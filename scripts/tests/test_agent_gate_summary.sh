@@ -1071,7 +1071,12 @@ assert_accelerators "perf-darwin" "$perf_darwin"
 #          `perf=ok` on a paranoid-4 box, exactly what AC3 exists to prevent — passed
 #          the whole suite, and so did forcing the real branch to always yield
 #          `unknown`. The fixture is scripts/perf-capability.sh's own test seam, which
-#          is inert without its hermetic marker.
+#          is inert without its hermetic marker — and which, since #3249 review R6-1/R6-2,
+#          must be provably INSIDE a declared, STAMPED sandbox root. This suite's `$tmp` is
+#          that root (every fixture below lives under it), so an out-of-sandbox seam — the
+#          real /proc included — cannot steer these cases.
+export CQLITE_PERF_TEST_SANDBOX="$tmp"
+: >"$tmp/.cqlite-perf-sandbox"
 perf_fixture_ok="$tmp/perf-proc-ok"; mkdir -p "$perf_fixture_ok"
 printf -- '-1\n' >"$perf_fixture_ok/perf_event_paranoid"
 printf '0\n'     >"$perf_fixture_ok/kptr_restrict"
@@ -1172,10 +1177,27 @@ for _fn in _perf_state_into _perf_accel_token_into; do
   perf_path_text="$perf_path_text$_t
 "
 done
+# The containment gate reached from here is the SYNTACTIC one and its THREE builtin-only
+# helpers (#3249 review R6-1/R6-2, plus perf_capability_nosymlink from #3261 AC2). Its resolving
+# sibling — perf_capability_sandbox_ok_resolved — canonicalizes with `$(cd -P …)` and is
+# deliberately NOT on this path: naming it here would be the tell that a fork had been introduced
+# into the emit chain.
+#   perf_capability_nosymlink joined this set with #3261 AC2 (roborev finding 2): sandbox_ok now
+#   calls it on the summary path, so a `$(readlink -f …)`/`$(realpath …)` added there later — the
+#   obvious way to "improve" a symlink check — would fork the emit chain. Omitting it left exactly
+#   the silently-eroding-guard gap this issue exists to close. It is a CLOSED set: a function that
+#   is renamed or removed makes fn_text return empty and reds `perf_path_missing`, so this list
+#   cannot quietly under-count.
+#   perf_capability_path_lines_ok joined for the SAME reason one round later (#3261, roborev round
+#   3): path_within now calls it, so it is on this path, and a future `$(tr -d …)`/`$(printf …)`
+#   there would fork the emit chain invisibly. Adding a helper to the emit path and NOT to this list
+#   is now a recognised recurring miss — if you touch anything path_within reaches, add it here.
 for _fn in perf_capability_token_into perf_capability_proc_read \
            perf_capability_proc_dir_into perf_capability_test_mode \
            perf_capability_seam_set perf_capability_is_int \
-           perf_capability_test_dir_valid; do
+           perf_capability_sandbox_ok perf_capability_sandbox_root_into \
+           perf_capability_nosymlink perf_capability_path_lines_ok \
+           perf_capability_path_within; do
   _t=$(fn_text "$PERF_LIB" "$_fn")
   [ -n "$_t" ] || perf_path_missing="$perf_path_missing $_fn"
   perf_path_text="$perf_path_text$_t

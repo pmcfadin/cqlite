@@ -280,14 +280,75 @@ environment, and every variable the section's control flow reads SHALL be initia
 the section BEFORE the platform/library guards, so no inherited environment value can
 enter a Linux-only implementation on another platform or without its helper library. The
 test-only path seams SHALL be inert without their explicit marker, and UNDER the marker
-BOTH seams SHALL be MANDATORY, absolute and outside `/etc`, `/proc` and `/sys`: a missing
-or production-shaped seam SHALL be a loud refusal in the env guard AND in the path
-resolvers, so a test-mode run can never fall back to a production directory and mutate the
-host. On every path that WRITES or gates a write, that judgement SHALL be made on the
-seam's CANONICAL destination — `.`, `..` and symlinked ancestors resolved — and not on its
-spelling, since a textual check accepts an unbounded set of paths that resolve into the
-production directory. The emit-time read path, which writes nothing and is contractually
-fork-free, MAY validate textually (rejecting `.`/`..` components and a symlinked seam).
+BOTH seams SHALL be MANDATORY: a seam that is not usable SHALL be a loud refusal in the env
+guard AND in the path resolvers, so a test-mode run can never fall back to a production
+directory and mutate the host.
+
+A seam's usability SHALL be decided by POSITIVE CONTAINMENT and by nothing else: test mode
+SHALL take ONE caller-declared sandbox root, and a seam SHALL be usable IFF it is STRICTLY
+contained within that root (a resolved-path prefix match with an explicit `/` boundary, so a
+sibling whose name merely starts with the root's is outside). Anything not provably inside
+the sandbox SHALL be refused. The implementation SHALL NOT decide usability from a list of
+forbidden locations or path spellings: such a list cannot be completed — `.`, `..`,
+symlinks, `//` (POSIX leaves two leading slashes implementation-defined and `pwd -P` may
+preserve them, while on Linux `//etc` opens `/etc`), trailing slashes, bind mounts and
+`/proc/self/root/…` all name the same directory — and a set of scattered prohibitions also
+lets a NEW seam consumer silently miss them. The sandbox root SHALL itself prove it is a
+sandbox by evidence on the filesystem (an absolute, canonically spelled, existing directory
+carrying a stamp file), so no environment value alone can nominate a production directory as
+the sandbox. EVERY consumer of a seam SHALL route through that one containment check —
+writes, write gating, the drop-in path, and every read of configuration (including the
+lower-precedence search-path entries and an optional `sysctl.conf` FILE entry, whose parent
+SHALL be canonicalized and the resulting file path validated) — and a consumer that does not
+SHALL be a failure of the test suite's structural audit rather than an unvalidated path. On
+every path that WRITES, gates a write, or reads host configuration, containment SHALL be
+judged on the CANONICALIZED candidate and root (`.`, `..` and symlinked ancestors resolved).
+
+Containment SHALL be judged on the DESTINATION, never on a NAME, and that rule SHALL extend
+to everything the guard authorizes — not only to the directories it names:
+
+- **The write TARGET, not only its containing directory.** A contained directory says nothing
+  about where its ENTRIES point, and a privileged `tee <path>` opens with `O_CREAT|O_TRUNC`
+  and FOLLOWS a symlink. So the managed file's own final component SHALL be validated (a
+  symlink there SHALL be a loud refusal), AND the privileged write SHALL be an atomic
+  directory-entry REPLACEMENT — content staged to a fresh entry in the validated directory
+  whose name SHALL be UNPREDICTABLE and SHALL be created by the staging tool itself with
+  `O_CREAT|O_EXCL` (a PREDICTABLE staging path that is checked, cleared and only then opened by
+  a privileged writer is the same check-then-open race one level down: the name can be
+  re-planted as a symlink in that window, and a predictable *suffix* such as a pid does not
+  help). The rename SHALL refuse to treat its destination as a directory
+  (`--no-target-directory`), or a symlink-to-DIRECTORY planted at the managed name redirects the
+  staged file outside the sandbox. The staging create, the write, the mode fix and the rename
+  SHOULD occur within a single privileged invocation to avoid needless windows, but that grouping
+  SHALL NOT be relied on as mutual exclusion: it sequences one process's commands and says nothing
+  about other processes on other CPUs. What SHALL make the staged write safe is the PRECONDITION:
+  the target directory SHALL be owned by the identity performing the privileged write and SHALL be
+  neither group- nor world-writable, and an owner or mode that cannot be determined SHALL be a
+  refusal. Any window that REMAINS SHALL be recorded as a residual with its reachability boundary
+  stated, and SHALL NOT be described as unreachable,
+  then renamed over the name — so a symlink appearing in the window between the check and the
+  write is replaced rather than written through. A read that decides idempotency SHALL NOT
+  follow the entry either, or a link whose target holds the canonical bytes would report
+  "already current" while the managed file does not exist.
+- **The emit-time read path too.** It writes nothing and is contractually fork-free, but a
+  syntactic-only check there is NOT sound: a symlink INSIDE the proven sandbox pointing at the
+  real `/proc/sys/kernel` satisfies containment, and the run then reports a capability verdict
+  derived from the HOST's real controls while claiming to have read a stand-in. A FABRICATED
+  verdict is strictly worse than a refusal. That path SHALL therefore reject a symlinked path
+  COMPONENT using shell builtins only (`[ -L ]` forks nothing), or be handed an
+  already-canonicalized, already-verified path — the fork-free contract STANDS either way.
+- **A strictly-contained file SHALL be ACCEPTED.** The file form SHALL be judged as
+  `<canonical parent>/<basename>`, not by asking whether the PARENT is strictly contained: a
+  file directly inside the root has the root as its parent, and a root is not strictly inside
+  itself. A guard that refuses legitimate input is the guard people route around.
+- **EXECUTABLES, not just paths.** The privileged-tool shim directory SHALL NOT be trusted
+  textually: an absolute directory that merely CONTAINS the real tools (`/usr`) satisfies
+  "inside the declared shim dir", and a symlink to the real `sudo`/`sysctl` placed inside a
+  genuine shim dir is spelled locally while resolving to the host's binary. Every privileged
+  executable's RESOLVED destination SHALL be positively contained beneath the proven sandbox
+  root, and the privileged tools PARKED in the declared shim dir SHALL be validated whether or
+  not `PATH` happens to reach them. The structural audit SHALL cover privilege-shim resolution
+  as well as seam paths.
 
 When the read-back reports a restrictive `perf_event_paranoid`/`kptr_restrict` state, the
 diagnostics SHALL NAME the competing configuration files across the COMPLETE
@@ -377,14 +438,98 @@ still exit 0. On Darwin the section SHALL be an explicit no-op.
   command, SHALL write nothing (in particular not the real `/etc/sysctl.d` drop-in), SHALL
   claim no verdict, and SHALL exit 0
 
-#### Scenario: a test seam that RESOLVES into production refuses to act
-- **GIVEN** the test-mode marker set, a root identity, and a sysctl path seam that passes
-  every textual non-production check but resolves into `/etc/sysctl.d` — `/tmp/../etc/sysctl.d`,
-  or `<symlink-to-/etc>/sysctl.d`
+#### Scenario: a test seam outside the declared sandbox refuses to act
+- **GIVEN** the test-mode marker set, a root identity, and a sysctl path seam that is not
+  strictly contained in the declared sandbox root — `/tmp/../etc/sysctl.d`,
+  `<symlink-to-/etc>/sysctl.d`, `//etc/sysctl.d`, a symlink whose target is outside the
+  sandbox, a relative path, or a sibling whose name merely starts with the root's
 - **WHEN** bootstrap runs with `--yes`
-- **THEN** it SHALL refuse the section with a loud diagnosis, SHALL invoke no privileged
-  command, SHALL leave the real drop-in byte- and metadata-unchanged, SHALL name no write
-  target at all, and SHALL exit 0
+- **THEN** it SHALL refuse the section with a loud diagnosis NAMING the offending seam, SHALL
+  invoke no privileged command, SHALL leave the real drop-in byte- and metadata-unchanged,
+  SHALL name no write target at all, and SHALL exit 0
+- **AND** the refusal SHALL come from the single containment check, so no per-spelling rule
+  is required for any of those forms, nor for a form not yet enumerated
+
+#### Scenario: an unproven sandbox root cannot make containment vacuous
+- **GIVEN** the test-mode marker set and a sandbox root that is unset, relative,
+  `//`-spelled, non-existent, or an existing directory carrying no sandbox stamp
+- **WHEN** any seam consumer resolves a path
+- **THEN** it SHALL refuse, naming the sandbox-root variable, so declaring a production
+  directory as the sandbox by environment alone cannot succeed
+
+#### Scenario: a seam consumer cannot skip the containment check
+- **GIVEN** the helper's source
+- **WHEN** the test suite audits every function that dereferences a seam variable
+- **THEN** each SHALL route through the containment check, with only an explicitly named and
+  justified allowlist (a presence-only predicate and the root reader itself), and finding no
+  consumers at all SHALL be a failure rather than a vacuous pass
+- **AND** a SECOND pass SHALL audit every function that RESOLVES a privileged tool, with the
+  same floor and the same named-allowlist rule, so the EXECUTABLES the guard authorizes cannot
+  silently skip containment either
+
+#### Scenario: a symlinked write target is never followed
+- **GIVEN** the test-mode marker, a sysctl seam strictly contained in the proven sandbox, and
+  the managed drop-in basename present INSIDE it as a SYMLINK to a file outside the sandbox
+- **WHEN** the write target is named, the idempotency read runs, or the drop-in is written
+- **THEN** naming it SHALL refuse (non-zero, empty, and saying the name is a symlink), the
+  idempotency read SHALL NOT report "already current" even when the link's target holds
+  byte-identical canonical content, and the write SHALL replace the directory ENTRY
+- **AND** the link's target SHALL be byte-unchanged throughout, and no staging entry SHALL be
+  left behind
+
+#### Scenario: a symlink to a DIRECTORY at the destination cannot redirect the staged write
+- **GIVEN** the test-mode marker, a contained sysctl seam, and the managed drop-in basename
+  present inside it as a SYMLINK to a DIRECTORY outside the sandbox
+- **WHEN** the drop-in is installed
+- **THEN** the link SHALL be replaced by a regular file holding the managed bytes, the outside
+  directory SHALL remain EMPTY, and no staging entry SHALL be left behind
+- **AND** the staged install SHALL be observable as a SINGLE privileged invocation (a hygiene
+  property that removes needless windows — NOT a mutual-exclusion guarantee)
+
+#### Scenario: a drop-in directory writable by less-privileged users refuses the install
+- **GIVEN** a drop-in directory that is group- or world-writable, or not owned by the identity
+  that would perform the privileged write, or whose owner/mode cannot be determined
+- **WHEN** the staged install runs
+- **THEN** it SHALL refuse by name and write NOTHING, because every step of a staging race needs
+  the ability to create or replace entries in that directory
+- **AND** a directory owned by the writer and not group- or world-writable SHALL still install, so
+  the precondition is not a blanket refusal
+
+#### Scenario: a contained path carrying a newline cannot serialize into two entries
+- **GIVEN** the test-mode marker and a path seam (or extra-dirs entry) that is strictly contained
+  in the proven sandbox but whose NAME embeds a CR or LF, crafted so a line-wise reader would see
+  a second entry naming the host's real `/etc/sysctl.d`
+- **WHEN** the search path is resolved
+- **THEN** the seam SHALL be refused and the emitted search path SHALL NOT contain the host's real
+  `/etc/sysctl.d`, since a newline-delimited representation cannot safely carry such a path
+
+#### Scenario: a symlinked read seam cannot fabricate a capability verdict
+- **GIVEN** the test-mode marker and a proc seam whose spelling is strictly inside the proven
+  sandbox but which is (or traverses) a SYMLINK to the real `/proc/sys/kernel`
+- **WHEN** the fork-free capability token is resolved
+- **THEN** it SHALL refuse to read, reporting the absent-stand-in token, never a verdict
+  derived from the host's real controls
+- **AND** a real, symlink-free stand-in directory inside the sandbox SHALL still read, so the
+  rejection is per-component rather than a blanket refusal
+
+#### Scenario: a strictly-contained sysctl.conf stand-in is accepted
+- **GIVEN** the test-mode marker and a `sysctl.conf` stand-in directly inside the proven
+  sandbox root, offered as a lower-precedence search-path entry
+- **WHEN** the search path is resolved
+- **THEN** the entry SHALL be ACCEPTED and appear on the path, while one outside the root, the
+  root itself, a `..` spelling, a relative path and a SYMLINKED final component SHALL each
+  still be refused
+
+#### Scenario: a privileged executable outside the sandbox refuses to act
+- **GIVEN** the test-mode marker and a declared privileged-shim directory that is absolute but
+  not contained in the proven sandbox root (the `/usr` shape), or one that IS contained but
+  whose `sudo`/`sysctl` is a SYMLINK resolving to a tool outside it — including one merely
+  PARKED there that `PATH` does not reach
+- **WHEN** the environment guard runs
+- **THEN** it SHALL refuse, naming the sandbox, so a privileged test-mode run can never execute
+  a real `sysctl --system` against the host kernel
+- **AND** a shim directory of REAL FILES inside the sandbox SHALL still be accepted, so the
+  check is not vacuous
 
 #### Scenario: re-run writes nothing
 - **WHEN** bootstrap runs twice on the same host

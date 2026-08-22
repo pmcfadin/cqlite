@@ -417,18 +417,26 @@ else
   # FAIL CLOSED on a misused test seam BEFORE anything privileged happens: this
   # section pipes the drop-in through `sudo tee <path>`, so a stray
   # CQLITE_PERF_SYSCTL_DIR / CQLITE_PERF_PROC_DIR export must never steer that write
-  # or fabricate a /proc verdict. The seams are inert without
-  # CQLITE_PERF_TEST_MODE=1, and the marker itself forbids a reachable real
-  # sudo/sysctl (see scripts/perf-capability.sh).
+  # or fabricate a /proc verdict. The seams are inert without CQLITE_PERF_TEST_MODE=1;
+  # under the marker each must be provably INSIDE the declared sandbox root, and the
+  # marker itself forbids a reachable real sudo/sysctl (see scripts/perf-capability.sh).
   if ! perf_capability_env_guard; then
-    warn "perf capability SKIPPED — the test-only env seams are misconfigured (a seam set without CQLITE_PERF_TEST_MODE=1; or test mode WITHOUT both non-production path seams, which has no production fallback; or test mode with a reachable real sudo/sysctl — details on stderr) — refusing to run a privileged write against an env-chosen path"
+    warn "perf capability SKIPPED — the test-only env seams are misconfigured (a seam set without CQLITE_PERF_TEST_MODE=1; or test mode without a proven CQLITE_PERF_TEST_SANDBOX and both path seams strictly inside it, which has no production fallback; or test mode with a reachable real sudo/sysctl — details on stderr) — refusing to run a privileged write against an env-chosen path"
     PERF_SECTION_OK=0
   else
     PERF_SECTION_OK=1
   fi
 fi
 if [ "$PERF_SECTION_OK" = 1 ]; then
-  PERF_DROPIN=$(perf_capability_dropin_path)
+  # FAIL CLOSED if the write target cannot even be NAMED (issue #3261 AC1): the resolver refuses
+  # an out-of-sandbox seam AND a managed name that is itself a symlink. An empty PERF_DROPIN would
+  # otherwise flow into the messages and the write as an empty path, so the section stops here.
+  if ! PERF_DROPIN=$(perf_capability_dropin_path) || [ -z "$PERF_DROPIN" ]; then
+    warn "perf capability SKIPPED — the drop-in write target could not be resolved (an out-of-sandbox test seam, or the managed name is a SYMLINK a privileged write would follow — details on stderr); wrote nothing"
+    PERF_SECTION_OK=0
+  fi
+fi
+if [ "$PERF_SECTION_OK" = 1 ]; then
 
   # perf_apply_now: run (under --yes) or PRINT (check mode) `sysctl -q --system`,
   # recording THREE INDEPENDENT FACTS instead of collapsing them into one rc:
@@ -503,11 +511,38 @@ if [ "$PERF_SECTION_OK" = 1 ]; then
   # until the next reboot, which is precisely what the functional verification exists
   # to prevent, on the path most people take (no --yes).
   perf_remedy_line() {
+    # THE PRINTED REMEDY POINTS AT BOOTSTRAP ITSELF (issue #3261, roborev rounds 5-7).
+    # History, because it is the whole reason this is three lines instead of a clever one:
+    #   * originally `--drop-in | sudo tee <path>` (and `--drop-in > <path>` from a root shell) — both
+    #     open the destination BY NAME, so a symlink planted between this advice printing and the human
+    #     running it redirects a privileged write. Hardening the installer while printing that is worse
+    #     than not hardening it: it reads as safe.
+    #   * then a new `perf-capability.sh --install` entry point — which itself shipped an env-guard
+    #     bypass (round 6) and then a supplied-prefix bypass (round 7), i.e. a fresh public surface that
+    #     re-opened the hole AC4 had just closed, twice.
+    #   * now: no new surface at all. `bootstrap --yes` ALREADY performs the guarded staged install and
+    #     applies `sysctl --system`, on the path this suite has always asserted. Removing the escape
+    #     hatch is strictly safer than guarding it, and subtraction cannot introduce a false pass.
+    # Bootstrap is idempotent (file header), so re-running it is the sanctioned repair everywhere.
+    # THREE states, THREE remedies — a remedy that cannot work on the box it is printed for is
+    # worse than none, because the user spends a cycle before learning that (roborev round 8, Medium,
+    # a regression THIS branch introduced when it pointed every case at `--yes`).
     if [ "$PERF_PRIV_STATE" = no-sudo-binary ]; then
-      info "no 'sudo' on this box — write + apply from a ROOT shell:  bash scripts/perf-capability.sh --drop-in > $PERF_DROPIN && sysctl -q --system"
+      info "no 'sudo' on this box — write + apply from a ROOT shell:  bash scripts/bootstrap-agent-machine.sh --yes"
       info "(or ask the image/host owner to install it; without the drop-in this box reverts to perf_event_paranoid=4 on reboot)"
+    elif [ "$PERF_PRIV_STATE" = sudo-needs-password ]; then
+      # Bootstrap probes privilege NON-INTERACTIVELY (`sudo -n`, see the probe above), so telling this
+      # box to "re-run with --yes" would fail again in exactly the same way and never prompt. The user
+      # must supply the password FIRST — `sudo -v` refreshes the credential timestamp, after which the
+      # `sudo -n` inside bootstrap succeeds — or run from an already-authenticated root shell.
+      info "sudo needs a password here, and bootstrap probes with 'sudo -n' (never prompts) — authenticate first, then re-run:  sudo -v && bash scripts/bootstrap-agent-machine.sh --yes"
+      # NOT `sudo -i` (roborev round 11, Low): a login shell switches to root HOME, so the relative
+      # `scripts/...` path below it usually would not exist — advice that fails on the box it is
+      # printed for. `sudo bash <script>` prompts once, keeps the working directory, and makes
+      # bootstrap itself root, so its internal `sudo -n` probe is never reached.
+      info "(or simply:  sudo bash scripts/bootstrap-agent-machine.sh --yes)"
     else
-      info "write + apply the drop-in:  bash scripts/perf-capability.sh --drop-in | ${PERF_RUN_AS}tee $PERF_DROPIN >/dev/null && ${PERF_RUN_AS}sysctl -q --system"
+      info "write + apply the drop-in:  bash scripts/bootstrap-agent-machine.sh --yes"
     fi
   }
 
@@ -605,10 +640,19 @@ EOF
     PERF_DROPIN_OK=0
     if [ "$AUTO_YES" = 1 ]; then
       info "writing perf sysctl drop-in: $PERF_DROPIN"
-      if perf_capability_dropin_content | ${PERF_ROOT[@]+"${PERF_ROOT[@]}"} tee "$PERF_DROPIN" >/dev/null 2>&1 \
-         && perf_capability_dropin_current; then
+      # ATOMIC DIRECTORY-ENTRY REPLACEMENT, not `tee <path>` (issue #3261 AC1). `tee` opens
+      # O_WRONLY|O_CREAT|O_TRUNC and FOLLOWS a symlink, so a symlink at the managed name aimed
+      # this privileged write at the link's target — anywhere on the box. The helper writes a
+      # staging entry in the validated directory and renames it over the name, so a pre-existing
+      # symlink is REPLACED rather than written through, and it re-reads the file to confirm.
+      perf_capability_dropin_install ${PERF_ROOT[@]+"${PERF_ROOT[@]}"}; PERF_INS_RC=$?
+      if [ "$PERF_INS_RC" -eq 0 ]; then
         ok "wrote $PERF_DROPIN (kernel.perf_event_paranoid = -1, kernel.kptr_restrict = 0)"
         PERF_DROPIN_OK=1
+      elif [ "$PERF_INS_RC" -eq 2 ]; then
+        # UNSUPPORTED HOST, not a failed attempt: re-running cannot help, so the remedy line is
+        # deliberately NOT printed — advice that cannot work is worse than none (roborev round 16).
+        warn "cannot install $PERF_DROPIN on this host: the atomic staged install needs GNU coreutils"
       else
         warn "could NOT write $PERF_DROPIN"
         perf_remedy_line

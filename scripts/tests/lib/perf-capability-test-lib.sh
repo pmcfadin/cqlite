@@ -18,6 +18,13 @@
 # refuses to fall back to a production directory — so a case that forgets one fails
 # closed and loudly instead of writing the host's real drop-in.
 #
+# ONE SANDBOX ROOT (review R6-1/R6-2). Every seam must now be provably INSIDE the declared
+# root CQLITE_PERF_TEST_SANDBOX, which is exported ONCE here as this suite's `$tmp` and
+# proves itself with the stamp file the helper looks for. That is why every seam a case sets
+# is a path under `$tmp`: containment is the whole check, so anything outside — `//etc`,
+# `/tmp/../etc/sysctl.d`, a symlinked ancestor, a relative path — is refused without the
+# helper needing to know the name of a single forbidden place.
+#
 # Sourced, never executed. The sourcing suite must NOT have `set -e` (the cases test
 # failing commands on purpose); `set -uo pipefail` is what both use.
 
@@ -28,8 +35,29 @@ PERFLIB="$SCRIPT_DIR/../perf-capability.sh"
 
 PASS=0
 FAIL=0
+SKIP=0
 ok()  { printf 'ok   - %s\n' "$1"; PASS=$((PASS + 1)); }
 bad() { printf 'FAIL - %s\n' "$1"; FAIL=$((FAIL + 1)); }
+# skip <case> <reason>: a LOUD, COUNTED skip (issue #3261, roborev round 5 Medium). A case that
+# cannot run on this host must still be VISIBLE in the tally — an absent case and a passing case
+# look identical in a green run, which is the vacuous-pass shape this repo has a standing rule
+# against. So every skip prints its own line WITH the reason and increments a counter that the
+# summary always reports, even when zero. It is deliberately NOT a pass: `skip` never touches PASS.
+skip() { printf 'SKIP - %s  [reason: %s]\n' "$1" "$2"; SKIP=$((SKIP + 1)); }
+
+# perf_install_supported: does THIS host have the GNU coreutils behaviour the staged installer
+# needs? Probed AFFIRMATIVELY (does the flag actually work here) rather than inferred from `uname`,
+# because the property that matters is the tool behaviour, not the OS name. `stat -c` and
+# `mv -T`/`--no-target-directory` are GNU-only; macOS/BSD ship neither, and macOS is a FIRST-CLASS
+# gate host in this repo (#3296 spent 13 rounds on exactly this class). Production is unaffected
+# either way — bootstrap gates the whole perf section on PLATFORM=linux — but the SUITE used to
+# invoke the installer unconditionally, so a macOS gate run failed on the toolchain, not on
+# behaviour.
+perf_install_supported() {
+  stat -c '%a' . >/dev/null 2>&1 || return 1
+  mv --help 2>&1 | grep -q -- '--no-target-directory' || return 1
+  return 0
+}
 
 # sudo_perf_offenders <tripwire-log>: the recorded `sudo` lines belonging to the PERF
 # path (its `-n` availability probe, its `tee`, its `sysctl`) that do NOT carry `-n`.
@@ -37,7 +65,26 @@ bad() { printf 'FAIL - %s\n' "$1"; FAIL=$((FAIL + 1)); }
 # from PERF_ROOT is a defect every functional assert would still pass. Lines from other
 # bootstrap sections (e.g. the mold `sudo apt-get install`) are out of this issue's scope.
 sudo_perf_offenders() {
-  grep -E '^sudo ' "$1" 2>/dev/null | grep -E '(\btee\b|\bsysctl\b|\btrue\b)' | grep -v '^sudo -n ' || true
+  grep -E '^sudo ' "$1" 2>/dev/null | grep -E '(\btee\b|\bsysctl\b|\btrue\b|\bsh\b)' | grep -v '^sudo -n ' || true
+}
+
+# THE STAGED INSTALL IS ONE PRIVILEGED INVOCATION, SO THE TRIPWIRE IS MULTI-LINE (issue #3261,
+# roborev round 2). `mktemp` + write + `chmod` + `mv -T` all run inside a single privileged
+# `sh -c` — that is the fix for the create->reopen race — so the shim records `sudo -n sh -c `
+# followed by the SCRIPT TEXT across many lines. A line-wise `grep 'tee .*99-cqlite-perf.conf'`
+# therefore no longer identifies a write, and asserting on it would silently stop testing
+# anything. These two helpers name the invocation instead of its internals:
+#   perf_write_count <log>   how many privileged staged installs were recorded (expect exactly 1
+#                            per write; more than one would mean the consolidation regressed into
+#                            several privileged calls, which is the race coming back)
+#   perf_wrote_dropin <log>  rc 0 iff a staged install was aimed at the managed drop-in path. The
+#                            argv's LAST line carries `perf-capability-install <dir> <path> <base>`,
+#                            so this matches the invocation marker AND the target on one line.
+perf_write_count() {
+  grep -c '^sudo -n sh -c' "$1" 2>/dev/null || true
+}
+perf_wrote_dropin() {
+  grep -q 'perf-capability-install .*99-cqlite-perf\.conf' "$1" 2>/dev/null
 }
 
 # `mktemp` IS A COMMAND THAT CAN FAIL, and these suites deliberately run WITHOUT
@@ -62,6 +109,24 @@ if [ -z "$tmp" ] || [ ! -d "$tmp" ]; then
   exit 1
 fi
 trap 'rm -rf "$tmp"' EXIT
+# A GROUP-WRITABLE-FREE umask FOR THE WHOLE SUITE (issue #3261, roborev round 3). The staged
+# install now REFUSES to write into a directory writable by anyone less privileged than the
+# writer, which is how the staging race is closed at its precondition. Whether a `mkdir -p` here
+# produces 0755 or 0775 is decided by the AMBIENT umask of whoever launched the suite — measured
+# 0002 on this fleet's worker boxes, i.e. group-writable — so without this line the harness would
+# build directories a correct implementation must refuse, and every install case would fail for a
+# reason that has nothing to do with the code under test. Set once, explicitly, so the suite does
+# not depend on how it was invoked (same class as the GIT_CONFIG_GLOBAL / SUDO_UID isolation below).
+umask 022
+# ...and CANONICALIZE it, because this IS the declared sandbox root (issue #3261 AC2). The
+# fork-free read gate now rejects a SYMLINKED path component — the fix for a symlink inside the
+# sandbox pointing at the real /proc/sys/kernel — and `mktemp -d` legitimately hands back a path
+# THROUGH a symlink on some supported hosts (macOS: TMPDIR lives under /var, and /var is a symlink
+# to private/var). An uncanonicalized root would make every POSITIVE case refuse there, i.e. the
+# suite would be green only on Linux. A root must be spelled as its own destination anyway.
+if tmp_canon=$(cd -P -- "$tmp" 2>/dev/null && pwd -P) && [ -n "$tmp_canon" ] && [ -d "$tmp_canon" ]; then
+  tmp="$tmp_canon"
+fi
 
 # Global-state isolation, same posture as test_bootstrap_agent_machine.sh: the
 # bootstrap runs below read/write git config and read board env, and these suites run
@@ -71,7 +136,7 @@ export GIT_CONFIG_NOSYSTEM=1
 : >"$GIT_CONFIG_GLOBAL"
 unset CQLITE_PROJECT_NUMBER CQLITE_PROJECT_OWNER CQLITE_PROJECT_ACCOUNT PROJECT_TITLE
 # A worker shell may export the seams themselves; a test must set exactly what it means.
-unset CQLITE_PERF_PROC_DIR CQLITE_PERF_SYSCTL_DIR
+unset CQLITE_PERF_PROC_DIR CQLITE_PERF_SYSCTL_DIR CQLITE_PERF_SYSCTL_EXTRA_DIRS
 # ...and so may a `sudo bash scripts/tests/...` invocation export SUDO_UID/GID/USER,
 # which the privilege-drop target resolution reads. A case that means to exercise that
 # path sets them itself; inheriting them would make the suite's verdict depend on how
@@ -80,11 +145,16 @@ unset SUDO_UID SUDO_GID SUDO_USER
 # The section under test must never be steered by an ambient export either: bootstrap
 # initialises PERF_SECTION_OK itself, and the bootstrap suite proves it.
 unset PERF_SECTION_OK
-# The two path seams are INERT unless this marker is set; under the marker they are
-# MANDATORY, must be absolute and non-production, and a real sudo/sysctl on PATH is a
-# hard refusal (the shim dir is declared per case in CQLITE_PERF_TEST_PRIV_DIR). Cases
-# that must exercise the PRODUCTION defaults run with `env -u CQLITE_PERF_TEST_MODE`.
+# The path seams are INERT unless this marker is set; under the marker they are MANDATORY,
+# must be provably INSIDE the declared sandbox root, and a real sudo/sysctl on PATH is a hard
+# refusal (the shim dir is declared per case in CQLITE_PERF_TEST_PRIV_DIR). Cases that must
+# exercise the PRODUCTION defaults run with `env -u CQLITE_PERF_TEST_MODE`.
 export CQLITE_PERF_TEST_MODE=1
+# THE sandbox root for both suites, STAMPED so the helper can PROVE the declaration instead
+# of trusting the variable (a bare CQLITE_PERF_TEST_SANDBOX=/etc buys nothing without a stamp
+# that only privilege could place there). Every seam any case sets lives under it.
+export CQLITE_PERF_TEST_SANDBOX="$tmp"
+: >"$tmp/.cqlite-perf-sandbox"
 
 # mkuname <dir> <sysname>: a `uname` stub, so the Linux/Darwin branch under test is
 # the one selected by the CASE, not by whatever host runs the suite. Without this the
@@ -245,6 +315,9 @@ perf_test_assert_host_clean() {
 # perf_test_report: the trailing count line + the suite's exit status.
 perf_test_report() {
   echo
-  echo "PASS=$PASS FAIL=$FAIL"
+  # SKIP is ALWAYS reported, including as 0. A count that only appears when non-zero teaches a
+  # reader to treat its absence as "nothing was skipped", which is exactly the inference that makes
+  # a silently-absent case indistinguishable from a passing one (#3261 roborev round 5).
+  echo "PASS=$PASS FAIL=$FAIL SKIP=$SKIP"
   [ "$FAIL" -eq 0 ]
 }

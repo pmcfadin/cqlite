@@ -32,6 +32,21 @@ set -uo pipefail
 # shellcheck source=scripts/tests/lib/perf-capability-test-lib.sh
 . "$(cd "$(dirname "$0")" && pwd)/lib/perf-capability-test-lib.sh"
 
+# --- WHOLE-SUITE CAPABILITY GATE (issue #3261, roborev round 6, Medium) ----------------------
+# EVERY case below drives bootstrap's perf section, and that section stages the drop-in through
+# GNU `stat -c` and `mv --no-target-directory`. The sibling suite grew a per-case skip; this one
+# was left invoking the installer unconditionally, so a macOS gate host — a FIRST-CLASS host here —
+# still failed on the TOOLCHAIN rather than on behaviour. The correct scope is the WHOLE suite, not
+# individual cases: bootstrap gates its entire perf section on PLATFORM=linux, so off Linux there is
+# no perf section to assert about at all, and a per-case skip would imply otherwise.
+# The skip is LOUD and COUNTED, and the report still runs, so a green macOS run SHOWS this suite was
+# skipped with its reason instead of vanishing. It is not a pass: `skip` never increments PASS.
+if ! perf_install_supported; then
+  skip "perf-capability-bootstrap: the ENTIRE suite (all cases drive bootstrap's perf section, which stages the drop-in via GNU stat -c / mv --no-target-directory)" "no GNU stat -c / mv --no-target-directory on this host; bootstrap gates its perf section on PLATFORM=linux, so there is nothing to assert off Linux"
+  perf_test_report
+  exit $?
+fi
+
 # --- 2. Bootstrap perf section: the DEFAULT (no --yes) run mutates NOTHING ----
 # Tripwire shims for every privileged/mutating tool the write path could use, so
 # "wrote nothing" is PROVEN rather than assumed. `perf` may be invoked (the
@@ -92,7 +107,7 @@ fi
 # unprofileable box until reboot — the very failure the functional verification
 # exists to prevent, on the path most people take (no --yes). Plus the AC5 posture
 # and the BPF caveat (#3217).
-if printf '%s' "$check_out" | grep -q 'perf-capability.sh --drop-in | sudo tee .*99-cqlite-perf.conf >/dev/null && sudo sysctl -q --system' \
+if printf '%s' "$check_out" | grep -q 'write + apply the drop-in:.*bootstrap-agent-machine.sh --yes' \
    && printf '%s' "$check_out" | grep -q 're-run with --yes'; then
   ok "perf section: prints the complete WRITE-AND-APPLY remedy line instead of running it"
 else
@@ -178,17 +193,32 @@ else
   bad "perf section: --yes did not write the canonical drop-in"
   ls -l "$sysctl_yes" 2>&1 | head -3
 fi
-if grep -q 'tee .*99-cqlite-perf.conf' "$yestrip" && grep -q 'sysctl -q --system' "$yestrip"; then
-  ok "perf section: --yes wrote through sudo tee and applied with 'sysctl --system'"
+if perf_wrote_dropin "$yestrip" && grep -q 'sysctl -q --system' "$yestrip"; then
+  ok "perf section: --yes wrote the drop-in through the privileged staged installer and applied with 'sysctl --system'"
 else
-  bad "perf section: --yes did not use sudo tee + sysctl --system"
+  bad "perf section: --yes did not run the staged install + sysctl --system"
   cat "$yestrip"
+fi
+# ...through EXACTLY ONE privileged invocation (issue #3261, roborev round 2). CORRECTED at roborev
+# round 6 (Low): an earlier version of this comment claimed the single `sh -c` means "no unprivileged
+# process can be scheduled between mktemp and the reopen". That is FALSE — it gives SEQUENCING within
+# one process, never mutual exclusion against other processes or CPUs — and it contradicted the
+# rationale already corrected in the implementation. Consolidation NARROWS the window; what actually
+# makes the write safe is the DIRECTORY OWNERSHIP AND WRITABILITY PRECONDITION (the destination must
+# be owned by the privileged writer and not group/world-writable, so no less-privileged actor can
+# plant anything to race with). This assert is still worth keeping: splitting the install back into
+# several privileged calls would widen the window again while every functional assert above passed.
+yes_write_n=$(perf_write_count "$yestrip")
+if [ "$yes_write_n" -eq 1 ]; then
+  ok "perf section: the staged install is EXACTLY ONE privileged invocation (no mktemp-in-one-call / write-in-another window)"
+else
+  bad "perf section: the staged install used $yes_write_n privileged invocations, expected 1: $(cat "$yestrip")"
 fi
 # ...and EVERY privileged invocation carried `-n`: an unattended worker must never be
 # able to sit on a password prompt, so `PERF_ROOT=(sudo)` (no -n) is a defect even
 # though every functional assert above would still pass.
 yes_bare_sudo=$(sudo_perf_offenders "$yestrip")
-if [ -z "$yes_bare_sudo" ] && grep -q '^sudo -n tee ' "$yestrip" && grep -q '^sudo -n sysctl ' "$yestrip"; then
+if [ -z "$yes_bare_sudo" ] && grep -q '^sudo -n sh -c' "$yestrip" && grep -q '^sudo -n sysctl ' "$yestrip"; then
   ok "perf section: every --yes privileged call went through 'sudo -n' (write AND apply, never interactive)"
 else
   bad "perf section: a privileged call did not carry sudo -n: $(cat "$yestrip")"
@@ -212,11 +242,46 @@ yes2_out=$(PATH="$yesshims:$perfbin:$tmp:$PATH" HOME="$yes_home" CARGO_HOME="$ye
   CQLITE_PERF_PROC_DIR="$proc_yes" CQLITE_PERF_SYSCTL_DIR="$sysctl_yes" CQLITE_PERF_TEST_PRIV_DIR="$yesshims" \
   bash "$tmp/perf-root-yes/scripts/bootstrap-agent-machine.sh" --skip-smoke --yes 2>&1)
 if printf '%s' "$yes2_out" | grep -q 'drop-in already current' \
-   && ! grep -q 'tee .*99-cqlite-perf.conf' "$yestrip"; then
+   && ! perf_wrote_dropin "$yestrip"; then
   ok "perf section: a second --yes run is an idempotent no-op (no re-write)"
 else
   bad "perf section: second --yes run re-wrote the drop-in"
   printf '%s\n' "$yes2_out" | sed -n '/Perf profiling/,/^$/p'
+fi
+
+# 3a. WIRING EVIDENCE FOR THE ATOMIC WRITE (issue #3261 AC1), end to end through bootstrap.
+#     The unit cases in the sibling suite prove the helper; this proves BOOTSTRAP uses it. A
+#     symlink at the managed name inside a perfectly-contained sandbox directory used to aim
+#     `sudo tee` at the link's TARGET — a privileged write anywhere on the box, from a run whose
+#     whole promise is that it cannot touch the host. Bootstrap's OUTER answer is a REFUSAL — the
+#     write target cannot even be named, so the section is skipped and nothing privileged runs. The
+#     installer's rename (unit-tested in the sibling suite) is the inner backstop for a symlink
+#     planted in the window between that check and the write; it is not what happens here, so this
+#     case asserts the refusal SPECIFICALLY rather than accepting either outcome.
+symtgt_d="$tmp/perf-symtarget.d"; mkdir -p "$symtgt_d"
+symtgt_out="$tmp/perf-symtarget-victim"; printf 'PRECIOUS-HOST-FILE\n' >"$symtgt_out"
+symtgt_before=$(cat "$symtgt_out")
+rm -f "$symtgt_d/99-cqlite-perf.conf"; ln -s "$symtgt_out" "$symtgt_d/99-cqlite-perf.conf"
+symtgt_proc="$tmp/perf-symtarget-proc"; mkdir -p "$symtgt_proc"
+printf '4\n' >"$symtgt_proc/perf_event_paranoid"; printf '1\n' >"$symtgt_proc/kptr_restrict"
+: >"$yestrip"
+mkperfshim 8888888
+symtgt_run=$(PATH="$yesshims:$perfbin:$tmp:$PATH" HOME="$yes_home" CARGO_HOME="$yes_home/.cargo" \
+  CQLITE_PERF_PROC_DIR="$symtgt_proc" CQLITE_PERF_SYSCTL_DIR="$symtgt_d" CQLITE_PERF_TEST_PRIV_DIR="$yesshims" \
+  bash "$tmp/perf-root-yes/scripts/bootstrap-agent-machine.sh" --skip-smoke --yes 2>&1)
+symtgt_rc=$?
+symtgt_leftover=$(ls -A "$symtgt_d" | grep -v '^99-cqlite-perf\.conf$' || true)
+symtgt_priv=$(grep -E 'perf-symtarget' "$yestrip" || true)
+if [ "$symtgt_rc" -eq 0 ] \
+   && printf '%s' "$symtgt_run" | grep -q 'is a SYMLINK' \
+   && printf '%s' "$symtgt_run" | grep -q 'perf capability SKIPPED' \
+   && [ "$(cat "$symtgt_out")" = "$symtgt_before" ] \
+   && [ -L "$symtgt_d/99-cqlite-perf.conf" ] && [ -z "$symtgt_leftover" ] \
+   && [ -z "$symtgt_priv" ]; then
+  ok "perf section: --yes against a SYMLINKED managed name REFUSES by name, skips the section, runs NO privileged command against that directory, leaves the link's target byte-unchanged and writes no staging entry — the run still exits 0 (#3261 AC1)"
+else
+  bad "perf section: a symlinked managed drop-in name was not refused fail-closed (rc=$symtgt_rc, target-changed=$([ "$(cat "$symtgt_out")" = "$symtgt_before" ] && echo no || echo YES), still-a-link=$([ -L "$symtgt_d/99-cqlite-perf.conf" ] && echo yes || echo no), leftover='$symtgt_leftover', privileged='$symtgt_priv')"
+  printf '%s\n' "$symtgt_run" | sed -n '/Perf profiling/,/^$/p'
 fi
 
 # --- 4. The verification VERDICT is honoured, and no-sudo degrades gracefully --
@@ -268,8 +333,8 @@ nosudo_out=$(PATH="$nosudo" HOME="$yes_home" CARGO_HOME="$yes_home/.cargo" \
 nosudo_rc=$?
 if [ "$nosudo_rc" -eq 0 ] && [ -z "$(ls -A "$nosudo_sysctl")" ] \
    && printf '%s' "$nosudo_out" | grep -q "no 'sudo' binary on this box" \
-   && printf '%s' "$nosudo_out" | grep -q 'ROOT shell:.*--drop-in > .*99-cqlite-perf.conf && sysctl -q --system' \
-   && ! printf '%s' "$nosudo_out" | grep -q 'sudo tee .*99-cqlite-perf.conf'; then
+   && printf '%s' "$nosudo_out" | grep -q 'ROOT shell:.*bootstrap-agent-machine.sh --yes' \
+   && ! printf '%s' "$nosudo_out" | grep -q 'perf-capability.sh --install'; then
   ok "perf section: a box with no sudo BINARY warns + prints the root-shell remedy (never a useless 'sudo tee'), writes nothing, exits 0"
 else
   bad "perf section: no-sudo box mishandled (rc=$nosudo_rc, dir='$(ls -A "$nosudo_sysctl")')"
@@ -301,8 +366,9 @@ pwsudo_out=$(PATH="$pwsudo" HOME="$yes_home" CARGO_HOME="$yes_home/.cargo" \
 pwsudo_rc=$?
 if [ "$pwsudo_rc" -eq 0 ] && [ -z "$(ls -A "$pwsudo_sysctl")" ] \
    && printf '%s' "$pwsudo_out" | grep -q 'sudo needs a password' \
-   && printf '%s' "$pwsudo_out" | grep -q 'sudo tee .*99-cqlite-perf.conf.*&& sudo sysctl -q --system' \
-   && ! printf '%s' "$pwsudo_out" | grep -q "no 'sudo' binary"; then
+   && printf '%s' "$pwsudo_out" | grep -q 'authenticate first, then re-run:.*sudo -v && bash scripts/bootstrap-agent-machine.sh --yes' \
+   && ! printf '%s' "$pwsudo_out" | grep -q "no 'sudo' binary" \
+   && ! printf '%s' "$pwsudo_out" | grep -q 'write + apply the drop-in:.*bootstrap-agent-machine.sh --yes'; then
   ok "perf section: a password-requiring sudo is diagnosed distinctly (not 'no sudo binary') with the interactive remedy, writes nothing, exits 0"
 else
   bad "perf section: password-requiring sudo mishandled (rc=$pwsudo_rc, dir='$(ls -A "$pwsudo_sysctl")')"
@@ -345,7 +411,7 @@ rootbox_out=$(PATH="$rootbox" HOME="$yes_home" CARGO_HOME="$yes_home/.cargo" \
 rootbox_rc=$?
 rootbox_remedy=$(printf '%s\n' "$rootbox_out" | grep 'write + apply the drop-in' || true)
 if [ "$rootbox_rc" -eq 0 ] && [ -z "$(ls -A "$rootbox_d")" ] \
-   && printf '%s' "$rootbox_remedy" | grep -q '| tee .*99-cqlite-perf.conf >/dev/null && sysctl -q --system' \
+   && printf '%s' "$rootbox_remedy" | grep -q 'write + apply the drop-in:.*bootstrap-agent-machine.sh --yes' \
    && ! printf '%s' "$rootbox_remedy" | grep -q 'sudo'; then
   ok "perf section: when ALREADY ROOT the printed write+apply remedy carries no 'sudo' prefix"
 else
@@ -993,7 +1059,7 @@ nlfix_out=$(PATH="$yesshims:$perfbin:$tmp:$PATH" HOME="$yes_home" CARGO_HOME="$y
 nlfix_rc=$?
 if [ "$nlfix_rc" -eq 0 ] \
    && ! printf '%s' "$nlfix_out" | grep -q 'drop-in already current' \
-   && grep -q 'tee .*99-cqlite-perf.conf' "$yestrip" \
+   && perf_wrote_dropin "$yestrip" \
    && cmp -s <(bash "$PERFLIB" --drop-in) "$nlfix_d/99-cqlite-perf.conf"; then
   ok "perf section: a drop-in MISSING its final newline is judged NOT current and REWRITTEN to the canonical bytes"
 else
@@ -1007,7 +1073,7 @@ nlfix2_out=$(PATH="$yesshims:$perfbin:$tmp:$PATH" HOME="$yes_home" CARGO_HOME="$
   CQLITE_PERF_PROC_DIR="$proc_yes" CQLITE_PERF_SYSCTL_DIR="$nlfix_d" CQLITE_PERF_TEST_PRIV_DIR="$yesshims" \
   bash "$tmp/perf-root-yes/scripts/bootstrap-agent-machine.sh" --skip-smoke --yes 2>&1)
 if ! printf '%s' "$nlfix2_out" | grep -q 'drop-in already current' \
-   && grep -q 'tee .*99-cqlite-perf.conf' "$yestrip" \
+   && perf_wrote_dropin "$yestrip" \
    && cmp -s <(bash "$PERFLIB" --drop-in) "$nlfix_d/99-cqlite-perf.conf"; then
   ok "perf section: a drop-in with an EXTRA trailing blank line is judged NOT current and REWRITTEN"
 else
@@ -1128,4 +1194,29 @@ fi
 
 # Nothing in this suite may have touched the REAL /etc/sysctl.d.
 perf_test_assert_host_clean
+# --- bootstrap reports an UNSUPPORTED HOST and prints NO retry remedy (roborev round 17, Low) -------
+# The rc 2 branch added in round 16 had NO coverage: this suite skips wholly on a non-GNU host, so on
+# a supported host the branch was never reached and on an unsupported one the suite never ran. Here a
+# controlled incompatible `mv` shim is injected on THIS (supported) host, so the branch is exercised
+# where it can actually be observed. Three properties, because a wrong remedy is its own defect:
+# unsupported is NAMED, nothing is written, and the retry remedy is ABSENT (re-running cannot help).
+uns_dir="$tmp/uns-sysctl.d"; rm -rf "$uns_dir"; mkdir -p "$uns_dir"; chmod 0755 "$uns_dir"
+# Only `mv` differs from the KNOWN-WORKING --yes write case above: same shims, same PATH tail, same
+# seams. Isolating the one variable is the point — if anything else drifts, this case would fail for a
+# reason that has nothing to do with unsupported-host handling.
+uns_bin="$tmp/uns-bin"; rm -rf "$uns_bin"; mkdir -p "$uns_bin"
+printf '%s\n' '#!/bin/sh' 'exit 1' >"$uns_bin/mv"; chmod +x "$uns_bin/mv"
+uns_out=$(PATH="$uns_bin:$yesshims:$perfbin:$tmp:$PATH" HOME="$yes_home" CARGO_HOME="$yes_home/.cargo" \
+  CQLITE_PERF_PROC_DIR="$proc_yes" CQLITE_PERF_SYSCTL_DIR="$uns_dir" CQLITE_PERF_TEST_PRIV_DIR="$yesshims" \
+  bash "$tmp/perf-root-yes/scripts/bootstrap-agent-machine.sh" --skip-smoke --yes 2>&1); uns_rc=$?
+if [ "$uns_rc" -eq 0 ] \
+   && printf '%s' "$uns_out" | grep -q 'cannot install .* on this host' \
+   && [ -z "$(ls -A "$uns_dir")" ] \
+   && ! printf '%s' "$uns_out" | grep -q 'write + apply the drop-in'; then
+  ok "perf section: an UNSUPPORTED host (no GNU mv -T) is NAMED, nothing is written, and the retry remedy is deliberately NOT printed — re-running cannot help"
+else
+  bad "perf section: unsupported-host handling wrong (rc=$uns_rc, dir='$(ls -A "$uns_dir")')"
+  printf '%s\n' "$uns_out" | grep -iE 'perf|drop-in' | tail -4
+fi
+
 perf_test_report

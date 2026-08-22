@@ -241,24 +241,24 @@ fi
 noseam_out=$(env -u CQLITE_PERF_PROC_DIR -u CQLITE_PERF_SYSCTL_DIR CQLITE_PERF_TEST_MODE=1 \
   bash -c '. "$1"; perf_capability_env_guard' _ "$PERFLIB" 2>&1); noseam_rc=$?
 if [ "$noseam_rc" -ne 0 ] \
-   && printf '%s' "$noseam_out" | grep -q 'requires an explicit NON-PRODUCTION CQLITE_PERF_PROC_DIR' \
-   && printf '%s' "$noseam_out" | grep -q 'requires an explicit NON-PRODUCTION CQLITE_PERF_SYSCTL_DIR' \
+   && printf '%s' "$noseam_out" | grep -q 'requires CQLITE_PERF_PROC_DIR INSIDE the declared sandbox' \
+   && printf '%s' "$noseam_out" | grep -q 'requires CQLITE_PERF_SYSCTL_DIR INSIDE the declared sandbox' \
    && printf '%s' "$noseam_out" | grep -q 'NEVER falls back'; then
   ok "perf-capability: test mode with NO path seams REFUSES loudly and names BOTH missing sandbox dirs"
 else
   bad "perf-capability: test mode without seams was allowed to act (rc=$noseam_rc, out='$noseam_out')"
 fi
-# A seam pointing AT production (or anywhere under /etc, /proc, /sys) is the same hole
-# wearing a seam, and a RELATIVE path is not a sandbox either.
-# Each rejection is asserted BY ITS REASON, not merely by a non-zero rc: this guard has a
-# second refusal (a real sudo/sysctl on PATH) that would otherwise satisfy an rc-only
-# check and let a seam-validation regression pass unnoticed.
+# A seam pointing AT production (or anywhere under /etc, /proc, /sys) is refused because it
+# is not inside the sandbox — no forbidden name is consulted — and a RELATIVE path is not a
+# sandbox path either. Each rejection is asserted BY ITS REASON, not merely by a non-zero rc:
+# this guard has a second refusal (a real sudo/sysctl on PATH) that would otherwise satisfy
+# an rc-only check and let a containment regression pass unnoticed.
 guard_rejects_seam() { # guard_rejects_seam <which:PROC|SYSCTL> <proc-seam> <sysctl-seam>
   local out
   out=$(env CQLITE_PERF_TEST_MODE=1 CQLITE_PERF_TEST_PRIV_DIR="$realpriv" \
           CQLITE_PERF_PROC_DIR="$2" CQLITE_PERF_SYSCTL_DIR="$3" \
           bash -c '. "$1"; perf_capability_env_guard' _ "$PERFLIB" 2>&1) && return 1
-  printf '%s' "$out" | grep -q "NON-PRODUCTION CQLITE_PERF_${1}_DIR"
+  printf '%s' "$out" | grep -q "CQLITE_PERF_${1}_DIR INSIDE the declared sandbox"
 }
 for badseam in /etc/sysctl.d /etc/sysctl.d/sub /etc /proc /proc/sys/kernel /sys relative/dir ''; do
   guard_rejects_seam SYSCTL "$seamed_proc" "$badseam" || {
@@ -275,20 +275,64 @@ guard_rejects_seam SYSCTL "$seamed_proc" "$symseam" || {
   bad "perf-capability: test mode ACCEPTED a sysctl seam that is a SYMLINK to /etc/sysctl.d"; badseam_fail=1; }
 guard_rejects_seam PROC "$symproc" "$seamed_d" || {
   bad "perf-capability: test mode ACCEPTED a proc seam that is a SYMLINK to /proc/sys/kernel"; badseam_fail=1; }
-# ...and the SPELLING is not the destination (issue #3249 review R5-1): `/tmp/../etc/sysctl.d`
-# and `<symlink-to-/etc>/sysctl.d` pass every textual test above, and a root `--yes` run
-# resolves BOTH to the production directory. Each escape so far was one more spelling of
-# "somewhere else", so the write-side guard now judges the CANONICAL destination. An
-# UNENTERABLE path resolves to nothing and is refused too — a write target must exist.
+# ...and the SPELLING is not the destination. `/tmp/../etc/sysctl.d`, `<symlink-to-/etc>/…`
+# (full rationale: fleet-runbook.md, perf seam containment, and-the-spelling-is-not-the-destination-tmp-e)
 symanc="$tmp/symlinked-ancestor"; rm -f "$symanc"; ln -s /etc "$symanc"
+symout="$tmp/symlink-out-of-sandbox"; rm -f "$symout"; ln -s /tmp "$symout"
 for resolveseam in "/tmp/../etc/sysctl.d" "$symanc/sysctl.d" "$tmp/./nonexistent-sandbox.d" \
-                   "$tmp/no-such-sandbox.d"; do
+                   "$tmp/no-such-sandbox.d" "//etc/sysctl.d" "//etc/sysctl.d/sub" \
+                   "$symout" "$tmp"; do
   guard_rejects_seam SYSCTL "$seamed_proc" "$resolveseam" || {
-    bad "perf-capability: test mode ACCEPTED a sysctl seam that RESOLVES outside its sandbox: '$resolveseam'"; badseam_fail=1; }
+    bad "perf-capability: test mode ACCEPTED a sysctl seam that is not strictly inside its sandbox: '$resolveseam'"; badseam_fail=1; }
 done
-guard_rejects_seam PROC "$symanc/sysctl.d" "$seamed_d" || {
-  bad "perf-capability: test mode ACCEPTED a proc seam with a SYMLINKED ANCESTOR into /etc"; badseam_fail=1; }
-[ -n "${badseam_fail:-}" ] || ok "perf-capability: test mode rejects an empty/relative/production-shaped/SYMLINKED seam AND one that merely RESOLVES into production (.. or a symlinked ancestor), on BOTH sandbox dirs, naming the offending seam"
+for resolveseam in "$symanc/sysctl.d" "//proc/sys/kernel" "$symout"; do
+  guard_rejects_seam PROC "$resolveseam" "$seamed_d" || {
+    bad "perf-capability: test mode ACCEPTED a proc seam outside its sandbox: '$resolveseam'"; badseam_fail=1; }
+done
+[ -n "${badseam_fail:-}" ] || ok "perf-capability: test mode rejects an empty/relative/production-shaped/SYMLINKED seam, one that RESOLVES out of the sandbox (.., a symlinked ancestor, a symlink to /tmp), the '//etc' double-slash spelling, a sibling-prefix path and the sandbox ROOT itself — on BOTH sandbox dirs, naming the offending seam"
+# 1c-iii-b. THE CONTAINMENT BOUNDARY AND THE SANDBOX ROOT ITSELF (issue #3249 review
+# (full rationale: fleet-runbook.md, perf seam containment, 1c-iii-b-the-containment-boundary-and-the-sand)
+sbx="$tmp/sandbox"; mkdir -p "$sbx/inside" "$sbx/inside-proc"; : >"$sbx/.cqlite-perf-sandbox"
+mkdir -p "${sbx}evil"                       # the sibling whose NAME starts with the root's
+nostamp="$tmp/unstamped-root"; mkdir -p "$nostamp/inside"
+# The shim dir lives INSIDE the root each call declares. It has to: since #3261 AC4 a privileged
+# tool must RESOLVE beneath the proven sandbox root, so a shim dir outside it is refused on its own
+# merits — which would decide these cases for the wrong reason (they are about path containment).
+sbxpriv="$sbx/priv"; mkdir -p "$sbxpriv"
+for t in sudo sysctl; do
+  printf '#!/usr/bin/env bash\nexit 0\n' >"$sbxpriv/$t"; chmod +x "$sbxpriv/$t"
+done
+guard_with_root() { # guard_with_root <sandbox-root> <proc-seam> <sysctl-seam> -> rc + stderr
+  # The shim dir FIRST on PATH and declared as such: the guard's OTHER refusals (a real
+  # sudo/sysctl reachable, an unresolvable privileged tool) must not be what decides these cases.
+  env PATH="$1/priv:$PATH" CQLITE_PERF_TEST_MODE=1 CQLITE_PERF_TEST_PRIV_DIR="$1/priv" \
+    CQLITE_PERF_TEST_SANDBOX="$1" CQLITE_PERF_PROC_DIR="$2" CQLITE_PERF_SYSCTL_DIR="$3" \
+    bash -c '. "$1"; perf_capability_env_guard' _ "$PERFLIB" 2>&1
+}
+bnd_fail=0
+guard_with_root "$sbx" "$sbx/inside-proc" "$sbx/inside" >/dev/null 2>&1 \
+  || { bad "perf-capability: a seam genuinely INSIDE the declared sandbox was refused (the guard is vacuous)"; bnd_fail=1; }
+bnd_out=$(guard_with_root "$sbx" "$sbx/inside-proc" "${sbx}evil") && bnd_fail=1
+printf '%s' "$bnd_out" | grep -q 'CQLITE_PERF_SYSCTL_DIR INSIDE the declared sandbox' || bnd_fail=1
+[ "$bnd_fail" -eq 0 ] || bad "perf-capability: '${sbx}evil' was treated as inside '$sbx' (prefix match without a / boundary), or a contained seam was refused"
+[ "$bnd_fail" -ne 0 ] || ok "perf-capability: containment is boundary-exact — a seam inside the declared sandbox is ACCEPTED while the sibling '<root>evil' is REFUSED by name"
+root_fail=0
+for badroot in '' relative/sandbox "//$tmp" "$tmp/no-such-root" "$nostamp"; do
+  ro=$(guard_with_root "$badroot" "$sbx/inside-proc" "$sbx/inside") && root_fail=1
+  printf '%s' "$ro" | grep -q 'requires CQLITE_PERF_TEST_SANDBOX' || root_fail=1
+  [ "$root_fail" -eq 0 ] || { bad "perf-capability: sandbox root '$badroot' was accepted (or refused without naming CQLITE_PERF_TEST_SANDBOX)"; break; }
+done
+[ "$root_fail" -ne 0 ] || ok "perf-capability: the sandbox ROOT must prove itself — unset/relative/'//'-spelled/absent/UNSTAMPED are refusals naming CQLITE_PERF_TEST_SANDBOX (so a stray CQLITE_PERF_TEST_SANDBOX=/etc cannot make containment vacuous)"
+# ...and the FORK-FREE read path applies the same containment: a `//`-spelled or
+# out-of-sandbox proc seam reads NOTHING (token `absent`), never the host's real /proc —
+# whose paranoid/kptr values would otherwise show up as ok/paranoid-N/kptr-restricted here.
+read_fail=0
+for badproc in "//proc/sys/kernel" "$symanc/sysctl.d" "/proc/sys/kernel" "${sbx}evil"; do
+  rt=$(env CQLITE_PERF_TEST_MODE=1 CQLITE_PERF_TEST_SANDBOX="$sbx" \
+         CQLITE_PERF_PROC_DIR="$badproc" bash "$PERFLIB" --token 2>/dev/null)
+  [ "$rt" = absent ] || { bad "perf-capability: the read path used an out-of-sandbox proc seam '$badproc' (token '$rt', expected 'absent')"; read_fail=1; }
+done
+[ "$read_fail" -ne 0 ] || ok "perf-capability: the fork-free READ path refuses an out-of-sandbox proc seam (including the '//proc' spelling) — token 'absent', the real /proc never read"
 # ...and the write TARGET is re-validated independently of the guard: --drop-in-path may
 # never NAME a production file, because that string is what a root `tee` is pointed at.
 for resolveseam in "/tmp/../etc/sysctl.d" "$symanc/sysctl.d"; do
@@ -547,17 +591,24 @@ if printf '%s\n' "$sp_out" | grep -q "^earlier $sp_hi/10-hardening.conf$" \
 else
   bad "perf-capability: search-path scan wrong: '$sp_out'"
 fi
-# ...and an EXTRA-DIRS entry that is not an absolute non-production path fails the whole
-# scan CLOSED (rc 1, no output): a test-mode scan may never read the host's real /run or
-# /usr/lib, and a bad entry is an UNKNOWN, not "no competitor".
-for spbad in /etc/sysctl.d relative/dir "/tmp/../etc/sysctl.d"; do
+# ...and an EXTRA-DIRS entry that is not provably inside the sandbox fails the whole scan
+# CLOSED (rc 1, no output): a test-mode scan may never read the host's real /run or /usr/lib,
+# and a bad entry is an UNKNOWN, not "no competitor". THIS ENTRY POINT IS R6-2: it used the
+# textual validator while the write path canonicalized, so a SYMLINKED ANCESTOR (and the
+# `//etc` spelling) could point a "sandboxed" scan at the host's real configuration. It now
+# goes through the same resolving gate — dirs and the `sysctl.conf` FILE entry alike.
+for spbad in /etc/sysctl.d relative/dir "/tmp/../etc/sysctl.d" "//etc/sysctl.d" \
+             "$symanc/sysctl.d" "$symanc/sysctl.conf" "$symout" "$tmp/../etc/sysctl.d"; do
+  sp_this=0
   sp_bad_out=$(CQLITE_PERF_TEST_MODE=1 CQLITE_PERF_SYSCTL_DIR="$sp_hi" \
     CQLITE_PERF_SYSCTL_EXTRA_DIRS="$spbad" \
-    bash -c '. "$1"; perf_capability_competing_files' _ "$PERFLIB" 2>/dev/null) && sp_bad_fail=1
-  [ -z "$sp_bad_out" ] || sp_bad_fail=1
-  [ -z "${sp_bad_fail:-}" ] || bad "perf-capability: a production/relative CQLITE_PERF_SYSCTL_EXTRA_DIRS entry '$spbad' did not fail the scan closed"
+    bash -c '. "$1"; perf_capability_competing_files' _ "$PERFLIB" 2>/dev/null) && sp_this=1
+  # No output at all, and in particular NOT ONE host path: this is the "no host file read"
+  # half of the property, so it is asserted rather than inferred from the rc.
+  [ -z "$sp_bad_out" ] || sp_this=1
+  [ "$sp_this" -eq 0 ] || { bad "perf-capability: CQLITE_PERF_SYSCTL_EXTRA_DIRS entry '$spbad' did not fail the scan closed (out='$sp_bad_out')"; sp_bad_fail=1; }
 done
-[ -n "${sp_bad_fail:-}" ] || ok "perf-capability: a production-shaped/relative/resolving-into-production extra search-path entry fails the scan CLOSED (rc 1, no output)"
+[ -n "${sp_bad_fail:-}" ] || ok "perf-capability: an extra search-path entry outside the sandbox — production-shaped, relative, '//etc'-spelled, or reached through a SYMLINKED ANCESTOR (dir or sysctl.conf FILE) — fails the scan CLOSED (rc 1, no output, no host path named)"
 # ...and an UNREADABLE directory is an UNKNOWN (rc 1), never "no competing file": this
 # diagnostic exists to replace an unknown with a named file, so answering an unknown with
 # the reassuring line would recreate the mystery it was written to end.
@@ -792,6 +843,843 @@ for variant in fail-rc empty-out; do
   fi
 done
 [ "$mtg_fail" -ne 0 ] || ok "perf-capability-test-lib: an unusable 'mktemp -d' (non-zero rc, or rc 0 with an empty path) REFUSES with a named reason, exits non-zero, never reaches the suite body, and creates no root-level path"
+
+# 1f. THE GATE IS SINGULAR AND UNSKIPPABLE — a STRUCTURAL audit (issue #3249 review R6-2).
+# (full rationale: fleet-runbook.md, perf seam containment, 1f-the-gate-is-singular-and-unskippable-a-stru)
+seam_audit=$(awk \
+  -v seamre='[$][{]?CQLITE_PERF_(PROC_DIR|SYSCTL_DIR|SYSCTL_EXTRA_DIRS|TEST_SANDBOX|TEST_PRIV_DIR)' \
+  -v gatere='(^|[[:space:];&|(])perf_capability_(sandbox_[a-z_]*|path_within)([[:space:]]|\\)|$)' '
+  # TWO representations, because the two matches want different things (roborev round 6, Low).
+  # (full rationale: fleet-runbook.md, perf seam containment, two-representations-because-the-two-matches-wa)
+  { code = $0
+    sub(/[[:space:]]*#.*$/, "", code)
+    codeq = $0
+    gsub(/"[^"]*"/, " ", codeq)
+    gsub(/\047[^\047]*\047/, " ", codeq)
+    sub(/[[:space:]]*#.*$/, "", codeq) }
+  /^[a-z_][a-z_0-9]*\(\)[[:space:]]*\{/ {
+    fn = $1; sub(/\(\)$/, "", fn); seam = 0; gate = 0
+    if (code ~ seamre) seam = 1
+    if (codeq ~ gatere) gate = 1
+    if ($0 ~ /\}[[:space:]]*$/) { printf "%s %d %d\n", fn, seam, gate; inb = 0 }
+    else inb = 1
+    next
+  }
+  inb && /^\}/ { printf "%s %d %d\n", fn, seam, gate; inb = 0; next }
+  inb {
+    if (code ~ seamre) seam = 1
+    if (codeq ~ gatere) gate = 1
+  }
+' "$PERFLIB")
+# The ONLY function allowed to read a seam without the gate, and why: it asks whether a seam
+# was handed to us AT ALL (for the marker-less refusal) and never uses the value as a path.
+# The containment family's own root reader is the gate, so it is named here too.
+seam_audit_allow=' perf_capability_seam_set perf_capability_sandbox_root_into '
+seam_consumers=0; seam_ungated=''
+while read -r fn seam gate; do
+  [ -n "$fn" ] || continue
+  [ "$seam" = 1 ] || continue
+  seam_consumers=$((seam_consumers + 1))
+  case "$seam_audit_allow" in *" $fn "*) continue ;; esac
+  [ "$gate" = 1 ] || seam_ungated="$seam_ungated $fn"
+done <<EOF
+$seam_audit
+EOF
+# 5 is the count at the time of writing (proc_dir_into, sysctl_dir, sysctl_search_path,
+# test_seams_ok, env_guard) plus the two allowlisted readers; the assert is a FLOOR, so adding
+# a consumer is fine and losing the parse is not.
+if [ "$seam_consumers" -ge 6 ] && [ -z "$seam_ungated" ] \
+   && printf '%s\n' "$seam_audit" | grep -q '^perf_capability_sysctl_search_path 1 1$' \
+   && printf '%s\n' "$seam_audit" | grep -q '^perf_capability_proc_dir_into 1 1$' \
+   && printf '%s\n' "$seam_audit" | grep -q '^perf_capability_env_guard 1 1$'; then
+  ok "perf-capability: STRUCTURAL — all $seam_consumers seam-dereferencing functions (CQLITE_PERF_TEST_PRIV_DIR included) route through the single containment gate (only the documented presence-check + the root reader are allowlisted), so a new entry point cannot silently skip it"
+else
+  bad "perf-capability: STRUCTURAL audit failed — seam consumers found: $seam_consumers; UNGATED:${seam_ungated:- none}"
+  printf '%s\n' "$seam_audit"
+fi
+# 1f-ii. THE SAME AUDIT FOR THE BINARIES THE GUARD AUTHORIZES (issue #3261 AC4). AC4 was the
+# (full rationale: fleet-runbook.md, perf seam containment, 1f-ii-the-same-audit-for-the-binaries-the-guar)
+priv_audit=$(awk \
+  -v privre='(for [a-z_]+ in (sudo|sysctl)|command -v .*(sudo|sysctl))' \
+  -v gatere='(^|[[:space:];&|(])perf_capability_(sandbox_[a-z_]*|path_within)([[:space:]]|\\)|$)' '
+  # TWO representations, because the two matches want different things (roborev round 6, Low).
+  # (full rationale: fleet-runbook.md, perf seam containment, two-representations-because-the-two-matches-wa)
+  { code = $0
+    sub(/[[:space:]]*#.*$/, "", code)
+    codeq = $0
+    gsub(/"[^"]*"/, " ", codeq)
+    gsub(/\047[^\047]*\047/, " ", codeq)
+    sub(/[[:space:]]*#.*$/, "", codeq) }
+  /^[a-z_][a-z_0-9]*\(\)[[:space:]]*\{/ {
+    fn = $1; sub(/\(\)$/, "", fn); priv = 0; gate = 0
+    if (code ~ privre) priv = 1
+    if (codeq ~ gatere) gate = 1
+    if ($0 ~ /\}[[:space:]]*$/) { printf "%s %d %d\n", fn, priv, gate; inb = 0 }
+    else inb = 1
+    next
+  }
+  inb && /^\}/ { printf "%s %d %d\n", fn, priv, gate; inb = 0; next }
+  inb {
+    if (code ~ privre) priv = 1
+    if (codeq ~ gatere) gate = 1
+  }
+' "$PERFLIB")
+# The ONE function allowed to resolve a privileged tool without the containment gate, and why:
+# perf_capability_drop_prefix_into resolves setpriv/runuser/sudo to DE-escalate (run the `perf
+# stat` probe as a LESS privileged identity). It cannot grant privilege, and in test mode
+# perf_capability_env_guard has already refused if any real sudo/sysctl was reachable at all —
+# so its inputs are already contained by the time it runs. Joining this list is a visible act.
+priv_audit_allow=' perf_capability_drop_prefix_into '
+priv_consumers=0; priv_ungated=''
+while read -r fn priv gate; do
+  [ -n "$fn" ] || continue
+  [ "$priv" = 1 ] || continue
+  priv_consumers=$((priv_consumers + 1))
+  case "$priv_audit_allow" in *" $fn "*) continue ;; esac
+  [ "$gate" = 1 ] || priv_ungated="$priv_ungated $fn"
+done <<EOF
+$priv_audit
+EOF
+if [ "$priv_consumers" -ge 2 ] && [ -z "$priv_ungated" ] \
+   && printf '%s\n' "$priv_audit" | grep -q '^perf_capability_env_guard 1 1$'; then
+  ok "perf-capability: STRUCTURAL — all $priv_consumers functions that RESOLVE a privileged tool route through the containment gate (only the documented de-escalation prefix builder is allowlisted), so the EXECUTABLES the guard authorizes are validated by destination too (#3261 AC4)"
+else
+  bad "perf-capability: STRUCTURAL privilege-shim audit failed — resolvers found: $priv_consumers; UNGATED:${priv_ungated:- none}"
+  printf '%s\n' "$priv_audit"
+fi
+
+# ---- 1g. #3261: A NAME IS NOT A DESTINATION — the four remaining escapes ------------------
+# (full rationale: fleet-runbook.md, perf seam containment, 1g-3261-a-name-is-not-a-destination-the-four)
+
+# 1g-i. AC1 (High) — DIRECTORY containment is not WRITE-TARGET containment. `tee <path>` opens
+# (full rationale: fleet-runbook.md, perf seam containment, 1g-i-ac1-high-directory-containment-is-not-wri)
+if perf_install_supported; then
+  wt_d="$tmp/wt-sandbox.d"; mkdir -p "$wt_d"
+  wt_outside="$tmp/wt-outside-target"; printf 'PRECIOUS-HOST-FILE\n' >"$wt_outside"
+  wt_before=$(cat "$wt_outside")
+  rm -f "$wt_d/99-cqlite-perf.conf"; ln -s "$wt_outside" "$wt_d/99-cqlite-perf.conf"
+  wt_path=$(env CQLITE_PERF_SYSCTL_DIR="$wt_d" bash "$PERFLIB" --drop-in-path 2>/dev/null); wt_rc=$?
+  wt_err=$(env CQLITE_PERF_SYSCTL_DIR="$wt_d" bash "$PERFLIB" --drop-in-path 2>&1 >/dev/null)
+  if [ "$wt_rc" -ne 0 ] && [ -z "$wt_path" ] \
+     && printf '%s' "$wt_err" | grep -qi 'symlink' \
+     && [ -L "$wt_d/99-cqlite-perf.conf" ] && [ "$(cat "$wt_outside")" = "$wt_before" ]; then
+    ok "perf-capability: the drop-in WRITE TARGET is refused when the managed basename is itself a SYMLINK (rc 1, empty, named) — a contained directory does not license writing through its entries (#3261 AC1)"
+  else
+    bad "perf-capability: a SYMLINKED write target was NAMED for a privileged tee (rc=$wt_rc, path='$wt_path', err='$wt_err')"
+  fi
+  # ...and the CONTENTS read that decides idempotency may not follow it either: a symlink whose
+  # TARGET happens to hold the canonical bytes must not report "already current" (that would
+  # leave the host file in place and claim success).
+  printf '%s\n' "$(bash "$PERFLIB" --drop-in)" >"$wt_outside"
+  if env CQLITE_PERF_SYSCTL_DIR="$wt_d" bash -c '. "$1"; perf_capability_dropin_current' _ "$PERFLIB" 2>/dev/null; then
+    bad "perf-capability: dropin_current followed a SYMLINK and reported the drop-in 'already current' from a file outside the managed name"
+  else
+    ok "perf-capability: dropin_current does NOT follow a symlinked managed name, even when the link's TARGET holds byte-identical canonical content (#3261 AC1)"
+  fi
+  # ...and the WRITE replaces the ENTRY. The refusal above is a check with a TOCTOU window; the
+  # rename has none. After it, the managed name is a REGULAR file holding the canonical bytes,
+  # the outside target is byte-identical to before, and no temp entry is left behind.
+  wt_outside_bytes=$(cat "$wt_outside")
+  wt_ins=$(env CQLITE_PERF_SYSCTL_DIR="$wt_d" \
+    bash -c '. "$1"; perf_capability_dropin_install' _ "$PERFLIB" 2>&1); wt_ins_rc=$?
+  wt_leftover=$(ls -A "$wt_d" | grep -v '^99-cqlite-perf\.conf$' || true)
+  if [ "$wt_ins_rc" -eq 0 ] && [ ! -L "$wt_d/99-cqlite-perf.conf" ] && [ -f "$wt_d/99-cqlite-perf.conf" ] \
+     && [ "$(cat "$wt_outside")" = "$wt_outside_bytes" ] && [ -z "$wt_leftover" ] \
+     && env CQLITE_PERF_SYSCTL_DIR="$wt_d" bash -c '. "$1"; perf_capability_dropin_current' _ "$PERFLIB"; then
+    ok "perf-capability: the drop-in write REPLACES the directory entry (temp + rename), so a pre-existing symlink at the managed name is replaced and its outside target is untouched — and no temp entry is left behind (#3261 AC1)"
+  else
+    bad "perf-capability: the atomic drop-in install did not replace a symlinked entry (rc=$wt_ins_rc, out='$wt_ins', link=$([ -L "$wt_d/99-cqlite-perf.conf" ] && echo yes || echo no), leftover='$wt_leftover', outside-changed=$([ "$(cat "$wt_outside")" = "$wt_outside_bytes" ] && echo no || echo YES))"
+  fi
+  # ...and the STAGING entry is UNPREDICTABLE, created by `mktemp` (roborev finding 1 on #3261 — the
+  # (full rationale: fleet-runbook.md, perf seam containment, and-the-staging-entry-is-unpredictable-create)
+  wt_bait="$tmp/wt-staging-bait"; printf 'BAIT-MUST-NOT-BE-WRITTEN\n' >"$wt_bait"
+  wt_bait_before=$(cat "$wt_bait")
+  rm -f "$wt_d/.99-cqlite-perf.conf.new"; ln -s "$wt_bait" "$wt_d/.99-cqlite-perf.conf.new"
+  rm -f "$wt_d/99-cqlite-perf.conf"
+  wt_st=$(env CQLITE_PERF_SYSCTL_DIR="$wt_d" \
+    bash -c '. "$1"; perf_capability_dropin_install' _ "$PERFLIB" 2>&1); wt_st_rc=$?
+  if [ "$wt_st_rc" -eq 0 ] && [ "$(cat "$wt_bait")" = "$wt_bait_before" ] \
+     && [ -L "$wt_d/.99-cqlite-perf.conf.new" ] \
+     && [ -f "$wt_d/99-cqlite-perf.conf" ] && [ ! -L "$wt_d/99-cqlite-perf.conf" ]; then
+    ok "perf-capability: the drop-in staging entry does NOT reuse the previously-predictable name — a symlink planted there is left untouched and its target is byte-unchanged, while the managed file is still written (#3261 roborev-1 TOCTOU)"
+  else
+    bad "perf-capability: the install wrote through a PREDICTABLE staging name (rc=$wt_st_rc, bait-changed=$([ "$(cat "$wt_bait")" = "$wt_bait_before" ] && echo no || echo YES), out='$wt_st')"
+  fi
+  rm -f "$wt_d/.99-cqlite-perf.conf.new"
+  # ...structurally: the staging entry is created by `mktemp` with a random-suffix template, no
+  # (rationale: fleet-runbook.md, perf seam containment, structurally-the-staging-entry-is-created-b)
+  wt_body=$(awk '/^perf_capability_dropin_install\(\)/{f=1} f{print} f&&/^\}/{exit}' "$PERFLIB")
+  wt_privcalls=$(printf '%s\n' "$wt_body" | grep -c '"\$@"')
+  wt_struct_fail=''
+  printf '%s\n' "$wt_body" | grep -q 'mktemp -- "\$d/\.\$b\.XXXXXX"' \
+    || wt_struct_fail="$wt_struct_fail no-mktemp-template"
+  printf '%s\n' "$wt_body" | grep -qF '.new"' && wt_struct_fail="$wt_struct_fail hardcoded-staging-name"
+  printf '%s\n' "$wt_body" | grep -q 'mv -fT -- "\$t" "\$p"' \
+    || wt_struct_fail="$wt_struct_fail no-mv-T"
+  [ "$wt_privcalls" -eq 1 ] || wt_struct_fail="$wt_struct_fail privileged-invocations=$wt_privcalls"
+  printf '%s\n' "$wt_body" | grep -q '"\$@" sh -c' || wt_struct_fail="$wt_struct_fail not-a-single-sh-c"
+  if [ -z "$wt_struct_fail" ]; then
+    ok "perf-capability: STRUCTURAL — the staged install is ONE privileged 'sh -c' (mktemp + write + chmod + mv all inside it, which NARROWS the create-to-reopen window but does NOT close it — see the note above), the staging name comes from an mktemp random-suffix template with no hardcoded literal, and the rename carries -T (#3261 roborev-1/roborev-2)"
+  else
+    bad "perf-capability: the staged install lost a structural property:$wt_struct_fail"
+    printf '%s\n' "$wt_body" | grep -n '\$@\|mktemp\|mv -' | head -8
+  fi
+  # ...and a `mktemp` that answers OUTSIDE the validated directory is refused rather than trusted —
+  # the check now lives INSIDE the privileged shell, so this also proves it survived consolidation.
+  wt_mt="$tmp/wt-bad-mktemp"; mkdir -p "$wt_mt"
+  for t in bash sh cat printf tee mv rm chmod env grep; do
+    s=$(command -v "$t" 2>/dev/null) && ln -sf "$s" "$wt_mt/$t"
+  done
+  printf '%s\n' '#!/usr/bin/env bash' 'printf "%s\n" "/tmp/perf-cap-elsewhere.$$"' >"$wt_mt/mktemp"
+  chmod +x "$wt_mt/mktemp"
+  wt_mt_out=$(env PATH="$wt_mt:$PATH" CQLITE_PERF_SYSCTL_DIR="$wt_d" \
+    bash -c '. "$1"; perf_capability_dropin_install' _ "$PERFLIB" 2>&1); wt_mt_rc=$?
+  if [ "$wt_mt_rc" -ne 0 ] \
+     && printf '%s' "$wt_mt_out" | grep -q 'mktemp did not create a staging entry inside the validated directory' \
+     && [ ! -e "/tmp/perf-cap-elsewhere.$$" ]; then
+    ok "perf-capability: a 'mktemp' answering a path OUTSIDE the validated directory is REFUSED by name from INSIDE the privileged shell, and that path is never created (the tool's answer is checked, not trusted)"
+  else
+    bad "perf-capability: a mktemp answering outside the validated directory was trusted (rc=$wt_mt_rc, out='$wt_mt_out')"
+  fi
+  # ...and the POST-CREATION destination race: a symlink-to-DIRECTORY planted at the managed name.
+  # Without `mv -T` (--no-target-directory) `mv` would move the staging file INTO the linked
+  # directory — the rename that exists to avoid FOLLOWING a symlink would follow one instead, landing
+  # the managed bytes outside the sandbox under a different name. With -T the destination is always a
+  # plain name to replace. Asserted by consequence: nothing may appear inside the outside directory.
+  wt_outdir="$tmp/wt-outside-dir"; rm -rf "$wt_outdir"; mkdir -p "$wt_outdir"
+  rm -f "$wt_d/99-cqlite-perf.conf"; ln -s "$wt_outdir" "$wt_d/99-cqlite-perf.conf"
+  wt_td=$(env CQLITE_PERF_SYSCTL_DIR="$wt_d" \
+    bash -c '. "$1"; perf_capability_dropin_install' _ "$PERFLIB" 2>&1); wt_td_rc=$?
+  wt_outdir_contents=$(ls -A "$wt_outdir")
+  wt_td_leftover=$(ls -A "$wt_d" | grep -v '^99-cqlite-perf\.conf$' || true)
+  # Measured without `-T`: the staging entry landed INSIDE $wt_outdir as `.99-cqlite-perf.conf.XXXXXX`
+  # — the managed bytes escaped the sandbox under a name nothing tracks. With `-T`: rc 0, the symlink
+  # is REPLACED by a regular file, the outside directory stays empty. All four pinned.
+  if [ "$wt_td_rc" -eq 0 ] && [ -z "$wt_outdir_contents" ] && [ -z "$wt_td_leftover" ] \
+     && [ -f "$wt_d/99-cqlite-perf.conf" ] && [ ! -L "$wt_d/99-cqlite-perf.conf" ]; then
+    ok "perf-capability: a symlink-to-DIRECTORY planted at the managed name does NOT redirect the staged write into it ('mv -T') — the link is REPLACED by a regular file, the outside directory stays empty, no staging entry is left behind (#3261 roborev-2)"
+  else
+    bad "perf-capability: the staged write was redirected through a symlink-to-directory at the managed name (rc=$wt_td_rc, outside-dir='$wt_outdir_contents', leftover='$wt_td_leftover', out='$wt_td')"
+  fi
+  rm -f "$wt_d/99-cqlite-perf.conf"
+  # ...and THE PRECONDITION THAT ACTUALLY CLOSES THE STAGING RACE (issue #3261, roborev round 3): a
+  # (rationale: fleet-runbook.md, perf seam containment, and-the-precondition-that-actually-closes-t)
+  wt_perm_d="$tmp/wt-perm.d"
+  wt_perm_fail=0
+  for wt_mode in 0775 0777 0757; do
+    rm -rf "$wt_perm_d"; mkdir -p "$wt_perm_d"; chmod "$wt_mode" "$wt_perm_d"
+    wt_perm_out=$(env CQLITE_PERF_SYSCTL_DIR="$wt_perm_d" \
+      bash -c '. "$1"; perf_capability_dropin_install' _ "$PERFLIB" 2>&1); wt_perm_rc=$?
+    wt_perm_left=$(ls -A "$wt_perm_d")
+    if [ "$wt_perm_rc" -eq 0 ] \
+       || ! printf '%s' "$wt_perm_out" | grep -q 'group- or world-writable' \
+       || [ -n "$wt_perm_left" ]; then
+      bad "perf-capability: a mode-$wt_mode drop-in directory was accepted for a privileged staged write (rc=$wt_perm_rc, left='$wt_perm_left', out='$wt_perm_out')"
+      wt_perm_fail=1
+    fi
+  done
+  # ...the NEGATIVE CONTROL: a directory owned by the writer and not group/world-writable installs.
+  rm -rf "$wt_perm_d"; mkdir -p "$wt_perm_d"; chmod 0755 "$wt_perm_d"
+  wt_ok_out=$(env CQLITE_PERF_SYSCTL_DIR="$wt_perm_d" \
+    bash -c '. "$1"; perf_capability_dropin_install' _ "$PERFLIB" 2>&1); wt_ok_rc=$?
+  if [ "$wt_ok_rc" -ne 0 ] || [ ! -f "$wt_perm_d/99-cqlite-perf.conf" ]; then
+    bad "perf-capability: a correctly-owned 0755 drop-in directory was REFUSED — the writability precondition is vacuous (rc=$wt_ok_rc, out='$wt_ok_out')"
+    wt_perm_fail=1
+  fi
+  # ...and an UNDETERMINABLE owner/mode is a refusal, not an assumption: with `stat` unusable the
+  # install must fail closed rather than proceed on the hope that the directory is fine.
+  wt_nostat="$tmp/wt-nostat"; mkdir -p "$wt_nostat"
+  for t in bash sh cat printf tee mv rm chmod env grep mktemp id; do
+    s=$(command -v "$t" 2>/dev/null) && ln -sf "$s" "$wt_nostat/$t"
+  done
+  printf '%s\n' '#!/usr/bin/env bash' 'exit 1' >"$wt_nostat/stat"; chmod +x "$wt_nostat/stat"
+  rm -rf "$wt_perm_d"; mkdir -p "$wt_perm_d"; chmod 0755 "$wt_perm_d"
+  wt_ns_out=$(env PATH="$wt_nostat" CQLITE_PERF_SYSCTL_DIR="$wt_perm_d" \
+    bash -c '. "$1"; perf_capability_dropin_install' _ "$PERFLIB" 2>&1); wt_ns_rc=$?
+  # A `stat` that cannot answer AT ALL is now reported as an UNSUPPORTED HOST (rc 2) rather than as
+  # "owner/mode indeterminate" — a broken `stat -c` means this host cannot do the atomic install,
+  # which is the more accurate diagnosis and the one added in roborev round 16. The property under
+  # test is unchanged and is what matters: it FAILS CLOSED and NAMES why, never proceeding on a
+  # directory whose ownership was never established. Either wording satisfies that; silence does not.
+  if [ "$wt_ns_rc" -eq 0 ] \
+     || ! printf '%s' "$wt_ns_out" | grep -qE 'cannot determine owner/mode|UNSUPPORTED on this host'; then
+    bad "perf-capability: an unusable 'stat' did not fail closed with a named reason (rc=$wt_ns_rc, out='$wt_ns_out')"
+    wt_perm_fail=1
+  fi
+  # ...a SHORT MODE from `stat -c %a` must not bypass the write-bit check (roborev round 5, High).
+  # (rationale: fleet-runbook.md, perf seam containment, a-short-mode-from-stat-c-a-must-not-bypass)
+  wt_short="$tmp/wt-shortmode"; mkdir -p "$wt_short"
+  for st in bash sh cat printf tee mv rm chmod env grep mktemp id ls; do
+    s=$(command -v "$st" 2>/dev/null) && ln -sf "$s" "$wt_short/$st"
+  done
+  printf '%s\n' '#!/usr/bin/env bash' 'printf "%s 33\n" "$(id -u)"' >"$wt_short/stat"
+  chmod +x "$wt_short/stat"
+  rm -rf "$wt_perm_d"; mkdir -p "$wt_perm_d"; chmod 0755 "$wt_perm_d"
+  wt_sm_out=$(env PATH="$wt_short" CQLITE_PERF_SYSCTL_DIR="$wt_perm_d" \
+    bash -c '. "$1"; perf_capability_dropin_install' _ "$PERFLIB" 2>&1); wt_sm_rc=$?
+  if [ "$wt_sm_rc" -eq 0 ] || [ -e "$wt_perm_d/99-cqlite-perf.conf" ] \
+     || ! printf '%s' "$wt_sm_out" | grep -q 'group- or world-writable'; then
+    bad "perf-capability: a SHORT mode (stat reported '33' = 0033, group+world writable) was accepted — the zero-padding is missing or ineffective (rc=$wt_sm_rc, out='$wt_sm_out')"
+    wt_perm_fail=1
+  fi
+
+  # ...a SYMLINKED destination directory is refused OUTRIGHT (owner ruling A', condition 2: lstat
+  # semantics ASSERTED, not inherited from `stat`'s default). The link itself may look perfectly
+  # owned and 0755 while entries would be created somewhere else entirely, so measuring the link
+  # and proceeding is exactly the by-name reasoning this family has punished eleven times. The
+  # link target here is a legitimate, correctly-owned, non-group-writable directory precisely so
+  # the case cannot pass for the wrong reason: only the SYMLINK-NESS may cause the refusal.
+  wt_ln_target="$tmp/wt-ln-target"; wt_ln_dir="$tmp/wt-ln-dir"
+  rm -rf "$wt_ln_target" "$wt_ln_dir"; mkdir -p "$wt_ln_target"; chmod 0755 "$wt_ln_target"
+  ln -s "$wt_ln_target" "$wt_ln_dir"
+  # ...and the refusal must survive TRAILING SLASHES (roborev round 10, Low). `[ -L link/ ]` and
+  # `[ -L link// ]` are both FALSE even when `link` IS a symlink, because the test follows the slash,
+  # so one extra character used to walk past the refusal this function explicitly promises. All three
+  # spellings are asserted, and the link TARGET is checked unwritten after each one.
+  for wt_ln_spell in "$wt_ln_dir" "$wt_ln_dir/" "$wt_ln_dir//"; do
+    wt_ln_out=$(env CQLITE_PERF_SYSCTL_DIR="$wt_ln_spell" \
+      bash -c '. "$1"; perf_capability_dropin_install' _ "$PERFLIB" 2>&1); wt_ln_rc=$?
+    if [ "$wt_ln_rc" -eq 0 ] || ! printf '%s' "$wt_ln_out" | grep -q 'is a SYMLINK'; then
+      bad "perf-capability: a SYMLINKED drop-in directory spelled '$wt_ln_spell' was not refused (rc=$wt_ln_rc, out='$wt_ln_out')"
+      wt_perm_fail=1
+    fi
+    if [ -e "$wt_ln_target/99-cqlite-perf.conf" ]; then
+      bad "perf-capability: spelling '$wt_ln_spell' was refused but the link TARGET was written anyway"
+      wt_perm_fail=1
+    fi
+  done
+  [ "$wt_perm_fail" -ne 0 ] || ok "perf-capability: a privileged staged install REFUSES a group-/world-writable drop-in directory by name and writes nothing, refuses a SYMLINKED destination outright (lstat semantics asserted, target left unwritten), refuses when owner/mode cannot be determined, and still installs into a correctly-owned 0755 directory — the staging race is closed at its PRECONDITION rather than by trying to win it (#3261 roborev-3, owner A' condition 2)"
+else
+  skip "perf-capability: staged-install write-target cases (symlinked managed name refused; dropin_current does not follow it; the write REPLACES the directory entry)" "no GNU stat -c / mv --no-target-directory on this host"
+  skip "perf-capability: staged-install staging-race cases (unpredictable mktemp name; ONE privileged sh -c; mktemp answer outside the validated dir refused; symlink-to-directory not followed)" "no GNU stat -c / mv --no-target-directory on this host"
+  skip "perf-capability: staged-install writability-precondition cases (group/world-writable refused; SHORT mode 0033 refused; SYMLINKED destination refused; undeterminable owner/mode fails closed; correctly-owned 0755 still installs)" "no GNU stat -c / mv --no-target-directory on this host"
+fi
+
+# ...and CR/LF IN A PATH SEAM IS REFUSED (issue #3261, roborev round 3). Not a containment defect —
+# the path IS contained — a SERIALIZATION one, which is why nine rounds of containment work never
+# saw it: the search path is emitted ONE ENTRY PER LINE and read back line-wise, so a contained
+# directory NAMED with an embedded newline splits into TWO entries, the second being the host's real
+# /etc/sysctl.d. One contained path becomes two paths, one of them production.
+wt_nl_root="$tmp/wt-nl-root"; mkdir -p "$wt_nl_root"; : >"$wt_nl_root/.cqlite-perf-sandbox"
+wt_nl_seam="$wt_nl_root/evil
+/etc/sysctl.d"
+mkdir -p "$wt_nl_seam" 2>/dev/null
+wt_nl_out=$(env CQLITE_PERF_TEST_SANDBOX="$wt_nl_root" CQLITE_PERF_SYSCTL_DIR="$wt_nl_seam" \
+  bash -c '. "$1"; perf_capability_sysctl_search_path' _ "$PERFLIB" 2>/dev/null); wt_nl_rc=$?
+# The primary seam must be VALID and INSIDE this sandbox (roborev round 28, Low): it previously pointed at
+# $seamed_d, which lies OUTSIDE $wt_nl_root, so the PRIMARY seam was refused and the run never reached the
+# newline-bearing EXTRA entry this case exists to judge — it passed vacuously for the wrong reason.
+wt_nl_primary="$wt_nl_root/primary-sysctl.d"; mkdir -p "$wt_nl_primary"; chmod 0755 "$wt_nl_primary"
+# ...proven non-vacuous first: with the newline entry ABSENT the same primary must SUCCEED, otherwise the
+# refusal below could still be coming from the primary rather than from the extra entry.
+wt_nl_base_rc=0
+env CQLITE_PERF_TEST_SANDBOX="$wt_nl_root" CQLITE_PERF_SYSCTL_DIR="$wt_nl_primary" \
+  bash -c '. "$1"; perf_capability_sysctl_search_path' _ "$PERFLIB" >/dev/null 2>&1 || wt_nl_base_rc=$?
+wt_nl_extra=$(env CQLITE_PERF_TEST_SANDBOX="$wt_nl_root" CQLITE_PERF_SYSCTL_DIR="$wt_nl_primary" \
+  CQLITE_PERF_SYSCTL_EXTRA_DIRS="$wt_nl_seam" \
+  bash -c '. "$1"; perf_capability_sysctl_search_path' _ "$PERFLIB" 2>/dev/null); wt_nl_extra_rc=$?
+if [ "$wt_nl_rc" -ne 0 ] && [ "$wt_nl_extra_rc" -ne 0 ] && [ "$wt_nl_base_rc" -eq 0 ] \
+   && ! printf '%s\n' "$wt_nl_out" | grep -qx -- /etc/sysctl.d \
+   && ! printf '%s\n' "$wt_nl_extra" | grep -qx -- /etc/sysctl.d; then
+  ok "perf-capability: a CONTAINED path carrying an embedded newline is REFUSED as a seam and as an extra-dirs entry, so it can never SERIALIZE into two search-path entries whose second line is the host's real /etc/sysctl.d (#3261 roborev-3)"
+else
+  bad "perf-capability: embedded-newline handling wrong (seam rc=$wt_nl_rc '$wt_nl_out'; extra rc=$wt_nl_extra_rc '$wt_nl_extra'; BASELINE rc=$wt_nl_base_rc must be 0 or the extra case proves nothing)"
+fi
+# ...and a CR is refused for the same reason (a CRLF-authored value would leave a stray \r inside a
+# resolved entry), while the predicate stays non-vacuous on an ordinary path.
+if env bash -c '. "$1"; perf_capability_path_lines_ok "$2"' _ "$PERFLIB" "$(printf '/tmp/a\rb')"; then
+  bad "perf-capability: a path containing CR was accepted by the line-safety predicate"
+elif ! env bash -c '. "$1"; perf_capability_path_lines_ok "$2"' _ "$PERFLIB" /tmp/ordinary/path; then
+  bad "perf-capability: the line-safety predicate rejects an ordinary path (vacuous)"
+else
+  ok "perf-capability: the line-safety predicate rejects CR as well as LF and still accepts an ordinary path"
+fi
+
+# ...and an UNSUPPORTED HOST is reported as rc 2, distinct from rc 1 REFUSED (roborev rounds 16-17).
+# (full rationale: fleet-runbook.md, perf seam containment, and-an-unsupported-host-is-reported-as-rc-2-d)
+us_fail=0
+# GUARDED like the staged-install cases (roborev round 21, Medium): this group's CONTROL expects a
+# successful install using the HOST's stat/mv, so off GNU it necessarily returns rc 2 and the suite
+# fails — reintroducing the macOS breakage the counted skip fixed.
+if ! perf_install_supported; then
+  skip "perf-capability: UNSUPPORTED-host reporting cases (rc 2 for broken stat -c / mv -T, with an all-GNU control)" "no GNU stat -c / mv --no-target-directory on this host, so the control case cannot install"
+else
+for us_break in '' mv stat; do
+  us_root=$(mktemp -d "$tmp/us.XXXXXX"); : >"$us_root/.cqlite-perf-sandbox"
+  mkdir -p "$us_root/sysctl.d"; chmod 0755 "$us_root" "$us_root/sysctl.d"
+  us_shim=$(mktemp -d "$tmp/usbin.XXXXXX")
+  for us_t in bash sh cat printf tee rm chmod env grep mktemp id ls stat mv; do
+    [ "$us_t" = "$us_break" ] && continue
+    us_p=$(command -v "$us_t" 2>/dev/null) && ln -sf "$us_p" "$us_shim/$us_t"
+  done
+  [ -n "$us_break" ] && { printf '%s\n' '#!/bin/sh' 'exit 1' >"$us_shim/$us_break"; chmod +x "$us_shim/$us_break"; }
+  us_out=$(env PATH="$us_shim" CQLITE_PERF_TEST_MODE=1 CQLITE_PERF_TEST_SANDBOX="$us_root" \
+    CQLITE_PERF_SYSCTL_DIR="$us_root/sysctl.d" CQLITE_PERF_PROC_DIR="$us_root" \
+    CQLITE_PERF_TEST_PRIV_DIR="$us_shim" \
+    bash -c '. "$1"; perf_capability_dropin_install' _ "$PERFLIB" 2>&1); us_rc=$?
+  us_wrote=no; [ -s "$us_root/sysctl.d/99-cqlite-perf.conf" ] && us_wrote=yes
+  if [ -z "$us_break" ]; then
+    [ "$us_rc" -eq 0 ] && [ "$us_wrote" = yes ] \
+      || { bad "perf-capability: an all-GNU host did not install (rc=$us_rc wrote=$us_wrote) — the UNSUPPORTED probe refuses everything"; us_fail=1; }
+  else
+    [ "$us_rc" -eq 2 ] \
+      || { bad "perf-capability: a broken '$us_break' gave rc=$us_rc, not the distinct rc 2 UNSUPPORTED (out='$us_out')"; us_fail=1; }
+    printf '%s' "$us_out" | grep -q 'UNSUPPORTED on this host' \
+      || { bad "perf-capability: a broken '$us_break' failed without naming the host as unsupported (out='$us_out')"; us_fail=1; }
+    [ "$us_wrote" = no ] \
+      || { bad "perf-capability: a broken '$us_break' wrote the drop-in anyway"; us_fail=1; }
+  fi
+done
+[ "$us_fail" -ne 0 ] || ok "perf-capability: a non-GNU host is reported as rc 2 UNSUPPORTED by name and writes nothing (broken stat -c and broken mv -T both), while an all-GNU host still installs (#3261 roborev-16/17)"
+fi
+
+# ...and an EXTRA_DIRS value whose FIRST LINE is VALID must still be refused (roborev round 31, Medium).
+# (full rationale: fleet-runbook.md, perf seam containment, and-an-extra-dirs-value-whose-first-line-is-v)
+ed_root=$(mktemp -d "$tmp/ed.XXXXXX"); : >"$ed_root/.cqlite-perf-sandbox"
+mkdir -p "$ed_root/good" "$ed_root/primary"; chmod 0755 "$ed_root" "$ed_root/good" "$ed_root/primary"
+ed_fail=0
+ed_base_rc=0
+env CQLITE_PERF_TEST_MODE=1 CQLITE_PERF_TEST_SANDBOX="$ed_root" CQLITE_PERF_SYSCTL_DIR="$ed_root/primary" \
+  CQLITE_PERF_SYSCTL_EXTRA_DIRS="$ed_root/good" \
+  bash -c '. "$1"; perf_capability_sysctl_search_path' _ "$PERFLIB" >/dev/null 2>&1 || ed_base_rc=$?
+[ "$ed_base_rc" -eq 0 ] \
+  || { bad "perf-capability: the single-line EXTRA_DIRS BASELINE failed (rc=$ed_base_rc) — the newline refusal below would prove nothing"; ed_fail=1; }
+ed_hidden="$ed_root/good"$'\n'"/etc/sysctl.d"
+ed_out=$(env CQLITE_PERF_TEST_MODE=1 CQLITE_PERF_TEST_SANDBOX="$ed_root" CQLITE_PERF_SYSCTL_DIR="$ed_root/primary" \
+  CQLITE_PERF_SYSCTL_EXTRA_DIRS="$ed_hidden" \
+  bash -c '. "$1"; perf_capability_sysctl_search_path' _ "$PERFLIB" 2>&1); ed_rc=$?
+[ "$ed_rc" -ne 0 ] \
+  || { bad "perf-capability: an EXTRA_DIRS value hiding entries after a newline was ACCEPTED (rc=$ed_rc, out='$ed_out')"; ed_fail=1; }
+printf '%s\n' "$ed_out" | grep -qx -- /etc/sysctl.d \
+  && { bad "perf-capability: the host /etc/sysctl.d reached the search path through a newline-hidden EXTRA_DIRS entry"; ed_fail=1; }
+[ "$ed_fail" -ne 0 ] || ok "perf-capability: an EXTRA_DIRS value whose FIRST line is a valid contained directory is still REFUSED when a newline hides more entries after it, and the host /etc/sysctl.d never reaches the search path — while the same value without the newline succeeds (#3261 roborev-31)"
+
+# ...and a stamped sandbox root ending in '//' must behave IDENTICALLY to one with no trailing slash
+# (roborev round 31, Low). Only ONE trailing slash was stripped, so '<root>//' became '<root>/', passed the
+# '//' rejection, and then the fork-free containment pattern appended its own separator and refused EVERY
+# child -- while the RESOLVING write path still accepted the same root. Read and write disagreeing about
+# the same sandbox is worse than either answer alone, so all three spellings are asserted to agree.
+ts_root=$(mktemp -d "$tmp/ts.XXXXXX"); : >"$ts_root/.cqlite-perf-sandbox"
+mkdir -p "$ts_root/child"; chmod 0755 "$ts_root" "$ts_root/child"
+ts_fail=0
+for ts_spell in "$ts_root" "$ts_root/" "$ts_root//"; do
+  env CQLITE_PERF_TEST_MODE=1 CQLITE_PERF_TEST_SANDBOX="$ts_spell" \
+    bash -c '. "$1"; perf_capability_sandbox_ok "$2"' _ "$PERFLIB" "$ts_root/child" 2>/dev/null \
+    || { bad "perf-capability: a contained child was REFUSED when the sandbox root was spelled '$ts_spell' (fork-free path disagrees with the resolving path)"; ts_fail=1; }
+done
+[ "$ts_fail" -ne 0 ] || ok "perf-capability: a stamped sandbox root spelled with no trailing slash, one, or two is normalised identically, so the fork-free and resolving paths cannot disagree about the same sandbox (#3261 roborev-31)"
+
+# ...and a SYMLINKED CONTROL FILE inside a contained PROC_DIR must not be read (roborev round 25,
+# (full rationale: fleet-runbook.md, perf seam containment, and-a-symlinked-control-file-inside-a-contain)
+pc_root=$(mktemp -d "$tmp/pc.XXXXXX"); : >"$pc_root/.cqlite-perf-sandbox"
+mkdir -p "$pc_root/proc"; chmod 0755 "$pc_root" "$pc_root/proc"
+printf '3\n' >"$pc_root/outside-paranoid"; printf '0\n' >"$pc_root/proc/kptr_restrict"
+ln -s "$pc_root/outside-paranoid" "$pc_root/proc/perf_event_paranoid"
+pc_link=$(env CQLITE_PERF_TEST_MODE=1 CQLITE_PERF_TEST_SANDBOX="$pc_root" CQLITE_PERF_PROC_DIR="$pc_root/proc" \
+  bash -c '. "$1"; perf_capability_token' _ "$PERFLIB" 2>/dev/null)
+rm -f "$pc_root/proc/perf_event_paranoid"; printf '3\n' >"$pc_root/proc/perf_event_paranoid"
+pc_real=$(env CQLITE_PERF_TEST_MODE=1 CQLITE_PERF_TEST_SANDBOX="$pc_root" CQLITE_PERF_PROC_DIR="$pc_root/proc" \
+  bash -c '. "$1"; perf_capability_token' _ "$PERFLIB" 2>/dev/null)
+if [ "$pc_link" = absent ] && [ "$pc_real" = paranoid-3 ]; then
+  ok "perf-capability: a SYMLINKED control file inside a contained PROC_DIR is refused (token 'absent', never a fabricated capability) while the same tree with a REAL file reads normally (#3261 roborev-25)"
+else
+  bad "perf-capability: symlinked control file handling wrong (symlinked token='$pc_link' expected absent; real token='$pc_real' expected paranoid-3)"
+fi
+
+# ...and LINE-SAFETY MUST BE JUDGED ON THE ORIGINAL PATH, not the canonicalized one (roborev round
+# (full rationale: fleet-runbook.md, perf seam containment, and-line-safety-must-be-judged-on-the-origina)
+lf_root=$(mktemp -d "$tmp/lf.XXXXXX"); : >"$lf_root/.cqlite-perf-sandbox"
+lf_dir="$lf_root/evil"$'\n'
+lf_fail=0
+if mkdir -p "$lf_dir" 2>/dev/null; then
+  if env CQLITE_PERF_TEST_MODE=1 CQLITE_PERF_TEST_SANDBOX="$lf_root" \
+       bash -c '. "$1"; perf_capability_sandbox_ok_resolved "$2"' _ "$PERFLIB" "$lf_dir" 2>/dev/null; then
+    bad "perf-capability: a directory whose name ends in LF was ACCEPTED by the resolved containment check (the newline was laundered through pwd -P)"
+    lf_fail=1
+  fi
+  # ...and the FILE variant, whose parent is the LF-named directory.
+  : >"$lf_dir/sysctl.conf" 2>/dev/null
+  if env CQLITE_PERF_TEST_MODE=1 CQLITE_PERF_TEST_SANDBOX="$lf_root" \
+       bash -c '. "$1"; perf_capability_sandbox_file_ok_resolved "$2"' _ "$PERFLIB" "$lf_dir/sysctl.conf" 2>/dev/null; then
+    bad "perf-capability: a file whose PARENT directory name ends in LF was ACCEPTED by the resolved file containment check"
+    lf_fail=1
+  fi
+  # ...NEGATIVE CONTROL: the same shapes WITHOUT a newline are still accepted, so the check is not
+  # refusing every path that merely looks unusual.
+  mkdir -p "$lf_root/ordinary"
+  env CQLITE_PERF_TEST_MODE=1 CQLITE_PERF_TEST_SANDBOX="$lf_root" \
+    bash -c '. "$1"; perf_capability_sandbox_ok_resolved "$2"' _ "$PERFLIB" "$lf_root/ordinary" 2>/dev/null \
+    || { bad "perf-capability: an ORDINARY contained directory was refused by the line-safety ordering fix (vacuous)"; lf_fail=1; }
+  [ "$lf_fail" -ne 0 ] || ok "perf-capability: line-safety is judged on the ORIGINAL path — a directory ending in LF and a file whose parent ends in LF are both REFUSED (the newline cannot launder through pwd -P), while an ordinary contained directory still passes (#3261 roborev-12)"
+else
+  skip "perf-capability: LF-in-path containment cases" "this filesystem refused to create a directory whose name contains a newline"
+fi
+
+# ...and the COMPETING-FILE SCAN must validate every globbed file, not just its directory (roborev
+# round 11, Medium). `[ -f ]` and `grep` FOLLOW symlinks, so a link sitting inside a perfectly
+# contained sandbox directory but pointing at a real host `*.conf` was read, and its contents
+# fabricated "a competitor sets these keys" diagnostics out of HOST state — the asserted numbers
+# would come from the box instead of the fixture. Fails CLOSED: a competitor we declined to examine
+# is the UNKNOWN this diagnostic exists to report, not hide.
+cs_root=$(mktemp -d "$tmp/cs.XXXXXX"); : >"$cs_root/.cqlite-perf-sandbox"
+cs_dir="$cs_root/sysctl.d"; mkdir -p "$cs_dir"
+cs_host="$tmp/cs-host-competitor.conf"
+printf 'kernel.perf_event_paranoid = 2\n' >"$cs_host"
+ln -s "$cs_host" "$cs_dir/00-host-link.conf"
+cs_fail=0
+cs_out=$(env CQLITE_PERF_TEST_MODE=1 CQLITE_PERF_TEST_SANDBOX="$cs_root" \
+  CQLITE_PERF_SYSCTL_DIR="$cs_dir" CQLITE_PERF_PROC_DIR="$cs_root" \
+  bash -c '. "$1"; perf_capability_competing_files' _ "$PERFLIB" 2>&1); cs_rc=$?
+[ "$cs_rc" -ne 0 ] || { bad "perf-capability: the competing-file scan ACCEPTED a symlinked *.conf inside the sandbox (rc=$cs_rc, out='$cs_out')"; cs_fail=1; }
+printf '%s' "$cs_out" | grep -q 'REFUSING to scan' \
+  || { bad "perf-capability: the scan failed on a symlinked competitor without naming the refusal (out='$cs_out')"; cs_fail=1; }
+printf '%s' "$cs_out" | grep -q 'perf_event_paranoid = 2' \
+  && { bad "perf-capability: the scan LEAKED host competitor content through a symlink"; cs_fail=1; }
+# ...the NEGATIVE CONTROL: a REAL file inside the sandbox is still scanned, so the check is not
+# refusing everything.
+printf 'kernel.kptr_restrict = 1\n' >"$cs_dir/zz-real.conf" 2>/dev/null
+# ...and the NEWLINE-BASENAME case, now actually EXERCISED (roborev round 27, Low). This block used to
+# (full rationale: fleet-runbook.md, perf seam containment, and-the-newline-basename-case-now-actually-ex)
+cs_nl_dir="$cs_root/nl-sysctl.d"; rm -rf "$cs_nl_dir"; mkdir -p "$cs_nl_dir"; chmod 0755 "$cs_nl_dir"
+cs_nl_name=$(printf 'zz-nl\ncompetitor.conf')
+# BASELINE FIRST, WITHOUT the newline file, and its status REQUIRED (roborev round 30, Low). My previous
+# (full rationale: fleet-runbook.md, perf seam containment, baseline-first-without-the-newline-file-and-it)
+printf 'kernel.kptr_restrict = 1\n' >"$cs_nl_dir/zz-ordinary.conf"
+cs_nl_base=$(env CQLITE_PERF_TEST_MODE=1 CQLITE_PERF_TEST_SANDBOX="$cs_root" \
+  CQLITE_PERF_SYSCTL_DIR="$cs_nl_dir" CQLITE_PERF_PROC_DIR="$cs_root" \
+  bash -c '. "$1"; perf_capability_competing_files' _ "$PERFLIB" 2>&1); cs_nl_base_rc=$?
+[ "$cs_nl_base_rc" -eq 0 ] \
+  || { bad "perf-capability: the ordinary-competitor BASELINE failed (rc=$cs_nl_base_rc, out='$cs_nl_base') — the newline refusal below would prove nothing"; cs_fail=1; }
+if printf 'kernel.kptr_restrict = 1\n' >"$cs_nl_dir/$cs_nl_name" 2>/dev/null; then
+  cs_nl_out=$(env CQLITE_PERF_TEST_MODE=1 CQLITE_PERF_TEST_SANDBOX="$cs_root" \
+    CQLITE_PERF_SYSCTL_DIR="$cs_nl_dir" CQLITE_PERF_PROC_DIR="$cs_root" \
+    bash -c '. "$1"; perf_capability_competing_files' _ "$PERFLIB" 2>&1); cs_nl_rc=$?
+  [ "$cs_nl_rc" -ne 0 ] \
+    || { bad "perf-capability: a newline-named competitor did NOT fail the scan closed (rc=$cs_nl_rc, out='$cs_nl_out')"; cs_fail=1; }
+  printf '%s' "$cs_nl_out" | grep -qx -- 'competitor.conf' \
+    && { bad "perf-capability: a newline in a competitor BASENAME split into an extra reported entry (out='$cs_nl_out')"; cs_fail=1; }
+  rm -f -- "$cs_nl_dir/$cs_nl_name"
+else
+  skip "perf-capability: newline-in-basename competitor case" "this filesystem refused to create a filename containing a newline"
+fi
+cs_ok_out=$(env CQLITE_PERF_TEST_MODE=1 CQLITE_PERF_TEST_SANDBOX="$cs_root" \
+  CQLITE_PERF_SYSCTL_DIR="$cs_dir" CQLITE_PERF_PROC_DIR="$cs_root" \
+  bash -c '. "$1"; perf_capability_competing_files' _ "$PERFLIB" 2>&1); cs_ok_rc=$?
+rm -f -- "$cs_dir/00-host-link.conf"
+cs_ok2_out=$(env CQLITE_PERF_TEST_MODE=1 CQLITE_PERF_TEST_SANDBOX="$cs_root" \
+  CQLITE_PERF_SYSCTL_DIR="$cs_dir" CQLITE_PERF_PROC_DIR="$cs_root" \
+  bash -c '. "$1"; perf_capability_competing_files' _ "$PERFLIB" 2>&1); cs_ok2_rc=$?
+if [ "$cs_ok2_rc" -ne 0 ] || ! printf '%s' "$cs_ok2_out" | grep -q 'zz-real.conf'; then
+  bad "perf-capability: a REAL contained competitor was not scanned once the symlink was removed — the per-file check is refusing everything (rc=$cs_ok2_rc, out='$cs_ok2_out')"
+  cs_fail=1
+fi
+[ "$cs_fail" -ne 0 ] || ok "perf-capability: the competing-file scan validates EVERY globbed file in test mode — a symlinked *.conf inside the sandbox fails the scan CLOSED by name and leaks no host content, while a real contained competitor is still reported (#3261 roborev-11)"
+
+# ...and a FAILING CONTENT GENERATOR must never look like success (roborev round 9, Medium). Both
+# (full rationale: fleet-runbook.md, perf seam containment, and-a-failing-content-generator-must-never-lo)
+cg_dir=$(mktemp -d "$tmp/cg.XXXXXX"); : >"$cg_dir/99-cqlite-perf.conf"
+cg_fail=0
+cg_cur_rc=0
+env CQLITE_PERF_SYSCTL_DIR="$cg_dir" bash -c '
+  . "$1"
+  perf_capability_dropin_content() { return 1; }
+  perf_capability_dropin_current' _ "$PERFLIB" >/dev/null 2>&1 || cg_cur_rc=$?
+[ "$cg_cur_rc" -ne 0 ] || { bad "perf-capability: a FAILING content generator let dropin_current report the drop-in already current (empty file compared equal)"; cg_fail=1; }
+cg_ins_out=$(env CQLITE_PERF_SYSCTL_DIR="$cg_dir" bash -c '
+  . "$1"
+  perf_capability_dropin_content() { return 1; }
+  perf_capability_dropin_install' _ "$PERFLIB" 2>&1); cg_ins_rc=$?
+[ "$cg_ins_rc" -ne 0 ] || { bad "perf-capability: dropin_install succeeded with a FAILING content generator (rc=$cg_ins_rc, out='$cg_ins_out')"; cg_fail=1; }
+[ ! -s "$cg_dir/99-cqlite-perf.conf" ] || { bad "perf-capability: dropin_install wrote content despite a failing generator"; cg_fail=1; }
+[ "$cg_fail" -ne 0 ] || ok "perf-capability: a FAILING drop-in content generator propagates — dropin_current does NOT report 'already current' against an empty file, and dropin_install refuses before any privileged command and writes nothing (#3261 roborev-9)"
+
+# ...and the install is still gated: an out-of-sandbox seam may not be written at all. Same GNU-only
+# toolchain dependency as the staged-install block above, so same counted skip off GNU.
+if ! perf_install_supported; then
+  skip "perf-capability: dropin_install refuses a seam resolving OUT of the sandbox" "no GNU stat -c / mv --no-target-directory on this host"
+elif env CQLITE_PERF_SYSCTL_DIR="$symanc/sysctl.d" \
+     bash -c '. "$1"; perf_capability_dropin_install' _ "$PERFLIB" >/dev/null 2>&1; then
+  bad "perf-capability: dropin_install wrote through a seam resolving OUT of the sandbox"
+else
+  ok "perf-capability: dropin_install inherits the containment gate — a seam resolving out of the sandbox writes nothing"
+fi
+
+# 1g-ii. AC2 (Medium) — the inversion REGRESSED symlink rejection on the READ path. The
+# (rationale: fleet-runbook.md, perf seam containment, 1g-ii-ac2-medium-the-inversion-regressed-sym)
+ac2_fail=0
+ac2_link="$tmp/ac2-proc-is-a-symlink"; rm -f "$ac2_link"; ln -s /proc/sys/kernel "$ac2_link"
+ac2_dirlink="$tmp/ac2-ancestor-link"; rm -f "$ac2_dirlink"; ln -s /proc/sys "$ac2_dirlink"
+for ac2_seam in "$ac2_link" "$ac2_dirlink/kernel"; do
+  ac2_tok=$(env CQLITE_PERF_PROC_DIR="$ac2_seam" bash "$PERFLIB" --token 2>/dev/null)
+  [ "$ac2_tok" = absent ] || {
+    bad "perf-capability: the fork-free READ path followed a SYMLINK inside the sandbox to the real /proc and reported a FABRICATED token '$ac2_tok' for seam '$ac2_seam' (expected 'absent')"
+    ac2_fail=1; }
+  env CQLITE_PERF_PROC_DIR="$ac2_seam" \
+    bash -c '. "$1"; perf_capability_proc_dir_into d' _ "$PERFLIB" >/dev/null 2>&1 && {
+    bad "perf-capability: proc_dir_into ACCEPTED a symlinked seam '$ac2_seam'"; ac2_fail=1; }
+done
+[ "$ac2_fail" -ne 0 ] || ok "perf-capability: the fork-free READ path rejects a SYMLINKED path component even when the SPELLING is strictly inside the sandbox — a symlink to the real /proc/sys/kernel reads nothing (token 'absent'), never a fabricated capability (#3261 AC2)"
+# ...and the rejection is not vacuous: a REAL directory of the same shape still reads.
+ac2_real="$tmp/ac2-real-proc"; mkdir -p "$ac2_real"
+printf '%s\n' -1 >"$ac2_real/perf_event_paranoid"; printf '%s\n' 0 >"$ac2_real/kptr_restrict"
+if [ "$(env CQLITE_PERF_PROC_DIR="$ac2_real" bash "$PERFLIB" --token 2>/dev/null)" = ok ]; then
+  ok "perf-capability: a REAL (symlink-free) stand-in directory inside the sandbox still reads — the AC2 rejection is per-component, not a blanket refusal"
+else
+  bad "perf-capability: the symlink rejection made the fork-free read path vacuous (a real stand-in dir no longer reads)"
+fi
+
+# 1g-iii. AC3 (Low) — a STRICTLY CONTAINED file was wrongly REFUSED. The file variant judged
+# (full rationale: fleet-runbook.md, perf seam containment, 1g-iii-ac3-low-a-strictly-contained-file-was-w)
+ac3_ok() { env CQLITE_PERF_TEST_SANDBOX="$1" \
+  bash -c '. "$1"; perf_capability_sandbox_file_ok_resolved "$2"' _ "$PERFLIB" "$2"; }
+: >"$sbx/sysctl.conf"
+ac3_fail=0
+ac3_ok "$sbx" "$sbx/sysctl.conf" || { bad "perf-capability: '<sandbox-root>/sysctl.conf' was REFUSED though strictly contained"; ac3_fail=1; }
+ac3_ok "$sbx" "$sbx/inside/sysctl.conf" || { bad "perf-capability: a sysctl.conf one level deeper inside the sandbox was refused"; ac3_fail=1; }
+# ...while every genuine escape is still refused: outside the root, the root itself, a `..`
+# spelling, and — the AC1 lesson applied here — a SYMLINKED final component, whose CONTENTS
+# the competing-file scan would otherwise read out of the host's real configuration.
+rm -f "$sbx/linked-sysctl.conf"; ln -s /etc/sysctl.conf "$sbx/linked-sysctl.conf"
+for ac3_bad in "$tmp/outside-the-root/sysctl.conf" "$sbx" "$sbx/../sysctl.conf" \
+               "$sbx/linked-sysctl.conf" "relative/sysctl.conf" ''; do
+  ac3_ok "$sbx" "$ac3_bad" && { bad "perf-capability: sandbox_file_ok_resolved ACCEPTED '$ac3_bad'"; ac3_fail=1; }
+done
+[ "$ac3_fail" -ne 0 ] || ok "perf-capability: the FILE variant accepts a strictly-contained '<root>/sysctl.conf' (canonical parent + basename) while still refusing one outside the root, the root itself, a '..' spelling, a relative path and a SYMLINKED final component (#3261 AC3)"
+# ...and end-to-end through the seam that consumes it: a contained sysctl.conf stand-in is a
+# legitimate CQLITE_PERF_SYSCTL_EXTRA_DIRS entry and must appear on the search path.
+: >"$tmp/sysctl.conf"
+ac3_path=$(env CQLITE_PERF_SYSCTL_DIR="$seamed_d" CQLITE_PERF_SYSCTL_EXTRA_DIRS="$tmp/sysctl.conf" \
+  bash -c '. "$1"; perf_capability_sysctl_search_path' _ "$PERFLIB" 2>/dev/null); ac3_path_rc=$?
+if [ "$ac3_path_rc" -eq 0 ] && printf '%s\n' "$ac3_path" | grep -qx -- "$tmp/sysctl.conf"; then
+  ok "perf-capability: a sysctl.conf stand-in directly inside the sandbox root is accepted as a CQLITE_PERF_SYSCTL_EXTRA_DIRS entry and reaches the search path (#3261 AC3, end to end)"
+else
+  bad "perf-capability: a contained sysctl.conf stand-in was dropped from the test-mode search path (rc=$ac3_path_rc, path='$ac3_path')"
+fi
+
+# 1g-iv. AC4 (High) — the guard authorizes EXECUTABLES, and never resolved them. Two escapes,
+# (rationale: fleet-runbook.md, perf seam containment, 1g-iv-ac4-high-the-guard-authorizes-executab)
+ac4_sys=''
+if ac4_sys=$(mktemp -d "${TMPDIR:-/tmp}/perf-cap-outside.XXXXXX") && [ -d "$ac4_sys" ]; then
+  trap 'rm -rf "$tmp" "$ac4_sys"' EXIT
+else
+  ac4_sys=''
+fi
+if [ -z "$ac4_sys" ]; then
+  bad "perf-capability: could not create the out-of-sandbox dir the AC4 cases need"
+else
+  for t in sudo sysctl; do
+    printf '#!/usr/bin/env bash\nexit 0\n' >"$ac4_sys/$t"; chmod +x "$ac4_sys/$t"
+  done
+  ac4_guard() { # ac4_guard <PATH-prefix> <priv-dir> -> rc + stderr; sandbox root is $sbx
+    env PATH="$1:$PATH" CQLITE_PERF_TEST_MODE=1 CQLITE_PERF_TEST_SANDBOX="$sbx" \
+      CQLITE_PERF_TEST_PRIV_DIR="$2" CQLITE_PERF_PROC_DIR="$sbx/inside-proc" \
+      CQLITE_PERF_SYSCTL_DIR="$sbx/inside" \
+      bash -c '. "$1"; perf_capability_env_guard' _ "$PERFLIB" 2>&1
+  }
+  ac4_fail=0
+  # (a) the `/usr` shape: absolute, CONTAINS the tools, not in the sandbox.
+  ac4_out=$(ac4_guard "$ac4_sys" "$ac4_sys") && ac4_fail=1
+  printf '%s' "$ac4_out" | grep -q 'sandbox' || ac4_fail=1
+  [ "$ac4_fail" -eq 0 ] || bad "perf-capability: an absolute shim dir OUTSIDE the sandbox root (the '/usr' shape) was accepted, or refused without naming the sandbox: '$ac4_out'"
+  # (b) the SYMLINK shape: a declared shim dir genuinely inside the sandbox, whose `sudo`
+  #     RESOLVES to the tool outside it.
+  ac4_link="$sbx/ac4-shims"; mkdir -p "$ac4_link"
+  printf '#!/usr/bin/env bash\nexit 0\n' >"$ac4_link/sysctl"; chmod +x "$ac4_link/sysctl"
+  rm -f "$ac4_link/sudo"; ln -s "$ac4_sys/sudo" "$ac4_link/sudo"
+  ac4_out2=$(ac4_guard "$ac4_link" "$ac4_link") && {
+    bad "perf-capability: a SYMLINK to a real privileged tool inside the declared shim dir was accepted — test mode could run the host's own sudo/sysctl"; ac4_fail=1; }
+  # (c) the SWEEP: with NO sudo/sysctl reachable on PATH at all the per-tool loop resolves
+  #     nothing, so a symlinked `sysctl` PARKED in the declared shim dir must still be
+  #     refused — otherwise it is one PATH-order change away from being executed.
+  ac4_nopath="$sbx/ac4-nopath"; mkdir -p "$ac4_nopath"
+  for t in bash cat printf env grep; do
+    s=$(command -v "$t" 2>/dev/null) && ln -sf "$s" "$ac4_nopath/$t"
+  done
+  ac4_park="$sbx/ac4-parked"; mkdir -p "$ac4_park"
+  rm -f "$ac4_park/sysctl"; ln -s "$ac4_sys/sysctl" "$ac4_park/sysctl"
+  ac4_out3=$(env PATH="$ac4_nopath" CQLITE_PERF_TEST_MODE=1 CQLITE_PERF_TEST_SANDBOX="$sbx" \
+    CQLITE_PERF_TEST_PRIV_DIR="$ac4_park" CQLITE_PERF_PROC_DIR="$sbx/inside-proc" \
+    CQLITE_PERF_SYSCTL_DIR="$sbx/inside" \
+    bash -c '. "$1"; perf_capability_env_guard' _ "$PERFLIB" 2>&1) && {
+    bad "perf-capability: a privileged tool PARKED as a symlink in the declared shim dir was accepted because PATH did not happen to reach it"; ac4_fail=1; }
+  # ...and NOT vacuous: a shim dir inside the sandbox holding REAL FILES is still accepted.
+  ac4_good="$sbx/ac4-good-shims"; mkdir -p "$ac4_good"
+  for t in sudo sysctl; do
+    printf '#!/usr/bin/env bash\nexit 0\n' >"$ac4_good/$t"; chmod +x "$ac4_good/$t"
+  done
+  ac4_guard "$ac4_good" "$ac4_good" >/dev/null 2>&1 || {
+    bad "perf-capability: a legitimate shim dir of REAL FILES inside the sandbox was refused — the AC4 fix is vacuous"; ac4_fail=1; }
+  [ "$ac4_fail" -ne 0 ] || ok "perf-capability: every privileged executable the guard authorizes is validated by DESTINATION — a shim dir outside the sandbox ('/usr' shape), a symlink to a real tool inside a declared shim dir, and one merely PARKED there out of PATH reach are all refused, while a shim dir of real files inside the sandbox still works (#3261 AC4)"
+fi
+
+# 1c-iv. THE SEAM LIST IS COMPLETE, BY CENSUS (roborev round 32, Medium x2).
+# (full rationale: fleet-runbook.md, perf seam containment, 1c-iv-the-seam-list-is-complete-by-census-robo)
+seam_census_fail=0
+seam_set_body=$(awk '/^perf_capability_seam_set\(\)/{f=1} f{print} f&&/^\}/{exit}' "$PERFLIB")
+[ -n "$seam_set_body" ] \
+  || { bad "perf-capability: perf_capability_seam_set was not found — renamed without updating this census audit?"; seam_census_fail=1; }
+seam_census=$(grep -oE 'CQLITE_PERF_[A-Z_]+' "$PERFLIB" | sort -u | grep -v '^CQLITE_PERF_TEST_MODE$')
+[ -n "$seam_census" ] \
+  || { bad "perf-capability: the CQLITE_PERF_* census came back EMPTY, so this audit would pass vacuously"; seam_census_fail=1; }
+seam_census_n=0
+for seam_name in $seam_census; do
+  seam_census_n=$((seam_census_n+1))
+  printf '%s\n' "$seam_set_body" | grep -q -- "$seam_name" \
+    || { bad "perf-capability: $seam_name is read by the library but NOT named in perf_capability_seam_set, so exporting it without CQLITE_PERF_TEST_MODE=1 passes the marker-less refusal"; seam_census_fail=1; }
+done
+[ "$seam_census_n" -ge 5 ] \
+  || { bad "perf-capability: the seam census found only $seam_census_n name(s); the file is known to carry at least 5 non-marker seams, so the extraction is broken"; seam_census_fail=1; }
+[ "$seam_census_fail" -ne 0 ] || ok "perf-capability: every one of the $seam_census_n non-marker CQLITE_PERF_* seams the library reads is named by perf_capability_seam_set, so a new seam cannot escape the marker-less refusal (#3261 roborev-32)"
+
+# ...and the refusal is asserted BEHAVIOURALLY, per seam, not just structurally: a structural
+# audit can be satisfied by a name appearing in a comment.
+# (full rationale: fleet-runbook.md, perf seam containment, per-seam-markerless-refusal)
+seam_each_fail=0
+# BASELINE FIRST: with every seam unset the guard must SUCCEED, or the refusals below prove nothing.
+seam_base_rc=0
+env -u CQLITE_PERF_TEST_MODE -u CQLITE_PERF_PROC_DIR -u CQLITE_PERF_SYSCTL_DIR \
+    -u CQLITE_PERF_TEST_SANDBOX -u CQLITE_PERF_SYSCTL_EXTRA_DIRS -u CQLITE_PERF_TEST_PRIV_DIR \
+  bash -c '. "$1"; perf_capability_env_guard' _ "$PERFLIB" >/dev/null 2>&1 || seam_base_rc=$?
+[ "$seam_base_rc" -eq 0 ] \
+  || { bad "perf-capability: the env guard REFUSED with no seam set at all (rc=$seam_base_rc) — the per-seam refusals below would prove nothing"; seam_each_fail=1; }
+# EVERY seam is unset per iteration, not just the marker (roborev round 33, Low, and it was RIGHT).
+# (full rationale: fleet-runbook.md, perf seam containment, every-seam-is-unset-per-iteration-not-just-the)
+for seam_name in $seam_census; do
+  seam_out=$(env -u CQLITE_PERF_TEST_MODE -u CQLITE_PERF_PROC_DIR -u CQLITE_PERF_SYSCTL_DIR \
+    -u CQLITE_PERF_TEST_SANDBOX -u CQLITE_PERF_SYSCTL_EXTRA_DIRS -u CQLITE_PERF_TEST_PRIV_DIR \
+    "$seam_name=$tmp/markerless-seam" \
+    bash -c '. "$1"; perf_capability_env_guard' _ "$PERFLIB" 2>&1); seam_rc=$?
+  [ "$seam_rc" -ne 0 ] \
+    || { bad "perf-capability: $seam_name set WITHOUT the marker was ACCEPTED by the env guard (rc=0, out='$seam_out') — a test-only seam is live on the production path"; seam_each_fail=1; }
+  printf '%s' "$seam_out" | grep -q 'REFUSING' \
+    || { bad "perf-capability: $seam_name without the marker failed (rc=$seam_rc) but printed no REFUSING diagnostic: '$seam_out'"; seam_each_fail=1; }
+done
+[ "$seam_each_fail" -ne 0 ] || ok "perf-capability: EACH of the $seam_census_n non-marker seams, set alone without CQLITE_PERF_TEST_MODE=1, is refused loudly by the env guard — while an entirely seam-free environment still succeeds (#3261 roborev-32)"
+
+# 1c-v. THE TWO CONTAINMENT PATHS AGREE ABOUT A SYMLINKED SANDBOX ROOT (roborev round 32, Medium).
+# (full rationale: fleet-runbook.md, perf seam containment, 1c-v-the-two-containment-paths-agree-about-a-s)
+sr_fail=0
+sr_real=$(mktemp -d "$tmp/sr-real.XXXXXX"); : >"$sr_real/.cqlite-perf-sandbox"
+mkdir -p "$sr_real/child"; chmod 0755 "$sr_real" "$sr_real/child"
+sr_link="$tmp/sr-link-$$"; ln -s "$sr_real" "$sr_link"
+sr_adir="$tmp/sr-anc-$$"; mkdir -p "$sr_adir/real"; chmod 0755 "$sr_adir" "$sr_adir/real"
+sr_alink="$tmp/sr-anclink-$$"; ln -s "$sr_adir" "$sr_alink"
+: >"$sr_adir/real/.cqlite-perf-sandbox"; mkdir -p "$sr_adir/real/child"; chmod 0755 "$sr_adir/real/child"
+sr_probe() {  # <fn> <root> <path> -> rc of that containment entry point
+  env CQLITE_PERF_TEST_MODE=1 CQLITE_PERF_TEST_SANDBOX="$2" \
+    bash -c '. "$1"; "$2" "$3"' _ "$PERFLIB" "$1" "$3" >/dev/null 2>&1
+}
+# NEGATIVE CONTROL: the canonical spelling of the same directory must be ACCEPTED by BOTH paths.
+for sr_fn in perf_capability_sandbox_ok perf_capability_sandbox_ok_resolved; do
+  sr_probe "$sr_fn" "$sr_real" "$sr_real/child" \
+    || { bad "perf-capability: $sr_fn refused the CANONICAL sandbox root, so the symlink cases below prove nothing"; sr_fail=1; }
+done
+# (a) the root ITSELF is a symlink to a stamped real directory; (b) an ANCESTOR of the root is a
+# symlink while the root's own final component is an ordinary name. Both must be refused by BOTH.
+for sr_case in "root-is-symlink:$sr_link:$sr_link/child" "symlinked-ancestor:$sr_alink/real:$sr_alink/real/child"; do
+  sr_label="${sr_case%%:*}"; sr_rest="${sr_case#*:}"
+  sr_root="${sr_rest%%:*}"; sr_path="${sr_rest#*:}"
+  for sr_fn in perf_capability_sandbox_ok perf_capability_sandbox_ok_resolved; do
+    ! sr_probe "$sr_fn" "$sr_root" "$sr_path" \
+      || { bad "perf-capability: $sr_fn ACCEPTED the $sr_label sandbox root ($sr_root) — the resolving and fork-free paths disagree about the same sandbox"; sr_fail=1; }
+  done
+done
+rm -f -- "$sr_link" "$sr_alink"
+[ "$sr_fail" -ne 0 ] || ok "perf-capability: a sandbox root that IS a symlink, and one reached through a symlinked ANCESTOR, are refused IDENTICALLY by the fork-free and the resolving containment paths, while the canonical spelling of the same directory is accepted by both (#3261 roborev-32)"
+
+# 1c-vi. A TRAILING-SLASH PROC_DIR READS, rather than reporting the host "absent" (roborev round 33).
+# Callers join with "/$name", so "<dir>/" became "<dir>//perf_event_paranoid": contained by the
+# directory gate, refused by the entry gate, and surfaced as the capability verdict absent -- a
+# spelling turned into a definite negative claim about the host, in the one function the gate's perf=
+# token comes from. The control asserts the SAME sandbox without the slash gives the same answer.
+ps_fail=0
+ps_root=$(mktemp -d "$tmp/ps.XXXXXX"); : >"$ps_root/.cqlite-perf-sandbox"
+ps_proc="$ps_root/proc"; mkdir -p "$ps_proc"; chmod 0755 "$ps_root" "$ps_proc"
+printf '0\n' >"$ps_proc/perf_event_paranoid"; printf '0\n' >"$ps_proc/kptr_restrict"
+ps_plain=$(env CQLITE_PERF_TEST_MODE=1 CQLITE_PERF_TEST_SANDBOX="$ps_root" \
+  CQLITE_PERF_PROC_DIR="$ps_proc" bash "$PERFLIB" --token 2>/dev/null)
+[ "$ps_plain" = ok ] \
+  || { bad "perf-capability: the unslashed PROC_DIR control did not yield token 'ok' (got '$ps_plain'), so the trailing-slash case below proves nothing"; ps_fail=1; }
+for ps_spell in "$ps_proc/" "$ps_proc//"; do
+  ps_tok=$(env CQLITE_PERF_TEST_MODE=1 CQLITE_PERF_TEST_SANDBOX="$ps_root" \
+    CQLITE_PERF_PROC_DIR="$ps_spell" bash "$PERFLIB" --token 2>/dev/null)
+  [ "$ps_tok" = "$ps_plain" ] \
+    || { bad "perf-capability: PROC_DIR spelled '$ps_spell' yielded token '$ps_tok' but the same directory unslashed yielded '$ps_plain' — a trailing slash changed a capability verdict"; ps_fail=1; }
+done
+[ "$ps_fail" -ne 0 ] || ok "perf-capability: a contained PROC_DIR spelled with one or two trailing slashes yields the SAME capability token as its unslashed spelling, so a spelling can no longer become a definite 'absent' claim about the host (#3261 roborev-33)"
+
+# 1c-vii. THE PROBE DELETES NOTHING IT DID NOT CREATE, and a WORKING mv that FAILS is not an
+# (full rationale: fleet-runbook.md, perf seam containment, 1c-vii-the-probe-deletes-nothing-it-did-not-cr)
+if perf_install_supported; then
+  pb_fail=0
+  # (a) A PRE-EXISTING probe entry must be REFUSED, and must SURVIVE. The name embeds the PID of the
+  # privileged shell, which the harness cannot predict, so the shim mv creates the collision itself:
+  # it plants the sibling name on its first call, which is the probe rename.
+  pb_root=$(mktemp -d "$tmp/pb.XXXXXX"); : >"$pb_root/.cqlite-perf-sandbox"
+  pb_d="$pb_root/sysctl.d"; mkdir -p "$pb_d"; chmod 0755 "$pb_root" "$pb_d"
+  pb_victim="$pb_d/.perfcap-probe.victim"; printf 'PRECIOUS\n' >"$pb_victim"
+  # A self-contained shim dir, the same shape the UNSUPPORTED cases use: it is both PATH and the
+  # declared TEST_PRIV_DIR, so the guard's privileged-tool containment is satisfied by construction.
+  pb_bin=$(mktemp -d "$tmp/pbbin.XXXXXX")
+  for pb_t in bash sh cat printf tee rm chmod env grep mktemp id ls stat; do
+    pb_p=$(command -v "$pb_t" 2>/dev/null) && ln -sf "$pb_p" "$pb_bin/$pb_t"
+  done
+  # An mv that ADVERTISES -T and then fails the rename: the Low half's subject.
+  printf '%s\n' '#!/bin/sh' 'case "$1" in --help) printf -- "--no-target-directory\n"; exit 0 ;; esac' 'exit 1' \
+    >"$pb_bin/mv"; chmod +x "$pb_bin/mv"
+  pb_out=$(env PATH="$pb_bin" CQLITE_PERF_TEST_MODE=1 CQLITE_PERF_TEST_SANDBOX="$pb_root" \
+    CQLITE_PERF_SYSCTL_DIR="$pb_d" CQLITE_PERF_PROC_DIR="$pb_root" \
+    CQLITE_PERF_TEST_PRIV_DIR="$pb_bin" \
+    bash -c '. "$1"; perf_capability_dropin_install' _ "$PERFLIB" 2>&1); pb_rc=$?
+  [ "$pb_rc" -eq 1 ] \
+    || { bad "perf-capability: an mv that ADVERTISES --no-target-directory but fails the rename gave rc=$pb_rc, not rc 1 — a working-but-failing mv is being reported as an unsupported host, which suppresses the retry remedy (out='$pb_out')"; pb_fail=1; }
+  printf '%s' "$pb_out" | grep -q 'NOT an unsupported host' \
+    || { bad "perf-capability: the rename-probe failure did not say it is NOT an unsupported host: '$pb_out'"; pb_fail=1; }
+  [ "$(cat "$pb_victim" 2>/dev/null)" = PRECIOUS ] \
+    || { bad "perf-capability: a pre-existing .perfcap-probe.* entry was DELETED or truncated by the probe"; pb_fail=1; }
+  # (b) STRUCTURAL, because the PID collision itself cannot be staged from outside: the probe must
+  # carry no delete before its absence proof. The rm that remains must sit AFTER the proof.
+  pb_body=$(awk '/^perf_capability_dropin_install\(\)/{f=1} f{print} f&&/^\}/{exit}' "$PERFLIB")
+  pb_before=$(printf '%s\n' "$pb_body" | awk '/\[ -e "\$__x1" \]/{exit} /rm -f -- "\$__x1"/{c++} END{print c+0}')
+  [ "$pb_before" -eq 0 ] \
+    || { bad "perf-capability: the probe deletes \$__x1/\$__x2 ($pb_before time(s)) BEFORE proving they are absent — after PID reuse that destroys an unrelated file under privilege"; pb_fail=1; }
+  [ "$pb_fail" -ne 0 ] || ok "perf-capability: the install probe deletes no entry it did not create (no rm before the absence proof, and a pre-existing probe-named file survives untouched), and an mv that advertises -T but fails the rename is rc 1 with a retry-worthy diagnostic rather than rc 2 UNSUPPORTED (#3261 roborev-34)"
+else
+  skip "perf-capability: install-probe cases (no rm before the absence proof; a working-but-failing mv is rc 1, not UNSUPPORTED)" "no GNU stat -c / mv --no-target-directory on this host"
+fi
+
+# 1c-viii. THE RESOLVING VALIDATORS REQUIRE AN ABSOLUTE, CANONICAL SPELLING (roborev round 35, Medium).
+# They judged only the canonicalized result while consumers keep the ORIGINAL argument, so a RELATIVE
+# candidate was authorized against THIS shell's cwd and re-resolved against a different one later --
+# the privileged installer runs its own shell. What remains after this fix (a verdict returned while
+# the resolved path is discarded, so the name is resolved twice) is #3323 entry 5, the closed family.
+rs_fail=0
+rs_root=$(mktemp -d "$tmp/rs.XXXXXX"); : >"$rs_root/.cqlite-perf-sandbox"
+mkdir -p "$rs_root/inside"; chmod 0755 "$rs_root" "$rs_root/inside"
+: >"$rs_root/inside/file.conf"
+rs_probe() {  # <fn> <candidate> [cwd] -> rc
+  ( [ -n "${3:-}" ] && cd -- "$3" || true
+    env CQLITE_PERF_TEST_MODE=1 CQLITE_PERF_TEST_SANDBOX="$rs_root" \
+      bash -c '. "$1"; "$2" "$3"' _ "$PERFLIB" "$1" "$2" >/dev/null 2>&1 )
+}
+# CONTROL: the absolute canonical spellings must be ACCEPTED, or the refusals below prove nothing.
+rs_probe perf_capability_sandbox_ok_resolved "$rs_root/inside" \
+  || { bad "perf-capability: sandbox_ok_resolved refused the absolute canonical directory, so the cases below prove nothing"; rs_fail=1; }
+rs_probe perf_capability_sandbox_file_ok_resolved "$rs_root/inside/file.conf" \
+  || { bad "perf-capability: sandbox_file_ok_resolved refused the absolute canonical file, so the cases below prove nothing"; rs_fail=1; }
+# (a) a RELATIVE candidate that resolves INSIDE the sandbox from the current cwd must still be refused
+! rs_probe perf_capability_sandbox_ok_resolved "inside" "$rs_root" \
+  || { bad "perf-capability: sandbox_ok_resolved ACCEPTED the relative spelling 'inside' because it resolved inside the sandbox from this cwd — the same spelling means a different directory from another cwd"; rs_fail=1; }
+! rs_probe perf_capability_sandbox_file_ok_resolved "inside/file.conf" "$rs_root" \
+  || { bad "perf-capability: sandbox_file_ok_resolved ACCEPTED the relative spelling 'inside/file.conf'"; rs_fail=1; }
+# (b) and a NON-CANONICAL absolute spelling, which resolves inside but is not spelled as a destination
+! rs_probe perf_capability_sandbox_ok_resolved "$rs_root/./inside" \
+  || { bad "perf-capability: sandbox_ok_resolved ACCEPTED a '/./' spelling"; rs_fail=1; }
+! rs_probe perf_capability_sandbox_ok_resolved "$rs_root/inside/../inside" \
+  || { bad "perf-capability: sandbox_ok_resolved ACCEPTED a '/../' spelling"; rs_fail=1; }
+! rs_probe perf_capability_sandbox_file_ok_resolved "$rs_root/./inside/file.conf" \
+  || { bad "perf-capability: sandbox_file_ok_resolved ACCEPTED a '/./' spelling"; rs_fail=1; }
+[ "$rs_fail" -ne 0 ] || ok "perf-capability: both RESOLVING validators refuse a relative candidate (even one resolving inside the sandbox from the current cwd) and a non-canonical './' or '../' absolute spelling, while accepting the absolute canonical spelling of the same directory and file (#3261 roborev-35)"
 
 # Nothing in this suite may have touched the REAL /etc/sysctl.d.
 perf_test_assert_host_clean
