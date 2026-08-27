@@ -338,38 +338,241 @@ fi
 #    attributes (`#[cfg(...)]`, `#[doc(hidden)]`) — which rustdoc cannot show us for
 #    hidden or configured-out items — are recorded somewhere, and so the consistency
 #    assert below has something to compare against.
+#
+#    THIS IS A LEXICAL SCAN OF ONE FILE WITH A PINNED EDGE-CASE SUITE — NOT A RUST
+#    PARSER, and it does not pretend to be one. A hand-written parser is a second
+#    implementation of the language, and a second implementation's correctness is
+#    only knowable by differential testing against the original (CLAUDE.md, #3283).
+#    What makes this safe is not soundness, it is (a) the fail-safe split below and
+#    (b) `scripts/tests/test_pub_surface_guard.sh`, which pins every shape this scan
+#    is known to handle — plain, attribute-on-its-own-line, SAME-LINE
+#    `#[attr] pub mod x;`, MULTI-LINE attributes, a trailing `// comment`, a
+#    `pub mod` inside a `/* */` block, and `#[doc(hidden)]`.
+#
+#    THE FAIL-SAFE SPLIT (this is the important part). Two different questions are
+#    answered by two independent derivations:
+#
+#      S — "which modules are declared at the crate root?" answered by the SIMPLEST
+#          rule that can be written, with no attribute parsing at all: any
+#          comment-stripped, column-zero line containing `pub mod NAME;`.
+#      P — the structured scan, which additionally attaches each declaration's
+#          attributes (joining multi-line attributes by bracket balance and
+#          splitting a same-line `#[attr] item`).
+#
+#    If S and P disagree about the SET of crate-root modules, the scan cannot be
+#    trusted and the guard FAILs — it never silently proceeds on the smaller set.
+#    Under-collecting here is precisely what produced the original false PASS: an
+#    `#[cfg(...)] pub mod x;` written on ONE line was dropped entirely, so that
+#    module escaped the consistency assert AND vanished from the snapshot.
+#
+#    Where P cannot determine an item's attributes it yields NONE, which lands the
+#    module in the ASSERTED set. A parser miss therefore reds loudly instead of
+#    waving a module through.
 # ---------------------------------------------------------------------------
 [ -f "$LIB_RS" ] || fail "$LIB_RS_REL not found — cannot scan the crate-root declarations."
 
-DERIVED_DECLS="$WORK_DIR/decls.txt"
-awk '
-  function flush_attrs() { attrs = ""; }
-  # Accumulate attributes; they apply to the next item only.
-  /^#\[/ { attrs = attrs $0 " "; next }
-  # `pub mod NAME;`
-  /^pub mod [A-Za-z_][A-Za-z0-9_]*;/ {
-    print line_prefix() attrs $0;
-    flush_attrs(); next
-  }
-  # `pub use ...;` possibly spanning multiple lines.
-  /^pub use / {
-    stmt = $0; ln = NR;
-    while (stmt !~ /;[[:space:]]*$/ && (getline nextline) > 0) {
-      gsub(/^[[:space:]]+|[[:space:]]+$/, "", nextline);
-      stmt = stmt " " nextline;
+CRATEROOT_AWK="$WORK_DIR/crateroot.awk"
+cat >"$CRATEROOT_AWK" <<'CRATEROOT_AWK_EOF'
+# Lexical scan of a crate root. NOT a Rust parser — see the guard's comment block.
+{ L[NR] = $0 }
+function ltrim(x) { sub(/^[[:space:]]+/, "", x); return x }
+function rtrim(x) { sub(/[[:space:]]+$/, "", x); return x }
+function squash(x) { gsub(/[[:space:]]+/, " ", x); return ltrim(rtrim(x)) }
+
+# Blank out comments, preserving line structure and column positions, and record
+# for each line whether it STARTS in ordinary code (a line that begins inside a
+# string or a block comment can never open a crate-root declaration).
+function normalize(   i, s, out, j, c, c2, st, depth, hashes, k, cnt) {
+  st = "code"; depth = 0; hashes = 0
+  for (i = 1; i <= n; i++) {
+    INCODE[i] = (st == "code") ? 1 : 0
+    s = L[i]; out = ""; j = 1
+    while (j <= length(s)) {
+      c = substr(s, j, 1); c2 = substr(s, j, 2)
+      if (st == "code") {
+        if (c2 == "//") { out = out "  "; j += 2; st = "line"; continue }
+        if (c2 == "/*") { out = out "  "; j += 2; depth = 1; st = "block"; continue }
+        if (c == "\"") { out = out c; j++; st = "str"; continue }
+        if (c == "r" && (substr(s, j+1, 1) == "\"" || substr(s, j+1, 1) == "#")) {
+          k = j + 1; hashes = 0
+          while (substr(s, k, 1) == "#") { hashes++; k++ }
+          if (substr(s, k, 1) == "\"") { out = out substr(s, j, k - j + 1); j = k + 1; st = "raw"; continue }
+        }
+        out = out c; j++
+      } else if (st == "line") {
+        out = out " "; j++
+      } else if (st == "block") {
+        if (c2 == "/*") { depth++; out = out "  "; j += 2; continue }
+        if (c2 == "*/") { depth--; out = out "  "; j += 2; if (depth == 0) st = "code"; continue }
+        out = out " "; j++
+      } else if (st == "str") {
+        if (c == "\\") { out = out "  "; j += 2; continue }
+        out = out c; j++
+        if (c == "\"") st = "code"
+      } else if (st == "raw") {
+        if (c == "\"") {
+          k = j + 1; cnt = 0
+          while (substr(s, k, 1) == "#" && cnt < hashes) { cnt++; k++ }
+          if (cnt == hashes) { out = out substr(s, j, k - j); j = k; st = "code"; continue }
+        }
+        out = out c; j++
+      }
+      # `st == "line"` ends with the line; block/str/raw carry over deliberately.
     }
-    gsub(/[[:space:]]+/, " ", stmt);
-    printf "%d\t%s%s\n", ln, attrs, stmt;
-    flush_attrs(); next
+    if (st == "line") st = "code"
+    N[i] = rtrim(out)
   }
-  # Anything else terminates a pending attribute run (it belonged to some other
-  # item — a static, a use, an impl — which this section does not record).
-  { flush_attrs() }
-  function line_prefix() { return NR "\t" }
-' "$LIB_RS" >"$DERIVED_DECLS"
+  if (st != "code") print "E\tcrate root ends inside a " st " (unterminated comment or string literal)"
+}
+
+# Consume one `#[...]` / `#![...]` attribute from the front of BUF, appending
+# following lines until its brackets balance. Returns "" if it never balances.
+function take_attr(   d, p, ch, res, instr) {
+  d = 0; p = 1; instr = 0
+  while (1) {
+    if (p > length(BUF)) {
+      CUR++
+      if (CUR > n) return ""
+      BUF = BUF " " ltrim(N[CUR])
+      continue
+    }
+    ch = substr(BUF, p, 1)
+    if (instr) {
+      if (ch == "\\") p++
+      else if (ch == "\"") instr = 0
+    } else if (ch == "\"") instr = 1
+    else if (ch == "[") d++
+    else if (ch == "]") {
+      d--
+      if (d == 0) { res = substr(BUF, 1, p); BUF = ltrim(substr(BUF, p + 1)); return res }
+    }
+    p++
+  }
+}
+
+# Consume through the terminating `;` of a statement, appending lines as needed.
+function take_stmt(   p, ch, res, instr) {
+  p = 1; instr = 0
+  while (1) {
+    if (p > length(BUF)) {
+      CUR++
+      if (CUR > n) return ""
+      BUF = BUF " " ltrim(N[CUR])
+      continue
+    }
+    ch = substr(BUF, p, 1)
+    if (instr) {
+      if (ch == "\\") p++
+      else if (ch == "\"") instr = 0
+    } else if (ch == "\"") instr = 1
+    else if (ch == ";") { res = substr(BUF, 1, p); BUF = ltrim(substr(BUF, p + 1)); return res }
+    p++
+  }
+}
+
+END {
+  n = NR
+  normalize()
+
+  # --- Derivation S: "which modules are declared at the crate root?" answered by
+  # the simplest rule that can be written, independent of all attribute parsing.
+  for (i = 1; i <= n; i++) {
+    if (!INCODE[i]) continue
+    t = N[i]
+    if (t ~ /^[[:space:]]/ || t == "") continue
+    # EVERY occurrence on the line, not just the first: two declarations sharing a
+    # line is exotic, but if S found only the first it would AGREE with a structured
+    # scan that also stops at the first, and the pair would silently under-collect.
+    # Finding all of them turns that shape into a loud cross-check FAIL instead.
+    rest = t
+    while (match(rest, /pub mod [A-Za-z_][A-Za-z0-9_]*[[:space:]]*;/)) {
+      nm = substr(rest, RSTART + 8, RLENGTH - 8)
+      sub(/[[:space:]]*;$/, "", nm)
+      print "S\t" nm
+      rest = substr(rest, RSTART + RLENGTH)
+    }
+  }
+
+  # --- Derivation P: the structured scan (attributes joined, same-line splits).
+  CUR = 1
+  while (CUR <= n) {
+    if (!INCODE[CUR]) { CUR++; continue }
+    line = N[CUR]
+    if (line == "" || line ~ /^[[:space:]]/) { CUR++; continue }
+    startline = CUR
+    BUF = line
+    attrs = ""
+    # Consume the run of OUTER attributes preceding an item. They may each span
+    # several lines, they may sit on their own lines, and the item may share the
+    # last attribute's line — all three shapes converge here.
+    while (1) {
+      if (BUF == "") {
+        if (CUR >= n) break
+        if (!INCODE[CUR + 1]) break
+        if (N[CUR + 1] == "" || N[CUR + 1] ~ /^[[:space:]]/) break
+        CUR++
+        BUF = N[CUR]
+      }
+      if (BUF !~ /^#!?\[/) break
+      a = take_attr()
+      if (a == "") { print "E\tunterminated attribute starting at line " startline; BUF = ""; break }
+      # An INNER attribute (`#![...]`) belongs to the enclosing module, not to a
+      # following item; it must not accumulate onto one.
+      if (a ~ /^#!\[/) attrs = ""
+      else attrs = attrs squash(a) " "
+    }
+    if (BUF ~ /^pub mod [A-Za-z_][A-Za-z0-9_]*[[:space:]]*;/) {
+      st2 = take_stmt()
+      nm = st2
+      sub(/^pub mod[[:space:]]+/, "", nm)
+      sub(/[[:space:]]*;$/, "", nm)
+      printf "M\t%d\t%s\t%s\n", CUR, nm, squash(attrs)
+      printf "D\t%d\t%s%s\n", startline, attrs, squash(st2)
+    } else if (BUF ~ /^pub use[[:space:]]/) {
+      st2 = take_stmt()
+      if (st2 == "") {
+        print "E\tunterminated `pub use` starting at line " startline
+      } else {
+        printf "D\t%d\t%s%s\n", startline, attrs, squash(st2)
+      }
+    }
+    CUR++
+  }
+}
+CRATEROOT_AWK_EOF
+
+SCAN_RAW="$WORK_DIR/crateroot.txt"
+awk -f "$CRATEROOT_AWK" "$LIB_RS" >"$SCAN_RAW"
+
+# The record tag is separated by a LITERAL TAB in the patterns below (not a `\t`
+# escape, which POSIX grep reads as a plain `t` — a selector that silently matched
+# nothing would turn each of these fail-closed checks into a vacuous pass).
+
+if grep -q '^E	' "$SCAN_RAW"; then
+  echo "" >&2
+  grep '^E	' "$SCAN_RAW" | cut -f2- >&2
+  fail "the crate-root lexical scan of $LIB_RS_REL hit input it could not read (see above). Refusing to report a verdict over a crate root it could not fully parse."
+fi
+
+DERIVED_DECLS="$WORK_DIR/decls.txt"
+DERIVED_MODS="$WORK_DIR/mods.txt"
+grep '^D	' "$SCAN_RAW" | cut -f2- >"$DERIVED_DECLS" || true
+grep '^M	' "$SCAN_RAW" | cut -f2- >"$DERIVED_MODS" || true
+
+# Cross-check the two derivations of "which modules are declared at the crate root".
+grep '^S	' "$SCAN_RAW" | cut -f2- | LC_ALL=C sort -u >"$WORK_DIR/mods.simple"
+cut -f2 "$DERIVED_MODS" | LC_ALL=C sort -u >"$WORK_DIR/mods.structured"
+if ! diff -u "$WORK_DIR/mods.simple" "$WORK_DIR/mods.structured" >"$WORK_DIR/mods.diff" 2>&1; then
+  echo "" >&2
+  echo "simple-scan vs structured-scan module sets:" >&2
+  sed -e '1s|.*|--- simple scan|' -e '2s|.*|+++ structured scan|' "$WORK_DIR/mods.diff" >&2
+  fail "the two independent scans of $LIB_RS_REL disagree about which modules the crate root declares. One of them is wrong, so neither result can be trusted — the guard refuses to assert over a module set it cannot pin down. (This is the guard that would have caught the same-line \`#[attr] pub mod x;\` shape being dropped.)"
+fi
 
 DECL_COUNT="$(wc -l <"$DERIVED_DECLS" | tr -d ' ')"
 [ "${DECL_COUNT:-0}" -gt 0 ] || fail "no crate-root \`pub mod\`/\`pub use\` declarations found in $LIB_RS_REL — the scan measured nothing. Refusing to pass."
+MOD_COUNT="$(wc -l <"$DERIVED_MODS" | tr -d ' ')"
+[ "${MOD_COUNT:-0}" -gt 0 ] || fail "no crate-root \`pub mod\` declarations found in $LIB_RS_REL — the scan measured nothing. Refusing to pass."
 
 # ---------------------------------------------------------------------------
 # 4) THE CONSISTENCY ASSERT (the core of #1712).
@@ -381,11 +584,7 @@ DECL_COUNT="$(wc -l <"$DERIVED_DECLS" | tr -d ' ')"
 #    crate root can see it — exactly the #1712 defect.
 # ---------------------------------------------------------------------------
 inconsistent=0
-while IFS=$'\t' read -r lineno decl; do
-  case "$decl" in
-    *"pub mod "*) ;;
-    *) continue ;;
-  esac
+while IFS=$'\t' read -r lineno modname attrs; do
   # Which declarations are EXEMPT from the assert, and why each one is:
   #
   #   * `#[cfg(...)]` at the declaration site — the gate is visible to every reader
@@ -400,7 +599,6 @@ while IFS=$'\t' read -r lineno decl; do
   # an exemption (as the first cut did) reopened the exact bypass this assert exists
   # to close: a purely cosmetic `#[cfg_attr(docsrs, doc(alias = "…"))]` would let a
   # module keep hiding its real gate inside its own file.
-  attrs="${decl%%pub mod *}"
   case "$attrs" in
     *'#[cfg('*|*'doc(hidden)'*) continue ;;
   esac
@@ -419,8 +617,6 @@ while IFS=$'\t' read -r lineno decl; do
       esac
       ;;
   esac
-  modname="${decl##*pub mod }"
-  modname="${modname%;}"
   if ! grep -qx "mod $CRATE_DOC_NAME::$modname" "$DERIVED_ITEMS"; then
     inconsistent=$((inconsistent + 1))
     echo "" >&2
@@ -440,7 +636,7 @@ while IFS=$'\t' read -r lineno decl; do
     echo "        #[doc(hidden)]" >&2
     echo "        pub mod $modname;" >&2
   fi
-done <"$DERIVED_DECLS"
+done <"$DERIVED_MODS"
 
 [ "$inconsistent" -eq 0 ] || fail "$inconsistent crate-root declaration(s) disagree with the default public surface (see above). Issue #1712."
 
