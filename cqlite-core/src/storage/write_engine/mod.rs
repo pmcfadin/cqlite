@@ -194,8 +194,10 @@ pub struct WriteEngineConfig {
     /// `Config.storage.memtable_size_threshold` (default 64MB) by
     /// [`WriteEngineConfig::from_config`] — issue #1697.
     pub memtable_flush_threshold: usize,
-    /// Memtable hard limit in bytes (default: 256MB)
-    /// When this limit is reached, writes will fail with an error
+    /// Memtable hard limit in bytes. Derived from the public
+    /// `Config.storage.memtable_hard_limit` (default 256MB) by
+    /// [`WriteEngineConfig::from_config`] — issue #1697. When this limit is
+    /// reached, writes fail with an error.
     pub memtable_hard_limit: usize,
     /// Table schema for column metadata
     pub schema: TableSchema,
@@ -225,10 +227,6 @@ pub struct WriteEngineConfig {
 
 #[cfg(feature = "write-support")]
 impl WriteEngineConfig {
-    /// Default hard limit (256 MB). Not modelled by the public [`crate::Config`]
-    /// facade, so this is the only literal for it (issue #1697).
-    pub const DEFAULT_HARD_LIMIT: usize = 256 * 1024 * 1024;
-
     /// Create a configuration carrying CQLite's shipped defaults.
     ///
     /// Defined as [`Self::from_config`] applied to [`crate::Config::default`]
@@ -1543,8 +1541,8 @@ mod tests {
             crate::Config::default().storage.memtable_size_threshold
         );
         assert_eq!(
-            config.memtable_hard_limit,
-            WriteEngineConfig::DEFAULT_HARD_LIMIT
+            config.memtable_hard_limit as u64,
+            crate::Config::default().storage.memtable_hard_limit
         );
 
         let config = config.with_flush_threshold(128 * 1024 * 1024);

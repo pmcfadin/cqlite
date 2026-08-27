@@ -557,14 +557,13 @@ impl Database {
                 // auto-flush: the memtable hits the hard limit and rejects
                 // writes first, dead-ending the binding write path
                 // (roborev jobs 2885/2890, issue #1620). Gated on
-                // `write-support`, matching every other `write_engine`
-                // reference in this file — `WriteEngineConfig` is
-                // `#[cfg(feature = "write-support")]` in core, and the
-                // threshold is only meaningful when the write engine exists.
+                // `write-support` so the accepted/rejected input set is
+                // unchanged from before #1697; the ceiling itself is now read
+                // from the PUBLIC config knob (same 256MB value) instead of the
+                // private `WriteEngineConfig::DEFAULT_HARD_LIMIT`.
                 #[cfg(feature = "write-support")]
                 {
-                    let hard_limit =
-                        cqlite_core::storage::write_engine::WriteEngineConfig::DEFAULT_HARD_LIMIT;
+                    let hard_limit = config.storage.memtable_hard_limit;
                     if v > hard_limit as f64 {
                         return Err(napi::Error::from_reason(format!(
                             "flushThreshold ({v} bytes) must not exceed the memtable hard limit ({hard_limit} bytes)"

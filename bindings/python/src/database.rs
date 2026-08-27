@@ -830,8 +830,8 @@ pub fn open(
                 "flush_threshold must be at least 1 byte",
             ));
         }
-        let hard_limit =
-            cqlite_core::storage::write_engine::WriteEngineConfig::DEFAULT_HARD_LIMIT as u64;
+        // #1697: the ceiling is a PUBLIC knob now (same 256MB value).
+        let hard_limit = cqlite_core::Config::default().storage.memtable_hard_limit;
         if v > hard_limit {
             return Err(PyValueError::new_err(format!(
                 "flush_threshold ({v} bytes) must not exceed the memtable hard limit ({hard_limit} bytes)"

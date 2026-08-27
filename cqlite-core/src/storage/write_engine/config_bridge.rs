@@ -51,13 +51,16 @@ impl WriteEngineConfig {
     /// the single source of truth for every write-path knob (issue #1697).
     ///
     /// Threads, in order: `config.storage.memtable_size_threshold` ->
-    /// [`Self::memtable_flush_threshold`], and all three of
+    /// [`Self::memtable_flush_threshold`],
+    /// `config.storage.memtable_hard_limit` -> [`Self::memtable_hard_limit`],
+    /// and all three of
     /// `config.storage.compaction` -> [`Self::auto_compaction`] /
     /// [`Self::compaction_min_threshold`] / [`Self::compaction_max_threshold`].
     ///
-    /// Callers that need a non-default `memtable_hard_limit`, durability mode,
-    /// or UDT registry chain the corresponding `with_*` builder afterwards;
-    /// the public `Config` does not model those today.
+    /// Threads `config.storage.memtable_hard_limit` too — the admission ceiling
+    /// `check_admission` enforces. Callers needing a non-default durability mode
+    /// or UDT registry chain the corresponding `with_*` builder afterwards; the
+    /// public `Config` does not model those today.
     ///
     /// ```rust,ignore
     /// let mut config = cqlite_core::Config::default();
@@ -78,7 +81,10 @@ impl WriteEngineConfig {
                 config.storage.memtable_size_threshold,
                 "storage.memtable_size_threshold",
             ),
-            memtable_hard_limit: Self::DEFAULT_HARD_LIMIT,
+            memtable_hard_limit: clamp_threshold_bytes(
+                config.storage.memtable_hard_limit,
+                "storage.memtable_hard_limit",
+            ),
             schema,
             durability: super::Durability::default(),
             udt_registry: None,
@@ -155,8 +161,13 @@ mod tests {
             cfg.compaction_max_threshold,
             defaults.storage.compaction.max_threshold
         );
-        // #1697 kept the RUNNING value as the new public default.
+        assert_eq!(
+            cfg.memtable_hard_limit as u64, defaults.storage.memtable_hard_limit,
+            "engine hard limit must come from Config::default()"
+        );
+        // #1697 kept the RUNNING values as the new public defaults.
         assert_eq!(defaults.storage.memtable_size_threshold, 64 * 1024 * 1024);
+        assert_eq!(defaults.storage.memtable_hard_limit, 256 * 1024 * 1024);
     }
 
     /// Every knob the bridge owns must be carried through, not defaulted.
@@ -164,6 +175,7 @@ mod tests {
     fn from_config_threads_every_public_knob() {
         let mut config = Config::default();
         config.storage.memtable_size_threshold = 4096;
+        config.storage.memtable_hard_limit = 8192;
         config.storage.compaction.auto_compaction = false;
         config.storage.compaction.min_threshold = 2;
         config.storage.compaction.max_threshold = 3;
@@ -175,6 +187,7 @@ mod tests {
             schema(),
         );
         assert_eq!(cfg.memtable_flush_threshold, 4096);
+        assert_eq!(cfg.memtable_hard_limit, 8192);
         assert!(!cfg.auto_compaction);
         assert_eq!(cfg.compaction_min_threshold, 2);
         assert_eq!(cfg.compaction_max_threshold, 3);

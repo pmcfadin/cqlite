@@ -42,6 +42,20 @@ pub struct StorageConfig {
     /// quadrupled everyone's flush rate.
     pub memtable_size_threshold: u64,
 
+    /// MemTable HARD limit in bytes (default: 256MB) — the admission ceiling.
+    ///
+    /// Live knob: the write engine's `check_admission` REJECTS a write whose
+    /// mutation exceeds this on its own, or that would push the memtable over
+    /// it. Before issue #1697 it existed only as the private
+    /// `WriteEngineConfig::DEFAULT_HARD_LIMIT`, so an embedder could be
+    /// hard-failed by a ceiling they had no way to see or change. The default is
+    /// unchanged (256MB): this exposes the knob, it does not alter behaviour.
+    /// [`Config::validate`] requires it to be >= [`Self::memtable_size_threshold`],
+    /// since a lower ceiling wedges the engine — writes are rejected before a
+    /// flush can ever relieve the memtable.
+    #[serde(default = "default_memtable_hard_limit")]
+    pub memtable_hard_limit: u64,
+
     /// Compaction configuration
     pub compaction: CompactionConfig,
 
@@ -214,6 +228,12 @@ fn default_use_mmap() -> bool {
     false
 }
 
+/// Default for [`StorageConfig::memtable_hard_limit`]: 256MB, the value the
+/// write engine always used privately (issue #1697).
+fn default_memtable_hard_limit() -> u64 {
+    256 * 1024 * 1024
+}
+
 /// Default for [`StorageConfig::mmap_min_size_bytes`]: one page.
 fn default_mmap_min_size_bytes() -> usize {
     4096
@@ -233,8 +253,10 @@ impl Default for StorageConfig {
     fn default() -> Self {
         Self {
             max_sstable_size: 64 * 1024 * 1024, // 64MB
-            // 64MB: the value the write engine always actually used (#1697).
+            // 64MB / 256MB: the values the write engine always used (#1697).
+            // Shared with the serde defaults so the two can never drift.
             memtable_size_threshold: 64 * 1024 * 1024,
+            memtable_hard_limit: default_memtable_hard_limit(),
             compaction: CompactionConfig::default(),
             block_size: 64 * 1024, // 64KB
             compression: CompressionConfig::default(),
@@ -776,6 +798,15 @@ impl Config {
         if self.storage.memtable_size_threshold == 0 {
             return Err(crate::Error::configuration(
                 "memtable_size_threshold must be greater than 0",
+            ));
+        }
+
+        // A hard limit below the flush threshold wedges the write engine: the
+        // memtable is rejected at the ceiling before a flush can relieve it.
+        // Only expressible as a rule now that both knobs live here (#1697).
+        if self.storage.memtable_hard_limit < self.storage.memtable_size_threshold {
+            return Err(crate::Error::configuration(
+                "memtable_hard_limit must be >= memtable_size_threshold",
             ));
         }
 

@@ -8,14 +8,20 @@
 //!
 //! | knob | private (live) | public (decorative) |
 //! |------|----------------|---------------------|
-//! | memtable flush threshold | `WriteEngineConfig::memtable_flush_threshold` (64MB) | `Config.storage.memtable_size_threshold` (was 16MB, no reader) |
+//! | memtable flush threshold | `WriteEngineConfig::memtable_flush_threshold` (64MB) | `Config.storage.memtable_size_threshold` (was 16MB, ZERO compiled readers) |
+//! | memtable hard limit | `WriteEngineConfig::memtable_hard_limit` (256MB) | none |
 //! | STCS `min_threshold` | `WriteEngineConfig::compaction_min_threshold` (4) | none |
 //! | STCS `max_threshold` | `WriteEngineConfig::compaction_max_threshold` (32) | none |
 //!
 //! So an embedder could set `memtable_size_threshold = 4KB` and get 64MB
-//! behaviour, silently. These tests are the per-knob guards: each drives the
-//! PUBLIC field and asserts an OBSERVABLE engine effect (an SSTable generation
-//! appearing, rows merged, merge width), never elapsed time.
+//! behaviour, silently — and could be hard-failed by a 256MB admission ceiling
+//! they had no way to see. (The two files that appeared to read
+//! `memtable_size_threshold` — `tests/integration/performance_integration.rs`
+//! and `tests/benchmarks/load_testing.rs` — are not registered cargo targets
+//! and never compile, so the reader count was an absolute zero; the guards
+//! below are the first compiled readers.) Each guard drives the PUBLIC field
+//! and asserts an OBSERVABLE engine effect (an SSTable generation appearing, a
+//! write rejected, rows merged, merge width), never elapsed time.
 //!
 //! [`public_auto_compaction_off_disables_compaction`] is the regression anchor
 //! for the ONE knob that was already wired (issue #1619 / N1): it must pass
@@ -198,6 +204,71 @@ fn public_memtable_threshold_drives_flush() {
         "memtable must stay near the configured {THRESHOLD} B threshold after auto-flush \
          (observed {} B)",
         engine.memtable_size()
+    );
+}
+
+/// AC1: `Config.storage.memtable_hard_limit` must be the admission ceiling the
+/// engine's `check_admission` enforces. Set it to 1KB and submit a single ~4KB
+/// mutation: the write must be REJECTED, and the error must quote the CONFIGURED
+/// limit (not 256MB), which is what proves the public value is the one in force.
+///
+/// RED (before the bridge): no public field exists to set, so the private 256MB
+/// default runs and a 4KB mutation is admitted without complaint.
+///
+/// Named for the established `*_knob_is_load_bearing` convention
+/// (`dead_cache_delete_tests.rs`, `issue_1582_byte_bounded_result_budget.rs`).
+#[test]
+fn public_memtable_hard_limit_knob_is_load_bearing() {
+    const HARD_LIMIT: u64 = 1024;
+
+    let temp = TempDir::new().expect("tempdir");
+    let mut config = Config::default();
+    // Below the ceiling, so `Config::validate` is satisfied (a hard limit under
+    // the flush threshold would wedge the engine and is rejected outright).
+    config.storage.memtable_size_threshold = 512;
+    config.storage.memtable_hard_limit = HARD_LIMIT;
+    config
+        .validate()
+        .expect("config must be internally consistent");
+
+    let mut engine = WriteEngine::new(engine_config(
+        &config,
+        temp.path().join("data"),
+        temp.path().join("wal"),
+        make_schema(),
+    ))
+    .expect("engine creation");
+
+    // One mutation far larger than the configured ceiling.
+    let err = engine
+        .write(row(1, 4096, 1_000_000))
+        .expect_err("a single 4KB mutation must be rejected under a 1KB hard limit");
+    let msg = err.to_string();
+    assert!(
+        msg.contains("hard limit") && msg.contains(&HARD_LIMIT.to_string()),
+        "the rejection must quote the CONFIGURED hard limit {HARD_LIMIT}, proving the public          knob reached check_admission; got: {msg}"
+    );
+
+    // A mutation that fits is still admitted — the knob bounds, it does not brick.
+    engine
+        .write(row(2, 16, 1_000_001))
+        .expect("a small mutation must still be admitted under the same limit");
+}
+
+/// `Config::validate` must refuse a hard limit BELOW the flush threshold: such
+/// an engine rejects writes at the ceiling before a flush can ever relieve the
+/// memtable. Only expressible as a rule now that both knobs live in one struct.
+#[test]
+fn hard_limit_below_flush_threshold_is_rejected_at_config_time() {
+    let mut config = Config::default();
+    config.storage.memtable_size_threshold = 8 * 1024;
+    config.storage.memtable_hard_limit = 4 * 1024;
+    let err = config
+        .validate()
+        .expect_err("a wedged memtable configuration must not validate");
+    assert!(
+        err.to_string().contains("memtable_hard_limit"),
+        "the error must name the offending knob; got: {err}"
     );
 }
 
