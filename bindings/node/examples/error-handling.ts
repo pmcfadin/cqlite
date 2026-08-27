@@ -63,7 +63,7 @@ async function demonstrateErrorHandling() {
     await db.execute('SELEC * FORM table');
   } catch (e) {
     if (isCqliteError(e)) {
-      console.log(`Error Code: ${e.code}`);           // 'PARSE' or 'QUERY'
+      console.log(`Error Code: ${e.code}`);           // 'PARSE' for a CQL syntax error
       console.log(`Category: ${e.category}`);          // 'Query'
       console.log(`Recoverable: ${e.isRecoverable}`);  // false
       console.log(`Message: ${e.message}`);
@@ -149,7 +149,15 @@ async function demonstrateErrorHandling() {
           break;
 
         case 'PARSE':
-          console.log('Query syntax error - check CQL syntax');
+          console.log('CQL syntax error, or corrupt on-disk data');
+          break;
+
+        case 'TIMEOUT':
+          console.log('Operation exceeded its deadline (issue #1451 - never IO)');
+          break;
+
+        case 'MEMORY':
+          console.log('Memory/allocation failure (issue #1451 - never IO)');
           break;
 
         case 'NOT_FOUND':
