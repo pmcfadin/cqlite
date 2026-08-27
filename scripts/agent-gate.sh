@@ -5483,10 +5483,16 @@ run_legacy_heuristics() {
 
   echo ">>> [$name] derived${names} ($count target(s) from $tests_dir/*.rs)"
   [ -n "$negonly" ] && echo ">>> [$name] allowed-zero (NEGATIVE-polarity only — cfg(not(...)) bodies compile out here and run in core-tests):$negonly"
-  echo ">>> [$name] RUSTFLAGS=-D warnings cargo build -p cqlite-core --features legacy-heuristics, then cargo test --lib + derived targets (#1699)"
+  echo ">>> [$name] RUSTFLAGS=-D warnings cargo build -p cqlite-core --features legacy-heuristics, then cargo test --no-fail-fast --lib + derived targets (#1699)"
+  # --no-fail-fast is load-bearing for THIS lane specifically. cargo test stops after the
+  # first failing test BINARY, and this lane is the first thing ever to execute these
+  # targets — so fail-fast reports one target's failures, hides the rest, and turns
+  # triage into a serial reveal (measured: run 1 showed only P0_4_modern_format_rejection,
+  # run 2 then showed 3 more in sstable_discovery_comprehensive). A lane whose purpose is
+  # to surface never-executed rot must surface ALL of it in one run.
   if RUSTFLAGS="-D warnings" cargo build --package cqlite-core --features legacy-heuristics >"$log" 2>&1 \
       && env CQLITE_DATASETS_ROOT="$CQLITE_DATASETS_ROOT" \
-        cargo test --package cqlite-core --features legacy-heuristics --lib "${targets[@]}" >>"$log" 2>&1; then
+        cargo test --no-fail-fast --package cqlite-core --features legacy-heuristics --lib "${targets[@]}" >>"$log" 2>&1; then
     # Green cargo exit is not sufficient — see the guard's own doc block.
     # The guard writes its verdict to stderr only, so `2>>` lands the message in the
     # component log (where the FAIL branch below tails it) while the `if` still tests
