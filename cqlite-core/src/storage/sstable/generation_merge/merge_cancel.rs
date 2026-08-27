@@ -76,49 +76,59 @@ pub(super) fn check(cancel: &ScanCancel) -> crate::Result<()> {
 /// Observability for the abandonment mechanism, on the `stream_merge_probe`
 /// pattern: the RECORD calls are unconditional `#[inline(always)]` functions whose
 /// BODIES are cfg-gated, so a default/release build links no atomic and pays
-/// nothing; the getters + [`probe::reset`] exist only in test / `work-counters`
-/// builds. Without them "the merge abandoned instead of running to completion" is
+/// nothing. Without them "the merge abandoned instead of running to completion" is
 /// unobservable from outside, and any test of it would have to time something.
+///
+/// Gated on `cfg(test)` ALONE — deliberately narrower than `stream_merge_probe`'s
+/// `any(test, feature = "work-counters")`. The only consumer is the in-crate
+/// [`super::abandon_tests`], which needs a `max_blocking_threads(1)` runtime it
+/// builds itself, so nothing in `tests/` can use these; adding the feature arm
+/// would only make the getters dead code in a `--all-features` build. A future
+/// integration consumer adds `feature = "work-counters"` back to all of the cfgs
+/// below, together. The READERS carry `not(feature = "tombstones")` as well,
+/// because their one caller does: that build has no `multi_gen_fixture` (its
+/// `scan_stream` routes through the materializing `scan`), so under
+/// `--all-features` the getters would be dead code.
 pub(super) mod probe {
-    #[cfg(any(test, feature = "work-counters"))]
+    #[cfg(test)]
     use std::sync::atomic::{AtomicU64, Ordering};
 
     /// Merges that ARMED a per-call guard (i.e. reached the spawn point).
-    #[cfg(any(test, feature = "work-counters"))]
+    #[cfg(test)]
     static ARMED: AtomicU64 = AtomicU64::new(0);
     /// Merge loops that exited via the cancel check rather than completing.
-    #[cfg(any(test, feature = "work-counters"))]
+    #[cfg(test)]
     static ABANDONED: AtomicU64 = AtomicU64::new(0);
 
     #[inline(always)]
     pub(super) fn record_armed() {
-        #[cfg(any(test, feature = "work-counters"))]
+        #[cfg(test)]
         ARMED.fetch_add(1, Ordering::Relaxed);
     }
 
     #[inline(always)]
     pub(super) fn record_abandoned() {
-        #[cfg(any(test, feature = "work-counters"))]
+        #[cfg(test)]
         ABANDONED.fetch_add(1, Ordering::Relaxed);
     }
 
     /// Merges that armed a guard since the last [`reset`].
-    #[cfg(any(test, feature = "work-counters"))]
-    pub(crate) fn armed() -> u64 {
+    #[cfg(all(test, not(feature = "tombstones")))]
+    pub(super) fn armed() -> u64 {
         ARMED.load(Ordering::Relaxed)
     }
 
     /// Merge loops ABANDONED since the last [`reset`] — each one is a blocking
     /// merge that stopped instead of building a `Vec` nobody could receive.
-    #[cfg(any(test, feature = "work-counters"))]
-    pub(crate) fn abandoned() -> u64 {
+    #[cfg(all(test, not(feature = "tombstones")))]
+    pub(super) fn abandoned() -> u64 {
         ABANDONED.load(Ordering::Relaxed)
     }
 
     /// Zero both counters. The statics are process-global, so callers serialize on
     /// the shared test mutex (the counter-test convention).
-    #[cfg(any(test, feature = "work-counters"))]
-    pub(crate) fn reset() {
+    #[cfg(all(test, not(feature = "tombstones")))]
+    pub(super) fn reset() {
         ARMED.store(0, Ordering::Relaxed);
         ABANDONED.store(0, Ordering::Relaxed);
     }
