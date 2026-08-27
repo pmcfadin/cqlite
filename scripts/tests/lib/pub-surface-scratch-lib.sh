@@ -17,7 +17,7 @@
 # corner case: CLAUDE.md records that subagents are killed by a 600s stall watchdog
 # under CPU contention, and this suite runs for minutes inside `tooling-tests`.
 #
-# WHAT A TRAP CAN AND CANNOT DO — MEASURED, because the obvious fix is NOT sufficient
+# WHAT A TRAP CAN AND CANNOT DO — MEASURED, because the obvious fix is not sufficient
 # and it would be easy to ship a vacuous test of it:
 #
 #   * `kill -TERM <pid>` on the script alone: bash runs the EXIT trap ANYWAY (measured:
@@ -30,31 +30,36 @@
 #     and without `set -e`, and with the `sleep & wait` idiom: no cleanup in any of them.
 #   * SIGKILL cannot be trapped at all, by anyone.
 #
-# So the trap list below is cheap hygiene for the single-PID case, and it is NOT the
-# fix. The fix is the STARTUP REAP: the next run cleans up after the killed one, which
-# works however the previous run died — the only property worth having here.
+# WHAT IS THEREFORE ACCEPTED, DELIBERATELY: a run killed by SIGKILL (or by a
+# process-group signal) can leave its scratch root and its worktree registrations
+# behind, and the remedy is manual — `git worktree remove --force <path>`. That is
+# rare, loud when it happens, and bounded.
 #
-# The reap is BOUNDED, not a heuristic: the suite holds a single-instance LOCK, so while
-# it runs no other instance can exist, and therefore every `pub-surface-selftest.*`
-# worktree registration other than this run's own is provably from a dead run.
+# AND WHY THERE IS NO STALE-RUN REAPER, so nobody adds one back. A startup sweep over
+# every registered worktree whose PATH looks like ours is not a cleanup, it is a
+# DELETE-BY-NAME-SHAPE: two concurrent runs have distinct mktemp roots, so each would
+# destroy the other's LIVE checkouts — not a race window, a certainty. Worse here than
+# elsewhere, because `/data/lanes/lane-*` are worktrees of ONE repository and
+# `git worktree list` is shared across all of them, so one lane's gate would delete
+# another lane's live scratch and the victim would fail with missing-file noise that
+# looks nothing like the cause. Inferring "stale" from a path shape is the same defect
+# class as reading a grammar by substring, which this issue has already fixed twice
+# (#1712 finding 3 and r2 F3). A pidfile-plus-`kill -0` mechanism would be sounder, but
+# it buys only best-effort recovery from the one signal nothing can catch, at the price
+# of a new mechanism with its own permissive branches (stale pidfile, PID reuse, a root
+# with no pidfile). Removal is BY EXPLICIT PATH only — ps_remove_worktree, below, which
+# is the same call the cleanup path uses.
 
-# ps_reap_stale_scratch <repo-root>: remove every `pub-surface-selftest.*` worktree
-# registration that is not this run's. Safe because the caller holds the single-instance
-# lock, so no concurrent run's checkouts can be in that set.
-ps_reap_stale_scratch() {
-  local repo="$1" wt
-  while IFS= read -r wt; do
-    [ -n "$wt" ] || continue
-    case "$wt" in
-      *"/pub-surface-selftest."*) ;;
-      *) continue ;;
-    esac
-    if [ -n "${PS_TMPROOT:-}" ]; then
-      case "$wt" in "$PS_TMPROOT"/*) continue ;; esac
-    fi
-    git -C "$repo" worktree remove --force "$wt" >/dev/null 2>&1 || true
-    rm -rf "$wt"
-  done < <(git -C "$repo" worktree list --porcelain 2>/dev/null | awk '/^worktree /{ print substr($0, 10) }')
+# ps_remove_worktree <repo-root> <path>: drop ONE worktree, by explicit path.
+# Both steps, always, in this order: `remove` drops the REGISTRATION (which is what a
+# bare `rm -rf` leaves behind and `prune` then refuses to reclaim — the state a killed
+# run leaves), the `rm -rf` covers a removal that failed for any reason, and the
+# `prune` reclaims a registration whose directory is already gone.
+ps_remove_worktree() {
+  local repo="$1" wt="$2"
+  [ -n "$wt" ] || return 0
+  git -C "$repo" worktree remove --force "$wt" >/dev/null 2>&1 || true
+  rm -rf "$wt"
   git -C "$repo" worktree prune >/dev/null 2>&1 || true
   return 0
 }
@@ -65,35 +70,11 @@ ps_scratch_init() {
   PS_REPO_ROOT="$1"
   PS_WORKTREES=()
   PS_CLEANED=0
-  PS_LOCK_DIR=""
-  PS_TMPROOT=""
-  PS_LOCK="${TMPDIR:-/tmp}/pub-surface-selftest.lock"
-  local wait_secs=600
-
-  # Single instance. `flock(1)` is util-linux and ABSENT ON macOS, a gate host here, so
-  # the fallback is an atomic mkdir mutex. Both give the property the reap needs: while
-  # this runs, no other instance of this suite exists.
-  if command -v flock >/dev/null 2>&1; then
-    exec 8>"$PS_LOCK" || { echo "FAIL: cannot create the self-test lock $PS_LOCK"; exit 1; }
-    flock -w "$wait_secs" 8 \
-      || { echo "FAIL: timed out after ${wait_secs}s waiting for the self-test lock $PS_LOCK - another run of this suite is active."; exit 1; }
-  else
-    local deadline=$(( $(date +%s) + wait_secs ))
-    until mkdir "$PS_LOCK.d" 2>/dev/null; do
-      [ "$(date +%s)" -lt "$deadline" ] \
-        || { echo "FAIL: timed out after ${wait_secs}s waiting for the self-test lock $PS_LOCK.d."
-             echo "      Either another run is active, or a killed run left it behind: rmdir '$PS_LOCK.d'"
-             exit 1; }
-      sleep 1
-    done
-    PS_LOCK_DIR="$PS_LOCK.d"
-  fi
-
-  # With the lock held, anything still registered belongs to a dead run. Reap BEFORE
-  # this run's own scratch root exists, so the "not mine" test cannot be got wrong.
-  ps_reap_stale_scratch "$PS_REPO_ROOT"
-
   PS_TMPROOT="$(mktemp -d "${TMPDIR:-/tmp}/pub-surface-selftest.XXXXXX")"
+  # EXIT alone is not enough — it does not fire on a signal. INT/TERM/HUP are what a
+  # Ctrl-C and a single-PID timeout send. The handler cleans up and then re-raises the
+  # conventional 128+signo status, so callers still see that the run was killed rather
+  # than that it failed.
   trap 'ps_cleanup' EXIT
   trap 'ps_cleanup; exit 130' INT
   trap 'ps_cleanup; exit 143' TERM
@@ -106,44 +87,12 @@ ps_cleanup() {
   PS_CLEANED=1
   local wt
   for wt in "${PS_WORKTREES[@]:-}"; do
-    [ -n "$wt" ] || continue
-    # Both, always, in this order: `remove` drops the REGISTRATION (which is what a
-    # bare `rm -rf` leaves behind and `prune` then refuses to reclaim), and the
-    # `rm -rf` covers a removal that failed for any reason.
-    git -C "$PS_REPO_ROOT" worktree remove --force "$wt" >/dev/null 2>&1 || true
-    rm -rf "$wt"
+    ps_remove_worktree "$PS_REPO_ROOT" "$wt"
   done
-  # Unconditional, not only on failure: reclaims any registration whose directory is
-  # already gone, which is the state `remove` cannot address.
-  git -C "$PS_REPO_ROOT" worktree prune >/dev/null 2>&1 || true
   [ -n "${PS_TMPROOT:-}" ] && rm -rf "$PS_TMPROOT"
-  if [ -n "${PS_LOCK_DIR:-}" ]; then
-    rmdir "$PS_LOCK_DIR" 2>/dev/null || true
-    PS_LOCK_DIR=""
-  fi
   return 0
 }
 
-# ps_scratch_tree_from <source-checkout> <name>: a detached worktree that reproduces
-# <source-checkout>'s WORKING TREE, not its HEAD, and publishes the path in SCRATCH.
-#
-# WHY THE WORKING TREE AND NOT HEAD. A `git worktree add` materialises a COMMIT, so a
-# scratch built from HEAD carries HEAD's sources. Copying only the live guard and the
-# live snapshot into it leaves source and baseline describing DIFFERENT trees, and
-# that breaks the ordinary pre-commit workflow: change the public API, regenerate the
-# snapshot, run the tests before committing, and the real-tree case passes while the
-# green scratch cases fail, because HEAD's API cannot match the newly regenerated
-# snapshot. A false FAIL that looks exactly like a real defect, sitting in the path
-# every future contributor walks.
-#
-# So the whole uncommitted delta is applied: tracked modifications via a binary
-# `git diff HEAD` patch, plus untracked-but-not-ignored files copied in. After that
-# the scratch's `git status --porcelain` must MATCH the source's; a mismatch means the
-# overlay did not reproduce the tree, and the suite FAILS rather than testing
-# something other than what you are working on.
-#
-# Deliberately NOT usable as a command substitution: `$(…)` would run the body in a
-# subshell, discarding the PS_WORKTREES bookkeeping the cleanup depends on.
 SCRATCH=""
 
 # ps_overlay <source-checkout> <worktree>: reproduce <source-checkout>'s uncommitted

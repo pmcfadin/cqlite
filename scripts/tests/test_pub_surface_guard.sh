@@ -68,9 +68,9 @@
 #                being invisible to rustdoc and to this snapshot.
 #  19.  KILL   — a killed run must not leave registered git worktrees behind (measured:
 #                a 2-minute tool timeout left 11, and `git worktree prune` could not
-#                reclaim them). Pins the STARTUP REAP behaviourally against a real
-#                leaked registration — traps alone provably do not fix this, see the
-#                library's comment — plus the trap list structurally.
+#                reclaim them). Pins the trap list structurally, that cleanup reclaims
+#                such a worktree BY EXPLICIT PATH, and — the regression guard — that a
+#                fresh run leaves a CONCURRENT run's scratch worktrees alone.
 #
 # NO TEST-ONLY SEAM. The guard's subject is hard-coded on purpose, so the negative
 # cases SUBSTITUTE THE ARTIFACT: each runs in its own `git worktree add --detach HEAD`
@@ -624,40 +624,39 @@ grep -q 'cargo-public-api' "$TMPROOT/case18.out" \
 echo "OK (18): a \`doc\` cfg predicate makes the guard REFUSE rather than certify"
 
 # ---------------------------------------------------------------------------
-# 19. KILL SAFETY — a killed run must not leave registered git worktrees behind.
+# 19. KILL SAFETY — cleanup must reclaim a registered worktree, BY EXPLICIT PATH,
+#     and must never touch a concurrent run's.
 #
 #     THE OBSERVED FAILURE. A 2-minute tool timeout on this suite left ELEVEN
 #     registered worktrees in the repository, and `git worktree prune` could not
 #     reclaim them because their directories and admin files were intact; they had to
 #     be removed by hand. This suite runs for minutes inside `tooling-tests`, and
-#     CLAUDE.md records that subagents are killed by a 600s stall watchdog, so this is
-#     routine.
+#     CLAUDE.md records the 600s stall watchdog, so this is routine.
 #
-#     WHY THE OBVIOUS FIX IS NOT THE FIX, and why this case tests the reap instead of
-#     the trap. Measured on this bash: `kill -TERM <pid>` on the script alone runs the
-#     EXIT trap ANYWAY, so a single-PID signal test passes whether or not INT/TERM are
-#     trapped — it cannot discriminate, which is exactly the vacuous-test shape this
-#     issue keeps fighting. A PROCESS-GROUP kill (what a tool timeout sends) skips the
-#     traps entirely even when INT/TERM/HUP are trapped, and SIGKILL cannot be trapped
-#     by anyone. So the traps are hygiene; the thing that actually recovers the
-#     repository is the STARTUP REAP, and that is what is pinned behaviourally here.
+#     WHY THE TRAP LIST IS ONLY HALF OF IT, measured rather than assumed: `kill -TERM
+#     <pid>` on the script alone runs the EXIT trap ANYWAY, so a single-PID signal test
+#     passes with or without INT/TERM trapped and cannot discriminate; a PROCESS-GROUP
+#     kill skips the traps even when they are installed; and SIGKILL cannot be trapped.
+#     A post-SIGKILL leftover is therefore ACCEPTED as rare manual cleanup — see the
+#     library comment for why a name-shape sweep is not the answer.
 #
-#     Both halves are asserted: the reap, behaviourally, against a REAL leaked
-#     registration; and the trap list, structurally, so it cannot silently shrink.
+#     So what is pinned here is what cleanup must actually do, plus the property that
+#     stops the tempting-but-destructive "fix" from coming back.
 # ---------------------------------------------------------------------------
 _lib="$REPO_ROOT/scripts/tests/lib/pub-surface-scratch-lib.sh"
 for _sig in INT TERM HUP; do
   grep -qE "^  trap 'ps_cleanup; exit [0-9]+' $_sig\$" "$_lib" \
-    || fail_case "case 19 — the scratch library no longer traps $_sig. Cheap hygiene for the single-PID case; do not drop it."
+    || fail_case "case 19 — the scratch library no longer traps $_sig. It is what covers the catchable kills; do not drop it."
 done
 grep -qE "^  trap 'ps_cleanup' EXIT\$" "$_lib" \
   || fail_case "case 19 — the EXIT trap is gone from the scratch library; the normal-exit path would stop cleaning up"
 grep -qF 'PS_CLEANED=1' "$_lib" \
   || fail_case "case 19 — cleanup is no longer idempotent, but a signal handler runs it and then the EXIT trap runs it again"
 
-# Behavioural half: manufacture exactly the state a killed run leaves — a REGISTERED
-# worktree under a `pub-surface-selftest.*` root, with its directory and admin files
-# intact, which is the state `git worktree prune` refuses to reclaim.
+# (a) Manufacture exactly the state a killed run leaves — a REGISTERED worktree whose
+#     directory and admin files are intact, which is the state `git worktree prune`
+#     refuses to reclaim — and remove it BY EXPLICIT PATH through the same call the
+#     cleanup path uses.
 leaked_root="$(mktemp -d "${TMPDIR:-/tmp}/pub-surface-selftest.leakedXXXXXX")"
 git -C "$REPO_ROOT" worktree add --detach --quiet "$leaked_root/leaked" HEAD >/dev/null 2>&1 \
   || fail_case "case 19 setup: could not create the decoy leaked worktree"
@@ -667,20 +666,46 @@ git -C "$REPO_ROOT" worktree prune >/dev/null 2>&1 || true
 git -C "$REPO_ROOT" worktree list --porcelain | grep -qF "$leaked_root/leaked" \
   || fail_case "case 19 setup: \`git worktree prune\` reclaimed the decoy, so it is not the state a killed run leaves"
 
-ps_reap_stale_scratch "$REPO_ROOT"
+ps_remove_worktree "$REPO_ROOT" "$leaked_root/leaked"
 
-if git -C "$REPO_ROOT" worktree list --porcelain | grep -qF "$leaked_root"; then
-  echo "FAIL: case 19 — the startup reap left a killed predecessor's worktree registered:"
-  git -C "$REPO_ROOT" worktree list | grep -F "pub-surface-selftest" || true
-  git -C "$REPO_ROOT" worktree remove --force "$leaked_root/leaked" >/dev/null 2>&1 || true
-  rm -rf "$leaked_root"
-  exit 1
-fi
-[ ! -d "$leaked_root/leaked" ] || fail_case "case 19 — the reap dropped the registration but left the directory $leaked_root/leaked"
+git -C "$REPO_ROOT" worktree list --porcelain | grep -qF "$leaked_root/leaked" \
+  && { echo "FAIL: case 19 — cleanup left a registered worktree behind:"
+       git -C "$REPO_ROOT" worktree list | grep -F "pub-surface-selftest" || true
+       rm -rf "$leaked_root"; exit 1; }
+[ ! -d "$leaked_root/leaked" ] || fail_case "case 19 — cleanup dropped the registration but left the directory $leaked_root/leaked"
 rm -rf "$leaked_root"
-# …and it must NOT have reaped this run's own scratch worktrees.
-[ -d "$TMPROOT" ] || fail_case "case 19 — the reap deleted the RUNNING suite's own scratch root"
-echo "OK (19): a killed run's leaked worktree is reaped at startup, and the live run's own is untouched"
+
+# (b) THE REGRESSION GUARD FOR THE DESTRUCTIVE "FIX". A startup sweep over every
+#     registered worktree whose path merely LOOKS like ours would delete a CONCURRENT
+#     run's live checkouts — certainly, not as a race — and across all five
+#     `/data/lanes/lane-*` worktrees of this one repository. So: stand up a decoy that
+#     represents another live run, start a FRESH init in a second process (the real
+#     startup path), and require the decoy to SURVIVE it.
+peer_root="$(mktemp -d "${TMPDIR:-/tmp}/pub-surface-selftest.peerXXXXXX")"
+git -C "$REPO_ROOT" worktree add --detach --quiet "$peer_root/live" HEAD >/dev/null 2>&1 \
+  || fail_case "case 19 setup: could not create the concurrent-run decoy"
+cat >"$TMPROOT/peer-probe.sh" <<PEER
+#!/usr/bin/env bash
+set -euo pipefail
+. "$REPO_ROOT/scripts/tests/lib/pub-surface-scratch-lib.sh"
+ps_scratch_init "$REPO_ROOT"
+PEER
+bash "$TMPROOT/peer-probe.sh" >"$TMPROOT/peer-probe.out" 2>&1 \
+  || fail_case "case 19 setup: a bare init failed; got: $(cat "$TMPROOT/peer-probe.out")"
+if ! git -C "$REPO_ROOT" worktree list --porcelain | grep -qF "$peer_root/live"; then
+  echo "FAIL: case 19 — starting a run DESTROYED a concurrent run's live scratch worktree"
+  echo "      ($peer_root/live). Scratch removal must be by EXPLICIT PATH; a sweep over"
+  echo "      paths that look like ours deletes peers, and this repository's worktree"
+  echo "      registry is shared across every /data/lanes/lane-* checkout."
+  rm -rf "$peer_root"; exit 1
+fi
+[ -d "$peer_root/live" ] \
+  || { echo "FAIL: case 19 — a concurrent run's scratch DIRECTORY was deleted by a fresh init"; rm -rf "$peer_root"; exit 1; }
+ps_remove_worktree "$REPO_ROOT" "$peer_root/live"
+rm -rf "$peer_root"
+# …and this run's own scratch root must still be there.
+[ -d "$TMPROOT" ] || fail_case "case 19 — the live run's own scratch root was deleted"
+echo "OK (19): cleanup reclaims a registered worktree by explicit path, and a fresh run leaves a concurrent run's alone"
 
 echo ""
 echo "PASS: test_pub_surface_guard.sh — all 19 cases (6 green, 11 reds, 1 usage, 1 kill-safety)"
