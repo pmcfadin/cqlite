@@ -818,24 +818,15 @@ pub fn open(
     let obs_cfg = crate::observability::config_from_py(py, otel_config)?;
     crate::observability::ensure_initialized(obs_cfg);
 
-    // Validate the optional flush threshold upfront (issue #1620), regardless of
-    // `writable`, so Python matches the Node binding's validation. A `0` threshold
-    // would make `should_flush(0)` true after every write (pathological
-    // flush-per-write); a threshold above the memtable hard limit would never
-    // trigger an auto-flush (the memtable hits the hard limit and rejects writes
-    // first, dead-ending the write path — roborev job 2885).
+    // Validate the config-INDEPENDENT half of the flush threshold upfront (#1620),
+    // regardless of `writable`, matching Node: a `0` threshold would make
+    // `should_flush(0)` true after every write. The CEILING half depends on the
+    // caller's `memtable_hard_limit`, so it lives beside the fold below.
     if let Some(v) = flush_threshold {
         if v < 1 {
             return Err(PyValueError::new_err(
                 "flush_threshold must be at least 1 byte",
             ));
-        }
-        // #1697: the ceiling is a PUBLIC knob now (same 256MB value).
-        let hard_limit = cqlite_core::Config::default().storage.memtable_hard_limit;
-        if v > hard_limit {
-            return Err(PyValueError::new_err(format!(
-                "flush_threshold ({v} bytes) must not exceed the memtable hard limit ({hard_limit} bytes)"
-            )));
         }
     }
 
@@ -860,19 +851,27 @@ pub fn open(
     // Capture the whole public config before `core_config` is moved into
     // ingestion / Database::open, so `Config.storage` is authoritative for the
     // Python write path rather than decorative (issues #1619, #1697); the ONE
-    // bridge `WriteEngineConfig::from_config` translates it below, and the
-    // already-validated `flush_threshold=` keyword (#1620) is folded onto the
-    // PUBLIC `memtable_size_threshold` instead of the engine's private setter.
-    // NOTE: the config bridge (`config_from_dict`)
-    // deserializes into the full `cqlite_core::Config`, which is NOT
-    // `#[serde(default)]`, so `config` must be a COMPLETE config — a full dict,
-    // a full JSON string, or a preset. A partial dict such as
-    // `{"storage": {"compaction": {"auto_compaction": false}}}` is rejected
-    // with missing-field errors. To flip only this switch, obtain a full config
-    // dict from a preset (e.g. `cqlite.performance_optimized()`), set
+    // bridge `WriteEngineConfig::from_config` translates it below.
+    //
+    // NOTE: `config_from_dict` deserializes into the full `cqlite_core::Config`,
+    // which is NOT `#[serde(default)]`, so `config` must be a COMPLETE config —
+    // a full dict, a full JSON string, or a preset; a partial dict is rejected
+    // with missing-field errors. To flip one switch, take a full dict from a
+    // preset (e.g. `cqlite.performance_optimized()`), set
     // `["storage"]["compaction"]["auto_compaction"] = False`, then pass it.
     let mut write_engine_public_config = core_config.clone();
     if let Some(v) = flush_threshold {
+        // The ceiling check MUST live here, beside the fold that mutates the very
+        // field it constrains, and MUST compare against the CALLER's
+        // `memtable_hard_limit` — never `Config::default()`'s (#1697 roborev r1).
+        // Above the caller's ceiling, auto-flush never fires and admission
+        // rejects first: the write path dead-ends permanently (roborev 2885).
+        let hard_limit = write_engine_public_config.storage.memtable_hard_limit;
+        if v > hard_limit {
+            return Err(PyValueError::new_err(format!(
+                "flush_threshold ({v} bytes) must not exceed the memtable hard limit ({hard_limit} bytes)"
+            )));
+        }
         write_engine_public_config.storage.memtable_size_threshold = v;
     }
 
