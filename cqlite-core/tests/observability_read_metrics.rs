@@ -271,7 +271,19 @@ async fn read_path_emits_rows_bytes_partitions_and_duration() {
         &batched_metrics,
         "scan_stream_batched",
         &batched_tally,
-        true,
+        false,
+    );
+    // ... and the OTHER direction of the read.bytes semantic, pinned positively:
+    // this second scan of the same SSTable serves every chunk from the resident
+    // decompressed-chunk cache, and a cache hit reads NO Data.db bytes. So a WARM
+    // scan must count ZERO bytes while still counting its rows and partitions —
+    // the metric is "bytes read from Data.db", not "bytes handed to the decoder".
+    assert_eq!(
+        batched_metrics.counter_sum(catalog::READ_BYTES),
+        0.0,
+        "a warm scan (every chunk resident in the decompressed-chunk cache) must \
+         count ZERO cqlite.read.bytes — counting a cache hit would overstate the \
+         Data.db I/O the read performed"
     );
 
     // ---------------------------------------------------------------------
