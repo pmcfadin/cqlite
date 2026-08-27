@@ -87,6 +87,34 @@ fn parse_str_consts(src: &str) -> std::collections::HashMap<&str, &str> {
     out
 }
 
+/// Every `catalog::SCREAMING_CONST` identifier referenced in the otel sources.
+///
+/// **ONE implementation, shared by BOTH directions of the registration guard** —
+/// the forward check (an instrument whose name is absent from `ALL_METRICS`) and the
+/// reverse check (a catalogued name with no instrument, issue #1705). A second copy
+/// would be a second implementation whose agreement with this one is unverifiable,
+/// and the two directions disagreeing is precisely the drift the guards exist to
+/// catch.
+///
+/// `catalog::unit::…` / `catalog::attr::…` submodule paths start with a lowercase
+/// char after `catalog::`, so they yield an empty identifier and are excluded by
+/// construction.
+fn otel_catalog_refs(otel_src: &str) -> std::collections::HashSet<String> {
+    let mut out = std::collections::HashSet::new();
+    for (i, _) in otel_src.match_indices("catalog::") {
+        let rest = &otel_src[i + "catalog::".len()..];
+        let ident: String = rest
+            .chars()
+            .take_while(|c| c.is_ascii_uppercase() || c.is_ascii_digit() || *c == '_')
+            .collect();
+        if ident.is_empty() {
+            continue;
+        }
+        out.insert(ident);
+    }
+    out
+}
+
 #[test]
 fn metric_names_are_namespaced_and_unique() {
     let mut seen = std::collections::HashSet::new();
@@ -371,20 +399,12 @@ fn every_instrument_registered_in_otel_is_catalogued() {
     let this_src = include_str!("catalog.rs");
     let ident_to_value = parse_str_consts(this_src);
 
-    // Extract every `catalog::SCREAMING_CONST` reference in otel.rs. `unit`/
-    // `attr` submodule refs (`catalog::unit::…`, `catalog::attr::…`) start with
-    // a lowercase char after `catalog::`, so they are excluded by construction.
+    // Extract every `catalog::SCREAMING_CONST` reference in the otel sources via
+    // the SHARED extractor the reverse-direction guard (#1705) also calls.
     let mut missing = Vec::new();
-    for (i, _) in otel_src.match_indices("catalog::") {
-        let rest = &otel_src[i + "catalog::".len()..];
-        let ident: String = rest
-            .chars()
-            .take_while(|c| c.is_ascii_uppercase() || c.is_ascii_digit() || *c == '_')
-            .collect();
-        // Skip lowercase submodule paths (unit/attr) — `ident` is empty then.
-        if ident.is_empty() {
-            continue;
-        }
+    let mut refs: Vec<String> = otel_catalog_refs(otel_src).into_iter().collect();
+    refs.sort();
+    for ident in refs {
         let value = ident_to_value.get(ident.as_str()).copied().unwrap_or_else(|| {
             panic!("otel.rs references catalog::{ident}, which is not a metric-name constant in catalog.rs")
         });
@@ -396,6 +416,195 @@ fn every_instrument_registered_in_otel_is_catalogued() {
         missing.is_empty(),
         "otel.rs registers instruments for metrics ABSENT from ALL_METRICS \
          (add them to catalog::ALL_METRICS): {missing:?}"
+    );
+}
+
+/// The disclosure every [`STATS_ONLY_METRICS`] entry's operator-doc annotation
+/// must carry, so the generated operator reference cannot advertise a scrapeable
+/// instrument that does not exist (issue #1705).
+const STATS_ONLY_DOC_DISCLOSURE: &str = "NOT emitted as a live OTel instrument";
+
+/// `catalog::IDENT` -> the annotation block text that names it, from
+/// `operator_docs_annotations.rs`.
+///
+/// Segmented on the `name: catalog::` field rather than by brace matching: each
+/// segment runs from one entry's `name:` to the next, which is exactly the text
+/// belonging to that entry.
+fn annotation_blocks() -> std::collections::HashMap<String, String> {
+    const NAME: &str = "name: catalog::";
+    let src = include_str!("operator_docs_annotations.rs");
+    let starts: Vec<usize> = src.match_indices(NAME).map(|(i, _)| i).collect();
+    let mut out = std::collections::HashMap::new();
+    for (n, &start) in starts.iter().enumerate() {
+        let end = starts.get(n + 1).copied().unwrap_or(src.len());
+        let seg = &src[start + NAME.len()..end];
+        let ident: String = seg
+            .chars()
+            .take_while(|c| c.is_ascii_uppercase() || c.is_ascii_digit() || *c == '_')
+            .collect();
+        if ident.is_empty() {
+            continue;
+        }
+        out.insert(ident, seg.to_string());
+    }
+    out
+}
+
+/// `metric name value` -> `catalog::IDENT`, recovered from `catalog.rs`.
+fn value_to_ident() -> std::collections::HashMap<&'static str, &'static str> {
+    let ident_to_value = parse_str_consts(include_str!("catalog.rs"));
+    let mut out = std::collections::HashMap::new();
+    for (ident, value) in ident_to_value {
+        // Metric-name constants are unique (asserted by
+        // `metric_names_are_namespaced_and_unique`); `unit`/`attr` values are not
+        // metric names and never appear in ALL_METRICS, so a collision there is
+        // harmless to the lookups this map serves.
+        out.insert(value, ident);
+    }
+    out
+}
+
+#[test]
+fn every_catalogued_metric_is_otel_registered_or_declared_stats_only() {
+    // Issue #1705 (AI5) — the REVERSE of
+    // `every_instrument_registered_in_otel_is_catalogued`, and the half that was
+    // missing: a PHANTOM catalog entry, i.e. a name in `ALL_METRICS` that no
+    // instrument is ever bound to. `operator_docs` generates the operator-facing
+    // metrics reference from `ALL_METRICS`, so a phantom entry advertises a series
+    // an operator can never scrape — the observability-honesty failure epic #1686
+    // exists to close.
+    //
+    // A name is accounted for in exactly one of two ways: it is referenced from
+    // the otel sources (an instrument is constructed/routed for it), or it is
+    // DECLARED in `catalog::STATS_ONLY_METRICS` as surfaced only through
+    // `Database::stats()`. Nothing else passes.
+    assert_every_otel_source_is_scanned();
+    let refs = otel_catalog_refs(&otel_sources());
+    let value_to_ident = value_to_ident();
+    let stats_only: std::collections::HashSet<&str> = STATS_ONLY_METRICS.iter().copied().collect();
+
+    let mut phantom = Vec::new();
+    for name in ALL_METRICS {
+        let ident = value_to_ident.get(name).copied().unwrap_or_else(|| {
+            panic!("ALL_METRICS entry {name:?} has no `pub const` declaration in catalog.rs")
+        });
+        if !refs.contains(ident) && !stats_only.contains(name) {
+            phantom.push(format!("catalog::{ident} (\"{name}\")"));
+        }
+    }
+    assert!(
+        phantom.is_empty(),
+        "ALL_METRICS names metrics with NO registered otel instrument and no \
+         STATS_ONLY_METRICS declaration — either wire the instrument in \
+         otel_instruments.rs/otel.rs, or declare it stats-only with its reason: \
+         {phantom:?}"
+    );
+}
+
+#[test]
+fn stats_only_metrics_are_catalogued_and_never_otel_registered() {
+    // Issue #1705: keep the exemption list from rotting in the OTHER direction.
+    // Once an instrument IS wired for a name, its exemption must be deleted — a
+    // stale entry would permanently excuse that name from the reverse guard.
+    assert_every_otel_source_is_scanned();
+    let refs = otel_catalog_refs(&otel_sources());
+    let value_to_ident = value_to_ident();
+    let mut seen = std::collections::HashSet::new();
+    for name in STATS_ONLY_METRICS {
+        assert!(
+            ALL_METRICS.contains(name),
+            "{name} is declared stats-only but is not in ALL_METRICS"
+        );
+        assert!(
+            seen.insert(*name),
+            "duplicate STATS_ONLY_METRICS entry {name}"
+        );
+        let ident = value_to_ident.get(name).copied().unwrap_or_else(|| {
+            panic!("STATS_ONLY_METRICS entry {name:?} has no `pub const` in catalog.rs")
+        });
+        assert!(
+            !refs.contains(ident),
+            "catalog::{ident} (\"{name}\") IS registered as an otel instrument — \
+             remove it from STATS_ONLY_METRICS, or the reverse registration guard \
+             carries a stale exemption"
+        );
+    }
+}
+
+#[test]
+fn stats_only_declaration_matches_the_operator_docs() {
+    // Issue #1705: ONE source of truth. `STATS_ONLY_METRICS` is the machine-
+    // checkable declaration; the operator reference generated from
+    // `operator_docs_annotations.rs` is what a human reads. Assert set equality
+    // between the declaration and the annotations carrying the "not scrapeable"
+    // disclosure, so the two cannot drift — a metric quietly demoted to
+    // stats-only without updating its operator prose (or vice versa) fails here.
+    let blocks = annotation_blocks();
+    let value_to_ident = value_to_ident();
+
+    let declared: std::collections::BTreeSet<String> = STATS_ONLY_METRICS
+        .iter()
+        .map(|name| {
+            value_to_ident
+                .get(name)
+                .copied()
+                .unwrap_or_else(|| panic!("no `pub const` for {name:?}"))
+                .to_string()
+        })
+        .collect();
+    let disclosed: std::collections::BTreeSet<String> = blocks
+        .iter()
+        .filter(|(_, seg)| seg.contains(STATS_ONLY_DOC_DISCLOSURE))
+        .map(|(ident, _)| ident.clone())
+        .collect();
+
+    assert_eq!(
+        declared, disclosed,
+        "catalog::STATS_ONLY_METRICS and the operator-doc annotations disclosing \
+         \"{STATS_ONLY_DOC_DISCLOSURE}\" must name the SAME metrics"
+    );
+    assert!(
+        !declared.is_empty(),
+        "the disclosure marker must still be findable — an annotation reword that \
+         breaks this parse would make the comparison vacuously true"
+    );
+}
+
+#[test]
+fn read_partition_lookup_documents_the_attribute_keys_it_actually_emits() {
+    // Issue #1705 (AI5 instance 2): the doc for this counter must name the
+    // attribute keys the emission sites actually attach. It names
+    // `attr::LOOKUP_ROUTE` (the storage-layer lookup route, #1034) and must NOT
+    // name `attr::ACCESS_PATH`, which is the query-engine SELECT access path
+    // (#1035) and is never attached to this metric. Pinned so the two
+    // similarly-named bounded keys cannot be swapped back in the prose.
+    let src = include_str!("catalog.rs");
+    let start = src
+        .find("/// `cqlite.read.partition_lookup.total`")
+        .expect("the READ_PARTITION_LOOKUP doc block must exist");
+    let end = src[start..]
+        .find("pub const READ_PARTITION_LOOKUP")
+        .expect("the doc block must precede its constant");
+    let doc = &src[start..start + end];
+    assert!(
+        doc.contains("[`attr::LOOKUP_ROUTE`]"),
+        "the READ_PARTITION_LOOKUP doc must name the emitted attr::LOOKUP_ROUTE key"
+    );
+    assert!(
+        !doc.contains("ACCESS_PATH"),
+        "the READ_PARTITION_LOOKUP doc must NOT name attr::ACCESS_PATH — that is \
+         the query-engine SELECT access path (#1035), never attached here"
+    );
+    // And the emission sites must agree: the storage-layer lookup counter is
+    // labelled with LOOKUP_ROUTE, not ACCESS_PATH.
+    let lookup_src = concat!(
+        include_str!("../storage/sstable/reader/partition_lookup.rs"),
+        include_str!("../storage/sstable/reader/bti_lookup_memo.rs"),
+    );
+    assert!(lookup_src.contains("attr::LOOKUP_ROUTE"));
+    assert!(
+        !lookup_src.contains("attr::ACCESS_PATH"),
+        "the partition-lookup emission sites must not attach attr::ACCESS_PATH"
     );
 }
 
