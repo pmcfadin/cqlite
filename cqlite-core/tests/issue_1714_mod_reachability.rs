@@ -768,6 +768,128 @@ fn unrecognized_literal_prefix_fails_closed() {
     }
 }
 
+/// **The identifier-family half of the same boundary.** Rust identifiers are
+/// `XID_Start XID_Continue*`, so `macro_rules! café { () => { mod orphan; } }` is a real
+/// macro definition — and this walker's lexer is deliberately ASCII-only. Scanning past
+/// the `é` lexes the macro name as `caf`, leaves the rest to the ordinary scan, fails to
+/// recognize the macro context, and counts the `mod orphan;` in the macro body as a real
+/// declaration: the walker's critical FALSE PASS, arrived at with no unrecognized prefix
+/// anywhere in sight.
+///
+/// The fix is the same one the prefix family got — refuse, never skip — because the
+/// alternative is shipping Unicode XID tables, i.e. a second implementation of rustc's
+/// lexer, which is what produced this walker's review history. Both positions are pinned:
+/// a non-ASCII character where an identifier could START, and one where the identifier
+/// just scanned could CONTINUE.
+#[test]
+fn non_ascii_identifiers_fail_closed_rather_than_hiding_a_macro_context() {
+    for (label, snippet, shown, position) in [
+        // THE case: without the refusal this walk reports zero orphans.
+        (
+            "unicode-macro-definition",
+            "macro_rules! café { () => { mod orphan; } }\npub mod wired;\n",
+            "é",
+            "CONTINUE",
+        ),
+        (
+            "unicode-macro-invocation",
+            "pub fn f() { café!(mod orphan;); }\npub mod wired;\n",
+            "é",
+            "CONTINUE",
+        ),
+        // An ordinary Unicode identifier: legal Rust this walker refuses to read rather
+        // than half-read. A loud refusal is the doctrine; a silent half-parse is not.
+        (
+            "unicode-identifier-continue",
+            "pub fn f() { let café = 1; let _ = café; }\npub mod wired;\n",
+            "é",
+            "CONTINUE",
+        ),
+        // XID_Start itself non-ASCII, so the very first byte of the identifier is the
+        // refusal point — the START position, reached from the sanitizer's scan loop.
+        (
+            "unicode-identifier-start",
+            "pub fn f() { let _ = Übersicht; }\npub mod wired;\n",
+            "Ü",
+            "START",
+        ),
+        (
+            "non-latin-identifier-start",
+            "pub fn 模块() {}\npub mod wired;\n",
+            "模",
+            "START",
+        ),
+    ] {
+        let tree = ScratchCrate::new(&format!("non-ascii-{label}"));
+        tree.write("src/lib.rs", snippet);
+        tree.write("src/wired.rs", "pub fn f() {}\n");
+        tree.write("src/orphan.rs", "pub fn never_compiled() {}\n");
+
+        let cause = tree.expect_failure();
+        assert!(
+            cause.contains("NON-ASCII character"),
+            "case `{label}`: a non-ASCII identifier byte must fail CLOSED as a non-ASCII \
+             refusal — scanning past it is the silent false PASS; got: {cause}"
+        );
+        assert!(
+            cause.contains(shown),
+            "case `{label}`: the refusal must NAME the offending character (`{shown}`); \
+             got: {cause}"
+        );
+        assert!(
+            cause.contains(position),
+            "case `{label}`: the refusal must say which identifier position it refused \
+             ({position}); got: {cause}"
+        );
+        assert!(
+            cause.contains("ASCII-only"),
+            "case `{label}`: the refusal must state that the ASCII-only identifier rules \
+              are deliberate, so the reader does not \"fix\" them by widening a byte range; \
+             got: {cause}"
+        );
+        assert!(
+            cause.contains("src/lib.rs") && cause.contains("line 1"),
+            "case `{label}`: the refusal must name the file and line; got: {cause}"
+        );
+        assert!(
+            cause.contains("#1714"),
+            "case `{label}`: the refusal must point at the issue that owns the lexer; \
+             got: {cause}"
+        );
+    }
+}
+
+/// The refusal must not fire on a non-ASCII character that is DATA. Comments and string
+/// literals are where non-ASCII actually lives in this repository (456 of the ~540 files
+/// measured below contain some), and the sanitizer blanks them before the identifier scan
+/// can reach a byte inside one — so every one of those files must walk cleanly. A refusal
+/// branch that reds on ordinary prose is the branch someone deletes.
+#[test]
+fn non_ascii_in_comments_and_literals_is_data_not_an_identifier() {
+    let tree = ScratchCrate::new("non-ascii-data");
+    tree.write(
+        "src/lib.rs",
+        "// café — mod orphan;\n\
+         /// Übersicht: mod orphan;\n\
+         /* 模块 mod orphan; */\n\
+         pub fn f() -> &'static str { \"café mod orphan;\" }\n\
+         pub fn g() -> &'static str { r#\"Übersicht mod orphan;\"# }\n\
+         pub fn h() -> char { '模' }\n\
+         pub mod wired;\n",
+    );
+    tree.write("src/wired.rs", "pub fn f() {}\n");
+    tree.write("src/orphan.rs", "pub fn never_compiled() {}\n");
+
+    let report = tree.analyze();
+    assert_eq!(
+        report.orphans.iter().cloned().collect::<Vec<_>>(),
+        vec!["src/orphan.rs".to_string()],
+        "non-ASCII inside comments and literals is DATA: it must neither red the walk nor \
+         hide the orphan; reachable={:?}",
+        report.reachable
+    );
+}
+
 /// A raw identifier is legal in a `mod` declaration, and the `r#` is **not** part of the
 /// name: `mod r#type;` declares a module whose file is `type.rs`. Failing closed here
 /// would be a real false FAIL the moment someone writes `mod r#try;`, so the resolution
@@ -881,24 +1003,31 @@ pub fn g<'a>(r#match: &'a str) -> &'a str { r#match }
     );
 }
 
-/// The anti-vacuity complement to [`unrecognized_literal_prefix_fails_closed`]: a
-/// refusal branch that reds on ORDINARY Rust is the branch someone deletes, and deleting
-/// it re-opens the whole false-PASS family. So the lexer is measured against every real
-/// `.rs` file in the two crates it serves — `cqlite-core/src` (this guard's subject) and
-/// `cqlite-cli/src` (#1502's subject, which will drive the same walker) — and must refuse
-/// none of them.
+// ---------------------------------------------------------------------------
+// Real-corpus anti-vacuity measurement
+// ---------------------------------------------------------------------------
+
+/// Every real `.rs` file in the two crates this walker serves — `cqlite-core/src` (its
+/// subject) and `cqlite-cli/src` (#1502's subject, which will drive the same walker).
 ///
-/// Measured when this landed: 1400 `.rs` files across the whole workspace produced
-/// exactly one refusal, and that one is correct (a rust-script file whose shebang makes
-/// `#\!` an invalid Rust escape, outside any crate's `src`).
-#[test]
-fn the_prefix_refusal_never_reds_ordinary_rust() {
+/// Nothing here is allowed to swallow a filesystem error. `read_dir`'s iterator yields a
+/// `Result` PER ENTRY, and the idiomatic-looking `entries.flatten()` DISCARDS the `Err`
+/// arm: a directory whose entries fail to stat would silently shrink the census while the
+/// count floor below still passed — a vacuous pass in the very measurement that exists to
+/// prove the refusals are not over-broad. Same for `Path::is_dir()`, which answers `false`
+/// on an IO error, so the entry's `file_type()` is asked instead and its error propagated.
+fn real_rust_corpus() -> Vec<PathBuf> {
     fn collect(dir: &PathBuf, out: &mut Vec<PathBuf>) {
         let entries =
             fs::read_dir(dir).unwrap_or_else(|e| panic!("cannot read {}: {e}", dir.display()));
-        for entry in entries.flatten() {
+        for entry in entries {
+            let entry =
+                entry.unwrap_or_else(|e| panic!("cannot read an entry of {}: {e}", dir.display()));
             let path = entry.path();
-            if path.is_dir() {
+            let file_type = entry
+                .file_type()
+                .unwrap_or_else(|e| panic!("cannot stat {}: {e}", path.display()));
+            if file_type.is_dir() {
                 collect(&path, out);
             } else if path.extension().map(|e| e == "rs").unwrap_or(false) {
                 out.push(path);
@@ -926,21 +1055,110 @@ fn the_prefix_refusal_never_reds_ordinary_rust() {
         "only {} files probed — the census collapsed, so this test proved nothing",
         files.len()
     );
+    files
+}
 
+/// Read a corpus file, refusing to guess at an unreadable one.
+fn read_corpus_file(path: &PathBuf) -> String {
+    fs::read_to_string(path).unwrap_or_else(|e| panic!("cannot read {}: {e}", path.display()))
+}
+
+/// The anti-vacuity complement to [`unrecognized_literal_prefix_fails_closed`]: a
+/// refusal branch that reds on ORDINARY Rust is the branch someone deletes, and deleting
+/// it re-opens the whole false-PASS family. So the lexer is measured against every real
+/// `.rs` file in the two crates it serves and must refuse none of them.
+///
+/// Measured when this landed: 1400 `.rs` files across the whole workspace produced
+/// exactly one refusal, and that one is correct (a rust-script file whose shebang makes
+/// `#!` an invalid Rust escape, outside any crate's `src`).
+#[test]
+fn the_prefix_refusal_never_reds_ordinary_rust() {
+    let files = real_rust_corpus();
     let mut refusals = Vec::new();
     for file in &files {
-        let text = fs::read_to_string(file)
-            .unwrap_or_else(|e| panic!("cannot read {}: {e}", file.display()));
-        if let Err(cause) = mod_reachability::sanitize(&text) {
+        if let Err(cause) = mod_reachability::sanitize(&read_corpus_file(file)) {
             refusals.push(format!("{}: {cause}", file.display()));
         }
     }
     assert!(
         refusals.is_empty(),
-        "the lexer refused {} real Rust file(s); an over-broad refusal is the branch \
+        "the lexer refused {} of {} real Rust file(s); an over-broad refusal is the branch \
          someone deletes:\n{}",
         refusals.len(),
+        files.len(),
         refusals.join("\n")
+    );
+}
+
+/// The same measurement for the NON-ASCII identifier refusal, which needs its own case
+/// because non-ASCII is *common* in this repository's real code — em dashes and accented
+/// words in comments, doc comments and string literals — while being *rare* in the one
+/// position the refusal covers. If the refusal fired on data, this guard would red on
+/// hundreds of ordinary files and be deleted within a week.
+///
+/// Three properties, so a pass cannot be vacuous:
+/// 1. a large majority of the corpus genuinely CONTAINS non-ASCII bytes (asserted, not
+///    assumed — otherwise the probe would be measuring ASCII files and proving nothing);
+/// 2. no such file is refused;
+/// 3. each one's SANITIZED text is pure ASCII and the same byte length as the input, i.e.
+///    every non-ASCII byte went through the blanking path rather than past the scan. That
+///    is the invariant `parse_mod_decls`, `find_mod_token` and `ident_token` rely on when
+///    they apply ASCII-only identifier rules to sanitized text.
+#[test]
+fn the_non_ascii_identifier_refusal_never_reds_ordinary_rust() {
+    let files = real_rust_corpus();
+    let mut with_non_ascii = 0usize;
+    let mut refusals = Vec::new();
+    let mut leaked = Vec::new();
+
+    for file in &files {
+        let text = read_corpus_file(file);
+        if text.is_ascii() {
+            continue;
+        }
+        with_non_ascii += 1;
+        match mod_reachability::sanitize(&text) {
+            Err(cause) => refusals.push(format!("{}: {cause}", file.display())),
+            Ok(sanitized) => {
+                if !sanitized.text.is_ascii() || sanitized.text.len() != text.len() {
+                    leaked.push(file.display().to_string());
+                }
+            }
+        }
+    }
+
+    // Property 1: the hazard is actually present in the corpus.
+    assert!(
+        with_non_ascii >= 100,
+        "only {with_non_ascii} of {} corpus files contain non-ASCII bytes — the probe is \
+         measuring ASCII files and proves nothing about the non-ASCII refusal",
+        files.len()
+    );
+    // Property 2: it never fires on them.
+    assert!(
+        refusals.is_empty(),
+        "the non-ASCII refusal fired on {} of {with_non_ascii} real Rust file(s) that carry \
+         non-ASCII text; a refusal that reds ordinary prose is the branch someone deletes, \
+         so this is a DESIGN problem, not a file to fix:\n{}",
+        refusals.len(),
+        refusals.join("\n")
+    );
+    // Property 3: every one of those bytes was blanked, offsets preserved.
+    assert!(
+        leaked.is_empty(),
+        "{} file(s) sanitized to text that is not pure ASCII (or changed byte length), so a \
+         non-ASCII byte reached code position unrefused — the downstream parsers' \
+         ASCII-only identifier rules would split an identifier around it:\n{}",
+        leaked.len(),
+        leaked.join("\n")
+    );
+
+    // The measurement itself, so a reader of the test output sees what was covered rather
+    // than trusting the assertions' silence.
+    eprintln!(
+        "non-ASCII refusal census: {} real .rs files scanned, {with_non_ascii} carried \
+         non-ASCII bytes, 0 refusals",
+        files.len()
     );
 }
 

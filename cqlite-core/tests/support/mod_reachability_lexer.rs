@@ -41,6 +41,22 @@
 //!
 //! A bare `'` is a char literal **or** a lifetime/label (`'a`, `'static`, and the raw
 //! lifetime `'r#fn`); telling them apart is [`scan_char_or_lifetime`]'s job.
+//!
+//! # Fail closed on a NON-ASCII identifier — the same boundary, one family over
+//!
+//! Rust identifiers are `XID_Start XID_Continue*`, so `café`, `Übersicht` and `模块` are
+//! all legal identifiers and `macro_rules! café { () => { mod orphan; } }` is a real macro
+//! definition. This lexer's identifier rules are **deliberately ASCII-only**
+//! ([`is_ident_start`] / [`is_ident_byte`]), because widening them means shipping (or
+//! depending on) Unicode XID tables — a second implementation of rustc's lexer, which is
+//! the mistake that produced this walker's whole review history.
+//!
+//! So the ASCII-only rules keep a **boundary**, not a blind spot: a non-ASCII byte in a
+//! position where an identifier could start or continue is an `Err`
+//! ([`refuse_non_ascii`]), exactly as an unrecognized literal prefix is. Without it the
+//! lexer would return `caf` for `café`, leave `é` to the ordinary scan, fail to recognize
+//! the macro context, and count the `mod orphan;` in the macro body as a real declaration
+//! — the silent FALSE PASS this walker exists to prevent.
 
 #![allow(dead_code)]
 
@@ -234,6 +250,9 @@ pub fn ident_token(b: &[u8], start: usize) -> IdentSpan {
 /// fail-closed branch that keeps the prefix family closed) and for a malformed or
 /// unterminated literal.
 pub fn lex_token(b: &[u8], src: &str, start: usize) -> Result<LexToken, String> {
+    // Identifier-family analogue of the unrecognized-prefix refusal below: a non-ASCII
+    // byte here could START a Unicode identifier this lexer does not model (#1714).
+    refuse_non_ascii(b, src, start, IdentPos::Start)?;
     // The unprefixed rows are looked up in exactly the same table as the prefixed ones,
     // so `"` and `'` cannot drift away from what `PREFIXES` says about them.
     if let Some(follower) = follower_of(b[start]) {
@@ -252,6 +271,10 @@ pub fn lex_token(b: &[u8], src: &str, start: usize) -> Result<LexToken, String> 
         ));
     }
     let id_end = ident_end(b, start);
+    // ...and the CONTINUE position. `ident_end` stops at the first non-ident ASCII byte,
+    // so without this the identifier `café` would lex as `caf` and its macro context
+    // would go unrecognized (#1714).
+    refuse_non_ascii(b, src, id_end, IdentPos::Continue)?;
     let ident = &src[start..id_end];
     let Some(next) = b.get(id_end).copied() else {
         return Ok(LexToken::Ident(ident_token(b, start)));
@@ -317,6 +340,70 @@ fn scan_form(
             Err(unrecognized(src, start, ident, b'#'))
         }
     }
+}
+
+/// Which identifier position a non-ASCII byte was met in. Both are refusals; the
+/// distinction is diagnostic only — it tells the reader whether the character would have
+/// begun an identifier or extended the one just scanned.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum IdentPos {
+    /// A byte where an identifier could START (`café`'s `c` position).
+    Start,
+    /// A byte where the identifier just scanned could CONTINUE (`café`'s `é`).
+    Continue,
+}
+
+impl IdentPos {
+    fn describe(self) -> &'static str {
+        match self {
+            IdentPos::Start => "could START a Rust identifier",
+            IdentPos::Continue => "could CONTINUE the identifier just scanned",
+        }
+    }
+}
+
+/// Refuse a non-ASCII byte met where an identifier could start or continue.
+///
+/// **This is the identifier-family analogue of [`unrecognized`]** (the literal-prefix
+/// refusal): the same fail-closed boundary, one lexical family over. See the module docs
+/// for why the identifier rules are ASCII-only and why widening them is the wrong fix.
+///
+/// `Ok(())` for `at` past the end of `b` and for every ASCII byte — non-ASCII text in
+/// comments and literals never reaches here, because the sanitizer blanks and skips those
+/// spans before the scan can reach a byte inside one.
+pub fn refuse_non_ascii(b: &[u8], src: &str, at: usize, pos: IdentPos) -> Result<(), String> {
+    let Some(&byte) = b.get(at) else {
+        return Ok(());
+    };
+    if byte.is_ascii() {
+        return Ok(());
+    }
+    Err(non_ascii_refusal(src, at, byte, pos))
+}
+
+/// `byte` is passed in rather than re-read from `src`, so this cannot index out of bounds
+/// even if a caller ever hands it a `src` that is not `b`'s text.
+fn non_ascii_refusal(src: &str, at: usize, byte: u8, pos: IdentPos) -> String {
+    // The byte is shown as a CHARACTER when the offset is a UTF-8 boundary (it always is
+    // in practice: everything scanned before it was ASCII), and as a raw byte otherwise,
+    // so the diagnostic can never itself mangle the input it is reporting.
+    let shown = match src.get(at..).and_then(|rest| rest.chars().next()) {
+        Some(ch) => format!("`{ch}` (U+{:04X})", ch as u32),
+        None => format!("byte 0x{byte:02X}"),
+    };
+    format!(
+        "line {}: {shown} is a NON-ASCII character in a position that {}. This lexer's \
+         identifier rules are deliberately ASCII-only, while Rust permits Unicode \
+         identifiers (`XID_Start XID_Continue*`), so scanning past it could misclassify a \
+         macro context — `macro_rules! café {{ () => {{ mod orphan; }} }}` would be read as \
+         ordinary code and the `mod orphan;` in its body counted as a real declaration, \
+         the silent FALSE PASS this walker exists to prevent (FAIL-CLOSED — see #1714).\n\
+         Remedy: rename the identifier to ASCII, or teach this lexer real Unicode XID \
+         identifier rules (tests/support/mod_reachability_lexer.rs) — which means Unicode \
+         tables, not a wider byte range.",
+        line_of(src, at),
+        pos.describe()
+    )
 }
 
 fn unrecognized(src: &str, start: usize, ident: &str, follower: u8) -> String {
@@ -545,14 +632,22 @@ pub fn is_raw_string_prefix(b: &[u8], after_prefix: usize) -> bool {
 // Shared byte helpers
 // ---------------------------------------------------------------------------
 
+/// ASCII-only by design — the boundary that makes that sound is [`refuse_non_ascii`],
+/// which refuses (never skips) a non-ASCII byte in this position. See the module docs.
 pub fn is_ident_start(c: u8) -> bool {
     c == b'_' || c.is_ascii_alphabetic()
 }
 
+/// ASCII-only by design; see [`is_ident_start`] and [`refuse_non_ascii`].
 pub fn is_ident_byte(c: u8) -> bool {
     c == b'_' || c.is_ascii_alphanumeric()
 }
 
+/// One past the last identifier byte at `start`.
+///
+/// Stops at the first byte [`is_ident_byte`] rejects, which includes every non-ASCII byte
+/// — so a caller that may see raw source must pair this with [`refuse_non_ascii`] at the
+/// returned offset rather than treat the stop as a token boundary.
 pub fn ident_end(b: &[u8], start: usize) -> usize {
     let mut j = start;
     while j < b.len() && is_ident_byte(b[j]) {

@@ -56,7 +56,10 @@
 //! what a macro expands to), a symlink under the source directory (see
 //! [`enumerate_rs_files`] — a silently-skipped subtree is a census with a hole in it), an
 //! unterminated comment or literal, an unreadable file, an unknown escape, an
-//! unrecognized literal or identifier prefix (see [`lexer`]), and a
+//! unrecognized literal or identifier prefix (see [`lexer`]), a **non-ASCII byte in a
+//! position where an identifier could start or continue** (see
+//! [`lexer::refuse_non_ascii`] — Rust permits Unicode identifiers, this lexer's rules are
+//! ASCII-only, and scanning past one could misclassify a macro context), and a
 //! `mod name;` that resolves to neither candidate file. A skip is the vacuous pass this
 //! guard exists to prevent.
 
@@ -72,7 +75,10 @@ use std::collections::{BTreeSet, VecDeque};
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use lexer::{ident_token, is_ident_byte, is_ident_start, lex_token, line_of, skip_ws, LexToken};
+use lexer::{
+    ident_token, is_ident_byte, is_ident_start, lex_token, line_of, refuse_non_ascii, skip_ws,
+    IdentPos, LexToken,
+};
 
 /// What to analyze. Crate-agnostic on purpose — see the module docs (#1502).
 #[derive(Debug, Clone)]
@@ -343,6 +349,13 @@ pub fn sanitize(src: &str) -> Result<Sanitized, String> {
                 LexToken::Lifetime { end } => i = end,
             }
         } else {
+            // Identifier-family analogue of the unrecognized-prefix refusal above: this
+            // byte is in CODE position (every comment and literal reached so far was
+            // blanked and skipped), and Rust allows a Unicode identifier there — which
+            // this lexer's ASCII-only rules do not model. Refusing, rather than scanning
+            // past, is what stops `macro_rules! café { () => { mod orphan; } }` from
+            // being read as ordinary code (#1714).
+            refuse_non_ascii(b, src, i, IdentPos::Start)?;
             i += 1;
         }
     }
@@ -350,6 +363,25 @@ pub fn sanitize(src: &str) -> Result<Sanitized, String> {
     let text = String::from_utf8(out).map_err(|e| {
         format!("sanitized text is not valid UTF-8 ({e}) — refusing to parse (FAIL-CLOSED)")
     })?;
+    // Backstop for the identifier-family boundary above, and the reason every downstream
+    // parser may rely on ASCII identifier rules: blanking writes ASCII spaces and a
+    // non-ASCII byte in code position is refused, so a SUCCESSFUL sanitize is ASCII-only
+    // by construction. Asserting that invariant beats arguing it — if some future lexer
+    // path lets a non-ASCII byte through in code position, `parse_mod_decls` and
+    // `find_mod_token` would silently split an identifier around it (#1714).
+    if let Some(at) = text.as_bytes().iter().position(|c| !c.is_ascii()) {
+        return Err(format!(
+            "line {}: sanitized text still holds a non-ASCII byte (0x{:02X}) after every \
+             comment and literal was blanked. This lexer's identifier rules are ASCII-only, \
+             so scanning it would split an identifier around that byte and could \
+             misclassify a macro context — the silent FALSE PASS this walker exists to \
+             prevent (FAIL-CLOSED — see #1714).\n\
+             Remedy: report this as a lexer gap — a non-ASCII byte in code position should \
+             already have been refused at the scan (tests/support/mod_reachability.rs).",
+            line_of(&text, at),
+            text.as_bytes()[at]
+        ));
+    }
     Ok(Sanitized { text, literals })
 }
 
