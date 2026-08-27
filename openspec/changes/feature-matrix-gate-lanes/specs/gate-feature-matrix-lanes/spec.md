@@ -78,6 +78,12 @@ an empty subject set reporting OK. Its `--lib` analogue SHALL be used instead: e
 SHALL be **observed** and SHALL have executed a **non-zero** test count, and the passing verdict SHALL print
 those counts as an affirmative measurement.
 
+**That guard's SUBJECT SET SHALL itself be derived from `cargo metadata`, never hard-coded** (roborev
+round-7 finding). `--bins` selects EVERY binary target, so a hard-coded list of unittest paths beside a
+wildcard selector is a second registry that drifts silently: adding a binary would let it execute zero
+tests while the guard still reported OK — the exact vacuous pass the guard exists to prevent. A failed
+derivation SHALL record FAIL, never a partial subject list, which would shrink the guard the same way.
+
 The derivation machinery (`_package_test_targets`, `check_declared_test_targets_observed`) SHALL be
 **retained**, so that widening the lane back once #3384 is fixed is a small change; the retained-but-uncalled
 reconciliation SHALL say in code that it is retained and what will call it again.
@@ -103,6 +109,12 @@ its per-lane fixture SKIP predicates.
 - **THEN** the Flight component records FAIL and the run's `RESULT:` is `FAIL`
 
 #### Scenario: The Flight component cannot pass without executing tests
+#### Scenario: A newly added binary target cannot escape the zero-tests guard
+- **GIVEN** a new `[[bin]]` target added to `cqlite-flight` whose unit tests execute zero tests
+- **WHEN** the Flight component runs
+- **THEN** the guard's subject set — derived from `cargo metadata` — includes that binary
+- **AND** the component records FAIL, with no edit to `scripts/agent-gate.sh` having been required
+
 - **GIVEN** an invocation of the Flight component whose `--lib` unit suite compiles but executes zero tests
 - **WHEN** the component completes
 - **THEN** it records FAIL, naming the unittest target and the zero-tests condition, and never PASS
@@ -143,9 +155,15 @@ The full gate SHALL include a `legacy-heuristics` component that does both of th
    feature set surfaces here;
 2. **executes** the `legacy-heuristics`-gated tests, `--lib` included.
 
-The set of test targets executed SHALL be **derived mechanically from the committed source** (the
-`cqlite-core/tests/*.rs` files that reference `legacy-heuristics`), never hard-coded, so adding a sixth
-gated test file extends the lane without a second edit.
+The set of test targets executed SHALL be **derived mechanically**, never hard-coded, so adding a sixth
+gated test target extends the lane without a second edit.
+
+**The candidate set SHALL come from `cargo metadata`, not from a `tests/*.rs` glob** (roborev round-7
+finding). A target is included when EITHER its `required-features` name `legacy-heuristics` (cargo gates
+it in the manifest, and its source may carry no cfg string at all) OR its own `src_path` contains a cfg
+reference to the feature. An earlier cut of this requirement specified the glob, which cannot see either a
+manifest-gated target or a **directory-style** one (`tests/foo/main.rs`) — so the requirement itself, not
+merely the code, understated the derivation it promised.
 
 The derivation SHALL be **fail-closed**: if it yields zero targets, the component SHALL record FAIL naming
 the derivation, and SHALL NOT record PASS. A lane with no subject has no verdict to give. The component
@@ -164,15 +182,29 @@ component, so a lane that only compiles adds no coverage. The distinguishing pro
   execution, not compilation, is what caught it
 
 #### Scenario: The target derivation finds no subject
-- **GIVEN** a tree in which no `cqlite-core/tests/*.rs` file references `legacy-heuristics`
+- **GIVEN** a tree in which no `cqlite-core` test target references or requires `legacy-heuristics`
 - **WHEN** the `legacy-heuristics` component runs
 - **THEN** it records FAIL and its output names the failed derivation
 - **AND** it does not record PASS or SKIP
 
+#### Scenario: The target enumeration itself cannot be taken
+- **GIVEN** a checkout in which `cargo metadata` cannot enumerate `cqlite-core`'s test targets
+- **WHEN** the component runs
+- **THEN** it records FAIL naming the failed derivation
+- **AND** it SHALL NOT fall back to a `tests/*.rs` glob, because that fallback would silently omit
+  manifest-gated and directory-style targets while appearing to succeed
+
 #### Scenario: A new gated test file is picked up without editing the gate
-- **GIVEN** a newly added `cqlite-core/tests/*.rs` carrying a `legacy-heuristics` cfg site
+- **GIVEN** a newly added `cqlite-core` test target carrying a `legacy-heuristics` cfg site
 - **WHEN** the component runs
 - **THEN** that target is among the ones executed, with no change to `scripts/agent-gate.sh`
+
+#### Scenario: A target gated ONLY in the manifest is picked up
+- **GIVEN** a `cqlite-core` test target declared with `required-features = ["legacy-heuristics"]` whose
+  source contains no `legacy-heuristics` cfg string
+- **WHEN** the component runs
+- **THEN** that target is among the ones executed, because membership is decided by `required-features`
+  as well as by a cfg site
 
 ### Requirement: The full gate compiles `parquet` and `delta-scan` in mutual isolation
 
