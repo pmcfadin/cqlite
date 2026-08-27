@@ -194,6 +194,58 @@ pub async fn collect_query_result(
 ) -> Result<cqlite_core::query::result::QueryResult> {
     use cqlite_core::query::result::{QueryResult, StreamingConfig};
 
+    // Issue #1695 — the operator's budget must cover THIS loop, not just setup.
+    //
+    // The engine's ONE chokepoint wrapper bounds the `execute_streaming` FUTURE,
+    // i.e. stream setup and time-to-first-batch. It structurally cannot bound what
+    // happens after that future returns, and what happens after it returns is where
+    // a CLI query spends ~all of its time: the `next_async()` loop below drives the
+    // incremental scan. Since the CLI is the only consumer that sets
+    // `performance.query_timeout_ms`, leaving consumption unbounded would leave the
+    // knob a placebo on the exact runaway full scan #1695 exists to bound.
+    //
+    // This is a SECOND bound at a DIFFERENT layer, not a second bound on the engine
+    // path, and it does NOT restart the engine's clock: the two run concurrently
+    // from nearly the same instant with the same duration, so setup overrunning the
+    // budget trips both at once and the caller sees `QueryTimeout` either way. The
+    // engine entry point remains bounded exactly once.
+    let budget = database.config().query.max_execution_time;
+    let started = std::time::Instant::now();
+    let collect = collect_streamed_rows(database, query, display_limit);
+
+    // `Duration::ZERO` is the documented "no timeout" sentinel — await directly
+    // rather than arming a zero timer, which would elapse at the first yield.
+    if budget.is_zero() {
+        return collect.await;
+    }
+    match tokio::time::timeout(budget, collect).await {
+        Ok(result) => result,
+        // Dropping `collect` drops the iterator, which closes the channel and
+        // retires the producer — the same teardown the `--limit` break relies on.
+        Err(_elapsed) => Err(anyhow::Error::new(cqlite_core::Error::QueryTimeout {
+            operation: "cli.query.collect".to_string(),
+            // MEASURED, never assumed equal to the budget: a blocked poll can
+            // overshoot, and the real figure is what tells an operator "budget too
+            // tight" from "one decode unit is uninterruptibly slow".
+            elapsed: started.elapsed(),
+            limit: budget,
+        })
+        .context("CLI query exceeded performance.query_timeout_ms")),
+    }
+}
+
+/// The unbounded body of [`collect_query_result`]; that caller applies the
+/// operator's budget. Kept separate so the bound wraps setup AND consumption as
+/// one future — a bound applied inside this function could not cover its own
+/// `execute_streaming` await.
+#[cfg(feature = "state_machine")]
+async fn collect_streamed_rows(
+    database: &Database,
+    query: &str,
+    display_limit: Option<usize>,
+) -> Result<cqlite_core::query::result::QueryResult> {
+    use cqlite_core::query::result::{QueryResult, StreamingConfig};
+
     let mut iter = database
         .execute_streaming(query, StreamingConfig::default())
         .await?;

@@ -48,6 +48,7 @@ mod datasets_root;
 
 use std::time::Duration;
 
+use cqlite_cli::commands::collect_query_result;
 use cqlite_cli::config::Config as CliConfig;
 use cqlite_cli::core_config::to_core_config;
 use cqlite_cli::error::{classify_error, CliExitCode};
@@ -150,6 +151,84 @@ async fn query_timeout_ms_bounds_a_cli_query_and_maps_to_exit_code_5() {
         exit,
         CliExitCode::QueryExecutionError,
         "a query-budget elapse must map to the query-execution exit code"
+    );
+}
+
+/// The ACTUAL CLI query path (`commands::collect_query_result`, which is what
+/// `cqlite query` and `cqlite export` call) must honour the budget — not just
+/// `Database::execute`.
+///
+/// This is the lane that matters most for #1695's stated problem. The CLI routes
+/// queries through `execute_streaming` + a `next_async()` loop, and the engine's
+/// chokepoint wrapper can only bound the SETUP future; everything after it returns
+/// is where a CLI scan spends its time. Without the CLI-layer bound the operator's
+/// knob is a placebo on exactly the runaway full scan it exists to stop, even
+/// though `Database::execute` (covered above) is correctly bounded.
+///
+/// SCOPE, stated rather than implied: this asserts the operator CONTRACT — a
+/// timeout error and exit 5 — and deliberately does NOT assert which layer tripped.
+/// With a 1ms budget either the engine's setup bound or the CLI's collection bound
+/// may fire first, and pinning that would be a wall-clock race. The companion test
+/// below is the deterministic half: it fails if the CLI bound is applied
+/// unconditionally.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_cli_collection_path_is_bounded_by_query_timeout_ms() {
+    let Some(db) =
+        open_via_cli_config("test_basic", "simple_table", "basic-types.cql", false, 1).await
+    else {
+        return;
+    };
+
+    let outcome = collect_query_result(&db, "SELECT * FROM test_basic.simple_table", None).await;
+    let err = match outcome {
+        Err(e) => e,
+        Ok(result) => panic!(
+            "REGRESSION (issue #1695): performance.query_timeout_ms = 1 was IGNORED on the              CLI's OWN query path — collect_query_result returned {} rows. The engine bounds              only stream setup, so an unbounded next_async() loop leaves the knob a placebo              on the CLI, which is the only consumer that sets it.",
+            result.rows.len()
+        ),
+    };
+
+    let timeout = err
+        .downcast_ref::<Error>()
+        .map(|e| matches!(e, Error::QueryTimeout { .. }))
+        .unwrap_or(false);
+    assert!(
+        timeout,
+        "the budget must surface as the distinct timeout error through the CLI path,          not as an unrelated failure: {err:#}"
+    );
+    assert_eq!(
+        classify_error(&err),
+        CliExitCode::QueryExecutionError,
+        "a CLI query-budget elapse must map to the query-execution exit code"
+    );
+}
+
+/// The deterministic companion: `query_timeout_ms = 0` must leave the CLI's OWN
+/// collection path unbounded. Uses a COMMITTED fixture, so it can never skip, and
+/// it fails if the CLI-layer bound ever stops honouring the `Duration::ZERO`
+/// sentinel (e.g. by arming a zero timer, which elapses at the first yield).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn zero_query_timeout_ms_leaves_the_cli_collection_path_unbounded() {
+    let db = open_via_cli_config(
+        "test_comp",
+        "incompressible_uncompressed_chunk",
+        "compression-parity.cql",
+        true,
+        0,
+    )
+    .await
+    .expect("the COMMITTED fixture can never skip");
+
+    let result = collect_query_result(
+        &db,
+        "SELECT * FROM test_comp.incompressible_uncompressed_chunk",
+        None,
+    )
+    .await
+    .expect("query_timeout_ms = 0 must mean UNBOUNDED on the CLI path too");
+    assert!(
+        !result.rows.is_empty(),
+        "0-rows-when-the-fixture-is-present is a failure, not a pass (#3220)"
     );
 }
 

@@ -185,6 +185,27 @@ async fn bound_tracked<T>(
     let Some(deadline) = started.checked_add(limit) else {
         return (fut.await, true);
     };
+    bound_tracked_until(deadline, started, limit, operation, fut).await
+}
+
+/// [`bound_tracked`] with the deadline supplied ABSOLUTELY rather than derived from
+/// `Instant::now() + limit`.
+///
+/// This split is not a test-only seam — it is the whole implementation, and the
+/// production caller above is its only non-test caller. It exists because the
+/// "already-expired budget" case cannot otherwise be tested by CONSTRUCTION: a test
+/// passing `Duration::from_nanos(1)` is asserting that the clock advances at least a
+/// nanosecond between computing the deadline and the first poll, which is true in
+/// practice and guaranteed by nothing (roborev round 5). With the deadline injected
+/// in the past, the short-circuit is decided by construction and no clock reading
+/// can change the outcome.
+async fn bound_tracked_until<T>(
+    deadline: Instant,
+    started: Instant,
+    limit: Duration,
+    operation: &str,
+    fut: BoundedFuture<'_, T>,
+) -> (Result<T>, bool) {
     // `elapsed` is MEASURED, never assumed equal to `limit`: a starved or blocked
     // poll can overshoot the deadline substantially, and the real figure is what
     // an operator needs in order to tell "budget too tight" from "one decode unit
@@ -495,9 +516,19 @@ mod tests {
     async fn an_expired_budget_reports_the_inner_future_as_unstarted() {
         let polled = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
         let seen = std::sync::Arc::clone(&polled);
-        // `Duration::from_nanos(1)` is expired by the time the first poll runs.
-        let (out, started): (Result<u32>, bool) = bound_tracked(
-            Duration::from_nanos(1),
+        // The deadline is injected ONE SECOND IN THE PAST, so "already expired" holds
+        // BY CONSTRUCTION. The earlier form passed `Duration::from_nanos(1)` and
+        // relied on the clock advancing a nanosecond between deriving the deadline
+        // and the first poll — true in practice, guaranteed by nothing, and a flake
+        // the moment it is not (roborev round 5). The `limit` stays generous so the
+        // TIMER cannot be what fires: this pins the poll-time deadline check.
+        let past = Instant::now()
+            .checked_sub(Duration::from_secs(1))
+            .expect("the process clock is at least 1s past its origin");
+        let (out, started): (Result<u32>, bool) = bound_tracked_until(
+            past,
+            past,
+            Duration::from_secs(30),
             "test.unstarted",
             Box::pin(async move {
                 seen.store(true, std::sync::atomic::Ordering::SeqCst);
