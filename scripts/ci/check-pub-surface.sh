@@ -132,7 +132,20 @@ TARGET_DIR="${CARGO_TARGET_DIR:-$REPO_ROOT/target}"
 DOC_ROOT="$TARGET_DIR/doc/$CRATE_DOC_NAME"
 
 WORK_DIR="$(mktemp -d "${TMPDIR:-/tmp}/pub-surface.XXXXXX")"
-cleanup() { rm -rf "$WORK_DIR"; }
+# Set once the mkdir-mutex fallback (see step 2) has taken the lock; empty otherwise.
+DOC_LOCK_DIR=""
+# NOTE: this MUST end with a command that succeeds. It runs from the EXIT trap, and
+# bash takes the trap's final status as the script's exit status when the script
+# falls off the end — a bare `[ -n "$X" ] && rmdir ...` therefore turned a PASSING
+# run into exit 1 whenever the fallback lock was not in use.
+release_doc_lock() {
+  if [ -n "$DOC_LOCK_DIR" ]; then
+    rmdir "$DOC_LOCK_DIR" 2>/dev/null || true
+    DOC_LOCK_DIR=""
+  fi
+  return 0
+}
+cleanup() { release_doc_lock; rm -rf "$WORK_DIR"; return 0; }
 trap cleanup EXIT
 
 # ---------------------------------------------------------------------------
@@ -524,7 +537,49 @@ fi
 
 # ---------------------------------------------------------------------------
 # 2) Build the docs (default features) and locate the emitted item tree.
+#
+#    MUTUAL EXCLUSION FIRST. The doc tree lives in a SHARED `CARGO_TARGET_DIR`, and
+#    this step deletes and rebuilds it (the delete is required: a tree left by an
+#    earlier run with different features would contribute stale modules). Two runs
+#    sharing a target dir — a gate alongside a self-test, two lanes pointed at one
+#    target dir — can therefore interleave so that one replaces the tree between the
+#    other's build and its scan, and a changed worktree gets verified against
+#    ANOTHER worktree's docs. That is a false PASS, and it is not theoretical: it
+#    was observed during this issue's own review, as a self-test run concurrently
+#    with a gate.
+#
+#    So delete -> build -> enumerate is held under a mutex keyed to the resolved doc
+#    directory. `flock(1)` is preferred (self-releasing, immune to a stale lock left
+#    by a SIGKILLed run) but is util-linux and ABSENT ON macOS, which is a gate host
+#    here; the fallback is an atomic `mkdir` mutex, which is portable to both. The
+#    one property both paths share, and the only one that matters: this step NEVER
+#    proceeds unlocked. A lock that cannot be acquired inside the wait window is a
+#    named FAIL carrying the lock path and the one-line remedy — loud and
+#    actionable, never a silent overlap.
 # ---------------------------------------------------------------------------
+DOC_LOCK="$TARGET_DIR/.pub-surface-doc.lock"
+DOC_LOCK_WAIT_SECS=900
+mkdir -p "$TARGET_DIR" 2>/dev/null || true
+
+if command -v flock >/dev/null 2>&1; then
+  exec 9>"$DOC_LOCK" || fail "cannot create the doc-tree lock file $DOC_LOCK. Refusing to build into a shared doc directory unlocked — a concurrent run could swap the tree between this build and its scan."
+  if ! flock -w "$DOC_LOCK_WAIT_SECS" 9; then
+    fail "timed out after ${DOC_LOCK_WAIT_SECS}s waiting for the doc-tree lock $DOC_LOCK. Another pub-surface run is using $DOC_ROOT. Refusing to proceed unlocked (a concurrent run could swap the tree between this build and its scan) — re-run when it finishes."
+  fi
+else
+  # No flock (macOS): an atomic mkdir mutex. A run killed with SIGKILL can leave the
+  # directory behind; that surfaces as the timeout FAIL below, naming the path, which
+  # is the right trade — a stale-lock heuristic would be one more thing that can be
+  # wrong in the permissive direction.
+  _lock_deadline=$(( $(date +%s) + DOC_LOCK_WAIT_SECS ))
+  until mkdir "$DOC_LOCK.d" 2>/dev/null; do
+    [ "$(date +%s)" -lt "$_lock_deadline" ] || fail "timed out after ${DOC_LOCK_WAIT_SECS}s waiting for the doc-tree lock $DOC_LOCK.d. Either another pub-surface run is using $DOC_ROOT, or a killed run left the lock behind. Refusing to proceed unlocked; if no other run is active, remove it:
+       rmdir '$DOC_LOCK.d'"
+    sleep 1
+  done
+  DOC_LOCK_DIR="$DOC_LOCK.d"
+fi
+
 DOC_LOG="$WORK_DIR/cargo-doc.log"
 
 # Remove the previous emission first: a doc tree left behind by an earlier run with
