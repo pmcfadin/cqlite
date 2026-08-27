@@ -12,7 +12,7 @@
  * - [x] Test: Error message contains original error text
  */
 
-const { Database } = require('../lib/index.js');
+const { Database, _errorContractProbe } = require('../lib/index.js');
 const { skipIfNoDatasets, getNonexistentPath } = require('./helpers.js');
 
 describe('Error Mapping Tests (Issue #297)', () => {
@@ -148,5 +148,95 @@ describe('Error Mapping Tests (Issue #297)', () => {
       expect(typeof e.isRecoverable).toBe('boolean');
       expect(e.message).toContain('closed');
     }
+  });
+});
+
+/**
+ * The shared FFI error contract (issue #1451).
+ *
+ * `cqlite_core::ffi_error_contract` is the ONE authoritative
+ * variant -> (python class, node code, category, recoverable, prefix) table.
+ * Before it, this binding derived `code` from the core `category()` while the
+ * Python binding matched the `Error` VARIANT, so the same core error had a
+ * different identity in each: `CqlParse` reported 'QUERY' here while Python
+ * raised `ParseError`, and `Timeout`/`Memory` both reported 'IO' while Python
+ * raised `TimeoutError`/`MemoryError`.
+ *
+ * These cases drive the production mapping (`to_napi_error` -> the `\0`-encoded
+ * metadata -> `enhanceError`) for variants no query can provoke, via the
+ * `_errorContractProbe` test-support surface. The Python half lives in
+ * `bindings/python/tests/test_errors.py::TestSharedErrorContract`.
+ */
+describe('Shared FFI error contract (Issue #1451)', () => {
+  // [core Error variant, expected code, expected category, expected
+  //  isRecoverable, expected message prefix]
+  const PINNED_ROWS = [
+    ['CqlParse', 'PARSE', 'Query', false, 'ParseError:'],
+    ['InvalidInput', 'INVALID_INPUT', 'Data', false, 'ValueError:'],
+    ['Timeout', 'TIMEOUT', 'System', false, 'TimeoutError:'],
+    ['Memory', 'MEMORY', 'System', true, 'MemoryError:'],
+    ['Corruption', 'PARSE', 'Data', false, 'ParseError:'],
+    ['Io', 'IO', 'System', true, 'IoError:'],
+    ['Cancelled', 'CANCELLED', 'Cancelled', false, 'CancelledError:'],
+  ];
+
+  test.each(PINNED_ROWS)(
+    '%s maps to code "%s", category "%s"',
+    (variant, code, category, isRecoverable, prefix) => {
+      expect.assertions(5);
+      try {
+        _errorContractProbe(variant);
+      } catch (e) {
+        expect(e.code).toBe(code);
+        expect(e.category).toBe(category);
+        expect(e.isRecoverable).toBe(isRecoverable);
+        expect(e.message.startsWith(prefix)).toBe(true);
+        // The null-byte metadata block is stripped from the human message.
+        expect(e.message).not.toContain('\u0000');
+      }
+    }
+  );
+
+  test('Timeout and Memory no longer collapse into the IO identity', () => {
+    expect.assertions(4);
+    const codes = {};
+    for (const variant of ['Io', 'Timeout', 'Memory']) {
+      try {
+        _errorContractProbe(variant);
+      } catch (e) {
+        codes[variant] = e.code;
+      }
+    }
+    expect(codes.Io).toBe('IO');
+    expect(codes.Timeout).not.toBe(codes.Io);
+    expect(codes.Memory).not.toBe(codes.Io);
+    expect(codes.Timeout).not.toBe(codes.Memory);
+  });
+
+  test('CqlParse is PARSE and specifically not QUERY', () => {
+    expect.assertions(2);
+    try {
+      _errorContractProbe('CqlParse');
+    } catch (e) {
+      expect(e.code).toBe('PARSE');
+      expect(e.code).not.toBe('QUERY');
+    }
+  });
+
+  test('an unknown variant name is fail-closed, never a default row', () => {
+    expect.assertions(2);
+    try {
+      _errorContractProbe('NoSuchVariant');
+    } catch (e) {
+      expect(e.message).toContain('unknown core Error variant');
+      expect(e.code).toBe('INVALID_INPUT');
+    }
+  });
+
+  test('the probe always throws (a silent success would vacuously pass)', () => {
+    // Every case above asserts INSIDE a catch block, so a probe that returned
+    // normally would make them all pass having asserted nothing.
+    expect(() => _errorContractProbe('Timeout')).toThrow();
+    expect(() => _errorContractProbe('NoSuchVariant')).toThrow();
   });
 });
