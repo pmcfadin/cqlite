@@ -10,8 +10,47 @@
 
 const fs = require('fs');
 const path = require('path');
+const { _errorContractNodeCodes } = require('../lib/index.js');
 
 const LIB_DTS_PATH = path.join(__dirname, '..', 'lib', 'index.d.ts');
+
+/**
+ * Extract the members of a string-literal union type from `.d.ts` source.
+ *
+ * Deliberately NOT a "read to the first semicolon" parse: union members carry
+ * trailing `//` comments and at least one of those comments itself contains a
+ * `;` (the `TIMEOUT` member's "never 'IO';"). Slicing at the first raw `;`
+ * truncates the union and silently UNDER-reads it — which would make a
+ * containment assert pass vacuously in the dangerous direction. So comments are
+ * stripped line-by-line FIRST, and only then is the declaration sliced at its
+ * terminating semicolon.
+ *
+ * @param {string} dts - Full `.d.ts` source text
+ * @param {string} typeName - e.g. 'ErrorCode'
+ * @returns {string[]} Sorted, deduplicated union members
+ */
+function parseStringUnion(dts, typeName) {
+  const codeOnly = dts
+    .split('\n')
+    .map((line) => {
+      const commentAt = line.indexOf('//');
+      return commentAt === -1 ? line : line.slice(0, commentAt);
+    })
+    .join('\n');
+
+  const declaration = new RegExp(`export\\s+type\\s+${typeName}\\s*=`);
+  const start = codeOnly.search(declaration);
+  if (start === -1) {
+    throw new Error(`type ${typeName} not found in index.d.ts`);
+  }
+  const end = codeOnly.indexOf(';', start);
+  if (end === -1) {
+    throw new Error(`type ${typeName} has no terminating ';' in index.d.ts`);
+  }
+  const body = codeOnly.slice(start, end);
+  const members = (body.match(/'[^']+'/g) || []).map((m) => m.slice(1, -1));
+  return [...new Set(members)].sort();
+}
 
 describe('TypeScript Definitions (Issue #312)', () => {
   let dtsContent;
@@ -243,6 +282,53 @@ describe('TypeScript Definitions (Issue #312)', () => {
 
     test('should include Cancelled error category (issue #2264)', () => {
       expect(dtsContent).toMatch(/type\s+ErrorCategory[\s\S]*?\|\s*['"]Cancelled['"]/);
+    });
+
+    /**
+     * Issue #1451: the `ErrorCode` union and the shared FFI error contract's
+     * `node_code` column are the SAME FACT WRITTEN TWICE, in two languages,
+     * maintained by hand. A new core `Error` variant is forced to get a contract
+     * row (`variant_of` is exhaustive, so it fails to compile) — but nothing
+     * forces this union to gain the row's code, so a new code could ship while
+     * TypeScript consumers are told it cannot occur. These two cases close that
+     * in BOTH directions, taking the authoritative set from the TABLE (via the
+     * `_errorContractNodeCodes` seam) rather than from a hand-written list here,
+     * which would merely be a third copy of the same fact.
+     */
+    describe('ErrorCode union is pinned to the shared contract table (issue #1451)', () => {
+      let tableCodes;
+      let unionCodes;
+
+      beforeAll(() => {
+        tableCodes = [...new Set(_errorContractNodeCodes())].sort();
+        unionCodes = parseStringUnion(dtsContent, 'ErrorCode');
+      });
+
+      test('the parse actually read the union (never a vacuous pass)', () => {
+        // A truncated/empty parse would make the containment assertions below
+        // pass while checking nothing, so the parse is asserted first.
+        expect(Array.isArray(tableCodes)).toBe(true);
+        expect(tableCodes.length).toBeGreaterThan(10);
+        expect(unionCodes.length).toBeGreaterThanOrEqual(tableCodes.length);
+        // Members declared AFTER the `;`-bearing TIMEOUT comment: their presence
+        // proves the parse did not truncate there.
+        expect(unionCodes).toContain('IO');
+        expect(unionCodes).toContain('MEMORY');
+        expect(unionCodes).toContain('CANCELLED');
+      });
+
+      test('every code the contract can emit is declared in the union', () => {
+        const missing = tableCodes.filter((code) => !unionCodes.includes(code));
+        expect(missing).toEqual([]);
+      });
+
+      test('the union declares no code the contract never emits', () => {
+        // `simple_error()` reuses INVALID_INPUT for non-core failures (e.g.
+        // "Database is closed"), which the table also emits, so the two sets are
+        // exactly equal today.
+        const extra = unionCodes.filter((code) => !tableCodes.includes(code));
+        expect(extra).toEqual([]);
+      });
     });
 
     test('CqliteError should extend Error', () => {

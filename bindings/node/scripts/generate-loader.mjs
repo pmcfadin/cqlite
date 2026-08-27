@@ -34,9 +34,11 @@ const IDENTS = [
   'StreamingResult',
   'WriteStats',
   'version',
-  // Test-support: shared FFI error-contract conformance probe (issue #1451).
-  // `lib/index.js` re-exports it as `_errorContractProbe`.
+  // Test-support: shared FFI error-contract conformance probe + the table's
+  // authoritative code set (issue #1451). `lib/index.js` re-exports them as
+  // `_errorContractProbe` / `_errorContractNodeCodes`.
   'errorContractProbe',
+  'errorContractNodeCodes',
 ]
 
 // Native binary loader template.

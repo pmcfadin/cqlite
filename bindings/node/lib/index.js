@@ -120,9 +120,28 @@ function _errorContractProbe(variant) {
   }
 }
 
+/**
+ * Test-support: the distinct `code` values the shared FFI error contract can
+ * emit (issue #1451), sorted and deduplicated.
+ *
+ * The authoritative set comes from the Rust contract table, so the `ErrorCode`
+ * union in `index.d.ts` can be asserted against it instead of against a
+ * hand-written copy (see `__test__/typescript-definitions.test.js`).
+ *
+ * Not part of the stable public API — the leading underscore marks it internal
+ * test support.
+ *
+ * @private
+ * @returns {string[]} Sorted, deduplicated error codes.
+ */
+function _errorContractNodeCodes() {
+  return nativeBinding.errorContractNodeCodes();
+}
+
 module.exports = {
   Database,
   PreparedStatement,
   version,
   _errorContractProbe,
+  _errorContractNodeCodes,
 };
