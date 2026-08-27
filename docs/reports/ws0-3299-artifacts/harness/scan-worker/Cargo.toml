@@ -1,0 +1,35 @@
+# #3299 S-sweep worker: ONE bare scan, pinned to ONE physical core, emitting
+# timestamped progress so an ALIGNED concurrency window can be computed.
+#
+# Its own `[workspace]` table keeps it OUT of the repo workspace, so the agent
+# gate never builds it and `cargo build` at the repo root is unaffected. Path
+# deps are RELATIVE (the #3026 harness hardcoded an absolute `/home/ubuntu/...`
+# path, which is unbuildable in any other checkout).
+[package]
+name = "ws0-3299-scan-worker"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[workspace]
+
+[dependencies]
+# EXACTLY the feature set `tools/ws0-corpus-gen` gives cqlite-core for
+# `ws0-scan-bench`: `cli-helpers` only, and deliberately NOT `arrow` — the bare
+# scan arm must exclude Arrow encode.
+cqlite-core = { path = "../../../../../cqlite-core", features = ["cli-helpers"] }
+# The rig's OWN scope-verification and pinned-schema helpers, reused rather than
+# copied, so the setup path here cannot drift from `ws0-scan-bench`'s.
+ws0-corpus-gen = { path = "../../../../../tools/ws0-corpus-gen" }
+clap = { version = "4.4", features = ["derive"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
+serde_json = "1"
+libc = "0.2"
+
+# Mirror the repo's [profile.release] EXACTLY (codegen-units=1, lto, panic=abort)
+# so this worker measures the same codegen `ws0-scan-bench` is built with. `strip`
+# is left off so the binary stays symbolised for any follow-up `perf record`.
+[profile.release]
+codegen-units = 1
+lto = true
+panic = "abort"
