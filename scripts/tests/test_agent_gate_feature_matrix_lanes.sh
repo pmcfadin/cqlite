@@ -17,6 +17,11 @@
 # #3229 — so a lane that reds in BOTH directions is reported as a HARNESS FAILURE,
 # never as a successful observation.
 #
+# ATTRIBUTED, NOT MERELY RED. A lane that broke for an unrelated reason produces the
+# same exit code and the same SUMMARY line as one that detected the plant, so a bare
+# red is not evidence either. Each planted run's output must NAME the planted symbol;
+# a red that does not is reported as FIRED-UNATTRIBUTED and fails the harness.
+#
 # THE REAL COMPONENT, NEVER A RETYPED COMMAND. Each direction runs
 # `bash scripts/agent-gate.sh --only <lane>`. Retyping the lane's cargo invocation
 # here would prove that a cargo command works; it would prove nothing about the gate
@@ -137,6 +142,7 @@ pub fn ah6_planted_delta_scan_marker() -> bool {
 }
 EOF
 }
+plant_marker_feature_iso_parquet='ah6_planted_delta_scan_marker'
 plant_desc_feature_iso_parquet='a #[cfg(feature = "parquet")] fn in cqlite-core/src/lib.rs calling a #[cfg(feature = "delta-scan")] fn (compiles with both features on; unresolved with parquet alone) — #1978 class'
 
 plant_feature_iso_delta_scan() {
@@ -153,6 +159,7 @@ pub fn ah6_planted_parquet_marker() -> bool {
 }
 EOF
 }
+plant_marker_feature_iso_delta_scan='ah6_planted_parquet_marker'
 plant_desc_feature_iso_delta_scan='the mirror: a #[cfg(feature = "delta-scan")] fn in cqlite-core/src/lib.rs calling a #[cfg(feature = "parquet")] fn'
 
 # A NEW file, deliberately. It does double duty: it proves the lane EXECUTES rather
@@ -169,6 +176,7 @@ fn ah6_planted_legacy_heuristics_break() {
 }
 EOF
 }
+plant_marker_legacy_heuristics='ah6_planted_legacy_heuristics_break'
 plant_desc_legacy_heuristics='a NEW cqlite-core/tests/ah6_planted_legacy.rs carrying a #[cfg(feature = "legacy-heuristics")] #[test] with an inverted assertion (also proves the DERIVED target set picks up a sixth gated file with no gate edit)'
 
 # A NEW cqlite-flight integration target, named by nothing in the gate — so a green
@@ -184,6 +192,7 @@ fn ah6_planted_flight_break() {
 }
 EOF
 }
+plant_marker_flight_tests='ah6_planted_flight_break'
 plant_desc_flight_tests='a NEW cqlite-flight/tests/ah6_planted_flight.rs with a failing #[test] — a target the gate names nowhere, so firing proves reach beyond query_semantics_flight_parity / issue_3095_flight_static_columns / the dhat target'
 
 # One uniform revert for every plant: restore tracked files, delete untracked ones.
@@ -226,6 +235,13 @@ run_direction() { # <lane> <tag>
   RC=$?
   t1=$(date +%s)
   STATUS=$(sed -n "s/^${lane}:[[:space:]]*\([A-Z][A-Z-]*\).*/\1/p" "$sf" 2>/dev/null | tail -1)
+  # The gate's per-component log, named by the SUMMARY's own `logs:` line. Used for
+  # ATTRIBUTION (below); the harness's captured stdout is the fallback, since the FAIL
+  # branch tails only 40 lines of the component log into it.
+  COMPONENT_LOG=""
+  local logdir
+  logdir=$(sed -n 's/^logs: //p' "$sf" 2>/dev/null | tail -1)
+  [ -n "$logdir" ] && [ -f "$logdir/$lane.log" ] && COMPONENT_LOG="$logdir/$lane.log"
   [ -n "$STATUS" ] || STATUS="<no ${lane} line in the summary>"
   printf '  %-7s exit=%s  summary says "%s: %s"  (%ss)\n' "$tag" "$RC" "$lane" "$STATUS" "$((t1 - t0))"
   LAST_LOG="$lg"
@@ -251,15 +267,36 @@ for lane in "${LANES[@]}"; do
   run_direction "$lane" planted
   planted_rc=$RC planted_status=$STATUS
   planted_log=$LAST_LOG
+  planted_component_log=$COMPONENT_LOG
 
   unplant || { RESULTS+=("$lane|HARNESS-ERROR|tree would not revert after the planted run"); FAILED=1; continue; }
 
   clean_ok=0;   [ "$clean_rc" = 3 ]   && [ "$clean_status" = PASS ] && clean_ok=1
   planted_ok=0; [ "$planted_rc" = 1 ] && [ "$planted_status" = FAIL ] && planted_ok=1
 
-  if [ "$clean_ok" = 1 ] && [ "$planted_ok" = 1 ]; then
-    RESULTS+=("$lane|FIRED|clean=PASS(exit 3), planted=FAIL(exit 1)")
-    echo "  => FIRED: silent on the clean tree, red on the planted break."
+  # ATTRIBUTION. A red is only evidence if it is THIS plant's red: a lane that happened
+  # to break for an unrelated reason would produce an identical exit code and an
+  # identical SUMMARY line. So the planted run's output must NAME the planted symbol.
+  # Unattributed is treated as a failure of the observation, never as a fire.
+  marker_var="plant_marker_${fn}"
+  marker="${!marker_var}"
+  attributed=0
+  if [ "$planted_ok" = 1 ]; then
+    if { [ -n "$planted_component_log" ] && grep -qF "$marker" "$planted_component_log"; } \
+       || grep -qF "$marker" "$planted_log"; then
+      attributed=1
+    fi
+  fi
+
+  if [ "$clean_ok" = 1 ] && [ "$planted_ok" = 1 ] && [ "$attributed" = 1 ]; then
+    RESULTS+=("$lane|FIRED|clean=PASS(exit 3), planted=FAIL(exit 1) naming $marker")
+    echo "  => FIRED: silent on the clean tree, red on the planted break, and the red NAMES"
+    echo "     the planted symbol ($marker) — so the red is this plant's, not an unrelated one."
+  elif [ "$clean_ok" = 1 ] && [ "$planted_ok" = 1 ]; then
+    RESULTS+=("$lane|FIRED-UNATTRIBUTED|the lane red'd but its output never names $marker")
+    echo "  => FIRED, BUT UNATTRIBUTED: the lane went red and never named the planted symbol"
+    echo "     ($marker), so the red cannot be shown to be this plant's. Not an observation."
+    FAILED=1
   elif [ "$clean_ok" = 0 ] && [ "$planted_ok" = 1 ]; then
     # Red in BOTH directions is NOT an observation: a lane that fails unconditionally
     # would look identical. Report it as the harness's own failure (#3229).
