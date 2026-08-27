@@ -180,77 +180,9 @@ impl Error {
     }
 }
 
+/// Invariant + code↔doc completeness tests live in a sibling file so this file
+/// stays pure source inside the campsite-rule target (#1116); they are logically
+/// the `tests` submodule of this module.
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::error::Error;
-
-    #[test]
-    fn as_str_is_lowercase_and_unique() {
-        let mut seen = std::collections::HashSet::new();
-        for c in ErrorCategory::ALL {
-            let s = c.as_str();
-            assert_eq!(s, s.to_ascii_lowercase());
-            assert!(seen.insert(s), "duplicate category label {s}");
-        }
-        assert_eq!(seen.len(), ErrorCategory::ALL.len());
-    }
-
-    #[test]
-    fn display_matches_as_str() {
-        for c in ErrorCategory::ALL {
-            assert_eq!(c.to_string(), c.as_str());
-        }
-    }
-
-    // Exhaustively cover every Error constructor / variant -> expected category.
-    #[test]
-    fn classify_every_error_variant() {
-        use ErrorCategory::*;
-
-        let io = std::io::Error::other("x");
-        assert_eq!(Error::from(io).obs_category(), Io);
-        assert_eq!(Error::invalid_path("p").obs_category(), Io);
-        assert_eq!(Error::Timeout("t".into()).obs_category(), Io);
-
-        assert_eq!(Error::serialization("s").obs_category(), Serialization);
-        assert_eq!(Error::type_conversion("t").obs_category(), Serialization);
-
-        assert_eq!(Error::corruption("c").obs_category(), Corruption);
-
-        assert_eq!(Error::schema("s").obs_category(), Schema);
-        assert_eq!(Error::Table("t".into()).obs_category(), Schema);
-
-        assert_eq!(Error::parse("p").obs_category(), Parsing);
-        assert_eq!(Error::cql_parse("p").obs_category(), Parsing);
-        assert_eq!(Error::invalid_format("f").obs_category(), Parsing);
-        assert_eq!(Error::unsupported_format("f").obs_category(), Parsing);
-
-        assert_eq!(Error::storage("s").obs_category(), Storage);
-        assert_eq!(Error::memory("m").obs_category(), Storage);
-        assert_eq!(Error::index("i").obs_category(), Storage);
-        assert_eq!(Error::compaction("c").obs_category(), Storage);
-        assert_eq!(Error::write_dir_locked("/d").obs_category(), Storage);
-
-        assert_eq!(Error::concurrency("c").obs_category(), Concurrency);
-        assert_eq!(Error::transaction("t").obs_category(), Concurrency);
-
-        assert_eq!(Error::constraint_violation("c").obs_category(), Constraints);
-        assert_eq!(Error::already_exists("a").obs_category(), Constraints);
-
-        assert_eq!(Error::query_execution("q").obs_category(), Query);
-        assert_eq!(Error::unsupported_query("q").obs_category(), Query);
-        assert_eq!(Error::invalid_input("i").obs_category(), Query);
-
-        assert_eq!(Error::configuration("c").obs_category(), Other);
-        assert_eq!(Error::invalid_state("s").obs_category(), Other);
-        assert_eq!(Error::invalid_operation("o").obs_category(), Other);
-        assert_eq!(Error::not_found("n").obs_category(), Other);
-        assert_eq!(Error::internal("i").obs_category(), Other);
-
-        // Issue #2264: a cooperative cancellation must be its OWN bucket, not
-        // `Io` (misleading — it is not a transport failure) and not lumped into
-        // the generic `Other` catch-all (would hide cancellation rate).
-        assert_eq!(Error::Cancelled.obs_category(), Cancelled);
-    }
-}
+#[path = "error_schema_tests.rs"]
+mod tests;
