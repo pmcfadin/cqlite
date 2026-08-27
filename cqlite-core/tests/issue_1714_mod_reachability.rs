@@ -207,13 +207,13 @@ fn every_resolution_rule_is_observed_working() {
 
     for (key, rule) in cases {
         assert!(
-            report.enumerated.contains(&key.to_string()),
+            report.enumerated.contains(*key),
             "resolution-rule case `{key}` ({rule}) is not in the census — the case moved or \
              was renamed. Repoint it at a live file; do not delete the case, the rule needs a \
              witness."
         );
         assert!(
-            report.reachable.contains(&key.to_string()),
+            report.reachable.contains(*key),
             "resolution rule NOT working: `{key}` should be reachable via {rule}, but the \
              walker did not reach it. A rule that stopped resolving turns real files into \
              false orphans (and, combined with a wide exception list, hides real ones)."
