@@ -338,6 +338,62 @@ reintroduces exactly the shared-target thrash (#2657) the SIDE placement exists 
 call. The right fix is #3380 itself, whose assert appears to be a false positive on heredoc prose
 independently of load.
 
+## The round-3 `-D warnings` fix was itself INERT until round 5 (recorded, not quietly repaired)
+
+Round 3 correctly identified that `RUSTFLAGS="-D warnings" cargo build && cargo test` guarded only the
+build. The fix put `env RUSTFLAGS="-D warnings"` on both invocations — and **that form is silently
+ignored whenever `CARGO_ENCODED_RUSTFLAGS` is set in the environment**, because cargo reads the encoded
+variable first and disregards `RUSTFLAGS` entirely when it is present. Round 5 found it (Medium).
+
+So for two rounds this lane advertised a warnings-as-errors guard that, in such an environment, enforced
+nothing — while its SUMMARY line stayed green and the report above recorded a 255 s cost increase as the
+"price of the lane actually enforcing what it claims". The cost was real; the enforcement was
+conditional on an environment variable nobody had checked.
+
+**Measured in both directions**, because the whole point of this issue is that a guard's own claim is not
+evidence. A crate containing an unused variable, with `CARGO_ENCODED_RUSTFLAGS` set to the **empty
+string**:
+
+| form | result |
+|---|---|
+| `env RUSTFLAGS="-D warnings" cargo build` (the round-3 fix) | **rc=0** — a warning, nothing more |
+| `_deny_warnings cargo build` (the round-5 fix) | **rc=101** — hard error |
+| `_deny_warnings` with a non-empty operator value (`--cfg=operator_flag`) | **rc=101**, operator flag preserved |
+
+An **empty-but-set** value is enough to suppress it, which is the quietest available route to a vacuous
+guard, so the plain branch **unsets** the encoded variable rather than assuming it is absent. Where the
+operator did set flags they are **appended to** (cargo's `\x1f` element separator) rather than replaced —
+discarding them would trade one silent behaviour change for another — and the append is announced on
+stderr, which every caller redirects into its component log.
+
+This is worth recording beyond the fix itself: **the lane's own doctrine caught the lane**. Two
+consecutive review rounds accepted `RUSTFLAGS=` as self-evidently sufficient because it *reads* as the
+CI-equivalent invocation. What surfaced it was asking the question this issue is built on — not "is the
+flag set?" but "is it in effect?" — which is the same distinction as "which lane compiles this feature?"
+versus "which lane executes it?".
+
+## The co-required-feature census miscounted its own gap (round 5, Low)
+
+The round-4 census grepped a single-line, fixed-**order** cfg pattern and counted matching
+**attributes** as "test bodies". Both error directions were live:
+
+- **over-report** — the gated `use cqlite_core::Value` import in `database_interface_tests.rs` was
+  counted as an omitted test body, so the lane announced **three** where **two** exist;
+- **under-report** (the permissive direction) — a reordered or multi-line cfg matched nothing at all.
+
+For a change whose entire deliverable is an accurate declaration of what a lane does not run, a census
+that miscounts its own gap is not a cosmetic defect. The replacement parses the attribute cluster:
+multi-line attributes accumulate until their parens balance, `feature = "…"` tokens are read in any
+order, the attached item is classified from its own first code line, and test-ness comes from an
+attribute **path ending in `test`** — a path test rather than a substring search, so a feature named
+`test-util` cannot pose as `#[test]`. Non-test gated items are reported separately and never folded into
+the body count: support code compiling out alongside its callers is not omitted coverage.
+
+A cfg carrying `not(feature = "X")` is deliberately **not classified**. It means the body compiles when X
+is **off** — the opposite of a gap — and guessing either way would be a silent miscount, so such sites
+are counted and **reported as unclassified**. That is the same principle as the `flight-tests` census:
+the omission a reader cannot see is the one that does damage.
+
 ## Cost change from the roborev round-3 `-D warnings` fix (recorded, not absorbed)
 
 Round 3 found that `RUSTFLAGS="-D warnings" cargo build && cargo test` applied the flag to the **build only**,
