@@ -1083,7 +1083,9 @@ pub const FLIGHT_ADMISSION_WAIT_SECONDS: &str = "cqlite.flight.admission.wait_se
 #[path = "catalog_registry.rs"]
 mod registry;
 
-pub use registry::{ADMISSION_METRICS, ALL_METRICS, SATURATION_GAUGES, STATS_ONLY_METRICS};
+pub use registry::{
+    StatsOnlyMetric, ADMISSION_METRICS, ALL_METRICS, SATURATION_GAUGES, STATS_ONLY_METRICS,
+};
 
 /// Catalog invariant tests live in a sibling file so `catalog.rs` stays inside
 /// the campsite-rule source target (#1116); they are logically the `tests`

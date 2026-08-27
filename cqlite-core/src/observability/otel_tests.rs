@@ -67,7 +67,7 @@ fn resolved_kinds(name: &str) -> usize {
 #[test]
 fn every_catalogued_metric_resolves_to_exactly_one_live_instrument_or_is_stats_only() {
     let stats_only: std::collections::HashSet<&str> =
-        catalog::STATS_ONLY_METRICS.iter().copied().collect();
+        catalog::STATS_ONLY_METRICS.iter().map(|m| m.name).collect();
     let mut unresolved = Vec::new();
     let mut ambiguous = Vec::new();
     let mut stats_only_but_wired = Vec::new();

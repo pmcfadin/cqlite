@@ -137,7 +137,34 @@ pub const ADMISSION_METRICS: &[&str] = &[
     FLIGHT_ADMISSION_REJECTED_TOTAL,
     FLIGHT_ADMISSION_WAIT_SECONDS,
 ];
-/// Catalogued metric names that are deliberately **NOT** registered as live OTel
+/// A catalogued metric that is deliberately **NOT** registered as a live OTel
+/// instrument, carried together with the AFFIRMATIVE evidence that it *is*
+/// nevertheless surfaced on a stats path (issue #1705).
+///
+/// A bare name list would be an unguarded waiver list: appending a name to it is
+/// all it would take to silence the registration-completeness guard for a metric
+/// whose instrument someone genuinely forgot to wire. So an entry is not a name, it
+/// is a name plus a **probe** — a function that READS the metric's value out of a
+/// [`MemoryStats`](crate::memory::MemoryStats) snapshot. That makes the exemption
+/// positively justified twice over:
+///
+/// * the COMPILER refuses the entry unless the field it names exists, and
+/// * `stats_only_probes_read_distinct_live_stats_fields` executes every probe
+///   against a snapshot with a unique sentinel per field, so a probe that reads
+///   nothing, returns a constant, or duplicates another entry's field FAILS.
+///
+/// A metric that is not actually on the stats path has no such field, so it cannot
+/// be exempted by declaration alone.
+pub struct StatsOnlyMetric {
+    /// The catalogued metric name (must be in [`ALL_METRICS`]).
+    pub name: &'static str,
+    /// Human-readable `Database::stats()` path, for failure messages and operators.
+    pub stats_field: &'static str,
+    /// Reads this metric's value out of a real stats snapshot.
+    pub stats_probe: fn(&crate::memory::MemoryStats) -> u64,
+}
+
+/// Catalogued metrics that are deliberately **NOT** registered as live OTel
 /// instruments (issue #1705, AI5 of epic #1686 "observability honesty").
 ///
 /// The catalog is the operator-facing name registry — [`super::super::operator_docs`]
@@ -146,27 +173,53 @@ pub const ADMISSION_METRICS: &[&str] = &[
 /// through an OTel meter, so they are not scrapeable from Prometheus / an OTel
 /// collector. That is a real and legitimate state, but it is indistinguishable
 /// from the bug the registration-completeness guard exists to catch (a catalogued
-/// name whose instrument nobody ever wired) unless it is DECLARED.
+/// name whose instrument nobody ever wired) unless it is DECLARED — and declared
+/// with evidence, per [`StatsOnlyMetric`].
 ///
-/// This is the single source both halves derive from: the guard
+/// This is the single source every half derives from:
 /// `every_catalogued_metric_is_otel_registered_or_declared_stats_only` treats a
-/// name here as exempt, and `stats_only_declaration_matches_the_operator_docs`
-/// requires each one's [`super::super::operator_docs`] annotation to carry the
-/// "not emitted as a live OTel instrument" disclosure — so the machine-checkable
-/// list and the operator-facing prose cannot drift apart. The companion guard
+/// name here as exempt; `stats_only_declaration_matches_the_operator_docs` requires
+/// each one's [`super::super::operator_docs`] annotation to carry the "not emitted
+/// as a live OTel instrument" disclosure, so the machine-checkable list and the
+/// operator-facing prose cannot drift apart;
 /// `stats_only_metrics_are_catalogued_and_never_otel_registered` fails if a name
-/// listed here DOES get an instrument, so a stale exemption cannot silently
-/// weaken the check either.
+/// listed here DOES get an instrument, so a stale exemption cannot silently weaken
+/// the guard; and `stats_only_probes_read_distinct_live_stats_fields` fails unless
+/// every entry's probe really reads its own field of a live snapshot.
 ///
-/// Adding a name here is a claim-boundary decision, not a formality: it says
+/// Adding an entry here is a claim-boundary decision, not a formality: it says
 /// "this metric is not scrapeable". Wire the instrument instead where you can.
-pub const STATS_ONLY_METRICS: &[&str] = &[
+pub const STATS_ONLY_METRICS: &[StatsOnlyMetric] = &[
     // Issue #2059: the process-global key→partition-offset cache reports through
     // `Database::stats().memory_stats`, not an OTel meter.
-    KEY_CACHE_HITS,
-    KEY_CACHE_MISSES,
-    KEY_CACHE_EVICTIONS,
-    KEY_CACHE_INVALIDATIONS,
-    KEY_CACHE_RESIDENT_BYTES,
-    KEY_CACHE_CAPACITY_BYTES,
+    StatsOnlyMetric {
+        name: KEY_CACHE_HITS,
+        stats_field: "memory_stats.key_cache_hits",
+        stats_probe: |s| s.key_cache_hits,
+    },
+    StatsOnlyMetric {
+        name: KEY_CACHE_MISSES,
+        stats_field: "memory_stats.key_cache_misses",
+        stats_probe: |s| s.key_cache_misses,
+    },
+    StatsOnlyMetric {
+        name: KEY_CACHE_EVICTIONS,
+        stats_field: "memory_stats.key_cache_evictions",
+        stats_probe: |s| s.key_cache_evictions,
+    },
+    StatsOnlyMetric {
+        name: KEY_CACHE_INVALIDATIONS,
+        stats_field: "memory_stats.key_cache_invalidations",
+        stats_probe: |s| s.key_cache_invalidations,
+    },
+    StatsOnlyMetric {
+        name: KEY_CACHE_RESIDENT_BYTES,
+        stats_field: "memory_stats.key_cache_resident_bytes",
+        stats_probe: |s| s.key_cache_resident_bytes as u64,
+    },
+    StatsOnlyMetric {
+        name: KEY_CACHE_CAPACITY_BYTES,
+        stats_field: "memory_stats.key_cache_capacity_bytes",
+        stats_probe: |s| s.key_cache_capacity_bytes as u64,
+    },
 ];

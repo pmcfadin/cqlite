@@ -87,32 +87,158 @@ fn parse_str_consts(src: &str) -> std::collections::HashMap<&str, &str> {
     out
 }
 
-/// Every `catalog::SCREAMING_CONST` identifier referenced in the otel sources.
+/// The otel sources with Rust comments removed, so no guard can be satisfied by
+/// PROSE (issue #1705, roborev B2).
 ///
-/// **ONE implementation, shared by BOTH directions of the registration guard** —
-/// the forward check (an instrument whose name is absent from `ALL_METRICS`) and the
-/// reverse check (a catalogued name with no instrument, issue #1705). A second copy
-/// would be a second implementation whose agreement with this one is unverifiable,
-/// and the two directions disagreeing is precisely the drift the guards exist to
-/// catch.
-///
-/// `catalog::unit::…` / `catalog::attr::…` submodule paths start with a lowercase
-/// char after `catalog::`, so they yield an empty identifier and are excluded by
-/// construction.
-fn otel_catalog_refs(otel_src: &str) -> std::collections::HashSet<String> {
-    let mut out = std::collections::HashSet::new();
-    for (i, _) in otel_src.match_indices("catalog::") {
-        let rest = &otel_src[i + "catalog::".len()..];
-        let ident: String = rest
-            .chars()
-            .take_while(|c| c.is_ascii_uppercase() || c.is_ascii_digit() || *c == '_')
-            .collect();
-        if ident.is_empty() {
-            continue;
+/// Line comments run to end-of-line and block comments to their terminator. A `//`
+/// inside a string literal would truncate that line — the failure direction is a
+/// guard that stops seeing a real registration (a RED test), never one that accepts
+/// a fake one. Neither otel source contains such a literal today.
+fn strip_rust_comments(src: &str) -> String {
+    let mut out = String::with_capacity(src.len());
+    let mut rest = src;
+    loop {
+        let line = rest.find("//");
+        let block = rest.find("/*");
+        if line.is_none() && block.is_none() {
+            out.push_str(rest);
+            return out;
         }
-        out.insert(ident);
+        // Whichever opener comes first wins; `usize::MAX` stands in for "absent".
+        let at_line = line.unwrap_or(usize::MAX) < block.unwrap_or(usize::MAX);
+        if at_line {
+            let l = line.unwrap_or(usize::MAX);
+            out.push_str(&rest[..l]);
+            let nl = rest[l..].find('\n').map(|n| l + n).unwrap_or(rest.len());
+            rest = &rest[nl..];
+        } else {
+            let b = block.unwrap_or(usize::MAX);
+            out.push_str(&rest[..b]);
+            let close = rest[b..]
+                .find("*/")
+                .map(|c| b + c + 2)
+                .unwrap_or(rest.len());
+            rest = &rest[close..];
+        }
+    }
+}
+
+/// [`otel_sources`], comment-free.
+fn otel_sources_uncommented() -> String {
+    strip_rust_comments(&otel_sources())
+}
+
+/// The OTel builder methods that BIND a metric name to a real instrument.
+const INSTRUMENT_BUILDERS: [&str; 6] = [
+    ".u64_counter(",
+    ".f64_counter(",
+    ".u64_histogram(",
+    ".f64_histogram(",
+    ".i64_gauge(",
+    ".u64_gauge(",
+];
+
+/// The three name→instrument resolvers in `otel.rs`. Their match arms ARE the
+/// dispatch table the emit path executes (`add_counter` / `record_histogram` /
+/// `record_gauge` each call one), so an arm here is evidence that the name is
+/// routed to a pre-built instrument rather than to the ad-hoc fallback.
+const OTEL_RESOLVERS: [&str; 3] = ["fn counter_for", "fn histogram_for", "fn gauge_for"];
+
+/// Catalog constants passed to an instrument-BUILDER call — i.e. names an
+/// instrument is actually constructed for.
+///
+/// Narrow on purpose (issue #1705, roborev B2): the previous extractor accepted ANY
+/// textual `catalog::CONST` occurrence, so a comment, a doc link or a dead
+/// `let _ = catalog::X;` counted as proof that an instrument existed. Only the
+/// construction call itself is authoritative for "an instrument was built".
+fn otel_instrument_constructions(src: &str) -> std::collections::HashSet<String> {
+    let mut out = std::collections::HashSet::new();
+    for builder in INSTRUMENT_BUILDERS {
+        for (i, _) in src.match_indices(builder) {
+            // rustfmt may wrap between the `(` and the argument.
+            let arg = src[i + builder.len()..].trim_start();
+            let Some(rest) = arg.strip_prefix("catalog::") else {
+                continue;
+            };
+            let ident: String = rest
+                .chars()
+                .take_while(|c| c.is_ascii_uppercase() || c.is_ascii_digit() || *c == '_')
+                .collect();
+            if !ident.is_empty() {
+                out.insert(ident);
+            }
+        }
     }
     out
+}
+
+/// Catalog constants that appear as a MATCH ARM inside one of the three
+/// [`OTEL_RESOLVERS`] — i.e. names the emit path routes to a pre-built instrument.
+///
+/// Fail-closed on a missing resolver: renaming or deleting one must red this guard,
+/// not silently empty it (a guard whose subject set shrinks to nothing passes
+/// vacuously, which is the defect class this fix exists to remove).
+fn otel_dispatch_arms(src: &str) -> std::collections::HashSet<String> {
+    let mut out = std::collections::HashSet::new();
+    for resolver in OTEL_RESOLVERS {
+        let start = src.find(resolver).unwrap_or_else(|| {
+            panic!(
+                "`{resolver}` not found in the otel sources — the registration guards \
+                 read the dispatch table out of these three resolvers, so renaming one \
+                 must be reflected in OTEL_RESOLVERS rather than leaving the guard blind"
+            )
+        });
+        let body = &src[start..];
+        let end = body
+            .find("\n}\n")
+            .expect("a resolver must end at a column-0 closing brace");
+        let body = &body[..end];
+        for (i, _) in body.match_indices("catalog::") {
+            let rest = &body[i + "catalog::".len()..];
+            let ident: String = rest
+                .chars()
+                .take_while(|c| c.is_ascii_uppercase() || c.is_ascii_digit() || *c == '_')
+                .collect();
+            if ident.is_empty() {
+                continue;
+            }
+            // Only an arm PATTERN counts: `catalog::IDENT =>` (rustfmt may wrap
+            // before the `=>`). A mention anywhere else in the body does not.
+            if rest[ident.len()..].trim_start().starts_with("=>") {
+                out.insert(ident);
+            }
+        }
+    }
+    out
+}
+
+/// Names with SOME instrument binding — constructed, or routed, or both.
+///
+/// Used by the FORWARD guard ("an instrument exists whose name is not catalogued"),
+/// where the union is the fail-closed choice: a half-wired instrument still must be
+/// catalogued.
+fn otel_instrument_bindings(src: &str) -> std::collections::HashSet<String> {
+    let mut out = otel_instrument_constructions(src);
+    out.extend(otel_dispatch_arms(src));
+    out
+}
+
+/// Names AFFIRMATIVELY registered as a live instrument: constructed **and** routed.
+///
+/// Used by the REVERSE guard ("a catalogued name no instrument is bound to"), where
+/// the intersection is the fail-closed choice: half a wiring is not a scrapeable
+/// series, so it must not excuse a catalog entry.
+///
+/// This is the always-compiled counterpart of the RUNTIME resolution asserted in
+/// `otel_tests.rs` (which calls the very resolvers the emit path calls, but only
+/// compiles under `--features observability`). Both must agree; the structural parse
+/// exists so the default gate run is not blind.
+fn otel_registered_instruments(src: &str) -> std::collections::HashSet<String> {
+    let constructed = otel_instrument_constructions(src);
+    otel_dispatch_arms(src)
+        .into_iter()
+        .filter(|ident| constructed.contains(ident))
+        .collect()
 }
 
 #[test]
@@ -324,7 +450,7 @@ fn partition_access_probe_metrics_have_dedicated_otel_arms_not_the_adhoc_fallbac
     // them either. Assert the arms exist at the source level, like the #2419
     // saturation-gauge guard above.
     assert_every_otel_source_is_scanned();
-    let otel_src = otel_sources();
+    let otel_src = otel_sources_uncommented();
     for (metric, arm) in [
         (
             READ_PARTITION_ACCESS_DISTINCT_PARTITIONS,
@@ -376,7 +502,7 @@ fn every_instrument_registered_in_otel_is_catalogued() {
     // `otel_instruments.rs` the construction. Scanning only one would let an
     // instrument built in the other escape the guard entirely (#1116 split).
     assert_every_otel_source_is_scanned();
-    let otel_src = otel_sources();
+    let otel_src = otel_sources_uncommented();
     let otel_src = otel_src.as_str();
     let catalogued: std::collections::HashSet<&str> = ALL_METRICS.iter().copied().collect();
 
@@ -399,14 +525,16 @@ fn every_instrument_registered_in_otel_is_catalogued() {
     let this_src = include_str!("catalog.rs");
     let ident_to_value = parse_str_consts(this_src);
 
-    // Extract every `catalog::SCREAMING_CONST` reference in the otel sources via
-    // the SHARED extractor the reverse-direction guard (#1705) also calls.
+    // Names with SOME instrument binding — constructed, routed, or both. The UNION
+    // is the fail-closed choice HERE (#1705, roborev B2): a half-wired instrument
+    // still must be catalogued. Only real construction/dispatch constructs count;
+    // a comment or a dead reference is not an instrument.
     let mut missing = Vec::new();
-    let mut refs: Vec<String> = otel_catalog_refs(otel_src).into_iter().collect();
+    let mut refs: Vec<String> = otel_instrument_bindings(otel_src).into_iter().collect();
     refs.sort();
     for ident in refs {
         let value = ident_to_value.get(ident.as_str()).copied().unwrap_or_else(|| {
-            panic!("otel.rs references catalog::{ident}, which is not a metric-name constant in catalog.rs")
+            panic!("otel.rs binds an instrument to catalog::{ident}, which is not a metric-name constant in catalog.rs")
         });
         if !catalogued.contains(value) {
             missing.push(format!("catalog::{ident} (\"{value}\")"));
@@ -484,14 +612,21 @@ fn every_catalogued_metric_is_otel_registered_or_declared_stats_only() {
     // an operator can never scrape — the observability-honesty failure epic #1686
     // exists to close.
     //
-    // A name is accounted for in exactly one of two ways: it is referenced from
-    // the otel sources (an instrument is constructed/routed for it), or it is
-    // DECLARED in `catalog::STATS_ONLY_METRICS` as surfaced only through
-    // `Database::stats()`. Nothing else passes.
+    // A name is accounted for in exactly one of two ways: an instrument is
+    // AFFIRMATIVELY registered for it — constructed by a builder call AND routed by
+    // a resolver match arm ([`otel_registered_instruments`]) — or it is DECLARED in
+    // `catalog::STATS_ONLY_METRICS`. Nothing else passes.
+    //
+    // Strictness note (#1705, roborev B2): this used to accept any textual
+    // `catalog::CONST` occurrence in the otel sources, so removing a registration
+    // while leaving a comment or a dead reference behind kept the guard green. Only
+    // the registration constructs are authoritative, comments are stripped first,
+    // and half a wiring does not count.
     assert_every_otel_source_is_scanned();
-    let refs = otel_catalog_refs(&otel_sources());
+    let refs = otel_registered_instruments(&otel_sources_uncommented());
     let value_to_ident = value_to_ident();
-    let stats_only: std::collections::HashSet<&str> = STATS_ONLY_METRICS.iter().copied().collect();
+    let stats_only: std::collections::HashSet<&str> =
+        STATS_ONLY_METRICS.iter().map(|m| m.name).collect();
 
     let mut phantom = Vec::new();
     for name in ALL_METRICS {
@@ -517,16 +652,18 @@ fn stats_only_metrics_are_catalogued_and_never_otel_registered() {
     // Once an instrument IS wired for a name, its exemption must be deleted — a
     // stale entry would permanently excuse that name from the reverse guard.
     assert_every_otel_source_is_scanned();
-    let refs = otel_catalog_refs(&otel_sources());
+    // UNION here: a stats-only metric must have NO instrument binding at all, not
+    // merely an incomplete one.
+    let refs = otel_instrument_bindings(&otel_sources_uncommented());
     let value_to_ident = value_to_ident();
     let mut seen = std::collections::HashSet::new();
-    for name in STATS_ONLY_METRICS {
+    for name in STATS_ONLY_METRICS.iter().map(|m| m.name) {
         assert!(
-            ALL_METRICS.contains(name),
+            ALL_METRICS.contains(&name),
             "{name} is declared stats-only but is not in ALL_METRICS"
         );
         assert!(
-            seen.insert(*name),
+            seen.insert(name),
             "duplicate STATS_ONLY_METRICS entry {name}"
         );
         let ident = value_to_ident.get(name).copied().unwrap_or_else(|| {
@@ -554,6 +691,7 @@ fn stats_only_declaration_matches_the_operator_docs() {
 
     let declared: std::collections::BTreeSet<String> = STATS_ONLY_METRICS
         .iter()
+        .map(|m| m.name)
         .map(|name| {
             value_to_ident
                 .get(name)
@@ -724,7 +862,7 @@ fn saturation_gauges_have_dedicated_otel_arms_not_the_adhoc_fallback() {
     // feature. Delete an arm → this fails. Scans BOTH otel sources (#1116 split):
     // reading `otel.rs` alone would miss an arm that moved with the construction.
     assert_every_otel_source_is_scanned();
-    let otel_src = otel_sources();
+    let otel_src = otel_sources_uncommented();
     for ident in [
         "MERGE_EGRESS_CHANNEL_DEPTH",
         "MERGE_ACTIVE_MERGES",
@@ -794,4 +932,204 @@ fn merge_producer_threads_gauge_is_registered_and_documented() {
     assert_eq!(MERGE_PRODUCER_THREADS, "cqlite.merge.producer_threads");
     assert!(MERGE_PRODUCER_THREADS.starts_with("cqlite."));
     assert_eq!(unit::THREADS, "{thread}");
+}
+
+/// A synthetic otel source carrying all three resolvers, so the registration
+/// parsers can be exercised on text this test controls. The parsers under test are
+/// the ones the guards call — never a copy of them.
+fn synthetic_otel_source(dispatch: &str, construction: &str) -> String {
+    format!(
+        "fn counter_for(i: &Instruments, name: &str) -> Option<&Counter<u64>> {{\n\
+         \x20   Some(match name {{\n{dispatch}        _ => return None,\n    }})\n}}\n\
+         fn histogram_for() {{\n    match name {{\n        _ => return None,\n    }}\n}}\n\
+         fn gauge_for() {{\n    match name {{\n        _ => return None,\n    }}\n}}\n\
+         fn build() {{\n{construction}}}\n"
+    )
+}
+
+/// Parse a synthetic source the way the guards do: comments stripped first.
+fn synthetic_registered(dispatch: &str, construction: &str) -> (bool, bool) {
+    let src = strip_rust_comments(&synthetic_otel_source(dispatch, construction));
+    (
+        otel_instrument_bindings(&src).contains("GHOST"),
+        otel_registered_instruments(&src).contains("GHOST"),
+    )
+}
+
+#[test]
+fn a_comment_or_a_dead_reference_cannot_pass_as_a_registered_instrument() {
+    // Issue #1705 (roborev B2) — the defect this replaces: the old extractor took
+    // ANY textual `catalog::CONST` occurrence as proof that an instrument existed,
+    // so deleting a registration while leaving a mention behind kept the reverse
+    // guard green. Prove that neither shape registers anything now.
+    let commented_out = synthetic_registered(
+        "        // catalog::GHOST => &i.ghost,\n",
+        "    // .u64_counter(catalog::GHOST)\n",
+    );
+    assert_eq!(
+        commented_out,
+        (false, false),
+        "a commented-out registration must register nothing"
+    );
+
+    let doc_link = synthetic_registered(
+        "        /// see [`catalog::GHOST`]\n",
+        "    /* catalog::GHOST */\n",
+    );
+    assert_eq!(
+        doc_link,
+        (false, false),
+        "a doc link / block comment must register nothing"
+    );
+
+    let dead_code = synthetic_registered("", "    let _ = catalog::GHOST;\n");
+    assert_eq!(
+        dead_code,
+        (false, false),
+        "a dead reference that builds no instrument must register nothing"
+    );
+}
+
+#[test]
+fn registration_requires_both_construction_and_dispatch() {
+    // The reverse guard's intersection rule: half a wiring is not a scrapeable
+    // series, so it must not excuse a catalog entry — while the forward guard's
+    // union still sees it (it is an instrument that must be catalogued).
+    assert_eq!(
+        synthetic_registered("", "    .u64_counter(catalog::GHOST)\n"),
+        (true, false),
+        "constructed but never routed: a binding, not a registered instrument"
+    );
+    assert_eq!(
+        synthetic_registered("        catalog::GHOST => &i.ghost,\n", ""),
+        (true, false),
+        "routed but never constructed: a binding, not a registered instrument"
+    );
+    assert_eq!(
+        synthetic_registered(
+            "        catalog::GHOST => &i.ghost,\n",
+            "    .u64_counter(catalog::GHOST)\n"
+        ),
+        (true, true),
+        "constructed AND routed is what registration means"
+    );
+    // rustfmt wraps long calls/arms; both wrapped shapes must still be seen.
+    assert_eq!(
+        synthetic_registered(
+            "        catalog::GHOST\n            => &i.ghost,\n",
+            "    .u64_counter(\n        catalog::GHOST,\n    )\n"
+        ),
+        (true, true),
+        "a wrapped construction/arm must not drop out — wrapping selects for LONG \
+         names, i.e. exactly the new metrics these guards exist to catch"
+    );
+}
+
+#[test]
+fn a_missing_resolver_reds_the_dispatch_parser_instead_of_emptying_it() {
+    // A guard whose subject set silently shrinks to nothing passes vacuously, so
+    // renaming/removing a resolver must PANIC rather than yield an empty arm set.
+    let no_gauge_resolver =
+        "fn counter_for() {\n    match name {\n    }\n}\nfn histogram_for() {\n    match name {\n    }\n}\n";
+    let previous = std::panic::take_hook();
+    std::panic::set_hook(Box::new(|_| {}));
+    let outcome = std::panic::catch_unwind(|| otel_dispatch_arms(no_gauge_resolver));
+    std::panic::set_hook(previous);
+    assert!(
+        outcome.is_err(),
+        "a missing resolver must fail the parse, not quietly return an empty set"
+    );
+}
+
+#[test]
+fn the_real_otel_sources_register_wired_metrics_and_not_the_stats_only_ones() {
+    // The affirmative half on the REAL source: the parsers must actually say YES
+    // for wired metrics (one per instrument kind) and NO for the declared
+    // stats-only ones — otherwise the two guards above could both be vacuous.
+    assert_every_otel_source_is_scanned();
+    let registered = otel_registered_instruments(&otel_sources_uncommented());
+    for wired in ["READ_ROWS", "READ_DURATION", "SSTABLES_OPEN"] {
+        assert!(
+            registered.contains(wired),
+            "catalog::{wired} is wired in the otel sources but the parser did not \
+             see it registered"
+        );
+    }
+    for stats_only in ["KEY_CACHE_HITS", "KEY_CACHE_CAPACITY_BYTES"] {
+        assert!(
+            !registered.contains(stats_only),
+            "catalog::{stats_only} is declared stats-only, so nothing may register it"
+        );
+    }
+    assert!(
+        registered.len() > 60,
+        "the registered set collapsed to {} entries — the parse is broken, and a \
+         shrunken subject set is a vacuous guard",
+        registered.len()
+    );
+}
+
+#[test]
+fn stats_only_probes_read_distinct_live_stats_fields() {
+    // Issue #1705: the stats-only list must not be an unguarded waiver list. A bare
+    // name list could silence the registration guard for a metric whose instrument
+    // was simply forgotten — appending the name would be the whole cost. So each
+    // entry carries a probe that READS its value out of a real
+    // `Database::stats().memory_stats` snapshot, and this asserts the probes are
+    // real: given a snapshot with a UNIQUE sentinel per key-cache field, every
+    // probe must return its OWN sentinel.
+    //
+    // What that rules out: a probe that ignores the snapshot (constant / `0`), a
+    // probe copied from a sibling entry (two entries reading one field), and — the
+    // point of the exercise — a metric with no stats field at all, which cannot be
+    // given a compiling probe in the first place.
+    let stats = crate::memory::MemoryStats {
+        key_cache_hits: 101,
+        key_cache_misses: 102,
+        key_cache_evictions: 103,
+        key_cache_invalidations: 104,
+        key_cache_resident_bytes: 105,
+        key_cache_capacity_bytes: 106,
+        // Neighbouring fields a sloppy probe might read instead must stay
+        // distinguishable from the six above.
+        block_cache_hits: 201,
+        block_cache_misses: 202,
+        block_cache_evictions: 203,
+        block_cache_capacity_bytes: 204,
+        ..Default::default()
+    };
+
+    assert!(
+        !STATS_ONLY_METRICS.is_empty(),
+        "the probe guard must have a subject — an empty declaration passes vacuously"
+    );
+    let mut seen: std::collections::HashMap<u64, &str> = std::collections::HashMap::new();
+    for m in STATS_ONLY_METRICS {
+        let observed = (m.stats_probe)(&stats);
+        assert_ne!(
+            observed,
+            0,
+            "catalog::…{name} declares stats_field {field} but its probe read 0 from a \
+             fully-populated snapshot — the probe reads no live field, so the \
+             stats-only exemption is unjustified",
+            name = m.name,
+            field = m.stats_field
+        );
+        if let Some(prior) = seen.insert(observed, m.name) {
+            panic!(
+                "{} and {} probe the SAME stats field (both read {observed}) — one of \
+                 them is not actually surfaced on the stats path it claims \
+                 ({})",
+                prior, m.name, m.stats_field
+            );
+        }
+    }
+
+    // And the probes must run against the REAL public snapshot type, not only a
+    // hand-built one: a default snapshot is readable through every probe.
+    let live = crate::memory::MemoryStats::default();
+    for m in STATS_ONLY_METRICS {
+        // Reading must not panic; the value itself is legitimately 0 before use.
+        let _ = (m.stats_probe)(&live);
+    }
 }

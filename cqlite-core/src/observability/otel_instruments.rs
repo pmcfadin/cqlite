@@ -7,10 +7,12 @@
 //!
 //! **Both files are scanned** by the catalog's
 //! `every_instrument_registered_in_otel_is_catalogued` guard, so moving construction
-//! here does not weaken it: any catalog metric-name constant referenced in either
-//! file must still appear in `ALL_METRICS`. (The guard is a plain source scan, so
-//! avoid writing a qualified constant path in prose here — it would be read as a
-//! real reference and fail the check.)
+//! here does not weaken it: any catalog metric-name constant BOUND TO AN INSTRUMENT
+//! in either file must still appear in `ALL_METRICS`. Since issue #1705 the guards
+//! strip comments first and read only the registration constructs (an instrument
+//! BUILDER call, and a match arm of one of `otel.rs`'s three name→instrument
+//! resolvers), so prose here is safe — and, more importantly, a comment or a dead
+//! reference can no longer pass as proof that an instrument exists.
 
 use super::catalog;
 use super::otel::meter;
