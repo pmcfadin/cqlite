@@ -172,6 +172,13 @@ pub struct PreparedQuery {
     /// legacy `QueryExecutor` path (Issue #961).
     #[cfg(feature = "state_machine")]
     select_pipeline: Option<PreparedSelect>,
+    /// Query execution budget inherited from `config.query.max_execution_time`
+    /// (issue #1695). `Duration::ZERO` = unbounded, which is also the value the
+    /// constructors default to: a handle built outside
+    /// [`crate::query::engine::QueryEngine::prepare`] (tests, direct construction)
+    /// carries no budget until one is attached with
+    /// [`Self::with_max_execution_time`].
+    max_execution_time: std::time::Duration,
 }
 
 /// Parameter metadata for prepared statements
@@ -225,6 +232,7 @@ impl PreparedQuery {
             executor,
             #[cfg(feature = "state_machine")]
             select_pipeline: None,
+            max_execution_time: std::time::Duration::ZERO,
         }
     }
 
@@ -272,16 +280,43 @@ impl PreparedQuery {
                 executor: select_executor,
                 plan_cache: std::sync::Mutex::new(None),
             }),
+            max_execution_time: std::time::Duration::ZERO,
         }
     }
 
+    /// Attach the engine's `query.max_execution_time` budget (issue #1695).
+    ///
+    /// Called by `QueryEngine::prepare`, so a handle handed to a caller enforces
+    /// the same budget the engine's own entry points do — a `prepare()` +
+    /// `execute()` pair is not an unbounded back door into a full scan.
+    /// `Duration::ZERO` leaves it unbounded.
+    pub(crate) fn with_max_execution_time(mut self, limit: std::time::Duration) -> Self {
+        self.max_execution_time = limit;
+        self
+    }
+
     /// Execute the prepared query with positional parameters.
+    ///
+    /// Bounded by the `query.max_execution_time` budget attached at `prepare()`
+    /// time (issue #1695), through the same single wrapper the engine's entry
+    /// points use; `Duration::ZERO` means unbounded.
     ///
     /// Issue #961: for prepared SELECTs the parameters are bound into the parsed
     /// statement and the bound query runs through the SELECT optimizer + executor,
     /// so a prepared `WHERE pk = ?` engages the partition-targeted fast path.
     /// Non-SELECT prepared statements retain the legacy executor path.
     pub async fn execute(&self, params: &[Value]) -> Result<QueryResult> {
+        crate::query::engine::deadline::bound(
+            self.max_execution_time,
+            "prepared.execute",
+            self.execute_unbounded(params),
+        )
+        .await
+    }
+
+    /// UNWRAPPED body of [`Self::execute`]; the bound is applied by that caller
+    /// and by [`Self::execute_with_context`], so one call is bounded ONCE.
+    async fn execute_unbounded(&self, params: &[Value]) -> Result<QueryResult> {
         self.validate_params(params)?;
 
         #[cfg(feature = "state_machine")]
@@ -298,7 +333,10 @@ impl PreparedQuery {
         self.executor.execute(&self.plan).await
     }
 
-    /// Execute with named parameters
+    /// Execute with named parameters.
+    ///
+    /// Converts to positional and delegates to the BOUNDED [`Self::execute`], so
+    /// it inherits the `query.max_execution_time` budget (issue #1695).
     pub async fn execute_named(&self, params: &HashMap<String, Value>) -> Result<QueryResult> {
         // Convert named parameters to positional, in declaration order.
         let mut positional_params = Vec::with_capacity(self.parameters.len());
@@ -339,6 +377,20 @@ impl PreparedQuery {
     /// SELECTs with no hints bind their params and run through the pipeline,
     /// matching `execute(context.positional_params)`.
     pub async fn execute_with_context(&self, context: &PreparedContext) -> Result<QueryResult> {
+        crate::query::engine::deadline::bound(
+            self.max_execution_time,
+            "prepared.execute_with_context",
+            self.execute_with_context_unbounded(context),
+        )
+        .await
+    }
+
+    /// UNWRAPPED body of [`Self::execute_with_context`] (bounded by that caller,
+    /// issue #1695).
+    async fn execute_with_context_unbounded(
+        &self,
+        context: &PreparedContext,
+    ) -> Result<QueryResult> {
         let hints = &context.hints;
 
         #[cfg(feature = "state_machine")]
@@ -569,6 +621,8 @@ impl PreparedQueryBuilder {
             executor,
             #[cfg(feature = "state_machine")]
             select_pipeline: None,
+            // Unbounded until the engine attaches its budget (issue #1695).
+            max_execution_time: std::time::Duration::ZERO,
         }
     }
 

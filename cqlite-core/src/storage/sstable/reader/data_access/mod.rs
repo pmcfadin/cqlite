@@ -451,12 +451,11 @@ impl SSTableReader {
 
         let mut chunk_count = 0;
         while let Some(compressed_chunk) = self.read_next_block(cursor).await? {
-            // Cooperative cancellation (issue #2346): poll the per-call token every
-            // 256 chunks so a cancelled stitched scan abandons the I/O/decompress
-            // walk promptly instead of stitching the entire data section first.
-            if chunk_count & 0xFF == 0 {
-                scan_cancel.check()?;
-            }
+            // Cooperative checkpoint (issue #2346): poll the per-call token so a
+            // cancelled stitched scan abandons the I/O/decompress walk promptly
+            // instead of stitching the entire data section first, yielding every
+            // 256 chunks so the chokepoint timeout can elapse here too (#1695).
+            scan_cancel.checkpoint(chunk_count).await?;
             let decompressed_chunk = if compressed_chunk.len() >= max_compressed_length {
                 // Stored uncompressed by Cassandra — pass the raw bytes through.
                 tracing::debug!(

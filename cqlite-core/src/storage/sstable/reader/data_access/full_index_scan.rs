@@ -145,10 +145,12 @@ impl SSTableReader {
         let schema = reader_schema.as_ref();
         let mut results = Vec::new();
         for i in 0..entries.len() {
-            // Cooperative cancellation (issue #2264): one real index-random-read +
+            // Cooperative checkpoint (issue #2264): one real index-random-read +
             // Data.db parse per partition — poll every entry so a cancelled Flight
-            // `do_get` abandons the walk promptly. Issue #2346: PER-CALL token.
-            scan_cancel.check()?;
+            // `do_get` abandons the walk promptly, and yield every 256th so the
+            // chokepoint `max_execution_time` timeout can elapse mid-walk (#1695).
+            // Issue #2346: PER-CALL token.
+            scan_cancel.checkpoint(i).await?;
 
             // Roborev job 1610 (finding 1): `raw_key: None` never actually occurs
             // in practice — `parse_big_index_entry` always sets `Some(raw_key)` —

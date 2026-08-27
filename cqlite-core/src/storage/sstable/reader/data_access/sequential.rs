@@ -545,14 +545,14 @@ impl SSTableReader {
             for (idx, (_entry_table_id, entry_key, entry_value)) in
                 all_entries.into_iter().enumerate()
             {
-                // Cooperative cancellation (issue #2346): the chunk-stitch loop
+                // Cooperative checkpoint (issue #2346): the chunk-stitch loop
                 // poll covers the I/O phase, but `parse_block` materialises every
-                // entry in one shot — poll here at the same 256-entry cadence as
-                // the non-stitching branch so a cancelled caller does not walk a
-                // huge already-parsed result set to completion.
-                if idx & 0xFF == 0 {
-                    scan_cancel.check()?;
-                }
+                // entry in one shot — checkpoint here so a cancelled caller does
+                // not walk a huge already-parsed result set to completion, and so
+                // the query-engine's ONE `max_execution_time` timeout can elapse
+                // mid-walk (issue #1695: the yield, at the same 256-entry cadence,
+                // is what makes this future `Pending`).
+                scan_cancel.checkpoint(idx).await?;
                 if prev_partition_key.as_ref() != Some(&entry_key) {
                     crate::storage::sstable::work_counters::add_stream_walk_partition_parsed();
                     prev_partition_key = Some(entry_key.clone());
@@ -602,11 +602,13 @@ impl SSTableReader {
         // stitching branch above for the "changed key = new partition" rationale.
         let mut prev_partition_key: Option<RowKey> = None;
         while let Some(block) = self.read_next_block(&cursor).await? {
-            // Cooperative cancellation (issue #2264): an index-less (Summary.db
+            // Cooperative checkpoint (issue #2264): an index-less (Summary.db
             // absent) SSTable materialises EVERY partition here in one pass; poll
             // the token per block so a cancelled Flight `do_get` abandons the walk
             // promptly instead of running to completion under the ~1–2 min backstop.
-            scan_cancel.check()?;
+            // A whole block is coarse, so every iteration is a correct yield point
+            // for the chokepoint timeout too (issue #1695).
+            scan_cancel.checkpoint_now().await?;
             block_count += 1;
             tracing::debug!(
                 "SSTableReader::sequential_scan - Read block {}, size {} bytes",
@@ -631,9 +633,7 @@ impl SSTableReader {
                 // elsewhere so materialisation honours the interval regardless of
                 // how large a single block turned out to be, independent of
                 // whichever inner parser branch produced `entries`.
-                if i & 0xFF == 0 {
-                    scan_cancel.check()?;
-                }
+                scan_cancel.checkpoint(i).await?;
                 tracing::debug!(
                     "SSTableReader::sequential_scan - Block {} entry {}: table_id='{}', key={:?}",
                     block_count,

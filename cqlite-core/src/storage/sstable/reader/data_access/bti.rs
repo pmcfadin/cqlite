@@ -650,9 +650,7 @@ impl SSTableReader {
             // 256-entry cadence as `sequential_scan`'s stitched branch so a
             // cancelled caller does not walk a huge already-parsed result set to
             // completion and then report success.
-            if idx & 0xFF == 0 {
-                scan_cancel.check()?;
-            }
+            scan_cancel.checkpoint(idx).await?;
             if prev_partition_key.as_ref() != Some(&entry_key) {
                 crate::storage::sstable::work_counters::add_stream_walk_partition_parsed();
                 prev_partition_key = Some(entry_key.clone());
