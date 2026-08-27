@@ -174,8 +174,18 @@ report is therefore:
 ```bash
 python3 docs/reports/ws0-3299-artifacts/harness/derive.py \
   --results   docs/reports/ws0-3299-artifacts/sweep \
+  --extension docs/reports/ws0-3299-artifacts/extA \
   --extension docs/reports/ws0-3299-artifacts/extB
 ```
+
+**Only extension B votes on the verdict, and that is enforced rather than
+chosen.** A tree may vote on an S only if every point it votes with has ≥3 reps.
+Extension A has 1 rep per point, so it is printed for provenance and abstains.
+The reason is this campaign's own history: at one rep extA put N=32 *above* N=24
+(+0.68%) while extB put it *below* (−1.95%) — **the sign flipped** — so without
+the rep-count gate the verdict would depend on which tree was passed last, i.e.
+on argument order. AC1 demands medians of ≥3 for exactly that reason, and the
+same floor applies to a verdict derived from them.
 
 `--extension` supplies the contemporaneous points that decide S=6's verdict and
 **does not pool its medians into the main table** — a different session, and
@@ -648,6 +658,7 @@ bash docs/reports/ws0-3299-artifacts/harness/sweep.sh --results <dir> --reps 3 -
 # grid alone will correctly report S=6 as `edge-truncated` (see §4).
 python3 docs/reports/ws0-3299-artifacts/harness/derive.py \
   --results   docs/reports/ws0-3299-artifacts/sweep \
+  --extension docs/reports/ws0-3299-artifacts/extA \
   --extension docs/reports/ws0-3299-artifacts/extB
 ```
 

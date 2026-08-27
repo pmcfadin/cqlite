@@ -422,7 +422,7 @@ def emit_resolution(by_point, reps):
           f"reduces but does not remove this — it is not a drift-free figure.\n")
 
 
-def extension_verdicts(path, reps):
+def extension_verdicts(path, reps, min_reps=3):
     """Bracketing verdicts derived FROM an extension tree's own contemporaneous points.
 
     Why this exists rather than a hand-written verdict file: a bracketing
@@ -445,6 +445,22 @@ def extension_verdicts(path, reps):
                for n in n_values if (s, n) in by_point]
         if len(pts) < 2:
             continue  # a single point decides nothing
+        # A TREE MAY ONLY VOTE IF EVERY POINT IT VOTES WITH HAS >= min_reps REPS.
+        #
+        # Not a formality. This campaign's own history is the argument: at ONE
+        # rep, extension A put N=32 ABOVE N=24 (+0.68%) while extension B put it
+        # BELOW (-1.95%) — the sign FLIPPED — so a single-rep tree would return
+        # `edge-truncated` for S=6 where the replicated tree returns `bracketed`.
+        # Without this gate the answer would depend on which tree was passed
+        # last, i.e. on argument order. AC1 requires medians of >= 3 for exactly
+        # this reason; the same floor applies to a verdict derived from them.
+        thin = {n: len(by_point[(s, n)]) for n, _ in pts if len(by_point[(s, n)]) < min_reps}
+        if thin:
+            print(f"> **Extension tree `{path}` does not vote on S={s}**: "
+                  f"{thin} — fewer than {min_reps} reps, and a single-rep verdict is "
+                  f"precisely what the N=32 sign-flip showed to be unreliable. Its points "
+                  f"are still printed below for provenance.\n")
+            continue
         peaks = {s: max(pts, key=lambda t: t[1])}
         verdict, why = bracket_verdict(by_point, s, peaks, n_values, 0.05)
         out[s] = {"verdict": verdict, "why": why, "source": f"extension tree `{path}`"}

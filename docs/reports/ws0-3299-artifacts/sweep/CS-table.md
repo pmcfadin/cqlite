@@ -1,3 +1,5 @@
+> **Extension tree `docs/reports/ws0-3299-artifacts/extA` does not vote on S=6**: {24: 1, 32: 1} — fewer than 3 reps, and a single-rep verdict is precisely what the N=32 sign-flip showed to be unreliable. Its points are still printed below for provenance.
+
 ## C(S, N) — bare-scan scaling grid, aligned window
 
 Corpus: #3096 'Corpus B' (4,000,000 rows, 693.69 B/row, UNCOMPRESSED). Medians over reps; spread = (max-min)/median.
@@ -85,6 +87,15 @@ Row attribution source: **committed guard output**. `recomputed` means the per-w
 Counter-window agreement (max over reps): 4.13e-05 — perf's enabled interval versus the driver's [T0, T1]. The measured proof that counters and rows were taken over the SAME interval.
 
 Max attribution shortfall over all reps: 0.0909% of the window (bound 0.50%). Rows are counted only between progress records the workers actually emitted, so this biases every rows/s figure DOWNWARD and every per-row counter UPWARD, by at most that fraction.
+
+### Extension run `docs/reports/ws0-3299-artifacts/extA`
+
+Incumbent re-measured **interleaved** with each candidate in every round, so these comparisons are contemporaneous. **These medians are NOT pooled into the main table** — a different session, and pooling would average across a drift epoch.
+
+| S | N | reps | median rows/s | spread |
+|--:|--:|--:|--:|--:|
+| 6 | 24 | 1 | 2,647,966 | 0.00% |
+| 6 | 32 | 1 | 2,665,993 | 0.00% |
 
 ### Extension run `docs/reports/ws0-3299-artifacts/extB`
 
