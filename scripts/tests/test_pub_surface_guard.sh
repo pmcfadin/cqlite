@@ -72,6 +72,12 @@
 #                such a worktree BY EXPLICIT PATH, and — the regression guard — that a
 #                fresh run leaves a CONCURRENT run's scratch worktrees alone.
 #
+#   A SHARED blind spot of the two derivations (roborev r4 F2):
+#  20.  RED    — an INLINE crate-root `pub mod NAME { #![cfg(…)] … }` is invisible to
+#                BOTH derivations, so they AGREE while both are blind and the gate
+#                hiding inside the body passes green. The scan must REFUSE over any
+#                top-level `pub mod` form it does not recognise.
+#
 # NO TEST-ONLY SEAM. The guard's subject is hard-coded on purpose, so the negative
 # cases SUBSTITUTE THE ARTIFACT: each runs in its own `git worktree add --detach HEAD`
 # scratch checkout whose files are edited in place (CLAUDE.md — a test that needs a
@@ -624,6 +630,39 @@ grep -q 'cargo-public-api' "$TMPROOT/case18.out" \
 echo "OK (18): a \`doc\` cfg predicate makes the guard REFUSE rather than certify"
 
 # ---------------------------------------------------------------------------
+# 20. RED — an INLINE crate-root `pub mod NAME { … }` is a SHARED BLIND SPOT of the
+#     two derivations, so the cross-check cannot see it (roborev r4 F2).
+#
+#     Both derivations recognise only the STATEMENT form `pub mod NAME;`. An inline
+#     module declaration is invisible to BOTH, so they AGREE (each derived the empty
+#     set for it) while both are blind — and a `#![cfg(feature = "…")]` gate hiding
+#     inside that inline body, i.e. EXACTLY the bypass this assert was filed to
+#     close, passed GREEN. A shared blind spot is not a disagreement, so the
+#     mutual cross-check can never catch it: the scan has to REFUSE instead.
+# ---------------------------------------------------------------------------
+scratch_tree inline-mod; wt20="$SCRATCH"
+cat >>"$wt20/cqlite-core/src/lib.rs" <<'RS'
+
+pub mod probe_inline_gated {
+    #![cfg(feature = "benchmarks")]
+    /// Self-test-only probe (#1712 r4 F2): the gate hides INSIDE the inline body.
+    pub fn probe() {}
+}
+RS
+set +e
+bash "$wt20/$GUARD_REL" >"$TMPROOT/case20.out" 2>&1
+case20_rc=$?
+set -e
+[ "$case20_rc" -ne 0 ] || fail_case "case 20 — an inline crate-root \`pub mod NAME { … }\` hiding a \`#![cfg]\` gate in its body passed GREEN. Both derivations are blind to the inline form, so their cross-check AGREES while neither saw it; got: $(cat "$TMPROOT/case20.out")"
+grep -q "unrecognized top-level \`pub mod\` form" "$TMPROOT/case20.out" \
+  || fail_case "case 20 — the guard failed but not with the unrecognized-\`pub mod\`-form refusal; got: $(cat "$TMPROOT/case20.out")"
+grep -q "probe_inline_gated" "$TMPROOT/case20.out" \
+  || fail_case "case 20 — the refusal did not name the offending declaration; got: $(cat "$TMPROOT/case20.out")"
+grep -qE "line [0-9]+" "$TMPROOT/case20.out" \
+  || fail_case "case 20 — the refusal did not name the offending LINE, so an operator cannot act on it; got: $(cat "$TMPROOT/case20.out")"
+echo "OK (20): an inline crate-root \`pub mod NAME { … }\` makes the scan REFUSE (shared blind spot, not a disagreement)"
+
+# ---------------------------------------------------------------------------
 # 19. KILL SAFETY — cleanup must reclaim a registered worktree, BY EXPLICIT PATH,
 #     and must never touch a concurrent run's.
 #
@@ -708,4 +747,4 @@ rm -rf "$peer_root"
 echo "OK (19): cleanup reclaims a registered worktree by explicit path, and a fresh run leaves a concurrent run's alone"
 
 echo ""
-echo "PASS: test_pub_surface_guard.sh — all 19 cases (6 green, 11 reds, 1 usage, 1 kill-safety)"
+echo "PASS: test_pub_surface_guard.sh — all 20 cases (6 green, 12 reds, 1 usage, 1 kill-safety)"
