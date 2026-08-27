@@ -4850,6 +4850,126 @@ check_no_unexpected_zero_tests() {
 }
 export -f check_no_unexpected_zero_tests
 
+# _package_test_targets <package>: print one TAB-separated line per declared
+# INTEGRATION (`test`) target of that workspace package — `<name>\t<required-features
+# comma-joined, empty when none>` (issue #1699, roborev round-2 finding 2).
+#
+# Why this exists. `cargo test -p <pkg>` SILENTLY SKIPS any `[[test]]` target whose
+# `required-features` are not all enabled: it is never built, never run, and — the
+# part that matters — it emits NO `Running tests/<name>.rs` line at all, so the #2039
+# zero-tests guard (which keys on that line) cannot see it. Measured on this package:
+# `issue_1494_producer_mem_budget` (`required-features = ["dhat-heap"]`) appeared 0
+# times in a lane log that showed 41 `Running` lines, so a lane claiming "every
+# integration target" was overstating by exactly the targets nobody can observe.
+#
+# The oracle is `cargo metadata`, i.e. CARGO ITSELF, for the same reason
+# _resolved_package_features uses it rather than parsing `[features]`: a hand-parse of
+# `[[test]]` sections would be a SECOND IMPLEMENTATION of cargo's target
+# auto-discovery (tests/*.rs are targets with NO stanza at all) and its correctness
+# would only be knowable by differential testing against the original.
+#
+# Fail-closed, same chain and same direction as _resolved_package_features: jq, else
+# python3, else failure. An empty result is a FAILED DERIVATION (return 1), never "the
+# package declares no test targets" — treating emptiness as an answer would excuse
+# every unobserved target at once, which is the vacuous-green shape.
+_package_test_targets() {
+  local pkg="$1"
+  local meta out
+  meta=$(cargo metadata --format-version 1 2>/dev/null) || return 1
+  [ -n "$meta" ] || return 1
+  if command -v jq >/dev/null 2>&1; then
+    out=$(printf '%s' "$meta" | jq -r --arg n "$pkg" \
+      '.packages[] | select(.name == $n) | .targets[]
+       | select(.kind | index("test"))
+       | [.name, ((."required-features" // []) | join(","))] | @tsv')
+  elif command -v python3 >/dev/null 2>&1; then
+    out=$(printf '%s' "$meta" | python3 -c '
+import json, sys
+n = sys.argv[1]
+d = json.load(sys.stdin)
+for p in d["packages"]:
+    if p["name"] != n:
+        continue
+    for t in p.get("targets", []):
+        if "test" in (t.get("kind") or []):
+            print("%s\t%s" % (t["name"], ",".join(t.get("required-features") or [])))
+' "$pkg")
+  else
+    return 1
+  fi
+  [ -n "$out" ] || return 1
+  printf '%s\n' "$out"
+}
+
+# check_declared_test_targets_observed <label> <logfile> <enabled-set> <target-metadata>
+#
+# Reconcile the DERIVED set of declared integration targets (see
+# _package_test_targets) against the targets actually OBSERVED emitting
+# `Running tests/<name>.rs` in the component log, and FAIL CLOSED naming any target
+# that is unobserved without BOTH halves of an explanation (issue #1699, roborev
+# round-2 finding 2). This is the counterpart to check_no_unexpected_zero_tests: that
+# guard catches a target that RAN and executed nothing; this one catches a target that
+# was never even BUILT, which prints nothing and is therefore invisible to it.
+#
+# An unobserved target is excused IFF BOTH hold, and the reason is printed either way:
+#   (a) EXPLAINED — its `required-features` are non-empty AND at least one of them is
+#       not in this lane's enabled set, so cargo's silent skip is accounted for by
+#       cargo's own rules rather than by a guess; AND
+#   (b) ALTERNATE EXECUTOR — the target's name appears somewhere in this gate script,
+#       i.e. some OTHER component names it (memory-budget names
+#       issue_1494_producer_mem_budget with `--test`), so the gate as a whole still
+#       executes it. Mechanical, from committed source: no curated excusal list.
+#
+# Anything else — an unobserved target with no off required-feature, or one no
+# component names — is the invisible skip this lane exists to prevent, and FAILs
+# naming the target and which half is missing. A positive verdict prints the
+# affirmative measurement (how many declared targets were observed), so a pasted log
+# shows the reconciliation RAN.
+check_declared_test_targets_observed() {
+  local label="$1" logfile="$2" enabled="$3" meta="$4"
+  if [ ! -r "$GATE_SELF" ]; then
+    echo "$label: FAIL-CLOSED — cannot read $GATE_SELF, so the alternate-executor half of the declared-vs-observed reconciliation is unmeasurable (issue #1699)" >&2
+    return 1
+  fi
+  local observed declared=0 seen=0
+  observed=" $(grep -oE 'Running tests/[^[:space:]]+\.rs' "$logfile" \
+    | sed -E 's#^Running tests/(.*)\.rs$#\1#' | sort -u | tr '\n' ' ') "
+  local bad="" excused="" tname rf rfl off
+  while IFS=$'\t' read -r tname rf; do
+    [ -n "$tname" ] || continue
+    declared=$((declared + 1))
+    case "$observed" in
+      *" $tname "*) seen=$((seen + 1)); continue ;;
+    esac
+    off=""
+    for rfl in ${rf//,/ }; do
+      case "$enabled" in *" $rfl "*) ;; *) off="$rfl"; break ;; esac
+    done
+    if [ -z "$off" ]; then
+      if [ -z "$rf" ]; then
+        bad="$bad $tname(unobserved-and-UNEXPLAINED:no-required-features)"
+      else
+        bad="$bad $tname(unobserved-and-UNEXPLAINED:required-features[$rf]-are-all-enabled)"
+      fi
+      continue
+    fi
+    if ! grep -qF -- "$tname" "$GATE_SELF"; then
+      bad="$bad $tname(required-features[$rf]-off[$off]-but-NO-alternate-executor-names-it)"
+      continue
+    fi
+    excused="$excused $tname(required-features[$rf]:off[$off];alternate-executor-names-it-in-agent-gate.sh)"
+  done <<< "$meta"
+  if [ -n "$excused" ]; then
+    echo "$label: declared-vs-observed EXCUSED (cargo silently skips a required-features target it cannot enable; another gate component executes it):$excused" >&2
+  fi
+  if [ -n "$bad" ]; then
+    echo "$label: FAIL-CLOSED —$bad declared as an integration target but NEVER OBSERVED running, and not explained by an off required-feature WITH an alternate executor (issue #1699: cargo skips such a target silently, printing no 'Running tests/' line at all, so the #2039 zero-tests guard cannot see it)" >&2
+    return 1
+  fi
+  echo "$label: declared-vs-observed OK — $seen/$declared declared integration targets observed running (cargo metadata vs 'Running tests/' lines)" >&2
+  return 0
+}
+
 run_component() { # run_component <name> <cmd...>
   local name="$1"; shift
   if [ -n "$ONLY" ] && ! grep -qw "$name" <<<"${ONLY//,/ }"; then
@@ -5426,6 +5546,18 @@ for node in (d.get("resolve") or {}).get("nodes", []):
 # targets STOP being allowed-zero with no gate edit, and a genuinely never-executed
 # target FAILs the lane exactly as before.
 #
+# DECLARED-VS-OBSERVED, also derived (roborev round-2 finding 2). "Whole package" is
+# not the same claim as "every declared target ran": `cargo test -p` SILENTLY SKIPS a
+# `[[test]]` target whose `required-features` are not enabled, printing NO
+# `Running tests/` line for it, so the #2039 zero-tests guard — which keys on that
+# line — cannot see it. Measured: `issue_1494_producer_mem_budget`
+# (`required-features = ["dhat-heap"]`) appeared 0 times in a lane log carrying 41
+# `Running` lines. So this component ALSO reconciles cargo metadata's declared `test`
+# targets against the ones observed running, and excuses an unobserved target only
+# when BOTH halves hold — an off required-feature explaining cargo's skip, AND another
+# gate component naming that target (memory-budget names this one) — printing the
+# reason either way. Anything else FAILs naming the target.
+#
 # Deliberately NOT done: adding `--features observability-testing`. Building the OTel
 # stack is a cost the gate declines on purpose (#1844 excludes that stack from clippy
 # for the same reason), and reversing that is not this component's call.
@@ -5456,6 +5588,30 @@ run_flight_tests() {
       echo "        resolve node for the package). The DERIVATION failed, not the tests."
       echo "        Without it the allowed-zero set is unknowable, and defaulting it"
       echo "        either way would be a verdict with no measurement behind it."
+    } | tee "$log"
+    end=$(date +%s)
+    record_result "$name" "$status" "$((end - start))"
+    echo ">>> [$name] $status ($((end - start))s)"
+    return 0
+  fi
+
+  # The DECLARED integration-target set, from cargo metadata (issue #1699, roborev
+  # round-2 finding 2). Needed because a `[[test]]` target whose `required-features`
+  # this lane does not enable is skipped by cargo SILENTLY — no `Running tests/` line,
+  # hence invisible to the #2039 zero-tests guard, hence a "whole package / every
+  # integration target" claim that is quietly false. Same fail-closed direction as the
+  # enabled set above: a failed DERIVATION is a FAIL naming the derivation, never an
+  # assumption that nothing was omitted.
+  local target_meta
+  if ! target_meta=$(_package_test_targets cqlite-flight); then
+    status=FAIL
+    {
+      echo "[$name] FAIL-CLOSED: could not derive cqlite-flight's declared integration"
+      echo "        (test) targets and their required-features from cargo metadata"
+      echo "        (no jq/python3, a metadata failure, or an empty target set). The"
+      echo "        DERIVATION failed, not the tests. Without it a silently-skipped"
+      echo "        required-features target is unobservable, and assuming none was"
+      echo "        omitted would be a verdict with no measurement behind it."
     } | tee "$log"
     end=$(date +%s)
     record_result "$name" "$status" "$((end - start))"
@@ -5507,7 +5663,7 @@ run_flight_tests() {
     fi
   done
 
-  echo ">>> [$name] cargo test --no-fail-fast -p cqlite-flight (whole package: --lib + every integration target, #1699)"
+  echo ">>> [$name] cargo test --no-fail-fast -p cqlite-flight (whole package: --lib + every integration target cargo can enable at this feature set, RECONCILED against cargo metadata, #1699)"
   echo ">>> [$name] enabled features (cargo metadata):$enabled"
   [ -n "$reasons" ] && echo ">>> [$name] allowed-zero (module-level #![cfg] names a feature NOT enabled here, so the body compiles out) target(gating feature):$reasons"
   [ -n "$unparsed" ] && echo ">>> [$name] module-level #![cfg] shape NOT recognised, so NOT allowed-zero (fail-closed):$unparsed"
@@ -5523,7 +5679,15 @@ run_flight_tests() {
     # the GUARD's exit status directly — not a pipeline's last stage.
     if check_no_unexpected_zero_tests "$name" "$log" \
         ${allow_zero[@]+"${allow_zero[@]}"} 2>>"$log"; then
-      status=PASS
+      # SECOND guard, catching the complementary shape (#1699): the zero-tests guard
+      # only sees targets that RAN. A required-features target cargo could not enable
+      # never runs and prints nothing at all, so only a declared-vs-observed
+      # reconciliation can see it. Both must pass for this lane's claim to hold.
+      if check_declared_test_targets_observed "$name" "$log" "$enabled" "$target_meta" 2>>"$log"; then
+        status=PASS
+      else
+        status=FAIL
+      fi
     else
       status=FAIL
     fi
