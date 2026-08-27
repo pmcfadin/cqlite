@@ -881,6 +881,69 @@ pub fn g<'a>(r#match: &'a str) -> &'a str { r#match }
     );
 }
 
+/// The anti-vacuity complement to [`unrecognized_literal_prefix_fails_closed`]: a
+/// refusal branch that reds on ORDINARY Rust is the branch someone deletes, and deleting
+/// it re-opens the whole false-PASS family. So the lexer is measured against every real
+/// `.rs` file in the two crates it serves — `cqlite-core/src` (this guard's subject) and
+/// `cqlite-cli/src` (#1502's subject, which will drive the same walker) — and must refuse
+/// none of them.
+///
+/// Measured when this landed: 1400 `.rs` files across the whole workspace produced
+/// exactly one refusal, and that one is correct (a rust-script file whose shebang makes
+/// `#\!` an invalid Rust escape, outside any crate's `src`).
+#[test]
+fn the_prefix_refusal_never_reds_ordinary_rust() {
+    fn collect(dir: &PathBuf, out: &mut Vec<PathBuf>) {
+        let entries =
+            fs::read_dir(dir).unwrap_or_else(|e| panic!("cannot read {}: {e}", dir.display()));
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                collect(&path, out);
+            } else if path.extension().map(|e| e == "rs").unwrap_or(false) {
+                out.push(path);
+            }
+        }
+    }
+
+    let workspace = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .expect("cqlite-core has a parent workspace directory")
+        .to_path_buf();
+    let mut files = Vec::new();
+    for crate_src in ["cqlite-core/src", "cqlite-cli/src"] {
+        let dir = workspace.join(crate_src);
+        assert!(
+            dir.is_dir(),
+            "`{}` must exist — a probe with no subject measures nothing (FAIL-CLOSED)",
+            dir.display()
+        );
+        collect(&dir, &mut files);
+    }
+    // A collapsed census is the vacuous pass; there were 481 + 60 files when this landed.
+    assert!(
+        files.len() >= 300,
+        "only {} files probed — the census collapsed, so this test proved nothing",
+        files.len()
+    );
+
+    let mut refusals = Vec::new();
+    for file in &files {
+        let text = fs::read_to_string(file)
+            .unwrap_or_else(|e| panic!("cannot read {}: {e}", file.display()));
+        if let Err(cause) = mod_reachability::sanitize(&text) {
+            refusals.push(format!("{}: {cause}", file.display()));
+        }
+    }
+    assert!(
+        refusals.is_empty(),
+        "the lexer refused {} real Rust file(s); an over-broad refusal is the branch \
+         someone deletes:\n{}",
+        refusals.len(),
+        refusals.join("\n")
+    );
+}
+
 // ---------------------------------------------------------------------------
 // Stripper unit tests (control vs data, at the sanitizer boundary)
 // ---------------------------------------------------------------------------
