@@ -19,18 +19,44 @@ Aggregate rows/s (median), min-max spread as % of median in parentheses. Blank =
 
 ### Cross-S marginal efficiency — BOTH denominators
 
-| S | best aggregate rows/s | N@peak | per-scan p50 rows/s | own N=1 | speedup vs **1-core peak** | **marg. eff. vs 1-core peak** | speedup vs 1-core N=1 | marg. eff. vs 1-core N=1 | cycles/row † | instr/row † | IPC | L1d loads/row † | L1d miss/row † |
-|--:|--:|--:|--:|--:|--:|--:|--:|--:|--:|--:|--:|--:|--:|
-| 1 | 487,213 | 2 | 243,729 | 358,869 | 1.000 | **1.000** | 1.358 | 1.358 | 14,229.4 | 23,143.3 | 1.626 | 5,796.9 | 109.72 |
-| 2 | 933,197 | 8 | 112,403 | 265,471 | 1.915 | **0.958** | 2.600 | 1.300 | 14,863.6 | 22,810.5 | 1.535 | 5,713.8 | 107.60 |
-| 3 | 1,290,610 | 8 | 162,619 | 254,991 | 2.649 | **0.883** | 3.596 | 1.199 | 15,821.9 | 23,441.8 | 1.482 | 5,866.5 | 124.16 |
-| 4 | 1,826,004 | 16 | 115,262 | 249,531 | 3.748 | **0.937** | 5.088 | 1.272 | 15,055.1 | 22,911.4 | 1.522 | 5,736.8 | 110.18 |
-| 5 | 2,177,475 | 16 | 133,267 | 231,424 | 4.469 | **0.894** | 6.068 | 1.214 | 15,572.9 | 23,262.5 | 1.494 | 5,822.2 | 120.41 |
-| 6 | 2,732,817 | 24 | 113,913 | 239,223 | 5.609 | **0.935** | 7.615 | 1.269 | 14,819.6 | 22,769.4 | 1.536 | 5,702.8 | 107.47 |
+| S | best aggregate rows/s | **spread at that point** | N@peak | per-scan p50 rows/s | own N=1 | speedup vs **1-core peak** | **marg. eff. vs 1-core peak** | speedup vs 1-core N=1 | marg. eff. vs 1-core N=1 | cycles/row † | instr/row † | IPC | L1d loads/row † | L1d miss/row † | peak status |
+|--:|--:|--:|--:|--:|--:|--:|--:|--:|--:|--:|--:|--:|--:|--:|--:|
+| 1 | 487,213 | 4.3% | 2 | 243,729 | 358,869 | 1.000 | **1.000** | 1.358 | 1.358 | 14,229.4 | 23,143.3 | 1.626 | 5,796.9 | 109.72 | **plateau** |
+| 2 | 933,197 | 2.9% | 8 | 112,403 | 265,471 | 1.915 | **0.958** | 2.600 | 1.300 | 14,863.6 | 22,810.5 | 1.535 | 5,713.8 | 107.60 | **edge-truncated** |
+| 3 | 1,290,610 | 1.7% | 8 | 162,619 | 254,991 | 2.649 | **0.883** | 3.596 | 1.199 | 15,821.9 | 23,441.8 | 1.482 | 5,866.5 | 124.16 | **edge-truncated** |
+| 4 | 1,826,004 | 0.4% | 16 | 115,262 | 249,531 | 3.748 | **0.937** | 5.088 | 1.272 | 15,055.1 | 22,911.4 | 1.522 | 5,736.8 | 110.18 | **edge-truncated** |
+| 5 | 2,177,475 | 1.7% | 16 | 133,267 | 231,424 | 4.469 | **0.894** | 6.068 | 1.214 | 15,572.9 | 23,262.5 | 1.494 | 5,822.2 | 120.41 | **edge-truncated** |
+| 6 | 2,732,817 | 0.7% | 24 | 113,913 | 239,223 | 5.609 | **0.935** | 7.615 | 1.269 | 14,819.6 | 22,769.4 | 1.536 | 5,702.8 | 107.47 | **edge-truncated** |
+
+### Is each best-N a real peak? (pre-registered bracketing rule)
+
+- **S=1, N@peak=2 — PLATEAU**: N=4 is within 1.88% of N=2, inside that point's own spread (3.41%) — a flat top; the LOWER N is reported (same throughput, cheaper).
+- **S=2, N@peak=8 — EDGE-TRUNCATED**: N=8 is the largest N tested at S=2; nothing above it was measured, so this is a LOWER BOUND on S=2's best, not a measured peak.
+- **S=3, N@peak=8 — EDGE-TRUNCATED**: N=8 is the largest N tested at S=3; nothing above it was measured, so this is a LOWER BOUND on S=3's best, not a measured peak.
+- **S=4, N@peak=16 — EDGE-TRUNCATED**: N=16 is the largest N tested at S=4; nothing above it was measured, so this is a LOWER BOUND on S=4's best, not a measured peak.
+- **S=5, N@peak=16 — EDGE-TRUNCATED**: N=16 is the largest N tested at S=5; nothing above it was measured, so this is a LOWER BOUND on S=5's best, not a measured peak.
+- **S=6, N@peak=24 — EDGE-TRUNCATED**: N=24 is the largest N tested at S=6; nothing above it was measured, so this is a LOWER BOUND on S=6's best, not a measured peak.
+
+**An `edge-truncated` row is a LOWER BOUND, not a measured peak**, and any figure derived from it (including AC2's target) inherits that status. It is not smoothed, interpolated, or quoted as a result.
 
 **† BASIS — every per-row counter is summed over ALL PINNED HARDWARE THREADS** (2S logical CPUs, both SMT siblings of each of the S cores), which is the set `perf stat -C` counted and is the same set at every N for a given S. It is NOT a per-hardware-thread figure: dividing by 2 would give the per-thread average only if both siblings were equally loaded, which is exactly what varies across the N ladder. IPC is basis-invariant (a ratio of two sums over the same set). Per mission section 1, no figure here is quoted without its basis.
 
 `marg. eff.` = speedup / S; 1.000 would be perfect scaling. **Reference B (S=1's own peak) is PRIMARY**: it is the most the engine achieves on one physical core, so it is the fair 'perfect scaling' unit, and it is the CONSERVATIVE choice — it yields lower efficiencies than A. Reference A (S=1 at N=1) is published alongside because it is the naive baseline. The `own N=1` column is why a self-normalised speedup is NOT published: each arm's own N=1 moves with S, so dividing by it would flatter the wide arms.
+
+### Rig resolution — per point, because spread is N-dependent
+
+| N | median spread over the S values measured at that N | points |
+|--:|--:|--:|
+| 1 | 4.20% | 6 |
+| 2 | 4.27% | 3 |
+| 4 | 3.36% | 6 |
+| 8 | 1.98% | 6 |
+| 16 | 0.45% | 3 |
+| 24 | 0.74% | 1 |
+
+Grid-wide: median **2.27%**, max **8.20%** over 25 points. **That grid-wide pair is a summary across heterogeneous points — useful for judging the rig, NOT an error bar for any single figure.** The deliverable (S=6 at best-N) sits in the high-N regime, so its own spread, printed in the table above, is the number that bounds it.
+
+**Round-over-round direction: 35 rose, 15 fell** across consecutive rounds at the same point. This is **INERT DATA, EXPLICITLY UNCONTROLLED FOR DRIFT** (`scripts/perf/README.md`): this rig does not control drift, nothing here establishes the session ran without it, and no round-major claim is made. A directional imbalance is consistent with page-cache warming or thermal settling. The S-order ROTATION is what distributes such a drift across points rather than concentrating it in one S — which is why the curve's SHAPE survives a drifting session even though no absolute number does. The rotation is a reasonable ordering, NOT a verified control. Note also that a median of 3 draws from a drifting distribution, so 'median of 3' reduces but does not remove this — it is not a drift-free figure.
 
 ### Endpoints S=1 and S=6 — the L1d partial of the DEFERRED AC3
 

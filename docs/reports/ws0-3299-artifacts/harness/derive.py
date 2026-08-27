@@ -121,6 +121,47 @@ def collect(results):
     return reps
 
 
+def bracket_verdict(by_point, s, peaks, n_values, grid_max_spread):
+    """Is this S's best-N a MEASURED peak, a PLATEAU, or an EDGE TRUNCATION?
+
+    Pre-registered rule (fixed before the data was seen, so it cannot be chosen
+    to suit it): a peak is BRACKETED when some tested N above it is lower by
+    MORE than the relevant point's own rep-to-rep spread. If the next N up is
+    within spread, the top is a PLATEAU and the LOWER N is taken — same
+    throughput, cheaper configuration. If no N above was tested at all, the
+    "peak" is the largest N tried and is an EDGE TRUNCATION, i.e. a LOWER BOUND
+    on that S's best, not a measurement of it.
+
+    The threshold is each point's OWN measured spread, not one global number:
+    spread here is strongly N-dependent (sub-1% at high N, 2-3.5% at low N), so
+    a single grid-wide figure would overstate the uncertainty on the wide points
+    and understate it on the narrow ones. `grid_max_spread` is the fallback only
+    for a point that somehow lacks 3 valid reps.
+    """
+    n_peak, best = peaks[s]
+    above = [n for n in n_values if n > n_peak and (s, n) in by_point]
+    if not above:
+        return "edge-truncated", (
+            f"N={n_peak} is the largest N tested at S={s}; nothing above it was measured, "
+            f"so this is a LOWER BOUND on S={s}'s best, not a measured peak"
+        )
+    nxt = min(above)
+    v = by_point[(s, nxt)]
+    nxt_med = agg(v, "aggregate_rows_per_s")
+    sp = spread_pct([x["aggregate_rows_per_s"] for x in v]) / 100.0
+    thr = sp if len(v) >= 3 else grid_max_spread
+    drop = (best - nxt_med) / best
+    if drop > thr:
+        return "bracketed", (
+            f"N={nxt} is {drop:.2%} below N={n_peak}, exceeding that point's own spread "
+            f"({thr:.2%}) — the curve has turned over"
+        )
+    return "plateau", (
+        f"N={nxt} is within {abs(drop):.2%} of N={n_peak}, inside that point's own spread "
+        f"({thr:.2%}) — a flat top; the LOWER N is reported (same throughput, cheaper)"
+    )
+
+
 def agg(points, key):
     """Median of `key` over the reps at one (S, N) point."""
     return median([p[key] for p in points])
@@ -132,6 +173,10 @@ def emit_table(reps, min_reps):
         by_point.setdefault((r["s"], r["n"]), []).append(r)
     s_values = sorted({s for s, _ in by_point})
     n_values = sorted({n for _, n in by_point})
+    bracket_notes = []
+    _sp = [spread_pct([r["aggregate_rows_per_s"] for r in v]) / 100.0
+           for v in by_point.values() if len(v) >= 2]
+    grid_max_spread = max(_sp) if _sp else 0.05
 
     print("## C(S, N) — bare-scan scaling grid, aligned window\n")
     print("Corpus: #3096 'Corpus B' (4,000,000 rows, 693.69 B/row, UNCOMPRESSED). "
@@ -166,11 +211,11 @@ def emit_table(reps, min_reps):
     ref_n1 = agg(by_point[(1, 1)], "aggregate_rows_per_s") if (1, 1) in by_point else None  # A: S=1 at N=1
 
     print("### Cross-S marginal efficiency — BOTH denominators\n")
-    print("| S | best aggregate rows/s | N@peak | per-scan p50 rows/s | own N=1 | "
+    print("| S | best aggregate rows/s | **spread at that point** | N@peak | per-scan p50 rows/s | own N=1 | "
           "speedup vs **1-core peak** | **marg. eff. vs 1-core peak** | speedup vs 1-core N=1 | "
           "marg. eff. vs 1-core N=1 | cycles/row † | instr/row † | IPC | L1d loads/row † | "
-          "L1d miss/row † |")
-    print("|--:|--:|--:|--:|--:|--:|--:|--:|--:|--:|--:|--:|--:|--:|")
+          "L1d miss/row † | peak status |")
+    print("|--:|--:|--:|--:|--:|--:|--:|--:|--:|--:|--:|--:|--:|--:|--:|--:|")
     for s in s_values:
         n_peak, best = peaks[s]
         v = by_point[(s, n_peak)]
@@ -185,14 +230,26 @@ def emit_table(reps, min_reps):
         sp_a = f"{best / ref_n1:.3f}" if ref_n1 else "n/a"
         me_a = f"{(best / ref_n1) / s:.3f}" if ref_n1 else "n/a"
         own_n1_cell = f"{own_n1:,.0f}" if own_n1 is not None else "n/m"
+        peak_sp = spread_pct([x["aggregate_rows_per_s"] for x in v])
+        verdict, why = bracket_verdict(by_point, s, peaks, n_values, grid_max_spread)
+        bracket_notes.append((s, n_peak, verdict, why))
         print(
-            f"| {s} | {best:,.0f} | {n_peak} | {agg(v, 'per_scan_p50_rows_per_s'):,.0f} | "
+            f"| {s} | {best:,.0f} | {peak_sp:.1f}% | {n_peak} | "
+            f"{agg(v, 'per_scan_p50_rows_per_s'):,.0f} | "
             f"{own_n1_cell} | {sp_b} | {me_b} | {sp_a} | {me_a} | "
             f"{agg(v, 'cycles_per_row'):,.1f} | {agg(v, 'instructions_per_row'):,.1f} | "
             f"{agg(v, 'ipc'):.3f} | {agg(v, 'l1d_loads_per_row'):,.1f} | "
-            f"{agg(v, 'l1d_load_misses_per_row'):,.2f} |"
+            f"{agg(v, 'l1d_load_misses_per_row'):,.2f} | **{verdict}** |"
         )
     print()
+    print("### Is each best-N a real peak? (pre-registered bracketing rule)\n")
+    for s_, n_, verdict, why in bracket_notes:
+        print(f"- **S={s_}, N@peak={n_} — {verdict.upper()}**: {why}.")
+    print()
+    if any(v == "edge-truncated" for _, _, v, _ in bracket_notes):
+        print("**An `edge-truncated` row is a LOWER BOUND, not a measured peak**, and any figure "
+              "derived from it (including AC2's target) inherits that status. It is not smoothed, "
+              "interpolated, or quoted as a result.\n")
     print("**† BASIS — every per-row counter is summed over ALL PINNED HARDWARE THREADS** "
           "(2S logical CPUs, both SMT siblings of each of the S cores), which is the set "
           "`perf stat -C` counted and is the same set at every N for a given S. It is NOT a "
@@ -209,8 +266,60 @@ def emit_table(reps, min_reps):
           "each arm's own N=1 moves with S, so dividing by it would flatter the wide "
           "arms.\n")
 
+    emit_resolution(by_point, reps)
     emit_endpoints(by_point, peaks)
     emit_provenance(reps, by_point, min_reps)
+
+
+def emit_resolution(by_point, reps):
+    """The rig's own reproducibility, per point — never one global error bar.
+
+    Spread is strongly N-DEPENDENT: a single stream's throughput turns on
+    scheduler placement and one core's frequency excursions, while an aggregate
+    over sixteen streams averages those away. So a grid-wide figure would
+    overstate the uncertainty on the wide points (which is where the deliverable
+    lives) and understate it on the narrow ones. Every difference quoted anywhere
+    in this report is compared against the spread of the POINTS BEING DIFFERENCED.
+    """
+    spreads = {(s, n): spread_pct([r["aggregate_rows_per_s"] for r in v])
+               for (s, n), v in by_point.items() if len(v) >= 2}
+    by_n = {}
+    for (s, n), sp in spreads.items():
+        by_n.setdefault(n, []).append(sp)
+    print("### Rig resolution — per point, because spread is N-dependent\n")
+    print("| N | median spread over the S values measured at that N | points |")
+    print("|--:|--:|--:|")
+    for n in sorted(by_n):
+        print(f"| {n} | {median(by_n[n]):.2f}% | {len(by_n[n])} |")
+    allsp = list(spreads.values())
+    print(f"\nGrid-wide: median **{median(allsp):.2f}%**, max **{max(allsp):.2f}%** over "
+          f"{len(allsp)} points. **That grid-wide pair is a summary across heterogeneous "
+          f"points — useful for judging the rig, NOT an error bar for any single figure.** "
+          f"The deliverable (S=6 at best-N) sits in the high-N regime, so its own spread, "
+          f"printed in the table above, is the number that bounds it.\n")
+
+    # Round-over-round direction: inert data, explicitly uncontrolled for drift.
+    rounds = {}
+    for r in reps:
+        rounds.setdefault((r["s"], r["n"]), {})[r["round"]] = r["aggregate_rows_per_s"]
+    up = dn = 0
+    for _, byr in rounds.items():
+        ks = sorted(byr)
+        for a, b in zip(ks, ks[1:]):
+            if byr[b] > byr[a]:
+                up += 1
+            else:
+                dn += 1
+    print(f"**Round-over-round direction: {up} rose, {dn} fell** across consecutive rounds at the "
+          f"same point. This is **INERT DATA, EXPLICITLY UNCONTROLLED FOR DRIFT** "
+          f"(`scripts/perf/README.md`): this rig does not control drift, nothing here establishes "
+          f"the session ran without it, and no round-major claim is made. A directional imbalance "
+          f"is consistent with page-cache warming or thermal settling. The S-order ROTATION is "
+          f"what distributes such a drift across points rather than concentrating it in one S — "
+          f"which is why the curve's SHAPE survives a drifting session even though no absolute "
+          f"number does. The rotation is a reasonable ordering, NOT a verified control. "
+          f"Note also that a median of 3 draws from a drifting distribution, so 'median of 3' "
+          f"reduces but does not remove this — it is not a drift-free figure.\n")
 
 
 def emit_endpoints(by_point, peaks):
