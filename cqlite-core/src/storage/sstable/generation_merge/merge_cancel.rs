@@ -179,11 +179,16 @@ mod tests {
              `ScanCancel::default()`, which no caller can ever trip"
         );
 
-        assert!(
-            !src.contains("ScanCancel::new()"),
-            "`seek_merge_generations_for_read` must pass its per-call token to \
-             `build_single_partition_merger_from_readers`; a freshly-minted \
-             `ScanCancel::new()` is unreachable by any caller and cancels nothing"
+        // AFFIRMATIVE, not "no inert constructor survives": an absence assert over
+        // source is defeated by any COMMENT that names the thing it forbids (the
+        // first draft of this test was, by a comment two lines from the call site).
+        // Counting the tokens actually handed out cannot be satisfied by prose.
+        assert_eq!(
+            src.matches("cancel.clone()").count(),
+            3,
+            "each of the 3 per-call tokens must be handed to a merger — the two \
+             cancellable `KWayMerger`s and `build_single_partition_merger_from_readers`, \
+             whose token was a discarded `ScanCancel` that no caller could ever trip"
         );
 
         assert_eq!(
