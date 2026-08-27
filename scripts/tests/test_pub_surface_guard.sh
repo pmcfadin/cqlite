@@ -969,5 +969,75 @@ rm -rf "$peer_root"
 [ -d "$TMPROOT" ] || fail_case "case 19 — the live run's own scratch root was deleted"
 echo "OK (19): cleanup reclaims a registered worktree by explicit path, and a fresh run leaves a concurrent run's alone"
 
+# ---------------------------------------------------------------------------
+# 25. RED — a UNICODE-NAMED associated item added to a page that ALREADY carries
+#     ASCII members must be NAMED in the diff (roborev round 5, finding 2).
+#
+#     Rust identifiers are Unicode: `pub fn café(&self)` is ordinary public API. The
+#     anchor scan used to read the name as `[A-Za-z0-9_]+` with a required closing
+#     quote, so such an anchor matched NOTHING and the item was SILENTLY DROPPED —
+#     and neither backstop could see it. The per-section emptiness check is satisfied
+#     by the page's ASCII siblings (the section is non-empty, just incomplete), and
+#     `all.html` lists item PAGES only, never associated items. Measured on the
+#     unfixed guard: appending `pub fn café_probe` + `pub const PROBE_CONSTÉ` to
+#     `ResolvedVersion` produced `RESULT: exit 0`, "1128 public items + 3785
+#     associated items … match cqlite-core/pub-surface.snapshot" — a real public-API
+#     addition certified green. That is the sixth instance in #1712 of one class: a
+#     lexical character class standing in for a structural read.
+#
+#     WHAT RUSTDOC ACTUALLY EMITS, measured rather than assumed (a scratch crate with
+#     `café`, `日本語`, `CONSTÉ`, `Struct変 { fieldé }`, `méthode`, `Assocé`):
+#       * identifier bytes appear RAW UTF-8 in anchors — `id="method.café"`,
+#         `id="variant.Struct変.field.fieldé"` — and are NEVER percent-encoded.
+#         Percent-encoding appears only in `impl-Borrow%3CT%3E-for-T`-shaped anchors,
+#         i.e. `<`/`>`/`'` inside impl headers, which live in EXCLUDED sections.
+#       * rustc normalises a non-NFC source identifier to NFC, and rustdoc emits that
+#         NFC form in BOTH the anchor and the page filename (`struct.Café.html`,
+#         `href="struct.Café.html"` in all.html). So there is exactly ONE spelling and
+#         the item page and the all.html cross-check cannot disagree about it.
+#     Hence no decoding, re-encoding or normalisation anywhere in this guard — which
+#     is the point: the anchor's delimited value is taken verbatim.
+#
+#     The case pins the OTHER direction in the SAME scratch, at no extra `cargo doc`:
+#     the diff must contain NOTHING BUT the two added lines. Widening the anchor read
+#     must not re-spell, drop or duplicate any pre-existing ASCII item.
+# ---------------------------------------------------------------------------
+scratch_tree unicode-assoc; wt25="$SCRATCH"
+cat >>"$wt25/cqlite-core/src/version_hints.rs" <<'RS'
+
+impl ResolvedVersion {
+    /// Self-test-only probe with a NON-ASCII name
+    /// (scripts/tests/test_pub_surface_guard.sh, issue #1712 r5 F2). Exists solely
+    /// inside a throwaway scratch worktree. Never committed.
+    pub fn café_probe(&self) -> bool {
+        true
+    }
+
+    /// Self-test-only probe associated const with a NON-ASCII name (#1712 r5 F2).
+    pub const PROBE_CONSTÉ: u8 = 1;
+}
+RS
+grep -qF 'café_probe' "$wt25/cqlite-core/src/version_hints.rs" \
+  || fail_case "case 25 setup: the Unicode probe items were not written to the scratch source"
+set +e
+bash "$wt25/$GUARD_REL" >"$TMPROOT/case25.out" 2>&1
+case25_rc=$?
+set -e
+[ "$case25_rc" -ne 0 ] \
+  || fail_case "case 25 — a UNICODE-named associated item did NOT trip the snapshot diff. The anchor scan dropped it silently, which is the #1712 r5 F2 FALSE PASS: a real public-API addition with a green guard. Got: $(cat "$TMPROOT/case25.out")"
+grep -qF -- "+method cqlite_core::version_hints::ResolvedVersion::café_probe" "$TMPROOT/case25.out" \
+  || fail_case "case 25 — a \`pub fn\` with a NON-ASCII name was not recorded as a \`method\` line at its real path; got: $(grep -F 'café' "$TMPROOT/case25.out" || echo '(no line mentions it at all)')"
+grep -qF -- "+associatedconstant cqlite_core::version_hints::ResolvedVersion::PROBE_CONSTÉ" "$TMPROOT/case25.out" \
+  || fail_case "case 25 — a \`pub const\` with a NON-ASCII name was not recorded as an \`associatedconstant\` line at its real path; got: $(grep -F 'PROBE_CONST' "$TMPROOT/case25.out" || echo '(no line mentions it at all)')"
+# No spurious drift: the ONLY changed snapshot lines are the two additions.
+awk '/^\+\+\+/ || /^---/ { next } /^[+-]/ { print }' "$TMPROOT/case25.out" >"$TMPROOT/case25.changed"
+if [ "$(wc -l <"$TMPROOT/case25.changed" | tr -d ' ')" -ne 2 ] || grep -q '^-' "$TMPROOT/case25.changed"; then
+  echo "FAIL: case 25 — widening the anchor read re-spelled, dropped or duplicated"
+  echo "      pre-existing ASCII surface. Only the two added lines may change:"
+  cat "$TMPROOT/case25.changed"
+  exit 1
+fi
+echo "OK (25): a Unicode-named associated item is named in the diff, and no ASCII item is re-spelled"
+
 echo ""
-echo "PASS: test_pub_surface_guard.sh — all 24 cases (7 green, 15 reds, 1 usage, 1 kill-safety)"
+echo "PASS: test_pub_surface_guard.sh — all 25 cases (7 green, 16 reds, 1 usage, 1 kill-safety)"
