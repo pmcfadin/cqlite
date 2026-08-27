@@ -493,13 +493,20 @@
 #                      partial-extraction discard removed; guard state back under
 #                      TMPDIR with no consistency check; exact-`S` index-flag match;
 #                      failed nested scan read as clean).
-#   flight-tests       cargo test -p cqlite-flight (WHOLE package: --lib + every
-#                      integration target). Issue #1699: before this, the gate
-#                      COMPILED cqlite-flight (clippy --all-targets) and RAN only three
-#                      of its ~44 targets by name (two in
-#                      flight-query-semantics-oracle, one dhat target in
+#   flight-tests       cargo test -p cqlite-flight --lib --bins (UNIT tests only).
+#                      Issue #1699: before this, the gate COMPILED cqlite-flight
+#                      (clippy --all-targets) and RAN only three of its ~44 targets by
+#                      name (two in flight-query-semantics-oracle, one dhat target in
 #                      memory-budget) — so a Flight regression elsewhere was found only
-#                      after a push, on CI. Runs under the zero-tests guard; no opt-out.
+#                      after a push, on CI. NARROWED from the whole package by #3384:
+#                      that package's INTEGRATION suite is ~50% non-deterministic under
+#                      intra-package parallelism (4 runs PASS/FAIL/PASS/FAIL, 2 distinct
+#                      victims), and a lane that reds 1-in-2 carries no information. The
+#                      lane therefore PRINTS A COVERAGE CENSUS on every run naming the
+#                      integration targets it does NOT execute, the CI Flight tier that
+#                      does, and #3384/#3383 — an omission stated is the opposite of the
+#                      silent omission #1699 exists to eliminate. Runs under a
+#                      unit-scoped zero-tests guard; no opt-out.
 #   legacy-heuristics  BUILD cqlite-core at `default + legacy-heuristics` under
 #                      -D warnings, then EXECUTE the tests that feature turns on
 #                      (issue #1699). clippy already test-compiles those bodies inside a
@@ -8662,9 +8669,10 @@ run_file_size
 #     report PASS. python-bindings is therefore in this set (#1175 finding 2): the
 #     preflight must FAIL loudly rather than let a skipped suite pass green — the
 #     same #646 failure mode that motivated guarding the Rust dataset suites.
-#     Added by #1699: flight-tests (the whole cqlite-flight package — its e2e
-#     do_get/parity targets read real Data.db, including the two
-#     flight-query-semantics-oracle already guards this way) and legacy-heuristics
+#     Added by #1699: flight-tests (its --lib unit suite reads real Data.db — e.g.
+#     stats.rs's real-fixture test, which SKIPS with a printed notice when
+#     CQLITE_DATASETS_ROOT is unset, exactly the silent-skip shape this set guards;
+#     it stays enrolled after the #3384 narrowing for that reason) and legacy-heuristics
 #     (several of its derived cqlite-core/tests targets — sstable_discovery_*,
 #     parsing_improvements_test — read real Data.db).
 #   dataset-free (deliberately NOT guarded): fmt, clippy, file-size (operate on
