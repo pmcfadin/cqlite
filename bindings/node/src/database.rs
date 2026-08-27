@@ -596,11 +596,24 @@ impl Database {
         #[cfg(feature = "write-support")]
         let schema_path_for_write: Option<PathBuf> = schema_path.clone();
 
-        // Capture the compaction settings before `core_config` is moved into
-        // ingestion / Database::open, so `Config.storage.compaction` is
-        // authoritative for the write path (issue #1619) rather than decorative.
+        // Capture the whole public config before `core_config` is moved into
+        // ingestion / Database::open, so `Config.storage` is authoritative for
+        // the write path (issues #1619, #1697) rather than decorative. It is
+        // translated by the ONE bridge, `WriteEngineConfig::from_config`, below.
+        //
+        // The `flushThreshold` option (issue #1620) is applied ONTO the public
+        // `storage.memtable_size_threshold` rather than onto the engine's
+        // private setter, so the option keeps its exact external behaviour while
+        // flowing through the single source. It was already validated above
+        // (finite, >= 1 byte, <= the memtable hard limit).
         #[cfg(feature = "write-support")]
-        let compaction_config = core_config.storage.compaction.clone();
+        let write_engine_public_config = {
+            let mut c = core_config.clone();
+            if let Some(v) = flush_threshold {
+                c.storage.memtable_size_threshold = v as u64;
+            }
+            c
+        };
 
         // Validate write options
         #[cfg(feature = "write-support")]
@@ -750,18 +763,16 @@ impl Database {
                 ));
             };
 
-            let mut config = cqlite_core::storage::write_engine::WriteEngineConfig::new(
+            // Built through the single Config -> WriteEngineConfig bridge
+            // (issue #1697). `flushThreshold` was already folded into
+            // `storage.memtable_size_threshold` above; when it was not provided
+            // the shipped 64 MB default flows through unchanged.
+            let config = cqlite_core::storage::write_engine::WriteEngineConfig::from_config(
+                &write_engine_public_config,
                 wd.join("data"),
                 wd.join("wal"),
                 schema,
-            )
-            .with_compaction_config(&compaction_config);
-
-            // Apply the optional flush threshold (issue #1620); default is the
-            // engine's 64 MB when not provided.
-            if let Some(v) = flush_threshold {
-                config = config.with_flush_threshold(v as usize);
-            }
+            );
 
             let engine = cqlite_core::storage::write_engine::WriteEngine::new(config)
                 .map_err(to_napi_error)?;

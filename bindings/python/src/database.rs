@@ -857,11 +857,20 @@ pub fn open(
 
     let core_config = config_from_py(py, config)?;
 
-    // Capture the compaction settings before `core_config` is moved into
-    // ingestion / Database::open, so `Config.storage.compaction` is
-    // authoritative for the Python write path rather than decorative (issue
-    // #1619). Setting `auto_compaction = false` disables STCS, making
-    // `maintenance_step` a no-op. NOTE: the config bridge (`config_from_dict`)
+    // Capture the whole public config before `core_config` is moved into
+    // ingestion / Database::open, so `Config.storage` is authoritative for the
+    // Python write path rather than decorative (issues #1619, #1697). It is
+    // translated by the ONE bridge, `WriteEngineConfig::from_config`, below:
+    // `compaction.auto_compaction = false` disables STCS (making
+    // `maintenance_step` a no-op), `compaction.min_threshold` /
+    // `compaction.max_threshold` set the STCS widths, and
+    // `memtable_size_threshold` sets the flush trigger.
+    //
+    // The `flush_threshold=` keyword (issue #1620) is applied ONTO that public
+    // field rather than onto the engine's private setter, so the option keeps
+    // its exact external behaviour while flowing through the single source.
+    //
+    // NOTE: the config bridge (`config_from_dict`)
     // deserializes into the full `cqlite_core::Config`, which is NOT
     // `#[serde(default)]`, so `config` must be a COMPLETE config — a full dict,
     // a full JSON string, or a preset. A partial dict such as
@@ -869,7 +878,10 @@ pub fn open(
     // with missing-field errors. To flip only this switch, obtain a full config
     // dict from a preset (e.g. `cqlite.performance_optimized()`), set
     // `["storage"]["compaction"]["auto_compaction"] = False`, then pass it.
-    let compaction_config = core_config.storage.compaction.clone();
+    let mut write_engine_public_config = core_config.clone();
+    if let Some(v) = flush_threshold {
+        write_engine_public_config.storage.memtable_size_threshold = v;
+    }
 
     // Open the read-side database and capture the schema registry when present.
     // We always use ingestion when a schema file is provided because that path
@@ -938,18 +950,16 @@ pub fn open(
             .map_err(runtime_init_to_py_err)?
             .map_err(to_py_err)?;
 
-        let mut engine_config = cqlite_core::storage::write_engine::WriteEngineConfig::new(
+        // Built through the single Config -> WriteEngineConfig bridge (issue
+        // #1697). `flush_threshold` was already folded into
+        // `storage.memtable_size_threshold` above; when it was not provided the
+        // shipped 64 MB default flows through unchanged.
+        let engine_config = cqlite_core::storage::write_engine::WriteEngineConfig::from_config(
+            &write_engine_public_config,
             wd.join("data"),
             wd.join("wal"),
             table_schema,
-        )
-        .with_compaction_config(&compaction_config);
-
-        // Apply the optional flush threshold in bytes (issue #1620); the engine
-        // default (64 MB) is used when not provided.
-        if let Some(v) = flush_threshold {
-            engine_config = engine_config.with_flush_threshold(v as usize);
-        }
+        );
 
         let engine = cqlite_core::storage::write_engine::WriteEngine::new(engine_config)
             .map_err(to_py_err)?;
@@ -960,7 +970,7 @@ pub fn open(
         let _ = (
             write_dir,
             schema_registry_opt,
-            compaction_config,
+            write_engine_public_config,
             flush_threshold,
         );
         None
