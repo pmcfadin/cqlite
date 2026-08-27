@@ -16,6 +16,18 @@
 //! ([`SSTableReader::get_with_resolution_unmetered`]) and the whole operation is
 //! metered ONCE, format-agnostically, because the generations of one table need not
 //! share an on-disk format and a fabricated single label would be a lie.
+//!
+//! # Why the meter starts at FUNCTION ENTRY (roborev F4)
+//!
+//! `resolve_reader_snapshot` takes the manager's reader lock and resolves the target
+//! table's generations. Starting the meter after it put LOCK AND RESOLUTION LATENCY
+//! OUTSIDE the reported read duration — and lock contention behind a slow scan
+//! (issue #1591) is precisely what an operator hunts a read-latency metric for, so
+//! excluding it hides the very stall the metric exists to expose. The meter therefore
+//! covers the whole function, including the `reader_list.is_empty()` early return: a
+//! read of a table with no candidate SSTables is a completed operation with zero rows,
+//! and the `tombstones` build used to emit NOTHING there while the default build
+//! emitted a sample — two builds disagreeing about what a read IS.
 
 use super::SSTableManager;
 use crate::observability::read_metrics::ReadOpMeter;
@@ -29,6 +41,12 @@ impl SSTableManager {
     /// Get a value by key from all SSTables with proper tombstone merging
     #[cfg(feature = "tombstones")]
     pub async fn get(&self, table_id: &TableId, key: &RowKey) -> Result<Option<ScanRow>> {
+        // ONE meter for the WHOLE logical read, started at FUNCTION ENTRY (issue #1701,
+        // roborev B1 + F4). This module's doc records WHY entry and not
+        // post-resolution, and why the empty-reader-list early return must still
+        // report a duration.
+        let mut meter = ReadOpMeter::start(None);
+
         // Resolve the applicable reader list FIRST, exactly like the non-tombstones
         // `get()` path (issue #1321). The previous code iterated EVERY reader in
         // `self.readers` and passed one global relaxed `fully_qualified_match` flag
@@ -43,17 +61,14 @@ impl SSTableManager {
         // `fully_qualified_match` signal and DROP the read guard before any I/O.
         let (reader_list, fully_qualified_match) = self.resolve_reader_snapshot(table_id).await;
         if reader_list.is_empty() {
+            // A read of a table with no candidate SSTables is still a completed read
+            // operation: it consumed the resolution latency above and returned an
+            // answer, so it reports a duration with zero rows (F4). Emitting nothing
+            // here is what made this build diverge from the default one.
+            meter.finish();
             return Ok(None);
         }
 
-        // ONE meter for the WHOLE logical point read (issue #1701, roborev B1): the
-        // per-reader lookups below are UNMETERED, so a read that walks N generations
-        // reports ONE duration sample and ONE reconciled row — not one per candidate
-        // SSTable. FORMAT-AGNOSTIC (`None`): the generations of one table may differ
-        // in on-disk format, so no single `sstable.format` label is honest at this
-        // grain; the meter never picks one arbitrarily. The single-reader path keeps
-        // its labelled meter (`SSTableReader::get_with_resolution`).
-        let mut meter = ReadOpMeter::start(None);
         let mut all_values = Vec::new();
 
         // Collect each applicable generation's value (tombstone-merge semantics are
@@ -105,6 +120,11 @@ impl SSTableManager {
     ///      with flat/non-Cassandra directory layouts that have no keyspace parent.
     #[cfg(not(feature = "tombstones"))]
     pub async fn get(&self, table_id: &TableId, key: &RowKey) -> Result<Option<ScanRow>> {
+        // ONE meter for the WHOLE logical read, started at FUNCTION ENTRY (issue #1701,
+        // roborev B1 + F4) — see the `tombstones` sibling above and the rationale in
+        // this module's doc.
+        let mut meter = ReadOpMeter::start(None);
+
         // Issue #1591: snapshot the resolved readers + the authoritative
         // `fully_qualified_match` signal and DROP the read guard before any I/O,
         // so a queued writer never FIFO-parks this point read behind a slow scan.
@@ -118,13 +138,6 @@ impl SSTableManager {
         // query resolved via the bare-name fallback keeps strict keyspace matching so
         // get() never returns another keyspace's same-named rows (issue #1321).
         let (reader_list, fully_qualified_match) = self.resolve_reader_snapshot(table_id).await;
-
-        // ONE meter for the WHOLE logical point read (issue #1701, roborev B1), for
-        // the same reason as the `tombstones` variant above: the per-reader lookups
-        // are UNMETERED, so walking N generations (a MISS on the first candidate then
-        // a hit on the second is the common shape) reports ONE duration sample, not
-        // one per candidate. Format-agnostic: generations may differ in format.
-        let mut meter = ReadOpMeter::start(None);
 
         // Return the first value found across all SSTables for this table
         for reader in &reader_list {

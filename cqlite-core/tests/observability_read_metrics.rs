@@ -666,4 +666,31 @@ async fn a_cross_generation_point_read_is_one_metered_operation() {
         0.0,
         "an absent key touched no partition"
     );
+
+    // --- A table with NO candidate SSTables: still ONE operation (roborev F4) ---
+    // The reader-list-empty early return sits BEFORE any per-reader work, so the
+    // meter has to start at function ENTRY to cover it. It also has to behave the
+    // same in both feature builds: the `tombstones` variant returned from here
+    // without emitting anything, so the two builds disagreed about whether a read
+    // of an unknown table is a read at all.
+    mc.reset();
+    let unknown = manager
+        .get(&TableId::new("read_metrics_ks.no_such_table"), &present_key)
+        .await
+        .expect("point read of a table with no SSTables");
+    let empty = mc.flush_and_collect();
+    assert!(unknown.is_none(), "an unknown table resolves no row");
+    assert_eq!(
+        histogram_recordings(&empty, catalog::READ_DURATION),
+        1,
+        "a read of a table with NO candidate SSTables is still a completed read \
+         operation and must record exactly one duration sample (it consumed the \
+         reader-lock + resolution latency the meter now covers); points: {:?}",
+        empty.find(catalog::READ_DURATION).map(|m| &m.points)
+    );
+    assert_eq!(
+        empty.counter_sum(catalog::READ_ROWS),
+        0.0,
+        "no candidate SSTables means no rows"
+    );
 }
