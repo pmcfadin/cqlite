@@ -8,6 +8,15 @@ target/
 # excluded from the main one and built only under nightly by its own workflow —
 # its lockfile is not part of any shipped image build, so keep it untracked.
 fuzz/Cargo.lock
+# Same case as fuzz/ above: the #3299 measurement harness's scan-worker carries
+# its own `[workspace]` table, so it is a SEPARATE workspace that the agent gate
+# and a root `cargo build` never compile, and its lockfile is not part of any
+# shipped image build. Second, independent reason to keep it untracked: roborev
+# appends a COMPILED-IN deny-list (`**/Cargo.lock`, `**/go.sum`, ...) that no
+# configuration can switch off (#3278), so a committed lockfile here would be
+# silently dropped from the reviewer's diff while `prompt-content:` still
+# expected it — a fail-closed FAIL on a file nobody could get reviewed.
+docs/reports/*-artifacts/**/Cargo.lock
 *.pdb
 
 # Parity failure-artifact bundles (issue #1027) — CI-only forensics, never committed
