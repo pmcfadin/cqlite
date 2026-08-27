@@ -250,10 +250,21 @@ class TestCqlParseErrorFromRealQuery:
     ``require_test_data`` instead of silently passing.
     """
 
-    def test_invalid_cql_raises_parse_error(self, db):
-        with pytest.raises(cqlite.CqliteError) as excinfo:
+    def test_truncated_cql_raises_parse_error(self, db):
+        """A statement that reaches the CQL parser and fails there is ParseError.
+
+        The statement must actually reach the parser: one whose first token is
+        not a known verb is rejected earlier as a core ``QueryExecution`` error
+        ("Unsupported query type"), which is a ``QueryError`` — asserted
+        separately below so the two identities stay distinguishable.
+        """
+        with pytest.raises(cqlite.ParseError) as excinfo:
+            db.execute("SELECT * FROM")
+        assert not isinstance(excinfo.value, cqlite.QueryError)
+
+    def test_unrecognized_statement_type_raises_query_error(self, db):
+        """The other side of the fix: an unsupported statement type is a
+        ``QueryError``, and must not borrow the parse identity."""
+        with pytest.raises(cqlite.QueryError) as excinfo:
             db.execute("THIS IS NOT VALID CQL!!!")
-        err = excinfo.value
-        assert isinstance(err, (cqlite.ParseError, cqlite.QueryError)), (
-            f"unexpected exception class {type(err).__name__}: {err}"
-        )
+        assert not isinstance(excinfo.value, cqlite.ParseError)

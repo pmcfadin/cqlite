@@ -57,6 +57,31 @@ describe('Error Mapping Tests (Issue #297)', () => {
     // — so it reported 'QUERY' while Python raised ParseError for the same core
     // error. The shared contract table (cqlite_core::ffi_error_contract) now
     // decides BY VARIANT, so exactly one code is correct here.
+    //
+    // The statement must actually REACH the CQL parser: a statement whose very
+    // first token is not a known verb is rejected earlier as
+    // `Error::QueryExecution` ("Unsupported query type"), which is genuinely
+    // `QUERY` — see the sibling case below.
+    skipIfNoDatasets();
+    const db = await Database.open(global.testPaths.SSTABLES_DIR, {
+      schema: global.testPaths.SCHEMA_BASIC_TYPES,
+    });
+    try {
+      expect.assertions(3);
+      await db.execute('SELECT * FROM');
+    } catch (e) {
+      expect(e.code).toBe('PARSE');
+      expect(e.category).toBe('Query');
+      expect(e.message).toContain('ParseError:');
+    } finally {
+      await db.close();
+    }
+  });
+
+  test('an unrecognized statement type stays "QUERY", not "PARSE"', async () => {
+    // The other side of the #1451 fix: `PARSE` now means a genuine CQL syntax
+    // failure, so an unsupported STATEMENT TYPE (an `Error::QueryExecution`)
+    // must NOT borrow it.
     skipIfNoDatasets();
     const db = await Database.open(global.testPaths.SSTABLES_DIR, {
       schema: global.testPaths.SCHEMA_BASIC_TYPES,
@@ -65,8 +90,8 @@ describe('Error Mapping Tests (Issue #297)', () => {
       expect.assertions(2);
       await db.execute('THIS IS NOT VALID SQL!!!');
     } catch (e) {
-      expect(e.code).toBe('PARSE');
-      expect(e.category).toBe('Query');
+      expect(e.code).toBe('QUERY');
+      expect(e.message).toContain('QueryError:');
     } finally {
       await db.close();
     }
