@@ -22,7 +22,7 @@
 use std::path::PathBuf;
 
 use super::WriteEngineConfig;
-use crate::config::{CompactionConfig, Config};
+use crate::config::Config;
 use crate::schema::TableSchema;
 
 /// Narrow the public `u64` byte threshold to the engine's `usize`.
@@ -94,26 +94,12 @@ impl WriteEngineConfig {
             compaction_max_threshold: config.storage.compaction.max_threshold,
         }
     }
-
-    /// Apply a public [`CompactionConfig`] onto this write-engine configuration
-    /// (issues #1619, #1697).
-    ///
-    /// Threads ALL THREE compaction values — the `auto_compaction` off-switch
-    /// plus both STCS thresholds — so `Config.storage.compaction` is fully
-    /// authoritative for the write path. Prefer [`Self::from_config`], which
-    /// threads the memtable threshold as well; this remains for callers that
-    /// already hold a `WriteEngineConfig` and only want the compaction half.
-    pub fn with_compaction_config(mut self, compaction: &CompactionConfig) -> Self {
-        self.auto_compaction = compaction.auto_compaction;
-        self.compaction_min_threshold = compaction.min_threshold;
-        self.compaction_max_threshold = compaction.max_threshold;
-        self
-    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::CompactionConfig;
 
     fn schema() -> TableSchema {
         crate::storage::write_engine::test_support::create_test_schema()
@@ -204,20 +190,37 @@ mod tests {
         assert_eq!(clamp_threshold_bytes(4096, "test"), 4096);
     }
 
-    /// `with_compaction_config` threads all three values (#1697); before the
-    /// fix it threaded only `auto_compaction`.
+    /// Every field of a public [`CompactionConfig`] reaches the engine through
+    /// `from_config` — the ONE translation (#1697).
+    ///
+    /// The exhaustive destructuring is the point, not decoration: adding a knob
+    /// to `CompactionConfig` breaks this test at COMPILE time, so it cannot be
+    /// threaded into `from_config` and silently forgotten. An N-field checklist
+    /// would keep passing at N. That property is also why the second, rival
+    /// translation (`with_compaction_config`, zero production callers) was
+    /// DELETED rather than tested: nothing could have asserted the two agreed.
     #[test]
-    fn with_compaction_config_threads_all_three_values() {
-        let compaction = CompactionConfig {
+    fn from_config_threads_every_compaction_field() {
+        let mut config = Config::default();
+        config.storage.compaction = CompactionConfig {
             auto_compaction: true,
             min_threshold: 7,
             max_threshold: 9,
         };
-        let cfg =
-            WriteEngineConfig::new(PathBuf::from("/tmp/d"), PathBuf::from("/tmp/w"), schema())
-                .with_compaction_config(&compaction);
-        assert!(cfg.auto_compaction);
-        assert_eq!(cfg.compaction_min_threshold, 7);
-        assert_eq!(cfg.compaction_max_threshold, 9);
+        let CompactionConfig {
+            auto_compaction,
+            min_threshold,
+            max_threshold,
+        } = config.storage.compaction.clone();
+
+        let cfg = WriteEngineConfig::from_config(
+            &config,
+            PathBuf::from("/tmp/d"),
+            PathBuf::from("/tmp/w"),
+            schema(),
+        );
+        assert_eq!(cfg.auto_compaction, auto_compaction);
+        assert_eq!(cfg.compaction_min_threshold, min_threshold);
+        assert_eq!(cfg.compaction_max_threshold, max_threshold);
     }
 }

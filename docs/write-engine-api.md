@@ -84,10 +84,14 @@ pub fn new(data_dir: PathBuf, wal_dir: PathBuf, schema: TableSchema) -> Self
 **Methods**:
 ```rust
 pub fn with_flush_threshold(self, threshold: usize) -> Self
-// Threads all three public compaction values (auto_compaction + both STCS
-// thresholds) onto an existing config.
-pub fn with_compaction_config(self, compaction: &cqlite_core::config::CompactionConfig) -> Self
 ```
+
+There is deliberately no `with_compaction_config`: it was a SECOND
+`CompactionConfig` -> engine translation with zero production callers, and
+nothing asserted the two agreed, so a knob threaded into `from_config` and
+missed there would have silently yielded engine defaults — the exact defect
+class #1697 exists to remove. Set `config.storage.compaction` and call
+`from_config` instead. (Removed in #1697; it was `pub`, see CHANGELOG.)
 
 **Public config source of truth** (issue #1697) — every write-path default has
 exactly one literal, in `Config::default()`:
