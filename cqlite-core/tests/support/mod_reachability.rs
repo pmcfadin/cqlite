@@ -38,10 +38,13 @@
 //! # Fail-closed
 //!
 //! Every construct this walker does not model is an `Err`, never a skip: `include!`,
-//! `#[cfg_attr(…, path = …)]`, a `#[path]` on an inline `mod` block, an unterminated
-//! comment or literal, an unreadable file, an unknown escape, and a `mod name;` that
-//! resolves to neither candidate file. A skip is the vacuous pass this guard exists to
-//! prevent.
+//! `#[cfg_attr(…, path = …)]`, a `#[path]` on an inline `mod` block, a `mod` token inside
+//! a macro's token tree (see [`scan_macro_context`] — rustc, not this walker, decides
+//! what a macro expands to), a symlink under the source directory (see
+//! [`enumerate_rs_files`] — a silently-skipped subtree is a census with a hole in it), an
+//! unterminated comment or literal, an unreadable file, an unknown escape, and a
+//! `mod name;` that resolves to neither candidate file. A skip is the vacuous pass this
+//! guard exists to prevent.
 
 #![allow(dead_code)]
 
@@ -683,6 +686,15 @@ pub fn parse_mod_decls(s: &Sanitized, file_label: &str) -> Result<Vec<ModDecl>, 
                     pending_path = None;
                 }
                 _ => {
+                    // A macro's token tree is neither control nor data this walker can
+                    // read — rustc decides what it expands to. `Some(end)` means the
+                    // tree held no `mod` token and is skipped wholesale; a `mod` inside
+                    // one is an `Err` (see `scan_macro_context`).
+                    if let Some(after_macro) =
+                        scan_macro_context(b, text, word, i, word_start, file_label)?
+                    {
+                        i = after_macro;
+                    }
                     pending_path = None;
                 }
             }
@@ -692,6 +704,108 @@ pub fn parse_mod_decls(s: &Sanitized, file_label: &str) -> Result<Vec<ModDecl>, 
         i += 1;
     }
     Ok(out)
+}
+
+/// If the identifier just consumed opens a **macro context**, return the byte offset one
+/// past its token tree; `None` when it does not open one.
+///
+/// Two shapes are recognized: a definition `macro_rules! name { … }` and an invocation
+/// `name!( … )` / `name![ … ]` / `name!{ … }` (a path-qualified `foo::bar!( … )` arrives
+/// here as its last segment, `bar`).
+///
+/// # Why a `mod` in here is an `Err` and not a declaration
+///
+/// `mod orphan;` inside a macro is **not** a declaration the walker can trust: rustc
+/// decides whether that token tree is ever expanded, how many times, and with what name
+/// (`mod $n;`). Counting it makes an unreachable file look reachable — the same false
+/// PASS a commented-out `mod` produced for `parser/collection_udt_tests.rs`, and the
+/// worst failure mode a hygiene guard has. Expanding macros is out of scope, so this
+/// fails CLOSED instead (module docs, "Fail-closed").
+///
+/// The refusal is scoped to token trees that actually contain a `mod` token: an
+/// over-broad rule that reds on every `format!` is the rule someone deletes, which is
+/// why `an_ordinary_macro_does_not_trip_the_mod_in_macro_guard` pins the other
+/// direction.
+fn scan_macro_context(
+    b: &[u8],
+    text: &str,
+    word: &str,
+    ident_end_at: usize,
+    word_start: usize,
+    file_label: &str,
+) -> Result<Option<usize>, String> {
+    let n = b.len();
+    let mut k = skip_ws(b, ident_end_at);
+    if k >= n || b[k] != b'!' {
+        return Ok(None);
+    }
+    k = skip_ws(b, k + 1);
+
+    // `macro_rules! name { … }` names the macro BETWEEN the `!` and the token tree;
+    // an invocation puts the name before the `!`.
+    let mut macro_name = format!("{word}!");
+    if word == "macro_rules" && k < n && is_ident_start(b[k]) {
+        let name_end = ident_end(b, k);
+        macro_name = format!("macro_rules! {}", &text[k..name_end]);
+        k = skip_ws(b, name_end);
+    }
+
+    // No delimiter after the `!` means this was never a macro invocation — `a != b`
+    // reaches here and must be left to the ordinary scan.
+    let (open, close_byte) = match b.get(k) {
+        Some(b'(') => (b'(', b')'),
+        Some(b'[') => (b'[', b']'),
+        Some(b'{') => (b'{', b'}'),
+        _ => return Ok(None),
+    };
+    let close = matching_bracket(b, k, open, close_byte).ok_or_else(|| {
+        format!(
+            "{file_label}:{}: unbalanced `{}` token tree for `{macro_name}` — the walker \
+             cannot tell where the macro ends, so it cannot know what follows it \
+             (FAIL-CLOSED)",
+            line_of(text, word_start),
+            open as char
+        )
+    })?;
+
+    if let Some(mod_at) = find_mod_token(b, text, k + 1, close) {
+        return Err(format!(
+            "{file_label}:{}: a `mod` declaration appears inside the token tree of \
+             `{macro_name}`. This walker does not expand macros, so it cannot tell whether \
+             that declaration names a real module file, how many times it is expanded, or \
+             what its name expands to — counting it would make an unreachable file look \
+             reachable (FAIL-CLOSED — see #1714).\n\
+             Remedy: declare the module outside the macro, or teach the walker this macro's \
+             expansion (tests/support/mod_reachability.rs).",
+            line_of(text, mod_at)
+        ));
+    }
+    Ok(Some(close + 1))
+}
+
+/// Byte offset of a `mod <ident>` / `mod $meta` token sequence within `[start, end)`, if any.
+///
+/// Token-aware on both sides: `module` and `r#mod` are identifiers, not the keyword.
+fn find_mod_token(b: &[u8], text: &str, start: usize, end: usize) -> Option<usize> {
+    let mut i = start;
+    while i < end {
+        if is_ident_start(b[i]) {
+            let word_end = ident_end(b, i).min(end);
+            // `r#mod` is a raw IDENTIFIER; the `#` before it is the tell.
+            let raw_ident = i > 0 && b[i - 1] == b'#';
+            if !raw_ident && &text[i..word_end] == "mod" {
+                let after = skip_ws(b, word_end);
+                // `mod name;` or a `macro_rules!` metavariable `mod $name;`.
+                if after < end && (is_ident_start(b[after]) || b[after] == b'$') {
+                    return Some(i);
+                }
+            }
+            i = word_end.max(i + 1);
+        } else {
+            i += 1;
+        }
+    }
+    None
 }
 
 /// `Some(value)` when the attribute body is a `path = "…"`; `Err` for unmodeled shapes.

@@ -433,6 +433,100 @@ fn missing_path_target_fails_closed() {
     );
 }
 
+/// A `mod` token inside a macro's token tree is neither control nor data the walker can
+/// read: rustc decides what the macro expands to, and this walker does not expand macros.
+/// Counting it as a real declaration makes an unreachable file look reachable — the exact
+/// false-PASS class this guard exists to prevent (same shape as the commented-out
+/// `mod` that hid `parser/collection_udt_tests.rs`). So it fails CLOSED, naming the macro.
+#[test]
+fn mod_declaration_inside_a_macro_fails_closed() {
+    for (label, lib_rs, needle) in [
+        (
+            "macro-rules-body",
+            "pub mod wired;\nmacro_rules! make_it { () => { mod orphan; }; }\n",
+            "make_it",
+        ),
+        (
+            "macro-invocation-paren",
+            "pub mod wired;\npub const S: &str = stringify!(mod orphan;);\n",
+            "stringify!",
+        ),
+        (
+            "macro-invocation-brace",
+            "pub mod wired;\ncfg_if::cfg_if! { mod orphan; }\n",
+            "cfg_if!",
+        ),
+        (
+            "macro-invocation-bracket",
+            "pub mod wired;\npub const S: &str = stringify![mod orphan;];\n",
+            "stringify!",
+        ),
+        (
+            "macro-rules-metavariable",
+            "pub mod wired;\nmacro_rules! decl { ($n:ident) => { mod $n; }; }\n",
+            "decl",
+        ),
+    ] {
+        let tree = ScratchCrate::new(label);
+        tree.write("src/lib.rs", lib_rs);
+        tree.write("src/wired.rs", "pub fn f() {}\n");
+        tree.write("src/orphan.rs", "pub fn never_compiled() {}\n");
+        let cause = tree.expect_failure();
+        assert!(
+            cause.contains("macro") && cause.contains(needle),
+            "case `{label}`: a `mod` inside a macro token tree must fail closed naming the \
+             macro (`{needle}`); got: {cause}"
+        );
+    }
+}
+
+/// The other half, and it is the half that keeps the guard alive: an over-broad macro
+/// rule that reds on EVERY macro is the rule someone deletes. Ordinary macros — a
+/// `macro_rules!` definition with no `mod` in it, `format!`, `vec![]`, and a `!=` that
+/// merely looks like an invocation — must leave the walk untouched, and the orphan
+/// underneath must still be found.
+#[test]
+fn an_ordinary_macro_does_not_trip_the_mod_in_macro_guard() {
+    let tree = ScratchCrate::new("macro-without-mod");
+    tree.write(
+        "src/lib.rs",
+        r####"
+macro_rules! shout {
+    ($x:expr) => {{
+        let modified = format!("{}!", $x);
+        modified
+    }};
+}
+macro_rules! braces_and_brackets {
+    () => {
+        vec![1usize, 2, 3]
+    };
+}
+pub mod wired;
+pub fn f() -> String { shout!("hi") }
+pub fn g() -> Vec<usize> { braces_and_brackets!() }
+pub fn h(a: usize, b: usize) -> bool { a != b }
+pub fn i() { assert!(matches!(Some(1u8), Some(_))); }
+"####,
+    );
+    tree.write("src/wired.rs", "pub fn f() {}\n");
+    tree.write("src/orphan.rs", "pub fn never_compiled() {}\n");
+
+    let report = tree.analyze();
+    assert_eq!(
+        report.orphans.iter().cloned().collect::<Vec<_>>(),
+        vec!["src/orphan.rs".to_string()],
+        "ordinary macros must neither fail the walk nor hide the orphan; enumerated={:?} \
+         reachable={:?}",
+        report.enumerated,
+        report.reachable
+    );
+    assert!(
+        report.reachable.contains("src/wired.rs"),
+        "a macro-bearing root must still resolve its real `mod` declarations"
+    );
+}
+
 #[test]
 fn empty_source_tree_fails_closed_rather_than_passing() {
     let tree = ScratchCrate::new("no-src-dir");
