@@ -17,7 +17,7 @@
 //! | public entry point     | inner body                    | bound covers                  |
 //! |------------------------|-------------------------------|-------------------------------|
 //! | `execute`              | `execute_inner`               | parse, plan, execute, collect |
-//! | `execute_streaming`    | `execute_streaming_inner`     | setup + time-to-first-batch   |
+//! | `execute_streaming`    | `execute_streaming_inner`     | setup (see the scope note)    |
 //! | `execute_with_params`  | `execute_with_params_inner`   | bind, plan, execute, collect  |
 //! | `execute_prepared`     | `execute_prepared_inner`      | bind, execute, collect        |
 //!
@@ -49,6 +49,7 @@
 //! `tests/issue_1695_query_timeout.rs`.
 
 use std::future::Future;
+use std::pin::Pin;
 use std::time::{Duration, Instant};
 
 // The engine type; `query::mod` re-exports it as `AdvancedQueryEngine`.
@@ -57,6 +58,17 @@ use super::QueryEngine as AdvancedQueryEngine;
 use crate::query::result::{QueryResultIterator, StreamingConfig};
 use crate::query::{executor::QueryResult, prepared::PreparedQuery};
 use crate::{Error, Result, Value};
+
+/// A query future handed to [`bound`], type-erased behind one heap allocation.
+///
+/// Erasure is deliberate and load-bearing, not stylistic: a generic `F` would be
+/// INLINED into the wrapper's state machine, so every bounded entry point would
+/// nest one more deep async layout inside its caller — enough to push rustc's
+/// layout-depth query over its default limit in downstream async blocks (the
+/// `#![recursion_limit]` class of failure, issue #1990). Behind `dyn Future` the
+/// wrapper's own layout is a pointer, so the depth it adds is CONSTANT. The single
+/// allocation per bounded call is immaterial next to parse + plan + scan.
+pub(crate) type BoundedFuture<'a, T> = Pin<Box<dyn Future<Output = Result<T>> + Send + 'a>>;
 
 /// Bound `fut` by `limit`, mapping an elapse to [`Error::QueryTimeout`].
 ///
@@ -84,10 +96,11 @@ use crate::{Error, Result, Value};
 ///
 /// Both halves carry the same `limit` and produce the same error, and the check
 /// lives HERE — at the one chokepoint — never in a scan loop.
-pub(crate) async fn bound<T, F>(limit: Duration, operation: &str, fut: F) -> Result<T>
-where
-    F: Future<Output = Result<T>>,
-{
+pub(crate) async fn bound<T>(
+    limit: Duration,
+    operation: &str,
+    fut: BoundedFuture<'_, T>,
+) -> Result<T> {
     // The documented "no timeout" sentinel: await directly rather than arming a
     // timer with a zero deadline (which would elapse at the first yield point).
     if limit.is_zero() {
@@ -95,7 +108,13 @@ where
     }
 
     let started = Instant::now();
-    let deadline = started + limit;
+    // Overflow-safe: `Instant + Duration` PANICS when the sum is unrepresentable,
+    // and `limit` is operator input (a `Duration::MAX` budget must not abort the
+    // process). An unrepresentable deadline is astronomically far away, so it means
+    // the same thing as the ZERO sentinel — unbounded — and is treated as such.
+    let Some(deadline) = started.checked_add(limit) else {
+        return fut.await;
+    };
     // `elapsed` is MEASURED, never assumed equal to `limit`: a starved or blocked
     // poll can overshoot the deadline substantially, and the real figure is what
     // an operator needs in order to tell "budget too tight" from "one decode unit
@@ -106,9 +125,7 @@ where
         limit,
     };
 
-    // Boxed so the poll-boundary check can own a pinned handle to it. One
-    // allocation per query — immaterial next to parse + plan + scan.
-    let mut inner = Box::pin(fut);
+    let mut inner = fut;
     let checked = std::future::poll_fn(move |cx| {
         if Instant::now() >= deadline {
             // Abandon WITHOUT polling further; `inner` is dropped with `checked`,
@@ -135,10 +152,7 @@ impl AdvancedQueryEngine {
     /// counting an elapse as a query error in the engine stats and recording it
     /// on the observability error stream (a timeout is a real query failure, and
     /// its own telemetry category — never `corruption`).
-    async fn bounded<T, F>(&self, operation: &str, fut: F) -> Result<T>
-    where
-        F: Future<Output = Result<T>>,
-    {
+    async fn bounded<T>(&self, operation: &str, fut: BoundedFuture<'_, T>) -> Result<T> {
         bound(self.config.query.max_execution_time, operation, fut)
             .await
             .inspect_err(|e| {
@@ -172,7 +186,8 @@ impl AdvancedQueryEngine {
         )
     )]
     pub async fn execute(&self, cql: &str) -> Result<QueryResult> {
-        self.bounded("query.execute", self.execute_inner(cql)).await
+        self.bounded("query.execute", Box::pin(self.execute_inner(cql)))
+            .await
     }
 
     /// Execute a CQL query with streaming results (Issue #280).
@@ -183,15 +198,24 @@ impl AdvancedQueryEngine {
     ///
     /// # Timeout scope (issue #1695) — read this before relying on it
     ///
-    /// `config.query.max_execution_time` bounds THIS future in its entirety:
-    /// statement parse, optimization, stream setup, and the time to the first
-    /// batch (the producer must reach the point where the iterator is handed
-    /// back). It does **NOT** bound the caller's subsequent row consumption: once
-    /// this returns `Ok(iterator)`, `iterator.next_async()` is unbounded, because
-    /// the pace of a bounded channel is set by the consumer and a slow consumer
-    /// is not a runaway query. Callers that need an end-to-end budget must apply
-    /// their own bound around the consumption loop. `Duration::ZERO` disables the
-    /// setup bound entirely.
+    /// `config.query.max_execution_time` bounds THIS future in its entirety, and
+    /// nothing after it:
+    ///
+    /// * **Bounded** — statement parse, optimization, schema resolution, stream
+    ///   setup, and every await this call makes before handing back the iterator.
+    ///   For the plan shapes that materialize before streaming (any aggregate,
+    ///   `ORDER BY`/`GROUP BY`, a projection trim, a `FROM`-less select) the
+    ///   ENTIRE query executes inside this future, so the whole scan is bounded.
+    /// * **NOT bounded** — the caller's later row consumption. On the incremental
+    ///   path the iterator is returned as soon as the producer task is spawned, so
+    ///   `iterator.next_async()` — including the wait for the FIRST batch — runs
+    ///   outside the budget. That is deliberate: the pace of a bounded channel is
+    ///   set by the consumer, and a slow consumer is not a runaway query.
+    ///
+    /// A caller that needs an end-to-end budget must bound its own consumption
+    /// loop (e.g. `tokio::time::timeout` around `next_async()`); a per-batch bound
+    /// inside the engine is possible future work, not this contract.
+    /// `Duration::ZERO` disables the setup bound entirely.
     ///
     /// # Errors
     ///
@@ -212,7 +236,7 @@ impl AdvancedQueryEngine {
     ) -> Result<QueryResultIterator> {
         self.bounded(
             "query.execute_streaming",
-            self.execute_streaming_inner(cql, config),
+            Box::pin(self.execute_streaming_inner(cql, config)),
         )
         .await
     }
@@ -250,7 +274,7 @@ impl AdvancedQueryEngine {
     pub async fn execute_with_params(&self, cql: &str, params: &[Value]) -> Result<QueryResult> {
         self.bounded(
             "query.execute_with_params",
-            self.execute_with_params_inner(cql, params),
+            Box::pin(self.execute_with_params_inner(cql, params)),
         )
         .await
     }
@@ -269,7 +293,7 @@ impl AdvancedQueryEngine {
     ) -> Result<QueryResult> {
         self.bounded(
             "query.execute_prepared",
-            self.execute_prepared_inner(prepared, params),
+            Box::pin(self.execute_prepared_inner(prepared, params)),
         )
         .await
     }
@@ -284,12 +308,16 @@ mod tests {
     /// consulted (a zero deadline would otherwise elapse at the first yield).
     #[tokio::test]
     async fn zero_limit_is_unbounded() {
-        let out: Result<u32> = bound(Duration::ZERO, "test.zero", async {
-            for _ in 0..64 {
-                tokio::task::yield_now().await;
-            }
-            Ok(7)
-        })
+        let out: Result<u32> = bound(
+            Duration::ZERO,
+            "test.zero",
+            Box::pin(async {
+                for _ in 0..64 {
+                    tokio::task::yield_now().await;
+                }
+                Ok(7)
+            }),
+        )
         .await;
         assert_eq!(out.expect("ZERO must not bound anything"), 7);
     }
@@ -300,7 +328,7 @@ mod tests {
     #[tokio::test]
     async fn elapsed_budget_yields_query_timeout() {
         let limit = Duration::from_millis(1);
-        let out: Result<u32> = bound(limit, "test.pending", std::future::pending()).await;
+        let out: Result<u32> = bound(limit, "test.pending", Box::pin(std::future::pending())).await;
         match out {
             Err(Error::QueryTimeout {
                 operation,
@@ -318,10 +346,10 @@ mod tests {
     /// NOT be recoverable-by-retry (the same query re-elapses).
     #[tokio::test]
     async fn timeout_error_is_distinct_from_corruption() {
-        let err = bound::<u32, _>(
+        let err = bound::<u32>(
             Duration::from_millis(1),
             "test.classify",
-            std::future::pending(),
+            Box::pin(std::future::pending()),
         )
         .await
         .expect_err("must elapse");
@@ -342,12 +370,19 @@ mod tests {
     /// timeout).
     #[tokio::test]
     async fn inner_outcome_passes_through() {
-        let ok: Result<u32> = bound(Duration::from_secs(300), "test.ok", async { Ok(3) }).await;
+        let ok: Result<u32> = bound(
+            Duration::from_secs(300),
+            "test.ok",
+            Box::pin(async { Ok(3) }),
+        )
+        .await;
         assert_eq!(ok.expect("must pass through"), 3);
 
-        let err: Result<u32> = bound(Duration::from_secs(300), "test.err", async {
-            Err(Error::corruption("inner"))
-        })
+        let err: Result<u32> = bound(
+            Duration::from_secs(300),
+            "test.err",
+            Box::pin(async { Err(Error::corruption("inner")) }),
+        )
         .await;
         assert!(matches!(
             err.expect_err("inner Err must be relayed"),
@@ -367,11 +402,15 @@ mod tests {
         }
         let dropped = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
         let flag = DropFlag(std::sync::Arc::clone(&dropped));
-        let out: Result<u32> = bound(Duration::from_millis(1), "test.drop", async move {
-            let _held = flag;
-            std::future::pending::<()>().await;
-            Ok(0)
-        })
+        let out: Result<u32> = bound(
+            Duration::from_millis(1),
+            "test.drop",
+            Box::pin(async move {
+                let _held = flag;
+                std::future::pending::<()>().await;
+                Ok(0)
+            }),
+        )
         .await;
         assert!(matches!(out, Err(Error::QueryTimeout { .. })));
         assert!(

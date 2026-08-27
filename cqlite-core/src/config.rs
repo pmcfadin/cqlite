@@ -458,9 +458,11 @@ pub struct QueryConfig {
     /// The CLI knob is `performance.query_timeout_ms` (0 ⇒ unbounded).
     ///
     /// For `execute_streaming` the budget covers the whole SETUP future — parse,
-    /// plan, stream setup and time-to-first-batch — and NOT the caller's later
-    /// row consumption from the returned iterator; see
-    /// [`crate::query::engine::AdvancedQueryEngine::execute_streaming`].
+    /// plan, stream setup, and (for the plan shapes that materialize before
+    /// streaming) the entire scan — but NOT the caller's later row consumption
+    /// from the returned iterator; see
+    /// [`crate::query::engine::QueryEngine::execute_streaming`] for the exact
+    /// scope.
     ///
     /// Default: 300s.
     pub max_execution_time: Duration,

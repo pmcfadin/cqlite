@@ -544,7 +544,11 @@ impl QueryEngine {
         let start_time = Instant::now();
         self.inc_total_queries();
 
-        let mut result = prepared.execute(params).await?;
+        // The UNBOUNDED body: this entry point is already wrapped by
+        // `deadline.rs`, and `PreparedQuery::execute` carries its own bound for
+        // callers holding a handle — going through it here would arm a second
+        // timer with a restarted clock (issue #1695).
+        let mut result = prepared.execute_unbounded(params).await?;
         self.update_execution_stats(&mut result, start_time);
         Ok(result)
     }

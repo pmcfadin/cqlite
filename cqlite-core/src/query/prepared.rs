@@ -309,14 +309,16 @@ impl PreparedQuery {
         crate::query::engine::deadline::bound(
             self.max_execution_time,
             "prepared.execute",
-            self.execute_unbounded(params),
+            Box::pin(self.execute_unbounded(params)),
         )
         .await
     }
 
-    /// UNWRAPPED body of [`Self::execute`]; the bound is applied by that caller
-    /// and by [`Self::execute_with_context`], so one call is bounded ONCE.
-    async fn execute_unbounded(&self, params: &[Value]) -> Result<QueryResult> {
+    /// UNWRAPPED body of [`Self::execute`]; the bound is applied by that caller,
+    /// by [`Self::execute_with_context`], and by the engine's `execute_prepared`
+    /// (which bounds the call itself), so one call is bounded ONCE — never twice
+    /// with a restarted clock.
+    pub(crate) async fn execute_unbounded(&self, params: &[Value]) -> Result<QueryResult> {
         self.validate_params(params)?;
 
         #[cfg(feature = "state_machine")]
@@ -380,7 +382,7 @@ impl PreparedQuery {
         crate::query::engine::deadline::bound(
             self.max_execution_time,
             "prepared.execute_with_context",
-            self.execute_with_context_unbounded(context),
+            Box::pin(self.execute_with_context_unbounded(context)),
         )
         .await
     }
