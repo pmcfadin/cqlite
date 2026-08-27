@@ -48,9 +48,19 @@
 
 #![allow(dead_code)]
 
+// One table-driven place for every Rust literal and identifier prefix (issue #1714): an
+// unrecognized prefix is an `Err`, never a fall-through to ordinary scanning. See the
+// lexer module's docs for why the prefix knowledge cannot live in three parsers again.
+#[path = "mod_reachability_lexer.rs"]
+pub mod lexer;
+
 use std::collections::{BTreeSet, VecDeque};
 use std::fs;
 use std::path::{Path, PathBuf};
+
+use lexer::{
+    ident_token, is_ident_byte, is_ident_start, lex_token, line_of, skip_ws, LexToken,
+};
 
 /// What to analyze. Crate-agnostic on purpose — see the module docs (#1502).
 #[derive(Debug, Clone)]
@@ -299,59 +309,26 @@ pub fn sanitize(src: &str) -> Result<Sanitized, String> {
             }
             blank(&mut out, i, j);
             i = j;
-        } else if c == b'"' {
-            let (end, value) = scan_string(b, i)?;
-            blank(&mut out, i, end);
-            literals.push(Literal {
-                start: i,
-                end,
-                value,
-            });
-            i = end;
-        } else if c == b'\'' {
-            match scan_char_or_lifetime(b, i)? {
-                Some(end) => {
+        } else if c == b'"' || c == b'\'' || is_ident_start(c) {
+            // ALL literal/identifier prefix recognition goes through the lexer's table:
+            // strings, raw strings at any hash level, byte and C-string flavors, byte
+            // chars, char-vs-lifetime, and raw identifiers. An identifier-ish token glued
+            // to `"`/`'`/`#` that the table does not know is an `Err` here, so a literal
+            // form newer than the table cannot silently disable the guard (#1714).
+            match lex_token(b, src, i)? {
+                LexToken::Literal { end, value } => {
                     blank(&mut out, i, end);
                     literals.push(Literal {
                         start: i,
                         end,
-                        value: String::new(),
+                        value,
                     });
                     i = end;
                 }
-                // A lifetime (`'a`): ordinary code, leave it alone.
-                None => i += 1,
-            }
-        } else if is_ident_start(c) {
-            let ident_end = ident_end(b, i);
-            let ident = &src[i..ident_end];
-            let next = b.get(ident_end).copied();
-            // `r"…"` / `r#"…"#` / `br#"…"#` are raw STRINGS; `r#type` is a raw
-            // IDENTIFIER (Rust allows keywords as identifiers that way, and
-            // `cqlite-core` uses `r#type`). They differ only in what follows the
-            // hashes: a `"` for the string, an identifier byte for the identifier.
-            let raw_prefix = matches!(ident, "r" | "br") && is_raw_string_prefix(b, ident_end);
-            let byte_prefix = ident == "b" && next == Some(b'"');
-            if raw_prefix {
-                let (end, value) = scan_raw_string(b, i, ident_end)?;
-                blank(&mut out, i, end);
-                literals.push(Literal {
-                    start: i,
-                    end,
-                    value,
-                });
-                i = end;
-            } else if byte_prefix {
-                let (end, value) = scan_string(b, ident_end)?;
-                blank(&mut out, i, end);
-                literals.push(Literal {
-                    start: i,
-                    end,
-                    value,
-                });
-                i = end;
-            } else {
-                i = ident_end;
+                // Ordinary code: identifiers (including `r#type`) and lifetimes/labels
+                // are consumed whole so their bytes cannot be re-read as a prefix.
+                LexToken::Ident(span) => i = span.end,
+                LexToken::Lifetime { end } => i = end,
             }
         } else {
             i += 1;
@@ -370,216 +347,6 @@ fn blank(out: &mut [u8], start: usize, end: usize) {
             *byte = b' ';
         }
     }
-}
-
-/// Scan a `"…"` literal starting at the opening quote. Returns `(end, unescaped value)`.
-///
-/// The value is accumulated as **raw bytes** and decoded as UTF-8 once at the end. The
-/// obvious `value.push(byte as char)` decodes UTF-8 one byte at a time, so the two bytes
-/// of `ó` become two Latin-1 characters and `#[path = "módulo.rs"]` resolves to mojibake
-/// that names no file — the byte-vs-char confusion behind CLAUDE.md's six-defect
-/// path-normalisation family.
-fn scan_string(b: &[u8], start: usize) -> Result<(usize, String), String> {
-    let n = b.len();
-    let mut j = start + 1;
-    let mut value: Vec<u8> = Vec::new();
-    while j < n {
-        match b[j] {
-            b'\\' => {
-                if j + 1 >= n {
-                    return Err("unterminated escape in string literal (FAIL-CLOSED)".to_string());
-                }
-                let esc = b[j + 1];
-                let decoded = match esc {
-                    b'\\' => '\\',
-                    b'"' => '"',
-                    b'\'' => '\'',
-                    b'n' => '\n',
-                    b'r' => '\r',
-                    b't' => '\t',
-                    b'0' => '\0',
-                    b'\n' => {
-                        // Line continuation: skip the newline and following whitespace.
-                        j += 2;
-                        while j < n && (b[j] as char).is_ascii_whitespace() {
-                            j += 1;
-                        }
-                        continue;
-                    }
-                    b'x' => {
-                        // `\xNN` — exactly two hex digits.
-                        let hex = b.get(j + 2..j + 4).ok_or_else(|| {
-                            "truncated `\\x` escape in string literal (FAIL-CLOSED)".to_string()
-                        })?;
-                        let text = std::str::from_utf8(hex).map_err(|_| {
-                            "non-UTF-8 `\\x` escape in string literal (FAIL-CLOSED)".to_string()
-                        })?;
-                        let byte = u8::from_str_radix(text, 16).map_err(|_| {
-                            format!("malformed `\\x{text}` escape in string literal (FAIL-CLOSED)")
-                        })?;
-                        // `\xNN` names a CODE POINT here, not a raw byte: Rust rejects
-                        // `\x80`+ in a string literal, and this scanner is shared with
-                        // byte strings (`b"\xff"`), where accumulating the raw byte would
-                        // make a legitimate literal invalid UTF-8 and fail the walk closed.
-                        push_char(&mut value, byte as char);
-                        j += 4;
-                        continue;
-                    }
-                    b'u' => {
-                        // `\u{HEX…}`
-                        if b.get(j + 2) != Some(&b'{') {
-                            return Err("malformed `\\u` escape (expected `{`) in string literal \
-                                 (FAIL-CLOSED)"
-                                .to_string());
-                        }
-                        let mut k = j + 3;
-                        let mut digits = String::new();
-                        while k < n && b[k] != b'}' {
-                            if b[k] != b'_' {
-                                digits.push(b[k] as char);
-                            }
-                            k += 1;
-                        }
-                        if k >= n {
-                            return Err(
-                                "unterminated `\\u{…}` escape in string literal (FAIL-CLOSED)"
-                                    .to_string(),
-                            );
-                        }
-                        let code = u32::from_str_radix(&digits, 16).map_err(|_| {
-                            format!("malformed `\\u{{{digits}}}` escape (FAIL-CLOSED)")
-                        })?;
-                        let ch = char::from_u32(code).ok_or_else(|| {
-                            format!("`\\u{{{digits}}}` is not a Unicode scalar (FAIL-CLOSED)")
-                        })?;
-                        push_char(&mut value, ch);
-                        j = k + 1;
-                        continue;
-                    }
-                    other => {
-                        return Err(format!(
-                            "unmodeled string escape `\\{}` — this walker does not decode it, \
-                             and guessing could mis-read a `#[path]` value (FAIL-CLOSED)",
-                            other as char
-                        ))
-                    }
-                };
-                push_char(&mut value, decoded);
-                j += 2;
-            }
-            b'"' => {
-                let decoded = String::from_utf8(value).map_err(|e| {
-                    format!(
-                        "string literal is not valid UTF-8 ({e}) — refusing to guess its \
-                         value (FAIL-CLOSED)"
-                    )
-                })?;
-                return Ok((j + 1, decoded));
-            }
-            other => {
-                // Raw byte: a multi-byte character arrives here one byte per iteration and
-                // must be reassembled, not transcoded per byte.
-                value.push(other);
-                j += 1;
-            }
-        }
-    }
-    Err("unterminated string literal (FAIL-CLOSED)".to_string())
-}
-
-/// Append `ch`'s UTF-8 encoding to a raw-byte literal accumulator.
-fn push_char(out: &mut Vec<u8>, ch: char) {
-    let mut buf = [0u8; 4];
-    out.extend_from_slice(ch.encode_utf8(&mut buf).as_bytes());
-}
-
-/// Scan `r#"…"#` (any hash count). `prefix_end` is the byte after the `r`/`br` ident.
-fn scan_raw_string(b: &[u8], start: usize, prefix_end: usize) -> Result<(usize, String), String> {
-    let n = b.len();
-    let mut hashes = 0usize;
-    let mut j = prefix_end;
-    while j < n && b[j] == b'#' {
-        hashes += 1;
-        j += 1;
-    }
-    if j >= n || b[j] != b'"' {
-        return Err(format!(
-            "malformed raw string literal at byte {start} (FAIL-CLOSED)"
-        ));
-    }
-    let content_start = j + 1;
-    let mut k = content_start;
-    while k < n {
-        if b[k] == b'"' {
-            let mut closing = 0usize;
-            while closing < hashes && k + 1 + closing < n && b[k + 1 + closing] == b'#' {
-                closing += 1;
-            }
-            if closing == hashes {
-                let value = String::from_utf8_lossy(&b[content_start..k]).into_owned();
-                return Ok((k + 1 + hashes, value));
-            }
-        }
-        k += 1;
-    }
-    Err("unterminated raw string literal (FAIL-CLOSED)".to_string())
-}
-
-/// `Ok(Some(end))` for a char literal, `Ok(None)` for a lifetime.
-fn scan_char_or_lifetime(b: &[u8], start: usize) -> Result<Option<usize>, String> {
-    let n = b.len();
-    if start + 1 >= n {
-        return Ok(None);
-    }
-    if b[start + 1] == b'\\' {
-        let mut j = start + 2;
-        // Escapes may be multi-byte (`\u{1F600}`); scan to the closing quote.
-        while j < n && b[j] != b'\'' {
-            j += 1;
-        }
-        if j >= n {
-            return Err("unterminated char literal (FAIL-CLOSED)".to_string());
-        }
-        return Ok(Some(j + 1));
-    }
-    // One UTF-8 scalar followed by `'` is a char literal; anything else is a lifetime.
-    let mut char_len = 1usize;
-    while start + 1 + char_len < n && (b[start + 1 + char_len] & 0xC0) == 0x80 {
-        char_len += 1;
-    }
-    let close = start + 1 + char_len;
-    if close < n && b[close] == b'\'' {
-        Ok(Some(close + 1))
-    } else {
-        Ok(None)
-    }
-}
-
-/// `true` when the bytes at `after_prefix` (just past an `r`/`br` ident) open a raw
-/// STRING literal: zero or more `#` followed by `"`. `r#type` therefore returns `false`
-/// (that is a raw identifier, not a literal).
-fn is_raw_string_prefix(b: &[u8], after_prefix: usize) -> bool {
-    let mut j = after_prefix;
-    while j < b.len() && b[j] == b'#' {
-        j += 1;
-    }
-    b.get(j) == Some(&b'"')
-}
-
-fn is_ident_start(c: u8) -> bool {
-    c == b'_' || c.is_ascii_alphabetic()
-}
-
-fn is_ident_byte(c: u8) -> bool {
-    c == b'_' || c.is_ascii_alphanumeric()
-}
-
-fn ident_end(b: &[u8], start: usize) -> usize {
-    let mut j = start;
-    while j < b.len() && is_ident_byte(b[j]) {
-        j += 1;
-    }
-    j
 }
 
 // ---------------------------------------------------------------------------
@@ -653,10 +420,25 @@ pub fn parse_mod_decls(s: &Sanitized, file_label: &str) -> Result<Vec<ModDecl>, 
             continue;
         }
         if is_ident_start(c) {
-            let end = ident_end(b, i);
-            let word = &text[i..end];
+            // One shared lexer consumes the identifier, `r#` included, so a raw
+            // identifier can never be re-read as its `r` + `#` + name pieces (#1714).
+            let tok = ident_token(b, i);
+            let word = &text[tok.name_start..tok.name_end];
             let word_start = i;
-            i = end;
+            i = tok.end;
+            if tok.raw {
+                // A raw identifier is an IDENTIFIER, never a keyword: `r#mod` declares
+                // nothing. But it CAN name a macro (`r#make!(…)`, `foo::r#bar!{…}`), so
+                // it must still reach the fail-closed macro branch — otherwise a `mod`
+                // inside that token tree would be counted as a real declaration (#1714).
+                if let Some(after_macro) =
+                    scan_macro_context(b, text, &format!("r#{word}"), i, word_start, file_label)?
+                {
+                    i = after_macro;
+                }
+                pending_path = None;
+                continue;
+            }
             match word {
                 "pub" => {
                     // `pub(crate)`, `pub(super)`, `pub(in path)` — skip the qualifier,
@@ -678,9 +460,13 @@ pub fn parse_mod_decls(s: &Sanitized, file_label: &str) -> Result<Vec<ModDecl>, 
                             line_of(text, word_start)
                         ));
                     }
-                    let name_end = ident_end(b, k);
-                    let name = text[k..name_end].to_string();
-                    let after = skip_ws(b, name_end);
+                    // `mod r#type;` is legal and declares a module whose file is
+                    // `type.rs`: the `r#` is not part of the name. Lexing the name
+                    // atomically is what makes that resolve instead of failing closed
+                    // on a `mod` "followed by neither `;` nor `{`" (#1714).
+                    let name_tok = ident_token(b, k);
+                    let name = text[name_tok.name_start..name_tok.name_end].to_string();
+                    let after = skip_ws(b, name_tok.end);
                     if after < n && b[after] == b';' {
                         out.push(ModDecl {
                             name,
@@ -708,13 +494,6 @@ pub fn parse_mod_decls(s: &Sanitized, file_label: &str) -> Result<Vec<ModDecl>, 
                             line_of(text, word_start)
                         ));
                     }
-                    pending_path = None;
-                }
-                "r" if b.get(i) == Some(&b'#')
-                    && b.get(i + 1).map(|c| is_ident_start(*c)).unwrap_or(false) =>
-                {
-                    // Raw identifier (`r#type`, `r#mod`): an identifier, never a keyword.
-                    i = ident_end(b, i + 1);
                     pending_path = None;
                 }
                 "include" => {
@@ -789,9 +568,16 @@ fn scan_macro_context(
     // an invocation puts the name before the `!`.
     let mut macro_name = format!("{word}!");
     if word == "macro_rules" && k < n && is_ident_start(b[k]) {
-        let name_end = ident_end(b, k);
-        macro_name = format!("macro_rules! {}", &text[k..name_end]);
-        k = skip_ws(b, name_end);
+        // The name may be a raw identifier (`macro_rules! r#make`); consuming it
+        // atomically is what keeps the definition recognized as a macro instead of
+        // leaving its body to be parsed as ordinary Rust (#1714).
+        let name_tok = ident_token(b, k);
+        macro_name = format!(
+            "macro_rules! {}{}",
+            if name_tok.raw { "r#" } else { "" },
+            &text[name_tok.name_start..name_tok.name_end]
+        );
+        k = skip_ws(b, name_tok.end);
     }
 
     // No delimiter after the `!` means this was never a macro invocation — `a != b`
@@ -834,17 +620,18 @@ fn find_mod_token(b: &[u8], text: &str, start: usize, end: usize) -> Option<usiz
     let mut i = start;
     while i < end {
         if is_ident_start(b[i]) {
-            let word_end = ident_end(b, i).min(end);
-            // `r#mod` is a raw IDENTIFIER; the `#` before it is the tell.
-            let raw_ident = i > 0 && b[i - 1] == b'#';
-            if !raw_ident && &text[i..word_end] == "mod" {
-                let after = skip_ws(b, word_end);
+            let tok = ident_token(b, i);
+            let word_end = tok.name_end.min(end);
+            // `r#mod` is a raw IDENTIFIER, not the keyword — decided by the shared lexer's
+            // `raw` flag rather than by peeking at the previous byte (#1714).
+            if !tok.raw && tok.name_end <= end && &text[tok.name_start..word_end] == "mod" {
+                let after = skip_ws(b, tok.end);
                 // `mod name;` or a `macro_rules!` metavariable `mod $name;`.
                 if after < end && (is_ident_start(b[after]) || b[after] == b'$') {
                     return Some(i);
                 }
             }
-            i = word_end.max(i + 1);
+            i = tok.end.max(i + 1);
         } else {
             i += 1;
         }
@@ -902,13 +689,6 @@ fn contains_word(haystack: &str, word: &str) -> bool {
     false
 }
 
-fn skip_ws(b: &[u8], mut i: usize) -> usize {
-    while i < b.len() && b[i].is_ascii_whitespace() {
-        i += 1;
-    }
-    i
-}
-
 fn matching_bracket(b: &[u8], open_at: usize, open: u8, close: u8) -> Option<usize> {
     let mut depth = 0usize;
     let mut i = open_at;
@@ -924,14 +704,6 @@ fn matching_bracket(b: &[u8], open_at: usize, open: u8, close: u8) -> Option<usi
         i += 1;
     }
     None
-}
-
-fn line_of(text: &str, offset: usize) -> usize {
-    text.as_bytes()[..offset.min(text.len())]
-        .iter()
-        .filter(|c| **c == b'\n')
-        .count()
-        + 1
 }
 
 // ---------------------------------------------------------------------------
