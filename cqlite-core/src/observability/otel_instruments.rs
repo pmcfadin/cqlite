@@ -1,523 +1,533 @@
 //! Cached OpenTelemetry instrument construction for the metric catalog.
 //!
 //! Split out of `otel.rs` to keep that file inside the campsite-rule source target
-//! (#1116). This module owns the `Instruments` struct and its one-time build;
-//! `otel.rs` keeps the record-routing (`add_counter` / `record_histogram` /
-//! `record_gauge`) that maps a catalog name onto a field here.
+//! (#1116). This module owns the instrument set and its one-time build; `otel.rs`
+//! keeps the record-routing (`add_counter` / `record_histogram` / `record_gauge`)
+//! and the three resolvers the emit path calls.
 //!
-//! **Both files are scanned** by the catalog's
-//! `every_instrument_registered_in_otel_is_catalogued` guard, so moving construction
-//! here does not weaken it: any catalog metric-name constant BOUND TO AN INSTRUMENT
-//! in either file must still appear in `ALL_METRICS`. Since issue #1705 the guards
-//! strip comments first and read only the registration constructs (an instrument
-//! BUILDER call, and a match arm of one of `otel.rs`'s three name→instrument
-//! resolvers), so prose here is safe — and, more importantly, a comment or a dead
-//! reference can no longer pass as proof that an instrument exists.
+//! # A name/instrument mismatch is UNREPRESENTABLE here (issue #1705, roborev F3)
+//!
+//! Registration used to state each metric name TWICE — once in a builder call in
+//! this file, once in a hand-written `catalog::NAME => &i.field` match arm in
+//! `otel.rs`. Two statements of one fact can disagree, and a mis-wired arm
+//! (`catalog::READ_ROWS => &i.read_bytes`) satisfied every guard we had — both the
+//! structural parse and the runtime resolution only ever asked whether SOME
+//! instrument existed for a name, never whether it was the RIGHT one, while
+//! emissions landed under the wrong series.
+//!
+//! So the name is now stated ONCE. Each [`Registry`] method takes the catalog name
+//! as a single parameter and uses it BOTH as the OTel instrument name AND as the
+//! map key the resolver looks up, in the same expression. There is no second place
+//! to write the name and therefore nothing to disagree with: the resolvers in
+//! `otel.rs` are map lookups with no per-metric code at all. `catalog_tests.rs`
+//! keeps that property by REDDING on any hand-written `catalog::IDENT =>` dispatch
+//! arm in the resolvers (see
+//! `a_handwritten_dispatch_arm_is_rejected_because_it_can_mis_wire`).
+//!
+//! **Both files are scanned** by the catalog's registration guards: any catalog
+//! metric name registered here must appear in `ALL_METRICS`, and any `ALL_METRICS`
+//! entry must be registered here or declared `catalog::STATS_ONLY_METRICS`. The
+//! extractor reads the registration CALLS below (comments stripped first) and fails
+//! CLOSED on an argument shape it does not recognise, so a registration written
+//! with a string literal or a local alias reds the guard instead of vanishing from
+//! it (issue #1705, roborev F4).
 
 use super::catalog;
 use super::otel::meter;
-use opentelemetry::metrics::{Counter, Gauge, Histogram};
+use opentelemetry::metrics::{Counter, Gauge, Histogram, Meter};
+use std::collections::HashMap;
 use std::sync::OnceLock;
 
-/// Lazily-built, cached instruments for every catalog metric. Building an
-/// instrument on each record call is wasteful (re-registration overhead and
-/// possible duplicate-instrument churn), so all catalog instruments are
-/// constructed once and reused. Non-catalog names fall back to an ad-hoc
-/// instrument so call sites never silently drop data.
+/// Lazily-built, cached instruments for every catalog metric, keyed by the catalog
+/// metric name they were CONSTRUCTED with.
+///
+/// Building an instrument on each record call is wasteful (re-registration overhead
+/// and possible duplicate-instrument churn), so all catalog instruments are
+/// constructed once and reused. Non-catalog names resolve to `None` and the emit
+/// path falls back to an ad-hoc instrument so call sites never silently drop data.
+///
+/// The fields are maps rather than one field per metric precisely so that lookup
+/// cannot name a different metric than construction did — see the module doc.
 pub(super) struct Instruments {
-    pub(super) read_rows: Counter<u64>,
-    pub(super) read_bytes: Counter<u64>,
-    pub(super) read_partitions: Counter<u64>,
-    pub(super) read_partition_lookup: Counter<u64>,
-    pub(super) read_bloom_checks: Counter<u64>,
-    pub(super) read_scan_window_refill: Counter<u64>,
-    pub(super) read_sstables_pruned: Counter<u64>,
-    pub(super) read_bloom_false_negatives: Counter<u64>,
-    pub(super) read_bti_rows_root_rejected: Counter<u64>,
-    pub(super) read_partition_access_distinct: Counter<u64>,
-    pub(super) read_partition_access_accesses: Counter<u64>,
-    pub(super) read_partition_access_bytes: Counter<u64>,
-    pub(super) read_partition_access_sample_denominator: Gauge<i64>,
-    pub(super) read_partition_access_dropped: Counter<u64>,
-    pub(super) read_partition_access_sampling_floor: Gauge<i64>,
-    pub(super) read_partition_access_window_dropped: Gauge<i64>,
-    pub(super) merge_rows_in: Counter<u64>,
-    pub(super) merge_rows_out: Counter<u64>,
-    pub(super) query_degraded_path: Counter<u64>,
-    pub(super) index_parses_total: Counter<u64>,
-    pub(super) index_interval_parses_total: Counter<u64>,
-    pub(super) storage_open_sstables: Counter<u64>,
-    pub(super) storage_open_bytes: Counter<u64>,
-    pub(super) storage_open_tables: Counter<u64>,
-    pub(super) query_rows: Counter<u64>,
-    pub(super) query_rows_scanned: Counter<u64>,
-    pub(super) errors_total: Counter<u64>,
-    pub(super) write_mutations: Counter<u64>,
-    pub(super) flush_rows: Counter<u64>,
-    pub(super) flush_bytes: Counter<u64>,
-    pub(super) flush_sstables: Counter<u64>,
-    pub(super) write_partitions: Counter<u64>,
-    pub(super) write_bytes: Counter<u64>,
-    pub(super) compaction_rows_merged: Counter<u64>,
-    pub(super) compaction_bytes_written: Counter<u64>,
-    pub(super) compaction_sstables_in: Counter<u64>,
-    pub(super) compaction_sstables_out: Counter<u64>,
-    pub(super) compaction_tombstones_purged: Counter<u64>,
-    pub(super) compaction_tombstones_suppressed: Counter<u64>,
-    pub(super) compaction_tombstones_emitted: Counter<u64>,
-    pub(super) rpc_requests: Counter<u64>,
-    pub(super) rpc_rows: Counter<u64>,
-    pub(super) rpc_bytes: Counter<u64>,
-    pub(super) warm_cache_hits: Counter<u64>,
-    pub(super) warm_cache_misses: Counter<u64>,
-    pub(super) warm_cache_evicts: Counter<u64>,
-    pub(super) warm_cache_refresh: Counter<u64>,
-    pub(super) flight_admission_rejected_total: Counter<u64>,
-    pub(super) read_duration: Histogram<f64>,
-    pub(super) query_duration: Histogram<f64>,
-    pub(super) compaction_duration: Histogram<f64>,
-    pub(super) wal_sync_duration: Histogram<f64>,
-    pub(super) flush_duration: Histogram<f64>,
-    pub(super) compression_ratio: Histogram<f64>,
-    pub(super) compaction_finalize_duration: Histogram<f64>,
-    pub(super) compaction_budget_requested: Histogram<f64>,
-    pub(super) compaction_budget_consumed: Histogram<f64>,
-    pub(super) rpc_duration: Histogram<f64>,
-    pub(super) rpc_phase_duration: Histogram<f64>,
-    pub(super) flight_admission_wait_seconds: Histogram<f64>,
-    pub(super) sstables_open: Gauge<i64>,
-    pub(super) memtable_size_bytes: Gauge<i64>,
-    pub(super) memtable_rows: Gauge<i64>,
-    pub(super) compaction_lag: Gauge<i64>,
-    pub(super) rpc_in_flight: Gauge<i64>,
-    pub(super) rpc_phase_active: Gauge<i64>,
-    pub(super) merge_producer_threads: Gauge<i64>,
-    pub(super) flight_admission_limit: Gauge<i64>,
-    pub(super) flight_admission_in_use: Gauge<i64>,
-    pub(super) flight_admission_waiting: Gauge<i64>,
-    // Saturation instrumentation (#2419, WS2 of epic #2313).
-    pub(super) merge_egress_channel_depth: Gauge<i64>,
-    // Adaptive egress-budget concurrency gauge (#2765).
-    pub(super) merge_active_merges: Gauge<i64>,
-    pub(super) proc_threads: Gauge<i64>,
-    pub(super) proc_fds: Gauge<i64>,
-    pub(super) proc_rss_bytes: Gauge<i64>,
-    pub(super) flight_blocking_tasks_in_use: Gauge<i64>,
-    // Flight table-visibility gauges (#2684).
-    pub(super) flight_tables_discovered: Gauge<i64>,
-    pub(super) flight_warm_tables: Gauge<i64>,
+    pub(super) counters: HashMap<&'static str, Counter<u64>>,
+    pub(super) histograms: HashMap<&'static str, Histogram<f64>>,
+    pub(super) gauges: HashMap<&'static str, Gauge<i64>>,
+}
+
+/// Builds an [`Instruments`] set, binding each catalog name to its instrument.
+///
+/// Each method mentions its `name` parameter twice — as the OTel instrument name
+/// and as the map key — but it is ONE value from ONE call site, so the two cannot
+/// diverge. This is the whole mechanism by which a mis-wire is unrepresentable.
+struct Registry {
+    meter: &'static Meter,
+    counters: HashMap<&'static str, Counter<u64>>,
+    histograms: HashMap<&'static str, Histogram<f64>>,
+    gauges: HashMap<&'static str, Gauge<i64>>,
+}
+
+impl Registry {
+    fn new(meter: &'static Meter) -> Self {
+        Self {
+            meter,
+            counters: HashMap::new(),
+            histograms: HashMap::new(),
+            gauges: HashMap::new(),
+        }
+    }
+
+    /// Register a `u64` counter for the catalog metric `name`.
+    fn counter(&mut self, name: &'static str, unit: &'static str, description: &'static str) {
+        let instrument = self
+            .meter
+            .u64_counter(name)
+            .with_unit(unit)
+            .with_description(description)
+            .build();
+        self.counters.insert(name, instrument);
+    }
+
+    /// Register an `f64` histogram for the catalog metric `name`.
+    fn histogram(&mut self, name: &'static str, unit: &'static str, description: &'static str) {
+        let instrument = self
+            .meter
+            .f64_histogram(name)
+            .with_unit(unit)
+            .with_description(description)
+            .build();
+        self.histograms.insert(name, instrument);
+    }
+
+    /// Register an `i64` gauge for the catalog metric `name`.
+    fn gauge(&mut self, name: &'static str, unit: &'static str, description: &'static str) {
+        let instrument = self
+            .meter
+            .i64_gauge(name)
+            .with_unit(unit)
+            .with_description(description)
+            .build();
+        self.gauges.insert(name, instrument);
+    }
+
+    fn build(self) -> Instruments {
+        Instruments {
+            counters: self.counters,
+            histograms: self.histograms,
+            gauges: self.gauges,
+        }
+    }
 }
 
 pub(super) fn instruments() -> &'static Instruments {
     static INSTRUMENTS: OnceLock<Instruments> = OnceLock::new();
     INSTRUMENTS.get_or_init(|| {
-        let m = meter();
-        Instruments {
-            read_rows: m
-                .u64_counter(catalog::READ_ROWS)
-                .with_unit(catalog::unit::ROWS)
-                .with_description("Total rows materialised by the read path.")
-                .build(),
-            read_bytes: m
-                .u64_counter(catalog::READ_BYTES)
-                .with_unit(catalog::unit::BYTES)
-                .with_description("Total bytes read from Data.db (post-decompression).")
-                .build(),
-            read_partitions: m
-                .u64_counter(catalog::READ_PARTITIONS)
-                .with_unit(catalog::unit::PARTITIONS)
-                .with_description("Total partitions scanned.")
-                .build(),
-            read_partition_lookup: m
-                .u64_counter(catalog::READ_PARTITION_LOOKUP)
-                .with_unit(catalog::unit::DIMENSIONLESS)
-                .with_description("Total partition point lookups, keyed by {result, lookup_route, format}.")
-                .build(),
-            read_bloom_checks: m
-                .u64_counter(catalog::READ_BLOOM_CHECKS)
-                .with_unit(catalog::unit::DIMENSIONLESS)
-                .with_description("Total bloom/BTI-trie presence checks, keyed by {result}.")
-                .build(),
-            read_scan_window_refill: m
-                .u64_counter(catalog::READ_SCAN_WINDOW_REFILL)
-                .with_unit(catalog::unit::DIMENSIONLESS)
-                .with_description("Windowed scan refills at compression-chunk boundaries.")
-                .build(),
-            read_sstables_pruned: m
-                .u64_counter(catalog::READ_SSTABLES_PRUNED)
-                .with_unit(catalog::unit::SSTABLES)
-                .with_description(
-                    "SSTables skipped by a presence-oracle negative, keyed by {format}.",
-                )
-                .build(),
-            read_bloom_false_negatives: m
-                .u64_counter(catalog::READ_BLOOM_FALSE_NEGATIVES)
-                .with_unit(catalog::unit::DIMENSIONLESS)
-                .with_description(
-                    "Opt-in presence-oracle false negatives (soundness alarm), keyed by {format}.",
-                )
-                .build(),
-            read_bti_rows_root_rejected: m
-                .u64_counter(catalog::READ_BTI_ROWS_ROOT_REJECTED)
-                .with_unit(catalog::unit::PARTITIONS)
-                .with_description(
-                    "Clustering reads that decoded a whole BTI partition because its Rows.db \
-                     row-index root failed validation, keyed by {reason} (#3002).",
-                )
-                .build(),
-            read_partition_access_distinct: m
-                .u64_counter(catalog::READ_PARTITION_ACCESS_DISTINCT_PARTITIONS)
-                .with_unit(catalog::unit::PARTITIONS)
-                .with_description("Distinct partitions per repeat-access bucket (#2827).")
-                .build(),
-            read_partition_access_accesses: m
-                .u64_counter(catalog::READ_PARTITION_ACCESS_ACCESSES)
-                .with_unit(catalog::unit::DIMENSIONLESS)
-                .with_description("Accesses per repeat-access bucket (#2827).")
-                .build(),
-            read_partition_access_bytes: m
-                .u64_counter(catalog::READ_PARTITION_ACCESS_BYTES)
-                .with_unit(catalog::unit::BYTES)
-                .with_description("Distinct-partition on-disk bytes per bucket (#2827).")
-                .build(),
-            read_partition_access_sample_denominator: m
-                .i64_gauge(catalog::READ_PARTITION_ACCESS_SAMPLE_DENOMINATOR)
-                .with_unit(catalog::unit::DIMENSIONLESS)
-                .with_description("Probe sampling scale at window close; 1 = census.")
-                .build(),
-            read_partition_access_dropped: m
-                .u64_counter(catalog::READ_PARTITION_ACCESS_DROPPED)
-                .with_unit(catalog::unit::DIMENSIONLESS)
-                .with_description("Probe accesses that could not be seated (#2827).")
-                .build(),
-            read_partition_access_sampling_floor: m
-                .i64_gauge(catalog::READ_PARTITION_ACCESS_SAMPLING_FLOOR)
-                .with_unit(catalog::unit::DIMENSIONLESS)
-                .with_description("1 when the probe window hit its sampling cap (#2827).")
-                .build(),
-            read_partition_access_window_dropped: m
-                .i64_gauge(catalog::READ_PARTITION_ACCESS_WINDOW_DROPPED)
-                .with_unit(catalog::unit::DIMENSIONLESS)
-                .with_description("Accesses the last closed probe window lost (#2827).")
-                .build(),
-            merge_rows_in: m
-                .u64_counter(catalog::MERGE_ROWS_IN)
-                .with_unit(catalog::unit::ROWS)
-                .with_description("Rows consumed at the k-way merge reconcile boundary.")
-                .build(),
-            merge_rows_out: m
-                .u64_counter(catalog::MERGE_ROWS_OUT)
-                .with_unit(catalog::unit::ROWS)
-                .with_description("Rows emitted by the k-way merge reconcile boundary.")
-                .build(),
-            query_degraded_path: m
-                .u64_counter(catalog::QUERY_DEGRADED_PATH)
-                .with_unit(catalog::unit::DIMENSIONLESS)
-                .with_description(
-                    "SELECTs taking a soundness fallback, keyed by {fallback_reason}.",
-                )
-                .build(),
-            index_parses_total: m
-                .u64_counter(catalog::INDEX_PARSES_TOTAL)
-                .with_unit(catalog::unit::DIMENSIONLESS)
-                .with_description("Full Index.db partition-index parses (#2383 spin probe).")
-                .build(),
-            index_interval_parses_total: m
-                .u64_counter(catalog::INDEX_INTERVAL_PARSES_TOTAL)
-                .with_unit(catalog::unit::DIMENSIONLESS)
-                .with_description(
-                    "Bounded Summary-guided Index.db interval parses, per point lookup (issue #2412).",
-                )
-                .build(),
-            storage_open_sstables: m
-                .u64_counter(catalog::STORAGE_OPEN_SSTABLES)
-                .with_unit(catalog::unit::SSTABLES)
-                .with_description("SSTables discovered and opened, summed across opens.")
-                .build(),
-            storage_open_bytes: m
-                .u64_counter(catalog::STORAGE_OPEN_BYTES)
-                .with_unit(catalog::unit::BYTES)
-                .with_description("On-disk Data.db bytes across SSTables discovered at open.")
-                .build(),
-            storage_open_tables: m
-                .u64_counter(catalog::STORAGE_OPEN_TABLES)
-                .with_unit(catalog::unit::DIMENSIONLESS)
-                .with_description("Logical tables represented by SSTables discovered at open.")
-                .build(),
-            query_rows: m
-                .u64_counter(catalog::QUERY_ROWS)
-                .with_unit(catalog::unit::ROWS)
-                .with_description("Total rows returned to callers by the query engine.")
-                .build(),
-            query_rows_scanned: m
-                .u64_counter(catalog::QUERY_ROWS_SCANNED)
-                .with_unit(catalog::unit::ROWS)
-                .with_description("Rows examined by SELECT scan before filtering/projection.")
-                .build(),
-            errors_total: m
-                .u64_counter(catalog::ERRORS_TOTAL)
-                .with_unit(catalog::unit::ERRORS)
-                .with_description("Total errors observed, keyed by bounded {category, subsystem}.")
-                .build(),
-            write_mutations: m
-                .u64_counter(catalog::WRITE_MUTATIONS)
-                .with_unit(catalog::unit::ROWS)
-                .with_description("Mutations accepted by the write path.")
-                .build(),
-            flush_rows: m
-                .u64_counter(catalog::FLUSH_ROWS)
-                .with_unit(catalog::unit::ROWS)
-                .with_description("Rows flushed from memtable to L0 SSTables.")
-                .build(),
-            flush_bytes: m
-                .u64_counter(catalog::FLUSH_BYTES)
-                .with_unit(catalog::unit::BYTES)
-                .with_description("Data.db bytes produced by memtable flushes.")
-                .build(),
-            flush_sstables: m
-                .u64_counter(catalog::FLUSH_SSTABLES)
-                .with_unit(catalog::unit::SSTABLES)
-                .with_description("L0 SSTables created by memtable flushes.")
-                .build(),
-            write_partitions: m
-                .u64_counter(catalog::WRITE_PARTITIONS)
-                .with_unit(catalog::unit::PARTITIONS)
-                .with_description("Partitions written by the SSTable writer.")
-                .build(),
-            write_bytes: m
-                .u64_counter(catalog::WRITE_BYTES)
-                .with_unit(catalog::unit::BYTES)
-                .with_description("Data.db bytes produced by the SSTable writer.")
-                .build(),
-            compaction_rows_merged: m
-                .u64_counter(catalog::COMPACTION_ROWS_MERGED)
-                .with_unit(catalog::unit::ROWS)
-                .with_description("Rows emitted by compaction merge.")
-                .build(),
-            compaction_bytes_written: m
-                .u64_counter(catalog::COMPACTION_BYTES_WRITTEN)
-                .with_unit(catalog::unit::BYTES)
-                .with_description("Bytes written to compaction output SSTables.")
-                .build(),
-            compaction_sstables_in: m
-                .u64_counter(catalog::COMPACTION_SSTABLES_IN)
-                .with_unit(catalog::unit::SSTABLES)
-                .with_description("Input SSTables consumed by compactions.")
-                .build(),
-            compaction_sstables_out: m
-                .u64_counter(catalog::COMPACTION_SSTABLES_OUT)
-                .with_unit(catalog::unit::SSTABLES)
-                .with_description("Output SSTables produced by compactions.")
-                .build(),
-            compaction_tombstones_purged: m
-                .u64_counter(catalog::COMPACTION_TOMBSTONES_PURGED)
-                .with_unit(catalog::unit::TOMBSTONES)
-                .with_description("Tombstones genuinely purged during compaction.")
-                .build(),
-            compaction_tombstones_suppressed: m
-                .u64_counter(catalog::COMPACTION_TOMBSTONES_SUPPRESSED)
-                .with_unit(catalog::unit::TOMBSTONES)
-                .with_description("Live cells/rows shadowed by a tombstone during reconciliation.")
-                .build(),
-            compaction_tombstones_emitted: m
-                .u64_counter(catalog::COMPACTION_TOMBSTONES_EMITTED)
-                .with_unit(catalog::unit::TOMBSTONES)
-                .with_description("Tombstone markers retained into the merge output.")
-                .build(),
-            rpc_requests: m
-                .u64_counter(catalog::RPC_REQUESTS)
-                .with_unit(catalog::unit::DIMENSIONLESS)
-                .with_description("Arrow Flight RPC requests served.")
-                .build(),
-            rpc_rows: m
-                .u64_counter(catalog::RPC_ROWS)
-                .with_unit(catalog::unit::ROWS)
-                .with_description("Rows returned to Flight clients.")
-                .build(),
-            rpc_bytes: m
-                .u64_counter(catalog::RPC_BYTES)
-                .with_unit(catalog::unit::BYTES)
-                .with_description("Record-batch payload bytes streamed to Flight clients.")
-                .build(),
-            warm_cache_hits: m
-                .u64_counter(catalog::WARM_CACHE_HITS)
-                .with_unit(catalog::unit::DIMENSIONLESS)
-                .with_description("Flight warm-handle cache hits (#2310).")
-                .build(),
-            warm_cache_misses: m
-                .u64_counter(catalog::WARM_CACHE_MISSES)
-                .with_unit(catalog::unit::DIMENSIONLESS)
-                .with_description("Flight warm-handle cache misses (#2310).")
-                .build(),
-            warm_cache_evicts: m
-                .u64_counter(catalog::WARM_CACHE_EVICTS)
-                .with_unit(catalog::unit::DIMENSIONLESS)
-                .with_description("Warm generations evicted (LRU / removed on disk) (#2310).")
-                .build(),
-            warm_cache_refresh: m
-                .u64_counter(catalog::WARM_CACHE_REFRESH)
-                .with_unit(catalog::unit::DIMENSIONLESS)
-                .with_description("Warm-handle refresh outcomes, keyed by {refresh_outcome} (#2310).")
-                .build(),
-            flight_admission_rejected_total: m
-                .u64_counter(catalog::FLIGHT_ADMISSION_REJECTED_TOTAL)
-                .with_unit(catalog::unit::DIMENSIONLESS)
-                .with_description("do_get requests rejected on admission timeout (#2420).")
-                .build(),
-            read_duration: m
-                .f64_histogram(catalog::READ_DURATION)
-                .with_unit(catalog::unit::SECONDS)
-                .with_description("Single read/scan operation duration in seconds.")
-                .build(),
-            query_duration: m
-                .f64_histogram(catalog::QUERY_DURATION)
-                .with_unit(catalog::unit::SECONDS)
-                .with_description("End-to-end query execution duration in seconds.")
-                .build(),
-            compaction_duration: m
-                .f64_histogram(catalog::COMPACTION_DURATION)
-                .with_unit(catalog::unit::SECONDS)
-                .with_description("Compaction run duration in seconds.")
-                .build(),
-            wal_sync_duration: m
-                .f64_histogram(catalog::WAL_SYNC_DURATION)
-                .with_unit(catalog::unit::SECONDS)
-                .with_description("WAL fsync duration in seconds.")
-                .build(),
-            flush_duration: m
-                .f64_histogram(catalog::FLUSH_DURATION)
-                .with_unit(catalog::unit::SECONDS)
-                .with_description("Memtable-to-SSTable flush duration in seconds.")
-                .build(),
-            compression_ratio: m
-                .f64_histogram(catalog::COMPRESSION_RATIO)
-                .with_unit(catalog::unit::DIMENSIONLESS)
-                .with_description("Per-chunk compression ratio.")
-                .build(),
-            compaction_finalize_duration: m
-                .f64_histogram(catalog::COMPACTION_FINALIZE_DURATION)
-                .with_unit(catalog::unit::SECONDS)
-                .with_description("Compaction finalize duration in seconds.")
-                .build(),
-            compaction_budget_requested: m
-                .f64_histogram(catalog::COMPACTION_BUDGET_REQUESTED)
-                .with_unit(catalog::unit::SECONDS)
-                .with_description("Maintenance budget requested in seconds.")
-                .build(),
-            compaction_budget_consumed: m
-                .f64_histogram(catalog::COMPACTION_BUDGET_CONSUMED)
-                .with_unit(catalog::unit::SECONDS)
-                .with_description("Maintenance budget consumed in seconds.")
-                .build(),
-            rpc_duration: m
-                .f64_histogram(catalog::RPC_DURATION)
-                .with_unit(catalog::unit::SECONDS)
-                .with_description("Arrow Flight RPC handler duration in seconds.")
-                .build(),
-            rpc_phase_duration: m
-                .f64_histogram(catalog::RPC_PHASE_DURATION)
-                .with_unit(catalog::unit::SECONDS)
-                .with_description("do_get per-phase duration in seconds (#2162).")
-                .build(),
-            flight_admission_wait_seconds: m
-                .f64_histogram(catalog::FLIGHT_ADMISSION_WAIT_SECONDS)
-                .with_unit(catalog::unit::SECONDS)
-                .with_description("do_get admission acquire wait time in seconds (#2420).")
-                .build(),
-            sstables_open: m
-                .i64_gauge(catalog::SSTABLES_OPEN)
-                .with_unit(catalog::unit::SSTABLES)
-                .with_description("Number of SSTables currently held open.")
-                .build(),
-            memtable_size_bytes: m
-                .i64_gauge(catalog::MEMTABLE_SIZE_BYTES)
-                .with_unit(catalog::unit::BYTES)
-                .with_description("Approximate active memtable size in bytes.")
-                .build(),
-            memtable_rows: m
-                .i64_gauge(catalog::MEMTABLE_ROWS)
-                .with_unit(catalog::unit::ROWS)
-                .with_description("Rows currently buffered in the active memtable.")
-                .build(),
-            compaction_lag: m
-                .i64_gauge(catalog::COMPACTION_LAG)
-                .with_unit(catalog::unit::SSTABLES)
-                .with_description("Current L0 SSTables pending compaction.")
-                .build(),
-            rpc_in_flight: m
-                .i64_gauge(catalog::RPC_IN_FLIGHT)
-                .with_unit(catalog::unit::DIMENSIONLESS)
-                .with_description("Arrow Flight RPCs currently being handled.")
-                .build(),
-            rpc_phase_active: m
-                .i64_gauge(catalog::RPC_PHASE_ACTIVE)
-                .with_unit(catalog::unit::DIMENSIONLESS)
-                .with_description("do_get phase currently executing (#2361).")
-                .build(),
-            merge_producer_threads: m
-                .i64_gauge(catalog::MERGE_PRODUCER_THREADS)
-                .with_unit(catalog::unit::THREADS)
-                .with_description("Live k-way merge producer threads (#2316).")
-                .build(),
-            flight_admission_limit: m
-                .i64_gauge(catalog::FLIGHT_ADMISSION_LIMIT)
-                .with_unit(catalog::unit::DIMENSIONLESS)
-                .with_description("Configured do_get admission ceiling K (#2420).")
-                .build(),
-            flight_admission_in_use: m
-                .i64_gauge(catalog::FLIGHT_ADMISSION_IN_USE)
-                .with_unit(catalog::unit::DIMENSIONLESS)
-                .with_description("do_get admission permits currently held (#2420).")
-                .build(),
-            flight_admission_waiting: m
-                .i64_gauge(catalog::FLIGHT_ADMISSION_WAITING)
-                .with_unit(catalog::unit::DIMENSIONLESS)
-                .with_description("do_get requests parked waiting for an admission permit (#2420).")
-                .build(),
-            merge_egress_channel_depth: m
-                .i64_gauge(catalog::MERGE_EGRESS_CHANNEL_DEPTH)
-                .with_unit(catalog::unit::ENTRIES)
-                .with_description("Live occupancy of the bounded merge egress sync_channel (#2419).")
-                .build(),
-            merge_active_merges: m
-                .i64_gauge(catalog::MERGE_ACTIVE_MERGES)
-                .with_unit(catalog::unit::MERGES)
-                .with_description(
-                    "Live concurrent k-way merges — divisor of the adaptive egress budget (#2765).",
-                )
-                .build(),
-            proc_threads: m
-                .i64_gauge(catalog::PROC_THREADS)
-                .with_unit(catalog::unit::THREADS)
-                .with_description("Process OS thread count (/proc/self/task, Linux) (#2419).")
-                .build(),
-            proc_fds: m
-                .i64_gauge(catalog::PROC_FDS)
-                .with_unit(catalog::unit::FDS)
-                .with_description("Process open fd count (/proc/self/fd, Linux) (#2419).")
-                .build(),
-            proc_rss_bytes: m
-                .i64_gauge(catalog::PROC_RSS_BYTES)
-                .with_unit(catalog::unit::BYTES)
-                .with_description("Process resident set size (/proc/self/status VmRSS, Linux) (#2419).")
-                .build(),
-            flight_blocking_tasks_in_use: m
-                .i64_gauge(catalog::FLIGHT_BLOCKING_TASKS_IN_USE)
-                .with_unit(catalog::unit::THREADS)
-                .with_description("Flight spawn_blocking tasks currently outstanding (#2419).")
-                .build(),
-            flight_tables_discovered: m
-                .i64_gauge(catalog::FLIGHT_TABLES_DISCOVERED)
-                .with_unit(catalog::unit::ENTRIES)
-                .with_description(
-                    "Table dirs visible under --data-dir, sampled by readdir on the ~2s tick (#2684).",
-                )
-                .build(),
-            flight_warm_tables: m
-                .i64_gauge(catalog::FLIGHT_WARM_TABLES)
-                .with_unit(catalog::unit::ENTRIES)
-                .with_description("Tables with a live warm reader set in the registry (#2684).")
-                .build(),
-        }
+        let mut reg = Registry::new(meter());
+        register_counters(&mut reg);
+        register_histograms(&mut reg);
+        register_gauges(&mut reg);
+        reg.build()
     })
+}
+
+/// Counter registrations. One call per metric; the name is the map key.
+fn register_counters(reg: &mut Registry) {
+    reg.counter(
+        catalog::READ_ROWS,
+        catalog::unit::ROWS,
+        "Total rows materialised by the read path.",
+    );
+    reg.counter(
+        catalog::READ_BYTES,
+        catalog::unit::BYTES,
+        "Total bytes read from Data.db (post-decompression).",
+    );
+    reg.counter(
+        catalog::READ_PARTITIONS,
+        catalog::unit::PARTITIONS,
+        "Total partitions scanned.",
+    );
+    reg.counter(
+        catalog::READ_PARTITION_LOOKUP,
+        catalog::unit::DIMENSIONLESS,
+        "Total partition point lookups, keyed by {result, lookup_route, format}.",
+    );
+    reg.counter(
+        catalog::READ_BLOOM_CHECKS,
+        catalog::unit::DIMENSIONLESS,
+        "Total bloom/BTI-trie presence checks, keyed by {result}.",
+    );
+    reg.counter(
+        catalog::READ_SCAN_WINDOW_REFILL,
+        catalog::unit::DIMENSIONLESS,
+        "Windowed scan refills at compression-chunk boundaries.",
+    );
+    reg.counter(
+        catalog::READ_SSTABLES_PRUNED,
+        catalog::unit::SSTABLES,
+        "SSTables skipped by a presence-oracle negative, keyed by {format}.",
+    );
+    reg.counter(
+        catalog::READ_BLOOM_FALSE_NEGATIVES,
+        catalog::unit::DIMENSIONLESS,
+        "Opt-in presence-oracle false negatives (soundness alarm), keyed by {format}.",
+    );
+    reg.counter(
+        catalog::READ_BTI_ROWS_ROOT_REJECTED,
+        catalog::unit::PARTITIONS,
+        "Clustering reads that decoded a whole BTI partition because its Rows.db \
+                     row-index root failed validation, keyed by {reason} (#3002).",
+    );
+    reg.counter(
+        catalog::READ_PARTITION_ACCESS_DISTINCT_PARTITIONS,
+        catalog::unit::PARTITIONS,
+        "Distinct partitions per repeat-access bucket (#2827).",
+    );
+    reg.counter(
+        catalog::READ_PARTITION_ACCESS_ACCESSES,
+        catalog::unit::DIMENSIONLESS,
+        "Accesses per repeat-access bucket (#2827).",
+    );
+    reg.counter(
+        catalog::READ_PARTITION_ACCESS_BYTES,
+        catalog::unit::BYTES,
+        "Distinct-partition on-disk bytes per bucket (#2827).",
+    );
+    reg.counter(
+        catalog::READ_PARTITION_ACCESS_DROPPED,
+        catalog::unit::DIMENSIONLESS,
+        "Probe accesses that could not be seated (#2827).",
+    );
+    reg.counter(
+        catalog::MERGE_ROWS_IN,
+        catalog::unit::ROWS,
+        "Rows consumed at the k-way merge reconcile boundary.",
+    );
+    reg.counter(
+        catalog::MERGE_ROWS_OUT,
+        catalog::unit::ROWS,
+        "Rows emitted by the k-way merge reconcile boundary.",
+    );
+    reg.counter(
+        catalog::QUERY_DEGRADED_PATH,
+        catalog::unit::DIMENSIONLESS,
+        "SELECTs taking a soundness fallback, keyed by {fallback_reason}.",
+    );
+    reg.counter(
+        catalog::INDEX_PARSES_TOTAL,
+        catalog::unit::DIMENSIONLESS,
+        "Full Index.db partition-index parses (#2383 spin probe).",
+    );
+    reg.counter(
+        catalog::INDEX_INTERVAL_PARSES_TOTAL,
+        catalog::unit::DIMENSIONLESS,
+        "Bounded Summary-guided Index.db interval parses, per point lookup (issue #2412).",
+    );
+    reg.counter(
+        catalog::STORAGE_OPEN_SSTABLES,
+        catalog::unit::SSTABLES,
+        "SSTables discovered and opened, summed across opens.",
+    );
+    reg.counter(
+        catalog::STORAGE_OPEN_BYTES,
+        catalog::unit::BYTES,
+        "On-disk Data.db bytes across SSTables discovered at open.",
+    );
+    reg.counter(
+        catalog::STORAGE_OPEN_TABLES,
+        catalog::unit::DIMENSIONLESS,
+        "Logical tables represented by SSTables discovered at open.",
+    );
+    reg.counter(
+        catalog::QUERY_ROWS,
+        catalog::unit::ROWS,
+        "Total rows returned to callers by the query engine.",
+    );
+    reg.counter(
+        catalog::QUERY_ROWS_SCANNED,
+        catalog::unit::ROWS,
+        "Rows examined by SELECT scan before filtering/projection.",
+    );
+    reg.counter(
+        catalog::ERRORS_TOTAL,
+        catalog::unit::ERRORS,
+        "Total errors observed, keyed by bounded {category, subsystem}.",
+    );
+    reg.counter(
+        catalog::WRITE_MUTATIONS,
+        catalog::unit::ROWS,
+        "Mutations accepted by the write path.",
+    );
+    reg.counter(
+        catalog::FLUSH_ROWS,
+        catalog::unit::ROWS,
+        "Rows flushed from memtable to L0 SSTables.",
+    );
+    reg.counter(
+        catalog::FLUSH_BYTES,
+        catalog::unit::BYTES,
+        "Data.db bytes produced by memtable flushes.",
+    );
+    reg.counter(
+        catalog::FLUSH_SSTABLES,
+        catalog::unit::SSTABLES,
+        "L0 SSTables created by memtable flushes.",
+    );
+    reg.counter(
+        catalog::WRITE_PARTITIONS,
+        catalog::unit::PARTITIONS,
+        "Partitions written by the SSTable writer.",
+    );
+    reg.counter(
+        catalog::WRITE_BYTES,
+        catalog::unit::BYTES,
+        "Data.db bytes produced by the SSTable writer.",
+    );
+    reg.counter(
+        catalog::COMPACTION_ROWS_MERGED,
+        catalog::unit::ROWS,
+        "Rows emitted by compaction merge.",
+    );
+    reg.counter(
+        catalog::COMPACTION_BYTES_WRITTEN,
+        catalog::unit::BYTES,
+        "Bytes written to compaction output SSTables.",
+    );
+    reg.counter(
+        catalog::COMPACTION_SSTABLES_IN,
+        catalog::unit::SSTABLES,
+        "Input SSTables consumed by compactions.",
+    );
+    reg.counter(
+        catalog::COMPACTION_SSTABLES_OUT,
+        catalog::unit::SSTABLES,
+        "Output SSTables produced by compactions.",
+    );
+    reg.counter(
+        catalog::COMPACTION_TOMBSTONES_PURGED,
+        catalog::unit::TOMBSTONES,
+        "Tombstones genuinely purged during compaction.",
+    );
+    reg.counter(
+        catalog::COMPACTION_TOMBSTONES_SUPPRESSED,
+        catalog::unit::TOMBSTONES,
+        "Live cells/rows shadowed by a tombstone during reconciliation.",
+    );
+    reg.counter(
+        catalog::COMPACTION_TOMBSTONES_EMITTED,
+        catalog::unit::TOMBSTONES,
+        "Tombstone markers retained into the merge output.",
+    );
+    reg.counter(
+        catalog::RPC_REQUESTS,
+        catalog::unit::DIMENSIONLESS,
+        "Arrow Flight RPC requests served.",
+    );
+    reg.counter(
+        catalog::RPC_ROWS,
+        catalog::unit::ROWS,
+        "Rows returned to Flight clients.",
+    );
+    reg.counter(
+        catalog::RPC_BYTES,
+        catalog::unit::BYTES,
+        "Record-batch payload bytes streamed to Flight clients.",
+    );
+    reg.counter(
+        catalog::WARM_CACHE_HITS,
+        catalog::unit::DIMENSIONLESS,
+        "Flight warm-handle cache hits (#2310).",
+    );
+    reg.counter(
+        catalog::WARM_CACHE_MISSES,
+        catalog::unit::DIMENSIONLESS,
+        "Flight warm-handle cache misses (#2310).",
+    );
+    reg.counter(
+        catalog::WARM_CACHE_EVICTS,
+        catalog::unit::DIMENSIONLESS,
+        "Warm generations evicted (LRU / removed on disk) (#2310).",
+    );
+    reg.counter(
+        catalog::WARM_CACHE_REFRESH,
+        catalog::unit::DIMENSIONLESS,
+        "Warm-handle refresh outcomes, keyed by {refresh_outcome} (#2310).",
+    );
+    reg.counter(
+        catalog::FLIGHT_ADMISSION_REJECTED_TOTAL,
+        catalog::unit::DIMENSIONLESS,
+        "do_get requests rejected on admission timeout (#2420).",
+    );
+}
+
+/// Histogram registrations.
+fn register_histograms(reg: &mut Registry) {
+    reg.histogram(
+        catalog::READ_DURATION,
+        catalog::unit::SECONDS,
+        "Single read/scan operation duration in seconds.",
+    );
+    reg.histogram(
+        catalog::QUERY_DURATION,
+        catalog::unit::SECONDS,
+        "End-to-end query execution duration in seconds.",
+    );
+    reg.histogram(
+        catalog::COMPACTION_DURATION,
+        catalog::unit::SECONDS,
+        "Compaction run duration in seconds.",
+    );
+    reg.histogram(
+        catalog::WAL_SYNC_DURATION,
+        catalog::unit::SECONDS,
+        "WAL fsync duration in seconds.",
+    );
+    reg.histogram(
+        catalog::FLUSH_DURATION,
+        catalog::unit::SECONDS,
+        "Memtable-to-SSTable flush duration in seconds.",
+    );
+    reg.histogram(
+        catalog::COMPRESSION_RATIO,
+        catalog::unit::DIMENSIONLESS,
+        "Per-chunk compression ratio.",
+    );
+    reg.histogram(
+        catalog::COMPACTION_FINALIZE_DURATION,
+        catalog::unit::SECONDS,
+        "Compaction finalize duration in seconds.",
+    );
+    reg.histogram(
+        catalog::COMPACTION_BUDGET_REQUESTED,
+        catalog::unit::SECONDS,
+        "Maintenance budget requested in seconds.",
+    );
+    reg.histogram(
+        catalog::COMPACTION_BUDGET_CONSUMED,
+        catalog::unit::SECONDS,
+        "Maintenance budget consumed in seconds.",
+    );
+    reg.histogram(
+        catalog::RPC_DURATION,
+        catalog::unit::SECONDS,
+        "Arrow Flight RPC handler duration in seconds.",
+    );
+    reg.histogram(
+        catalog::RPC_PHASE_DURATION,
+        catalog::unit::SECONDS,
+        "do_get per-phase duration in seconds (#2162).",
+    );
+    reg.histogram(
+        catalog::FLIGHT_ADMISSION_WAIT_SECONDS,
+        catalog::unit::SECONDS,
+        "do_get admission acquire wait time in seconds (#2420).",
+    );
+}
+
+/// Gauge registrations.
+fn register_gauges(reg: &mut Registry) {
+    reg.gauge(
+        catalog::READ_PARTITION_ACCESS_SAMPLE_DENOMINATOR,
+        catalog::unit::DIMENSIONLESS,
+        "Probe sampling scale at window close; 1 = census.",
+    );
+    reg.gauge(
+        catalog::READ_PARTITION_ACCESS_SAMPLING_FLOOR,
+        catalog::unit::DIMENSIONLESS,
+        "1 when the probe window hit its sampling cap (#2827).",
+    );
+    reg.gauge(
+        catalog::READ_PARTITION_ACCESS_WINDOW_DROPPED,
+        catalog::unit::DIMENSIONLESS,
+        "Accesses the last closed probe window lost (#2827).",
+    );
+    reg.gauge(
+        catalog::SSTABLES_OPEN,
+        catalog::unit::SSTABLES,
+        "Number of SSTables currently held open.",
+    );
+    reg.gauge(
+        catalog::MEMTABLE_SIZE_BYTES,
+        catalog::unit::BYTES,
+        "Approximate active memtable size in bytes.",
+    );
+    reg.gauge(
+        catalog::MEMTABLE_ROWS,
+        catalog::unit::ROWS,
+        "Rows currently buffered in the active memtable.",
+    );
+    reg.gauge(
+        catalog::COMPACTION_LAG,
+        catalog::unit::SSTABLES,
+        "Current L0 SSTables pending compaction.",
+    );
+    reg.gauge(
+        catalog::RPC_IN_FLIGHT,
+        catalog::unit::DIMENSIONLESS,
+        "Arrow Flight RPCs currently being handled.",
+    );
+    reg.gauge(
+        catalog::RPC_PHASE_ACTIVE,
+        catalog::unit::DIMENSIONLESS,
+        "do_get phase currently executing (#2361).",
+    );
+    reg.gauge(
+        catalog::MERGE_PRODUCER_THREADS,
+        catalog::unit::THREADS,
+        "Live k-way merge producer threads (#2316).",
+    );
+    reg.gauge(
+        catalog::FLIGHT_ADMISSION_LIMIT,
+        catalog::unit::DIMENSIONLESS,
+        "Configured do_get admission ceiling K (#2420).",
+    );
+    reg.gauge(
+        catalog::FLIGHT_ADMISSION_IN_USE,
+        catalog::unit::DIMENSIONLESS,
+        "do_get admission permits currently held (#2420).",
+    );
+    reg.gauge(
+        catalog::FLIGHT_ADMISSION_WAITING,
+        catalog::unit::DIMENSIONLESS,
+        "do_get requests parked waiting for an admission permit (#2420).",
+    );
+    reg.gauge(
+        catalog::MERGE_EGRESS_CHANNEL_DEPTH,
+        catalog::unit::ENTRIES,
+        "Live occupancy of the bounded merge egress sync_channel (#2419).",
+    );
+    reg.gauge(
+        catalog::MERGE_ACTIVE_MERGES,
+        catalog::unit::MERGES,
+        "Live concurrent k-way merges — divisor of the adaptive egress budget (#2765).",
+    );
+    reg.gauge(
+        catalog::PROC_THREADS,
+        catalog::unit::THREADS,
+        "Process OS thread count (/proc/self/task, Linux) (#2419).",
+    );
+    reg.gauge(
+        catalog::PROC_FDS,
+        catalog::unit::FDS,
+        "Process open fd count (/proc/self/fd, Linux) (#2419).",
+    );
+    reg.gauge(
+        catalog::PROC_RSS_BYTES,
+        catalog::unit::BYTES,
+        "Process resident set size (/proc/self/status VmRSS, Linux) (#2419).",
+    );
+    reg.gauge(
+        catalog::FLIGHT_BLOCKING_TASKS_IN_USE,
+        catalog::unit::THREADS,
+        "Flight spawn_blocking tasks currently outstanding (#2419).",
+    );
+    reg.gauge(
+        catalog::FLIGHT_TABLES_DISCOVERED,
+        catalog::unit::ENTRIES,
+        "Table dirs visible under --data-dir, sampled by readdir on the ~2s tick (#2684).",
+    );
+    reg.gauge(
+        catalog::FLIGHT_WARM_TABLES,
+        catalog::unit::ENTRIES,
+        "Tables with a live warm reader set in the registry (#2684).",
+    );
 }
