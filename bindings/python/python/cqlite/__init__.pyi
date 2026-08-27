@@ -406,7 +406,23 @@ def open(
     Args:
         path: Path to the SSTable directory
         schema: Optional path to CQL schema file.  Required when ``writable=True``.
-        config: Optional configuration (dict, JSON string, or preset name)
+        config: Optional configuration (dict, JSON string, or preset name).
+                Must be a COMPLETE config -- the bridge deserializes into the
+                full core config, so a partial dict is rejected with
+                missing-field errors.  Take a full dict from a preset
+                (``cqlite.performance_optimized()``) and mutate it.
+
+                Since issue #1697 ``storage`` additionally accepts the write-path
+                knobs that were previously unreachable:
+                ``storage.memtable_hard_limit`` (admission ceiling in bytes,
+                default 268435456 -- writes past it are REJECTED),
+                ``storage.compaction.min_threshold`` (STCS eligibility bar,
+                default 4) and ``storage.compaction.max_threshold`` (STCS merge
+                width cap, default 32).  All three now actually reach the write
+                engine.  ``storage.memtable_size_threshold`` is validated
+                against ``storage.memtable_hard_limit``: a threshold above the
+                ceiling raises ``ValueError``, because such a memtable can never
+                flush and is rejected at admission.
         writable: Enable write support (INSERT / UPDATE / DELETE).
                   When ``True``, both ``schema`` and ``write_dir`` must be provided.
         write_dir: Directory for WAL files and flushed SSTables.
@@ -416,6 +432,14 @@ def open(
                    size, ``execute`` awaits a real async flush to a new SSTable
                    generation.  Only meaningful when ``writable=True``.
                    Default: 64 MB (67108864 bytes).
+
+                   **OVERRIDES** ``config["storage"]["memtable_size_threshold"]``
+                   when both are given (issue #1697): the keyword is folded onto
+                   the public config, so it is this value that reaches the write
+                   engine.  It must therefore satisfy the same rule --
+                   ``ValueError`` if it exceeds *your*
+                   ``config["storage"]["memtable_hard_limit"]``, not the default
+                   ceiling.  Raising that ceiling raises what is accepted here.
 
                    **Caveat**: Only one ``Database`` instance should hold a given
                    ``write_dir`` at a time.  Concurrent instances sharing the same

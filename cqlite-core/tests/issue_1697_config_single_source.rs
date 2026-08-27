@@ -246,7 +246,7 @@ fn public_memtable_hard_limit_knob_is_load_bearing() {
     let msg = err.to_string();
     assert!(
         msg.contains("hard limit") && msg.contains(&HARD_LIMIT.to_string()),
-        "the rejection must quote the CONFIGURED hard limit {HARD_LIMIT}, proving the public          knob reached check_admission; got: {msg}"
+        "the rejection must quote the CONFIGURED hard limit {HARD_LIMIT}, proving the public knob reached check_admission; got: {msg}"
     );
 
     // A mutation that fits is still admitted — the knob bounds, it does not brick.

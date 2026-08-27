@@ -556,19 +556,19 @@ impl Database {
                 // A threshold above the hard limit would never trigger an
                 // auto-flush: the memtable hits the hard limit and rejects
                 // writes first, dead-ending the binding write path
-                // (roborev jobs 2885/2890, issue #1620). Gated on
-                // `write-support` so the accepted/rejected input set is
-                // unchanged from before #1697; the ceiling itself is now read
-                // from the PUBLIC config knob (same 256MB value) instead of the
-                // private `WriteEngineConfig::DEFAULT_HARD_LIMIT`.
-                #[cfg(feature = "write-support")]
-                {
-                    let hard_limit = config.storage.memtable_hard_limit;
-                    if v > hard_limit as f64 {
-                        return Err(napi::Error::from_reason(format!(
-                            "flushThreshold ({v} bytes) must not exceed the memtable hard limit ({hard_limit} bytes)"
-                        )));
-                    }
+                // (roborev jobs 2885/2890, issue #1620). Read from the CALLER's
+                // public knob, so raising the ceiling raises what is accepted.
+                //
+                // NOT gated on `write-support`: `memtable_hard_limit` is
+                // feature-independent, so a gate here would only make the same
+                // `flushThreshold` accepted in one build and rejected in
+                // another — a feature-dependent input-acceptance difference
+                // with nothing behind it.
+                let hard_limit = config.storage.memtable_hard_limit;
+                if v > hard_limit as f64 {
+                    return Err(napi::Error::from_reason(format!(
+                        "flushThreshold ({v} bytes) must not exceed the memtable hard limit ({hard_limit} bytes)"
+                    )));
                 }
                 // Issue #1697: applied to the PUBLIC knob rather than the
                 // engine's private `with_flush_threshold` setter, so the option
