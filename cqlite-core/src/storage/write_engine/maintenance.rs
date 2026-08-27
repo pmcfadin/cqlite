@@ -2499,18 +2499,16 @@ mod tests {
         );
     }
 
-    /// Issue #1619 AH1: `Config.storage.compaction` must be non-decorative. A
-    /// `CompactionConfig` with `auto_compaction = false` bridged onto the
-    /// `WriteEngineConfig` must disable the default policy end-to-end — no rows
-    /// merged and an unchanged L0 SSTable count after a maintenance step.
+    /// Issue #1619 AH1: `Config.storage.compaction` must be non-decorative — an
+    /// `auto_compaction = false` bridged onto the `WriteEngineConfig` must disable
+    /// the default policy end-to-end: no rows merged, L0 count unchanged.
     #[test]
     fn test_compaction_config_disables_default_policy() {
         let temp_dir = TempDir::new().unwrap();
         let schema = create_test_schema();
 
-        // Routed through the ONE public bridge (#1697): the off-switch has to
-        // travel `Config.storage.compaction` -> `WriteEngineConfig`, which is
-        // the path a real embedder uses.
+        // Routed through the ONE public bridge (#1697), which is the path a real
+        // embedder travels: `Config.storage.compaction` -> `WriteEngineConfig`.
         let mut public_config = crate::config::Config::default();
         public_config.storage.compaction.auto_compaction = false;
         let config = WriteEngineConfig::from_config(

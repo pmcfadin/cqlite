@@ -27,11 +27,21 @@ use crate::schema::TableSchema;
 
 /// Narrow the public `u64` byte threshold to the engine's `usize`.
 ///
-/// On a 32-bit target a `u64` config value can exceed `usize::MAX`. Clamping
-/// (rather than an unchecked `as` truncation) keeps the requested "flush very
-/// rarely" intent: a truncating cast could wrap a huge threshold down to a tiny
-/// one and turn a bulk-load config into flush-per-write. The clamp is logged so
-/// it is never silent.
+/// On a 32-bit or wasm32 target a `u64` config value can exceed `usize::MAX`.
+/// Clamping (rather than an unchecked `as` truncation) is the safer of two bad
+/// outcomes: a truncating cast could wrap `0x1_0000_0000` down to `0` and turn a
+/// bulk-load config into flush-per-write, whereas the clamp at least preserves
+/// the "flush very rarely" direction of the request.
+///
+/// Both outcomes are still wrong, so [`Config::validate`] REJECTS such a value
+/// outright — `usize::MAX` is itself degenerate (`should_flush` never fires and
+/// `check_admission` can never reject, because `saturating_add` caps there).
+/// This clamp is therefore defense in depth for callers that reach the bridge
+/// without validating, NOT the primary defense.
+///
+/// The `tracing::warn!` is best-effort only: with no subscriber installed it
+/// expands to a no-op, and no `from_config` caller guarantees one. Do not rely
+/// on the clamp being observable.
 fn clamp_threshold_bytes(bytes: u64, knob: &str) -> usize {
     match usize::try_from(bytes) {
         Ok(v) => v,

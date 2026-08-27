@@ -52,7 +52,8 @@ pub struct StorageConfig {
     /// unchanged (256MB): this exposes the knob, it does not alter behaviour.
     /// [`Config::validate`] requires it to be >= [`Self::memtable_size_threshold`],
     /// since a lower ceiling wedges the engine — writes are rejected before a
-    /// flush can ever relieve the memtable.
+    /// flush can ever relieve the memtable — and requires BOTH knobs to fit in
+    /// the target's `usize` (see `validate`; only reachable on 32-bit/wasm32).
     #[serde(default = "default_memtable_hard_limit")]
     pub memtable_hard_limit: u64,
 
@@ -801,13 +802,49 @@ impl Config {
             ));
         }
 
+        // Both memtable byte knobs are `u64` on the public surface but `usize`
+        // in the engine (see `WriteEngineConfig::from_config`). On a 32-bit or
+        // wasm32 target a value above `usize::MAX` cannot be represented, and
+        // the bridge's clamp would land it exactly on `usize::MAX` — the state
+        // `memtable.rs` names degenerate: `should_flush` never fires and
+        // `check_admission`'s `projected > hard_limit` is UNREACHABLE because
+        // `saturating_add` caps at `usize::MAX`. That is never-flush AND
+        // never-reject: grow until OOM. Reject it here instead (#1697).
+        //
+        // `usize_max_bytes` is the target's `usize::MAX` widened to `u64` — via
+        // `try_from`, never an `as` cast — so on a 64-bit target it equals
+        // `u64::MAX` and the comparisons below are trivially false rather than
+        // ill-typed. A hypothetical target with `usize` WIDER than `u64` falls
+        // back to `u64::MAX`, which is also correct: every `u64` value is then
+        // addressable. The bridge keeps its clamp as defense in depth for any
+        // path that skips `validate`.
+        let usize_max_bytes = u64::try_from(usize::MAX).unwrap_or(u64::MAX);
+        for (knob, bytes) in [
+            (
+                "memtable_size_threshold",
+                self.storage.memtable_size_threshold,
+            ),
+            ("memtable_hard_limit", self.storage.memtable_hard_limit),
+        ] {
+            if bytes > usize_max_bytes {
+                return Err(crate::Error::configuration(format!(
+                    "{knob} ({bytes} bytes) exceeds this target's addressable maximum \
+                     ({usize_max_bytes} bytes); a memtable that large can never flush \
+                     and can never reject a write"
+                )));
+            }
+        }
+
         // A hard limit below the flush threshold wedges the write engine: the
         // memtable is rejected at the ceiling before a flush can relieve it.
         // Only expressible as a rule now that both knobs live here (#1697).
         if self.storage.memtable_hard_limit < self.storage.memtable_size_threshold {
-            return Err(crate::Error::configuration(
-                "memtable_hard_limit must be >= memtable_size_threshold",
-            ));
+            return Err(crate::Error::configuration(format!(
+                "memtable_hard_limit ({} bytes) must be >= memtable_size_threshold \
+                 ({} bytes); a lower ceiling rejects writes before a flush can \
+                 relieve the memtable",
+                self.storage.memtable_hard_limit, self.storage.memtable_size_threshold
+            )));
         }
 
         // Validate the STCS thresholds threaded into the write engine (#1697).
@@ -820,9 +857,10 @@ impl Config {
             ));
         }
         if compaction.max_threshold < compaction.min_threshold {
-            return Err(crate::Error::configuration(
-                "compaction.max_threshold must be >= compaction.min_threshold",
-            ));
+            return Err(crate::Error::configuration(format!(
+                "compaction.max_threshold ({}) must be >= compaction.min_threshold ({})",
+                compaction.max_threshold, compaction.min_threshold
+            )));
         }
 
         // Validate bloom filter settings
