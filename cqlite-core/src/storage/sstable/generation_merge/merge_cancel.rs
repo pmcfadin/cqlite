@@ -17,6 +17,23 @@
 //! (The STREAMING driver has no such gap: its `blocking_send` fails as soon as the
 //! consumer is gone, which ends its loop within one merge step.)
 //!
+//! # Two granularities, and why the token also goes INTO the merger
+//!
+//! [`check`] is called once per partition, which is the merge's own unit of work
+//! — but a single `KWayMerger::step()` can itself be long, because the merger's
+//! producer threads are doing the actual SSTable decode. So the token is ALSO
+//! handed to the merger's input readers via `KWayMerger::new_cancellable` /
+//! `build_single_partition_merger_from_readers` (#2264's cooperative reader
+//! cancellation), letting an abandoned merge stop MID-step instead of finishing
+//! the partition it is decoding. This costs nothing and removes nothing: the
+//! tokens it displaces were `ScanCancel::default()` (what plain `KWayMerger::new`
+//! installs) and one literal `ScanCancel::new()` — neither reachable by any
+//! caller, so neither could ever be tripped. It must stay the PER-CALL token for
+//! the same reason as below; the shared reader token would cancel other queries.
+//! Producer TEARDOWN was already safe without this (#2361: dropping a
+//! `KWayMerger` closes the channel, trips the readers' token and joins the
+//! threads) — this is about promptness, not leaks.
+//!
 //! # The shape: a guard in the async scope, a flag in the closure
 //!
 //! [`per_call`] mints a FRESH token per call and returns it paired with a guard
@@ -140,6 +157,42 @@ mod abandon_tests;
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Structural pin (#1695 roborev round 2): the three MATERIALIZING merges must
+    /// hand their per-call token to the merger's own input readers, not the inert
+    /// default. Behavioural coverage cannot reach this — "a reader stops mid-step"
+    /// is only observable as a latency difference, and a wall-clock assert in the
+    /// correctness path is forbidden — so the invariant is asserted on the source.
+    ///
+    /// It is deliberately NOT "no `KWayMerger::new` anywhere": the STREAMING driver
+    /// (`stream_generations_for_read`) keeps the plain constructor on purpose, since
+    /// its `blocking_send` already fails the instant the consumer is dropped.
+    #[test]
+    fn the_materializing_merges_pass_their_token_into_the_merger() {
+        let src = include_str!("../generation_merge.rs");
+
+        assert_eq!(
+            src.matches("KWayMerger::new_cancellable(").count(),
+            2,
+            "`merge_generations_for_read` and `merge_generations_for_read_with_metadata` \
+             must each build a CANCELLABLE merger; a plain `KWayMerger::new` there installs \
+             `ScanCancel::default()`, which no caller can ever trip"
+        );
+
+        assert!(
+            !src.contains("ScanCancel::new()"),
+            "`seek_merge_generations_for_read` must pass its per-call token to \
+             `build_single_partition_merger_from_readers`; a freshly-minted \
+             `ScanCancel::new()` is unreachable by any caller and cancels nothing"
+        );
+
+        assert_eq!(
+            src.matches("merge_cancel::per_call()").count(),
+            3,
+            "one fresh token per materializing merge — a token shared across calls \
+             would let one query's timeout cancel another query's merge"
+        );
+    }
 
     /// The guard trips its token on drop — the mechanism the timed-out query
     /// relies on — and does not trip it before.

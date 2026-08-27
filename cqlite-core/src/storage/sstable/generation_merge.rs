@@ -299,7 +299,8 @@ pub(super) async fn merge_generations_for_read(
         let _admission = admission; // #2063: hold across the detached blocking work.
                                     // Issue #1849: capture the read-time TTL clock ONCE per scan.
         let shadow = ReadShadow::new(&schema, now_epoch_secs());
-        let mut merger = KWayMerger::new(paths, &schema)?;
+        // #1695: readers get the token too — `merge_cancel` "Two granularities".
+        let mut merger = KWayMerger::new_cancellable(paths, &schema, cancel.clone())?;
         let mut out = Vec::new();
         loop {
             // #1695: caller's future gone — abandon rather than finish a `Vec` nobody
@@ -369,7 +370,6 @@ pub(super) async fn seek_merge_generations_for_read(
     schema: &crate::schema::TableSchema,
     target_key: &RowKey,
 ) -> Result<Vec<(RowKey, ScanRow)>> {
-    use crate::storage::scan_cancel::ScanCancel;
     use crate::storage::write_engine::merge::{
         build_single_partition_merger_from_readers, PointAccessRecording,
     };
@@ -401,7 +401,7 @@ pub(super) async fn seek_merge_generations_for_read(
             ordered,
             &keys,
             &schema,
-            ScanCancel::new(),
+            cancel.clone(), // #1695: per-call token, not an untrippable `ScanCancel::new()`.
             // The executor records this logical access at its own storage
             // boundary (`StorageEngine::scan_partition_clustering`), so
             // recording here as well would count one read twice (#2827).
@@ -524,7 +524,7 @@ pub(super) async fn merge_generations_for_read_with_metadata(
         let _admission = admission; // #2063: hold across the detached blocking work.
                                     // Issue #1849: capture the read-time TTL clock ONCE per scan.
         let shadow = ReadShadow::new(&merge_schema, now_epoch_secs());
-        let mut merger = KWayMerger::new(paths, &merge_schema)?;
+        let mut merger = KWayMerger::new_cancellable(paths, &merge_schema, cancel.clone())?;
         let mut out = Vec::new();
         loop {
             // #1695: abandon at the next partition once the caller's future is gone.
