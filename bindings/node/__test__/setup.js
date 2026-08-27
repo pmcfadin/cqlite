@@ -45,10 +45,26 @@ const SCHEMA_OA_TEST = path.join(SCHEMAS_DIR, 'oa-test.cql');
  * sstables dir is the exact shape of the original #773 failure and used to
  * count as "available", false-greening a broken fixture setup.
  *
+ * Symlinked directories ARE followed (a symlinked keyspace dir is a legitimate
+ * corpus layout), so the walk must be cycle-safe: `visited` holds the resolved
+ * real path of every directory already entered, and a link pointing at an
+ * ancestor is skipped instead of recursing until the stack overflows.
+ *
  * @param {string} dir
+ * @param {Set<string>} [visited] resolved real paths already walked
  * @returns {boolean}
  */
-function hasDataDbFile(dir) {
+function hasDataDbFile(dir, visited = new Set()) {
+  let real;
+  try {
+    real = fs.realpathSync(dir);
+  } catch (err) {
+    // A path that cannot be resolved contributes no fixtures (fail closed).
+    return false;
+  }
+  if (visited.has(real)) return false; // cycle or diamond: already covered
+  visited.add(real);
+
   let entries;
   try {
     entries = fs.readdirSync(dir, { withFileTypes: true });
@@ -69,7 +85,7 @@ function hasDataDbFile(dir) {
       }
     }
     if (isDirectory) {
-      if (hasDataDbFile(full)) return true;
+      if (hasDataDbFile(full, visited)) return true;
     } else if (entry.name.endsWith('-Data.db')) {
       return true;
     }

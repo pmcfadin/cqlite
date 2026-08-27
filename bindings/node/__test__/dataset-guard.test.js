@@ -70,6 +70,26 @@ const CORPUS_SHAPES = {
     },
     childTest: "test('noop', () => {});\n",
   },
+  // A self-referential symlink inside test_basic. Symlinked keyspace dirs are
+  // followed on purpose, so the walk must terminate on a link pointing at an
+  // ancestor and report an unavailable corpus rather than crashing setup --
+  // which it must never do in NON-strict mode (issue #1458).
+  //
+  // HONESTY NOTE: this case is a behavioral CONTROL, not a red-then-green
+  // regression pin. Measured on Linux, the pre-visited-set walk did not blow
+  // the stack: the kernel's 40-level symlink cap makes statSync() fail ELOOP at
+  // recursion depth ~81, which the broken-symlink `continue` swallows. The
+  // visited-set still earns its place (it drops those ~80 redundant
+  // readdir/stat rounds and re-walks of diamond-linked dirs), and this case
+  // pins the observable contract on every platform.
+  symlinkCycle: {
+    build: (sstables) => {
+      const testBasic = path.join(sstables, 'test_basic');
+      fs.mkdirSync(testBasic, { recursive: true });
+      fs.symlinkSync(sstables, path.join(testBasic, 'loop'), 'dir');
+    },
+    childTest: "test('noop', () => { expect(global.DATASETS_AVAILABLE).toBe(false); });\n",
+  },
 };
 
 /**
@@ -138,5 +158,16 @@ describe('dataset guard (issue #1458)', () => {
     }
     expect(output).toMatch(/test_basic/);
     expect(output).toMatch(/-Data\.db/);
+  }, 120000);
+
+  // The walk follows symlinked dirs, so a link pointing at an ancestor must
+  // terminate quietly (exit 0, corpus unavailable) rather than crash setup.
+  test('a self-referential symlink does not crash the walk (non-strict)', () => {
+    const { status, stdout, stderr } = runChildJest({ strict: false, corpus: 'symlinkCycle' });
+    const output = `${stdout}${stderr}`;
+    if (status !== 0) {
+      throw new Error(`expected exit 0, got ${status}\n${output}`);
+    }
+    expect(output).not.toMatch(/Maximum call stack/);
   }, 120000);
 });
