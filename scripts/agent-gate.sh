@@ -187,15 +187,18 @@
 #                      bash/grep/awk — offline, deterministic, no datasets/network.
 #   pub-surface        standing PUBLIC-API snapshot guard for cqlite-core
 #                      (scripts/ci/check-pub-surface.sh, issue #1712). Derives the
-#                      crate's default-feature public surface from rustdoc's own
-#                      emitted item tree (rustc's real name resolution + cfg
-#                      evaluation) and diffs it against the committed
+#                      crate's default-feature public surface by walking rustdoc's
+#                      own MODULE INDEX GRAPH (rustc's real name resolution + cfg
+#                      evaluation), including `pub use` re-exports and glob
+#                      expansions, cross-checked for completeness against rustdoc's
+#                      all.html, and diffs it against the committed
 #                      cqlite-core/pub-surface.snapshot; ALSO asserts the crate root
 #                      tells the truth — an unconditional, non-#[doc(hidden)]
 #                      `pub mod NAME;` must actually be in the default public
 #                      surface (the #1712 defect: an inner #![cfg] hid `benchmarks`
 #                      from every default build while the crate root advertised it).
-#                      Boundary: item PATHS + kinds, not signatures. Fail-closed and
+#                      Boundary: item PATHS + kinds + associated-item names and
+#                      re-export edges, never signatures. Fail-closed and
 #                      affirmative — a cargo doc failure, absent doc tree, zero-item
 #                      enumeration or missing snapshot is a NAMED FAIL, never a
 #                      vacuous pass; no env opt-out. ~6s, offline, no datasets.
@@ -517,13 +520,14 @@
 #                      and a bad argument must exit 2. Each negative case substitutes
 #                      the artifact in its own detached scratch worktree (the guard
 #                      has no test-only seam) and reuses CARGO_TARGET_DIR, so the
-#                      12-case suite costs ~80s of rustdoc and no datasets/network.
+#                      16-case suite costs ~90s of rustdoc and no datasets/network.
 #                      Also reds on a new `pub fn` on an existing public struct, a new
 #                      enum variant, a cosmetic `cfg_attr` that must not exempt a
 #                      crate-root `pub mod` from the assert, a SAME-LINE
 #                      `#[attr] pub mod x;` (which the first cut dropped entirely — a
-#                      false PASS), and a disagreement between the guard's two
-#                      independent crate-root scans.
+#                      false PASS), a disagreement between the guard's two
+#                      independent crate-root scans, a deleted public RE-EXPORT, and
+#                      a tell-tale token inside an attribute's STRING VALUE.
 #   minimal-build      cargo build + `cargo test --lib --no-run` (compile-only)
 #                      -p cqlite-core --no-default-features --features all-compression
 #   smoke              bash test-data/scripts/smoke-test-all-tables.sh
@@ -5561,8 +5565,9 @@ run_pub_surface() {
 # green and three reds (consistency assert on the pre-#1712 shape, snapshot drift,
 # missing snapshot) plus the usage case, substituting the artifact in detached scratch
 # worktrees rather than through any test-only seam, and pins every crate-root parse
-# shape the (lexical, not-a-Rust-parser) scan claims to handle. Reuses
-# CARGO_TARGET_DIR (~80s); never invokes the gate, so it cannot recurse.
+# shape the (lexical, not-a-Rust-parser) scan claims to handle, plus both directions
+# of the public-surface enumeration. Reuses CARGO_TARGET_DIR (~90s); never invokes the
+# gate, so it cannot recurse.
 run_tooling_tests() {
   local name=tooling-tests
   if [ -n "$ONLY" ] && ! grep -qw "$name" <<<"${ONLY//,/ }"; then
@@ -6750,11 +6755,13 @@ run_tooling_tests() {
   # diff, a missing snapshot FAILs instead of passing vacuously, and a bad argument
   # exits 2. Each negative case substitutes the artifact in its own
   # `git worktree add --detach HEAD` scratch checkout (no test-only seam in the guard)
-  # and reuses CARGO_TARGET_DIR, so the whole 12-case suite is ~80s of rustdoc. It also
-  # pins every crate-root PARSE shape the scan claims to handle (same-line
-  # `#[attr] pub mod x;`, multi-line attrs, trailing comments, block-commented decls),
-  # since that scan is lexical and its safety rests on the pinned suite. A failure
-  # FAILs the component, mirroring the guards above.
+  # and reuses CARGO_TARGET_DIR, so the whole 16-case suite is ~90s of rustdoc. It pins
+  # every crate-root PARSE shape the scan claims to handle (same-line
+  # `#[attr] pub mod x;`, multi-line attrs, trailing comments, block-commented decls,
+  # attributes separated from their item by blank/comment lines), since that scan is
+  # lexical and its safety rests on the pinned suite; and both directions of the
+  # public-surface enumeration — deleting a public RE-EXPORT must red, renaming a
+  # PRIVATE re-exported-through module must not. A failure FAILs the component.
   echo ">>> [$name] bash scripts/tests/test_pub_surface_guard.sh"
   if ! bash "$REPO_ROOT/scripts/tests/test_pub_surface_guard.sh" >>"$log" 2>&1; then
     status=FAIL

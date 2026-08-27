@@ -248,10 +248,10 @@ component FAILs otherwise. An unexpected diff there is a **semver decision, not 
 chore** — say in the PR body why the surface moved. The guard also asserts the crate root tells the
 truth: an unconditional, non-`#[doc(hidden)]` `pub mod NAME;` must actually be present in the
 default-feature surface, so a cfg gate can never again hide inside a module file while the crate
-root advertises the module. **Stated boundary**: granularity is item PATHS, kinds and
-associated-item NAMES (methods, enum variants, public fields, associated consts/types) — never
-SIGNATURES, generics or bounds, and trait/synthetic/blanket impl members are excluded by design
-because they move on any dependency bump.
+root advertises the module. **Stated boundary**: granularity is item PATHS, kinds,
+associated-item NAMES (methods, enum variants, public fields, associated consts/types) and
+`pub use` re-export edges — never SIGNATURES, generics or bounds, and trait/synthetic/blanket impl
+members are excluded by design because they move on any dependency bump.
 
 ### Code quality
 - `RUSTFLAGS="-D warnings"` must pass; no `unwrap()`/`expect()` in library code; `thiserror` for errors

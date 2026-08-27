@@ -49,6 +49,16 @@
 #  12.  PINNED — plain / `#[cfg]` / `#[doc(hidden)]` / multi-line `pub use`, the
 #                shapes that always worked, asserted straight off the snapshot.
 #
+#   Public-surface ENUMERATION and ATTRIBUTE reading (roborev round 2):
+#  13.  RED    — deleting a public RE-EXPORT of an otherwise-public item must red and
+#                name it. A filesystem walk cannot see this at all.
+#  14.  GREEN  — renaming a PRIVATE, only-re-exported-through module must NOT be a
+#                public API change.
+#  15.  RED    — a tell-tale token (`doc(hidden)`, `cfg(`) inside an attribute's
+#                STRING VALUE must not exempt a declaration from the assert.
+#  16.  GREEN  — a real `#[cfg]` separated from its item by blank/comment lines must
+#                still gate it.
+#
 # NO TEST-ONLY SEAM. The guard's subject is hard-coded on purpose, so the negative
 # cases SUBSTITUTE THE ARTIFACT: each runs in its own `git worktree add --detach HEAD`
 # scratch checkout whose files are edited in place (CLAUDE.md — a test that needs a
@@ -421,5 +431,132 @@ decls_section | grep -q '^pub use crate::{ config::Config,' \
   || fail_case "case 12 — a MULTI-LINE \`pub use\` was not joined onto one recorded line"
 echo "OK (12): plain / #[cfg] / #[doc(hidden)] / multi-line pub use are all pinned in the snapshot"
 
+# ---------------------------------------------------------------------------
+# 13. RED — deleting a PUBLIC RE-EXPORT of an otherwise-public item (roborev r2 F1).
+#
+#     `schema::SchemaLoadWarning` is public through `pub use aggregator::{…}`. The
+#     type itself stays public at its canonical path, so nothing about the
+#     filesystem tree changes — which is exactly why a directory walk passed this
+#     breaking change green. Removing the re-export must now RED and name it.
+# ---------------------------------------------------------------------------
+scratch_tree drop-reexport; wt13="$SCRATCH"
+awk '{ if ($0 == "    SchemaLoadWarning,") next; print }' \
+  "$wt13/cqlite-core/src/schema/mod.rs" >"$wt13/schema.mod.rs"
+mv "$wt13/schema.mod.rs" "$wt13/cqlite-core/src/schema/mod.rs"
+grep -q '^    SchemaLoadWarning,$' "$wt13/cqlite-core/src/schema/mod.rs" \
+  && fail_case "case 13 setup: could not drop SchemaLoadWarning from the re-export list"
+set +e
+bash "$wt13/$GUARD_REL" >"$TMPROOT/case13.out" 2>&1
+case13_rc=$?
+set -e
+[ "$case13_rc" -ne 0 ] || fail_case "case 13 — deleting a public re-export passed GREEN. That is a breaking change the guard must see; got: $(cat "$TMPROOT/case13.out")"
+grep -q "^-reexport cqlite_core::schema::SchemaLoadWarning = " "$TMPROOT/case13.out" \
+  || fail_case "case 13 — the guard failed but the diff did not name the deleted re-export; got: $(grep -i schemaloadwarning "$TMPROOT/case13.out")"
+echo "OK (13): deleting a public re-export REDs and names it"
+
+# ---------------------------------------------------------------------------
+# 14. GREEN — renaming a PRIVATE module that only re-exports through is NOT a
+#     public API change (roborev r2 F2).
+#
+#     `schema::udt_registry` is `mod`, not `pub mod`: nothing public reaches it, and
+#     its items are public only via `pub use udt_registry::{…}`. A directory walk
+#     recorded it and its items, so this rename read as an API change — noise, and
+#     the kind of noise that teaches people to regenerate without reading. The
+#     guard must now PASS OUTRIGHT.
+# ---------------------------------------------------------------------------
+scratch_tree rename-private-mod; wt14="$SCRATCH"
+mv "$wt14/cqlite-core/src/schema/udt_registry.rs" "$wt14/cqlite-core/src/schema/udt_registry_renamed.rs"
+sed -e 's/^mod udt_registry;$/mod udt_registry_renamed;/' \
+    -e 's/^pub use udt_registry::/pub use udt_registry_renamed::/' \
+    "$wt14/cqlite-core/src/schema/mod.rs" >"$wt14/schema.mod.rs"
+mv "$wt14/schema.mod.rs" "$wt14/cqlite-core/src/schema/mod.rs"
+grep -q '^mod udt_registry_renamed;$' "$wt14/cqlite-core/src/schema/mod.rs" \
+  || fail_case "case 14 setup: could not rename the private udt_registry module"
+set +e
+bash "$wt14/$GUARD_REL" >"$TMPROOT/case14.out" 2>&1
+case14_rc=$?
+set -e
+[ "$case14_rc" -eq 0 ] || {
+  echo "FAIL: case 14 — renaming a PRIVATE, re-exported-through module was reported as a"
+  echo "      public API change. Private module paths must not be in the snapshot at all."
+  cat "$TMPROOT/case14.out"
+  exit 1
+}
+echo "OK (14): renaming a private re-exported-through module is not a public API change"
+
+# ---------------------------------------------------------------------------
+# 15. RED — a COSMETIC attribute whose TEXT contains `doc(hidden)` / `cfg(` must not
+#     exempt a declaration from the consistency assert (roborev r2 F3).
+#
+#     Both attributes below hide and gate exactly nothing; the tell-tale tokens are
+#     inside string-literal VALUES. Under the previous substring test either one
+#     bought an exemption, so a module could keep hiding its real gate inside its
+#     own file — a false PASS.
+# ---------------------------------------------------------------------------
+scratch_tree cosmetic-attrs; wt15="$SCRATCH"
+awk '
+  /^#\[cfg\(feature = "benchmarks"\)\]$/ {
+    print "#[doc = \"this text mentions doc(hidden) but hides nothing\"]"
+    print "#[cfg_attr(docsrs, doc(alias = \"cfg(foo)\"))]"
+    next
+  }
+  { print }
+' "$wt15/cqlite-core/src/lib.rs" >"$wt15/lib.rs.cosmetic"
+mv "$wt15/lib.rs.cosmetic" "$wt15/cqlite-core/src/lib.rs"
+grep -q 'mentions doc(hidden) but hides nothing' "$wt15/cqlite-core/src/lib.rs" \
+  || fail_case "case 15 setup: could not substitute the cosmetic attributes"
+grep -q '^#\[cfg(feature = "benchmarks")\]$' "$wt15/cqlite-core/src/lib.rs" \
+  && fail_case "case 15 setup: the real declaration-site cfg gate survived"
+printf '%s\n%s\n' '#![cfg(feature = "benchmarks")]' "$(cat "$wt15/cqlite-core/src/benchmarks/mod.rs")" \
+  >"$wt15/cqlite-core/src/benchmarks/mod.rs.new"
+mv "$wt15/cqlite-core/src/benchmarks/mod.rs.new" "$wt15/cqlite-core/src/benchmarks/mod.rs"
+set +e
+bash "$wt15/$GUARD_REL" >"$TMPROOT/case15.out" 2>&1
+case15_rc=$?
+set -e
+[ "$case15_rc" -ne 0 ] || fail_case "case 15 — cosmetic attributes bought an exemption; got: $(cat "$TMPROOT/case15.out")"
+grep -q "INCONSISTENT with the real public surface" "$TMPROOT/case15.out" \
+  || fail_case "case 15 — the consistency assert did NOT fire: an attribute whose STRING VALUE mentions doc(hidden)/cfg( was read as structure; got: $(cat "$TMPROOT/case15.out")"
+grep -q "pub mod benchmarks" "$TMPROOT/case15.out" \
+  || fail_case "case 15 — the guard failed but never named \`benchmarks\`"
+echo "OK (15): a tell-tale token inside an attribute VALUE does not exempt a declaration"
+
+# ---------------------------------------------------------------------------
+# 16. GREEN — a real `#[cfg]` separated from its item by a blank line and comments
+#     still gates it (roborev r2 F4).
+#
+#     Rust permits blank lines, `//` comments and `///` doc comments between an
+#     attribute and the item it applies to. Breaking the attribute run on them made
+#     a genuinely gated module read as unconditional — a false FAIL. The guard must
+#     PASS OUTRIGHT here: the rendered declaration is unchanged, so there is not
+#     even a snapshot diff.
+# ---------------------------------------------------------------------------
+scratch_tree separated-attr; wt16="$SCRATCH"
+awk '
+  /^#\[cfg\(feature = "benchmarks"\)\]$/ {
+    print
+    print ""
+    print "/// A doc comment between the gate and the item."
+    print "// …and an ordinary comment too."
+    print ""
+    next
+  }
+  { print }
+' "$wt16/cqlite-core/src/lib.rs" >"$wt16/lib.rs.separated"
+mv "$wt16/lib.rs.separated" "$wt16/cqlite-core/src/lib.rs"
+grep -q 'A doc comment between the gate and the item' "$wt16/cqlite-core/src/lib.rs" \
+  || fail_case "case 16 setup: could not insert the separator lines"
+set +e
+bash "$wt16/$GUARD_REL" >"$TMPROOT/case16.out" 2>&1
+case16_rc=$?
+set -e
+[ "$case16_rc" -eq 0 ] || {
+  echo "FAIL: case 16 — a real #[cfg] separated from its item by a blank line and comments"
+  echo "      stopped gating it, so a correctly-written crate root was reported wrong."
+  cat "$TMPROOT/case16.out"
+  exit 1
+}
+echo "OK (16): a #[cfg] separated from its item by blank/comment lines still gates it"
+
 echo ""
-echo "PASS: test_pub_surface_guard.sh — all 12 cases (2 green, 9 reds, 1 usage)"
+echo "PASS: test_pub_surface_guard.sh — all 16 cases (4 green, 11 reds, 1 usage)"
