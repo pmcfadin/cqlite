@@ -82,8 +82,17 @@ def verify_clock_source(worker_bin):
     return {"driver_before_ns": a, "worker_ns": w, "driver_after_ns": b, "bracket_ns": b - a}
 
 
-def launch_workers(args, rundir, worker_cpus):
-    procs = []
+def launch_workers(args, rundir, worker_cpus, procs):
+    """Spawn one worker per entry, APPENDING INTO the caller's `procs` list.
+
+    The list is an in/out parameter rather than a return value on purpose. The
+    previous shape built a LOCAL list and returned it, so if a spawn raised
+    part-way the return never happened, the caller's name was never bound, and
+    the already-started workers were invisible to the caller's `finally` —
+    orphaned, holding pinned cores, and corrupting the NEXT rep with the cause
+    already gone. Appending as each child starts makes a PARTIAL spawn visible
+    to the cleanup path.
+    """
     for i, cpus in enumerate(worker_cpus):
         cpu_arg = ",".join(str(c) for c in cpus)
         cmd = [
@@ -100,7 +109,6 @@ def launch_workers(args, rundir, worker_cpus):
         ]
         log = open(os.path.join(rundir, f"worker-{i}.log"), "w")
         procs.append((i, subprocess.Popen(cmd, stdout=log, stderr=subprocess.STDOUT), log))
-    return procs
 
 
 def wait_ready(procs, rundir, timeout_s):
@@ -262,8 +270,11 @@ def main():
         )
 
     clock_check = verify_clock_source(args.worker_bin)
-    procs = launch_workers(args, rundir, worker_cpus)
+    # The spawn is INSIDE the try, so a failure part-way through it still reaches
+    # the `finally` below (see `launch_workers` for why the list is in/out).
+    procs = []
     try:
+        launch_workers(args, rundir, worker_cpus, procs)
         wait_ready(procs, rundir, args.ready_timeout_s)
         with open(os.path.join(rundir, "go"), "w") as fh:
             fh.write(f"{now_ns()}\n")
