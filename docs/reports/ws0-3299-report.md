@@ -1,11 +1,22 @@
 # WS0 #3299 — the bare-scan scaling curve C(S), and the box-level target it derives
 
-**Status: DRAFT.** AC1 and AC2 are measured and complete. AC3 is DEFERRED
-(instrument unavailable, per the issue's pre-registered AC5) with the L1d partial
-reported. Two sections are placeholders pending runs the delivery lead owns:
-the frequency calibration and phase 2. **AC4 is DISCHARGED** in both
-halves (§9): the box-level target, and "remaining to target" at **+74.8%**, from
-the first same-corpus same-session bare-scan-vs-`do_get` figures in the program.
+**Status: COMPLETE.** Every acceptance criterion is explicitly dispositioned:
+
+| AC | disposition | where |
+|---|---|---|
+| **AC1** — C(S) curve, best-N aggregate + per-scan p50 per S | ✅ **MET** — 25 points × 3 reps, medians with per-point spread, both denominators, peaks classified | §3, §4 |
+| **AC2** — derived box-level target | ✅ **MET** — 2,102,167 rows/s, input peak bracketed, spread 0.74% | §5 |
+| **AC3** — LLC-load-misses/row, S=1 vs S=6 | ⛔ **DEFERRED — instrument unavailable**, per the issue's pre-registered AC5. Every LLC counter on this box is `<not supported>` or a hard 0 on a workload that cannot have zero. The available L1d partial is reported and does **not** discharge it. | §7 |
+| **AC4** — mission doc updated: box-level target + "remaining" | ✅ **MET, both halves** — target, and remaining at **+75.4%** (box) / +53.9% (per core), all same-corpus. Mission-doc edit owned by the delivery lead. | §9 |
+| **AC5** — pre-registered fallback if AC3 is unmeasurable | ✅ **EXERCISED AS WRITTEN** — AC1/AC2 proceeded, AC3 explicitly deferred, nothing approximated from a dead counter. | §7 |
+
+**Headline results.** Box-level bare scan **2,732,817 rows/s** at S=6 (93.5%
+marginal efficiency, peak bracketed) ⇒ target **2,102,167**; `do_get` today
+**1,198,673** ⇒ **+75.4% remaining**. And the finding that corrects a
+program-level assumption: **about half the apparent bare-scan-vs-`do_get` slope
+gap was the CORPUS, not the arm** (11.45 pp same-corpus, vs a 22.4 pp
+cross-corpus impression), so **#3288's slope ceiling is 11.45 pp** — real, and
+roughly half what it looked like (§10, §7.2).
 
 Host: `i-04ac0a860eef7f241`, `c7i.4xlarge`, Intel Xeon Platinum 8488C, 16 logical
 / **8 physical** cores, 1 NUMA node, `perf_event_paranoid = -1`, kernel
@@ -336,15 +347,62 @@ ratio between the two sets is computed. What is comparable is the *shape*, and
 the shape differs in the interesting direction: bare scan's cycles/row
 degradation at six cores is **~4%, against `do_get`'s ~19%**.
 
-> **PLACEHOLDER — frequency calibration.** The C(S) discount conflates two
-> effects: cache/memory contention, *and* the package clock falling as more cores
-> go active. Both belong in a box-level aggregate, but only the contention part
-> is addressable by a footprint lever, so charging turbo loss to #3288 would
-> overstate its ceiling. Plan (written, not run):
-> `artifacts/freq-calibration/PLAN.md`, using `msr/aperf` + `msr/mperf` with a
-> positive control. If the instrument is degenerate the decomposition is
-> **dropped**, not approximated. Note the total available is small either way:
-> cycles/row rises only 4.1% across the whole range.
+### 7.1 The turbo decomposition — MEASURED, and it is not the slope gap
+
+`msr/aperf` ÷ `msr/mperf` counted cleanly, both at **100.00% `pct_running`**, so
+the decomposition the plan said to drop if degenerate is instead delivered:
+
+| | S=1 (N=2) | S=6 (N=24) |
+|---|--:|--:|
+| aperf/mperf | 1.4621 | 1.4256 |
+| **true frequency** | **3.509 GHz** | **3.421 GHz** |
+
+**Clock ratio f(6)/f(1) = 0.9750 ⇒ −2.51 pp.** Cross-checked independently by
+`cycles`/`task-clock` at 0.9732 (−2.68%) — the two **agree to 0.18 pp**.
+
+**Why that cross-check is legitimate HERE and nowhere else in this report.**
+`cycles/task-clock` is occupancy × frequency, not frequency (§3's column caption
+says so, and the general form reads "1.27 GHz" at S=4/N=1 — one busy core diluted
+across eight pinned CPUs). It is admissible at these two points *only* because
+**occupancy is MATCHED**: task-clock gives 1.600/2 = **80.0%** at S=1 and
+9.602/12 = **80.0%** at S=6. With occupancy equal, the ratio of the quotients *is*
+the ratio of the frequencies. That is a property of this specific pair, not a
+rehabilitation of the formula.
+
+**The split, both arms, same box and same core counts:**
+
+| arm | total discount at S=6 | clock | residual |
+|---|--:|--:|--:|
+| bare scan | 6.52 pp | **2.51 pp (38%)** | **4.01 pp (62%)** |
+| `do_get` | 17.97 pp | 2.51 pp | **15.46 pp** |
+
+Bare scan's clock-adjusted marginal efficiency is **0.9588** — what its scaling
+looks like at constant clock.
+
+### 7.2 #3288's slope ceiling: 11.45 pp, established two independent ways
+
+```
+do_get residual 15.46 pp  −  bare-scan residual 4.01 pp  =  11.45 pp
+```
+
+That **reproduces the same-corpus marginal-efficiency gap** (0.9348 − 0.8203 =
+**11.45 pp**) **to the second decimal**, by a completely different route — one
+through frequency-adjusted residuals, one through raw marginal efficiencies.
+
+**The slope gap is NOT turbo.** The clock penalty is identical for both arms
+(same box, same core counts), so it **cancels** in the comparison. What remains
+is genuinely `do_get`-specific footprint — exactly what #3288 targets. **So
+11.45 pp of marginal efficiency at S=6 is #3288's slope ceiling, with turbo
+excluded by construction.**
+
+Two things to carry, both uncomfortable and both load-bearing:
+
+- **It is about half what the cross-corpus reading implied** (11.45 vs 22.4 pp,
+  §10). This issue was chartered to calibrate that ceiling; the answer is "real,
+  but roughly half what it looked like."
+- **Bare scan itself has only 4.01 pp of non-clock scaling loss.** There is very
+  little slope headroom in the scan path at all, so a footprint lever's value is
+  almost entirely in the **Flight path**, not the scan.
 
 ---
 
@@ -569,11 +627,15 @@ These cost real time here and none of them is visible from the code alone.
 
 ### Harness provenance — the code that measured vs the code that ships
 
-> **PLACEHOLDER.** One defect found by self-review (`SELF-REVIEW.md` Q3: a
-> partial worker spawn is orphaned because `launch_workers` sits outside its
-> `try` and returns a local list) is fixed **after** the campaign, never during
-> it — no measurement-path change is made while reps are in flight. The fix is
-> **provably success-path-neutral**: it is observable only on an exception
-> between the first `Popen` and the guarded block, so no counted interval,
-> counter, attribution rule or recorded value can differ. The measuring commit
-> and the shipped commit will be named here on both sides once it lands.
+Every measurement in this report was produced by `rep.py` **as of
+`78b4b27bd`**, where it last changed (19:56) — two minutes before the main grid
+launched at 19:58 — unchanged through the main grid, extension A, extension B,
+phase 2 and the frequency calibration.
+
+**`fbf2c7bc9` is the shipped version.** It closes one defect found by
+self-review (`SELF-REVIEW.md` Q3: a partial worker spawn was orphaned because
+`launch_workers` built a *local* list and sat outside its `try`, so the caller's
+`finally` could not see it). The fix is **success-path-neutral** — observable
+only on an exception between the first `Popen` and the guarded block, so no
+counted interval, counter, attribution rule or recorded value can differ. It was
+applied **after** the last run, never during it.
