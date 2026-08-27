@@ -97,6 +97,57 @@ figures nor the gate's warm figures below; they are recorded for reproducibility
 as the lanes' cost.
 
 
+## `flight-tests`: a whole-package invocation was NON-DETERMINISTIC (#3383)
+
+The lane shipped as `cargo test --no-fail-fast -p cqlite-flight` — the whole package.
+That form turned out to red **2 out of 3 runs**, for a reason that has nothing to do
+with any defect the lane exists to find.
+
+`cqlite-flight`'s `fast_arm_stream_stops_when_the_client_drops_it` (in
+`issue_3058_bypass_path_taken`) asserts a **race outcome**: the client's stream drop
+must beat the producer. Run alone it wins reliably; run alongside 39 other integration
+binaries competing for the same 16 cores it does not.
+
+| how the target was run | host load | result |
+|---|---|---|
+| alone, `cargo test -p cqlite-flight --test issue_3058_bypass_path_taken` (×3) | 74 | **3 / 3 PASS** |
+| inside the whole-package `flight-tests` lane (×3) | — | **2 of 3 runs FAILED** |
+
+**A merge-gate lane that reds 2-in-3 carries no information**, and it is worse than
+uninformative: it teaches every worker that a red from this lane means "re-run it",
+which is precisely the habit that lets a real red through. Since `cargo test -p` cannot
+exclude one target, the invocation became an explicit list:
+
+```
+cargo test --no-fail-fast -p cqlite-flight --lib --bins --test <T1> --test <T2> …
+```
+
+The list is **derived from `cargo metadata` at run time**, so the #2039 "a hand-picked
+list is a second registry that drifts silently" lesson still holds — adding
+`cqlite-flight/tests/foo.rs` puts `--test foo` on the command line with no gate edit,
+and the harness above still proves it by planting a brand-new target the gate names
+nowhere. Measured after the change, on the same box:
+
+| lane invocation | declared | run | skipped (`required-features`) | skipped (flaky) | secs |
+|---|---|---|---|---|---|
+| whole package `-p` | 42 | 41 | 1 (silently) | — | 128 (cold) / 27 (warm) |
+| derived `--test` list | 42 | **40** | 1 (named) | 1 (named, `#3383`) | 60 |
+
+Two properties are worth separating, because only one of them is curated:
+
+- the `required-features` subtraction is **derived** — `cargo test --test X` is a *hard
+  error* on a target whose features are unmet, where `-p` skipped it silently;
+- the flake subtraction is **curated, and labelled as such in code**. Flakiness is not
+  mechanically decidable from source: nothing in a file says "this assertion races". So
+  instead of a derivation that pretends to measure it, both halves of every entry are
+  enforced — a numeric issue number (so the list cannot grow without a filed issue
+  obliging its removal) and a target the package actually declares (so a rename or
+  deletion reds rather than quietly excusing nothing).
+
+`--bins` is explicit and load-bearing. An explicit selector suppresses every target kind
+not named, so omitting it would have silently stopped executing `main.rs`'s 2 unit tests
+— the change would itself have opened the never-executed hole this lane exists to close.
+
 ## Cost
 
 Two different numbers, and the second **cannot be derived from the first**.
@@ -108,9 +159,10 @@ Two different numbers, and the second **cannot be derived from the first**.
 | `feature-iso-parquet` | `cargo check --no-default-features --features all-compression,parquet` | 18 | **cold**; lib-only `cargo check` — the *superseded* shape (D2 replaced it with `cargo test --lib --no-run`) |
 | `feature-iso-delta-scan` | `cargo check --no-default-features --features all-compression,delta-scan` | 10 | **cold**; same superseded shape |
 | `legacy-heuristics` (build half) | `cargo build -p cqlite-core --features legacy-heuristics` | 26 | **cold** |
-| `flight-tests` | `cargo test -p cqlite-flight` (whole package) | 128 | **cold** |
+| `flight-tests` | `cargo test -p cqlite-flight` (whole package) | 128 | **cold**; the *superseded* shape (#3383 replaced it with a derived `--test` list) |
 | `legacy-heuristics` (component) | first green run of the component as shipped | 37 | first green run |
-| `flight-tests` (component) | SUMMARY line | 27 | **warm cache** |
+| `flight-tests` (component) | SUMMARY line | 27 | **warm cache**; superseded whole-package shape |
+| `flight-tests` (component, derived `--test` list) | SUMMARY line | 60 | **warm cache**, 40 of 42 targets — the shipped shape (#3383) |
 | `legacy-heuristics` (component) | SUMMARY line | 7 | **warm cache** |
 | `feature-iso-parquet` (component) | SUMMARY line | 0 | **warm cache** — *not* the lane's cost |
 | `feature-iso-delta-scan` (component) | SUMMARY line | 1 | **warm cache** — *not* the lane's cost |
@@ -163,6 +215,7 @@ presented as the other.
 
 ## References
 
-- Design: `openspec/changes/feature-matrix-gate-lanes/design.md` (D2, D3, D4, D5, D6)
+- Design: `openspec/changes/feature-matrix-gate-lanes/design.md` (D2, D3, D4 + its #3383 amendment, D5, D6)
+- Flake tracked for removal from the exclusion list: #3383
 - Harness: `scripts/tests/test_agent_gate_feature_matrix_lanes.sh`
 - Registration pin: `scripts/tests/test_agent_gate_summary.sh` (runs in `--lite` via `tooling-tests`)
