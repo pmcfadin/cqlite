@@ -14,9 +14,10 @@
 //! it, so **every knob has exactly one literal default** — the one in
 //! [`Config::default`].
 //!
-//! Knobs the public facade does not (yet) model — `memtable_hard_limit`,
-//! [`Durability`](super::Durability), the UDT registry — keep the engine's own
-//! defaults here and stay settable through the existing `with_*` builders.
+//! Knobs the public facade does not (yet) model — [`Durability`](super::Durability)
+//! and the UDT registry — keep the engine's own defaults here and stay settable
+//! through the existing `with_*` builders. Neither is live-divergent: no public
+//! field claims to control them, so there is nothing to be dishonest about.
 
 use std::path::PathBuf;
 
