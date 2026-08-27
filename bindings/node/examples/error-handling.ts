@@ -47,9 +47,9 @@ async function demonstrateErrorHandling() {
   }
 
   // =============================================
-  // Example 2: Invalid SQL syntax
+  // Example 2: Invalid CQL syntax (code 'PARSE')
   // =============================================
-  console.log('\n--- Example 2: Invalid SQL Syntax ---');
+  console.log('\n--- Example 2: Invalid CQL Syntax ---');
 
   const dataDir = process.env.CQLITE_DATA_DIR || 'path/to/sstables';
   const schemaPath = process.env.CQLITE_SCHEMA || 'path/to/schema.cql';
@@ -59,8 +59,11 @@ async function demonstrateErrorHandling() {
   try {
     db = await Database.open(dataDir, { schema: schemaPath });
 
-    // Intentionally malformed SQL
-    await db.execute('SELEC * FORM table');
+    // Intentionally malformed CQL. It must be malformed IN THE GRAMMAR (a
+    // SELECT with no table) so it reaches the parser: a statement whose leading
+    // token is not a known verb (e.g. 'SELEC * FORM table') never reaches the
+    // parser and reports 'QUERY', not 'PARSE' (issue #1451).
+    await db.execute('SELECT * FROM');
   } catch (e) {
     if (isCqliteError(e)) {
       console.log(`Error Code: ${e.code}`);           // 'PARSE' for a CQL syntax error
@@ -195,7 +198,10 @@ async function demonstrateErrorHandling() {
   const testDb = await Database.open(dataDir, { schema: schemaPath });
   try {
     await executeWithErrorHandling(testDb, 'SELECT * FROM test_basic.simple_table LIMIT 1');
+    // 'INVALID QUERY' is an unknown statement TYPE -> code 'QUERY'; only a
+    // statement that reaches the CQL parser yields 'PARSE' (issue #1451).
     await executeWithErrorHandling(testDb, 'INVALID QUERY');
+    await executeWithErrorHandling(testDb, 'SELECT * FROM');
     await executeWithErrorHandling(testDb, 'SELECT * FROM no.such_table');
   } finally {
     await testDb.close();

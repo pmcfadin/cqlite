@@ -43,15 +43,21 @@
 //!
 //! # Example
 //!
+//! The statement below is malformed *in the CQL grammar* (a `SELECT` with no
+//! table), so it reaches the parser and fails there — that is what `PARSE`
+//! means. A statement whose leading token is not a known verb (`"INVALID SQL"`)
+//! never reaches the parser: it is rejected earlier as `Error::QueryExecution`
+//! and correctly reports `QUERY`, not `PARSE`.
+//!
 //! ```javascript
 //! try {
-//!   await db.execute("INVALID SQL");
+//!   await db.execute("SELECT * FROM");
 //! } catch (e) {
 //!   console.log(e.code);          // "PARSE" (a CQL syntax failure)
 //!   console.log(e.category);      // "Query"
 //!   console.log(e.isRecoverable); // false
 //!   if (e.code === "PARSE") {
-//!     console.log("SQL syntax error");
+//!     console.log("CQL syntax error");
 //!   }
 //! }
 //! ```

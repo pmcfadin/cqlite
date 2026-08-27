@@ -764,15 +764,22 @@ export interface StreamingResult extends AsyncIterable<Row> {
  * `ErrorCategory` they report: a timeout is `TIMEOUT` with category `'System'`,
  * and a CQL syntax failure is `PARSE` with category `'Query'`.
  *
+ * Note `PARSE` means the statement REACHED the CQL parser and failed there. A
+ * statement whose leading token is not a known verb (e.g. `'INVALID SQL'`) is
+ * rejected before parsing and reports `QUERY`, not `PARSE`.
+ *
  * @example
  * ```typescript
  * try {
- *   await db.execute('INVALID SQL');
+ *   await db.execute('SELECT * FROM');   // malformed CQL: reaches the parser
  * } catch (e) {
  *   const err = e as CqliteError;
  *   switch (err.code) {
  *     case 'PARSE':
  *       console.log('CQL syntax error');
+ *       break;
+ *     case 'QUERY':
+ *       console.log('unsupported or failed query (e.g. an unknown statement type)');
  *       break;
  *     case 'TIMEOUT':
  *       console.log('the operation exceeded its deadline');

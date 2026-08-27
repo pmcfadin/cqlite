@@ -149,7 +149,8 @@ describe('Error Mapping Tests (Issue #297)', () => {
       expect(typeof e.code).toBe('string');
       expect(typeof e.category).toBe('string');
       expect(typeof e.isRecoverable).toBe('boolean');
-      // Parse/Query errors are not recoverable
+      // An unknown statement type is a QueryExecution error (code 'QUERY', not
+      // 'PARSE' — see the dedicated cases above); neither is recoverable.
       expect(e.isRecoverable).toBe(false);
     } finally {
       await db.close();
