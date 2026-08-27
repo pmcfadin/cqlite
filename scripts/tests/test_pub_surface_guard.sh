@@ -34,6 +34,21 @@
 #               round 1, blocker 2: treating every cfg_attr as an exemption reopened
 #               the very bypass the assert closes).
 #
+#   Crate-root PARSE shapes (lead review round 2). The scan is a lexical scan with a
+#   pinned edge-case suite, not a Rust parser, so every shape it claims to handle is
+#   pinned here:
+#   9.  RED    — a SAME-LINE `#[attr] pub mod x;` must be seen at all. The old
+#                accumulator dropped it entirely, so the module escaped the assert
+#                AND the snapshot: a false PASS.
+#  10.  SHAPES — a multi-line attribute must join onto its declaration, a trailing
+#                `// comment` must not leak into the module name, and a `pub mod`
+#                inside a `/* */` block must stay a phantom. All three used to be
+#                false FAILs.
+#  11.  RED    — when the two independent crate-root derivations disagree the guard
+#                must REFUSE, not quietly use the smaller set.
+#  12.  PINNED — plain / `#[cfg]` / `#[doc(hidden)]` / multi-line `pub use`, the
+#                shapes that always worked, asserted straight off the snapshot.
+#
 # NO TEST-ONLY SEAM. The guard's subject is hard-coded on purpose, so the negative
 # cases SUBSTITUTE THE ARTIFACT: each runs in its own `git worktree add --detach HEAD`
 # scratch checkout whose files are edited in place (CLAUDE.md — a test that needs a
@@ -168,28 +183,6 @@ grep -q "INCONSISTENT with the real public surface" "$TMPROOT/case2.out" \
 echo "OK (2): the consistency assert FAILS on the pre-#1712 shape and names \`benchmarks\`"
 
 # ---------------------------------------------------------------------------
-# 3. RED — snapshot drift on a genuinely new public item.
-# ---------------------------------------------------------------------------
-scratch_tree new-pub-item; wt3="$SCRATCH"
-cat >>"$wt3/cqlite-core/src/version_hints.rs" <<'RS'
-
-/// Self-test-only probe item (scripts/tests/test_pub_surface_guard.sh, issue #1712).
-/// Exists solely inside a throwaway scratch worktree to prove the snapshot guard
-/// notices a NEW public item. It is never committed.
-pub struct PubSurfaceSelfTestProbe;
-RS
-set +e
-bash "$wt3/$GUARD_REL" >"$TMPROOT/case3.out" 2>&1
-case3_rc=$?
-set -e
-[ "$case3_rc" -ne 0 ] || fail_case "case 3 — a NEW public item did not trip the snapshot diff; got: $(cat "$TMPROOT/case3.out")"
-grep -q "PubSurfaceSelfTestProbe" "$TMPROOT/case3.out" \
-  || fail_case "case 3 — the guard failed but the diff never named the new item; got: $(cat "$TMPROOT/case3.out")"
-grep -q -- "--regenerate" "$TMPROOT/case3.out" \
-  || fail_case "case 3 — the drift diagnostic did not print the regenerate command"
-echo "OK (3): a new public item trips the snapshot diff and is named in it"
-
-# ---------------------------------------------------------------------------
 # 4. RED — the committed snapshot is missing.
 # ---------------------------------------------------------------------------
 scratch_tree no-snapshot; wt4="$SCRATCH"
@@ -206,59 +199,60 @@ grep -q -- "--regenerate" "$TMPROOT/case4.out" \
 echo "OK (4): a missing snapshot FAILs and names the regenerate command"
 
 # ---------------------------------------------------------------------------
-# 6. RED — a new `pub fn` on an EXISTING public struct (roborev round 1, B1).
+# 3/6/7. RED — new public surface must appear in the diff, at its real path.
 #
-#    This is the case the first cut of the guard could NOT see: only standalone
-#    rustdoc pages were enumerated, so an added method moved nothing.
+#    Three additions in ONE scratch checkout (they share a `cargo doc`, which keeps
+#    the suite fast) with three independent assertions:
+#      3 — a new standalone `pub struct`,
+#      6 — a new `pub fn` on an ALREADY-PUBLIC struct,
+#      7 — a new VARIANT on an ALREADY-PUBLIC enum.
+#    6 and 7 are the cases the first cut of the guard could NOT see: it enumerated
+#    only standalone rustdoc pages, so an added associated item moved nothing.
+#
+#    The variant is added together with its arms in the two exhaustive matches in
+#    the same file — without them the crate would not compile, `cargo doc` would
+#    fail, and the case would be exercising the cargo-doc failure path instead of
+#    variant coverage.
 # ---------------------------------------------------------------------------
-scratch_tree new-method; wt6="$SCRATCH"
-cat >>"$wt6/cqlite-core/src/version_hints.rs" <<'RS'
+scratch_tree new-surface; wt3="$SCRATCH"
+awk '
+  { print }
+  /^    Unknown,$/ && !seen_variant { print "    /// Self-test-only probe variant (#1712)."; print "    PubSurfaceSelfTestVariant,"; seen_variant = 1 }
+  /VersionSource::Unknown => 255,/ { print "            VersionSource::PubSurfaceSelfTestVariant => 254," }
+  /VersionSource::Unknown => "Unknown \(no version information available\)",/ { print "            VersionSource::PubSurfaceSelfTestVariant => \"self-test probe\"," }
+' "$wt3/cqlite-core/src/version_hints.rs" >"$wt3/version_hints.probe.rs"
+mv "$wt3/version_hints.probe.rs" "$wt3/cqlite-core/src/version_hints.rs"
+grep -q 'PubSurfaceSelfTestVariant,' "$wt3/cqlite-core/src/version_hints.rs" \
+  || fail_case "case 7 setup: could not add the probe variant to VersionSource"
+cat >>"$wt3/cqlite-core/src/version_hints.rs" <<'RS'
+
+/// Self-test-only probe item (scripts/tests/test_pub_surface_guard.sh, issue #1712).
+/// Exists solely inside a throwaway scratch worktree to prove the snapshot guard
+/// notices new public surface. Never committed.
+pub struct PubSurfaceSelfTestProbe;
 
 impl ResolvedVersion {
-    /// Self-test-only probe method (scripts/tests/test_pub_surface_guard.sh, #1712).
-    /// Added to an ALREADY-PUBLIC struct inside a throwaway scratch worktree, to prove
-    /// the snapshot notices an added associated item. Never committed.
+    /// Self-test-only probe method (#1712), added to an ALREADY-PUBLIC struct.
     pub fn pub_surface_self_test_probe(&self) -> bool {
         true
     }
 }
 RS
 set +e
-bash "$wt6/$GUARD_REL" >"$TMPROOT/case6.out" 2>&1
-case6_rc=$?
+bash "$wt3/$GUARD_REL" >"$TMPROOT/case3.out" 2>&1
+case3_rc=$?
 set -e
-[ "$case6_rc" -ne 0 ] || fail_case "case 6 — a new \`pub fn\` on an existing public struct did not trip the snapshot; got: $(cat "$TMPROOT/case6.out")"
-grep -q "pub_surface_self_test_probe" "$TMPROOT/case6.out" \
-  || fail_case "case 6 — the guard failed but the diff never named the new method; got: $(cat "$TMPROOT/case6.out")"
-grep -q "^+method cqlite_core::version_hints::ResolvedVersion::pub_surface_self_test_probe" "$TMPROOT/case6.out" \
-  || fail_case "case 6 — the new method was mentioned but not recorded as a \`method\` line at its real path; got: $(grep pub_surface_self_test_probe "$TMPROOT/case6.out")"
+[ "$case3_rc" -ne 0 ] || fail_case "case 3/6/7 — new public surface did not trip the snapshot diff; got: $(cat "$TMPROOT/case3.out")"
+grep -q -- "--regenerate" "$TMPROOT/case3.out" \
+  || fail_case "case 3 — the drift diagnostic did not print the regenerate command"
+grep -q "^+struct cqlite_core::version_hints::PubSurfaceSelfTestProbe$" "$TMPROOT/case3.out" \
+  || fail_case "case 3 — a new standalone \`pub struct\` was not recorded at its real path; got: $(grep PubSurfaceSelfTestProbe "$TMPROOT/case3.out")"
+echo "OK (3): a new standalone public item is named in the diff"
+grep -q "^+method cqlite_core::version_hints::ResolvedVersion::pub_surface_self_test_probe$" "$TMPROOT/case3.out" \
+  || fail_case "case 6 — a new \`pub fn\` on an existing public struct was not recorded as a \`method\` line at its real path; got: $(grep pub_surface_self_test_probe "$TMPROOT/case3.out")"
 echo "OK (6): a new pub fn on an existing public struct is named in the diff"
-
-# ---------------------------------------------------------------------------
-# 7. RED — a new VARIANT on an EXISTING public enum (roborev round 1, B1).
-#
-#    The variant is added together with its arms in the two exhaustive matches in
-#    the same file: without them the crate would not compile, `cargo doc` would
-#    fail, and the case would be testing the cargo-doc failure path instead of
-#    variant coverage.
-# ---------------------------------------------------------------------------
-scratch_tree new-variant; wt7="$SCRATCH"
-awk '
-  { print }
-  /^    Unknown,$/ && !seen_variant { print "    /// Self-test-only probe variant (#1712)."; print "    PubSurfaceSelfTestVariant,"; seen_variant = 1 }
-  /VersionSource::Unknown => 255,/ { print "            VersionSource::PubSurfaceSelfTestVariant => 254," }
-  /VersionSource::Unknown => "Unknown \(no version information available\)",/ { print "            VersionSource::PubSurfaceSelfTestVariant => \"self-test probe\"," }
-' "$wt7/cqlite-core/src/version_hints.rs" >"$wt7/version_hints.probe.rs"
-mv "$wt7/version_hints.probe.rs" "$wt7/cqlite-core/src/version_hints.rs"
-grep -q 'PubSurfaceSelfTestVariant,' "$wt7/cqlite-core/src/version_hints.rs" \
-  || fail_case "case 7 setup: could not add the probe variant to VersionSource"
-set +e
-bash "$wt7/$GUARD_REL" >"$TMPROOT/case7.out" 2>&1
-case7_rc=$?
-set -e
-[ "$case7_rc" -ne 0 ] || fail_case "case 7 — a new enum variant did not trip the snapshot; got: $(cat "$TMPROOT/case7.out")"
-grep -q "^+variant cqlite_core::version_hints::VersionSource::PubSurfaceSelfTestVariant" "$TMPROOT/case7.out" \
-  || fail_case "case 7 — the guard failed but the diff never recorded the new variant at its real path; got: $(grep -i pubsurfaceselftestvariant "$TMPROOT/case7.out"; tail -20 "$TMPROOT/case7.out")"
+grep -q "^+variant cqlite_core::version_hints::VersionSource::PubSurfaceSelfTestVariant$" "$TMPROOT/case3.out" \
+  || fail_case "case 7 — a new enum variant was not recorded at its real path; got: $(grep -i pubsurfaceselftestvariant "$TMPROOT/case3.out")"
 echo "OK (7): a new enum variant is named in the diff"
 
 # ---------------------------------------------------------------------------
@@ -307,5 +301,125 @@ grep -q "pub mod benchmarks" "$TMPROOT/case8.out" \
   || fail_case "case 8 — the guard failed but never named \`benchmarks\`; got: $(cat "$TMPROOT/case8.out")"
 echo "OK (8): a cosmetic cfg_attr does not exempt a crate-root pub mod from the assert"
 
+# ---------------------------------------------------------------------------
+# 9. RED — CRATE-ROOT PARSE, same-line `#[attr] pub mod x;` (lead review, defect 1).
+#
+#    The FALSE PASS. The old line-oriented accumulator consumed the attribute line
+#    and `next`ed, so a declaration sharing its line with an attribute was dropped
+#    ENTIRELY: the module escaped the consistency assert and vanished from the
+#    snapshot's declarations section. Here the gate is cosmetic and the real one
+#    hides inside the module file, so the assert MUST fire — pre-fix it could not,
+#    because the declaration did not exist as far as the guard was concerned.
+# ---------------------------------------------------------------------------
+scratch_tree sameline-decl; wt9="$SCRATCH"
+awk '
+  /^#\[cfg\(feature = "benchmarks"\)\]$/ { held = 1; next }
+  {
+    if (held && $0 == "pub mod benchmarks;") {
+      print "#[cfg_attr(feature = \"benchmarks\", doc = \"opt-in perf runs\")] pub mod benchmarks;"
+      held = 0
+      next
+    }
+    if (held) print "#[cfg(feature = \"benchmarks\")]"
+    held = 0
+    print
+  }
+' "$wt9/cqlite-core/src/lib.rs" >"$wt9/lib.rs.sameline"
+mv "$wt9/lib.rs.sameline" "$wt9/cqlite-core/src/lib.rs"
+grep -qx '#\[cfg_attr(feature = "benchmarks", doc = "opt-in perf runs")\] pub mod benchmarks;' "$wt9/cqlite-core/src/lib.rs" \
+  || fail_case "case 9 setup: could not put the attribute and the declaration on one line"
+printf '%s\n%s\n' '#![cfg(feature = "benchmarks")]' "$(cat "$wt9/cqlite-core/src/benchmarks/mod.rs")" \
+  >"$wt9/cqlite-core/src/benchmarks/mod.rs.new"
+mv "$wt9/cqlite-core/src/benchmarks/mod.rs.new" "$wt9/cqlite-core/src/benchmarks/mod.rs"
+set +e
+bash "$wt9/$GUARD_REL" >"$TMPROOT/case9.out" 2>&1
+case9_rc=$?
+set -e
+[ "$case9_rc" -ne 0 ] || fail_case "case 9 — a same-line \`#[attr] pub mod x;\` passed; got: $(cat "$TMPROOT/case9.out")"
+grep -q "INCONSISTENT with the real public surface" "$TMPROOT/case9.out" \
+  || fail_case "case 9 — the consistency assert did NOT fire on a same-line declaration, so the declaration was dropped by the crate-root scan (the false PASS); got: $(cat "$TMPROOT/case9.out")"
+grep -q "pub mod benchmarks" "$TMPROOT/case9.out" \
+  || fail_case "case 9 — the guard failed but never named \`benchmarks\`; got: $(cat "$TMPROOT/case9.out")"
+echo "OK (9): a same-line \`#[attr] pub mod x;\` is seen by the crate-root scan and asserted"
+
+# ---------------------------------------------------------------------------
+# 10. GREEN-ish — the three FALSE-FAIL shapes (lead review, defects 2-4).
+#
+#     Multi-line attributes, a trailing `// comment`, and a `pub mod` inside a
+#     `/* */` block. Each used to produce a spurious INCONSISTENT. The guard still
+#     exits non-zero here (the snapshot legitimately changed — new declarations),
+#     so the assertion is on the CONTENT: no consistency complaint at all, and each
+#     shape rendered correctly in the declarations diff.
+# ---------------------------------------------------------------------------
+scratch_tree parse-shapes; wt10="$SCRATCH"
+cat >"$wt10/cqlite-core/src/probe_trailing.rs" <<'RS'
+//! Self-test-only probe module (scripts/tests/test_pub_surface_guard.sh, #1712).
+RS
+cat >>"$wt10/cqlite-core/src/lib.rs" <<'RS'
+
+#[cfg(all(
+    feature = "probe-a",
+    feature = "probe-b"
+))]
+pub mod probe_multiline;
+
+pub mod probe_trailing; // a trailing comment must not land inside the module name
+
+/*
+pub mod probe_phantom;
+*/
+RS
+set +e
+bash "$wt10/$GUARD_REL" >"$TMPROOT/case10.out" 2>&1
+set -e
+grep -q "INCONSISTENT" "$TMPROOT/case10.out" \
+  && fail_case "case 10 — a correctly-written crate root was reported INCONSISTENT (false FAIL); got: $(cat "$TMPROOT/case10.out")"
+grep -q "probe_phantom" "$TMPROOT/case10.out" \
+  && fail_case "case 10 — a \`pub mod\` inside a /* */ block was recorded as a real declaration (phantom)"
+grep -qF '+#[cfg(all( feature = "probe-a", feature = "probe-b" ))] pub mod probe_multiline;' "$TMPROOT/case10.out" \
+  || fail_case "case 10 — a MULTI-LINE attribute was not joined onto its declaration; got: $(grep probe_multiline "$TMPROOT/case10.out")"
+grep -qxF '+pub mod probe_trailing;' "$TMPROOT/case10.out" \
+  || fail_case "case 10 — a trailing // comment leaked into the recorded declaration; got: $(grep probe_trailing "$TMPROOT/case10.out")"
+echo "OK (10): multi-line attrs join, trailing comments strip, block-commented decls stay phantoms"
+
+# ---------------------------------------------------------------------------
+# 11. RED — the two independent crate-root derivations must DISAGREE loudly when
+#     the structured scan under-collects (lead review: the fail-safe split).
+#
+#     Two gated declarations on one line: the simple scan finds both, the
+#     structured scan stops after the first. Neither result can be trusted, so the
+#     guard must refuse rather than assert over the smaller set.
+# ---------------------------------------------------------------------------
+scratch_tree scan-disagreement; wt11="$SCRATCH"
+cat >>"$wt11/cqlite-core/src/lib.rs" <<'RS'
+
+#[cfg(feature = "probe-a")] pub mod probe_first; #[cfg(feature = "probe-a")] pub mod probe_second;
+RS
+set +e
+bash "$wt11/$GUARD_REL" >"$TMPROOT/case11.out" 2>&1
+case11_rc=$?
+set -e
+[ "$case11_rc" -ne 0 ] || fail_case "case 11 — the structured scan under-collected and the guard still passed; got: $(cat "$TMPROOT/case11.out")"
+grep -q "disagree about which modules the crate root declares" "$TMPROOT/case11.out" \
+  || fail_case "case 11 — the guard failed but not with the scan-disagreement diagnostic; got: $(cat "$TMPROOT/case11.out")"
+grep -q "probe_second" "$TMPROOT/case11.out" \
+  || fail_case "case 11 — the disagreement diagnostic did not name the module only one scan saw"
+echo "OK (11): the two crate-root derivations disagreeing is a loud FAIL, not a silent smaller set"
+
+# ---------------------------------------------------------------------------
+# 12. The three shapes that ALWAYS worked, pinned so a future rewrite cannot lose
+#     them. Read straight off the committed snapshot — no worktree, no cargo.
+# ---------------------------------------------------------------------------
+decls_section() { sed -n '/^## crate-root-declarations/,$p' "$REPO_ROOT/$SNAPSHOT_REL"; }
+decls_section | grep -qx 'pub mod config;' \
+  || fail_case "case 12 — a PLAIN \`pub mod\` is missing from the snapshot's declarations section"
+decls_section | grep -qx '#\[cfg(feature = "state_machine")\] pub mod query;' \
+  || fail_case "case 12 — a normal-form \`#[cfg]\` declaration is missing or mis-rendered"
+decls_section | grep -qx '#\[doc(hidden)\] pub mod testing;' \
+  || fail_case "case 12 — a \`#[doc(hidden)]\` declaration is missing or mis-rendered"
+decls_section | grep -q '^pub use crate::{ config::Config,' \
+  || fail_case "case 12 — a MULTI-LINE \`pub use\` was not joined onto one recorded line"
+echo "OK (12): plain / #[cfg] / #[doc(hidden)] / multi-line pub use are all pinned in the snapshot"
+
 echo ""
-echo "PASS: test_pub_surface_guard.sh — all 8 cases (1 green, 6 reds, 1 usage)"
+echo "PASS: test_pub_surface_guard.sh — all 12 cases (2 green, 9 reds, 1 usage)"

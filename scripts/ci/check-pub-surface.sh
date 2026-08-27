@@ -127,9 +127,7 @@ fail() {
   exit 1
 }
 
-# ---------------------------------------------------------------------------
-# 1) Build the docs (default features) and locate the emitted item tree.
-# ---------------------------------------------------------------------------
+# Shared paths + scratch space for every step below.
 TARGET_DIR="${CARGO_TARGET_DIR:-$REPO_ROOT/target}"
 DOC_ROOT="$TARGET_DIR/doc/$CRATE_DOC_NAME"
 
@@ -137,202 +135,13 @@ WORK_DIR="$(mktemp -d "${TMPDIR:-/tmp}/pub-surface.XXXXXX")"
 cleanup() { rm -rf "$WORK_DIR"; }
 trap cleanup EXIT
 
-DOC_LOG="$WORK_DIR/cargo-doc.log"
-
-# Remove the previous emission first: a doc tree left behind by an earlier run with
-# DIFFERENT features (e.g. `--features benchmarks`) would otherwise contribute stale
-# directories to the enumeration, and the snapshot would record a surface no default
-# build has. rustdoc regenerates it in a few seconds.
-rm -rf "$DOC_ROOT"
-
-if ! (cd "$REPO_ROOT" && cargo doc --no-deps --quiet --package "$PACKAGE" --lib) >"$DOC_LOG" 2>&1; then
-  echo "--- last 40 lines of cargo doc output ---" >&2
-  tail -40 "$DOC_LOG" >&2
-  echo "--- end ---" >&2
-  fail "\`cargo doc --no-deps --package $PACKAGE --lib\` FAILED. The public surface could not be measured, so this check reports FAIL — never a vacuous pass."
-fi
-
-if [ ! -d "$DOC_ROOT" ]; then
-  fail "cargo doc succeeded but the emitted item tree $DOC_ROOT is ABSENT. Nothing could be enumerated; refusing to report a pass over an unmeasured surface."
-fi
-
 # ---------------------------------------------------------------------------
-# 2) Enumerate the rustdoc item tree -> "<kind> cqlite_core::a::b::Name" lines.
+# 1) Scan the CRATE-ROOT declarations of cqlite-core/src/lib.rs.
 #
-#    One directory per public module; one `<kind>.<Name>.html` file per public
-#    item; and, per page, the ASSOCIATED items declared by this crate (inherent
-#    methods, associated consts/types, enum variants, public struct fields, trait
-#    required/provided members). rustdoc's own non-item files are skipped by name.
-# ---------------------------------------------------------------------------
-DERIVED_ITEMS="$WORK_DIR/items.txt"
-PAGES="$WORK_DIR/pages.txt"
-: >"$DERIVED_ITEMS"
-: >"$PAGES"
-
-# Modules: every directory below the crate doc root, plus the crate root itself.
-{
-  printf 'mod %s\n' "$CRATE_DOC_NAME"
-  find "$DOC_ROOT" -mindepth 1 -type d -print | while IFS= read -r d; do
-    rel="${d#"$DOC_ROOT"/}"
-    case "$rel" in
-      # rustdoc's own asset/aggregate trees. They live beside the crate dir rather
-      # than inside it on current stable, but skipping them here keeps the
-      # enumeration correct if that ever changes.
-      static.files|static.files/*|src|src/*|trait.impl|trait.impl/*|type.impl|type.impl/*|implementors|implementors/*) continue ;;
-    esac
-    printf 'mod %s::%s\n' "$CRATE_DOC_NAME" "${rel//\//::}"
-  done
-} >>"$DERIVED_ITEMS"
-
-# Items: `<kind>.<Name>.html` for every kind rustdoc emits as a standalone page.
-find "$DOC_ROOT" -type f -name '*.html' -print | while IFS= read -r f; do
-  rel="${f#"$DOC_ROOT"/}"
-  base="${rel##*/}"
-  dir="${rel%/*}"
-  [ "$dir" = "$rel" ] && dir=""
-  case "$base" in
-    index.html|all.html|help.html|settings.html) continue ;;
-  esac
-  kind="${base%%.*}"
-  case "$kind" in
-    struct|enum|fn|trait|type|constant|macro|union|derive|attr|primitive|static|mod) ;;
-    *) continue ;;
-  esac
-  name="${base#"$kind".}"
-  name="${name%.html}"
-  # Record the page for the associated-item pass below (same subject set, one
-  # enumeration decision, so the two passes can never disagree about what an
-  # "item page" is).
-  printf '%s\n' "$f" >>"$PAGES"
-  if [ -n "$dir" ]; then
-    printf '%s %s::%s::%s\n' "$kind" "$CRATE_DOC_NAME" "${dir//\//::}" "$name"
-  else
-    printf '%s %s::%s\n' "$kind" "$CRATE_DOC_NAME" "$name"
-  fi
-done >>"$DERIVED_ITEMS"
-
-# --- Associated items -------------------------------------------------------
-#
-# Standalone rustdoc pages alone are BLIND to public methods, enum variants,
-# public struct fields and associated consts/types: adding a `pub fn` to an
-# existing public struct would not move the snapshot at all. So each item page is
-# also scanned for the associated items THIS CRATE DECLARES.
-#
-# WHAT IS DELIBERATELY EXCLUDED, and why: the `trait-implementations`,
-# `synthetic-implementations`, `blanket-implementations`, `implementors`,
-# `foreign-impls` and `deref-methods-*` sections. Those anchors are not this
-# crate's declared surface — they are generated from trait impls, auto traits and
-# blanket impls in dependencies (`struct.DatabaseStats.html` carries 17
-# `id="method.*"` anchors and ZERO inherent methods; every one comes from Clone,
-# Debug, Into, TryFrom, Borrow, tracing's Instrument, …). They move whenever a
-# dependency is bumped, so recording them would make this snapshot a churn source
-# and train people to regenerate it without reading the diff — the failure mode
-# this guard exists to prevent. The exclusion is stated in the snapshot header
-# too, as an honest boundary rather than a silent gap.
-#
-# The scan is SECTION-SCOPED, and the scoping is done WITHIN each line, not per
-# line: rustdoc's HTML is near-minified (a whole page is ~17 lines) and a single
-# line routinely carries the end of one section header and the start of the next,
-# so a line-granular state machine would attribute trait-impl anchors to the
-# inherent `implementations` section. A real section boundary is recognised by
-# `<h2 id="…" class="…section-header">`; a doc-comment heading inside a docblock
-# (`<h2 id="safety">`, `<h2 id="note">`, … — no class) must NOT move the state.
-ASSOC_AWK="$WORK_DIR/assoc.awk"
-cat >"$ASSOC_AWK" <<'AWK_EOF'
-BEGIN {
-  # Sections whose anchors ARE this crate's declared surface.
-  split("variants fields implementations required-methods provided-methods required-associated-consts provided-associated-consts required-associated-types provided-associated-types", _w, " ")
-  for (_k in _w) if (_w[_k] != "") WANT[_w[_k]] = 1
-  prefix = docroot "/"
-}
-FNR == 1 {
-  rel = FILENAME
-  if (substr(rel, 1, length(prefix)) == prefix) rel = substr(rel, length(prefix) + 1)
-  base = rel
-  sub(/^.*\//, "", base)
-  dir = rel
-  if (dir == base) { dir = "" } else { sub(/\/[^\/]*$/, "", dir) }
-  pkind = base
-  sub(/\..*$/, "", pkind)
-  iname = substr(base, length(pkind) + 2)
-  sub(/\.html$/, "", iname)
-  gsub(/\//, "::", dir)
-  itempath = (dir == "" ? crate : crate "::" dir) "::" iname
-  section = ""
-}
-{
-  n = split($0, seg, "<h2 ")
-  for (_s = 1; _s <= n; _s++) {
-    piece = seg[_s]
-    if (_s > 1) {
-      if (match(piece, /^id="[A-Za-z0-9_-]+" class="[^"]*section-header"/)) {
-        hdr = substr(piece, RSTART, RLENGTH)
-        sub(/^id="/, "", hdr)
-        sub(/".*$/, "", hdr)
-        section = hdr
-        if (section in WANT) seen[FILENAME "\t" section] = 1
-      }
-      # else: a doc-comment heading inside a docblock — state must NOT move.
-    }
-    if (!(section in WANT)) continue
-    rest = piece
-    while (match(rest, /id="(method|tymethod|variant|structfield|associatedconstant|associatedtype)\.[A-Za-z0-9_]+(\.field\.[A-Za-z0-9_]+)?"/)) {
-      tok = substr(rest, RSTART + 4, RLENGTH - 5)
-      rest = substr(rest, RSTART + RLENGTH)
-      akind = tok
-      sub(/\..*$/, "", akind)
-      aname = substr(tok, length(akind) + 2)
-      if (index(aname, ".field.") > 0) {
-        sub(/\.field\./, "::", aname)
-        akind = "variantfield"
-      }
-      print akind " " itempath "::" aname
-      filled[FILENAME "\t" section] = 1
-    }
-  }
-}
-END {
-  # A wanted section that was PRESENT but yielded nothing is a measurement
-  # failure (rustdoc anchor format changed), not an empty section. Report it;
-  # the caller turns it into a named FAIL.
-  for (key in seen) if (!(key in filled)) print "!EMPTY\t" key > "/dev/stderr"
-}
-AWK_EOF
-
-ASSOC_RAW="$WORK_DIR/assoc.txt"
-ASSOC_ERR="$WORK_DIR/assoc.err"
-if [ -s "$PAGES" ]; then
-  tr '\n' '\0' <"$PAGES" | xargs -0 awk -v crate="$CRATE_DOC_NAME" -v docroot="$DOC_ROOT" \
-    -f "$ASSOC_AWK" >"$ASSOC_RAW" 2>"$ASSOC_ERR"
-else
-  : >"$ASSOC_RAW"; : >"$ASSOC_ERR"
-fi
-
-if [ -s "$ASSOC_ERR" ]; then
-  echo "" >&2
-  echo "Sections present but yielding no anchors (first 10):" >&2
-  head -10 "$ASSOC_ERR" >&2
-  fail "the associated-item scan found rustdoc sections it could not read. That is the signature of a rustdoc HTML format change, not an empty API — refusing to record a surface measured with a broken extractor."
-fi
-
-ASSOC_COUNT="$(wc -l <"$ASSOC_RAW" | tr -d ' ')"
-if [ "${ASSOC_COUNT:-0}" -eq 0 ]; then
-  fail "the associated-item scan extracted ZERO methods/variants/fields/associated items across the entire crate. At this crate's size that is implausible — it is the signature of a rustdoc HTML format change. Refusing to pass on an unmeasured surface."
-fi
-cat "$ASSOC_RAW" >>"$DERIVED_ITEMS"
-
-LC_ALL=C sort -o "$DERIVED_ITEMS" "$DERIVED_ITEMS"
-
-MODULE_COUNT="$(grep -c '^mod ' "$DERIVED_ITEMS" || true)"
-ITEM_COUNT="$(grep -vc '^mod ' "$DERIVED_ITEMS" || true)"
-ITEM_COUNT=$((ITEM_COUNT - ASSOC_COUNT))
-
-if [ "${ITEM_COUNT:-0}" -eq 0 ] || [ "${MODULE_COUNT:-0}" -eq 0 ]; then
-  fail "enumerated $ITEM_COUNT items over $MODULE_COUNT modules under $DOC_ROOT — a zero count means the enumeration did not measure anything (rustdoc layout changed?), NOT that the crate has no public API. Refusing to pass."
-fi
-
-# ---------------------------------------------------------------------------
-# 3) Scan the CRATE-ROOT declarations of cqlite-core/src/lib.rs.
+#    Deliberately FIRST, before the docs are built: it is independent of rustdoc,
+#    and a crate root the guard cannot parse is a verdict-blocking condition. Doing
+#    it here means that failure is reported in well under a second instead of after
+#    a doc build whose result could not be used anyway.
 #
 #    Only the crate root, not the tree: this section exists so that declaration-site
 #    attributes (`#[cfg(...)]`, `#[doc(hidden)]`) — which rustdoc cannot show us for
@@ -574,6 +383,213 @@ DECL_COUNT="$(wc -l <"$DERIVED_DECLS" | tr -d ' ')"
 MOD_COUNT="$(wc -l <"$DERIVED_MODS" | tr -d ' ')"
 [ "${MOD_COUNT:-0}" -gt 0 ] || fail "no crate-root \`pub mod\` declarations found in $LIB_RS_REL — the scan measured nothing. Refusing to pass."
 
+
+# In VERIFY mode the committed snapshot is the baseline the whole run exists to
+# compare against, so its absence is checked HERE rather than after the doc build:
+# there is no point spending a rustdoc build to report a missing baseline. A missing
+# snapshot is a FAIL, never an implicit pass.
+if [ "$MODE" = verify ] && [ ! -r "$SNAPSHOT" ]; then
+  fail "committed snapshot $SNAPSHOT_REL is MISSING or unreadable. It is required — a missing snapshot is a FAIL, never an implicit pass. Create it with:
+       bash scripts/ci/check-pub-surface.sh --regenerate"
+fi
+
+# ---------------------------------------------------------------------------
+# 2) Build the docs (default features) and locate the emitted item tree.
+# ---------------------------------------------------------------------------
+DOC_LOG="$WORK_DIR/cargo-doc.log"
+
+# Remove the previous emission first: a doc tree left behind by an earlier run with
+# DIFFERENT features (e.g. `--features benchmarks`) would otherwise contribute stale
+# directories to the enumeration, and the snapshot would record a surface no default
+# build has. rustdoc regenerates it in a few seconds.
+rm -rf "$DOC_ROOT"
+
+if ! (cd "$REPO_ROOT" && cargo doc --no-deps --quiet --package "$PACKAGE" --lib) >"$DOC_LOG" 2>&1; then
+  echo "--- last 40 lines of cargo doc output ---" >&2
+  tail -40 "$DOC_LOG" >&2
+  echo "--- end ---" >&2
+  fail "\`cargo doc --no-deps --package $PACKAGE --lib\` FAILED. The public surface could not be measured, so this check reports FAIL — never a vacuous pass."
+fi
+
+if [ ! -d "$DOC_ROOT" ]; then
+  fail "cargo doc succeeded but the emitted item tree $DOC_ROOT is ABSENT. Nothing could be enumerated; refusing to report a pass over an unmeasured surface."
+fi
+
+# ---------------------------------------------------------------------------
+# 3) Enumerate the rustdoc item tree -> "<kind> cqlite_core::a::b::Name" lines.
+#
+#    One directory per public module; one `<kind>.<Name>.html` file per public
+#    item; and, per page, the ASSOCIATED items declared by this crate (inherent
+#    methods, associated consts/types, enum variants, public struct fields, trait
+#    required/provided members). rustdoc's own non-item files are skipped by name.
+# ---------------------------------------------------------------------------
+DERIVED_ITEMS="$WORK_DIR/items.txt"
+PAGES="$WORK_DIR/pages.txt"
+: >"$DERIVED_ITEMS"
+: >"$PAGES"
+
+# Modules: every directory below the crate doc root, plus the crate root itself.
+{
+  printf 'mod %s\n' "$CRATE_DOC_NAME"
+  find "$DOC_ROOT" -mindepth 1 -type d -print | while IFS= read -r d; do
+    rel="${d#"$DOC_ROOT"/}"
+    case "$rel" in
+      # rustdoc's own asset/aggregate trees. They live beside the crate dir rather
+      # than inside it on current stable, but skipping them here keeps the
+      # enumeration correct if that ever changes.
+      static.files|static.files/*|src|src/*|trait.impl|trait.impl/*|type.impl|type.impl/*|implementors|implementors/*) continue ;;
+    esac
+    printf 'mod %s::%s\n' "$CRATE_DOC_NAME" "${rel//\//::}"
+  done
+} >>"$DERIVED_ITEMS"
+
+# Items: `<kind>.<Name>.html` for every kind rustdoc emits as a standalone page.
+find "$DOC_ROOT" -type f -name '*.html' -print | while IFS= read -r f; do
+  rel="${f#"$DOC_ROOT"/}"
+  base="${rel##*/}"
+  dir="${rel%/*}"
+  [ "$dir" = "$rel" ] && dir=""
+  case "$base" in
+    index.html|all.html|help.html|settings.html) continue ;;
+  esac
+  kind="${base%%.*}"
+  case "$kind" in
+    struct|enum|fn|trait|type|constant|macro|union|derive|attr|primitive|static|mod) ;;
+    *) continue ;;
+  esac
+  name="${base#"$kind".}"
+  name="${name%.html}"
+  # Record the page for the associated-item pass below (same subject set, one
+  # enumeration decision, so the two passes can never disagree about what an
+  # "item page" is).
+  printf '%s\n' "$f" >>"$PAGES"
+  if [ -n "$dir" ]; then
+    printf '%s %s::%s::%s\n' "$kind" "$CRATE_DOC_NAME" "${dir//\//::}" "$name"
+  else
+    printf '%s %s::%s\n' "$kind" "$CRATE_DOC_NAME" "$name"
+  fi
+done >>"$DERIVED_ITEMS"
+
+# --- Associated items -------------------------------------------------------
+#
+# Standalone rustdoc pages alone are BLIND to public methods, enum variants,
+# public struct fields and associated consts/types: adding a `pub fn` to an
+# existing public struct would not move the snapshot at all. So each item page is
+# also scanned for the associated items THIS CRATE DECLARES.
+#
+# WHAT IS DELIBERATELY EXCLUDED, and why: the `trait-implementations`,
+# `synthetic-implementations`, `blanket-implementations`, `implementors`,
+# `foreign-impls` and `deref-methods-*` sections. Those anchors are not this
+# crate's declared surface — they are generated from trait impls, auto traits and
+# blanket impls in dependencies (`struct.DatabaseStats.html` carries 17
+# `id="method.*"` anchors and ZERO inherent methods; every one comes from Clone,
+# Debug, Into, TryFrom, Borrow, tracing's Instrument, …). They move whenever a
+# dependency is bumped, so recording them would make this snapshot a churn source
+# and train people to regenerate it without reading the diff — the failure mode
+# this guard exists to prevent. The exclusion is stated in the snapshot header
+# too, as an honest boundary rather than a silent gap.
+#
+# The scan is SECTION-SCOPED, and the scoping is done WITHIN each line, not per
+# line: rustdoc's HTML is near-minified (a whole page is ~17 lines) and a single
+# line routinely carries the end of one section header and the start of the next,
+# so a line-granular state machine would attribute trait-impl anchors to the
+# inherent `implementations` section. A real section boundary is recognised by
+# `<h2 id="…" class="…section-header">`; a doc-comment heading inside a docblock
+# (`<h2 id="safety">`, `<h2 id="note">`, … — no class) must NOT move the state.
+ASSOC_AWK="$WORK_DIR/assoc.awk"
+cat >"$ASSOC_AWK" <<'AWK_EOF'
+BEGIN {
+  # Sections whose anchors ARE this crate's declared surface.
+  split("variants fields implementations required-methods provided-methods required-associated-consts provided-associated-consts required-associated-types provided-associated-types", _w, " ")
+  for (_k in _w) if (_w[_k] != "") WANT[_w[_k]] = 1
+  prefix = docroot "/"
+}
+FNR == 1 {
+  rel = FILENAME
+  if (substr(rel, 1, length(prefix)) == prefix) rel = substr(rel, length(prefix) + 1)
+  base = rel
+  sub(/^.*\//, "", base)
+  dir = rel
+  if (dir == base) { dir = "" } else { sub(/\/[^\/]*$/, "", dir) }
+  pkind = base
+  sub(/\..*$/, "", pkind)
+  iname = substr(base, length(pkind) + 2)
+  sub(/\.html$/, "", iname)
+  gsub(/\//, "::", dir)
+  itempath = (dir == "" ? crate : crate "::" dir) "::" iname
+  section = ""
+}
+{
+  n = split($0, seg, "<h2 ")
+  for (_s = 1; _s <= n; _s++) {
+    piece = seg[_s]
+    if (_s > 1) {
+      if (match(piece, /^id="[A-Za-z0-9_-]+" class="[^"]*section-header"/)) {
+        hdr = substr(piece, RSTART, RLENGTH)
+        sub(/^id="/, "", hdr)
+        sub(/".*$/, "", hdr)
+        section = hdr
+        if (section in WANT) seen[FILENAME "\t" section] = 1
+      }
+      # else: a doc-comment heading inside a docblock — state must NOT move.
+    }
+    if (!(section in WANT)) continue
+    rest = piece
+    while (match(rest, /id="(method|tymethod|variant|structfield|associatedconstant|associatedtype)\.[A-Za-z0-9_]+(\.field\.[A-Za-z0-9_]+)?"/)) {
+      tok = substr(rest, RSTART + 4, RLENGTH - 5)
+      rest = substr(rest, RSTART + RLENGTH)
+      akind = tok
+      sub(/\..*$/, "", akind)
+      aname = substr(tok, length(akind) + 2)
+      if (index(aname, ".field.") > 0) {
+        sub(/\.field\./, "::", aname)
+        akind = "variantfield"
+      }
+      print akind " " itempath "::" aname
+      filled[FILENAME "\t" section] = 1
+    }
+  }
+}
+END {
+  # A wanted section that was PRESENT but yielded nothing is a measurement
+  # failure (rustdoc anchor format changed), not an empty section. Report it;
+  # the caller turns it into a named FAIL.
+  for (key in seen) if (!(key in filled)) print "!EMPTY\t" key > "/dev/stderr"
+}
+AWK_EOF
+
+ASSOC_RAW="$WORK_DIR/assoc.txt"
+ASSOC_ERR="$WORK_DIR/assoc.err"
+if [ -s "$PAGES" ]; then
+  tr '\n' '\0' <"$PAGES" | xargs -0 awk -v crate="$CRATE_DOC_NAME" -v docroot="$DOC_ROOT" \
+    -f "$ASSOC_AWK" >"$ASSOC_RAW" 2>"$ASSOC_ERR"
+else
+  : >"$ASSOC_RAW"; : >"$ASSOC_ERR"
+fi
+
+if [ -s "$ASSOC_ERR" ]; then
+  echo "" >&2
+  echo "Sections present but yielding no anchors (first 10):" >&2
+  head -10 "$ASSOC_ERR" >&2
+  fail "the associated-item scan found rustdoc sections it could not read. That is the signature of a rustdoc HTML format change, not an empty API — refusing to record a surface measured with a broken extractor."
+fi
+
+ASSOC_COUNT="$(wc -l <"$ASSOC_RAW" | tr -d ' ')"
+if [ "${ASSOC_COUNT:-0}" -eq 0 ]; then
+  fail "the associated-item scan extracted ZERO methods/variants/fields/associated items across the entire crate. At this crate's size that is implausible — it is the signature of a rustdoc HTML format change. Refusing to pass on an unmeasured surface."
+fi
+cat "$ASSOC_RAW" >>"$DERIVED_ITEMS"
+
+LC_ALL=C sort -o "$DERIVED_ITEMS" "$DERIVED_ITEMS"
+
+MODULE_COUNT="$(grep -c '^mod ' "$DERIVED_ITEMS" || true)"
+ITEM_COUNT="$(grep -vc '^mod ' "$DERIVED_ITEMS" || true)"
+ITEM_COUNT=$((ITEM_COUNT - ASSOC_COUNT))
+
+if [ "${ITEM_COUNT:-0}" -eq 0 ] || [ "${MODULE_COUNT:-0}" -eq 0 ]; then
+  fail "enumerated $ITEM_COUNT items over $MODULE_COUNT modules under $DOC_ROOT — a zero count means the enumeration did not measure anything (rustdoc layout changed?), NOT that the crate has no public API. Refusing to pass."
+fi
+
 # ---------------------------------------------------------------------------
 # 4) THE CONSISTENCY ASSERT (the core of #1712).
 #
@@ -701,11 +717,6 @@ if [ "$MODE" = regenerate ]; then
   echo "pub-surface: WROTE $SNAPSHOT_REL — $ITEM_COUNT public items + $ASSOC_COUNT associated items over $MODULE_COUNT modules; $DECL_COUNT crate-root declarations."
   echo "             Review the diff: it is a public-API change, not a formatting chore."
   exit 0
-fi
-
-if [ ! -r "$SNAPSHOT" ]; then
-  fail "committed snapshot $SNAPSHOT_REL is MISSING or unreadable. It is required — a missing snapshot is a FAIL, never an implicit pass. Create it with:
-       bash scripts/ci/check-pub-surface.sh --regenerate"
 fi
 
 if ! diff -u "$SNAPSHOT" "$RENDERED" >"$WORK_DIR/surface.diff" 2>&1; then

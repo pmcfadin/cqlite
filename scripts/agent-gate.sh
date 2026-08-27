@@ -517,10 +517,13 @@
 #                      and a bad argument must exit 2. Each negative case substitutes
 #                      the artifact in its own detached scratch worktree (the guard
 #                      has no test-only seam) and reuses CARGO_TARGET_DIR, so the
-#                      8-case suite costs ~85s of rustdoc and no datasets/network.
+#                      12-case suite costs ~80s of rustdoc and no datasets/network.
 #                      Also reds on a new `pub fn` on an existing public struct, a new
-#                      enum variant, and a cosmetic `cfg_attr` that must not exempt a
-#                      crate-root `pub mod` from the assert (roborev round 1).
+#                      enum variant, a cosmetic `cfg_attr` that must not exempt a
+#                      crate-root `pub mod` from the assert, a SAME-LINE
+#                      `#[attr] pub mod x;` (which the first cut dropped entirely — a
+#                      false PASS), and a disagreement between the guard's two
+#                      independent crate-root scans.
 #   minimal-build      cargo build + `cargo test --lib --no-run` (compile-only)
 #                      -p cqlite-core --no-default-features --features all-compression
 #   smoke              bash test-data/scripts/smoke-test-all-tables.sh
@@ -5557,8 +5560,9 @@ run_pub_surface() {
 # for the pub-surface component: it drives scripts/ci/check-pub-surface.sh through one
 # green and three reds (consistency assert on the pre-#1712 shape, snapshot drift,
 # missing snapshot) plus the usage case, substituting the artifact in detached scratch
-# worktrees rather than through any test-only seam. Reuses CARGO_TARGET_DIR (~85s);
-# never invokes the gate, so it cannot recurse.
+# worktrees rather than through any test-only seam, and pins every crate-root parse
+# shape the (lexical, not-a-Rust-parser) scan claims to handle. Reuses
+# CARGO_TARGET_DIR (~80s); never invokes the gate, so it cannot recurse.
 run_tooling_tests() {
   local name=tooling-tests
   if [ -n "$ONLY" ] && ! grep -qw "$name" <<<"${ONLY//,/ }"; then
@@ -6746,7 +6750,10 @@ run_tooling_tests() {
   # diff, a missing snapshot FAILs instead of passing vacuously, and a bad argument
   # exits 2. Each negative case substitutes the artifact in its own
   # `git worktree add --detach HEAD` scratch checkout (no test-only seam in the guard)
-  # and reuses CARGO_TARGET_DIR, so the whole 8-case suite is ~85s of rustdoc. A failure
+  # and reuses CARGO_TARGET_DIR, so the whole 12-case suite is ~80s of rustdoc. It also
+  # pins every crate-root PARSE shape the scan claims to handle (same-line
+  # `#[attr] pub mod x;`, multi-line attrs, trailing comments, block-commented decls),
+  # since that scan is lexical and its safety rests on the pinned suite. A failure
   # FAILs the component, mirroring the guards above.
   echo ">>> [$name] bash scripts/tests/test_pub_surface_guard.sh"
   if ! bash "$REPO_ROOT/scripts/tests/test_pub_surface_guard.sh" >>"$log" 2>&1; then
