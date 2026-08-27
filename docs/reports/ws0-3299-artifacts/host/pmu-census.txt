@@ -1,0 +1,38 @@
+==== #3299 PMU CENSUS ====
+date_utc:        2026-08-27T19:03:00Z
+host:            ip-172-31-7-163
+instance_id:     i-04ac0a860eef7f241
+kernel:          6.17.0-1019-aws
+perf_version:    perf version 6.17.13
+paranoid:        -1
+kptr_restrict:   0
+nmi_watchdog:    0
+nproc_logical:   16
+cache_hostile:   /data/lanes/lane-3299/docs/reports/ws0-3224-artifacts/cache-hostile.c (2 GiB pointer chase, 20M serial-dependent accesses)
+
+EVENT                            VERDICT                       VALUE   ENABLED%  RAW
+--------------------------------------------------------------------------------------------------
+instructions                     REAL                     4137979348     100.00  4137979348,,instructions,6334774975,100.00,,
+cycles                           REAL                    22227766667     100.00  22227766667,,cycles,6288538571,100.00,,
+L1-dcache-loads                  REAL                      786172946     100.00  786172946,,L1-dcache-loads,6360176622,100.00,,
+L1-dcache-load-misses            REAL                      120303664     100.00  120303664,,L1-dcache-load-misses,6324958504,100.00,,
+LLC-loads                        NOT-SUPPORTED       <not supported>     100.00  <not supported>,,LLC-loads,0,100.00,,
+LLC-load-misses                  NOT-SUPPORTED       <not supported>     100.00  <not supported>,,LLC-load-misses,0,100.00,,
+cache-references                 HARD-ZERO                         0     100.00  0,,cache-references,6500386656,100.00,,
+cache-misses                     HARD-ZERO                         0     100.00  0,,cache-misses,6350834813,100.00,,
+mem_load_retired.l3_miss         HARD-ZERO                         0     100.00  0,,mem_load_retired.l3_miss,6379587596,100.00,,
+mem_load_retired.l3_hit          HARD-ZERO                         0     100.00  0,,mem_load_retired.l3_hit,6345162140,100.00,,
+longest_lat_cache.miss           HARD-ZERO                         0     100.00  0,,longest_lat_cache.miss,6408314045,100.00,,
+longest_lat_cache.reference      HARD-ZERO                         0     100.00  0,,longest_lat_cache.reference,6315741054,100.00,,
+r4f2e                            HARD-ZERO                         0     100.00  0,,r4f2e,6424464585,100.00,,
+r412e                            HARD-ZERO                         0     100.00  0,,r412e,6336371135,100.00,,
+
+LEGEND — the distinction this census exists to draw:
+  REAL          the instrument counted. Usable.
+  HARD-ZERO     the instrument programmed cleanly, reported 100.00% enabled, and
+                returned 0 on a workload that CANNOT have zero of this quantity.
+                This is an UNAVAILABLE INSTRUMENT, not a measurement of zero, and it
+                is the exact silent-instrument failure #3217 published and #3224
+                catalogued. It MUST NOT be reported as a measured value.
+  NOT-SUPPORTED / NOT-COUNTED / UNKNOWN-EVENT / UNPARSEABLE / MULTIPLEXED
+                unavailable, or an estimate rather than a count. Not usable.

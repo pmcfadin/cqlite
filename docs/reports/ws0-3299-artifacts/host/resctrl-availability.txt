@@ -1,0 +1,11 @@
+==== resctrl availability (E1 llc_occupancy) ====
+date_utc: 2026-08-27T19:02:49Z
+/sys/fs/resctrl present: NO
+resctrl in /proc/filesystems: 0
+CPUID RDT flags in /proc/cpuinfo: 
+
+mount attempt (read-only probe):
+mount: /sys/fs/resctrl: mount point does not exist.
+       dmesg(1) may have more information after failed mount system call.
+
+VERDICT: resctrl-based llc_occupancy is UNAVAILABLE on this host.

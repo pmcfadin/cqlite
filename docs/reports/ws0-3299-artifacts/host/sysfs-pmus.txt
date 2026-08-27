@@ -1,0 +1,17 @@
+==== /sys/bus/event_source/devices (PMUs visible to this kernel) ====
+breakpoint
+cpu
+kprobe
+msr
+software
+tracepoint
+uprobe
+
+==== per-PMU type/cpumask ====
+breakpoint: type=5 cpumask=-
+cpu: type=4 cpumask=-
+kprobe: type=8 cpumask=-
+msr: type=10 cpumask=-
+software: type=1 cpumask=-
+tracepoint: type=2 cpumask=-
+uprobe: type=9 cpumask=-
