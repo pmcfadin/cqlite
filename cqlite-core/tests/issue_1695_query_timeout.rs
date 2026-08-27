@@ -30,6 +30,10 @@
 //! * `timeout_error_is_not_a_corruption` — the timeout is a DISTINCT variant with
 //!   a distinct telemetry category, so an operator budget can never read as
 //!   damaged data.
+//! * `an_expired_budget_keeps_error_queries_within_total_queries` /
+//!   `a_completed_query_is_counted_exactly_once` — the engine statistics stay
+//!   COHERENT under the bound: a timed-out query is counted as a query AND as an
+//!   error, never as an error against a total that never saw it.
 //!
 //! # Fixture discipline
 //!
@@ -462,6 +466,73 @@ async fn dropping_a_streaming_iterator_retires_its_producer() {
 
     drop(iter);
     await_tasks_back_to(baseline, "post-drop").await;
+}
+
+/// Roborev blocker: the engine's own statistics must stay COHERENT under the
+/// bound. An already-expired budget returns before the inner body runs, and the
+/// inner body is what calls `inc_total_queries()` — so counting only the error
+/// published `error_queries > total_queries`, a state no sequence of queries can
+/// legitimately produce and one an operator dashboard reads as corruption of the
+/// counters themselves.
+///
+/// Structural, not timed: the assertion is on the counter DELTAS of one query
+/// whose budget is expired before its first poll, so it decides identically on
+/// every host.
+#[tokio::test]
+async fn an_expired_budget_keeps_error_queries_within_total_queries() {
+    let db = open_committed_db(EXPIRED_BUDGET).await;
+    let before = query_stats(&db).await;
+    assert_eq!(
+        (before.total_queries, before.error_queries),
+        (0, 0),
+        "precondition: a freshly opened database has run no queries"
+    );
+
+    let outcome = db.execute(&scan_query(&COMMITTED)).await;
+    assert_timed_out(outcome, "query.execute", EXPIRED_BUDGET, |r| {
+        format!("{} rows", r.rows.len())
+    });
+
+    let after = query_stats(&db).await;
+    assert!(
+        after.error_queries <= after.total_queries,
+        "IMPOSSIBLE STATISTICS: {} error(s) against {} total quer(ies) — a timed-out query          must be counted as a query, not only as an error",
+        after.error_queries,
+        after.total_queries
+    );
+    assert_eq!(
+        (after.total_queries, after.error_queries),
+        (1, 1),
+        "the timed-out query must be counted exactly once as a query and once as an error"
+    );
+}
+
+/// The same coherence must hold when the inner body DID run and counted itself:
+/// the wrapper must not double-count the total. A normal (unbounded) query gives
+/// the complementary delta — one total, no error.
+#[tokio::test]
+async fn a_completed_query_is_counted_exactly_once() {
+    let db = open_committed_db(Duration::ZERO).await;
+    let rows = db
+        .execute(&scan_query(&COMMITTED))
+        .await
+        .expect("unbounded query must succeed");
+    assert!(
+        !rows.rows.is_empty(),
+        "anti-vacuity: the fixture must return rows"
+    );
+    let stats = query_stats(&db).await;
+    assert_eq!(
+        (stats.total_queries, stats.error_queries),
+        (1, 0),
+        "a query that ran must be counted ONCE, with no error"
+    );
+}
+
+/// The query-engine counters as the public `Database::stats()` surface reports
+/// them.
+async fn query_stats(db: &cqlite_core::Database) -> cqlite_core::query::QueryStats {
+    db.stats().await.expect("database stats").query_stats
 }
 
 /// The timeout must be distinguishable from corruption at every layer a consumer
