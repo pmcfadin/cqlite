@@ -72,12 +72,21 @@ impl ScanCancel {
     /// walk interruptible at the SAME audited cadence at which it is already
     /// cancellable.
     ///
-    /// `tick` is the loop's own counter (partition/entry/chunk index); the
-    /// cancellation flag is polled on EVERY call (a relaxed atomic load), the
-    /// runtime yield happens on every `YIELD_STRIDE`-th one.
+    /// `tick` is the loop's own counter (partition/entry/chunk index). BOTH the
+    /// cancellation poll and the runtime yield happen on every `YIELD_STRIDE`-th
+    /// call, and an off-stride call is a deliberate no-op.
+    ///
+    /// Polling on every call would be the more responsive choice, and an earlier
+    /// revision did that — but it silently RAISED the cancellation cadence of
+    /// three callers that had hand-rolled `if tick & 0xFF == 0 { check()? }`,
+    /// adding a relaxed atomic load and an `.await` point to a per-entry decode
+    /// loop. That cadence was chosen deliberately by #2264/#2346, and #1695 has no
+    /// mandate to retune the read hot path, so this reproduces it exactly.
+    /// A loop that genuinely needs per-iteration cancellation uses
+    /// [`Self::checkpoint_now`] instead.
     pub async fn checkpoint(&self, tick: usize) -> crate::Result<()> {
-        self.check()?;
         if tick % YIELD_STRIDE == 0 {
+            self.check()?;
             tokio::task::yield_now().await;
         }
         Ok(())
@@ -93,10 +102,14 @@ impl ScanCancel {
     }
 }
 
-/// Runtime-yield stride for [`ScanCancel::checkpoint`] — the same 256-iteration
-/// cadence the cancellation polls already used (#2264/#2346), so neither
-/// cancellation latency nor scan throughput changes measurably: one task
-/// reschedule per 256 decoded partitions/entries/chunks.
+/// Checkpoint stride for [`ScanCancel::checkpoint`] — the same 256-iteration
+/// cadence the callers' hand-rolled cancellation polls used (#2264/#2346). Both
+/// the poll and the yield sit on that boundary, so cancellation latency is
+/// UNCHANGED from those callers and the added cost is one task reschedule per 256
+/// decoded partitions/entries/chunks. Stated as an equivalence to the prior code
+/// rather than as a throughput claim: no measurement was taken here, and #2403's
+/// release theme is exactly where an unmeasured "no measurable change" would be
+/// the wrong thing to assert.
 pub const YIELD_STRIDE: usize = 256;
 
 #[cfg(test)]
@@ -125,22 +138,32 @@ mod tests {
     /// boundary) hand control back to the runtime — the property the chokepoint
     /// timeout depends on (issue #1695).
     #[tokio::test]
-    async fn checkpoint_yields_at_the_stride_and_relays_cancellation() {
+    async fn checkpoint_checks_and_yields_at_the_stride_only() {
         let c = ScanCancel::new();
-        // Stride boundary: yields, still Ok.
+        // Stride boundary: checks + yields, still Ok.
         assert!(c.checkpoint(0).await.is_ok());
-        // Off-stride: no yield, still Ok.
+        // Off-stride: no check, no yield, still Ok.
         assert!(c.checkpoint(1).await.is_ok());
         assert!(c.checkpoint_now().await.is_ok());
 
         c.cancel();
-        // Cancellation is polled on EVERY call, on and off stride, and takes
-        // precedence over the yield.
-        for tick in [0usize, 1, YIELD_STRIDE, YIELD_STRIDE + 1] {
+        // ON stride, cancellation is observed and takes precedence over the yield.
+        for tick in [0usize, YIELD_STRIDE] {
             assert!(matches!(
                 c.checkpoint(tick).await,
                 Err(crate::Error::Cancelled)
             ));
+        }
+        // OFF stride it is deliberately NOT observed. This is the contract, not a
+        // gap: it reproduces the `if tick & 0xFF == 0 { check()? }` cadence the
+        // callers had before #1695, so a per-entry decode loop pays nothing between
+        // boundaries. A loop needing per-iteration cancellation uses
+        // `checkpoint_now`, which is asserted below to still report it.
+        for tick in [1usize, YIELD_STRIDE + 1] {
+            assert!(
+                c.checkpoint(tick).await.is_ok(),
+                "an off-stride checkpoint must be a no-op even once cancelled"
+            );
         }
         assert!(matches!(
             c.checkpoint_now().await,

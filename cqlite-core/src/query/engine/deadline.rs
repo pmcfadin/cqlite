@@ -56,6 +56,46 @@
 //! `storage::sstable::generation_merge::merge_cancel`. Any FUTURE blocking work
 //! reached from a bounded entry point owes the same treatment; the drop alone is
 //! not enough for it.
+//!
+//! # What the bound does NOT cover
+//!
+//! A `tokio::time::timeout` can only elapse when the future it wraps becomes
+//! `Pending`. So the budget bounds work that YIELDS, and three things do not:
+//!
+//! 1. **Post-scan synchronous stages.** `ORDER BY` sorting, aggregation and
+//!    projection run inside `select_executor`'s non-async `execute_sort` and
+//!    friends, over an already-materialized `Vec`. A query whose scan finishes
+//!    inside the budget and then sorts a large result set can overshoot
+//!    substantially, and this wrapper cannot interrupt it — `Vec::sort_by` is one
+//!    uninterruptible call. Bounding it means making the post-scan pipeline async
+//!    or chunked, which is deliberately NOT part of issue #1695 (whose mandate is
+//!    ONE wrapper at the chokepoint); it follows the contract that issue chose for
+//!    the analogous streaming case — bound what is practical, document the rest.
+//!    Note the scan is the dominant cost for genuinely large data, and it IS
+//!    bounded, so the exposure is a result set big enough to sort for a long time
+//!    yet cheap enough to have been scanned within budget.
+//! 2. **Row consumption after `execute_streaming` returns.** The bound covers the
+//!    whole future including time-to-first-batch, not the caller's subsequent
+//!    iteration. Per-batch bounds are a follow-up.
+//! 3. **A single overshooting poll.** If one poll runs past the deadline and
+//!    returns `Ready`, its result is ACCEPTED rather than discarded — the plain
+//!    `tokio::time::timeout` semantics this issue specifies. Erroring there would
+//!    throw away a correct completed result without shortening the wait the caller
+//!    already took. The reported `elapsed` is MEASURED, so the overshoot is
+//!    visible rather than hidden.
+//!
+//! # Telemetry is NOT symmetric across the two prepared routes
+//!
+//! [`AdvancedQueryEngine::bounded`] records an elapse: it increments
+//! `error_queries` and marks the observability error stream with the timeout
+//! category. The prepared-handle route ([`crate::query::prepared::PreparedQuery`])
+//! bounds itself through the bare [`bound`] helper instead, because the handle
+//! carries only its executor and its budget — it holds no stats or observability
+//! handle to report through. So a timeout taken on that route is ENFORCED
+//! identically but is invisible to `Database::stats()` and to
+//! `cqlite.errors.total{category="timeout"}`. Do not read "both routes are
+//! bounded" as "both routes are observable"; closing that gap needs a stats handle
+//! threaded from `prepare()`.
 
 use std::future::Future;
 use std::pin::Pin;
@@ -338,6 +378,10 @@ impl AdvancedQueryEngine {
     /// [`bound`]. So a prepared query is bounded on EITHER route — and bounded
     /// exactly ONCE on each, because the shared inner body is the `pub(crate)`
     /// unbounded one. Do not add a second wrapper here.
+    ///
+    /// The two routes differ in TELEMETRY, not in enforcement: only this one
+    /// records an elapse in `error_queries` and on the observability error
+    /// stream — see the module's "Telemetry is NOT symmetric" note.
     pub async fn execute_prepared(
         &self,
         prepared: &PreparedQuery,
