@@ -825,3 +825,86 @@ async fn a_cross_generation_point_read_is_one_metered_operation() {
         "no candidate SSTables means no rows"
     );
 }
+
+// ---------------------------------------------------------------------------
+// Compaction's own reads: bytes YES, query metrics NO (roborev R3)
+// ---------------------------------------------------------------------------
+
+/// The documented contract, asserted in BOTH directions.
+///
+/// `read.bytes` is credited inside the chunk decode plane, which is handed a `ReadAt` +
+/// a `CompressionInfo` and cannot know who asked — so it counts every subsystem's
+/// `Data.db` reads, compaction included. That is what the module doc and the operator
+/// reference now say; before this case the COMPRESSED compaction walk called
+/// `Compression::decompress` inline and never reached the plane, so the shipped
+/// behaviour excluded exactly what the docs promised.
+///
+/// The other half matters just as much: `read.rows` / `read.partitions` /
+/// `read.duration` are emitted at QUERY read boundaries only, and compaction reaches
+/// its inputs through `stream_all_partitions_for_compaction` on a reader directly, so
+/// a compaction must contribute NOTHING to them. Asserting that keeps the split honest
+/// — an operator's read-rate and read-latency series stay free of background traffic.
+///
+/// Fixture: the COMMITTED compressed `test_comp/lz4_table` (LZ4, 600 rows), so the
+/// compressed decode branch — the one that was excluded — is the branch exercised.
+#[tokio::test(flavor = "multi_thread")]
+#[serial_test::serial(read_metrics)]
+async fn a_compaction_read_counts_bytes_but_no_query_metrics() {
+    use cqlite_core::storage::scan_cancel::ScanCancel;
+
+    let fx = Fixture {
+        keyspace: "test_comp",
+        table: "lz4_table",
+        format: "big",
+        warm_scan_is_cached: true,
+        min_partitions: 1,
+        compression: "lz4",
+    };
+    let mc = testing::metrics_capture();
+    let reader = open_reader(&fx).await;
+
+    mc.reset();
+    let rows = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
+    let counted = std::sync::Arc::clone(&rows);
+    reader
+        .stream_all_partitions_for_compaction(None, &ScanCancel::default(), move |_row| {
+            counted.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            Ok(std::ops::ControlFlow::Continue(()))
+        })
+        .await
+        .expect("streaming compaction read over the committed LZ4 fixture");
+    let metrics = mc.flush_and_collect();
+
+    assert!(
+        rows.load(std::sync::atomic::Ordering::Relaxed) > 0,
+        "the committed compressed fixture must yield compaction rows — a zero-row read \
+         would satisfy the byte assertion below for the wrong reason"
+    );
+    assert!(
+        metrics.counter_sum(catalog::READ_BYTES) > 0.0,
+        "a COMPRESSED compaction read materialises Data.db payload through the decode \
+         plane, so cqlite.read.bytes must count it — the docs promise 'every subsystem \
+         that reads an SSTable, compaction included'; points: {:?}",
+        metrics.find(catalog::READ_BYTES).map(|m| &m.points)
+    );
+    assert_eq!(
+        metrics.sum_where(catalog::READ_BYTES, &[(catalog::attr::COMPRESSION, "lz4")]),
+        metrics.counter_sum(catalog::READ_BYTES),
+        "counted under the table's bounded compression label, like any other reader"
+    );
+
+    for name in [
+        catalog::READ_ROWS,
+        catalog::READ_PARTITIONS,
+        catalog::READ_DURATION,
+    ] {
+        assert_eq!(
+            metrics.counter_sum(name),
+            0.0,
+            "{name} is a QUERY-boundary metric: a compaction read must contribute \
+             NOTHING to it, or an operator's read-rate and read-latency series would \
+             move with background compaction; points: {:?}",
+            metrics.find(name).map(|m| &m.points)
+        );
+    }
+}

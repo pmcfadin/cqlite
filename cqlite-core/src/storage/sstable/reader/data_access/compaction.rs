@@ -54,25 +54,24 @@ impl SSTableReader {
 
         while let Some(compressed_chunk) = self.read_next_block(cursor).await? {
             use crate::storage::sstable::compression::Compression;
+            let algorithm = self.compression_reader.as_ref().map(|r| r.algorithm());
             let decompressed_chunk = if compressed_chunk.len() >= max_compressed_length {
-                // Stored uncompressed by Cassandra — pass the raw bytes through.
-                tracing::debug!(
-                    "stitch_and_parse_all_chunks_for_compaction: chunk {} is incompressible (len={} >= max_compressed_length={}), using raw bytes",
-                    chunk_count,
-                    compressed_chunk.len(),
-                    max_compressed_length
-                );
-                compressed_chunk
+                // Raw bytes through, COUNTED at the plane's boundary (#1701 R3).
+                super::super::chunk_source::counted_raw_chunk(compressed_chunk, algorithm)
             } else if let Some(compression_reader) = &self.compression_reader {
                 let compression = Compression::new(*compression_reader.algorithm())?;
-                compression.decompress(&compressed_chunk).map_err(|e| {
+                super::super::chunk_source::ChunkSource::decompress_only(
+                    Some(&compression),
+                    compressed_chunk,
+                )
+                .map_err(|e| {
                     Error::corruption(format!(
                         "stitch_and_parse_all_chunks_for_compaction: Failed to decompress chunk {}: {}",
                         chunk_count, e
                     ))
                 })?
             } else {
-                compressed_chunk
+                super::super::chunk_source::counted_raw_chunk(compressed_chunk, None)
             };
             stitched_buffer.extend_from_slice(&decompressed_chunk);
             chunk_count += 1;
@@ -685,22 +684,23 @@ impl SSTableReader {
             if chunk_count & 0xFF == 0 {
                 scan_cancel.check()?;
             }
+            let algorithm = self.compression_reader.as_ref().map(|r| r.algorithm());
             let decompressed_chunk = if compressed_chunk.len() >= max_compressed_length {
-                // Stored uncompressed by Cassandra — pass the raw bytes through.
-                tracing::debug!(
-                    "stream_all_partitions_for_compaction: chunk {} is incompressible (len={} >= max_compressed_length={}), using raw bytes",
-                    chunk_count,
-                    compressed_chunk.len(),
-                    max_compressed_length
-                );
-                compressed_chunk
+                // Raw bytes through, COUNTED at the plane's boundary (#1701 R3).
+                super::super::chunk_source::counted_raw_chunk(compressed_chunk, algorithm)
             } else if let Some(compression_reader) = &self.compression_reader {
                 let compression = Compression::new(*compression_reader.algorithm())?;
                 // Issue #2819 (B4): LZ4 decompress — the `stream_decompress` scope
-                // (reached only for a genuinely compressed chunk).
+                // (reached only for a genuinely compressed chunk). #1701 R3: the
+                // decompress resolves in the METERED plane.
                 crate::observability::stream_subphase::timed(
                     crate::observability::StreamSubPhase::Decompress,
-                    || compression.decompress(&compressed_chunk),
+                    || {
+                        super::super::chunk_source::ChunkSource::decompress_only(
+                            Some(&compression),
+                            compressed_chunk,
+                        )
+                    },
                 )
                 .map_err(|e| {
                     Error::corruption(format!(
@@ -709,7 +709,7 @@ impl SSTableReader {
                     ))
                 })?
             } else {
-                compressed_chunk
+                super::super::chunk_source::counted_raw_chunk(compressed_chunk, None)
             };
             // Refill the window: compact the already-consumed prefix ONCE
             // (issue #1589), then append the freshly decompressed chunk.

@@ -41,7 +41,7 @@ pub(super) const ANNOTATIONS: &[MetricDoc] = &[
         name: catalog::READ_DURATION,
         kind: MetricKind::Histogram,
         unit: catalog::unit::SECONDS,
-        summary: "Distribution of single read/scan operation durations.",
+        summary: "Distribution of single read/scan operation durations, at the core query read boundaries (manager scans, point reads, streaming handles).",
         attributes: &[attr::SSTABLE_FORMAT],
         interpretation: "Watch p99; a growing tail is the read-latency alarm.",
         round_item: "—",

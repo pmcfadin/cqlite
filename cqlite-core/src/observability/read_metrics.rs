@@ -21,11 +21,21 @@
 //!
 //! # Which SUBSYSTEM's bytes `read.bytes` counts (issue #1701, roborev F3)
 //!
-//! `read.rows` / `read.partitions` / `read.duration` are emitted at QUERY read
-//! boundaries only — the manager's scans and point reads, and the streaming handles
-//! — so a compaction can never contribute to them: compaction reads its inputs
-//! through `stream_all_partitions_for_compaction` on a reader directly, never through
-//! those boundaries.
+//! `read.rows` / `read.partitions` / `read.duration` are emitted at an ENUMERATED set
+//! of core query read boundaries — `SSTableManager`'s materializing scans and point
+//! reads, and the `JoinedStream` streaming handles — so a compaction can never
+//! contribute to them: compaction reads its inputs through
+//! `stream_all_partitions_for_compaction` on a reader directly, never through those
+//! boundaries.
+//!
+//! That set is a CLAIM ABOUT THOSE BOUNDARIES, not about the whole product. A caller
+//! that reaches the readers by another route is NOT metered by this module — notably
+//! the Arrow Flight `do_get` path, which drives `KWayMerger`/`QueryRowStream` directly
+//! and emits its own rows/partitions from `cqlite-flight`'s `ScanProgressMeter` with no
+//! duration at all. Extending duration coverage there needs Flight-level metering and
+//! capture infrastructure in that crate, and is deliberately out of scope here; nothing
+//! in this module or the operator reference should be read as claiming it. Flight reads
+//! DO contribute `read.bytes`, because they decode through the same chunk plane.
 //!
 //! `read.bytes` is different, and deliberately so. It is credited inside the CHUNK
 //! DECODE PLANE (`reader::chunk_source`), which is handed a `ReadAt` + a
