@@ -39,7 +39,15 @@
 
 ## 3. `flight-tests` (surface: `scripts/agent-gate.sh`)
 - [ ] Register in `COMPONENTS` + dispatch, SIDE lane, own `CARGO_TARGET_DIR`, in `DATASET_COMPONENTS`.
-- [ ] Scope per D4/D6 on the measured number; run under the zero-tests guard; no opt-out env var.
+- [ ] Scope per D4/D6 on the measured number — RESOLVED as `--lib --bins` (D4 second correction, #3384);
+      no opt-out env var.
+- [ ] Run under a zero-tests guard THAT HAS A SUBJECT at this scope: `check_no_unexpected_zero_tests`
+      disclaims `--lib`, so use its `--lib` analogue (each selected unittest target OBSERVED and NON-ZERO).
+- [ ] PRINT the coverage census on every run, to BOTH stdout (`>>>`) and the component log: declared
+      integration-target count derived from `cargo metadata`, that this lane runs none of them, CI's Flight
+      tier as what does, and #3384/#3383. Retire the flake-quarantine plumbing (no subject left); RETAIN
+      `_package_test_targets` (feeds the census) and `check_declared_test_targets_observed` (uncalled, with a
+      comment naming what will call it again).
 - [ ] Leave `flight-query-semantics-oracle` functionally untouched — including its per-lane #3095 fixture
       SKIP predicates. Overlap is accepted deliberately (D4).
 

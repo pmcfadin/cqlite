@@ -84,4 +84,8 @@ lane-scope decision they drive.
   recommendation; the measured answer is recorded before implementation begins.
 - **`flight-tests` is the only expensive new lane.** D4 decides whole-package vs `--lib`+bounded set on the
   measured number, and places it in the SIDE lane with its own `CARGO_TARGET_DIR` so it does not thrash
-  MAIN's shared target dir (#2657).
+  MAIN's shared target dir (#2657). **RESOLVED during implementation: `--lib --bins`** — the measurement was
+  not cost but CORRECTNESS. The package's integration suite is ~50% non-deterministic under intra-package
+  parallelism (4 runs PASS/FAIL/PASS/FAIL, 2 distinct victims; box load, `nice`, `--test-threads=2` and
+  concurrent MAIN compilation each ruled out by measurement), so the integration half is descoped as #3384
+  and the lane DECLARES that gap in a derived census it prints on every run. See D4's second correction.
