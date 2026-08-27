@@ -4884,26 +4884,42 @@ check_unittest_targets_ran() {
     echo "$label: FAIL-CLOSED — check_unittest_targets_ran was called with NO expected unittest target; a guard with an empty subject set would report OK having measured nothing (issue #3384)" >&2
     return 1
   fi
-  local line cur="" bad="" seen=""
-  declare -A counts=()
+  # NO `declare -A` HERE, DELIBERATELY (roborev round-3 finding, High). This gate
+  # explicitly supports stock macOS /bin/bash 3.2 — see the lane-parallelism fallback
+  # at the AGENT_GATE_JOBS derivation, which degrades rather than requires bash >= 4.3 —
+  # and associative arrays are a bash 4.0 feature. A `declare -A` here would have made a
+  # SUCCESSFUL cargo run fail inside its own zero-test guard on a supported platform.
+  # A newline-delimited "<target><TAB><count>" list is 3.2-safe; target names come from
+  # cargo's own `Running unittests <path>` output and contain no tabs or newlines.
+  local line cur="" bad="" seen="" counts=""
   while IFS= read -r line; do
-    if [[ "$line" == *"Running unittests "* ]]; then
-      cur=$(printf '%s' "$line" | sed -E 's#.*Running unittests ([^[:space:]]+).*#\1#')
-      continue
-    fi
-    if [ -n "$cur" ] && [[ "$line" =~ ^running[[:space:]]+([0-9]+)[[:space:]]+tests?$ ]]; then
-      counts["$cur"]="${BASH_REMATCH[1]}"
-      cur=""
+    case "$line" in
+      *"Running unittests "*)
+        cur=$(printf '%s' "$line" | sed -E 's#.*Running unittests ([^[:space:]]+).*#\1#')
+        continue
+        ;;
+    esac
+    if [ -n "$cur" ]; then
+      case "$line" in
+        running\ [0-9]*\ test|running\ [0-9]*\ tests)
+          counts="$counts$cur\t$(printf '%s' "$line" | sed -E 's#^running[[:space:]]+([0-9]+)[[:space:]]+tests?$#\1#')
+"
+          cur=""
+          ;;
+      esac
     fi
   done < "$logfile"
-  local p
+  local p n
   for p in "${expected[@]}"; do
-    if [ -z "${counts[$p]+x}" ]; then
+    # Exact whole-field match on the TAB-delimited pair, so one target name cannot
+    # match another's prefix.
+    n=$(printf '%b' "$counts" | awk -F'\t' -v t="$p" '$1 == t { print $2; exit }')
+    if [ -z "$n" ]; then
       bad="$bad $p(NOT OBSERVED: no 'Running unittests $p' line — the cargo selector no longer chooses this target)"
-    elif [ "${counts[$p]}" -eq 0 ]; then
+    elif [ "$n" -eq 0 ]; then
       bad="$bad $p(ran 0 tests: the unit suite compiled out at this feature set)"
     else
-      seen="$seen $p(${counts[$p]} tests)"
+      seen="$seen $p($n tests)"
     fi
   done
   if [ -n "$bad" ]; then
@@ -5989,8 +6005,15 @@ run_legacy_heuristics() {
   # triage into a serial reveal (measured: run 1 showed only P0_4_modern_format_rejection,
   # run 2 then showed 3 more in sstable_discovery_comprehensive). A lane whose purpose is
   # to surface never-executed rot must surface ALL of it in one run.
-  if RUSTFLAGS="-D warnings" cargo build --package cqlite-core --features legacy-heuristics >"$log" 2>&1 \
-      && env CQLITE_DATASETS_ROOT="$CQLITE_DATASETS_ROOT" \
+  # RUSTFLAGS="-D warnings" MUST cover the cargo test compile too (roborev round-3
+  # finding, Medium). A `RUSTFLAGS=... cargo build && cargo test` chain applies it to the
+  # BUILD ONLY, and `cargo test` then recompiles the lib's cfg(test) code plus the
+  # selected --test targets WITHOUT warnings-as-errors — so the warning-class defect this
+  # lane exists to catch at this feature set (#1981's dead-code shape: a cfg(test) helper
+  # whose only caller is gated out) would have passed silently in exactly the half of the
+  # lane that compiles test code. `env` both invocations so neither half is unguarded.
+  if env RUSTFLAGS="-D warnings" cargo build --package cqlite-core --features legacy-heuristics >"$log" 2>&1 \
+      && env RUSTFLAGS="-D warnings" CQLITE_DATASETS_ROOT="$CQLITE_DATASETS_ROOT" \
         cargo test --no-fail-fast --package cqlite-core --features legacy-heuristics --lib "${targets[@]}" >>"$log" 2>&1; then
     # Green cargo exit is not sufficient — see the guard's own doc block.
     # The guard writes its verdict to stderr only, so `2>>` lands the message in the

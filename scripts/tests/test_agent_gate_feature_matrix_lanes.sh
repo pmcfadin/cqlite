@@ -77,19 +77,42 @@ else
   LANES=("${ALL_LANES[@]}")
 fi
 
-# The corpus root. flight-tests and legacy-heuristics are DATASET_COMPONENTS, and the
-# throwaway worktree has none of the gitignored Data.db binaries, so the root must be
-# an absolute path to a real corpus — inherited if the caller already exported one.
+# The corpus root — required ONLY BY THE LANES THAT CONSUME FIXTURES (roborev round-3
+# finding, Low). flight-tests and legacy-heuristics are DATASET_COMPONENTS, and the
+# throwaway worktree has none of the gitignored Data.db binaries, so for those the root
+# must be an absolute path to a real corpus. The two feature-isolation lanes are
+# COMPILE-ONLY (`cargo test --lib --no-run`) and are not in DATASET_COMPONENTS, so
+# demanding a corpus for a subset naming only those made the documented subset mode
+# unusable in a fixture-less checkout — a precondition unrelated to what was selected.
 DATASETS="${CQLITE_DATASETS_ROOT:-}"
-if [ -z "$DATASETS" ]; then
-  echo "CQLITE_DATASETS_ROOT is not set; export the absolute root printed by" >&2
-  echo "  bash test-data/scripts/fetch-datasets.sh" >&2
-  exit 2
+_needs_datasets=0
+for _l in ${LANES[@]+"${LANES[@]}"}; do
+  case "$_l" in flight-tests|legacy-heuristics) _needs_datasets=1 ;; esac
+done
+if [ "$_needs_datasets" -eq 1 ]; then
+  if [ -z "$DATASETS" ]; then
+    echo "CQLITE_DATASETS_ROOT is not set, and the selected lanes include a" >&2
+    echo "dataset-consuming lane (flight-tests / legacy-heuristics). Export the" >&2
+    echo "absolute root printed by:" >&2
+    echo "  bash test-data/scripts/fetch-datasets.sh" >&2
+    echo "Or select only the compile-only lanes (feature-iso-parquet," >&2
+    echo "feature-iso-delta-scan), which need no corpus." >&2
+    exit 2
+  fi
+  case "$DATASETS" in
+    /*) ;;
+    *) echo "CQLITE_DATASETS_ROOT must be ABSOLUTE (got: $DATASETS)" >&2; exit 2 ;;
+  esac
+else
+  # A root is still VALIDATED if one is present — an exported relative root is a
+  # fail-closed error everywhere else in this repo (#3148) and must not become
+  # acceptable just because this run does not read it.
+  case "${DATASETS:-/}" in
+    /*) ;;
+    *) echo "CQLITE_DATASETS_ROOT must be ABSOLUTE (got: $DATASETS)" >&2; exit 2 ;;
+  esac
+  echo "note: no dataset-consuming lane selected; CQLITE_DATASETS_ROOT not required" >&2
 fi
-case "$DATASETS" in
-  /*) ;;
-  *) echo "CQLITE_DATASETS_ROOT must be ABSOLUTE (got: $DATASETS)" >&2; exit 2 ;;
-esac
 
 # THE SUBJECT MUST BE THE CODE IN FRONT OF YOU (roborev round-2 finding 1). The
 # throwaway worktree is created from committed HEAD, so any UNCOMMITTED lane change in
