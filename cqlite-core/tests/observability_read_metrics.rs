@@ -450,7 +450,11 @@ async fn exercise_read_surfaces(fx: &Fixture, mc: &testing::MetricsCapture) {
     );
 }
 
+// Serialized against the sibling case below: the capture harness's meter provider is
+// process-global with DELTA temporality, so two metric-asserting tests running
+// concurrently would land in each other's collect window and break an exact total.
 #[tokio::test(flavor = "multi_thread")]
+#[serial_test::serial(read_metrics)]
 async fn read_path_emits_rows_bytes_partitions_and_duration() {
     let mc = testing::metrics_capture();
     // BIG (`nb`) windowed scan plane and BTI (`da`) trie walk are separate decode
@@ -461,4 +465,205 @@ async fn read_path_emits_rows_bytes_partitions_and_duration() {
     // Data.db payload and must be counted, under the bounded `compression = "none"`
     // label. Neither fixture above can see this — both are compressed.
     exercise_read_surfaces(&UNCOMPRESSED, &mc).await;
+}
+
+// ---------------------------------------------------------------------------
+// Cross-generation point read: ONE logical read is ONE metered operation
+// (issue #1701, roborev B1)
+// ---------------------------------------------------------------------------
+
+/// A logical point read may probe several SSTable generations of one table.
+/// `SSTableManager::get` used to call the METERED per-reader lookup, so one `get`
+/// emitted one `cqlite.read.duration` sample PER CANDIDATE and counted a row once per
+/// matching generation instead of once per reconciled result — a metric overstating
+/// both the read rate and the read count.
+///
+/// # Why this fixture is CQLite-written, deliberately
+///
+/// No COMMITTED corpus table carries more than one generation (the multi-generation
+/// tables in the fetched corpus are not in the checkout), so the only fixture that is
+/// guaranteed present in EVERY checkout is one this test builds. That is sound here
+/// because the property under test is METRIC ACCOUNTING over a known number of
+/// generations, not an on-disk framing/encoding property — the case #3042 reserves
+/// for Cassandra-written bytes. A CQLite-written SSTable cannot make this assertion
+/// pass vacuously: the generation COUNT is verified on disk, and the row/duration
+/// counts come from the production emission path either way.
+#[cfg(feature = "write-support")]
+#[tokio::test(flavor = "multi_thread")]
+#[serial_test::serial(read_metrics)]
+async fn a_cross_generation_point_read_is_one_metered_operation() {
+    use cqlite_core::schema::parse_cql_schema;
+    use cqlite_core::storage::sstable::SSTableManager;
+    use cqlite_core::storage::write_engine::{
+        CellOperation, Mutation, PartitionKey, WriteEngine, WriteEngineConfig,
+    };
+    use cqlite_core::types::Value;
+
+    const KS: &str = "read_metrics_ks";
+    const TBL: &str = "items";
+
+    let mc = testing::metrics_capture();
+    let tmp = tempfile::TempDir::new().expect("temp dir");
+    let data_dir = tmp.path().join("data");
+    let wal_dir = tmp.path().join("wal");
+    std::fs::create_dir_all(&data_dir).expect("create data dir");
+    std::fs::create_dir_all(&wal_dir).expect("create wal dir");
+
+    let schema_cql = format!("CREATE TABLE {KS}.{TBL} (\n  id int PRIMARY KEY,\n  name text\n);\n");
+    let schema = parse_cql_schema(&schema_cql).expect("parse fixture schema");
+
+    let write_row = |id: i32| {
+        Mutation::new(
+            cqlite_core::storage::write_engine::TableId::new(KS, TBL),
+            PartitionKey::single("id", Value::Integer(id)),
+            None,
+            vec![CellOperation::Write {
+                column: "name".to_string(),
+                value: Value::text(format!("row-{id}")),
+            }],
+            100 + id as i64,
+            None,
+        )
+    };
+
+    // Two flushes, no compaction => two generations the point read must walk.
+    {
+        let config = WriteEngineConfig::new(data_dir.clone(), wal_dir.clone(), schema.clone());
+        let mut engine = WriteEngine::new(config).expect("write engine");
+        for id in 1..=4 {
+            engine.write(write_row(id)).expect("write gen1 row");
+        }
+        engine
+            .flush()
+            .await
+            .expect("flush gen1")
+            .expect("gen1 produced no SSTable");
+        for id in 5..=8 {
+            engine.write(write_row(id)).expect("write gen2 row");
+        }
+        engine
+            .flush()
+            .await
+            .expect("flush gen2")
+            .expect("gen2 produced no SSTable");
+        engine.close().await.expect("close engine");
+    }
+
+    let sstable_dir = data_dir.join(KS).join(TBL);
+    let generations = std::fs::read_dir(&sstable_dir)
+        .expect("read sstable dir")
+        .filter_map(|e| e.ok())
+        .filter(|e| e.file_name().to_string_lossy().ends_with("-Data.db"))
+        .count();
+    assert_eq!(
+        generations,
+        2,
+        "the fixture must hold exactly 2 generations for this case to say anything \
+         about per-generation double counting (saw {generations} in {})",
+        sstable_dir.display()
+    );
+
+    let config = Config::default();
+    let platform = Arc::new(Platform::new(&config).await.expect("platform"));
+    let manager = SSTableManager::new(
+        &data_dir,
+        &config,
+        platform,
+        #[cfg(feature = "state_machine")]
+        None,
+    )
+    .await
+    .expect("open the two-generation table");
+    let tid = TableId::new(format!("{KS}.{TBL}"));
+
+    // Learn a present partition key through the public scan surface (outside any
+    // collect window, so it contributes no metrics to the assertions below).
+    let scanned = manager
+        .scan(&tid, None, None, None, Some(&schema))
+        .await
+        .expect("scan the two-generation table");
+    assert!(
+        scanned.len() >= 8,
+        "both generations' rows must be readable before metering is asserted (saw {})",
+        scanned.len()
+    );
+    let present_key = scanned
+        .last()
+        .map(|(k, _)| k.clone())
+        .expect("a present partition key");
+
+    // --- A PRESENT key: one operation, one row, one partition ----------------
+    mc.reset();
+    let row = manager
+        .get(&tid, &present_key)
+        .await
+        .expect("cross-generation point read");
+    let hit = mc.flush_and_collect();
+    assert!(row.is_some(), "the learned key must resolve a row");
+    assert_eq!(
+        histogram_recordings(&hit, catalog::READ_DURATION),
+        1,
+        "ONE logical point read must record EXACTLY ONE cqlite.read.duration sample, \
+         whatever the number of generations it probed; points: {:?}",
+        hit.find(catalog::READ_DURATION).map(|m| &m.points)
+    );
+    assert_eq!(
+        hit.counter_sum(catalog::READ_ROWS),
+        1.0,
+        "the RECONCILED result is one row, even when several generations match; \
+         points: {:?}",
+        hit.find(catalog::READ_ROWS).map(|m| &m.points)
+    );
+    assert_eq!(
+        hit.counter_sum(catalog::READ_PARTITIONS),
+        1.0,
+        "one partition; points: {:?}",
+        hit.find(catalog::READ_PARTITIONS).map(|m| &m.points)
+    );
+    // Format-agnostic at this grain: the generations of one table need not share an
+    // on-disk format, so the emission must carry NO `sstable.format` label rather
+    // than an arbitrarily-picked one.
+    for name in [
+        catalog::READ_ROWS,
+        catalog::READ_PARTITIONS,
+        catalog::READ_DURATION,
+    ] {
+        let points = hit.find(name).map(|m| m.points.clone()).unwrap_or_default();
+        assert!(
+            !points.is_empty() && points.iter().all(|p| p.attributes.is_empty()),
+            "{name} from a CROSS-GENERATION read must carry no attributes (a single \
+             format label would be a fabrication); points: {points:?}"
+        );
+    }
+
+    // --- An ABSENT key: still exactly ONE operation ---------------------------
+    // This is the deterministic shape of the defect: absence probes EVERY generation,
+    // so the pre-fix code emitted one duration sample per candidate (2 here) for one
+    // logical read. A read that resolves absence still reports its latency, with zero
+    // rows — dropping it would bias the distribution toward hits.
+    let absent_key = RowKey::new(987_654_321i32.to_be_bytes().to_vec());
+    mc.reset();
+    let missing = manager
+        .get(&tid, &absent_key)
+        .await
+        .expect("absent-key point read");
+    let miss = mc.flush_and_collect();
+    assert!(missing.is_none(), "the crafted key must be absent");
+    assert_eq!(
+        histogram_recordings(&miss, catalog::READ_DURATION),
+        1,
+        "an ABSENT-key read across 2 generations is still ONE operation and must \
+         record exactly ONE duration sample; points: {:?}",
+        miss.find(catalog::READ_DURATION).map(|m| &m.points)
+    );
+    assert_eq!(
+        miss.counter_sum(catalog::READ_ROWS),
+        0.0,
+        "an absent key delivered no rows"
+    );
+    assert_eq!(
+        miss.counter_sum(catalog::READ_PARTITIONS),
+        0.0,
+        "an absent key touched no partition"
+    );
 }
