@@ -1799,6 +1799,148 @@ else
   bad "1699-lite-unchanged: LITE_COMPONENTS gained$leaked — --lite is the fast loop, not the gate of record"
 fi
 
+# --- 17. #1699: `-D warnings` in the new lanes cannot be silently switched off -------
+#
+# roborev round-5 finding (Medium). `env RUSTFLAGS="-D warnings" cargo …` is IGNORED
+# whenever CARGO_ENCODED_RUSTFLAGS is present, because cargo reads the encoded variable
+# first — so a lane whose entire warning-class guard rides on RUSTFLAGS enforces NOTHING
+# in such an environment, while its SUMMARY line stays green. MEASURED, not argued: with
+# `CARGO_ENCODED_RUSTFLAGS=""` set, a crate with an unused variable built rc=0 under the
+# old form and rc=101 through `_deny_warnings`. Even an EMPTY encoded value suppresses
+# it, which is the quietest possible route to a vacuous guard.
+#
+# These are STRUCTURAL asserts, deliberately. A behavioural one would need a real cargo
+# build (the measurement above), which does not belong in a sub-second self-test; and the
+# regression to guard is textual anyway — somebody reintroducing `env RUSTFLAGS=` on one
+# of these invocations because it reads as equivalent.
+if awk '/^_deny_warnings\(\) \{/,/^\}/' "$GATE" | grep -q 'CARGO_ENCODED_RUSTFLAGS'; then
+  ok "1699-denywarn-helper: _deny_warnings exists and accounts for CARGO_ENCODED_RUSTFLAGS"
+else
+  bad "1699-denywarn-helper: _deny_warnings is missing or ignores CARGO_ENCODED_RUSTFLAGS — RUSTFLAGS alone is silently inert when the encoded form is set"
+fi
+
+# Both branches must be present: APPEND when the operator set flags (dropping them would
+# trade one silent behaviour change for another), and UNSET when they did not (an
+# empty-but-set value still counts as present to cargo).
+dw_body="$tmp/1699-denywarn-body.txt"
+awk '/^_deny_warnings\(\) \{/,/^\}/' "$GATE" > "$dw_body"
+if grep -q 'env -u CARGO_ENCODED_RUSTFLAGS' "$dw_body"; then
+  ok "1699-denywarn-unset: the plain branch UNSETS CARGO_ENCODED_RUSTFLAGS (an empty-but-set value would suppress RUSTFLAGS)"
+else
+  bad "1699-denywarn-unset: the plain branch does not unset CARGO_ENCODED_RUSTFLAGS — an empty-but-set value silently suppresses -D warnings"
+fi
+if grep -q '\${CARGO_ENCODED_RUSTFLAGS}' "$dw_body"; then
+  ok "1699-denywarn-append: the encoded branch APPENDS to the operator's flags rather than discarding them"
+else
+  bad "1699-denywarn-append: the encoded branch does not preserve the operator's existing flags"
+fi
+
+# The four lanes' cargo invocations must go THROUGH the helper. This is the assert that
+# actually stops the regression: the helper being correct is worthless if a lane bypasses
+# it. Scoped to the two lane functions so the pre-existing clippy component (which has
+# the same latent exposure, filed separately) does not make this assert fail for
+# something outside this change.
+for fn_ in run_legacy_heuristics run_feature_iso; do
+  body_="$tmp/1699-lanefn-$fn_.txt"
+  awk -v f="^$fn_\\\\(\\\\) \\\\{" '$0 ~ f, /^\}/' "$GATE" > "$body_"
+  if [ ! -s "$body_" ]; then
+    bad "1699-denywarn-scope: could not extract $fn_ from the gate — the extraction itself broke, so the asserts below would pass vacuously"
+    continue
+  fi
+  if grep -q '_deny_warnings' "$body_"; then
+    ok "1699-denywarn-use: $fn_ compiles through _deny_warnings"
+  else
+    bad "1699-denywarn-use: $fn_ does not use _deny_warnings — its -D warnings guard is inert under CARGO_ENCODED_RUSTFLAGS"
+  fi
+  # The oracle must read CODE, not PROSE. First cut matched the lane's own `echo ">>>
+  # RUSTFLAGS=-D warnings cargo build …"` progress line and its explanatory comments, and
+  # FAILED a correct lane — the #3312 shape (a decision made from a stream carrying both
+  # control tokens and someone else's payload), here in the false-FAIL direction. So
+  # comments and echoed strings are removed before the match, and the assignment must sit
+  # in COMMAND POSITION (line start or after `env`/`&&`/`||`/`;`/`|`/`(`).
+  code_="$tmp/1699-lanefn-$fn_-code.txt"
+  sed -e 's/[[:space:]]*#.*$//' -e '/^[[:space:]]*echo[[:space:]]/d' "$body_" > "$code_"
+  if grep -qE '(^|[;&|(][[:space:]]*|[[:space:]]env[[:space:]]+)RUSTFLAGS=' "$code_"; then
+    bad "1699-denywarn-bare: $fn_ sets RUSTFLAGS directly in command position — that form is silently ignored when CARGO_ENCODED_RUSTFLAGS is set; route it through _deny_warnings"
+  else
+    ok "1699-denywarn-bare: $fn_ sets no bare RUSTFLAGS in command position"
+  fi
+done
+
+# --- 18. #1699: the co-required-feature census counts TEST BODIES, not cfg sites ------
+#
+# roborev round-5 finding (Low). The first census grepped a single-line, fixed-ORDER cfg
+# pattern and counted MATCHING ATTRIBUTES, so a gated `use` import was reported as an
+# omitted test body (3 claimed, 2 real) while a reordered or multi-line cfg was missed
+# entirely. This lane's whole deliverable is an accurate declaration of what it does not
+# run, so a census that miscounts its own gap is the defect — and both error directions
+# matter, over- and under-report.
+#
+# Asserted BEHAVIOURALLY against fixtures, because the shapes are exactly what a textual
+# assert would miss. The helper is extracted rather than sourced: agent-gate.sh dispatches
+# when sourced.
+coreq_h="$tmp/1699-coreq-helper.sh"
+awk '/^_legacy_coreq_sites\(\) \{/,/^\}/' "$GATE" > "$coreq_h"
+if [ -s "$coreq_h" ]; then
+  ok "1699-coreq-extract: extracted _legacy_coreq_sites from the real script"
+  # shellcheck disable=SC1090
+  . "$coreq_h"
+  coreq_fx="$tmp/1699-coreq-fixture.rs"
+  cat > "$coreq_fx" <<'RSFX'
+#[cfg(all(feature = "legacy-heuristics", feature = "absent-one"))]
+use some::Import;
+
+#[cfg(all(feature = "absent-one", feature = "legacy-heuristics"))]
+#[test]
+fn reordered_is_found() {}
+
+#[cfg(all(
+    feature = "legacy-heuristics",
+    feature = "absent-two"
+))]
+#[tokio::test]
+async fn multiline_is_found() {}
+
+#[cfg(all(feature = "legacy-heuristics", not(feature = "absent-one")))]
+#[test]
+fn negated_is_not_guessed() {}
+
+#[cfg(all(feature = "legacy-heuristics", feature = "present-one"))]
+#[test]
+fn enabled_coreq_is_no_gap() {}
+RSFX
+  coreq_out="$tmp/1699-coreq-out.txt"
+  _legacy_coreq_sites "$coreq_fx" " default legacy-heuristics present-one " > "$coreq_out" 2>/dev/null
+  n_testfn=$(awk -F'\t' '$1=="fn" && $2=="1"' "$coreq_out" | wc -l | tr -d ' ')
+  n_item=$(awk -F'\t' '$1=="item"' "$coreq_out" | wc -l | tr -d ' ')
+  n_skip=$(awk -F'\t' '$1=="skip"' "$coreq_out" | wc -l | tr -d ' ')
+  n_all=$(wc -l < "$coreq_out" | tr -d ' ')
+  # 2 gated TEST fns (reordered + multiline), 1 non-test item (the gated import),
+  # 1 negated site reported as unclassified, and the enabled co-req is NOT a gap at all.
+  if [ "$n_testfn" = "2" ]; then
+    ok "1699-coreq-testfn: 2 gated test fns found (reordered AND multiline cfg both parsed)"
+  else
+    bad "1699-coreq-testfn: expected 2 gated test fns, got $n_testfn — a reordered or multi-line cfg is being missed (under-report)"
+  fi
+  if [ "$n_item" = "1" ]; then
+    ok "1699-coreq-item: the gated import is classified as a non-test item, NOT an omitted test body"
+  else
+    bad "1699-coreq-item: expected 1 non-test gated item, got $n_item — the census is counting cfg sites as test bodies again (over-report)"
+  fi
+  if [ "$n_skip" = "1" ]; then
+    ok "1699-coreq-negated: a negated co-required cfg is reported as unclassified, never guessed"
+  else
+    bad "1699-coreq-negated: expected 1 unclassified negated site, got $n_skip — not(feature=...) means the body compiles when the feature is OFF, the opposite of a gap"
+  fi
+  if [ "$n_all" = "4" ]; then
+    ok "1699-coreq-enabled: an ENABLED co-required feature produces no record (it is not a gap)"
+  else
+    bad "1699-coreq-enabled: expected 4 records total, got $n_all — an enabled co-required feature is being reported as a gap"
+  fi
+else
+  bad "1699-coreq-extract: could NOT extract _legacy_coreq_sites — the extraction itself broke, so every census assert would pass vacuously"
+fi
+
 echo "----"
 echo "passed: $PASS  failed: $FAIL"
 [ "$FAIL" -eq 0 ]

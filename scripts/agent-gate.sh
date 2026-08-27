@@ -5933,6 +5933,86 @@ run_flight_tests() {
 # whose inline #[cfg(test)] bodies are gated the same way.
 #
 # No opt-out env var: the committed test files are never legitimately absent.
+# _legacy_coreq_sites — derive, STRUCTURALLY, the legacy-heuristics-gated cfg sites whose
+# OTHER co-required features are not enabled at this lane's feature set.
+#
+# roborev round-5 finding (Low): the first version grepped a single-line, FIXED-ORDER
+# attribute pattern and counted MATCHING ATTRIBUTES as "test bodies". Two consequences,
+# in opposite directions and both wrong for a census: the gated `use cqlite_core::Value`
+# import in database_interface_tests.rs was counted as a body, so the lane claimed THREE
+# omitted bodies where only TWO exist (over-report); and a reordered or multi-line cfg
+# was missed entirely (under-report — the permissive direction). In a change whose whole
+# deliverable is an ACCURATE declaration of what a lane does not run, a census that
+# miscounts its own gap IS the defect.
+#
+# So the attribute cluster is parsed rather than pattern-matched: attributes accumulate
+# until their parens balance (multi-line), `feature = "…"` tokens are collected in ANY
+# order, the attached item is classified from its own first code line (`fn` vs anything
+# else), and test-ness comes from an attribute whose path ENDS in `test` (`#[test]`,
+# `#[tokio::test]`) anywhere in the cluster — a path test, not a substring search, so a
+# feature named `test-util` cannot pose as one.
+#
+# A cfg carrying a NEGATED sub-expression is deliberately NOT classified: `not(feature =
+# "X")` means the body compiles when X is OFF, i.e. the opposite of a gap, and guessing
+# either way would be a silent miscount. Such sites are emitted as `skip` and REPORTED,
+# so the census can never quietly swallow a shape it does not model.
+#
+# Emits one TAB-separated record per co-required site:
+#   <fn|item|skip> <TAB> <istest: 0|1> <TAB> <comma-separated missing features>
+_legacy_coreq_sites() { # _legacy_coreq_sites <file> <enabled-feature-list>
+  awk -v LH="legacy-heuristics" -v ENABLED=" $2 " '
+    function countch(str, ch,   n, i) {
+      n = 0
+      for (i = 1; i <= length(str); i++) if (substr(str, i, 1) == ch) n++
+      return n
+    }
+    function handle_attr(a,   path, tmp, m, has_lh, miss) {
+      path = a
+      sub(/^#\[[ \t]*/, "", path)
+      sub(/[ \t]*[(\]].*$/, "", path)
+      if (path ~ /(^|::)test$/) istest = 1
+      has_lh = 0; miss = ""
+      tmp = a
+      while (match(tmp, /feature[ \t]*=[ \t]*"[^"]+"/)) {
+        m = substr(tmp, RSTART, RLENGTH)
+        sub(/^feature[ \t]*=[ \t]*"/, "", m)
+        sub(/"$/, "", m)
+        if (m == LH) has_lh = 1
+        else if (index(ENABLED, " " m " ") == 0 && index(" " miss ",", " " m ",") == 0)
+          miss = (miss == "" ? m : miss "," m)
+        tmp = substr(tmp, RSTART + RLENGTH)
+      }
+      if (!has_lh || miss == "") return
+      if (a ~ /not[ \t]*\(/) { printf "skip\t0\t%s\n", miss; return }
+      armed = 1; missing = miss
+    }
+    {
+      t = $0
+      sub(/^[ \t]+/, "", t)
+      if (collecting) {
+        buf = buf " " t
+        depth += countch(t, "(") - countch(t, ")")
+        if (depth <= 0) { collecting = 0; handle_attr(buf) }
+        next
+      }
+      if (t ~ /^#\[/) {
+        buf = t
+        depth = countch(t, "(") - countch(t, ")")
+        if (depth > 0) collecting = 1; else handle_attr(buf)
+        next
+      }
+      if (t ~ /^\/\// || t ~ /^$/) next   # comments and blank lines keep the cluster intact
+      if (armed) {
+        if (t ~ /^(pub[ \t]+)?(pub\([^)]*\)[ \t]+)?(const[ \t]+)?(async[ \t]+)?(unsafe[ \t]+)?(extern[ \t]+("[^"]*"[ \t]+)?)?fn[ \t]/)
+          printf "fn\t%d\t%s\n", istest, missing
+        else
+          printf "item\t%d\t%s\n", istest, missing
+      }
+      armed = 0; istest = 0; missing = ""
+    }
+  ' "$1"
+}
+
 run_legacy_heuristics() {
   local name=legacy-heuristics
   if [ -n "$ONLY" ] && ! grep -qw "$name" <<<"${ONLY//,/ }"; then
@@ -6028,7 +6108,7 @@ run_legacy_heuristics() {
   # pass that would actually execute them. It is a third full compile of cqlite-core at a
   # third feature set — measured cost for the existing single pass is ~292s — and the
   # general "experimental executes nowhere" hole is #3373's subject, not this lane's.
-  local lh_enabled coreq="" coreq_n=0 f_ tok
+  local lh_enabled coreq="" coreq_n=0 f_
   if ! lh_enabled=$(_resolved_package_features cqlite-core --features legacy-heuristics); then
     status=FAIL
     {
@@ -6041,29 +6121,61 @@ run_legacy_heuristics() {
     echo ">>> [$name] $status ($((end - start))s)"
     return 0
   fi
+  local lh_testfn=0 lh_other=0 lh_skip=0 _sites _k _it _ms _m
   for f_ in $names; do
     [ -r "$tests_dir/$f_.rs" ] || continue
-    while IFS= read -r tok; do
-      [ -n "$tok" ] || continue
-      case "$lh_enabled" in
-        *" $tok "*) ;;
-        *) coreq_n=$((coreq_n + 1))
-           case " $coreq " in *" $tok "*) ;; *) coreq="$coreq $tok" ;; esac ;;
+    # A census that CANNOT be taken is never reported as empty (the lane's standing rule):
+    # a failed derivation FAILs and names the derivation.
+    if ! _sites=$(_legacy_coreq_sites "$tests_dir/$f_.rs" "$lh_enabled"); then
+      status=FAIL
+      {
+        echo "[$name] FAIL-CLOSED: the co-required-feature census could not be derived from"
+        echo "        $tests_dir/$f_.rs. The derivation, not the feature, is what failed."
+        echo "        A census that cannot be taken is not reported as empty."
+      } | tee "$log"
+      end=$(date +%s)
+      record_result "$name" "$status" "$((end - start))"
+      echo ">>> [$name] $status ($((end - start))s)"
+      return 0
+    fi
+    while IFS=$'\t' read -r _k _it _ms; do
+      [ -n "$_k" ] || continue
+      case "$_k" in
+        fn)   if [ "$_it" = "1" ]; then lh_testfn=$((lh_testfn + 1)); else lh_other=$((lh_other + 1)); fi ;;
+        item) lh_other=$((lh_other + 1)) ;;
+        skip) lh_skip=$((lh_skip + 1)) ;;
       esac
+      for _m in $(echo "$_ms" | tr ',' ' '); do
+        case " $coreq " in *" $_m "*) ;; *) coreq="$coreq $_m" ;; esac
+      done
     done <<EOF
-$(grep -oE '#\[cfg\(all\(feature[[:space:]]*=[[:space:]]*"legacy-heuristics",[[:space:]]*feature[[:space:]]*=[[:space:]]*"[^"]+"\)\)\]' "$tests_dir/$f_.rs" 2>/dev/null \
-   | sed -E 's/.*,[[:space:]]*feature[[:space:]]*=[[:space:]]*"([^"]+)"\)\)\]$/\1/')
+$_sites
 EOF
   done
+  coreq_n=$((lh_testfn + lh_other))
   local -a lh_census=()
-  if [ "$coreq_n" -gt 0 ]; then
-    local _body_word="bodies"; [ "$coreq_n" -eq 1 ] && _body_word="body"
+  if [ "$lh_testfn" -gt 0 ] || [ "$lh_other" -gt 0 ] || [ "$lh_skip" -gt 0 ]; then
     lh_census+=("COVERAGE CENSUS — WHAT THIS LANE DOES NOT EXECUTE:")
-    lh_census+=("  $coreq_n legacy-heuristics-gated test $_body_word ALSO require$coreq, which this lane")
-    lh_census+=("  does NOT enable, so they compile out and are NOT EXECUTED here.")
-    lh_census+=("  The #2039 zero-tests guard CANNOT detect this: sibling ungated tests in the same")
-    lh_census+=("  target keep its count nonzero.")
-    lh_census+=("  Tracked by #3373 (experimental-gated tests execute in NO lane at all).")
+    if [ "$lh_testfn" -gt 0 ]; then
+      local _tw="test fns"; [ "$lh_testfn" -eq 1 ] && _tw="test fn"
+      lh_census+=("  $lh_testfn legacy-heuristics-gated $_tw ALSO require$coreq, which this lane")
+      lh_census+=("  does NOT enable, so they compile out and are NOT EXECUTED here.")
+      lh_census+=("  The #2039 zero-tests guard CANNOT detect this: sibling ungated tests in the same")
+      lh_census+=("  target keep its count nonzero.")
+      lh_census+=("  Tracked by #3373 (experimental-gated tests execute in NO lane at all).")
+    fi
+    if [ "$lh_other" -gt 0 ]; then
+      local _ow="items"; [ "$lh_other" -eq 1 ] && _ow="item"
+      # Counted and reported SEPARATELY, never folded into the test-body number: a gated
+      # import or helper compiling out is support code following its callers, not omitted
+      # coverage. Folding them together is what made the round-4 census over-report.
+      lh_census+=("  ($lh_other further gated $_ow — imports / non-test fns — also compile out here;")
+      lh_census+=("   support code following its callers, NOT omitted coverage, so not counted above.)")
+    fi
+    if [ "$lh_skip" -gt 0 ]; then
+      lh_census+=("  $lh_skip co-required cfg site(s) carry a NEGATED sub-expression and were NOT")
+      lh_census+=("  classified — reported rather than guessed, so this census cannot under-report.")
+    fi
   else
     lh_census+=("co-required-feature census: 0 — every legacy-heuristics-gated body is reachable at this feature set")
   fi
@@ -6092,8 +6204,10 @@ EOF
   # lane exists to catch at this feature set (#1981's dead-code shape: a cfg(test) helper
   # whose only caller is gated out) would have passed silently in exactly the half of the
   # lane that compiles test code. `env` both invocations so neither half is unguarded.
-  if env RUSTFLAGS="-D warnings" cargo build --package cqlite-core --features legacy-heuristics >>"$log" 2>&1 \
-      && env RUSTFLAGS="-D warnings" CQLITE_DATASETS_ROOT="$CQLITE_DATASETS_ROOT" \
+  # Both halves go through _deny_warnings, which is what makes `-D warnings` real: a bare
+  # `env RUSTFLAGS=...` is silently ignored when CARGO_ENCODED_RUSTFLAGS is set (round-5).
+  if _deny_warnings cargo build --package cqlite-core --features legacy-heuristics >>"$log" 2>&1 \
+      && _deny_warnings env CQLITE_DATASETS_ROOT="$CQLITE_DATASETS_ROOT" \
         cargo test --no-fail-fast --package cqlite-core --features legacy-heuristics --lib "${targets[@]}" >>"$log" 2>&1; then
     # Green cargo exit is not sufficient — see the guard's own doc block.
     # The guard writes its verdict to stderr only, so `2>>` lands the message in the
@@ -6167,8 +6281,40 @@ EOF
 # owns that, at the default feature set).
 #
 # No opt-out env var: a committed feature is never legitimately absent.
+# _deny_warnings — run a cargo invocation with `-D warnings` ACTUALLY in effect.
+#
+# roborev round-5 finding (Medium): `env RUSTFLAGS="-D warnings" cargo …` is SILENTLY
+# INERT whenever CARGO_ENCODED_RUSTFLAGS is present in the environment, because cargo
+# reads the ENCODED variable first and ignores RUSTFLAGS entirely when it is set. Every
+# lane in this issue exists to stop a guard that looks enforced from enforcing nothing,
+# so a warnings-as-errors guard an inherited env var can switch off is precisely the
+# defect class — and this file already knows the precedence rule (the managed-config
+# check near the top tests BOTH variables for exactly this reason).
+#
+# When the encoded form is present it is APPENDED to, not replaced: dropping an
+# operator's flags would trade one silent behaviour change for another, and the
+# question here is only whether `-D warnings` is added. cargo's element separator is
+# US (\x1f), and `-D warnings` is TWO elements (the space-split form RUSTFLAGS would
+# have produced). The append is announced on stderr — which every caller redirects into
+# its component log — so a non-default flag environment is visible rather than assumed.
+#
+# The plain branch UNSETS the encoded variable rather than leaving it: an empty-but-set
+# value is still "present" to cargo and would suppress RUSTFLAGS, which is the same
+# vacuous outcome by a quieter route.
+_deny_warnings() {
+  if [ -n "${CARGO_ENCODED_RUSTFLAGS:-}" ]; then
+    local _us
+    _us=$(printf '\037')
+    echo "[deny-warnings] CARGO_ENCODED_RUSTFLAGS is set and takes precedence over RUSTFLAGS;" >&2
+    echo "[deny-warnings] appending -D warnings to it so the guard is not silently inert." >&2
+    CARGO_ENCODED_RUSTFLAGS="${CARGO_ENCODED_RUSTFLAGS}${_us}-D${_us}warnings" "$@"
+  else
+    env -u CARGO_ENCODED_RUSTFLAGS RUSTFLAGS="-D warnings" "$@"
+  fi
+}
+
 run_feature_iso() { # run_feature_iso <feature>
-  RUSTFLAGS="-D warnings" cargo test --package cqlite-core \
+  _deny_warnings cargo test --package cqlite-core \
     --no-default-features --features "all-compression,$1" --lib --no-run
 }
 
