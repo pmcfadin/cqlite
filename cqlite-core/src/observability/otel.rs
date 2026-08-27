@@ -13,8 +13,8 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::OnceLock;
 use std::time::Duration;
 
-use super::otel_instruments::instruments;
-use opentelemetry::metrics::Meter;
+use super::otel_instruments::{instruments, Instruments};
+use opentelemetry::metrics::{Counter, Gauge, Histogram, Meter};
 use opentelemetry::trace::TracerProvider as _;
 use opentelemetry::{global, KeyValue};
 use opentelemetry_otlp::{MetricExporter, Protocol, SpanExporter, WithExportConfig};
@@ -277,14 +277,17 @@ pub(super) fn meter() -> &'static Meter {
     METER.get_or_init(|| global::meter(SCOPE))
 }
 
-/// Add to a u64 counter identified by a catalog name.
+/// Resolve a catalog metric name to its pre-built u64 counter.
 ///
-/// Catalog names use the cached instrument; unknown names build an ad-hoc
-/// counter so call sites never silently drop data (catalog names should always
-/// be used).
-pub(crate) fn add_counter(name: &'static str, value: u64, attributes: &[KeyValue]) {
-    let i = instruments();
-    let counter = match name {
+/// **ONE implementation, two callers** (issue #1705, roborev B2): the emit path
+/// [`add_counter`] below, and the registration-completeness guard in `otel_tests.rs`
+/// which asks this function to RESOLVE every catalogued name — an affirmative
+/// runtime measurement of "an instrument exists for this name", rather than a text
+/// search for a mention of it. `None` means the name has no dedicated instrument
+/// and the caller falls back to an ad-hoc one, so a guard can distinguish a wired
+/// metric from an unwired one by calling this.
+pub(super) fn counter_for<'a>(i: &'a Instruments, name: &str) -> Option<&'a Counter<u64>> {
+    Some(match name {
         catalog::READ_ROWS => &i.read_rows,
         catalog::READ_BYTES => &i.read_bytes,
         catalog::READ_PARTITIONS => &i.read_partitions,
@@ -330,18 +333,26 @@ pub(crate) fn add_counter(name: &'static str, value: u64, attributes: &[KeyValue
         catalog::WARM_CACHE_EVICTS => &i.warm_cache_evicts,
         catalog::WARM_CACHE_REFRESH => &i.warm_cache_refresh,
         catalog::FLIGHT_ADMISSION_REJECTED_TOTAL => &i.flight_admission_rejected_total,
-        _ => {
-            meter().u64_counter(name).build().add(value, attributes);
-            return;
-        }
-    };
-    counter.add(value, attributes);
+        _ => return None,
+    })
 }
 
-/// Record into an f64 histogram identified by a catalog name.
-pub(crate) fn record_histogram(name: &'static str, value: f64, attributes: &[KeyValue]) {
-    let i = instruments();
-    let hist = match name {
+/// Add to a u64 counter identified by a catalog name.
+///
+/// Catalog names use the cached instrument; unknown names build an ad-hoc
+/// counter so call sites never silently drop data (catalog names should always
+/// be used).
+pub(crate) fn add_counter(name: &'static str, value: u64, attributes: &[KeyValue]) {
+    match counter_for(instruments(), name) {
+        Some(counter) => counter.add(value, attributes),
+        None => meter().u64_counter(name).build().add(value, attributes),
+    }
+}
+
+/// Resolve a catalog metric name to its pre-built f64 histogram. Shared by the
+/// emit path and the registration guard — see [`counter_for`].
+pub(super) fn histogram_for<'a>(i: &'a Instruments, name: &str) -> Option<&'a Histogram<f64>> {
+    Some(match name {
         catalog::READ_DURATION => &i.read_duration,
         catalog::QUERY_DURATION => &i.query_duration,
         catalog::COMPACTION_DURATION => &i.compaction_duration,
@@ -354,21 +365,25 @@ pub(crate) fn record_histogram(name: &'static str, value: f64, attributes: &[Key
         catalog::RPC_DURATION => &i.rpc_duration,
         catalog::RPC_PHASE_DURATION => &i.rpc_phase_duration,
         catalog::FLIGHT_ADMISSION_WAIT_SECONDS => &i.flight_admission_wait_seconds,
-        _ => {
-            meter()
-                .f64_histogram(name)
-                .build()
-                .record(value, attributes);
-            return;
-        }
-    };
-    hist.record(value, attributes);
+        _ => return None,
+    })
 }
 
-/// Record an i64 gauge identified by a catalog name.
-pub(crate) fn record_gauge(name: &'static str, value: i64, attributes: &[KeyValue]) {
-    let i = instruments();
-    let gauge = match name {
+/// Record into an f64 histogram identified by a catalog name.
+pub(crate) fn record_histogram(name: &'static str, value: f64, attributes: &[KeyValue]) {
+    match histogram_for(instruments(), name) {
+        Some(hist) => hist.record(value, attributes),
+        None => meter()
+            .f64_histogram(name)
+            .build()
+            .record(value, attributes),
+    }
+}
+
+/// Resolve a catalog metric name to its pre-built i64 gauge. Shared by the emit
+/// path and the registration guard — see [`counter_for`].
+pub(super) fn gauge_for<'a>(i: &'a Instruments, name: &str) -> Option<&'a Gauge<i64>> {
+    Some(match name {
         catalog::SSTABLES_OPEN => &i.sstables_open,
         catalog::READ_PARTITION_ACCESS_SAMPLE_DENOMINATOR => {
             &i.read_partition_access_sample_denominator
@@ -392,12 +407,16 @@ pub(crate) fn record_gauge(name: &'static str, value: i64, attributes: &[KeyValu
         catalog::FLIGHT_BLOCKING_TASKS_IN_USE => &i.flight_blocking_tasks_in_use,
         catalog::FLIGHT_TABLES_DISCOVERED => &i.flight_tables_discovered,
         catalog::FLIGHT_WARM_TABLES => &i.flight_warm_tables,
-        _ => {
-            meter().i64_gauge(name).build().record(value, attributes);
-            return;
-        }
-    };
-    gauge.record(value, attributes);
+        _ => return None,
+    })
+}
+
+/// Record an i64 gauge identified by a catalog name.
+pub(crate) fn record_gauge(name: &'static str, value: i64, attributes: &[KeyValue]) {
+    match gauge_for(instruments(), name) {
+        Some(gauge) => gauge.record(value, attributes),
+        None => meter().i64_gauge(name).build().record(value, attributes),
+    }
 }
 
 /// Mark the currently-active `tracing` span as errored and tag it with the
