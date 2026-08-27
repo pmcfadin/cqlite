@@ -319,10 +319,18 @@ function squash(x) { gsub(/[[:space:]]+/, " ", x); return ltrim(rtrim(x)) }
 # Blank out comments, preserving line structure and column positions, and record
 # for each line whether it STARTS in ordinary code (a line that begins inside a
 # string or a block comment can never open a crate-root declaration).
-function normalize(   i, s, out, j, c, c2, st, depth, hashes, k, cnt) {
-  st = "code"; depth = 0; hashes = 0
+#
+# It also records BRACE_MIN[i]: the LOWEST brace nesting depth the line reaches,
+# counting only braces in ordinary code (never inside a comment, a string, a raw
+# string or a char literal). Depth zero is what makes a declaration a CRATE-ROOT
+# declaration — leading whitespace does not, and Rust permits an indented top-level
+# item. Refusal I below is the only consumer; the two derivations keep their pinned
+# column-zero rule (see the comment there for why).
+function normalize(   i, s, out, j, c, c2, st, depth, hashes, k, cnt, bd, bmin) {
+  st = "code"; depth = 0; hashes = 0; bd = 0
   for (i = 1; i <= n; i++) {
     INCODE[i] = (st == "code") ? 1 : 0
+    bmin = bd
     s = L[i]; out = ""; j = 1
     while (j <= length(s)) {
       c = substr(s, j, 1); c2 = substr(s, j, 2)
@@ -334,6 +342,24 @@ function normalize(   i, s, out, j, c, c2, st, depth, hashes, k, cnt) {
           k = j + 1; hashes = 0
           while (substr(s, k, 1) == "#") { hashes++; k++ }
           if (substr(s, k, 1) == "\"") { out = out substr(s, j, k - j + 1); j = k + 1; st = "raw"; continue }
+        }
+        # A CHAR LITERAL can carry a brace (`'{'`), which would desync the counter
+        # below. This recognises only the two simple shapes `'x'` and `'\x'` and does
+        # NOT try to be a Rust lexer: a lifetime (`'a`) has no closing quote so it
+        # never matches, and `'\u{7f}'` falls through with its braces BALANCED, which
+        # costs the counter nothing. The text copied to `out` is unchanged, so the
+        # scan the two derivations read is byte-identical to before.
+        if (c == "'" && match(substr(s, j), /^'(\\.|[^'])'/)) {
+          out = out substr(s, j, RLENGTH); j += RLENGTH; continue
+        }
+        if (c == "{") bd++
+        else if (c == "}") {
+          bd--
+          if (bd < bmin) bmin = bd
+          # Depth below zero means the count is WRONG (a shape this is not a parser
+          # for), and a count that is wrong HIGH under-fires Refusal I — the silent
+          # direction. So an unreliable count makes every indented `pub mod` refuse.
+          if (bd < 0) BRACE_UNRELIABLE = 1
         }
         out = out c; j++
       } else if (st == "line") {
@@ -357,6 +383,7 @@ function normalize(   i, s, out, j, c, c2, st, depth, hashes, k, cnt) {
       # `st == "line"` ends with the line; block/str/raw carry over deliberately.
     }
     if (st == "line") st = "code"
+    BRACE_MIN[i] = bmin
     N[i] = rtrim(out)
   }
   if (st != "code") print "E\tcrate root ends inside a " st " (unterminated comment or string literal)"
@@ -472,6 +499,54 @@ END {
     }
   }
 
+  # --- Refusal I: an INDENTED `pub mod` at BRACE DEPTH ZERO.
+  #
+  # Rust does not require a top-level item to start at column zero, but every scan
+  # path above keys on column zero. So an indented `pub mod x;` whose module file
+  # carries an inner `#![cfg(...)]` is absent from S, absent from P AND absent from
+  # rustdoc: the two derivations AGREE (both derived nothing for it) while both are
+  # blind, the cross-check is satisfied, and the crate-root inconsistency this assert
+  # exists to catch passes GREEN. Same shape as Refusal U — a SHARED blind spot is
+  # not a disagreement — so it gets the same treatment: refuse, do not guess.
+  #
+  # WHY A REFUSAL AND NOT "COLLECT INDENTED DEPTH-0 DECLARATIONS TOO" (the choice, and
+  # its cost). Teaching S and P to collect by depth instead of by column is the more
+  # CORRECT reading, and it was rejected deliberately: it puts a hand-written brace
+  # counter underneath the primary collection rule of BOTH derivations, so a counter
+  # bug (this is a lexical scan, not a Rust parser — `'{'`, macro token trees, shapes
+  # nobody has thought of) becomes a blind spot the two derivations SHARE, which is
+  # exactly the defect class being fixed here and exactly what their mutual
+  # cross-check cannot see. Keeping S at its pinned "simplest rule that can be
+  # written" — column-zero, no depth, no attributes — is what makes the cross-check
+  # worth anything. So the depth counter is confined to THIS refusal, where its only
+  # authority is to decide whether to fire, and every branch of it is set to fire.
+  #
+  # DELIBERATELY OVER-APPROXIMATE, in the safe direction, in three ways: it fires on
+  # any depth-0 indented `pub mod` shape (statement, inline, split across lines); it
+  # uses the line's MINIMUM depth, so `    } pub mod x;` (genuinely crate-root) fires,
+  # at the price of also firing on the exotic `    pub mod inner; }` inside a block;
+  # and an unreliable count fires everything. Over-firing costs a loud FAIL with a
+  # one-word remedy (dedent it); under-firing costs a silent false PASS.
+  #
+  # It must NOT fire below depth 0: `mod outer { pub mod inner; }` is ordinary Rust,
+  # `inner` is not a crate-root declaration, and a refusal that reds correct code is
+  # a refusal agents learn to waive.
+  for (i = 1; i <= n; i++) {
+    if (!INCODE[i]) continue
+    t = N[i]
+    if (t == "" || t !~ /^[[:space:]]/) continue
+    if (!BRACE_UNRELIABLE && BRACE_MIN[i] != 0) continue
+    rest = t
+    while (match(rest, /pub[[:space:]]+mod([^A-Za-z0-9_]|$)/)) {
+      pre = (RSTART > 1) ? substr(rest, RSTART - 1, 1) : ""
+      tail = substr(rest, RSTART)
+      if (pre !~ /[A-Za-z0-9_]/) {
+        printf "I\tline %d: INDENTED crate-root (brace depth 0) `pub mod`: `%s`\n", i, squash(substr(tail, 1, 72))
+      }
+      rest = substr(rest, RSTART + RLENGTH)
+    }
+  }
+
   # --- Derivation P: the structured scan (attributes joined, same-line splits).
   CUR = 1
   while (CUR <= n) {
@@ -552,6 +627,17 @@ if grep -q '^U	' "$SCAN_RAW"; then
   fail "the crate root $LIB_RS_REL declares a public module in a form the crate-root scan does not handle (see above). The scan handles exactly one shape: the statement form \`pub mod NAME;\`.
        An INLINE module (\`pub mod NAME { ... }\`) can carry its own \`#![cfg(...)]\` INNER attribute — the gate hides inside the body while the crate root advertises the module unconditionally, which is the exact bypass this consistency assert exists to close. Both derivations are blind to the inline form, so they AGREE and the cross-check below cannot see it; the guard refuses rather than report a verdict it cannot support.
        Remedy: declare it as a FILE module — \`pub mod NAME;\` in $LIB_RS_REL plus NAME.rs (or NAME/mod.rs) — and put any cfg gate at the DECLARATION SITE (\`#[cfg(feature = \"...\")] pub mod NAME;\`), where the snapshot and this assert can both see it."
+fi
+
+# An INDENTED `pub mod` at brace depth zero. Also a blind spot the two derivations
+# SHARE (both key on column zero), so it too needs its own channel rather than the
+# cross-check, which by construction cannot see it.
+if grep -q '^I	' "$SCAN_RAW"; then
+  echo "" >&2
+  grep '^I	' "$SCAN_RAW" | cut -f2- >&2
+  fail "the crate root $LIB_RS_REL declares a public module on an INDENTED line at brace depth zero (see above). Rust accepts that as a top-level declaration; this scan does not read it — both of its derivations key on column zero, so they AGREE while both are blind, and a module whose file carries an inner \`#![cfg(...)]\` would then be advertised unconditionally by the crate root while being absent from the compiled crate, from rustdoc and from the snapshot. That is the exact bypass this consistency assert exists to close, so the guard refuses rather than report a verdict it cannot support.
+       (An indented \`pub mod\` NESTED inside \`mod outer { ... }\` is ordinary Rust and is NOT reported: what makes a declaration crate-root is brace depth zero, not column zero.)
+       Remedy: dedent it to column zero — \`pub mod NAME;\` — and put any cfg gate at the DECLARATION SITE (\`#[cfg(feature = \"...\")] pub mod NAME;\`), where the snapshot and this assert can both see it."
 fi
 
 DERIVED_DECLS="$WORK_DIR/decls.txt"
