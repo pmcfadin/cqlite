@@ -795,6 +795,97 @@ set -e
 echo "OK (22): a relative CARGO_TARGET_DIR resolves against the repo root — the guard inspects the tree cargo wrote"
 
 # ---------------------------------------------------------------------------
+# 23. RED — an INDENTED crate-root `pub mod NAME;` at BRACE DEPTH ZERO is a SHARED
+#     BLIND SPOT of the two derivations, exactly like the inline form (roborev r5 F1).
+#
+#     Rust does not require top-level declarations to sit at column zero, but EVERY
+#     crate-root scan path here skipped a line with leading whitespace. So an
+#     indented `pub mod x;` whose module file carries an inner `#![cfg(feature = …)]`
+#     was absent from derivation S, absent from derivation P **and** absent from
+#     rustdoc — the two scans therefore AGREED, the cross-check was satisfied, and the
+#     crate-root inconsistency this guard exists to catch passed GREEN.
+#
+#     MEASURED against the unfixed script: exit 0, i.e. a clean certification of a
+#     crate root that advertises a module the compiled crate does not have.
+# ---------------------------------------------------------------------------
+scratch_tree indented-mod; wt23="$SCRATCH"
+cat >"$wt23/cqlite-core/src/probe_indented_gated.rs" <<'RS'
+#![cfg(feature = "benchmarks")]
+//! Self-test-only probe (#1712 r5 F1): the gate sits in the MODULE FILE while the
+//! crate root advertises the module unconditionally — just INDENTED.
+
+/// Self-test-only probe.
+pub fn probe() {}
+RS
+cat >>"$wt23/cqlite-core/src/lib.rs" <<'RS'
+
+    /// Self-test-only probe (#1712 r5 F1): INDENTED, but at brace depth ZERO, so
+    /// this IS a crate-root declaration however it is laid out.
+    pub mod probe_indented_gated;
+RS
+set +e
+bash "$wt23/$GUARD_REL" >"$TMPROOT/case23.out" 2>&1
+case23_rc=$?
+set -e
+[ "$case23_rc" -ne 0 ] || fail_case "case 23 — an INDENTED crate-root \`pub mod NAME;\` whose module file hides a \`#![cfg]\` gate passed GREEN. Indentation is not depth: the declaration is at brace depth 0, so it is a crate-root declaration, and skipping it makes both derivations blind in the same place; got: $(cat "$TMPROOT/case23.out")"
+grep -q "probe_indented_gated" "$TMPROOT/case23.out" \
+  || fail_case "case 23 — the guard failed but never named the offending declaration; got: $(cat "$TMPROOT/case23.out")"
+grep -qE "line [0-9]+" "$TMPROOT/case23.out" \
+  || fail_case "case 23 — the diagnostic did not name the offending LINE, so an operator cannot act on it; got: $(cat "$TMPROOT/case23.out")"
+grep -qi "indent" "$TMPROOT/case23.out" \
+  || fail_case "case 23 — the diagnostic did not say the problem is the INDENTATION, so its remedy is not actionable; got: $(cat "$TMPROOT/case23.out")"
+echo "OK (23): an INDENTED crate-root \`pub mod NAME;\` at brace depth 0 makes the scan REFUSE"
+
+# ---------------------------------------------------------------------------
+# 24. GREEN — an indented `pub mod` NESTED inside a module block must stay green.
+#
+#     This case is the other half of 23 and is exactly as important. An indented
+#     `pub mod inner;` is perfectly ordinary Rust when it sits inside `mod outer { … }`
+#     — it is NOT a crate-root declaration, and a blanket "refuse any indented
+#     `pub mod`" would red every such crate. A refusal that fires on legitimate code
+#     gets waived, and a waived guard guards nothing; the property that decides a
+#     crate-root declaration is BRACE DEPTH ZERO, not column zero.
+#
+#     Both nested shapes are covered: the statement form (whose module lives in
+#     `probe_outer_block/`) and the inline form, which case 20's refusal must also
+#     keep ignoring below the crate root.
+# ---------------------------------------------------------------------------
+scratch_tree nested-indented-mod; wt24="$SCRATCH"
+mkdir -p "$wt24/cqlite-core/src/probe_outer_block"
+cat >"$wt24/cqlite-core/src/probe_outer_block/probe_inner_file.rs" <<'RS'
+//! Self-test-only probe (#1712 r5 F1): a nested module, reached only through a
+//! PRIVATE parent, so it changes no public surface.
+
+/// Self-test-only probe.
+pub fn probe() {}
+RS
+cat >>"$wt24/cqlite-core/src/lib.rs" <<'RS'
+
+// Self-test-only probe (#1712 r5 F1): legitimate INDENTED `pub mod` declarations,
+// nested inside a private module block and therefore at brace depth 1.
+mod probe_outer_block {
+    pub mod probe_inner_file;
+    pub mod probe_inner_inline {
+        /// Self-test-only probe.
+        pub fn probe() {}
+    }
+}
+RS
+set +e
+bash "$wt24/$GUARD_REL" >"$TMPROOT/case24.out" 2>&1
+case24_rc=$?
+set -e
+[ "$case24_rc" -eq 0 ] || {
+  echo "FAIL: case 24 — an indented \`pub mod\` NESTED inside \`mod outer { … }\` (brace depth 1)"
+  echo "      was rejected. That is ordinary Rust and not a crate-root declaration; the"
+  echo "      refusal must key on brace depth, not on leading whitespace, or it reds"
+  echo "      correct code and gets waived."
+  cat "$TMPROOT/case24.out"
+  exit 1
+}
+echo "OK (24): an indented \`pub mod\` nested inside a module block (brace depth 1) stays GREEN"
+
+# ---------------------------------------------------------------------------
 # 19. KILL SAFETY — cleanup must reclaim a registered worktree, BY EXPLICIT PATH,
 #     and must never touch a concurrent run's.
 #
@@ -879,4 +970,4 @@ rm -rf "$peer_root"
 echo "OK (19): cleanup reclaims a registered worktree by explicit path, and a fresh run leaves a concurrent run's alone"
 
 echo ""
-echo "PASS: test_pub_surface_guard.sh — all 22 cases (6 green, 14 reds, 1 usage, 1 kill-safety)"
+echo "PASS: test_pub_surface_guard.sh — all 24 cases (7 green, 15 reds, 1 usage, 1 kill-safety)"
