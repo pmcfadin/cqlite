@@ -80,7 +80,7 @@ jobs:
           echo "Changed files:"
           sed 's/^/  - /' changed-files.txt
 
-          relevant_regex='^(cqlite-core/src/observability/|cqlite-core/src/query/|cqlite-core/src/storage/|bindings/|cqlite-flight/|cqlite-core/benches/observability_overhead\.rs|cqlite-core/tests/observability_correctness\.rs|cqlite-core/tests/observability_no_otel_default\.rs|cqlite-core/Cargo\.toml|Cargo\.toml|Cargo\.lock|scripts/ci/observability_overhead\.sh|scripts/ci/observability_no_otel_default\.sh|\.github/workflows/observability-gate\.yml)'
+          relevant_regex='^(cqlite-core/src/observability/|cqlite-core/src/query/|cqlite-core/src/storage/|bindings/|cqlite-flight/|cqlite-core/benches/observability_overhead\.rs|cqlite-core/tests/observability_correctness\.rs|cqlite-core/tests/observability_read_metrics\.rs|cqlite-core/tests/observability_no_otel_default\.rs|cqlite-core/Cargo\.toml|Cargo\.toml|Cargo\.lock|scripts/ci/observability_overhead\.sh|scripts/ci/observability_no_otel_default\.sh|\.github/workflows/observability-gate\.yml)'
 
           run_correctness=false
           if grep -Eq "$relevant_regex" changed-files.txt; then
@@ -129,7 +129,20 @@ jobs:
           cargo test -p cqlite-core \
             --features observability-testing,cli-helpers \
             --test observability_correctness \
+            --test observability_read_metrics \
             --test observability_no_otel_default
+
+      # Read-metric honesty at the stream boundary (issue #1701): these live in the
+      # library's own test build because they hand-build a channel to make "the
+      # producer already enqueued rows the consumer never polled" a fact of the
+      # fixture rather than a timing outcome. The gate's core-tests component runs
+      # cqlite-core WITHOUT `observability-testing`, so this is the only place they
+      # execute — without this step the coverage would exist and never run.
+      - name: Read-metric boundary tests (library)
+        run: |
+          cargo test -p cqlite-core \
+            --features observability-testing,cli-helpers \
+            --lib read_metric_tests
 
       # 3. Zero-overhead-when-disabled: two-build bench comparison on one runner.
       - name: Observability overhead gate
