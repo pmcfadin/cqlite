@@ -4959,70 +4959,47 @@ for p in d["packages"]:
   printf '%s\n' "$out"
 }
 
-# FLIGHT_FLAKE_SKIPS — the flight-tests lane's flake-exclusion list (issue #3383).
+# THE FLAKE-QUARANTINE PLUMBING IS RETIRED, DELIBERATELY (issues #3383/#3384).
 #
-# CURATED, not derived — and that distinction is deliberate, so it is stated here
-# rather than left to be inferred. Every OTHER excusal set in this lane is DERIVED
-# from committed source (allowed-zero from each test file's own module-level
-# `#![cfg]`; required-features from cargo metadata) because the property is
-# MECHANICALLY DECIDABLE. Flakiness is not: nothing in the source says "this
-# assertion races". So this list is hand-maintained, and admitting that in code is
-# better than a derivation that pretends to measure something it cannot.
+# It used to live here: `FLIGHT_FLAKE_SKIPS`, a curated `<target>:<issue>` list that
+# excluded named cqlite-flight integration targets from the flight-tests lane, plus
+# `_validate_flight_flake_skips`, which failed closed on a malformed or stale entry.
 #
-# Format: space-separated `<target>:<issue-number>`. BOTH halves of every entry are
-# enforced by _validate_flight_flake_skips, because a curated list is exactly the
-# thing that grows silently:
-#   * an entry with no NUMERIC issue number FAILs, so a skip can never be added
-#     without a filed issue that obliges someone to remove it; and
-#   * an entry naming a target this package does not declare FAILs, so a rename or a
-#     deletion surfaces as a red rather than as a line that quietly excuses nothing
-#     while looking like it excuses something.
-# Every skip is echoed on every run, so the component log always NAMES what this lane
-# chose not to execute.
+# Why it is GONE rather than kept inert. It existed for exactly one purpose: to paper
+# over the non-determinism of cqlite-flight's integration suite, one victim at a time.
+# That approach was measured and REJECTED (owner ruling, #3384) — two distinct victims
+# appeared in four runs, which is not a converging series, so a per-victim quarantine
+# has no visible end and would become the dumping ground its own design rule forbids.
+# The lane instead runs `--lib --bins` and DECLARES the whole integration half as an
+# un-run gap (see run_flight_tests's census). With no lane executing those targets
+# locally, the list has NO SUBJECT: an empty curated list, and a validator whose only
+# caller is gone, would be a guard reporting OK having measured nothing — the vacuous
+# shape both this issue and #1699 exist to eliminate. So there is no code path that
+# reads a flake list and silently does nothing, because there is no flake list.
 #
-# The current entry. `issue_3058_bypass_path_taken` carries
-# `fast_arm_stream_stops_when_the_client_drops_it`, which asserts a RACE OUTCOME — the
-# client's drop must beat the producer. Measured (issue #3383): 3/3 PASS standalone at
-# load 74, but 2 of 3 whole-lane runs FAILED under intra-package parallelism. A
-# merge-gate lane that reds 2-in-3 carries no information, so the target is skipped
-# HERE until #3383 makes the assertion deterministic. It is NOT deleted and NOT
-# `#[ignore]`d: it still runs anywhere else it is invoked, and the skip is target-
-# granular only because `--test` is the granularity cargo offers.
-FLIGHT_FLAKE_SKIPS="issue_3058_bypass_path_taken:3383"
+# If #3384's fix ever needs a target-granular exclusion again, reintroduce it WITH its
+# validator (a curated excusal list is the thing that rots silently, so both halves of
+# every entry must be enforced) — git history at this line has the working version.
 
-# _validate_flight_flake_skips <label> <target-metadata> <skips>
+# check_declared_test_targets_observed <label> <logfile> <enabled-set> <target-metadata> <skips>
 #
-# FAIL CLOSED on a malformed or STALE FLIGHT_FLAKE_SKIPS entry, NAMING it. Both rules
-# exist because a curated excusal list rots in ways a derived one cannot, and it runs
-# BEFORE the cargo invocation so a bad list costs no test time.
-_validate_flight_flake_skips() {
-  local label="$1" meta="$2" skips="$3"
-  local declared entry tname tissue bad=""
-  declared=" $(printf '%s\n' "$meta" | cut -f1 | sort -u | tr '\n' ' ') "
-  for entry in $skips; do
-    tname="${entry%%:*}"
-    tissue="${entry#*:}"
-    # No `:` at all leaves tissue == entry; an empty half, or any non-digit in the
-    # issue number, is equally malformed. Checked affirmatively (the issue must BE
-    # digits) rather than by rejecting a bad shape, so an unplanned spelling FAILs.
-    if [ "$tissue" = "$entry" ] || [ -z "$tname" ] || [ -z "$tissue" ] \
-        || [ -n "${tissue//[0-9]/}" ]; then
-      bad="$bad '$entry'(MALFORMED: expected <target>:<issue-number> with a NUMERIC issue)"
-      continue
-    fi
-    case "$declared" in
-      *" $tname "*) ;;
-      *) bad="$bad '$entry'(STALE: '$tname' is not a declared test target of cqlite-flight)" ;;
-    esac
-  done
-  if [ -n "$bad" ]; then
-    echo "$label: FAIL-CLOSED — FLIGHT_FLAKE_SKIPS entry:$bad (issue #3383: this list is CURATED, so both halves of every entry are enforced — a skip with no filed issue obliging its removal, and a skip naming a target that no longer exists, are the two ways a curated list rots silently)" >&2
-    return 1
-  fi
-  return 0
-}
-
-# check_declared_test_targets_observed <label> <logfile> <enabled-set> <target-metadata> <flake-skips>
+# RETAINED BUT CURRENTLY UNCALLED — read this first (issues #3384/#1699). Its only
+# caller was the flight-tests lane while that lane executed cqlite-flight's integration
+# targets. It no longer does: the integration half of that package is ~50%
+# non-deterministic under intra-package parallelism, so the lane narrowed to
+# `--lib --bins` and now DECLARES the whole integration half as an un-run gap (see
+# run_flight_tests's census). Calling this reconciliation from a lane that puts no
+# integration target on the command line would FAIL every one of them, correctly and
+# uselessly.
+#
+# It is kept rather than deleted because it is the reconciliation the WIDENED lane will
+# call again the moment #3384 makes that suite deterministic, and re-deriving a subtle
+# fail-closed guard from scratch is how it comes back weaker. WHAT WILL CALL IT AGAIN:
+# run_flight_tests, once its command line carries `--test` targets — with an EMPTY
+# <skips> argument, since the flake-quarantine plumbing is retired (see the note above)
+# and #3384's resolution is a fix, not a quarantine. `_package_test_targets`, which
+# feeds it, IS still called: the lane uses it to count the targets its census reports
+# as un-run, which is what makes that census a measurement rather than a claim.
 #
 # Reconcile the DERIVED set of declared integration targets (see
 # _package_test_targets) against the targets actually OBSERVED emitting
@@ -5036,13 +5013,15 @@ _validate_flight_flake_skips() {
 # EXPLICITLY in the diagnostic and never folded into another, because they are
 # different facts about different actors:
 #
-#   1. FLAKE-SKIPPED — the target is on FLIGHT_FLAKE_SKIPS, i.e. THIS LANE CHOSE not to
-#      execute it, and the entry names the issue that obliges its return. Distinct from
-#      category 2/3 below on purpose: "cargo cannot run it here" and "we decided not to
-#      run it" are not the same claim, and collapsing them would hide a deliberate
-#      coverage decision behind a mechanical one. The list itself is validated
-#      separately (_validate_flight_flake_skips), so a stale or issue-less entry FAILs
-#      before this guard is even reached.
+#   1. SKIPPED BY THE CALLER — the target is named in the <skips> argument as
+#      `<target>:<issue>`, i.e. the CALLING LANE CHOSE not to execute it and the entry
+#      names the issue that obliges its return. Distinct from category 2/3 below on
+#      purpose: "cargo cannot run it here" and "we decided not to run it" are not the
+#      same claim, and collapsing them would hide a deliberate coverage decision behind
+#      a mechanical one. NO CALLER PASSES A NON-EMPTY <skips> TODAY (the flake-quarantine
+#      plumbing is retired, #3384), so this branch is dormant; a future caller reviving
+#      it owes the list its own fail-closed validator, because a curated excusal list is
+#      exactly the thing that rots silently.
 #
 #   Otherwise the target must satisfy BOTH remaining halves, and the reason is printed
 #   either way:
