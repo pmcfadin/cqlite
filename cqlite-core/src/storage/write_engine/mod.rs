@@ -23,6 +23,8 @@
 //! On startup, the WriteEngine replays WAL entries into the memtable.
 
 #[cfg(feature = "write-support")]
+pub mod config_bridge;
+#[cfg(feature = "write-support")]
 pub mod cql_to_mutation;
 #[cfg(feature = "write-support")]
 pub mod export;
@@ -188,7 +190,9 @@ pub struct WriteEngineConfig {
     pub data_dir: PathBuf,
     /// Directory for WAL files
     pub wal_dir: PathBuf,
-    /// Memtable flush threshold in bytes (default: 64MB)
+    /// Memtable flush threshold in bytes. Derived from the public
+    /// `Config.storage.memtable_size_threshold` (default 64MB) by
+    /// [`WriteEngineConfig::from_config`] — issue #1697.
     pub memtable_flush_threshold: usize,
     /// Memtable hard limit in bytes (default: 256MB)
     /// When this limit is reached, writes will fail with an error
@@ -208,40 +212,31 @@ pub struct WriteEngineConfig {
     /// disable compaction entirely — `maintenance_step` then becomes a no-op.
     pub auto_compaction: bool,
     /// Minimum number of SSTables in a size bucket required to trigger a
-    /// compaction (STCS `min_threshold`). Defaults to `4`. Ignored when
-    /// [`WriteEngineConfig::auto_compaction`] is `false`.
+    /// compaction (STCS `min_threshold`). Derived from the public
+    /// `Config.storage.compaction.min_threshold` (default `4`) — issue #1697.
+    /// Ignored when [`WriteEngineConfig::auto_compaction`] is `false`.
     pub compaction_min_threshold: usize,
     /// Maximum number of SSTables compacted together in one step (STCS
-    /// `max_threshold`). Defaults to `32`. Ignored when
-    /// [`WriteEngineConfig::auto_compaction`] is `false`.
+    /// `max_threshold`). Derived from the public
+    /// `Config.storage.compaction.max_threshold` (default `32`) — issue #1697.
+    /// Ignored when [`WriteEngineConfig::auto_compaction`] is `false`.
     pub compaction_max_threshold: usize,
 }
 
 #[cfg(feature = "write-support")]
 impl WriteEngineConfig {
-    /// Default flush threshold (64 MB)
-    pub const DEFAULT_FLUSH_THRESHOLD: usize = 64 * 1024 * 1024;
-    /// Default hard limit (256 MB)
+    /// Default hard limit (256 MB). Not modelled by the public [`crate::Config`]
+    /// facade, so this is the only literal for it (issue #1697).
     pub const DEFAULT_HARD_LIMIT: usize = 256 * 1024 * 1024;
-    /// Default STCS `min_threshold` (issue #1619)
-    pub const DEFAULT_COMPACTION_MIN_THRESHOLD: usize = 4;
-    /// Default STCS `max_threshold` (issue #1619)
-    pub const DEFAULT_COMPACTION_MAX_THRESHOLD: usize = 32;
 
-    /// Create a new configuration with default flush threshold
+    /// Create a configuration carrying CQLite's shipped defaults.
+    ///
+    /// Defined as [`Self::from_config`] applied to [`crate::Config::default`]
+    /// (issue #1697): every default write-path value has exactly ONE literal,
+    /// in `Config::default()`, so the public facade and the engine can never
+    /// again disagree about what actually runs.
     pub fn new(data_dir: PathBuf, wal_dir: PathBuf, schema: TableSchema) -> Self {
-        Self {
-            data_dir,
-            wal_dir,
-            memtable_flush_threshold: Self::DEFAULT_FLUSH_THRESHOLD,
-            memtable_hard_limit: Self::DEFAULT_HARD_LIMIT,
-            schema,
-            durability: Durability::default(),
-            udt_registry: None,
-            auto_compaction: true,
-            compaction_min_threshold: Self::DEFAULT_COMPACTION_MIN_THRESHOLD,
-            compaction_max_threshold: Self::DEFAULT_COMPACTION_MAX_THRESHOLD,
-        }
+        Self::from_config(&crate::Config::default(), data_dir, wal_dir, schema)
     }
 
     /// Attach a [`UdtRegistry`] used to resolve bare CQL UDT column types at
@@ -279,19 +274,6 @@ impl WriteEngineConfig {
     /// ```
     pub fn with_durability(mut self, durability: Durability) -> Self {
         self.durability = durability;
-        self
-    }
-
-    /// Apply a [`crate::config::CompactionConfig`] onto this write-engine
-    /// configuration (issue #1619). This makes `Config.storage.compaction`
-    /// authoritative for the write path: `auto_compaction = false` disables the
-    /// default STCS policy so [`WriteEngine::maintenance_step`] becomes a no-op.
-    ///
-    /// The compaction thresholds (`compaction_min_threshold` /
-    /// `compaction_max_threshold`) keep their defaults; only the on/off switch
-    /// is surfaced through the public `Config` today.
-    pub fn with_compaction_config(mut self, compaction: &crate::config::CompactionConfig) -> Self {
-        self.auto_compaction = compaction.auto_compaction;
         self
     }
 }
@@ -1555,9 +1537,10 @@ mod tests {
             schema,
         );
 
+        // #1697: the default now originates from the public Config facade.
         assert_eq!(
-            config.memtable_flush_threshold,
-            WriteEngineConfig::DEFAULT_FLUSH_THRESHOLD
+            config.memtable_flush_threshold as u64,
+            crate::Config::default().storage.memtable_size_threshold
         );
         assert_eq!(
             config.memtable_hard_limit,

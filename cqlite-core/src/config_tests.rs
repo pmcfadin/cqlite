@@ -17,8 +17,7 @@ fn test_default_config() {
 fn test_memory_optimized_config() {
     let config = Config::memory_optimized();
     assert!(
-        config.storage.memtable_size_threshold
-            < Config::default().storage.memtable_size_threshold
+        config.storage.memtable_size_threshold < Config::default().storage.memtable_size_threshold
     );
     assert!(config.memory.max_memory < Config::default().memory.max_memory);
 }
@@ -27,8 +26,7 @@ fn test_memory_optimized_config() {
 fn test_performance_optimized_config() {
     let config = Config::performance_optimized();
     assert!(
-        config.storage.memtable_size_threshold
-            > Config::default().storage.memtable_size_threshold
+        config.storage.memtable_size_threshold > Config::default().storage.memtable_size_threshold
     );
     assert!(config.memory.max_memory > Config::default().memory.max_memory);
 }
@@ -42,8 +40,7 @@ fn test_performance_optimized_config() {
 fn budget_fields_deserialize_with_serde_default_when_absent() {
     // Serialize a default QueryConfig, then STRIP both budget fields to
     // emulate an old serialized config that predates them.
-    let mut value =
-        serde_json::to_value(QueryConfig::default()).expect("serialize QueryConfig");
+    let mut value = serde_json::to_value(QueryConfig::default()).expect("serialize QueryConfig");
     let obj = value
         .as_object_mut()
         .expect("QueryConfig serializes as object");

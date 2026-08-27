@@ -29,7 +29,17 @@ pub struct StorageConfig {
     /// Maximum SSTable file size in bytes (default: 64MB)
     pub max_sstable_size: u64,
 
-    /// MemTable size threshold for flushing (default: 16MB)
+    /// MemTable size threshold for flushing, in bytes (default: 64MB).
+    ///
+    /// This is the AUTHORITATIVE flush trigger for the write path: it is the
+    /// single value `WriteEngineConfig::from_config` translates into
+    /// `WriteEngineConfig::memtable_flush_threshold` (issue #1697).
+    ///
+    /// The default changed 16MB -> 64MB in #1697: before that fix this field had
+    /// no production reader — the engine carried its own private 64MB default,
+    /// so 64MB is the value that always actually ran. Keeping the RUNNING value
+    /// preserves behaviour; adopting the decorative 16MB would have silently
+    /// quadrupled everyone's flush rate.
     pub memtable_size_threshold: u64,
 
     /// Compaction configuration
@@ -222,8 +232,9 @@ fn default_direct_io_prefetch_bytes() -> usize {
 impl Default for StorageConfig {
     fn default() -> Self {
         Self {
-            max_sstable_size: 64 * 1024 * 1024,        // 64MB
-            memtable_size_threshold: 16 * 1024 * 1024, // 16MB
+            max_sstable_size: 64 * 1024 * 1024, // 64MB
+            // 64MB: the value the write engine always actually used (#1697).
+            memtable_size_threshold: 64 * 1024 * 1024,
             compaction: CompactionConfig::default(),
             block_size: 64 * 1024, // 64KB
             compression: CompressionConfig::default(),
@@ -243,15 +254,11 @@ impl Default for StorageConfig {
     }
 }
 
-/// Compaction strategy configuration.
-///
-/// The write engine implements Size-Tiered Compaction Strategy (STCS) and
-/// installs it by default (issue #1619). `auto_compaction` is the authoritative
-/// on/off switch consumed by the write path via
-/// `WriteEngineConfig::with_compaction_config`. Previously this struct also
-/// carried `strategy`/`max_sstables`/`size_ratio`/`max_threads`/
-/// `background_interval` fields that were never read by any behavior; they were
-/// removed (issue #1619) rather than left decorative.
+/// Compaction strategy configuration — the authoritative source for the write
+/// path's Size-Tiered Compaction Strategy (STCS), consumed via
+/// `WriteEngineConfig::from_config` (issues #1619, #1697). Decorative
+/// `strategy`/`max_sstables`/`size_ratio`/`max_threads`/`background_interval`
+/// knobs, read by no behavior, were removed in #1619 rather than left in place.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CompactionConfig {
     /// Enable automatic (STCS) compaction. When `false`, the write engine
@@ -680,7 +687,9 @@ impl Config {
         let mut config = Self::default();
 
         // Increase memory usage for better performance
-        config.storage.memtable_size_threshold = 64 * 1024 * 1024; // 64MB
+        // Above the 64MB default (#1697 raised the default to the value that
+        // always ran), so this preset still trades memory for throughput.
+        config.storage.memtable_size_threshold = 128 * 1024 * 1024; // 128MB
         config.storage.max_sstable_size = 256 * 1024 * 1024; // 256MB
         config.memory.max_memory = 4 * 1024 * 1024 * 1024; // 4GB
 
@@ -767,6 +776,21 @@ impl Config {
         if self.storage.memtable_size_threshold == 0 {
             return Err(crate::Error::configuration(
                 "memtable_size_threshold must be greater than 0",
+            ));
+        }
+
+        // Validate the STCS thresholds threaded into the write engine (#1697).
+        // `STCSPolicy::new` rejects these too, but failing here surfaces the
+        // problem at config time rather than at engine construction.
+        let compaction = &self.storage.compaction;
+        if compaction.min_threshold == 0 {
+            return Err(crate::Error::configuration(
+                "compaction.min_threshold must be greater than 0",
+            ));
+        }
+        if compaction.max_threshold < compaction.min_threshold {
+            return Err(crate::Error::configuration(
+                "compaction.max_threshold must be >= compaction.min_threshold",
             ));
         }
 

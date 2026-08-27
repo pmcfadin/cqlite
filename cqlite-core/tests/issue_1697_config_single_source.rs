@@ -62,8 +62,7 @@ fn engine_config(
     wal_dir: PathBuf,
     schema: TableSchema,
 ) -> WriteEngineConfig {
-    WriteEngineConfig::new(data_dir, wal_dir, schema)
-        .with_compaction_config(&config.storage.compaction)
+    WriteEngineConfig::from_config(config, data_dir, wal_dir, schema)
 }
 
 fn make_schema() -> TableSchema {
