@@ -1813,7 +1813,10 @@ fi
 # build (the measurement above), which does not belong in a sub-second self-test; and the
 # regression to guard is textual anyway — somebody reintroducing `env RUSTFLAGS=` on one
 # of these invocations because it reads as equivalent.
-if awk '/^_deny_warnings\(\) \{/,/^\}/' "$GATE" | grep -q 'CARGO_ENCODED_RUSTFLAGS'; then
+# `grep -c` + numeric test, not `| grep -q`: under pipefail an early-exiting `grep -q`
+# SIGPIPEs `awk` and the pipeline reports 141 on a successful match, which would red this
+# assert intermittently. A flaky assert is what teaches people to re-run until green.
+if [ "$(awk '/^_deny_warnings\(\) \{/,/^\}/' "$GATE" | grep -c 'CARGO_ENCODED_RUSTFLAGS')" -gt 0 ]; then
   ok "1699-denywarn-helper: _deny_warnings exists and accounts for CARGO_ENCODED_RUSTFLAGS"
 else
   bad "1699-denywarn-helper: _deny_warnings is missing or ignores CARGO_ENCODED_RUSTFLAGS — RUSTFLAGS alone is silently inert when the encoded form is set"
@@ -1940,6 +1943,44 @@ RSFX
 else
   bad "1699-coreq-extract: could NOT extract _legacy_coreq_sites — the extraction itself broke, so every census assert would pass vacuously"
 fi
+
+# --- 19. #1699: the derived lanes must not decide anything via `| grep -q` -----------
+#
+# `scripts/agent-gate.sh` runs under `set -uo pipefail`. An early-exiting consumer
+# (`grep -q`, `grep -m`, `head`) closes the pipe as soon as it is satisfied, so the
+# upstream dies of SIGPIPE and the PIPELINE's status is 141 — NON-ZERO ON A SUCCESSFUL
+# MATCH. Any `if`/`if !` reading that status therefore gets the wrong answer, and the
+# wrongness is TIMING-DEPENDENT: it appears only when the upstream still has output
+# buffered when the consumer exits, which is why it reads as an intermittent flake.
+#
+# This is not hypothetical for this lane. The allowed-zero derivation used
+# `! sed … | grep -qE`, so a test file WITH a surviving positive cfg site was classified
+# as negative-polarity-only and EXCUSED from the #2039 zero-tests guard — a gated target
+# executing nothing would not have failed the lane. MEASURED at 6/6 mis-classifications
+# with a match on line 1 of a 200k-line input, 0/6 after the fix. Same defect class as
+# #3380, whose guard-test assert this shape makes non-deterministic in BOTH directions
+# (a vacuous PASS when SIGPIPE wins, a fire when it does not).
+#
+# Scoped to the #1699 lane functions: the pattern is pervasive in this repo (~696 sites
+# in scripts/) and auditing all of it is #3380's neighbourhood, not this issue's.
+for fn_ in run_legacy_heuristics run_feature_iso run_flight_tests; do
+  body_="$tmp/1699-pipefail-$fn_.txt"
+  awk -v f="^$fn_\\\\(\\\\) \\\\{" '$0 ~ f, /^\}/' "$GATE" > "$body_"
+  if [ ! -s "$body_" ]; then
+    bad "1699-pipefail-scope: could not extract $fn_ from the gate — the extraction broke, so this assert would pass vacuously"
+    continue
+  fi
+  # Comments are stripped first: the explanation above deliberately NAMES the forbidden
+  # shape, and an oracle that reads its own rationale as a violation is the #3312
+  # control/data-channel defect (it already false-FAILED once in this issue).
+  code_="$tmp/1699-pipefail-$fn_-code.txt"
+  sed -e 's/[[:space:]]*#.*$//' "$body_" > "$code_"
+  if [ "$(grep -cE '\|[[:space:]]*(grep[[:space:]]+-[a-zA-Z]*[qm]|head([[:space:]]|$))' "$code_")" -gt 0 ]; then
+    bad "1699-pipefail: $fn_ pipes into an early-exiting consumer (grep -q/-m or head) — under pipefail that reports 141 on a SUCCESSFUL match, so the branch reading it is wrong intermittently; use grep -c plus a numeric test"
+  else
+    ok "1699-pipefail: $fn_ makes no decision through a pipeline into an early-exiting consumer"
+  fi
+done
 
 echo "----"
 echo "passed: $PASS  failed: $FAIL"

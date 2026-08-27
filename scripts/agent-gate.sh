@@ -6055,8 +6055,20 @@ run_legacy_heuristics() {
     targets+=(--test "$base")
     count=$((count + 1))
     names="$names $base"
-    if ! sed -E 's/not\([[:space:]]*feature[[:space:]]*=[[:space:]]*"legacy-heuristics"[[:space:]]*\)//g' "$f" \
-        | grep -qE "$cfg_site"; then
+    # `grep -cE` and a NUMERIC test, deliberately, NOT `| grep -qE`. Under `set -o
+    # pipefail` (line 650) an early-exiting `grep -q` SIGPIPEs its upstream, so the
+    # PIPELINE reports 141 — non-zero — on a SUCCESSFUL match. Negated by the `!` here,
+    # that made a file WITH a surviving positive cfg site fall into `allow_zero`: the
+    # target would then have been EXCUSED from the #2039 zero-tests guard, so a gated
+    # target that executed nothing would NOT have failed the lane. That is the exact
+    # vacuous excusal this derivation exists to make impossible, arriving through the
+    # plumbing rather than the logic. MEASURED: with a matching site on line 1 of a
+    # 200k-line file (so `grep -q` exits while `sed` is still writing), the old form
+    # mis-classified 6/6 and this form 0/6. `grep -c` consumes all input, so there is no
+    # early close and no SIGPIPE — the count is an AFFIRMATIVE measurement, which is what
+    # a permissive branch must key on. Same defect class as #3380.
+    if [ "$(sed -E 's/not\([[:space:]]*feature[[:space:]]*=[[:space:]]*"legacy-heuristics"[[:space:]]*\)//g' "$f" \
+        | grep -cE "$cfg_site")" -eq 0 ]; then
       allow_zero+=("$base")
       negonly="$negonly $base"
     fi
