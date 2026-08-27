@@ -252,8 +252,10 @@ def load_progress(path):
     return recs
 
 
-def attribute_window(repdir, t0, t1, s, shortfall_bound):
+def attribute_window(repdir, t0, t1, n, shortfall_bound):
     """Rows produced INSIDE [t0, t1], per worker, by DIFFERENCING observed records.
+
+    `n` is the number of WORKERS (streams), not the core count.
 
     Returns (per_worker, diagnostics). Never interpolates and never assumes a
     rate: each worker contributes `rows(b) - rows(a)` for two records it actually
@@ -265,11 +267,11 @@ def attribute_window(repdir, t0, t1, s, shortfall_bound):
     if span <= 0:
         fail("WINDOW_SPAN", f"window span is {span} ns — t1 must be strictly after t0")
     per = []
-    for i in range(s):
+    for i in range(n):
         prog = os.path.join(repdir, f"worker-{i}.progress.jsonl")
         summ = os.path.join(repdir, f"worker-{i}.summary.json")
         if not os.path.exists(prog):
-            fail("WINDOW_WORKER_MISSING", f"{prog} is absent — a rep is only valid if all {s} workers reported")
+            fail("WINDOW_WORKER_MISSING", f"{prog} is absent — a rep is only valid if all {n} workers reported")
         if not os.path.exists(summ):
             fail("WINDOW_WORKER_MISSING", f"{summ} is absent — worker {i} did not exit cleanly")
         recs = load_progress(prog)
@@ -350,14 +352,27 @@ def guard_window(args):
         fail("WINDOW_MISSING", f"{win} is absent — no measured window, so no measurement")
     with open(win) as fh:
         w = json.load(fh)
-    t0, t1, s = int(w["t0_ns"]), int(w["t1_ns"]), int(w["s"])
-    per = attribute_window(args.repdir, t0, t1, s, args.shortfall_bound)
+    t0, t1 = int(w["t0_ns"]), int(w["t1_ns"])
+    # WORKER COUNT IS N, NOT S. They are different dimensions (S = pinned cores,
+    # N = concurrent streams) and conflating them would silently validate only
+    # the first S of N workers — i.e. a rep could pass with streams nobody
+    # checked. Read fail-closed: an old-schema window.json without `n` is
+    # refused rather than defaulted.
+    if "n" not in w:
+        fail(
+            "WINDOW_MISSING",
+            f"{win} carries no `n` (stream count). This harness is two-dimensional "
+            f"(S = pinned cores, N = concurrent streams); a window without N cannot say "
+            f"how many workers should have reported.",
+        )
+    s, n = int(w["s"]), int(w["n"])
+    per = attribute_window(args.repdir, t0, t1, n, args.shortfall_bound)
 
     # Pinning, OBSERVED: each worker's own sched_getaffinity readback must equal
     # the sibling pair it was supposed to own.
     expected = w.get("worker_cpus")
     if expected:
-        for i in range(s):
+        for i in range(n):
             with open(os.path.join(args.repdir, f"worker-{i}.summary.json")) as fh:
                 got = sorted(int(x) for x in json.load(fh)["observed_affinity"])
             want = sorted(int(x) for x in expected[i])
@@ -405,6 +420,7 @@ def guard_window(args):
         json.dumps(
             {
                 "s": s,
+                "n": n,
                 "window_ns": t1 - t0,
                 "rows_in_window_total": total,
                 "aggregate_rows_per_s": total / ((t1 - t0) / 1e9),

@@ -1,11 +1,15 @@
 #!/usr/bin/env bash
 # #3299 WS0 — the bare-scan scaling curve C(S), S = 1..6.
 #
-# WHAT THIS MEASURES. S independent bare scans (`Database::execute_streaming`
-# over the #3096 measurement corpus), each pinned to ONE COMPLETE physical core,
-# run concurrently; the aggregate rows/s, per-scan p50 rows/s, cycles/row and
-# instructions/row are taken over an ALIGNED window strictly inside the interval
-# in which all S scans are producing rows. See README.md for the window
+# WHAT THIS MEASURES. A TWO-DIMENSIONAL grid, the shape #3217 measured:
+#   S = pinned PHYSICAL cores (1..6), the resource budget a point is labelled by;
+#   N = concurrent bare-scan streams (`Database::execute_streaming` over the
+#       #3096 corpus) running on those S cores.
+# At each S the best-N aggregate is the deliverable (AC1), because the peak is
+# NOT at N=S: #3217 peaked at N=2 for S=1 but N=8 for S=2 and N=16 for S=4/S=6.
+# Aggregate rows/s, per-scan p50, cycles/row and instructions/row are taken over
+# an ALIGNED window strictly inside the interval in which all N scans produce
+# rows. See README.md for the window
 # convention — it is the methodological core of this issue.
 #
 # WHAT IT DOES NOT DO. It does not regenerate the corpus (already generated and
@@ -15,7 +19,7 @@
 # so AC3 is DEFERRED per the issue's pre-registered AC5 rather than approximated.
 #
 # USAGE
-#   bash sweep.sh --results <dir> [--s-list 1,2,3,4,5,6] [--reps 3]
+#   bash sweep.sh --results <dir> [--grid "1:1,2,4,8 2:1,2,4,8 ..."] [--reps 3]
 #                 [--duration-s 60] [--corpus /data/ws0-3096]
 #   bash sweep.sh --equivalence --results <dir>   # worker vs ws0-scan-bench, S=1
 set -Eeuo pipefail
@@ -29,7 +33,18 @@ WORKER_SRC="$HERE/scan-worker"
 
 CORPUS=/data/ws0-3096
 RESULTS=""
-S_LIST="1,2,3,4,5,6"
+# THE GRID: "<S>:<N,N,...>" per S. Defaults, and why (see README for the full
+# argument):
+#   * N=1 appears at EVERY S. It is denominator A's baseline and it is what makes
+#     the per-arm N=1 DECLINE visible — #3217 measured 216,229 -> 163,510 as S
+#     went 1->6, which is exactly why a self-normalised speedup is not
+#     cross-comparable.
+#   * Powers of two up to ~4S. The pinned set holds 2S hardware threads, and
+#     #3217's peak sat at or above that thread count at every S.
+#   * The ENDPOINTS are sampled densely and the middle S values thinned, because
+#     AC2 consumes S=6's best-N and the #3224 endpoint comparison consumes S=1/N=2
+#     and S=6/N=16 specifically. Both of those N values are in the ladder.
+GRID="1:1,2,4,8 2:1,2,4,8 3:1,4,8 4:1,4,8,16 5:1,4,8,16 6:1,2,4,8,16,24"
 REPS=3
 DURATION_S=60
 PROGRESS_ROWS=16384
@@ -49,7 +64,7 @@ while [[ $# -gt 0 ]]; do
   case "$1" in
     --results)        RESULTS="$2"; shift 2 ;;
     --corpus)         CORPUS="$2"; shift 2 ;;
-    --s-list)         S_LIST="$2"; shift 2 ;;
+    --grid)           GRID="$2"; shift 2 ;;
     --reps)           REPS="$2"; shift 2 ;;
     --duration-s)     DURATION_S="$2"; shift 2 ;;
     --progress-rows)  PROGRESS_ROWS="$2"; shift 2 ;;
@@ -125,9 +140,9 @@ import json, sys
 print(json.dumps([[int(x) for x in sys.argv[1].split(",")]]))
 PY
   "$CONTAIN" --mem "$MEM_CAP" --swap 0 -- \
-    python3 "$REP" --s 1 --rep 0 --round 0 --rundir "$RESULTS/equiv-worker" \
+    python3 "$REP" --s 1 --n 1 --rep 0 --round 0 --rundir "$RESULTS/equiv-worker" \
       --worker-bin "$WORKER_BIN" --corpus "$CORPUS" \
-      --worker-cpus "$(cat "$RESULTS/equiv-worker-cpus.json")" \
+      --worker-cpus "$(cat "$RESULTS/equiv-worker-cpus.json")" --perf-cpus "$CG" \
       --events "$EVENTS" --duration-s "$DURATION_S" \
       --progress-rows "$PROGRESS_ROWS" --prewarm-passes "$PREWARM_PASSES" \
     > "$RESULTS/equiv-worker.json"
@@ -138,45 +153,57 @@ PY
 fi
 
 # --- the sweep -----------------------------------------------------------------
-IFS=',' read -r -a S_VALUES <<< "$S_LIST"
+# Flatten the grid into an ordered point list "S:N".
+POINTS=()
+for spec in $GRID; do
+  gs="${spec%%:*}"; ns="${spec#*:}"
+  IFS=',' read -r -a NLIST <<< "$ns"
+  for gn in "${NLIST[@]}"; do POINTS+=( "$gs:$gn" ); done
+done
+NPOINTS=${#POINTS[@]}
+echo "[sweep] grid: $NPOINTS points x $REPS reps = $(( NPOINTS * REPS )) reps"
+
 MANIFEST="$RESULTS/manifest.jsonl"
 : > "$MANIFEST"
 
 for (( round=1; round<=REPS; round++ )); do
-  # S-ORDER ROTATION. Each round visits the S values in a rotated order, so a
-  # monotone host drift cannot masquerade as an S effect by always measuring the
-  # same S first. NOTE (scripts/perf/README.md): this rig does NOT control drift.
-  # The per-round order is recorded so within-round direction is available as
-  # INERT DATA EXPLICITLY UNCONTROLLED FOR DRIFT — it is not a verified claim.
-  n=${#S_VALUES[@]}
+  # POINT-ORDER ROTATION. Each round visits the grid in a rotated order, so a
+  # monotone host drift cannot masquerade as an S or N effect by always
+  # measuring the same point first. NOTE (scripts/perf/README.md): this rig does
+  # NOT control drift. The per-round order is recorded so within-round direction
+  # is available as INERT DATA EXPLICITLY UNCONTROLLED FOR DRIFT — it is not a
+  # verified claim, and deliberately not the deleted `round_major_verified` one.
   ORDER=()
-  for (( k=0; k<n; k++ )); do ORDER+=( "${S_VALUES[$(( (k + round - 1) % n ))]}" ); done
+  for (( k=0; k<NPOINTS; k++ )); do ORDER+=( "${POINTS[$(( (k + round - 1) % NPOINTS ))]}" ); done
   echo "[sweep] round $round/$REPS order: ${ORDER[*]}"
 
-  for S in "${ORDER[@]}"; do
-    (( S >= 1 )) || { echo "FATAL: S must be >= 1, got $S" >&2; exit 2; }
-    # This point's CPU set is the first S COMPLETE sibling groups: worker i owns
-    # BOTH logical CPUs of physical core i. Built in one place and then verified
-    # by the guard before a single row is scanned.
+  for pt in "${ORDER[@]}"; do
+    S="${pt%%:*}"; N="${pt#*:}"
+    (( S >= 1 && N >= 1 )) || { echo "FATAL: S and N must be >= 1, got S=$S N=$N" >&2; exit 2; }
     (( S <= PHYS )) || { echo "FATAL: S=$S exceeds $PHYS physical cores" >&2; exit 2; }
-    WORKER_CPUS="$(printf '%s\n' "${CORE_GROUPS[@]}" | python3 -c '
-import json, sys
+
+    # The counted set is the union of the first S COMPLETE sibling groups, ONCE.
+    # Every one of the N workers is pinned to that same union and the scheduler
+    # places them — the shape #3217/#3224 measured (server pinned to S cores, N
+    # streams driven into it).
+    CPUS="$(printf '%s\n' "${CORE_GROUPS[@]}" | python3 -c '
+import sys
 groups = [l.strip() for l in sys.stdin if l.strip()]
-s = int(sys.argv[1])
-print(json.dumps([[int(c) for c in g.split(",")] for g in groups[:s]]))
+print(",".join(groups[:int(sys.argv[1])]))
 ' "$S")"
-    CPUS="$(python3 -c '
+    WORKER_CPUS="$(python3 -c '
 import json, sys
-print(",".join(str(c) for grp in json.loads(sys.argv[1]) for c in grp))
-' "$WORKER_CPUS")"
+cpus = [int(c) for c in sys.argv[1].split(",")]
+print(json.dumps([cpus] * int(sys.argv[2])))
+' "$CPUS" "$N")"
     python3 "$GUARDS" cpuset --s "$S" --cpus "$CPUS" --siblings "$SIB_MAP" --headroom-cores "$HEADROOM_CORES"
 
-    RD="$RESULTS/s${S}-round${round}"
-    echo "[sweep] S=$S round=$round cpus=$CPUS -> $RD"
+    RD="$RESULTS/s${S}-n${N}-round${round}"
+    echo "[sweep] S=$S N=$N round=$round cpus=$CPUS -> $RD"
     "$CONTAIN" --mem "$MEM_CAP" --swap 0 -- \
-      python3 "$REP" --s "$S" --rep "$round" --round "$round" --rundir "$RD" \
+      python3 "$REP" --s "$S" --n "$N" --rep "$round" --round "$round" --rundir "$RD" \
         --worker-bin "$WORKER_BIN" --corpus "$CORPUS" \
-        --worker-cpus "$WORKER_CPUS" --events "$EVENTS" \
+        --worker-cpus "$WORKER_CPUS" --perf-cpus "$CPUS" --events "$EVENTS" \
         --duration-s "$DURATION_S" --progress-rows "$PROGRESS_ROWS" \
         --prewarm-passes "$PREWARM_PASSES" \
       | tee -a "$RESULTS/rep-stdout.log"
@@ -185,7 +212,7 @@ print(",".join(str(c) for grp in json.loads(sys.argv[1]) for c in grp))
     # rather than surviving to the aggregation step.
     python3 "$GUARDS" perf-csv --csv "$RD/perf.csv" --events "$EVENTS"
     python3 "$GUARDS" window --repdir "$RD" > "$RD/attribution.json"
-    echo "{\"s\":$S,\"round\":$round,\"rundir\":\"$RD\",\"order\":\"${ORDER[*]}\"}" >> "$MANIFEST"
+    echo "{\"s\":$S,\"n\":$N,\"round\":$round,\"rundir\":\"$RD\",\"order\":\"${ORDER[*]}\"}" >> "$MANIFEST"
   done
 done
 

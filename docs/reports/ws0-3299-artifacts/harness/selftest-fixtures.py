@@ -108,7 +108,12 @@ def build(case, d, workers):
         with open(os.path.join(d, "window.json"), "w") as fh:
             json.dump(
                 {
+                    # S = pinned cores, N = concurrent streams. The fixtures pin
+                    # one core per worker, so here they coincide numerically;
+                    # they are still written as SEPARATE fields, because the
+                    # guard must read the stream count from `n`.
                     "s": workers,
+                    "n": workers,
                     "rep": 1,
                     "round": 1,
                     "t0_ns": t0,

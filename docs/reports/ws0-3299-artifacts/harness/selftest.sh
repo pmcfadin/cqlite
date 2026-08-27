@@ -169,14 +169,37 @@ expect_guard_fail WINDOW_COUNTER_MISMATCH python3 "$GUARDS" window --repdir "$TM
 python3 "$FIX" window --dir "$TMP/w-span" --case bad-span --workers 2
 expect_guard_fail WINDOW_SPAN          python3 "$GUARDS" window --repdir "$TMP/w-span"
 
-# A rep measured at S=6 whose directory holds only 2 workers must not aggregate.
-python3 "$FIX" window --dir "$TMP/w-s6" --case good --workers 2
-python3 - "$TMP/w-s6/window.json" <<'PY'
+# A rep claiming N=6 streams whose directory holds only 2 must not aggregate.
+python3 "$FIX" window --dir "$TMP/w-n6" --case good --workers 2
+python3 - "$TMP/w-n6/window.json" <<'PY'
+import json, sys
+p = sys.argv[1]
+d = json.load(open(p)); d["n"] = 6; json.dump(d, open(p, "w"))
+PY
+expect_guard_fail WINDOW_WORKER_MISSING python3 "$GUARDS" window --repdir "$TMP/w-n6"
+
+# S AND N ARE DIFFERENT DIMENSIONS. Raising only S (the CORE count) must not
+# change how many streams are validated: a window with S=6, N=2 and 2 workers is
+# a legitimate point (2 streams on 6 cores), not an incomplete rep. This is the
+# positive half of the conflation check — if the guard read the worker count
+# from `s` it would demand six workers here and fail a valid measurement.
+python3 "$FIX" window --dir "$TMP/w-s6n2" --case good --workers 2
+python3 - "$TMP/w-s6n2/window.json" <<'PY'
 import json, sys
 p = sys.argv[1]
 d = json.load(open(p)); d["s"] = 6; json.dump(d, open(p, "w"))
 PY
-expect_guard_fail WINDOW_WORKER_MISSING python3 "$GUARDS" window --repdir "$TMP/w-s6"
+expect_ok "S=6 with N=2 is a valid point, not an incomplete rep" \
+  python3 "$GUARDS" window --repdir "$TMP/w-s6n2"
+
+# An old-schema window.json with no `n` at all is refused rather than defaulted.
+python3 "$FIX" window --dir "$TMP/w-non" --case good --workers 2
+python3 - "$TMP/w-non/window.json" <<'PY'
+import json, sys
+p = sys.argv[1]
+d = json.load(open(p)); d.pop("n"); json.dump(d, open(p, "w"))
+PY
+expect_guard_fail WINDOW_MISSING python3 "$GUARDS" window --repdir "$TMP/w-non"
 
 # ------------------------------------------------------ no relaxation knob ---
 echo

@@ -1,14 +1,28 @@
 #!/usr/bin/env python3
-"""#3299 — ONE rep at ONE value of S: S pinned bare scans, one aligned window.
+"""#3299 — ONE rep at ONE (S, N) point: N bare scans on S cores, one aligned window.
+
+The sweep is TWO-dimensional, like #3217's:
+
+  * **S** = the number of pinned PHYSICAL cores. It sets the `perf stat -C` set
+    (the union of those cores' complete SMT sibling groups) and is the resource
+    budget the point is labelled by.
+  * **N** = the number of concurrent bare-scan streams running on those S cores.
+    N is NOT tied to S: #3217 measured the peak at N=2 for S=1 but N=8 for S=2
+    and N=16 for S=4 and S=6, so collapsing to N=S would report a number that is
+    not the best the core budget achieves, and AC1 asks for the best-N point.
+
+All N workers are pinned to the SAME union set and the scheduler places them,
+which is the shape #3217/#3224 measured (server pinned to S cores, N streams
+driven into it).
 
 Runs INSIDE the containment scope (`test-data/scripts/perf-run-contained.sh`),
 launched by `sweep.sh`. It owns the part of the protocol that must be exact:
 
-  1. launch S workers, each `taskset`-pinned to ONE complete physical core;
+  1. launch N workers, each `taskset`-pinned to the union of the S cores;
   2. wait for every worker to finish prewarming and signal ready (WARM protocol —
      no first-touch page-cache population may fall inside the window);
   3. wait until every worker has emitted >= 2 post-barrier progress records, i.e.
-     all S are OBSERVED to be producing rows concurrently;
+     all N are OBSERVED to be producing rows concurrently;
   4. open the measurement window with perf's control FIFO and close it the same
      way, recording T0/T1 on the same CLOCK_MONOTONIC the workers timestamp with;
   5. stop the workers and write `window.json`.
@@ -108,7 +122,7 @@ def wait_ready(procs, rundir, timeout_s):
 def wait_steady(procs, rundir, min_samples, timeout_s):
     """Block until every worker has emitted >= min_samples post-barrier records.
 
-    This is the affirmative observation that all S scans are concurrently
+    This is the affirmative observation that all N scans are concurrently
     producing rows BEFORE the window opens — the precondition the aligned-window
     convention exists to satisfy. It is checked again after the fact by the
     `WINDOW_NOT_SPANNED` guard, from the recorded timestamps.
@@ -193,7 +207,8 @@ def perf_window(args, rundir, cpu_list):
 
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--s", type=int, required=True)
+    ap.add_argument("--s", type=int, required=True, help="pinned PHYSICAL cores")
+    ap.add_argument("--n", type=int, required=True, help="concurrent bare-scan streams")
     ap.add_argument("--rep", type=int, required=True)
     ap.add_argument("--round", type=int, required=True)
     ap.add_argument("--rundir", required=True)
@@ -201,7 +216,13 @@ def main():
     ap.add_argument("--corpus", required=True)
     ap.add_argument("--keyspace", default="ws0")
     ap.add_argument("--table", default="events")
-    ap.add_argument("--worker-cpus", required=True, help="JSON list of per-worker CPU lists, e.g. [[0,8],[1,9]]")
+    ap.add_argument(
+        "--worker-cpus",
+        required=True,
+        help="JSON list of N per-worker CPU lists. Every entry is normally the SAME union "
+        "of the S cores' sibling groups, e.g. [[0,8,1,9],[0,8,1,9]] for S=2, N=2.",
+    )
+    ap.add_argument("--perf-cpus", required=True, help="the perf -C set: the union of the S cores")
     ap.add_argument("--events", required=True)
     ap.add_argument("--duration-s", type=float, required=True)
     ap.add_argument("--progress-rows", type=int, default=16384)
@@ -214,9 +235,11 @@ def main():
     args = ap.parse_args()
 
     worker_cpus = json.loads(args.worker_cpus)
-    if len(worker_cpus) != args.s:
-        die(f"--worker-cpus has {len(worker_cpus)} entries but --s is {args.s}")
-    cpu_list = ",".join(str(c) for cpus in worker_cpus for c in cpus)
+    if len(worker_cpus) != args.n:
+        die(f"--worker-cpus has {len(worker_cpus)} entries but --n is {args.n}")
+    # The counted set is the S cores, ONCE — never the per-worker lists summed,
+    # which would repeat every CPU N times and inflate the expected task-clock.
+    cpu_list = args.perf_cpus
 
     rundir = args.rundir
     if os.path.exists(rundir):
@@ -250,6 +273,7 @@ def main():
     window = {
         "issue": 3299,
         "s": args.s,
+        "n": args.n,
         "rep": args.rep,
         "round": args.round,
         "t0_ns": t0,
@@ -268,7 +292,7 @@ def main():
     }
     with open(os.path.join(rundir, "window.json"), "w") as fh:
         json.dump(window, fh, indent=2)
-    print(json.dumps({"rep": args.rep, "s": args.s, "window_ns": t1 - t0, "rundir": rundir}))
+    print(json.dumps({"rep": args.rep, "s": args.s, "n": args.n, "window_ns": t1 - t0, "rundir": rundir}))
 
 
 if __name__ == "__main__":
