@@ -61,6 +61,7 @@ use crate::storage::write_engine::merge::{CellData, KWayMerger, MergeEntry, Merg
 use crate::types::{CellWriteMetadata, TableId as CqlTableId};
 use crate::{Result, RowCells, RowKey, ScanRow, Value};
 
+mod merge_cancel;
 #[cfg(not(feature = "tombstones"))]
 mod merge_stream_setup;
 #[cfg(not(feature = "tombstones"))]
@@ -280,6 +281,11 @@ pub(super) async fn merge_generations_for_read(
     // shape in `scan_admission.rs` `# Scope`. Moved into the closure below.
     let admission = reader::scan_stream_windowed::scan_admission::admit().await;
 
+    // Issue #1695: a dropped `JoinHandle` does NOT stop a `spawn_blocking` closure.
+    // `_cancel_guard` lives in THIS future's scope and trips `cancel` on drop, so the
+    // loop below abandons the merge at its next partition. See `merge_cancel`.
+    let (_cancel_guard, cancel) = merge_cancel::per_call();
+
     // Own the bounds/target so the merge body can use them without borrowing
     // across the await; cheap clone of the key bytes.
     let start_key = start_key.cloned();
@@ -295,7 +301,13 @@ pub(super) async fn merge_generations_for_read(
         let shadow = ReadShadow::new(&schema, now_epoch_secs());
         let mut merger = KWayMerger::new(paths, &schema)?;
         let mut out = Vec::new();
-        while let MergeStep::Partition { key, rows } = merger.step()? {
+        loop {
+            // #1695: caller's future gone — abandon rather than finish a `Vec` nobody
+            // can receive. Once per PARTITION: the merge's own unit of work.
+            cancel.check()?;
+            let MergeStep::Partition { key, rows } = merger.step()? else {
+                break;
+            };
             let row_key = RowKey::new(key.key.clone());
 
             // Partition-targeted point read (#1579): keep ONLY the target and stop.
@@ -367,6 +379,10 @@ pub(super) async fn seek_merge_generations_for_read(
     // shape in `scan_admission.rs` `# Scope`.
     let admission = reader::scan_stream_windowed::scan_admission::admit().await;
 
+    // Issue #1695: per-call abandonment for the detached blocking merge below (a
+    // dropped `JoinHandle` cannot stop it). See `merge_cancel`.
+    let (_cancel_guard, cancel) = merge_cancel::per_call();
+
     // NEWEST→OLDEST like `ordered_generation_paths`, so the seeking merger's
     // run_index (= position) equals the full-scan merger's LWW tie-break rank.
     let mut ordered: Vec<Arc<reader::SSTableReader>> = candidates.to_vec();
@@ -395,7 +411,12 @@ pub(super) async fn seek_merge_generations_for_read(
             return Ok(Vec::new()); // no candidate holds the target
         };
         let mut out = Vec::new();
-        while let MergeStep::Partition { key, rows } = merger.step()? {
+        loop {
+            // #1695: abandon at the next partition once the caller's future is gone.
+            cancel.check()?;
+            let MergeStep::Partition { key, rows } = merger.step()? else {
+                break;
+            };
             let row_key = RowKey::new(key.key.clone());
             // A fail-safe filter-scan run could surface a prefix-collision key; keep
             // only the exact target and stop once seen (partition keys are unique).
@@ -454,6 +475,10 @@ pub(super) async fn merge_generations_for_read_with_metadata(
     // helpers: no phase both runs detached blocking work AND has released the permit.
     let admission = reader::scan_stream_windowed::scan_admission::admit().await;
 
+    // Issue #1695: per-call abandonment for the detached blocking merge below (a
+    // dropped `JoinHandle` cannot stop it). See `merge_cancel`.
+    let (_cancel_guard, cancel) = merge_cancel::per_call();
+
     // Own the bounds so the merge body can use them without borrowing across the
     // await; cheap clone of the key bytes. Mirrors the plain helper.
     let owned_start = start_key.cloned();
@@ -501,7 +526,12 @@ pub(super) async fn merge_generations_for_read_with_metadata(
         let shadow = ReadShadow::new(&merge_schema, now_epoch_secs());
         let mut merger = KWayMerger::new(paths, &merge_schema)?;
         let mut out = Vec::new();
-        while let MergeStep::Partition { key, rows } = merger.step()? {
+        loop {
+            // #1695: abandon at the next partition once the caller's future is gone.
+            cancel.check()?;
+            let MergeStep::Partition { key, rows } = merger.step()? else {
+                break;
+            };
             let row_key = RowKey::new(key.key.clone());
 
             // Partition-targeted point read (#1579): keep ONLY the target and stop.
