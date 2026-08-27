@@ -16,6 +16,8 @@ const os = require('os');
 const path = require('path');
 
 const SETUP_JS = path.join(__dirname, 'setup.js');
+// Upper bound on a nested jest run (see the spawnSync call for why it matters).
+const CHILD_TIMEOUT_MS = 90000;
 const PACKAGE_DIR = path.dirname(__dirname);
 
 /**
@@ -162,7 +164,28 @@ function runChildJest({ strict, corpus = 'empty' }) {
     env,
     encoding: 'utf8',
     cwd: tmp,
+    // A finite bound is load-bearing, not hygiene: jest's own per-test timeout
+    // cannot interrupt a SYNCHRONOUS spawnSync, so without this a wedged child
+    // stalls the whole test job indefinitely. Kept below the 120s per-test
+    // timeout so a hang surfaces as the explicit throw below.
+    timeout: CHILD_TIMEOUT_MS,
+    killSignal: 'SIGKILL',
   });
+
+  // A timed-out or unstartable child yields status === null, and the strict
+  // cases assert `status !== 0` -- so an unreported hang would MASQUERADE as
+  // the strict-mode failure they are trying to prove. Fail loudly instead.
+  if (result.error) {
+    throw new Error(
+      `child jest did not complete (corpus=${corpus} strict=${strict}): ${result.error.message}`
+    );
+  }
+  if (result.status === null) {
+    throw new Error(
+      `child jest was killed without an exit status (corpus=${corpus} strict=${strict}; ` +
+      `signal=${result.signal}) -- treated as a harness failure, never as a guard verdict`
+    );
+  }
   return { status: result.status, stdout: result.stdout || '', stderr: result.stderr || '' };
 }
 
