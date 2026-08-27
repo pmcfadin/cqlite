@@ -168,7 +168,8 @@ def emit_table(reps, min_reps):
     print("### Cross-S marginal efficiency — BOTH denominators\n")
     print("| S | best aggregate rows/s | N@peak | per-scan p50 rows/s | own N=1 | "
           "speedup vs **1-core peak** | **marg. eff. vs 1-core peak** | speedup vs 1-core N=1 | "
-          "marg. eff. vs 1-core N=1 | cycles/row | instr/row | IPC | L1d loads/row | L1d miss/row |")
+          "marg. eff. vs 1-core N=1 | cycles/row † | instr/row † | IPC | L1d loads/row † | "
+          "L1d miss/row † |")
     print("|--:|--:|--:|--:|--:|--:|--:|--:|--:|--:|--:|--:|--:|--:|")
     for s in s_values:
         n_peak, best = peaks[s]
@@ -192,6 +193,13 @@ def emit_table(reps, min_reps):
             f"{agg(v, 'l1d_load_misses_per_row'):,.2f} |"
         )
     print()
+    print("**† BASIS — every per-row counter is summed over ALL PINNED HARDWARE THREADS** "
+          "(2S logical CPUs, both SMT siblings of each of the S cores), which is the set "
+          "`perf stat -C` counted and is the same set at every N for a given S. It is NOT a "
+          "per-hardware-thread figure: dividing by 2 would give the per-thread average only "
+          "if both siblings were equally loaded, which is exactly what varies across the N "
+          "ladder. IPC is basis-invariant (a ratio of two sums over the same set). "
+          "Per mission section 1, no figure here is quoted without its basis.\n")
     print("`marg. eff.` = speedup / S; 1.000 would be perfect scaling. **Reference B "
           "(S=1's own peak) is PRIMARY**: it is the most the engine achieves on one "
           "physical core, so it is the fair 'perfect scaling' unit, and it is the "
@@ -216,6 +224,9 @@ def emit_endpoints(by_point, peaks):
           f"But `L1-dcache-loads` and `L1-dcache-load-misses` ARE real here, and they are "
           f"exactly the counters #3224 reported as flat across its endpoints — so the "
           f"private-cache half of the question is answerable.\n")
+    print(f"All per-row counters below are summed over ALL PINNED HARDWARE THREADS "
+          f"(2S logical CPUs) — the same basis as the table above, and the same set "
+          f"`perf stat -C` counted.\n")
     print(f"| per-row counter | S={lo}, N={peaks[lo][0]} | S={hi}, N={peaks[hi][0]} | ratio |")
     print("|---|--:|--:|--:|")
     for label, key, fmt in (

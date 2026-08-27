@@ -17,6 +17,9 @@ fuzz/Cargo.lock
 # silently dropped from the reviewer's diff while `prompt-content:` still
 # expected it — a fail-closed FAIL on a file nobody could get reviewed.
 docs/reports/*-artifacts/**/Cargo.lock
+# Python bytecode from the measurement harnesses' own tooling (guards.py is
+# imported by derive.py, so CPython writes one). Generated, never source.
+docs/reports/*-artifacts/**/__pycache__/
 *.pdb
 
 # Parity failure-artifact bundles (issue #1027) — CI-only forensics, never committed
