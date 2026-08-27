@@ -88,6 +88,34 @@ fn _inet_from_bytes(py: Python<'_>, bytes: Vec<u8>) -> PyResult<PyObject> {
     value::inet_to_py(py, &bytes)
 }
 
+/// Test-support: raise the Python exception the shared FFI error contract maps a
+/// named core `Error` variant to (issue #1451).
+///
+/// `variant` is a core `cqlite_core::Error` variant identifier, verbatim (e.g.
+/// `"CqlParse"`, `"Timeout"`). The probe builds that variant's representative
+/// error and returns it through the PRODUCTION `to_py_err` path, so the pytest
+/// suite can assert the contract's Python identity for EVERY variant — including
+/// `Timeout` and `Memory`, which no test query can provoke. This is the Python
+/// twin of the Node binding's `_errorContractProbe`, and both read the one shared
+/// table, so a cross-binding divergence is a test failure in both suites.
+///
+/// An unrecognized name raises `ValueError` rather than substituting a default
+/// row (fail-closed: a typo'd variant must never look like a passing mapping).
+/// Not part of the stable public API; the leading underscore marks it internal
+/// test support.
+#[pyfunction]
+fn _raise_mapped_core_error(variant: &str) -> PyResult<()> {
+    match cqlite_core::ffi_error_contract::FfiErrorVariant::from_name(variant)
+        .and_then(|v| v.sample_error())
+    {
+        Some(err) => Err(to_py_err(err)),
+        None => Err(pyo3::exceptions::PyValueError::new_err(format!(
+            "unknown core Error variant '{variant}' (or no representative value \
+             for it on this build target)"
+        ))),
+    }
+}
+
 /// Python module for CQLite.
 #[pymodule]
 fn _cqlite(m: &Bound<'_, PyModule>) -> PyResult<()> {
@@ -105,6 +133,10 @@ fn _cqlite(m: &Bound<'_, PyModule>) -> PyResult<()> {
     // Test-support: direct INET rendering path for the malformed-inet typed-error
     // test (issue #1453). See the fn doc comment.
     m.add_function(wrap_pyfunction!(_inet_from_bytes, m)?)?;
+
+    // Test-support: shared FFI error-contract conformance probe (issue #1451).
+    // See the fn doc comment.
+    m.add_function(wrap_pyfunction!(_raise_mapped_core_error, m)?)?;
 
     // Register exception types
     error::register_exceptions(m)?;

@@ -1,6 +1,12 @@
 //! Error mapping layer for Python bindings.
 //!
-//! Maps `cqlite_core::Error` variants to Python exceptions.
+//! Maps `cqlite_core::Error` variants to Python exceptions **by reading the
+//! shared FFI error contract** (`cqlite_core::ffi_error_contract`) — the ONE
+//! authoritative variant -> (python class, node code, category, recoverable,
+//! prefix) table that `bindings/node` reads too, so a core error has the same
+//! identity in every binding (issue #1451). This module owns only the
+//! identifier -> concrete PyO3 class step; it never decides WHICH class a
+//! variant gets.
 //!
 //! # Exception Hierarchy
 //!
@@ -16,6 +22,7 @@
 //! └── MemoryError (builtin) - Memory errors
 //! ```
 
+use cqlite_core::ffi_error_contract::{contract_for, PyExceptionClass};
 use pyo3::exceptions::{PyIOError, PyMemoryError, PyRuntimeError, PyTimeoutError, PyValueError};
 use pyo3::prelude::*;
 use pyo3::{create_exception, PyErr};
@@ -57,68 +64,42 @@ pub fn register_exceptions(m: &Bound<'_, PyModule>) -> PyResult<()> {
 /// This function is used instead of `impl From<cqlite_core::Error> for PyErr`
 /// due to Rust's orphan rules (both types are from external crates).
 ///
-/// # Mapping Table
+/// The class is chosen **by variant** from the shared FFI error contract
+/// (`cqlite_core::ffi_error_contract`), never re-derived here — that table is
+/// also what `bindings/node` reads, so the two bindings cannot drift apart
+/// (issue #1451). To change how a variant surfaces, edit the table.
+///
+/// # Mapping Table (from the shared contract)
 ///
 /// | Rust Variant | Python Exception |
 /// |--------------|------------------|
 /// | `Io` | `IOError` (builtin) |
 /// | `Schema`, `Table` | `SchemaError` |
-/// | `QueryExecution`, `UnsupportedQuery` | `QueryError` |
+/// | `QueryExecution`, `ResultTooLarge`, `UnsupportedQuery` | `QueryError` |
 /// | `CqlParse` | `ParseError` |
 /// | `Configuration`, `InvalidInput` | `ValueError` (builtin) |
 /// | `Timeout` | `TimeoutError` (builtin) |
 /// | `Memory` | `MemoryError` (builtin) |
+/// | `InvalidState` | `RuntimeError` (builtin) |
 /// | `Cancelled` | `CancelledError` (issue #2264 — never `IOError`) |
-/// | All others | `CqliteError` (base) |
+/// | All others (incl. `Corruption`) | `CqliteError` (base) |
 pub fn to_py_err(err: cqlite_core::Error) -> PyErr {
     let message = err.to_string();
 
-    match err {
-        // I/O errors -> Python IOError (builtin)
-        cqlite_core::Error::Io(_) => PyIOError::new_err(message),
-
-        // Schema-related errors -> SchemaError
-        cqlite_core::Error::Schema(_) | cqlite_core::Error::Table(_) => {
-            SchemaError::new_err(message)
-        }
-
-        // Query execution errors -> QueryError. `ResultTooLarge` (issue #1582,
-        // byte-bounded result budget) is a query-shaped error whose message
-        // tells the user to add LIMIT or stream, so it maps to QueryError too.
-        cqlite_core::Error::QueryExecution(_)
-        | cqlite_core::Error::ResultTooLarge { .. }
-        | cqlite_core::Error::UnsupportedQuery(_) => QueryError::new_err(message),
-
-        // CQL parsing errors -> ParseError
-        cqlite_core::Error::CqlParse(_) => ParseError::new_err(message),
-
-        // Configuration/input errors -> Python ValueError (builtin)
-        cqlite_core::Error::Configuration(_) | cqlite_core::Error::InvalidInput(_) => {
-            PyValueError::new_err(message)
-        }
-
-        // Timeout errors -> Python TimeoutError (builtin)
-        cqlite_core::Error::Timeout(_) => PyTimeoutError::new_err(message),
-
-        // Memory errors -> Python MemoryError (builtin)
-        cqlite_core::Error::Memory(_) => PyMemoryError::new_err(message),
-
-        // Invalid state errors -> Python RuntimeError (builtin)
-        // This covers cases like using a closed database
-        cqlite_core::Error::InvalidState(_) => PyRuntimeError::new_err(message),
-
-        // Write-dir lock conflict -> CqliteError with clear message
-        // The formatted message already contains the path and advice
-        cqlite_core::Error::WriteDirLocked { .. } => CqliteError::new_err(message),
-
-        // A cooperative cancellation -> dedicated CancelledError (issue #2264),
-        // NOT the base CqliteError (would be indistinguishable from any other
-        // failure) and NEVER IOError (not a transport/filesystem failure).
-        cqlite_core::Error::Cancelled => CancelledError::new_err(message),
-
-        // All other errors -> CqliteError (base exception)
-        // See test_error_mapping_completeness() for the complete list of unmapped variants
-        _ => CqliteError::new_err(message),
+    // ONE lookup in the shared contract; the match below only turns the
+    // class IDENTIFIER into the concrete PyO3 class. It is exhaustive, so a new
+    // `PyExceptionClass` fails to compile until it is wired to a real class.
+    match contract_for(&err).py_class {
+        PyExceptionClass::IoError => PyIOError::new_err(message),
+        PyExceptionClass::ValueError => PyValueError::new_err(message),
+        PyExceptionClass::TimeoutError => PyTimeoutError::new_err(message),
+        PyExceptionClass::MemoryError => PyMemoryError::new_err(message),
+        PyExceptionClass::RuntimeError => PyRuntimeError::new_err(message),
+        PyExceptionClass::CqliteError => CqliteError::new_err(message),
+        PyExceptionClass::SchemaError => SchemaError::new_err(message),
+        PyExceptionClass::QueryError => QueryError::new_err(message),
+        PyExceptionClass::ParseError => ParseError::new_err(message),
+        PyExceptionClass::CancelledError => CancelledError::new_err(message),
     }
 }
 
@@ -136,6 +117,7 @@ pub fn runtime_init_to_py_err(err: std::io::Error) -> PyErr {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use cqlite_core::ffi_error_contract::FfiErrorVariant;
     use cqlite_core::Error;
 
     /// Helper to extract error message from PyErr
@@ -345,132 +327,190 @@ mod tests {
         }
     }
 
-    /// Compile-time completeness check for error variant mapping.
+    /// The Python exception class each core variant is EXPECTED to surface as —
+    /// a hand-written restatement of the shared contract's `py_class` column.
     ///
-    /// This test ensures all `cqlite_core::Error` variants are explicitly handled
-    /// in the `to_py_err` function. If a new variant is added to the core Error enum,
-    /// this test will fail to compile, forcing a review of the Python error mapping.
+    /// Two guards in one:
+    ///
+    /// 1. **Compile-time completeness.** The match is exhaustive over
+    ///    `cqlite_core::Error`, so adding a variant to the core enum fails to
+    ///    compile here until the Python identity is reviewed.
+    /// 2. **Content.** `test_error_mapping_completeness` asserts the shared
+    ///    table (and the exception `to_py_err` actually raises) agrees with this
+    ///    independent statement, so an accidental edit to the table's
+    ///    `py_class` column fails HERE instead of reaching users.
     ///
     /// # Error Mapping Table (Complete)
     ///
     /// | Rust Variant | Python Exception | Notes |
     /// |--------------|------------------|-------|
     /// | `Io` | `IOError` (builtin) | I/O operations |
-    /// | `Schema` | `SchemaError` | Schema validation |
-    /// | `Table` | `SchemaError` | Table-related errors |
-    /// | `QueryExecution` | `QueryError` | Query execution |
-    /// | `UnsupportedQuery` | `QueryError` | Unsupported operations |
-    /// | `CqlParse` | `ParseError` | CQL syntax errors |
-    /// | `Configuration` | `ValueError` (builtin) | Config errors |
-    /// | `InvalidInput` | `ValueError` (builtin) | Input validation |
-    /// | `Timeout` | `TimeoutError` (builtin) | Operation timeouts |
-    /// | `Memory` | `MemoryError` (builtin) | Memory allocation |
-    /// | `InvalidState` | `RuntimeError` (builtin) | Invalid state (e.g., closed DB) |
-    /// | `Cancelled` | `CancelledError` | Cooperative abort (issue #2264) — never `IOError` |
-    /// | `Serialization` | `CqliteError` (base) | Unmapped - generic error |
-    /// | `Corruption` | `CqliteError` (base) | Unmapped - generic error |
-    /// | `InvalidFormat` | `CqliteError` (base) | Unmapped - generic error |
-    /// | `UnsupportedFormat` | `CqliteError` (base) | Unmapped - generic error |
-    /// | `InvalidPath` | `CqliteError` (base) | Unmapped - generic error |
-    /// | `TypeConversion` | `CqliteError` (base) | Unmapped - generic error |
-    /// | `Storage` | `CqliteError` (base) | Unmapped - generic error |
-    /// | `Concurrency` | `CqliteError` (base) | Unmapped - generic error |
-    /// | `NotFound` | `CqliteError` (base) | Unmapped - generic error |
-    /// | `AlreadyExists` | `CqliteError` (base) | Unmapped - generic error |
-    /// | `InvalidOperation` | `CqliteError` (base) | Unmapped - generic error |
-    /// | `ConstraintViolation` | `CqliteError` (base) | Unmapped - generic error |
-    /// | `Transaction` | `CqliteError` (base) | Unmapped - generic error |
-    /// | `Index` | `CqliteError` (base) | Unmapped - generic error |
-    /// | `Compaction` | `CqliteError` (base) | Unmapped - generic error |
-    /// | `Internal` | `CqliteError` (base) | Unmapped - generic error |
-    /// | `Parse` | `CqliteError` (base) | Unmapped - generic error |
-    /// | `Wasm` (wasm32 only) | `CqliteError` (base) | Unmapped - generic error |
+    /// | `Schema`, `Table` | `SchemaError` | Schema/table validation |
+    /// | `QueryExecution`, `ResultTooLarge`, `UnsupportedQuery` | `QueryError` | Query execution |
+    /// | `CqlParse` | `ParseError` | CQL syntax errors (Node code `PARSE`, #1451) |
+    /// | `Configuration`, `InvalidInput` | `ValueError` (builtin) | Config/input validation |
+    /// | `Timeout` | `TimeoutError` (builtin) | Node code `TIMEOUT` (#1451) |
+    /// | `Memory` | `MemoryError` (builtin) | Node code `MEMORY` (#1451) |
+    /// | `InvalidState` | `RuntimeError` (builtin) | Invalid state (e.g. closed DB) |
+    /// | `Cancelled` | `CancelledError` | Cooperative abort (#2264) — never `IOError` |
+    /// | `Corruption`, `Serialization`, `InvalidFormat`, `UnsupportedFormat` | `CqliteError` (base) | No closer Python class |
+    /// | `UnsupportedVersion`, `UnsupportedCommitLogVersion`, `CorruptCommitLogFrame` | `CqliteError` (base) | Format gating |
+    /// | `InvalidReadPath`, `ForcedReadPathUnavailable` | `CqliteError` (base) | Read-path knob (#1918) |
+    /// | `InvalidPath`, `TypeConversion`, `Storage`, `Concurrency`, `NotFound` | `CqliteError` (base) | |
+    /// | `AlreadyExists`, `InvalidOperation`, `ConstraintViolation`, `Transaction` | `CqliteError` (base) | |
+    /// | `Index`, `Compaction`, `Internal`, `Parse`, `WriteDirLocked` | `CqliteError` (base) | |
+    /// | `Wasm` (wasm32 only) | `CqliteError` (base) | |
+    fn expected_py_class(err: &Error) -> PyExceptionClass {
+        match err {
+            // === Explicitly mapped to specific Python exceptions ===
+            Error::Io(_) => PyExceptionClass::IoError,
+            Error::Schema(_) | Error::Table(_) => PyExceptionClass::SchemaError,
+            Error::QueryExecution(_)
+            | Error::ResultTooLarge { .. }
+            | Error::UnsupportedQuery(_) => PyExceptionClass::QueryError,
+            Error::CqlParse(_) => PyExceptionClass::ParseError,
+            Error::Configuration(_) | Error::InvalidInput(_) => PyExceptionClass::ValueError,
+            Error::Timeout(_) => PyExceptionClass::TimeoutError,
+            Error::Memory(_) => PyExceptionClass::MemoryError,
+            Error::InvalidState(_) => PyExceptionClass::RuntimeError,
+            Error::Cancelled => PyExceptionClass::CancelledError,
+
+            // === Variants with no closer Python class: the base exception ===
+            Error::Serialization { .. } => PyExceptionClass::CqliteError,
+            Error::Corruption(_) => PyExceptionClass::CqliteError,
+            Error::InvalidFormat(_) => PyExceptionClass::CqliteError,
+            Error::UnsupportedFormat(_) => PyExceptionClass::CqliteError,
+            Error::UnsupportedVersion { .. } => PyExceptionClass::CqliteError,
+            // CommitLog reader (#2389) — not bound yet (v1 is library+CLI only).
+            Error::UnsupportedCommitLogVersion { .. } => PyExceptionClass::CqliteError,
+            Error::CorruptCommitLogFrame(_) => PyExceptionClass::CqliteError,
+            // Read-path forcing knob errors (#1918).
+            Error::InvalidReadPath { .. } => PyExceptionClass::CqliteError,
+            Error::ForcedReadPathUnavailable { .. } => PyExceptionClass::CqliteError,
+            Error::InvalidPath(_) => PyExceptionClass::CqliteError,
+            Error::TypeConversion(_) => PyExceptionClass::CqliteError,
+            Error::Storage(_) => PyExceptionClass::CqliteError,
+            Error::Concurrency(_) => PyExceptionClass::CqliteError,
+            Error::NotFound(_) => PyExceptionClass::CqliteError,
+            Error::AlreadyExists(_) => PyExceptionClass::CqliteError,
+            Error::InvalidOperation(_) => PyExceptionClass::CqliteError,
+            Error::ConstraintViolation(_) => PyExceptionClass::CqliteError,
+            Error::Transaction(_) => PyExceptionClass::CqliteError,
+            Error::Index(_) => PyExceptionClass::CqliteError,
+            Error::Compaction(_) => PyExceptionClass::CqliteError,
+            Error::Internal(_) => PyExceptionClass::CqliteError,
+            Error::Parse(_) => PyExceptionClass::CqliteError,
+            Error::WriteDirLocked { .. } => PyExceptionClass::CqliteError,
+
+            // Conditional variant (only exists on wasm32)
+            #[cfg(target_arch = "wasm32")]
+            Error::Wasm(_) => PyExceptionClass::CqliteError,
+        }
+    }
+
+    /// Is the exception `to_py_err` produced an instance of `class`?
+    ///
+    /// Exhaustive over `PyExceptionClass`, so a new class in the shared contract
+    /// fails to compile until this check (and `to_py_err`) handles it.
+    fn raised_class_matches(py: Python<'_>, py_err: &PyErr, class: PyExceptionClass) -> bool {
+        match class {
+            PyExceptionClass::IoError => py_err.is_instance_of::<PyIOError>(py),
+            PyExceptionClass::ValueError => py_err.is_instance_of::<PyValueError>(py),
+            PyExceptionClass::TimeoutError => py_err.is_instance_of::<PyTimeoutError>(py),
+            PyExceptionClass::MemoryError => py_err.is_instance_of::<PyMemoryError>(py),
+            PyExceptionClass::RuntimeError => py_err.is_instance_of::<PyRuntimeError>(py),
+            // The base class is only correct if NO subclass matched, otherwise
+            // "maps to CqliteError" would be satisfied by every subclass too.
+            PyExceptionClass::CqliteError => {
+                py_err.is_instance_of::<CqliteError>(py)
+                    && !py_err.is_instance_of::<SchemaError>(py)
+                    && !py_err.is_instance_of::<QueryError>(py)
+                    && !py_err.is_instance_of::<ParseError>(py)
+                    && !py_err.is_instance_of::<CancelledError>(py)
+            }
+            PyExceptionClass::SchemaError => py_err.is_instance_of::<SchemaError>(py),
+            PyExceptionClass::QueryError => py_err.is_instance_of::<QueryError>(py),
+            PyExceptionClass::ParseError => py_err.is_instance_of::<ParseError>(py),
+            PyExceptionClass::CancelledError => py_err.is_instance_of::<CancelledError>(py),
+        }
+    }
+
+    /// Every core variant maps to the documented Python class — in the shared
+    /// contract AND in the exception `to_py_err` actually raises.
     #[test]
     fn test_error_mapping_completeness() {
-        // This function uses an exhaustive match to ensure all Error variants
-        // are accounted for. If a new variant is added to cqlite_core::Error,
-        // this will fail to compile until the match is updated.
-        //
-        // The goal is NOT to test runtime behavior (other tests do that),
-        // but to serve as a compile-time check and documentation.
+        let mut checked = 0usize;
+        for &variant in FfiErrorVariant::ALL {
+            let Some(err) = variant.sample_error() else {
+                // Only `Wasm` lacks a representative value off wasm32.
+                assert_eq!(variant, FfiErrorVariant::Wasm);
+                continue;
+            };
+            let expected = expected_py_class(&err);
+            let row = contract_for(&err);
+            assert_eq!(
+                row.py_class, expected,
+                "shared contract row {} maps to {:?}, this binding documents {:?}",
+                row.variant, row.py_class, expected
+            );
 
-        fn verify_all_variants_documented(err: &Error) {
-            match err {
-                // === Explicitly mapped to specific Python exceptions ===
-                Error::Io(_) => { /* Maps to PyIOError */ }
-                Error::Schema(_) => { /* Maps to SchemaError */ }
-                Error::Table(_) => { /* Maps to SchemaError */ }
-                Error::QueryExecution(_) => { /* Maps to QueryError */ }
-                Error::ResultTooLarge { .. } => { /* Maps to QueryError (issue #1582) */ }
-                Error::UnsupportedQuery(_) => { /* Maps to QueryError */ }
-                // Issue #1918: read-path forcing knob errors fall through to the
-                // base CqliteError like every other query-shaped variant below.
-                Error::InvalidReadPath { .. } => { /* Maps to CqliteError */ }
-                Error::ForcedReadPathUnavailable { .. } => { /* Maps to CqliteError */ }
-                Error::CqlParse(_) => { /* Maps to ParseError */ }
-                Error::Configuration(_) => { /* Maps to PyValueError */ }
-                Error::InvalidInput(_) => { /* Maps to PyValueError */ }
-                Error::Timeout(_) => { /* Maps to PyTimeoutError */ }
-                Error::Memory(_) => { /* Maps to PyMemoryError */ }
-                Error::InvalidState(_) => { /* Maps to PyRuntimeError */ }
-                Error::Cancelled => { /* Maps to CancelledError (issue #2264) — NEVER IOError */ }
-
-                // === Unmapped variants (fall through to base CqliteError) ===
-                Error::Serialization { .. } => { /* Maps to CqliteError */ }
-                Error::Corruption(_) => { /* Maps to CqliteError */ }
-                Error::InvalidFormat(_) => { /* Maps to CqliteError */ }
-                Error::UnsupportedFormat(_) => { /* Maps to CqliteError */ }
-                Error::UnsupportedVersion { .. } => { /* Maps to CqliteError */ }
-                // CommitLog reader (#2389) — not bound yet (v1 is library+CLI only),
-                // same Data-category handling as the sibling SSTable-format errors above.
-                Error::UnsupportedCommitLogVersion { .. } => { /* Maps to CqliteError */ }
-                Error::CorruptCommitLogFrame(_) => { /* Maps to CqliteError */ }
-                Error::InvalidPath(_) => { /* Maps to CqliteError */ }
-                Error::TypeConversion(_) => { /* Maps to CqliteError */ }
-                Error::Storage(_) => { /* Maps to CqliteError */ }
-                Error::Concurrency(_) => { /* Maps to CqliteError */ }
-                Error::NotFound(_) => { /* Maps to CqliteError */ }
-                Error::AlreadyExists(_) => { /* Maps to CqliteError */ }
-                Error::InvalidOperation(_) => { /* Maps to CqliteError */ }
-                Error::ConstraintViolation(_) => { /* Maps to CqliteError */ }
-                Error::Transaction(_) => { /* Maps to CqliteError */ }
-                Error::Index(_) => { /* Maps to CqliteError */ }
-                Error::Compaction(_) => { /* Maps to CqliteError */ }
-                Error::Internal(_) => { /* Maps to CqliteError */ }
-                Error::Parse(_) => { /* Maps to CqliteError */ }
-
-                // Write-dir lock conflict — maps to CqliteError with clear message
-                Error::WriteDirLocked { .. } => { /* Maps to CqliteError */ }
-
-                // Conditional variant (only exists on wasm32)
-                #[cfg(target_arch = "wasm32")]
-                Error::Wasm(_) => { /* Maps to CqliteError */ }
-            }
+            let py_err = to_py_err(err);
+            Python::with_gil(|py| {
+                assert!(
+                    raised_class_matches(py, &py_err, expected),
+                    "{} must raise {}",
+                    row.variant,
+                    expected.as_str()
+                );
+            });
+            checked += 1;
         }
+        let expected_checked =
+            FfiErrorVariant::ALL.len() - if cfg!(target_arch = "wasm32") { 0 } else { 1 };
+        assert_eq!(
+            checked, expected_checked,
+            "every contract row except Wasm (off wasm32) must be exercised"
+        );
+    }
 
-        // Create sample errors to verify the function compiles
-        // (This exercises the exhaustive match at compile time)
-        let test_errors = vec![
-            Error::Io(std::io::Error::new(std::io::ErrorKind::NotFound, "test")),
-            Error::Schema("test".to_string()),
-            Error::Corruption("test".to_string()),
-            Error::InvalidState("test".to_string()),
-            Error::Serialization {
-                message: "test".to_string(),
-                source: None,
-            },
-            Error::Cancelled,
+    /// The four cross-binding divergences issue #1451 fixes, pinned on the
+    /// Python side of the contract.
+    #[test]
+    fn test_pinned_contract_rows() {
+        let cases = [
+            (
+                Error::cql_parse("syntax error"),
+                PyExceptionClass::ParseError,
+                "PARSE",
+            ),
+            (
+                Error::invalid_input("bad input"),
+                PyExceptionClass::ValueError,
+                "INVALID_INPUT",
+            ),
+            (
+                Error::Timeout("timed out".to_string()),
+                PyExceptionClass::TimeoutError,
+                "TIMEOUT",
+            ),
+            (
+                Error::memory("out of memory"),
+                PyExceptionClass::MemoryError,
+                "MEMORY",
+            ),
+            (
+                Error::corruption("data corrupted"),
+                PyExceptionClass::CqliteError,
+                "PARSE",
+            ),
         ];
 
-        for err in &test_errors {
-            verify_all_variants_documented(err);
-        }
-
-        // Additionally verify that the to_py_err function handles all these
-        // (This is a runtime sanity check, but primarily the compile-time check matters)
-        for err in test_errors {
-            let _py_err = to_py_err(err);
-            // If we got here, the mapping didn't panic
+        for (err, py_class, node_code) in cases {
+            let row = contract_for(&err);
+            assert_eq!(row.py_class, py_class, "py_class for {}", row.variant);
+            // Asserted here too: this binding and Node read the SAME row, so a
+            // Node-side code change cannot silently move the Python class.
+            assert_eq!(row.node_code, node_code, "node_code for {}", row.variant);
         }
     }
 
