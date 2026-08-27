@@ -825,6 +825,30 @@ fn resolve_mod_file(crate_dir: &Path, parent_key: &str, decl: &ModDecl) -> Resul
     };
 
     if let Some(raw) = &decl.path_attr {
+        // An ABSOLUTE `#[path]` value is legal Rust, and rustc resolves it against the
+        // FILESYSTEM ROOT — not against the declaring file's directory. Joining it onto
+        // `base` and normalizing the result (which folds a leading `/`, and unifies `\` to
+        // `/`, so `C:\x.rs` becomes `C/x.rs`) silently re-points the declaration at a
+        // DIFFERENT, in-crate file: `#[path = "/abs/target.rs"]` in `src/lib.rs` would mark
+        // `src/abs/target.rs` reachable while rustc compiles `/abs/target.rs`. A same-named
+        // in-crate orphan then reads as wired — the FALSE PASS this walker exists to
+        // prevent. The target is also outside the census by construction, so there is
+        // nothing to boundary-check it against; refuse (#1714).
+        if let Some(shape) = absolute_path_shape(raw) {
+            return Err(format!(
+                "{parent_key}:{}: `#[path = \"{raw}\"] mod {}` names an ABSOLUTE path \
+                 ({shape}). rustc resolves it against the filesystem root, so it may point \
+                 outside the crate entirely and cannot be boundary-checked against the \
+                 census; treating it as relative to `{}` would mark a DIFFERENT, in-crate \
+                 file reachable and hide a real orphan (FAIL-CLOSED — see #1714).\n\
+                 Remedy: write the `#[path]` value relative to the declaring file, or teach \
+                 the walker absolute targets with an explicit in-crate boundary check \
+                 (tests/support/mod_reachability.rs).",
+                decl.line,
+                decl.name,
+                dirname(parent_key)
+            ));
+        }
         // The Rust Reference, "Modules / The path attribute":
         //   * a `#[path]` mod at FILE TOP LEVEL resolves relative to the DIRECTORY of the
         //     declaring file (so `#[path = "otel_tests.rs"]` in `observability/otel.rs`
@@ -907,6 +931,28 @@ fn file_stem(key: &str) -> String {
         Some(idx) => base[..idx].to_string(),
         None => base.to_string(),
     }
+}
+
+/// `Some(description)` when `raw` is an ABSOLUTE path value, `None` when it is relative.
+///
+/// Platform-independent on purpose: `Path::is_absolute` answers per-HOST (`C:\x.rs` is
+/// "relative" on Unix), while [`normalize_key`] unifies `\` to `/` on every host — so a
+/// Windows-shaped value would fold into an in-crate key here regardless of where this runs.
+/// All four spellings are therefore recognized directly.
+fn absolute_path_shape(raw: &str) -> Option<&'static str> {
+    let b = raw.as_bytes();
+    match b.first() {
+        Some(b'/') => return Some("POSIX, leading `/`"),
+        // `\x`, and the UNC form `\\server\share\x`.
+        Some(b'\\') => return Some("Windows root-relative or UNC, leading `\\`"),
+        _ => {}
+    }
+    // `C:\x.rs` / `C:/x.rs` — a drive-letter prefix.
+    if b.len() >= 3 && b[0].is_ascii_alphabetic() && b[1] == b':' && (b[2] == b'/' || b[2] == b'\\')
+    {
+        return Some("Windows drive-letter, `X:` prefix");
+    }
+    None
 }
 
 /// Lexically resolve `.` and `..` in a `/`-separated key. Escaping the crate root is an error.

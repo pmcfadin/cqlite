@@ -435,6 +435,48 @@ fn missing_path_target_fails_closed() {
     );
 }
 
+/// Rust permits an ABSOLUTE `#[path]` value, and rustc resolves it as an absolute path —
+/// against the filesystem root, not against the declaring file's directory. Prepending the
+/// declaring module's directory to it and normalizing the result as if it were relative
+/// re-points the declaration at an entirely different, IN-CRATE file: `#[path =
+/// "/abs/target.rs"]` in `src/lib.rs` becomes `src/abs/target.rs`, so a same-named in-crate
+/// orphan is marked reachable while rustc compiles something outside the crate. That is a
+/// FALSE PASS — an orphan reported as wired — which is why the walker refuses instead.
+///
+/// Both spellings are covered: POSIX (`/…`) and the Windows forms (`\…`, `C:\…`, `C:/…`),
+/// since `normalize_key` unifies `\` to `/` and would otherwise fold a drive-letter or UNC
+/// value into an in-crate key on any platform.
+#[test]
+fn absolute_path_attribute_value_fails_closed() {
+    // (source spelling of the literal, the value it decodes to). A Windows path must
+    // double its backslashes in Rust source — `"\abs"` is an invalid escape rustc rejects
+    // too, and the sanitizer refuses it one layer earlier.
+    for (spelling, value) in [
+        ("/abs/target.rs", "/abs/target.rs"),
+        ("\\\\abs\\\\target.rs", "\\abs\\target.rs"),
+        ("C:\\\\abs\\\\target.rs", "C:\\abs\\target.rs"),
+        ("C:/abs/target.rs", "C:/abs/target.rs"),
+    ] {
+        let tree = ScratchCrate::new("absolute-path-attr");
+        tree.write(
+            "src/lib.rs",
+            &format!("#[path = \"{spelling}\"]\nmod aliased;\npub mod wired;\n"),
+        );
+        tree.write("src/wired.rs", "pub fn f() {}\n");
+        // The file a "prepend the module directory and normalize" reading would land on.
+        // It is a real orphan: rustc, reading the value as absolute, never compiles it.
+        tree.write("src/abs/target.rs", "pub fn never_compiled() {}\n");
+        tree.write("src/C/abs/target.rs", "pub fn never_compiled() {}\n");
+
+        let cause = tree.expect_failure();
+        assert!(
+            cause.contains(value) && cause.contains("src/lib.rs:2") && cause.contains("absolute"),
+            "the refusal must name the file, the line and the absolute value verbatim; \
+             got: {cause}"
+        );
+    }
+}
+
 /// A `#[path]` value is read out of the sanitizer's literal side table, so the string
 /// scanner must reproduce the value BYTE-EXACTLY. Decoding unescaped bytes one at a time
 /// (`byte as char`) turns the two UTF-8 bytes of `ó` into two Latin-1 characters, and the
