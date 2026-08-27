@@ -9,18 +9,16 @@
 //! `#[path = "scan_stream_windowed_decode.rs"] impl`-carrying module in the parent.
 
 use super::SSTableReader;
-use crate::observability::read_metrics;
 use crate::Result;
 
 impl SSTableReader {
-    /// The bounded `catalog::attr::COMPRESSION` label for this reader's scan decode
-    /// (issue #1701): the configured algorithm, or `"none"` for an uncompressed
-    /// SSTable — a named series, never an absent label.
-    fn scan_compression_label(&self) -> &'static str {
-        match self.compression_reader.as_ref() {
-            Some(cr) => read_metrics::compression_attr(cr.algorithm()),
-            None => read_metrics::COMPRESSION_NONE,
-        }
+    /// This reader's configured decompression algorithm, or `None` for an
+    /// uncompressed SSTable — the plane maps `None` onto the bounded `"none"`
+    /// compression label (issue #1701), so no call site invents a label of its own.
+    fn scan_algorithm(
+        &self,
+    ) -> Option<&crate::storage::sstable::compression::CompressionAlgorithm> {
+        self.compression_reader.as_ref().map(|r| r.algorithm())
     }
 
     /// Decode ONE compressed chunk on the IO half (issue #1940, D2): CRC was
@@ -54,10 +52,7 @@ impl SSTableReader {
             // bytes this scan just read — Cassandra stored the chunk raw — so they are
             // counted here, at the exit that BYPASSES the decode plane where the
             // sibling compressed exit counts. Skipping them would understate real I/O.
-            read_metrics::record_decompressed_bytes(
-                compressed.len(),
-                self.scan_compression_label(),
-            );
+            super::super::chunk_source::count_raw_chunk(&compressed, self.scan_algorithm());
             return Ok((bytes::Bytes::from(compressed), Vec::new()));
         }
         let key = crate::storage::cache::ChunkKey::new(
@@ -86,8 +81,7 @@ impl SSTableReader {
             // write surface emits only uncompressed SSTables, the #1406 claim
             // boundary), so leaving it uncounted made every uncompressed read
             // invisible to the metric.
-            let read_bytes = compressed.len();
-            read_metrics::record_decompressed_bytes(read_bytes, read_metrics::COMPRESSION_NONE);
+            super::super::chunk_source::count_raw_chunk(&compressed, None);
             return Ok((self.chunk_cache.insert(key, compressed), Vec::new()));
         }
         // Miss → decompress from the BORROWED slice (so we keep `compressed` to

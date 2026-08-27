@@ -348,12 +348,11 @@ impl SSTableReader {
                 scan_cancel.check()?;
             }
             let decompressed_chunk = if compressed_chunk.len() >= max_compressed_length {
-                // Stored uncompressed by Cassandra — pass the raw bytes through.
-                tracing::debug!(
-                    "stitch_all_chunks: chunk {} is incompressible (len={} >= max_compressed_length={}), using raw bytes",
-                    chunk_count,
-                    compressed_chunk.len(),
-                    max_compressed_length
+                // Stored uncompressed by Cassandra — the raw bytes pass through, and
+                // are COUNTED at the plane's one raw-chunk boundary (issue #1701 F3).
+                super::chunk_source::count_raw_chunk(
+                    &compressed_chunk,
+                    self.compression_reader.as_ref().map(|r| r.algorithm()),
                 );
                 compressed_chunk
             } else if let Some(compression_reader) = &self.compression_reader {
@@ -592,6 +591,13 @@ impl SSTableReader {
             model::CHUNK_READ_CALLS.fetch_add(1, Ordering::Relaxed);
             let mut buffer = vec![0u8; size as usize];
             source.read_exact_at(block_offset, &mut buffer)?;
+            // cqlite.read.bytes (issue #1701 roborev F3): an UNCOMPRESSED offset read
+            // never reaches the decode plane — there is nothing to decompress — so its
+            // bytes are counted at the plane's raw-chunk boundary here. Without this a
+            // point read (or an index-driven partition read) of an uncompressed
+            // SSTable reported rows and a duration but ZERO bytes. The cache-hit
+            // early return above stays uncounted: it read no Data.db.
+            super::chunk_source::count_raw_chunk(&buffer, None);
             buffer
         };
 

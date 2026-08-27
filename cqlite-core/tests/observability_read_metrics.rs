@@ -116,6 +116,26 @@ const BTI: Fixture = Fixture {
     compression: "lz4",
 };
 
+/// A COMMITTED fixture whose chunks Cassandra stored **RAW** inside a COMPRESSED
+/// SSTable: `LZ4Compressor` with `min_compress_ratio = 1.0` over high-entropy blobs,
+/// so `maxCompressedLength = chunk_length` and `CompressedSequentialWriter`'s
+/// uncompressed-chunk fallback fires (1 partition, 64 rows).
+///
+/// This case exists for roborev F3: the incompressible-raw shape is a SECOND family
+/// of decode exits that hand the buffer through without decompressing, and every one
+/// of them used to leave `read.bytes` short while still reporting rows and a
+/// duration. The bytes are attributed to the TABLE's algorithm (`lz4`) — the chunk
+/// was stored raw, but the SSTable is LZ4-compressed, and the label describes the
+/// SSTable, not one chunk's luck.
+const INCOMPRESSIBLE: Fixture = Fixture {
+    keyspace: "test_comp",
+    table: "incompressible_uncompressed_chunk",
+    format: "big",
+    warm_scan_is_cached: false,
+    min_partitions: 1,
+    compression: "lz4",
+};
+
 /// A COMMITTED **UNCOMPRESSED** BIG (`nb`) fixture (no `CompressionInfo.db`): 1
 /// partition, 600 on-disk rows.
 ///
@@ -465,6 +485,9 @@ async fn read_path_emits_rows_bytes_partitions_and_duration() {
     // Data.db payload and must be counted, under the bounded `compression = "none"`
     // label. Neither fixture above can see this — both are compressed.
     exercise_read_surfaces(&UNCOMPRESSED, &mc).await;
+    // INCOMPRESSIBLE (roborev F3): chunks stored RAW inside a compressed SSTable take
+    // the other family of plane-bypassing exits.
+    exercise_read_surfaces(&INCOMPRESSIBLE, &mc).await;
 }
 
 // ---------------------------------------------------------------------------
@@ -620,6 +643,15 @@ async fn a_cross_generation_point_read_is_one_metered_operation() {
         "one partition; points: {:?}",
         hit.find(catalog::READ_PARTITIONS).map(|m| &m.points)
     );
+    // The cross-generation read really reads Data.db, so it must report bytes too
+    // (roborev F3 named the merge producer as a suspected blind spot).
+    assert!(
+        hit.counter_sum(catalog::READ_BYTES) > 0.0,
+        "a cross-generation point read materialises Data.db payload and must report \
+         cqlite.read.bytes; points: {:?}",
+        hit.find(catalog::READ_BYTES).map(|m| &m.points)
+    );
+
     // Format-agnostic at this grain: the generations of one table need not share an
     // on-disk format, so the emission must carry NO `sstable.format` label rather
     // than an arbitrarily-picked one.

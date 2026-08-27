@@ -11,7 +11,7 @@
 
 use crate::observability::read_metrics;
 use crate::storage::cache::{ChunkKey, DecompressedChunkCache};
-use crate::storage::sstable::compression::Compression;
+use crate::storage::sstable::compression::{Compression, CompressionAlgorithm};
 use crate::storage::sstable::compression_info::CompressionInfo;
 use crate::storage::sstable::reader::block_io::read_compressed_chunk_at;
 use crate::storage::sstable::reader::data_access::DECOMPRESS_CALLS;
@@ -48,6 +48,51 @@ pub(crate) struct ChunkSource<'a> {
     namespace: u64,
     /// Stable reader identity
     cache_id: u64,
+}
+
+/// The bounded [`crate::observability::catalog::attr::COMPRESSION`] label for a
+/// decode site's configured algorithm (issue #1701) — `"none"` when there is none,
+/// never an absent label. Free function taking the ALGORITHM so every decode site
+/// resolves the label identically whether it holds a `Compression`, a
+/// `CompressionReader`, or nothing.
+pub(crate) fn compression_label_of(algorithm: Option<&CompressionAlgorithm>) -> &'static str {
+    match algorithm {
+        Some(a) => read_metrics::compression_attr(a),
+        None => read_metrics::COMPRESSION_NONE,
+    }
+}
+
+/// Count a chunk the caller hands through RAW — Cassandra stored it uncompressed
+/// because its compressed length would have met `max_compressed_length`, or the
+/// SSTable has no compressor at all — into
+/// [`crate::observability::catalog::READ_BYTES`], exactly as a DECOMPRESSED chunk's
+/// bytes are counted (issue #1701, roborev F3).
+///
+/// # Why this lives in the plane rather than at each call site
+///
+/// FIVE decode exits do that raw passthrough THEMSELVES (`len >=
+/// max_compressed_length`, or "no compressor, the buffer already holds finished
+/// bytes") and so never reach [`ChunkSource::decompress_only`] /
+/// [`ChunkSource::decode_and_cache`]: the windowed scan's IO half (two exits), the
+/// compressed offset-read window, the BIG promoted seek window, and the stitch path.
+/// Every one was a silent hole in `read.bytes` — a read reporting rows and a duration
+/// while reporting fewer bytes than it actually read. Counting them independently at
+/// five sites would leave the NEXT such exit free to bypass the metric again, so the
+/// counting is ONE named plane function they all call: greppable from the plane, and
+/// the thing to reach for when a sixth raw exit appears.
+pub(crate) fn count_raw_chunk(bytes: &[u8], algorithm: Option<&CompressionAlgorithm>) {
+    read_metrics::record_decompressed_bytes(bytes.len(), compression_label_of(algorithm));
+}
+
+/// [`count_raw_chunk`] for a site that hands the buffer ON as its own value: counts,
+/// then returns it unchanged. Same single boundary — this exists only so a site whose
+/// raw exit is one expression (`Ok(whole)`) can route through it without restructuring.
+pub(crate) fn counted_raw_chunk(
+    bytes: Vec<u8>,
+    algorithm: Option<&CompressionAlgorithm>,
+) -> Vec<u8> {
+    count_raw_chunk(&bytes, algorithm);
+    bytes
 }
 
 impl<'a> ChunkSource<'a> {
@@ -87,10 +132,7 @@ impl<'a> ChunkSource<'a> {
     ///
     /// [`catalog::attr::COMPRESSION`]: crate::observability::catalog::attr::COMPRESSION
     fn compression_label(&self) -> &'static str {
-        match self.compression {
-            Some(c) => read_metrics::compression_attr(c.algorithm()),
-            None => read_metrics::COMPRESSION_NONE,
-        }
+        compression_label_of(self.compression.map(|c| c.algorithm()))
     }
 
     /// Whole-chunk read: positioned read → CRC → decompress → B1 cache.
@@ -139,10 +181,14 @@ impl<'a> ChunkSource<'a> {
         compressed: Vec<u8>,
         incompressible: bool,
     ) -> Result<Bytes> {
-        let decompressed = if incompressible {
-            // Stored uncompressed by Cassandra: pass raw bytes through (no decompress counter)
-            compressed
-        } else if let Some(compression) = self.compression {
+        if incompressible {
+            // Stored uncompressed by Cassandra: pass the raw bytes through (no
+            // decompress counter), but COUNT them — they are Data.db payload this
+            // read materialised, exactly like a decompressed chunk's (issue #1701 F3).
+            count_raw_chunk(&compressed, self.compression.map(|c| c.algorithm()));
+            return Ok(self.cache.insert(key, compressed));
+        }
+        let decompressed = if let Some(compression) = self.compression {
             // Decompress: the single query-path decompress call site
             let d = compression.decompress(&compressed).map_err(|e| {
                 Error::corruption(format!(
