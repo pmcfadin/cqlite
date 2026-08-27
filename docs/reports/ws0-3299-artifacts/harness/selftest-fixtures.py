@@ -162,6 +162,31 @@ def perf_csv(path, case, ncpus=2):
             fh.write(f"{val},,{ev},60000000000,{pct},,\n")
 
 
+def flight_step(path, case):
+    """One `flight-loadgen` step record (phase 2's occupancy evidence)."""
+    rec = {"round": "t", "concurrency": 8, "rows_total": 12_345_678,
+           "rows_per_s": 205_761.3, "requests_ok": 4096,
+           "requests_error": 0, "requests_unavailable": 0}
+    lines = [rec]
+    if case == "zero-rows":
+        rec["rows_total"] = 0
+    elif case == "errors":
+        rec["requests_error"] = 7
+    elif case == "unavailable":
+        rec["requests_unavailable"] = 3
+    elif case == "no-ok":
+        rec["requests_ok"] = 0
+    elif case == "two-steps":
+        lines = [rec, dict(rec, concurrency=16)]
+    elif case == "no-step":
+        lines = [{"round": "t", "note": "a record with no rows_total"}]
+    elif case == "empty":
+        lines = []
+    with open(path, "w") as fh:
+        for line in lines:
+            fh.write(json.dumps(line) + "\n")
+
+
 def siblings_map(path, cores=8, offset=8):
     with open(path, "w") as fh:
         for c in range(cores):
@@ -180,6 +205,9 @@ def main():
     p = sub.add_parser("perf-csv")
     p.add_argument("--path", required=True)
     p.add_argument("--case", default="good")
+    fl = sub.add_parser("flight-step")
+    fl.add_argument("--path", required=True)
+    fl.add_argument("--case", default="good")
     s = sub.add_parser("siblings")
     s.add_argument("--path", required=True)
     s.add_argument("--cores", type=int, default=8)
@@ -189,6 +217,8 @@ def main():
         build(a.case, a.dir, a.workers)
     elif a.what == "perf-csv":
         perf_csv(a.path, a.case)
+    elif a.what == "flight-step":
+        flight_step(a.path, a.case)
     else:
         siblings_map(a.path, a.cores, a.offset)
 

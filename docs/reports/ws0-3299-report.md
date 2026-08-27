@@ -136,11 +136,18 @@ For S=6 this is not marginal: **N=24 beats N=16 by +9.8%**, far outside that
 point's 0.4–0.7% spread, so the curve was still climbing when the ladder ended.
 
 > **PLACEHOLDER — extension A.** `--grid "6:24,32,48,64"`, 3 reps, with the
-> incumbent N=24 **re-measured interleaved** with each candidate so every
-> comparison is contemporaneous. This is required, not precautionary: the session
-> drifts directionally (§6), so comparing a late N=32 against an early N=24 would
-> let drift answer the bracketing question in the direction that inflates the
-> target. Verdict and the incumbent's early-vs-late values go here.
+> incumbent N=24 **re-measured interleaved** with each candidate in every round,
+> so the bracketing verdict is drift-robust by construction. This is required,
+> not precautionary: the session drifts directionally (§6), so comparing a late
+> N=32 against an early N=24 would let drift answer the bracketing question — in
+> the direction that inflates the target.
+>
+> **The re-measured N=24 is also a result in its own right**, not merely a
+> control: it is an independent read on session drift **at the exact
+> configuration AC2 consumes**. Its value will be published beside the main
+> grid's 2,732,817 and the difference left to speak for itself. If they differ
+> materially, **extA's value is the one used for the bracketing comparison**,
+> because it is contemporaneous with the candidates it is being compared against.
 
 ---
 
@@ -296,10 +303,80 @@ we are today, which is `do_get`. The only box-level `do_get` figure is #3217's
 mission §0 calls out — 3.5× the bytes per row and no per-row decompression are
 two large opposite-signed effects on exactly the measured quantity.
 
-> **PLACEHOLDER — phase 2.** `do_get` on Corpus B, same host and session, at S=6
-> best-N and S=1 only. Scope, comparability judgement and the pinning question
-> are open; if the two arms cannot be made comparable at S=6 on 8 physical cores,
-> AC4 ships with a stated hole and a proposed follow-up rather than a false ratio.
+### 9.1 Phase 2 — measuring `do_get` on Corpus B
+
+**Scope**: `do_get` on Corpus B, same host and session, **S=1 and S=6 only**,
+≥3 reps, same 100.00% `pct_running` kill criterion, contained. Not a grid — the
+full `do_get` C(N) curve is #3217's deliverable and no AC asks for it again.
+
+**Mechanics** (read from the code, `artifacts/phase2-recon.md`):
+
+| piece | how |
+|---|---|
+| server | `cqlite-flight --data-dir /data/ws0-3096 --port <p>`; the table is resolved positionally as `<data_dir>/<keyspace>/<table>`. |
+| schema | **carried in the TICKET, not a server-side file** — `service.rs:424 parse_schema(ticket)` parses CQL DDL per request and caches it. So Corpus B's `ws0-events.cql` goes into the ticket template and the server needs no change. |
+| concurrency (N) | `flight-loadgen --ramp` — a comma-separated list of target concurrencies, **one ramp step each**. This arm runs ONE value per rep, so the counted interval matches exactly one step. |
+| rows | per-step JSONL records carrying `rows_total` / `rows_per_s`. |
+| shape | **`--shape full`**, matching the bare scan's `SELECT * FROM ws0.events`. The loadgen's default is `mixed`, which would measure a different workload and void the cross-arm ratio. |
+
+**Corpus B is servable**: no schema obstacle (above); **no `CompressionInfo.db`
+assumption** in the Flight path — the warm-budget accounting is explicitly
+compression-agnostic, enumerating components "whichever format, whichever
+compression setting" and noting `CRC.db` "can DOMINATE on an uncompressed BIG
+table"; and no Corpus-A schema assumption. That is a code read, so the harness
+confirms it empirically with an **uncounted warmup whose row count must be
+non-zero** before any rep is measured — a 0-row `do_get` would otherwise look
+like an extremely fast one, since a server answering `NotFound` completes every
+request immediately (#3224 shipped exactly that failure).
+
+**Core allocation**, derived from `thread_siblings_list`, client disjoint from
+server and verified as such (`perf stat -C <server>` would otherwise count client
+work as engine work):
+
+| point | server (S complete sibling groups) | client (CONSTANT) |
+|---|---|---|
+| S=1 | `0,8` | `6,14,7,15` |
+| S=6 | `0,8,1,9,2,10,3,11,4,12,5,13` | `6,14,7,15` |
+
+**The client set is held constant on purpose.** If it shrank as the server grew,
+`do_get`'s own S=1→S=6 slope would confound server scaling with client
+starvation. A constant 2-physical-core client also matches #3217/#3224's
+convention, which is what makes the Corpus-B-vs-Corpus-A `do_get` comparison
+same-arm and same-convention.
+
+**The window is #3224's ALIGNED convention, verbatim**: perf runs the loadgen as
+its own child, so the counted interval *is* the row-producing interval — no
+attribution and no rate assumption. Phase 1 needed its own machinery only because
+it had N independent worker processes and no single child to wrap.
+
+### 9.2 The asymmetry, stated precisely
+
+Bare-scan S=6 ran 6 cores pinned with **2 idle** and no client. `do_get` S=6 runs
+6 serving with those same 2 **busy** driving load. These are not identical machine
+states — the client perturbs shared LLC, memory bandwidth and turbo.
+
+**So the cross-arm slope comparison is NOT a controlled A/B**, and is not
+presented as one. Three things nonetheless make phase 2 sound:
+
+1. **The deployment bar is itself asymmetric.** The bar is box-level `do_get`
+   within ~1.3× of box-level bare scan; in any real deployment `do_get` has
+   clients and bare scan does not. The asymmetry is part of what is being asked,
+   not an artefact of the rig.
+2. **`do_get`-on-B vs `do_get`-on-A is clean** — same arm, same convention, so it
+   answers "does the corpus change `do_get`'s slope?" with no asymmetry caveat.
+3. **Marginal efficiency is self-normalised per arm**, each measured under its own
+   convention at every S, so each arm's own slope is internally valid.
+
+Only the cross-arm slope carries the idle-vs-busy-headroom caveat, and it is
+labelled wherever it appears.
+
+**One open risk, to be falsified rather than asserted.** A 2-core client driving
+a 6-core server may be client-bound; if so the figure measures the loadgen, not
+`do_get`, and the error direction **understates `do_get`** and therefore
+**overstates** the bare-scan gap — flattering the very lever this issue
+calibrates. The cheap test is to re-run S=6 with a 1-core client: if the
+aggregate moves materially, the measurement is client-bound and void. That test
+runs before any S=6 `do_get` figure is written here.
 
 ---
 

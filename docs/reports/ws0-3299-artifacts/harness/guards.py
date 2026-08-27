@@ -433,6 +433,60 @@ def guard_window(args):
     return 0
 
 
+# --- phase 2: the Flight `do_get` arm -----------------------------------------
+
+
+def guard_flight_step(args):
+    """Validate ONE `flight-loadgen` step record for the `do_get` arm.
+
+    Phase 2 reuses THIS module rather than forking a second set of checks, so a
+    guard fixed here is fixed for both arms. What differs is only the occupancy
+    question: the bare-scan arm asks it of per-worker progress records, and this
+    asks it of the loadgen's own step record.
+
+    A ZERO-ROW `do_get` IS THE FAILURE THIS EXISTS TO CATCH. It would otherwise
+    look like an extremely fast one — the server returning `NotFound` for every
+    request completes very quickly and reports a large request rate. #3224 hit
+    exactly this: `rows_total % corpus == 0` passed on `0 % 3999890 == 0` while
+    the server logged `discovered 0 tables across 0 keyspaces` behind 2,258,606
+    `NotFound`s, and the rep returned rc=0.
+    """
+    if not os.path.exists(args.jsonl):
+        fail("FLIGHT_RECORD_MISSING", f"{args.jsonl} does not exist — no loadgen record, so no measurement")
+    recs = []
+    with open(args.jsonl) as fh:
+        for line in fh:
+            line = line.strip()
+            if line:
+                recs.append(json.loads(line))
+    steps = [r for r in recs if "rows_total" in r]
+    if not steps:
+        fail("FLIGHT_RECORD_MISSING", f"{args.jsonl} holds no step record carrying rows_total")
+    if len(steps) != 1:
+        fail(
+            "FLIGHT_STEP_COUNT",
+            f"{args.jsonl} holds {len(steps)} step records; this arm runs ONE concurrency per "
+            f"rep so the counted perf interval matches exactly one step. Multiple steps would "
+            f"span the ramp between them, which is not a measured window.",
+        )
+    st = steps[0]
+    rows = int(st.get("rows_total", 0))
+    if rows <= 0:
+        fail(
+            "FLIGHT_ZERO_ROWS",
+            f"the step returned {rows} rows. A zero-row do_get is a FAILURE, never a "
+            f"measurement — and it presents as a very FAST one, because a server answering "
+            f"NotFound completes every request immediately.",
+        )
+    for key in ("requests_error", "requests_unavailable"):
+        if key in st and int(st[key]) != 0:
+            fail("FLIGHT_REQUEST_ERRORS", f"step reported {key}={st[key]}; a rep with failed requests is not a measurement")
+    if "requests_ok" in st and int(st["requests_ok"]) <= 0:
+        fail("FLIGHT_REQUEST_ERRORS", "step reported requests_ok=0")
+    print(json.dumps({"rows_total": rows, "rows_per_s": st.get("rows_per_s"), "record": args.jsonl}))
+    return 0
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = ap.add_subparsers(dest="cmd", required=True)
@@ -454,6 +508,10 @@ def main():
     w.add_argument("--shortfall-bound", type=float, default=DEFAULT_SHORTFALL_BOUND)
     w.add_argument("--counter-window-tolerance", type=float, default=DEFAULT_COUNTER_WINDOW_TOLERANCE)
     w.set_defaults(fn=guard_window)
+
+    f = sub.add_parser("flight-step", help="verify one flight-loadgen step record (phase 2)")
+    f.add_argument("--jsonl", required=True)
+    f.set_defaults(fn=guard_flight_step)
 
     args = ap.parse_args()
     sys.exit(args.fn(args))

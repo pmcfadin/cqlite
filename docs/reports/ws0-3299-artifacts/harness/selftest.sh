@@ -201,6 +201,28 @@ d = json.load(open(p)); d.pop("n"); json.dump(d, open(p, "w"))
 PY
 expect_guard_fail WINDOW_MISSING python3 "$GUARDS" window --repdir "$TMP/w-non"
 
+# ------------------------------------ phase 2: the Flight do_get step record ---
+echo
+echo "-- flight-step (phase 2) --"
+python3 "$FIX" flight-step --path "$TMP/fl-good.jsonl"
+expect_ok "flight-step well-formed" \
+  python3 "$GUARDS" flight-step --jsonl "$TMP/fl-good.jsonl"
+expect_guard_fail FLIGHT_RECORD_MISSING \
+  python3 "$GUARDS" flight-step --jsonl "$TMP/fl-nope.jsonl"
+for c in empty no-step; do python3 "$FIX" flight-step --path "$TMP/fl-$c.jsonl" --case "$c"; done
+expect_guard_fail FLIGHT_RECORD_MISSING python3 "$GUARDS" flight-step --jsonl "$TMP/fl-empty.jsonl"
+expect_guard_fail FLIGHT_RECORD_MISSING python3 "$GUARDS" flight-step --jsonl "$TMP/fl-no-step.jsonl"
+# THE one this guard exists for: a zero-row do_get presents as a very FAST one,
+# because a server answering NotFound completes every request immediately.
+python3 "$FIX" flight-step --path "$TMP/fl-zero.jsonl" --case zero-rows
+expect_guard_fail FLIGHT_ZERO_ROWS python3 "$GUARDS" flight-step --jsonl "$TMP/fl-zero.jsonl"
+for c in errors unavailable no-ok; do
+  python3 "$FIX" flight-step --path "$TMP/fl-$c.jsonl" --case "$c"
+  expect_guard_fail FLIGHT_REQUEST_ERRORS python3 "$GUARDS" flight-step --jsonl "$TMP/fl-$c.jsonl"
+done
+python3 "$FIX" flight-step --path "$TMP/fl-two.jsonl" --case two-steps
+expect_guard_fail FLIGHT_STEP_COUNT python3 "$GUARDS" flight-step --jsonl "$TMP/fl-two.jsonl"
+
 # ------------------------------------------------------ no relaxation knob ---
 echo
 echo "-- no escape hatch --"
