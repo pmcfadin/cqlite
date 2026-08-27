@@ -82,6 +82,14 @@ struct Fixture {
     /// metric reports the I/O that happened — hiding a real re-read would be exactly
     /// the dishonesty this issue removes.
     warm_scan_is_cached: bool,
+    /// Partitions this fixture must deliver, at minimum. Two or more is what makes
+    /// `read.partitions` distinguishable from `read.rows`; the single-partition
+    /// UNCOMPRESSED fixture below is here for the byte-counting direction instead
+    /// (it is the only committed uncompressed SSTable).
+    min_partitions: u64,
+    /// The bounded `catalog::attr::COMPRESSION` label the byte counter must carry —
+    /// `"none"` for an SSTable with no `CompressionInfo.db`.
+    compression: &'static str,
 }
 
 /// A COMMITTED compressed BIG (`nb`) fixture: 3 partitions, 892 on-disk rows, with
@@ -92,6 +100,8 @@ const BIG: Fixture = Fixture {
     table: "wide_partition",
     format: "big",
     warm_scan_is_cached: true,
+    min_partitions: 2,
+    compression: "lz4",
 };
 
 /// A COMMITTED BTI (`da`) fixture: 3 partitions, 900 on-disk rows. The BTI trie walk
@@ -102,6 +112,29 @@ const BTI: Fixture = Fixture {
     table: "wide_table",
     format: "bti",
     warm_scan_is_cached: false,
+    min_partitions: 2,
+    compression: "lz4",
+};
+
+/// A COMMITTED **UNCOMPRESSED** BIG (`nb`) fixture (no `CompressionInfo.db`): 1
+/// partition, 600 on-disk rows.
+///
+/// This case exists for roborev B2. Uncompressed is a FIRST-CLASS read path — the
+/// #1406 claim boundary says CQLite's own production write surface emits
+/// uncompressed SSTables ONLY — and the byte counter used to skip the
+/// no-compressor decode branch entirely, so every uncompressed read was invisible.
+/// Both compressed fixtures above are blind to that by construction, which is why a
+/// third fixture is needed rather than another assertion on the first two.
+const UNCOMPRESSED: Fixture = Fixture {
+    keyspace: "test_comp",
+    table: "uncompressed_table",
+    format: "big",
+    // The uncompressed windowed exit MOVES the read buffer into the B1
+    // decompressed-chunk cache (zero-copy, issue #1940 BLOCKER-1), so a re-scan is a
+    // cache hit and reads no Data.db bytes — same as the compressed BIG plane.
+    warm_scan_is_cached: true,
+    min_partitions: 1,
+    compression: "none",
 };
 
 /// Resolve a fixture's `Data.db`. FAIL-CLOSED: the fixture is committed, so an
@@ -195,9 +228,10 @@ fn assert_read_metrics(
     metrics: &CapturedMetrics,
     phase: &str,
     expected: &Tally,
-    format: &str,
+    fx: &Fixture,
     expect_bytes: bool,
 ) {
+    let format = fx.format;
     let labelled = [(catalog::attr::SSTABLE_FORMAT, format)];
     assert_eq!(
         metrics.sum_where(catalog::READ_ROWS, &labelled),
@@ -261,14 +295,37 @@ fn assert_read_metrics(
     if expect_bytes {
         assert!(
             metrics.counter_sum(catalog::READ_BYTES) > 0.0,
-            "[{phase}] cqlite.read.bytes must count the decompressed Data.db bytes \
-             the read materialised; collected metrics: {:?}",
+            "[{phase}] cqlite.read.bytes must count the Data.db bytes the read \
+             materialised; collected metrics: {:?}",
             metric_names(metrics)
         );
         assert_eq!(
             metrics.unit(catalog::READ_BYTES),
             Some(catalog::unit::BYTES),
             "[{phase}] cqlite.read.bytes unit"
+        );
+        // The byte counter's ONE documented attribute (issue #1701 roborev B3: the
+        // chunk decode plane knows the compressor, not the SSTable format). For an
+        // uncompressed SSTable that value is the bounded `"none"`, not an absent
+        // label — the regression B2 fixed made those reads vanish entirely, and an
+        // unlabelled emission would satisfy a bare `> 0` check.
+        let byte_labelled = [(catalog::attr::COMPRESSION, fx.compression)];
+        assert_eq!(
+            metrics.sum_where(catalog::READ_BYTES, &byte_labelled),
+            metrics.counter_sum(catalog::READ_BYTES),
+            "[{phase}] every cqlite.read.bytes point must carry {} = {}; points: {:?}",
+            catalog::attr::COMPRESSION,
+            fx.compression,
+            metrics.find(catalog::READ_BYTES).map(|m| &m.points)
+        );
+        assert!(
+            metrics
+                .find(catalog::READ_BYTES)
+                .is_some_and(|m| m.points.iter().all(|p| p.attributes.len() == 1)),
+            "[{phase}] cqlite.read.bytes must carry EXACTLY its one documented \
+             attribute — no format label the chunk plane cannot honestly know; \
+             points: {:?}",
+            metrics.find(catalog::READ_BYTES).map(|m| &m.points)
         );
     }
 }
@@ -305,14 +362,15 @@ async fn exercise_read_surfaces(fx: &Fixture, mc: &testing::MetricsCapture) {
         fx.table
     );
     assert!(
-        scan_tally.partitions > 1,
-        "[{}.{}] the fixture must carry MORE THAN ONE partition for the partitions \
-         counter to be distinguishable from the rows counter (saw {})",
+        scan_tally.partitions >= fx.min_partitions,
+        "[{}.{}] the fixture must deliver at least {} partition(s) for this case to \
+         mean anything (saw {})",
         fx.keyspace,
         fx.table,
+        fx.min_partitions,
         scan_tally.partitions
     );
-    assert_read_metrics(&scan_metrics, "scan_stream", &scan_tally, fx.format, true);
+    assert_read_metrics(&scan_metrics, "scan_stream", &scan_tally, fx, true);
 
     // ---------------------------------------------------------------------
     // Phase 2 — the BATCHED streaming scan surface (`scan_stream_batched`), the
@@ -339,7 +397,7 @@ async fn exercise_read_surfaces(fx: &Fixture, mc: &testing::MetricsCapture) {
         &batched_metrics,
         "scan_stream_batched",
         &batched_tally,
-        fx.format,
+        fx,
         !fx.warm_scan_is_cached,
     );
     // ... and the read.bytes semantic in BOTH directions, pinned positively per
@@ -383,7 +441,7 @@ async fn exercise_read_surfaces(fx: &Fixture, mc: &testing::MetricsCapture) {
             rows: 1,
             partitions: 1,
         },
-        fx.format,
+        fx,
         // Bytes are counted per decompressed chunk; the point read serves its
         // covering chunk from the resident chunk cache populated by the scans
         // above, and a cache hit reads no Data.db bytes. So the point phase does
@@ -399,4 +457,8 @@ async fn read_path_emits_rows_bytes_partitions_and_duration() {
     // paths carrying different bounded format labels; both must report.
     exercise_read_surfaces(&BIG, &mc).await;
     exercise_read_surfaces(&BTI, &mc).await;
+    // UNCOMPRESSED (roborev B2): the no-compressor decode branch is a real read of
+    // Data.db payload and must be counted, under the bounded `compression = "none"`
+    // label. Neither fixture above can see this — both are compressed.
+    exercise_read_surfaces(&UNCOMPRESSED, &mc).await;
 }

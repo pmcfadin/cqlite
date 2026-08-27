@@ -163,8 +163,8 @@ impl SSTableReader {
                 block_data.to_vec(),
             )?
         } else {
-            tracing::debug!("parse_block_entries: No compression, using raw block data");
-            block_data.to_vec()
+            // No compressor: the RAW block goes through the same plane so its bytes count (#1701).
+            super::super::chunk_source::ChunkSource::decompress_only(None, block_data.to_vec())?
         };
 
         // Determine parsing strategy based on data format classification

@@ -9,9 +9,20 @@
 //! `#[path = "scan_stream_windowed_decode.rs"] impl`-carrying module in the parent.
 
 use super::SSTableReader;
+use crate::observability::read_metrics;
 use crate::Result;
 
 impl SSTableReader {
+    /// The bounded `catalog::attr::COMPRESSION` label for this reader's scan decode
+    /// (issue #1701): the configured algorithm, or `"none"` for an uncompressed
+    /// SSTable — a named series, never an absent label.
+    fn scan_compression_label(&self) -> &'static str {
+        match self.compression_reader.as_ref() {
+            Some(cr) => read_metrics::compression_attr(cr.algorithm()),
+            None => read_metrics::COMPRESSION_NONE,
+        }
+    }
+
     /// Decode ONE compressed chunk on the IO half (issue #1940, D2): CRC was
     /// already verified inside the read path, so this does cache-lookup-or-decompress
     /// and returns the refcounted decompressed `Bytes` substrate shipped on the
@@ -39,6 +50,14 @@ impl SSTableReader {
         // Incompressible-raw chunks (stored uncompressed by Cassandra) skip the
         // cache and are passed through zero-copy; the buffer is consumed.
         if compressed.len() >= max_compressed_length {
+            // cqlite.read.bytes (issue #1701 roborev B2): these ARE `Data.db` payload
+            // bytes this scan just read — Cassandra stored the chunk raw — so they are
+            // counted here, at the exit that BYPASSES the decode plane where the
+            // sibling compressed exit counts. Skipping them would understate real I/O.
+            read_metrics::record_decompressed_bytes(
+                compressed.len(),
+                self.scan_compression_label(),
+            );
             return Ok((bytes::Bytes::from(compressed), Vec::new()));
         }
         let key = crate::storage::cache::ChunkKey::new(
@@ -61,6 +80,14 @@ impl SSTableReader {
         // buffer is minted for the next chunk. No decompress here, so the
         // decode-thread probe does NOT fire (it pins where decompression runs).
         if self.compression_reader.is_none() {
+            // cqlite.read.bytes (issue #1701 roborev B2): the UNCOMPRESSED scan's
+            // chunk bytes are `Data.db` payload read from disk. This exit also
+            // bypasses the plane, and uncompressed is a FIRST-CLASS path (CQLite's own
+            // write surface emits only uncompressed SSTables, the #1406 claim
+            // boundary), so leaving it uncounted made every uncompressed read
+            // invisible to the metric.
+            let read_bytes = compressed.len();
+            read_metrics::record_decompressed_bytes(read_bytes, read_metrics::COMPRESSION_NONE);
             return Ok((self.chunk_cache.insert(key, compressed), Vec::new()));
         }
         // Miss → decompress from the BORROWED slice (so we keep `compressed` to
