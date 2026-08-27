@@ -4915,10 +4915,13 @@ for p in d["packages"]:
 #   (a) EXPLAINED — its `required-features` are non-empty AND at least one of them is
 #       not in this lane's enabled set, so cargo's silent skip is accounted for by
 #       cargo's own rules rather than by a guess; AND
-#   (b) ALTERNATE EXECUTOR — the target's name appears somewhere in this gate script,
-#       i.e. some OTHER component names it (memory-budget names
-#       issue_1494_producer_mem_budget with `--test`), so the gate as a whole still
-#       executes it. Mechanical, from committed source: no curated excusal list.
+#   (b) ALTERNATE EXECUTOR — some OTHER component of this gate script actually INVOKES
+#       the target: a NON-COMMENT `--test <name>` line (memory-budget carries the only
+#       one for issue_1494_producer_mem_budget). Mechanical, read from committed source,
+#       so there is no curated excusal list — and deliberately NOT a bare substring
+#       search, which the comments above would satisfy by themselves: an artifact
+#       DESCRIBING the excusal would BECOME the excusal (#3312's shape), and the target
+#       would stay excused after its only real executor was deleted.
 #
 # Anything else — an unobserved target with no off required-feature, or one no
 # component names — is the invisible skip this lane exists to prevent, and FAILs
@@ -4953,11 +4956,21 @@ check_declared_test_targets_observed() {
       fi
       continue
     fi
-    if ! grep -qF -- "$tname" "$GATE_SELF"; then
-      bad="$bad $tname(required-features[$rf]-off[$off]-but-NO-alternate-executor-names-it)"
+    # The alternate executor must be a REAL cargo target reference on a NON-COMMENT
+    # line. A bare substring search over this file would be satisfied by PROSE — the
+    # comments above name `issue_1494_producer_mem_budget` while explaining this very
+    # mechanism, so an artifact DESCRIBING the excusal would BECOME the excusal, and the
+    # target would stay excused after its only real executor was deleted (#3312's
+    # lesson; the same `#`-blind-scan defect this change filed as #3380 against the
+    # roborev guard). Measured: that target appears 5x here — 4 comments and ONE real
+    # invocation (`--test issue_1494_producer_mem_budget`, in memory-budget).
+    # If a component ever executes a target by some other form (a nextest filter
+    # expression, say), this FAILs closed and the pattern gets widened deliberately.
+    if ! grep -qE "^[^#]*--test[[:space:]]+$tname([[:space:]]|\$)" "$GATE_SELF"; then
+      bad="$bad $tname(required-features[$rf]-off[$off]-but-NO-alternate-executor-INVOKES-it:no non-comment \`--test $tname\` in agent-gate.sh)"
       continue
     fi
-    excused="$excused $tname(required-features[$rf]:off[$off];alternate-executor-names-it-in-agent-gate.sh)"
+    excused="$excused $tname(required-features[$rf]:off[$off];alternate-executor-INVOKES-it:non-comment \`--test $tname\` in agent-gate.sh)"
   done <<< "$meta"
   if [ -n "$excused" ]; then
     echo "$label: declared-vs-observed EXCUSED (cargo silently skips a required-features target it cannot enable; another gate component executes it):$excused" >&2
