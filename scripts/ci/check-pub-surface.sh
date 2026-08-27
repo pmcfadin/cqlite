@@ -59,11 +59,14 @@
 #
 # # Stated boundary (do not overclaim)
 #
-# Granularity is item PATHS and KINDS, not signatures. This catches an added,
-# removed or renamed public item; it does NOT catch a changed parameter type, a
-# changed return type, a new trait impl, or a changed field. It is a coarse
-# semver tripwire, not a semver checker (`cargo-public-api` would be the latter,
-# but it is nightly-only and this repo pins stable).
+# Granularity is item PATHS, KINDS and associated-item NAMES — never SIGNATURES.
+# It catches an added, removed or renamed public item, method, enum variant,
+# public field or associated const/type. It does NOT catch a changed parameter
+# type, a changed return type, changed generics or bounds, or a changed field
+# TYPE, and it deliberately does not record trait/synthetic/blanket impl members
+# (see the associated-item pass for why). It is a coarse semver tripwire, not a
+# semver checker (`cargo-public-api` would be the latter, but it is nightly-only
+# and this repo pins stable).
 #
 # Exit 0 = surface matches + crate root is consistent. 1 = drift/inconsistency.
 # 2 = usage error.
@@ -157,10 +160,14 @@ fi
 # 2) Enumerate the rustdoc item tree -> "<kind> cqlite_core::a::b::Name" lines.
 #
 #    One directory per public module; one `<kind>.<Name>.html` file per public
-#    item. rustdoc's own non-item files are skipped by name.
+#    item; and, per page, the ASSOCIATED items declared by this crate (inherent
+#    methods, associated consts/types, enum variants, public struct fields, trait
+#    required/provided members). rustdoc's own non-item files are skipped by name.
 # ---------------------------------------------------------------------------
 DERIVED_ITEMS="$WORK_DIR/items.txt"
+PAGES="$WORK_DIR/pages.txt"
 : >"$DERIVED_ITEMS"
+: >"$PAGES"
 
 # Modules: every directory below the crate doc root, plus the crate root itself.
 {
@@ -193,6 +200,10 @@ find "$DOC_ROOT" -type f -name '*.html' -print | while IFS= read -r f; do
   esac
   name="${base#"$kind".}"
   name="${name%.html}"
+  # Record the page for the associated-item pass below (same subject set, one
+  # enumeration decision, so the two passes can never disagree about what an
+  # "item page" is).
+  printf '%s\n' "$f" >>"$PAGES"
   if [ -n "$dir" ]; then
     printf '%s %s::%s::%s\n' "$kind" "$CRATE_DOC_NAME" "${dir//\//::}" "$name"
   else
@@ -200,10 +211,121 @@ find "$DOC_ROOT" -type f -name '*.html' -print | while IFS= read -r f; do
   fi
 done >>"$DERIVED_ITEMS"
 
+# --- Associated items -------------------------------------------------------
+#
+# Standalone rustdoc pages alone are BLIND to public methods, enum variants,
+# public struct fields and associated consts/types: adding a `pub fn` to an
+# existing public struct would not move the snapshot at all. So each item page is
+# also scanned for the associated items THIS CRATE DECLARES.
+#
+# WHAT IS DELIBERATELY EXCLUDED, and why: the `trait-implementations`,
+# `synthetic-implementations`, `blanket-implementations`, `implementors`,
+# `foreign-impls` and `deref-methods-*` sections. Those anchors are not this
+# crate's declared surface — they are generated from trait impls, auto traits and
+# blanket impls in dependencies (`struct.DatabaseStats.html` carries 17
+# `id="method.*"` anchors and ZERO inherent methods; every one comes from Clone,
+# Debug, Into, TryFrom, Borrow, tracing's Instrument, …). They move whenever a
+# dependency is bumped, so recording them would make this snapshot a churn source
+# and train people to regenerate it without reading the diff — the failure mode
+# this guard exists to prevent. The exclusion is stated in the snapshot header
+# too, as an honest boundary rather than a silent gap.
+#
+# The scan is SECTION-SCOPED, and the scoping is done WITHIN each line, not per
+# line: rustdoc's HTML is near-minified (a whole page is ~17 lines) and a single
+# line routinely carries the end of one section header and the start of the next,
+# so a line-granular state machine would attribute trait-impl anchors to the
+# inherent `implementations` section. A real section boundary is recognised by
+# `<h2 id="…" class="…section-header">`; a doc-comment heading inside a docblock
+# (`<h2 id="safety">`, `<h2 id="note">`, … — no class) must NOT move the state.
+ASSOC_AWK="$WORK_DIR/assoc.awk"
+cat >"$ASSOC_AWK" <<'AWK_EOF'
+BEGIN {
+  # Sections whose anchors ARE this crate's declared surface.
+  split("variants fields implementations required-methods provided-methods required-associated-consts provided-associated-consts required-associated-types provided-associated-types", _w, " ")
+  for (_k in _w) if (_w[_k] != "") WANT[_w[_k]] = 1
+  prefix = docroot "/"
+}
+FNR == 1 {
+  rel = FILENAME
+  if (substr(rel, 1, length(prefix)) == prefix) rel = substr(rel, length(prefix) + 1)
+  base = rel
+  sub(/^.*\//, "", base)
+  dir = rel
+  if (dir == base) { dir = "" } else { sub(/\/[^\/]*$/, "", dir) }
+  pkind = base
+  sub(/\..*$/, "", pkind)
+  iname = substr(base, length(pkind) + 2)
+  sub(/\.html$/, "", iname)
+  gsub(/\//, "::", dir)
+  itempath = (dir == "" ? crate : crate "::" dir) "::" iname
+  section = ""
+}
+{
+  n = split($0, seg, "<h2 ")
+  for (_s = 1; _s <= n; _s++) {
+    piece = seg[_s]
+    if (_s > 1) {
+      if (match(piece, /^id="[A-Za-z0-9_-]+" class="[^"]*section-header"/)) {
+        hdr = substr(piece, RSTART, RLENGTH)
+        sub(/^id="/, "", hdr)
+        sub(/".*$/, "", hdr)
+        section = hdr
+        if (section in WANT) seen[FILENAME "\t" section] = 1
+      }
+      # else: a doc-comment heading inside a docblock — state must NOT move.
+    }
+    if (!(section in WANT)) continue
+    rest = piece
+    while (match(rest, /id="(method|tymethod|variant|structfield|associatedconstant|associatedtype)\.[A-Za-z0-9_]+(\.field\.[A-Za-z0-9_]+)?"/)) {
+      tok = substr(rest, RSTART + 4, RLENGTH - 5)
+      rest = substr(rest, RSTART + RLENGTH)
+      akind = tok
+      sub(/\..*$/, "", akind)
+      aname = substr(tok, length(akind) + 2)
+      if (index(aname, ".field.") > 0) {
+        sub(/\.field\./, "::", aname)
+        akind = "variantfield"
+      }
+      print akind " " itempath "::" aname
+      filled[FILENAME "\t" section] = 1
+    }
+  }
+}
+END {
+  # A wanted section that was PRESENT but yielded nothing is a measurement
+  # failure (rustdoc anchor format changed), not an empty section. Report it;
+  # the caller turns it into a named FAIL.
+  for (key in seen) if (!(key in filled)) print "!EMPTY\t" key > "/dev/stderr"
+}
+AWK_EOF
+
+ASSOC_RAW="$WORK_DIR/assoc.txt"
+ASSOC_ERR="$WORK_DIR/assoc.err"
+if [ -s "$PAGES" ]; then
+  tr '\n' '\0' <"$PAGES" | xargs -0 awk -v crate="$CRATE_DOC_NAME" -v docroot="$DOC_ROOT" \
+    -f "$ASSOC_AWK" >"$ASSOC_RAW" 2>"$ASSOC_ERR"
+else
+  : >"$ASSOC_RAW"; : >"$ASSOC_ERR"
+fi
+
+if [ -s "$ASSOC_ERR" ]; then
+  echo "" >&2
+  echo "Sections present but yielding no anchors (first 10):" >&2
+  head -10 "$ASSOC_ERR" >&2
+  fail "the associated-item scan found rustdoc sections it could not read. That is the signature of a rustdoc HTML format change, not an empty API — refusing to record a surface measured with a broken extractor."
+fi
+
+ASSOC_COUNT="$(wc -l <"$ASSOC_RAW" | tr -d ' ')"
+if [ "${ASSOC_COUNT:-0}" -eq 0 ]; then
+  fail "the associated-item scan extracted ZERO methods/variants/fields/associated items across the entire crate. At this crate's size that is implausible — it is the signature of a rustdoc HTML format change. Refusing to pass on an unmeasured surface."
+fi
+cat "$ASSOC_RAW" >>"$DERIVED_ITEMS"
+
 LC_ALL=C sort -o "$DERIVED_ITEMS" "$DERIVED_ITEMS"
 
 MODULE_COUNT="$(grep -c '^mod ' "$DERIVED_ITEMS" || true)"
 ITEM_COUNT="$(grep -vc '^mod ' "$DERIVED_ITEMS" || true)"
+ITEM_COUNT=$((ITEM_COUNT - ASSOC_COUNT))
 
 if [ "${ITEM_COUNT:-0}" -eq 0 ] || [ "${MODULE_COUNT:-0}" -eq 0 ]; then
   fail "enumerated $ITEM_COUNT items over $MODULE_COUNT modules under $DOC_ROOT — a zero count means the enumeration did not measure anything (rustdoc layout changed?), NOT that the crate has no public API. Refusing to pass."
@@ -314,9 +436,21 @@ RENDERED="$WORK_DIR/rendered.snapshot"
 # in the PR body why the diff is what it is.
 #
 # STATED BOUNDARY (deliberately narrow — do not read more into a green than this):
-#   * Granularity is item PATHS and KINDS, not SIGNATURES. This catches an added,
-#     removed or renamed public item. It does NOT catch a changed parameter type, a
-#     changed return type, a changed field, or a new/removed trait impl.
+#   * Granularity is item PATHS, KINDS and associated-item NAMES — never SIGNATURES.
+#     Recorded: modules, standalone items (struct/enum/fn/trait/type/constant/macro/
+#     union/…), and, per item, the associated members this crate DECLARES — inherent
+#     methods, associated consts/types, enum variants (and their struct fields),
+#     public struct fields, and a trait's required/provided members.
+#     NOT recorded, and therefore NOT detected: a changed parameter type, a changed
+#     return type, changed generics or bounds, a changed field TYPE, or a changed
+#     visibility that does not change the item's presence.
+#   * TRAIT / SYNTHETIC / BLANKET IMPL MEMBERS ARE DELIBERATELY EXCLUDED, as are
+#     \`deref-methods-*\` sections. Those anchors come from impls of foreign traits and
+#     from auto/blanket impls in dependencies — they are not this crate's declared
+#     surface, and they move on any dependency bump, which would turn this file into a
+#     churn source and train reviewers to regenerate it without reading the diff. So a
+#     newly IMPLEMENTED foreign trait does not show up here. That is a real gap, stated
+#     rather than hidden.
 #   * \`#[doc(hidden)]\` items are invisible to rustdoc and therefore appear ONLY in
 #     the crate-root-declarations section below, and only if they are declared at
 #     the crate root.
@@ -338,7 +472,7 @@ EOF
 
 if [ "$MODE" = regenerate ]; then
   cp "$RENDERED" "$SNAPSHOT"
-  echo "pub-surface: WROTE $SNAPSHOT_REL — $ITEM_COUNT public items over $MODULE_COUNT modules; $DECL_COUNT crate-root declarations."
+  echo "pub-surface: WROTE $SNAPSHOT_REL — $ITEM_COUNT public items + $ASSOC_COUNT associated items over $MODULE_COUNT modules; $DECL_COUNT crate-root declarations."
   echo "             Review the diff: it is a public-API change, not a formatting chore."
   exit 0
 fi
@@ -367,4 +501,4 @@ if ! diff -u "$SNAPSHOT" "$RENDERED" >"$WORK_DIR/surface.diff" 2>&1; then
 fi
 
 # Affirmative success line: a pasted gate SUMMARY must show that this check RAN.
-echo "pub-surface: $ITEM_COUNT public items over $MODULE_COUNT modules match $SNAPSHOT_REL; $DECL_COUNT crate-root declarations consistent"
+echo "pub-surface: $ITEM_COUNT public items + $ASSOC_COUNT associated items (methods/variants/fields/assoc consts) over $MODULE_COUNT modules match $SNAPSHOT_REL; $DECL_COUNT crate-root declarations consistent"
