@@ -95,6 +95,30 @@ pub(crate) fn counted_raw_chunk(
     bytes
 }
 
+/// Credit an UNCOMPRESSED block read to `cqlite.read.bytes` (issue #1701, roborev
+/// F1/F3), returning the read unchanged.
+///
+/// Gated on `compression_info.is_none()`: for an SSTable with NO
+/// `CompressionInfo.db` the block bytes ARE the finished `Data.db` payload and never
+/// reach a decompress step, so this is their only counting opportunity. A COMPRESSED
+/// read must NOT be counted here — those bytes are still compressed and the plane
+/// counts that read's payload post-decompression, so counting both would report one
+/// read twice under two different sizes.
+///
+/// Lives here rather than in `block_io` so every `read.bytes` increment in the crate
+/// stays inside this module (grep `record_decompressed_bytes`).
+pub(crate) fn count_uncompressed_block(
+    compression_info: &Option<std::sync::Arc<CompressionInfo>>,
+    read: Result<Option<Vec<u8>>>,
+) -> Result<Option<Vec<u8>>> {
+    if compression_info.is_none() {
+        if let Ok(Some(block)) = &read {
+            count_raw_chunk(block, None);
+        }
+    }
+    read
+}
+
 impl<'a> ChunkSource<'a> {
     /// Construct a ChunkSource for positioned chunk reads.
     #[allow(clippy::too_many_arguments)]

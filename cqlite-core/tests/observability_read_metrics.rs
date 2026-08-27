@@ -391,6 +391,24 @@ async fn exercise_read_surfaces(fx: &Fixture, mc: &testing::MetricsCapture) {
         scan_tally.partitions
     );
     assert_read_metrics(&scan_metrics, "scan_stream", &scan_tally, fx, true);
+    if fx.compression == "none" {
+        // NO-DOUBLE-COUNTING bound, checkable only on an UNCOMPRESSED fixture: its
+        // decompressed payload IS its on-disk payload, so one cold scan cannot
+        // honestly report more `read.bytes` than the Data.db file HOLDS. A boundary
+        // that counted the same buffer twice (at the block read AND again at a
+        // no-op decompress, say) reports ~2x the file size and fails here.
+        let file_size = std::fs::metadata(committed_data_db(fx))
+            .expect("stat the fixture Data.db")
+            .len() as f64;
+        let counted = scan_metrics.counter_sum(catalog::READ_BYTES);
+        assert!(
+            counted <= file_size,
+            "[{}.{}] a cold scan counted {counted} read.bytes for a {file_size}-byte \
+             uncompressed Data.db — bytes are counted more than once",
+            fx.keyspace,
+            fx.table
+        );
+    }
 
     // ---------------------------------------------------------------------
     // Phase 2 — the BATCHED streaming scan surface (`scan_stream_batched`), the
@@ -697,6 +715,87 @@ async fn a_cross_generation_point_read_is_one_metered_operation() {
         miss.counter_sum(catalog::READ_PARTITIONS),
         0.0,
         "an absent key touched no partition"
+    );
+
+    // --- The MATERIALIZING scan surface (roborev F1) --------------------------
+    // `SSTableManager::scan` is the DOMINANT public read surface (the CLI SELECT
+    // path and most of the query executor call it), and it emitted nothing at all.
+    // It is also the sharpest no-double-counting probe available: the two
+    // generations hold 4 rows each with distinct keys, so the reconciled result is
+    // EXACTLY 8. The per-generation `reader.scan` calls underneath are unmetered, so
+    // a boundary that leaked would show 16 here, not 8.
+    mc.reset();
+    let scanned_rows = manager
+        .scan(&tid, None, None, None, Some(&schema))
+        .await
+        .expect("materializing cross-generation scan");
+    let materializing = mc.flush_and_collect();
+    assert_eq!(
+        scanned_rows.len(),
+        8,
+        "the fixture's two generations reconcile to exactly 8 distinct rows"
+    );
+    assert_eq!(
+        materializing.counter_sum(catalog::READ_ROWS),
+        scanned_rows.len() as f64,
+        "cqlite.read.rows must equal the rows the materializing scan RETURNED — a \
+         row counted at both the manager and per-reader layers would read 16; \
+         points: {:?}",
+        materializing.find(catalog::READ_ROWS).map(|m| &m.points)
+    );
+    assert_eq!(
+        materializing.counter_sum(catalog::READ_PARTITIONS),
+        scanned_rows
+            .iter()
+            .map(|(k, _)| k.as_bytes())
+            .collect::<HashSet<_>>()
+            .len() as f64,
+        "one count per distinct partition the materializing scan returned"
+    );
+    assert_eq!(
+        histogram_recordings(&materializing, catalog::READ_DURATION),
+        1,
+        "a materializing scan over N generations is ONE read operation; points: {:?}",
+        materializing
+            .find(catalog::READ_DURATION)
+            .map(|m| &m.points)
+    );
+    assert!(
+        materializing.counter_sum(catalog::READ_BYTES) > 0.0,
+        "the materializing scan really read Data.db"
+    );
+
+    // --- The partition-TARGETED materializing surface (roborev F1) -------------
+    mc.reset();
+    let (targeted, _engaged) = manager
+        .scan_partition(&tid, present_key.as_bytes(), Some(&schema))
+        .await
+        .expect("partition-targeted scan");
+    let targeted_metrics = mc.flush_and_collect();
+    assert_eq!(
+        targeted.len(),
+        1,
+        "the targeted scan returns exactly the one row of that partition"
+    );
+    assert_eq!(
+        targeted_metrics.counter_sum(catalog::READ_ROWS),
+        1.0,
+        "cqlite.read.rows for a partition-targeted scan; points: {:?}",
+        targeted_metrics.find(catalog::READ_ROWS).map(|m| &m.points)
+    );
+    assert_eq!(
+        targeted_metrics.counter_sum(catalog::READ_PARTITIONS),
+        1.0,
+        "one partition"
+    );
+    assert_eq!(
+        histogram_recordings(&targeted_metrics, catalog::READ_DURATION),
+        1,
+        "ONE operation — the targeted scan prunes candidates but is still one read; \
+         points: {:?}",
+        targeted_metrics
+            .find(catalog::READ_DURATION)
+            .map(|m| &m.points)
     );
 
     // --- A table with NO candidate SSTables: still ONE operation (roborev F4) ---

@@ -173,6 +173,23 @@ impl ReadOpMeter {
         }
     }
 
+    /// Account every row of an ALREADY-MATERIALIZED result (issue #1701 F1).
+    ///
+    /// The materializing read boundaries (`SSTableManager::scan` and the
+    /// partition-targeted scans) hand their whole `Vec` here in one call, so the
+    /// emission stays at operation granularity — this is bookkeeping over a result
+    /// the caller already holds, not a per-row emission. Written to take an iterator
+    /// of KEYS so a 2-tuple `(key, row)` and a 3-tuple `(key, row, cell_metadata)`
+    /// result both fit (`rows.iter().map(|(k, ..)| k)`).
+    pub(crate) fn record_keys<'a>(&mut self, keys: impl IntoIterator<Item = &'a RowKey>) {
+        if self.0.is_none() {
+            return;
+        }
+        for key in keys {
+            self.record_row(key);
+        }
+    }
+
     /// Emit this operation's totals. Idempotent: the second call is a no-op, so a
     /// stream that observed its own end of stream and is then dropped emits once.
     pub(crate) fn finish(&mut self) {
