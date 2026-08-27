@@ -64,18 +64,45 @@ pub struct WriteEngineConfig {
 }
 ```
 
-**Constructor**:
+**Constructors**:
 ```rust
+// The canonical bridge: the ONE place public Config values are translated
+// for the write path (issue #1697).
+pub fn from_config(
+    config: &cqlite_core::Config,
+    data_dir: PathBuf,
+    wal_dir: PathBuf,
+    schema: TableSchema,
+) -> Self
+
+// Shipped defaults — defined as `from_config(&Config::default(), ..)`.
 pub fn new(data_dir: PathBuf, wal_dir: PathBuf, schema: TableSchema) -> Self
 ```
 
 **Methods**:
 ```rust
 pub fn with_flush_threshold(self, threshold: usize) -> Self
+// Threads all three public compaction values (auto_compaction + both STCS
+// thresholds) onto an existing config.
+pub fn with_compaction_config(self, compaction: &cqlite_core::config::CompactionConfig) -> Self
 ```
 
+**Public config source of truth** (issue #1697) — every write-path default has
+exactly one literal, in `Config::default()`:
+
+| `WriteEngineConfig` field | public `Config` field | default |
+|---|---|---|
+| `memtable_flush_threshold` | `storage.memtable_size_threshold` | 64 MB |
+| `auto_compaction` | `storage.compaction.auto_compaction` | `true` |
+| `compaction_min_threshold` | `storage.compaction.min_threshold` | 4 |
+| `compaction_max_threshold` | `storage.compaction.max_threshold` | 32 |
+
 **Constants**:
-- `DEFAULT_FLUSH_THRESHOLD`: 64 MB (67,108,864 bytes)
+- `DEFAULT_HARD_LIMIT`: 256 MB — `memtable_hard_limit` is not modelled by the
+  public `Config`, so this remains the single literal for it. The former
+  `DEFAULT_FLUSH_THRESHOLD` / `DEFAULT_COMPACTION_MIN_THRESHOLD` /
+  `DEFAULT_COMPACTION_MAX_THRESHOLD` constants were removed in #1697; their
+  values now come from `Config::default()`.
 
 ### WriteEngine
 
