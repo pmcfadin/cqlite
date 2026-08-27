@@ -26,16 +26,41 @@ umbrella verdict erases exactly that distinction.
 
 ## D2 — The isolation lanes test-compile, under `-D warnings`
 
-**Decision: `RUSTFLAGS="-D warnings" cargo check --all-targets -p cqlite-core --no-default-features
---features all-compression,<one-of>` — not the issue's literal bare `cargo check`.**
+**Decision: `RUSTFLAGS="-D warnings" cargo test -p cqlite-core --no-default-features --features
+all-compression,<one-of> --lib --no-run` — not the issue's literal bare `cargo check`, and not
+`cargo check --all-targets`.**
 
-The issue asks for `cargo check --package cqlite-core --no-default-features --features
+**CORRECTION (this decision previously mandated `cargo check --all-targets`; that instrument was measured
+and found wrong).** The *argument* for compiling test code stands unchanged and is restated first, because
+it is the part that survives.
+
+**What stands.** The issue asks for `cargo check --package cqlite-core --no-default-features --features
 all-compression,parquet`. Taken literally that lane is **blind to the incident it cites**. #1978 was an
-ungated `#[cfg(test)]` module referencing a `write-support`-gated item; `cargo check` without `--all-targets`
-never compiles test targets, so the lane would compile the library, go green, and miss it. `minimal-build`
-already learned this exact lesson and carries the comment to prove it (`agent-gate.sh:8300` region: "A plain
-`cargo build` never does, so a `#[cfg(test)]` module referencing a write-support-gated item silently escaped
-this gate").
+ungated `#[cfg(test)]` module referencing a `write-support`-gated item, and a bare `cargo check` never
+compiles `cfg(test)` code at all — so the lane would compile the library, go green, and miss it. Any lane
+that does not compile test code is not measuring the incident class. `minimal-build` already learned this
+exact lesson and carries the comment to prove it ("A plain `cargo build` never does, so a `#[cfg(test)]`
+module referencing a write-support-gated item silently escaped this gate").
+
+**What was wrong: the instrument, not the argument.** `--all-targets` over-reaches. The #1978 incident class
+lives in `cqlite-core/src/**`'s **inline `#[cfg(test)]` modules**; `--all-targets` additionally compiles
+cqlite-core's ~100 **integration** test files, which are written against the **default** feature set and so
+fail on modules these lanes deliberately configure out. **Measured**, three representative failures:
+
+| File | Line | Fails on |
+|------|------|----------|
+| `cqlite-core/tests/issue_1004_primitive_codec_vectors.rs` | 23 | `storage::serialization` |
+| `cqlite-core/tests/issue_2412_wraparound_scan.rs` | 42 | `storage::write_engine` |
+| `cqlite-core/tests/contract_stability_tests.rs` | 23 | `cqlite_core::query` |
+
+Those are **noise** — the integration suite assuming default features — not cross-feature leakage, which is
+the only thing these lanes exist to measure. A lane that reds on its own scaffolding teaches agents to waive
+it.
+
+**The correct instrument: `cargo test --lib --no-run`,** exactly the shape `minimal-build` uses, and for
+exactly this reason. It compiles the lib **with** its `cfg(test)` modules (the incident class) and pulls in
+**no** integration target. Note the trap this closes in the other direction: a plain `cargo check --lib`
+does **not** compile `cfg(test)` and would be blind to #1978 — `--lib --no-run` is load-bearing as a pair.
 
 `-D warnings` for the same reason `minimal-build` sets it (#1981): the dead-code lint is how a
 feature-orphaned helper surfaces, and a lane without `-D warnings` demotes that to a warning nobody reads.
@@ -44,9 +69,9 @@ feature-orphaned helper surfaces, and a lane without `-D warnings` demotes that 
 is measuring from *feature isolation* to *no-compression support*, which is a different (and already
 covered) question — `minimal-build` owns that one.
 
-**Cost of the strengthening: measured.** `cargo check` (lib only) was 18 s / 10 s; `--all-targets` figures
-are in D6. If `--all-targets` proved disproportionate the fallback is stated rather than silently taken:
-keep `--all-targets` and drop to a *single* isolation component. It did not.
+**Cost.** `cargo check` (lib only) was 18 s / 10 s. `--lib --no-run` compiles the same crate graph plus the
+lib's test cfg, well short of the `--all-targets` figures recorded in D6, so the fallback D6 reserved
+(dropping to a *single* isolation component if the cost proved disproportionate) is not needed.
 
 ## D3 — `legacy-heuristics`: EXECUTE, don't just compile
 

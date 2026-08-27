@@ -108,10 +108,21 @@ The full gate SHALL include two components that compile `cqlite-core` with `--no
 --features all-compression,parquet` and `--no-default-features --features all-compression,delta-scan`
 respectively — each **without** the other feature, and neither via `--all-features`.
 
-Each SHALL compile **test targets as well as the library** (`--all-targets`) under
-`RUSTFLAGS="-D warnings"`. A lane that compiles only the library is blind to the incident class this change
-exists to catch (#1978: an ungated `#[cfg(test)]` module referencing a feature-gated item), because a
-library-only compile never builds test targets.
+Each SHALL compile **the library together with its inline `#[cfg(test)]` modules**, via
+`cargo test --lib --no-run`, under `RUSTFLAGS="-D warnings"`. A bare `cargo check`/`cargo check --lib` is
+blind to the incident class this change exists to catch (#1978: an ungated `#[cfg(test)]` module referencing
+a feature-gated item), because neither compiles `cfg(test)` code.
+
+Each SHALL NOT use `--all-targets`. **CORRECTION:** this requirement previously mandated `--all-targets`.
+The argument for compiling test code stands; the instrument was wrong. `--all-targets` additionally compiles
+cqlite-core's ~100 **integration** test files, which are written against the **default** feature set and
+therefore fail here on modules the lane deliberately configures out — measured:
+`issue_1004_primitive_codec_vectors.rs:23` (`storage::serialization`), `issue_2412_wraparound_scan.rs:42`
+(`storage::write_engine`), `contract_stability_tests.rs:23` (`cqlite_core::query`). Those failures are
+**noise**, not cross-feature leakage, and a lane that reds on its own scaffolding is a lane agents learn to
+waive. The #1978 incident class lives in `cqlite-core/src/**`'s inline `#[cfg(test)]` modules, which
+`--lib --no-run` compiles and no integration target is needed for; `minimal-build` already uses this exact
+shape for this exact reason.
 
 The two SHALL be **separately named** components, so a FAIL in the SUMMARY identifies which direction of
 coupling broke without reading the log.
@@ -128,11 +139,13 @@ coupling broke without reading the log.
 - **WHEN** the full gate runs
 - **THEN** `feature-iso-delta-scan` records FAIL and names itself in the SUMMARY
 
-#### Scenario: A feature-orphaned test helper fails the lane
-- **GIVEN** a `#[cfg(test)]` helper in `cqlite-core` whose only caller is gated out at the isolated feature
-  set, producing a dead-code warning
+#### Scenario: A feature-orphaned test helper inside the lib fails the lane
+- **GIVEN** a helper in an inline `#[cfg(test)]` module in `cqlite-core/src/**` whose only caller is gated
+  out at the isolated feature set, producing a dead-code warning
 - **WHEN** the isolation lane runs
-- **THEN** it records FAIL, because it compiles test targets under `-D warnings`
+- **THEN** it records FAIL, because `cargo test --lib --no-run` compiles the lib's `cfg(test)` modules under
+  `-D warnings`
+- **AND** the same helper is invisible to a bare `cargo check --lib`, which never compiles `cfg(test)` code
 
 ### Requirement: Each new lane is declared once per registry and is visible in `--list` and the SUMMARY
 
