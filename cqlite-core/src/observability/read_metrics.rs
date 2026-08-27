@@ -92,10 +92,19 @@ struct Accounting {
     rows: u64,
     partitions: u64,
     /// The previous row's partition key. Scan producers emit rows GROUPED BY
-    /// partition in on-disk order and every emitted row carries its PARTITION key
-    /// (the row key comes from the partition header — `row_framing.rs`), so a
-    /// change of key is a partition boundary. Retained as an `Arc` clone (a
-    /// refcount bump, no key copy).
+    /// partition in on-disk (token) order and every emitted row carries its
+    /// PARTITION key — the row key is the one decoded from the partition header
+    /// (`row_decoder/row_framing.rs::parse_partition_header_full`, cloned onto each
+    /// of that partition's rows in `row_decoder/block_emit.rs`) — so a CHANGE of key
+    /// is a partition boundary.
+    ///
+    /// That is not a new inference: it is the same rule the read-work probe already
+    /// applies at the BTI and BIG walks ("changed partition key = one more partition
+    /// BODY decoded", `work_counters::add_stream_walk_partition_parsed` call sites,
+    /// issues #2398/#3109). Because emission is token-ordered, a partition appearing
+    /// in several inputs of a merge arrives as ONE adjacent run and is counted once.
+    ///
+    /// Retained as an `Arc` clone (a refcount bump, no key copy).
     last_partition: Option<Arc<[u8]>>,
     emitted: bool,
 }
