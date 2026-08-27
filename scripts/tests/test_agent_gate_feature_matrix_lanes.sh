@@ -119,6 +119,18 @@ fi
 # the live checkout is silently EXCLUDED from every run — the harness would then report
 # a successful observation of code that is not the code being reviewed, which is worse
 # than no observation. Refuse rather than mislead; the remedy is a commit, not a flag.
+# The COMMIT is captured alongside the status, and both are re-verified (roborev round-6
+# finding, Medium). `git status --porcelain` alone cannot see a HEAD move: a clean commit,
+# `checkout`, `reset --hard` or branch switch during this multi-minute harness leaves the
+# status IDENTICAL while the code under observation changes. The harness would then have
+# observed the OLD tree and reported the NEW one as successfully observed — a stale
+# certification that reads exactly like a fresh one, which is the #2926 tree-integrity
+# hazard reproduced inside the tool that exists to prove the lanes work.
+LIVE_HEAD_BEFORE=$(git -C "$REPO_ROOT" rev-parse HEAD) || {
+  echo "HARNESS FAILURE: could not read the live checkout's HEAD, so the" >&2
+  echo "  never-mutate-the-live-checkout invariant is unverifiable from the start." >&2
+  exit 2
+}
 LIVE_STATUS_BEFORE=$(git -C "$REPO_ROOT" status --porcelain) || {
   echo "FATAL: could not read the live checkout's git status" >&2; exit 1; }
 if [ -n "$LIVE_STATUS_BEFORE" ]; then
@@ -148,13 +160,30 @@ fi
 # makes exactly that a gate FAIL for everyone else in this checkout.
 LIVE_TREE_VIOLATED=0
 assert_live_checkout_untouched() {
-  local phase="$1" now
+  local phase="$1" now now_head
   now=$(git -C "$REPO_ROOT" status --porcelain 2>/dev/null) || {
     echo "HARNESS FAILURE ($phase): could not re-read the live checkout's git status," >&2
     echo "  so the never-mutate-the-live-checkout invariant is UNVERIFIABLE here." >&2
     LIVE_TREE_VIOLATED=1
     return 1
   }
+  now_head=$(git -C "$REPO_ROOT" rev-parse HEAD 2>/dev/null) || {
+    echo "HARNESS FAILURE ($phase): could not re-read the live checkout's HEAD," >&2
+    echo "  so the invariant is UNVERIFIABLE here (unreadable is never treated as unchanged)." >&2
+    LIVE_TREE_VIOLATED=1
+    return 1
+  }
+  if [ "$now_head" != "$LIVE_HEAD_BEFORE" ]; then
+    {
+      echo "HARNESS FAILURE ($phase): the live checkout's HEAD MOVED during the run"
+      echo "  ($LIVE_HEAD_BEFORE -> $now_head). git status alone cannot see this: a clean"
+      echo "  commit, checkout, reset or branch switch leaves it identical. The observation"
+      echo "  above was made against the OLD commit, so reporting it as this HEAD's would be"
+      echo "  a STALE certification indistinguishable from a fresh one."
+    } >&2
+    LIVE_TREE_VIOLATED=1
+    return 1
+  fi
   if [ "$now" != "$LIVE_STATUS_BEFORE" ]; then
     {
       echo "HARNESS FAILURE ($phase): the LIVE CHECKOUT changed during the run."
@@ -202,7 +231,10 @@ echo "target:    $TARGET"
 echo "datasets:  $DATASETS"
 echo
 
-git worktree add --detach "$TREE" HEAD >/dev/null 2>&1 || {
+# `$LIVE_HEAD_BEFORE`, not `HEAD`: the copy must be the exact commit whose observation
+# this run reports. `HEAD` is re-resolved at this moment and would silently follow a
+# concurrent commit (roborev round-6 finding).
+git worktree add --detach "$TREE" "$LIVE_HEAD_BEFORE" >/dev/null 2>&1 || {
   echo "FATAL: could not create the throwaway worktree" >&2; exit 1; }
 
 # ---------------------------------------------------------------------------
@@ -437,8 +469,13 @@ assert_live_checkout_untouched "pre-summary" || FAILED=1
 
 END=$(date +%s)
 echo "==== AH6 OBSERVATION SUMMARY ===="
-echo "head:     $(git rev-parse HEAD)"
-echo "live-tree: $([ "$LIVE_TREE_VIOLATED" -eq 0 ] && echo "UNCHANGED (verified: git status --porcelain identical to start)" || echo "MUTATED — HARNESS FAILURE")"
+# The CAPTURED commit, never a fresh `git rev-parse HEAD` at emit time: the observation
+# was made against the tree copied from $LIVE_HEAD_BEFORE, so re-reading HEAD here would
+# report whatever the checkout happens to be NOW and attribute this run's evidence to a
+# commit it never examined (roborev round-6 finding; the same rule as the gate's #2926
+# block, whose commit: line is derived from its verified capture).
+echo "observed-commit: $LIVE_HEAD_BEFORE (captured at start; the throwaway copy was made from THIS sha)"
+echo "live-tree: $([ "$LIVE_TREE_VIOLATED" -eq 0 ] && echo "UNCHANGED (verified: git status --porcelain AND HEAD identical to start)" || echo "MUTATED — HARNESS FAILURE")"
 echo "elapsed:  $((END - START))s"
 [ "$SUBSET" -eq 1 ] && echo "mode:     SUBSET (${LANES[*]}) — a partial observation, NOT the full AC2 evidence"
 for r in "${RESULTS[@]}"; do

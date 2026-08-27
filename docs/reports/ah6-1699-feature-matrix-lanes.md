@@ -394,6 +394,56 @@ is **off** — the opposite of a gap — and guessing either way would be a sile
 are counted and **reported as unclassified**. That is the same principle as the `flight-tests` census:
 the omission a reader cannot see is the one that does damage.
 
+## The census's feature oracle was workspace-scoped, and my "verification" of it could not fail (round 6, Medium)
+
+The co-required census asks "which features are enabled at this lane's feature set?" and answered it with
+`cargo metadata --features legacy-heuristics`. **`cargo metadata` resolves the entire workspace and unions
+features across every member**, so it reported cqlite-core as having five features enabled that
+`cargo test -p cqlite-core --features legacy-heuristics` does not enable:
+
+| oracle | features reported |
+|---|---|
+| `cargo metadata` (workspace-wide) | **14** — incl. `arrow`, `arrow-shape-corpus`, `cli-helpers`, `parquet`, `producer-fault-injection` |
+| `cargo tree -p cqlite-core` (package-scoped, dev edges included) | **9** |
+
+The five extras are enabled by **other workspace members** — `cqlite-flight` (`arrow`,
+`arrow-shape-corpus`, `producer-fault-injection`), `cqlite-py` and `cqlite-node` (`cli-helpers`,
+`parquet`), `ws0-corpus-gen` (`cli-helpers`) — checked per dependency edge including `kind=dev`. **None is
+a dev-dependency of cqlite-core**, so none is in the lane's build graph.
+
+**The direction is what makes this a defect rather than a curiosity.** The census reports *gaps*: "this
+body needs feature X, which is not enabled here". An over-broad enabled set makes a real gap look
+reachable and **drops it from the census** — a silent under-report, in the one output whose entire purpose
+is to state omissions. Nothing is lost today (`experimental` is absent from both sets, so the census as
+shipped is correct either way), but a test gated on `all(legacy-heuristics, parquet)` would have compiled
+out of the lane and been reported as covered.
+
+### The part worth keeping: my control could not fail
+
+The previous version of this report and the code comment beside it both claimed the breadth was
+**dev-dependency unification** and that it had been **verified not to be over-broad**, on the evidence
+that `cargo metadata --manifest-path cqlite-core/Cargo.toml` returned the identical set.
+
+**That was not a control.** For a workspace *member*, cargo locates the enclosing workspace and resolves
+the whole thing regardless of which member's manifest you point at — so the two commands were the same
+query twice, and agreement was guaranteed before it was run. The claim was stated with the confidence of
+a measurement while being a tautology.
+
+The generalisable lesson, which is the same one this whole issue is about one level up: **a check that
+cannot come out the other way is not evidence.** "Compiling a feature is not covering it" and "a control
+that cannot fail is not a control" are the same sentence about different subjects. Both got past two
+review rounds because the *form* looked rigorous — a second command, a matching answer — and nobody asked
+what result would have falsified it.
+
+Now `_resolved_package_features` uses `cargo tree -p <pkg> -e features,normal,build,dev`, which is scoped
+to the package actually being built while still counting genuine dev-dependency unification (measured to
+make no difference here — requested anyway, because omitting it would bias the set the other way and
+over-report gaps). A failed resolve returns non-zero and the lane FAILs naming the census, so "could not
+measure" never becomes "nothing to report". Pinned by `1699-featoracle-*` in
+`test_agent_gate_summary.sh`, including the behavioural regression that a dependent-only feature stays
+absent **and** its complement — that the genuinely-enabled features are present — so the assert cannot
+pass on an empty or garbage set.
+
 ## Cost change from the roborev round-3 `-D warnings` fix (recorded, not absorbed)
 
 Round 3 found that `RUSTFLAGS="-D warnings" cargo build && cargo test` applied the flag to the **build only**,

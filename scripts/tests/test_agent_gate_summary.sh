@@ -1982,6 +1982,82 @@ for fn_ in run_legacy_heuristics run_feature_iso run_flight_tests; do
   fi
 done
 
+# --- 20. #1699: the feature oracle is PACKAGE-scoped, not workspace-scoped -----------
+#
+# roborev round-6 finding (Medium). `cargo metadata` resolves the WHOLE workspace and
+# unions features across every member, so cqlite-core came back with `arrow`,
+# `arrow-shape-corpus`, `cli-helpers`, `parquet` and `producer-fault-injection` enabled —
+# five features turned on only by cqlite-flight / cqlite-py / cqlite-node /
+# ws0-corpus-gen, which `cargo test -p cqlite-core` does not build. Measured 14 features
+# workspace-wide vs 9 package-scoped, and none of the five is a dev-dependency of
+# cqlite-core.
+#
+# The direction is what makes it a defect: the only consumer is the co-required-feature
+# census, which reports GAPS, so an over-broad enabled set makes a real gap look reachable
+# and silently DROPS it — an under-report in the output whose whole job is to state
+# omissions.
+rpf_body="$tmp/1699-rpf.txt"
+awk '/^_resolved_package_features\(\) \{/,/^\}/' "$GATE" > "$rpf_body"
+if [ ! -s "$rpf_body" ]; then
+  bad "1699-featoracle-extract: could not extract _resolved_package_features — the extraction broke, so the asserts below would pass vacuously"
+else
+  ok "1699-featoracle-extract: extracted _resolved_package_features from the real script"
+  rpf_code="$tmp/1699-rpf-code.txt"
+  sed 's/[[:space:]]*#.*$//' "$rpf_body" > "$rpf_code"
+  if [ "$(grep -cE 'cargo[[:space:]]+tree[[:space:]]+-p' "$rpf_code")" -gt 0 ]; then
+    ok "1699-featoracle-scoped: the oracle resolves with a package-scoped 'cargo tree -p'"
+  else
+    bad "1699-featoracle-scoped: the oracle no longer uses 'cargo tree -p' — a workspace-wide resolve unions OTHER members' features and silently under-reports census gaps"
+  fi
+  if [ "$(grep -cE 'cargo[[:space:]]+metadata' "$rpf_code")" -eq 0 ]; then
+    ok "1699-featoracle-nometa: the oracle makes no workspace-wide 'cargo metadata' feature resolve"
+  else
+    bad "1699-featoracle-nometa: the oracle is back on 'cargo metadata' — that resolves the whole workspace and reports other members' features as this package's"
+  fi
+  # Dev edges must stay requested: dev-dependency unification IS applied by `cargo test`,
+  # so dropping them would bias the set the other way (over-reporting gaps).
+  if [ "$(grep -cE '\-e[[:space:]]+features[^[:space:]]*dev' "$rpf_code")" -gt 0 ]; then
+    ok "1699-featoracle-dev: dev edges are included, so genuine dev-dependency unification is still counted"
+  else
+    bad "1699-featoracle-dev: dev edges are not requested — cargo test DOES apply dev-dependency unification, so the set would be understated"
+  fi
+
+  # BEHAVIOURAL: the regression roborev asked for — a feature enabled ONLY by a workspace
+  # dependent must be ABSENT. Runs only where cargo can resolve; a missing/failing cargo
+  # is reported as an explicit SKIP naming what went unverified, never folded into a pass.
+  if command -v cargo >/dev/null 2>&1; then
+    # shellcheck disable=SC1090
+    . "$rpf_body"
+    rpf_out=$(_resolved_package_features cqlite-core --features legacy-heuristics 2>/dev/null || true)
+    if [ -z "$rpf_out" ]; then
+      echo "SKIP - 1699-featoracle-behaviour: cargo present but the resolve returned nothing (offline registry?) — NOT verified here"
+    else
+      _leaked=""
+      for _f in parquet cli-helpers arrow arrow-shape-corpus producer-fault-injection; do
+        case "$rpf_out" in *" $_f "*) _leaked="$_leaked $_f" ;; esac
+      done
+      if [ -z "$_leaked" ]; then
+        ok "1699-featoracle-behaviour: no dependent-only feature (parquet/cli-helpers/arrow/...) is reported as enabled for cqlite-core"
+      else
+        bad "1699-featoracle-behaviour: dependent-only features are reported as enabled —$_leaked. cargo test -p cqlite-core does not enable them, so census gaps requiring them would be silently dropped"
+      fi
+      # The complement, so the assert above cannot pass by the oracle returning junk: the
+      # features the invocation really does enable MUST be present.
+      _absent=""
+      for _f in legacy-heuristics default write-support all-compression; do
+        case "$rpf_out" in *" $_f "*) ;; *) _absent="$_absent $_f" ;; esac
+      done
+      if [ -z "$_absent" ]; then
+        ok "1699-featoracle-complement: the features the invocation really enables ARE present (so the assert above is not passing on an empty/garbage set)"
+      else
+        bad "1699-featoracle-complement: genuinely-enabled features are MISSING —$_absent. An understated set over-reports census gaps"
+      fi
+    fi
+  else
+    echo "SKIP - 1699-featoracle-behaviour: cargo not available — the dependent-only-feature regression was NOT verified here"
+  fi
+fi
+
 echo "----"
 echo "passed: $PASS  failed: $FAIL"
 [ "$FAIL" -eq 0 ]

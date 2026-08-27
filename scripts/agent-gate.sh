@@ -5645,28 +5645,41 @@ run_flight_query_semantics_oracle() {
 # set), so an empty result is a failed derivation, and the caller must treat it as
 # one rather than as "no features enabled".
 _resolved_package_features() {
+  # PACKAGE-SCOPED resolve, via `cargo tree -p` — NOT `cargo metadata` (roborev round-6
+  # finding, Medium). `cargo metadata` resolves the ENTIRE workspace and unions features
+  # across every member, so it reported cqlite-core as having `arrow`,
+  # `arrow-shape-corpus`, `cli-helpers`, `parquet` and `producer-fault-injection` enabled.
+  # MEASURED: 14 features workspace-wide vs 9 package-scoped, and the five extras are
+  # turned on by cqlite-flight / cqlite-py / cqlite-node / ws0-corpus-gen — OTHER
+  # members. None is a dev-dependency of cqlite-core (checked per-dependency, including
+  # `kind=dev`), so `cargo test -p cqlite-core --features …` does NOT enable them.
+  #
+  # THE DIRECTION IS WHY THIS IS NOT COSMETIC. The only consumer is the co-required-feature
+  # census, which reports a GAP: "this body needs feature X, which is not enabled here".
+  # An OVER-BROAD enabled set makes a real gap look reachable and DROPS it from the census
+  # — a silent UNDER-report, the permissive direction, in the one output whose entire job
+  # is to state omissions. Today nothing is lost (`experimental` is absent from both sets,
+  # so the current census is correct either way), but a future test gated on
+  # `all(legacy-heuristics, parquet)` would have compiled out of the lane and been
+  # announced as covered.
+  #
+  # An earlier version of this comment claimed the breadth was dev-dependency unification
+  # "verified not to be over-broad" via `cargo metadata --manifest-path
+  # cqlite-core/Cargo.toml`. That was NOT a control: for a workspace MEMBER, cargo finds
+  # the workspace root and resolves the whole workspace anyway, so it necessarily agreed.
+  # Recorded because the wrong lesson is "the numbers matched"; the right one is that a
+  # control which cannot fail is not a control.
+  #
+  # Dev edges are requested explicitly (`-e features,normal,build,dev`) so genuine
+  # dev-dependency unification — which `cargo test` DOES apply — is still counted; that
+  # was measured to make no difference here, but omitting it would bias the other way.
+  # A failed resolve returns non-zero and the caller FAILs the lane naming the census, so
+  # "could not measure" never becomes "nothing to report".
   local pkg="$1"; shift
-  local meta feats
-  meta=$(cargo metadata --format-version 1 "$@" 2>/dev/null) || return 1
-  [ -n "$meta" ] || return 1
-  if command -v jq >/dev/null 2>&1; then
-    feats=$(printf '%s' "$meta" | jq -r --arg n "$pkg" \
-      '(.packages[] | select(.name == $n) | .id) as $id
-       | .resolve.nodes[] | select(.id == $id) | .features[]')
-  elif command -v python3 >/dev/null 2>&1; then
-    feats=$(printf '%s' "$meta" | python3 -c '
-import json, sys
-n = sys.argv[1]
-d = json.load(sys.stdin)
-ids = {p["id"] for p in d["packages"] if p["name"] == n}
-for node in (d.get("resolve") or {}).get("nodes", []):
-    if node["id"] in ids:
-        for f in node.get("features", []):
-            print(f)
-' "$pkg")
-  else
-    return 1
-  fi
+  local feats
+  feats=$(cargo tree -p "$pkg" "$@" -e features,normal,build,dev --prefix none -f '{p}|{f}' 2>/dev/null \
+    | awk -F'|' -v pat="^$pkg v" '$1 ~ pat {print $2}' \
+    | tr ',' '\n' | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//' -e '/^$/d' | sort -u) || return 1
   [ -n "$feats" ] || return 1
   printf ' %s ' "$(printf '%s' "$feats" | tr '\n' ' ' | sed -E 's/[[:space:]]+/ /g; s/^ //; s/ $//')"
 }
