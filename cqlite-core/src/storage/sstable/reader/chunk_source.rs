@@ -105,6 +105,22 @@ pub(crate) fn counted_raw_chunk(
 /// counts that read's payload post-decompression, so counting both would report one
 /// read twice under two different sizes.
 ///
+/// # This is the ONLY counting of an uncompressed block — downstream branches must NOT
+///
+/// Every caller of `block_io::read_next_block` receives bytes that are ALREADY counted
+/// when the SSTable has no `CompressionInfo.db`, so a "no compressor, pass the buffer
+/// through" branch further down that call chain must leave them alone. `compression_info`
+/// and `compression_reader` are derived from the SAME parse (`reader/mod.rs`), so
+/// `compression_reader.is_none()` holds EXACTLY when this gate fired — which makes the
+/// naive `counted_raw_chunk(chunk, None)` in such a branch a straight DOUBLE count, at
+/// twice the true byte total. That is not a corner case: #1406 makes UNCOMPRESSED the
+/// only shape CQLite's own write surface emits, so it is the ordinary compaction input.
+/// Both compaction decode loops (`data_access/compaction.rs`) and the query stitch
+/// (`data_access/mod.rs`) therefore return that branch's buffer UNCOUNTED. The
+/// incompressible-raw branch beside them is the opposite case and DOES count: it is
+/// reached only when `max_compressed_length` is a real value, i.e. `compression_info` is
+/// `Some`, i.e. this gate did NOT fire.
+///
 /// Lives here rather than in `block_io` so every `read.bytes` increment in the crate
 /// stays inside this module (grep `record_decompressed_bytes`).
 pub(crate) fn count_uncompressed_block(

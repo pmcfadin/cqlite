@@ -908,3 +908,85 @@ async fn a_compaction_read_counts_bytes_but_no_query_metrics() {
         );
     }
 }
+
+/// An UNCOMPRESSED compaction read counts each chunk's bytes **ONCE** (issue #1701,
+/// lead review of the roborev R3 fix).
+///
+/// # The defect this pins
+///
+/// Routing compaction decode through the metered plane (R3) added a
+/// `counted_raw_chunk(chunk, None)` to each compaction loop's "no compressor" branch.
+/// But those bytes arrive from `block_io::read_next_block`, which already counts them
+/// via `chunk_source::count_uncompressed_block` whenever the SSTable has no
+/// `CompressionInfo.db` — and `compression_reader.is_none()` holds EXACTLY then (both
+/// are derived from one parse). So every uncompressed compaction read reported
+/// `read.bytes` at **twice** its true value: a byte counter an operator cannot use for
+/// I/O amplification, which is the metric's whole purpose.
+///
+/// It is the ordinary case, not an exotic one — #1406 makes uncompressed the only shape
+/// CQLite's own write surface emits, so a compaction of CQLite-written SSTables takes
+/// exactly this branch. The sibling compressed case above is blind to it by
+/// construction (its bytes are counted once, in the decompress plane), which is why
+/// this needs its own fixture rather than another assertion there.
+///
+/// # The oracle, and why it is falsifiable
+///
+/// The bytes read are the `Data.db` **data section**, which is strictly smaller than
+/// the file: a correct single count therefore cannot exceed the file length, while a
+/// double count is ~2x it and blows the bound. The assertion is derived from the
+/// on-disk artifact, not from CQLite's own prior output. RED-verified: restoring either
+/// `counted_raw_chunk(compressed_chunk, None)` fails it.
+#[tokio::test(flavor = "multi_thread")]
+#[serial_test::serial(read_metrics)]
+async fn an_uncompressed_compaction_read_counts_each_chunk_once() {
+    use cqlite_core::storage::scan_cancel::ScanCancel;
+
+    let fx = UNCOMPRESSED;
+    let data_db = committed_data_db(&fx);
+    let data_db_len = std::fs::metadata(&data_db)
+        .unwrap_or_else(|e| panic!("stat {}: {e}", data_db.display()))
+        .len();
+
+    let mc = testing::metrics_capture();
+    let reader = open_reader(&fx).await;
+
+    mc.reset();
+    let rows = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
+    let counted = std::sync::Arc::clone(&rows);
+    reader
+        .stream_all_partitions_for_compaction(None, &ScanCancel::default(), move |_row| {
+            counted.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            Ok(std::ops::ControlFlow::Continue(()))
+        })
+        .await
+        .expect("streaming compaction read over the committed uncompressed fixture");
+    let metrics = mc.flush_and_collect();
+
+    assert!(
+        rows.load(std::sync::atomic::Ordering::Relaxed) > 0,
+        "the committed uncompressed fixture must yield compaction rows — a zero-row \
+         read would satisfy the byte bound below for the wrong reason"
+    );
+    let bytes = metrics.counter_sum(catalog::READ_BYTES);
+    assert!(
+        bytes > 0.0,
+        "an uncompressed compaction read still reads Data.db, so cqlite.read.bytes \
+         must count it; points: {:?}",
+        metrics.find(catalog::READ_BYTES).map(|m| &m.points)
+    );
+    assert!(
+        bytes <= data_db_len as f64,
+        "cqlite.read.bytes = {bytes} EXCEEDS the whole {} ({data_db_len} bytes) for a \
+         single pass over its data section — the signature of counting each chunk \
+         TWICE (once in read_next_block's count_uncompressed_block, once again in a \
+         compaction loop's no-compressor branch); points: {:?}",
+        data_db.display(),
+        metrics.find(catalog::READ_BYTES).map(|m| &m.points)
+    );
+    assert_eq!(
+        metrics.sum_where(catalog::READ_BYTES, &[(catalog::attr::COMPRESSION, "none")]),
+        bytes,
+        "counted under the bounded compression=none label, like any other \
+         uncompressed reader"
+    );
+}

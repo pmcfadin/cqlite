@@ -71,7 +71,7 @@ impl SSTableReader {
                     ))
                 })?
             } else {
-                super::super::chunk_source::counted_raw_chunk(compressed_chunk, None)
+                compressed_chunk // counted by read_next_block; see count_uncompressed_block
             };
             stitched_buffer.extend_from_slice(&decompressed_chunk);
             chunk_count += 1;
@@ -709,7 +709,7 @@ impl SSTableReader {
                     ))
                 })?
             } else {
-                super::super::chunk_source::counted_raw_chunk(compressed_chunk, None)
+                compressed_chunk // counted by read_next_block; see count_uncompressed_block
             };
             // Refill the window: compact the already-consumed prefix ONCE
             // (issue #1589), then append the freshly decompressed chunk.
