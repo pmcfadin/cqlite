@@ -602,3 +602,33 @@ async fn await_tasks_back_to(baseline: usize, phase: &str) {
         alive_tasks() - baseline
     );
 }
+
+/// Structural pin (#1695 roborev round 11): the query-layer streaming producer must
+/// await consumer closure CONCURRENTLY with the next batch, not check it after the
+/// batch arrives.
+///
+/// Rounds 8–11 all found the same class of hole — a cancellation check placed
+/// BETWEEN awaits does not bound the await itself — so this pins the shape rather
+/// than one instance of it. A behavioural test would need a producer that stalls
+/// mid-batch on demand, which is a timing construction, and the property is
+/// structural anyway: `recv()` must not be awaited alone.
+#[test]
+fn the_query_layer_producer_awaits_closure_concurrently_with_the_batch() {
+    let src = include_str!("../src/query/select_executor/streaming.rs");
+
+    assert!(
+        src.contains("_ = tx.closed() => return Ok(()),"),
+        "the batch wait must race consumer closure; without it a stalled upstream \
+         batch leaves a timed-out scan running"
+    );
+    assert!(
+        src.contains("biased;"),
+        "closure must be polled BEFORE the batch, so an already-gone consumer ends \
+         the scan without taking one more batch"
+    );
+    assert!(
+        !src.contains("while let Some(batch) = scan_stream.recv().await"),
+        "`recv()` must not be awaited on its own — that is the shape this pin exists \
+         to prevent returning"
+    );
+}
