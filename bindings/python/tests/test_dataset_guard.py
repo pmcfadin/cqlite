@@ -40,6 +40,7 @@ def test_strict_fails_on_empty_datasets_dir(tmp_path, monkeypatch):
     _strict(monkeypatch)
 
     assert conftest._count_data_db() == 0
+    assert conftest._has_data_db() is False
 
     with pytest.raises(Failed) as excinfo:
         conftest.skip_if_no_datasets()
@@ -64,6 +65,7 @@ def test_strict_passes_when_data_db_present(tmp_path, monkeypatch):
     _strict(monkeypatch)
 
     assert conftest._count_data_db() == 1
+    assert conftest._has_data_db() is True
 
     conftest.skip_if_no_datasets()  # must not raise Failed or Skipped
 
@@ -81,6 +83,7 @@ def test_strict_fails_when_data_db_is_a_directory(tmp_path, monkeypatch):
     _strict(monkeypatch)
 
     assert conftest._count_data_db() == 0
+    assert conftest._has_data_db() is False
 
     with pytest.raises(Failed) as excinfo:
         conftest.skip_if_no_datasets()
