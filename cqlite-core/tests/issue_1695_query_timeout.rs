@@ -268,6 +268,15 @@ async fn every_public_entry_point_is_bounded() {
         |r| format!("{} rows", r.rows.len()),
     );
 
+    // A handle from `prepare()` carries the engine's budget too (issue #1695):
+    // `Database::prepare` hands back a `PreparedQuery` whose own `execute` would
+    // otherwise be an unbounded back door into the same full scan.
+    let prepared = db.prepare(&query).await.expect("prepare the scan");
+    let via_handle = prepared.execute(&[]).await;
+    assert_timed_out(via_handle, "prepared.execute", EXPIRED_BUDGET, |r| {
+        format!("{} rows", r.rows.len())
+    });
+
     // With a bind marker: the bound SELECT pipeline.
     let bound = db
         .execute_with_params(
