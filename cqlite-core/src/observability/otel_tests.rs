@@ -44,11 +44,20 @@ fn traceparent_valid_header_is_accepted() {
 // otel source*. A comment, a dead `let _ = catalog::X;`, or a deleted
 // registration cannot satisfy them.
 //
+// WHAT RESOLUTION ALONE CANNOT SEE, and why it no longer matters (#1705, F3):
+// `Some(instrument)` proves an instrument exists for a name, never that it is the
+// RIGHT one — a mis-wired dispatch arm (`catalog::READ_ROWS => &i.read_bytes`)
+// resolved happily while emitting under the wrong series. That is fixed
+// STRUCTURALLY rather than detected: instruments are keyed by the catalog name
+// they were CONSTRUCTED with (`otel_instruments::Registry`), so lookup cannot name
+// a different metric than construction did, and `catalog_tests.rs` reds on any
+// hand-written per-metric arm that would reintroduce the second statement.
+//
 // SCOPE, stated honestly: this file only compiles under
 // `--features observability` (the whole `otel` module is gated), so the default
 // gate run does NOT execute these. The always-compiled companion is the
 // structural registration parse in `catalog_tests.rs`, which is deliberately
-// narrowed to the construction + dispatch constructs for that reason.
+// narrowed to the `Registry` registration calls for that reason.
 // ---------------------------------------------------------------------------
 
 /// How many of the three instrument kinds resolve `name` to a live instrument.
@@ -125,4 +134,53 @@ fn an_unregistered_name_resolves_to_no_instrument() {
     assert_eq!(resolved_kinds(catalog::READ_ROWS), 1);
     assert_eq!(resolved_kinds(catalog::READ_DURATION), 1);
     assert_eq!(resolved_kinds(catalog::SSTABLES_OPEN), 1);
+}
+
+#[test]
+fn every_live_instrument_is_catalogued_and_resolves_only_as_its_own_kind() {
+    // The FORWARD direction at RUNTIME (#1705, F3): walk the instrument set that was
+    // actually built and assert every key is catalogued. The structural parse in
+    // `catalog_tests.rs` asserts the same thing about the SOURCE; this asserts it
+    // about the live objects, so a registration the parser somehow misreads is still
+    // caught here.
+    let i = instruments();
+    let catalogued: std::collections::HashSet<&str> =
+        catalog::ALL_METRICS.iter().copied().collect();
+    let live: Vec<(&str, &str)> = i
+        .counters
+        .keys()
+        .map(|n| ("counter", *n))
+        .chain(i.histograms.keys().map(|n| ("histogram", *n)))
+        .chain(i.gauges.keys().map(|n| ("gauge", *n)))
+        .collect();
+
+    let uncatalogued: Vec<&(&str, &str)> = live
+        .iter()
+        .filter(|(_, name)| !catalogued.contains(name))
+        .collect();
+    assert!(
+        uncatalogued.is_empty(),
+        "live instruments exist for metrics ABSENT from ALL_METRICS: {uncatalogued:?}"
+    );
+
+    // Each key resolves as exactly ONE kind, so no name is registered twice across
+    // kinds (which would make `add_counter` and `record_gauge` disagree about it).
+    for (kind, name) in &live {
+        assert_eq!(
+            resolved_kinds(name),
+            1,
+            "{name} (registered as a {kind}) must resolve as exactly one kind"
+        );
+    }
+
+    // And the affirmative COUNT: every catalogued metric except the declared
+    // stats-only ones has a live instrument, so the sets are equal — not merely
+    // "no surprises found", which an empty instrument set would also satisfy.
+    let stats_only = catalog::STATS_ONLY_METRICS.len();
+    assert_eq!(
+        live.len(),
+        catalog::ALL_METRICS.len() - stats_only,
+        "the live instrument set must be exactly ALL_METRICS minus the {stats_only} \
+         STATS_ONLY_METRICS entries"
+    );
 }

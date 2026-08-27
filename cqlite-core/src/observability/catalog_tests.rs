@@ -8,8 +8,10 @@ use super::*;
 
 /// The otel source the instrument guards scan, as ONE string.
 ///
-/// `otel.rs` holds the record-routing arms and `otel_instruments.rs` the
-/// construction, so a guard reading either alone is blind to half the wiring.
+/// `otel_instruments.rs` holds the `Registry` registrations and `otel.rs` the emit
+/// path + resolvers, so a guard reading either alone is blind to half the wiring
+/// (the F4 builder-call audit needs both: the Registry helpers live in one file, the
+/// ad-hoc fallbacks in the other).
 fn otel_sources() -> String {
     concat!(include_str!("otel.rs"), include_str!("otel_instruments.rs")).to_string()
 }
@@ -689,24 +691,24 @@ fn partition_access_probe_metrics_have_dedicated_registrations_not_the_adhoc_fal
 #[test]
 fn every_instrument_registered_in_otel_is_catalogued() {
     // Issue #2426 (roborev MEDIUM, F1): guard the "emitted instrument absent
-    // from ALL_METRICS" bug class. `otel.rs` is the canonical instrument
-    // construction + record-routing site (every cross-crate emission — incl.
-    // cqlite-flight's warm-cache/admission metrics — routes through its
-    // `add_counter`/`record_histogram`/`record_gauge` dedicated arms). Any
-    // `catalog::SCREAMING_CONST` referenced there is a metric name bound to a
-    // real instrument, so it MUST appear in `ALL_METRICS`. This is a
-    // fully-automatic source-level check (no `observability` feature needed):
-    // add an instrument in `otel.rs` and forget to catalogue it → this fails.
+    // from ALL_METRICS" bug class. The otel sources are the canonical instrument
+    // registration + record-routing site (every cross-crate emission — incl.
+    // cqlite-flight's warm-cache/admission metrics — routes through
+    // `add_counter`/`record_histogram`/`record_gauge`, which resolve the
+    // registered instruments). Any `catalog::SCREAMING_CONST` BOUND to an
+    // instrument there is a metric name with a live series, so it MUST appear in
+    // `ALL_METRICS`. This is a fully-automatic source-level check (no
+    // `observability` feature needed): register an instrument and forget to
+    // catalogue it → this fails.
     //
-    // Automation note (#2426): this scans the core `otel.rs` registration site.
-    // Because every catalogued instrument that cqlite-flight emits now has a
-    // dedicated arm here (never the ad-hoc `_ =>` fallback), the check
-    // transitively covers the flight emission sites too. A future metric emitted
-    // ONLY via the ad-hoc fallback (no dedicated arm, no catalog entry) would not
-    // be caught here — that path is reserved for genuinely non-catalog names.
-    // BOTH halves of the otel wiring: `otel.rs` keeps the record-routing arms and
-    // `otel_instruments.rs` the construction. Scanning only one would let an
-    // instrument built in the other escape the guard entirely (#1116 split).
+    // Automation note (#2426): because every catalogued instrument that
+    // cqlite-flight emits is registered here (never the ad-hoc `_ =>` fallback),
+    // the check transitively covers the flight emission sites too. A future metric
+    // emitted ONLY via the ad-hoc fallback (no registration, no catalog entry)
+    // would not be caught here — that path is reserved for genuinely non-catalog
+    // names. BOTH otel sources are scanned (#1116 split): `otel_instruments.rs`
+    // holds the registrations, `otel.rs` the resolvers and fallbacks, and reading
+    // one alone would let a binding in the other escape the guard.
     assert_every_otel_source_is_scanned();
     let otel_src = otel_sources_uncommented();
     let otel_src = otel_src.as_str();
@@ -819,15 +821,16 @@ fn every_catalogued_metric_is_otel_registered_or_declared_stats_only() {
     // exists to close.
     //
     // A name is accounted for in exactly one of two ways: an instrument is
-    // AFFIRMATIVELY registered for it — constructed by a builder call AND routed by
-    // a resolver match arm ([`otel_registered_instruments`]) — or it is DECLARED in
-    // `catalog::STATS_ONLY_METRICS`. Nothing else passes.
+    // AFFIRMATIVELY registered for it — a `Registry` registration call, which binds
+    // the name to the instrument in ONE construct ([`otel_registered_instruments`])
+    // — or it is DECLARED in `catalog::STATS_ONLY_METRICS`. Nothing else passes.
     //
-    // Strictness note (#1705, roborev B2): this used to accept any textual
+    // Strictness note (#1705, roborev B2/F4): this used to accept any textual
     // `catalog::CONST` occurrence in the otel sources, so removing a registration
     // while leaving a comment or a dead reference behind kept the guard green. Only
-    // the registration constructs are authoritative, comments are stripped first,
-    // and half a wiring does not count.
+    // the registration calls are authoritative, comments are stripped first, and a
+    // registration whose argument this guard cannot classify is an ERROR rather than
+    // a skipped line.
     assert_every_otel_source_is_scanned();
     let refs = otel_registered_instruments(&otel_sources_uncommented());
     let value_to_ident = value_to_ident();
