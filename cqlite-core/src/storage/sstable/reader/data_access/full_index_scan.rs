@@ -150,11 +150,13 @@ impl SSTableReader {
             // `do_get` abandons the walk promptly, and yield every 256th so the
             // chokepoint `max_execution_time` timeout can elapse mid-walk (#1695).
             // Issue #2346: PER-CALL token.
-            // `checkpoint_now`, not `checkpoint(i)`: this loop polled cancellation
-            // on EVERY iteration before #1695 (one real index random read per
-            // iteration is already coarse), and the stride-gated `checkpoint`
-            // would have quietly lowered that to one poll per 256.
-            scan_cancel.checkpoint_now().await?;
+            // `checkpoint_polled`, which is the ONLY one of the three that leaves
+            // this loop's cadences BOTH unchanged: it polled cancellation on every
+            // iteration before #1695 (one real index random read each is already
+            // coarse) and had NO yield at all. `checkpoint(i)` would lower the poll
+            // to one per 256; `checkpoint_now()` would add a runtime reschedule per
+            // partition to every large index-backed scan.
+            scan_cancel.checkpoint_polled(i).await?;
 
             // Roborev job 1610 (finding 1): `raw_key: None` never actually occurs
             // in practice — `parse_big_index_entry` always sets `Some(raw_key)` —

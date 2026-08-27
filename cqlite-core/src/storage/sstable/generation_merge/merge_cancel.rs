@@ -201,7 +201,16 @@ mod tests {
 
     /// The guard trips its token on drop — the mechanism the timed-out query
     /// relies on — and does not trip it before.
+    // #[serial] with the abandonment test (roborev round 4): `per_call()` arms the
+    // probe and `check()` on a cancelled token records an abandonment, so this test
+    // increments the SAME process-global counters `abandon_tests` resets and then
+    // asserts on. `#[serial]` does not exclude UNANNOTATED tests, so without this
+    // annotation a concurrent run of this test could satisfy that test's
+    // `armed() > 0` anti-vacuity guard AND its `abandoned() >= 1` assertion while
+    // the merge under test did neither — a vacuous pass in the one test whose whole
+    // job is proving the abandonment really happened.
     #[test]
+    #[serial_test::serial]
     fn guard_cancels_its_token_on_drop() {
         let (guard, cancel) = per_call();
         assert!(
@@ -223,7 +232,9 @@ mod tests {
     /// Each call mints an INDEPENDENT token, so one query's cancellation can never
     /// reach another's in-flight merge (the reason a shared reader token must not
     /// be reused here).
+    // #[serial] for the same reason as above: `per_call()` arms the probe.
     #[test]
+    #[serial_test::serial]
     fn tokens_are_independent_per_call() {
         let (guard_a, cancel_a) = per_call();
         let (_guard_b, cancel_b) = per_call();

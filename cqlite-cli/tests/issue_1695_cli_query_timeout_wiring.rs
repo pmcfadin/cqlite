@@ -16,7 +16,17 @@
 //! ```
 //!
 //! `main.rs`'s `create_core_config` is a one-line delegation to
-//! `to_core_config`, so the binary and this test exercise the same mapping.
+//! `to_core_config` — the same SOURCE the binary's mapping lives in.
+//!
+//! SCOPE OF THIS EVIDENCE, stated because the previous wording overclaimed
+//! ("the binary and this test exercise the same mapping"): `cqlite-cli` compiles
+//! `config`/`core_config`/`error` twice, once into the lib and once into the bin,
+//! so this test drives the LIB copy while the shipped binary runs its own. The
+//! mapping and the exit-code classification are really covered, and they cannot
+//! silently differ in BEHAVIOUR while the source is shared — but this is not an
+//! end-to-end proof that the `cqlite` executable exits 5. That needs a
+//! `CARGO_BIN_EXE_cqlite` spawn, proposed as a follow-up along with unifying the
+//! bin onto the library modules (a pre-existing CLI-wide duplication).
 //!
 //! # Fixtures
 //!

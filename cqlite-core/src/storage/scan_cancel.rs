@@ -92,6 +92,33 @@ impl ScanCancel {
         Ok(())
     }
 
+    /// Cooperative checkpoint that polls cancellation on EVERY call but yields
+    /// only at the [`YIELD_STRIDE`] boundary — the third of three cadences.
+    ///
+    /// For a loop whose iterations are individually coarse enough to want prompt
+    /// cancellation (one real index random read each), but numerous enough that a
+    /// per-iteration runtime reschedule would be a throughput cost. Reaching for
+    /// [`Self::checkpoint_now`] there preserves the cancellation cadence and
+    /// silently ADDS a yield per iteration where the caller previously had none;
+    /// reaching for [`Self::checkpoint`] preserves the yield cadence and silently
+    /// LOWERS cancellation to one poll per 256. Neither is what such a caller
+    /// wants, which is why this exists as its own method.
+    ///
+    /// The three, so the choice is explicit at every call site:
+    ///
+    /// | method | cancellation poll | runtime yield |
+    /// |---|---|---|
+    /// | [`Self::checkpoint`] | every 256th | every 256th |
+    /// | `checkpoint_polled` | EVERY call | every 256th |
+    /// | [`Self::checkpoint_now`] | EVERY call | EVERY call |
+    pub async fn checkpoint_polled(&self, tick: usize) -> crate::Result<()> {
+        self.check()?;
+        if tick % YIELD_STRIDE == 0 {
+            tokio::task::yield_now().await;
+        }
+        Ok(())
+    }
+
     /// [`Self::checkpoint`] for a loop whose iterations are individually coarse
     /// (a whole block / data section), where every iteration is a correct yield
     /// point.
