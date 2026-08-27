@@ -11,14 +11,33 @@
 //! `UnsupportedCommitLogVersion`, `CorruptCommitLogFrame`, `ResultTooLarge`,
 //! `ForcedReadPathUnavailable`, `InvalidReadPath`).
 //!
-//! Both sides are derived PROGRAMMATICALLY from the one source file — the table by
-//! parsing the module doc comment, the mapping by parsing `classify()`'s match arms
-//! — so there is no second hand-maintained list to drift. Cross-block rule (epic
-//! #1686 capstone §3): `classify()` is the authority the bindings' error table
-//! derives from, so the core table must be exact.
+//! Both sides are derived PROGRAMMATICALLY, so there is no second hand-maintained
+//! list to drift. Cross-block rule (epic #1686 capstone §3): `classify()` is the
+//! authority the bindings' error table derives from, so the core table must be
+//! exact.
+//!
+//! # Where the code side's authority comes from (roborev B1 on this issue)
+//!
+//! An earlier version derived the code side from a source scrape of `classify()`
+//! alone. That is the classic vacuous-guard shape CLAUDE.md names: a variant
+//! absorbed by a catch-all arm is absent from BOTH parsed sides, so the advertised
+//! set-equality passes while the taxonomy was never updated. The code side is now
+//! THREE mutually-checking oracles, the first of which is the compiler:
+//!
+//! 1. **`classify()` has no catch-all arm** (`classify_has_no_catch_all_arm`), and
+//!    it matches on `&Error`. Rust's exhaustiveness check therefore REFUSES TO
+//!    COMPILE until a newly-added `Error` variant is named in an arm explicitly —
+//!    the compiler, not a scrape, is what makes the enumeration complete.
+//! 2. **The `Error` enum declaration** is parsed structurally
+//!    ([`declared_error_variants`]) and asserted equal to the arm set, so a parser
+//!    that stops seeing arms fails loudly instead of shrinking the guard.
+//! 3. **Each compiled variant has a constructed sample** whose variant name is read
+//!    back from its derived `Debug` output, and whose category is MEASURED by
+//!    calling `classify()` on the value — an affirmative runtime measurement.
 
 use super::*;
 use crate::error::Error;
+use std::collections::BTreeMap;
 
 /// The one copy of `error_schema.rs`'s source both parsers read.
 fn error_schema_src() -> &'static str {
@@ -133,13 +152,162 @@ fn documented_taxonomy() -> Vec<(String, String, Vec<String>)> {
     rows
 }
 
-/// Parse `classify()`'s body into `Error` variant → `ErrorCategory` variant.
+/// The `crate::error` source the `Error`-enum declaration parser reads.
+fn error_src() -> &'static str {
+    include_str!("../error.rs")
+}
+
+/// Whether this build compiles the `#[cfg(target_arch = "wasm32")]` `Error`
+/// variants. On every other target such a variant does not exist, so it can be
+/// neither constructed nor classified at runtime — see [`documented_map`].
+const WASM_VARIANTS_COMPILED: bool = cfg!(target_arch = "wasm32");
+
+/// Every variant the `Error` enum DECLARES → is it `wasm32`-gated.
 ///
-/// Reads the ACTUAL match arms, so a variant added to `classify()` without a
-/// doc-table row is visible here even though Rust has no reflection over enum
-/// variants. Arms are delimited by `=> ErrorCategory::<Cat>`; every `Error::<V>`
-/// pattern preceding a delimiter belongs to that arm.
-fn classified_variants() -> std::collections::BTreeMap<String, String> {
+/// **Why a source parse at all, and what it cannot see.** Rust has no reflection
+/// over enum variants, so the declared set has to be read from the one construct
+/// that holds it: the `pub enum Error { … }` block in `error.rs`. This parser is
+/// deliberately NOT the sole oracle — it exists to catch a scrape regression in
+/// [`classify_arms`] (which the compiler keeps complete). It recognises a variant
+/// as a line at the enum's own 4-space indent opening with an ASCII-uppercase
+/// identifier followed by `(`, `{` or `,`; it therefore cannot see a
+/// macro-generated variant or one written at another indentation. Either would
+/// disagree with the compiler-audited arm set and FAIL
+/// `declared_error_variants_equal_classify_arms` — the failure mode is a red test,
+/// never a silent pass.
+fn declared_error_variants() -> BTreeMap<String, bool> {
+    const HEAD: &str = "pub enum Error {";
+    let src = error_src();
+    let start = src
+        .find(HEAD)
+        .expect("error.rs must declare `pub enum Error`");
+    let body = &src[start + HEAD.len()..];
+    let mut out = BTreeMap::new();
+    let mut wasm_gated = false;
+    for line in body.lines() {
+        if line == "}" {
+            break; // end of the enum declaration
+        }
+        let trimmed = line.trim_start();
+        let indent = line.len() - trimmed.len();
+        if indent != 4 {
+            continue; // struct-variant fields / wrapped attribute continuations
+        }
+        if trimmed.starts_with("#[cfg(target_arch = \"wasm32\")]") {
+            wasm_gated = true;
+            continue;
+        }
+        if !trimmed.starts_with(|c: char| c.is_ascii_uppercase()) {
+            continue; // doc comment, attribute, or a wrapped `)]`
+        }
+        let ident: String = trimmed
+            .chars()
+            .take_while(|c| c.is_ascii_alphanumeric() || *c == '_')
+            .collect();
+        let rest = trimmed[ident.len()..].trim_start();
+        if !(rest.starts_with('(') || rest.starts_with('{') || rest.starts_with(',')) {
+            continue;
+        }
+        out.insert(ident, wasm_gated);
+        wasm_gated = false;
+    }
+    assert!(
+        out.len() > 30,
+        "the Error enum declaration must have been parsed; got {out:?}"
+    );
+    out
+}
+
+/// Parse a `classify()`-shaped match body into `Error` variant →
+/// (`ErrorCategory` variant, is-`wasm32`-gated).
+///
+/// Takes the body as an argument so [`the_classify_arm_parser_rejects_a_catch_all`]
+/// can feed it synthetic bodies — the parser under test is THIS one, not a copy of
+/// it (CLAUDE.md: "a port is a second implementation").
+///
+/// **Fail-closed on any arm alternative that is not an explicit `Error::` pattern.**
+/// That single rule is what makes the parsed set COMPLETE rather than merely
+/// non-empty: `classify()` matches on `&Error`, so if every alternative must name a
+/// variant, Rust's exhaustiveness check guarantees every variant is named. A
+/// wildcard (`_ =>`), a named binding (`other =>`), or `Error::X | _ =>` all return
+/// `Err` here instead of quietly absorbing future variants.
+fn parse_classify_arms(body: &str) -> Result<BTreeMap<String, (String, bool)>, String> {
+    const ARM: &str = "=> ErrorCategory::";
+    const CFG_WASM: &str = "#[cfg(target_arch = \"wasm32\")]";
+    let mut out: BTreeMap<String, (String, bool)> = BTreeMap::new();
+    // Start after the `match … {` opener: the function signature ahead of it is not
+    // an arm pattern, and feeding it to the per-alternative rule below would reject
+    // every well-formed body.
+    let mut prev_end = body
+        .find("match ")
+        .and_then(|i| body[i..].find('{').map(|j| i + j + 1))
+        .ok_or_else(|| "classify()'s body must contain a `match … {` opener".to_string())?;
+    for (idx, _) in body.match_indices(ARM) {
+        if idx < prev_end {
+            continue;
+        }
+        let patterns = &body[prev_end..idx];
+        let after = &body[idx + ARM.len()..];
+        let category: String = after
+            .chars()
+            .take_while(|c| c.is_ascii_alphanumeric() || *c == '_')
+            .collect();
+        if category.is_empty() {
+            return Err("an arm must name an ErrorCategory variant".to_string());
+        }
+        prev_end = idx + ARM.len() + category.len();
+
+        // Drop `//` comments (arms carry explanatory prose) and the previous arm's
+        // trailing comma, then judge each `|` alternative on its own.
+        let cleaned: String = patterns
+            .lines()
+            .map(|l| l.split("//").next().unwrap_or("").trim())
+            .filter(|l| !l.is_empty())
+            .collect::<Vec<_>>()
+            .join(" ");
+        let cleaned = cleaned.trim().trim_start_matches(',').trim();
+        for alt in cleaned.split('|') {
+            let alt = alt.trim();
+            if alt.is_empty() {
+                continue;
+            }
+            let (gated, alt) = match alt.strip_prefix(CFG_WASM) {
+                Some(rest) => (true, rest.trim()),
+                None => (false, alt),
+            };
+            let Some(rest) = alt.strip_prefix("Error::") else {
+                return Err(format!(
+                    "classify() arm alternative {alt:?} is not an explicit `Error::` \
+                     pattern — a wildcard or named binding would absorb future \
+                     variants silently, which is exactly the drift this guard exists \
+                     to catch (issue #1705)"
+                ));
+            };
+            let ident: String = rest
+                .chars()
+                .take_while(|c| c.is_ascii_alphanumeric() || *c == '_')
+                .collect();
+            if ident.is_empty() {
+                return Err(format!("could not read a variant name from {alt:?}"));
+            }
+            if let Some(prior) = out.insert(ident.clone(), (category.clone(), gated)) {
+                if prior.0 != category {
+                    return Err(format!(
+                        "Error::{ident} appears in two classify() arms ({} and {category})",
+                        prior.0
+                    ));
+                }
+            }
+        }
+    }
+    if out.len() <= 20 {
+        return Err(format!("classify() must have been parsed; got {out:?}"));
+    }
+    Ok(out)
+}
+
+/// The real `classify()` body, extracted from `error_schema.rs`.
+fn classify_body() -> &'static str {
     let src = error_schema_src();
     let start = src
         .find("fn classify(")
@@ -148,43 +316,142 @@ fn classified_variants() -> std::collections::BTreeMap<String, String> {
     let end = body
         .find("\n}\n")
         .expect("classify() must be terminated by a column-0 closing brace");
-    let body = &body[..end];
+    &body[..end]
+}
 
-    const ARM: &str = "=> ErrorCategory::";
-    let mut out = std::collections::BTreeMap::new();
-    let mut prev_end = 0usize;
-    for (idx, _) in body.match_indices(ARM) {
-        let patterns = &body[prev_end..idx];
-        let after = &body[idx + ARM.len()..];
-        let category: String = after
-            .chars()
-            .take_while(|c| c.is_ascii_alphanumeric() || *c == '_')
-            .collect();
-        assert!(
-            !category.is_empty(),
-            "an arm must name an ErrorCategory variant"
-        );
-        for (v, _) in patterns.match_indices("Error::") {
-            let ident: String = patterns[v + "Error::".len()..]
-                .chars()
-                .take_while(|c| c.is_ascii_alphanumeric() || *c == '_')
-                .collect();
-            if ident.is_empty() {
-                continue;
+/// `classify()`'s arms — COMPLETE because the compiler says so (see the module doc).
+fn classify_arms() -> BTreeMap<String, (String, bool)> {
+    match parse_classify_arms(classify_body()) {
+        Ok(map) => map,
+        Err(why) => panic!("classify() is not exhaustively enumerable: {why}"),
+    }
+}
+
+/// One constructed `Error` value per variant THIS TARGET compiles.
+///
+/// No variant name is written beside a value: [`debug_variant_name`] reads it back
+/// out of the derived `Debug` output, so a sample cannot mislabel itself, and the
+/// category is obtained by CALLING `classify()` on the value
+/// ([`measured_categories`]) rather than by reading source text.
+fn error_samples() -> Vec<Error> {
+    let mut samples = vec![
+        Error::Io(std::io::Error::other("x")),
+        Error::Serialization {
+            message: "m".into(),
+            source: None,
+        },
+        Error::Corruption("c".into()),
+        Error::Schema("s".into()),
+        Error::CqlParse("q".into()),
+        Error::InvalidFormat("f".into()),
+        Error::UnsupportedFormat("f".into()),
+        Error::UnsupportedVersion {
+            version: "ma".into(),
+            floor: "na".into(),
+        },
+        Error::UnsupportedCommitLogVersion {
+            version: 5,
+            floor: 6,
+            ceiling: 7,
+        },
+        Error::CorruptCommitLogFrame("f".into()),
+        Error::Timeout("t".into()),
+        Error::InvalidPath("p".into()),
+        Error::InvalidState("s".into()),
+        Error::QueryExecution("q".into()),
+        Error::ResultTooLarge {
+            budget_bytes: 1,
+            estimated_bytes: 2,
+            rows: 3,
+        },
+        Error::InvalidReadPath {
+            value: "nope".into(),
+        },
+        Error::ForcedReadPathUnavailable {
+            forced: "point",
+            reason: "r".into(),
+        },
+        Error::TypeConversion("t".into()),
+        Error::Configuration("c".into()),
+        Error::Storage("s".into()),
+        Error::Memory("m".into()),
+        Error::Concurrency("c".into()),
+        Error::WriteDirLocked { path: "/d".into() },
+        Error::NotFound("n".into()),
+        Error::Table("t".into()),
+        Error::AlreadyExists("a".into()),
+        Error::InvalidOperation("o".into()),
+        Error::ConstraintViolation("v".into()),
+        Error::Transaction("t".into()),
+        Error::Index("i".into()),
+        Error::Compaction("c".into()),
+        Error::Internal("i".into()),
+        Error::Parse("p".into()),
+        Error::InvalidInput("i".into()),
+        Error::UnsupportedQuery("q".into()),
+        Error::Cancelled,
+    ];
+    #[cfg(target_arch = "wasm32")]
+    samples.push(Error::Wasm("w".into()));
+    samples.sort_by_key(debug_variant_name);
+    samples
+}
+
+/// The variant name of `err`, read from its derived `Debug` output.
+///
+/// `#[derive(Debug)]` on an enum prints the variant identifier first (`Cancelled`,
+/// `Io(..)`, `Serialization { .. }`), so the leading identifier IS the variant name
+/// — obtained from the VALUE, never from a hand-written literal beside it.
+fn debug_variant_name(err: &Error) -> String {
+    format!("{err:?}")
+        .chars()
+        .take_while(|c| c.is_ascii_alphanumeric() || *c == '_')
+        .collect()
+}
+
+/// `Error` variant → category, MEASURED by calling `classify()` on a real value of
+/// each variant this target compiles.
+fn measured_categories() -> BTreeMap<String, String> {
+    error_samples()
+        .iter()
+        .map(|e| (debug_variant_name(e), format!("{:?}", classify(e))))
+        .collect()
+}
+
+/// The variant → category map the doc table is compared against.
+///
+/// Runtime-measured for every variant this target compiles. A `wasm32`-gated
+/// variant cannot be constructed here (it does not exist in this build), so its
+/// category is taken from the compiler-audited `classify()` arm text and the fact is
+/// stated rather than hidden: on a `wasm32` build it becomes runtime-measured like
+/// everything else. The doc table lists it unconditionally because the table is a
+/// human-facing description of the enum, not of one target.
+fn actual_map() -> BTreeMap<String, String> {
+    let mut out = measured_categories();
+    if !WASM_VARIANTS_COMPILED {
+        for (variant, (category, gated)) in classify_arms() {
+            if gated {
+                out.insert(variant, category);
             }
-            let prior = out.insert(ident.clone(), category.clone());
+        }
+    }
+    out
+}
+
+/// The variant → category map the module-doc taxonomy table declares.
+fn documented_map() -> BTreeMap<String, String> {
+    let mut documented = BTreeMap::new();
+    for (category, _, mapped) in documented_taxonomy() {
+        for variant in mapped {
+            let prior = documented.insert(variant.clone(), category.clone());
             assert!(
-                prior.is_none() || prior.as_deref() == Some(category.as_str()),
-                "Error::{ident} appears in two classify() arms ({prior:?} and {category})"
+                prior.is_none(),
+                "Error::{variant} is documented under two categories \
+                 ({prior:?} and {category})"
             );
         }
-        prev_end = idx + ARM.len() + category.len();
     }
-    assert!(
-        out.len() > 20,
-        "classify() must have been parsed; got {out:?}"
-    );
-    out
+    documented
 }
 
 #[test]
@@ -227,6 +494,93 @@ fn documented_categories_equal_the_error_category_enum() {
 }
 
 #[test]
+fn classify_has_no_catch_all_arm() {
+    // Issue #1705 (roborev B1) — the LOAD-BEARING pin. `classify()` matches on
+    // `&Error` with every arm alternative an explicit `Error::<Variant>` pattern,
+    // so Rust's exhaustiveness check refuses to compile until a newly-added variant
+    // is categorised BY HAND. Re-adding `_ => ErrorCategory::Other` (or a named
+    // binding arm) would restore exactly the hole this issue closes: a new variant
+    // silently absorbed into `Other`, absent from the doc table, and invisible to
+    // every parsed comparison below. So the absence of a catch-all is asserted
+    // directly rather than assumed.
+    if let Err(why) = parse_classify_arms(classify_body()) {
+        panic!(
+            "classify() must stay exhaustively enumerable (no catch-all arm): {why}\n\
+             The taxonomy guard's completeness comes from the COMPILER refusing to \
+             build until each new Error variant is named in an arm."
+        );
+    }
+}
+
+#[test]
+fn the_classify_arm_parser_rejects_a_catch_all() {
+    // The pin above is only worth as much as the parser behind it, so prove the
+    // rejection on synthetic bodies — asserting THIS parser, the one
+    // `classify_has_no_catch_all_arm` calls, not a copy of it.
+    let mut ok = String::from("fn classify(err: &Error) -> ErrorCategory {\n    match err {\n");
+    for n in 0..21 {
+        ok.push_str(&format!(
+            "        Error::V{n}(_) => ErrorCategory::Other,\n"
+        ));
+    }
+    let parsed = parse_classify_arms(&ok).expect("an all-explicit body must parse");
+    assert_eq!(parsed.len(), 21);
+    assert_eq!(parsed["V7"], ("Other".to_string(), false));
+
+    for bad in [
+        // a bare wildcard
+        format!("{ok}        _ => ErrorCategory::Other,\n"),
+        // a wildcard folded into an otherwise explicit arm
+        format!("{ok}        Error::VX(_) | _ => ErrorCategory::Other,\n"),
+        // a NAMED binding, which is a catch-all that contains no `_` at all
+        format!("{ok}        other => ErrorCategory::Other,\n"),
+    ] {
+        let err = parse_classify_arms(&bad)
+            .expect_err("a catch-all arm must be rejected, not silently parsed");
+        assert!(
+            err.contains("not an explicit `Error::` pattern"),
+            "unexpected rejection reason: {err}"
+        );
+    }
+}
+
+#[test]
+fn declared_error_variants_equal_classify_arms() {
+    // Issue #1705 (roborev B1): the two independent code-side derivations must
+    // agree. `classify_arms()` is kept complete by the compiler; this asserts the
+    // structural `Error`-enum parse sees the same set, so a parser regression on
+    // either side is a RED test rather than a quietly shrinking guard.
+    let declared: Vec<String> = declared_error_variants().into_keys().collect();
+    let arms: Vec<String> = classify_arms().into_keys().collect();
+    assert_eq!(
+        declared, arms,
+        "the Error enum declaration and classify()'s match arms must name the same \
+         variants (classify() is exhaustive, so any difference is a parse bug in \
+         one of the two derivations)"
+    );
+}
+
+#[test]
+fn every_compiled_error_variant_has_a_constructed_sample() {
+    // Issue #1705 (roborev B1): the categories compared against the doc table are
+    // MEASURED by calling `classify()` on a real value of each variant, so every
+    // variant this target compiles must have a sample. Adding an `Error` variant
+    // therefore fails HERE (add a sample) as well as at the compiler (categorise it
+    // in `classify()`) — no path leaves the taxonomy table unchecked.
+    let expected: Vec<String> = declared_error_variants()
+        .into_iter()
+        .filter(|(_, wasm_gated)| WASM_VARIANTS_COMPILED || !wasm_gated)
+        .map(|(v, _)| v)
+        .collect();
+    let sampled: Vec<String> = error_samples().iter().map(debug_variant_name).collect();
+    assert_eq!(
+        sampled, expected,
+        "error_samples() must hold exactly one constructed value per Error variant \
+         this target compiles (names are read back from each value's Debug output)"
+    );
+}
+
+#[test]
 fn every_error_variant_classify_routes_is_documented_in_the_taxonomy_table() {
     // Issue #1705 (AI5) — the RED test. `classify()` is the authority the
     // bindings' error table derives from (epic #1686 capstone §3), and its
@@ -239,20 +593,12 @@ fn every_error_variant_classify_routes_is_documented_in_the_taxonomy_table() {
     //     describing behaviour that does not exist.
     //
     // Mapping equality, not just membership: a variant listed under the WRONG
-    // category row is also caught.
-    let classified = classified_variants();
+    // category row is also caught. The code side is the RUNTIME-measured map
+    // (`classify()` called on a constructed value per variant), not a scrape of
+    // the function's text — see the module doc's oracle note (roborev B1).
+    let classified = actual_map();
+    let documented = documented_map();
 
-    let mut documented = std::collections::BTreeMap::new();
-    for (category, _, mapped) in documented_taxonomy() {
-        for variant in mapped {
-            let prior = documented.insert(variant.clone(), category.clone());
-            assert!(
-                prior.is_none(),
-                "Error::{variant} is documented under two categories \
-                 ({prior:?} and {category})"
-            );
-        }
-    }
     let undocumented: Vec<String> = classified
         .iter()
         .filter(|(v, _)| !documented.contains_key(v.as_str()))
@@ -282,7 +628,9 @@ fn every_error_variant_classify_routes_is_documented_in_the_taxonomy_table() {
     );
 }
 
-// Exhaustively cover every Error constructor / variant -> expected category.
+// Exhaustively cover every Error constructor / variant -> expected category. These
+// expectations are HAND-WRITTEN on purpose: they are the independent check that the
+// doc-table comparison above is comparing against the right categories.
 #[test]
 fn classify_every_error_variant() {
     use ErrorCategory::*;
