@@ -274,6 +274,37 @@ impl<T: ScanStreamItem> JoinedStream<T> {
     }
 }
 
+impl<T: ScanStreamItem> Drop for JoinedStream<T> {
+    /// Account the rows the producer had ALREADY MATERIALISED and enqueued but this
+    /// consumer never polled, then emit this operation's read totals (issue #1701,
+    /// roborev F2).
+    ///
+    /// # Why draining is the honest accounting
+    ///
+    /// Rows are accounted as they cross [`recv`](JoinedStream::recv), which is the
+    /// only place this type sees them. A `LIMIT` consumer — the COMMON case, and the
+    /// one real caller of the per-row streaming surface — stops polling early and
+    /// drops the stream while the bounded channel still holds rows the producer
+    /// decoded, sent, and can never take back. Emitting only the polled rows
+    /// understated `read.rows`/`read.partitions` while `read.bytes` still counted the
+    /// chunks those rows were decoded from, so an amplification ratio built from the
+    /// two was wrong in the exact case it matters, and the documented
+    /// "rows materialised by the read path" was contradicted by its own metric.
+    ///
+    /// `try_recv` is non-blocking and the receiver is dropped immediately after, so
+    /// this neither waits for the producer nor changes the teardown behaviour. Each
+    /// item is accounted EXACTLY once: a polled row was accounted in `recv` and is no
+    /// longer in the channel; a buffered row is accounted here and was never polled.
+    fn drop(&mut self) {
+        while let Ok(item) = self.rx.try_recv() {
+            if let Ok(delivered) = &item {
+                delivered.account(&mut self.meter);
+            }
+        }
+        self.meter.finish();
+    }
+}
+
 /// The fail-closed error for a scan producer task that died without reporting
 /// (issues #3106, #3124).
 ///
@@ -679,6 +710,128 @@ mod tests {
         assert!(
             stream.recv().await.is_none(),
             "and stays one on a later poll"
+        );
+    }
+}
+
+/// Read-metric accounting at this boundary (issue #1701, roborev F2).
+///
+/// Gated on `observability-testing` because the assertions read back the emitted
+/// series through the in-memory capture harness. Deterministic and hermetic: the
+/// channel is hand-built, so "the producer already enqueued N rows the consumer
+/// never polled" is a fact of the fixture rather than a timing outcome — the shape a
+/// real `LIMIT` consumer produces, without the race an integration test would need.
+#[cfg(all(test, feature = "observability-testing"))]
+mod read_metric_tests {
+    use crate::observability::testing;
+    use crate::observability::{catalog, testing::CapturedMetrics};
+    use tokio::sync::mpsc;
+
+    use super::*;
+
+    fn row(byte: u8) -> (RowKey, ScanRow) {
+        (RowKey::new(vec![byte]), ScanRow::Row(Vec::new()))
+    }
+
+    fn duration_recordings(metrics: &CapturedMetrics, name: &str) -> u64 {
+        metrics
+            .find(name)
+            .map(|m| m.points.iter().filter_map(|p| p.count).sum())
+            .unwrap_or(0)
+    }
+
+    /// A consumer that stops polling early (the `LIMIT` shape) and drops the stream
+    /// must still report the rows the producer had ALREADY materialised and enqueued.
+    ///
+    /// Before the drain in [`JoinedStream::drop`], this reported ONE row of the five
+    /// the producer sent, while `cqlite.read.bytes` still counted the chunks all five
+    /// were decoded from — so a read-amplification ratio computed from the pair was
+    /// wrong in exactly the case that matters.
+    #[tokio::test(flavor = "multi_thread")]
+    #[serial_test::serial(read_metrics)]
+    async fn dropping_a_buffered_stream_reports_the_rows_the_producer_materialised() {
+        let mc = testing::metrics_capture();
+        mc.reset();
+
+        const SENT: usize = 5;
+        let (tx, rx) = mpsc::channel(SENT + 1);
+        for i in 0..SENT {
+            // Two DISTINCT partitions (keys 0,0,0 then 1,1) so the partition counter
+            // is not trivially equal to the row counter.
+            tx.send(Ok(row(if i < 3 { 0 } else { 1 })))
+                .await
+                .expect("send");
+        }
+        drop(tx); // the producer finished: every row is enqueued, none is lost
+        let task = tokio::spawn(async {});
+
+        {
+            let mut stream = RowScanStream::new_measured(rx, task, None);
+            // Poll exactly ONE row, then abandon the stream with four rows buffered.
+            let first = stream.recv().await.expect("one item").expect("ok item");
+            assert_eq!(first.0.as_bytes(), &[0u8]);
+        }
+
+        let metrics = mc.flush_and_collect();
+        assert_eq!(
+            metrics.counter_sum(catalog::READ_ROWS),
+            SENT as f64,
+            "an abandoned stream must report all {SENT} rows the producer enqueued, \
+             not just the one that was polled; points: {:?}",
+            metrics.find(catalog::READ_ROWS).map(|m| &m.points)
+        );
+        assert_eq!(
+            metrics.counter_sum(catalog::READ_PARTITIONS),
+            2.0,
+            "both distinct partitions the producer emitted; points: {:?}",
+            metrics.find(catalog::READ_PARTITIONS).map(|m| &m.points)
+        );
+        assert_eq!(
+            duration_recordings(&metrics, catalog::READ_DURATION),
+            1,
+            "the abandoned scan is still ONE read operation"
+        );
+    }
+
+    /// The other half of the same property: a stream drained to its end of stream
+    /// reports each row EXACTLY once — the drain-on-drop must not re-count rows the
+    /// consumer already polled.
+    #[tokio::test(flavor = "multi_thread")]
+    #[serial_test::serial(read_metrics)]
+    async fn a_fully_consumed_stream_counts_each_row_exactly_once() {
+        let mc = testing::metrics_capture();
+        mc.reset();
+
+        const SENT: usize = 4;
+        let (tx, rx) = mpsc::channel(SENT + 1);
+        for i in 0..SENT {
+            tx.send(Ok(row(i as u8))).await.expect("send");
+        }
+        drop(tx);
+        let task = tokio::spawn(async {});
+
+        {
+            let mut stream = RowScanStream::new_measured(rx, task, None);
+            let mut seen = 0usize;
+            while let Some(item) = stream.recv().await {
+                item.expect("ok item");
+                seen += 1;
+            }
+            assert_eq!(seen, SENT);
+        }
+
+        let metrics = mc.flush_and_collect();
+        assert_eq!(
+            metrics.counter_sum(catalog::READ_ROWS),
+            SENT as f64,
+            "each polled row counts ONCE — the drop-drain must not double count; \
+             points: {:?}",
+            metrics.find(catalog::READ_ROWS).map(|m| &m.points)
+        );
+        assert_eq!(
+            duration_recordings(&metrics, catalog::READ_DURATION),
+            1,
+            "one operation, one duration sample (recv end-of-stream then Drop)"
         );
     }
 }
