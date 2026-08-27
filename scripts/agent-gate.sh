@@ -4901,7 +4901,70 @@ for p in d["packages"]:
   printf '%s\n' "$out"
 }
 
-# check_declared_test_targets_observed <label> <logfile> <enabled-set> <target-metadata>
+# FLIGHT_FLAKE_SKIPS — the flight-tests lane's flake-exclusion list (issue #3383).
+#
+# CURATED, not derived — and that distinction is deliberate, so it is stated here
+# rather than left to be inferred. Every OTHER excusal set in this lane is DERIVED
+# from committed source (allowed-zero from each test file's own module-level
+# `#![cfg]`; required-features from cargo metadata) because the property is
+# MECHANICALLY DECIDABLE. Flakiness is not: nothing in the source says "this
+# assertion races". So this list is hand-maintained, and admitting that in code is
+# better than a derivation that pretends to measure something it cannot.
+#
+# Format: space-separated `<target>:<issue-number>`. BOTH halves of every entry are
+# enforced by _validate_flight_flake_skips, because a curated list is exactly the
+# thing that grows silently:
+#   * an entry with no NUMERIC issue number FAILs, so a skip can never be added
+#     without a filed issue that obliges someone to remove it; and
+#   * an entry naming a target this package does not declare FAILs, so a rename or a
+#     deletion surfaces as a red rather than as a line that quietly excuses nothing
+#     while looking like it excuses something.
+# Every skip is echoed on every run, so the component log always NAMES what this lane
+# chose not to execute.
+#
+# The current entry. `issue_3058_bypass_path_taken` carries
+# `fast_arm_stream_stops_when_the_client_drops_it`, which asserts a RACE OUTCOME — the
+# client's drop must beat the producer. Measured (issue #3383): 3/3 PASS standalone at
+# load 74, but 2 of 3 whole-lane runs FAILED under intra-package parallelism. A
+# merge-gate lane that reds 2-in-3 carries no information, so the target is skipped
+# HERE until #3383 makes the assertion deterministic. It is NOT deleted and NOT
+# `#[ignore]`d: it still runs anywhere else it is invoked, and the skip is target-
+# granular only because `--test` is the granularity cargo offers.
+FLIGHT_FLAKE_SKIPS="issue_3058_bypass_path_taken:3383"
+
+# _validate_flight_flake_skips <label> <target-metadata> <skips>
+#
+# FAIL CLOSED on a malformed or STALE FLIGHT_FLAKE_SKIPS entry, NAMING it. Both rules
+# exist because a curated excusal list rots in ways a derived one cannot, and it runs
+# BEFORE the cargo invocation so a bad list costs no test time.
+_validate_flight_flake_skips() {
+  local label="$1" meta="$2" skips="$3"
+  local declared entry tname tissue bad=""
+  declared=" $(printf '%s\n' "$meta" | cut -f1 | sort -u | tr '\n' ' ') "
+  for entry in $skips; do
+    tname="${entry%%:*}"
+    tissue="${entry#*:}"
+    # No `:` at all leaves tissue == entry; an empty half, or any non-digit in the
+    # issue number, is equally malformed. Checked affirmatively (the issue must BE
+    # digits) rather than by rejecting a bad shape, so an unplanned spelling FAILs.
+    if [ "$tissue" = "$entry" ] || [ -z "$tname" ] || [ -z "$tissue" ] \
+        || [ -n "${tissue//[0-9]/}" ]; then
+      bad="$bad '$entry'(MALFORMED: expected <target>:<issue-number> with a NUMERIC issue)"
+      continue
+    fi
+    case "$declared" in
+      *" $tname "*) ;;
+      *) bad="$bad '$entry'(STALE: '$tname' is not a declared test target of cqlite-flight)" ;;
+    esac
+  done
+  if [ -n "$bad" ]; then
+    echo "$label: FAIL-CLOSED — FLIGHT_FLAKE_SKIPS entry:$bad (issue #3383: this list is CURATED, so both halves of every entry are enforced — a skip with no filed issue obliging its removal, and a skip naming a target that no longer exists, are the two ways a curated list rots silently)" >&2
+    return 1
+  fi
+  return 0
+}
+
+# check_declared_test_targets_observed <label> <logfile> <enabled-set> <target-metadata> <flake-skips>
 #
 # Reconcile the DERIVED set of declared integration targets (see
 # _package_test_targets) against the targets actually OBSERVED emitting
@@ -4911,7 +4974,20 @@ for p in d["packages"]:
 # guard catches a target that RAN and executed nothing; this one catches a target that
 # was never even BUILT, which prints nothing and is therefore invisible to it.
 #
-# An unobserved target is excused IFF BOTH hold, and the reason is printed either way:
+# An unobserved target has exactly THREE possible explanations, each named
+# EXPLICITLY in the diagnostic and never folded into another, because they are
+# different facts about different actors:
+#
+#   1. FLAKE-SKIPPED — the target is on FLIGHT_FLAKE_SKIPS, i.e. THIS LANE CHOSE not to
+#      execute it, and the entry names the issue that obliges its return. Distinct from
+#      category 2/3 below on purpose: "cargo cannot run it here" and "we decided not to
+#      run it" are not the same claim, and collapsing them would hide a deliberate
+#      coverage decision behind a mechanical one. The list itself is validated
+#      separately (_validate_flight_flake_skips), so a stale or issue-less entry FAILs
+#      before this guard is even reached.
+#
+#   Otherwise the target must satisfy BOTH remaining halves, and the reason is printed
+#   either way:
 #   (a) EXPLAINED — its `required-features` are non-empty AND at least one of them is
 #       not in this lane's enabled set, so cargo's silent skip is accounted for by
 #       cargo's own rules rather than by a guess; AND
@@ -4929,7 +5005,7 @@ for p in d["packages"]:
 # affirmative measurement (how many declared targets were observed), so a pasted log
 # shows the reconciliation RAN.
 check_declared_test_targets_observed() {
-  local label="$1" logfile="$2" enabled="$3" meta="$4"
+  local label="$1" logfile="$2" enabled="$3" meta="$4" skips="$5"
   if [ ! -r "$GATE_SELF" ]; then
     echo "$label: FAIL-CLOSED — cannot read $GATE_SELF, so the alternate-executor half of the declared-vs-observed reconciliation is unmeasurable (issue #1699)" >&2
     return 1
@@ -4937,13 +5013,26 @@ check_declared_test_targets_observed() {
   local observed declared=0 seen=0
   observed=" $(grep -oE 'Running tests/[^[:space:]]+\.rs' "$logfile" \
     | sed -E 's#^Running tests/(.*)\.rs$#\1#' | sort -u | tr '\n' ' ') "
-  local bad="" excused="" tname rf rfl off
+  local bad="" excused="" flaky="" tname rf rfl off sk skissue
   while IFS=$'\t' read -r tname rf; do
     [ -n "$tname" ] || continue
     declared=$((declared + 1))
     case "$observed" in
       *" $tname "*) seen=$((seen + 1)); continue ;;
     esac
+    # Category 1: this lane deliberately did not run it. Checked FIRST and reported
+    # under its own label — a flake-skipped target is unobserved with no off
+    # required-feature, so without this branch it would FAIL as
+    # `unobserved-and-UNEXPLAINED`, and folding it into the required-features excusal
+    # instead would misreport a CHOICE as a cargo limitation.
+    skissue=""
+    for sk in $skips; do
+      if [ "${sk%%:*}" = "$tname" ]; then skissue="${sk#*:}"; break; fi
+    done
+    if [ -n "$skissue" ]; then
+      flaky="$flaky $tname(flake-skipped:issue #$skissue)"
+      continue
+    fi
     off=""
     for rfl in ${rf//,/ }; do
       case "$enabled" in *" $rfl "*) ;; *) off="$rfl"; break ;; esac
@@ -4972,11 +5061,14 @@ check_declared_test_targets_observed() {
     fi
     excused="$excused $tname(required-features[$rf]:off[$off];alternate-executor-INVOKES-it:non-comment \`--test $tname\` in agent-gate.sh)"
   done <<< "$meta"
+  if [ -n "$flaky" ]; then
+    echo "$label: declared-vs-observed FLAKE-SKIPPED (this lane DELIBERATELY did not execute these — a CURATED exclusion, categorically distinct from cargo being unable to run a target; each names the issue obliging its return):$flaky" >&2
+  fi
   if [ -n "$excused" ]; then
     echo "$label: declared-vs-observed EXCUSED (cargo silently skips a required-features target it cannot enable; another gate component executes it):$excused" >&2
   fi
   if [ -n "$bad" ]; then
-    echo "$label: FAIL-CLOSED —$bad declared as an integration target but NEVER OBSERVED running, and not explained by an off required-feature WITH an alternate executor (issue #1699: cargo skips such a target silently, printing no 'Running tests/' line at all, so the #2039 zero-tests guard cannot see it)" >&2
+    echo "$label: FAIL-CLOSED —$bad declared as an integration target but NEVER OBSERVED running, and explained by NONE of the three permitted categories (flake-skipped with an issue; an off required-feature WITH an alternate executor) (issue #1699: cargo skips such a target silently, printing no 'Running tests/' line at all, so the #2039 zero-tests guard cannot see it)" >&2
     return 1
   fi
   echo "$label: declared-vs-observed OK — $seen/$declared declared integration targets observed running (cargo metadata vs 'Running tests/' lines)" >&2
