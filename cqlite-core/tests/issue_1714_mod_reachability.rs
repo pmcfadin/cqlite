@@ -433,6 +433,46 @@ fn missing_path_target_fails_closed() {
     );
 }
 
+/// A `#[path]` value is read out of the sanitizer's literal side table, so the string
+/// scanner must reproduce the value BYTE-EXACTLY. Decoding unescaped bytes one at a time
+/// (`byte as char`) turns the two UTF-8 bytes of `ó` into two Latin-1 characters, and the
+/// mojibake resolves to nothing. That fails *closed* (an unresolvable path errors), so it
+/// is a false FAIL rather than a false PASS — but CLAUDE.md records a six-defect
+/// path-normalisation family born of exactly this byte-vs-char confusion.
+#[test]
+fn non_ascii_path_attribute_values_survive_the_sanitizer() {
+    // (a) the character written literally in the source.
+    let tree = ScratchCrate::new("non-ascii-path-literal");
+    tree.write("src/lib.rs", "#[path = \"módulo_ñ.rs\"]\nmod aliased;\n");
+    tree.write("src/módulo_ñ.rs", "pub fn f() {}\n");
+    let report = tree.analyze();
+    assert!(
+        report.reachable.contains("src/módulo_ñ.rs"),
+        "a non-ASCII `#[path]` value must resolve to its file; reachable={:?}",
+        report.reachable
+    );
+    assert!(
+        report.orphans.is_empty(),
+        "no file in this tree is unreachable, yet orphans={:?}",
+        report.orphans
+    );
+
+    // (b) the same character written as a `\u{…}` escape — escape handling must keep
+    //     working alongside the raw-byte accumulation.
+    let tree = ScratchCrate::new("non-ascii-path-escape");
+    tree.write(
+        "src/lib.rs",
+        "#[path = \"m\\u{f3}dulo_\\u{f1}.rs\"]\nmod aliased;\n",
+    );
+    tree.write("src/módulo_ñ.rs", "pub fn f() {}\n");
+    let report = tree.analyze();
+    assert!(
+        report.reachable.contains("src/módulo_ñ.rs"),
+        "a `\\u{{…}}`-escaped `#[path]` value must resolve to the same file; reachable={:?}",
+        report.reachable
+    );
+}
+
 /// A symlink under `src/` is a hole in the census. `DirEntry::file_type().is_dir()` is
 /// FALSE for a symlink that points at a directory, so the whole subtree behind it would
 /// be walked past in silence and every orphan inside it would pass undetected — a silent

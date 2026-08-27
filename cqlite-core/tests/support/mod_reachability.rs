@@ -373,10 +373,16 @@ fn blank(out: &mut [u8], start: usize, end: usize) {
 }
 
 /// Scan a `"…"` literal starting at the opening quote. Returns `(end, unescaped value)`.
+///
+/// The value is accumulated as **raw bytes** and decoded as UTF-8 once at the end. The
+/// obvious `value.push(byte as char)` decodes UTF-8 one byte at a time, so the two bytes
+/// of `ó` become two Latin-1 characters and `#[path = "módulo.rs"]` resolves to mojibake
+/// that names no file — the byte-vs-char confusion behind CLAUDE.md's six-defect
+/// path-normalisation family.
 fn scan_string(b: &[u8], start: usize) -> Result<(usize, String), String> {
     let n = b.len();
     let mut j = start + 1;
-    let mut value = String::new();
+    let mut value: Vec<u8> = Vec::new();
     while j < n {
         match b[j] {
             b'\\' => {
@@ -411,7 +417,11 @@ fn scan_string(b: &[u8], start: usize) -> Result<(usize, String), String> {
                         let byte = u8::from_str_radix(text, 16).map_err(|_| {
                             format!("malformed `\\x{text}` escape in string literal (FAIL-CLOSED)")
                         })?;
-                        value.push(byte as char);
+                        // `\xNN` names a CODE POINT here, not a raw byte: Rust rejects
+                        // `\x80`+ in a string literal, and this scanner is shared with
+                        // byte strings (`b"\xff"`), where accumulating the raw byte would
+                        // make a legitimate literal invalid UTF-8 and fail the walk closed.
+                        push_char(&mut value, byte as char);
                         j += 4;
                         continue;
                     }
@@ -442,7 +452,7 @@ fn scan_string(b: &[u8], start: usize) -> Result<(usize, String), String> {
                         let ch = char::from_u32(code).ok_or_else(|| {
                             format!("`\\u{{{digits}}}` is not a Unicode scalar (FAIL-CLOSED)")
                         })?;
-                        value.push(ch);
+                        push_char(&mut value, ch);
                         j = k + 1;
                         continue;
                     }
@@ -454,17 +464,33 @@ fn scan_string(b: &[u8], start: usize) -> Result<(usize, String), String> {
                         ))
                     }
                 };
-                value.push(decoded);
+                push_char(&mut value, decoded);
                 j += 2;
             }
-            b'"' => return Ok((j + 1, value)),
+            b'"' => {
+                let decoded = String::from_utf8(value).map_err(|e| {
+                    format!(
+                        "string literal is not valid UTF-8 ({e}) — refusing to guess its \
+                         value (FAIL-CLOSED)"
+                    )
+                })?;
+                return Ok((j + 1, decoded));
+            }
             other => {
-                value.push(other as char);
+                // Raw byte: a multi-byte character arrives here one byte per iteration and
+                // must be reassembled, not transcoded per byte.
+                value.push(other);
                 j += 1;
             }
         }
     }
     Err("unterminated string literal (FAIL-CLOSED)".to_string())
+}
+
+/// Append `ch`'s UTF-8 encoding to a raw-byte literal accumulator.
+fn push_char(out: &mut Vec<u8>, ch: char) {
+    let mut buf = [0u8; 4];
+    out.extend_from_slice(ch.encode_utf8(&mut buf).as_bytes());
 }
 
 /// Scan `r#"…"#` (any hash count). `prefix_end` is the byte after the `r`/`br` ident.
