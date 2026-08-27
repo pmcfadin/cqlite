@@ -48,11 +48,12 @@ mod datasets_root;
 
 use std::time::Duration;
 
-use cqlite_cli::commands::collect_query_result;
+use cqlite_cli::commands::{collect_query_result, collect_rows_until};
 use cqlite_cli::config::Config as CliConfig;
 use cqlite_cli::core_config::to_core_config;
 use cqlite_cli::error::{classify_error, CliExitCode};
 use cqlite_core::ingestion::{ingest, IngestionConfig};
+use cqlite_core::query::result::StreamingConfig;
 use cqlite_core::{Database, Error};
 
 use datasets_root::{describe_search, schema_path, sstables_root_for_table};
@@ -229,6 +230,84 @@ async fn zero_query_timeout_ms_leaves_the_cli_collection_path_unbounded() {
     assert!(
         !result.rows.is_empty(),
         "0-rows-when-the-fixture-is-present is a failure, not a pass (#3220)"
+    );
+}
+
+/// The DETERMINISTIC, ALWAYS-RUNNING proof that the CLI's COLLECTION LOOP — not
+/// merely stream setup — is the thing under a deadline (roborev round 6).
+///
+/// The two tests above cannot establish this on their own: the 1ms one lets either
+/// the engine's setup bound or the CLI's collection bound fire, so deleting the
+/// collection bound could still pass it, and it skips when the fetched fixture is
+/// absent. This one removes both weaknesses:
+///
+/// * **Deterministic** — `collect_rows_until` takes an ABSOLUTE deadline, so a
+///   deadline in the PAST makes `timeout_at` report `Elapsed` on its first poll. No
+///   clock has to advance, no scan has to be slow, and no row is ever pulled.
+/// * **Always runs** — a COMMITTED fixture, so there is no skip path.
+/// * **Discriminating** — asserts the `cli.query.collect` operation, which only the
+///   CLI-layer bound produces. An engine setup elapse would name a `query.*`
+///   operation and fail this assertion, so the test cannot be satisfied by the
+///   wrong layer.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_expired_deadline_abandons_the_cli_collection_loop_without_pulling_rows() {
+    // `query_timeout_ms = 0` so SETUP is unbounded and cannot be what fails; the
+    // deadline under test is supplied directly below.
+    let db = open_via_cli_config(
+        "test_comp",
+        "incompressible_uncompressed_chunk",
+        "compression-parity.cql",
+        true,
+        0,
+    )
+    .await
+    .expect("the COMMITTED fixture can never skip");
+
+    let iter = db
+        .execute_streaming(
+            "SELECT * FROM test_comp.incompressible_uncompressed_chunk",
+            StreamingConfig::default(),
+        )
+        .await
+        .expect("stream setup is unbounded here, so it must succeed");
+
+    let budget = Duration::from_secs(30);
+    let err = collect_rows_until(
+        iter,
+        None,
+        // ONE SECOND IN THE PAST: expiry holds by construction.
+        Some(tokio::time::Instant::now() - Duration::from_secs(1)),
+        std::time::Instant::now(),
+        budget,
+    )
+    .await
+    .expect_err(
+        "REGRESSION (issue #1695): an already-expired deadline must abandon the CLI          collection loop. If this returns rows, the consumption bound is gone and the          operator's knob is a placebo on the streaming path the CLI actually uses.",
+    );
+
+    let core = err
+        .downcast_ref::<Error>()
+        .expect("the CLI-layer elapse must carry a cqlite_core::Error");
+    match core {
+        Error::QueryTimeout {
+            operation, limit, ..
+        } => {
+            assert_eq!(
+                operation, "cli.query.collect",
+                "must be the CLI COLLECTION bound, not the engine's setup bound —                  otherwise this test would pass with the collection bound deleted"
+            );
+            assert_eq!(
+                limit, &budget,
+                "the reported limit must be the budget given"
+            );
+        }
+        other => panic!("expected QueryTimeout, got {other}"),
+    }
+
+    assert_eq!(
+        classify_error(&err),
+        CliExitCode::QueryExecutionError,
+        "a CLI collection-budget elapse must still map to exit code 5"
     );
 }
 
