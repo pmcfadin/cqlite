@@ -63,27 +63,107 @@ fn backticked(s: &str) -> Vec<&str> {
     out
 }
 
-/// The `Error` variants a `Maps from` cell documents.
+/// Split a `Maps from` cell into its NON-parenthetical text and its parenthetical
+/// commentary, or `Err` on an unbalanced parenthesis.
 ///
-/// The cell is a comma-separated list; an item DOCUMENTS a variant only when the
-/// item OPENS with a backticked identifier, and any prose after it inside the same
-/// item is commentary. That rule (rather than "every backticked token in the cell")
-/// is what keeps the `Cancelled` row's contrast mention — ``never `Io``` — from
-/// being read as a second `Io` mapping, which would make the doc side of the
-/// comparison self-contradictory. It also drops the `Other` row's trailing
-/// "and any future variant (catch-all)" prose, which names no variant.
-fn documented_variants(cell: &str) -> Vec<String> {
-    let mut out = Vec::new();
-    for item in cell.split(',') {
-        let item = item.trim();
-        if !item.starts_with('`') {
-            continue;
-        }
-        if let Some(first) = backticked(item).first() {
-            out.push((*first).to_string());
+/// Parentheses are the table's one sanctioned place for commentary (`Cancelled`
+/// uses it), and a comma inside one — "…a cooperative abort, never `Io`" — must not
+/// be read as an item separator. Splitting first is therefore what lets the item
+/// rule below be strict.
+fn split_commentary(cell: &str) -> Result<(String, String), String> {
+    let mut body = String::new();
+    let mut commentary = String::new();
+    let mut depth = 0usize;
+    for c in cell.chars() {
+        match c {
+            '(' => {
+                depth += 1;
+                commentary.push(c);
+            }
+            ')' => {
+                depth = depth
+                    .checked_sub(1)
+                    .ok_or_else(|| format!("unbalanced `)` in `Maps from` cell: {cell}"))?;
+                commentary.push(c);
+            }
+            _ if depth > 0 => commentary.push(c),
+            _ => body.push(c),
         }
     }
-    out
+    if depth != 0 {
+        return Err(format!("unclosed `(` in `Maps from` cell: {cell}"));
+    }
+    Ok((body, commentary))
+}
+
+/// Behavioural claims the table may NOT make, in prose or in a parenthetical.
+///
+/// `classify()` has no catch-all arm (`classify_has_no_catch_all_arm`), so every
+/// one of these is FALSE by construction: a new `Error` variant does not land in
+/// `Other`, it fails to compile until categorised. The `Other` row carried
+/// "and any future variant (catch-all)" for exactly as long as nothing checked
+/// (issue #1705, F5) — the completeness comparison could not see it because the
+/// phrase names no backticked variant and was silently discarded as prose.
+const FORBIDDEN_TABLE_CLAIMS: [&str; 5] = [
+    "catch-all",
+    "catchall",
+    "future variant",
+    "other variant",
+    "all remaining",
+];
+
+/// The `Error` variants a `Maps from` cell documents — parsed FAIL-CLOSED.
+///
+/// Rules, in order:
+///
+/// 1. Parenthetical commentary is separated out ([`split_commentary`]).
+/// 2. Every remaining comma-separated item must be EXACTLY one backticked
+///    identifier. Unbacketed prose is an ERROR, not something to skip: skipping is
+///    what let the `Other` row promise a catch-all that does not exist.
+/// 3. Neither the items nor the commentary may assert one of the
+///    [`FORBIDDEN_TABLE_CLAIMS`].
+///
+/// Returns `Err` (rather than panicking) so
+/// [`the_maps_from_parser_rejects_prose_that_smuggles_a_behavioural_claim`] can
+/// exercise THIS parser — the one the table guard calls — on synthetic cells.
+fn parse_maps_from(cell: &str) -> Result<Vec<String>, String> {
+    let (body, commentary) = split_commentary(cell)?;
+    let lowered = format!("{body} {commentary}").to_ascii_lowercase();
+    for claim in FORBIDDEN_TABLE_CLAIMS {
+        if lowered.contains(claim) {
+            return Err(format!(
+                "`Maps from` cell claims {claim:?}, which classify() does not do — it \
+                 has no catch-all arm, so an uncategorised variant is a compile error, \
+                 not an `Other`: {cell}"
+            ));
+        }
+    }
+    let mut out = Vec::new();
+    for item in body.split(',') {
+        let item = item.trim();
+        if item.is_empty() {
+            continue; // a wrapped row's trailing comma
+        }
+        let tokens = backticked(item);
+        let ident = match tokens.first() {
+            Some(first) if tokens.len() == 1 && item == format!("`{first}`") => *first,
+            _ => {
+                return Err(format!(
+                    "`Maps from` item {item:?} is not a backticked `Error` variant name \
+                     (put commentary in parentheses or in the prose below the table): {cell}"
+                ))
+            }
+        };
+        if !ident.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+            || !ident.starts_with(|c: char| c.is_ascii_uppercase())
+        {
+            return Err(format!(
+                "`Maps from` item {ident:?} is not an `Error` variant identifier: {cell}"
+            ));
+        }
+        out.push(ident.to_string());
+    }
+    Ok(out)
 }
 
 /// Parse the `# Taxonomy` markdown table out of `error_schema.rs`'s module doc.
@@ -124,7 +204,8 @@ fn documented_taxonomy() -> Vec<(String, String, Vec<String>)> {
         );
         let variant = backticked(cells[0]);
         let label = backticked(cells[1]);
-        let mapped: Vec<String> = documented_variants(cells[2]);
+        let mapped: Vec<String> = parse_maps_from(cells[2])
+            .unwrap_or_else(|why| panic!("taxonomy table row is not parseable: {why}"));
         if variant.is_empty() {
             // Continuation of the previous row.
             let last = rows
@@ -577,6 +658,64 @@ fn every_compiled_error_variant_has_a_constructed_sample() {
         sampled, expected,
         "error_samples() must hold exactly one constructed value per Error variant \
          this target compiles (names are read back from each value's Debug output)"
+    );
+}
+
+#[test]
+fn the_maps_from_parser_rejects_prose_that_smuggles_a_behavioural_claim() {
+    // Issue #1705 (F5) — the RED test for this file's OWN bug class. The `Other`
+    // row read "`Internal`, `Wasm`, and any future variant (catch-all)" while the
+    // prose beneath it asserted the table was EXACT and `classify()` had no
+    // catch-all arm. All three could not be true, and the completeness guard was
+    // blind to it: the phrase names no backticked variant, so the old extractor
+    // discarded it as commentary. A guard that cannot see this defect will not see
+    // the next one, so unbacketed items and catch-all claims are now errors.
+    let stale = "`Internal`, `Wasm`, and any future variant (catch-all)";
+    let why = parse_maps_from(stale).expect_err("the stale `Other` cell must be rejected");
+    assert!(
+        why.contains("catch-all"),
+        "the rejection must name the false claim: {why}"
+    );
+
+    // Prose with no claim vocabulary is still rejected: an item that is not a
+    // backticked variant name cannot be compared against classify() at all.
+    let prose = parse_maps_from("`Internal`, plus whatever else turns up")
+        .expect_err("an unbacketed item must be rejected");
+    assert!(
+        prose.contains("is not a backticked `Error` variant name"),
+        "unexpected rejection reason: {prose}"
+    );
+    // Backticked-but-not-a-variant prose (a lowercase token, or a variant with
+    // trailing commentary outside parentheses) is rejected too.
+    assert!(parse_maps_from("`Internal`, `see below`").is_err());
+    assert!(parse_maps_from("`Internal` and any others").is_err());
+
+    // What the table legitimately says still parses: parenthetical commentary,
+    // including a comma and a contrast mention inside it, and a cfg note.
+    assert_eq!(
+        parse_maps_from("`Cancelled` (issue #2264 — a cooperative abort, never `Io`)")
+            .expect("parenthetical commentary is allowed"),
+        vec!["Cancelled".to_string()],
+    );
+    assert_eq!(
+        parse_maps_from("`Internal`, `Wasm` (`wasm32` builds only)")
+            .expect("a cfg note is allowed"),
+        vec!["Internal".to_string(), "Wasm".to_string()],
+    );
+    // An unbalanced parenthesis fails closed rather than swallowing the rest.
+    assert!(parse_maps_from("`Internal` (oops").is_err());
+    assert!(parse_maps_from("`Internal`)").is_err());
+
+    // And the REAL table must be free of both defects — i.e. this parser is what
+    // the shipped module doc is held to, not just synthetic strings.
+    let rows = documented_taxonomy();
+    let other = rows
+        .iter()
+        .find(|(category, _, _)| category == "Other")
+        .expect("the taxonomy table must have an `Other` row");
+    assert!(
+        other.2.contains(&"Internal".to_string()),
+        "the `Other` row must still document its variants: {other:?}"
     );
 }
 

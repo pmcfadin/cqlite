@@ -24,14 +24,27 @@
 //! |                |                  | `ResultTooLarge`, `ForcedReadPathUnavailable`, `InvalidReadPath`  |
 //! | `Cancelled`    | `cancelled`      | `Cancelled` (issue #2264 — a cooperative abort, never `Io`)       |
 //! | `Other`        | `other`          | `Configuration`, `InvalidState`, `InvalidOperation`, `NotFound`,  |
-//! |                |                  | `Internal`, `Wasm`, and any future variant (catch-all)            |
+//! |                |                  | `Internal`, `Wasm` (`wasm32` builds only)                         |
 //!
-//! The table is EXACT, not illustrative, and
+//! The table is EXACT, not illustrative: every row's `Maps from` column lists the
+//! COMPLETE set of `Error` variants [`classify`] routes to that category, `Other`
+//! included. There is **no catch-all**. [`classify`] matches on `&Error` with every
+//! arm an explicit `Error::<Variant>` pattern (pinned by
+//! `error_schema_tests::classify_has_no_catch_all_arm`), so a newly-added `Error`
+//! variant is a COMPILE ERROR until it is categorised by hand — it is never
+//! silently absorbed into `Other`. `Wasm` is `#[cfg(target_arch = "wasm32")]`-gated
+//! and therefore exists only in `wasm32` builds; it is listed because the table
+//! describes the enum, not one target.
+//!
 //! `error_schema_tests::every_error_variant_classify_routes_is_documented_in_the_taxonomy_table`
 //! enforces variant→category set equality against [`classify`]'s match arms in
 //! both directions (issue #1705, AI5 of epic #1686): a variant routed but
 //! undocumented, a documented variant that is never routed, and a variant listed
-//! under the wrong category all fail. Cross-block rule (epic #1686 capstone §3):
+//! under the wrong category all fail. The `Maps from` column is parsed
+//! fail-closed — a non-parenthetical item that is not a backticked variant name,
+//! or a parenthetical that claims catch-all behaviour, reds the guard rather than
+//! being silently dropped as prose (which is how the stale "any future variant
+//! (catch-all)" claim survived here). Cross-block rule (epic #1686 capstone §3):
 //! [`classify`] is the authority the language bindings' error tables derive from,
 //! so this table is what those tables must mirror.
 //!
@@ -77,7 +90,10 @@ pub enum ErrorCategory {
     /// separately from genuine errors — a cancelled `do_get` is an expected
     /// outcome, not a fault.
     Cancelled,
-    /// Everything else (configuration, internal, platform, catch-all).
+    /// Everything else: configuration, invalid state/operation, not-found,
+    /// internal, platform. NOT a catch-all — [`classify`] names every `Error`
+    /// variant explicitly, so a new variant lands here only when a human puts it
+    /// here (see the module-doc taxonomy table).
     Other,
 }
 
@@ -162,12 +178,13 @@ pub(crate) fn classify(err: &Error) -> ErrorCategory {
         | Error::InvalidInput(_) => ErrorCategory::Query,
 
         // Issue #2264: a cooperative cancellation is an expected outcome, not a
-        // fault — kept out of both `Io` and the `Other` catch-all.
+        // fault — kept out of both `Io` and the generic `Other` bucket.
         Error::Cancelled => ErrorCategory::Cancelled,
 
-        // Catch-all for the remaining variants and any future additions. Listed
-        // explicitly (no wildcard arm besides wasm) so that adding a new Error
-        // variant forces a compile decision here.
+        // The remaining variants, each named EXPLICITLY. This is not a catch-all
+        // and there is no wildcard arm anywhere in this match, so a newly-added
+        // `Error` variant fails to compile until it is categorised here by hand
+        // (pinned by `error_schema_tests::classify_has_no_catch_all_arm`).
         Error::Configuration(_)
         | Error::InvalidState(_)
         | Error::InvalidOperation(_)
