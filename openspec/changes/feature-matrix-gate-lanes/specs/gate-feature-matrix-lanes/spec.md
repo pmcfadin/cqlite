@@ -207,16 +207,27 @@ The harness SHALL NOT be added to the default component set — it performs real
 full gate to re-prove a static property is disproportionate. It SHALL be runnable on demand, and the
 observation of all four lanes firing SHALL be recorded in the repository.
 
-#### Scenario: Each lane fires on its own planted break
+**ATTRIBUTION (added during implementation, and it is the sharper half of this requirement).** A non-zero
+exit SHALL NOT by itself count as an observation. A lane that broke for an unrelated reason produces an
+IDENTICAL exit code and an IDENTICAL SUMMARY line to one that detected the plant, so a bare red is not
+evidence either. Each planted run's output SHALL **name the planted symbol**, and a red that does not SHALL
+be reported as `FIRED-UNATTRIBUTED` and SHALL fail the harness. This is the same rule as "a positive verdict
+requires an affirmative measurement", applied to the harness's own verdict.
+
+#### Scenario: Each lane fires on its own planted break, and the red is attributable
 - **WHEN** the harness runs
 - **THEN** for each of `flight-tests`, `legacy-heuristics`, `feature-iso-parquet`,
-  `feature-iso-delta-scan`, the lane exits non-zero on the planted break
+  `feature-iso-delta-scan`, the lane's `--only` run exits **1** on the planted break with that component
+  recorded `FAIL`
+- **AND** that run's output NAMES the planted symbol, so the red is shown to be this plant's
 - **AND** the harness names the planted break and the lane that fired
 
 #### Scenario: The harness checks the negative direction
 - **WHEN** the harness runs each lane against the unbroken worktree copy
-- **THEN** each lane exits zero
-- **AND** a harness run in which a lane fails in BOTH directions is reported as a harness FAILURE, not as a
+- **THEN** each lane's `--only` run exits **3** (`PARTIAL` — the gate deliberately refuses to let a partial
+  run be scripted into a green claim, so zero is NOT the clean-direction exit code) with that component
+  recorded `PASS`
+- **AND** a harness run in which a lane reds in BOTH directions is reported as a harness FAILURE, not as a
   successful observation
 
 #### Scenario: The harness never mutates the live checkout
