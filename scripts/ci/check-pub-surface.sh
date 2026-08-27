@@ -1067,8 +1067,30 @@ BEGIN {
         canon = title; sub(/^[a-z]+ /, "", canon)
         page = resolve(dir, href)
         if (section == "reexports") {
-          if (match(e, /^ id="reexport\.[A-Za-z0-9_]+"/)) {
-            nm = substr(e, RSTART, RLENGTH); sub(/^ id="reexport\./, "", nm); sub(/".*$/, "", nm)
+          # NAMED vs GLOB is read STRUCTURALLY: rustdoc gives a named re-export
+          # `<dt id="reexport.NAME">` and a glob `<dt>` with NO id attribute at all
+          # (measured over this crate's 330 named re-exports and 7 globs). The NAME is
+          # then taken to its closing quote, NOT matched as `[A-Za-z0-9_]+` — Rust
+          # identifiers are Unicode, and here a name that failed to match did not
+          # merely get dropped, it fell into the GLOB branch below and made the walk
+          # enumerate a module's whole contents under a re-export path (#1712 r5 F2,
+          # same class as the associated-item anchor read).
+          if (index(e, " id=\"") == 1) {
+            nm = substr(e, 6)
+            qe = index(nm, "\"")
+            if (qe == 0) {
+              printf "ERR\tmodule %s has a re-export entry whose `id=\"` attribute has no closing quote; the re-exported name cannot be read\n", mp
+              continue
+            }
+            nm = substr(nm, 1, qe - 1)
+            if (substr(nm, 1, 9) != "reexport.") {
+              # An id on a re-export `<dt>` that is not `reexport.NAME`. Unrecognised,
+              # so REFUSE rather than fall through to the glob branch: over-firing
+              # costs one loud FAIL, under-firing silently mis-enumerates the surface.
+              printf "ERR\tmodule %s has a re-export entry with an unrecognised anchor `%s`; refusing to guess whether it is a named or a glob re-export\n", mp, nm
+              continue
+            }
+            nm = substr(nm, 10)
             printf "REEXPORT\t%s::%s\t%s\t%s\t%s\n", mp, nm, kind, canon, (kind == "mod" ? "" : page)
           } else {
             # A GLOB re-export (`pub use x::*;`). rustdoc does not expand it into the
@@ -1203,6 +1225,11 @@ BEGIN {
   # Sections whose anchors ARE this crate's declared surface.
   split("variants fields implementations required-methods provided-methods required-associated-consts provided-associated-consts required-associated-types provided-associated-types", _w, " ")
   for (_k in _w) if (_w[_k] != "") WANT[_w[_k]] = 1
+  # Anchor PREFIXES that name a declared associated item. The kind is the part of the
+  # anchor value before its first `.`; everything after it is the item's NAME and is
+  # NOT pattern-matched (see the loop below for why).
+  split("method tymethod variant structfield associatedconstant associatedtype", _a, " ")
+  for (_k in _a) if (_a[_k] != "") AKIND[_a[_k]] = 1
   prefix = docroot "/"
   # The path each page's associated items are recorded under is decided ONCE, by the
   # module-index walk (see pagemap.txt), never re-derived from the file location —
@@ -1237,15 +1264,56 @@ FNR == 1 {
     }
     if (!(section in WANT)) continue
     rest = piece
-    while (match(rest, /id="(method|tymethod|variant|structfield|associatedconstant|associatedtype)\.[A-Za-z0-9_]+(\.field\.[A-Za-z0-9_]+)?"/)) {
-      tok = substr(rest, RSTART + 4, RLENGTH - 5)
-      rest = substr(rest, RSTART + RLENGTH)
-      akind = tok
-      sub(/\..*$/, "", akind)
-      aname = substr(tok, length(akind) + 2)
-      if (index(aname, ".field.") > 0) {
+    while ((q = index(rest, "id=\"")) > 0) {
+      rest = substr(rest, q + 4)
+      qe = index(rest, "\"")
+      if (qe == 0) {
+        # An `id="` with no closing quote in this segment. The value cannot be
+        # extracted, so REFUSE — see the trade-off note below.
+        print "!UNTERMINATED\t" FILENAME "\t" section > "/dev/stderr"
+        break
+      }
+      tok = substr(rest, 1, qe - 1)
+      rest = substr(rest, qe + 1)
+      # THE ANCHOR VALUE IS TAKEN TO ITS CLOSING QUOTE, never matched as a character
+      # class over "permitted" identifier bytes. Rust identifiers are UNICODE, so a
+      # class like `[A-Za-z0-9_]+` silently DROPPED `pub fn café` — a real public-API
+      # addition that neither backstop can see, because the per-section emptiness
+      # check is satisfied by the page's ASCII siblings and `all.html` lists item
+      # PAGES only, never associated items (#1712 r5 F2).
+      #
+      # MEASURED, so nothing here decodes, re-encodes or normalises: rustdoc writes
+      # identifier bytes RAW UTF-8 into these anchors and never percent-encodes them
+      # (the `%3C`/`%3E`/`%27` spellings appear only in `impl-…` anchors, which are in
+      # excluded sections), and rustc has already normalised a non-NFC source
+      # identifier to NFC — the same NFC spelling rustdoc uses for the page filename
+      # and for its `all.html` href. One spelling, verbatim, in every consumer, so the
+      # snapshot text and the all.html cross-check cannot disagree about it.
+      d = index(tok, ".")
+      if (d == 0) continue
+      akind = substr(tok, 1, d - 1)
+      if (!(akind in AKIND)) continue
+      aname = substr(tok, d + 1)
+      if (index(aname, ".") == 0) {
+        # `kind.name` — a plain associated item.
+      } else if (index(aname, ".field.") > 0) {
+        # `variant.NAME.field.FIELD` — a struct-variant field.
         sub(/\.field\./, "::", aname)
         akind = "variantfield"
+      } else if (aname ~ /\.fields$/) {
+        # `variant.NAME.fields` — rustdoc's per-variant "Fields" SUB-HEADING (an
+        # <h4>, 73 of them in this crate), not a declared item. Skipped deliberately.
+        continue
+      } else {
+        # A wanted kind with a dot structure this scan does not recognise. THE
+        # TRADE-OFF, stated: refusing over-fires into ONE loud, actionable FAIL naming
+        # the anchor, while skipping under-fires into a SILENT false PASS in the one
+        # guard whose entire job is to notice public-API additions. So: refuse.
+        # (Measured as unreachable today — a doc-comment heading cannot masquerade as
+        # one of these anchors, because rustdoc STRIPS dots when it slugifies heading
+        # text: `## Method.foo` becomes `id="methodfoo-dotted"`, never `method.foo`.)
+        print "!SHAPE\t" FILENAME "\t" section "\t" tok > "/dev/stderr"
+        continue
       }
       print akind " " itempath "::" aname
       filled[FILENAME "\t" section] = 1
@@ -1272,7 +1340,9 @@ fi
 if [ -s "$ASSOC_ERR" ]; then
   echo "" >&2
   echo "Associated-item scan diagnostics (first 10; !NOPATH = a page with no public path," >&2
-  echo "!EMPTY = a section present but yielding no anchors):" >&2
+  echo "!EMPTY = a section present but yielding no anchors, !UNTERMINATED = an \`id=\"\`" >&2
+  echo "whose value has no closing quote, !SHAPE = an associated-item anchor whose dot" >&2
+  echo "structure this scan does not recognise):" >&2
   head -10 "$ASSOC_ERR" >&2
   fail "the associated-item scan found rustdoc sections it could not read. That is the signature of a rustdoc HTML format change, not an empty API — refusing to record a surface measured with a broken extractor."
 fi
