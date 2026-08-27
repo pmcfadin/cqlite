@@ -230,9 +230,20 @@ requires an affirmative measurement", applied to the harness's own verdict.
 - **AND** a harness run in which a lane reds in BOTH directions is reported as a harness FAILURE, not as a
   successful observation
 
-#### Scenario: The harness never mutates the live checkout
+#### Scenario: The harness never mutates the live checkout, and VERIFIES it
 - **WHEN** the harness runs from a clean worktree
 - **THEN** `git status --porcelain` in that worktree is unchanged by the run
+- **AND** the harness itself MEASURES that invariant rather than only asserting it in prose: it captures
+  the live checkout's `git status --porcelain` at start and re-compares it **before printing any verdict**
+  and again **in cleanup** (so an interrupted run is covered too), reporting any difference as a HARNESS
+  FAILURE — a successful observation accompanied by a mutated live checkout is not a success
+
+#### Scenario: The harness refuses to run from a dirty checkout
+- **WHEN** the live checkout has uncommitted changes
+- **THEN** the harness exits **2** without running any lane, because the throwaway worktree is created from
+  committed `HEAD` and uncommitted changes are therefore silently excluded from every run — a PASS would
+  describe code other than the code being reviewed
+- **AND** there is no override flag or env var: the only thing one could buy is a green about unchanged code
 
 ### Requirement: The new lanes' cost is measured, reported, and kept off the fast loop
 

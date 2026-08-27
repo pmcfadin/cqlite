@@ -33,6 +33,11 @@
 # never the live checkout. #2926 makes a mid-run tree mutation a gate FAIL, so a
 # harness that edited the tree its own gate was running in would be the very defect
 # it exists to catch. Plants are applied and reverted BETWEEN runs, never during one.
+# That isolation is VERIFIED, not asserted: the live checkout's `git status --porcelain`
+# is captured at start and re-compared before the summary and again in cleanup, and any
+# difference is a HARNESS FAILURE. It also REFUSES to run from a dirty checkout — the
+# worktree is created from committed HEAD, so uncommitted changes would be silently
+# excluded and a PASS would describe code other than the code in front of you.
 # The copy gets its own CARGO_TARGET_DIR so the clean and planted runs of a lane
 # share compilation.
 #
@@ -46,8 +51,10 @@
 #   bash scripts/tests/test_agent_gate_feature_matrix_lanes.sh <lane> ...   # subset
 #
 # Exit: 0 = every selected lane observed to fire AND to stay clean; 1 = a lane did not
-# fire, or the harness could not establish a clean baseline; 3 = a SUBSET run in which
-# everything selected fired (a partial observation, never the full AC2 evidence).
+# fire, the harness could not establish a clean baseline, or the live checkout was
+# mutated during the run; 2 = usage / precondition refusal (unknown lane, no absolute
+# CQLITE_DATASETS_ROOT, DIRTY live checkout); 3 = a SUBSET run in which everything
+# selected fired (a partial observation, never the full AC2 evidence).
 
 set -uo pipefail
 
@@ -84,6 +91,61 @@ case "$DATASETS" in
   *) echo "CQLITE_DATASETS_ROOT must be ABSOLUTE (got: $DATASETS)" >&2; exit 2 ;;
 esac
 
+# THE SUBJECT MUST BE THE CODE IN FRONT OF YOU (roborev round-2 finding 1). The
+# throwaway worktree is created from committed HEAD, so any UNCOMMITTED lane change in
+# the live checkout is silently EXCLUDED from every run — the harness would then report
+# a successful observation of code that is not the code being reviewed, which is worse
+# than no observation. Refuse rather than mislead; the remedy is a commit, not a flag.
+LIVE_STATUS_BEFORE=$(git -C "$REPO_ROOT" status --porcelain) || {
+  echo "FATAL: could not read the live checkout's git status" >&2; exit 1; }
+if [ -n "$LIVE_STATUS_BEFORE" ]; then
+  {
+    echo "REFUSING TO RUN: the live checkout is DIRTY."
+    echo
+    echo "  This harness observes the lanes against a throwaway worktree created from"
+    echo "  committed HEAD ($(git -C "$REPO_ROOT" rev-parse --short HEAD)), so uncommitted"
+    echo "  changes are NOT part of any run. A PASS here would describe HEAD, not the"
+    echo "  working tree you are looking at — an observation about the wrong code."
+    echo
+    echo "  Commit (or stash) first, then re-run. There is deliberately no override:"
+    echo "  the only thing an override could buy is a green about code nobody changed."
+    echo
+    echo "  dirty paths:"
+    printf '%s\n' "$LIVE_STATUS_BEFORE" | sed 's/^/    /'
+  } >&2
+  exit 2
+fi
+
+# assert_live_checkout_untouched <phase>: re-verify the harness's OWN stated invariant
+# — "the live checkout is never mutated" — rather than merely asserting it in prose
+# (roborev round-2 finding 1; delta spec Requirement 5). Called before reporting
+# success AND from cleanup, so a mutation is caught on every exit path. A difference is
+# a HARNESS FAILURE: every plant is supposed to land in the throwaway worktree, so a
+# changed live tree means a plant (or a gate run) escaped its isolation, and #2926
+# makes exactly that a gate FAIL for everyone else in this checkout.
+LIVE_TREE_VIOLATED=0
+assert_live_checkout_untouched() {
+  local phase="$1" now
+  now=$(git -C "$REPO_ROOT" status --porcelain 2>/dev/null) || {
+    echo "HARNESS FAILURE ($phase): could not re-read the live checkout's git status," >&2
+    echo "  so the never-mutate-the-live-checkout invariant is UNVERIFIABLE here." >&2
+    LIVE_TREE_VIOLATED=1
+    return 1
+  }
+  if [ "$now" != "$LIVE_STATUS_BEFORE" ]; then
+    {
+      echo "HARNESS FAILURE ($phase): the LIVE CHECKOUT changed during the run."
+      echo "  Every plant must land in the throwaway worktree; a mutated live tree means"
+      echo "  one escaped isolation (and #2926 makes a mid-run tree mutation a gate FAIL)."
+      echo "  live git status now:"
+      printf '%s\n' "$now" | sed 's/^/    /'
+    } >&2
+    LIVE_TREE_VIOLATED=1
+    return 1
+  fi
+  return 0
+}
+
 WORK=$(mktemp -d "${TMPDIR:-/tmp}/ah6-1699-XXXXXX") || exit 1
 TREE="$WORK/tree"
 # Stable, OUTSIDE the throwaway tree: the clean and planted runs of a lane must share
@@ -93,6 +155,10 @@ TARGET="${TMPDIR:-/tmp}/ah6-1699-target"
 
 cleanup() {
   local rc=$?
+  # Verify the invariant on EVERY exit path, including an interrupted run: a plant that
+  # escaped into the live checkout is exactly what an aborted run is most likely to
+  # leave behind, and it must never be discovered later by somebody else's gate.
+  assert_live_checkout_untouched "cleanup" || rc=1
   if [ -d "$TREE" ]; then
     git -C "$REPO_ROOT" worktree remove --force "$TREE" >/dev/null 2>&1 \
       || rm -rf "$TREE"
@@ -319,16 +385,23 @@ for lane in "${LANES[@]}"; do
   echo
 done
 
+# The harness's own invariant, MEASURED before any verdict is printed: a success that
+# was accompanied by a mutated live checkout is not a success (roborev round-2 finding
+# 1). Checked here rather than only in cleanup so the failure is attributable to the
+# run and appears above the summary.
+assert_live_checkout_untouched "pre-summary" || FAILED=1
+
 END=$(date +%s)
 echo "==== AH6 OBSERVATION SUMMARY ===="
 echo "head:     $(git rev-parse HEAD)"
+echo "live-tree: $([ "$LIVE_TREE_VIOLATED" -eq 0 ] && echo "UNCHANGED (verified: git status --porcelain identical to start)" || echo "MUTATED — HARNESS FAILURE")"
 echo "elapsed:  $((END - START))s"
 [ "$SUBSET" -eq 1 ] && echo "mode:     SUBSET (${LANES[*]}) — a partial observation, NOT the full AC2 evidence"
 for r in "${RESULTS[@]}"; do
   printf '%-24s %-16s %s\n' "${r%%|*}" "$(echo "$r" | cut -d'|' -f2)" "$(echo "$r" | cut -d'|' -f3-)"
 done
 if [ "$FAILED" -ne 0 ]; then
-  echo "RESULT: FAIL (a lane did not fire, or its clean baseline was not established)"
+  echo "RESULT: FAIL (a lane did not fire, its clean baseline was not established, or the live checkout was mutated)"
   exit 1
 fi
 if [ "$SUBSET" -eq 1 ]; then
