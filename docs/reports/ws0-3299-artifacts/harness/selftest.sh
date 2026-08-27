@@ -164,6 +164,8 @@ python3 "$FIX" window --dir "$TMP/w-nosum" --case missing-summary --workers 2
 expect_guard_fail WINDOW_WORKER_MISSING python3 "$GUARDS" window --repdir "$TMP/w-nosum"
 python3 "$FIX" window --dir "$TMP/w-one" --case one-sample --workers 2
 expect_guard_fail WINDOW_WORKER_MISSING python3 "$GUARDS" window --repdir "$TMP/w-one"
+python3 "$FIX" window --dir "$TMP/w-drift" --case window-drift --workers 2
+expect_guard_fail WINDOW_COUNTER_MISMATCH python3 "$GUARDS" window --repdir "$TMP/w-drift"
 python3 "$FIX" window --dir "$TMP/w-span" --case bad-span --workers 2
 expect_guard_fail WINDOW_SPAN          python3 "$GUARDS" window --repdir "$TMP/w-span"
 

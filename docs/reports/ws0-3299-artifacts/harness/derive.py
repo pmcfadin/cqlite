@@ -80,9 +80,15 @@ def load_rep(repdir):
         "ipc": counters["instructions"] / counters["cycles"],
         "l1d_loads_per_row": counters["L1-dcache-loads"] / rows,
         "l1d_load_misses_per_row": counters["L1-dcache-load-misses"] / rows,
-        # task-clock is ms of CPU time on the pinned CPUs; the set holds 2 logical
-        # CPUs per physical core, so full occupancy of S cores is 2*S.
-        "cpu_utilisation": (counters["task-clock"] / 1e3) / (window_s * 2 * s),
+        # NOT a utilisation figure. Under CPU-wide (`-C`) counting `task-clock`
+        # is elapsed x ncpus BY CONSTRUCTION, so a "utilisation" computed from it
+        # would read 1.000 at every S no matter what the machine did — a column
+        # that cannot vary is not a measurement. What IS real is unhalted cycles
+        # per pinned-CPU-second: at full occupancy it is the clock rate, and it
+        # falls if the cores idle OR if the clock drops. It cannot separate those
+        # two causes, and is labelled accordingly rather than called "GHz".
+        "unhalted_cycles_per_cpu_s": counters["cycles"] / (window_s * 2 * s),
+        "counter_window_drift_frac": guards.counter_window_drift(repdir, win, counters),
         "shortfall_max_frac": max(p["attribution_shortfall_frac"] for p in per),
     }
 
@@ -115,7 +121,8 @@ def emit_table(reps, min_reps):
           f"Reps per point: {sorted({s: len(v) for s, v in by_s.items()}.items())}. "
           f"Medians; spread = (max-min)/median.\n")
     print("| S | aggregate rows/s (median) | spread | per-scan p50 rows/s | "
-          "marg. eff. vs S=1 | cycles/row | instr/row | IPC | L1d miss/row | CPU util |")
+          "marg. eff. vs S=1 | cycles/row | instr/row | IPC | L1d miss/row | "
+          "unhalted Gcyc/CPU·s |")
     print("|--:|--:|--:|--:|--:|--:|--:|--:|--:|--:|")
     for s in sorted(by_s):
         v = by_s[s]
@@ -130,7 +137,7 @@ def emit_table(reps, min_reps):
             f"{median([r['instructions_per_row'] for r in v]):,.1f} | "
             f"{median([r['ipc'] for r in v]):.3f} | "
             f"{median([r['l1d_load_misses_per_row'] for r in v]):,.2f} | "
-            f"{median([r['cpu_utilisation'] for r in v]):.3f} |"
+            f"{median([r['unhalted_cycles_per_cpu_s'] for r in v]) / 1e9:.3f} |"
         )
     print()
     print("`marg. eff. vs S=1` = (aggregate rows/s at S ÷ S) ÷ (aggregate rows/s at S=1). "
@@ -138,6 +145,13 @@ def emit_table(reps, min_reps):
     print("**No LLC column exists.** Every LLC instrument on this host is unavailable "
           "(`../host/README.md`), so AC3 is DEFERRED, not approximated: a hard 0 from a "
           "dead counter would read as 'no misses'.\n")
+    print("`unhalted Gcyc/CPU·s` is unhalted cycles per pinned logical-CPU-second. It is "
+          "NOT a utilisation percentage and NOT a reported clock: it conflates occupancy "
+          "with frequency, and is shown so a collapse in either is visible.\n")
+    print(f"Counter-window agreement (max over reps): "
+          f"{max(r['counter_window_drift_frac'] for r in reps):.2e} — perf's enabled "
+          f"interval versus the driver's [T0, T1]. This is the measured proof that the "
+          f"counters and the rows were taken over the SAME interval.\n")
     print(f"Max attribution shortfall over all reps: "
           f"{max(r['shortfall_max_frac'] for r in reps):.4%} of the window "
           f"(bound {guards.DEFAULT_SHORTFALL_BOUND:.2%}). Rows are only counted between "

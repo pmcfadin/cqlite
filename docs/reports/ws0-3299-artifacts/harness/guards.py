@@ -29,8 +29,11 @@ import sys
 #
 # Exactly the events the #3299 protocol measures, all four of which the Step 1
 # census on THIS box proved REAL at 100.00% enabled (see ../host/README.md).
-# `task-clock` is a software event (it consumes no PMC) and is the utilisation
-# denominator.
+# `task-clock` is a software event (it consumes no PMC). It is NOT a utilisation
+# measure here: under CPU-wide (`-C`) counting it is elapsed-time x ncpus BY
+# CONSTRUCTION, so any "utilisation" derived from it reads 1.0 whatever the
+# machine is doing. It is carried for the one thing it CAN prove — see
+# `WINDOW_COUNTER_MISMATCH`.
 REQUIRED_EVENTS = (
     "instructions",
     "cycles",
@@ -67,6 +70,11 @@ CENSUS_UNAVAILABLE_EVENTS = frozenset(
 # The window may lose at most this fraction of its span to sample-boundary
 # attribution at the two ends (see README, "the aligned window").
 DEFAULT_SHORTFALL_BOUND = 0.005
+
+# perf's enabled interval may differ from the driver's [T0, T1] by at most this
+# fraction (see `WINDOW_COUNTER_MISMATCH`). The observed disagreement on this box
+# is ~1e-5; the tolerance covers the ACK round trip, not a real drift.
+DEFAULT_COUNTER_WINDOW_TOLERANCE = 0.01
 
 
 def fail(code, msg):
@@ -329,6 +337,13 @@ def attribute_window(repdir, t0, t1, s, shortfall_bound):
     return per
 
 
+def counter_window_drift(repdir, win, counters):
+    """|task-clock - window x ncpus| / (window x ncpus). See WINDOW_COUNTER_MISMATCH."""
+    ncpus = len([c for c in win["perf_cpus"].split(",") if c != ""])
+    expected = float(int(win["t1_ns"]) - int(win["t0_ns"])) * ncpus
+    return abs(counters["task-clock"] - expected) / expected
+
+
 def guard_window(args):
     win = os.path.join(args.repdir, "window.json")
     if not os.path.exists(win):
@@ -352,6 +367,39 @@ def guard_window(args):
                     f"worker {i} ran on CPUs {got} but was pinned to {want}. The kernel, not "
                     f"the taskset argument, is the authority on where it ran.",
                 )
+    # THE COUNTER WINDOW AND THE ROW WINDOW MUST BE THE SAME INTERVAL.
+    #
+    # That identity is the central claim of this harness, and until now it rested
+    # on the control-FIFO handshake being correct. It is now MEASURED. Under
+    # CPU-wide counting `task-clock` accumulates elapsed time on every pinned CPU
+    # whether or not anything runs, so over a window of W ns on N CPUs it must
+    # read W*N. If perf's enabled interval had drifted from the driver's
+    # [T0, T1] — a missed ACK, a late enable, a disable that did not take — this
+    # is where it shows up, and the rep is refused.
+    csv_name = w.get("perf_csv")
+    if csv_name:
+        csv_path = os.path.join(args.repdir, csv_name)
+        ncpus = len([c for c in w["perf_cpus"].split(",") if c != ""])
+        counters = parse_perf_csv(csv_path)
+        if "task-clock" in counters:
+            val, _pct = counters["task-clock"]
+            try:
+                task_clock_ns = float(val)
+            except ValueError:
+                fail("PERF_EVENT_UNPARSEABLE", f"task-clock value {val!r} is not a number")
+            expected = float(t1 - t0) * ncpus
+            drift = abs(task_clock_ns - expected) / expected
+            if drift > args.counter_window_tolerance:
+                fail(
+                    "WINDOW_COUNTER_MISMATCH",
+                    f"perf counted {task_clock_ns:.0f} ns of task-clock over {ncpus} CPUs, but "
+                    f"the driver's window [{t0}, {t1}] is {expected:.0f} ns x CPU — a "
+                    f"{drift:.4%} disagreement (tolerance "
+                    f"{args.counter_window_tolerance:.4%}). The counters and the rows were "
+                    f"therefore NOT taken over the same interval, which is the one property "
+                    f"the aligned window exists to guarantee.",
+                )
+
     total = sum(p["rows_in_window"] for p in per)
     print(
         json.dumps(
@@ -361,6 +409,7 @@ def guard_window(args):
                 "rows_in_window_total": total,
                 "aggregate_rows_per_s": total / ((t1 - t0) / 1e9),
                 "attribution_shortfall_max_frac": max(p["attribution_shortfall_frac"] for p in per),
+                "counter_window_drift_frac": drift if csv_name and "task-clock" in counters else None,
                 "per_worker": per,
             }
         )
@@ -387,6 +436,7 @@ def main():
     w = sub.add_parser("window", help="verify + attribute an aligned concurrency window")
     w.add_argument("--repdir", required=True)
     w.add_argument("--shortfall-bound", type=float, default=DEFAULT_SHORTFALL_BOUND)
+    w.add_argument("--counter-window-tolerance", type=float, default=DEFAULT_COUNTER_WINDOW_TOLERANCE)
     w.set_defaults(fn=guard_window)
 
     args = ap.parse_args()

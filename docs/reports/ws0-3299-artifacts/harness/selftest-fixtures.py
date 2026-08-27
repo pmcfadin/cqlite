@@ -51,6 +51,14 @@ def write_summary(path, worker_id, affinity):
 
 def build(case, d, workers):
     os.makedirs(d, exist_ok=True)
+    # A well-formed perf.csv accompanies every window fixture, so the
+    # counter-window check has something to read; `window-drift` supplies a
+    # deliberately inconsistent one.
+    perf_csv(
+        os.path.join(d, "perf.csv"),
+        "window-drift" if case == "window-drift" else "good",
+        ncpus=2 * workers,
+    )
     t0, t1 = T0, T1
     worker_cpus = [[i, i + 8] for i in range(workers)]
 
@@ -107,20 +115,25 @@ def build(case, d, workers):
                     "t1_ns": t1,
                     "worker_cpus": worker_cpus,
                     "events": "instructions,cycles,L1-dcache-loads,L1-dcache-load-misses,task-clock",
+                    "perf_cpus": ",".join(str(c) for g in worker_cpus for c in g),
                     "perf_csv": "perf.csv",
                 },
                 fh,
             )
 
 
-def perf_csv(path, case):
-    """`perf stat -x,` rows: value,unit,event,run_time_ns,pct_running."""
+def perf_csv(path, case, ncpus=2):
+    """`perf stat -x,` rows: value,unit,event,run_time_ns,pct_running.
+
+    `task-clock` is written as `window x ncpus` in ns, which is what CPU-wide
+    counting produces by construction and what `WINDOW_COUNTER_MISMATCH` checks.
+    """
     rows = [
         ("120000000000", "instructions", "100.00"),
         ("60000000000", "cycles", "100.00"),
         ("30000000000", "L1-dcache-loads", "100.00"),
         ("900000000", "L1-dcache-load-misses", "100.00"),
-        ("120000.00", "task-clock", "100.00"),
+        (str((T1 - T0) * ncpus), "task-clock", "100.00"),  # window x ncpus, in ns
     ]
     if case == "not-counted":
         rows[3] = ("<not counted>", "L1-dcache-load-misses", "100.00")
@@ -134,6 +147,10 @@ def perf_csv(path, case):
         rows[1] = ("sixty-billion", "cycles", "100.00")
     elif case == "zero":
         rows[3] = ("0", "L1-dcache-load-misses", "100.00")
+    elif case == "window-drift":
+        # task-clock reports three quarters of the driver's window: perf counted
+        # a DIFFERENT interval from the one the rows were attributed to.
+        rows[4] = (str(int((T1 - T0) * ncpus * 0.75)), "task-clock", "100.00")
     with open(path, "w") as fh:
         fh.write("# started on Thu Jan  1 00:00:00 2026\n\n")
         for val, ev, pct in rows:
