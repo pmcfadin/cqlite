@@ -393,111 +393,138 @@ Three real defects were caught by guards firing on genuine data, not fixtures:
 
 ---
 
-## 9. AC4 — DISCHARGED, both halves, all same-corpus
+## 9. AC4 — DISCHARGED, both halves, both bases, all same-corpus
 
-| half of AC4 | status |
-|---|---|
-| §6 box-level **target** number | ✅ **DISCHARGED** — §5. |
-| §0 **"remaining to target"** at box level | ✅ **DISCHARGED** — below. |
+The first same-corpus, same-host, same-session figures for both arms in this
+program. Corpus B throughout (uncompressed, 693.69 B/row); **no cross-corpus
+division appears anywhere below.**
 
-| quantity | rows/s | logical / uncompressed |
+| | S=1 (per physical core) | S=6 (box) |
 |---|--:|--:|
-| box-level **target** (bare scan S=6 ÷ 1.3) | **2,102,167** | 1,458.3 MB/s |
-| box-level **`do_get` today** (S=6, best-N=16) | **1,202,360** | 834.1 MB/s |
-| **remaining** | **+74.8%** | |
+| bare scan | 487,213 | 2,732,817 |
+| `do_get` | 243,536 | 1,198,673 |
+| **`do_get` / bare scan** | **0.500** | **0.439** |
+| **gap (bare ÷ `do_get`)** | **2.00×** | **2.28×** |
 
-**Two independent derivations, published because they cross-check:**
+| basis | target (bare ÷ 1.3) | `do_get` today | **remaining** |
+|---|--:|--:|--:|
+| **box** (S=6) | **2,102,167** | 1,198,673 | **+75.4%** |
+| **per core** (S=1) | **374,779** | 243,536 | **+53.9%** |
 
-1. **Direct**: `2,102,167 / 1,202,360 = 1.748` ⇒ **+74.8%**.
-2. **Via the ratio**: `do_get` = **0.440 ×** bare scan today (bare scan is
-   **2.27×** `do_get`). The bar is 1.3×, i.e. `do_get` ≥ bare/1.3 = **0.769** of
-   bare scan. Going 0.440 → 0.769 is **+74.8%**.
+Derivations, shown so they can be re-derived rather than trusted:
+`2,732,817 / 1.3 = 2,102,167`; `2,102,167 / 1,198,673 = 1.754` ⇒ **+75.4%**.
+`487,213 / 1.3 = 374,779`; `374,779 / 243,536 = 1.539` ⇒ **+53.9%**. The ratio
+route cross-checks the box figure: `do_get` is 0.439 of bare scan, the bar needs
+0.769, and `0.769 / 0.439 = 1.75`.
 
-**This is the same-corpus, same-host, same-session ratio R1 promised, and it is
-the first such number in the program.** No cross-corpus division appears
-anywhere in it: both arms are Corpus B (uncompressed, 693.69 B/row), measured on
-one box in one session.
+**Peaks.** `do_get` S=1 best-N=2, **bracketed** (219,401 @ N=1 < 243,536 @ N=2 >
+223,835 @ N=4). `do_get` S=6 best-N=16 (spread 1.53%); N=24's 1,197,339 is only
+**−0.11%**, inside spread, so that top is a **plateau at N=16–24** and the same
+pre-registered rule takes the **lower N**. **`do_get` S=6/N=4 is excluded from
+best-N selection**: its 24.61% spread over 5–7 of 8 requests is ramp warm-up, not
+a throughput reading — excluded for that stated reason, not dropped quietly.
 
-### 9.1 How the hole closed — the history is the evidence
+**The two bases differ for a reason, and the reason is the deliverable for
+#3288.** Per-core the gap is 2.00×; at box level it is 2.28×. **The box gap is
+worse precisely because `do_get` scales worse** (marginal efficiency 0.820 vs
+bare scan's 0.935). So the box-level bar is *harder* than the per-core bar, and
+**the difference between the two bases IS the slope component** — cleanly
+separated from the constant per-row overhead.
 
-An earlier draft of this report shipped AC4's "remaining" half as a **stated
-hole**, on this reasoning: `ws0-baseline.sh` ships a **1:4** server:client core
-ratio, a `do_get` S=6 point on 8 physical cores would run **6:2**, and if that
-were **client-bound** it would not measure `do_get` at all — with the error
-direction understating `do_get`, overstating the gap, and flattering #3288.
+## 10. THE SLOPE-GAP CORRECTION — about half of it was the CORPUS, not the arm
 
-Rather than assert that, this report proposed a falsification, and it was run.
-**Server fixed at 6 physical cores, identical ramp, only the client varied:**
+This corrects a program-level assumption, so it gets its own section rather than
+a footnote.
+
+| marginal efficiency at S=6 | value | corpus |
+|---|--:|---|
+| bare scan | **0.935** | B |
+| `do_get` (measured here) | **0.820** | **B** |
+| `do_get` (#3217) | 0.711 | A |
+
+- **Same-corpus slope gap: 11.5 pp** (0.935 → 0.820).
+- **Cross-corpus impression: 22.4 pp** (0.935 → 0.711).
+
+**Comparing bare-scan-on-B against `do_get`-on-A overstated the arm's slope
+penalty by ~1.95×. Roughly half of the apparent gap was the corpus.**
+
+**Nobody could have done better before today.** No same-corpus pair existed:
+bare scan had only ever been measured on Corpus B and `do_get` only on Corpus A.
+The cross-corpus comparison was the only one available, and it is exactly the
+error mission §0 warns about — *"earlier figures mixed corpora and could not be
+divided"* — arriving in the one place it was hardest to notice, because both
+numbers were individually sound.
+
+**What this does to #3288, stated in the direction that is least comfortable:**
+the slope headroom a footprint lever could recover at S=6 is **~11.5 pp of
+marginal efficiency, not ~22**. The lever is **real but roughly half as valuable
+as the cross-corpus reading suggested**. This issue was chartered to calibrate
+that ceiling, and "smaller than it looked" is the honest answer; reporting the
+larger figure would have overstated a lever on the strength of a comparison the
+program's own doctrine forbids.
+
+The discount remains **not intrinsic to the corpus** — `do_get` on B still scales
+worse than bare scan on B, by a measured 11.5 pp. What changes is its **size**.
+
+## 11. What still separates the two arms — two disclosures, neither papered over
+
+**(a) Machine state.** Bare-scan S=6 ran 6 cores pinned with **2 idle** and no
+client. `do_get` S=6 ran 6 serving with those 2 **busy** driving load. Not
+identical states, so the cross-arm comparison is **not a controlled A/B**. It is
+still the right comparison — the deployment bar is itself asymmetric, since real
+`do_get` has clients and bare scan does not.
+
+**(b) THE TWO ARMS ARE NOT WINDOWED IDENTICALLY**, which is the easier one to
+miss. Bare scan uses this issue's **aligned window** (control-FIFO bracketed,
+rows differenced from progress records the workers actually emitted). `do_get`
+uses **`flight-loadgen`'s own per-step accounting** — the #3100/#3217 arm-B
+convention, *not* that window. The two arms' absolute rows/s therefore come from
+different instruments and every ratio above inherits whatever systematic
+difference that carries.
+
+**The choice was fidelity to the existing arm-B convention over consistency with
+this issue's arm-A convention**, so the new `do_get` figures can be set beside
+#3100/#3217's. That is a judgement call, it is recorded rather than discovered,
+and a reader is free to disagree with it.
+
+### 11.1 How the client-bound objection was settled
+
+An earlier draft shipped AC4's "remaining" half as a **stated hole**: the rig's
+calibrated ratio is **1:4** server:client, a `do_get` S=6 point on 8 physical
+cores runs **6:2**, and a client-bound figure would not measure `do_get` at all —
+understating it, overstating the gap, and **flattering #3288**.
+
+That was posed as a test, not a conclusion, and the test refuted it. Server fixed
+at 6 physical cores, identical ramp, only the client varied:
 
 | client cores | rows/s |
 |---|--:|
 | 2 physical (`6,14,7,15`) | 1,027,268 |
 | 1 physical (`6,14`) | 1,027,467 |
 
-**Halving the client moved the aggregate by +0.02%** — far inside the points'
-own spread. **The measurement is not client-bound; the objection is REFUTED**,
-and with it this report's own recommendation to skip S=6. The recommendation was
-wrong and the measurement said so, which is why the objection was posed as a test
-instead of a conclusion.
+**+0.02%** — far inside spread. **Not client-bound; the objection is refuted**,
+along with this report's own recommendation to skip S=6. The "needs ≈30+ physical
+cores" follow-up is retired. What survives is disclosure (a) above.
 
-**What survives**: the machine-state asymmetry (§9.3). What is retired: the
-"needs a host with ≈30+ physical cores" follow-up — not needed.
+### 11.2 Positive control, and operational facts a re-runner needs
 
-### 9.2 `do_get` on Corpus B, S=6
+**The servability smoke returned exactly 4,000,000 rows** — the corpus row count.
+That is both proof Flight serves Corpus B (uncompressed, no `CompressionInfo.db`)
+and a correctness signal: the full-shape `do_get` returned the *whole* corpus,
+not a truncated or empty one. It is what makes the rest of §9 meaningful, since a
+0-row `do_get` presents as a very fast one.
 
-| N | reps | median rows/s | spread |
-|--:|--:|--:|--:|
-| 8 | 2 | 1,027,888 | 0.56% |
-| **16** | 2 | **1,202,360** | 0.61% |
-| 24 | 2 | 1,196,955 | 0.06% |
-
-**Peak bracketed at N=16** — N=24 is below it. **N=4 is excluded from best-N
-selection**: its 24.61% spread is ramp warm-up, not a throughput reading, and it
-is nowhere near the peak. It is excluded for that stated reason rather than
-dropped silently.
-
-**Positive control — the servability smoke returned exactly 4,000,000 rows**, the
-corpus row count. That is both proof that Flight serves Corpus B (uncompressed,
-no `CompressionInfo.db`) and a correctness signal: the full-shape `do_get`
-returned the whole corpus, not a truncated or empty result. It is the check that
-makes the rest of §9 meaningful, because a 0-row `do_get` presents as a very fast
-one.
-
-### 9.3 What still separates the two arms — two disclosures, neither papered over
-
-**(a) Machine state.** Bare-scan S=6 ran 6 cores pinned with **2 idle** and no
-client. `do_get` S=6 runs 6 serving with those 2 **busy** driving load. Not
-identical states, so the cross-arm comparison is **not a controlled A/B**. It is
-still the right comparison: the deployment bar is itself asymmetric — real
-`do_get` has clients and bare scan does not.
-
-**(b) THE TWO ARMS ARE NOT WINDOWED IDENTICALLY.** This matters and is easy to
-miss. The bare-scan arm uses this issue's **aligned window** — control-FIFO
-bracketed, rows differenced from progress records the workers actually emitted.
-The `do_get` arm uses **`flight-loadgen`'s own per-step accounting**, which is
-*not* that window. So the two arms' absolute rows/s are not measured by the same
-instrument, and the ratio inherits whatever systematic difference that carries.
-
-**Why the loadgen's accounting was kept anyway**: it is the convention
-#3100/#3217 used for arm B, and matching the program's existing `do_get`
-convention is worth more than matching this issue's own arm-A convention —
-otherwise the new `do_get` figure could not be set beside the existing ones. A
-deliberate choice, recorded rather than discovered.
-
-### 9.4 Operational facts a re-runner needs
-
-- **The server takes `--listen <addr:port>`, not `--port`** — the recon's
-  `phase2-recon.md` had this wrong, corrected there.
+- **The server takes `--listen <addr:port>`, not `--port`.** The recon had this
+  wrong; corrected there, and the harness fix is queued (`SELF-REVIEW.md` Q6).
 - **`flight-loadgen --shape` defaults to `mixed`** (weighted ptr/lim/full), so a
   bare-scan comparison **must** pass `--shape full`. A default run would have
   silently measured a different workload and produced a plausible, wrong ratio.
-- **`max_concurrent_scans` is DERIVED from the visible CPUs, and silently caps
-  any `do_get` N sweep**: 32 unpinned (16 threads), **24** pinned to 6 physical
-  cores, and **4** pinned to 1 physical core. Every N ladder used here stays
-  under its ceiling, but a future reader sweeping N will hit it without an error
-  that says so.
+- **`max_concurrent_scans` is DERIVED from visible CPUs and silently caps any N
+  sweep**: 32 unpinned, **24** at 6 physical cores, **4** at 1 physical core.
+  Every ladder here stays under its ceiling; a future reader sweeping N will hit
+  it with no error that says so.
 
-## 10. Reproduction
+## 12. Reproduction
 
 ```bash
 bash docs/reports/ws0-3299-artifacts/harness/selftest.sh          # 41 guard cases, hermetic
