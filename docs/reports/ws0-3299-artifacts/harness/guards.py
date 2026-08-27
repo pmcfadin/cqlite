@@ -323,7 +323,7 @@ def attribute_window(repdir, t0, t1, n, shortfall_bound):
                 f"worker {i} leaves {shortfall:.4%} of the window unattributed (bound "
                 f"{shortfall_bound:.4%}). Rows are only counted between records the worker "
                 f"actually emitted, so an interval this coarse would understate the rate by "
-                f"more than the bound. Lower --progress-rows or lengthen the window.",
+                f"more than the bound. Lower --progress-ms or lengthen the window.",
             )
         per.append(
             {

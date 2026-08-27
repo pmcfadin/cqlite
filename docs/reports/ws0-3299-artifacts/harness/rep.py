@@ -95,7 +95,7 @@ def launch_workers(args, rundir, worker_cpus):
             "--table", args.table,
             "--worker-id", str(i),
             "--rundir", rundir,
-            "--progress-rows", str(args.progress_rows),
+            "--progress-ms", str(args.progress_ms),
             "--prewarm-passes", str(args.prewarm_passes),
             "--max-secs", str(args.max_secs),
         ]
@@ -225,7 +225,7 @@ def main():
     ap.add_argument("--perf-cpus", required=True, help="the perf -C set: the union of the S cores")
     ap.add_argument("--events", required=True)
     ap.add_argument("--duration-s", type=float, required=True)
-    ap.add_argument("--progress-rows", type=int, default=16384)
+    ap.add_argument("--progress-ms", type=int, default=25)
     ap.add_argument("--prewarm-passes", type=int, default=1)
     ap.add_argument("--max-secs", type=int, default=900)
     ap.add_argument("--ready-timeout-s", type=float, default=600.0)
@@ -284,7 +284,7 @@ def main():
         "worker_cpus": worker_cpus,
         "events": args.events,
         "perf_csv": os.path.basename(csv),
-        "progress_rows": args.progress_rows,
+        "progress_ms": args.progress_ms,
         "prewarm_passes": args.prewarm_passes,
         "steady_samples_at_go": steady,
         "clock_source_check": clock_check,

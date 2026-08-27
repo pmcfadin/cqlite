@@ -12,7 +12,7 @@
 //! same `ingest_with_selection(TableDirSelection::Exact)` setup, the rig's own
 //! `scan_scope::verify_exact_scope`, the same
 //! `Database::execute_streaming(sql, StreamingConfig::default())` loop with the
-//! same `black_box` — and adds only a progress record every `--progress-rows`
+//! same `black_box` — and adds only a progress record every `--progress-ms`
 //! rows plus a steady-state loop. The equivalence is not asserted by this comment:
 //! `sweep.sh --equivalence` measures this worker against `ws0-scan-bench` on one
 //! core in the same session and refuses a divergence beyond a stated band.
@@ -107,12 +107,30 @@ struct Cli {
     #[arg(long, required_unless_present = "print_monotonic_ns")]
     rundir: Option<PathBuf>,
 
-    /// Rows between progress records. This sets the attribution granularity of
-    /// the aligned window, so it is a MEASUREMENT parameter, not a log verbosity
-    /// knob: the driver's shortfall guard rejects a rep whose window boundaries
-    /// could not be pinned down closely enough (see README, "aligned window").
-    #[arg(long, default_value_t = 16384, value_parser = at_least_one_row)]
-    progress_rows: u64,
+    /// Milliseconds between progress records. This sets the attribution
+    /// granularity of the aligned window, so it is a MEASUREMENT parameter, not
+    /// a log verbosity knob: the driver's shortfall guard rejects a rep whose
+    /// window boundaries could not be pinned down closely enough (see README,
+    /// "aligned window").
+    ///
+    /// # Why TIME and not rows (measured, #3299 second smoke)
+    ///
+    /// A row-based interval was tried first and is WRONG for an N sweep, because
+    /// per-worker throughput falls roughly as N/S: a fixed 16,384-row interval
+    /// that samples every 45 ms at S=1/N=1 samples every ~360 ms at S=1/N=8, so
+    /// the attribution shortfall GROWS with N — exactly along the axis being
+    /// swept. The guard caught it at S=1/N=2 (0.5393% against a 0.5% bound). A
+    /// time-based interval is invariant to throughput, so every point in the
+    /// grid is attributed at the same granularity, which is also what makes the
+    /// points comparable to each other.
+    #[arg(long, default_value_t = 25, value_parser = at_least_one_ms)]
+    progress_ms: u64,
+
+    /// Rows between elapsed-time checks. The clock is read once per this many
+    /// rows rather than once per row, so the hot loop's overhead is bounded; at
+    /// the default this is a ~20 ns vDSO read against ~700 us of scan work.
+    #[arg(long, default_value_t = 256, value_parser = at_least_one_row)]
+    progress_check_rows: u64,
 
     /// Full passes to run BEFORE signalling ready. The protocol here is WARM, so
     /// this must be >= 1: the measured window must never contain first-touch page
@@ -126,15 +144,28 @@ struct Cli {
     max_secs: u64,
 }
 
-/// `--progress-rows` must be >= 1. At 0 the sample countdown would wrap on its
+/// `--progress-check-rows` must be >= 1. At 0 the countdown would wrap on its
 /// first decrement and the worker would emit no usable progress at all, so the
 /// aligned window could not be computed — refused at parse time rather than
 /// producing a rep the guards would have to reject later.
 fn at_least_one_row(s: &str) -> Result<u64, String> {
     let n: u64 = s.parse().map_err(|_| format!("`{s}` is not an integer"))?;
     if n == 0 {
-        return Err("must be >= 1: a 0-row sample interval emits no progress records, \
+        return Err("must be >= 1: a 0-row check interval emits no progress records, \
                     so no window could be attributed"
+            .to_string());
+    }
+    Ok(n)
+}
+
+/// `--progress-ms` must be >= 1. A 0 ms interval would emit a record every time
+/// the row counter reaches the check interval, turning the progress file into a
+/// hot write loop inside the measured window.
+fn at_least_one_ms(s: &str) -> Result<u64, String> {
+    let n: u64 = s.parse().map_err(|_| format!("`{s}` is not an integer"))?;
+    if n == 0 {
+        return Err("must be >= 1: a 0 ms sample interval writes a progress record on \
+                    every check, inside the measured window"
             .to_string());
     }
     Ok(n)
@@ -258,6 +289,8 @@ async fn run(cli: Cli) -> Result<ExitCode, Box<dyn std::error::Error>> {
     let mut passes: u64 = 0;
     let mut samples: u64 = 0;
     let deadline = t_start + cli.max_secs.saturating_mul(1_000_000_000);
+    let sample_ns = cli.progress_ms.saturating_mul(1_000_000);
+    let mut next_sample_ns = t_start + sample_ns;
     emit(&mut progress, t_start, 0)?;
     samples += 1;
     let mut stopping = false;
@@ -265,23 +298,26 @@ async fn run(cli: Cli) -> Result<ExitCode, Box<dyn std::error::Error>> {
         let mut it = db
             .execute_streaming(&sql, StreamingConfig::default())
             .await?;
-        let mut until_sample = cli.progress_rows;
+        let mut until_check = cli.progress_check_rows;
         while let Some(row) = it.next_async().await {
             let row = row?;
             cells += row.values.len() as u64;
             std::hint::black_box(&row);
             rows += 1;
-            until_sample -= 1;
-            if until_sample == 0 {
-                until_sample = cli.progress_rows;
+            until_check -= 1;
+            if until_check == 0 {
+                until_check = cli.progress_check_rows;
                 let now = monotonic_ns();
-                emit(&mut progress, now, rows)?;
-                samples += 1;
-                // Stop and deadline are checked on the sample boundary, so the
-                // hot loop carries no extra syscall per row.
-                if stop.exists() || now >= deadline {
-                    stopping = true;
-                    break;
+                if now >= next_sample_ns {
+                    emit(&mut progress, now, rows)?;
+                    samples += 1;
+                    next_sample_ns = now + sample_ns;
+                    // Stop and deadline are checked on the sample boundary, so
+                    // the hot loop carries no extra syscall per row.
+                    if stop.exists() || now >= deadline {
+                        stopping = true;
+                        break;
+                    }
                 }
             }
         }
@@ -317,7 +353,8 @@ async fn run(cli: Cli) -> Result<ExitCode, Box<dyn std::error::Error>> {
         "query": sql,
         "prewarm_passes": cli.prewarm_passes,
         "prewarm_rows": prewarm_rows,
-        "progress_rows": cli.progress_rows,
+        "progress_ms": cli.progress_ms,
+        "progress_check_rows": cli.progress_check_rows,
         "t_start_ns": t_start,
         "t_end_ns": t_end,
         "rows_total": rows,

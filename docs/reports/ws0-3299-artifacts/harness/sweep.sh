@@ -47,7 +47,11 @@ RESULTS=""
 GRID="1:1,2,4,8 2:1,2,4,8 3:1,4,8 4:1,4,8,16 5:1,4,8,16 6:1,2,4,8,16,24"
 REPS=3
 DURATION_S=60
-PROGRESS_ROWS=16384
+# Sample interval for the aligned-window attribution, in MILLISECONDS. Time, not
+# rows: per-worker throughput falls as N/S, so a fixed row interval would degrade
+# the attribution precisely along the axis being swept (measured — see the worker's
+# --progress-ms doc comment). At 25 ms the shortfall over a 60 s window is <0.1%.
+PROGRESS_MS=25
 PREWARM_PASSES=1
 HEADROOM_CORES=2
 MEM_CAP=24G
@@ -67,7 +71,7 @@ while [[ $# -gt 0 ]]; do
     --grid)           GRID="$2"; shift 2 ;;
     --reps)           REPS="$2"; shift 2 ;;
     --duration-s)     DURATION_S="$2"; shift 2 ;;
-    --progress-rows)  PROGRESS_ROWS="$2"; shift 2 ;;
+    --progress-ms)    PROGRESS_MS="$2"; shift 2 ;;
     --prewarm-passes) PREWARM_PASSES="$2"; shift 2 ;;
     --mem)            MEM_CAP="$2"; shift 2 ;;
     --equivalence)    EQUIVALENCE=1; shift ;;
@@ -144,7 +148,7 @@ PY
       --worker-bin "$WORKER_BIN" --corpus "$CORPUS" \
       --worker-cpus "$(cat "$RESULTS/equiv-worker-cpus.json")" --perf-cpus "$CG" \
       --events "$EVENTS" --duration-s "$DURATION_S" \
-      --progress-rows "$PROGRESS_ROWS" --prewarm-passes "$PREWARM_PASSES" \
+      --progress-ms "$PROGRESS_MS" --prewarm-passes "$PREWARM_PASSES" \
     > "$RESULTS/equiv-worker.json"
   python3 "$GUARDS" perf-csv --csv "$RESULTS/equiv-worker/perf.csv" --events "$EVENTS"
   python3 "$GUARDS" window --repdir "$RESULTS/equiv-worker" > "$RESULTS/equiv-worker-window.json"
@@ -204,7 +208,7 @@ print(json.dumps([cpus] * int(sys.argv[2])))
       python3 "$REP" --s "$S" --n "$N" --rep "$round" --round "$round" --rundir "$RD" \
         --worker-bin "$WORKER_BIN" --corpus "$CORPUS" \
         --worker-cpus "$WORKER_CPUS" --perf-cpus "$CPUS" --events "$EVENTS" \
-        --duration-s "$DURATION_S" --progress-rows "$PROGRESS_ROWS" \
+        --duration-s "$DURATION_S" --progress-ms "$PROGRESS_MS" \
         --prewarm-passes "$PREWARM_PASSES" \
       | tee -a "$RESULTS/rep-stdout.log"
 
