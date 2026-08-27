@@ -185,6 +185,93 @@ cat >"$CRATEROOT_AWK" <<'CRATEROOT_AWK_EOF'
 # Lexical scan of a crate root. NOT a Rust parser — see the guard's comment block.
 { L[NR] = $0 }
 function ltrim(x) { sub(/^[[:space:]]+/, "", x); return x }
+# --- Structural reading of a declaration's ATTRIBUTES -------------------------
+# Answers exactly one question — can this declaration be configured out, or hidden
+# from rustdoc, under some configuration? — as GATED / HIDDEN / OPEN.
+#
+# It is STRUCTURAL, over meta-items, because substring matching on attribute text
+# is the same defect class as the four parse shapes: `#[doc = "mentions
+# doc(hidden)"]` and `#[cfg_attr(docsrs, doc(alias = "cfg(foo)"))]` both contain the
+# tell-tale substrings while gating and hiding NOTHING, and under a substring test
+# either one exempts a module from the consistency assert — a false PASS. String
+# literal CONTENTS are therefore erased before anything is parsed: an attribute
+# VALUE is data, never structure.
+function strip_strings(t,   out, i, c, instr) {
+  out = ""; instr = 0
+  for (i = 1; i <= length(t); i++) {
+    c = substr(t, i, 1)
+    if (instr) {
+      if (c == "\\") { i++; continue }
+      if (c == "\"") { instr = 0; out = out "\"" }
+      continue
+    }
+    if (c == "\"") { instr = 1; out = out "\""; continue }
+    out = out c
+  }
+  return out
+}
+# Split the inside of a meta-list into its TOP-LEVEL comma-separated items.
+function split_meta(str, arr,   i, d, c, cur, k) {
+  k = 0; cur = ""; d = 0
+  for (i = 1; i <= length(str); i++) {
+    c = substr(str, i, 1)
+    if (c == "(") d++
+    else if (c == ")") d--
+    if (c == "," && d == 0) { if (ltrim(rtrim(cur)) != "") { k++; arr[k] = ltrim(rtrim(cur)) } ; cur = ""; continue }
+    cur = cur c
+  }
+  if (ltrim(rtrim(cur)) != "") { k++; arr[k] = ltrim(rtrim(cur)) }
+  return k
+}
+function meta_verdict(m,   nm, rest, args, parts, k, i, v, r) {
+  m = ltrim(rtrim(m))
+  if (!match(m, /^[A-Za-z_][A-Za-z0-9_]*/)) return "OPEN"
+  nm = substr(m, RSTART, RLENGTH)
+  rest = ltrim(substr(m, RLENGTH + 1))
+  args = ""
+  if (substr(rest, 1, 1) == "(" && substr(rest, length(rest), 1) == ")")
+    args = substr(rest, 2, length(rest) - 2)
+  if (nm == "cfg") return "GATED"
+  if (nm == "doc") {
+    if (args == "") return "OPEN"
+    k = split_meta(args, parts)
+    for (i = 1; i <= k; i++) if (parts[i] == "hidden") return "HIDDEN"
+    return "OPEN"
+  }
+  if (nm == "cfg_attr") {
+    k = split_meta(args, parts)
+    r = "OPEN"
+    # parts[1] is the PREDICATE; parts[2..] are the attributes it would apply.
+    for (i = 2; i <= k; i++) {
+      v = meta_verdict(parts[i])
+      if (v == "GATED") return "GATED"
+      if (v == "HIDDEN") r = "HIDDEN"
+    }
+    return r
+  }
+  return "OPEN"
+}
+function attrs_verdict(a,   i, j, c, d, m, v, res) {
+  a = strip_strings(a)
+  res = "OPEN"
+  i = 1
+  while (i <= length(a)) {
+    if (substr(a, i, 2) != "#[") { i++; continue }
+    d = 0; j = i + 1
+    while (j <= length(a)) {
+      c = substr(a, j, 1)
+      if (c == "[") d++
+      else if (c == "]") { d--; if (d == 0) break }
+      j++
+    }
+    if (j > length(a)) return "GATED"   # unbalanced: cannot read it, so do not exempt on OPEN
+    v = meta_verdict(substr(a, i + 2, j - i - 2))
+    if (v == "GATED") return "GATED"
+    if (v == "HIDDEN") res = "HIDDEN"
+    i = j + 1
+  }
+  return res
+}
 function rtrim(x) { sub(/[[:space:]]+$/, "", x); return x }
 function squash(x) { gsub(/[[:space:]]+/, " ", x); return ltrim(rtrim(x)) }
 
@@ -316,10 +403,16 @@ END {
     # last attribute's line — all three shapes converge here.
     while (1) {
       if (BUF == "") {
-        if (CUR >= n) break
-        if (!INCODE[CUR + 1]) break
-        if (N[CUR + 1] == "" || N[CUR + 1] ~ /^[[:space:]]/) break
-        CUR++
+        # Rust permits blank lines and comments (including `///` doc comments, which
+        # normalize to empty here) BETWEEN an attribute and the item it applies to,
+        # so those must not end the attribute run: breaking on them made a genuinely
+        # gated module read as unconditional and reported it INCONSISTENT.
+        nxt = CUR + 1
+        while (nxt <= n && INCODE[nxt] && N[nxt] == "") nxt++
+        if (nxt > n) break
+        if (!INCODE[nxt]) break
+        if (N[nxt] ~ /^[[:space:]]/) break
+        CUR = nxt
         BUF = N[CUR]
       }
       if (BUF !~ /^#!?\[/) break
@@ -335,7 +428,11 @@ END {
       nm = st2
       sub(/^pub mod[[:space:]]+/, "", nm)
       sub(/[[:space:]]*;$/, "", nm)
-      printf "M\t%d\t%s\t%s\n", CUR, nm, squash(attrs)
+      # Fields: line, name, attribute VERDICT. The rendered attribute text lives on
+      # the `D` record only — a possibly-EMPTY field must never sit before a
+      # meaningful one here, because bash `read` with IFS=<tab> collapses runs of
+      # tabs (tab is IFS whitespace), which would silently shift every later field.
+      printf "M\t%d\t%s\t%s\n", CUR, nm, attrs_verdict(attrs)
       printf "D\t%d\t%s%s\n", startline, attrs, squash(st2)
     } else if (BUF ~ /^pub use[[:space:]]/) {
       st2 = take_stmt()
@@ -762,38 +859,30 @@ LC_ALL=C sort -o "$DERIVED_ITEMS" "$DERIVED_ITEMS"
 #    crate root can see it — exactly the #1712 defect.
 # ---------------------------------------------------------------------------
 inconsistent=0
-while IFS=$'\t' read -r lineno modname attrs; do
+while IFS=$'\t' read -r lineno modname gate; do
   # Which declarations are EXEMPT from the assert, and why each one is:
   #
-  #   * `#[cfg(...)]` at the declaration site — the gate is visible to every reader
-  #     of the crate root, which is exactly what this assert wants.
-  #   * anything applying `doc(hidden)` (directly or through a `cfg_attr`) — the item
-  #     is deliberately undocumented, so rustdoc omitting it proves nothing.
-  #   * a `cfg_attr` that could itself APPLY a `cfg` — under some configuration it
-  #     becomes a declaration-site gate, so its absence from the surface may be
-  #     legitimate.
+  #   GATED  — a real `#[cfg(...)]` at the declaration site, or a `cfg_attr` that
+  #            could itself APPLY a `cfg`. The gate is visible to every reader of
+  #            the crate root, which is exactly what this assert wants; and under
+  #            some configuration the module legitimately is not in the surface.
+  #   HIDDEN — a real `doc(hidden)` meta-item, directly or as a `cfg_attr` output.
+  #            The item is deliberately undocumented, so rustdoc omitting it proves
+  #            nothing.
+  #   OPEN   — neither, so the declaration reads as an unconditional public export
+  #            and MUST be in the default surface.
   #
-  # A `cfg_attr` that can apply NEITHER is NOT exempt. Treating every `cfg_attr` as
-  # an exemption (as the first cut did) reopened the exact bypass this assert exists
-  # to close: a purely cosmetic `#[cfg_attr(docsrs, doc(alias = "…"))]` would let a
-  # module keep hiding its real gate inside its own file.
-  case "$attrs" in
-    *'#[cfg('*|*'doc(hidden)'*) continue ;;
-  esac
-  case "$attrs" in
-    *'#[cfg_attr('*)
-      # Everything from the first `cfg_attr` on — deliberately over-approximate
-      # (a later, unrelated attribute is included), because over-approximating
-      # here only ever SKIPS a check, never invents a failure.
-      cfg_attr_body="${attrs#*'#[cfg_attr('}"
-      # `doc(cfg(...))` is the docs.rs "shown as feature-gated" annotation. It
-      # contains the token `cfg(` but applies no gate at all, so it must not be
-      # mistaken for one; neutralise it before testing.
-      cfg_attr_body="${cfg_attr_body//doc(cfg(/doc(}"
-      case "$cfg_attr_body" in
-        *'cfg('*) continue ;;
-      esac
-      ;;
+  # The verdict is computed STRUCTURALLY over meta-items by `attrs_verdict` in the
+  # crate-root scan, with string-literal contents erased first (an attribute VALUE
+  # is data, never structure). A substring test here would be the same defect class
+  # as the parse shapes above: `#[doc = "mentions doc(hidden)"]` and
+  # `#[cfg_attr(docsrs, doc(alias = "cfg(foo)"))]` gate and hide NOTHING, yet each
+  # contains the tell-tale substring, and either would exempt an inner-gated module
+  # from this assert — a false PASS.
+  case "$gate" in
+    GATED|HIDDEN) continue ;;
+    OPEN) ;;
+    *) fail "the crate-root scan produced an unrecognised attribute verdict '$gate' for \`pub mod $modname\` at $LIB_RS_REL:$lineno. An unplanned verdict is not an exemption; refusing to pass." ;;
   esac
   if ! grep -qx "mod $CRATE_DOC_NAME::$modname" "$DERIVED_ITEMS"; then
     inconsistent=$((inconsistent + 1))
