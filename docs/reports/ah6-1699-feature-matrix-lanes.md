@@ -58,7 +58,44 @@ Properties that make the observation mean something:
 
 ## Observed results
 
-<!-- RESULTS -->
+Run at `94833d510` on the worker box, `CQLITE_DATASETS_ROOT=/data/datasets`.
+Harness elapsed: **581 s** (8 runs — one clean and one planted per lane). All four
+lanes fired.
+
+| lane | planted break | clean tree | planted tree | attributed to |
+|------|---------------|-----------|--------------|---------------|
+| `feature-iso-parquet` | a `#[cfg(feature = "parquet")]` fn at the root of `cqlite-core/src/lib.rs` calling a `#[cfg(feature = "delta-scan")]` fn — compiles with both features on (clippy's ~30-feature cqlite-core arm), unresolved with parquet alone. #1978's class. | **PASS** (exit 3, 112 s) | **FAIL** (exit 1, 20 s) | `ah6_planted_delta_scan_marker` |
+| `feature-iso-delta-scan` | the mirror: a `#[cfg(feature = "delta-scan")]` fn calling a `#[cfg(feature = "parquet")]` fn. | **PASS** (exit 3, 46 s) | **FAIL** (exit 1, 16 s) | `ah6_planted_parquet_marker` |
+| `legacy-heuristics` | a **new** `cqlite-core/tests/ah6_planted_legacy.rs` holding a `#[cfg(feature = "legacy-heuristics")] #[test]` with an inverted assertion. | **PASS** (exit 3, 176 s) | **FAIL** (exit 1, 5 s) | `ah6_planted_legacy_heuristics_break` |
+| `flight-tests` | a **new** `cqlite-flight/tests/ah6_planted_flight.rs` with a failing `#[test]`. | **PASS** (exit 3, 178 s) | **FAIL** (exit 1, 27 s) | `ah6_planted_flight_break` |
+
+Two of the plants do extra duty beyond "the lane can fail":
+
+- The `legacy-heuristics` plant is a **new file**, so the lane's red also proves its
+  `--test` target set is genuinely **derived** from the committed source (it picked up
+  a sixth gated file with no gate edit; a hard-coded list would have ignored it and
+  stayed green) and that the lane **executes** rather than merely compiles — a
+  compile-only lane stays green on a failing assertion, which is exactly D3's premise.
+- The `flight-tests` plant is a target the gate names **nowhere**, so its red proves
+  the lane reaches past the three cqlite-flight targets already covered
+  (`query_semantics_flight_parity`, `issue_3095_flight_static_columns`, and
+  `memory-budget`'s dhat target).
+
+**Attribution.** A bare red is not evidence: a lane that broke for an unrelated reason
+produces the same exit code and the same SUMMARY line. The harness therefore requires
+each planted run's output to **name the planted symbol** (the right-hand column above);
+a red that does not is reported as `FIRED-UNATTRIBUTED` and fails the harness.
+
+**Exit codes.** `--only` on a component that found nothing exits **3** (`PARTIAL` — the
+gate refuses to let a partial run be scripted into a green claim); with a failed
+component it exits **1**. The harness checks the exit code and the SUMMARY status line
+and requires them to agree.
+
+The durations in the table are the harness's own `--only` runs from a fresh throwaway
+worktree against a shared, partly-warm `CARGO_TARGET_DIR`. They are neither the cold
+figures nor the gate's warm figures below; they are recorded for reproducibility, not
+as the lanes' cost.
+
 
 ## Cost
 
