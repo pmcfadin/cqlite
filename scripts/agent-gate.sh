@@ -493,6 +493,33 @@
 #                      partial-extraction discard removed; guard state back under
 #                      TMPDIR with no consistency check; exact-`S` index-flag match;
 #                      failed nested scan read as clean).
+#   flight-tests       cargo test -p cqlite-flight (WHOLE package: --lib + every
+#                      integration target). Issue #1699: before this, the gate
+#                      COMPILED cqlite-flight (clippy --all-targets) and RAN only three
+#                      of its ~44 targets by name (two in
+#                      flight-query-semantics-oracle, one dhat target in
+#                      memory-budget) — so a Flight regression elsewhere was found only
+#                      after a push, on CI. Runs under the zero-tests guard; no opt-out.
+#   legacy-heuristics  BUILD cqlite-core at `default + legacy-heuristics` under
+#                      -D warnings, then EXECUTE the tests that feature turns on
+#                      (issue #1699). clippy already test-compiles those bodies inside a
+#                      ~30-feature union, so the two things only this lane does are the
+#                      MINIMAL feature set and EXECUTION: an inverted assertion in a
+#                      positively-gated test body FAILs here while clippy stays green.
+#                      The --test target set is DERIVED from the committed
+#                      cqlite-core/tests/*.rs (never hard-coded, so a sixth gated file
+#                      needs no gate edit) and the derivation is FAIL-CLOSED — zero
+#                      derived targets is a FAIL naming the derivation, never a PASS or
+#                      a SKIP. Runs under the zero-tests guard; no opt-out.
+#   feature-iso-parquet / feature-iso-delta-scan
+#                      RUSTFLAGS=-D warnings cargo check --all-targets -p cqlite-core
+#                      --no-default-features --features all-compression,<one-of>, each
+#                      WITHOUT the other feature (issue #1699). clippy enables parquet
+#                      AND delta-scan together, which is the shape that MASKS
+#                      cross-feature coupling; these two lanes are separately named so a
+#                      SUMMARY FAIL says WHICH direction of coupling broke. --all-targets
+#                      is load-bearing (#1978: a library-only check never compiles the
+#                      `#[cfg(test)]` module that incident lived in). No opt-out.
 #   minimal-build      cargo build + `cargo test --lib --no-run` (compile-only)
 #                      -p cqlite-core --no-default-features --features all-compression
 #   smoke              bash test-data/scripts/smoke-test-all-tables.sh
@@ -2163,7 +2190,7 @@ _python_build_verify_venv() {
   return 3
 }
 
-COMPONENTS=(file-size fmt clippy roborev-lints core-tests tombstones-scan scan-offload-guard work-counters-guard byte-budget-guard arrow-parity-guard memory-budget integration-tests format-compat write-tests cli-tests compaction-byte-parity bti-multiclustering query-semantics-oracle flight-query-semantics-oracle python-bindings node-bindings delivery-telemetry oom-audit parity-report operator-metrics-doc kit-dashboard-drift binding-unwind-profile tooling-tests minimal-build smoke)
+COMPONENTS=(file-size fmt clippy roborev-lints core-tests tombstones-scan scan-offload-guard work-counters-guard byte-budget-guard arrow-parity-guard memory-budget integration-tests format-compat write-tests cli-tests compaction-byte-parity bti-multiclustering query-semantics-oracle flight-query-semantics-oracle flight-tests legacy-heuristics feature-iso-parquet feature-iso-delta-scan python-bindings node-bindings delivery-telemetry oom-audit parity-report operator-metrics-doc kit-dashboard-drift binding-unwind-profile tooling-tests minimal-build smoke)
 
 # _component_lane <name> (issues #1737, #2657): SINGLE SOURCE OF TRUTH for the
 # MAIN-vs-SIDE lane split. Defined early (before the arg-parse dispatch) so the
@@ -2179,6 +2206,11 @@ _component_lane() {
   case "$1" in
     python-bindings|node-bindings) printf side ;;
     parity-report|delivery-telemetry|binding-unwind-profile|smoke|memory-budget) printf side ;;
+    # #1699 feature-matrix lanes. All four build cqlite-core at a feature set that
+    # DIVERGES from MAIN's (cqlite-flight's arrow flavour; default+legacy-heuristics;
+    # no-default-features+one-of parquet/delta-scan), which is class (a) of the SIDE
+    # rationale below: sharing MAIN's target dir would thrash it (#2657).
+    flight-tests|legacy-heuristics|feature-iso-parquet|feature-iso-delta-scan) printf side ;;
     *) printf main ;;
   esac
 }
@@ -4764,6 +4796,56 @@ run_roborev_lints_cmd() {
     bash "$REPO_ROOT/scripts/tests/test_roborev_guard_portability.sh"
 }
 
+# check_no_unexpected_zero_tests <label> <logfile> [allowed-zero-target...]
+#
+# THE zero-tests guard (originally #2039, inline in cli-tests; promoted to a single
+# top-level definition by #1699 when a second and third component needed it). Parses
+# cargo's OWN per-target "Running tests/<name>.rs" / "test result: ok. N passed"
+# output and FAILs CLOSED if any `--test` target ran 0 tests, unless that target is
+# named on the caller's explicit allowed-zero list.
+#
+# The shape it exists to catch: a test target whose body compiles out at the feature
+# set the component selected (`#[cfg(feature = ...)]` with the feature off, a
+# whole-file `#![cfg(...)]`, a required-features target landing in the wrong pass)
+# COMPILES, runs zero tests, and cargo exits 0 — so the component reads PASS while
+# its subject was never executed. That is the vacuous-green shape: a positive verdict
+# with no affirmative measurement behind it.
+#
+# Match the FULL zero-line (roborev finding, #2039): "0 passed; 0 failed" alone also
+# matches a target whose tests are ALL #[ignore]d ("0 passed; 0 failed; 3 ignored"),
+# which is a legitimate, unrelated shape this guard must never fault — only a
+# truly-empty run (0 ignored too) is the compiled-out shape.
+#
+# SCOPE, stated so a caller does not over-trust it: it keys on "Running tests/", i.e.
+# INTEGRATION `--test` targets. A `--lib` unit-test run prints "Running unittests
+# src/lib.rs", which this deliberately does not claim to cover.
+#
+# Exported (`export -f`) because the cli-tests component body runs under `bash -c`
+# and must see the SAME implementation rather than a second copy of it.
+check_no_unexpected_zero_tests() {
+  local label="$1" logfile="$2"; shift 2
+  local allowed_zero=" $* "
+  local bad="" target=""
+  while IFS= read -r line; do
+    if [[ "$line" == *"Running tests/"* ]]; then
+      target=$(printf "%s" "$line" | sed -E "s#.*Running tests/([^[:space:]]+)\.rs.*#\1#")
+    elif [[ "$line" == "test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out"* ]]; then
+      if [ -n "$target" ] && [[ "$allowed_zero" != *" $target "* ]]; then
+        bad="$bad $target"
+      fi
+      target=""
+    elif [[ "$line" == "test result:"* ]]; then
+      target=""
+    fi
+  done < "$logfile"
+  if [ -n "$bad" ]; then
+    echo "$label: FAIL-CLOSED —$bad ran 0 tests unexpectedly (issue #2039: a target whose body is #[cfg]-gated out at this component's feature set, and not on the allowed-zero list, would otherwise silently never run)" >&2
+    return 1
+  fi
+  return 0
+}
+export -f check_no_unexpected_zero_tests
+
 run_component() { # run_component <name> <cmd...>
   local name="$1"; shift
   if [ -n "$ONLY" ] && ! grep -qw "$name" <<<"${ONLY//,/ }"; then
@@ -5247,6 +5329,194 @@ run_flight_query_semantics_oracle() {
   end=$(date +%s)
   record_result "$name" "$status" "$((end - start))"
   echo ">>> [$name] $status ($((end - start))s)"
+}
+
+# flight-tests: EXECUTE the cqlite-flight test suite locally (issue #1699).
+#
+# What the gate covered before this component: clippy COMPILES the crate
+# (--all-targets), flight-query-semantics-oracle RUNS two named integration targets
+# (query_semantics_flight_parity, issue_3095_flight_static_columns) and memory-budget
+# RUNS one dhat target. Everything else in the crate — ~38 integration targets plus
+# --lib — was compiled and never run, so a Flight regression outside those three
+# targets was discovered only AFTER a push, on CI's Flight tier. A local-first gate
+# has to catch it before the push; that is the gap this closes.
+#
+# Whole package (`cargo test -p cqlite-flight`), not `--lib` plus a hand-picked
+# target list: a hand-picked list is a second registry that drifts silently (the
+# #2039 cli-tests lesson), and the whole package measured 128s on the reference box —
+# proportionate for the SIDE lane, where it overlaps MAIN rather than tailing it.
+#
+# flight-query-semantics-oracle is LEFT ALONE (design D4). Re-running its two targets
+# here costs a few seconds; re-deriving its per-lane #3095 fixture SKIP predicates
+# (which exist precisely so one lane cannot silently skip behind another lane's absent
+# fixtures) would risk a correctness regression in a working component to save them.
+# Overlap is the cheaper error.
+#
+# No opt-out env var: cqlite-flight is a committed workspace member and is never
+# legitimately absent. Fixture-dependent sub-targets may still SKIP through the
+# existing dataset machinery, which reports the skip.
+run_flight_tests() {
+  local name=flight-tests
+  if [ -n "$ONLY" ] && ! grep -qw "$name" <<<"${ONLY//,/ }"; then
+    return 0
+  fi
+  local log="$LOG_DIR/$name.log"
+  local start end status
+  start=$(date +%s)
+  echo ">>> [$name] cargo test -p cqlite-flight (whole package: --lib + every integration target, #1699)"
+  if env CQLITE_DATASETS_ROOT="$CQLITE_DATASETS_ROOT" \
+      cargo test -p cqlite-flight >"$log" 2>&1; then
+    # A green cargo exit is NOT sufficient: a target whose body is cfg-gated out
+    # compiles, runs 0 tests and exits 0. Nothing is on the allowed-zero list — every
+    # cqlite-flight integration target must execute at least one test.
+    # The guard writes its verdict to stderr only, so `2>>` lands the message in the
+    # component log (where the FAIL branch below tails it) while the `if` still tests
+    # the GUARD's exit status directly — not a pipeline's last stage.
+    if check_no_unexpected_zero_tests "$name" "$log" 2>>"$log"; then
+      status=PASS
+    else
+      status=FAIL
+    fi
+  else
+    status=FAIL
+  fi
+  if [ "$status" = FAIL ]; then
+    echo "--- [$name] FAILED; last 40 lines of $log ---"
+    tail -40 "$log"
+    echo "--- end of $name output ---"
+  fi
+  end=$(date +%s)
+  record_result "$name" "$status" "$((end - start))"
+  echo ">>> [$name] $status ($((end - start))s)"
+}
+
+# legacy-heuristics: BUILD cqlite-core at `default + legacy-heuristics` AND EXECUTE
+# the tests that feature turns on (issue #1699).
+#
+# Two properties, neither of which any other component has:
+#
+#  1. THE FEATURE SET. run_clippy's cqlite-core arm enables legacy-heuristics
+#     alongside parquet, delta-scan and ~30 more features at once, so the feature is
+#     never compiled at its OWN minimal set. A warning-class defect visible only at
+#     `default + legacy-heuristics` surfaces here and nowhere else, which is why this
+#     half runs under RUSTFLAGS=-D warnings.
+#  2. EXECUTION. That same clippy pass already test-COMPILES the gated bodies
+#     (--all-targets), so a compile-only lane would add nothing. What has never
+#     happened anywhere — no gate component, no CI job — is RUNNING the positively
+#     gated bodies. The `#[cfg(not(feature = "legacy-heuristics"))]` polarity already
+#     runs in core-tests; the `#[cfg(feature = ...)]` polarity is the subject here.
+#     The distinguishing property: an INVERTED assertion in a positively-gated test
+#     body FAILs this component while clippy still passes.
+#
+# The --test target set is DERIVED from the committed source, never hard-coded: a
+# literal list drifts the moment a sixth gated test file is added, and the drift is
+# INVISIBLE (the lane stays green while its subject shrinks). Derivation is
+# FAIL-CLOSED — zero derived targets is a FAIL naming the derivation, never a PASS and
+# never a SKIP, because a lane with no subject has no verdict to give.
+#
+# --lib is included because cqlite-core/src/** carries legacy-heuristics cfg sites
+# whose inline #[cfg(test)] bodies are gated the same way.
+#
+# No opt-out env var: the committed test files are never legitimately absent.
+run_legacy_heuristics() {
+  local name=legacy-heuristics
+  if [ -n "$ONLY" ] && ! grep -qw "$name" <<<"${ONLY//,/ }"; then
+    return 0
+  fi
+  local log="$LOG_DIR/$name.log"
+  local start end status
+  start=$(date +%s)
+
+  # Derive the target set: every committed cqlite-core/tests/*.rs that references the
+  # feature, mapped to its target name (basename without .rs). Anchored on REPO_ROOT
+  # so the derivation cannot depend on CWD.
+  local tests_dir="$REPO_ROOT/cqlite-core/tests"
+  local -a targets=()
+  local names="" f base
+  for f in "$tests_dir"/*.rs; do
+    [ -f "$f" ] || continue
+    grep -q 'legacy-heuristics' "$f" || continue
+    base=$(basename "$f" .rs)
+    targets+=(--test "$base")
+    names="$names $base"
+  done
+  if [ "${#targets[@]}" -eq 0 ]; then
+    status=FAIL
+    {
+      echo "[$name] FAIL-CLOSED: derived ZERO legacy-heuristics --test targets from"
+      echo "        $tests_dir/*.rs (grep 'legacy-heuristics')."
+      echo "        The derivation, not the feature, is what failed — an unreadable or"
+      echo "        moved tests dir, or a renamed feature. A lane with no subject has no"
+      echo "        verdict to give, so this is a FAIL, never a PASS and never a SKIP."
+    } | tee "$log"
+    end=$(date +%s)
+    record_result "$name" "$status" "$((end - start))"
+    echo ">>> [$name] $status ($((end - start))s)"
+    return 0
+  fi
+
+  echo ">>> [$name] derived${names} (${#targets[@]} target(s) from $tests_dir/*.rs)"
+  echo ">>> [$name] RUSTFLAGS=-D warnings cargo build -p cqlite-core --features legacy-heuristics, then cargo test --lib + derived targets (#1699)"
+  if RUSTFLAGS="-D warnings" cargo build --package cqlite-core --features legacy-heuristics >"$log" 2>&1 \
+      && env CQLITE_DATASETS_ROOT="$CQLITE_DATASETS_ROOT" \
+        cargo test --package cqlite-core --features legacy-heuristics --lib "${targets[@]}" >>"$log" 2>&1; then
+    # Green cargo exit is not sufficient — see the guard's own doc block.
+    # The guard writes its verdict to stderr only, so `2>>` lands the message in the
+    # component log (where the FAIL branch below tails it) while the `if` still tests
+    # the GUARD's exit status directly — not a pipeline's last stage.
+    if check_no_unexpected_zero_tests "$name" "$log" 2>>"$log"; then
+      status=PASS
+    else
+      status=FAIL
+    fi
+  else
+    status=FAIL
+  fi
+  if [ "$status" = FAIL ]; then
+    echo "--- [$name] FAILED; last 40 lines of $log ---"
+    tail -40 "$log"
+    echo "--- end of $name output ---"
+  fi
+  end=$(date +%s)
+  record_result "$name" "$status" "$((end - start))"
+  echo ">>> [$name] $status ($((end - start))s)"
+}
+
+# run_feature_iso <feature>: ONE isolation lane, parameterized by the feature under
+# test (issue #1699). Two dispatch arms consume it — feature-iso-parquet and
+# feature-iso-delta-scan — so the rationale lives once, here, and the two lanes can
+# never drift apart.
+#
+# WHY these lanes exist: run_clippy's cqlite-core arm enables legacy-heuristics,
+# parquet AND delta-scan together with ~30 more features. That combined shape is
+# exactly what MASKS cross-feature coupling — a parquet-gated item that accidentally
+# references a delta-scan-gated item compiles fine whenever both features are on, so
+# no existing component can see it. Each lane therefore enables exactly ONE of the two
+# and asserts the code still compiles without the other. Never --all-features here:
+# isolation is the entire point.
+#
+# `all-compression` stays in both lanes because it is in `default`; dropping it would
+# change what the lane measures from FEATURE ISOLATION to NO-COMPRESSION support,
+# which is a different (and already covered) question — minimal-build owns that one.
+#
+# --all-targets is LOAD-BEARING, not decoration (#1978). That incident was an ungated
+# `#[cfg(test)]` module referencing a feature-gated item, and a library-only `cargo
+# check` never compiles test targets — so the literal `cargo check` this lane could
+# have been would compile the library, go green, and miss the very incident class it
+# cites. minimal-build already carries this exact lesson.
+#
+# RUSTFLAGS=-D warnings is load-bearing for the same reason minimal-build sets it
+# (#1981): a feature-orphaned helper (a `#[cfg(test)]` helper whose only caller is
+# gated out at this feature set) surfaces as a DEAD-CODE WARNING, and a lane without
+# -D warnings demotes that to a line nobody reads.
+#
+# `cargo check` rather than a full build keeps the cost proportionate to the purpose:
+# the question is "does it still compile in isolation", not "does it link".
+#
+# No opt-out env var: a committed feature is never legitimately absent.
+run_feature_iso() { # run_feature_iso <feature>
+  RUSTFLAGS="-D warnings" cargo check --all-targets --package cqlite-core \
+    --no-default-features --features "all-compression,$1"
 }
 
 # parity-report: verify the committed derived parity report is not stale vs its
@@ -7849,6 +8119,11 @@ run_file_size
 #     report PASS. python-bindings is therefore in this set (#1175 finding 2): the
 #     preflight must FAIL loudly rather than let a skipped suite pass green — the
 #     same #646 failure mode that motivated guarding the Rust dataset suites.
+#     Added by #1699: flight-tests (the whole cqlite-flight package — its e2e
+#     do_get/parity targets read real Data.db, including the two
+#     flight-query-semantics-oracle already guards this way) and legacy-heuristics
+#     (several of its derived cqlite-core/tests targets — sstable_discovery_*,
+#     parsing_improvements_test — read real Data.db).
 #   dataset-free (deliberately NOT guarded): fmt, clippy, file-size (operate on
 #     source text),
 #     parity-report (renders the manifest + diffs the committed report; reads no
@@ -7857,13 +8132,15 @@ run_file_size
 #     CQLITE_DATASETS_ROOT in test_agent_gate_summary.sh *sets an empty* root to
 #     exercise the preflight, it consumes no real data), minimal-build (a cargo
 #     build plus a compile-only `cargo test --lib --no-run`; no tests run, no
-#     data — issue #1978), and format-compat. format-compat is excluded (#1175
+#     data — issue #1978), the two #1699 feature-isolation lanes
+#     (feature-iso-parquet / feature-iso-delta-scan: `cargo check` only — nothing
+#     executes, so no fixture can be consumed), and format-compat. format-compat is excluded (#1175
 #     finding 1): its sole target (cargo test -p format-compatibility-tests,
 #     tests/format-compatibility) is pure in-memory byte-level format-compliance
 #     assertions with hardcoded vectors — it reads no CQLITE_DATASETS_ROOT and no
 #     Data.db — so guarding it just made `--only format-compat` falsely fail the
 #     preflight when datasets are absent.
-DATASET_COMPONENTS="core-tests tombstones-scan scan-offload-guard work-counters-guard memory-budget integration-tests write-tests cli-tests python-bindings smoke"
+DATASET_COMPONENTS="core-tests tombstones-scan scan-offload-guard work-counters-guard memory-budget integration-tests write-tests cli-tests python-bindings smoke flight-tests legacy-heuristics"
 
 # selected_needs_datasets: true iff at least one SELECTED component reads datasets.
 # With no --only, every component runs, so it's always true. With --only, it's true
@@ -8226,38 +8503,12 @@ dispatch_component() {
   # This shape is proven real: write_readback_content_tests/graceful_shutdown_tests
   # ARE this shape (that is exactly why they are the hardcoded ground truth).
   #
-  # Guard: after each pass, parse cargo'"'"'s own per-target "Running tests/<name>.rs"
-  # / "test result: ok. N passed" text and FAIL CLOSED if any target ran 0 tests
-  # unless it is on that pass'"'"'s explicit allowed-zero list. Only the two Pass-1
-  # ground-truth names are allowed to run 0 there; NOTHING is allowed to run 0 in
-  # Pass 2 (every real write-support target must execute at least one test).
-  check_no_unexpected_zero_tests() {
-    local pass_name="$1" logfile="$2"; shift 2
-    local allowed_zero=" $* "
-    local bad="" target=""
-    while IFS= read -r line; do
-      if [[ "$line" == *"Running tests/"* ]]; then
-        target=$(printf "%s" "$line" | sed -E "s#.*Running tests/([^[:space:]]+)\.rs.*#\1#")
-      elif [[ "$line" == "test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out"* ]]; then
-        # Match the FULL zero-line (roborev finding, #2039): "0 passed; 0 failed"
-        # alone also matches a target whose tests are ALL #[ignore]d (e.g.
-        # "0 passed; 0 failed; 3 ignored; ..."), which is a legitimate, unrelated
-        # shape this guard must never fault — only a truly-empty run (0 ignored
-        # too) is the write-support-#[cfg]-gated-with-no-required-features shape.
-        if [ -n "$target" ] && [[ "$allowed_zero" != *" $target "* ]]; then
-          bad="$bad $target"
-        fi
-        target=""
-      elif [[ "$line" == "test result:"* ]]; then
-        target=""
-      fi
-    done < "$logfile"
-    if [ -n "$bad" ]; then
-      echo "cli-tests: FAIL-CLOSED —$bad ran 0 tests in $pass_name unexpectedly (issue #2039: a write-support-#[cfg]-gated target with no declared required-features, not on the allowed-zero list, would otherwise silently never run)" >&2
-      return 1
-    fi
-    return 0
-  }
+  # The guard itself is agent-gate.sh:check_no_unexpected_zero_tests, a single
+  # top-level definition `export -f`-ed into this `bash -c` body (#1699 promoted it
+  # out of here when legacy-heuristics/flight-tests needed the same check — one
+  # implementation, not three copies). Only the two Pass-1 ground-truth names are
+  # allowed to run 0 there; NOTHING is allowed to run 0 in Pass 2 (every real
+  # write-support target must execute at least one test).
 
   log1=$(mktemp) && log2=$(mktemp)
   trap "rm -f \"$log1\" \"$log2\"" EXIT
@@ -8265,16 +8516,25 @@ dispatch_component() {
   cargo test --package cqlite-cli "${def_flags[@]}" 2>&1 | tee "$log1"
   rc=${PIPESTATUS[0]}
   [ "$rc" -eq 0 ] || exit "$rc"
-  check_no_unexpected_zero_tests "Pass 1 (default)" "$log1" write_readback_content_tests graceful_shutdown_tests || exit 1
+  check_no_unexpected_zero_tests "cli-tests Pass 1 (default)" "$log1" write_readback_content_tests graceful_shutdown_tests || exit 1
 
   cargo test --package cqlite-cli --features write-support "${ws_flags[@]}" 2>&1 | tee "$log2"
   rc=${PIPESTATUS[0]}
   [ "$rc" -eq 0 ] || exit "$rc"
-  check_no_unexpected_zero_tests "Pass 2 (write-support)" "$log2"' ;;
+  check_no_unexpected_zero_tests "cli-tests Pass 2 (write-support)" "$log2"' ;;
     compaction-byte-parity) run_compaction_byte_parity ;;
     bti-multiclustering) run_bti_multiclustering ;;
     query-semantics-oracle) run_query_semantics_oracle ;;
     flight-query-semantics-oracle) run_flight_query_semantics_oracle ;;
+    flight-tests) run_flight_tests ;;
+    legacy-heuristics) run_legacy_heuristics ;;
+    # The two #1699 feature-ISOLATION lanes: cqlite-core with ONE of parquet /
+    # delta-scan and NOT the other. `--all-targets` and `-D warnings` are both
+    # load-bearing (#1978 was an ungated `#[cfg(test)]` module referencing a
+    # feature-gated item, which a library-only check never compiles; #1981 is why the
+    # dead-code lint must be an error) — full rationale on run_feature_iso.
+    feature-iso-parquet) run_component feature-iso-parquet run_feature_iso parquet ;;
+    feature-iso-delta-scan) run_component feature-iso-delta-scan run_feature_iso delta-scan ;;
     python-bindings) run_python_bindings ;;
     node-bindings) run_node_bindings ;;
     delivery-telemetry) run_delivery_telemetry ;;
