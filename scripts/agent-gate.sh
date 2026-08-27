@@ -5427,24 +5427,50 @@ run_legacy_heuristics() {
   local start end status
   start=$(date +%s)
 
-  # Derive the target set: every committed cqlite-core/tests/*.rs that references the
-  # feature, mapped to its target name (basename without .rs). Anchored on REPO_ROOT
-  # so the derivation cannot depend on CWD.
+  # Derive the target set: every committed cqlite-core/tests/*.rs carrying a
+  # legacy-heuristics CFG SITE, mapped to its target name (basename without .rs).
+  # Anchored on REPO_ROOT so the derivation cannot depend on CWD.
+  #
+  # Matched on the ATTRIBUTE shape `feature = "legacy-heuristics"`, not the bare
+  # string: compile_time_heuristic_enforcement.rs alone mentions the feature 15 times
+  # in prose, and a doc comment is not a cfg site. (Measured: both spellings yield the
+  # same 5 files today, so this is precision for the future, not a change of subject.)
+  #
+  # ALLOWED-ZERO, DERIVED (never a curated list). A file whose ONLY sites are the
+  # NEGATIVE polarity `#[cfg(not(feature = "legacy-heuristics"))]` legitimately
+  # executes 0 tests HERE — its bodies compile out when the feature is ON, and they
+  # already run in core-tests, where the feature is off. It stays in the executed set
+  # (so it must still COMPILE at this feature set) but is passed to the zero-tests
+  # guard as allowed-zero, with the reason printed. The guard therefore still FAILs on
+  # the case that matters: a POSITIVE-polarity file that executes nothing.
+  #
+  # Polarity is decided by stripping every `not(feature = "legacy-heuristics")`
+  # wrapper and asking whether any cfg-shaped reference survives — mechanical, so a
+  # file that gains a positive site stops being allowed-zero with no gate edit.
   local tests_dir="$REPO_ROOT/cqlite-core/tests"
-  local -a targets=()
-  local names="" f base
+  local -a targets=() allow_zero=()
+  local cfg_site='feature[[:space:]]*=[[:space:]]*"legacy-heuristics"'
+  local names="" negonly="" f base count=0
   for f in "$tests_dir"/*.rs; do
     [ -f "$f" ] || continue
-    grep -q 'legacy-heuristics' "$f" || continue
+    grep -qE "$cfg_site" "$f" || continue
     base=$(basename "$f" .rs)
+    # Two array elements per target (`--test <name>`), so ${#targets[@]} is NOT the
+    # target count — $count is.
     targets+=(--test "$base")
+    count=$((count + 1))
     names="$names $base"
+    if ! sed -E 's/not\([[:space:]]*feature[[:space:]]*=[[:space:]]*"legacy-heuristics"[[:space:]]*\)//g' "$f" \
+        | grep -qE "$cfg_site"; then
+      allow_zero+=("$base")
+      negonly="$negonly $base"
+    fi
   done
-  if [ "${#targets[@]}" -eq 0 ]; then
+  if [ "$count" -eq 0 ]; then
     status=FAIL
     {
       echo "[$name] FAIL-CLOSED: derived ZERO legacy-heuristics --test targets from"
-      echo "        $tests_dir/*.rs (grep 'legacy-heuristics')."
+      echo "        $tests_dir/*.rs (pattern: $cfg_site)."
       echo "        The derivation, not the feature, is what failed — an unreadable or"
       echo "        moved tests dir, or a renamed feature. A lane with no subject has no"
       echo "        verdict to give, so this is a FAIL, never a PASS and never a SKIP."
@@ -5455,7 +5481,8 @@ run_legacy_heuristics() {
     return 0
   fi
 
-  echo ">>> [$name] derived${names} (${#targets[@]} target(s) from $tests_dir/*.rs)"
+  echo ">>> [$name] derived${names} ($count target(s) from $tests_dir/*.rs)"
+  [ -n "$negonly" ] && echo ">>> [$name] allowed-zero (NEGATIVE-polarity only — cfg(not(...)) bodies compile out here and run in core-tests):$negonly"
   echo ">>> [$name] RUSTFLAGS=-D warnings cargo build -p cqlite-core --features legacy-heuristics, then cargo test --lib + derived targets (#1699)"
   if RUSTFLAGS="-D warnings" cargo build --package cqlite-core --features legacy-heuristics >"$log" 2>&1 \
       && env CQLITE_DATASETS_ROOT="$CQLITE_DATASETS_ROOT" \
@@ -5464,7 +5491,8 @@ run_legacy_heuristics() {
     # The guard writes its verdict to stderr only, so `2>>` lands the message in the
     # component log (where the FAIL branch below tails it) while the `if` still tests
     # the GUARD's exit status directly — not a pipeline's last stage.
-    if check_no_unexpected_zero_tests "$name" "$log" 2>>"$log"; then
+    if check_no_unexpected_zero_tests "$name" "$log" \
+        ${allow_zero[@]+"${allow_zero[@]}"} 2>>"$log"; then
       status=PASS
     else
       status=FAIL
