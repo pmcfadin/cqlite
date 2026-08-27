@@ -50,18 +50,31 @@
       wired) and that removing a name reds `--lite`. Demonstrate the red, do not assume it.
 
 ## 5. Planted-break harness (surface: `scripts/tests/test_agent_gate_feature_matrix_lanes.sh`, new)
-- [ ] Create a throwaway `git worktree add --detach` copy; **never** mutate the live checkout. Assert
+- [x] Create a throwaway `git worktree add --detach` copy; **never** mutate the live checkout. Assert
       `git status --porcelain` in the live worktree is unchanged by a run.
-- [ ] Per lane, plant the minimal *incident-class* break from D5 and assert the lane exits non-zero.
-- [ ] Per lane, assert the lane exits **zero** on the unbroken copy. A lane failing in both directions is a
+- [x] Per lane, plant the minimal *incident-class* break from D5 and assert the lane exits non-zero.
+- [x] Per lane, assert the lane PASSes on the unbroken copy. A lane failing in both directions is a
       harness FAILURE, reported as such.
-- [ ] Print, per lane, what was planted and what fired. Clean up the worktree on exit, including on failure.
-- [ ] Opt-in only — **not** in `COMPONENTS`. Nightly `gate.yml` enrollment is deliberately out of scope
+      **CORRECTION to this task's literal wording ("exits zero"): the clean direction exits `3`, not `0`.**
+      The harness runs the REAL component via `agent-gate.sh --only <lane>`, and a PARTIAL run that found
+      nothing exits **3** by design — the gate refuses to let a partial run be scripted into a green claim
+      (`OVERALL=PARTIAL` ⇒ `exit 3`); a PARTIAL run with a failed component exits `1`. Asserting `0` would
+      have been unsatisfiable and would have pressured the harness into retyping the lane's cargo command,
+      which proves a command works, not that the lane fires. So the harness asserts exit `3` + SUMMARY
+      status `PASS` for clean, and exit `1` + SUMMARY status `FAIL` for planted, requiring the two signals
+      to agree.
+- [x] Print, per lane, what was planted and what fired. Clean up the worktree on exit, including on failure.
+- [x] **Beyond the task list: attribute each planted red to its plant.** A lane that broke for an unrelated
+      reason yields an identical exit code and an identical SUMMARY line, so a bare red is not evidence.
+      Each planted run's output must NAME the planted symbol; a red that does not is reported as
+      `FIRED-UNATTRIBUTED` and fails the harness.
+- [x] Opt-in only — **not** in `COMPONENTS`. Nightly `gate.yml` enrollment is deliberately out of scope
       (workflow change ⇒ #2910 registry enrollment); file it as a follow-up instead.
 
 ## 6. Observation + cost record (surface: `docs/reports/`)
-- [ ] Record the harness run: all four lanes observed firing, per-lane planted break, and the negative
-      direction. This is the AC2 deliverable.
+- [x] Record the harness run: all four lanes observed firing, per-lane planted break, and the negative
+      direction. This is the AC2 deliverable —
+      `docs/reports/ah6-1699-feature-matrix-lanes.md` (observed at `94833d510`; all four FIRED, attributed).
 - [ ] Record per-component durations from the full-gate SUMMARY.
 - [ ] Measure the baseline full gate at the merge base and the gate of record on this branch, **sequentially,
       one gate at a time** (#2640), and post both totals. Do not sum per-component seconds to claim added
