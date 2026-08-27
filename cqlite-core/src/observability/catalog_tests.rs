@@ -451,15 +451,25 @@ fn annotation_blocks() -> std::collections::HashMap<String, String> {
 }
 
 /// `metric name value` -> `catalog::IDENT`, recovered from `catalog.rs`.
+///
+/// Fail-closed on a collision rather than letting the later declaration silently
+/// win: this map is how the registration guards turn an `ALL_METRICS` *value* back
+/// into the identifier they look for in the otel sources, so a shadowed entry would
+/// make a guard check the WRONG constant — a false PASS. Two `&str` constants in
+/// `catalog.rs` sharing a value (a metric name colliding with an `attr`/`unit`
+/// value, or a duplicated name) is a catalog bug in its own right.
 fn value_to_ident() -> std::collections::HashMap<&'static str, &'static str> {
     let ident_to_value = parse_str_consts(include_str!("catalog.rs"));
-    let mut out = std::collections::HashMap::new();
+    let mut out: std::collections::HashMap<&str, &str> = std::collections::HashMap::new();
     for (ident, value) in ident_to_value {
-        // Metric-name constants are unique (asserted by
-        // `metric_names_are_namespaced_and_unique`); `unit`/`attr` values are not
-        // metric names and never appear in ALL_METRICS, so a collision there is
-        // harmless to the lookups this map serves.
-        out.insert(value, ident);
+        if let Some(prior) = out.insert(value, ident) {
+            panic!(
+                "catalog.rs declares two &str constants with the value {value:?} \
+                 (catalog::{prior} and catalog::{ident}) — the registration guards \
+                 resolve a metric name back to its identifier through this map, so a \
+                 collision would silently point a guard at the wrong constant"
+            );
+        }
     }
     out
 }

@@ -28,7 +28,6 @@ fn error_schema_src() -> &'static str {
 /// Every ``backticked`` token in `s`, in order.
 fn backticked(s: &str) -> Vec<&str> {
     let mut out = Vec::new();
-    let bytes = s.as_bytes();
     let mut i = 0;
     while let Some(open) = s[i..].find('`') {
         let open = i + open;
@@ -41,7 +40,6 @@ fn backticked(s: &str) -> Vec<&str> {
             out.push(token);
         }
         i = close + 1;
-        debug_assert!(i <= bytes.len());
     }
     out
 }
