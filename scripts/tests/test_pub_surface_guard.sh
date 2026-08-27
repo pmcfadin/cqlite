@@ -89,82 +89,15 @@ SNAPSHOT_REL="cqlite-core/pub-surface.snapshot"
 # dependencies. Respect an already-exported CARGO_TARGET_DIR (the gate sets one).
 export CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-$REPO_ROOT/target}"
 
-WORKTREES=()
-TMPROOT="$(mktemp -d "${TMPDIR:-/tmp}/pub-surface-selftest.XXXXXX")"
-cleanup() {
-  local wt
-  for wt in "${WORKTREES[@]:-}"; do
-    [ -n "$wt" ] || continue
-    git -C "$REPO_ROOT" worktree remove --force "$wt" >/dev/null 2>&1 || rm -rf "$wt"
-  done
-  git -C "$REPO_ROOT" worktree prune >/dev/null 2>&1 || true
-  rm -rf "$TMPROOT"
-}
-trap cleanup EXIT
-
-# scratch_tree <name>: create a detached worktree at HEAD and publish its path in
-# the global SCRATCH. Deliberately NOT a command substitution: `$(scratch_tree …)`
-# would run the body in a subshell, so the WORKTREES bookkeeping the EXIT trap
-# cleans up would be discarded and every scratch checkout would be left behind.
-SCRATCH=""
-# scratch_tree_from <source-checkout> <name>: a detached worktree that reproduces
-# <source-checkout>'s WORKING TREE, not its HEAD, and publishes the path in SCRATCH.
-#
-# WHY THE WORKING TREE AND NOT HEAD. A `git worktree add` materialises a COMMIT, so
-# a scratch built from HEAD carries HEAD's sources. Copying only the live guard and
-# the live snapshot into it — which is what this used to do — leaves source and
-# baseline describing DIFFERENT trees, and that breaks the ordinary pre-commit
-# workflow: change the public API, regenerate the snapshot, run the tests before
-# committing, and the real-tree case passes while the green scratch cases fail,
-# because HEAD's API cannot match the newly regenerated snapshot. A booby trap for
-# the next contributor, and it fails in the direction that looks like a real defect.
-#
-# So the whole uncommitted delta is applied: tracked modifications via a binary
-# `git diff HEAD` patch, plus untracked-but-not-ignored files copied in. After that
-# the scratch's `git status --porcelain` must MATCH the source's; a mismatch means
-# the overlay did not reproduce the tree and the suite FAILS rather than testing
-# something other than what you are working on.
-#
-# Deliberately NOT a command substitution: `$(scratch_tree …)` would run the body in
-# a subshell, discarding the WORKTREES bookkeeping the EXIT trap cleans up.
-scratch_tree_from() {
-  local src="$1" nm="$2"
-  local path="$TMPROOT/$nm"
-  git -C "$src" worktree add --detach --quiet "$path" HEAD >/dev/null 2>&1 \
-    || { echo "FAIL: could not create scratch worktree $path"; exit 1; }
-  WORKTREES+=("$path")
-
-  # 1. tracked modifications (staged + unstaged), including the snapshot.
-  local patch="$TMPROOT/$nm.live.patch"
-  git -C "$src" diff HEAD --binary >"$patch" 2>/dev/null || true
-  if [ -s "$patch" ]; then
-    git -C "$path" apply --whitespace=nowarn "$patch" \
-      || { echo "FAIL: could not apply $src's uncommitted changes to the scratch worktree $path."
-           echo "      The scratch would then describe a different tree than the one under test."
-           exit 1; }
-  fi
-
-  # 2. untracked, non-ignored files (a brand-new source file is part of the tree too).
-  local rel
-  while IFS= read -r rel; do
-    [ -n "$rel" ] || continue
-    mkdir -p "$path/$(dirname "$rel")"
-    cp "$src/$rel" "$path/$rel"
-  done < <(git -C "$src" ls-files --others --exclude-standard)
-
-  # 3. Prove it: the scratch must describe the SAME tree as the source.
-  local src_status scratch_status
-  src_status="$(git -C "$src" status --porcelain --untracked-files=all | LC_ALL=C sort)"
-  scratch_status="$(git -C "$path" status --porcelain --untracked-files=all | LC_ALL=C sort)"
-  if [ "$src_status" != "$scratch_status" ]; then
-    echo "FAIL: the scratch worktree $path does not reproduce $src's working tree."
-    echo "      Source-only / scratch-only entries:"
-    diff <(printf '%s\n' "$src_status") <(printf '%s\n' "$scratch_status") | head -20
-    exit 1
-  fi
-  SCRATCH="$path"
-}
-scratch_tree() { scratch_tree_from "$REPO_ROOT" "$1"; }
+# Scratch-worktree management lives in a shared library so the KILL-SAFETY case can
+# drive the very same code path from a tiny second process (see case 19). It owns the
+# scratch root, the cleanup and the EXIT/INT/TERM/HUP traps.
+# shellcheck source=scripts/tests/lib/pub-surface-scratch-lib.sh
+. "$REPO_ROOT/scripts/tests/lib/pub-surface-scratch-lib.sh"
+ps_scratch_init "$REPO_ROOT"
+TMPROOT="$PS_TMPROOT"
+scratch_tree_from() { ps_scratch_tree_from "$@"; }
+scratch_tree() { ps_scratch_tree_from "$REPO_ROOT" "$1"; }
 
 fail_case() { echo "FAIL: $*"; exit 1; }
 
@@ -685,5 +618,29 @@ grep -q 'cargo-public-api' "$TMPROOT/case18.out" \
   || fail_case "case 18 — the diagnostic did not record that the blind spot is shared by every rustdoc-derived oracle"
 echo "OK (18): a \`doc\` cfg predicate makes the guard REFUSE rather than certify"
 
+# ---------------------------------------------------------------------------
+# CASE 19 (structural) — THIS SUITE MUST NOT LEAK WORKTREES WHEN IT IS KILLED.
+#
+#     A bash EXIT trap does NOT fire on SIGTERM/SIGINT. With `trap cleanup EXIT`
+#     alone, a killed run left one REGISTERED worktree per case behind — measured:
+#     11 of them — and `git worktree prune` could NOT reclaim them, because their
+#     admin files were intact, so they had to be removed by hand. Subagents here are
+#     killed by the 600s stall watchdog under CPU contention and this suite runs for
+#     minutes, so this is a routine event, not a corner case.
+#
+#     Pinned STRUCTURALLY rather than behaviourally: driving a real SIGTERM would
+#     mean this suite re-invoking itself, i.e. recursion plus a recursion-guard seam.
+#     The signal-handling behaviour was verified by measurement when the fix landed;
+#     what this case prevents is the trap silently losing its signal list again.
+# ---------------------------------------------------------------------------
+_self="$REPO_ROOT/scripts/tests/test_pub_surface_guard.sh"
+grep -qE "^trap +'cleanup; exit [0-9]+' +INT +TERM +HUP\\b" "$_self" \
+  || fail_case "case 19 — this suite no longer traps INT/TERM/HUP. An EXIT trap alone does not fire on a signal, so a watchdog kill will leak one registered git worktree per case into the repo (prune cannot reclaim them)."
+grep -qE '^trap cleanup EXIT$' "$_self" \
+  || fail_case "case 19 — the EXIT trap is gone; a normal-exit path would stop cleaning up"
+grep -qF '_CLEANED=1' "$_self" \
+  || fail_case "case 19 — cleanup is no longer idempotent, but a signal handler runs it and then triggers the EXIT trap, so it runs twice"
+echo "OK (19): a killed run cannot leak worktrees — INT/TERM/HUP are trapped and cleanup is idempotent"
+
 echo ""
-echo "PASS: test_pub_surface_guard.sh — all 18 cases (6 green, 11 reds, 1 usage)"
+echo "PASS: test_pub_surface_guard.sh — all 19 cases (7 green, 11 reds, 1 usage)"
