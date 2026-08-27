@@ -241,9 +241,15 @@ async fn zero_query_timeout_ms_leaves_the_cli_collection_path_unbounded() {
 /// collection bound could still pass it, and it skips when the fetched fixture is
 /// absent. This one removes both weaknesses:
 ///
-/// * **Deterministic** — `collect_rows_until` takes an ABSOLUTE deadline, so a
-///   deadline in the PAST makes `timeout_at` report `Elapsed` on its first poll. No
-///   clock has to advance, no scan has to be slow, and no row is ever pulled.
+/// * **Deterministic** — `collect_rows_until` takes an ABSOLUTE deadline and
+///   REJECTS one at or before `now` before polling collection at all. No clock has
+///   to advance, no scan has to be slow, and no row is ever pulled. (Precisely:
+///   `timeout_at` alone would NOT give this — it polls its inner future first and
+///   consults the deadline second, so an expired deadline still returns `Ok` for a
+///   stream that is immediately ready. An earlier version of this comment credited
+///   `timeout_at` for the determinism; the explicit up-front check is what actually
+///   provides it, and `an_expired_deadline_beats_an_immediately_ready_stream` pins
+///   the case that distinguishes them.)
 /// * **Always runs** — a COMMITTED fixture, so there is no skip path.
 /// * **Discriminating** — asserts the `cli.query.collect` operation, which only the
 ///   CLI-layer bound produces. An engine setup elapse would name a `query.*`
@@ -308,6 +314,61 @@ async fn an_expired_deadline_abandons_the_cli_collection_loop_without_pulling_ro
         classify_error(&err),
         CliExitCode::QueryExecutionError,
         "a CLI collection-budget elapse must still map to exit code 5"
+    );
+}
+
+/// The case that distinguishes an up-front expiry check from `timeout_at` alone
+/// (roborev round 7): an expired deadline must win even when collection would
+/// complete WITHOUT EVER YIELDING.
+///
+/// `display_limit = Some(0)` makes the collection loop break on its first iteration,
+/// so the future is immediately ready. `timeout_at` polls the inner future before
+/// consulting the deadline, so with only `timeout_at` this returns `Ok` with zero
+/// rows and no timeout — the budget silently not applying. Deterministic and
+/// always-running: a COMMITTED fixture and a deadline in the past.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_expired_deadline_beats_an_immediately_ready_stream() {
+    let db = open_via_cli_config(
+        "test_comp",
+        "incompressible_uncompressed_chunk",
+        "compression-parity.cql",
+        true,
+        0,
+    )
+    .await
+    .expect("the COMMITTED fixture can never skip");
+
+    let iter = db
+        .execute_streaming(
+            "SELECT * FROM test_comp.incompressible_uncompressed_chunk",
+            StreamingConfig::default(),
+        )
+        .await
+        .expect("stream setup is unbounded here, so it must succeed");
+
+    let outcome = collect_rows_until(
+        iter,
+        // Immediately ready: the loop's display-limit check breaks before any await.
+        Some(0),
+        Some(tokio::time::Instant::now() - Duration::from_secs(1)),
+        std::time::Instant::now(),
+        Duration::from_secs(30),
+    )
+    .await;
+
+    let err = match outcome {
+        Err(e) => e,
+        Ok(result) => panic!(
+            "an EXPIRED deadline returned Ok with {} rows because collection was              immediately ready — `timeout_at` polls its inner future before checking              the deadline, so the budget must be rejected UP FRONT, not left to the              timer",
+            result.rows.len()
+        ),
+    };
+    assert!(
+        matches!(
+            err.downcast_ref::<Error>(),
+            Some(Error::QueryTimeout { .. })
+        ),
+        "must be the CLI collection timeout: {err:#}"
     );
 }
 

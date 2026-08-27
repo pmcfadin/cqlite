@@ -229,7 +229,13 @@ pub async fn collect_query_result(
         // remainder, both mean setup consumed the whole budget — so consumption gets
         // a deadline already in the past rather than an unbounded run.
         let remaining = budget.checked_sub(started.elapsed()).unwrap_or_default();
-        Some(tokio::time::Instant::now() + remaining)
+        // `Instant + Duration` PANICS when the sum is unrepresentable, and `remaining`
+        // derives from operator config (`performance.query_timeout_ms`), so a huge
+        // value must not abort the process. `checked_add` returning `None` lands on
+        // the same `None` this function already uses for "unbounded" — which is the
+        // right meaning, since an unrepresentable deadline is astronomically far
+        // away. Mirrors the core's treatment in `deadline::bound_tracked`.
+        tokio::time::Instant::now().checked_add(remaining)
     };
 
     collect_rows_until(iter, display_limit, deadline, started, budget).await
@@ -253,10 +259,23 @@ pub async fn collect_rows_until(
     started: std::time::Instant,
     budget: std::time::Duration,
 ) -> Result<cqlite_core::query::result::QueryResult> {
-    let collect = collect_streamed_rows(iter, display_limit);
     let Some(deadline) = deadline else {
-        return collect.await;
+        return collect_streamed_rows(iter, display_limit).await;
     };
+
+    // Reject an ALREADY-EXPIRED deadline before polling collection at all.
+    // `timeout_at` polls its inner future FIRST and only then consults the deadline,
+    // so an expired deadline still returns `Ok` whenever collection happens to be
+    // immediately ready — `display_limit = Some(0)` breaks the loop on its first
+    // iteration, and a fully buffered stream can complete without yielding. Relying
+    // on `timeout_at` alone therefore made "expired means timeout before pulling
+    // rows" true only for streams that happen not to be ready (roborev round 7);
+    // this makes it true by construction, which is also what lets the test assert it.
+    if deadline <= tokio::time::Instant::now() {
+        return Err(expired(started, budget));
+    }
+
+    let collect = collect_streamed_rows(iter, display_limit);
     match tokio::time::timeout_at(deadline, collect).await {
         Ok(result) => result,
         // Dropping `collect` drops the iterator, closing the channel and retiring the
@@ -268,16 +287,24 @@ pub async fn collect_rows_until(
         // in consumption. Closing it properly means carrying the deadline into the
         // core streaming producer so core owns and records it — which is the
         // per-batch bound the issue explicitly deferred. Follow-up.
-        Err(_elapsed) => Err(anyhow::Error::new(cqlite_core::Error::QueryTimeout {
-            operation: "cli.query.collect".to_string(),
-            // MEASURED, never assumed equal to the budget: a blocked poll can
-            // overshoot, and the real figure tells an operator "budget too tight"
-            // from "one decode unit is uninterruptibly slow".
-            elapsed: started.elapsed(),
-            limit: budget,
-        })
-        .context("CLI query exceeded performance.query_timeout_ms")),
+        Err(_elapsed) => Err(expired(started, budget)),
     }
+}
+
+/// The CLI-layer collection elapse. One constructor for both exits (the up-front
+/// expired-deadline check and the `timeout_at` arm) so they cannot drift in
+/// operation name, reported figures or context.
+#[cfg(feature = "state_machine")]
+fn expired(started: std::time::Instant, budget: std::time::Duration) -> anyhow::Error {
+    anyhow::Error::new(cqlite_core::Error::QueryTimeout {
+        operation: "cli.query.collect".to_string(),
+        // MEASURED, never assumed equal to the budget: a blocked poll can overshoot,
+        // and the real figure tells an operator "budget too tight" from "one decode
+        // unit is uninterruptibly slow".
+        elapsed: started.elapsed(),
+        limit: budget,
+    })
+    .context("CLI query exceeded performance.query_timeout_ms")
 }
 
 /// The unbounded consumption loop; [`collect_rows_until`] applies the deadline.
