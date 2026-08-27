@@ -386,8 +386,38 @@ while IFS=$'\t' read -r lineno decl; do
     *"pub mod "*) ;;
     *) continue ;;
   esac
-  case "$decl" in
-    *"#[cfg("*|*"#[cfg_attr("*|*"doc(hidden)"*) continue ;;
+  # Which declarations are EXEMPT from the assert, and why each one is:
+  #
+  #   * `#[cfg(...)]` at the declaration site — the gate is visible to every reader
+  #     of the crate root, which is exactly what this assert wants.
+  #   * anything applying `doc(hidden)` (directly or through a `cfg_attr`) — the item
+  #     is deliberately undocumented, so rustdoc omitting it proves nothing.
+  #   * a `cfg_attr` that could itself APPLY a `cfg` — under some configuration it
+  #     becomes a declaration-site gate, so its absence from the surface may be
+  #     legitimate.
+  #
+  # A `cfg_attr` that can apply NEITHER is NOT exempt. Treating every `cfg_attr` as
+  # an exemption (as the first cut did) reopened the exact bypass this assert exists
+  # to close: a purely cosmetic `#[cfg_attr(docsrs, doc(alias = "…"))]` would let a
+  # module keep hiding its real gate inside its own file.
+  attrs="${decl%%pub mod *}"
+  case "$attrs" in
+    *'#[cfg('*|*'doc(hidden)'*) continue ;;
+  esac
+  case "$attrs" in
+    *'#[cfg_attr('*)
+      # Everything from the first `cfg_attr` on — deliberately over-approximate
+      # (a later, unrelated attribute is included), because over-approximating
+      # here only ever SKIPS a check, never invents a failure.
+      cfg_attr_body="${attrs#*'#[cfg_attr('}"
+      # `doc(cfg(...))` is the docs.rs "shown as feature-gated" annotation. It
+      # contains the token `cfg(` but applies no gate at all, so it must not be
+      # mistaken for one; neutralise it before testing.
+      cfg_attr_body="${cfg_attr_body//doc(cfg(/doc(}"
+      case "$cfg_attr_body" in
+        *'cfg('*) continue ;;
+      esac
+      ;;
   esac
   modname="${decl##*pub mod }"
   modname="${modname%;}"

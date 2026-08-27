@@ -22,6 +22,17 @@
 #   4. RED    — the committed snapshot is missing; VERIFY must FAIL naming the
 #               regenerate command, never pass vacuously over an absent baseline.
 #   5. USAGE  — an unrecognized argument exits 2 (repo convention).
+#   6. RED    — a new `pub fn` on an EXISTING public struct is named in the diff.
+#               The first cut of the guard enumerated only standalone rustdoc pages
+#               and was blind to this (roborev round 1, blocker 1).
+#   7. RED    — a new VARIANT on an EXISTING public enum is named in the diff (same
+#               blind spot). The variant is added together with its arms in the two
+#               exhaustive matches, so the crate still compiles and the case tests
+#               variant coverage rather than the cargo-doc failure path.
+#   8. RED    — a purely cosmetic `#[cfg_attr(...)]` at the declaration site must NOT
+#               exempt a crate-root `pub mod` from the consistency assert (roborev
+#               round 1, blocker 2: treating every cfg_attr as an exemption reopened
+#               the very bypass the assert closes).
 #
 # NO TEST-ONLY SEAM. The guard's subject is hard-coded on purpose, so the negative
 # cases SUBSTITUTE THE ARTIFACT: each runs in its own `git worktree add --detach HEAD`
@@ -37,6 +48,7 @@ set -euo pipefail
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 GUARD_REL="scripts/ci/check-pub-surface.sh"
 GUARD="$REPO_ROOT/$GUARD_REL"
+SNAPSHOT_REL="cqlite-core/pub-surface.snapshot"
 
 [ -f "$GUARD" ] || { echo "FAIL: guard script not found at $GUARD"; exit 1; }
 
@@ -68,6 +80,13 @@ scratch_tree() {
   git -C "$REPO_ROOT" worktree add --detach --quiet "$path" HEAD >/dev/null 2>&1 \
     || { echo "FAIL: could not create scratch worktree $path"; exit 1; }
   WORKTREES+=("$path")
+  # A worktree materialises HEAD, so without this the negative cases would be
+  # validating the LAST COMMIT rather than the change under test — an uncommitted
+  # guard fix silently goes untested, and an uncommitted guard REGRESSION silently
+  # passes. Overlay the live checkout's guard + snapshot (the two artifacts the
+  # cases are about) so the suite always measures the tree you are working in.
+  cp "$REPO_ROOT/$GUARD_REL" "$path/$GUARD_REL"
+  cp "$REPO_ROOT/$SNAPSHOT_REL" "$path/$SNAPSHOT_REL"
   SCRATCH="$path"
 }
 
@@ -99,7 +118,7 @@ if [ "$green_rc" -ne 0 ]; then
   cat "$TMPROOT/green.out"
   exit 1
 fi
-grep -q "public items over" "$TMPROOT/green.out" \
+grep -q "public items + .* associated items" "$TMPROOT/green.out" \
   || fail_case "the guard passed but printed no affirmative measurement line; got: $(cat "$TMPROOT/green.out")"
 echo "OK (1): real tree verifies clean — $(cat "$TMPROOT/green.out")"
 
@@ -174,7 +193,7 @@ echo "OK (3): a new public item trips the snapshot diff and is named in it"
 # 4. RED — the committed snapshot is missing.
 # ---------------------------------------------------------------------------
 scratch_tree no-snapshot; wt4="$SCRATCH"
-rm -f "$wt4/cqlite-core/pub-surface.snapshot"
+rm -f "$wt4/$SNAPSHOT_REL"
 set +e
 bash "$wt4/$GUARD_REL" >"$TMPROOT/case4.out" 2>&1
 case4_rc=$?
@@ -186,5 +205,107 @@ grep -q -- "--regenerate" "$TMPROOT/case4.out" \
   || fail_case "case 4 — the missing-snapshot diagnostic did not print the regenerate command"
 echo "OK (4): a missing snapshot FAILs and names the regenerate command"
 
+# ---------------------------------------------------------------------------
+# 6. RED — a new `pub fn` on an EXISTING public struct (roborev round 1, B1).
+#
+#    This is the case the first cut of the guard could NOT see: only standalone
+#    rustdoc pages were enumerated, so an added method moved nothing.
+# ---------------------------------------------------------------------------
+scratch_tree new-method; wt6="$SCRATCH"
+cat >>"$wt6/cqlite-core/src/version_hints.rs" <<'RS'
+
+impl ResolvedVersion {
+    /// Self-test-only probe method (scripts/tests/test_pub_surface_guard.sh, #1712).
+    /// Added to an ALREADY-PUBLIC struct inside a throwaway scratch worktree, to prove
+    /// the snapshot notices an added associated item. Never committed.
+    pub fn pub_surface_self_test_probe(&self) -> bool {
+        true
+    }
+}
+RS
+set +e
+bash "$wt6/$GUARD_REL" >"$TMPROOT/case6.out" 2>&1
+case6_rc=$?
+set -e
+[ "$case6_rc" -ne 0 ] || fail_case "case 6 — a new \`pub fn\` on an existing public struct did not trip the snapshot; got: $(cat "$TMPROOT/case6.out")"
+grep -q "pub_surface_self_test_probe" "$TMPROOT/case6.out" \
+  || fail_case "case 6 — the guard failed but the diff never named the new method; got: $(cat "$TMPROOT/case6.out")"
+grep -q "^+method cqlite_core::version_hints::ResolvedVersion::pub_surface_self_test_probe" "$TMPROOT/case6.out" \
+  || fail_case "case 6 — the new method was mentioned but not recorded as a \`method\` line at its real path; got: $(grep pub_surface_self_test_probe "$TMPROOT/case6.out")"
+echo "OK (6): a new pub fn on an existing public struct is named in the diff"
+
+# ---------------------------------------------------------------------------
+# 7. RED — a new VARIANT on an EXISTING public enum (roborev round 1, B1).
+#
+#    The variant is added together with its arms in the two exhaustive matches in
+#    the same file: without them the crate would not compile, `cargo doc` would
+#    fail, and the case would be testing the cargo-doc failure path instead of
+#    variant coverage.
+# ---------------------------------------------------------------------------
+scratch_tree new-variant; wt7="$SCRATCH"
+awk '
+  { print }
+  /^    Unknown,$/ && !seen_variant { print "    /// Self-test-only probe variant (#1712)."; print "    PubSurfaceSelfTestVariant,"; seen_variant = 1 }
+  /VersionSource::Unknown => 255,/ { print "            VersionSource::PubSurfaceSelfTestVariant => 254," }
+  /VersionSource::Unknown => "Unknown \(no version information available\)",/ { print "            VersionSource::PubSurfaceSelfTestVariant => \"self-test probe\"," }
+' "$wt7/cqlite-core/src/version_hints.rs" >"$wt7/version_hints.probe.rs"
+mv "$wt7/version_hints.probe.rs" "$wt7/cqlite-core/src/version_hints.rs"
+grep -q 'PubSurfaceSelfTestVariant,' "$wt7/cqlite-core/src/version_hints.rs" \
+  || fail_case "case 7 setup: could not add the probe variant to VersionSource"
+set +e
+bash "$wt7/$GUARD_REL" >"$TMPROOT/case7.out" 2>&1
+case7_rc=$?
+set -e
+[ "$case7_rc" -ne 0 ] || fail_case "case 7 — a new enum variant did not trip the snapshot; got: $(cat "$TMPROOT/case7.out")"
+grep -q "^+variant cqlite_core::version_hints::VersionSource::PubSurfaceSelfTestVariant" "$TMPROOT/case7.out" \
+  || fail_case "case 7 — the guard failed but the diff never recorded the new variant at its real path; got: $(grep -i pubsurfaceselftestvariant "$TMPROOT/case7.out"; tail -20 "$TMPROOT/case7.out")"
+echo "OK (7): a new enum variant is named in the diff"
+
+# ---------------------------------------------------------------------------
+# 8. RED — a cosmetic `cfg_attr` must NOT buy an exemption from the consistency
+#    assert (roborev round 1, B2).
+#
+#    Treating every `cfg_attr` as an exemption reopened the bypass the assert
+#    exists to close: the module keeps its real gate hidden inside its own file
+#    while a purely cosmetic attribute at the declaration site silences the check.
+# ---------------------------------------------------------------------------
+scratch_tree cfg-attr-bypass; wt8="$SCRATCH"
+awk '
+  /^#\[cfg\(feature = "benchmarks"\)\]$/ { held = 1; next }
+  {
+    if (held && $0 == "pub mod benchmarks;") {
+      print "#[cfg_attr(feature = \"benchmarks\", doc = \"opt-in perf runs\")]"
+    } else if (held) {
+      print "#[cfg(feature = \"benchmarks\")]"
+    }
+    held = 0
+    print
+  }
+' "$wt8/cqlite-core/src/lib.rs" >"$wt8/lib.rs.cfgattr"
+mv "$wt8/lib.rs.cfgattr" "$wt8/cqlite-core/src/lib.rs"
+grep -q '^#\[cfg_attr(feature = "benchmarks", doc = "opt-in perf runs")\]$' "$wt8/cqlite-core/src/lib.rs" \
+  || fail_case "case 8 setup: could not substitute the cosmetic cfg_attr at the declaration site"
+grep -q '^#\[cfg(feature = "benchmarks")\]$' "$wt8/cqlite-core/src/lib.rs" \
+  && fail_case "case 8 setup: a real declaration-site cfg gate survived — the case would pass for the wrong reason"
+printf '%s\n%s\n' '#![cfg(feature = "benchmarks")]' "$(cat "$wt8/cqlite-core/src/benchmarks/mod.rs")" \
+  >"$wt8/cqlite-core/src/benchmarks/mod.rs.new"
+mv "$wt8/cqlite-core/src/benchmarks/mod.rs.new" "$wt8/cqlite-core/src/benchmarks/mod.rs"
+set +e
+bash "$wt8/$GUARD_REL" >"$TMPROOT/case8.out" 2>&1
+case8_rc=$?
+set -e
+[ "$case8_rc" -ne 0 ] || {
+  echo "FAIL: case 8 — a purely cosmetic \`cfg_attr\` at the declaration site bought an"
+  echo "      exemption from the consistency assert, so the module kept hiding its real"
+  echo "      gate inside its own file. That is the roborev B2 bypass."
+  cat "$TMPROOT/case8.out"
+  exit 1
+}
+grep -q "INCONSISTENT with the real public surface" "$TMPROOT/case8.out" \
+  || fail_case "case 8 — the guard failed for some OTHER reason than the consistency assert; got: $(cat "$TMPROOT/case8.out")"
+grep -q "pub mod benchmarks" "$TMPROOT/case8.out" \
+  || fail_case "case 8 — the guard failed but never named \`benchmarks\`; got: $(cat "$TMPROOT/case8.out")"
+echo "OK (8): a cosmetic cfg_attr does not exempt a crate-root pub mod from the assert"
+
 echo ""
-echo "PASS: test_pub_surface_guard.sh — all 5 cases (1 green, 3 reds, 1 usage)"
+echo "PASS: test_pub_surface_guard.sh — all 8 cases (1 green, 6 reds, 1 usage)"

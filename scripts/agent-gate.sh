@@ -517,7 +517,10 @@
 #                      and a bad argument must exit 2. Each negative case substitutes
 #                      the artifact in its own detached scratch worktree (the guard
 #                      has no test-only seam) and reuses CARGO_TARGET_DIR, so the
-#                      suite costs ~22s of rustdoc and no datasets/network.
+#                      8-case suite costs ~85s of rustdoc and no datasets/network.
+#                      Also reds on a new `pub fn` on an existing public struct, a new
+#                      enum variant, and a cosmetic `cfg_attr` that must not exempt a
+#                      crate-root `pub mod` from the assert (roborev round 1).
 #   minimal-build      cargo build + `cargo test --lib --no-run` (compile-only)
 #                      -p cqlite-core --no-default-features --features all-compression
 #   smoke              bash test-data/scripts/smoke-test-all-tables.sh
@@ -5554,7 +5557,7 @@ run_pub_surface() {
 # for the pub-surface component: it drives scripts/ci/check-pub-surface.sh through one
 # green and three reds (consistency assert on the pre-#1712 shape, snapshot drift,
 # missing snapshot) plus the usage case, substituting the artifact in detached scratch
-# worktrees rather than through any test-only seam. Reuses CARGO_TARGET_DIR (~22s);
+# worktrees rather than through any test-only seam. Reuses CARGO_TARGET_DIR (~85s);
 # never invokes the gate, so it cannot recurse.
 run_tooling_tests() {
   local name=tooling-tests
@@ -6743,8 +6746,8 @@ run_tooling_tests() {
   # diff, a missing snapshot FAILs instead of passing vacuously, and a bad argument
   # exits 2. Each negative case substitutes the artifact in its own
   # `git worktree add --detach HEAD` scratch checkout (no test-only seam in the guard)
-  # and reuses CARGO_TARGET_DIR, so the whole suite is ~22s of rustdoc. A failure FAILs
-  # the component, mirroring the guards above.
+  # and reuses CARGO_TARGET_DIR, so the whole 8-case suite is ~85s of rustdoc. A failure
+  # FAILs the component, mirroring the guards above.
   echo ">>> [$name] bash scripts/tests/test_pub_surface_guard.sh"
   if ! bash "$REPO_ROOT/scripts/tests/test_pub_surface_guard.sh" >>"$log" 2>&1; then
     status=FAIL
