@@ -73,6 +73,26 @@ impl WriteEngineConfig {
     /// or UDT registry chain the corresponding `with_*` builder afterwards; the
     /// public `Config` does not model those today.
     ///
+    /// # This does NOT validate, and enforcement is uneven (#1697)
+    ///
+    /// `from_config` is infallible on purpose: it is also the definition of
+    /// [`Self::new`], so returning `Result` would ripple into every construction
+    /// site in the workspace. It therefore threads whatever it is given, and
+    /// [`Config::validate`] is the CALLER's responsibility. Today's posture,
+    /// recorded honestly rather than implied:
+    ///
+    /// | write path | validates the public config? |
+    /// |---|---|
+    /// | Python binding | YES — `config_from_py`, plus a `flush_threshold` ceiling check |
+    /// | Node binding | YES — parse-then-check, contiguous with the fold |
+    /// | CLI | YES — `write_engine_config::resolve` |
+    /// | direct core embedder (`from_config` / `new`) | NO — nothing calls `validate` |
+    ///
+    /// So an in-process embedder can still construct a wedged engine (e.g. a
+    /// flush threshold above `memtable_hard_limit`: never flushed, and rejected
+    /// at admission). Closing that last gap needs either a fallible bridge or
+    /// validation inside `WriteEngine::new`; a follow-up issue owns the choice.
+    ///
     /// ```rust,ignore
     /// let mut config = cqlite_core::Config::default();
     /// config.storage.memtable_size_threshold = 8 * 1024 * 1024;

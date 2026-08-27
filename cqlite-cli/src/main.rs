@@ -26,6 +26,8 @@ mod formatter;
 mod output;
 mod script_executor;
 mod status_metrics;
+#[cfg(feature = "write-support")]
+mod write_engine_config;
 
 use cli_types::{AdminCommands, Cli, Commands, ExportSstableArgs, MaintenanceArgs, OutputMode};
 use commands::info::execute_info_command;
@@ -474,15 +476,10 @@ async fn run_main() -> Result<()> {
             ));
         };
 
-        // #1693: a low env flush threshold makes an interactive session's
-        // auto-flush observable without writing 64MB (unset in production).
-        // #1697: applied to the PUBLIC knob, reaching the engine via the bridge.
-        let mut public_config = cqlite_core::Config::default();
-        if let Ok(raw) = std::env::var("CQLITE_MEMTABLE_FLUSH_THRESHOLD") {
-            if let Ok(bytes) = raw.trim().parse::<usize>() {
-                public_config.storage.memtable_size_threshold = bytes as u64;
-            }
-        }
+        // #1693 flush-threshold env override, applied to the PUBLIC knob and
+        // VALIDATED before it reaches the engine — an unvalidated override can
+        // wedge the write path permanently (see `write_engine_config`).
+        let public_config = crate::write_engine_config::resolve()?;
         let data = write_dir.join("data");
         let wal = write_dir.join("wal");
         let mut config = WriteEngineConfig::from_config(&public_config, data, wal, schema.clone());
