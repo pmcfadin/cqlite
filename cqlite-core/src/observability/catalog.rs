@@ -214,8 +214,8 @@ pub const READ_ROWS: &str = "cqlite.read.rows";
 
 /// `cqlite.read.bytes` — counter `By`.
 ///
-/// Total bytes read from Data.db (post-decompression). Bounded attributes:
-/// [`attr::SSTABLE_FORMAT`], [`attr::COMPRESSION`].
+/// Total bytes read from Data.db (post-decompression), once per chunk decode.
+/// Bounded attributes: [`attr::COMPRESSION`] alone — the chunk plane knows no format (#1701).
 pub const READ_BYTES: &str = "cqlite.read.bytes";
 
 /// `cqlite.read.partitions` — counter `{partition}`.

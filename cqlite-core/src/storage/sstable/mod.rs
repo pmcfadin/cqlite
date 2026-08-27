@@ -23,6 +23,10 @@ pub mod promoted_index_reader;
 pub mod read_work_counters;
 pub mod reader;
 mod scan_stream_fanout;
+// The cross-generation point read (`SSTableManager::get`), split out of this file per
+// the campsite rule (epic #1116). Owns the OPERATION-level read metrics so one
+// logical point read reports one duration sample (issue #1701).
+mod manager_point_read;
 pub mod summary_reader;
 pub mod version_gate;
 pub mod work_counters;
@@ -94,8 +98,6 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tokio::sync::{Mutex, RwLock};
 
-#[cfg(feature = "tombstones")]
-use self::tombstone_merger::{EntryMetadata, GenerationValue, TombstoneMerger};
 use crate::platform::Platform;
 use crate::types::CellWriteMetadata;
 #[cfg(not(feature = "tombstones"))] // #1917 concat fallbacks; tombstones uses k-way merge
@@ -946,97 +948,6 @@ impl SSTableManager {
         Err(crate::error::Error::unsupported_format(
             "SSTable writing requires experimental feature",
         ))
-    }
-
-    /// Get a value by key from all SSTables with proper tombstone merging
-    #[cfg(feature = "tombstones")]
-    pub async fn get(&self, table_id: &TableId, key: &RowKey) -> Result<Option<ScanRow>> {
-        // Resolve the applicable reader list FIRST, exactly like the non-tombstones
-        // `get()` path (issue #1321). The previous code iterated EVERY reader in
-        // `self.readers` and passed one global relaxed `fully_qualified_match` flag
-        // to all of them, so same-named tables in OTHER keyspaces passed the relaxed
-        // BTI guard and wrongly contributed values/tombstones to the merge — a
-        // cross-keyspace data-bleed bug. `resolve_reader_list` returns precisely the
-        // readers for the resolved target table across generations, so the relaxed
-        // guard can only ever apply to the readers that ARE the target table; a
-        // wrong-keyspace same-named reader is never in the merge set.
-        //
-        // Issue #1591: snapshot the resolved readers + the authoritative
-        // `fully_qualified_match` signal and DROP the read guard before any I/O.
-        let (reader_list, fully_qualified_match) = self.resolve_reader_snapshot(table_id).await;
-        if reader_list.is_empty() {
-            return Ok(None);
-        }
-
-        let mut all_values = Vec::new();
-
-        // Collect each applicable generation's value (tombstone-merge semantics are
-        // unchanged: still build a `GenerationValue` per reader and resolve via
-        // `TombstoneMerger::merge_generations`). Only the SET of readers being merged
-        // changed — the resolved list instead of every reader globally.
-        for reader in &reader_list {
-            if let Some(value) = reader
-                .get_with_resolution(table_id, key, fully_qualified_match)
-                .await?
-            {
-                let generation = reader.generation;
-                let write_time = reader.extract_write_time_from_entry(key, &value);
-
-                let gen_value = GenerationValue {
-                    value,
-                    metadata: EntryMetadata {
-                        write_time,
-                        generation,
-                        ttl: None, // Would be extracted from SSTable metadata
-                    },
-                };
-                all_values.push(gen_value);
-            }
-        }
-
-        // Use tombstone merger to resolve conflicts across generations
-        let merger = TombstoneMerger::new();
-        merger.merge_generations(all_values)
-    }
-
-    /// Get a value by key from all SSTables (simple version without tombstone merging)
-    ///
-    /// Uses `table_readers` (keyed by fully-qualified `"keyspace.table"`) so that only the
-    /// SSTables for the requested table are searched (Issue #680).  Same-named tables in
-    /// different keyspaces (e.g. `test_basic.simple_table` and `test_oa.simple_table`) are
-    /// now correctly distinguished.
-    ///
-    /// Lookup order:
-    ///   1. Exact match on the full `table_id` string (e.g. `"test_basic.simple_table"`)
-    ///   2. Unqualified table name (e.g. `"simple_table"`) — for backward compatibility
-    ///      with flat/non-Cassandra directory layouts that have no keyspace parent.
-    #[cfg(not(feature = "tombstones"))]
-    pub async fn get(&self, table_id: &TableId, key: &RowKey) -> Result<Option<ScanRow>> {
-        // Issue #1591: snapshot the resolved readers + the authoritative
-        // `fully_qualified_match` signal and DROP the read guard before any I/O,
-        // so a queued writer never FIFO-parks this point read behind a slow scan.
-        //
-        // `fully_qualified_match`: did resolution match the FULLY-QUALIFIED
-        // `keyspace.table` key exactly, or fall back to the bare table name? An
-        // unqualified query is treated as an exact match (no keyspace to mismatch).
-        // This authoritative signal gates the get() point-lookup table-consistency
-        // guard exactly like the seek path (#1284): only an exact FQ match may relax
-        // to a name-only check across a header-keyspace divergence; a fully-qualified
-        // query resolved via the bare-name fallback keeps strict keyspace matching so
-        // get() never returns another keyspace's same-named rows (issue #1321).
-        let (reader_list, fully_qualified_match) = self.resolve_reader_snapshot(table_id).await;
-
-        // Return the first value found across all SSTables for this table
-        for reader in &reader_list {
-            if let Some(value) = reader
-                .get_with_resolution(table_id, key, fully_qualified_match)
-                .await?
-            {
-                return Ok(Some(value));
-            }
-        }
-
-        Ok(None)
     }
 
     /// Scan a range of keys from all SSTables for a table.

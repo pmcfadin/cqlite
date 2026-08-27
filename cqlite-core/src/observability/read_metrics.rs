@@ -36,6 +36,12 @@ use crate::observability as obs;
 use crate::storage::sstable::compression::CompressionAlgorithm;
 use crate::types::RowKey;
 
+/// The bounded [`catalog::attr::COMPRESSION`] value for "this SSTable has no
+/// compressor", so an uncompressed read is attributed to a NAMED series rather than
+/// an anonymous one (issue #1701). Same spelling the write side uses for
+/// `CompressionAlgorithm::None`.
+pub(crate) const COMPRESSION_NONE: &str = "none";
+
 /// Map a compression algorithm to its bounded [`catalog::attr::COMPRESSION`] value.
 ///
 /// Bounded by the `CompressionAlgorithm` enum itself (five variants), never by a
@@ -48,29 +54,40 @@ pub(crate) fn compression_attr(algorithm: &CompressionAlgorithm) -> &'static str
         CompressionAlgorithm::Snappy => "snappy",
         CompressionAlgorithm::Deflate => "deflate",
         CompressionAlgorithm::Zstd => "zstd",
-        CompressionAlgorithm::None => "none",
+        CompressionAlgorithm::None => COMPRESSION_NONE,
     }
 }
 
-/// Count `bytes` of DECOMPRESSED `Data.db` payload into [`catalog::READ_BYTES`].
+/// Count `bytes` of `Data.db` payload (post-decompression) into
+/// [`catalog::READ_BYTES`], tagged with the bounded `compression` label.
 ///
 /// Called once per chunk the read path materialises, from the single chunk decode
-/// plane (`reader::chunk_source`). A chunk served from the resident decompressed
-/// chunk cache reads no `Data.db` bytes and is deliberately NOT counted — the
-/// metric is "bytes read from Data.db (post-decompression)", so counting a cache
-/// hit would overstate the I/O the read performed.
-pub(crate) fn record_decompressed_bytes(bytes: usize, compression: Option<&'static str>) {
+/// plane (`reader::chunk_source`) — every one of its four decode exits, INCLUDING
+/// the ones that hand back raw bytes: an UNCOMPRESSED SSTable (`compression =
+/// "none"`) and a Cassandra-stored-raw incompressible chunk read `Data.db` payload
+/// exactly like a decompressed chunk does. Uncompressed is a first-class read path,
+/// not an edge case — CQLite's own production write surface emits uncompressed
+/// SSTables only (the #1406 claim boundary) — so a `"none"` read that went
+/// uncounted would make the metric silently understate real I/O.
+///
+/// A chunk served from the resident decompressed-chunk cache is deliberately NOT
+/// counted: the metric is "bytes read from Data.db", so counting a cache hit would
+/// overstate the I/O the read performed.
+///
+/// The label is a `&'static str` from [`compression_attr`]'s closed mapping, so this
+/// costs no allocation and no formatting on the per-chunk path.
+pub(crate) fn record_decompressed_bytes(bytes: usize, compression: &'static str) {
     if bytes == 0 {
         return;
     }
-    match compression {
-        Some(algorithm) => obs::add_counter(
-            catalog::READ_BYTES,
-            bytes as u64,
-            &[(catalog::attr::COMPRESSION, AttrValue::StaticStr(algorithm))],
-        ),
-        None => obs::add_counter(catalog::READ_BYTES, bytes as u64, &[]),
-    }
+    obs::add_counter(
+        catalog::READ_BYTES,
+        bytes as u64,
+        &[(
+            catalog::attr::COMPRESSION,
+            AttrValue::StaticStr(compression),
+        )],
+    );
 }
 
 /// One read OPERATION's row/partition/duration accounting, emitted ONCE at the end.

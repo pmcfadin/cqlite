@@ -76,15 +76,21 @@ impl<'a> ChunkSource<'a> {
     }
 
     /// The bounded [`catalog::attr::COMPRESSION`] label for this source's
-    /// decompressor, or `None` when there is none (issue #1701). Derived from the
-    /// `CompressionAlgorithm` ENUM, never from the algorithm string parsed out of
-    /// `CompressionInfo.db` — a file-controlled string would be an unbounded metric
-    /// dimension.
+    /// decompressor (issue #1701). Derived from the `CompressionAlgorithm` ENUM,
+    /// never from the algorithm string parsed out of `CompressionInfo.db` — a
+    /// file-controlled string would be an unbounded metric dimension.
+    ///
+    /// No decompressor is `"none"`, NOT an absent label: an uncompressed SSTable is a
+    /// real, first-class read path (CQLite's own writer emits only uncompressed
+    /// SSTables — the #1406 claim boundary), so its bytes are attributed to a named
+    /// series rather than an anonymous one.
     ///
     /// [`catalog::attr::COMPRESSION`]: crate::observability::catalog::attr::COMPRESSION
-    fn compression_label(&self) -> Option<&'static str> {
-        self.compression
-            .map(|c| read_metrics::compression_attr(c.algorithm()))
+    fn compression_label(&self) -> &'static str {
+        match self.compression {
+            Some(c) => read_metrics::compression_attr(c.algorithm()),
+            None => read_metrics::COMPRESSION_NONE,
+        }
     }
 
     /// Whole-chunk read: positioned read → CRC → decompress → B1 cache.
@@ -237,10 +243,18 @@ impl<'a> ChunkSource<'a> {
             // counted at the same per-chunk grain.
             read_metrics::record_decompressed_bytes(
                 decompressed.len(),
-                Some(read_metrics::compression_attr(c.algorithm())),
+                read_metrics::compression_attr(c.algorithm()),
             );
             Ok(decompressed)
         } else {
+            // No compressor: these bytes ARE the `Data.db` payload, so they are read
+            // work and must be counted (issue #1701, roborev B2). Skipping this branch
+            // left every UNCACHED UNCOMPRESSED read — the shape CQLite's own writer
+            // produces (#1406) — invisible to `cqlite.read.bytes`.
+            read_metrics::record_decompressed_bytes(
+                compressed.len(),
+                read_metrics::COMPRESSION_NONE,
+            );
             Ok(compressed)
         }
     }

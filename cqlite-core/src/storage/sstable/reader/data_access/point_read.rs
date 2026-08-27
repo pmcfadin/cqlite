@@ -54,7 +54,7 @@ impl SSTableReader {
         // and free of even an `Instant` sample, when metrics are not collected.
         let mut meter = ReadOpMeter::start(Some(self.sstable_format_label()));
         let outcome = self
-            .get_with_resolution_inner(table_id, key, fully_qualified_match)
+            .get_with_resolution_unmetered(table_id, key, fully_qualified_match)
             .await;
         if let Ok(Some(_)) = &outcome {
             // A resolved point read is exactly one row of exactly one partition.
@@ -65,10 +65,21 @@ impl SSTableReader {
     }
 
     /// The point-read body [`get_with_resolution`](Self::get_with_resolution)
-    /// measures. Split out so the metric accounting wraps EVERY exit — including
-    /// the `?` propagations and the early authoritative-absence return — without
-    /// threading an emit call through each of them.
-    async fn get_with_resolution_inner(
+    /// measures — and the entry point for a caller that owns the OPERATION-level
+    /// meter itself (issue #1701, roborev B1).
+    ///
+    /// `SSTableManager::get` walks the resolved generations of one table, so metering
+    /// each per-reader lookup would emit one `cqlite.read.duration` sample per
+    /// CANDIDATE SSTABLE and count a row once per matching generation rather than
+    /// once per reconciled result. The manager therefore calls THIS and meters the
+    /// whole operation once (`storage::sstable::manager_point_read`). A direct
+    /// single-reader caller keeps [`get_with_resolution`](Self::get_with_resolution),
+    /// whose meter can honestly carry this reader's format label.
+    ///
+    /// Split out (rather than emitting inline) so the accounting wraps EVERY exit —
+    /// the `?` propagations and the early authoritative-absence return included —
+    /// without threading an emit call through each of them.
+    pub(crate) async fn get_with_resolution_unmetered(
         &self,
         table_id: &TableId,
         key: &RowKey,
