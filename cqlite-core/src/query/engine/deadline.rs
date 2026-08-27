@@ -47,6 +47,15 @@
 //! spawned producer observes its receiver go away and exits (its `send` fails).
 //! Nothing is detached and left running — see
 //! `tests/issue_1695_query_timeout.rs`.
+//!
+//! ONE place needs more than the drop, and has it: a `spawn_blocking` closure
+//! CANNOT be cancelled by dropping its `JoinHandle`. The multi-generation
+//! materializing merges build their result inside such a closure with no channel
+//! send that could fail, so each one arms a per-call flag whose guard lives in the
+//! dropped future's scope and abandons the merge at its next partition — see
+//! `storage::sstable::generation_merge::merge_cancel`. Any FUTURE blocking work
+//! reached from a bounded entry point owes the same treatment; the drop alone is
+//! not enough for it.
 
 use std::future::Future;
 use std::pin::Pin;
