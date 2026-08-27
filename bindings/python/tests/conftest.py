@@ -76,11 +76,64 @@ def _require_fixtures_strict() -> bool:
     ) in ("1", "true")
 
 
+# Two helpers, deliberately (issue #1458):
+#   _has_data_db()   -- the PREDICATE the guard asks on every dataset-dependent
+#                       test. Short-circuits at the first hit, so it never walks
+#                       the whole corpus (155 *-Data.db over 122 table dirs) to
+#                       answer "is there at least one?". Mirrors the Node
+#                       hasDataDbFile() walk, which short-circuits the same way.
+#   _count_data_db() -- the DIAGNOSTIC / acceptance-criteria counter. O(corpus)
+#                       and deliberately NOT on the hot path.
+# Both apply the same is_file() filter, so they can never disagree.
+
+
+def _data_db_files():
+    """Yield every ``*-Data.db`` FILE under ``DATASETS`` (issue #1458).
+
+    A present-but-EMPTY datasets directory is the exact shape of the original
+    #773 failure, so directory existence alone is not evidence of a corpus.
+    Yields nothing when ``DATASETS`` does not exist.
+
+    Only FILES qualify: ``Path.glob`` yields directories too, so an unfiltered
+    match lets a *directory* named e.g. ``placeholder-Data.db`` satisfy strict
+    mode with zero actual SSTable binaries.
+    """
+    if not DATASETS.exists():
+        return
+    for path in DATASETS.glob("**/*-Data.db"):
+        if path.is_file():
+            yield path
+
+
+def _has_data_db() -> bool:
+    """True when at least one ``*-Data.db`` FILE exists under ``DATASETS``.
+
+    Short-circuits at the first hit — this is the hot-path check used by
+    ``skip_if_no_datasets()``.
+    """
+    return any(True for _ in _data_db_files())
+
+
+def _count_data_db() -> int:
+    """Number of ``*-Data.db`` SSTable binaries under ``DATASETS`` (issue #1458).
+
+    Diagnostic counter: walks the ENTIRE corpus, so it is not used by the guard.
+    Returns 0 when ``DATASETS`` does not exist.
+    """
+    return sum(1 for _ in _data_db_files())
+
+
 def skip_if_no_datasets():
-    """Skip (or, under strict mode, FAIL) when the datasets dir is absent.
+    """Skip (or, under strict mode, FAIL) when the dataset corpus is unusable.
 
     Issue #1230: under ``CQLITE_REQUIRE_FIXTURES=1`` (used by CI) a missing
     dataset is a hard failure, never a silent skip.
+
+    Issue #1458: the check is CONTENT-aware, not directory-only — a datasets
+    dir that exists but holds zero ``*-Data.db`` files fails closed under strict
+    mode too, since that false-greens a broken fixture setup exactly like an
+    absent directory does. Local dev without the binaries (neither strict flag
+    set) still skips in both cases.
     """
     if not DATASETS.exists():
         msg = f"Test data not found: {DATASETS}"
@@ -88,6 +141,17 @@ def skip_if_no_datasets():
             pytest.fail(
                 f"{msg} (CQLITE_REQUIRE_FIXTURES=1 — fetch with "
                 "bash test-data/scripts/fetch-datasets.sh)",
+                pytrace=False,
+            )
+        pytest.skip(msg)
+
+    if not _has_data_db():
+        msg = f"Datasets dir present but contains 0 *-Data.db files: {DATASETS}"
+        if _require_fixtures_strict():
+            pytest.fail(
+                "Datasets dir present but contains 0 *-Data.db files "
+                "(CQLITE_REQUIRE_FIXTURES=1 — fetch with "
+                f"test-data/scripts/fetch-datasets.sh): {DATASETS}",
                 pytrace=False,
             )
         pytest.skip(msg)
