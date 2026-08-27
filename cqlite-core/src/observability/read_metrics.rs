@@ -234,6 +234,15 @@ impl ReadOpMeter {
     /// its meter rather than dropping it. Distinct from [`inert`](Self::inert),
     /// which is chosen at CONSTRUCTION for a boundary that is never an operation;
     /// this is decided at RUNTIME, after the attempt has already begun timing.
+    ///
+    /// Gated to the build that HAS a declining boundary: the only one is
+    /// `SSTableManager::scan_partition_clustering_reverse`, and `reverse_scan.rs` is
+    /// itself `#![cfg(not(feature = "tombstones"))]` (the seek/reverse paths exist only
+    /// on the default build). Under `--all-features` that module is compiled out, so an
+    /// ungated `discard` is dead code and fails the crate's `-D warnings` — and a blanket
+    /// `#[allow(dead_code)]` would silence the NEXT genuinely-dead method too. Widen this
+    /// cfg when a second declining boundary appears outside that module.
+    #[cfg(not(feature = "tombstones"))]
     pub(crate) fn discard(&mut self) {
         if let Some(acc) = self.0.as_mut() {
             acc.emitted = true;
