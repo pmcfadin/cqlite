@@ -650,6 +650,26 @@ impl SSTableReader {
             // 256-entry cadence as `sequential_scan`'s stitched branch so a
             // cancelled caller does not walk a huge already-parsed result set to
             // completion and then report success.
+            //
+            // KNOWN GAP for a QUERY TIMEOUT (#1695, roborev round 12), recorded here
+            // so it need not be re-derived: `scan_cancel` is the READER's SHARED
+            // token. #2264 trips it on a Flight client disconnect, and #2361 trips it
+            // when an iterator adapter drops — but NOTHING trips it when a streaming
+            // query's consumer goes away, so a timed-out scan over a BTI table keeps
+            // materialising this whole `results` Vec. The sibling producers were fixed
+            // by consulting their own channel (`tx.is_closed()` / racing
+            // `tx.closed()`), which is not available here: this function RETURNS a Vec
+            // and holds no sender.
+            //
+            // The fix is a closure→token bridge — a per-call token, a watcher awaiting
+            // the output sender's `closed()`, and that token passed in here in place of
+            // the reader's — which is the same mechanism the deferred "carry
+            // cancellation into the core streaming producer" work needs for
+            // `KWayMerger::step()` and `JoinedStream`. Deliberately NOT done ad hoc for
+            // BTI alone: three partial fixes in this area is how the gap got this
+            // scattered. Do NOT substitute the reader's token thinking it is
+            // equivalent — tripping THAT cancels other queries' scans on the same
+            // reader.
             scan_cancel.checkpoint(idx).await?;
             if prev_partition_key.as_ref() != Some(&entry_key) {
                 crate::storage::sstable::work_counters::add_stream_walk_partition_parsed();
