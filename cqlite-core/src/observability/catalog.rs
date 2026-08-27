@@ -625,8 +625,18 @@ pub const WRITE_BYTES: &str = "cqlite.write.bytes";
 
 /// `cqlite.compression.ratio` — histogram `1`.
 ///
-/// Per-chunk compression ratio (compressed bytes / uncompressed bytes; ≤1.0
-/// means the chunk shrank). Bounded attributes: [`attr::COMPRESSION`].
+/// **WRITE-SIDE ONLY.** Per-chunk compression ratio (compressed bytes /
+/// uncompressed bytes; ≤1.0 means the chunk shrank), recorded by the SSTable
+/// *writer* as it compresses each chunk. There is NO read-side emission: the read
+/// path decompresses chunks without recording a ratio, so this histogram says
+/// nothing about the compression of the SSTables being read (issue #1705, AI5 of
+/// epic #1686 — the previous wording implied a read-side series that does not
+/// exist).
+///
+/// Scope note (#1406): the only emission site is `CompressedDataWriter`, and the
+/// production write surface emits UNCOMPRESSED SSTables, so this series is silent
+/// outside compressed-fixture synthesis. Bounded attributes:
+/// [`attr::COMPRESSION`].
 pub const COMPRESSION_RATIO: &str = "cqlite.compression.ratio";
 
 // ---------------------------------------------------------------------------

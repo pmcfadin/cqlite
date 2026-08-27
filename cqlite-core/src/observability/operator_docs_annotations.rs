@@ -437,9 +437,9 @@ pub(super) const ANNOTATIONS: &[MetricDoc] = &[
         name: catalog::COMPRESSION_RATIO,
         kind: MetricKind::Histogram,
         unit: catalog::unit::DIMENSIONLESS,
-        summary: "Per-chunk compression ratio (compressed/uncompressed; <=1.0 means the chunk shrank).",
+        summary: "WRITE-SIDE ONLY: per-chunk compression ratio recorded by the SSTable writer as it compresses each chunk (compressed/uncompressed; <=1.0 means the chunk shrank). There is no read-side emission, so it says nothing about the SSTables being read.",
         attributes: &[attr::COMPRESSION],
-        interpretation: "Ratios near 1.0 mean incompressible data; a sudden rise means less benefit from the configured codec.",
+        interpretation: "Ratios near 1.0 mean incompressible data; a sudden rise means less benefit from the configured codec. Silent unless compressed writing is in use (#1406: the production write surface emits uncompressed SSTables).",
         round_item: "—",
     },
     MetricDoc {

@@ -13,16 +13,27 @@
 //! |----------------|------------------|-------------------------------------------------------------------|
 //! | `Io`           | `io`             | `Io`, `InvalidPath`, `Timeout`                                     |
 //! | `Serialization`| `serialization`  | `Serialization`, `TypeConversion`                                 |
-//! | `Corruption`   | `corruption`     | `Corruption`                                                       |
+//! | `Corruption`   | `corruption`     | `Corruption`, `CorruptCommitLogFrame`                              |
 //! | `Schema`       | `schema`         | `Schema`, `Table`                                                  |
-//! | `Parsing`      | `parsing`        | `Parse`, `CqlParse`, `InvalidFormat`, `UnsupportedFormat`         |
+//! | `Parsing`      | `parsing`        | `Parse`, `CqlParse`, `InvalidFormat`, `UnsupportedFormat`,        |
+//! |                |                  | `UnsupportedVersion`, `UnsupportedCommitLogVersion`               |
 //! | `Storage`      | `storage`        | `Storage`, `Memory`, `Index`, `Compaction`, `WriteDirLocked`     |
 //! | `Concurrency`  | `concurrency`    | `Concurrency`, `Transaction`                                       |
 //! | `Constraints`  | `constraints`    | `ConstraintViolation`, `AlreadyExists`                            |
-//! | `Query`        | `query`          | `QueryExecution`, `UnsupportedQuery`, `InvalidInput`             |
+//! | `Query`        | `query`          | `QueryExecution`, `UnsupportedQuery`, `InvalidInput`,             |
+//! |                |                  | `ResultTooLarge`, `ForcedReadPathUnavailable`, `InvalidReadPath`  |
 //! | `Cancelled`    | `cancelled`      | `Cancelled` (issue #2264 — a cooperative abort, never `Io`)       |
 //! | `Other`        | `other`          | `Configuration`, `InvalidState`, `InvalidOperation`, `NotFound`,  |
 //! |                |                  | `Internal`, `Wasm`, and any future variant (catch-all)            |
+//!
+//! The table is EXACT, not illustrative, and
+//! `error_schema_tests::every_error_variant_classify_routes_is_documented_in_the_taxonomy_table`
+//! enforces variant→category set equality against [`classify`]'s match arms in
+//! both directions (issue #1705, AI5 of epic #1686): a variant routed but
+//! undocumented, a documented variant that is never routed, and a variant listed
+//! under the wrong category all fail. Cross-block rule (epic #1686 capstone §3):
+//! [`classify`] is the authority the language bindings' error tables derive from,
+//! so this table is what those tables must mirror.
 //!
 //! # Relation to spans and CLI exit codes
 //!

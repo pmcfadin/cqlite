@@ -609,6 +609,67 @@ fn read_partition_lookup_documents_the_attribute_keys_it_actually_emits() {
 }
 
 #[test]
+fn compression_ratio_is_documented_write_side_only_and_emitted_only_there() {
+    // Issue #1705 (AI5 instance 4): the doc used to describe a bare "per-chunk
+    // compression ratio", which reads as a read-path signal an operator could use
+    // to reason about the SSTables being READ. There is no such emission. Pin the
+    // honesty claim to the code: the only emission site is the compressed-data
+    // WRITER, and no reader/decompression path records this histogram.
+    let src = include_str!("catalog.rs");
+    let start = src
+        .find("/// `cqlite.compression.ratio`")
+        .expect("the COMPRESSION_RATIO doc block must exist");
+    let end = src[start..]
+        .find("pub const COMPRESSION_RATIO")
+        .expect("the doc block must precede its constant");
+    let doc = &src[start..start + end];
+    assert!(
+        doc.contains("WRITE-SIDE ONLY"),
+        "the COMPRESSION_RATIO doc must state that it is write-side only"
+    );
+
+    // The claim, measured: every emission site of this metric across the crate
+    // (outside the catalog + operator-doc declaration sites, which name it without
+    // emitting) must be a writer.
+    let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+    let mut emitters = Vec::new();
+    let mut stack = vec![dir.clone()];
+    while let Some(d) = stack.pop() {
+        let entries = std::fs::read_dir(&d).expect("crate src must be readable");
+        for e in entries.filter_map(|e| e.ok()) {
+            let path = e.path();
+            if path.is_dir() {
+                stack.push(path);
+                continue;
+            }
+            if path.extension().and_then(|x| x.to_str()) != Some("rs") {
+                continue;
+            }
+            let rel = path
+                .strip_prefix(&dir)
+                .unwrap_or(&path)
+                .to_string_lossy()
+                .replace('\\', "/");
+            if rel.starts_with("observability/") {
+                continue; // declaration + annotation sites, not emitters
+            }
+            let text = std::fs::read_to_string(&path).expect("source must be readable");
+            if text.contains("COMPRESSION_RATIO") {
+                emitters.push(rel);
+            }
+        }
+    }
+    emitters.sort();
+    assert_eq!(
+        emitters,
+        vec!["storage/sstable/writer/compressed_data_writer.rs".to_string()],
+        "COMPRESSION_RATIO must be emitted ONLY from the compressed-data writer — a \
+         new site (especially a read/decompression path) invalidates the \
+         write-side-only wording in its catalog doc and operator annotation"
+    );
+}
+
+#[test]
 fn saturation_gauges_are_registered_namespaced_and_unique() {
     // Issue #2419 (WS2), spec Requirement: every saturation gauge must be a
     // `cqlite.*` name in ALL_METRICS, appearing exactly once, with the units
