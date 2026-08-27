@@ -1,18 +1,24 @@
 # Phase-2 recon — can we measure `do_get` on Corpus B, and is S=6 comparable?
 
 Read-only recon, no runs. Answers the three questions asked before phase 2 is
-committed to. **The short version: (a) mechanics are straightforward, (c) Corpus
-B is servable, and (b) — the decisive one — `do_get` at S=6 is NOT comparable to
-bare-scan S=6 on this box, and probably not even a valid `do_get` measurement.**
+committed to. **OUTCOME (recorded after the runs): (a) and (c) held. (b) — this recon's
+decisive recommendation, to skip S=6 as probably client-bound — was WRONG, and
+the falsification it proposed is what proved it wrong.** Halving the client moved
+the S=6 aggregate by **+0.02%**, so the point is not client-bound; `do_get` S=6
+was measured and AC4's box-level "remaining" is discharged. The reasoning below
+is left as written, with this outcome noted, because a recommendation and its
+refutation are both evidence. See report §9.1.
 
 ## (a) Mechanics
 
 | piece | how |
 |---|---|
-| server | `cqlite-flight --data-dir <root> --port <p>`. `Producer::table_base_dir` resolves `<data_dir>/<keyspace>/<table>`, so `--data-dir /data/ws0-3096` serves `ws0.events`. |
+| server | `cqlite-flight --data-dir <root> --listen <addr:port>`. `Producer::table_base_dir` resolves `<data_dir>/<keyspace>/<table>`, so `--data-dir /data/ws0-3096` serves `ws0.events`. **CORRECTION:** this recon originally wrote `--port <p>`, which the server does not accept. Found when the run was executed. |
 | schema | **Carried in the TICKET, not a server-side file** — `service.rs:424 parse_schema(ticket)` parses CQL DDL per request and caches it (`schemas: Mutex<HashMap<String, Arc<TableSchema>>>`). So the server needs no `--schema`; the loadgen's `--ticket-template` supplies Corpus B's DDL. |
 | loadgen | `flight-loadgen --endpoint http://127.0.0.1:<p> --ticket-template <file>` |
-| **N** | `--concurrency` — an ordered comma-separated list of target concurrencies, **one ramp step each** (default `1,2,4,8,16,32`). So N is expressed as ramp steps, and one invocation sweeps the whole ladder. |
+| **N** | `--ramp` — an ordered comma-separated list of target concurrencies, **one ramp step each** (default `1,2,4,8,16,32`). So N is expressed as ramp steps. |
+| shape | `--shape` **defaults to `mixed`** (weighted ptr/lim/full). A bare-scan comparison MUST pass `--shape full`; a default run silently measures a different workload and yields a plausible, wrong ratio. |
+| admission | `max_concurrent_scans` is **DERIVED from visible CPUs** and silently caps an N sweep: 32 unpinned, **24** at 6 physical cores, **4** at 1 physical core. |
 | rows | per-step records carrying `rows_total` and `rows_per_s` (`record.rs`), written to `--out`. |
 | pinning | `ws0-baseline.sh` splits `--server-cpus` / `--client-cpus` and **refuses overlap**. |
 

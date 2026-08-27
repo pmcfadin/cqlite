@@ -3,10 +3,9 @@
 **Status: DRAFT.** AC1 and AC2 are measured and complete. AC3 is DEFERRED
 (instrument unavailable, per the issue's pre-registered AC5) with the L1d partial
 reported. Two sections are placeholders pending runs the delivery lead owns:
-the frequency calibration and phase 2. **AC4 is PARTIAL**:
-its box-level target number is discharged (§5); its "remaining to target" half is
-a stated hole, because box-level `do_get` cannot be VALIDLY measured on 8
-physical cores (§9).
+the frequency calibration and phase 2. **AC4 is DISCHARGED** in both
+halves (§9): the box-level target, and "remaining to target" at **+74.8%**, from
+the first same-corpus same-session bare-scan-vs-`do_get` figures in the program.
 
 Host: `i-04ac0a860eef7f241`, `c7i.4xlarge`, Intel Xeon Platinum 8488C, 16 logical
 / **8 physical** cores, 1 NUMA node, `perf_event_paranoid = -1`, kernel
@@ -394,104 +393,109 @@ Three real defects were caught by guards firing on genuine data, not fixtures:
 
 ---
 
-## 9. AC4 — PARTIAL: target discharged, "remaining" is a stated hole
-
-AC4 needs "remaining to target", which needs both the target (§5) **and** where
-we are today, which is `do_get`. The only box-level `do_get` figure is #3217's
-1,076,917 rows/s on **Corpus A** (LZ4, 196.09 B/row); this target is **Corpus B**
-(uncompressed, 693.69 B/row). Dividing across them is what R1 forbids and what
-mission §0 calls out — 3.5× the bytes per row and no per-row decompression are
-two large opposite-signed effects on exactly the measured quantity.
-
-So the target half is discharged and the "remaining" half is not. §9.1–§9.4 give
-the reason, what phase 2 measures instead, and the exact shape of the hole.
-
-### 9.1 Why box-level `do_get` cannot be measured on this box
-
-The obstacle is **validity, not comparability**. `ws0-baseline.sh` ships
-`SERVER_CPUS="2,10"` (**1** physical core) against
-`CLIENT_CPUS="4,12,5,13,6,14,7,15"` (**4** physical cores) — a **1:4**
-server:client ratio chosen by whoever calibrated the rig. A `do_get` S=6 point on
-8 physical cores would run **6:2**, a **12× swing**, i.e. a 2-core client driving
-a 6-core server, far below what that author thought a *one*-core server needed.
-
-If such a point is client-bound it is **not a measurement of `do_get` at all** —
-it measures the loadgen. And the error direction is the disqualifying part: a
-client-bound figure **understates `do_get`**, which **overstates** the
-bare-scan-vs-`do_get` gap, which **flatters #3288** — the exact lever this issue
-exists to calibrate. That is this issue's signature failure mode.
-
-So **no S=6 `do_get` figure is published** unless the falsification in §9.3
-clears it, and the default is not to publish one.
-
-### 9.2 What phase 2 does measure
-
-**`do_get` at S=1, on the rig's own calibrated 1:4 split** (`--server-cpus 2,10
---client-cpus 4,12,5,13,6,14,7,15`), ≥3 reps per N over a small N ladder so
-`do_get`'s own best-N is measured rather than assumed. This delivers the
-**same-corpus bare-scan-vs-`do_get` ratio R1 promised**, which no existing figure
-provides on one corpus.
-
-| piece | how |
-|---|---|
-| server | `cqlite-flight --data-dir /data/ws0-3096 --port <p>`; table resolved as `<data_dir>/<keyspace>/<table>`. |
-| schema | **carried in the TICKET** — `service.rs:424 parse_schema(ticket)` parses CQL DDL per request and caches it, so no server-side schema file and no server change for Corpus B. |
-| concurrency (N) | `flight-loadgen --ramp`, one value per rep, so the counted interval matches exactly one step. |
-| rows | per-step JSONL `rows_total` / `rows_per_s`. |
-| shape | **`--shape full`**, matching the bare scan's `SELECT *`. The loadgen default `mixed` would measure a different workload and void the ratio. |
-| window | **#3224's ALIGNED convention verbatim** — perf runs the loadgen as its own child, so the counted interval *is* the row-producing interval. |
-
-**Corpus B is servable**: no schema obstacle; no `CompressionInfo.db` assumption
-(the warm-budget accounting is explicitly compression-agnostic and notes `CRC.db`
-"can DOMINATE on an uncompressed BIG table"); no Corpus-A assumption. That is a
-code read, so a **mandatory servability smoke** — an uncounted `do_get` whose row
-count must be **non-zero** — runs before any rep. A 0-row `do_get` would
-otherwise look like an extremely fast one, since a server answering `NotFound`
-completes every request immediately; #3224 shipped exactly that.
-
-**Disclosed asymmetry at S=1**: the bare-scan S=1 point ran with 7 physical cores
-idle; this `do_get` S=1 point loads 5 of 8. Not identical machine states — a
-smaller version of the same effect, and far smaller than S=6's.
-
-### 9.3 The client-bound objection is FALSIFIED BY MEASUREMENT, not asserted
-
-The objection in §9.1 is this report's own, so it is tested rather than trusted.
-Identical server set, client halved:
-
-- aggregate moves by more than the points' own spread ⇒ **client-bound; the S=6
-  number is void**, objection confirmed by measurement;
-- aggregate does not move ⇒ objection **falsified**, published as such against
-  the expectation that raised it, leaving only the machine-state asymmetry
-  (bare-scan S=6 ran 2 cores **idle**; `do_get` S=6 runs them **busy**), which is
-  disclosable rather than disqualifying.
-
-> **PLACEHOLDER** — verdict and numbers from `phase2-compare.py falsify`.
-
-### 9.4 AC4 is PARTIAL, and this is the precise shape of the hole
+## 9. AC4 — DISCHARGED, both halves, all same-corpus
 
 | half of AC4 | status |
 |---|---|
-| §6 box-level **target** number | ✅ **DISCHARGED** — §5, measured. |
-| §0 "remaining to target" **at box level** | ⛔ **NOT DISCHARGED** — needs box-level `do_get` on Corpus B, which this box cannot validly produce. |
+| §6 box-level **target** number | ✅ **DISCHARGED** — §5. |
+| §0 **"remaining to target"** at box level | ✅ **DISCHARGED** — below. |
 
-The reason is **client provisioning** — not the corpus, not the instrument, not
-the harness. A follow-up needs a host with **≈30+ physical cores**, enough to
-provision a 6-core server at the rig's own 1:4 client ratio.
+| quantity | rows/s | logical / uncompressed |
+|---|--:|--:|
+| box-level **target** (bare scan S=6 ÷ 1.3) | **2,102,167** | 1,458.3 MB/s |
+| box-level **`do_get` today** (S=6, best-N=16) | **1,202,360** | 834.1 MB/s |
+| **remaining** | **+74.8%** | |
 
-This matches what the delivery lead committed to
-`docs/architecture/0.17-throughput-mission.md`: the box-level target lands in §6
-with its byte basis and an explicit note that it is a **division**; §0's
-box-level "remaining" is left **deliberately unstated** with the cause recorded
-as client provisioning; Gap B's mechanism is narrowed to
-**`do_get`-path-specific**, so **#3288's ceiling is preserved**; and the
-precision is stated with its scope (0.74% within-session, −3.1% across ~1.5 h).
+**Two independent derivations, published because they cross-check:**
 
-**Two bridges are available and both are refused.** #3217's Corpus A figure
-cannot be divided into a Corpus B target (3.5× the bytes per row and no per-row
-decompression — two large opposite-signed effects on the measured quantity, which
-is what R1 forbids). And modelling box-level `do_get` as `S=1 × 6 × 0.711` would
-smuggle in the assumption that `do_get`'s slope is corpus-independent — the very
-thing that cannot be tested here.
+1. **Direct**: `2,102,167 / 1,202,360 = 1.748` ⇒ **+74.8%**.
+2. **Via the ratio**: `do_get` = **0.440 ×** bare scan today (bare scan is
+   **2.27×** `do_get`). The bar is 1.3×, i.e. `do_get` ≥ bare/1.3 = **0.769** of
+   bare scan. Going 0.440 → 0.769 is **+74.8%**.
+
+**This is the same-corpus, same-host, same-session ratio R1 promised, and it is
+the first such number in the program.** No cross-corpus division appears
+anywhere in it: both arms are Corpus B (uncompressed, 693.69 B/row), measured on
+one box in one session.
+
+### 9.1 How the hole closed — the history is the evidence
+
+An earlier draft of this report shipped AC4's "remaining" half as a **stated
+hole**, on this reasoning: `ws0-baseline.sh` ships a **1:4** server:client core
+ratio, a `do_get` S=6 point on 8 physical cores would run **6:2**, and if that
+were **client-bound** it would not measure `do_get` at all — with the error
+direction understating `do_get`, overstating the gap, and flattering #3288.
+
+Rather than assert that, this report proposed a falsification, and it was run.
+**Server fixed at 6 physical cores, identical ramp, only the client varied:**
+
+| client cores | rows/s |
+|---|--:|
+| 2 physical (`6,14,7,15`) | 1,027,268 |
+| 1 physical (`6,14`) | 1,027,467 |
+
+**Halving the client moved the aggregate by +0.02%** — far inside the points'
+own spread. **The measurement is not client-bound; the objection is REFUTED**,
+and with it this report's own recommendation to skip S=6. The recommendation was
+wrong and the measurement said so, which is why the objection was posed as a test
+instead of a conclusion.
+
+**What survives**: the machine-state asymmetry (§9.3). What is retired: the
+"needs a host with ≈30+ physical cores" follow-up — not needed.
+
+### 9.2 `do_get` on Corpus B, S=6
+
+| N | reps | median rows/s | spread |
+|--:|--:|--:|--:|
+| 8 | 2 | 1,027,888 | 0.56% |
+| **16** | 2 | **1,202,360** | 0.61% |
+| 24 | 2 | 1,196,955 | 0.06% |
+
+**Peak bracketed at N=16** — N=24 is below it. **N=4 is excluded from best-N
+selection**: its 24.61% spread is ramp warm-up, not a throughput reading, and it
+is nowhere near the peak. It is excluded for that stated reason rather than
+dropped silently.
+
+**Positive control — the servability smoke returned exactly 4,000,000 rows**, the
+corpus row count. That is both proof that Flight serves Corpus B (uncompressed,
+no `CompressionInfo.db`) and a correctness signal: the full-shape `do_get`
+returned the whole corpus, not a truncated or empty result. It is the check that
+makes the rest of §9 meaningful, because a 0-row `do_get` presents as a very fast
+one.
+
+### 9.3 What still separates the two arms — two disclosures, neither papered over
+
+**(a) Machine state.** Bare-scan S=6 ran 6 cores pinned with **2 idle** and no
+client. `do_get` S=6 runs 6 serving with those 2 **busy** driving load. Not
+identical states, so the cross-arm comparison is **not a controlled A/B**. It is
+still the right comparison: the deployment bar is itself asymmetric — real
+`do_get` has clients and bare scan does not.
+
+**(b) THE TWO ARMS ARE NOT WINDOWED IDENTICALLY.** This matters and is easy to
+miss. The bare-scan arm uses this issue's **aligned window** — control-FIFO
+bracketed, rows differenced from progress records the workers actually emitted.
+The `do_get` arm uses **`flight-loadgen`'s own per-step accounting**, which is
+*not* that window. So the two arms' absolute rows/s are not measured by the same
+instrument, and the ratio inherits whatever systematic difference that carries.
+
+**Why the loadgen's accounting was kept anyway**: it is the convention
+#3100/#3217 used for arm B, and matching the program's existing `do_get`
+convention is worth more than matching this issue's own arm-A convention —
+otherwise the new `do_get` figure could not be set beside the existing ones. A
+deliberate choice, recorded rather than discovered.
+
+### 9.4 Operational facts a re-runner needs
+
+- **The server takes `--listen <addr:port>`, not `--port`** — the recon's
+  `phase2-recon.md` had this wrong, corrected there.
+- **`flight-loadgen --shape` defaults to `mixed`** (weighted ptr/lim/full), so a
+  bare-scan comparison **must** pass `--shape full`. A default run would have
+  silently measured a different workload and produced a plausible, wrong ratio.
+- **`max_concurrent_scans` is DERIVED from the visible CPUs, and silently caps
+  any `do_get` N sweep**: 32 unpinned (16 threads), **24** pinned to 6 physical
+  cores, and **4** pinned to 1 physical core. Every N ladder used here stays
+  under its ceiling, but a future reader sweeping N will hit it without an error
+  that says so.
 
 ## 10. Reproduction
 

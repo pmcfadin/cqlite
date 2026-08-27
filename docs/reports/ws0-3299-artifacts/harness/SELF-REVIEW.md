@@ -124,6 +124,23 @@ abort every rep. Deferred for the same reason as Q3, plus one specific to
 live `sweep.sh` can corrupt the running parse. It must be edited only when no
 sweep is running.
 
+## Q6 — `phase2.sh` carries the recon's `--port` error (fix queued)
+
+`phase2.sh` invokes the server with `--port "$PORT"`; the binary takes
+`--listen <addr:port>`. The measurements were run by hand with the correct flag,
+so no number is affected, but the committed harness would not start a server as
+written.
+
+**Not fixed yet, deliberately**: phase-2 runs were still in flight, and **bash
+reads a script incrementally as it executes**, so editing a live `sweep.sh` or
+`phase2.sh` can corrupt the running parse. Queued with the orphan fix (Q3) for
+the moment the box is quiet, in one commit.
+
+Same commit will add the `--shape full` default rationale as an assertion rather
+than a comment: a `mixed` run measures a different workload and would produce a
+plausible, wrong cross-arm ratio, which is precisely the kind of silent error the
+rest of this harness is built to refuse.
+
 ## Q5 (mine) — exclusive-create must not break resume
 
 `rep.py` now refuses an existing rundir (correctly: a shared rundir lets a peer's
