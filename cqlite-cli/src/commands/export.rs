@@ -113,6 +113,13 @@ pub async fn export_data(
         _ => StreamingConfig::for_text_formats(),
     };
 
+    // Issue #1695: the budget clock starts BEFORE setup. An earlier revision derived
+    // the remainder from `start_time`, which is captured AFTER `execute_streaming`
+    // returns — so consumption was handed a fresh FULL budget and setup cost nothing
+    // against it (roborev round 10). `start_time` still exists for the export
+    // statistics, which deliberately report consumption time only.
+    let budget_start = Instant::now();
+
     // Execute the query with streaming (Issue #280 - true end-to-end streaming)
     let mut result_iter = database
         .execute_streaming(&query, config.clone())
@@ -164,7 +171,7 @@ pub async fn export_data(
         // reading of an astronomically distant deadline.
         tokio::time::Instant::now().checked_add(
             export_budget
-                .checked_sub(start_time.elapsed())
+                .checked_sub(budget_start.elapsed())
                 .unwrap_or_default(),
         )
     };
@@ -200,12 +207,14 @@ pub async fn export_data(
                     break;
                 }
 
-                check_export_deadline(export_deadline, start_time, export_budget)?;
-
-                let chunk = result_iter
-                    .collect_chunk(chunk_size)
-                    .await
-                    .map_err(|e| anyhow::anyhow!("Failed to collect chunk: {}", e))?;
+                let chunk = collect_chunk_within(
+                    &mut result_iter,
+                    chunk_size,
+                    export_deadline,
+                    budget_start,
+                    export_budget,
+                )
+                .await?;
 
                 if chunk.is_empty() {
                     break;
@@ -257,12 +266,14 @@ pub async fn export_data(
                     break;
                 }
 
-                check_export_deadline(export_deadline, start_time, export_budget)?;
-
-                let chunk = result_iter
-                    .collect_chunk(chunk_size)
-                    .await
-                    .map_err(|e| anyhow::anyhow!("Failed to collect chunk: {}", e))?;
+                let chunk = collect_chunk_within(
+                    &mut result_iter,
+                    chunk_size,
+                    export_deadline,
+                    budget_start,
+                    export_budget,
+                )
+                .await?;
 
                 if chunk.is_empty() {
                     break;
@@ -332,12 +343,14 @@ pub async fn export_data(
                     break;
                 }
 
-                check_export_deadline(export_deadline, start_time, export_budget)?;
-
-                let chunk = result_iter
-                    .collect_chunk(chunk_size)
-                    .await
-                    .map_err(|e| anyhow::anyhow!("Failed to collect chunk: {}", e))?;
+                let chunk = collect_chunk_within(
+                    &mut result_iter,
+                    chunk_size,
+                    export_deadline,
+                    budget_start,
+                    export_budget,
+                )
+                .await?;
 
                 if chunk.is_empty() {
                     break;
@@ -414,12 +427,14 @@ pub async fn export_data(
                     break;
                 }
 
-                check_export_deadline(export_deadline, start_time, export_budget)?;
-
-                let chunk = result_iter
-                    .collect_chunk(chunk_size)
-                    .await
-                    .map_err(|e| anyhow::anyhow!("Failed to collect chunk: {}", e))?;
+                let chunk = collect_chunk_within(
+                    &mut result_iter,
+                    chunk_size,
+                    export_deadline,
+                    budget_start,
+                    export_budget,
+                )
+                .await?;
 
                 if chunk.is_empty() {
                     break;
@@ -699,6 +714,66 @@ mod tests {
     }
 }
 
+/// Pull one chunk, abandoning the wait at `deadline` (issue #1695).
+///
+/// The pre-pull [`check_export_deadline`] alone was NOT enough: it only runs between
+/// pulls, and `collect_chunk` can stay PENDING indefinitely while the producer looks
+/// for rows — a no-match scan over a large table is exactly that — so control never
+/// returned to the check and the export ran past the deadline (roborev round 10).
+/// Wrapping the AWAIT bounds the wait itself.
+///
+/// Only the future is wrapped, not the loop or the enclosing per-format `match`, so
+/// no writer or progress-bar borrow moves.
+///
+/// BOTH layers live here rather than at the call sites: an already-expired deadline
+/// is rejected before a pull starts, and a pull that hangs is bounded by the timer.
+/// Keeping them together means a fifth consumption loop cannot be added that forgets
+/// one of them — the four existing ones each got the pre-check by hand, which is
+/// exactly the kind of per-site obligation that rots.
+#[cfg(feature = "state_machine")]
+async fn collect_chunk_within(
+    result_iter: &mut cqlite_core::query::result::QueryResultIterator,
+    chunk_size: usize,
+    deadline: Option<tokio::time::Instant>,
+    started: std::time::Instant,
+    budget: std::time::Duration,
+) -> Result<Vec<cqlite_core::query::result::QueryRow>> {
+    // Layer 1: an ALREADY-expired deadline must not start a pull at all. This cannot
+    // be left to `timeout_at` below, which polls its inner future FIRST and consults
+    // the deadline second — so an immediately-ready chunk would come back `Ok` past
+    // the deadline (the round-7 lesson, applied here before it could recur).
+    check_export_deadline(deadline, started, budget)?;
+
+    // Layer 2: bound the WAIT itself.
+    let pull = result_iter.collect_chunk(chunk_size);
+    let chunk = match deadline {
+        None => pull.await,
+        Some(deadline) => match tokio::time::timeout_at(deadline, pull).await {
+            Ok(chunk) => chunk,
+            // Dropping `pull` drops the in-flight chunk collection; the caller's error
+            // path then drops the iterator, closing the channel and retiring the
+            // producer.
+            Err(_elapsed) => return Err(export_expired(started, budget)),
+        },
+    };
+    chunk.map_err(|e| anyhow::anyhow!("Failed to collect chunk: {}", e))
+}
+
+/// The export-layer elapse. One constructor for both exits — the pre-pull check and
+/// the bounded await — so they cannot drift in operation name or reported figures.
+#[cfg(feature = "state_machine")]
+fn export_expired(started: std::time::Instant, budget: std::time::Duration) -> anyhow::Error {
+    anyhow::Error::new(cqlite_core::Error::QueryTimeout {
+        operation: "cli.export.collect".to_string(),
+        // MEASURED, not assumed equal to the budget: a slow chunk can overshoot, and
+        // the real figure distinguishes "budget too tight" from "one chunk is
+        // uninterruptibly slow".
+        elapsed: started.elapsed(),
+        limit: budget,
+    })
+    .context("CLI export exceeded performance.query_timeout_ms")
+}
+
 /// The export-side budget check (issue #1695), called before each chunk pull.
 ///
 /// Deliberately a check rather than a `timeout_at` wrapper: the four consumption
@@ -722,15 +797,7 @@ fn check_export_deadline(
     if tokio::time::Instant::now() < deadline {
         return Ok(());
     }
-    Err(anyhow::Error::new(cqlite_core::Error::QueryTimeout {
-        operation: "cli.export.collect".to_string(),
-        // MEASURED, not assumed equal to the budget: a slow chunk can overshoot,
-        // and the real figure distinguishes "budget too tight" from "one chunk is
-        // uninterruptibly slow".
-        elapsed: started.elapsed(),
-        limit: budget,
-    })
-    .context("CLI export exceeded performance.query_timeout_ms"))
+    Err(export_expired(started, budget))
 }
 
 #[cfg(all(test, feature = "state_machine"))]
