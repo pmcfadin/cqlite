@@ -5998,6 +5998,86 @@ run_legacy_heuristics() {
 
   echo ">>> [$name] derived${names} ($count target(s) from $tests_dir/*.rs)"
   [ -n "$negonly" ] && echo ">>> [$name] allowed-zero (NEGATIVE-polarity only — cfg(not(...)) bodies compile out here and run in core-tests):$negonly"
+
+  # COVERAGE CENSUS — the co-required-feature gap (roborev round-4 finding, Medium).
+  #
+  # A test body gated `#[cfg(all(feature = "legacy-heuristics", feature = "X"))]` compiles
+  # OUT when X is not enabled, and this lane enables only `default + legacy-heuristics`.
+  # Those bodies are therefore NOT EXECUTED here — and the #2039 zero-tests guard cannot
+  # see it, because sibling ungated tests in the same target keep its count nonzero. That
+  # is the same invisible-omission shape this whole issue exists to remove (cf. the
+  # required-features targets that print no `Running` line, and the observability-testing
+  # targets of #3375), so the lane DECLARES it rather than leaving it to be discovered.
+  #
+  # DERIVED, not curated: the co-required feature names come from the committed cfg
+  # attributes, and membership is tested against cargo's OWN resolved feature set for this
+  # invocation — so if such a feature later becomes enabled here, it drops out of the
+  # census automatically with no gate edit.
+  #
+  # ON THE ORACLE'S BREADTH, since it looks alarming and was checked rather than assumed:
+  # the resolved set printed below is WIDER than cqlite-core's `default + legacy-heuristics`
+  # (it includes arrow/parquet/cli-helpers). That is NOT a workspace-resolution artifact —
+  # `cargo metadata --manifest-path cqlite-core/Cargo.toml` returns the identical set. It is
+  # DEV-DEPENDENCY feature unification, which `cargo test` applies as well. So this is the
+  # right oracle for a `cargo test` lane: it reports what the test compile really enables.
+  # The direction matters for THIS census specifically — it reports a GAP, so an
+  # over-broad enabled set would UNDER-report gaps (the permissive direction). Verified
+  # not to be over-broad, `experimental` is genuinely absent, and the count below is real.
+  #
+  # Deliberately NOT done in this change: a second `--features legacy-heuristics,experimental`
+  # pass that would actually execute them. It is a third full compile of cqlite-core at a
+  # third feature set — measured cost for the existing single pass is ~292s — and the
+  # general "experimental executes nowhere" hole is #3373's subject, not this lane's.
+  local lh_enabled coreq="" coreq_n=0 f_ tok
+  if ! lh_enabled=$(_resolved_package_features cqlite-core --features legacy-heuristics); then
+    status=FAIL
+    {
+      echo "[$name] FAIL-CLOSED: could not derive cqlite-core's enabled feature set at"
+      echo "        default+legacy-heuristics, so the co-required-feature census is"
+      echo "        unmeasurable. A census that cannot be taken is not reported as empty."
+    } | tee "$log"
+    end=$(date +%s)
+    record_result "$name" "$status" "$((end - start))"
+    echo ">>> [$name] $status ($((end - start))s)"
+    return 0
+  fi
+  for f_ in $names; do
+    [ -r "$tests_dir/$f_.rs" ] || continue
+    while IFS= read -r tok; do
+      [ -n "$tok" ] || continue
+      case "$lh_enabled" in
+        *" $tok "*) ;;
+        *) coreq_n=$((coreq_n + 1))
+           case " $coreq " in *" $tok "*) ;; *) coreq="$coreq $tok" ;; esac ;;
+      esac
+    done <<EOF
+$(grep -oE '#\[cfg\(all\(feature[[:space:]]*=[[:space:]]*"legacy-heuristics",[[:space:]]*feature[[:space:]]*=[[:space:]]*"[^"]+"\)\)\]' "$tests_dir/$f_.rs" 2>/dev/null \
+   | sed -E 's/.*,[[:space:]]*feature[[:space:]]*=[[:space:]]*"([^"]+)"\)\)\]$/\1/')
+EOF
+  done
+  local -a lh_census=()
+  if [ "$coreq_n" -gt 0 ]; then
+    local _body_word="bodies"; [ "$coreq_n" -eq 1 ] && _body_word="body"
+    lh_census+=("COVERAGE CENSUS — WHAT THIS LANE DOES NOT EXECUTE:")
+    lh_census+=("  $coreq_n legacy-heuristics-gated test $_body_word ALSO require$coreq, which this lane")
+    lh_census+=("  does NOT enable, so they compile out and are NOT EXECUTED here.")
+    lh_census+=("  The #2039 zero-tests guard CANNOT detect this: sibling ungated tests in the same")
+    lh_census+=("  target keep its count nonzero.")
+    lh_census+=("  Tracked by #3373 (experimental-gated tests execute in NO lane at all).")
+  else
+    lh_census+=("co-required-feature census: 0 — every legacy-heuristics-gated body is reachable at this feature set")
+  fi
+  lh_census+=("enabled features (cargo metadata):$lh_enabled")
+  local _cl
+  for _cl in "${lh_census[@]}"; do echo ">>> [$name] $_cl"; done
+  # The log OPENS with the census (`>` here; the cargo build below switches to `>>`), so
+  # the omission is in the component log on every run, pass or fail — the same contract
+  # the flight-tests lane uses. A gap that only appears on stdout is a gap nobody reads.
+  {
+    echo "==== [$name] COVERAGE CENSUS (issue #1699 / #3373) ===="
+    for _cl in "${lh_census[@]}"; do echo "$_cl"; done
+    echo "==== end census ===="
+  } > "$log"
   echo ">>> [$name] RUSTFLAGS=-D warnings cargo build -p cqlite-core --features legacy-heuristics, then cargo test --no-fail-fast --lib + derived targets (#1699)"
   # --no-fail-fast is load-bearing for THIS lane specifically. cargo test stops after the
   # first failing test BINARY, and this lane is the first thing ever to execute these
@@ -6012,7 +6092,7 @@ run_legacy_heuristics() {
   # lane exists to catch at this feature set (#1981's dead-code shape: a cfg(test) helper
   # whose only caller is gated out) would have passed silently in exactly the half of the
   # lane that compiles test code. `env` both invocations so neither half is unguarded.
-  if env RUSTFLAGS="-D warnings" cargo build --package cqlite-core --features legacy-heuristics >"$log" 2>&1 \
+  if env RUSTFLAGS="-D warnings" cargo build --package cqlite-core --features legacy-heuristics >>"$log" 2>&1 \
       && env RUSTFLAGS="-D warnings" CQLITE_DATASETS_ROOT="$CQLITE_DATASETS_ROOT" \
         cargo test --no-fail-fast --package cqlite-core --features legacy-heuristics --lib "${targets[@]}" >>"$log" 2>&1; then
     # Green cargo exit is not sufficient — see the guard's own doc block.
