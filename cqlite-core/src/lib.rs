@@ -13,6 +13,12 @@
 pub mod config;
 pub mod cql;
 pub mod error;
+// The shared FFI error contract (issue #1451): the ONE authoritative
+// variant -> (python class, node code, category, recoverable, prefix) table that
+// `bindings/python` and `bindings/node` both consume, so a core error has the
+// same identity in every binding. Inert data only — no pyo3/napi dependency.
+// Relocates to `cqlite-ffi-common` when issue #1452 lands.
+pub mod ffi_error_contract;
 pub(crate) mod float_cmp;
 pub mod parser;
 // DISABLED FOR M1: Security and performance modules causing compilation errors
