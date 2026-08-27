@@ -35,6 +35,19 @@
 //! offset rather than by re-reading the text. Control tokens and caller data therefore
 //! never share a channel.
 //!
+//! # One table for every prefix (issue #1714, roborev rounds 1-2)
+//!
+//! Five review findings on this walker were **one bug five times**: prefix recognition
+//! lived in three parsers (`sanitize`, `parse_mod_decls`, `find_mod_token`), each knowing
+//! a different subset of Rust's literal and identifier prefixes, and an unrecognized
+//! prefix **fell through to ordinary scanning** — so the `mod orphan;` inside a
+//! `cr#"…"#` raw C-string, or inside `macro_rules! r#make`, was counted as a real
+//! declaration. That knowledge now lives once, in the [`lexer`] module's `PREFIXES`
+//! table, and every caller goes through [`lexer::lex_token`] / [`lexer::ident_token`]. An
+//! identifier-ish token glued to `"`, `'` or `#` that the table does not know is an `Err`
+//! naming file, line and token, so a Rust literal form newer than the table cannot
+//! silently disable the guard.
+//!
 //! # Fail-closed
 //!
 //! Every construct this walker does not model is an `Err`, never a skip: `include!`,
@@ -42,7 +55,8 @@
 //! a macro's token tree (see [`scan_macro_context`] — rustc, not this walker, decides
 //! what a macro expands to), a symlink under the source directory (see
 //! [`enumerate_rs_files`] — a silently-skipped subtree is a census with a hole in it), an
-//! unterminated comment or literal, an unreadable file, an unknown escape, and a
+//! unterminated comment or literal, an unreadable file, an unknown escape, an
+//! unrecognized literal or identifier prefix (see [`lexer`]), and a
 //! `mod name;` that resolves to neither candidate file. A skip is the vacuous pass this
 //! guard exists to prevent.
 
