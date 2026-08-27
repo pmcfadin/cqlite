@@ -859,17 +859,10 @@ pub fn open(
 
     // Capture the whole public config before `core_config` is moved into
     // ingestion / Database::open, so `Config.storage` is authoritative for the
-    // Python write path rather than decorative (issues #1619, #1697). It is
-    // translated by the ONE bridge, `WriteEngineConfig::from_config`, below:
-    // `compaction.auto_compaction = false` disables STCS (making
-    // `maintenance_step` a no-op), `compaction.min_threshold` /
-    // `compaction.max_threshold` set the STCS widths, and
-    // `memtable_size_threshold` sets the flush trigger.
-    //
-    // The `flush_threshold=` keyword (issue #1620) is applied ONTO that public
-    // field rather than onto the engine's private setter, so the option keeps
-    // its exact external behaviour while flowing through the single source.
-    //
+    // Python write path rather than decorative (issues #1619, #1697); the ONE
+    // bridge `WriteEngineConfig::from_config` translates it below, and the
+    // already-validated `flush_threshold=` keyword (#1620) is folded onto the
+    // PUBLIC `memtable_size_threshold` instead of the engine's private setter.
     // NOTE: the config bridge (`config_from_dict`)
     // deserializes into the full `cqlite_core::Config`, which is NOT
     // `#[serde(default)]`, so `config` must be a COMPLETE config — a full dict,
@@ -950,10 +943,7 @@ pub fn open(
             .map_err(runtime_init_to_py_err)?
             .map_err(to_py_err)?;
 
-        // Built through the single Config -> WriteEngineConfig bridge (issue
-        // #1697). `flush_threshold` was already folded into
-        // `storage.memtable_size_threshold` above; when it was not provided the
-        // shipped 64 MB default flows through unchanged.
+        // Via the single bridge (#1697).
         let engine_config = cqlite_core::storage::write_engine::WriteEngineConfig::from_config(
             &write_engine_public_config,
             wd.join("data"),

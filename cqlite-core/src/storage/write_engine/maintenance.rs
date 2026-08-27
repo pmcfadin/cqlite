@@ -2499,10 +2499,9 @@ mod tests {
         );
     }
 
-    /// Issue #1619 AH1: `Config.storage.compaction` must be non-decorative.
-    /// A `CompactionConfig` with `auto_compaction = false` mapped onto the
+    /// Issue #1619 AH1: `Config.storage.compaction` must be non-decorative. A
+    /// `CompactionConfig` with `auto_compaction = false` mapped onto the
     /// WriteEngineConfig must disable the default policy end-to-end (no rows
-    /// merged, no L0 reduction) — proving the config wiring reaches behavior.
     #[test]
     fn test_compaction_config_disables_default_policy() {
         let temp_dir = TempDir::new().unwrap();
