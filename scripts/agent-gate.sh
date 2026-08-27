@@ -185,6 +185,21 @@
 #                      package.json build script, node-release.yml); hard-FAILs on
 #                      any abort-built or missing/unparseable definition. Pure
 #                      bash/grep/awk — offline, deterministic, no datasets/network.
+#   pub-surface        standing PUBLIC-API snapshot guard for cqlite-core
+#                      (scripts/ci/check-pub-surface.sh, issue #1712). Derives the
+#                      crate's default-feature public surface from rustdoc's own
+#                      emitted item tree (rustc's real name resolution + cfg
+#                      evaluation) and diffs it against the committed
+#                      cqlite-core/pub-surface.snapshot; ALSO asserts the crate root
+#                      tells the truth — an unconditional, non-#[doc(hidden)]
+#                      `pub mod NAME;` must actually be in the default public
+#                      surface (the #1712 defect: an inner #![cfg] hid `benchmarks`
+#                      from every default build while the crate root advertised it).
+#                      Boundary: item PATHS + kinds, not signatures. Fail-closed and
+#                      affirmative — a cargo doc failure, absent doc tree, zero-item
+#                      enumeration or missing snapshot is a NAMED FAIL, never a
+#                      vacuous pass; no env opt-out. ~6s, offline, no datasets.
+#                      SKIP-aware (loud): SKIPs only when cqlite-core is absent.
 #   tooling-tests      shell-tooling regression tests (fast, no datasets/network):
 #                      scripts/tests/test_agent_gate_summary.sh — proves the
 #                      SUMMARY block survives non-foreground capture (#1175). It
@@ -493,6 +508,16 @@
 #                      partial-extraction discard removed; guard state back under
 #                      TMPDIR with no consistency check; exact-`S` index-flag match;
 #                      failed nested scan read as clean).
+#                      Also runs scripts/tests/test_pub_surface_guard.sh (#1712),
+#                      the non-vacuity proof for the pub-surface component: the
+#                      consistency assert must RED on the pre-#1712 source shape (a
+#                      bare ungated `pub mod benchmarks;` whose cfg gate hides inside
+#                      the module file), a new public item must trip the snapshot
+#                      diff, a missing snapshot must FAIL rather than pass vacuously,
+#                      and a bad argument must exit 2. Each negative case substitutes
+#                      the artifact in its own detached scratch worktree (the guard
+#                      has no test-only seam) and reuses CARGO_TARGET_DIR, so the
+#                      suite costs ~22s of rustdoc and no datasets/network.
 #   minimal-build      cargo build + `cargo test --lib --no-run` (compile-only)
 #                      -p cqlite-core --no-default-features --features all-compression
 #   smoke              bash test-data/scripts/smoke-test-all-tables.sh
@@ -2163,7 +2188,7 @@ _python_build_verify_venv() {
   return 3
 }
 
-COMPONENTS=(file-size fmt clippy roborev-lints core-tests tombstones-scan scan-offload-guard work-counters-guard byte-budget-guard arrow-parity-guard memory-budget integration-tests format-compat write-tests cli-tests compaction-byte-parity bti-multiclustering query-semantics-oracle flight-query-semantics-oracle python-bindings node-bindings delivery-telemetry oom-audit parity-report operator-metrics-doc kit-dashboard-drift binding-unwind-profile tooling-tests minimal-build smoke)
+COMPONENTS=(file-size fmt clippy roborev-lints core-tests tombstones-scan scan-offload-guard work-counters-guard byte-budget-guard arrow-parity-guard memory-budget integration-tests format-compat write-tests cli-tests compaction-byte-parity bti-multiclustering query-semantics-oracle flight-query-semantics-oracle python-bindings node-bindings delivery-telemetry oom-audit parity-report operator-metrics-doc kit-dashboard-drift binding-unwind-profile pub-surface tooling-tests minimal-build smoke)
 
 # _component_lane <name> (issues #1737, #2657): SINGLE SOURCE OF TRUTH for the
 # MAIN-vs-SIDE lane split. Defined early (before the arg-parse dispatch) so the
@@ -5422,6 +5447,68 @@ run_kit_dashboard_drift() {
   echo ">>> [$name] $status ($((end - start))s)"
 }
 
+# pub-surface: the standing PUBLIC-API snapshot guard for cqlite-core (issue #1712,
+# epic #1688). scripts/ci/check-pub-surface.sh derives the crate's default-feature
+# public surface from rustdoc's OWN emitted item tree — rustc's real name resolution
+# and real cfg evaluation, never re-derived from source text by us — and diffs it
+# against the committed cqlite-core/pub-surface.snapshot. It also asserts that the
+# crate root TELLS THE TRUTH: an unconditional, non-`#[doc(hidden)]`
+# `pub mod NAME;` at the crate root must actually be present in the default public
+# surface. The defect that motivated it: `pub mod benchmarks;` read as shipped public
+# API for months while an inner `#![cfg(feature = "benchmarks")]` hidden inside
+# benchmarks/mod.rs configured it out of every default build — the crate root said one
+# thing and the compiled API said another, and nothing could tell the difference.
+# Fail-closed and affirmative: a cargo doc failure, an absent doc tree, a zero-item
+# enumeration, or a missing committed snapshot are each a NAMED FAIL, never "nothing
+# measured, PASS", and there is no env opt-out. Cheap (~6s: `cargo doc --no-deps
+# --lib`, deps already built) and offline — no datasets/network. SKIP-aware (loud,
+# never a silent PASS): SKIPs only when cqlite-core is genuinely absent (a sparse
+# checkout). Its own self-test lives in tooling-tests.
+run_pub_surface() {
+  local name=pub-surface
+  if [ -n "$ONLY" ] && ! grep -qw "$name" <<<"${ONLY//,/ }"; then
+    return 0
+  fi
+  local guard="scripts/ci/check-pub-surface.sh"
+  local log="$LOG_DIR/$name.log"
+  local start end status
+  start=$(date +%s)
+  if [ ! -d "$REPO_ROOT/cqlite-core" ]; then
+    status=SKIP
+    echo ">>> [$name] SKIP (cqlite-core is absent — sparse checkout)"
+    record_result "$name" "$status" 0
+    return 0
+  fi
+  if [ ! -f "$REPO_ROOT/$guard" ]; then
+    status=FAIL
+    echo ">>> [$name] FAIL: cqlite-core IS present but the guard $guard is MISSING"
+    echo "    (deleted/renamed) — that is breakage in a complete checkout, not a sparse"
+    echo "    checkout. Restore the guard or update this component's path."
+    record_result "$name" "$status" 0
+    return 0
+  fi
+  echo ">>> [$name] bash $guard"
+  if bash "$REPO_ROOT/$guard" >"$log" 2>&1; then
+    status=PASS
+    # Echo the guard's affirmative measurement line so a pasted gate log shows the
+    # check RAN over a real surface, rather than merely reporting PASS.
+    grep -m1 '^pub-surface: ' "$log" || true
+  else
+    status=FAIL
+    echo "--- [$name] FAILED: cqlite-core's public API drifted from the committed"
+    echo '    cqlite-core/pub-surface.snapshot, or a crate-root `pub mod` disagrees with'
+    echo "    the default public surface (issue #1712). If the API change is INTENDED,"
+    echo "    regenerate in the same commit and explain it in the PR body:"
+    echo "        bash scripts/ci/check-pub-surface.sh --regenerate"
+    echo "--- last 60 lines of $log ---"
+    tail -60 "$log"
+    echo "--- end of $name output ---"
+  fi
+  end=$(date +%s)
+  record_result "$name" "$status" "$((end - start))"
+  echo ">>> [$name] $status ($((end - start))s)"
+}
+
 # tooling-tests: fast shell-tooling regression tests that have no Rust target and
 # no dataset/network needs. Currently scripts/tests/test_agent_gate_summary.sh,
 # which verifies the SUMMARY block survives non-foreground capture (#1175), and
@@ -5463,6 +5550,12 @@ run_kit_dashboard_drift() {
 # its own tmpdir. SKIP-aware: the summary test's truncation case relies on a python3
 # reader, so with no python3 we record SKIP (loud, never silent PASS); any test
 # failure -> hard FAIL.
+# Also runs scripts/tests/test_pub_surface_guard.sh (#1712), the non-vacuity proof
+# for the pub-surface component: it drives scripts/ci/check-pub-surface.sh through one
+# green and three reds (consistency assert on the pre-#1712 shape, snapshot drift,
+# missing snapshot) plus the usage case, substituting the artifact in detached scratch
+# worktrees rather than through any test-only seam. Reuses CARGO_TARGET_DIR (~22s);
+# never invokes the gate, so it cannot recurse.
 run_tooling_tests() {
   local name=tooling-tests
   if [ -n "$ONLY" ] && ! grep -qw "$name" <<<"${ONLY//,/ }"; then
@@ -6635,6 +6728,27 @@ run_tooling_tests() {
   if ! bash "$REPO_ROOT/scripts/tests/test_gate_selftest_hermetic.sh" >>"$log" 2>&1; then
     status=FAIL
     echo "--- [$name] FAILED (gate self-test hermeticity lint #2874); last 40 lines of $log ---"
+    tail -40 "$log"
+    echo "--- end of $name output ---"
+    end=$(date +%s)
+    record_result "$name" "$status" "$((end - start))"
+    echo ">>> [$name] $status ($((end - start))s)"
+    return 0
+  fi
+
+  # pub-surface guard self-test (#1712): no python3/datasets/network needed, always
+  # runs. Proves scripts/ci/check-pub-surface.sh actually FIRES — the consistency
+  # assert reds on the pre-#1712 source shape (a bare ungated `pub mod benchmarks;`
+  # whose cfg gate hides inside the module file), a new public item trips the snapshot
+  # diff, a missing snapshot FAILs instead of passing vacuously, and a bad argument
+  # exits 2. Each negative case substitutes the artifact in its own
+  # `git worktree add --detach HEAD` scratch checkout (no test-only seam in the guard)
+  # and reuses CARGO_TARGET_DIR, so the whole suite is ~22s of rustdoc. A failure FAILs
+  # the component, mirroring the guards above.
+  echo ">>> [$name] bash scripts/tests/test_pub_surface_guard.sh"
+  if ! bash "$REPO_ROOT/scripts/tests/test_pub_surface_guard.sh" >>"$log" 2>&1; then
+    status=FAIL
+    echo "--- [$name] FAILED (pub-surface guard self-test #1712); last 40 lines of $log ---"
     tail -40 "$log"
     echo "--- end of $name output ---"
     end=$(date +%s)
@@ -8283,6 +8397,7 @@ dispatch_component() {
     operator-metrics-doc) run_operator_metrics_doc ;;
     kit-dashboard-drift) run_kit_dashboard_drift ;;
     binding-unwind-profile) run_component binding-unwind-profile bash "$REPO_ROOT/scripts/tests/test_binding_unwind_profile.sh" ;;
+    pub-surface) run_pub_surface ;;
     tooling-tests) run_tooling_tests ;;
     minimal-build) run_component minimal-build bash -c '
   # Match the CI "All Compression Build & Test" job byte-for-byte (issue #1981):
