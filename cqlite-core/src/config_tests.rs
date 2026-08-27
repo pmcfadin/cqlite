@@ -371,3 +371,182 @@ fn retained_budget_knob_deserializes_and_validates() {
     assert!(config.validate().is_ok());
     assert!(config.memory.block_cache.max_size > 0);
 }
+
+// ---- issue #1697 (AH4): the write-path knobs the public Config newly owns ----
+
+/// Item 5: `memtable_hard_limit >= memtable_size_threshold`. A lower ceiling
+/// wedges the engine — `check_admission` rejects the write before a flush can
+/// relieve the memtable — so it must be rejected at config time.
+#[test]
+fn hard_limit_below_flush_threshold_is_rejected_and_names_both_values() {
+    let mut config = Config::default();
+    config.storage.memtable_size_threshold = 64 * 1024 * 1024;
+    config.storage.memtable_hard_limit = 32 * 1024 * 1024;
+
+    let err = config
+        .validate()
+        .expect_err("a ceiling below the flush threshold wedges the engine")
+        .to_string();
+    // An operator needs the two colliding numbers, not just the rule name.
+    assert!(err.contains(&(64 * 1024 * 1024).to_string()), "{err}");
+    assert!(err.contains(&(32 * 1024 * 1024).to_string()), "{err}");
+
+    // Equality is the boundary and is ALLOWED: a memtable that flushes exactly
+    // at its ceiling is tight but coherent.
+    config.storage.memtable_hard_limit = config.storage.memtable_size_threshold;
+    config
+        .validate()
+        .expect("hard_limit == memtable_size_threshold must be accepted");
+}
+
+/// Item 5: `compaction.min_threshold > 0`. STCS with a zero eligibility bar is
+/// meaningless; `STCSPolicy::new` rejects it too, but failing here surfaces it
+/// at config time rather than at engine construction.
+#[test]
+fn zero_compaction_min_threshold_is_rejected() {
+    let mut config = Config::default();
+    config.storage.compaction.min_threshold = 0;
+    let err = config
+        .validate()
+        .expect_err("min_threshold 0 must be rejected")
+        .to_string();
+    assert!(err.contains("compaction.min_threshold"), "{err}");
+
+    config.storage.compaction.min_threshold = 1;
+    config.validate().expect("min_threshold 1 must be accepted");
+}
+
+/// Item 5: `compaction.max_threshold >= min_threshold` — a merge-width cap below
+/// the eligibility bar can never admit a merge.
+#[test]
+fn compaction_max_below_min_is_rejected_and_names_both_values() {
+    let mut config = Config::default();
+    config.storage.compaction.min_threshold = 8;
+    config.storage.compaction.max_threshold = 4;
+
+    let err = config
+        .validate()
+        .expect_err("max_threshold below min_threshold can never admit a merge")
+        .to_string();
+    assert!(err.contains('8'), "{err}");
+    assert!(err.contains('4'), "{err}");
+
+    // Equality is the boundary and is ALLOWED: exactly-N-way merges.
+    config.storage.compaction.max_threshold = 8;
+    config
+        .validate()
+        .expect("max_threshold == min_threshold must be accepted");
+}
+
+/// Item 6: a byte count above the target's `usize::MAX` must be REJECTED, not
+/// clamped. Clamping lands on `usize::MAX`, where `should_flush` never fires AND
+/// `check_admission`'s `projected > hard_limit` is unreachable (`saturating_add`
+/// caps there) — never flush, never reject, grow until OOM.
+///
+/// Only reachable on a 32-bit/wasm32 target, so the test is written against the
+/// target's own bound: on 64-bit there is no such `u64` and the rule is vacuous,
+/// which the `is_none()` branch states explicitly rather than silently skipping.
+#[test]
+fn a_byte_count_above_the_targets_usize_max_is_rejected_not_clamped() {
+    let usize_max_bytes = u64::try_from(usize::MAX).unwrap_or(u64::MAX);
+    let Some(unaddressable) = usize_max_bytes.checked_add(1) else {
+        // 64-bit: `usize::MAX == u64::MAX`, so every u64 is addressable and the
+        // rule cannot fire. Assert exactly that, so this test never reads as
+        // coverage it does not provide.
+        assert_eq!(usize_max_bytes, u64::MAX);
+        return;
+    };
+
+    for knob in ["memtable_size_threshold", "memtable_hard_limit"] {
+        let mut config = Config::default();
+        match knob {
+            "memtable_size_threshold" => {
+                config.storage.memtable_size_threshold = unaddressable;
+                config.storage.memtable_hard_limit = unaddressable;
+            }
+            _ => config.storage.memtable_hard_limit = unaddressable,
+        }
+        let err = config
+            .validate()
+            .expect_err("an unaddressable byte count must be rejected")
+            .to_string();
+        assert!(err.contains("addressable"), "{knob}: {err}");
+    }
+}
+
+/// Item 7: the three fields #1697 added carry `#[serde(default = ...)]`, and the
+/// Python bindings are a serde JSON bridge that requires a COMPLETE dict — so a
+/// config payload written before these fields existed must still deserialize.
+/// Delete an attribute and this test fails; without it, every pre-upgrade
+/// Python config dict would break silently.
+#[test]
+fn storage_config_deserializes_without_the_issue_1697_fields() {
+    let mut value = serde_json::to_value(StorageConfig::default()).unwrap();
+    let obj = value.as_object_mut().unwrap();
+    obj.remove("memtable_hard_limit");
+    let compaction = obj
+        .get_mut("compaction")
+        .and_then(|c| c.as_object_mut())
+        .unwrap();
+    compaction.remove("min_threshold");
+    compaction.remove("max_threshold");
+    assert!(!compaction.contains_key("min_threshold"));
+
+    let restored: StorageConfig =
+        serde_json::from_value(value).expect("a pre-#1697 payload must still deserialize");
+    let defaults = StorageConfig::default();
+    assert_eq!(
+        restored.memtable_hard_limit, defaults.memtable_hard_limit,
+        "absent memtable_hard_limit must default to the 256MB admission ceiling"
+    );
+    assert_eq!(
+        restored.compaction.min_threshold, defaults.compaction.min_threshold,
+        "absent compaction.min_threshold must default to STCS's 4"
+    );
+    assert_eq!(
+        restored.compaction.max_threshold, defaults.compaction.max_threshold,
+        "absent compaction.max_threshold must default to STCS's 32"
+    );
+}
+
+/// Item 7, through the top-level `Config` — the shape the Python bindings
+/// actually parse — and it must still VALIDATE, not merely deserialize.
+#[test]
+fn full_config_deserializes_and_validates_without_the_issue_1697_fields() {
+    let mut value = serde_json::to_value(Config::default()).unwrap();
+    let storage = value
+        .get_mut("storage")
+        .and_then(|s| s.as_object_mut())
+        .unwrap();
+    storage.remove("memtable_hard_limit");
+    let compaction = storage
+        .get_mut("compaction")
+        .and_then(|c| c.as_object_mut())
+        .unwrap();
+    compaction.remove("min_threshold");
+    compaction.remove("max_threshold");
+
+    let restored: Config =
+        serde_json::from_value(value).expect("a pre-#1697 Config payload must still deserialize");
+    restored
+        .validate()
+        .expect("the defaulted fields must satisfy validate's new rules");
+    assert_eq!(restored.storage.memtable_hard_limit, 256 * 1024 * 1024);
+    assert_eq!(restored.storage.compaction.min_threshold, 4);
+    assert_eq!(restored.storage.compaction.max_threshold, 32);
+}
+
+/// The #1697 fields round-trip when PRESENT, so the defaults above are a
+/// fallback rather than an override that ignores what the caller wrote.
+#[test]
+fn the_issue_1697_fields_roundtrip_when_present() {
+    let mut config = StorageConfig::default();
+    config.memtable_hard_limit = 512 * 1024 * 1024;
+    config.compaction.min_threshold = 6;
+    config.compaction.max_threshold = 12;
+    let json = serde_json::to_string(&config).unwrap();
+    let restored: StorageConfig = serde_json::from_str(&json).unwrap();
+    assert_eq!(restored.memtable_hard_limit, 512 * 1024 * 1024);
+    assert_eq!(restored.compaction.min_threshold, 6);
+    assert_eq!(restored.compaction.max_threshold, 12);
+}
