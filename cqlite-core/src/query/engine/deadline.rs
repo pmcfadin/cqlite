@@ -50,6 +50,8 @@
 
 use std::future::Future;
 use std::pin::Pin;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 // The engine type; `query::mod` re-exports it as `AdvancedQueryEngine`.
@@ -101,10 +103,29 @@ pub(crate) async fn bound<T>(
     operation: &str,
     fut: BoundedFuture<'_, T>,
 ) -> Result<T> {
+    bound_tracked(limit, operation, fut).await.0
+}
+
+/// [`bound`] plus the one fact the caller's STATISTICS need: whether the inner
+/// future was ever polled (issue #1695, roborev).
+///
+/// Every `*_inner` body counts itself with `inc_total_queries()` as its first
+/// statement, i.e. synchronously on its FIRST poll. So `started == true` ⟺ the
+/// query is already in `total_queries`. When the budget is ALREADY EXPIRED at the
+/// first poll boundary this returns the timeout WITHOUT ever polling `inner`, so
+/// nothing counted the query — and a caller that then counts the error would
+/// publish `error_queries > total_queries`, an impossible statistic. Returning
+/// `started` lets [`AdvancedQueryEngine::bounded`] keep the two counters coherent
+/// without the inner body having to run.
+async fn bound_tracked<T>(
+    limit: Duration,
+    operation: &str,
+    fut: BoundedFuture<'_, T>,
+) -> (Result<T>, bool) {
     // The documented "no timeout" sentinel: await directly rather than arming a
     // timer with a zero deadline (which would elapse at the first yield point).
     if limit.is_zero() {
-        return fut.await;
+        return (fut.await, true);
     }
 
     let started = Instant::now();
@@ -113,7 +134,7 @@ pub(crate) async fn bound<T>(
     // process). An unrepresentable deadline is astronomically far away, so it means
     // the same thing as the ZERO sentinel — unbounded — and is treated as such.
     let Some(deadline) = started.checked_add(limit) else {
-        return fut.await;
+        return (fut.await, true);
     };
     // `elapsed` is MEASURED, never assumed equal to `limit`: a starved or blocked
     // poll can overshoot the deadline substantially, and the real figure is what
@@ -125,17 +146,26 @@ pub(crate) async fn bound<T>(
         limit,
     };
 
+    // Set on the first poll that actually REACHES `inner`. Shared with the caller
+    // (rather than a captured `bool`) because `poll_fn` is moved into `timeout` and
+    // dropped there, so its captures are gone by the time the verdict is read.
+    let inner_started = Arc::new(AtomicBool::new(false));
+
     let mut inner = fut;
-    let checked = std::future::poll_fn(move |cx| {
-        if Instant::now() >= deadline {
-            // Abandon WITHOUT polling further; `inner` is dropped with `checked`,
-            // which IS the cancellation.
-            return std::task::Poll::Ready(Err(expired(operation)));
+    let checked = std::future::poll_fn({
+        let inner_started = Arc::clone(&inner_started);
+        move |cx| {
+            if Instant::now() >= deadline {
+                // Abandon WITHOUT polling further; `inner` is dropped with `checked`,
+                // which IS the cancellation.
+                return std::task::Poll::Ready(Err(expired(operation)));
+            }
+            inner_started.store(true, Ordering::Relaxed);
+            inner.as_mut().poll(cx)
         }
-        inner.as_mut().poll(cx)
     });
 
-    match tokio::time::timeout(limit, checked).await {
+    let out = match tokio::time::timeout(limit, checked).await {
         Ok(inner) => inner,
         // The timer half: `checked` was dropped by `timeout`, taking the query
         // future with it.
@@ -144,7 +174,8 @@ pub(crate) async fn bound<T>(
             elapsed: started.elapsed(),
             limit,
         }),
-    }
+    };
+    (out, inner_started.load(Ordering::Relaxed))
 }
 
 impl AdvancedQueryEngine {
@@ -153,14 +184,23 @@ impl AdvancedQueryEngine {
     /// on the observability error stream (a timeout is a real query failure, and
     /// its own telemetry category — never `corruption`).
     async fn bounded<T>(&self, operation: &str, fut: BoundedFuture<'_, T>) -> Result<T> {
-        bound(self.config.query.max_execution_time, operation, fut)
-            .await
-            .inspect_err(|e| {
-                if matches!(e, Error::QueryTimeout { .. }) {
-                    self.inc_error_queries();
-                    crate::observability::record_error(e, "query");
+        let (out, inner_started) =
+            bound_tracked(self.config.query.max_execution_time, operation, fut).await;
+        out.inspect_err(|e| {
+            if matches!(e, Error::QueryTimeout { .. }) {
+                // An ALREADY-EXPIRED budget returns before the inner body runs, so
+                // nothing counted the query: `*_inner` bodies call
+                // `inc_total_queries()` as their first statement (issue #1695,
+                // roborev). Count it here instead, so a timed-out query is always a
+                // query — never an error against a total that never saw it, which
+                // would publish `error_queries > total_queries`.
+                if !inner_started {
+                    self.inc_total_queries();
                 }
-            })
+                self.inc_error_queries();
+                crate::observability::record_error(e, "query");
+            }
+        })
     }
 
     /// Execute a CQL query.
@@ -388,6 +428,59 @@ mod tests {
             err.expect_err("inner Err must be relayed"),
             Error::Corruption(_)
         ));
+    }
+
+    /// An ALREADY-EXPIRED budget reports that the inner future was never STARTED,
+    /// which is the fact the engine's statistics need: the `*_inner` bodies count
+    /// themselves on their first poll, so an unstarted query is one nothing counted.
+    /// Without this signal `bounded` would record an error against a total that
+    /// never saw the query (issue #1695, roborev: `error_queries > total_queries`).
+    #[tokio::test]
+    async fn an_expired_budget_reports_the_inner_future_as_unstarted() {
+        let polled = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let seen = std::sync::Arc::clone(&polled);
+        // `Duration::from_nanos(1)` is expired by the time the first poll runs.
+        let (out, started): (Result<u32>, bool) = bound_tracked(
+            Duration::from_nanos(1),
+            "test.unstarted",
+            Box::pin(async move {
+                seen.store(true, std::sync::atomic::Ordering::SeqCst);
+                Ok(1)
+            }),
+        )
+        .await;
+        assert!(matches!(out, Err(Error::QueryTimeout { .. })));
+        assert!(
+            !polled.load(std::sync::atomic::Ordering::SeqCst),
+            "precondition: the expired budget must short-circuit BEFORE the body runs"
+        );
+        assert!(
+            !started,
+            "an inner future that was never polled must be reported as unstarted"
+        );
+    }
+
+    /// The complement: a future that DID run is reported as started (so its own
+    /// `inc_total_queries()` is not double-counted), on the completing path and on
+    /// the unbounded sentinel alike.
+    #[tokio::test]
+    async fn a_polled_inner_future_is_reported_as_started() {
+        let (out, started): (Result<u32>, bool) = bound_tracked(
+            Duration::from_secs(300),
+            "test.started",
+            Box::pin(async { Ok(5) }),
+        )
+        .await;
+        assert_eq!(out.expect("must complete"), 5);
+        assert!(started, "a polled inner future must be reported as started");
+
+        let (zero, zero_started): (Result<u32>, bool) =
+            bound_tracked(Duration::ZERO, "test.zero", Box::pin(async { Ok(6) })).await;
+        assert_eq!(zero.expect("must complete"), 6);
+        assert!(
+            zero_started,
+            "the unbounded sentinel awaits the inner future directly, so it started"
+        );
     }
 
     /// Dropping the inner future IS the cancellation: when the budget elapses,
