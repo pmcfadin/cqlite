@@ -128,7 +128,35 @@ fail() {
 }
 
 # Shared paths + scratch space for every step below.
-TARGET_DIR="${CARGO_TARGET_DIR:-$REPO_ROOT/target}"
+#
+# THE INVARIANT: THE TREE THIS SCRIPT INSPECTS MUST BE THE TREE CARGO WROTE. Every
+# later step — the mutex, the `rm -rf` of the previous emission, the module-index
+# walk, the all.html cross-check — reads `DOC_ROOT`, so if that resolves anywhere
+# other than where cargo put the docs, the guard locks the wrong path (mutual
+# exclusion silently stops applying), deletes an unrelated directory, and compares
+# the committed snapshot against a tree cargo never touched.
+#
+# So a RELATIVE `CARGO_TARGET_DIR` is resolved against `REPO_ROOT`, NOT the caller's
+# cwd. That is not a preference, it is the only value that satisfies the invariant:
+# cargo resolves a relative `CARGO_TARGET_DIR` against the CWD OF THE CARGO PROCESS
+# (measured), and this script invokes it as `(cd "$REPO_ROOT" && cargo doc …)` below,
+# so cargo's base IS `REPO_ROOT`. Resolving against the caller's cwd instead made the
+# guard lock `<caller-cwd>/<rel>/.pub-surface-doc.lock` and then report the doc tree
+# ABSENT, about a directory cargo was never asked to write (issue #1712, roborev r4).
+# Resolution is preferred over a refusal here precisely because it is unambiguous —
+# there is exactly one base cargo can be using.
+#
+# And the agreement is then ENFORCED rather than inferred: the resolved ABSOLUTE path
+# is handed to cargo explicitly at the invocation below. An env `CARGO_TARGET_DIR`
+# outranks a `build.target-dir` in `.cargo/config.toml`, so after that assignment
+# there is no configuration, cwd or cargo-version detail left that could point the two
+# at different directories — which is worth more than trusting a measurement of how
+# cargo resolves relative paths today.
+case "${CARGO_TARGET_DIR:-}" in
+  "") TARGET_DIR="$REPO_ROOT/target" ;;
+  /*) TARGET_DIR="$CARGO_TARGET_DIR" ;;
+  *)  TARGET_DIR="$REPO_ROOT/$CARGO_TARGET_DIR" ;;
+esac
 DOC_ROOT="$TARGET_DIR/doc/$CRATE_DOC_NAME"
 
 WORK_DIR="$(mktemp -d "${TMPDIR:-/tmp}/pub-surface.XXXXXX")"
@@ -641,7 +669,10 @@ DOC_LOG="$WORK_DIR/cargo-doc.log"
 # build has. rustdoc regenerates it in a few seconds.
 rm -rf "$DOC_ROOT"
 
-if ! (cd "$REPO_ROOT" && cargo doc --no-deps --quiet --package "$PACKAGE" --lib) >"$DOC_LOG" 2>&1; then
+# `CARGO_TARGET_DIR="$TARGET_DIR"` is the enforcement half of the invariant stated at
+# the top: cargo writes exactly where DOC_ROOT is read from, by construction.
+if ! (cd "$REPO_ROOT" && CARGO_TARGET_DIR="$TARGET_DIR" \
+        cargo doc --no-deps --quiet --package "$PACKAGE" --lib) >"$DOC_LOG" 2>&1; then
   echo "--- last 40 lines of cargo doc output ---" >&2
   tail -40 "$DOC_LOG" >&2
   echo "--- end ---" >&2
