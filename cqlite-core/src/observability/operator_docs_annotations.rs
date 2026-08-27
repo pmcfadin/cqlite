@@ -25,7 +25,7 @@ pub(super) const ANNOTATIONS: &[MetricDoc] = &[
         unit: catalog::unit::BYTES,
         summary: "Total Data.db bytes read (post-decompression), counted once per chunk decode (compressed or not).",
         attributes: &[attr::COMPRESSION],
-        interpretation: "Track against read.rows to spot read amplification; a spike with flat rows means wide scans. A chunk served from the decompressed-chunk cache reads no Data.db bytes and is not counted, so a warm re-scan shows rows rising with bytes flat.",
+        interpretation: "Track against read.rows to spot read amplification; a spike with flat rows means wide scans. A chunk served from the decompressed-chunk cache reads no Data.db bytes and is not counted, so a warm re-scan shows rows rising with bytes flat. Counted for EVERY subsystem that reads an SSTable, compaction included, so a bytes spike with flat read.rows can also be a compaction running.",
         round_item: "—",
     },
     MetricDoc {

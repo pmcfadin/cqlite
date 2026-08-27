@@ -19,6 +19,29 @@
 //! decompressed chunk ([`record_decompressed_bytes`]) — the coarsest grain at which
 //! the decompressed size is actually known.
 //!
+//! # Which SUBSYSTEM's bytes `read.bytes` counts (issue #1701, roborev F3)
+//!
+//! `read.rows` / `read.partitions` / `read.duration` are emitted at QUERY read
+//! boundaries only — the manager's scans and point reads, and the streaming handles
+//! — so a compaction can never contribute to them: compaction reads its inputs
+//! through `stream_all_partitions_for_compaction` on a reader directly, never through
+//! those boundaries.
+//!
+//! `read.bytes` is different, and deliberately so. It is credited inside the CHUNK
+//! DECODE PLANE (`reader::chunk_source`), which is handed a `ReadAt` + a
+//! `CompressionInfo` and cannot know WHO asked — the same plane serves a query read,
+//! a compaction read, and a verification scan. So the metric answers "how many
+//! `Data.db` bytes did this process materialise", including compaction's own reads.
+//!
+//! That is a real limitation for an operator reading query amplification off
+//! `read.bytes` while a compaction runs, and the honest fix is NOT to guess at the
+//! plane: it needs a read-PURPOSE dimension threaded from each caller (or a separate
+//! compaction-bytes-read instrument), which reaches into the compaction merge
+//! producer and is a change to compaction plumbing rather than metric wiring. It is
+//! therefore recorded here and left to a follow-up, not silently approximated: the
+//! plane never invents a purpose label it cannot know, exactly as it never invents
+//! the SSTable format label.
+//!
 //! # Zero-cost when off
 //!
 //! [`ReadOpMeter::start`] consults [`obs::metrics_active`] ONCE (the issue #2819 M1
