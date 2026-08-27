@@ -128,6 +128,49 @@ bounded target set) is decided on the measured number in D6, and the measurement
 `cqlite-flight` is a separate crate built with `arrow`-flavoured cqlite-core features — textbook SIDE class
 (a), so putting it on MAIN would thrash the shared target dir.
 
+**Amendment (#3383): the invocation is a DERIVED explicit target list, not `cargo test -p`.** The original
+decision above said "the package suite", on the reasoning that a hand-picked target list is a second
+registry that drifts silently (the #2039 `cli-tests` lesson). That reasoning was and remains correct — and
+it is exactly why the replacement is **derived**, not typed out.
+
+What forced the change is measured, not stylistic. `cqlite-flight`'s
+`fast_arm_stream_stops_when_the_client_drops_it` (in `issue_3058_bypass_path_taken`) asserts a **race
+outcome**: the client's stream drop must beat the producer. Under `-p`'s intra-package parallelism it does
+not reliably win.
+
+| How it was run | Result |
+|---|---|
+| the target alone, `--test issue_3058_bypass_path_taken`, host load 74 | **3 / 3 PASS** |
+| inside the whole-package `flight-tests` lane | **2 of 3 runs FAILED** |
+
+A merge-gate lane that reds 2-in-3 carries **no information**. Worse than uninformative, it is corrosive:
+it teaches every worker that this lane's red means "re-run it", which is the habit that lets a *real* red
+through. `cargo test -p` offers no way to exclude one target, so the invocation had to become explicit:
+
+```
+cargo test --no-fail-fast -p cqlite-flight --lib --bins --test <T1> --test <T2> …
+```
+
+Three properties preserve the original decision's intent:
+
+1. **The list is DERIVED from `cargo metadata` at run time**, so the drift the #2039 lesson warns about is
+   structurally impossible: adding `cqlite-flight/tests/foo.rs` puts `--test foo` on the command line with
+   **no gate edit**, and `scripts/tests/test_agent_gate_feature_matrix_lanes.sh` still proves it by planting
+   a brand-new target the gate names nowhere and requiring the lane to red.
+2. **Two subtractions, only one of them curated.** Targets whose `required-features` this lane cannot enable
+   are omitted because `--test X` on such a target is a **hard error** (where `-p` skipped it silently) —
+   derived from cargo metadata. The flake list (`FLIGHT_FLAKE_SKIPS`) is **curated and labelled as such in
+   code**, because flakiness is not mechanically decidable from source: nothing in a file says "this
+   assertion races". Both halves of every entry are enforced (numeric issue number; target must be
+   declared), so the list cannot grow silently or rot into a no-op.
+3. **`--lib --bins` are explicit and load-bearing.** An explicit selector suppresses every target kind not
+   named, so omitting `--bins` would have silently stopped executing `main.rs`'s 2 unit tests — this change
+   would itself have opened the never-executed hole the lane exists to close. (No Rust doctests are lost:
+   all 10 doc fences in the crate are ```` ```text ````/```` ```json ````.)
+
+A failed derivation, or an empty run list, is a **FAIL naming the derivation** — never "nothing to run",
+which would be a green lane that executed no integration target at all.
+
 **`flight-query-semantics-oracle` is left alone.** `flight-tests` re-running its two targets is a few
 seconds of overlap; re-deriving its per-lane fixture SKIP predicates (#3095, which exist specifically so one
 lane cannot silently skip behind an unrelated lane's absent fixtures) risks a correctness regression in a

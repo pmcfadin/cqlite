@@ -32,6 +32,23 @@ merely compiles them. Its reach SHALL extend beyond the test targets the gate al
 a failing assertion in a `cqlite-flight` test target that no existing component names SHALL make the full
 gate FAIL.
 
+The component SHALL execute `--lib`, `--bins`, and an **explicit list of `--test` targets DERIVED from
+`cargo metadata` at run time** (issue #3383). It SHALL NOT rely on a bare `cargo test -p`, because that
+form cannot exclude a single target, and it SHALL NOT use a hand-written target list, because that is a
+second registry that drifts silently. A newly added `cqlite-flight/tests/*.rs` SHALL therefore be executed
+with **no gate edit**. `--bins` SHALL be named explicitly, since an explicit target selector suppresses
+every kind not named and its omission would silently stop executing the binary's unit tests.
+
+The derived run list SHALL exclude exactly two categories, and nothing else:
+
+1. targets whose `required-features` the component does not enable — because `cargo test --test X` on such a
+   target is a hard error, where `cargo test -p` skipped it silently; and
+2. targets named by a **curated** flake-exclusion list, each entry of which SHALL name a numeric issue
+   number recording the work that returns the target to the lane.
+
+A failed derivation, or an empty run list, SHALL be a FAIL that **names the derivation** — never a pass, and
+never reported as "nothing to run".
+
 The component SHALL run in the SIDE lane with its **own** `CARGO_TARGET_DIR`, because `cqlite-flight` is a
 separate crate built against a divergent `cqlite-core` feature set and sharing MAIN's target dir would
 thrash it. It SHALL be declared in `DATASET_COMPONENTS` if any target it runs consumes fixtures, so the
@@ -55,6 +72,36 @@ its per-lane fixture SKIP predicates.
 - **GIVEN** an invocation of the Flight component that compiles but executes zero tests
 - **WHEN** the component completes
 - **THEN** it records FAIL, naming the zero-tests condition, and never PASS
+
+#### Scenario: A newly added Flight test target is executed with no gate edit
+- **GIVEN** a new `cqlite-flight/tests/<name>.rs` containing a failing assertion
+- **AND** no gate component names `<name>`
+- **WHEN** the Flight component runs
+- **THEN** `<name>` appears on the derived `--test` list and the component records FAIL
+
+#### Scenario: A flake-exclusion entry without an issue number fails the gate
+- **GIVEN** a flake-exclusion entry that names a target but no numeric issue number
+- **WHEN** the Flight component runs
+- **THEN** it records FAIL, naming the malformed entry, before any test is executed
+- **AND** the exclusion list can therefore never grow without a filed issue obliging its removal
+
+#### Scenario: A stale flake-exclusion entry fails the gate
+- **GIVEN** a flake-exclusion entry naming a target the package does not declare (renamed or deleted)
+- **WHEN** the Flight component runs
+- **THEN** it records FAIL, naming the stale entry, rather than silently excusing nothing
+
+#### Scenario: An unexecuted target with no permitted explanation fails the gate
+- **GIVEN** a declared `cqlite-flight` test target that is neither executed, nor excluded for unmet
+  `required-features` with another component invoking it, nor on the flake-exclusion list
+- **WHEN** the Flight component runs
+- **THEN** it records FAIL, naming the target and the missing explanation
+
+#### Scenario: Each exclusion is reported under its own named category
+- **WHEN** the Flight component completes successfully
+- **THEN** its log states how many targets were declared, run, excluded for `required-features`, and
+  excluded as flaky
+- **AND** a flake exclusion is reported as flake-skipped with its issue number, never folded into the
+  `required-features` category — "we chose not to run it" and "cargo cannot run it here" are distinct facts
 
 #### Scenario: The oracle component keeps its own fixture predicates
 - **WHEN** the committed `test_compaction_tombstone_ttl` keyspace is absent but `test_deltas`/`test_tomb`
