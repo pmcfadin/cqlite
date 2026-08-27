@@ -10,7 +10,6 @@
 
 const fs = require('fs');
 const path = require('path');
-const { _errorContractNodeCodes } = require('../lib/index.js');
 
 const LIB_DTS_PATH = path.join(__dirname, '..', 'lib', 'index.d.ts');
 
@@ -300,6 +299,12 @@ describe('TypeScript Definitions (Issue #312)', () => {
       let unionCodes;
 
       beforeAll(() => {
+        // Required HERE, not at module scope: only these three cases need the
+        // native addon, and a module-scope require would take the file's ~80
+        // pure-text assertions down with it when the addon is not built. If it
+        // IS missing these cases fail loudly (never skip) — the assert cannot be
+        // performed without the authoritative table.
+        const { _errorContractNodeCodes } = require('../lib/index.js');
         tableCodes = [...new Set(_errorContractNodeCodes())].sort();
         unionCodes = parseStringUnion(dtsContent, 'ErrorCode');
       });
