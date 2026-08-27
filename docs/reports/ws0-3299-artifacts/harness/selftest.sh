@@ -247,6 +247,33 @@ done
 python3 "$FIX" flight-step --path "$TMP/fl-two.jsonl" --case two-steps
 expect_guard_fail FLIGHT_STEP_COUNT python3 "$GUARDS" flight-step --jsonl "$TMP/fl-two.jsonl"
 
+# ------------------------------------- STRUCTURAL: process-lifecycle safety ---
+# Asks WHERE a spawn is, not what it looks like, so a new one added anywhere
+# outside a cleanup guarantee fails however it is written. Two consecutive review
+# rounds found this same class (orphaned workers, then an unreaped perf), which
+# is why it is now checked structurally rather than case by case.
+echo
+echo "-- process lifecycle (structural) --"
+expect_ok "every child spawn is under a cleanup guarantee" \
+  python3 "$HERE/check-lifecycle.py" "$HERE/rep.py"
+# NEGATIVE CONTROL: the exact pre-fix shape — a local list, appended outside any
+# try — must be REJECTED. Without this the check above could pass vacuously.
+cat > "$TMP/lifecycle-bad.py" <<'PY'
+import subprocess
+def launch(cmds):
+    procs = []
+    for c in cmds:
+        procs.append(subprocess.Popen(c))
+    return procs
+PY
+if python3 "$HERE/check-lifecycle.py" "$TMP/lifecycle-bad.py" >/dev/null 2>&1; then
+  echo "FAIL  [lifecycle negative control] the check ACCEPTED the pre-fix orphan shape"
+  FAIL=$((FAIL+1))
+else
+  echo "ok    [lifecycle negative control] rejects a local-list spawn outside try"
+  PASS=$((PASS+1))
+fi
+
 # ------------------------------------------------------ no relaxation knob ---
 echo
 echo "-- no escape hatch --"

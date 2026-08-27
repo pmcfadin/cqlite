@@ -80,6 +80,8 @@ All per-row counters below are summed over ALL PINNED HARDWARE THREADS (2S logic
 
 `unhalted Gcyc/CPU·s` is deliberately absent from the deliverable table for the same reason a CPU-utilisation column is: under CPU-wide counting `task-clock` is elapsed x ncpus by construction, so a utilisation derived from it cannot vary.
 
+Row attribution source: **committed guard output**. `recomputed` means the per-worker progress records were present and were re-differenced; `committed guard output` means they were not (too voluminous to commit — a single S=6/N=24 rep emits ~57,600 records) and the figures come from the `attribution.json` that `guards.py window` produced from them at measurement time. That file is re-checked here against `window.json` for s, n and window length, so a mismatched or edited attribution is refused rather than absorbed.
+
 Counter-window agreement (max over reps): 4.13e-05 — perf's enabled interval versus the driver's [T0, T1]. The measured proof that counters and rows were taken over the SAME interval.
 
 Max attribution shortfall over all reps: 0.0909% of the window (bound 0.50%). Rows are counted only between progress records the workers actually emitted, so this biases every rows/s figure DOWNWARD and every per-row counter UPWARD, by at most that fraction.

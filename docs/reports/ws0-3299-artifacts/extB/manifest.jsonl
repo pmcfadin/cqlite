@@ -1,6 +1,6 @@
-{"s":6,"n":24,"round":1,"rundir":"/data/ws0-3299/extB/s6-n24-round1","order":"6:24 6:32"}
-{"s":6,"n":32,"round":1,"rundir":"/data/ws0-3299/extB/s6-n32-round1","order":"6:24 6:32"}
-{"s":6,"n":32,"round":2,"rundir":"/data/ws0-3299/extB/s6-n32-round2","order":"6:32 6:24"}
-{"s":6,"n":24,"round":2,"rundir":"/data/ws0-3299/extB/s6-n24-round2","order":"6:32 6:24"}
-{"s":6,"n":24,"round":3,"rundir":"/data/ws0-3299/extB/s6-n24-round3","order":"6:24 6:32"}
-{"s":6,"n":32,"round":3,"rundir":"/data/ws0-3299/extB/s6-n32-round3","order":"6:24 6:32"}
+{"s": 6, "n": 24, "round": 1, "rundir": "s6-n24-round1", "order": "6:24 6:32"}
+{"s": 6, "n": 32, "round": 1, "rundir": "s6-n32-round1", "order": "6:24 6:32"}
+{"s": 6, "n": 32, "round": 2, "rundir": "s6-n32-round2", "order": "6:32 6:24"}
+{"s": 6, "n": 24, "round": 2, "rundir": "s6-n24-round2", "order": "6:32 6:24"}
+{"s": 6, "n": 24, "round": 3, "rundir": "s6-n24-round3", "order": "6:24 6:32"}
+{"s": 6, "n": 32, "round": 3, "rundir": "s6-n32-round3", "order": "6:24 6:32"}

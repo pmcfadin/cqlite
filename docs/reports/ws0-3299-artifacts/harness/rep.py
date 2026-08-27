@@ -43,6 +43,7 @@ and only then reads T0 — the two windows share their boundaries by constructio
 """
 
 import argparse
+import errno
 import json
 import os
 import subprocess
@@ -153,8 +154,44 @@ def wait_steady(procs, rundir, min_samples, timeout_s):
         time.sleep(0.05)
 
 
+def open_ctl_fifo(path, proc, timeout=30.0):
+    """Open the control FIFO for writing WITHOUT ever blocking indefinitely.
+
+    A plain `os.open(path, O_WRONLY)` on a FIFO blocks until a reader appears —
+    forever if perf died before opening its end (a bad event name, a permission
+    failure, an exec error). The process is then wedged with no diagnostic. So
+    the open is non-blocking and polled, and every iteration asks whether perf is
+    still ALIVE: a liveness check is what turns an indefinite block into a
+    reported failure.
+    """
+    deadline = time.monotonic() + timeout
+    while True:
+        try:
+            fd = os.open(path, os.O_WRONLY | os.O_NONBLOCK)
+            # Writes should block normally once the peer is attached.
+            os.set_blocking(fd, True)
+            return fd
+        except OSError as e:
+            if e.errno not in (errno.ENXIO, errno.ENOENT):
+                raise
+        if proc.poll() is not None:
+            die(f"perf exited rc={proc.returncode} before opening its control FIFO "
+                f"(see perf.log) — no measurement window was ever opened")
+        if time.monotonic() > deadline:
+            die(f"perf did not open its control FIFO within {timeout}s")
+        time.sleep(0.005)
+
+
 def perf_window(args, rundir, cpu_list):
-    """Open, hold and close the counting window via perf's control FIFO."""
+    """Open, hold and close the counting window via perf's control FIFO.
+
+    EVERY resource acquired here is released on EVERY exit path — success,
+    timeout, exception — by the single `finally` below. That is deliberate and
+    it is the same class of defect as the worker orphan leak: a `die()` between
+    the `Popen` and the reap used to leave perf running with its descriptors
+    open, and a stray perf holding a counted CPU set corrupts the NEXT rep with
+    the cause already invisible.
+    """
     ctl = os.path.join(rundir, "perf.ctl")
     ack = os.path.join(rundir, "perf.ack")
     for f in (ctl, ack):
@@ -176,40 +213,72 @@ def perf_window(args, rundir, cpu_list):
         "-e", args.events,
         "--", "sleep", str(args.duration_s + args.perf_slack_s),
     ]
-    perf_log = open(os.path.join(rundir, "perf.log"), "w")
-    proc = subprocess.Popen(cmd, stdout=perf_log, stderr=subprocess.STDOUT)
+    perf_log = None
+    proc = None
+    ctl_fd = None
+    ack_fd = None
+    try:
+        perf_log = open(os.path.join(rundir, "perf.log"), "w")
+        proc = subprocess.Popen(cmd, stdout=perf_log, stderr=subprocess.STDOUT)
+        ctl_fd = open_ctl_fifo(ctl, proc)
+        ack_fd = os.open(ack, os.O_RDONLY | os.O_NONBLOCK)
 
-    # Opening our write end blocks until perf opens its read end: that IS the
-    # readiness handshake, so no sleep-and-hope is needed.
-    ctl_fd = os.open(ctl, os.O_WRONLY)
-    ack_fd = os.open(ack, os.O_RDONLY | os.O_NONBLOCK)
+        def command(word, timeout=30.0):
+            os.write(ctl_fd, (word + "\n").encode())
+            deadline = time.monotonic() + timeout
+            while time.monotonic() < deadline:
+                try:
+                    data = os.read(ack_fd, 64)
+                    if data:
+                        return
+                except BlockingIOError:
+                    pass
+                if proc.poll() is not None:
+                    die(f"perf exited rc={proc.returncode} while awaiting '{word}'")
+                time.sleep(0.001)
+            die(f"perf did not acknowledge '{word}' within {timeout}s")
 
-    def command(word, timeout=30.0):
-        os.write(ctl_fd, (word + "\n").encode())
-        deadline = time.monotonic() + timeout
-        while time.monotonic() < deadline:
+        command("enable")
+        t0 = now_ns()
+        time.sleep(args.duration_s)
+        # T1 IS READ *BEFORE* THE DISABLE, ON PURPOSE.
+        #
+        # Counting therefore stops slightly AFTER the row window closes, exactly
+        # as it starts slightly BEFORE t0 is read (the enable ACK precedes the
+        # timestamp). The counted interval is thus a bounded SUPERSET of the
+        # attributed row interval on BOTH ends, which biases per-row counters
+        # UPWARD — the conservative direction — and can never attribute rows to
+        # cycles that were not counted.
+        #
+        # Reading t1 after the disable, as this did originally, put the row
+        # window's close AFTER counting stopped: rows attributed to an interval
+        # the counters did not cover. The `task-clock` check cannot see that,
+        # because it compares interval LENGTHS and those two intervals have the
+        # same length — they are merely SHIFTED. Bounded by the ACK round trip
+        # (~7 ms observed on a 60 s window = 0.012%), but wrong in principle.
+        t1 = now_ns()
+        command("disable")
+        rc = proc.wait(timeout=args.perf_slack_s + 60)
+        if rc != 0:
+            die(f"perf exited rc={rc} (see perf.log)")
+        proc = None  # reaped cleanly; nothing for the finally to tear down
+        return t0, t1, csv
+    finally:
+        for fd in (ctl_fd, ack_fd):
+            if fd is not None:
+                try:
+                    os.close(fd)
+                except OSError:
+                    pass
+        if proc is not None and proc.poll() is None:
+            proc.terminate()
             try:
-                data = os.read(ack_fd, 64)
-                if data:
-                    return
-            except BlockingIOError:
-                pass
-            time.sleep(0.001)
-        die(f"perf did not acknowledge '{word}' within {timeout}s")
-
-    command("enable")
-    t0 = now_ns()
-    time.sleep(args.duration_s)
-    command("disable")
-    t1 = now_ns()
-    os.close(ctl_fd)
-    os.close(ack_fd)
-
-    rc = proc.wait(timeout=args.perf_slack_s + 60)
-    perf_log.close()
-    if rc != 0:
-        die(f"perf exited rc={rc} (see perf.log)")
-    return t0, t1, csv
+                proc.wait(timeout=10)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+                proc.wait(timeout=10)
+        if perf_log is not None:
+            perf_log.close()
 
 
 def main():

@@ -83,9 +83,23 @@ The residual bias has a stated direction: rows are under-counted against a full-
 window denominator, so **rows/s is biased LOW and per-row counters HIGH**, by at
 most the published shortfall (max **0.0909%** over all 75 reps).
 
-**That the two windows coincide is measured, not argued**: under CPU-wide
-counting `task-clock` must read `window × nCPUs`, and it does, to at most
-**4.13e-05** across all 75 reps.
+**What is measured about the two windows, stated exactly.** Under CPU-wide
+counting `task-clock` must read `window × nCPUs`, and it does to at most
+**4.13e-05** across all 75 reps. That establishes the two intervals have the
+**same LENGTH** — it does **not** establish that they coincide, because a
+length comparison cannot see two equally-sized but **shifted** intervals.
+
+Their **alignment** is bounded separately, by the control-FIFO ACK latency:
+observed windows ran 60.002–60.007 s against 60.000 s requested, so the
+offset is **≤ ~7 ms on 60 s = 0.012%**. The harness also reads `t1` *before*
+sending `disable` (as it reads `t0` *after* the enable ACK), which makes the
+counted interval a bounded **superset** of the attributed row interval at both
+ends — so per-row counters are biased **upward**, the conservative direction,
+and no row is ever attributed to cycles that were not counted.
+
+An earlier draft of this report said the two windows "coincide, measured not
+argued". That overstated what the check can show, and it is corrected here
+rather than quietly softened.
 
 ---
 

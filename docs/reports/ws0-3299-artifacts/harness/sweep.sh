@@ -82,6 +82,22 @@ done
 [[ -n "$RESULTS" ]] || { echo "--results is required" >&2; usage; }
 [[ -x "$CONTAIN" ]] || { echo "FATAL: containment wrapper missing: $CONTAIN" >&2; exit 2; }
 
+# EXCLUSIVE-CREATE AT EVERY LEVEL THAT HOLDS EVIDENCE — root as well as rundir.
+#
+# rep.py already refuses an existing RUNDIR. That was not enough: this script
+# reached `: > "$MANIFEST"` first, so re-running against a COMPLETED results tree
+# truncated its manifest, siblings map and build log — destroying the provenance
+# of a finished campaign — and only THEN hit the per-rep refusal. Closing one
+# level and leaving the one above it open is how this defect family regenerates,
+# so the rule is stated here: never truncate existing result metadata implicitly,
+# at any level.
+if [[ -e "$RESULTS" ]]; then
+  echo "FATAL: $RESULTS already exists. Refusing to write into it: this script would" >&2
+  echo "  truncate manifest.jsonl / siblings.map / worker-build.log and destroy the" >&2
+  echo "  provenance of whatever campaign produced them. Point --results at a fresh" >&2
+  echo "  path (a timestamped one is the habit), or remove this tree deliberately." >&2
+  exit 2
+fi
 mkdir -p "$RESULTS"
 RESULTS="$(cd "$RESULTS" && pwd)"
 
@@ -216,7 +232,12 @@ print(json.dumps([cpus] * int(sys.argv[2])))
     # rather than surviving to the aggregation step.
     python3 "$GUARDS" perf-csv --csv "$RD/perf.csv" --events "$EVENTS"
     python3 "$GUARDS" window --repdir "$RD" > "$RD/attribution.json"
-    echo "{\"s\":$S,\"n\":$N,\"round\":$round,\"rundir\":\"$RD\",\"order\":\"${ORDER[*]}\"}" >> "$MANIFEST"
+    # RUNDIR IS RECORDED RELATIVE TO THE RESULTS ROOT, never absolutely.
+    # An absolute path makes the COMMITTED evidence unusable: a reader running
+    # derive.py against the checked-in tree gets /data/... paths that do not
+    # exist on their machine. Relative + resolved-against-the-manifest means the
+    # tree is re-aggregatable wherever it is copied.
+    echo "{\"s\":$S,\"n\":$N,\"round\":$round,\"rundir\":\"$(basename "$RD")\",\"order\":\"${ORDER[*]}\"}" >> "$MANIFEST"
   done
 done
 

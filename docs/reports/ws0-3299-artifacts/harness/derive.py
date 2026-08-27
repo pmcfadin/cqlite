@@ -79,7 +79,50 @@ def load_rep(repdir):  # noqa: C901 — one linear read of one rep's evidence
             guards.fail("PERF_MULTIPLEXED", f"{repdir}: event {ev!r} at {pct}% — a scaled estimate")
         counters[ev] = float(val)
 
-    per = guards.attribute_window(repdir, t0, t1, n, guards.DEFAULT_SHORTFALL_BOUND)
+    # ATTRIBUTION SOURCE — recompute where the raw records exist, otherwise read
+    # the guard's own committed output.
+    #
+    # The per-worker progress records are the ground truth and are RECOMPUTED
+    # whenever they are present. They are NOT committed, because at a 25 ms
+    # sample interval a single S=6/N=24 rep emits ~57,600 records and the
+    # campaign has 91 reps. What IS committed is `attribution.json` — the output
+    # `guards.py window` produced from those records AT MEASUREMENT TIME, after
+    # they passed every window guard. Reading it is what makes the committed
+    # tree re-aggregatable at all; not reading it would leave the checked-in
+    # evidence unusable, which is worse.
+    #
+    # It is not trusted blindly: the identity fields are re-checked against
+    # `window.json` below, so a mismatched or hand-edited attribution is refused.
+    attribution_path = os.path.join(repdir, "attribution.json")
+    if os.path.exists(os.path.join(repdir, "worker-0.progress.jsonl")):
+        per = guards.attribute_window(repdir, t0, t1, n, guards.DEFAULT_SHORTFALL_BOUND)
+        attribution_source = "recomputed"
+    elif os.path.exists(attribution_path):
+        with open(attribution_path) as fh:
+            att = json.load(fh)
+        if int(att.get("s", -1)) != s or int(att.get("n", -1)) != n:
+            guards.fail(
+                "WINDOW_FIELD_MALFORMED",
+                f"{attribution_path} records s={att.get('s')}, n={att.get('n')} but "
+                f"window.json says s={s}, n={n} — the two describe different reps",
+            )
+        if int(att.get("window_ns", -1)) != t1 - t0:
+            guards.fail(
+                "WINDOW_FIELD_MALFORMED",
+                f"{attribution_path} records window_ns={att.get('window_ns')} but window.json "
+                f"gives {t1 - t0} — the attribution was computed over a different window",
+            )
+        per = att["per_worker"]
+        if len(per) != n:
+            guards.fail("WINDOW_WORKER_MISSING",
+                        f"{attribution_path} holds {len(per)} workers, expected n={n}")
+        attribution_source = "committed guard output"
+    else:
+        guards.fail(
+            "WINDOW_WORKER_MISSING",
+            f"{repdir} holds neither worker progress records nor attribution.json — "
+            f"there is nothing to attribute rows from",
+        )
     rows = sum(p["rows_in_window"] for p in per)
     window_s = (t1 - t0) / 1e9
     return {
@@ -105,7 +148,33 @@ def load_rep(repdir):  # noqa: C901 — one linear read of one rep's evidence
         "l1d_loads_per_row": counters["L1-dcache-loads"] / rows,
         "counter_window_drift_frac": guards.counter_window_drift(repdir, win, counters),
         "shortfall_max_frac": max(p["attribution_shortfall_frac"] for p in per),
+        "attribution_source": attribution_source,
     }
+
+
+def resolve_rundir(results, recorded):
+    """Resolve a manifest `rundir` against the MANIFEST'S OWN directory.
+
+    Manifests record rundirs RELATIVE to the results root, so a committed tree is
+    re-aggregatable wherever it is copied. Absolute paths are accepted for
+    historical manifests, but only if they exist — and if one does not, the
+    remedy is named, because "no such directory" on a path from another machine
+    is otherwise a confusing way to learn that the evidence was recorded
+    unusably.
+    """
+    if not os.path.isabs(recorded):
+        return os.path.join(results, recorded)
+    if os.path.isdir(recorded):
+        return recorded
+    fallback = os.path.join(results, os.path.basename(recorded))
+    if os.path.isdir(fallback):
+        return fallback
+    sys.exit(
+        f"FATAL: manifest records the ABSOLUTE rundir {recorded!r}, which does not exist "
+        f"here, and {fallback!r} is not present either. An absolute rundir makes a committed "
+        f"results tree unusable on any other machine; re-emit the manifest with paths "
+        f"relative to the results root."
+    )
 
 
 def collect(results):
@@ -117,7 +186,7 @@ def collect(results):
     with open(manifest) as fh:
         for line in fh:
             if line.strip():
-                reps.append(load_rep(json.loads(line)["rundir"]))
+                reps.append(load_rep(resolve_rundir(results, json.loads(line)["rundir"])))
     return reps
 
 
@@ -384,6 +453,16 @@ def emit_provenance(reps, by_point, min_reps):
     print("`unhalted Gcyc/CPU·s` is deliberately absent from the deliverable table for the "
           "same reason a CPU-utilisation column is: under CPU-wide counting `task-clock` is "
           "elapsed x ncpus by construction, so a utilisation derived from it cannot vary.\n")
+    srcs = sorted({r["attribution_source"] for r in reps})
+    print(
+        "Row attribution source: **" + ", ".join(srcs) + "**. `recomputed` means the "
+        "per-worker progress records were present and were re-differenced; `committed guard "
+        "output` means they were not (too voluminous to commit — a single S=6/N=24 rep emits "
+        "~57,600 records) and the figures come from the `attribution.json` that "
+        "`guards.py window` produced from them at measurement time. That file is re-checked "
+        "here against `window.json` for s, n and window length, so a mismatched or edited "
+        "attribution is refused rather than absorbed.\n"
+    )
     print(f"Counter-window agreement (max over reps): "
           f"{max(r['counter_window_drift_frac'] for r in reps):.2e} — perf's enabled interval "
           f"versus the driver's [T0, T1]. The measured proof that counters and rows were "
