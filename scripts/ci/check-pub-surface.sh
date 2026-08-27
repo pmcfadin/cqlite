@@ -402,6 +402,48 @@ END {
     }
   }
 
+  # --- Refusal U: a top-level `pub mod` occurrence NEITHER derivation consumed.
+  #
+  # Both derivations above recognise exactly ONE shape: the statement form
+  # `pub mod NAME;`. An INLINE module — `pub mod NAME { #![cfg(...)] ... }` — is
+  # invisible to BOTH, so they AGREE (each derived the empty set for it) while both
+  # are blind. The mutual cross-check cannot catch a blind spot the two derivations
+  # SHARE, and a `#![cfg]` inside that body is the exact bypass this assert exists to
+  # close, so the scan REFUSES over a crate root declaring a public module in a shape
+  # it does not handle. It deliberately does NOT parse the body: that road is a Rust
+  # parser, and this guard has already paid for four substring-vs-structure defects.
+  #
+  # DELIBERATELY OVER-APPROXIMATE, in the safe direction — it also fires on a
+  # multi-line `pub mod` / `NAME;` split across lines, on `pub  mod NAME;` (two
+  # spaces), and on the token inside a non-indented string literal, none of which
+  # either derivation recognises either. Over-firing costs a loud, actionable FAIL;
+  # under-firing costs a silent false PASS, which is the defect being fixed here.
+  #
+  # `pub(crate) mod` / `pub(super) mod` / `pub(in path) mod` are OUT OF SCOPE and are
+  # deliberately not matched: this assert's subject is the PUBLIC surface, and a
+  # restricted-visibility module is not reachable from outside the crate, so it can
+  # neither enter the snapshot nor hide a gate that changes the public surface.
+  # (cqlite-core's crate root carries exactly such an inline module today,
+  # `pub(crate) mod test_alloc_probe`, which must stay green.)
+  for (i = 1; i <= n; i++) {
+    if (!INCODE[i]) continue
+    t = N[i]
+    if (t ~ /^[[:space:]]/ || t == "") continue
+    rest = t
+    while (match(rest, /pub[[:space:]]+mod([^A-Za-z0-9_]|$)/)) {
+      # An identifier character immediately before the match means this is not the
+      # `pub` keyword at all (`repub mod`), so it declares nothing.
+      pre = (RSTART > 1) ? substr(rest, RSTART - 1, 1) : ""
+      tail = substr(rest, RSTART)
+      if (pre !~ /[A-Za-z0-9_]/ && tail !~ /^pub mod [A-Za-z_][A-Za-z0-9_]*[[:space:]]*;/) {
+        # squash() also collapses any TAB in the snippet, which keeps the record's
+        # single text field from splitting under the tab-field convention below.
+        printf "U\tline %d: unrecognized top-level `pub mod` form: `%s`\n", i, squash(substr(tail, 1, 72))
+      }
+      rest = substr(rest, RSTART + RLENGTH)
+    }
+  }
+
   # --- Derivation P: the structured scan (attributes joined, same-line splits).
   CUR = 1
   while (CUR <= n) {
@@ -471,6 +513,17 @@ if grep -q '^E	' "$SCAN_RAW"; then
   echo "" >&2
   grep '^E	' "$SCAN_RAW" | cut -f2- >&2
   fail "the crate-root lexical scan of $LIB_RS_REL hit input it could not read (see above). Refusing to report a verdict over a crate root it could not fully parse."
+fi
+
+# A `pub mod` shape NEITHER derivation consumed. This is NOT a disagreement between
+# the two derivations — it is a blind spot they SHARE, which is precisely why the
+# cross-check further down cannot catch it and why this refusal is its own channel.
+if grep -q '^U	' "$SCAN_RAW"; then
+  echo "" >&2
+  grep '^U	' "$SCAN_RAW" | cut -f2- >&2
+  fail "the crate root $LIB_RS_REL declares a public module in a form the crate-root scan does not handle (see above). The scan handles exactly one shape: the statement form \`pub mod NAME;\`.
+       An INLINE module (\`pub mod NAME { ... }\`) can carry its own \`#![cfg(...)]\` INNER attribute — the gate hides inside the body while the crate root advertises the module unconditionally, which is the exact bypass this consistency assert exists to close. Both derivations are blind to the inline form, so they AGREE and the cross-check below cannot see it; the guard refuses rather than report a verdict it cannot support.
+       Remedy: declare it as a FILE module — \`pub mod NAME;\` in $LIB_RS_REL plus NAME.rs (or NAME/mod.rs) — and put any cfg gate at the DECLARATION SITE (\`#[cfg(feature = \"...\")] pub mod NAME;\`), where the snapshot and this assert can both see it."
 fi
 
 DERIVED_DECLS="$WORK_DIR/decls.txt"
