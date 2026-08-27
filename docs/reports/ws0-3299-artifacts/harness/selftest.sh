@@ -274,6 +274,27 @@ else
   PASS=$((PASS+1))
 fi
 
+# -------------------------------- STRUCTURAL: a verdict is computed, not told ---
+echo
+echo "-- verdict channel (structural) --"
+expect_ok "derive.py has no hand-written verdict channel" \
+  python3 "$HERE/check-no-verdict-channel.py" "$HERE/derive.py"
+# NEGATIVE CONTROLS — both shapes the hatch has taken or could take. Without
+# these the check above could pass vacuously.
+sed 's/--extension", action="append"/--verdict-override", action="append"/' \
+  "$HERE/derive.py" > "$TMP/vc-flag.py"
+sed 's/verdicts.update(extension_verdicts(d, reps))/verdicts.update(json.load(open("v.json")))/' \
+  "$HERE/derive.py" > "$TMP/vc-file.py"
+for shape in flag file; do
+  if python3 "$HERE/check-no-verdict-channel.py" "$TMP/vc-$shape.py" >/dev/null 2>&1; then
+    echo "FAIL  [verdict channel: $shape] the check ACCEPTED a reintroduced override"
+    FAIL=$((FAIL+1))
+  else
+    echo "ok    [verdict channel: $shape] rejects a reintroduced override"
+    PASS=$((PASS+1))
+  fi
+done
+
 # ------------------------------------------------------ no relaxation knob ---
 echo
 echo "-- no escape hatch --"

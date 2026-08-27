@@ -179,7 +179,21 @@ python3 docs/reports/ws0-3299-artifacts/harness/derive.py \
 
 `--extension` supplies the contemporaneous points that decide S=6's verdict and
 **does not pool its medians into the main table** — a different session, and
-pooling would average across a drift epoch (§6).
+pooling would average across a drift epoch (§6). So the verdict is aggregated
+across trees while each tree's medians stay distinct, and every figure says
+which tree it came from.
+
+**A verdict-override file existed for one revision, and was removed.** An earlier
+commit let a hand-written `verdict-override.json` supply S=6's peak status. **Its
+contents were entirely true** — it carried the real extension evidence — and that
+is exactly why it is recorded here rather than quietly dropped: **the mechanism
+is wrong even when the instance is honest.** Nothing could check its prose
+against reality; it handed back the after-the-fact discretion that pre-registering
+the rule exists to remove; and it papered over the real gap (the tool could not
+read the extension trees) with an assertion instead of a fix. It is gone, the
+verdict is now computed from measured points by the same rule, and
+`selftest.sh` asserts structurally that no such channel can return — negative-
+controlled against both shapes it could take, a flag and a file.
 
 **S=2 through S=5 remain edge-truncated**: their best N is the largest tried, so
 each is a **lower bound on that S's best**, not a measured peak. They shape the

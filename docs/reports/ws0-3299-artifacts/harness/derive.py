@@ -236,8 +236,14 @@ def agg(points, key):
     return median([p[key] for p in points])
 
 
-def emit_table(reps, min_reps, overrides=None):
-    overrides = overrides or {}
+def emit_table(reps, min_reps, derived_verdicts=None):
+    """`derived_verdicts` is COMPUTED, never asserted.
+
+    Its only producer is `extension_verdicts()`, which applies the same
+    pre-registered `bracket_verdict()` to an extension tree's own measured
+    points. There is deliberately no way to supply a verdict by hand.
+    """
+    derived_verdicts = derived_verdicts or {}
     by_point = {}
     for r in reps:
         by_point.setdefault((r["s"], r["n"]), []).append(r)
@@ -249,9 +255,21 @@ def emit_table(reps, min_reps, overrides=None):
     # incumbent lets session drift answer the question), so an extension run that
     # re-measured the incumbent interleaved with its candidates is the better
     # authority for that S — and it lives in its own results tree precisely
-    # because its medians must NOT be pooled across sessions. An override is
-    # therefore explicit, sourced, and printed with its source rather than
-    # silently replacing the computed verdict.
+    # because its medians must NOT be pooled across sessions. The verdict
+    # therefore travels WITHOUT the data — but it is still COMPUTED from that
+    # tree's points by the same pre-registered rule, and printed with the tree it
+    # came from.
+    #
+    # THERE IS NO OVERRIDE CHANNEL, AND THERE MUST NOT BE ONE. An earlier
+    # revision accepted a hand-written `verdict-override.json`. Its contents were
+    # entirely TRUE — it carried the real extension evidence — which is exactly
+    # why it is worth naming: the MECHANISM is wrong even when the INSTANCE is
+    # honest. Nothing could check that its prose matched reality, so a stale or
+    # wrong file would have printed `bracketed` with a straight face; it
+    # reintroduced precisely the after-the-fact discretion that pre-registering
+    # the rule exists to remove; and it papered over the real gap (this tool
+    # could not see the extension trees) with an assertion instead of a fix.
+    # `selftest.sh` asserts structurally that no such channel returns.
     _sp = [spread_pct([r["aggregate_rows_per_s"] for r in v]) / 100.0
            for v in by_point.values() if len(v) >= 2]
     grid_max_spread = max(_sp) if _sp else 0.05
@@ -310,8 +328,8 @@ def emit_table(reps, min_reps, overrides=None):
         own_n1_cell = f"{own_n1:,.0f}" if own_n1 is not None else "n/m"
         peak_sp = spread_pct([x["aggregate_rows_per_s"] for x in v])
         verdict, why = bracket_verdict(by_point, s, peaks, n_values, grid_max_spread)
-        if s in overrides:
-            o = overrides[s]
+        if s in derived_verdicts:
+            o = derived_verdicts[s]
             verdict = o["verdict"]
             why = f'{o["why"]} — SOURCE: {o["source"]}'
         bracket_notes.append((s, n_peak, verdict, why))
@@ -407,7 +425,7 @@ def emit_resolution(by_point, reps):
 def extension_verdicts(path, reps):
     """Bracketing verdicts derived FROM an extension tree's own contemporaneous points.
 
-    Why this exists rather than a hand-written override file: a bracketing
+    Why this exists rather than a hand-written verdict file: a bracketing
     decision requires points measured close together (a candidate compared
     against an incumbent measured hours earlier lets session drift answer it),
     and the extension runs re-measured the incumbent INTERLEAVED with each
@@ -583,10 +601,12 @@ def main():
     if not args.results:
         ap.error("--results is required")
     extensions = [(d, collect(d)) for d in args.extension]
-    ov = {}
+    # The ONLY producer of verdicts is extension_verdicts(), which computes them
+    # from measured points. No file, flag or environment variable can supply one.
+    verdicts = {}
     for d, reps in extensions:
-        ov.update(extension_verdicts(d, reps))
-    emit_table(collect(args.results), args.min_reps, ov)
+        verdicts.update(extension_verdicts(d, reps))
+    emit_table(collect(args.results), args.min_reps, verdicts)
     for d, reps in extensions:
         emit_extension(d, reps)
 
