@@ -39,32 +39,39 @@ const SCHEMA_OA_TEST = path.join(SCHEMAS_DIR, 'oa-test.cql');
 
 /**
  * Recursively check whether `dir` contains at least one `*-Data.db` SSTable
- * binary (issue #1458).
+ * binary FILE (issue #1458).
  *
  * Directory existence alone is NOT evidence of a corpus: a present-but-EMPTY
  * sstables dir is the exact shape of the original #773 failure and used to
  * count as "available", false-greening a broken fixture setup.
  *
- * Symlinked directories ARE followed (a symlinked keyspace dir is a legitimate
- * corpus layout), so the walk must be cycle-safe: `visited` holds the resolved
- * real path of every directory already entered, and a link pointing at an
- * ancestor is skipped instead of recursing until the stack overflows.
+ * Three traversal rules, DELIBERATELY IDENTICAL to those of the Python guard's
+ * `_data_db_files()` in bindings/python/tests/conftest.py, which gets them for
+ * free from a recursive `Path.glob` of `*-Data.db` filtered by `Path.is_file()`:
+ *   1. a symlinked DIRECTORY is NOT traversed (recursion enters real dirs only);
+ *   2. a symlinked FILE whose target is a regular file IS counted (`is_file()`,
+ *      like `statSync`, follows the link);
+ *   3. a FIFO, socket, device node or directory named `*-Data.db` is NOT
+ *      counted -- only a regular file qualifies.
+ *
+ * The two implementations are ONE contract written twice: whoever changes the
+ * rules here must change `_data_db_files()` too, and vice versa.
+ *
+ * Consequence, recorded honestly: a symlinked KEYSPACE DIRECTORY is unsupported
+ * in BOTH languages. No corpus uses that layout (measured: zero symlinks under
+ * the fleet corpus and under the checkout's test-data/datasets), and rule 1
+ * fails in the SAFE direction -- such a root reports zero fixtures, so strict
+ * mode throws the existing loud "0 *-Data.db files" error rather than silently
+ * skipping.
+ *
+ * Rule 1 also makes symlink CYCLES structurally unreachable (only a followed
+ * directory link could close one), so this walk needs no realpath/visited-set
+ * cycle machinery.
  *
  * @param {string} dir
- * @param {Set<string>} [visited] resolved real paths already walked
  * @returns {boolean}
  */
-function hasDataDbFile(dir, visited = new Set()) {
-  let real;
-  try {
-    real = fs.realpathSync(dir);
-  } catch (err) {
-    // A path that cannot be resolved contributes no fixtures (fail closed).
-    return false;
-  }
-  if (visited.has(real)) return false; // cycle or diamond: already covered
-  visited.add(real);
-
+function hasDataDbFile(dir) {
   let entries;
   try {
     entries = fs.readdirSync(dir, { withFileTypes: true });
@@ -74,20 +81,22 @@ function hasDataDbFile(dir, visited = new Set()) {
   }
   for (const entry of entries) {
     const full = path.join(dir, entry.name);
-    let isDirectory = entry.isDirectory();
-    if (entry.isSymbolicLink()) {
-      // withFileTypes does not follow symlinks; a symlinked keyspace dir is
-      // still a legitimate corpus layout.
-      try {
-        isDirectory = fs.statSync(full).isDirectory();
-      } catch (err) {
-        continue; // broken symlink
-      }
-    }
-    if (isDirectory) {
-      if (hasDataDbFile(full, visited)) return true;
+    if (entry.isDirectory()) {
+      // Rule 1: withFileTypes never follows symlinks, so isDirectory() is true
+      // for REAL directories only and a symlinked dir is skipped here.
+      if (hasDataDbFile(full)) return true;
     } else if (entry.name.endsWith('-Data.db')) {
-      return true;
+      // Rule 3: a regular file qualifies immediately.
+      if (entry.isFile()) return true;
+      if (entry.isSymbolicLink()) {
+        // Rule 2: follow the link -- it counts iff the target is a regular
+        // file. A broken link (or one to a FIFO/socket/dir) contributes none.
+        try {
+          if (fs.statSync(full).isFile()) return true;
+        } catch (err) {
+          continue;
+        }
+      }
     }
   }
   return false;
