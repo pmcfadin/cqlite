@@ -59,6 +59,8 @@ pub struct WriteEngineConfig {
     pub wal_dir: PathBuf,
     /// Memtable flush threshold in bytes (default: 64MB)
     pub memtable_flush_threshold: usize,
+    /// Memtable admission ceiling in bytes (default: 256MB)
+    pub memtable_hard_limit: usize,
     /// Table schema for column metadata
     pub schema: TableSchema,
 }
@@ -90,19 +92,28 @@ pub fn with_compaction_config(self, compaction: &cqlite_core::config::Compaction
 **Public config source of truth** (issue #1697) — every write-path default has
 exactly one literal, in `Config::default()`:
 
-| `WriteEngineConfig` field | public `Config` field | default |
-|---|---|---|
-| `memtable_flush_threshold` | `storage.memtable_size_threshold` | 64 MB |
-| `auto_compaction` | `storage.compaction.auto_compaction` | `true` |
-| `compaction_min_threshold` | `storage.compaction.min_threshold` | 4 |
-| `compaction_max_threshold` | `storage.compaction.max_threshold` | 32 |
+| `WriteEngineConfig` field | public `Config` field | default | what it does |
+|---|---|---|---|
+| `memtable_flush_threshold` | `storage.memtable_size_threshold` | 64 MB | flush trigger |
+| `memtable_hard_limit` | `storage.memtable_hard_limit` | 256 MB | admission ceiling — writes past it are REJECTED |
+| `auto_compaction` | `storage.compaction.auto_compaction` | `true` | install STCS or no policy |
+| `compaction_min_threshold` | `storage.compaction.min_threshold` | 4 | STCS eligibility bar |
+| `compaction_max_threshold` | `storage.compaction.max_threshold` | 32 | STCS merge width cap |
 
-**Constants**:
-- `DEFAULT_HARD_LIMIT`: 256 MB — `memtable_hard_limit` is not modelled by the
-  public `Config`, so this remains the single literal for it. The former
-  `DEFAULT_FLUSH_THRESHOLD` / `DEFAULT_COMPACTION_MIN_THRESHOLD` /
-  `DEFAULT_COMPACTION_MAX_THRESHOLD` constants were removed in #1697; their
-  values now come from `Config::default()`.
+`Config::validate()` enforces `memtable_hard_limit >= memtable_size_threshold`
+(a lower ceiling wedges the engine: writes are rejected before a flush can
+relieve the memtable), `compaction.min_threshold > 0`, and
+`compaction.max_threshold >= min_threshold`.
+
+**Constants**: none remain for the above. `DEFAULT_FLUSH_THRESHOLD`,
+`DEFAULT_HARD_LIMIT`, `DEFAULT_COMPACTION_MIN_THRESHOLD` and
+`DEFAULT_COMPACTION_MAX_THRESHOLD` were all removed in #1697 — every one of
+those values now has exactly one literal, in `Config::default()`.
+
+**Every production write path** builds its engine config through `from_config`:
+`cqlite-core` (`WriteEngineConfig::new`), `cqlite-cli` (`main.rs`, with the
+`CQLITE_MEMTABLE_FLUSH_THRESHOLD` env escape hatch applied ON TOP of the public
+value), and both bindings (`flush_threshold` / `flushThreshold`).
 
 ### WriteEngine
 
