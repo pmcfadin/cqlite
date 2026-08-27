@@ -611,33 +611,79 @@ fn merge_producer_threads_gauge_is_registered_and_documented() {
     assert_eq!(unit::THREADS, "{thread}");
 }
 
+/// A deterministic sentinel for a `MemoryStats` field, derived from the field NAME.
+///
+/// Both sides of the probe assertion below compute it from the same string, so the
+/// seeded snapshot and the expected value CANNOT drift apart — no second
+/// hand-maintained table of expectations to go stale (issue #1705, roborev F8).
+/// Values stay small so they fit every field's own type (`u64` and `usize` alike).
+fn stats_sentinel(field: &str) -> u64 {
+    let mut h: u64 = 0x1234_5678;
+    for b in field.bytes() {
+        h = h.wrapping_mul(31).wrapping_add(u64::from(b));
+    }
+    1_000 + h % 100_000
+}
+
 #[test]
-fn stats_only_probes_read_distinct_live_stats_fields() {
+fn stats_only_probes_read_the_exact_field_they_declare() {
     // Issue #1705: the stats-only list must not be an unguarded waiver list. A bare
     // name list could silence the registration guard for a metric whose instrument
     // was simply forgotten — appending the name would be the whole cost. So each
     // entry carries a probe that READS its value out of a real
-    // `Database::stats().memory_stats` snapshot, and this asserts the probes are
-    // real: given a snapshot with a UNIQUE sentinel per key-cache field, every
-    // probe must return its OWN sentinel.
+    // `Database::stats().memory_stats` snapshot, and this asserts each probe reads
+    // the field its OWN `stats_field` names.
     //
-    // What that rules out: a probe that ignores the snapshot (constant / `0`), a
-    // probe copied from a sibling entry (two entries reading one field), and — the
+    // EXACT equality per probe, not "nonzero and pairwise distinct" (roborev F8).
+    // Distinctness only says the probes differ from each other: two probes SWAPPED
+    // satisfy it, and so does a probe reading an unrelated field (a block-cache
+    // counter instead of the key-cache one it advertises). Both are the
+    // "no bad signal found" shape — a positive verdict with no affirmative
+    // measurement behind it. Deriving the expectation from the declared
+    // `stats_field` makes the declaration the oracle: the probe must return the
+    // sentinel of THAT field and no other.
+    //
+    // What it rules out: a probe that ignores the snapshot (constant / `0`), a probe
+    // copied from a sibling entry, a probe reading a neighbouring field, and — the
     // point of the exercise — a metric with no stats field at all, which cannot be
     // given a compiling probe in the first place.
+    let seeded = [
+        "key_cache_hits",
+        "key_cache_misses",
+        "key_cache_evictions",
+        "key_cache_invalidations",
+        "key_cache_resident_bytes",
+        "key_cache_capacity_bytes",
+        "block_cache_hits",
+        "block_cache_misses",
+        "block_cache_evictions",
+        "block_cache_capacity_bytes",
+    ];
+    // Equality is only a meaningful oracle if no two seeded fields share a value.
+    for (n, a) in seeded.iter().enumerate() {
+        for b in &seeded[n + 1..] {
+            assert_ne!(
+                stats_sentinel(a),
+                stats_sentinel(b),
+                "sentinels for {a} and {b} collide — a swapped probe would pass"
+            );
+        }
+    }
+
     let stats = crate::memory::MemoryStats {
-        key_cache_hits: 101,
-        key_cache_misses: 102,
-        key_cache_evictions: 103,
-        key_cache_invalidations: 104,
-        key_cache_resident_bytes: 105,
-        key_cache_capacity_bytes: 106,
-        // Neighbouring fields a sloppy probe might read instead must stay
-        // distinguishable from the six above.
-        block_cache_hits: 201,
-        block_cache_misses: 202,
-        block_cache_evictions: 203,
-        block_cache_capacity_bytes: 204,
+        key_cache_hits: stats_sentinel("key_cache_hits"),
+        key_cache_misses: stats_sentinel("key_cache_misses"),
+        key_cache_evictions: stats_sentinel("key_cache_evictions"),
+        key_cache_invalidations: stats_sentinel("key_cache_invalidations"),
+        key_cache_resident_bytes: stats_sentinel("key_cache_resident_bytes") as usize,
+        key_cache_capacity_bytes: stats_sentinel("key_cache_capacity_bytes") as usize,
+        // Neighbouring fields a sloppy probe might read instead are seeded too, so
+        // reading one of them is a WRONG value rather than a `0` that could be
+        // mistaken for an unpopulated snapshot.
+        block_cache_hits: stats_sentinel("block_cache_hits"),
+        block_cache_misses: stats_sentinel("block_cache_misses"),
+        block_cache_evictions: stats_sentinel("block_cache_evictions"),
+        block_cache_capacity_bytes: stats_sentinel("block_cache_capacity_bytes") as usize,
         ..Default::default()
     };
 
@@ -645,26 +691,36 @@ fn stats_only_probes_read_distinct_live_stats_fields() {
         !STATS_ONLY_METRICS.is_empty(),
         "the probe guard must have a subject — an empty declaration passes vacuously"
     );
-    let mut seen: std::collections::HashMap<u64, &str> = std::collections::HashMap::new();
     for m in STATS_ONLY_METRICS {
-        let observed = (m.stats_probe)(&stats);
-        assert_ne!(
-            observed,
-            0,
-            "catalog::…{name} declares stats_field {field} but its probe read 0 from a \
-             fully-populated snapshot — the probe reads no live field, so the \
-             stats-only exemption is unjustified",
-            name = m.name,
-            field = m.stats_field
+        // `stats_field` is the operator-facing path (`memory_stats.<field>`); the
+        // field name after the prefix is what the probe must read. A declaration
+        // this test cannot resolve to a seeded field fails CLOSED — a new
+        // stats-only entry has to seed its field here, which is the point.
+        let field = m
+            .stats_field
+            .strip_prefix("memory_stats.")
+            .unwrap_or_else(|| {
+                panic!(
+                    "{}'s stats_field {:?} must name a `memory_stats.<field>` path",
+                    m.name, m.stats_field
+                )
+            });
+        assert!(
+            seeded.contains(&field),
+            "{} declares stats_field {:?}, which this guard does not seed — add the \
+             field to `seeded` (and to the snapshot below) so its probe is measured \
+             rather than assumed",
+            m.name,
+            m.stats_field
         );
-        if let Some(prior) = seen.insert(observed, m.name) {
-            panic!(
-                "{} and {} probe the SAME stats field (both read {observed}) — one of \
-                 them is not actually surfaced on the stats path it claims \
-                 ({})",
-                prior, m.name, m.stats_field
-            );
-        }
+        assert_eq!(
+            (m.stats_probe)(&stats),
+            stats_sentinel(field),
+            "{}'s probe does not read {} — it returned another field's value (a \
+             swapped or copied probe), so the stats-only exemption is unjustified",
+            m.name,
+            m.stats_field
+        );
     }
 
     // And the probes must run against the REAL public snapshot type, not only a
@@ -674,6 +730,38 @@ fn stats_only_probes_read_distinct_live_stats_fields() {
         // Reading must not panic; the value itself is legitimately 0 before use.
         let _ = (m.stats_probe)(&live);
     }
+}
+
+#[test]
+fn the_stats_probe_guard_catches_a_swapped_probe() {
+    // The RED half (roborev F8): prove the assertion above can FAIL. A probe that
+    // reads a sibling field returns that field's sentinel, not its own, so the
+    // expectation derived from its declaration rejects it. Without this, the guard
+    // is only known to pass on correct input.
+    let stats = crate::memory::MemoryStats {
+        key_cache_hits: stats_sentinel("key_cache_hits"),
+        key_cache_misses: stats_sentinel("key_cache_misses"),
+        ..Default::default()
+    };
+    // Correct probe: reads what it declares.
+    let honest: fn(&crate::memory::MemoryStats) -> u64 = |s| s.key_cache_hits;
+    assert_eq!(honest(&stats), stats_sentinel("key_cache_hits"));
+    // Swapped probe: declares `key_cache_hits`, reads `key_cache_misses`.
+    let swapped: fn(&crate::memory::MemoryStats) -> u64 = |s| s.key_cache_misses;
+    assert_ne!(
+        swapped(&stats),
+        stats_sentinel("key_cache_hits"),
+        "a swapped probe must NOT satisfy the expectation derived from its \
+         declaration — nonzero-and-distinct did satisfy it, which is why that rule \
+         was replaced"
+    );
+    // A constant probe fails the same way, and so does one reading an unseeded
+    // field (`0`).
+    let constant: fn(&crate::memory::MemoryStats) -> u64 = |_| 7;
+    assert_ne!(constant(&stats), stats_sentinel("key_cache_hits"));
+    let unseeded: fn(&crate::memory::MemoryStats) -> u64 = |s| s.key_cache_evictions;
+    assert_eq!(unseeded(&stats), 0);
+    assert_ne!(unseeded(&stats), stats_sentinel("key_cache_evictions"));
 }
 
 /// The instrument-registration guards live in a sibling file so both stay inside

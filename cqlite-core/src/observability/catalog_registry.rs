@@ -149,9 +149,12 @@ pub const ADMISSION_METRICS: &[&str] = &[
 /// positively justified twice over:
 ///
 /// * the COMPILER refuses the entry unless the field it names exists, and
-/// * `stats_only_probes_read_distinct_live_stats_fields` executes every probe
-///   against a snapshot with a unique sentinel per field, so a probe that reads
-///   nothing, returns a constant, or duplicates another entry's field FAILS.
+/// * `stats_only_probes_read_the_exact_field_they_declare` executes every probe
+///   against a snapshot seeded with a per-field sentinel derived from the field
+///   NAME, and requires each probe to return the sentinel of the field its own
+///   `stats_field` declares. A probe that reads nothing, returns a constant,
+///   duplicates another entry's field, or is SWAPPED with a sibling's therefore
+///   FAILS — exact equality, not merely "nonzero and distinct" (roborev F8).
 ///
 /// A metric that is not actually on the stats path has no such field, so it cannot
 /// be exempted by declaration alone.
@@ -184,8 +187,9 @@ pub struct StatsOnlyMetric {
 /// operator-facing prose cannot drift apart;
 /// `stats_only_metrics_are_catalogued_and_never_otel_registered` fails if a name
 /// listed here DOES get an instrument, so a stale exemption cannot silently weaken
-/// the guard; and `stats_only_probes_read_distinct_live_stats_fields` fails unless
-/// every entry's probe really reads its own field of a live snapshot.
+/// the guard; and `stats_only_probes_read_the_exact_field_they_declare` fails unless
+/// every entry's probe really reads the one field of a live snapshot its
+/// `stats_field` names.
 ///
 /// Adding an entry here is a claim-boundary decision, not a formality: it says
 /// "this metric is not scrapeable". Wire the instrument instead where you can.
