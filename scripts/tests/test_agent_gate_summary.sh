@@ -2058,6 +2058,83 @@ else
   fi
 fi
 
+# --- 21. #1699: guard subjects are DERIVED, and unmodelled cfg shapes stay unclassified
+#
+# roborev round-7 findings. Three separate places where a guard's SUBJECT was narrower
+# than its selector, which is the same "looks covered, isn't" shape as the whole issue:
+#   (a) the flight zero-test guard took a hard-coded `src/lib.rs src/main.rs` while
+#       `--bins` selects EVERY binary, so a new binary could run zero tests unnoticed;
+#   (b) legacy target discovery globbed `tests/*.rs`, which cannot see a target gated only
+#       by `required-features` in the manifest, nor a directory-style `tests/foo/main.rs`;
+#   (c) the co-required census treated every token as conjunctive, so
+#       `any(feature = "legacy-heuristics", feature = "experimental")` — REACHABLE in this
+#       lane — was reported as compiled out.
+lh_body="$tmp/1699-lhfn.txt"
+awk '/^run_legacy_heuristics\(\) \{/,/^\}/' "$GATE" > "$lh_body"
+ft_body="$tmp/1699-ftfn.txt"
+awk '/^run_flight_tests\(\) \{/,/^\}/' "$GATE" > "$ft_body"
+if [ ! -s "$lh_body" ] || [ ! -s "$ft_body" ]; then
+  bad "1699-derived-extract: could not extract run_legacy_heuristics/run_flight_tests — extraction broke, so these asserts would pass vacuously"
+else
+  ok "1699-derived-extract: extracted both lane functions from the real script"
+  lh_code="$tmp/1699-lhfn-code.txt"; sed 's/[[:space:]]*#.*$//' "$lh_body" > "$lh_code"
+  ft_code="$tmp/1699-ftfn-code.txt"; sed 's/[[:space:]]*#.*$//' "$ft_body" > "$ft_code"
+
+  if [ "$(grep -cE 'check_unittest_targets_ran[^|]*src/lib\.rs' "$ft_code")" -eq 0 ]; then
+    ok "1699-derived-flightguard: the flight zero-test guard takes no hard-coded unittest path"
+  else
+    bad "1699-derived-flightguard: the flight zero-test guard is back on a hard-coded src/lib.rs — --bins selects every binary, so a new one could run zero tests with the guard reporting OK"
+  fi
+  if [ "$(grep -cE '_package_unittest_srcs' "$ft_code")" -gt 0 ]; then
+    ok "1699-derived-flightsubj: the flight guard's subject set is derived from cargo metadata"
+  else
+    bad "1699-derived-flightsubj: the flight guard's subject set is no longer derived — a hard-coded list beside a wildcard selector drifts silently (#2039)"
+  fi
+  if [ "$(grep -cE '_package_test_targets_gated' "$lh_code")" -gt 0 ]; then
+    ok "1699-derived-legacycand: legacy target candidates come from cargo metadata (sees manifest-gated + directory-style targets)"
+  else
+    bad "1699-derived-legacycand: legacy target discovery no longer enumerates cargo's test targets — a tests/*.rs glob omits manifest-gated and directory-style targets"
+  fi
+  if [ "$(grep -cE 'for[[:space:]]+f[[:space:]]+in[[:space:]]+"\$tests_dir"/\*\.rs' "$lh_code")" -eq 0 ]; then
+    ok "1699-derived-noglob: membership is not decided by a bare tests/*.rs glob"
+  else
+    bad "1699-derived-noglob: the tests/*.rs glob is back as the candidate source"
+  fi
+
+  # (c) BEHAVIOURAL: any(...) and cfg_attr must come back as unclassified, not as gaps.
+  if [ -s "$coreq_h" ]; then
+    coreq_fx2="$tmp/1699-coreq-bool.rs"
+    cat > "$coreq_fx2" <<'RSFX2'
+#[cfg(any(feature = "legacy-heuristics", feature = "absent-one"))]
+#[test]
+fn any_is_reachable_here_not_a_gap() {}
+
+#[cfg_attr(feature = "absent-one", ignore)]
+#[cfg(all(feature = "legacy-heuristics", feature = "absent-one"))]
+#[test]
+fn cfg_attr_is_not_evaluated() {}
+
+#[cfg(all(feature = "legacy-heuristics", feature = "absent-two"))]
+#[test]
+fn plain_conjunction_is_still_a_gap() {}
+RSFX2
+    coreq_out2="$tmp/1699-coreq-bool-out.txt"
+    _legacy_coreq_sites "$coreq_fx2" " default legacy-heuristics " > "$coreq_out2" 2>/dev/null
+    b_skip=$(awk -F'\t' '$1=="skip"' "$coreq_out2" | wc -l | tr -d ' ')
+    b_fn=$(awk -F'\t' '$1=="fn" && $2=="1"' "$coreq_out2" | wc -l | tr -d ' ')
+    if [ "$b_skip" = "2" ]; then
+      ok "1699-coreq-bool: any(...) and cfg_attr are reported UNCLASSIFIED, not as gaps"
+    else
+      bad "1699-coreq-bool: expected 2 unclassified sites (any + cfg_attr), got $b_skip — a token list cannot tell a conjunction from a disjunction, and any(...) is REACHABLE in this lane"
+    fi
+    if [ "$b_fn" = "1" ]; then
+      ok "1699-coreq-bool-complement: a plain all(...) conjunction is still reported as a gap (the skip arm did not swallow everything)"
+    else
+      bad "1699-coreq-bool-complement: expected 1 genuine conjunctive gap, got $b_fn — the unclassified arm is over-matching and the census now under-reports"
+    fi
+  fi
+fi
+
 echo "----"
 echo "passed: $PASS  failed: $FAIL"
 [ "$FAIL" -eq 0 ]

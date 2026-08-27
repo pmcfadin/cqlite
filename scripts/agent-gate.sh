@@ -4877,6 +4877,48 @@ export -f check_no_unexpected_zero_tests
 # `running N tests` is parsed rather than the `test result:` line because 0 is
 # unambiguous there, and because an all-`#[ignore]`d suite (a legitimate shape) still
 # reports a non-zero `running N`.
+# _package_unittest_srcs <pkg> — the `src` paths of every lib/bin target of <pkg>, in the
+# form `cargo test` prints them after `Running unittests` (e.g. `src/lib.rs`).
+#
+# roborev round-7 finding (Medium): the flight-tests zero-test guard was called with a
+# HARD-CODED `src/lib.rs src/main.rs`. `--bins` selects EVERY binary, so adding one to
+# cqlite-flight would have let it run zero tests with the guard still reporting OK — the
+# vacuous pass the guard exists to prevent, reintroduced as a two-entry registry that
+# drifts silently. That is #2039's lesson, which this very lane's report cites; a
+# hard-coded list beside a wildcard selector is the same defect in miniature.
+#
+# Derived from cargo metadata so the guard's subject set tracks the selector. A failed
+# derivation returns non-zero and the caller FAILs — never a fallback to a partial list,
+# which would silently shrink the guard's subject exactly like the hard-coded pair did.
+_package_unittest_srcs() {
+  local pkg="$1"
+  local meta out
+  meta=$(cargo metadata --format-version 1 --no-deps 2>/dev/null) || return 1
+  [ -n "$meta" ] || return 1
+  if command -v python3 >/dev/null 2>&1; then
+    out=$(printf '%s' "$meta" | python3 -c '
+import json, sys, os
+pkg = sys.argv[1]
+d = json.load(sys.stdin)
+for p in d.get("packages", []):
+    if p.get("name") != pkg:
+        continue
+    root = os.path.dirname(p.get("manifest_path", ""))
+    for t in p.get("targets", []):
+        kinds = t.get("kind") or []
+        if not any(k in ("lib", "bin") for k in kinds):
+            continue
+        sp = t.get("src_path") or ""
+        rel = os.path.relpath(sp, root) if root and sp.startswith(root) else sp
+        print(rel)
+' "$pkg") || return 1
+  else
+    return 1
+  fi
+  [ -n "$out" ] || return 1
+  printf '%s\n' "$out"
+}
+
 check_unittest_targets_ran() {
   local label="$1" logfile="$2"; shift 2
   local -a expected=("$@")
@@ -5900,7 +5942,23 @@ run_flight_tests() {
     # targets to be OBSERVED and to have executed a non-zero count — an affirmative
     # measurement, not the absence of a bad signal. Its verdict goes to stderr, so `2>>`
     # lands it in the component log while the `if` tests the GUARD's own exit status.
-    if check_unittest_targets_ran "$name" "$log" src/lib.rs src/main.rs 2>>"$log"; then
+    # The guard's subject set is DERIVED from cargo metadata, never hard-coded: `--bins`
+    # selects every binary, so a hard-coded pair would let a newly added one run zero
+    # tests while the guard still reported OK (roborev round-7 finding).
+    local -a unit_srcs=()
+    local _us_line
+    while IFS= read -r _us_line; do
+      [ -n "$_us_line" ] && unit_srcs+=("$_us_line")
+    done <<EOF
+$(_package_unittest_srcs cqlite-flight)
+EOF
+    if [ "${#unit_srcs[@]}" -eq 0 ]; then
+      echo "[$name] FAIL-CLOSED: could not derive cqlite-flight's lib/bin unittest targets" >>"$log"
+      echo "        from cargo metadata. The DERIVATION failed, so the zero-test guard has no" >>"$log"
+      echo "        subject — and a guard with no subject reports OK having measured nothing." >>"$log"
+      status=FAIL
+    elif check_unittest_targets_ran "$name" "$log" "${unit_srcs[@]}" 2>>"$log"; then
+      echo ">>> [$name] zero-test guard subject (derived): ${unit_srcs[*]}"
       status=PASS
     else
       status=FAIL
@@ -5980,10 +6038,19 @@ _legacy_coreq_sites() { # _legacy_coreq_sites <file> <enabled-feature-list>
       return n
     }
     function handle_attr(a,   path, tmp, m, has_lh, miss) {
+      # NOTE: has_cfg_attr / armed / istest / missing are deliberately GLOBAL (cluster
+      # state), reset at each item line — awk locals are the extra params only.
       path = a
       sub(/^#\[[ \t]*/, "", path)
       sub(/[ \t]*[(\]].*$/, "", path)
       if (path ~ /(^|::)test$/) istest = 1
+      # cfg_attr is a CLUSTER-level uncertainty, not a property of the arming attribute:
+      # `#[cfg_attr(feature = "x", test)]` makes TEST-NESS ITSELF conditional, so the
+      # path check above cannot see it and the item would be silently demoted to a
+      # non-test "other" — an under-report of test bodies. cfg_attr can equally carry the
+      # gating cfg. This parser evaluates neither, so any cluster containing one is
+      # reported UNCLASSIFIED rather than classified on incomplete information.
+      if (path ~ /(^|::)cfg_attr$/) has_cfg_attr = 1
       has_lh = 0; miss = ""
       tmp = a
       while (match(tmp, /feature[ \t]*=[ \t]*"[^"]+"/)) {
@@ -5996,7 +6063,16 @@ _legacy_coreq_sites() { # _legacy_coreq_sites <file> <enabled-feature-list>
         tmp = substr(tmp, RSTART + RLENGTH)
       }
       if (!has_lh || miss == "") return
-      if (a ~ /not[ \t]*\(/) { printf "skip\t0\t%s\n", miss; return }
+      # UNCLASSIFIED, never guessed, for every Boolean shape this parser does not model
+      # (roborev round-7 finding, Low). The token list alone cannot tell a CONJUNCTION
+      # from a DISJUNCTION: `all(legacy-heuristics, experimental)` is a real gap, while
+      # `any(legacy-heuristics, experimental)` is REACHABLE here through the
+      # legacy-heuristics arm and reporting it as compiled out is a false claim. `not(...)`
+      # is the same problem inverted. `cfg_attr` adds a conditional-attribute layer this
+      # parser does not evaluate at all. Reporting them is the honest option: a census
+      # exists to state what it cannot see, and a wrong entry costs more than a named
+      # unknown.
+      if (a ~ /not[ \t]*\(/ || a ~ /any[ \t]*\(/) { printf "skip\t0\t%s\n", miss; return }
       armed = 1; missing = miss
     }
     {
@@ -6016,14 +6092,52 @@ _legacy_coreq_sites() { # _legacy_coreq_sites <file> <enabled-feature-list>
       }
       if (t ~ /^\/\// || t ~ /^$/) next   # comments and blank lines keep the cluster intact
       if (armed) {
-        if (t ~ /^(pub[ \t]+)?(pub\([^)]*\)[ \t]+)?(const[ \t]+)?(async[ \t]+)?(unsafe[ \t]+)?(extern[ \t]+("[^"]*"[ \t]+)?)?fn[ \t]/)
+        if (has_cfg_attr)
+          printf "skip\t0\t%s\n", missing
+        else if (t ~ /^(pub[ \t]+)?(pub\([^)]*\)[ \t]+)?(const[ \t]+)?(async[ \t]+)?(unsafe[ \t]+)?(extern[ \t]+("[^"]*"[ \t]+)?)?fn[ \t]/)
           printf "fn\t%d\t%s\n", istest, missing
         else
           printf "item\t%d\t%s\n", istest, missing
       }
-      armed = 0; istest = 0; missing = ""
+      armed = 0; istest = 0; missing = ""; has_cfg_attr = 0
     }
   ' "$1"
+}
+
+# _package_test_targets_gated <pkg> <feature> — one TAB-separated record per `test`
+# target of <pkg>: `<name>\t<abs src_path>\t<manifest|source>`, where the third field is
+# `manifest` when the target's `required-features` name <feature> (cargo gates it) and
+# `source` otherwise (the caller must then scan src_path itself).
+#
+# roborev round-7 finding (Medium): the legacy lane discovered targets with a
+# `tests/*.rs` GLOB plus a cfg-string scan, which cannot see two shapes cargo does:
+# a target gated ONLY by `required-features = ["legacy-heuristics"]` (its source may
+# contain no cfg string at all), and a DIRECTORY-style target (`tests/foo/main.rs`).
+# Either would be silently omitted while the lane's own report claims the set is derived
+# so that "a new gated file is picked up with no gate edit" — so the CLAIM was wrong, not
+# only the code. cargo is the authority on which targets exist and how they are gated.
+_package_test_targets_gated() {
+  local pkg="$1" feat="$2"
+  local meta out
+  meta=$(cargo metadata --format-version 1 --no-deps 2>/dev/null) || return 1
+  [ -n "$meta" ] || return 1
+  command -v python3 >/dev/null 2>&1 || return 1
+  out=$(printf '%s' "$meta" | python3 -c '
+import json, sys
+pkg, feat = sys.argv[1], sys.argv[2]
+d = json.load(sys.stdin)
+for p in d.get("packages", []):
+    if p.get("name") != pkg:
+        continue
+    for t in p.get("targets", []):
+        if "test" not in (t.get("kind") or []):
+            continue
+        rf = t.get("required-features") or t.get("required_features") or []
+        how = "manifest" if feat in rf else "source"
+        print("%s\t%s\t%s" % (t.get("name", ""), t.get("src_path", ""), how))
+' "$pkg" "$feat") || return 1
+  [ -n "$out" ] || return 1
+  printf '%s\n' "$out"
 }
 
 run_legacy_heuristics() {
@@ -6059,10 +6173,35 @@ run_legacy_heuristics() {
   local -a targets=() allow_zero=()
   local cfg_site='feature[[:space:]]*=[[:space:]]*"legacy-heuristics"'
   local names="" negonly="" f base count=0
-  for f in "$tests_dir"/*.rs; do
-    [ -f "$f" ] || continue
-    grep -qE "$cfg_site" "$f" || continue
-    base=$(basename "$f" .rs)
+  # CANDIDATES FROM CARGO, NOT A GLOB (roborev round-7 finding). See
+  # _package_test_targets_gated for why: a manifest-gated or directory-style target is
+  # invisible to `tests/*.rs`. A failed enumeration FAILs and names the derivation — it is
+  # never a fallback to the glob, which would silently shrink the target set.
+  local meta_targets
+  if ! meta_targets=$(_package_test_targets_gated cqlite-core legacy-heuristics); then
+    status=FAIL
+    {
+      echo "[$name] FAIL-CLOSED: could not enumerate cqlite-core's test targets from cargo"
+      echo "        metadata, so the legacy-heuristics target set is unmeasurable. The"
+      echo "        DERIVATION failed; this is deliberately NOT a fallback to a tests/*.rs"
+      echo "        glob, which omits manifest-gated and directory-style targets."
+    } | tee "$log"
+    end=$(date +%s)
+    record_result "$name" "$status" "$((end - start))"
+    echo ">>> [$name] $status ($((end - start))s)"
+    return 0
+  fi
+  local _mt_name _mt_src _mt_how
+  while IFS="$(printf '\t')" read -r _mt_name _mt_src _mt_how; do
+    [ -n "$_mt_name" ] || continue
+    f="$_mt_src"
+    # Included when EITHER cargo gates the target on the feature (the arm the glob could
+    # not see) OR its own source carries a cfg reference to it.
+    if [ "$_mt_how" != "manifest" ]; then
+      [ -f "$f" ] || continue
+      [ "$(grep -cE "$cfg_site" "$f")" -gt 0 ] || continue
+    fi
+    base="$_mt_name"
     # Two array elements per target (`--test <name>`), so ${#targets[@]} is NOT the
     # target count — $count is.
     targets+=(--test "$base")
@@ -6085,12 +6224,14 @@ run_legacy_heuristics() {
       allow_zero+=("$base")
       negonly="$negonly $base"
     fi
-  done
+  done <<EOF
+$meta_targets
+EOF
   if [ "$count" -eq 0 ]; then
     status=FAIL
     {
       echo "[$name] FAIL-CLOSED: derived ZERO legacy-heuristics --test targets from"
-      echo "        $tests_dir/*.rs (pattern: $cfg_site)."
+      echo "        cargo metadata's test targets (cfg pattern: $cfg_site; or required-features)."
       echo "        The derivation, not the feature, is what failed — an unreadable or"
       echo "        moved tests dir, or a renamed feature. A lane with no subject has no"
       echo "        verdict to give, so this is a FAIL, never a PASS and never a SKIP."
@@ -6101,7 +6242,11 @@ run_legacy_heuristics() {
     return 0
   fi
 
-  echo ">>> [$name] derived${names} ($count target(s) from $tests_dir/*.rs)"
+  # Provenance named accurately: candidates come from cargo metadata (which sees
+  # manifest-gated and directory-style targets), and membership from each target's own
+  # src_path or its required-features. Saying "from tests/*.rs" would misdescribe the
+  # derivation in a lane whose subject is accurate declaration.
+  echo ">>> [$name] derived${names} ($count target(s); candidates from cargo metadata, gated by cfg site or required-features)"
   [ -n "$negonly" ] && echo ">>> [$name] allowed-zero (NEGATIVE-polarity only — cfg(not(...)) bodies compile out here and run in core-tests):$negonly"
 
   # COVERAGE CENSUS — the co-required-feature gap (roborev round-4 finding, Medium).
@@ -6198,8 +6343,10 @@ EOF
       lh_census+=("   support code following its callers, NOT omitted coverage, so not counted above.)")
     fi
     if [ "$lh_skip" -gt 0 ]; then
-      lh_census+=("  $lh_skip co-required cfg site(s) carry a NEGATED sub-expression and were NOT")
-      lh_census+=("  classified — reported rather than guessed, so this census cannot under-report.")
+      lh_census+=("  $lh_skip co-required cfg site(s) use a Boolean shape this census does not")
+      lh_census+=("  model (not(...) / any(...) / cfg_attr) and were NOT classified — a token list")
+      lh_census+=("  cannot tell a conjunction from a disjunction, and any(...) IS reachable here.")
+      lh_census+=("  Reported rather than guessed: a named unknown beats a wrong entry.")
     fi
   else
     lh_census+=("co-required-feature census: 0 — every legacy-heuristics-gated body is reachable at this feature set")
