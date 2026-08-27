@@ -5621,10 +5621,31 @@ for node in (d.get("resolve") or {}).get("nodes", []):
 # targets was discovered only AFTER a push, on CI's Flight tier. A local-first gate
 # has to catch it before the push; that is the gap this closes.
 #
-# Whole package (`cargo test -p cqlite-flight`), not `--lib` plus a hand-picked
-# target list: a hand-picked list is a second registry that drifts silently (the
-# #2039 cli-tests lesson), and the whole package measured 128s on the reference box —
-# proportionate for the SIDE lane, where it overlaps MAIN rather than tailing it.
+# AN EXPLICIT, DERIVED TARGET LIST — not the whole package, and not a hand-picked
+# one either (issue #3383). The first cut was `cargo test -p cqlite-flight`, on the
+# reasoning that a hand-picked list is a second registry that drifts silently (the
+# #2039 cli-tests lesson). That reasoning still holds, and it is why this list is
+# DERIVED from cargo metadata rather than typed out: adding
+# cqlite-flight/tests/foo.rs puts `--test foo` on the command line with NO gate edit,
+# so the drift the #2039 lesson warns about is structurally impossible here.
+#
+# What forced the change: `-p` has no way to exclude ONE target, and this lane needs
+# exactly that. `issue_3058_bypass_path_taken` carries an assertion on a RACE OUTCOME
+# (`fast_arm_stream_stops_when_the_client_drops_it` — the client's drop must beat the
+# producer). Measured: 3/3 PASS run standalone at load 74, but 2 of 3 whole-lane runs
+# FAILED under intra-package parallelism. A MERGE-GATE lane that reds 2-in-3 carries
+# no information — it trains agents to re-run and to waive, which is worse than not
+# having the lane. So the run list is every declared target MINUS two categories
+# (unmet required-features, which `--test` errors on where `-p` skipped silently; and
+# the CURATED FLIGHT_FLAKE_SKIPS), and the lane stays deterministic. The whole package
+# measured 128s on the reference box — proportionate for the SIDE lane, where it
+# overlaps MAIN rather than tailing it.
+#
+# `--lib --bins` are on the command line explicitly because an explicit selector
+# SUPPRESSES every target kind not named: without `--bins`, main.rs's 2 unit tests
+# (which `-p` did run) would stop executing, i.e. this change would have created
+# exactly the silent never-executed hole the lane exists to close. There are no Rust
+# doctests in the crate to lose (measured: all 10 doc fences are ```text/```json).
 #
 # flight-query-semantics-oracle is LEFT ALONE (design D4). Re-running its two targets
 # here costs a few seconds; re-deriving its per-lane #3095 fixture SKIP predicates
@@ -5651,17 +5672,20 @@ for node in (d.get("resolve") or {}).get("nodes", []):
 # targets STOP being allowed-zero with no gate edit, and a genuinely never-executed
 # target FAILs the lane exactly as before.
 #
-# DECLARED-VS-OBSERVED, also derived (roborev round-2 finding 2). "Whole package" is
-# not the same claim as "every declared target ran": `cargo test -p` SILENTLY SKIPS a
-# `[[test]]` target whose `required-features` are not enabled, printing NO
-# `Running tests/` line for it, so the #2039 zero-tests guard — which keys on that
-# line — cannot see it. Measured: `issue_1494_producer_mem_budget`
-# (`required-features = ["dhat-heap"]`) appeared 0 times in a lane log carrying 41
-# `Running` lines. So this component ALSO reconciles cargo metadata's declared `test`
-# targets against the ones observed running, and excuses an unobserved target only
-# when BOTH halves hold — an off required-feature explaining cargo's skip, AND another
-# gate component naming that target (memory-budget names this one) — printing the
-# reason either way. Anything else FAILs naming the target.
+# DECLARED-VS-OBSERVED, also derived (roborev round-2 finding 2). "Every target on
+# the command line" is not the same claim as "every declared target ran", and neither
+# was "whole package": `cargo test -p` SILENTLY SKIPS a `[[test]]` target whose
+# `required-features` are not enabled, printing NO `Running tests/` line for it, so
+# the #2039 zero-tests guard — which keys on that line — cannot see it. Measured:
+# `issue_1494_producer_mem_budget` (`required-features = ["dhat-heap"]`) appeared 0
+# times in a lane log carrying 41 `Running` lines. So this component ALSO reconciles
+# cargo metadata's declared `test` targets against the ones observed running, and an
+# unobserved target must fall into ONE of exactly three EXPLICITLY-NAMED categories:
+# flake-skipped (FLIGHT_FLAKE_SKIPS, naming its issue), or an off required-feature
+# explaining cargo's skip WITH another gate component actually invoking the target
+# (memory-budget invokes this one). The reason is printed either way; anything else
+# FAILs naming the target. The three stay separate in the diagnostic because "we chose
+# not to run it" and "cargo cannot run it here" are different facts.
 #
 # Deliberately NOT done: adding `--features observability-testing`. Building the OTel
 # stack is a cost the gate declines on purpose (#1844 excludes that stack from clippy
@@ -5768,7 +5792,80 @@ run_flight_tests() {
     fi
   done
 
-  echo ">>> [$name] cargo test --no-fail-fast -p cqlite-flight (whole package: --lib + every integration target cargo can enable at this feature set, RECONCILED against cargo metadata, #1699)"
+  # The flake-exclusion list is validated BEFORE anything is built or run: a malformed
+  # or STALE entry is a FAIL naming it, never a line that silently excuses nothing.
+  if ! _validate_flight_flake_skips "$name" "$target_meta" "$FLIGHT_FLAKE_SKIPS" 2>"$log"; then
+    status=FAIL
+    cat "$log"
+    end=$(date +%s)
+    record_result "$name" "$status" "$((end - start))"
+    echo ">>> [$name] $status ($((end - start))s)"
+    return 0
+  fi
+
+  # THE RUN LIST — DERIVED from cargo metadata (issue #3383): every declared test
+  # target, minus the two categories that must not appear on a `--test` command line.
+  #
+  #   (a) A target whose `required-features` this lane cannot enable. Note the
+  #       asymmetry that makes this mandatory rather than tidy: `cargo test -p` SKIPS
+  #       such a target silently, but `cargo test --test X` on it is a HARD ERROR
+  #       ("target ... requires the features ..."), which would fail the lane for a
+  #       reason having nothing to do with the code. Each one is still ACCOUNTED FOR
+  #       by check_declared_test_targets_observed below, so omitting it here does not
+  #       make it invisible.
+  #   (b) FLIGHT_FLAKE_SKIPS, validated above and echoed individually below.
+  #
+  # Both counts are printed, so the component log states what ran and what did not.
+  local -a run_targets=()
+  local run_n=0 rf_n=0 flake_n=0 declared_n=0
+  local rf_reasons="" tname rf rfl off sk skissue
+  while IFS=$'\t' read -r tname rf; do
+    [ -n "$tname" ] || continue
+    declared_n=$((declared_n + 1))
+    off=""
+    for rfl in ${rf//,/ }; do
+      case "$enabled" in *" $rfl "*) ;; *) off="$rfl"; break ;; esac
+    done
+    if [ -n "$off" ]; then
+      rf_n=$((rf_n + 1))
+      rf_reasons="$rf_reasons $tname(required-features[$rf]:off[$off])"
+      continue
+    fi
+    skissue=""
+    for sk in $FLIGHT_FLAKE_SKIPS; do
+      if [ "${sk%%:*}" = "$tname" ]; then skissue="${sk#*:}"; break; fi
+    done
+    if [ -n "$skissue" ]; then
+      flake_n=$((flake_n + 1))
+      echo ">>> [$name] SKIPPED (flaky, #$skissue): $tname"
+      continue
+    fi
+    run_targets+=(--test "$tname")
+    run_n=$((run_n + 1))
+  done <<< "$target_meta"
+
+  # An EMPTY run list is a FAILED DERIVATION, never "there was nothing to run": the
+  # latter would be a green lane that executed no integration target at all, which is
+  # the vacuous pass this whole component exists to prevent.
+  if [ "$run_n" -eq 0 ]; then
+    status=FAIL
+    {
+      echo "[$name] FAIL-CLOSED: the DERIVED run list came out EMPTY — $declared_n"
+      echo "        declared test target(s), $rf_n excluded for unmet required-features,"
+      echo "        $flake_n excluded as flaky, 0 left to run. The DERIVATION produced no"
+      echo "        subject, which is not the same statement as 'the tests passed'."
+      echo "        Suspect cargo metadata, this component's feature set, or a"
+      echo "        FLIGHT_FLAKE_SKIPS list that has grown to cover the package."
+    } | tee "$log"
+    end=$(date +%s)
+    record_result "$name" "$status" "$((end - start))"
+    echo ">>> [$name] $status ($((end - start))s)"
+    return 0
+  fi
+
+  echo ">>> [$name] cargo test --no-fail-fast -p cqlite-flight --lib --bins + $run_n DERIVED --test targets (explicit list from cargo metadata, RECONCILED against it afterwards, #1699/#3383)"
+  echo ">>> [$name] run-list census: $declared_n declared test target(s); $run_n run; $rf_n skipped for unmet required-features; $flake_n skipped as flaky (curated)"
+  [ -n "$rf_reasons" ] && echo ">>> [$name] not on the --test command line (cargo errors on an unmet required-features target, unlike \`-p\`'s silent skip):$rf_reasons"
   echo ">>> [$name] enabled features (cargo metadata):$enabled"
   [ -n "$reasons" ] && echo ">>> [$name] allowed-zero (module-level #![cfg] names a feature NOT enabled here, so the body compiles out) target(gating feature):$reasons"
   [ -n "$unparsed" ] && echo ">>> [$name] module-level #![cfg] shape NOT recognised, so NOT allowed-zero (fail-closed):$unparsed"
@@ -5776,7 +5873,8 @@ run_flight_tests() {
   # after the first failing test BINARY, and a lane whose purpose is to surface
   # never-executed rot must surface ALL of it in one run rather than as a serial reveal.
   if env CQLITE_DATASETS_ROOT="$CQLITE_DATASETS_ROOT" \
-      cargo test --no-fail-fast -p cqlite-flight ${feature_args[@]+"${feature_args[@]}"} >"$log" 2>&1; then
+      cargo test --no-fail-fast -p cqlite-flight ${feature_args[@]+"${feature_args[@]}"} \
+      --lib --bins "${run_targets[@]}" >"$log" 2>&1; then
     # A green cargo exit is NOT sufficient: a target whose body is cfg-gated out
     # compiles, runs 0 tests and exits 0. Only the DERIVED set above is excused.
     # The guard writes its verdict to stderr only, so `2>>` lands the message in the
@@ -5788,7 +5886,8 @@ run_flight_tests() {
       # only sees targets that RAN. A required-features target cargo could not enable
       # never runs and prints nothing at all, so only a declared-vs-observed
       # reconciliation can see it. Both must pass for this lane's claim to hold.
-      if check_declared_test_targets_observed "$name" "$log" "$enabled" "$target_meta" 2>>"$log"; then
+      if check_declared_test_targets_observed "$name" "$log" "$enabled" "$target_meta" \
+          "$FLIGHT_FLAKE_SKIPS" 2>>"$log"; then
         status=PASS
       else
         status=FAIL
