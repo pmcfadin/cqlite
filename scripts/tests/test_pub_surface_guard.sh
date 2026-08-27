@@ -59,6 +59,14 @@
 #  16.  GREEN  — a real `#[cfg]` separated from its item by blank/comment lines must
 #                still gate it.
 #
+#   Trust boundaries of the measurement itself (roborev round 3):
+#  17.  GREEN  — a scratch built from a DIRTY tree (uncommitted API change + its
+#                regenerated snapshot) must verify clean, so the ordinary
+#                change -> regenerate -> test -> commit workflow is not a booby trap.
+#  18.  RED    — a `doc` cfg predicate must make the guard REFUSE: `cargo doc`
+#                compiles with `doc` SET, so a `#[cfg(not(doc))]` item ships while
+#                being invisible to rustdoc and to this snapshot.
+#
 # NO TEST-ONLY SEAM. The guard's subject is hard-coded on purpose, so the negative
 # cases SUBSTITUTE THE ARTIFACT: each runs in its own `git worktree add --detach HEAD`
 # scratch checkout whose files are edited in place (CLAUDE.md — a test that needs a
@@ -99,21 +107,64 @@ trap cleanup EXIT
 # would run the body in a subshell, so the WORKTREES bookkeeping the EXIT trap
 # cleans up would be discarded and every scratch checkout would be left behind.
 SCRATCH=""
-scratch_tree() {
-  local nm="$1"
+# scratch_tree_from <source-checkout> <name>: a detached worktree that reproduces
+# <source-checkout>'s WORKING TREE, not its HEAD, and publishes the path in SCRATCH.
+#
+# WHY THE WORKING TREE AND NOT HEAD. A `git worktree add` materialises a COMMIT, so
+# a scratch built from HEAD carries HEAD's sources. Copying only the live guard and
+# the live snapshot into it — which is what this used to do — leaves source and
+# baseline describing DIFFERENT trees, and that breaks the ordinary pre-commit
+# workflow: change the public API, regenerate the snapshot, run the tests before
+# committing, and the real-tree case passes while the green scratch cases fail,
+# because HEAD's API cannot match the newly regenerated snapshot. A booby trap for
+# the next contributor, and it fails in the direction that looks like a real defect.
+#
+# So the whole uncommitted delta is applied: tracked modifications via a binary
+# `git diff HEAD` patch, plus untracked-but-not-ignored files copied in. After that
+# the scratch's `git status --porcelain` must MATCH the source's; a mismatch means
+# the overlay did not reproduce the tree and the suite FAILS rather than testing
+# something other than what you are working on.
+#
+# Deliberately NOT a command substitution: `$(scratch_tree …)` would run the body in
+# a subshell, discarding the WORKTREES bookkeeping the EXIT trap cleans up.
+scratch_tree_from() {
+  local src="$1" nm="$2"
   local path="$TMPROOT/$nm"
-  git -C "$REPO_ROOT" worktree add --detach --quiet "$path" HEAD >/dev/null 2>&1 \
+  git -C "$src" worktree add --detach --quiet "$path" HEAD >/dev/null 2>&1 \
     || { echo "FAIL: could not create scratch worktree $path"; exit 1; }
   WORKTREES+=("$path")
-  # A worktree materialises HEAD, so without this the negative cases would be
-  # validating the LAST COMMIT rather than the change under test — an uncommitted
-  # guard fix silently goes untested, and an uncommitted guard REGRESSION silently
-  # passes. Overlay the live checkout's guard + snapshot (the two artifacts the
-  # cases are about) so the suite always measures the tree you are working in.
-  cp "$REPO_ROOT/$GUARD_REL" "$path/$GUARD_REL"
-  cp "$REPO_ROOT/$SNAPSHOT_REL" "$path/$SNAPSHOT_REL"
+
+  # 1. tracked modifications (staged + unstaged), including the snapshot.
+  local patch="$TMPROOT/$nm.live.patch"
+  git -C "$src" diff HEAD --binary >"$patch" 2>/dev/null || true
+  if [ -s "$patch" ]; then
+    git -C "$path" apply --whitespace=nowarn "$patch" \
+      || { echo "FAIL: could not apply $src's uncommitted changes to the scratch worktree $path."
+           echo "      The scratch would then describe a different tree than the one under test."
+           exit 1; }
+  fi
+
+  # 2. untracked, non-ignored files (a brand-new source file is part of the tree too).
+  local rel
+  while IFS= read -r rel; do
+    [ -n "$rel" ] || continue
+    mkdir -p "$path/$(dirname "$rel")"
+    cp "$src/$rel" "$path/$rel"
+  done < <(git -C "$src" ls-files --others --exclude-standard)
+
+  # 3. Prove it: the scratch must describe the SAME tree as the source.
+  local src_status scratch_status
+  src_status="$(git -C "$src" status --porcelain --untracked-files=all | LC_ALL=C sort)"
+  scratch_status="$(git -C "$path" status --porcelain --untracked-files=all | LC_ALL=C sort)"
+  if [ "$src_status" != "$scratch_status" ]; then
+    echo "FAIL: the scratch worktree $path does not reproduce $src's working tree."
+    echo "      Source-only / scratch-only entries:"
+    diff <(printf '%s\n' "$src_status") <(printf '%s\n' "$scratch_status") | head -20
+    exit 1
+  fi
   SCRATCH="$path"
 }
+scratch_tree() { scratch_tree_from "$REPO_ROOT" "$1"; }
 
 fail_case() { echo "FAIL: $*"; exit 1; }
 
@@ -558,5 +609,81 @@ set -e
 }
 echo "OK (16): a #[cfg] separated from its item by blank/comment lines still gates it"
 
+# ---------------------------------------------------------------------------
+# 17. GREEN — the ORDINARY PRE-COMMIT WORKFLOW must pass (roborev r3 F3).
+#
+#     Change the public API, regenerate the snapshot, run the tests BEFORE
+#     committing. Scratch worktrees used to carry committed HEAD sources with the
+#     live snapshot copied over them, so HEAD's API could not match the regenerated
+#     baseline and the green cases failed — a false FAIL that looks exactly like a
+#     real defect, sitting in the path every future contributor walks.
+#
+#     Proved end to end, through the REAL code path rather than a re-implementation:
+#     an outer scratch stands in for a dirty working tree (a new public item plus its
+#     regenerated snapshot, both UNCOMMITTED), and a child scratch is created from it
+#     with the same scratch_tree_from() the whole suite uses. The child must verify
+#     clean.
+# ---------------------------------------------------------------------------
+scratch_tree dirty-worktree; wt17="$SCRATCH"
+cat >>"$wt17/cqlite-core/src/version_hints.rs" <<'RS'
+
+/// Self-test-only probe item (scripts/tests/test_pub_surface_guard.sh, issue #1712),
+/// standing in for an UNCOMMITTED public-API change. Never committed.
+pub struct PubSurfaceUncommittedProbe;
+RS
+set +e
+bash "$wt17/$GUARD_REL" --regenerate >"$TMPROOT/case17-regen.out" 2>&1
+case17_regen_rc=$?
+set -e
+[ "$case17_regen_rc" -eq 0 ] \
+  || fail_case "case 17 setup: --regenerate failed in the outer scratch; got: $(cat "$TMPROOT/case17-regen.out")"
+git -C "$wt17" status --porcelain | grep -q 'pub-surface.snapshot' \
+  || fail_case "case 17 setup: the regenerated snapshot is not an uncommitted change in the outer scratch"
+
+scratch_tree_from "$wt17" dirty-worktree-child; wt17c="$SCRATCH"
+grep -q 'PubSurfaceUncommittedProbe' "$wt17c/cqlite-core/src/version_hints.rs" \
+  || fail_case "case 17 — the child scratch did not receive the outer scratch's uncommitted source change"
+grep -q 'PubSurfaceUncommittedProbe' "$wt17c/$SNAPSHOT_REL" \
+  || fail_case "case 17 — the child scratch did not receive the outer scratch's regenerated snapshot"
+set +e
+bash "$wt17c/$GUARD_REL" >"$TMPROOT/case17.out" 2>&1
+case17_rc=$?
+set -e
+[ "$case17_rc" -eq 0 ] || {
+  echo "FAIL: case 17 — a scratch checkout built from a tree with an UNCOMMITTED public-API"
+  echo "      change plus its regenerated snapshot did not verify clean. Scratch source and"
+  echo "      baseline are describing different trees, which breaks the ordinary"
+  echo "      change-API -> regenerate -> run-tests -> commit workflow."
+  cat "$TMPROOT/case17.out"
+  exit 1
+}
+echo "OK (17): a scratch built from a DIRTY tree (uncommitted API change + regenerated snapshot) verifies clean"
+
+# ---------------------------------------------------------------------------
+# 18. RED — the crate must not use a `doc` cfg predicate (roborev r3 F1).
+#
+#     `cargo doc` compiles with `doc` SET, so an item behind `#[cfg(not(doc))]`
+#     ships but never reaches rustdoc — invisible to this guard and to every other
+#     rustdoc-derived oracle. The guard must REFUSE rather than certify a surface it
+#     knows may differ from the compiled one.
+# ---------------------------------------------------------------------------
+scratch_tree cfg-doc; wt18="$SCRATCH"
+cat >>"$wt18/cqlite-core/src/version_hints.rs" <<'RS'
+
+#[cfg(not(doc))]
+/// Self-test-only probe (#1712): present in a normal build, invisible to rustdoc.
+pub fn pub_surface_cfg_not_doc_probe() {}
+RS
+set +e
+bash "$wt18/$GUARD_REL" >"$TMPROOT/case18.out" 2>&1
+case18_rc=$?
+set -e
+[ "$case18_rc" -ne 0 ] || fail_case "case 18 — a \`cfg(not(doc))\` item passed GREEN. It ships but never reaches rustdoc, so the snapshot cannot be trusted; got: $(cat "$TMPROOT/case18.out")"
+grep -q 'cfg cfg\|`doc` cfg predicate' "$TMPROOT/case18.out" \
+  || fail_case "case 18 — the guard failed but not with the cfg(doc) diagnostic; got: $(cat "$TMPROOT/case18.out")"
+grep -q 'cargo-public-api' "$TMPROOT/case18.out" \
+  || fail_case "case 18 — the diagnostic did not record that the blind spot is shared by every rustdoc-derived oracle"
+echo "OK (18): a \`doc\` cfg predicate makes the guard REFUSE rather than certify"
+
 echo ""
-echo "PASS: test_pub_surface_guard.sh — all 16 cases (4 green, 11 reds, 1 usage)"
+echo "PASS: test_pub_surface_guard.sh — all 18 cases (6 green, 11 reds, 1 usage)"

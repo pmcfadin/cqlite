@@ -201,7 +201,11 @@
 #                      re-export edges, never signatures. Fail-closed and
 #                      affirmative — a cargo doc failure, absent doc tree, zero-item
 #                      enumeration or missing snapshot is a NAMED FAIL, never a
-#                      vacuous pass; no env opt-out. ~6s, offline, no datasets.
+#                      vacuous pass; so is a `doc` cfg predicate in the crate, which
+#                      would make the documented surface diverge from the shipped
+#                      one. Holds a mutex over the shared doc dir, so a concurrent
+#                      run cannot swap the tree under it. No env opt-out. ~6s,
+#                      offline, no datasets.
 #                      SKIP-aware (loud): SKIPs only when cqlite-core is absent.
 #   tooling-tests      shell-tooling regression tests (fast, no datasets/network):
 #                      scripts/tests/test_agent_gate_summary.sh — proves the
@@ -520,14 +524,16 @@
 #                      and a bad argument must exit 2. Each negative case substitutes
 #                      the artifact in its own detached scratch worktree (the guard
 #                      has no test-only seam) and reuses CARGO_TARGET_DIR, so the
-#                      16-case suite costs ~90s of rustdoc and no datasets/network.
+#                      18-case suite costs ~125s of rustdoc and no datasets/network.
 #                      Also reds on a new `pub fn` on an existing public struct, a new
 #                      enum variant, a cosmetic `cfg_attr` that must not exempt a
 #                      crate-root `pub mod` from the assert, a SAME-LINE
 #                      `#[attr] pub mod x;` (which the first cut dropped entirely — a
 #                      false PASS), a disagreement between the guard's two
 #                      independent crate-root scans, a deleted public RE-EXPORT, and
-#                      a tell-tale token inside an attribute's STRING VALUE.
+#                      a tell-tale token inside an attribute's STRING VALUE, and a
+#                      `cfg(doc)` predicate (which would make the rustdoc-derived
+#                      surface differ from the shipped one).
 #   minimal-build      cargo build + `cargo test --lib --no-run` (compile-only)
 #                      -p cqlite-core --no-default-features --features all-compression
 #   smoke              bash test-data/scripts/smoke-test-all-tables.sh
@@ -5566,7 +5572,7 @@ run_pub_surface() {
 # missing snapshot) plus the usage case, substituting the artifact in detached scratch
 # worktrees rather than through any test-only seam, and pins every crate-root parse
 # shape the (lexical, not-a-Rust-parser) scan claims to handle, plus both directions
-# of the public-surface enumeration. Reuses CARGO_TARGET_DIR (~90s); never invokes the
+# of the public-surface enumeration. Reuses CARGO_TARGET_DIR (~125s); never invokes the
 # gate, so it cannot recurse.
 run_tooling_tests() {
   local name=tooling-tests
@@ -6755,7 +6761,7 @@ run_tooling_tests() {
   # diff, a missing snapshot FAILs instead of passing vacuously, and a bad argument
   # exits 2. Each negative case substitutes the artifact in its own
   # `git worktree add --detach HEAD` scratch checkout (no test-only seam in the guard)
-  # and reuses CARGO_TARGET_DIR, so the whole 16-case suite is ~90s of rustdoc. It pins
+  # and reuses CARGO_TARGET_DIR, so the whole 18-case suite is ~125s of rustdoc. It pins
   # every crate-root PARSE shape the scan claims to handle (same-line
   # `#[attr] pub mod x;`, multi-line attrs, trailing comments, block-commented decls,
   # attributes separated from their item by blank/comment lines), since that scan is
