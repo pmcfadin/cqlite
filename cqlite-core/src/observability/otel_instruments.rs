@@ -47,7 +47,11 @@ use std::sync::OnceLock;
 /// path falls back to an ad-hoc instrument so call sites never silently drop data.
 ///
 /// The fields are maps rather than one field per metric precisely so that lookup
-/// cannot name a different metric than construction did — see the module doc.
+/// cannot name a different metric than construction did — see the module doc. The
+/// emit path therefore pays one hash per record instead of walking the retired
+/// match's up-to-45 `&str` comparisons; both are noise beside the SDK's own record
+/// path (which takes a lock and aggregates), and the previous cost was already
+/// O(arms) for every metric declared late in the match.
 pub(super) struct Instruments {
     pub(super) counters: HashMap<&'static str, Counter<u64>>,
     pub(super) histograms: HashMap<&'static str, Histogram<f64>>,

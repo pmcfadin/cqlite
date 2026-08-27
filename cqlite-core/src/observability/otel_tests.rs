@@ -176,11 +176,19 @@ fn every_live_instrument_is_catalogued_and_resolves_only_as_its_own_kind() {
     // And the affirmative COUNT: every catalogued metric except the declared
     // stats-only ones has a live instrument, so the sets are equal — not merely
     // "no surprises found", which an empty instrument set would also satisfy.
-    let stats_only = catalog::STATS_ONLY_METRICS.len();
+    // Counted by filtering rather than subtracting, so the expectation stands on
+    // its own instead of assuming STATS_ONLY_METRICS ⊆ ALL_METRICS (asserted
+    // elsewhere) and underflowing if it ever does not.
+    let stats_only: std::collections::HashSet<&str> =
+        catalog::STATS_ONLY_METRICS.iter().map(|m| m.name).collect();
+    let expected = catalog::ALL_METRICS
+        .iter()
+        .filter(|name| !stats_only.contains(*name))
+        .count();
     assert_eq!(
         live.len(),
-        catalog::ALL_METRICS.len() - stats_only,
-        "the live instrument set must be exactly ALL_METRICS minus the {stats_only} \
-         STATS_ONLY_METRICS entries"
+        expected,
+        "the live instrument set must be exactly the catalogued metrics that are not \
+         declared STATS_ONLY"
     );
 }
