@@ -1,6 +1,18 @@
-# ABORTED extension probe — DIRECTIONAL HINT ONLY, NOT RESULTS
+# ABORTED extension probe — INVALID DATA, NOT RESULTS
 
-These four points (`s2-n16`, `s3-n16`, `s4-n32`, `s5-n32`) come from an extension
+**These points are from an ABORTED run and MUST NOT be used as measurements.**
+They are preserved as an audit trail, not as data. Superseded by **`extA`**
+(`--grid "6:24,32,48,64"`), which re-measures the incumbent interleaved with each
+candidate.
+
+> Why this warning is in the PATH as well as this file: these directories hold
+> real `perf.csv` files at `100.00% pct_running` and are **structurally
+> indistinguishable from valid points**. Their invalidity lives in the run's
+> design, not in the bytes — so a reader who never opens this README has nothing
+> to distrust. That is the silent-instrument shape in artifact form, which is why
+> the directory itself is named `sweep-ext-aborted`.
+
+These points (`s2-n16`, `s3-n16`, `s4-n32`, `s5-n32`) come from an extension
 run that was **killed** and they **MUST NOT enter the C(S) table** or be quoted
 as results. Two independent disqualifications, either sufficient:
 
@@ -13,8 +25,11 @@ as results. Two independent disqualifications, either sufficient:
    the direction that inflates the peak and therefore inflates AC2's target.
    That is the one error this issue cannot ship, so the comparison is not made.
 
+`s5-n32` is **absent** because the run was killed mid-rep; its `attribution.json`
+was never written.
+
 Kept only because they cost box time and they say something directionally about
-where to extend:
+where to extend — a hint for choosing the next ladder, never a value:
 
 | point | 1 rep | main-grid incumbent (median of 3) | direction |
 |---|--:|--:|---|
