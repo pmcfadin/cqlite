@@ -32,7 +32,7 @@
 mod mod_reachability;
 
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use mod_reachability::{analyze, strip_comments_and_strings, ExpectedOrphan, ModuleGraphSpec};
@@ -1092,7 +1092,7 @@ pub fn g<'a>(r#match: &'a str) -> &'a str { r#match }
 /// prove the refusals are not over-broad. Same for `Path::is_dir()`, which answers `false`
 /// on an IO error, so the entry's `file_type()` is asked instead and its error propagated.
 fn real_rust_corpus() -> Vec<PathBuf> {
-    fn collect(dir: &PathBuf, out: &mut Vec<PathBuf>) {
+    fn collect(dir: &Path, out: &mut Vec<PathBuf>) {
         let entries =
             fs::read_dir(dir).unwrap_or_else(|e| panic!("cannot read {}: {e}", dir.display()));
         for entry in entries {
@@ -1134,7 +1134,7 @@ fn real_rust_corpus() -> Vec<PathBuf> {
 }
 
 /// Read a corpus file, refusing to guess at an unreadable one.
-fn read_corpus_file(path: &PathBuf) -> String {
+fn read_corpus_file(path: &Path) -> String {
     fs::read_to_string(path).unwrap_or_else(|e| panic!("cannot read {}: {e}", path.display()))
 }
 
