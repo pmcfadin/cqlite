@@ -256,7 +256,22 @@ fi
 #     file. Extract check_no_unexpected_zero_tests() VERBATIM from the gate (source
 #     of truth, no re-typed copy to drift) and drive it against synthetic cargo-style
 #     "Running tests/<name>.rs" / "test result:" log text.
-FUNC_SRC=$(awk '/^  check_no_unexpected_zero_tests\(\) \{/{f=1} f{print} f&&/^  \}$/{exit}' "$GATE")
+# INDENTATION-AGNOSTIC extraction (issue #1699). This used to hard-code a two-space
+# indent, which broke the moment check_no_unexpected_zero_tests() was promoted from a
+# nested definition to a top-level one — a silent-coverage-loss shape: the extraction
+# yields empty and the behavioural cases below never run. Capture the definition's OWN
+# leading whitespace and terminate on the closing brace at that SAME indentation, so
+# the self-test follows the function instead of pinning its position.
+FUNC_SRC=$(awk '
+  !f && /^[[:space:]]*check_no_unexpected_zero_tests\(\) \{/ {
+    f = 1
+    indent = $0; sub(/[^[:space:]].*$/, "", indent)
+    close_re = "^" indent "\\}$"
+    print
+    next
+  }
+  f { print; if ($0 ~ close_re) exit }
+' "$GATE")
 if [ -z "$FUNC_SRC" ]; then
   bad "could not extract check_no_unexpected_zero_tests() from $GATE"
 else
