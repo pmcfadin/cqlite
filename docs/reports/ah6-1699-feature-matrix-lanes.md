@@ -312,3 +312,28 @@ presented as the other.
 - Integration-suite non-determinism (the descope's subject): #3384; first individual victim: #3383
 - Harness: `scripts/tests/test_agent_gate_feature_matrix_lanes.sh`
 - Registration pin: `scripts/tests/test_agent_gate_summary.sh` (runs in `--lite` via `tooling-tests`)
+
+## Does this change make #3380 more likely? (disclosure)
+
+#3380 is an intermittent failure of `test_roborev_review_guard.sh`'s #3312 structural assert, reproduced on
+clean `origin/main` and correlated with box load. Since this change adds four SIDE-lane components, the
+question is fair and is answered from the gate's own concurrency model rather than guessed:
+
+**Peak concurrency: UNCHANGED.** `AGENT_GATE_JOBS` defaults to `min(4, ncpu/2)`; MAIN takes one slot and the
+SIDE lane runs at most `AGENT_GATE_JOBS - 1` of its members **at once**. So SIDE peak stays 3 heavy processes
+whether SIDE has 7 members or 11. This change adds no simultaneous load.
+
+**Exposure WINDOW: modestly longer.** The four lanes add total SIDE work, so the SIDE lane runs longer, and
+`tooling-tests` / `roborev-lints` — both deliberately pinned to the strictly-serial MAIN lane *because* their
+embedded shell self-tests "starved under co-scheduled SIDE-lane load" (#2657) — now have a longer interval in
+which they can overlap SIDE work.
+
+**So: this change does not create #3380 and does not raise its peak trigger condition, but it plausibly
+widens the window in which the trigger can occur.** "#1699 didn't cause it" is true and is not the whole
+answer; the whole answer is the one worth recording.
+
+Not mitigated here, deliberately. The available mitigations are moving the lanes to the MAIN lane — which
+reintroduces exactly the shared-target thrash (#2657) the SIDE placement exists to avoid — or lowering
+`AGENT_GATE_JOBS`, a fleet-wide performance decision. Both are worse than the flake and both are the owner's
+call. The right fix is #3380 itself, whose assert appears to be a false positive on heredoc prose
+independently of load.
