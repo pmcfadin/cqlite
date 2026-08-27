@@ -5335,6 +5335,57 @@ run_flight_query_semantics_oracle() {
   echo ">>> [$name] $status ($((end - start))s)"
 }
 
+# _resolved_package_features <package> [cargo-feature-flag…]: print " a b c " — the
+# features cargo ACTUALLY enables for that workspace package under a `cargo test`
+# resolve, one space-delimited set (issue #1699).
+#
+# The oracle is `cargo metadata`, i.e. CARGO ITSELF, deliberately rather than a
+# hand-parse of `[features]` in Cargo.toml. A parser here would be a SECOND
+# IMPLEMENTATION of cargo's feature resolver, and its correctness would only be
+# knowable by differential testing against the original — and it would get this very
+# package wrong today: cqlite-flight's `default` is empty, yet `test-util` is on for
+# every test build via the self-referential dev-dependency
+# (`cqlite-flight = { path = ".", features = ["test-util"] }`), which no reading of
+# `default = []` can see. `cargo metadata` reports `default test-util`, transitively
+# closed and dev-dependency-unified, in ~1s.
+#
+# Any feature flags the CALLER passes are forwarded, so the answer can never drift
+# from the invocation it describes.
+#
+# Known imprecision, and its direction: `cargo metadata`'s resolve is WORKSPACE-wide,
+# so a feature another member turns on could be reported enabled here when a bare
+# `-p` build would not enable it. That errs STRICT — a feature wrongly believed ON
+# means a compiled-out target is NOT excused and the lane FAILs loudly — never
+# permissive. Emptiness is impossible for a real package (`default` is always in the
+# set), so an empty result is a failed derivation, and the caller must treat it as
+# one rather than as "no features enabled".
+_resolved_package_features() {
+  local pkg="$1"; shift
+  local meta feats
+  meta=$(cargo metadata --format-version 1 "$@" 2>/dev/null) || return 1
+  [ -n "$meta" ] || return 1
+  if command -v jq >/dev/null 2>&1; then
+    feats=$(printf '%s' "$meta" | jq -r --arg n "$pkg" \
+      '(.packages[] | select(.name == $n) | .id) as $id
+       | .resolve.nodes[] | select(.id == $id) | .features[]')
+  elif command -v python3 >/dev/null 2>&1; then
+    feats=$(printf '%s' "$meta" | python3 -c '
+import json, sys
+n = sys.argv[1]
+d = json.load(sys.stdin)
+ids = {p["id"] for p in d["packages"] if p["name"] == n}
+for node in (d.get("resolve") or {}).get("nodes", []):
+    if node["id"] in ids:
+        for f in node.get("features", []):
+            print(f)
+' "$pkg")
+  else
+    return 1
+  fi
+  [ -n "$feats" ] || return 1
+  printf ' %s ' "$(printf '%s' "$feats" | tr '\n' ' ' | sed -E 's/[[:space:]]+/ /g; s/^ //; s/ $//')"
+}
+
 # flight-tests: EXECUTE the cqlite-flight test suite locally (issue #1699).
 #
 # What the gate covered before this component: clippy COMPILES the crate
@@ -5359,6 +5410,25 @@ run_flight_query_semantics_oracle() {
 # No opt-out env var: cqlite-flight is a committed workspace member and is never
 # legitimately absent. Fixture-dependent sub-targets may still SKIP through the
 # existing dataset machinery, which reports the skip.
+#
+# ALLOWED-ZERO, DERIVED (never a curated list) — same discipline as legacy-heuristics.
+# 14 of cqlite-flight's 42 integration targets open with a MODULE-LEVEL
+# `#![cfg(feature = "…")]` naming a feature that is OFF at this component's feature
+# set, so their whole bodies compile out and they legitimately execute 0 tests here.
+# That is not a defect and must not FAIL the lane — but neither may it be excused by
+# naming files or features in the gate, which is a second registry that drifts
+# silently the moment a file is added, renamed, or has its gate changed. So BOTH
+# halves are read from the committed source at run time: the GATE from each file's own
+# module-level attribute, the ENABLED SET from cargo itself
+# (`_resolved_package_features`, forwarded this component's own feature flags). A
+# target is allowed-zero IFF its gate names a feature cargo says is not enabled — so
+# if a feature ever moves into `default`, or this component starts passing it, those
+# targets STOP being allowed-zero with no gate edit, and a genuinely never-executed
+# target FAILs the lane exactly as before.
+#
+# Deliberately NOT done: adding `--features observability-testing`. Building the OTel
+# stack is a cost the gate declines on purpose (#1844 excludes that stack from clippy
+# for the same reason), and reversing that is not this component's call.
 run_flight_tests() {
   local name=flight-tests
   if [ -n "$ONLY" ] && ! grep -qw "$name" <<<"${ONLY//,/ }"; then
@@ -5367,16 +5437,92 @@ run_flight_tests() {
   local log="$LOG_DIR/$name.log"
   local start end status
   start=$(date +%s)
-  echo ">>> [$name] cargo test -p cqlite-flight (whole package: --lib + every integration target, #1699)"
+
+  # The feature flags THIS component passes to cargo — declared ONCE and consumed by
+  # both the test run and the enabled-set derivation, so the two can never disagree.
+  # Empty today (cqlite-flight's `default = []`); adding one here automatically shrinks
+  # the allowed-zero set.
+  local -a feature_args=()
+
+  # The enabled set. A failed derivation is a FAIL naming the derivation, never a
+  # fallback to "nothing enabled" — that would silently EXCUSE every gated target,
+  # which is the vacuous-green shape this lane exists to prevent.
+  local enabled
+  if ! enabled=$(_resolved_package_features cqlite-flight ${feature_args[@]+"${feature_args[@]}"}); then
+    status=FAIL
+    {
+      echo "[$name] FAIL-CLOSED: could not derive cqlite-flight's enabled feature set"
+      echo "        from cargo metadata (no jq/python3, a metadata failure, or no"
+      echo "        resolve node for the package). The DERIVATION failed, not the tests."
+      echo "        Without it the allowed-zero set is unknowable, and defaulting it"
+      echo "        either way would be a verdict with no measurement behind it."
+    } | tee "$log"
+    end=$(date +%s)
+    record_result "$name" "$status" "$((end - start))"
+    echo ">>> [$name] $status ($((end - start))s)"
+    return 0
+  fi
+
+  # Derive allowed-zero from each test file's OWN module-level cfg attribute.
+  # Recognised shapes, both of which compile the whole file out when a named feature
+  # is off:
+  #   #![cfg(feature = "X")]
+  #   #![cfg(all(feature = "X", feature = "Y", …))]
+  # Anything else (any(…), not(…), a mixed predicate) is NOT recognised and therefore
+  # NOT allowed-zero: for those shapes one absent feature does not prove the file
+  # compiles out, so excusing it would be a guess. Unrecognised shapes are echoed, so
+  # a resulting guard FAIL is instantly attributable rather than mysterious.
+  local tests_dir="$REPO_ROOT/cqlite-flight/tests"
+  local -a allow_zero=()
+  local reasons="" unparsed="" f base cfgline inner residue gfeats gf off
+  local re_one='^#!\[cfg\(feature[[:space:]]*=[[:space:]]*"([^"]+)"[[:space:]]*\)\][[:space:]]*$'
+  local re_all='^#!\[cfg\(all\((.*)\)\)\][[:space:]]*$'
+  for f in "$tests_dir"/*.rs; do
+    [ -f "$f" ] || continue
+    cfgline=$(grep -m1 -E '^#!\[cfg\(' "$f") || continue
+    base=$(basename "$f" .rs)
+    gfeats=""
+    if [[ "$cfgline" =~ $re_one ]]; then
+      gfeats="${BASH_REMATCH[1]}"
+    elif [[ "$cfgline" =~ $re_all ]]; then
+      inner="${BASH_REMATCH[1]}"
+      # Recognise the all(…) form ONLY when EVERY term is `feature = "…"`: strip those
+      # terms plus the separators and require nothing to survive.
+      residue=$(printf '%s' "$inner" | sed -E 's/feature[[:space:]]*=[[:space:]]*"[^"]+"//g; s/[[:space:],]//g')
+      if [ -z "$residue" ]; then
+        gfeats=$(printf '%s' "$inner" | grep -oE '"[^"]+"' | tr -d '"' | tr '\n' ' ')
+      fi
+    fi
+    if [ -z "$gfeats" ]; then
+      unparsed="$unparsed $base"
+      continue
+    fi
+    off=""
+    for gf in $gfeats; do
+      case "$enabled" in *" $gf "*) ;; *) off="$gf"; break ;; esac
+    done
+    if [ -n "$off" ]; then
+      allow_zero+=("$base")
+      reasons="$reasons $base($off)"
+    fi
+  done
+
+  echo ">>> [$name] cargo test --no-fail-fast -p cqlite-flight (whole package: --lib + every integration target, #1699)"
+  echo ">>> [$name] enabled features (cargo metadata):$enabled"
+  [ -n "$reasons" ] && echo ">>> [$name] allowed-zero (module-level #![cfg] names a feature NOT enabled here, so the body compiles out) target(gating feature):$reasons"
+  [ -n "$unparsed" ] && echo ">>> [$name] module-level #![cfg] shape NOT recognised, so NOT allowed-zero (fail-closed):$unparsed"
+  # --no-fail-fast for the same reason legacy-heuristics carries it: cargo test stops
+  # after the first failing test BINARY, and a lane whose purpose is to surface
+  # never-executed rot must surface ALL of it in one run rather than as a serial reveal.
   if env CQLITE_DATASETS_ROOT="$CQLITE_DATASETS_ROOT" \
-      cargo test -p cqlite-flight >"$log" 2>&1; then
+      cargo test --no-fail-fast -p cqlite-flight ${feature_args[@]+"${feature_args[@]}"} >"$log" 2>&1; then
     # A green cargo exit is NOT sufficient: a target whose body is cfg-gated out
-    # compiles, runs 0 tests and exits 0. Nothing is on the allowed-zero list — every
-    # cqlite-flight integration target must execute at least one test.
+    # compiles, runs 0 tests and exits 0. Only the DERIVED set above is excused.
     # The guard writes its verdict to stderr only, so `2>>` lands the message in the
     # component log (where the FAIL branch below tails it) while the `if` still tests
     # the GUARD's exit status directly — not a pipeline's last stage.
-    if check_no_unexpected_zero_tests "$name" "$log" 2>>"$log"; then
+    if check_no_unexpected_zero_tests "$name" "$log" \
+        ${allow_zero[@]+"${allow_zero[@]}"} 2>>"$log"; then
       status=PASS
     else
       status=FAIL
