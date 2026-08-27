@@ -71,6 +71,7 @@ use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 
 use super::super::SSTableReader;
+use crate::observability::read_metrics::ReadOpMeter;
 use crate::types::{ScanRow, TableId};
 use crate::{Error, Result, RowKey};
 
@@ -85,14 +86,30 @@ use crate::{Error, Result, RowKey};
 pub trait ScanStreamItem {
     /// How this stream is named in a failure message.
     const STREAM_KIND: &'static str;
+
+    /// Account this item's rows (and partition boundaries) into the read-operation
+    /// meter (issue #1701). Per-item BOOKKEEPING, not per-item EMISSION: the meter
+    /// bumps two `u64`s and the single counter add / duration record happens once,
+    /// when the operation ends.
+    fn account(&self, meter: &mut ReadOpMeter);
 }
 
 impl ScanStreamItem for (RowKey, ScanRow) {
     const STREAM_KIND: &'static str = "per-row scan stream";
+
+    fn account(&self, meter: &mut ReadOpMeter) {
+        meter.record_row(&self.0);
+    }
 }
 
 impl ScanStreamItem for Vec<(RowKey, ScanRow)> {
     const STREAM_KIND: &'static str = "batched scan stream";
+
+    fn account(&self, meter: &mut ReadOpMeter) {
+        for (key, _) in self {
+            meter.record_row(key);
+        }
+    }
 }
 
 /// Consumer handle for a streaming scan: the item channel PLUS the producer task
@@ -108,6 +125,13 @@ pub struct JoinedStream<T: ScanStreamItem> {
     /// enum is that there is no representable "the handle is gone and I never saw a
     /// verdict" state to accidentally read as success.
     task: TaskState,
+    /// This read OPERATION's row/partition/duration accounting (issue #1701).
+    /// INERT unless the stream was built by [`JoinedStream::new_measured`], because
+    /// only a TOP-LEVEL operation may be measured: a fan-out merge's per-generation
+    /// sub-scan and the per-row → batch re-chunker would otherwise count the same
+    /// rows a second and third time. Emits once — at the observed end of stream, or
+    /// on drop for a scan the consumer abandoned (the `LIMIT` shape).
+    meter: ReadOpMeter,
 }
 
 /// What a [`JoinedStream`] knows about its producer task (issue #3106, roborev).
@@ -137,7 +161,9 @@ enum TaskState {
 }
 
 impl<T: ScanStreamItem> JoinedStream<T> {
-    /// Pair a scan channel with the task that drives it.
+    /// Pair a scan channel with the task that drives it, WITHOUT read-metric
+    /// accounting — for a stream that is not a top-level read operation (a fan-out
+    /// sub-scan, a re-chunker over an already-measured source, a test stand-in).
     pub(in crate::storage::sstable) fn new(
         rx: mpsc::Receiver<Result<T>>,
         task: JoinHandle<()>,
@@ -145,6 +171,26 @@ impl<T: ScanStreamItem> JoinedStream<T> {
         Self {
             rx,
             task: TaskState::Running(task),
+            meter: ReadOpMeter::inert(),
+        }
+    }
+
+    /// [`new`](Self::new) for a TOP-LEVEL read operation, whose rows, partitions and
+    /// duration are reported through the catalog read metrics (issue #1701).
+    ///
+    /// `format` is the single-SSTable format label (`"big"` / `"bti"`) when the
+    /// stream reads ONE SSTable, or `None` for a cross-generation merge, whose
+    /// reconciled rows come from possibly mixed-format inputs — the
+    /// format-agnostic grain [`crate::observability::catalog::READ_ROWS`] documents.
+    pub(in crate::storage::sstable) fn new_measured(
+        rx: mpsc::Receiver<Result<T>>,
+        task: JoinHandle<()>,
+        format: Option<&'static str>,
+    ) -> Self {
+        Self {
+            rx,
+            task: TaskState::Running(task),
+            meter: ReadOpMeter::start(format),
         }
     }
 
@@ -174,11 +220,22 @@ impl<T: ScanStreamItem> JoinedStream<T> {
     /// clean end of stream for a task that may have panicked.
     pub async fn recv(&mut self) -> Option<Result<T>> {
         if let TaskState::Died { cancelled } = self.task {
+            self.meter.finish();
             return Some(Err(sticky_dead_task_error::<T>(cancelled)));
         }
         if let Some(item) = self.rx.recv().await {
+            // Read-metric bookkeeping (issue #1701) for the rows this item
+            // DELIVERED. An `Err` item carries no rows, and the meter's own totals
+            // are emitted at the terminal transition below.
+            if let Ok(delivered) = &item {
+                delivered.account(&mut self.meter);
+            }
             return Some(item);
         }
+        // Terminal: the producer is finished, dead, or about to be joined. Emit this
+        // operation's read totals exactly once (idempotent; `Drop` is the backstop
+        // for a consumer that stops polling early).
+        self.meter.finish();
         // Channel closed: the producer dropped its sender. Join it to learn WHY.
         let outcome = match &mut self.task {
             // `JoinHandle: Future + Unpin`, so `&mut JoinHandle` is itself a future:

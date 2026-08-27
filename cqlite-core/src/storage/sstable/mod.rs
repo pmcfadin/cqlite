@@ -2278,7 +2278,7 @@ impl SSTableManager {
                 }
             }
         });
-        Ok(reader::RowScanStream::new(rx, task))
+        Ok(reader::RowScanStream::new_measured(rx, task, None))
     }
 
     /// Batched streaming scan under the `tombstones` feature (issue #1592).

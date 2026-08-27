@@ -59,6 +59,10 @@ mod error_schema;
 pub mod operator_docs;
 mod operator_docs_annotations;
 pub mod partition_access;
+// Read-path metric emission at batch granularity (issue #1701): the accumulator
+// that makes cqlite.read.{rows,bytes,partitions,duration} live instruments
+// instead of documented-but-never-written ones.
+pub(crate) mod read_metrics;
 pub mod stream_subphase;
 
 pub use config::{ObservabilityConfig, ObservabilityConfigBuilder, OtelProtocol};

@@ -77,6 +77,14 @@ impl SSTableReader {
         // rather than `buffer_size * BATCH_EMIT_ROWS`.
         let cap = buffer_size.div_ceil(BATCH_EMIT_ROWS).max(1);
         let (tx, rx) = mpsc::channel(cap);
+        // Read-metric grain (issue #1701): identical rule to the per-row surface —
+        // an `Acquire` scan is the top-level read OPERATION and is measured with
+        // this reader's format label; an `Exempt` sub-scan is not (its merge is).
+        // Sampled before `self` moves into the task below.
+        let measured_format = match admission {
+            ScanAdmission::Acquire => Some(self.sstable_format_label()),
+            ScanAdmission::Exempt => None,
+        };
         let task = tokio::spawn(async move {
             if let Err(e) = self
                 .run_scan_stream_batched(
@@ -93,7 +101,10 @@ impl SSTableReader {
                 let _ = tx.send(Err(e)).await;
             }
         });
-        BatchedScanStream::new(rx, task)
+        match measured_format {
+            Some(format) => BatchedScanStream::new_measured(rx, task, Some(format)),
+            None => BatchedScanStream::new(rx, task),
+        }
     }
 
     async fn run_scan_stream_batched(

@@ -9,6 +9,7 @@
 //! `CompressionInfo` + chunk-index); only the decompress step is consolidated here.
 //! Architecture test: `tests/chunk_decode_single_plane.rs`.
 
+use crate::observability::read_metrics;
 use crate::storage::cache::{ChunkKey, DecompressedChunkCache};
 use crate::storage::sstable::compression::Compression;
 use crate::storage::sstable::compression_info::CompressionInfo;
@@ -72,6 +73,18 @@ impl<'a> ChunkSource<'a> {
             namespace,
             cache_id,
         }
+    }
+
+    /// The bounded [`catalog::attr::COMPRESSION`] label for this source's
+    /// decompressor, or `None` when there is none (issue #1701). Derived from the
+    /// `CompressionAlgorithm` ENUM, never from the algorithm string parsed out of
+    /// `CompressionInfo.db` — a file-controlled string would be an unbounded metric
+    /// dimension.
+    ///
+    /// [`catalog::attr::COMPRESSION`]: crate::observability::catalog::attr::COMPRESSION
+    fn compression_label(&self) -> Option<&'static str> {
+        self.compression
+            .map(|c| read_metrics::compression_attr(c.algorithm()))
     }
 
     /// Whole-chunk read: positioned read → CRC → decompress → B1 cache.
@@ -146,6 +159,13 @@ impl<'a> ChunkSource<'a> {
             compressed
         };
 
+        // cqlite.read.bytes (issue #1701): the DECOMPRESSED Data.db payload this
+        // chunk materialised, counted ONCE per chunk decode — the coarsest grain at
+        // which the decompressed size is known, and never per row. A chunk served
+        // from the B1 cache returns above without reaching here, which is correct:
+        // a cache hit read no Data.db bytes.
+        read_metrics::record_decompressed_bytes(decompressed.len(), self.compression_label());
+
         // Insert into B1 cache (Vec→Arc conversion happens once here) and return
         Ok(self.cache.insert(key, decompressed))
     }
@@ -181,6 +201,9 @@ impl<'a> ChunkSource<'a> {
         } else {
             compressed.to_vec()
         };
+        // cqlite.read.bytes (issue #1701) — same per-chunk grain as
+        // `decode_and_cache`; this is the windowed scan's decode entry.
+        read_metrics::record_decompressed_bytes(decompressed.len(), self.compression_label());
         Ok(self.cache.insert(key, decompressed))
     }
 
@@ -202,12 +225,21 @@ impl<'a> ChunkSource<'a> {
     ) -> Result<Vec<u8>> {
         if let Some(c) = compression {
             let compressed_len = compressed.len();
-            c.decompress(&compressed).map_err(|e| {
+            let decompressed = c.decompress(&compressed).map_err(|e| {
                 Error::corruption(format!(
                     "ChunkSource: decompress failed ({} compressed bytes): {}",
                     compressed_len, e
                 ))
-            })
+            })?;
+            // cqlite.read.bytes (issue #1701): the uncached decompress sites (the
+            // sequential-scan block decode, the stitch path, the BIG reverse/seek
+            // window) read Data.db bytes exactly like the cached ones, so they are
+            // counted at the same per-chunk grain.
+            read_metrics::record_decompressed_bytes(
+                decompressed.len(),
+                Some(read_metrics::compression_attr(c.algorithm())),
+            );
+            Ok(decompressed)
         } else {
             Ok(compressed)
         }

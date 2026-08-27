@@ -180,7 +180,12 @@ pub(super) fn spawn_fanout_merge(
         }
     });
 
-    RowScanStream::new(out_rx, task)
+    // The fan-out k-way merge IS the top-level read operation (issue #1701): each
+    // per-generation sub-scan is opened `Exempt` and therefore unmeasured, so the
+    // merged stream is measured here — FORMAT-AGNOSTIC, because the reconciled rows
+    // come from possibly mixed BIG/BTI inputs and no single format label would be
+    // honest at this grain (the rule `catalog::READ_ROWS` documents).
+    RowScanStream::new_measured(out_rx, task, None)
 }
 
 /// Re-chunk a per-row streaming scan into `BATCH_EMIT_ROWS`-sized `Vec` batches over
