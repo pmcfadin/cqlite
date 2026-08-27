@@ -474,20 +474,18 @@ async fn run_main() -> Result<()> {
             ));
         };
 
-        let mut config = WriteEngineConfig::new(
-            write_dir.join("data"),
-            write_dir.join("wal"),
-            schema.clone(),
-        );
-        // Issue #1693: allow a low flush threshold via env so an interactive
-        // writable session's mid-session auto-flush is observable in tests
-        // WITHOUT writing the 64MB default threshold worth of data over stdin.
-        // Production leaves this unset and keeps the 64MB default.
+        // #1693: a low env flush threshold makes an interactive session's
+        // auto-flush observable without writing 64MB (unset in production).
+        // #1697: applied to the PUBLIC knob, reaching the engine via the bridge.
+        let mut public_config = cqlite_core::Config::default();
         if let Ok(raw) = std::env::var("CQLITE_MEMTABLE_FLUSH_THRESHOLD") {
             if let Ok(bytes) = raw.trim().parse::<usize>() {
-                config = config.with_flush_threshold(bytes);
+                public_config.storage.memtable_size_threshold = bytes as u64;
             }
         }
+        let data = write_dir.join("data");
+        let wal = write_dir.join("wal");
+        let mut config = WriteEngineConfig::from_config(&public_config, data, wal, schema.clone());
         // #929: supply a UDT registry built from the schema file's CREATE TYPE
         // statements so a bare-name non-frozen UDT column flushes as complex
         // per-field cells instead of the single-cell fallback (roborev #1029).
