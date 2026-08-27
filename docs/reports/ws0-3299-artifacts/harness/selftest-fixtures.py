@@ -103,28 +103,46 @@ def build(case, d, workers):
         os.unlink(os.path.join(d, f"worker-{workers - 1}.progress.jsonl"))
     if case == "bad-span":
         t0, t1 = T1, T0
+    if case == "no-task-clock":
+        # A perf.csv with every event EXCEPT task-clock: the counter-window check
+        # then has no evidence, which must FAIL rather than be skipped.
+        rows = [ln for ln in open(os.path.join(d, "perf.csv")) if "task-clock" not in ln]
+        with open(os.path.join(d, "perf.csv"), "w") as fh:
+            fh.writelines(rows)
 
     if case != "no-window":
-        with open(os.path.join(d, "window.json"), "w") as fh:
-            json.dump(
-                {
+        win = {
                     # S = pinned cores, N = concurrent streams. The fixtures pin
                     # one core per worker, so here they coincide numerically;
                     # they are still written as SEPARATE fields, because the
                     # guard must read the stream count from `n`.
-                    "s": workers,
-                    "n": workers,
-                    "rep": 1,
-                    "round": 1,
-                    "t0_ns": t0,
-                    "t1_ns": t1,
-                    "worker_cpus": worker_cpus,
-                    "events": "instructions,cycles,L1-dcache-loads,L1-dcache-load-misses,task-clock",
-                    "perf_cpus": ",".join(str(c) for g in worker_cpus for c in g),
-                    "perf_csv": "perf.csv",
-                },
-                fh,
-            )
+            "s": workers,
+            "n": workers,
+            "rep": 1,
+            "round": 1,
+            "t0_ns": t0,
+            "t1_ns": t1,
+            "worker_cpus": worker_cpus,
+            "events": "instructions,cycles,L1-dcache-loads,L1-dcache-load-misses,task-clock",
+            "perf_cpus": ",".join(str(c) for g in worker_cpus for c in g),
+            "perf_csv": "perf.csv",
+        }
+        # FAIL-OPEN cases: a field whose absence used to SKIP its own check and
+        # still return success. Each must now be refused.
+        if case == "no-worker-cpus":
+            del win["worker_cpus"]
+        elif case == "no-perf-csv":
+            del win["perf_csv"]
+        elif case == "no-perf-cpus":
+            del win["perf_cpus"]
+        elif case == "empty-perf-cpus":
+            win["perf_cpus"] = ""            # falsy -> caught as MISSING
+        elif case == "degenerate-perf-cpus":
+            win["perf_cpus"] = ","           # TRUTHY but names no CPU -> MALFORMED
+        elif case == "short-worker-cpus":
+            win["worker_cpus"] = worker_cpus[:-1]
+        with open(os.path.join(d, "window.json"), "w") as fh:
+            json.dump(win, fh)
 
 
 def perf_csv(path, case, ncpus=2):

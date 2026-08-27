@@ -368,20 +368,45 @@ def guard_window(args):
     s, n = int(w["s"]), int(w["n"])
     per = attribute_window(args.repdir, t0, t1, n, args.shortfall_bound)
 
+    # EVERY FIELD BELOW IS REQUIRED. None of these checks may be skipped by the
+    # absence of its own input.
+    #
+    # They used to be conditional (`if expected:`, `if csv_name:`, `if
+    # "task-clock" in counters:`), so a window.json missing `worker_cpus` skipped
+    # affinity verification and one missing `perf_csv`/`task-clock` skipped the
+    # counter-window verification — and the rep still returned SUCCESS. That is
+    # this issue's own recurring failure shape, a CHECK THAT REPORTS SUCCESS
+    # HAVING MEASURED NOTHING, sitting in the guard layer whose entire purpose is
+    # to prevent it. It is the same class as an LLC counter that programs cleanly
+    # and returns a hard zero: absence of a bad signal is not a good signal.
+    for field in ("worker_cpus", "perf_csv", "perf_cpus"):
+        if not w.get(field):
+            fail(
+                "WINDOW_FIELD_MISSING",
+                f"{win} carries no `{field}`. This field is REQUIRED: without it the "
+                f"corresponding fail-closed check cannot run, and a guard that silently "
+                f"skips itself and returns success is worse than no guard at all.",
+            )
+
     # Pinning, OBSERVED: each worker's own sched_getaffinity readback must equal
-    # the sibling pair it was supposed to own.
-    expected = w.get("worker_cpus")
-    if expected:
-        for i in range(n):
-            with open(os.path.join(args.repdir, f"worker-{i}.summary.json")) as fh:
-                got = sorted(int(x) for x in json.load(fh)["observed_affinity"])
-            want = sorted(int(x) for x in expected[i])
-            if got != want:
-                fail(
-                    "WINDOW_AFFINITY_MISMATCH",
-                    f"worker {i} ran on CPUs {got} but was pinned to {want}. The kernel, not "
-                    f"the taskset argument, is the authority on where it ran.",
-                )
+    # the CPU set it was supposed to own.
+    expected = w["worker_cpus"]
+    if len(expected) != n:
+        fail(
+            "WINDOW_FIELD_MALFORMED",
+            f"{win} lists {len(expected)} worker_cpus entries but n={n}; the affinity check "
+            f"would verify a different set of workers than the rep measured.",
+        )
+    for i in range(n):
+        with open(os.path.join(args.repdir, f"worker-{i}.summary.json")) as fh:
+            got = sorted(int(x) for x in json.load(fh)["observed_affinity"])
+        want = sorted(int(x) for x in expected[i])
+        if got != want:
+            fail(
+                "WINDOW_AFFINITY_MISMATCH",
+                f"worker {i} ran on CPUs {got} but was pinned to {want}. The kernel, not "
+                f"the taskset argument, is the authority on where it ran.",
+            )
     # THE COUNTER WINDOW AND THE ROW WINDOW MUST BE THE SAME INTERVAL.
     #
     # That identity is the central claim of this harness, and until now it rested
@@ -391,29 +416,38 @@ def guard_window(args):
     # read W*N. If perf's enabled interval had drifted from the driver's
     # [T0, T1] — a missed ACK, a late enable, a disable that did not take — this
     # is where it shows up, and the rep is refused.
-    csv_name = w.get("perf_csv")
-    if csv_name:
-        csv_path = os.path.join(args.repdir, csv_name)
-        ncpus = len([c for c in w["perf_cpus"].split(",") if c != ""])
-        counters = parse_perf_csv(csv_path)
-        if "task-clock" in counters:
-            val, _pct = counters["task-clock"]
-            try:
-                task_clock_ns = float(val)
-            except ValueError:
-                fail("PERF_EVENT_UNPARSEABLE", f"task-clock value {val!r} is not a number")
-            expected = float(t1 - t0) * ncpus
-            drift = abs(task_clock_ns - expected) / expected
-            if drift > args.counter_window_tolerance:
-                fail(
-                    "WINDOW_COUNTER_MISMATCH",
-                    f"perf counted {task_clock_ns:.0f} ns of task-clock over {ncpus} CPUs, but "
-                    f"the driver's window [{t0}, {t1}] is {expected:.0f} ns x CPU — a "
-                    f"{drift:.4%} disagreement (tolerance "
-                    f"{args.counter_window_tolerance:.4%}). The counters and the rows were "
-                    f"therefore NOT taken over the same interval, which is the one property "
-                    f"the aligned window exists to guarantee.",
-                )
+    csv_name = w["perf_csv"]
+    csv_path = os.path.join(args.repdir, csv_name)
+    ncpus = len([c for c in w["perf_cpus"].split(",") if c != ""])
+    if ncpus == 0:
+        fail("WINDOW_FIELD_MALFORMED", f"{win} has an empty `perf_cpus`; the counter-window "
+                                       f"check divides by the counted CPU count")
+    counters = parse_perf_csv(csv_path)
+    if "task-clock" not in counters:
+        fail(
+            "WINDOW_NO_TASK_CLOCK",
+            f"{csv_path} carries no `task-clock`. It is the ONLY evidence that perf's enabled "
+            f"interval equals the driver's [T0, T1] — the central claim of the aligned window "
+            f"— so its absence means that claim is unverified, not that it holds.",
+        )
+    if True:
+        val, _pct = counters["task-clock"]
+        try:
+            task_clock_ns = float(val)
+        except ValueError:
+            fail("PERF_EVENT_UNPARSEABLE", f"task-clock value {val!r} is not a number")
+        expected = float(t1 - t0) * ncpus
+        drift = abs(task_clock_ns - expected) / expected
+        if drift > args.counter_window_tolerance:
+            fail(
+                "WINDOW_COUNTER_MISMATCH",
+                f"perf counted {task_clock_ns:.0f} ns of task-clock over {ncpus} CPUs, but "
+                f"the driver's window [{t0}, {t1}] is {expected:.0f} ns x CPU — a "
+                f"{drift:.4%} disagreement (tolerance "
+                f"{args.counter_window_tolerance:.4%}). The counters and the rows were "
+                f"therefore NOT taken over the same interval, which is the one property "
+                f"the aligned window exists to guarantee.",
+            )
 
     total = sum(p["rows_in_window"] for p in per)
     print(
@@ -425,7 +459,7 @@ def guard_window(args):
                 "rows_in_window_total": total,
                 "aggregate_rows_per_s": total / ((t1 - t0) / 1e9),
                 "attribution_shortfall_max_frac": max(p["attribution_shortfall_frac"] for p in per),
-                "counter_window_drift_frac": drift if csv_name and "task-clock" in counters else None,
+                "counter_window_drift_frac": drift,
                 "per_worker": per,
             }
         )

@@ -201,6 +201,30 @@ d = json.load(open(p)); d.pop("n"); json.dump(d, open(p, "w"))
 PY
 expect_guard_fail WINDOW_MISSING python3 "$GUARDS" window --repdir "$TMP/w-non"
 
+# --- FAIL-OPEN regression: a check must not skip itself and return success ---
+# Each field below used to be OPTIONAL in guard_window: omitting it skipped the
+# check it feeds and the rep still PASSED. That is this issue's recurring shape —
+# a check reporting success having measured nothing — inside the guard layer
+# itself. Each absence must now be refused.
+echo
+echo "-- required window fields (fail-open regression) --"
+for c in no-worker-cpus no-perf-csv no-perf-cpus; do
+  python3 "$FIX" window --dir "$TMP/w-$c" --case "$c" --workers 2
+  expect_guard_fail WINDOW_FIELD_MISSING python3 "$GUARDS" window --repdir "$TMP/w-$c"
+done
+# An EMPTY perf_cpus is falsy, so the required-field check catches it first.
+python3 "$FIX" window --dir "$TMP/w-empty-perf-cpus" --case empty-perf-cpus --workers 2
+expect_guard_fail WINDOW_FIELD_MISSING python3 "$GUARDS" window --repdir "$TMP/w-empty-perf-cpus"
+# A perf_cpus of "," is TRUTHY but names no CPU — it passes the presence check
+# and would divide by zero in the counter-window comparison. This is what keeps
+# the ncpus==0 branch reachable rather than dead code.
+for c in degenerate-perf-cpus short-worker-cpus; do
+  python3 "$FIX" window --dir "$TMP/w-$c" --case "$c" --workers 2
+  expect_guard_fail WINDOW_FIELD_MALFORMED python3 "$GUARDS" window --repdir "$TMP/w-$c"
+done
+python3 "$FIX" window --dir "$TMP/w-notc" --case no-task-clock --workers 2
+expect_guard_fail WINDOW_NO_TASK_CLOCK python3 "$GUARDS" window --repdir "$TMP/w-notc"
+
 # ------------------------------------ phase 2: the Flight do_get step record ---
 echo
 echo "-- flight-step (phase 2) --"

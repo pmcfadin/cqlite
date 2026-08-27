@@ -592,6 +592,44 @@ bash docs/reports/ws0-3299-artifacts/harness/sweep.sh --results <dir> --reps 3 -
 python3 docs/reports/ws0-3299-artifacts/harness/derive.py --results <dir>
 ```
 
+### Phase 2 (`do_get`) — the exact commands that were run
+
+**There is no phase-2 script, deliberately.** One was written and is now
+**deleted**: it passed `--port` (the server takes `--listen`, so it could never
+start), it wrapped perf around the loadgen's *whole process lifetime* while rows
+came only from the timed step — the very windowing mismatch this issue's aligned
+window exists to prevent — and its comparison tool printed client-bound verdicts
+without validating that the two runs shared a server set, a shape or a corpus.
+None of it produced a published number; the figures below came from these
+commands. A runner that cannot start the server, mismatches its windows and
+prints unvalidated verdicts is strictly worse than none.
+
+```bash
+# ticket template (the DDL travels in the TICKET; the server has no --schema)
+python3 -c "import pathlib,sys; sys.path.insert(0,'scripts/perf');   from ws0_ticket_input import write_ticket_template;   print(write_ticket_template(pathlib.Path(OUTDIR), pathlib.Path('/data/ws0-3096/ws0-events.cql')))"
+# -> sha256 f4efb7b7724986f655c37d99ceb668b99b08fd73d5de9cead4a1b672a778a858
+
+# server, S=6  (6 complete sibling groups)
+taskset -c 0,8,1,9,2,10,3,11,4,12,5,13   ./target/release/cqlite-flight --data-dir /data/ws0-3096 --listen 127.0.0.1:<port>
+# server, S=1  (the rig's calibrated 1:4 split)
+taskset -c 2,10 ./target/release/cqlite-flight --data-dir /data/ws0-3096 --listen 127.0.0.1:<port>
+
+# loadgen — client sets: S=6 -> 6,14,7,15 ; S=1 -> 4,12,5,13,6,14,7,15
+taskset -c <client cpus> ./target/release/flight-loadgen   --endpoint http://127.0.0.1:<port> --ticket-template <t>   --ramp <N,...> --step-duration 25s --shape full --round rN --out <f>
+```
+
+**`--shape full` is mandatory.** The default is `mixed`
+(`ptr=0.6,lim=0.3,full=0.1`), which would silently measure a different workload
+and yield a plausible, wrong ratio.
+
+**THE `do_get` ARM CARRIES NO PERF COUNTERS.** Its rows/s is `flight-loadgen`'s
+own per-step accounting — the #3100/#3217 arm-B convention — and there are no
+`cycles`, `instructions` or L1d figures for it. So the cross-arm comparison in
+§9–§11 rests on **throughput measured two different ways**: the bare-scan arm's
+control-FIFO aligned window versus the loadgen's per-step accounting. That
+asymmetry is stated here as well as in §11(b) so that deleting the script does
+not bury it.
+
 Harness design, the aligned-window convention and the N-ladder rationale:
 `docs/reports/ws0-3299-artifacts/harness/README.md`. Reviewer-facing defect
 analysis: `harness/SELF-REVIEW.md`.
