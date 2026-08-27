@@ -481,6 +481,38 @@ MOD_COUNT="$(wc -l <"$DERIVED_MODS" | tr -d ' ')"
 [ "${MOD_COUNT:-0}" -gt 0 ] || fail "no crate-root \`pub mod\` declarations found in $LIB_RS_REL — the scan measured nothing. Refusing to pass."
 
 
+# ---------------------------------------------------------------------------
+# 1b) REFUSE if the crate uses `cfg(doc)`.
+#
+#     `cargo doc` compiles with the `doc` cfg SET. So a `#[cfg(not(doc))] pub fn
+#     new_api()` is in the surface a normal default build SHIPS and absent from
+#     rustdoc — and therefore absent from this snapshot. That is a false PASS, and
+#     it is not fixable by measuring harder: the rustdoc-derived view simply is not
+#     the compiled view once `cfg(doc)` is in play.
+#
+#     THIS BLIND SPOT IS SHARED BY EVERY RUSTDOC-DERIVED ORACLE — `cargo-public-api`
+#     and rustdoc JSON have it too. It is a property of the input, not of this
+#     implementation, which matters for whoever revisits this guard later: switching
+#     tools does not fix it. Closing it properly needs a SECOND measurement without
+#     the `doc` cfg, compared against the first.
+#
+#     Until then the guard REFUSES rather than certify a surface it knows may differ from
+#     the shipped one. The scan is deliberately OVER-APPROXIMATE (it will also fire
+#     on the token inside a comment or a string literal): over-firing costs a loud,
+#     actionable FAIL, while under-firing costs a silent false PASS. Measured today:
+#     zero occurrences in cqlite-core/src.
+# ---------------------------------------------------------------------------
+CFGDOC_HITS="$WORK_DIR/cfgdoc.txt"
+if grep -rnE '(cfg|any|all|not)[[:space:]]*\([^)]*(^|[^A-Za-z0-9_"])doc[[:space:]]*[,)]' \
+     --include='*.rs' "$REPO_ROOT/$PACKAGE/src" >"$CFGDOC_HITS" 2>/dev/null; then
+  echo "" >&2
+  echo 'Occurrences of a `doc` cfg predicate (first 10):' >&2
+  head -10 "$CFGDOC_HITS" | sed "s|$REPO_ROOT/||" >&2
+  fail "$PACKAGE now uses a \`doc\` cfg predicate (\`cfg(doc)\` / \`cfg(not(doc))\`). \`cargo doc\` compiles with \`doc\` SET, so the rustdoc-derived surface this guard measures can no longer be trusted to equal the surface a default build ships — an item behind \`cfg(not(doc))\` would be MISSING from the snapshot while being public in the shipped crate.
+       This is a property of every rustdoc-derived oracle (cargo-public-api and rustdoc JSON share it), not of this script, so it cannot be fixed by switching tools.
+       Either avoid the attribute in $PACKAGE, or extend this guard to take a SECOND measurement without the \`doc\` cfg and compare the two, before it can certify again."
+fi
+
 # In VERIFY mode the committed snapshot is the baseline the whole run exists to
 # compare against, so its absence is checked HERE rather than after the doc build:
 # there is no point spending a rustdoc build to report a missing baseline. A missing
