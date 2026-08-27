@@ -1703,7 +1703,8 @@ fi
 # dispatch_component case, and (for the two that need fixtures) DATASET_COMPONENTS — so
 # an edit that drops a lane from ONE of them silently shrinks the gate of record while
 # every run stays green. That is the failure this case exists to red, cheaply: it drives
-# `--list` (the real array) and reads the dispatch case out of the real script. No
+# `--list` (the real array) and reads the dispatch case AND DATASET_COMPONENTS out of the
+# real script. No
 # cargo, no git, no network, sub-second — it must stay affordable wherever it runs.
 #
 # The expensive half of the #3272 observed-to-fire standard (does each lane actually
@@ -1746,6 +1747,42 @@ for lane in $FEATURE_MATRIX_LANES; do
   else
     bad "1699-dispatch: $lane has NO dispatch_component arm — it would hit 'unknown component' and return 2"
   fi
+done
+
+# DATASET_COMPONENTS, the THIRD registry (roborev round-2 finding 3). It is what makes
+# a component participate in the #2078 fetched-corpus preflight, so a lane dropped from
+# it stops being fixture-guarded while every run stays green — the same silent-shrink
+# shape as a missing dispatch arm, in the one place the two asserts above cannot see.
+# Both DIRECTIONS are asserted, which is what keeps the registry honest: the two
+# EXECUTING lanes (flight-tests, legacy-heuristics) run real dataset-dependent tests and
+# MUST be present; the two ISOLATION lanes compile only (`cargo test --lib --no-run`),
+# need no fixtures at all, and MUST be absent — adding them would make a fixture-less
+# checkout FAIL-CLOSED on lanes that never open a Data.db.
+#
+# Read out of the REAL script as a single space-delimited assignment; an extraction that
+# comes back empty is a FAILURE of the extraction, never a pass, because every
+# membership assert below would then be vacuous.
+dataset_components=$(sed -nE 's/^DATASET_COMPONENTS="([^"]*)".*/\1/p' "$GATE" | head -1)
+if [ -n "$dataset_components" ]; then
+  ok "1699-dataset-extract: extracted DATASET_COMPONENTS from the real script ($(printf '%s' "$dataset_components" | wc -w | tr -d ' ') entries)"
+else
+  bad "1699-dataset-extract: could NOT extract DATASET_COMPONENTS — the extraction itself broke, so every membership assert below would pass vacuously"
+fi
+for lane in flight-tests legacy-heuristics; do
+  case " $dataset_components " in
+    *" $lane "*)
+      ok "1699-dataset-present: $lane is in DATASET_COMPONENTS (so the #2078 missing-fixtures preflight covers it)" ;;
+    *)
+      bad "1699-dataset-present: $lane is NOT in DATASET_COMPONENTS — it runs dataset-dependent tests, so missing fixtures would bypass the preflight and it would fail obscurely instead" ;;
+  esac
+done
+for lane in feature-iso-parquet feature-iso-delta-scan; do
+  case " $dataset_components " in
+    *" $lane "*)
+      bad "1699-dataset-absent: $lane is in DATASET_COMPONENTS — it is a compile-only isolation lane (--lib --no-run) that opens no fixture, so enrolling it makes a fixture-less checkout fail-closed for no reason" ;;
+    *)
+      ok "1699-dataset-absent: $lane is correctly NOT in DATASET_COMPONENTS (compile-only, needs no corpus)" ;;
+  esac
 done
 
 # The fast-loop sets must NOT inherit these lanes: they are full-gate components, and
