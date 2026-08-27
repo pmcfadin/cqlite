@@ -757,8 +757,12 @@ export interface StreamingResult extends AsyncIterable<Row> {
 /**
  * Error codes for CQLite errors.
  *
- * These codes map to the ErrorCategory enum in cqlite-core and can be used
- * for programmatic error handling.
+ * Each code is decided **by core `Error` variant** from the shared FFI error
+ * contract (`cqlite_core::ffi_error_contract`) — the one authoritative table the
+ * Python binding reads too, so the same underlying error has the same identity
+ * in both (issue #1451). Codes are therefore FINER-GRAINED than the
+ * `ErrorCategory` they report: a timeout is `TIMEOUT` with category `'System'`,
+ * and a CQL syntax failure is `PARSE` with category `'Query'`.
  *
  * @example
  * ```typescript
@@ -768,7 +772,10 @@ export interface StreamingResult extends AsyncIterable<Row> {
  *   const err = e as CqliteError;
  *   switch (err.code) {
  *     case 'PARSE':
- *       console.log('SQL syntax error');
+ *       console.log('CQL syntax error');
+ *       break;
+ *     case 'TIMEOUT':
+ *       console.log('the operation exceeded its deadline');
  *       break;
  *     case 'IO':
  *       console.log('I/O error, may be retryable');
@@ -778,18 +785,22 @@ export interface StreamingResult extends AsyncIterable<Row> {
  * ```
  */
 export type ErrorCode =
-  | 'IO'           // System-level I/O errors (file access, memory, timeout)
+  | 'IO'           // I/O errors: file access, invalid path (NOT timeouts or memory)
   | 'SCHEMA'       // Schema-related errors (table not found, invalid schema)
-  | 'QUERY'        // Query execution errors (unsupported queries)
-  | 'PARSE'        // Data/parsing errors (CQL syntax, type conversion)
-  | 'CONFIG'       // Configuration errors
-  | 'STORAGE'      // Storage engine errors
-  | 'CONCURRENCY'  // Concurrency/lock errors
+  | 'QUERY'        // Query execution errors (unsupported query, result-set budget)
+  | 'PARSE'        // A CQL syntax failure, or corrupt/undecodable on-disk data
+  | 'CONFIG'       // Configuration errors (including an invalid read-path knob)
+  | 'STORAGE'      // Storage engine errors (storage, index, compaction)
+  | 'CONCURRENCY'  // Concurrency/lock errors (including a locked write_dir)
   | 'NOT_FOUND'    // Resource not found
   | 'CONFLICT'     // Resource conflicts (already exists)
-  | 'INVALID_INPUT' // Logic errors (invalid operation, invalid state)
+  | 'INVALID_INPUT' // Invalid caller input, invalid operation, or invalid state
   | 'CONSTRAINT'   // Constraint violations
   | 'TRANSACTION'  // Transaction errors
+  | 'TIMEOUT'      // The operation exceeded its deadline (issue #1451 — never 'IO';
+                   // Python raises the builtin TimeoutError for the same error)
+  | 'MEMORY'       // A memory/allocation failure (issue #1451 — never 'IO';
+                   // Python raises the builtin MemoryError for the same error)
   | 'PLATFORM'     // Platform-specific errors (WASM)
   | 'INTERNAL'     // Internal errors
   | 'CANCELLED';   // Cooperative scan cancellation (issue #2264 — never 'IO')

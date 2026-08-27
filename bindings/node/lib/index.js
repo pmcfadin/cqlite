@@ -24,7 +24,7 @@
  */
 
 const nativeBinding = require('../index.js');
-const { createWrappedDatabase } = require('./error-wrapper.js');
+const { createWrappedDatabase, enhanceError } = require('./error-wrapper.js');
 
 /**
  * PreparedStatement wraps a native PreparedStatement with type consistency.
@@ -95,8 +95,34 @@ const Database = createWrappedDatabase(nativeBinding.Database, wrapPreparedState
 // Re-export version function
 const { version } = nativeBinding;
 
+/**
+ * Test-support: throw the JS error the shared FFI error contract maps a named
+ * core Rust `Error` variant to (issue #1451).
+ *
+ * Goes through the production native mapping and the same `enhanceError`
+ * wrapper every `Database` method uses, so the thrown error carries the real
+ * `code`/`category`/`isRecoverable`. This is how the test suite reaches variants
+ * no query can provoke (`Timeout`, `Memory`). The Python binding's twin is
+ * `cqlite._raise_mapped_core_error`.
+ *
+ * Not part of the stable public API — the leading underscore marks it internal
+ * test support.
+ *
+ * @private
+ * @param {string} variant - Core `Error` variant identifier, e.g. 'Timeout'
+ * @throws {Error} Always; the mapped error for `variant`.
+ */
+function _errorContractProbe(variant) {
+  try {
+    return nativeBinding.errorContractProbe(variant);
+  } catch (error) {
+    throw enhanceError(error);
+  }
+}
+
 module.exports = {
   Database,
   PreparedStatement,
   version,
+  _errorContractProbe,
 };
