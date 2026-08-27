@@ -767,55 +767,162 @@ fn every_error_variant_classify_routes_is_documented_in_the_taxonomy_table() {
     );
 }
 
-// Exhaustively cover every Error constructor / variant -> expected category. These
-// expectations are HAND-WRITTEN on purpose: they are the independent check that the
-// doc-table comparison above is comparing against the right categories.
+/// The INDEPENDENT, hand-written expectation set: one constructed `Error` value per
+/// variant paired with the category it MUST classify as.
+///
+/// These are written by hand ON PURPOSE (issue #1038, tightened by #1705 roborev
+/// F10). Every other guard in this file compares two derivations of the same source
+/// — `classify()`'s arms against the module-doc table — and consistency cannot
+/// detect a variant filed under the WRONG category, because both sides agree. This
+/// list is the only oracle for the CORRECT category, so it is the one place where a
+/// human judgement is recorded rather than a comparison.
+///
+/// A LIST rather than a sequence of asserts so
+/// [`the_independent_category_test_covers_every_variant_the_taxonomy_documents`] can
+/// MEASURE its coverage (each value's variant name is read back from `Debug`)
+/// instead of scraping the test's text. That is what stops this oracle silently
+/// lagging behind the enum again — the F10 defect was exactly that: the six variants
+/// this issue documents were absent here while every consistency guard stayed green.
+fn independent_expectations() -> Vec<(Error, ErrorCategory)> {
+    use ErrorCategory::*;
+    vec![
+        (Error::from(std::io::Error::other("x")), Io),
+        (Error::invalid_path("p"), Io),
+        (Error::Timeout("t".into()), Io),
+        (Error::serialization("s"), Serialization),
+        (Error::type_conversion("t"), Serialization),
+        (Error::corruption("c"), Corruption),
+        // A corrupt CommitLog frame is on-disk corruption, alongside `Corruption` —
+        // deliberately NOT `Parsing`, so a checksum/framing failure lands on the
+        // corruption dashboard an operator watches for bit-rot (#1705, F10).
+        (Error::CorruptCommitLogFrame("f".into()), Corruption),
+        (Error::schema("s"), Schema),
+        (Error::Table("t".into()), Schema),
+        (Error::parse("p"), Parsing),
+        (Error::cql_parse("p"), Parsing),
+        (Error::invalid_format("f"), Parsing),
+        (Error::unsupported_format("f"), Parsing),
+        // A version/format floor rejection is a FORMAT-parsing failure, not a
+        // configuration or storage one — same bucket as `UnsupportedFormat`.
+        (
+            Error::UnsupportedVersion {
+                version: "ma".into(),
+                floor: "na".into(),
+            },
+            Parsing,
+        ),
+        (
+            Error::UnsupportedCommitLogVersion {
+                version: 5,
+                floor: 6,
+                ceiling: 7,
+            },
+            Parsing,
+        ),
+        (Error::storage("s"), Storage),
+        (Error::memory("m"), Storage),
+        (Error::index("i"), Storage),
+        (Error::compaction("c"), Storage),
+        (Error::write_dir_locked("/d"), Storage),
+        (Error::concurrency("c"), Concurrency),
+        (Error::transaction("t"), Concurrency),
+        (Error::constraint_violation("c"), Constraints),
+        (Error::already_exists("a"), Constraints),
+        (Error::query_execution("q"), Query),
+        (Error::unsupported_query("q"), Query),
+        (Error::invalid_input("i"), Query),
+        // The three query-time outcomes: a byte-budget refusal, and the #1918
+        // read-path forcing knob failing closed, are QUERY outcomes — not `Storage`,
+        // not `Configuration` (#1705, F10).
+        (
+            Error::ResultTooLarge {
+                budget_bytes: 1,
+                estimated_bytes: 2,
+                rows: 3,
+            },
+            Query,
+        ),
+        (
+            Error::ForcedReadPathUnavailable {
+                forced: "point",
+                reason: "r".into(),
+            },
+            Query,
+        ),
+        (
+            Error::InvalidReadPath {
+                value: "nope".into(),
+            },
+            Query,
+        ),
+        (Error::configuration("c"), Other),
+        (Error::invalid_state("s"), Other),
+        (Error::invalid_operation("o"), Other),
+        (Error::not_found("n"), Other),
+        (Error::internal("i"), Other),
+        // Issue #2264: a cooperative cancellation must be its OWN bucket, not `Io`
+        // (misleading — it is not a transport failure) and not lumped into the
+        // generic `Other` bucket (would hide cancellation rate).
+        (Error::Cancelled, Cancelled),
+    ]
+}
+
 #[test]
 fn classify_every_error_variant() {
-    use ErrorCategory::*;
+    for (err, expected) in independent_expectations() {
+        let variant = debug_variant_name(&err);
+        assert_eq!(
+            err.obs_category(),
+            expected,
+            "Error::{variant} must classify as {expected:?}"
+        );
+    }
+}
 
-    let io = std::io::Error::other("x");
-    assert_eq!(Error::from(io).obs_category(), Io);
-    assert_eq!(Error::invalid_path("p").obs_category(), Io);
-    assert_eq!(Error::Timeout("t".into()).obs_category(), Io);
+#[test]
+fn the_independent_category_test_covers_every_variant_the_taxonomy_documents() {
+    // Issue #1705 (roborev F10): [`independent_expectations`] is the ONLY oracle for
+    // the CORRECT category — every other guard here compares two derivations of the
+    // same source, which cannot detect a variant filed under the wrong one. So its
+    // coverage must not lag behind the enum, which is precisely how the six variants
+    // this issue documents came to be unpinned.
+    //
+    // MEASURED, not scraped: each expectation's variant name is read back from its
+    // value's derived `Debug`, and compared against the compiler-audited
+    // `classify()` arm set. Adding an `Error` variant therefore reds THIS test until
+    // a hand-written expectation for it exists.
+    let covered: std::collections::BTreeSet<String> = independent_expectations()
+        .iter()
+        .map(|(err, _)| debug_variant_name(err))
+        .collect();
+    assert!(
+        !covered.is_empty(),
+        "the coverage guard must have a subject — an empty expectation list passes \
+         vacuously"
+    );
 
-    assert_eq!(Error::serialization("s").obs_category(), Serialization);
-    assert_eq!(Error::type_conversion("t").obs_category(), Serialization);
+    let missing: Vec<String> = classify_arms()
+        .into_iter()
+        // A `wasm32`-gated variant cannot be constructed on this target, so it has
+        // no constructible expectation here; `actual_map` states that gap too.
+        .filter(|(variant, (_, wasm_gated))| !wasm_gated && !covered.contains(variant))
+        .map(|(variant, (category, _))| format!("Error::{variant} -> {category}"))
+        .collect();
+    assert!(
+        missing.is_empty(),
+        "classify() routes variants that the INDEPENDENT hand-written expectation \
+         list never pins, so nothing asserts their CORRECT category (add them to \
+         `independent_expectations`): {missing:?}"
+    );
 
-    assert_eq!(Error::corruption("c").obs_category(), Corruption);
-
-    assert_eq!(Error::schema("s").obs_category(), Schema);
-    assert_eq!(Error::Table("t".into()).obs_category(), Schema);
-
-    assert_eq!(Error::parse("p").obs_category(), Parsing);
-    assert_eq!(Error::cql_parse("p").obs_category(), Parsing);
-    assert_eq!(Error::invalid_format("f").obs_category(), Parsing);
-    assert_eq!(Error::unsupported_format("f").obs_category(), Parsing);
-
-    assert_eq!(Error::storage("s").obs_category(), Storage);
-    assert_eq!(Error::memory("m").obs_category(), Storage);
-    assert_eq!(Error::index("i").obs_category(), Storage);
-    assert_eq!(Error::compaction("c").obs_category(), Storage);
-    assert_eq!(Error::write_dir_locked("/d").obs_category(), Storage);
-
-    assert_eq!(Error::concurrency("c").obs_category(), Concurrency);
-    assert_eq!(Error::transaction("t").obs_category(), Concurrency);
-
-    assert_eq!(Error::constraint_violation("c").obs_category(), Constraints);
-    assert_eq!(Error::already_exists("a").obs_category(), Constraints);
-
-    assert_eq!(Error::query_execution("q").obs_category(), Query);
-    assert_eq!(Error::unsupported_query("q").obs_category(), Query);
-    assert_eq!(Error::invalid_input("i").obs_category(), Query);
-
-    assert_eq!(Error::configuration("c").obs_category(), Other);
-    assert_eq!(Error::invalid_state("s").obs_category(), Other);
-    assert_eq!(Error::invalid_operation("o").obs_category(), Other);
-    assert_eq!(Error::not_found("n").obs_category(), Other);
-    assert_eq!(Error::internal("i").obs_category(), Other);
-
-    // Issue #2264: a cooperative cancellation must be its OWN bucket, not
-    // `Io` (misleading — it is not a transport failure) and not lumped into
-    // the generic `Other` catch-all (would hide cancellation rate).
-    assert_eq!(Error::Cancelled.obs_category(), Cancelled);
+    // And the affirmative direction: every expectation names a variant classify()
+    // actually routes, so a stale entry for a deleted variant cannot sit here
+    // unnoticed.
+    let routed: std::collections::BTreeSet<String> = classify_arms().into_keys().collect();
+    let stale: Vec<&String> = covered.iter().filter(|v| !routed.contains(*v)).collect();
+    assert!(
+        stale.is_empty(),
+        "the independent expectation list names variants classify() does not route \
+         (remove the stale entries): {stale:?}"
+    );
 }
