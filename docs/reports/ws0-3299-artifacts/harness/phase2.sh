@@ -1,43 +1,45 @@
 #!/usr/bin/env bash
-# #3299 PHASE 2 — the Flight `do_get` arm on Corpus B, at S=1 and S=6 only.
+# #3299 PHASE 2 — the Flight `do_get` arm on Corpus B. ONE point per invocation.
 #
-# WHY THIS EXISTS. AC4 needs "remaining to target", which needs both the target
-# (bare scan, phase 1) and where we are today (`do_get`). The only box-level
-# `do_get` figure in existence is #3217's 1,076,917 rows/s on CORPUS A (LZ4,
-# 196.09 B/row); phase 1's target is CORPUS B (uncompressed, 693.69 B/row).
-# Dividing across those is forbidden — 3.5x the bytes per row and no per-row
-# decompression are two large opposite-signed effects on the measured quantity.
-# So `do_get` is measured on Corpus B, in the same session, at TWO points only.
+# WHY ONE POINT PER INVOCATION rather than an S sweep: phase 2's scope is not a
+# curve. It is (1) a servability smoke, (2) a client-bound FALSIFICATION at S=6,
+# and (3) `do_get` at S=1 on the rig's own calibrated core split. Those three
+# want DIFFERENT core allocations, so the allocation is an explicit argument and
+# is printed into every artifact, rather than derived by a rule that would have
+# to encode three exceptions. The launcher can see exactly what will run.
 #
-# NOT a 25-point grid: the full `do_get` C(N) curve is #3217's deliverable and
-# already exists. No acceptance criterion asks for it again on Corpus B.
+# THE VALIDITY PROBLEM THIS SHAPE EXISTS TO RESPECT (recon, adopted):
+# `ws0-baseline.sh` ships `SERVER_CPUS="2,10"` (ONE physical core) against
+# `CLIENT_CPUS="4,12,5,13,6,14,7,15"` (FOUR) — a 1:4 server:client ratio chosen
+# by whoever calibrated the rig. A `do_get` S=6 point on 8 physical cores would
+# run 6:2, a 12x swing, and a 2-core client driving a 6-core server is far below
+# what that author thought a ONE-core server needed. If such a point is
+# client-bound it is not a measurement of `do_get` at all — and the error
+# direction UNDERSTATES `do_get`, OVERSTATING the bare-scan gap, which flatters
+# the very lever this issue calibrates. Hence: no S=6 figure is published unless
+# the falsification below clears it.
 #
-# THE ALIGNED WINDOW HERE IS #3224's, VERBATIM AND UNMODIFIED: perf runs the
-# loadgen as its OWN CHILD, so the counted interval IS the row-producing
-# interval — numerator and denominator share one window by construction, with no
-# rate assumption and nothing to attribute. Phase 1 needed its own machinery only
-# because it had N independent worker PROCESSES and no single child to wrap; here
-# there is exactly one loadgen process, which is the case #3224's convention was
-# written for. The server is warmed by a separate uncounted invocation first.
+# ALIGNED WINDOW — #3224's convention, verbatim: perf runs the loadgen as its OWN
+# CHILD, so the counted interval IS the row-producing interval. Numerator and
+# denominator share one window by construction; nothing is attributed and no rate
+# is assumed. (Phase 1 needed bespoke machinery only because it had N independent
+# worker processes and no single child to wrap.)
 #
-# CORE ALLOCATION — the client set is CONSTANT across S, on purpose.
-#   server = the first S complete sibling groups
-#   client = the LAST TWO complete sibling groups, at EVERY S
-# Holding the client constant is what makes `do_get`'s OWN S=1->S=6 slope
-# internally valid: if the client shrank as the server grew, the arm's slope
-# would confound server scaling with client starvation. It also matches
-# #3217/#3224's convention (a constant 2-physical-core client), which is what
-# makes the Corpus-B-vs-Corpus-A `do_get` comparison same-convention and
-# same-arm — the one comparison in phase 2 that carries no asymmetry caveat.
+# USAGE — the three phase-2 invocations, in order:
 #
-# THE ASYMMETRY, STATED NOT HIDDEN. Bare-scan S=6 ran 6 cores pinned with 2 IDLE
-# and no client; `do_get` S=6 runs 6 serving with those same 2 BUSY driving load.
-# Those are not identical machine states, so the CROSS-ARM slope comparison is
-# not a controlled A/B. It is still the right thing to measure: the deployment
-# bar itself is asymmetric (real `do_get` has clients; bare scan does not), each
-# arm's own marginal efficiency is self-normalised and internally valid, and the
-# `do_get`-B-vs-A comparison is clean. The report states this rather than
-# implying a controlled comparison.
+#   # 1. servability + S=1 at the rig's CALIBRATED 1:4 split (server 1 core, client 4)
+#   phase2.sh --results D --label s1-rigsplit \
+#             --server-cpus 2,10 --client-cpus 4,12,5,13,6,14,7,15 --n-list 1,2,4,8
+#
+#   # 2/3. the client-bound FALSIFICATION at S=6: identical server, client halved
+#   phase2.sh --results D --label s6-client2 \
+#             --server-cpus 0,8,1,9,2,10,3,11,4,12,5,13 --client-cpus 6,14,7,15 --n-list 24
+#   phase2.sh --results D --label s6-client1 \
+#             --server-cpus 0,8,1,9,2,10,3,11,4,12,5,13 --client-cpus 7,15     --n-list 24
+#   #    aggregate moves materially => CLIENT-BOUND, the S=6 number is VOID
+#   #    aggregate does not move     => that objection is falsified; only the
+#   #                                   machine-state asymmetry remains, and it is disclosable
+#   python3 phase2-compare.py --results D --a s6-client2 --b s6-client1
 set -Eeuo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -46,134 +48,136 @@ CONTAIN="$REPO/test-data/scripts/perf-run-contained.sh"
 GUARDS="$HERE/guards.py"
 
 CORPUS=/data/ws0-3096
-KEYSPACE=ws0
-TABLE=events
-RESULTS=""
-S_LIST="1,6"
-RAMP=""                 # concurrency per rep; default resolved per S below
-REPS=3
-STEP_DURATION=60s
-PORT=18815
-MEM_CAP=24G
-CLIENT_CORES=2
+KEYSPACE=ws0; TABLE=events
+RESULTS=""; LABEL=""; SERVER_CPUS=""; CLIENT_CPUS=""; N_LIST=""
+REPS=3; STEP_DURATION=60s; PORT=18815; MEM_CAP=24G
 SERVER_BIN="$REPO/target/release/cqlite-flight"
 LOADGEN_BIN="$REPO/target/release/flight-loadgen"
-# `full` is the shape that corresponds to a bare scan (`SELECT * FROM ws0.events`).
-# The loadgen's DEFAULT is `mixed`, which would measure a different workload and
-# make the cross-arm ratio meaningless.
+# `full` matches the bare scan's `SELECT * FROM ws0.events`. The loadgen's DEFAULT
+# is `mixed`, which measures a different workload and would void the cross-arm ratio.
 SHAPE=full
 
-usage() { sed -n '2,40p' "${BASH_SOURCE[0]}" >&2; exit 2; }
+usage() { sed -n '2,45p' "${BASH_SOURCE[0]}" >&2; exit 2; }
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --results) RESULTS="$2"; shift 2 ;;
-    --corpus) CORPUS="$2"; shift 2 ;;
-    --s-list) S_LIST="$2"; shift 2 ;;
-    --ramp) RAMP="$2"; shift 2 ;;
+    --label) LABEL="$2"; shift 2 ;;
+    --server-cpus) SERVER_CPUS="$2"; shift 2 ;;
+    --client-cpus) CLIENT_CPUS="$2"; shift 2 ;;
+    --n-list) N_LIST="$2"; shift 2 ;;
     --reps) REPS="$2"; shift 2 ;;
     --step-duration) STEP_DURATION="$2"; shift 2 ;;
     --port) PORT="$2"; shift 2 ;;
+    --corpus) CORPUS="$2"; shift 2 ;;
     --shape) SHAPE="$2"; shift 2 ;;
     -h|--help) usage ;;
     *) echo "unknown arg: $1" >&2; usage ;;
   esac
 done
-[[ -n "$RESULTS" ]] || { echo "--results is required" >&2; usage; }
+for req in RESULTS LABEL SERVER_CPUS CLIENT_CPUS N_LIST; do
+  [[ -n "${!req}" ]] || { echo "--${req,,} is required" >&2; usage; }
+done
 for b in "$SERVER_BIN" "$LOADGEN_BIN"; do
-  [[ -x "$b" ]] || { echo "FATAL: $b not built. Build BEFORE the box is quiet, never during a rep." >&2; exit 2; }
+  [[ -x "$b" ]] || { echo "FATAL: $b not built. Build while the box is QUIET, never during a rep." >&2; exit 2; }
 done
 mkdir -p "$RESULTS"; RESULTS="$(cd "$RESULTS" && pwd)"
 
-# --- topology, from sysfs (never assumed) -------------------------------------
+# --- topology + core-set verification -----------------------------------------
 SIB_MAP="$RESULTS/siblings.map"; : > "$SIB_MAP"
 for c in /sys/devices/system/cpu/cpu[0-9]*; do
   echo "${c##*/cpu} $(cat "$c/topology/thread_siblings_list")" >> "$SIB_MAP"
 done
 sort -n -o "$SIB_MAP" "$SIB_MAP"
-mapfile -t CORE_GROUPS < <(awk '{print $2}' "$SIB_MAP" | sort -u -t, -k1,1n)
-PHYS=${#CORE_GROUPS[@]}
-# Client = the LAST CLIENT_CORES groups, constant at every S.
-CLIENT_CPUS="$(printf '%s\n' "${CORE_GROUPS[@]}" | tail -n "$CLIENT_CORES" | paste -sd,)"
-echo "[phase2] $PHYS physical cores; client (CONSTANT) = $CLIENT_CPUS"
+# Both sets must be complete sibling groups: a half-populated core measures a
+# different machine. `--headroom-cores 0` because phase 2 deliberately uses the
+# whole box (server + client), unlike the bare-scan arm which kept 2 cores idle —
+# a difference §9.2 of the report discloses rather than hides.
+SCOUNT="$(python3 -c 'import sys;print(len(set(sys.argv[1].split(","))) // 2)' "$SERVER_CPUS")"
+CCOUNT="$(python3 -c 'import sys;print(len(set(sys.argv[1].split(","))) // 2)' "$CLIENT_CPUS")"
+python3 "$GUARDS" cpuset --s "$SCOUNT" --cpus "$SERVER_CPUS" --siblings "$SIB_MAP" --headroom-cores 0
+python3 "$GUARDS" cpuset --s "$CCOUNT" --cpus "$CLIENT_CPUS" --siblings "$SIB_MAP" --headroom-cores 0
+# Disjointness is VERIFIED, not assumed: `perf stat -C <server>` would otherwise
+# count the loadgen's work as engine work.
+python3 - "$SERVER_CPUS" "$CLIENT_CPUS" <<'PY'
+import sys
+a, b = set(sys.argv[1].split(",")), set(sys.argv[2].split(","))
+if a & b:
+    sys.exit(f"FATAL: server and client CPU sets OVERLAP on {sorted(a & b)} — "
+             f"perf -C <server> would count client work as engine work")
+PY
+echo "[phase2] $LABEL  server=$SERVER_CPUS (${SCOUNT} cores)  client=$CLIENT_CPUS (${CCOUNT} cores)"
 
 # --- ticket template: the DDL travels in the TICKET, not a server flag --------
-# `cqlite-flight` has no --schema: service.rs `parse_schema(ticket)` parses the
+# `cqlite-flight` has no --schema: `service.rs:424 parse_schema(ticket)` parses the
 # CQL DDL carried by each request and caches it. So Corpus B's schema is injected
-# here, and the server needs no change to serve an uncompressed corpus.
-DDL_FILE="$CORPUS/$KEYSPACE-$TABLE.cql"
-[[ -r "$DDL_FILE" ]] || DDL_FILE="$CORPUS/ws0-events.cql"
+# here and the server needs no change to serve an uncompressed corpus.
+DDL_FILE="$CORPUS/ws0-events.cql"
 [[ -r "$DDL_FILE" ]] || { echo "FATAL: no DDL at $DDL_FILE" >&2; exit 2; }
 TICKET="$RESULTS/ticket-template.json"
 python3 - "$DDL_FILE" "$KEYSPACE" "$TABLE" "$TICKET" <<'PY'
 import json, sys
-ddl = open(sys.argv[1]).read()
-json.dump({"keyspace": sys.argv[2], "table": sys.argv[3], "ddl": ddl,
+json.dump({"keyspace": sys.argv[2], "table": sys.argv[3], "ddl": open(sys.argv[1]).read(),
            "snapshot": None, "token_ranges": None, "limit": None},
           open(sys.argv[4], "w"), indent=2)
 PY
-echo "[phase2] ticket template <- $DDL_FILE"
 
-start_server() { # $1 = server cpu list, $2 = log
-  "$CONTAIN" --mem "$MEM_CAP" --swap 0 -- \
-    taskset -c "$1" "$SERVER_BIN" --data-dir "$CORPUS" --port "$PORT" > "$2" 2>&1 &
-  SERVER_WRAPPER=$!
-  for _ in $(seq 1 120); do
-    if (exec 3<>"/dev/tcp/127.0.0.1/$PORT") 2>/dev/null; then exec 3<&- 3>&-; return 0; fi
-    sleep 0.5
-  done
-  echo "FATAL: server did not listen on $PORT within 60s (see $2)" >&2; return 1
-}
+SERVER_WRAPPER=""
 stop_server() {
-  # Kill by PID, never by name: `pkill -x cqlite-flight` cannot match a name over
-  # the kernel's 15-char comm limit, and `pkill -f <pat>` matches the killer's own
-  # shell. Both report success having killed nothing.
-  pkill -P "${SERVER_WRAPPER:-0}" 2>/dev/null || true
-  kill "${SERVER_WRAPPER:-0}" 2>/dev/null || true
-  wait "${SERVER_WRAPPER:-0}" 2>/dev/null || true
+  # By PID, never by name. `pkill -x cqlite-flight` CANNOT match — the kernel's
+  # comm is 15 chars and the name is longer, so it reports success having killed
+  # nothing. `pkill -f <pat>` matches the killer's own shell. Both leave orphans
+  # that hold cores and silently corrupt the NEXT rep.
+  [[ -n "$SERVER_WRAPPER" ]] || return 0
+  pkill -P "$SERVER_WRAPPER" 2>/dev/null || true
+  kill "$SERVER_WRAPPER" 2>/dev/null || true
+  wait "$SERVER_WRAPPER" 2>/dev/null || true
+  SERVER_WRAPPER=""
 }
 trap stop_server EXIT
 
-IFS=',' read -r -a S_VALUES <<< "$S_LIST"
-: > "$RESULTS/manifest.jsonl"
-for S in "${S_VALUES[@]}"; do
-  (( S + CLIENT_CORES <= PHYS )) || { echo "FATAL: S=$S plus a $CLIENT_CORES-core client exceeds $PHYS physical cores" >&2; exit 2; }
-  SERVER_CPUS="$(printf '%s\n' "${CORE_GROUPS[@]}" | head -n "$S" | paste -sd,)"
-  python3 "$GUARDS" cpuset --s "$S" --cpus "$SERVER_CPUS" --siblings "$SIB_MAP" --headroom-cores 0
-  # Disjointness is verified, not assumed: `perf stat -C <server>` would
-  # otherwise count client work as engine work.
-  python3 - "$SERVER_CPUS" "$CLIENT_CPUS" <<'PY'
-import sys
-a = set(sys.argv[1].split(",")); b = set(sys.argv[2].split(","))
-if a & b:
-    sys.exit(f"FATAL: server and client CPU sets OVERLAP on {sorted(a & b)}")
-PY
-  N="${RAMP:-$(( S * 4 ))}"
-  echo "[phase2] S=$S server=$SERVER_CPUS client=$CLIENT_CPUS N=$N"
-  start_server "$SERVER_CPUS" "$RESULTS/server-s${S}.log"
+"$CONTAIN" --mem "$MEM_CAP" --swap 0 -- \
+  taskset -c "$SERVER_CPUS" "$SERVER_BIN" --data-dir "$CORPUS" --port "$PORT" \
+  > "$RESULTS/$LABEL-server.log" 2>&1 &
+SERVER_WRAPPER=$!
+for _ in $(seq 1 120); do
+  (exec 3<>"/dev/tcp/127.0.0.1/$PORT") 2>/dev/null && { exec 3<&- 3>&-; break; }
+  sleep 0.5
+done
+(exec 3<>"/dev/tcp/127.0.0.1/$PORT") 2>/dev/null || {
+  echo "FATAL: server did not listen on $PORT within 60s (see $RESULTS/$LABEL-server.log)" >&2; exit 2; }
+exec 3<&- 3>&- || true
 
-  # WARMUP: uncounted, and it doubles as the recon's outstanding residual check —
-  # a non-zero do_get against Corpus B, confirmed BEFORE any measurement, because
-  # a 0-row do_get presents as a very fast one.
-  taskset -c "$CLIENT_CPUS" "$LOADGEN_BIN" --endpoint "http://127.0.0.1:$PORT" \
-    --ticket-template "$TICKET" --ramp "$N" --step-duration 20s --shape "$SHAPE" \
-    --round "warmup-s$S" --out "$RESULTS/s${S}-warmup.jsonl" > "$RESULTS/s${S}-warmup.log" 2>&1
-  python3 "$GUARDS" flight-step --jsonl "$RESULTS/s${S}-warmup.jsonl"
+# --- SERVABILITY SMOKE: uncounted, and MANDATORY ------------------------------
+# A 0-row `do_get` presents as an extremely FAST one — a server answering
+# NotFound completes every request immediately — so "it ran" proves nothing and
+# a row count must be observed BEFORE any rep is measured. #3224 shipped exactly
+# this failure (2,258,606 NotFounds behind `discovered 0 tables`, rc=0).
+FIRST_N="${N_LIST%%,*}"
+taskset -c "$CLIENT_CPUS" "$LOADGEN_BIN" --endpoint "http://127.0.0.1:$PORT" \
+  --ticket-template "$TICKET" --ramp "$FIRST_N" --step-duration 20s --shape "$SHAPE" \
+  --round "smoke-$LABEL" --out "$RESULTS/$LABEL-smoke.jsonl" > "$RESULTS/$LABEL-smoke.log" 2>&1
+python3 "$GUARDS" flight-step --jsonl "$RESULTS/$LABEL-smoke.jsonl"
+echo "[phase2] servability smoke PASSED (non-zero rows observed against Corpus B)"
 
+IFS=',' read -r -a NS <<< "$N_LIST"
+for N in "${NS[@]}"; do
   for (( rep=1; rep<=REPS; rep++ )); do
-    RD="$RESULTS/s${S}-n${N}-rep${rep}"; mkdir "$RD"
-    # ALIGNED (#3224): perf is the PARENT of the loadgen, so the counted interval
-    # is the row-producing interval. -C counts the SERVER cores only.
+    RD="$RESULTS/${LABEL}-n${N}-rep${rep}"
+    [[ -e "$RD" ]] && { echo "FATAL: $RD exists; refusing to reuse or delete a results dir" >&2; exit 2; }
+    mkdir "$RD"
+    # ALIGNED: perf is the PARENT of the loadgen, counting the SERVER cores only.
     perf stat -x, -o "$RD/perf.csv" -C "$SERVER_CPUS" \
       -e instructions,cycles,L1-dcache-loads,L1-dcache-load-misses,task-clock \
       -- taskset -c "$CLIENT_CPUS" "$LOADGEN_BIN" \
            --endpoint "http://127.0.0.1:$PORT" --ticket-template "$TICKET" \
            --ramp "$N" --step-duration "$STEP_DURATION" --shape "$SHAPE" \
-           --round "s${S}-rep${rep}" --out "$RD/step.jsonl" > "$RD/loadgen.log" 2>&1
+           --round "${LABEL}-n${N}-rep${rep}" --out "$RD/step.jsonl" > "$RD/loadgen.log" 2>&1
     python3 "$GUARDS" perf-csv --csv "$RD/perf.csv"
     python3 "$GUARDS" flight-step --jsonl "$RD/step.jsonl"
-    echo "{\"arm\":\"do_get\",\"s\":$S,\"n\":$N,\"rep\":$rep,\"rundir\":\"$RD\",\"server_cpus\":\"$SERVER_CPUS\",\"client_cpus\":\"$CLIENT_CPUS\"}" >> "$RESULTS/manifest.jsonl"
-    echo "[phase2] S=$S rep=$rep OK"
+    printf '{"arm":"do_get","label":"%s","n":%s,"rep":%s,"rundir":"%s","server_cpus":"%s","client_cpus":"%s","server_cores":%s,"client_cores":%s,"shape":"%s"}\n' \
+      "$LABEL" "$N" "$rep" "$RD" "$SERVER_CPUS" "$CLIENT_CPUS" "$SCOUNT" "$CCOUNT" "$SHAPE" >> "$RESULTS/manifest.jsonl"
+    echo "[phase2] $LABEL N=$N rep=$rep OK"
   done
-  stop_server
 done
-echo "[phase2] done -> $RESULTS/manifest.jsonl"
+stop_server
+echo "[phase2] $LABEL done -> $RESULTS/manifest.jsonl"
