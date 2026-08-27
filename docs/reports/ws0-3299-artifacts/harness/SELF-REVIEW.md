@@ -124,22 +124,40 @@ abort every rep. Deferred for the same reason as Q3, plus one specific to
 live `sweep.sh` can corrupt the running parse. It must be edited only when no
 sweep is running.
 
-## Q6 — `phase2.sh` carries the recon's `--port` error (fix queued)
+## Q6 — `phase2.sh` / `phase2-compare.py`: DELETED, not fixed
 
-`phase2.sh` invokes the server with `--port "$PORT"`; the binary takes
-`--listen <addr:port>`. The measurements were run by hand with the correct flag,
-so no number is affected, but the committed harness would not start a server as
-written.
+I flagged the `--port` error here (the server takes `--listen`, so no invocation
+could start a server) and queued a fix. Roborev then found two more in the same
+pair: perf wrapped the loadgen's **whole process lifetime** while `rows_total`
+covered only the timed step — the exact windowing mismatch this issue's aligned
+window exists to prevent, reintroduced in the phase-2 script — and the
+comparison tool printed client-bound verdicts **without validating** that the two
+runs shared a server set, a shape or a corpus.
 
-**Not fixed yet, deliberately**: phase-2 runs were still in flight, and **bash
-reads a script incrementally as it executes**, so editing a live `sweep.sh` or
-`phase2.sh` can corrupt the running parse. Queued with the orphan fix (Q3) for
-the moment the box is quiet, in one commit.
+**Disposition: deleted, not fixed.** Neither script produced a published number
+— `do_get` was measured by invoking `flight-loadgen` directly — so their only
+value was reproducibility, and three defects of that kind make them worse than
+absent. The reproduction value is replaced by the **exact commands that were
+run**, recorded verbatim in the report.
 
-Same commit will add the `--shape full` default rationale as an assertion rather
-than a comment: a `mixed` run measures a different workload and would produce a
-plausible, wrong cross-arm ratio, which is precisely the kind of silent error the
-rest of this harness is built to refuse.
+**The lesson worth keeping**: I wrote a phase-2 harness that reintroduced the
+windowing sin the phase-1 harness was built to avoid. Familiarity with the
+principle did not transfer to new code written under time pressure, which is why
+the review layer exists and why "I already know that one" is not a defence.
+
+## Q7 — the fail-open guard fields (roborev finding 4)
+
+`guard_window` treated `worker_cpus`, `perf_csv`, `perf_cpus` and `task-clock` as
+OPTIONAL: omitting any skipped the check it feeds and the rep still returned
+success. Same shape as an LLC counter that programs cleanly and returns a hard
+zero — a check reporting success having measured nothing — this time in the guard
+layer itself.
+
+**Fixed**: all four required, with `WINDOW_FIELD_MISSING`,
+`WINDOW_FIELD_MALFORMED` and `WINDOW_NO_TASK_CLOCK`, each observed to fire in
+`selftest.sh`. **Verified not exercised**: of the 91 committed reps carrying a
+`window.json`, **0** would have taken a fail-open path. A latent hole, not one
+that fired.
 
 ## Q5 (mine) — exclusive-create must not break resume
 
