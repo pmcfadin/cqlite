@@ -512,14 +512,18 @@
 #                      derived targets is a FAIL naming the derivation, never a PASS or
 #                      a SKIP. Runs under the zero-tests guard; no opt-out.
 #   feature-iso-parquet / feature-iso-delta-scan
-#                      RUSTFLAGS=-D warnings cargo check --all-targets -p cqlite-core
-#                      --no-default-features --features all-compression,<one-of>, each
-#                      WITHOUT the other feature (issue #1699). clippy enables parquet
-#                      AND delta-scan together, which is the shape that MASKS
-#                      cross-feature coupling; these two lanes are separately named so a
-#                      SUMMARY FAIL says WHICH direction of coupling broke. --all-targets
-#                      is load-bearing (#1978: a library-only check never compiles the
-#                      `#[cfg(test)]` module that incident lived in). No opt-out.
+#                      RUSTFLAGS=-D warnings cargo test -p cqlite-core
+#                      --no-default-features --features all-compression,<one-of>
+#                      --lib --no-run, each WITHOUT the other feature (issue #1699).
+#                      clippy enables parquet AND delta-scan together, which is the
+#                      shape that MASKS cross-feature coupling; these two lanes are
+#                      separately named so a SUMMARY FAIL says WHICH direction of
+#                      coupling broke. `--lib --no-run` is load-bearing and is the
+#                      minimal-build shape: it compiles the lib WITH its inline
+#                      `#[cfg(test)]` modules — where the #1978 incident class lives,
+#                      invisible to a bare `cargo check` — while pulling in none of the
+#                      ~100 integration test files, which assume default features and
+#                      fail here as noise, not leakage. No opt-out.
 #   minimal-build      cargo build + `cargo test --lib --no-run` (compile-only)
 #                      -p cqlite-core --no-default-features --features all-compression
 #   smoke              bash test-data/scripts/smoke-test-all-tables.sh
@@ -5533,24 +5537,41 @@ run_legacy_heuristics() {
 # change what the lane measures from FEATURE ISOLATION to NO-COMPRESSION support,
 # which is a different (and already covered) question — minimal-build owns that one.
 #
-# --all-targets is LOAD-BEARING, not decoration (#1978). That incident was an ungated
-# `#[cfg(test)]` module referencing a feature-gated item, and a library-only `cargo
-# check` never compiles test targets — so the literal `cargo check` this lane could
-# have been would compile the library, go green, and miss the very incident class it
-# cites. minimal-build already carries this exact lesson.
+# COMPILING TEST CODE IS LOAD-BEARING, but `--all-targets` was the wrong instrument.
+# The argument STANDS: the #1978 incident class is an ungated `#[cfg(test)]` module
+# referencing a feature-gated item, and a library-only `cargo check` never compiles
+# `cfg(test)` code at all — so a bare `cargo check` would compile the library, go
+# green, and miss the very incident class this lane cites.
+#
+# But that incident class lives in `cqlite-core/src/**`'s INLINE `#[cfg(test)]`
+# modules, and `--all-targets` reaches far past them: it also compiles cqlite-core's
+# ~100 INTEGRATION test files, which are written against the DEFAULT feature set and
+# therefore fail here on modules this lane deliberately configures out. Measured:
+# issue_1004_primitive_codec_vectors.rs:23 (`storage::serialization`),
+# issue_2412_wraparound_scan.rs:42 (`storage::write_engine`),
+# contract_stability_tests.rs:23 (`cqlite_core::query`). Those are NOISE — the
+# integration suite assuming default features — not cross-feature leakage, which is
+# what this lane exists to measure.
+#
+# The correct instrument is `cargo test --lib --no-run`: it compiles the lib WITH its
+# `cfg(test)` modules (the incident class) and pulls in NO integration test target.
+# minimal-build is the precedent — it uses this exact shape for exactly this reason.
+# Do NOT "simplify" this to `cargo check --lib`: that does not compile `cfg(test)` and
+# is blind to #1978.
 #
 # RUSTFLAGS=-D warnings is load-bearing for the same reason minimal-build sets it
 # (#1981): a feature-orphaned helper (a `#[cfg(test)]` helper whose only caller is
 # gated out at this feature set) surfaces as a DEAD-CODE WARNING, and a lane without
 # -D warnings demotes that to a line nobody reads.
 #
-# `cargo check` rather than a full build keeps the cost proportionate to the purpose:
-# the question is "does it still compile in isolation", not "does it link".
+# `--no-run` rather than executing keeps the cost proportionate to the purpose: the
+# question is "does it still compile in isolation", not "do the tests pass" (core-tests
+# owns that, at the default feature set).
 #
 # No opt-out env var: a committed feature is never legitimately absent.
 run_feature_iso() { # run_feature_iso <feature>
-  RUSTFLAGS="-D warnings" cargo check --all-targets --package cqlite-core \
-    --no-default-features --features "all-compression,$1"
+  RUSTFLAGS="-D warnings" cargo test --package cqlite-core \
+    --no-default-features --features "all-compression,$1" --lib --no-run
 }
 
 # parity-report: verify the committed derived parity report is not stale vs its
@@ -8167,8 +8188,8 @@ run_file_size
 #     exercise the preflight, it consumes no real data), minimal-build (a cargo
 #     build plus a compile-only `cargo test --lib --no-run`; no tests run, no
 #     data — issue #1978), the two #1699 feature-isolation lanes
-#     (feature-iso-parquet / feature-iso-delta-scan: `cargo check` only — nothing
-#     executes, so no fixture can be consumed), and format-compat. format-compat is excluded (#1175
+#     (feature-iso-parquet / feature-iso-delta-scan: `cargo test --lib --no-run`,
+#     compile-only — nothing executes, so no fixture can be consumed), and format-compat. format-compat is excluded (#1175
 #     finding 1): its sole target (cargo test -p format-compatibility-tests,
 #     tests/format-compatibility) is pure in-memory byte-level format-compliance
 #     assertions with hardcoded vectors — it reads no CQLITE_DATASETS_ROOT and no
