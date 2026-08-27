@@ -171,6 +171,58 @@ Three properties preserve the original decision's intent:
 A failed derivation, or an empty run list, is a **FAIL naming the derivation** — never "nothing to run",
 which would be a green lane that executed no integration target at all.
 
+**SECOND CORRECTION (#3384): the lane runs `--lib --bins` ONLY, and DECLARES the integration half as an
+un-run gap.** The amendment above kept the integration targets and subtracted one flaky victim. That was
+wrong about the shape of the problem, and continuing to measure is what showed it: the non-determinism is
+**not one racing assertion**, it is a property of the package's integration suite under intra-package
+parallelism.
+
+| How it was run | Result |
+|---|---|
+| `--test issue_3058_bypass_path_taken` alone, host load 74 | **3 / 3 PASS** |
+| whole-package lane, four consecutive runs | **PASS / FAIL / PASS / FAIL** (~50%) |
+| victims observed across those runs | **2 distinct** — `issue_3058_bypass_path_taken`, `issue_2370_gauge_readback_test` |
+| whole-box load as the cause | **RULED OUT** — 3/3 PASS standalone at load 74 |
+| `nice` as the cause | **RULED OUT** — 2/2 PASS |
+| `--test-threads=2` as the fix | **RULED OUT** — 2/2 PASS, i.e. it did not distinguish |
+| concurrent MAIN-lane compilation as the cause | **RULED OUT** — failures reproduced under `--only`, where MAIN runs nothing |
+
+**Why quarantine-per-victim was rejected (owner ruling).** Two distinct victims in four runs is not a
+converging series: there is no reason to believe the third run of a widened lane would not find a third. A
+list that grows once per red has no visible end, and it would turn the quarantine into the dumping ground
+its own design rule (D4 amendment, point 2) forbids — a curated excusal list is legitimate only when it is
+small, closed, and each entry is on a path out. Neither condition held. So the whole integration half is
+descoped in one deliberate act, tracked as **#3384** (the general suite-hygiene defect) with **#3383** as
+its first individual victim, rather than absorbed one silent line at a time.
+
+**What replaces the coverage, and why this is not a silent shrink.** #1699 exists because a lane that omits
+coverage looks identical to a lane that covers it. A narrowed lane that stayed quiet about the narrowing
+would therefore reintroduce this change's own defect one level down — which is why the descope's deliverable
+is not the narrowing but the **declaration**. On every run, pass or fail, the lane prints a coverage census
+to both the gate's stdout (`>>>`) and its component log, naming: the number of declared integration targets
+(counted from `cargo metadata` at run time, never hard-coded, so the stated gap cannot drift into a false
+claim), that this lane executes none of them, that CI's Flight tier covers them
+(`flight-ci.yml:229`, mandated on `cqlite-flight/**` and `cqlite-core/**`, `required` failing closed per
+#2910) with `flight-query-semantics-oracle` and `memory-budget` covering three of them locally, and the
+issue numbers that own the gap. A comment would not do: a comment is not read on a run.
+
+**Two consequences in code.** (a) The flake-quarantine plumbing (`FLIGHT_FLAKE_SKIPS` and its validator) is
+**retired, not kept inert**: it existed only to paper over #3384, and with no lane executing those targets it
+has no subject — an empty curated list plus a validator with no caller is a guard reporting OK having
+measured nothing, which is the vacuous shape this whole change is about. (b) The gate's existing zero-tests
+guard `check_no_unexpected_zero_tests` keys on `Running tests/<name>.rs` and **explicitly disclaims `--lib`**,
+so calling it here would be that same empty-subject guard. Its `--lib` analogue
+`check_unittest_targets_ran` is called instead: each selected unittest target must be OBSERVED and must have
+run a NON-ZERO count, and the pass prints the counts. Retained deliberately: `_package_test_targets` (still
+called — it feeds the census) and `check_declared_test_targets_observed` (currently uncalled, and now saying
+so at the top, because it is what the widened lane calls again once #3384 is fixed).
+
+**Cost of the descope, stated plainly.** Local pre-push execution of ~38 `cqlite-flight` integration targets
+is lost; three of them still run locally in other components; all of them still run on CI's Flight tier
+before merge, which `required` cannot go green without. The lane keeps 387 `--lib` + 2 `--bins` unit tests,
+observed deterministic across every run of this session, and re-verified PASS 3/3 through the real component
+after the change.
+
 **`flight-query-semantics-oracle` is left alone.** `flight-tests` re-running its two targets is a few
 seconds of overlap; re-deriving its per-lane fixture SKIP predicates (#3095, which exist specifically so one
 lane cannot silently skip behind an unrelated lane's absent fixtures) risks a correctness regression in a
