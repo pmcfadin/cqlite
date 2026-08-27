@@ -41,9 +41,10 @@ is **flat (×0.984)**, `L1-dcache-load-misses/row` is **flat (×0.979)**, and
 `cycles/row` rises only **×1.041**. A 4% cycles/row rise across the entire range
 is the quantitative form of "bare scan does not decay".
 
-**Two standing caveats.** S=1 and S=6 have measured peaks (S=6's bracketed by a
-dedicated extension, §4); **S=2–S=5's best-N values sit at the top of their tested
-ladders and are lower bounds**. And this rig does not control drift (§6) — the
+**Two standing caveats.** Only **S=6** is `bracketed` (by a dedicated extension,
+§4); **S=1** is a `plateau` (N=4 is 1.88% below N=2, *inside* that point's 3.41%
+spread — so its peak is flat, not demonstrated to turn over); and **S=2–S=5's
+best-N values sit at the top of their tested ladders and are lower bounds**. And this rig does not control drift (§6) — the
 target's precision is 0.74% within-session but −3.1%/−1.0% across ~1.5–2 h.
 
 ---
@@ -158,6 +159,27 @@ cheaper); **edge-truncated** if nothing above it was tested.
 **Two of the six are resolved, and they are the two the acceptance criteria
 consume.** **S=1** is a plateau at N=2 (N=4 is 1.88% lower, inside its 3.41%
 spread). **S=6** is **bracketed** at N=24 by a dedicated extension — see below.
+
+**Only S=6 is `bracketed`. S=1 is a `plateau`, not bracketed** — a distinction
+worth keeping, because "the peak is flat here" and "the curve was observed
+turning over" are different claims and only the second is a bracket.
+
+**Reproducing these verdicts, and a discrepancy to expect.** `derive.py` decides
+a verdict from the tree it is given. Run against the main grid **alone** it will
+correctly print S=6 as `edge-truncated`, because within `sweep/` the ladder tops
+out at N=24 and nothing above it was measured there — the bracketing evidence
+lives in the extension trees. The command that reproduces the table in this
+report is therefore:
+
+```bash
+python3 docs/reports/ws0-3299-artifacts/harness/derive.py \
+  --results   docs/reports/ws0-3299-artifacts/sweep \
+  --extension docs/reports/ws0-3299-artifacts/extB
+```
+
+`--extension` supplies the contemporaneous points that decide S=6's verdict and
+**does not pool its medians into the main table** — a different session, and
+pooling would average across a drift epoch (§6).
 
 **S=2 through S=5 remain edge-truncated**: their best N is the largest tried, so
 each is a **lower bound on that S's best**, not a measured peak. They shape the
@@ -489,10 +511,13 @@ Derivations, shown so they can be re-derived rather than trusted:
 route cross-checks the box figure: `do_get` is 0.439 of bare scan, the bar needs
 0.769, and `0.769 / 0.439 = 1.75`.
 
-**Peaks.** `do_get` S=1 best-N=2, **bracketed** (219,401 @ N=1 < 243,536 @ N=2 >
-223,835 @ N=4). `do_get` S=6 best-N=16 (spread 1.53%); N=24's 1,197,339 is only
-**−0.11%**, inside spread, so that top is a **plateau at N=16–24** and the same
-pre-registered rule takes the **lower N**. **`do_get` S=6/N=4 is excluded from
+**Peaks, by the same pre-registered rule.** `do_get` S=1 best-N=2 is
+**BRACKETED**: 219,401 @ N=1 < **243,536** @ N=2 > 223,835 @ N=4, and the fall to
+N=4 is **−8.09%** against that point's own **3.73%** spread — outside it, so the
+curve turned over. `do_get` S=6 best-N=16 (1,198,673, spread 1.53%) is a
+**PLATEAU**: N=24's 1,197,339 is **−0.11%**, *inside* its 0.67% spread, so the
+rule takes the **lower N**. Per-point spreads: N=1 5.72%, N=2 2.11%, N=4 3.73%
+(S=1); N=8 0.56%, N=16 1.53%, N=24 0.67% (S=6). **`do_get` S=6/N=4 is excluded from
 best-N selection**: its 24.61% spread over 5–7 of 8 requests is ramp warm-up, not
 a throughput reading — excluded for that stated reason, not dropped quietly.
 
@@ -603,7 +628,13 @@ bash docs/reports/ws0-3299-artifacts/harness/selftest.sh          # 41 guard cas
 bash docs/reports/ws0-3299-artifacts/host/census.sh               # the PMU census
 bash docs/reports/ws0-3299-artifacts/harness/sweep.sh --equivalence --results <dir>
 bash docs/reports/ws0-3299-artifacts/harness/sweep.sh --results <dir> --reps 3 --duration-s 60
-python3 docs/reports/ws0-3299-artifacts/harness/derive.py --results <dir>
+# Reproduce the published C(S) table from the COMMITTED evidence. `--extension`
+# supplies the contemporaneous points that decide S=6's bracketing verdict; it is
+# REQUIRED to reproduce the table as published, because derive.py on the main
+# grid alone will correctly report S=6 as `edge-truncated` (see §4).
+python3 docs/reports/ws0-3299-artifacts/harness/derive.py \
+  --results   docs/reports/ws0-3299-artifacts/sweep \
+  --extension docs/reports/ws0-3299-artifacts/extB
 ```
 
 ### Phase 2 (`do_get`) — the exact commands that were run

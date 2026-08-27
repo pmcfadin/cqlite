@@ -35,7 +35,7 @@ Aggregate rows/s (median), min-max spread as % of median in parentheses. Blank =
 - **S=3, N@peak=8 — EDGE-TRUNCATED**: N=8 is the largest N tested at S=3; nothing above it was measured, so this is a LOWER BOUND on S=3's best, not a measured peak.
 - **S=4, N@peak=16 — EDGE-TRUNCATED**: N=16 is the largest N tested at S=4; nothing above it was measured, so this is a LOWER BOUND on S=4's best, not a measured peak.
 - **S=5, N@peak=16 — EDGE-TRUNCATED**: N=16 is the largest N tested at S=5; nothing above it was measured, so this is a LOWER BOUND on S=5's best, not a measured peak.
-- **S=6, N@peak=24 — BRACKETED**: N=32 (2,652,863, spread 0.67%) is 1.95% BELOW N=24 (2,705,485, spread 0.64%), exceeding the larger of the two spreads, so the curve has turned over; N=16 is below N=24 as well, making this a clean INTERIOR MAXIMUM (rises 16->24, falls 24->32) — SOURCE: extension B (grid 6:24,32, 3 reps, incumbent re-measured INTERLEAVED with the candidate in every round, so the comparison is contemporaneous).
+- **S=6, N@peak=24 — BRACKETED**: N=32 is 1.95% below N=24, exceeding that point's own spread (0.67%) — the curve has turned over — SOURCE: extension tree `docs/reports/ws0-3299-artifacts/extB`.
 
 **An `edge-truncated` row is a LOWER BOUND, not a measured peak**, and any figure derived from it (including AC2's target) inherits that status. It is not smoothed, interpolated, or quoted as a result.
 
@@ -85,4 +85,13 @@ Row attribution source: **committed guard output**. `recomputed` means the per-w
 Counter-window agreement (max over reps): 4.13e-05 — perf's enabled interval versus the driver's [T0, T1]. The measured proof that counters and rows were taken over the SAME interval.
 
 Max attribution shortfall over all reps: 0.0909% of the window (bound 0.50%). Rows are counted only between progress records the workers actually emitted, so this biases every rows/s figure DOWNWARD and every per-row counter UPWARD, by at most that fraction.
+
+### Extension run `docs/reports/ws0-3299-artifacts/extB`
+
+Incumbent re-measured **interleaved** with each candidate in every round, so these comparisons are contemporaneous. **These medians are NOT pooled into the main table** — a different session, and pooling would average across a drift epoch.
+
+| S | N | reps | median rows/s | spread |
+|--:|--:|--:|--:|--:|
+| 6 | 24 | 3 | 2,705,485 | 0.64% |
+| 6 | 32 | 3 | 2,652,863 | 0.67% |
 

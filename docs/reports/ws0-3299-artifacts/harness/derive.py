@@ -404,6 +404,52 @@ def emit_resolution(by_point, reps):
           f"reduces but does not remove this — it is not a drift-free figure.\n")
 
 
+def extension_verdicts(path, reps):
+    """Bracketing verdicts derived FROM an extension tree's own contemporaneous points.
+
+    Why this exists rather than a hand-written override file: a bracketing
+    decision requires points measured close together (a candidate compared
+    against an incumbent measured hours earlier lets session drift answer it),
+    and the extension runs re-measured the incumbent INTERLEAVED with each
+    candidate for exactly that reason. Their medians must NOT be pooled into the
+    main grid's — different session — so the verdict travels without the data.
+
+    Deriving it from the tree keeps the conclusion attached to numbers a reader
+    can recompute, instead of a JSON file someone edits.
+    """
+    by_point = {}
+    for r in reps:
+        by_point.setdefault((r["s"], r["n"]), []).append(r)
+    n_values = sorted({n for _, n in by_point})
+    out = {}
+    for s in sorted({s for s, _ in by_point}):
+        pts = [(n, agg(by_point[(s, n)], "aggregate_rows_per_s"))
+               for n in n_values if (s, n) in by_point]
+        if len(pts) < 2:
+            continue  # a single point decides nothing
+        peaks = {s: max(pts, key=lambda t: t[1])}
+        verdict, why = bracket_verdict(by_point, s, peaks, n_values, 0.05)
+        out[s] = {"verdict": verdict, "why": why, "source": f"extension tree `{path}`"}
+    return out
+
+
+def emit_extension(path, reps):
+    by_point = {}
+    for r in reps:
+        by_point.setdefault((r["s"], r["n"]), []).append(r)
+    print(f"### Extension run `{path}`\n")
+    print("Incumbent re-measured **interleaved** with each candidate in every round, so these "
+          "comparisons are contemporaneous. **These medians are NOT pooled into the main table** "
+          "— a different session, and pooling would average across a drift epoch.\n")
+    print("| S | N | reps | median rows/s | spread |")
+    print("|--:|--:|--:|--:|--:|")
+    for (s, n) in sorted(by_point):
+        v = by_point[(s, n)]
+        print(f"| {s} | {n} | {len(v)} | {agg(v, 'aggregate_rows_per_s'):,.0f} | "
+              f"{spread_pct([x['aggregate_rows_per_s'] for x in v]):.2f}% |")
+    print()
+
+
 def emit_endpoints(by_point, peaks):
     """The S=1 and S=6 endpoints, and the L1d partial of the deferred AC3."""
     lo, hi = min(peaks), max(peaks)
@@ -524,20 +570,25 @@ def main():
     ap.add_argument("--results", help="results tree written by sweep.sh")
     ap.add_argument("--equivalence", metavar="RESULTS", help="render the equivalence control instead")
     ap.add_argument("--min-reps", type=int, default=3)
-    ap.add_argument("--verdict-override", metavar="JSON",
-                    help="per-S bracketing verdict from a CONTEMPORANEOUS extension run; "
-                         "each entry must name its source, which is printed with the verdict")
+    ap.add_argument("--extension", action="append", default=[], metavar="DIR",
+                    help="a CONTEMPORANEOUS extension results tree (repeatable). Its points are "
+                         "NOT pooled into the main table's medians — different session, and "
+                         "pooling would average across a drift epoch. It is used only to decide "
+                         "the bracketing verdict for the S values it covers, and is printed as "
+                         "its own table with its own numbers.")
     args = ap.parse_args()
     if args.equivalence:
         emit_equivalence(args.equivalence)
         return
     if not args.results:
         ap.error("--results is required")
+    extensions = [(d, collect(d)) for d in args.extension]
     ov = {}
-    if args.verdict_override:
-        with open(args.verdict_override) as fh:
-            ov = {int(k): v for k, v in json.load(fh).items()}
+    for d, reps in extensions:
+        ov.update(extension_verdicts(d, reps))
     emit_table(collect(args.results), args.min_reps, ov)
+    for d, reps in extensions:
+        emit_extension(d, reps)
 
 
 if __name__ == "__main__":
