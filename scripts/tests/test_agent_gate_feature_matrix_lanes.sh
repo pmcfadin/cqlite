@@ -245,21 +245,42 @@ EOF
 plant_marker_legacy_heuristics='ah6_planted_legacy_heuristics_break'
 plant_desc_legacy_heuristics='a NEW cqlite-core/tests/ah6_planted_legacy.rs carrying a #[cfg(feature = "legacy-heuristics")] #[test] with an inverted assertion (also proves the DERIVED target set picks up a sixth gated file with no gate edit)'
 
-# A NEW cqlite-flight integration target, named by nothing in the gate — so a green
-# here would mean the lane reaches past the three targets already covered
-# (query_semantics_flight_parity, issue_3095_flight_static_columns, memory-budget's
-# dhat target).
+# A failing UNIT test in a NEW cqlite-flight/src module — appended to src/lib.rs, so it
+# lands in the `--lib` binary the lane now executes.
+#
+# WHY THIS PLANT CHANGED (issue #3384). It used to be a NEW cqlite-flight/tests/*.rs
+# integration target, chosen to prove the lane reached past the three targets already
+# covered elsewhere (query_semantics_flight_parity, issue_3095_flight_static_columns,
+# memory-budget's dhat target). The lane no longer executes integration targets at all:
+# that half of the package is ~50% non-deterministic under intra-package parallelism, so
+# the lane narrowed to `--lib --bins` and DECLARES the integration half as an un-run gap
+# in a census it prints on every run. The old plant would therefore no longer fire, and
+# a plant that cannot fire turns this harness into the vacuous green it exists to
+# prevent — so the plant moved to the lane's ACTUAL subject. This expectation was
+# updated deliberately, not because the lane got weaker at its own job: it still proves
+# EXECUTION rather than compilation (a compile-only lane stays green on a failing
+# assertion), which is the incident class this lane owns.
+#
+# The gate names neither the module nor the test, so firing still proves reach beyond
+# anything hard-coded — and it additionally exercises check_unittest_targets_ran's
+# subject, the `--lib` unittest binary.
 plant_flight_tests() {
-  cat > "$TREE/cqlite-flight/tests/ah6_planted_flight.rs" <<'EOF'
+  cat > "$TREE/cqlite-flight/src/ah6_planted_flight.rs" <<'EOF'
 //! AH6 PLANTED BREAK (issue #1699 observation harness) — reverted by the harness.
 #[test]
 fn ah6_planted_flight_break() {
     assert_eq!(1 + 1, 3, "AH6 planted break for the flight-tests lane");
 }
 EOF
+  cat >> "$TREE/cqlite-flight/src/lib.rs" <<'EOF'
+
+// AH6 PLANTED BREAK (issue #1699 observation harness) — reverted by the harness.
+#[cfg(test)]
+mod ah6_planted_flight;
+EOF
 }
 plant_marker_flight_tests='ah6_planted_flight_break'
-plant_desc_flight_tests='a NEW cqlite-flight/tests/ah6_planted_flight.rs with a failing #[test] — a target the gate names nowhere, so firing proves reach beyond query_semantics_flight_parity / issue_3095_flight_static_columns / the dhat target'
+plant_desc_flight_tests='a NEW cqlite-flight/src/ah6_planted_flight.rs unit-test module wired into src/lib.rs with a failing #[test] — the lane runs --lib --bins after the #3384 narrowing, and the gate names neither the module nor the test, so firing proves EXECUTION (not compilation) of a subject nothing hard-codes'
 
 # One uniform revert for every plant: restore tracked files, delete untracked ones.
 # `clean -fd` without -x deliberately spares the gitignored build output.
