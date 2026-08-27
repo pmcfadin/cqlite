@@ -124,9 +124,33 @@ modules — the #1978 incident class a bare `cargo check` is blind to.
 
 ### Added full-gate wall time
 
-**TODO — measured separately by the lead.** Baseline full gate at `origin/main` versus
-the gate of record on `issue-1699-feature-matrix-gate-lanes`, run sequentially on one
-box (#2640 pins one gate at a time).
+**METHOD CHANGED, AND WHY — a baseline-vs-after subtraction is not measurable on this
+fleet, so the question is answered a better way.**
+
+The plan was a baseline full gate at `origin/main` versus the gate of record on this
+branch, run sequentially. It was attempted and **abandoned mid-run, deliberately**: this
+worker box hosts five lane worktrees, and while the baseline ran the 16-core box sustained
+a load average of **52–86** from co-scheduled gates in lanes 1697/1701/1705. A four-component
+delta cannot be recovered from two totals taken under load that varies by more than the
+delta itself, and the "after" run would sit under different load again. Publishing the
+subtraction would have been a number with no measurement behind it. (The same load is the
+prime suspect in #3380, an intermittent guard failure observed during this work.)
+
+**The load-independent answer, which is also the one that matters: is the SIDE lane the
+critical path?** All four lanes are dispatched to the concurrent SIDE lane by
+`_component_lane`, each in its own `CARGO_TARGET_DIR`, because each builds cqlite-core at a
+feature set diverging from MAIN's and would otherwise thrash MAIN's shared target dir
+(#2657). Concurrent work adds wall time **only insofar as it outlasts MAIN**. So the added
+wall time is read off a SINGLE run by comparing the SIDE lane's total against MAIN's:
+
+- if MAIN still finishes last, the four lanes cost **zero** added wall time — they hid
+  entirely inside MAIN's long pole;
+- if SIDE now finishes last, the added wall time is `SIDE_total - MAIN_total`, and only
+  that excess.
+
+This needs no baseline, is immune to whole-box load (both lanes are inside the same run,
+under the same load), and is computed from the gate of record's own per-component
+durations. The figure is reported in the PR from that SUMMARY block.
 
 **These are different numbers, and summing the per-component durations does not yield
 the second.** The lanes run in the concurrent **SIDE** lane, each in its own
