@@ -433,6 +433,47 @@ fn missing_path_target_fails_closed() {
     );
 }
 
+/// A symlink under `src/` is a hole in the census. `DirEntry::file_type().is_dir()` is
+/// FALSE for a symlink that points at a directory, so the whole subtree behind it would
+/// be walked past in silence and every orphan inside it would pass undetected — a silent
+/// census omission is a vacuous pass. Following it instead would need canonical-path
+/// boundary and cycle checks to buy nothing (there are no symlinks under
+/// `cqlite-core/src`), so the walker refuses.
+#[test]
+#[cfg(unix)]
+fn symlink_under_src_fails_closed() {
+    use std::os::unix::fs::symlink;
+
+    // (a) a symlinked DIRECTORY: `is_dir()` is false, so the subtree is skipped.
+    let tree = ScratchCrate::new("symlink-dir");
+    tree.write("src/lib.rs", "pub mod wired;\n");
+    tree.write("src/wired.rs", "pub fn f() {}\n");
+    tree.write("outside/hidden_orphan.rs", "pub fn never_compiled() {}\n");
+    symlink(tree.dir.join("outside"), tree.dir.join("src/linked_dir"))
+        .unwrap_or_else(|e| panic!("cannot create directory symlink: {e}"));
+    let cause = tree.expect_failure();
+    assert!(
+        cause.contains("symlink") && cause.contains("linked_dir"),
+        "a symlinked DIRECTORY under `src/` must fail closed naming the path; got: {cause}"
+    );
+
+    // (b) a symlinked `.rs` FILE, which could name a file outside the crate entirely.
+    let tree = ScratchCrate::new("symlink-file");
+    tree.write("src/lib.rs", "pub mod wired;\n");
+    tree.write("src/wired.rs", "pub fn f() {}\n");
+    tree.write("outside/target.rs", "pub fn f() {}\n");
+    symlink(
+        tree.dir.join("outside/target.rs"),
+        tree.dir.join("src/linked.rs"),
+    )
+    .unwrap_or_else(|e| panic!("cannot create file symlink: {e}"));
+    let cause = tree.expect_failure();
+    assert!(
+        cause.contains("symlink") && cause.contains("linked.rs"),
+        "a symlinked `.rs` FILE under `src/` must fail closed naming the path; got: {cause}"
+    );
+}
+
 /// A `mod` token inside a macro's token tree is neither control nor data the walker can
 /// read: rustc decides what the macro expands to, and this walker does not expand macros.
 /// Counting it as a real declaration makes an unreachable file look reachable — the exact

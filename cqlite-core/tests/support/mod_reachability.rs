@@ -191,6 +191,24 @@ fn enumerate_rs_files(
         let file_type = entry
             .file_type()
             .map_err(|e| format!("cannot stat `{}`: {e} (FAIL-CLOSED)", path.display()))?;
+        // `is_dir()` is FALSE for a symlink pointing at a directory, so the naive form
+        // walks straight past the subtree and every orphan inside it passes undetected.
+        // A silent census omission is the vacuous pass this walker exists to prevent, and
+        // a symlinked `.rs` file could name a target outside the crate entirely. Following
+        // one would need canonical-path boundary and cycle checks to buy nothing (there
+        // are no symlinks under `cqlite-core/src`), so refuse instead of guessing.
+        if file_type.is_symlink() {
+            return Err(format!(
+                "`{}` is a symlink, which this walker does not model: a symlinked directory \
+                 is not reported as a directory, so its whole subtree would be silently \
+                 omitted from the census, and a symlinked `.rs` file may point outside the \
+                 crate (FAIL-CLOSED — see #1714).\n\
+                 Remedy: replace the symlink with a real file or directory, or teach the \
+                 walker to follow it with canonical-path boundary and cycle checks \
+                 (tests/support/mod_reachability.rs).",
+                path.display()
+            ));
+        }
         if file_type.is_dir() {
             enumerate_rs_files(crate_dir, &path, out)?;
         } else if path.extension().map(|e| e == "rs").unwrap_or(false) {
