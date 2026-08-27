@@ -173,14 +173,20 @@ def emit_table(reps, min_reps):
     for s in s_values:
         n_peak, best = peaks[s]
         v = by_point[(s, n_peak)]
+        # `own N=1` is only shown where it was MEASURED. An absent point prints
+        # "n/m" rather than being back-filled from a neighbouring S — the whole
+        # reason this column exists is that each arm's own N=1 MOVES with S, so
+        # substituting another S's value would assert exactly what it is here to
+        # test.
         own_n1 = agg(by_point[(s, 1)], "aggregate_rows_per_s") if (s, 1) in by_point else None
         sp_b = f"{best / ref_peak:.3f}" if ref_peak else "n/a"
         me_b = f"**{(best / ref_peak) / s:.3f}**" if ref_peak else "n/a"
         sp_a = f"{best / ref_n1:.3f}" if ref_n1 else "n/a"
         me_a = f"{(best / ref_n1) / s:.3f}" if ref_n1 else "n/a"
+        own_n1_cell = f"{own_n1:,.0f}" if own_n1 is not None else "n/m"
         print(
             f"| {s} | {best:,.0f} | {n_peak} | {agg(v, 'per_scan_p50_rows_per_s'):,.0f} | "
-            f"{own_n1:,.0f} | {sp_b} | {me_b} | {sp_a} | {me_a} | "
+            f"{own_n1_cell} | {sp_b} | {me_b} | {sp_a} | {me_a} | "
             f"{agg(v, 'cycles_per_row'):,.1f} | {agg(v, 'instructions_per_row'):,.1f} | "
             f"{agg(v, 'ipc'):.3f} | {agg(v, 'l1d_loads_per_row'):,.1f} | "
             f"{agg(v, 'l1d_load_misses_per_row'):,.2f} |"

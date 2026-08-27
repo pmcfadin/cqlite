@@ -1,14 +1,19 @@
 {
   "issue": 3299,
   "s": 1,
+  "n": 2,
   "rep": 1,
   "round": 1,
-  "t0_ns": 2608419655958,
-  "t1_ns": 2623420975919,
-  "window_ns": 15001319961,
-  "requested_duration_s": 15.0,
+  "t0_ns": 3844806655885,
+  "t1_ns": 3864807885597,
+  "window_ns": 20001229712,
+  "requested_duration_s": 20.0,
   "perf_cpus": "0,8",
   "worker_cpus": [
+    [
+      0,
+      8
+    ],
     [
       0,
       8
@@ -16,16 +21,17 @@
   ],
   "events": "instructions,cycles,L1-dcache-loads,L1-dcache-load-misses,task-clock",
   "perf_csv": "perf.csv",
-  "progress_rows": 16384,
+  "progress_ms": 25,
   "prewarm_passes": 1,
   "steady_samples_at_go": [
-    3
+    4,
+    4
   ],
   "clock_source_check": {
-    "driver_before_ns": 2597327496141,
-    "worker_ns": 2597328825611,
-    "driver_after_ns": 2597329435127,
-    "bracket_ns": 1938986
+    "driver_before_ns": 3827868199869,
+    "worker_ns": 3827869443598,
+    "driver_after_ns": 3827869912973,
+    "bracket_ns": 1713104
   },
   "protocol": "warm; aligned window strictly inside S-concurrent steady state"
 }

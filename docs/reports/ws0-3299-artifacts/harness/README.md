@@ -1,9 +1,16 @@
 # #3299 S-sweep harness — the bare-scan scaling curve C(S), S = 1..6
 
-Measures S independent bare scans (`cqlite_core::Database::execute_streaming`
-over the #3096 measurement corpus), each pinned to one **complete physical
-core**, and reports aggregate rows/s, per-scan p50 rows/s, marginal efficiency
-vs S=1, cycles/row and instructions/row over an **aligned window**.
+Measures a **two-dimensional grid** of bare scans
+(`cqlite_core::Database::execute_streaming` over the #3096 measurement corpus)
+and reports, per S, the best-N aggregate rows/s, per-scan p50 rows/s, marginal
+efficiency against **both** denominators, cycles/row and instructions/row — all
+over an **aligned window**.
+
+- **S** = pinned **physical cores** (1..6). It sets the `perf stat -C` set — the
+  union of those cores' complete SMT sibling groups — and labels the point.
+- **N** = **concurrent bare-scan streams** on those S cores. All N workers are
+  pinned to that same union and the scheduler places them, which is the shape
+  #3217/#3224 measured (server pinned to S cores, N streams driven into it).
 
 ```bash
 bash selftest.sh                                        # hermetic; runs anywhere
@@ -11,10 +18,48 @@ bash sweep.sh --equivalence --results /data/ws0-3299/eq # worker vs ws0-scan-ben
 bash sweep.sh --results /data/ws0-3299/sweep --reps 3 --duration-s 60
 ```
 
+## The N ladder, and why it is shaped this way
+
+Default grid (`--grid` overrides it):
+
+| S | N values | N/S at the top |
+|--:|---|--:|
+| 1 | 1, 2, 4, 8 | 8 |
+| 2 | 1, 2, 4, 8 | 4 |
+| 3 | 1, 4, 8 | 2.7 |
+| 4 | 1, 4, 8, 16 | 4 |
+| 5 | 1, 4, 8, 16 | 3.2 |
+| 6 | 1, 2, 4, 8, 16, 24 | 4 |
+
+25 points. Four constraints fix the shape:
+
+1. **N is not S, and the peak is not at N=S.** #3217 measured the peak at N=2 for
+   S=1 but N=8 for S=2 and N=16 for S=4 and S=6. AC1 asks for the *best-N*
+   aggregate, so collapsing to N=S would report less than the core budget
+   achieves. This harness's own first 2-D smoke reproduced the S=1 shape
+   immediately: N=1 → 360,807 rows/s, **N=2 → 492,360**, N=8 → 463,842.
+2. **N=1 appears at EVERY S.** It is denominator A's baseline, and it is what
+   makes the per-arm N=1 *decline* visible — the reason a self-normalised
+   speedup is not cross-comparable (#3217 measured 216,229 → 163,510 as S went
+   1→6).
+3. **Powers of two up to ~4S.** The pinned set holds 2S hardware threads, and
+   #3217's peak sat at or above that thread count at every S, so the ladder has
+   to reach past 2S to be sure the peak is bracketed rather than clipped.
+4. **Endpoints dense, middle thinned.** AC2 consumes S=6's best-N, and the
+   #3224 endpoint comparison consumes **S=1/N=2** and **S=6/N=16** specifically,
+   so both of those N values are in the ladder by name. S=3 and S=5 are thinned
+   because they inform the curve's shape but no acceptance criterion reads them.
+
+**Measured budget**: the two most expensive points (S=1/N=8 and S=6/N=24, the
+highest N/S ratios) took **238 s for two reps at 60 s windows**, i.e. ~119 s per
+rep including prewarm, barrier, steady-state ramp and teardown. Cheaper points
+scale down with N/S. The full 25-point × 3-rep grid at 60 s windows is
+**≈2.0–2.5 h**.
+
 | file | role |
 |---|---|
-| `scan-worker/` | the arm: ONE pinned bare scan, emitting timestamped progress |
-| `rep.py` | ONE rep at ONE S: barrier, steady state, the perf window |
+| `scan-worker/` | the arm: ONE bare-scan stream, emitting timestamped progress |
+| `rep.py` | ONE rep at ONE (S, N) point: barrier, steady state, the perf window |
 | `sweep.sh` | topology, guards, corpus identity, containment, the rep loop |
 | `guards.py` | every fail-closed validator, in ONE implementation |
 | `derive.py` | medians + spread → the C(S) table |
@@ -47,8 +92,8 @@ compared as if they were one (#3224's reproducibility gap 2).
    barrier. After the barrier each scans **continuously**, in a loop, so there is
    a steady state in which all S are producing rows at once.
 2. The driver waits until **every** worker has emitted ≥3 post-barrier progress
-   records — an affirmative observation that all S are concurrently producing,
-   not an inference from having launched S processes.
+   records — an affirmative observation that all N are concurrently producing,
+   not an inference from having launched N processes.
 3. The window is then opened and closed through **perf's control FIFO**
    (`perf stat -D -1 --control fifo:ctl,ack`): the driver enables counting, waits
    for perf's ACK, and only then reads `T0`; at `T0 + D` it disables, waits for
@@ -64,13 +109,25 @@ compared as if they were one (#3224's reproducibility gap 2).
 `selftest.sh`:
 
 - `WINDOW_NOT_SPANNED` — every worker must have emitted a record **at or before
-  `T0`** and one **at or after `T1`**. That is the mechanical proof that all S
+  `T0`** and one **at or after `T1`**. That is the mechanical proof that all N
   scans were producing rows across the *whole* window; a worker that started late
-  or stopped early makes the point not-S and the rep is discarded.
+  or stopped early makes the point not-N and the rep is discarded.
 - `WINDOW_SHORTFALL` — `[a_i, b_i] ⊆ [T0, T1]`, so each worker's contribution
   misses at most one sample interval at each end. That residual,
   `((a_i − T0) + (T1 − b_i)) / (T1 − T0)`, is computed per worker, **published**,
   and capped at **0.5%**.
+
+**Sampling is by TIME, not by rows, and that was forced by a measurement.** The
+first version emitted a record every 16,384 rows. Per-worker throughput falls
+roughly as N/S, so that interval stretched from ~45 ms at S=1/N=1 to ~360 ms at
+S=1/N=8 — the attribution degraded *along the axis being swept*, leaving the
+widest and most interesting points the worst attributed. The guard caught it
+(`WINDOW_SHORTFALL`, 0.5393% against the 0.5% bound, at S=1/N=2). The fix was the
+worker, not the bound: `--progress-ms` (default 25) with the clock read once per
+`--progress-check-rows` (default 256). A time-based interval is invariant to
+throughput, so every point in the grid is attributed at the same granularity —
+which is also what makes the points comparable to each other. Measured shortfall
+after the change: **0.070%** at S=1/N=8 and **0.086%** at S=6/N=24.
 
 **The direction of the residual bias is stated because it is not zero.** Rows are
 under-counted (up to the shortfall) while the denominator is the full window, so
@@ -106,6 +163,17 @@ That claim is not left as a comment. `sweep.sh --equivalence` runs
 in the same session, over the same bytes**, and `derive.py` prints both rates and
 their delta. A large divergence means they are not the same code path and the S=1
 point is not comparable to the existing rig's.
+
+**The crate is deliberately OUTSIDE the repo workspace.** Its `Cargo.toml`
+carries its own `[workspace]` table, so neither `scripts/agent-gate.sh` nor a
+root `cargo build` ever compiles it — the same arrangement `fuzz/` uses. Its path
+dependencies are **relative** (`../../../../../cqlite-core`), unlike the #3026
+precedent's hardcoded `/home/ubuntu/workspace/wt-3026/...`, which is why that
+harness cannot be built in any other checkout. Its `Cargo.lock` is deliberately
+untracked and gitignored for the same reason `fuzz/Cargo.lock` is, plus one
+more: roborev's compiled-in deny-list drops `**/Cargo.lock` from every review
+diff (#3278), so committing it would create a file that `prompt-content:`
+demands and the reviewer can never receive.
 
 The progress emitter's own cost is inside the counted window and is disclosed
 rather than netted out: one buffered `write` + `flush` per sample, ~18 per second
