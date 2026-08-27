@@ -22,6 +22,17 @@
 #     NOT recorded, and therefore NOT detected: a changed parameter type, a changed
 #     return type, changed generics or bounds, a changed field TYPE, or a changed
 #     visibility that does not change the item's presence.
+#   * RE-EXPORTS are first-class: `pub use` exposures are recorded as `reexport`
+#     lines naming BOTH the exposed path and the canonical target, and glob
+#     re-exports as `reexport-glob` lines PLUS the expanded item paths. Deleting a
+#     re-export is a breaking change and shows up here.
+#   * Only PUBLICLY REACHABLE paths are recorded. rustdoc emits a directory for every
+#     source `pub mod`, including ones no public index reaches; those are not public
+#     API and are absent here, so renaming a private-but-re-exported-through module
+#     is not a diff.
+#   * ASSOCIATED ITEMS are recorded ONCE per item, at its canonical public path when
+#     it has one (a glob re-export can make the same type public at several paths;
+#     the extra paths appear as item lines, not as duplicated method lists).
 #   * TRAIT / SYNTHETIC / BLANKET IMPL MEMBERS ARE DELIBERATELY EXCLUDED, as are
 #     `deref-methods-*` sections. Those anchors come from impls of foreign traits and
 #     from auto/blanket impls in dependencies — they are not this crate's declared
@@ -53,6 +64,7 @@ associatedconstant cqlite_core::storage::write_engine::WriteEngineConfig::DEFAUL
 associatedconstant cqlite_core::storage::write_engine::merge_policy::STCSPolicy::DEFAULT_MIN_SSTABLE_SIZE
 associatedconstant cqlite_core::storage::write_engine::wal::WriteAheadLog::DEFAULT_BUFFER_SIZE
 associatedconstant cqlite_core::storage::write_engine::wal::WriteAheadLog::WAL_FILENAME
+constant cqlite_core::RETENTION_SLACK
 constant cqlite_core::config::DEFAULT_MAX_RESULT_BYTES
 constant cqlite_core::observability::catalog::ADMISSION_METRICS
 constant cqlite_core::observability::catalog::ALL_METRICS
@@ -176,10 +188,14 @@ constant cqlite_core::observability::config::DEFAULT_TIMEOUT
 constant cqlite_core::observability::operator_docs::COMMITTED_DOC_REL
 constant cqlite_core::observability::operator_docs::WEBSITE_DOC_REL
 constant cqlite_core::observability::partition_access::DEFAULT_MAX_PREFIX_BITS
-constant cqlite_core::observability::partition_access::config::DEFAULT_MAX_PREFIX_BITS
 constant cqlite_core::observability::partition_access::decision::ASSUMED_DECODE_MULTIPLIER
 constant cqlite_core::observability::partition_access::decision::MIN_ACCESSES
 constant cqlite_core::observability::partition_access::decision::RECOMMENDED_GO_THRESHOLD
+constant cqlite_core::parser::MAX_VINT_LENGTH
+constant cqlite_core::parser::MAX_VINT_SIZE
+constant cqlite_core::parser::SSTABLE_MAGIC
+constant cqlite_core::parser::SUPPORTED_MAGIC_NUMBERS
+constant cqlite_core::parser::SUPPORTED_VERSION
 constant cqlite_core::parser::header::SSTABLE_MAGIC
 constant cqlite_core::parser::header::SUPPORTED_MAGIC_NUMBERS
 constant cqlite_core::parser::header::SUPPORTED_VERSION
@@ -199,8 +215,6 @@ constant cqlite_core::storage::sstable::bti::BTI_PAGE_SIZE
 constant cqlite_core::storage::sstable::bti::MAX_TRIE_DEPTH
 constant cqlite_core::storage::sstable::bti::parser::FLAG_HAS_HASH_BYTE
 constant cqlite_core::storage::sstable::bti::parser::FLAG_OPEN_MARKER
-constant cqlite_core::storage::sstable::bti::parser::partitions::FLAG_HAS_HASH_BYTE
-constant cqlite_core::storage::sstable::bti::parser::rows::FLAG_OPEN_MARKER
 constant cqlite_core::storage::sstable::compression_info::SUPPORTED_COMPRESSOR_NAMES
 constant cqlite_core::storage::sstable::reader::presence_verification::ENV_VAR
 constant cqlite_core::storage::sstable::writer::crc_writer::CRC_CHUNK_SIZE
@@ -208,6 +222,11 @@ constant cqlite_core::storage::sstable::writer::index_writer::COLUMN_INDEX_SIZE_
 constant cqlite_core::storage::sstable::writer::index_writer::INDEX_INFO_WIDTH_BASE
 constant cqlite_core::storage::sstable::writer::summary_writer::BASE_SAMPLING_LEVEL
 constant cqlite_core::types::RETENTION_SLACK
+enum cqlite_core::DataType
+enum cqlite_core::ScanRow
+enum cqlite_core::TombstoneType
+enum cqlite_core::Value
+enum cqlite_core::comparator::ComparatorType
 enum cqlite_core::config::CachePolicy
 enum cqlite_core::config::CompressionAlgorithm
 enum cqlite_core::config::DiskAccessMode
@@ -244,7 +263,6 @@ enum cqlite_core::error::ErrorCategory
 enum cqlite_core::observability::AttrValue
 enum cqlite_core::observability::ErrorCategory
 enum cqlite_core::observability::config::OtelProtocol
-enum cqlite_core::observability::error_schema::ErrorCategory
 enum cqlite_core::observability::operator_docs::DocGenError
 enum cqlite_core::observability::operator_docs::MetricKind
 enum cqlite_core::observability::partition_access::AccessWeight
@@ -253,10 +271,12 @@ enum cqlite_core::observability::partition_access::SizeSource
 enum cqlite_core::observability::partition_access::decision::Refusal
 enum cqlite_core::observability::partition_access::decision::Verdict
 enum cqlite_core::observability::partition_access::decision::WindowSource
-enum cqlite_core::observability::partition_access::types::AccessWeight
-enum cqlite_core::observability::partition_access::types::RepeatBucket
-enum cqlite_core::observability::partition_access::types::SizeSource
 enum cqlite_core::observability::stream_subphase::StreamSubPhase
+enum cqlite_core::parser::CassandraVersion
+enum cqlite_core::parser::CqlTypeId
+enum cqlite_core::parser::DataFormat
+enum cqlite_core::parser::TypeCategory
+enum cqlite_core::parser::VIntError
 enum cqlite_core::parser::binary::CQLiteParseError
 enum cqlite_core::parser::complex_types::TypeCategory
 enum cqlite_core::parser::header::CassandraVersion
@@ -286,7 +306,6 @@ enum cqlite_core::query::select_ast::SortDirection
 enum cqlite_core::query::select_ast::WhereExpression
 enum cqlite_core::query::select_ast::WriteTimeTtlFunction
 enum cqlite_core::query::select_executor::LeafOutcome
-enum cqlite_core::query::select_executor::predicate::LeafOutcome
 enum cqlite_core::query::select_optimizer::ExecutionStep
 enum cqlite_core::query::select_optimizer::SSTableFilterOp
 enum cqlite_core::query::select_parser::Token
@@ -301,12 +320,6 @@ enum cqlite_core::schema::discovery::IndexType
 enum cqlite_core::schema::discovery::ValidationErrorType
 enum cqlite_core::schema::discovery::ValidationStatus
 enum cqlite_core::schema::discovery::ValidationWarningType
-enum cqlite_core::schema::discovery::model::CollectionKind
-enum cqlite_core::schema::discovery::model::DiscoveryMethod
-enum cqlite_core::schema::discovery::model::IndexType
-enum cqlite_core::schema::discovery::model::ValidationErrorType
-enum cqlite_core::schema::discovery::model::ValidationStatus
-enum cqlite_core::schema::discovery::model::ValidationWarningType
 enum cqlite_core::schema::registry::ErrorSeverity
 enum cqlite_core::schema::registry::SchemaChangeType
 enum cqlite_core::schema::registry::SchemaSource
@@ -320,8 +333,6 @@ enum cqlite_core::storage::sstable::bti::node::BtiNodeData
 enum cqlite_core::storage::sstable::bti::node::BtiNodeType
 enum cqlite_core::storage::sstable::bti::parser::BtiPartitionLocation
 enum cqlite_core::storage::sstable::bti::parser::RowsTrieRootRejectReason
-enum cqlite_core::storage::sstable::bti::parser::partitions::BtiPartitionLocation
-enum cqlite_core::storage::sstable::bti::parser::rows_root::RowsTrieRootRejectReason
 enum cqlite_core::storage::sstable::compression::CompressionAlgorithm
 enum cqlite_core::storage::sstable::compression::CompressionPriority
 enum cqlite_core::storage::sstable::directory::types::SSTableComponent
@@ -335,16 +346,12 @@ enum cqlite_core::storage::sstable::reader::QueryRowBatch
 enum cqlite_core::storage::sstable::reader::SinglePartitionCompaction
 enum cqlite_core::storage::sstable::reader::compaction_row::CompactionBound
 enum cqlite_core::storage::sstable::reader::compaction_row::CompactionRowData
-enum cqlite_core::storage::sstable::reader::data_access::point_compaction::SinglePartitionCompaction
-enum cqlite_core::storage::sstable::reader::data_access::summary_scan::query_rows::QueryRowBatch
-enum cqlite_core::storage::sstable::reader::types::IntegrityStatus
 enum cqlite_core::storage::sstable::row_cell_state_machine::State
 enum cqlite_core::storage::sstable::validation::TestStatus
 enum cqlite_core::storage::sstable::verify::VerifyErrorClass
 enum cqlite_core::storage::sstable::verify::VerifyMode
 enum cqlite_core::storage::sstable::version_gate::SsTableFormat
 enum cqlite_core::storage::sstable::version_gate::VersionGates
-enum cqlite_core::storage::sstable::version_gate::descriptor::SsTableFormat
 enum cqlite_core::storage::sstable::writer::SSTableFormat
 enum cqlite_core::storage::sstable::writer::compression_info_writer::CompressionAlgorithm
 enum cqlite_core::storage::sstable::writer::partitions_writer::PartitionPayload
@@ -354,10 +361,6 @@ enum cqlite_core::storage::write_engine::merge::MergeStep
 enum cqlite_core::storage::write_engine::merge::PointAccessRecording
 enum cqlite_core::storage::write_engine::merge::RowData
 enum cqlite_core::storage::write_engine::merge::StreamingStep
-enum cqlite_core::storage::write_engine::merge::model::MergeStep
-enum cqlite_core::storage::write_engine::merge::model::RowData
-enum cqlite_core::storage::write_engine::merge::point_read::PointAccessRecording
-enum cqlite_core::storage::write_engine::merge::streaming::StreamingStep
 enum cqlite_core::storage::write_engine::mutation::CellOperation
 enum cqlite_core::storage::write_engine::mutation::ClusteringBound
 enum cqlite_core::storage::write_engine::wal::TruncateError
@@ -398,10 +401,6 @@ fn cqlite_core::observability::operator_docs::operator_metric_docs
 fn cqlite_core::observability::operator_docs::render_markdown
 fn cqlite_core::observability::operator_docs::render_website_markdown
 fn cqlite_core::observability::partition_access::close_window
-fn cqlite_core::observability::partition_access::config::enabled
-fn cqlite_core::observability::partition_access::config::parse_probe_flag
-fn cqlite_core::observability::partition_access::config::set_probe_enabled
-fn cqlite_core::observability::partition_access::config::window_config_from_env
 fn cqlite_core::observability::partition_access::decision::evaluate
 fn cqlite_core::observability::partition_access::decision::evaluate_with_threshold
 fn cqlite_core::observability::partition_access::enabled
@@ -428,7 +427,11 @@ fn cqlite_core::observability::stream_subphase::sink_active
 fn cqlite_core::observability::stream_subphase::time_recv
 fn cqlite_core::observability::stream_subphase::timed
 fn cqlite_core::parser::binary::parse_binary_data
-fn cqlite_core::parser::enhanced_statistics_parser::header::parse_nb_format_header
+fn cqlite_core::parser::decode_signed
+fn cqlite_core::parser::decode_unsigned
+fn cqlite_core::parser::encode_vint
+fn cqlite_core::parser::encode_vint_zigzag
+fn cqlite_core::parser::encode_vuint
 fn cqlite_core::parser::enhanced_statistics_parser::parse_enhanced_statistics_file
 fn cqlite_core::parser::enhanced_statistics_parser::parse_nb_format_header
 fn cqlite_core::parser::enhanced_statistics_parser::parse_nb_format_statistics_data
@@ -441,25 +444,75 @@ fn cqlite_core::parser::header::parse_sstable_header
 fn cqlite_core::parser::header::parse_sstable_stats
 fn cqlite_core::parser::header::parse_vstring
 fn cqlite_core::parser::header::serialize_sstable_header
+fn cqlite_core::parser::parse_bigint
+fn cqlite_core::parser::parse_blob
+fn cqlite_core::parser::parse_boolean
+fn cqlite_core::parser::parse_column_info
+fn cqlite_core::parser::parse_compression_info
+fn cqlite_core::parser::parse_counter
 fn cqlite_core::parser::parse_cql_schema
+fn cqlite_core::parser::parse_cql_type_id
+fn cqlite_core::parser::parse_cql_value
+fn cqlite_core::parser::parse_cql_value_raw
+fn cqlite_core::parser::parse_date
+fn cqlite_core::parser::parse_decimal
+fn cqlite_core::parser::parse_double
+fn cqlite_core::parser::parse_duration
+fn cqlite_core::parser::parse_enhanced_statistics_file
+fn cqlite_core::parser::parse_float
+fn cqlite_core::parser::parse_frozen_udt
+fn cqlite_core::parser::parse_frozen_udt_with_registry
+fn cqlite_core::parser::parse_inet
+fn cqlite_core::parser::parse_int
+fn cqlite_core::parser::parse_list
+fn cqlite_core::parser::parse_list_enhanced
+fn cqlite_core::parser::parse_list_v5_format
+fn cqlite_core::parser::parse_list_with_schema
+fn cqlite_core::parser::parse_magic_and_version
+fn cqlite_core::parser::parse_magic_and_version_legacy
+fn cqlite_core::parser::parse_map
+fn cqlite_core::parser::parse_map_enhanced
+fn cqlite_core::parser::parse_map_v5_format
+fn cqlite_core::parser::parse_map_with_schema
+fn cqlite_core::parser::parse_nb_format_header
+fn cqlite_core::parser::parse_nb_format_statistics_data
+fn cqlite_core::parser::parse_set
+fn cqlite_core::parser::parse_set_enhanced
+fn cqlite_core::parser::parse_set_v5_format
+fn cqlite_core::parser::parse_smallint
+fn cqlite_core::parser::parse_sstable_header
+fn cqlite_core::parser::parse_sstable_stats
+fn cqlite_core::parser::parse_statistics_header
+fn cqlite_core::parser::parse_statistics_with_fallback
+fn cqlite_core::parser::parse_text
+fn cqlite_core::parser::parse_time
+fn cqlite_core::parser::parse_timestamp
+fn cqlite_core::parser::parse_timestamp_statistics
+fn cqlite_core::parser::parse_tinyint
+fn cqlite_core::parser::parse_tombstone
+fn cqlite_core::parser::parse_tuple
+fn cqlite_core::parser::parse_udt
+fn cqlite_core::parser::parse_udt_enhanced
+fn cqlite_core::parser::parse_udt_enhanced_with_registry
+fn cqlite_core::parser::parse_udt_with_registry
+fn cqlite_core::parser::parse_udt_with_schema
+fn cqlite_core::parser::parse_udt_with_schema_and_registry
+fn cqlite_core::parser::parse_uuid
+fn cqlite_core::parser::parse_varint
+fn cqlite_core::parser::parse_vint
+fn cqlite_core::parser::parse_vint_length
+fn cqlite_core::parser::parse_vint_length_signed
+fn cqlite_core::parser::parse_vstring
+fn cqlite_core::parser::parse_vuint
 fn cqlite_core::parser::repair_metadata::parse_repair_metadata
 fn cqlite_core::parser::repair_metadata::parse_stats_extras
 fn cqlite_core::parser::repair_metadata::read_table_counts
+fn cqlite_core::parser::serialize_cql_value
+fn cqlite_core::parser::serialize_sstable_header
 fn cqlite_core::parser::statistics::parse_statistics_header
 fn cqlite_core::parser::statistics::parse_timestamp_statistics
 fn cqlite_core::parser::toc_walk_metrics::reset_toc_walk_count
 fn cqlite_core::parser::toc_walk_metrics::toc_walk_count
-fn cqlite_core::parser::types::collections::parse_list
-fn cqlite_core::parser::types::collections::parse_list_enhanced
-fn cqlite_core::parser::types::collections::parse_list_v5_format
-fn cqlite_core::parser::types::collections::parse_list_with_schema
-fn cqlite_core::parser::types::collections::parse_map
-fn cqlite_core::parser::types::collections::parse_map_enhanced
-fn cqlite_core::parser::types::collections::parse_map_v5_format
-fn cqlite_core::parser::types::collections::parse_map_with_schema
-fn cqlite_core::parser::types::collections::parse_set
-fn cqlite_core::parser::types::collections::parse_set_enhanced
-fn cqlite_core::parser::types::collections::parse_set_v5_format
 fn cqlite_core::parser::types::parse_bigint
 fn cqlite_core::parser::types::parse_blob
 fn cqlite_core::parser::types::parse_boolean
@@ -502,35 +555,7 @@ fn cqlite_core::parser::types::parse_udt_with_schema
 fn cqlite_core::parser::types::parse_udt_with_schema_and_registry
 fn cqlite_core::parser::types::parse_uuid
 fn cqlite_core::parser::types::parse_varint
-fn cqlite_core::parser::types::primitives::parse_bigint
-fn cqlite_core::parser::types::primitives::parse_blob
-fn cqlite_core::parser::types::primitives::parse_boolean
-fn cqlite_core::parser::types::primitives::parse_counter
-fn cqlite_core::parser::types::primitives::parse_date
-fn cqlite_core::parser::types::primitives::parse_decimal
-fn cqlite_core::parser::types::primitives::parse_double
-fn cqlite_core::parser::types::primitives::parse_duration
-fn cqlite_core::parser::types::primitives::parse_float
-fn cqlite_core::parser::types::primitives::parse_inet
-fn cqlite_core::parser::types::primitives::parse_int
-fn cqlite_core::parser::types::primitives::parse_smallint
-fn cqlite_core::parser::types::primitives::parse_text
-fn cqlite_core::parser::types::primitives::parse_time
-fn cqlite_core::parser::types::primitives::parse_timestamp
-fn cqlite_core::parser::types::primitives::parse_tinyint
-fn cqlite_core::parser::types::primitives::parse_uuid
-fn cqlite_core::parser::types::primitives::parse_varint
 fn cqlite_core::parser::types::serialize_cql_value
-fn cqlite_core::parser::types::tombstones::parse_tombstone
-fn cqlite_core::parser::types::udt::parse_frozen_udt
-fn cqlite_core::parser::types::udt::parse_frozen_udt_with_registry
-fn cqlite_core::parser::types::udt::parse_tuple
-fn cqlite_core::parser::types::udt::parse_udt
-fn cqlite_core::parser::types::udt::parse_udt_enhanced
-fn cqlite_core::parser::types::udt::parse_udt_enhanced_with_registry
-fn cqlite_core::parser::types::udt::parse_udt_with_registry
-fn cqlite_core::parser::types::udt::parse_udt_with_schema
-fn cqlite_core::parser::types::udt::parse_udt_with_schema_and_registry
 fn cqlite_core::parser::vint::decode_signed
 fn cqlite_core::parser::vint::decode_unsigned
 fn cqlite_core::parser::vint::encode_vint
@@ -542,6 +567,8 @@ fn cqlite_core::parser::vint::parse_vint_length_signed
 fn cqlite_core::parser::vint::parse_vuint
 fn cqlite_core::parser::vint::zigzag_decode
 fn cqlite_core::parser::vint::zigzag_encode
+fn cqlite_core::parser::zigzag_decode
+fn cqlite_core::parser::zigzag_encode
 fn cqlite_core::query::access_path::last
 fn cqlite_core::query::access_path::record
 fn cqlite_core::query::access_path::reset
@@ -551,10 +578,6 @@ fn cqlite_core::query::select_executor::build_row_from_scan
 fn cqlite_core::query::select_executor::build_row_from_scan_cached
 fn cqlite_core::query::select_executor::evaluate_leaf
 fn cqlite_core::query::select_executor::evaluate_predicates
-fn cqlite_core::query::select_executor::predicate::evaluate_leaf
-fn cqlite_core::query::select_executor::predicate::evaluate_predicates
-fn cqlite_core::query::select_executor::row_build::build_row_from_scan
-fn cqlite_core::query::select_executor::row_build::build_row_from_scan_cached
 fn cqlite_core::query::select_parser::parse_select
 fn cqlite_core::query::writetime_ttl_validator::descriptors_from_table_schema
 fn cqlite_core::query::writetime_ttl_validator::extract_writetime_ttl_calls
@@ -570,8 +593,6 @@ fn cqlite_core::schema::cql_parser::parse_create_type
 fn cqlite_core::schema::cql_parser::split_cql_statements
 fn cqlite_core::schema::cql_parser::table_name_matches
 fn cqlite_core::schema::split_qualified_udt
-fn cqlite_core::schema::udt_registry::split_qualified_udt
-fn cqlite_core::schema::udt_registry::udt_registry_from_cql
 fn cqlite_core::schema::udt_registry_from_cql
 fn cqlite_core::storage::commitlog::frame::marker_crc
 fn cqlite_core::storage::commitlog::mutation::decode_mutation
@@ -598,8 +619,6 @@ fn cqlite_core::storage::sstable::bti::parser::encode_bti_trie_key_from_token
 fn cqlite_core::storage::sstable::bti::parser::encode_clustering_bound_oss50
 fn cqlite_core::storage::sstable::bti::parser::encode_clustering_bound_oss50_with_order
 fn cqlite_core::storage::sstable::bti::parser::encode_partition_key_for_bti_trie
-fn cqlite_core::storage::sstable::bti::parser::encoding::encode_clustering_bound_oss50
-fn cqlite_core::storage::sstable::bti::parser::encoding::encode_clustering_bound_oss50_with_order
 fn cqlite_core::storage::sstable::bti::parser::iterate_partition_locations_in_bti_file
 fn cqlite_core::storage::sstable::bti::parser::iterate_partitions_in_bti_file
 fn cqlite_core::storage::sstable::bti::parser::iterate_rows_for_partition
@@ -607,21 +626,8 @@ fn cqlite_core::storage::sstable::bti::parser::iterate_rows_in_bti_file
 fn cqlite_core::storage::sstable::bti::parser::iterate_rows_in_bti_trie
 fn cqlite_core::storage::sstable::bti::parser::lookup_partition_in_bti_file
 fn cqlite_core::storage::sstable::bti::parser::lookup_raw_key_in_bti_partitions_db
-fn cqlite_core::storage::sstable::bti::parser::partitions::decode_bti_partition_payload
-fn cqlite_core::storage::sstable::bti::parser::partitions::encode_bti_trie_key_from_token
-fn cqlite_core::storage::sstable::bti::parser::partitions::encode_partition_key_for_bti_trie
-fn cqlite_core::storage::sstable::bti::parser::partitions::lookup_partition_in_bti_file
-fn cqlite_core::storage::sstable::bti::parser::partitions::lookup_raw_key_in_bti_partitions_db
 fn cqlite_core::storage::sstable::bti::parser::resolve_rows_db_entry
-fn cqlite_core::storage::sstable::bti::parser::rows::decode_bti_row_payload
-fn cqlite_core::storage::sstable::bti::parser::rows::iterate_rows_for_partition
-fn cqlite_core::storage::sstable::bti::parser::rows::iterate_rows_in_bti_file
-fn cqlite_core::storage::sstable::bti::parser::rows::iterate_rows_in_bti_trie
-fn cqlite_core::storage::sstable::bti::parser::rows::resolve_rows_db_entry
-fn cqlite_core::storage::sstable::bti::parser::rows::select_row_index_blocks_for_range
 fn cqlite_core::storage::sstable::bti::parser::select_row_index_blocks_for_range
-fn cqlite_core::storage::sstable::bti::parser::traversal::iterate_partition_locations_in_bti_file
-fn cqlite_core::storage::sstable::bti::parser::traversal::iterate_partitions_in_bti_file
 fn cqlite_core::storage::sstable::bti::sized_ints::non_zero_size
 fn cqlite_core::storage::sstable::bti::sized_ints::read
 fn cqlite_core::storage::sstable::bti::sized_ints::read_unsigned
@@ -630,8 +636,6 @@ fn cqlite_core::storage::sstable::chunk_decompressor::create_decompressor_from_f
 fn cqlite_core::storage::sstable::compression_info::is_supported_compressor_name
 fn cqlite_core::storage::sstable::directory::parse_toc_file
 fn cqlite_core::storage::sstable::directory::parse_toc_file_detailed
-fn cqlite_core::storage::sstable::directory::toc::parse_toc_file
-fn cqlite_core::storage::sstable::directory::toc::parse_toc_file_detailed
 fn cqlite_core::storage::sstable::directory::validation::test_all_directories
 fn cqlite_core::storage::sstable::directory::validation::test_directory_validation
 fn cqlite_core::storage::sstable::directory::validation::validate_generation_components
@@ -690,12 +694,7 @@ fn cqlite_core::storage::write_engine::merge::compact_sstables_with_registry
 fn cqlite_core::storage::write_engine::merge::compute_baseline_min
 fn cqlite_core::storage::write_engine::merge::compute_max_purgeable_timestamp
 fn cqlite_core::storage::write_engine::merge::effective_compaction_schema
-fn cqlite_core::storage::write_engine::merge::fully_expired::fully_expired_sstables
 fn cqlite_core::storage::write_engine::merge::fully_expired_sstables
-fn cqlite_core::storage::write_engine::merge::point_read::build_single_partition_merger
-fn cqlite_core::storage::write_engine::merge::point_read::build_single_partition_merger_from_readers
-fn cqlite_core::storage::write_engine::merge::point_read::build_single_partition_merger_with_registry
-fn cqlite_core::storage::write_engine::merge::read_assembly::assemble_read_cells
 fn cqlite_core::storage::write_engine::merge::repair_state::classify_inputs
 fn cqlite_core::storage::write_engine::merge::udt_columns_eligible_for_normalization
 fn cqlite_core::util::cassandra_murmur3::cassandra_murmur3_normalize_token
@@ -1900,6 +1899,7 @@ method cqlite_core::version_hints::VersionHintResolver::resolve
 method cqlite_core::version_hints::VersionSource::description
 method cqlite_core::version_hints::VersionSource::precedence
 mod cqlite_core
+mod cqlite_core::comparator
 mod cqlite_core::config
 mod cqlite_core::cql
 mod cqlite_core::cql::ast
@@ -1926,27 +1926,19 @@ mod cqlite_core::observability::catalog
 mod cqlite_core::observability::catalog::attr
 mod cqlite_core::observability::catalog::unit
 mod cqlite_core::observability::config
-mod cqlite_core::observability::error_schema
 mod cqlite_core::observability::operator_docs
 mod cqlite_core::observability::partition_access
-mod cqlite_core::observability::partition_access::config
 mod cqlite_core::observability::partition_access::decision
-mod cqlite_core::observability::partition_access::types
 mod cqlite_core::observability::stream_subphase
 mod cqlite_core::parser
 mod cqlite_core::parser::binary
 mod cqlite_core::parser::complex_types
 mod cqlite_core::parser::enhanced_statistics_parser
-mod cqlite_core::parser::enhanced_statistics_parser::header
 mod cqlite_core::parser::header
 mod cqlite_core::parser::repair_metadata
 mod cqlite_core::parser::statistics
 mod cqlite_core::parser::toc_walk_metrics
 mod cqlite_core::parser::types
-mod cqlite_core::parser::types::collections
-mod cqlite_core::parser::types::primitives
-mod cqlite_core::parser::types::tombstones
-mod cqlite_core::parser::types::udt
 mod cqlite_core::parser::vint
 mod cqlite_core::platform
 mod cqlite_core::platform::fs
@@ -1962,9 +1954,6 @@ mod cqlite_core::query::prepared
 mod cqlite_core::query::result
 mod cqlite_core::query::select_ast
 mod cqlite_core::query::select_executor
-mod cqlite_core::query::select_executor::predicate
-mod cqlite_core::query::select_executor::row_build
-mod cqlite_core::query::select_executor::writetime_ttl
 mod cqlite_core::query::select_integration_tests
 mod cqlite_core::query::select_naming
 mod cqlite_core::query::select_optimizer
@@ -1974,10 +1963,8 @@ mod cqlite_core::schema
 mod cqlite_core::schema::aggregator
 mod cqlite_core::schema::cql_parser
 mod cqlite_core::schema::discovery
-mod cqlite_core::schema::discovery::model
 mod cqlite_core::schema::parser
 mod cqlite_core::schema::registry
-mod cqlite_core::schema::udt_registry
 mod cqlite_core::storage
 mod cqlite_core::storage::cache
 mod cqlite_core::storage::cache::global_key_offset
@@ -2002,11 +1989,6 @@ mod cqlite_core::storage::sstable::bti
 mod cqlite_core::storage::sstable::bti::encoder
 mod cqlite_core::storage::sstable::bti::node
 mod cqlite_core::storage::sstable::bti::parser
-mod cqlite_core::storage::sstable::bti::parser::encoding
-mod cqlite_core::storage::sstable::bti::parser::partitions
-mod cqlite_core::storage::sstable::bti::parser::rows
-mod cqlite_core::storage::sstable::bti::parser::rows_root
-mod cqlite_core::storage::sstable::bti::parser::traversal
 mod cqlite_core::storage::sstable::bti::sized_ints
 mod cqlite_core::storage::sstable::bulletproof_reader
 mod cqlite_core::storage::sstable::chunk_decompressor
@@ -2014,7 +1996,6 @@ mod cqlite_core::storage::sstable::chunk_reader
 mod cqlite_core::storage::sstable::compression
 mod cqlite_core::storage::sstable::compression_info
 mod cqlite_core::storage::sstable::directory
-mod cqlite_core::storage::sstable::directory::toc
 mod cqlite_core::storage::sstable::directory::types
 mod cqlite_core::storage::sstable::directory::validation
 mod cqlite_core::storage::sstable::directory_integration_tests
@@ -2027,14 +2008,7 @@ mod cqlite_core::storage::sstable::promoted_index_reader
 mod cqlite_core::storage::sstable::read_work_counters
 mod cqlite_core::storage::sstable::reader
 mod cqlite_core::storage::sstable::reader::compaction_row
-mod cqlite_core::storage::sstable::reader::data_access
-mod cqlite_core::storage::sstable::reader::data_access::joined_scan_stream
-mod cqlite_core::storage::sstable::reader::data_access::model
-mod cqlite_core::storage::sstable::reader::data_access::point_compaction
-mod cqlite_core::storage::sstable::reader::data_access::summary_scan
-mod cqlite_core::storage::sstable::reader::data_access::summary_scan::query_rows
 mod cqlite_core::storage::sstable::reader::presence_verification
-mod cqlite_core::storage::sstable::reader::types
 mod cqlite_core::storage::sstable::refresh
 mod cqlite_core::storage::sstable::row_cell_state_machine
 mod cqlite_core::storage::sstable::statistics_reader
@@ -2044,22 +2018,17 @@ mod cqlite_core::storage::sstable::summary_reader::interval
 mod cqlite_core::storage::sstable::validation
 mod cqlite_core::storage::sstable::verify
 mod cqlite_core::storage::sstable::version_gate
-mod cqlite_core::storage::sstable::version_gate::big
-mod cqlite_core::storage::sstable::version_gate::bti
-mod cqlite_core::storage::sstable::version_gate::descriptor
 mod cqlite_core::storage::sstable::work_counters
 mod cqlite_core::storage::sstable::writer
 mod cqlite_core::storage::sstable::writer::compressed_data_writer
 mod cqlite_core::storage::sstable::writer::compression_info_writer
 mod cqlite_core::storage::sstable::writer::crc_writer
 mod cqlite_core::storage::sstable::writer::data_writer
-mod cqlite_core::storage::sstable::writer::data_writer::types
 mod cqlite_core::storage::sstable::writer::digest_writer
 mod cqlite_core::storage::sstable::writer::filter_writer
 mod cqlite_core::storage::sstable::writer::index_writer
 mod cqlite_core::storage::sstable::writer::partitions_writer
 mod cqlite_core::storage::sstable::writer::stats_writer
-mod cqlite_core::storage::sstable::writer::stats_writer::estimated_histogram
 mod cqlite_core::storage::sstable::writer::stats_writer::metadata
 mod cqlite_core::storage::sstable::writer::summary_writer
 mod cqlite_core::storage::sstable::writer::toc_writer
@@ -2068,18 +2037,11 @@ mod cqlite_core::storage::sstable_data_manager
 mod cqlite_core::storage::write_engine
 mod cqlite_core::storage::write_engine::cql_to_mutation
 mod cqlite_core::storage::write_engine::export
-mod cqlite_core::storage::write_engine::maintenance
 mod cqlite_core::storage::write_engine::memtable
 mod cqlite_core::storage::write_engine::merge
-mod cqlite_core::storage::write_engine::merge::fully_expired
-mod cqlite_core::storage::write_engine::merge::model
-mod cqlite_core::storage::write_engine::merge::point_read
-mod cqlite_core::storage::write_engine::merge::read_assembly
 mod cqlite_core::storage::write_engine::merge::repair_state
-mod cqlite_core::storage::write_engine::merge::streaming
 mod cqlite_core::storage::write_engine::merge_policy
 mod cqlite_core::storage::write_engine::mutation
-mod cqlite_core::storage::write_engine::stats
 mod cqlite_core::storage::write_engine::wal
 mod cqlite_core::types
 mod cqlite_core::types::comparator
@@ -2087,9 +2049,357 @@ mod cqlite_core::util
 mod cqlite_core::util::cassandra_murmur3
 mod cqlite_core::util::value_fmt
 mod cqlite_core::version_hints
+reexport cqlite_core::ComparatorType = enum cqlite_core::types::comparator::ComparatorType
+reexport cqlite_core::Config = struct cqlite_core::config::Config
+reexport cqlite_core::Error = enum cqlite_core::error::Error
+reexport cqlite_core::Platform = struct cqlite_core::platform::Platform
+reexport cqlite_core::QueryResult = struct cqlite_core::query::result::QueryResult
+reexport cqlite_core::QueryRow = struct cqlite_core::query::result::QueryRow
+reexport cqlite_core::RefreshReport = struct cqlite_core::storage::sstable::refresh::RefreshReport
+reexport cqlite_core::Result = type cqlite_core::error::Result
+reexport cqlite_core::SchemaStatus = enum cqlite_core::query::engine::SchemaStatus
+reexport cqlite_core::cql::ConfigFeature = enum cqlite_core::cql::config::ParserFeature
+reexport cqlite_core::cql::CqlAssignment = struct cqlite_core::cql::ast::CqlAssignment
+reexport cqlite_core::cql::CqlAssignmentOperator = enum cqlite_core::cql::ast::CqlAssignmentOperator
+reexport cqlite_core::cql::CqlBinaryOperator = enum cqlite_core::cql::ast::CqlBinaryOperator
+reexport cqlite_core::cql::CqlColumnDef = struct cqlite_core::cql::ast::CqlColumnDef
+reexport cqlite_core::cql::CqlCreateTable = struct cqlite_core::cql::ast::CqlCreateTable
+reexport cqlite_core::cql::CqlDataType = enum cqlite_core::cql::ast::CqlDataType
+reexport cqlite_core::cql::CqlDelete = struct cqlite_core::cql::ast::CqlDelete
+reexport cqlite_core::cql::CqlDropTable = struct cqlite_core::cql::ast::CqlDropTable
+reexport cqlite_core::cql::CqlExpression = enum cqlite_core::cql::ast::CqlExpression
+reexport cqlite_core::cql::CqlIdentifier = struct cqlite_core::cql::ast::CqlIdentifier
+reexport cqlite_core::cql::CqlInsert = struct cqlite_core::cql::ast::CqlInsert
+reexport cqlite_core::cql::CqlInsertValues = enum cqlite_core::cql::ast::CqlInsertValues
+reexport cqlite_core::cql::CqlLiteral = enum cqlite_core::cql::ast::CqlLiteral
+reexport cqlite_core::cql::CqlOrderBy = struct cqlite_core::cql::ast::CqlOrderBy
+reexport cqlite_core::cql::CqlParser = trait cqlite_core::cql::traits::CqlParser
+reexport cqlite_core::cql::CqlParserFactory = trait cqlite_core::cql::traits::CqlParserFactory
+reexport cqlite_core::cql::CqlPrimaryKey = struct cqlite_core::cql::ast::CqlPrimaryKey
+reexport cqlite_core::cql::CqlResult = type cqlite_core::error::Result
+reexport cqlite_core::cql::CqlSelect = struct cqlite_core::cql::ast::CqlSelect
+reexport cqlite_core::cql::CqlSelectItem = enum cqlite_core::cql::ast::CqlSelectItem
+reexport cqlite_core::cql::CqlSortDirection = enum cqlite_core::cql::ast::CqlSortDirection
+reexport cqlite_core::cql::CqlStatement = enum cqlite_core::cql::ast::CqlStatement
+reexport cqlite_core::cql::CqlTable = struct cqlite_core::cql::ast::CqlTable
+reexport cqlite_core::cql::CqlTableOptions = struct cqlite_core::cql::ast::CqlTableOptions
+reexport cqlite_core::cql::CqlUnaryOperator = enum cqlite_core::cql::ast::CqlUnaryOperator
+reexport cqlite_core::cql::CqlUpdate = struct cqlite_core::cql::ast::CqlUpdate
+reexport cqlite_core::cql::CqlUsing = struct cqlite_core::cql::ast::CqlUsing
+reexport cqlite_core::cql::CqlVisitor = trait cqlite_core::cql::traits::CqlVisitor
+reexport cqlite_core::cql::DefaultVisitor = struct cqlite_core::cql::visitor::DefaultVisitor
+reexport cqlite_core::cql::ErrorSeverity = enum cqlite_core::cql::error::ErrorSeverity
+reexport cqlite_core::cql::FactoryInfo = struct cqlite_core::cql::traits::FactoryInfo
+reexport cqlite_core::cql::IdentifierCollector = struct cqlite_core::cql::visitor::IdentifierCollector
+reexport cqlite_core::cql::MemorySettings = struct cqlite_core::cql::config::MemorySettings
+reexport cqlite_core::cql::NomParser = struct cqlite_core::cql::nom_backend::NomParser
+reexport cqlite_core::cql::ParserBackend = enum cqlite_core::cql::config::ParserBackend
+reexport cqlite_core::cql::ParserBackendInfo = struct cqlite_core::cql::traits::ParserBackendInfo
+reexport cqlite_core::cql::ParserConfig = struct cqlite_core::cql::config::ParserConfig
+reexport cqlite_core::cql::ParserError = enum cqlite_core::cql::error::ParserError
+reexport cqlite_core::cql::ParserErrorCategory = enum cqlite_core::cql::error::ErrorCategory
+reexport cqlite_core::cql::ParserFactory = struct cqlite_core::cql::factory::ParserFactory
+reexport cqlite_core::cql::ParserFeature = enum cqlite_core::cql::traits::ParserFeature
+reexport cqlite_core::cql::ParserRegistry = struct cqlite_core::cql::factory::ParserRegistry
+reexport cqlite_core::cql::ParserWarning = struct cqlite_core::cql::error::ParserWarning
+reexport cqlite_core::cql::PerformanceCharacteristics = struct cqlite_core::cql::traits::PerformanceCharacteristics
+reexport cqlite_core::cql::PerformanceSettings = struct cqlite_core::cql::config::PerformanceSettings
+reexport cqlite_core::cql::SchemaBuilderVisitor = struct cqlite_core::cql::visitor::SchemaBuilderVisitor
+reexport cqlite_core::cql::SchemaParserConfig = struct cqlite_core::cql::schema_integration::SchemaParserConfig
+reexport cqlite_core::cql::SecuritySettings = struct cqlite_core::cql::config::SecuritySettings
+reexport cqlite_core::cql::SemanticValidator = struct cqlite_core::cql::visitor::SemanticValidator
+reexport cqlite_core::cql::SourcePosition = struct cqlite_core::cql::traits::SourcePosition
+reexport cqlite_core::cql::TypeCollectorVisitor = struct cqlite_core::cql::visitor::TypeCollectorVisitor
+reexport cqlite_core::cql::UseCase = enum cqlite_core::cql::factory::UseCase
+reexport cqlite_core::cql::ValidationVisitor = struct cqlite_core::cql::visitor::ValidationVisitor
+reexport cqlite_core::cql::extract_table_name_enhanced = fn cqlite_core::cql::schema_integration::extract_table_name_enhanced
+reexport cqlite_core::cql::parse_cql_schema_compat = fn cqlite_core::cql::schema_integration::parse_cql_schema_compat
+reexport cqlite_core::cql::parse_cql_schema_enhanced = fn cqlite_core::cql::schema_integration::parse_cql_schema_enhanced
+reexport cqlite_core::cql::parse_cql_schema_fast = fn cqlite_core::cql::schema_integration::parse_cql_schema_fast
+reexport cqlite_core::cql::parse_cql_schema_simple = fn cqlite_core::cql::schema_integration::parse_cql_schema_simple
+reexport cqlite_core::cql::parse_cql_schema_strict = fn cqlite_core::cql::schema_integration::parse_cql_schema_strict
+reexport cqlite_core::cql::parse_cql_schemas_batch = fn cqlite_core::cql::schema_integration::parse_cql_schemas_batch
+reexport cqlite_core::cql::register_global_factory = fn cqlite_core::cql::factory::register_global_factory
+reexport cqlite_core::cql::table_name_matches_enhanced = fn cqlite_core::cql::schema_integration::table_name_matches_enhanced
+reexport cqlite_core::cql::validate_cql_schema_syntax = fn cqlite_core::cql::schema_integration::validate_cql_schema_syntax
+reexport cqlite_core::discovery::CoverageBadge = enum cqlite_core::discovery::coverage::CoverageBadge
+reexport cqlite_core::discovery::CoverageCalculator = struct cqlite_core::discovery::coverage::CoverageCalculator
+reexport cqlite_core::discovery::CoverageInfo = struct cqlite_core::discovery::coverage::CoverageInfo
+reexport cqlite_core::discovery::DiscoveryService = struct cqlite_core::discovery::service::DiscoveryService
+reexport cqlite_core::discovery::DiscoverySummary = struct cqlite_core::discovery::service::DiscoverySummary
+reexport cqlite_core::discovery::KeyspaceInfo = struct cqlite_core::discovery::scanner::KeyspaceInfo
+reexport cqlite_core::discovery::ScanResult = struct cqlite_core::discovery::scanner::ScanResult
+reexport cqlite_core::discovery::Scanner = struct cqlite_core::discovery::scanner::Scanner
+reexport cqlite_core::discovery::TableInfo = struct cqlite_core::discovery::scanner::TableInfo
+reexport cqlite_core::observability::ObservabilityConfig = struct cqlite_core::observability::config::ObservabilityConfig
+reexport cqlite_core::observability::ObservabilityConfigBuilder = struct cqlite_core::observability::config::ObservabilityConfigBuilder
+reexport cqlite_core::observability::OtelProtocol = enum cqlite_core::observability::config::OtelProtocol
+reexport cqlite_core::observability::StreamSubPhase = enum cqlite_core::observability::stream_subphase::StreamSubPhase
+reexport cqlite_core::observability::StreamSubPhaseGuard = struct cqlite_core::observability::stream_subphase::StreamSubPhaseGuard
+reexport cqlite_core::observability::StreamSubPhaseTimings = struct cqlite_core::observability::stream_subphase::StreamSubPhaseTimings
+reexport cqlite_core::observability::partition_access::Refusal = enum cqlite_core::observability::partition_access::decision::Refusal
+reexport cqlite_core::observability::partition_access::Verdict = enum cqlite_core::observability::partition_access::decision::Verdict
+reexport cqlite_core::parser::CQLiteParseError = enum cqlite_core::parser::binary::CQLiteParseError
+reexport cqlite_core::parser::CqlResult = type cqlite_core::error::Result
+reexport cqlite_core::parser::ParseResult = type cqlite_core::parser::binary::ParseResult
+reexport cqlite_core::parser::SSTableParser = struct cqlite_core::parser::binary::SSTableParser
+reexport cqlite_core::query::AccessPath = enum cqlite_core::query::access_path::AccessPath
+reexport cqlite_core::query::AdvancedQueryEngine = struct cqlite_core::query::engine::QueryEngine
+reexport cqlite_core::query::AnalyzeResult = struct cqlite_core::query::engine::AnalyzeResult
+reexport cqlite_core::query::CacheStats = struct cqlite_core::query::engine::CacheStats
+reexport cqlite_core::query::ColumnInfo = struct cqlite_core::query::result::ColumnInfo
+reexport cqlite_core::query::ExecutionHints = struct cqlite_core::query::prepared::ExecutionHints
+reexport cqlite_core::query::ExecutionStep = struct cqlite_core::query::planner::ExecutionStep
+reexport cqlite_core::query::ExecutorQueryResult = struct cqlite_core::query::result::QueryResult
+reexport cqlite_core::query::ExecutorQueryRow = struct cqlite_core::query::result::QueryRow
+reexport cqlite_core::query::ExplainResult = struct cqlite_core::query::engine::ExplainResult
+reexport cqlite_core::query::FallbackReason = enum cqlite_core::query::access_path::FallbackReason
+reexport cqlite_core::query::IndexSelection = struct cqlite_core::query::planner::IndexSelection
+reexport cqlite_core::query::LeafOutcome = enum cqlite_core::query::select_executor::LeafOutcome
+reexport cqlite_core::query::M2SelectValidator = struct cqlite_core::query::m2_select_validator::M2SelectValidator
+reexport cqlite_core::query::OptimizedQueryPlan = struct cqlite_core::query::select_optimizer::OptimizedQueryPlan
+reexport cqlite_core::query::ParameterMetadata = struct cqlite_core::query::prepared::ParameterMetadata
+reexport cqlite_core::query::PartitionKeyCache = struct cqlite_core::query::select_executor::PartitionKeyCache
+reexport cqlite_core::query::PerformanceMetrics = struct cqlite_core::query::result::PerformanceMetrics
+reexport cqlite_core::query::PlanType = enum cqlite_core::query::planner::PlanType
+reexport cqlite_core::query::PreparedContext = struct cqlite_core::query::prepared::PreparedContext
+reexport cqlite_core::query::PreparedQuery = struct cqlite_core::query::prepared::PreparedQuery
+reexport cqlite_core::query::PreparedQueryBuilder = struct cqlite_core::query::prepared::PreparedQueryBuilder
+reexport cqlite_core::query::PreparedQueryStats = struct cqlite_core::query::prepared::PreparedQueryStats
+reexport cqlite_core::query::QueryExecutor = struct cqlite_core::query::executor::QueryExecutor
+reexport cqlite_core::query::QueryHints = struct cqlite_core::query::planner::QueryHints
+reexport cqlite_core::query::QueryMetadata = struct cqlite_core::query::result::QueryMetadata
+reexport cqlite_core::query::QueryParser = struct cqlite_core::query::parser::QueryParser
+reexport cqlite_core::query::QueryPlan = struct cqlite_core::query::planner::QueryPlan
+reexport cqlite_core::query::QueryPlanner = struct cqlite_core::query::planner::QueryPlanner
+reexport cqlite_core::query::QueryResult = struct cqlite_core::query::result::QueryResult
+reexport cqlite_core::query::QueryResultIterator = struct cqlite_core::query::result::QueryResultIterator
+reexport cqlite_core::query::QueryRow = struct cqlite_core::query::result::QueryRow
+reexport cqlite_core::query::RowMetadata = struct cqlite_core::query::result::RowMetadata
+reexport cqlite_core::query::SSTableFilterOp = enum cqlite_core::query::select_optimizer::SSTableFilterOp
+reexport cqlite_core::query::SSTablePredicate = struct cqlite_core::query::select_optimizer::SSTablePredicate
+reexport cqlite_core::query::SchemaStatus = enum cqlite_core::query::engine::SchemaStatus
+reexport cqlite_core::query::SelectExecutor = struct cqlite_core::query::select_executor::SelectExecutor
+reexport cqlite_core::query::SelectOptimizer = struct cqlite_core::query::select_optimizer::SelectOptimizer
+reexport cqlite_core::query::SelectParser = struct cqlite_core::query::select_parser::SelectParser
+reexport cqlite_core::query::SelectStatement = struct cqlite_core::query::select_ast::SelectStatement
+reexport cqlite_core::query::SelectValidationResult = struct cqlite_core::query::m2_select_validator::SelectValidationResult
+reexport cqlite_core::query::StreamingConfig = struct cqlite_core::query::result::StreamingConfig
+reexport cqlite_core::query::UnsupportedFeature = enum cqlite_core::query::m2_select_validator::UnsupportedFeature
+reexport cqlite_core::query::WriteTimeTtlColumnDescriptor = struct cqlite_core::query::writetime_ttl_validator::ColumnDescriptor
+reexport cqlite_core::query::WriteTimeTtlKind = enum cqlite_core::query::writetime_ttl_validator::WriteTimeTtlKind
+reexport cqlite_core::query::build_row_from_scan = fn cqlite_core::query::select_executor::build_row_from_scan
+reexport cqlite_core::query::build_row_from_scan_cached = fn cqlite_core::query::select_executor::build_row_from_scan_cached
+reexport cqlite_core::query::cql_type_to_data_type = fn cqlite_core::query::result::cql_type_to_data_type
+reexport cqlite_core::query::descriptors_from_table_schema = fn cqlite_core::query::writetime_ttl_validator::descriptors_from_table_schema
+reexport cqlite_core::query::evaluate_leaf = fn cqlite_core::query::select_executor::evaluate_leaf
+reexport cqlite_core::query::evaluate_predicates = fn cqlite_core::query::select_executor::evaluate_predicates
+reexport cqlite_core::query::executor::QueryResult = struct cqlite_core::query::result::QueryResult
+reexport cqlite_core::query::executor::QueryRow = struct cqlite_core::query::result::QueryRow
+reexport cqlite_core::query::parse_select = fn cqlite_core::query::select_parser::parse_select
+reexport cqlite_core::query::result::CellExpiration = struct cqlite_core::types::CellExpiration
+reexport cqlite_core::query::result::CellWriteMetadata = struct cqlite_core::types::CellWriteMetadata
+reexport cqlite_core::query::validate_all_writetime_ttl_calls = fn cqlite_core::query::writetime_ttl_validator::validate_all_writetime_ttl_calls
+reexport cqlite_core::query::validate_writetime_ttl_call = fn cqlite_core::query::writetime_ttl_validator::validate_writetime_ttl_call
+reexport cqlite_core::schema::AggregatorConfig = struct cqlite_core::schema::aggregator::AggregatorConfig
+reexport cqlite_core::schema::ColumnDefinition = struct cqlite_core::schema::discovery::ColumnDefinition
+reexport cqlite_core::schema::DiscoveryMethod = enum cqlite_core::schema::discovery::DiscoveryMethod
+reexport cqlite_core::schema::IndexDefinition = struct cqlite_core::schema::discovery::IndexDefinition
+reexport cqlite_core::schema::LoadErrorType = enum cqlite_core::schema::aggregator::LoadErrorType
+reexport cqlite_core::schema::LoadResult = struct cqlite_core::schema::aggregator::LoadResult
+reexport cqlite_core::schema::ParsingContext = struct cqlite_core::schema::registry::ParsingContext
+reexport cqlite_core::schema::RegistryStatistics = struct cqlite_core::schema::registry::RegistryStatistics
+reexport cqlite_core::schema::SchemaAggregator = struct cqlite_core::schema::aggregator::SchemaAggregator
+reexport cqlite_core::schema::SchemaChange = struct cqlite_core::schema::registry::SchemaChange
+reexport cqlite_core::schema::SchemaChangeType = enum cqlite_core::schema::registry::SchemaChangeType
+reexport cqlite_core::schema::SchemaDiscoveryConfig = struct cqlite_core::schema::discovery::SchemaDiscoveryConfig
+reexport cqlite_core::schema::SchemaDiscoveryEngine = struct cqlite_core::schema::discovery::SchemaDiscoveryEngine
+reexport cqlite_core::schema::SchemaInfo = struct cqlite_core::schema::discovery::SchemaInfo
+reexport cqlite_core::schema::SchemaLoadError = struct cqlite_core::schema::aggregator::SchemaLoadError
+reexport cqlite_core::schema::SchemaLoadWarning = struct cqlite_core::schema::aggregator::SchemaLoadWarning
+reexport cqlite_core::schema::SchemaMetadata = struct cqlite_core::schema::discovery::SchemaMetadata
+reexport cqlite_core::schema::SchemaParser = struct cqlite_core::schema::parser::SchemaParser
+reexport cqlite_core::schema::SchemaQuery = struct cqlite_core::schema::registry::SchemaQuery
+reexport cqlite_core::schema::SchemaRegistry = struct cqlite_core::schema::registry::SchemaRegistry
+reexport cqlite_core::schema::SchemaRegistryConfig = struct cqlite_core::schema::registry::SchemaRegistryConfig
+reexport cqlite_core::schema::SchemaSource = enum cqlite_core::schema::registry::SchemaSource
+reexport cqlite_core::schema::SchemaValidationStatus = enum cqlite_core::schema::registry::SchemaValidationStatus
+reexport cqlite_core::schema::SchemaValidator = struct cqlite_core::schema::registry::SchemaValidator
+reexport cqlite_core::schema::SchemaVersion = struct cqlite_core::schema::registry::SchemaVersion
+reexport cqlite_core::schema::TableOptions = struct cqlite_core::schema::discovery::TableOptions
+reexport cqlite_core::schema::TypeInfo = struct cqlite_core::schema::discovery::TypeInfo
+reexport cqlite_core::schema::UDTDefinition = struct cqlite_core::schema::discovery::UDTDefinition
+reexport cqlite_core::schema::ValidationError = struct cqlite_core::schema::discovery::ValidationError
+reexport cqlite_core::schema::ValidationReport = struct cqlite_core::schema::registry::ValidationReport
+reexport cqlite_core::schema::ValidationResults = struct cqlite_core::schema::discovery::ValidationResults
+reexport cqlite_core::schema::ValidationStatus = enum cqlite_core::schema::discovery::ValidationStatus
+reexport cqlite_core::schema::ValidationWarning = struct cqlite_core::schema::discovery::ValidationWarning
+reexport cqlite_core::schema::cql_type_to_type_id = fn cqlite_core::schema::cql_parser::cql_type_to_type_id
+reexport cqlite_core::schema::extract_table_name = fn cqlite_core::schema::cql_parser::extract_table_name
+reexport cqlite_core::schema::parse_cql_schema = fn cqlite_core::schema::cql_parser::parse_cql_schema
+reexport cqlite_core::schema::parse_cql_schema_with_visitor = fn cqlite_core::schema::cql_parser::parse_cql_schema_with_visitor
+reexport cqlite_core::schema::parse_create_table = fn cqlite_core::schema::cql_parser::parse_create_table
+reexport cqlite_core::schema::table_name_matches = fn cqlite_core::schema::cql_parser::table_name_matches
+reexport cqlite_core::serialization = mod cqlite_core::storage::serialization
+reexport cqlite_core::storage::cache::DEFAULT_GLOBAL_KEY_CACHE_BYTES = constant cqlite_core::storage::cache::global_key_offset::DEFAULT_GLOBAL_KEY_CACHE_BYTES
+reexport cqlite_core::storage::cache::DEFAULT_GLOBAL_KEY_CACHE_SHARDS = constant cqlite_core::storage::cache::global_key_offset::DEFAULT_GLOBAL_KEY_CACHE_SHARDS
+reexport cqlite_core::storage::cache::GenerationIdentity = struct cqlite_core::storage::cache::global_key_offset::GenerationIdentity
+reexport cqlite_core::storage::cache::GlobalKeyOffsetCache = struct cqlite_core::storage::cache::global_key_offset::GlobalKeyOffsetCache
+reexport cqlite_core::storage::cache::PartitionLoc = struct cqlite_core::storage::cache::global_key_offset::PartitionLoc
+reexport cqlite_core::storage::commitlog::ColumnSpec = struct cqlite_core::storage::commitlog::schema::ColumnSpec
+reexport cqlite_core::storage::commitlog::CommitLogDescriptor = struct cqlite_core::storage::commitlog::descriptor::CommitLogDescriptor
+reexport cqlite_core::storage::commitlog::CommitLogReader = struct cqlite_core::storage::commitlog::reader::CommitLogReader
+reexport cqlite_core::storage::commitlog::CommitLogSchema = struct cqlite_core::storage::commitlog::schema::CommitLogSchema
+reexport cqlite_core::storage::commitlog::CommitLogVersionGates = struct cqlite_core::storage::commitlog::descriptor::CommitLogVersionGates
+reexport cqlite_core::storage::commitlog::DecodedCell = struct cqlite_core::storage::commitlog::mutation::DecodedCell
+reexport cqlite_core::storage::commitlog::DecodedRow = struct cqlite_core::storage::commitlog::mutation::DecodedRow
+reexport cqlite_core::storage::commitlog::MAX_SEGMENT_BYTES = constant cqlite_core::storage::commitlog::reader::MAX_SEGMENT_BYTES
+reexport cqlite_core::storage::commitlog::Mutation = struct cqlite_core::storage::commitlog::mutation::Mutation
+reexport cqlite_core::storage::commitlog::MutationIter = struct cqlite_core::storage::commitlog::reader::MutationIter
+reexport cqlite_core::storage::commitlog::PartitionUpdate = struct cqlite_core::storage::commitlog::mutation::PartitionUpdate
+reexport cqlite_core::storage::commitlog::SUPPORTED_COMMITLOG_VERSION = constant cqlite_core::storage::commitlog::descriptor::SUPPORTED_COMMITLOG_VERSION
+reexport cqlite_core::storage::commitlog::SchemaSet = type cqlite_core::storage::commitlog::schema::SchemaSet
+reexport cqlite_core::storage::commitlog::cql_fixed_len = fn cqlite_core::storage::commitlog::schema::cql_fixed_len
+reexport cqlite_core::storage::commitlog::format_table_id = fn cqlite_core::storage::commitlog::schema::format_table_id
+reexport cqlite_core::storage::commitlog::parse_table_id = fn cqlite_core::storage::commitlog::schema::parse_table_id
+reexport cqlite_core::storage::serialization::CellEncoder = struct cqlite_core::storage::serialization::cell::CellEncoder
+reexport cqlite_core::storage::serialization::RowSerializer = struct cqlite_core::storage::serialization::row::RowSerializer
+reexport cqlite_core::storage::serialization::TypeSerializer = struct cqlite_core::storage::serialization::types::TypeSerializer
+reexport cqlite_core::storage::serialization::encode_signed = fn cqlite_core::storage::serialization::vint::encode_signed
+reexport cqlite_core::storage::serialization::encode_unsigned = fn cqlite_core::storage::serialization::vint::encode_unsigned
+reexport cqlite_core::storage::serialization::signed_len = fn cqlite_core::storage::serialization::vint::signed_len
+reexport cqlite_core::storage::serialization::unsigned_len = fn cqlite_core::storage::serialization::vint::unsigned_len
+reexport cqlite_core::storage::sstable::RefreshReport = struct cqlite_core::storage::sstable::refresh::RefreshReport
+reexport cqlite_core::storage::sstable::SSTableReader = struct cqlite_core::storage::sstable::reader::SSTableReader
+reexport cqlite_core::storage::sstable::VerifyErrorClass = enum cqlite_core::storage::sstable::verify::VerifyErrorClass
+reexport cqlite_core::storage::sstable::VerifyFinding = struct cqlite_core::storage::sstable::verify::VerifyFinding
+reexport cqlite_core::storage::sstable::VerifyMode = enum cqlite_core::storage::sstable::verify::VerifyMode
+reexport cqlite_core::storage::sstable::VerifyReport = struct cqlite_core::storage::sstable::verify::VerifyReport
+reexport cqlite_core::storage::sstable::bti::BatchEncoder = struct cqlite_core::storage::sstable::bti::encoder::BatchEncoder
+reexport cqlite_core::storage::sstable::bti::BtiError = enum cqlite_core::storage::sstable::bti::node::BtiError
+reexport cqlite_core::storage::sstable::bti::BtiNode = struct cqlite_core::storage::sstable::bti::node::BtiNode
+reexport cqlite_core::storage::sstable::bti::BtiNodeData = enum cqlite_core::storage::sstable::bti::node::BtiNodeData
+reexport cqlite_core::storage::sstable::bti::BtiNodeType = enum cqlite_core::storage::sstable::bti::node::BtiNodeType
+reexport cqlite_core::storage::sstable::bti::BtiPartitionLocation = enum cqlite_core::storage::sstable::bti::parser::BtiPartitionLocation
+reexport cqlite_core::storage::sstable::bti::BtiResult = type cqlite_core::storage::sstable::bti::node::BtiResult
+reexport cqlite_core::storage::sstable::bti::BtiRowIndexEntry = struct cqlite_core::storage::sstable::bti::parser::BtiRowIndexEntry
+reexport cqlite_core::storage::sstable::bti::BtiRowIndexEntryWithKey = type cqlite_core::storage::sstable::bti::parser::BtiRowIndexEntryWithKey
+reexport cqlite_core::storage::sstable::bti::BtiRowIndexHeader = struct cqlite_core::storage::sstable::bti::parser::BtiRowIndexHeader
+reexport cqlite_core::storage::sstable::bti::ByteComparableEncoder = struct cqlite_core::storage::sstable::bti::encoder::ByteComparableEncoder
+reexport cqlite_core::storage::sstable::bti::EncoderConfig = struct cqlite_core::storage::sstable::bti::encoder::EncoderConfig
+reexport cqlite_core::storage::sstable::bti::EncoderStats = struct cqlite_core::storage::sstable::bti::encoder::EncoderStats
+reexport cqlite_core::storage::sstable::bti::FLAG_HAS_HASH_BYTE = constant cqlite_core::storage::sstable::bti::parser::FLAG_HAS_HASH_BYTE
+reexport cqlite_core::storage::sstable::bti::FLAG_OPEN_MARKER = constant cqlite_core::storage::sstable::bti::parser::FLAG_OPEN_MARKER
+reexport cqlite_core::storage::sstable::bti::PayloadRef = struct cqlite_core::storage::sstable::bti::node::PayloadRef
+reexport cqlite_core::storage::sstable::bti::RowsTrieRootRejectReason = enum cqlite_core::storage::sstable::bti::parser::RowsTrieRootRejectReason
+reexport cqlite_core::storage::sstable::bti::RowsTrieRootRejection = struct cqlite_core::storage::sstable::bti::parser::RowsTrieRootRejection
+reexport cqlite_core::storage::sstable::bti::SizedPointer = struct cqlite_core::storage::sstable::bti::node::SizedPointer
+reexport cqlite_core::storage::sstable::bti::Transition = struct cqlite_core::storage::sstable::bti::node::Transition
+reexport cqlite_core::storage::sstable::bti::ValidatedRowsTrieRoot = struct cqlite_core::storage::sstable::bti::parser::ValidatedRowsTrieRoot
+reexport cqlite_core::storage::sstable::bti::decode_bti_partition_payload = fn cqlite_core::storage::sstable::bti::parser::decode_bti_partition_payload
+reexport cqlite_core::storage::sstable::bti::encode_bti_trie_key_from_token = fn cqlite_core::storage::sstable::bti::parser::encode_bti_trie_key_from_token
+reexport cqlite_core::storage::sstable::bti::encode_clustering_bound_oss50 = fn cqlite_core::storage::sstable::bti::parser::encode_clustering_bound_oss50
+reexport cqlite_core::storage::sstable::bti::encode_clustering_bound_oss50_with_order = fn cqlite_core::storage::sstable::bti::parser::encode_clustering_bound_oss50_with_order
+reexport cqlite_core::storage::sstable::bti::encode_partition_key_for_bti_trie = fn cqlite_core::storage::sstable::bti::parser::encode_partition_key_for_bti_trie
+reexport cqlite_core::storage::sstable::bti::iterate_partition_locations_in_bti_file = fn cqlite_core::storage::sstable::bti::parser::iterate_partition_locations_in_bti_file
+reexport cqlite_core::storage::sstable::bti::iterate_partitions_in_bti_file = fn cqlite_core::storage::sstable::bti::parser::iterate_partitions_in_bti_file
+reexport cqlite_core::storage::sstable::bti::iterate_rows_for_partition = fn cqlite_core::storage::sstable::bti::parser::iterate_rows_for_partition
+reexport cqlite_core::storage::sstable::bti::iterate_rows_in_bti_file = fn cqlite_core::storage::sstable::bti::parser::iterate_rows_in_bti_file
+reexport cqlite_core::storage::sstable::bti::iterate_rows_in_bti_trie = fn cqlite_core::storage::sstable::bti::parser::iterate_rows_in_bti_trie
+reexport cqlite_core::storage::sstable::bti::lookup_partition_in_bti_file = fn cqlite_core::storage::sstable::bti::parser::lookup_partition_in_bti_file
+reexport cqlite_core::storage::sstable::bti::lookup_raw_key_in_bti_partitions_db = fn cqlite_core::storage::sstable::bti::parser::lookup_raw_key_in_bti_partitions_db
+reexport cqlite_core::storage::sstable::bti::resolve_rows_db_entry = fn cqlite_core::storage::sstable::bti::parser::resolve_rows_db_entry
+reexport cqlite_core::storage::sstable::bti::select_row_index_blocks_for_range = fn cqlite_core::storage::sstable::bti::parser::select_row_index_blocks_for_range
+reexport cqlite_core::storage::sstable::directory::ComponentAnalysis = struct cqlite_core::storage::sstable::directory::validation::ComponentAnalysis
+reexport cqlite_core::storage::sstable::directory::SSTableComponent = enum cqlite_core::storage::sstable::directory::types::SSTableComponent
+reexport cqlite_core::storage::sstable::directory::SSTableGeneration = struct cqlite_core::storage::sstable::directory::types::SSTableGeneration
+reexport cqlite_core::storage::sstable::directory::SecondaryIndex = struct cqlite_core::storage::sstable::directory::types::SecondaryIndex
+reexport cqlite_core::storage::sstable::directory::ValidationReport = struct cqlite_core::storage::sstable::directory::validation::ValidationReport
+reexport cqlite_core::storage::sstable::directory::test_all_directories = fn cqlite_core::storage::sstable::directory::validation::test_all_directories
+reexport cqlite_core::storage::sstable::directory::test_directory_validation = fn cqlite_core::storage::sstable::directory::validation::test_directory_validation
+reexport cqlite_core::storage::sstable::directory::validate_generation_components = fn cqlite_core::storage::sstable::directory::validation::validate_generation_components
+reexport cqlite_core::storage::sstable::directory::validate_toc_consistency = fn cqlite_core::storage::sstable::directory::validation::validate_toc_consistency
+reexport cqlite_core::storage::sstable::reader::CompactionRow = struct cqlite_core::storage::sstable::reader::compaction_row::CompactionRow
+reexport cqlite_core::storage::sstable::reader::CompactionRowData = enum cqlite_core::storage::sstable::reader::compaction_row::CompactionRowData
+reexport cqlite_core::storage::sstable::reader::ComplexColumn = struct cqlite_core::storage::sstable::reader::compaction_row::ComplexColumn
+reexport cqlite_core::storage::sstable::reader::ComplexElement = struct cqlite_core::storage::sstable::reader::compaction_row::ComplexElement
+reexport cqlite_core::storage::sstable::reader::SimpleCell = struct cqlite_core::storage::sstable::reader::compaction_row::SimpleCell
+reexport cqlite_core::storage::sstable::row_cell_state_machine::CassandraVersion = enum cqlite_core::parser::header::CassandraVersion
+reexport cqlite_core::storage::sstable::summary_reader::SummaryInterval = struct cqlite_core::storage::sstable::summary_reader::interval::SummaryInterval
+reexport cqlite_core::storage::sstable::verify_sstable = fn cqlite_core::storage::sstable::verify::verify_sstable
+reexport cqlite_core::storage::sstable::verify_sstable_generation = fn cqlite_core::storage::sstable::verify::verify_sstable_generation
+reexport cqlite_core::storage::sstable::writer::COLUMN_INDEX_SIZE_BYTES = constant cqlite_core::storage::sstable::writer::index_writer::COLUMN_INDEX_SIZE_BYTES
+reexport cqlite_core::storage::sstable::writer::ComponentEntry = struct cqlite_core::storage::sstable::writer::toc_writer::ComponentEntry
+reexport cqlite_core::storage::sstable::writer::CompressedDataWriter = struct cqlite_core::storage::sstable::writer::compressed_data_writer::CompressedDataWriter
+reexport cqlite_core::storage::sstable::writer::CompressionAlgorithm = enum cqlite_core::storage::sstable::writer::compression_info_writer::CompressionAlgorithm
+reexport cqlite_core::storage::sstable::writer::CompressionInfoWriter = struct cqlite_core::storage::sstable::writer::compression_info_writer::CompressionInfoWriter
+reexport cqlite_core::storage::sstable::writer::CompressionMetadata = struct cqlite_core::storage::sstable::writer::compression_info_writer::CompressionMetadata
+reexport cqlite_core::storage::sstable::writer::Compressor = trait cqlite_core::storage::sstable::writer::compressed_data_writer::Compressor
+reexport cqlite_core::storage::sstable::writer::DataWriter = struct cqlite_core::storage::sstable::writer::data_writer::DataWriter
+reexport cqlite_core::storage::sstable::writer::DeflateCompressor = struct cqlite_core::storage::sstable::writer::compressed_data_writer::DeflateCompressor
+reexport cqlite_core::storage::sstable::writer::DigestWriter = struct cqlite_core::storage::sstable::writer::digest_writer::DigestWriter
+reexport cqlite_core::storage::sstable::writer::FilterWriter = struct cqlite_core::storage::sstable::writer::filter_writer::FilterWriter
+reexport cqlite_core::storage::sstable::writer::INDEX_INFO_WIDTH_BASE = constant cqlite_core::storage::sstable::writer::index_writer::INDEX_INFO_WIDTH_BASE
+reexport cqlite_core::storage::sstable::writer::IndexEntryInfo = struct cqlite_core::storage::sstable::writer::index_writer::IndexEntryInfo
+reexport cqlite_core::storage::sstable::writer::IndexWriter = struct cqlite_core::storage::sstable::writer::index_writer::IndexWriter
+reexport cqlite_core::storage::sstable::writer::Lz4Compressor = struct cqlite_core::storage::sstable::writer::compressed_data_writer::Lz4Compressor
+reexport cqlite_core::storage::sstable::writer::NoopCompressor = struct cqlite_core::storage::sstable::writer::compressed_data_writer::NoopCompressor
+reexport cqlite_core::storage::sstable::writer::PromotedIndexBlock = struct cqlite_core::storage::sstable::writer::index_writer::PromotedIndexBlock
+reexport cqlite_core::storage::sstable::writer::SnappyCompressor = struct cqlite_core::storage::sstable::writer::compressed_data_writer::SnappyCompressor
+reexport cqlite_core::storage::sstable::writer::StatisticsMetadata = struct cqlite_core::storage::sstable::writer::stats_writer::metadata::StatisticsMetadata
+reexport cqlite_core::storage::sstable::writer::StatisticsWriter = struct cqlite_core::storage::sstable::writer::stats_writer::StatisticsWriter
+reexport cqlite_core::storage::sstable::writer::StreamFinish = struct cqlite_core::storage::sstable::writer::data_writer::StreamFinish
+reexport cqlite_core::storage::sstable::writer::SummaryWriter = struct cqlite_core::storage::sstable::writer::summary_writer::SummaryWriter
+reexport cqlite_core::storage::sstable::writer::TocWriter = struct cqlite_core::storage::sstable::writer::toc_writer::TocWriter
+reexport cqlite_core::storage::sstable::writer::ZstdCompressor = struct cqlite_core::storage::sstable::writer::compressed_data_writer::ZstdCompressor
+reexport cqlite_core::storage::sstable::writer::create_compressor = fn cqlite_core::storage::sstable::writer::compressed_data_writer::create_compressor
+reexport cqlite_core::storage::sstable::writer::stats_writer::StatisticsMetadata = struct cqlite_core::storage::sstable::writer::stats_writer::metadata::StatisticsMetadata
+reexport cqlite_core::storage::sstable::writer::stats_writer::TombstoneHistogram = struct cqlite_core::storage::sstable::writer::stats_writer::metadata::TombstoneHistogram
+reexport cqlite_core::storage::write_engine::CellOperation = enum cqlite_core::storage::write_engine::mutation::CellOperation
+reexport cqlite_core::storage::write_engine::ClusteringBound = enum cqlite_core::storage::write_engine::mutation::ClusteringBound
+reexport cqlite_core::storage::write_engine::ClusteringKey = struct cqlite_core::storage::write_engine::mutation::ClusteringKey
+reexport cqlite_core::storage::write_engine::DecoratedKey = struct cqlite_core::storage::write_engine::mutation::DecoratedKey
+reexport cqlite_core::storage::write_engine::ExportOptions = struct cqlite_core::storage::write_engine::export::ExportOptions
+reexport cqlite_core::storage::write_engine::ExportReport = struct cqlite_core::storage::write_engine::export::ExportReport
+reexport cqlite_core::storage::write_engine::KWayMerger = struct cqlite_core::storage::write_engine::merge::KWayMerger
+reexport cqlite_core::storage::write_engine::Memtable = struct cqlite_core::storage::write_engine::memtable::Memtable
+reexport cqlite_core::storage::write_engine::Mutation = struct cqlite_core::storage::write_engine::mutation::Mutation
+reexport cqlite_core::storage::write_engine::PartitionKey = struct cqlite_core::storage::write_engine::mutation::PartitionKey
+reexport cqlite_core::storage::write_engine::PartitionTombstone = struct cqlite_core::storage::write_engine::mutation::PartitionTombstone
+reexport cqlite_core::storage::write_engine::PointAccessRecording = enum cqlite_core::storage::write_engine::merge::PointAccessRecording
+reexport cqlite_core::storage::write_engine::RangeTombstone = struct cqlite_core::storage::write_engine::mutation::RangeTombstone
+reexport cqlite_core::storage::write_engine::RecoveryReport = struct cqlite_core::storage::write_engine::wal::RecoveryReport
+reexport cqlite_core::storage::write_engine::STCSPolicy = struct cqlite_core::storage::write_engine::merge_policy::STCSPolicy
+reexport cqlite_core::storage::write_engine::TableId = struct cqlite_core::storage::write_engine::mutation::TableId
+reexport cqlite_core::storage::write_engine::WriteAheadLog = struct cqlite_core::storage::write_engine::wal::WriteAheadLog
+reexport cqlite_core::storage::write_engine::build_single_partition_merger = fn cqlite_core::storage::write_engine::merge::build_single_partition_merger
+reexport cqlite_core::storage::write_engine::build_single_partition_merger_from_readers = fn cqlite_core::storage::write_engine::merge::build_single_partition_merger_from_readers
+reexport cqlite_core::storage::write_engine::build_single_partition_merger_with_registry = fn cqlite_core::storage::write_engine::merge::build_single_partition_merger_with_registry
+reexport cqlite_core::storage::write_engine::merge::RepairState = struct cqlite_core::storage::write_engine::merge::repair_state::RepairState
+reexport cqlite_core::storage::write_engine::merge::classify_inputs = fn cqlite_core::storage::write_engine::merge::repair_state::classify_inputs
+reexport cqlite_core::types::ComparatorType = enum cqlite_core::types::comparator::ComparatorType
+reexport cqlite_core::write_engine = mod cqlite_core::storage::write_engine
+reexport-glob cqlite_core::* = cqlite_core::types::*
+reexport-glob cqlite_core::parser::* = cqlite_core::parser::complex_types::*
+reexport-glob cqlite_core::parser::* = cqlite_core::parser::enhanced_statistics_parser::*
+reexport-glob cqlite_core::parser::* = cqlite_core::parser::header::*
+reexport-glob cqlite_core::parser::* = cqlite_core::parser::statistics::*
+reexport-glob cqlite_core::parser::* = cqlite_core::parser::types::*
+reexport-glob cqlite_core::parser::* = cqlite_core::parser::vint::*
+struct cqlite_core::CellExpiration
+struct cqlite_core::CellWriteMetadata
+struct cqlite_core::ColumnId
 struct cqlite_core::Database
 struct cqlite_core::DatabaseStats
 struct cqlite_core::PreparedStatement
+struct cqlite_core::RowKey
+struct cqlite_core::TableId
+struct cqlite_core::TombstoneInfo
+struct cqlite_core::TupleValue
+struct cqlite_core::UdtField
+struct cqlite_core::UdtFieldDef
+struct cqlite_core::UdtTypeDef
+struct cqlite_core::UdtValue
 struct cqlite_core::config::BackgroundTaskConfig
 struct cqlite_core::config::CacheConfig
 struct cqlite_core::config::CompactionConfig
@@ -2174,14 +2484,31 @@ struct cqlite_core::observability::partition_access::PartitionAccessRecorder
 struct cqlite_core::observability::partition_access::TableScope
 struct cqlite_core::observability::partition_access::WindowConfig
 struct cqlite_core::observability::partition_access::WindowSummary
-struct cqlite_core::observability::partition_access::config::WindowConfig
 struct cqlite_core::observability::partition_access::decision::Ceiling
-struct cqlite_core::observability::partition_access::types::AccessWeightBuilder
-struct cqlite_core::observability::partition_access::types::BucketStats
-struct cqlite_core::observability::partition_access::types::WindowSummary
 struct cqlite_core::observability::stream_subphase::StreamSubPhaseGuard
 struct cqlite_core::observability::stream_subphase::StreamSubPhaseTimings
 struct cqlite_core::observability::stream_subphase::SubPhaseTimer
+struct cqlite_core::parser::ColumnInfo
+struct cqlite_core::parser::ColumnStatistics
+struct cqlite_core::parser::ComplexTypeParser
+struct cqlite_core::parser::CompressionInfo
+struct cqlite_core::parser::CompressionStatistics
+struct cqlite_core::parser::ParsedType
+struct cqlite_core::parser::PartitionSizeBucket
+struct cqlite_core::parser::PartitionStatistics
+struct cqlite_core::parser::RowSizeBucket
+struct cqlite_core::parser::RowStatistics
+struct cqlite_core::parser::SSTableHeader
+struct cqlite_core::parser::SSTableStatistics
+struct cqlite_core::parser::SSTableStats
+struct cqlite_core::parser::StatisticsAnalyzer
+struct cqlite_core::parser::StatisticsHeader
+struct cqlite_core::parser::StatisticsSummary
+struct cqlite_core::parser::TableStatistics
+struct cqlite_core::parser::TimestampStatistics
+struct cqlite_core::parser::TypeMetadata
+struct cqlite_core::parser::TypeParsingContext
+struct cqlite_core::parser::ValueFrequency
 struct cqlite_core::parser::binary::SSTableParser
 struct cqlite_core::parser::complex_types::ComplexTypeParser
 struct cqlite_core::parser::complex_types::ParsedType
@@ -2263,8 +2590,6 @@ struct cqlite_core::query::select_ast::WriteTimeTtlCall
 struct cqlite_core::query::select_executor::FixedClock
 struct cqlite_core::query::select_executor::PartitionKeyCache
 struct cqlite_core::query::select_executor::SelectExecutor
-struct cqlite_core::query::select_executor::row_build::PartitionKeyCache
-struct cqlite_core::query::select_executor::writetime_ttl::FixedClock
 struct cqlite_core::query::select_optimizer::AggregateComputation
 struct cqlite_core::query::select_optimizer::AggregationPlan
 struct cqlite_core::query::select_optimizer::OptimizedQueryPlan
@@ -2307,28 +2632,6 @@ struct cqlite_core::schema::discovery::UdtFieldInfo
 struct cqlite_core::schema::discovery::ValidationError
 struct cqlite_core::schema::discovery::ValidationResults
 struct cqlite_core::schema::discovery::ValidationWarning
-struct cqlite_core::schema::discovery::model::CachingOptions
-struct cqlite_core::schema::discovery::model::CollectionType
-struct cqlite_core::schema::discovery::model::ColumnDefinition
-struct cqlite_core::schema::discovery::model::CompactionStrategy
-struct cqlite_core::schema::discovery::model::CompressionOptions
-struct cqlite_core::schema::discovery::model::ConsistencyResults
-struct cqlite_core::schema::discovery::model::DiscoveryMetrics
-struct cqlite_core::schema::discovery::model::FieldConflict
-struct cqlite_core::schema::discovery::model::IndexDefinition
-struct cqlite_core::schema::discovery::model::SchemaDiscoveryConfig
-struct cqlite_core::schema::discovery::model::SchemaInfo
-struct cqlite_core::schema::discovery::model::SchemaMetadata
-struct cqlite_core::schema::discovery::model::TableOptions
-struct cqlite_core::schema::discovery::model::TypeInconsistency
-struct cqlite_core::schema::discovery::model::TypeInfo
-struct cqlite_core::schema::discovery::model::UDTDefinition
-struct cqlite_core::schema::discovery::model::UdtConflict
-struct cqlite_core::schema::discovery::model::UdtFieldDefinition
-struct cqlite_core::schema::discovery::model::UdtFieldInfo
-struct cqlite_core::schema::discovery::model::ValidationError
-struct cqlite_core::schema::discovery::model::ValidationResults
-struct cqlite_core::schema::discovery::model::ValidationWarning
 struct cqlite_core::schema::parser::SchemaParser
 struct cqlite_core::schema::registry::ParsingContext
 struct cqlite_core::schema::registry::RegistryStatistics
@@ -2341,7 +2644,6 @@ struct cqlite_core::schema::registry::SchemaVersion
 struct cqlite_core::schema::registry::ValidationError
 struct cqlite_core::schema::registry::ValidationReport
 struct cqlite_core::schema::registry::ValidationWarning
-struct cqlite_core::schema::udt_registry::UdtRegistry
 struct cqlite_core::storage::StorageEngine
 struct cqlite_core::storage::StorageStats
 struct cqlite_core::storage::cache::ChunkKey
@@ -2393,10 +2695,6 @@ struct cqlite_core::storage::sstable::bti::parser::BtiRowIndexEntry
 struct cqlite_core::storage::sstable::bti::parser::BtiRowIndexHeader
 struct cqlite_core::storage::sstable::bti::parser::RowsTrieRootRejection
 struct cqlite_core::storage::sstable::bti::parser::ValidatedRowsTrieRoot
-struct cqlite_core::storage::sstable::bti::parser::rows::BtiRowIndexEntry
-struct cqlite_core::storage::sstable::bti::parser::rows::BtiRowIndexHeader
-struct cqlite_core::storage::sstable::bti::parser::rows_root::RowsTrieRootRejection
-struct cqlite_core::storage::sstable::bti::parser::rows_root::ValidatedRowsTrieRoot
 struct cqlite_core::storage::sstable::bulletproof_reader::BulletproofReader
 struct cqlite_core::storage::sstable::bulletproof_reader::OaFormatHeader
 struct cqlite_core::storage::sstable::bulletproof_reader::SSTableEntry
@@ -2448,16 +2746,6 @@ struct cqlite_core::storage::sstable::reader::compaction_row::ComplexColumn
 struct cqlite_core::storage::sstable::reader::compaction_row::ComplexElement
 struct cqlite_core::storage::sstable::reader::compaction_row::RowLiveness
 struct cqlite_core::storage::sstable::reader::compaction_row::SimpleCell
-struct cqlite_core::storage::sstable::reader::data_access::joined_scan_stream::JoinedStream
-struct cqlite_core::storage::sstable::reader::data_access::model::ClusteringSlice
-struct cqlite_core::storage::sstable::reader::data_access::summary_scan::ScanTokenBound
-struct cqlite_core::storage::sstable::reader::data_access::summary_scan::query_rows::QueryRowStream
-struct cqlite_core::storage::sstable::reader::types::BlockMeta
-struct cqlite_core::storage::sstable::reader::types::IntegrityCheckResult
-struct cqlite_core::storage::sstable::reader::types::SSTableReader
-struct cqlite_core::storage::sstable::reader::types::SSTableReaderConfig
-struct cqlite_core::storage::sstable::reader::types::SSTableReaderHealthMetrics
-struct cqlite_core::storage::sstable::reader::types::SSTableReaderStats
 struct cqlite_core::storage::sstable::refresh::RefreshReport
 struct cqlite_core::storage::sstable::row_cell_state_machine::ClusteringRow
 struct cqlite_core::storage::sstable::row_cell_state_machine::DeletionInfo
@@ -2483,9 +2771,6 @@ struct cqlite_core::storage::sstable::verify::VerifyReport
 struct cqlite_core::storage::sstable::version_gate::BigVersionGates
 struct cqlite_core::storage::sstable::version_gate::BtiVersionGates
 struct cqlite_core::storage::sstable::version_gate::SsTableDescriptor
-struct cqlite_core::storage::sstable::version_gate::big::BigVersionGates
-struct cqlite_core::storage::sstable::version_gate::bti::BtiVersionGates
-struct cqlite_core::storage::sstable::version_gate::descriptor::SsTableDescriptor
 struct cqlite_core::storage::sstable::writer::SSTableInfo
 struct cqlite_core::storage::sstable::writer::SSTableWriter
 struct cqlite_core::storage::sstable::writer::compressed_data_writer::CompressedDataWriter
@@ -2499,7 +2784,6 @@ struct cqlite_core::storage::sstable::writer::compression_info_writer::Compressi
 struct cqlite_core::storage::sstable::writer::data_writer::DataWriter
 struct cqlite_core::storage::sstable::writer::data_writer::PartitionEmitCounts
 struct cqlite_core::storage::sstable::writer::data_writer::StreamFinish
-struct cqlite_core::storage::sstable::writer::data_writer::types::PartitionEmitCounts
 struct cqlite_core::storage::sstable::writer::digest_writer::DigestWriter
 struct cqlite_core::storage::sstable::writer::filter_writer::BloomFilterStats
 struct cqlite_core::storage::sstable::writer::filter_writer::FilterWriter
@@ -2512,7 +2796,6 @@ struct cqlite_core::storage::sstable::writer::partitions_writer::RowIndexBlock
 struct cqlite_core::storage::sstable::writer::partitions_writer::RowsTrieWriter
 struct cqlite_core::storage::sstable::writer::stats_writer::EstimatedHistogram
 struct cqlite_core::storage::sstable::writer::stats_writer::StatisticsWriter
-struct cqlite_core::storage::sstable::writer::stats_writer::estimated_histogram::EstimatedHistogram
 struct cqlite_core::storage::sstable::writer::stats_writer::metadata::StatisticsMetadata
 struct cqlite_core::storage::sstable::writer::stats_writer::metadata::TombstoneHistogram
 struct cqlite_core::storage::sstable::writer::summary_writer::SummaryWriter
@@ -2534,7 +2817,6 @@ struct cqlite_core::storage::write_engine::WriteEngine
 struct cqlite_core::storage::write_engine::WriteEngineConfig
 struct cqlite_core::storage::write_engine::export::ExportOptions
 struct cqlite_core::storage::write_engine::export::ExportReport
-struct cqlite_core::storage::write_engine::maintenance::MaintenanceReport
 struct cqlite_core::storage::write_engine::memtable::Memtable
 struct cqlite_core::storage::write_engine::merge::CellData
 struct cqlite_core::storage::write_engine::merge::CompactReport
@@ -2544,12 +2826,7 @@ struct cqlite_core::storage::write_engine::merge::MergeEntry
 struct cqlite_core::storage::write_engine::merge::MergeStats
 struct cqlite_core::storage::write_engine::merge::StreamingMerger
 struct cqlite_core::storage::write_engine::merge::UdtNormalizationPlan
-struct cqlite_core::storage::write_engine::merge::model::CellData
-struct cqlite_core::storage::write_engine::merge::model::ComplexDeletion
-struct cqlite_core::storage::write_engine::merge::model::MergeEntry
-struct cqlite_core::storage::write_engine::merge::model::MergeStats
 struct cqlite_core::storage::write_engine::merge::repair_state::RepairState
-struct cqlite_core::storage::write_engine::merge::streaming::StreamingMerger
 struct cqlite_core::storage::write_engine::merge_policy::STCSPolicy
 struct cqlite_core::storage::write_engine::mutation::ClusteringKey
 struct cqlite_core::storage::write_engine::mutation::DecoratedKey
@@ -2558,7 +2835,6 @@ struct cqlite_core::storage::write_engine::mutation::PartitionKey
 struct cqlite_core::storage::write_engine::mutation::PartitionTombstone
 struct cqlite_core::storage::write_engine::mutation::RangeTombstone
 struct cqlite_core::storage::write_engine::mutation::TableId
-struct cqlite_core::storage::write_engine::stats::CompactionStats
 struct cqlite_core::storage::write_engine::wal::RecoveryReport
 struct cqlite_core::storage::write_engine::wal::WriteAheadLog
 struct cqlite_core::types::CellExpiration
@@ -4044,9 +4320,7 @@ trait cqlite_core::cql::traits::CqlParser
 trait cqlite_core::cql::traits::CqlParserFactory
 trait cqlite_core::cql::traits::CqlVisitor
 trait cqlite_core::query::select_executor::NowSeconds
-trait cqlite_core::query::select_executor::writetime_ttl::NowSeconds
 trait cqlite_core::storage::sstable::reader::ScanStreamItem
-trait cqlite_core::storage::sstable::reader::data_access::joined_scan_stream::ScanStreamItem
 trait cqlite_core::storage::sstable::writer::compressed_data_writer::Compressor
 trait cqlite_core::storage::write_engine::MergePolicy
 trait cqlite_core::storage::write_engine::merge::SSTableRowIterator
@@ -4081,6 +4355,7 @@ tymethod cqlite_core::storage::sstable::writer::compressed_data_writer::Compress
 tymethod cqlite_core::storage::sstable::writer::compressed_data_writer::Compressor::compress
 tymethod cqlite_core::storage::write_engine::MergePolicy::select_merge
 tymethod cqlite_core::storage::write_engine::merge::SSTableRowIterator::next
+type cqlite_core::RowCells
 type cqlite_core::cql::ast::CqlOrdering
 type cqlite_core::cql::error::ParserResult
 type cqlite_core::cql::visitor::TransformationFn
@@ -4092,13 +4367,10 @@ type cqlite_core::schema::ColumnSpec
 type cqlite_core::storage::commitlog::schema::SchemaSet
 type cqlite_core::storage::sstable::bti::node::BtiResult
 type cqlite_core::storage::sstable::bti::parser::BtiRowIndexEntryWithKey
-type cqlite_core::storage::sstable::bti::parser::rows::BtiRowIndexEntryWithKey
 type cqlite_core::storage::sstable::index::SSTableIndex
 type cqlite_core::storage::sstable::promoted_index_reader::PrefixLen
 type cqlite_core::storage::sstable::reader::BatchedScanStream
 type cqlite_core::storage::sstable::reader::RowScanStream
-type cqlite_core::storage::sstable::reader::data_access::joined_scan_stream::BatchedScanStream
-type cqlite_core::storage::sstable::reader::data_access::joined_scan_stream::RowScanStream
 type cqlite_core::types::RowCells
 variant cqlite_core::config::CachePolicy::Lru
 variant cqlite_core::config::CompressionAlgorithm::Deflate

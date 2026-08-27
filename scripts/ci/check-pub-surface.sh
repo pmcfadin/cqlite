@@ -416,59 +416,226 @@ if [ ! -d "$DOC_ROOT" ]; then
 fi
 
 # ---------------------------------------------------------------------------
-# 3) Enumerate the rustdoc item tree -> "<kind> cqlite_core::a::b::Name" lines.
+# 3) Enumerate the public surface by WALKING RUSTDOC'S MODULE INDEX GRAPH.
 #
-#    One directory per public module; one `<kind>.<Name>.html` file per public
-#    item; and, per page, the ASSOCIATED items declared by this crate (inherent
-#    methods, associated consts/types, enum variants, public struct fields, trait
-#    required/provided members). rustdoc's own non-item files are skipped by name.
+#    NOT the filesystem tree. rustdoc emits a directory for every `pub mod` in the
+#    source, including modules that are NOT publicly reachable (a `pub mod` inside a
+#    private module, or one whose contents escape only through a `pub use`). Walking
+#    directories therefore gets the public API wrong in BOTH directions:
+#
+#      * it MISSES re-exports. `schema::AggregatorConfig` is public through a nested
+#        `pub use`; only the canonical `schema::aggregator::AggregatorConfig` has a
+#        directory. Deleting that re-export is a breaking change that a directory
+#        walk passes green — a false PASS.
+#      * it INVENTS private paths. `schema::udt_registry` has a directory but is not
+#        reachable from any public index, so renaming it read as a public API change
+#        — a false FAIL.
+#
+#    Each module's `index.html` is rustdoc's own statement of what that module makes
+#    public: its declared items, its child modules, and a `<h2 id="reexports">`
+#    section naming every `pub use`. So the walk starts at the crate root index and
+#    follows that graph; a directory no public index reaches is not public and is not
+#    recorded.
+#
+#    GLOB re-exports (`pub use x::*;`) are the one shape the index does not expand —
+#    it prints the glob line and nothing else. Those are resolved by WALKING THE
+#    TARGET MODULE under the importing module's path: everything the target declares
+#    is public at the importing path, so the expansion is exact rather than an
+#    estimate. A glob whose target is outside this crate cannot be enumerated from
+#    rustdoc output at all, and is a hard FAIL rather than a silent gap (there are
+#    none today).
+#
+#    Items are recorded at the paths at which they are PUBLIC, which for a
+#    re-exported item is the re-export path — that is the semver-relevant one. The
+#    canonical path is recorded alongside it on the `reexport` line, so a rename of a
+#    private-but-re-exported-through module shows up as ONE explainable line rather
+#    than a whole subtree of churn.
+#
+#    COMPLETENESS IS CROSS-CHECKED, not assumed: rustdoc also emits `all.html`, its
+#    own flat list of every public item in the crate. The set of item pages the walk
+#    reaches must equal the set `all.html` links. Two independent derivations of the
+#    same fact, and a disagreement FAILs — the same fail-safe shape as the crate-root
+#    scan above. (Measured today: 1011 = 1011, exactly.)
 # ---------------------------------------------------------------------------
 DERIVED_ITEMS="$WORK_DIR/items.txt"
-PAGES="$WORK_DIR/pages.txt"
 : >"$DERIVED_ITEMS"
-: >"$PAGES"
 
-# Modules: every directory below the crate doc root, plus the crate root itself.
-{
-  printf 'mod %s\n' "$CRATE_DOC_NAME"
-  find "$DOC_ROOT" -mindepth 1 -type d -print | while IFS= read -r d; do
-    rel="${d#"$DOC_ROOT"/}"
-    case "$rel" in
-      # rustdoc's own asset/aggregate trees. They live beside the crate dir rather
-      # than inside it on current stable, but skipping them here keeps the
-      # enumeration correct if that ever changes.
-      static.files|static.files/*|src|src/*|trait.impl|trait.impl/*|type.impl|type.impl/*|implementors|implementors/*) continue ;;
-    esac
-    printf 'mod %s::%s\n' "$CRATE_DOC_NAME" "${rel//\//::}"
-  done
-} >>"$DERIVED_ITEMS"
+INDEX_WALK_AWK="$WORK_DIR/index_walk.awk"
+cat >"$INDEX_WALK_AWK" <<'INDEX_WALK_AWK_EOF'
+# Walk rustdoc's MODULE INDEX GRAPH (never the filesystem tree) from the crate root
+# outward. See the guard's comment block for why.
+function slurp(f,   line, s, rc) {
+  s = ""
+  while ((rc = (getline line < f)) > 0) s = s line "\n"
+  close(f)
+  if (rc < 0) return "\001ERR"
+  return s
+}
+function resolve(dir, href,   full, parts, np, i, k, stack, out) {
+  if (href ~ /^[a-z]+:/) return ""
+  full = (dir == "" ? href : dir "/" href)
+  np = split(full, parts, "/")
+  k = 0
+  for (i = 1; i <= np; i++) {
+    if (parts[i] == "" || parts[i] == ".") continue
+    if (parts[i] == "..") { if (k > 0) k--; continue }
+    k++; stack[k] = parts[i]
+  }
+  out = ""
+  for (i = 1; i <= k; i++) out = (out == "" ? stack[i] : out "/" stack[i])
+  return out
+}
+function basename(p,   b) { b = p; sub(/^.*\//, "", b); return b }
+function dirname(p,   d) { if (p !~ /\//) return ""; d = p; sub(/\/[^\/]*$/, "", d); return d }
+# Name of the item a page URL points at: `struct.Foo.html` -> Foo, `foo/index.html` -> foo.
+function pagename(href,   b) {
+  b = basename(href)
+  if (b == "index.html") return basename(dirname(href))
+  sub(/\.html$/, "", b)
+  sub(/^[a-z]+\./, "", b)
+  return b
+}
+BEGIN {
+  split("modules structs enums functions constants traits types macros unions primitives statics attributes derives traitaliases", _w, " ")
+  for (_k in _w) WANT[_w[_k]] = 1
 
-# Items: `<kind>.<Name>.html` for every kind rustdoc emits as a standalone page.
-find "$DOC_ROOT" -type f -name '*.html' -print | while IFS= read -r f; do
-  rel="${f#"$DOC_ROOT"/}"
-  base="${rel##*/}"
-  dir="${rel%/*}"
-  [ "$dir" = "$rel" ] && dir=""
-  case "$base" in
-    index.html|all.html|help.html|settings.html) continue ;;
-  esac
-  kind="${base%%.*}"
-  case "$kind" in
-    struct|enum|fn|trait|type|constant|macro|union|derive|attr|primitive|static|mod) ;;
-    *) continue ;;
-  esac
-  name="${base#"$kind".}"
-  name="${name%.html}"
-  # Record the page for the associated-item pass below (same subject set, one
-  # enumeration decision, so the two passes can never disagree about what an
-  # "item page" is).
-  printf '%s\n' "$f" >>"$PAGES"
-  if [ -n "$dir" ]; then
-    printf '%s %s::%s::%s\n' "$kind" "$CRATE_DOC_NAME" "${dir//\//::}" "$name"
-  else
-    printf '%s %s::%s\n' "$kind" "$CRATE_DOC_NAME" "$name"
-  fi
-done >>"$DERIVED_ITEMS"
+  qn = 0
+  qn++; QDIR[qn] = ""; QMP[qn] = crate; QALIAS[qn] = 0
+  SEEN["" SUBSEP crate] = 1
+  head = 1
+  while (head <= qn) {
+    dir = QDIR[head]; mp = QMP[head]; alias = QALIAS[head]; head++
+    if (!(mp in MODSEEN)) { MODSEEN[mp] = 1; print "MOD\t" mp }
+    file = docroot (dir == "" ? "" : "/" dir) "/index.html"
+    content = slurp(file)
+    if (content == "\001ERR") { print "ERR\tcannot read module index " file " (module " mp ")"; continue }
+    nsec = split(content, seg, "<h2 ")
+    section = ""
+    for (si = 1; si <= nsec; si++) {
+      piece = seg[si]
+      if (si > 1) {
+        if (match(piece, /^id="[A-Za-z0-9_-]+" class="[^"]*section-header"/)) {
+          hdr = substr(piece, RSTART, RLENGTH); sub(/^id="/, "", hdr); sub(/".*$/, "", hdr)
+          section = hdr
+        }
+      }
+      if (section != "reexports" && !(section in WANT)) continue
+      nent = split(piece, ent, "<dt")
+      for (ei = 2; ei <= nent; ei++) {
+        e = ent[ei]
+        p = index(e, "</dt>")
+        if (p > 0) e = substr(e, 1, p - 1)
+        if (!match(e, /<a class="[a-z]+" href="[^"]*" title="[^"]*"/)) continue
+        anc = substr(e, RSTART, RLENGTH)
+        kind = anc; sub(/^<a class="/, "", kind); sub(/".*$/, "", kind)
+        href = anc; sub(/^.*href="/, "", href); sub(/".*$/, "", href)
+        title = anc; sub(/^.*title="/, "", title); sub(/"$/, "", title)
+        canon = title; sub(/^[a-z]+ /, "", canon)
+        page = resolve(dir, href)
+        if (section == "reexports") {
+          if (match(e, /^ id="reexport\.[A-Za-z0-9_]+"/)) {
+            nm = substr(e, RSTART, RLENGTH); sub(/^ id="reexport\./, "", nm); sub(/".*$/, "", nm)
+            printf "REEXPORT\t%s::%s\t%s\t%s\t%s\n", mp, nm, kind, canon, (kind == "mod" ? "" : page)
+          } else {
+            # A GLOB re-export (`pub use x::*;`). rustdoc does not expand it into the
+            # importing module's item lists, so the exposed names are invisible unless
+            # we WALK THE TARGET under the importing module's path. Everything the
+            # target declares is public here, so that walk is exact — not an estimate.
+            printf "GLOB\t%s\t%s\n", mp, canon
+            gd = dirname(page)
+            if (page == "") {
+              printf "ERR\tglob re-export `pub use %s::*;` in %s targets a module OUTSIDE this crate; its exposed names cannot be enumerated from rustdoc output\n", canon, mp
+            } else if (!((gd SUBSEP mp) in SEEN)) {
+              SEEN[gd SUBSEP mp] = 1; qn++; QDIR[qn] = gd; QMP[qn] = mp; QALIAS[qn] = 1
+            }
+          }
+          continue
+        }
+        nm = pagename(href)
+        exposed = mp "::" nm
+        if (kind == "mod") {
+          d = dirname(page)
+          if (!((d SUBSEP exposed) in SEEN)) { SEEN[d SUBSEP exposed] = 1; qn++; QDIR[qn] = d; QMP[qn] = exposed; QALIAS[qn] = alias }
+          # Inside a GLOB expansion every path differs from its canonical one by
+          # construction; the single `reexport-glob` line already records that, so
+          # emitting a per-item re-export line there would be noise, not information.
+          if (canon != exposed && !alias) printf "REEXPORT\t%s\t%s\t%s\t\n", exposed, kind, canon
+          continue
+        }
+        printf "ITEM\t%s\t%s\t%s\t%s\n", kind, exposed, page, canon
+        if (canon != exposed && !alias) printf "REEXPORT\t%s\t%s\t%s\t%s\n", exposed, kind, canon, page
+      }
+    }
+  }
+}
+INDEX_WALK_AWK_EOF
+
+WALK_RAW="$WORK_DIR/walk.txt"
+awk -v docroot="$DOC_ROOT" -v crate="$CRATE_DOC_NAME" -f "$INDEX_WALK_AWK" </dev/null >"$WALK_RAW"
+
+if grep -q '^ERR	' "$WALK_RAW"; then
+  echo "" >&2
+  grep '^ERR	' "$WALK_RAW" | cut -f2- >&2
+  fail "the module-index walk could not enumerate part of the public surface (see above). Refusing to report a verdict over a surface it could not fully measure."
+fi
+
+MODULE_COUNT="$(grep -c '^MOD	' "$WALK_RAW" || true)"
+ITEM_COUNT="$(grep -c '^ITEM	' "$WALK_RAW" || true)"
+REEXPORT_COUNT="$(grep -c '^REEXPORT	' "$WALK_RAW" || true)"
+GLOB_COUNT="$(grep -c '^GLOB	' "$WALK_RAW" || true)"
+
+if [ "${ITEM_COUNT:-0}" -eq 0 ] || [ "${MODULE_COUNT:-0}" -eq 0 ]; then
+  fail "the module-index walk reached $ITEM_COUNT items over $MODULE_COUNT modules under $DOC_ROOT — a zero count means the walk did not measure anything (rustdoc index layout changed?), NOT that the crate has no public API. Refusing to pass."
+fi
+
+# --- Completeness cross-check against rustdoc's own all.html -----------------
+ALL_HTML="$DOC_ROOT/all.html"
+[ -r "$ALL_HTML" ] || fail "$ALL_HTML is missing, so the walk's completeness cannot be cross-checked. That check is the only thing standing between this guard and a silently partial surface — refusing to pass without it."
+grep -o 'href="[^"]*\.html"' "$ALL_HTML" | sed 's/href="//; s/"$//' \
+  | grep -vE '(^|/)index\.html$' | LC_ALL=C sort -u >"$WORK_DIR/pages.all"
+awk -F'\t' '$1 == "ITEM" && $4 != "" { print $4 } $1 == "REEXPORT" && $5 != "" { print $5 }' \
+  "$WALK_RAW" | LC_ALL=C sort -u >"$WORK_DIR/pages.walk"
+if ! diff -u "$WORK_DIR/pages.all" "$WORK_DIR/pages.walk" >"$WORK_DIR/pages.diff" 2>&1; then
+  echo "" >&2
+  echo "rustdoc all.html vs the module-index walk:" >&2
+  sed -e '1s|.*|--- rustdoc all.html (every public item in the crate)|' \
+      -e '2s|.*|+++ reached by the module-index walk|' "$WORK_DIR/pages.diff" >&2
+  fail "the module-index walk and rustdoc's own all.html disagree about which item pages are public. One of them is wrong, so the enumerated surface cannot be trusted — the guard refuses rather than record a partial API."
+fi
+ALL_COUNT="$(wc -l <"$WORK_DIR/pages.all" | tr -d ' ')"
+[ "${ALL_COUNT:-0}" -gt 0 ] || fail "rustdoc's all.html lists zero public items. That is not a crate with no API, it is a measurement that did not happen."
+
+# --- Render the walk as snapshot lines ---------------------------------------
+awk -F'\t' '
+  $1 == "MOD"      { print "mod " $2 }
+  $1 == "ITEM"     { print $2 " " $3 }
+  $1 == "REEXPORT" { print "reexport " $2 " = " $3 " " $4 }
+  $1 == "GLOB"     { print "reexport-glob " $2 "::* = " $3 "::*" }
+' "$WALK_RAW" >>"$DERIVED_ITEMS"
+
+# --- page -> the path its ASSOCIATED items are recorded under ----------------
+# One entry per page, so a method is recorded once even when its type is public at
+# several paths (a glob re-export makes that common). Preference, in order: the
+# item's own CANONICAL path when that path is itself public — the most stable key,
+# and the one a reader expects; else the smallest public path; else, if the item is
+# public solely through a re-export, the re-export path. (Measured today: no page is
+# re-export-only, so the last arm is a fail-safe rather than a fallback in use.)
+awk -F'\t' '
+  # C = the item is public at its OWN canonical path; that is the preferred key.
+  $1 == "ITEM" && $4 != "" && $3 == $5 { C[$4] = $3 }
+  $1 == "ITEM" && $4 != "" { if (!($4 in D) || $3 < D[$4]) D[$4] = $3 }
+  $1 == "REEXPORT" && $5 != "" { if (!($5 in R) || $2 < R[$5]) R[$5] = $2 }
+  END {
+    for (p in D) print p "\t" ((p in C) ? C[p] : D[p])
+    for (p in R) if (!(p in D)) print p "\t" R[p]
+  }' "$WALK_RAW" | LC_ALL=C sort >"$WORK_DIR/pagemap.txt"
+
+PAGES="$WORK_DIR/pages.txt"
+cut -f1 "$WORK_DIR/pagemap.txt" | sed "s|^|$DOC_ROOT/|" >"$PAGES"
+while IFS= read -r _p; do
+  [ -f "$_p" ] || fail "the module-index walk references the item page $_p, which does not exist on disk. The doc tree is inconsistent; refusing to measure a surface from it."
+done <"$PAGES"
+
 
 # --- Associated items -------------------------------------------------------
 #
@@ -503,20 +670,21 @@ BEGIN {
   split("variants fields implementations required-methods provided-methods required-associated-consts provided-associated-consts required-associated-types provided-associated-types", _w, " ")
   for (_k in _w) if (_w[_k] != "") WANT[_w[_k]] = 1
   prefix = docroot "/"
+  # The path each page's associated items are recorded under is decided ONCE, by the
+  # module-index walk (see pagemap.txt), never re-derived from the file location —
+  # a file location is a definition site, which for a re-exported item is not
+  # necessarily a public path at all.
+  while ((getline _l < pagemap) > 0) {
+    _t = index(_l, "\t")
+    if (_t > 0) PATHOF[substr(_l, 1, _t - 1)] = substr(_l, _t + 1)
+  }
+  close(pagemap)
 }
 FNR == 1 {
   rel = FILENAME
   if (substr(rel, 1, length(prefix)) == prefix) rel = substr(rel, length(prefix) + 1)
-  base = rel
-  sub(/^.*\//, "", base)
-  dir = rel
-  if (dir == base) { dir = "" } else { sub(/\/[^\/]*$/, "", dir) }
-  pkind = base
-  sub(/\..*$/, "", pkind)
-  iname = substr(base, length(pkind) + 2)
-  sub(/\.html$/, "", iname)
-  gsub(/\//, "::", dir)
-  itempath = (dir == "" ? crate : crate "::" dir) "::" iname
+  itempath = PATHOF[rel]
+  if (itempath == "") { print "!NOPATH\t" rel > "/dev/stderr" }
   section = ""
 }
 {
@@ -562,14 +730,15 @@ ASSOC_RAW="$WORK_DIR/assoc.txt"
 ASSOC_ERR="$WORK_DIR/assoc.err"
 if [ -s "$PAGES" ]; then
   tr '\n' '\0' <"$PAGES" | xargs -0 awk -v crate="$CRATE_DOC_NAME" -v docroot="$DOC_ROOT" \
-    -f "$ASSOC_AWK" >"$ASSOC_RAW" 2>"$ASSOC_ERR"
+    -v pagemap="$WORK_DIR/pagemap.txt" -f "$ASSOC_AWK" >"$ASSOC_RAW" 2>"$ASSOC_ERR"
 else
   : >"$ASSOC_RAW"; : >"$ASSOC_ERR"
 fi
 
 if [ -s "$ASSOC_ERR" ]; then
   echo "" >&2
-  echo "Sections present but yielding no anchors (first 10):" >&2
+  echo "Associated-item scan diagnostics (first 10; !NOPATH = a page with no public path," >&2
+  echo "!EMPTY = a section present but yielding no anchors):" >&2
   head -10 "$ASSOC_ERR" >&2
   fail "the associated-item scan found rustdoc sections it could not read. That is the signature of a rustdoc HTML format change, not an empty API — refusing to record a surface measured with a broken extractor."
 fi
@@ -582,13 +751,6 @@ cat "$ASSOC_RAW" >>"$DERIVED_ITEMS"
 
 LC_ALL=C sort -o "$DERIVED_ITEMS" "$DERIVED_ITEMS"
 
-MODULE_COUNT="$(grep -c '^mod ' "$DERIVED_ITEMS" || true)"
-ITEM_COUNT="$(grep -vc '^mod ' "$DERIVED_ITEMS" || true)"
-ITEM_COUNT=$((ITEM_COUNT - ASSOC_COUNT))
-
-if [ "${ITEM_COUNT:-0}" -eq 0 ] || [ "${MODULE_COUNT:-0}" -eq 0 ]; then
-  fail "enumerated $ITEM_COUNT items over $MODULE_COUNT modules under $DOC_ROOT — a zero count means the enumeration did not measure anything (rustdoc layout changed?), NOT that the crate has no public API. Refusing to pass."
-fi
 
 # ---------------------------------------------------------------------------
 # 4) THE CONSISTENCY ASSERT (the core of #1712).
@@ -686,6 +848,17 @@ RENDERED="$WORK_DIR/rendered.snapshot"
 #     NOT recorded, and therefore NOT detected: a changed parameter type, a changed
 #     return type, changed generics or bounds, a changed field TYPE, or a changed
 #     visibility that does not change the item's presence.
+#   * RE-EXPORTS are first-class: \`pub use\` exposures are recorded as \`reexport\`
+#     lines naming BOTH the exposed path and the canonical target, and glob
+#     re-exports as \`reexport-glob\` lines PLUS the expanded item paths. Deleting a
+#     re-export is a breaking change and shows up here.
+#   * Only PUBLICLY REACHABLE paths are recorded. rustdoc emits a directory for every
+#     source \`pub mod\`, including ones no public index reaches; those are not public
+#     API and are absent here, so renaming a private-but-re-exported-through module
+#     is not a diff.
+#   * ASSOCIATED ITEMS are recorded ONCE per item, at its canonical public path when
+#     it has one (a glob re-export can make the same type public at several paths;
+#     the extra paths appear as item lines, not as duplicated method lists).
 #   * TRAIT / SYNTHETIC / BLANKET IMPL MEMBERS ARE DELIBERATELY EXCLUDED, as are
 #     \`deref-methods-*\` sections. Those anchors come from impls of foreign traits and
 #     from auto/blanket impls in dependencies — they are not this crate's declared
@@ -714,7 +887,7 @@ EOF
 
 if [ "$MODE" = regenerate ]; then
   cp "$RENDERED" "$SNAPSHOT"
-  echo "pub-surface: WROTE $SNAPSHOT_REL — $ITEM_COUNT public items + $ASSOC_COUNT associated items over $MODULE_COUNT modules; $DECL_COUNT crate-root declarations."
+  echo "pub-surface: WROTE $SNAPSHOT_REL — $ITEM_COUNT public items + $ASSOC_COUNT associated items + $REEXPORT_COUNT re-exports + $GLOB_COUNT glob re-exports over $MODULE_COUNT public modules; $DECL_COUNT crate-root declarations."
   echo "             Review the diff: it is a public-API change, not a formatting chore."
   exit 0
 fi
@@ -738,4 +911,4 @@ if ! diff -u "$SNAPSHOT" "$RENDERED" >"$WORK_DIR/surface.diff" 2>&1; then
 fi
 
 # Affirmative success line: a pasted gate SUMMARY must show that this check RAN.
-echo "pub-surface: $ITEM_COUNT public items + $ASSOC_COUNT associated items (methods/variants/fields/assoc consts) over $MODULE_COUNT modules match $SNAPSHOT_REL; $DECL_COUNT crate-root declarations consistent"
+echo "pub-surface: $ITEM_COUNT public items + $ASSOC_COUNT associated items + $REEXPORT_COUNT re-exports + $GLOB_COUNT globs over $MODULE_COUNT public modules match $SNAPSHOT_REL ($ALL_COUNT item pages, cross-checked against rustdoc all.html); $DECL_COUNT crate-root declarations consistent"
