@@ -91,9 +91,31 @@ ad-hoc cargo runs never count. `scripts/agent-gate.sh --list` shows the componen
 
 | Mode | Command | Use |
 |------|---------|-----|
-| **Full** — the gate of record | `scripts/agent-gate.sh` | ONCE per issue, immediately pre-merge, inside `flow-closer`. fmt, clippy `-D warnings`, core/integration/write/CLI tests, `oom-audit` (SKIP-aware structural no-unbounded-materialization audit, #2012), minimal-features build, smoke. Emits `AGENT-GATE SUMMARY`. |
+| **Full** — the gate of record | `scripts/agent-gate.sh` | ONCE per issue, immediately pre-merge, inside `flow-closer`. fmt, clippy `-D warnings`, core/integration/write/CLI tests, `oom-audit` (SKIP-aware structural no-unbounded-materialization audit, #2012), minimal-features build, the **feature-matrix lanes** (#1699: `flight-tests` EXECUTES cqlite-flight's whole suite; `legacy-heuristics` builds AND RUNS the feature's gated tests at its own feature set; `feature-iso-parquet`/`feature-iso-delta-scan` compile `parquet` and `delta-scan` in MUTUAL isolation, each without the other, never `--all-features`), smoke. Emits `AGENT-GATE SUMMARY`. |
 | **Lite** (#1821, ~1–5 min) | `scripts/agent-gate.sh --lite` | EVERY fix round. file-size + fmt + scoped clippy + blast-radius tests (touched package `--lib` + diff's new `--test` targets, mapped from `git diff origin/main...HEAD`; defaults to `cqlite-core --lib` when no rust package is in the diff). Emits a DISTINCT `AGENT-GATE LITE SUMMARY` (MODE: lite) — can NEVER be pasted as the full SUMMARY. |
 | **Delta** (#1892) | `scripts/agent-gate.sh --delta <anchor-sha> --anchor-run-id <id>` (or `--anchor-summary-file <path>`) | Re-certify a post-full-PASS polish round whose diff is ONLY executable tests/docs (rust test code, python/node binding tests against an already-built module, `scripts/tests/*.sh`, `*.md`; #2081). FAILs CLOSED on anything else (src, scripts, workflows, `Cargo.*`, config, test-data, unbuilt node module) — never builds, never passes vacuously. Emits a DISTINCT `AGENT-GATE DELTA SUMMARY` naming the anchor + a `delta-executors:` line; record BOTH it AND the anchor's full SUMMARY in the PR. NOT the gate of record. |
+
+**Compiling a feature is not covering it (#1699).** The scoped clippy matrix enables ~30 cqlite-core features
+at once under `--all-targets`, so a feature can be *test-compiled* on every full gate and have **executed
+nothing** — and a combined feature set is exactly what MASKS cross-feature coupling (an item gated on feature
+A referencing feature B's items compiles fine while both are on). Measured, not argued: turning EXECUTION on
+for `legacy-heuristics` surfaced 4 tests that had never run once, two of which assert behaviour CQLite
+deliberately does not support (#3372 five `not yet implemented` stubs behind the flag; #3374 filler-byte mock
+`Statistics.db` plus pre-`na` `mc-` names); and `flight-tests` surfaced **14 cqlite-flight targets that
+execute NOWHERE** — not locally, not in CI — because their module-level
+`#![cfg(feature = "observability-testing")]` is off in every lane that runs them (#3375), a gap #2910's tier
+aggregation cannot see because the tier *runs* and silently executes 0 tests. So when you add a feature flag,
+ask which lane **executes** it, not which lane compiles it; if the answer is none, the feature is uncovered
+however green the gate looks. `experimental` is the remaining known instance (#3373).
+Two corollaries the lanes are built on. **Derive, never curate**: both executing lanes compute their target
+set and their allowed-zero set from committed source at run time, so a new gated file is picked up and a
+feature joining `default` shrinks the excusal set with no gate edit — and a failed derivation is a FAIL naming
+the derivation, never a fallback to "nothing enabled", which would silently excuse every gated target. And
+**a lane in `--list` is not a lane that works**: `feature-iso-parquet` reports `PASS (0s)` warm, so presence
+proves nothing. `scripts/tests/test_agent_gate_feature_matrix_lanes.sh` (opt-in) plants each lane's
+incident-class break in a throwaway `git worktree` and requires the lane to red **and** to NAME the planted
+symbol — a bare red is not evidence either, since an unrelated breakage produces an identical exit code and
+SUMMARY line.
 
 **Required invocation — summary-file redirect, never raw stdout (issues #1175/#2079), full AND lite:**
 

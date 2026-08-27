@@ -181,9 +181,56 @@ The gate mirrors the enforced CI gates (`.github/workflows/ci.yml`,
 | `cli-tests` | `cargo test -p cqlite-cli --test unit_tests` |
 | `tooling-tests` | `bash scripts/tests/test_agent_gate_summary.sh` (SUMMARY-capture regression, #1175; SKIP-aware on missing python3) |
 | `minimal-build` | `cargo build -p cqlite-core --no-default-features --features all-compression` |
+| `flight-tests` | `cargo test --no-fail-fast -p cqlite-flight` — the WHOLE package (issue #1699) |
+| `legacy-heuristics` | `cargo build -p cqlite-core --features legacy-heuristics`, then `cargo test --no-fail-fast … --lib` + `--test` targets DERIVED from `cqlite-core/tests/*.rs` (#1699) |
+| `feature-iso-parquet` | `cargo test -p cqlite-core --no-default-features --features all-compression,parquet --lib --no-run` — **without** `delta-scan` (#1699) |
+| `feature-iso-delta-scan` | the mirror — **without** `parquet` (#1699) |
 | `smoke` | `bash test-data/scripts/smoke-test-all-tables.sh` (against a freshly built debug binary) |
 
 All components run even after a failure so one run reports everything.
+
+### Feature-matrix lanes (issue #1699)
+
+**Compiling a feature is not covering it.** The scoped clippy matrix below enables ~30 cqlite-core features
+at once under `--all-targets`, so a feature can be *test-compiled* on every full gate and have **executed
+nothing** — and a combined feature set is exactly what MASKS cross-feature coupling (an item gated on feature
+A referencing feature B's items compiles fine while both are on). Measured when these lanes landed: turning
+execution on for `legacy-heuristics` surfaced 4 tests that had never run once, two of which assert behaviour
+CQLite deliberately does not support (#3372, #3374); and `flight-tests` surfaced **14 cqlite-flight targets
+that execute nowhere** — not locally, not in CI — because their module-level
+`#![cfg(feature = "observability-testing")]` is off in every lane that runs them (#3375). When you add a
+feature flag, ask which lane **executes** it, not which lane compiles it. `experimental` is the remaining
+known instance (#3373).
+
+**Why the isolation lanes use `cargo test --lib --no-run`, not `cargo check --all-targets`.** The incident
+class they exist to catch (#1978) is an ungated `#[cfg(test)]` module referencing a feature-gated item, so a
+bare `cargo check` — which never compiles test targets — would be blind to it. But `--all-targets` overshoots
+in the other direction: measured, it compiles cqlite-core's ~100 *integration* test files, which assume
+default features, and fails on `storage::serialization`, `storage::write_engine` and `cqlite_core::query`
+being configured out. That is noise, not leakage. `--lib --no-run` compiles the lib **with** its `cfg(test)`
+modules and pulls in no integration target; `minimal-build` is the precedent.
+
+**Derive, never curate.** Both executing lanes compute their `--test` target set and their allowed-zero set
+from committed source at run time — the legacy lane by grepping for the cfg *attribute shape* (a doc comment
+is not a cfg site), the Flight lane from each file's module-level `#![cfg]` versus cargo's **resolved**
+feature set. So a newly added gated file is picked up, and a feature joining `default` shrinks the excusal
+set, with no gate edit. Unrecognised `#![cfg]` shapes (`any(…)`, `not(…)`, mixed predicates) are **not**
+excused — one absent feature does not prove the file compiles out. A failed derivation is a FAIL naming the
+derivation, never a fallback to "nothing enabled", which would silently excuse every gated target.
+
+**`--no-fail-fast` on both executing lanes.** `cargo test` stops after the first failing test *binary*, and a
+lane whose purpose is surfacing never-executed rot must surface all of it in one run. Measured: the first run
+reported only `P0_4_modern_format_rejection_tests`; the next then reported 3 further failures the first had
+hidden.
+
+**A lane in `--list` is not a lane that works.** `feature-iso-parquet` reports `PASS (0s)` warm, so presence
+and a green verdict prove nothing about whether it can fail.
+`scripts/tests/test_agent_gate_feature_matrix_lanes.sh` (opt-in; it performs real compiles, so it is not a
+default component) plants each lane's incident-class break in a throwaway `git worktree` — never the live
+checkout, since #2926 makes a mid-run tree mutation a gate FAIL — and requires the lane to red **and** to
+stay green unbroken, so it cannot pass by failing everything. It also requires the red to **name the planted
+symbol**: a bare red is not evidence either, because an unrelated breakage produces an identical exit code
+and SUMMARY line. Recorded observation: `docs/reports/ah6-1699-feature-matrix-lanes.md`.
 
 ### Scoped clippy (issue #1844)
 
