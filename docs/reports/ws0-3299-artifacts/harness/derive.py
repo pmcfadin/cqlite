@@ -167,13 +167,22 @@ def agg(points, key):
     return median([p[key] for p in points])
 
 
-def emit_table(reps, min_reps):
+def emit_table(reps, min_reps, overrides=None):
+    overrides = overrides or {}
     by_point = {}
     for r in reps:
         by_point.setdefault((r["s"], r["n"]), []).append(r)
     s_values = sorted({s for s, _ in by_point})
     n_values = sorted({n for _, n in by_point})
     bracket_notes = []
+    # Verdicts are computed WITHIN the tree given. A bracketing decision must be
+    # made from CONTEMPORANEOUS points (a candidate measured hours after its
+    # incumbent lets session drift answer the question), so an extension run that
+    # re-measured the incumbent interleaved with its candidates is the better
+    # authority for that S — and it lives in its own results tree precisely
+    # because its medians must NOT be pooled across sessions. An override is
+    # therefore explicit, sourced, and printed with its source rather than
+    # silently replacing the computed verdict.
     _sp = [spread_pct([r["aggregate_rows_per_s"] for r in v]) / 100.0
            for v in by_point.values() if len(v) >= 2]
     grid_max_spread = max(_sp) if _sp else 0.05
@@ -232,6 +241,10 @@ def emit_table(reps, min_reps):
         own_n1_cell = f"{own_n1:,.0f}" if own_n1 is not None else "n/m"
         peak_sp = spread_pct([x["aggregate_rows_per_s"] for x in v])
         verdict, why = bracket_verdict(by_point, s, peaks, n_values, grid_max_spread)
+        if s in overrides:
+            o = overrides[s]
+            verdict = o["verdict"]
+            why = f'{o["why"]} — SOURCE: {o["source"]}'
         bracket_notes.append((s, n_peak, verdict, why))
         print(
             f"| {s} | {best:,.0f} | {peak_sp:.1f}% | {n_peak} | "
@@ -432,13 +445,20 @@ def main():
     ap.add_argument("--results", help="results tree written by sweep.sh")
     ap.add_argument("--equivalence", metavar="RESULTS", help="render the equivalence control instead")
     ap.add_argument("--min-reps", type=int, default=3)
+    ap.add_argument("--verdict-override", metavar="JSON",
+                    help="per-S bracketing verdict from a CONTEMPORANEOUS extension run; "
+                         "each entry must name its source, which is printed with the verdict")
     args = ap.parse_args()
     if args.equivalence:
         emit_equivalence(args.equivalence)
         return
     if not args.results:
         ap.error("--results is required")
-    emit_table(collect(args.results), args.min_reps)
+    ov = {}
+    if args.verdict_override:
+        with open(args.verdict_override) as fh:
+            ov = {int(k): v for k, v in json.load(fh).items()}
+    emit_table(collect(args.results), args.min_reps, ov)
 
 
 if __name__ == "__main__":

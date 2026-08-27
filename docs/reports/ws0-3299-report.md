@@ -3,7 +3,7 @@
 **Status: DRAFT.** AC1 and AC2 are measured and complete. AC3 is DEFERRED
 (instrument unavailable, per the issue's pre-registered AC5) with the L1d partial
 reported. Two sections are placeholders pending runs the delivery lead owns:
-the S=6 bracketing extension and the frequency calibration. **AC4 is PARTIAL**:
+the frequency calibration and phase 2. **AC4 is PARTIAL**:
 its box-level target number is discharged (§5); its "remaining to target" half is
 a stated hole, because box-level `do_get` cannot be VALIDLY measured on 8
 physical cores (§9).
@@ -31,9 +31,10 @@ is **flat (×0.984)**, `L1-dcache-load-misses/row` is **flat (×0.979)**, and
 `cycles/row` rises only **×1.041**. A 4% cycles/row rise across the entire range
 is the quantitative form of "bare scan does not decay".
 
-**Every figure here carries two standing caveats.** Every best-N except S=1's sits
-at the top of its tested N ladder, so those are **lower bounds** (§4). And this
-rig does not control drift (§6).
+**Two standing caveats.** S=1 and S=6 have measured peaks (S=6's bracketed by a
+dedicated extension, §4); **S=2–S=5's best-N values sit at the top of their tested
+ladders and are lower bounds**. And this rig does not control drift (§6) — the
+target's precision is 0.74% within-session but −3.1%/−1.0% across ~1.5–2 h.
 
 ---
 
@@ -130,65 +131,56 @@ some tested N above it is lower by more than the relevant point's **own** spread
 **plateau** if within spread (the lower N is then reported — same throughput,
 cheaper); **edge-truncated** if nothing above it was tested.
 
-Only **S=1** is resolved (plateau at N=2; N=4 is 1.88% lower, inside its 3.41%
-spread). **S=2 through S=6 are all edge-truncated** — their best N is the largest
-N tried, so each is a **lower bound on that S's best**, not a measured peak.
+**Two of the six are resolved, and they are the two the acceptance criteria
+consume.** **S=1** is a plateau at N=2 (N=4 is 1.88% lower, inside its 3.41%
+spread). **S=6** is **bracketed** at N=24 by a dedicated extension — see below.
 
-For S=6 this is not marginal: **N=24 beats N=16 by +9.8%**, far outside that
-point's 0.4–0.7% spread, so the curve was still climbing when the ladder ended.
+**S=2 through S=5 remain edge-truncated**: their best N is the largest tried, so
+each is a **lower bound on that S's best**, not a measured peak. They shape the
+curve; no acceptance criterion reads them. Extending them was deliberately
+dropped in favour of resolving S=6, which is AC2's input.
 
-### Extension A's verdict: S=6 is a PLATEAU at N=24–32, upper end memory-bounded
+### FINAL VERDICT — S=6's peak is BRACKETED at N=24, a clean interior maximum
 
-Extension A re-measured the incumbent **N=24 interleaved with N=32/48/64 in the
-same rounds**, so every comparison below is contemporaneous and drift-robust by
-construction.
+Extensions A and B re-measured the incumbent **N=24 interleaved with its
+candidates in the same rounds**, so every comparison below is contemporaneous and
+drift-robust by construction. With all 3 reps at each point:
 
-| N | extA aggregate rows/s | vs N=24 |
-|--:|--:|--:|
-| 24 (incumbent, re-measured) | 2,647,966 | — |
-| 32 | 2,665,993 | **+0.68%** |
-| 48 | *unmeasurable* | OOM-killed under the 24 GiB containment cap |
+| N | reps | median rows/s | spread | vs N=24 |
+|--:|--:|--:|--:|--:|
+| 16 | 3 | 2,477,956 *(main grid)* | 0.38% | −8.4% |
+| **24** | 3 | **2,705,485** | **0.64%** | — |
+| 32 | 3 | 2,652,863 | 0.67% | **−1.95%** |
 
-The pre-registered rule, quoted: *"a peak is bracketed when the best N has at
-least one tested N above it that is lower by more than the point's own
-rep-to-rep spread. If a doubling is within spread, the top is flat — record it as
-a plateau and take the lowest N achieving it (cheaper configuration, same
-throughput)."* N=32's **+0.68%** sits inside the point's own **~0.7%** spread, so
-this is a **plateau**, and the rule takes the **lowest N achieving it — N=24**.
+The pre-registered rule: *a peak is bracketed when the best N has a tested N above
+it lower by more than the point's own spread.* **N=32 is 1.95% below N=24,
+exceeding the larger of the two spreads (0.67%)** — so the curve has demonstrably
+turned over. N=16 is below N=24 as well, so this is a **clean interior maximum**:
+it rises 16→24 and falls 24→32.
 
-**Consequence for AC2: the target is NOT materially understated.** The main
-grid's best-N was already sitting on the plateau, so the §5 figure is not a lower
-bound of unknown tightness — it is a plateau value with one bounded residual,
-below.
+**S=6 is therefore `bracketed`** — not `plateau`, not `edge-truncated`. The
+earlier plateau reading came from single reps (extA round 1 put N=32 at +0.68%,
+extB round 1 at −1.95% — the sign flipped); replication resolved it, which is
+exactly what ≥3 reps are for and a good illustration of why AC1 demands them.
 
-**S=6 is marked `plateau (N=24–32), upper end memory-bounded`** — deliberately
-neither of the other two verdicts. Not `bracketed`, because nothing above N=32
-could be measured, so the curve was never observed turning over. Not
-`edge-truncated`, because N=32 *was* measured and *is* within spread. That
-three-way distinction is the honest one and the table carries it verbatim.
+**One precision about which halves are contemporaneous.** The *fall* (24→32) is
+measured within one interleaved run and is the load-bearing half. The *rise*
+(16→24) pairs the main grid's N=16 against extB's N=24, i.e. across sessions —
+but the measured session offsets (−3.1%, −1.0%) are far smaller than the **+9.2%**
+rise, so it is robust to them. Said plainly rather than left for a reader to spot.
 
-**The N=48 limit is MEMORY, not throughput — and it is a property of THIS
-HARNESS, not of CQLite.** 48 independent scan processes exceeded the 24 GiB
-containment cap and the scope was OOM-killed. Each worker in this harness holds
-its **own** `Database`, its own readers and its own buffers, because the arm
-under test is *N independent bare scans*; that is the design of the measurement,
-not of the engine. **Nobody deploys 48 independent scanners**, and production
-`do_get` shares one server process. So: the peak search space here is bounded at
-**N ≤ 32 by memory**, and **nothing in this bound is a CQLite memory limit** —
-do not read it as one.
+**N=40 was considered and dropped**, not overlooked: the function is decreasing
+past N=24 and N≥48 is unmeasurable (below), so no point at 40 can change the
+maximum. Running it would have added box time and no information.
 
-**Extension B strengthens the verdict in the strongest available way: the sign
-FLIPPED.** Extension B's round 1 puts N=32 at **−1.95%** against N=24, where
-extension A's round 1 had it at **+0.68%**. So the N=24→N=32 gap is **smaller
-than the scatter between two measurements of the same pair** — which is what a
-plateau *is*, established by measurement rather than by a threshold comparison.
-
-That upgrades "take the lowest N" from a tie-break convention to a substantive
-conclusion: **N=24 is at worst equal to N=32**, so the main grid's **2,732,817
-stands as the plateau value** and nothing above it was left on the table within
-the measurable range.
-
-> **PLACEHOLDER — extension B medians** (`6:24,32`, 3 reps) once all 6 reps land.
+**Separately — and no longer load-bearing for the peak — N≥48 is not a measurable
+configuration here.** 48 independent scan processes exceed the 24 GiB containment
+cap and the scope is OOM-killed. This is a property of **this harness's
+N-independent-process design** (each worker holds its own `Database`, readers and
+buffers, because the arm under test is *N independent bare scans*) — **not of
+CQLite, and not of production `do_get`**, which shares one server process. Nobody
+deploys 48 independent scanners. It is reported because it bounds what future
+work can probe on this box, not because the peak rests on it.
 
 ## 5. AC2 — the derived box-level target
 
@@ -212,13 +204,22 @@ Byte bases, per mission §1 — never a bare rows/s:
 The division is `/ 1.3`, not `× 1.3`: mission §6 is normative ("within ~1.3× of")
 and §0 does the arithmetic the same way.
 
-**Status of this figure, after extension A (§4): NOT materially understated.**
-The earlier reading — a lower bound of unknown tightness — was correct only until
-the plateau was measured. N=32 is within spread of N=24, so the main grid's
-best-N was already on the plateau. One residual remains and is bounded rather
-than open: **N > 32 could not be measured at all** (memory, §4), so the figure is
-a plateau value with an unmeasurable region above it, not a peak observed to turn
-over.
+**Status of this figure: FIRM.** S=6's peak is **bracketed by measurement** at
+N=24 (§4) — a clean interior maximum, with the curve observed rising into it and
+falling out of it. Every earlier "lower bound of unknown tightness" hedge is
+retired: this is a measurement with a stated error bar, not a floor.
+
+**An independent confirmation two hours later**, at the AC2 configuration:
+
+| source | S=6, N=24 | derived target (÷1.3) |
+|---|--:|--:|
+| **main grid** — the campaign of record (25 points × 3 reps, S-order rotated) | **2,732,817** (spread 0.74%) | **2,102,167** |
+| extension B — targeted confirmation, ~2 h later | 2,705,485 (spread 0.64%) | 2,081,143 |
+
+The main grid's figure is the **headline**, because it comes from the campaign of
+record. Extension B reproducing it to **−1.0%** two hours later is a stronger
+statement about the target's reliability than the within-session 0.64% alone,
+which speaks only to dispersion inside one session (§6).
 
 It is **+56%** above the issue body's ~1.35M estimate, which assumed bare scan
 would scale at `do_get`'s 71%.

@@ -1,0 +1,7 @@
+{
+  "6": {
+    "verdict": "bracketed",
+    "source": "extension B (grid 6:24,32, 3 reps, incumbent re-measured INTERLEAVED with the candidate in every round, so the comparison is contemporaneous)",
+    "why": "N=32 (2,652,863, spread 0.67%) is 1.95% BELOW N=24 (2,705,485, spread 0.64%), exceeding the larger of the two spreads, so the curve has turned over; N=16 is below N=24 as well, making this a clean INTERIOR MAXIMUM (rises 16->24, falls 24->32)"
+  }
+}

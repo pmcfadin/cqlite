@@ -26,7 +26,7 @@ Aggregate rows/s (median), min-max spread as % of median in parentheses. Blank =
 | 3 | 1,290,610 | 1.7% | 8 | 162,619 | 254,991 | 2.649 | **0.883** | 3.596 | 1.199 | 15,821.9 | 23,441.8 | 1.482 | 5,866.5 | 124.16 | **edge-truncated** |
 | 4 | 1,826,004 | 0.4% | 16 | 115,262 | 249,531 | 3.748 | **0.937** | 5.088 | 1.272 | 15,055.1 | 22,911.4 | 1.522 | 5,736.8 | 110.18 | **edge-truncated** |
 | 5 | 2,177,475 | 1.7% | 16 | 133,267 | 231,424 | 4.469 | **0.894** | 6.068 | 1.214 | 15,572.9 | 23,262.5 | 1.494 | 5,822.2 | 120.41 | **edge-truncated** |
-| 6 | 2,732,817 | 0.7% | 24 | 113,913 | 239,223 | 5.609 | **0.935** | 7.615 | 1.269 | 14,819.6 | 22,769.4 | 1.536 | 5,702.8 | 107.47 | **edge-truncated** |
+| 6 | 2,732,817 | 0.7% | 24 | 113,913 | 239,223 | 5.609 | **0.935** | 7.615 | 1.269 | 14,819.6 | 22,769.4 | 1.536 | 5,702.8 | 107.47 | **bracketed** |
 
 ### Is each best-N a real peak? (pre-registered bracketing rule)
 
@@ -35,7 +35,7 @@ Aggregate rows/s (median), min-max spread as % of median in parentheses. Blank =
 - **S=3, N@peak=8 — EDGE-TRUNCATED**: N=8 is the largest N tested at S=3; nothing above it was measured, so this is a LOWER BOUND on S=3's best, not a measured peak.
 - **S=4, N@peak=16 — EDGE-TRUNCATED**: N=16 is the largest N tested at S=4; nothing above it was measured, so this is a LOWER BOUND on S=4's best, not a measured peak.
 - **S=5, N@peak=16 — EDGE-TRUNCATED**: N=16 is the largest N tested at S=5; nothing above it was measured, so this is a LOWER BOUND on S=5's best, not a measured peak.
-- **S=6, N@peak=24 — EDGE-TRUNCATED**: N=24 is the largest N tested at S=6; nothing above it was measured, so this is a LOWER BOUND on S=6's best, not a measured peak.
+- **S=6, N@peak=24 — BRACKETED**: N=32 (2,652,863, spread 0.67%) is 1.95% BELOW N=24 (2,705,485, spread 0.64%), exceeding the larger of the two spreads, so the curve has turned over; N=16 is below N=24 as well, making this a clean INTERIOR MAXIMUM (rises 16->24, falls 24->32) — SOURCE: extension B (grid 6:24,32, 3 reps, incumbent re-measured INTERLEAVED with the candidate in every round, so the comparison is contemporaneous).
 
 **An `edge-truncated` row is a LOWER BOUND, not a measured peak**, and any figure derived from it (including AC2's target) inherits that status. It is not smoothed, interpolated, or quoted as a result.
 
