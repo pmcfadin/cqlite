@@ -433,8 +433,19 @@ async fn dropping_a_streaming_iterator_retires_its_producer() {
     let db = open_committed_db(Duration::ZERO).await;
     let baseline = alive_tasks();
 
+    // A ONE-row channel buffer, deliberately: with the default 1024-row buffer the
+    // producer can push this fixture's whole result set and EXIT before the check
+    // below, making "a producer is alive" a race. With `buffer_size = 1` and a
+    // fixture of many rows, taking one row leaves the producer parked on a full
+    // channel — so it is still alive by construction, not by timing.
     let mut iter = db
-        .execute_streaming(&scan_query(&COMMITTED), StreamingConfig::default())
+        .execute_streaming(
+            &scan_query(&COMMITTED),
+            StreamingConfig {
+                buffer_size: 1,
+                ..StreamingConfig::default()
+            },
+        )
         .await
         .expect("unbounded streaming setup");
     let first = iter.next_async().await;
@@ -445,7 +456,8 @@ async fn dropping_a_streaming_iterator_retires_its_producer() {
     );
     assert!(
         alive_tasks() > baseline,
-        "precondition: a live producer task must exist while the iterator is held"
+        "precondition: a live producer task must exist while the iterator is held \
+         (it is parked on the 1-row channel with rows left to send)"
     );
 
     drop(iter);
