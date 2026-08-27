@@ -17,22 +17,83 @@
 # corner case: CLAUDE.md records that subagents are killed by a 600s stall watchdog
 # under CPU contention, and this suite runs for minutes inside `tooling-tests`.
 #
-# RESIDUAL, stated rather than implied: SIGKILL cannot be trapped by any process, so
-# a `kill -9` still leaks. The remedy is the same manual one
-# (`git worktree remove --force <path>`); nothing here can prevent it, and a
-# startup reaper that guessed which stale worktrees were "definitely dead" would be
-# a heuristic that could delete a CONCURRENT run's checkouts.
+# WHAT A TRAP CAN AND CANNOT DO — MEASURED, because the obvious fix is NOT sufficient
+# and it would be easy to ship a vacuous test of it:
+#
+#   * `kill -TERM <pid>` on the script alone: bash runs the EXIT trap ANYWAY (measured:
+#     a script carrying only `trap cleanup EXIT` cleaned up and exited 143). So a
+#     signal-based test that signals a single PID CANNOT tell a fixed suite from a
+#     broken one — it passes either way, which makes it worse than no test.
+#   * A PROCESS-GROUP kill (`kill -TERM -<pgid>` — what a tool timeout and a watchdog
+#     send) skips the traps: bash is waiting on a foreground child that the same signal
+#     kills, and dies by signal. Measured with and without an explicit TERM trap, with
+#     and without `set -e`, and with the `sleep & wait` idiom: no cleanup in any of them.
+#   * SIGKILL cannot be trapped at all, by anyone.
+#
+# So the trap list below is cheap hygiene for the single-PID case, and it is NOT the
+# fix. The fix is the STARTUP REAP: the next run cleans up after the killed one, which
+# works however the previous run died — the only property worth having here.
+#
+# The reap is BOUNDED, not a heuristic: the suite holds a single-instance LOCK, so while
+# it runs no other instance can exist, and therefore every `pub-surface-selftest.*`
+# worktree registration other than this run's own is provably from a dead run.
 
-# ps_scratch_init <repo-root>: create the scratch root and install the cleanup trap.
+# ps_reap_stale_scratch <repo-root>: remove every `pub-surface-selftest.*` worktree
+# registration that is not this run's. Safe because the caller holds the single-instance
+# lock, so no concurrent run's checkouts can be in that set.
+ps_reap_stale_scratch() {
+  local repo="$1" wt
+  while IFS= read -r wt; do
+    [ -n "$wt" ] || continue
+    case "$wt" in
+      *"/pub-surface-selftest."*) ;;
+      *) continue ;;
+    esac
+    if [ -n "${PS_TMPROOT:-}" ]; then
+      case "$wt" in "$PS_TMPROOT"/*) continue ;; esac
+    fi
+    git -C "$repo" worktree remove --force "$wt" >/dev/null 2>&1 || true
+    rm -rf "$wt"
+  done < <(git -C "$repo" worktree list --porcelain 2>/dev/null | awk '/^worktree /{ print substr($0, 10) }')
+  git -C "$repo" worktree prune >/dev/null 2>&1 || true
+  return 0
+}
+
+# ps_scratch_init <repo-root>: take the single-instance lock, reap whatever a killed
+# predecessor left registered, create this run's scratch root, install the traps.
 ps_scratch_init() {
   PS_REPO_ROOT="$1"
   PS_WORKTREES=()
   PS_CLEANED=0
+  PS_LOCK_DIR=""
+  PS_TMPROOT=""
+  PS_LOCK="${TMPDIR:-/tmp}/pub-surface-selftest.lock"
+  local wait_secs=600
+
+  # Single instance. `flock(1)` is util-linux and ABSENT ON macOS, a gate host here, so
+  # the fallback is an atomic mkdir mutex. Both give the property the reap needs: while
+  # this runs, no other instance of this suite exists.
+  if command -v flock >/dev/null 2>&1; then
+    exec 8>"$PS_LOCK" || { echo "FAIL: cannot create the self-test lock $PS_LOCK"; exit 1; }
+    flock -w "$wait_secs" 8 \
+      || { echo "FAIL: timed out after ${wait_secs}s waiting for the self-test lock $PS_LOCK - another run of this suite is active."; exit 1; }
+  else
+    local deadline=$(( $(date +%s) + wait_secs ))
+    until mkdir "$PS_LOCK.d" 2>/dev/null; do
+      [ "$(date +%s)" -lt "$deadline" ] \
+        || { echo "FAIL: timed out after ${wait_secs}s waiting for the self-test lock $PS_LOCK.d."
+             echo "      Either another run is active, or a killed run left it behind: rmdir '$PS_LOCK.d'"
+             exit 1; }
+      sleep 1
+    done
+    PS_LOCK_DIR="$PS_LOCK.d"
+  fi
+
+  # With the lock held, anything still registered belongs to a dead run. Reap BEFORE
+  # this run's own scratch root exists, so the "not mine" test cannot be got wrong.
+  ps_reap_stale_scratch "$PS_REPO_ROOT"
+
   PS_TMPROOT="$(mktemp -d "${TMPDIR:-/tmp}/pub-surface-selftest.XXXXXX")"
-  # EXIT alone is not enough — it does not fire on a signal. INT/TERM/HUP are the
-  # signals a tool timeout, a Ctrl-C and a watchdog actually send. The handler
-  # cleans up and then re-raises the conventional 128+signo status, so callers
-  # still see that the run was killed rather than that it failed.
   trap 'ps_cleanup' EXIT
   trap 'ps_cleanup; exit 130' INT
   trap 'ps_cleanup; exit 143' TERM
@@ -55,7 +116,11 @@ ps_cleanup() {
   # Unconditional, not only on failure: reclaims any registration whose directory is
   # already gone, which is the state `remove` cannot address.
   git -C "$PS_REPO_ROOT" worktree prune >/dev/null 2>&1 || true
-  rm -rf "$PS_TMPROOT"
+  [ -n "${PS_TMPROOT:-}" ] && rm -rf "$PS_TMPROOT"
+  if [ -n "${PS_LOCK_DIR:-}" ]; then
+    rmdir "$PS_LOCK_DIR" 2>/dev/null || true
+    PS_LOCK_DIR=""
+  fi
   return 0
 }
 
@@ -140,31 +205,12 @@ ps_scratch_tree_from() {
   ps_overlay "$src" "$path"
 }
 
-# ps_scratch_reuse <source-checkout>: hand back ONE shared scratch worktree, reset to
-# <source-checkout>'s working tree.
-#
-# WHY REUSE. Every distinct worktree PATH is a distinct cargo fingerprint, so a fresh
-# worktree per case made `cargo doc` re-do work and thrash the shared target dir:
-# measured per-case cost climbed 13s -> 31s across the suite, ~230s total. Reusing one
-# path keeps cargo's view stable, so only the file a case actually changed is
-# re-documented.
-#
-# Correctness is not traded away for that: the tree is hard-reset (`checkout -f` +
-# `clean -fd`) and then re-overlaid, and ps_overlay's status-equality assert runs
-# every single time — so a case can only ever see the working tree, never the
-# previous case's mutations. Cases needing two trees at once (the dirty-tree case)
-# still call ps_scratch_tree_from for a genuinely separate one.
-PS_SHARED=""
-ps_scratch_reuse() {
-  local src="$1"
-  if [ -z "$PS_SHARED" ]; then
-    ps_scratch_tree_from "$src" shared
-    PS_SHARED="$SCRATCH"
-    return 0
-  fi
-  git -C "$PS_SHARED" checkout -f --quiet HEAD -- . 2>/dev/null \
-    || { echo "FAIL: could not reset the shared scratch worktree $PS_SHARED"; exit 1; }
-  git -C "$PS_SHARED" clean -fdq \
-    || { echo "FAIL: could not clean the shared scratch worktree $PS_SHARED"; exit 1; }
-  ps_overlay "$src" "$PS_SHARED"
-}
+# MEASURED AND REJECTED (issue #1712, round 5): reusing ONE scratch worktree across
+# cases, reset between them, to keep cargo's fingerprint stable. It bought NOTHING —
+# 4m13 shared vs 4m00 one-per-case on the same box — because the suite's cost is
+# almost entirely `cargo doc`, not worktree setup: a bare
+# `cargo doc --no-deps -p cqlite-core --lib` measured 5.8s early in that session and
+# 22.4s later on the same machine, while the guard's own logic is ~1s. So the suite's
+# duration tracks machine state, and the only real lever is FEWER doc builds, not
+# fewer worktrees. One worktree per case is kept because it is simpler and gives each
+# case total isolation.

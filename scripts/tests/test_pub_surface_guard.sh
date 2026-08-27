@@ -66,11 +66,11 @@
 #  18.  RED    — a `doc` cfg predicate must make the guard REFUSE: `cargo doc`
 #                compiles with `doc` SET, so a `#[cfg(not(doc))]` item ships while
 #                being invisible to rustdoc and to this snapshot.
-#  19.  KILL   — a run killed by SIGTERM must leak NO git worktree. A bash EXIT trap
-#                does not fire on a signal, and this suite creates one registered
-#                worktree per case, so a watchdog kill used to pollute the repo's
-#                worktree registry with one entry per case (measured: 11, and
-#                `git worktree prune` could not reclaim them).
+#  19.  KILL   — a killed run must not leave registered git worktrees behind (measured:
+#                a 2-minute tool timeout left 11, and `git worktree prune` could not
+#                reclaim them). Pins the STARTUP REAP behaviourally against a real
+#                leaked registration — traps alone provably do not fix this, see the
+#                library's comment — plus the trap list structurally.
 #
 # NO TEST-ONLY SEAM. The guard's subject is hard-coded on purpose, so the negative
 # cases SUBSTITUTE THE ARTIFACT: each runs in its own `git worktree add --detach HEAD`
@@ -102,9 +102,7 @@ export CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-$REPO_ROOT/target}"
 ps_scratch_init "$REPO_ROOT"
 TMPROOT="$PS_TMPROOT"
 scratch_tree_from() { ps_scratch_tree_from "$@"; }
-# Every case but the dirty-tree one (which needs two trees at once) reuses a single
-# scratch worktree, reset to the working tree each time — see ps_scratch_reuse.
-scratch_tree() { ps_scratch_reuse "$REPO_ROOT"; }
+scratch_tree() { ps_scratch_tree_from "$REPO_ROOT" "$1"; }
 
 fail_case() { echo "FAIL: $*"; exit 1; }
 
@@ -626,75 +624,63 @@ grep -q 'cargo-public-api' "$TMPROOT/case18.out" \
 echo "OK (18): a \`doc\` cfg predicate makes the guard REFUSE rather than certify"
 
 # ---------------------------------------------------------------------------
-# 19. KILL SAFETY — a run killed by SIGTERM must leak NO git worktree.
+# 19. KILL SAFETY — a killed run must not leave registered git worktrees behind.
 #
-#     A bash EXIT trap does NOT fire on SIGTERM/SIGINT. With `trap cleanup EXIT`
-#     alone, a killed run left one REGISTERED worktree per case behind — measured:
-#     11 of them — and `git worktree prune` could NOT reclaim them, because their
-#     directories and admin files were intact, so they had to be removed by hand.
-#     Subagents here are killed by the 600s stall watchdog under CPU contention and
-#     this suite runs for minutes inside `tooling-tests`, so this is a routine
-#     event, not a corner case.
+#     THE OBSERVED FAILURE. A 2-minute tool timeout on this suite left ELEVEN
+#     registered worktrees in the repository, and `git worktree prune` could not
+#     reclaim them because their directories and admin files were intact; they had to
+#     be removed by hand. This suite runs for minutes inside `tooling-tests`, and
+#     CLAUDE.md records that subagents are killed by a 600s stall watchdog, so this is
+#     routine.
 #
-#     Driven BEHAVIOURALLY, through the real code path: a tiny harness sources the
-#     same scratch library this suite uses, creates a registered worktree and
-#     blocks; we SIGTERM it and assert the registry and the scratch root are both
-#     clean afterwards. Signalling this suite itself would need recursion plus a
-#     recursion-guard seam, hence the second process — which is also why the
-#     scratch/cleanup code lives in a library rather than inline here.
+#     WHY THE OBVIOUS FIX IS NOT THE FIX, and why this case tests the reap instead of
+#     the trap. Measured on this bash: `kill -TERM <pid>` on the script alone runs the
+#     EXIT trap ANYWAY, so a single-PID signal test passes whether or not INT/TERM are
+#     trapped — it cannot discriminate, which is exactly the vacuous-test shape this
+#     issue keeps fighting. A PROCESS-GROUP kill (what a tool timeout sends) skips the
+#     traps entirely even when INT/TERM/HUP are trapped, and SIGKILL cannot be trapped
+#     by anyone. So the traps are hygiene; the thing that actually recovers the
+#     repository is the STARTUP REAP, and that is what is pinned behaviourally here.
 #
-#     A structural assertion rides along, because the behavioural case can only
-#     observe the signals it sends: it pins that the library's trap actually NAMES
-#     INT, TERM and HUP, so dropping one silently is caught too.
+#     Both halves are asserted: the reap, behaviourally, against a REAL leaked
+#     registration; and the trap list, structurally, so it cannot silently shrink.
 # ---------------------------------------------------------------------------
 _lib="$REPO_ROOT/scripts/tests/lib/pub-surface-scratch-lib.sh"
 for _sig in INT TERM HUP; do
   grep -qE "^  trap 'ps_cleanup; exit [0-9]+' $_sig\$" "$_lib" \
-    || fail_case "case 19 — the scratch library no longer traps $_sig. An EXIT trap alone does not fire on a signal, so a watchdog kill leaks one registered git worktree per case into the repo (prune cannot reclaim them)."
+    || fail_case "case 19 — the scratch library no longer traps $_sig. Cheap hygiene for the single-PID case; do not drop it."
 done
 grep -qE "^  trap 'ps_cleanup' EXIT\$" "$_lib" \
   || fail_case "case 19 — the EXIT trap is gone from the scratch library; the normal-exit path would stop cleaning up"
 grep -qF 'PS_CLEANED=1' "$_lib" \
   || fail_case "case 19 — cleanup is no longer idempotent, but a signal handler runs it and then the EXIT trap runs it again"
 
-KILL_HARNESS="$TMPROOT/kill-harness.sh"
-cat >"$KILL_HARNESS" <<HARNESS
-#!/usr/bin/env bash
-set -euo pipefail
-. "$REPO_ROOT/scripts/tests/lib/pub-surface-scratch-lib.sh"
-ps_scratch_init "$REPO_ROOT"
-ps_scratch_tree_from "$REPO_ROOT" kill-safety
-printf '%s\n' "\$PS_TMPROOT" >"$TMPROOT/kill-harness.root"
-printf 'ready\n' >"$TMPROOT/kill-harness.ready"
-while :; do sleep 1; done
-HARNESS
-rm -f "$TMPROOT/kill-harness.ready" "$TMPROOT/kill-harness.root"
-bash "$KILL_HARNESS" >"$TMPROOT/kill-harness.out" 2>&1 &
-harness_pid=$!
-_deadline=$(( $(date +%s) + 120 ))
-until [ -f "$TMPROOT/kill-harness.ready" ]; do
-  kill -0 "$harness_pid" 2>/dev/null \
-    || fail_case "case 19 setup: the kill harness exited before it was ready; got: $(cat "$TMPROOT/kill-harness.out" 2>/dev/null)"
-  [ "$(date +%s)" -lt "$_deadline" ] || fail_case "case 19 setup: the kill harness never became ready"
-  sleep 1
-done
-harness_root="$(cat "$TMPROOT/kill-harness.root")"
-git -C "$REPO_ROOT" worktree list | grep -qF "$harness_root/kill-safety" \
-  || fail_case "case 19 setup: the harness's worktree was never registered, so the case would prove nothing"
+# Behavioural half: manufacture exactly the state a killed run leaves — a REGISTERED
+# worktree under a `pub-surface-selftest.*` root, with its directory and admin files
+# intact, which is the state `git worktree prune` refuses to reclaim.
+leaked_root="$(mktemp -d "${TMPDIR:-/tmp}/pub-surface-selftest.leakedXXXXXX")"
+git -C "$REPO_ROOT" worktree add --detach --quiet "$leaked_root/leaked" HEAD >/dev/null 2>&1 \
+  || fail_case "case 19 setup: could not create the decoy leaked worktree"
+git -C "$REPO_ROOT" worktree list --porcelain | grep -qF "$leaked_root/leaked" \
+  || fail_case "case 19 setup: the decoy worktree was never registered, so the case would prove nothing"
+git -C "$REPO_ROOT" worktree prune >/dev/null 2>&1 || true
+git -C "$REPO_ROOT" worktree list --porcelain | grep -qF "$leaked_root/leaked" \
+  || fail_case "case 19 setup: \`git worktree prune\` reclaimed the decoy, so it is not the state a killed run leaves"
 
-kill -TERM "$harness_pid" 2>/dev/null || true
-wait "$harness_pid" 2>/dev/null || true
+ps_reap_stale_scratch "$REPO_ROOT"
 
-if git -C "$REPO_ROOT" worktree list --porcelain | grep -qF "$harness_root"; then
-  echo "FAIL: case 19 — a SIGTERMed run LEAKED a registered git worktree under"
-  echo "      $harness_root. A bash EXIT trap does not fire on a signal, so every"
-  echo "      killed run pollutes the repository's worktree registry."
+if git -C "$REPO_ROOT" worktree list --porcelain | grep -qF "$leaked_root"; then
+  echo "FAIL: case 19 — the startup reap left a killed predecessor's worktree registered:"
   git -C "$REPO_ROOT" worktree list | grep -F "pub-surface-selftest" || true
+  git -C "$REPO_ROOT" worktree remove --force "$leaked_root/leaked" >/dev/null 2>&1 || true
+  rm -rf "$leaked_root"
   exit 1
 fi
-[ ! -d "$harness_root" ] \
-  || fail_case "case 19 — the scratch root $harness_root survived a SIGTERM"
-echo "OK (19): a SIGTERMed run leaks no registered worktree and removes its scratch root"
+[ ! -d "$leaked_root/leaked" ] || fail_case "case 19 — the reap dropped the registration but left the directory $leaked_root/leaked"
+rm -rf "$leaked_root"
+# …and it must NOT have reaped this run's own scratch worktrees.
+[ -d "$TMPROOT" ] || fail_case "case 19 — the reap deleted the RUNNING suite's own scratch root"
+echo "OK (19): a killed run's leaked worktree is reaped at startup, and the live run's own is untouched"
 
 echo ""
 echo "PASS: test_pub_surface_guard.sh — all 19 cases (6 green, 11 reds, 1 usage, 1 kill-safety)"
