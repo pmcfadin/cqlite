@@ -1694,6 +1694,74 @@ else
   grep -n 'RESULT:' "$tree_sum" 2>/dev/null
 fi
 
+# --- 16. #1699: the feature-matrix lanes are REGISTERED, in all three places that ----
+#         must agree, and NOT in the fast-loop sets.
+# The four lanes (flight-tests, legacy-heuristics, feature-iso-parquet,
+# feature-iso-delta-scan) exist because the full gate previously only COMPILED
+# cqlite-flight and legacy-heuristics, and only ever built parquet/delta-scan TOGETHER.
+# A component is declared in three places that must agree — the COMPONENTS array, the
+# dispatch_component case, and (for the two that need fixtures) DATASET_COMPONENTS — so
+# an edit that drops a lane from ONE of them silently shrinks the gate of record while
+# every run stays green. That is the failure this case exists to red, cheaply: it drives
+# `--list` (the real array) and reads the dispatch case out of the real script. No
+# cargo, no git, no network, sub-second — it must stay affordable wherever it runs.
+#
+# The expensive half of the #3272 observed-to-fire standard (does each lane actually
+# FAIL on a planted break?) is a separate opt-in harness; this is deliberately only the
+# cheap structural half.
+FEATURE_MATRIX_LANES="flight-tests legacy-heuristics feature-iso-parquet feature-iso-delta-scan"
+
+# `--list` prints exactly "${COMPONENTS[@]}", so it IS the array — asserting against it
+# beats grepping the source (it cannot pass on a name that is commented out or sitting
+# in an unrelated string). Stderr is dropped: the gate announces sccache/nextest there.
+lanes_list="$tmp/1699-list.txt"
+if bash "$GATE" --list >"$lanes_list" 2>/dev/null; then
+  ok "1699-list: scripts/agent-gate.sh --list exits 0"
+else
+  bad "1699-list: scripts/agent-gate.sh --list failed to run"
+fi
+
+# The dispatch case arms, read out of the REAL script: every top-level arm of
+# dispatch_component() is a 4-space-indented `<name>)`. Extracting them (rather than
+# grepping the whole file for the name) is what makes this an assert about
+# REACHABILITY: a name in COMPONENTS with no arm falls through to the `unknown
+# component` branch and returns 2, which no other case here would catch.
+dispatch_arms="$tmp/1699-dispatch-arms.txt"
+awk '/^dispatch_component\(\) \{/,/^\}/' "$GATE" \
+  | sed -nE 's/^    ([a-z0-9][a-z0-9-]*)\).*/\1/p' > "$dispatch_arms"
+if [ -s "$dispatch_arms" ]; then
+  ok "1699-dispatch: extracted $(wc -l < "$dispatch_arms" | tr -d ' ') dispatch_component case arms"
+else
+  bad "1699-dispatch: extracted ZERO dispatch_component case arms — the extraction itself broke, so every reachability assert below would pass vacuously"
+fi
+
+for lane in $FEATURE_MATRIX_LANES; do
+  if grep -qxF "$lane" "$lanes_list" 2>/dev/null; then
+    ok "1699-registered: $lane is in COMPONENTS (printed by --list)"
+  else
+    bad "1699-registered: $lane is NOT printed by --list — dropped from the COMPONENTS array"
+  fi
+  if grep -qxF "$lane" "$dispatch_arms" 2>/dev/null; then
+    ok "1699-dispatch: $lane is reachable in dispatch_component"
+  else
+    bad "1699-dispatch: $lane has NO dispatch_component arm — it would hit 'unknown component' and return 2"
+  fi
+done
+
+# The fast-loop sets must NOT inherit these lanes: they are full-gate components, and
+# --lite's whole value is that it stays 1-5 min. `--lite-list` prints LITE_COMPONENTS.
+lite_list="$tmp/1699-lite-list.txt"
+bash "$GATE" --lite-list >"$lite_list" 2>/dev/null
+leaked=""
+for lane in $FEATURE_MATRIX_LANES; do
+  grep -qxF "$lane" "$lite_list" 2>/dev/null && leaked="$leaked $lane"
+done
+if [ -z "$leaked" ]; then
+  ok "1699-lite-unchanged: no feature-matrix lane leaked into LITE_COMPONENTS"
+else
+  bad "1699-lite-unchanged: LITE_COMPONENTS gained$leaked — --lite is the fast loop, not the gate of record"
+fi
+
 echo "----"
 echo "passed: $PASS  failed: $FAIL"
 [ "$FAIL" -eq 0 ]
