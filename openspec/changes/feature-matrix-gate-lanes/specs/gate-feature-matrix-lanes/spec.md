@@ -142,20 +142,36 @@ line in the `==== AGENT-GATE SUMMARY ====` block with a status and a duration.
 The `--lite` and `--delta` component sets SHALL NOT gain any of the four lanes: they are full-gate
 components. `--lite`'s existing behaviour SHALL be unchanged.
 
-A **structural self-test** SHALL pin the registration, and SHALL be part of a set `--lite` already runs, so
-dropping a lane from the component array reds the fast loop in seconds rather than silently shrinking the
-gate of record. The self-test SHALL assert, for each of the four lanes, that it is in the `COMPONENTS`
-array, that it is reachable in the dispatch table, and that `--list` prints it.
+A **structural self-test** SHALL pin the registration, so dropping a lane from the component array reds a
+run rather than silently shrinking the gate of record. It SHALL assert, for each of the four lanes, that it
+is in the `COMPONENTS` array, that it is reachable in the dispatch table, and that `--list` prints it — and
+additionally that no lane has leaked into `LITE_COMPONENTS`.
+
+**MEASURED CORRECTION (this change).** This requirement was first written claiming the self-test would red
+`--lite`. That is **false** and the claim is withdrawn rather than engineered around:
+`scripts/tests/test_agent_gate_summary.sh` is executed by the **`tooling-tests`** component
+(`scripts/agent-gate.sh:7020`), and `LITE_COMPONENTS` is `(file-size fmt clippy roborev-lints
+scoped-tests)` — `tooling-tests` is not in it. So the assert is enforced by the **FULL gate**, i.e. the gate
+of record, which every issue must pass before merge; it is NOT enforced by the fast loop.
+
+The self-test SHALL NOT be forced into `--lite` to make the original sentence true. Two reasons, both
+measured or structural: it runs **141 assertions in 14 s**, against a `roborev-lints` charter of sub-second
+hermetic checks; and `roborev-lints` exists to mechanize specific roborev **finding classes**, so
+gate-registration asserts are a category error there. Catching a dropped lane at the gate of record — before
+any merge — is the property that actually matters; catching it seconds earlier is not worth widening a
+component's charter.
 
 #### Scenario: `--list` and the SUMMARY both name the new lanes
 - **WHEN** `scripts/agent-gate.sh --list` runs
 - **THEN** all four new component names are printed
 - **AND** after a full run each appears in the SUMMARY block with a status and a duration
 
-#### Scenario: Silently dropping a lane reds the fast loop
-- **GIVEN** one of the four names removed from the `COMPONENTS` array
-- **WHEN** `scripts/agent-gate.sh --lite` runs
-- **THEN** the structural self-test FAILs and the LITE SUMMARY records `RESULT: FAIL`
+#### Scenario: Silently dropping a lane reds the full gate
+- **GIVEN** one of the four names removed from the gate's registries
+- **WHEN** `scripts/tests/test_agent_gate_summary.sh` runs (as the full gate's `tooling-tests` component runs
+  it)
+- **THEN** it exits non-zero and the failing assertion **names the missing lane**
+- **AND** the demonstration is performed in a throwaway `git worktree`, leaving the live checkout clean
 
 #### Scenario: The fast loop does not inherit the new lanes
 - **WHEN** `scripts/agent-gate.sh --lite` runs on an unmodified tree
