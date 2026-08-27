@@ -90,16 +90,16 @@ pub fn to_py_err(err: cqlite_core::Error) -> PyErr {
     // class IDENTIFIER into the concrete PyO3 class. It is exhaustive, so a new
     // `PyExceptionClass` fails to compile until it is wired to a real class.
     match contract_for(&err).py_class {
-        PyExceptionClass::IoError => PyIOError::new_err(message),
-        PyExceptionClass::ValueError => PyValueError::new_err(message),
-        PyExceptionClass::TimeoutError => PyTimeoutError::new_err(message),
-        PyExceptionClass::MemoryError => PyMemoryError::new_err(message),
-        PyExceptionClass::RuntimeError => PyRuntimeError::new_err(message),
-        PyExceptionClass::CqliteError => CqliteError::new_err(message),
-        PyExceptionClass::SchemaError => SchemaError::new_err(message),
-        PyExceptionClass::QueryError => QueryError::new_err(message),
-        PyExceptionClass::ParseError => ParseError::new_err(message),
-        PyExceptionClass::CancelledError => CancelledError::new_err(message),
+        PyExceptionClass::Io => PyIOError::new_err(message),
+        PyExceptionClass::Value => PyValueError::new_err(message),
+        PyExceptionClass::Timeout => PyTimeoutError::new_err(message),
+        PyExceptionClass::Memory => PyMemoryError::new_err(message),
+        PyExceptionClass::Runtime => PyRuntimeError::new_err(message),
+        PyExceptionClass::Cqlite => CqliteError::new_err(message),
+        PyExceptionClass::Schema => SchemaError::new_err(message),
+        PyExceptionClass::Query => QueryError::new_err(message),
+        PyExceptionClass::Parse => ParseError::new_err(message),
+        PyExceptionClass::Cancelled => CancelledError::new_err(message),
     }
 }
 
@@ -363,48 +363,48 @@ mod tests {
     fn expected_py_class(err: &Error) -> PyExceptionClass {
         match err {
             // === Explicitly mapped to specific Python exceptions ===
-            Error::Io(_) => PyExceptionClass::IoError,
-            Error::Schema(_) | Error::Table(_) => PyExceptionClass::SchemaError,
+            Error::Io(_) => PyExceptionClass::Io,
+            Error::Schema(_) | Error::Table(_) => PyExceptionClass::Schema,
             Error::QueryExecution(_)
             | Error::ResultTooLarge { .. }
-            | Error::UnsupportedQuery(_) => PyExceptionClass::QueryError,
-            Error::CqlParse(_) => PyExceptionClass::ParseError,
-            Error::Configuration(_) | Error::InvalidInput(_) => PyExceptionClass::ValueError,
-            Error::Timeout(_) => PyExceptionClass::TimeoutError,
-            Error::Memory(_) => PyExceptionClass::MemoryError,
-            Error::InvalidState(_) => PyExceptionClass::RuntimeError,
-            Error::Cancelled => PyExceptionClass::CancelledError,
+            | Error::UnsupportedQuery(_) => PyExceptionClass::Query,
+            Error::CqlParse(_) => PyExceptionClass::Parse,
+            Error::Configuration(_) | Error::InvalidInput(_) => PyExceptionClass::Value,
+            Error::Timeout(_) => PyExceptionClass::Timeout,
+            Error::Memory(_) => PyExceptionClass::Memory,
+            Error::InvalidState(_) => PyExceptionClass::Runtime,
+            Error::Cancelled => PyExceptionClass::Cancelled,
 
             // === Variants with no closer Python class: the base exception ===
-            Error::Serialization { .. } => PyExceptionClass::CqliteError,
-            Error::Corruption(_) => PyExceptionClass::CqliteError,
-            Error::InvalidFormat(_) => PyExceptionClass::CqliteError,
-            Error::UnsupportedFormat(_) => PyExceptionClass::CqliteError,
-            Error::UnsupportedVersion { .. } => PyExceptionClass::CqliteError,
+            Error::Serialization { .. } => PyExceptionClass::Cqlite,
+            Error::Corruption(_) => PyExceptionClass::Cqlite,
+            Error::InvalidFormat(_) => PyExceptionClass::Cqlite,
+            Error::UnsupportedFormat(_) => PyExceptionClass::Cqlite,
+            Error::UnsupportedVersion { .. } => PyExceptionClass::Cqlite,
             // CommitLog reader (#2389) — not bound yet (v1 is library+CLI only).
-            Error::UnsupportedCommitLogVersion { .. } => PyExceptionClass::CqliteError,
-            Error::CorruptCommitLogFrame(_) => PyExceptionClass::CqliteError,
+            Error::UnsupportedCommitLogVersion { .. } => PyExceptionClass::Cqlite,
+            Error::CorruptCommitLogFrame(_) => PyExceptionClass::Cqlite,
             // Read-path forcing knob errors (#1918).
-            Error::InvalidReadPath { .. } => PyExceptionClass::CqliteError,
-            Error::ForcedReadPathUnavailable { .. } => PyExceptionClass::CqliteError,
-            Error::InvalidPath(_) => PyExceptionClass::CqliteError,
-            Error::TypeConversion(_) => PyExceptionClass::CqliteError,
-            Error::Storage(_) => PyExceptionClass::CqliteError,
-            Error::Concurrency(_) => PyExceptionClass::CqliteError,
-            Error::NotFound(_) => PyExceptionClass::CqliteError,
-            Error::AlreadyExists(_) => PyExceptionClass::CqliteError,
-            Error::InvalidOperation(_) => PyExceptionClass::CqliteError,
-            Error::ConstraintViolation(_) => PyExceptionClass::CqliteError,
-            Error::Transaction(_) => PyExceptionClass::CqliteError,
-            Error::Index(_) => PyExceptionClass::CqliteError,
-            Error::Compaction(_) => PyExceptionClass::CqliteError,
-            Error::Internal(_) => PyExceptionClass::CqliteError,
-            Error::Parse(_) => PyExceptionClass::CqliteError,
-            Error::WriteDirLocked { .. } => PyExceptionClass::CqliteError,
+            Error::InvalidReadPath { .. } => PyExceptionClass::Cqlite,
+            Error::ForcedReadPathUnavailable { .. } => PyExceptionClass::Cqlite,
+            Error::InvalidPath(_) => PyExceptionClass::Cqlite,
+            Error::TypeConversion(_) => PyExceptionClass::Cqlite,
+            Error::Storage(_) => PyExceptionClass::Cqlite,
+            Error::Concurrency(_) => PyExceptionClass::Cqlite,
+            Error::NotFound(_) => PyExceptionClass::Cqlite,
+            Error::AlreadyExists(_) => PyExceptionClass::Cqlite,
+            Error::InvalidOperation(_) => PyExceptionClass::Cqlite,
+            Error::ConstraintViolation(_) => PyExceptionClass::Cqlite,
+            Error::Transaction(_) => PyExceptionClass::Cqlite,
+            Error::Index(_) => PyExceptionClass::Cqlite,
+            Error::Compaction(_) => PyExceptionClass::Cqlite,
+            Error::Internal(_) => PyExceptionClass::Cqlite,
+            Error::Parse(_) => PyExceptionClass::Cqlite,
+            Error::WriteDirLocked { .. } => PyExceptionClass::Cqlite,
 
             // Conditional variant (only exists on wasm32)
             #[cfg(target_arch = "wasm32")]
-            Error::Wasm(_) => PyExceptionClass::CqliteError,
+            Error::Wasm(_) => PyExceptionClass::Cqlite,
         }
     }
 
@@ -414,24 +414,24 @@ mod tests {
     /// fails to compile until this check (and `to_py_err`) handles it.
     fn raised_class_matches(py: Python<'_>, py_err: &PyErr, class: PyExceptionClass) -> bool {
         match class {
-            PyExceptionClass::IoError => py_err.is_instance_of::<PyIOError>(py),
-            PyExceptionClass::ValueError => py_err.is_instance_of::<PyValueError>(py),
-            PyExceptionClass::TimeoutError => py_err.is_instance_of::<PyTimeoutError>(py),
-            PyExceptionClass::MemoryError => py_err.is_instance_of::<PyMemoryError>(py),
-            PyExceptionClass::RuntimeError => py_err.is_instance_of::<PyRuntimeError>(py),
+            PyExceptionClass::Io => py_err.is_instance_of::<PyIOError>(py),
+            PyExceptionClass::Value => py_err.is_instance_of::<PyValueError>(py),
+            PyExceptionClass::Timeout => py_err.is_instance_of::<PyTimeoutError>(py),
+            PyExceptionClass::Memory => py_err.is_instance_of::<PyMemoryError>(py),
+            PyExceptionClass::Runtime => py_err.is_instance_of::<PyRuntimeError>(py),
             // The base class is only correct if NO subclass matched, otherwise
             // "maps to CqliteError" would be satisfied by every subclass too.
-            PyExceptionClass::CqliteError => {
+            PyExceptionClass::Cqlite => {
                 py_err.is_instance_of::<CqliteError>(py)
                     && !py_err.is_instance_of::<SchemaError>(py)
                     && !py_err.is_instance_of::<QueryError>(py)
                     && !py_err.is_instance_of::<ParseError>(py)
                     && !py_err.is_instance_of::<CancelledError>(py)
             }
-            PyExceptionClass::SchemaError => py_err.is_instance_of::<SchemaError>(py),
-            PyExceptionClass::QueryError => py_err.is_instance_of::<QueryError>(py),
-            PyExceptionClass::ParseError => py_err.is_instance_of::<ParseError>(py),
-            PyExceptionClass::CancelledError => py_err.is_instance_of::<CancelledError>(py),
+            PyExceptionClass::Schema => py_err.is_instance_of::<SchemaError>(py),
+            PyExceptionClass::Query => py_err.is_instance_of::<QueryError>(py),
+            PyExceptionClass::Parse => py_err.is_instance_of::<ParseError>(py),
+            PyExceptionClass::Cancelled => py_err.is_instance_of::<CancelledError>(py),
         }
     }
 
@@ -480,27 +480,27 @@ mod tests {
         let cases = [
             (
                 Error::cql_parse("syntax error"),
-                PyExceptionClass::ParseError,
+                PyExceptionClass::Parse,
                 "PARSE",
             ),
             (
                 Error::invalid_input("bad input"),
-                PyExceptionClass::ValueError,
+                PyExceptionClass::Value,
                 "INVALID_INPUT",
             ),
             (
                 Error::Timeout("timed out".to_string()),
-                PyExceptionClass::TimeoutError,
+                PyExceptionClass::Timeout,
                 "TIMEOUT",
             ),
             (
                 Error::memory("out of memory"),
-                PyExceptionClass::MemoryError,
+                PyExceptionClass::Memory,
                 "MEMORY",
             ),
             (
                 Error::corruption("data corrupted"),
-                PyExceptionClass::CqliteError,
+                PyExceptionClass::Cqlite,
                 "PARSE",
             ),
         ];

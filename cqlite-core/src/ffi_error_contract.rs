@@ -53,45 +53,47 @@ use crate::error::{Error, ErrorCategory};
 ///
 /// An *identifier*, not a PyO3 type: `cqlite-core` must not depend on `pyo3`.
 /// The Python binding matches on this enum to pick the concrete class, so a new
-/// member fails that binding's build until it is handled.
+/// member fails that binding's build until it is handled. Members are named
+/// without an `Error` suffix (the enum already says "exception class"); the
+/// Python-visible class name is [`PyExceptionClass::as_str`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PyExceptionClass {
     /// Python builtin `IOError`/`OSError`.
-    IoError,
+    Io,
     /// Python builtin `ValueError`.
-    ValueError,
+    Value,
     /// Python builtin `TimeoutError`.
-    TimeoutError,
+    Timeout,
     /// Python builtin `MemoryError`.
-    MemoryError,
+    Memory,
     /// Python builtin `RuntimeError`.
-    RuntimeError,
+    Runtime,
     /// `cqlite.CqliteError` — the base class of the binding's own hierarchy.
-    CqliteError,
+    Cqlite,
     /// `cqlite.SchemaError` (subclass of `CqliteError`).
-    SchemaError,
+    Schema,
     /// `cqlite.QueryError` (subclass of `CqliteError`).
-    QueryError,
+    Query,
     /// `cqlite.ParseError` (subclass of `CqliteError`).
-    ParseError,
+    Parse,
     /// `cqlite.CancelledError` (subclass of `CqliteError`, issue #2264).
-    CancelledError,
+    Cancelled,
 }
 
 impl PyExceptionClass {
     /// The class name as Python sees it (`"IOError"`, `"ParseError"`, …).
     pub const fn as_str(self) -> &'static str {
         match self {
-            PyExceptionClass::IoError => "IOError",
-            PyExceptionClass::ValueError => "ValueError",
-            PyExceptionClass::TimeoutError => "TimeoutError",
-            PyExceptionClass::MemoryError => "MemoryError",
-            PyExceptionClass::RuntimeError => "RuntimeError",
-            PyExceptionClass::CqliteError => "CqliteError",
-            PyExceptionClass::SchemaError => "SchemaError",
-            PyExceptionClass::QueryError => "QueryError",
-            PyExceptionClass::ParseError => "ParseError",
-            PyExceptionClass::CancelledError => "CancelledError",
+            PyExceptionClass::Io => "IOError",
+            PyExceptionClass::Value => "ValueError",
+            PyExceptionClass::Timeout => "TimeoutError",
+            PyExceptionClass::Memory => "MemoryError",
+            PyExceptionClass::Runtime => "RuntimeError",
+            PyExceptionClass::Cqlite => "CqliteError",
+            PyExceptionClass::Schema => "SchemaError",
+            PyExceptionClass::Query => "QueryError",
+            PyExceptionClass::Parse => "ParseError",
+            PyExceptionClass::Cancelled => "CancelledError",
         }
     }
 }
@@ -181,47 +183,47 @@ macro_rules! ffi_error_contract_table {
 // took the `PARSE` code that belongs to a genuine CQL parse failure.
 // ============================================================================
 ffi_error_contract_table! {
-    Io => { py: IoError, code: "IO", category: System, recoverable: true, prefix: Some("IoError"), },
-    Serialization => { py: CqliteError, code: "PARSE", category: Data, recoverable: false, prefix: Some("ParseError"), },
-    Corruption => { py: CqliteError, code: "PARSE", category: Data, recoverable: false, prefix: Some("ParseError"), },
-    Schema => { py: SchemaError, code: "SCHEMA", category: Schema, recoverable: false, prefix: Some("SchemaError"), },
+    Io => { py: Io, code: "IO", category: System, recoverable: true, prefix: Some("IoError"), },
+    Serialization => { py: Cqlite, code: "PARSE", category: Data, recoverable: false, prefix: Some("ParseError"), },
+    Corruption => { py: Cqlite, code: "PARSE", category: Data, recoverable: false, prefix: Some("ParseError"), },
+    Schema => { py: Schema, code: "SCHEMA", category: Schema, recoverable: false, prefix: Some("SchemaError"), },
     // (#1451) real PARSE: a CQL syntax failure, not the generic QUERY bucket.
-    CqlParse => { py: ParseError, code: "PARSE", category: Query, recoverable: false, prefix: Some("ParseError"), },
-    InvalidFormat => { py: CqliteError, code: "PARSE", category: Data, recoverable: false, prefix: Some("ParseError"), },
-    UnsupportedFormat => { py: CqliteError, code: "PARSE", category: Data, recoverable: false, prefix: Some("ParseError"), },
-    UnsupportedVersion => { py: CqliteError, code: "PARSE", category: Data, recoverable: false, prefix: Some("ParseError"), },
-    UnsupportedCommitLogVersion => { py: CqliteError, code: "PARSE", category: Data, recoverable: false, prefix: Some("ParseError"), },
-    CorruptCommitLogFrame => { py: CqliteError, code: "PARSE", category: Data, recoverable: false, prefix: Some("ParseError"), },
+    CqlParse => { py: Parse, code: "PARSE", category: Query, recoverable: false, prefix: Some("ParseError"), },
+    InvalidFormat => { py: Cqlite, code: "PARSE", category: Data, recoverable: false, prefix: Some("ParseError"), },
+    UnsupportedFormat => { py: Cqlite, code: "PARSE", category: Data, recoverable: false, prefix: Some("ParseError"), },
+    UnsupportedVersion => { py: Cqlite, code: "PARSE", category: Data, recoverable: false, prefix: Some("ParseError"), },
+    UnsupportedCommitLogVersion => { py: Cqlite, code: "PARSE", category: Data, recoverable: false, prefix: Some("ParseError"), },
+    CorruptCommitLogFrame => { py: Cqlite, code: "PARSE", category: Data, recoverable: false, prefix: Some("ParseError"), },
     // (#1451) dedicated TIMEOUT code: a deadline is not an I/O failure.
-    Timeout => { py: TimeoutError, code: "TIMEOUT", category: System, recoverable: false, prefix: Some("TimeoutError"), },
-    InvalidPath => { py: CqliteError, code: "IO", category: System, recoverable: false, prefix: Some("IoError"), },
-    InvalidState => { py: RuntimeError, code: "INVALID_INPUT", category: Logic, recoverable: false, prefix: Some("RuntimeError"), },
-    QueryExecution => { py: QueryError, code: "QUERY", category: Query, recoverable: false, prefix: Some("QueryError"), },
-    ResultTooLarge => { py: QueryError, code: "QUERY", category: Query, recoverable: false, prefix: Some("QueryError"), },
-    InvalidReadPath => { py: CqliteError, code: "CONFIG", category: Configuration, recoverable: false, prefix: Some("ValueError"), },
-    ForcedReadPathUnavailable => { py: CqliteError, code: "QUERY", category: Query, recoverable: false, prefix: Some("QueryError"), },
-    TypeConversion => { py: CqliteError, code: "PARSE", category: Data, recoverable: false, prefix: Some("ParseError"), },
-    Configuration => { py: ValueError, code: "CONFIG", category: Configuration, recoverable: false, prefix: Some("ValueError"), },
-    Storage => { py: CqliteError, code: "STORAGE", category: Storage, recoverable: true, prefix: None, },
+    Timeout => { py: Timeout, code: "TIMEOUT", category: System, recoverable: false, prefix: Some("TimeoutError"), },
+    InvalidPath => { py: Cqlite, code: "IO", category: System, recoverable: false, prefix: Some("IoError"), },
+    InvalidState => { py: Runtime, code: "INVALID_INPUT", category: Logic, recoverable: false, prefix: Some("RuntimeError"), },
+    QueryExecution => { py: Query, code: "QUERY", category: Query, recoverable: false, prefix: Some("QueryError"), },
+    ResultTooLarge => { py: Query, code: "QUERY", category: Query, recoverable: false, prefix: Some("QueryError"), },
+    InvalidReadPath => { py: Cqlite, code: "CONFIG", category: Configuration, recoverable: false, prefix: Some("ValueError"), },
+    ForcedReadPathUnavailable => { py: Cqlite, code: "QUERY", category: Query, recoverable: false, prefix: Some("QueryError"), },
+    TypeConversion => { py: Cqlite, code: "PARSE", category: Data, recoverable: false, prefix: Some("ParseError"), },
+    Configuration => { py: Value, code: "CONFIG", category: Configuration, recoverable: false, prefix: Some("ValueError"), },
+    Storage => { py: Cqlite, code: "STORAGE", category: Storage, recoverable: true, prefix: None, },
     // (#1451) dedicated MEMORY code: an allocation failure is not an I/O failure.
-    Memory => { py: MemoryError, code: "MEMORY", category: System, recoverable: true, prefix: Some("MemoryError"), },
-    Concurrency => { py: CqliteError, code: "CONCURRENCY", category: Concurrency, recoverable: true, prefix: None, },
-    WriteDirLocked => { py: CqliteError, code: "CONCURRENCY", category: Concurrency, recoverable: false, prefix: None, },
-    NotFound => { py: CqliteError, code: "NOT_FOUND", category: NotFound, recoverable: false, prefix: None, },
-    Table => { py: SchemaError, code: "SCHEMA", category: Schema, recoverable: false, prefix: Some("SchemaError"), },
-    AlreadyExists => { py: CqliteError, code: "CONFLICT", category: Conflict, recoverable: false, prefix: None, },
-    InvalidOperation => { py: CqliteError, code: "INVALID_INPUT", category: Logic, recoverable: false, prefix: Some("RuntimeError"), },
-    ConstraintViolation => { py: CqliteError, code: "CONSTRAINT", category: Constraint, recoverable: false, prefix: None, },
-    Transaction => { py: CqliteError, code: "TRANSACTION", category: Transaction, recoverable: true, prefix: None, },
-    Index => { py: CqliteError, code: "STORAGE", category: Storage, recoverable: true, prefix: None, },
-    Compaction => { py: CqliteError, code: "STORAGE", category: Storage, recoverable: true, prefix: None, },
-    Wasm => { py: CqliteError, code: "PLATFORM", category: Platform, recoverable: false, prefix: None, },
-    Internal => { py: CqliteError, code: "INTERNAL", category: Internal, recoverable: false, prefix: None, },
-    Parse => { py: CqliteError, code: "PARSE", category: Data, recoverable: false, prefix: Some("ParseError"), },
+    Memory => { py: Memory, code: "MEMORY", category: System, recoverable: true, prefix: Some("MemoryError"), },
+    Concurrency => { py: Cqlite, code: "CONCURRENCY", category: Concurrency, recoverable: true, prefix: None, },
+    WriteDirLocked => { py: Cqlite, code: "CONCURRENCY", category: Concurrency, recoverable: false, prefix: None, },
+    NotFound => { py: Cqlite, code: "NOT_FOUND", category: NotFound, recoverable: false, prefix: None, },
+    Table => { py: Schema, code: "SCHEMA", category: Schema, recoverable: false, prefix: Some("SchemaError"), },
+    AlreadyExists => { py: Cqlite, code: "CONFLICT", category: Conflict, recoverable: false, prefix: None, },
+    InvalidOperation => { py: Cqlite, code: "INVALID_INPUT", category: Logic, recoverable: false, prefix: Some("RuntimeError"), },
+    ConstraintViolation => { py: Cqlite, code: "CONSTRAINT", category: Constraint, recoverable: false, prefix: None, },
+    Transaction => { py: Cqlite, code: "TRANSACTION", category: Transaction, recoverable: true, prefix: None, },
+    Index => { py: Cqlite, code: "STORAGE", category: Storage, recoverable: true, prefix: None, },
+    Compaction => { py: Cqlite, code: "STORAGE", category: Storage, recoverable: true, prefix: None, },
+    Wasm => { py: Cqlite, code: "PLATFORM", category: Platform, recoverable: false, prefix: None, },
+    Internal => { py: Cqlite, code: "INTERNAL", category: Internal, recoverable: false, prefix: None, },
+    Parse => { py: Cqlite, code: "PARSE", category: Data, recoverable: false, prefix: Some("ParseError"), },
     // (#1451) INVALID_INPUT, not PARSE: bad caller input is not a CQL parse failure.
-    InvalidInput => { py: ValueError, code: "INVALID_INPUT", category: Data, recoverable: false, prefix: Some("ValueError"), },
-    UnsupportedQuery => { py: QueryError, code: "QUERY", category: Query, recoverable: false, prefix: Some("QueryError"), },
-    Cancelled => { py: CancelledError, code: "CANCELLED", category: Cancelled, recoverable: false, prefix: Some("CancelledError"), },
+    InvalidInput => { py: Value, code: "INVALID_INPUT", category: Data, recoverable: false, prefix: Some("ValueError"), },
+    UnsupportedQuery => { py: Query, code: "QUERY", category: Query, recoverable: false, prefix: Some("QueryError"), },
+    Cancelled => { py: Cancelled, code: "CANCELLED", category: Cancelled, recoverable: false, prefix: Some("CancelledError"), },
 }
 
 /// Map a core [`Error`] to its contract key.
@@ -351,7 +353,9 @@ impl FfiErrorVariant {
             FfiErrorVariant::Internal => Error::internal("sample internal failure"),
             FfiErrorVariant::Parse => Error::parse("sample parse failure"),
             FfiErrorVariant::InvalidInput => Error::invalid_input("sample invalid input"),
-            FfiErrorVariant::UnsupportedQuery => Error::unsupported_query("sample unsupported query"),
+            FfiErrorVariant::UnsupportedQuery => {
+                Error::unsupported_query("sample unsupported query")
+            }
             FfiErrorVariant::Cancelled => Error::Cancelled,
         };
         Some(sample)

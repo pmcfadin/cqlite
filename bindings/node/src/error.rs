@@ -572,7 +572,9 @@ mod tests {
             assert!(!row.node_code.is_empty());
             let napi_err = to_napi_error(err);
             assert!(
-                napi_err.reason.contains(&format!("\0code={}", row.node_code)),
+                napi_err
+                    .reason
+                    .contains(&format!("\0code={}", row.node_code)),
                 "row {} must encode its code for the JS wrapper",
                 row.variant
             );
@@ -601,11 +603,7 @@ mod tests {
                 "MEMORY",
                 Some("MemoryError"),
             ),
-            (
-                Error::corruption("torn page"),
-                "PARSE",
-                Some("ParseError"),
-            ),
+            (Error::corruption("torn page"), "PARSE", Some("ParseError")),
         ];
 
         for (err, code, prefix) in cases {

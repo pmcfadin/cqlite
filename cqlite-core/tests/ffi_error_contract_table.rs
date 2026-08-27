@@ -102,11 +102,13 @@ fn table_agrees_with_core_category_and_recoverable() {
 fn every_row_has_a_nonempty_screaming_snake_node_code() {
     for &v in FfiErrorVariant::ALL {
         let code = v.row().node_code;
-        assert!(!code.is_empty(), "row {} has an empty code", v.row().variant);
         assert!(
-            code
-                .chars()
-                .all(|c| c.is_ascii_uppercase() || c == '_'),
+            !code.is_empty(),
+            "row {} has an empty code",
+            v.row().variant
+        );
+        assert!(
+            code.chars().all(|c| c.is_ascii_uppercase() || c == '_'),
             "node code {code} must be SCREAMING_SNAKE_CASE (it is a JS `error.code`)"
         );
     }
@@ -145,7 +147,7 @@ fn row_of(err: &Error) -> FfiErrorRow {
 fn cql_parse_row_is_parse_error_and_real_parse_code() {
     let row = row_of(&Error::cql_parse("bad syntax"));
     assert_eq!(row.variant, "CqlParse");
-    assert_eq!(row.py_class, PyExceptionClass::ParseError);
+    assert_eq!(row.py_class, PyExceptionClass::Parse);
     // Issue #1451: Node reported "QUERY" here, because it derived the code from
     // category(). `PARSE` is now a real CQL parse failure in BOTH bindings.
     assert_eq!(row.node_code, "PARSE");
@@ -158,7 +160,7 @@ fn cql_parse_row_is_parse_error_and_real_parse_code() {
 fn invalid_input_row_is_value_error_and_not_the_parse_code() {
     let row = row_of(&Error::invalid_input("bad argument"));
     assert_eq!(row.variant, "InvalidInput");
-    assert_eq!(row.py_class, PyExceptionClass::ValueError);
+    assert_eq!(row.py_class, PyExceptionClass::Value);
     // Issue #1451: Node reported "PARSE" (from the Data category), which belongs
     // to a genuine CQL parse failure. Bad caller input is INVALID_INPUT.
     assert_eq!(row.node_code, "INVALID_INPUT");
@@ -170,7 +172,7 @@ fn invalid_input_row_is_value_error_and_not_the_parse_code() {
 fn timeout_row_has_a_dedicated_timeout_code() {
     let row = row_of(&Error::Timeout("deadline exceeded".to_string()));
     assert_eq!(row.variant, "Timeout");
-    assert_eq!(row.py_class, PyExceptionClass::TimeoutError);
+    assert_eq!(row.py_class, PyExceptionClass::Timeout);
     // Issue #1451: Node collapsed Timeout into "IO" via the System category.
     assert_eq!(row.node_code, "TIMEOUT");
     assert_eq!(row.category, ErrorCategory::System);
@@ -182,7 +184,7 @@ fn timeout_row_has_a_dedicated_timeout_code() {
 fn memory_row_has_a_dedicated_memory_code() {
     let row = row_of(&Error::memory("allocation failed"));
     assert_eq!(row.variant, "Memory");
-    assert_eq!(row.py_class, PyExceptionClass::MemoryError);
+    assert_eq!(row.py_class, PyExceptionClass::Memory);
     // Issue #1451: Node collapsed Memory into "IO" via the System category.
     assert_eq!(row.node_code, "MEMORY");
     assert_eq!(row.category, ErrorCategory::System);
@@ -196,7 +198,7 @@ fn corruption_row_stays_on_the_base_python_class() {
     assert_eq!(row.variant, "Corruption");
     // Python has no closer builtin/custom class for corrupt on-disk data, so the
     // base class is authoritative here (issue #1451's divergence table).
-    assert_eq!(row.py_class, PyExceptionClass::CqliteError);
+    assert_eq!(row.py_class, PyExceptionClass::Cqlite);
     assert_eq!(row.node_code, "PARSE");
     assert_eq!(row.category, ErrorCategory::Data);
     assert!(!row.recoverable);
@@ -215,11 +217,11 @@ fn timeout_and_memory_no_longer_share_the_io_identity() {
 
 #[test]
 fn python_class_names_are_the_names_python_sees() {
-    assert_eq!(PyExceptionClass::IoError.as_str(), "IOError");
-    assert_eq!(PyExceptionClass::ParseError.as_str(), "ParseError");
-    assert_eq!(PyExceptionClass::ValueError.as_str(), "ValueError");
-    assert_eq!(PyExceptionClass::TimeoutError.as_str(), "TimeoutError");
-    assert_eq!(PyExceptionClass::MemoryError.as_str(), "MemoryError");
-    assert_eq!(PyExceptionClass::CqliteError.as_str(), "CqliteError");
-    assert_eq!(PyExceptionClass::CancelledError.as_str(), "CancelledError");
+    assert_eq!(PyExceptionClass::Io.as_str(), "IOError");
+    assert_eq!(PyExceptionClass::Parse.as_str(), "ParseError");
+    assert_eq!(PyExceptionClass::Value.as_str(), "ValueError");
+    assert_eq!(PyExceptionClass::Timeout.as_str(), "TimeoutError");
+    assert_eq!(PyExceptionClass::Memory.as_str(), "MemoryError");
+    assert_eq!(PyExceptionClass::Cqlite.as_str(), "CqliteError");
+    assert_eq!(PyExceptionClass::Cancelled.as_str(), "CancelledError");
 }
