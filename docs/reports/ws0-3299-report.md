@@ -177,24 +177,18 @@ not of the engine. **Nobody deploys 48 independent scanners**, and production
 **N ≤ 32 by memory**, and **nothing in this bound is a CQLite memory limit** —
 do not read it as one.
 
-> **PLACEHOLDER — extension B** (`6:24,32`, 3 reps) for proper medians on the
-> plateau pair. Round-1 verdict above is expected to stand.
+**Extension B strengthens the verdict in the strongest available way: the sign
+FLIPPED.** Extension B's round 1 puts N=32 at **−1.95%** against N=24, where
+extension A's round 1 had it at **+0.68%**. So the N=24→N=32 gap is **smaller
+than the scatter between two measurements of the same pair** — which is what a
+plateau *is*, established by measurement rather than by a threshold comparison.
 
-> **SUPERSEDED PLACEHOLDER — extension A.** `--grid "6:24,32,48,64"`, 3 reps, with the
-> incumbent N=24 **re-measured interleaved** with each candidate in every round,
-> so the bracketing verdict is drift-robust by construction. This is required,
-> not precautionary: the session drifts directionally (§6), so comparing a late
-> N=32 against an early N=24 would let drift answer the bracketing question — in
-> the direction that inflates the target.
->
-> **The re-measured N=24 is also a result in its own right**, not merely a
-> control: it is an independent read on session drift **at the exact
-> configuration AC2 consumes**. Its value will be published beside the main
-> grid's 2,732,817 and the difference left to speak for itself. If they differ
-> materially, **extA's value is the one used for the bracketing comparison**,
-> because it is contemporaneous with the candidates it is being compared against.
+That upgrades "take the lowest N" from a tie-break convention to a substantive
+conclusion: **N=24 is at worst equal to N=32**, so the main grid's **2,732,817
+stands as the plateau value** and nothing above it was left on the table within
+the measurable range.
 
----
+> **PLACEHOLDER — extension B medians** (`6:24,32`, 3 reps) once all 6 reps land.
 
 ## 5. AC2 — the derived box-level target
 
@@ -259,10 +253,17 @@ reported only as a summary for judging the rig.
 Extension A re-measured S=6/N=24 about **1.5 h** after the main grid, at the
 exact configuration AC2 consumes:
 
-| | S=6, N=24 | |
-|---|--:|---|
-| main grid (median of 3) | 2,732,817 | within-session spread **0.74%** |
+**Three independent reads** of S=6/N=24 now bound session drift directly:
+
+| read | S=6, N=24 | vs main grid |
+|---|--:|--:|
+| main grid (median of 3) | 2,732,817 | — (within-session spread **0.74%**) |
 | extension A, ~1.5 h later | 2,647,966 | **−3.1%** |
+| extension B, later still | 2,705,485 | **−1.0%** |
+
+Three points spanning **3.1%** with **no consistent direction** is far better
+evidence than a single pair — a pair cannot distinguish drift from one bad
+measurement.
 
 **These two numbers measure different things and must not be conflated.** The
 0.74% is dispersion *within* a session; the −3.1% is reproducibility *across*
@@ -272,7 +273,8 @@ point, in this rig, rather than the rig's recorded 370,134 → 333,206 anecdote.
 
 **And the drift is uncontrolled, not correctable**: its direction *reversed*
 between the two scales — 7 of 9 round-over-round deltas rose *within* the
-session, while the across-session delta *fell*. A drift with an inconsistent sign
+session, while both across-session reads *fell*, and by different amounts
+(−3.1%, then −1.0%) rather than monotonically. A drift with an inconsistent sign
 cannot be modelled out, only disclosed. So: **no cross-session absolute may be
 derived from these figures**, and the target's precision must be stated with its
 scope — 0.74% within-session, −3.1% across ~1.5 h.
@@ -501,4 +503,45 @@ python3 docs/reports/ws0-3299-artifacts/harness/derive.py --results <dir>
 ```
 
 Harness design, the aligned-window convention and the N-ladder rationale:
-`docs/reports/ws0-3299-artifacts/harness/README.md`.
+`docs/reports/ws0-3299-artifacts/harness/README.md`. Reviewer-facing defect
+analysis: `harness/SELF-REVIEW.md`.
+
+### Operating hazards anyone re-running this campaign must know
+
+These cost real time here and none of them is visible from the code alone.
+
+1. **Bash reads a script INCREMENTALLY as it executes.** Editing `sweep.sh` while
+   a sweep is running can corrupt the running parse mid-run. Python is not
+   affected (it reads the whole file at process start), but `rep.py` must still
+   not be edited mid-campaign for the separate reason below. **Edit nothing while
+   a run is live.**
+2. **One launcher, and a UNIQUE results root per run.** Two sweeps sharing a
+   results root is silently destructive in both directions: the second's `rmtree`
+   deletes the first's completed evidence, and its `stop` file ends the first
+   run's window mid-measurement while every process still exits 0. `rep.py` now
+   exclusive-creates its rundir so this fails loudly, but the discipline is
+   cheaper than the diagnostic.
+3. **Anything CPU-heavy spoils a live rep — including the agent gate.**
+   `--lite` compiles. A spoiled rep still exits 0 and still reports `100.00%
+   pct_running`; the only tell is the clock. One rep in this campaign was
+   contaminated exactly this way and is flagged in the artifacts.
+4. **Do not kill workers by NAME.** `pkill -x ws0-3299-scan-worker` can never
+   match (the kernel's `comm` is 15 chars, the name is longer) and `pkill -f
+   <pattern>` matches the killer's own shell. Both report success having killed
+   nothing. Kill by PID, or — better — write the `stop` barrier file into the
+   rundir and let the workers exit through their own path.
+5. **Orphaned workers self-terminate within `--max-secs`** (900 s default), so a
+   killed run degrades rather than wedging the box. Do not start the next
+   measurement inside that window: an orphan holding cores corrupts the next rep
+   with the cause already invisible.
+
+### Harness provenance — the code that measured vs the code that ships
+
+> **PLACEHOLDER.** One defect found by self-review (`SELF-REVIEW.md` Q3: a
+> partial worker spawn is orphaned because `launch_workers` sits outside its
+> `try` and returns a local list) is fixed **after** the campaign, never during
+> it — no measurement-path change is made while reps are in flight. The fix is
+> **provably success-path-neutral**: it is observable only on an exception
+> between the first `Popen` and the guarded block, so no counted interval,
+> counter, attribution rule or recorded value can differ. The measuring commit
+> and the shipped commit will be named here on both sides once it lands.

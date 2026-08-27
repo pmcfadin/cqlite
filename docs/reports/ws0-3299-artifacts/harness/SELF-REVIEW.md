@@ -69,9 +69,43 @@ its own `--max-secs` deadline (900 s default) checked on each progress sample, s
 an orphan self-terminates within ~15 minutes with no supervisor. That is the
 backstop that made the observed orphan episode recoverable.
 
-**Fix (deferred): move `launch_workers` inside the `try`.** One line. Deferred
-because extension runs were live at the time and rep.py is measurement-path code;
-it will be applied when the box is quiet.
+### The fix, and why the OBVIOUS version of it is insufficient
+
+Moving the call inside the `try` is **not enough on its own.**
+`launch_workers()` builds a **local** `procs` list and returns it, so if it
+raises mid-loop the return never happens and the caller's name is never bound.
+With `procs = []` initialised before the `try`, the `finally` would then write the
+`stop` barrier (so the already-spawned workers *do* exit through their own path —
+the important half) but its reaping loop would iterate an **empty list**, never
+reaping the children or closing their log file descriptors.
+
+The complete fix is therefore to have the caller own the list and
+`launch_workers` **append into it as each worker starts**:
+
+```python
+procs = []
+try:
+    launch_workers(args, rundir, worker_cpus, procs)   # appends in place
+    wait_ready(procs, ...)
+    ...
+finally:
+    # writes `stop`, then reaps whatever was actually started — including a
+    # PARTIAL spawn, which the return-a-local-list shape made invisible
+```
+
+**Success-path neutrality (the licence for fixing this after the measurements).**
+On a rep that does not raise, the loop runs to completion exactly as before: the
+same processes with the same arguments in the same order, `procs` ending with
+identical contents, and every later statement — `wait_ready`, the barrier, the
+window, the reap, the return-code check — reading it identically. The change is
+observable **only** on an exception between the first `Popen` and the guarded
+block. No counted interval, no counter, no attribution rule and no recorded value
+can differ.
+
+**Disposition: apply once the campaign is fully done** (after phase 2 and the
+frequency calibration), never mid-campaign, and record the provenance in the
+report — the numbers were produced by the pre-fix harness, the harness shipped is
+the post-fix one, and the delta touches only the exception path.
 
 ## Q4 (mine) — `--rep` and `--round` are the same value under two names
 
