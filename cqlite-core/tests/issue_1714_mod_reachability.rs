@@ -56,6 +56,16 @@ const EXPECTED_ORPHANS: &[ExpectedOrphan] = &[
         issue: "#3364",
         reason: "#3364 owns deleting this 102-LOC orphan; #1714 must not delete it here",
     },
+    // Found BY THIS GUARD on its first run over the live tree, and not by the hand
+    // census that preceded it: `parser/mod.rs:115` carries a COMMENTED-OUT
+    // `// pub mod collection_udt_tests;`, which a raw `mod <stem>` grep counts as a
+    // wiring. Stripping comments before parsing is what exposes it — the guard's first
+    // real catch, and the reason the control-vs-data requirement is not academic.
+    ExpectedOrphan {
+        path: "parser/collection_udt_tests.rs",
+        issue: "#3365",
+        reason: "#3365 owns deleting/wiring this 374-LOC orphan; #1714 must not decide it here",
+    },
 ];
 
 /// A collapsed census is the vacuous-pass failure mode, so the floor is asserted rather
