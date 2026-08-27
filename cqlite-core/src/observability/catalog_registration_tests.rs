@@ -43,17 +43,42 @@ const REGISTRATION_CALLS: [(&str, &str); 3] = [
 /// way.
 const OTEL_RESOLVERS: [&str; 3] = ["fn counter_for", "fn histogram_for", "fn gauge_for"];
 
-/// The leading `catalog::IDENT` of `arg`, or `None` if `arg` does not open with one.
+/// Delimiters that may follow a metric-name ARGUMENT: the next argument, or the end
+/// of the call.
+const ARGUMENT_END: [&str; 2] = [",", ")"];
+
+/// Delimiters that may follow a match-arm PATTERN: the arm body, or another
+/// alternative (`catalog::A | catalog::B => …` is still a hand-written arm).
+const PATTERN_END: [&str; 2] = ["=>", "|"];
+
+/// The `catalog::IDENT` that is the COMPLETE text of `arg` up to one of
+/// `terminators`, or `None` if `arg` is anything else.
+///
+/// **Complete, not leading (issue #1705, roborev F7).** An earlier version accepted
+/// any expression that merely BEGAN with a catalog constant, so
+/// `reg.counter(catalog::READ_ROWS.trim_start_matches("cqlite."), …)` was classified
+/// as `READ_ROWS` while registering the series `read.rows` — the guard reporting a
+/// name the code does not emit, which is the same vacuity family as the findings
+/// before it. So after the identifier only whitespace and then a terminator may
+/// follow: a method call, a cast, a concatenation or any other suffix makes this
+/// `None`, and every caller treats `None` as an ERROR rather than a skip.
 ///
 /// rustfmt may wrap between a call's `(` and its first argument, so callers pass
 /// already-`trim_start`ed text.
-fn leading_catalog_ident(arg: &str) -> Option<String> {
+fn complete_catalog_ident(arg: &str, terminators: &[&str]) -> Option<String> {
     let rest = arg.strip_prefix("catalog::")?;
     let ident: String = rest
         .chars()
         .take_while(|c| c.is_ascii_uppercase() || c.is_ascii_digit() || *c == '_')
         .collect();
-    (!ident.is_empty()).then_some(ident)
+    if ident.is_empty() {
+        return None;
+    }
+    let after = rest[ident.len()..].trim_start();
+    terminators
+        .iter()
+        .any(|t| after.starts_with(t))
+        .then_some(ident)
 }
 
 /// The first argument text of the call whose `(` ends at `src[..end]`, truncated to
@@ -84,7 +109,7 @@ fn parse_registrations(src: &str) -> Result<std::collections::BTreeMap<String, S
         for (i, _) in src.match_indices(call) {
             let end = i + call.len();
             let arg = src[end..].trim_start();
-            let Some(ident) = leading_catalog_ident(arg) else {
+            let Some(ident) = complete_catalog_ident(arg, &ARGUMENT_END) else {
                 return Err(format!(
                     "`{call}` is a Registry registration whose first argument is not a \
                      `catalog::IDENT` constant: {:?}. Register metrics by their catalog \
@@ -142,7 +167,7 @@ fn parse_builder_constructions(src: &str) -> Result<std::collections::BTreeSet<S
         for (i, _) in src.match_indices(builder) {
             let end = i + builder.len();
             let arg = src[end..].trim_start();
-            if let Some(ident) = leading_catalog_ident(arg) {
+            if let Some(ident) = complete_catalog_ident(arg, &ARGUMENT_END) {
                 out.insert(ident);
                 continue;
             }
@@ -234,15 +259,10 @@ fn handwritten_dispatch_arms(src: &str) -> Result<std::collections::BTreeSet<Str
     for body in resolver_bodies(src)? {
         for (i, _) in body.match_indices("catalog::") {
             let rest = &body[i..];
-            let Some(ident) = leading_catalog_ident(rest) else {
-                continue;
-            };
-            // Only an arm PATTERN counts: `catalog::IDENT =>` (rustfmt may wrap
-            // before the `=>`). A mention anywhere else in the body does not.
-            if rest["catalog::".len() + ident.len()..]
-                .trim_start()
-                .starts_with("=>")
-            {
+            // Only an arm PATTERN counts: `catalog::IDENT =>` or an alternative
+            // `catalog::IDENT |` (rustfmt may wrap before either). A mention
+            // anywhere else in the body does not.
+            if let Some(ident) = complete_catalog_ident(rest, &PATTERN_END) {
                 out.insert(ident);
             }
         }
@@ -700,10 +720,25 @@ fn an_unrecognised_registration_argument_fails_closed() {
             "function call",
             "    reg.gauge(ghost_name(), catalog::unit::ROWS, \"g\");\n",
         ),
+        // Issue #1705, roborev F7: an expression that BEGINS with a catalog
+        // constant but registers a DIFFERENT name. This one registered the series
+        // `read.rows` while the guard read it as `READ_ROWS` — a guard reporting a
+        // name the code does not emit is worse than one that says nothing.
+        (
+            "method call on the constant",
+            "    reg.counter(catalog::GHOST.trim_start_matches(\"cqlite.\"), u, \"g\");\n",
+        ),
+        (
+            "concatenation",
+            "    reg.counter(&[catalog::GHOST, \".v2\"].concat(), u, \"g\");\n",
+        ),
     ] {
         let src = strip_rust_comments(&synthetic_otel_source("", registration));
-        let why = parse_registrations(&src)
-            .expect_err(&format!("a {label} registration argument must fail closed"));
+        // `let Err(..) else` rather than `expect_err(&format!(..))`: the message is
+        // only built when the assertion actually fails (roborev F6).
+        let Err(why) = parse_registrations(&src) else {
+            panic!("a {label} registration argument must fail closed");
+        };
         assert!(
             why.contains("not a\n                     `catalog::IDENT` constant")
                 || why.contains("`catalog::IDENT` constant"),
@@ -730,6 +765,45 @@ fn an_unrecognised_registration_argument_fails_closed() {
         "",
     ));
     assert!(parse_builder_constructions(&alias_builder).is_err());
+    // …and the F7 shape on a builder call: a suffixed catalog constant is NOT a
+    // catalog-named construction, so it must fail closed rather than be recorded
+    // under the constant's ident.
+    let suffixed_builder = strip_rust_comments(&synthetic_otel_source(
+        "    let _ = meter().u64_counter(catalog::GHOST.trim()).build();\n",
+        "",
+    ));
+    assert!(
+        parse_builder_constructions(&suffixed_builder).is_err(),
+        "a method call on a catalog constant must not pass as that constant"
+    );
+    // The complete-argument rule directly: only whitespace may separate the
+    // identifier from its delimiter, and a pattern terminator does not license an
+    // argument (nor vice versa).
+    assert_eq!(
+        complete_catalog_ident("catalog::GHOST, u, \"g\");", &ARGUMENT_END),
+        Some("GHOST".to_string())
+    );
+    assert_eq!(
+        complete_catalog_ident("catalog::GHOST\n    )", &ARGUMENT_END),
+        Some("GHOST".to_string())
+    );
+    assert_eq!(
+        complete_catalog_ident("catalog::GHOST.trim(), u", &ARGUMENT_END),
+        None
+    );
+    assert_eq!(
+        complete_catalog_ident("catalog::GHOST as &str, u", &ARGUMENT_END),
+        None
+    );
+    assert_eq!(
+        complete_catalog_ident("catalog::GHOST => x", &ARGUMENT_END),
+        None
+    );
+    assert_eq!(
+        complete_catalog_ident("catalog::GHOST | catalog::OTHER => x", &PATTERN_END),
+        Some("GHOST".to_string()),
+        "an arm ALTERNATIVE is still a hand-written arm"
+    );
 
     // A hand-built instrument named by a catalog constant is not an error — it is a
     // BINDING the forward guard must see, so it is recorded rather than skipped.
