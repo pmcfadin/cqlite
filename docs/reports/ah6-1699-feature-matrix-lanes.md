@@ -148,6 +148,99 @@ Two properties are worth separating, because only one of them is curated:
 not named, so omitting it would have silently stopped executing `main.rs`'s 2 unit tests
 — the change would itself have opened the never-executed hole this lane exists to close.
 
+## `flight-tests`: the descope to `--lib` (#3384) — the non-determinism was the SUITE, not one test
+
+The amendment above (an explicit derived list minus one flaky victim) was **withdrawn on
+further measurement**. Four consecutive whole-package runs of the lane were recorded, and
+the pattern is not "one racing assertion":
+
+| run | lane result | victim |
+|---|---|---|
+| 1 | **PASS** | — |
+| 2 | **FAIL** | `issue_3058_bypass_path_taken::fast_arm_stream_stops_when_the_client_drops_it` |
+| 3 | **PASS** | — |
+| 4 | **FAIL** | `issue_2370_gauge_readback_test` |
+
+**~50% non-deterministic, with TWO DISTINCT VICTIMS in four runs.** Four hypotheses were
+ruled out by measurement rather than by argument:
+
+| hypothesis | how it was tested | verdict |
+|---|---|---|
+| whole-box load (other lanes' gates) | the victim target alone at host load 74, ×3 | **RULED OUT** — 3/3 PASS |
+| the gate's `nice`/`taskpolicy` wrapper | lane re-run without it, ×2 | **RULED OUT** — 2/2 PASS |
+| intra-package test parallelism, fixable by throttling | lane at `--test-threads=2`, ×2 | **RULED OUT** as a *discriminator* — 2/2 PASS, i.e. it did not distinguish |
+| concurrent MAIN-lane compilation | failures reproduced under `--only flight-tests`, where MAIN runs nothing | **RULED OUT** |
+
+**Quarantining victims one at a time was rejected** (owner ruling). Two distinct victims in
+four runs is not a converging series — nothing suggests a widened lane would not find a
+third — so the list would grow once per red with no visible end, turning the quarantine into
+the dumping ground its own design rule forbids. A curated excusal list is legitimate only
+while it is small, closed, and every entry is on a path out; none of those held. The general
+suite-hygiene defect is filed as **#3384**, with **#3383** as its first individual victim.
+
+**The lane therefore runs `cargo test --no-fail-fast -p cqlite-flight --lib --bins`** — 387
+`--lib` unit tests plus `main.rs`'s 2, observed deterministic in every run of this session,
+and re-verified **PASS 3/3** through the real component after the change (6s / 7s / 8s warm).
+
+**The deliverable of the descope is the DECLARATION, not the narrowing.** This whole issue
+exists because a lane that omits coverage looks identical to a lane that covers it, so a
+narrowed lane that stayed quiet would reintroduce the defect one level down. On every run,
+pass or fail, the lane prints a coverage census to **both** the gate's stdout (as `>>>`
+lines) and its component log. Verbatim from `flight-tests.log`:
+
+```
+==== [flight-tests] COVERAGE CENSUS (issue #1699 / #3384) ====
+cargo test --no-fail-fast -p cqlite-flight --lib --bins (UNIT tests only, #1699/#3384)
+COVERAGE CENSUS — WHAT THIS LANE DOES NOT RUN:
+  cqlite-flight declares 42 integration (test) targets. THIS LANE EXECUTES NONE OF THEM.
+  (1 of the 42 could not run here in any case: unmet required-features.)
+  WHY: the integration half of this package is ~50% NON-DETERMINISTIC under
+       intra-package parallelism — 4 whole-package runs went PASS/FAIL/PASS/FAIL
+       with 2 different victims (issue_3058_bypass_path_taken,
+       issue_2370_gauge_readback_test). Ruled out by measurement: box load,
+       nice, --test-threads=2, concurrent MAIN-lane compilation.
+       Issues: #3384 (the general suite-hygiene defect), #3383 (first victim).
+  WHO DOES RUN THEM: CI's Flight tier — .github/workflows/flight-ci.yml line 229,
+       'cargo test --package cqlite-flight', mandated on cqlite-flight/** AND
+       cqlite-core/**, with the 'required' check failing closed on it (#2910).
+       Locally, flight-query-semantics-oracle runs 2 of these targets and
+       memory-budget runs 1 (--test issue_1494_producer_mem_budget).
+  This omission is DECLARED, not silent: widening the lane back is a small
+       change once #3384 is fixed (the derivation machinery is retained).
+declared targets with unmet required-features: issue_1494_producer_mem_budget(required-features[dhat-heap]:off[dhat-heap])
+enabled features (cargo metadata): default test-util
+==== end census ====
+```
+
+The `42` is **counted from `cargo metadata` at run time**, never hard-coded, so the stated
+gap cannot drift into a false claim; a failed count is a FAIL naming the derivation, because
+an understated gap is exactly the silent omission this issue exists to eliminate.
+
+**Consequences in code, both of them about not leaving a vacuous guard behind:**
+
+- The flake-quarantine plumbing (`FLIGHT_FLAKE_SKIPS` + its validator) is **retired, not
+  kept inert**. It existed only to paper over #3384; with no lane executing those targets it
+  has no subject, and an empty curated list plus a caller-less validator is a guard
+  reporting OK having measured nothing.
+- `check_no_unexpected_zero_tests` keys on `Running tests/<name>.rs` and **explicitly
+  disclaims `--lib`**, so calling it on a `--lib --bins` selection would be that same
+  empty-subject guard. Its `--lib` analogue `check_unittest_targets_ran` is called instead:
+  each selected unittest target must be OBSERVED *and* must have run a NON-ZERO count, and
+  the pass prints them — `src/lib.rs(387 tests) src/main.rs(2 tests) executed`.
+- `_package_test_targets` stays **called** (it feeds the census);
+  `check_declared_test_targets_observed` is retained **uncalled**, saying so at the top,
+  because it is what the widened lane calls again once #3384 is fixed.
+- The observation harness's `flight-tests` plant moved from a new
+  `cqlite-flight/tests/*.rs` integration target to a new `cqlite-flight/src/` unit-test
+  module wired into `src/lib.rs`. The old plant could no longer fire, and **a plant that
+  cannot fire turns the harness into the vacuous green it exists to prevent**.
+
+**Cost of the descope, stated plainly.** Local pre-push execution of ~38 `cqlite-flight`
+integration targets is lost. Three still run locally in other components
+(`flight-query-semantics-oracle` ×2, `memory-budget` ×1); all of them still run on CI's
+Flight tier before merge, mandated on `cqlite-flight/**` and `cqlite-core/**`, and
+`required` cannot go green without it (#2910).
+
 ## Cost
 
 Two different numbers, and the second **cannot be derived from the first**.
@@ -215,7 +308,7 @@ presented as the other.
 
 ## References
 
-- Design: `openspec/changes/feature-matrix-gate-lanes/design.md` (D2, D3, D4 + its #3383 amendment, D5, D6)
-- Flake tracked for removal from the exclusion list: #3383
+- Design: `openspec/changes/feature-matrix-gate-lanes/design.md` (D2, D3, D4 + its #3383 amendment and #3384 second correction, D5, D6)
+- Integration-suite non-determinism (the descope's subject): #3384; first individual victim: #3383
 - Harness: `scripts/tests/test_agent_gate_feature_matrix_lanes.sh`
 - Registration pin: `scripts/tests/test_agent_gate_summary.sh` (runs in `--lite` via `tooling-tests`)
