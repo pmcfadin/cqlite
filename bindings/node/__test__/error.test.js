@@ -51,17 +51,22 @@ describe('Error Mapping Tests (Issue #297)', () => {
     }
   });
 
-  test('Parse error maps to code "PARSE" or "QUERY"', async () => {
+  test('CQL parse error maps to the authoritative code "PARSE"', async () => {
+    // Issue #1451: this assertion used to hedge (`['PARSE','QUERY']`) because
+    // Node derived its code from `category()`, and `CqlParse` is Query-category
+    // — so it reported 'QUERY' while Python raised ParseError for the same core
+    // error. The shared contract table (cqlite_core::ffi_error_contract) now
+    // decides BY VARIANT, so exactly one code is correct here.
     skipIfNoDatasets();
     const db = await Database.open(global.testPaths.SSTABLES_DIR, {
       schema: global.testPaths.SCHEMA_BASIC_TYPES,
     });
     try {
-      expect.assertions(1);
+      expect.assertions(2);
       await db.execute('THIS IS NOT VALID SQL!!!');
     } catch (e) {
-      // Parse errors may come as PARSE or QUERY depending on where the error is caught
-      expect(['PARSE', 'QUERY']).toContain(e.code);
+      expect(e.code).toBe('PARSE');
+      expect(e.category).toBe('Query');
     } finally {
       await db.close();
     }
