@@ -337,3 +337,21 @@ reintroduces exactly the shared-target thrash (#2657) the SIDE placement exists 
 `AGENT_GATE_JOBS`, a fleet-wide performance decision. Both are worse than the flake and both are the owner's
 call. The right fix is #3380 itself, whose assert appears to be a false positive on heredoc prose
 independently of load.
+
+## Cost change from the roborev round-3 `-D warnings` fix (recorded, not absorbed)
+
+Round 3 found that `RUSTFLAGS="-D warnings" cargo build && cargo test` applied the flag to the **build only**,
+leaving the `cargo test` recompile of `cfg(test)` code unguarded — the exact #1981 dead-code shape the lane
+exists to catch. Fixing it (`env RUSTFLAGS=` on both invocations) means the test compile no longer shares the
+build's artifacts, so the lane pays a full recompile at this feature set:
+
+| `legacy-heuristics` component | measured |
+|---|---|
+| before the fix (test compile unguarded) | **37 s** |
+| after the fix (both halves under `-D warnings`) | **292 s** |
+
+That is a ~255 s increase on a cold cache for this lane, and it is the price of the lane actually enforcing
+what it claims. It is recorded here rather than left for someone to discover as an unexplained slowdown. The
+lane remains in the concurrent SIDE lane, so per the wall-time method above the added *gate* wall time is
+still `max(0, SIDE_total - MAIN_total)` — this increase only matters if it makes SIDE the critical path, which
+the gate of record's own component durations will show.
