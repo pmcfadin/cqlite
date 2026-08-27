@@ -990,3 +990,181 @@ async fn an_uncompressed_compaction_read_counts_each_chunk_once() {
          uncompressed reader"
     );
 }
+
+/// The PUBLIC `ORDER BY <clustering> DESC` read emits all four metrics as ONE
+/// operation (issue #1701, roborev round 4).
+///
+/// # The defect this pins
+///
+/// `SSTableManager::scan_partition_clustering_reverse` — the BIG reverse fast path the
+/// query executor takes for `ORDER BY ... DESC` on a single wide partition — bypassed
+/// every `ReadOpMeter`. The chunk plane still counted `read.bytes` on the way down, so
+/// the read reported BYTES WITHOUT ROWS: an amplification ratio built from the two was
+/// wrong for an entire user-facing query form, and `read.duration` never saw the reverse
+/// path at all.
+///
+/// # Why this drives `Database::execute` rather than the manager
+///
+/// The seam is `pub(crate)`, and the wiring-evidence rule wants the PUBLIC surface that
+/// reaches it. `SELECT ... ORDER BY seq DESC` over a single-generation wide partition is
+/// that surface: one candidate generation and a fixed-width `int` clustering is exactly
+/// the shape the fast path claims, so a served read here is the metered path, not the
+/// forward fallback.
+///
+/// # Why a CQLite-WRITTEN fixture is legitimate here
+///
+/// The #3042 rule — an on-disk framing property must be oracled against
+/// Cassandra-written bytes, never CQLite's own output — does not bite, because the
+/// property under test is not on-disk layout. It is whether OUR read path emits its own
+/// metrics, and a uniform framing error on both sides could not hide a missing emission.
+/// The committed fixtures cannot serve here: this needs a partition wide enough to carry
+/// promoted index blocks in a table whose schema the reverse path admits.
+///
+/// # The exactly-once assertions
+///
+/// `read.duration` is asserted at EXACTLY one recording, not merely non-zero. Both
+/// failure directions are then covered by one case: bypassing the meter gives zero, and
+/// dropping (rather than discarding) a declining attempt's meter would give two for one
+/// logical read — the over-counting roborev B1 removed. RED-verified: reverting the
+/// `reverse_scan.rs` metering leaves `read.bytes > 0` with rows/partitions/duration all 0,
+/// exactly the reported symptom.
+#[tokio::test(flavor = "multi_thread")]
+#[serial_test::serial(read_metrics)]
+async fn a_public_order_by_desc_read_is_one_metered_operation() {
+    use cqlite_core::ingestion::{ingest, IngestionConfig};
+
+    const ROWS: usize = 100;
+
+    let tmp = tempfile::TempDir::new().expect("tmp");
+    let data_dir = tmp.path().join("data");
+    let (schema_path, _schema_tmp) = reverse_fixture_schema_file();
+    write_single_generation_wide_partition(&data_dir, ROWS).await;
+
+    let db = ingest(IngestionConfig {
+        schema_paths: vec![schema_path],
+        data_dir,
+        version_hint: Some("5.0".to_string()),
+        core_config: cqlite_core::Config::default(),
+        table_directory_filter: None,
+    })
+    .await
+    .expect("ingest the single-generation wide-partition fixture")
+    .database;
+
+    let mc = testing::metrics_capture();
+    mc.reset();
+    let res = db
+        .execute("SELECT seq FROM obsfn.wide WHERE id = 1 ORDER BY seq DESC")
+        .await
+        .expect("public ORDER BY DESC read");
+    let metrics = mc.flush_and_collect();
+
+    assert_eq!(
+        res.rows.len(),
+        ROWS,
+        "the reverse read must return the whole partition — a short read would satisfy \
+         the metric assertions below for the wrong reason"
+    );
+    assert_eq!(
+        metrics.counter_sum(catalog::READ_ROWS),
+        ROWS as f64,
+        "every row the reverse path returned must be counted; points: {:?}",
+        metrics.find(catalog::READ_ROWS).map(|m| &m.points)
+    );
+    assert_eq!(
+        metrics.counter_sum(catalog::READ_PARTITIONS),
+        1.0,
+        "one partition was read; points: {:?}",
+        metrics.find(catalog::READ_PARTITIONS).map(|m| &m.points)
+    );
+    assert_eq!(
+        histogram_recordings(&metrics, catalog::READ_DURATION),
+        1,
+        "EXACTLY one operation: zero means the reverse seam bypassed the meter, and two \
+         would mean a declining attempt dropped its meter instead of discarding it; \
+         points: {:?}",
+        metrics.find(catalog::READ_DURATION).map(|m| &m.points)
+    );
+    assert!(
+        metrics.counter_sum(catalog::READ_BYTES) > 0.0,
+        "the read really touched Data.db, so bytes are counted too — bytes WITHOUT rows \
+         was the reported defect; points: {:?}",
+        metrics.find(catalog::READ_BYTES).map(|m| &m.points)
+    );
+}
+
+/// A temp `.cql` file for the reverse fixture's table, so `ingest` can register
+/// query-time decode metadata. Returns the guard: dropping it removes the file.
+fn reverse_fixture_schema_file() -> (PathBuf, tempfile::TempDir) {
+    let dir = tempfile::TempDir::new().expect("schema tmp");
+    let path = dir.path().join("wide.cql");
+    std::fs::write(
+        &path,
+        "CREATE TABLE obsfn.wide (id int, seq int, val text, PRIMARY KEY (id, seq));",
+    )
+    .expect("write schema file");
+    (path, dir)
+}
+
+/// Write ONE generation holding a single wide partition of `rows` rows.
+///
+/// One generation is what makes `scan_partition_clustering_reverse` take its
+/// `candidates.len() == 1` serving path (several generations return `Ok(None)` so the
+/// reconciling forward sort can run), and the 1 KiB payload per row is what makes the
+/// partition wide enough to carry the promoted index blocks the reverse walk steps back
+/// through.
+async fn write_single_generation_wide_partition(data_dir: &std::path::Path, rows: usize) {
+    use cqlite_core::schema::{ClusteringColumn, Column, KeyColumn, TableSchema};
+    use cqlite_core::storage::write_engine::{WriteEngine, WriteEngineConfig};
+
+    let text_col = |name: &str, ty: &str| Column {
+        name: name.to_string(),
+        data_type: ty.to_string(),
+        nullable: false,
+        default: None,
+        is_static: false,
+    };
+    let schema = TableSchema {
+        keyspace: "obsfn".to_string(),
+        table: "wide".to_string(),
+        partition_keys: vec![KeyColumn {
+            name: "id".to_string(),
+            data_type: "int".to_string(),
+            position: 0,
+        }],
+        clustering_keys: vec![ClusteringColumn {
+            name: "seq".to_string(),
+            data_type: "int".to_string(),
+            position: 0,
+            order: Default::default(),
+        }],
+        columns: vec![
+            text_col("id", "int"),
+            text_col("seq", "int"),
+            text_col("val", "text"),
+        ],
+        comments: Default::default(),
+        dropped_columns: Default::default(),
+    };
+
+    let wal_dir = data_dir
+        .parent()
+        .expect("data_dir has a parent")
+        .join("wal");
+    let cfg = WriteEngineConfig::new(data_dir.to_path_buf(), wal_dir, schema);
+    let mut engine = WriteEngine::new(cfg).expect("write engine");
+
+    let blob = "x".repeat(1024);
+    for seq in 0..rows {
+        engine
+            .execute(&format!(
+                "INSERT INTO obsfn.wide (id, seq, val) VALUES (1, {seq}, '{blob}')"
+            ))
+            .expect("write row");
+    }
+    engine
+        .flush()
+        .await
+        .expect("flush")
+        .expect("one sstable generation");
+}

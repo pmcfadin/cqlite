@@ -591,7 +591,7 @@ impl SSTableReader {
 
         let mut buf = vec![0u8; len];
         point_source.read_exact_at(offset, &mut buf)?;
-        Ok(buf)
+        Ok(super::super::chunk_source::counted_raw_chunk(buf, None)) // #1701 raw exit
     }
 }
 

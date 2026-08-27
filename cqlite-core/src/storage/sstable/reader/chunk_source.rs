@@ -70,11 +70,15 @@ pub(crate) fn compression_label_of(algorithm: Option<&CompressionAlgorithm>) -> 
 ///
 /// # Why this lives in the plane rather than at each call site
 ///
-/// FIVE decode exits do that raw passthrough THEMSELVES (`len >=
+/// SIX decode exits do that raw passthrough THEMSELVES (`len >=
 /// max_compressed_length`, or "no compressor, the buffer already holds finished
 /// bytes") and so never reach [`ChunkSource::decompress_only`] /
 /// [`ChunkSource::decode_and_cache`]: the windowed scan's IO half (two exits), the
-/// compressed offset-read window, the BIG promoted seek window, and the stitch path.
+/// compressed offset-read window, the BIG promoted seek window, the stitch path, and
+/// the UNCOMPRESSED arm of the BIG promoted/reverse partition window
+/// (`read_uncompressed_verified_at`, found by roborev round 4 — the sixth exit this
+/// doc predicted, reached by every `ORDER BY ... DESC` read of an uncompressed
+/// SSTable, which is the only shape CQLite's own write surface emits).
 /// Every one was a silent hole in `read.bytes` — a read reporting rows and a duration
 /// while reporting fewer bytes than it actually read. Counting them independently at
 /// five sites would leave the NEXT such exit free to bypass the metric again, so the
