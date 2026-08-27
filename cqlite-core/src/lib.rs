@@ -15,13 +15,12 @@ pub mod cql;
 pub mod error;
 pub(crate) mod float_cmp;
 pub mod parser;
-// DISABLED FOR M1: Security and performance modules causing compilation errors
-// pub mod performance;
-// pub mod security; // Security framework for comprehensive protection
 pub mod types;
 pub mod util;
 pub mod version_hints;
 
+// #1712: gate at the DECLARATION SITE so the crate root tells the truth about what ships. Zero consumers; opt-in, perf-runs only.
+#[cfg(feature = "benchmarks")]
 pub mod benchmarks;
 pub mod memory;
 // Observability foundation (epic #1031, issues #1032 + #1038). Always present;
