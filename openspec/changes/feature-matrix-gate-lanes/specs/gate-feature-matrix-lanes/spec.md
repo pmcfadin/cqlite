@@ -24,36 +24,69 @@ holds each to the #3272 standard: **a lane is credited only when it has been OBS
 
 ## ADDED Requirements
 
-### Requirement: The full gate executes the `cqlite-flight` test suite locally
+### Requirement: The full gate executes the `cqlite-flight` UNIT test suite locally, and DECLARES the integration targets it does not run
 
-The full `scripts/agent-gate.sh` SHALL include a component that **executes** `cqlite-flight`'s tests, not
-merely compiles them. Its reach SHALL extend beyond the test targets the gate already names
-(`query_semantics_flight_parity`, `issue_3095_flight_static_columns`, and the `memory-budget` dhat target):
-a failing assertion in a `cqlite-flight` test target that no existing component names SHALL make the full
-gate FAIL.
+The full `scripts/agent-gate.sh` SHALL include a component that **executes** `cqlite-flight`'s unit tests,
+not merely compiles them: it SHALL run `cargo test --no-fail-fast -p cqlite-flight --lib --bins`. A failing
+assertion in a `cqlite-flight` unit test that no existing component names SHALL make the full gate FAIL.
+`--bins` SHALL be named explicitly, since an explicit target selector suppresses every kind not named and
+its omission would silently stop executing `main.rs`'s unit tests.
 
-The component SHALL execute `--lib`, `--bins`, and an **explicit list of `--test` targets DERIVED from
-`cargo metadata` at run time** (issue #3383). It SHALL NOT rely on a bare `cargo test -p`, because that
-form cannot exclude a single target, and it SHALL NOT use a hand-written target list, because that is a
-second registry that drifts silently. A newly added `cqlite-flight/tests/*.rs` SHALL therefore be executed
-with **no gate edit**. `--bins` SHALL be named explicitly, since an explicit target selector suppresses
-every kind not named and its omission would silently stop executing the binary's unit tests.
+**DESCOPED FROM INTEGRATION TARGETS, ON MEASUREMENT (issue #3384).** Two earlier cuts of this requirement
+promised execution reach across `cqlite-flight`'s integration (`test`) targets — first via
+`cargo test -p cqlite-flight`, then via an explicit `--test` list derived from `cargo metadata` minus a
+curated flake quarantine (#3383). Both are withdrawn. The integration half of this package is **~50%
+non-deterministic** under intra-package parallelism: four consecutive whole-package runs went
+**PASS / FAIL / PASS / FAIL** with **two different victims**
+(`issue_3058_bypass_path_taken::fast_arm_stream_stops_when_the_client_drops_it` and
+`issue_2370_gauge_readback_test`). Four hypotheses were ruled out by measurement rather than by argument:
+whole-box load (3/3 PASS standalone at load 74), `nice` (2/2), `--test-threads=2` (2/2), and concurrent
+MAIN-lane compilation (the failures reproduced under `--only`, where MAIN runs nothing). A merge-gate lane
+that reds ~1-in-2 carries no information — it trains agents to re-run and to waive, which is worse than not
+having the lane. Per-victim quarantining was **considered and rejected** (owner ruling): two victims in four
+runs is not a converging series, so the quarantine has no visible end and would become the dumping ground
+its own design rule forbids. The general suite-hygiene defect is **#3384**; **#3383** is its first
+individual victim.
 
-The derived run list SHALL exclude exactly two categories, and nothing else:
+Consequently this requirement SHALL NOT claim any execution reach across integration targets, and the
+curated flake-exclusion list SHALL be **retired**, not kept inert: with no lane executing those targets it
+has no subject, and an empty curated list plus a validator with no caller is a guard reporting OK having
+measured nothing.
 
-1. targets whose `required-features` the component does not enable — because `cargo test --test X` on such a
-   target is a hard error, where `cargo test -p` skipped it silently; and
-2. targets named by a **curated** flake-exclusion list, each entry of which SHALL name a numeric issue
-   number recording the work that returns the target to the lane.
+**THE OMISSION SHALL BE DECLARED, ON EVERY RUN.** This is the load-bearing half. A lane that silently omits
+coverage is indistinguishable from a lane that covers it, so a narrowed lane that stayed quiet about the
+narrowing would reintroduce this change's own defect one level down. The component SHALL therefore print a
+**coverage census**, to BOTH the gate's stdout (as `>>>` lines) and the component log, on every run —
+never only in a source comment, which is not read on a run — stating:
 
-A failed derivation, or an empty run list, SHALL be a FAIL that **names the derivation** — never a pass, and
-never reported as "nothing to run".
+1. how many integration (`test`) targets `cqlite-flight` declares, **counted from `cargo metadata` at run
+   time** and never hard-coded, so the stated gap cannot drift into a false claim;
+2. that this lane **executes none of them**, in those terms;
+3. which lane does: CI's Flight tier (`.github/workflows/flight-ci.yml` line 229,
+   `cargo test --package cqlite-flight`), mandated on `cqlite-flight/**` **and** `cqlite-core/**`, with the
+   `required` check failing closed on it per #2910 — and, locally, that
+   `flight-query-semantics-oracle` runs two of those targets and `memory-budget` one; and
+4. the issues that own the gap: **#3384** (general) and **#3383** (first victim).
+
+A failed derivation of either the enabled feature set or the declared-target count SHALL be a FAIL that
+**names the derivation** — never a pass, and never a census claiming a gap of unknown or zero size.
+
+The component SHALL run under a zero-tests guard **that has a subject at this scope**. The gate's existing
+`check_no_unexpected_zero_tests` keys on cargo's `Running tests/<name>.rs` lines and explicitly disclaims
+`--lib` (`Running unittests src/lib.rs`), so calling it on a `--lib --bins` selection would be a guard with
+an empty subject set reporting OK. Its `--lib` analogue SHALL be used instead: each selected unittest target
+SHALL be **observed** and SHALL have executed a **non-zero** test count, and the passing verdict SHALL print
+those counts as an affirmative measurement.
+
+The derivation machinery (`_package_test_targets`, `check_declared_test_targets_observed`) SHALL be
+**retained**, so that widening the lane back once #3384 is fixed is a small change; the retained-but-uncalled
+reconciliation SHALL say in code that it is retained and what will call it again.
 
 The component SHALL run in the SIDE lane with its **own** `CARGO_TARGET_DIR`, because `cqlite-flight` is a
 separate crate built against a divergent `cqlite-core` feature set and sharing MAIN's target dir would
-thrash it. It SHALL be declared in `DATASET_COMPONENTS` if any target it runs consumes fixtures, so the
-existing dataset preflight applies to it. It SHALL run under the gate's existing zero-tests guard, so
-"compiled, executed 0 tests" cannot be recorded as a pass.
+thrash it. It SHALL remain declared in `DATASET_COMPONENTS`: its `--lib` suite includes a real-fixture test
+(`stats.rs`) that SKIPS with a printed notice when `CQLITE_DATASETS_ROOT` is unset, which is precisely the
+silent-skip shape that set guards.
 
 There SHALL be **no environment variable that disables this component**. `cqlite-flight` is a committed
 workspace member and is never legitimately absent; fixture-dependent sub-targets may SKIP only through the
@@ -62,46 +95,38 @@ gate's existing dataset machinery, which reports the skip.
 The pre-existing `flight-query-semantics-oracle` component SHALL be left functionally unchanged, including
 its per-lane fixture SKIP predicates.
 
-#### Scenario: A broken Flight test outside the named oracle targets fails the gate
-- **GIVEN** a `cqlite-flight` integration test target that no gate component names individually
+#### Scenario: A broken Flight unit test outside the named oracle targets fails the gate
+- **GIVEN** a `cqlite-flight` unit test (in `src/`, reached by `--lib`) that no gate component names
+  individually
 - **AND** an assertion in it is made to fail
 - **WHEN** the full gate runs
-- **THEN** the new Flight component records FAIL and the run's `RESULT:` is `FAIL`
+- **THEN** the Flight component records FAIL and the run's `RESULT:` is `FAIL`
 
 #### Scenario: The Flight component cannot pass without executing tests
-- **GIVEN** an invocation of the Flight component that compiles but executes zero tests
+- **GIVEN** an invocation of the Flight component whose `--lib` unit suite compiles but executes zero tests
 - **WHEN** the component completes
-- **THEN** it records FAIL, naming the zero-tests condition, and never PASS
+- **THEN** it records FAIL, naming the unittest target and the zero-tests condition, and never PASS
 
-#### Scenario: A newly added Flight test target is executed with no gate edit
-- **GIVEN** a new `cqlite-flight/tests/<name>.rs` containing a failing assertion
-- **AND** no gate component names `<name>`
+#### Scenario: A selected unittest target that stops being selected fails the gate
+- **GIVEN** the component's cargo invocation no longer selects one of `src/lib.rs` / `src/main.rs`
+- **WHEN** the component completes
+- **THEN** it records FAIL, naming the unobserved unittest target — an explicit selector silently dropping a
+  target kind is the never-executed hole this lane exists to close
+
+#### Scenario: The lane NAMES the integration-target count it does not run, and its issue
+- **WHEN** the Flight component runs, whether it passes or fails
+- **THEN** its stdout `>>>` lines AND its component log both state the number of declared
+  `cqlite-flight` integration targets, derived from `cargo metadata` at run time
+- **AND** state that this lane executes none of them
+- **AND** name CI's Flight tier (`.github/workflows/flight-ci.yml` line 229) as what does cover them, with
+  its path mandate and the `required` fail-closed behaviour (#2910)
+- **AND** name issues **#3384** and **#3383** as owning the gap
+
+#### Scenario: A failed target-count derivation fails the gate rather than understating the gap
+- **GIVEN** `cargo metadata` cannot be read, or the declared-target count comes back zero
 - **WHEN** the Flight component runs
-- **THEN** `<name>` appears on the derived `--test` list and the component records FAIL
-
-#### Scenario: A flake-exclusion entry without an issue number fails the gate
-- **GIVEN** a flake-exclusion entry that names a target but no numeric issue number
-- **WHEN** the Flight component runs
-- **THEN** it records FAIL, naming the malformed entry, before any test is executed
-- **AND** the exclusion list can therefore never grow without a filed issue obliging its removal
-
-#### Scenario: A stale flake-exclusion entry fails the gate
-- **GIVEN** a flake-exclusion entry naming a target the package does not declare (renamed or deleted)
-- **WHEN** the Flight component runs
-- **THEN** it records FAIL, naming the stale entry, rather than silently excusing nothing
-
-#### Scenario: An unexecuted target with no permitted explanation fails the gate
-- **GIVEN** a declared `cqlite-flight` test target that is neither executed, nor excluded for unmet
-  `required-features` with another component invoking it, nor on the flake-exclusion list
-- **WHEN** the Flight component runs
-- **THEN** it records FAIL, naming the target and the missing explanation
-
-#### Scenario: Each exclusion is reported under its own named category
-- **WHEN** the Flight component completes successfully
-- **THEN** its log states how many targets were declared, run, excluded for `required-features`, and
-  excluded as flaky
-- **AND** a flake exclusion is reported as flake-skipped with its issue number, never folded into the
-  `required-features` category — "we chose not to run it" and "cargo cannot run it here" are distinct facts
+- **THEN** it records FAIL naming the DERIVATION, never a census reporting a zero or unknown gap — an
+  understated gap is the silent omission this change exists to eliminate
 
 #### Scenario: The oracle component keeps its own fixture predicates
 - **WHEN** the committed `test_compaction_tombstone_ttl` keyspace is absent but `test_deltas`/`test_tomb`
