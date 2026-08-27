@@ -52,7 +52,7 @@ async fn dropping_a_buffered_stream_reports_the_rows_the_producer_materialised()
     let task = tokio::spawn(async {});
 
     {
-        let mut stream = RowScanStream::new_measured(rx, task, None);
+        let mut stream = RowScanStream::new_measured_rows(rx, task, None);
         // Poll exactly ONE row, then abandon the stream with four rows buffered.
         let first = stream.recv().await.expect("one item").expect("ok item");
         assert_eq!(first.0.as_bytes(), &[0u8]);
@@ -97,7 +97,7 @@ async fn a_fully_consumed_stream_counts_each_row_exactly_once() {
     let task = tokio::spawn(async {});
 
     {
-        let mut stream = RowScanStream::new_measured(rx, task, None);
+        let mut stream = RowScanStream::new_measured_rows(rx, task, None);
         let mut seen = 0usize;
         while let Some(item) = stream.recv().await {
             item.expect("ok item");

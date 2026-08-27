@@ -734,7 +734,7 @@ pub(super) async fn stream_generations_for_read(
         // The cross-generation reconciling merge is the top-level read operation
         // (issue #1701), measured FORMAT-AGNOSTICALLY: its rows are reconciled across
         // possibly mixed BIG/BTI inputs, so no single format label is honest here.
-        Ok(Ok(())) => Ok(reader::RowScanStream::new_measured(out_rx, task, None)),
+        Ok(Ok(())) => Ok(reader::RowScanStream::new_measured_rows(out_rx, task, None)),
         // A REPORTED construction failure is CLASSIFIED from its `Error` variant (issue
         // #3154): only a merger-INELIGIBLE input earns the caller's concat fallback, and
         // an I/O / corruption / other runtime failure propagates. Answering the latter

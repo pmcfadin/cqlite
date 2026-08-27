@@ -86,31 +86,50 @@ use crate::{Error, Result, RowKey};
 pub trait ScanStreamItem {
     /// How this stream is named in a failure message.
     const STREAM_KIND: &'static str;
-
-    /// Account this item's rows (and partition boundaries) into the read-operation
-    /// meter (issue #1701). Per-item BOOKKEEPING, not per-item EMISSION: the meter
-    /// bumps two `u64`s and the single counter add / duration record happens once,
-    /// when the operation ends.
-    fn account(&self, meter: &mut ReadOpMeter);
 }
 
 impl ScanStreamItem for (RowKey, ScanRow) {
     const STREAM_KIND: &'static str = "per-row scan stream";
-
-    fn account(&self, meter: &mut ReadOpMeter) {
-        meter.record_row(&self.0);
-    }
 }
 
 impl ScanStreamItem for Vec<(RowKey, ScanRow)> {
     const STREAM_KIND: &'static str = "batched scan stream";
+}
 
-    fn account(&self, meter: &mut ReadOpMeter) {
-        for (key, _) in self {
-            meter.record_row(key);
-        }
+/// How a stream item's rows are accounted into the read-operation meter (issue #1701).
+///
+/// A FUNCTION POINTER stored on the stream, deliberately NOT a method on
+/// [`ScanStreamItem`]: that trait is PUBLIC (re-exported through
+/// `reader::{RowScanStream, BatchedScanStream}`, whose defining module is not
+/// nameable), so adding a required method to it would break every downstream
+/// implementation at compile time — and its parameter type [`ReadOpMeter`] is
+/// crate-private, so an external implementer could not even NAME the signature it was
+/// being asked to write. The metric wiring therefore stays entirely off the public
+/// surface: the pointer is a private field, set by the crate-internal constructors.
+type ItemAccounting<T> = fn(&T, &mut ReadOpMeter);
+
+/// Per-item accounting for the PER-ROW surface: one row, and a partition boundary when
+/// its key differs from the previous row's.
+fn account_row_item(item: &(RowKey, ScanRow), meter: &mut ReadOpMeter) {
+    meter.record_row(&item.0);
+}
+
+/// Per-item accounting for the BATCHED surface: every row of the batch. Per-item
+/// BOOKKEEPING, not per-item EMISSION — the meter bumps two `u64`s and the single
+/// counter add / duration record happens once, when the operation ends.
+///
+/// `&Vec<_>` (not `&[_]`) because the signature must match `ItemAccounting<T>` for
+/// `T = Vec<(RowKey, ScanRow)>` exactly.
+#[allow(clippy::ptr_arg)]
+fn account_batch_item(items: &Vec<(RowKey, ScanRow)>, meter: &mut ReadOpMeter) {
+    for (key, _) in items {
+        meter.record_row(key);
     }
 }
+
+/// Accounting for a stream that is NOT a metered read operation. Its meter is inert,
+/// so this would be a no-op either way; naming it keeps the field non-optional.
+fn account_nothing<T>(_item: &T, _meter: &mut ReadOpMeter) {}
 
 /// Consumer handle for a streaming scan: the item channel PLUS the producer task
 /// that feeds it, so end-of-stream is an OBSERVED fact rather than an assumption.
@@ -132,6 +151,10 @@ pub struct JoinedStream<T: ScanStreamItem> {
     /// rows a second and third time. Emits once — at the observed end of stream, or
     /// on drop for a scan the consumer abandoned (the `LIMIT` shape).
     meter: ReadOpMeter,
+    /// How to account one delivered item into `meter` (see [`ItemAccounting`]). A
+    /// private field rather than a public-trait method, so the metric wiring adds
+    /// nothing to [`ScanStreamItem`]'s published surface.
+    account: ItemAccounting<T>,
 }
 
 /// What a [`JoinedStream`] knows about its producer task (issue #3106, roborev).
@@ -172,6 +195,7 @@ impl<T: ScanStreamItem> JoinedStream<T> {
             rx,
             task: TaskState::Running(task),
             meter: ReadOpMeter::inert(),
+            account: account_nothing,
         }
     }
 
@@ -186,11 +210,13 @@ impl<T: ScanStreamItem> JoinedStream<T> {
         rx: mpsc::Receiver<Result<T>>,
         task: JoinHandle<()>,
         format: Option<&'static str>,
+        account: ItemAccounting<T>,
     ) -> Self {
         Self {
             rx,
             task: TaskState::Running(task),
             meter: ReadOpMeter::start(format),
+            account,
         }
     }
 
@@ -228,7 +254,7 @@ impl<T: ScanStreamItem> JoinedStream<T> {
             // DELIVERED. An `Err` item carries no rows, and the meter's own totals
             // are emitted at the terminal transition below.
             if let Ok(delivered) = &item {
-                delivered.account(&mut self.meter);
+                (self.account)(delivered, &mut self.meter);
             }
             return Some(item);
         }
@@ -296,12 +322,50 @@ impl<T: ScanStreamItem> Drop for JoinedStream<T> {
     /// item is accounted EXACTLY once: a polled row was accounted in `recv` and is no
     /// longer in the channel; a buffered row is accounted here and was never polled.
     fn drop(&mut self) {
+        // R2: CLOSE the channel BEFORE draining. Without it a producer still running
+        // can complete a send in the window between the last `try_recv() == Empty` and
+        // the receiver's destruction, and that row — already decoded, already
+        // enqueued — is discarded AFTER the meter finished, making an abandoned
+        // scan's totals race-dependent. `close()` makes every in-flight and later
+        // send fail, so the set of enqueued rows is FIXED before the drain reads it;
+        // buffered messages stay receivable, which is what the drain then collects.
+        self.rx.close();
         while let Ok(item) = self.rx.try_recv() {
             if let Ok(delivered) = &item {
-                delivered.account(&mut self.meter);
+                (self.account)(delivered, &mut self.meter);
             }
         }
         self.meter.finish();
+    }
+}
+
+impl RowScanStream {
+    /// [`new_measured`](JoinedStream::new_measured) for the PER-ROW surface, supplying
+    /// its accounting (issue #1701).
+    ///
+    /// Exists so the measured row-stream constructors OUTSIDE this module (the fan-out
+    /// merge and the cross-generation merge) need no access to the private accounting
+    /// function — keeping the metric wiring off both the public `ScanStreamItem` trait
+    /// and the crate's re-export surface.
+    pub(in crate::storage::sstable) fn new_measured_rows(
+        rx: mpsc::Receiver<Result<(RowKey, ScanRow)>>,
+        task: JoinHandle<()>,
+        format: Option<&'static str>,
+    ) -> Self {
+        Self::new_measured(rx, task, format, account_row_item)
+    }
+}
+
+impl BatchedScanStream {
+    /// [`new_measured`](JoinedStream::new_measured) for the BATCHED surface, supplying
+    /// its accounting (issue #1701) — the sibling of
+    /// [`RowScanStream::new_measured_rows`], for the same reason.
+    pub(in crate::storage::sstable) fn new_measured_batches(
+        rx: mpsc::Receiver<Result<Vec<(RowKey, ScanRow)>>>,
+        task: JoinHandle<()>,
+        format: Option<&'static str>,
+    ) -> Self {
+        Self::new_measured(rx, task, format, account_batch_item)
     }
 }
 
