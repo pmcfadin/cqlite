@@ -331,10 +331,13 @@ impl AdvancedQueryEngine {
     /// Execute a prepared query.
     ///
     /// Bounded by `config.query.max_execution_time` (issue #1695). NOTE: this is
-    /// the ENGINE's prepared entry point; calling
+    /// the ENGINE's prepared entry point, but it is not the only bounded one:
     /// [`PreparedQuery::execute`](crate::query::prepared::PreparedQuery::execute)
-    /// directly on a handle obtained from `prepare()` bypasses the engine and is
-    /// therefore unbounded.
+    /// and `execute_with_context`, called directly on a handle obtained from
+    /// `prepare()`, carry the engine's budget and bound themselves via
+    /// [`bound`]. So a prepared query is bounded on EITHER route — and bounded
+    /// exactly ONCE on each, because the shared inner body is the `pub(crate)`
+    /// unbounded one. Do not add a second wrapper here.
     pub async fn execute_prepared(
         &self,
         prepared: &PreparedQuery,
