@@ -723,6 +723,12 @@ pub(super) async fn stream_generations_for_read(
         };
 
         loop {
+            // #1695: observe consumer closure EVERY iteration, not only when a send
+            // happens — the three `continue` paths below send nothing. See
+            // `merge_cancel`, "Why the streaming producer needs its own check".
+            if out_tx.is_closed() {
+                return;
+            }
             let step = match merger.step() {
                 Ok(s) => s,
                 Err(e) => {

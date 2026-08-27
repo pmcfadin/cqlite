@@ -34,6 +34,31 @@
 //! `KWayMerger` closes the channel, trips the readers' token and joins the
 //! threads) — this is about promptness, not leaks.
 //!
+//! # Why the streaming producer needs its own check (roborev round 8)
+//!
+//! `stream_generations_for_read` was excluded from the guard above on the grounds
+//! that its `out_tx.blocking_send(..).is_err()` already retires it when the consumer
+//! drops. That reasoning was INCOMPLETE: a send-failure check is only reached when a
+//! partition actually yields a row, and three paths in that loop `continue` without
+//! sending — a partition below `start_key`, one above `end_key`, and one whose rows
+//! are all tombstoned or TTL-expired (`live` empty). A range scan matching nothing,
+//! or a no-match full scan, therefore performed not one send and so not one check,
+//! and walked the whole remaining table after `QueryTimeout` had already been handed
+//! back to the caller.
+//!
+//! It uses `Sender::is_closed()` at the top of its loop rather than this module's
+//! token: closure is already observable through the channel it owns, so nothing has
+//! to be plumbed in and no `Drop` impl is needed on the stream, and it strictly
+//! dominates the send-failure check. The token machinery here remains the right tool
+//! for the MATERIALIZING merges, which have no channel to consult at all.
+//!
+//! RESIDUAL: neither mechanism can abort a single long `KWayMerger::step()` on the
+//! streaming path, because that merger's readers still hold an inert
+//! `ScanCancel::default()`. Fixing that means a drop-tripped guard living inside
+//! `JoinedStream` so the readers can be cancelled too — the deferred "carry
+//! cancellation into the core streaming producer" work, which also covers the
+//! per-batch bound and lets core RECORD the elapse.
+//!
 //! # The shape: a guard in the async scope, a flag in the closure
 //!
 //! [`per_call`] mints a FRESH token per call and returns it paired with a guard
@@ -157,6 +182,43 @@ mod abandon_tests;
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Structural pin (#1695 roborev round 8): the STREAMING producer must observe
+    /// consumer closure BEFORE it does a merge step, not only when it sends.
+    ///
+    /// Behavioural coverage cannot reach this without being vacuous. To show the
+    /// difference you need a producer that is still alive, has work left, and has
+    /// nothing to send — and on any fixture small enough for the suite, a no-match
+    /// scan runs to completion and the producer exits ON ITS OWN, so the case passes
+    /// with the check deleted. Making it discriminating needs a fixture large enough
+    /// that "walks the rest of the table" is observably slower than "stops now",
+    /// which is a wall-clock threshold in the correctness path — forbidden. So the
+    /// invariant is asserted on the source, and ORDER is the substance of it: a check
+    /// placed after `step()` would still pay for a full step per iteration after the
+    /// consumer is gone.
+    #[test]
+    fn the_streaming_producer_checks_closure_before_stepping() {
+        let src = include_str!("../generation_merge.rs");
+
+        let check = src.find("if out_tx.is_closed()").expect(
+            "the streaming producer must consult `is_closed()`; without it the \
+                     only stop signal is a failing send, which the three `continue` \
+                     paths never reach",
+        );
+        let step = src
+            .find("let step = match merger.step()")
+            .expect("the streaming producer's merge step must still be there");
+        assert!(
+            check < step,
+            "the closure check must come BEFORE the merge step, else an abandoned \
+             stream still pays for one full step per iteration"
+        );
+        assert_eq!(
+            src.matches("if out_tx.is_closed()").count(),
+            1,
+            "exactly one closure check is expected in the streaming producer"
+        );
+    }
 
     /// Structural pin (#1695 roborev round 2): the three MATERIALIZING merges must
     /// hand their per-call token to the merger's own input readers, not the inert
