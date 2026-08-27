@@ -217,7 +217,7 @@ fn assert_read_metrics(
 async fn read_path_emits_rows_bytes_partitions_and_duration() {
     let mc = testing::metrics_capture();
     let reader = open_reader().await;
-    let tid = TableId::new(&format!("{KEYSPACE}.{TABLE}"));
+    let tid = TableId::new(format!("{KEYSPACE}.{TABLE}"));
 
     // ---------------------------------------------------------------------
     // Phase 1 — the per-row streaming scan surface (`scan_stream`).
