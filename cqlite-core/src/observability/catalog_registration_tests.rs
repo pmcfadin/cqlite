@@ -270,18 +270,34 @@ fn handwritten_dispatch_arms(src: &str) -> Result<std::collections::BTreeSet<Str
     Ok(out)
 }
 
-/// Assert the resolvers carry no per-metric dispatch — see
-/// [`handwritten_dispatch_arms`].
-fn assert_resolvers_have_no_handwritten_dispatch(src: &str) {
+/// `Ok(())` when the resolvers carry no per-metric dispatch, `Err(why)` otherwise —
+/// see [`handwritten_dispatch_arms`].
+///
+/// A Result rather than a panicking assertion (issue #1705, roborev F9): the tests
+/// that must observe this guard REJECTING a source used to run it under
+/// `catch_unwind` with the process-global panic hook swapped out, which races every
+/// other test in the binary — an interleaved replace/restore can leave the silencing
+/// hook installed and swallow an unrelated failure's diagnostics. The failure is
+/// reported as a value instead, so no global state is touched at all and the
+/// rejection REASON becomes assertable.
+fn check_resolvers_have_no_handwritten_dispatch(src: &str) -> Result<(), String> {
     match handwritten_dispatch_arms(src) {
-        Err(why) => panic!("the otel resolvers could not be parsed: {why}"),
-        Ok(arms) if !arms.is_empty() => panic!(
+        Err(why) => Err(format!("the otel resolvers could not be parsed: {why}")),
+        Ok(arms) if !arms.is_empty() => Err(format!(
             "the otel resolvers contain hand-written per-metric dispatch arms for \
              {arms:?}. Registration must stay ONE construct (a `Registry` call), or a \
              name/instrument mismatch becomes representable again and invisible to every \
              guard (#1705, F3)"
-        ),
-        Ok(_) => {}
+        )),
+        Ok(_) => Ok(()),
+    }
+}
+
+/// [`check_resolvers_have_no_handwritten_dispatch`], failing the calling test with
+/// the check's own diagnosis.
+fn assert_resolvers_have_no_handwritten_dispatch(src: &str) {
+    if let Err(why) = check_resolvers_have_no_handwritten_dispatch(src) {
+        panic!("{why}");
     }
 }
 
@@ -675,10 +691,11 @@ fn a_handwritten_dispatch_arm_is_rejected_because_it_can_mis_wire() {
         arms.contains("READ_ROWS"),
         "a mis-wired dispatch arm must be detected: {arms:?}"
     );
-    let outcome = catch_panic(|| assert_resolvers_have_no_handwritten_dispatch(&mis_wired));
+    let why = check_resolvers_have_no_handwritten_dispatch(&mis_wired)
+        .expect_err("a mis-wired dispatch arm must RED the guard, not merely be listed");
     assert!(
-        outcome.is_err(),
-        "a mis-wired dispatch arm must RED the guard, not merely be listed"
+        why.contains("READ_ROWS") && why.contains("hand-written per-metric dispatch"),
+        "the rejection must name the offending arm: {why}"
     );
 
     // A CORRECTLY-wired arm is rejected too: the construct is what is unsafe. A
@@ -689,7 +706,7 @@ fn a_handwritten_dispatch_arm_is_rejected_because_it_can_mis_wire() {
         "",
     ));
     assert!(
-        catch_panic(|| assert_resolvers_have_no_handwritten_dispatch(&hand_wired)).is_err(),
+        check_resolvers_have_no_handwritten_dispatch(&hand_wired).is_err(),
         "any per-metric dispatch arm must be rejected, correct-looking or not"
     );
 
@@ -830,16 +847,6 @@ fn an_unrecognised_registration_argument_fails_closed() {
         .is_empty());
 }
 
-/// Run `f`, returning `Err` if it panicked, with the panic hook silenced so a
-/// deliberately-failing guard does not spew a backtrace into the test log.
-fn catch_panic<F: FnOnce() + std::panic::UnwindSafe>(f: F) -> Result<(), ()> {
-    let previous = std::panic::take_hook();
-    std::panic::set_hook(Box::new(|_| {}));
-    let outcome = std::panic::catch_unwind(f);
-    std::panic::set_hook(previous);
-    outcome.map_err(|_| ())
-}
-
 #[test]
 fn a_missing_resolver_reds_the_parse_instead_of_emptying_it() {
     // A guard whose subject set silently shrinks to nothing passes vacuously, so
@@ -852,8 +859,8 @@ fn a_missing_resolver_reds_the_parse_instead_of_emptying_it() {
     assert!(why.contains("fn gauge_for"), "unexpected reason: {why}");
     assert!(handwritten_dispatch_arms(no_gauge_resolver).is_err());
     assert!(
-        catch_panic(|| assert_resolvers_have_no_handwritten_dispatch(no_gauge_resolver)).is_err(),
-        "the assertion wrapper must red on an unparseable resolver set"
+        check_resolvers_have_no_handwritten_dispatch(no_gauge_resolver).is_err(),
+        "the guard must red on an unparseable resolver set, never pass vacuously"
     );
 
     // And an empty registration set is an error for the same reason.
