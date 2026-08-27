@@ -77,8 +77,18 @@ function hasDataDbFile(dir) {
   return false;
 }
 
-// Issue #1458: content-aware, not directory-only.
-const DATASETS_AVAILABLE = fs.existsSync(SSTABLES_DIR) && hasDataDbFile(SSTABLES_DIR);
+// Issue #1458: content-aware AND still test_basic-scoped.
+//
+// BOTH halves are load-bearing, and content-awareness was ADDED to the original
+// `existsSync(SSTABLES_DIR/test_basic)` requirement -- never swapped for it. A
+// corpus-WIDE `hasDataDbFile(SSTABLES_DIR)` accepts a root holding only, say,
+// test_collections/ and then enables EVERY dataset-dependent suite including the
+// test_basic ones that cannot possibly pass: a net WEAKENING of this guard.
+// Asking for content INSIDE test_basic implies the dir exists AND that the
+// corpus is non-empty, so this is strictly stronger than either half alone.
+// Do not "simplify" it back to a corpus-wide check.
+const TEST_BASIC_DIR = path.join(SSTABLES_DIR, 'test_basic');
+const DATASETS_AVAILABLE = fs.existsSync(SSTABLES_DIR) && hasDataDbFile(TEST_BASIC_DIR);
 
 // Strict fixture mode (issue #1230/#1458). Mirrors the Python
 // _require_fixtures_strict() helper: same two env var names, and the same
@@ -127,7 +137,7 @@ if (process.env.DEBUG_TESTS) {
 // describe.skip, which would report a green run over zero real assertions.
 if (REQUIRE_FIXTURES && !DATASETS_AVAILABLE) {
   throw new Error(
-    `No SSTable fixtures found: ${SSTABLES_DIR} is absent or contains 0 *-Data.db files ` +
+    `No SSTable fixtures found: ${TEST_BASIC_DIR} is absent or contains 0 *-Data.db files ` +
     '(CQLITE_REQUIRE_FIXTURES=1 — fetch with bash test-data/scripts/fetch-datasets.sh)'
   );
 }

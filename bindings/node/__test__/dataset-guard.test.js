@@ -38,20 +38,53 @@ function resolveJestBin() {
 }
 
 /**
- * Run a child jest process whose ONLY setup file is the real setup.js, against
- * a datasets root that exists but holds zero *-Data.db files.
+ * Corpus shapes a child jest run can be pointed at. Each shape owns both the
+ * on-disk layout AND the child test body, because the body decides what a
+ * non-zero exit is allowed to mean.
  *
- * @param {{strict: boolean}} opts
+ * @type {Record<string, {build: (sstables: string) => void, childTest: string}>}
+ */
+const CORPUS_SHAPES = {
+  // Present-but-empty: sstables/test_basic/ exists, no *-Data.db anywhere.
+  // The body asserts the guard's own verdict, so the non-strict control proves
+  // the run both survived AND saw an unavailable corpus.
+  empty: {
+    build: (sstables) => {
+      fs.mkdirSync(path.join(sstables, 'test_basic'), { recursive: true });
+    },
+    childTest: "test('noop', () => { expect(global.DATASETS_AVAILABLE).toBe(false); });\n",
+  },
+  // test_basic/ present but EMPTY, while a DIFFERENT keyspace holds a
+  // *-Data.db. A corpus-WIDE content check that dropped the test_basic
+  // requirement reports this as available and then enables the
+  // test_basic-dependent suites, which cannot possibly pass (issue #1458).
+  //
+  // The body here is deliberately assertion-FREE: the guard throwing must be
+  // the only possible source of a non-zero exit, otherwise a failing child
+  // assertion would green this test against the very bug it pins.
+  otherKeyspaceOnly: {
+    build: (sstables) => {
+      fs.mkdirSync(path.join(sstables, 'test_basic'), { recursive: true });
+      fs.mkdirSync(path.join(sstables, 'test_collections'), { recursive: true });
+      fs.writeFileSync(path.join(sstables, 'test_collections', 'nb-1-big-Data.db'), '');
+    },
+    childTest: "test('noop', () => {});\n",
+  },
+};
+
+/**
+ * Run a child jest process whose ONLY setup file is the real setup.js, against
+ * a synthesized datasets root of the requested shape.
+ *
+ * @param {{strict: boolean, corpus?: keyof typeof CORPUS_SHAPES}} opts
  * @returns {{status: number, stdout: string, stderr: string}}
  */
-function runChildJest({ strict }) {
+function runChildJest({ strict, corpus = 'empty' }) {
+  const shape = CORPUS_SHAPES[corpus];
+  if (!shape) throw new Error(`unknown corpus shape: ${corpus}`);
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'cqlite-dataset-guard-'));
-  // Present-but-empty corpus: sstables/test_basic/ exists, no *-Data.db anywhere.
-  fs.mkdirSync(path.join(tmp, 'datasets', 'sstables', 'test_basic'), { recursive: true });
-  fs.writeFileSync(
-    path.join(tmp, 'noop.test.js'),
-    "test('noop', () => { expect(global.DATASETS_AVAILABLE).toBe(false); });\n"
-  );
+  shape.build(path.join(tmp, 'datasets', 'sstables'));
+  fs.writeFileSync(path.join(tmp, 'noop.test.js'), shape.childTest);
 
   const config = JSON.stringify({
     testEnvironment: 'node',
@@ -89,5 +122,21 @@ describe('dataset guard (issue #1458)', () => {
       throw new Error(`expected exit 0, got ${status}\n${stdout}${stderr}`);
     }
     expect(status).toBe(0);
+  }, 120000);
+
+  // Regression: content-awareness was ADDED to the test_basic requirement, not
+  // swapped for it. A *-Data.db under some OTHER keyspace does not make the
+  // test_basic-dependent suites runnable, so it must not report available.
+  test('strict mode fails when test_basic is empty but another keyspace has data', () => {
+    const { status, stdout, stderr } = runChildJest({
+      strict: true,
+      corpus: 'otherKeyspaceOnly',
+    });
+    const output = `${stdout}${stderr}`;
+    if (status === 0) {
+      throw new Error(`expected non-zero exit, got 0\n${output}`);
+    }
+    expect(output).toMatch(/test_basic/);
+    expect(output).toMatch(/-Data\.db/);
   }, 120000);
 });
