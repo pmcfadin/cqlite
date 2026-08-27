@@ -621,6 +621,267 @@ fn empty_source_tree_fails_closed_rather_than_passing() {
 }
 
 // ---------------------------------------------------------------------------
+// The literal/identifier prefix family (issue #1714, roborev rounds 1-2)
+// ---------------------------------------------------------------------------
+
+/// Every Rust literal form, one case each, with `mod orphan;` **inside** the literal.
+///
+/// This is the family test, not a set of special cases. Five review findings on this
+/// walker were all the same shape: prefix recognition lived in three parsers, each
+/// knowing a different subset of Rust's prefixes, so an unrecognized prefix fell through
+/// to ordinary scanning and the `mod orphan;` inside it was counted as a real
+/// declaration — a silent FALSE PASS. `cr#"…"#` (raw C-string) was the last one found;
+/// its exact adversarial case is pinned below, because the embedded `"` is the point: a
+/// scanner that terminates the literal at the first quote lands squarely in `mod orphan;`.
+#[test]
+fn every_literal_prefix_form_is_data_not_a_declaration() {
+    for (label, literal) in [
+        ("string", r####""mod orphan;""####),
+        (
+            "string-escaped-quote",
+            r####""escaped \" then mod orphan;""####,
+        ),
+        ("raw", r####"r"mod orphan;""####),
+        ("raw-hash", r####"r#"quote " and mod orphan;"#"####),
+        ("raw-hash2", r####"r##"deeper "# and mod orphan;"##"####),
+        ("byte-string", r####"b"mod orphan;""####),
+        ("byte-raw", r####"br"mod orphan;""####),
+        ("byte-raw-hash", r####"br#"quote " and mod orphan;"#"####),
+        ("cstring", r####"c"mod orphan;""####),
+        ("cstring-raw", r####"cr"mod orphan;""####),
+        // The roborev round-2 finding, verbatim: embedded quotes inside a hashed raw
+        // C-string. A naive scanner terminates at the first `"` and reads the rest as code.
+        (
+            "cstring-raw-hash",
+            r####"cr#"left " mod orphan; " right"#"####,
+        ),
+        (
+            "cstring-raw-hash2",
+            r####"cr##"deeper "# and mod orphan;"##"####,
+        ),
+        // A char literal cannot hold `mod orphan;`, so the byte-char cases pin the other
+        // way a mis-lex hurts: a quote inside `b'…'`/`'…'` that is mistaken for the start
+        // of a string literal shifts every later quote pairing, which drops the following
+        // string's `mod orphan;` into code position.
+        ("byte-char-quote", r####"(b'"', "mod orphan;")"####),
+        ("char-quote", r####"('"', "mod orphan;")"####),
+        ("char-escaped-quote", r####"('\'', "mod orphan;")"####),
+    ] {
+        let tree = ScratchCrate::new(&format!("literal-{label}"));
+        tree.write(
+            "src/lib.rs",
+            &format!("pub mod wired;\npub fn f() {{ let _ = {literal}; }}\n"),
+        );
+        tree.write("src/wired.rs", "pub fn f() {}\n");
+        tree.write("src/orphan.rs", "pub fn never_compiled() {}\n");
+
+        let report = tree.analyze();
+        assert_eq!(
+            report.orphans.iter().cloned().collect::<Vec<_>>(),
+            vec!["src/orphan.rs".to_string()],
+            "case `{label}` ({literal}): a `mod orphan;` inside a literal is DATA — it must \
+             not make `orphan.rs` look reachable; reachable={:?}",
+            report.reachable
+        );
+        assert!(
+            report.reachable.contains("src/wired.rs"),
+            "case `{label}` ({literal}): the literal must not swallow the real `mod wired;` \
+             that follows it; reachable={:?}",
+            report.reachable
+        );
+    }
+}
+
+/// **The test that keeps the family closed.** An identifier-ish token glued to `"`, `'`
+/// or `#` that the lexer's `PREFIXES` table does not know must be an `Err` naming the
+/// file, line and token — never a fall-through to ordinary scanning.
+///
+/// Rust reserves every such sequence (edition-2021 reserved prefixes) precisely so new
+/// literal forms can be added; `c"…"` and `cr#"…"#` themselves arrived that way in Rust
+/// 1.77. Without this branch, the *next* prefix silently disables the guard, which is how
+/// this walker got two findings of the same shape in consecutive review rounds. With it,
+/// the walk stops and a human adds one table row.
+#[test]
+fn unrecognized_literal_prefix_fails_closed() {
+    for (label, snippet, token) in [
+        // A hypothetical future string prefix (`f"…"`, `k#"…"#`) — the real threat model.
+        (
+            "future-string-prefix",
+            "pub fn f() { let _ = f\"mod orphan;\"; }\npub mod wired;\n",
+            "f\"",
+        ),
+        (
+            "future-hash-prefix",
+            "pub fn f() { let _ = k#\"mod orphan;\"#; }\npub mod wired;\n",
+            "k#",
+        ),
+        // `b#`/`c#` are NOT raw-string prefixes (`br#`/`cr#` are) — a one-character slip
+        // that must refuse rather than scan on.
+        (
+            "byte-hash-is-not-a-raw-prefix",
+            "pub fn f() { let _ = b#\"mod orphan;\"#; }\npub mod wired;\n",
+            "b#",
+        ),
+        (
+            "cstring-hash-is-not-a-raw-prefix",
+            "pub fn f() { let _ = c#\"mod orphan;\"#; }\npub mod wired;\n",
+            "c#",
+        ),
+        // `r##foo` is neither a raw string (no `\"`) nor a raw identifier (two hashes).
+        (
+            "double-hash-raw-identifier",
+            "pub fn f() { let _ = r##orphan; }\npub mod wired;\n",
+            "r#",
+        ),
+        // A future char-like prefix.
+        (
+            "future-char-prefix",
+            "pub fn f() { let _ = q'x'; }\npub mod wired;\n",
+            "q'",
+        ),
+    ] {
+        let tree = ScratchCrate::new(&format!("prefix-{label}"));
+        tree.write("src/lib.rs", snippet);
+        tree.write("src/wired.rs", "pub fn f() {}\n");
+        tree.write("src/orphan.rs", "pub fn never_compiled() {}\n");
+
+        let cause = tree.expect_failure();
+        assert!(
+            cause.contains("unrecognized literal/identifier prefix"),
+            "case `{label}`: an unrecognized prefix must fail CLOSED as a prefix refusal \
+             (a fall-through to ordinary scanning is the silent false PASS); got: {cause}"
+        );
+        assert!(
+            cause.contains(token),
+            "case `{label}`: the refusal must NAME the offending token (`{token}`) so a \
+             human can add the table row; got: {cause}"
+        );
+        assert!(
+            cause.contains("src/lib.rs") && cause.contains("line 1"),
+            "case `{label}`: the refusal must name the file and line; got: {cause}"
+        );
+        assert!(
+            cause.contains("#1714"),
+            "case `{label}`: the refusal must point at the issue that owns the table; \
+             got: {cause}"
+        );
+    }
+}
+
+/// A raw identifier is legal in a `mod` declaration, and the `r#` is **not** part of the
+/// name: `mod r#type;` declares a module whose file is `type.rs`. Failing closed here
+/// would be a real false FAIL the moment someone writes `mod r#try;`, so the resolution
+/// is pinned in both flavors (`name.rs` and `name/mod.rs`).
+#[test]
+fn raw_identifier_module_declarations_resolve() {
+    let tree = ScratchCrate::new("raw-ident-mod");
+    tree.write(
+        "src/lib.rs",
+        "pub mod r#type;\npub mod r#try;\npub mod wired;\n",
+    );
+    tree.write("src/type.rs", "pub fn f() {}\n");
+    tree.write("src/try/mod.rs", "pub fn f() {}\n");
+    tree.write("src/wired.rs", "pub fn f() {}\n");
+    tree.write("src/orphan.rs", "pub fn never_compiled() {}\n");
+
+    let report = tree.analyze();
+    for expected in ["src/type.rs", "src/try/mod.rs", "src/wired.rs"] {
+        assert!(
+            report.reachable.contains(expected),
+            "`mod r#…;` must resolve with the `r#` stripped: `{expected}` missing from {:?}",
+            report.reachable
+        );
+    }
+    assert_eq!(
+        report.orphans.iter().cloned().collect::<Vec<_>>(),
+        vec!["src/orphan.rs".to_string()],
+        "raw-identifier modules must not disturb orphan detection"
+    );
+}
+
+/// A macro may be *named* with a raw identifier, in both definition and invocation
+/// position. If the walker does not consume `r#name` atomically it never recognizes the
+/// macro at all, parses its token tree as ordinary Rust, and counts the `mod orphan;`
+/// inside it as a real declaration — the roborev round-2 finding.
+#[test]
+fn raw_identifier_named_macros_reach_the_mod_in_macro_guard() {
+    for (label, lib_rs, needle) in [
+        (
+            "raw-macro-rules-definition",
+            "pub mod wired;\nmacro_rules! r#make { () => { mod orphan; }; }\n",
+            "r#make",
+        ),
+        (
+            "raw-macro-invocation-paren",
+            "pub mod wired;\npub const S: &str = r#make!(mod orphan;);\n",
+            "r#make!",
+        ),
+        (
+            "raw-macro-invocation-brace",
+            "pub mod wired;\nouter::r#bar! { mod orphan; }\n",
+            "r#bar!",
+        ),
+        (
+            "raw-macro-invocation-bracket",
+            "pub mod wired;\npub const S: &str = r#make![mod orphan;];\n",
+            "r#make!",
+        ),
+        (
+            "raw-macro-rules-metavariable",
+            "pub mod wired;\nmacro_rules! r#decl { ($n:ident) => { mod $n; }; }\n",
+            "r#decl",
+        ),
+    ] {
+        let tree = ScratchCrate::new(&format!("raw-macro-{label}"));
+        tree.write("src/lib.rs", lib_rs);
+        tree.write("src/wired.rs", "pub fn f() {}\n");
+        tree.write("src/orphan.rs", "pub fn never_compiled() {}\n");
+
+        let cause = tree.expect_failure();
+        assert!(
+            cause.contains("macro") && cause.contains(needle),
+            "case `{label}`: a `mod` inside a raw-identifier-named macro's token tree must \
+             fail closed naming the macro (`{needle}`); got: {cause}"
+        );
+    }
+}
+
+/// The other direction for raw identifiers: `r#mod` is an IDENTIFIER, never the keyword,
+/// and an ordinary raw-identifier-named macro with no `mod` in it must leave the walk
+/// alone. An over-broad guard is the guard someone deletes.
+#[test]
+fn raw_identifiers_that_are_not_declarations_do_not_trip_the_guard() {
+    let tree = ScratchCrate::new("raw-ident-benign");
+    tree.write(
+        "src/lib.rs",
+        r####"
+macro_rules! r#fn {
+    ($x:expr) => {{ let r#mod = $x; r#mod }};
+}
+pub mod wired;
+pub struct S { pub r#type: u8, pub r#mod: u8 }
+pub fn f() -> usize { r#fn!(1usize) }
+pub fn g<'a>(r#match: &'a str) -> &'a str { r#match }
+"####,
+    );
+    tree.write("src/wired.rs", "pub fn f() {}\n");
+    tree.write("src/orphan.rs", "pub fn never_compiled() {}\n");
+
+    let report = tree.analyze();
+    assert_eq!(
+        report.orphans.iter().cloned().collect::<Vec<_>>(),
+        vec!["src/orphan.rs".to_string()],
+        "`r#mod` is an identifier, not a declaration, and a benign raw-named macro must \
+         neither fail the walk nor hide the orphan; reachable={:?}",
+        report.reachable
+    );
+    assert!(
+        report.reachable.contains("src/wired.rs"),
+        "a raw-identifier-bearing root must still resolve its real `mod` declarations"
+    );
+}
+
+// ---------------------------------------------------------------------------
 // Stripper unit tests (control vs data, at the sanitizer boundary)
 // ---------------------------------------------------------------------------
 
@@ -669,7 +930,13 @@ fn stripper_blanks_every_literal_form() {
         "let s = r#\"quote \" and mod x;\"#;\n",
         "let s = r##\"deeper \"# and mod x;\"##;\n",
         "let s = b\"mod x;\";\n",
+        "let s = br\"mod x;\";\n",
         "let s = br#\"mod x;\"#;\n",
+        "let s = c\"mod x;\";\n",
+        "let s = cr\"mod x;\";\n",
+        "let s = cr#\"quote \" and mod x;\"#;\n",
+        "let s = cr##\"deeper \"# and mod x;\"##;\n",
+        "let s = (b'\"', \"mod x;\");\n",
     ] {
         let out = stripped(src);
         assert!(

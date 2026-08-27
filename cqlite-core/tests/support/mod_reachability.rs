@@ -58,9 +58,7 @@ use std::collections::{BTreeSet, VecDeque};
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use lexer::{
-    ident_token, is_ident_byte, is_ident_start, lex_token, line_of, skip_ws, LexToken,
-};
+use lexer::{ident_token, is_ident_byte, is_ident_start, lex_token, line_of, skip_ws, LexToken};
 
 /// What to analyze. Crate-agnostic on purpose — see the module docs (#1502).
 #[derive(Debug, Clone)]
