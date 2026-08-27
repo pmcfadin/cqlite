@@ -257,12 +257,39 @@ pub struct CompactionConfig {
     /// Enable automatic (STCS) compaction. When `false`, the write engine
     /// installs no merge policy and `maintenance_step` is a no-op.
     pub auto_compaction: bool,
+
+    /// STCS `min_threshold`: minimum number of SSTables in a size bucket before
+    /// a compaction is triggered (default: 4). Ignored when
+    /// [`Self::auto_compaction`] is `false`. Wired to the write engine by
+    /// `WriteEngineConfig::from_config` (issue #1697).
+    #[serde(default = "default_compaction_min_threshold")]
+    pub min_threshold: usize,
+
+    /// STCS `max_threshold`: maximum number of SSTables merged together in one
+    /// compaction step (default: 32). Ignored when [`Self::auto_compaction`] is
+    /// `false`. Wired to the write engine by `WriteEngineConfig::from_config`
+    /// (issue #1697).
+    #[serde(default = "default_compaction_max_threshold")]
+    pub max_threshold: usize,
+}
+
+/// Default for [`CompactionConfig::min_threshold`]: Cassandra's STCS default.
+fn default_compaction_min_threshold() -> usize {
+    4
+}
+
+/// Default for [`CompactionConfig::max_threshold`]: Cassandra's STCS default.
+fn default_compaction_max_threshold() -> usize {
+    32
 }
 
 impl Default for CompactionConfig {
     fn default() -> Self {
         Self {
             auto_compaction: true,
+            // Shared with the serde defaults so the two can never drift.
+            min_threshold: default_compaction_min_threshold(),
+            max_threshold: default_compaction_max_threshold(),
         }
     }
 }

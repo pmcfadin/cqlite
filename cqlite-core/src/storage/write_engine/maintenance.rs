@@ -2510,6 +2510,7 @@ mod tests {
 
         let compaction = crate::config::CompactionConfig {
             auto_compaction: false,
+            ..Default::default()
         };
         let config = WriteEngineConfig::new(
             temp_dir.path().join("data"),
