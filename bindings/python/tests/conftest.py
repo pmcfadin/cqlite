@@ -82,10 +82,14 @@ def _count_data_db() -> int:
     A present-but-EMPTY datasets directory is the exact shape of the original
     #773 failure, so directory existence alone is not evidence of a corpus.
     Returns 0 when ``DATASETS`` does not exist.
+
+    Only FILES count: ``Path.glob`` yields directories too, so an unfiltered
+    count lets a *directory* named e.g. ``placeholder-Data.db`` satisfy strict
+    mode with zero actual SSTable binaries.
     """
     if not DATASETS.exists():
         return 0
-    return sum(1 for _ in DATASETS.glob("**/*-Data.db"))
+    return sum(1 for p in DATASETS.glob("**/*-Data.db") if p.is_file())
 
 
 def skip_if_no_datasets():

@@ -66,3 +66,23 @@ def test_strict_passes_when_data_db_present(tmp_path, monkeypatch):
     assert conftest._count_data_db() == 1
 
     conftest.skip_if_no_datasets()  # must not raise Failed or Skipped
+
+
+def test_strict_fails_when_data_db_is_a_directory(tmp_path, monkeypatch):
+    """A DIRECTORY named ``*-Data.db`` is not an SSTable binary.
+
+    ``Path.glob`` yields directories as well as files, so an unfiltered count
+    lets a placeholder dir satisfy strict mode with zero real fixtures -- the
+    same false-green class this guard exists to close.
+    """
+    datasets = _empty_datasets_dir(tmp_path)
+    (datasets / "test_basic" / "nb-1-big-Data.db").mkdir()
+    monkeypatch.setattr(conftest, "DATASETS", datasets)
+    _strict(monkeypatch)
+
+    assert conftest._count_data_db() == 0
+
+    with pytest.raises(Failed) as excinfo:
+        conftest.skip_if_no_datasets()
+
+    assert "0 *-Data.db" in str(excinfo.value)
