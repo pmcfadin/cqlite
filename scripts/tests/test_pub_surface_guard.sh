@@ -78,6 +78,16 @@
 #                hiding inside the body passes green. The scan must REFUSE over any
 #                top-level `pub mod` form it does not recognise.
 #
+#   Trust boundaries, second pass (roborev r4 F1/F3) — both were FALSE PASSES:
+#  21.  RED    — the §1b `doc`-cfg refusal was itself a substring test, so
+#                `#[cfg(doc)]` and `#[cfg_attr(not(doc), cfg(any()))]` sailed past it
+#                and the guard CERTIFIED a snapshot listing an item the shipped crate
+#                does not have. Four condition-position shapes must refuse; `doc` in
+#                cfg_attr's ATTRIBUTE position must not.
+#  22.  RED    — a RELATIVE `CARGO_TARGET_DIR` was resolved against the CALLER's cwd
+#                while cargo resolves it against the repo root, so the guard locked,
+#                deleted and inspected a different tree than the one cargo wrote.
+#
 # NO TEST-ONLY SEAM. The guard's subject is hard-coded on purpose, so the negative
 # cases SUBSTITUTE THE ARTIFACT: each runs in its own `git worktree add --detach HEAD`
 # scratch checkout whose files are edited in place (CLAUDE.md — a test that needs a
@@ -663,6 +673,128 @@ grep -qE "line [0-9]+" "$TMPROOT/case20.out" \
 echo "OK (20): an inline crate-root \`pub mod NAME { … }\` makes the scan REFUSE (shared blind spot, not a disagreement)"
 
 # ---------------------------------------------------------------------------
+# 21. RED — a `doc` cfg predicate the OLD LEXICAL detector could not see (roborev
+#     r4 F1). This is the guard's own §1b refusal being an instance of the very
+#     defect class it fences off: a substring test standing in for a structural one.
+#
+#     MEASURED against the pre-fix detector, whose pattern required a non-identifier
+#     character immediately BEFORE the `doc` token (and `^` there is a line anchor,
+#     so it can only match at column zero):
+#
+#       #[cfg(doc)]                          -> PASSED GREEN   (false PASS)
+#       #[cfg_attr(not(doc), cfg(any()))]    -> PASSED GREEN   (false PASS)
+#       #[cfg_attr(doc, doc(hidden))]        -> failed, but with the SNAPSHOT-DRIFT
+#                                               diagnostic; the refusal never fired
+#
+#     The first two are the dangerous ones and they are not exotic: under `cargo doc`
+#     the `doc` cfg is SET, so `#[cfg(doc)]` KEEPS the item in rustdoc's output while a
+#     default build DROPS it, and `cfg_attr(not(doc), cfg(any()))` is the mirror image
+#     — rustdoc sees the item, the shipped crate does not. In both cases the guard
+#     certified a snapshot listing a public item the compiled crate does not have.
+#
+#     The last shape below is the DELIBERATE NON-FIRE: `doc` there sits in cfg_attr's
+#     ATTRIBUTE position (`doc = "…"`, ordinary conditional prose), not in its
+#     CONDITION position, and gates nothing. It must stay green, or the refusal
+#     becomes a false FAIL on a legitimate pattern.
+# ---------------------------------------------------------------------------
+scratch_tree cfg-doc-shapes; wt21="$SCRATCH"
+t21="$wt21/cqlite-core/src/version_hints.rs"
+cp "$t21" "$TMPROOT/case21.orig.rs"
+# Attach the attribute to an ALREADY-PUBLIC item, deliberately: a brand-new item
+# would move the snapshot and red as ordinary drift, which cannot tell a fired
+# refusal from an unfired one.
+apply21() {
+  awk -v a="$1" '/^pub struct VersionHintResolver;/ && !done { print a; done = 1 } { print }' \
+    "$TMPROOT/case21.orig.rs" >"$t21"
+  grep -qF "$1" "$t21" \
+    || fail_case "case 21 setup: could not attach \`$1\` to an existing public item, so the case would prove nothing"
+}
+
+c21=0
+while IFS= read -r shape; do
+  [ -n "$shape" ] || continue
+  c21=$((c21 + 1))
+  apply21 "$shape"
+  set +e
+  bash "$wt21/$GUARD_REL" >"$TMPROOT/case21.$c21.out" 2>&1
+  rc21=$?
+  set -e
+  [ "$rc21" -ne 0 ] \
+    || fail_case "case 21.$c21 — \`$shape\` on a public item passed GREEN. \`cargo doc\` compiles with the \`doc\` cfg SET, so the snapshot records a surface the shipped crate does not have; got: $(cat "$TMPROOT/case21.$c21.out")"
+  grep -q '`doc` cfg predicate' "$TMPROOT/case21.$c21.out" \
+    || fail_case "case 21.$c21 — \`$shape\` failed, but NOT with the \`doc\`-cfg-predicate refusal. A failure with another cause is not this guard firing; got: $(cat "$TMPROOT/case21.$c21.out")"
+  grep -q 'version_hints.rs' "$TMPROOT/case21.$c21.out" \
+    || fail_case "case 21.$c21 — the refusal did not name the offending FILE, so an operator cannot act on it; got: $(cat "$TMPROOT/case21.$c21.out")"
+done <<'SHAPES'
+#[cfg(doc)]
+#[cfg_attr(doc, doc(hidden))]
+#[cfg_attr(not(doc), cfg(any()))]
+#[cfg(all(doc, unix))]
+SHAPES
+[ "$c21" -eq 4 ] || fail_case "case 21 — only $c21 of the 4 pinned shapes ran; a case that does not run cannot fail"
+
+# …and the deliberate NON-FIRE: `doc` in cfg_attr's ATTRIBUTE position gates nothing.
+apply21 '#[cfg_attr(feature = "parquet", doc = "conditional prose, not a cfg predicate")]'
+set +e
+bash "$wt21/$GUARD_REL" >"$TMPROOT/case21.nofire.out" 2>&1
+rc21n=$?
+set -e
+if grep -q '`doc` cfg predicate' "$TMPROOT/case21.nofire.out"; then
+  fail_case "case 21 — the refusal OVER-fired on \`#[cfg_attr(feature = \"parquet\", doc = \"…\")]\`, where \`doc\` is in cfg_attr's ATTRIBUTE position and gates nothing. That is a false FAIL on a legitimate pattern; got: $(cat "$TMPROOT/case21.nofire.out")"
+fi
+[ "$rc21n" -eq 0 ] \
+  || fail_case "case 21 — a harmless conditional-prose \`doc = \"…\"\` attribute did not verify clean; got: $(cat "$TMPROOT/case21.nofire.out")"
+cp "$TMPROOT/case21.orig.rs" "$t21"
+echo "OK (21): a \`doc\` cfg predicate in cfg/cfg_attr CONDITION position makes the guard REFUSE (4 shapes), and \`doc\` in cfg_attr's ATTRIBUTE position does not"
+
+# ---------------------------------------------------------------------------
+# 22. RED — a RELATIVE `CARGO_TARGET_DIR` must not make the guard inspect a
+#     DIFFERENT tree than the one cargo wrote (roborev r4 F3).
+#
+#     THE INVARIANT: the tree the script locks, deletes, enumerates and compares must
+#     be the tree cargo just wrote. The guard runs cargo from the REPO ROOT
+#     (`cd "$REPO_ROOT" && cargo doc`) and cargo resolves a relative
+#     `CARGO_TARGET_DIR` against ITS OWN cwd (measured), so a script that resolves the
+#     same value against the CALLER's cwd is pointed somewhere else entirely.
+#
+#     MEASURED pre-fix, invoked from a foreign cwd with `CARGO_TARGET_DIR=probe-target`:
+#     the guard created and LOCKED `<caller-cwd>/probe-target/.pub-surface-doc.lock`
+#     — not the lock every other run takes, so the mutual exclusion that exists to
+#     stop one run swapping the doc tree under another silently did not apply — and
+#     then reported `the emitted item tree probe-target/doc/cqlite_core is ABSENT`
+#     about a directory cargo was never asked to write.
+#
+#     The scratch's relative target dir is a SYMLINK to the suite's shared target dir,
+#     so the correct resolution is also the fast one (no dependency rebuild) and the
+#     case cannot pass merely because both paths were empty.
+# ---------------------------------------------------------------------------
+scratch_tree rel-target; wt22="$SCRATCH"
+mkdir -p "$CARGO_TARGET_DIR"
+abs22="$(cd "$CARGO_TARGET_DIR" && pwd)"
+ln -s "$abs22" "$wt22/probe-target"
+mkdir -p "$TMPROOT/case22-cwd"
+set +e
+( cd "$TMPROOT/case22-cwd" && CARGO_TARGET_DIR=probe-target bash "$wt22/$GUARD_REL" ) \
+  >"$TMPROOT/case22.out" 2>&1
+case22_rc=$?
+set -e
+[ "$case22_rc" -eq 0 ] || {
+  echo "FAIL: case 22 — under a RELATIVE CARGO_TARGET_DIR invoked from a cwd other than the"
+  echo "      repo root, the guard did not verify the tree cargo wrote. Resolve the doc dir"
+  echo "      against the same base cargo uses (the repo root), or refuse fail-closed."
+  cat "$TMPROOT/case22.out"
+  exit 1
+}
+[ ! -e "$TMPROOT/case22-cwd/probe-target" ] || {
+  echo "FAIL: case 22 — the guard operated on the CALLER-relative path"
+  echo "      $TMPROOT/case22-cwd/probe-target, which cargo never wrote. Whatever it locked,"
+  echo "      deleted and inspected there was not the tree under test."
+  find "$TMPROOT/case22-cwd" -maxdepth 3 | head -10
+  exit 1
+}
+echo "OK (22): a relative CARGO_TARGET_DIR resolves against the repo root — the guard inspects the tree cargo wrote"
+
+# ---------------------------------------------------------------------------
 # 19. KILL SAFETY — cleanup must reclaim a registered worktree, BY EXPLICIT PATH,
 #     and must never touch a concurrent run's.
 #
@@ -747,4 +879,4 @@ rm -rf "$peer_root"
 echo "OK (19): cleanup reclaims a registered worktree by explicit path, and a fresh run leaves a concurrent run's alone"
 
 echo ""
-echo "PASS: test_pub_surface_guard.sh — all 20 cases (6 green, 12 reds, 1 usage, 1 kill-safety)"
+echo "PASS: test_pub_surface_guard.sh — all 22 cases (6 green, 14 reds, 1 usage, 1 kill-safety)"
