@@ -304,7 +304,7 @@ pub(super) async fn merge_generations_for_read(
         loop {
             // #1695: caller's future gone — abandon rather than finish a `Vec` nobody
             // can receive. Once per PARTITION: the merge's own unit of work.
-            cancel.check()?;
+            merge_cancel::check(&cancel)?;
             let MergeStep::Partition { key, rows } = merger.step()? else {
                 break;
             };
@@ -413,7 +413,7 @@ pub(super) async fn seek_merge_generations_for_read(
         let mut out = Vec::new();
         loop {
             // #1695: abandon at the next partition once the caller's future is gone.
-            cancel.check()?;
+            merge_cancel::check(&cancel)?;
             let MergeStep::Partition { key, rows } = merger.step()? else {
                 break;
             };
@@ -528,7 +528,7 @@ pub(super) async fn merge_generations_for_read_with_metadata(
         let mut out = Vec::new();
         loop {
             // #1695: abandon at the next partition once the caller's future is gone.
-            cancel.check()?;
+            merge_cancel::check(&cancel)?;
             let MergeStep::Partition { key, rows } = merger.step()? else {
                 break;
             };

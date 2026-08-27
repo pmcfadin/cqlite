@@ -53,9 +53,79 @@ impl Drop for CancelOnDrop {
 /// is dropped. Bind the guard (`let (_guard, cancel) = per_call();`) so it lives
 /// as long as the async fn's scope, and move `cancel` into the blocking closure.
 pub(super) fn per_call() -> (CancelOnDrop, ScanCancel) {
+    probe::record_armed();
     let token = ScanCancel::new();
     (CancelOnDrop(token.clone()), token)
 }
+
+/// The blocking merge loop's per-partition poll: `Err(Error::Cancelled)` once the
+/// caller's future is gone, else `Ok(())`.
+///
+/// Call it at the TOP of the loop, BEFORE `step()`, so an abandoned merge does no
+/// further work at all — that ordering is what makes "abandoned" mean "zero
+/// partitions merged since the flag was tripped", which is what the probe's
+/// [`probe::abandoned`] count lets a test assert without any timing.
+pub(super) fn check(cancel: &ScanCancel) -> crate::Result<()> {
+    if cancel.is_cancelled() {
+        probe::record_abandoned();
+        return Err(crate::Error::Cancelled);
+    }
+    Ok(())
+}
+
+/// Observability for the abandonment mechanism, on the `stream_merge_probe`
+/// pattern: the RECORD calls are unconditional `#[inline(always)]` functions whose
+/// BODIES are cfg-gated, so a default/release build links no atomic and pays
+/// nothing; the getters + [`probe::reset`] exist only in test / `work-counters`
+/// builds. Without them "the merge abandoned instead of running to completion" is
+/// unobservable from outside, and any test of it would have to time something.
+pub(super) mod probe {
+    #[cfg(any(test, feature = "work-counters"))]
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    /// Merges that ARMED a per-call guard (i.e. reached the spawn point).
+    #[cfg(any(test, feature = "work-counters"))]
+    static ARMED: AtomicU64 = AtomicU64::new(0);
+    /// Merge loops that exited via the cancel check rather than completing.
+    #[cfg(any(test, feature = "work-counters"))]
+    static ABANDONED: AtomicU64 = AtomicU64::new(0);
+
+    #[inline(always)]
+    pub(super) fn record_armed() {
+        #[cfg(any(test, feature = "work-counters"))]
+        ARMED.fetch_add(1, Ordering::Relaxed);
+    }
+
+    #[inline(always)]
+    pub(super) fn record_abandoned() {
+        #[cfg(any(test, feature = "work-counters"))]
+        ABANDONED.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// Merges that armed a guard since the last [`reset`].
+    #[cfg(any(test, feature = "work-counters"))]
+    pub(crate) fn armed() -> u64 {
+        ARMED.load(Ordering::Relaxed)
+    }
+
+    /// Merge loops ABANDONED since the last [`reset`] — each one is a blocking
+    /// merge that stopped instead of building a `Vec` nobody could receive.
+    #[cfg(any(test, feature = "work-counters"))]
+    pub(crate) fn abandoned() -> u64 {
+        ABANDONED.load(Ordering::Relaxed)
+    }
+
+    /// Zero both counters. The statics are process-global, so callers serialize on
+    /// the shared test mutex (the counter-test convention).
+    #[cfg(any(test, feature = "work-counters"))]
+    pub(crate) fn reset() {
+        ARMED.store(0, Ordering::Relaxed);
+        ABANDONED.store(0, Ordering::Relaxed);
+    }
+}
+
+#[cfg(all(test, not(feature = "tombstones")))]
+mod abandon_tests;
 
 #[cfg(test)]
 mod tests {
@@ -66,11 +136,19 @@ mod tests {
     #[test]
     fn guard_cancels_its_token_on_drop() {
         let (guard, cancel) = per_call();
+        assert!(
+            check(&cancel).is_ok(),
+            "an un-cancelled token must not stop a merge"
+        );
         assert!(!cancel.is_cancelled(), "must start un-cancelled");
         drop(guard);
         assert!(
             cancel.is_cancelled(),
             "dropping the async-scope guard must trip the blocking closure's flag"
+        );
+        assert!(
+            matches!(check(&cancel), Err(crate::Error::Cancelled)),
+            "the merge loop's poll must abandon once the guard has dropped"
         );
     }
 
