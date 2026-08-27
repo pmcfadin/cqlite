@@ -123,7 +123,7 @@ equalised (§4).
 
 ---
 
-## 4. Peak bracketing — why most of this table is a lower bound
+## 4. Peak bracketing — which best-N values are real
 
 Pre-registered rule, fixed before the data was seen: a peak is **bracketed** when
 some tested N above it is lower by more than the relevant point's **own** spread;
@@ -137,7 +137,50 @@ N tried, so each is a **lower bound on that S's best**, not a measured peak.
 For S=6 this is not marginal: **N=24 beats N=16 by +9.8%**, far outside that
 point's 0.4–0.7% spread, so the curve was still climbing when the ladder ended.
 
-> **PLACEHOLDER — extension A.** `--grid "6:24,32,48,64"`, 3 reps, with the
+### Extension A's verdict: S=6 is a PLATEAU at N=24–32, upper end memory-bounded
+
+Extension A re-measured the incumbent **N=24 interleaved with N=32/48/64 in the
+same rounds**, so every comparison below is contemporaneous and drift-robust by
+construction.
+
+| N | extA aggregate rows/s | vs N=24 |
+|--:|--:|--:|
+| 24 (incumbent, re-measured) | 2,647,966 | — |
+| 32 | 2,665,993 | **+0.68%** |
+| 48 | *unmeasurable* | OOM-killed under the 24 GiB containment cap |
+
+The pre-registered rule, quoted: *"a peak is bracketed when the best N has at
+least one tested N above it that is lower by more than the point's own
+rep-to-rep spread. If a doubling is within spread, the top is flat — record it as
+a plateau and take the lowest N achieving it (cheaper configuration, same
+throughput)."* N=32's **+0.68%** sits inside the point's own **~0.7%** spread, so
+this is a **plateau**, and the rule takes the **lowest N achieving it — N=24**.
+
+**Consequence for AC2: the target is NOT materially understated.** The main
+grid's best-N was already sitting on the plateau, so the §5 figure is not a lower
+bound of unknown tightness — it is a plateau value with one bounded residual,
+below.
+
+**S=6 is marked `plateau (N=24–32), upper end memory-bounded`** — deliberately
+neither of the other two verdicts. Not `bracketed`, because nothing above N=32
+could be measured, so the curve was never observed turning over. Not
+`edge-truncated`, because N=32 *was* measured and *is* within spread. That
+three-way distinction is the honest one and the table carries it verbatim.
+
+**The N=48 limit is MEMORY, not throughput — and it is a property of THIS
+HARNESS, not of CQLite.** 48 independent scan processes exceeded the 24 GiB
+containment cap and the scope was OOM-killed. Each worker in this harness holds
+its **own** `Database`, its own readers and its own buffers, because the arm
+under test is *N independent bare scans*; that is the design of the measurement,
+not of the engine. **Nobody deploys 48 independent scanners**, and production
+`do_get` shares one server process. So: the peak search space here is bounded at
+**N ≤ 32 by memory**, and **nothing in this bound is a CQLite memory limit** —
+do not read it as one.
+
+> **PLACEHOLDER — extension B** (`6:24,32`, 3 reps) for proper medians on the
+> plateau pair. Round-1 verdict above is expected to stand.
+
+> **SUPERSEDED PLACEHOLDER — extension A.** `--grid "6:24,32,48,64"`, 3 reps, with the
 > incumbent N=24 **re-measured interleaved** with each candidate in every round,
 > so the bracketing verdict is drift-robust by construction. This is required,
 > not precautionary: the session drifts directionally (§6), so comparing a late
@@ -175,9 +218,23 @@ Byte bases, per mission §1 — never a bare rows/s:
 The division is `/ 1.3`, not `× 1.3`: mission §6 is normative ("within ~1.3× of")
 and §0 does the arithmetic the same way.
 
-**This target is a LOWER BOUND** until S=6's peak is bracketed (§4), because its
-input is edge-truncated. It is **+56%** above the issue body's ~1.35M estimate,
-which assumed bare scan would scale at `do_get`'s 71%.
+**Status of this figure, after extension A (§4): NOT materially understated.**
+The earlier reading — a lower bound of unknown tightness — was correct only until
+the plateau was measured. N=32 is within spread of N=24, so the main grid's
+best-N was already on the plateau. One residual remains and is bounded rather
+than open: **N > 32 could not be measured at all** (memory, §4), so the figure is
+a plateau value with an unmeasurable region above it, not a peak observed to turn
+over.
+
+It is **+56%** above the issue body's ~1.35M estimate, which assumed bare scan
+would scale at `do_get`'s 71%.
+
+**The `/ 1.3` is a division, and the multiplication error was not an isolated
+slip.** The issue body's "1.3 ×" had **propagated into the tracking document** —
+the delivery lead found and corrected it in **two** places in
+`0.17-throughput-mission.md` (§0 and the #3299 open-work row). Multiplying would
+put the target *above* our own measured ceiling, i.e. unreachable by
+construction, so the direction of the error is self-evidencing once written out.
 
 ---
 
@@ -196,6 +253,29 @@ in this report is compared against the spread of the points being differenced,
 and where a difference falls inside that spread it is reported as *within
 resolution* rather than as a value. Grid-wide (median 2.27%, max 8.20%) is
 reported only as a summary for judging the rig.
+
+### Within-session dispersion is NOT across-session reproducibility
+
+Extension A re-measured S=6/N=24 about **1.5 h** after the main grid, at the
+exact configuration AC2 consumes:
+
+| | S=6, N=24 | |
+|---|--:|---|
+| main grid (median of 3) | 2,732,817 | within-session spread **0.74%** |
+| extension A, ~1.5 h later | 2,647,966 | **−3.1%** |
+
+**These two numbers measure different things and must not be conflated.** The
+0.74% is dispersion *within* a session; the −3.1% is reproducibility *across*
+sessions. Quoting the former as the figure's uncertainty would understate it by
+4×, and this is an **in-band** measurement of that gap — at the AC2-relevant
+point, in this rig, rather than the rig's recorded 370,134 → 333,206 anecdote.
+
+**And the drift is uncontrolled, not correctable**: its direction *reversed*
+between the two scales — 7 of 9 round-over-round deltas rose *within* the
+session, while the across-session delta *fell*. A drift with an inconsistent sign
+cannot be modelled out, only disclosed. So: **no cross-session absolute may be
+derived from these figures**, and the target's precision must be stated with its
+scope — 0.74% within-session, −3.1% across ~1.5 h.
 
 The mission doc's ~1.4% between-binary floor (§0) is a **different** quantity —
 it concerns comparing separately-built binaries, which no point in this grid
@@ -290,7 +370,22 @@ Three real defects were caught by guards firing on genuine data, not fixtures:
    collided rep ran at an effective 2.470 versus 3.291 on a clean re-run, a 25%
    package-wide turbo reduction that only occurs with many cores busy.
    `rep.py` now **exclusive-creates** its rundir, so this cannot recur silently.
-3. The guard that mattered most is the one that **did not misfire**. A rig that
+3. **`WINDOW_SHORTFALL` again, on extension A's first attempt** — worker 16 at
+   **0.7524%** against the 0.5% bound. The diagnostic was not the shortfall but
+   the **window length**: 63.68 s against the main grid's 60.008 s, i.e. a
+   **3.68 s control-FIFO ACK latency**. Probable cause: 34 orphaned workers had
+   just been killed mid-scan, disturbing the page cache, and a single prewarm
+   pass did not restore it. Fixed with `--prewarm-passes 2`, which touches only
+   **pre-measurement** cache state and therefore costs nothing in comparability
+   — no counted interval, no counter and no attribution rule changed.
+
+   **Why this one is worth recording: the window length was only visible because
+   the harness records `window_ns` per rep instead of assuming the requested
+   duration.** A rig that logged "60 s" because it asked for 60 s would have
+   shown a shortfall with no cause attached, and the natural (wrong) response
+   would have been to loosen the bound.
+
+4. The guard that mattered most is the one that **did not misfire**. A rig that
    had tolerated an empty counter file would have published a rep with no
    counters. The bug was always upstream of the guard.
 
@@ -377,8 +472,16 @@ Identical server set, client halved:
 | §0 "remaining to target" **at box level** | ⛔ **NOT DISCHARGED** — needs box-level `do_get` on Corpus B, which this box cannot validly produce. |
 
 The reason is **client provisioning** — not the corpus, not the instrument, not
-the harness. A follow-up needs a host with ≈30+ physical cores, enough to
+the harness. A follow-up needs a host with **≈30+ physical cores**, enough to
 provision a 6-core server at the rig's own 1:4 client ratio.
+
+This matches what the delivery lead committed to
+`docs/architecture/0.17-throughput-mission.md`: the box-level target lands in §6
+with its byte basis and an explicit note that it is a **division**; §0's
+box-level "remaining" is left **deliberately unstated** with the cause recorded
+as client provisioning; Gap B's mechanism is narrowed to
+**`do_get`-path-specific**, so **#3288's ceiling is preserved**; and the
+precision is stated with its scope (0.74% within-session, −3.1% across ~1.5 h).
 
 **Two bridges are available and both are refused.** #3217's Corpus A figure
 cannot be divided into a Corpus B target (3.5× the bytes per row and no per-row
