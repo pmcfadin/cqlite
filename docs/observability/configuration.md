@@ -212,7 +212,7 @@ dot-separated under the `cqlite.` root; units use UCUM annotations
 | Metric | Instrument | Unit | Bounded attributes |
 |--------|-----------|------|--------------------|
 | `cqlite.read.rows` | counter | `{row}` | `cqlite.sstable.format` |
-| `cqlite.read.bytes` | counter | `By` | `cqlite.sstable.format`, `cqlite.compression` |
+| `cqlite.read.bytes` | counter | `By` | `cqlite.compression` |
 | `cqlite.read.partitions` | counter | `{partition}` | `cqlite.sstable.format` |
 | `cqlite.read.duration` | histogram | `s` | `cqlite.sstable.format` |
 | `cqlite.read.partition_lookup.total` | counter | `1` | `cqlite.result`, `cqlite.read.lookup_route`, `cqlite.sstable.format` |

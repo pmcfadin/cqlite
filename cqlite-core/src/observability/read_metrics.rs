@@ -223,6 +223,23 @@ impl ReadOpMeter {
         }
     }
 
+    /// Suppress this meter permanently: neither [`finish`](Self::finish) nor `Drop`
+    /// will emit (issue #1701, roborev round 4).
+    ///
+    /// For a read boundary that may DECLINE the read and hand it to a different,
+    /// ALREADY-METERED path. `Drop` emits, so simply returning would report a
+    /// duration for the attempt AND another for the path that actually served the
+    /// read — two operations for one logical read, which is exactly the
+    /// over-counting roborev B1 removed. The declining boundary therefore discards
+    /// its meter rather than dropping it. Distinct from [`inert`](Self::inert),
+    /// which is chosen at CONSTRUCTION for a boundary that is never an operation;
+    /// this is decided at RUNTIME, after the attempt has already begun timing.
+    pub(crate) fn discard(&mut self) {
+        if let Some(acc) = self.0.as_mut() {
+            acc.emitted = true;
+        }
+    }
+
     /// Emit this operation's totals. Idempotent: the second call is a no-op, so a
     /// stream that observed its own end of stream and is then dropped emits once.
     pub(crate) fn finish(&mut self) {
