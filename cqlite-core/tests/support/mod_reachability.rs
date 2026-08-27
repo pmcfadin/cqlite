@@ -33,7 +33,10 @@
 //! before [`parse_mod_decls`] ever sees the text, and the attribute values the parser
 //! genuinely needs (`#[path = "…"]`) are recovered from a **side table** keyed by byte
 //! offset rather than by re-reading the text. Control tokens and caller data therefore
-//! never share a channel.
+//! never share a channel. The same reasoning covers a **shebang**: rustc discards a `#!`
+//! line at byte offset 0, so a `#!/usr/bin/env -S tool mod orphan;` first line is not Rust
+//! and must not be read as a declaration ([`shebang_end`]) — while `#![…]` at offset 0 is
+//! an inner attribute and stays ordinary code, because blanking it would swallow real code.
 //!
 //! # One table for every prefix (issue #1714, roborev rounds 1-2)
 //!
@@ -56,7 +59,9 @@
 //! what a macro expands to), a symlink under the source directory (see
 //! [`enumerate_rs_files`] — a silently-skipped subtree is a census with a hole in it), an
 //! unterminated comment or literal, an unreadable file, an unknown escape, an
-//! unrecognized literal or identifier prefix (see [`lexer`]), a **non-ASCII byte in a
+//! unrecognized literal or identifier prefix (see [`lexer`]), a `#!` at byte offset 0
+//! whose shebang-vs-inner-attribute reading is ambiguous (see [`shebang_end`]), a
+//! **non-ASCII byte in a
 //! position where an identifier could start or continue** (see
 //! [`lexer::refuse_non_ascii`] — Rust permits Unicode identifiers, this lexer's rules are
 //! ASCII-only, and scanning past one could misclassify a macro context), and a
@@ -299,6 +304,16 @@ pub fn sanitize(src: &str) -> Result<Sanitized, String> {
     let mut literals: Vec<Literal> = Vec::new();
     let mut i = 0usize;
 
+    // rustc DISCARDS a `#!` line at byte offset 0 (`rustc_lexer::strip_shebang`), so its
+    // bytes are not Rust at all. Parsing them as code is a false-PASS path: a first line
+    // `#!/usr/bin/env -S tool mod orphan;` would yield a bogus `mod orphan;` and make an
+    // unreachable file look reachable (#1714). Blanked, not deleted, like every other
+    // non-Rust span here, so offsets and line numbers stay aligned with the source.
+    if let Some(end) = shebang_end(b)? {
+        blank(&mut out, 0, end);
+        i = end;
+    }
+
     while i < n {
         let c = b[i];
         if c == b'/' && i + 1 < n && b[i + 1] == b'/' {
@@ -383,6 +398,50 @@ pub fn sanitize(src: &str) -> Result<Sanitized, String> {
         ));
     }
     Ok(Sanitized { text, literals })
+}
+
+/// Length of the shebang line at byte offset 0, or `None` when there is none.
+///
+/// The rule is narrow on purpose, and getting it backwards would be worse than not
+/// having it: `#![...]` at offset 0 is a Rust **inner attribute** (`#![allow(…)]` opens
+/// most crate roots, this one included), and blanking that line would swallow any real
+/// code sharing it. So only `#!` NOT followed by `[` is a shebang, and it is a shebang
+/// only at offset 0 — a `#!` further down the file is ordinary Rust.
+///
+/// rustc decides the `[` question after skipping whitespace **and comments**, so
+/// `#! [allow(…)]` and `#!/* c */[allow(…)]` are inner attributes to rustc while a
+/// next-byte test reads them as shebangs. This walker models neither reading, so it
+/// refuses that shape rather than guessing — the difference between the two readings is
+/// exactly one blanked line of code, i.e. a possible wrong verdict (FAIL-CLOSED, #1714).
+fn shebang_end(b: &[u8]) -> Result<Option<usize>, String> {
+    if b.len() < 2 || b[0] != b'#' || b[1] != b'!' {
+        return Ok(None);
+    }
+    if b.get(2) == Some(&b'[') {
+        return Ok(None); // inner attribute: ordinary Rust.
+    }
+    // Would rustc's whitespace-and-comment skip land on `[`? Anything that could is
+    // refused; a real shebang (`#!/usr/bin/env …`) starts with a non-space, non-comment
+    // byte and is unaffected.
+    let mut t = 2usize;
+    while t < b.len() && b[t].is_ascii_whitespace() {
+        t += 1;
+    }
+    let ambiguous = match (b.get(t), b.get(t + 1)) {
+        (Some(&b'['), _) => Some("whitespace"),
+        (Some(&b'/'), Some(&b'/')) | (Some(&b'/'), Some(&b'*')) => Some("a comment"),
+        _ => None,
+    };
+    if let Some(what) = ambiguous {
+        return Err(format!(
+            "line 1: `#!` at byte offset 0 followed by {what} before the rest of the line.              rustc skips whitespace and comments before deciding, so this may be an inner              attribute (`#![…]`, ordinary Rust) or a shebang (discarded entirely) — and the              two readings differ by one line of code, so guessing could either invent a `mod`              declaration or swallow a real one (FAIL-CLOSED — see #1714).\n\
+             Remedy: write the inner attribute as `#![…]` with no gap, or report this as a              sanitizer gap (tests/support/mod_reachability.rs)."
+        ));
+    }
+    // A shebang ends at (not including) the first newline — matching rustc's
+    // `2 + first_line_len`, so a following line stays ordinary Rust.
+    let end = b.iter().position(|c| *c == b'\n').unwrap_or(b.len());
+    Ok(Some(end))
 }
 
 fn blank(out: &mut [u8], start: usize, end: usize) {
