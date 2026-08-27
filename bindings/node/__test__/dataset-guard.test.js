@@ -10,7 +10,7 @@
  * reimplement the directory walk — because a test that reimplements the logic
  * it asserts on is invariant to the bug (#3042).
  */
-const { spawnSync } = require('child_process');
+const { execFileSync, spawnSync } = require('child_process');
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
@@ -70,18 +70,56 @@ const CORPUS_SHAPES = {
     },
     childTest: "test('noop', () => {});\n",
   },
-  // A self-referential symlink inside test_basic. Symlinked keyspace dirs are
-  // followed on purpose, so the walk must terminate on a link pointing at an
-  // ancestor and report an unavailable corpus rather than crashing setup --
-  // which it must never do in NON-strict mode (issue #1458).
+  // A NON-REGULAR entry named `*-Data.db` inside test_basic: a FIFO (falling
+  // back to a directory where mkfifo is unavailable). Name-only matching
+  // reports this as a corpus and enables every dataset-dependent suite, which
+  // then fails on the first read -- the guard must require a REGULAR FILE,
+  // exactly as Python's `Path.is_file()` filter does (issue #1458).
+  //
+  // Body is deliberately assertion-FREE (see otherKeyspaceOnly): the guard
+  // throwing must be the only possible source of a non-zero exit.
+  nonRegularDataDb: {
+    build: (sstables) => {
+      const testBasic = path.join(sstables, 'test_basic');
+      fs.mkdirSync(testBasic, { recursive: true });
+      const fifo = path.join(testBasic, 'nb-1-big-Data.db');
+      try {
+        execFileSync('mkfifo', [fifo]);
+      } catch (err) {
+        // No mkfifo (non-POSIX host): a DIRECTORY named *-Data.db is the other
+        // non-regular shape the is_file() filter must reject.
+        fs.mkdirSync(fifo, { recursive: true });
+      }
+    },
+    childTest: "test('noop', () => {});\n",
+  },
+  // POSITIVE control for the other half of the regular-file rule: a *-Data.db
+  // that is a SYMLINK to a real regular file still counts, because Python's
+  // `Path.is_file()` follows links. Pins rule 2 so a future tightening of the
+  // non-regular rejection above cannot silently drop symlinked fixtures.
+  symlinkedDataFile: {
+    build: (sstables) => {
+      const testBasic = path.join(sstables, 'test_basic');
+      fs.mkdirSync(testBasic, { recursive: true });
+      const payload = path.join(sstables, '..', 'payload.bin');
+      fs.writeFileSync(payload, 'sstable bytes');
+      fs.symlinkSync(payload, path.join(testBasic, 'nb-1-big-Data.db'), 'file');
+    },
+    childTest: "test('noop', () => { expect(global.DATASETS_AVAILABLE).toBe(true); });\n",
+  },
+  // A self-referential symlink inside test_basic. Symlinked DIRECTORIES are not
+  // traversed (matching Python's recursive glob), which is what makes a cycle
+  // structurally unreachable; this case pins that observable contract -- the
+  // link is skipped, the corpus reports unavailable, and setup never crashes in
+  // NON-strict mode (issue #1458).
   //
   // HONESTY NOTE: this case is a behavioral CONTROL, not a red-then-green
-  // regression pin. Measured on Linux, the pre-visited-set walk did not blow
-  // the stack: the kernel's 40-level symlink cap makes statSync() fail ELOOP at
-  // recursion depth ~81, which the broken-symlink `continue` swallows. The
-  // visited-set still earns its place (it drops those ~80 redundant
-  // readdir/stat rounds and re-walks of diamond-linked dirs), and this case
-  // pins the observable contract on every platform.
+  // regression pin -- no shipped version of this walk crashed here. Measured on
+  // Linux, the earlier symlink-following walk did not blow the stack either:
+  // the kernel's 40-level symlink cap makes statSync() fail ELOOP at recursion
+  // depth ~81, which its broken-symlink `continue` swallowed. Now that
+  // directory links are skipped outright there is no cycle machinery left to
+  // exercise, so what this case guards is the contract, on every platform.
   symlinkCycle: {
     build: (sstables) => {
       const testBasic = path.join(sstables, 'test_basic');
@@ -160,8 +198,9 @@ describe('dataset guard (issue #1458)', () => {
     expect(output).toMatch(/-Data\.db/);
   }, 120000);
 
-  // The walk follows symlinked dirs, so a link pointing at an ancestor must
-  // terminate quietly (exit 0, corpus unavailable) rather than crash setup.
+  // Symlinked directories are skipped, so a link pointing at an ancestor is
+  // never entered: the walk terminates quietly (exit 0, corpus unavailable)
+  // rather than crashing setup.
   test('a self-referential symlink does not crash the walk (non-strict)', () => {
     const { status, stdout, stderr } = runChildJest({ strict: false, corpus: 'symlinkCycle' });
     const output = `${stdout}${stderr}`;
@@ -169,5 +208,35 @@ describe('dataset guard (issue #1458)', () => {
       throw new Error(`expected exit 0, got ${status}\n${output}`);
     }
     expect(output).not.toMatch(/Maximum call stack/);
+  }, 120000);
+
+  // Regression (roborev round 3): name-only matching accepted a FIFO/directory
+  // named *-Data.db as a fixture. Only a REGULAR FILE is a corpus, matching
+  // Python's `Path.is_file()` filter.
+  test('strict mode fails when the only *-Data.db entry is not a regular file', () => {
+    const { status, stdout, stderr } = runChildJest({
+      strict: true,
+      corpus: 'nonRegularDataDb',
+    });
+    const output = `${stdout}${stderr}`;
+    if (status === 0) {
+      throw new Error(`expected non-zero exit, got 0\n${output}`);
+    }
+    expect(output).toMatch(/test_basic/);
+    expect(output).toMatch(/-Data\.db/);
+  }, 120000);
+
+  // Positive control for the other half of the same rule: `is_file()` follows
+  // symlinks, so a *-Data.db symlinked to a real regular file still counts.
+  test('a *-Data.db symlinked to a regular file still counts as available', () => {
+    const { status, stdout, stderr } = runChildJest({
+      strict: false,
+      corpus: 'symlinkedDataFile',
+    });
+    const output = `${stdout}${stderr}`;
+    if (status !== 0) {
+      throw new Error(`expected exit 0, got ${status}\n${output}`);
+    }
+    expect(status).toBe(0);
   }, 120000);
 });
