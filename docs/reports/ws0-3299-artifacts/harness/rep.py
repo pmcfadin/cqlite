@@ -45,7 +45,6 @@ and only then reads T0 — the two windows share their boundaries by constructio
 import argparse
 import json
 import os
-import shutil
 import subprocess
 import sys
 import time
@@ -242,9 +241,25 @@ def main():
     cpu_list = args.perf_cpus
 
     rundir = args.rundir
-    if os.path.exists(rundir):
-        shutil.rmtree(rundir)
-    os.makedirs(rundir)
+    # EXCLUSIVE CREATE, never rmtree-then-recreate.
+    #
+    # The previous shape deleted an existing rundir and carried on. That makes
+    # two concurrent runs sharing a results root silently destructive in BOTH
+    # directions: the second run wipes the first's evidence, and — far worse —
+    # the second run's `stop` file lands in the directory the first run's workers
+    # are polling, so they stop mid-window and the first run reports a rep whose
+    # scans quietly ended early. A measurement rig must not have a mode where
+    # another process can end its window without saying so.
+    try:
+        os.makedirs(rundir)
+    except FileExistsError:
+        die(
+            f"{rundir} already exists. Refusing to reuse or delete it: a rundir is the "
+            f"barrier channel its workers poll, so sharing one with another run lets that "
+            f"run's `stop` file end this run's window mid-measurement. Point --rundir at a "
+            f"fresh path, or delete this one deliberately.",
+            code=5,
+        )
 
     clock_check = verify_clock_source(args.worker_bin)
     procs = launch_workers(args, rundir, worker_cpus)
