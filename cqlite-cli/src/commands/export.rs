@@ -141,6 +141,34 @@ pub async fn export_data(
     // Track timing for statistics
     let start_time = Instant::now();
 
+    // Issue #1695 — `performance.query_timeout_ms` must bound an EXPORT too.
+    //
+    // `cqlite export` is a streaming consumer exactly like `cqlite query`: the engine's
+    // chokepoint wrapper bounds `execute_streaming` above, and everything after it is
+    // this function's `collect_chunk` loops. Bounding only the query path left a
+    // runaway export scan running indefinitely after setup (roborev round 9) — the same
+    // placebo, in the command most likely to be pointed at a whole table.
+    //
+    // Setup was awaited ABOVE, outside this deadline, so a setup elapse stays the
+    // engine's to report; the export gets whatever of the budget is LEFT. Checked
+    // before each chunk pull rather than wrapping the 260-line per-format `match`:
+    // one chunk is this loop's unit of work, so the overshoot is bounded by one chunk
+    // and the writers/progress-bar borrows are left untouched.
+    let export_budget = database.config().query.max_execution_time;
+    let export_deadline = if export_budget.is_zero() {
+        // The documented "no timeout" sentinel.
+        None
+    } else {
+        // `checked_add` because the addend is operator config and `Instant + Duration`
+        // panics when unrepresentable; `None` then means unbounded, which is the right
+        // reading of an astronomically distant deadline.
+        tokio::time::Instant::now().checked_add(
+            export_budget
+                .checked_sub(start_time.elapsed())
+                .unwrap_or_default(),
+        )
+    };
+
     // Resolve the progress total from the CLI `--limit` (spec Option A / R5):
     // a determinate bar + ETA only when the user supplied an explicit limit,
     // otherwise the indeterminate spinner. Never infer a total from data shape.
@@ -171,6 +199,8 @@ pub async fn export_data(
                 if rows_remaining == Some(0) {
                     break;
                 }
+
+                check_export_deadline(export_deadline, start_time, export_budget)?;
 
                 let chunk = result_iter
                     .collect_chunk(chunk_size)
@@ -226,6 +256,8 @@ pub async fn export_data(
                 if rows_remaining == Some(0) {
                     break;
                 }
+
+                check_export_deadline(export_deadline, start_time, export_budget)?;
 
                 let chunk = result_iter
                     .collect_chunk(chunk_size)
@@ -299,6 +331,8 @@ pub async fn export_data(
                 if rows_remaining == Some(0) {
                     break;
                 }
+
+                check_export_deadline(export_deadline, start_time, export_budget)?;
 
                 let chunk = result_iter
                     .collect_chunk(chunk_size)
@@ -379,6 +413,8 @@ pub async fn export_data(
                 if rows_remaining == Some(0) {
                     break;
                 }
+
+                check_export_deadline(export_deadline, start_time, export_budget)?;
 
                 let chunk = result_iter
                     .collect_chunk(chunk_size)
@@ -660,5 +696,85 @@ mod tests {
         assert!(t.contains("{pos}"), "must show a row count: {t:?}");
         assert!(!t.contains("{eta}"), "must NOT show an ETA: {t:?}");
         assert!(!t.contains("{percent}"), "must NOT show a percent: {t:?}");
+    }
+}
+
+/// The export-side budget check (issue #1695), called before each chunk pull.
+///
+/// Deliberately a check rather than a `timeout_at` wrapper: the four consumption
+/// loops live inside a 260-line per-format `match` holding file writers and a
+/// progress bar, and wrapping that whole expression in an async block to make it
+/// cancellable would move every one of those borrows. Checking before each pull
+/// bounds the overshoot by ONE chunk — the loop's own unit of work — and changes no
+/// ownership.
+///
+/// `deadline` is `None` for the documented `Duration::ZERO` sentinel (unbounded) and
+/// also when the deadline is unrepresentable, which means the same thing.
+#[cfg(feature = "state_machine")]
+fn check_export_deadline(
+    deadline: Option<tokio::time::Instant>,
+    started: std::time::Instant,
+    budget: std::time::Duration,
+) -> Result<()> {
+    let Some(deadline) = deadline else {
+        return Ok(());
+    };
+    if tokio::time::Instant::now() < deadline {
+        return Ok(());
+    }
+    Err(anyhow::Error::new(cqlite_core::Error::QueryTimeout {
+        operation: "cli.export.collect".to_string(),
+        // MEASURED, not assumed equal to the budget: a slow chunk can overshoot,
+        // and the real figure distinguishes "budget too tight" from "one chunk is
+        // uninterruptibly slow".
+        elapsed: started.elapsed(),
+        limit: budget,
+    })
+    .context("CLI export exceeded performance.query_timeout_ms"))
+}
+
+#[cfg(all(test, feature = "state_machine"))]
+mod export_deadline_tests {
+    use super::check_export_deadline;
+    use std::time::Duration;
+
+    /// The `Duration::ZERO` sentinel reaches this as `None` and must never fail a
+    /// chunk pull — an unbounded export is a legal operator configuration.
+    #[test]
+    fn no_deadline_never_stops_an_export() {
+        assert!(
+            check_export_deadline(None, std::time::Instant::now(), Duration::ZERO).is_ok(),
+            "an unbounded export must not be interrupted"
+        );
+    }
+
+    /// An expired deadline must stop the export BEFORE the next chunk is pulled, and
+    /// must say so as the distinct timeout error carrying the export-side operation —
+    /// not the query-side one, so an operator can tell which loop elapsed.
+    ///
+    /// Deterministic by construction: the deadline is a full second in the past, so no
+    /// clock has to advance and no chunk has to be slow.
+    #[tokio::test]
+    async fn an_expired_deadline_stops_the_export_before_the_next_chunk() {
+        let budget = Duration::from_secs(30);
+        let err = check_export_deadline(
+            Some(tokio::time::Instant::now() - Duration::from_secs(1)),
+            std::time::Instant::now(),
+            budget,
+        )
+        .expect_err("an expired export deadline must stop the chunk loop");
+
+        match err.downcast_ref::<cqlite_core::Error>() {
+            Some(cqlite_core::Error::QueryTimeout {
+                operation, limit, ..
+            }) => {
+                assert_eq!(
+                    operation, "cli.export.collect",
+                    "must name the EXPORT loop, distinct from `cli.query.collect`"
+                );
+                assert_eq!(limit, &budget);
+            }
+            other => panic!("expected QueryTimeout, got {other:?}"),
+        }
     }
 }

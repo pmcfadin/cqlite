@@ -300,6 +300,27 @@ impl SelectExecutor {
                     // key is decoded once regardless of batching.
                     let mut pk_cache = PartitionKeyCache::default();
                     while let Some(batch) = scan_stream.recv().await {
+                        // #1695: stop when OUR consumer is gone, even with nothing to
+                        // send. `tx.send(..).is_err()` below is otherwise the only stop
+                        // signal, and it is reached only by a row that SURVIVES the
+                        // row-build, the predicates, the per-partition limit and the
+                        // OFFSET skip — every one of which `continue`s. A no-match
+                        // predicate, or an OFFSET past the result set, therefore sent
+                        // nothing, checked nothing, and drained this whole scan after
+                        // the caller already had its `QueryTimeout`.
+                        //
+                        // This task also holds `scan_stream`, the STORAGE producer's
+                        // receiver, so the equivalent `is_closed()` check down in
+                        // `generation_merge` cannot fire on our behalf: from the
+                        // storage side its consumer is alive and asking for batches.
+                        // The two checks are one per layer, and neither substitutes
+                        // for the other.
+                        //
+                        // Per BATCH, matching the #1592 design's unit of work (one
+                        // async wake per batch, not per row).
+                        if tx.is_closed() {
+                            return Ok(());
+                        }
                         for (key, value) in batch? {
                             // Capture the partition-key digest before `key` is moved
                             // into row construction (only when needed).
