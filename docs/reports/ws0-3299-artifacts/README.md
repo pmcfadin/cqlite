@@ -11,6 +11,8 @@ exactly like measurements.
 | `sweep/` | ✅ **THE DELIVERABLE** | The 25-point × 3-rep main grid, 75/75 reps, all guards passed, 0 discarded. `CS-table.md` is the derived table. Every AC1/AC2 figure comes from here. |
 | `host/` | ✅ evidence | The PMU census taken **on this instance**, with #3224's `cache-hostile` as a positive control, and the AC3-unanswerable verdict it establishes. |
 | `harness/` | 🔧 code | The measurement rig, reviewed code (#3229). `README.md` states the aligned-window convention; `selftest.sh` is hermetic (41 guard cases). |
+| `extB/` | ✅ **the bracketing verdict** | `6:24,32`, 3 reps, incumbent re-measured INTERLEAVED with the candidate so the comparison is contemporaneous. Source of S=6's `bracketed` verdict and of the independent −1.0% confirmation at the AC2 configuration. Medians deliberately NOT pooled with `sweep/` — different session. |
+| `extA/` | ⚠️ superseded | First bracketing attempt. Established that single reps were insufficient (its N=32 sign flipped against extB's), that N≥48 OOMs, and an in-band −3.1% drift read. **`s6-n24-round1` is CONTAMINATED** — it overlapped an agent-gate run. |
 | `smoke/` | ⚠️ **NOT results** | Reduced-grid plumbing proofs and the budget calibration. 1 rep per point. Labelled inside. |
 | `sweep-ext-aborted/` | ⛔ **INVALID** | An aborted extension run. Its `perf.csv` files are real and read `100.00% pct_running`, and it is **structurally indistinguishable from valid data** — the invalidity is in the run's DESIGN (1 rep; no contemporaneous incumbent). Every rep directory carries its own `INVALID-DO-NOT-USE.txt`. |
 | `freq-calibration/` | 📋 plan only | `PLAN.md` — written, **not run**. No data here. |
