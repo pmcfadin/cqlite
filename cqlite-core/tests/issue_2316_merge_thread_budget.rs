@@ -312,7 +312,7 @@ fn poll_until_stable(timeout: Duration) -> (usize, usize) {
 /// #2316 amplification survives it unchanged. Returns `(peak, settled)` of the
 /// post-reap window; `settled` is the CONFIRMED reading (the stabilized steady
 /// state), while `peak` is reported for diagnosis only.
-fn reap_settle_and_resample(accept_at_or_below: usize) -> (usize, usize) {
+fn reap_settle_and_resample(accept_at_or_below: usize) -> ReapOutcome {
     poll_until_reaped(
         accept_at_or_below,
         REAP_QUIESCENCE_SPAN,
@@ -320,33 +320,49 @@ fn reap_settle_and_resample(accept_at_or_below: usize) -> (usize, usize) {
     )
 }
 
+/// Outcome of the reap confirmation. Deliberately NOT a bare count: acceptance
+/// must be an AFFIRMATIVE measurement, never the absence of a bad one (roborev
+/// job 61). An earlier version returned the latest reading on timeout, so a count
+/// that merely DIPPED within budget as the deadline passed — without ever holding
+/// there — was indistinguishable from a genuine drain, and passed the pin.
+enum ReapOutcome {
+    /// The pool drained to within budget AND held there for the quiescence span.
+    /// This is the ONLY value that may satisfy the pin.
+    Drained { peak: usize, settled: usize },
+    /// The deadline expired without such a reading. The pin FAILS on this
+    /// regardless of what the instantaneous count happened to be.
+    Unconfirmed { peak: usize, last: usize },
+}
+
 /// Poll until the blocking pool has demonstrably drained to `accept_at_or_below`
-/// and held there for `min_span`, or until `timeout` expires — returning
-/// `(peak, final)` of the polling window.
+/// and held there for `min_span`, or until `timeout` expires.
 ///
 /// ## Why acceptance and failure are deliberately ASYMMETRIC
 ///
 /// An unchanged thread count does NOT prove no blocking task is still running: a
 /// busy or parked task keeps the count constant without ever having started its
-/// keep-alive clock (roborev job 60). So quiescence alone is sufficient to ACCEPT
-/// a clean reading but NOT to condemn a dirty one — if it were used for both, a
+/// keep-alive clock (roborev job 60). So quiescence is sufficient to ACCEPT a
+/// clean reading but NOT to condemn a dirty one — if it were used for both, a
 /// task that finishes late would be reaped after the re-sample and its thread
-/// would be miscounted as persistent, which is exactly the false failure this
-/// change exists to remove.
+/// miscounted as persistent, which is the false failure this change removes.
 ///
 /// This function therefore keeps waiting for as long as the count is over the
-/// threshold, spending the full `timeout` before letting the caller fail. That is
-/// sound rather than "retry until green": the only threads that can disappear
-/// during the wait are REAPABLE ones, and a genuine #2316 amplification's runtime
-/// workers are not reapable while their runtime lives — which it does, for as
-/// long as the producer blocks on the full `sync_channel` (i.e. past this call).
-/// No amount of extra patience can make an amplification pass; it can only ever
-/// give late-finishing blocking work the reap window it is owed.
+/// threshold, spending the full `timeout` before giving up. That is sound rather
+/// than "retry until green": the only threads that can disappear during the wait
+/// are REAPABLE ones, and a genuine #2316 amplification's runtime workers are not
+/// reapable while their runtime lives — which it does, for as long as the
+/// producer blocks on the full `sync_channel` (i.e. past this call). No amount of
+/// extra patience can make an amplification pass; it can only give late-finishing
+/// blocking work the reap window it is owed.
+///
+/// Timing out yields [`ReapOutcome::Unconfirmed`], which FAILS the pin. Failing
+/// closed is the right direction here: an unconfirmable measurement is not
+/// evidence of good behaviour.
 fn poll_until_reaped(
     accept_at_or_below: usize,
     min_span: Duration,
     timeout: Duration,
-) -> (usize, usize) {
+) -> ReapOutcome {
     let deadline = Instant::now() + timeout;
     let mut peak = 0usize;
     let mut last: Option<usize> = None;
@@ -359,10 +375,10 @@ fn poll_until_reaped(
         peak = peak.max(n);
         latest = n;
         if last == Some(n) {
-            // Accept ONLY a reading that is both quiesced AND already within the
-            // budget. A quiesced but over-budget reading is not yet trustworthy.
+            // Accept ONLY a reading that is both within budget AND has HELD there
+            // for the full span. Either half alone is not a confirmation.
             if n <= accept_at_or_below && unchanged_since.elapsed() >= min_span {
-                return (peak, n);
+                return ReapOutcome::Drained { peak, settled: n };
             }
         } else {
             last = Some(n);
@@ -370,10 +386,7 @@ fn poll_until_reaped(
         }
         std::thread::sleep(POLL_INTERVAL);
     }
-    // Deadline reached while still over budget: report the final reading and let
-    // the caller's assertion fail on it. This is the fail-loud path, NOT a panic
-    // of its own, so the pin's diagnostic is what the reader sees.
-    (peak, latest)
+    ReapOutcome::Unconfirmed { peak, last: latest }
 }
 
 // ── Real multi-SSTable input construction (never an empty dataset) ──────────
@@ -577,27 +590,42 @@ fn merge_bounds_producer_threads_to_o_m() {
     // blocking-pool threads disappear over the hold, while a multi-threaded
     // runtime's workers — the actual #2316 defect — cannot be reaped while their
     // runtime lives. See `reap_settle_and_resample`. The bound is NOT widened.
-    let confirmed = if delta > bound {
+    let (pin_satisfied, confirm_note) = if delta > bound {
         eprintln!(
             "[issue-2316-reap] fast-path delta={delta} exceeds bound={bound}; holding the blocked \
              producers until the pool drains within budget and holds there for \
              {REAP_QUIESCENCE_SPAN:?} (> tokio's 10s blocking-pool thread_keep_alive), or up to \
              {REAP_CONFIRM_TIMEOUT:?} before condemning the reading"
         );
-        let (reap_peak, reap_settled) = reap_settle_and_resample(baseline + bound);
-        let reap_delta = reap_settled.saturating_sub(baseline);
-        eprintln!(
-            "[issue-2316-reap] post-reap peak={reap_peak} settled={reap_settled} \
-             confirmed_delta={reap_delta} bound={bound} ({})",
-            if reap_delta <= bound {
-                "within bound — the overshoot was reapable blocking-pool jitter, absorbed"
-            } else {
-                "STILL over bound — persistent (non-reapable) threads"
+        match reap_settle_and_resample(baseline + bound) {
+            ReapOutcome::Drained { peak: rp, settled } => {
+                let d = settled.saturating_sub(baseline);
+                eprintln!(
+                    "[issue-2316-reap] post-reap peak={rp} settled={settled} confirmed_delta={d} \
+                     bound={bound} (within bound and HELD for {REAP_QUIESCENCE_SPAN:?} — the \
+                     overshoot was reapable blocking-pool jitter, absorbed)"
+                );
+                (true, format!("drained to {d} within bound"))
             }
-        );
-        reap_delta
+            ReapOutcome::Unconfirmed { peak: rp, last } => {
+                let d = last.saturating_sub(baseline);
+                eprintln!(
+                    "[issue-2316-reap] post-reap peak={rp} last={last} last_delta={d} \
+                     bound={bound} (UNCONFIRMED after {REAP_CONFIRM_TIMEOUT:?} — never held \
+                     within budget for {REAP_QUIESCENCE_SPAN:?})"
+                );
+                (
+                    false,
+                    format!(
+                        "UNCONFIRMED after {REAP_CONFIRM_TIMEOUT:?}: last reading {last} \
+                         (delta {d}), peak {rp} — the pool never drained to within budget and \
+                         HELD there for {REAP_QUIESCENCE_SPAN:?}"
+                    ),
+                )
+            }
+        }
     } else {
-        delta
+        (true, format!("fast-path delta {delta} within bound"))
     };
 
     // Drain the merge so producers exit cleanly (no leaked threads / temp files).
@@ -624,18 +652,17 @@ fn merge_bounds_producer_threads_to_o_m() {
     // `confirmed` equals the fast-path delta unless that exceeded the bound, in
     // which case it is the delta that SURVIVED the reap settle.
     assert!(
-        confirmed <= bound,
-        "merge over M={m} inputs holds {confirmed} PERSISTENT OS threads over baseline \
-         (fast-path peak={peak}, settled={settled}, delta={delta}; still over budget after \
-         waiting up to {REAP_CONFIRM_TIMEOUT:?} for the blocking pool to drain: {confirmed}; \
-         baseline={baseline}); O(M) bound is {bound} (= {PER_INPUT}·M + {THREAD_SLACK}). \
-         These threads outlived tokio's blocking-pool keep-alive while every producer was \
-         still blocked on `send`, so they are NOT reapable spawn_blocking jitter — they are \
-         held by something with the producers' lifetime. A confirmed delta >= num_cpus \
-         (num_cpus={cpus}) is consistent with the #2316 amplification (a producer building a \
-         multi-threaded runtime, whose workers live as long as the runtime); a smaller \
-         confirmed delta is a persistent overshoot of another origin — either way it is a \
-         real, non-transient cost this pin rejects. (confirmed >= num_cpus: {})",
-        confirmed >= cpus
+        pin_satisfied,
+        "merge over M={m} inputs failed the O(M) producer-thread pin: {confirm_note}. \
+         (fast-path peak={peak}, settled={settled}, delta={delta}, baseline={baseline}; \
+         O(M) bound is {bound} = {PER_INPUT}·M + {THREAD_SLACK}.) \
+         The confirmation holds every producer blocked on `send` and waits up to \
+         {REAP_CONFIRM_TIMEOUT:?} for tokio's blocking pool to drain, so threads still present \
+         at the end are NOT reapable spawn_blocking jitter — they are held by something with the \
+         producers' lifetime. A surviving delta >= num_cpus (num_cpus={cpus}) is consistent with \
+         the #2316 amplification (a producer building a multi-threaded runtime, whose workers \
+         live as long as the runtime); a smaller one is a persistent overshoot of another origin. \
+         An UNCONFIRMED outcome means the measurement itself never settled — that FAILS closed, \
+         because an unconfirmable reading is not evidence of good behaviour."
     );
 }
