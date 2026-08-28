@@ -25,9 +25,46 @@
 //! LOUDLY (a clear panic, never a silent under-sample) if the count never
 //! settles. The assertion FAILS on the pre-change code (each producer's
 //! multi-threaded runtime adds `num_cpus` workers) and PASSES after the
-//! `current_thread`-runtime fix, on any host where `num_cpus >= 2`. Where the
-//! amplification collapses (`num_cpus < 2`) or the platform exposes no direct
-//! thread-count API, the test guards deterministically rather than flake.
+//! `current_thread`-runtime fix — but ONLY on a host with enough cores for the
+//! pre-change cost `M·(1 + num_cpus)` to actually EXCEED the `O(M)` bound. That
+//! threshold is derived from the constants below (see
+//! [`min_cpus_for_amplification`]), NOT assumed: at `M = 4` with the current
+//! `PER_INPUT`/`THREAD_SLACK` the pre-change delta is 12 on a 2-core host, which
+//! is UNDER the bound of 15 — so `num_cpus >= 2` (the claim this docstring made
+//! before issue #3385) was never sufficient to detect the regression. Below the
+//! derived threshold, or where the platform exposes no direct thread-count API,
+//! the test guards deterministically rather than flake.
+//!
+//! ## Measured noise mechanism: reapable blocking-pool threads (issue #3385)
+//!
+//! Under CPU starvation this pin red by exactly one thread in a FULL gate
+//! (`delta=16` vs `bound=15`, `peak=18`, `baseline=2`, `num_cpus=16`) while
+//! passing 3/3 standalone. Instrumenting the thread NAMES (`/proc/self/task/*/comm`)
+//! identified the overshoot precisely — it is NOT runtime workers:
+//!
+//! ```text
+//! [issue-2316] cpus=16 M=4 baseline=2 peak=10 settled=10 delta=8 bound=15
+//! census   {"issue_2316_merg": 1, "merge_bounds_pr": 5, "tokio-rt-worker": 4}
+//! after a 13s hold: peak2=6 settled2=6 delta2=4
+//! census2  {"issue_2316_merg": 1, "merge_bounds_pr": 5}   # ZERO tokio threads
+//! ```
+//!
+//! Each producer builds a `current_thread` runtime (ZERO workers) plus
+//! demand-driven `spawn_blocking` threads (named `tokio-rt-worker` by tokio),
+//! whose pool GROWS under starvation (measured 3/producer in the contended gate
+//! vs 1/producer idle). Those threads are REAPED once idle past tokio's blocking
+//! pool `thread_keep_alive`, so after a hold the delta settles to `M` — the
+//! producer threads alone — a `num_cpus`-INDEPENDENT steady state.
+//!
+//! A genuine #2316 amplification behaves the OPPOSITE way: a multi-threaded
+//! `Runtime`'s worker threads live for the LIFETIME of the runtime, and every
+//! producer's runtime stays alive while the producer blocks on the full
+//! `sync_channel`. So holding the producers past the keep-alive and re-sampling
+//! separates the two hypotheses BY MECHANISM, not by a widened tolerance: it can
+//! only ever convert a jitter FAIL into a PASS, never mask a real amplification.
+//! That confirmation runs ONLY when the fast-path delta already exceeds the
+//! bound, so the common (passing) case pays zero extra latency, and the bound
+//! itself is NOT weakened.
 //!
 //! ## Process-isolation requirement
 //!
@@ -82,6 +119,41 @@ const PER_INPUT: usize = 3;
 
 /// Fixed slack over the `PER_INPUT · M` bound for incidental/settle threads.
 const THREAD_SLACK: usize = 3;
+
+/// The O(M) bound this test pins for `m` inputs.
+fn thread_bound(m: usize) -> usize {
+    PER_INPUT * m + THREAD_SLACK
+}
+
+/// Smallest `num_cpus` at which the PRE-CHANGE cost is actually DETECTABLE by
+/// this bound, derived from the constants rather than assumed (issue #3385).
+///
+/// The pre-change merge cost `M + M·num_cpus = M·(1 + num_cpus)` threads. The
+/// regression is observable only where that EXCEEDS [`thread_bound`]:
+/// `M·(1 + c) > PER_INPUT·M + THREAD_SLACK`, i.e. the smallest integer
+/// `c > (bound - M)/M`. With the current constants at `M = 4` that is `c >= 3`
+/// (pre-change delta 16 vs bound 15) — NOT `c >= 2`, where the pre-change delta
+/// is 12 and sits UNDER the bound. Below this threshold the test would hold
+/// vacuously either way, so it guards explicitly instead of pretending to pin.
+fn min_cpus_for_amplification(m: usize) -> usize {
+    if m == 0 {
+        return usize::MAX;
+    }
+    thread_bound(m).saturating_sub(m) / m + 1
+}
+
+/// Margin to wait out tokio's blocking-pool reaping before CONFIRMING an
+/// over-bound reading (issue #3385).
+///
+/// tokio's default blocking-pool `thread_keep_alive` is **10 s**: an idle
+/// `spawn_blocking` thread is reaped only after that long without work. This
+/// margin MUST exceed it, or the re-sample would observe threads that are
+/// merely not-yet-reaped and report jitter as a persistent overshoot. It is the
+/// one unavoidable duration in this test — reaping is defined in terms of
+/// elapsed idle time, so no lifecycle signal can substitute — but it is used as
+/// a SETTLE (wait out the keep-alive, then re-stabilize and read once), never as
+/// a retry-until-green loop.
+const BLOCKING_POOL_KEEP_ALIVE_MARGIN: Duration = Duration::from_secs(13);
 
 // ── Direct, no-heuristics OS thread-count observation ───────────────────────
 
@@ -179,6 +251,29 @@ fn poll_until_stable(timeout: Duration) -> (usize, usize) {
          fail-loud BOUND, not a synchronization mechanism — producer startup may be \
          stalled under extreme contention, or the lifecycle signal never settles"
     );
+}
+
+/// Re-sample the OS thread count after holding the (still-blocked) producers
+/// past tokio's blocking-pool keep-alive, so a reading can be CONFIRMED as a
+/// PERSISTENT overshoot rather than reaping jitter (issue #3385).
+///
+/// The discriminator is mechanical, not statistical:
+///
+/// * `spawn_blocking` pool threads are IDLE-REAPED after
+///   [`BLOCKING_POOL_KEEP_ALIVE_MARGIN`] (> tokio's 10 s `thread_keep_alive`),
+///   so a starvation-inflated pool has provably vanished by the re-sample.
+/// * A multi-threaded `Runtime`'s worker threads are NOT reapable — they live
+///   for the lifetime of the runtime, and each producer's runtime stays alive
+///   for as long as that producer blocks on the full `sync_channel` (which it
+///   does until this test drains the merge, i.e. strictly after this call).
+///
+/// So this confirmation can only ever turn a jitter FAIL into a PASS; a genuine
+/// #2316 amplification survives it unchanged. Returns `(peak, settled)` of the
+/// post-reap window; `settled` is the CONFIRMED reading (the stabilized steady
+/// state), while `peak` is reported for diagnosis only.
+fn reap_settle_and_resample() -> (usize, usize) {
+    std::thread::sleep(BLOCKING_POOL_KEEP_ALIVE_MARGIN);
+    poll_until_stable(Duration::from_secs(15))
 }
 
 // ── Real multi-SSTable input construction (never an empty dataset) ──────────
@@ -309,11 +404,24 @@ fn build_inputs() -> (TempDir, Vec<PathBuf>, TableSchema) {
 
 #[test]
 fn merge_bounds_producer_threads_to_o_m() {
-    // Guard 1: the amplification (M·num_cpus) collapses on a single-core host, so
-    // the bound cannot be distinguished from the O(M) target there. Hold trivially.
+    // Guard 1: the pre-change amplification is `M·(1 + num_cpus)`, which only
+    // EXCEEDS this test's O(M) bound above a threshold DERIVED from the bound's
+    // own constants (issue #3385 — the old `num_cpus < 2` guard was provably
+    // wrong: at M=4, num_cpus=2 the pre-change delta is 12, under the bound of
+    // 15, so the pin could not have detected the regression there either).
+    // Below the threshold the bound cannot distinguish pre- from post-change
+    // code, so hold trivially and say why rather than assert a vacuous pass.
     let cpus = num_cpus::get();
-    if cpus < 2 {
-        eprintln!("[skip] num_cpus={cpus} < 2 — amplification not observable; holding trivially");
+    let min_cpus = min_cpus_for_amplification(NUM_INPUTS);
+    if cpus < min_cpus {
+        eprintln!(
+            "[skip] num_cpus={cpus} < {min_cpus} — with M={NUM_INPUTS}, PER_INPUT={PER_INPUT}, \
+             THREAD_SLACK={THREAD_SLACK} the pre-change cost M·(1+num_cpus)={} does not exceed \
+             the O(M) bound {}, so the #2316 amplification is not observable here; \
+             holding trivially",
+            NUM_INPUTS * (1 + cpus),
+            thread_bound(NUM_INPUTS)
+        );
         return;
     }
     // Guard 2: no direct thread-count API on this platform → cannot observe.
@@ -352,13 +460,44 @@ fn merge_bounds_producer_threads_to_o_m() {
     // it on a contended host. `peak` also captures any transient spike seen
     // while ramping up (the pre-fix defect: a burst of per-producer runtime
     // worker threads), even if the count later settles slightly lower.
-    let (peak, _settled) = poll_until_stable(Duration::from_secs(15));
+    let (peak, settled) = poll_until_stable(Duration::from_secs(15));
     let delta = peak.saturating_sub(baseline);
-    let bound = PER_INPUT * m + THREAD_SLACK;
+    let bound = thread_bound(m);
 
     eprintln!(
-        "[issue-2316] cpus={cpus} M={m} baseline={baseline} peak={peak} delta={delta} bound={bound}"
+        "[issue-2316] cpus={cpus} M={m} baseline={baseline} peak={peak} settled={settled} \
+         delta={delta} bound={bound}"
     );
+
+    // Issue #3385 — CONFIRM an over-bound reading before failing. The fast path
+    // above is unchanged and pays ZERO extra latency: a within-bound delta is
+    // accepted exactly as before. Only an overshoot takes this branch, and it
+    // does so with the producers STILL blocked on `send` (the merge is drained
+    // further below), which is what makes the discriminator sound: reapable
+    // blocking-pool threads disappear over the hold, while a multi-threaded
+    // runtime's workers — the actual #2316 defect — cannot be reaped while their
+    // runtime lives. See `reap_settle_and_resample`. The bound is NOT widened.
+    let confirmed = if delta > bound {
+        eprintln!(
+            "[issue-2316-reap] fast-path delta={delta} exceeds bound={bound}; holding the blocked \
+             producers {BLOCKING_POOL_KEEP_ALIVE_MARGIN:?} (> tokio's 10s blocking-pool \
+             thread_keep_alive) to reap idle spawn_blocking threads, then re-sampling"
+        );
+        let (reap_peak, reap_settled) = reap_settle_and_resample();
+        let reap_delta = reap_settled.saturating_sub(baseline);
+        eprintln!(
+            "[issue-2316-reap] post-reap peak={reap_peak} settled={reap_settled} \
+             confirmed_delta={reap_delta} bound={bound} ({})",
+            if reap_delta <= bound {
+                "within bound — the overshoot was reapable blocking-pool jitter, absorbed"
+            } else {
+                "STILL over bound — persistent (non-reapable) threads"
+            }
+        );
+        reap_delta
+    } else {
+        delta
+    };
 
     // Drain the merge so producers exit cleanly (no leaked threads / temp files).
     let mut writer =
@@ -379,13 +518,23 @@ fn merge_bounds_producer_threads_to_o_m() {
         NUM_INPUTS as u64 * ROWS_PER_INPUT as u64
     );
 
-    // THE PIN: the merge's peak OS-thread delta over baseline must be within the
-    // O(M) bound. Pre-change this is `M + M·num_cpus` (>> bound); post-change `M`.
+    // THE PIN: the merge's OS-thread delta over baseline must be within the O(M)
+    // bound. Pre-change this is `M + M·num_cpus` (>> bound); post-change `M`.
+    // `confirmed` equals the fast-path delta unless that exceeded the bound, in
+    // which case it is the delta that SURVIVED the reap settle.
     assert!(
-        delta <= bound,
-        "merge over M={m} inputs added {delta} OS threads over baseline \
-         (peak={peak}, baseline={baseline}); O(M) bound is {bound} (= {PER_INPUT}·M + {THREAD_SLACK}). \
-         A delta scaling with num_cpus (num_cpus={cpus}) means a producer built a \
-         multi-threaded runtime — issue #2316 amplification."
+        confirmed <= bound,
+        "merge over M={m} inputs holds {confirmed} PERSISTENT OS threads over baseline \
+         (fast-path peak={peak}, settled={settled}, delta={delta}; confirmed after a \
+         {BLOCKING_POOL_KEEP_ALIVE_MARGIN:?} blocking-pool reap settle: {confirmed}; \
+         baseline={baseline}); O(M) bound is {bound} (= {PER_INPUT}·M + {THREAD_SLACK}). \
+         These threads outlived tokio's blocking-pool keep-alive while every producer was \
+         still blocked on `send`, so they are NOT reapable spawn_blocking jitter — they are \
+         held by something with the producers' lifetime. A confirmed delta >= num_cpus \
+         (num_cpus={cpus}) is consistent with the #2316 amplification (a producer building a \
+         multi-threaded runtime, whose workers live as long as the runtime); a smaller \
+         confirmed delta is a persistent overshoot of another origin — either way it is a \
+         real, non-transient cost this pin rejects. (confirmed >= num_cpus: {})",
+        confirmed >= cpus
     );
 }
