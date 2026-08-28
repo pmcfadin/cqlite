@@ -47,7 +47,7 @@ bench harness. **Zero production wiring** and **no new decode work**: every byte
 | `cqlite-flight/src/df_spike/rss.rs` | Per-run peak-RSS sampling |
 | `cqlite-flight/src/df_spike/bench.rs` | Scenario/arm matrix + the JSON result record |
 | `cqlite-flight/src/bin/df_spike_bench.rs` | The harness binary (`required-features = ["datafusion-spike"]`) |
-| `cqlite-flight/src/df_spike/tests.rs` | 21 tests: pushdown classification, the arm-equivalence oracle, the harness CLI contract |
+| `cqlite-flight/src/df_spike/tests/` | 24 tests, split by responsibility: `pushdown` classification, the `provider` surface, the arm-`equivalence` oracle, the `harness` contract, shared `support` fixtures |
 
 **Why it lives inside `cqlite-flight` and not in a new crate:** the streaming seam it drives is
 `pub(crate)` — `MergeProducer::produce_streaming`, the `BatchSink` trait, `ScanProgress`,
@@ -617,7 +617,7 @@ Verified two ways:
 * `cargo build -p cqlite-flight` produces the `cqlite-flight` server binary and **not**
   `df_spike_bench` (verified by deleting it and rebuilding) — `required-features` holds.
 
-**The spike's own 21 tests do not run in the gate**, because they sit behind a non-default feature.
+**The spike's own 24 tests do not run in the gate**, because they sit behind a non-default feature.
 That follows this crate's existing convention for feature-gated test code (`observability-testing`,
 `dhat-heap`); run them explicitly:
 
