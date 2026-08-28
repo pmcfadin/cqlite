@@ -78,6 +78,14 @@ work**, not because vectorized execution is faster. The `vectorized-exec` delta 
 meaningful over identical batches. `row_pushdown` reports separately what pushdown buys, and its
 batches are never compared row-for-row against the other arms'.
 
+**Why the arms are pinned to one DataFusion partition (issue #2877 shape).** The `datafusion@tp1`
+arm exists because the first version of this harness ran `SessionContext::new()` — DataFusion's
+*default* parallelism, ~16 target partitions on this box — against direct arms that consume batches
+on a single thread. That comparison measures repartitioning and pipeline concurrency, not
+vectorization. Caught in roborev round 1; unfixed, this spike would have **reported threading as
+vectorization**. The headline comparison is therefore taken at equal thread count, and concurrency is
+reported as its own separate column (§3.3) rather than folded into the vectorized-exec delta.
+
 ### 2.2 The row-engine arm understates the row engine — deliberately
 
 `rowwise.rs` downcasts each column **once per batch** and then indexes it. CQLite's production row
@@ -187,10 +195,16 @@ The 1,899,750 rows against the manifest's nominal 1,900,000 is not a loss: `cass
 draws `pk` from `uniform(1..1e9)` over 190,000 seeds, so a handful of seeds collide onto the same
 partition key. The count is identical in all 45 runs.
 
-**RF is nominal only.** The DDL records `SimpleStrategy RF=3`, but a single-node container stores
-exactly one replica. This corpus delivers M15's **wide** and **overlap** halves; the property
-actually exercised is cross-SSTable overlap (read-time reconciliation), **not** replication. Do not
-cite it as an RF=3 measurement.
+**RF is nominal only — unreachable on a single-node container, and immaterial to a file-level
+reader** (lead ruling, 2026-08-28). The DDL records `SimpleStrategy RF=3`; a single-node container
+stores exactly one replica. This is **not** a missing half of M15 item 2: CQLite is a local SSTable
+reader — it opens files and never consults a replica set, so replication factor cannot reach the read
+path under measurement at all. RF=3 was a proxy for the property that *does* reach it: **multiple
+overlapping SSTable generations per partition**, which this corpus delivers and §0 measures
+(`data_db_count = 2`, overlap **0.288**, established by a token-slice `writetime` probe whose slice
+row count was **unchanged** across generation 2 — an unchanged count proves gen2 *overwrote* rather
+than *appended*, which is the property the reconciliation path actually exercises). Still do not cite
+this as an RF=3 measurement.
 
 ### 3.1 Methodology corrections and disclosed defects
 
