@@ -5039,7 +5039,26 @@ _package_unittest_srcs() { # <pkg> [kinds] [enabled-features]
   local meta out
   meta=$(cargo metadata --format-version 1 --no-deps 2>/dev/null) || return 1
   [ -n "$meta" ] || return 1
-  if command -v python3 >/dev/null 2>&1; then
+  # jq FIRST, then python3, then failure — the same chain and the same direction as
+  # _package_index / _package_test_targets / _resolved_package_features. A single-parser
+  # helper is a FALSE RED on a jq-only host (roborev round-18, Medium): this gate treats
+  # macOS as a first-class host, and here the lane would have failed closed on a healthy
+  # tree, which is the verdict agents learn to re-run away from.
+  if command -v jq >/dev/null 2>&1; then
+    out=$(printf '%s' "$meta" | jq -r --arg n "$pkg" --arg kinds "$kinds" --arg en "$enabled" '
+      ($kinds | split(",")) as $want
+      | ($en | split(" ") | map(select(length > 0))) as $enabled
+      | .packages[] | select(.name == $n)
+      | ((.manifest_path // "") | split("/") | .[0:-1] | join("/")) as $root
+      | .targets[]
+      | select([ (.kind // [])[] | select(. as $k | $want | index($k)) ] | length > 0)
+      | select(.test != false)
+      | ((."required-features" // .required_features // [])) as $rf
+      | select((($rf | length) == 0) or ((($rf - $enabled) | length) == 0))
+      | (.src_path // "") as $sp
+      | if ($root != "" and ($sp | startswith($root + "/")))
+        then ($sp | ltrimstr($root + "/")) else $sp end') || return 1
+  elif command -v python3 >/dev/null 2>&1; then
     out=$(printf '%s' "$meta" | python3 -c '
 import json, sys, os
 pkg = sys.argv[1]
@@ -5065,7 +5084,7 @@ for p in d.get("packages", []):
         if rf and not set(rf).issubset(enabled):
             continue
         sp = t.get("src_path") or ""
-        rel = os.path.relpath(sp, root) if root and sp.startswith(root) else sp
+        rel = sp[len(root) + 1:] if root and sp.startswith(root + os.sep) else sp
         print(rel)
 ' "$pkg" "$kinds" "$enabled") || return 1
   else
@@ -6311,6 +6330,25 @@ _package_test_targets_gated() {
   local meta out
   meta=$(cargo metadata --format-version 1 --no-deps 2>/dev/null) || return 1
   [ -n "$meta" ] || return 1
+  # jq FIRST, then python3, then failure (roborev round-18, Medium) — see
+  # _package_unittest_srcs above for why a single-parser helper is a false red rather than
+  # a missing convenience. Differentially tested against the python half by
+  # test_agent_gate_summary.sh section 31 over this workspace's real metadata.
+  if command -v jq >/dev/null 2>&1; then
+    out=$(printf '%s' "$meta" | jq -r --arg n "$pkg" --arg feat "$feat" '
+      .packages[] | select(.name == $n)
+      | ((.manifest_path // "") | split("/") | .[0:-1] | join("/")) as $root
+      | .targets[] | select([ (.kind // [])[] | select(. == "test") ] | length > 0)
+      | ((."required-features" // .required_features // [])) as $rf
+      | (.src_path // "") as $sp
+      | [ (.name // ""), $sp,
+          (if ($rf | index($feat)) then "manifest" else "source" end),
+          (if ($root != "" and ($sp | startswith($root + "/")))
+           then ($sp | ltrimstr($root + "/")) else $sp end) ] | @tsv') || return 1
+    [ -n "$out" ] || return 1
+    printf '%s\n' "$out"
+    return 0
+  fi
   command -v python3 >/dev/null 2>&1 || return 1
   out=$(printf '%s' "$meta" | python3 -c '
 import json, os, sys
@@ -6331,7 +6369,7 @@ for p in d.get("packages", []):
         # manifest dir rather than by stripping a `tests/` prefix: an explicitly mapped
         # `[[test]] path = "..."` target need not live under tests/ at all, and the strip
         # would have left an ABSOLUTE path that can never match (roborev round-10 finding).
-        rel = os.path.relpath(sp, root) if root and sp else sp
+        rel = sp[len(root) + 1:] if root and sp.startswith(root + os.sep) else sp
         print("%s\t%s\t%s\t%s" % (t.get("name", ""), sp, how, rel))
 ' "$pkg" "$feat") || return 1
   [ -n "$out" ] || return 1
@@ -9963,7 +10001,14 @@ dispatch_component() {
   # write-support target must execute at least one test).
 
   log1=$(mktemp) && log2=$(mktemp)
-  trap "rm -f \"$log1\" \"$log2\"" EXIT
+  # The `.ansi-stripped` siblings too (roborev round-18, Low): the zero-test guards
+  # parse a stripped COPY that _ansi_stripped_log writes beside the log, so cleaning
+  # only the originals leaks two files per gate run into TMPDIR. NOTE: no apostrophes in
+  # this comment — the cli-tests component body is a single-quoted `bash -c` string, so one
+  # would terminate it (it did, first try). The lane logs of the other components
+  # live under $LOG_DIR, which is retained deliberately as the `logs:` bundle; these
+  # two bare mktemps are the only ones nobody else collects.
+  trap "rm -f \"$log1\" \"$log2\" \"$log1.ansi-stripped\" \"$log2.ansi-stripped\"" EXIT
 
   cargo test --package cqlite-cli "${def_flags[@]}" 2>&1 | tee "$log1"
   rc=${PIPESTATUS[0]}

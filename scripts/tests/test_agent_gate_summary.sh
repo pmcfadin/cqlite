@@ -2916,6 +2916,121 @@ if [ -s "$tmp/1699-lanefn-run_feature_iso-code.txt" ]; then
   done
 fi
 
+# --- 31. #1699: the cargo-metadata helpers are jq-OR-python3, and the two halves agree ---
+#
+# roborev round-18 finding (Medium): _package_unittest_srcs and _package_test_targets_gated
+# were python3-ONLY, while this gate's documented convention (agent-gate.sh:1126-1130) and
+# every incumbent helper is "jq, else python3, else the loud #2658 no-parser failure". On a
+# jq-only host — and this gate treats macOS as a first-class host, with a /bin/bash-3.2
+# floor and a BSD `stat` branch — both returned a FAILED DERIVATION, so the mandatory
+# flight-tests and legacy-heuristics lanes redded the FULL gate on a healthy tree. A false
+# red is not the safe direction: it is the verdict agents learn to re-run away from.
+#
+# TWO asserts, because neither alone is sufficient:
+#   (a) STRUCTURAL, over every metadata helper — the class-level guard. The next
+#       single-parser helper someone adds is caught here rather than on someone's laptop.
+#   (b) DIFFERENTIAL — the jq port and the python original must produce BYTE-IDENTICAL
+#       output over this workspace's real metadata. A port is a SECOND IMPLEMENTATION, and
+#       #3229's lesson is that its correctness is only knowable by differential testing
+#       against the original: the deleted census-exclusion oracle re-derived Go's trim
+#       rules in bash, was tested against a MODEL of Go, and its NBSP divergence was
+#       unfindable by care.
+# DERIVED, NEVER CURATED — the rule both executing lanes are built on, applied to their own
+# lint: the subject set is every gate function that INVOKES `cargo metadata`, computed from
+# the committed source at run time, so a helper added later is linted with no test edit. A
+# broken derivation is a FAIL naming it (below), never a shrunken subject set that greens.
+# The pattern is the invocation shape `=$(cargo metadata`, not the bare words, because the
+# lanes' own progress messages talk ABOUT cargo metadata and would otherwise be linted as
+# helpers that lack a parser they never needed.
+meta_fns_=$(sed 's/[[:space:]]*#.*$//' "$GATE" \
+  | awk '/^[a-zA-Z_][a-zA-Z0-9_]*\(\)/ { split($1, a, "("); fn = a[1] }
+         /=\$\(cargo metadata/ { if (fn != "") print fn }' | sort -u)
+n_meta_=$(printf '%s\n' "$meta_fns_" | grep -c . || true)
+# The derivation must contain the two helpers this finding was ABOUT. Anything else means the
+# extraction moved and the lint is measuring a set that no longer includes its own subject.
+for must_ in _package_unittest_srcs _package_test_targets_gated; do
+  if printf '%s\n' "$meta_fns_" | grep -qxF "$must_"; then
+    ok "1699-r18-parser-derive: the derived cargo-metadata helper set includes $must_ ($n_meta_ helpers derived)"
+  else
+    bad "1699-r18-parser-derive: $must_ is ABSENT from the derived cargo-metadata helper set ($n_meta_ derived) — the derivation is broken, so every assert below it would pass having measured nothing"
+  fi
+done
+for fn_ in $meta_fns_; do
+  body_="$tmp/1699-parser-$fn_.txt"
+  awk -v f="^$fn_\\\\(\\\\) \\\\{" '$0 ~ f, /^\}/' "$GATE" > "$body_"
+  if [ ! -s "$body_" ]; then
+    bad "1699-r18-parser-scope: could not extract $fn_ — the extraction broke, so this lint would pass vacuously"
+    continue
+  fi
+  code_="$tmp/1699-parser-$fn_-code.txt"
+  sed 's/[[:space:]]*#.*$//' "$body_" > "$code_"
+  jq_n_=$(grep -cF 'command -v jq' "$code_")
+  py_n_=$(grep -cF 'command -v python3' "$code_")
+  if [ "$jq_n_" -gt 0 ] && [ "$py_n_" -gt 0 ]; then
+    ok "1699-r18-parser-$fn_: offers BOTH metadata parsers (jq and python3)"
+  else
+    bad "1699-r18-parser-$fn_: single-parser metadata helper (jq=$jq_n_ python3=$py_n_) — on a host carrying only the other parser this returns a FAILED DERIVATION and the lane reds on a healthy tree; macOS is a first-class gate host"
+  fi
+done
+
+# (b) the differential. Needs both parsers AND cargo, since the subject is the REAL
+# metadata of this workspace rather than a fixture: a fixture would only cover the shapes
+# whoever wrote it already thought of, and the round-7/10/13 findings were all about
+# target shapes nobody had thought of (manifest-gated, directory-style, `test = false`,
+# required-features-excluded, explicitly path-mapped).
+if command -v jq >/dev/null 2>&1 && command -v python3 >/dev/null 2>&1 && command -v cargo >/dev/null 2>&1; then
+  repo_root_=$(cd "$SCRIPT_DIR/../.." && pwd)
+  while IFS='|' read -r fn_ a1_ a2_; do
+    [ -n "$fn_" ] || continue
+    body_="$tmp/1699-diff-$fn_.sh"
+    awk -v f="^$fn_\\\\(\\\\) \\\\{" '$0 ~ f, /^\}/' "$GATE" > "$body_"
+    if [ ! -s "$body_" ]; then
+      bad "1699-r18-diff-scope: could not extract $fn_ — the differential would compare nothing"
+      continue
+    fi
+    # Force the python half by SUBSTITUTING THE ARTIFACT in our own scratch copy — never by
+    # adding a parser-selection env var to the gate. A test-only seam is one more thing a
+    # real invoker can set (#3312), and the point of this assert is what an ordinary host does.
+    py_body_="$tmp/1699-diff-$fn_-py.sh"
+    sed 's|command -v jq >/dev/null 2>&1|false|' "$body_" > "$py_body_"
+    if [ "$(grep -cF 'command -v jq' "$py_body_")" -ne 0 ]; then
+      bad "1699-r18-diff-$fn_: could not force the python half in the scratch copy — the differential would be comparing jq with itself, i.e. passing vacuously"
+      continue
+    fi
+    jq_out_="$tmp/1699-diff-$fn_-jq.out"; py_out_="$tmp/1699-diff-$fn_-py.out"
+    ( cd "$repo_root_" && . "$body_"    && "$fn_" "$a1_" "$a2_" ) > "$jq_out_" 2>/dev/null; jq_rc_=$?
+    ( cd "$repo_root_" && . "$py_body_" && "$fn_" "$a1_" "$a2_" ) > "$py_out_" 2>/dev/null; py_rc_=$?
+    if [ "$jq_rc_" -ne 0 ] || [ ! -s "$jq_out_" ]; then
+      skipped "1699-r18-diff-$fn_: the jq half produced no output on this box (rc=$jq_rc_; offline registry?) — the two parsers were NOT compared for this helper"
+    elif [ "$py_rc_" -ne 0 ] || [ ! -s "$py_out_" ]; then
+      bad "1699-r18-diff-$fn_: the python half produced nothing (rc=$py_rc_) while the jq half worked — the incumbent parser is broken, which no lane would survive"
+    elif cmp -s "$jq_out_" "$py_out_"; then
+      ok "1699-r18-diff-$fn_: jq port and python original agree byte-for-byte over the real workspace metadata ($(grep -c . "$jq_out_") records)"
+    else
+      bad "1699-r18-diff-$fn_: the jq PORT and the python ORIGINAL DISAGREE — one of the two lanes derives a different subject set depending on which parser the host has: $(diff "$py_out_" "$jq_out_" 2>/dev/null | head -4 | tr '\n' ' ')"
+    fi
+  done <<'PARSER_DIFF_SPECS'
+_package_unittest_srcs|cqlite-flight|lib,bin
+_package_test_targets_gated|cqlite-core|legacy-heuristics
+PARSER_DIFF_SPECS
+else
+  skipped "1699-r18-diff: needs jq + python3 + cargo on this host — the two metadata parsers were NOT differentially compared here"
+fi
+
+# roborev round-18 (Low): the cli-tests component cleaned its two logs but not the
+# `.ansi-stripped` copies the zero-test guards parse, leaking two files per gate run into
+# TMPDIR. Structural, because the component itself is a 5-minute cargo run: the trap line is
+# the whole of the fix, so pinning the trap line is pinning the fix.
+cli_body_="$tmp/1699-r18-cli-trap.txt"
+awk '/^    cli-tests\)/, /compaction-byte-parity\)/' "$GATE" > "$cli_body_"
+if [ ! -s "$cli_body_" ]; then
+  bad "1699-r18-cli-trap-scope: could not extract the cli-tests component — this assert would pass vacuously"
+elif [ "$(grep -cF 'log1.ansi-stripped' "$cli_body_")" -gt 0 ] && [ "$(grep -cF 'log2.ansi-stripped' "$cli_body_")" -gt 0 ]; then
+  ok "1699-r18-cli-trap: cli-tests cleans the .ansi-stripped siblings its guards parse, not just the two logs"
+else
+  bad "1699-r18-cli-trap: cli-tests leaks \$log1.ansi-stripped/\$log2.ansi-stripped into TMPDIR on every gate run — the trap removes only the originals"
+fi
+
 echo "----"
 echo "passed: $PASS  failed: $FAIL"
 [ "$FAIL" -eq 0 ]
