@@ -128,6 +128,7 @@ struct Counters {
     /// partition count regardless of how narrow the split range (or `LIMIT`) is —
     /// the fixed multi-second warm-scan setup this counter exists to make visible.
     stream_walk_partitions_parsed: AtomicU64,
+    query_row_producers_finished: AtomicU64,
     /// Merge ENTRIES decoded from `Data.db` by ANY [`KWayMerger`]-adapter-driven
     /// run (Issue #2096) — full scans, compaction, AND multi-candidate point
     /// reads all share the same [`SSTableRowIteratorAdapter`]/`PathProbe::Seeked`
@@ -165,6 +166,7 @@ impl Counters {
             reverse_peak_block_rows: AtomicU64::new(0),
             data_db_checksum_full_reads: AtomicU64::new(0),
             stream_walk_partitions_parsed: AtomicU64::new(0),
+            query_row_producers_finished: AtomicU64::new(0),
             merge_run_entries_decoded: AtomicU64::new(0),
         }
     }
@@ -220,6 +222,15 @@ impl Counters {
             .fetch_add(1, Ordering::Relaxed);
     }
 
+    fn add_query_row_producer_finished(&self) {
+        self.query_row_producers_finished
+            .fetch_add(1, Ordering::Relaxed);
+    }
+
+    fn query_row_producers_finished(&self) -> u64 {
+        self.query_row_producers_finished.load(Ordering::Relaxed)
+    }
+
     fn stream_walk_partitions_parsed(&self) -> u64 {
         self.stream_walk_partitions_parsed.load(Ordering::Relaxed)
     }
@@ -272,6 +283,8 @@ impl Counters {
         self.reverse_peak_block_rows.store(0, Ordering::Relaxed);
         self.data_db_checksum_full_reads.store(0, Ordering::Relaxed);
         self.stream_walk_partitions_parsed
+            .store(0, Ordering::Relaxed);
+        self.query_row_producers_finished
             .store(0, Ordering::Relaxed);
         self.merge_run_entries_decoded.store(0, Ordering::Relaxed);
     }
@@ -414,6 +427,25 @@ pub(crate) fn add_stream_walk_partition_parsed() {
 /// `cargo test` (issue #2428). Such assertions use [`stream_walk_scope`]'s
 /// thread-local [`StreamWalkScope`](stream_walk_scope::StreamWalkScope) instead,
 /// which is immune by construction.
+/// One `QueryRowStream` producer thread has TERMINATED (issue #3384).
+///
+/// The causal completion signal for an abandoned walk. A test that instead waits
+/// for [`stream_walk_partitions_parsed`] to "stop growing" is asserting on a
+/// SAMPLE of another thread's progress: a producer that is merely descheduled
+/// looks identical to one that has stopped, so the walk can resume and drain the
+/// table after the assertion passed (roborev, issue #3384). This counter moves
+/// only when the producer closure has actually run to completion, so a reader
+/// that observes it knows the walk's row count is FINAL.
+pub(crate) fn add_query_row_producer_finished() {
+    COUNTERS.add_query_row_producer_finished();
+}
+
+/// Number of `QueryRowStream` producer threads that have terminated since
+/// [`reset`] (issue #3384). See [`add_query_row_producer_finished`].
+pub fn query_row_producers_finished() -> u64 {
+    COUNTERS.query_row_producers_finished()
+}
+
 pub fn stream_walk_partitions_parsed() -> u64 {
     COUNTERS.stream_walk_partitions_parsed()
 }

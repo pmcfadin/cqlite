@@ -533,30 +533,39 @@ async fn fast_arm_stream_stops_when_the_client_drops_it() {
     );
 
     // THE stop assertion, on an observed work marker rather than a timing
-    // threshold: wait for the partition-body count to STABILIZE (two equal
-    // consecutive samples), then require it to be bounded below the fixture.
-    // Stabilization is a convergence check, not a deadline — a walk that keeps
-    // decoding simply never converges and the test says so. `PROBE_LOCK`
-    // serializes this file and one file = one process, so no sibling scan
-    // contributes to the counter.
-    let mut settled = work_counters::stream_walk_partitions_parsed();
-    let mut stable = false;
-    for _ in 0..2_000 {
-        for _ in 0..10 {
-            tokio::task::yield_now().await;
-        }
-        let sample = work_counters::stream_walk_partitions_parsed();
-        if sample == settled {
-            stable = true;
+    // threshold: wait for the producer thread to TERMINATE, then read its final
+    // partition-body count.
+    //
+    // This used to wait for the count to STABILIZE (two equal consecutive
+    // samples). That is a sample of another thread's progress, and a producer
+    // that is merely descheduled — or between two increments — is
+    // indistinguishable from one that has stopped, so a cancellation regression
+    // could pass here and drain the fixture immediately afterwards (roborev,
+    // issue #3384). `query_row_producers_finished` is incremented as the last act
+    // of the producer closure, so observing it makes "the walk stopped" a fact
+    // rather than an inference. The loop bound is a liveness guard, not a
+    // deadline. `PROBE_LOCK` serializes this file and one file = one process, so
+    // no sibling scan contributes to either counter.
+    let mut stopped = false;
+    for _ in 0..6_000 {
+        // The producer runs on its own OS thread, so yielding this task is not
+        // enough to let it make progress; sleep briefly instead.
+        tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+        if work_counters::query_row_producers_finished() > 0 {
+            stopped = true;
             break;
         }
-        settled = sample;
     }
     assert!(
-        stable,
-        "the walk never stopped decoding partition bodies after the client dropped \
-         the stream (last sample {settled} of {PARTITIONS})"
+        stopped,
+        "the query-row producer never terminated after the client dropped the \
+         stream — the abandoned walk is still running (decoded {} of {PARTITIONS} \
+         partition bodies so far)",
+        work_counters::stream_walk_partitions_parsed()
     );
+    // Read the counter only AFTER the producer has provably exited, so this is
+    // its FINAL value and not a sample of a thread that might resume.
+    let settled = work_counters::stream_walk_partitions_parsed();
     // Observability for the issue-#3384 measurement: under `--nocapture` this
     // prints the observed read-ahead, so the distribution can be re-measured
     // (e.g. before tightening the ceiling) without patching the test. Silent in a

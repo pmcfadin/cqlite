@@ -8,6 +8,16 @@
 //! `QueryRowStream`'s fields) directly.
 
 use super::*;
+// The sizing constants live in `query_rows_bounds.rs` (issue #3384), not in the
+// parent module, so `use super::*` does not reach them.
+use super::super::query_rows_bounds::{
+    QUERY_ROWS_CHANNEL_BATCHES, QUERY_ROWS_FULL_SCAN_BUFFER_ROWS, QUERY_ROWS_MAX_READ_AHEAD,
+    QUERY_ROWS_MAX_RESIDENT_ROWS, QUERY_ROWS_PER_BATCH,
+};
+use crate::storage::sstable::reader::data_access::sequential::batched_scan_stream::batched_channel_capacity;
+use crate::storage::sstable::reader::scan_stream_windowed::{
+    BATCH_EMIT_ROWS, MAX_INFLIGHT_BATCH_ROWS,
+};
 
 /// Build a `QueryRowStream` around a raw channel so the CONSUMER half of the
 /// #3106 protocol can be asserted in isolation, including the case a real
