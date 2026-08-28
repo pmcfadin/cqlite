@@ -1493,14 +1493,21 @@ else
     bad 'AC3: the four case (f) contract probes (sanctioned / relative / root-checkout / no --repo) were NOT RUN, because this file’s own fixture setup FAILED — losing all four contract probes is a counted FAILURE, not a skip'
   else
     _tail='--agent codex --model gpt-5.6-sol --wait'
+    # A SYNTHETIC 40-hex base (#3392). The wrapper now enqueues the RESOLVED merge-base sha, and the
+    # extracted block therefore matches the base by SHAPE (`--base <40-hex> --repo`). This fixture has
+    # no `origin/main` to compute a real merge-base from — its subject is the `--repo`
+    # canonicalisation — so a shape-conformant literal is what keeps these four probes measuring THAT
+    # contract. A symbolic base here would be rejected by the shape match and all four probes would
+    # report the wrong thing about `--repo`.
+    _cf_base=0123456789abcdef0123456789abcdef01234567
     probe_case_f sanctioned 'the sanctioned canonical --repo record' accept \
-      "review --branch --base origin/main --repo $_canon $_tail"
+      "review --branch --base $_cf_base --repo $_canon $_tail"
     probe_case_f relative 'a RELATIVE --repo' reject \
-      "review --branch --base origin/main --repo . $_tail"
+      "review --branch --base $_cf_base --repo . $_tail"
     probe_case_f rootco 'a ROOT-CHECKOUT --repo' reject \
-      "review --branch --base origin/main --repo $REPO_ROOT $_tail"
+      "review --branch --base $_cf_base --repo $REPO_ROOT $_tail"
     probe_case_f norepo 'a --branch review with NO --repo at all' reject \
-      "review --branch --base origin/main $_tail"
+      "review --branch --base $_cf_base $_tail"
   fi
 fi
 
