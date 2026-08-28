@@ -172,19 +172,19 @@ static BLOCKING_SCAN_TASKS_INFLIGHT: AtomicI64 = AtomicI64::new(0);
 ///
 /// Decrement is a `Drop` impl so an unwinding task still clears its slot; a leaked
 /// increment would hang every future reader.
-pub struct BlockingScanTaskGuard;
+/// The private field is load-bearing (roborev, issue #3384): as a UNIT struct this
+/// was constructible by name, so a caller could make one WITHOUT the increment and
+/// then decrement the gauge below zero on drop — silently breaking every completion
+/// check that reads it. `pub(crate)` for the same reason, narrowed further: nothing
+/// outside this crate needs to register a blocking task, and the observers
+/// ([`blocking_scan_tasks_inflight`]) stay public.
+pub(crate) struct BlockingScanTaskGuard(());
 
 impl BlockingScanTaskGuard {
-    /// Register one running blocking scan task.
-    pub fn new() -> Self {
+    /// Register one running blocking scan task. The ONLY way to make one.
+    pub(crate) fn new() -> Self {
         BLOCKING_SCAN_TASKS_INFLIGHT.fetch_add(1, Ordering::Release);
-        Self
-    }
-}
-
-impl Default for BlockingScanTaskGuard {
-    fn default() -> Self {
-        Self::new()
+        Self(())
     }
 }
 
