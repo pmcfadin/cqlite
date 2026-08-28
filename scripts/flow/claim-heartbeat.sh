@@ -637,33 +637,61 @@ ps_usable() {
   ps -p "$$" >/dev/null 2>&1
 }
 
+# signal_probe_class <pid> — echo `present` | `absent` | `denied` | `unknown`.
+#
+# `kill -0` is the ONE probe here that is not visibility-based, which is why its failure mode
+# has to be decoded rather than abstained on (roborev round 10, Medium). EPERM means the
+# process EXISTS and is simply not ours; ESRCH means it is gone. Treating both as "no
+# opinion" made every remaining voter a VISIBILITY probe — `ps` and `/proc/<pid>` are
+# correlated, both hidden by `hidepid=2` — so a different user's live process was unanimously
+# "absent" and reported DEAD.
+#
+# `LC_ALL=C` is load-bearing: the distinction is drawn from the error text, so the message
+# has to be in a known language. An unrecognised message is `unknown`, never folded onto
+# either answer.
+signal_probe_class() {
+  local pid="$1" err
+  if kill -0 "$pid" 2>/dev/null; then
+    printf 'present\n'
+    return 0
+  fi
+  err="$(LC_ALL=C kill -0 "$pid" 2>&1 || true)"
+  case "$err" in
+    *"not permitted"* | *"Not permitted"* | *"Operation not permitted"*) printf 'denied\n' ;;
+    *"No such process"* | *"no such process"*)                           printf 'absent\n' ;;
+    *)                                                                   printf 'unknown\n' ;;
+  esac
+}
+
 # process_presence <pid> — echo `present` | `absent` | `unknown`.
 #
 # BUILT FROM AGREEING VOTES, because a NEGATIVE answer from one probe is not proof of
 # absence (roborev round 9, Medium). `ps -p` exiting nonzero can mean the process is gone,
 # but it can equally mean a transient failure under load or that the target is not visible
-# to us (`/proc` `hidepid`, a foreign owner) — and reading that as absence reports a LIVE
-# supervisor as DEAD. Validating `ps` against our OWN pid (round 8) was necessary but not
-# sufficient: it proves the tool runs, not that it can see THIS target.
+# to us — and reading that as absence reports a LIVE supervisor as DEAD. Validating `ps`
+# against our OWN pid (round 8) was necessary but not sufficient: it proves the tool runs,
+# not that it can see THIS target.
 #
-# So each available probe votes, and only unanimity decides:
-#   * `ps -p <pid>`      — the portable primary.
-#   * `/proc/<pid>`      — present on Linux; visible for all processes under the default
-#                          `hidepid`, so it catches a target `ps` failed to report.
-#   * `kill -0 <pid>`    — SUCCESS is affirmative presence. Its failure is deliberately NOT
-#                          counted as absence: EPERM (the process exists but is not ours)
-#                          is indistinguishable from ESRCH without parsing a localised
-#                          error string, which is not something to build a verdict on.
-# Unanimous present => present. Unanimous absent => absent. DISAGREEMENT => unknown: our
-# view of the process table is not self-consistent, so nothing is claimed either way.
+# THE VOTERS MUST NOT ALL MEASURE THE SAME THING (round 10). `ps -p` and `/proc/<pid>` are
+# both VISIBILITY probes and are hidden together by `hidepid=2`, so on their own they can be
+# unanimously and confidently wrong about a live process owned by another user. The signal
+# probe is the independent one, and its EPERM answer is affirmative evidence of EXISTENCE —
+# which is exactly the case the other two get wrong.
+#
+# Unanimous present => present. Unanimous absent => absent. DISAGREEMENT => unknown: our view
+# of the process table is not self-consistent, so nothing is claimed either way.
 process_presence() {
-  local pid="$1" yes=0 no=0
+  local pid="$1" yes=0 no=0 sig
   if ps -p "$pid" >/dev/null 2>&1; then yes=$((yes + 1)); else no=$((no + 1)); fi
   if [ -d /proc ]; then
     if [ -e "/proc/$pid" ]; then yes=$((yes + 1)); else no=$((no + 1)); fi
   fi
-  # Only the affirmative direction of `kill -0` votes; see above.
-  if kill -0 "$pid" 2>/dev/null; then yes=$((yes + 1)); fi
+  sig="$(signal_probe_class "$pid")"
+  case "$sig" in
+    present | denied) yes=$((yes + 1)) ;;   # denied == EPERM == it exists
+    absent)           no=$((no + 1)) ;;
+    unknown)          : ;;                  # genuinely no opinion; abstains
+  esac
 
   if [ "$yes" -gt 0 ] && [ "$no" -eq 0 ]; then
     printf 'present\n'
@@ -831,69 +859,82 @@ cmd_dead_lanes() {
         verdict="UNKNOWN-NO-PID"
         detail="claim ref records no pid (pre-#2655 or hand-made)"
         unreadable=$((unreadable + 1))
-      elif ! ps_usable || [ "$(process_presence "$pid")" = "unknown" ]; then
-        # The probe cannot see our OWN pid, so it cannot be trusted about anyone else's.
-        # Neither DEAD nor ALIVE — incomplete (roborev round 8, Medium).
-        verdict="UNKNOWN-PROBE"
-        detail="the process probes could not agree about pid ${pid} (or ps cannot answer for a known-present pid), so it was NOT judged — repair ps, check /proc visibility, or re-run when the host is not exhausted"
-        unreadable=$((unreadable + 1))
-      elif [ "$(process_presence "$pid")" = "present" ] && [ "$(process_state_class "$pid")" = "unreadable" ]; then
-        # The pid is in the process table but its STATE could not be read, so we cannot
-        # tell a running supervisor from a zombie. Neither DEAD nor ALIVE — an incomplete
-        # measurement (roborev round 7, Medium).
-        verdict="UNKNOWN-STATE"
-        detail="pid ${pid} exists but its process state could not be read — running vs zombie NOT established"
-        unreadable=$((unreadable + 1))
-      elif [ "$(process_presence "$pid")" = "present" ] && [ "$(process_state_class "$pid")" = "zombie" ]; then
-        verdict="DEAD-NO-PROCESS"
-        dead=$((dead + 1))
-        detail="supervisor pid ${pid} is a ZOMBIE (exited, awaiting reap — it cannot drive the lane); open-pr=$(open_pr_state "$issue")"
-      elif [ "$(process_presence "$pid")" = "present" ]; then
-        # The pid exists. That alone does NOT make it the process that stamped the
-        # claim: pids are recycled, and a stale claim naming a reused pid would read
-        # ALIVE — the dangerous direction for a monitor whose whole job is spotting a
-        # dead lane. The claim's OWN ts settles it with no change to what `stamp`
-        # records: a process that started AFTER the claim was stamped cannot be the
-        # process that stamped it.
-        local pstart cts
-        pstart="$(process_start_epoch "$pid")"
-        cts=""
-        [ -n "$ts" ] && cts="$(ts_to_epoch "$ts" 2>/dev/null || true)"
-        if [ -n "$pstart" ] && [ -n "$cts" ] && [ "$pstart" -gt "$((cts + PID_IDENTITY_SLACK_SECS))" ]; then
-          verdict="DEAD-PID-REUSED"
-          dead=$((dead + 1))
-          detail="pid ${pid} started $((pstart - cts))s AFTER the claim was stamped — a different process now holds it; open-pr=$(open_pr_state "$issue")"
-        elif [ -n "$pstart" ] && [ -n "$cts" ] && [ "$pstart" -lt "$((cts - PID_IDENTITY_SLACK_SECS))" ]; then
-          verdict="ALIVE"
-          detail="identity=verified (start predates the claim ts by more than the ${PID_IDENTITY_SLACK_SECS}s tolerance)"
-        elif [ -n "$pstart" ] && [ -n "$cts" ]; then
-          # THE TOLERANCE BAND IS ITS OWN ANSWER, ON BOTH SIDES (roborev rounds 4 and 9,
-          # Medium). Round 4 stopped `ts < start <= ts+slack` claiming ALIVE. Round 9 found
-          # the mirror: the band was one-sided, so `start <= ts` claimed ALIVE right up to
-          # equality — and since both numbers are whole seconds sampled at different
-          # moments, a pid recycled just after stamping reconstructs as equal to, or a
-          # hair before, the claim ts and read clean. ALIVE now requires the start to
-          # predate the ts by MORE than the tolerance; anything within +/- tolerance is
-          # exactly the case where rounding could have produced either ordering, so it is
-          # not evidence of identity and does not get to claim health.
-          verdict="UNKNOWN-IDENTITY"
-          detail="pid ${pid} started $((pstart - cts))s relative to the claim ts, inside the +/-${PID_IDENTITY_SLACK_SECS}s rounding band — identity NOT established"
-          unreadable=$((unreadable + 1))
-        else
-          # NOT "ALIVE" (roborev round 3, Medium). Reporting ALIVE with an
-          # `identity=unverified` annotation still let the run exit 0, and a recycled
-          # pid then reproduces the false-clean. An annotation is not a substitute for
-          # an exit code: nobody greps the annotation.
-          verdict="UNKNOWN-IDENTITY"
-          detail="pid ${pid} exists but its start time or the claim ts could not be read — pid reuse NOT excluded"
-          unreadable=$((unreadable + 1))
-        fi
       else
-        verdict="DEAD-NO-PROCESS"
-        dead=$((dead + 1))
-        detail="open-pr=$(open_pr_state "$issue")"
-        case "$detail" in
-          *yes) detail="open-pr=yes — ORPHANED ENDGAME (#2499): report it, do NOT reap it" ;;
+        # PRESENCE AND STATE ARE EACH READ ONCE (roborev round 10, Medium). The first cut
+        # called `process_presence` in up to four successive `elif` guards, so a transient
+        # change between them could leave every branch unmatched and fall through to a
+        # final `else` that assumed absence — a false death produced by re-measuring. One
+        # read, then an explicit dispatch over the three states it can return.
+        local presence state
+        if ! ps_usable; then
+          presence="unknown"
+        else
+          presence="$(process_presence "$pid")"
+        fi
+
+        case "$presence" in
+          unknown)
+            verdict="UNKNOWN-PROBE"
+            detail="the process probes could not agree about pid ${pid} (or ps cannot answer for a known-present pid), so it was NOT judged — repair ps, check /proc visibility, or re-run when the host is not exhausted"
+            unreadable=$((unreadable + 1))
+            ;;
+          absent)
+            verdict="DEAD-NO-PROCESS"
+            dead=$((dead + 1))
+            detail="open-pr=$(open_pr_state "$issue")"
+            case "$detail" in
+              *yes) detail="open-pr=yes — ORPHANED ENDGAME (#2499): report it, do NOT reap it" ;;
+            esac
+            ;;
+          present)
+            state="$(process_state_class "$pid")"
+            case "$state" in
+              unreadable)
+                # In the process table, but running-vs-zombie was never established.
+                verdict="UNKNOWN-STATE"
+                detail="pid ${pid} exists but its process state could not be read — running vs zombie NOT established"
+                unreadable=$((unreadable + 1))
+                ;;
+              zombie)
+                verdict="DEAD-NO-PROCESS"
+                dead=$((dead + 1))
+                detail="supervisor pid ${pid} is a ZOMBIE (exited, awaiting reap — it cannot drive the lane); open-pr=$(open_pr_state "$issue")"
+                ;;
+              *)
+                # Running. Existence still does NOT make it the process that stamped the
+                # claim: pids are recycled, and a stale claim naming a reused pid would read
+                # ALIVE — the dangerous direction for a monitor whose whole job is spotting a
+                # dead lane. The claim's OWN ts settles it with no change to what `stamp`
+                # records: a process that started AFTER the claim was stamped cannot be the
+                # process that stamped it.
+                local pstart cts
+                pstart="$(process_start_epoch "$pid")"
+                cts=""
+                [ -n "$ts" ] && cts="$(ts_to_epoch "$ts" 2>/dev/null || true)"
+                if [ -z "$pstart" ] || [ -z "$cts" ]; then
+                  # NOT "ALIVE" (round 3, Medium): an annotation is not a substitute for an
+                  # exit code — nobody greps the annotation.
+                  verdict="UNKNOWN-IDENTITY"
+                  detail="pid ${pid} exists but its start time or the claim ts could not be read — pid reuse NOT excluded"
+                  unreadable=$((unreadable + 1))
+                elif [ "$pstart" -gt "$((cts + PID_IDENTITY_SLACK_SECS))" ]; then
+                  verdict="DEAD-PID-REUSED"
+                  dead=$((dead + 1))
+                  detail="pid ${pid} started $((pstart - cts))s AFTER the claim was stamped — a different process now holds it; open-pr=$(open_pr_state "$issue")"
+                elif [ "$pstart" -lt "$((cts - PID_IDENTITY_SLACK_SECS))" ]; then
+                  verdict="ALIVE"
+                  detail="identity=verified (start predates the claim ts by more than the ${PID_IDENTITY_SLACK_SECS}s tolerance)"
+                else
+                  # THE TOLERANCE BAND IS ITS OWN ANSWER, ON BOTH SIDES (rounds 4 and 9).
+                  # Within +/- tolerance is exactly where rounding could have produced either
+                  # ordering, so it is not evidence of identity and cannot claim health.
+                  verdict="UNKNOWN-IDENTITY"
+                  detail="pid ${pid} started $((pstart - cts))s relative to the claim ts, inside the +/-${PID_IDENTITY_SLACK_SECS}s rounding band — identity NOT established"
+                  unreadable=$((unreadable + 1))
+                fi
+                ;;
+            esac
+            ;;
         esac
       fi
     fi

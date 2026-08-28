@@ -1210,13 +1210,90 @@ else
   bad "a target ps cannot see must not be declared dead: rc=$hp_rc out:
 $hp_out"
 fi
-# NON-VACUITY: /proc really does hold that pid, and the shim really does hide it from ps.
-if [ -e "/proc/$$" ] && ! PATH="$hideshim:$PATH" SHIM_HIDE_PID="$$" ps -p "$$" >/dev/null 2>&1; then
-  ok "NON-VACUITY: /proc/$$ exists while the shimmed ps reports it absent — the probes genuinely disagree"
+# NON-VACUITY, PLATFORM-AWARE (roborev round 10, Medium). The first cut demanded `/proc/$$`
+# unconditionally, which fails on macOS — and this suite is now registered in the canonical
+# gate, which runs on macOS too, so that would have been a permanent red there rather than a
+# finding about this code. The independent evidence of presence differs by platform: /proc on
+# Linux, the signal probe everywhere.
+shim_hides_it=false
+if ! PATH="$hideshim:$PATH" SHIM_HIDE_PID="$$" ps -p "$$" >/dev/null 2>&1; then
+  shim_hides_it=true
+fi
+present_elsewhere=false
+if [ -d /proc ]; then
+  [ -e "/proc/$$" ] && present_elsewhere=true
+  present_evidence="/proc/$$ exists"
 else
-  bad "NON-VACUITY broken: the disagreement fixture is not in the state TEST 49 assumes"
+  kill -0 "$$" 2>/dev/null && present_elsewhere=true
+  present_evidence="kill -0 succeeds (no /proc on this platform)"
+fi
+if [ "$shim_hides_it" = true ] && [ "$present_elsewhere" = true ]; then
+  ok "NON-VACUITY: $present_evidence while the shimmed ps reports it absent — the probes genuinely disagree"
+else
+  bad "NON-VACUITY broken: the disagreement fixture is not in the state TEST 49 assumes (shim_hides=$shim_hides_it present_elsewhere=$present_elsewhere)"
 fi
 (cd "$WORK" && g push -q origin ":refs/machine-claims/hiddenPid" 2>/dev/null || true)
+
+# ===========================================================================
+echo "TEST 50: the signal probe decodes EPERM as PRESENT (round 10, Medium)"
+# ===========================================================================
+# The voting scheme had CORRELATED voters: `ps -p` and `/proc/<pid>` are both VISIBILITY
+# probes, hidden together by `hidepid=2`, so a different user's live process could be
+# unanimously "absent" and reported DEAD. `kill -0` is the one independent probe, and its
+# EPERM failure is affirmative evidence the process EXISTS — abstaining on it left only the
+# correlated pair.
+#
+# Tested at the FUNCTION level, deliberately. End-to-end on Linux the /proc vote breaks the
+# tie on its own, so a black-box case passes with or without this decode and proves nothing
+# about it (verified: the black-box form was green against the pre-fix script). The three
+# states are therefore asserted directly. The function is EXTRACTED from the shipped file
+# rather than reimplemented here — the script cannot be sourced, since sourcing runs its
+# dispatch — so this exercises the real code, and it fails outright if the function is gone.
+probe_fn="$T/signal-probe.sh"
+sed -n '/^signal_probe_class()/,/^}/p' "$HB" >"$probe_fn"
+if [ -s "$probe_fn" ]; then
+  ok "extracted signal_probe_class from the shipped script ($(wc -l <"$probe_fn" | tr -d ' ') lines)"
+else
+  bad "signal_probe_class is missing from $HB — the EPERM decode does not exist"
+fi
+# shellcheck disable=SC1090
+. "$probe_fn" 2>/dev/null || true
+if [ "$(type -t signal_probe_class 2>/dev/null)" = "function" ]; then
+  # PRESENT: our own pid, signallable.
+  sp_self="$(signal_probe_class "$$")"
+  # DENIED: pid 1 is root-owned, so an unprivileged user gets EPERM. Skipping is not an
+  # option — if this user CAN signal pid 1 the premise is broken and that is a failure.
+  sp_root="$(signal_probe_class 1)"
+  # ABSENT: a pid that cannot plausibly exist.
+  sp_gone="$(signal_probe_class 999999)"
+  if kill -0 1 2>/dev/null; then
+    bad "PREMISE BROKEN: this user CAN signal pid 1, so the EPERM state cannot be exercised here"
+  elif [ "$sp_self" = "present" ] && [ "$sp_root" = "denied" ] && [ "$sp_gone" = "absent" ]; then
+    ok "signal_probe_class distinguishes all three: own pid=present, root-owned pid 1=denied (EPERM, i.e. it EXISTS), 999999=absent"
+  else
+    bad "the signal probe must decode EPERM as denied and ESRCH as absent (self=$sp_self root=$sp_root gone=$sp_gone)"
+  fi
+  # NON-VACUITY of the `denied` state: it must NOT be the same answer as `absent`, or the
+  # correlated-voter fix would be a rename.
+  if [ "$sp_root" != "$sp_gone" ]; then
+    ok "NON-VACUITY: an EPERM pid and an absent pid get DIFFERENT answers ('$sp_root' vs '$sp_gone')"
+  else
+    bad "NON-VACUITY broken: EPERM and absent are indistinguishable ('$sp_root'), which is the defect"
+  fi
+else
+  bad "signal_probe_class could not be loaded from the shipped script"
+fi
+# ...and end-to-end, a pid ps cannot see but which EPERMs on signal is never called dead.
+craft_old_claim "$WORK" "epermMachine" 3412 1 0
+ep_out=$(cd "$WORK" && PATH="$hideshim:$PATH" SHIM_HIDE_PID=1 HEARTBEAT_MACHINE=epermMachine \
+  CLAIM_OPEN_PR_CMD="$NO_OPEN_PR" bash "$HB" dead-lanes 2>&1)
+if ! printf '%s\n' "$ep_out" | grep -E '^epermMachine ' | grep -q 'DEAD'; then
+  ok "end-to-end: a pid hidden from ps but EPERM-on-signal is never reported DEAD"
+else
+  bad "an EPERM pid must not be declared dead: out:
+$ep_out"
+fi
+(cd "$WORK" && g push -q origin ":refs/machine-claims/epermMachine" 2>/dev/null || true)
 
 echo
 echo "=== claim-heartbeat.sh: $PASS passed, $FAIL failed ==="
