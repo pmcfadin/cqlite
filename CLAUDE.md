@@ -915,7 +915,19 @@ end-to-end test. Green helper-only unit tests are not sufficient.
   reap predicate (exit 0 = reap, 1 = keep, 2 = no ref): reap ONLY on age > threshold (4h) AND no open
   PR AND (pid-dead, when the claim is local — a foreign machine's PID is unknowable). It KEEPS on a
   fresh ref, an open PR, a live local PID, or an unparseable age; a `gh`/network hiccup in the
-  open-PR probe assumes an open PR (keeps). The `project-board-sync` 30-min cron runs a `reap-claims`
+  open-PR probe assumes an open PR (keeps).
+  **`should-reap` is a REAP GATE, not a liveness monitor, and the difference cost three lanes
+  (#3393)**: it consults the PID only AFTER age > 4h, so a worker the kernel OOM-killed a minute ago
+  is indistinguishable from a healthy one for four hours — and even then the answer is an exit code
+  nobody watches. Nothing reported three silent lane deaths, each of which left a clean worktree, a
+  held claim and an open PR. **There is no committed tool for this yet** (#3393 AC3 is open, blocked
+  on a claim-ref layout decision: `refs/machine-claims/<machine>` is per-MACHINE, so on a multi-lane
+  box a surviving lane's stamp overwrites a dead sibling's PID and the dead lane becomes
+  unobservable). Until it lands, a suspected dead lane is diagnosed BY HAND, and the order matters —
+  `docs/development/fleet-runbook.md` records it, starting with `dmesg` for an OOM kill *before*
+  concluding a box is broken, because reading that symptom as a broken instance already cost one
+  healthy machine.
+  The `project-board-sync` 30-min cron runs a `reap-claims`
   job that applies this predicate server-side and flips a freed board item back to Ready with a
   traceable comment. **`PROJECTS_TOKEN` absence now FAILS the workflow loudly (`::error::`)** — a
   persistent red run is the alert, replacing the old silent green `::notice::` no-op. The scheduled
