@@ -5858,26 +5858,28 @@ run_flight_query_semantics_oracle() {
 # features cargo ACTUALLY enables for that workspace package under a `cargo test`
 # resolve, one space-delimited set (issue #1699).
 #
-# The oracle is `cargo metadata`, i.e. CARGO ITSELF, deliberately rather than a
-# hand-parse of `[features]` in Cargo.toml. A parser here would be a SECOND
-# IMPLEMENTATION of cargo's feature resolver, and its correctness would only be
-# knowable by differential testing against the original — and it would get this very
-# package wrong today: cqlite-flight's `default` is empty, yet `test-util` is on for
-# every test build via the self-referential dev-dependency
-# (`cqlite-flight = { path = ".", features = ["test-util"] }`), which no reading of
-# `default = []` can see. `cargo metadata` reports `default test-util`, transitively
-# closed and dev-dependency-unified, in ~1s.
+# The oracle is CARGO ITSELF — `cargo tree -p <pkg>`, a PACKAGE-SCOPED resolve — deliberately
+# rather than a hand-parse of `[features]` in Cargo.toml. A parser here would be a SECOND
+# IMPLEMENTATION of cargo's feature resolver, and its correctness would only be knowable by
+# differential testing against the original — and it would get this very package wrong today:
+# cqlite-flight's `default` is empty, yet `test-util` is on for every test build via the
+# self-referential dev-dependency (`cqlite-flight = { path = ".", features = ["test-util"] }`),
+# which no reading of `default = []` can see. The resolve reports `default test-util`.
 #
-# Any feature flags the CALLER passes are forwarded, so the answer can never drift
-# from the invocation it describes.
+# Any feature flags the CALLER passes are forwarded, so the answer can never drift from the
+# invocation it describes.
 #
-# Known imprecision, and its direction: `cargo metadata`'s resolve is WORKSPACE-wide,
-# so a feature another member turns on could be reported enabled here when a bare
-# `-p` build would not enable it. That errs STRICT — a feature wrongly believed ON
-# means a compiled-out target is NOT excused and the lane FAILs loudly — never
-# permissive. Emptiness is impossible for a real package (`default` is always in the
-# set), so an empty result is a failed derivation, and the caller must treat it as
-# one rather than as "no features enabled".
+# NOT `cargo metadata`, and this header USED to say it was (roborev round-20, Low — the header
+# survived the round-6 fix immediately below it and then contradicted its own implementation for
+# fourteen rounds, including a "known imprecision" paragraph describing a WORKSPACE-wide resolve
+# this function no longer performs and an over-broad enabled set it no longer returns). A stale
+# doc block directly above a corrected implementation is worse than no comment: it is read as the
+# contract, and here it described the exact defect the code was changed to remove. The measured
+# reason for the change is in the body comment below.
+#
+# Emptiness is impossible for a real package (`default` is always in the set), so an empty result
+# is a failed derivation, and the caller must treat it as one rather than as "no features
+# enabled".
 _resolved_package_features() {
   # PACKAGE-SCOPED resolve, via `cargo tree -p` — NOT `cargo metadata` (roborev round-6
   # finding, Medium). `cargo metadata` resolves the ENTIRE workspace and unions features
@@ -6104,9 +6106,45 @@ run_flight_tests() {
   census+=("       issue_2370_gauge_readback_test). Ruled out by measurement: box load,")
   census+=("       nice, --test-threads=2, concurrent MAIN-lane compilation.")
   census+=("       Issues: #3384 (the general suite-hygiene defect), #3383 (first victim).")
-  census+=("  WHO DOES RUN THEM: CI's Flight tier — .github/workflows/flight-ci.yml line 229,")
+  # Split the omitted population before naming a runner for it (roborev round-20, Medium).
+  # A crate-level `#![cfg(feature = "X")]` with X off means the target runs ZERO tests wherever
+  # X is off — including CI, whose invocation enables no features (cqlite-flight's `default` is
+  # empty). Naming CI as the runner of those targets is a FALSE all-clear, and a census that
+  # names the wrong runner is worse than one that admits ignorance because it closes the question.
+  local gated_meta gated_n=0 gated_unclass=0 gated_names="" grel ggate goff ci_n
+  if ! gated_meta=$(_crate_gated_test_targets cqlite-flight "$enabled"); then
+    gated_meta=""   # no crate-gated target found is a legitimate empty result, see below
+  fi
+  local gated_elsewhere=0 elsewhere_names=""
+  while IFS=$'\t' read -r grel ggate goff; do
+    [ -n "$grel" ] || continue
+    if [ "$goff" = "UNCLASSIFIED" ]; then
+      gated_unclass=$((gated_unclass + 1))
+      gated_names="$gated_names $grel(gate:UNRECOGNISED)"
+    elif _feature_enabled_by_some_component cqlite-flight "$goff"; then
+      # Gated, but ANOTHER component of this gate turns that feature on — so it executes
+      # SOMEWHERE, and saying otherwise would be the same false-runner claim in reverse.
+      gated_elsewhere=$((gated_elsewhere + 1))
+      elsewhere_names="$elsewhere_names $grel(off-here:$goff, enabled by another component)"
+    else
+      gated_n=$((gated_n + 1))
+      gated_names="$gated_names $grel(off:$goff)"
+    fi
+  done <<< "$gated_meta"
+  ci_n=$((declared_n - gated_n - gated_unclass - gated_elsewhere))
+  census+=("  OF THOSE, $gated_n EXECUTE NOWHERE — not here, not in CI, not in any tier (#3375):")
+  census+=("       their whole crate is gated by an inner #![cfg(feature = ...)] naming a feature")
+  census+=("       that is OFF in every lane that runs them, so they compile, run 0 tests and")
+  census+=("       exit 0. cqlite-flight's 'default' feature set is EMPTY, so CI's bare")
+  census+=("       'cargo test --package cqlite-flight' does not enable them either. Derived at")
+  census+=("       run time from the targets' own source, never a curated count.")
+  [ "$gated_unclass" -gt 0 ] && census+=("       plus $gated_unclass with an UNRECOGNISED gate shape — reported, not assumed benign.")
+  [ "$gated_elsewhere" -gt 0 ] && census+=("  AND $gated_elsewhere crate-gated target(s) DO execute, but only in another component of this")
+  [ "$gated_elsewhere" -gt 0 ] && census+=("       gate, which enables their gate feature (derived from this script's own source).")
+  census+=("  WHO RUNS THE REMAINING $ci_n: CI's Flight tier — .github/workflows/flight-ci.yml line 229,")
   census+=("       'cargo test --package cqlite-flight', mandated on cqlite-flight/** AND")
   census+=("       cqlite-core/**, with the 'required' check failing closed on it (#2910).")
+  census+=("       That claim is SCOPED deliberately: it is not true of the $gated_n above.")
   census+=("       Locally, flight-query-semantics-oracle runs 2 of these targets and")
   census+=("       memory-budget runs 1 (--test issue_1494_producer_mem_budget).")
   census+=("  This omission is DECLARED, not silent: widening the lane back is a small")
@@ -6114,6 +6152,8 @@ run_flight_tests() {
   local cl
   for cl in "${census[@]}"; do echo ">>> [$name] $cl"; done
   [ -n "$rf_reasons" ] && echo ">>> [$name] declared targets with unmet required-features:$rf_reasons"
+  [ -n "$gated_names" ] && echo ">>> [$name] crate-gated targets that execute NOWHERE (#3375):$gated_names"
+  [ -n "$elsewhere_names" ] && echo ">>> [$name] crate-gated but run by another component:$elsewhere_names"
   echo ">>> [$name] enabled features (cargo tree -p, package-scoped):$enabled"
 
   # The log opens WITH the census (`>` here, `>>` for cargo below), so the omission is
@@ -6122,6 +6162,8 @@ run_flight_tests() {
     echo "==== [$name] COVERAGE CENSUS (issue #1699 / #3384) ===="
     for cl in "${census[@]}"; do echo "$cl"; done
     [ -n "$rf_reasons" ] && echo "declared targets with unmet required-features:$rf_reasons"
+    [ -n "$gated_names" ] && echo "crate-gated targets that execute NOWHERE (#3375):$gated_names"
+    [ -n "$elsewhere_names" ] && echo "crate-gated but run by another component:$elsewhere_names"
     echo "enabled features (cargo tree -p, package-scoped):$enabled"
     echo "==== end census ===="
   } > "$log"
@@ -6309,6 +6351,87 @@ _legacy_coreq_sites() { # _legacy_coreq_sites <file> <enabled-feature-list>
     }
     END { emit() }
   ' "$1"
+}
+
+# _crate_gated_test_targets <pkg> <enabled-set> — the declared `test` targets of <pkg> whose
+# ROOT FILE carries a crate-level inner gate (`#![cfg(feature = "X")]`) naming a feature that is
+# NOT in <enabled-set>. One record per line: `<rel-path>\t<gate-text>\t<off-feature>`.
+#
+# roborev round-18 finding (Medium) — and it landed on the census, which is the one artifact in this
+# lane whose entire job is to be honest about what does NOT run. The census said "WHO DOES RUN THEM:
+# CI's Flight tier … cargo test --package cqlite-flight". That is FALSE for a target whose whole
+# crate is gated on a feature CI does not enable: it compiles, runs ZERO tests, and exits 0 there
+# exactly as it would here. MEASURED on this corpus: 15 of cqlite-flight's test targets carry a
+# crate-level gate — 13 on `observability-testing`, one on
+# `all(feature = "observability-testing", feature = "test-util")`, one on `dhat-heap` — and
+# cqlite-flight's `default` is EMPTY, so those 14 observability-testing targets execute NOWHERE:
+# not in this lane, not in CI, not in any tier (#3375).
+#
+# A census that names the wrong runner is worse than one that admits ignorance, because it closes
+# the question. So the two populations are now reported SEPARATELY and the CI claim is scoped to the
+# targets it is actually true of.
+#
+# Recognised gate shapes are the two this corpus uses: a single `feature = "X"` and an `all(...)` of
+# them. Anything else is emitted with off-feature `UNCLASSIFIED` rather than assumed benign — an
+# unrecognised gate is exactly where a silent gap would hide, and the caller prints it.
+# _feature_enabled_by_some_component <pkg> <feature> — does ANY component of THIS gate enable
+# <feature> for <pkg>? Derived from the gate's own source with comments stripped, because the
+# alternative is a curated "these run elsewhere" list, and the census's third iteration on this
+# finding was caused by exactly that kind of hand-maintained claim.
+#
+# Why it matters: `issue_1494_producer_mem_budget` is crate-gated on `dhat-heap`, which IS enabled
+# by the `memory-budget` component (`cargo test --package cqlite-flight --features dhat-heap`), so
+# calling it "executes nowhere" would have been a NEW false claim — and one the census contradicted
+# two lines later, where it already said memory-budget runs that target. `observability-testing`, by
+# contrast, appears in this gate only inside COMMENTS, so its 14 targets really do execute nowhere.
+_feature_enabled_by_some_component() { # <pkg> <feature>
+  local pkg="$1" feat="$2" hits
+  # `grep -c` + a numeric test, NEVER `| grep -q`. Under this script's `set -uo pipefail` a
+  # `… | grep -q` returns 141 ON A SUCCESSFUL MATCH — grep exits at the first hit, the upstream
+  # dies of SIGPIPE, and pipefail reports the signal — so the predicate reads FALSE precisely when
+  # the answer is TRUE. That is #3380's mechanism, and it bit THIS function on its first run: the
+  # identical pattern matched standalone (where I had not used `-q`) and returned false inside the
+  # gate, silently classifying a target that memory-budget does run as executing nowhere. #3387
+  # tracks the other ~696 sites of this shape.
+  hits=$(sed 's/[[:space:]]*#.*$//' "$GATE_SELF" 2>/dev/null \
+    | grep -cE -- "(--package|-p) +$pkg\b[^|]*--features[^|]*\b$feat\b|--features[^|]*\b$feat\b[^|]*(--package|-p) +$pkg\b" || true)
+  [ "${hits:-0}" -gt 0 ]
+}
+
+_crate_gated_test_targets() { # <pkg> <enabled-set>  -> rel \t gate \t off
+  local pkg="$1" enabled="$2" meta rel sp gate feats f off
+  meta=$(_package_test_targets_gated "$pkg" __none__) || return 1
+  [ -n "$meta" ] || return 1
+  while IFS=$'\t' read -r _tn sp _how rel; do
+    [ -n "$sp" ] || continue
+    [ -r "$sp" ] || continue
+    # Inner attributes only, and only at the top of the file: an inner `#![cfg]` gates the WHOLE
+    # crate, which is the shape that makes a target execute nothing at all. A `#[cfg]` on one item
+    # is a different (and legitimate) thing and is deliberately not counted here.
+    # WHOLE FILE, no line window. The first cut read only the first 40 lines and
+    # UNDER-REPORTED BY TWO — tests/issue_2370_single_flight_test.rs and
+    # tests/issue_2412_do_get_cold_warm_e2e.rs carry their gate at lines 43 and 49, behind long
+    # prose headers. An arbitrary bound inside the census that exists to stop arbitrary claims is
+    # the same defect one level down, and it was caught only by cross-checking the derived count
+    # against an independent `grep -l` (13 vs 15). Scanning the whole file is also SOUND rather
+    # than merely safer: an inner attribute is only legal before any item, so every column-zero
+    # `#![cfg(` in a Rust source file IS a crate-level gate wherever it appears.
+    gate=$(grep -m1 '^#!\[cfg(' "$sp" || true)
+    [ -n "$gate" ] || continue
+    case "$gate" in
+      *'all('*) feats=$(printf '%s' "$gate" | grep -oE 'feature = "[^"]+"' | sed 's/feature = "//; s/"//') ;;
+      *'feature = "'*) feats=$(printf '%s' "$gate" | grep -oE 'feature = "[^"]+"' | sed 's/feature = "//; s/"//') ;;
+      *) printf '%s\t%s\t%s\n' "$rel" "$gate" "UNCLASSIFIED"; continue ;;
+    esac
+    if [ -z "$feats" ]; then
+      printf '%s\t%s\t%s\n' "$rel" "$gate" "UNCLASSIFIED"; continue
+    fi
+    off=""
+    for f in $feats; do
+      case " $enabled " in *" $f "*) ;; *) off="$f"; break ;; esac
+    done
+    [ -n "$off" ] && printf '%s\t%s\t%s\n' "$rel" "$gate" "$off"
+  done <<< "$meta"
 }
 
 # _package_test_targets_gated <pkg> <feature> — one TAB-separated record per `test`

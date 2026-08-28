@@ -3040,6 +3040,73 @@ else
   bad "1699-r18-cli-trap: cli-tests leaks \$log1.ansi-stripped/\$log2.ansi-stripped into TMPDIR on every gate run — the trap removes only the originals"
 fi
 
+# --- 32. #1699: the census must not name the WRONG RUNNER (roborev round-20, Medium) ---
+#
+# The census said "WHO DOES RUN THEM: CI's Flight tier … cargo test --package cqlite-flight".
+# That is FALSE for a target whose whole crate is gated by an inner `#![cfg(feature = "X")]` with
+# X off: it compiles, runs ZERO tests and exits 0 in CI exactly as it would here. cqlite-flight's
+# `default` is EMPTY, and MEASURED on this corpus 15 of its 42 test targets carry such a gate — 14
+# on `observability-testing`, which this gate enables NOWHERE (its only two occurrences here are in
+# comments), and one on `dhat-heap`, which the `memory-budget` component DOES enable.
+#
+# A census that names the wrong runner is worse than one that admits ignorance, because it closes
+# the question — which is the whole failure mode this lane exists to prevent, arriving inside the
+# lane's own output. So the two populations are reported separately and the CI claim is scoped.
+#
+# STRUCTURAL, over the extracted run_flight_tests body: the behavioural form is `--only flight-tests`,
+# a multi-minute cargo run that does not belong in a sub-second self-test (it was run by hand, and
+# its numbers are in docs/reports/ah6-1699-feature-matrix-lanes.md).
+fl_body_="$tmp/1699-r20-flight.txt"
+awk '/^run_flight_tests\(\) \{/, /^\}/' "$GATE" > "$fl_body_"
+if [ ! -s "$fl_body_" ]; then
+  bad "1699-r20-census-scope: could not extract run_flight_tests — every assert below would pass vacuously"
+else
+  # The unscoped claim must be GONE: it is the defect, and its absence is the fix.
+  if [ "$(grep -cF 'WHO DOES RUN THEM' "$fl_body_")" -eq 0 ]; then
+    ok "1699-r20-census-unscoped-gone: the census no longer claims a single runner for ALL omitted targets"
+  else
+    bad "1699-r20-census-unscoped-gone: the census still says 'WHO DOES RUN THEM' of the whole omitted set — false for the crate-gated targets, which run in NO tier (#3375)"
+  fi
+  for needle_ in 'EXECUTE NOWHERE' '#3375' 'WHO RUNS THE REMAINING' 'UNRECOGNISED gate shape' 'enabled by another component'; do
+    if [ "$(grep -cF -- "$needle_" "$fl_body_")" -gt 0 ]; then
+      ok "1699-r20-census-element: the census states '$needle_'"
+    else
+      bad "1699-r20-census-element: the census no longer states '$needle_' — the omission it describes would go back to being silent"
+    fi
+  done
+  # Counts must be DERIVED, never written down. A literal 14/15/27 in the body is the curated-count
+  # defect this lane was built to avoid, and it would go stale the moment a target is added.
+  # POSITIVE form: require the VARIABLE on each counting line, rather than forbidding a digit
+  # somewhere near a phrase. The first cut did the latter, anchored the digits on the wrong side of
+  # the phrase, and a planted literal `OF THOSE, 14 EXECUTE NOWHERE` sailed through it (RED-verified
+  # as a MISS). Forbidding a bad spelling is guesswork about where the badness will appear;
+  # requiring the derivation is a statement about what must be true.
+  derived_ok_=1
+  grep -F 'EXECUTE NOWHERE' "$fl_body_" | grep -q '\$gated_n' || derived_ok_=0
+  grep -F 'WHO RUNS THE REMAINING' "$fl_body_" | grep -q '\$ci_n' || derived_ok_=0
+  if [ "$derived_ok_" -eq 1 ]; then
+    ok "1699-r20-census-derived: both counting lines interpolate their DERIVED variable (\$gated_n, \$ci_n)"
+  else
+    bad "1699-r20-census-derived: a census count is no longer interpolated from its derived variable — a literal there goes stale the moment a target is added or a feature joins default, silently: $(grep -nE 'EXECUTE NOWHERE|WHO RUNS THE REMAINING' "$fl_body_" | head -2 | tr '\n' ' ')"
+  fi
+fi
+
+# The predicate that classifies "runs in another component" must not use `… | grep -q`. Under this
+# script's `set -uo pipefail` that returns 141 ON A SUCCESSFUL MATCH (grep exits at the first hit,
+# the upstream dies of SIGPIPE), so the predicate reads FALSE exactly when the answer is TRUE.
+# THIS BIT THE FUNCTION ON ITS FIRST RUN: the same pattern matched standalone and returned false
+# inside the gate, classifying a target `memory-budget` does run as executing nowhere. #3380 is the
+# instance that cost this PR a review round; #3387 tracks the ~696 other sites.
+pred_="$tmp/1699-r20-pred.txt"
+awk '/^_feature_enabled_by_some_component\(\) \{/, /^\}/' "$GATE" > "$pred_"
+if [ ! -s "$pred_" ]; then
+  bad "1699-r20-pipefail-scope: could not extract _feature_enabled_by_some_component — this assert would pass vacuously"
+elif [ "$(sed 's/[[:space:]]*#.*$//' "$pred_" | grep -cE '\|[[:space:]]*grep[^|]*-[a-zA-Z]*q')" -eq 0 ]; then
+  ok "1699-r20-pipefail: the component-enables-feature predicate uses grep -c + a numeric test, not '| grep -q' (which returns 141 on a successful match under pipefail)"
+else
+  bad "1699-r20-pipefail: '| grep -q' is back in the predicate — under pipefail it reports 141 on a SUCCESSFUL match, so the predicate answers FALSE precisely when it should answer TRUE (#3380/#3387)"
+fi
+
 echo "----"
 echo "passed: $PASS  failed: $FAIL"
 [ "$FAIL" -eq 0 ]
