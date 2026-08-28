@@ -254,7 +254,7 @@ fn literal_first_comparison_mirrors_the_operator() {
 #[test]
 fn untranslatable_filters_classify_as_unsupported() {
     let schema = testutil::clustering_schema();
-    let filters = vec![
+    let filters = [
         // Unknown column: production lowering rejects it, so the claim is refused.
         col("nope").eq(lit(1_i32)),
         // Column-to-column comparison: the scan path evaluates column-vs-literal.
