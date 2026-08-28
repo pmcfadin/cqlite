@@ -247,6 +247,109 @@ done
 python3 "$FIX" flight-step --path "$TMP/fl-two.jsonl" --case two-steps
 expect_guard_fail FLIGHT_STEP_COUNT python3 "$GUARDS" flight-step --jsonl "$TMP/fl-two.jsonl"
 
+# --------------------------------------------------------- corpus identity ---
+echo
+echo "-- corpus identity --"
+# THE DEFECT THIS SECTION EXISTS FOR: sweep.sh used to resolve the corpus with
+# `find "$CORPUS" -name '*-Data.db' -print -quit` — the first arbitrary match
+# ANYWHERE under the root — so it could verify one file while the worker scanned
+# another. `guards.py corpus` resolves the ONE path scan-worker opens.
+#
+# HOW THIS STAYS HERMETIC. guards.py reads the pinned digest from the committed
+# Rust constant, resolved relative to ITS OWN location. A copy placed at the same
+# relative depth inside a temp tree therefore reads a temp PIN, which makes every
+# branch — the digest comparison included — observable without a 2.6 GB corpus.
+FR="$TMP/fakerepo"
+FG="$FR/docs/reports/ws0-3299-artifacts/harness/guards.py"
+mkdir -p "$FR/tools/ws0-corpus-gen/src" "$(dirname "$FG")"
+cp "$GUARDS" "$FG"
+plant_pin() {  # <pin-root> <bytes> <sha256>
+  mkdir -p "$1/tools/ws0-corpus-gen/src"
+  cat > "$1/tools/ws0-corpus-gen/src/measurement_corpus.rs" <<EOF
+pub const DATA_DB_BYTES: u64 = $2;
+pub const DATA_DB_SHA256: &str = "$3";
+EOF
+}
+CORP="$TMP/corpus"
+mkdir -p "$CORP/ws0/events"
+printf 'pinned measurement corpus stand-in\n' > "$CORP/ws0/events/nb-1-big-Data.db"
+PIN_SHA="$(sha256sum "$CORP/ws0/events/nb-1-big-Data.db" | cut -d' ' -f1)"
+PIN_BYTES="$(stat -c %s "$CORP/ws0/events/nb-1-big-Data.db")"
+plant_pin "$FR" "$PIN_BYTES" "$PIN_SHA"
+
+# POSITIVE control: the pinned bytes, at the exact path the worker opens.
+expect_ok "corpus identity: pinned Data.db at <corpus>/ws0/events" \
+  python3 "$FG" corpus --corpus "$CORP"
+
+# THE PRE-FIX CASE. The decoy is BYTE-IDENTICAL to the pin but lives elsewhere
+# under the root, and `<corpus>/ws0/events` does not exist — so the old
+# `find -print -quit` check PASSED this tree while the worker had nothing to
+# scan. It must now refuse.
+DEC="$TMP/corpus-decoy"
+mkdir -p "$DEC/backup/2026-08/ks/tbl"
+cp "$CORP/ws0/events/nb-1-big-Data.db" "$DEC/backup/2026-08/ks/tbl/nb-1-big-Data.db"
+expect_guard_fail CORPUS_DATA_DB_ABSENT \
+  python3 "$FG" corpus --corpus "$DEC"
+# Same shape one level in: the right table dir exists but is empty, and a
+# pin-identical decoy sits beside it.
+DEC2="$TMP/corpus-decoy2"
+mkdir -p "$DEC2/ws0/events" "$DEC2/ws0/events_old"
+cp "$CORP/ws0/events/nb-1-big-Data.db" "$DEC2/ws0/events_old/nb-1-big-Data.db"
+expect_guard_fail CORPUS_DATA_DB_ABSENT \
+  python3 "$FG" corpus --corpus "$DEC2"
+
+# Two Data.db in the scanned directory: the scan reads BOTH, so one pinned
+# identity cannot describe the input.
+AMB="$TMP/corpus-ambiguous"
+cp -a "$CORP" "$AMB"
+cp "$AMB/ws0/events/nb-1-big-Data.db" "$AMB/ws0/events/nb-2-big-Data.db"
+expect_guard_fail CORPUS_DATA_DB_AMBIGUOUS \
+  python3 "$FG" corpus --corpus "$AMB"
+
+# A compressed corpus is a DIFFERENT corpus (#3096 Corpus B is uncompressed).
+CMP="$TMP/corpus-compressed"
+cp -a "$CORP" "$CMP"
+: > "$CMP/ws0/events/nb-1-big-CompressionInfo.db"
+expect_guard_fail CORPUS_COMPRESSED \
+  python3 "$FG" corpus --corpus "$CMP"
+
+BAD="$TMP/corpus-bytes"
+cp -a "$CORP" "$BAD"
+printf 'x' >> "$BAD/ws0/events/nb-1-big-Data.db"
+expect_guard_fail CORPUS_BYTES_MISMATCH \
+  python3 "$FG" corpus --corpus "$BAD"
+
+# THE CASE A BYTE COUNT CANNOT SEE: same size, different bytes. This is why the
+# guard digests the file instead of stat-ing it.
+SHA="$TMP/corpus-sha"
+cp -a "$CORP" "$SHA"
+printf 'PINNED measurement corpus stand-in\n' > "$SHA/ws0/events/nb-1-big-Data.db"
+[[ "$(stat -c %s "$SHA/ws0/events/nb-1-big-Data.db")" == "$PIN_BYTES" ]] \
+  || { echo "FAIL  [corpus sha fixture] same-size fixture is not the same size"; FAIL=$((FAIL+1)); }
+expect_guard_fail CORPUS_SHA_MISMATCH \
+  python3 "$FG" corpus --corpus "$SHA"
+
+# An UNCONSULTABLE pin refuses; it never passes. (Affirmative-measurement rule.)
+FR2="$TMP/fakerepo-nopin"
+FG2="$FR2/docs/reports/ws0-3299-artifacts/harness/guards.py"
+mkdir -p "$(dirname "$FG2")"
+cp "$GUARDS" "$FG2"
+expect_guard_fail CORPUS_PIN_UNREADABLE \
+  python3 "$FG2" corpus --corpus "$CORP"
+mkdir -p "$FR2/tools/ws0-corpus-gen/src"
+printf 'pub const DATA_DB_BYTES: u64 = 12;\n// the digest constant was renamed\n' \
+  > "$FR2/tools/ws0-corpus-gen/src/measurement_corpus.rs"
+expect_guard_fail CORPUS_PIN_UNPARSEABLE \
+  python3 "$FG2" corpus --corpus "$CORP"
+
+# AND THE COMMITTED PIN ITSELF: the in-tree guards.py must parse the real
+# `measurement_corpus.rs`. The pin is read BEFORE the corpus is resolved, so an
+# empty corpus reaching CORPUS_DATA_DB_ABSENT proves the real pin parsed. A
+# renamed or reformatted constant would surface here as a PIN failure instead.
+mkdir -p "$TMP/corpus-empty"
+expect_guard_fail CORPUS_DATA_DB_ABSENT \
+  python3 "$GUARDS" corpus --corpus "$TMP/corpus-empty"
+
 # ------------------------------------- STRUCTURAL: process-lifecycle safety ---
 # Asks WHERE a spawn is, not what it looks like, so a new one added anywhere
 # outside a cleanup guarantee fails however it is written. Two consecutive review
