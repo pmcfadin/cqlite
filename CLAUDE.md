@@ -907,7 +907,26 @@ end-to-end test. Green helper-only unit tests are not sufficient.
   reap predicate (exit 0 = reap, 1 = keep, 2 = no ref): reap ONLY on age > threshold (4h) AND no open
   PR AND (pid-dead, when the claim is local — a foreign machine's PID is unknowable). It KEEPS on a
   fresh ref, an open PR, a live local PID, or an unparseable age; a `gh`/network hiccup in the
-  open-PR probe assumes an open PR (keeps). The `project-board-sync` 30-min cron runs a `reap-claims`
+  open-PR probe assumes an open PR (keeps).
+  **`should-reap` is a REAP GATE, not a liveness monitor, and the difference cost three lanes
+  (#3393)**: it consults the PID only AFTER age > 4h, so a worker the kernel OOM-killed a minute ago
+  is indistinguishable from a healthy one for four hours — and even then the answer is an exit code
+  nobody watches. `claim-heartbeat.sh dead-lanes` answers the other question, "is anything dead RIGHT
+  NOW", and inverts BOTH of the reaper's conservative guards on purpose: **no age gate** (a fresh
+  claim with a dead PID *is* the shape of an OOM kill) and **an open PR does not suppress the
+  report** (for the reaper an open PR means KEEP; for a report it is the most urgent row on the page
+  — a dead process holding an in-flight endgame, annotated `open-pr=yes`, still never reaped).
+  It is a REPORT: it deletes no ref and moves no board item. Verdicts are three-valued because a PID
+  is only checkable on the machine that owns the claim — `DEAD-NO-PROCESS` / `ALIVE` /
+  `UNKNOWN-FOREIGN` / `UNKNOWN-NO-PID` — and only `DEAD-NO-PROCESS` sets the exit code (`3`,
+  deliberately distinct from `1` = the measurement itself failed, so a cron cannot page on a network
+  blip and stay silent on a real dead lane). An UNKNOWN is never folded onto the permissive answer.
+  **Not covered, by construction**: #3393 AC3's "worktree present, tmux session absent" test is
+  unimplementable in committed tooling because the lane-directory layout and tmux session naming
+  exist NOWHERE in this repo — a tool guessing at them would report nothing on any differently-named
+  machine, a vacuous green in a watchdog's clothes. Diagnostic order for a box that stops answering:
+  `docs/development/fleet-runbook.md`.
+  The `project-board-sync` 30-min cron runs a `reap-claims`
   job that applies this predicate server-side and flips a freed board item back to Ready with a
   traceable comment. **`PROJECTS_TOKEN` absence now FAILS the workflow loudly (`::error::`)** — a
   persistent red run is the alert, replacing the old silent green `::notice::` no-op. The scheduled

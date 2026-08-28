@@ -497,7 +497,7 @@ cmd_dead_lanes() {
     return 0
   fi
 
-  printf '%-20s %-8s %-10s %-18s %s\n' "MACHINE" "ISSUE" "PID" "VERDICT" "DETAIL"
+  printf '%-20s %-8s %-12s %-18s %s\n' "MACHINE" "ISSUE" "PID" "VERDICT" "DETAIL"
   while IFS= read -r line; do
     [ -n "$line" ] || continue
     local refname machine msg issue pid verdict detail
@@ -506,7 +506,7 @@ cmd_dead_lanes() {
 
     if ! git fetch "$REMOTE" "$refname" >/dev/null 2>&1; then
       # An unreadable ref is NOT "no dead lane here" — say so and do not judge it.
-      printf '%-20s %-8s %-10s %-18s %s\n' "$machine" "?" "?" "UNKNOWN-UNREADABLE" "fetch of $refname failed"
+      printf '%-20s %-8s %-12s %-18s %s\n' "$machine" "?" "?" "UNKNOWN-UNREADABLE" "fetch of $refname failed"
       continue
     fi
     msg="$(git log -1 --format=%B FETCH_HEAD 2>/dev/null || true)"
@@ -535,7 +535,7 @@ cmd_dead_lanes() {
         detail="open-pr=no"
       fi
     fi
-    printf '%-20s %-8s %-18s %-18s %s\n' "$machine" "$issue" "${pid:-none}" "$verdict" "$detail"
+    printf '%-20s %-8s %-12s %-18s %s\n' "$machine" "$issue" "${pid:-none}" "$verdict" "$detail"
   done <<<"$raw"
 
   if [ "$dead" -gt 0 ]; then
