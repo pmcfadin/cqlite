@@ -209,13 +209,13 @@ impl<T: ScanStreamItem> JoinedStream<T> {
     pub(in crate::storage::sstable) fn new_measured(
         rx: mpsc::Receiver<Result<T>>,
         task: JoinHandle<()>,
-        format: Option<&'static str>,
+        meter: ReadOpMeter,
         account: ItemAccounting<T>,
     ) -> Self {
         Self {
             rx,
             task: TaskState::Running(task),
-            meter: ReadOpMeter::start(format),
+            meter,
             account,
         }
     }
@@ -347,12 +347,19 @@ impl RowScanStream {
     /// merge and the cross-generation merge) need no access to the private accounting
     /// function — keeping the metric wiring off both the public `ScanStreamItem` trait
     /// and the crate's re-export surface.
+    ///
+    /// The CALLER starts the meter (issue #1701, roborev round 5): a stream whose
+    /// construction does real work — the cross-generation merge opens every generation
+    /// and builds a `KWayMerger` before it can signal readiness — must start timing at
+    /// its own function entry, or construction latency falls outside `read.duration`
+    /// and a construction FAILURE reports none at all (no stream is ever returned).
+    /// That is the entry-at-function rule `manager_point_read`'s module doc states.
     pub(in crate::storage::sstable) fn new_measured_rows(
         rx: mpsc::Receiver<Result<(RowKey, ScanRow)>>,
         task: JoinHandle<()>,
-        format: Option<&'static str>,
+        meter: ReadOpMeter,
     ) -> Self {
-        Self::new_measured(rx, task, format, account_row_item)
+        Self::new_measured(rx, task, meter, account_row_item)
     }
 }
 
@@ -363,9 +370,9 @@ impl BatchedScanStream {
     pub(in crate::storage::sstable) fn new_measured_batches(
         rx: mpsc::Receiver<Result<Vec<(RowKey, ScanRow)>>>,
         task: JoinHandle<()>,
-        format: Option<&'static str>,
+        meter: ReadOpMeter,
     ) -> Self {
-        Self::new_measured(rx, task, format, account_batch_item)
+        Self::new_measured(rx, task, meter, account_batch_item)
     }
 }
 

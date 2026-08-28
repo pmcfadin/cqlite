@@ -644,6 +644,14 @@ pub(super) async fn stream_generations_for_read(
     end_key: Option<&RowKey>,
     buffer_size: usize,
 ) -> std::result::Result<reader::RowScanStream, MergeStreamSetupError> {
+    // ONE meter for the whole logical read, started at FUNCTION ENTRY (issue #1701,
+    // roborev round 5) and ADOPTED by the returned stream. Constructing the merge opens
+    // every generation and builds the `KWayMerger`; starting the meter at the stream
+    // instead put that latency OUTSIDE `read.duration` and reported NOTHING at all for
+    // a construction failure, both against the entry-at-function rule the rest of this
+    // issue follows. Format-agnostic: rows reconcile across possibly mixed BIG/BTI
+    // inputs, so no single `sstable.format` label is honest.
+    let mut meter = crate::observability::read_metrics::ReadOpMeter::start(None);
     let start_key = start_key.cloned();
     let end_key = end_key.cloned();
     let paths = ordered_generation_paths(reader_list);
@@ -732,22 +740,31 @@ pub(super) async fn stream_generations_for_read(
 
     match ready_rx.await {
         // The cross-generation reconciling merge is the top-level read operation
-        // (issue #1701), measured FORMAT-AGNOSTICALLY: its rows are reconciled across
-        // possibly mixed BIG/BTI inputs, so no single format label is honest here.
-        Ok(Ok(())) => Ok(reader::RowScanStream::new_measured_rows(out_rx, task, None)),
+        // (issue #1701): the stream ADOPTS the meter started at this function's entry,
+        // so construction latency is inside the reported duration.
+        Ok(Ok(())) => Ok(reader::RowScanStream::new_measured_rows(
+            out_rx, task, meter,
+        )),
         // A REPORTED construction failure is CLASSIFIED from its `Error` variant (issue
         // #3154): only a merger-INELIGIBLE input earns the caller's concat fallback, and
         // an I/O / corruption / other runtime failure propagates. Answering the latter
         // with the concat returned a full-length UNRECONCILED result set under `Ok`.
-        Ok(Err(e)) => Err(MergeStreamSetupError::from_construction_failure(e)),
+        Ok(Err(e)) => {
+            // A FAILED read consumed its construction latency; report it (#1701 R5).
+            meter.finish();
+            Err(MergeStreamSetupError::from_construction_failure(e))
+        }
         // `ready_tx` is dropped-WITHOUT-send on exactly one condition: the blocking
         // task unwound before either readiness arm ran. So this `Err` ⟺ a dead
         // producer — JOIN the retained handle to recover the real cause (the panic
         // message) instead of dropping it unjoined, and report it as the
         // fallback-INELIGIBLE variant (issue #3124, roborev).
-        Err(_) => Err(MergeStreamSetupError::ProducerDied(
-            merge_stream_setup::dead_merge_producer_error(task.await),
-        )),
+        Err(_) => {
+            meter.finish();
+            Err(MergeStreamSetupError::ProducerDied(
+                merge_stream_setup::dead_merge_producer_error(task.await),
+            ))
+        }
     }
 }
 

@@ -113,7 +113,11 @@ impl SSTableReader {
             }
         });
         match measured_format {
-            Some(format) => RowScanStream::new_measured_rows(rx, task, Some(format)),
+            Some(format) => RowScanStream::new_measured_rows(
+                rx,
+                task,
+                crate::observability::read_metrics::ReadOpMeter::start(Some(format)),
+            ),
             None => RowScanStream::new(rx, task),
         }
     }

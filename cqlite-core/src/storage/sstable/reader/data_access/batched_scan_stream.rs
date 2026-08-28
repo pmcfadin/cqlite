@@ -102,7 +102,11 @@ impl SSTableReader {
             }
         });
         match measured_format {
-            Some(format) => BatchedScanStream::new_measured_batches(rx, task, Some(format)),
+            Some(format) => BatchedScanStream::new_measured_batches(
+                rx,
+                task,
+                crate::observability::read_metrics::ReadOpMeter::start(Some(format)),
+            ),
             None => BatchedScanStream::new(rx, task),
         }
     }

@@ -71,23 +71,6 @@ struct Fixture {
     table: &'static str,
     /// The bounded format label the emission must carry for this SSTable.
     format: &'static str,
-    /// Whether a SECOND scan of this SSTable is served from the resident
-    /// decompressed-chunk cache and therefore skips re-DECOMPRESSING each chunk.
-    ///
-    /// It does NOT mean the warm scan reads no `Data.db` bytes: the windowed feed
-    /// reads every chunk positionally BEFORE it consults the cache, so the I/O happens
-    /// either way and `read.bytes` counts it on both planes (issue #1701, roborev
-    /// round 5 — an earlier version of this fixture and its assertion both claimed
-    /// otherwise, and agreed with each other while being wrong).
-    ///
-    /// True for the BIG windowed scan plane, whose decode goes through the B1
-    /// decompressed-chunk cache (`ChunkSource::decode_borrowed`). FALSE for the BTI
-    /// whole-file trie walk, which decompresses UNCACHED
-    /// (`ChunkSource::decompress_only`): its re-scan genuinely re-reads and
-    /// re-decompresses every chunk, so `read.bytes` must count them AGAIN. The
-    /// metric reports the I/O that happened — hiding a real re-read would be exactly
-    /// the dishonesty this issue removes.
-    warm_scan_is_cached: bool,
     /// Partitions this fixture must deliver, at minimum. Two or more is what makes
     /// `read.partitions` distinguishable from `read.rows`; the single-partition
     /// UNCOMPRESSED fixture below is here for the byte-counting direction instead
@@ -105,7 +88,6 @@ const BIG: Fixture = Fixture {
     keyspace: "test_big",
     table: "wide_partition",
     format: "big",
-    warm_scan_is_cached: true,
     min_partitions: 2,
     compression: "lz4",
 };
@@ -117,7 +99,6 @@ const BTI: Fixture = Fixture {
     keyspace: "test_da",
     table: "wide_table",
     format: "bti",
-    warm_scan_is_cached: false,
     min_partitions: 2,
     compression: "lz4",
 };
@@ -137,7 +118,6 @@ const INCOMPRESSIBLE: Fixture = Fixture {
     keyspace: "test_comp",
     table: "incompressible_uncompressed_chunk",
     format: "big",
-    warm_scan_is_cached: false,
     min_partitions: 1,
     compression: "lz4",
 };
@@ -155,10 +135,6 @@ const UNCOMPRESSED: Fixture = Fixture {
     keyspace: "test_comp",
     table: "uncompressed_table",
     format: "big",
-    // The uncompressed windowed exit MOVES the read buffer into the B1
-    // decompressed-chunk cache (zero-copy, issue #1940 BLOCKER-1), so a re-scan is a
-    // cache hit and reads no Data.db bytes — same as the compressed BIG plane.
-    warm_scan_is_cached: true,
     min_partitions: 1,
     compression: "none",
 };
@@ -862,7 +838,6 @@ async fn a_compaction_read_counts_bytes_but_no_query_metrics() {
         keyspace: "test_comp",
         table: "lz4_table",
         format: "big",
-        warm_scan_is_cached: true,
         min_partitions: 1,
         compression: "lz4",
     };
