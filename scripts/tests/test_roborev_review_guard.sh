@@ -4683,6 +4683,53 @@ case "$_cls_ctl" in
   *)
     ok 'structural control: the filter drops --help prose and comments, so recording the retired states in doctrine is not itself a violation' ;;
 esac
+# ===== BOTH DIRECTIONS, PINNED AGAINST THE REAL WRAPPER (#3367 AC2/AC3) =====
+# The control above builds its own pair of files, which shows the FILTER discriminates but says
+# nothing about the state of the actual subject. These two pin the real file, in both directions.
+#
+# (a) THE REAL WRAPPER'S DOCTRINE PROSE MUST NOT TRIP THE SCAN — and this pin is only worth
+#     anything if that prose is actually THERE. The exemption is load-bearing precisely because
+#     `roborev-review.sh` names the retired states in its `usage()` heredoc while telling the
+#     reader they are gone (that occurrence is what red this component on two unrelated lanes).
+#     If the wrapper ever stopped naming them, the pin would pass having tested nothing, so the
+#     RAW presence is asserted FIRST and its absence is a FAIL, not a silent skip.
+_ac2_prose=""
+for _ac2_tok in mixed-delivery delegated-oversize snapshot-unbound unparseable-instruction; do
+  grep -qF "$_ac2_tok" "$WRAPPER_REAL" && _ac2_prose="$_ac2_prose $_ac2_tok"
+done
+if [ -z "$_ac2_prose" ]; then
+  bad 'structural (#3367 AC2): the real wrapper names NONE of the prose-shaped retired states, so the prose exemption is untested by this run — the guard would read green whether or not it works (the wrapper is supposed to record what was deleted; if that record is gone, restore it or retire this pin deliberately)'
+else
+  _ac2_leaked=""
+  for _ac2_tok in $_ac2_prose; do
+    case "$_cls_exec" in *"$_ac2_tok"*) _ac2_leaked="$_ac2_leaked $_ac2_tok" ;; esac
+  done
+  if [ -z "$_ac2_leaked" ]; then
+    ok "structural (#3367 AC2): the real wrapper's doctrine prose names$_ac2_prose and the executable-line filter drops every one — recording what was deleted is not itself a violation"
+  else
+    bad "structural (#3367 AC2): the real wrapper's doctrine prose survived the executable-line filter —$_ac2_leaked. This is the deterministic red that made two lanes investigate a diff touching no scripts/ path; the --help heredoc and comment exemptions must cover it"
+  fi
+fi
+# (b) A GENUINE REINTRODUCTION INTO THE REAL WRAPPER MUST STILL BE CAUGHT. Asserted against a COPY
+#     of the real trio with one executable line appended — not the 2-line synthetic above — so the
+#     exemptions cannot have widened far enough to swallow live code in the real file's own shape.
+#     Without this, (a) could be satisfied by an exemption that drops everything.
+_ac3_dir="$tmp/real-wrapper-reintroduction"
+mkdir -p "$_ac3_dir"
+cp "$WRAPPER_REAL" "$_ac3_dir/roborev-review.sh"
+printf '\nROBOREV_DIFF_SOURCE_STATE="mixed-delivery"   # a genuine reintroduction\n' \
+  >>"$_ac3_dir/roborev-review.sh"
+_ac3_exec=$(_cls_exec_lines "$ORACLES" "$CHECKS_FILE" "$_ac3_dir/roborev-review.sh")
+_ac3_caught=""
+for _ac3_tok in ROBOREV_DIFF_SOURCE_STATE mixed-delivery; do
+  case "$_ac3_exec" in *"$_ac3_tok"*) _ac3_caught="$_ac3_caught $_ac3_tok" ;; esac
+done
+case "$_ac3_caught" in
+  *ROBOREV_DIFF_SOURCE_STATE*)
+    ok "structural (#3367 AC3): an executable classifier reintroduction appended to a COPY of the real wrapper is still caught —$_ac3_caught — so the prose exemptions narrow the scan without blinding it" ;;
+  *)
+    bad 'structural (#3367 AC3): an executable classifier reintroduction appended to a copy of the REAL wrapper was NOT caught. The prose exemption has widened until it swallows live code, so the classifier-GONE assert above is green by blindness' ;;
+esac
 # THE THREE SNAPSHOT KEYS GO WITH IT: a block that still emitted them would be describing a
 # measurement the wrapper no longer makes.
 _skeys=""
