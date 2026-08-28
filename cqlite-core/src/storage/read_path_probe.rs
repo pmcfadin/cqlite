@@ -105,40 +105,6 @@ impl ReadPathProbe {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    /// A delta must count exactly the work recorded between the two snapshots,
-    /// independent of whatever a sibling test already accumulated.
-    #[test]
-    fn delta_counts_only_work_between_snapshots() {
-        let before = ReadPathProbe::snapshot();
-        record_merger_built();
-        record_reconcile_entry();
-        record_reconcile_entry();
-        record_cell_metadata_map();
-        let delta = ReadPathProbe::snapshot().delta_since(&before);
-        assert!(delta.mergers_built >= 1, "the merger build was recorded");
-        assert!(delta.reconcile_entries >= 2, "both reconciles recorded");
-        assert!(delta.cell_metadata_maps >= 1, "the map alloc was recorded");
-        assert!(delta.any_merge_work());
-    }
-
-    /// A zero delta reports no merge work — the shape the bypass assertion uses.
-    #[test]
-    fn zero_delta_reports_no_merge_work() {
-        let a = ReadPathProbe {
-            mergers_built: 7,
-            reconcile_entries: 9,
-            cell_metadata_maps: 11,
-        };
-        let delta = a.delta_since(&a);
-        assert_eq!(delta, ReadPathProbe::default());
-        assert!(!delta.any_merge_work());
-    }
-}
-
 // ---------------------------------------------------------------------------
 // Query-row producer completion (issue #3384)
 // ---------------------------------------------------------------------------
@@ -184,4 +150,38 @@ pub fn query_row_producers_finished() -> u64 {
 /// lock serializes producers in its binary.
 pub fn reset_query_row_producers_finished() {
     QUERY_ROW_PRODUCERS_FINISHED.store(0, Ordering::Release);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A delta must count exactly the work recorded between the two snapshots,
+    /// independent of whatever a sibling test already accumulated.
+    #[test]
+    fn delta_counts_only_work_between_snapshots() {
+        let before = ReadPathProbe::snapshot();
+        record_merger_built();
+        record_reconcile_entry();
+        record_reconcile_entry();
+        record_cell_metadata_map();
+        let delta = ReadPathProbe::snapshot().delta_since(&before);
+        assert!(delta.mergers_built >= 1, "the merger build was recorded");
+        assert!(delta.reconcile_entries >= 2, "both reconciles recorded");
+        assert!(delta.cell_metadata_maps >= 1, "the map alloc was recorded");
+        assert!(delta.any_merge_work());
+    }
+
+    /// A zero delta reports no merge work — the shape the bypass assertion uses.
+    #[test]
+    fn zero_delta_reports_no_merge_work() {
+        let a = ReadPathProbe {
+            mergers_built: 7,
+            reconcile_entries: 9,
+            cell_metadata_maps: 11,
+        };
+        let delta = a.delta_since(&a);
+        assert_eq!(delta, ReadPathProbe::default());
+        assert!(!delta.any_merge_work());
+    }
 }
