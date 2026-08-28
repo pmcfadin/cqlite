@@ -6663,34 +6663,50 @@ _crate_gated_test_targets() { # <pkg>  -> name \t rel \t gate-text
     # No such attribute exists in this corpus today (measured: 0 across cqlite-flight/tests), so
     # this is the direction where a defect would have been invisible until someone reformatted.
     gate=$(awk '
-      # Leave the leading region at the first line that is not blank / comment / attribute.
-      # BLOCK comments count as trivia too (roborev round-37, Low) — `/* … */` and `/*! … */`,
-      # single-line or multiline. Without this a leading block comment (a very common file header,
-      # and `/*!` is idiomatic module docs) was read as the first ITEM, so every crate-level
-      # `#![cfg(...)]` after it was silently omitted from the census. Round 36 fixed exactly this
-      # shape in `_legacy_coreq_sites` and I did not carry it to this sibling scanner — the
-      # same-defect-in-a-second-place recurrence this change has now hit four times.
-      !inattr && !leading_done && in_block { if ($0 ~ /\*\//) in_block = 0; next }
-      !inattr && !leading_done {
-        t = $0
-        gsub(/^[[:space:]]+|[[:space:]]+$/, "", t)
-        if (t ~ /^\/\*/) { if (t !~ /\*\//) in_block = 1; next }
-        if (t != "" && t !~ /^\/\// && t !~ /^#!?\[/) { leading_done = 1 }
-      }
-      leading_done { next }
-      /^[[:space:]]*#!\[cfg(_attr)?\(/ { acc = $0; depth = 0; inattr = 1 }
-      inattr {
-        if (acc != $0) acc = acc " " $0
-        n = split(acc, ch, "")
-        depth = 0
-        for (i = 1; i <= n; i++) { if (ch[i] == "(") depth++; else if (ch[i] == ")") depth-- }
-        if (depth <= 0) {
-          gsub(/^[[:space:]]+|[[:space:]]+$/, "", acc)
-          gsub(/[[:space:]]+/, " ", acc)
-          out = (out == "" ? acc : out " " acc)
-          inattr = 0; acc = ""
+      # ONE state machine for ALL leading trivia (roborev rounds 37/38/41). Previous versions
+      # handled the variants one at a time — line comments, then block comments, then multiline
+      # `cfg` attributes — and each round found the next syntax that ended the leading region early
+      # and silently dropped the crate gate after it. The variants that broke it: `/* */`, `/*! */`,
+      # a multiline `#![cfg(all(`, and finally a multiline NON-cfg attribute such as
+      # `#![allow(\n  clippy::x\n)]`, whose continuation line read as the first item.
+      #
+      # So the region is now defined structurally rather than by enumerating spellings: from the top
+      # of the file, skip blank lines, line comments, block comments (stateful), and ANY inner
+      # attribute (bracket-balanced, therefore multiline-safe) — emitting text only for the ones
+      # that are `cfg`/`cfg_attr`. The first line that is none of those ends the region.
+      function trim(x) { gsub(/^[[:space:]]+|[[:space:]]+$/, "", x); return x }
+      function bal(x,   n, i, c) {   # net bracket depth of a line
+        n = 0
+        for (i = 1; i <= length(x); i++) {
+          c = substr(x, i, 1)
+          if (c == "[" || c == "(") n++
+          else if (c == "]" || c == ")") n--
         }
+        return n
+      }
+      done { next }
+      # inside a multi-line block comment
+      in_block { if ($0 ~ /\*\//) in_block = 0; next }
+      # inside a multi-line attribute: keep consuming until the brackets balance
+      depth != 0 {
+        if (collect) acc = acc " " trim($0)
+        depth += bal($0)
+        if (depth <= 0) { depth = 0; if (collect) { out = (out == "" ? acc : out " " acc); collect = 0; acc = "" } }
         next
+      }
+      {
+        t = trim($0)
+        if (t == "") next
+        if (t ~ /^\/\//) next                                  # line comment, incl. //!
+        if (t ~ /^\/\*/) { if (t !~ /\*\//) in_block = 1; next }  # block comment, incl. /*!
+        if (t ~ /^#!\[/) {                                      # ANY inner attribute
+          collect = (t ~ /^#!\[[[:space:]]*cfg(_attr)?[[:space:]]*\(/)
+          if (collect) acc = t
+          depth = bal(t)
+          if (depth <= 0) { depth = 0; if (collect) { out = (out == "" ? acc : out " " acc); collect = 0; acc = "" } }
+          next
+        }
+        done = 1                                                # first real item: region over
       }
       END { if (out != "") print out }
     ' "$sp") || return 1
@@ -6846,6 +6862,14 @@ _rust_module_closure() { # <root-file>  -> one path per line; unresolved mods to
       fi
     done <<EOF
 $(awk '
+  # Block comments are TRIVIA, statefully (roborev round-41). Without this, a `#[path]` or `mod`
+  # inside `/* … */` was read as a real declaration — so the closure could scan a file Rust never
+  # includes, or FAIL the lane as unresolved on a commented-out example — and a block comment
+  # between a real `#[path]` and its `mod` cleared the pending path, silently unbinding them.
+  in_block { if ($0 ~ /\*\//) in_block = 0; next }
+  /^[[:space:]]*\/\*/ { if ($0 !~ /\*\//) in_block = 1; next }
+  # A single-line `/* … */` anywhere on an otherwise-trivia line is also trivia.
+  /^[[:space:]]*\/\*.*\*\/[[:space:]]*$/ { next }
   # A `#[path = "..."]` ATTRIBUTE only, and a same-line `mod` must still be processed (roborev
   # round-40, Medium). Two defects in one line:
   #   * `next` fired unconditionally, so the very common single-line form

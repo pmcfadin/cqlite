@@ -3213,6 +3213,29 @@ VERBATIM_CASES
     bad "1699-r35-module-attr-complement: reported '$got_' — the leading-region rule has narrowed away a genuine crate-level gate"
   fi
 
+  # A multiline NON-cfg attribute before the gate (roborev round-41). `#![allow(\n … \n)]` used to
+  # end the leading region on its continuation line, so the crate gate after it vanished. The scanner
+  # now brackets-balances EVERY inner attribute and emits only cfg/cfg_attr — structural rather than
+  # a list of spellings, which is what the previous four rounds kept extending.
+  printf '#![allow(\n    clippy::needless_range_loop,\n    dead_code\n)]\n#![cfg(feature = "x")]\nfn t() {}\n' > "$gg_src_/multiattr.rs"
+  got_=$(
+    export GG_SRC="$gg_src_/multiattr.rs" GG_REL="tests/multiattr.rs"
+    _package_test_targets_gated() { printf '%s\t%s\t%s\t%s\t%s\n' ma2_t "$GG_SRC" source "$GG_REL" ""; }
+    # shellcheck disable=SC1090
+    . "$gg_body_"
+    _crate_gated_test_targets somepkg 2>/dev/null | awk -F'\t' '{print $3}'
+  )
+  if [ "$got_" = '#![cfg(feature = "x")]' ]; then
+    ok "1699-r41-multiattr: a crate gate after a MULTILINE non-cfg attribute is still reported"
+  else
+    bad "1699-r41-multiattr: reported '$got_' — a multiline #![allow(...)] ended the leading region, so the gate vanished and the target reads as ungated"
+  fi
+  # and the non-cfg attribute must NOT be emitted as if it were a gate
+  case "$got_" in
+    *allow*) bad "1699-r41-multiattr-purity: the non-cfg attribute leaked into the reported gate text: '$got_'" ;;
+    *) ok "1699-r41-multiattr-purity: only cfg/cfg_attr text is emitted, not every leading attribute" ;;
+  esac
+
   # MULTILINE attributes (roborev round-28, Medium). rustfmt breaks a long condition across lines,
   # and the line-based extraction reduced `#![cfg(all(` … `))]` to `#![cfg(` — discarding exactly
   # the condition a reader needs. There is NO such attribute in this corpus today (measured: 0
@@ -3642,6 +3665,26 @@ else
   else
     bad "1699-r40-closure[doccomment]: a doc-comment mention bound 'wrong.rs' to the next mod — the closure then reads a file the compiler never sees"
   fi
+  # (b2) BLOCK-COMMENTED declarations are not declarations (roborev round-41). A `/* mod ghost; */`
+  # was read as real, so the closure could demand a file Rust never includes — failing the lane as
+  # UNRESOLVED on a commented-out example.
+  printf '/* #[path = "ghost.rs"] mod ghost; */\nmod plain;\n' > "$mc_dir_/commented.rs"
+  unres_="$tmp/1699-r41-unres.txt"
+  got_=$( . "$mc_"; _rust_module_closure "$mc_dir_/commented.rs" 2>"$unres_" | grep -c 'ghost' )
+  if [ "${got_:-0}" -eq 0 ] && [ "$(grep -c ghost "$unres_" 2>/dev/null)" -eq 0 ]; then
+    ok "1699-r41-closure[commented]: a block-commented #[path]/mod is ignored, not resolved and not reported UNRESOLVED"
+  else
+    bad "1699-r41-closure[commented]: a commented-out declaration was treated as real (closure hits=$got_, unresolved=$(grep -c ghost "$unres_" 2>/dev/null)) — the lane fails on an example nobody compiles"
+  fi
+  # (b3) a block comment BETWEEN a real #[path] and its mod must not clear the pending path
+  printf '#[path = "child.rs"]\n/* explanatory note */\nmod child;\n' > "$mc_dir_/pathgap.rs"
+  got_=$( . "$mc_"; _rust_module_closure "$mc_dir_/pathgap.rs" 2>/dev/null | grep -c 'child.rs' )
+  if [ "${got_:-0}" -gt 0 ]; then
+    ok "1699-r41-closure[pathgap]: a block comment between #[path] and mod preserves the pending path"
+  else
+    bad "1699-r41-closure[pathgap]: the comment cleared the pending path, so the mod resolved to the WRONG file (or not at all)"
+  fi
+
   # (c) COMPLEMENT: the ordinary two-line form must still work (the fix must not narrow it away)
   printf '#[path = "child.rs"]\nmod child;\n' > "$mc_dir_/twoline.rs"
   got_=$( . "$mc_"; _rust_module_closure "$mc_dir_/twoline.rs" 2>/dev/null | grep -c 'child.rs' )
