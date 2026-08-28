@@ -1313,7 +1313,7 @@ mod tests {
 #[path = "per_row_scan_stream.rs"]
 mod per_row_scan_stream;
 
-// The BATCHED streaming scan (issue #1592), its issue-#3109 BTI dispatch, and the
-// channel-sizing `const fn` #3384's read-ahead bound derives from (epic #1116).
+// The BATCHED streaming scan (`scan_stream_batched`, issue #1592) and its issue-#3109
+// BTI dispatch — split out of this file for the same campsite reason (epic #1116).
 #[path = "batched_scan_stream.rs"]
 pub(super) mod batched_scan_stream;

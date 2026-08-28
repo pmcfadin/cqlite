@@ -97,6 +97,20 @@ const CANCEL_DECODE_CEILING: usize = QUERY_ROWS_MAX_READ_AHEAD + CANCEL_DOWNSTRE
 /// durability, so the whole fixture costs ~150ms to build.
 const PARTITIONS: usize = 4 * CANCEL_DECODE_CEILING;
 
+// Non-vacuity, enforced at COMPILE TIME: the fixture must stay a wide multiple of
+// the decode ceiling, or "the walk stopped within the read-ahead" would be
+// trivially true of a full drain. A runtime `assert!` here could only ever be a
+// tautology (both sides are `const`, and `PARTITIONS` is defined from the
+// ceiling); as a `const` assertion it instead fails the BUILD if a later edit
+// replaces `PARTITIONS` with a literal, or grows the core read-ahead past the
+// margin (issue #3384).
+const _: () = assert!(
+    PARTITIONS >= 4 * CANCEL_DECODE_CEILING,
+    "fixture drift: PARTITIONS must stay >= 4x CANCEL_DECODE_CEILING or the \
+     read-ahead bound in fast_arm_stream_stops_when_the_client_drops_it is \
+     trivially satisfied (issue #3384)"
+);
+
 /// Per-stream in-flight egress ceiling for the mid-stream-cancel test.
 ///
 /// # What this governs — and what it does NOT
@@ -550,15 +564,6 @@ async fn fast_arm_stream_stops_when_the_client_drops_it() {
     eprintln!(
         "issue-3384 observed read-ahead: {settled} partition bodies \
          (ceiling {CANCEL_DECODE_CEILING}, fixture {PARTITIONS})"
-    );
-    // Non-vacuity: the fixture must be far larger than the bound, or "bounded by
-    // the read-ahead" would be trivially true of a full drain. Asserted rather
-    // than assumed, so a future shrink of the fixture (or a growth of the core
-    // read-ahead) cannot quietly make the assertion below meaningless.
-    assert!(
-        PARTITIONS >= 4 * CANCEL_DECODE_CEILING,
-        "fixture drift: {PARTITIONS} partitions is not a wide enough margin over \
-         the decode ceiling {CANCEL_DECODE_CEILING} for the bound to mean anything"
     );
     assert!(
         settled <= CANCEL_DECODE_CEILING as u64,

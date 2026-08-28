@@ -18,8 +18,18 @@
 //! now share ONE dispatch, [`SSTableReader::stream_bti_scan`], so a third divergent
 //! copy of this decision cannot drift again (the #1577 class).
 //!
-//! Included via `#[path = "batched_scan_stream.rs"] mod batched_scan_stream;` in
-//! [`super`], so it shares `sequential.rs`'s imports through `use super::*`.
+//! Included via `#[path = "batched_scan_stream.rs"] pub(super) mod batched_scan_stream;`
+//! in [`super`], so it shares `sequential.rs`'s imports through `use super::*`.
+//!
+//! # Why the module is `pub(super)` (issue #3384)
+//!
+//! [`batched_channel_capacity`] is the SINGLE definition of this surface's channel
+//! sizing, and `summary_scan::query_rows` derives its exported read-ahead bound
+//! ([`QUERY_ROWS_MAX_READ_AHEAD`](crate::storage::sstable::reader::QUERY_ROWS_MAX_READ_AHEAD))
+//! from it rather than restating the arithmetic. `pub(super)` is the narrowest
+//! visibility that reaches that sibling; the prose lives here rather than beside
+//! the `mod` declaration because `sequential.rs` is 1319 lines, already over the
+//! campsite threshold (epic #1116), and this file is not.
 
 use super::*;
 
