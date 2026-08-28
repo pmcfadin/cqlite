@@ -710,23 +710,46 @@ MOD_COUNT="$(wc -l <"$DERIVED_MODS" | tr -d ' ')"
 #     by construction rather than by a rule someone has to maintain.
 #
 #     THE ONE EXCLUSION, AND WHY IT IS NOT A PARSER CREEPING BACK. A `doc` token
-#     immediately followed (ignoring spaces/tabs on the SAME line) by `=` is NOT
-#     reported. This is one lookahead character, decided without knowing where in the
-#     attribute the token sits:
-#       * a cfg PREDICATE spelling of doc is ALWAYS the bare flag — `doc`, `not(doc)`,
-#         `all(doc, …)`, `any(doc, …)`, `cfg_attr(doc, …)`. Rust has no
-#         `cfg(doc = "…")` form: `doc` is a cfg FLAG, never a key with a value;
-#       * `doc = "…"` is therefore unambiguously the ATTRIBUTE form `#[doc = "text"]`,
-#         which gates nothing.
-#     So the exclusion removes exactly one harmless shape — CONDITIONAL DOCUMENTATION,
-#     `#[cfg_attr(feature = "x", doc = "…")]`, a standard idiom anyone may add to this
-#     crate at any time — and nothing else. Without it, adding conditional docs to
-#     cqlite-core BRICKS this gate and the remedy text tells the author to delete their
-#     documentation; the "0 occurrences today" measurement below was true and still
-#     understated that blast radius. `#[cfg_attr(doc, doc = "x")]` STILL REFUSES: its
-#     CONDITION is the bare `doc`, and the skipped assignment does not disarm the
-#     window. A `doc` at end of line whose `=` is on the NEXT line is still reported —
+#     immediately followed (ignoring spaces/tabs on the SAME line) by `=` OR `(` is NOT
+#     reported. This is one lookahead over two characters, decided without knowing where
+#     in the attribute the token sits — no position tracking, no comma counting, no
+#     meta-item walk.
+#
+#     THE JUSTIFICATION IS rustc's, AND IT WAS MEASURED, NOT REASONED. An earlier
+#     version of this comment claimed "Rust has no `cfg(doc = …)` form". THAT CLAIM IS
+#     FALSE and rustc says so — `#[cfg(doc = "x")]` compiles without error. The
+#     exclusion is still correct, but for two DIFFERENT reasons, each verified by
+#     running rustc rather than by reading the reference:
+#       * `doc(` in PREDICATE position is a SYNTAX ERROR. `#[cfg(doc(hidden))]` is
+#         rejected with `error[E0539]: malformed 'cfg' attribute input`. So exempting
+#         `doc(` cannot possibly exempt a real cfg predicate — there is no such thing.
+#       * `doc =` in PREDICATE position is VALID but ALWAYS FALSE. `doc` is set by
+#         `cargo doc` as a BARE flag with no value, so a key/value test against it never
+#         matches. Verified: an item behind `#[cfg(doc = "x")]` is ABSENT even when
+#         compiled with `--cfg doc` (`error[E0425]: cannot find function`). Absent in
+#         BOTH the rustdoc build and the normal build is not a DIVERGENCE, and divergence
+#         is the only thing this refusal exists to prevent.
+#     So the exclusion removes exactly the shapes that cannot change what is COMPILED:
+#     CONDITIONAL DOCUMENTATION (`#[cfg_attr(feature = "x", doc = "…")]`) and
+#     CONDITIONAL DOC METADATA (`#[cfg_attr(docsrs, doc(alias = "…"))]`,
+#     `#[cfg_attr(feature = "x", doc(hidden))]`) — all standard idioms anyone may add to
+#     this crate at any time. Without the exclusion, adding either BRICKS this gate and
+#     the remedy text tells the author to delete their documentation; the "0 occurrences
+#     today" measurement below was true of the tree and still no bound on what a
+#     colleague adds tomorrow. Both shapes were found by the SELF-TEST falsifying a
+#     narrower rule, not by review — cases 8 and 15.
+#
+#     `#[cfg_attr(doc, doc = "x")]` and `#[cfg_attr(doc, doc(hidden))]` STILL REFUSE:
+#     their CONDITION is the bare `doc`, and a skipped argument does not disarm the
+#     window. Conditional `doc(hidden)` in ATTRIBUTE position is deliberately NOT this
+#     section's business — §1b is about the `doc` CFG; whether a `doc(hidden)` item
+#     belongs in the snapshot is decided by `attrs_verdict`, which cases 8 and 15 test.
+#     A `doc` at end of line whose `=` or `(` is on the NEXT line is still reported —
 #     the scan does not look across lines, i.e. it fails in the over-firing direction.
+#     A bare `#[doc]` (no argument) is accepted by rustc with only a WARNING, so it is
+#     reachable and it still refuses. That over-fire is left in deliberately: it costs
+#     one loud FAIL on an attribute that does nothing, and closing it would mean
+#     deciding position again.
 #
 #     THE TRADE, STATED SO NOBODY "FIXES" IT. This OVER-approximates ON PURPOSE. It
 #     fires on `doc` inside a COMMENT or a STRING in a cfg attribute
@@ -782,11 +805,16 @@ cat >"$CFGDOC_AWK" <<'CFGDOC_AWK_EOF'
 # line is REPORTED (the scan does not look across lines) — an over-fire, i.e. the
 # safe direction.
 function istok(c) { return (c ~ /[A-Za-z0-9_]/) }
-# One lookahead, same line only: is the next non-blank character an `=`?
-function assigned(s, p,   n) {
+# One lookahead, same line only: does an ARGUMENT follow this token — `=` or `(`?
+# A `doc` that carries an argument is the ATTRIBUTE form (`doc = "…"`, `doc(hidden)`,
+# `doc(alias = "…")`), never a cfg predicate that can change what is COMPILED. See the
+# `1b)` block above for the two rustc-verified facts this rests on.
+function has_argument(s, p,   n, ch) {
   n = length(s)
   while (p <= n && substr(s, p, 1) ~ /[ \t]/) p++
-  return (p <= n && substr(s, p, 1) == "=")
+  if (p > n) return 0
+  ch = substr(s, p, 1)
+  return (ch == "=" || ch == "(")
 }
 FNR == 1 { armed = 0; armline = 0 }
 {
@@ -800,7 +828,7 @@ FNR == 1 { armed = 0; armline = 0 }
     tok = substr($0, i, j - i)
     i = j - 1
     if (tok == "cfg" || tok == "cfg_attr") { armed = 1; armline = FNR }
-    else if (tok == "doc" && armed && !assigned($0, j)) {
+    else if (tok == "doc" && armed && !has_argument($0, j)) {
       printf "%s:%d: %s   [`cfg` token opened at line %d]\n", FILENAME, FNR, squash($0), armline
       armed = 0
     }
