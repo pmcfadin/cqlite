@@ -369,10 +369,14 @@ if machine_log.is_file():
     records = [json.loads(line) for line in machine_log.read_text().splitlines() if line.strip()]
     by_cell = {r["cell"]: r for r in records}
     covered = [r for r in runs if r["_cell"] in by_cell]
+    # BOTH ends. The driver's gate can only check the load BEFORE a cell; a storm
+    # that starts mid-cell is caught only by `load_after`, and that cell is just
+    # as contaminated as one that started dirty.
     loaded = sorted(
-        (r["_cell"], by_cell[r["_cell"]]["load_before"])
+        (r["_cell"], max(by_cell[r["_cell"]]["load_before"], by_cell[r["_cell"]]["load_after"]))
         for r in covered
-        if by_cell[r["_cell"]]["load_before"] > by_cell[r["_cell"]]["max_load"]
+        if max(by_cell[r["_cell"]]["load_before"], by_cell[r["_cell"]]["load_after"])
+        > by_cell[r["_cell"]]["max_load"]
     )
     print("- machine state recorded for %d of %d cells (%d predate the capture: UNKNOWN, not "
           "assumed quiet)%s"
