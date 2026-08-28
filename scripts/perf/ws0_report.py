@@ -40,7 +40,9 @@ that module permits. There is no environment variable that relaxes any of it.
 from __future__ import annotations
 
 import argparse
+import datetime
 import json
+import math
 import pathlib
 import sys
 
@@ -346,12 +348,134 @@ def build_report(args: argparse.Namespace) -> tuple[dict, list[str]]:
         # the whole failure mode this issue is about. The verdict recorded the breadth already;
         # the reporter was dropping it on the floor.
         _wc = verdict.get("window_census") or {}
+        # THE VERDICT MUST COVER *THIS* SESSION'S MEASUREMENT WINDOW, NOT MERELY NAME THE SAME
+        # FILE (#3248, roborev job 70 finding 3). The `timeseries` check above binds the verdict
+        # to the right SAMPLER; it says nothing about WHEN. `box-load.jsonl` is a single
+        # long-lived file spanning every session on this box, so a clean verdict judged over a
+        # DIFFERENT ten-minute window of the SAME file satisfied every check here and certified
+        # this session. That is a pass borrowed from an adjacent measurement -- the same shape as
+        # a verdict from a different file, one level down.
+        #
+        # The session's window is derived from the REP PAYLOADS' own `ts_unix_ms`, never from an
+        # argument: a value that cannot be supplied cannot disagree (the reason `flight_endpoint`
+        # and the corpus are read from the manifest rather than the command line). Payload records
+        # are selected STRUCTURALLY, by carrying the field, rather than by a filename allowlist a
+        # newly-added arm would silently escape.
+        _reps_seen = 0
+        _t_lo = None
+        _t_hi = None
+        for _pf in sorted(d.glob("*.jsonl")):
+            try:
+                _text = _pf.read_text()
+            except OSError as exc:
+                raise Invalid(
+                    f"{_pf.name} is unreadable, so this session's measurement window cannot be"
+                    f" established and the quiescence verdict cannot be bound to it: {exc}"
+                ) from None
+            for _line in _text.splitlines():
+                if not _line.strip():
+                    continue
+                try:
+                    _r = json.loads(_line)
+                except ValueError:
+                    continue
+                if not isinstance(_r, dict) or "ts_unix_ms" not in _r:
+                    continue
+                _ts = _r["ts_unix_ms"]
+                _dur = _r.get("duration_s", 0)
+                if isinstance(_ts, bool) or not isinstance(_ts, (int, float)) \
+                        or not math.isfinite(_ts) or _ts <= 0:
+                    raise Invalid(
+                        f"{_pf.name} carries an unusable `ts_unix_ms` ({_ts!r}) on a rep record,"
+                        " so the measurement window cannot be bounded. A window that cannot be"
+                        " COMPUTED must never be treated as covered."
+                    )
+                if isinstance(_dur, bool) or not isinstance(_dur, (int, float)) \
+                        or not math.isfinite(_dur) or _dur < 0:
+                    raise Invalid(
+                        f"{_pf.name} carries an unusable `duration_s` ({_dur!r}) beside a rep"
+                        " timestamp; the rep's extent is then unknown, so the window would be"
+                        " UNDERSTATED and the coverage check weaker than it reads."
+                    )
+                _reps_seen += 1
+                # `ts_unix_ms` IS THE REP'S END, ESTABLISHED FROM THE PRODUCER'S SOURCE RATHER
+                # THAN ASSUMED. The first version of this check widened each rep by its duration
+                # in BOTH directions, reasoning that the record "does not say which end" and that
+                # symmetric widening was the conservative choice. It was conservative and WRONG:
+                # it pushed the session window 18 s past the true end and REFUSED a correctly
+                # covered session -- a red on correct input, which is the failure mode agents
+                # learn to waive. Two independent measurements then settled it (payload mtime
+                # equals `ts` to the second) and `tools/flight-loadgen/src/ramp.rs:184-188` is the
+                # authority: `duration_s = started.elapsed()` and `ts_unix_ms = SystemTime::now()`
+                # are BOTH taken after every worker has joined. So the extent is [ts - dur, ts].
+                _lo = (_ts / 1000.0) - _dur
+                _hi = _ts / 1000.0
+                _t_lo = _lo if _t_lo is None else min(_t_lo, _lo)
+                _t_hi = _hi if _t_hi is None else max(_t_hi, _hi)
+        if _reps_seen == 0 or _t_lo is None or _t_hi is None:
+            raise Invalid(
+                "no rep payload in this session carries a `ts_unix_ms`, so the session's own"
+                " measurement window is unknown and the QUIESCENT verdict cannot be bound to it."
+                " An unbindable verdict states nothing about this session, so it is refused"
+                " rather than published (#3248)."
+            )
+        _win = _wc.get("window") if isinstance(_wc.get("window"), dict) else None
+        if _win is None or _win.get("start") is None or _win.get("end") is None:
+            raise Invalid(
+                f"{vpath.name} records no `window_census.window` start/end, so the verdict cannot"
+                " be shown to cover this session's measurement window. Re-run with the current"
+                " ws0_quiescence.py, which records the judged window."
+            )
+
+        def _epoch(label: str, value: object) -> float:
+            if not isinstance(value, str):
+                raise Invalid(f"{vpath.name} window {label} is not a string ({value!r}).")
+            try:
+                _dt = datetime.datetime.fromisoformat(value.replace("Z", "+00:00"))
+            except ValueError:
+                raise Invalid(
+                    f"{vpath.name} window {label} ({value!r}) is not an ISO-8601 instant, so the"
+                    " judged window cannot be compared with the measurement window."
+                ) from None
+            if _dt.tzinfo is None:
+                _dt = _dt.replace(tzinfo=datetime.timezone.utc)
+            return _dt.timestamp()
+
+        _v_start = _epoch("start", _win.get("start"))
+        _v_end = _epoch("end", _win.get("end"))
+        if _v_start > _t_lo or _v_end < _t_hi:
+            raise Invalid(
+                f"{vpath.name} was judged over {_win.get('start')}..{_win.get('end')}, which does"
+                f" NOT cover this session's measurement window"
+                f" ({datetime.datetime.fromtimestamp(_t_lo, datetime.timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')}"
+                f"..{datetime.datetime.fromtimestamp(_t_hi, datetime.timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')},"
+                f" from {_reps_seen} rep record(s), each spanning [ts-duration, ts]). A clean"
+                " verdict from an ADJACENT window of the same long-lived timeseries establishes"
+                " nothing about the window these numbers were measured in."
+            )
+        # REQUIRED, NOT "COPIED IF PRESENT" (#3248, roborev job 70 finding 4). These were read
+        # with `.get()`, so a verdict missing its sample count, its coverage bound or its census
+        # breadth still published `QUIESCENT` with `null` caveats -- a stronger claim than the
+        # evidence supports, printed as though the caveat had been checked and found empty. A
+        # missing caveat is an UNMEASURED caveat, which is exactly this issue's recurring shape.
+        for _k in ("samples", "coverage_largest_gap_s", "narrow_census_records", "census_breadth"):
+            if _wc.get(_k) is None:
+                raise Invalid(
+                    f"{vpath.name} records no `window_census.{_k}`, so the QUIESCENT verdict"
+                    " cannot be published with the caveats that qualify it. A null caveat reads"
+                    " as an absent concern; re-run with the current ws0_quiescence.py."
+                )
         quiescence_verdict = {
             "verdict": verdict.get("verdict"),
             "in_window_samples": _wc.get("samples"),
             "coverage_largest_gap_s": _wc.get("coverage_largest_gap_s"),
             "narrow_census_records": _wc.get("narrow_census_records"),
             "census_breadth": _wc.get("census_breadth"),
+            # WHICH WINDOW was judged, and that it covers the reps (asserted above). Recorded so a
+            # reader can re-check the binding rather than trust that it happened (#3248 job 70).
+            "judged_window": {"start": _win.get("start"), "end": _win.get("end")},
+            "covers_measurement_window": True,
+            "measurement_window_rep_records": _reps_seen,
         }
     quiescence = quiescence_intent
     # WHICH SERVER PRODUCED THE MEASURED ROWS (#3272 round 14, F2). Read from the pre-measurement
