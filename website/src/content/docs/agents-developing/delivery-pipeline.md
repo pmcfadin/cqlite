@@ -314,10 +314,10 @@ notifications. See the [fleet runbook](https://github.com/pmcfadin/cqlite/blob/m
 
 **Supervisor-authored claim + CI-side reaper (issue #2655 / #2499 design).** Heartbeats used to depend on
 the worker LLM *remembering* to `beat`, and the reap threshold was enforced only in prose. Liveness is now
-**mechanism-driven**: the supervisor stamps `refs/machine-claims/<machine>` (issue + supervisor-PID + ts, via
+**mechanism-driven**: the supervisor stamps `refs/lane-claims/<machine>/<issue>` (issue + supervisor-PID + ts, via
 `claim-heartbeat.sh stamp`) at every worker spawn, refreshes it each iteration, and clears it on a clean
 exit — where `reap` **refuses to delete a claim whose issue still has an open PR** (an unfinished endgame
-stays owned for adoption rather than orphaned; the #2499 orphaned-endgame case). This `refs/machine-claims/*`
+stays owned for adoption rather than orphaned; the #2499 orphaned-endgame case). This `refs/lane-claims/*`
 namespace is deliberately distinct from `claim.sh`'s per-issue lock `refs/claims/issue-<N>`.
 **Claims are PER LANE since #3393's owner ruling** — `refs/lane-claims/<machine>/<issue>`, replacing
 one-ref-per-machine. The old layout was justified by #1930's "one worker per machine", which the fleet
@@ -349,15 +349,33 @@ a `python3` at 20–28 GB) and three lanes died silently, each leaving a clean w
 open PR. **Memory exhaustion is invisible to any monitor that iterates existing sessions**: a dead tmux
 session cannot report itself.
 
-**There is no committed tool for this yet.** #3430 tracks it, blocked on a layout decision rather than on
-code: `refs/machine-claims/<machine>` is keyed per **MACHINE** and force-updated every supervisor
-iteration, so on a multi-lane box a surviving lane's stamp overwrites a dead sibling's PID — a live sibling
-does not merely hide a dead lane, it **masks** it. Either lane-scoped refs land (which changes what
-`should-reap` and the CI reaper read), or the one-worker-per-machine invariant (#1930) is enforced and
-multi-lane boxes are themselves the defect; #3393's own data supports the latter (4 lanes ⇒ OOM kills and
-wedges on *both* boxes; the 1-lane box ⇒ zero).
+**The tool is `claim-heartbeat.sh dead-lanes`, and per-lane claim refs are what make it work.** It asks
+"is anything dead RIGHT NOW", inverting both of the reaper's conservative guards on purpose: no age gate (a
+fresh claim with a dead PID *is* the shape of an OOM kill), and an open PR does not suppress the report — for
+the reaper an open PR means KEEP, but for a report it is the most urgent row on the page. It is a REPORT: no
+ref is deleted, no board item moved. Read `dead-lanes --help` for the authoritative verdict set; it lives
+beside the code and cannot drift from it.
 
-Until it lands, a suspected dead lane is diagnosed **by hand, and the order matters** — full procedure in
+**Why the layout had to change first (#3393 owner ruling A).** The OLD `refs/machine-claims/<machine>` was
+keyed per **MACHINE** and force-updated every supervisor iteration, so on a multi-lane box a surviving lane's
+stamp overwrote a dead sibling's PID — a live sibling did not merely hide a dead lane, it **masked** it. Two
+of the three deaths above were on one host, which is exactly the case that collapsed. Claims are now
+`refs/lane-claims/<machine>/<issue>`, one per lane, and **#1930's one-worker-per-machine invariant is
+retracted** — multiple lanes per box is the standing model, so design for it. A new namespace was required
+rather than a sub-path: git forbids a ref being both a file and a directory, and `<machine>-<issue>` is
+ambiguous when machine names contain dashes. The legacy namespace is still *read* by `list-claims`,
+`dead-lanes` and the CI reaper so a pre-ruling ref is drained rather than pinning its board item at In
+Progress forever.
+
+Exit codes are what a cron reads, so they are worth knowing: **3** = a dead lane was reported, **0** = at
+least one local lane was measured and none is dead, **1** = incomplete, which includes zero claim refs and a
+run where every claim belongs to another machine. Exit 0 became trustworthy only with per-lane refs; under
+the old layout it was a false clean about the very scenario the command exists to catch, and it was
+deliberately unavailable in the interim. It claims nothing about lanes that never stamped (a lane run with
+`CLAIM_CMD=""` is invisible) and nothing about other machines — a PID is only checkable where it runs, so
+**run it ON the suspect box**.
+
+A suspected dead lane still has a diagnostic **order, and it matters** — full procedure in
 `docs/development/fleet-runbook.md`. The one line worth memorising: when a box accepts TCP but sends no SSH
 banner from inside the VPC, **check `dmesg` for an OOM kill before concluding the instance is broken**.
 Reading that symptom as a broken instance already cost one healthy machine (terminated, losing a

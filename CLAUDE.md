@@ -927,7 +927,7 @@ end-to-end test. Green helper-only unit tests are not sufficient.
   probes board access functionally rather than trusting the `project` scope string). The three
   worker-environment deltas and the messages that identify them: `docs/development/fleet-runbook.md`.
 - **Supervisor-authored machine claim + CI reaper (#2655/#2499)**: liveness is now MECHANISM-driven,
-  not prose. `worker-supervisor.sh` stamps `refs/machine-claims/<machine>` (issue+supervisor-PID+ts)
+  not prose. `worker-supervisor.sh` stamps `refs/lane-claims/<machine>/<issue>` (issue+supervisor-PID+ts)
   via `claim-heartbeat.sh stamp` at every spawn, refreshes it each iteration, and clears it on a
   clean exit (`reap`, which REFUSES when the issue still has an open PR — an unfinished endgame stays
   owned for adoption, never orphaned). **The ref is PER LANE — `refs/lane-claims/<machine>/<issue>`

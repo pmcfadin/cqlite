@@ -1348,7 +1348,7 @@ test_finalized_verified_merged_counts() {
 }
 
 # ---------------------------------------------------------------------------
-# Test 23-claim (#2655): the supervisor STAMPS refs/machine-claims/<machine> before each
+# Test 23-claim (#2655): the supervisor STAMPS refs/lane-claims/<machine>/<issue> before each
 # spawn and CLEARS (reap) it on a clean exit — via CLAIM_CMD, mechanically, without the
 # worker LLM. A hermetic CLAIM_CMD stub logs every invocation; we assert one
 # `stamp <issue> <pid>` per iteration and exactly one `reap <machine>` at stop.
