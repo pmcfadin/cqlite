@@ -328,6 +328,36 @@ the more cautious-sounding assumption. **"Conservative" is not a substitute for 
 padded in the safe direction is still a guess, and it can still be wrong in the direction that costs
 you a true result.**
 
+### The ninth instance, and the cleanest one: a PROXY chosen for the property it proxies
+
+I wanted to know whether two binaries contained the same machine code. Bytes were unusable — operands
+relocate — so I compared **instruction mnemonics** and reported the answer as *machine-code identity*.
+A mnemonic sequence is **adjacent to** machine code: it agrees with it most of the time and diverges
+exactly where the interesting cases live. It reported **291 of 363** shared symbols identical; **155 of
+those are not**, and 49 differ in a register or a real immediate — a difference a mnemonic comparison
+cannot see *by construction*. On that basis I published a headline number twice and stated that
+"different codegen is excluded", which the evidence never supported.
+
+**What makes this the cleanest instance is that the first oracle failed in the OPPOSITE direction, and
+both felt obviously right while in use.** Byte equality is too strict (15/363); mnemonics too loose
+(291/363); comparing operands with only the relocatable parts normalized gives 136/363. Three answers
+to one question, spanning 4%–80%, and **no amount of care applied to a wrong oracle would have found
+it** — each was internally consistent and produced plausible tables.
+
+**The transferable rules:**
+
+1. **When you substitute a proxy for the property, say so in the claim.** "Identical mnemonics" is a
+   fact; "identical machine code" was an inference from it, and collapsing the two is where the error
+   entered. Had the table been labelled with what was measured, the gap would have been visible.
+2. **Ask which direction the proxy errs, and by how much.** Bytes over-report difference; mnemonics
+   over-report sameness. Neither error is symmetric, and knowing the direction tells you whether your
+   conclusion is safe. It also told me which claims survived the correction: the +77.1% on the
+   provably-identical subset is now phrased against a **lower bound**, so a better oracle can only
+   strengthen it.
+3. **A retraction is part of the result.** "Codegen is excluded" was withdrawn outright rather than
+   softened. The measurement that replaced it is narrower and true, which is worth more than a wide
+   claim resting on the wrong comparison.
+
 ### The same shape in the tooling, for completeness
 
 Three further instances landed in *mechanism* rather than in reasoning, and they are the same error:
