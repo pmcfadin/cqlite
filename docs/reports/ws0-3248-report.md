@@ -18,9 +18,15 @@ re-derive and the manifest edit I deliberately refused:
 
 **1. Only ~57% of the Flight/bare-scan gap is Flight-only CODE.**
 The gap is +6,707 cycles/row. Flight-marginal code accounts for **3,842**. A further ~24% is the
-**same shared code running 21.5% more expensively** on the Flight arm (8,926 vs 7,348 cyc/row), and
-~41% is allocator work. The issue anticipated the shared/marginal split; it did not anticipate that a
-quarter of the gap would be identical code costing more.
+**same shared SYMBOLS running ~21% more expensively** on the Flight arm, and ~41% is allocator work.
+The issue anticipated the shared/marginal split; it did not anticipate that a quarter of the gap would
+sit in code *both* arms run.
+
+**Two independent derivations of that ~21%, which is why it is the number this report leans on:**
+`aggregate-profiles.py` gives **7,348 → 8,926 cyc/row (+21.5%)** from the AC2 bucket totals;
+`codegen-identity.py` gives **7,327 → 8,879 (+21.2%)** from flat profiles × profiled cyc/row. Two paths
+through the data, agreeing to 0.3 pp. Note it is a statement about shared *symbols*, not shared machine
+code — that stronger reading is the one withdrawn next.
 
 **A machine-code decomposition of that shared bucket was attempted and is WITHDRAWN.** The arms are
 *different binaries* (`ws0-scan-bench` vs `cqlite-flight`) and the shared bucket is assigned by
