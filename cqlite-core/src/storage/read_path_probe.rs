@@ -156,6 +156,35 @@ pub fn query_row_producers_finished() -> u64 {
     QUERY_ROW_PRODUCERS_FINISHED.load(Ordering::Acquire)
 }
 
+/// Times a batched scan took the STITCHING branch (issue #3384).
+static BATCHED_SCAN_STITCHING_PATHS: AtomicU64 = AtomicU64::new(0);
+
+/// Record that a batched scan routed to `run_scan_stream_windowed` — the
+/// STITCHING branch (issue #3384).
+///
+/// Exists so a test can AFFIRMATIVELY measure which branch its fixture took, rather
+/// than infer it. The completion signal below covers only the non-stitching loop, and
+/// the obvious proxies for "am I on that loop" are all wrong: absence of
+/// `CompressionInfo.db` does not imply it (roborev), and neither does the fixture being
+/// uncompressed in the colloquial sense — `requires_chunk_stitching()` is
+/// `data_format() == V5CompressedLegacy && is_nb_format()`, and `V5_0Uncompressed` maps
+/// to the FORMER but not the LATTER. Two proxies, two different wrong answers; the
+/// branch itself is the only thing worth asserting on.
+pub fn mark_batched_scan_stitching_path() {
+    BATCHED_SCAN_STITCHING_PATHS.fetch_add(1, Ordering::Release);
+}
+
+/// Batched scans that took the stitching branch since
+/// [`reset_batched_scan_stitching_paths`] (issue #3384).
+pub fn batched_scan_stitching_paths() -> u64 {
+    BATCHED_SCAN_STITCHING_PATHS.load(Ordering::Acquire)
+}
+
+/// Zero the stitching-branch count (issue #3384).
+pub fn reset_batched_scan_stitching_paths() {
+    BATCHED_SCAN_STITCHING_PATHS.store(0, Ordering::Release);
+}
+
 /// Detached `BatchedScanStream` tasks that have terminated, published with
 /// RELEASE ordering (issue #3384).
 static BATCHED_SCANS_FINISHED: AtomicU64 = AtomicU64::new(0);

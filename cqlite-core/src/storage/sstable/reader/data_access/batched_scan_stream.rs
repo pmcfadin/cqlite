@@ -227,6 +227,10 @@ impl SSTableReader {
         }
 
         if self.requires_chunk_stitching() {
+            // Affirmative branch marker (issue #3384): the detached-scan completion
+            // signal does NOT cover this branch's `spawn_blocking` decode, so a test
+            // relying on that signal must be able to measure that it did not land here.
+            crate::storage::read_path_probe::mark_batched_scan_stitching_path();
             // Forward the windowed driver's internal batches straight through — no
             // flatten, no re-batch (issue #1592). Same driver, same order/content
             // as the per-row path; only the output surface differs.

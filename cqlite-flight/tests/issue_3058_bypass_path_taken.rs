@@ -226,22 +226,6 @@ async fn build_generations(batches: Vec<Vec<Mutation>>) -> (tempfile::TempDir, P
 /// Authoritative count of `*-Data.db` generations under the table directory —
 /// the same listing the warm registry's generation probe uses, so a test can
 /// state the source count it is exercising instead of assuming it.
-/// `*-CompressionInfo.db` components under the table dir — zero means every reader
-/// here is uncompressed, hence non-stitching (issue #3384).
-fn count_compression_info(data_dir: &std::path::Path) -> usize {
-    let table_dir = data_dir.join(KS).join(TBL);
-    std::fs::read_dir(&table_dir)
-        .into_iter()
-        .flatten()
-        .flatten()
-        .filter(|e| {
-            e.file_name()
-                .to_str()
-                .is_some_and(|n| n.ends_with("-CompressionInfo.db"))
-        })
-        .count()
-}
-
 fn count_data_dbs(data_dir: &std::path::Path) -> usize {
     let table_dir = data_dir.join(KS).join(TBL);
     std::fs::read_dir(&table_dir)
@@ -525,25 +509,9 @@ async fn fast_arm_stream_stops_when_the_client_drops_it() {
     // previous case in this binary must not be able to publish into this count.
     cqlite_core::storage::read_path_probe::reset_query_row_producers_finished();
     cqlite_core::storage::read_path_probe::reset_batched_scans_finished();
+    cqlite_core::storage::read_path_probe::reset_batched_scan_stitching_paths();
     let (_temp, data_dir) = build_generations(vec![rows]).await;
     assert_eq!(count_data_dbs(&data_dir), 1);
-    // ENFORCED precondition for the completion signal below (roborev, issue #3384).
-    // That signal is a drop guard on the scan's spawned future, so it covers a
-    // decode loop that runs INSIDE that future. Only NON-STITCHING readers take that
-    // loop: `requires_chunk_stitching()` (compressed `nb`) instead routes to
-    // `run_scan_stream_windowed`, whose `spawn_blocking` parse/feed tasks are not
-    // cancellable and can still be decoding when the guard fires. The write engine
-    // emits UNCOMPRESSED SSTables, so this fixture takes the covered path — asserted
-    // rather than assumed, so switching the fixture to a compressed one cannot
-    // silently turn the signal premature.
-    assert_eq!(
-        count_compression_info(&data_dir),
-        0,
-        "this fixture must stay UNCOMPRESSED: a compressed reader takes the stitching \
-         path, whose spawn_blocking decode is not covered by the completion signal \
-         this test waits on (issue #3384)"
-    );
-
     let svc = CqliteFlightService::new(data_dir, 1)
         .with_egress_budget(EgressBudget::bytes(CANCEL_EGRESS_CEILING));
     let before = ReadPathProbe::snapshot();
@@ -624,6 +592,38 @@ async fn fast_arm_stream_stops_when_the_client_drops_it() {
          {PARTITIONS})",
         work_counters::stream_walk_partitions_parsed()
     );
+    // WHICH BRANCH THIS FIXTURE TAKES — measured, and it is NOT what two rounds of
+    // plausible inference concluded (roborev, issue #3384).
+    //
+    // It takes the STITCHING branch. Both proxies were wrong: absence of
+    // `CompressionInfo.db` proves nothing, and so does "the write engine emits
+    // uncompressed SSTables" — `requires_chunk_stitching()` is
+    // `data_format() == V5CompressedLegacy && is_nb_format()`, and this fixture
+    // satisfies BOTH. Asserted here so the reasoning below is pinned to a measurement
+    // rather than to an argument, and so a future format change forces it to be redone.
+    assert_eq!(
+        cqlite_core::storage::read_path_probe::batched_scan_stitching_paths(),
+        1,
+        "this fixture is expected on the STITCHING branch; if that changed, the drain \
+         window below needs re-justifying (issue #3384)"
+    );
+    // CONSEQUENCE, stated rather than glossed: the stitching branch decodes in
+    // `spawn_blocking` parse/feed tasks. Blocking tasks are NOT cancellable, so the two
+    // causal signals above — the outer producer and the scan future's drop guard — do
+    // not prove those tasks have stopped. There is no causal signal for them today;
+    // publishing one from the blocking tasks is the real fix and is tracked on #3428.
+    //
+    // What IS true: the tail is BOUNDED. Each blocking task feeds a bounded channel and
+    // stops when its consumer is gone, so it cannot run away — which is why the ceiling
+    // below, built from those same buffer sizes, still holds. The drain lets that
+    // bounded tail land. MEASURED, not tuned: without it the observed max was 1280,
+    // with it 2370, and a 10x longer window gives 2048 — LOWER, so the spread is
+    // run-to-run variance and the window is sufficient rather than merely long. It is a
+    // drain for bounded work, never a deadline, and nothing here compares an elapsed
+    // duration to a threshold (#2642).
+    for _ in 0..200 {
+        tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+    }
     // Both producers have provably finished, so this is the FINAL count.
     let settled = work_counters::stream_walk_partitions_parsed();
     // Observability for the issue-#3384 measurement: under `--nocapture` this
