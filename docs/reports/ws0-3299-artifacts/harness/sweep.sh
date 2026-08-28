@@ -119,22 +119,21 @@ PHYS=${#CORE_GROUPS[@]}
 echo "[sweep] topology: $(nproc) logical / $PHYS physical; groups: ${CORE_GROUPS[*]}"
 
 # --- corpus identity, verified before anything is measured ---------------------
-DATA_DB="$(find "$CORPUS" -name '*-Data.db' -print -quit)"
-[[ -n "$DATA_DB" ]] || { echo "FATAL: no *-Data.db under $CORPUS" >&2; exit 2; }
-if compgen -G "$(dirname "$DATA_DB")/*-CompressionInfo.db" > /dev/null; then
-  echo "FATAL: $CORPUS carries a CompressionInfo.db. The #3096 measurement corpus is" >&2
-  echo "  UNCOMPRESSED (693.69 B/row); a compressed corpus is a DIFFERENT corpus and its" >&2
-  echo "  numbers are not comparable (cross-corpus division is forbidden on this issue)." >&2
-  exit 2
-fi
-DATA_BYTES="$(stat -c %s "$DATA_DB")"
-EXPECT_BYTES=2774760422
-if [[ "$DATA_BYTES" != "$EXPECT_BYTES" ]]; then
-  echo "FATAL: Data.db is $DATA_BYTES bytes, expected $EXPECT_BYTES (the verified #3096" >&2
-  echo "  'Corpus B'). A different corpus makes every cross-point comparison invalid." >&2
-  exit 2
-fi
-echo "[sweep] corpus: $DATA_DB ($DATA_BYTES bytes, uncompressed, identity OK)"
+# Delegated to `guards.py corpus` so the refusal path is REACHABLE FROM A TEST
+# (selftest.sh observes every one of its codes fire). It checks the ONE path the
+# worker actually opens — `<corpus>/ws0/events/*-Data.db` — against the committed
+# `measurement_corpus::DATA_DB_BYTES`/`DATA_DB_SHA256` pin.
+#
+# WHAT THIS REPLACED, and why it mattered: the previous inline check resolved
+# `find "$CORPUS" -name '*-Data.db' -print -quit`, i.e. the first arbitrary match
+# ANYWHERE under the root. An unrelated Data.db elsewhere in the tree could
+# therefore satisfy the identity check while the worker scanned a different —
+# possibly compressed, possibly wrong-geometry — corpus. It also compared only the
+# BYTE COUNT, which cannot see same-size-different-bytes; the digest can.
+CORPUS_ID_JSON="$RESULTS/sweep-corpus-identity.json"
+python3 "$GUARDS" corpus --corpus "$CORPUS" > "$CORPUS_ID_JSON" \
+  || { echo "FATAL: corpus identity refused (see GUARD-FAIL above)" >&2; rm -f "$CORPUS_ID_JSON"; exit 2; }
+echo "[sweep] corpus: $(cat "$CORPUS_ID_JSON")"
 
 # --- build the worker ----------------------------------------------------------
 echo "[sweep] building worker (release, repo profile)..."

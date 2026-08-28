@@ -21,8 +21,10 @@ escape hatch on a measurement guard can only ever buy a confident wrong number.
 """
 
 import argparse
+import hashlib
 import json
 import os
+import re
 import sys
 
 # --- the counter contract ---------------------------------------------------
@@ -521,6 +523,116 @@ def guard_flight_step(args):
     return 0
 
 
+# --- corpus identity ---------------------------------------------------------
+#
+# THE EXACT PATH THE WORKER OPENS, and nothing else. The pre-fix check resolved
+# `find "$CORPUS" -name '*-Data.db' -print -quit` — the FIRST arbitrary match
+# ANYWHERE under the root — so an unrelated, valid, correctly-sized Data.db
+# elsewhere in the tree could satisfy the identity check while the worker read a
+# DIFFERENT corpus (possibly compressed, possibly the wrong geometry). Verifying
+# one file and measuring another is the same false-assurance shape as a control
+# that cannot fail: the check passes and says nothing about the measurement.
+#
+# `scan-worker` opens `<corpus>/<keyspace>/<table>/` with clap defaults
+# `ws0`/`events`, and sweep.sh exposes no flag to change either, so the measured
+# file is exactly ONE path. It is spelled here as a CONSTANT, not a parameter: a
+# guard whose subject is caller-selectable can be pointed away from the subject.
+CORPUS_KEYSPACE = "ws0"
+CORPUS_TABLE = "events"
+
+# Where the pinned identity comes from. NOT a copy: the digest and byte count are
+# read from the committed Rust constants in `tools/ws0-corpus-gen/src/
+# measurement_corpus.rs` — the same single source of truth
+# `scripts/perf/ws0_canonical_corpus.py` reads — so this guard cannot drift from
+# the rig's pin. Path is resolved relative to THIS file (harness -> artifacts ->
+# reports -> docs -> repo root), never from the environment.
+CORPUS_PIN_REL = os.path.join("tools", "ws0-corpus-gen", "src", "measurement_corpus.rs")
+
+
+def _repo_root():
+    return os.path.abspath(os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", "..", ".."))
+
+
+def read_corpus_pins():
+    """`DATA_DB_BYTES` and `DATA_DB_SHA256`, parsed from the committed Rust pin.
+
+    Fails closed on every way the pin can fail to answer: missing file,
+    unreadable file, absent constant, malformed constant. An unconsultable
+    oracle yields a REFUSAL, never a pass (a positive verdict requires an
+    affirmative measurement).
+    """
+    path = os.path.join(_repo_root(), CORPUS_PIN_REL)
+    try:
+        with open(path) as fh:
+            text = fh.read()
+    except OSError as exc:
+        fail("CORPUS_PIN_UNREADABLE",
+             f"cannot read the pinned corpus identity at {path}: {exc}. The pin is the ONLY "
+             f"oracle for corpus identity; without it no corpus can be certified.")
+    m_sha = re.search(r'pub\s+const\s+DATA_DB_SHA256\s*:\s*&str\s*=\s*"([0-9a-fA-F]{64})"', text)
+    m_bytes = re.search(r"pub\s+const\s+DATA_DB_BYTES\s*:\s*u64\s*=\s*([0-9_]+)\s*;", text)
+    if not m_sha or not m_bytes:
+        fail("CORPUS_PIN_UNPARSEABLE",
+             f"{path}: could not parse DATA_DB_SHA256 (64 hex) and/or DATA_DB_BYTES. The pin "
+             f"moved or was reformatted; fix the parse rather than skipping the check.")
+    return int(m_bytes.group(1).replace("_", "")), m_sha.group(1).lower()
+
+
+def sha256_file(path):
+    h = hashlib.sha256()
+    with open(path, "rb") as fh:
+        for chunk in iter(lambda: fh.read(8 << 20), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def guard_corpus(args):
+    """The file the worker will scan IS the pinned #3096 measurement corpus."""
+    expect_bytes, expect_sha = read_corpus_pins()
+    table_dir = os.path.join(args.corpus, CORPUS_KEYSPACE, CORPUS_TABLE)
+    try:
+        entries = sorted(os.listdir(table_dir))
+    except OSError as exc:
+        fail("CORPUS_DATA_DB_ABSENT",
+             f"{table_dir} is not a readable directory ({exc}). This is the EXACT path "
+             f"scan-worker opens (<corpus>/{CORPUS_KEYSPACE}/{CORPUS_TABLE}); a *-Data.db "
+             f"elsewhere under {args.corpus} is a different corpus and does not count.")
+    data = [e for e in entries if e.endswith("-Data.db")]
+    if not data:
+        fail("CORPUS_DATA_DB_ABSENT",
+             f"no *-Data.db in {table_dir} — the exact directory scan-worker opens. A "
+             f"*-Data.db elsewhere under {args.corpus} does not satisfy this check.")
+    if len(data) > 1:
+        fail("CORPUS_DATA_DB_AMBIGUOUS",
+             f"{table_dir} holds {len(data)} *-Data.db files ({', '.join(data)}). The scan "
+             f"would read all of them; a single pinned identity cannot describe that set.")
+    data_db = os.path.join(table_dir, data[0])
+    comp = [e for e in entries if e.endswith("-CompressionInfo.db")]
+    if comp:
+        fail("CORPUS_COMPRESSED",
+             f"{table_dir} carries {comp[0]}. The #3096 measurement corpus is UNCOMPRESSED "
+             f"(693.69 B/row); a compressed corpus is a DIFFERENT corpus and its numbers are "
+             f"not comparable (cross-corpus division is forbidden on this issue).")
+    actual_bytes = os.path.getsize(data_db)
+    if actual_bytes != expect_bytes:
+        fail("CORPUS_BYTES_MISMATCH",
+             f"{data_db} is {actual_bytes} bytes; the pin says {expect_bytes}. A different "
+             f"corpus makes every cross-point comparison invalid.")
+    actual_sha = sha256_file(data_db)
+    if actual_sha != expect_sha:
+        fail("CORPUS_SHA_MISMATCH",
+             f"{data_db} digests {actual_sha}; the pin says {expect_sha}. Same size, "
+             f"different bytes — exactly what a byte-count-only check misses.")
+    print(json.dumps({
+        "data_db": data_db,
+        "bytes": actual_bytes,
+        "sha256": actual_sha,
+        "compressed": False,
+        "pin_source": os.path.join(_repo_root(), CORPUS_PIN_REL),
+    }))
+    return 0
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = ap.add_subparsers(dest="cmd", required=True)
@@ -542,6 +654,10 @@ def main():
     w.add_argument("--shortfall-bound", type=float, default=DEFAULT_SHORTFALL_BOUND)
     w.add_argument("--counter-window-tolerance", type=float, default=DEFAULT_COUNTER_WINDOW_TOLERANCE)
     w.set_defaults(fn=guard_window)
+
+    k = sub.add_parser("corpus", help="verify the EXACT Data.db the worker opens is the pinned corpus")
+    k.add_argument("--corpus", required=True)
+    k.set_defaults(fn=guard_corpus)
 
     f = sub.add_parser("flight-step", help="verify one flight-loadgen step record (phase 2)")
     f.add_argument("--jsonl", required=True)
