@@ -1470,6 +1470,85 @@ grep -qE "$MEASURED_RE" "$TMPROOT/case47.out" \
 echo "OK (47): a cosmetic string mentioning \`path =\` (or containing \`r\`) does NOT trip the \`#[path]\` or raw-string refusals"
 
 # ---------------------------------------------------------------------------
+# 48. GREEN+RED — STRING CONTENTS ARE NOT CODE (roborev r13 F2, and Refusal X narrowed).
+#
+#     `normalize()` used to copy string and RAW-string CONTENTS verbatim into the text
+#     BOTH derivations read. Derivation S scans a line UNANCHORED while P is line-start
+#     anchored, so a one-line `const X: &str = r#"pub mod fake;"#;` was found by S,
+#     missed by P, and the cross-check called a DISAGREEMENT — the MANDATORY gate
+#     REJECTING VALID RUST. A false FAIL.
+#
+#     (a)-(c) GREEN: literals containing declaration-like text, and a MULTI-LINE raw
+#     string whose closing line is `"#;` — that last one also pins the Refusal X
+#     narrowing, since X used to fire on ANY residue after a closing delimiter and `"#;`
+#     is how every multi-line raw string ends.
+#     (d) RED: `"#; pub mod x;` — a real declaration after a closing delimiter MUST still
+#     refuse, or the narrowing would have bought the false PASS Refusal X exists to stop.
+# ---------------------------------------------------------------------------
+c48_i=0
+for c48lit in 'const A: &str = r#"pub mod fake_a;"#;' 'const C: &str = "pub mod fake_c;";'; do
+  c48_i=$((c48_i + 1))
+  scratch_tree "literal-decl-text-$c48_i"; wt48="$SCRATCH"
+  printf '\n%s\n' "$c48lit" >>"$wt48/cqlite-core/src/lib.rs"
+  set +e
+  bash "$wt48/$GUARD_REL" >"$TMPROOT/case48.out" 2>&1
+  c48rc=$?
+  set -e
+  [ "$c48rc" -eq 0 ] || fail_case "case 48($c48_i) — a STRING LITERAL containing \`pub mod\` text was treated as a declaration, so the two scans disagreed and the mandatory gate REJECTED VALID RUST; got: $(cat "$TMPROOT/case48.out")"
+done
+
+scratch_tree literal-multiline-raw; wt48c="$SCRATCH"
+printf '\nconst B: &str = r#"\npub mod fake_b;\n"#;\n' >>"$wt48c/cqlite-core/src/lib.rs"
+set +e
+bash "$wt48c/$GUARD_REL" >"$TMPROOT/case48c.out" 2>&1
+c48c_rc=$?
+set -e
+[ "$c48c_rc" -eq 0 ] || fail_case "case 48(c) — a MULTI-LINE raw string was rejected. Its closing line is \`\"#;\`, and Refusal X used to fire on ANY residue after a closing delimiter, so every crate root containing one was refused; got: $(cat "$TMPROOT/case48c.out")"
+
+scratch_tree literal-close-then-decl; wt48d="$SCRATCH"
+printf '\nconst D: &str = r#"\nz\n"#; pub mod probe_x;\n' >>"$wt48d/cqlite-core/src/lib.rs"
+printf '#![cfg(feature = "benchmarks")]\n//! inner-gated\npub fn p() {}\n' >"$wt48d/cqlite-core/src/probe_x.rs"
+set +e
+bash "$wt48d/$GUARD_REL" >"$TMPROOT/case48d.out" 2>&1
+c48d_rc=$?
+set -e
+[ "$c48d_rc" -ne 0 ] || fail_case "case 48(d) — a real declaration AFTER a closing string delimiter on the same line passed GREEN. Narrowing Refusal X must not buy the false PASS it exists to stop; got: $(cat "$TMPROOT/case48d.out")"
+grep -qF "code follows a closing" "$TMPROOT/case48d.out" \
+  || fail_case "case 48(d) — refused, but not via Refusal X; got: $(cat "$TMPROOT/case48d.out")"
+echo "OK (48): string and RAW-string CONTENTS are not read as code — literals with declaration text and multi-line raw strings CERTIFY, while a real declaration after a closing delimiter still REFUSES"
+
+# ---------------------------------------------------------------------------
+# 49. RED+GREEN — an item macro AFTER ANOTHER ITEM on the same line (roborev r13 F1).
+#
+#     `pub fn f() {} make_mod!();` — missed by both the line-anchored sweep (r11) and the
+#     after-attribute check (r12). The sweep is now UNANCHORED, which is only safe
+#     because case 48's fix blanked string contents.
+#
+#     (b) GREEN, and it is the control that widening broke before it was caught by
+#     testing: a one-line `pub fn f() { assert!(true); }`. `BRACE_MIN` is the line's
+#     MINIMUM depth, so the body's `assert!` passed the depth filter; depth is now
+#     tracked ALONG the line and only a depth-0 match counts.
+# ---------------------------------------------------------------------------
+scratch_tree macro-after-item; wt49="$SCRATCH"
+printf '\npub fn zz() {} make_mod!(probe_q);\n' >>"$wt49/cqlite-core/src/lib.rs"
+set +e
+bash "$wt49/$GUARD_REL" >"$TMPROOT/case49.out" 2>&1
+c49rc=$?
+set -e
+[ "$c49rc" -ne 0 ] || fail_case "case 49 — an item macro FOLLOWING another item on the same line passed GREEN; it can expand to a self-gating crate-root module; got: $(cat "$TMPROOT/case49.out")"
+grep -qF "ITEM MACRO invocation" "$TMPROOT/case49.out" \
+  || fail_case "case 49 — refused, but not with the item-macro diagnostic; got: $(cat "$TMPROOT/case49.out")"
+
+scratch_tree macro-in-oneline-fn; wt49b="$SCRATCH"
+printf '\npub fn probe_one_line() { assert!(true); }\n' >>"$wt49b/cqlite-core/src/lib.rs"
+set +e
+bash "$wt49b/$GUARD_REL" >"$TMPROOT/case49b.out" 2>&1
+c49b_rc=$?
+set -e
+[ "$c49b_rc" -eq 0 ] || fail_case "case 49(b) — a one-line \`pub fn f() { assert!(true); }\` was refused as an item macro. The macro is inside the BODY (brace depth 1); only a depth-0 invocation is an item macro; got: $(cat "$TMPROOT/case49b.out")"
+echo "OK (49): an item macro after another item on one line REFUSES, while a one-line fn whose BODY calls a macro stays GREEN"
+
+# ---------------------------------------------------------------------------
 # 36. GREEN — THE POSITIVE CONTROL for 29-38.
 #
 #     Without it, every case above would be satisfied by a guard hardwired to refuse
@@ -1568,4 +1647,4 @@ grep -qF "affirmative measurement" "$TMPROOT/case39.out" \
 echo "OK (39): a crate root with ZERO unconditional declarations FAILs — the assert never reports success having examined nothing"
 
 echo ""
-echo "PASS: test_pub_surface_guard.sh — all 34 cases (6 green, 26 reds, 1 usage, 1 kill-safety)"
+echo "PASS: test_pub_surface_guard.sh — all 36 cases (7 green, 27 reds, 1 usage, 1 kill-safety)"
