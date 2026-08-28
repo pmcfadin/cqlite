@@ -8,6 +8,16 @@ to ~2x. A mean would hide that; the median plus an explicit range does not.
 
 Never fabricates a number: a cell with no successful iteration is printed as
 MISSING, and an unmeasured peak RSS is printed as `unmeasured`, not 0.
+
+AND IT FAILS CLOSED. An INCOMPLETE matrix used to be silently skipped over —
+missing cells simply did not appear, so a half-finished run produced a summary
+that looked exactly like a complete one, and a correctness precondition could
+print a FAIL line while the script still exited 0. Any consumer (a report, a
+reader, a script) would take that as usable. Now the expected
+scenario x arm-config x iteration matrix is reconstructed from the cells present,
+every absent cell is rendered as MISSING, and a missing cell OR a failed
+correctness precondition exits NONZERO. Every count printed is derived from the
+data; none is hard-coded.
 """
 import json
 import pathlib
@@ -24,6 +34,11 @@ for path in sorted(cells_dir.glob("*.json")):
 
 if not runs:
     sys.exit("no cell results found under %s" % cells_dir)
+
+# Reasons this summary must NOT be treated as usable. Printed in full at the end
+# and turned into a nonzero exit — a summary that names its own defects but exits
+# 0 is a summary someone will quote.
+failures = []
 
 
 # `ArmKind` serialises with serde's snake_case rename, so `DataFusion` is
@@ -48,6 +63,32 @@ for run in runs:
 
 def med(values):
     return statistics.median(values)
+
+
+# THE EXPECTED MATRIX. There is no declared expectation to compare against — the
+# driver writes one file per cell and nothing states how many there should be —
+# so it is reconstructed as the full cross product of the scenarios, arm configs
+# and iterations that DO appear. That cannot detect a whole missing arm or a
+# whole missing iteration (nothing observed it), but it does detect every HOLE,
+# which is what an interrupted or partially-failed run leaves behind.
+observed_arms = sorted({k[1] for k in groups})
+observed_iters = sorted({r["iteration"] for r in runs})
+expected_cells = [
+    (scenario, arm, iteration)
+    for scenario in SCENARIOS
+    for arm in observed_arms
+    for iteration in observed_iters
+]
+present_cells = {(r["scenario"], key(r), r["iteration"]) for r in runs}
+missing_cells = [c for c in expected_cells if c not in present_cells]
+duplicate_cells = sorted(
+    c for c in present_cells
+    if sum(1 for r in runs if (r["scenario"], key(r), r["iteration"]) == c) > 1
+)
+if missing_cells:
+    failures.append("%d expected cell(s) are MISSING" % len(missing_cells))
+if duplicate_cells:
+    failures.append("%d cell(s) appear more than once" % len(duplicate_cells))
 
 # EVERY row carries its own `n`, and a single-sample row prints NO range.
 #
@@ -78,7 +119,15 @@ for scenario in SCENARIOS:
     ]:
         rs = groups.get((scenario, arm))
         if not rs:
+            # Rendered, not skipped: an absent arm that simply does not appear in
+            # the table is indistinguishable from one that was never asked for.
+            print("| %s | %s | 0 | MISSING | — |%s" % (scenario, arm, " |" * 8))
             continue
+        absent = [i for i in observed_iters if i not in {r["iteration"] for r in rs}]
+        if absent:
+            print("| %s | %s | %d | MISSING iteration(s) %s | — |%s"
+                  % (scenario, arm, len(rs),
+                     ",".join(str(i) for i in absent), " |" * 8))
         secs = [r["elapsed_nanos"] / 1e9 for r in rs]
         rss = [r["peak_rss_bytes"] for r in rs if r["peak_rss_bytes"] is not None]
         # A single sample has no range to report. Say so, rather than printing
@@ -258,6 +307,12 @@ comparable = sorted({r["rows_scanned"] for r in runs if r["arm"] != "row_pushdow
 print("- rows_scanned across the COMPARABLE arms (floor/row_engine/datafusion): %s%s"
       % (comparable, "" if len(comparable) == 1
          else "  <-- FAIL: the comparable arms did not read the same rows"))
+if len(comparable) != 1:
+    failures.append("the comparable arms did not read the same rows: %s" % comparable)
+if bad_sources:
+    failures.append("%d run(s) reconciled fewer than 2 sources" % len(bad_sources))
+if bad_arm:
+    failures.append("%d run(s) did not observe the merge arm" % len(bad_arm))
 push = sorted({r["rows_scanned"] for r in runs if r["arm"] == "row_pushdown"})
 print("- rows_scanned for row_pushdown (narrowed scan, expected to differ): %s" % push)
 # `rows_result` AGREEMENT. `rows_scanned` agreement (above) cannot see a
@@ -275,6 +330,8 @@ disagreeing = {k: sorted(v) for k, v in answers.items() if len(v) > 1}
 print("- rows_result agreement across the answering arms (floor excluded): %s"
       % ("ALL AGREE" if not disagreeing
          else "%s  <-- FAIL: the arms answered different queries" % disagreeing))
+if disagreeing:
+    failures.append("the answering arms disagreed on rows_result: %s" % disagreeing)
 
 # THE FLOOR DIAGNOSTIC, reported and not asserted. The discard-only floor does
 # strictly less work than every executing arm, so it bounds them from below — in
@@ -299,9 +356,24 @@ print("- cold-fault / elapsed ratio: %.2f..%.2f — cold-fault is a STALL ACCOUN
 print("- reconcile_entries range: %d..%d" % (
     min(r["reconcile_entries"] for r in runs),
     max(r["reconcile_entries"] for r in runs)))
+print("- matrix completeness: %d of %d expected cells present (%d scenario(s) x %d arm "
+      "config(s) x %d iteration(s))%s"
+      % (len(present_cells), len(expected_cells), len(SCENARIOS), len(observed_arms),
+         len(observed_iters),
+         "" if not missing_cells else "  <-- FAIL, missing: %s" % (missing_cells,)))
 rss_all = [r["peak_rss_bytes"] for r in runs if r["peak_rss_bytes"] is not None]
 if rss_all:
     print("- peak RSS across ALL runs: %.1f MiB max (B4 budget 512 MiB)"
           % (max(rss_all) / 1048576))
 else:
     print("- peak RSS: unmeasured on this platform")
+
+# EXIT STATUS, not just prose. An incomplete or internally-inconsistent matrix
+# must not yield a summary a caller treats as usable — the report's own
+# regeneration command is expected to fail loudly rather than emit a plausible
+# document.
+if failures:
+    print("\n**THIS SUMMARY IS NOT USABLE.** %d precondition failure(s):\n" % len(failures))
+    for reason in failures:
+        print("- %s" % reason)
+    sys.exit(1)
