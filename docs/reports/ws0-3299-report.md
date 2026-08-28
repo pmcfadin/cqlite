@@ -256,6 +256,15 @@ work can probe on this box, not because the peak rests on it.
 
 ## 5. AC2 — the derived box-level target
 
+**THE TARGET IS A FLOOR ON `do_get`, AND IT SITS BELOW BARE SCAN.** In one sentence: the bar is
+`do_get_aggregate(S=6) >= bare_scan_aggregate(S=6) / 1.3`, so the target is
+**2,732,817 / 1.3 = 2,102,167 rows/s** — a number **77% of** box-level bare scan that `do_get` must
+climb **up to**, with bare scan as the unreachable ceiling above it. It is **NOT** `1.3 x bare scan`
+(= 3,552,662), which would put the target **30% ABOVE our own measured ceiling** and be unreachable
+by construction. The direction matters because the two readings differ by **1.69x** in the number
+the 0.17 mission is defined against, and this issue's own body used the wrong one.
+
+
 ```
 target = bare_scan_aggregate(S=6, best-N) / 1.3
        = 2,732,817 / 1.3
