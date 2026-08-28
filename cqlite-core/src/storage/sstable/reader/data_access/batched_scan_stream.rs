@@ -23,6 +23,27 @@
 
 use super::*;
 
+/// Batches the public BATCHED-scan channel below holds for a given `buffer_size`.
+///
+/// Sizing the channel to `ceil(buffer_size / BATCH_EMIT_ROWS)` batches keeps its
+/// resident-row budget comparable to the per-row surface's `buffer_size` rather
+/// than `buffer_size * BATCH_EMIT_ROWS`.
+///
+/// A `const fn` with ONE definition because the query-row stream's exported
+/// read-ahead bound
+/// ([`QUERY_ROWS_MAX_READ_AHEAD_ROWS`](crate::storage::sstable::reader::QUERY_ROWS_MAX_READ_AHEAD_ROWS))
+/// is derived from it. A second copy of this arithmetic could drift from the
+/// channel the constructor actually builds — which is precisely how a documented
+/// read-ahead bound becomes silently wrong (issue #3384).
+pub(crate) const fn batched_channel_capacity(buffer_size: usize) -> usize {
+    let cap = buffer_size.div_ceil(BATCH_EMIT_ROWS);
+    if cap == 0 {
+        1
+    } else {
+        cap
+    }
+}
+
 impl SSTableReader {
     /// Batched streaming scan (issue #1592, Epic F/F2): the additive companion to
     /// [`scan_stream`](Self::scan_stream) whose channel item is a `Vec` BATCH of
@@ -74,9 +95,7 @@ impl SSTableReader {
         // The public channel carries BATCHES (see `batched_channel_capacity`,
         // which is the SINGLE definition of this sizing — the query-row stream's
         // exported read-ahead bound is derived from the same `const fn`).
-        let cap = crate::storage::sstable::reader::scan_stream_windowed::batched_channel_capacity(
-            buffer_size,
-        );
+        let cap = batched_channel_capacity(buffer_size);
         let (tx, rx) = mpsc::channel(cap);
         // Read-metric grain (issue #1701): identical rule to the per-row surface —
         // an `Acquire` scan is the top-level read OPERATION and is measured with

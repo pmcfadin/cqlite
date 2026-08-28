@@ -286,29 +286,6 @@ const BATCH_CHANNEL_CAP: usize = 2;
 /// change that breaks the bound must update this constant AND keep that test green.
 pub(super) const MAX_INFLIGHT_BATCH_ROWS: usize = (BATCH_CHANNEL_CAP + 2) * BATCH_EMIT_ROWS;
 
-/// Batches the public BATCHED-scan channel
-/// ([`SSTableReader::scan_stream_batched_admitted`](crate::storage::sstable::reader::SSTableReader))
-/// holds for a given `buffer_size`.
-///
-/// Sizing the channel to `ceil(buffer_size / BATCH_EMIT_ROWS)` batches keeps the
-/// resident-row budget of that channel comparable to the per-row surface's
-/// `buffer_size` rather than `buffer_size * BATCH_EMIT_ROWS`.
-///
-/// A `const fn` with ONE definition because the query-row stream's exported
-/// read-ahead bound
-/// ([`QUERY_ROWS_MAX_READ_AHEAD_ROWS`](crate::storage::sstable::reader::QUERY_ROWS_MAX_READ_AHEAD_ROWS))
-/// is derived from it. A second copy of this arithmetic could drift from the
-/// channel the constructor actually builds — which is precisely how a documented
-/// read-ahead bound becomes silently wrong.
-pub(crate) const fn batched_channel_capacity(buffer_size: usize) -> usize {
-    let cap = buffer_size.div_ceil(BATCH_EMIT_ROWS);
-    if cap == 0 {
-        1
-    } else {
-        cap
-    }
-}
-
 /// Which public surface the windowed driver's forwarder adapts its single
 /// internal `Vec`-batched stream to (issue #1592, Epic F/F2).
 ///

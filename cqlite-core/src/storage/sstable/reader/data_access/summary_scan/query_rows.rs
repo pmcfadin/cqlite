@@ -101,12 +101,13 @@ use std::sync::Arc;
 
 use super::super::super::SSTableReader;
 use super::super::full_index_stream::FullIndexStreamOutcome;
+use super::super::sequential::batched_scan_stream::batched_channel_capacity;
 use super::ScanTokenBound;
 use crate::storage::producer_fault::ProducerFault;
 use crate::storage::scan_cancel::ScanCancel;
 use crate::storage::sstable::reader::scan_stream_windowed::scan_admission::ScanAdmission;
 use crate::storage::sstable::reader::scan_stream_windowed::{
-    batched_channel_capacity, BATCH_EMIT_ROWS, MAX_INFLIGHT_BATCH_ROWS,
+    BATCH_EMIT_ROWS, MAX_INFLIGHT_BATCH_ROWS,
 };
 use crate::types::ScanRow;
 use crate::{Error, Result, RowKey};
