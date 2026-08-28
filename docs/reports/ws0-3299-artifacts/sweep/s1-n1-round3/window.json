@@ -1,0 +1,32 @@
+{
+  "issue": 3299,
+  "s": 1,
+  "n": 1,
+  "rep": 3,
+  "round": 3,
+  "t0_ns": 11585807518417,
+  "t1_ns": 11645808993702,
+  "window_ns": 60001475285,
+  "requested_duration_s": 60.0,
+  "perf_cpus": "0,8",
+  "worker_cpus": [
+    [
+      0,
+      8
+    ]
+  ],
+  "events": "instructions,cycles,L1-dcache-loads,L1-dcache-load-misses,task-clock",
+  "perf_csv": "perf.csv",
+  "progress_ms": 25,
+  "prewarm_passes": 1,
+  "steady_samples_at_go": [
+    4
+  ],
+  "clock_source_check": {
+    "driver_before_ns": 11574416446585,
+    "worker_ns": 11574417763003,
+    "driver_after_ns": 11574418354047,
+    "bracket_ns": 1907462
+  },
+  "protocol": "warm; aligned window strictly inside S-concurrent steady state"
+}

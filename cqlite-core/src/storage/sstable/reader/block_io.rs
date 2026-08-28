@@ -98,7 +98,7 @@ pub(crate) async fn read_next_block(
                 );
                 attempt = 1;
             }
-            other => return other,
+            other => return super::chunk_source::count_uncompressed_block(compression_info, other),
         }
     }
 }

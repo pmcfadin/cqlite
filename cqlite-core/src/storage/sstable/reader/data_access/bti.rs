@@ -650,9 +650,40 @@ impl SSTableReader {
             // 256-entry cadence as `sequential_scan`'s stitched branch so a
             // cancelled caller does not walk a huge already-parsed result set to
             // completion and then report success.
-            if idx & 0xFF == 0 {
-                scan_cancel.check()?;
-            }
+            //
+            // KNOWN GAP for a QUERY TIMEOUT (#1695, roborev round 12), recorded here
+            // so it need not be re-derived: `scan_cancel` is the READER's SHARED
+            // token. #2264 trips it on a Flight client disconnect, and #2361 trips it
+            // when an iterator adapter drops — but NOTHING trips it when a streaming
+            // query's consumer goes away, so a timed-out scan over a BTI table keeps
+            // materialising this whole `results` Vec. The sibling producers were fixed
+            // by consulting their own channel (`tx.is_closed()` / racing
+            // `tx.closed()`), which is not available here: this function RETURNS a Vec
+            // and holds no sender.
+            //
+            // WHAT IS ACTUALLY MISSING, verified rather than guessed (roborev raised
+            // this twice, so the next person should not have to re-derive it):
+            // `bti_scan_with_metadata_cancellable` already exists and already takes a
+            // `&ScanCancel`, so the plumbing is NOT the gap. The gap is that the
+            // caller has no token it can legitimately pass:
+            //
+            //  * A CLONE of the reader's token is wrong — clones share state, so
+            //    tripping it cancels OTHER queries scanning the same reader. That is
+            //    the trap the materializing merges avoided with a per-call token.
+            //  * A FRESH per-call token tripped by a watcher on the output sender's
+            //    `closed()` handles the timeout case but silently DROPS #2264's Flight
+            //    cancellation, which trips the reader token WITHOUT necessarily
+            //    dropping the receiver — so a client disconnect would go back to the
+            //    ~1–2 min transport backstop. Losing existing cancellation to add new
+            //    cancellation is not a fix.
+            //
+            // So this needs one small API decision — a token that represents "either
+            // the reader's OR this stream's closure" (a linked/derived `ScanCancel`) —
+            // and that composition is the same primitive the deferred `JoinedStream` /
+            // `KWayMerger::step()` work needs. It is deliberately not improvised here:
+            // three partial fixes in this area is how the gap got this scattered, and a
+            // fourth guessing at token composition would be the worst of them.
+            scan_cancel.checkpoint(idx).await?;
             if prev_partition_key.as_ref() != Some(&entry_key) {
                 crate::storage::sstable::work_counters::add_stream_walk_partition_parsed();
                 prev_partition_key = Some(entry_key.clone());
@@ -727,9 +758,45 @@ impl SSTableReader {
         now_secs: Option<i64>,
         out: &WindowedOut,
     ) -> Result<()> {
-        let entries = self
-            .bti_scan_with_metadata(start_key, end_key, None, schema, true, now_secs)
-            .await?;
+        // #1695 (roborev raised this in rounds 12, 14 and 15): race the
+        // materialization against OUR consumer's departure.
+        //
+        // `bti_scan_with_metadata` materializes the WHOLE table into `entries` before
+        // the first send below, so the send-failure checks in the arms are reached
+        // only after all the work is done. Its internal `scan_cancel.checkpoint(idx)`
+        // polls the READER-WIDE token, which #2264 trips on a Flight disconnect and
+        // #2361 on adapter teardown — but nothing trips when a timed-out streaming
+        // query drops its iterator. So a timed-out query kept decoding and sorting a
+        // whole BTI table.
+        //
+        // Racing the scan FUTURE is what fixes it, and it needs no new cancellation
+        // plumbing: the checkpoints inside are await points, so dropping the future
+        // there abandons the scan within one checkpoint interval. Crucially the
+        // reader-wide token is still passed through untouched, so #2264 and #2361 keep
+        // working — nothing is traded away for this. (An earlier attempt added a
+        // "derive a per-stream token from the reader's" API for the same purpose; it
+        // was removed once the race proved to give the same semantics with no new
+        // surface. Do not reintroduce it without a caller the race cannot serve.)
+        //
+        // `biased` so an already-departed consumer wins over a ready scan.
+        //
+        // RESIDUAL, deliberately: `sort_by_token_order_with_meta` after the loop is
+        // SYNCHRONOUS, so a departure during the sort is not observed until it ends.
+        // That is bounded by one sort rather than a whole table walk, and is the same
+        // uninterruptible-post-scan-stage limit documented at the chokepoint.
+        let scan = self.bti_scan_with_metadata(start_key, end_key, None, schema, true, now_secs);
+        let entries = match out {
+            WindowedOut::PerRow(tx) => tokio::select! {
+                biased;
+                _ = tx.closed() => return Ok(()),
+                result = scan => result?,
+            },
+            WindowedOut::Batched(tx) => tokio::select! {
+                biased;
+                _ = tx.closed() => return Ok(()),
+                result = scan => result?,
+            },
+        };
 
         match out {
             WindowedOut::PerRow(tx) => {

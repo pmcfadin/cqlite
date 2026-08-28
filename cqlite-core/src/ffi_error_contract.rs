@@ -224,6 +224,21 @@ ffi_error_contract_table! {
     InvalidInput => { py: Value, code: "INVALID_INPUT", category: Data, recoverable: false, prefix: Some("ValueError"), },
     UnsupportedQuery => { py: Query, code: "QUERY", category: Query, recoverable: false, prefix: Some("QueryError"), },
     Cancelled => { py: Cancelled, code: "CANCELLED", category: Cancelled, recoverable: false, prefix: Some("CancelledError"), },
+    // Query execution budget elapsed (issue #1695). Field by field, because three of
+    // them could plausibly have gone the other way:
+    //   py: Timeout   — the SAME builtin `TimeoutError` as its sibling `Timeout`, so a
+    //                   Python caller guarding a query with `except TimeoutError:` does
+    //                   not find that the one timeout worth catching is the one that
+    //                   escapes it. NOT `Query`, which would have matched the classify
+    //                   category but split the two timeouts across two Python classes.
+    //   code: TIMEOUT — likewise the sibling's code, so Node and Python agree on
+    //                   identity, which is the whole point of this table (#1451).
+    //   category: Query — must MATCH `Error::classify()`, which returns `Query` for
+    //                   this variant: a budget elapse is a query-execution failure, and
+    //                   #1695 requires it be distinguishable from corruption/data.
+    //                   This is deliberately NOT the same axis as `py`/`code`.
+    //   recoverable: false — matches `Error::is_recoverable()` for this variant.
+    QueryTimeout => { py: Timeout, code: "TIMEOUT", category: Query, recoverable: false, prefix: Some("TimeoutError"), },
 }
 
 /// Map a core [`Error`] to its contract key.
@@ -271,6 +286,7 @@ pub fn variant_of(err: &Error) -> FfiErrorVariant {
         Error::InvalidInput(_) => FfiErrorVariant::InvalidInput,
         Error::UnsupportedQuery(_) => FfiErrorVariant::UnsupportedQuery,
         Error::Cancelled => FfiErrorVariant::Cancelled,
+        Error::QueryTimeout { .. } => FfiErrorVariant::QueryTimeout,
     }
 }
 
@@ -357,6 +373,16 @@ impl FfiErrorVariant {
                 Error::unsupported_query("sample unsupported query")
             }
             FfiErrorVariant::Cancelled => Error::Cancelled,
+            // Issue #1695. This sample is what makes the mapping TESTABLE: no test
+            // query can provoke a budget elapse through the bindings (neither exposes
+            // `query.max_execution_time`), which is the exact case this hook exists
+            // for. Fields are representative, not meaningful — the probe asserts the
+            // CLASS, not the figures.
+            FfiErrorVariant::QueryTimeout => Error::QueryTimeout {
+                operation: "sample.query".to_string(),
+                elapsed: std::time::Duration::from_millis(1500),
+                limit: std::time::Duration::from_millis(1000),
+            },
         };
         Some(sample)
     }

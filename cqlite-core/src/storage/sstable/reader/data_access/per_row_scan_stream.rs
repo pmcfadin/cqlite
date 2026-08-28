@@ -87,6 +87,21 @@ impl SSTableReader {
         admission: ScanAdmission,
     ) -> RowScanStream {
         let (tx, rx) = mpsc::channel(buffer_size.max(1));
+        // Read-metric grain (issue #1701): a DIRECT scan is a top-level read
+        // OPERATION and is measured with this reader's format label. An `Exempt`
+        // sub-scan is one generation of a fan-out merge — the merge's own stream is
+        // the measured operation, so measuring here too would double-count its rows.
+        // Sampled before `self` moves into the task below.
+        // START the meter BEFORE the spawn (issue #1701, roborev round 7): constructed
+        // after it, the producer task could begin — or finish — before timing began, so
+        // `read.duration` measured less than the operation. Sampling the format label
+        // here also keeps it off `self`, which moves into the task below.
+        let meter = match admission {
+            ScanAdmission::Acquire => Some(crate::observability::read_metrics::ReadOpMeter::start(
+                Some(self.sstable_format_label()),
+            )),
+            ScanAdmission::Exempt => None,
+        };
         // Issue #3124 (site 2): the task's `JoinHandle` is RETAINED, not discarded.
         // This task is the per-generation producer a fan-out k-way merge primes a
         // head from; before this, a task that UNWOUND (a decode panic, an abort)
@@ -103,7 +118,10 @@ impl SSTableReader {
                 let _ = tx.send(Err(e)).await;
             }
         });
-        RowScanStream::new(rx, task)
+        match meter {
+            Some(meter) => RowScanStream::new_measured_rows(rx, task, meter),
+            None => RowScanStream::new(rx, task),
+        }
     }
 
     async fn run_scan_stream(
@@ -202,6 +220,22 @@ impl SSTableReader {
             // Non-stitching formats already read block-by-block; emit per block so
             // only one block's entries are live at a time.
             while let Some(block) = self.read_next_block(&cursor).await? {
+                // #1695: observe consumer closure once per BLOCK, not only on a send.
+                // The four `continue` paths below (table-id mismatch, below `start`,
+                // above `end`, tombstone-filtered) reach no send, so a scan whose
+                // filters reject everything used to read and PARSE every block of the
+                // table after the caller already had its `QueryTimeout`. Found by
+                // sweeping this class rather than waiting for it to be reported: it is
+                // the same defect as `generation_merge`'s producer and the query-layer
+                // producer, in a third place.
+                //
+                // A plain check suffices here, where the query layer needed a `select!`
+                // on `tx.closed()`: this loop's await is a bounded disk read, not an
+                // open-ended wait on another producer, so it always returns to the
+                // check. One block is the loop's own unit of work.
+                if tx.is_closed() {
+                    return Ok(());
+                }
                 let entries =
                     self.parse_block_entries_with_schema(&block, schema.as_ref(), true)?;
                 for (entry_table_id, entry_key, entry_value) in entries {

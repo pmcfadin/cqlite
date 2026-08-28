@@ -192,11 +192,143 @@ pub async fn collect_query_result(
     query: &str,
     display_limit: Option<usize>,
 ) -> Result<cqlite_core::query::result::QueryResult> {
-    use cqlite_core::query::result::{QueryResult, StreamingConfig};
+    use cqlite_core::query::result::StreamingConfig;
 
-    let mut iter = database
+    // Issue #1695 — the operator's budget must cover CONSUMPTION, not just setup.
+    //
+    // The engine's ONE chokepoint wrapper bounds the `execute_streaming` FUTURE, i.e.
+    // setup and time-to-first-batch. It structurally cannot bound what happens after
+    // that future returns, and that is where a CLI query spends essentially all of
+    // its time: the `next_async()` loop drives the incremental scan. Since the CLI is
+    // the only consumer that sets `performance.query_timeout_ms`, leaving consumption
+    // unbounded leaves the knob a placebo on the runaway full scan #1695 exists to
+    // bound.
+    //
+    // SETUP IS AWAITED OUTSIDE ANY CLI TIMEOUT, deliberately (roborev round 6). An
+    // earlier revision wrapped setup AND consumption in one CLI timeout, which
+    // started microseconds BEFORE the engine's identical-duration bound and so always
+    // won the race — dropping the engine's future before its `bounded()` could record
+    // the elapse, and silently costing `error_queries` and
+    // `cqlite.errors.total{category="timeout"}` an event the engine was supposed to
+    // own. Now a setup elapse belongs to the engine, is recorded by the engine, and
+    // propagates through `?`; the CLI bounds only what the engine cannot reach, using
+    // whatever of the budget is LEFT.
+    let budget = database.config().query.max_execution_time;
+    let started = std::time::Instant::now();
+
+    let iter = database
         .execute_streaming(query, StreamingConfig::default())
         .await?;
+
+    // `Duration::ZERO` is the documented "no timeout" sentinel: no deadline at all.
+    let deadline = if budget.is_zero() {
+        None
+    } else {
+        // NOTE the asymmetry with the sentinel: a REMAINING budget of zero means
+        // EXPIRED, not unbounded. `checked_sub` returning `None`, or a zero
+        // remainder, both mean setup consumed the whole budget — so consumption gets
+        // a deadline already in the past rather than an unbounded run.
+        let remaining = budget.checked_sub(started.elapsed()).unwrap_or_default();
+        // `Instant + Duration` PANICS when the sum is unrepresentable, and `remaining`
+        // derives from operator config (`performance.query_timeout_ms`), so a huge
+        // value must not abort the process. `checked_add` returning `None` lands on
+        // the same `None` this function already uses for "unbounded" — which is the
+        // right meaning, since an unrepresentable deadline is astronomically far
+        // away. Mirrors the core's treatment in `deadline::bound_tracked`.
+        tokio::time::Instant::now().checked_add(remaining)
+    };
+
+    collect_rows_until(iter, display_limit, deadline, started, budget).await
+}
+
+/// Drain a streaming query into a `QueryResult`, abandoning it at `deadline`.
+///
+/// `deadline` is an ABSOLUTE instant rather than a duration so that "already
+/// expired" is expressible and therefore TESTABLE BY CONSTRUCTION: a caller can
+/// pass an instant in the past and `timeout_at` reports `Elapsed` on the first poll,
+/// with no reliance on a clock advancing during the test (roborev round 6, the same
+/// correction applied to the core's `bound_tracked_until`). `None` means unbounded.
+///
+/// `started`/`budget` are carried only to report the MEASURED elapsed and the
+/// configured limit in the error — never to re-derive the deadline.
+#[cfg(feature = "state_machine")]
+pub async fn collect_rows_until(
+    iter: cqlite_core::query::result::QueryResultIterator,
+    display_limit: Option<usize>,
+    deadline: Option<tokio::time::Instant>,
+    started: std::time::Instant,
+    budget: std::time::Duration,
+) -> Result<cqlite_core::query::result::QueryResult> {
+    let Some(deadline) = deadline else {
+        return collect_streamed_rows(iter, display_limit).await;
+    };
+
+    // Reject an ALREADY-EXPIRED deadline before polling collection at all.
+    // `timeout_at` polls its inner future FIRST and only then consults the deadline,
+    // so an expired deadline still returns `Ok` whenever collection happens to be
+    // immediately ready — `display_limit = Some(0)` breaks the loop on its first
+    // iteration, and a fully buffered stream can complete without yielding. Relying
+    // on `timeout_at` alone therefore made "expired means timeout before pulling
+    // rows" true only for streams that happen not to be ready (roborev round 7);
+    // this makes it true by construction, which is also what lets the test assert it.
+    if deadline <= tokio::time::Instant::now() {
+        return Err(expired(started, budget));
+    }
+
+    let collect = collect_streamed_rows(iter, display_limit);
+    match tokio::time::timeout_at(deadline, collect).await {
+        Ok(result) => result,
+        // Dropping `collect` drops the iterator, closing the channel and retiring the
+        // producer — the same teardown the `--limit` break relies on.
+        //
+        // KNOWN GAP, documented rather than papered over: this CLI-layer elapse does
+        // NOT increment `error_queries` or the timeout telemetry counter, because
+        // `inc_error_queries` is private to the engine and the engine is not involved
+        // in consumption. Closing it properly means carrying the deadline into the
+        // core streaming producer so core owns and records it — which is the
+        // per-batch bound the issue explicitly deferred. Follow-up.
+        Err(_elapsed) => Err(expired(started, budget)),
+    }
+}
+
+/// The CLI-layer collection elapse. One constructor for both exits (the up-front
+/// expired-deadline check and the `timeout_at` arm) so they cannot drift in
+/// operation name, reported figures or context.
+#[cfg(feature = "state_machine")]
+fn expired(started: std::time::Instant, budget: std::time::Duration) -> anyhow::Error {
+    let err = cqlite_core::Error::QueryTimeout {
+        operation: "cli.query.collect".to_string(),
+        // MEASURED, never assumed equal to the budget: a blocked poll can overshoot,
+        // and the real figure tells an operator "budget too tight" from "one decode
+        // unit is uninterruptibly slow".
+        elapsed: started.elapsed(),
+        limit: budget,
+    };
+    // #1695 (roborev raised this in five rounds): record the timeout on the SAME
+    // observability error stream the engine uses, so a consumption-phase elapse is
+    // not invisible to `cqlite.errors.total{category="timeout"}`. Consumption is
+    // where a CLI scan spends its time, so without this a dashboard could read zero
+    // timeouts while operators were seeing them.
+    //
+    // `record_error` is the engine's own public sink, not a second mechanism, and the
+    // two callers observe DISJOINT events — the engine records a SETUP elapse, this
+    // records a CONSUMPTION elapse — so nothing is double counted.
+    //
+    // Still NOT covered, and narrower than before: the engine's `error_queries`
+    // counter, which is private query accounting for work the engine itself executed.
+    // The CLI's consumption phase is not an engine query execution, so folding it in
+    // there would misreport that counter's meaning.
+    cqlite_core::observability::record_error(&err, "query");
+    anyhow::Error::new(err).context("CLI query exceeded performance.query_timeout_ms")
+}
+
+/// The unbounded consumption loop; [`collect_rows_until`] applies the deadline.
+#[cfg(feature = "state_machine")]
+async fn collect_streamed_rows(
+    mut iter: cqlite_core::query::result::QueryResultIterator,
+    display_limit: Option<usize>,
+) -> Result<cqlite_core::query::result::QueryResult> {
+    use cqlite_core::query::result::QueryResult;
 
     let mut rows = Vec::new();
     loop {

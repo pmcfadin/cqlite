@@ -72,7 +72,24 @@ pub(super) fn spawn_windowed_forwarder(
             // Per-row (historical) surface: FLATTEN each confirmed batch back
             // into single `(RowKey, ScanRow)` items. One send per row.
             WindowedOut::PerRow(tx) => {
-                while let Some(batch) = batch_rx.recv().await {
+                loop {
+                    // #1695: race OUR consumer's closure against the upstream batch.
+                    // A forwarder has no skip paths, so it notices closure on its next
+                    // send — but only once a batch ARRIVES. While parked in `recv()` it
+                    // notices nothing, and the parse half upstream can be filtering
+                    // every row (its own filters reach no send either), so the whole
+                    // chain could sit idle-but-alive while upstream burned CPU to EOF.
+                    // That composite case is why "a parked forwarder burns nothing" was
+                    // the wrong reason to call this safe (roborev round 12).
+                    // `biased` so an already-gone consumer wins over a ready batch.
+                    let batch = tokio::select! {
+                        biased;
+                        _ = tx.closed() => return,
+                        next = batch_rx.recv() => match next {
+                            Some(batch) => batch,
+                            None => break,
+                        },
+                    };
                     match batch {
                         Ok(rows) => {
                             for entry in rows {
@@ -95,7 +112,16 @@ pub(super) fn spawn_windowed_forwarder(
             // through — one send per batch, not per row. A terminal error is
             // forwarded as one item then the stream ends.
             WindowedOut::Batched(tx) => {
-                while let Some(batch) = batch_rx.recv().await {
+                loop {
+                    // #1695: same race as the per-row arm above.
+                    let batch = tokio::select! {
+                        biased;
+                        _ = tx.closed() => return,
+                        next = batch_rx.recv() => match next {
+                            Some(batch) => batch,
+                            None => break,
+                        },
+                    };
                     let terminal = batch.is_err();
                     if tx.send(batch).await.is_err() {
                         return; // consumer dropped

@@ -1,0 +1,7 @@
+# started on Thu Aug 27 19:38:31 2026
+
+228616362031,,instructions,40041108238,100.00,1.62,insn per cycle
+140794065293,,cycles,40009897939,100.00,3.519,GHz
+57268923848,,L1-dcache-loads,40009591924,100.00,1.431,G/sec
+1093020564,,L1-dcache-load-misses,40009514948,100.00,1.91,of all L1-dcache accesses
+40009205575,,task-clock,40009205575,100.00,1.600,CPUs utilized

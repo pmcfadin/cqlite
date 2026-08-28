@@ -18,6 +18,7 @@
 #![cfg(not(feature = "tombstones"))]
 
 use super::SSTableManager;
+use crate::observability::read_metrics::ReadOpMeter;
 use crate::schema::TableSchema;
 use crate::types::{ScanRow, TableId};
 use crate::{Result, RowKey};
@@ -34,6 +35,16 @@ impl SSTableManager {
         partition_key: &[u8],
         schema: Option<&TableSchema>,
     ) -> Result<Option<Vec<(RowKey, ScanRow)>>> {
+        // ONE meter for the whole logical read, started at FUNCTION ENTRY (issue
+        // #1701, roborev B1/F4/round-4) so the reader-lock + resolution latency below
+        // is inside the reported duration. Format-agnostic (`None`) like every other
+        // MANAGER-seam meter (`manager_point_read`, the `mod.rs` scans): at entry we
+        // do not yet know this is a single-generation read, and a label is attached
+        // only when the operation provably reads one SSTable of a known format.
+        //
+        // DISCARDED on every `Ok(None)` exit — see the returns below.
+        let mut meter = ReadOpMeter::start(None);
+
         // Issue #1591: snapshot the reader list and DROP the read guard before any
         // I/O (candidate prune + the block-walk delegated to the reader).
         let (reader_list, _fully_qualified_match) = self.resolve_reader_snapshot(table_id).await;
@@ -73,11 +84,30 @@ impl SSTableManager {
         }
 
         if candidates.len() != 1 {
+            // DECLINED: the caller re-runs this read through the metered forward
+            // path (`scan_partition_clustering`), which emits its own operation.
+            // `Drop` emits, so the meter must be DISCARDED rather than dropped, or
+            // one `ORDER BY DESC` read would report two durations.
+            meter.discard();
             return Ok(None);
         }
 
-        candidates[0]
+        let rows = candidates[0]
             .big_reverse_partition_rows(partition_key, schema)
-            .await
+            .await?;
+
+        match &rows {
+            // SERVED here: this is the operation. Count the returned rows (the
+            // reverse walk materialises them, so this is bookkeeping over a result
+            // the caller already holds) and emit once.
+            Some(materialized) => {
+                meter.record_keys(materialized.iter().map(|(key, _)| key));
+                meter.finish();
+            }
+            // DECLINED inside the reader (narrow/static/variable-width clustering, an
+            // open range-tombstone marker): same fallback, same discard.
+            None => meter.discard(),
+        }
+        Ok(rows)
     }
 }

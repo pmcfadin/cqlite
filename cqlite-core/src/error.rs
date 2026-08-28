@@ -76,6 +76,31 @@ pub enum Error {
     #[error("Operation timeout: {0}")]
     Timeout(String),
 
+    /// A query exceeded the configured `query.max_execution_time` budget
+    /// (issue #1695).
+    ///
+    /// Raised by the SINGLE timeout wrapper at the query-engine chokepoint (see
+    /// `crate::query::engine::deadline`), never by an ad-hoc clock check inside a
+    /// scan loop. Deliberately a variant of its own — distinct from
+    /// [`Error::Timeout`] (an I/O-level timeout) and from every corruption
+    /// variant — so an operator-imposed budget can never be mistaken for damaged
+    /// data: it classifies as its own bounded telemetry category
+    /// (`crate::observability::ErrorCategory::Timeout`).
+    #[error(
+        "query exceeded the configured query.max_execution_time budget of {limit:?} \
+         (elapsed {elapsed:?}) at {operation}; raise query.max_execution_time \
+         (CLI: performance.query_timeout_ms), narrow the query with a \
+         partition-key WHERE or a LIMIT, or set it to 0 for no timeout"
+    )]
+    QueryTimeout {
+        /// The bounded entry point that elapsed (e.g. `query.execute`).
+        operation: String,
+        /// Time actually spent before the budget was abandoned.
+        elapsed: std::time::Duration,
+        /// The configured budget (`query.max_execution_time`).
+        limit: std::time::Duration,
+    },
+
     /// Invalid path error
     #[error("Invalid path: {0}")]
     InvalidPath(String),
@@ -465,6 +490,10 @@ impl Error {
             Error::InvalidPath(_) => false,
             Error::InvalidState(_) => false,
             Error::Timeout(_) => false,
+            // Issue #1695: re-running the same query under the same budget elapses
+            // again — the operator must raise `query.max_execution_time` or narrow
+            // the query (same reasoning as `ResultTooLarge`).
+            Error::QueryTimeout { .. } => false,
             Error::UnsupportedQuery(_) => false,
             // A cancelled operation is deliberate, not a transient fault: re-running
             // it would just be cancelled again. The caller decides whether to retry.
@@ -517,6 +546,12 @@ impl Error {
             Error::InvalidPath(_) => ErrorCategory::System,
             Error::InvalidState(_) => ErrorCategory::Logic,
             Error::Timeout(_) => ErrorCategory::System,
+            // Issue #1695: a query-budget elapse is a QUERY-lifecycle outcome, not
+            // a `Data` (corruption/serialization) fault. The developer-facing
+            // taxonomy is deliberately left at 14 variants (adding one breaks the
+            // bindings' public code mapping); the DISTINCT bucket lives in the
+            // telemetry taxonomy — see `observability::ErrorCategory::Timeout`.
+            Error::QueryTimeout { .. } => ErrorCategory::Query,
             Error::UnsupportedQuery(_) => ErrorCategory::Query,
             Error::Cancelled => ErrorCategory::Cancelled,
         }

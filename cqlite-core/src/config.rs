@@ -445,7 +445,26 @@ pub enum ReadPathMode {
 /// Query engine configuration
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct QueryConfig {
-    /// Maximum query execution time
+    /// Maximum wall-clock budget for ONE query execution (issue #1695).
+    ///
+    /// ENFORCED, not advisory: every public query entry point on the engine
+    /// (`execute`, `execute_streaming`, `execute_with_params`, `execute_prepared`)
+    /// runs under a single `tokio::time::timeout` at the engine chokepoint and
+    /// fails with [`crate::Error::QueryTimeout`] when the budget elapses.
+    ///
+    /// **`Duration::ZERO` is the "no timeout" sentinel** — an explicitly LEGAL
+    /// value meaning unbounded execution ([`Config::validate`] never rejects it).
+    /// There is no `Option` here, so `ZERO` is the only way to disable the bound.
+    /// The CLI knob is `performance.query_timeout_ms` (0 ⇒ unbounded).
+    ///
+    /// For `execute_streaming` the budget covers the whole SETUP future — parse,
+    /// plan, stream setup, and (for the plan shapes that materialize before
+    /// streaming) the entire scan — but NOT the caller's later row consumption
+    /// from the returned iterator; see
+    /// [`crate::query::engine::QueryEngine::execute_streaming`] for the exact
+    /// scope.
+    ///
+    /// Default: 300s.
     pub max_execution_time: Duration,
 
     /// Force the SELECT access-path decision (issue #1918).
@@ -904,6 +923,15 @@ impl Config {
                 compaction.max_threshold, compaction.min_threshold
             )));
         }
+
+        // Query execution budget (issue #1695). `Duration::ZERO` is the documented
+        // "no timeout" sentinel and is therefore explicitly LEGAL: validation must
+        // never reject it (pinned by `config_validate_accepts_the_zero_sentinel`
+        // in `tests/issue_1695_query_timeout.rs`). Every non-zero value is a real
+        // budget honoured at the engine chokepoint — a `Duration` cannot be
+        // negative and any positive budget is enforceable — so there is nothing
+        // further to reject here. This arm exists so a future "must be > 0" rule
+        // cannot be added without confronting the sentinel contract.
 
         // Validate bloom filter settings
         if self.storage.enable_bloom_filters
