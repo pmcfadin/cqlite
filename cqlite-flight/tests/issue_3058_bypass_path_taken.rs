@@ -508,6 +508,7 @@ async fn fast_arm_stream_stops_when_the_client_drops_it() {
     // Reset UNDER `PROBE_LOCK` (held for this whole test): a producer from a
     // previous case in this binary must not be able to publish into this count.
     cqlite_core::storage::read_path_probe::reset_query_row_producers_finished();
+    cqlite_core::storage::read_path_probe::reset_batched_scans_finished();
     let (_temp, data_dir) = build_generations(vec![rows]).await;
     assert_eq!(count_data_dbs(&data_dir), 1);
 
@@ -566,24 +567,32 @@ async fn fast_arm_stream_stops_when_the_client_drops_it() {
          partition bodies so far)",
         work_counters::stream_walk_partitions_parsed()
     );
-    // The completion signal proves the OUTER query-row producer stopped. It does
-    // NOT prove the INNER batched scan task has (roborev, issue #3384):
-    // `drive_full_scan_rows` drops `BatchedScanStream` on its way out and that task
-    // is never joined. The trail is BOUNDED and cannot run away — the inner loop
-    // consults its consumer only when a batch fills, so once the receiver is dropped
-    // it decodes at most one more `BATCH_EMIT_ROWS` batch before its `send` fails and
-    // it returns — but "bounded" is not "finished", so let that trail land before
-    // reading rather than reading the instant the outer thread exits.
+    // BOTH halves must be observed before the counter is final (roborev, issue
+    // #3384). The signal above proves the OUTER query-row producer stopped pulling;
+    // it does NOT prove the INNER batched scan task has stopped DECODING, because
+    // `drive_full_scan_rows` drops `BatchedScanStream` without joining its task.
     //
-    // MEASURED, not assumed: without this window the observed maximum was 1280; with
-    // it, 2370. The earlier reads were genuinely non-final. Convergence checked too —
-    // a 10x longer window gives 2048, i.e. LOWER, so the spread is run-to-run variance
-    // and not window-dependence. This is a drain window for a bounded amount of work,
-    // never a deadline, and no assertion here compares an elapsed duration to a
-    // threshold (#2642).
-    for _ in 0..200 {
+    // A fixed drain interval was the first attempt and it was WRONG for this issue's
+    // own reason: it makes the race less likely instead of removing it, and a
+    // descheduled or regressed task can still increment after the sample. So wait on
+    // the inner task's own causal completion signal instead. The bound below is a
+    // liveness guard, never a deadline.
+    let mut inner_done = false;
+    for _ in 0..6_000 {
         tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+        if cqlite_core::storage::read_path_probe::batched_scans_finished() > 0 {
+            inner_done = true;
+            break;
+        }
     }
+    assert!(
+        inner_done,
+        "the detached batched scan task never terminated after the client dropped \
+         the stream — the abandoned walk is still decoding (counter at {} of \
+         {PARTITIONS})",
+        work_counters::stream_walk_partitions_parsed()
+    );
+    // Both producers have provably finished, so this is the FINAL count.
     let settled = work_counters::stream_walk_partitions_parsed();
     // Observability for the issue-#3384 measurement: under `--nocapture` this
     // prints the observed read-ahead, so the distribution can be re-measured

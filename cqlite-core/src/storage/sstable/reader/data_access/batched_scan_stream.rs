@@ -33,6 +33,15 @@
 
 use super::*;
 
+/// Publishes detached-scan completion on drop — see the spawn site (issue #3384).
+struct ScanTaskDone;
+
+impl Drop for ScanTaskDone {
+    fn drop(&mut self) {
+        crate::storage::read_path_probe::mark_batched_scan_finished();
+    }
+}
+
 /// Batches the public BATCHED-scan channel below holds for a given `buffer_size`.
 ///
 /// Sizing the channel to `ceil(buffer_size / BATCH_EMIT_ROWS)` batches keeps its
@@ -121,6 +130,17 @@ impl SSTableReader {
             ScanAdmission::Exempt => None,
         };
         let task = tokio::spawn(async move {
+            // CAUSAL completion signal for THIS detached task (issue #3384,
+            // roborev). `BatchedScanStream` is dropped without joining its task, so
+            // a consumer that stopped reading cannot otherwise tell "the scan
+            // finished" from "the scan is descheduled between two increments".
+            //
+            // It is a DROP guard, not a statement at the end of the block, because
+            // the common exit here is CANCELLATION, not completion: the query-row
+            // producer owns a `current_thread` runtime and drops it as it returns,
+            // which cancels this future at its next await — so a trailing statement
+            // would never run. Measured: it never fired. Drop runs on both paths.
+            let _done = ScanTaskDone;
             if let Err(e) = self
                 .run_scan_stream_batched(
                     table_id,

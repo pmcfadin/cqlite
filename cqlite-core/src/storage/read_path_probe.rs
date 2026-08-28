@@ -156,6 +156,33 @@ pub fn query_row_producers_finished() -> u64 {
     QUERY_ROW_PRODUCERS_FINISHED.load(Ordering::Acquire)
 }
 
+/// Detached `BatchedScanStream` tasks that have terminated, published with
+/// RELEASE ordering (issue #3384).
+static BATCHED_SCANS_FINISHED: AtomicU64 = AtomicU64::new(0);
+
+/// Publish that one detached batched-scan task has terminated.
+///
+/// The INNER half of the abandoned-walk completion story. `mark_query_row_producer_finished`
+/// proves the outer query-row thread stopped pulling; this proves the detached task it
+/// dropped without joining has stopped DECODING. Only both together make
+/// `stream_walk_partitions_parsed` final — waiting a fixed interval instead merely
+/// makes the race less likely, which is the defect this issue exists to remove.
+pub fn mark_batched_scan_finished() {
+    BATCHED_SCANS_FINISHED.fetch_add(1, Ordering::Release);
+}
+
+/// Detached batched-scan tasks that have terminated since
+/// [`reset_batched_scans_finished`] (issue #3384). `Acquire`, for the same
+/// happens-before reason as [`query_row_producers_finished`].
+pub fn batched_scans_finished() -> u64 {
+    BATCHED_SCANS_FINISHED.load(Ordering::Acquire)
+}
+
+/// Zero the detached batched-scan completion count (issue #3384).
+pub fn reset_batched_scans_finished() {
+    BATCHED_SCANS_FINISHED.store(0, Ordering::Release);
+}
+
 /// Zero the completion count. A test that will wait on
 /// [`query_row_producers_finished`] must call this first, while holding whatever
 /// lock serializes producers in its binary.
