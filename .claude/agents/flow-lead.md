@@ -148,7 +148,7 @@ There is a shared **claim board** — a GitHub Project (v2) with a `Status` sing
 same item. The deciding cross-machine lock is the slugless fixed-name ref **`refs/claims/issue-<N>`**
 acquired via `bash scripts/flow/claim.sh claim <N>` (#2665 — assignee `@me` is identical for the same
 GitHub user on two machines, so assignee alone is NOT a lock; the `issue-<N>-<slug>` branch is PR
-plumbing, NOT the lock). **`refs/claims/issue-<N>` and `refs/machine-claims/<machine>` are DISTINCT
+plumbing, NOT the lock). **`refs/claims/issue-<N>` and `refs/lane-claims/<machine>/<issue>` are DISTINCT
 namespaces**: the former is the per-issue lock (`claim.sh`), the latter the supervisor-authored
 *machine-busy* stamp (#2655/#2499) that feeds the CI reaper — reading one as the other double-claims.
 A session claims the issue ref FIRST (git arbitrates the atomic push server-side),
@@ -159,17 +159,25 @@ for the render + reaper. The claiming session also maintains a liveness **heartb
 claim time and every stage transition) that `flow-board` uses for deterministic reaping (age > 4h AND no
 open PR), replacing the old "no recent commits" guesswork (issue #2089).
 
-- **One active worker per machine; the worker paces the machine's load (#1930).** A single lead/worker
-  session owns a machine at a time — this is the load + worktree-isolation rule that sits *above* the
-  claim protocol. Two efforts on one box collide on the shared worktree (the 2026-07-04 #1582 retro: a
-  second session live-edited the worktree mid-gate, breaking the tree) and oversubscribe the CPU, which
+- **~~One active worker per machine~~ RETRACTED (#3393 owner ruling, 2026-08-28) — MULTIPLE LANES PER
+  BOX IS THE MODEL. Two rules survive it, and they are the ones that were doing the work:**
+  **(1) NEVER TWO SESSIONS IN ONE WORKTREE**, and **(2) the box's load is yours to pace.** The
+  retracted part was the worker *count*; the isolation and load concerns were always the substance.
+  Both remain evidenced: the 2026-07-04 #1582 retro (a second session live-edited a worktree mid-gate,
+  breaking the tree) recurred on 2026-08-28 (#3436 — a second session entered an occupied, *claimed*
+  lane; only the gate's `tree-integrity` check noticed). Note what that implies: the claim ref is a
+  hard control **cross-machine** only, because git arbitrates the push; locally it is advisory against
+  a session that never reads it, and nothing yet owns the lane directory itself.
+  Sharing a worktree collides, and oversubscribing the CPU, which
   flakes scheduling-sensitive tests (`test_write_throughput`, `test_streaming_next_releases_gil`) and can
   SIGKILL gates. The owning worker is responsible for load: **serialize your OWN full-gate runs — never two
   full `scripts/agent-gate.sh` at once on one box** (the machine-wide gate cap #1825 is a backstop, not a
   license to overlap). **Subagents are exempt** — a worker fanning out `sstable-developer`/reviewers is not
   "multiple workers"; the worker orchestrates and paces them, and they never launch competing full gates.
-  The rule targets independent lead/worker *sessions*. The claim protocol below still governs *cross-machine*
-  issue ownership (one-per-machine handles a single box; different machines coordinate via the `refs/claims/issue-<N>` ref lock).
+  The load rule targets independent lead/worker *sessions* on one box, of which there may now be several.
+  The claim protocol below governs issue ownership; per-lane claim refs
+  (`refs/lane-claims/<machine>/<issue>`, #3393) make each lane on a box independently observable, which
+  one-ref-per-machine could not do.
 - **Default (recommended): one lead → subagents.** A single `flow-lead` spawns subagents and assigns each
   **disjoint** work — zero dup by construction. Subagents never self-select overlapping work; the lead
   hands out distinct tasks.

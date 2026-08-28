@@ -319,7 +319,16 @@ the worker LLM *remembering* to `beat`, and the reap threshold was enforced only
 exit — where `reap` **refuses to delete a claim whose issue still has an open PR** (an unfinished endgame
 stays owned for adoption rather than orphaned; the #2499 orphaned-endgame case). This `refs/machine-claims/*`
 namespace is deliberately distinct from `claim.sh`'s per-issue lock `refs/claims/issue-<N>`.
-`claim-heartbeat.sh should-reap <machine>` is the single, **fail-safe** reap predicate (exit `0` = reap,
+**Claims are PER LANE since #3393's owner ruling** — `refs/lane-claims/<machine>/<issue>`, replacing
+one-ref-per-machine. The old layout was justified by #1930's "one worker per machine", which the fleet
+had not followed all day: several lanes on a box overwrote each other's claim, so a monitor could see
+at most one and two of #3393's three silent lane deaths (both on one host) were structurally
+invisible. **#1930 is retracted; design for N lanes per box.** The legacy `refs/machine-claims/*` is
+still *read* so a pre-ruling ref is drained rather than pinning its board item at In Progress
+forever. A new namespace was required rather than a sub-path because git forbids a ref being both a
+file and a directory, and `<machine>-<issue>` is ambiguous when machine names contain dashes.
+
+`claim-heartbeat.sh should-reap <machine> [issue]` is the single, **fail-safe** reap predicate (exit `0` = reap,
 `1` = keep, `2` = no ref): it reaps ONLY when age > threshold (4h) **AND** the issue has no open PR **AND**
 (the PID is dead, *when the claim is local* — a foreign machine's PID is unknowable, so from CI that clause
 is skipped and age + no-open-PR govern). It KEEPS on a fresh ref, an open PR, a live local PID, or an

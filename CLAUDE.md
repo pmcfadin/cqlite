@@ -902,7 +902,12 @@ end-to-end test. Green helper-only unit tests are not sufficient.
   not prose. `worker-supervisor.sh` stamps `refs/machine-claims/<machine>` (issue+supervisor-PID+ts)
   via `claim-heartbeat.sh stamp` at every spawn, refreshes it each iteration, and clears it on a
   clean exit (`reap`, which REFUSES when the issue still has an open PR — an unfinished endgame stays
-  owned for adoption, never orphaned). This namespace is distinct from `claim.sh`'s per-issue lock
+  owned for adoption, never orphaned). **The ref is PER LANE — `refs/lane-claims/<machine>/<issue>`
+  — since #3393's ruling**; the old per-machine `refs/machine-claims/<machine>` is legacy and is
+  still *read* by `list-claims`, `dead-lanes` and the CI reaper purely so a pre-ruling ref gets
+  drained (an un-enumerated claim ref pins its board item at In Progress indefinitely). `reap` and
+  `should-reap` take `<machine> [issue]`: with an issue they act on the lane, without one on the
+  legacy ref. This namespace is distinct from `claim.sh`'s per-issue lock
   `refs/claims/issue-<N>`. `claim-heartbeat.sh should-reap <machine> [secs]` is the single, fail-safe
   reap predicate (exit 0 = reap, 1 = keep, 2 = no ref): reap ONLY on age > threshold (4h) AND no open
   PR AND (pid-dead, when the claim is local — a foreign machine's PID is unknowable). It KEEPS on a
@@ -949,14 +954,27 @@ end-to-end test. Green helper-only unit tests are not sufficient.
   persistent red run is the alert, replacing the old silent green `::notice::` no-op. The scheduled
   board sweep only backlogs a null-status issue once it is past a 10-min auto-add grace window, so it
   no longer races the built-in Auto-add's default-status write.
-- **One worker per machine (#1930)**: one lead/worker session owns a box; it fans out subagents but
-  keeps to **one full gate at a time** — enforced mechanically (#2640): `bootstrap-agent-machine.sh`
+- **~~One worker per machine (#1930)~~ RETRACTED — MULTIPLE LANES PER MACHINE IS THE STANDING MODEL
+  (#3393, owner ruling 2026-08-28).** The invariant was false in practice all day (the fleet runs up
+  to 4 lanes per box on standing instruction) and leaving it written is what caused the defect it
+  was supposed to prevent: `refs/machine-claims/<machine>` was designed one-ref-per-machine *because*
+  of this text, so several lanes on one box overwrote each other's claim and `dead-lanes` could report
+  at most one — which is why two of #3393's three silent lane deaths, both on one host, were
+  structurally invisible. Claims are now **per LANE**:
+  `refs/lane-claims/<machine>/<issue>` (a new namespace, because git forbids a ref being both a file
+  and a directory, and `<machine>-<issue>` is ambiguous when machine names contain dashes). Read
+  "one worker per machine" nowhere as a design constraint; design for N lanes per box.
+  **What DOES still hold — one full gate at a time per machine**, which is a resource
+  bound and not a worker-count invariant — enforced mechanically (#2640): `bootstrap-agent-machine.sh`
   pins `CQLITE_GATE_MAX_CONCURRENCY=1` (the #1825 cap admits one gate; the per-gate core budget then
   gives it full cores), and every gate derives `CARGO_BUILD_JOBS` + nextest `--test-threads` from its
   slot count and runs under `taskpolicy -c utility`/`nice`, so no manual `pgrep`-serialization is
   needed. It pre-claims by checking the `refs/claims/issue-<N>` ref (`claim.sh status <N>`) AND any legacy
-  `issue-<N>-*` branch. Multiple independent sessions → separate
-  machines, each claim-protocol-gated; NEVER N bare leads without the protocol. Unattended runs:
+  `issue-<N>-*` branch. Multiple sessions on ONE machine are now expected, each
+  claim-protocol-gated; NEVER N bare sessions without the protocol — and note the claim ref is a
+  hard control only *cross-machine* (git arbitrates the push). Locally it is advisory: a session
+  that never consults it can still walk into an occupied lane directory, which happened
+  (#3436). Unattended runs:
   `scripts/local/worker-supervisor.sh` (#2090) recycles ONE worker process per issue (hard context
   bound = process exit; the worker writes `.worker-last-iteration.json` then EXITs — never a second
   issue per session), with flock single-instance + preflight + crash-loop breaker + budgets + ntfy
