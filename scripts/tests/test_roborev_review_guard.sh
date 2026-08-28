@@ -4786,59 +4786,118 @@ fi
 # guard written with its needle spelled literally matches its own pattern lines and reports the
 # defect against itself — measured: four self-hits on the first run. Splitting is the same device
 # the scanner-substitution assert uses, for the same reason.
+#
+# THE GRAMMAR IS CLOSED OVER OCCURRENCES, NOT LINES (roborev job 34 on this PR, Medium). The first
+# version was closed over LINES and over ONE SPELLING, and was therefore not closed at all — it had
+# three bypasses, each of which would have let a mutable doctrine read back in silently:
+#   (a) `"${WRAPPER}"`  — braced; the scan only knew the unbraced spelling;
+#   (b) `$WRAPPER`      — unquoted; likewise unrecognised;
+#   (c) `bash "$WRAPPER"; grep -c x "$WRAPPER"` — a COMPOUND line, where one permitted occurrence
+#       (the invocation) caused the WHOLE line to be accepted, carrying a real scan in with it.
+# That is this issue's own defect one level up: a guard whose green means "no instance of the shape
+# I happened to think of," which is exactly the reasoning #3367 exists to retire. So the grammar now
+# asserts three things, and (1) is what makes (3) tractable — with one legal spelling, the
+# permitted-form test no longer has to parse shell:
+#   (1) SPELLING — every occurrence is written exactly `"$WRAPPER"`. Braced and unquoted forms FAIL.
+#   (2) ARITY    — at most ONE occurrence per line, so no occurrence can ride in on another's verdict.
+#   (3) FORM     — that occurrence's line is an invocation, a whole-value save, or marked.
+#
+# PROSE IS STRIPPED BEFORE ANY OF IT. Comments are dropped, and within a line both single-quoted
+# spans and backslash-escaped `\$` are literal text rather than expansions — this file's own `ok`
+# and `bad` messages NAME the variable while describing the rule, and an earlier version red on
+# exactly those, which is #3367's cause 2 reproduced inside the fix for cause 1.
 _wr_marker='wrapper-mutable''-read-allow'
-_wr_ref='"$WRAP''PER"'
+_wr_vname='WRAP''PER'
+_wr_ref='"$'"$_wr_vname"'"'
 _wr_bad_reads=""
+_wr_bad_spelling=""
+_wr_multi=""
+_wr_total=0
 while IFS= read -r _wr_num_line; do
   [ -n "$_wr_num_line" ] || continue
   # `grep -n` prefixes `NNNN:`; the grammar must judge the CODE, not the line number (an unstripped
   # prefix made every whole-value save look like an assignment to `NNNN:name`, i.e. four false FAILs).
   _wr_line=${_wr_num_line#*:}
-  case "$_wr_line" in
+  _wr_code=$(printf '%s\n' "$_wr_line" | sed -e 's/\\[$]/@ESC@/g' -e "s/'[^']*'//g")
+  # Occurrences of exactly this variable — `$WRAPPER_REAL` is a DIFFERENT name and must not count.
+  _wr_n=$(printf '%s\n' "$_wr_code" | grep -oE '[$][{]?'"$_wr_vname"'[}]?([^A-Za-z0-9_]|$)' | wc -l | tr -d '[:space:]')
+  [ "${_wr_n:-0}" -ge 1 ] || continue
+  _wr_total=$((_wr_total + _wr_n))
+  # (1) SPELLING: every occurrence on this line must be the exact quoted form.
+  _wr_q=$(printf '%s\n' "$_wr_code" | grep -oF "$_wr_ref" | wc -l | tr -d '[:space:]')
+  if [ "${_wr_n:-0}" -ne "${_wr_q:-0}" ]; then
+    _wr_bad_spelling="$_wr_bad_spelling${_wr_bad_spelling:+; }$_wr_num_line"
+    continue
+  fi
+  case "$_wr_code" in
     *"$_wr_marker"*) continue ;;
   esac
-  # An INVOCATION, either bare `bash` or an explicit interpreter path (`"$nobin/bash" "$WRAPPER"`).
-  case "$_wr_line" in
+  # (2) ARITY: one occurrence per line, so a permitted one cannot carry an unpermitted one.
+  if [ "${_wr_n:-0}" -gt 1 ]; then
+    _wr_multi="$_wr_multi${_wr_multi:+; }$_wr_num_line"
+    continue
+  fi
+  # (3) FORM. An INVOCATION, either bare `bash` or an explicit interpreter path.
+  case "$_wr_code" in
     *"bash $_wr_ref"*|*"bash\" $_wr_ref"*) continue ;;
   esac
   # A whole-value SAVE: `NAME="$WRAPPER"` and nothing else on the line.
-  case "$_wr_line" in
+  case "$_wr_code" in
     *"=$_wr_ref")
-      case "${_wr_line%%=*}" in
+      case "${_wr_code%%=*}" in
         ''|*[!A-Za-z0-9_]*) ;;
         *) continue ;;
       esac ;;
   esac
   _wr_bad_reads="$_wr_bad_reads${_wr_bad_reads:+; }$_wr_num_line"
 done <<EOF
-$(grep -nE '"[$]WRAP''PER"' "$TEST_SELF" | grep -vE '^[0-9]+:[[:space:]]*#')
+$(grep -nE '[$][{]?'"$_wr_vname"'[}]?' "$TEST_SELF" | grep -vE '^[0-9]+:[[:space:]]*#')
 EOF
-if [ -z "$_wr_bad_reads" ]; then
-  ok 'structural (#3367): every read of the mutable $WRAPPER is an invocation, a whole-value save, or an explicitly marked opt-out — no doctrine scan takes it as a SUBJECT, so no verdict depends on which case ran last'
+# AFFIRMATIVE MEASUREMENT: zero occurrences means this scan had no subject, which is not a pass.
+if [ "${_wr_total:-0}" -eq 0 ]; then
+  bad 'structural (#3367): the order-dependence grammar found NO occurrence of the mutable wrapper variable at all, so it certified nothing — the variable was renamed, or the prose-stripping swallowed the file'
+elif [ -n "$_wr_bad_spelling" ]; then
+  bad "structural (#3367): an occurrence of the mutable wrapper variable is not spelled as the single legal quoted form, so the form check below cannot see it (braced and unquoted spellings were live bypasses): $(printf '%s' "$_wr_bad_spelling" | cut -c1-200)"
+elif [ -n "$_wr_multi" ]; then
+  bad "structural (#3367): a line carries MORE THAN ONE occurrence of the mutable wrapper variable, so a permitted one (an invocation) would carry an unpermitted one (a doctrine scan) past the grammar: $(printf '%s' "$_wr_multi" | cut -c1-200)"
+elif [ -n "$_wr_bad_reads" ]; then
+  bad "structural (#3367): a read of the mutable wrapper variable matches no permitted form, so its verdict depends on gate-mock ordering — use \$WRAPPER_REAL for a doctrine SUBJECT: $(printf '%s' "$_wr_bad_reads" | cut -c1-200)"
 else
-  bad "structural (#3367): a read of the mutable \$WRAPPER matches no permitted form, so its verdict depends on gate-mock ordering — use \$WRAPPER_REAL for a doctrine SUBJECT: $(printf '%s' "$_wr_bad_reads" | cut -c1-240)"
+  ok "structural (#3367): all $_wr_total occurrences of the mutable wrapper variable use the single legal spelling, sit one per line, and are an invocation, a whole-value save, or a marked opt-out — no doctrine scan takes it as a SUBJECT, so no verdict depends on which case ran last"
 fi
-# The grammar is only closed if it can actually REJECT: a `case` typo falling through to `continue`
-# would accept everything and read green on a clean file, which is the blind-scan shape one level up.
-# Both directions are probed, so neither an over-strict nor an over-lax grammar passes silently.
+# THE GRAMMAR MUST BE ABLE TO REJECT, and specifically to reject the three bypasses roborev found.
+# A control that only probed the shape the author already had in mind is how (a)-(c) survived round
+# one, so each is probed as its own synthetic line, alongside the two forms that must be ACCEPTED.
 _wr_ctl_bad=""
-for _wr_probe in "_x=\$(grep -c foo $_wr_ref)" "sed -n 1p $_wr_ref"; do
-  case "$_wr_probe" in
-    *"$_wr_marker"*|*"bash $_wr_ref"*|*"bash\" $_wr_ref"*) _wr_ctl_bad="$_wr_ctl_bad accepted:$_wr_probe" ;;
-    *"=$_wr_ref") _wr_ctl_bad="$_wr_ctl_bad accepted:$_wr_probe" ;;
+_wr_probe_line() {
+  # Returns: the verdict this grammar gives one synthetic line — spelling|arity|form|ok
+  _p_code=$(printf '%s\n' "$1" | sed -e 's/\\[$]/@ESC@/g' -e "s/'[^']*'//g")
+  _p_n=$(printf '%s\n' "$_p_code" | grep -oE '[$][{]?'"$_wr_vname"'[}]?([^A-Za-z0-9_]|$)' | wc -l | tr -d '[:space:]')
+  _p_q=$(printf '%s\n' "$_p_code" | grep -oF "$_wr_ref" | wc -l | tr -d '[:space:]')
+  [ "${_p_n:-0}" -ne "${_p_q:-0}" ] && { printf 'spelling\n'; return; }
+  [ "${_p_n:-0}" -gt 1 ] && { printf 'arity\n'; return; }
+  case "$_p_code" in *"bash $_wr_ref"*|*"bash\" $_wr_ref"*) printf 'ok\n'; return ;; esac
+  case "$_p_code" in
+    *"=$_wr_ref") case "${_p_code%%=*}" in ''|*[!A-Za-z0-9_]*) ;; *) printf 'ok\n'; return ;; esac ;;
   esac
-done
-for _wr_probe in "_gm_real_wrapper=$_wr_ref" "  bash $_wr_ref --help"; do
-  case "$_wr_probe" in
-    *"bash $_wr_ref"*|*"bash\" $_wr_ref"*) ;;
-    *"=$_wr_ref") case "${_wr_probe%%=*}" in ''|*[!A-Za-z0-9_]*) _wr_ctl_bad="$_wr_ctl_bad rejected:$_wr_probe" ;; esac ;;
-    *) _wr_ctl_bad="$_wr_ctl_bad rejected:$_wr_probe" ;;
-  esac
+  printf 'form\n'
+}
+for _wr_case in \
+  "spelling:_x=\$(grep -c foo \"\${$_wr_vname}\")" \
+  "spelling:_x=\$(grep -c foo \$$_wr_vname)" \
+  "arity:bash $_wr_ref --help; grep -c q $_wr_ref" \
+  "form:_x=\$(grep -c foo $_wr_ref)" \
+  "form:sed -n 1p $_wr_ref" \
+  "ok:  bash $_wr_ref --help" \
+  "ok:_gm_real_wrapper=$_wr_ref"; do
+  _wr_want=${_wr_case%%:*}
+  _wr_got=$(_wr_probe_line "${_wr_case#*:}")
+  [ "$_wr_got" = "$_wr_want" ] || _wr_ctl_bad="$_wr_ctl_bad [want=$_wr_want got=$_wr_got: ${_wr_case#*:}]"
 done
 if [ -z "$_wr_ctl_bad" ]; then
-  ok 'structural control (#3367): the grammar rejects synthetic doctrine SCANS of $WRAPPER and accepts synthetic invocations/saves — it is discriminating in both directions, not vacuously green'
+  ok 'structural control (#3367): the grammar classifies all seven synthetic lines correctly — it rejects the braced, unquoted and compound-line bypasses roborev found, rejects plain doctrine scans, and still accepts invocations and whole-value saves'
 else
-  bad "structural control (#3367): the permitted-form grammar misclassifies a synthetic read —$_wr_ctl_bad"
+  bad "structural control (#3367): the permitted-form grammar misclassifies a synthetic read, so its verdict on the real file is not trustworthy —$_wr_ctl_bad"
 fi
 # ...and `WRAPPER_REAL` must never be reassigned, or it is just `WRAPPER` with a longer name.
 _wr_real_writes=$(grep -cE '^[[:space:]]*WRAPPER_REAL=' "$TEST_SELF")
