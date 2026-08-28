@@ -71,11 +71,12 @@ impl SSTableReader {
         admission: ScanAdmission,
         now_secs: Option<i64>,
     ) -> BatchedScanStream {
-        // The public channel carries BATCHES; sizing it to
-        // `ceil(buffer_size / BATCH_EMIT_ROWS)` batches keeps the resident-row
-        // budget of this channel comparable to the per-row surface's `buffer_size`
-        // rather than `buffer_size * BATCH_EMIT_ROWS`.
-        let cap = buffer_size.div_ceil(BATCH_EMIT_ROWS).max(1);
+        // The public channel carries BATCHES (see `batched_channel_capacity`,
+        // which is the SINGLE definition of this sizing — the query-row stream's
+        // exported read-ahead bound is derived from the same `const fn`).
+        let cap = crate::storage::sstable::reader::scan_stream_windowed::batched_channel_capacity(
+            buffer_size,
+        );
         let (tx, rx) = mpsc::channel(cap);
         // Read-metric grain (issue #1701): identical rule to the per-row surface —
         // an `Acquire` scan is the top-level read OPERATION and is measured with

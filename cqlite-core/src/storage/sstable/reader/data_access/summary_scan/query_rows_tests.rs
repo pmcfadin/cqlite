@@ -244,3 +244,62 @@ fn the_cancel_bridge_is_one_way() {
         "and is propagated into the child so the walk aborts promptly"
     );
 }
+
+/// The exported read-ahead bounds must stay DERIVED from the buffer sizes that
+/// actually run — never a hand-maintained literal (issue #3384).
+///
+/// This is the regression pin for the whole point of the constants: an integration
+/// test sizes its fixture as a multiple of [`QUERY_ROWS_MAX_READ_AHEAD_ROWS`] so
+/// "the abandoned walk stopped early" is structural rather than scheduling luck.
+/// Were a buffer sizing change to leave the constant behind, that test would
+/// silently go back to asserting a coin flip, so each term is pinned here against
+/// the sizing it comes from.
+#[test]
+fn the_exported_read_ahead_bounds_are_derived_from_the_real_buffer_sizes() {
+    assert_eq!(
+        QUERY_ROWS_MAX_RESIDENT_ROWS,
+        QUERY_ROWS_PER_BATCH * (QUERY_ROWS_CHANNEL_BATCHES + 1),
+        "the handoff-channel bound is channel-resident batches + the parked send"
+    );
+    assert_eq!(
+        QUERY_ROWS_FULL_SCAN_BUFFER_ROWS,
+        QUERY_ROWS_PER_BATCH * QUERY_ROWS_CHANNEL_BATCHES,
+        "the full-ring arm's inner buffer_size must stay the value \
+         `drive_full_scan_rows` passes"
+    );
+    assert_eq!(
+        QUERY_ROWS_MAX_READ_AHEAD_ROWS,
+        QUERY_ROWS_MAX_RESIDENT_ROWS
+            + batched_channel_capacity(QUERY_ROWS_FULL_SCAN_BUFFER_ROWS) * BATCH_EMIT_ROWS
+            + BATCH_EMIT_ROWS
+            + MAX_INFLIGHT_BATCH_ROWS,
+        "the walk's read-ahead is the SUM of every bounded buffer between disk \
+         and consumer; see the constant's doc for the four terms"
+    );
+    // The walk's read-ahead STRICTLY exceeds the handoff channel's own bound —
+    // the property that makes using the wrong one of the two a real error rather
+    // than a stylistic one.
+    assert!(
+        QUERY_ROWS_MAX_READ_AHEAD_ROWS > QUERY_ROWS_MAX_RESIDENT_ROWS,
+        "read-ahead {QUERY_ROWS_MAX_READ_AHEAD_ROWS} must exceed the handoff \
+         channel's {QUERY_ROWS_MAX_RESIDENT_ROWS}"
+    );
+}
+
+/// The channel sizing helper the read-ahead bound is derived from is the SAME
+/// definition the batched scan stream's constructor uses, so it must behave like
+/// `ceil` with a floor of one batch — a zero-capacity `mpsc::channel` would panic
+/// at the constructor, and a capacity that over-states the real channel would
+/// over-state the read-ahead bound.
+#[test]
+fn the_batched_channel_capacity_helper_is_ceil_with_a_one_batch_floor() {
+    assert_eq!(batched_channel_capacity(0), 1, "never zero-capacity");
+    assert_eq!(batched_channel_capacity(1), 1);
+    assert_eq!(batched_channel_capacity(BATCH_EMIT_ROWS), 1);
+    assert_eq!(
+        batched_channel_capacity(BATCH_EMIT_ROWS + 1),
+        2,
+        "ceil, not floor"
+    );
+    assert_eq!(batched_channel_capacity(4 * BATCH_EMIT_ROWS), 4);
+}
