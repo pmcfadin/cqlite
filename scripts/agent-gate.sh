@@ -6284,6 +6284,27 @@ EOF
   printf '%s' "$out"
 }
 
+# _lh_positive_in_closure <closure> <cfg-site-regex> — does ANY file in this target's module
+# closure carry a POSITIVE `legacy-heuristics` cfg reference (i.e. one that survives stripping
+# every `not(feature = "legacy-heuristics")` wrapper)?
+#
+# A portable loop rather than `xargs -r` (roborev round-14): `-r` is GNU-only and this gate
+# supports stock macOS, where the lane would otherwise have mis-scanned every target. `sed |
+# grep -c` consumes each file whole, so there is no early-close SIGPIPE race either (#3380).
+_lh_positive_in_closure() {
+  local closure="$1" cfg_site="$2" cf
+  while IFS= read -r cf; do
+    [ -n "$cf" ] || continue
+    if [ "$(sed -E 's/not\([[:space:]]*feature[[:space:]]*=[[:space:]]*"legacy-heuristics"[[:space:]]*\)//g' "$cf" 2>/dev/null \
+        | grep -cE "$cfg_site")" -gt 0 ]; then
+      return 0
+    fi
+  done <<EOF
+$closure
+EOF
+  return 1
+}
+
 run_legacy_heuristics() {
   local name=legacy-heuristics
   if [ -n "$ONLY" ] && ! grep -qw "$name" <<<"${ONLY//,/ }"; then
@@ -6335,7 +6356,7 @@ run_legacy_heuristics() {
     echo ">>> [$name] $status ($((end - start))s)"
     return 0
   fi
-  local _mt_name _mt_src _mt_how _mt_rel _mt_dir
+  local _mt_name _mt_src _mt_how _mt_rel _mt_dir _mt_hit _mt_cf
   while IFS="$(printf '\t')" read -r _mt_name _mt_src _mt_how _mt_rel; do
     [ -n "$_mt_name" ] || continue
     f="$_mt_src"
@@ -6363,7 +6384,22 @@ run_legacy_heuristics() {
       [ -f "$f" ] || continue
       # Membership over the WHOLE module tree: a gated test can live in a child module
       # whose root never names the feature.
-      [ "$(printf '%s' "$_mt_closure" | tr '\n' '\0' | xargs -0 -r grep -lE "$cfg_site" 2>/dev/null | wc -l)" -gt 0 ] || continue
+      # A PORTABLE LOOP, not `xargs -r` (roborev round-14 finding, Medium). `-r` is
+      # GNU-only: BSD/macOS xargs rejects it, and this gate explicitly supports stock macOS
+      # (see the bash 3.2 note in check_unittest_targets_ran). On that host the lane would
+      # have skipped every source-gated target and then reported a failed derivation.
+      # Dropping `-r` alone is NOT the fix either: without it GNU xargs runs the command
+      # once with NO file arguments, and `grep -lE <pattern>` with no files reads STDIN —
+      # which here is the already-consumed pipe. A loop has neither problem, and `grep -c`
+      # consumes each file whole so there is no SIGPIPE race (cf. the #3380 class).
+      _mt_hit=0
+      while IFS= read -r _mt_cf; do
+        [ -n "$_mt_cf" ] || continue
+        if [ "$(grep -cE "$cfg_site" "$_mt_cf" 2>/dev/null)" -gt 0 ]; then _mt_hit=1; break; fi
+      done <<EOF
+$_mt_closure
+EOF
+      [ "$_mt_hit" -eq 1 ] || continue
     fi
     base="$_mt_name"
     # The census subject is the UNION of every included target's module tree, deduped later
@@ -6405,9 +6441,9 @@ EOF
     # Polarity over the WHOLE module tree, not just the root (round 12): a positive gate in
     # a child module must stop this target being allowed-zero, or the target is EXCUSED from
     # the zero-tests guard on the strength of a file that happened to be silent.
-    elif [ "$(printf '%s' "$_mt_closure" | tr '\n' '\0' \
-        | xargs -0 -r sed -E 's/not\([[:space:]]*feature[[:space:]]*=[[:space:]]*"legacy-heuristics"[[:space:]]*\)//g' 2>/dev/null \
-        | grep -cE "$cfg_site")" -eq 0 ]; then
+    elif _lh_positive_in_closure "$_mt_closure" "$cfg_site"; then
+      :
+    else
       # TWO DIFFERENT IDENTIFIERS FOR TWO DIFFERENT CONSUMERS, and conflating them was a
       # real bug (roborev round-9 finding, Medium). `--test <name>` takes cargo's TARGET
       # NAME, but check_no_unexpected_zero_tests parses `Running tests/<path>.rs` and keys

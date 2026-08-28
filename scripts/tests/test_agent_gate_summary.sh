@@ -2614,6 +2614,40 @@ CLV
   fi
 fi
 
+# --- 29. #1699: no GNU-only constructs in the new lanes (macOS is a first-class host) ---
+#
+# roborev round-14 finding (Medium): the lane used `xargs -r`, which is GNU-only. BSD/macOS
+# xargs rejects it, and this gate treats macOS as a first-class host (a `Darwin) … taskpolicy`
+# wrapper, a BSD `stat` branch, and an explicit /bin/bash-3.2 floor). On that host the lane
+# would have skipped every source-gated target and then reported a FAILED DERIVATION — a
+# confusing red rather than a wrong answer, but a red nobody could act on.
+#
+# Dropping `-r` alone would not have been the fix: without it GNU xargs runs the command once
+# with NO file arguments, and `grep -lE <pattern>` with no files reads STDIN. Portable loops
+# have neither problem. STATIC lint, following the precedent in
+# test_agent_gate_tree_portability.sh, which lints tree-integrity functions the same way.
+for fn_ in run_legacy_heuristics run_flight_tests run_feature_iso _rust_module_closure \
+           _lh_positive_in_closure _package_test_targets_gated _package_unittest_srcs \
+           _resolved_package_features _deny_warnings; do
+  body_="$tmp/1699-gnu-$fn_.txt"
+  awk -v f="^$fn_\\\\(\\\\) \\\\{" '$0 ~ f, /^\}/' "$GATE" > "$body_"
+  if [ ! -s "$body_" ]; then
+    bad "1699-gnu-scope: could not extract $fn_ — the extraction broke, so this lint would pass vacuously"
+    continue
+  fi
+  code_="$tmp/1699-gnu-$fn_-code.txt"
+  sed 's/[[:space:]]*#.*$//' "$body_" > "$code_"
+  # The comments deliberately NAME the forbidden constructs, so strip them first — an oracle
+  # that reads its own rationale as a violation is the #3312 defect, and it already
+  # false-FAILED once in this issue.
+  hits=$(grep -nE '(xargs[^|]*-r|readlink -f|stat -c|sed -i[^.]|date -d|grep -P|sort -V)' "$code_" | head -3)
+  if [ -z "$hits" ]; then
+    ok "1699-gnu-$fn_: no GNU-only construct"
+  else
+    bad "1699-gnu-$fn_: GNU-only construct(s) present — macOS is a first-class gate host: $(printf '%s' "$hits" | tr '\n' ' ')"
+  fi
+done
+
 echo "----"
 echo "passed: $PASS  failed: $FAIL"
 [ "$FAIL" -eq 0 ]
