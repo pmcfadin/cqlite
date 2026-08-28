@@ -3050,10 +3050,18 @@ cli_body_="$tmp/1699-r18-cli-trap.txt"
 awk '/^    cli-tests\)/, /compaction-byte-parity\)/' "$GATE" > "$cli_body_"
 if [ ! -s "$cli_body_" ]; then
   bad "1699-r18-cli-trap-scope: could not extract the cli-tests component — this assert would pass vacuously"
-elif [ "$(grep -cF 'log1.ansi-stripped' "$cli_body_")" -gt 0 ] && [ "$(grep -cF 'log2.ansi-stripped' "$cli_body_")" -gt 0 ]; then
-  ok "1699-r18-cli-trap: cli-tests cleans the .ansi-stripped siblings its guards parse, not just the two logs"
+elif [ "$(grep -cE 'mktemp -d .*agent-gate-cli' "$cli_body_")" -gt 0 ] \
+  && [ "$(grep -cE 'trap "rm -rf .*_cli_tmp' "$cli_body_")" -gt 0 ]; then
+  # SUPERSEDES the round-18 form of this assert. That one required the trap to name
+  # `$log1.ansi-stripped`/`$log2.ansi-stripped` explicitly, which fixed the LEAK but left the
+  # round-31 hazard: `_ansi_stripped_log` writes a PREDICTABLE sibling of its input, and these logs
+  # sat in the shared tmp for minutes, so another local user could pre-create that sibling as a
+  # symlink and have the guard's `sed` overwrite any file the gate user can write. A private
+  # `mktemp -d` closes both at once — nothing to enumerate, nothing guessable — so the assert now
+  # pins the DIRECTORY rather than the two derived filenames.
+  ok "1699-r31-cli-private-dir: cli-tests logs into a private mktemp -d and removes it wholesale (so the predictable .ansi-stripped sibling is neither guessable nor leaked)"
 else
-  bad "1699-r18-cli-trap: cli-tests leaks \$log1.ansi-stripped/\$log2.ansi-stripped into TMPDIR on every gate run — the trap removes only the originals"
+  bad "1699-r31-cli-private-dir: cli-tests is back to bare mktemp files in the shared tmp — _ansi_stripped_log writes a PREDICTABLE sibling there, which another local user can pre-create as a symlink for the guard's sed to follow"
 fi
 
 # --- 32. #1699: the census must not name the WRONG RUNNER (roborev round-20, Medium) ---
@@ -3352,6 +3360,34 @@ fi
 # A FLOOR, not an exact count: new asserts are added constantly and an equality check would red on
 # every addition. Raise it deliberately when you add a section — the ratchet is the point, and the
 # number below is the count measured at the commit that introduced this check.
+# --- 36b. #1699: the `bash -c` top-level-`local` LINT WAS ABANDONED (recorded, not hidden) ------
+#
+# `bash -n` ACCEPTS `local` at a script's top level; bash rejects it at RUNTIME ("local: can only be
+# used in a function"). So the class survives every syntax check and fails the component minutes
+# into a cargo run. I introduced exactly that in the round-31 fix and caught it by hand.
+#
+# A lint for it needs to EXTRACT each `run_component X bash -c '…'` body, and three successive
+# extractors each produced FALSE POSITIVES on healthy code:
+#   1. awk scanning for a terminator LINE (`^' ;;$`) — the terminator sits at the END of a content
+#      line, so it over-ran into unrelated gate comments containing apostrophes ("component's
+#      command") and reported 7 syntax failures that did not exist;
+#   2. python keyed on the literal `' ;;` — the core-tests arm ends `"${@:3}"' \` because arguments
+#      follow it, so the same over-run happened for that arm;
+#   3. python taking the NEXT apostrophe as the terminator — correct for a plain single-quoted
+#      string, but these bodies embed quotes with the `'"'"'` idiom, so it truncated one body and
+#      reported an unterminated string.
+#
+# Correct extraction requires a shell-quoting parser. Writing one here would be a second
+# implementation of shell lexing whose correctness is only knowable by differential testing against
+# a shell — the exact reasoning that retired #3229's census-exclusion oracle, which was DELETED
+# because its false-PASS count kept rising. The mirror case applies just as strongly: a lint that
+# reds healthy code is the one agents learn to ignore, and then it protects nothing.
+#
+# SO THERE IS NO LINT, and the residual is stated instead of implied: a top-level `local` in a
+# `bash -c` body will be caught by the FULL GATE RUNNING that component, not before. That is a real
+# reduction in fast-loop coverage, accepted. What IS pinned, soundly and without extraction, is the
+# property the round-31 fix established (1699-r31-cli-private-dir, above).
+
 # --- 37. #1699: the flight lane's own fixture preflight (roborev round-30, Medium) ------
 #
 # Enrolling the lane in DATASET_COMPONENTS is not enough. The generic full-gate preflight requires

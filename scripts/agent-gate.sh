@@ -6069,7 +6069,14 @@ run_flight_tests() {
   # uses; an opt-out is deliberately visible rather than silent.
   # "full" spelled the way this script spells it (`-z "$ONLY"` and `LITE -eq 0`), matching the
   # #2078 preflight's own test rather than inventing a MODE variable that does not exist here.
-  if [ -z "$ONLY" ] && [ "$LITE" -eq 0 ] && [ -n "${CQLITE_DATASETS_ROOT:-}" ]; then
+  # HONOURS THE DOCUMENTED OPT-OUT (roborev round-31, Medium). Without this the #2078 escape hatch
+  # became INEFFECTIVE: `AGENT_GATE_ALLOW_MISSING_FIXTURES=1` got past the generic preflight and then
+  # this lane failed the run anyway, so an opt-out that the SUMMARY reports as taken did not, in
+  # fact, let the gate finish. A per-lane check that ignores the global opt-out is a second,
+  # undocumented policy — and the opt-out's whole value is that it is VISIBLE in the block
+  # (`missing-fixtures: OPT-OUT`), which a silent per-lane veto destroys.
+  if [ -z "$ONLY" ] && [ "$LITE" -eq 0 ] && [ -n "${CQLITE_DATASETS_ROOT:-}" ] \
+     && [ "${AGENT_GATE_ALLOW_MISSING_FIXTURES:-0}" != 1 ]; then
     local _fx_dir _fx_ok=0
     for _fx_dir in "$CQLITE_DATASETS_ROOT"/sstables/test_timeseries/sensor_data-*; do
       [ -d "$_fx_dir" ] || continue
@@ -6094,6 +6101,8 @@ run_flight_tests() {
       return 0
     fi
     echo ">>> [$name] fixture preflight: test_timeseries/sensor_data + Statistics.db present"
+  elif [ "${AGENT_GATE_ALLOW_MISSING_FIXTURES:-0}" = 1 ] && [ -z "$ONLY" ] && [ "$LITE" -eq 0 ]; then
+    echo ">>> [$name] fixture preflight: SKIPPED (AGENT_GATE_ALLOW_MISSING_FIXTURES=1) — the real-fixture stats test may return early, so this lane does NOT validate the wide-table stats path in this run (#3425)"
   fi
 
   # The enabled set. A failed derivation is a FAIL naming the derivation, never a
@@ -10229,7 +10238,18 @@ dispatch_component() {
   # allowed to run 0 there; NOTHING is allowed to run 0 in Pass 2 (every real
   # write-support target must execute at least one test).
 
-  log1=$(mktemp) && log2=$(mktemp)
+  # A PRIVATE DIRECTORY, not two bare mktemp files in the shared tmp (roborev round-31, Medium).
+  # `_ansi_stripped_log` writes `<log>.ansi-stripped` — a PREDICTABLE sibling — and these tests run
+  # for minutes, so another local user could pre-create that sibling as a SYMLINK and have the
+  # guard`s `sed` overwrite any file the gate user can write. Inside a 0700 mktemp -d the sibling
+  # path is not guessable and not creatable by anyone else. (The other callers were already safe:
+  # they log into $LOG_DIR, itself a per-run mktemp -d.)
+  # NO `local` here: this body runs under `bash -c`, not inside a function, and bash rejects
+  # `local` at the top level with "can only be used in a function" — which would have failed the
+  # component on its first real run rather than at parse time (`bash -n` accepts it).
+  _cli_tmp=$(mktemp -d "${TMPDIR:-/tmp}/agent-gate-cli.XXXXXX") || exit 1
+  chmod 700 "$_cli_tmp" 2>/dev/null || true
+  log1="$_cli_tmp/pass1.log"; log2="$_cli_tmp/pass2.log"
   # The `.ansi-stripped` siblings too (roborev round-18, Low): the zero-test guards
   # parse a stripped COPY that _ansi_stripped_log writes beside the log, so cleaning
   # only the originals leaks two files per gate run into TMPDIR. NOTE: no apostrophes in
@@ -10237,7 +10257,7 @@ dispatch_component() {
   # would terminate it (it did, first try). The lane logs of the other components
   # live under $LOG_DIR, which is retained deliberately as the `logs:` bundle; these
   # two bare mktemps are the only ones nobody else collects.
-  trap "rm -f \"$log1\" \"$log2\" \"$log1.ansi-stripped\" \"$log2.ansi-stripped\"" EXIT
+  trap "rm -rf \"$_cli_tmp\"" EXIT
 
   cargo test --package cqlite-cli "${def_flags[@]}" 2>&1 | tee "$log1"
   rc=${PIPESTATUS[0]}
