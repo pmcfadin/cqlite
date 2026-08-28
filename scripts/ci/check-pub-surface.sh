@@ -519,9 +519,30 @@ END {
     # Cannot false-fire on prose or literals: `normalize()` blanks comments AND string
     # contents. Cannot false-fire on an identifier ending in "pub" (`republic`) because
     # the token is boundary-anchored.
-    if (N[i] ~ /(^|[^A-Za-z0-9_])pub([[:space:]]*\([^)]*\))?[[:space:]]*$/) {
-      printf "V\tline %d: a depth-0 line is nothing but a visibility qualifier, so a declaration is split across lines: `%s`\n", i, squash(substr(ltrim(N[i]), 1, 72))
+    if (N[i] !~ /(^|[^A-Za-z0-9_])pub([[:space:]]*\([^)]*\))?[[:space:]]*$/) continue
+    # REQUIRE CORROBORATION FROM THE NEXT LINE (roborev r17). A dangling `pub` alone is
+    # NOT sufficient evidence of a split declaration: a macro TOKEN TREE can legally
+    # contain one, e.g. `const S: &str = stringify!(\n    pub\n);`, and refusing that
+    # failed the MANDATORY gate on valid Rust that declares no module at all.
+    #
+    # So the refusal now fires only when the next non-blank in-code line BEGINS a module
+    # declaration. That is corroboration, not grammar: two adjacent facts, neither of
+    # which needs a parser. `stringify!`'s next line is `);`, so it certifies.
+    #
+    # This is Refusal V's SECOND correction (too narrow in r16, too broad in r17) and it
+    # is the same lifecycle the item-macro refusal ran before being removed. The
+    # difference, and the reason this one is kept: the split-declaration hole IS closable
+    # by a bounded LOCAL rule, whereas separating an item macro from an expression macro
+    # provably required item boundaries.
+    vnext = 0
+    for (vj = i + 1; vj <= n; vj++) {
+      if (!INCODE[vj]) { vnext = -1; break }
+      if (N[vj] ~ /^[[:space:]]*$/) continue
+      vnext = vj; break
     }
+    if (vnext <= 0) continue
+    if (N[vnext] !~ /^[[:space:]]*mod[[:space:]]+[A-Za-z_]/) continue
+    printf "V\tline %d: a depth-0 line ends in a bare visibility qualifier and the next line begins a module declaration, so the declaration is split across lines: `%s` / `%s`\n", i, squash(substr(ltrim(N[i]), 1, 40)), squash(substr(ltrim(N[vnext]), 1, 30))
   }
 
   # --- Derivation S: "which modules are declared at the crate root?" answered by

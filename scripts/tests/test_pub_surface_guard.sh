@@ -1590,7 +1590,43 @@ bash "$wt52d/$GUARD_REL" >"$TMPROOT/case52d.out" 2>&1
 c52d_rc=$?
 set -e
 [ "$c52d_rc" -eq 0 ] || fail_case "case 52(d) — an identifier ending in \"pub\" (\`republic\`), a comment ending in \`pub\`, or a string ending in \`pub\` was refused as a split declaration; got: $(cat "$TMPROOT/case52d.out")"
-echo "OK (52): a declaration split across lines REFUSES — bare, parenthesised, and TRAILING after a same-line attribute — while ordinary one-line \`pub\` items, \`republic\`, and comments/strings ending in \`pub\` stay GREEN"
+
+# (e) CORROBORATION, NOT JUST A DANGLING `pub` (roborev r17). A macro TOKEN TREE can
+#     legally contain a bare `pub` — `const S: &str = stringify!(\n    pub\n);` — and the
+#     widened match refused it, failing the MANDATORY gate on valid Rust that declares no
+#     module at all. The refusal now requires the NEXT non-blank in-code line to BEGIN a
+#     module declaration: two adjacent facts, neither needing a parser.
+#
+#     This is Refusal V's second correction — too narrow in r16, too broad in r17 — the
+#     same lifecycle the item-macro refusal ran before being removed. It is KEPT because
+#     the split-declaration hole IS closable by a bounded LOCAL rule, whereas separating
+#     an item macro from an expression macro provably required item boundaries.
+scratch_tree split-decl-macro-tokentree; wt52e="$SCRATCH"
+printf '\nconst SS: &str = stringify!(\n    pub\n);\n' >>"$wt52e/cqlite-core/src/lib.rs"
+set +e
+bash "$wt52e/$GUARD_REL" >"$TMPROOT/case52e.out" 2>&1
+c52e_rc=$?
+set -e
+[ "$c52e_rc" -eq 0 ] || fail_case "case 52(e) — a macro TOKEN TREE containing a bare \`pub\` was refused as a split declaration. It declares no module; the mandatory gate must not red it; got: $(cat "$TMPROOT/case52e.out")"
+
+scratch_tree split-decl-nonmod; wt52f="$SCRATCH"
+printf '\npub\nfn probe_fn9() {}\n' >>"$wt52f/cqlite-core/src/lib.rs"
+set +e
+bash "$wt52f/$GUARD_REL" >"$TMPROOT/case52f.out" 2>&1
+c52f_rc=$?
+set -e
+[ "$c52f_rc" -eq 0 ] || fail_case "case 52(f) — a dangling \`pub\` followed by a NON-module item was refused. Only a split MODULE declaration is this guard's business; got: $(cat "$TMPROOT/case52f.out")"
+
+# and the corroboration must survive a blank line between the two halves
+scratch_tree split-decl-blankline; wt52g="$SCRATCH"
+printf '\npub\n\nmod probe_split;\n' >>"$wt52g/cqlite-core/src/lib.rs"
+printf '#![cfg(feature = "benchmarks")]\n//! inner-gated\npub fn p() {}\n' >"$wt52g/cqlite-core/src/probe_split.rs"
+set +e
+bash "$wt52g/$GUARD_REL" >"$TMPROOT/case52g.out" 2>&1
+c52g_rc=$?
+set -e
+[ "$c52g_rc" -ne 0 ] || fail_case "case 52(g) — a split declaration with a BLANK LINE between the halves passed GREEN; the corroboration lookahead must skip blank lines; got: $(cat "$TMPROOT/case52g.out")"
+echo "OK (52): a split MODULE declaration REFUSES (bare, parenthesised, after an attribute, across a blank line) — while a macro token tree containing \`pub\`, a dangling \`pub\` before a NON-module item, one-line \`pub\` items and \`republic\` all stay GREEN"
 
 # ---------------------------------------------------------------------------
 # 36. GREEN — THE POSITIVE CONTROL for 29-38.
