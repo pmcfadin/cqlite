@@ -90,6 +90,12 @@
       `FIRED-UNATTRIBUTED` and fails the harness.
 - [x] Opt-in only — **not** in `COMPONENTS`. Nightly `gate.yml` enrollment is deliberately out of scope
       (workflow change ⇒ #2910 registry enrollment); file it as a follow-up instead.
+- [x] **Residual test gaps DECLARED, not left silent** — #3409 names every scenario the spec states and
+      the code implements but no test drives (the FAIL halves of three fail-closed branches, the
+      behavioural form of the manifest-gated case, the #1978-shaped isolation plant that would make the
+      observation discriminating, the un-measured "clippy still records PASS" clause, the `--delta`
+      registry assert, and the one clause of the round-18 jq port this corpus cannot discriminate). Same
+      standard the `flight-tests` census applies to itself: a lane that omits coverage says so.
 
 ## 6. Observation + cost record (surface: `docs/reports/`)
 - [x] Record the harness run: all four lanes observed firing, per-lane planted break, and the negative
