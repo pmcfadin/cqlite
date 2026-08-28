@@ -266,7 +266,7 @@ try {
   const result = await db.executeNative('SELECT * FROM keyspace.table');
 } catch (e) {
   // Error code for programmatic handling
-  console.log(`Code: ${e.code}`);        // 'IO', 'SCHEMA', 'QUERY', 'PARSE', etc.
+  console.log(`Code: ${e.code}`);        // 'IO', 'SCHEMA', 'QUERY', 'PARSE', 'TIMEOUT', etc.
 
   // Error category
   console.log(`Category: ${e.category}`); // 'System', 'Schema', 'Query', etc.
@@ -281,16 +281,31 @@ try {
 
 **Error Codes:**
 
+Codes come from the shared FFI error contract (`cqlite_core::ffi_error_contract`),
+keyed by the core error VARIANT — the same table the Python binding reads, so a
+given failure has the same identity in both bindings (issue #1451). A code is
+therefore finer-grained than the `category` it reports (a timeout is `TIMEOUT`
+with category `System`).
+
 | Code | Category | Description | Recoverable |
 |------|----------|-------------|-------------|
-| `IO` | System | File system errors | Yes |
-| `SCHEMA` | Schema | Schema parsing/validation | No |
-| `QUERY` | Query | Query execution failures | No |
-| `PARSE` | Data | CQL syntax errors | No |
-| `CONFIG` | Configuration | Invalid configuration | No |
-| `STORAGE` | Storage | Storage engine errors | No |
+| `IO` | System | File system errors, invalid path | Yes (`IO`) |
+| `SCHEMA` | Schema | Schema parsing/validation, table errors | No |
+| `QUERY` | Query | Query execution failures, result-set budget | No |
+| `PARSE` | Data / Query | CQL syntax errors; corrupt or undecodable data | No |
+| `CONFIG` | Configuration | Invalid configuration or read-path knob | No |
+| `STORAGE` | Storage | Storage engine, index, compaction errors | Yes |
 | `NOT_FOUND` | NotFound | Table/resource not found | No |
-| `INVALID_INPUT` | Logic | Invalid operation (e.g., closed db) | No |
+| `INVALID_INPUT` | Data / Logic | Invalid input, operation, or state (e.g. closed db) | No |
+| `CONCURRENCY` | Concurrency | Lock contention, `write_dir` already locked | Varies |
+| `CONFLICT` | Conflict | Resource already exists | No |
+| `CONSTRAINT` | Constraint | Constraint violation | No |
+| `TRANSACTION` | Transaction | Transaction errors | Yes |
+| `TIMEOUT` | System | Operation exceeded its deadline (never `IO`) | No |
+| `MEMORY` | System | Memory/allocation failure (never `IO`) | Yes |
+| `PLATFORM` | Platform | Platform-specific (WASM) errors | No |
+| `INTERNAL` | Internal | Internal errors | No |
+| `CANCELLED` | Cancelled | Cooperative scan cancellation (never `IO`) | No |
 
 ## Type Conversions
 
