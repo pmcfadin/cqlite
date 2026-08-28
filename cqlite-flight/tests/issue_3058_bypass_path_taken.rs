@@ -36,9 +36,13 @@ use tonic::Request;
 
 use cqlite_core::schema::{ClusteringColumn, Column, KeyColumn, TableSchema};
 use cqlite_core::storage::read_path_probe::ReadPathProbe;
+use cqlite_core::storage::sstable::reader::{
+    QUERY_ROWS_MAX_READ_AHEAD_ROWS, QUERY_ROWS_MAX_RESIDENT_ROWS,
+};
 use cqlite_core::storage::sstable::work_counters;
 use cqlite_core::storage::write_engine::{
-    CellOperation, ClusteringKey, Mutation, PartitionKey, TableId, WriteEngine, WriteEngineConfig,
+    CellOperation, ClusteringKey, Durability, Mutation, PartitionKey, TableId, WriteEngine,
+    WriteEngineConfig,
 };
 use cqlite_core::types::Value;
 use cqlite_core::util::cassandra_murmur3::cassandra_murmur3_token;
@@ -46,23 +50,70 @@ use cqlite_flight::bypass::MERGE_PATH_ENV;
 use cqlite_flight::egress_credit::EgressBudget;
 use cqlite_flight::service::CqliteFlightService;
 
-/// Partitions in the mid-stream-cancel fixture. Must be far more than the stream
-/// can hold in flight under [`CANCEL_EGRESS_CEILING`], so "stopped early" and
-/// "drained the table" are distinguishable STRUCTURALLY (by the credit pool)
-/// rather than by scheduling luck.
-const PARTITIONS: usize = 800;
+/// Rows per Arrow batch for the mid-stream-cancel test — one, so the client can
+/// stop after a single row and every downstream term below is counted in rows.
+const CANCEL_BATCH_SIZE: usize = 1;
+
+/// Rows resident DOWNSTREAM of the core producer when the client stops reading —
+/// the slack term of [`CANCEL_DECODE_CEILING`], derived from the mechanism rather
+/// than fitted to an observation.
+///
+/// Two contributions:
+///
+/// * **The Flight egress path**, which is COUNT-bounded independently of bytes:
+///   `do_get`'s channel holds `DO_GET_CHANNEL_CAPACITY` (4) batches with ~2 more
+///   in flight (one counted-but-unsent, one encoder prefetch) and the producer's
+///   own row buffer holds at most one further batch — all at
+///   [`CANCEL_BATCH_SIZE`] rows each, so ~7 rows. (Those constants are
+///   crate-private, hence named in prose and covered generously by the `8 *`
+///   below rather than mirrored as load-bearing literals.)
+/// * **The one core handoff batch** `ScanRowSource` holds as its current row
+///   iterator, which cannot exceed [`QUERY_ROWS_MAX_RESIDENT_ROWS`]. This is the
+///   dominant term.
+const CANCEL_DOWNSTREAM_ROWS: usize = QUERY_ROWS_MAX_RESIDENT_ROWS + 8 * CANCEL_BATCH_SIZE;
+
+/// Rows an ABANDONED fast-arm walk may still decode after the client stops
+/// reading — the structural bound the stop assertion is made against.
+///
+/// It is a CONSTANT, independent of the fixture's size: the producer runs ahead
+/// only as far as the bounded buffers between disk and client allow, then parks
+/// and observes the cancellation. [`QUERY_ROWS_MAX_READ_AHEAD_ROWS`] is
+/// cqlite-core's own sum of those buffers on the arm this test runs (a
+/// no-token-bound `do_get` → the full-ring arm), derived there from the sizings
+/// that actually run; [`CANCEL_DOWNSTREAM_ROWS`] adds what is resident on the
+/// Flight side of the handoff.
+///
+/// One row per partition in the fixture, so a row bound is a partition bound.
+const CANCEL_DECODE_CEILING: usize = QUERY_ROWS_MAX_READ_AHEAD_ROWS + CANCEL_DOWNSTREAM_ROWS;
+
+/// Partitions in the mid-stream-cancel fixture: a generous multiple of
+/// [`CANCEL_DECODE_CEILING`], so "the walk stopped" and "the walk drained the
+/// table" are separated by a wide margin that no scheduling outcome can close.
+/// The 800 this once was is BELOW the read-ahead bound — 1.25x of the handoff
+/// channel alone — which is why the old `settled < PARTITIONS` assertion was a
+/// coin flip (issue #3384). Rows are tiny and the fixture builder skips WAL
+/// durability, so the whole fixture costs ~150ms to build.
+const PARTITIONS: usize = 4 * CANCEL_DECODE_CEILING;
 
 /// Per-stream in-flight egress ceiling for the mid-stream-cancel test.
 ///
-/// This is what makes the stop assertion DETERMINISTIC. Without a tight ceiling
-/// the producer is free to race ahead of a client that has stopped reading, and
-/// on a fast/loaded machine it can decode the whole (tiny, one-row-per-partition)
-/// fixture before the cancellation is observed — which is scheduling, not
-/// behaviour, and made an earlier revision of this test flaky under the gate's
-/// parallel load. With the ceiling, only a bounded number of batches can be
-/// buffered ahead of the dropped client, so the walk MUST park and then stop:
-/// the bound below holds by construction. Comfortably above one 1-row batch's
-/// capacity (so no batch is refused) and far below the whole fixture's.
+/// # What this governs — and what it does NOT
+///
+/// It caps the CAPACITY BYTES the server holds on the EGRESS path: Arrow batches
+/// queued in `do_get`'s channel or yielded and not yet dropped. That is entirely
+/// DOWNSTREAM of the read-ahead this test bounds, so it cannot make the stop
+/// assertion deterministic at any value — an earlier revision of this doc claimed
+/// it did ("the bound holds by construction"), and that claim was false: the walk
+/// is driven by `SSTableReader::open_query_row_stream`'s producer thread, which
+/// decodes into its own bounded buffers ahead of the egress path and is metered by
+/// nothing here. With a fixture of 800 one-row partitions the producer's
+/// read-ahead alone could reach the whole table, which is precisely the flake
+/// issue #3384 records. The determinism now comes from
+/// [`CANCEL_DECODE_CEILING`] — a bound on the producer, not on egress.
+///
+/// It is kept because a metered stream is the shape production runs, and because
+/// it does bound the downstream half of [`CANCEL_DOWNSTREAM_ROWS`]. Comfortably
+/// above one 1-row batch's capacity, so no batch is ever refused.
 const CANCEL_EGRESS_CEILING: usize = 64 * 1024;
 
 /// Serializes the process-global probe/env window (see the module doc).
@@ -138,7 +189,12 @@ async fn build_generations(batches: Vec<Vec<Mutation>>) -> (tempfile::TempDir, P
     let temp = tempfile::TempDir::new().expect("tempdir");
     let data_dir = temp.path().join("data");
     let wal_dir = temp.path().join("wal");
-    let config = WriteEngineConfig::new(data_dir.clone(), wal_dir, schema());
+    // `Durability::Disabled` (bulk-load mode): these fixtures are durable after the
+    // `flush` below, which is the only state any test here reads, and skipping the
+    // per-write WAL fsync is what makes the several-thousand-partition
+    // mid-stream-cancel fixture cost ~150ms instead of ~50s.
+    let config = WriteEngineConfig::new(data_dir.clone(), wal_dir, schema())
+        .with_durability(Durability::Disabled);
     let mut engine = WriteEngine::new(config).expect("engine");
     for batch in batches {
         for m in batch {
@@ -405,11 +461,25 @@ async fn token_pruning_to_one_source_still_selects_the_fast_path() {
 /// arm ran (roborev: asserting only `mergers_built == 0` would pass even if the
 /// fast arm drained the whole table after the client left). The marker is
 /// `work_counters::stream_walk_partitions_parsed()`, which counts partition BODIES
-/// decoded: after the drop it must stop growing AND be below the fixture's
-/// partition count.
+/// decoded.
 ///
-/// The bound is made structural by [`CANCEL_EGRESS_CEILING`] — see its doc for why
-/// a bound without it is scheduling luck rather than behaviour.
+/// # Why the bound is [`CANCEL_DECODE_CEILING`] and not the fixture size
+///
+/// Two assertions, and they say different things:
+///
+/// 1. **The walk STOPPED** — the counter stops growing. This is the causal half.
+/// 2. **It stopped WHERE THE MECHANISM SAYS IT MUST** — the count is at most the
+///    pipeline's bounded read-ahead ([`CANCEL_DECODE_CEILING`]), a constant that
+///    does not scale with the table.
+///
+/// (2) used to read `settled < PARTITIONS` over an 800-partition fixture, which
+/// asserted that the cancellation BEAT the producer — a race outcome, ~25-30% red
+/// in isolation (issue #3384). The producer legitimately reads ahead up to
+/// [`QUERY_ROWS_MAX_READ_AHEAD_ROWS`] rows, i.e. THREE TIMES that fixture, so a
+/// full drain was permitted behaviour that the test called a bug. Bounding by the
+/// read-ahead instead keeps the real property (a cancelled walk does O(1) further
+/// work, not O(table)) and makes it a fact about the code rather than about the
+/// scheduler.
 #[tokio::test]
 async fn fast_arm_stream_stops_when_the_client_drops_it() {
     let _guard = PROBE_LOCK.lock().await;
@@ -471,10 +541,30 @@ async fn fast_arm_stream_stops_when_the_client_drops_it() {
         "the walk never stopped decoding partition bodies after the client dropped \
          the stream (last sample {settled} of {PARTITIONS})"
     );
+    // Observability for the issue-#3384 measurement: under `--nocapture` this
+    // prints the observed read-ahead, so the distribution can be re-measured
+    // (e.g. before tightening the ceiling) without patching the test. Silent in a
+    // normal run; not an assertion.
+    eprintln!(
+        "issue-3384 observed read-ahead: {settled} partition bodies \
+         (ceiling {CANCEL_DECODE_CEILING}, fixture {PARTITIONS})"
+    );
+    // Non-vacuity: the fixture must be far larger than the bound, or "bounded by
+    // the read-ahead" would be trivially true of a full drain. Asserted rather
+    // than assumed, so a future shrink of the fixture (or a growth of the core
+    // read-ahead) cannot quietly make the assertion below meaningless.
     assert!(
-        settled < PARTITIONS as u64,
-        "the abandoned scan must not have drained the whole fixture: decoded \
-         {settled} of {PARTITIONS} partition bodies"
+        PARTITIONS >= 4 * CANCEL_DECODE_CEILING,
+        "fixture drift: {PARTITIONS} partitions is not a wide enough margin over \
+         the decode ceiling {CANCEL_DECODE_CEILING} for the bound to mean anything"
+    );
+    assert!(
+        settled <= CANCEL_DECODE_CEILING as u64,
+        "the abandoned scan decoded MORE than the pipeline's bounded read-ahead \
+         permits: {settled} partition bodies > ceiling {CANCEL_DECODE_CEILING} \
+         (core read-ahead {QUERY_ROWS_MAX_READ_AHEAD_ROWS} + downstream \
+         {CANCEL_DOWNSTREAM_ROWS}), fixture {PARTITIONS}. Either the walk ignored \
+         the cancellation or a buffer grew without the core bound following it"
     );
 }
 
