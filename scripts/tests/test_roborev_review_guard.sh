@@ -4989,6 +4989,15 @@ _wr_classify() {
   # rather than be believed — CLAUDE.md's `${end:-$start}` lesson, on the field that can least
   # afford it. Key the permissive branch on the AFFIRMATIVE value, never on `!= <bad>`.
   if [ "${_c_bal:-0}" -eq 0 ]; then printf 'unbalanced %s\n' $(( ${_c_code:-0} + ${_c_lit:-0} )); return; fi
+  # ANY apparently-inert occurrence on a line carrying a command substitution is REFUSED, whether or
+  # not the line also has a recognised live read (roborev job 43). Gating this on `code -eq 0` was
+  # not enough: `bash "$WRAPPER" "$(grep "a'"'"'b" "$WRAPPER" "c'"'"'d")"` presents ONE occurrence as a
+  # permitted invocation while a SECOND, inside the substitution, is mis-paired into `lit` and never
+  # judged at all — the arity rule counts only `code`, so it does not see it either. Inside `$( )`
+  # the flat parse cannot be trusted about ANY occurrence, so no occurrence there may be excused.
+  if [ "${_c_cs:-1}" -eq 1 ] && [ "${_c_lit:-0}" -gt 0 ]; then
+    printf 'substitution %s\n' $(( ${_c_code:-0} + ${_c_lit:-0} )); return
+  fi
   if [ "${_c_ev:-0}" -eq 1 ] && [ $(( ${_c_code:-0} + ${_c_lit:-0} )) -gt 0 ]; then
     printf 'eval %s\n' $(( ${_c_code:-0} + ${_c_lit:-0} )); return
   fi
@@ -5002,7 +5011,8 @@ _wr_classify() {
       # command word is this harness's own `ok`/`bad` reporter. Anything else FAILs closed, which
       # costs nothing today (all four literal occurrences are diagnostics) and cannot be widened by
       # accident.
-      # ...and never inside a command substitution, where the flat parse cannot be trusted.
+      # (a substitution has already been refused above; this stays as a belt-and-braces AFFIRMATIVE
+      # test rather than relying on the earlier branch's condition never changing)
       if [ "${_c_cs:-1}" -eq 0 ]; then
         _c_pw=$(_wr_cmdpos "$_c_seg")
         case "$_c_pw" in
@@ -5057,7 +5067,7 @@ _wr_classify() {
 # the SAME function over fixtures whose correct verdict is known — dispatch included.
 _wr_scan_file() {
   _sf_file=$1
-  _wr_bad_reads=""; _wr_bad_spelling=""; _wr_prose_bad=""; _wr_unknown=""; _wr_multi=""; _wr_lit_bad=""; _wr_unbal=""
+  _wr_bad_reads=""; _wr_bad_spelling=""; _wr_prose_bad=""; _wr_unknown=""; _wr_multi=""; _wr_lit_bad=""; _wr_unbal=""; _wr_subst=""
   _wr_total=0; _wr_prose_n=0
   while IFS= read -r _wr_num_line; do
     [ -n "$_wr_num_line" ] || continue
@@ -5073,6 +5083,7 @@ _wr_scan_file() {
       eval) _wr_prose_bad="$_wr_prose_bad${_wr_prose_bad:+; }$_wr_num_line" ;;
       prose) _wr_lit_bad="$_wr_lit_bad${_wr_lit_bad:+; }$_wr_num_line" ;;
       unbalanced) _wr_unbal="$_wr_unbal${_wr_unbal:+; }$_wr_num_line" ;;
+      substitution) _wr_subst="$_wr_subst${_wr_subst:+; }$_wr_num_line" ;;
       spelling) _wr_bad_spelling="$_wr_bad_spelling${_wr_bad_spelling:+; }$_wr_num_line" ;;
       arity) _wr_multi="$_wr_multi${_wr_multi:+; }$_wr_num_line" ;;
       form) _wr_bad_reads="$_wr_bad_reads${_wr_bad_reads:+; }$_wr_num_line" ;;
@@ -5095,6 +5106,7 @@ EOF
   elif [ "${_wr_total:-0}" -eq 0 ]; then _WR_VERDICT=empty
   elif [ -n "$_wr_prose_bad" ]; then _WR_VERDICT=eval
   elif [ -n "$_wr_unbal" ]; then _WR_VERDICT=unbalanced
+  elif [ -n "$_wr_subst" ]; then _WR_VERDICT=substitution
   elif [ -n "$_wr_lit_bad" ]; then _WR_VERDICT=prose
   elif [ -n "$_wr_bad_spelling" ]; then _WR_VERDICT=spelling
   elif [ -n "$_wr_multi" ]; then _WR_VERDICT=arity
@@ -5110,6 +5122,8 @@ case "$_WR_VERDICT" in
     bad "structural (#3367): the order-dependence classifier returned a verdict the dispatch does not recognise, so some line was neither accepted nor rejected —$_wr_unknown" ;;
   empty)
     bad 'structural (#3367): the order-dependence pass found NO accepted occurrence of the mutable wrapper variable at all, so it certified nothing — the variable was renamed, or the scan lost its subject' ;;
+  substitution)
+    bad "structural (#3367): a line carries a COMMAND SUBSTITUTION and an occurrence of the mutable wrapper variable that this flat parse read as inert. Inside \$( ) quoting restarts, so a second read can hide there while a first is waved through as a permitted invocation — no occurrence on such a line may be excused: $(printf '%s' "$_wr_subst" | cut -c1-200)" ;;
   unbalanced)
     bad "structural (#3367): a line carrying the mutable wrapper variable ends INSIDE an unterminated quote, so the per-line quote parse is unreliable and no verdict from it can be trusted. This is how the guard would green-light #3367's original defect — the closing line of a multi-line quoted program begins with the CLOSING quote, which a per-line scanner reads as an opening one: $(printf '%s' "$_wr_unbal" | cut -c1-200)" ;;
   prose)
@@ -5166,6 +5180,7 @@ _wr_fixture f_bracedef "_x=\$(grep -c foo \"\${$_wr_vname:-/tmp/x}\")"
 _wr_fixture f_fakeinv  "grep foo $_wr_ref # \$(bash $_wr_ref)"
 _wr_fixture f_evalasm  "_cmd='grep foo $_wr_ref'"
 _wr_fixture f_multiline "' \"\$ORACLES\" \"\$CHECKS_FILE\" $_wr_ref 2>/dev/null || true)"
+_wr_fixture f_cshidden "bash $_wr_ref \"\$(grep \"a'b\" $_wr_ref \"c'd\")\""
 _wr_fixture f_csprose  "ok \"\$(grep \"a'b\" $_wr_ref \"c'd\")\""
 _wr_fixture f_locsave  "  local _gm_real_wrapper=$_wr_ref"
 _wr_fixture f_semisave "_gm_real_wrapper=$_wr_ref;"
@@ -5198,7 +5213,8 @@ _wr_expect f_bracedef spelling
 _wr_expect f_fakeinv  form
 _wr_expect f_evalasm  prose
 _wr_expect f_multiline unbalanced
-_wr_expect f_csprose  prose
+_wr_expect f_cshidden substitution
+_wr_expect f_csprose  substitution
 _wr_expect f_locsave  clean
 _wr_expect f_semisave clean
 _wr_expect f_cmpsave  form
@@ -5213,7 +5229,7 @@ _wr_expect f_empty    empty
 # and the success message below prints counts from them.
 _wr_scan_file "$TEST_SELF"
 if [ -z "$_wr_ctl_bad" ]; then
-  ok 'structural control (#3367): the ENFORCEMENT PASS itself (classifier + dispatch) gives the correct verdict on all thirty-two fixtures — it rejects the braced, unquoted, compound-line, unallowlisted-alias, mentions-the-word-bash quote-swallowed, marker-self-authorising and eval bypasses, refuses to let a marker waive a second read, reports a subjectless file as empty, and still accepts invocations, allowlisted saves, marked opt-outs, captured invocations and unmarked prose'
+  ok 'structural control (#3367): the ENFORCEMENT PASS itself (classifier + dispatch) gives the correct verdict on all thirty-three fixtures — it rejects the braced, unquoted, compound-line, unallowlisted-alias, mentions-the-word-bash quote-swallowed, marker-self-authorising and eval bypasses, refuses to let a marker waive a second read, reports a subjectless file as empty, and still accepts invocations, allowlisted saves, marked opt-outs, captured invocations and unmarked prose'
 else
   bad "structural control (#3367): the enforcement pass misclassifies a fixture, so its verdict on the real file is not trustworthy —$_wr_ctl_bad"
 fi
@@ -5237,7 +5253,13 @@ while IFS= read -r _wr_u; do
   _wr_ud=${_wr_ud%"${_wr_ud##*[! 	]}"}
   [ "$_wr_ud" = "_wr_aliases=" ] && continue
   _wr_alias_seen=$((_wr_alias_seen + 1))
-  case "$_wr_uc" in *"$_wr_marker"*) continue ;; esac
+  # THE MARKER IS RECOGNISED ONLY AT THE START OF A QUOTE-AWARE TRAILING COMMENT, exactly as the
+  # main classifier does it. Matched anywhere, `grep "wrapper-mutable-read-allow" "$_wr_saved"`
+  # exempts ITSELF and scans the alias — the self-authorisation shape again, on the one check that
+  # had not yet been converted. The scanner already computes this; ask it rather than re-deciding.
+  _wr_umk=$(printf '%s\n' "$_wr_u" | awk -v VN="$_wr_vname" -v MK="$_wr_marker" "$_WR_QS" | head -1)
+  _wr_umk=${_wr_umk% *}; _wr_umk=${_wr_umk% *}; _wr_umk=${_wr_umk% *}; _wr_umk=${_wr_umk##* }
+  [ "${_wr_umk:-0}" -eq 1 ] && continue
   _wr_ut=${_wr_uc#"${_wr_uc%%[! ]*}"}
   _wr_is_restore=no
   for _wr_a in $_wr_aliases; do
@@ -5268,6 +5290,32 @@ if [ -z "$_wr_ax_bad" ]; then
   ok 'structural control (#3367): the alias-declaration exemption matches the declaration EXACTLY — a line merely quoting the alias names is still judged, so it cannot exempt itself while scanning an alias'
 else
   bad "structural control (#3367): the alias-declaration exemption misclassifies a synthetic line, so a line quoting the declaration could skip the alias-use check —$_wr_ax_bad"
+fi
+# NO ALIAS MAY BE REACHED UNDER ANOTHER NAME (roborev job 43). Both structural scans look for the
+# alias by NAME or by `$`-expansion, so an indirect binding reaches the saved mutable path without
+# either seeing it:  declare -n subject=_wr_saved ; grep ... "$subject"
+# Two narrow checks rather than one broad one. A blanket ban on indirect expansion was the first
+# attempt and it FALSE-FAILED on two pre-existing legitimate uses (`${!_rw_i}` walking positional
+# arguments at ~960, nothing to do with aliases) — a guard that reds on correct code is the guard
+# people learn to waive, so the ban is scoped to what actually threatens an alias.
+_wr_nrefd=$(grep -nE '(declare|local|typeset)[[:space:]]+-[A-Za-z]*'"n"'[[:space:]]' "$TEST_SELF" \
+  | grep -vE '^[0-9]+:[[:space:]]*#' || true)
+if [ -z "$_wr_nrefd" ]; then
+  ok 'structural (#3367): the harness declares no nameref, so no second name can be bound to an allowlisted alias'
+else
+  bad "structural (#3367): a nameref declaration appears in this file. It can bind an allowlisted alias to a new name that the alias-use scan (which looks for the alias by name) and the wrapper scan (which looks for \$WRAPPER) both miss: $(printf '%s' "$_wr_nrefd" | head -3 | tr '\n' ';' | cut -c1-200)"
+fi
+# ...and an indirect expansion must not name an alias. The needle is split so this guard cannot
+# match its own line.
+_wr_indir=$(grep -nE '[$][{]'"!" "$TEST_SELF" | grep -vE '^[0-9]+:[[:space:]]*#' || true)
+_wr_indir_bad=""
+for _wr_ia in $_wr_aliases; do
+  case "$_wr_indir" in *"$_wr_ia"*) _wr_indir_bad="$_wr_indir_bad $_wr_ia" ;; esac
+done
+if [ -z "$_wr_indir_bad" ]; then
+  ok 'structural (#3367): no indirect expansion names a save alias (the pre-existing ones walk positional arguments)'
+else
+  bad "structural (#3367): an indirect expansion names a save alias —$_wr_indir_bad. That reaches the mutable path under a name neither structural scan is looking for"
 fi
 if [ "${_wr_alias_seen:-0}" -eq 0 ]; then
   bad 'structural (#3367): no use of any save alias was found, so the alias restriction certified nothing — the aliases were renamed and the allowlist is now describing names that do not exist'
