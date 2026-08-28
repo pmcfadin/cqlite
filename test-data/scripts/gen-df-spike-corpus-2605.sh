@@ -294,16 +294,31 @@ capture_schema() {  # $1 = destination file
 
 # Per-SSTable min/max write timestamp, so the manifest can attribute each
 # Data.db to a generation (max_ts >= gen2 start => it holds generation-2 data).
+#
+# sstablemetadata prints "Minimum timestamp: 08/28/2026 06:24:07 (1787898247892692)"
+# — the microseconds are the LAST integer on the line, and the human-readable
+# date in front of them is why this must not be reduced with a blunt digit
+# filter (which silently concatenates the date's digits onto the timestamp).
+sstable_timestamp() {  # $1 = sstablemetadata output, $2 = Minimum|Maximum
+  printf '%s\n' "$1" | awk -v want="$2 timestamp" '
+    index($0, want) == 1 { s = $0; gsub(/[^0-9]/, " ", s); n = split(s, a, " "); print a[n]; exit }'
+}
+
 capture_sstable_timestamps() {  # $1 = container dir, $2 = destination tsv
   local dir="$1" out="$2"
   : > "$out"
-  local f base mn mx
+  local f base raw mn mx
   while read -r f; do
     [[ -n "$f" ]] || continue
     base="$(basename "$f")"
-    mn=$($DOCKER exec "$CONTAINER" bash -lc "/opt/cassandra/tools/bin/sstablemetadata '$f' 2>/dev/null | awk -F': ' '/^Minimum timestamp/ {print \$2; exit}'" | tr -dc '0-9')
-    mx=$($DOCKER exec "$CONTAINER" bash -lc "/opt/cassandra/tools/bin/sstablemetadata '$f' 2>/dev/null | awk -F': ' '/^Maximum timestamp/ {print \$2; exit}'" | tr -dc '0-9')
-    printf '%s\t%s\t%s\n' "$base" "${mn:-0}" "${mx:-0}" >> "$out"
+    # tr -d '\0': sstablemetadata emits NUL bytes (raw key blobs), which a
+    # command substitution would otherwise warn about on every file.
+    raw="$($DOCKER exec "$CONTAINER" /opt/cassandra/tools/bin/sstablemetadata "$f" 2>/dev/null | tr -d '\0' || true)"
+    mn="$(sstable_timestamp "$raw" Minimum)"
+    mx="$(sstable_timestamp "$raw" Maximum)"
+    [[ -n "$mn" && -n "$mx" ]] \
+      || log "WARNING: could not read min/max timestamp for $base (generation attribution will be null)"
+    printf '%s\t%s\t%s\n' "$base" "${mn:-}" "${mx:-}" >> "$out"
   done < <($DOCKER exec "$CONTAINER" bash -lc "ls '$dir'/*-Data.db 2>/dev/null" | tr -d '\r')
   log "captured per-SSTable timestamps -> $out ($(wc -l <"$out" | tr -d ' ') files)"
 }
@@ -409,7 +424,11 @@ if os.path.exists(tsv):
     for line in open(tsv):
         parts = line.rstrip("\n").split("\t")
         if len(parts) == 3:
-            ts[parts[0]] = (int(parts[1] or 0), int(parts[2] or 0))
+            # An unreadable timestamp stays None: the manifest must not report a
+            # fabricated 0 as a real minimum/maximum.
+            mn = int(parts[1]) if parts[1].isdigit() else None
+            mx = int(parts[2]) if parts[2].isdigit() else None
+            ts[parts[0]] = (mn, mx)
 
 files = []
 total = 0
