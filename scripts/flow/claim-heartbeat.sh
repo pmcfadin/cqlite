@@ -131,6 +131,26 @@
 #   Only DEAD-NO-PROCESS sets the exit code. An UNKNOWN is a gap in what this
 #   host can see, and it is printed as such rather than counted either way.
 #
+#   TWO SCOPE LIMITS, BOTH STATED RATHER THAN SHIPPED QUIETLY — a monitor whose bounds
+#   are undocumented is read as covering more than it does, which is its own false-clean.
+#
+#   (1) LOCAL-ONLY. A pid is checkable only on the machine that owns the claim, so this
+#   reports on THIS machine's lanes and marks foreign ones UNKNOWN-FOREIGN. A run that
+#   measured no local lane at all exits 1 saying so, never 0 — otherwise a run from an
+#   operator box or CI would report "no dead lanes" about a fleet it never inspected
+#   (roborev round 4, High). To sweep a fleet, run it ON each box.
+#
+#   (2) ONE CLAIM REF PER MACHINE, so CONCURRENT LANES ON ONE BOX ARE NOT SEPARATELY
+#   VISIBLE. `refs/machine-claims/<machine>` is per-MACHINE by design (#2655, premised on
+#   one worker per machine, #1930), so several lanes on one box overwrite each other's
+#   claim and only the last-stamped supervisor pid stays observable — this command can
+#   then report at most one of them. That bound matters here specifically because #3393's
+#   own evidence is FOUR LANES PER BOX (and the 1-lane box recorded zero OOM kills), i.e.
+#   exactly the configuration in which lanes died. Giving each lane its own ref would fix
+#   it, but that namespace is shared with `should-reap` and the CI reaper, so its layout
+#   is a design decision for the owner and is escalated on #3393 rather than taken here.
+#   Until then: on a multi-lane box, treat a clean `dead-lanes` as covering ONE lane.
+#
 #   SCOPE LIMIT, stated because the acceptance criterion asks for more: #3393 AC3
 #   describes the operator's scratch check as "worktree present, tmux session
 #   absent => DEAD-NO-SESSION". That test cannot be implemented here, because the
@@ -193,11 +213,15 @@ REMOTE="${HEARTBEAT_REMOTE:-origin}"
 # pushes — it surfaces git's raw error.
 export GIT_TERMINAL_PROMPT=0
 
-# Slack when comparing a process's start time against its claim's `ts` (#3393). `ts` is
-# second-resolution and the stamp happens moments AFTER the process starts, so a genuine
-# claim always has start <= ts; the slack only absorbs clock granularity/skew, never a
-# real recycle (a reused pid is minutes-to-hours newer than the claim).
-PID_IDENTITY_SLACK_SECS="${PID_IDENTITY_SLACK_SECS:-60}"
+# Rounding tolerance when comparing a process's start time against its claim's `ts`
+# (#3393). Both come from the SAME host and the SAME clock — `ts` is written by `date -u`
+# at stamp time, and the start epoch is `now - elapsed` — and the stamp necessarily
+# happens AFTER the process starts, so a genuine claim always has start <= ts. The only
+# error to absorb is second-resolution rounding on each side, so this is 2s, not the 60s
+# the first cut used (roborev round 4, Medium: a 60s window is long enough for a real
+# pid recycle, and anything inside the window is reported UNKNOWN-IDENTITY rather than
+# ALIVE, so widening it buys nothing but lost detection).
+PID_IDENTITY_SLACK_SECS="${PID_IDENTITY_SLACK_SECS:-2}"
 
 # Default reap threshold: 4h (matches the heartbeat threshold documented above).
 DEFAULT_REAP_THRESHOLD_SECS="${DEFAULT_REAP_THRESHOLD_SECS:-14400}"
@@ -614,7 +638,7 @@ open_pr_state() {
 cmd_dead_lanes() {
   [ "$#" -eq 0 ] || die_usage "dead-lanes takes no arguments (got '$1')"
 
-  local raw this_machine dead=0 unreadable=0 lsrc
+  local raw this_machine dead=0 unreadable=0 lsrc local_seen=0
   this_machine="${HEARTBEAT_MACHINE:-$(hostname -s)}"
 
   # NO `|| true` HERE (roborev round 1, Medium). Swallowing the status turned an
@@ -673,62 +697,90 @@ cmd_dead_lanes() {
     detail=""
     if [ "$machine" != "$this_machine" ]; then
       # Unknowable BY DESIGN from here, so this does NOT count as an incomplete
-      # measurement: counting it would make every multi-machine fleet exit 1 forever
-      # and train readers to ignore the code.
+      # measurement on its own: counting every foreign row would pin a healthy
+      # multi-machine fleet at exit 1 forever and train readers to ignore the code.
+      # What DOES matter is whether ANY local lane was measured — see `local_seen` at
+      # the end of this function.
       verdict="UNKNOWN-FOREIGN"
-      detail="pid not checkable from ${this_machine}"
-    elif [ -z "$pid" ]; then
-      # A LOCAL claim SHOULD carry a pid, so its absence is a real gap in what this
-      # run could determine — counted (roborev round 2, Medium).
-      verdict="UNKNOWN-NO-PID"
-      detail="claim ref records no pid (pre-#2655 or hand-made)"
-      unreadable=$((unreadable + 1))
-    elif process_exists "$pid"; then
-      # The pid exists. That alone does NOT make it the process that stamped the
-      # claim: pids are recycled, and a stale claim naming a reused pid would read
-      # ALIVE — the dangerous direction for a monitor whose whole job is spotting a
-      # dead lane. The claim's OWN ts settles it with no change to what `stamp`
-      # records: a process that started AFTER the claim was stamped cannot be the
-      # process that stamped it.
-      local pstart cts
-      pstart="$(process_start_epoch "$pid")"
-      cts=""
-      [ -n "$ts" ] && cts="$(ts_to_epoch "$ts" 2>/dev/null || true)"
-      if [ -n "$pstart" ] && [ -n "$cts" ] && [ "$pstart" -gt "$((cts + PID_IDENTITY_SLACK_SECS))" ]; then
-        verdict="DEAD-PID-REUSED"
-        dead=$((dead + 1))
-        detail="pid ${pid} started $((pstart - cts))s AFTER the claim was stamped — a different process now holds it; open-pr=$(open_pr_state "$issue")"
-      elif [ -n "$pstart" ] && [ -n "$cts" ]; then
-        verdict="ALIVE"
-        detail="identity=verified (start precedes the claim ts)"
-      else
-        # NOT "ALIVE" (roborev round 3, Medium). The first cut reported ALIVE with an
-        # `identity=unverified` annotation, which still let the run exit 0 — and a
-        # recycled pid then reproduces exactly the false-clean this monitor exists to
-        # prevent. An unverifiable identity is a gap in what this run could determine,
-        # so it gets its own verdict and counts toward an incomplete measurement. An
-        # annotation is not a substitute for an exit code: nobody greps the annotation.
-        verdict="UNKNOWN-IDENTITY"
-        detail="pid ${pid} exists but its start time or the claim ts could not be read — pid reuse NOT excluded"
-        unreadable=$((unreadable + 1))
-      fi
+      detail="pid not checkable from ${this_machine} — run dead-lanes ON ${machine}"
     else
-      verdict="DEAD-NO-PROCESS"
-      dead=$((dead + 1))
-      detail="open-pr=$(open_pr_state "$issue")"
-      case "$detail" in
-        *yes) detail="open-pr=yes — ORPHANED ENDGAME (#2499): report it, do NOT reap it" ;;
-      esac
+      # A claim this machine owns: its pid is checkable, so this row is a real
+      # measurement and the run is entitled to draw a conclusion from it.
+      local_seen=$((local_seen + 1))
+      if [ -z "$pid" ]; then
+        # A LOCAL claim SHOULD carry a pid, so its absence is a real gap in what this
+        # run could determine — counted (roborev round 2, Medium).
+        verdict="UNKNOWN-NO-PID"
+        detail="claim ref records no pid (pre-#2655 or hand-made)"
+        unreadable=$((unreadable + 1))
+      elif process_exists "$pid"; then
+        # The pid exists. That alone does NOT make it the process that stamped the
+        # claim: pids are recycled, and a stale claim naming a reused pid would read
+        # ALIVE — the dangerous direction for a monitor whose whole job is spotting a
+        # dead lane. The claim's OWN ts settles it with no change to what `stamp`
+        # records: a process that started AFTER the claim was stamped cannot be the
+        # process that stamped it.
+        local pstart cts
+        pstart="$(process_start_epoch "$pid")"
+        cts=""
+        [ -n "$ts" ] && cts="$(ts_to_epoch "$ts" 2>/dev/null || true)"
+        if [ -n "$pstart" ] && [ -n "$cts" ] && [ "$pstart" -gt "$((cts + PID_IDENTITY_SLACK_SECS))" ]; then
+          verdict="DEAD-PID-REUSED"
+          dead=$((dead + 1))
+          detail="pid ${pid} started $((pstart - cts))s AFTER the claim was stamped — a different process now holds it; open-pr=$(open_pr_state "$issue")"
+        elif [ -n "$pstart" ] && [ -n "$cts" ] && [ "$pstart" -le "$cts" ]; then
+          verdict="ALIVE"
+          detail="identity=verified (start precedes the claim ts)"
+        elif [ -n "$pstart" ] && [ -n "$cts" ]; then
+          # THE SLACK WINDOW IS ITS OWN ANSWER (roborev round 4, Medium). Treating
+          # `ts < start <= ts+slack` as ALIVE turned an explicitly unverified identity
+          # into a clean result — a pid recycled inside the window read ALIVE, which is
+          # the false-clean this command exists to prevent. The window absorbs
+          # second-resolution rounding; it is NOT evidence of identity, so it does not
+          # get to claim ALIVE.
+          verdict="UNKNOWN-IDENTITY"
+          detail="pid ${pid} started $((pstart - cts))s after the claim ts, inside the ${PID_IDENTITY_SLACK_SECS}s rounding window — identity NOT established"
+          unreadable=$((unreadable + 1))
+        else
+          # NOT "ALIVE" (roborev round 3, Medium). Reporting ALIVE with an
+          # `identity=unverified` annotation still let the run exit 0, and a recycled
+          # pid then reproduces the false-clean. An annotation is not a substitute for
+          # an exit code: nobody greps the annotation.
+          verdict="UNKNOWN-IDENTITY"
+          detail="pid ${pid} exists but its start time or the claim ts could not be read — pid reuse NOT excluded"
+          unreadable=$((unreadable + 1))
+        fi
+      else
+        verdict="DEAD-NO-PROCESS"
+        dead=$((dead + 1))
+        detail="open-pr=$(open_pr_state "$issue")"
+        case "$detail" in
+          *yes) detail="open-pr=yes — ORPHANED ENDGAME (#2499): report it, do NOT reap it" ;;
+        esac
+      fi
     fi
     printf '%-20s %-8s %-12s %-18s %s\n' "$machine" "$issue" "${pid:-none}" "$verdict" "$detail"
   done <<<"$raw"
 
   if [ "$unreadable" -gt 0 ]; then
-    note "INCOMPLETE measurement: ${unreadable} claim ref(s) could not be read, so those lanes were not judged either way"
+    note "INCOMPLETE measurement: ${unreadable} claim ref(s) could not be judged either way"
   fi
   if [ "$dead" -gt 0 ]; then
     note "${dead} dead lane(s) reported — this is a REPORT, nothing was deleted or reaped"
     return 3
+  fi
+  # A RUN THAT INSPECTED NO LOCAL PROCESS CANNOT REPORT A CLEAN FLEET (roborev round 4,
+  # High). This command is LOCAL-ONLY — a pid is checkable only on the machine that owns
+  # the claim — so run from an operator box or CI, every row is UNKNOWN-FOREIGN and
+  # nothing was actually measured. Exiting 0 there says "none found" about a fleet it
+  # never looked at, which is the false-clean this whole command exists to prevent.
+  # Individual foreign rows still do NOT each count as incomplete: on a healthy
+  # multi-machine fleet that would pin the exit code at 1 forever and train readers to
+  # ignore it. The distinction is "did I measure ANY local lane", not "is every lane
+  # local".
+  if [ "$local_seen" -eq 0 ]; then
+    note "NOTHING WAS MEASURED: no claim on ${REMOTE} is owned by this machine (${this_machine}), and a pid is only checkable where it runs. dead-lanes is LOCAL-ONLY — run it ON the suspect box, or check each machine in turn. This is NOT 'no dead lanes'."
+    return 1
   fi
   [ "$unreadable" -eq 0 ] || return 1
   return 0

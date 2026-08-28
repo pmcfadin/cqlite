@@ -399,7 +399,11 @@ fi
 # ===========================================================================
 echo "TEST 23: a LIVE local pid is reported ALIVE, and does not set the dead exit code"
 # ===========================================================================
-craft_old_claim "$WORK" "aliveLocal" 3394 "$$" 30
+# age 0, not 30: a supervisor cannot stamp a claim BEFORE its own process started, so a
+# "30s-old" claim naming a process that started 20s ago is a self-inconsistent fixture —
+# and the identity check correctly reads it as UNKNOWN-IDENTITY. Realistic ordering is
+# process first, stamp after.
+craft_old_claim "$WORK" "aliveLocal" 3394 "$$" 0
 al_out=$(cd "$WORK" && HEARTBEAT_MACHINE=aliveLocal CLAIM_OPEN_PR_CMD="$NO_OPEN_PR" \
   bash "$HB" dead-lanes 2>&1)
 al_rc=$?
@@ -667,14 +671,19 @@ else
   bad "a local pid-less claim must make the run incomplete (exit 1): rc=$npl_rc out:
 $npl_out"
 fi
-# Same ref, viewed from ANOTHER machine: unknowable by design, so exit 0 stands.
+# Same ref, viewed from ANOTHER machine: still UNKNOWN-FOREIGN per row, but the RUN as a
+# whole measured no local process at all — so it must NOT report a clean fleet
+# (roborev round 4, High). This assertion previously demanded exit 0 here, which let a
+# run from an operator or CI box say "no dead lanes" about a fleet it never inspected.
 fpl_out=$(cd "$WORK" && HEARTBEAT_MACHINE=someFarMachine CLAIM_OPEN_PR_CMD="$NO_OPEN_PR" \
   bash "$HB" dead-lanes 2>&1)
 fpl_rc=$?
-if [ "$fpl_rc" -eq 0 ] && printf '%s\n' "$fpl_out" | grep -E '^noPidLocal ' | grep -q 'UNKNOWN-FOREIGN'; then
-  ok "the SAME ref read from another machine is UNKNOWN-FOREIGN and does NOT make the run incomplete (by design)"
+if [ "$fpl_rc" -eq 1 ] \
+  && printf '%s\n' "$fpl_out" | grep -E '^noPidLocal ' | grep -q 'UNKNOWN-FOREIGN' \
+  && printf '%s\n' "$fpl_out" | grep -qi 'LOCAL-ONLY'; then
+  ok "a run from a machine owning NO claim exits 1 and says it is LOCAL-ONLY — never 'no dead lanes' about a fleet it never inspected"
 else
-  bad "a foreign claim must not force exit 1: rc=$fpl_rc out:
+  bad "an all-foreign run measured nothing and must exit 1 saying so: rc=$fpl_rc out:
 $fpl_out"
 fi
 (cd "$WORK" && g push -q origin ":refs/machine-claims/noPidLocal" 2>/dev/null || true)
@@ -714,9 +723,10 @@ echo "TEST 36: a live pid CONSISTENT with its claim ts is ALIVE, and says identi
 # ===========================================================================
 # The accept half of TEST 35 — without it, a check that called everything reused would
 # pass TEST 35 while being useless.
-tail -f /dev/null &
-live2=$!
-craft_old_claim "$WORK" "goodPid" 3399 "$live2" 0   # stamped now, i.e. AFTER the process started
+# The TEST SHELL's own pid: alive, and started well before the claim is stamped, so
+# start < ts holds by seconds rather than by luck. A freshly-spawned helper lands within
+# the rounding window and would (correctly) read UNKNOWN-IDENTITY, making this case flaky.
+craft_old_claim "$WORK" "goodPid" 3399 "$$" 0
 gp_out=$(cd "$WORK" && HEARTBEAT_MACHINE=goodPid CLAIM_OPEN_PR_CMD="$NO_OPEN_PR" \
   bash "$HB" dead-lanes 2>&1)
 if printf '%s\n' "$gp_out" | grep -E '^goodPid ' | grep -q 'ALIVE' \
@@ -726,8 +736,6 @@ else
   bad "a consistent live pid must read ALIVE/identity=verified: out:
 $gp_out"
 fi
-kill "$live2" 2>/dev/null
-wait "$live2" 2>/dev/null
 (cd "$WORK" && g push -q origin ":refs/machine-claims/goodPid" 2>/dev/null || true)
 
 # ===========================================================================
@@ -766,22 +774,20 @@ echo "TEST 38: the pid-identity check is TIMEZONE-FREE (roborev round 3, Medium)
 # far past PID_IDENTITY_SLACK_SECS, which would declare a live supervisor
 # DEAD-PID-REUSED. Driven by running the check under a deliberately skewed TZ: the
 # verdict must not depend on it.
-tail -f /dev/null &
-tz_pid=$!
-craft_old_claim "$WORK" "tzMachine" 3402 "$tz_pid" 0
+craft_old_claim "$WORK" "tzMachine" 3402 "$$" 0
 tz_utc=$(cd "$WORK" && TZ=UTC HEARTBEAT_MACHINE=tzMachine CLAIM_OPEN_PR_CMD="$NO_OPEN_PR" \
   bash "$HB" dead-lanes 2>&1 | grep -E '^tzMachine ' | awk '{print $4}')
 tz_ist=$(cd "$WORK" && TZ=Asia/Kolkata HEARTBEAT_MACHINE=tzMachine CLAIM_OPEN_PR_CMD="$NO_OPEN_PR" \
   bash "$HB" dead-lanes 2>&1 | grep -E '^tzMachine ' | awk '{print $4}')
 tz_neg=$(cd "$WORK" && TZ=America/Los_Angeles HEARTBEAT_MACHINE=tzMachine CLAIM_OPEN_PR_CMD="$NO_OPEN_PR" \
   bash "$HB" dead-lanes 2>&1 | grep -E '^tzMachine ' | awk '{print $4}')
-if [ "$tz_utc" = "ALIVE" ] && [ "$tz_ist" = "ALIVE" ] && [ "$tz_neg" = "ALIVE" ]; then
+# The property is AGREEMENT plus the absence of a false recycle — asserted rather than a
+# specific verdict, so the case cannot go green merely because every zone is equally wrong.
+if [ "$tz_utc" = "$tz_ist" ] && [ "$tz_ist" = "$tz_neg" ] && [ "$tz_utc" = "ALIVE" ]; then
   ok "the identity verdict is identical under UTC, +05:30 and -07:00 (ALIVE in all three) — no timezone dependence"
 else
   bad "the identity check must not depend on TZ: UTC=$tz_utc IST=$tz_ist PST=$tz_neg"
 fi
-kill "$tz_pid" 2>/dev/null
-wait "$tz_pid" 2>/dev/null
 (cd "$WORK" && g push -q origin ":refs/machine-claims/tzMachine" 2>/dev/null || true)
 
 # ===========================================================================
@@ -860,6 +866,66 @@ else
   bad "NON-VACUITY broken: the git shim emitted no warning, so TEST 40 proves nothing"
 fi
 (cd "$WORK" && g push -q origin ":refs/machine-claims/warnMachine" 2>/dev/null || true)
+
+# ===========================================================================
+echo "TEST 41: one HEALTHY local lane + foreign lanes still exits 0 (round 4 balance)"
+# ===========================================================================
+# The other side of TEST 34: foreign rows must not EACH count as incomplete, or a
+# healthy multi-machine fleet would sit at exit 1 forever and everyone would learn to
+# ignore the code. The rule is "did I measure ANY local lane", not "is every lane local".
+craft_old_claim "$WORK" "mixedLocal" 3405 "$$" 0
+mixed_out=$(cd "$WORK" && HEARTBEAT_MACHINE=mixedLocal CLAIM_OPEN_PR_CMD="$NO_OPEN_PR" \
+  bash "$HB" dead-lanes 2>&1)
+mixed_rc=$?
+foreign_rows=$(printf '%s\n' "$mixed_out" | grep -c 'UNKNOWN-FOREIGN' || true)
+if [ "$mixed_rc" -eq 0 ] \
+  && [ "$foreign_rows" -gt 0 ] \
+  && printf '%s\n' "$mixed_out" | grep -E '^mixedLocal ' | grep -q 'ALIVE'; then
+  ok "one measured-healthy local lane alongside $foreign_rows foreign rows exits 0 — foreign rows alone do not force incompleteness"
+else
+  bad "a healthy local lane must yield exit 0 despite foreign rows: rc=$mixed_rc foreign=$foreign_rows out:
+$mixed_out"
+fi
+(cd "$WORK" && g push -q origin ":refs/machine-claims/mixedLocal" 2>/dev/null || true)
+
+# ===========================================================================
+echo "TEST 42: a pid recycled INSIDE the rounding window is UNKNOWN, not ALIVE"
+# ===========================================================================
+# roborev round 4 (Medium): with a 60s slack, `ts < start <= ts+60` was reported ALIVE —
+# so a pid recycled within a minute read clean. The window absorbs second-resolution
+# rounding; it is not evidence of identity. Driven by crafting a claim stamped 1s BEFORE
+# a live process started, i.e. inside the tolerance but still not verifiable.
+tail -f /dev/null &
+win_pid=$!
+craft_old_claim "$WORK" "windowPid" 3406 "$win_pid" 1
+win_out=$(cd "$WORK" && PID_IDENTITY_SLACK_SECS=30 HEARTBEAT_MACHINE=windowPid \
+  CLAIM_OPEN_PR_CMD="$NO_OPEN_PR" bash "$HB" dead-lanes 2>&1)
+win_rc=$?
+if printf '%s\n' "$win_out" | grep -E '^windowPid ' | grep -q 'UNKNOWN-IDENTITY' \
+  && [ "$win_rc" -eq 1 ]; then
+  ok "a start time inside the rounding window is UNKNOWN-IDENTITY + exit 1, never a clean ALIVE"
+else
+  bad "the slack window must not produce ALIVE: rc=$win_rc out:
+$win_out"
+fi
+kill "$win_pid" 2>/dev/null
+wait "$win_pid" 2>/dev/null
+(cd "$WORK" && g push -q origin ":refs/machine-claims/windowPid" 2>/dev/null || true)
+
+# ===========================================================================
+echo "TEST 43: the one-ref-per-machine LIMIT is documented (round 4, High — not silently shipped)"
+# ===========================================================================
+# refs/machine-claims/<machine> is ONE ref per machine (#2655, premised on one worker per
+# machine, #1930), yet #3393's own evidence is FOUR lanes per box. So concurrent lanes on
+# one box overwrite each other's claim and only the last supervisor pid stays observable —
+# a real bound on what this command can report. Changing the ref layout is a design
+# decision on a namespace shared with should-reap and the CI reaper, so it is escalated
+# rather than made here; what must not happen is shipping the limit unstated.
+if grep -q 'ONE CLAIM REF PER MACHINE' "$HB" && grep -qi 'four lanes\|4 lanes' "$HB"; then
+  ok "the one-ref-per-machine limitation is stated in the script, with the multi-lane case named"
+else
+  bad "the one-ref-per-machine limit must be documented where a reader of dead-lanes will see it"
+fi
 
 echo
 echo "=== claim-heartbeat.sh: $PASS passed, $FAIL failed ==="
