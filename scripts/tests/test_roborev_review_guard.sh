@@ -42,7 +42,7 @@ WRAPPER="$SCRIPT_DIR/../flow/roborev-review.sh"
 # Note the direction of the hazard now: with the `--help` prose exemption in place, a scan
 # that lands on the scratch copy finds nothing and reports CLEAN — a false pass, which is
 # worse than the false fail that surfaced the bug.
-WRAPPER_REAL="$SCRIPT_DIR/../flow/roborev-review.sh"
+readonly WRAPPER_REAL="$SCRIPT_DIR/../flow/roborev-review.sh"
 # The structured waiver scanner the wrapper delegates to (#3312 job 26). Defined HERE, beside
 # WRAPPER, because run_wrapper passes it on every call — the structural section is too late.
 SCAN_TOOL="$SCRIPT_DIR/../flow/roborev-waiver-scan.py"
@@ -4857,99 +4857,134 @@ _wr_is_invocation() {
   esac
   return 1
 }
+# THE ENFORCEMENT LOOP AND ITS CONTROL SHARE ONE CLASSIFIER (reviewer B2). They used to be two
+# implementations of the same five rules, and they had ALREADY DRIFTED: the probe knew nothing about
+# the marker arm, so one of the three documented permitted forms was uncovered in both directions,
+# and the loop itself was executed by no control at all — replacing the loop's accumulator with
+# `continue` (the exact "case typo" the control claims to guard against) left BOTH asserts green with
+# the guard fully disabled. That is the `_cls_exec_lines` lesson again: a port is a second
+# implementation, and its correctness is only knowable by differential testing against the original.
+# So there is ONE function, the loop calls it, and the control table certifies the thing that runs.
+#
+# COUNTED ON THE RAW LINE, AND PROSE-STRIPPING IS FAIL-CLOSED (reviewer B1). The count used to be
+# taken AFTER the single-quote strip, so a strip that swallowed a REAL occurrence made it invisible —
+# to the grammar and to the `_wr_total -eq 0` backstop alike, since the line simply looked like it
+# had no occurrence. Two measured false PASSes, both accepted by the old code:
+#   `_probe=$(grep -c "the wrapper's tok" "$WRAPPER")  # it's a scan`   (apostrophes pair ACROSS the read)
+#   `eval 'grep -c ROBOREV_DIFF_SOURCE_STATE "$WRAPPER"'`               (single-quoted text that IS code)
+# The second is the sharper one and is not contrived: a line-oriented quote-strip cannot tell inert
+# prose from a quoted string that is later evaluated. So occurrences are counted on the RAW line, and
+# a line whose strip removed any occurrence is a FAIL unless it carries the explicit prose marker.
+# Exactly three lines in this file need it — the `ok`/`bad` messages that NAME the variable while
+# describing the rule — which is the whole price of closing the only fail-open door in the grammar.
+_wr_prose_marker='wrapper-prose''-allow'
+# _wr_classify <raw line> -> "<verdict> <raw-occurrence-count>"
+#   none | prose | prose-ok | spelling | arity | form | ok
+_wr_classify() {
+  _c_raw=$1
+  _c_n=$(printf '%s\n' "$_c_raw" | grep -oE '[$][{]?'"$_wr_vname"'[}]?([^A-Za-z0-9_]|$)' | wc -l | tr -d '[:space:]')
+  if [ "${_c_n:-0}" -lt 1 ]; then printf 'none 0\n'; return; fi
+  _c_code=$(printf '%s\n' "$_c_raw" | sed -e 's/\\[$]/@ESC@/g' -e "s/'[^']*'//g")
+  _c_s=$(printf '%s\n' "$_c_code" | grep -oE '[$][{]?'"$_wr_vname"'[}]?([^A-Za-z0-9_]|$)' | wc -l | tr -d '[:space:]')
+  if [ "${_c_n:-0}" -ne "${_c_s:-0}" ]; then
+    case "$_c_raw" in
+      *"$_wr_prose_marker"*) printf 'prose-ok %s\n' "$_c_n"; return ;;
+    esac
+    printf 'prose %s\n' "$_c_n"; return
+  fi
+  _c_q=$(printf '%s\n' "$_c_code" | grep -oF "$_wr_ref" | wc -l | tr -d '[:space:]')
+  if [ "${_c_n:-0}" -ne "${_c_q:-0}" ]; then printf 'spelling %s\n' "$_c_n"; return; fi
+  # ARITY IS CHECKED BEFORE THE MARKER (reviewer nit): otherwise approving a marker for one read
+  # implicitly approves any number of reads on that line, which is the compound-line bypass again.
+  if [ "${_c_n:-0}" -gt 1 ]; then printf 'arity %s\n' "$_c_n"; return; fi
+  case "$_c_code" in
+    *"$_wr_marker"*) printf 'ok %s\n' "$_c_n"; return ;;
+  esac
+  if _wr_is_invocation "$_c_code"; then printf 'ok %s\n' "$_c_n"; return; fi
+  case "$_c_code" in
+    *"=$_wr_ref")
+      _c_nm=${_c_code%%=*}
+      _c_nm=${_c_nm#"${_c_nm%%[! ]*}"}
+      case " $_wr_aliases " in *" $_c_nm "*) printf 'ok %s\n' "$_c_n"; return ;; esac ;;
+  esac
+  printf 'form %s\n' "$_c_n"
+}
 _wr_bad_reads=""
 _wr_bad_spelling=""
+_wr_prose_bad=""
+_wr_unknown=""
 _wr_multi=""
 _wr_total=0
+_wr_prose_n=0
 while IFS= read -r _wr_num_line; do
   [ -n "$_wr_num_line" ] || continue
-  # `grep -n` prefixes `NNNN:`; the grammar must judge the CODE, not the line number (an unstripped
-  # prefix made every whole-value save look like an assignment to `NNNN:name`, i.e. four false FAILs).
+  # `grep -n` prefixes `NNNN:`; the grammar must judge the CODE, not the line number.
   _wr_line=${_wr_num_line#*:}
-  _wr_code=$(printf '%s\n' "$_wr_line" | sed -e 's/\\[$]/@ESC@/g' -e "s/'[^']*'//g")
-  # Occurrences of exactly this variable — `$WRAPPER_REAL` is a DIFFERENT name and must not count.
-  _wr_n=$(printf '%s\n' "$_wr_code" | grep -oE '[$][{]?'"$_wr_vname"'[}]?([^A-Za-z0-9_]|$)' | wc -l | tr -d '[:space:]')
-  [ "${_wr_n:-0}" -ge 1 ] || continue
-  _wr_total=$((_wr_total + _wr_n))
-  # (1) SPELLING: every occurrence on this line must be the exact quoted form.
-  _wr_q=$(printf '%s\n' "$_wr_code" | grep -oF "$_wr_ref" | wc -l | tr -d '[:space:]')
-  if [ "${_wr_n:-0}" -ne "${_wr_q:-0}" ]; then
-    _wr_bad_spelling="$_wr_bad_spelling${_wr_bad_spelling:+; }$_wr_num_line"
-    continue
-  fi
-  case "$_wr_code" in
-    *"$_wr_marker"*) continue ;;
+  _wr_res=$(_wr_classify "$_wr_line")
+  _wr_v=${_wr_res%% *}
+  _wr_c=${_wr_res##* }
+  case "$_wr_v" in
+    none) ;;
+    ok) _wr_total=$((_wr_total + _wr_c)) ;;
+    prose-ok) _wr_prose_n=$((_wr_prose_n + _wr_c)) ;;
+    prose) _wr_prose_bad="$_wr_prose_bad${_wr_prose_bad:+; }$_wr_num_line" ;;
+    spelling) _wr_bad_spelling="$_wr_bad_spelling${_wr_bad_spelling:+; }$_wr_num_line" ;;
+    arity) _wr_multi="$_wr_multi${_wr_multi:+; }$_wr_num_line" ;;
+    form) _wr_bad_reads="$_wr_bad_reads${_wr_bad_reads:+; }$_wr_num_line" ;;
+    # A CLOSED GRAMMAR OVER THE VERDICTS THEMSELVES: an unplanned verdict must not fall silently
+    # into the permissive branch, which is the shape this whole section exists to retire.
+    *) _wr_unknown="$_wr_unknown${_wr_unknown:+; }$_wr_v" ;;
   esac
-  # (2) ARITY: one occurrence per line, so a permitted one cannot carry an unpermitted one.
-  if [ "${_wr_n:-0}" -gt 1 ]; then
-    _wr_multi="$_wr_multi${_wr_multi:+; }$_wr_num_line"
-    continue
-  fi
-  # (3) FORM. An INVOCATION -- decided by COMMAND POSITION, never by substring.
-  if _wr_is_invocation "$_wr_code"; then continue; fi
-  # A whole-value SAVE into an ALLOWLISTED alias: `NAME="$WRAPPER"` and nothing else on the line.
-  case "$_wr_code" in
-    *"=$_wr_ref")
-      _wr_nm=${_wr_code%%=*}
-      _wr_nm=${_wr_nm#"${_wr_nm%%[! ]*}"}
-      case " $_wr_aliases " in *" $_wr_nm "*) continue ;; esac ;;
-  esac
-  _wr_bad_reads="$_wr_bad_reads${_wr_bad_reads:+; }$_wr_num_line"
 done <<EOF
 $(grep -nE '[$][{]?'"$_wr_vname"'[}]?' "$TEST_SELF" | grep -vE '^[0-9]+:[[:space:]]*#')
 EOF
 # AFFIRMATIVE MEASUREMENT: zero occurrences means this scan had no subject, which is not a pass.
-if [ "${_wr_total:-0}" -eq 0 ]; then
-  bad 'structural (#3367): the order-dependence grammar found NO occurrence of the mutable wrapper variable at all, so it certified nothing — the variable was renamed, or the prose-stripping swallowed the file'
+if [ -n "$_wr_unknown" ]; then
+  bad "structural (#3367): the order-dependence classifier returned a verdict the loop does not recognise, so some line was neither accepted nor rejected —$_wr_unknown"
+elif [ "${_wr_total:-0}" -eq 0 ]; then
+  bad 'structural (#3367): the order-dependence grammar found NO accepted occurrence of the mutable wrapper variable at all, so it certified nothing — the variable was renamed, or the scan lost its subject'
+elif [ -n "$_wr_prose_bad" ]; then
+  bad "structural (#3367): a line's quote-stripping removed an occurrence of the mutable wrapper variable, so the grammar could not see it and would have passed it silently (an apostrophe in a nearby string, or a single-quoted command later eval'd, both do this): $(printf '%s' "$_wr_prose_bad" | cut -c1-200)"
 elif [ -n "$_wr_bad_spelling" ]; then
-  bad "structural (#3367): an occurrence of the mutable wrapper variable is not spelled as the single legal quoted form, so the form check below cannot see it (braced and unquoted spellings were live bypasses): $(printf '%s' "$_wr_bad_spelling" | cut -c1-200)"
+  bad "structural (#3367): an occurrence of the mutable wrapper variable is not spelled as the single legal quoted form, so the form check cannot see it (braced and unquoted spellings were live bypasses): $(printf '%s' "$_wr_bad_spelling" | cut -c1-200)"
 elif [ -n "$_wr_multi" ]; then
   bad "structural (#3367): a line carries MORE THAN ONE occurrence of the mutable wrapper variable, so a permitted one (an invocation) would carry an unpermitted one (a doctrine scan) past the grammar: $(printf '%s' "$_wr_multi" | cut -c1-200)"
 elif [ -n "$_wr_bad_reads" ]; then
   bad "structural (#3367): a read of the mutable wrapper variable matches no permitted form, so its verdict depends on gate-mock ordering — use \$WRAPPER_REAL for a doctrine SUBJECT: $(printf '%s' "$_wr_bad_reads" | cut -c1-200)"
 else
-  ok "structural (#3367): all $_wr_total occurrences of the mutable wrapper variable use the single legal spelling, sit one per line, and are an invocation, a whole-value save, or a marked opt-out — no doctrine scan takes it as a SUBJECT, so no verdict depends on which case ran last"
+  ok "structural (#3367): all $_wr_total live occurrences of the mutable wrapper variable (plus $_wr_prose_n marked prose) are counted on the RAW line, use the single legal spelling, sit one per line, and are an invocation, an allowlisted save, or a marked opt-out — no doctrine scan takes it as a SUBJECT"
 fi
-# THE GRAMMAR MUST BE ABLE TO REJECT, and specifically to reject the three bypasses roborev found.
-# A control that only probed the shape the author already had in mind is how (a)-(c) survived round
-# one, so each is probed as its own synthetic line, alongside the two forms that must be ACCEPTED.
+# THE CONTROL CERTIFIES THE FUNCTION THE LOOP ACTUALLY CALLS. Each bypass any review has found is
+# probed as its own synthetic line, alongside every form that must still be ACCEPTED — a control that
+# only probed the shapes the author already had in mind is how three rounds of bypasses survived.
 _wr_ctl_bad=""
-_wr_probe_line() {
-  # Returns: the verdict this grammar gives one synthetic line — spelling|arity|form|ok
-  _p_code=$(printf '%s\n' "$1" | sed -e 's/\\[$]/@ESC@/g' -e "s/'[^']*'//g")
-  _p_n=$(printf '%s\n' "$_p_code" | grep -oE '[$][{]?'"$_wr_vname"'[}]?([^A-Za-z0-9_]|$)' | wc -l | tr -d '[:space:]')
-  _p_q=$(printf '%s\n' "$_p_code" | grep -oF "$_wr_ref" | wc -l | tr -d '[:space:]')
-  [ "${_p_n:-0}" -ne "${_p_q:-0}" ] && { printf 'spelling\n'; return; }
-  [ "${_p_n:-0}" -gt 1 ] && { printf 'arity\n'; return; }
-  if _wr_is_invocation "$_p_code"; then printf 'ok\n'; return; fi
-  case "$_p_code" in
-    *"=$_wr_ref")
-      _p_nm=${_p_code%%=*}
-      _p_nm=${_p_nm#"${_p_nm%%[! ]*}"}
-      case " $_wr_aliases " in *" $_p_nm "*) printf 'ok\n'; return ;; esac ;;
-  esac
-  printf 'form\n'
-}
 for _wr_case in \
   "spelling:_x=\$(grep -c foo \"\${$_wr_vname}\")" \
   "spelling:_x=\$(grep -c foo \$$_wr_vname)" \
   "arity:bash $_wr_ref --help; grep -c q $_wr_ref" \
+  "arity:_x=\$(grep -c q $_wr_ref); bash $_wr_ref --help # $_wr_marker: one marker must not waive two reads" \
+  "prose:_probe=\$(grep -c \"the wrapper's tok\" $_wr_ref) # it's a scan" \
+  "prose:eval 'grep -c FOO $_wr_ref'" \
+  "prose-ok:  ok 'the mutable \$$_wr_vname is named here in prose' # $_wr_prose_marker" \
   "form:_x=\$(grep -c foo $_wr_ref)" \
   "form:sed -n 1p $_wr_ref" \
   "form:grep bash $_wr_ref" \
   "form:_x=\$(awk /bash/ $_wr_ref)" \
   "form:subject=$_wr_ref" \
+  "ok:_x=\$(grep -c foo $_wr_ref) # $_wr_marker: a reviewed opt-out" \
   "ok:STUB_INVOKED=\"\$INVOKED\" PATH=\"\$stubbin:\$PATH\" bash $_wr_ref --help" \
   "ok:  bash $_wr_ref --help" \
-  "ok:_gm_real_wrapper=$_wr_ref"; do
+  "ok:_gm_real_wrapper=$_wr_ref" \
+  "none:_x=\$(grep -c foo \"\$${_wr_vname}_REAL\")"; do
   _wr_want=${_wr_case%%:*}
-  _wr_got=$(_wr_probe_line "${_wr_case#*:}")
+  _wr_res=$(_wr_classify "${_wr_case#*:}")
+  _wr_got=${_wr_res%% *}
   [ "$_wr_got" = "$_wr_want" ] || _wr_ctl_bad="$_wr_ctl_bad [want=$_wr_want got=$_wr_got: ${_wr_case#*:}]"
 done
 if [ -z "$_wr_ctl_bad" ]; then
-  ok 'structural control (#3367): the grammar classifies all eleven synthetic lines correctly — it rejects the braced, unquoted, compound-line, unallowlisted-alias and mentions-the-word-bash bypasses roborev found, rejects plain doctrine scans, and still accepts invocations and whole-value saves'
+  ok 'structural control (#3367): the classifier THE LOOP CALLS classifies all seventeen synthetic lines correctly — it rejects the braced, unquoted, compound-line, unallowlisted-alias, mentions-the-word-bash and quote-swallowed bypasses, refuses to let one marker waive a second read, and still accepts invocations, allowlisted saves, marked opt-outs and marked prose'
 else
-  bad "structural control (#3367): the permitted-form grammar misclassifies a synthetic read, so its verdict on the real file is not trustworthy —$_wr_ctl_bad"
+  bad "structural control (#3367): the permitted-form classifier misclassifies a synthetic read, so its verdict on the real file is not trustworthy —$_wr_ctl_bad"
 fi
 # AND AN ALLOWLISTED ALIAS MAY ONLY RESTORE. Naming the two save variables is not enough on its
 # own: if `_wr_saved` could itself be scanned, the allowlist would just relocate the bypass. So every
@@ -4983,11 +5018,30 @@ else
   bad "structural (#3367): a save alias is used for something other than restoring the mutable global, so it is a second name for the same order-dependent value: $(printf '%s' "$_wr_alias_bad" | cut -c1-200)"
 fi
 # ...and `WRAPPER_REAL` must never be reassigned, or it is just `WRAPPER` with a longer name.
-_wr_real_writes=$(grep -cE '^[[:space:]]*WRAPPER_REAL=' "$TEST_SELF")
-if [ "$_wr_real_writes" -eq 1 ]; then
-  ok 'structural (#3367): WRAPPER_REAL is assigned exactly once, so it cannot acquire the order dependence it exists to avoid'
+#
+# ENFORCED BY THE SHELL, ASSERTED AS A PROPERTY (roborev job 37). This used to count lines matching
+# `^WRAPPER_REAL=`, i.e. it enumerated ASSIGNMENT SYNTAX — so `export WRAPPER_REAL=…`,
+# `WRAPPER_REAL+=…` and `printf -v WRAPPER_REAL …` all mutated the supposedly immutable path while
+# the guard stayed green. Enumerating the spellings of a mutation is the same error as enumerating
+# the spellings of a read (job 34) and matching an invocation by substring (job 36): a list of
+# shapes someone thought of, standing in for the property itself. `readonly` makes the shell the
+# enforcer, so no syntax can evade it, and the check below asks the shell rather than the text.
+if grep -qE '^readonly WRAPPER_REAL=' "$TEST_SELF"; then
+  ok 'structural (#3367): WRAPPER_REAL is declared readonly, so the shell — not a syntax list — is what prevents reassignment'
 else
-  bad "structural (#3367): WRAPPER_REAL is assigned $_wr_real_writes times; it must be written exactly once"
+  bad 'structural (#3367): WRAPPER_REAL is not declared readonly, so its immutability rests on a grep for assignment spellings, which export/+=/printf -v all evade'
+fi
+# BEHAVIOURAL: ask the shell. A subshell that tries to reassign must FAIL — this is the property
+# itself, measured, rather than a claim about the declaration's text.
+if ( WRAPPER_REAL=/nonexistent/decoy ) 2>/dev/null; then
+  bad 'structural (#3367): WRAPPER_REAL could be reassigned in a subshell, so the readonly declaration is not in force and every doctrine scan is back to reading a mutable path'
+else
+  ok 'structural (#3367): a reassignment of WRAPPER_REAL is REFUSED by the shell (measured, not inferred from the declaration text)'
+fi
+if [ "$WRAPPER_REAL" = "$SCRIPT_DIR/../flow/roborev-review.sh" ]; then
+  ok 'structural (#3367): WRAPPER_REAL still names the real wrapper, so the immutable path is also the CORRECT path'
+else
+  bad "structural (#3367): WRAPPER_REAL does not name the real wrapper — it is immutable but wrong: $WRAPPER_REAL"
 fi
 # BEHAVIOURAL: poison `WRAPPER` and run the classifier filter over both paths.
 #
@@ -5016,7 +5070,7 @@ _wr_real_hit=no; _wr_mut_hit=no
 case "$_cls_via_real"    in *"$_wr_sentinel"*) _wr_real_hit=yes ;; esac
 case "$_cls_via_mutable" in *"$_wr_sentinel"*) _wr_mut_hit=yes ;; esac
 if [ "$_wr_real_hit" = no ] && [ "$_wr_mut_hit" = yes ]; then
-  ok 'behavioural (#3367): with $WRAPPER poisoned, the same filter reports the sentinel via $WRAPPER and NOT via $WRAPPER_REAL — the immutable path is what makes the verdict stable, and the scan is demonstrably not blind'
+  ok 'behavioural (#3367): with $WRAPPER poisoned, the same filter reports the sentinel via $WRAPPER and NOT via $WRAPPER_REAL — the immutable path is what makes the verdict stable, and the scan is demonstrably not blind' # wrapper-prose-allow: names the variable in a diagnostic, does not read it
 elif [ "$_wr_mut_hit" = no ]; then
   bad 'behavioural (#3367): the poisoned wrapper was NOT flagged even when scanned directly, so this case shows nothing about path stability (the fixture or the executable-line filter is wrong, not the paths)'
 else
@@ -5025,9 +5079,9 @@ fi
 # The restore must have happened, or every later case silently audits the scratch copy — the exact
 # failure mode this section exists to prevent, reintroduced by the pin that tests for it.
 if [ "$WRAPPER" = "$_wr_saved" ]; then # wrapper-mutable-read-allow: asserting the restore requires reading it
-  ok 'behavioural (#3367): the probe restored $WRAPPER, so no later case inherits the poisoned path'
+  ok 'behavioural (#3367): the probe restored $WRAPPER, so no later case inherits the poisoned path' # wrapper-prose-allow: names the variable in a diagnostic, does not read it
 else
-  bad 'behavioural (#3367): the probe left $WRAPPER pointing at its scratch copy'
+  bad 'behavioural (#3367): the probe left $WRAPPER pointing at its scratch copy' # wrapper-prose-allow: names the variable in a diagnostic, does not read it
 fi
 
 # ===== ABSENCE IS A FAIL, AND THE WAIVER IS THE ONLY WAY PAST IT =====
