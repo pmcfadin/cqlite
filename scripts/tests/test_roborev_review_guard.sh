@@ -4911,7 +4911,7 @@ _wr_is_invocation() {
 _WR_QS=$(cat <<'AWKEOF'
 {
   line = $0; n = length(line); sq = 0; dq = 0
-  code = 0; lit = 0; q = 0; mk = 0; ev = 0
+  code = 0; lit = 0; q = 0; mk = 0; ev = 0; cut = n
   for (i = 1; i <= n; i++) {
     c = substr(line, i, 1)
     if (!sq && c == "\\") { i++; continue }
@@ -4921,31 +4921,33 @@ _WR_QS=$(cat <<'AWKEOF'
       if (c == "'") { sq = 1; continue }
       if (c == "\"") { dq = 1; continue }
       if (c == "#" && (i == 1 || substr(line, i-1, 1) ~ /[ \t]/)) {
-        # THE MARKER MUST OPEN THE COMMENT, not merely appear in it. Matched anywhere, a comment
-        # that only QUOTES the marker ("# see 'wrapper-mutable-read-allow' above") grants it -- an
-        # artifact describing the escape hatch becoming it, which is the shape CLAUDE.md says to
-        # close by anchoring the control token where the payload cannot reach. Caught by fixture
-        # f_selfauth, not by review.
-        cm = substr(line, i + 1)
-        sub(/^[ \t]+/, "", cm)
+        cm = substr(line, i + 1); sub(/^[ \t]+/, "", cm)
         if (index(cm, MK) == 1) mk = 1
+        cut = i - 1
         break
       }
     }
     if (c == "$") {
-      rest = substr(line, i)
-      if (match(rest, "^[$][{]?" VN "[}]?")) {
-        tok = substr(rest, 1, RLENGTH); after = substr(rest, RLENGTH + 1, 1)
-        if (after !~ /[A-Za-z0-9_]/) {
-          if (sq) lit++
-          else { code++
-                 if (tok == "$" VN && dq && substr(line, i-1, 1) == "\"" && after == "\"") q++ }
-        }
+      rest = substr(line, i); hit = 0; exact = 0
+      # A BRACED expansion is complete at its brace, so the identifier-boundary rule must NOT be
+      # applied to it: `${WRAPPER}_REAL` is a live read of WRAPPER followed by the literal text
+      # `_REAL`, and testing the character after `}` discarded it as if it named another variable.
+      # `${WRAPPER:-x}` is a read too, hence "name followed by any non-identifier character".
+      if (match(rest, "^[$][{]" VN "[^A-Za-z0-9_]")) { hit = 1 }
+      else if (match(rest, "^[$]" VN)) {
+        after = substr(rest, RLENGTH + 1, 1)
+        if (after !~ /[A-Za-z0-9_]/) { hit = 1
+          if (dq && substr(line, i-1, 1) == "\"" && after == "\"") exact = 1 }
       }
+      if (hit) { if (sq) lit++; else { code++; if (exact) q++ } }
     }
   }
-  if (line ~ /(^|[ \t;&|(])eval([ \t]|$)/) ev = 1
-  printf "%d %d %d %d %d\n", code, lit, q, mk, ev
+  # The EXECUTABLE segment, comment removed by the same quote-aware pass. Every form check reads
+  # this, never the raw line: a `sed` comment-strip is not quote-aware, so a fake invocation in a
+  # trailing comment (`grep foo "$WRAPPER" # $(bash "$WRAPPER")`) was accepted as an invocation.
+  seg = substr(line, 1, cut)
+  if (seg ~ /(^|[ \t;&|(])eval([ \t]|$)/) ev = 1
+  printf "%d %d %d %d %d\n%s\n", code, lit, q, mk, ev, seg
 }
 AWKEOF
 )
@@ -4953,7 +4955,9 @@ AWKEOF
 #   none | prose-ok | eval | spelling | arity | form | ok
 _wr_classify() {
   _c_raw=$1
-  _c_m=$(printf '%s\n' "$_c_raw" | awk -v VN="$_wr_vname" -v MK="$_wr_marker" "$_WR_QS")
+  _c_out=$(printf '%s\n' "$_c_raw" | awk -v VN="$_wr_vname" -v MK="$_wr_marker" "$_WR_QS")
+  _c_m=$(printf '%s\n' "$_c_out" | head -1)
+  _c_seg=$(printf '%s\n' "$_c_out" | tail -n +2)
   _c_code=${_c_m%% *}; _c_rest=${_c_m#* }
   _c_lit=${_c_rest%% *}; _c_rest=${_c_rest#* }
   _c_q=${_c_rest%% *}; _c_rest=${_c_rest#* }
@@ -4962,7 +4966,21 @@ _wr_classify() {
     printf 'eval %s\n' $(( ${_c_code:-0} + ${_c_lit:-0} )); return
   fi
   if [ "${_c_code:-0}" -eq 0 ]; then
-    if [ "${_c_lit:-0}" -gt 0 ]; then printf 'prose-ok %s\n' "$_c_lit"; return; fi
+    if [ "${_c_lit:-0}" -gt 0 ]; then
+      # INERT TEXT NEEDS AN AFFIRMATIVE PERMIT, NOT MERELY THE ABSENCE OF A LIVE READ. Single quotes
+      # make an occurrence literal ON THIS LINE, but they do not make it inert in the PROGRAM:
+      #   _cmd='grep foo "$WRAPPER"'   ...later...   eval "$_cmd"
+      # is a doctrine read assembled on one line and executed on another, and no per-line parse can
+      # see the join. So a literal occurrence is accepted only where prose legitimately lives — the
+      # command word is this harness's own `ok`/`bad` reporter. Anything else FAILs closed, which
+      # costs nothing today (all four literal occurrences are diagnostics) and cannot be widened by
+      # accident.
+      _c_pw=$(_wr_cmdpos "$_c_seg")
+      case "$_c_pw" in
+        'ok '*|'bad '*) printf 'prose-ok %s\n' "$_c_lit"; return ;;
+      esac
+      printf 'prose %s\n' "$_c_lit"; return
+    fi
     printf 'none 0\n'; return
   fi
   if [ "${_c_code:-0}" -ne "${_c_q:-0}" ]; then printf 'spelling %s\n' "$_c_code"; return; fi
@@ -4970,11 +4988,10 @@ _wr_classify() {
   # number of reads on that line, which is the compound-line bypass again.
   if [ "${_c_code:-0}" -gt 1 ]; then printf 'arity %s\n' "$_c_code"; return; fi
   if [ "${_c_mk:-0}" -eq 1 ]; then printf 'ok %s\n' "$_c_code"; return; fi
-  _c_code_only=$(printf '%s\n' "$_c_raw" | sed 's/[ 	]#[^"'"'"']*$//')
-  if _wr_is_invocation "$_c_code_only"; then printf 'ok %s\n' "$_c_code"; return; fi
-  case "$_c_code_only" in
-    *"=$_wr_ref")
-      _c_nm=${_c_code_only%%=*}
+  if _wr_is_invocation "$_c_seg"; then printf 'ok %s\n' "$_c_code"; return; fi
+  case "$_c_seg" in
+    *"=$_wr_ref"|*"=$_wr_ref"' ')
+      _c_nm=${_c_seg%%=*}
       _c_nm=${_c_nm#"${_c_nm%%[! ]*}"}
       case " $_wr_aliases " in *" $_c_nm "*) printf 'ok %s\n' "$_c_code"; return ;; esac ;;
   esac
@@ -4991,7 +5008,7 @@ _wr_classify() {
 # the SAME function over fixtures whose correct verdict is known — dispatch included.
 _wr_scan_file() {
   _sf_file=$1
-  _wr_bad_reads=""; _wr_bad_spelling=""; _wr_prose_bad=""; _wr_unknown=""; _wr_multi=""
+  _wr_bad_reads=""; _wr_bad_spelling=""; _wr_prose_bad=""; _wr_unknown=""; _wr_multi=""; _wr_lit_bad=""
   _wr_total=0; _wr_prose_n=0
   while IFS= read -r _wr_num_line; do
     [ -n "$_wr_num_line" ] || continue
@@ -5005,6 +5022,7 @@ _wr_scan_file() {
       ok) _wr_total=$((_wr_total + _wr_c)) ;;
       prose-ok) _wr_prose_n=$((_wr_prose_n + _wr_c)) ;;
       eval) _wr_prose_bad="$_wr_prose_bad${_wr_prose_bad:+; }$_wr_num_line" ;;
+      prose) _wr_lit_bad="$_wr_lit_bad${_wr_lit_bad:+; }$_wr_num_line" ;;
       spelling) _wr_bad_spelling="$_wr_bad_spelling${_wr_bad_spelling:+; }$_wr_num_line" ;;
       arity) _wr_multi="$_wr_multi${_wr_multi:+; }$_wr_num_line" ;;
       form) _wr_bad_reads="$_wr_bad_reads${_wr_bad_reads:+; }$_wr_num_line" ;;
@@ -5026,6 +5044,7 @@ EOF
   if [ -n "$_wr_unknown" ]; then _WR_VERDICT=unknown
   elif [ "${_wr_total:-0}" -eq 0 ]; then _WR_VERDICT=empty
   elif [ -n "$_wr_prose_bad" ]; then _WR_VERDICT=eval
+  elif [ -n "$_wr_lit_bad" ]; then _WR_VERDICT=prose
   elif [ -n "$_wr_bad_spelling" ]; then _WR_VERDICT=spelling
   elif [ -n "$_wr_multi" ]; then _WR_VERDICT=arity
   elif [ -n "$_wr_bad_reads" ]; then _WR_VERDICT=form
@@ -5040,6 +5059,8 @@ case "$_WR_VERDICT" in
     bad "structural (#3367): the order-dependence classifier returned a verdict the dispatch does not recognise, so some line was neither accepted nor rejected —$_wr_unknown" ;;
   empty)
     bad 'structural (#3367): the order-dependence pass found NO accepted occurrence of the mutable wrapper variable at all, so it certified nothing — the variable was renamed, or the scan lost its subject' ;;
+  prose)
+    bad "structural (#3367): a line holds the mutable wrapper variable inside single quotes somewhere other than an ok/bad diagnostic. Single quotes make it literal on THIS line but not inert in the PROGRAM — assigning it and eval'ing it later is a doctrine read no per-line parse can see — so only the harness's own reporters may carry it as text: $(printf '%s' "$_wr_lit_bad" | cut -c1-200)" ;;
   eval)
     bad "structural (#3367): a line EVALs text containing the mutable wrapper variable. A single-quoted string that is later evaluated IS code reading the mutable global, and no quote parser can tell it from prose, so it is refused rather than guessed at: $(printf '%s' "$_wr_prose_bad" | cut -c1-200)" ;;
   spelling)
@@ -5084,6 +5105,10 @@ _wr_fixture f_aposmk   "printf '%s' \"it's\"; grep $_wr_ref"
 _wr_fixture f_selfauth "bad \"the wrapper's rule\"; grep -c z $_wr_ref # see 'wrapper-mutable-read-allow' above"
 _wr_fixture f_prosetag "  ok 'the mutable \$$_wr_vname is named in prose, and needs no marker'"
 _wr_fixture f_captured "_x=\$(bash $_wr_ref --help)"
+_wr_fixture f_bracesfx "_x=\$(grep -c foo \"\${$_wr_vname}_REAL\")"
+_wr_fixture f_bracedef "_x=\$(grep -c foo \"\${$_wr_vname:-/tmp/x}\")"
+_wr_fixture f_fakeinv  "grep foo $_wr_ref # \$(bash $_wr_ref)"
+_wr_fixture f_evalasm  "_cmd='grep foo $_wr_ref'"
 _wr_fixture f_marked   "_x=\$(grep -c foo $_wr_ref) # $_wr_marker: a reviewed opt-out"
 _wr_fixture f_mixed    "grep -c q $_wr_ref; ok 'mentions \$$_wr_vname'"
 _wr_fixture f_save     "_gm_real_wrapper=$_wr_ref"
@@ -5105,6 +5130,10 @@ _wr_expect f_aposmk   form
 _wr_expect f_selfauth form
 _wr_expect f_prosetag clean
 _wr_expect f_captured clean
+_wr_expect f_bracesfx spelling
+_wr_expect f_bracedef spelling
+_wr_expect f_fakeinv  form
+_wr_expect f_evalasm  prose
 _wr_expect f_marked   clean
 _wr_expect f_mixed    form
 _wr_expect f_save     clean
@@ -5114,7 +5143,7 @@ _wr_expect f_empty    empty
 # and the success message below prints counts from them.
 _wr_scan_file "$TEST_SELF"
 if [ -z "$_wr_ctl_bad" ]; then
-  ok 'structural control (#3367): the ENFORCEMENT PASS itself (classifier + dispatch) gives the correct verdict on all twenty-one fixtures — it rejects the braced, unquoted, compound-line, unallowlisted-alias, mentions-the-word-bash quote-swallowed, marker-self-authorising and eval bypasses, refuses to let a marker waive a second read, reports a subjectless file as empty, and still accepts invocations, allowlisted saves, marked opt-outs, captured invocations and unmarked prose'
+  ok 'structural control (#3367): the ENFORCEMENT PASS itself (classifier + dispatch) gives the correct verdict on all twenty-five fixtures — it rejects the braced, unquoted, compound-line, unallowlisted-alias, mentions-the-word-bash quote-swallowed, marker-self-authorising and eval bypasses, refuses to let a marker waive a second read, reports a subjectless file as empty, and still accepts invocations, allowlisted saves, marked opt-outs, captured invocations and unmarked prose'
 else
   bad "structural control (#3367): the enforcement pass misclassifies a fixture, so its verdict on the real file is not trustworthy —$_wr_ctl_bad"
 fi
