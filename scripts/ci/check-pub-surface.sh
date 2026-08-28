@@ -1,75 +1,85 @@
 #!/usr/bin/env bash
-# check-pub-surface.sh — a STANDING PUBLIC-SURFACE SNAPSHOT GUARD for `cqlite-core`
-# (issue #1712, epic #1688).
+# check-pub-surface.sh — the CRATE-ROOT DECLARATION-CONSISTENCY GUARD for
+# `cqlite-core` (issue #1712, epic #1688).
 #
 # # What this exists for
 #
-# `cqlite-core` is the crate every binding, tool and downstream consumer links
-# against, and nothing in the repo noticed when an item entered or left its public
-# API. The concrete instance that motivated this guard: `pub mod benchmarks;` sat
-# unqualified at the crate root for months, reading to every human and every
-# reviewer as a shipped public module, while a `#![cfg(feature = "benchmarks")]`
-# hidden INSIDE `benchmarks/mod.rs` quietly configured it out of every default
-# build. The crate root said one thing and the compiled API said another, and no
-# mechanism could tell the difference.
+# `pub mod benchmarks;` sat unqualified at the crate root of `cqlite-core` for
+# months, reading to every human and every reviewer as a shipped public module,
+# while a `#![cfg(feature = "benchmarks")]` hidden INSIDE `benchmarks/mod.rs`
+# quietly configured it out of every default build. The declaration site said one
+# thing, the module's own file said another, and no mechanism could tell the
+# difference.
 #
-# So this guard answers two questions, on every full gate:
+# So this guard answers exactly ONE question, on every full gate:
 #
-#   1. Has the default-feature public API of `cqlite-core` changed since the
-#      committed snapshot? (VERIFY mode diffs against `cqlite-core/pub-surface.snapshot`.)
-#   2. Does the crate root TELL THE TRUTH about what it exports? (The consistency
-#      assert below: an unconditional, non-hidden `pub mod NAME;` at the crate root
-#      MUST be present in the default public surface.)
+#   Does the crate root TELL THE TRUTH about the modules it declares? An
+#   unconditional, non-`#[doc(hidden)]` `pub mod NAME;` must not be gated by an
+#   inner `#![cfg(...)]` inside NAME's own file.
 #
-# # Where the surface comes from — rustdoc, not us
+# BOTH FACTS ARE IN THE SOURCE, and each is read from a BOUNDED input:
 #
-# The surface is read off **rustdoc's own emitted item tree**
-# (`<target>/doc/cqlite_core/`), which is rustc's real name resolution and real cfg
-# evaluation, already done. We never re-derive visibility from source text: a
-# hand-rolled parser would be a second implementation of the compiler's rules, and
-# a second implementation's correctness is only knowable by differential testing
-# against the original (CLAUDE.md, #3283). Reading rustdoc's output has no such
-# problem — it IS the original.
+#   * the DECLARATION SITE — the crate-root scan below, which reads each top-level
+#     declaration's attributes STRUCTURALLY (`attrs_verdict`) over one file,
+#     `cqlite-core/src/lib.rs`;
+#   * the MODULE'S OWN FILE — for each declaration the scan calls OPEN
+#     (unconditional and not hidden), the module file's PROLOGUE is read and asked
+#     one question: is there an inner `#![...]` attribute here that mentions `cfg`?
 #
-# The one thing rustdoc cannot tell us is `#[doc(hidden)]` items, which it omits by
-# construction. Those are therefore recorded in a second, source-derived section
-# covering ONLY the crate-root declarations of `cqlite-core/src/lib.rs` — enough to
-# pin the declaration-site shape (`#[cfg(...)]`, `#[doc(hidden)]`) of every
-# top-level `pub mod` / `pub use`, which is exactly what the consistency assert
-# needs and exactly what the #1712 defect hid.
+# THE PROLOGUE IS PROVABLY THE WHOLE INPUT, and this was MEASURED with rustc, not
+# reasoned from the reference: an inner attribute is rejected both after an outer
+# attribute ("an inner attribute is not permitted following an outer attribute")
+# and after an item ("an inner attribute is not permitted in this context"). So
+# everything before the first outer attribute or first item contains EVERY inner
+# attribute the module has — the check does not need to read the rest of the file,
+# and there is nowhere else for a module-level gate to hide.
+#
+# # WHAT THIS GUARD IS NOT — public-API drift detection (read this before filing a bug)
+#
+# It does NOT snapshot, diff or otherwise detect changes to `cqlite-core`'s public
+# API. There is no `pub-surface.snapshot` and no `--regenerate`. That capability was
+# built on top of a rustdoc-derived surface and REMOVED DELIBERATELY (issue #1712,
+# lead ruling): five separate review findings were all one defect class — a lexical
+# scanner that had to FIND DECLARATIONS ANYWHERE IN ARBITRARY SOURCE, an unbounded
+# parsing problem where the code must reach a verdict on every line and therefore
+# CANNOT ABSTAIN. What is left is bounded, single-question, and can refuse.
+#
+# The principled route to real drift detection is reachability from rustc's own
+# dep-info rather than another text scan — issue #3366. Until that lands, nothing in
+# this repo detects a public-API change, and a green here must not be read as one.
 #
 # # No invoker-selectable subject
 #
-# The target package and the snapshot path are HARD-CODED. No flag and no
-# environment variable may select them, and none may be added. A gate component
-# whose subject its invoker can choose can be pointed at a trivial subject and
-# greened vacuously — the same reason `scripts/flow/roborev-review-oracles.sh`
-# resolves its enforcer from its own directory with no override (CLAUDE.md: "the
-# constrained party must not choose its own enforcer"). A test that needs a
-# different subject SUBSTITUTES THE ARTIFACT in its own scratch checkout
-# (`git worktree add --detach`), which is what scripts/tests/test_pub_surface_guard.sh
-# does.
+# The target package and the crate root are HARD-CODED. No flag and no environment
+# variable may select them, and none may be added. A gate component whose subject
+# its invoker can choose can be pointed at a trivial subject and greened vacuously
+# — the same reason `scripts/flow/roborev-review-oracles.sh` resolves its enforcer
+# from its own directory with no override (CLAUDE.md: "the constrained party must
+# not choose its own enforcer"). A test that needs a different subject SUBSTITUTES
+# THE ARTIFACT in its own scratch checkout (`git worktree add --detach`), which is
+# what scripts/tests/test_pub_surface_guard.sh does.
 #
-# # Fail-closed, affirmatively
+# # Fail-closed, affirmatively — REFUSE, NEVER GUESS
 #
 # A positive verdict requires an affirmative measurement (CLAUDE.md). There is no
-# path through this script on which "nothing was measured" reads as PASS:
-# `cargo doc` failing, the doc tree being absent, zero items enumerated, or the
-# committed snapshot being unreadable are each a NAMED FAIL. There is no opt-out.
+# path through this script on which "nothing was measured" reads as PASS: a crate
+# root it cannot fully read, a `pub mod` shape it does not recognise, zero
+# declarations found, zero unconditional declarations checked, a module file that
+# resolves to neither or both of its two legal paths, an unreadable module file, an
+# inner attribute it cannot classify confidently, or a block comment in a prologue
+# — each one is a NAMED FAIL that names the file. There is no opt-out.
 #
 # # Stated boundary (do not overclaim)
 #
-# Granularity is item PATHS, KINDS and associated-item NAMES — never SIGNATURES.
-# It catches an added, removed or renamed public item, method, enum variant,
-# public field or associated const/type. It does NOT catch a changed parameter
-# type, a changed return type, changed generics or bounds, or a changed field
-# TYPE, and it deliberately does not record trait/synthetic/blanket impl members
-# (see the associated-item pass for why). It is a coarse semver tripwire, not a
-# semver checker (`cargo-public-api` would be the latter, but it is nightly-only
-# and this repo pins stable).
+# GREEN means: every unconditional crate-root `pub mod NAME;` in
+# cqlite-core/src/lib.rs was matched to exactly one module file whose prologue was
+# read and carries no `cfg`-mentioning inner attribute. It means NOTHING about
+# items inside those modules, about signatures, about re-exports, or about whether
+# the public API changed. It does not look at any module that is NOT declared at
+# the crate root, and it does not look past the prologue of the ones that are.
 #
-# Exit 0 = surface matches + crate root is consistent. 1 = drift/inconsistency.
-# 2 = usage error.
+# Exit 0 = every unconditional crate-root declaration is consistent with its module
+# file. 1 = an inconsistency, or a refusal. 2 = usage error.
 
 set -euo pipefail
 
@@ -79,37 +89,36 @@ REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 # Hard-coded subject — see "No invoker-selectable subject" above. Deliberately not
 # parameterised, not env-overridable.
 readonly PACKAGE="cqlite-core"
-readonly CRATE_DOC_NAME="cqlite_core"
-readonly SNAPSHOT_REL="cqlite-core/pub-surface.snapshot"
 readonly LIB_RS_REL="cqlite-core/src/lib.rs"
+readonly SRC_REL="cqlite-core/src"
 
-SNAPSHOT="$REPO_ROOT/$SNAPSHOT_REL"
 LIB_RS="$REPO_ROOT/$LIB_RS_REL"
-
-MODE=verify
+SRC_DIR="$REPO_ROOT/$SRC_REL"
 
 usage() {
   cat <<'EOF'
-Usage: scripts/ci/check-pub-surface.sh [--regenerate|--write] [--help]
+Usage: scripts/ci/check-pub-surface.sh [--help]
 
-Public-surface snapshot guard for the cqlite-core crate (issue #1712).
+Crate-root declaration-consistency guard for the cqlite-core crate (issue #1712).
 
-  (no flags)      VERIFY: derive the default-feature public surface from rustdoc
-                  and diff it against the committed cqlite-core/pub-surface.snapshot.
-                  Also asserts the crate root tells the truth about its exports.
-  --regenerate    Rewrite cqlite-core/pub-surface.snapshot from the current tree.
-  --write         Synonym for --regenerate.
+  (no flags)      Scan the top-level declarations of cqlite-core/src/lib.rs and, for
+                  every unconditional non-#[doc(hidden)] `pub mod NAME;`, read
+                  NAME's own module file and assert it does not gate itself with an
+                  inner `#![cfg(...)]`. Refuses (exit 1) rather than guess on any
+                  input it cannot classify.
   --help          This message.
 
-The target package and snapshot path are hard-coded and cannot be selected by any
-flag or environment variable, deliberately: a gate component must not let its
-invoker point it at a trivial subject and pass vacuously.
+This guard does NOT detect public-API drift: there is no snapshot and no
+--regenerate mode (issue #1712 descope; the principled route is issue #3366).
+
+The target package and crate root are hard-coded and cannot be selected by any flag
+or environment variable, deliberately: a gate component must not let its invoker
+point it at a trivial subject and pass vacuously.
 EOF
 }
 
 while [ "$#" -gt 0 ]; do
   case "$1" in
-    --regenerate|--write) MODE=regenerate ;;
     --help|-h) usage; exit 0 ;;
     *)
       echo "check-pub-surface.sh: unrecognized argument '$1'" >&2
@@ -127,67 +136,20 @@ fail() {
   exit 1
 }
 
-# Shared paths + scratch space for every step below.
-#
-# THE INVARIANT: THE TREE THIS SCRIPT INSPECTS MUST BE THE TREE CARGO WROTE. Every
-# later step — the mutex, the `rm -rf` of the previous emission, the module-index
-# walk, the all.html cross-check — reads `DOC_ROOT`, so if that resolves anywhere
-# other than where cargo put the docs, the guard locks the wrong path (mutual
-# exclusion silently stops applying), deletes an unrelated directory, and compares
-# the committed snapshot against a tree cargo never touched.
-#
-# So a RELATIVE `CARGO_TARGET_DIR` is resolved against `REPO_ROOT`, NOT the caller's
-# cwd. That is not a preference, it is the only value that satisfies the invariant:
-# cargo resolves a relative `CARGO_TARGET_DIR` against the CWD OF THE CARGO PROCESS
-# (measured), and this script invokes it as `(cd "$REPO_ROOT" && cargo doc …)` below,
-# so cargo's base IS `REPO_ROOT`. Resolving against the caller's cwd instead made the
-# guard lock `<caller-cwd>/<rel>/.pub-surface-doc.lock` and then report the doc tree
-# ABSENT, about a directory cargo was never asked to write (issue #1712, roborev r4).
-# Resolution is preferred over a refusal here precisely because it is unambiguous —
-# there is exactly one base cargo can be using.
-#
-# And the agreement is then ENFORCED rather than inferred: the resolved ABSOLUTE path
-# is handed to cargo explicitly at the invocation below. An env `CARGO_TARGET_DIR`
-# outranks a `build.target-dir` in `.cargo/config.toml`, so after that assignment
-# there is no configuration, cwd or cargo-version detail left that could point the two
-# at different directories — which is worth more than trusting a measurement of how
-# cargo resolves relative paths today.
-case "${CARGO_TARGET_DIR:-}" in
-  "") TARGET_DIR="$REPO_ROOT/target" ;;
-  /*) TARGET_DIR="$CARGO_TARGET_DIR" ;;
-  *)  TARGET_DIR="$REPO_ROOT/$CARGO_TARGET_DIR" ;;
-esac
-DOC_ROOT="$TARGET_DIR/doc/$CRATE_DOC_NAME"
-
 WORK_DIR="$(mktemp -d "${TMPDIR:-/tmp}/pub-surface.XXXXXX")"
-# Set once the mkdir-mutex fallback (see step 2) has taken the lock; empty otherwise.
-DOC_LOCK_DIR=""
-# NOTE: this MUST end with a command that succeeds. It runs from the EXIT trap, and
-# bash takes the trap's final status as the script's exit status when the script
-# falls off the end — a bare `[ -n "$X" ] && rmdir ...` therefore turned a PASSING
-# run into exit 1 whenever the fallback lock was not in use.
-release_doc_lock() {
-  if [ -n "$DOC_LOCK_DIR" ]; then
-    rmdir "$DOC_LOCK_DIR" 2>/dev/null || true
-    DOC_LOCK_DIR=""
-  fi
-  return 0
-}
-cleanup() { release_doc_lock; rm -rf "$WORK_DIR"; return 0; }
+cleanup() { rm -rf "$WORK_DIR"; return 0; }
 trap cleanup EXIT
 
 # ---------------------------------------------------------------------------
 # 1) Scan the CRATE-ROOT declarations of cqlite-core/src/lib.rs.
 #
-#    Deliberately FIRST, before the docs are built: it is independent of rustdoc,
-#    and a crate root the guard cannot parse is a verdict-blocking condition. Doing
-#    it here means that failure is reported in well under a second instead of after
-#    a doc build whose result could not be used anyway.
+#    Deliberately FIRST: a crate root the guard cannot parse is a verdict-blocking
+#    condition, so that failure is reported before any module file is opened.
 #
-#    Only the crate root, not the tree: this section exists so that declaration-site
-#    attributes (`#[cfg(...)]`, `#[doc(hidden)]`) — which rustdoc cannot show us for
-#    hidden or configured-out items — are recorded somewhere, and so the consistency
-#    assert below has something to compare against.
+#    Only the crate root, not the tree: this section records each top-level
+#    declaration's SITE attributes (`#[cfg(...)]`, `#[doc(hidden)]`) so that step 2
+#    knows WHICH declarations claim to be unconditional public exports, which is
+#    exactly the set whose module files have to be read.
 #
 #    THIS IS A LEXICAL SCAN OF ONE FILE WITH A PINNED EDGE-CASE SUITE — NOT A RUST
 #    PARSER, and it does not pretend to be one. A hand-written parser is a second
@@ -213,7 +175,7 @@ trap cleanup EXIT
 #    trusted and the guard FAILs — it never silently proceeds on the smaller set.
 #    Under-collecting here is precisely what produced the original false PASS: an
 #    `#[cfg(...)] pub mod x;` written on ONE line was dropped entirely, so that
-#    module escaped the consistency assert AND vanished from the snapshot.
+#    module escaped the consistency assert altogether.
 #
 #    Where P cannot determine an item's attributes it yields NONE, which lands the
 #    module in the ASSERTED set. A parser miss therefore reds loudly instead of
@@ -228,7 +190,7 @@ cat >"$CRATEROOT_AWK" <<'CRATEROOT_AWK_EOF'
 function ltrim(x) { sub(/^[[:space:]]+/, "", x); return x }
 # --- Structural reading of a declaration's ATTRIBUTES -------------------------
 # Answers exactly one question — can this declaration be configured out, or hidden
-# from rustdoc, under some configuration? — as GATED / HIDDEN / OPEN.
+# from the documented surface, under some configuration? — as GATED / HIDDEN / OPEN.
 #
 # It is STRUCTURAL, over meta-items, because substring matching on attribute text
 # is the same defect class as the four parse shapes: `#[doc = "mentions
@@ -438,6 +400,33 @@ END {
   n = NR
   normalize()
 
+  # --- Refusal X: a line that does NOT START in ordinary code yet carries CODE.
+  #
+  # `INCODE[i]` records only the comment/string state at the START of line i, so a
+  # declaration that follows a closing delimiter ON THE SAME LINE — `*/ pub mod x;`
+  # — is skipped by BOTH derivations (each one bails on `!INCODE`). They therefore
+  # AGREE while both are blind, exactly like Refusals U and I, and the mutual
+  # cross-check cannot see a blind spot the two derivations SHARE (issue #1712,
+  # roborev r7 finding 2). An inner-gated module declared that way would pass GREEN.
+  #
+  # WHY A REFUSAL AND NOT A MODEL. Tracking mid-line comment state so those
+  # declarations could be COLLECTED means a block-comment state machine underneath
+  # the primary collection rule of both derivations — a second implementation of
+  # Rust's lexer, defeatable in the false-PASS direction, which is the defect class
+  # this whole guard has already paid for five times. A refusal is bounded, obviously
+  # correct and cannot rot; the cost is one loud FAIL with a one-word remedy (put the
+  # code on its own line).
+  #
+  # DELIBERATELY OVER-APPROXIMATE, in the safe direction: it fires on ANY non-blank
+  # code left on such a line, `pub mod` or not, and on a line that resumes after a
+  # multi-line string literal too. Over-firing costs a named FAIL; under-firing costs
+  # a silent false PASS.
+  for (i = 1; i <= n; i++) {
+    if (INCODE[i]) continue
+    if (N[i] == "") continue
+    printf "X\tline %d: code follows a closing block-comment/string delimiter on the SAME line: `%s`\n", i, squash(substr(ltrim(N[i]), 1, 72))
+  }
+
   # --- Derivation S: "which modules are declared at the crate root?" answered by
   # the simplest rule that can be written, independent of all attribute parsing.
   for (i = 1; i <= n; i++) {
@@ -477,7 +466,7 @@ END {
   # `pub(crate) mod` / `pub(super) mod` / `pub(in path) mod` are OUT OF SCOPE and are
   # deliberately not matched: this assert's subject is the PUBLIC surface, and a
   # restricted-visibility module is not reachable from outside the crate, so it can
-  # neither enter the snapshot nor hide a gate that changes the public surface.
+  # hide a gate that changes the crate's public surface.
   # (cqlite-core's crate root carries exactly such an inline module today,
   # `pub(crate) mod test_alloc_probe`, which must stay green.)
   for (i = 1; i <= n; i++) {
@@ -504,9 +493,9 @@ END {
   # Rust does not require a top-level item to start at column zero, but every scan
   # path above keys on column zero. So an indented `pub mod x;` whose module file
   # carries an inner `#![cfg(...)]` is absent from S, absent from P AND absent from
-  # rustdoc: the two derivations AGREE (both derived nothing for it) while both are
-  # blind, the cross-check is satisfied, and the crate-root inconsistency this assert
-  # exists to catch passes GREEN. Same shape as Refusal U — a SHARED blind spot is
+  # from step 2's examined set: the two derivations AGREE (both derived nothing for
+  # it) while both are blind, the cross-check is satisfied, and the crate-root
+  # inconsistency this assert exists to catch passes GREEN. Same shape as Refusal U — a SHARED blind spot is
   # not a disagreement — so it gets the same treatment: refuse, do not guess.
   #
   # WHY A REFUSAL AND NOT "COLLECT INDENTED DEPTH-0 DECLARATIONS TOO" (the choice, and
@@ -618,6 +607,18 @@ if grep -q '^E	' "$SCAN_RAW"; then
   fail "the crate-root lexical scan of $LIB_RS_REL hit input it could not read (see above). Refusing to report a verdict over a crate root it could not fully parse."
 fi
 
+# CODE AFTER A CLOSING DELIMITER on a line the scan reads as comment/string state.
+# Another blind spot the two derivations SHARE — both skip a line whose START is not
+# ordinary code — so it needs its own channel rather than the cross-check, which by
+# construction cannot see it (issue #1712, roborev r7 F2).
+if grep -q '^X	' "$SCAN_RAW"; then
+  echo "" >&2
+  grep '^X	' "$SCAN_RAW" | cut -f2- >&2
+  fail "the crate root $LIB_RS_REL carries CODE after a closing block-comment or string delimiter on the SAME line (see above). The scan records comment/string state only at the START of each line, so both of its derivations skip such a line entirely: they AGREE while both are blind, and a \`*/ pub mod NAME;\` whose module file hides an inner \`#![cfg(...)]\` would sail through the consistency assert this guard exists to be.
+       The guard REFUSES rather than model mid-line comment state — that is a second implementation of Rust's lexer sitting underneath the primary collection rule of both derivations, and every one of the five defects already fixed on this guard was a scanner of exactly that shape.
+       Remedy: put the code on its own line, at column zero."
+fi
+
 # A `pub mod` shape NEITHER derivation consumed. This is NOT a disagreement between
 # the two derivations — it is a blind spot they SHARE, which is precisely why the
 # cross-check further down cannot catch it and why this refusal is its own channel.
@@ -626,7 +627,7 @@ if grep -q '^U	' "$SCAN_RAW"; then
   grep '^U	' "$SCAN_RAW" | cut -f2- >&2
   fail "the crate root $LIB_RS_REL declares a public module in a form the crate-root scan does not handle (see above). The scan handles exactly one shape: the statement form \`pub mod NAME;\`.
        An INLINE module (\`pub mod NAME { ... }\`) can carry its own \`#![cfg(...)]\` INNER attribute — the gate hides inside the body while the crate root advertises the module unconditionally, which is the exact bypass this consistency assert exists to close. Both derivations are blind to the inline form, so they AGREE and the cross-check below cannot see it; the guard refuses rather than report a verdict it cannot support.
-       Remedy: declare it as a FILE module — \`pub mod NAME;\` in $LIB_RS_REL plus NAME.rs (or NAME/mod.rs) — and put any cfg gate at the DECLARATION SITE (\`#[cfg(feature = \"...\")] pub mod NAME;\`), where the snapshot and this assert can both see it."
+       Remedy: declare it as a FILE module — \`pub mod NAME;\` in $LIB_RS_REL plus NAME.rs (or NAME/mod.rs) — and put any cfg gate at the DECLARATION SITE (\`#[cfg(feature = \"...\")] pub mod NAME;\`), where this assert reads it structurally."
 fi
 
 # An INDENTED `pub mod` at brace depth zero. Also a blind spot the two derivations
@@ -635,9 +636,9 @@ fi
 if grep -q '^I	' "$SCAN_RAW"; then
   echo "" >&2
   grep '^I	' "$SCAN_RAW" | cut -f2- >&2
-  fail "the crate root $LIB_RS_REL declares a public module on an INDENTED line at brace depth zero (see above). Rust accepts that as a top-level declaration; this scan does not read it — both of its derivations key on column zero, so they AGREE while both are blind, and a module whose file carries an inner \`#![cfg(...)]\` would then be advertised unconditionally by the crate root while being absent from the compiled crate, from rustdoc and from the snapshot. That is the exact bypass this consistency assert exists to close, so the guard refuses rather than report a verdict it cannot support.
+  fail "the crate root $LIB_RS_REL declares a public module on an INDENTED line at brace depth zero (see above). Rust accepts that as a top-level declaration; this scan does not read it — both of its derivations key on column zero, so they AGREE while both are blind, and a module whose file carries an inner \`#![cfg(...)]\` would then be advertised unconditionally by the crate root while being absent from the compiled crate, and never examined by step 2. That is the exact bypass this consistency assert exists to close, so the guard refuses rather than report a verdict it cannot support.
        (An indented \`pub mod\` NESTED inside \`mod outer { ... }\` is ordinary Rust and is NOT reported: what makes a declaration crate-root is brace depth zero, not column zero.)
-       Remedy: dedent it to column zero — \`pub mod NAME;\` — and put any cfg gate at the DECLARATION SITE (\`#[cfg(feature = \"...\")] pub mod NAME;\`), where the snapshot and this assert can both see it."
+       Remedy: dedent it to column zero — \`pub mod NAME;\` — and put any cfg gate at the DECLARATION SITE (\`#[cfg(feature = \"...\")] pub mod NAME;\`), where this assert reads it structurally."
 fi
 
 DERIVED_DECLS="$WORK_DIR/decls.txt"
@@ -660,695 +661,194 @@ DECL_COUNT="$(wc -l <"$DERIVED_DECLS" | tr -d ' ')"
 MOD_COUNT="$(wc -l <"$DERIVED_MODS" | tr -d ' ')"
 [ "${MOD_COUNT:-0}" -gt 0 ] || fail "no crate-root \`pub mod\` declarations found in $LIB_RS_REL — the scan measured nothing. Refusing to pass."
 
-
 # ---------------------------------------------------------------------------
-# 1b) REFUSE if any `cfg`/`cfg_attr` attribute in the crate's sources mentions the
-#     token `doc`. DELIBERATELY BLUNT — READ THIS BEFORE "IMPROVING" IT.
+# 2) THE MODULE-FILE ORACLE — answer the other half of the question FROM SOURCE.
 #
-#     WHY THE REFUSAL EXISTS. `cargo doc` compiles with the `doc` cfg SET. So a
-#     `#[cfg(not(doc))] pub fn new_api()` is in the surface a normal default build
-#     SHIPS and absent from rustdoc — and therefore absent from this snapshot; a
-#     `#[cfg(doc)]` item is the mirror image, RECORDED in the snapshot while the
-#     shipped crate does not have it at all. Either way the guard would certify a
-#     surface the crate does not have: a false PASS in the one guard whose entire job
-#     is noticing public-API changes.
+#    THE DEFECT, stated exactly (issue #1712): the DECLARATION SITE says
+#    unconditional while the MODULE'S OWN FILE says gated. Step 1 read the
+#    declaration site. This step reads the module file. Nothing else is needed, and
+#    nothing else is consulted.
 #
-#     THIS BLIND SPOT IS SHARED BY EVERY RUSTDOC-DERIVED ORACLE — `cargo-public-api`
-#     and rustdoc JSON have it too. It is a property of the input, not of this
-#     implementation, which matters for whoever revisits this guard later: switching
-#     tools does not fix it. Closing it properly needs a SECOND measurement taken
-#     WITHOUT the `doc` cfg, compared against the first. Until then the guard REFUSES
-#     rather than certify a surface it knows may differ from the shipped one.
+#    WHY THIS IS NOT THE SCANNER CLASS THAT WAS DELETED HERE (read before "improving"
+#    it). Five review findings on this issue were all one shape: a hand-rolled scan
+#    that had to FIND DECLARATIONS ANYWHERE IN ARBITRARY SOURCE — an unbounded
+#    parsing problem where the code must reach a verdict on every line and therefore
+#    CANNOT ABSTAIN. This question is the opposite in all three respects that matter:
 #
-#     WHAT WAS DELETED HERE, AND WHY IT IS NOT COMING BACK. Detection used to be a
-#     PARSER — a meta-item walk (`has_doc()` / `split_meta()` / `strip_strings()` plus
-#     a bracket-balanced `#[…]` extractor) that asked whether a `doc` token sat in a
-#     cfg PREDICATE position, precisely so it could NOT fire on `doc` in `cfg_attr`'s
-#     ATTRIBUTE position (`#[cfg_attr(feature = "x", doc = "…")]`, harmless
-#     conditional prose). That precision was DEFEATED THREE TIMES on this one issue:
-#       1. the original `grep -E` required a non-identifier character immediately
-#          BEFORE the `doc` token, and the `^` alternative there is a LINE ANCHOR
-#          (matchable only at column zero), so a `doc` in first-argument position
-#          could never match it: `#[cfg(doc)]` PASSED GREEN;
-#       2. `#[cfg_attr(doc, doc(hidden))]` was missed entirely — the alternation
-#          matched `cfg`, then required a space or `(`, and met `_`;
-#       3. the meta-item walk did not skip Rust COMMENTS, so the perfectly valid
-#          `#[cfg(/* explanation */ doc)]` handed it a predicate starting with `/`,
-#          matched no identifier, returned "no doc", and CERTIFIED. Re-measured
-#          against that parser before this change: `#[cfg(/* explanation */ doc)]`,
-#          `#[cfg( // explanation` + newline + `doc)]` and a multi-line
-#          `#[cfg(all(/* why */ doc, unix))]` ALL exited 0 with the refusal never
-#          firing.
-#     Across issue #1712 that is the SEVENTH instance of one class: a LEXICAL pattern
-#     standing in for a STRUCTURAL read. The ruling was to stop patching instances and
-#     remove the class, so the parser is gone. What is left has no meta-item grammar,
-#     no comment handling and no string handling to get wrong: ARM on a bare `cfg` or
-#     `cfg_attr` token, DISARM at the next `]`, and refuse on a bare `doc` token seen
-#     while armed. `]` is what makes the window self-scoping — an attribute ends with
-#     one — and it needs no notion of what an attribute IS, so a spaced `# [cfg(doc)]`,
-#     an attribute split across lines and a comment anywhere inside one are all caught
-#     by construction rather than by a rule someone has to maintain.
+#      * BOUNDED INPUT — ONE named file, and only its PROLOGUE.
+#      * ONE QUESTION — "is there an inner attribute here that mentions `cfg`?"
+#      * IT CAN REFUSE — and on anything it cannot classify confidently, it does.
 #
-#     THE ONE EXCLUSION, AND WHY IT IS NOT A PARSER CREEPING BACK. A `doc` token
-#     immediately followed (ignoring spaces/tabs on the SAME line) by `=` OR `(` is NOT
-#     reported. This is one lookahead over two characters, decided without knowing where
-#     in the attribute the token sits — no position tracking, no comma counting, no
-#     meta-item walk.
+#    THE PROLOGUE IS PROVABLY THE WHOLE INPUT, MEASURED WITH rustc rather than read
+#    out of the reference:
+#        #[allow(dead_code)]  +  #![allow(unused)]  =>
+#            error: an inner attribute is not permitted following an outer attribute
+#        pub fn f() {}        +  #![allow(unused)]  =>
+#            error: an inner attribute is not permitted in this context
+#    So every inner attribute a module has sits before its first outer attribute and
+#    before its first item. Stopping at whichever comes first cannot miss one: there
+#    is nowhere else in the file for a module-level gate to hide.
 #
-#     THE JUSTIFICATION IS rustc's, AND IT WAS MEASURED, NOT REASONED. An earlier
-#     version of this comment claimed "Rust has no `cfg(doc = …)` form". THAT CLAIM IS
-#     FALSE and rustc says so — `#[cfg(doc = "x")]` compiles without error. The
-#     exclusion is still correct, but for two DIFFERENT reasons, each verified by
-#     running rustc rather than by reading the reference:
-#       * `doc(` in PREDICATE position is a SYNTAX ERROR. `#[cfg(doc(hidden))]` is
-#         rejected with `error[E0539]: malformed 'cfg' attribute input`. So exempting
-#         `doc(` cannot possibly exempt a real cfg predicate — there is no such thing.
-#       * `doc =` in PREDICATE position is VALID but ALWAYS FALSE. `doc` is set by
-#         `cargo doc` as a BARE flag with no value, so a key/value test against it never
-#         matches. Verified: an item behind `#[cfg(doc = "x")]` is ABSENT even when
-#         compiled with `--cfg doc` (`error[E0425]: cannot find function`). Absent in
-#         BOTH the rustdoc build and the normal build is not a DIVERGENCE, and divergence
-#         is the only thing this refusal exists to prevent.
-#     So the exclusion removes exactly the shapes that cannot change what is COMPILED:
-#     CONDITIONAL DOCUMENTATION (`#[cfg_attr(feature = "x", doc = "…")]`) and
-#     CONDITIONAL DOC METADATA (`#[cfg_attr(docsrs, doc(alias = "…"))]`,
-#     `#[cfg_attr(feature = "x", doc(hidden))]`) — all standard idioms anyone may add to
-#     this crate at any time. Without the exclusion, adding either BRICKS this gate and
-#     the remedy text tells the author to delete their documentation; the "0 occurrences
-#     today" measurement below was true of the tree and still no bound on what a
-#     colleague adds tomorrow. Both shapes were found by the SELF-TEST falsifying a
-#     narrower rule, not by review — cases 8 and 15.
+#    THE FOUR THINGS THE PROLOGUE READER DOES, and nothing more:
+#      1. skip blank lines;
+#      2. skip a line whose first non-space characters are `//` — a line comment is
+#         UNAMBIGUOUSLY terminated by the newline, so skipping it needs no state and
+#         cannot desynchronise (this is the one comment form that is safe to handle);
+#      3. REFUSE on `/*` — see below;
+#      4. on `#![`, consume the attribute by BRACKET BALANCE (appending lines until it
+#         closes) and classify it; on anything else, the prologue is OVER — stop.
 #
-#     `#[cfg_attr(doc, doc = "x")]` and `#[cfg_attr(doc, doc(hidden))]` STILL REFUSE:
-#     their CONDITION is the bare `doc`, and a skipped argument does not disarm the
-#     window. Conditional `doc(hidden)` in ATTRIBUTE position is deliberately NOT this
-#     section's business — §1b is about the `doc` CFG; whether a `doc(hidden)` item
-#     belongs in the snapshot is decided by `attrs_verdict`, which cases 8 and 15 test.
-#     A `doc` at end of line whose `=` or `(` is on the NEXT line is still reported —
-#     the scan does not look across lines, i.e. it fails in the over-firing direction.
-#     A bare `#[doc]` (no argument) is accepted by rustc with only a WARNING, so it is
-#     reachable and it still refuses. That over-fire is left in deliberately: it costs
-#     one loud FAIL on an attribute that does nothing, and closing it would mean
-#     deciding position again.
+#    WHY `/*` IS A REFUSAL AND NOT A FEATURE. `/* #![cfg(feature = "x")] */` before
+#    the first item is a delimiter inside a comment, i.e. the SAME class as the five
+#    deleted findings, and handling it means a block-comment state machine — nesting,
+#    `/*` inside a string, `*/` inside a string. The lead's ruling on this guard is
+#    explicit: prefer the refusal, because "it is bounded, obviously correct, and
+#    cannot rot". So a block comment opening in a prologue is a NAMED FAIL with a
+#    one-line remedy (use `//`), never a modelled state.
 #
-#     THE TRADE, STATED SO NOBODY "FIXES" IT. This OVER-approximates ON PURPOSE. It
-#     fires on `doc` inside a COMMENT or a STRING in a cfg attribute
-#     (`#[cfg(feature = "doc")]` gates on a FEATURE named doc and still refuses), on a
-#     bare `doc` token in an ATTRIBUTE position that is not an assignment
-#     (`#[cfg_attr(feature = "x", doc(hidden))]` gates nothing and still refuses — see
-#     the self-test case that pins this as INTENDED), and on a bare `doc` token
-#     following any unrelated `cfg` mention that has no `]`
-#     after it. Every one of those is a LOUD FAIL naming a file and a line, costing
-#     whoever hits it one edit or one deliberate decision. UNDER-firing costs a SILENT
-#     FALSE PASS in the API guard. Those two costs are not comparable, so the
-#     direction of the approximation is fixed, and buying precision back means
-#     reintroducing a parser — each sub-parser being independently defeatable in the
-#     false-PASS direction. The deleted string-stripper is the instructive one: it ran
-#     per LINE, so `#[cfg(/*"*/doc)]` erased the `doc` and certified. DO NOT restore
-#     position analysis, comment stripping or string stripping here. If the noise ever
-#     becomes real, the fix is the SECOND MEASUREMENT above, not a cleverer scan.
+#    THE CLASSIFICATION, and why it splits into TWO non-passing verdicts. An inner
+#    attribute whose leading identifier is `cfg` can configure the module out — that
+#    is THE DEFECT, and it gets the defect diagnostic with the hoist remedy. Anything
+#    else that so much as MENTIONS a `cfg`-prefixed token (`cfg_attr`, which can apply
+#    a `cfg`; a `cfg` token anywhere in the attribute, including inside a string) is
+#    REFUSED, not exempted: deciding that such an attribute gates nothing means
+#    parsing meta-items and erasing string contents, which is the parser this guard
+#    has already paid for five times. Both verdicts exit non-zero, so no
+#    classification gap can become a false PASS; they carry DIFFERENT text so the
+#    operator knows which one they hit. An attribute mentioning no `cfg` token at all
+#    (`#![allow(...)]`, `#![doc = "..."]`, `#![no_std]`) is inert for this question
+#    and the scan moves on.
 #
-#     THE ONE ACKNOWLEDGED UNDER-FIRE, since it is a scan and not a parser: a literal
-#     `]` sitting between the `cfg` token and the `doc` token INSIDE one attribute
-#     disarms the window early (`#[cfg(feature = "a]b", doc)]`). It cannot arise from
-#     ordinary code or from rustfmt output, and no shape short of a `]` inside a
-#     string literal in a cfg predicate reaches it.
-#
-#     MEASURED TODAY in cqlite-core/src, re-measured for this change rather than
-#     inherited: 481 `.rs` files; 1821 attributes mention `cfg`, of which 7 are
-#     `cfg_attr` (every one `feature = "…"` applying an `allow(…)`); 38 attributes
-#     carry a bare `doc` token, all of them `#[doc(hidden)]` with no `cfg` in them;
-#     0 carry BOTH. This scan reports 0 hits on that tree — so the blunt rule fires
-#     on nothing that exists today, measured under the BLUNT rule itself (re-measured
-#     after the `doc =` exclusion landed: still 481 files, still 0 hits) and not
-#     merely under the deleted parser's narrowing. "0 today" is NOT the argument for
-#     the exclusion above: the idiom it protects is one someone adds tomorrow.
+#    OVER-APPROXIMATION IS DELIBERATE AND ONE-DIRECTIONAL, as everywhere else in this
+#    guard: a cosmetic `#![cfg_attr(docsrs, doc(...))]` in a prologue REFUSES and
+#    costs one loud FAIL naming the file and line. Under-firing costs a silent false
+#    PASS in the one assert this guard is. Those costs are not comparable.
 # ---------------------------------------------------------------------------
-CFGDOC_AWK="$WORK_DIR/cfgdoc.awk"
-cat >"$CFGDOC_AWK" <<'CFGDOC_AWK_EOF'
-# Blunt two-state scan — see the guard's "1b)" comment block. NOT a parser, and it
-# must not become one: ARM on a bare `cfg`/`cfg_attr` token, DISARM at the next `]`,
-# report a bare `doc` token seen while armed. Comments, strings, macro bodies and
-# multi-line attributes are all deliberately un-special-cased.
+PROLOGUE_AWK="$WORK_DIR/prologue.awk"
+cat >"$PROLOGUE_AWK" <<'PROLOGUE_AWK_EOF'
+# Read ONE module file's PROLOGUE and emit exactly one tab-separated record:
 #
-# THE ONE EXCLUSION: a `doc` token immediately followed (ignoring spaces/tabs on the
-# SAME line) by `=` is NOT reported. `doc = "…"` is unambiguously the ATTRIBUTE form
-# `#[doc = "text"]`, which gates nothing; a cfg PREDICATE spelling of doc is always
-# the BARE flag (`doc`, `not(doc)`, `all(doc, …)`, `cfg_attr(doc, …)`) because Rust
-# has no `cfg(doc = "…")` form — `doc` is a cfg flag, never a key with a value. So
-# this removes exactly the harmless conditional-documentation idiom
-# (`#[cfg_attr(feature = "x", doc = "…")]`) and nothing else. It is ONE lookahead
-# character, not a grammar: no position analysis, no meta-item walk, no comment or
-# string handling. `#[cfg_attr(doc, doc = "x")]` still REFUSES — its CONDITION is the
-# bare `doc`. The window stays ARMED across a skipped `doc =`, so a bare `doc` later
-# in the same attribute still fires. A `doc` at end of line whose `=` is on the NEXT
-# line is REPORTED (the scan does not look across lines) — an over-fire, i.e. the
-# safe direction.
-function istok(c) { return (c ~ /[A-Za-z0-9_]/) }
-# One lookahead, same line only: does an ARGUMENT follow this token — `=` or `(`?
-# A `doc` that carries an argument is the ATTRIBUTE form (`doc = "…"`, `doc(hidden)`,
-# `doc(alias = "…")`), never a cfg predicate that can change what is COMPILED. See the
-# `1b)` block above for the two rustc-verified facts this rests on.
-function has_argument(s, p,   n, ch) {
-  n = length(s)
-  while (p <= n && substr(s, p, 1) ~ /[ \t]/) p++
-  if (p > n) return 0
-  ch = substr(s, p, 1)
-  return (ch == "=" || ch == "(")
-}
-FNR == 1 { armed = 0; armline = 0 }
-{
-  L = length($0)
-  for (i = 1; i <= L; i++) {
-    c = substr($0, i, 1)
-    if (c == "]") { armed = 0; continue }
-    if (!istok(c)) continue
+#   CLEAN  <line>                     prologue ended at <line>; no cfg-mentioning
+#                                     inner attribute in it
+#   GATED  <line>  <attr>             an inner `#![cfg(...)]` — THE #1712 defect
+#   REFUSE <line>  <why>              cannot classify; the guard FAILs naming it
+#
+# NOT a Rust parser and it must not become one — see the guard's "2)" comment block.
+function ltrim(x) { sub(/^[[:space:]]+/, "", x); return x }
+function rtrim(x) { sub(/[[:space:]]+$/, "", x); return x }
+function squash(x) { gsub(/[[:space:]]+/, " ", x); return ltrim(rtrim(x)) }
+function refuse(ln, why) { printf "REFUSE\t%d\t%s\n", ln, why; DONE = 1 }
+# Does the attribute text mention any `cfg`-prefixed IDENTIFIER TOKEN? Token-bounded
+# so `config`/`configure` do not match, and deliberately NOT string-aware: a `cfg`
+# inside a string literal here costs a REFUSAL (safe), while erasing string contents
+# would be one more sub-scanner to get wrong in the false-PASS direction.
+function mentions_cfg(t,   i, n, c, j, tok) {
+  n = length(t)
+  for (i = 1; i <= n; i++) {
+    c = substr(t, i, 1)
+    if (c !~ /[A-Za-z0-9_]/) continue
     j = i
-    while (j <= L && istok(substr($0, j, 1))) j++
-    tok = substr($0, i, j - i)
+    while (j <= n && substr(t, j, 1) ~ /[A-Za-z0-9_]/) j++
+    tok = substr(t, i, j - i)
     i = j - 1
-    if (tok == "cfg" || tok == "cfg_attr") { armed = 1; armline = FNR }
-    else if (tok == "doc" && armed && !has_argument($0, j)) {
-      printf "%s:%d: %s   [`cfg` token opened at line %d]\n", FILENAME, FNR, squash($0), armline
-      armed = 0
-    }
+    if (tok ~ /^cfg/) return 1
   }
+  return 0
 }
-function squash(x) { gsub(/[[:space:]]+/, " ", x); sub(/^ /, "", x); sub(/ $/, "", x); return x }
-CFGDOC_AWK_EOF
-
-# The subject set is measured, not assumed: zero files scanned would make this
-# refusal vacuous, which is the same shape as a pass derived from an absent signal.
-CFGDOC_FILES="$WORK_DIR/cfgdoc.files"
-find "$REPO_ROOT/$PACKAGE/src" -type f -name '*.rs' -print >"$CFGDOC_FILES"
-CFGDOC_FILE_COUNT="$(wc -l <"$CFGDOC_FILES" | tr -d ' ')"
-[ "${CFGDOC_FILE_COUNT:-0}" -gt 0 ] || fail "found no \`.rs\` files under $PACKAGE/src, so the \`doc\` cfg-predicate scan measured NOTHING. A positive verdict requires an affirmative measurement; refusing to pass."
-
-CFGDOC_HITS="$WORK_DIR/cfgdoc.txt"
-tr '\n' '\0' <"$CFGDOC_FILES" | xargs -0 awk -f "$CFGDOC_AWK" >"$CFGDOC_HITS"
-if [ -s "$CFGDOC_HITS" ]; then
-  echo "" >&2
-  echo 'Attributes mentioning `cfg` that also carry a bare `doc` token (first 10):' >&2
-  head -10 "$CFGDOC_HITS" | sed "s|$REPO_ROOT/||" >&2
-  fail "$PACKAGE mentions the \`doc\` cfg inside a \`cfg\`/\`cfg_attr\` attribute, at the file and line named above, so this guard treats it as a \`doc\` cfg predicate and REFUSES to certify. \`cargo doc\` compiles with the \`doc\` cfg SET, so the rustdoc-derived surface this guard measures can no longer be trusted to equal the surface a default build ships — an item behind \`cfg(not(doc))\` would be MISSING from the snapshot while being public in the shipped crate, and an item behind \`cfg(doc)\` would be RECORDED in it while the shipped crate does not have it at all.
-       This is a property of every rustdoc-derived oracle (cargo-public-api and rustdoc JSON share it), not of this script, so it cannot be fixed by switching tools.
-       REMEDY: remove the \`doc\` cfg from $PACKAGE (that is the cheap fix), or accept that this guard cannot certify this crate while it is there — extending it would mean taking a SECOND measurement without the \`doc\` cfg and comparing the two.
-       The detection is DELIBERATELY BLUNT and it over-fires on purpose: a bare \`doc\` token inside a comment or a string in a cfg attribute, or in \`cfg_attr\`'s ATTRIBUTE position (\`#[cfg_attr(feature = \"x\", doc(hidden))]\`), gates nothing and STILL refuses. That is INTENDED, not a bug. (Conditional DOCUMENTATION is exempt: a \`doc\` token followed by \`=\`, as in \`#[cfg_attr(feature = \"x\", doc = \"…\")]\`, is the attribute form \`#[doc = \"text\"]\` and never a cfg predicate, so it does not trigger this refusal.) — the precise version of this check was defeated three times, so it was replaced by a rule with no parser to get wrong. See the \"1b)\" comment block in $(basename "$0")."
-fi
-
-# In VERIFY mode the committed snapshot is the baseline the whole run exists to
-# compare against, so its absence is checked HERE rather than after the doc build:
-# there is no point spending a rustdoc build to report a missing baseline. A missing
-# snapshot is a FAIL, never an implicit pass.
-if [ "$MODE" = verify ] && [ ! -r "$SNAPSHOT" ]; then
-  fail "committed snapshot $SNAPSHOT_REL is MISSING or unreadable. It is required — a missing snapshot is a FAIL, never an implicit pass. Create it with:
-       bash scripts/ci/check-pub-surface.sh --regenerate"
-fi
-
-# ---------------------------------------------------------------------------
-# 2) Build the docs (default features) and locate the emitted item tree.
-#
-#    MUTUAL EXCLUSION FIRST. The doc tree lives in a SHARED `CARGO_TARGET_DIR`, and
-#    this step deletes and rebuilds it (the delete is required: a tree left by an
-#    earlier run with different features would contribute stale modules). Two runs
-#    sharing a target dir — a gate alongside a self-test, two lanes pointed at one
-#    target dir — can therefore interleave so that one replaces the tree between the
-#    other's build and its scan, and a changed worktree gets verified against
-#    ANOTHER worktree's docs. That is a false PASS, and it is not theoretical: it
-#    was observed during this issue's own review, as a self-test run concurrently
-#    with a gate.
-#
-#    So delete -> build -> enumerate is held under a mutex keyed to the resolved doc
-#    directory. `flock(1)` is preferred (self-releasing, immune to a stale lock left
-#    by a SIGKILLed run) but is util-linux and ABSENT ON macOS, which is a gate host
-#    here; the fallback is an atomic `mkdir` mutex, which is portable to both. The
-#    one property both paths share, and the only one that matters: this step NEVER
-#    proceeds unlocked. A lock that cannot be acquired inside the wait window is a
-#    named FAIL carrying the lock path and the one-line remedy — loud and
-#    actionable, never a silent overlap.
-# ---------------------------------------------------------------------------
-DOC_LOCK="$TARGET_DIR/.pub-surface-doc.lock"
-DOC_LOCK_WAIT_SECS=900
-mkdir -p "$TARGET_DIR" 2>/dev/null || true
-
-if command -v flock >/dev/null 2>&1; then
-  exec 9>"$DOC_LOCK" || fail "cannot create the doc-tree lock file $DOC_LOCK. Refusing to build into a shared doc directory unlocked — a concurrent run could swap the tree between this build and its scan."
-  if ! flock -w "$DOC_LOCK_WAIT_SECS" 9; then
-    fail "timed out after ${DOC_LOCK_WAIT_SECS}s waiting for the doc-tree lock $DOC_LOCK. Another pub-surface run is using $DOC_ROOT. Refusing to proceed unlocked (a concurrent run could swap the tree between this build and its scan) — re-run when it finishes."
-  fi
-else
-  # No flock (macOS): an atomic mkdir mutex. A run killed with SIGKILL can leave the
-  # directory behind; that surfaces as the timeout FAIL below, naming the path, which
-  # is the right trade — a stale-lock heuristic would be one more thing that can be
-  # wrong in the permissive direction.
-  _lock_deadline=$(( $(date +%s) + DOC_LOCK_WAIT_SECS ))
-  until mkdir "$DOC_LOCK.d" 2>/dev/null; do
-    [ "$(date +%s)" -lt "$_lock_deadline" ] || fail "timed out after ${DOC_LOCK_WAIT_SECS}s waiting for the doc-tree lock $DOC_LOCK.d. Either another pub-surface run is using $DOC_ROOT, or a killed run left the lock behind. Refusing to proceed unlocked; if no other run is active, remove it:
-       rmdir '$DOC_LOCK.d'"
-    sleep 1
-  done
-  DOC_LOCK_DIR="$DOC_LOCK.d"
-fi
-
-DOC_LOG="$WORK_DIR/cargo-doc.log"
-
-# Remove the previous emission first: a doc tree left behind by an earlier run with
-# DIFFERENT features (e.g. `--features benchmarks`) would otherwise contribute stale
-# directories to the enumeration, and the snapshot would record a surface no default
-# build has. rustdoc regenerates it in a few seconds.
-rm -rf "$DOC_ROOT"
-
-# `CARGO_TARGET_DIR="$TARGET_DIR"` is the enforcement half of the invariant stated at
-# the top: cargo writes exactly where DOC_ROOT is read from, by construction.
-if ! (cd "$REPO_ROOT" && CARGO_TARGET_DIR="$TARGET_DIR" \
-        cargo doc --no-deps --quiet --package "$PACKAGE" --lib) >"$DOC_LOG" 2>&1; then
-  echo "--- last 40 lines of cargo doc output ---" >&2
-  tail -40 "$DOC_LOG" >&2
-  echo "--- end ---" >&2
-  fail "\`cargo doc --no-deps --package $PACKAGE --lib\` FAILED. The public surface could not be measured, so this check reports FAIL — never a vacuous pass."
-fi
-
-if [ ! -d "$DOC_ROOT" ]; then
-  fail "cargo doc succeeded but the emitted item tree $DOC_ROOT is ABSENT. Nothing could be enumerated; refusing to report a pass over an unmeasured surface."
-fi
-
-# ---------------------------------------------------------------------------
-# 3) Enumerate the public surface by WALKING RUSTDOC'S MODULE INDEX GRAPH.
-#
-#    NOT the filesystem tree. rustdoc emits a directory for every `pub mod` in the
-#    source, including modules that are NOT publicly reachable (a `pub mod` inside a
-#    private module, or one whose contents escape only through a `pub use`). Walking
-#    directories therefore gets the public API wrong in BOTH directions:
-#
-#      * it MISSES re-exports. `schema::AggregatorConfig` is public through a nested
-#        `pub use`; only the canonical `schema::aggregator::AggregatorConfig` has a
-#        directory. Deleting that re-export is a breaking change that a directory
-#        walk passes green — a false PASS.
-#      * it INVENTS private paths. `schema::udt_registry` has a directory but is not
-#        reachable from any public index, so renaming it read as a public API change
-#        — a false FAIL.
-#
-#    Each module's `index.html` is rustdoc's own statement of what that module makes
-#    public: its declared items, its child modules, and a `<h2 id="reexports">`
-#    section naming every `pub use`. So the walk starts at the crate root index and
-#    follows that graph; a directory no public index reaches is not public and is not
-#    recorded.
-#
-#    GLOB re-exports (`pub use x::*;`) are the one shape the index does not expand —
-#    it prints the glob line and nothing else. Those are resolved by WALKING THE
-#    TARGET MODULE under the importing module's path: everything the target declares
-#    is public at the importing path, so the expansion is exact rather than an
-#    estimate. A glob whose target is outside this crate cannot be enumerated from
-#    rustdoc output at all, and is a hard FAIL rather than a silent gap (there are
-#    none today).
-#
-#    Items are recorded at the paths at which they are PUBLIC, which for a
-#    re-exported item is the re-export path — that is the semver-relevant one. The
-#    canonical path is recorded alongside it on the `reexport` line, so a rename of a
-#    private-but-re-exported-through module shows up as ONE explainable line rather
-#    than a whole subtree of churn.
-#
-#    COMPLETENESS IS CROSS-CHECKED, not assumed: rustdoc also emits `all.html`, its
-#    own flat list of every public item in the crate. The set of item pages the walk
-#    reaches must equal the set `all.html` links. Two independent derivations of the
-#    same fact, and a disagreement FAILs — the same fail-safe shape as the crate-root
-#    scan above. (Measured today: 1011 = 1011, exactly.)
-# ---------------------------------------------------------------------------
-DERIVED_ITEMS="$WORK_DIR/items.txt"
-: >"$DERIVED_ITEMS"
-
-INDEX_WALK_AWK="$WORK_DIR/index_walk.awk"
-cat >"$INDEX_WALK_AWK" <<'INDEX_WALK_AWK_EOF'
-# Walk rustdoc's MODULE INDEX GRAPH (never the filesystem tree) from the crate root
-# outward. See the guard's comment block for why.
-function slurp(f,   line, s, rc) {
-  s = ""
-  while ((rc = (getline line < f)) > 0) s = s line "\n"
-  close(f)
-  if (rc < 0) return "\001ERR"
-  return s
+# The attribute's leading identifier: `#![NAME...`. "" if there is not one.
+function attr_name(t,   rest) {
+  rest = ltrim(substr(t, 4))          # drop `#![`
+  if (match(rest, /^[A-Za-z_][A-Za-z0-9_]*/)) return substr(rest, RSTART, RLENGTH)
+  return ""
 }
-function resolve(dir, href,   full, parts, np, i, k, stack, out) {
-  if (href ~ /^[a-z]+:/) return ""
-  full = (dir == "" ? href : dir "/" href)
-  np = split(full, parts, "/")
-  k = 0
-  for (i = 1; i <= np; i++) {
-    if (parts[i] == "" || parts[i] == ".") continue
-    if (parts[i] == "..") { if (k > 0) k--; continue }
-    k++; stack[k] = parts[i]
-  }
-  out = ""
-  for (i = 1; i <= k; i++) out = (out == "" ? stack[i] : out "/" stack[i])
-  return out
-}
-function basename(p,   b) { b = p; sub(/^.*\//, "", b); return b }
-function dirname(p,   d) { if (p !~ /\//) return ""; d = p; sub(/\/[^\/]*$/, "", d); return d }
-# Name of the item a page URL points at: `struct.Foo.html` -> Foo, `foo/index.html` -> foo.
-function pagename(href,   b) {
-  b = basename(href)
-  if (b == "index.html") return basename(dirname(href))
-  sub(/\.html$/, "", b)
-  sub(/^[a-z]+\./, "", b)
-  return b
-}
-BEGIN {
-  split("modules structs enums functions constants traits types macros unions primitives statics attributes derives traitaliases", _w, " ")
-  for (_k in _w) WANT[_w[_k]] = 1
-
-  qn = 0
-  qn++; QDIR[qn] = ""; QMP[qn] = crate; QALIAS[qn] = 0
-  SEEN["" SUBSEP crate] = 1
-  head = 1
-  while (head <= qn) {
-    dir = QDIR[head]; mp = QMP[head]; alias = QALIAS[head]; head++
-    if (!(mp in MODSEEN)) { MODSEEN[mp] = 1; print "MOD\t" mp }
-    file = docroot (dir == "" ? "" : "/" dir) "/index.html"
-    content = slurp(file)
-    if (content == "\001ERR") { print "ERR\tcannot read module index " file " (module " mp ")"; continue }
-    nsec = split(content, seg, "<h2 ")
-    section = ""
-    for (si = 1; si <= nsec; si++) {
-      piece = seg[si]
-      if (si > 1) {
-        if (match(piece, /^id="[A-Za-z0-9_-]+" class="[^"]*section-header"/)) {
-          hdr = substr(piece, RSTART, RLENGTH); sub(/^id="/, "", hdr); sub(/".*$/, "", hdr)
-          section = hdr
-        }
-      }
-      if (section != "reexports" && !(section in WANT)) continue
-      nent = split(piece, ent, "<dt")
-      for (ei = 2; ei <= nent; ei++) {
-        e = ent[ei]
-        p = index(e, "</dt>")
-        if (p > 0) e = substr(e, 1, p - 1)
-        if (!match(e, /<a class="[a-z]+" href="[^"]*" title="[^"]*"/)) continue
-        anc = substr(e, RSTART, RLENGTH)
-        kind = anc; sub(/^<a class="/, "", kind); sub(/".*$/, "", kind)
-        href = anc; sub(/^.*href="/, "", href); sub(/".*$/, "", href)
-        title = anc; sub(/^.*title="/, "", title); sub(/"$/, "", title)
-        canon = title; sub(/^[a-z]+ /, "", canon)
-        page = resolve(dir, href)
-        if (section == "reexports") {
-          # NAMED vs GLOB is read STRUCTURALLY: rustdoc gives a named re-export
-          # `<dt id="reexport.NAME">` and a glob `<dt>` with NO id attribute at all
-          # (measured over this crate's 330 named re-exports and 7 globs). The NAME is
-          # then taken to its closing quote, NOT matched as `[A-Za-z0-9_]+` — Rust
-          # identifiers are Unicode, and here a name that failed to match did not
-          # merely get dropped, it fell into the GLOB branch below and made the walk
-          # enumerate a module's whole contents under a re-export path (#1712 r5 F2,
-          # same class as the associated-item anchor read).
-          if (index(e, " id=\"") == 1) {
-            nm = substr(e, 6)
-            qe = index(nm, "\"")
-            if (qe == 0) {
-              printf "ERR\tmodule %s has a re-export entry whose `id=\"` attribute has no closing quote; the re-exported name cannot be read\n", mp
-              continue
-            }
-            nm = substr(nm, 1, qe - 1)
-            if (substr(nm, 1, 9) != "reexport.") {
-              # An id on a re-export `<dt>` that is not `reexport.NAME`. Unrecognised,
-              # so REFUSE rather than fall through to the glob branch: over-firing
-              # costs one loud FAIL, under-firing silently mis-enumerates the surface.
-              printf "ERR\tmodule %s has a re-export entry with an unrecognised anchor `%s`; refusing to guess whether it is a named or a glob re-export\n", mp, nm
-              continue
-            }
-            nm = substr(nm, 10)
-            printf "REEXPORT\t%s::%s\t%s\t%s\t%s\n", mp, nm, kind, canon, (kind == "mod" ? "" : page)
-          } else {
-            # A GLOB re-export (`pub use x::*;`). rustdoc does not expand it into the
-            # importing module's item lists, so the exposed names are invisible unless
-            # we WALK THE TARGET under the importing module's path. Everything the
-            # target declares is public here, so that walk is exact — not an estimate.
-            printf "GLOB\t%s\t%s\n", mp, canon
-            gd = dirname(page)
-            if (page == "") {
-              printf "ERR\tglob re-export `pub use %s::*;` in %s targets a module OUTSIDE this crate; its exposed names cannot be enumerated from rustdoc output\n", canon, mp
-            } else if (!((gd SUBSEP mp) in SEEN)) {
-              SEEN[gd SUBSEP mp] = 1; qn++; QDIR[qn] = gd; QMP[qn] = mp; QALIAS[qn] = 1
-            }
-          }
-          continue
-        }
-        nm = pagename(href)
-        exposed = mp "::" nm
-        if (kind == "mod") {
-          d = dirname(page)
-          if (!((d SUBSEP exposed) in SEEN)) { SEEN[d SUBSEP exposed] = 1; qn++; QDIR[qn] = d; QMP[qn] = exposed; QALIAS[qn] = alias }
-          # Inside a GLOB expansion every path differs from its canonical one by
-          # construction; the single `reexport-glob` line already records that, so
-          # emitting a per-item re-export line there would be noise, not information.
-          if (canon != exposed && !alias) printf "REEXPORT\t%s\t%s\t%s\t\n", exposed, kind, canon
-          continue
-        }
-        printf "ITEM\t%s\t%s\t%s\t%s\n", kind, exposed, page, canon
-        if (canon != exposed && !alias) printf "REEXPORT\t%s\t%s\t%s\t%s\n", exposed, kind, canon, page
-      }
-    }
-  }
-}
-INDEX_WALK_AWK_EOF
-
-WALK_RAW="$WORK_DIR/walk.txt"
-awk -v docroot="$DOC_ROOT" -v crate="$CRATE_DOC_NAME" -f "$INDEX_WALK_AWK" </dev/null >"$WALK_RAW"
-
-if grep -q '^ERR	' "$WALK_RAW"; then
-  echo "" >&2
-  grep '^ERR	' "$WALK_RAW" | cut -f2- >&2
-  fail "the module-index walk could not enumerate part of the public surface (see above). Refusing to report a verdict over a surface it could not fully measure."
-fi
-
-MODULE_COUNT="$(grep -c '^MOD	' "$WALK_RAW" || true)"
-ITEM_COUNT="$(grep -c '^ITEM	' "$WALK_RAW" || true)"
-REEXPORT_COUNT="$(grep -c '^REEXPORT	' "$WALK_RAW" || true)"
-GLOB_COUNT="$(grep -c '^GLOB	' "$WALK_RAW" || true)"
-
-if [ "${ITEM_COUNT:-0}" -eq 0 ] || [ "${MODULE_COUNT:-0}" -eq 0 ]; then
-  fail "the module-index walk reached $ITEM_COUNT items over $MODULE_COUNT modules under $DOC_ROOT — a zero count means the walk did not measure anything (rustdoc index layout changed?), NOT that the crate has no public API. Refusing to pass."
-fi
-
-# --- Completeness cross-check against rustdoc's own all.html -----------------
-ALL_HTML="$DOC_ROOT/all.html"
-[ -r "$ALL_HTML" ] || fail "$ALL_HTML is missing, so the walk's completeness cannot be cross-checked. That check is the only thing standing between this guard and a silently partial surface — refusing to pass without it."
-grep -o 'href="[^"]*\.html"' "$ALL_HTML" | sed 's/href="//; s/"$//' \
-  | grep -vE '(^|/)index\.html$' | LC_ALL=C sort -u >"$WORK_DIR/pages.all"
-awk -F'\t' '$1 == "ITEM" && $4 != "" { print $4 } $1 == "REEXPORT" && $5 != "" { print $5 }' \
-  "$WALK_RAW" | LC_ALL=C sort -u >"$WORK_DIR/pages.walk"
-if ! diff -u "$WORK_DIR/pages.all" "$WORK_DIR/pages.walk" >"$WORK_DIR/pages.diff" 2>&1; then
-  echo "" >&2
-  echo "rustdoc all.html vs the module-index walk:" >&2
-  sed -e '1s|.*|--- rustdoc all.html (every public item in the crate)|' \
-      -e '2s|.*|+++ reached by the module-index walk|' "$WORK_DIR/pages.diff" >&2
-  fail "the module-index walk and rustdoc's own all.html disagree about which item pages are public. One of them is wrong, so the enumerated surface cannot be trusted — the guard refuses rather than record a partial API."
-fi
-ALL_COUNT="$(wc -l <"$WORK_DIR/pages.all" | tr -d ' ')"
-[ "${ALL_COUNT:-0}" -gt 0 ] || fail "rustdoc's all.html lists zero public items. That is not a crate with no API, it is a measurement that did not happen."
-
-# --- Render the walk as snapshot lines ---------------------------------------
-awk -F'\t' '
-  $1 == "MOD"      { print "mod " $2 }
-  $1 == "ITEM"     { print $2 " " $3 }
-  $1 == "REEXPORT" { print "reexport " $2 " = " $3 " " $4 }
-  $1 == "GLOB"     { print "reexport-glob " $2 "::* = " $3 "::*" }
-' "$WALK_RAW" >>"$DERIVED_ITEMS"
-
-# --- page -> the path its ASSOCIATED items are recorded under ----------------
-# One entry per page, so a method is recorded once even when its type is public at
-# several paths (a glob re-export makes that common). Preference, in order: the
-# item's own CANONICAL path when that path is itself public — the most stable key,
-# and the one a reader expects; else the smallest public path; else, if the item is
-# public solely through a re-export, the re-export path. (Measured today: no page is
-# re-export-only, so the last arm is a fail-safe rather than a fallback in use.)
-awk -F'\t' '
-  # C = the item is public at its OWN canonical path; that is the preferred key.
-  $1 == "ITEM" && $4 != "" && $3 == $5 { C[$4] = $3 }
-  $1 == "ITEM" && $4 != "" { if (!($4 in D) || $3 < D[$4]) D[$4] = $3 }
-  $1 == "REEXPORT" && $5 != "" { if (!($5 in R) || $2 < R[$5]) R[$5] = $2 }
-  END {
-    for (p in D) print p "\t" ((p in C) ? C[p] : D[p])
-    for (p in R) if (!(p in D)) print p "\t" R[p]
-  }' "$WALK_RAW" | LC_ALL=C sort >"$WORK_DIR/pagemap.txt"
-
-PAGES="$WORK_DIR/pages.txt"
-cut -f1 "$WORK_DIR/pagemap.txt" | sed "s|^|$DOC_ROOT/|" >"$PAGES"
-while IFS= read -r _p; do
-  [ -f "$_p" ] || fail "the module-index walk references the item page $_p, which does not exist on disk. The doc tree is inconsistent; refusing to measure a surface from it."
-done <"$PAGES"
-
-
-# --- Associated items -------------------------------------------------------
-#
-# Standalone rustdoc pages alone are BLIND to public methods, enum variants,
-# public struct fields and associated consts/types: adding a `pub fn` to an
-# existing public struct would not move the snapshot at all. So each item page is
-# also scanned for the associated items THIS CRATE DECLARES.
-#
-# WHAT IS DELIBERATELY EXCLUDED, and why: the `trait-implementations`,
-# `synthetic-implementations`, `blanket-implementations`, `implementors`,
-# `foreign-impls` and `deref-methods-*` sections. Those anchors are not this
-# crate's declared surface — they are generated from trait impls, auto traits and
-# blanket impls in dependencies (`struct.DatabaseStats.html` carries 17
-# `id="method.*"` anchors and ZERO inherent methods; every one comes from Clone,
-# Debug, Into, TryFrom, Borrow, tracing's Instrument, …). They move whenever a
-# dependency is bumped, so recording them would make this snapshot a churn source
-# and train people to regenerate it without reading the diff — the failure mode
-# this guard exists to prevent. The exclusion is stated in the snapshot header
-# too, as an honest boundary rather than a silent gap.
-#
-# The scan is SECTION-SCOPED, and the scoping is done WITHIN each line, not per
-# line: rustdoc's HTML is near-minified (a whole page is ~17 lines) and a single
-# line routinely carries the end of one section header and the start of the next,
-# so a line-granular state machine would attribute trait-impl anchors to the
-# inherent `implementations` section. A real section boundary is recognised by
-# `<h2 id="…" class="…section-header">`; a doc-comment heading inside a docblock
-# (`<h2 id="safety">`, `<h2 id="note">`, … — no class) must NOT move the state.
-ASSOC_AWK="$WORK_DIR/assoc.awk"
-cat >"$ASSOC_AWK" <<'AWK_EOF'
-BEGIN {
-  # Sections whose anchors ARE this crate's declared surface.
-  split("variants fields implementations required-methods provided-methods required-associated-consts provided-associated-consts required-associated-types provided-associated-types", _w, " ")
-  for (_k in _w) if (_w[_k] != "") WANT[_w[_k]] = 1
-  # Anchor PREFIXES that name a declared associated item. The kind is the part of the
-  # anchor value before its first `.`; everything after it is the item's NAME and is
-  # NOT pattern-matched (see the loop below for why).
-  split("method tymethod variant structfield associatedconstant associatedtype", _a, " ")
-  for (_k in _a) if (_a[_k] != "") AKIND[_a[_k]] = 1
-  prefix = docroot "/"
-  # The path each page's associated items are recorded under is decided ONCE, by the
-  # module-index walk (see pagemap.txt), never re-derived from the file location —
-  # a file location is a definition site, which for a re-exported item is not
-  # necessarily a public path at all.
-  while ((getline _l < pagemap) > 0) {
-    _t = index(_l, "\t")
-    if (_t > 0) PATHOF[substr(_l, 1, _t - 1)] = substr(_l, _t + 1)
-  }
-  close(pagemap)
-}
-FNR == 1 {
-  rel = FILENAME
-  if (substr(rel, 1, length(prefix)) == prefix) rel = substr(rel, length(prefix) + 1)
-  itempath = PATHOF[rel]
-  if (itempath == "") { print "!NOPATH\t" rel > "/dev/stderr" }
-  section = ""
-}
-{
-  n = split($0, seg, "<h2 ")
-  for (_s = 1; _s <= n; _s++) {
-    piece = seg[_s]
-    if (_s > 1) {
-      if (match(piece, /^id="[A-Za-z0-9_-]+" class="[^"]*section-header"/)) {
-        hdr = substr(piece, RSTART, RLENGTH)
-        sub(/^id="/, "", hdr)
-        sub(/".*$/, "", hdr)
-        section = hdr
-        if (section in WANT) seen[FILENAME "\t" section] = 1
-      }
-      # else: a doc-comment heading inside a docblock — state must NOT move.
-    }
-    if (!(section in WANT)) continue
-    rest = piece
-    while ((q = index(rest, "id=\"")) > 0) {
-      rest = substr(rest, q + 4)
-      qe = index(rest, "\"")
-      if (qe == 0) {
-        # An `id="` with no closing quote in this segment. The value cannot be
-        # extracted, so REFUSE — see the trade-off note below.
-        print "!UNTERMINATED\t" FILENAME "\t" section > "/dev/stderr"
-        break
-      }
-      tok = substr(rest, 1, qe - 1)
-      rest = substr(rest, qe + 1)
-      # THE ANCHOR VALUE IS TAKEN TO ITS CLOSING QUOTE, never matched as a character
-      # class over "permitted" identifier bytes. Rust identifiers are UNICODE, so a
-      # class like `[A-Za-z0-9_]+` silently DROPPED `pub fn café` — a real public-API
-      # addition that neither backstop can see, because the per-section emptiness
-      # check is satisfied by the page's ASCII siblings and `all.html` lists item
-      # PAGES only, never associated items (#1712 r5 F2).
-      #
-      # MEASURED, so nothing here decodes, re-encodes or normalises: rustdoc writes
-      # identifier bytes RAW UTF-8 into these anchors and never percent-encodes them
-      # (the `%3C`/`%3E`/`%27` spellings appear only in `impl-…` anchors, which are in
-      # excluded sections), and rustc has already normalised a non-NFC source
-      # identifier to NFC — the same NFC spelling rustdoc uses for the page filename
-      # and for its `all.html` href. One spelling, verbatim, in every consumer, so the
-      # snapshot text and the all.html cross-check cannot disagree about it.
-      d = index(tok, ".")
-      if (d == 0) continue
-      akind = substr(tok, 1, d - 1)
-      if (!(akind in AKIND)) continue
-      aname = substr(tok, d + 1)
-      if (index(aname, ".") == 0) {
-        # `kind.name` — a plain associated item.
-      } else if (index(aname, ".field.") > 0) {
-        # `variant.NAME.field.FIELD` — a struct-variant field.
-        sub(/\.field\./, "::", aname)
-        akind = "variantfield"
-      } else if (aname ~ /\.fields$/) {
-        # `variant.NAME.fields` — rustdoc's per-variant "Fields" SUB-HEADING (an
-        # <h4>, 73 of them in this crate), not a declared item. Skipped deliberately.
-        continue
-      } else {
-        # A wanted kind with a dot structure this scan does not recognise. THE
-        # TRADE-OFF, stated: refusing over-fires into ONE loud, actionable FAIL naming
-        # the anchor, while skipping under-fires into a SILENT false PASS in the one
-        # guard whose entire job is to notice public-API additions. So: refuse.
-        # (Measured as unreachable today — a doc-comment heading cannot masquerade as
-        # one of these anchors, because rustdoc STRIPS dots when it slugifies heading
-        # text: `## Method.foo` becomes `id="methodfoo-dotted"`, never `method.foo`.)
-        print "!SHAPE\t" FILENAME "\t" section "\t" tok > "/dev/stderr"
-        continue
-      }
-      print akind " " itempath "::" aname
-      filled[FILENAME "\t" section] = 1
-    }
-  }
-}
+{ L[NR] = $0 }
 END {
-  # A wanted section that was PRESENT but yielded nothing is a measurement
-  # failure (rustdoc anchor format changed), not an empty section. Report it;
-  # the caller turns it into a named FAIL.
-  for (key in seen) if (!(key in filled)) print "!EMPTY\t" key > "/dev/stderr"
+  n = NR
+  i = 1
+  while (i <= n) {
+    t = ltrim(L[i])
+    if (t == "") { i++; continue }
+    # A `//` line comment is unambiguously terminated by the newline, so skipping the
+    # line needs no state at all. This is the ONLY comment form handled; `/*` refuses.
+    if (substr(t, 1, 2) == "//") { i++; continue }
+    if (substr(t, 1, 2) == "/*") {
+      refuse(i, "a BLOCK COMMENT opens in the module prologue: `" squash(substr(t, 1, 72)) "`")
+      exit
+    }
+    if (substr(t, 1, 3) != "#![") {
+      # First outer attribute or first item: rustc forbids an inner attribute after
+      # either, so the prologue — and every inner attribute in the file — ends here.
+      printf "CLEAN\t%d\n", i
+      exit
+    }
+    # An inner attribute. Consume it by BRACKET BALANCE, appending lines as needed.
+    buf = t
+    startline = i
+    cur = i
+    d = 0
+    p = 3                              # position of the `[` in `#![`
+    endpos = 0
+    while (1) {
+      if (p > length(buf)) {
+        cur++
+        if (cur > n) { refuse(startline, "an inner attribute starting here never closes its `[`"); exit }
+        buf = buf " " ltrim(L[cur])
+        continue
+      }
+      ch = substr(buf, p, 1)
+      if (ch == "[") d++
+      else if (ch == "]") { d--; if (d == 0) { endpos = p; break } }
+      p++
+    }
+    attr = substr(buf, 1, endpos)
+    rest = ltrim(rtrim(substr(buf, endpos + 1)))
+    # ANYTHING after the closing `]` is refused rather than parsed. A second inner
+    # attribute on the same line (`#![doc = "]"] #![cfg(x)]`) would otherwise be
+    # invisible — a false PASS — and a trailing `/*` would desynchronise the lines
+    # after it. Rustfmt never emits either shape.
+    if (rest != "") {
+      refuse(startline, "content follows an inner attribute on the SAME line: `" squash(substr(rest, 1, 60)) "`")
+      exit
+    }
+    if (index(attr, "/*") > 0) {
+      refuse(startline, "an inner attribute contains a block comment: `" squash(attr) "`")
+      exit
+    }
+    nm = attr_name(attr)
+    if (nm == "") {
+      refuse(startline, "an inner attribute whose name cannot be read: `" squash(substr(attr, 1, 72)) "`")
+      exit
+    }
+    if (nm == "cfg") {
+      printf "GATED\t%d\t%s\n", startline, squash(attr)
+      exit
+    }
+    if (mentions_cfg(attr)) {
+      refuse(startline, "an inner attribute mentions a `cfg` token and cannot be confidently classified: `" squash(substr(attr, 1, 72)) "`")
+      exit
+    }
+    i = cur + 1
+  }
+  # Ran off the end: the whole file is prologue (blank lines, `//` comments and inert
+  # inner attributes) and it carries no cfg-mentioning inner attribute.
+  printf "CLEAN\t%d\n", n + 1
 }
-AWK_EOF
-
-ASSOC_RAW="$WORK_DIR/assoc.txt"
-ASSOC_ERR="$WORK_DIR/assoc.err"
-if [ -s "$PAGES" ]; then
-  tr '\n' '\0' <"$PAGES" | xargs -0 awk -v crate="$CRATE_DOC_NAME" -v docroot="$DOC_ROOT" \
-    -v pagemap="$WORK_DIR/pagemap.txt" -f "$ASSOC_AWK" >"$ASSOC_RAW" 2>"$ASSOC_ERR"
-else
-  : >"$ASSOC_RAW"; : >"$ASSOC_ERR"
-fi
-
-if [ -s "$ASSOC_ERR" ]; then
-  echo "" >&2
-  echo "Associated-item scan diagnostics (first 10; !NOPATH = a page with no public path," >&2
-  echo "!EMPTY = a section present but yielding no anchors, !UNTERMINATED = an \`id=\"\`" >&2
-  echo "whose value has no closing quote, !SHAPE = an associated-item anchor whose dot" >&2
-  echo "structure this scan does not recognise):" >&2
-  head -10 "$ASSOC_ERR" >&2
-  fail "the associated-item scan found rustdoc sections it could not read. That is the signature of a rustdoc HTML format change, not an empty API — refusing to record a surface measured with a broken extractor."
-fi
-
-ASSOC_COUNT="$(wc -l <"$ASSOC_RAW" | tr -d ' ')"
-if [ "${ASSOC_COUNT:-0}" -eq 0 ]; then
-  fail "the associated-item scan extracted ZERO methods/variants/fields/associated items across the entire crate. At this crate's size that is implausible — it is the signature of a rustdoc HTML format change. Refusing to pass on an unmeasured surface."
-fi
-cat "$ASSOC_RAW" >>"$DERIVED_ITEMS"
-
-LC_ALL=C sort -o "$DERIVED_ITEMS" "$DERIVED_ITEMS"
-
+PROLOGUE_AWK_EOF
 
 # ---------------------------------------------------------------------------
-# 4) THE CONSISTENCY ASSERT (the core of #1712).
+# 3) THE CONSISTENCY ASSERT (the core of #1712).
 #
 #    Every crate-root `pub mod NAME;` that carries NO declaration-site `#[cfg(...)]`
 #    and is NOT `#[doc(hidden)]` reads to every human as an unconditional public
-#    export. It MUST therefore be present in the default-feature public surface. If
-#    it is not, its gate is hiding inside the module file where no reader of the
-#    crate root can see it — exactly the #1712 defect.
+#    export. Its module file must therefore not gate itself: if it does, the gate is
+#    hiding inside the module file where no reader of the crate root can see it —
+#    exactly the #1712 defect.
 # ---------------------------------------------------------------------------
+OPEN_COUNT=0
+READ_COUNT=0
 inconsistent=0
+PROLOGUE_OUT="$WORK_DIR/prologue.txt"
+
 while IFS=$'\t' read -r lineno modname gate; do
   # Which declarations are EXEMPT from the assert, and why each one is:
   #
@@ -1357,10 +857,10 @@ while IFS=$'\t' read -r lineno modname gate; do
   #            the crate root, which is exactly what this assert wants; and under
   #            some configuration the module legitimately is not in the surface.
   #   HIDDEN — a real `doc(hidden)` meta-item, directly or as a `cfg_attr` output.
-  #            The item is deliberately undocumented, so rustdoc omitting it proves
-  #            nothing.
+  #            The declaration is deliberately not part of the documented surface,
+  #            so it makes no unconditional promise to a reader.
   #   OPEN   — neither, so the declaration reads as an unconditional public export
-  #            and MUST be in the default surface.
+  #            and its module file MUST NOT gate it.
   #
   # The verdict is computed STRUCTURALLY over meta-items by `attrs_verdict` in the
   # crate-root scan, with string-literal contents erased first (an attribute VALUE
@@ -1374,120 +874,103 @@ while IFS=$'\t' read -r lineno modname gate; do
     OPEN) ;;
     *) fail "the crate-root scan produced an unrecognised attribute verdict '$gate' for \`pub mod $modname\` at $LIB_RS_REL:$lineno. An unplanned verdict is not an exemption; refusing to pass." ;;
   esac
-  if ! grep -qx "mod $CRATE_DOC_NAME::$modname" "$DERIVED_ITEMS"; then
-    inconsistent=$((inconsistent + 1))
-    echo "" >&2
-    echo "❌ pub-surface: crate-root declaration is INCONSISTENT with the real public surface" >&2
-    echo "" >&2
-    echo "    \`pub mod $modname\` at $LIB_RS_REL:$lineno reads as an unconditional public" >&2
-    echo "    export, but it is ABSENT from the default-feature public surface." >&2
-    echo "" >&2
-    echo "    Its cfg gate lives INSIDE the module file (an inner \`#![cfg(...)]\`), where no" >&2
-    echo "    reader of the crate root can see it: the crate root says the module ships, the" >&2
-    echo "    compiled API says it does not." >&2
-    echo "" >&2
-    echo "    Remedy — hoist the gate to the declaration site so the crate root tells the truth:" >&2
-    echo "        #[cfg(feature = \"…\")]" >&2
-    echo "        pub mod $modname;" >&2
-    echo "    …or, if it is deliberately an undocumented internal surface, mark it" >&2
-    echo "        #[doc(hidden)]" >&2
-    echo "        pub mod $modname;" >&2
+  OPEN_COUNT=$((OPEN_COUNT + 1))
+
+  # RESOLVE THE MODULE FILE. Rust gives a non-inline module exactly two legal paths,
+  # and rustc itself rejects both existing at once ("file for module found at both").
+  # Neither, both, or a path that is not a readable regular file is a REFUSAL naming
+  # what was looked for — never a skip. A skip here is a silent false PASS: the
+  # declaration would go unexamined while the run still reports success.
+  mod_file_rel="$SRC_REL/$modname.rs"
+  mod_dir_rel="$SRC_REL/$modname/mod.rs"
+  mod_file="$REPO_ROOT/$mod_file_rel"
+  mod_dir="$REPO_ROOT/$mod_dir_rel"
+  found=0
+  resolved=""
+  resolved_rel=""
+  if [ -e "$mod_file" ]; then found=$((found + 1)); resolved="$mod_file"; resolved_rel="$mod_file_rel"; fi
+  if [ -e "$mod_dir" ]; then found=$((found + 1)); resolved="$mod_dir"; resolved_rel="$mod_dir_rel"; fi
+  if [ "$found" -eq 0 ]; then
+    fail "\`pub mod $modname\` at $LIB_RS_REL:$lineno reads as an unconditional public export, but NEITHER of its two legal module files exists:
+           $mod_file_rel
+           $mod_dir_rel
+       The guard cannot read the module's own prologue, so it cannot tell whether the module gates itself — and it refuses to pass a declaration it did not examine.
+       Causes: the declaration names a module that is not there (the crate does not compile), or the declaration carries a \`#[path = \"...\"]\` attribute relocating its source. This guard deliberately does not resolve \`#[path\`: put any cfg gate at the DECLARATION SITE instead, where step 1 reads it structurally."
   fi
+  if [ "$found" -gt 1 ]; then
+    fail "\`pub mod $modname\` at $LIB_RS_REL:$lineno resolves to BOTH of its legal module files:
+           $mod_file_rel
+           $mod_dir_rel
+       rustc rejects that too (\"file for module found at both\"), and the guard will not choose one of them — refusing rather than guess which file is the module."
+  fi
+  if [ ! -f "$resolved" ] || [ ! -r "$resolved" ]; then
+    fail "the module file $resolved_rel for \`pub mod $modname\` ($LIB_RS_REL:$lineno) exists but is not a READABLE REGULAR FILE (a directory, a dangling symlink, or unreadable permissions). Refusing to report a verdict over a module file it could not read."
+  fi
+
+  if ! awk -f "$PROLOGUE_AWK" "$resolved" >"$PROLOGUE_OUT" 2>"$WORK_DIR/prologue.err"; then
+    echo "" >&2
+    cat "$WORK_DIR/prologue.err" >&2
+    fail "the prologue reader errored on $resolved_rel (see above). Refusing to report a verdict over a module file it could not read."
+  fi
+  [ "$(wc -l <"$PROLOGUE_OUT" | tr -d ' ')" -eq 1 ] \
+    || fail "the prologue reader produced $(wc -l <"$PROLOGUE_OUT" | tr -d ' ') records for $resolved_rel, expected exactly 1. Refusing to pass on an unreadable result."
+
+  IFS=$'\t' read -r verdict at detail <"$PROLOGUE_OUT" || true
+  case "$verdict" in
+    CLEAN)
+      READ_COUNT=$((READ_COUNT + 1))
+      ;;
+    REFUSE)
+      fail "the prologue of $resolved_rel could not be read confidently, at $resolved_rel:$at — $detail
+       That module is declared \`pub mod $modname;\` at $LIB_RS_REL:$lineno with no declaration-site gate, so this guard has to establish that the module file does not gate itself; it cannot, so it REFUSES rather than guess.
+       Remedy: use \`//\` line comments in the prologue, keep one inner attribute per line, and put any cfg gate at the DECLARATION SITE (\`#[cfg(feature = \"...\")] pub mod $modname;\`) where step 1 reads it structurally."
+      ;;
+    GATED)
+      READ_COUNT=$((READ_COUNT + 1))
+      inconsistent=$((inconsistent + 1))
+      echo "" >&2
+      echo "❌ pub-surface: crate-root declaration is INCONSISTENT with the module's own file" >&2
+      echo "" >&2
+      echo "    \`pub mod $modname\` at $LIB_RS_REL:$lineno reads as an unconditional public" >&2
+      echo "    export, but its module file GATES ITSELF:" >&2
+      echo "" >&2
+      echo "        $resolved_rel:$at:  $detail" >&2
+      echo "" >&2
+      echo "    The cfg gate lives INSIDE the module file, where no reader of the crate root" >&2
+      echo "    can see it: the crate root says the module ships, the compiled crate does not" >&2
+      echo "    have it." >&2
+      echo "" >&2
+      echo "    Remedy — hoist the gate to the declaration site so the crate root tells the truth:" >&2
+      echo "        #[cfg(feature = \"…\")]" >&2
+      echo "        pub mod $modname;" >&2
+      echo "    …and delete the inner attribute from $resolved_rel. Or, if it is deliberately" >&2
+      echo "    an undocumented internal surface, mark the declaration" >&2
+      echo "        #[doc(hidden)]" >&2
+      echo "        pub mod $modname;" >&2
+      ;;
+    *)
+      fail "the prologue reader returned an unrecognised verdict '$verdict' for $resolved_rel. An unplanned verdict is not an exemption; refusing to pass."
+      ;;
+  esac
 done <"$DERIVED_MODS"
 
-[ "$inconsistent" -eq 0 ] || fail "$inconsistent crate-root declaration(s) disagree with the default public surface (see above). Issue #1712."
+[ "$inconsistent" -eq 0 ] \
+  || fail "$inconsistent crate-root declaration(s) are advertised unconditionally while gating themselves inside their own module file (see above). Issue #1712."
 
-# ---------------------------------------------------------------------------
-# 5) Render the snapshot and either write it or diff it.
-# ---------------------------------------------------------------------------
-RENDERED="$WORK_DIR/rendered.snapshot"
-{
-  cat <<EOF
-# cqlite-core public-surface snapshot (issue #1712)
-#
-# WHAT THIS IS: the default-feature public API of the \`cqlite-core\` crate, derived
-# from rustdoc's own emitted item tree (rustc's real name resolution and real cfg
-# evaluation — never re-derived from source text by us).
-#
-# REGENERATE WITH:  bash scripts/ci/check-pub-surface.sh --regenerate
-# VERIFIED BY:      the \`pub-surface\` component of scripts/agent-gate.sh
-#
-# A DIFF HERE IS A PUBLIC-API CHANGE AND REQUIRES REVIEW. It is a semver decision,
-# not a formatting chore: an added line is new public surface this crate must now
-# keep; a removed or renamed line is a breaking change for every binding, tool and
-# downstream consumer. Regenerate it in the SAME commit as the API change, and say
-# in the PR body why the diff is what it is.
-#
-# STATED BOUNDARY (deliberately narrow — do not read more into a green than this):
-#   * Granularity is item PATHS, KINDS and associated-item NAMES — never SIGNATURES.
-#     Recorded: modules, standalone items (struct/enum/fn/trait/type/constant/macro/
-#     union/…), and, per item, the associated members this crate DECLARES — inherent
-#     methods, associated consts/types, enum variants (and their struct fields),
-#     public struct fields, and a trait's required/provided members.
-#     NOT recorded, and therefore NOT detected: a changed parameter type, a changed
-#     return type, changed generics or bounds, a changed field TYPE, or a changed
-#     visibility that does not change the item's presence.
-#   * RE-EXPORTS are first-class: \`pub use\` exposures are recorded as \`reexport\`
-#     lines naming BOTH the exposed path and the canonical target, and glob
-#     re-exports as \`reexport-glob\` lines PLUS the expanded item paths. Deleting a
-#     re-export is a breaking change and shows up here.
-#   * Only PUBLICLY REACHABLE paths are recorded. rustdoc emits a directory for every
-#     source \`pub mod\`, including ones no public index reaches; those are not public
-#     API and are absent here, so renaming a private-but-re-exported-through module
-#     is not a diff.
-#   * ASSOCIATED ITEMS are recorded ONCE per item, at its canonical public path when
-#     it has one (a glob re-export can make the same type public at several paths;
-#     the extra paths appear as item lines, not as duplicated method lists).
-#   * TRAIT / SYNTHETIC / BLANKET IMPL MEMBERS ARE DELIBERATELY EXCLUDED, as are
-#     \`deref-methods-*\` sections. Those anchors come from impls of foreign traits and
-#     from auto/blanket impls in dependencies — they are not this crate's declared
-#     surface, and they move on any dependency bump, which would turn this file into a
-#     churn source and train reviewers to regenerate it without reading the diff. So a
-#     newly IMPLEMENTED foreign trait does not show up here. That is a real gap, stated
-#     rather than hidden.
-#   * \`#[doc(hidden)]\` items are invisible to rustdoc and therefore appear ONLY in
-#     the crate-root-declarations section below, and only if they are declared at
-#     the crate root.
-#   * The surface is measured with DEFAULT features only. Items behind non-default
-#     features (\`benchmarks\`, \`parquet\`, \`cli-helpers\`, \`fuzz\`, …) are absent here
-#     by design.
-#
-# Sections: rustdoc items first, then the crate-root declarations of
-# cqlite-core/src/lib.rs recorded WITH their declaration-site attributes (which is
-# what the guard's crate-root consistency assert compares against).
+# AFFIRMATIVE MEASUREMENT, not "no error observed" (CLAUDE.md). Zero unconditional
+# declarations, or a prologue count that does not account for every one of them,
+# means the assert examined nothing (or not everything) — which is the vacuous pass
+# itself, so each is a NAMED FAIL rather than a quiet success.
+[ "$OPEN_COUNT" -gt 0 ] \
+  || fail "the crate root $LIB_RS_REL declares $MOD_COUNT module(s) but NOT ONE of them is an unconditional, non-\`#[doc(hidden)]\` \`pub mod\`, so this assert examined nothing. A positive verdict requires an affirmative measurement; refusing to pass."
+[ "$READ_COUNT" -eq "$OPEN_COUNT" ] \
+  || fail "$OPEN_COUNT unconditional crate-root declaration(s) were found but only $READ_COUNT module prologue(s) were read. Every one of them must be examined; refusing to pass over a declaration that was skipped."
 
-## rustdoc-public-surface (default features)
-EOF
-  cat "$DERIVED_ITEMS"
-  echo ""
-  echo "## crate-root-declarations ($LIB_RS_REL)"
-  cut -f2- <"$DERIVED_DECLS"
-} >"$RENDERED"
-
-if [ "$MODE" = regenerate ]; then
-  cp "$RENDERED" "$SNAPSHOT"
-  echo "pub-surface: WROTE $SNAPSHOT_REL — $ITEM_COUNT public items + $ASSOC_COUNT associated items + $REEXPORT_COUNT re-exports + $GLOB_COUNT glob re-exports over $MODULE_COUNT public modules; $DECL_COUNT crate-root declarations."
-  echo "             Review the diff: it is a public-API change, not a formatting chore."
-  exit 0
-fi
-
-if ! diff -u "$SNAPSHOT" "$RENDERED" >"$WORK_DIR/surface.diff" 2>&1; then
-  echo "" >&2
-  echo "❌ pub-surface: the public API of $PACKAGE has CHANGED relative to the committed snapshot." >&2
-  echo "" >&2
-  echo "--- diff: $SNAPSHOT_REL (committed)  vs  freshly derived ---" >&2
-  sed -e "1s|.*|--- $SNAPSHOT_REL (committed)|" -e "2s|.*|+++ freshly derived from rustdoc|" "$WORK_DIR/surface.diff" >&2
-  echo "--- end of diff ---" >&2
-  echo "" >&2
-  echo "    If this change to the public API is INTENDED, regenerate the snapshot in the" >&2
-  echo "    same commit and explain the diff in the PR body:" >&2
-  echo "        bash scripts/ci/check-pub-surface.sh --regenerate" >&2
-  echo "" >&2
-  echo "    If it is NOT intended, you have accidentally added, removed or renamed a public" >&2
-  echo "    item of $PACKAGE — a semver-relevant change for every binding and downstream" >&2
-  echo "    consumer. Fix the code, not the snapshot." >&2
-  exit 1
-fi
-
-# Affirmative success line: a pasted gate SUMMARY must show that this check RAN.
-echo "pub-surface: $ITEM_COUNT public items + $ASSOC_COUNT associated items + $REEXPORT_COUNT re-exports + $GLOB_COUNT globs over $MODULE_COUNT public modules match $SNAPSHOT_REL ($ALL_COUNT item pages, cross-checked against rustdoc all.html); $DECL_COUNT crate-root declarations consistent"
+# Affirmative success line: a pasted gate SUMMARY must show that this check RAN, and
+# every element of it is something the guard can only know AFTER enumerating the
+# crate-root declarations and READING that many module files from disk. The
+# `pub-surface` component of scripts/agent-gate.sh matches this line WHOLE (never a
+# prefix — roborev r7 F3: a check against a PREFIX tests a SPELLING, not a STATE), so
+# ANY change to its wording must be made in BOTH places, plus case 26(b)'s positive
+# control in scripts/tests/test_pub_surface_guard.sh.
+echo "pub-surface: $DECL_COUNT crate-root declarations scanned in $LIB_RS_REL ($MOD_COUNT pub mod, of which $OPEN_COUNT unconditional); $READ_COUNT module-file prologues read from source; $inconsistent inconsistent"
