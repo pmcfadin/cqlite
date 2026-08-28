@@ -224,3 +224,18 @@ pub fn log_startup(
         "cqlite-flight starting"
     );
 }
+
+/// The POST-BIND readiness line (issue #3384).
+///
+/// Distinct from [`log_startup`], which records CONFIGURATION and is necessarily
+/// written before the port is acquired. This one is emitted only once a listener
+/// exists, so its presence is proof the process owns `bound` — the property a
+/// readiness probe needs and that a configuration line cannot supply, since a
+/// process can log its configuration and then die of `EADDRINUSE`.
+///
+/// `bound` is the ADDRESS ACTUALLY BOUND, not the one requested: with
+/// `--listen 127.0.0.1:0` the requested port is 0 and only this line names the
+/// port a client can dial.
+pub fn log_listening(bound: std::net::SocketAddr) {
+    tracing::info!(listening_on = %bound, "cqlite-flight listening on {bound}");
+}

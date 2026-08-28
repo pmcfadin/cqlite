@@ -19,9 +19,8 @@
 //! (#2642). The timeouts below are liveness bounds on process/socket readiness,
 //! not correctness properties.
 
-use std::net::{SocketAddr, TcpListener};
+use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
-use std::process::{Child, Command, Stdio};
 use std::time::Duration;
 
 use arrow_flight::decode::FlightRecordBatchStream;
@@ -77,115 +76,26 @@ fn ticket_bytes() -> Vec<u8> {
 // Server process control
 // ---------------------------------------------------------------------------
 
-/// A spawned `cqlite-flight` server process, killed on drop so a failing
-/// assertion can never leak a listener.
-struct ServerProcess {
-    child: Child,
-    addr: SocketAddr,
-    log: PathBuf,
-    // Kept so the log file outlives the process.
-    _log_dir: tempfile::TempDir,
-}
+// Spawning the real binary and WAITING FOR IT CORRECTLY is shared with
+// `tests/issue_2821_egress_budget_e2e.rs` (issue #3384): both files carried the
+// same copy of it, and therefore the same readiness defect. See the support
+// module's doc for the readiness contract.
+#[path = "support/flight_server_process.rs"]
+mod flight_server_process;
+use flight_server_process::{ServerProcess, ServerSpec};
 
-impl Drop for ServerProcess {
-    fn drop(&mut self) {
-        let _ = self.child.kill();
-        let _ = self.child.wait();
-    }
-}
-
-impl ServerProcess {
-    /// Everything the server wrote to stdout+stderr so far (the startup log),
-    /// with the `tracing-subscriber` ANSI styling stripped so the field
-    /// assertions match plain `key=value` text.
-    fn log(&self) -> String {
-        strip_ansi(&std::fs::read_to_string(&self.log).unwrap_or_default())
-    }
-}
-
-/// Drop CSI escape sequences (`ESC [ <params> <final byte>`) from `s`.
-fn strip_ansi(s: &str) -> String {
-    let mut out = String::with_capacity(s.len());
-    let mut chars = s.chars().peekable();
-    while let Some(c) = chars.next() {
-        if c != '\u{1b}' {
-            out.push(c);
-            continue;
-        }
-        // Skip the `[` introducer, then every parameter/intermediate byte up to
-        // and including the final byte in `@..=~` (e.g. the `m` of `ESC[32m`).
-        if chars.peek() == Some(&'[') {
-            chars.next();
-        }
-        for c in chars.by_ref() {
-            if ('@'..='~').contains(&c) {
-                break;
-            }
-        }
-    }
-    out
-}
-
-/// An ephemeral loopback port that is free right now.
-fn free_port() -> u16 {
-    let l = TcpListener::bind("127.0.0.1:0").expect("bind ephemeral");
-    let port = l.local_addr().expect("local_addr").port();
-    drop(l);
-    port
-}
-
-/// Start the REAL server binary over `data_dir` with `extra_args` and `env`, and
-/// wait until it accepts connections.
+/// Start the REAL server binary over `data_dir` with `extra_args` and `env`.
 ///
-/// Retries on a port that another process grabbed in the gap between
-/// [`free_port`] and the child's own bind — a startup race, not a correctness
-/// property, so no assertion depends on timing here.
+/// `CQLITE_MAX_BATCH_BYTES` is removed from the child's environment first so a
+/// stray value in the developer's environment cannot silently change what is
+/// under test.
 fn start_server(data_dir: &Path, extra_args: &[String], env: &[(&str, String)]) -> ServerProcess {
-    let exe = env!("CARGO_BIN_EXE_cqlite-flight");
-    let mut last_log = String::new();
-    for _ in 0..3 {
-        let port = free_port();
-        let addr: SocketAddr = format!("127.0.0.1:{port}").parse().expect("addr");
-        let log_dir = tempfile::TempDir::new().expect("log dir");
-        let log = log_dir.path().join("server.log");
-        let out = std::fs::File::create(&log).expect("log file");
-        let err = out.try_clone().expect("clone log fd");
-
-        let mut cmd = Command::new(exe);
-        cmd.arg("--data-dir")
-            .arg(data_dir)
-            .arg("--listen")
-            .arg(addr.to_string())
-            .args(extra_args)
-            .stdout(Stdio::from(out))
-            .stderr(Stdio::from(err));
-        // Start from a clean slate so a stray CQLITE_MAX_BATCH_BYTES in the
-        // developer's environment cannot silently change what is under test.
-        cmd.env_remove(ENV_MAX_BATCH_BYTES);
-        for (k, v) in env {
-            cmd.env(k, v);
-        }
-        let child = cmd.spawn().expect("spawn cqlite-flight");
-        let mut server = ServerProcess {
-            child,
-            addr,
-            log,
-            _log_dir: log_dir,
-        };
-
-        // Liveness wait: poll the socket until the server accepts.
-        for _ in 0..200 {
-            if std::net::TcpStream::connect_timeout(&addr, Duration::from_millis(50)).is_ok() {
-                return server;
-            }
-            if let Ok(Some(_)) = server.child.try_wait() {
-                break; // exited early (likely a port collision) — retry
-            }
-            std::thread::sleep(Duration::from_millis(50));
-        }
-        last_log = server.log();
-    }
-    panic!("cqlite-flight never became ready; last server log:\n{last_log}");
+    flight_server_process::start_server(ServerSpec {
+        data_dir,
+        args: extra_args,
+        env,
+        env_remove: &[ENV_MAX_BATCH_BYTES],
+    })
 }
 
 /// Stream a real `do_get` against `addr` and return the row count of each

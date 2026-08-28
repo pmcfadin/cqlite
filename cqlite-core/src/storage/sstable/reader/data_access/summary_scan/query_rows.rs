@@ -101,22 +101,19 @@ use std::sync::Arc;
 
 use super::super::super::SSTableReader;
 use super::super::full_index_stream::FullIndexStreamOutcome;
+use super::query_rows_bounds::{
+    QUERY_ROWS_CHANNEL_BATCHES, QUERY_ROWS_FULL_SCAN_BUFFER_ROWS, QUERY_ROWS_PER_BATCH,
+};
 use super::ScanTokenBound;
 use crate::storage::producer_fault::ProducerFault;
 use crate::storage::scan_cancel::ScanCancel;
 use crate::storage::sstable::reader::scan_stream_windowed::scan_admission::ScanAdmission;
+// Re-exported so `summary_scan::query_rows::QUERY_ROWS_MAX_READ_AHEAD` keeps
+// resolving after the sizing constants moved to their own file (issue #3384).
+#[allow(unused_imports)]
+pub use super::query_rows_bounds::{QUERY_ROWS_MAX_READ_AHEAD, QUERY_ROWS_MAX_RESIDENT_ROWS};
 use crate::types::ScanRow;
 use crate::{Error, Result, RowKey};
-
-/// Rows accumulated before a batch is handed to the consumer. Matches the
-/// batched scan surface's emit granularity (issue #1592): one cross-thread
-/// handoff per batch instead of per row.
-const QUERY_ROWS_PER_BATCH: usize = 128;
-
-/// Batches the bounded handoff channel may hold. Resident rows are therefore
-/// bounded by `QUERY_ROWS_PER_BATCH * (QUERY_ROWS_CHANNEL_BATCHES + 1)` plus the
-/// partition currently being decoded — independent of table size.
-const QUERY_ROWS_CHANNEL_BATCHES: usize = 4;
 
 /// One message from a [`QueryRowStream`].
 #[derive(Debug)]
@@ -319,6 +316,8 @@ impl SSTableReader {
         // a production build.
         let mut fault =
             crate::storage::producer_fault::ProducerFault::capture_for(|| self.file_path());
+        // One publisher per producer thread; see `CompletionOnce` (issue #3384).
+        let mut done = CompletionOnce::new();
         std::thread::Builder::new()
             .name("cqlite-query-rows".to_string())
             .spawn(move || {
@@ -348,6 +347,7 @@ impl SSTableReader {
                             &bridge,
                             &tx,
                             &mut fault,
+                            &mut done,
                         ))
                     }));
                 // EXACTLY ONE terminal message on every exit path, so the
@@ -357,6 +357,12 @@ impl SSTableReader {
                     Ok(Err(e)) => QueryRowMsg::Failed(e),
                     Err(panic) => QueryRowMsg::Failed(panicked_producer_error(panic.as_ref())),
                 };
+                // CAUSAL completion signal (issue #3384), published BEFORE the
+                // terminal message and never after (roborev): a consumer holding
+                // the terminal message must be able to conclude this producer can
+                // no longer publish, or a PRIOR case's producer could increment
+                // into a LATER case's freshly-reset counter. Nothing below decodes.
+                done.publish();
                 // The consumer may already be gone; a failed send is fine.
                 let _ = sender.send(terminal);
             })
@@ -470,6 +476,7 @@ async fn drive_query_rows(
     cancel: &CancelBridge,
     tx: &SyncSender<QueryRowMsg>,
     fault: &mut ProducerFault,
+    done: &mut CompletionOnce,
 ) -> Result<()> {
     if token_bound.is_none() {
         return drive_full_scan_rows(reader, schema, now_secs, cancel, tx, fault).await;
@@ -519,8 +526,40 @@ async fn drive_query_rows(
     // Neither walk can serve this reader. Report it as the FIRST and ONLY
     // message, having emitted nothing — enforced, for the same reason.
     assert_nothing_emitted(sink.emitted, "before reporting Unsupported")?;
+    // Publish BEFORE the send: the documented caller drops the stream the moment it
+    // sees `Unsupported`, so this message is terminal in practice even though the
+    // closure still sends `Done` behind it (roborev, issue #3384).
+    done.publish();
     let _ = tx.send(QueryRowMsg::Item(QueryRowBatch::Unsupported));
     Ok(())
+}
+
+/// Publishes producer completion EXACTLY ONCE, and always BEFORE any message a
+/// consumer can act on as terminal (issue #3384, roborev).
+///
+/// The invariant this exists to hold: **no consumer-observable terminal message may
+/// precede the completion publish.** If one does, the consumer can drop the stream,
+/// its test can finish and a LATER test can `reset` the counter, and only then does
+/// the paused producer increment — so the later test observes a completion that was
+/// never its own and reads a non-final work count. That is a false PASS in the exact
+/// test this issue exists to make trustworthy.
+///
+/// Two exit paths publish, hence the idempotence: the `Unsupported` report inside
+/// [`drive_query_rows`], and the producer closure's terminal `Done`/`Failed`. A
+/// producer that takes the first still reaches the second.
+struct CompletionOnce(bool);
+
+impl CompletionOnce {
+    const fn new() -> Self {
+        Self(false)
+    }
+
+    fn publish(&mut self) {
+        if !self.0 {
+            self.0 = true;
+            crate::storage::read_path_probe::mark_query_row_producer_finished();
+        }
+    }
 }
 
 /// Hand ONE batch of rows to the consumer, returning `false` when the consumer
@@ -631,7 +670,7 @@ async fn drive_full_scan_rows(
         None,
         None,
         Some(schema),
-        QUERY_ROWS_PER_BATCH * QUERY_ROWS_CHANNEL_BATCHES,
+        QUERY_ROWS_FULL_SCAN_BUFFER_ROWS,
         ScanAdmission::Exempt,
         Some(now_secs),
     );

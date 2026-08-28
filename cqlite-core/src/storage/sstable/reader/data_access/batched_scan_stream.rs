@@ -18,10 +18,50 @@
 //! now share ONE dispatch, [`SSTableReader::stream_bti_scan`], so a third divergent
 //! copy of this decision cannot drift again (the #1577 class).
 //!
-//! Included via `#[path = "batched_scan_stream.rs"] mod batched_scan_stream;` in
-//! [`super`], so it shares `sequential.rs`'s imports through `use super::*`.
+//! Included via `#[path = "batched_scan_stream.rs"] pub(super) mod batched_scan_stream;`
+//! in [`super`], so it shares `sequential.rs`'s imports through `use super::*`.
+//!
+//! # Why the module is `pub(super)` (issue #3384)
+//!
+//! [`batched_channel_capacity`] is the SINGLE definition of this surface's channel
+//! sizing, and `summary_scan::query_rows` derives its exported read-ahead bound
+//! ([`QUERY_ROWS_MAX_READ_AHEAD`](crate::storage::sstable::reader::QUERY_ROWS_MAX_READ_AHEAD))
+//! from it rather than restating the arithmetic. `pub(super)` is the narrowest
+//! visibility that reaches that sibling; the prose lives here rather than beside
+//! the `mod` declaration because `sequential.rs` is 1319 lines, already over the
+//! campsite threshold (epic #1116), and this file is not.
 
 use super::*;
+
+/// Publishes detached-scan completion on drop — see the spawn site (issue #3384).
+struct ScanTaskDone;
+
+impl Drop for ScanTaskDone {
+    fn drop(&mut self) {
+        crate::storage::read_path_probe::mark_batched_scan_finished();
+    }
+}
+
+/// Batches the public BATCHED-scan channel below holds for a given `buffer_size`.
+///
+/// Sizing the channel to `ceil(buffer_size / BATCH_EMIT_ROWS)` batches keeps its
+/// resident-row budget comparable to the per-row surface's `buffer_size` rather
+/// than `buffer_size * BATCH_EMIT_ROWS`.
+///
+/// A `const fn` with ONE definition because the query-row stream's exported
+/// read-ahead bound
+/// ([`QUERY_ROWS_MAX_READ_AHEAD`](crate::storage::sstable::reader::QUERY_ROWS_MAX_READ_AHEAD))
+/// is derived from it. A second copy of this arithmetic could drift from the
+/// channel the constructor actually builds — which is precisely how a documented
+/// read-ahead bound becomes silently wrong (issue #3384).
+pub(crate) const fn batched_channel_capacity(buffer_size: usize) -> usize {
+    let cap = buffer_size.div_ceil(BATCH_EMIT_ROWS);
+    if cap == 0 {
+        1
+    } else {
+        cap
+    }
+}
 
 impl SSTableReader {
     /// Batched streaming scan (issue #1592, Epic F/F2): the additive companion to
@@ -71,11 +111,10 @@ impl SSTableReader {
         admission: ScanAdmission,
         now_secs: Option<i64>,
     ) -> BatchedScanStream {
-        // The public channel carries BATCHES; sizing it to
-        // `ceil(buffer_size / BATCH_EMIT_ROWS)` batches keeps the resident-row
-        // budget of this channel comparable to the per-row surface's `buffer_size`
-        // rather than `buffer_size * BATCH_EMIT_ROWS`.
-        let cap = buffer_size.div_ceil(BATCH_EMIT_ROWS).max(1);
+        // The public channel carries BATCHES (see `batched_channel_capacity`,
+        // which is the SINGLE definition of this sizing — the query-row stream's
+        // exported read-ahead bound is derived from the same `const fn`).
+        let cap = batched_channel_capacity(buffer_size);
         let (tx, rx) = mpsc::channel(cap);
         // Read-metric grain (issue #1701): identical rule to the per-row surface —
         // an `Acquire` scan is the top-level read OPERATION and is measured with
@@ -90,7 +129,25 @@ impl SSTableReader {
             )),
             ScanAdmission::Exempt => None,
         };
+
+        // CAUSAL completion signal for THIS detached task (issue #3384, roborev).
+        // `BatchedScanStream` is dropped without joining its task, so a consumer that
+        // stopped reading cannot otherwise tell "the scan finished" from "the scan is
+        // descheduled between two increments".
+        //
+        // A DROP guard, not a statement at the end of the block, because the common exit
+        // here is CANCELLATION, not completion: the query-row producer owns a
+        // `current_thread` runtime and drops it as it returns, cancelling this future at
+        // its next await — a trailing statement would never run. Measured: it never fired.
+        //
+        // Constructed BEFORE `tokio::spawn` and moved in (roborev): a future dropped
+        // before its FIRST POLL — a runtime shut down between spawn and schedule — would
+        // otherwise never construct the guard, so nothing would publish and every waiter
+        // would time out. Owning it outside the async block makes the guard's lifetime
+        // the TASK's, not the body's.
+        let done = ScanTaskDone;
         let task = tokio::spawn(async move {
+            let _done = done;
             if let Err(e) = self
                 .run_scan_stream_batched(
                     table_id,
@@ -177,6 +234,10 @@ impl SSTableReader {
         }
 
         if self.requires_chunk_stitching() {
+            // Affirmative branch marker (issue #3384): the detached-scan completion
+            // signal does NOT cover this branch's `spawn_blocking` decode, so a test
+            // relying on that signal must be able to measure that it did not land here.
+            crate::storage::read_path_probe::mark_batched_scan_stitching_path();
             // Forward the windowed driver's internal batches straight through — no
             // flatten, no re-batch (issue #1592). Same driver, same order/content
             // as the per-row path; only the output surface differs.

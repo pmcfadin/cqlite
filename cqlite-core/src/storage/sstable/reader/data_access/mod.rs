@@ -106,7 +106,7 @@ pub use point_compaction::SinglePartitionCompaction;
 // Token-range bound pushed into the Summary-guided streaming walk (issue #2413
 // Option A). Re-exported to the crate so the flight warm merge can construct one
 // from its `TokenFilter`.
-pub use summary_scan::{QueryRowBatch, QueryRowStream, ScanTokenBound};
+pub use summary_scan::{QueryRowBatch, QueryRowStream, ScanTokenBound, QUERY_ROWS_MAX_READ_AHEAD};
 
 // Re-export the decompress-work counter so the sibling `scan_stream_windowed`
 // module (outside `data_access`) can increment it on the windowed-scan miss path
