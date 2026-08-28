@@ -26,8 +26,8 @@
 # turning both checks into no-ops would be the worst regression possible here).
 
 # shellcheck disable=SC2034
-# ^ every variable assigned in this file (PUSH_ASSERT, BASE_SHA, CENSUS_CHECK,
-#   CODE_FREE, census_*) is READ by the sourcing wrapper, which
+# ^ every variable assigned in this file (PUSH_ASSERT, BASE_TIP_SHA, RANGE_BASE_SHA,
+#   CENSUS_CHECK, CODE_FREE, census_*) is READ by the sourcing wrapper, which
 #   shellcheck cannot see when it lints this fragment standalone. Lint the pair with
 #   `shellcheck -x scripts/flow/roborev-review.sh` to resolve them across the
 #   source boundary.
@@ -187,11 +187,12 @@ _rx_dirglob_match() {
 
 # ROBOREV_RANGE_ENDPOINT_REFS: the refs that ARE the census range's endpoints, named once so
 # neither caller nor reader can disagree about what "the range" means. HEAD is the right-hand
-# endpoint; `BASE_SHA` the left. The order is presentational ONLY — the fold below is a
-# DISJUNCTION, so permuting this array cannot change any answer.
+# endpoint; `RANGE_BASE_SHA` — the MERGE-BASE, which is what `<base>...HEAD` actually diffs
+# against, NOT the base ref's tip (#3392) — is the left. The order is presentational ONLY —
+# the fold below is a DISJUNCTION, so permuting this array cannot change any answer.
 roborev_range_endpoint_refs() {
   local ref
-  for ref in HEAD "${BASE_SHA:-}"; do
+  for ref in HEAD "${RANGE_BASE_SHA:-}"; do
     [ -n "$ref" ] && printf '%s\n' "$ref"
   done
 }
@@ -496,7 +497,7 @@ roborev_push_assert() {
   PUSH_ASSERT="PASS"
 }
 
-# roborev_census: sets BASE_SHA, CENSUS, CENSUS_CHECK, CODE_FREE and the
+# roborev_census: sets BASE_TIP_SHA, RANGE_BASE_SHA, CENSUS, CENSUS_CHECK, CODE_FREE and the
 # census_* / census_paths state; calls `finish` on failure or an empty census.
 roborev_census() {
   # --- step 3: the local diff census — THE ORACLE -------------------------------
@@ -505,10 +506,69 @@ roborev_census() {
   # unresolvable base must never be allowed to produce an empty census, which would
   # surface as NOTHING-TO-REVIEW and read as "nothing to look at" rather than "we
   # could not tell". No implicit `git fetch` is performed on the caller's behalf.
-  BASE_SHA=""
-  if ! BASE_SHA=$(git -C "$REPO" rev-parse --verify --quiet "${BASE}^{commit}"); then
+  BASE_TIP_SHA=""
+  RANGE_BASE_SHA=""
+  if ! BASE_TIP_SHA=$(git -C "$REPO" rev-parse --verify --quiet "${BASE}^{commit}"); then
     CENSUS_CHECK="FAIL (base '$BASE' unresolvable)"
     DETAILS+=("ERROR: census: base ref '$BASE' does not resolve to a commit in $REPO, so the census — and therefore every vacuity judgement — would be unfounded. This is a FAIL, explicitly NOT a NOTHING-TO-REVIEW: an unresolvable base is 'we cannot tell', never 'there is nothing to review'. If '$BASE' is a remote-tracking ref, this clone may have a narrow fetch refspec or have never fetched it; fetch it yourself (the wrapper never fetches behind your back) and re-run. No review was enqueued.")
+    finish FAIL 1
+  fi
+
+  # ===== THE RANGE BASE IS THE MERGE-BASE, NEVER THE BASE REF'S TIP (#3392) =====
+  # `<base>...HEAD` — the THREE-DOT form the census measures — is
+  # `merge-base(<base>, HEAD)..HEAD`. It is NOT `<base-tip>..HEAD`, and the two differ for
+  # every branch whose `<base>` has advanced since the branch point, i.e. for almost every
+  # branch that has not just been rebased. roborev reviews the same three-dot range and its
+  # job record's `git_ref` therefore carries `<merge-base>..<head>`.
+  #
+  # Before this, ONE name (`BASE_SHA`) held the TIP and was used both as this range's left
+  # endpoint and as `sha-assert`'s expected range base, so the assert compared a
+  # merge-base-relative reviewed range against the tip and FAILED DETERMINISTICALLY on a
+  # CORRECT review — an abort that costs the review's tokens and reads exactly like a vacuous
+  # review. Two different definitions of "base" under one name is the whole defect, so the
+  # name is retired: `RANGE_BASE_SHA` is the base OF THE RANGE UNDER REVIEW (what the census
+  # diffs from, what the assert expects, what the absence waiver is bound to) and
+  # `BASE_TIP_SHA` is the base REF's tip, used only where the tip itself is the subject (the
+  # root-checkout T1 diagnostic in the wrapper).
+  #
+  # RESOLVED FROM `$BASE_TIP_SHA`, NOT FROM `$BASE` AGAIN, and the census diff below is then
+  # pinned to `$RANGE_BASE_SHA`: one read of the moving ref, one range, used by the census,
+  # the assert and the waiver scope. That is what closes the SECOND-ORDER race the deterministic
+  # bug was masking — a mirror ref that advances mid-run can otherwise leave the census
+  # measuring one range while the assert expects another, and each would look correct alone.
+  #
+  # FAIL CLOSED, affirmatively. Unrelated histories (no common ancestor) exit non-zero with no
+  # output; a broken/absent object store can fail in other ways. Either way the range under
+  # review is UNKNOWN, and an unknown range must never degrade to the tip or to an empty value —
+  # the tip is the very thing that produced the defect, and an empty expected base would make
+  # `sha-assert` compare against nothing. So the permissive branch is keyed on the AFFIRMATIVE
+  # value: a single 40-hex sha and nothing else (a multi-line `--all`-style answer, an empty
+  # answer, or anything non-hex is a FAIL, because we could not tell WHICH base was reviewed).
+  # Ordered BEFORE any review is enqueued, like every other census check, so a failure here
+  # costs no review tokens.
+  local mergebase_err="$LOG.mergebase.err"
+  if ! RANGE_BASE_SHA=$(git -C "$REPO" merge-base "$BASE_TIP_SHA" HEAD 2>"$mergebase_err"); then
+    CENSUS_CHECK="FAIL (no merge-base between '$BASE' and HEAD)"
+    DETAILS+=("ERROR: census: 'git merge-base $BASE_TIP_SHA HEAD' failed in $REPO, so the BASE OF THE RANGE UNDER REVIEW is unknown and neither the census ('${BASE}...HEAD' is merge-base..HEAD) nor sha-assert would have anything sound to measure against. This is a FAIL, explicitly NOT a NOTHING-TO-REVIEW: an unresolvable merge-base is 'we cannot tell', never 'there is nothing to review'. The usual cause is that '$BASE' and HEAD have NO common ancestor (unrelated histories). It is deliberately NOT degraded to the tip of '$BASE': asserting a merge-base-relative reviewed range against a tip is the defect this resolution exists to fix. No review was enqueued. git said:")
+    while IFS= read -r line; do
+      [ -n "$line" ] || continue
+      DETAILS+=("  $line")
+    done <"$mergebase_err"
+    finish FAIL 1
+  fi
+  # The AFFIRMATIVE form test: `range_base_form` only ever becomes `40-hex` by a positive
+  # measurement (hex-only AND exactly 40 bytes), and the branch below keys on THAT value rather
+  # than on "not one of the bad shapes" — a shape nobody anticipated therefore fails closed.
+  # `*[!0-9a-f]*` catches a NEWLINE too, so a multi-line answer (several merge bases) cannot
+  # slip through as a sha with trailing noise.
+  local range_base_form="unusable"
+  case "$RANGE_BASE_SHA" in
+    *[!0-9a-f]*) ;;
+    ?*) [ "${#RANGE_BASE_SHA}" -eq 40 ] && range_base_form="40-hex" ;;
+  esac
+  if [ "$range_base_form" != "40-hex" ]; then
+    CENSUS_CHECK="FAIL (merge-base of '$BASE' and HEAD unusable)"
+    DETAILS+=("ERROR: census: 'git merge-base $BASE_TIP_SHA HEAD' succeeded but did not yield exactly one 40-hex commit sha, so the base of the range under review is not established. A PASS here would rest on the ABSENCE of a non-zero exit rather than on a measurement, so it fails closed. What git returned, rendered between markers: [$RANGE_BASE_SHA]. No review was enqueued.")
     finish FAIL 1
   fi
 
@@ -548,13 +608,17 @@ roborev_census() {
   # survives intact — which a line-oriented read cannot do at all.
   local numstat_file="$LOG.numstat"
   set +e
-  git -C "$REPO" diff --numstat -z --no-renames "${BASE}...HEAD" \
+  # `"$RANGE_BASE_SHA" HEAD` (two-dot) IS `"${BASE}...HEAD"` (three-dot) BY DEFINITION, with
+  # the moving ref read exactly ONCE — see the merge-base resolution above. Every diagnostic
+  # that says `${BASE}...HEAD` names this same range; the spelling here is pinned, the prose
+  # there is the reader-facing name for it.
+  git -C "$REPO" diff --numstat -z --no-renames "$RANGE_BASE_SHA" HEAD \
     >"$numstat_file" 2>"$numstat_file.err"
   DIFF_RC=$?
   set -e
   if [ "$DIFF_RC" -ne 0 ]; then
     CENSUS_CHECK="FAIL (git diff failed)"
-    DETAILS+=("ERROR: census: 'git diff --numstat -z --no-renames ${BASE}...HEAD' exited $DIFF_RC in $REPO, so the census was never measured. This is a FAIL, explicitly NOT a NOTHING-TO-REVIEW — an unmeasurable diff is 'we cannot tell', never 'there is nothing to review'. git said:")
+    DETAILS+=("ERROR: census: 'git diff --numstat -z --no-renames $RANGE_BASE_SHA HEAD' (that is, ${BASE}...HEAD) exited $DIFF_RC in $REPO, so the census was never measured. This is a FAIL, explicitly NOT a NOTHING-TO-REVIEW — an unmeasurable diff is 'we cannot tell', never 'there is nothing to review'. git said:")
     while IFS= read -r line; do
       [ -n "$line" ] || continue
       DETAILS+=("  $line")

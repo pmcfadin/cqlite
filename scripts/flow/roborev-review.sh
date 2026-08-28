@@ -82,7 +82,8 @@
 # agent-gate summary headers so neither can ever be pasted as the other:
 #
 #   ==== ROBOREV REVIEW SUMMARY ====
-#   repo: / branch: / base: / head-sha: / reviewed-sha: / job: / model: / census:
+#   repo: / branch: / base: / head-sha: / reviewed-sha: / assert-base: / job: /
+#   model: / census: /
 #   tokens: / push-assert: / census-check: / code-free: / job-record: /
 #   sha-assert: / review-completed: / prompt-content: /
 #   vacuity-tier1: / vacuity-tier2: / findings: / roborev-exit: / log:
@@ -101,6 +102,10 @@
 #   job-record        PASS | PASS (no token accounting in the record) |
 #                     DEGRADED (incomplete after <n> retries: <fields>) | SKIP
 #   sha-assert        PASS | FAIL (...) | SKIP
+#                     Asserts BOTH endpoints of the reviewed range against the CENSUS range,
+#                     whose base is the MERGE-BASE of `<base>` and HEAD — `<base>...HEAD` is
+#                     `merge-base(<base>, HEAD)..HEAD`, never `<base-tip>..HEAD` (#3392). The
+#                     base ref's TIP is still read, for the T1 root-checkout signature alone.
 #   prompt-content    PASS (<k>/<n> code census paths present) |
 #                     FAIL (<k>/<n> code census paths absent from the prompt) |
 #                     FAIL (no code census path was checkable — a 0/0 is never a pass) |
@@ -173,7 +178,10 @@
 # record's git_ref, asserting BOTH endpoints of the reviewed range against the census
 # range), `review-completed` (job status + an allow-list of terminal verdict markers),
 # `prompt-content` (the CODE subset of our census inside the prompt actually sent). Prose matching (`vacuity-tier1`) and token accounting (`vacuity-tier2`)
-# CORROBORATE; tier 1 can only ever raise a NOTICE.
+# CORROBORATE; tier 1 can only ever raise a NOTICE. `base:`, `head-sha:`, `reviewed-sha:`,
+# `assert-base:`, `census:`, `tokens:` and `waiver:` are INFORMATIONAL — they are in neither
+# the verdict-grammar scan nor the affirmation loop (both enumerate the verdict-carrying keys
+# by name), so none of them can make a run pass or fail on its own.
 #
 # EXIT CODES (exactly three outcomes plus a usage code)
 #   0  PASS               — a review demonstrably HAPPENED against branch HEAD with
@@ -377,7 +385,11 @@ A worker or a closer may REQUEST one — one comment, including the token accoun
 and may never apply it to its own PR.
 
 IT IS BOUND TO THE WHOLE REVIEW SCOPE, not just the head: base AND head AND job are all
-required and all verified. The authorizer's judgment under (d) was about ONE review and
+required and all verified. `base=` is the base OF THE REVIEWED RANGE — the merge-base of
+`--base` and HEAD, which the block prints as `assert-base:` — NOT the tip of the base ref
+(#3392). Copy it from `assert-base:`; the two are the same commit only while the branch is
+not behind its base, and binding to the tip made a waiver go STALE the instant the base ref
+advanced, which is what made this mechanism a dead letter under fleet load. The authorizer's judgment under (d) was about ONE review and
 its token accounting, so the waiver may not outlive it — a push, a different base or a
 re-run each need a fresh one. A marker missing any field is MALFORMED, never granted.
 
@@ -458,7 +470,10 @@ a worktree; the gate's hermetic check uses a stub reviewer.
        - head-sha == the worktree branch HEAD (git rev-parse HEAD);
        - sha-assert: PASS;
        - reviewed-sha ENDS IN that same head-sha, and its base endpoint (before '..')
-         == git rev-parse <base> — i.e. the reviewed range IS <base>...HEAD;
+         == git merge-base <base> HEAD — i.e. the reviewed range IS <base>...HEAD.
+         NOT git rev-parse <base>: the tip and the merge-base are the same commit only
+         while the branch is not behind <base> (#3392). assert-base: names the sha the
+         assert used, and the <base> tip beside it, so the two are never confused;
        - reviewed-sha is NOT the base ref alone, and its head endpoint is NOT the base
          sha: either means the review never reached the worktree's own commits, which
          is the root-checkout resolution this probe exists to rule out;
@@ -684,6 +699,16 @@ emit_summary() {
   emit_kv 'base' "$BASE"
   emit_kv 'head-sha' "${HEAD_SHA:--}"
   emit_kv 'reviewed-sha' "$REVIEWED_SHA"
+  # ===== WHICH BASE THE RANGE ASSERT COMPARED AGAINST (#3392) =====
+  # INFORMATIONAL, exactly like `census:`/`tokens:`/`waiver:` — it is NOT in the verdict-grammar
+  # scan and NOT in the affirmation loop (both enumerate the verdict-carrying keys by name), so it
+  # can never make anything pass or fail on its own; `sha-assert:` alone carries that verdict.
+  # It exists because the two candidate bases are INDISTINGUISHABLE in a pasted block otherwise:
+  # a reader comparing `reviewed-sha`'s base endpoint against `base:` has no way to tell a
+  # merge-base from the ref tip, which is exactly the confusion that let the tip-vs-merge-base
+  # defect survive two misdiagnoses. Both shas are printed, always, so their (in)equality is
+  # visible rather than inferred. Placed beside `head-sha:`/`reviewed-sha:`, the other endpoints.
+  emit_kv 'assert-base' "${RANGE_BASE_SHA:--} (merge-base of $BASE and HEAD; $BASE tip ${BASE_TIP_SHA:--})"
   emit_kv 'job' "$JOB"
   emit_kv 'model' "$MODEL_LINE"
   emit_kv 'census' "$CENSUS"
@@ -1078,19 +1103,33 @@ TOK_OUT=$(fact output_tokens)
 # reviewed at all: when the record is unavailable this assert FAILS rather than
 # falling back to a check that verifies nothing. (A single-sha `git_ref` is still
 # accepted, for a roborev build that reports one.)
+#
+# ===== THE EXPECTED RANGE BASE IS `RANGE_BASE_SHA`, THE MERGE-BASE (#3392) =====
+# `<base>...HEAD` is `merge-base(<base>, HEAD)..HEAD`, which is the range the census
+# measures and the range roborev reviews. Comparing the record's base endpoint against
+# the base REF'S TIP instead — as this did — made a CORRECT review FAIL deterministically
+# for every branch whose base had advanced since the branch point, i.e. for almost every
+# branch that had not just been rebased. It was misdiagnosed as a race twice; the
+# controlled measurement (base ref recorded before AND after the review, unmoved, assert
+# failed anyway) is what killed that hypothesis. So the comparison is now like-for-like.
+#
+# `BASE_TIP_SHA` DOES NOT DISAPPEAR, and that is AC2: the single-sha branch below needs
+# the TIP, because the T1 trap it detects is a `--branch` review resolved against the
+# ROOT checkout, which enqueues the base ref's TIP. Each variable is used where its own
+# meaning is the subject, and neither is a stand-in for the other.
 if [ "$announce_ok" -eq 1 ]; then
   case "$JOB_GIT_REF" in
     *..*)
       range_base="${JOB_GIT_REF%%..*}"
       range_head="${JOB_GIT_REF##*..}"
       REVIEWED_SHA="$JOB_GIT_REF"
-      if [ "$range_head" = "$HEAD_SHA" ] && [ "$range_base" = "$BASE_SHA" ]; then
+      if [ "$range_head" = "$HEAD_SHA" ] && [ "$range_base" = "$RANGE_BASE_SHA" ]; then
         SHA_ASSERT="PASS"
       else
         SHA_ASSERT="FAIL (reviewed range does not match ${BASE}...HEAD)"
-        DETAILS+=("ERROR: sha-assert: the reviewed range '$JOB_GIT_REF' does not match the census range: expected base '$BASE_SHA' ($BASE) and head '$HEAD_SHA' (job $JOB).")
-        if [ "$range_base" != "$BASE_SHA" ]; then
-          DETAILS+=("ERROR: sha-assert: the range BASE is '$range_base', not '$BASE_SHA'. An empty-tree base (4b825dc6...) is the signature of the non-sanctioned two-positional commit-range form.")
+        DETAILS+=("ERROR: sha-assert: the reviewed range '$JOB_GIT_REF' does not match the census range: expected base '$RANGE_BASE_SHA' (the merge-base of $BASE and HEAD, which is what '${BASE}...HEAD' diffs from) and head '$HEAD_SHA' (job $JOB).")
+        if [ "$range_base" != "$RANGE_BASE_SHA" ]; then
+          DETAILS+=("ERROR: sha-assert: the range BASE is '$range_base', not '$RANGE_BASE_SHA'. An empty-tree base (4b825dc6...) is the signature of the non-sanctioned two-positional commit-range form. A base equal to the TIP of '$BASE' ($BASE_TIP_SHA) instead of its merge-base with HEAD would mean the review scope was anchored at the ref tip, which is NOT the branch diff — the reviewed range must be merge-base..HEAD.")
         fi
         if [ "$range_head" != "$HEAD_SHA" ]; then
           DETAILS+=("ERROR: sha-assert: the range HEAD is '$range_head', not branch HEAD '$HEAD_SHA' — the reviewed scope stops short of the branch tip.")
@@ -1111,10 +1150,24 @@ if [ "$announce_ok" -eq 1 ]; then
       else
         SHA_ASSERT="FAIL (reviewed-sha does not match head-sha)"
         DETAILS+=("ERROR: sha-assert: the job record's git_ref '$JOB_GIT_REF' does not equal branch HEAD '$HEAD_SHA' (job $JOB).")
-        if [ "$JOB_GIT_REF" = "$BASE_SHA" ]; then
-          DETAILS+=("ERROR: sha-assert: the reviewed sha EQUALS the base ref '$BASE' ($BASE_SHA) — NO branch change was reviewed. That equality is the signature of a '--branch' review resolved against the ROOT checkout instead of this worktree.")
+        # ===== T1, AND WHY THE TIP IS STILL READ HERE (AC2, #3392) =====
+        # A `--branch` review resolved against the ROOT checkout enqueues the base ref's
+        # TIP, so THE TIP is the sha this signature is about — it is not interchangeable
+        # with the merge-base. But the merge-base is the base of the range that SHOULD have
+        # been reviewed, so an equality with EITHER is the same "no branch change was
+        # reviewed" signature and both are reported, naming WHICH one matched. On a freshly
+        # rebased branch they are the same commit and the message says so; when they differ,
+        # which one matched is the diagnostic (tip => the root-checkout resolution;
+        # merge-base => a review anchored at the branch point, still reviewing nothing).
+        # Either way this FAILs — nothing here becomes permissive.
+        if [ "$JOB_GIT_REF" = "$BASE_TIP_SHA" ] && [ "$JOB_GIT_REF" = "$RANGE_BASE_SHA" ]; then
+          DETAILS+=("ERROR: sha-assert: the reviewed sha EQUALS the base ref '$BASE' — which here is BOTH its tip and its merge-base with HEAD ($BASE_TIP_SHA; this branch is not behind '$BASE') — so NO branch change was reviewed. That equality is the signature of a '--branch' review resolved against the ROOT checkout instead of this worktree.")
+        elif [ "$JOB_GIT_REF" = "$BASE_TIP_SHA" ]; then
+          DETAILS+=("ERROR: sha-assert: the reviewed sha EQUALS the TIP of the base ref '$BASE' ($BASE_TIP_SHA) — NO branch change was reviewed. That equality is the signature of a '--branch' review resolved against the ROOT checkout instead of this worktree. (The base of the range that SHOULD have been reviewed is the merge-base, $RANGE_BASE_SHA.)")
+        elif [ "$JOB_GIT_REF" = "$RANGE_BASE_SHA" ]; then
+          DETAILS+=("ERROR: sha-assert: the reviewed sha EQUALS the MERGE-BASE of '$BASE' and HEAD ($RANGE_BASE_SHA) — the branch point itself, so NO branch change was reviewed: every commit under review is a DESCENDANT of it. (The tip of '$BASE' is $BASE_TIP_SHA.)")
         else
-          DETAILS+=("ERROR: sha-assert: the reviewed sha matches NEITHER endpoint (head '$HEAD_SHA', base '$BASE' $BASE_SHA).")
+          DETAILS+=("ERROR: sha-assert: the reviewed sha matches NEITHER endpoint (head '$HEAD_SHA', range base '$RANGE_BASE_SHA' — the merge-base of '$BASE' and HEAD, whose tip is $BASE_TIP_SHA).")
         fi
       fi
       ;;
@@ -1271,7 +1324,7 @@ if [ "$failed" -eq 0 ]; then
       # time a key is added, and the provenance test is the property that actually matters.
       WAIVED)
         if [ -n "${ROBOREV_WAIVER_AUTHOR:-}" ] && [ -n "${ROBOREV_WAIVER_REASON:-}" ] \
-          && [ "${ROBOREV_WAIVER_SCOPE:-}" = "base=${BASE_SHA:-} head=${HEAD_SHA:-} job=${JOB:-}" ] \
+          && [ "${ROBOREV_WAIVER_SCOPE:-}" = "base=${RANGE_BASE_SHA:-} head=${HEAD_SHA:-} job=${JOB:-}" ] \
           && [ "${ROBOREV_WAIVER_STATE:-}" = "granted" ]; then continue; fi
         ;;
     esac
