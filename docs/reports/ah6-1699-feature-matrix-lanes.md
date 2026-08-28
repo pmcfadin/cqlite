@@ -195,6 +195,38 @@ Two properties are worth separating, because only one of them is curated:
 not named, so omitting it would have silently stopped executing `main.rs`'s 2 unit tests
 — the change would itself have opened the never-executed hole this lane exists to close.
 
+## A COUNTEREXAMPLE TO THIS REPORT'S OWN PREMISE: the unit half is not fully deterministic either (#3420)
+
+Recorded here rather than left for someone to discover, because it weakens a claim this report makes.
+
+The descope below rests on a premise: the **integration** half of cqlite-flight is non-deterministic, so
+the lane runs the **unit** half, which is deterministic enough to gate on. The first premise is measured
+(2 distinct victims in 4 runs). The second now has a counterexample.
+
+`saturation::tests::proc_thread_gauge_rises_with_load_and_settles` failed inside the lane with
+`the thread count must rise while 8 extra threads are parked (base=59, loaded=50)`. The numbers are the
+diagnosis: the count **fell by 9** while the test parked 8 threads, because it asserts on a
+**process-wide** thread count inside a 386-test parallel harness where unrelated tests spawn and join
+threads throughout. It cannot distinguish "my threads did not start" from "other threads exited between
+my samples", so its **pass is not evidence either** — the same shape as the wall-clock-race class, with a
+thread count in place of a clock. Filed as **#3420**, with the fix left to its own PR off `origin/main`
+per the #3380 precedent rather than folded in here.
+
+| condition | result |
+|---|---|
+| inside the `flight-tests` lane (SIDE lane, box under load) | **FAIL** — `base=59, loaded=50` |
+| standalone `cargo test -p cqlite-flight --features test-util --lib`, 6 runs, quiet box | **6 PASS / 0 FAIL** |
+
+**What this does and does not change.** It does not overturn the descope: one unsound test with an
+identified mechanism is fixable, whereas the integration suite presented an unbounded victim list, which
+is what the owner ruling turned on. But the accurate statement is **"the unit half has one known unsound
+test, filed"**, not "the unit half is deterministic" — and until #3420 lands, this lane can intermittently
+red any lane's gate of record. That cost is real, it is imposed by this change, and it is stated here
+rather than discovered by the next worker.
+
+It is also, in the narrow sense, the lane working: the test had **never been executed by any lane or CI
+job** before this one, which is the entire thesis of #1699.
+
 ## `flight-tests`: the descope to `--lib` (#3384) — the non-determinism was the SUITE, not one test
 
 The amendment above (an explicit derived list minus one flaky victim) was **withdrawn on

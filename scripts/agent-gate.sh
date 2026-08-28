@@ -6120,12 +6120,17 @@ run_flight_tests() {
   if ! gated_meta=$(_crate_gated_test_targets cqlite-flight "$enabled"); then
     gated_meta=""   # no crate-gated target found is a legitimate empty result, see below
   fi
-  local gated_elsewhere=0 elsewhere_names="" gname excluded_set=" " excluded_n=0
+  local gated_elsewhere=0 elsewhere_names="" unclass_names="" gname excluded_set=" " excluded_n=0
   while IFS=$'\t' read -r gname grel ggate goff; do
     [ -n "$grel" ] || continue
     if [ "$goff" = "UNCLASSIFIED" ]; then
+      # A SEPARATE list (roborev round-23, Medium). These were appended to $gated_names, which is
+      # printed under "crate-gated targets that execute NOWHERE" — a conclusion the code
+      # deliberately did NOT reach for them: an unrecognised boolean expression was never
+      # evaluated, so claiming it executes nowhere asserts exactly what was declined. Reporting an
+      # unknown as a known is the failure this census exists to prevent.
       gated_unclass=$((gated_unclass + 1))
-      gated_names="$gated_names $grel(gate:UNRECOGNISED)"
+      unclass_names="$unclass_names $grel(gate:UNRECOGNISED, NOT evaluated)"
     elif _component_runs_target cqlite-flight "$goff" "$gname"; then
       # Gated here, but another component of this gate enables that feature AND SELECTS THIS TARGET
       # — so it executes somewhere, and calling it "nowhere" would be the same false claim reversed.
@@ -6172,6 +6177,7 @@ run_flight_tests() {
   for cl in "${census[@]}"; do echo ">>> [$name] $cl"; done
   [ -n "$rf_reasons" ] && echo ">>> [$name] declared targets with unmet required-features:$rf_reasons"
   [ -n "$gated_names" ] && echo ">>> [$name] crate-gated targets that execute NOWHERE (#3375):$gated_names"
+  [ -n "$unclass_names" ] && echo ">>> [$name] crate-gated with an UNRECOGNISED gate — NOT classified either way:$unclass_names"
   [ -n "$elsewhere_names" ] && echo ">>> [$name] crate-gated but run by another component:$elsewhere_names"
   echo ">>> [$name] enabled features (cargo tree -p, package-scoped):$enabled"
 
@@ -6182,6 +6188,7 @@ run_flight_tests() {
     for cl in "${census[@]}"; do echo "$cl"; done
     [ -n "$rf_reasons" ] && echo "declared targets with unmet required-features:$rf_reasons"
     [ -n "$gated_names" ] && echo "crate-gated targets that execute NOWHERE (#3375):$gated_names"
+    [ -n "$unclass_names" ] && echo "crate-gated with an UNRECOGNISED gate — NOT classified either way:$unclass_names"
     [ -n "$elsewhere_names" ] && echo "crate-gated but run by another component:$elsewhere_names"
     echo "enabled features (cargo tree -p, package-scoped):$enabled"
     echo "==== end census ===="
@@ -6412,8 +6419,8 @@ _legacy_coreq_sites() { # _legacy_coreq_sites <file> <enabled-feature-list>
 # NO `| grep -q` ANYWHERE IN HERE — the round-20 version of this predicate shipped exactly that and
 # returned 141 on a successful match under `pipefail` (#3380). The scan below is pure `case`
 # matching on a captured string, which has no pipeline to misreport.
-_component_runs_target() { # <pkg> <feature> <target-name>
-  local pkg="$1" feat="$2" tgt="$3" joined line
+_component_runs_target() { # <pkg> <comma-separated-features> <target-name>
+  local pkg="$1" feats_needed="$2" tgt="$3" joined line
   joined=$(sed 's/[[:space:]]*#.*$//' "$GATE_SELF" 2>/dev/null \
     | awk '{ if (sub(/\\$/, "")) { printf "%s ", $0 } else { print } }')
   [ -n "$joined" ] || return 1
@@ -6433,15 +6440,21 @@ _component_runs_target() { # <pkg> <feature> <target-name>
       *"--package $pkg"*|*"-p $pkg"*) ;;
       *) continue ;;
     esac
-    # The feature must be enabled on THIS invocation, matched as an EXACT token: a substring test
-    # would let `dhat` match `dhat-heap` (and vice versa) and silently reclassify a target.
+    # EVERY needed feature must be enabled on THIS invocation (roborev round-23, Medium): for a
+    # target gated `all(A, B)` with both off, an invocation enabling only A still executes nothing.
+    # Matched as EXACT tokens — a substring test would let `dhat` match `dhat-heap` (and vice versa)
+    # and silently reclassify a target.
     featlist=${line#*--features }
     featlist=${featlist%% *}
-    matched=0
-    for f in ${featlist//,/ }; do
-      [ "$f" = "$feat" ] && matched=1 && break
+    local need all_present=1
+    for need in ${feats_needed//,/ }; do
+      matched=0
+      for f in ${featlist//,/ }; do
+        [ "$f" = "$need" ] && matched=1 && break
+      done
+      [ "$matched" = 1 ] || { all_present=0; break; }
     done
-    [ "$matched" = 1 ] || continue
+    [ "$all_present" = 1 ] || continue
     case "$line" in
       *"--test "*)
         # selective: it runs only the integration targets it names
@@ -6554,8 +6567,15 @@ _crate_gated_test_targets() { # <pkg> <enabled-set>  -> name \t rel \t gate \t o
         any_unclass=1
         break
       fi
+      # EVERY off feature, not just the first (roborev round-23, Medium). With `all(A, B)` where
+      # both are off, keeping only A let the caller ask "does another component enable A?" and
+      # answer yes while B stayed off — so the target would be reported as running elsewhere while
+      # executing nothing. The caller must be able to require the COMPLETE set.
       for f in $feats; do
-        case " $enabled " in *" $f "*) ;; *) [ -z "$all_off" ] && all_off="$f" ;; esac
+        case " $enabled " in
+          *" $f "*) ;;
+          *) case ",$all_off," in *",$f,"*) ;; *) all_off="${all_off:+$all_off,}$f" ;; esac ;;
+        esac
       done
     done <<< "$gate"
     # One line of gate text for the record, whatever the attribute count.
