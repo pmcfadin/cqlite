@@ -138,6 +138,8 @@
 #     UNKNOWN-FOREIGN   claim owned by another machine; its pid is unknowable from
 #                       here, so it is reported as neither.
 #     UNKNOWN-NO-PID    local claim ref carries no pid (pre-#2655 or hand-made).
+#     UNKNOWN-STATE     the pid exists but its process state could not be read, so
+#                       running-vs-zombie was never established.
 #     UNKNOWN-UNREADABLE  the ref listed but would not fetch.
 #   BOTH `DEAD-*` verdicts set the finding code 3. The `UNKNOWN-*` verdicts are gaps in
 #   what this run could determine: every one of them EXCEPT `UNKNOWN-FOREIGN` makes the
@@ -221,7 +223,12 @@
 #   0  success (including "zero heartbeats" on `list`, and "already absent" on
 #      `clear` — both are not errors)
 #   1  git operation failed (push/fetch/delete)
-#   3  `dead-lanes` only: at least one DEAD-NO-PROCESS lane was reported. A
+#   3  MEANING IS PER-SUBCOMMAND (roborev round 7, Low — this was documented as
+#      dead-lanes-exclusive, which it never was): for `clear` and `reap` it means the
+#      deletion was REFUSED because the issue still has an open PR; for `dead-lanes` it
+#      means at least one DEAD-* lane was reported. Both are "the command ran and
+#      declined to report success", never a failure of the command itself.
+#      For `dead-lanes` specifically: at least one DEAD-* lane was reported. A
 #      DISTINCT code, not 1: "I found a dead lane" is a successful measurement
 #      with a finding, while 1 means the measurement itself failed. A cron that
 #      conflated them would page for a network blip and stay silent on a real
@@ -624,20 +631,25 @@ process_start_epoch() {
 # lane reported healthy, which is the failure this command exists to prevent. Verified in
 # the suite against a REAL zombie (a forked child whose parent has not waited).
 process_exists() {
-  ps -p "$1" >/dev/null 2>&1 || return 1
-  ! process_is_zombie "$1"
+  ps -p "$1" >/dev/null 2>&1
 }
 
-# process_is_zombie <pid> — exit 0 iff the pid is in state Z. An UNREADABLE state is NOT
-# treated as a zombie: that would turn "cannot tell" into "dead", and a false DEAD on a
-# healthy fleet is how a monitor gets ignored. Unreadable state falls through to the
-# identity check, which has its own three-valued handling.
-process_is_zombie() {
+# process_state_class <pid> — echo `zombie` | `running` | `unreadable`.
+#
+# THREE-VALUED, and that is the whole point (roborev round 7, Medium). The first cut was a
+# two-valued `process_is_zombie` that returned "not a zombie" when the state could not be
+# read — after which a readable start time produced ALIVE and exit 0. So an unreadable
+# state became a CLEAN result, which is the same "unknown folded onto the permissive
+# answer" shape this command exists to avoid, reintroduced one level down in the fix for
+# the previous round. The unreadable case must be neither: not `zombie` (a false DEAD on a
+# healthy fleet is how a monitor gets ignored) and not `running` (that is the false-clean).
+process_state_class() {
   local st
   st="$(ps -o stat= -p "$1" 2>/dev/null | tr -d ' ')"
   case "$st" in
-    Z*) return 0 ;;
-    *)  return 1 ;;
+    '') printf 'unreadable\n' ;;
+    Z*) printf 'zombie\n' ;;
+    *)  printf 'running\n' ;;
   esac
 }
 
@@ -779,6 +791,17 @@ cmd_dead_lanes() {
         verdict="UNKNOWN-NO-PID"
         detail="claim ref records no pid (pre-#2655 or hand-made)"
         unreadable=$((unreadable + 1))
+      elif process_exists "$pid" && [ "$(process_state_class "$pid")" = "unreadable" ]; then
+        # The pid is in the process table but its STATE could not be read, so we cannot
+        # tell a running supervisor from a zombie. Neither DEAD nor ALIVE — an incomplete
+        # measurement (roborev round 7, Medium).
+        verdict="UNKNOWN-STATE"
+        detail="pid ${pid} exists but its process state could not be read — running vs zombie NOT established"
+        unreadable=$((unreadable + 1))
+      elif process_exists "$pid" && [ "$(process_state_class "$pid")" = "zombie" ]; then
+        verdict="DEAD-NO-PROCESS"
+        dead=$((dead + 1))
+        detail="supervisor pid ${pid} is a ZOMBIE (exited, awaiting reap — it cannot drive the lane); open-pr=$(open_pr_state "$issue")"
       elif process_exists "$pid"; then
         # The pid exists. That alone does NOT make it the process that stamped the
         # claim: pids are recycled, and a stale claim naming a reused pid would read
@@ -823,12 +846,6 @@ cmd_dead_lanes() {
         case "$detail" in
           *yes) detail="open-pr=yes — ORPHANED ENDGAME (#2499): report it, do NOT reap it" ;;
         esac
-        # Distinguish the two ways a pid stops being able to drive a lane, because the
-        # operator sees different things: gone entirely, vs still in the process table
-        # as a zombie awaiting reap.
-        if process_is_zombie "$pid"; then
-          detail="supervisor pid ${pid} is a ZOMBIE (exited, awaiting reap — it cannot drive the lane); ${detail}"
-        fi
       fi
     fi
     printf '%-20s %-8s %-12s %-18s %s\n' "$machine" "$issue" "${pid:-none}" "$verdict" "$detail"

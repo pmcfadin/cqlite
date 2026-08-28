@@ -810,9 +810,12 @@ shimdir="$T/psshim"
 mkdir -p "$shimdir"
 cat >"$shimdir/ps" <<'PSEOF'
 #!/usr/bin/env bash
-# Existence probe (`ps -p <pid>`) succeeds; every elapsed-time query returns nothing.
+# Existence succeeds and the STATE is readable (a normal sleeping process), so this case
+# isolates the IDENTITY gap: only the elapsed-time queries come back empty. Leaving the
+# state unreadable too would land on UNKNOWN-STATE and test a different branch.
 for a in "$@"; do
   case "$a" in
+    stat=) echo "S"; exit 0 ;;
     etimes=|etime=) exit 0 ;;
   esac
 done
@@ -1008,10 +1011,16 @@ chmod +x "$zshim/ps"
 craft_old_claim "$WORK" "unreadState" 3408 "$$" 0
 us_out=$(cd "$WORK" && PATH="$zshim:$PATH" HEARTBEAT_MACHINE=unreadState \
   CLAIM_OPEN_PR_CMD="$NO_OPEN_PR" bash "$HB" dead-lanes 2>&1)
-if ! printf '%s\n' "$us_out" | grep -E '^unreadState ' | grep -q 'DEAD'; then
-  ok "an unreadable process state is NOT reported dead (cannot-tell must not become a false DEAD)"
+us_rc=$?
+# BOTH directions, because "not DEAD" alone was too weak (roborev round 7, Medium): it
+# accepted the ALIVE + exit 0 that an unreadable state used to produce, which is the
+# false-clean. The correct answer is NEITHER — an UNKNOWN that counts as incomplete.
+if printf '%s\n' "$us_out" | grep -E '^unreadState ' | grep -q 'UNKNOWN-STATE' \
+  && ! printf '%s\n' "$us_out" | grep -E '^unreadState ' | grep -qE 'DEAD|ALIVE' \
+  && [ "$us_rc" -eq 1 ]; then
+  ok "an unreadable process state is UNKNOWN-STATE + exit 1 — neither a false DEAD nor a false-clean ALIVE"
 else
-  bad "an unreadable state must not be treated as a zombie: out:
+  bad "an unreadable state must be UNKNOWN-STATE + exit 1: rc=$us_rc out:
 $us_out"
 fi
 (cd "$WORK" && g push -q origin ":refs/machine-claims/unreadState" 2>/dev/null || true)
