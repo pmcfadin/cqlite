@@ -3181,6 +3181,38 @@ disjunction|#![cfg(any(feature = "x", feature = "y"))]|#![cfg(any(feature = "x",
 indented|    #![cfg(feature = "x")]|#![cfg(feature = "x")]
 ungated|NONE|ABSENT
 VERBATIM_CASES
+  # A MODULE-LEVEL inner attribute is NOT a crate gate (roborev round-35, Low). `#![cfg(...)]` is
+  # legal inside an inline module, where it gates that module only — reporting it as a crate-level
+  # gate overstates the census in the same "names something false" direction round 20 opened.
+  printf '//! prose\nfn item() {}\nmod m {\n    #![cfg(feature = "x")]\n    fn inner() {}\n}\n' > "$gg_src_/modattr.rs"
+  got_=$(
+    export GG_SRC="$gg_src_/modattr.rs" GG_REL="tests/modattr.rs"
+    _package_test_targets_gated() { printf '%s\t%s\t%s\t%s\n' modattr_target "$GG_SRC" source "$GG_REL"; }
+    # shellcheck disable=SC1090
+    . "$gg_body_"
+    _crate_gated_test_targets somepkg 2>/dev/null | awk -F'\t' '{print $3}'
+  )
+  if [ -z "$got_" ]; then
+    ok "1699-r35-module-attr: an inner #![cfg] INSIDE a module is not reported as a crate-level gate"
+  else
+    bad "1699-r35-module-attr: reported '$got_' as a crate-level gate — that attribute gates one module, not the target, so the census would claim the whole target compiles out"
+  fi
+  # Complement: a crate gate BEFORE any item is still reported (the leading-region rule must not
+  # have narrowed the real case away).
+  printf '//! prose\n// a comment\n\n#![cfg(feature = "x")]\nfn item() {}\n' > "$gg_src_/leading.rs"
+  got_=$(
+    export GG_SRC="$gg_src_/leading.rs" GG_REL="tests/leading.rs"
+    _package_test_targets_gated() { printf '%s\t%s\t%s\t%s\n' leading_target "$GG_SRC" source "$GG_REL"; }
+    # shellcheck disable=SC1090
+    . "$gg_body_"
+    _crate_gated_test_targets somepkg 2>/dev/null | awk -F'\t' '{print $3}'
+  )
+  if [ "$got_" = '#![cfg(feature = "x")]' ]; then
+    ok "1699-r35-module-attr-complement: a real crate gate after comments/blank lines is still reported"
+  else
+    bad "1699-r35-module-attr-complement: reported '$got_' — the leading-region rule has narrowed away a genuine crate-level gate"
+  fi
+
   # MULTILINE attributes (roborev round-28, Medium). rustfmt breaks a long condition across lines,
   # and the line-based extraction reduced `#![cfg(all(` … `))]` to `#![cfg(` — discarding exactly
   # the condition a reader needs. There is NO such attribute in this corpus today (measured: 0
@@ -3360,6 +3392,41 @@ fi
 # A FLOOR, not an exact count: new asserts are added constantly and an equality check would red on
 # every addition. Raise it deliberately when you add a section — the ratchet is the point, and the
 # number below is the count measured at the commit that introduced this check.
+# --- 35b. #1699: _deny_warnings refuses inherited lint controls (round-35, Medium) --------
+#
+# `-D warnings` goes last so it wins over another `-D`/`-W` — but it does NOT win over
+# `--cap-lints allow` (caps every lint below deny) or `--force-warn <spec>` (forces the lint back to
+# a warning). Either makes these lanes' whole warning-class guard SILENTLY INERT while the SUMMARY
+# line stays green: #1981's defect reintroduced through the ENVIRONMENT rather than the code. A
+# guard switchable off by an inherited variable is not a guard.
+dw_="$tmp/1699-r35-dw.sh"
+awk '/^_deny_warnings\(\) \{/, /^\}/' "$GATE" > "$dw_"
+if [ ! -s "$dw_" ]; then
+  bad "1699-r35-denywarn-scope: could not extract _deny_warnings — these asserts would pass vacuously"
+else
+  for spec_ in "RUSTFLAGS=--cap-lints allow" "RUSTFLAGS=--force-warn warnings"; do
+    var_=${spec_%%=*}; val_=${spec_#*=}
+    if ( export "$var_=$val_"; . "$dw_"; _deny_warnings true ) >/dev/null 2>&1; then
+      bad "1699-r35-denywarn-refuse[$val_]: _deny_warnings ACCEPTED an inherited '$val_' — the appended -D warnings cannot override it, so the lane's warning guard is inert while reporting PASS"
+    else
+      ok "1699-r35-denywarn-refuse[$val_]: _deny_warnings fails closed on an inherited '$val_'"
+    fi
+  done
+  # And the ENCODED form, which takes precedence over RUSTFLAGS entirely.
+  if ( export CARGO_ENCODED_RUSTFLAGS="$(printf -- '--cap-lints\037allow')"; . "$dw_"; _deny_warnings true ) >/dev/null 2>&1; then
+    bad "1699-r35-denywarn-refuse[encoded]: _deny_warnings ACCEPTED --cap-lints via CARGO_ENCODED_RUSTFLAGS, which takes precedence over RUSTFLAGS — the quietest possible route to an inert guard"
+  else
+    ok "1699-r35-denywarn-refuse[encoded]: _deny_warnings fails closed on --cap-lints in CARGO_ENCODED_RUSTFLAGS too"
+  fi
+  # COMPLEMENT: an ordinary inherited RUSTFLAGS must still be accepted, or this becomes a false red
+  # on every box that sets a target-cpu or a sanitizer flag.
+  if ( export RUSTFLAGS="-C target-cpu=native"; . "$dw_"; _deny_warnings true ) >/dev/null 2>&1; then
+    ok "1699-r35-denywarn-complement: an ordinary inherited RUSTFLAGS is still accepted and appended to"
+  else
+    bad "1699-r35-denywarn-complement: _deny_warnings now refuses a HARMLESS inherited RUSTFLAGS — that is a false red on any box with a target-cpu or sanitizer flag set"
+  fi
+fi
+
 # --- 36b. #1699: the `bash -c` top-level-`local` LINT WAS ABANDONED (recorded, not hidden) ------
 #
 # `bash -n` ACCEPTS `local` at a script's top level; bash rejects it at RUNTIME ("local: can only be
@@ -3492,12 +3559,23 @@ print("CASE nullglob:", "FAIL-CLOSED" if ("FAIL-CLOSED" in out and "sensor_data-
 out = run(good, prelude="shopt -s nullglob")
 print("CASE nullglob_good:", "PASS" if "PREFLIGHT-PASSED" in out else "FAIL")
 
+# (d4) a VALID symlink to a fixture directory must PASS. `find` defaults to `-P` and does not follow
+# its starting point, so without `-H` this was a FALSE RED on a legitimate corpus layout — the
+# direction that teaches people to waive a check (roborev round-35).
+lnk = os.path.join(tmp, "pf-validlink"); base = os.path.join(lnk, "sstables/test_timeseries")
+real = os.path.join(lnk, "real-fixture")
+os.makedirs(real, exist_ok=True); os.makedirs(base, exist_ok=True)
+open(os.path.join(real, "nb-1-big-Statistics.db"), "w").close()
+os.symlink(real, os.path.join(base, "sensor_data-viasymlink"))
+out = run(lnk)
+print("CASE valid_dir_symlink:", "PASS" if "PREFLIGHT-PASSED" in out else "FAIL")
+
 # (d) nothing matches -> must fail closed
 none = os.path.join(tmp, "pf-none"); os.makedirs(os.path.join(none, "sstables/test_timeseries"), exist_ok=True)
 out = run(none)
 print("CASE no_match:", "FAIL-CLOSED" if ("FAIL-CLOSED" in out and "NOTHING matches" in out) else "MISSED")
 PF_PY
-  for want_ in "CASE good: PASS" "CASE second_incomplete: FAIL-CLOSED" "CASE prefix_file: FAIL-CLOSED" "CASE dangling_symlink: FAIL-CLOSED" "CASE nullglob: FAIL-CLOSED" "CASE nullglob_good: PASS" "CASE no_match: FAIL-CLOSED"; do
+  for want_ in "CASE good: PASS" "CASE second_incomplete: FAIL-CLOSED" "CASE prefix_file: FAIL-CLOSED" "CASE dangling_symlink: FAIL-CLOSED" "CASE nullglob: FAIL-CLOSED" "CASE nullglob_good: PASS" "CASE valid_dir_symlink: PASS" "CASE no_match: FAIL-CLOSED"; do
     if grep -qF "$want_" "$pf_report_"; then
       ok "1699-r32-preflight-behaviour[${want_%%:*}]: ${want_#*: }"
     else

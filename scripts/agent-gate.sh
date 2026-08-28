@@ -6104,7 +6104,15 @@ run_flight_tests() {
         _fx_bad="$_fx_bad $(basename "$_fx_entry")(dangling-symlink)"
       elif [ ! -d "$_fx_entry" ]; then
         _fx_bad="$_fx_bad $(basename "$_fx_entry")(not-a-directory)"
-      elif [ -z "$(find "$_fx_entry" -maxdepth 1 -name '*-Statistics.db' -print -quit 2>/dev/null)" ]; then
+      elif [ -z "$(find -H "$_fx_entry" -maxdepth 1 -name '*-Statistics.db' -print -quit 2>/dev/null)" ]; then
+        # `-H` so a VALID symlink to a fixture directory is followed (roborev round-35, Medium).
+        # `find` defaults to `-P` and does not follow its starting point, so a `sensor_data-*`
+        # symlink pointing at a real fixture dir yielded nothing and was reported
+        # `no-Statistics.db` — a FALSE RED that would fail the full gate on a legitimate corpus
+        # layout, which is the direction that teaches people to waive a check. Rust's `read_dir`
+        # + the test's own `read_dir(&dir)` follow it, so the preflight must too. `-H` follows
+        # ONLY the command-line argument, which is exactly the entry under judgement.
+        #
         # `find`, not `ls <glob>` (roborev round-34, Medium). With `nullglob` inherited through
         # BASHOPTS an unmatched pattern EXPANDS TO NOTHING, so `ls` runs with no arguments, lists
         # the CWD and SUCCEEDS — a directory with no Statistics.db would have passed preflight while
@@ -6537,8 +6545,14 @@ _crate_gated_test_targets() { # <pkg>  -> name \t rel \t gate-text
       echo "UNREADABLE $sp (declared target $_tn)" >&2
       return 1
     fi
-    # EVERY crate-level inner attribute, at any indentation, `cfg` or `cfg_attr`: they are
-    # conjunctive and Rust permits leading whitespace. Joined onto one line, VERBATIM, not parsed.
+    # ONLY THE CRATE'S LEADING INNER-ATTRIBUTE REGION (roborev round-35, Low). An inner
+    # `#![cfg(...)]` is legal INSIDE an inline module too (`mod m { #![cfg(feature = "x")] … }`),
+    # where it gates that module and NOT the target — reporting it as a crate-level gate would
+    # overstate the census in the same "names something false" direction round 20 opened. Rust
+    # requires crate-level inner attributes to precede every item, so the region is: from the top,
+    # across blank lines, comments (`//`, `//!`) and attributes, stopping at the FIRST line that is
+    # none of those. Conservative by construction — an attribute after any item is not counted, and
+    # nothing is inferred about it.
     #
     # ONE awk PASS, not `grep | tr | sed` (roborev round-28, two Mediums in one line):
     #   * the pipeline's exit status was IGNORED, so a read error produced empty or partial output
@@ -6551,6 +6565,13 @@ _crate_gated_test_targets() { # <pkg>  -> name \t rel \t gate-text
     # No such attribute exists in this corpus today (measured: 0 across cqlite-flight/tests), so
     # this is the direction where a defect would have been invisible until someone reformatted.
     gate=$(awk '
+      # Leave the leading region at the first line that is not blank / comment / attribute.
+      !inattr && !leading_done {
+        t = $0
+        gsub(/^[[:space:]]+|[[:space:]]+$/, "", t)
+        if (t != "" && t !~ /^\/\// && t !~ /^#!?\[/) { leading_done = 1 }
+      }
+      leading_done { next }
       /^[[:space:]]*#!\[cfg(_attr)?\(/ { acc = $0; depth = 0; inattr = 1 }
       inattr {
         if (acc != $0) acc = acc " " $0
@@ -7264,6 +7285,26 @@ EOF
 # value is still "present" to cargo and would suppress RUSTFLAGS, which is the same
 # vacuous outcome by a quieter route.
 _deny_warnings() {
+  # REFUSE inherited lint controls that DEFEAT the appended `-D warnings` (roborev round-35,
+  # Medium). `-D warnings` going last wins over another `-D`/`-W`, but it does NOT win over:
+  #   --cap-lints allow      caps every lint below deny, so nothing can become an error
+  #   --force-warn <spec>    forces the lint back to a warning regardless of later -D
+  # Either one makes these lanes' entire warning-class guard SILENTLY INERT while their SUMMARY
+  # line stays green — the #1981 defect reintroduced through the environment instead of the code.
+  # A guard that can be switched off by an inherited variable is not a guard, and detecting it is
+  # cheap, so this fails closed and names the offending flag rather than compiling anyway.
+  local _dw_all="${RUSTFLAGS:-} ${CARGO_ENCODED_RUSTFLAGS:-}"
+  case "$_dw_all" in
+    *--cap-lints*|*--force-warn*)
+      echo "[deny-warnings] FAIL-CLOSED: the inherited lint flags contain --cap-lints or" >&2
+      echo "[deny-warnings] --force-warn, either of which prevents '-D warnings' from making a" >&2
+      echo "[deny-warnings] warning an error — so this lane's warning guard would be inert while" >&2
+      echo "[deny-warnings] reporting PASS. Unset them (RUSTFLAGS / CARGO_ENCODED_RUSTFLAGS) and" >&2
+      echo "[deny-warnings] re-run; the guard is refusing rather than compiling something it" >&2
+      echo "[deny-warnings] cannot vouch for (issue #1699, roborev round-35)." >&2
+      return 1
+      ;;
+  esac
   if [ -n "${CARGO_ENCODED_RUSTFLAGS:-}" ]; then
     local _us
     _us=$(printf '\037')
