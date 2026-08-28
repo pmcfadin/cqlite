@@ -375,13 +375,42 @@ fn config_validate_accepts_the_zero_sentinel() {
 /// the execute-then-stream paths an aggregate takes — the whole scan. A 1ms
 /// budget over the large fixture must therefore fail the call itself.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn streaming_budget_covers_the_setup_future() {
+async fn streaming_budget_covers_setup_for_a_materializing_plan() {
     let db = open_committed_db(EXPIRED_BUDGET).await;
     let outcome = db
         .execute_streaming(
             &streaming_scan_query(&COMMITTED),
             StreamingConfig::default(),
         )
+        .await;
+    assert_timed_out(outcome, "query.execute_streaming", EXPIRED_BUDGET, |_| {
+        "an iterator".to_string()
+    });
+}
+
+/// The same bound on the INCREMENTAL plan shape — the common one — which the case
+/// above does not reach (roborev round 17).
+///
+/// `streaming_scan_query` is `SELECT COUNT(*)`: an aggregate, so the whole query
+/// executes inside the bounded future and the case above cannot distinguish "setup is
+/// bounded" from "everything is bounded". A plain `SELECT *` returns its iterator as
+/// soon as the producer is spawned, so this pins the part of the contract that
+/// actually applies to an ordinary scan: SETUP is bounded.
+///
+/// It deliberately does NOT assert anything about row consumption AFTER the iterator
+/// is returned, because by documented contract that is NOT bounded here — see
+/// `deadline`'s "What the bound does NOT cover". Consumption is bounded one layer up,
+/// in the CLI, and pinned there by
+/// `cqlite-cli/tests/issue_1695_cli_query_timeout_wiring.rs`
+/// (`the_cli_collection_path_is_bounded_by_query_timeout_ms` and the deterministic
+/// `an_expired_deadline_abandons_the_cli_collection_loop_without_pulling_rows`).
+/// If a future change bounds core-side consumption too, this comment is the place that
+/// has to change with it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn streaming_budget_covers_setup_for_an_incremental_plan() {
+    let db = open_committed_db(EXPIRED_BUDGET).await;
+    let outcome = db
+        .execute_streaming(&scan_query(&COMMITTED), StreamingConfig::default())
         .await;
     assert_timed_out(outcome, "query.execute_streaming", EXPIRED_BUDGET, |_| {
         "an iterator".to_string()
