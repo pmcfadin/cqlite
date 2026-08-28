@@ -157,7 +157,57 @@ at a **pinned `now`**, (a) the DataFusion arm returns the row engine's rows, val
 
 ## 5. Dependency and build-time impact (AC4)
 
-<!-- DEPS -->
+### 5.1 Pin, and why it is not upgradeable here
+
+`datafusion = "44.0.0"`, optional, `default-features = false`. **DF 44 is the last line that resolves
+`arrow` 53.x** — verified by real resolution, not by reading a changelog: DF 44.0.0 pulls
+`arrow 53.4.1`, the **exact** version `cqlite-flight` and `arrow-flight 53` already use, so a
+`RecordBatch` produced by the Flight producer is handed to DataFusion with **zero conversion**. DF >= 45
+moves to `arrow` 54 and forks the Arrow type graph — two structurally identical but mutually
+incompatible `RecordBatch`/`Schema` types in one binary — which destroys the entire reuse premise of
+this spike. Do not bump the major.
+
+It compiles clean on the pinned `rustc 1.97.1` with `RUSTFLAGS="-D warnings"`.
+
+(The `arrow 54.2.1` already in `Cargo.lock` comes from `duckdb 1.2.2` behind an optional `cqlite-cli`
+feature and is unrelated.)
+
+### 5.2 Measured impact
+
+| Measure | Feature OFF | Feature ON | Delta |
+|---|---:|---:|---:|
+| Workspace `Cargo.lock` packages | 658 | 695 | **+37** |
+| `cqlite-flight` resolved dep graph (unique crates compiled) | 199 | 277 | **+78** |
+| Clean `cargo build -p cqlite-flight --release` (sccache disabled, 16 cores) | 142 s | 373 s | **+231 s (2.6x)** |
+| `target/release` size | 599 MiB | 1021 MiB | **+422 MiB** |
+
+Method: `CARGO_TARGET_DIR` pointed at a fresh directory per arm with `RUSTC_WRAPPER=` (sccache
+disabled) so both arms are genuinely cold; dep counts from `cargo tree --edges normal`.
+
+The `+78`-vs-`+37` gap is not a contradiction: `+37` is the number of packages **new to the lock**,
+while `+78` is the number of crates **newly reachable from `cqlite-flight`** — 41 of them (`chrono`,
+`half`, `object_store`, `petgraph`, `sqlparser`, the `parquet`/`arrow` leaves DataFusion needs, ...)
+were already in the lock for other workspace members and are now compiled for this crate too. For a
+promotion decision the honest cost is the **`+231 s` build time and `+422 MiB` of build output**,
+because that is what every CI run and every developer would pay.
+
+### 5.3 With the feature OFF, nothing changes (AC1)
+
+Verified two ways:
+
+* `RUSTFLAGS="-D warnings" cargo check -p cqlite-flight --all-targets` (default features) is clean and
+  compiles **no DataFusion crate** — the module, the harness binary
+  (`required-features = ["datafusion-spike"]`) and every DataFusion/`async-trait` dependency are gated.
+* The `--lite` gate (`file-size`, `fmt`, workspace-scoped `clippy`, `roborev-lints`, `scoped-tests`)
+  PASSes with default features.
+
+The only change to non-spike production code is one visibility widening:
+`cqlite-flight/src/filter.rs`'s `lower_predicate_expr` becomes `pub(crate)` so the spike validates a
+translated DataFusion filter through **production's** lowering instead of re-deriving operand
+coercion. `filter.rs`'s inline tests were split into `filter_tests.rs` (campsite rule, epic
+#1116/#1135) because that file was already over the 800-line source target; all 29 tests are
+unchanged and still run.
+
 
 ---
 
