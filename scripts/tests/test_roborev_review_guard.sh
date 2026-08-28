@@ -49,6 +49,14 @@ readonly WRAPPER_REAL="$SCRIPT_DIR/../flow/roborev-review.sh"
 # every early run_wrapper call at an arbitrary script and the suite would report on that instead --
 # a hermeticity hole introduced by this very refactor. Only the two gate-mock cases may set it.
 RUN_WRAPPER_PATH=""
+# THE MUTABLE GLOBAL IS FORBIDDEN BY THE SHELL, NOT BY A GREP (roborev job 54). `readonly` on an
+# UNSET name refuses every later assignment form -- `WRAPPER=`, `export WRAPPER=`, `declare
+# WRAPPER=`, `WRAPPER+=`, `printf -v WRAPPER`, `read WRAPPER` (all six measured). The structural
+# check below matched only a bare `WRAPPER=`, which is the assignment-syntax enumeration roborev
+# already corrected me on for WRAPPER_REAL in job 37; I repeated it on the new check. Nothing reads
+# $WRAPPER any more, so leaving it unset costs nothing and makes reintroduction impossible rather
+# than merely detected.
+readonly WRAPPER
 # A code-only view of a file: quoted spans blanked, comments removed, continuations joined. Used by
 # the one structural scan below, so a variable NAME appearing inside a diagnostic string or a
 # comment is not mistaken for a read of it.
@@ -4695,7 +4703,11 @@ _cls_exec_lines() {
   # another claim about a SET, and ${VAR:+word} / ${VAR:-word} / ${VAR:?word} all REFERENCE the
   # retired state while being none of them (roborev job 53). The real heredoc contains exactly one
   # braced expansion, so surfacing every one costs a single line of prose review.
-  in_usage && ($0 ~ /[$][(]/ || $0 ~ /`/ || $0 ~ /[$][{]/) { print; next }
+  # EVERY expansion, braced or not. The heredoc delimiter is unquoted, so `$ROBOREV_DIFF_SOURCE_STATE`
+  # is as live as `${...}` -- surfacing only the braced form was one more claim about a SET
+  # (roborev job 54). Measured: the real heredoc has 4 expansion lines and none names a retired
+  # token, so surfacing all of them costs nothing.
+  in_usage && ($0 ~ /[$][(]/ || $0 ~ /`/ || $0 ~ /[$][{]/ || $0 ~ /[$][A-Za-z_]/) { print; next }
   in_usage { next }
   /^[[:space:]]*#/ { next }
   # A SUBSTITUTION LINE KEEPS ITS TAIL. Inside `$( )` a quoted `#` looks like a comment opener to
@@ -4875,8 +4887,12 @@ fi
 # Nothing is left to read wrongly, so there is nothing to police: one shell-enforced fact replaces
 # the scanner, its thirty-six fixtures and its poison probe. The property below is what remains.
 _wr_bad=""
-if grep -qE '^[[:space:]]*WRAPPER=' "$TEST_SELF"; then
-  _wr_bad="$_wr_bad a-mutable-WRAPPER-global-is-back;"
+# Ask the shell whether the global can exist, rather than guessing which spelling would create it.
+if ( WRAPPER=/nonexistent/decoy ) 2>/dev/null; then
+  _wr_bad="$_wr_bad a-mutable-WRAPPER-global-can-be-created;"
+fi
+if [ -n "${WRAPPER+set}" ]; then
+  _wr_bad="$_wr_bad WRAPPER-has-a-value;"
 fi
 # `RUN_WRAPPER_PATH` is the scratch-copy override. It may be ASSIGNED only by the mock cases and READ
 # only by run_wrapper -- otherwise it is the same order-dependent global under a new name.
