@@ -4653,7 +4653,7 @@ done
 if [ -z "$_classifier" ]; then
   ok 'structural: the delivery-mode classifier is GONE — no block/heading/fence/candidate state, no snapshot or delegated distinction, no NOTICE exemption'
 else
-  bad "structural: delivery-mode classification is back in the flow scripts —$_classifier. Owner ruling (4) deleted it because FOUR consecutive review rounds each found a High-severity false verdict in inferring structure from prompt text that embeds repository-controlled content (#3312)"
+  bad "structural: delivery-mode classification is back in the flow scripts —$_classifier. Owner ruling (4) deleted it because FOUR consecutive review rounds each found a High-severity false verdict in inferring structure from prompt text that embeds repository-controlled content (#3312). THIS IS NOT A FLAKE AND MUST NOT BE WAIVED: since #3367 the scan reads an immutable path, so this FAIL is deterministic and reproduces standalone (bash scripts/tests/test_roborev_review_guard.sh) — it is NOT the intermittent tooling-tests red of #2790/#2596/#2188"
 fi
 # THE CONTROL FOR THAT FILTER (#3392). The scan above reads the REAL files, so on a clean tree it is
 # indistinguishable from a scan that examines nothing — which is what it had degraded into. The same
