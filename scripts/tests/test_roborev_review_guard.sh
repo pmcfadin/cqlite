@@ -53,8 +53,8 @@ CHECKS_SRC="$SCRIPT_DIR/../flow/roborev-review-checks.sh"
 ORACLES_SRC="$SCRIPT_DIR/../flow/roborev-review-oracles.sh"
 BLOCK_HEADER="==== ROBOREV REVIEW SUMMARY ===="
 
-if [ ! -f "$WRAPPER" ]; then
-  printf 'FAIL - wrapper not found at %s\n' "$WRAPPER"
+if [ ! -f "$WRAPPER" ]; then # wrapper-mutable-read-allow: preflight, before any case can reassign it
+  printf 'FAIL - wrapper not found at %s\n' "$WRAPPER" # wrapper-mutable-read-allow: the preflight diagnostic
   exit 1
 fi
 
@@ -4695,29 +4695,103 @@ else
   bad "structural: the block still emits —$_skeys. Those keys described the retired classifier's output (#3312 ruling (4))"
 fi
 # ===== THE DOCTRINE SCANS MUST NOT READ A MUTABLE GLOBAL (#3367) =====
-# The classifier-GONE assert above FAILed once on a branch whose diff touched no `scripts/` file at
-# all, then passed 4/4 at the same commit and an unchanged tree. Cause: it read `"$WRAPPER"`, which
-# the gate-mock cases repoint at a scratch copy ~2000 lines earlier and restore afterwards. A check
-# whose SUBJECT is chosen by a global another case mutates is order-dependent by construction.
+# The classifier-GONE assert FAILed once inside a gate on a branch whose diff touched no `scripts/`
+# file at all, then passed 4/4 at the same commit and an unchanged tree. Cause: it read `"$WRAPPER"`,
+# which the gate-mock cases repoint at a scratch copy ~2000 lines earlier and restore afterwards. A
+# check whose SUBJECT is chosen by a global another case mutates is order-dependent by construction,
+# and its verdict is decided by which case ran last rather than by the file it claims to audit.
+#
+# Note which way the hazard now points. With the `--help` prose exemption in place (#3392) the real
+# wrapper is CLEAN, so a scan that lands on the scratch copy finds nothing and reports CLEAN too —
+# a FALSE PASS, strictly worse than the false FAIL that surfaced the bug, because nothing reds.
 #
 # Two pins, because fixing the call sites without pinning them just waits for the next one:
-#   (1) STRUCTURAL — no text-scanning read of `$WRAPPER` may exist in this file. Invocations
-#       (`bash "$WRAPPER"`) are exempt: those cases mean the copy in their own context.
-#   (2) BEHAVIOURAL — with `WRAPPER` deliberately poisoned, the scan's verdict must not move, and
-#       the same scan against the poisoned path MUST move. Without the second half, (2) would pass
-#       for a scan that reads nothing at all.
-# COMMENTS STRIPPED FIRST, and this check learned that the hard way: its first version flagged
-# ITS OWN explanatory comment above (the one quoting `"$WRAPPER"` while describing the defect),
-# which is exactly #3367's cause 2 — a structural assert measuring the prose that documents it.
-# A guard that reds on its own rationale is one the next person deletes. `grep -n` is kept for the
-# diagnostic, so the line numbers below still point at real code.
-_wr_scan_leaks=$(grep -nE '(grep|awk|sed|cp|wc|head|tail)[^|]*"\$WRAPPER"' "$TEST_SELF" \
-  | grep -vE '^[0-9]+:[[:space:]]*#' \
-  | grep -v 'bash "\$WRAPPER"' || true)
-if [ -z "$_wr_scan_leaks" ]; then
-  ok 'structural (#3367): no doctrine scan reads the mutable $WRAPPER — every text scan uses $WRAPPER_REAL, so no verdict depends on which case ran last'
+#   (1) STRUCTURAL — a CLOSED GRAMMAR over every read of `$WRAPPER` in this file.
+#   (2) BEHAVIOURAL — with `WRAPPER` poisoned, the scan's verdict must not move, and the same scan
+#       against the poisoned path MUST move. Without the second half, (1) would pass for a scan
+#       that reads nothing at all.
+#
+# WHY A CLOSED GRAMMAR AND NOT A LEAK PATTERN. The first version of (1) was
+# `grep -nE '(grep|awk|sed|...)[^|]*"\$WRAPPER"'` — a search for the KNOWN-BAD shape. It reported
+# CLEAN while the defect was still present, because `grep` is line-oriented and the offending read
+# was a MULTI-LINE `awk` whose command word and whose `"$WRAPPER"` argument sat five lines apart.
+# It missed the exact construct it was written for. That is this repo's recurring
+# affirmative-measurement rule one level down: never derive a pass from the ABSENCE of a bad signal.
+# So every read is enumerated and each must match an AFFIRMATIVELY PERMITTED form; an unrecognised
+# line FAILs. A new way to read the mutable global cannot be a shape nobody predicted.
+#
+# COMMENTS ARE STRIPPED FIRST, and this check learned that the hard way: an earlier version flagged
+# its own explanatory comments above (they quote `"$WRAPPER"` while describing the defect), which is
+# #3367's own cause 2 — a structural assert reding on the prose that documents it. A guard that reds
+# on its own rationale is one the next person deletes.
+#
+# THE PERMITTED FORMS, and why each is not order-dependent:
+#   * `bash "$WRAPPER"` — an INVOCATION. A gate-mock case means the copy in its own context; that is
+#     the whole point of the reassignment, so it must keep reading the mutable value.
+#   * `<var>="$WRAPPER"` — a whole-value SAVE for a later restore, which must capture whatever is
+#     live at that moment or the restore would install the wrong path.
+#   * a line carrying the explicit allow marker — a reviewed, named opt-out for the two preflight
+#     lines (they run before any mutation) and for the poisoned probe below, whose entire purpose is
+#     to read the mutable value. The marker is spelled in two halves at the match site so this guard
+#     can never match its own pattern line.
+#
+# EVERY NEEDLE BELOW IS SPLIT ACROSS A QUOTE BOUNDARY. The subject of this scan is THIS FILE, so a
+# guard written with its needle spelled literally matches its own pattern lines and reports the
+# defect against itself — measured: four self-hits on the first run. Splitting is the same device
+# the scanner-substitution assert uses, for the same reason.
+_wr_marker='wrapper-mutable''-read-allow'
+_wr_ref='"$WRAP''PER"'
+_wr_bad_reads=""
+while IFS= read -r _wr_num_line; do
+  [ -n "$_wr_num_line" ] || continue
+  # `grep -n` prefixes `NNNN:`; the grammar must judge the CODE, not the line number (an unstripped
+  # prefix made every whole-value save look like an assignment to `NNNN:name`, i.e. four false FAILs).
+  _wr_line=${_wr_num_line#*:}
+  case "$_wr_line" in
+    *"$_wr_marker"*) continue ;;
+  esac
+  # An INVOCATION, either bare `bash` or an explicit interpreter path (`"$nobin/bash" "$WRAPPER"`).
+  case "$_wr_line" in
+    *"bash $_wr_ref"*|*"bash\" $_wr_ref"*) continue ;;
+  esac
+  # A whole-value SAVE: `NAME="$WRAPPER"` and nothing else on the line.
+  case "$_wr_line" in
+    *"=$_wr_ref")
+      case "${_wr_line%%=*}" in
+        ''|*[!A-Za-z0-9_]*) ;;
+        *) continue ;;
+      esac ;;
+  esac
+  _wr_bad_reads="$_wr_bad_reads${_wr_bad_reads:+; }$_wr_num_line"
+done <<EOF
+$(grep -nE '"[$]WRAP''PER"' "$TEST_SELF" | grep -vE '^[0-9]+:[[:space:]]*#')
+EOF
+if [ -z "$_wr_bad_reads" ]; then
+  ok 'structural (#3367): every read of the mutable $WRAPPER is an invocation, a whole-value save, or an explicitly marked opt-out — no doctrine scan takes it as a SUBJECT, so no verdict depends on which case ran last'
 else
-  bad "structural (#3367): a doctrine scan still reads the mutable \$WRAPPER, so its verdict depends on gate-mock ordering — $(printf '%s' "$_wr_scan_leaks" | head -3 | tr '\n' ';')"
+  bad "structural (#3367): a read of the mutable \$WRAPPER matches no permitted form, so its verdict depends on gate-mock ordering — use \$WRAPPER_REAL for a doctrine SUBJECT: $(printf '%s' "$_wr_bad_reads" | cut -c1-240)"
+fi
+# The grammar is only closed if it can actually REJECT: a `case` typo falling through to `continue`
+# would accept everything and read green on a clean file, which is the blind-scan shape one level up.
+# Both directions are probed, so neither an over-strict nor an over-lax grammar passes silently.
+_wr_ctl_bad=""
+for _wr_probe in "_x=\$(grep -c foo $_wr_ref)" "sed -n 1p $_wr_ref"; do
+  case "$_wr_probe" in
+    *"$_wr_marker"*|*"bash $_wr_ref"*|*"bash\" $_wr_ref"*) _wr_ctl_bad="$_wr_ctl_bad accepted:$_wr_probe" ;;
+    *"=$_wr_ref") _wr_ctl_bad="$_wr_ctl_bad accepted:$_wr_probe" ;;
+  esac
+done
+for _wr_probe in "_gm_real_wrapper=$_wr_ref" "  bash $_wr_ref --help"; do
+  case "$_wr_probe" in
+    *"bash $_wr_ref"*|*"bash\" $_wr_ref"*) ;;
+    *"=$_wr_ref") case "${_wr_probe%%=*}" in ''|*[!A-Za-z0-9_]*) _wr_ctl_bad="$_wr_ctl_bad rejected:$_wr_probe" ;; esac ;;
+    *) _wr_ctl_bad="$_wr_ctl_bad rejected:$_wr_probe" ;;
+  esac
+done
+if [ -z "$_wr_ctl_bad" ]; then
+  ok 'structural control (#3367): the grammar rejects synthetic doctrine SCANS of $WRAPPER and accepts synthetic invocations/saves — it is discriminating in both directions, not vacuously green'
+else
+  bad "structural control (#3367): the permitted-form grammar misclassifies a synthetic read —$_wr_ctl_bad"
 fi
 # ...and `WRAPPER_REAL` must never be reassigned, or it is just `WRAPPER` with a longer name.
 _wr_real_writes=$(grep -cE '^[[:space:]]*WRAPPER_REAL=' "$TEST_SELF")
@@ -4737,7 +4811,7 @@ mkdir -p "$_wr_poison_dir"
 _wr_saved="$WRAPPER"
 WRAPPER="$_wr_poison_dir/roborev-review.sh"
 _cls_via_real=$(_cls_exec_lines "$ORACLES" "$CHECKS_FILE" "$WRAPPER_REAL")
-_cls_via_mutable=$(_cls_exec_lines "$ORACLES" "$CHECKS_FILE" "$WRAPPER")
+_cls_via_mutable=$(_cls_exec_lines "$ORACLES" "$CHECKS_FILE" "$WRAPPER") # wrapper-mutable-read-allow: reading the poisoned path IS this probe
 WRAPPER="$_wr_saved"
 _wr_real_hit=no; _wr_mut_hit=no
 case "$_cls_via_real"    in *'mixed-delivery'*) _wr_real_hit=yes ;; esac
