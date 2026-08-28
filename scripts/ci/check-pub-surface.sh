@@ -333,11 +333,22 @@ function squash(x) { gsub(/[[:space:]]+/, " ", x); return ltrim(rtrim(x)) }
 # item. Refusal I below is the only consumer; the two derivations keep their pinned
 # column-zero rule (see the comment there for why).
 function normalize(   i, s, out, j, c, c2, st, depth, hashes, k, cnt, bd, bmin) {
-  st = "code"; depth = 0; hashes = 0; bd = 0
+  st = "code"; depth = 0; hashes = 0; bd = 0; pd = 0
   for (i = 1; i <= n; i++) {
     INCODE[i] = (st == "code") ? 1 : 0
     bmin = bd
     BRACE_START[i] = bd
+    # PAREN/BRACKET depth at this line's START, carried ACROSS lines exactly as `bd`
+    # already is (roborev r20 F2). A MACRO TOKEN TREE can span lines —
+    # `swallow!(\n    pub mod phantom;\n);` is valid Rust emitting no module — and
+    # single-line paren tracking could not see it, so Refusal I fired on the indented
+    # `pub mod` inside the tree: the MANDATORY gate rejecting valid Rust.
+    #
+    # This is not a new lexer. normalize() ALREADY maintains cross-line state for
+    # comments, strings, raw strings and BRACE depth; this completes a counter that
+    # existed for one delimiter kind and not the others. Braces stay separate because
+    # they carry ITEM SCOPE (`mod x { }`), which is a different question.
+    PDEPTH_START[i] = pd
     s = L[i]; out = ""; j = 1
     while (j <= length(s)) {
       c = substr(s, j, 1); c2 = substr(s, j, 2)
@@ -359,6 +370,8 @@ function normalize(   i, s, out, j, c, c2, st, depth, hashes, k, cnt, bd, bmin) 
         if (c == "'" && match(substr(s, j), /^'(\\.|[^'])'/)) {
           out = out substr(s, j, RLENGTH); j += RLENGTH; continue
         }
+        if (c == "(" || c == "[") pd++
+        else if (c == ")" || c == "]") { if (pd > 0) pd-- }
         if (c == "{") bd++
         else if (c == "}") {
           bd--
@@ -560,6 +573,30 @@ END {
     printf "V\tline %d: a depth-0 line ends in a bare visibility qualifier and the next line begins a module declaration, so the declaration is split across lines: `%s` / `%s`\n", i, squash(substr(ltrim(N[i]), 1, 40)), squash(substr(ltrim(N[vnext]), 1, 30))
   }
 
+  # --- Refusal W: an INDENTED attribute at crate-root depth ---------------------
+  #
+  # Both derivations skip indented lines — that column-zero rule is what keeps them
+  # independent — so an INDENTED top-level attribute is invisible to both. It is not
+  # inert, though: it can be `#[path = "actual.rs"]` or `#[cfg(...)]`, either of which
+  # decides the verdict. Measured (roborev r20 F1): an indented `#[path]` above a
+  # column-zero `pub mod probe;` was DISCARDED, the module read as attribute-free and
+  # OPEN, and resolution certified a clean standard-path DECOY while the real, self-gated
+  # file went unexamined.
+  #
+  # Refused rather than collected, for the same reason as Refusal I: teaching the
+  # derivations to read indented attributes puts a second rule underneath their primary
+  # collection rule, where a defect becomes a blind spot they SHARE. Scoped tightly —
+  # brace depth 0 AND delimiter depth 0 — so attributes on struct fields, inside `mod`
+  # blocks and inside macro token trees are all untouched. MEASURED: zero such lines in
+  # cqlite-core/src/lib.rs, so it costs nothing today.
+  for (i = 1; i <= n; i++) {
+    if (!INCODE[i]) continue
+    if (!BRACE_UNRELIABLE && BRACE_MIN[i] != 0) continue
+    if (PDEPTH_START[i] > 0) continue
+    if (N[i] !~ /^[[:space:]]+#[[:space:]]*!?[[:space:]]*\[/) continue
+    printf "W\tline %d: an INDENTED attribute at crate-root depth: `%s`\n", i, squash(substr(ltrim(N[i]), 1, 72))
+  }
+
   # --- Derivation S: "which modules are declared at the crate root?" answered by
   # the simplest rule that can be written, independent of all attribute parsing.
   for (i = 1; i <= n; i++) {
@@ -594,7 +631,7 @@ END {
     # text normalize() has already stripped of comments and string contents. Declarations
     # inside `(` … `)` are skipped; nothing at true crate-root depth changes.
     sdepth = BRACE_START[i]
-    spdepth = 0
+    spdepth = PDEPTH_START[i]
     rest = t
     consumed = 0
     while (match(rest, /pub mod [A-Za-z_][A-Za-z0-9_]*[[:space:]]*;/)) {
@@ -692,6 +729,9 @@ END {
     t = N[i]
     if (t == "" || t !~ /^[[:space:]]/) continue
     if (!BRACE_UNRELIABLE && BRACE_MIN[i] != 0) continue
+    # NOT inside a macro token tree (roborev r20 F2): an indented `pub mod` inside
+    # `swallow!( ... )` is token-tree CONTENT, not an indented crate-root declaration.
+    if (PDEPTH_START[i] > 0) continue
     rest = t
     while (match(rest, /pub[[:space:]]+mod([^A-Za-z0-9_]|$)/)) {
       pre = (RSTART > 1) ? substr(rest, RSTART - 1, 1) : ""
@@ -808,6 +848,12 @@ fi
 # A `pub mod` shape NEITHER derivation consumed. This is NOT a disagreement between
 # the two derivations — it is a blind spot they SHARE, which is precisely why the
 # cross-check further down cannot catch it and why this refusal is its own channel.
+if grep -q '^W	' "$SCAN_RAW"; then
+  echo "" >&2
+  grep '^W	' "$SCAN_RAW" | cut -f2- >&2
+  fail "the crate root $LIB_RS_REL carries an INDENTED attribute at crate-root depth (see above). Both of this scan's derivations skip indented lines — that column-zero rule is what keeps them independent — so such an attribute is invisible to BOTH, and it is not inert: \`#[path = \"...\"]\` redirects the module file and \`#[cfg(...)]\` gates the declaration. A \`#[path]\` hidden this way makes the guard resolve a clean standard-path DECOY while the real, self-gated module goes unexamined. Teaching the derivations to read indented attributes would put a second rule underneath their primary collection rule, where a defect becomes a blind spot they SHARE, so the guard refuses instead. Remedy: put the attribute at column zero."
+fi
+
 if grep -q '^V	' "$SCAN_RAW"; then
   echo "" >&2
   grep '^V	' "$SCAN_RAW" | cut -f2- >&2

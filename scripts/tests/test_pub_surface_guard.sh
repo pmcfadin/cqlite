@@ -1748,6 +1748,65 @@ echo "OK (53): \`#\` and \`[\` separated by whitespace are canonicalised in the 
 
 
 # ---------------------------------------------------------------------------
+# 55. RED+GREEN — MULTILINE macro token trees, and INDENTED crate-root attributes
+#     (roborev r20 F2 / F1).
+#
+#     F2 was a FALSE FAIL on the mandatory gate: paren depth was tracked only WITHIN a
+#     line, so `swallow!(\n    pub mod phantom;\n);` — valid Rust emitting no module —
+#     had its indented content read as an indented crate-root declaration and hit
+#     Refusal I. normalize() now carries paren/bracket depth ACROSS lines, exactly as it
+#     already carried brace depth, comment state and string state. Bracket-delimited
+#     trees behave the same.
+#
+#     F1 was a FALSE PASS: both derivations skip indented lines, so an INDENTED
+#     `#[path = "actual.rs"]` above a column-zero `pub mod probe;` was discarded, the
+#     module read as attribute-free and OPEN, and resolution certified a clean
+#     standard-path DECOY while the real self-gated file went unexamined. Refusal W
+#     refuses an indented attribute at crate-root depth rather than teaching the
+#     derivations to read one, which would put a second rule underneath their primary
+#     collection rule — where a defect becomes a blind spot they SHARE.
+# ---------------------------------------------------------------------------
+c55_i=0
+for c55 in 'swallow!(\n    pub mod phantom;\n);' 'swallow![\n    pub mod phantom;\n];' 'swallow!( pub mod phantom; );'; do
+  c55_i=$((c55_i + 1))
+  scratch_tree "tokentree-multiline-$c55_i"; wt55="$SCRATCH"
+  printf '\n%b\n' "$c55" >>"$wt55/cqlite-core/src/lib.rs"
+  set +e
+  bash "$wt55/$GUARD_REL" >"$TMPROOT/case55.out" 2>&1
+  c55rc=$?
+  set -e
+  [ "$c55rc" -eq 0 ] || fail_case "case 55($c55_i) — a macro token tree spanning lines was read as a crate-root declaration. It emits no module; delimiter depth must carry ACROSS lines; got: $(cat "$TMPROOT/case55.out")"
+done
+
+# F1's RED: an indented attribute at crate-root depth must REFUSE, and the decoy must not
+# be certified.
+scratch_tree indented-attr-path-decoy; wt55d="$SCRATCH"
+printf '\n  #[path = "probe_actual.rs"]\npub mod probe_decoy;\n' >>"$wt55d/cqlite-core/src/lib.rs"
+printf '//! CLEAN DECOY at the standard path\npub fn p() {}\n' >"$wt55d/cqlite-core/src/probe_decoy.rs"
+printf '#![cfg(feature = "benchmarks")]\n//! the REAL module, and it gates itself\npub fn p() {}\n' >"$wt55d/cqlite-core/src/probe_actual.rs"
+set +e
+bash "$wt55d/$GUARD_REL" >"$TMPROOT/case55d.out" 2>&1
+c55d_rc=$?
+set -e
+[ "$c55d_rc" -ne 0 ] || fail_case "case 55(d) — an INDENTED \`#[path]\` was discarded, so the guard certified a clean DECOY while the real module file gates itself; got: $(cat "$TMPROOT/case55d.out")"
+grep -qF "INDENTED attribute" "$TMPROOT/case55d.out" \
+  || fail_case "case 55(d) — refused, but not via Refusal W; got: $(cat "$TMPROOT/case55d.out")"
+
+# GREEN scoping controls: Refusal W must not touch attributes below crate-root depth.
+c55_j=0
+for c55g in 'mod o10 {\n    #[allow(dead_code)]\n    pub fn q() {}\n}' 'pub struct S10 {\n    #[allow(dead_code)]\n    f: u8,\n}' 'swallow!(\n    #[path = "x.rs"]\n    pub mod phantom;\n);'; do
+  c55_j=$((c55_j + 1))
+  scratch_tree "indented-attr-scoped-$c55_j"; wt55g="$SCRATCH"
+  printf '\n%b\n' "$c55g" >>"$wt55g/cqlite-core/src/lib.rs"
+  set +e
+  bash "$wt55g/$GUARD_REL" >"$TMPROOT/case55g.out" 2>&1
+  c55g_rc=$?
+  set -e
+  [ "$c55g_rc" -eq 0 ] || fail_case "case 55(g$c55_j) — Refusal W fired on an indented attribute BELOW crate-root depth (inside a mod block, a struct, or a macro token tree). It is scoped to brace depth 0 AND delimiter depth 0; got: $(cat "$TMPROOT/case55g.out")"
+done
+echo "OK (55): macro token trees spanning lines are not declarations, and an INDENTED crate-root attribute REFUSES — while indented attributes inside mod blocks, structs and token trees stay GREEN"
+
+# ---------------------------------------------------------------------------
 # 36. GREEN — THE POSITIVE CONTROL for 29-38.
 #
 #     Without it, every case above would be satisfied by a guard hardwired to refuse
@@ -1846,4 +1905,4 @@ grep -qF "affirmative measurement" "$TMPROOT/case39.out" \
 echo "OK (39): a crate root with ZERO unconditional declarations FAILs — the assert never reports success having examined nothing"
 
 echo ""
-echo "PASS: test_pub_surface_guard.sh — all 39 cases (9 green, 28 reds, 1 usage, 1 kill-safety)"
+echo "PASS: test_pub_surface_guard.sh — all 40 cases (9 green, 29 reds, 1 usage, 1 kill-safety)"
