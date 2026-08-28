@@ -763,15 +763,19 @@ async fn collect_chunk_within(
 /// the bounded await — so they cannot drift in operation name or reported figures.
 #[cfg(feature = "state_machine")]
 fn export_expired(started: std::time::Instant, budget: std::time::Duration) -> anyhow::Error {
-    anyhow::Error::new(cqlite_core::Error::QueryTimeout {
+    let err = cqlite_core::Error::QueryTimeout {
         operation: "cli.export.collect".to_string(),
         // MEASURED, not assumed equal to the budget: a slow chunk can overshoot, and
         // the real figure distinguishes "budget too tight" from "one chunk is
         // uninterruptibly slow".
         elapsed: started.elapsed(),
         limit: budget,
-    })
-    .context("CLI export exceeded performance.query_timeout_ms")
+    };
+    // #1695: same reasoning as `commands::query::expired` — record on the engine's
+    // own public observability sink so an export consumption elapse reaches
+    // `cqlite.errors.total{category="timeout"}`.
+    cqlite_core::observability::record_error(&err, "query");
+    anyhow::Error::new(err).context("CLI export exceeded performance.query_timeout_ms")
 }
 
 /// The export-side budget check (issue #1695), called before each chunk pull.

@@ -296,15 +296,30 @@ pub async fn collect_rows_until(
 /// operation name, reported figures or context.
 #[cfg(feature = "state_machine")]
 fn expired(started: std::time::Instant, budget: std::time::Duration) -> anyhow::Error {
-    anyhow::Error::new(cqlite_core::Error::QueryTimeout {
+    let err = cqlite_core::Error::QueryTimeout {
         operation: "cli.query.collect".to_string(),
         // MEASURED, never assumed equal to the budget: a blocked poll can overshoot,
         // and the real figure tells an operator "budget too tight" from "one decode
         // unit is uninterruptibly slow".
         elapsed: started.elapsed(),
         limit: budget,
-    })
-    .context("CLI query exceeded performance.query_timeout_ms")
+    };
+    // #1695 (roborev raised this in five rounds): record the timeout on the SAME
+    // observability error stream the engine uses, so a consumption-phase elapse is
+    // not invisible to `cqlite.errors.total{category="timeout"}`. Consumption is
+    // where a CLI scan spends its time, so without this a dashboard could read zero
+    // timeouts while operators were seeing them.
+    //
+    // `record_error` is the engine's own public sink, not a second mechanism, and the
+    // two callers observe DISJOINT events — the engine records a SETUP elapse, this
+    // records a CONSUMPTION elapse — so nothing is double counted.
+    //
+    // Still NOT covered, and narrower than before: the engine's `error_queries`
+    // counter, which is private query accounting for work the engine itself executed.
+    // The CLI's consumption phase is not an engine query execution, so folding it in
+    // there would misreport that counter's meaning.
+    cqlite_core::observability::record_error(&err, "query");
+    anyhow::Error::new(err).context("CLI query exceeded performance.query_timeout_ms")
 }
 
 /// The unbounded consumption loop; [`collect_rows_until`] applies the deadline.

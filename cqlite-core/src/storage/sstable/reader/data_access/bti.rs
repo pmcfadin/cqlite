@@ -661,15 +661,28 @@ impl SSTableReader {
             // `tx.closed()`), which is not available here: this function RETURNS a Vec
             // and holds no sender.
             //
-            // The fix is a closure→token bridge — a per-call token, a watcher awaiting
-            // the output sender's `closed()`, and that token passed in here in place of
-            // the reader's — which is the same mechanism the deferred "carry
-            // cancellation into the core streaming producer" work needs for
-            // `KWayMerger::step()` and `JoinedStream`. Deliberately NOT done ad hoc for
-            // BTI alone: three partial fixes in this area is how the gap got this
-            // scattered. Do NOT substitute the reader's token thinking it is
-            // equivalent — tripping THAT cancels other queries' scans on the same
-            // reader.
+            // WHAT IS ACTUALLY MISSING, verified rather than guessed (roborev raised
+            // this twice, so the next person should not have to re-derive it):
+            // `bti_scan_with_metadata_cancellable` already exists and already takes a
+            // `&ScanCancel`, so the plumbing is NOT the gap. The gap is that the
+            // caller has no token it can legitimately pass:
+            //
+            //  * A CLONE of the reader's token is wrong — clones share state, so
+            //    tripping it cancels OTHER queries scanning the same reader. That is
+            //    the trap the materializing merges avoided with a per-call token.
+            //  * A FRESH per-call token tripped by a watcher on the output sender's
+            //    `closed()` handles the timeout case but silently DROPS #2264's Flight
+            //    cancellation, which trips the reader token WITHOUT necessarily
+            //    dropping the receiver — so a client disconnect would go back to the
+            //    ~1–2 min transport backstop. Losing existing cancellation to add new
+            //    cancellation is not a fix.
+            //
+            // So this needs one small API decision — a token that represents "either
+            // the reader's OR this stream's closure" (a linked/derived `ScanCancel`) —
+            // and that composition is the same primitive the deferred `JoinedStream` /
+            // `KWayMerger::step()` work needs. It is deliberately not improvised here:
+            // three partial fixes in this area is how the gap got this scattered, and a
+            // fourth guessing at token composition would be the worst of them.
             scan_cancel.checkpoint(idx).await?;
             if prev_partition_key.as_ref() != Some(&entry_key) {
                 crate::storage::sstable::work_counters::add_stream_walk_partition_parsed();
