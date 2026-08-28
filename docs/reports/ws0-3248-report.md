@@ -7,7 +7,10 @@ which of the Flight arm's cost is **shared** with the bare scan and which is **F
 Both are done. The headline results, then where each acceptance criterion landed.
 
 Full artifacts: `ws0-3248-artifacts/`. Method and its epistemic rules:
-[`measurement-method.md`](ws0-3248-artifacts/measurement-method.md).
+[`measurement-method.md`](ws0-3248-artifacts/measurement-method.md). Whether the committed
+`results.json` artifacts re-derive, measured per artifact — including the one thing that does **not**
+re-derive and the manifest edit I deliberately refused:
+[`raw/artifact-reproduction.md`](ws0-3248-artifacts/raw/artifact-reproduction.md).
 
 ---
 

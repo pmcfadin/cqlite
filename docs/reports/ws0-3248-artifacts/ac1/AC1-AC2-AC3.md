@@ -6,9 +6,29 @@ decay unattributed; #3096 left 82% of per-row encode in one undifferentiated com
 this document opens.
 
 Instrument: `perfsym` binaries (symbols, no debuginfo, no frame pointers — codegen-faithful),
-CPU-wide `perf record -e cycles -F 499 -C 2,10` bracketing exactly each counted window, 3 warm reps
-per arm, 0 lost samples. Demangling verified by positive control before any of this was believed
-(`raw/demangler-probe.md`).
+CPU-wide `perf record -e cycles -F 499 -C 2,10`, 3 warm reps per arm, 0 lost samples. Demangling
+verified by positive control before any of this was believed (`raw/demangler-probe.md`).
+
+**The profile does NOT bracket the counted window exactly, and the asymmetry is not negligible.**
+This sentence previously claimed exact bracketing; the driver in fact arms `perf record` and sleeps
+300 ms before opening the counting window (`scripts/perf/ws0-baseline.sh`, the `sleep 0.3` and the
+comment above it). There is no setting that makes the claim true — arming late leaves the start of
+the window UNSAMPLED, arming early includes pre-window samples — so the direction chosen is the one
+that cannot silently drop the region under study. The cost, measured on this session's own records
+rather than estimated:
+
+| arm | counted window | 300 ms as % of capture |
+|---|---|---|
+| `bare_scan` | 11.89–12.15 s | **2.47–2.52%** |
+| `flight_bypass` | 59.21–62.06 s | **0.48–0.51%** |
+
+Because the arms' windows differ by ~5×, so does the contamination — **~5.2× more pre-window
+capture in the scan arm than in the Flight arm**, in a document whose headline is a *differential*
+between them. Those samples land on server startup and steady-state, not on the encode region, so
+the direction of the bias is to inflate non-encode self-time, slightly more in the scan arm. Read
+every self-time percentage below as carrying that asymmetry; the AC2 shared-vs-marginal split is the
+figure most exposed to it, and a 2.5%-vs-0.5% shift in non-encode samples does not close the gaps
+reported there (the smallest is 21.5%), but it is a real term and it was previously stated as zero.
 
 ---
 

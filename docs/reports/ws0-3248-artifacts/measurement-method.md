@@ -304,6 +304,30 @@ apart required reading the guard, not adjusting the threshold — and in the one
 was wrong, the fix was to **relocate the bound to where it is valid and make the binding check
 stronger**, never to loosen it.
 
+### The eighth instance, found by review inside the guard built to stop it
+
+Round 7 of review found the same hazard **in the reporter's own quiescence check** — the code written
+to enforce this section. The reporter verified that the quiescence verdict named the same *timeseries
+file* the session manifest declared, and treated that as evidence the session was quiet.
+
+`box-load.jsonl` is **one long-lived file spanning every session on this box**. Naming it establishes
+which *sampler* produced the verdict, and nothing whatever about *when*. A clean verdict judged over a
+different ten-minute window of the same file satisfied every check and certified this session:
+**the right instrument, the wrong interval, reported as the property.** The fix binds the verdict's
+judged window to this session's own measurement window, derived from the rep payloads' `ts_unix_ms`.
+
+**And the first version of that fix reproduced the hazard in the opposite direction**, which is why it
+is recorded here rather than in a changelog. Not knowing which end of the rep `ts_unix_ms` denoted, it
+widened every rep by its duration in *both* directions, on the reasoning that symmetric widening is
+the conservative choice. It is conservative — and it pushed the window 18 s past the true end and
+**refused a correctly covered session**. A guard that reds on correct input is the guard agents learn
+to waive, so a false red is not the safe failure it feels like. It was settled by *measurement*
+(payload mtime equals `ts` to the second) and by the *producer's source* — `ramp.rs:184-188` takes
+both `started.elapsed()` and `SystemTime::now()` after every worker joins — rather than by choosing
+the more cautious-sounding assumption. **"Conservative" is not a substitute for "measured": a guess
+padded in the safe direction is still a guess, and it can still be wrong in the direction that costs
+you a true result.**
+
 ### The same shape in the tooling, for completeness
 
 Three further instances landed in *mechanism* rather than in reasoning, and they are the same error:
@@ -367,3 +391,29 @@ refused correct input, the other cried wolf intermittently. A guard that fires o
 tree is the guard people learn to ignore, and then delete. This defect class does not produce
 wrong *numbers* — it produces **wrong verdicts about whether the numbers can be trusted**, which
 is the same harm one level up.
+
+---
+
+## 8. The profiler does not bracket the counted window, and the error is asymmetric
+
+Stated here because it survived six review rounds inside a claim of exactness, and because the
+asymmetry — not the magnitude — is what matters to a differential.
+
+The driver arms `perf record`, sleeps **300 ms**, and only then opens the counting window. There is no
+setting that makes "brackets exactly" true: arming late leaves the start of the window unsampled,
+arming early includes pre-window samples. The chosen direction is the one that cannot silently **drop**
+the region under study.
+
+The cost, from this session's own records:
+
+| arm | counted window | 300 ms as % of capture |
+|---|---|---|
+| `bare_scan` | 11.89–12.15 s | **2.47–2.52%** |
+| `flight_bypass` | 59.21–62.06 s | **0.48–0.51%** |
+
+The arms' windows differ by ~5×, so the contamination does too: **~5.2× more pre-window capture in the
+scan arm**, in a document whose headline is the *difference* between the arms. The samples land on
+server startup and steady-state rather than the encode region, so the bias inflates non-encode
+self-time, more in the scan arm. It does not close the reported gaps — the smallest is 21.5% — but it
+is a real term that was previously reported as zero, and a reader comparing per-function shares
+between the two arms should carry it.
