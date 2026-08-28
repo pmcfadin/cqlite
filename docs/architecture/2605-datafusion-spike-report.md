@@ -794,11 +794,30 @@ cargo build --release -p cqlite-flight --features datafusion-spike --bin df_spik
 
 # Run the matrix. Use the DRIVER, not the harness's own loop — see §3.1(a) for why
 # one process per cell and a rotated arm order are load-bearing, not cosmetic.
+#
+# A COMPLETE five-arm cycle (§2.6). This is what a fresh measurement should run:
 bash docs/reports/2605-datafusion-spike-artifacts/run-matrix.sh \
   /data/corpus-2605/sstables/perf_2605/wide_4kb-<uuid> \
   docs/reports/2605-datafusion-spike-artifacts/wide_4kb.cql \
   docs/reports/2605-datafusion-spike-artifacts \
-  3
+  5
+
+# THE COMMITTED CELLS ARE 3 ITERATIONS, which is NOT a complete cycle, so the
+# driver refuses that schedule by default — reproducing them exactly needs the
+# explicit opt-out. The refusal is the tool working (§2.6); it is spelled out here
+# because a reader reproducing §3 would otherwise hit it with no explanation:
+ALLOW_PARTIAL_CYCLE=1 bash docs/reports/2605-datafusion-spike-artifacts/run-matrix.sh \
+  <table-dir> docs/reports/2605-datafusion-spike-artifacts/wide_4kb.cql \
+  docs/reports/2605-datafusion-spike-artifacts 3
+
+# Add iterations to an existing cell set without re-measuring it (start-iteration):
+#   ... run-matrix.sh <table-dir> <ddl> <out-dir> 5 4     # measures iterations 4-5 only
+#
+# The driver WAITS for the 1-minute load average to drop below MAX_LOAD (default
+# 4.0) before each cell and refuses after QUIESCE_TIMEOUT_SECS. That is not
+# ceremony: iteration 4 was once measured against a load of 172 and came back
+# 1.2x-4.3x slower than the entire range of iterations 1-3 (those cells were
+# discarded). Every cell's load is recorded in machine-state.jsonl.
 
 # Aggregate
 python3 docs/reports/2605-datafusion-spike-artifacts/summarize.py \
