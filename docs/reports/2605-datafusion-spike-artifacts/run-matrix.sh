@@ -14,13 +14,25 @@
 #      second arm in the same process inherits the first arm's high-water mark. One
 #      PROCESS PER CELL makes the peak-RSS column genuinely per-arm.
 #
-# Usage: run-matrix.sh <table-dir> <ddl-file> <out-dir> [iterations]
+# Usage: run-matrix.sh <table-dir> <ddl-file> <out-dir> [iterations] [start-iteration]
+#
+# START-ITERATION exists so a cycle can be COMPLETED without re-measuring what is
+# already on disk: `... 5 4` runs iterations 4 and 5 only, and the cells it writes
+# join the 1-3 already present to make a complete five-arm cycle. The
+# counterbalancing check below is applied to the WHOLE range 1..ITERS, not to the
+# slice being run, because that is the set an analysis will pool.
 set -euo pipefail
 
 DIR=${1:?table dir}
 DDL=${2:?ddl file}
 OUT=${3:?out dir}
 ITERS=${4:-3}
+START=${5:-1}
+
+if (( START < 1 || START > ITERS )); then
+  echo "run-matrix.sh: start-iteration ${START} must be within 1..${ITERS}" >&2
+  exit 2
+fi
 
 BIN=${DF_SPIKE_BENCH:-./target/release/df_spike_bench}
 SCENARIOS=(full_scan_count projected_scan filtered_scan)
@@ -43,7 +55,7 @@ n=${#ARMS[@]}
 if (( ITERS % n != 0 )); then
   if [[ ${ALLOW_PARTIAL_CYCLE:-0} != 1 ]]; then
     cat >&2 <<EOF
-run-matrix.sh: REFUSING to run ${ITERS} iterations over ${n} arm configs.
+run-matrix.sh: REFUSING a matrix of ${ITERS} iterations over ${n} arm configs.
 
 Rotation counterbalances position only over a COMPLETE cycle, so ${ITERS} is not
 counterbalanced: some arms can never occupy some positions. Use a multiple of
@@ -65,6 +77,7 @@ counterbalanced=false
 (( ITERS % n == 0 )) && counterbalanced=true
 {
   printf '{\n  "issue": 2605,\n  "arm_configs": %d,\n  "iterations": %d,\n' "$n" "$ITERS"
+  printf '  "measured_in_this_invocation": "%d..%d",\n' "$START" "$ITERS"
   printf '  "counterbalanced": %s,\n  "orders": {\n' "$counterbalanced"
 } > "$OUT/schedule.json"
 
@@ -75,9 +88,15 @@ for iter in $(seq 1 "$ITERS"); do
   for i in $(seq 0 $((n - 1))); do
     order+=("${ARMS[$(( (i + shift_by) % n ))]}")
   done
+  # The schedule record covers EVERY iteration of the matrix, including ones a
+  # previous invocation measured — it describes the cell set, not this process.
   sep=","
   (( iter == ITERS )) && sep=""
   printf '    "%d": "%s"%s\n' "$iter" "${order[*]}" "$sep" >> "$OUT/schedule.json"
+  if (( iter < START )); then
+    echo ">>> iteration $iter already measured — skipping (start-iteration=$START)"
+    continue
+  fi
 
   for scenario in "${SCENARIOS[@]}"; do
     for spec in "${order[@]}"; do
