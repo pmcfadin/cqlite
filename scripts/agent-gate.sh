@@ -6345,8 +6345,11 @@ run_flight_tests() {
     gated_n=$((gated_n + 1))
     gated_lines="$gated_lines $grel[$ggate]"
   done <<< "$gated_meta"
-  census+=("  OF THOSE, $gated_n carry a CRATE-LEVEL gate (#![cfg(...)] / #![cfg_attr(...)]),")
-  census+=("       listed with their gate text VERBATIM below. A crate-level gate naming a feature")
+  census+=("  OF THOSE, $gated_n contain an INNER cfg attribute (#![cfg(...)] / #![cfg_attr(...)]),")
+  census+=("       reported as OCCURRENCES with file:line, verbatim, below. NOT a claim that each is")
+  census+=("       CRATE-level: deciding that needs a Rust parser, and five review rounds showed a")
+  census+=("       line scan cannot approximate it (a module-level inner attribute looks identical")
+  census+=("       here). The file:line is authoritative — open it. A crate-level gate naming a feature")
   census+=("       that is off means the target COMPILES, runs ZERO tests and exits 0.")
   census+=("       CI's tier passes NO --features, so it enables whatever this package's own")
   census+=("       resolve enables — which is NOT the same as 'default' (roborev round-28, Low):")
@@ -6373,7 +6376,7 @@ run_flight_tests() {
   local cl
   for cl in "${census[@]}"; do echo ">>> [$name] $cl"; done
   [ -n "$rf_reasons" ] && echo ">>> [$name] declared targets with unmet required-features:$rf_reasons"
-  [ -n "$gated_lines" ] && echo ">>> [$name] crate-gated targets, gate text VERBATIM:$gated_lines"
+  [ -n "$gated_lines" ] && echo ">>> [$name] targets with an inner cfg attribute (file:line, verbatim; crate-level-ness NOT claimed):$gated_lines"
   echo ">>> [$name] enabled features (cargo tree -p, package-scoped):$enabled"
 
   # The log opens WITH the census (`>` here, `>>` for cargo below), so the omission is
@@ -6382,7 +6385,7 @@ run_flight_tests() {
     echo "==== [$name] COVERAGE CENSUS (issue #1699 / #3384) ===="
     for cl in "${census[@]}"; do echo "$cl"; done
     [ -n "$rf_reasons" ] && echo "declared targets with unmet required-features:$rf_reasons"
-    [ -n "$gated_lines" ] && echo "crate-gated targets, gate text VERBATIM:$gated_lines"
+    [ -n "$gated_lines" ] && echo "targets with an inner cfg attribute (file:line, verbatim; crate-level-ness NOT claimed):$gated_lines"
     echo "enabled features (cargo tree -p, package-scoped):$enabled"
     echo "==== end census ===="
   } > "$log"
@@ -6662,54 +6665,22 @@ _crate_gated_test_targets() { # <pkg>  -> name \t rel \t gate-text
     #     Parens are balanced across lines instead, so the whole attribute is printed.
     # No such attribute exists in this corpus today (measured: 0 across cqlite-flight/tests), so
     # this is the direction where a defect would have been invisible until someone reformatted.
-    gate=$(awk '
-      # ONE state machine for ALL leading trivia (roborev rounds 37/38/41). Previous versions
-      # handled the variants one at a time — line comments, then block comments, then multiline
-      # `cfg` attributes — and each round found the next syntax that ended the leading region early
-      # and silently dropped the crate gate after it. The variants that broke it: `/* */`, `/*! */`,
-      # a multiline `#![cfg(all(`, and finally a multiline NON-cfg attribute such as
-      # `#![allow(\n  clippy::x\n)]`, whose continuation line read as the first item.
-      #
-      # So the region is now defined structurally rather than by enumerating spellings: from the top
-      # of the file, skip blank lines, line comments, block comments (stateful), and ANY inner
-      # attribute (bracket-balanced, therefore multiline-safe) — emitting text only for the ones
-      # that are `cfg`/`cfg_attr`. The first line that is none of those ends the region.
-      function trim(x) { gsub(/^[[:space:]]+|[[:space:]]+$/, "", x); return x }
-      function bal(x,   n, i, c) {   # net bracket depth of a line
-        n = 0
-        for (i = 1; i <= length(x); i++) {
-          c = substr(x, i, 1)
-          if (c == "[" || c == "(") n++
-          else if (c == "]" || c == ")") n--
-        }
-        return n
-      }
-      done { next }
-      # inside a multi-line block comment
-      in_block { if ($0 ~ /\*\//) in_block = 0; next }
-      # inside a multi-line attribute: keep consuming until the brackets balance
-      depth != 0 {
-        if (collect) acc = acc " " trim($0)
-        depth += bal($0)
-        if (depth <= 0) { depth = 0; if (collect) { out = (out == "" ? acc : out " " acc); collect = 0; acc = "" } }
-        next
-      }
-      {
-        t = trim($0)
-        if (t == "") next
-        if (t ~ /^\/\//) next                                  # line comment, incl. //!
-        if (t ~ /^\/\*/) { if (t !~ /\*\//) in_block = 1; next }  # block comment, incl. /*!
-        if (t ~ /^#!\[/) {                                      # ANY inner attribute
-          collect = (t ~ /^#!\[[[:space:]]*cfg(_attr)?[[:space:]]*\(/)
-          if (collect) acc = t
-          depth = bal(t)
-          if (depth <= 0) { depth = 0; if (collect) { out = (out == "" ? acc : out " " acc); collect = 0; acc = "" } }
-          next
-        }
-        done = 1                                                # first real item: region over
-      }
-      END { if (out != "") print out }
-    ' "$sp") || return 1
+    # DESCOPED TO AN OCCURRENCE REPORT (roborev rounds 37/38/40/41/42). Five consecutive rounds
+    # found the next syntax that fooled a structural scan of the leading region: `//`, `/* */`,
+    # `/*! */`, a multiline `#![cfg(all(`, a multiline NON-cfg attribute, and finally brackets
+    # inside a STRING LITERAL (`#![doc = "["]`) throwing off the bracket arithmetic. Round 42's
+    # reviewer suggested the honest remedy itself — "use Rust syntax tooling" — which a bash gate
+    # component cannot have. Deciding *whether an inner attribute is crate-level* requires a Rust
+    # parser; a line scan cannot, and every attempt to approximate it produced a new false claim.
+    #
+    # So this stops deciding. It reports OCCURRENCES: every line that looks like an inner cfg
+    # attribute, verbatim, with the file it came from. The census states the limitation in the same
+    # breath, so the reader knows a module-level inner attribute is indistinguishable from a
+    # crate-level one HERE and can open the file — which is the same call this change already made
+    # twice (the classifier became an observation in round 27; the legacy census reports sites, not
+    # bodies). What is lost is a claim nobody could support; what remains needs no grammar at all.
+    gate=$(grep -nE '^[[:space:]]*#!\[[[:space:]]*cfg(_attr)?[[:space:]]*\(' "$sp" \
+      | sed 's/^\([0-9]*\):[[:space:]]*/L\1: /' | tr '\n' ' ' | sed 's/  */ /g; s/^ //; s/ $//') || true
     [ -n "$gate" ] || continue
     printf '%s\t%s\t%s\n' "$_tn" "$rel" "$gate"
   done <<< "$meta"
@@ -6900,6 +6871,12 @@ $(awk '
     if (haspath) { printf "P\t%s\n", p; haspath = 0 } else { printf "M\t%s\n", n }
     next
   }
+  # An ATTRIBUTE line preserves a pending `#[path]` (roborev round-42). An outer-attribute cluster
+  # is legal — `#[path = "mapped.rs"] #[cfg(...)] mod child;` or the same across lines — and clearing
+  # `haspath` on the intervening attribute resolved the module to the WRONG file, or failed the lane
+  # as unresolved. Attributes join blank lines and comments as cluster trivia; anything else still
+  # ends the cluster, which stays the conservative direction.
+  /^[[:space:]]*#\[/ { next }
   { if ($0 !~ /^[[:space:]]*$/ && $0 !~ /^[[:space:]]*\/\//) haspath = 0 }
 ' "$f")
 EOF

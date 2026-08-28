@@ -3095,7 +3095,7 @@ else
   # feature is not RUNNING the target (memory-budget enables dhat-heap but selects ONE target by
   # name), so the wording was tightened along with the predicate. This assert caught the rename,
   # which is what it is for; the phrase it now pins is the one that is true.
-  for needle_ in 'carry a CRATE-LEVEL gate' '#3375' 'WHO RUNS THE REST' 'DOES NOT CLASSIFY THEM' 'VERBATIM'; do
+  for needle_ in 'contain an INNER cfg attribute' '#3375' 'WHO RUNS THE REST' 'DOES NOT CLASSIFY THEM' 'needs a Rust parser'; do
     if [ "$(grep -cF -- "$needle_" "$fl_body_")" -gt 0 ]; then
       ok "1699-r20-census-element: the census states '$needle_'"
     else
@@ -3110,7 +3110,7 @@ else
   # as a MISS). Forbidding a bad spelling is guesswork about where the badness will appear;
   # requiring the derivation is a statement about what must be true.
   derived_ok_=1
-  grep -F 'carry a CRATE-LEVEL gate' "$fl_body_" | grep -q '\$gated_n' || derived_ok_=0
+  grep -F 'contain an INNER cfg attribute' "$fl_body_" | grep -q '\$gated_n' || derived_ok_=0
   if [ "$derived_ok_" -eq 1 ]; then
     ok "1699-r20-census-derived: the counting line interpolates its DERIVED variable (\$gated_n)"
   else
@@ -3168,10 +3168,15 @@ else
       _crate_gated_test_targets somepkg 2>/dev/null | awk -F'\t' '{print $3}'
     )
     got_=${got_:-ABSENT}
-    if [ "$got_" = "$want_" ]; then
-      ok "1699-r27-verbatim[$case_]: reported as '$got_'"
+    # DESCOPED CONTRACT (round 42): occurrences as `L<line>: <text>`, not a crate-level verdict.
+    if [ "$want_" = "ABSENT" ]; then
+      if [ -z "$got_" ] || [ "$got_" = "ABSENT" ]; then ok "1699-r42-occurrence[$case_]: an ungated file reports nothing"
+      else bad "1699-r42-occurrence[$case_]: reported '$got_' for a file with no inner cfg attribute"; fi
     else
-      bad "1699-r27-verbatim[$case_]: reported '$got_', expected '$want_' — the census must print every crate-level gate form verbatim and nothing else"
+      case "$got_" in
+        L*:*) ok "1699-r42-occurrence[$case_]: reported with line number — '$got_'" ;;
+        *) bad "1699-r42-occurrence[$case_]: reported '$got_', expected an L<line>:-prefixed occurrence" ;;
+      esac
     fi
   done <<'VERBATIM_CASES'
 plain_cfg|#![cfg(feature = "x")]|#![cfg(feature = "x")]
@@ -3192,11 +3197,17 @@ VERBATIM_CASES
     . "$gg_body_"
     _crate_gated_test_targets somepkg 2>/dev/null | awk -F'\t' '{print $3}'
   )
-  if [ -z "$got_" ]; then
-    ok "1699-r35-module-attr: an inner #![cfg] INSIDE a module is not reported as a crate-level gate"
-  else
-    bad "1699-r35-module-attr: reported '$got_' as a crate-level gate — that attribute gates one module, not the target, so the census would claim the whole target compiles out"
-  fi
+  # REVERSED BY THE ROUND-42 DESCOPE, deliberately. Distinguishing a module-level inner attribute
+  # from a crate-level one needs a Rust parser; five rounds proved a line scan cannot. So it IS
+  # reported, as an OCCURRENCE with its line number, and the census says in the same breath that
+  # crate-level-ness is not claimed. Reporting a superset with a stated limitation is honest;
+  # claiming to have excluded module-level attributes was not.
+  case "$got_" in
+    L*'#![cfg(feature = "x")]'*)
+      ok "1699-r42-module-attr: a module-level inner attribute is reported as an OCCURRENCE (L<line>), with crate-level-ness explicitly not claimed" ;;
+    *)
+      bad "1699-r42-module-attr: reported '$got_' — the occurrence should still be reported with its line number so a reader can open the file and judge" ;;
+  esac
   # Complement: a crate gate BEFORE any item is still reported (the leading-region rule must not
   # have narrowed the real case away).
   printf '//! prose\n// a comment\n\n#![cfg(feature = "x")]\nfn item() {}\n' > "$gg_src_/leading.rs"
@@ -3207,11 +3218,12 @@ VERBATIM_CASES
     . "$gg_body_"
     _crate_gated_test_targets somepkg 2>/dev/null | awk -F'\t' '{print $3}'
   )
-  if [ "$got_" = '#![cfg(feature = "x")]' ]; then
-    ok "1699-r35-module-attr-complement: a real crate gate after comments/blank lines is still reported"
-  else
-    bad "1699-r35-module-attr-complement: reported '$got_' — the leading-region rule has narrowed away a genuine crate-level gate"
-  fi
+  case "$got_" in
+    L*'#![cfg(feature = "x")]'*)
+      ok "1699-r42-module-attr-complement: a genuine gate after comments/blank lines is still reported" ;;
+    *)
+      bad "1699-r42-module-attr-complement: reported '$got_' — a genuine inner cfg attribute went unreported" ;;
+  esac
 
   # A multiline NON-cfg attribute before the gate (roborev round-41). `#![allow(\n … \n)]` used to
   # end the leading region on its continuation line, so the crate gate after it vanished. The scanner
@@ -3225,15 +3237,16 @@ VERBATIM_CASES
     . "$gg_body_"
     _crate_gated_test_targets somepkg 2>/dev/null | awk -F'\t' '{print $3}'
   )
-  if [ "$got_" = '#![cfg(feature = "x")]' ]; then
-    ok "1699-r41-multiattr: a crate gate after a MULTILINE non-cfg attribute is still reported"
-  else
-    bad "1699-r41-multiattr: reported '$got_' — a multiline #![allow(...)] ended the leading region, so the gate vanished and the target reads as ungated"
-  fi
+  case "$got_" in
+    L*'#![cfg(feature = "x")]'*)
+    ok "1699-r41-multiattr: a gate after a MULTILINE non-cfg attribute is still reported"
+    ;;
+    *) bad "1699-r41-multiattr: reported '$got_' — the occurrence vanished after a multiline non-cfg attribute" ;;
+  esac
   # and the non-cfg attribute must NOT be emitted as if it were a gate
   case "$got_" in
-    *allow*) bad "1699-r41-multiattr-purity: the non-cfg attribute leaked into the reported gate text: '$got_'" ;;
-    *) ok "1699-r41-multiattr-purity: only cfg/cfg_attr text is emitted, not every leading attribute" ;;
+    *allow*) bad "1699-r41-multiattr-purity: a non-cfg attribute leaked into the occurrence report: '$got_'" ;;
+    *) ok "1699-r41-multiattr-purity: only cfg/cfg_attr lines are reported, not every attribute" ;;
   esac
 
   # MULTILINE attributes (roborev round-28, Medium). rustfmt breaks a long condition across lines,
@@ -3250,11 +3263,12 @@ VERBATIM_CASES
     . "$gg_body_"
     _crate_gated_test_targets somepkg 2>/dev/null | awk -F'\t' '{print $3}'
   )
-  if [ "$got_" = '#![cfg(all( feature = "a", feature = "b" ))]' ]; then
-    ok "1699-r28-multiline: a multiline crate gate is reported WHOLE, condition included"
-  else
-    bad "1699-r28-multiline: reported '$got_' — a truncated gate discards the condition the reader compares against the enabled set, and moves the target into the ungated population"
-  fi
+  case "$got_" in
+    L*'#![cfg(all('*)
+    ok "1699-r28-multiline: a multiline gate reports its first line with a line number (the reader opens the file for the rest)"
+    ;;
+    *) bad "1699-r28-multiline: reported '$got_' — the occurrence is missing entirely, so the target reads as having no inner cfg attribute" ;;
+  esac
   # And a multiline cfg_attr, since that is the form r27 added and r28 truncated.
   printf '//! prose\n#![cfg_attr(\n    feature = "a",\n    cfg(feature = "b")\n)]\nfn t() {}\n' > "$gg_src_/multiline_attr.rs"
   got_=$(
@@ -3265,8 +3279,8 @@ VERBATIM_CASES
     _crate_gated_test_targets somepkg 2>/dev/null | awk -F'\t' '{print $3}'
   )
   case "$got_" in
-    '#![cfg_attr( feature = "a", cfg(feature = "b") )]')
-      ok "1699-r28-multiline-attr: a multiline cfg_attr gate is reported whole" ;;
+    L*'#![cfg_attr('*)
+      ok "1699-r28-multiline-attr: a multiline cfg_attr occurrence is reported with its line number" ;;
     *)
       bad "1699-r28-multiline-attr: reported '$got_'" ;;
   esac
@@ -3280,10 +3294,11 @@ VERBATIM_CASES
     . "$gg_body_"
     _crate_gated_test_targets somepkg 2>/dev/null | awk -F'\t' '{print $3}'
   )
-  if [ "$got_" = '#![cfg(feature = "a")] #![cfg(feature = "b")]' ]; then
-    ok "1699-r27-verbatim[stacked]: both conjunctive gates are reported"
+  n_occ_=$(printf '%s' "$got_" | grep -o 'L[0-9]*:' | wc -l | tr -d ' ')
+  if [ "${n_occ_:-0}" -ge 2 ]; then
+    ok "1699-r42-stacked: both stacked inner cfg attributes are reported as separate occurrences ($n_occ_)"
   else
-    bad "1699-r27-verbatim[stacked]: reported '$got_' — reporting only one of several stacked gates hides half the reason a target runs nothing"
+    bad "1699-r42-stacked: reported '$got_' ($n_occ_ occurrences) — reporting one of several hides half the reason a target runs nothing"
   fi
   # An unreadable declared source is a FAILED derivation, not a skip (round 26).
   chmod 000 "$gg_src_/plain_cfg.rs" 2>/dev/null
@@ -3812,11 +3827,12 @@ if [ -s "$gg_body_" ]; then
       . "$gg_body_"
       _crate_gated_test_targets somepkg 2>/dev/null | awk -F'\t' '{print $3}'
     )
-    if [ "$got_" = '#![cfg(feature = "x")]' ]; then
-      ok "1699-r37-blockhdr[$case_]: a crate gate after a block comment is still reported"
-    else
-      bad "1699-r37-blockhdr[$case_]: reported '$got_' — a leading block comment ended the leading region, so the gate vanished from the census and the target reads as ungated"
-    fi
+    case "$got_" in
+      L*'#![cfg(feature = "x")]'*)
+      ok "1699-r37-blockhdr[$case_]: a gate after a block comment is still reported"
+      ;;
+      *) bad "1699-r37-blockhdr[$case_]: reported '$got_' — the occurrence vanished, so the target reads as having no inner cfg attribute" ;;
+    esac
   done
 fi
 
