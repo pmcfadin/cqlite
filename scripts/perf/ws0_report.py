@@ -282,7 +282,56 @@ def build_report(args: argparse.Namespace) -> tuple[dict, list[str]]:
     events = config["events"]
     bin_dir = config["bin_dir"]
     profile = config["profile"]
-    quiescence = config["quiescence"]
+    # THE QUIESCENCE CLAIM NEEDS ITS EVIDENCE, NOT JUST ITS INTENT (#3248, roborev job 64
+    # finding 2).
+    #
+    # `config.quiescence` is stamped BEFORE the first rep, so it records what the run INTENDED.
+    # The judgement happens AFTER every measurement artifact is complete, which means a session
+    # that was REJECTED or INTERRUPTED still has a complete artifact set and a manifest saying
+    # `judged against <path>` -- and re-reporting it would print that claim with no successful
+    # verdict anywhere. The intent is not the evidence.
+    #
+    # So a configured session must carry `quiescence-verdict.json`, it must say QUIESCENT, and
+    # it must name the SAME timeseries the manifest does. An unjudged session is fine and says
+    # so; a session that CLAIMS judgement and cannot show it is refused.
+    quiescence_intent = config["quiescence"]
+    quiescence_verdict = None
+    if quiescence_intent.startswith("judged against "):
+        declared_ts = quiescence_intent[len("judged against "):].strip()
+        vpath = d / "quiescence-verdict.json"
+        if not vpath.exists():
+            raise Invalid(
+                f"the session manifest says {quiescence_intent!r}, but {vpath.name} is absent."
+                " The judgement runs AFTER the measurement artifacts are complete, so a"
+                " rejected or interrupted session looks identical to a certified one from the"
+                " artifacts alone. A quiescence claim requires its verdict; re-run, or report a"
+                " session that does not claim to have been judged."
+            )
+        try:
+            verdict = json.loads(vpath.read_text())
+        except (OSError, ValueError) as exc:
+            raise Invalid(f"{vpath.name} is not readable JSON: {exc}") from None
+        if not isinstance(verdict, dict) or verdict.get("verdict") != "QUIESCENT":
+            raise Invalid(
+                f"{vpath.name} does not record a QUIESCENT verdict"
+                f" (verdict={verdict.get('verdict') if isinstance(verdict, dict) else '?'!r})."
+                " A session whose own verdict is not QUIESCENT must not be reported as judged."
+            )
+        recorded_ts = (verdict.get("window_census") or {}).get("timeseries")
+        if recorded_ts is not None and recorded_ts != declared_ts:
+            raise Invalid(
+                f"{vpath.name} was judged against {recorded_ts!r} but the manifest declares"
+                f" {declared_ts!r}. A verdict from a DIFFERENT timeseries does not establish"
+                " anything about this session."
+            )
+        quiescence_verdict = {
+            "verdict": verdict.get("verdict"),
+            "in_window_samples": (verdict.get("window_census") or {}).get("samples"),
+            "coverage_largest_gap_s": (verdict.get("window_census") or {}).get(
+                "coverage_largest_gap_s"
+            ),
+        }
+    quiescence = quiescence_intent
     # WHICH SERVER PRODUCED THE MEASURED ROWS (#3272 round 14, F2). Read from the pre-measurement
     # manifest and passed to every Flight arm, which compares it against EVERY rep's recorded
     # `endpoint`. Deliberately NOT a reporter argument, for the reason F1 gave for the whole
@@ -445,6 +494,9 @@ def build_report(args: argparse.Namespace) -> tuple[dict, list[str]]:
         # judged at all. Recorded both ways: an unjudged session is UNVERIFIED, not quiet
         # (#3248).
         "quiescence": quiescence,
+        # The VERDICT, not the intent. None when the session did not claim to be judged; a
+        # session that claimed it and could not show one never reaches here (#3248).
+        "quiescence_verdict": quiescence_verdict,
         "measurements": [],
     }
 
@@ -598,13 +650,16 @@ def build_report(args: argparse.Namespace) -> tuple[dict, list[str]]:
             corpus_rows,
             corpus_cells_per_row,
             pinned_scan_corpus,
+            tuple(events),
         )
         results["measurements"].append(scan)
         lines.append(f"[{temp.upper()}]")
         lines.append(fmt("bare scan (execute_streaming)", scan))
         lines += prewarm_warning(scan, "bare-scan", temp)
         for arm in arms:
-            fl = collect_flight(d, temp, arm, reps, corpus_rows, flight_endpoint)
+            fl = collect_flight(
+                d, temp, arm, reps, corpus_rows, flight_endpoint, tuple(events)
+            )
             results["measurements"].append(fl)
             # The label says the arm was REQUESTED, and it is derived FROM THE BLOCK rather than
             # from the loop variable (#3272 round 16). Two properties, both deliberate:

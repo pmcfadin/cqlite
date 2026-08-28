@@ -124,7 +124,16 @@ def _exact_int(label: str, raw: str) -> int:
         # multiplexing, which is exactly what this tool refuses.
         if "." in text or "e" in text.lower():
             raise ValueError(text)
-        return int(text)
+        value = int(text)
+        if value < 0:
+            raise Refusal(
+                "PERF_COUNTER_NEGATIVE",
+                f"event {label!r} reports {value}, and a hardware counter is non-negative by"
+                " construction. Accepting it produced a NEGATIVE FREQUENCY with verdict OK"
+                " (roborev job 64 finding 5): every later check compared magnitudes and none"
+                " asked whether the inputs were possible.",
+            )
+        return value
     except ValueError as exc:
         raise Refusal(
             "PERF_COUNTER_UNPARSEABLE",
@@ -210,6 +219,12 @@ def derive(
     aperf = events["msr/aperf/"]["rate_hz"]
     mperf = events["msr/mperf/"]["rate_hz"]
     tsc = events["msr/tsc/"]["rate_hz"]
+    if aperf <= 0:
+        raise Refusal(
+            "FREQ_APERF_NOT_POSITIVE",
+            f"aperf rate is {aperf}; a frequency derived from a non-positive APERF is not a"
+            " frequency. Refused rather than reported.",
+        )
     if mperf <= 0 or tsc <= 0:
         raise Refusal(
             "FREQ_DIVISOR_ZERO",

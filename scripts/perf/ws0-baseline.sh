@@ -770,6 +770,35 @@ OUT_DIR="$(create_out_dir "${OUT_DIR:-}" "$REPO_ROOT/target/perf-ws0-3096")" || 
 build_release_binaries || exit 2
 record_measured_binaries || exit 2
 
+# THE SYMBOL CHECK, AGAIN, ON THE BINARIES THAT WILL ACTUALLY RUN (#3248, roborev job 64
+# finding 1 — High).
+#
+# The pre-boundary check above is necessary but NOT SUFFICIENT, and its insufficiency is the
+# exact failure it was written to prevent. It skips a binary that does not exist yet
+# (`[[ -e ... ]]`), so on a CLEAN CHECKOUT with `--profile-out` and no `--bin-dir`:
+# validation passed (nothing to check), `build_release_binaries` then produced STRIPPED
+# binaries because `[profile.release]` sets `strip = true`, and profiling recorded a file
+# full of raw addresses — silently, with perf exiting 0. A guard that only fires when the
+# subject already exists cannot protect the path that creates the subject.
+#
+# Checked here on `$BIN`, which `record_measured_binaries` has just repointed at the FROZEN
+# copies under measured-bin/ — the bytes this session actually executes, not the ones that
+# happened to be in target/ when the arguments were parsed.
+if [[ -n "$PROFILE_OUT" ]]; then
+  for _b in "${WS0_MEASURED_BINARIES[@]}"; do
+    _fsyms=$(nm "$BIN/$_b" 2>/dev/null | grep -c '_RN' || true)
+    if [[ "${_fsyms:-0}" -eq 0 ]]; then
+      echo "FATAL: --profile-out was given, but the FROZEN binary $BIN/$_b carries no Rust" >&2
+      echo "       symbols, so a sampling profile of it would attribute nothing." >&2
+      echo "       [profile.release] sets strip = true, so the default build cannot be" >&2
+      echo "       profiled. Build a symbol-bearing profile and pass --bin-dir:" >&2
+      echo "         cargo build --profile perfsym -p ws0-corpus-gen -p cqlite-flight -p flight-loadgen" >&2
+      exit 2
+    fi
+  done
+  echo "profile symbols: verified on all ${#WS0_MEASURED_BINARIES[@]} frozen binaries"
+fi
+
 # --- THE SCHEMA, THEN THE REQUEST DERIVED FROM IT (#3272 round 6 R2 + round 10 M1) ----
 # Both live in scripts/perf/lib-inputs.sh, which carries the full argument for each: the DDL is a
 # MEASUREMENT INPUT the two arms read ASYMMETRICALLY (the bare scan ingests it per invocation, the

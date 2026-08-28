@@ -208,6 +208,14 @@ def window_census_clean(timeseries: str, start: str, end: str) -> Dict[str, obje
     Two instants cannot see a competitor that arrived after the first and left before the
     second; a 10 s timeseries across the window can.
     """
+    # Parsed up front, because the read loop now compares parsed instants rather than raw
+    # strings (finding 4).
+    t_start_pre = _parse_ts("--window-start", start)
+    t_end_pre = _parse_ts("--window-end", end)
+    if t_end_pre <= t_start_pre:
+        raise NotQuiescent(
+            "QUIESCENCE_WINDOW_INVALID", f"window end {end} is not after start {start}"
+        )
     rows = []
     with open(timeseries, encoding="utf-8") as fh:
         for line in fh:
@@ -224,7 +232,17 @@ def window_census_clean(timeseries: str, start: str, end: str) -> Dict[str, obje
                     f"{timeseries} carries an unparseable line; a timeseries that cannot be"
                     " read in full cannot establish that the window was clean",
                 )
-            if start <= rec.get("ts", "") <= end:
+            # EVERY nonblank record's ts is PARSED AND VALIDATED BEFORE any range filter,
+            # and the filter compares PARSED datetimes (#3248, roborev job 64 finding 4).
+            #
+            # The first version filtered on the RAW string, so a record with a missing or
+            # malformed `ts` failed the string comparison and was SILENTLY SKIPPED. If its
+            # neighbours stayed inside the 30s gap bound, a sample carrying a
+            # COMPETING-PROCESS observation could vanish while the window certified clean --
+            # a contaminated sample dropped by the very filter meant to find it.
+            instant = _parse_ts(f"{timeseries} record", rec.get("ts"))
+            if t_start_pre <= instant <= t_end_pre:
+                rec["_instant"] = instant
                 rows.append(rec)
     if not rows:
         raise NotQuiescent(
@@ -234,14 +252,8 @@ def window_census_clean(timeseries: str, start: str, end: str) -> Dict[str, obje
         )
     # COVERAGE: the window must actually be OBSERVED, not merely intersected. A non-empty
     # sample set is not coverage — see MAX_SAMPLE_GAP_S.
-    t_start = _parse_ts("--window-start", start)
-    t_end = _parse_ts("--window-end", end)
-    if t_end <= t_start:
-        raise NotQuiescent(
-            "QUIESCENCE_WINDOW_INVALID",
-            f"window end {end} is not after start {start}",
-        )
-    instants = sorted(_parse_ts(f"{timeseries} sample", r.get("ts")) for r in rows)
+    t_start, t_end = t_start_pre, t_end_pre
+    instants = sorted(r["_instant"] for r in rows)
     gaps = [("start", (instants[0] - t_start).total_seconds())]
     gaps += [
         (f"between {instants[i].isoformat()} and {instants[i + 1].isoformat()}",
@@ -304,6 +316,10 @@ def window_census_clean(timeseries: str, start: str, end: str) -> Dict[str, obje
         "load1_max": max(loads) if loads else None,
         "load1_mean": (sum(loads) / len(loads)) if loads else None,
         "window": {"start": start, "end": end},
+        # Recorded so the REPORTER can verify this verdict was produced against the timeseries
+        # the session manifest declares -- a verdict from a different file establishes nothing
+        # about this session (#3248 finding 2).
+        "timeseries": timeseries,
     }
 
 
