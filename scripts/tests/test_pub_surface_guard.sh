@@ -164,9 +164,14 @@ fail_case() { echo "FAIL: $*"; exit 1; }
 # AFFIRMATIVE post-condition: after stripping, `lib.rs` must not mention the
 # `benchmarks` feature at all.
 bench_strip_site_gate() { # <lib.rs path> <case label>
+  # Restores the EXACT pre-#1712 shape — a bare `pub mod benchmarks;` — whatever the
+  # current tree's layout is: the gate on its own line or trailing, and the `#1712`
+  # note as its own line or trailing the declaration. Keyed on the DECLARATION, never
+  # on the gate's position relative to it.
   awk '
     /^#\[cfg\(feature = "benchmarks"\)\]/ { next }
     /^\/\/ #1712: gate HERE/ { next }
+    /^pub mod benchmarks;/ { print "pub mod benchmarks;"; next }
     { print }
   ' "$1" >"$1.stripped"
   mv "$1.stripped" "$1"
@@ -183,7 +188,7 @@ bench_strip_site_gate() { # <lib.rs path> <case label>
 
 bench_attr_above_decl() { # <lib.rs path> <attribute text> <case label>
   awk -v attr="$2" '
-    $0 == "pub mod benchmarks;" { print attr }
+    /^pub mod benchmarks;/ { print attr }
     { print }
   ' "$1" >"$1.attr"
   mv "$1.attr" "$1"
@@ -193,7 +198,7 @@ bench_attr_above_decl() { # <lib.rs path> <attribute text> <case label>
 
 bench_attr_same_line() { # <lib.rs path> <attribute text> <case label>
   awk -v attr="$2" '
-    $0 == "pub mod benchmarks;" { print attr " " $0; next }
+    /^pub mod benchmarks;/ { print attr " " $0; next }
     { print }
   ' "$1" >"$1.same"
   mv "$1.same" "$1"
@@ -445,7 +450,7 @@ echo "OK (15): a tell-tale token inside an attribute VALUE does not exempt a dec
 # ---------------------------------------------------------------------------
 scratch_tree separated-attr; wt16="$SCRATCH"
 awk '
-  $0 == "pub mod benchmarks;" {
+  /^pub mod benchmarks;/ {
     print ""
     print "/// A doc comment between the gate and the item."
     print "// …and an ordinary comment too."
@@ -815,7 +820,7 @@ mixed_line_tree() { # <label> <declaration-line>  -> $SCRATCH
   scratch_tree "$1"
   bench_strip_site_gate "$SCRATCH/cqlite-core/src/lib.rs" "28 ($1)"
   # Drop the now-bare declaration; the case re-adds it in the shape under test.
-  grep -vx 'pub mod benchmarks;' "$SCRATCH/cqlite-core/src/lib.rs" >"$SCRATCH/lib.rs.nodecl"
+  grep -v '^pub mod benchmarks;' "$SCRATCH/cqlite-core/src/lib.rs" >"$SCRATCH/lib.rs.nodecl"
   mv "$SCRATCH/lib.rs.nodecl" "$SCRATCH/cqlite-core/src/lib.rs"
   grep -q 'pub mod benchmarks' "$SCRATCH/cqlite-core/src/lib.rs" \
     && fail_case "case 28 setup ($1): the original benchmarks declaration survived the strip"
