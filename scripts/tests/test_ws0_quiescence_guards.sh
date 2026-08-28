@@ -35,7 +35,7 @@ mksample() { # <path> <load1> <competing-json>
 expect_refusal() {
   local name="$1" cause="$2"; shift 2
   local out rc
-  out="$(python3 "$Q" judge "$@" 2>&1)"; rc=$?
+  out="$(python3 "$Q" judge --after-settled "$@" 2>&1)"; rc=$?
   if [ "$rc" -eq 0 ]; then
     fail "$name — exited 0; a refusal that exits 0 is not a refusal"
     return
@@ -50,7 +50,7 @@ expect_refusal() {
 echo "== ACCEPT direction, asserted AFFIRMATIVELY =="
 mksample "$TMP/ok-before.json" 0.80 '[]'
 mksample "$TMP/ok-after.json"  1.10 '[]'
-out="$(python3 "$Q" judge --before "$TMP/ok-before.json" --after "$TMP/ok-after.json" --out "$TMP/ok.json" 2>&1)"; rc=$?
+out="$(python3 "$Q" judge --after-settled --before "$TMP/ok-before.json" --after "$TMP/ok-after.json" --out "$TMP/ok.json" 2>&1)"; rc=$?
 if [ "$rc" -ne 0 ]; then
   fail "quiet rep accepted — exited $rc: $(head -2 <<<"$out" | tr '\n' ' ')"
 else
@@ -114,13 +114,107 @@ expect_refusal "movement bound loosened" QUIESCENCE_THRESHOLD_LOOSENED \
   --before "$TMP/ok-before.json" --after "$TMP/ok-after.json" --max-load1-movement 99
 
 # ...and tightening must actually bite, or the knob is decorative.
-out="$(python3 "$Q" judge --before "$TMP/ok-before.json" --after "$TMP/ok-after.json" --max-load1-movement 0.1 2>&1)"; rc=$?
+out="$(python3 "$Q" judge --after-settled --before "$TMP/ok-before.json" --after "$TMP/ok-after.json" --max-load1-movement 0.1 2>&1)"; rc=$?
 if [ "$rc" -eq 0 ]; then
   fail "tightened movement bound 0.1 accepted a 0.30 movement — the knob does not tighten"
 elif grep -q 'REFUSED: QUIESCENCE_LOAD_MOVED' <<<"$out"; then
   pass "tightened movement bound refuses a movement it should"
 else
   fail "tightened movement bound failed with an unexpected cause: $(head -2 <<<"$out" | tr '\n' ' ')"
+fi
+
+echo "== the in-window timeseries is the BINDING check (redesign, #3248) =="
+# WHY THIS SECTION EXISTS. The first version of this gate bounded load1 at BOTH boundaries
+# and then REFUSED this issue's own AC0 pass: load1 read 3.05 against a 2.0 bound with a
+# competing census of ZERO at both boundaries and zero competitors across all 48 in-window
+# sampler lines. The box was clean; load1 is a 1-MINUTE DECAYING AVERAGE, so a sample taken
+# straight after a nine-minute CPU-bound run reads the run's OWN residue. Bounding it there
+# measures how hard the rig just worked, not whether the box was quiet — it would refuse
+# every honest run of a CPU-bound rig while passing a short one on a contended box.
+# The threshold was NOT loosened. The bound moved out of a place it cannot be valid, and the
+# binding check became STRONGER: attributable process identity across the whole window.
+
+# NOTHING MAY BIND: neither a window nor a settled after-sample is refused, because "nothing
+# established the window was clean" must not read as "the window was clean".
+out="$(python3 "$Q" judge --before "$TMP/ok-before.json" --after "$TMP/ok-after.json" 2>&1)"; rc=$?
+if [ "$rc" -ne 0 ] && grep -q 'REFUSED: QUIESCENCE_WINDOW_UNVERIFIED' <<<"$out"; then
+  pass "neither timeseries nor --after-settled is REFUSED (no unbound path to a pass)"
+else
+  fail "a run with no binding in-window check must be refused (rc=$rc, out: $(head -1 <<<"$out"))"
+fi
+
+# A CONTAMINATED window is refused even when both boundaries are clean — the case two
+# instants structurally cannot see.
+{ printf '{"ts":"2026-01-01T00:00:00Z","load1":0.5,"rustc":0,"cargo":0,"gate":0}\n'
+  printf '{"ts":"2026-01-01T00:00:10Z","load1":9.9,"rustc":7,"cargo":1,"gate":0}\n'
+  printf '{"ts":"2026-01-01T00:00:20Z","load1":0.5,"rustc":0,"cargo":0,"gate":0}\n'; } > "$TMP/ts-dirty.jsonl"
+out="$(python3 "$Q" judge --before "$TMP/ok-before.json" --after "$TMP/ok-after.json" \
+        --timeseries "$TMP/ts-dirty.jsonl" --window-start 2026-01-01T00:00:00Z \
+        --window-end 2026-01-01T00:00:30Z 2>&1)"; rc=$?
+if [ "$rc" -ne 0 ] && grep -q 'REFUSED: QUIESCENCE_WINDOW_CONTAMINATED' <<<"$out"; then
+  pass "a competitor appearing only MID-WINDOW is caught (invisible to boundary samples)"
+else
+  fail "a mid-window competitor must be caught (rc=$rc, out: $(head -1 <<<"$out"))"
+fi
+
+# An UNCOVERED window is refused: no samples in range reads exactly like a clean window.
+{ printf '{"ts":"2025-01-01T00:00:00Z","load1":0.5,"rustc":0,"cargo":0,"gate":0}\n'; } > "$TMP/ts-far.jsonl"
+out="$(python3 "$Q" judge --before "$TMP/ok-before.json" --after "$TMP/ok-after.json" \
+        --timeseries "$TMP/ts-far.jsonl" --window-start 2026-01-01T00:00:00Z \
+        --window-end 2026-01-01T00:00:30Z 2>&1)"; rc=$?
+if [ "$rc" -ne 0 ] && grep -q 'REFUSED: QUIESCENCE_TIMESERIES_EMPTY' <<<"$out"; then
+  pass "an UNCOVERED window is refused (absent measurement is not a pass)"
+else
+  fail "an uncovered window must be refused (rc=$rc, out: $(head -1 <<<"$out"))"
+fi
+
+# A MALFORMED sampler line is an error, not a line to skip: skipping it would let a
+# truncated timeseries certify a window it never covered.
+{ printf '{"ts":"2026-01-01T00:00:00Z","load1":0.5,"rustc":0,"cargo":0,"gate":0}\n'
+  printf 'this is not json\n'; } > "$TMP/ts-bad.jsonl"
+out="$(python3 "$Q" judge --before "$TMP/ok-before.json" --after "$TMP/ok-after.json" \
+        --timeseries "$TMP/ts-bad.jsonl" --window-start 2026-01-01T00:00:00Z \
+        --window-end 2026-01-01T00:00:30Z 2>&1)"; rc=$?
+if [ "$rc" -ne 0 ] && grep -q 'REFUSED: QUIESCENCE_TIMESERIES_MALFORMED' <<<"$out"; then
+  pass "a malformed sampler line is an ERROR, not a skipped line"
+else
+  fail "a malformed timeseries line must be refused (rc=$rc, out: $(head -1 <<<"$out"))"
+fi
+
+# --timeseries without a window is a usage refusal: an unbounded window would judge samples
+# from a different run entirely.
+out="$(python3 "$Q" judge --before "$TMP/ok-before.json" --after "$TMP/ok-after.json" \
+        --timeseries "$TMP/ts-dirty.jsonl" 2>&1)"; rc=$?
+if [ "$rc" -ne 0 ] && grep -q 'QUIESCENCE_WINDOW_UNBOUNDED' <<<"$out"; then
+  pass "--timeseries without a window is refused (would judge another run's samples)"
+else
+  fail "--timeseries needs an explicit window (rc=$rc, out: $(head -1 <<<"$out"))"
+fi
+
+# A CLEAN window ACCEPTS, and the after-sample's load1 is recorded UNBOUNDED with its reason.
+{ printf '{"ts":"2026-01-01T00:00:00Z","load1":0.5,"rustc":0,"cargo":0,"gate":0}\n'
+  printf '{"ts":"2026-01-01T00:00:10Z","load1":2.9,"rustc":0,"cargo":0,"gate":0}\n'
+  printf '{"ts":"2026-01-01T00:00:20Z","load1":3.1,"rustc":0,"cargo":0,"gate":0}\n'; } > "$TMP/ts-clean.jsonl"
+mksample "$TMP/hot-after.json" 3.05 '[]'
+out="$(python3 "$Q" judge --before "$TMP/ok-before.json" --after "$TMP/hot-after.json" \
+        --timeseries "$TMP/ts-clean.jsonl" --window-start 2026-01-01T00:00:00Z \
+        --window-end 2026-01-01T00:00:30Z --out "$TMP/win.json" 2>&1)"; rc=$?
+if [ "$rc" -eq 0 ] && grep -q 'RECORDED, NOT BOUNDED' <<<"$out"; then
+  pass "a clean window ACCEPTS a hot-but-self-inflicted after-load, labelled not-bounded"
+else
+  fail "a clean window with a self-inflicted after-load must accept (rc=$rc, out: $(head -2 <<<"$out"|tr '\n' ' '))"
+fi
+# ...and that acceptance must NOT have skipped the before-bound: a genuinely busy ENTRY is
+# still refused even with a clean window, or the redesign would have removed the guard
+# rather than relocated it.
+mksample "$TMP/busy-before.json" 9.0 '[]'
+out="$(python3 "$Q" judge --before "$TMP/busy-before.json" --after "$TMP/ok-after.json" \
+        --timeseries "$TMP/ts-clean.jsonl" --window-start 2026-01-01T00:00:00Z \
+        --window-end 2026-01-01T00:00:30Z 2>&1)"; rc=$?
+if [ "$rc" -ne 0 ] && grep -q 'QUIESCENCE_LOAD_TOO_HIGH' <<<"$out"; then
+  pass "the BEFORE load bound survives the redesign (relocated, not removed)"
+else
+  fail "a busy entry state must still be refused (rc=$rc, out: $(head -1 <<<"$out"))"
 fi
 
 echo "== the census reads /proc directly, not via pgrep -f =="
@@ -175,7 +269,7 @@ fi
 # doing its job on its own author, and it is why the rule is "derive by running": a source count
 # is an estimate, and an estimate in a floor is either decorative (too low) or a false failure
 # (too high).
-MIN_CHECKS=12
+MIN_CHECKS=19
 if [ "$checks" -lt "$MIN_CHECKS" ]; then
   echo
   echo "FAIL - only $checks check(s) ran; this suite has at least $MIN_CHECKS."

@@ -138,9 +138,102 @@ def sample(self_pid: Optional[int] = None) -> Dict[str, object]:
     return {"load": load, "competing_count": len(comp), "competing": comp}
 
 
+def window_census_clean(timeseries: str, start: str, end: str) -> Dict[str, object]:
+    """Every sampler line in [start, end]: refuse if ANY shows a competing process.
+
+    This is STRONGER than two boundary samples and is the check the gate actually rests on.
+    Two instants cannot see a competitor that arrived after the first and left before the
+    second; a 10 s timeseries across the window can.
+    """
+    rows = []
+    with open(timeseries, encoding="utf-8") as fh:
+        for line in fh:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                rec = json.loads(line)
+            except ValueError:
+                # A malformed sampler line is an ERROR, not a line to skip: skipping it
+                # would let a truncated timeseries certify a window it never covered.
+                raise NotQuiescent(
+                    "QUIESCENCE_TIMESERIES_MALFORMED",
+                    f"{timeseries} carries an unparseable line; a timeseries that cannot be"
+                    " read in full cannot establish that the window was clean",
+                )
+            if start <= rec.get("ts", "") <= end:
+                rows.append(rec)
+    if not rows:
+        raise NotQuiescent(
+            "QUIESCENCE_TIMESERIES_EMPTY",
+            f"no sampler lines fall in [{start}, {end}] — the window is UNCOVERED, which"
+            " reads exactly like a clean one. An absent measurement is not a pass.",
+        )
+    dirty = [r for r in rows
+             if r.get("rustc") or r.get("cargo") or r.get("gate")]
+    if dirty:
+        raise NotQuiescent(
+            "QUIESCENCE_WINDOW_CONTAMINATED",
+            f"{len(dirty)} of {len(rows)} in-window sample(s) show a competing process,"
+            f" first at {dirty[0].get('ts')}: rustc={dirty[0].get('rustc')}"
+            f" cargo={dirty[0].get('cargo')} gate={dirty[0].get('gate')}",
+        )
+    loads = [r["load1"] for r in rows if "load1" in r]
+    return {
+        "samples": len(rows),
+        "competing_samples": 0,
+        "load1_min": min(loads) if loads else None,
+        "load1_max": max(loads) if loads else None,
+        "load1_mean": (sum(loads) / len(loads)) if loads else None,
+        "window": {"start": start, "end": end},
+    }
+
+
 def judge(before: Dict[str, object], after: Dict[str, object], *,
-          max_load1: float, max_movement: float) -> Dict[str, object]:
-    """Accept or refuse a rep from its two boundary samples. Refusal is fail-closed."""
+          max_load1: float, max_movement: float,
+          window: Optional[Dict[str, object]] = None,
+          after_settled: bool = False) -> Dict[str, object]:
+    """Accept or refuse a rep. Refusal is fail-closed.
+
+    THE LOAD BOUNDS ARE ASYMMETRIC, AND THE FIRST VERSION OF THIS FUNCTION WAS WRONG.
+    It applied the `load1` level and movement bounds to BOTH boundary samples, and then
+    refused this issue's own AC0 pass: `load1` at the after boundary read 3.05 against a
+    2.0 bound, with a competing census of ZERO at both boundaries and zero competing
+    processes across all 48 in-window sampler lines.
+
+    The box was clean. `load1` is a ONE-MINUTE EXPONENTIALLY-DECAYING AVERAGE, so a sample
+    taken immediately after a nine-minute CPU-bound measurement necessarily reads the
+    measurement's OWN residue. Bounding it there does not measure the box's quietness; it
+    measures how hard the rig just worked, and it would refuse every honest run of a
+    CPU-bound rig while passing a short one on a contended box.
+
+    The deeper lesson, and it is the same one the census-vs-`pgrep -f` bug taught one level
+    down: **attribute by process IDENTITY, not by aggregate load.** An aggregate cannot
+    distinguish my own load from a competitor's, which is exactly the confusion that made a
+    peer's `pgrep -c -f` report a busy box when it was idle. So:
+
+      * the competing-process CENSUS is the guard, applied at BOTH boundaries AND across
+        every in-window sampler line;
+      * the `load1` LEVEL bound applies to the BEFORE sample, where it is meaningful (is the
+        box quiet as we ENTER the window, including foreign load from processes the census
+        does not enumerate);
+      * the after sample's `load1` is RECORDED but NOT bounded unless the caller asserts it
+        was taken after settling, because otherwise it is self-inflicted.
+
+    The threshold was NOT loosened to make this issue's own run pass. The bound that fired
+    was removed from a place it could not be valid and kept where it can, and the binding
+    check was made STRONGER: 48 attributable samples instead of 2 ambiguous ones.
+    """
+    # There must ALWAYS be a binding in-window check. A run with neither a settled after
+    # sample nor a window timeseries has nothing establishing the window was clean, and
+    # "nothing" must not read as "clean".
+    if window is None and not after_settled:
+        raise NotQuiescent(
+            "QUIESCENCE_WINDOW_UNVERIFIED",
+            "neither a window timeseries nor a settled after-sample was supplied, so"
+            " nothing establishes that the measurement window was free of competing load."
+            " Pass --timeseries with --window-start/--window-end, or --after-settled.",
+        )
     for name, s in (("before", before), ("after", after)):
         comp = s["competing"]
         if comp:
@@ -154,27 +247,43 @@ def judge(before: Dict[str, object], after: Dict[str, object], *,
             )
     l1_before = before["load"]["load1"]
     l1_after = after["load"]["load1"]
-    for name, value in (("before", l1_before), ("after", l1_after)):
-        if value > max_load1:
+    # BEFORE only — see the docstring. This is the state the window was ENTERED in.
+    if l1_before > max_load1:
+        raise NotQuiescent(
+            "QUIESCENCE_LOAD_TOO_HIGH",
+            f"load1 at the before boundary is {l1_before} (> {max_load1}); the box was not"
+            " quiet as the window opened.",
+        )
+    movement = abs(l1_after - l1_before)
+    if after_settled:
+        if l1_after > max_load1:
             raise NotQuiescent(
                 "QUIESCENCE_LOAD_TOO_HIGH",
-                f"load1 at the {name} boundary is {value} (> {max_load1}).",
+                f"load1 at the SETTLED after boundary is {l1_after} (> {max_load1}).",
             )
-    movement = abs(l1_after - l1_before)
-    if movement > max_movement:
-        raise NotQuiescent(
-            "QUIESCENCE_LOAD_MOVED",
-            f"load1 moved {movement:.2f} between the boundaries ({l1_before} -> {l1_after},"
-            f" bound {max_movement}). A rep whose load moved mid-flight is INVALID, not slow:"
-            " it breaks the interleaving that makes the A/B comparison readable.",
-        )
+        if movement > max_movement:
+            raise NotQuiescent(
+                "QUIESCENCE_LOAD_MOVED",
+                f"load1 moved {movement:.2f} between the boundaries ({l1_before} ->"
+                f" {l1_after}, bound {max_movement}). A rep whose load moved mid-flight is"
+                " INVALID, not slow: it breaks the interleaving that makes A/B readable.",
+            )
     return {
         "verdict": "QUIESCENT",
         "load1_before": l1_before,
         "load1_after": l1_after,
+        "load1_after_is_bounded": bool(after_settled),
+        "load1_after_note": (
+            "bounded: the caller asserted this sample was taken after settling"
+            if after_settled else
+            "RECORDED, NOT BOUNDED: load1 is a 1-minute decaying average, so a sample taken"
+            " immediately after a CPU-bound window reads the window's own residue. The"
+            " binding in-window check is the timeseries census."
+        ),
         "load1_movement": movement,
         "competing_before": 0,
         "competing_after": 0,
+        "window_census": window,
         "thresholds": {"max_load1": max_load1, "max_load1_movement": max_movement},
         "before": before,
         "after": after,
@@ -192,6 +301,15 @@ def main(argv: Optional[list] = None) -> int:
     p_j.add_argument("--before", required=True)
     p_j.add_argument("--after", required=True)
     p_j.add_argument("--out", default=None)
+    p_j.add_argument("--timeseries", default=None,
+                     help="sampler JSONL; every line inside the window must show a zero"
+                          " competing census. This is the binding in-window check.")
+    p_j.add_argument("--window-start", default=None, help="ISO ts, inclusive")
+    p_j.add_argument("--window-end", default=None, help="ISO ts, inclusive")
+    p_j.add_argument("--after-settled", action="store_true",
+                     help="assert the after-sample was taken AFTER load settled, which"
+                          " licenses bounding its load1. Without it, or without"
+                          " --timeseries, the run is refused as unverified.")
     for p in (p_j,):
         p.add_argument("--max-load1", type=float, default=DEFAULT_MAX_LOAD1)
         p.add_argument("--max-load1-movement", type=float,
@@ -235,18 +353,35 @@ def main(argv: Optional[list] = None) -> int:
                   file=sys.stderr)
             return 1
 
+    window = None
     try:
+        if args.timeseries:
+            if not (args.window_start and args.window_end):
+                print("ws0_quiescence: REFUSED: QUIESCENCE_WINDOW_UNBOUNDED: --timeseries"
+                      " needs --window-start and --window-end; an unbounded window would"
+                      " judge samples from another run", file=sys.stderr)
+                return 2
+            window = window_census_clean(args.timeseries, args.window_start,
+                                         args.window_end)
         rec = judge(before, after, max_load1=args.max_load1,
-                    max_movement=args.max_load1_movement)
+                    max_movement=args.max_load1_movement,
+                    window=window, after_settled=args.after_settled)
     except NotQuiescent as exc:
         print(f"ws0_quiescence: REFUSED: {exc.cause}: {exc.detail}", file=sys.stderr)
         return 1
 
     if args.out:
         pathlib.Path(args.out).write_text(json.dumps(rec, indent=2, sort_keys=True) + "\n")
-    print(f"ws0_quiescence: {rec['verdict']} load1 {rec['load1_before']} -> "
-          f"{rec['load1_after']} (moved {rec['load1_movement']:.2f} <= "
-          f"{args.max_load1_movement}), competing 0 at both boundaries")
+    print(f"ws0_quiescence: {rec['verdict']}")
+    print(f"  competing census: 0 at both boundaries")
+    w = rec.get("window_census")
+    if w:
+        print(f"  in-window census: 0 competing across {w['samples']} sampler sample(s)"
+              f" [{w['window']['start']} .. {w['window']['end']}]")
+        print(f"  in-window load1:  min={w['load1_min']} max={w['load1_max']}"
+              f" mean={w['load1_mean']:.2f}  (recorded as context, not a gate)")
+    print(f"  load1 before: {rec['load1_before']} (bounded <= {args.max_load1})")
+    print(f"  load1 after:  {rec['load1_after']} — {rec['load1_after_note']}")
     return 0
 
 
