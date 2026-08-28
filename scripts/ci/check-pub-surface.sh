@@ -573,6 +573,40 @@ END {
     printf "V\tline %d: a depth-0 line ends in a bare visibility qualifier and the next line begins a module declaration, so the declaration is split across lines: `%s` / `%s`\n", i, squash(substr(ltrim(N[i]), 1, 40)), squash(substr(ltrim(N[vnext]), 1, 30))
   }
 
+  # --- Refusal Y: an outer attribute AFTER other code on the same line ----------
+  #
+  # The structured scan recognises an attribute only at the START of a line, so
+  # `const X: () = (); #[path = "actual.rs"]` followed by `pub mod probe;` DISCARDED the
+  # `#[path]`: both scans then agreed `probe` was OPEN and resolution certified a clean
+  # standard-path DECOY while the real, self-gated module went unexamined (roborev r21 F1).
+  #
+  # Same treatment as Refusals I and W, for the same reason: collecting a mid-line
+  # attribute means a second rule underneath the derivations' primary collection rule,
+  # where a defect becomes a blind spot they SHARE. Refuse instead.
+  #
+  # Scoped by DELIMITER DEPTH AT THE ATTRIBUTE, walked along the line, so an attribute
+  # inside a parameter list (`fn f(#[allow(x)] a: u8)`) or inside a macro token tree is
+  # untouched — those sit at depth > 0. MEASURED: zero such lines in the real lib.rs.
+  for (i = 1; i <= n; i++) {
+    if (!INCODE[i]) continue
+    if (!BRACE_UNRELIABLE && BRACE_MIN[i] != 0) continue
+    yline = N[i]
+    ypd = PDEPTH_START[i]
+    for (yk = 1; yk <= length(yline) - 1; yk++) {
+      yc = substr(yline, yk, 1)
+      if (yc == "(" || yc == "[") { ypd++; continue }
+      if (yc == ")" || yc == "]") { ypd--; continue }
+      if (ypd != 0) continue
+      if (yc != "#") continue
+      yrest = substr(yline, yk)
+      if (yrest !~ /^#[[:space:]]*!?[[:space:]]*\[/) continue
+      ybefore = substr(yline, 1, yk - 1)
+      if (ybefore ~ /^[[:space:]]*$/) break      # attribute starts the line: not ours
+      printf "Y\tline %d: an outer attribute FOLLOWS other code on the same line: `%s`\n", i, squash(substr(ltrim(yrest), 1, 60))
+      break
+    }
+  }
+
   # --- Refusal W: an INDENTED attribute at crate-root depth ---------------------
   #
   # Both derivations skip indented lines — that column-zero rule is what keeps them
@@ -640,8 +674,14 @@ END {
         sc2 = substr(rest, sk, 1)
         if (sc2 == "{") sdepth++
         else if (sc2 == "}") sdepth--
-        else if (sc2 == "(") spdepth++
-        else if (sc2 == ")") spdepth--
+        # BRACKETS TOO (roborev r21 F2). normalize()'s CROSS-LINE counter already tracked
+        # `[`/`]`; this within-line walk did not, so a single-line `swallow![ pub mod
+        # phantom; ];` was collected by S and not by P — the mandatory gate rejecting valid
+        # Rust. THIRD time one fix needed two homes on this issue, and the second time the
+        # two homes were the cross-line and within-line halves of the SAME counter. When a
+        # depth notion exists in two places, change both in one edit.
+        else if (sc2 == "(" || sc2 == "[") spdepth++
+        else if (sc2 == ")" || sc2 == "]") spdepth--
       }
       nm = substr(rest, RSTART + 8, RLENGTH - 8)
       sub(/[[:space:]]*;$/, "", nm)
@@ -848,6 +888,12 @@ fi
 # A `pub mod` shape NEITHER derivation consumed. This is NOT a disagreement between
 # the two derivations — it is a blind spot they SHARE, which is precisely why the
 # cross-check further down cannot catch it and why this refusal is its own channel.
+if grep -q '^Y	' "$SCAN_RAW"; then
+  echo "" >&2
+  grep '^Y	' "$SCAN_RAW" | cut -f2- >&2
+  fail "the crate root $LIB_RS_REL carries an outer attribute AFTER other code on the same line (see above). The structured scan recognises an attribute only at the START of a line, so such an attribute is DISCARDED — and it is not inert: \`#[path = \"...\"]\` redirects the module file and \`#[cfg(...)]\` gates the declaration. A \`#[path]\` hidden this way makes the guard resolve a clean standard-path DECOY while the real, self-gated module goes unexamined. Collecting mid-line attributes would put a second rule underneath the derivations' primary collection rule, where a defect becomes a blind spot they SHARE, so the guard refuses instead. Remedy: put the attribute on its own line at column zero."
+fi
+
 if grep -q '^W	' "$SCAN_RAW"; then
   echo "" >&2
   grep '^W	' "$SCAN_RAW" | cut -f2- >&2

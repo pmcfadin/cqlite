@@ -1807,6 +1807,62 @@ done
 echo "OK (55): macro token trees spanning lines are not declarations, and an INDENTED crate-root attribute REFUSES — while indented attributes inside mod blocks, structs and token trees stay GREEN"
 
 # ---------------------------------------------------------------------------
+# 56. RED+GREEN — an attribute AFTER other code on a line, and BRACKET token trees
+#     (roborev r21 F1 / F2).
+#
+#     F1 was a FALSE PASS: the structured scan recognises an attribute only at a line's
+#     START, so `const X: () = (); #[path = "actual.rs"]` above a column-zero
+#     `pub mod probe;` DISCARDED the `#[path]` — both scans agreed `probe` was OPEN and
+#     resolution certified a clean standard-path DECOY while the real self-gated module
+#     went unexamined. Refusal Y refuses it, scoped by DELIMITER DEPTH AT THE ATTRIBUTE so
+#     a parameter-list attribute and a token-tree attribute are untouched.
+#
+#     F2 was a FALSE FAIL, and it was an inconsistency of ours: normalize()'s CROSS-LINE
+#     counter tracked `[`/`]` but derivation S's WITHIN-LINE walk did not, so a single-line
+#     `swallow![ pub mod phantom; ];` was collected by S and not by P. Third time on this
+#     issue that one fix needed two homes — and the second time the two homes were the
+#     cross-line and within-line halves of the SAME counter.
+# ---------------------------------------------------------------------------
+scratch_tree attr-after-item-decoy; wt56="$SCRATCH"
+printf '\nconst PROBE_XX: () = (); #[path = "probe_actual.rs"]\npub mod probe_decoy;\n' >>"$wt56/cqlite-core/src/lib.rs"
+printf '//! CLEAN DECOY at the standard path\npub fn p() {}\n' >"$wt56/cqlite-core/src/probe_decoy.rs"
+printf '#![cfg(feature = "benchmarks")]\n//! the REAL module, and it gates itself\npub fn p() {}\n' >"$wt56/cqlite-core/src/probe_actual.rs"
+set +e
+bash "$wt56/$GUARD_REL" >"$TMPROOT/case56.out" 2>&1
+c56rc=$?
+set -e
+[ "$c56rc" -ne 0 ] || fail_case "case 56 — an attribute FOLLOWING other code on the same line was discarded, so the guard certified a clean DECOY while the real module gates itself; got: $(cat "$TMPROOT/case56.out")"
+grep -qF "FOLLOWS other code" "$TMPROOT/case56.out" \
+  || fail_case "case 56 — refused, but not via Refusal Y; got: $(cat "$TMPROOT/case56.out")"
+
+# F2's GREEN: bracket-delimited token trees, single-line and multiline.
+c56_i=0
+for c56b in 'swallow![ pub mod phantom; ];' 'swallow![\n    pub mod phantom;\n];' 'swallow!( pub mod phantom; );'; do
+  c56_i=$((c56_i + 1))
+  scratch_tree "tokentree-bracket-$c56_i"; wt56b="$SCRATCH"
+  printf '\n%b\n' "$c56b" >>"$wt56b/cqlite-core/src/lib.rs"
+  set +e
+  bash "$wt56b/$GUARD_REL" >"$TMPROOT/case56b.out" 2>&1
+  c56b_rc=$?
+  set -e
+  [ "$c56b_rc" -eq 0 ] || fail_case "case 56(b$c56_i) — a bracket- or paren-delimited token tree was read as a crate-root declaration; the within-line and cross-line depth counters must agree on which delimiters they track; got: $(cat "$TMPROOT/case56b.out")"
+done
+
+# GREEN scoping controls for Refusal Y.
+c56_j=0
+for c56g in 'pub fn probe_pf(#[allow(unused)] a: u8) { let _ = a; }' 'swallow!(\n    #[path = "x.rs"]\n    pub mod phantom;\n);' 'const PROBE_YY: u8 = 1;'; do
+  c56_j=$((c56_j + 1))
+  scratch_tree "attr-after-item-scoped-$c56_j"; wt56g="$SCRATCH"
+  printf '\n%b\n' "$c56g" >>"$wt56g/cqlite-core/src/lib.rs"
+  set +e
+  bash "$wt56g/$GUARD_REL" >"$TMPROOT/case56g.out" 2>&1
+  c56g_rc=$?
+  set -e
+  [ "$c56g_rc" -eq 0 ] || fail_case "case 56(g$c56_j) — Refusal Y fired on an attribute at delimiter depth > 0 (a parameter list or a macro token tree) or on an ordinary item; it is scoped by depth AT THE ATTRIBUTE; got: $(cat "$TMPROOT/case56g.out")"
+done
+echo "OK (56): an attribute FOLLOWING other code on a line REFUSES, and bracket-delimited token trees are not declarations — while parameter-list attributes, token-tree attributes and ordinary items stay GREEN"
+
+# ---------------------------------------------------------------------------
 # 36. GREEN — THE POSITIVE CONTROL for 29-38.
 #
 #     Without it, every case above would be satisfied by a guard hardwired to refuse
@@ -1905,4 +1961,4 @@ grep -qF "affirmative measurement" "$TMPROOT/case39.out" \
 echo "OK (39): a crate root with ZERO unconditional declarations FAILs — the assert never reports success having examined nothing"
 
 echo ""
-echo "PASS: test_pub_surface_guard.sh — all 40 cases (9 green, 29 reds, 1 usage, 1 kill-safety)"
+echo "PASS: test_pub_surface_guard.sh — all 41 cases (9 green, 30 reds, 1 usage, 1 kill-safety)"
