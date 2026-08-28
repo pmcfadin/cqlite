@@ -1870,7 +1870,11 @@ for fn_ in run_legacy_heuristics run_feature_iso; do
   fi
 done
 
-# --- 18. #1699: the co-required-feature census counts TEST BODIES, not cfg sites ------
+# --- 18. #1699: the co-required-feature census reports cfg SITES (descoped, round 10) ---
+#
+# This header used to read "counts TEST BODIES, not cfg sites" — the exact claim round 10 DESCOPED and
+# §24 now forbids (`1699-r10-no-classification`). A stale header in the file that pins the descope is a
+# small instance of this issue's own defect, so it is corrected rather than left as harmless prose.
 #
 # roborev round-5 finding (Low). The first census grepped a single-line, fixed-ORDER cfg
 # pattern and counted MATCHING ATTRIBUTES, so a gated `use` import was reported as an
@@ -2831,6 +2835,85 @@ else
   else
     bad "1699-r17-observed-wired: the legacy lane does not call check_test_targets_observed — an uncalled guard is decoration"
   fi
+fi
+
+# --- 33. #1699: the coverage CENSUS is the deliverable of the descope, so it is pinned ----
+#
+# C intent audit finding (P1): nothing anywhere asserted the census. Deleting the emitter broke no test.
+# That is the sharpest kind of gap on this issue, because the spec says in as many words that "the
+# deliverable of the descope is the DECLARATION, not the narrowing" — so the census was the one output
+# whose absence should have been loudest, and it was the one output with no guard at all.
+#
+# STRUCTURAL, and honest about being so: the census is emitted from inside run_flight_tests around a real
+# cargo invocation, so driving it behaviourally means a compile. What a structural assert DOES buy is
+# exactly what the audit asked for — deleting or hollowing the emitter now reds — and it checks each
+# required ELEMENT rather than merely that some census-shaped text exists.
+# A LINE-comment strip, not a trailing-`#` strip, for these checks specifically. The trailing form
+# deleted `#3384` from INSIDE the census strings and false-FAILED three elements that were present —
+# the same oracle-mangles-its-own-input shape that has bitten twice already in this issue. Dropping only
+# whole comment LINES keeps issue references inside `echo` text while still removing prose that merely
+# mentions them.
+ft_lines="$tmp/1699-ftfn-lines.txt"; grep -v '^[[:space:]]*#' "$ft_body" > "$ft_lines" 2>/dev/null || : 
+lh_lines="$tmp/1699-lhfn-lines.txt"; grep -v '^[[:space:]]*#' "$lh_body" > "$lh_lines" 2>/dev/null || :
+if [ -s "$ft_code" ]; then
+  # (a) the count must be DERIVED at run time, never hard-coded: an understated gap is the silent
+  #     under-report this lane exists to remove.
+  if [ "$(grep -cE 'declares .*integration|_package_test_targets|cargo metadata' "$ft_code")" -gt 0 ] \
+     && [ "$(grep -cE 'declares 4[0-9] integration' "$ft_code")" -eq 0 ]; then
+    ok "1699-census-derived: the Flight census counts its integration targets at run time (no hard-coded number)"
+  else
+    bad "1699-census-derived: the Flight census appears to hard-code its target count — an understated gap cannot drift into a false claim only if the number is derived"
+  fi
+  # (b) each required element of the declaration.
+  for el_ in 'EXECUTES NONE OF THEM' 'WHY' '3384' '3383' 'flight-ci' 'DECLARED, not silent'; do
+    if [ "$(grep -cF "$el_" "$ft_lines")" -gt 0 ]; then
+      ok "1699-census-element: the Flight census states '$el_'"
+    else
+      bad "1699-census-element: the Flight census no longer states '$el_' — the declaration is what this lane trades its coverage for, so a hollowed census is a silent narrowing"
+    fi
+  done
+  # (c) BOTH sinks. A gap that appears only on stdout is a gap nobody reads in CI; one only in the log is
+  #     a gap nobody reads locally.
+  if [ "$(grep -cE '>>> \[\$name\]|>>> \[flight' "$ft_lines")" -gt 0 ] && [ "$(grep -cE '"\$log"' "$ft_lines")" -gt 0 ]; then
+    ok "1699-census-both-sinks: the Flight census reaches both stdout and the component log"
+  else
+    bad "1699-census-both-sinks: the Flight census no longer reaches both stdout and the component log"
+  fi
+fi
+if [ -s "$lh_code" ]; then
+  for el_ in 'COVERAGE CENSUS' 'Sites, not bodies' '3373' 'where:'; do
+    if [ "$(grep -cF "$el_" "$lh_lines")" -gt 0 ]; then
+      ok "1699-census-lh-element: the legacy census states '$el_'"
+    else
+      bad "1699-census-lh-element: the legacy census no longer states '$el_'"
+    fi
+  done
+fi
+
+# --- 34. #1699: the isolation lanes' INSTRUMENT is pinned (C audit P1) -------------------
+#
+# Nothing forbade reverting `cargo test --lib --no-run` to `cargo check`. That matters because the
+# difference IS the requirement: `cargo check` does not compile the lib's `#[cfg(test)]` modules and is
+# therefore blind to the #1978 incident class (a feature-orphaned test-only helper) these lanes exist to
+# catch. An earlier draft of the spec mandated `cargo check` here and contradicted the mutual-isolation
+# requirement; the spec is fixed, and this pins the code so the two cannot drift apart again.
+if [ -s "$tmp/1699-lanefn-run_feature_iso-code.txt" ]; then
+  fi_="$tmp/1699-lanefn-run_feature_iso-code.txt"
+  for req_ in -- '--lib' '--no-run' '--no-default-features' 'all-compression,'; do
+    [ "$req_" = "--" ] && continue
+    if [ "$(grep -cF -- "$req_" "$fi_")" -gt 0 ]; then
+      ok "1699-iso-instrument: run_feature_iso still passes $req_"
+    else
+      bad "1699-iso-instrument: run_feature_iso no longer passes $req_ — the instrument IS the requirement here"
+    fi
+  done
+  for forbid_ in 'cargo check' '--all-targets' '--all-features'; do
+    if [ "$(grep -cF -- "$forbid_" "$fi_")" -eq 0 ]; then
+      ok "1699-iso-forbidden: run_feature_iso does not use '$forbid_'"
+    else
+      bad "1699-iso-forbidden: run_feature_iso uses '$forbid_' — cargo check is blind to cfg(test) (#1978), --all-targets pulls in ~100 default-feature integration files (measured noise), and --all-features defeats mutual isolation entirely"
+    fi
+  done
 fi
 
 echo "----"

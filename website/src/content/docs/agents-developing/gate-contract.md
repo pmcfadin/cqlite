@@ -181,8 +181,8 @@ The gate mirrors the enforced CI gates (`.github/workflows/ci.yml`,
 | `cli-tests` | `cargo test -p cqlite-cli --test unit_tests` |
 | `tooling-tests` | `bash scripts/tests/test_agent_gate_summary.sh` (SUMMARY-capture regression, #1175; SKIP-aware on missing python3) |
 | `minimal-build` | `cargo build -p cqlite-core --no-default-features --features all-compression` |
-| `flight-tests` | `cargo test --no-fail-fast -p cqlite-flight` — the WHOLE package (issue #1699) |
-| `legacy-heuristics` | `cargo build -p cqlite-core --features legacy-heuristics`, then `cargo test --no-fail-fast … --lib` + `--test` targets DERIVED from `cqlite-core/tests/*.rs` (#1699) |
+| `flight-tests` | `cargo test --no-fail-fast -p cqlite-flight --lib --bins` — the UNIT suite only, plus a mandatory run-time census naming the 42 integration targets it does NOT run (issue #1699; descoped on measurement, #3384) |
+| `legacy-heuristics` | `cargo build -p cqlite-core --features legacy-heuristics`, then `cargo test --no-fail-fast … --lib` + `--test` targets DERIVED from **cargo metadata** — membership by a cfg site anywhere in the target's module closure, or by `required-features` (#1699) |
 | `feature-iso-parquet` | `cargo test -p cqlite-core --no-default-features --features all-compression,parquet --lib --no-run` — **without** `delta-scan` (#1699) |
 | `feature-iso-delta-scan` | the mirror — **without** `parquet` (#1699) |
 | `smoke` | `bash test-data/scripts/smoke-test-all-tables.sh` (against a freshly built debug binary) |
@@ -210,12 +210,30 @@ default features, and fails on `storage::serialization`, `storage::write_engine`
 being configured out. That is noise, not leakage. `--lib --no-run` compiles the lib **with** its `cfg(test)`
 modules and pulls in no integration target; `minimal-build` is the precedent.
 
-**Derive, never curate.** Both executing lanes compute their `--test` target set and their allowed-zero set
-from committed source at run time — the legacy lane by grepping for the cfg *attribute shape* (a doc comment
-is not a cfg site), the Flight lane from each file's module-level `#![cfg]` versus cargo's **resolved**
-feature set. So a newly added gated file is picked up, and a feature joining `default` shrinks the excusal
-set, with no gate edit. Unrecognised `#![cfg]` shapes (`any(…)`, `not(…)`, mixed predicates) are **not**
-excused — one absent feature does not prove the file compiles out. A failed derivation is a FAIL naming the
+**A narrowed lane DECLARES its narrowing, at run time, on every run.** `flight-tests` executes the unit suite
+only, and prints a census naming how many integration targets it does not run (counted from `cargo metadata`,
+never hard-coded), why (their ~50% non-determinism, #3384/#3383), and who does run them (CI's Flight tier,
+which `required` fails closed on). This is not politeness: a lane that omits coverage silently is
+indistinguishable from one that covers it, which is the defect this whole component set exists to remove — so
+a silent narrowing would reintroduce it one level down.
+
+**Derive, never curate.** Both executing lanes compute their subject set from committed source at run time,
+so a newly added gated file is picked up and a feature joining `default` shrinks the excusal set, with no gate
+edit:
+
+- **`legacy-heuristics`** takes its candidate targets from **cargo metadata** — not a `tests/*.rs` glob, which
+  cannot see a target gated only by `required-features` nor a directory-style `tests/foo/main.rs` — and
+  includes one when a cfg site appears anywhere in that target's **module closure** (`mod` declarations in
+  every visibility form, plus `#[path]`, resolved transitively). Its allowed-zero set is derived the same way:
+  a target is excused only when NO file in its closure carries a surviving positive cfg site, and a
+  manifest-gated target is never excused at all.
+- **`flight-tests`** derives its unit-target set (lib + every bin) from cargo metadata, so a newly added
+  binary cannot run zero tests unnoticed — a hard-coded list beside a `--bins` selector is a second registry
+  that drifts silently.
+
+A cfg shape the census cannot evaluate — `any(…)`, `not(…)`, `cfg_attr` — is reported **unclassified**, never
+excused: a token list cannot tell a conjunction from a disjunction, and `any(legacy-heuristics, X)` is
+*reachable* here. A failed derivation is a FAIL naming the
 derivation, never a fallback to "nothing enabled", which would silently excuse every gated target.
 
 **`--no-fail-fast` on both executing lanes.** `cargo test` stops after the first failing test *binary*, and a

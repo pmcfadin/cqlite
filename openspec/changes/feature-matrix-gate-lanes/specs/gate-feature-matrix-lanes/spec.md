@@ -397,19 +397,43 @@ requires an affirmative measurement", applied to the harness's own verdict.
 The change SHALL report **two distinct cost numbers**, neither presented as the other:
 
 1. the **per-component durations** of the four new lanes, read from the full-gate SUMMARY block;
-2. the **added wall-clock time** of the full gate, measured as a baseline full run at the merge base versus
-   the gate of record on this branch, run **sequentially on one machine** (one gate at a time, #2640).
+2. the **added wall-clock time** of the full gate, measured as `max(0, SIDE_total − MAIN_total)` from the
+   gate of record's OWN per-component durations.
 
-The second number SHALL NOT be derived by summing the first: three of the four lanes run in the SIDE lane
-concurrently with MAIN, so the sum overstates the added wall time.
+The second number SHALL NOT be derived by summing the first: all four lanes run in the SIDE lane
+concurrently with MAIN, so the sum overstates the added wall time — possibly to ≈0.
 
-The isolation lanes SHALL use `cargo check` rather than a full build, keeping their cost proportionate to
-their purpose.
+**The measurement METHOD is prescribed, and an earlier version of this requirement prescribed one that
+cannot be taken here.** It mandated a baseline full run at the merge base versus the gate of record, run
+sequentially on one machine. That was attempted and **abandoned mid-run**: this worker box hosts five lane
+worktrees and sustained a load average of 52–86 on 16 cores during the baseline, so a four-component delta
+cannot be recovered from two totals whose noise exceeds the delta, and the "after" run would sit under
+different load again. Publishing that subtraction would have been a number with no measurement behind it.
+
+The replacement is **load-independent and single-run**: concurrent work adds wall time only insofar as it
+outlasts MAIN, so if MAIN still finishes last the four lanes cost **zero** added wall time, and if SIDE
+finishes last the added time is exactly its excess. Both lanes are inside the same run under the same load,
+so the figure is immune to whole-box contention. Where the reported figure was taken with build caches
+pruned, that SHALL be stated, and both lanes' caches SHALL have been pruned **symmetrically** — pruning only
+SIDE would make SIDE look slow against a warm MAIN and inflate the very number being reported.
+
+The instrument the isolation lanes use is governed by the mutual-isolation requirement above
+(`cargo test --lib --no-run`), NOT by this requirement. An earlier version mandated `cargo check` here,
+which contradicted it: `cargo check` does not compile the lib's `#[cfg(test)]` modules and is therefore blind
+to the #1978 incident class these lanes exist to catch.
 
 #### Scenario: Both cost numbers are posted
 - **WHEN** the PR is opened
-- **THEN** its body carries the four per-component durations from the SUMMARY and the baseline-versus-after
-  full-gate totals, each labelled as what it is
+- **THEN** its body carries the four per-component durations from the SUMMARY **and** the
+  `max(0, SIDE_total − MAIN_total)` figure computed from that same SUMMARY, each labelled as what it is
+- **AND** neither is presented as the other, and the sum of the per-component durations is not offered as the
+  added wall time
+
+#### Scenario: A cost figure whose method could not be applied is not invented
+- **GIVEN** a measurement method this requirement prescribes that cannot be applied on the host in question
+- **WHEN** the cost is reported
+- **THEN** the report states which method was used and why the prescribed one was not applicable
+- **AND** it does NOT publish a figure produced by a method that was not actually carried out
 
 ### Requirement: Doctrine states what the full gate now certifies
 
