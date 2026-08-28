@@ -12,9 +12,9 @@
 //! `ForcedReadPathUnavailable`, `InvalidReadPath`).
 //!
 //! Both sides are derived PROGRAMMATICALLY, so there is no second hand-maintained
-//! list to drift. Cross-block rule (epic #1686 capstone §3): `classify()` is the
-//! authority the bindings' error table derives from, so the core table must be
-//! exact.
+//! list to drift. This taxonomy is TELEMETRY-ONLY: the language bindings read
+//! `ffi_error_contract` (issue #1451), which mirrors the distinct
+//! `Error::category()` enum, not `classify()`.
 //!
 //! # Where the code side's authority comes from (roborev B1 on this issue)
 //!
@@ -726,9 +726,9 @@ fn the_maps_from_parser_rejects_prose_that_smuggles_a_behavioural_claim() {
 
 #[test]
 fn every_error_variant_classify_routes_is_documented_in_the_taxonomy_table() {
-    // Issue #1705 (AI5) — the RED test. `classify()` is the authority the
-    // bindings' error table derives from (epic #1686 capstone §3), and its
-    // module-doc table is what operators and binding authors read. Assert
+    // Issue #1705 (AI5) — the RED test. `classify()`'s module-doc table is what
+    // operators read for telemetry (the bindings read `ffi_error_contract`
+    // instead — see the module doc). Assert
     // variant→category set equality in BOTH directions:
     //
     //   * a variant `classify()` routes but the table omits  → undocumented

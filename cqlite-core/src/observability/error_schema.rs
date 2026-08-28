@@ -45,9 +45,12 @@
 //! fail-closed — a non-parenthetical item that is not a backticked variant name,
 //! or a parenthetical that claims catch-all behaviour, reds the guard rather than
 //! being silently dropped as prose (which is how the stale "any future variant
-//! (catch-all)" claim survived here). Cross-block rule (epic #1686 capstone §3):
-//! [`classify`] is the authority the language bindings' error tables derive from,
-//! so this table is what those tables must mirror.
+//! (catch-all)" claim survived here).
+//!
+//! **Scope: telemetry only.** The language bindings do NOT derive from
+//! [`classify`]: `crate::ffi_error_contract` (issue #1451) mirrors the distinct
+//! [`Error::category`](crate::error::Error::category) enum, and nothing pins the
+//! two together — `QueryTimeout` is `Timeout` here and `Query` there.
 //!
 //! # Relation to spans and CLI exit codes
 //!
