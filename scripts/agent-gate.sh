@@ -4865,10 +4865,55 @@ _ansi_stripped_log() {
   fi
 }
 
+# check_test_targets_observed <label> <logfile> <expected-id>... — every expected integration
+# target must appear as a `Running` banner in the log.
+#
+# roborev round-17 preferred this POSITIVE form alongside the zero-test check, and it is the
+# right shape: check_no_unexpected_zero_tests can only judge targets it SAW, so a target that
+# never appeared at all is invisible to it. This lane derives its target set, so it can assert
+# the stronger claim — "these are the targets that executed" — instead of assuming it.
+#
+# Ids are spelled as the guard spells them (tests-relative under tests/, package-relative
+# otherwise), so the two agree by construction.
+check_test_targets_observed() {
+  local label="$1" logfile="$2"; shift 2
+  local -a expected=("$@")
+  if [ "${#expected[@]}" -eq 0 ]; then
+    echo "$label: FAIL-CLOSED — check_test_targets_observed called with NO expected target; a guard with an empty subject set reports OK having measured nothing (issue #1699)." >&2
+    return 1
+  fi
+  local src seen="" missing="" line t e
+  src=$(_ansi_stripped_log "$logfile" 2>/dev/null) || src=""
+  if [ -z "$src" ] || [ ! -r "$src" ]; then
+    echo "$label: FAIL-CLOSED — could not prepare '$logfile' for parsing, so no target could be observed (issue #1699)." >&2
+    return 1
+  fi
+  while IFS= read -r line; do
+    case "$line" in
+      *"Running tests/"*)
+        t=$(printf '%s' "$line" | sed -E "s#.*Running tests/([^[:space:]]+)\\.rs.*#\\1#")
+        seen="$seen $t " ;;
+      *"Running "*".rs"*)
+        case "$line" in *"Running unittests"*) continue ;; esac
+        t=$(printf '%s' "$line" | sed -E "s#.*Running ([^[:space:]]+)\\.rs.*#\\1#")
+        seen="$seen $t " ;;
+    esac
+  done < "$src"
+  for e in "${expected[@]}"; do
+    case "$seen" in *" $e "*) ;; *) missing="$missing $e" ;; esac
+  done
+  if [ -n "$missing" ]; then
+    echo "$label: FAIL-CLOSED — derived target(s)$missing produced no 'Running' banner, so they did NOT execute. The zero-test guard cannot see this: it judges only targets it observed, and an absent target is not an observed one (issue #1699, roborev round-17)." >&2
+    return 1
+  fi
+  return 0
+}
+export -f check_test_targets_observed
+
 check_no_unexpected_zero_tests() {
   local label="$1" logfile="$2"; shift 2
   local allowed_zero=" $* "
-  local bad="" target=""
+  local bad="" target="" _banners=0 _results=0 _unit_banners=0
   # FAIL CLOSED if the log cannot be prepared or read (roborev round-16, HIGH). Without
   # this, ANY failure to resolve the parse source — an unexported helper, a deleted file, a
   # sed that could not write — leaves the read loop with nothing to consume, and a guard that
@@ -4902,18 +4947,44 @@ check_no_unexpected_zero_tests() {
     # version is pinned by a behavioural log fixture rather than by its own existence.
     if [[ "$line" == *"Running tests/"* ]]; then
       target=$(printf "%s" "$line" | sed -E "s#.*Running tests/([^[:space:]]+)\.rs.*#\1#")
-    elif [[ "$line" == *"Running "*".rs"* ]] && [[ "$line" != *"Running unittests"* ]]; then
+      _banners=$((_banners + 1))
+    elif [[ "$line" == *"Running unittests"* ]]; then
+      # NOT this guard's subject — check_unittest_targets_ran owns --lib/--bins targets. But
+      # it is COUNTED, because the affirmative check below must not red a legitimately
+      # unittest-only log (a `--lib` selection produces nothing else). Without this the new
+      # round-17 check turned a correct log into a false red; the complement assert caught it.
+      _unit_banners=$((_unit_banners + 1))
+      target=""
+    elif [[ "$line" == *"Running "*".rs"* ]]; then
       # `--lib`/`--bins` unittest lines are check_unittest_targets_ran's subject, not ours.
       target=$(printf "%s" "$line" | sed -E "s#.*Running ([^[:space:]]+)\.rs.*#\1#")
+      _banners=$((_banners + 1))
     elif [[ "$line" == "test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out"* ]]; then
+      _results=$((_results + 1))
       if [ -n "$target" ] && [[ "$allowed_zero" != *" $target "* ]]; then
         bad="$bad $target"
       fi
       target=""
     elif [[ "$line" == "test result:"* ]]; then
+      _results=$((_results + 1))
       target=""
     fi
   done < "$_parse_src"
+  # AN AFFIRMATIVE MEASUREMENT, not the absence of a bad signal (roborev round-17, HIGH).
+  # Round 16 made this guard fail when it could not READ its input; that was not enough. A
+  # non-empty, perfectly readable log can still contain no PARSEABLE `Running` banner — a
+  # cargo output-format change, a normalisation that drops the line, output suppressed by a
+  # wrapper — and then `target` and `bad` both stay empty and the guard returns SUCCESS even
+  # for `test result: ok. 0 passed`. The vacuous green this whole change exists to close,
+  # surviving two rounds of closing it.
+  #
+  # So: if the log contains test RESULTS, at least one banner must have been ATTRIBUTED to a
+  # target. Results with zero recognised banners means the parse is broken, not that
+  # everything is fine — and "the parse is broken" is never a pass.
+  if [ "$_results" -gt 0 ] && [ "$_banners" -eq 0 ] && [ "$_unit_banners" -eq 0 ]; then
+    echo "$label: FAIL-CLOSED — '$logfile' contains $_results cargo test-result line(s) but NOT ONE parseable 'Running <path>.rs' banner, so no result could be attributed to a target. The parse is broken (a cargo format change, a normalisation that dropped the line, or suppressed output); a guard that attributed nothing has measured nothing and must never report OK (issue #1699, roborev round-17)." >&2
+    return 1
+  fi
   if [ -n "$bad" ]; then
     echo "$label: FAIL-CLOSED —$bad ran 0 tests unexpectedly (issue #2039: a target whose body is #[cfg]-gated out at this component's feature set, and not on the allowed-zero list, would otherwise silently never run)" >&2
     return 1
@@ -6409,7 +6480,7 @@ run_legacy_heuristics() {
   # wrapper and asking whether any cfg-shaped reference survives — mechanical, so a
   # file that gains a positive site stops being allowed-zero with no gate edit.
   local tests_dir="$REPO_ROOT/cqlite-core/tests"
-  local -a targets=() allow_zero=()
+  local -a targets=() allow_zero=() observe_ids=()
   local cfg_site='feature[[:space:]]*=[[:space:]]*"legacy-heuristics"'
   local names="" negonly="" f base count=0 srcs=""
   # CANDIDATES FROM CARGO, NOT A GLOB (roborev round-7 finding). See
@@ -6430,7 +6501,7 @@ run_legacy_heuristics() {
     echo ">>> [$name] $status ($((end - start))s)"
     return 0
   fi
-  local _mt_name _mt_src _mt_how _mt_rel _mt_dir _mt_hit _mt_cf
+  local _mt_name _mt_src _mt_how _mt_rel _mt_dir _mt_hit _mt_cf _obs_id
   while IFS="$(printf '\t')" read -r _mt_name _mt_src _mt_how _mt_rel; do
     [ -n "$_mt_name" ] || continue
     f="$_mt_src"
@@ -6476,6 +6547,14 @@ EOF
       [ "$_mt_hit" -eq 1 ] || continue
     fi
     base="$_mt_name"
+    # The observation set is EVERY selected target, spelled the guard's way, so the lane can
+    # assert that each one actually ran (round-17). Distinct from allow_zero, which only says
+    # which of them may legitimately run zero tests.
+    _obs_id="$_mt_rel"
+    case "$_mt_rel" in
+      tests/*) _obs_id="${_mt_rel#tests/}" ;;
+    esac
+    observe_ids+=("${_obs_id%.rs}")
     # The census subject is the UNION of every included target's module tree, deduped later
     # (a shared `common/mod.rs` is one site, not one per target that includes it).
     local _cf
@@ -6780,6 +6859,7 @@ EOF
     # (3478 observed at this feature set) are half of what this lane claims to execute.
     if check_no_unexpected_zero_tests "$name" "$log" \
         ${allow_zero[@]+"${allow_zero[@]}"} 2>>"$log" \
+        && check_test_targets_observed "$name" "$log" ${observe_ids[@]+"${observe_ids[@]}"} 2>>"$log" \
         && check_unittest_targets_ran "$name" "$log" "${lh_unit_srcs[@]}" 2>>"$log"; then
       echo ">>> [$name] zero-test guards: integration targets + unit suite (derived): ${lh_unit_srcs[*]}"
       status=PASS

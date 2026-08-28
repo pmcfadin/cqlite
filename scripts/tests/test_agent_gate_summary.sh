@@ -2772,6 +2772,67 @@ if [ -s "$zn_h" ]; then
   fi
 fi
 
+# --- 32. #1699: results with NO recognised banner is a broken parse, not a pass (round-17) --
+#
+# Round 16 made the guard fail when it could not READ its input. That was not enough: a
+# non-empty, perfectly readable log can contain no PARSEABLE `Running` banner (a cargo format
+# change, a normalisation that drops the line, output suppressed by a wrapper) and then both
+# `target` and `bad` stay empty and the guard returns SUCCESS even for
+# `test result: ok. 0 passed`. The vacuous green surviving two rounds of closing it. So the
+# guard now demands an AFFIRMATIVE attribution: results present ⇒ at least one banner
+# recognised.
+if [ -s "$zn_h" ]; then
+  nb="$tmp/1699-r17-nobanner.log"
+  printf 'some preamble line\nrunning 0 tests\ntest result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out\n' > "$nb"
+  if ( . "$zn_h"; check_no_unexpected_zero_tests "nobanner" "$nb" >/dev/null 2>&1 ); then
+    bad "1699-r17-nobanner: a log with test RESULTS but no recognisable 'Running' banner PASSED — nothing was attributed to a target, so the guard measured nothing and reported OK"
+  else
+    ok "1699-r17-nobanner: results with zero recognised banners is a FAIL (the parse is broken, and a broken parse is never a pass)"
+  fi
+  # Complement: a log with NO results at all must not be forced to fail — some components
+  # legitimately produce no test-result lines, and reddening there would be a false red.
+  nrl="$tmp/1699-r17-noresults.log"
+  printf '   Compiling foo v0.1.0\n    Finished test profile\n' > "$nrl"
+  if ( . "$zn_h"; check_no_unexpected_zero_tests "noresults" "$nrl" >/dev/null 2>&1 ); then
+    ok "1699-r17-noresults-complement: a log with no test results at all is not forced to FAIL (the check keys on results PRESENT, not on banners absent)"
+  else
+    bad "1699-r17-noresults-complement: a log with no test results now FAILS — the affirmative check is over-reaching into a false red"
+  fi
+fi
+
+# The POSITIVE form round 17 preferred: every DERIVED target must be observed. The zero-test
+# guard can only judge targets it saw, so a target that never ran at all is invisible to it.
+tob="$tmp/1699-r17-tob.sh"
+awk '/^_ansi_stripped_log\(\) \{/,/^\}/' "$GATE" > "$tob"
+awk '/^check_test_targets_observed\(\) \{/,/^\}/' "$GATE" >> "$tob"
+if [ "$(grep -c 'check_test_targets_observed()' "$tob")" -eq 0 ]; then
+  bad "1699-r17-observed-extract: could not extract check_test_targets_observed — extraction broke, so these asserts would pass vacuously"
+else
+  ok "1699-r17-observed-extract: extracted check_test_targets_observed from the real script"
+  obs_log="$tmp/1699-r17-obs.log"
+  printf '     Running tests/alpha.rs (x)\nrunning 3 tests\ntest result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out\n' > "$obs_log"
+  if ( . "$tob"; check_test_targets_observed "obs" "$obs_log" alpha >/dev/null 2>&1 ); then
+    ok "1699-r17-observed-present: an observed target passes"
+  else
+    bad "1699-r17-observed-present: an observed target FAILED — false red"
+  fi
+  if ( . "$tob"; check_test_targets_observed "obs" "$obs_log" alpha beta >/dev/null 2>&1 ); then
+    bad "1699-r17-observed-absent: a derived target that produced NO 'Running' banner passed — it did not execute, and the zero-test guard cannot see an absent target"
+  else
+    ok "1699-r17-observed-absent: a derived target with no banner is a FAIL (it never executed)"
+  fi
+  if ( . "$tob"; check_test_targets_observed "obs" "$obs_log" >/dev/null 2>&1 ); then
+    bad "1699-r17-observed-empty: called with NO expected target it PASSED — a guard with an empty subject set reports OK having measured nothing"
+  else
+    ok "1699-r17-observed-empty: an empty expected set is a FAIL (#3384's empty-subject rule)"
+  fi
+  if [ "$(grep -cE 'check_test_targets_observed' "$lh_code")" -gt 0 ]; then
+    ok "1699-r17-observed-wired: the legacy lane actually calls it (a helper nothing calls guards nothing)"
+  else
+    bad "1699-r17-observed-wired: the legacy lane does not call check_test_targets_observed — an uncalled guard is decoration"
+  fi
+fi
+
 echo "----"
 echo "passed: $PASS  failed: $FAIL"
 [ "$FAIL" -eq 0 ]
