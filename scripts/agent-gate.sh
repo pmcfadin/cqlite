@@ -5476,7 +5476,10 @@ run_kit_dashboard_drift() {
 # thing and the compiled API said another, and nothing could tell the difference.
 # Fail-closed and affirmative: a cargo doc failure, an absent doc tree, a zero-item
 # enumeration, or a missing committed snapshot are each a NAMED FAIL, never "nothing
-# measured, PASS", and there is no env opt-out. Cheap (~6s: `cargo doc --no-deps
+# measured, PASS", and there is no env opt-out. THIS COMPONENT holds the same line for
+# the guard itself (#1712 r6 F2): PASS requires the guard's affirmative measurement
+# line, not merely a zero exit, so an early `return 0` inside the guard is a NAMED FAIL
+# here instead of a vacuous green. Cheap (~6s: `cargo doc --no-deps
 # --lib`, deps already built) and offline — no datasets/network. SKIP-aware (loud,
 # never a silent PASS): SKIPs only when cqlite-core is genuinely absent (a sparse
 # checkout). Its own self-test lives in tooling-tests.
@@ -5505,10 +5508,36 @@ run_pub_surface() {
   fi
   echo ">>> [$name] bash $guard"
   if bash "$REPO_ROOT/$guard" >"$log" 2>&1; then
-    status=PASS
-    # Echo the guard's affirmative measurement line so a pasted gate log shows the
-    # check RAN over a real surface, rather than merely reporting PASS.
-    grep -m1 '^pub-surface: ' "$log" || true
+    # AFFIRMATIVE MEASUREMENT, not "no error observed" (issue #1712 r6 F2). A zero
+    # exit is only HALF the verdict: the guard must also have PRINTED what it
+    # measured — `pub-surface: N public items … match … snapshot; M crate-root
+    # declarations consistent`. Keying PASS on the exit status alone (and echoing
+    # that line with `|| true`) meant an accidental early `return 0` anywhere inside
+    # the guard reported `pub-surface: PASS` while NOTHING had been enumerated. That
+    # is CLAUDE.md's named rule — never derive a pass from the ABSENCE of a bad
+    # signal; a positive verdict requires an affirmative measurement — and it matters
+    # most HERE, because this is the component that certifies the guard that
+    # certifies cqlite-core's public API, so a vacuous PASS here silently unguards
+    # every semver decision downstream. The permissive branch is therefore keyed on
+    # the AFFIRMATIVE value (the line is present), never on the absence of an error.
+    local measured
+    measured="$(grep -m1 '^pub-surface: ' "$log" || true)"
+    if [ -n "$measured" ]; then
+      status=PASS
+      # Echo it so a pasted gate log shows the check RAN over a real surface.
+      echo "$measured"
+    else
+      status=FAIL
+      echo "--- [$name] FAILED: the guard exited 0 but printed NO affirmative measurement"
+      echo "    line (\`pub-surface: <N> public items … match … snapshot; <M> crate-root"
+      echo "    declarations consistent\`), so NOTHING was measured and this is NOT a PASS"
+      echo "    (issue #1712). A zero exit with no measurement is an early return inside"
+      echo "    $guard — a real defect in the guard, not a formatting slip; fix the guard"
+      echo "    (or, if its success wording moved, update BOTH it and this component)."
+      echo "--- last 60 lines of $log ---"
+      tail -60 "$log"
+      echo "--- end of $name output ---"
+    fi
   else
     status=FAIL
     echo "--- [$name] FAILED: cqlite-core's public API drifted from the committed"
