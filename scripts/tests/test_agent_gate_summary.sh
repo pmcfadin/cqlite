@@ -3570,12 +3570,23 @@ os.symlink(real, os.path.join(base, "sensor_data-viasymlink"))
 out = run(lnk)
 print("CASE valid_dir_symlink:", "PASS" if "PREFLIGHT-PASSED" in out else "FAIL")
 
+# (d5) the BASE directory itself is a symlink -> must still find the fixtures (roborev round-38).
+# Round 35 added `-H` to the per-entry find and left the outer enumeration at the default `-P`, so a
+# symlinked `test_timeseries` enumerated NOTHING and the preflight failed the gate on a valid layout.
+blnk = os.path.join(tmp, "pf-baselink"); real_ts = os.path.join(blnk, "real_ts")
+os.makedirs(os.path.join(real_ts, "sensor_data-a"), exist_ok=True)
+open(os.path.join(real_ts, "sensor_data-a/nb-1-big-Statistics.db"), "w").close()
+os.makedirs(os.path.join(blnk, "sstables"), exist_ok=True)
+os.symlink(real_ts, os.path.join(blnk, "sstables/test_timeseries"))
+out = run(blnk)
+print("CASE base_is_symlink:", "PASS" if "PREFLIGHT-PASSED" in out else "FAIL")
+
 # (d) nothing matches -> must fail closed
 none = os.path.join(tmp, "pf-none"); os.makedirs(os.path.join(none, "sstables/test_timeseries"), exist_ok=True)
 out = run(none)
 print("CASE no_match:", "FAIL-CLOSED" if ("FAIL-CLOSED" in out and "NOTHING matches" in out) else "MISSED")
 PF_PY
-  for want_ in "CASE good: PASS" "CASE second_incomplete: FAIL-CLOSED" "CASE prefix_file: FAIL-CLOSED" "CASE dangling_symlink: FAIL-CLOSED" "CASE nullglob: FAIL-CLOSED" "CASE nullglob_good: PASS" "CASE valid_dir_symlink: PASS" "CASE no_match: FAIL-CLOSED"; do
+  for want_ in "CASE good: PASS" "CASE second_incomplete: FAIL-CLOSED" "CASE prefix_file: FAIL-CLOSED" "CASE dangling_symlink: FAIL-CLOSED" "CASE nullglob: FAIL-CLOSED" "CASE nullglob_good: PASS" "CASE valid_dir_symlink: PASS" "CASE base_is_symlink: PASS" "CASE no_match: FAIL-CLOSED"; do
     if grep -qF "$want_" "$pf_report_"; then
       ok "1699-r32-preflight-behaviour[${want_%%:*}]: ${want_#*: }"
     else
@@ -3734,6 +3745,24 @@ if [ -s "$lh40_" ]; then
   else
     bad "1699-r37-libscan: the library census scan ignores its exit status again — an unreadable source directory yields an empty list and is reported as a clean zero-gap census"
   fi
+fi
+
+# --- 41. #1699: the unmet-target diagnostic must name the TARGET (round-38, Medium) -------
+#
+# `rf_unmet` used `$base`, which round 37's hoist left assigned ~60 lines BELOW the append — so the
+# diagnostic named the previous iteration's target, or nothing on the first. A census that
+# misattributes its own gaps is worse than one that omits them: it sends the reader to a target that
+# is fine. Structural, over the extracted function with comments stripped (an earlier assert in this
+# file matched the comment describing its own defect).
+lh41_="$tmp/1699-r38-lh.txt"
+awk '/^run_legacy_heuristics\(\) \{/, /^\}/' "$GATE" | sed 's/[[:space:]]*#.*$//' > "$lh41_"
+if [ ! -s "$lh41_" ]; then
+  bad "1699-r38-attrib-scope: could not extract run_legacy_heuristics — this assert would pass vacuously"
+elif [ "$(grep -cE 'rf_unmet="\$rf_unmet \$_mt_name' "$lh41_")" -gt 0 ] \
+  && [ "$(grep -cE 'rf_unmet="\$rf_unmet \$base' "$lh41_")" -eq 0 ]; then
+  ok "1699-r38-attrib: the unmet-target gap names \$_mt_name (available at the top of the loop), not \$base (assigned later)"
+else
+  bad "1699-r38-attrib: the gap diagnostic is back to a variable assigned AFTER the append — it will name the previous target or nothing, misattributing the census gap"
 fi
 
 # LOWERED DELIBERATELY, 300 -> 285, and this is the ratchet working rather than being defeated.

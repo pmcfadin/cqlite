@@ -6139,8 +6139,12 @@ run_flight_tests() {
         # at all and the check means the same thing under every shell option.
         _fx_bad="$_fx_bad $(basename "$_fx_entry")(no-Statistics.db)"
       fi
-    done < <(find "$CQLITE_DATASETS_ROOT/sstables/test_timeseries" -maxdepth 1 \
-               -name 'sensor_data-*' -print0 2>/dev/null)
+    done < <(find -H "$_fx_base" -maxdepth 1 -name 'sensor_data-*' -print0 2>/dev/null)
+    # `-H` on the OUTER enumeration as well (roborev round-38, Medium). Round 35 added it to the
+    # per-entry find and left this one at the default `-P`, so a corpus whose `test_timeseries`
+    # BASE directory is itself a symlink enumerated NOTHING — the preflight then failed the whole
+    # gate on a legitimate layout, while the Rust test's `read_dir` follows it happily. Fixed one
+    # site and missed its sibling: the same recurrence as rounds 11-13 and 37, fifth instance.
     if [ -n "$_fx_basefail" ] || [ "$_fx_seen" -eq 0 ] || [ -n "$_fx_bad" ]; then
       status=FAIL
       {
@@ -6936,7 +6940,12 @@ run_legacy_heuristics() {
       done
     fi
     if [ -n "$_rf_off" ]; then
-      rf_unmet="$rf_unmet $base(required-features unmet:$_rf_off)"
+      # `$_mt_name`, NOT `$base` (roborev round-38, Medium). `base` is assigned ~60 lines below this
+      # point — a consequence of round 37 hoisting this decision to the top of the loop — so the
+      # diagnostic named the PREVIOUS iteration's target, or nothing at all on the first one. A
+      # coverage census that misattributes its own gaps is worse than one that omits them, because
+      # it sends the reader to a target that is fine.
+      rf_unmet="$rf_unmet $_mt_name(required-features unmet:$_rf_off)"
       continue
     fi
     [ -n "$_mt_name" ] || continue
