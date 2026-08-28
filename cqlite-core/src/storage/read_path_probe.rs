@@ -167,6 +167,19 @@ static BATCHED_SCANS_FINISHED: AtomicU64 = AtomicU64::new(0);
 /// dropped without joining has stopped DECODING. Only both together make
 /// `stream_walk_partitions_parsed` final — waiting a fixed interval instead merely
 /// makes the race less likely, which is the defect this issue exists to remove.
+///
+/// # Scope, and it is narrower than "the scan has finished" (roborev, issue #3384)
+///
+/// This is published from a DROP guard on the spawned future, so it covers everything
+/// that decodes INSIDE that future — which is the whole of the block-by-block loop
+/// taken by non-stitching (uncompressed) readers.
+///
+/// It does NOT cover the STITCHING path. `requires_chunk_stitching()` (compressed `nb`)
+/// routes to `run_scan_stream_windowed`, which dispatches `spawn_blocking` parse/feed
+/// tasks; blocking tasks are not cancellable, so they can still be decoding and
+/// advancing `stream_walk_partitions_parsed` when this signal fires. On that path the
+/// signal is PREMATURE and must not be read as finality. Joining those tasks on
+/// cancellation is the real fix and is tracked on #3428.
 pub fn mark_batched_scan_finished() {
     BATCHED_SCANS_FINISHED.fetch_add(1, Ordering::Release);
 }

@@ -226,6 +226,22 @@ async fn build_generations(batches: Vec<Vec<Mutation>>) -> (tempfile::TempDir, P
 /// Authoritative count of `*-Data.db` generations under the table directory —
 /// the same listing the warm registry's generation probe uses, so a test can
 /// state the source count it is exercising instead of assuming it.
+/// `*-CompressionInfo.db` components under the table dir — zero means every reader
+/// here is uncompressed, hence non-stitching (issue #3384).
+fn count_compression_info(data_dir: &std::path::Path) -> usize {
+    let table_dir = data_dir.join(KS).join(TBL);
+    std::fs::read_dir(&table_dir)
+        .into_iter()
+        .flatten()
+        .flatten()
+        .filter(|e| {
+            e.file_name()
+                .to_str()
+                .is_some_and(|n| n.ends_with("-CompressionInfo.db"))
+        })
+        .count()
+}
+
 fn count_data_dbs(data_dir: &std::path::Path) -> usize {
     let table_dir = data_dir.join(KS).join(TBL);
     std::fs::read_dir(&table_dir)
@@ -511,6 +527,22 @@ async fn fast_arm_stream_stops_when_the_client_drops_it() {
     cqlite_core::storage::read_path_probe::reset_batched_scans_finished();
     let (_temp, data_dir) = build_generations(vec![rows]).await;
     assert_eq!(count_data_dbs(&data_dir), 1);
+    // ENFORCED precondition for the completion signal below (roborev, issue #3384).
+    // That signal is a drop guard on the scan's spawned future, so it covers a
+    // decode loop that runs INSIDE that future. Only NON-STITCHING readers take that
+    // loop: `requires_chunk_stitching()` (compressed `nb`) instead routes to
+    // `run_scan_stream_windowed`, whose `spawn_blocking` parse/feed tasks are not
+    // cancellable and can still be decoding when the guard fires. The write engine
+    // emits UNCOMPRESSED SSTables, so this fixture takes the covered path — asserted
+    // rather than assumed, so switching the fixture to a compressed one cannot
+    // silently turn the signal premature.
+    assert_eq!(
+        count_compression_info(&data_dir),
+        0,
+        "this fixture must stay UNCOMPRESSED: a compressed reader takes the stitching \
+         path, whose spawn_blocking decode is not covered by the completion signal \
+         this test waits on (issue #3384)"
+    );
 
     let svc = CqliteFlightService::new(data_dir, 1)
         .with_egress_budget(EgressBudget::bytes(CANCEL_EGRESS_CEILING));
