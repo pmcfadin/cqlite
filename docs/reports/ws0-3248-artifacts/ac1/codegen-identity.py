@@ -122,7 +122,12 @@ def text_symbols(binpath: str) -> dict:
 
 
 _BRANCH = re.compile(r'^(\S+)\s+([0-9a-f]+)\s+<([^>]*)>\s*$')
-_RIP = re.compile(r'0x[0-9a-f]+\(%rip\)')
+# THE SIGN IS PART OF THE DISPLACEMENT (roborev job 73 finding 3). This matched only
+# positive displacements, so objdump's `-0x123(%rip)` normalized to `-RIP` and an identical
+# reference whose displacement changed SIGN between binaries compared DIFFERENT -- a false
+# difference, i.e. an UNDERSTATED identical set. The `-RIP` form was visible in my own probe
+# output and I read past it.
+_RIP = re.compile(r'-?0x[0-9a-f]+\(%rip\)')
 _COMMENT = re.compile(r'\s*#\s*[0-9a-f]+\s*<([^>]*)>\s*$')
 
 

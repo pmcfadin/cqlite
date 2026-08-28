@@ -582,8 +582,24 @@ if [[ -n "$PROFILE_OUT" ]]; then
     # blocked every legitimate profiling run. A guard that fails closed on correct input is
     # still a defect, and it is the same family as the rest of this issue -- the observer
     # (grep exiting early) changed the thing being measured (the producer exit status).
+    # A MISSING BINARY IS FATAL HERE, NOT SKIPPED (roborev job 73 finding 1). The `-e` guard
+    # below used to mean an ABSENT binary passed this loop silently: combined with a --bin-dir
+    # check that verified only that the DIRECTORY existed, an empty or partial --bin-dir passed
+    # `--validate-args-only` outright, and a real run then relaxed host sysctls and claimed
+    # output directories before `build_release_binaries` rejected it. `--profile-out` requires
+    # `--bin-dir` (above) and `--bin-dir` implies `--no-build`, so nothing will ever create it --
+    # the configuration has NO reachable success and belongs in argument validation. This is the
+    # preflight half of a fail-open I already fixed on the post-build side in round 1; the same
+    # `[[ -e ]]` skip was still here.
+    if [[ ! -f "$_prof_bin/$_b" ]]; then
+      echo "FATAL: --profile-out was given with --bin-dir '$_prof_bin', but '$_b' is not a file" >&2
+      echo "       there. --bin-dir implies --no-build, so nothing will create it and this run" >&2
+      echo "       cannot succeed. Build the profile first, e.g." >&2
+      echo "         cargo build --profile perfsym -p ws0-corpus-gen -p cqlite-flight -p flight-loadgen" >&2
+      exit 2
+    fi
     _syms=$(nm "$_prof_bin/$_b" 2>/dev/null | grep -c '_RN' || true)
-    if [[ -e "$_prof_bin/$_b" && "${_syms:-0}" -eq 0 ]]; then
+    if [[ "${_syms:-0}" -eq 0 ]]; then
       echo "FATAL: --profile-out was given, but $_prof_bin/$_b carries NO Rust symbols." >&2
       echo "       A sampling profile of a stripped binary reports raw addresses and attributes" >&2
       echo "       nothing -- the profiler exits 0 and the failure is silent, which is the" >&2
@@ -616,6 +632,28 @@ if [[ -n "$BIN_DIR" && ! -d "$BIN_DIR" ]]; then
   echo "       nothing will create it. Build it first, e.g." >&2
   echo "         cargo build --profile perfsym -p cqlite-flight -p flight-loadgen" >&2
   exit 2
+fi
+
+# ...AND THE DIRECTORY IS NOT THE BINARIES (roborev job 73 finding 1). An EMPTY but existing
+# --bin-dir satisfied the check above, so `--validate-args-only` reported ARGUMENTS OK for a run
+# that could not possibly execute: --bin-dir implies --no-build, so a missing measured binary is
+# never created. Checked here, before any side effect, for the same reason as every other
+# argument check -- refusing an impossible configuration AFTER acting on it is the defect.
+if [[ -n "$BIN_DIR" ]]; then
+  for _rb in ws0-scan-bench cqlite-flight flight-loadgen; do
+    if [[ ! -f "$BIN_DIR/$_rb" ]]; then
+      echo "FATAL: --bin-dir '$BIN_DIR' does not hold '$_rb'." >&2
+      echo "       --bin-dir implies --no-build, so nothing will create it and this run cannot" >&2
+      echo "       succeed. Build all three into that directory first, e.g." >&2
+      echo "         cargo build --profile perfsym -p ws0-corpus-gen -p cqlite-flight -p flight-loadgen" >&2
+      exit 2
+    fi
+    if [[ ! -x "$BIN_DIR/$_rb" ]]; then
+      echo "FATAL: --bin-dir '$BIN_DIR/$_rb' exists but is not executable." >&2
+      echo "       The reps execute it directly, so this run cannot succeed." >&2
+      exit 2
+    fi
+  done
 fi
 
 if [[ "$VALIDATE_ONLY" == "1" ]]; then
