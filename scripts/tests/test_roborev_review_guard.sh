@@ -4628,17 +4628,37 @@ _cls_exec_lines() {
     }
     return s
   }
+  # The line with quoted spans BLANKED and the comment removed, so a construct can be recognised in
+  # CODE position only. `printf %s '"'"'cat <<EOF'"'"'` must not open heredoc suppression (roborev job 48).
+  function unq_of(s2,   n3, i3, sq3, dq3, c3, out) {
+    n3 = length(s2); sq3 = 0; dq3 = 0; out = ""
+    for (i3 = 1; i3 <= n3; i3++) {
+      c3 = substr(s2, i3, 1)
+      if (!sq3 && c3 == "\\") { i3++; out = out "  "; continue }
+      if (sq3) { out = out " "; if (c3 == "'"'"'") sq3 = 0; continue }
+      if (dq3) { out = out " "; if (c3 == "\"") dq3 = 0; continue }
+      if (c3 == "'"'"'") { sq3 = 1; out = out " "; continue }
+      if (c3 == "\"") { dq3 = 1; out = out " "; continue }
+      if (c3 == "#" && (i3 == 1 || substr(s2, i3-1, 1) ~ /[ \t]/)) break
+      out = out c3
+    }
+    return out
+  }
   # SUPPRESS THE HEREDOC BODY, NOT THE WHOLE FUNCTION (roborev job 47). Suppression used to begin at
   # `usage() {`, so any EXECUTABLE statement between the function opener and its `cat <<EOF` was
   # invisible to the classifier-GONE scan — a reintroduction parked there passed the guard, and the
   # AC3 control did not cover it because it appends only OUTSIDE the function. What earns the
   # exemption is being PROSE PRINTED TO A USER, which starts at the heredoc opener, not at the `{`.
   FILENAME ~ /roborev-review\.sh$/ && /^usage\(\) \{/ { in_usage_fn = 1 }
-  in_usage_fn && /cat[ \t]*<<-?[ \t]*.?EOF/ { in_usage_fn = 0; in_usage = 1; next }
+  in_usage_fn && unq_of($0) ~ /(^|[ \t;&|(])cat[ \t]+<<-?[ \t]*.?EOF/ { in_usage_fn = 0; in_usage = 1; next }
   in_usage && /^EOF$/ { in_usage = 0; next }
   in_usage { next }
   /^[[:space:]]*#/ { next }
-  { print code_of($0) }
+  # A SUBSTITUTION LINE KEEPS ITS TAIL. Inside `$( )` a quoted `#` looks like a comment opener to
+  # this flat parser, so stripping the "comment" could hide a prohibited token that bash executes
+  # (roborev job 48). Emitting the whole line risks only a false FAIL on a genuine trailing comment
+  # of a substitution line naming a retired state — the safe direction.
+  { print ($0 ~ /[$][(]/ || $0 ~ /`/) ? $0 : code_of($0) }
 ' "$@" 2>/dev/null || true
 }
 # ===== THE CLASSIFIER IS GONE, AND MUST STAY GONE (owner ruling (4), #3312) =====
@@ -5392,6 +5412,56 @@ if [ -z "$_wr_ax_bad" ]; then
   ok 'structural control (#3367): the alias-declaration exemption matches the declaration EXACTLY — a line merely quoting the alias names is still judged, so it cannot exempt itself while scanning an alias'
 else
   bad "structural control (#3367): the alias-declaration exemption misclassifies a synthetic line, so a line quoting the declaration could skip the alias-use check —$_wr_ax_bad"
+fi
+# ===== THE COMPLETE SET OF WAYS TO READ A SHELL VARIABLE (roborev job 48) =====
+# `eval 'grep foo "$WRAP''PER"'` reads the wrapper and NO textual scan for `$WRAPPER` can see it:
+# shell concatenates adjacent quoted strings, so the NAME is assembled at runtime. Verified against
+# bash: `eval 'echo "$WRAP''PER"'` prints the value. Chasing spellings here is hopeless — there are
+# unboundedly many ways to spell a name by concatenation, and this file uses that very trick itself
+# to stop its guards matching their own pattern lines.
+#
+# So the argument is closed from the other end. A shell variable can be read in exactly four ways:
+#   (a) a literal `$NAME` / `${NAME}`  -> enumerated and classified by the pass above
+#   (b) indirect expansion `${!var}`   -> refused except an exact two-line allowlist
+#   (c) a nameref                      -> declaration banned outright
+#   (d) `eval` of constructed text     -> banned here
+# That is the whole set, so a constructed name has nowhere left to be executed. The ban costs
+# nothing: this harness has never used `eval` in code position (measured 0).
+_wr_evalp=$(sed -e :a -e '/\\$/N; s/\\\n//; ta' "$TEST_SELF" \
+  | grep -nE '(^|[ \t;&|(])'"eval"'([ \t]|$)' | grep -vE '^[0-9]+:[[:space:]]*#' || true)
+_wr_evalp=$(printf '%s\n' "$_wr_evalp" | grep -vE "_wr_expect|_wr_fixture|^[0-9]+:[[:space:]]*(ok|bad) " || true)
+if [ -z "$_wr_evalp" ]; then
+  ok 'structural (#3367): the harness runs no eval, so a variable name assembled by shell concatenation has nowhere to be executed — with literal reads classified, indirect expansion allowlisted and namerefs banned, that closes every way to read the mutable path'
+else
+  bad "structural (#3367): an eval appears in code position. Shell concatenates adjacent quoted strings, so eval can read the mutable wrapper under a name no textual scan can see (\$WRAP''PER): $(printf '%s' "$_wr_evalp" | head -3 | tr '\n' ';' | cut -c1-200)"
+fi
+# ...and a save alias may only ever be assigned FROM the mutable global. A bare mutation
+# (`_wr_saved=/decoy`) is invisible to a scan that looks for `$alias`, and the poison probe would
+# then "restore" the wrong path while its own equality assert happily agreed (roborev job 48).
+_wr_amut=""
+while IFS= read -r _wr_ml; do
+  [ -n "$_wr_ml" ] || continue
+  _wr_mlc=${_wr_ml#*:}
+  _wr_mlc=${_wr_mlc#"${_wr_mlc%%[! 	]*}"}
+  _wr_mlc=${_wr_mlc%"${_wr_mlc##*[! 	]}"}
+  _wr_mlc=${_wr_mlc%;}
+  case "$_wr_mlc" in 'local '*|'export '*|'declare '*|'typeset '*) _wr_mlc=${_wr_mlc#* } ;; esac
+  _wr_mlc=${_wr_mlc#"${_wr_mlc%%[! 	]*}"}
+  _wr_mok=no
+  for _wr_ma in $_wr_aliases; do
+    [ "$_wr_mlc" = "$_wr_ma=$_wr_ref" ] && _wr_mok=yes
+  done
+  [ "$_wr_mok" = yes ] && continue
+  _wr_amut="$_wr_amut${_wr_amut:+; }$_wr_ml"
+done <<EOF
+$(sed -e :a -e '/\\$/N; s/\\\n//; ta' "$TEST_SELF" \
+  | grep -nE '(^|[ 	;&|(])(local |export |declare |typeset )?('"$_wr_alias_re"')=' \
+  | grep -vE '^[0-9]+:[[:space:]]*#' | grep -vE '_wr_fixture|_wr_expect|_wr_ax')
+EOF
+if [ -z "$_wr_amut" ]; then
+  ok 'structural (#3367): every assignment to a save alias takes its value from the mutable global itself — none can be pointed somewhere else, so a restore cannot silently install the wrong path'
+else
+  bad "structural (#3367): a save alias is assigned something other than the mutable global, so a later restore would install that value instead and the probe's own equality assert would agree with it: $(printf '%s' "$_wr_amut" | cut -c1-200)"
 fi
 # NO ALIAS MAY BE REACHED UNDER ANOTHER NAME (roborev job 43). Both structural scans look for the
 # alias by NAME or by `$`-expansion, so an indirect binding reaches the saved mutable path without
