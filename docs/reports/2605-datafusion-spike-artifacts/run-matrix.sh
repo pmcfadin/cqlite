@@ -35,6 +35,43 @@ if (( START < 1 || START > ITERS )); then
 fi
 
 BIN=${DF_SPIKE_BENCH:-./target/release/df_spike_bench}
+
+# QUIESCENCE. A wall-clock measurement taken on a loaded box measures the box, not
+# the code. This is not hypothetical: iteration 4 of this matrix was first
+# measured while a sibling job drove the 1-minute load average to 172, and its
+# cells came in 1.2x-4.3x slower than the ENTIRE range of iterations 1-3
+# (`filtered_scan/row_engine` 399.2 s against a [72.3, 116.4] range). Those cells
+# were discarded. Nothing in the cell JSON would have revealed why they were slow,
+# which is the actual defect: the contamination was invisible.
+#
+# So each cell now WAITS for the box to settle and REFUSES rather than measure
+# through a storm, and the load it did measure under is recorded next to the
+# cells. `MAX_LOAD` is a 1-minute load average; the default admits this harness
+# (~1.1 cores) plus a little background but not a parallel build.
+MAX_LOAD=${MAX_LOAD:-4.0}
+QUIESCE_TIMEOUT_SECS=${QUIESCE_TIMEOUT_SECS:-1800}
+MACHINE_LOG="$OUT/machine-state.jsonl"
+
+load_now() { cut -d' ' -f1 /proc/loadavg; }
+mem_available_kb() { awk '/^MemAvailable:/ {print $2}' /proc/meminfo; }
+
+wait_for_quiet() {
+  local waited=0 load
+  load=$(load_now)
+  while awk -v l="$load" -v m="$MAX_LOAD" 'BEGIN { exit !(l > m) }'; do
+    if (( waited >= QUIESCE_TIMEOUT_SECS )); then
+      echo "run-matrix.sh: REFUSING to measure: 1-min load $load exceeds MAX_LOAD=$MAX_LOAD after \
+${waited}s of waiting. A wall-clock benchmark on a loaded box measures the box. Re-run when the \
+machine is idle, or raise MAX_LOAD deliberately and accept that the numbers are contended." >&2
+      exit 3
+    fi
+    (( waited == 0 )) && echo ">>> waiting for the box to settle (load $load > $MAX_LOAD)"
+    sleep 30
+    waited=$(( waited + 30 ))
+    load=$(load_now)
+  done
+  echo "$load"
+}
 SCENARIOS=(full_scan_count projected_scan filtered_scan)
 # Five arm CONFIGS: the four arms, plus DataFusion a second time with
 # target_partitions pinned to 1 (thread-count-equalised — see the report §3.2).
@@ -103,7 +140,8 @@ for iter in $(seq 1 "$ITERS"); do
       arm=${spec%%:*}
       tp=${spec##*:}
       label="$scenario.$arm${tp:+.tp$tp}.iter$iter"
-      echo ">>> $label"
+      load_before=$(wait_for_quiet)
+      echo ">>> $label (load $load_before)"
       "$BIN" \
         --dir "$DIR" --ddl-file "$DDL" \
         --projection pk,ck,v_int \
@@ -111,6 +149,10 @@ for iter in $(seq 1 "$ITERS"); do
         --scenario "$scenario" --arm "$arm" --iterations 1 --iteration-base "$iter" \
         ${tp:+--df-target-partitions "$tp"} \
         --out "$OUT/cells/$label.json"
+      # The machine state this cell was measured under, recorded so a reader can
+      # tell a slow ENGINE from a busy BOX without having to trust a memory.
+      printf '{"cell":"%s","load_before":%s,"load_after":%s,"mem_available_kb":%s,"max_load":%s}\n' \
+        "$label" "$load_before" "$(load_now)" "$(mem_available_kb)" "$MAX_LOAD" >> "$MACHINE_LOG"
     done
   done
 done

@@ -361,6 +361,29 @@ print("- matrix completeness: %d of %d expected cells present (%d scenario(s) x 
       % (len(present_cells), len(expected_cells), len(SCENARIOS), len(observed_arms),
          len(observed_iters),
          "" if not missing_cells else "  <-- FAIL, missing: %s" % (missing_cells,)))
+# MACHINE STATE. A cell measured on a loaded box measures the box; the driver now
+# records the load each cell ran under, and the coverage is reported honestly —
+# cells measured before the capture existed are UNKNOWN, never assumed quiet.
+machine_log = cells_dir.parent / "machine-state.jsonl"
+if machine_log.is_file():
+    records = [json.loads(line) for line in machine_log.read_text().splitlines() if line.strip()]
+    by_cell = {r["cell"]: r for r in records}
+    covered = [r for r in runs if r["_cell"] in by_cell]
+    loaded = sorted(
+        (r["_cell"], by_cell[r["_cell"]]["load_before"])
+        for r in covered
+        if by_cell[r["_cell"]]["load_before"] > by_cell[r["_cell"]]["max_load"]
+    )
+    print("- machine state recorded for %d of %d cells (%d predate the capture: UNKNOWN, not "
+          "assumed quiet)%s"
+          % (len(covered), len(runs), len(runs) - len(covered),
+             "" if not loaded else "  <-- FAIL, measured above MAX_LOAD: %s" % (loaded,)))
+    if loaded:
+        failures.append("%d cell(s) were measured above MAX_LOAD" % len(loaded))
+else:
+    print("- machine state: NOT RECORDED for any cell (the driver gained the capture after this "
+          "matrix was measured); load contamination cannot be ruled out from the artifacts")
+
 rss_all = [r["peak_rss_bytes"] for r in runs if r["peak_rss_bytes"] is not None]
 if rss_all:
     print("- peak RSS across ALL runs: %.1f MiB max (B4 budget 512 MiB)"
