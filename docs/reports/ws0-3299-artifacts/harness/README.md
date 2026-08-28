@@ -64,6 +64,7 @@ scale down with N/S. The full 25-point × 3-rep grid at 60 s windows is
 | `guards.py` | every fail-closed validator, in ONE implementation |
 | `derive.py` | medians + spread → the C(S) table |
 | `selftest.sh`, `selftest-fixtures.py` | each guard fed the input it must reject |
+| `check-exact-pins.py` | the measured worker's deps are `=`-exact and the recorded closure agrees |
 
 ## The ALIGNED window — the methodological core
 
@@ -188,6 +189,21 @@ more: roborev's compiled-in deny-list drops `**/Cargo.lock` from every review
 diff (#3278), so committing it would create a file that `prompt-content:`
 demands and the reviewer can never receive.
 
+**The measured binary is pinned anyway, and that is not a side note.** Outside the
+root workspace, an untracked lockfile plus caret ranges would mean the binary that
+produced every number in `../../ws0-3299-report.md` could not be rebuilt: a later
+`cargo build` resolves newer minors and measures different codegen. So the pin
+lives where a reviewer can read it — `scan-worker/Cargo.toml` gives every DIRECT
+registry dependency an `=`-exact version (clap 4.6.6, tokio 1.53.1, serde_json
+1.0.151, libc 0.2.189, under the repo's pinned rustc 1.97.1), the two path deps
+are pinned by the repo commit, and the TRANSITIVE closure that `=` does not cover
+is committed beside the manifest as `scan-worker/measured-build-lockfile.txt`:
+
+```bash
+cd scan-worker && cp measured-build-lockfile.txt Cargo.lock \
+  && cargo build --release --locked
+```
+
 The progress emitter's own cost is inside the counted window and is disclosed
 rather than netted out: one buffered `write` + `flush` per sample, ~18 per second
 per worker at the default settings.
@@ -228,3 +244,10 @@ per worker at the default settings.
 | `WINDOW_ZERO_ROWS` | a scan that observed nothing (a failure, not a measurement) |
 | `WINDOW_AFFINITY_MISMATCH` | a worker the kernel ran somewhere other than its pinned pair |
 | `WINDOW_WORKER_MISSING` / `_SPAN` | an incomplete rep, or a non-positive window |
+| `CORPUS_DATA_DB_ABSENT` / `_AMBIGUOUS` | the EXACT path the worker opens (`<corpus>/ws0/events`) holding no Data.db, or more than one — a Data.db elsewhere under the root does not count |
+| `CORPUS_COMPRESSED` | a `CompressionInfo.db`: a compressed corpus is a DIFFERENT corpus |
+| `CORPUS_BYTES_MISMATCH` / `_SHA_MISMATCH` | a Data.db that is not the pinned #3096 Corpus B, by size or by digest (same-size-different-bytes is invisible to a size check) |
+| `CORPUS_PIN_UNREADABLE` / `_UNPARSEABLE` | an unconsultable identity pin — refused, never passed |
+| `EQUIV_DIVERGENCE` | a worker whose residual exceeds `ws0-scan-bench`'s own measured pass-to-pass spread |
+| `EQUIV_NO_SPREAD` | fewer than two bench passes: an unmeasured bound cannot license a pass |
+| `PIN_NOT_EXACT` / `PIN_LOCK_MISSING` / `PIN_LOCK_DISAGREES` | a worker dependency that is not `=`-pinned, or a stale/absent record of the measured closure |

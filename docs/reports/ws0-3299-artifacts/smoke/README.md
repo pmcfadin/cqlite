@@ -10,7 +10,7 @@ dispersion. The deliverable is 25 points × ≥3 reps at 60 s.
 | `equivalence.md` | this harness's worker vs the rig's `ws0-scan-bench`, one core, one session |
 | `s{S}-n{N}-round1/` | 20 s smoke reps: `window.json`, `perf.csv`, `attribution.json` |
 | `budget-s{S}-n{N}-round1/` | 60 s reps at the two most expensive points, used for the budget |
-| `selftest-output.txt` | all 41 guard cases, each observed to fire or pass |
+| `selftest-output.txt` | all 86 guard cases, each observed to fire or pass (regenerated whenever the suite grows — it was left at the 41-case run) |
 | `siblings.map`, `manifest.jsonl` | the topology pinned from, and the reps run |
 
 ## What these establish

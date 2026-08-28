@@ -13,18 +13,34 @@ publish = false
 
 [workspace]
 
+# WHY EVERY REGISTRY VERSION IS `=`-EXACT. This crate sits OUTSIDE the repo
+# workspace (see the `[workspace]` table above), so the root `Cargo.lock` does not
+# pin its build, and its own lockfile is gitignored — roborev appends a COMPILED-IN
+# `**/Cargo.lock` deny-list that no configuration disables (#3278), so a committed
+# lockfile here would be a file the reviewer can never receive. With caret ranges
+# the binary that produced every number in ../../ws0-3299-report.md could not be
+# rebuilt reliably: `cargo build` months later would resolve newer minors and
+# measure different codegen. The versions below are the ones ACTUALLY USED for the
+# published measurements (rustc 1.97.1, the repo's pinned toolchain).
+#
+# SCOPE OF THE CLAIM, stated rather than implied: `=` pins every DIRECT registry
+# dependency. TRANSITIVE versions are still cargo-resolved and are NOT pinned by
+# this manifest — the full resolved graph of the measured build is recorded beside
+# it in `measured-build-lockfile.txt` (a lockfile under a reviewable name; copy it
+# to `Cargo.lock` to reproduce the exact graph).
 [dependencies]
 # EXACTLY the feature set `tools/ws0-corpus-gen` gives cqlite-core for
 # `ws0-scan-bench`: `cli-helpers` only, and deliberately NOT `arrow` — the bare
-# scan arm must exclude Arrow encode.
+# scan arm must exclude Arrow encode. The two path deps are pinned by the REPO
+# COMMIT, which is why they carry no version requirement.
 cqlite-core = { path = "../../../../../cqlite-core", features = ["cli-helpers"] }
 # The rig's OWN scope-verification and pinned-schema helpers, reused rather than
 # copied, so the setup path here cannot drift from `ws0-scan-bench`'s.
 ws0-corpus-gen = { path = "../../../../../tools/ws0-corpus-gen" }
-clap = { version = "4.4", features = ["derive"] }
-tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
-serde_json = "1"
-libc = "0.2"
+clap = { version = "=4.6.6", features = ["derive"] }
+tokio = { version = "=1.53.1", features = ["rt-multi-thread", "macros"] }
+serde_json = "=1.0.151"
+libc = "=0.2.189"
 
 # Mirror the repo's [profile.release] EXACTLY (codegen-units=1, lto, panic=abort)
 # so this worker measures the same codegen `ws0-scan-bench` is built with. `strip`

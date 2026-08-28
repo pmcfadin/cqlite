@@ -16,6 +16,16 @@ fuzz/Cargo.lock
 # configuration can switch off (#3278), so a committed lockfile here would be
 # silently dropped from the reviewer's diff while `prompt-content:` still
 # expected it — a fail-closed FAIL on a file nobody could get reviewed.
+#
+# AND REPRODUCIBILITY DOES NOT DEPEND ON THIS FILE. Ignoring a lockfile would
+# normally leave the measured binary unpinned (the root lockfile does not reach a
+# separate workspace, and caret ranges resolve newer minors later). It does not
+# here, because the pin was moved somewhere a reviewer CAN read: the harness's
+# `scan-worker/Cargo.toml` gives every direct registry dependency an `=`-EXACT
+# version, and the transitive closure of the measured build is committed beside it
+# as `scan-worker/measured-build-lockfile.txt` (a lockfile under a reviewable
+# name — `cp` it to `Cargo.lock` to rebuild the exact graph). So this line hides
+# a redundant artifact, not the pin.
 docs/reports/*-artifacts/**/Cargo.lock
 # Python bytecode from the measurement harnesses' own tooling (guards.py is
 # imported by derive.py, so CPython writes one). Generated, never source.

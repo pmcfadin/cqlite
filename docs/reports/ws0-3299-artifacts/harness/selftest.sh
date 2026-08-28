@@ -414,6 +414,51 @@ plant_equiv "$TMP/eq-1pass" 356763 0.000639 361779
 expect_guard_fail EQUIV_NO_SPREAD \
   python3 "$HERE/derive.py" --equivalence "$TMP/eq-1pass"
 
+# ---------------------------------------- STRUCTURAL: the worker is pinned ---
+echo
+echo "-- exact dependency pins (structural) --"
+# THE DEFECT THIS SECTION EXISTS FOR: scan-worker/ is its OWN workspace, so the
+# repo's root Cargo.lock does not pin its build, and its own lockfile is
+# gitignored (roborev's compiled-in `**/Cargo.lock` deny-list, #3278). With caret
+# ranges the binary that produced every published number could not be rebuilt — a
+# later `cargo build` resolves newer minors and measures different codegen.
+expect_ok "worker deps are =exact and the recorded closure agrees" \
+  python3 "$HERE/check-exact-pins.py" "$HERE/scan-worker/Cargo.toml"
+# NEGATIVE CONTROLS. Without these the check above could pass vacuously.
+mkdir -p "$TMP/pins"
+sed 's/^clap = { version = "=4.6.6"/clap = { version = "4.4"/' \
+  "$HERE/scan-worker/Cargo.toml" > "$TMP/pins/caret.toml"
+expect_guard_fail PIN_NOT_EXACT \
+  python3 "$HERE/check-exact-pins.py" "$TMP/pins/caret.toml" \
+    "$HERE/scan-worker/measured-build-lockfile.txt"
+sed 's|^cqlite-core = { path = "\(.*\)", features|cqlite-core = { path = "\1", version = "0.16.1", features|' \
+  "$HERE/scan-worker/Cargo.toml" > "$TMP/pins/pathver.toml"
+expect_guard_fail PIN_NOT_EXACT \
+  python3 "$HERE/check-exact-pins.py" "$TMP/pins/pathver.toml" \
+    "$HERE/scan-worker/measured-build-lockfile.txt"
+printf '[package]\nname = "x"\nversion = "0.1.0"\n' > "$TMP/pins/nodeps.toml"
+expect_guard_fail PIN_NOT_EXACT \
+  python3 "$HERE/check-exact-pins.py" "$TMP/pins/nodeps.toml" \
+    "$HERE/scan-worker/measured-build-lockfile.txt"
+expect_guard_fail PIN_MANIFEST_UNREADABLE \
+  python3 "$HERE/check-exact-pins.py" "$TMP/pins/does-not-exist.toml" \
+    "$HERE/scan-worker/measured-build-lockfile.txt"
+expect_guard_fail PIN_LOCK_MISSING \
+  python3 "$HERE/check-exact-pins.py" "$HERE/scan-worker/Cargo.toml" \
+    "$TMP/pins/no-such-lock.txt"
+# THE DRIFT DIRECTION: the record must be a record OF THIS BUILD. A closure whose
+# clap version is not the pinned one is stale, and a stale record is worse than
+# none — it looks like provenance.
+python3 - "$HERE/scan-worker/measured-build-lockfile.txt" "$TMP/pins/stale.txt" <<'EOF'
+import sys
+src, dst = sys.argv[1], sys.argv[2]
+text = open(src).read().replace('name = "clap"\nversion = "4.6.6"',
+                                'name = "clap"\nversion = "4.5.0"')
+open(dst, "w").write(text)
+EOF
+expect_guard_fail PIN_LOCK_DISAGREES \
+  python3 "$HERE/check-exact-pins.py" "$HERE/scan-worker/Cargo.toml" "$TMP/pins/stale.txt"
+
 # ------------------------------------- STRUCTURAL: process-lifecycle safety ---
 # Asks WHERE a spawn is, not what it looks like, so a new one added anywhere
 # outside a cleanup guarantee fails however it is written. Two consecutive review
