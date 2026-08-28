@@ -917,7 +917,14 @@ END {
       }
       # A RAW STRING delimiter is `r` + N hashes + `"`. Modelling N is a second lexer;
       # refusing is bounded and obviously correct.
-      if (ch == "r" && nx == "#") {
+      # ALL raw-literal forms, ZERO-HASH INCLUDED (roborev r12). The first version tested
+      # `r` followed by `#`, so a valid `r"..."` (no hashes) fell through to ordinary
+      # string handling, where a trailing backslash is read as an escape and
+      # `#![doc = r"\\"]` was REJECTED — a false FAIL. Same "pattern narrower than the
+      # hole" shape as the declaration-side raw check. Token-boundary guarded so an
+      # identifier ending in r/b/c does not match.
+      prv = (p > 1) ? substr(buf, p - 1, 1) : ""
+      if (prv !~ /[A-Za-z0-9_]/ && substr(buf, p) ~ /^(b|c)?r#*"/) {
         refuse(startline, "an inner attribute contains a RAW STRING, whose delimiter length this bounded scan does not model: `" squash(substr(buf, 1, 72)) "`")
         exit
       }

@@ -1378,14 +1378,11 @@ echo "OK (45): a top-level ITEM MACRO invocation REFUSES, while a \`macro_rules!
 #     harmless for a genuinely-hidden module and correct for a self-gating one. Refusing
 #     would red `#[cfg_attr(docsrs, doc(hidden))]`, a standard idiom, for no gain.
 # ---------------------------------------------------------------------------
-oracle_tree cfg-attr-conditional-hidden; wt46="$SCRATCH"
-# Re-declare the probe WITH a conditional doc(hidden) in front of it.
-python3 - "$wt46/cqlite-core/src/lib.rs" <<'PY'
-import sys
-p=sys.argv[1]; s=open(p).read()
-s=s.replace("\npub mod probe_oracle;\n", "\n#[cfg_attr(any(), doc(hidden))]\npub mod probe_oracle;\n", 1)
-open(p,'w').write(s)
-PY
+# NO python3 here (roborev r12 F3): this suite is documented and gated as needing no
+# Python, and `set -e` would abort the whole "dependency-free" suite where it is absent.
+# `scratch_tree` + printf does the same job with the shell already in use.
+scratch_tree cfg-attr-conditional-hidden; wt46="$SCRATCH"
+printf '\n#[cfg_attr(any(), doc(hidden))]\npub mod probe_oracle;\n' >>"$wt46/cqlite-core/src/lib.rs"
 printf '#![cfg(feature = "benchmarks")]\n//! Self-test-only probe (#1712 r11 F2): inner-gated, must NOT be exempted.\npub fn probe() {}\n' >"$wt46/cqlite-core/src/probe_oracle.rs"
 set +e
 bash "$wt46/$GUARD_REL" >"$TMPROOT/case46.out" 2>&1
@@ -1412,13 +1409,8 @@ echo "OK (46): a conditional \`cfg_attr\` exemption never becomes an uncondition
 #     reds correct code is the one agents learn to waive, and a waived refusal devalues
 #     every other refusal in this guard.
 # ---------------------------------------------------------------------------
-oracle_tree path-in-string-cosmetic; wt47="$SCRATCH"
-python3 - "$wt47/cqlite-core/src/lib.rs" <<'PY'
-import sys
-p=sys.argv[1]; s=open(p).read()
-s=s.replace("\npub mod probe_oracle;\n", "\n#[doc = \"the path = something cosmetic, and a stray r in for\"]\npub mod probe_oracle;\n", 1)
-open(p,'w').write(s)
-PY
+scratch_tree path-in-string-cosmetic; wt47="$SCRATCH"
+printf '\n#[doc = "the path = something cosmetic, and a stray r in for"]\npub mod probe_oracle;\n' >>"$wt47/cqlite-core/src/lib.rs"
 printf '//! Self-test-only probe (#1712 r11 F3): ordinary prologue, must CERTIFY.\npub fn probe() {}\n' >"$wt47/cqlite-core/src/probe_oracle.rs"
 set +e
 bash "$wt47/$GUARD_REL" >"$TMPROOT/case47.out" 2>&1
