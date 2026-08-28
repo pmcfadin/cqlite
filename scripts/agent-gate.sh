@@ -4833,6 +4833,38 @@ run_roborev_lints_cmd() {
 #
 # Exported (`export -f`) because the cli-tests component body runs under `bash -c`
 # and must see the SAME implementation rather than a second copy of it.
+# _ansi_stripped_log <logfile> — echo a path to <logfile> with ANSI escapes removed.
+#
+# roborev round-15 finding (HIGH), and the premise checked out: `.github/workflows/gate.yml`
+# (the nightly FULL gate) sets `CARGO_TERM_COLOR: always`, as do seven other workflows and
+# scripts/local/pre-merge.sh. Cargo then emits
+#     ESC[1mESC[92m     RunningESC[0m unittests src/lib.rs (...)
+# with the reset sequence sitting BETWEEN `Running` and the path — so every parser keyed on
+# the literal text sees nothing. MEASURED on both guards, and the two directions differ:
+#   * check_unittest_targets_ran  -> FALSE FAIL: the new lanes would red on every clean
+#     nightly run, reporting "no Running unittests line" about a perfectly healthy log.
+#   * check_no_unexpected_zero_tests -> VACUOUS PASS: a target running ZERO tests is never
+#     associated with its result, so the #2039 guard silently reports OK. That one is
+#     PRE-EXISTING and affects its other callers (core-tests, cli-tests) on nightly CI too;
+#     filed separately.
+#
+# Stripping is done ONCE into a sibling file, not per line and not through a pipe. A pipe
+# would put the reading loop in a SUBSHELL and its accumulated verdict variables would be
+# discarded — which for these guards means silently passing, the exact failure they exist to
+# prevent. The ESC byte is injected via printf rather than written as `\x1b`, because BSD sed
+# does not honour `\x` escapes and macOS is a first-class gate host.
+_ansi_stripped_log() {
+  local logfile="$1" out esc
+  [ -r "$logfile" ] || { printf '%s' "$logfile"; return 0; }
+  esc=$(printf '\033')
+  out="$logfile.ansi-stripped"
+  if sed -E "s/${esc}\\[[0-9;]*[A-Za-z]//g" "$logfile" > "$out" 2>/dev/null; then
+    printf '%s' "$out"
+  else
+    printf '%s' "$logfile"
+  fi
+}
+
 check_no_unexpected_zero_tests() {
   local label="$1" logfile="$2"; shift 2
   local allowed_zero=" $* "
@@ -4864,7 +4896,7 @@ check_no_unexpected_zero_tests() {
     elif [[ "$line" == "test result:"* ]]; then
       target=""
     fi
-  done < "$logfile"
+  done < "$(_ansi_stripped_log "$logfile")"
   if [ -n "$bad" ]; then
     echo "$label: FAIL-CLOSED —$bad ran 0 tests unexpectedly (issue #2039: a target whose body is #[cfg]-gated out at this component's feature set, and not on the allowed-zero list, would otherwise silently never run)" >&2
     return 1
@@ -4978,7 +5010,7 @@ check_unittest_targets_ran() {
           ;;
       esac
     fi
-  done < "$logfile"
+  done < "$(_ansi_stripped_log "$logfile")"
   local p n
   for p in "${expected[@]}"; do
     # Exact whole-field match on the TAB-delimited pair, so one target name cannot
@@ -6691,7 +6723,7 @@ EOF
   # Both halves go through _deny_warnings, which is what makes `-D warnings` real: a bare
   # `env RUSTFLAGS=...` is silently ignored when CARGO_ENCODED_RUSTFLAGS is set (round-5).
   if _deny_warnings cargo build --package cqlite-core --features legacy-heuristics >>"$log" 2>&1 \
-      && _deny_warnings env CQLITE_DATASETS_ROOT="$CQLITE_DATASETS_ROOT" \
+      && _deny_warnings env CQLITE_DATASETS_ROOT="$CQLITE_DATASETS_ROOT" CARGO_TERM_COLOR=never \
         cargo test --no-fail-fast --package cqlite-core --features legacy-heuristics --lib "${targets[@]}" >>"$log" 2>&1; then
     # Green cargo exit is not sufficient — see the guard's own doc block.
     # The guard writes its verdict to stderr only, so `2>>` lands the message in the

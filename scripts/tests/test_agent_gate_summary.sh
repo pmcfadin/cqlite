@@ -2358,7 +2358,12 @@ fi
 # cargo's OUTPUT FORMAT, so text fixtures are the right oracle and cost nothing. Cases cover
 # observed-nonzero, observed-zero, a missing target, several binaries, and ignored-only runs.
 zt_h="$tmp/1699-zt-helper.sh"
-awk '/^check_unittest_targets_ran\(\) \{/,/^\}/' "$GATE" > "$zt_h"
+# The guard calls _ansi_stripped_log, so the extraction must carry it. Getting this wrong is
+# instructive rather than merely annoying: with the helper undefined the redirection target
+# became the empty string, the loop read nothing, and check_no_unexpected_zero_tests reported
+# OK having parsed zero lines — the vacuous pass, reproduced by accident in the harness.
+awk '/^_ansi_stripped_log\(\) \{/,/^\}/' "$GATE" > "$zt_h"
+awk '/^check_unittest_targets_ran\(\) \{/,/^\}/' "$GATE" >> "$zt_h"
 if [ ! -s "$zt_h" ]; then
   bad "1699-zt-extract: could not extract check_unittest_targets_ran — the extraction broke, so these asserts would pass vacuously"
 else
@@ -2535,11 +2540,17 @@ fi
 # the fix now lives in the shared guard and is pinned BEHAVIOURALLY below.
 if [ -s "$zt_h" ]; then
   zn_h="$tmp/1699-zeronotest.sh"
-  awk '/^check_no_unexpected_zero_tests\(\) \{/,/^\}/' "$GATE" > "$zn_h"
+  awk '/^_ansi_stripped_log\(\) \{/,/^\}/' "$GATE" > "$zn_h"
+  awk '/^check_no_unexpected_zero_tests\(\) \{/,/^\}/' "$GATE" >> "$zn_h"
   if [ ! -s "$zn_h" ]; then
     bad "1699-r13-zn-extract: could not extract check_no_unexpected_zero_tests — extraction broke, so these asserts would pass vacuously"
   else
     ok "1699-r13-zn-extract: extracted check_no_unexpected_zero_tests from the real script"
+    if [ "$(grep -c '_ansi_stripped_log()' "$zn_h")" -gt 0 ]; then
+      ok "1699-r13-zn-deps: the extraction carries _ansi_stripped_log (without it the guard reads an EMPTY path and reports OK having parsed nothing)"
+    else
+      bad "1699-r13-zn-deps: the extraction is missing _ansi_stripped_log — the guard would read an empty path, parse zero lines, and PASS vacuously"
+    fi
     # shellcheck disable=SC1090
     . "$zn_h"
     zn_case() { # <name> <expect> <log> <allowed-zero...>
@@ -2647,6 +2658,64 @@ for fn_ in run_legacy_heuristics run_flight_tests run_feature_iso _rust_module_c
     bad "1699-gnu-$fn_: GNU-only construct(s) present — macOS is a first-class gate host: $(printf '%s' "$hits" | tr '\n' ' ')"
   fi
 done
+
+# --- 30. #1699: both zero-test guards survive CARGO_TERM_COLOR=always (round-15, HIGH) ---
+#
+# .github/workflows/gate.yml (the nightly FULL gate) sets `CARGO_TERM_COLOR: always`, as do
+# seven other workflows and scripts/local/pre-merge.sh. Cargo then emits
+#     ESC[1mESC[92m     RunningESC[0m unittests src/lib.rs (...)
+# with the reset sequence BETWEEN `Running` and the path, so a parser keyed on literal text
+# sees nothing. MEASURED against real cargo output, and the two directions differ:
+#   * check_unittest_targets_ran  -> FALSE FAIL (the lanes red on a clean nightly run)
+#   * check_no_unexpected_zero_tests -> VACUOUS PASS (a zero-test target goes unrecorded)
+# The second is PRE-EXISTING for the guard's other callers on nightly CI.
+#
+# The ESC byte is injected with printf, not written as \x1b, because these fixtures must
+# exercise the same bytes cargo emits.
+if [ -s "$zt_h" ] && [ -s "$zn_h" ]; then
+  ESC=$(printf '\033')
+  col_ok="$tmp/1699-color-ok.log"
+  printf '%s[1m%s[92m     Running%s[0m unittests src/lib.rs (target/debug/deps/x-1)\nrunning 12 tests\ntest result: ok. 12 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out\n' \
+    "$ESC" "$ESC" "$ESC" > "$col_ok"
+  if check_unittest_targets_ran "color-ok" "$col_ok" src/lib.rs >/dev/null 2>&1; then
+    ok "1699-r15-color-unittest: a COLOURED healthy log is parsed (no false FAIL on nightly gate.yml)"
+  else
+    bad "1699-r15-color-unittest: a COLOURED healthy log is not parsed — the new lanes would red on every clean nightly run, reporting 'no Running unittests line' about a healthy log"
+  fi
+
+  col_zero="$tmp/1699-color-zero.log"
+  printf '%s[1m%s[92m     Running%s[0m tests/foo.rs (target/debug/deps/foo-1)\nrunning 0 tests\ntest result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out\n' \
+    "$ESC" "$ESC" "$ESC" > "$col_zero"
+  if check_no_unexpected_zero_tests "color-zero" "$col_zero" >/dev/null 2>&1; then
+    bad "1699-r15-color-zerotest: a COLOURED zero-test log PASSES — the target is never associated with its result, so the #2039 guard reports OK having measured nothing (this is the vacuous-pass direction, and it affects the guard's other callers on nightly CI too)"
+  else
+    ok "1699-r15-color-zerotest: a COLOURED zero-test log is still caught (the #2039 guard is not silently inert under colour)"
+  fi
+
+  # A coloured log that is HEALTHY must still pass, or the strip has turned one false verdict
+  # into the other.
+  col_nonzero="$tmp/1699-color-nonzero.log"
+  printf '%s[1m%s[92m     Running%s[0m tests/foo.rs (target/debug/deps/foo-1)\nrunning 7 tests\ntest result: ok. 7 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out\n' \
+    "$ESC" "$ESC" "$ESC" > "$col_nonzero"
+  if check_no_unexpected_zero_tests "color-nonzero" "$col_nonzero" >/dev/null 2>&1; then
+    ok "1699-r15-color-complement: a COLOURED healthy integration log still passes (the strip did not trade one false verdict for the other)"
+  else
+    bad "1699-r15-color-complement: a COLOURED healthy integration log now FAILS — the ANSI strip is over-matching"
+  fi
+
+  # The strip must not be done through a PIPE into the reading loop: that puts the loop in a
+  # subshell and discards the accumulated verdict, which for these guards means silently
+  # passing — the exact failure they exist to prevent.
+  for g_ in check_unittest_targets_ran check_no_unexpected_zero_tests; do
+    gb_="$tmp/1699-color-$g_.txt"
+    awk -v f="^$g_\\\\(\\\\) \\\\{" '$0 ~ f, /^\}/' "$GATE" > "$gb_"
+    if [ "$(grep -cE 'done[[:space:]]*<[[:space:]]*"\$\(_ansi_stripped_log' "$gb_")" -gt 0 ]; then
+      ok "1699-r15-color-nosubshell: $g_ reads the stripped log by REDIRECTION, not through a pipe (a piped loop runs in a subshell and its verdict is discarded)"
+    else
+      bad "1699-r15-color-nosubshell: $g_ no longer reads a stripped log by redirection — if it was changed to a pipe, the loop runs in a subshell and the accumulated verdict is LOST, which means silently passing"
+    fi
+  done
+fi
 
 echo "----"
 echo "passed: $PASS  failed: $FAIL"
