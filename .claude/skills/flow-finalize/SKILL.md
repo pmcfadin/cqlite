@@ -42,7 +42,9 @@ You are the CQLite delivery lead. The PR for issue `#N` is **merged**. Close the
    ```bash
    python3 scripts/delivery-telemetry.py record \
      --issue <N> --pr <pr> --slug <slug> --routing design|oracle \
-     --gate pass --gate-runs <runs through the first PASS; don't re-run after a pass> \
+     --gate pass|fail|not-run --gate-runs <runs through the first PASS; don't re-run after a pass> \
+     # `--gate not-run --gate-runs 0` (#3448) is the ONLY honest record when NO full gate of
+     # record ran; the two are coupled both ways (not-run <=> 0) and neither flag is optional.
      --claim-collisions <rejected claim pushes> --rebase-events <rebases/conflict resolutions> \
      --roborev-findings <roborev findings raised> --rework <re-open / re-review rounds>
    # This skill NEVER invokes roborev (the closer owns the final pass, via the only sanctioned invocation

@@ -986,7 +986,9 @@ end-to-end test. Green helper-only unit tests are not sufficient.
   via `scripts/delivery-telemetry.py record` — a reopened issue that ships more than once
   legitimately gets one record per shipped PR, so retro aggregation by issue treats such
   multi-cycle issues as multiple deliveries, not one (issue #2314). Records hold authoritative
-  data only (a counter not observed is an error, never a fabricated 0). On a cadence the manager
+  data only (a counter not observed is an error, never a fabricated 0; a delivery with no full gate
+  of record is `gate: not-run` + `gate_runs: 0`, coupled both ways and reported by `retro` as its own
+  ungated class — #3448). On a cadence the manager
   runs `retro` and files a deduped `flow-meta` issue. The SKIP-aware `delivery-telemetry` gate
   component covers the tool. Doctrine: `docs/development/pm-operating-loop.md`.
   - **Stamp via a PR-in-worktree, never a direct push (#2433 branch protection).** `main` blocks
