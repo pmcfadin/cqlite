@@ -13,14 +13,15 @@
 pub mod config;
 pub mod cql;
 pub mod error;
+// The shared FFI error contract both bindings consume (issue #1451; see the module docs).
+pub mod ffi_error_contract;
 pub(crate) mod float_cmp;
 pub mod parser;
 pub mod types;
 pub mod util;
 pub mod version_hints;
 
-// #1712: gate at the DECLARATION SITE so the crate root tells the truth about what ships. Zero consumers; opt-in, perf-runs only.
-#[cfg(feature = "benchmarks")]
+#[cfg(feature = "benchmarks")] // #1712: gate HERE so the crate root tells the truth; opt-in perf runs only.
 pub mod benchmarks;
 pub mod memory;
 // Observability foundation (epic #1031, issues #1032 + #1038). Always present;

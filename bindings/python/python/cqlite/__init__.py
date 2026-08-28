@@ -9,6 +9,8 @@ from cqlite._cqlite import (
     _decimal_from_parts,
     # Test-support: direct INET rendering path (issue #1453)
     _inet_from_bytes,
+    # Test-support: shared FFI error-contract conformance probe (issue #1451)
+    _raise_mapped_core_error,
     # Exception types
     CqliteError,
     SchemaError,
@@ -50,6 +52,8 @@ __all__ = [
     "_decimal_from_parts",
     # Test-support: direct INET rendering path (issue #1453)
     "_inet_from_bytes",
+    # Test-support: shared FFI error-contract conformance probe (issue #1451)
+    "_raise_mapped_core_error",
     # Exception types
     "CqliteError",
     "SchemaError",
