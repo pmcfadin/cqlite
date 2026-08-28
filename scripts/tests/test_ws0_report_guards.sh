@@ -1486,15 +1486,16 @@ assert r["quiescence_verdict"] is not None, "the judged branch was never entered
 assert r["quiescence_verdict"]["verdict"] == "QUIESCENT", r["quiescence_verdict"]
 PY
 then
-  pass "a QUIESCENT verdict COVERING the session's measurement window is ACCEPTED (rc=0)"
+  pass "a QUIESCENT verdict COVERING the session's flight-rep window is ACCEPTED (rc=0)"
 else
   fail "the positive control must pass: a covering, complete verdict (rc=$rc, out: $out)"
 fi
 if [ "$rc" -eq 0 ] && python3 - "$d" <<'PY'
 import json, pathlib, sys
 q = json.loads((pathlib.Path(sys.argv[1]) / "results.json").read_text())["quiescence_verdict"]
-assert q["covers_measurement_window"] is True, q
-assert q["measurement_window_rep_records"] >= 1, q
+assert q["covers_flight_rep_window"] is True, q
+assert q["flight_rep_records"] >= 1, q
+assert "bare-scan" in q["flight_rep_window_source"], q
 assert q["judged_window"]["start"] and q["judged_window"]["end"], q
 for k in ("in_window_samples", "coverage_largest_gap_s",
           "narrow_census_records", "census_breadth"):
@@ -1514,7 +1515,7 @@ q_stamp_ts "$d" "$Q_TS_MS"
 q_write_verdict "$d" -1260 -1140 -none-
 out=$(python3 "$REPORT" --dir "$d" --corpus "$TMP/corpus" 2>&1); rc=$?
 if [ "$rc" -ne 0 ] && grep -q 'judged over' <<<"$out" \
-   && grep -q "NOT cover this session's measurement window" <<<"$out"; then
+   && grep -q "NOT cover this session's FLIGHT-REP window" <<<"$out"; then
   pass "a verdict judged over an ADJACENT window of the same timeseries is REFUSED"
 else
   fail "an adjacent-window verdict must be refused naming the judged window (rc=$rc, out: $out)"
@@ -1560,7 +1561,7 @@ out=$(python3 "$REPORT" --dir "$d" --corpus "$TMP/corpus" 2>&1); rc=$?
 if [ "$rc" -ne 0 ] && grep -q 'no rep payload in this session carries a' <<<"$out"; then
   pass "a session whose payloads carry no ts_unix_ms is REFUSED (window unbindable, never assumed)"
 else
-  fail "an unbindable measurement window must be refused (rc=$rc, out: $out)"
+  fail "an unbindable flight-rep window must be refused (rc=$rc, out: $out)"
 fi
 # ==========================================================================
 # #3272 round 20 — the ERROR-CODE breakdown: see test_ws0_error_code_guards.sh

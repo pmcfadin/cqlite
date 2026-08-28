@@ -446,7 +446,7 @@ def build_report(args: argparse.Namespace) -> tuple[dict, list[str]]:
         if _v_start > _t_lo or _v_end < _t_hi:
             raise Invalid(
                 f"{vpath.name} was judged over {_win.get('start')}..{_win.get('end')}, which does"
-                f" NOT cover this session's measurement window"
+                f" NOT cover this session's FLIGHT-REP window"
                 f" ({datetime.datetime.fromtimestamp(_t_lo, datetime.timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')}"
                 f"..{datetime.datetime.fromtimestamp(_t_hi, datetime.timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')},"
                 f" from {_reps_seen} rep record(s), each spanning [ts-duration, ts]). A clean"
@@ -471,11 +471,34 @@ def build_report(args: argparse.Namespace) -> tuple[dict, list[str]]:
             "coverage_largest_gap_s": _wc.get("coverage_largest_gap_s"),
             "narrow_census_records": _wc.get("narrow_census_records"),
             "census_breadth": _wc.get("census_breadth"),
-            # WHICH WINDOW was judged, and that it covers the reps (asserted above). Recorded so a
-            # reader can re-check the binding rather than trust that it happened (#3248 job 70).
+            # WHICH WINDOW was judged, and that it covers the FLIGHT reps (asserted above).
+            # Recorded so a reader can re-check the binding rather than trust that it happened
+            # (#3248 job 70).
             "judged_window": {"start": _win.get("start"), "end": _win.get("end")},
-            "covers_measurement_window": True,
-            "measurement_window_rep_records": _reps_seen,
+            # DELIBERATELY NOT `covers_measurement_window`, WHICH IS WHAT THIS FIELD FIRST SAID.
+            # The window is derived from `ts_unix_ms`, and the ONLY producer of that field in the
+            # whole rig is the flight loadgen step record (tools/flight-loadgen/src/record.rs).
+            # The bare-scan arm's payload is `scan-<temp>-<rep>.json` -- a `.json`, not `.jsonl`,
+            # and it carries no absolute time at all, only `timed_scan_secs`. So the scan arm's
+            # extent CANNOT be derived from the records, and naming this field for the whole
+            # measurement would have claimed coverage of an arm the check never saw.
+            #
+            # The gap is not hypothetical: arm positions ALTERNATE, and this session's own records
+            # show it (scan at position 1,2,1 and flight at 2,1,2 across the three reps). A scan
+            # rep at position 1 therefore begins BEFORE the round's flight rep, and one at
+            # position 2 ends AFTER it, so the assert is under-strict by roughly one scan rep at
+            # each edge. What it does still catch is the case it was built for -- a verdict
+            # borrowed from an ADJACENT window of the same long-lived timeseries, which is minutes
+            # away, not seconds. Widening by a guessed margin was considered and refused: an
+            # invented bound is not a measurement, and this same guard already cost one round by
+            # padding "conservatively" in the wrong direction.
+            "covers_flight_rep_window": True,
+            "flight_rep_window_source": (
+                "derived from ts_unix_ms/duration_s in the session's *.jsonl rep payloads; the"
+                " bare-scan arm records no absolute time, so its extent is NOT covered by this"
+                " assert (#3248)"
+            ),
+            "flight_rep_records": _reps_seen,
         }
     quiescence = quiescence_intent
     # WHICH SERVER PRODUCED THE MEASURED ROWS (#3272 round 14, F2). Read from the pre-measurement
