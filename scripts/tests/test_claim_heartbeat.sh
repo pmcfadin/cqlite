@@ -623,6 +623,120 @@ else
   bad "dead-lanes must document whose pid it checks and what it does NOT cover"
 fi
 
+# ===========================================================================
+echo "TEST 34: a LOCAL pid-less claim makes the run INCOMPLETE; a FOREIGN one does not"
+# ===========================================================================
+# roborev round 2 (Medium): UNKNOWN-NO-PID was printed but not counted, so the run
+# could exit 0 while unable to judge a lane on THIS machine. The foreign case is
+# deliberately different: a foreign pid is unknowable BY DESIGN, so counting it would
+# make every multi-machine fleet exit 1 forever and train everyone to ignore the code.
+(
+  cd "$WORK" || exit 1
+  et=$(git hash-object -t tree --stdin </dev/null)
+  cs=$(GIT_AUTHOR_NAME=t GIT_AUTHOR_EMAIL=t@t GIT_COMMITTER_NAME=t GIT_COMMITTER_EMAIL=t@t \
+    git commit-tree "$et" -m "claim issue=3397 machine=noPidLocal ts=$(date -u +%Y-%m-%dT%H:%M:%SZ)")
+  g push -q origin "${cs}:refs/machine-claims/noPidLocal"
+)
+npl_out=$(cd "$WORK" && HEARTBEAT_MACHINE=noPidLocal CLAIM_OPEN_PR_CMD="$NO_OPEN_PR" \
+  bash "$HB" dead-lanes 2>&1)
+npl_rc=$?
+if [ "$npl_rc" -eq 1 ] && printf '%s\n' "$npl_out" | grep -E '^noPidLocal ' | grep -q 'UNKNOWN-NO-PID'; then
+  ok "a LOCAL pid-less claim is UNKNOWN-NO-PID and makes the run exit 1 (cannot judge != clean)"
+else
+  bad "a local pid-less claim must make the run incomplete (exit 1): rc=$npl_rc out:
+$npl_out"
+fi
+# Same ref, viewed from ANOTHER machine: unknowable by design, so exit 0 stands.
+fpl_out=$(cd "$WORK" && HEARTBEAT_MACHINE=someFarMachine CLAIM_OPEN_PR_CMD="$NO_OPEN_PR" \
+  bash "$HB" dead-lanes 2>&1)
+fpl_rc=$?
+if [ "$fpl_rc" -eq 0 ] && printf '%s\n' "$fpl_out" | grep -E '^noPidLocal ' | grep -q 'UNKNOWN-FOREIGN'; then
+  ok "the SAME ref read from another machine is UNKNOWN-FOREIGN and does NOT make the run incomplete (by design)"
+else
+  bad "a foreign claim must not force exit 1: rc=$fpl_rc out:
+$fpl_out"
+fi
+(cd "$WORK" && g push -q origin ":refs/machine-claims/noPidLocal" 2>/dev/null || true)
+
+# ===========================================================================
+echo "TEST 35: a RECYCLED pid is not reported ALIVE (roborev round 2, Medium)"
+# ===========================================================================
+# `kill -0` cannot tell the stamped supervisor from an unrelated process that later
+# inherited its pid — and that error runs in the DANGEROUS direction: a dead lane
+# reported alive is precisely the silence #3393 is about. The claim's own `ts` settles
+# it without changing what `stamp` records: a process that STARTED AFTER the claim was
+# stamped cannot be the process that stamped it.
+tail -f /dev/null &
+live_pid=$!
+craft_old_claim "$WORK" "reusedPid" 3398 "$live_pid" 7200   # claim stamped 2h BEFORE this process started
+ru_out=$(cd "$WORK" && HEARTBEAT_MACHINE=reusedPid CLAIM_OPEN_PR_CMD="$NO_OPEN_PR" \
+  bash "$HB" dead-lanes 2>&1)
+ru_rc=$?
+if [ "$ru_rc" -eq 3 ] && printf '%s\n' "$ru_out" | grep -E '^reusedPid ' | grep -q 'DEAD-PID-REUSED'; then
+  ok "a LIVE pid that started AFTER its claim was stamped is DEAD-PID-REUSED, not ALIVE (rc=3)"
+else
+  bad "a recycled pid must not read ALIVE: rc=$ru_rc out:
+$ru_out"
+fi
+# NON-VACUITY: that pid really is alive, so a bare `kill -0` would have said ALIVE.
+if kill -0 "$live_pid" 2>/dev/null; then
+  ok "NON-VACUITY: the pid above IS live (kill -0 succeeds), so the pre-fix check would have reported ALIVE"
+else
+  bad "NON-VACUITY broken: the fixture pid is not alive, so TEST 35 proves nothing"
+fi
+kill "$live_pid" 2>/dev/null
+wait "$live_pid" 2>/dev/null
+(cd "$WORK" && g push -q origin ":refs/machine-claims/reusedPid" 2>/dev/null || true)
+
+# ===========================================================================
+echo "TEST 36: a live pid CONSISTENT with its claim ts is ALIVE, and says identity=verified"
+# ===========================================================================
+# The accept half of TEST 35 — without it, a check that called everything reused would
+# pass TEST 35 while being useless.
+tail -f /dev/null &
+live2=$!
+craft_old_claim "$WORK" "goodPid" 3399 "$live2" 0   # stamped now, i.e. AFTER the process started
+gp_out=$(cd "$WORK" && HEARTBEAT_MACHINE=goodPid CLAIM_OPEN_PR_CMD="$NO_OPEN_PR" \
+  bash "$HB" dead-lanes 2>&1)
+if printf '%s\n' "$gp_out" | grep -E '^goodPid ' | grep -q 'ALIVE' \
+  && printf '%s\n' "$gp_out" | grep -E '^goodPid ' | grep -q 'identity=verified'; then
+  ok "a live pid whose start precedes its claim ts is ALIVE with identity=verified"
+else
+  bad "a consistent live pid must read ALIVE/identity=verified: out:
+$gp_out"
+fi
+kill "$live2" 2>/dev/null
+wait "$live2" 2>/dev/null
+(cd "$WORK" && g push -q origin ":refs/machine-claims/goodPid" 2>/dev/null || true)
+
+# ===========================================================================
+echo "TEST 37: a FAILED PR probe renders open-pr=unknown, never a definite yes"
+# ===========================================================================
+# roborev round 2 (Low): `issue_has_open_pr` is fail-SAFE for the REAPER (a gh outage
+# reads as "has open PR", so nothing is reaped on unproven information). Rendering that
+# same guess as a definite `open-pr=yes` told the operator an orphaned endgame exists
+# when the probe had simply failed. Reporting needs three states, not two.
+craft_old_claim "$WORK" "probeFail" 3400 999999 30
+pf_out=$(cd "$WORK" && HEARTBEAT_MACHINE=probeFail \
+  CLAIM_OPEN_PR_CMD='exit 7' bash "$HB" dead-lanes 2>&1)
+if printf '%s\n' "$pf_out" | grep -E '^probeFail ' | grep -q 'open-pr=unknown' \
+  && ! printf '%s\n' "$pf_out" | grep -E '^probeFail ' | grep -q 'open-pr=yes'; then
+  ok "a failed PR probe renders open-pr=unknown (never a definite yes on a guess)"
+else
+  bad "a failed PR probe must render unknown: out:
+$pf_out"
+fi
+# ...and a CONFIRMED open PR still says yes, so unknown has not swallowed the real signal.
+pf2_out=$(cd "$WORK" && HEARTBEAT_MACHINE=probeFail \
+  CLAIM_OPEN_PR_CMD="$HAS_OPEN_PR" bash "$HB" dead-lanes 2>&1)
+if printf '%s\n' "$pf2_out" | grep -E '^probeFail ' | grep -q 'open-pr=yes'; then
+  ok "a CONFIRMED open PR still renders open-pr=yes (the orphaned-endgame signal survives)"
+else
+  bad "a confirmed open PR must still say yes: out:
+$pf2_out"
+fi
+(cd "$WORK" && g push -q origin ":refs/machine-claims/probeFail" 2>/dev/null || true)
+
 echo
 echo "=== claim-heartbeat.sh: $PASS passed, $FAIL failed ==="
 [ "$FAIL" -eq 0 ]

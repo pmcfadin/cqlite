@@ -193,6 +193,12 @@ REMOTE="${HEARTBEAT_REMOTE:-origin}"
 # pushes — it surfaces git's raw error.
 export GIT_TERMINAL_PROMPT=0
 
+# Slack when comparing a process's start time against its claim's `ts` (#3393). `ts` is
+# second-resolution and the stamp happens moments AFTER the process starts, so a genuine
+# claim always has start <= ts; the slack only absorbs clock granularity/skew, never a
+# real recycle (a reused pid is minutes-to-hours newer than the claim).
+PID_IDENTITY_SLACK_SECS="${PID_IDENTITY_SLACK_SECS:-60}"
+
 # Default reap threshold: 4h (matches the heartbeat threshold documented above).
 DEFAULT_REAP_THRESHOLD_SECS="${DEFAULT_REAP_THRESHOLD_SECS:-14400}"
 
@@ -504,6 +510,76 @@ cmd_should_reap() {
   return 0
 }
 
+# process_start_epoch <pid> — epoch seconds at which <pid> started, or EMPTY when it
+# cannot be determined. `ps -o lstart=` is used because it exists on both Linux and
+# macOS, unlike /proc. Empty is a THIRD answer, never folded onto "consistent".
+process_start_epoch() {
+  local pid="$1" lstart epoch
+  lstart="$(ps -o lstart= -p "$pid" 2>/dev/null | sed -e 's/^ *//' -e 's/ *$//')"
+  [ -n "$lstart" ] || return 0
+  if epoch="$(date -u -d "$lstart" +%s 2>/dev/null)"; then
+    printf '%s\n' "$epoch"
+    return 0
+  fi
+  # BSD/macOS date: parse ps's own `lstart` format.
+  if epoch="$(date -u -j -f '%a %b %d %T %Y' "$lstart" +%s 2>/dev/null)"; then
+    printf '%s\n' "$epoch"
+  fi
+  return 0
+}
+
+# process_exists <pid> — exit 0 iff the pid exists, REGARDLESS of ownership.
+# `kill -0` is NOT used for this (roborev round 2, Medium): it fails with EPERM for a
+# live process owned by another user, which would report a healthy lane as dead. `ps -p`
+# answers existence without needing permission to signal.
+process_exists() {
+  ps -p "$1" >/dev/null 2>&1
+}
+
+# open_pr_state <issue> — echo `yes` | `no` | `unknown`. THREE-VALUED on purpose
+# (roborev round 2, Low): `issue_has_open_pr` is fail-SAFE for the REAPER — a gh outage
+# reads as "has open PR" so nothing is reaped on unproven information — but rendering
+# that same guess to an operator as a definite `open-pr=yes` claims an orphaned endgame
+# that may not exist. A report must distinguish a confirmed answer from a failed probe.
+# `issue_has_open_pr` is deliberately left untouched: its two-valued fail-safe shape is
+# correct for the decision it serves.
+open_pr_state() {
+  local issue="$1" rc
+  case "$issue" in
+    '' | *[!0-9]*) printf 'unknown\n'; return 0 ;;
+  esac
+  if [ -n "${CLAIM_OPEN_PR_CMD:-}" ]; then
+    set +e
+    bash -c "$CLAIM_OPEN_PR_CMD" _ "$issue" >/dev/null 2>&1
+    rc=$?
+    set -e
+    case "$rc" in
+      0) printf 'yes\n' ;;
+      1) printf 'no\n' ;;
+      *) printf 'unknown\n' ;;  # any other status = the probe itself did not answer
+    esac
+    return 0
+  fi
+  if ! command -v gh >/dev/null 2>&1; then
+    printf 'unknown\n'
+    return 0
+  fi
+  local heads
+  set +e
+  heads="$(gh pr list --state open --limit 1000 --json headRefName --jq '.[].headRefName' 2>/dev/null)"
+  rc=$?
+  set -e
+  if [ "$rc" -ne 0 ]; then
+    printf 'unknown\n'
+    return 0
+  fi
+  if printf '%s\n' "$heads" | grep -qE "^issue-${issue}(-|$)"; then
+    printf 'yes\n'
+  else
+    printf 'no\n'
+  fi
+}
+
 # cmd_dead_lanes — REPORT (never mutate) every machine claim whose owning process is
 # gone. See the header for what "owning process" means and what this does NOT cover.
 #
@@ -539,7 +615,7 @@ cmd_dead_lanes() {
   printf '%-20s %-8s %-12s %-18s %s\n' "MACHINE" "ISSUE" "PID" "VERDICT" "DETAIL"
   while IFS= read -r line; do
     [ -n "$line" ] || continue
-    local refname machine msg issue pid verdict detail
+    local refname machine msg issue pid ts verdict detail
     refname="$(printf '%s' "$line" | awk '{print $2}')"
     machine="${refname#refs/machine-claims/}"
 
@@ -553,6 +629,8 @@ cmd_dead_lanes() {
     msg="$(git log -1 --format=%B FETCH_HEAD 2>/dev/null || true)"
     issue="$(printf '%s' "$msg" | sed -n 's/.*issue=\([0-9][0-9]*\).*/\1/p' | head -1)"
     pid="$(printf '%s' "$msg" | sed -n 's/.*pid=\([0-9][0-9]*\).*/\1/p' | head -1)"
+    # The claim's own stamp time — the second half of the pid-identity check below.
+    ts="$(printf '%s' "$msg" | sed -n 's/.*ts=\([^ ]*\).*/\1/p' | head -1)"
     # `worker-supervisor.sh` stamps issue "0" when the current iteration's issue is
     # not yet known. That is a PLACEHOLDER, not issue #0: probing for a PR on it
     # would query a number that cannot exist and print a bogus issue in the report.
@@ -562,26 +640,51 @@ cmd_dead_lanes() {
 
     detail=""
     if [ "$machine" != "$this_machine" ]; then
+      # Unknowable BY DESIGN from here, so this does NOT count as an incomplete
+      # measurement: counting it would make every multi-machine fleet exit 1 forever
+      # and train readers to ignore the code.
       verdict="UNKNOWN-FOREIGN"
       detail="pid not checkable from ${this_machine}"
     elif [ -z "$pid" ]; then
+      # A LOCAL claim SHOULD carry a pid, so its absence is a real gap in what this
+      # run could determine — counted (roborev round 2, Medium).
       verdict="UNKNOWN-NO-PID"
       detail="claim ref records no pid (pre-#2655 or hand-made)"
-    elif kill -0 "$pid" 2>/dev/null; then
-      verdict="ALIVE"
+      unreadable=$((unreadable + 1))
+    elif process_exists "$pid"; then
+      # The pid exists. That alone does NOT make it the process that stamped the
+      # claim: pids are recycled, and a stale claim naming a reused pid would read
+      # ALIVE — the dangerous direction for a monitor whose whole job is spotting a
+      # dead lane. The claim's OWN ts settles it with no change to what `stamp`
+      # records: a process that started AFTER the claim was stamped cannot be the
+      # process that stamped it.
+      local pstart cts
+      pstart="$(process_start_epoch "$pid")"
+      cts=""
+      [ -n "$ts" ] && cts="$(ts_to_epoch "$ts" 2>/dev/null || true)"
+      if [ -n "$pstart" ] && [ -n "$cts" ] && [ "$pstart" -gt "$((cts + PID_IDENTITY_SLACK_SECS))" ]; then
+        verdict="DEAD-PID-REUSED"
+        dead=$((dead + 1))
+        detail="pid ${pid} started $((pstart - cts))s AFTER the claim was stamped — a different process now holds it; open-pr=$(open_pr_state "$issue")"
+      elif [ -n "$pstart" ] && [ -n "$cts" ]; then
+        verdict="ALIVE"
+        detail="identity=verified (start precedes the claim ts)"
+      else
+        # PERMISSIVE, and the reason is recorded here rather than left implicit: the
+        # start time or the claim ts could not be read, so reuse is not excluded. The
+        # alternative — refusing to report ALIVE at all — would make the command
+        # useless wherever `ps -o lstart=` is unavailable, so the gap is ANNOTATED
+        # instead of hidden.
+        verdict="ALIVE"
+        detail="identity=unverified (start time unavailable — pid reuse not excluded)"
+      fi
     else
       verdict="DEAD-NO-PROCESS"
       dead=$((dead + 1))
-      # The open-PR annotation uses the SAME fail-safe predicate the reaper uses
-      # (a gh/network failure reads as "has open PR"), so this line never invites
-      # a reap on unproven information. It does NOT gate the report.
-      if [ "$issue" != "?" ] && issue_has_open_pr "$issue"; then
-        detail="open-pr=yes — ORPHANED ENDGAME (#2499): report it, do NOT reap it"
-      elif [ "$issue" = "?" ]; then
-        detail="issue unknown (ref stamped before the issue was known)"
-      else
-        detail="open-pr=no"
-      fi
+      detail="open-pr=$(open_pr_state "$issue")"
+      case "$detail" in
+        *yes) detail="open-pr=yes — ORPHANED ENDGAME (#2499): report it, do NOT reap it" ;;
+      esac
     fi
     printf '%-20s %-8s %-12s %-18s %s\n' "$machine" "$issue" "${pid:-none}" "$verdict" "$detail"
   done <<<"$raw"
