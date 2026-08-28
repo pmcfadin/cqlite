@@ -9,8 +9,9 @@
 //! `CompressionInfo` + chunk-index); only the decompress step is consolidated here.
 //! Architecture test: `tests/chunk_decode_single_plane.rs`.
 
+use crate::observability::read_metrics;
 use crate::storage::cache::{ChunkKey, DecompressedChunkCache};
-use crate::storage::sstable::compression::Compression;
+use crate::storage::sstable::compression::{Compression, CompressionAlgorithm};
 use crate::storage::sstable::compression_info::CompressionInfo;
 use crate::storage::sstable::reader::block_io::read_compressed_chunk_at;
 use crate::storage::sstable::reader::data_access::DECOMPRESS_CALLS;
@@ -49,6 +50,95 @@ pub(crate) struct ChunkSource<'a> {
     cache_id: u64,
 }
 
+/// The bounded [`crate::observability::catalog::attr::COMPRESSION`] label for a
+/// decode site's configured algorithm (issue #1701) — `"none"` when there is none,
+/// never an absent label. Free function taking the ALGORITHM so every decode site
+/// resolves the label identically whether it holds a `Compression`, a
+/// `CompressionReader`, or nothing.
+pub(crate) fn compression_label_of(algorithm: Option<&CompressionAlgorithm>) -> &'static str {
+    match algorithm {
+        Some(a) => read_metrics::compression_attr(a),
+        None => read_metrics::COMPRESSION_NONE,
+    }
+}
+
+/// Count a chunk the caller hands through RAW — Cassandra stored it uncompressed
+/// because its compressed length would have met `max_compressed_length`, or the
+/// SSTable has no compressor at all — into
+/// [`crate::observability::catalog::READ_BYTES`], exactly as a DECOMPRESSED chunk's
+/// bytes are counted (issue #1701, roborev F3).
+///
+/// # Why this lives in the plane rather than at each call site
+///
+/// SIX decode exits do that raw passthrough THEMSELVES (`len >=
+/// max_compressed_length`, or "no compressor, the buffer already holds finished
+/// bytes") and so never reach [`ChunkSource::decompress_only`] /
+/// [`ChunkSource::decode_and_cache`]: the windowed scan's IO half (two exits), the
+/// compressed offset-read window, the BIG promoted seek window, the stitch path, and
+/// the UNCOMPRESSED arm of the BIG promoted/reverse partition window
+/// (`read_uncompressed_verified_at`, found by roborev round 4 — the sixth exit this
+/// doc predicted, reached by every `ORDER BY ... DESC` read of an uncompressed
+/// SSTable, which is the only shape CQLite's own write surface emits).
+/// Every one was a silent hole in `read.bytes` — a read reporting rows and a duration
+/// while reporting fewer bytes than it actually read. Counting them independently at
+/// five sites would leave the NEXT such exit free to bypass the metric again, so the
+/// counting is ONE named plane function they all call: greppable from the plane, and
+/// the thing to reach for when a sixth raw exit appears.
+pub(crate) fn count_raw_chunk(bytes: &[u8], algorithm: Option<&CompressionAlgorithm>) {
+    read_metrics::record_decompressed_bytes(bytes.len(), compression_label_of(algorithm));
+}
+
+/// [`count_raw_chunk`] for a site that hands the buffer ON as its own value: counts,
+/// then returns it unchanged. Same single boundary — this exists only so a site whose
+/// raw exit is one expression (`Ok(whole)`) can route through it without restructuring.
+pub(crate) fn counted_raw_chunk(
+    bytes: Vec<u8>,
+    algorithm: Option<&CompressionAlgorithm>,
+) -> Vec<u8> {
+    count_raw_chunk(&bytes, algorithm);
+    bytes
+}
+
+/// Credit an UNCOMPRESSED block read to `cqlite.read.bytes` (issue #1701, roborev
+/// F1/F3), returning the read unchanged.
+///
+/// Gated on `compression_info.is_none()`: for an SSTable with NO
+/// `CompressionInfo.db` the block bytes ARE the finished `Data.db` payload and never
+/// reach a decompress step, so this is their only counting opportunity. A COMPRESSED
+/// read must NOT be counted here — those bytes are still compressed and the plane
+/// counts that read's payload post-decompression, so counting both would report one
+/// read twice under two different sizes.
+///
+/// # This is the ONLY counting of an uncompressed block — downstream branches must NOT
+///
+/// Every caller of `block_io::read_next_block` receives bytes that are ALREADY counted
+/// when the SSTable has no `CompressionInfo.db`, so a "no compressor, pass the buffer
+/// through" branch further down that call chain must leave them alone. `compression_info`
+/// and `compression_reader` are derived from the SAME parse (`reader/mod.rs`), so
+/// `compression_reader.is_none()` holds EXACTLY when this gate fired — which makes the
+/// naive `counted_raw_chunk(chunk, None)` in such a branch a straight DOUBLE count, at
+/// twice the true byte total. That is not a corner case: #1406 makes UNCOMPRESSED the
+/// only shape CQLite's own write surface emits, so it is the ordinary compaction input.
+/// Both compaction decode loops (`data_access/compaction.rs`) and the query stitch
+/// (`data_access/mod.rs`) therefore return that branch's buffer UNCOUNTED. The
+/// incompressible-raw branch beside them is the opposite case and DOES count: it is
+/// reached only when `max_compressed_length` is a real value, i.e. `compression_info` is
+/// `Some`, i.e. this gate did NOT fire.
+///
+/// Lives here rather than in `block_io` so every `read.bytes` increment in the crate
+/// stays inside this module (grep `record_decompressed_bytes`).
+pub(crate) fn count_uncompressed_block(
+    compression_info: &Option<std::sync::Arc<CompressionInfo>>,
+    read: Result<Option<Vec<u8>>>,
+) -> Result<Option<Vec<u8>>> {
+    if compression_info.is_none() {
+        if let Ok(Some(block)) = &read {
+            count_raw_chunk(block, None);
+        }
+    }
+    read
+}
+
 impl<'a> ChunkSource<'a> {
     /// Construct a ChunkSource for positioned chunk reads.
     #[allow(clippy::too_many_arguments)]
@@ -72,6 +162,21 @@ impl<'a> ChunkSource<'a> {
             namespace,
             cache_id,
         }
+    }
+
+    /// The bounded [`catalog::attr::COMPRESSION`] label for this source's
+    /// decompressor (issue #1701). Derived from the `CompressionAlgorithm` ENUM,
+    /// never from the algorithm string parsed out of `CompressionInfo.db` — a
+    /// file-controlled string would be an unbounded metric dimension.
+    ///
+    /// No decompressor is `"none"`, NOT an absent label: an uncompressed SSTable is a
+    /// real, first-class read path (CQLite's own writer emits only uncompressed
+    /// SSTables — the #1406 claim boundary), so its bytes are attributed to a named
+    /// series rather than an anonymous one.
+    ///
+    /// [`catalog::attr::COMPRESSION`]: crate::observability::catalog::attr::COMPRESSION
+    fn compression_label(&self) -> &'static str {
+        compression_label_of(self.compression.map(|c| c.algorithm()))
     }
 
     /// Whole-chunk read: positioned read → CRC → decompress → B1 cache.
@@ -120,10 +225,14 @@ impl<'a> ChunkSource<'a> {
         compressed: Vec<u8>,
         incompressible: bool,
     ) -> Result<Bytes> {
-        let decompressed = if incompressible {
-            // Stored uncompressed by Cassandra: pass raw bytes through (no decompress counter)
-            compressed
-        } else if let Some(compression) = self.compression {
+        if incompressible {
+            // Stored uncompressed by Cassandra: pass the raw bytes through (no
+            // decompress counter), but COUNT them — they are Data.db payload this
+            // read materialised, exactly like a decompressed chunk's (issue #1701 F3).
+            count_raw_chunk(&compressed, self.compression.map(|c| c.algorithm()));
+            return Ok(self.cache.insert(key, compressed));
+        }
+        let decompressed = if let Some(compression) = self.compression {
             // Decompress: the single query-path decompress call site
             let d = compression.decompress(&compressed).map_err(|e| {
                 Error::corruption(format!(
@@ -145,6 +254,13 @@ impl<'a> ChunkSource<'a> {
             // No compression reader: treat raw bytes as decompressed
             compressed
         };
+
+        // cqlite.read.bytes (issue #1701): the DECOMPRESSED Data.db payload this
+        // chunk materialised, counted ONCE per chunk decode — the coarsest grain at
+        // which the decompressed size is known, and never per row. A chunk served
+        // from the B1 cache returns above without reaching here, which is correct:
+        // a cache hit read no Data.db bytes.
+        read_metrics::record_decompressed_bytes(decompressed.len(), self.compression_label());
 
         // Insert into B1 cache (Vec→Arc conversion happens once here) and return
         Ok(self.cache.insert(key, decompressed))
@@ -181,6 +297,9 @@ impl<'a> ChunkSource<'a> {
         } else {
             compressed.to_vec()
         };
+        // cqlite.read.bytes (issue #1701) — same per-chunk grain as
+        // `decode_and_cache`; this is the windowed scan's decode entry.
+        read_metrics::record_decompressed_bytes(decompressed.len(), self.compression_label());
         Ok(self.cache.insert(key, decompressed))
     }
 
@@ -202,13 +321,30 @@ impl<'a> ChunkSource<'a> {
     ) -> Result<Vec<u8>> {
         if let Some(c) = compression {
             let compressed_len = compressed.len();
-            c.decompress(&compressed).map_err(|e| {
+            let decompressed = c.decompress(&compressed).map_err(|e| {
                 Error::corruption(format!(
                     "ChunkSource: decompress failed ({} compressed bytes): {}",
                     compressed_len, e
                 ))
-            })
+            })?;
+            // cqlite.read.bytes (issue #1701): the uncached decompress sites (the
+            // sequential-scan block decode, the stitch path, the BIG reverse/seek
+            // window) read Data.db bytes exactly like the cached ones, so they are
+            // counted at the same per-chunk grain.
+            read_metrics::record_decompressed_bytes(
+                decompressed.len(),
+                read_metrics::compression_attr(c.algorithm()),
+            );
+            Ok(decompressed)
         } else {
+            // No compressor: these bytes ARE the `Data.db` payload, so they are read
+            // work and must be counted (issue #1701, roborev B2). Skipping this branch
+            // left every UNCACHED UNCOMPRESSED read — the shape CQLite's own writer
+            // produces (#1406) — invisible to `cqlite.read.bytes`.
+            read_metrics::record_decompressed_bytes(
+                compressed.len(),
+                read_metrics::COMPRESSION_NONE,
+            );
             Ok(compressed)
         }
     }

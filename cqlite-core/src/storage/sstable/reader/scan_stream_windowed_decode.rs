@@ -12,6 +12,15 @@ use super::SSTableReader;
 use crate::Result;
 
 impl SSTableReader {
+    /// This reader's configured decompression algorithm, or `None` for an
+    /// uncompressed SSTable — the plane maps `None` onto the bounded `"none"`
+    /// compression label (issue #1701), so no call site invents a label of its own.
+    fn scan_algorithm(
+        &self,
+    ) -> Option<&crate::storage::sstable::compression::CompressionAlgorithm> {
+        self.compression_reader.as_ref().map(|r| r.algorithm())
+    }
+
     /// Decode ONE compressed chunk on the IO half (issue #1940, D2): CRC was
     /// already verified inside the read path, so this does cache-lookup-or-decompress
     /// and returns the refcounted decompressed `Bytes` substrate shipped on the
@@ -39,6 +48,11 @@ impl SSTableReader {
         // Incompressible-raw chunks (stored uncompressed by Cassandra) skip the
         // cache and are passed through zero-copy; the buffer is consumed.
         if compressed.len() >= max_compressed_length {
+            // cqlite.read.bytes (issue #1701 roborev B2): these ARE `Data.db` payload
+            // bytes this scan just read — Cassandra stored the chunk raw — so they are
+            // counted here, at the exit that BYPASSES the decode plane where the
+            // sibling compressed exit counts. Skipping them would understate real I/O.
+            super::super::chunk_source::count_raw_chunk(&compressed, self.scan_algorithm());
             return Ok((bytes::Bytes::from(compressed), Vec::new()));
         }
         let key = crate::storage::cache::ChunkKey::new(
@@ -49,6 +63,21 @@ impl SSTableReader {
         // compressed buffer is recycled unused. Warm scans must take the hit rather
         // than re-decompress and overwrite (issue #1598 roborev Medium).
         if let Some(hit) = self.chunk_cache.get(&key) {
+            // cqlite.read.bytes (issue #1701, roborev round 5): a hit here still READ
+            // the chunk off disk. The windowed feed calls
+            // `read_compressed_chunk_sync` / `read_uncompressed_piece_sync`
+            // UNCONDITIONALLY and only then asks the cache (see the caller in
+            // `scan_stream_windowed_read.rs`; neither reader consults the cache), so
+            // this cache saves DECOMPRESSION, not I/O — the comment above says as much
+            // when it calls `compressed` "recycled unused". Returning uncounted made a
+            // warm scan report ZERO bytes for I/O it genuinely performed, which is the
+            // opposite of what an I/O-amplification metric is for.
+            //
+            // Counted as the DECOMPRESSED size, like every other site: `read.bytes` is
+            // documented post-decompression, so counting `compressed.len()` here would
+            // make the same chunk contribute two different amounts cold vs warm and
+            // break comparability of the series.
+            super::super::chunk_source::count_raw_chunk(&hit, self.scan_algorithm());
             return Ok((hit, compressed));
         }
         // No compressor (raw/uncompressed NB scan, no CompressionInfo): the read
@@ -61,6 +90,13 @@ impl SSTableReader {
         // buffer is minted for the next chunk. No decompress here, so the
         // decode-thread probe does NOT fire (it pins where decompression runs).
         if self.compression_reader.is_none() {
+            // cqlite.read.bytes (issue #1701 roborev B2): the UNCOMPRESSED scan's
+            // chunk bytes are `Data.db` payload read from disk. This exit also
+            // bypasses the plane, and uncompressed is a FIRST-CLASS path (CQLite's own
+            // write surface emits only uncompressed SSTables, the #1406 claim
+            // boundary), so leaving it uncounted made every uncompressed read
+            // invisible to the metric.
+            super::super::chunk_source::count_raw_chunk(&compressed, None);
             return Ok((self.chunk_cache.insert(key, compressed), Vec::new()));
         }
         // Miss → decompress from the BORROWED slice (so we keep `compressed` to

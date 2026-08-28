@@ -371,6 +371,13 @@ mod tests {
             Error::CqlParse(_) => PyExceptionClass::Parse,
             Error::Configuration(_) | Error::InvalidInput(_) => PyExceptionClass::Value,
             Error::Timeout(_) => PyExceptionClass::Timeout,
+            // Query execution budget elapsed (issue #1695): the SAME builtin
+            // `TimeoutError` as its sibling above, so `except TimeoutError:` catches
+            // both. Its core `ErrorCategory` is `Query` — a separate axis from the
+            // Python class, which is why this is not `PyExceptionClass::Query`. Node
+            // gives the same variant code `TIMEOUT`, which is the cross-binding
+            // agreement the shared table (#1451) exists to enforce.
+            Error::QueryTimeout { .. } => PyExceptionClass::Timeout,
             Error::Memory(_) => PyExceptionClass::Memory,
             Error::InvalidState(_) => PyExceptionClass::Runtime,
             Error::Cancelled => PyExceptionClass::Cancelled,

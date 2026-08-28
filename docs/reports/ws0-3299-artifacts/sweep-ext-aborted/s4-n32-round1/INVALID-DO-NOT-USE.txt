@@ -1,0 +1,13 @@
+INVALID MEASUREMENT — DO NOT USE THIS POINT.
+
+From an ABORTED extension run. Invalid for two independent reasons:
+  1. ONE rep (AC1 requires medians of >= 3; this carries no dispersion).
+  2. NO contemporaneous incumbent — comparing it against the main grid crosses a
+     1-2 h gap in a session with measured directional drift, so drift alone could
+     decide the comparison it exists to make.
+
+The perf.csv here is real and reads 100.00% pct_running. That is exactly why this
+file exists: the data is structurally indistinguishable from a valid point, and
+its invalidity is a property of the run's DESIGN, not of its bytes.
+
+Superseded by the extA run (grid 6:24,32,48,64). See ../README.md.

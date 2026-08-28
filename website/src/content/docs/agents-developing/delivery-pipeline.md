@@ -341,6 +341,29 @@ comment. Two workflow hardenings ship with it: **`PROJECTS_TOKEN` absence now fa
 10-minute auto-add grace window**, so it no longer races the built-in Auto-add workflow's default-status
 write on a freshly created issue.
 
+**`should-reap` is a REAP GATE, not a liveness monitor — and that gap cost three lanes (#3393).** It
+consults the recorded PID only *after* age > threshold, so a worker the kernel OOM-killed a minute ago is
+indistinguishable from a healthy one for **four hours** — and even then the answer is an exit code nobody is
+watching. On 2026-08-27/28 the kernel issued **10 global OOM kills** across two 30 GB workers (every victim
+a `python3` at 20–28 GB) and three lanes died silently, each leaving a clean worktree, a held claim and an
+open PR. **Memory exhaustion is invisible to any monitor that iterates existing sessions**: a dead tmux
+session cannot report itself.
+
+**There is no committed tool for this yet.** #3430 tracks it, blocked on a layout decision rather than on
+code: `refs/machine-claims/<machine>` is keyed per **MACHINE** and force-updated every supervisor
+iteration, so on a multi-lane box a surviving lane's stamp overwrites a dead sibling's PID — a live sibling
+does not merely hide a dead lane, it **masks** it. Either lane-scoped refs land (which changes what
+`should-reap` and the CI reaper read), or the one-worker-per-machine invariant (#1930) is enforced and
+multi-lane boxes are themselves the defect; #3393's own data supports the latter (4 lanes ⇒ OOM kills and
+wedges on *both* boxes; the 1-lane box ⇒ zero).
+
+Until it lands, a suspected dead lane is diagnosed **by hand, and the order matters** — full procedure in
+`docs/development/fleet-runbook.md`. The one line worth memorising: when a box accepts TCP but sends no SSH
+banner from inside the VPC, **check `dmesg` for an OOM kill before concluding the instance is broken**.
+Reading that symptom as a broken instance already cost one healthy machine (terminated, losing a
+measurement lane's 43 minutes and an unpushed commit), and a soft reboot may be silently ignored on a
+memory-exhausted host.
+
 **Never block on a question (park-and-resume, #2666).** A worker runs unattended, so `AskUserQuestion` (and
 any interactive prompt) is attended-sessions-only. When a worker hits Seam 1 (an unapproved spec) or a
 genuine mid-run owner decision it does not wait — it **parks**: posts ONE structured question comment

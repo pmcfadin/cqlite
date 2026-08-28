@@ -500,7 +500,11 @@ impl SSTableReader {
         let io_failed = Arc::new(AtomicBool::new(false));
         let reader = Arc::clone(&self);
         let task_io_failed = Arc::clone(&io_failed);
+        // Detached-blocking-work marker; BEFORE the spawn so a queued task is not
+        // counted as zero. Full rationale on `BlockingScanTaskGuard` (issue #3384).
+        let parse_inflight = crate::storage::read_path_probe::BlockingScanTaskGuard::new();
         let parse_task = tokio::task::spawn_blocking(move || {
+            let _inflight = parse_inflight;
             reader.drain_scan_window_blocking(ctx, raw_rx, batch_tx, task_io_failed)
         });
 
@@ -629,7 +633,10 @@ impl SSTableReader {
         max_compressed_length: usize,
     ) -> Option<Error> {
         let io_failed_feed = Arc::clone(io_failed);
+        // Registered BEFORE the spawn — see the parse half (issue #3384).
+        let feed_inflight = crate::storage::read_path_probe::BlockingScanTaskGuard::new();
         let feed = tokio::task::spawn_blocking(move || -> Option<Error> {
+            let _inflight = feed_inflight;
             // Panic/early-exit guard (roborev finding, issue #1593). `raw_tx` is
             // captured (moved) into this closure and drops when the closure
             // returns OR unwinds; the parse half reads a `raw_tx` close with

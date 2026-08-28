@@ -197,7 +197,7 @@ pub mod attr {
 
 /// `cqlite.read.rows` — counter `{row}`.
 ///
-/// Total rows materialised by the read path. On the Flight k-way merge scan
+/// Rows a read DELIVERED (see `ReadOpMeter`). On the Flight k-way merge scan
 /// (issue #2162) the delta is emitted incrementally during a long-running scan,
 /// at a bounded row threshold, so the counter climbs before the scan returns;
 /// the total is unchanged. That merge-scan emission is FORMAT-AGNOSTIC (carries
@@ -214,20 +214,20 @@ pub const READ_ROWS: &str = "cqlite.read.rows";
 
 /// `cqlite.read.bytes` — counter `By`.
 ///
-/// Total bytes read from Data.db (post-decompression). Bounded attributes:
-/// [`attr::SSTABLE_FORMAT`], [`attr::COMPRESSION`].
+/// Total bytes read from Data.db (post-decompression), once per chunk decode.
+/// Bounded attributes: [`attr::COMPRESSION`] alone — the chunk plane knows no format (#1701).
 pub const READ_BYTES: &str = "cqlite.read.bytes";
 
 /// `cqlite.read.partitions` — counter `{partition}`.
 ///
-/// Total partitions scanned. On the Flight k-way merge scan (issue #2162) the
-/// delta is emitted incrementally during a long-running scan, at a bounded row
-/// threshold, so the counter climbs before the scan returns; the total is
-/// unchanged. Like [`READ_ROWS`], that merge-scan emission is FORMAT-AGNOSTIC
-/// (no attributes) — the merged partition already reconciles across possibly
-/// mixed-format input SSTables — while a direct single-SSTable read-path caller
-/// may still attach [`attr::SSTABLE_FORMAT`]. Bounded attributes:
-/// [`attr::SSTABLE_FORMAT`] OR none.
+/// Partitions a read DELIVERED rows from on the CORE path (boundaries come from EMITTED
+/// row keys, so a wholly tombstoned/TTL-expired partition contributes ZERO), and
+/// partitions SCANNED on Flight's k-way merge arm — the gap is exactly the
+/// fully-suppressed partitions, and `ReadOpMeter::record_row` records why. On that
+/// Flight merge scan (#2162) the delta is emitted incrementally at a bounded row
+/// threshold, so the counter climbs before the scan returns; the total is unchanged,
+/// and like [`READ_ROWS`] it is FORMAT-AGNOSTIC (no attributes) while a single-SSTable
+/// caller may attach [`attr::SSTABLE_FORMAT`]. Bounded: that OR none.
 pub const READ_PARTITIONS: &str = "cqlite.read.partitions";
 
 /// `cqlite.read.duration` — histogram `s`.

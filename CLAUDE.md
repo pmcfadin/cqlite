@@ -91,7 +91,7 @@ ad-hoc cargo runs never count. `scripts/agent-gate.sh --list` shows the componen
 
 | Mode | Command | Use |
 |------|---------|-----|
-| **Full** — the gate of record | `scripts/agent-gate.sh` | ONCE per issue, immediately pre-merge, inside `flow-closer`. fmt, clippy `-D warnings`, core/integration/write/CLI tests, `oom-audit` (SKIP-aware structural no-unbounded-materialization audit, #2012), minimal-features build, smoke. Emits `AGENT-GATE SUMMARY`. |
+| **Full** — the gate of record | `scripts/agent-gate.sh` | ONCE per issue, immediately pre-merge, inside `flow-closer`. fmt, clippy `-D warnings`, core/integration/write/CLI tests, `oom-audit` (SKIP-aware structural no-unbounded-materialization audit, #2012), `pub-surface` (cqlite-core crate-root declaration-consistency guard, #1712), minimal-features build, smoke. Emits `AGENT-GATE SUMMARY`. |
 | **Lite** (#1821, ~1–5 min) | `scripts/agent-gate.sh --lite` | EVERY fix round. file-size + fmt + scoped clippy + blast-radius tests (touched package `--lib` + diff's new `--test` targets, mapped from `git diff origin/main...HEAD`; defaults to `cqlite-core --lib` when no rust package is in the diff). Emits a DISTINCT `AGENT-GATE LITE SUMMARY` (MODE: lite) — can NEVER be pasted as the full SUMMARY. |
 | **Delta** (#1892) | `scripts/agent-gate.sh --delta <anchor-sha> --anchor-run-id <id>` (or `--anchor-summary-file <path>`) | Re-certify a post-full-PASS polish round whose diff is ONLY executable tests/docs (rust test code, python/node binding tests against an already-built module, `scripts/tests/*.sh`, `*.md`; #2081). FAILs CLOSED on anything else (src, scripts, workflows, `Cargo.*`, config, test-data, unbuilt node module) — never builds, never passes vacuously. Emits a DISTINCT `AGENT-GATE DELTA SUMMARY` naming the anchor + a `delta-executors:` line; record BOTH it AND the anchor's full SUMMARY in the PR. NOT the gate of record. |
 
@@ -240,6 +240,26 @@ only, zero Cassandra-side parity coverage. Fail-closed in code: configuring comp
 writing returns `Error::UnsupportedFormat`. Do NOT claim CQLite emits compressed SSTables (manifest:
 `claim.blocked.compressed_sstable_writes`; safe wording `claim.safe.uncompressed_sstable_writes`).
 Wiring them (posture a) is issue #1406.
+
+### Crate root must tell the truth (`cqlite-core`, issue #1712)
+The full gate's `pub-surface` component (`scripts/ci/check-pub-surface.sh`) asserts ONE property,
+answered entirely from source: an unconditional, non-`#[doc(hidden)]` top-level `pub mod NAME;` in
+`cqlite-core/src/lib.rs` must not be gated by an inner `#![cfg(...)]` inside `NAME`'s own file. The
+defect it exists for: `pub mod benchmarks;` read as shipped public API for months while an inner
+`#![cfg(feature = "benchmarks")]` in `benchmarks/mod.rs` configured it out of every default build.
+Both facts are source and each is a BOUNDED read — the declaration's attributes structurally from
+`lib.rs`, and the module file's PROLOGUE (rustc-verified to hold every inner attribute a module
+has). It **REFUSES rather than guess**: a `pub mod` shape it does not recognise, a module file
+resolving to neither/both legal paths, an unreadable module file, a block comment in a prologue or
+an inner attribute it cannot classify are each a named FAIL. Remedy is always the same — hoist the
+gate to the declaration site.
+
+**PUBLIC-API DRIFT DETECTION IS NOT PART OF IT.** There is no `pub-surface.snapshot` and no
+`--regenerate`: the rustdoc-derived snapshot half was **removed deliberately** (#1712) because five
+review findings were one defect class — a scanner that had to find declarations anywhere in
+arbitrary source, an unbounded parsing problem that cannot abstain. So **nothing in this repo
+currently detects a public-API change**, and a green `pub-surface` must never be read as one; the
+principled route (reachability from rustc's own dep-info) is **issue #3366**.
 
 ### Code quality
 - `RUSTFLAGS="-D warnings"` must pass; no `unwrap()`/`expect()` in library code; `thiserror` for errors
@@ -423,7 +443,15 @@ implement (TDD) → --lite each fix round (summary-file redirect)
   the job-id carrier: for a range review it names only the BASE, so an unavailable record FAILs rather
   than falling back to prose that verifies nothing. A range that does not match, a SINGLE-COMMIT record
   (even one equal to HEAD), or a base-equal scope **aborts the round** — base-equality is the signature of
-  the worktree bug. **(3)** `"contains no code changes to review"` on a
+  the worktree bug. **The expected RANGE BASE is the MERGE-BASE, never the base ref's TIP (#3392)**:
+  `<base>...HEAD` *is* `merge-base(<base>, HEAD)..HEAD`, so an assert that expected the tip FAILED
+  DETERMINISTICALLY on a CORRECT review of any branch whose `main` had advanced past its branch point —
+  i.e. almost every branch not just rebased. It was misdiagnosed as a race **twice** (the falsifying
+  control: `origin/main` recorded before AND after a failing round, unmoved). The tip is still read, for
+  the T1 root-checkout signature alone, and the block now prints an informational
+  `assert-base: <merge-base> (merge-base of <base> and HEAD; <base> tip <sha>)` so the two can never be
+  confused in a pasted block. The absence waiver's `base=` field is bound to that same merge-base —
+  copy it from `assert-base:`, not from `base:`. **(3)** `"contains no code changes to review"` on a
   NON-EMPTY diff is a **HARD FAIL**, never a pass. **(4)** A docs-only (code-free) diff **cannot be
   roborev-certified at all** — and "docs-only" means a **CODE-FREE CENSUS as the wrapper classifies it,
   NEVER a `docs/` path prefix** (#3229). The mechanism, stated correctly: **roborev drops exactly what
@@ -916,9 +944,10 @@ end-to-end test. Green helper-only unit tests are not sufficient.
   **`should-reap` is a REAP GATE, not a liveness monitor, and the difference cost three lanes
   (#3393)**: it consults the PID only AFTER age > 4h, so a worker the kernel OOM-killed a minute ago
   is indistinguishable from a healthy one for four hours — and even then the answer is an exit code
-  nobody watches. `claim-heartbeat.sh dead-lanes` answers the other question, "is anything dead RIGHT
-  NOW", and inverts BOTH of the reaper's conservative guards on purpose: **no age gate** (a fresh
-  claim with a dead PID *is* the shape of an OOM kill) and **an open PR does not suppress the
+  nobody watches, and nothing reported three silent lane deaths — each leaving a clean worktree, a
+  held claim and an open PR. `claim-heartbeat.sh dead-lanes` answers the other question, "is anything
+  dead RIGHT NOW", and inverts BOTH of the reaper's conservative guards on purpose: **no age gate** (a
+  fresh claim with a dead PID *is* the shape of an OOM kill) and **an open PR does not suppress the
   report** (for the reaper an open PR means KEEP; for a report it is the most urgent row on the page
   — a dead process holding an in-flight endgame, annotated `open-pr=yes`, still never reaped).
   It is a REPORT: it deletes no ref and moves no board item. **`claim-heartbeat.sh dead-lanes --help`
@@ -927,27 +956,30 @@ end-to-end test. Green helper-only unit tests are not sufficient.
   already). In outline: verdicts are MULTI-valued because a PID is only checkable on the machine that
   owns the claim — two `DEAD-*` verdicts (`DEAD-NO-PROCESS`, which covers a zombie, and
   `DEAD-PID-REUSED`) and a family of `UNKNOWN-*` ones (`FOREIGN`, `NO-PID`, `STATE`, `IDENTITY`,
-  `PROBE`, `UNREADABLE`). **It is POSITIVE-DETECTION ONLY and NEVER exits 0** — there is no clean
-  verdict, by construction. Exit `3` = a dead lane was reported (both `DEAD-*` verdicts); exit `1` =
-  no dead lane was reported *and absence is not establishable*. The reason is the per-MACHINE claim
-  ref: the ref is force-updated every supervisor iteration, so on a multi-lane box a surviving
-  sibling's stamp overwrites a dead lane's pid and the command then sees a live, identity-verified
-  pid — a false clean about the exact scenario #3393 exists to catch. Documenting that was not
-  enough (a documented false-clean is still a false-clean, and the exit code is what a cron reads),
-  so the clean verdict was removed rather than qualified: act on `3`, and never read `1` as a clean
-  bill of health. Restoring a meaningful `0` needs lane-scoped claim refs — an owner decision,
-  escalated on #3393, because it changes a namespace shared with `should-reap` and the CI reaper and
-  collides with the standing one-worker-per-machine invariant (#1930) the fleet was already
-  violating. An UNKNOWN is never folded onto the permissive answer — "zero claim refs" and "every
-  claim is foreign" are both exit 1, since neither establishes an idle fleet, and `UNKNOWN-FOREIGN`
-  alone never manufactures a finding. **It is LOCAL-ONLY**: run it ON the suspect box. It also
-  refuses outright on git < 2.29, which cannot fetch without writing `FETCH_HEAD` — a monitor may
-  decline to answer, but it may not corrupt the `FETCH_HEAD` that `should-reap`/`reap` read.
+  `PROBE`, `UNREADABLE`). Exit `3` = a dead lane was reported (both `DEAD-*` verdicts); exit `1` = the
+  measurement was incomplete or nothing local was measured; exit `0` = **at least one local lane was
+  measured and none is dead**.
+  **That clean verdict was removed and is now restored, and the difference is the ref layout (#3393
+  ruling A).** Under per-MACHINE claims the ref was force-updated every supervisor iteration, so on a
+  multi-lane box a surviving sibling's stamp overwrote a dead lane's PID and the command saw a live,
+  identity-verified PID — a false clean about the exact scenario it exists to catch. Per-lane refs
+  (`refs/lane-claims/<machine>/<issue>`) remove that mechanism rather than mitigate it: a sibling
+  stamps a DIFFERENT ref, so a dead lane's ref survives with its dead PID. Exit 0 claims nothing more
+  than its wording — **not** that lanes which never stamped are healthy (a lane run with
+  `CLAIM_CMD=""` is invisible, so zero claim refs stays exit 1), and **nothing** about other machines
+  (a foreign PID is unknowable, so an all-foreign run stays exit 1). Those two guards are what stop
+  the clean verdict becoming the old false clean by another route. An UNKNOWN is never folded onto
+  the permissive answer, and `UNKNOWN-FOREIGN` alone never manufactures a finding. **It is
+  LOCAL-ONLY**: run it ON the suspect box. It also refuses outright on git < 2.29, which cannot fetch
+  without writing `FETCH_HEAD` — a monitor may decline to answer, but it may not corrupt the
+  `FETCH_HEAD` that `should-reap`/`reap` read.
   **Not covered, by construction**: #3393 AC3's "worktree present, tmux session absent" test is
   unimplementable in committed tooling because the lane-directory layout and tmux session naming
   exist NOWHERE in this repo — a tool guessing at them would report nothing on any differently-named
-  machine, a vacuous green in a watchdog's clothes. Diagnostic order for a box that stops answering:
-  `docs/development/fleet-runbook.md`.
+  machine, a vacuous green in a watchdog's clothes. **Diagnostic order for a box that stops answering
+  is in `docs/development/fleet-runbook.md`** and starts with `dmesg` for an OOM kill *before*
+  concluding the instance is broken, because reading that symptom as a broken box already cost one
+  healthy machine.
   The `project-board-sync` 30-min cron runs a `reap-claims`
   job that applies this predicate server-side and flips a freed board item back to Ready with a
   traceable comment. **`PROJECTS_TOKEN` absence now FAILS the workflow loudly (`::error::`)** — a
@@ -1000,7 +1032,9 @@ end-to-end test. Green helper-only unit tests are not sufficient.
   via `scripts/delivery-telemetry.py record` — a reopened issue that ships more than once
   legitimately gets one record per shipped PR, so retro aggregation by issue treats such
   multi-cycle issues as multiple deliveries, not one (issue #2314). Records hold authoritative
-  data only (a counter not observed is an error, never a fabricated 0). On a cadence the manager
+  data only (a counter not observed is an error, never a fabricated 0; a delivery with no full gate
+  of record is `gate: not-run` + `gate_runs: 0`, coupled both ways and reported by `retro` as its own
+  ungated class — #3448). On a cadence the manager
   runs `retro` and files a deduped `flow-meta` issue. The SKIP-aware `delivery-telemetry` gate
   component covers the tool. Doctrine: `docs/development/pm-operating-loop.md`.
   - **Stamp via a PR-in-worktree, never a direct push (#2433 branch protection).** `main` blocks

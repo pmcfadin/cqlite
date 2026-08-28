@@ -235,6 +235,16 @@ required-features = ["work-counters", "write-support"]
 name = "issue_2877_scan_chunk_coalescing"
 required-features = ["write-support", "lz4"]
 
+# `query.max_execution_time` enforcement at the engine chokepoint (issue #1695).
+# It is `#![cfg(all(feature = "state_machine", feature = "cli-helpers"))]` — the
+# fixture is opened through `cqlite_core::ingestion` (cli-helpers) so the lane
+# drives the same `Database` surface the CLI does. Declared here so the gate and
+# `--lite` run it WITH those features instead of compiling an empty target; the
+# `#![cfg]` and these required-features must always agree.
+[[test]]
+name = "issue_1695_query_timeout"
+required-features = ["state_machine", "cli-helpers"]
+
 # Statistics.db single-TOC-walk oracle (issue #2148). `#![cfg(feature =
 # "cli-helpers")]` — the `toc_walk_metrics` counter getters/`reset` +
 # `record_toc_walk` live behind `cli-helpers` — so it only compiles+runs with that

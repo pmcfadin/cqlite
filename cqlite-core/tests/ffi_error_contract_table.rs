@@ -126,6 +126,29 @@ fn from_name_is_fail_closed_for_an_unknown_variant() {
     );
 }
 
+/// Issue #1695: a query budget elapse must land on the SAME identity as its sibling
+/// `Timeout` on both surfaces — Python's builtin `TimeoutError` and node code
+/// `TIMEOUT` — so `except TimeoutError:` in Python and a `TIMEOUT` check in JS both
+/// catch it. Its core CATEGORY is deliberately `Query` (a budget elapse is a
+/// query-execution failure, distinguishable from corruption per #1695), which is a
+/// different axis from the surface identity; `table_agrees_with_core_category_and_recoverable`
+/// is what keeps that field honest against `Error::classify()`.
+#[test]
+fn query_timeout_shares_the_timeout_identity_on_both_surfaces() {
+    let row = contract_for(
+        &FfiErrorVariant::QueryTimeout
+            .sample_error()
+            .expect("sample exists"),
+    );
+    assert_eq!(row.py_class, PyExceptionClass::Timeout);
+    assert_eq!(row.node_code, "TIMEOUT");
+    assert_eq!(
+        row.category,
+        cqlite_core::error::ErrorCategory::Query,
+        "the classify category is a separate axis from the surface identity"
+    );
+}
+
 /// The row count is pinned so adding an `Error` variant (and therefore a row)
 /// is a deliberate, reviewed act rather than an invisible one. Update the count
 /// together with the table.
@@ -133,7 +156,7 @@ fn from_name_is_fail_closed_for_an_unknown_variant() {
 fn row_count_is_pinned() {
     assert_eq!(
         FfiErrorVariant::ALL.len(),
-        37,
+        38,
         "contract row count changed — review the new row's py_class/node_code \
          and update this pin"
     );

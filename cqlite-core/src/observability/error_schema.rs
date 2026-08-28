@@ -21,6 +21,7 @@
 //! | `Constraints`  | `constraints`    | `ConstraintViolation`, `AlreadyExists`                            |
 //! | `Query`        | `query`          | `QueryExecution`, `UnsupportedQuery`, `InvalidInput`             |
 //! | `Cancelled`    | `cancelled`      | `Cancelled` (issue #2264 — a cooperative abort, never `Io`)       |
+//! | `Timeout`      | `timeout`        | `QueryTimeout` (issue #1695 — an operator budget, never data)     |
 //! | `Other`        | `other`          | `Configuration`, `InvalidState`, `InvalidOperation`, `NotFound`,  |
 //! |                |                  | `Internal`, `Wasm`, and any future variant (catch-all)            |
 //!
@@ -66,6 +67,12 @@ pub enum ErrorCategory {
     /// separately from genuine errors — a cancelled `do_get` is an expected
     /// outcome, not a fault.
     Cancelled,
+    /// A query exceeded its configured execution budget
+    /// (`query.max_execution_time`, issue #1695). Its OWN bucket, never
+    /// `Corruption` (an operator-imposed deadline is not damaged data) and never
+    /// the `Other` catch-all (a rising timeout rate is the signal that the budget
+    /// is too tight or a scan has regressed — the one thing dashboards must see).
+    Timeout,
     /// Everything else (configuration, internal, platform, catch-all).
     Other,
 }
@@ -85,6 +92,7 @@ impl ErrorCategory {
             ErrorCategory::Constraints => "constraints",
             ErrorCategory::Query => "query",
             ErrorCategory::Cancelled => "cancelled",
+            ErrorCategory::Timeout => "timeout",
             ErrorCategory::Other => "other",
         }
     }
@@ -101,6 +109,7 @@ impl ErrorCategory {
         ErrorCategory::Constraints,
         ErrorCategory::Query,
         ErrorCategory::Cancelled,
+        ErrorCategory::Timeout,
         ErrorCategory::Other,
     ];
 }
@@ -153,6 +162,11 @@ pub(crate) fn classify(err: &Error) -> ErrorCategory {
         // Issue #2264: a cooperative cancellation is an expected outcome, not a
         // fault — kept out of both `Io` and the `Other` catch-all.
         Error::Cancelled => ErrorCategory::Cancelled,
+
+        // Issue #1695: an elapsed `query.max_execution_time` budget. Its own
+        // bucket so it is never indistinguishable from `Corruption` on a
+        // dashboard, and never buried in `Other`.
+        Error::QueryTimeout { .. } => ErrorCategory::Timeout,
 
         // Catch-all for the remaining variants and any future additions. Listed
         // explicitly (no wildcard arm besides wasm) so that adding a new Error
@@ -252,5 +266,16 @@ mod tests {
         // `Io` (misleading — it is not a transport failure) and not lumped into
         // the generic `Other` catch-all (would hide cancellation rate).
         assert_eq!(Error::Cancelled.obs_category(), Cancelled);
+
+        // Issue #1695: an elapsed query budget is its OWN telemetry bucket —
+        // never `Corruption` (it is not damaged data), never `Io` (it is not a
+        // transport fault) and never the `Other` catch-all.
+        let timeout = Error::QueryTimeout {
+            operation: "query.execute".into(),
+            elapsed: std::time::Duration::from_millis(1),
+            limit: std::time::Duration::from_millis(1),
+        };
+        assert_eq!(timeout.obs_category(), Timeout);
+        assert_ne!(timeout.obs_category(), Corruption);
     }
 }

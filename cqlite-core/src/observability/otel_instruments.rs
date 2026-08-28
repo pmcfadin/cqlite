@@ -114,7 +114,7 @@ pub(super) fn instruments() -> &'static Instruments {
             read_rows: m
                 .u64_counter(catalog::READ_ROWS)
                 .with_unit(catalog::unit::ROWS)
-                .with_description("Total rows materialised by the read path.")
+                .with_description("Rows a read delivered to its consumer.")
                 .build(),
             read_bytes: m
                 .u64_counter(catalog::READ_BYTES)

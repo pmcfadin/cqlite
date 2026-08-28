@@ -49,7 +49,9 @@ use crate::{Error, Result, RowKey};
 mod compressed_scan_window;
 /// Single-generation, token-scoped, pull-based query ROW stream (issue #3058).
 mod query_rows;
-pub use query_rows::{QueryRowBatch, QueryRowStream};
+/// Sizing constants + the derived read-ahead bounds (issue #3384).
+mod query_rows_bounds;
+pub use query_rows::{QueryRowBatch, QueryRowStream, QUERY_ROWS_MAX_READ_AHEAD};
 
 // COMBINED-INTERACTION regression for the #2876 read-intent split x the #2877
 // coalescing window: every widened read this walk issues must land on the

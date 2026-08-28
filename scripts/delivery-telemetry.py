@@ -61,6 +61,11 @@ RETRO_WEIGHTS = {
 # (authoritative-data-only: we never fabricate a count we did not observe).
 REQUIRED_COUNTERS = ("claim_collisions", "rebase_events", "gate_runs", "roborev_findings", "rework")
 
+# The `gate` value meaning "no full gate of record ran" (issue #3448). It is a legal VALUE,
+# never a default: --gate/--gate-runs stay required, and this value is coupled to
+# gate_runs == 0 in both directions (see _validate_gate_coupling).
+GATE_NOT_RUN = "not-run"
+
 
 # ============================================================ minimal JSON-Schema check
 #
@@ -168,12 +173,42 @@ def _validate_severity_pair(record: dict, errors: list) -> None:
                       f"{blockers + nits}, but must equal roborev_findings ({findings})")
 
 
+def _validate_gate_coupling(record: dict, errors: list) -> None:
+    """Cross-field check for gate <-> gate_runs coherence (issue #3448).
+
+    `gate: "not-run"` means NO full gate of record ran, so the only coherent run count is
+    0 — and 0 runs cannot have produced a pass/fail outcome. The coupling therefore holds
+    in BOTH directions:
+
+        gate == "not-run"  <==>  gate_runs == 0
+
+    Not expressible in the minimal JSON-Schema subset above (no if/then, no
+    dependentSchemas), so it lives here alongside _validate_severity_pair. Routing it
+    through validate_record means `lint` and `retro` enforce it over the WHOLE ledger, not
+    just freshly-recorded lines — an incoherent hand-edited record is caught too.
+
+    Guarded with isinstance checks so a wrong-typed/absent field (already flagged by the
+    generic walk above) doesn't also raise a confusing TypeError here.
+    """
+    gate = record.get("gate")
+    runs = record.get("gate_runs")
+    if not isinstance(gate, str) or not isinstance(runs, int) or isinstance(runs, bool):
+        return  # type/required errors already reported by the generic walk
+    if gate == GATE_NOT_RUN and runs != 0:
+        errors.append(f": gate '{GATE_NOT_RUN}' requires gate_runs 0 (no full gate of record "
+                      f"ran), got {runs}")
+    elif gate != GATE_NOT_RUN and runs == 0:
+        errors.append(f": gate_runs 0 requires gate '{GATE_NOT_RUN}' (zero runs produced no "
+                      f"outcome), got {gate!r}")
+
+
 def validate_record(record: dict, schema: dict) -> list:
     """Return a list of human-readable validation errors (empty == valid)."""
     errors: list = []
     _validate(record, schema, "", errors)
     if isinstance(record, dict):
         _validate_severity_pair(record, errors)
+        _validate_gate_coupling(record, errors)
     return errors
 
 
@@ -273,7 +308,18 @@ def build_record(args, gh_fields: dict) -> dict:
                 f"error: --{counter.replace('_', '-')} is required "
                 f"(authoritative-data-only: a counter that was not observed is never defaulted)")
     if args.gate is None:
-        raise SystemExit("error: --gate {pass|fail} is required")
+        raise SystemExit("error: --gate {pass|fail|not-run} is required")
+    # gate <-> gate_runs coupling (issue #3448), refused here as a bad invocation so the CLI
+    # names the offending flags rather than reporting an opaque built-record schema error.
+    # This adds a legal VALUE, never a default: --gate/--gate-runs remain required above.
+    if args.gate == GATE_NOT_RUN and args.gate_runs != 0:
+        raise SystemExit(
+            f"error: --gate {GATE_NOT_RUN} means no full gate of record ran, so --gate-runs "
+            f"must be 0 (got {args.gate_runs})")
+    if args.gate != GATE_NOT_RUN and args.gate_runs == 0:
+        raise SystemExit(
+            f"error: --gate-runs 0 means no full gate of record ran, so --gate must be "
+            f"'{GATE_NOT_RUN}' (got '{args.gate}') — zero runs produced no pass/fail outcome")
 
     # Optional roborev severity split (issue #2088). Authoritative-only: supply BOTH
     # --roborev-blockers/--roborev-nits or NEITHER — a lone counter is a user error, never
@@ -473,10 +519,17 @@ def aggregate(records: list) -> dict:
     roborev_findings count. Nits are still totaled, but reported separately (see
     `roborev_nits_total` / `roborev_severity_records`) rather than folded into the weighted
     score, keeping `rank()`'s RETRO_WEIGHTS-keyed categories unchanged and deterministic.
+
+    Ungated deliveries (issue #3448): a `gate: "not-run"` record contributes 0 failed rounds
+    (zero rounds were observed) but is NOT silently indistinguishable from a clean one-run
+    pass — it is counted in the informational `gate_not_run_records` extra and reported as
+    its own class by `cmd_retro`, so an ungated delivery can never be read off the retro as
+    a gated pass.
     """
     tally = {k: 0 for k in RETRO_WEIGHTS}
     nit_total = 0
     severity_records = 0
+    not_run_records = 0
     for r in records:
         tally["claim_collisions"] += r["claim_collisions"]
         tally["rebase_events"] += r["rebase_events"]
@@ -491,7 +544,12 @@ def aggregate(records: list) -> dict:
         # Failed gate ROUNDS. By the gate_runs contract (runs stop at the first PASS — see
         # the schema), every run but a terminal pass WAS a failed round, so this is exact,
         # not an inference: terminal pass -> gate_runs-1 failures; terminal fail -> all
-        # gate_runs. gate_runs >= 1 by schema; max(0, ...) guards the schema-forbidden 0.
+        # gate_runs. A "not-run" record (issue #3448) has gate_runs == 0 by the validated
+        # coupling and contributes 0 failed rounds — correct, because zero rounds were
+        # observed, not because a failure was assumed away. max(0, ...) keeps the arithmetic
+        # non-negative for any counted-but-unreachable combination.
+        if r["gate"] == GATE_NOT_RUN:
+            not_run_records += 1
         passed_final = 1 if r["gate"] == "pass" else 0
         tally["gate_failures"] += max(0, r["gate_runs"] - passed_final)
     # Informational extras, NOT part of the weighted categories: rank() below iterates
@@ -499,6 +557,7 @@ def aggregate(records: list) -> dict:
     # matching weight and can never desync rank()'s output.
     tally["roborev_nits_total"] = nit_total
     tally["roborev_severity_records"] = severity_records
+    tally["gate_not_run_records"] = not_run_records
     return tally
 
 
@@ -567,6 +626,14 @@ def cmd_retro(args) -> int:
               f"blockers counted above, {tally['roborev_nits_total']} nit(s) excluded — see "
               f"docs/development/roborev-severity.md)")
 
+    # ungated deliveries (issue #3448): reported as their own class so a "not-run" is never
+    # read as a gated pass. Not a weighted category — no full gate ran, so no gate round
+    # failed; the fact worth surfacing is that the certification is ABSENT, not failed.
+    if tally["gate_not_run_records"]:
+        print(f"  ({tally['gate_not_run_records']} of {len(records)} record(s): no full gate "
+              f"of record ran — gate 'not-run', excluded from gate_failures above; these are "
+              f"UNGATED deliveries, not gated passes — see issue #3448)")
+
     top_cat, top_cnt, _, top_score = ranked[0]
     if top_score == 0:
         print("\nno recurring failures recorded — nothing to file")
@@ -634,7 +701,9 @@ def build_parser() -> argparse.ArgumentParser:
     rec.add_argument("--slug", required=True)
     rec.add_argument("--routing", choices=["design", "oracle"], default=None)
     rec.add_argument("--priority", default=None, help="P0..P3 (else read from the issue)")
-    rec.add_argument("--gate", choices=["pass", "fail"], default=None)
+    rec.add_argument("--gate", choices=["pass", "fail", GATE_NOT_RUN], default=None,
+                     help="final full-gate outcome; '%s' (issue #3448) records that NO "
+                          "full gate of record ran and REQUIRES --gate-runs 0" % GATE_NOT_RUN)
     rec.add_argument("--gate-runs", dest="gate_runs", type=int, default=None)
     rec.add_argument("--claim-collisions", dest="claim_collisions", type=int, default=None)
     rec.add_argument("--rebase-events", dest="rebase_events", type=int, default=None)

@@ -299,7 +299,41 @@ impl SelectExecutor {
                     // partition may straddle a batch boundary), so a partition's
                     // key is decoded once regardless of batching.
                     let mut pk_cache = PartitionKeyCache::default();
-                    while let Some(batch) = scan_stream.recv().await {
+                    loop {
+                        // #1695: stop as soon as OUR consumer is gone, even with nothing
+                        // to send AND even while the upstream batch is still coming.
+                        //
+                        // `tx.send(..).is_err()` below is otherwise the only stop signal,
+                        // and it is reached only by a row that SURVIVES the row build,
+                        // the predicates, the per-partition limit and the OFFSET skip —
+                        // every one of which `continue`s. A no-match predicate, or an
+                        // OFFSET past the result set, therefore sent nothing, checked
+                        // nothing, and drained this whole scan after the caller already
+                        // had its `QueryTimeout`.
+                        //
+                        // A bare `is_closed()` at the top of the loop was NOT enough
+                        // (roborev round 11): it runs only after `recv()` RETURNS, so a
+                        // stalled or slow upstream batch never reached it. Awaiting
+                        // `tx.closed()` CONCURRENTLY with the batch bounds the wait
+                        // itself — the same correction round 10 forced on the export
+                        // chunk pull, which I applied there and not here.
+                        //
+                        // `biased` so closure is polled BEFORE the batch: an already-gone
+                        // consumer ends the scan without first taking another batch.
+                        //
+                        // This task also holds `scan_stream`, the STORAGE producer's
+                        // receiver, so the `is_closed()` check down in `generation_merge`
+                        // cannot fire on our behalf: from the storage side its consumer
+                        // is alive and asking for batches. One check per layer, and
+                        // neither substitutes for the other.
+                        let batch = tokio::select! {
+                            biased;
+                            _ = tx.closed() => return Ok(()),
+                            next = scan_stream.recv() => match next {
+                                Some(batch) => batch,
+                                None => break,
+                            },
+                        };
                         for (key, value) in batch? {
                             // Capture the partition-key digest before `key` is moved
                             // into row construction (only when needed).

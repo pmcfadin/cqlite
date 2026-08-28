@@ -23,6 +23,15 @@ pub mod promoted_index_reader;
 pub mod read_work_counters;
 pub mod reader;
 mod scan_stream_fanout;
+// The cross-generation point read (`SSTableManager::get`), split out of this file per
+// the campsite rule (epic #1116). Owns the OPERATION-level read metrics so one
+// logical point read reports one duration sample (issue #1701).
+mod manager_point_read;
+// The `tombstones` build's partition-TARGETED materializing scans, split out of
+// `mod.rs` per the campsite rule (epic #1116). Owns the OPERATION-level read metrics
+// so a targeted read reports the rows IT delivered, not the whole table's (#1701 R9).
+#[cfg(feature = "tombstones")]
+mod manager_tombstones_partition_scan;
 pub mod summary_reader;
 pub mod version_gate;
 pub mod work_counters;
@@ -94,8 +103,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tokio::sync::{Mutex, RwLock};
 
-#[cfg(feature = "tombstones")]
-use self::tombstone_merger::{EntryMetadata, GenerationValue, TombstoneMerger};
+use crate::observability::read_metrics::ReadOpMeter;
 use crate::platform::Platform;
 use crate::types::CellWriteMetadata;
 #[cfg(not(feature = "tombstones"))] // #1917 concat fallbacks; tombstones uses k-way merge
@@ -948,97 +956,6 @@ impl SSTableManager {
         ))
     }
 
-    /// Get a value by key from all SSTables with proper tombstone merging
-    #[cfg(feature = "tombstones")]
-    pub async fn get(&self, table_id: &TableId, key: &RowKey) -> Result<Option<ScanRow>> {
-        // Resolve the applicable reader list FIRST, exactly like the non-tombstones
-        // `get()` path (issue #1321). The previous code iterated EVERY reader in
-        // `self.readers` and passed one global relaxed `fully_qualified_match` flag
-        // to all of them, so same-named tables in OTHER keyspaces passed the relaxed
-        // BTI guard and wrongly contributed values/tombstones to the merge — a
-        // cross-keyspace data-bleed bug. `resolve_reader_list` returns precisely the
-        // readers for the resolved target table across generations, so the relaxed
-        // guard can only ever apply to the readers that ARE the target table; a
-        // wrong-keyspace same-named reader is never in the merge set.
-        //
-        // Issue #1591: snapshot the resolved readers + the authoritative
-        // `fully_qualified_match` signal and DROP the read guard before any I/O.
-        let (reader_list, fully_qualified_match) = self.resolve_reader_snapshot(table_id).await;
-        if reader_list.is_empty() {
-            return Ok(None);
-        }
-
-        let mut all_values = Vec::new();
-
-        // Collect each applicable generation's value (tombstone-merge semantics are
-        // unchanged: still build a `GenerationValue` per reader and resolve via
-        // `TombstoneMerger::merge_generations`). Only the SET of readers being merged
-        // changed — the resolved list instead of every reader globally.
-        for reader in &reader_list {
-            if let Some(value) = reader
-                .get_with_resolution(table_id, key, fully_qualified_match)
-                .await?
-            {
-                let generation = reader.generation;
-                let write_time = reader.extract_write_time_from_entry(key, &value);
-
-                let gen_value = GenerationValue {
-                    value,
-                    metadata: EntryMetadata {
-                        write_time,
-                        generation,
-                        ttl: None, // Would be extracted from SSTable metadata
-                    },
-                };
-                all_values.push(gen_value);
-            }
-        }
-
-        // Use tombstone merger to resolve conflicts across generations
-        let merger = TombstoneMerger::new();
-        merger.merge_generations(all_values)
-    }
-
-    /// Get a value by key from all SSTables (simple version without tombstone merging)
-    ///
-    /// Uses `table_readers` (keyed by fully-qualified `"keyspace.table"`) so that only the
-    /// SSTables for the requested table are searched (Issue #680).  Same-named tables in
-    /// different keyspaces (e.g. `test_basic.simple_table` and `test_oa.simple_table`) are
-    /// now correctly distinguished.
-    ///
-    /// Lookup order:
-    ///   1. Exact match on the full `table_id` string (e.g. `"test_basic.simple_table"`)
-    ///   2. Unqualified table name (e.g. `"simple_table"`) — for backward compatibility
-    ///      with flat/non-Cassandra directory layouts that have no keyspace parent.
-    #[cfg(not(feature = "tombstones"))]
-    pub async fn get(&self, table_id: &TableId, key: &RowKey) -> Result<Option<ScanRow>> {
-        // Issue #1591: snapshot the resolved readers + the authoritative
-        // `fully_qualified_match` signal and DROP the read guard before any I/O,
-        // so a queued writer never FIFO-parks this point read behind a slow scan.
-        //
-        // `fully_qualified_match`: did resolution match the FULLY-QUALIFIED
-        // `keyspace.table` key exactly, or fall back to the bare table name? An
-        // unqualified query is treated as an exact match (no keyspace to mismatch).
-        // This authoritative signal gates the get() point-lookup table-consistency
-        // guard exactly like the seek path (#1284): only an exact FQ match may relax
-        // to a name-only check across a header-keyspace divergence; a fully-qualified
-        // query resolved via the bare-name fallback keeps strict keyspace matching so
-        // get() never returns another keyspace's same-named rows (issue #1321).
-        let (reader_list, fully_qualified_match) = self.resolve_reader_snapshot(table_id).await;
-
-        // Return the first value found across all SSTables for this table
-        for reader in &reader_list {
-            if let Some(value) = reader
-                .get_with_resolution(table_id, key, fully_qualified_match)
-                .await?
-            {
-                return Ok(Some(value));
-            }
-        }
-
-        Ok(None)
-    }
-
     /// Scan a range of keys from all SSTables for a table.
     ///
     /// # Arguments
@@ -1082,6 +999,44 @@ impl SSTableManager {
         end_key: Option<&RowKey>,
         limit: Option<usize>,
         schema: Option<&crate::schema::TableSchema>,
+    ) -> Result<Vec<(RowKey, ScanRow)>> {
+        // ONE meter per materializing read OPERATION (issue #1701, roborev F1). This
+        // is the DOMINANT public read surface — the CLI SELECT path and most of the
+        // query executor call it — so leaving it unmetered left the four headline read
+        // metrics flat for almost every real read. Started HERE, at the PUBLIC entry
+        // (F4), so reader-lock + resolution latency is inside the reported duration,
+        // and its `Drop` reports every early return and `?` propagation with zero rows.
+        // FORMAT-AGNOSTIC: this scan spans a table's generations, which need not share
+        // an on-disk format, so no single `sstable.format` label would be honest.
+        self.scan_with_meter(
+            table_id,
+            start_key,
+            end_key,
+            limit,
+            schema,
+            ReadOpMeter::start(None),
+        )
+        .await
+    }
+
+    /// [`scan`](Self::scan) with the read operation's meter supplied by the CALLER
+    /// (issue #1701, roborev round 9).
+    ///
+    /// ONE meter per LOGICAL read, owned by the OUTERMOST read API. A targeted
+    /// single-partition read served by scanning and filtering — the `tombstones`
+    /// build's [`scan_partition`](Self::scan_partition), in
+    /// `manager_tombstones_partition_scan.rs` — must report the rows it DELIVERED,
+    /// not the whole table's, so it passes [`ReadOpMeter::inert`] here and meters its
+    /// own post-filter result instead. Public `scan` passes a started meter, so every
+    /// direct caller is metered exactly as before.
+    pub(in crate::storage::sstable) async fn scan_with_meter(
+        &self,
+        table_id: &TableId,
+        start_key: Option<&RowKey>,
+        end_key: Option<&RowKey>,
+        limit: Option<usize>,
+        schema: Option<&crate::schema::TableSchema>,
+        mut meter: ReadOpMeter,
     ) -> Result<Vec<(RowKey, ScanRow)>> {
         tracing::debug!("SSTableManager::scan - Scanning table_id='{}'", table_id);
 
@@ -1129,6 +1084,7 @@ impl SSTableManager {
                             "SSTableManager::scan - cross-generation merge produced {} rows",
                             merged.len()
                         );
+                        meter.record_keys(merged.iter().map(|(k, ..)| k));
                         return Ok(merged);
                     }
                     Err(e) => {
@@ -1174,6 +1130,7 @@ impl SSTableManager {
             all_results.len()
         );
 
+        meter.record_keys(all_results.iter().map(|(k, ..)| k));
         Ok(all_results)
     }
 
@@ -1414,6 +1371,12 @@ impl SSTableManager {
         Vec<(RowKey, ScanRow, HashMap<String, CellWriteMetadata>)>,
         bool,
     )> {
+        // ONE meter per materializing read OPERATION (issue #1701, roborev F1),
+        // started at ENTRY (F4) so reader-lock + resolution latency is inside the
+        // duration and `Drop` reports every early return with zero rows.
+        // Format-agnostic: the operation spans a table's generations.
+        let mut meter = ReadOpMeter::start(None);
+
         // Issue #1591: snapshot the reader list and DROP the read guard before any
         // I/O (bloom/BTI prune, per-candidate decode, cross-generation merge).
         let (reader_list, _fully_qualified_match) = self.resolve_reader_snapshot(table_id).await;
@@ -1477,6 +1440,7 @@ impl SSTableManager {
                         // only) is exactly the partitions this lookup returns.
                         work_counters::add_sstables_scanned(candidates.len() as u64);
                         work_counters::add_partitions_parsed(merged.len() as u64);
+                        meter.record_keys(merged.iter().map(|(k, ..)| k));
                         return Ok((merged, true));
                     }
                     Err(e) => {
@@ -1512,41 +1476,8 @@ impl SSTableManager {
             all_results.sort_by(|a, b| cmp_partition_keys_by_token(a.0.as_bytes(), b.0.as_bytes()));
         }
         work_counters::add_partitions_parsed(all_results.len() as u64);
+        meter.record_keys(all_results.iter().map(|(k, ..)| k));
         Ok((all_results, true))
-    }
-
-    /// `tombstones`-build counterpart of
-    /// [`scan_partition_with_cell_metadata`](Self::scan_partition_with_cell_metadata).
-    ///
-    /// That build has no bloom-prune metadata path, so a fully-constrained
-    /// `WHERE pk = ?` WRITETIME/TTL read is served by scanning with metadata and
-    /// filtering to the partition key, matching the `not(tombstones)` output while
-    /// keeping the query executor free of `tombstones` cfg branching.
-    ///
-    /// Returns `(rows, engaged)` with `engaged == false`: this is a full metadata
-    /// scan + retain with NO SSTable prune, so the caller MUST report an honest
-    /// fallback access path (`FallbackReason::TombstonesBuildNoPrune`) rather than a
-    /// targeted label, even though the rows are byte-identical to the pruned build
-    /// (Epic #951, honest access paths).
-    #[cfg(feature = "tombstones")]
-    pub async fn scan_partition_with_cell_metadata(
-        &self,
-        table_id: &TableId,
-        partition_key: &[u8],
-        schema: Option<&crate::schema::TableSchema>,
-    ) -> Result<(
-        Vec<(
-            RowKey,
-            ScanRow,
-            HashMap<String, crate::types::CellWriteMetadata>,
-        )>,
-        bool,
-    )> {
-        let mut rows = self
-            .scan_with_cell_metadata(table_id, None, None, None, schema)
-            .await?;
-        rows.retain(|entry| entry.0.as_bytes() == partition_key);
-        Ok((rows, false))
     }
 
     /// Clustering-slice-aware partition-targeted scan (Issue #954, Epic #951).
@@ -1587,6 +1518,12 @@ impl SSTableManager {
         // divergence; a fully-qualified query resolved via the bare-name fallback
         // keeps strict keyspace matching so it never returns another keyspace's
         // same-named rows (#1284 review).
+        // ONE meter per materializing read OPERATION (issue #1701, roborev F1),
+        // started at ENTRY (F4) so reader-lock + resolution latency is inside the
+        // duration and `Drop` reports every early return with zero rows.
+        // Format-agnostic: the operation spans a table's generations.
+        let mut meter = ReadOpMeter::start(None);
+
         let (reader_list, fully_qualified_match) = self.resolve_reader_snapshot(table_id).await;
         if reader_list.is_empty() {
             return Ok((Vec::new(), false));
@@ -1645,6 +1582,7 @@ impl SSTableManager {
                         // The cross-generation merge decodes full partitions; the
                         // clustering seek does not engage here (#954). Correct rows
                         // via the post-scan backstop; honest non-engaged signal.
+                        meter.record_keys(merged.iter().map(|(k, ..)| k));
                         return Ok((merged, false));
                     }
                     Err(e) => {
@@ -1720,32 +1658,8 @@ impl SSTableManager {
             all_results.sort_by(|a, b| cmp_partition_keys_by_token(a.0.as_bytes(), b.0.as_bytes()));
         }
         work_counters::add_partitions_parsed(all_results.len() as u64);
+        meter.record_keys(all_results.iter().map(|(k, ..)| k));
         Ok((all_results, clustering_engaged))
-    }
-
-    /// `tombstones`-build counterpart of [`scan_partition`](Self::scan_partition).
-    ///
-    /// That build uses a structurally different reader map and has no bloom-prune
-    /// `scan_partition` path, so a fully-constrained `WHERE pk = ?` is served by
-    /// scanning and filtering to the partition key. The output is a subset of
-    /// [`scan`](Self::scan) — identical to what the `not(tombstones)`
-    /// `scan_partition` returns — which keeps the query executor free of any
-    /// `tombstones` cfg branching.
-    ///
-    /// Returns `(rows, engaged)` with `engaged == false`: this is a full scan +
-    /// retain with NO SSTable prune, so the caller MUST report an honest fallback
-    /// access path (`FallbackReason::TombstonesBuildNoPrune`) rather than a targeted
-    /// label, even though the rows match the pruned build byte-for-byte (Epic #951).
-    #[cfg(feature = "tombstones")]
-    pub async fn scan_partition(
-        &self,
-        table_id: &TableId,
-        partition_key: &[u8],
-        schema: Option<&crate::schema::TableSchema>,
-    ) -> Result<(Vec<(RowKey, ScanRow)>, bool)> {
-        let mut rows = self.scan(table_id, None, None, None, schema).await?;
-        rows.retain(|entry| entry.0.as_bytes() == partition_key);
-        Ok((rows, false))
     }
 
     /// Resolve the reader list for a table id, trying the fully-qualified
@@ -1816,6 +1730,36 @@ impl SSTableManager {
         limit: Option<usize>,
         schema: Option<&crate::schema::TableSchema>,
     ) -> Result<Vec<(RowKey, ScanRow, HashMap<String, CellWriteMetadata>)>> {
+        // ONE meter per materializing read OPERATION (issue #1701, roborev F1),
+        // started at the PUBLIC entry (F4) so reader-lock + resolution latency is
+        // inside the duration and `Drop` reports every early return with zero rows.
+        // Format-agnostic: the operation spans a table's generations.
+        self.scan_with_cell_metadata_with_meter(
+            table_id,
+            start_key,
+            end_key,
+            limit,
+            schema,
+            ReadOpMeter::start(None),
+        )
+        .await
+    }
+
+    /// [`scan_with_cell_metadata`](Self::scan_with_cell_metadata) with the read
+    /// operation's meter supplied by the CALLER (issue #1701, roborev round 9) —
+    /// the metadata-path twin of [`scan_with_meter`](Self::scan_with_meter), for the
+    /// same reason: the `tombstones` build's targeted
+    /// [`scan_partition_with_cell_metadata`](Self::scan_partition_with_cell_metadata)
+    /// filters this result down to one partition and must report what it DELIVERED.
+    pub(in crate::storage::sstable) async fn scan_with_cell_metadata_with_meter(
+        &self,
+        table_id: &TableId,
+        start_key: Option<&RowKey>,
+        end_key: Option<&RowKey>,
+        limit: Option<usize>,
+        schema: Option<&crate::schema::TableSchema>,
+        mut meter: ReadOpMeter,
+    ) -> Result<Vec<(RowKey, ScanRow, HashMap<String, CellWriteMetadata>)>> {
         // Issue #1591: snapshot the reader list and DROP the read guard before any
         // I/O (per-reader metadata decode and cross-generation merge).
         let (reader_list, _fully_qualified_match) = self.resolve_reader_snapshot(table_id).await;
@@ -1843,7 +1787,10 @@ impl SSTableManager {
                 )
                 .await
                 {
-                    Ok(merged) => return Ok(merged),
+                    Ok(merged) => {
+                        meter.record_keys(merged.iter().map(|(k, ..)| k));
+                        return Ok(merged);
+                    }
                     Err(e) => {
                         // Never fail a read because the merge path hit an
                         // unsupported format; fall back to concatenation.
@@ -1875,11 +1822,13 @@ impl SSTableManager {
             );
         }
 
-        let all_results = scan_merge::kway_merge_token_order(per_reader, limit)
-            .into_iter()
-            .map(|(k, (v, m))| (k, v, m))
-            .collect();
+        let all_results: Vec<(RowKey, ScanRow, HashMap<String, CellWriteMetadata>)> =
+            scan_merge::kway_merge_token_order(per_reader, limit)
+                .into_iter()
+                .map(|(k, (v, m))| (k, v, m))
+                .collect();
 
+        meter.record_keys(all_results.iter().map(|(k, ..)| k));
         Ok(all_results)
     }
 
@@ -2271,6 +2220,10 @@ impl SSTableManager {
         // an error at the consumer rather than a clean end of stream (this build's
         // rows are already materialized, but the boundary must not be the one place
         // where a dead producer still reads as a finished scan).
+        //
+        // UNMETERED on purpose (issue #1701 F1): the `scan` above IS the metered read
+        // operation on this build, so metering this forwarder too would count every
+        // row of a `tombstones` streaming scan TWICE.
         let task = tokio::spawn(async move {
             for entry in results {
                 if tx.send(Ok(entry)).await.is_err() {

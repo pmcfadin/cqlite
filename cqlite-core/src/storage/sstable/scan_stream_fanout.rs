@@ -80,6 +80,13 @@ pub(super) fn spawn_fanout_merge(
             .unwrap_or_default()
     });
 
+    // The fan-out k-way merge IS the top-level read operation (issue #1701), and its
+    // meter starts HERE — BEFORE the spawn (roborev round 7). Constructed after it, the
+    // merge task could begin, or finish, before timing began. FORMAT-AGNOSTIC: the
+    // reconciled rows come from possibly mixed BIG/BTI inputs, so no single format label
+    // would be honest at this grain (the rule `catalog::READ_ROWS` documents).
+    let meter = crate::observability::read_metrics::ReadOpMeter::start(None);
+
     // The `JoinHandle` is RETAINED (issue #3124, site 1): it is what lets the
     // returned stream tell "the merge finished" apart from "the merge DIED".
     let task = tokio::spawn(async move {
@@ -180,7 +187,9 @@ pub(super) fn spawn_fanout_merge(
         }
     });
 
-    RowScanStream::new(out_rx, task)
+    // Each per-generation sub-scan is opened `Exempt` and therefore unmeasured, so the
+    // merged stream carries the operation's meter, started above.
+    RowScanStream::new_measured_rows(out_rx, task, meter)
 }
 
 /// Re-chunk a per-row streaming scan into `BATCH_EMIT_ROWS`-sized `Vec` batches over

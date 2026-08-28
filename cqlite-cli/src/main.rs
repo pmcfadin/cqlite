@@ -21,6 +21,7 @@ mod cli;
 mod cli_types;
 mod commands;
 mod config;
+mod core_config;
 mod error;
 mod formatter;
 mod output;
@@ -1268,32 +1269,24 @@ fn is_dml_statement(query: &str) -> bool {
     cqlite_core::cql::is_dml_statement(query)
 }
 
-/// Convert CLI configuration to core database configuration
+/// Convert CLI configuration to core database configuration.
+///
+/// Delegates to `core_config::to_core_config` (issue #1695) so the mapping —
+/// including `performance.query_timeout_ms` → `query.max_execution_time`, the
+/// knob the engine enforces — lives in a module an integration test can import.
+///
+/// PRECISELY, because an earlier version of this comment overclaimed: this
+/// resolves to the BINARY-LOCAL `mod core_config` declared above, not to
+/// `cqlite_cli::core_config`. `cqlite-cli` compiles every one of these modules
+/// TWICE — once into the lib, once into this bin — so the integration test
+/// exercises a SEPARATE COMPILED COPY of the same source file. Behaviour is
+/// identical today and the mapping is genuinely covered, but the test is not
+/// evidence about this binary's copy, and the two could drift. Unifying them
+/// means routing the bin through `cqlite_cli::{config, core_config, error}`,
+/// which is a pre-existing CLI-wide duplication rather than anything #1695
+/// introduced — tracked as a follow-up, not fixed here.
 fn create_core_config(cli_config: &config::Config) -> Result<CoreConfig> {
-    let mut core_config = CoreConfig::default();
-
-    // Apply CLI configuration settings to core config
-    if let Some(memory_limit_mb) = cli_config.performance.memory_limit_mb {
-        core_config.memory.max_memory = memory_limit_mb * 1024 * 1024; // Convert MB to bytes
-    }
-
-    // Set cache size from CLI config
-    core_config.memory.block_cache.max_size = cli_config.performance.cache_size_mb * 1024 * 1024; // Convert MB to bytes
-
-    // Set query timeout
-    core_config.query.max_execution_time =
-        std::time::Duration::from_millis(cli_config.performance.query_timeout_ms);
-
-    // Enable optimizations for better performance
-    core_config.query.enable_optimization = true;
-    core_config.storage.enable_bloom_filters = true;
-
-    // Validate the configuration
-    core_config
-        .validate()
-        .map_err(|e| anyhow::anyhow!("Invalid database configuration: {}", e))?;
-
-    Ok(core_config)
+    core_config::to_core_config(cli_config)
 }
 
 /// Extract table name from query for schema validation (Issue #199)

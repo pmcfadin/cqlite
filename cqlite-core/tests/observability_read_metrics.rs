@@ -1,0 +1,1354 @@
+//! Read-path metric honesty: the four headline READ metrics must actually be
+//! emitted by the read path (issue #1701, epic #1686 observability honesty).
+//!
+//! # What this pins, and why it is a HONESTY test
+//!
+//! `cqlite.read.rows`, `cqlite.read.bytes`, `cqlite.read.partitions` and
+//! `cqlite.read.duration` are documented in
+//! [`cqlite_core::observability::catalog`], registered as instruments, rendered in
+//! the operator metric reference, and showcased in the observability module's own
+//! doc example — and before this issue NO production read path ever updated them.
+//! An operator running a full `observability` build could not see read throughput
+//! at all. A metric that is documented but never written is worse than an absent
+//! one: a dashboard shows a flat zero and reads as "no reads happening".
+//!
+//! So the assertions here are deliberately about EMISSION AT A REAL READ SURFACE
+//! (`SSTableReader::scan_stream`, `scan_stream_batched`, `get`) over REAL Cassandra
+//! 5.0 SSTables — never about a helper being callable.
+//!
+//! # Granularity contract (why totals, not per-row assertions)
+//!
+//! The emission is at BATCH granularity: one counter add and one duration record
+//! per read OPERATION (per chunk for `read.bytes`), never per row. The assertions
+//! therefore compare the operation TOTAL against the rows the test itself received
+//! — an independent tally — and require the duration histogram to hold at least one
+//! recording. There is deliberately NO wall-clock threshold assertion anywhere
+//! here: "a recording exists" is the property; "it took less than X ms" would be a
+//! flake (#2642).
+//!
+//! # Fixture contract (#3220)
+//!
+//! Both fixtures are COMMITTED to git (`test_big/wide_partition`, a compressed BIG
+//! `nb` SSTable with 3 partitions / 892 on-disk rows, and its Index.db sibling), so
+//! they can never be legitimately absent in any checkout: resolution failure is a
+//! hard FAILURE, per case, unconditionally — never a suite-wide `assert!(ran > 0)`
+//! and never a silent SKIP. A present-but-empty scan (0 rows) fails too.
+//!
+//! # Why every metric assertion lives in ONE serial test
+//!
+//! The production metric helpers record through a single process-global `Meter`
+//! that binds on first use, so the in-memory capture provider is process-wide and
+//! cannot be swapped per test; the exporter uses DELTA temporality, so a
+//! concurrently-running sibling test's read flow would land in this test's collect
+//! window and break an exact-total assertion. The phases below therefore run in one
+//! test, each `reset()`-ing immediately before its own flow — the same rationale
+//! (and the same shape) as `observability_correctness.rs`.
+//!
+//! Run with:
+//! ```text
+//! cargo test -p cqlite-core --features observability-testing \
+//!   --test observability_read_metrics
+//! ```
+
+#![cfg(feature = "observability-testing")]
+
+use std::collections::HashSet;
+use std::path::PathBuf;
+use std::sync::Arc;
+
+use cqlite_core::observability::catalog;
+use cqlite_core::observability::testing::{self, CapturedMetrics};
+use cqlite_core::storage::sstable::SSTableReader;
+use cqlite_core::{Config, Platform, RowKey, ScanRow, TableId};
+
+#[path = "support/datasets_root.rs"]
+mod datasets_root;
+
+/// A COMMITTED fixture, its `catalog::attr::SSTABLE_FORMAT` label, and the shape
+/// that makes it worth reading here.
+struct Fixture {
+    keyspace: &'static str,
+    table: &'static str,
+    /// The bounded format label the emission must carry for this SSTable.
+    format: &'static str,
+    /// Partitions this fixture must deliver, at minimum. Two or more is what makes
+    /// `read.partitions` distinguishable from `read.rows`; the single-partition
+    /// UNCOMPRESSED fixture below is here for the byte-counting direction instead
+    /// (it is the only committed uncompressed SSTable).
+    min_partitions: u64,
+    /// The bounded `catalog::attr::COMPRESSION` label the byte counter must carry —
+    /// `"none"` for an SSTable with no `CompressionInfo.db`.
+    compression: &'static str,
+}
+
+/// A COMMITTED compressed BIG (`nb`) fixture: 3 partitions, 892 on-disk rows, with
+/// a `CompressionInfo.db` so the scan really decompresses chunks (which is what
+/// `read.bytes` counts).
+const BIG: Fixture = Fixture {
+    keyspace: "test_big",
+    table: "wide_partition",
+    format: "big",
+    min_partitions: 2,
+    compression: "lz4",
+};
+
+/// A COMMITTED BTI (`da`) fixture: 3 partitions, 900 on-disk rows. The BTI trie walk
+/// is a SEPARATE decode path from the BIG windowed scan, and it carries a different
+/// bounded format label, so both are exercised.
+const BTI: Fixture = Fixture {
+    keyspace: "test_da",
+    table: "wide_table",
+    format: "bti",
+    min_partitions: 2,
+    compression: "lz4",
+};
+
+/// A COMMITTED fixture whose chunks Cassandra stored **RAW** inside a COMPRESSED
+/// SSTable: `LZ4Compressor` with `min_compress_ratio = 1.0` over high-entropy blobs,
+/// so `maxCompressedLength = chunk_length` and `CompressedSequentialWriter`'s
+/// uncompressed-chunk fallback fires (1 partition, 64 rows).
+///
+/// This case exists for roborev F3: the incompressible-raw shape is a SECOND family
+/// of decode exits that hand the buffer through without decompressing, and every one
+/// of them used to leave `read.bytes` short while still reporting rows and a
+/// duration. The bytes are attributed to the TABLE's algorithm (`lz4`) — the chunk
+/// was stored raw, but the SSTable is LZ4-compressed, and the label describes the
+/// SSTable, not one chunk's luck.
+const INCOMPRESSIBLE: Fixture = Fixture {
+    keyspace: "test_comp",
+    table: "incompressible_uncompressed_chunk",
+    format: "big",
+    min_partitions: 1,
+    compression: "lz4",
+};
+
+/// A COMMITTED **UNCOMPRESSED** BIG (`nb`) fixture (no `CompressionInfo.db`): 1
+/// partition, 600 on-disk rows.
+///
+/// This case exists for roborev B2. Uncompressed is a FIRST-CLASS read path — the
+/// #1406 claim boundary says CQLite's own production write surface emits
+/// uncompressed SSTables ONLY — and the byte counter used to skip the
+/// no-compressor decode branch entirely, so every uncompressed read was invisible.
+/// Both compressed fixtures above are blind to that by construction, which is why a
+/// third fixture is needed rather than another assertion on the first two.
+const UNCOMPRESSED: Fixture = Fixture {
+    keyspace: "test_comp",
+    table: "uncompressed_table",
+    format: "big",
+    min_partitions: 1,
+    compression: "none",
+};
+
+/// Resolve a fixture's `Data.db`. FAIL-CLOSED: the fixture is committed, so an
+/// absence is a resolution defect, never a legitimate skip (#3220).
+fn committed_data_db(fx: &Fixture) -> PathBuf {
+    let (keyspace, table) = (fx.keyspace, fx.table);
+    let root = datasets_root::sstables_root_for_table(keyspace, table).unwrap_or_else(|| {
+        panic!(
+            "{keyspace}.{table} is COMMITTED to git and must resolve in every checkout, \
+             unconditionally (#3220) — {}",
+            datasets_root::describe_search(keyspace, table)
+        )
+    });
+    let ks_dir = root.join(keyspace);
+    let prefix = format!("{table}-");
+    let gen_dir = std::fs::read_dir(&ks_dir)
+        .unwrap_or_else(|e| panic!("read {}: {e}", ks_dir.display()))
+        .filter_map(|e| e.ok())
+        .map(|e| e.path())
+        .find(|p| {
+            p.is_dir()
+                && p.file_name()
+                    .and_then(|n| n.to_str())
+                    .is_some_and(|n| n.starts_with(&prefix))
+        })
+        .unwrap_or_else(|| panic!("no {prefix}* generation dir under {}", ks_dir.display()));
+    std::fs::read_dir(&gen_dir)
+        .unwrap_or_else(|e| panic!("read {}: {e}", gen_dir.display()))
+        .filter_map(|e| e.ok())
+        .map(|e| e.path())
+        .find(|p| {
+            p.file_name()
+                .and_then(|n| n.to_str())
+                .is_some_and(|n| n.ends_with("-Data.db"))
+        })
+        .unwrap_or_else(|| panic!("no *-Data.db under {}", gen_dir.display()))
+}
+
+async fn open_reader(fx: &Fixture) -> Arc<SSTableReader> {
+    let data_db = committed_data_db(fx);
+    let config = Config::default();
+    let platform = Arc::new(
+        Platform::new(&config)
+            .await
+            .expect("platform initialisation"),
+    );
+    Arc::new(
+        SSTableReader::open(&data_db, &config, platform)
+            .await
+            .expect("open the committed fixture"),
+    )
+}
+
+/// Rows + distinct partition keys the TEST observed, computed independently of the
+/// instrumentation: `partitions` is a set of distinct keys, while the production
+/// accounting counts partition TRANSITIONS in scan order — two different
+/// computations, so the equality below has teeth.
+struct Tally {
+    rows: u64,
+    partitions: u64,
+}
+
+fn tally(entries: &[(RowKey, ScanRow)]) -> Tally {
+    let distinct: HashSet<&[u8]> = entries.iter().map(|(k, _)| k.as_bytes()).collect();
+    Tally {
+        rows: entries.len() as u64,
+        partitions: distinct.len() as u64,
+    }
+}
+
+/// Number of recordings aggregated into a histogram metric (0 when absent).
+fn histogram_recordings(metrics: &CapturedMetrics, name: &str) -> u64 {
+    metrics
+        .find(name)
+        .map(|m| m.points.iter().filter_map(|p| p.count).sum())
+        .unwrap_or(0)
+}
+
+fn metric_names(metrics: &CapturedMetrics) -> Vec<String> {
+    metrics.entries().iter().map(|m| m.name.clone()).collect()
+}
+
+/// Assert the four READ metrics for one completed read operation.
+///
+/// `format` is the bounded `catalog::attr::SSTABLE_FORMAT` value the emission must
+/// carry: a single-SSTable read knows its format, so the label must be THERE and be
+/// the RIGHT one — the row/partition totals are therefore asserted BOTH as the
+/// metric-wide sum and as the sum of the labelled series, so an unlabelled (or
+/// mislabelled) emission cannot satisfy them.
+fn assert_read_metrics(
+    metrics: &CapturedMetrics,
+    phase: &str,
+    expected: &Tally,
+    fx: &Fixture,
+    expect_bytes: bool,
+) {
+    let format = fx.format;
+    let labelled = [(catalog::attr::SSTABLE_FORMAT, format)];
+    assert_eq!(
+        metrics.sum_where(catalog::READ_ROWS, &labelled),
+        expected.rows as f64,
+        "[{phase}] cqlite.read.rows must carry the bounded {} = {format} label a \
+         single-SSTable read knows; collected metrics: {:?}, points: {:?}",
+        catalog::attr::SSTABLE_FORMAT,
+        metric_names(metrics),
+        metrics.find(catalog::READ_ROWS).map(|m| &m.points)
+    );
+    assert_eq!(
+        metrics.sum_where(catalog::READ_PARTITIONS, &labelled),
+        expected.partitions as f64,
+        "[{phase}] cqlite.read.partitions must carry the bounded {} = {format} \
+         label; points: {:?}",
+        catalog::attr::SSTABLE_FORMAT,
+        metrics.find(catalog::READ_PARTITIONS).map(|m| &m.points)
+    );
+    assert_eq!(
+        metrics.counter_sum(catalog::READ_ROWS),
+        expected.rows as f64,
+        "[{phase}] cqlite.read.rows must equal the {} rows the read actually \
+         delivered; collected metrics: {:?}",
+        expected.rows,
+        metric_names(metrics)
+    );
+    assert_eq!(
+        metrics.unit(catalog::READ_ROWS),
+        Some(catalog::unit::ROWS),
+        "[{phase}] cqlite.read.rows unit"
+    );
+
+    assert_eq!(
+        metrics.counter_sum(catalog::READ_PARTITIONS),
+        expected.partitions as f64,
+        "[{phase}] cqlite.read.partitions must equal the {} distinct partitions the \
+         read touched; collected metrics: {:?}",
+        expected.partitions,
+        metric_names(metrics)
+    );
+    assert_eq!(
+        metrics.unit(catalog::READ_PARTITIONS),
+        Some(catalog::unit::PARTITIONS),
+        "[{phase}] cqlite.read.partitions unit"
+    );
+
+    // One duration RECORDING per read operation — never a wall-clock threshold
+    // (#2642): the property is that the operation was timed at all.
+    assert!(
+        histogram_recordings(metrics, catalog::READ_DURATION) >= 1,
+        "[{phase}] cqlite.read.duration must hold at least one recording for a \
+         completed read operation; collected metrics: {:?}",
+        metric_names(metrics)
+    );
+    assert_eq!(
+        metrics.unit(catalog::READ_DURATION),
+        Some(catalog::unit::SECONDS),
+        "[{phase}] cqlite.read.duration unit"
+    );
+
+    if expect_bytes {
+        assert!(
+            metrics.counter_sum(catalog::READ_BYTES) > 0.0,
+            "[{phase}] cqlite.read.bytes must count the Data.db bytes the read \
+             materialised; collected metrics: {:?}",
+            metric_names(metrics)
+        );
+        assert_eq!(
+            metrics.unit(catalog::READ_BYTES),
+            Some(catalog::unit::BYTES),
+            "[{phase}] cqlite.read.bytes unit"
+        );
+        // The byte counter's ONE documented attribute (issue #1701 roborev B3: the
+        // chunk decode plane knows the compressor, not the SSTable format). For an
+        // uncompressed SSTable that value is the bounded `"none"`, not an absent
+        // label — the regression B2 fixed made those reads vanish entirely, and an
+        // unlabelled emission would satisfy a bare `> 0` check.
+        let byte_labelled = [(catalog::attr::COMPRESSION, fx.compression)];
+        assert_eq!(
+            metrics.sum_where(catalog::READ_BYTES, &byte_labelled),
+            metrics.counter_sum(catalog::READ_BYTES),
+            "[{phase}] every cqlite.read.bytes point must carry {} = {}; points: {:?}",
+            catalog::attr::COMPRESSION,
+            fx.compression,
+            metrics.find(catalog::READ_BYTES).map(|m| &m.points)
+        );
+        assert!(
+            metrics
+                .find(catalog::READ_BYTES)
+                .is_some_and(|m| m.points.iter().all(|p| p.attributes.len() == 1)),
+            "[{phase}] cqlite.read.bytes must carry EXACTLY its one documented \
+             attribute — no format label the chunk plane cannot honestly know; \
+             points: {:?}",
+            metrics.find(catalog::READ_BYTES).map(|m| &m.points)
+        );
+    }
+}
+
+/// Drive the three read surfaces of ONE SSTable and assert the four metrics after
+/// each. Shared by the BIG and BTI cases so both formats are held to the identical
+/// contract (the emission differs only in the bounded format label).
+async fn exercise_read_surfaces(fx: &Fixture, mc: &testing::MetricsCapture) {
+    let reader = open_reader(fx).await;
+    let tid = TableId::new(format!("{}.{}", fx.keyspace, fx.table));
+
+    // ---------------------------------------------------------------------
+    // Phase 1 — the per-row streaming scan surface (`scan_stream`). COLD: this is
+    // the first read of this SSTable, so its chunks are decompressed for real and
+    // `read.bytes` must be counted.
+    // ---------------------------------------------------------------------
+    mc.reset();
+    let mut entries = Vec::new();
+    {
+        let mut stream = reader
+            .clone()
+            .scan_stream(tid.clone(), None, None, None, 64);
+        while let Some(item) = stream.recv().await {
+            entries.push(item.expect("per-row scan stream item"));
+        }
+    }
+    let scan_metrics = mc.flush_and_collect();
+    let scan_tally = tally(&entries);
+    assert!(
+        scan_tally.rows > 0,
+        "[{}.{}] the committed fixture is present but the scan delivered 0 rows — a \
+         dataset-dependent assertion must never pass on an empty read",
+        fx.keyspace,
+        fx.table
+    );
+    assert!(
+        scan_tally.partitions >= fx.min_partitions,
+        "[{}.{}] the fixture must deliver at least {} partition(s) for this case to \
+         mean anything (saw {})",
+        fx.keyspace,
+        fx.table,
+        fx.min_partitions,
+        scan_tally.partitions
+    );
+    assert_read_metrics(&scan_metrics, "scan_stream", &scan_tally, fx, true);
+    if fx.compression == "none" {
+        // NO-DOUBLE-COUNTING bound, checkable only on an UNCOMPRESSED fixture: its
+        // decompressed payload IS its on-disk payload, so one cold scan cannot
+        // honestly report more `read.bytes` than the Data.db file HOLDS. A boundary
+        // that counted the same buffer twice (at the block read AND again at a
+        // no-op decompress, say) reports ~2x the file size and fails here.
+        let file_size = std::fs::metadata(committed_data_db(fx))
+            .expect("stat the fixture Data.db")
+            .len() as f64;
+        let counted = scan_metrics.counter_sum(catalog::READ_BYTES);
+        assert!(
+            counted <= file_size,
+            "[{}.{}] a cold scan counted {counted} read.bytes for a {file_size}-byte \
+             uncompressed Data.db — bytes are counted more than once",
+            fx.keyspace,
+            fx.table
+        );
+    }
+
+    // ---------------------------------------------------------------------
+    // Phase 2 — the BATCHED streaming scan surface (`scan_stream_batched`), the
+    // one the streaming SELECT executor consumes.
+    // ---------------------------------------------------------------------
+    mc.reset();
+    let mut batched_entries = Vec::new();
+    {
+        let mut stream = reader
+            .clone()
+            .scan_stream_batched(tid.clone(), None, None, None, 64);
+        while let Some(item) = stream.recv().await {
+            batched_entries.extend(item.expect("batched scan stream item"));
+        }
+    }
+    let batched_metrics = mc.flush_and_collect();
+    let batched_tally = tally(&batched_entries);
+    assert_eq!(
+        batched_tally.rows, scan_tally.rows,
+        "[{}.{}] the batched surface must deliver the same rows as the per-row one",
+        fx.keyspace, fx.table
+    );
+    assert_read_metrics(
+        &batched_metrics,
+        "scan_stream_batched",
+        &batched_tally,
+        fx,
+        true,
+    );
+    // read.bytes on a SECOND scan, and why the cached plane no longer differs
+    // (issue #1701, roborev round 5). This assertion used to be split: zero bytes when
+    // `warm_scan_is_cached`, positive otherwise. That was WRONG, and it was wrong in
+    // the worst way — the test and the code shared one false assumption, so it passed.
+    // The windowed feed calls `read_compressed_chunk_sync` /
+    // `read_uncompressed_piece_sync` UNCONDITIONALLY and only then asks the
+    // decompressed-chunk cache, and neither reader consults that cache. So a warm scan
+    // performs every Data.db read a cold one does; the cache saves DECOMPRESSION only.
+    // Reporting zero there hid real I/O from the one metric whose job is to expose it.
+    //
+    // Both planes therefore count, and `warm_scan_is_cached` no longer speaks to
+    // read.bytes at all — it records only whether the re-scan re-DECOMPRESSES.
+    assert!(
+        batched_metrics.counter_sum(catalog::READ_BYTES) > 0.0,
+        "[{}.{}] a second scan re-reads every chunk off disk on BOTH decode planes \
+         (the feed reads before it consults the cache), so cqlite.read.bytes must \
+         count them — reporting zero would hide real I/O, cached plane or not; \
+         points: {:?}",
+        fx.keyspace,
+        fx.table,
+        batched_metrics.find(catalog::READ_BYTES).map(|m| &m.points)
+    );
+
+    // ---------------------------------------------------------------------
+    // Phase 3 — the point read (`get`). One partition, one row.
+    // ---------------------------------------------------------------------
+    let key = entries
+        .first()
+        .map(|(k, _)| k.clone())
+        .expect("a present partition key learned from the scan");
+    mc.reset();
+    let row = reader.get(&tid, &key).await.expect("point read");
+    let point_metrics = mc.flush_and_collect();
+    assert!(row.is_some(), "the learned key must resolve a row");
+    assert_read_metrics(
+        &point_metrics,
+        "get",
+        &Tally {
+            rows: 1,
+            partitions: 1,
+        },
+        fx,
+        // The point read DOES read Data.db, so its bytes are asserted (issue #1701,
+        // roborev round 8). The earlier version skipped this on the assumption that the
+        // point read would be served from the chunk cache the scans above populated —
+        // WRONG: `get_cached_data` keys the BIG point read in `NS_BIG_POINT`, which
+        // `data_access/mod.rs` documents as "disjoint from the chunk-index namespaces
+        // used by the windowed-scan and BTI sites". A disjoint namespace cannot hit
+        // those entries, so this read is COLD and a regression in the point-specific
+        // byte paths would have passed unnoticed behind the skipped assertion.
+        //
+        // (Unlike the windowed feed, this site consults the cache BEFORE the file read,
+        // so a genuine hit here really would read nothing — the defect was the
+        // namespace assumption, not the cache-hit semantics.)
+        true,
+    );
+}
+
+// Serialized against the sibling case below: the capture harness's meter provider is
+// process-global with DELTA temporality, so two metric-asserting tests running
+// concurrently would land in each other's collect window and break an exact total.
+#[tokio::test(flavor = "multi_thread")]
+#[serial_test::serial(read_metrics)]
+async fn read_path_emits_rows_bytes_partitions_and_duration() {
+    let mc = testing::metrics_capture();
+    // BIG (`nb`) windowed scan plane and BTI (`da`) trie walk are separate decode
+    // paths carrying different bounded format labels; both must report.
+    exercise_read_surfaces(&BIG, &mc).await;
+    exercise_read_surfaces(&BTI, &mc).await;
+    // UNCOMPRESSED (roborev B2): the no-compressor decode branch is a real read of
+    // Data.db payload and must be counted, under the bounded `compression = "none"`
+    // label. Neither fixture above can see this — both are compressed.
+    exercise_read_surfaces(&UNCOMPRESSED, &mc).await;
+    // INCOMPRESSIBLE (roborev F3): chunks stored RAW inside a compressed SSTable take
+    // the other family of plane-bypassing exits.
+    exercise_read_surfaces(&INCOMPRESSIBLE, &mc).await;
+}
+
+// ---------------------------------------------------------------------------
+// Cross-generation point read: ONE logical read is ONE metered operation
+// (issue #1701, roborev B1)
+// ---------------------------------------------------------------------------
+
+/// A logical point read may probe several SSTable generations of one table.
+/// `SSTableManager::get` used to call the METERED per-reader lookup, so one `get`
+/// emitted one `cqlite.read.duration` sample PER CANDIDATE and counted a row once per
+/// matching generation instead of once per reconciled result — a metric overstating
+/// both the read rate and the read count.
+///
+/// # Why this fixture is CQLite-written, deliberately
+///
+/// No COMMITTED corpus table carries more than one generation (the multi-generation
+/// tables in the fetched corpus are not in the checkout), so the only fixture that is
+/// guaranteed present in EVERY checkout is one this test builds. That is sound here
+/// because the property under test is METRIC ACCOUNTING over a known number of
+/// generations, not an on-disk framing/encoding property — the case #3042 reserves
+/// for Cassandra-written bytes. A CQLite-written SSTable cannot make this assertion
+/// pass vacuously: the generation COUNT is verified on disk, and the row/duration
+/// counts come from the production emission path either way.
+#[cfg(feature = "write-support")]
+#[tokio::test(flavor = "multi_thread")]
+#[serial_test::serial(read_metrics)]
+async fn a_cross_generation_point_read_is_one_metered_operation() {
+    use cqlite_core::schema::parse_cql_schema;
+    use cqlite_core::storage::sstable::SSTableManager;
+    use cqlite_core::storage::write_engine::{
+        CellOperation, Mutation, PartitionKey, WriteEngine, WriteEngineConfig,
+    };
+    use cqlite_core::types::Value;
+
+    const KS: &str = "read_metrics_ks";
+    const TBL: &str = "items";
+
+    let mc = testing::metrics_capture();
+    let tmp = tempfile::TempDir::new().expect("temp dir");
+    let data_dir = tmp.path().join("data");
+    let wal_dir = tmp.path().join("wal");
+    std::fs::create_dir_all(&data_dir).expect("create data dir");
+    std::fs::create_dir_all(&wal_dir).expect("create wal dir");
+
+    let schema_cql = format!("CREATE TABLE {KS}.{TBL} (\n  id int PRIMARY KEY,\n  name text\n);\n");
+    let schema = parse_cql_schema(&schema_cql).expect("parse fixture schema");
+
+    let write_row = |id: i32| {
+        Mutation::new(
+            cqlite_core::storage::write_engine::TableId::new(KS, TBL),
+            PartitionKey::single("id", Value::Integer(id)),
+            None,
+            vec![CellOperation::Write {
+                column: "name".to_string(),
+                value: Value::text(format!("row-{id}")),
+            }],
+            100 + id as i64,
+            None,
+        )
+    };
+
+    // Two flushes, no compaction => two generations the point read must walk.
+    {
+        let config = WriteEngineConfig::new(data_dir.clone(), wal_dir.clone(), schema.clone());
+        let mut engine = WriteEngine::new(config).expect("write engine");
+        for id in 1..=4 {
+            engine.write(write_row(id)).expect("write gen1 row");
+        }
+        engine
+            .flush()
+            .await
+            .expect("flush gen1")
+            .expect("gen1 produced no SSTable");
+        for id in 5..=8 {
+            engine.write(write_row(id)).expect("write gen2 row");
+        }
+        engine
+            .flush()
+            .await
+            .expect("flush gen2")
+            .expect("gen2 produced no SSTable");
+        engine.close().await.expect("close engine");
+    }
+
+    let sstable_dir = data_dir.join(KS).join(TBL);
+    let generations = std::fs::read_dir(&sstable_dir)
+        .expect("read sstable dir")
+        .filter_map(|e| e.ok())
+        .filter(|e| e.file_name().to_string_lossy().ends_with("-Data.db"))
+        .count();
+    assert_eq!(
+        generations,
+        2,
+        "the fixture must hold exactly 2 generations for this case to say anything \
+         about per-generation double counting (saw {generations} in {})",
+        sstable_dir.display()
+    );
+
+    let config = Config::default();
+    let platform = Arc::new(Platform::new(&config).await.expect("platform"));
+    let manager = SSTableManager::new(
+        &data_dir,
+        &config,
+        platform,
+        #[cfg(feature = "state_machine")]
+        None,
+    )
+    .await
+    .expect("open the two-generation table");
+    let tid = TableId::new(format!("{KS}.{TBL}"));
+
+    // Learn a present partition key through the public scan surface (outside any
+    // collect window, so it contributes no metrics to the assertions below).
+    let scanned = manager
+        .scan(&tid, None, None, None, Some(&schema))
+        .await
+        .expect("scan the two-generation table");
+    assert!(
+        scanned.len() >= 8,
+        "both generations' rows must be readable before metering is asserted (saw {})",
+        scanned.len()
+    );
+    let present_key = scanned
+        .last()
+        .map(|(k, _)| k.clone())
+        .expect("a present partition key");
+
+    // --- A PRESENT key: one operation, one row, one partition ----------------
+    mc.reset();
+    let row = manager
+        .get(&tid, &present_key)
+        .await
+        .expect("cross-generation point read");
+    let hit = mc.flush_and_collect();
+    assert!(row.is_some(), "the learned key must resolve a row");
+    assert_eq!(
+        histogram_recordings(&hit, catalog::READ_DURATION),
+        1,
+        "ONE logical point read must record EXACTLY ONE cqlite.read.duration sample, \
+         whatever the number of generations it probed; points: {:?}",
+        hit.find(catalog::READ_DURATION).map(|m| &m.points)
+    );
+    assert_eq!(
+        hit.counter_sum(catalog::READ_ROWS),
+        1.0,
+        "the RECONCILED result is one row, even when several generations match; \
+         points: {:?}",
+        hit.find(catalog::READ_ROWS).map(|m| &m.points)
+    );
+    assert_eq!(
+        hit.counter_sum(catalog::READ_PARTITIONS),
+        1.0,
+        "one partition; points: {:?}",
+        hit.find(catalog::READ_PARTITIONS).map(|m| &m.points)
+    );
+    // The cross-generation read really reads Data.db, so it must report bytes too
+    // (roborev F3 named the merge producer as a suspected blind spot).
+    assert!(
+        hit.counter_sum(catalog::READ_BYTES) > 0.0,
+        "a cross-generation point read materialises Data.db payload and must report \
+         cqlite.read.bytes; points: {:?}",
+        hit.find(catalog::READ_BYTES).map(|m| &m.points)
+    );
+
+    // Format-agnostic at this grain: the generations of one table need not share an
+    // on-disk format, so the emission must carry NO `sstable.format` label rather
+    // than an arbitrarily-picked one.
+    for name in [
+        catalog::READ_ROWS,
+        catalog::READ_PARTITIONS,
+        catalog::READ_DURATION,
+    ] {
+        let points = hit.find(name).map(|m| m.points.clone()).unwrap_or_default();
+        assert!(
+            !points.is_empty() && points.iter().all(|p| p.attributes.is_empty()),
+            "{name} from a CROSS-GENERATION read must carry no attributes (a single \
+             format label would be a fabrication); points: {points:?}"
+        );
+    }
+
+    // --- An ABSENT key: still exactly ONE operation ---------------------------
+    // This is the deterministic shape of the defect: absence probes EVERY generation,
+    // so the pre-fix code emitted one duration sample per candidate (2 here) for one
+    // logical read. A read that resolves absence still reports its latency, with zero
+    // rows — dropping it would bias the distribution toward hits.
+    let absent_key = RowKey::new(987_654_321i32.to_be_bytes().to_vec());
+    mc.reset();
+    let missing = manager
+        .get(&tid, &absent_key)
+        .await
+        .expect("absent-key point read");
+    let miss = mc.flush_and_collect();
+    assert!(missing.is_none(), "the crafted key must be absent");
+    assert_eq!(
+        histogram_recordings(&miss, catalog::READ_DURATION),
+        1,
+        "an ABSENT-key read across 2 generations is still ONE operation and must \
+         record exactly ONE duration sample; points: {:?}",
+        miss.find(catalog::READ_DURATION).map(|m| &m.points)
+    );
+    assert_eq!(
+        miss.counter_sum(catalog::READ_ROWS),
+        0.0,
+        "an absent key delivered no rows"
+    );
+    assert_eq!(
+        miss.counter_sum(catalog::READ_PARTITIONS),
+        0.0,
+        "an absent key touched no partition"
+    );
+
+    // --- The MATERIALIZING scan surface (roborev F1) --------------------------
+    // `SSTableManager::scan` is the DOMINANT public read surface (the CLI SELECT
+    // path and most of the query executor call it), and it emitted nothing at all.
+    // It is also the sharpest no-double-counting probe available: the two
+    // generations hold 4 rows each with distinct keys, so the reconciled result is
+    // EXACTLY 8. The per-generation `reader.scan` calls underneath are unmetered, so
+    // a boundary that leaked would show 16 here, not 8.
+    mc.reset();
+    let scanned_rows = manager
+        .scan(&tid, None, None, None, Some(&schema))
+        .await
+        .expect("materializing cross-generation scan");
+    let materializing = mc.flush_and_collect();
+    assert_eq!(
+        scanned_rows.len(),
+        8,
+        "the fixture's two generations reconcile to exactly 8 distinct rows"
+    );
+    assert_eq!(
+        materializing.counter_sum(catalog::READ_ROWS),
+        scanned_rows.len() as f64,
+        "cqlite.read.rows must equal the rows the materializing scan RETURNED — a \
+         row counted at both the manager and per-reader layers would read 16; \
+         points: {:?}",
+        materializing.find(catalog::READ_ROWS).map(|m| &m.points)
+    );
+    assert_eq!(
+        materializing.counter_sum(catalog::READ_PARTITIONS),
+        scanned_rows
+            .iter()
+            .map(|(k, _)| k.as_bytes())
+            .collect::<HashSet<_>>()
+            .len() as f64,
+        "one count per distinct partition the materializing scan returned"
+    );
+    assert_eq!(
+        histogram_recordings(&materializing, catalog::READ_DURATION),
+        1,
+        "a materializing scan over N generations is ONE read operation; points: {:?}",
+        materializing
+            .find(catalog::READ_DURATION)
+            .map(|m| &m.points)
+    );
+    assert!(
+        materializing.counter_sum(catalog::READ_BYTES) > 0.0,
+        "the materializing scan really read Data.db"
+    );
+
+    // --- The partition-TARGETED materializing surface (roborev F1) -------------
+    mc.reset();
+    let (targeted, _engaged) = manager
+        .scan_partition(&tid, present_key.as_bytes(), Some(&schema))
+        .await
+        .expect("partition-targeted scan");
+    let targeted_metrics = mc.flush_and_collect();
+    assert_eq!(
+        targeted.len(),
+        1,
+        "the targeted scan returns exactly the one row of that partition"
+    );
+    assert_eq!(
+        targeted_metrics.counter_sum(catalog::READ_ROWS),
+        1.0,
+        "cqlite.read.rows for a partition-targeted scan; points: {:?}",
+        targeted_metrics.find(catalog::READ_ROWS).map(|m| &m.points)
+    );
+    assert_eq!(
+        targeted_metrics.counter_sum(catalog::READ_PARTITIONS),
+        1.0,
+        "one partition"
+    );
+    assert_eq!(
+        histogram_recordings(&targeted_metrics, catalog::READ_DURATION),
+        1,
+        "ONE operation — the targeted scan prunes candidates but is still one read; \
+         points: {:?}",
+        targeted_metrics
+            .find(catalog::READ_DURATION)
+            .map(|m| &m.points)
+    );
+
+    // --- A table with NO candidate SSTables: still ONE operation (roborev F4) ---
+    // The reader-list-empty early return sits BEFORE any per-reader work, so the
+    // meter has to start at function ENTRY to cover it. It also has to behave the
+    // same in both feature builds: the `tombstones` variant returned from here
+    // without emitting anything, so the two builds disagreed about whether a read
+    // of an unknown table is a read at all.
+    mc.reset();
+    let unknown = manager
+        .get(&TableId::new("read_metrics_ks.no_such_table"), &present_key)
+        .await
+        .expect("point read of a table with no SSTables");
+    let empty = mc.flush_and_collect();
+    assert!(unknown.is_none(), "an unknown table resolves no row");
+    assert_eq!(
+        histogram_recordings(&empty, catalog::READ_DURATION),
+        1,
+        "a read of a table with NO candidate SSTables is still a completed read \
+         operation and must record exactly one duration sample (it consumed the \
+         reader-lock + resolution latency the meter now covers); points: {:?}",
+        empty.find(catalog::READ_DURATION).map(|m| &m.points)
+    );
+    assert_eq!(
+        empty.counter_sum(catalog::READ_ROWS),
+        0.0,
+        "no candidate SSTables means no rows"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Compaction's own reads: bytes YES, query metrics NO (roborev R3)
+// ---------------------------------------------------------------------------
+
+/// The documented contract, asserted in BOTH directions.
+///
+/// `read.bytes` is credited inside the chunk decode plane, which is handed a `ReadAt` +
+/// a `CompressionInfo` and cannot know who asked — so it counts every subsystem's
+/// `Data.db` reads, compaction included. That is what the module doc and the operator
+/// reference now say; before this case the COMPRESSED compaction walk called
+/// `Compression::decompress` inline and never reached the plane, so the shipped
+/// behaviour excluded exactly what the docs promised.
+///
+/// The other half matters just as much: `read.rows` / `read.partitions` /
+/// `read.duration` are emitted at QUERY read boundaries only, and compaction reaches
+/// its inputs through `stream_all_partitions_for_compaction` on a reader directly, so
+/// a compaction must contribute NOTHING to them. Asserting that keeps the split honest
+/// — an operator's read-rate and read-latency series stay free of background traffic.
+///
+/// Fixture: the COMMITTED compressed `test_comp/lz4_table` (LZ4, 600 rows), so the
+/// compressed decode branch — the one that was excluded — is the branch exercised.
+#[tokio::test(flavor = "multi_thread")]
+#[serial_test::serial(read_metrics)]
+async fn a_compaction_read_counts_bytes_but_no_query_metrics() {
+    use cqlite_core::storage::scan_cancel::ScanCancel;
+
+    let fx = Fixture {
+        keyspace: "test_comp",
+        table: "lz4_table",
+        format: "big",
+        min_partitions: 1,
+        compression: "lz4",
+    };
+    let mc = testing::metrics_capture();
+    let reader = open_reader(&fx).await;
+
+    mc.reset();
+    let rows = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
+    let counted = std::sync::Arc::clone(&rows);
+    reader
+        .stream_all_partitions_for_compaction(None, &ScanCancel::default(), move |_row| {
+            counted.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            Ok(std::ops::ControlFlow::Continue(()))
+        })
+        .await
+        .expect("streaming compaction read over the committed LZ4 fixture");
+    let metrics = mc.flush_and_collect();
+
+    assert!(
+        rows.load(std::sync::atomic::Ordering::Relaxed) > 0,
+        "the committed compressed fixture must yield compaction rows — a zero-row read \
+         would satisfy the byte assertion below for the wrong reason"
+    );
+    assert!(
+        metrics.counter_sum(catalog::READ_BYTES) > 0.0,
+        "a COMPRESSED compaction read materialises Data.db payload through the decode \
+         plane, so cqlite.read.bytes must count it — the docs promise 'every subsystem \
+         that reads an SSTable, compaction included'; points: {:?}",
+        metrics.find(catalog::READ_BYTES).map(|m| &m.points)
+    );
+    assert_eq!(
+        metrics.sum_where(catalog::READ_BYTES, &[(catalog::attr::COMPRESSION, "lz4")]),
+        metrics.counter_sum(catalog::READ_BYTES),
+        "counted under the table's bounded compression label, like any other reader"
+    );
+
+    for name in [
+        catalog::READ_ROWS,
+        catalog::READ_PARTITIONS,
+        catalog::READ_DURATION,
+    ] {
+        assert_eq!(
+            metrics.counter_sum(name),
+            0.0,
+            "{name} is a QUERY-boundary metric: a compaction read must contribute \
+             NOTHING to it, or an operator's read-rate and read-latency series would \
+             move with background compaction; points: {:?}",
+            metrics.find(name).map(|m| &m.points)
+        );
+    }
+}
+
+/// An UNCOMPRESSED compaction read counts each chunk's bytes **ONCE** (issue #1701,
+/// lead review of the roborev R3 fix).
+///
+/// # The defect this pins
+///
+/// Routing compaction decode through the metered plane (R3) added a
+/// `counted_raw_chunk(chunk, None)` to each compaction loop's "no compressor" branch.
+/// But those bytes arrive from `block_io::read_next_block`, which already counts them
+/// via `chunk_source::count_uncompressed_block` whenever the SSTable has no
+/// `CompressionInfo.db` — and `compression_reader.is_none()` holds EXACTLY then (both
+/// are derived from one parse). So every uncompressed compaction read reported
+/// `read.bytes` at **twice** its true value: a byte counter an operator cannot use for
+/// I/O amplification, which is the metric's whole purpose.
+///
+/// It is the ordinary case, not an exotic one — #1406 makes uncompressed the only shape
+/// CQLite's own write surface emits, so a compaction of CQLite-written SSTables takes
+/// exactly this branch. The sibling compressed case above is blind to it by
+/// construction (its bytes are counted once, in the decompress plane), which is why
+/// this needs its own fixture rather than another assertion there.
+///
+/// # The oracle, and why it is falsifiable
+///
+/// The bytes read are the `Data.db` **data section**, which is strictly smaller than
+/// the file: a correct single count therefore cannot exceed the file length, while a
+/// double count is ~2x it and blows the bound. The assertion is derived from the
+/// on-disk artifact, not from CQLite's own prior output. RED-verified: restoring either
+/// `counted_raw_chunk(compressed_chunk, None)` fails it.
+#[tokio::test(flavor = "multi_thread")]
+#[serial_test::serial(read_metrics)]
+async fn an_uncompressed_compaction_read_counts_each_chunk_once() {
+    use cqlite_core::storage::scan_cancel::ScanCancel;
+
+    let fx = UNCOMPRESSED;
+    let data_db = committed_data_db(&fx);
+    let data_db_len = std::fs::metadata(&data_db)
+        .unwrap_or_else(|e| panic!("stat {}: {e}", data_db.display()))
+        .len();
+
+    let mc = testing::metrics_capture();
+    let reader = open_reader(&fx).await;
+
+    mc.reset();
+    let rows = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
+    let counted = std::sync::Arc::clone(&rows);
+    reader
+        .stream_all_partitions_for_compaction(None, &ScanCancel::default(), move |_row| {
+            counted.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            Ok(std::ops::ControlFlow::Continue(()))
+        })
+        .await
+        .expect("streaming compaction read over the committed uncompressed fixture");
+    let metrics = mc.flush_and_collect();
+
+    assert!(
+        rows.load(std::sync::atomic::Ordering::Relaxed) > 0,
+        "the committed uncompressed fixture must yield compaction rows — a zero-row \
+         read would satisfy the byte bound below for the wrong reason"
+    );
+    let bytes = metrics.counter_sum(catalog::READ_BYTES);
+    assert!(
+        bytes > 0.0,
+        "an uncompressed compaction read still reads Data.db, so cqlite.read.bytes \
+         must count it; points: {:?}",
+        metrics.find(catalog::READ_BYTES).map(|m| &m.points)
+    );
+    assert!(
+        bytes <= data_db_len as f64,
+        "cqlite.read.bytes = {bytes} EXCEEDS the whole {} ({data_db_len} bytes) for a \
+         single pass over its data section — the signature of counting each chunk \
+         TWICE (once in read_next_block's count_uncompressed_block, once again in a \
+         compaction loop's no-compressor branch); points: {:?}",
+        data_db.display(),
+        metrics.find(catalog::READ_BYTES).map(|m| &m.points)
+    );
+    assert_eq!(
+        metrics.sum_where(catalog::READ_BYTES, &[(catalog::attr::COMPRESSION, "none")]),
+        bytes,
+        "counted under the bounded compression=none label, like any other \
+         uncompressed reader"
+    );
+}
+
+/// The PUBLIC `ORDER BY <clustering> DESC` read emits all four metrics as ONE
+/// operation (issue #1701, roborev round 4).
+///
+/// # The defect this pins
+///
+/// `SSTableManager::scan_partition_clustering_reverse` — the BIG reverse fast path the
+/// query executor takes for `ORDER BY ... DESC` on a single wide partition — bypassed
+/// every `ReadOpMeter`. The chunk plane still counted `read.bytes` on the way down, so
+/// the read reported BYTES WITHOUT ROWS: an amplification ratio built from the two was
+/// wrong for an entire user-facing query form, and `read.duration` never saw the reverse
+/// path at all.
+///
+/// # Why this drives `Database::execute` rather than the manager
+///
+/// The seam is `pub(crate)`, and the wiring-evidence rule wants the PUBLIC surface that
+/// reaches it. `SELECT ... ORDER BY seq DESC` over a single-generation wide partition is
+/// that surface: one candidate generation and a fixed-width `int` clustering is exactly
+/// the shape the fast path claims, so a served read here is the metered path, not the
+/// forward fallback.
+///
+/// # Why a CQLite-WRITTEN fixture is legitimate here
+///
+/// The #3042 rule — an on-disk framing property must be oracled against
+/// Cassandra-written bytes, never CQLite's own output — does not bite, because the
+/// property under test is not on-disk layout. It is whether OUR read path emits its own
+/// metrics, and a uniform framing error on both sides could not hide a missing emission.
+/// The committed fixtures cannot serve here: this needs a partition wide enough to carry
+/// promoted index blocks in a table whose schema the reverse path admits.
+///
+/// # The exactly-once assertions
+///
+/// `read.duration` is asserted at EXACTLY one recording, not merely non-zero. Both
+/// failure directions are then covered by one case: bypassing the meter gives zero, and
+/// dropping (rather than discarding) a declining attempt's meter would give two for one
+/// logical read — the over-counting roborev B1 removed. RED-verified: reverting the
+/// `reverse_scan.rs` metering leaves `read.bytes > 0` with rows/partitions/duration all 0,
+/// exactly the reported symptom.
+#[tokio::test(flavor = "multi_thread")]
+#[serial_test::serial(read_metrics)]
+async fn a_public_order_by_desc_read_is_one_metered_operation() {
+    use cqlite_core::ingestion::{ingest, IngestionConfig};
+
+    const ROWS: usize = 100;
+
+    let tmp = tempfile::TempDir::new().expect("tmp");
+    let data_dir = tmp.path().join("data");
+    let (schema_path, _schema_tmp) = reverse_fixture_schema_file();
+    write_single_generation_wide_partition(&data_dir, ROWS).await;
+
+    let db = ingest(IngestionConfig {
+        schema_paths: vec![schema_path],
+        data_dir,
+        version_hint: Some("5.0".to_string()),
+        core_config: cqlite_core::Config::default(),
+        table_directory_filter: None,
+    })
+    .await
+    .expect("ingest the single-generation wide-partition fixture")
+    .database;
+
+    let mc = testing::metrics_capture();
+    mc.reset();
+    let res = db
+        .execute("SELECT seq FROM obsfn.wide WHERE id = 1 ORDER BY seq DESC")
+        .await
+        .expect("public ORDER BY DESC read");
+    let metrics = mc.flush_and_collect();
+
+    assert_eq!(
+        res.rows.len(),
+        ROWS,
+        "the reverse read must return the whole partition — a short read would satisfy \
+         the metric assertions below for the wrong reason"
+    );
+    assert_eq!(
+        metrics.counter_sum(catalog::READ_ROWS),
+        ROWS as f64,
+        "every row the reverse path returned must be counted; points: {:?}",
+        metrics.find(catalog::READ_ROWS).map(|m| &m.points)
+    );
+    assert_eq!(
+        metrics.counter_sum(catalog::READ_PARTITIONS),
+        1.0,
+        "one partition was read; points: {:?}",
+        metrics.find(catalog::READ_PARTITIONS).map(|m| &m.points)
+    );
+    assert_eq!(
+        histogram_recordings(&metrics, catalog::READ_DURATION),
+        1,
+        "EXACTLY one operation: zero means the reverse seam bypassed the meter, and two \
+         would mean a declining attempt dropped its meter instead of discarding it; \
+         points: {:?}",
+        metrics.find(catalog::READ_DURATION).map(|m| &m.points)
+    );
+    assert!(
+        metrics.counter_sum(catalog::READ_BYTES) > 0.0,
+        "the read really touched Data.db, so bytes are counted too — bytes WITHOUT rows \
+         was the reported defect; points: {:?}",
+        metrics.find(catalog::READ_BYTES).map(|m| &m.points)
+    );
+}
+
+// ---------------------------------------------------------------------------
+// A partition-TARGETED read reports the rows IT delivered, not the table's
+// (issue #1701, roborev round 9)
+// ---------------------------------------------------------------------------
+
+/// `read.rows` / `read.partitions` must describe the TARGETED read, in every
+/// feature build.
+///
+/// Under `--features tombstones` the manager has no bloom-prune `scan_partition`
+/// path, so a fully-constrained `WHERE pk = ?` is served by scanning the table and
+/// `retain`-ing the requested partition. The inner full scan owned the meter and
+/// recorded its FULL result, so a targeted read reported EVERY row and EVERY
+/// partition of the table — a metric contradicting the "rows a read DELIVERED"
+/// contract [`catalog::READ_ROWS`] states, and one meaning two different things
+/// across builds (the `not(tombstones)` path meters the delivered partition).
+///
+/// # Why a CLUSTERED, multi-partition fixture
+///
+/// The pre-existing cross-generation case reads a table with ONE row per partition,
+/// so its rows and partitions counts are indistinguishable and a delivered row count
+/// of 1 says little. Here 3 partitions x 3 clustering rows = 9 rows on disk and 3
+/// delivered, so all three quantities differ: a leak of the inner scan reads 9 rows /
+/// 3 partitions, the honest emission reads 3 rows / 1 partition, and neither can be
+/// mistaken for the other. The expected count is DERIVED from the scanned data (the
+/// rows sharing the probed key), not hard-coded, and the case asserts up front that
+/// the delivered count is strictly less than the table's — without that, the
+/// assertion could pass on a table where the two coincide.
+///
+/// # Exactly-once duration
+///
+/// `read.duration` is asserted at EXACTLY one recording, covering both directions in
+/// one case: the outer targeted API metering nothing gives zero, and an inner scan
+/// that still meters itself alongside the outer one gives two samples for one logical
+/// read — the over-counting roborev B1 removed.
+///
+/// # Why a CQLite-WRITTEN fixture is legitimate here
+///
+/// Per #3042 the property under test is not on-disk framing but whether OUR read path
+/// accounts its OWN delivered rows; a uniform framing error on both sides cannot hide
+/// a wrong count. No committed corpus table can serve: the case needs a known,
+/// small, multi-partition clustered table whose per-partition row count is fixed.
+#[cfg(feature = "write-support")]
+#[tokio::test(flavor = "multi_thread")]
+#[serial_test::serial(read_metrics)]
+async fn a_partition_targeted_read_reports_only_the_rows_it_delivered() {
+    use cqlite_core::schema::parse_cql_schema;
+    use cqlite_core::storage::sstable::SSTableManager;
+    use cqlite_core::storage::write_engine::{WriteEngine, WriteEngineConfig};
+
+    const KS: &str = "read_metrics_targeted_ks";
+    const TBL: &str = "clustered";
+    const PARTITIONS: i32 = 3;
+    const ROWS_PER_PARTITION: i32 = 3;
+
+    let mc = testing::metrics_capture();
+    let tmp = tempfile::TempDir::new().expect("temp dir");
+    let data_dir = tmp.path().join("data");
+    let wal_dir = tmp.path().join("wal");
+    std::fs::create_dir_all(&data_dir).expect("create data dir");
+    std::fs::create_dir_all(&wal_dir).expect("create wal dir");
+
+    let schema_cql =
+        format!("CREATE TABLE {KS}.{TBL} (id int, seq int, val text, PRIMARY KEY (id, seq));");
+    let schema = parse_cql_schema(&schema_cql).expect("parse fixture schema");
+
+    {
+        let cfg = WriteEngineConfig::new(data_dir.clone(), wal_dir.clone(), schema.clone());
+        let mut engine = WriteEngine::new(cfg).expect("write engine");
+        for id in 1..=PARTITIONS {
+            for seq in 0..ROWS_PER_PARTITION {
+                engine
+                    .execute(&format!(
+                        "INSERT INTO {KS}.{TBL} (id, seq, val) VALUES ({id}, {seq}, 'v{id}-{seq}')"
+                    ))
+                    .expect("write fixture row");
+            }
+        }
+        engine
+            .flush()
+            .await
+            .expect("flush the fixture")
+            .expect("the fixture produced no SSTable");
+        engine.close().await.expect("close engine");
+    }
+
+    let config = Config::default();
+    let platform = Arc::new(Platform::new(&config).await.expect("platform"));
+    let manager = SSTableManager::new(
+        &data_dir,
+        &config,
+        platform,
+        #[cfg(feature = "state_machine")]
+        None,
+    )
+    .await
+    .expect("open the clustered fixture");
+    let tid = TableId::new(format!("{KS}.{TBL}"));
+
+    // Learn the table's shape through the public scan surface, OUTSIDE any collect
+    // window, so it contributes nothing to the assertions below.
+    let all_rows = manager
+        .scan(&tid, None, None, None, Some(&schema))
+        .await
+        .expect("scan the clustered fixture");
+    let probe_key = all_rows
+        .first()
+        .map(|(k, _)| k.clone())
+        .expect("the fixture delivered no rows at all");
+    let delivered = all_rows
+        .iter()
+        .filter(|(k, _)| k.as_bytes() == probe_key.as_bytes())
+        .count();
+    assert_eq!(
+        (all_rows.len(), delivered),
+        (
+            (PARTITIONS * ROWS_PER_PARTITION) as usize,
+            ROWS_PER_PARTITION as usize
+        ),
+        "the fixture must hold {PARTITIONS} partitions of {ROWS_PER_PARTITION} rows for \
+         the targeted count to be distinguishable from the table's"
+    );
+    assert!(
+        delivered < all_rows.len(),
+        "a targeted read must deliver STRICTLY fewer rows than the table holds, or this \
+         case cannot tell the two accountings apart ({delivered} of {})",
+        all_rows.len()
+    );
+
+    // --- scan_partition: the rows/partitions the TARGETED read delivered -------
+    mc.reset();
+    let (targeted, _engaged) = manager
+        .scan_partition(&tid, probe_key.as_bytes(), Some(&schema))
+        .await
+        .expect("partition-targeted scan");
+    let m = mc.flush_and_collect();
+    assert_eq!(
+        targeted.len(),
+        delivered,
+        "the targeted scan returns exactly its partition's rows"
+    );
+    assert_eq!(
+        m.counter_sum(catalog::READ_ROWS),
+        delivered as f64,
+        "cqlite.read.rows must equal the rows the TARGETED read delivered ({delivered}), \
+         never the table's {}; points: {:?}",
+        all_rows.len(),
+        m.find(catalog::READ_ROWS).map(|x| &x.points)
+    );
+    assert_eq!(
+        m.counter_sum(catalog::READ_PARTITIONS),
+        1.0,
+        "a single-partition read delivered rows from exactly ONE partition, not the \
+         table's {PARTITIONS}; points: {:?}",
+        m.find(catalog::READ_PARTITIONS).map(|x| &x.points)
+    );
+    assert_eq!(
+        histogram_recordings(&m, catalog::READ_DURATION),
+        1,
+        "ONE logical targeted read is ONE operation: zero means the outer API metered \
+         nothing, two means the inner scan metered itself as well; points: {:?}",
+        m.find(catalog::READ_DURATION).map(|x| &x.points)
+    );
+
+    // --- scan_partition_with_cell_metadata: the WRITETIME/TTL twin -------------
+    mc.reset();
+    let (targeted_meta, _engaged_meta) = manager
+        .scan_partition_with_cell_metadata(&tid, probe_key.as_bytes(), Some(&schema))
+        .await
+        .expect("partition-targeted metadata scan");
+    let mm = mc.flush_and_collect();
+    assert_eq!(
+        targeted_meta.len(),
+        delivered,
+        "the targeted metadata scan returns exactly its partition's rows"
+    );
+    assert_eq!(
+        mm.counter_sum(catalog::READ_ROWS),
+        delivered as f64,
+        "the metadata path accounts the same delivered rows; points: {:?}",
+        mm.find(catalog::READ_ROWS).map(|x| &x.points)
+    );
+    assert_eq!(
+        mm.counter_sum(catalog::READ_PARTITIONS),
+        1.0,
+        "one partition on the metadata path too; points: {:?}",
+        mm.find(catalog::READ_PARTITIONS).map(|x| &x.points)
+    );
+    assert_eq!(
+        histogram_recordings(&mm, catalog::READ_DURATION),
+        1,
+        "the targeted metadata read is one operation; points: {:?}",
+        mm.find(catalog::READ_DURATION).map(|x| &x.points)
+    );
+}
+
+/// A temp `.cql` file for the reverse fixture's table, so `ingest` can register
+/// query-time decode metadata. Returns the guard: dropping it removes the file.
+fn reverse_fixture_schema_file() -> (PathBuf, tempfile::TempDir) {
+    let dir = tempfile::TempDir::new().expect("schema tmp");
+    let path = dir.path().join("wide.cql");
+    std::fs::write(
+        &path,
+        "CREATE TABLE obsfn.wide (id int, seq int, val text, PRIMARY KEY (id, seq));",
+    )
+    .expect("write schema file");
+    (path, dir)
+}
+
+/// Write ONE generation holding a single wide partition of `rows` rows.
+///
+/// One generation is what makes `scan_partition_clustering_reverse` take its
+/// `candidates.len() == 1` serving path (several generations return `Ok(None)` so the
+/// reconciling forward sort can run), and the 1 KiB payload per row is what makes the
+/// partition wide enough to carry the promoted index blocks the reverse walk steps back
+/// through.
+async fn write_single_generation_wide_partition(data_dir: &std::path::Path, rows: usize) {
+    use cqlite_core::schema::{ClusteringColumn, Column, KeyColumn, TableSchema};
+    use cqlite_core::storage::write_engine::{WriteEngine, WriteEngineConfig};
+
+    let text_col = |name: &str, ty: &str| Column {
+        name: name.to_string(),
+        data_type: ty.to_string(),
+        nullable: false,
+        default: None,
+        is_static: false,
+    };
+    let schema = TableSchema {
+        keyspace: "obsfn".to_string(),
+        table: "wide".to_string(),
+        partition_keys: vec![KeyColumn {
+            name: "id".to_string(),
+            data_type: "int".to_string(),
+            position: 0,
+        }],
+        clustering_keys: vec![ClusteringColumn {
+            name: "seq".to_string(),
+            data_type: "int".to_string(),
+            position: 0,
+            order: Default::default(),
+        }],
+        columns: vec![
+            text_col("id", "int"),
+            text_col("seq", "int"),
+            text_col("val", "text"),
+        ],
+        comments: Default::default(),
+        dropped_columns: Default::default(),
+    };
+
+    let wal_dir = data_dir
+        .parent()
+        .expect("data_dir has a parent")
+        .join("wal");
+    let cfg = WriteEngineConfig::new(data_dir.to_path_buf(), wal_dir, schema);
+    let mut engine = WriteEngine::new(cfg).expect("write engine");
+
+    let blob = "x".repeat(1024);
+    for seq in 0..rows {
+        engine
+            .execute(&format!(
+                "INSERT INTO obsfn.wide (id, seq, val) VALUES (1, {seq}, '{blob}')"
+            ))
+            .expect("write row");
+    }
+    engine
+        .flush()
+        .await
+        .expect("flush")
+        .expect("one sstable generation");
+}

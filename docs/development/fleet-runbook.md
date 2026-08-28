@@ -649,7 +649,8 @@ machine + heartbeat age (issue #2089). Interpretation:
 - **In Progress, heartbeat fresh** → leave it alone
 - **In Progress, heartbeat stale** → deterministically reaped by flow-board (heartbeat age > 4h AND no
   open PR → Status → Ready, work preserved on the branch, traceable comment; issue #2089). The
-  supervisor also stamps a machine-scoped claim ref `refs/machine-claims/<machine>` that the
+  supervisor also stamps a lane-scoped claim ref `refs/lane-claims/<machine>/<issue>` (per-lane since
+  #3393; the legacy per-machine ref is still read only so a pre-ruling one gets drained) that the
   `project-board-sync` 30-min cron's `reap-claims` job reaps on the SAME predicate server-side (age >
   4h AND no open PR AND, for a local claim, PID-dead) — so a supervisor that dies overnight gets its
   claim reaped by CI without waiting for a human to run flow-board (issue #2655)
@@ -669,7 +670,7 @@ machine + heartbeat age (issue #2089). Interpretation:
 | `missing-schemas: FAIL-CLOSED (#3148)` | Either a committed `test-data/schemas/*.cql` is unreadable (broken checkout — `git restore --source=HEAD -- test-data/schemas`) or `CQLITE_SCHEMAS_ROOT` is set to a **relative** path (export an absolute one, or unset it). Never a corpus-layout problem: the schemas root is checkout-relative. No opt-out exists — do not look for one. |
 | Two machines want the same issue | Impossible past the claim: the second claim-ref push is rejected server-side (non-fast-forward on the fixed-name ref, #2665); the loser sees `CLAIM LOST` and picks the next Ready item. |
 | **SSH accepts TCP but sends no banner** (from inside the VPC) | **Check `dmesg` for an OOM kill BEFORE concluding the instance is broken** — see the diagnostic order below. This is a memory symptom far more often than a broken box, and a soft reboot may be silently ignored. |
-| A lane vanished — worktree clean, claim held, nothing reported | `bash scripts/flow/claim-heartbeat.sh dead-lanes` (#3393). Reports every claim whose owning process is gone, with no 4h wait and without suppressing a lane that holds an open PR. `should-reap` cannot tell you this: it only consults the pid after age > 4h. **Read exit 3 (a dead lane was found) as the signal; it never exits 0** — claims are per-machine, so on a multi-lane box a surviving lane's stamp can overwrite a dead sibling's, and absence therefore cannot be established. LOCAL-ONLY: run it ON the box. A just-spawned lane reads `UNKNOWN-IDENTITY` until the supervisor's next stamp refresh; that is expected. |
+| A lane vanished — worktree clean, claim held, nothing reported | `bash scripts/flow/claim-heartbeat.sh dead-lanes` (#3393). Reports every claim whose owning process is gone, with no 4h wait and without suppressing a lane that holds an open PR. `should-reap` will not tell you: it consults the PID only after the claim is >4h old, so a lane killed a minute ago is indistinguishable from a healthy one for four hours. **Exit 3 = a dead lane was found; exit 0 = at least one local lane was measured and none is dead; exit 1 = incomplete, which includes zero claim refs and an all-foreign run.** Exit 0 became trustworthy only with per-lane claim refs (#3393 ruling A) — under the old per-machine layout a surviving lane's stamp overwrote a dead sibling's, so absence could not be established. LOCAL-ONLY: run it ON the box. A just-spawned lane reads `UNKNOWN-IDENTITY` until the supervisor's next stamp refresh; that is expected. |
 
 
 ### Diagnostic order when a box stops answering (#3393)
@@ -687,18 +688,23 @@ So, in this order:
    victim, its RSS and its cgroup — `task_memcg=…/tmux-spawn-<uuid>.scope` identifies a **lane**
    rather than a system service. This is step 1 because it is cheap, non-destructive, and
    disambiguates the most likely cause.
-2. **`bash scripts/flow/claim-heartbeat.sh dead-lanes`** — which lanes lost their process. A row
-   annotated `open-pr=yes` is an **orphaned endgame** (#2499): report and adopt it, never reap it.
+2. **`bash scripts/flow/claim-heartbeat.sh dead-lanes`** — which lanes lost their process. Run it
+   **on the box in question**: a PID is only checkable where it runs. A row annotated `open-pr=yes`
+   is an **orphaned endgame** (#2499): adopt it, never reap it. Since #3393's per-lane claim refs
+   every lane on a multi-lane box is reported independently, so this no longer covers just one of
+   them.
 3. **`df -h`** — a full disk is the other resource-exhaustion story that surfaces as a confusing
    failure (#3379), and it is equally cheap to rule out.
 4. **Only then** treat the instance as broken. Note that a soft `reboot-instances` may be
    **silently ignored** on a memory-exhausted box (observed: console stayed at the original boot,
    CPU never dipped); a hard stop/start was required.
 
-Two standing lessons from the same incident: **memory exhaustion is invisible to any monitor that
-iterates existing sessions** — a dead tmux session cannot report itself, which is what
-`dead-lanes` exists to cover — and **lane density is the dial**: 4 lanes per box produced OOM
-kills and wedges on *both* boxes, while the 1-lane rig box recorded **zero** and never wedged.
+Two standing lessons from the same incident. **Memory exhaustion is invisible to any monitor that
+iterates existing sessions** — a dead tmux session cannot report itself, so nothing noticed three
+silent lane deaths (`lane-1705` twice, `lane-1697` once), each leaving a clean worktree, a held
+claim and an open PR; covering that is what `dead-lanes` exists for. And **lane density is the
+dial**: 4 lanes per box produced OOM kills and wedges on *both* boxes, while the 1-lane rig box
+recorded **zero** and never wedged.
 
 ---
 
