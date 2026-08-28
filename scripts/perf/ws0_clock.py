@@ -284,6 +284,28 @@ def derive(
     }
 
     # --- the trap value, recorded so it can never be mistaken for a clock -----------
+    # `task-clock` IS OPTIONAL AND ITS PARSE FAILURE MUST NOT REJECT A RUN.
+    #
+    # It feeds ONLY the labelled trap value below — the clock itself never uses it — so a
+    # run that cannot parse it should lose the trap value, not the measurement. This matters
+    # because perf's HUMAN-READABLE output renders task-clock as a fractional `msec` figure,
+    # and although this box's `perf stat -x,` emits an integer nanosecond count with an EMPTY
+    # unit in every form tested (CPU-wide, to a file, and per-process, perf 6.17.13), another
+    # version or locale might not. Rejecting the whole run after the measurement for a value
+    # used only in an advisory field would be "refusing a value after acting on it".
+    #
+    # The strictness in `_exact_int` is NOT relaxed to accommodate this: a FRACTIONAL count is
+    # how perf reports a value it SCALED for multiplexing, so accepting fractional counts
+    # would defeat the multiplexing guard. The right answer is to make this ONE consumer
+    # tolerant, not to make the parser permissive.
+    if "cycles" in events and "task-clock" not in events:
+        out["occupancy_times_frequency_NOT_A_CLOCK"] = {
+            "value_ghz_LOOKS_LIKE": None,
+            "WARNING": (
+                "not computed: `task-clock` was not among the counted events. The trap value"
+                " is advisory — the frequency above does not depend on it."
+            ),
+        }
     if "cycles" in events and "task-clock" in events:
         # `task-clock`'s COUNT is accrued CPU-nanoseconds. The trap quantity is
         # cycles / task-clock-in-seconds, i.e. counts and not rates — computing it from

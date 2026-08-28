@@ -317,8 +317,23 @@ def build_report(args: argparse.Namespace) -> tuple[dict, list[str]]:
                 f" (verdict={verdict.get('verdict') if isinstance(verdict, dict) else '?'!r})."
                 " A session whose own verdict is not QUIESCENT must not be reported as judged."
             )
+        # THE FIELD IS REQUIRED, NOT "COMPARED IF PRESENT" (#3248, roborev job 66 finding 3).
+        #
+        # The first version compared only `if recorded_ts is not None`, so a verdict WITHOUT
+        # the field was accepted — a QUIESCENT claim published with no evidence it came from
+        # the timeseries the manifest declares. That is a pass derived from the ABSENCE of a
+        # bad signal, which is the rule this issue keeps restating; it is the THIRD time this
+        # exact shape has appeared in my own guards, which is why it is called out here rather
+        # than quietly patched.
         recorded_ts = (verdict.get("window_census") or {}).get("timeseries")
-        if recorded_ts is not None and recorded_ts != declared_ts:
+        if recorded_ts is None:
+            raise Invalid(
+                f"{vpath.name} records no `window_census.timeseries`, so nothing establishes"
+                " WHICH load record this verdict was produced from. A verdict that cannot name"
+                " its own subject cannot support the manifest's claim; re-run with the current"
+                " ws0_quiescence.py, which records it."
+            )
+        if recorded_ts != declared_ts:
             raise Invalid(
                 f"{vpath.name} was judged against {recorded_ts!r} but the manifest declares"
                 f" {declared_ts!r}. A verdict from a DIFFERENT timeseries does not establish"

@@ -337,7 +337,7 @@ perf_invocation_lint() {
     # one owner.
     /^perf_record_c\(\)/ {
       inrec = 1
-      if (mode == "library") print NR ": defines perf_record_c, but the rig has exactly ONE wrapper file (this file is not it)"
+      if (mode == "library") print NR ": defines perf_record_c, but this file was not discovered as the record owner"
       next
     }
     inrec && /^\}/     { inrec = 0; recseen = 1; next }
@@ -423,10 +423,16 @@ perf_invocation_lint() {
     # by the reader: a diagnostic a human has to remember to ignore is one they will read as
     # a finding.
     END {
-      if (mode != "library") {
+      if (mode == "owner") {
         if (!wrapseen)     print "0: perf_stat_c() is absent — there is no single wrapper to allow"
         if (!wrapinvoke)   print "0: perf_stat_c() invokes nothing — the allowlist would be vacuous"
         if (!wrapcpuwide)  print "0: perf_stat_c() does not pass -C — the wrapper counts nothing CPU-wide"
+      }
+      if (mode == "record-owner") {
+        # A record-only owner asserts the RECORD contract and says nothing about the stat one.
+        if (!recseen)      print "0: perf_record_c() is absent — this file was linted as the record owner"
+      }
+      if (mode != "library") {
         # perf_record_c is OPTIONAL — a rig with no sampling profile is legitimate — but if it
         # is DEFINED it must be non-vacuous and CPU-wide, on the same terms as perf_stat_c. A
         # defined-but-empty wrapper would otherwise be an allowlist entry protecting nothing.
@@ -557,8 +563,16 @@ perf_invocation_lint_tree() {
     # a record-owning file must be linted in owner mode too or its wrapper's non-vacuity and
     # its mandatory -C would never be asserted — the guard would exist and never run, which is
     # this issue's whole subject.
-    if [[ "$f" == "$owner" || ( -n "$rec_owner" && "$f" == "$rec_owner" ) ]]; then
+    if [[ "$f" == "$owner" ]]; then
+      # The STAT owner (which may also define perf_record_c) gets the full owner assertions.
       out="$(perf_invocation_lint "$f" owner)"
+    elif [[ -n "$rec_owner" && "$f" == "$rec_owner" ]]; then
+      # A RECORD-ONLY owner file (#3248, roborev job 66 finding 4). The tree lint permitted
+      # this configuration while `owner` mode unconditionally asserted `perf_stat_c` is
+      # present, so a valid record-only owner was reported as missing the stat wrapper -- the
+      # checker permitted a shape it then failed. `record-owner` mode asserts the RECORD
+      # wrapper contract and nothing about the stat one.
+      out="$(perf_invocation_lint "$f" record-owner)"
     else
       out="$(perf_invocation_lint "$f" library)"
     fi

@@ -513,6 +513,14 @@ def read_perf_counters(
       line exists but the measurement does not, which is the silent-instrument
       failure in its purest form;
     * a value is present but unparseable, fractional, or NEGATIVE — a corrupt artifact,
+      and the FRACTIONAL half is deliberate rather than incidental: perf reports a fractional
+      count for a value it SCALED because the PMU multiplexed the event, so accepting
+      fractional counts would defeat the multiplexing guard below. (perf's HUMAN-READABLE
+      output does render time-based events like `task-clock` as fractional `msec`, but
+      `-x,` CSV mode on every form tested here emits an integer nanosecond count with an empty
+      unit. If a future perf changes that, the fix is to make the ONE consumer of that event
+      tolerant — as `ws0_clock.py` does for its advisory trap value — never to loosen this
+      parser.)
       not a zero. The negative half is #3272 review round 3, B2: hardware counters are
       non-negative by construction, and `int("-4")` used to sail through to become a
       negative `cycles`/`instructions`, then a negative setup-subtracted `ins`, then a

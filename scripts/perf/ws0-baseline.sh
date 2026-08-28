@@ -718,9 +718,36 @@ BIN="${BIN_DIR:-$REPO_ROOT/target/release}"
 # record of that distinction, so it is taken before the reassignment can occur.
 # The profile directory is CREATED here, below the --validate-args-only boundary, so a
 # validation-only run leaves no state behind (its path was already checked above).
-if [[ -n "$PROFILE_OUT" ]] && ! mkdir -p "$PROFILE_OUT"; then
-  echo "FATAL: could not create --profile-out '$PROFILE_OUT'." >&2
-  exit 2
+# --profile-out IS CLAIMED, NOT JUST CREATED (#3248, roborev job 66 finding 2).
+#
+# Profile filenames are DETERMINISTIC (`profile-<tag>.data`), so two sessions pointed at one
+# directory silently overwrite each other, and a session can validate or attribute another
+# session's capture. The rig already refuses a reused `--out` for exactly this reason
+# (`require_unused_out_dir`); `--profile-out` had no equivalent, which made the weaker
+# half of the pair the one an operator would reach for.
+#
+# `mkdir` (not `mkdir -p`) on a marker directory is the claim: it is atomic, so of two
+# concurrent sessions exactly one wins.
+if [[ -n "$PROFILE_OUT" ]]; then
+  if ! mkdir -p "$PROFILE_OUT"; then
+    echo "FATAL: could not create --profile-out '$PROFILE_OUT'." >&2
+    exit 2
+  fi
+  if ! mkdir "$PROFILE_OUT/.ws0-profile-claim" 2>/dev/null; then
+    echo "FATAL: --profile-out '$PROFILE_OUT' is ALREADY CLAIMED by another measurement" >&2
+    echo "       session (its .ws0-profile-claim marker exists). Profile filenames are" >&2
+    echo "       deterministic, so sharing the directory would overwrite one session's" >&2
+    echo "       captures with another's — and a profile attributed to the wrong session is" >&2
+    echo "       worse than a missing one. Name an unused directory." >&2
+    exit 2
+  fi
+  if ! find "$PROFILE_OUT" -maxdepth 1 -name 'profile-*.data' -print -quit | grep -q .; then
+    :
+  else
+    echo "FATAL: --profile-out '$PROFILE_OUT' already holds profile-*.data from an earlier" >&2
+    echo "       run. Measuring into it would mix two sessions' captures under one name." >&2
+    exit 2
+  fi
 fi
 BIN_DIR_RECORDED="$BIN"
 # WHETHER A SAMPLING PROFILE WAS ATTACHED, and at what frequency (#3248, roborev job 60
