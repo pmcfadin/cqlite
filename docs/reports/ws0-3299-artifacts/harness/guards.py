@@ -312,21 +312,12 @@ def attribute_window(repdir, t0, t1, n, shortfall_bound):
                 f"without assuming a rate.",
             )
         rows = b[1] - a[1]
-        if rows <= 0:
-            fail(
-                "WINDOW_ZERO_ROWS",
-                f"worker {i} produced {rows} rows inside the window — a scan that observed "
-                f"nothing is a failure, not a measurement.",
-            )
-        shortfall = ((a[0] - t0) + (t1 - b[0])) / span
-        if shortfall > shortfall_bound:
-            fail(
-                "WINDOW_SHORTFALL",
-                f"worker {i} leaves {shortfall:.4%} of the window unattributed (bound "
-                f"{shortfall_bound:.4%}). Rows are only counted between records the worker "
-                f"actually emitted, so an interval this coarse would understate the rate by "
-                f"more than the bound. Lower --progress-ms or lengthen the window.",
-            )
+        # THE RECORD IS BUILT WITH THE SHARED DEFINITIONS AND THEN VALIDATED BY
+        # THE SHARED VALIDATOR. The positivity precondition lives inside
+        # `attribution_rows_per_s` because the rate cannot be computed without
+        # it; everything else (the shortfall bound, worker identity, the internal
+        # consistency of the record) is asserted once, below, by the same
+        # function `derive.py` runs when it READS a committed attribution.
         per.append(
             {
                 "worker": i,
@@ -334,11 +325,279 @@ def attribute_window(repdir, t0, t1, n, shortfall_bound):
                 "t_a_ns": a[0],
                 "t_b_ns": b[0],
                 "attributed_span_ns": b[0] - a[0],
-                "attribution_shortfall_frac": shortfall,
-                "rows_per_s": rows / ((b[0] - a[0]) / 1e9),
+                "attribution_shortfall_frac": attribution_shortfall_frac(a[0], b[0], t0, t1),
+                "rows_per_s": attribution_rows_per_s(rows, b[0] - a[0], f"{repdir}: worker {i}"),
             }
         )
+    return validate_attribution(per, t0, t1, n, shortfall_bound, repdir)
+
+
+# --- ONE validation of an attribution: at WRITE time AND at READ time ---------
+#
+# WHY THIS IS SHARED CODE AND NOT A SECOND CHECKER. `derive.py` is the tool a
+# reader runs against the committed tree to reproduce the published table, i.e.
+# it is the REPRODUCTION PATH. The per-worker progress records are far too
+# voluminous to commit (~57,600 records for a single S=6/N=24 rep, over 91 reps),
+# so for the committed tree the evidence `derive.py` reads is `attribution.json`
+# — the output `guards.py window` produced AT MEASUREMENT TIME. If the read path
+# validated that file less strictly than the write path validated the records it
+# came from, then re-aggregation would "confirm" a table from evidence the guards
+# would have REFUSED: a check reporting success without having verified the thing
+# that matters.
+#
+# So the two paths call the SAME functions. Writing a second validator inside
+# `derive.py` would be a second implementation whose agreement with this one is
+# only knowable by differential testing against it (CLAUDE.md, #3283) — and the
+# way that divergence shows up is the read path silently accepting something.
+#
+# WHAT THIS CAN AND CANNOT ESTABLISH, stated so nobody reads more into it. It
+# establishes INTERNAL CONSISTENCY (every derived field recomputes from the
+# record's own primitives), CONSISTENCY WITH `window.json` (s, n, the window
+# bounds), and CONFORMANCE TO THE PUBLISHED BOUNDS (the 0.5% shortfall). It
+# cannot establish AUTHENTICITY: a tamperer who edits a row count AND the rate
+# AND the span AND the totals to match produces a self-consistent file, and only
+# the raw progress records could refute it. Those records are the ground truth
+# and are RECOMPUTED whenever present — which is why `attribution_source` is
+# printed per run rather than assumed.
+
+ATTRIBUTION_RECORD_FIELDS = (
+    "worker",
+    "rows_in_window",
+    "t_a_ns",
+    "t_b_ns",
+    "attributed_span_ns",
+    "attribution_shortfall_frac",
+    "rows_per_s",
+)
+
+# Derived fields are recomputed and compared RELATIVELY: they round-trip through
+# JSON exactly today (Python emits shortest-repr floats), so this tolerance
+# covers a re-emit by another writer, not a real disagreement. It is far tighter
+# than any edit a hand-tamper would make.
+ATTRIBUTION_REL_TOL = 1e-9
+
+
+def _rel_close(got, want, tol=ATTRIBUTION_REL_TOL):
+    scale = max(abs(float(want)), abs(float(got)), 1e-300)
+    return abs(float(got) - float(want)) / scale <= tol
+
+
+def attribution_rows_per_s(rows, attributed_span_ns, where):
+    """The ONE definition of a worker's in-window rate, with its preconditions.
+
+    Both preconditions are here rather than at the call sites because the rate
+    is undefined without them, so no caller can compute one and skip them.
+    """
+    if rows <= 0:
+        fail(
+            "WINDOW_ZERO_ROWS",
+            f"{where} attributes {rows} rows inside the window — a scan that observed "
+            f"nothing is a failure, not a measurement.",
+        )
+    if attributed_span_ns <= 0:
+        fail(
+            "WINDOW_ZERO_ROWS",
+            f"{where} attributes {rows} rows over a {attributed_span_ns} ns span; a rate "
+            f"over a non-positive interval is not a measurement.",
+        )
+    return rows / (attributed_span_ns / 1e9)
+
+
+def attribution_shortfall_frac(t_a_ns, t_b_ns, t0, t1):
+    """The ONE definition of the attribution shortfall (see DEFAULT_SHORTFALL_BOUND)."""
+    return ((t_a_ns - t0) + (t1 - t_b_ns)) / (t1 - t0)
+
+
+def validate_attribution(per, t0, t1, n, shortfall_bound, where):  # noqa: C901
+    """Validate a per-worker attribution — the write path and the read path both call this."""
+    span = t1 - t0
+    if span <= 0:
+        fail("WINDOW_SPAN", f"{where}: window span is {span} ns — t1 must be strictly after t0")
+    if not isinstance(per, list):
+        fail(
+            "ATTRIBUTION_FIELD_MISSING",
+            f"{where}: the per-worker attribution is {type(per).__name__}, not a list of "
+            f"records; there is nothing to validate rows from.",
+        )
+    if len(per) != n:
+        fail(
+            "WINDOW_WORKER_MISSING",
+            f"{where} holds {len(per)} worker record(s) but n={n}. A rep is only valid if "
+            f"every stream reported; aggregating a short list would publish a total that "
+            f"omits streams the window claims were running.",
+        )
+    seen = set()
+    for idx, rec in enumerate(per):
+        if not isinstance(rec, dict):
+            fail("ATTRIBUTION_FIELD_MISSING",
+                 f"{where}: per-worker entry #{idx} is {type(rec).__name__}, not a record")
+        missing = [k for k in ATTRIBUTION_RECORD_FIELDS if k not in rec]
+        if missing:
+            fail(
+                "ATTRIBUTION_FIELD_MISSING",
+                f"{where}: per-worker entry #{idx} lacks {missing}. Every field is REQUIRED: "
+                f"the consistency checks below are what make a committed attribution usable, "
+                f"and a check skipped for want of its own input returns success having "
+                f"verified nothing.",
+            )
+        try:
+            worker = int(rec["worker"])
+            rows = int(rec["rows_in_window"])
+            t_a = int(rec["t_a_ns"])
+            t_b = int(rec["t_b_ns"])
+            span_rec = int(rec["attributed_span_ns"])
+            sf = float(rec["attribution_shortfall_frac"])
+            rate = float(rec["rows_per_s"])
+        except (TypeError, ValueError) as exc:
+            fail("ATTRIBUTION_FIELD_MISSING",
+                 f"{where}: per-worker entry #{idx} carries a non-numeric field ({exc})")
+        if worker in seen:
+            fail(
+                "ATTRIBUTION_WORKER_DUPLICATE",
+                f"{where}: worker id {worker} appears more than once. Rows are SUMMED over "
+                f"this list, so a duplicated worker double-counts its rows into the "
+                f"aggregate — the published figure would exceed what the machine produced.",
+            )
+        if not 0 <= worker < n:
+            fail(
+                "ATTRIBUTION_WORKER_UNKNOWN",
+                f"{where}: worker id {worker} is outside [0, {n}). The list must be exactly "
+                f"the n streams the window records, so an unknown id means these rows belong "
+                f"to a rep this window does not describe.",
+            )
+        seen.add(worker)
+        if not t0 <= t_a <= t_b <= t1:
+            fail(
+                "ATTRIBUTION_TIMESTAMP_OUTSIDE_WINDOW",
+                f"{where}: worker {worker} is attributed between t={t_a} and t={t_b}, which "
+                f"is not an ordered pair inside the window [{t0}, {t1}]. Rows may only be "
+                f"counted between two records the worker emitted INSIDE the window; a bound "
+                f"outside it counts rows produced when fewer than S scans were concurrent.",
+            )
+        if span_rec != t_b - t_a:
+            fail(
+                "ATTRIBUTION_SPAN_INCONSISTENT",
+                f"{where}: worker {worker} records attributed_span_ns={span_rec} but its own "
+                f"bounds t={t_a}..{t_b} span {t_b - t_a} ns. The span is the denominator of "
+                f"its rate, so the record contradicts itself.",
+            )
+        expect_rate = attribution_rows_per_s(rows, span_rec, f"{where}: worker {worker}")
+        if not _rel_close(rate, expect_rate):
+            fail(
+                "ATTRIBUTION_RATE_INCONSISTENT",
+                f"{where}: worker {worker} records {rows} rows over {span_rec} ns = "
+                f"{expect_rate:.6f} rows/s, but states rows_per_s={rate:.6f}. The three are "
+                f"one measurement written three ways; a disagreement means at least one was "
+                f"altered after the guard computed them, so neither the aggregate nor the "
+                f"per-scan p50 derived from this record can be published.",
+            )
+        expect_sf = attribution_shortfall_frac(t_a, t_b, t0, t1)
+        if not _rel_close(sf, expect_sf):
+            fail(
+                "ATTRIBUTION_SHORTFALL_INCONSISTENT",
+                f"{where}: worker {worker} states attribution_shortfall_frac={sf:.8%} but its "
+                f"own bounds inside [{t0}, {t1}] leave {expect_sf:.8%} unattributed. The "
+                f"shortfall is what bounds the downward bias on every figure derived from "
+                f"this rep, so a recorded value that does not follow from the timestamps "
+                f"cannot be used as that bound.",
+            )
+        if sf > shortfall_bound:
+            fail(
+                "WINDOW_SHORTFALL",
+                f"{where}: worker {worker} leaves {sf:.4%} of the window unattributed (bound "
+                f"{shortfall_bound:.4%}). Rows are only counted between records the worker "
+                f"actually emitted, so an interval this coarse would understate the rate by "
+                f"more than the published bound. Lower --progress-ms or lengthen the window.",
+            )
     return per
+
+
+def attribution_summary(per, t0, t1, s, n, drift):
+    """The ONE definition of a rep's attribution summary — written, then re-derived on read."""
+    total = sum(int(p["rows_in_window"]) for p in per)
+    return {
+        "s": s,
+        "n": n,
+        "window_ns": t1 - t0,
+        "rows_in_window_total": total,
+        "aggregate_rows_per_s": total / ((t1 - t0) / 1e9),
+        "attribution_shortfall_max_frac": max(float(p["attribution_shortfall_frac"]) for p in per),
+        "counter_window_drift_frac": drift,
+        "per_worker": per,
+    }
+
+
+def validate_attribution_file(att, t0, t1, s, n, shortfall_bound, where):
+    """Validate a COMMITTED `attribution.json` against the `window.json` it belongs to.
+
+    Returns its per-worker list, validated by `validate_attribution` — the same
+    function that validated the records it was computed from.
+    """
+    if not isinstance(att, dict):
+        fail("ATTRIBUTION_FIELD_MISSING",
+             f"{where}: is {type(att).__name__}, not an attribution record")
+    required = ("s", "n", "window_ns", "rows_in_window_total", "aggregate_rows_per_s",
+                "attribution_shortfall_max_frac", "per_worker")
+    absent = [k for k in required if k not in att]
+    if absent:
+        fail(
+            "ATTRIBUTION_FIELD_MISSING",
+            f"{where} lacks {absent}. Each is REQUIRED because each is CHECKED; a field "
+            f"whose absence skipped its own check would let this file be aggregated with "
+            f"less validation than the guard that wrote it applied.",
+        )
+    # IDENTITY FIRST. Everything below recomputes derived fields from the
+    # record's own primitives, so the record must first be shown to describe THIS
+    # rep — otherwise a self-consistent attribution from a different (S, N) or a
+    # different window would validate cleanly and be aggregated as this one.
+    if int(att["s"]) != s or int(att["n"]) != n:
+        fail(
+            "WINDOW_FIELD_MALFORMED",
+            f"{where} records s={att['s']}, n={att['n']} but window.json says s={s}, n={n} "
+            f"— the two describe different reps",
+        )
+    if int(att["window_ns"]) != t1 - t0:
+        fail(
+            "WINDOW_FIELD_MALFORMED",
+            f"{where} records window_ns={att['window_ns']} but window.json gives {t1 - t0} "
+            f"— the attribution was computed over a different window",
+        )
+    per = validate_attribution(att["per_worker"], t0, t1, n, shortfall_bound, where)
+    want = attribution_summary(per, t0, t1, s, n, att.get("counter_window_drift_frac"))
+    if int(att["rows_in_window_total"]) != want["rows_in_window_total"]:
+        fail(
+            "ATTRIBUTION_TOTAL_INCONSISTENT",
+            f"{where} states rows_in_window_total={att['rows_in_window_total']} but its own "
+            f"{n} per-worker records sum to {want['rows_in_window_total']}. The total is the "
+            f"numerator of the published aggregate rows/s.",
+        )
+    for key in ("aggregate_rows_per_s", "attribution_shortfall_max_frac"):
+        if not _rel_close(att[key], want[key]):
+            fail(
+                "ATTRIBUTION_TOTAL_INCONSISTENT",
+                f"{where} states {key}={float(att[key]):.8f} but its own per-worker records "
+                f"give {want[key]:.8f}; the summary contradicts the evidence it summarises.",
+            )
+    return per
+
+
+def check_counter_window_drift(drift, tolerance, where):
+    """The ONE decision on perf's enabled interval vs the driver's [T0, T1].
+
+    Called at measurement time by `guard_window` and at READ time by
+    `derive.py`: the committed `perf.csv` and `window.json` are both re-read
+    there, so the property they exist to prove is re-decided rather than assumed
+    to have been decided once.
+    """
+    if drift > tolerance:
+        fail(
+            "WINDOW_COUNTER_MISMATCH",
+            f"{where}: perf's enabled interval disagrees with the driver's window by "
+            f"{drift:.4%} (tolerance {tolerance:.4%}). The counters and the rows were "
+            f"therefore NOT taken over the same interval, which is the one property the "
+            f"aligned window exists to guarantee.",
+        )
+    return drift
 
 
 def counter_window_drift(repdir, win, counters):
@@ -481,32 +740,20 @@ def guard_window(args):
             fail("PERF_EVENT_UNPARSEABLE", f"task-clock value {val!r} is not a number")
         expected = float(t1 - t0) * ncpus
         drift = abs(task_clock_ns - expected) / expected
-        if drift > args.counter_window_tolerance:
-            fail(
-                "WINDOW_COUNTER_MISMATCH",
-                f"perf counted {task_clock_ns:.0f} ns of task-clock over {ncpus} CPUs, but "
-                f"the driver's window [{t0}, {t1}] is {expected:.0f} ns x CPU — a "
-                f"{drift:.4%} disagreement (tolerance "
-                f"{args.counter_window_tolerance:.4%}). The counters and the rows were "
-                f"therefore NOT taken over the same interval, which is the one property "
-                f"the aligned window exists to guarantee.",
-            )
-
-    total = sum(p["rows_in_window"] for p in per)
-    print(
-        json.dumps(
-            {
-                "s": s,
-                "n": n,
-                "window_ns": t1 - t0,
-                "rows_in_window_total": total,
-                "aggregate_rows_per_s": total / ((t1 - t0) / 1e9),
-                "attribution_shortfall_max_frac": max(p["attribution_shortfall_frac"] for p in per),
-                "counter_window_drift_frac": drift,
-                "per_worker": per,
-            }
+        # ONE decision, shared with the READ path (`derive.py`), so a committed
+        # rep is judged against the same tolerance when it is re-aggregated as
+        # when it was measured.
+        check_counter_window_drift(
+            drift, args.counter_window_tolerance,
+            f"{csv_path}: {task_clock_ns:.0f} ns task-clock over {ncpus} CPUs vs window "
+            f"[{t0}, {t1}] = {expected:.0f} ns x CPU",
         )
-    )
+
+    # EMITTED BY THE SAME FUNCTION THE READ PATH RE-DERIVES. `derive.py` validates
+    # a committed attribution by recomputing this summary from its own per-worker
+    # records and comparing; that comparison is only meaningful if both sides are
+    # one implementation.
+    print(json.dumps(attribution_summary(per, t0, t1, s, n, drift)))
     return 0
 
 

@@ -257,6 +257,114 @@ def siblings_map(path, cores=8, offset=8):
             fh.write(f"{c + offset} {c},{c + offset}\n")
 
 
+# --- tampering with a COMMITTED attribution (the read path's negative controls) ---
+#
+# `derive.py` is the tool a reader runs against the committed tree to reproduce
+# the published table, and for a committed rep the evidence it reads is
+# `attribution.json` (the raw progress records are far too voluminous to commit).
+# So every way that file can be wrong needs a case that OBSERVES the refusal.
+#
+# The ops that move a timestamp RECOMPUTE the derived fields consistently, so the
+# only check that can catch them is the one under test — otherwise a case would
+# "pass" via an incidental inconsistency and prove nothing about the property it
+# names.
+
+
+def _load_rep(repdir):
+    with open(os.path.join(repdir, "window.json")) as fh:
+        win = json.load(fh)
+    with open(os.path.join(repdir, "attribution.json")) as fh:
+        att = json.load(fh)
+    return win, att
+
+
+def _resync_record(rec, t0, t1):
+    """Make one record internally consistent again after its bounds were moved."""
+    rec["attributed_span_ns"] = rec["t_b_ns"] - rec["t_a_ns"]
+    rec["rows_per_s"] = rec["rows_in_window"] / (rec["attributed_span_ns"] / 1e9)
+    rec["attribution_shortfall_frac"] = (
+        (rec["t_a_ns"] - t0) + (t1 - rec["t_b_ns"])) / (t1 - t0)
+
+
+def _resync_summary(att, t0, t1):
+    total = sum(r["rows_in_window"] for r in att["per_worker"])
+    att["rows_in_window_total"] = total
+    att["aggregate_rows_per_s"] = total / ((t1 - t0) / 1e9)
+    att["attribution_shortfall_max_frac"] = max(
+        r["attribution_shortfall_frac"] for r in att["per_worker"])
+
+
+def tamper(repdir, op):  # noqa: C901 — a flat table of one-line mutations
+    win, att = _load_rep(repdir)
+    t0, t1 = int(win["t0_ns"]), int(win["t1_ns"])
+    per = att["per_worker"]
+
+    if op == "rows-bumped":
+        # THE LEAD CASE: a row count raised, nothing else touched. It inflates the
+        # published aggregate directly.
+        per[0]["rows_in_window"] += 1000
+    elif op == "rows-bumped-resynced":
+        # The same edit with the record's OWN derived fields and the summary
+        # brought back into agreement: internally consistent, and refused only
+        # because the rate no longer follows from the rows and the span.
+        per[0]["rows_in_window"] += 1000
+        per[0]["rows_per_s"] = per[0]["rows_in_window"] / (
+            per[0]["attributed_span_ns"] / 1e9)
+        _resync_summary(att, t0, t1)
+    elif op == "duplicate-worker":
+        per[-1]["worker"] = per[0]["worker"]
+    elif op == "unknown-worker":
+        per[-1]["worker"] = 99
+    elif op == "worker-dropped":
+        del per[-1]
+        _resync_summary(att, t0, t1)
+    elif op == "timestamp-outside-window":
+        per[0]["t_b_ns"] = t1 + 1 * NS
+        _resync_record(per[0], t0, t1)
+        _resync_summary(att, t0, t1)
+    elif op == "shortfall-over-bound":
+        per[0]["t_a_ns"] = per[0]["t_a_ns"] + 1 * NS   # 1 s of a 60 s window = 1.67%
+        _resync_record(per[0], t0, t1)
+        _resync_summary(att, t0, t1)
+    elif op == "shortfall-misstated":
+        per[0]["attribution_shortfall_frac"] += 0.001  # still under the bound
+        att["attribution_shortfall_max_frac"] = max(
+            r["attribution_shortfall_frac"] for r in per)
+    elif op == "span-misstated":
+        per[0]["attributed_span_ns"] += 1_000_000
+    elif op == "total-misstated":
+        att["rows_in_window_total"] += 1000
+    elif op == "aggregate-misstated":
+        att["aggregate_rows_per_s"] *= 1.05
+    elif op == "record-field-dropped":
+        del per[0]["rows_per_s"]
+    elif op == "summary-field-dropped":
+        del att["attribution_shortfall_max_frac"]
+    elif op == "n-misstated":
+        att["n"] += 1
+    elif op == "window-misstated":
+        att["window_ns"] += 1000
+    elif op == "task-clock-drift":
+        # perf's enabled interval no longer matches the driver's [T0, T1]: the
+        # read path must re-decide this, not merely print it.
+        ncpus = len([c for c in win["perf_cpus"].split(",") if c])
+        out = []
+        for line in open(os.path.join(repdir, win["perf_csv"])):
+            f = line.split(",")
+            if len(f) > 2 and f[2] == "task-clock":
+                f[0] = str(int((t1 - t0) * ncpus * 0.75))
+                line = ",".join(f)
+            out.append(line)
+        with open(os.path.join(repdir, win["perf_csv"]), "w") as fh:
+            fh.writelines(out)
+        return
+    else:
+        raise SystemExit(f"unknown tamper op {op!r}")
+
+    with open(os.path.join(repdir, "attribution.json"), "w") as fh:
+        json.dump(att, fh)
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__)
     sub = ap.add_subparsers(dest="what", required=True)
@@ -274,9 +382,14 @@ def main():
     s.add_argument("--path", required=True)
     s.add_argument("--cores", type=int, default=8)
     s.add_argument("--offset", type=int, default=8)
+    tp = sub.add_parser("tamper")
+    tp.add_argument("--repdir", required=True)
+    tp.add_argument("--op", required=True)
     a = ap.parse_args()
     if a.what == "window":
         build(a.case, a.dir, a.workers)
+    elif a.what == "tamper":
+        tamper(a.repdir, a.op)
     elif a.what == "perf-csv":
         perf_csv(a.path, a.case)
     elif a.what == "flight-step":

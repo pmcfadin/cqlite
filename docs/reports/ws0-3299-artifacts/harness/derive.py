@@ -100,22 +100,26 @@ def load_rep(repdir):  # noqa: C901 — one linear read of one rep's evidence
     elif os.path.exists(attribution_path):
         with open(attribution_path) as fh:
             att = json.load(fh)
-        if int(att.get("s", -1)) != s or int(att.get("n", -1)) != n:
-            guards.fail(
-                "WINDOW_FIELD_MALFORMED",
-                f"{attribution_path} records s={att.get('s')}, n={att.get('n')} but "
-                f"window.json says s={s}, n={n} — the two describe different reps",
-            )
-        if int(att.get("window_ns", -1)) != t1 - t0:
-            guards.fail(
-                "WINDOW_FIELD_MALFORMED",
-                f"{attribution_path} records window_ns={att.get('window_ns')} but window.json "
-                f"gives {t1 - t0} — the attribution was computed over a different window",
-            )
-        per = att["per_worker"]
-        if len(per) != n:
-            guards.fail("WINDOW_WORKER_MISSING",
-                        f"{attribution_path} holds {len(per)} workers, expected n={n}")
+        # THE READ PATH RUNS THE WRITE PATH'S VALIDATION, not a lighter version of
+        # it. `guards.validate_attribution_file` re-checks the rep identity (s, n,
+        # window length), then hands the per-worker list to the SAME
+        # `validate_attribution` that `guards.py window` applied to the records
+        # this file was computed from: worker count and identity, timestamps
+        # inside [T0, T1], every derived field recomputed from the record's own
+        # primitives, the 0.5% shortfall bound, and the summary totals against
+        # the records they summarise.
+        #
+        # It used to check only s, n, window length and list length here — so a
+        # modified row count, a duplicated worker, timestamps outside the window
+        # or a shortfall over the published bound would have been aggregated
+        # straight into the table. That matters more than an ordinary validation
+        # gap because THIS is the reproduction path: a reader re-aggregating the
+        # committed tree would have "confirmed" a table from evidence the guards
+        # would have refused. The validation is in guards.py, not here, so there
+        # is exactly one implementation of it (CLAUDE.md, #3283).
+        per = guards.validate_attribution_file(
+            att, t0, t1, s, n, guards.DEFAULT_SHORTFALL_BOUND, attribution_path
+        )
         attribution_source = "committed guard output"
     else:
         guards.fail(
@@ -146,7 +150,18 @@ def load_rep(repdir):  # noqa: C901 — one linear read of one rep's evidence
         # two causes, and is labelled accordingly rather than called "GHz".
         "unhalted_cycles_per_cpu_s": counters["cycles"] / (window_s * 2 * s),
         "l1d_loads_per_row": counters["L1-dcache-loads"] / rows,
-        "counter_window_drift_frac": guards.counter_window_drift(repdir, win, counters),
+        # DECIDED on read, not merely reported: the committed perf.csv and
+        # window.json are both re-read here, so the property they exist to prove
+        # (counters and rows over the SAME interval) is re-judged against the same
+        # tolerance the measurement-time guard used. Printing this figure without
+        # deciding it would let a rep the write-time guard would have refused be
+        # aggregated, and its drift would appear only as a number in a provenance
+        # line nobody is obliged to read.
+        "counter_window_drift_frac": guards.check_counter_window_drift(
+            guards.counter_window_drift(repdir, win, counters),
+            guards.DEFAULT_COUNTER_WINDOW_TOLERANCE,
+            f"{repdir}: perf's enabled interval vs the driver's window [{t0}, {t1}]",
+        ),
         "shortfall_max_frac": max(p["attribution_shortfall_frac"] for p in per),
         "attribution_source": attribution_source,
     }
@@ -539,9 +554,15 @@ def emit_provenance(reps, by_point, min_reps):
         "per-worker progress records were present and were re-differenced; `committed guard "
         "output` means they were not (too voluminous to commit — a single S=6/N=24 rep emits "
         "~57,600 records) and the figures come from the `attribution.json` that "
-        "`guards.py window` produced from them at measurement time. That file is re-checked "
-        "here against `window.json` for s, n and window length, so a mismatched or edited "
-        "attribution is refused rather than absorbed.\n"
+        "`guards.py window` produced from them at measurement time. **That file is validated "
+        "on read by the SAME `guards.py` code that validated the records it came from** — rep "
+        "identity (s, n, window length), worker count and identity, timestamps inside "
+        "[T0, T1], every derived field recomputed from the record's own primitives, the "
+        f"{guards.DEFAULT_SHORTFALL_BOUND:.2%} shortfall bound, and the summary totals against "
+        "the records they summarise — so a mismatched or edited attribution is REFUSED, not "
+        "absorbed. What that cannot establish is authenticity: a file edited consistently "
+        "throughout is self-consistent, and only the raw progress records (recomputed whenever "
+        "present) could refute it.\n"
     )
     print(f"Counter-window agreement (max over reps): "
           f"{max(r['counter_window_drift_frac'] for r in reps):.2e} — perf's enabled interval "
