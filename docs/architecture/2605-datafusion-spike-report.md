@@ -191,18 +191,10 @@ The confounder is identified, not guessed: the corpus is 10.35 GB, the box has 3
 Cassandra container that produced it still resident, and `stream_cold_fault` measures exactly the
 synchronous page-in this causes. §3.3 therefore controls for it.
 
-**And the noise is visibly non-converging.** `summary.md` prints the running
-`row_engine / datafusion@tp1` ratio as iterations accumulate:
-
-| scenario | after n=1 | after n=2 | after n=3 (final) |
-|---|---|---|---|
-| `full_scan_count` | 1.19x | 1.37x | **1.09x** |
-| `projected_scan` | 1.15x | 1.25x | **1.03x** |
-| `filtered_scan` | 1.44x | 1.15x | **0.92x** |
-
-The estimate does not settle — it wanders, and on `filtered_scan` it crosses 1.0. Anyone stopping at
-one or two iterations would have published a "1.2-1.4x DataFusion win"; the drift is the reason this
-report does not quote a wall-clock ratio as the vectorized-exec delta at all.
+**And the noise is visibly non-converging**: the running `row_engine / datafusion@tp1` ratio wanders
+`1.19x -> 1.37x -> 1.09x` as the three iterations accumulate, and on `filtered_scan` it crosses 1.0.
+The full drift table, and what an early read of it would have published, is **§3.6** — it is the
+reason this report does not quote a wall-clock ratio as the vectorized-exec delta at all.
 
 ### 3.2 Raw per-cell results (median over each row's own `n`, with the range)
 
