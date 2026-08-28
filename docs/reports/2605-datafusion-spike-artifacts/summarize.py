@@ -108,6 +108,78 @@ for scenario in SCENARIOS:
         "n/a" if enc is None or floor in (None, 0) else "%.1f%%" % (100 * enc / floor),
     ))
 
+# ---------------------------------------------------------------------------
+# I/O-controlled engine comparison.
+#
+# WHY THIS SECTION EXISTS. Raw wall time on this box CANNOT resolve the
+# engine delta: the 10.35 GB corpus does not fit in the free page cache
+# (30 GB box, 7 GB of it the Cassandra container that wrote the corpus), so
+# per-iteration wall time swings by up to ~2.4x and the `floor` arm — which by
+# construction does STRICTLY LESS work than every other arm — sometimes measures
+# SLOWER than them. That is a proof, not a suspicion, that raw wall time here is
+# noise-dominated, and quoting a wall-time ratio as a "vectorized-exec delta"
+# would be reporting cache luck as an engine property.
+#
+# `stream_cold_fault` measures exactly the confounder (synchronous body-chunk
+# page-in on the producer threads), and it is recorded per run. So the honest
+# move is a covariate adjustment: regress wall on cold-fault across all runs and
+# compare the per-arm mean RESIDUAL. A positive residual means "slower than this
+# run's I/O alone predicts", which is the engine signal with I/O controlled.
+#
+# It is stated with its limits: this is an observational adjustment over 45 runs
+# on one box, not a controlled experiment, and the residual spread is reported so
+# a reader can see whether a difference clears it.
+print("\n## Engine comparison with I/O controlled\n")
+walls = [r["elapsed_nanos"] / 1e9 for r in runs]
+faults = [r["subphase_cold_fault_nanos"] / 1e9 for r in runs]
+n = len(runs)
+mw, mf = sum(walls) / n, sum(faults) / n
+sxx = sum((f - mf) ** 2 for f in faults)
+sxy = sum((f - mf) * (w - mw) for f, w in zip(faults, walls))
+if sxx == 0:
+    print("- cold-fault is constant across runs; no adjustment possible")
+else:
+    slope = sxy / sxx
+    intercept = mw - slope * mf
+    sw = sum((w - mw) ** 2 for w in walls)
+    r2 = (sxy ** 2) / (sxx * sw) if sw else float("nan")
+    print("- wall = %.2f s + %.3f x cold_fault_s  (R^2 = %.3f over %d runs)"
+          % (intercept, slope, r2, n))
+    print("- i.e. %.0f%% of the wall-time variance across every run in this matrix is"
+          " explained by page-in time ALONE\n" % (100 * r2))
+    print("| scenario | arm | mean residual s (+ = slower than I/O predicts) | residual [min, max] |")
+    print("|---|---|---|---|")
+    for scenario in SCENARIOS:
+        arms = sorted({k[1] for k in groups if k[0] == scenario})
+        for arm in ["floor", "row_engine", "datafusion@tp1"] + [
+            a for a in arms if a not in ("floor", "row_engine", "datafusion@tp1")
+        ]:
+            rs = groups.get((scenario, arm))
+            if not rs:
+                continue
+            res = [
+                r["elapsed_nanos"] / 1e9
+                - (intercept + slope * r["subphase_cold_fault_nanos"] / 1e9)
+                for r in rs
+            ]
+            print("| %s | %s | %+.1f | [%+.1f, %+.1f] |"
+                  % (scenario, arm, sum(res) / len(res), min(res), max(res)))
+
+# ---------------------------------------------------------------------------
+# The STABLE half of the measurement: producer CPU sub-phases.
+print("\n## Producer CPU sub-phases (the stable signal)\n")
+print("| bucket | median ms over all 45 runs | [min, max] | us/row at 1,899,750 rows |")
+print("|---|---|---|---|")
+for label, field in [
+    ("stream_encode (row->column transpose)", "subphase_encode_nanos"),
+    ("stream_merge (merge + reconcile + row materialize)", "subphase_merge_nanos"),
+    ("stream_decompress (LZ4)", "subphase_decompress_nanos"),
+    ("stream_cold_fault (page-in, 2 threads summed)", "subphase_cold_fault_nanos"),
+]:
+    vals = [r[field] / 1e6 for r in runs]
+    print("| %s | %.0f | [%.0f, %.0f] | %.2f |"
+          % (label, med(vals), min(vals), max(vals), med(vals) * 1000 / 1899750))
+
 print("\n## Preconditions (every run)\n")
 bad_sources = [r["_cell"] for r in runs if r["sources"] < 2]
 bad_arm = [r["_cell"] for r in runs if not r["merge_arm_observed"]]
