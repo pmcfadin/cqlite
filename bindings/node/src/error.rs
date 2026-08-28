@@ -495,6 +495,14 @@ mod tests {
             // CommitLog reader (#2389) — not bound yet (v1 is library+CLI only).
             | Error::UnsupportedCommitLogVersion { .. }
             | Error::CorruptCommitLogFrame(_) => "PARSE",
+            // Query execution budget elapsed (issue #1695): the SAME `TIMEOUT` code as
+            // its sibling `Timeout`, so a JS caller checking for `TIMEOUT` catches
+            // both. Deliberately NOT `QUERY`, even though its `ErrorCategory` IS
+            // `Query` — #1451's whole point is that codes are decided BY VARIANT, so
+            // the classify category and the JS code are separate axes. Python maps the
+            // same variant to the builtin `TimeoutError`, which is the cross-binding
+            // agreement the shared table exists to enforce.
+            Error::QueryTimeout { .. } => "TIMEOUT",
             Error::Configuration(_) | Error::InvalidReadPath { .. } => "CONFIG",
             Error::InvalidInput(_) | Error::InvalidState(_) | Error::InvalidOperation(_) => {
                 "INVALID_INPUT"
