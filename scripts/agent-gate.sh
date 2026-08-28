@@ -518,24 +518,29 @@
 #                      TMPDIR with no consistency check; exact-`S` index-flag match;
 #                      failed nested scan read as clean).
 #                      Also runs scripts/tests/test_pub_surface_guard.sh (#1712),
-#                      the non-vacuity proof for the pub-surface component: the
-#                      consistency assert must RED on the pre-#1712 source shape (a
-#                      bare ungated `pub mod benchmarks;` whose cfg gate hides inside
-#                      the module file), a new public item must trip the snapshot
-#                      diff, a missing snapshot must FAIL rather than pass vacuously,
-#                      and a bad argument must exit 2. Each negative case substitutes
-#                      the artifact in its own detached scratch worktree (the guard
-#                      has no test-only seam) and reuses CARGO_TARGET_DIR, so the
-#                      18-case suite costs ~125s of rustdoc and no datasets/network.
-#                      Also reds on a new `pub fn` on an existing public struct, a new
-#                      enum variant, a cosmetic `cfg_attr` that must not exempt a
-#                      crate-root `pub mod` from the assert, a SAME-LINE
-#                      `#[attr] pub mod x;` (which the first cut dropped entirely — a
-#                      false PASS), a disagreement between the guard's two
-#                      independent crate-root scans, a deleted public RE-EXPORT, and
-#                      a tell-tale token inside an attribute's STRING VALUE, and a
-#                      `cfg(doc)` predicate (which would make the rustdoc-derived
-#                      surface differ from the shipped one).
+#                      the non-vacuity proof for the pub-surface component. 23 cases,
+#                      source-only (no cargo doc since the #1712 descope), each
+#                      negative case substituting the artifact in its own detached
+#                      scratch worktree — the guard has no test-only seam. The
+#                      INHERITED declaration half: the consistency assert must RED on
+#                      the pre-#1712 source shape (a bare ungated
+#                      `pub mod benchmarks;` whose cfg gate hides inside the module
+#                      file), a cosmetic `cfg_attr` must not exempt a crate-root
+#                      `pub mod`, a tell-tale token inside an attribute's STRING VALUE
+#                      must not either, a SAME-LINE `#[attr] pub mod x;` must be seen
+#                      (the first cut dropped it — a false PASS), the two independent
+#                      crate-root scans disagreeing must REFUSE, and the three SHARED
+#                      blind spots must refuse rather than agree-while-blind (inline
+#                      `pub mod x { … }`, an INDENTED depth-0 declaration, and
+#                      `*/ pub mod x;` — code after a closing delimiter). The NEW
+#                      module-file oracle half: every refusal path (module file
+#                      resolving to neither/both legal paths, not a readable regular
+#                      file, a block comment in the prologue, an inner attribute that
+#                      merely mentions `cfg`, content after an inner attribute on one
+#                      line, an unterminated inner attribute) plus green positive
+#                      controls, without which a guard hardwired to refuse everything
+#                      would satisfy them all. And case 26: THIS component must not
+#                      report PASS on a guard that exited 0 having measured nothing.
 #   minimal-build      cargo build + `cargo test --lib --no-run` (compile-only)
 #                      -p cqlite-core --no-default-features --features all-compression
 #   smoke              bash test-data/scripts/smoke-test-all-tables.sh
@@ -5622,14 +5627,17 @@ run_pub_surface() {
 # its own tmpdir. SKIP-aware: the summary test's truncation case relies on a python3
 # reader, so with no python3 we record SKIP (loud, never silent PASS); any test
 # failure -> hard FAIL.
-# Also runs scripts/tests/test_pub_surface_guard.sh (#1712), the non-vacuity proof
-# for the pub-surface component: it drives scripts/ci/check-pub-surface.sh through one
-# green and three reds (consistency assert on the pre-#1712 shape, snapshot drift,
-# missing snapshot) plus the usage case, substituting the artifact in detached scratch
-# worktrees rather than through any test-only seam, and pins every crate-root parse
-# shape the (lexical, not-a-Rust-parser) scan claims to handle, plus both directions
-# of the public-surface enumeration. Reuses CARGO_TARGET_DIR (~125s); never invokes the
-# gate, so it cannot recurse.
+# Also runs scripts/tests/test_pub_surface_guard.sh (#1712), the non-vacuity proof for
+# the pub-surface component: 23 cases driving scripts/ci/check-pub-surface.sh through
+# 5 greens, 16 reds, the usage case and the kill-safety case, substituting the artifact
+# in detached scratch worktrees rather than through any test-only seam. It pins every
+# crate-root parse shape the (lexical, not-a-Rust-parser) scan claims to handle, all
+# four SHARED blind spots that its two derivations cannot express as a disagreement,
+# and every REFUSAL path of the module-file oracle together with the green controls
+# that stop a refuse-everything guard from satisfying them. SOURCE-ONLY since the #1712
+# descope — no cargo doc, no cargo at all, seconds not minutes; never invokes the gate
+# except in case 26 (`--only pub-surface`, which self-exempts from the #1825 slot), so
+# it cannot recurse.
 run_tooling_tests() {
   local name=tooling-tests
   if [ -n "$ONLY" ] && ! grep -qw "$name" <<<"${ONLY//,/ }"; then
@@ -6813,17 +6821,17 @@ run_tooling_tests() {
   # pub-surface guard self-test (#1712): no python3/datasets/network needed, always
   # runs. Proves scripts/ci/check-pub-surface.sh actually FIRES — the consistency
   # assert reds on the pre-#1712 source shape (a bare ungated `pub mod benchmarks;`
-  # whose cfg gate hides inside the module file), a new public item trips the snapshot
-  # diff, a missing snapshot FAILs instead of passing vacuously, and a bad argument
-  # exits 2. Each negative case substitutes the artifact in its own
-  # `git worktree add --detach HEAD` scratch checkout (no test-only seam in the guard)
-  # and reuses CARGO_TARGET_DIR, so the whole 18-case suite is ~125s of rustdoc. It pins
+  # whose cfg gate hides inside the module file) and a bad argument exits 2. Each
+  # negative case substitutes the artifact in its own `git worktree add --detach HEAD`
+  # scratch checkout (no test-only seam in the guard); SOURCE-ONLY since the #1712
+  # descope, so the 23-case suite is seconds rather than ~125s of rustdoc. It pins
   # every crate-root PARSE shape the scan claims to handle (same-line
   # `#[attr] pub mod x;`, multi-line attrs, trailing comments, block-commented decls,
   # attributes separated from their item by blank/comment lines), since that scan is
-  # lexical and its safety rests on the pinned suite; and both directions of the
-  # public-surface enumeration — deleting a public RE-EXPORT must red, renaming a
-  # PRIVATE re-exported-through module must not. A failure FAILs the component.
+  # lexical and its safety rests on the pinned suite; the four SHARED blind spots its
+  # two derivations cannot express as a disagreement; and every REFUSAL path of the
+  # module-file oracle, each with a green control so a refuse-everything guard cannot
+  # satisfy them. A failure FAILs the component.
   echo ">>> [$name] bash scripts/tests/test_pub_surface_guard.sh"
   if ! bash "$REPO_ROOT/scripts/tests/test_pub_surface_guard.sh" >>"$log" 2>&1; then
     status=FAIL
