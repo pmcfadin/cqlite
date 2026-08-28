@@ -750,9 +750,19 @@ pub(super) async fn stream_generations_for_read(
         // an I/O / corruption / other runtime failure propagates. Answering the latter
         // with the concat returned a full-length UNRECONCILED result set under `Ok`.
         Ok(Err(e)) => {
-            // A FAILED read consumed its construction latency; report it (#1701 R5).
-            meter.finish();
-            Err(MergeStreamSetupError::from_construction_failure(e))
+            let err = MergeStreamSetupError::from_construction_failure(e);
+            // CLASSIFY before deciding the meter's fate (#1701 R6). A FALLBACK-ELIGIBLE
+            // failure does not end the read — `scan_stream` answers it with the METERED
+            // fan-out concat, which emits its own duration, so finishing here too would
+            // report TWO durations for one logical read (the B1 over-count, reintroduced
+            // by the R5 fix that finished EVERY error arm). Only a PROPAGATING failure
+            // ends the read here, and it must report the latency it consumed.
+            if err.fallback_eligible() {
+                meter.discard();
+            } else {
+                meter.finish();
+            }
+            Err(err)
         }
         // `ready_tx` is dropped-WITHOUT-send on exactly one condition: the blocking
         // task unwound before either readiness arm ran. So this `Err` ⟺ a dead

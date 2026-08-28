@@ -32,9 +32,9 @@ pub(super) const ANNOTATIONS: &[MetricDoc] = &[
         name: catalog::READ_PARTITIONS,
         kind: MetricKind::Counter,
         unit: catalog::unit::PARTITIONS,
-        summary: "Total partitions scanned by the read path.",
+        summary: "Partitions a read DELIVERED rows from on core read paths; partitions SCANNED on Flight's k-way merge arm.",
         attributes: &[attr::SSTABLE_FORMAT],
-        interpretation: "Rising in step with read.rows is healthy; many partitions for few rows indicates a full scan.",
+        interpretation: "Rising in step with read.rows is healthy; many partitions for few rows indicates a full scan. Mind the producer difference when comparing series: core paths derive partition boundaries from EMITTED row keys, so a partition whose every row is tombstone-shadowed or TTL-expired contributes ZERO, while Flight's merge arm counts it as scanned. The gap is exactly the fully-suppressed partitions, so an amplification dashboard mixing the two producers can under-count partitions on the core side.",
         round_item: "—",
     },
     MetricDoc {
