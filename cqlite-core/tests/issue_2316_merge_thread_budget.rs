@@ -64,7 +64,9 @@
 //! only ever convert a jitter FAIL into a PASS, never mask a real amplification.
 //! That confirmation runs ONLY when the fast-path delta already exceeds the
 //! bound, so the common (passing) case pays zero extra latency, and the bound
-//! itself is NOT weakened.
+//! itself is NOT weakened. It is also deliberately ASYMMETRIC — patient before
+//! failing, prompt to accept — because an unchanged thread count is evidence
+//! that the pool HAS drained but never evidence that it has FINISHED draining.
 //!
 //! Measured on a contended 16-core host (48 spinners, 5 runs) with CORRECT code,
 //! the fast-path delta was 18 / 76 / 41 / 8 / 22 against a bound of 15 — four of
@@ -186,8 +188,9 @@ const REAP_QUIESCENCE_SPAN: Duration = Duration::from_secs(12);
 
 /// Fail-loud bound on the whole reap-confirm wait. Worst case is work finishing
 /// late, plus the 10 s keep-alive, plus [`REAP_QUIESCENCE_SPAN`]; this is a
-/// generous multiple of that, and is reached ONLY on the overshoot path.
-const REAP_CONFIRM_TIMEOUT: Duration = Duration::from_secs(90);
+/// generous multiple of that, and is reached ONLY when the count is STILL over
+/// bound — i.e. only on the path that is about to fail the pin anyway.
+const REAP_CONFIRM_TIMEOUT: Duration = Duration::from_secs(60);
 
 // ── Direct, no-heuristics OS thread-count observation ───────────────────────
 
@@ -293,11 +296,13 @@ fn poll_until_stable(timeout: Duration) -> (usize, usize) {
 ///
 /// The discriminator is mechanical, not statistical:
 ///
-/// * `spawn_blocking` pool threads are IDLE-REAPED 10 s after going idle, and a
-///   reap changes the thread count — so waiting for the count to hold unchanged
-///   for [`REAP_QUIESCENCE_SPAN`] (> that keep-alive) is positive evidence that a
-///   starvation-inflated pool has finished draining, rather than an assumption
-///   that a fixed hold was long enough (roborev job 59 finding 2).
+/// * `spawn_blocking` pool threads are IDLE-REAPED 10 s after going idle, so a
+///   starvation-inflated pool DRAINS on its own while the producers stay blocked.
+///   The confirmation waits for that drain rather than assuming a fixed hold
+///   covered it (roborev job 59 finding 2) — and, because an unchanged count
+///   cannot prove a busy task is not still running (roborev job 60), it treats
+///   quiescence as grounds to ACCEPT a within-budget reading only, never to
+///   condemn an over-budget one. See [`poll_until_reaped`].
 /// * A multi-threaded `Runtime`'s worker threads are NOT reapable — they live
 ///   for the lifetime of the runtime, and each producer's runtime stays alive
 ///   for as long as that producer blocks on the full `sync_channel` (which it
@@ -307,33 +312,56 @@ fn poll_until_stable(timeout: Duration) -> (usize, usize) {
 /// #2316 amplification survives it unchanged. Returns `(peak, settled)` of the
 /// post-reap window; `settled` is the CONFIRMED reading (the stabilized steady
 /// state), while `peak` is reported for diagnosis only.
-fn reap_settle_and_resample() -> (usize, usize) {
-    poll_until_quiescent(REAP_QUIESCENCE_SPAN, REAP_CONFIRM_TIMEOUT)
+fn reap_settle_and_resample(accept_at_or_below: usize) -> (usize, usize) {
+    poll_until_reaped(
+        accept_at_or_below,
+        REAP_QUIESCENCE_SPAN,
+        REAP_CONFIRM_TIMEOUT,
+    )
 }
 
-/// Poll until the OS thread count has been CONTINUOUSLY UNCHANGED for
-/// `min_span`, returning `(peak, settled)` of the polling window.
+/// Poll until the blocking pool has demonstrably drained to `accept_at_or_below`
+/// and held there for `min_span`, or until `timeout` expires — returning
+/// `(peak, final)` of the polling window.
 ///
-/// Distinct from [`poll_until_stable`], which accepts a fixed number of
-/// consecutive identical readings (~200 ms) — enough to detect that thread
-/// CREATION has finished, but not that idle-time-based REAPING has. Reaping
-/// resets the span whenever it fires, so a span longer than tokio's keep-alive
-/// is positive evidence that no reap is still pending, rather than an assumption
-/// that enough time has passed.
+/// ## Why acceptance and failure are deliberately ASYMMETRIC
 ///
-/// `timeout` is a fail-loud BOUND ONLY, never the synchronization mechanism.
-fn poll_until_quiescent(min_span: Duration, timeout: Duration) -> (usize, usize) {
+/// An unchanged thread count does NOT prove no blocking task is still running: a
+/// busy or parked task keeps the count constant without ever having started its
+/// keep-alive clock (roborev job 60). So quiescence alone is sufficient to ACCEPT
+/// a clean reading but NOT to condemn a dirty one — if it were used for both, a
+/// task that finishes late would be reaped after the re-sample and its thread
+/// would be miscounted as persistent, which is exactly the false failure this
+/// change exists to remove.
+///
+/// This function therefore keeps waiting for as long as the count is over the
+/// threshold, spending the full `timeout` before letting the caller fail. That is
+/// sound rather than "retry until green": the only threads that can disappear
+/// during the wait are REAPABLE ones, and a genuine #2316 amplification's runtime
+/// workers are not reapable while their runtime lives — which it does, for as
+/// long as the producer blocks on the full `sync_channel` (i.e. past this call).
+/// No amount of extra patience can make an amplification pass; it can only ever
+/// give late-finishing blocking work the reap window it is owed.
+fn poll_until_reaped(
+    accept_at_or_below: usize,
+    min_span: Duration,
+    timeout: Duration,
+) -> (usize, usize) {
     let deadline = Instant::now() + timeout;
     let mut peak = 0usize;
     let mut last: Option<usize> = None;
     let mut unchanged_since = Instant::now();
+    let mut latest = 0usize;
     while Instant::now() < deadline {
         let n = os_thread_count().expect(
             "thread count observation must remain available (guard 2 already confirmed it)",
         );
         peak = peak.max(n);
+        latest = n;
         if last == Some(n) {
-            if unchanged_since.elapsed() >= min_span {
+            // Accept ONLY a reading that is both quiesced AND already within the
+            // budget. A quiesced but over-budget reading is not yet trustworthy.
+            if n <= accept_at_or_below && unchanged_since.elapsed() >= min_span {
                 return (peak, n);
             }
         } else {
@@ -342,13 +370,10 @@ fn poll_until_quiescent(min_span: Duration, timeout: Duration) -> (usize, usize)
         }
         std::thread::sleep(POLL_INTERVAL);
     }
-    panic!(
-        "OS thread count never quiesced within {timeout:?} (last reading {last:?}, unchanged for \
-         {:?} of the {min_span:?} required, peak observed {peak}); this is a fail-loud BOUND, not \
-         a synchronization mechanism — the blocking pool may still be churning under extreme \
-         contention",
-        unchanged_since.elapsed()
-    );
+    // Deadline reached while still over budget: report the final reading and let
+    // the caller's assertion fail on it. This is the fail-loud path, NOT a panic
+    // of its own, so the pin's diagnostic is what the reader sees.
+    (peak, latest)
 }
 
 // ── Real multi-SSTable input construction (never an empty dataset) ──────────
@@ -555,10 +580,11 @@ fn merge_bounds_producer_threads_to_o_m() {
     let confirmed = if delta > bound {
         eprintln!(
             "[issue-2316-reap] fast-path delta={delta} exceeds bound={bound}; holding the blocked \
-             producers until the thread count holds unchanged for {REAP_QUIESCENCE_SPAN:?} \
-             (> tokio's 10s blocking-pool thread_keep_alive), i.e. until reaping has quiesced"
+             producers until the pool drains within budget and holds there for \
+             {REAP_QUIESCENCE_SPAN:?} (> tokio's 10s blocking-pool thread_keep_alive), or up to \
+             {REAP_CONFIRM_TIMEOUT:?} before condemning the reading"
         );
-        let (reap_peak, reap_settled) = reap_settle_and_resample();
+        let (reap_peak, reap_settled) = reap_settle_and_resample(baseline + bound);
         let reap_delta = reap_settled.saturating_sub(baseline);
         eprintln!(
             "[issue-2316-reap] post-reap peak={reap_peak} settled={reap_settled} \
@@ -600,8 +626,8 @@ fn merge_bounds_producer_threads_to_o_m() {
     assert!(
         confirmed <= bound,
         "merge over M={m} inputs holds {confirmed} PERSISTENT OS threads over baseline \
-         (fast-path peak={peak}, settled={settled}, delta={delta}; confirmed after the \
-         blocking pool quiesced for {REAP_QUIESCENCE_SPAN:?}: {confirmed}; \
+         (fast-path peak={peak}, settled={settled}, delta={delta}; still over budget after \
+         waiting up to {REAP_CONFIRM_TIMEOUT:?} for the blocking pool to drain: {confirmed}; \
          baseline={baseline}); O(M) bound is {bound} (= {PER_INPUT}·M + {THREAD_SLACK}). \
          These threads outlived tokio's blocking-pool keep-alive while every producer was \
          still blocked on `send`, so they are NOT reapable spawn_blocking jitter — they are \
