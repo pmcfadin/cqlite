@@ -62,7 +62,21 @@ fn run() -> Result<(), String> {
     let args = parse_args()?;
     let ddl = std::fs::read_to_string(&args.ddl_file)
         .map_err(|e| format!("cannot read --ddl-file {}: {e}", args.ddl_file.display()))?;
-    let (_, schema) = cqlite_core::schema::parse_create_table(&ddl).map_err(|_| {
+    // Skip anything before the first `CREATE TABLE` (a comment header, or a
+    // `CREATE KEYSPACE` when the file is Cassandra's own `schema.cql`) —
+    // `parse_create_table` requires its input to START at the statement. The
+    // FIRST such statement is used and nothing after it is inspected, so a file
+    // holding several tables is a usage error the caller must not make.
+    let statement = ddl
+        .find("CREATE TABLE")
+        .map(|at| &ddl[at..])
+        .ok_or_else(|| {
+            format!(
+                "{} contains no CREATE TABLE statement",
+                args.ddl_file.display()
+            )
+        })?;
+    let (_, schema) = cqlite_core::schema::parse_create_table(statement).map_err(|_| {
         format!(
             "cannot parse a CREATE TABLE statement out of {}",
             args.ddl_file.display()
