@@ -501,7 +501,16 @@ cmd_stamp() {
 cmd_list() {
   local now_epoch raw
   now_epoch="$(date -u +%s)"
-  raw="$(git ls-remote "$REMOTE" 'refs/heartbeats/*' 2>/dev/null || true)"
+  # NOT SWALLOWED (#3393 self-sweep). `flow-board` reads this to render the fleet view and decide
+  # what is owned, so an origin or auth outage rendering "no heartbeats found" is the same fail-open
+  # shape found four times elsewhere in this change. Found by grepping for the class rather than
+  # waiting for a fifth review round.
+  local ls_rc=0
+  raw="$(git ls-remote "$REMOTE" 'refs/heartbeats/*' 2>/dev/null)" || ls_rc=$?
+  if [ "$ls_rc" -ne 0 ]; then
+    note "could not list heartbeat refs on ${REMOTE} (git exited ${ls_rc}) — this listing would be empty for a reason that is NOT 'no heartbeats exist'"
+    return 1
+  fi
 
   if [ -z "$raw" ]; then
     echo "no heartbeats found on $REMOTE"
@@ -515,11 +524,17 @@ cmd_list() {
     refname="$(printf '%s' "$line" | awk '{print $2}')"
     machine="${refname#refs/heartbeats/}"
 
-    if ! git fetch "$REMOTE" "$refname" >/dev/null 2>&1; then
+    # A PRIVATE REF, NOT FETCH_HEAD (#3393 self-sweep). `FETCH_HEAD` is shared per-worktree, so any
+    # concurrent fetch can clobber it between the fetch and the read and this row would describe
+    # ANOTHER ref. Already fixed in `dead-lanes` and `ref_msg_field`; these two readers were missed.
+    local tmpref_l
+    tmpref_l="refs/tmp/claim-heartbeat-list/$$-${RANDOM}"
+    if ! git fetch --no-write-fetch-head --no-tags "$REMOTE" "+${refname}:${tmpref_l}" >/dev/null 2>&1; then
       printf '%-20s %-8s %-24s %s\n' "$machine" "?" "?" "fetch-failed"
       continue
     fi
-    msg="$(git log -1 --format=%B FETCH_HEAD 2>/dev/null || true)"
+    msg="$(git log -1 --format=%B "$tmpref_l" 2>/dev/null || true)"
+    git update-ref -d "$tmpref_l" 2>/dev/null || true
     issue="$(printf '%s' "$msg" | sed -n 's/.*issue=\([0-9][0-9]*\).*/\1/p' | head -1)"
     ts="$(printf '%s' "$msg" | sed -n 's/.*ts=\([^ ]*\).*/\1/p' | head -1)"
     [ -n "$issue" ] || issue="?"
@@ -669,11 +684,15 @@ cmd_list_claims() {
       *) machine="${refname#refs/machine-claims/} (legacy)" ;;
     esac
 
-    if ! git fetch "$REMOTE" "$refname" >/dev/null 2>&1; then
+    # A PRIVATE REF, NOT FETCH_HEAD — same reason as in `cmd_list` above (#3393 self-sweep).
+    local tmpref_c
+    tmpref_c="refs/tmp/claim-heartbeat-listclaims/$$-${RANDOM}"
+    if ! git fetch --no-write-fetch-head --no-tags "$REMOTE" "+${refname}:${tmpref_c}" >/dev/null 2>&1; then
       printf '%-20s %-8s %-10s %-24s %s\n' "$machine" "?" "?" "?" "fetch-failed"
       continue
     fi
-    msg="$(git log -1 --format=%B FETCH_HEAD 2>/dev/null || true)"
+    msg="$(git log -1 --format=%B "$tmpref_c" 2>/dev/null || true)"
+    git update-ref -d "$tmpref_c" 2>/dev/null || true
     issue="$(printf '%s' "$msg" | sed -n 's/.*issue=\([0-9][0-9]*\).*/\1/p' | head -1)"
     pid="$(printf '%s' "$msg" | sed -n 's/.*pid=\([0-9][0-9]*\).*/\1/p' | head -1)"
     ts="$(printf '%s' "$msg" | sed -n 's/.*ts=\([^ ]*\).*/\1/p' | head -1)"
@@ -1050,7 +1069,7 @@ cmd_dead_lanes() {
   # decision", which is the worse of the two by a wide margin. A monitor may decline to
   # answer; it may not damage the thing it is monitoring.
   if [ "$GIT_SUPPORTS_NO_WRITE_FETCH_HEAD" != yes ]; then
-    note "this git cannot fetch without writing FETCH_HEAD (needs 2.29+; found '$(git --version 2>/dev/null || echo unknown)'). Refusing to run rather than clobbering the FETCH_HEAD that list/should-reap/reap read — upgrade git, or run dead-lanes from a checkout with a newer one. NOTHING was measured."
+    note "this git cannot fetch without writing FETCH_HEAD (needs 2.29+; found '$(git --version 2>/dev/null || echo unknown)'). Refusing to run rather than clobbering the shared FETCH_HEAD that other tooling in this checkout may read — upgrade git, or run dead-lanes from a checkout with a newer one. NOTHING was measured."
     return 1
   fi
 

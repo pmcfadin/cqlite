@@ -466,8 +466,13 @@ jobs:
             if [ -n "$lane_issue" ]; then
               issue="$lane_issue"
             else
-              git fetch origin "$refname" >/dev/null 2>&1 || true
-              msg=$(git log -1 --format=%B FETCH_HEAD 2>/dev/null || true)
+              # A PRIVATE REF, NOT FETCH_HEAD (#3393 self-sweep). FETCH_HEAD is shared, so a
+              # concurrent fetch could make this row's issue come from ANOTHER ref — and the issue
+              # is what the board flip and the traceability comment act on.
+              tmpref="refs/tmp/reap-claims/$$-$RANDOM"
+              git fetch --no-write-fetch-head --no-tags origin "+${refname}:${tmpref}" >/dev/null 2>&1 || true
+              msg=$(git log -1 --format=%B "$tmpref" 2>/dev/null || true)
+              git update-ref -d "$tmpref" 2>/dev/null || true
               issue=$(printf '%s' "$msg" | sed -n 's/.*issue=\([0-9][0-9]*\).*/\1/p' | head -1)
             fi
 

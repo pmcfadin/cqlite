@@ -315,8 +315,10 @@ echo "TEST 9: stamp creates refs/lane-claims/<machine>/<issue> with issue+pid (#
 claim_sha=$(g -C "$WORK" ls-remote origin "refs/lane-claims/claimA/900" | awk '{print $1}')
 claim_msg=""
 if [ -n "$claim_sha" ]; then
-  g -C "$WORK" fetch -q origin "refs/lane-claims/claimA/900" 2>/dev/null
-  claim_msg=$(g -C "$WORK" log -1 --format=%B FETCH_HEAD 2>/dev/null)
+  # Private ref here too: the suite fetches concurrently in other cases, and FETCH_HEAD is shared.
+  g -C "$WORK" fetch -q --no-write-fetch-head --no-tags origin "+refs/lane-claims/claimA/900:refs/tmp/t9" 2>/dev/null
+  claim_msg=$(g -C "$WORK" log -1 --format=%B refs/tmp/t9 2>/dev/null)
+  g -C "$WORK" update-ref -d refs/tmp/t9 2>/dev/null || true
 fi
 if [ -n "$claim_sha" ] && printf '%s' "$claim_msg" | grep -q 'issue=900' \
   && printf '%s' "$claim_msg" | grep -q 'pid=4242'; then
@@ -2062,6 +2064,36 @@ for _fnfile in "$HB" "$SCRIPT_DIR/../flow/claim.sh" "$SCRIPT_DIR/../local/worker
     bad "duplicate function definition(s) in $(basename "$_fnfile"): $(printf '%s' "$_dupes" | tr '\n' ' ') — bash uses the LAST one, so the earlier is dead code"
   fi
 done
+
+# ===========================================================================
+echo "TEST 66: NO shipped flow script or workflow reads shared FETCH_HEAD (#3393 self-sweep)"
+# ===========================================================================
+# TEST 51 pinned this for `cmd_dead_lanes` alone, and the sweep that followed found three more
+# readers the narrow guard could not see: `cmd_list`, `cmd_list_claims` and the CI reaper's legacy
+# message parse. FETCH_HEAD is shared per-worktree, so any concurrent fetch can make a read describe
+# ANOTHER ref — and in the reaper's case the misread value is the issue the board flip acts on.
+# Widened from one function to every shipped file, because the class kept reappearing one caller over.
+_fh_leaks=""
+for _fh_file in "$SCRIPT_DIR/../flow/claim-heartbeat.sh" "$SCRIPT_DIR/../flow/claim.sh" \
+  "$SCRIPT_DIR/../local/worker-supervisor.sh" "$SCRIPT_DIR/../../.github/workflows/project-board-sync.yml"; do
+  [ -r "$_fh_file" ] || continue
+  _hits=$(grep -nE 'git[[:space:]]+(log|show|rev-parse|cat-file|for-each-ref)[^|]*FETCH_HEAD' "$_fh_file" \
+    | grep -vE '^[0-9]+:[[:space:]]*#' || true)
+  [ -z "$_hits" ] || _fh_leaks="$_fh_leaks $(basename "$_fh_file"):$(printf '%s' "$_hits" | head -1 | cut -d: -f1)"
+done
+if [ -z "$_fh_leaks" ]; then
+  ok "no shipped flow script or workflow reads FETCH_HEAD with a revision-reading git command"
+else
+  bad "FETCH_HEAD is still read in:${_fh_leaks} — a concurrent fetch can make that read describe another ref"
+fi
+# NON-VACUITY: the guard must actually be able to see a read. Planted in a scratch copy.
+_fh_probe="$T/fh-probe.sh"
+printf '%s\n' '#!/usr/bin/env bash' 'msg=$(git log -1 --format=%B FETCH_HEAD)' >"$_fh_probe"
+if grep -qE 'git[[:space:]]+(log|show|rev-parse|cat-file|for-each-ref)[^|]*FETCH_HEAD' "$_fh_probe"; then
+  ok "NON-VACUITY: the same pattern DOES match a planted FETCH_HEAD read, so the clean result above is a measurement"
+else
+  bad "NON-VACUITY broken: the guard pattern cannot even match a planted read"
+fi
 
 echo
 echo "=== claim-heartbeat.sh: $PASS passed, $FAIL failed ==="
