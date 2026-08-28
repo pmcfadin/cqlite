@@ -92,7 +92,8 @@ expect_guard_fail PERF_CSV_MISSING \
 : > "$TMP/empty.csv"
 expect_guard_fail PERF_CSV_MISSING \
   python3 "$GUARDS" perf-csv --csv "$TMP/empty.csv"
-for case in not-counted not-supported multiplexed absent unparseable zero; do
+for case in not-counted not-supported multiplexed absent unparseable zero \
+            negative pct-not-finite value-not-finite; do
   python3 "$FIX" perf-csv --path "$TMP/$case.csv" --case "$case"
 done
 expect_guard_fail PERF_EVENT_NOT_COUNTED python3 "$GUARDS" perf-csv --csv "$TMP/not-counted.csv"
@@ -101,6 +102,12 @@ expect_guard_fail PERF_MULTIPLEXED      python3 "$GUARDS" perf-csv --csv "$TMP/m
 expect_guard_fail PERF_EVENT_ABSENT     python3 "$GUARDS" perf-csv --csv "$TMP/absent.csv"
 expect_guard_fail PERF_EVENT_UNPARSEABLE python3 "$GUARDS" perf-csv --csv "$TMP/unparseable.csv"
 expect_guard_fail PERF_EVENT_ZERO       python3 "$GUARDS" perf-csv --csv "$TMP/zero.csv"
+# A NEGATIVE counter delta is impossible from hardware, and `nan`/`inf` PARSE as
+# floats and then compare FALSE against every bound — so an unguarded `pct < 100`
+# would wave a NaN through as if the 100.00%-enabled contract had been checked.
+expect_guard_fail PERF_EVENT_NEGATIVE   python3 "$GUARDS" perf-csv --csv "$TMP/negative.csv"
+expect_guard_fail PERF_EVENT_NOT_FINITE python3 "$GUARDS" perf-csv --csv "$TMP/pct-not-finite.csv"
+expect_guard_fail PERF_EVENT_NOT_FINITE python3 "$GUARDS" perf-csv --csv "$TMP/value-not-finite.csv"
 # The #3217 silent-instrument class, closed at the INPUT boundary: an LLC event
 # the Step 1 census proved dead here cannot be configured at all, so its hard 0
 # can never be published as an L3 measurement.
@@ -728,13 +735,34 @@ FREQ_OUT="$TMP/freq.md"
 # bug) and reproduce the PUBLISHED numbers exactly — f(S=1)=3.509 GHz,
 # f(S=6)=3.421 GHz, clock ratio 0.9750. The values are asserted, not just the
 # exit status: a table of the wrong numbers also exits 0.
+#
+# AND THE HONESTY PROPERTIES OF THE SAME TABLE (#3299 round 6), because a tool
+# that prints the right frequency beside a false protocol is still publishing a
+# false claim:
+#   * the ACTUAL N of each record (2 and 24, read from window.json) — the tool
+#     used to state "full occupancy at N = 2S", which would be N=12 at S=6, a
+#     configuration this campaign never measured;
+#   * the MEASURED occupancy of each record, all three figures, asserted matched;
+#   * NO numeric dispersion anywhere, because each endpoint is ONE rep and one
+#     measurement has UNMEASURED dispersion, not 0.00%.
 if ( cd "$TMP" && python3 "$FREQ" --results "$FREQRUN" ) > "$FREQ_OUT" 2>&1; then
   miss=""
-  grep -q '^| 1 | 3.509 ' "$FREQ_OUT"          || miss="$miss f(S=1)=3.509"
-  grep -q '^| 6 | 3.421 ' "$FREQ_OUT"          || miss="$miss f(S=6)=3.421"
-  grep -q 'f(S=6)/f(S=1) = 0.9750' "$FREQ_OUT" || miss="$miss ratio=0.9750"
+  grep -q '^| 1 | 2 | 3.509 ' "$FREQ_OUT"       || miss="$miss f(S=1)=3.509@N=2"
+  grep -q '^| 6 | 24 | 3.421 ' "$FREQ_OUT"      || miss="$miss f(S=6)=3.421@N=24"
+  grep -q 'f(S=6)/f(S=1) = 0.9750' "$FREQ_OUT"  || miss="$miss ratio=0.9750"
+  grep -q '^| 1 | 2 | 2 | 40.004 | 1.0004 | 0.9901 | 0.8000 |' "$FREQ_OUT" \
+    || miss="$miss S=1-occupancy-row"
+  grep -q '^| 6 | 24 | 12 | 240.082 | 1.0001 | 0.9882 | 0.8002 |' "$FREQ_OUT" \
+    || miss="$miss S=6-occupancy-row"
+  grep -q '\*\*MATCHED\*\*' "$FREQ_OUT"          || miss="$miss matched-verdict"
+  grep -q '1 rep — UNMEASURED' "$FREQ_OUT"      || miss="$miss dispersion-unmeasured"
+  # The two claims that were NOT true of this evidence must be gone, not reworded
+  # around: no numeric spread for a one-rep point, and no "full occupancy" protocol.
+  ! grep -q '0\.00%' "$FREQ_OUT"                 || miss="$miss STILL-PRINTS-0.00%-SPREAD"
+  ! grep -qi 'FULL occupancy' "$FREQ_OUT"        || miss="$miss STILL-CLAIMS-full-occupancy"
   if [[ -z "$miss" ]]; then
-    echo "ok    [freq acceptance] committed freq-run reproduces 3.509 / 3.421 GHz, ratio 0.9750"
+    echo "ok    [freq acceptance] committed freq-run reproduces 3.509 / 3.421 GHz, ratio 0.9750,"
+    echo "      at its ACTUAL N (2, 24), with matched measured occupancy and no 0.00% spread"
     PASS=$((PASS+1))
   else
     echo "FAIL  [freq acceptance] committed freq-run did not reproduce:$miss"; FAIL=$((FAIL+1))
@@ -754,7 +782,7 @@ for d in s1 s6; do
     "$FREQRUN/s1/perf.csv" > "$DECOY/$d/perf.csv"
 done
 if ( cd "$DECOY" && python3 "$FREQ" --results "$FREQRUN" ) > "$TMP/freq-decoy.md" 2>&1 \
-   && grep -q '^| 1 | 3.509 ' "$TMP/freq-decoy.md"; then
+   && grep -q '^| 1 | 2 | 3.509 ' "$TMP/freq-decoy.md"; then
   echo "ok    [freq cwd control] a decoy rundir in the CURRENT directory is not read"
   PASS=$((PASS+1))
 else
@@ -773,6 +801,66 @@ EMPTYMAN="$TMP/freq-empty-manifest"
 cp -a "$FREQRUN" "$EMPTYMAN"
 printf '\n\n' > "$EMPTYMAN/manifest.jsonl"
 expect_guard_fail FREQ_MANIFEST_EMPTY python3 "$FREQ" --results "$EMPTYMAN"
+
+# EVERY REFUSAL THE OCCUPANCY CHECK ADDS, OBSERVED TO FIRE. The tool now READS the
+# actual N and MEASURES the occupancy of each record instead of asserting a
+# protocol, so each way that evidence can be missing or inconsistent needs a case.
+freq_copy() {  # <name> -> prints a scratch copy of the committed freq-run
+  local d="$TMP/freq-$1"
+  rm -rf "$d"; cp -a "$FREQRUN" "$d"; echo "$d"
+}
+freq_edit_perf() {  # <dir> <rundir> <event> <field-index> <value>
+  local f="$1/$2/perf.csv"
+  awk -F, -v OFS=, -v ev="$3" -v idx="$4" -v val="$5" \
+    '$3 == ev { $idx = val } { print }' "$f" > "$f.new" && mv "$f.new" "$f"
+}
+
+# The ACTUAL N and the pinned CPU set are READ, so a record that does not carry
+# them cannot be published — before this, window.json was never opened at all.
+D="$(freq_copy no-window)"; rm "$D/s6/window.json"
+expect_guard_fail FREQ_RECORD_INCOMPLETE python3 "$FREQ" --results "$D"
+D="$(freq_copy no-perf-cpus)"
+python3 -c 'import json,sys; p=sys.argv[1]; w=json.load(open(p)); del w["perf_cpus"]; json.dump(w, open(p,"w"))' \
+  "$D/s1/window.json"
+expect_guard_fail FREQ_RECORD_INCOMPLETE python3 "$FREQ" --results "$D"
+
+# The occupancy INSTRUMENT absent: perf emitted no `CPUs utilized` metric, so the
+# figure the report published as "80% occupancy" cannot be recomputed at all.
+D="$(freq_copy no-metric)"; freq_edit_perf "$D" s6 task-clock 6 ""
+expect_guard_fail FREQ_OCCUPANCY_ABSENT python3 "$FREQ" --results "$D"
+# ...and the event the occupancy figures divide by, absent from the rep's own
+# recorded event list.
+D="$(freq_copy no-task-clock)"
+grep -v ',task-clock,' "$D/s6/perf.csv" > "$D/s6/perf.csv.new" && mv "$D/s6/perf.csv.new" "$D/s6/perf.csv"
+python3 -c 'import json,sys; p=sys.argv[1]; w=json.load(open(p));
+w["events"] = ",".join(e for e in w["events"].split(",") if e != "task-clock"); json.dump(w, open(p,"w"))' \
+  "$D/s6/window.json"
+expect_guard_fail FREQ_OCCUPANCY_ABSENT python3 "$FREQ" --results "$D"
+
+# THE LEAD CASE: the endpoints at DIFFERENT occupancies. A frequency ratio
+# between them is not a frequency ratio, and publishing one is the exact confound
+# that made an earlier revision read 1.271 "GHz" at S=4/N=1.
+D="$(freq_copy occupancy-mismatch)"; freq_edit_perf "$D" s6 task-clock 6 4.800
+expect_guard_fail FREQ_OCCUPANCY_MISMATCH python3 "$FREQ" --results "$D"
+
+# The counters and the driver's window must be the SAME interval here too — every
+# occupancy figure divides by counted CPU time — decided by the same guard
+# derive.py uses, not a second copy of it.
+D="$(freq_copy counter-window)"
+python3 -c 'import sys
+p = sys.argv[1]; out = []
+for line in open(p):
+    f = line.split(",")
+    if len(f) > 4 and f[2] == "task-clock":
+        f[0] = str(int(int(f[0]) * 1.25)); line = ",".join(f)
+    out.append(line)
+open(p, "w").writelines(out)' "$D/s6/perf.csv"
+expect_guard_fail WINDOW_COUNTER_MISMATCH python3 "$FREQ" --results "$D"
+
+# And the WRITE path's counter validation runs here as well: a zeroed counter in a
+# committed freq record is a dead instrument, refused rather than published.
+D="$(freq_copy zero-counter)"; freq_edit_perf "$D" s6 cycles 1 0
+expect_guard_fail PERF_EVENT_ZERO python3 "$FREQ" --results "$D"
 
 # ------- the READ path validates with the WRITE path's guards (reproduction) ---
 echo
@@ -853,6 +941,14 @@ expect_read_refusal WINDOW_FIELD_MALFORMED                 window-misstated
 # The counter/row window identity is DECIDED on read too, not merely printed in a
 # provenance line: perf's enabled interval cut to 75% of the driver's window.
 expect_read_refusal WINDOW_COUNTER_MISMATCH                task-clock-drift
+# THE COUNTER CONTRACT, ON READ, BY THE WRITE PATH'S OWN VALIDATOR (#3299 round
+# 6). The read path used to check only absent / `<not counted>` / multiplexed, so
+# all three of these were ACCEPTED from a committed perf.csv and published. A hard
+# zero at 100.00% enabled is this campaign's central lesson — a dead instrument,
+# not a measurement of zero — so the publishing path may not be the lenient one.
+expect_read_refusal PERF_EVENT_ZERO                        counter-zeroed
+expect_read_refusal PERF_EVENT_NEGATIVE                    counter-negative
+expect_read_refusal PERF_EVENT_NOT_FINITE                  pct-not-finite
 
 # THE KNOWN LIMIT, ASSERTED SO THE CLAIM STAYS HONEST. The read path establishes
 # internal consistency, agreement with `window.json` and conformance to the
@@ -886,6 +982,12 @@ if ( cd "$TMP" && python3 "$HERE/derive.py" --results "$SWEEP" \
   grep -q '^| 6 | 2,732,817 | 0.7% | 24 |' "$CS_OUT"     || miss="$miss S=6-peak=2,732,817@N=24"
   grep -q '^| 6 | 2,732,817 .*\*\*0.935\*\*' "$CS_OUT"   || miss="$miss marg-eff=0.935"
   grep -q 'S=6, N@peak=24 — BRACKETED' "$CS_OUT"         || miss="$miss S=6-BRACKETED"
+  # extA measured each of its points ONCE. A one-rep point must say so rather
+  # than print `0.00%`, which asserts a precision never established and is
+  # textually identical to a point replicated three times.
+  grep -q '^| 6 | 24 | 1 | 2,647,966 | 1 rep — UNMEASURED |' "$CS_OUT" \
+    || miss="$miss extA-dispersion-UNMEASURED"
+  ! grep -q '| 0\.00% |' "$CS_OUT"                        || miss="$miss STILL-PRINTS-0.00%-SPREAD"
   if [[ -z "$miss" ]]; then
     echo "ok    [read path acceptance] all 91 committed reps validate and still publish"
     echo "      S=6 = 2,732,817 rows/s at N=24, marg. eff. 0.935, BRACKETED"
@@ -919,6 +1021,25 @@ if grep -q 'guards\.validate_attribution_file(' "$HERE/derive.py" \
   PASS=$((PASS+1))
 else
   echo "FAIL  [one validator] the read path no longer shares the write path's validator"
+  FAIL=$((FAIL+1))
+fi
+
+# The SAME property for the COUNTER validation: both read-path tools must CALL
+# `guards.validate_counters`, and neither may carry counter checks of its own. The
+# tell of a reintroduced second implementation is a counter refusal code appearing
+# outside guards.py.
+cv_bad=""
+grep -q 'guards\.validate_counters(' "$HERE/derive.py"     || cv_bad="$cv_bad derive.py-does-not-call"
+grep -q 'guards\.validate_counters(' "$FREQ"               || cv_bad="$cv_bad derive-freq.py-does-not-call"
+grep -q 'validate_counters(args.csv' "$HERE/guards.py"     || cv_bad="$cv_bad guard_perf_csv-bypasses"
+grep -qE 'PERF_MULTIPLEXED|PERF_EVENT_ZERO' "$HERE/derive.py" && cv_bad="$cv_bad derive.py-has-own-copy"
+grep -qE 'PERF_MULTIPLEXED|PERF_EVENT_ZERO' "$FREQ" && cv_bad="$cv_bad derive-freq.py-has-own-copy"
+if [[ -z "$cv_bad" ]]; then
+  echo "ok    [one counter validator] measurement time and BOTH read-path tools run"
+  echo "      guards.validate_counters; neither carries its own counter checks"
+  PASS=$((PASS+1))
+else
+  echo "FAIL  [one counter validator]$cv_bad"
   FAIL=$((FAIL+1))
 fi
 

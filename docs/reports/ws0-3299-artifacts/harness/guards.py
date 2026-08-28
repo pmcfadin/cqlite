@@ -23,6 +23,7 @@ escape hatch on a measurement guard can only ever buy a confident wrong number.
 import argparse
 import hashlib
 import json
+import math
 import os
 import re
 import sys
@@ -169,71 +170,138 @@ def guard_cpuset(args):
 # --- perf CSV ---------------------------------------------------------------
 
 
-def parse_perf_csv(path):
-    """`perf stat -x,` rows -> {event: (value_or_marker, pct_running)}.
+def _perf_rows(path):
+    """`perf stat -x,` lines -> the raw field lists, ONE line-level parser.
 
-    Layout: 1=value 2=unit 3=event 4=run_time_ns 5=pct_running. With `--control`
-    the rows are emitted once, at disable/exit.
+    Layout: 0=value 1=unit 2=event 3=run_time_ns 4=pct_running 5=metric
+    6=metric-unit. With `--control` the rows are emitted once, at disable/exit.
+    Every reader of a perf CSV in this harness comes through here, so there is
+    one place that knows the column order.
     """
     if not os.path.exists(path):
         fail("PERF_CSV_MISSING", f"{path} does not exist — an absent counter file is FATAL, never a zero")
-    out = {}
+    rows = []
     with open(path) as fh:
         for line in fh:
             line = line.rstrip("\n")
             if not line.strip() or line.startswith("#"):
                 continue
-            f = line.split(",")
+            f = [x.strip() for x in line.split(",")]
             if len(f) < 5:
                 continue
-            out[f[2].strip()] = (f[0].strip(), f[4].strip())
-    if not out:
+            rows.append(f)
+    if not rows:
         fail("PERF_CSV_MISSING", f"{path} parsed to zero counter rows — refusing to treat that as a measurement")
-    return out
+    return rows
 
 
-def guard_perf_csv(args):
-    events = [e for e in (args.events or ",".join(REQUIRED_EVENTS)).split(",") if e]
+def parse_perf_csv(path):
+    """`perf stat -x,` rows -> {event: (value_or_marker, pct_running)}."""
+    return {f[2]: (f[0], f[4]) for f in _perf_rows(path)}
 
+
+def parse_perf_metrics(path):
+    """`perf stat -x,` rows -> {event: (metric, metric_unit)} — perf's OWN derived
+    column (e.g. `1.600` / `CPUs utilized` beside `task-clock`).
+
+    Empty strings where perf emitted no metric for that event. It is returned RAW
+    and unjudged: whether an absent metric is fatal is the caller's question, and
+    only the caller knows what it needs the metric FOR.
+    """
+    return {f[2]: (f[5] if len(f) > 5 else "", f[6] if len(f) > 6 else "") for f in _perf_rows(path)}
+
+
+# --- ONE counter validation: at WRITE time AND at READ time -------------------
+#
+# `guard_perf_csv` (measurement time) and `derive.py` / `derive-freq.py` (read
+# time — the REPRODUCTION path a reader runs against the committed tree) call THIS
+# function. Not two implementations that agree by inspection: a second
+# implementation's agreement with the first is only knowable by differential
+# testing against it (CLAUDE.md, #3283), and the way it diverges is the read path
+# silently accepting something.
+#
+# THE DEFECT THIS EXISTS FOR: the read path used to carry a LIGHTER copy —
+# absent / `<not counted>` / multiplexed only. So a committed `perf.csv` holding a
+# hard ZERO, a NEGATIVE count, or a non-finite `pct_running` would have been
+# aggregated straight into the published table, even though the measurement-time
+# guard would have refused that rep. The zero case is this campaign's central
+# lesson (a hard 0 at 100.00% enabled is a DEAD INSTRUMENT, not a measurement of
+# zero), so the path that publishes may not be the lenient one.
+
+
+def validate_counters(csv_path, events, where=None):
+    """Validate `events` in `csv_path`; return {event: float value}.
+
+    Refuses, fail-closed: an event the Step 1 census proved dead on this host; an
+    absent event; `<not counted>`/`<not supported>`; an unparseable or NON-FINITE
+    value or `pct_running`; a NEGATIVE count; a ZERO count; anything below
+    100.00% enabled.
+    """
+    at = f"{where}: " if where else ""
     forbidden = sorted(set(events) & CENSUS_UNAVAILABLE_EVENTS)
     if forbidden:
         fail(
             "PERF_FORBIDDEN_EVENT",
-            f"{forbidden} were proven UNAVAILABLE on this host by the Step 1 census "
+            f"{at}{forbidden} were proven UNAVAILABLE on this host by the Step 1 census "
             f"(<not supported>, or a hard 0 at 100.00% enabled on a workload that cannot "
             f"have zero). Their 0 is an absent instrument, not a measurement. AC3 is "
             f"DEFERRED on this box, never approximated from a dead counter.",
         )
 
-    rows = parse_perf_csv(args.csv)
+    rows = parse_perf_csv(csv_path)
+    out = {}
     for ev in events:
         if ev not in rows:
-            fail("PERF_EVENT_ABSENT", f"event {ev!r} is not in {args.csv} (present: {sorted(rows)})")
+            fail("PERF_EVENT_ABSENT", f"{at}event {ev!r} is not in {csv_path} (present: {sorted(rows)})")
         val, pct = rows[ev]
         if "<not counted>" in val or "<not supported>" in val:
-            fail("PERF_EVENT_NOT_COUNTED", f"event {ev!r} reads {val!r} — an unavailable instrument, never a 0")
+            fail("PERF_EVENT_NOT_COUNTED",
+                 f"{at}event {ev!r} reads {val!r} — an unavailable instrument, never a 0")
         try:
-            ival = int(float(val))
+            fval = float(val)
         except ValueError:
-            fail("PERF_EVENT_UNPARSEABLE", f"event {ev!r} value {val!r} is not a number")
+            fail("PERF_EVENT_UNPARSEABLE", f"{at}event {ev!r} value {val!r} is not a number")
         try:
             fpct = float(pct)
         except ValueError:
-            fail("PERF_EVENT_UNPARSEABLE", f"event {ev!r} pct_running {pct!r} is not a number")
+            fail("PERF_EVENT_UNPARSEABLE", f"{at}event {ev!r} pct_running {pct!r} is not a number")
+        # NaN/inf PARSE as floats and then compare FALSE against every bound, so
+        # `fpct < 100.0` would wave a NaN through as if it had been checked. They
+        # are refused explicitly rather than left to a comparison that cannot see
+        # them.
+        if not math.isfinite(fval):
+            fail("PERF_EVENT_NOT_FINITE",
+                 f"{at}event {ev!r} value {val!r} is not finite. It parses as a float and then "
+                 f"compares FALSE against every bound, so it would pass every check unexamined.")
+        if not math.isfinite(fpct):
+            fail("PERF_EVENT_NOT_FINITE",
+                 f"{at}event {ev!r} pct_running {pct!r} is not finite, so the 100.00%-enabled "
+                 f"bound cannot be evaluated on it — an unevaluated bound is not a satisfied one.")
         if fpct < 100.0:
             fail(
                 "PERF_MULTIPLEXED",
-                f"event {ev!r} ran only {fpct}% of the window — that is a SCALED ESTIMATE, "
+                f"{at}event {ev!r} ran only {fpct}% of the window — that is a SCALED ESTIMATE, "
                 f"not a count. This issue's kill criterion requires 100.00% on every event; "
                 f"the rep is discarded.",
             )
-        if ival == 0:
+        if fval < 0:
+            fail("PERF_EVENT_NEGATIVE",
+                 f"{at}event {ev!r} counted {val!r}. A hardware counter delta cannot be "
+                 f"negative; this is a corrupt or edited record, not a measurement.")
+        if int(fval) == 0:
             fail(
                 "PERF_EVENT_ZERO",
-                f"event {ev!r} counted 0 over a window in which rows were demonstrably "
+                f"{at}event {ev!r} counted 0 over a window in which rows were demonstrably "
                 f"produced. On this host that signature means an unavailable instrument "
                 f"(see ../host/README.md), so it is refused rather than published.",
             )
+        out[ev] = fval
+    return out
+
+
+def guard_perf_csv(args):
+    events = [e for e in (args.events or ",".join(REQUIRED_EVENTS)).split(",") if e]
+    validate_counters(args.csv, events)
     print(f"PERF-OK events={len(events)} all at 100.00% enabled")
     return 0
 

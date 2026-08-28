@@ -52,10 +52,34 @@ def median(xs):
     return statistics.median(xs)
 
 
+# What a SINGLE rep licenses, and what it does not (#3299 round 6).
+#
+# A point measured once has UNMEASURED dispersion, not ZERO dispersion. Printing
+# `0.00%` for it asserts a precision that was never established — the same
+# false-assurance class this campaign keeps catching — and it is textually
+# IDENTICAL to a genuinely reproducible point measured three times. So the
+# formatter refuses to emit a number where there is no second draw to differ from,
+# and `spread_pct` refuses to be CALLED with one: the caller must decide what to
+# print, because only the caller knows whether the figure is load-bearing.
+UNMEASURED_DISPERSION = "1 rep — UNMEASURED"
+
+
 def spread_pct(xs):
+    if len(xs) < 2:
+        raise ValueError(
+            "spread_pct needs >= 2 reps: one measurement has UNMEASURED dispersion, not "
+            "zero. Use fmt_spread(), or branch on len() and say UNMEASURED."
+        )
     lo, hi = min(xs), max(xs)
     m = median(xs)
     return 0.0 if m == 0 else (hi - lo) / m * 100.0
+
+
+def fmt_spread(xs, digits=1):
+    """A spread for a TABLE CELL: a percentage, or the honest absence of one."""
+    if len(xs) < 2:
+        return UNMEASURED_DISPERSION
+    return f"{spread_pct(xs):.{digits}f}%"
 
 
 def load_rep(repdir):  # noqa: C901 — one linear read of one rep's evidence
@@ -64,20 +88,21 @@ def load_rep(repdir):  # noqa: C901 — one linear read of one rep's evidence
     t0, t1 = int(win["t0_ns"]), int(win["t1_ns"])
     s, n = int(win["s"]), int(win["n"])
 
-    # RE-ASSERT the counter contract here (see module docstring): guards.fail()
-    # exits non-zero, so an unvalidated tree cannot be aggregated into a table.
+    # THE READ PATH RUNS THE WRITE PATH'S COUNTER VALIDATION — the SAME
+    # `guards.validate_counters` that `guards.py perf-csv` ran at measurement
+    # time, not a lighter version of it.
+    #
+    # It used to carry its own loop checking only absent / `<not counted>` /
+    # multiplexed. So a committed perf.csv holding a hard ZERO, a NEGATIVE count
+    # or a non-finite `pct_running` would have been aggregated straight into the
+    # published table, even though the measurement-time guard refuses exactly
+    # those — and a zero counter at 100.00% enabled is this campaign's central
+    # lesson (a dead instrument, not a measurement of zero). This is the
+    # REPRODUCTION path, so its validation may not be the lenient one.
     events = [e for e in win["events"].split(",") if e]
-    rows_csv = guards.parse_perf_csv(os.path.join(repdir, win["perf_csv"]))
-    counters = {}
-    for ev in events:
-        if ev not in rows_csv:
-            guards.fail("PERF_EVENT_ABSENT", f"{repdir}: event {ev!r} absent at aggregation time")
-        val, pct = rows_csv[ev]
-        if "<not" in val:
-            guards.fail("PERF_EVENT_NOT_COUNTED", f"{repdir}: event {ev!r} reads {val!r}")
-        if float(pct) < 100.0:
-            guards.fail("PERF_MULTIPLEXED", f"{repdir}: event {ev!r} at {pct}% — a scaled estimate")
-        counters[ev] = float(val)
+    counters = guards.validate_counters(
+        os.path.join(repdir, win["perf_csv"]), events, where=repdir
+    )
 
     # ATTRIBUTION SOURCE — recompute where the raw records exist, otherwise read
     # the guard's own committed output.
@@ -232,8 +257,12 @@ def bracket_verdict(by_point, s, peaks, n_values, grid_max_spread):
     nxt = min(above)
     v = by_point[(s, nxt)]
     nxt_med = agg(v, "aggregate_rows_per_s")
-    sp = spread_pct([x["aggregate_rows_per_s"] for x in v]) / 100.0
-    thr = sp if len(v) >= 3 else grid_max_spread
+    # The point's OWN spread only where it HAS one (>= 3 reps, per AC1). With
+    # fewer, there is no measured dispersion to threshold against and the
+    # grid-wide fallback is used — never a 0.0 manufactured from a single draw,
+    # which would make every one-rep drop look significant.
+    thr = (spread_pct([x["aggregate_rows_per_s"] for x in v]) / 100.0
+           if len(v) >= 3 else grid_max_spread)
     drop = (best - nxt_med) / best
     if drop > thr:
         return "bracketed", (
@@ -296,7 +325,8 @@ def emit_table(reps, min_reps, derived_verdicts=None):
     # --- the grid ------------------------------------------------------------
     print("### C(N) per S, with dispersion\n")
     print("Aggregate rows/s (median), min-max spread as % of median in parentheses. "
-          "Blank = not measured at that point.\n")
+          "Blank = not measured at that point. A point with ONE rep reads "
+          f"`{UNMEASURED_DISPERSION}` — a single draw has unmeasured dispersion, not zero.\n")
     print("| N | " + " | ".join(f"S={s}" for s in s_values) + " |")
     print("|--:|" + "---|" * len(s_values))
     peaks = {}
@@ -311,9 +341,8 @@ def emit_table(reps, min_reps, derived_verdicts=None):
                 continue
             v = by_point[(s, n)]
             m = agg(v, "aggregate_rows_per_s")
-            sp = spread_pct([p["aggregate_rows_per_s"] for p in v])
             star = "**" if peaks[s][0] == n else ""
-            cells.append(f"{star}{m:,.0f}{star} ({sp:.1f}%)")
+            cells.append(f"{star}{m:,.0f}{star} ({fmt_spread([p['aggregate_rows_per_s'] for p in v])})")
         print(f"| {n} | " + " | ".join(cells) + " |")
     print("\n**bold** = that S's best-N point.\n")
 
@@ -341,7 +370,7 @@ def emit_table(reps, min_reps, derived_verdicts=None):
         sp_a = f"{best / ref_n1:.3f}" if ref_n1 else "n/a"
         me_a = f"{(best / ref_n1) / s:.3f}" if ref_n1 else "n/a"
         own_n1_cell = f"{own_n1:,.0f}" if own_n1 is not None else "n/m"
-        peak_sp = spread_pct([x["aggregate_rows_per_s"] for x in v])
+        peak_sp = fmt_spread([x["aggregate_rows_per_s"] for x in v])
         verdict, why = bracket_verdict(by_point, s, peaks, n_values, grid_max_spread)
         if s in derived_verdicts:
             o = derived_verdicts[s]
@@ -349,7 +378,7 @@ def emit_table(reps, min_reps, derived_verdicts=None):
             why = f'{o["why"]} — SOURCE: {o["source"]}'
         bracket_notes.append((s, n_peak, verdict, why))
         print(
-            f"| {s} | {best:,.0f} | {peak_sp:.1f}% | {n_peak} | "
+            f"| {s} | {best:,.0f} | {peak_sp} | {n_peak} | "
             f"{agg(v, 'per_scan_p50_rows_per_s'):,.0f} | "
             f"{own_n1_cell} | {sp_b} | {me_b} | {sp_a} | {me_a} | "
             f"{agg(v, 'cycles_per_row'):,.1f} | {agg(v, 'instructions_per_row'):,.1f} | "
@@ -495,7 +524,7 @@ def emit_extension(path, reps):
     for (s, n) in sorted(by_point):
         v = by_point[(s, n)]
         print(f"| {s} | {n} | {len(v)} | {agg(v, 'aggregate_rows_per_s'):,.0f} | "
-              f"{spread_pct([x['aggregate_rows_per_s'] for x in v]):.2f}% |")
+              f"{fmt_spread([x['aggregate_rows_per_s'] for x in v], 2)} |")
     print()
 
 

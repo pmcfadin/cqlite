@@ -185,6 +185,15 @@ def perf_csv(path, case, ncpus=2):
         rows[1] = ("sixty-billion", "cycles", "100.00")
     elif case == "zero":
         rows[3] = ("0", "L1-dcache-load-misses", "100.00")
+    elif case == "negative":
+        # A hardware counter delta cannot be negative: a corrupt or edited record.
+        rows[3] = ("-900000000", "L1-dcache-load-misses", "100.00")
+    elif case == "pct-not-finite":
+        # `nan` PARSES as a float and then compares FALSE against `< 100.0`, so an
+        # unguarded bound would wave it through as if it had been checked.
+        rows[1] = ("60000000000", "cycles", "nan")
+    elif case == "value-not-finite":
+        rows[1] = ("inf", "cycles", "100.00")
     elif case == "window-drift":
         # task-clock reports three quarters of the driver's window: perf counted
         # a DIFFERENT interval from the one the rows were attributed to.
@@ -294,6 +303,30 @@ def _resync_summary(att, t0, t1):
         r["attribution_shortfall_frac"] for r in att["per_worker"])
 
 
+def _tamper_perf_csv(repdir, win, op):
+    """Edit ONE row of a committed perf.csv — the read path's counter controls.
+
+    A committed `perf.csv` is evidence the reproduction path re-reads, so every
+    way a counter can be wrong needs a case that OBSERVES the read-time refusal.
+    Before `derive.py` shared the write path's validator, all three of these were
+    ACCEPTED on read and published.
+    """
+    out = []
+    for line in open(os.path.join(repdir, win["perf_csv"])):
+        f = line.split(",")
+        if len(f) > 4 and f[2] == "cycles":
+            if op == "counter-zeroed":
+                f[0] = "0"                      # a dead instrument, not a measured zero
+            elif op == "counter-negative":
+                f[0] = "-60000000000"
+            elif op == "pct-not-finite":
+                f[4] = "nan"                    # parses, then compares FALSE against every bound
+            line = ",".join(f)
+        out.append(line)
+    with open(os.path.join(repdir, win["perf_csv"]), "w") as fh:
+        fh.writelines(out)
+
+
 def tamper(repdir, op):  # noqa: C901 — a flat table of one-line mutations
     win, att = _load_rep(repdir)
     t0, t1 = int(win["t0_ns"]), int(win["t1_ns"])
@@ -344,6 +377,9 @@ def tamper(repdir, op):  # noqa: C901 — a flat table of one-line mutations
         att["n"] += 1
     elif op == "window-misstated":
         att["window_ns"] += 1000
+    elif op in ("counter-zeroed", "counter-negative", "pct-not-finite"):
+        _tamper_perf_csv(repdir, win, op)
+        return
     elif op == "task-clock-drift":
         # perf's enabled interval no longer matches the driver's [T0, T1]: the
         # read path must re-decide this, not merely print it.
