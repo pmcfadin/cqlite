@@ -249,14 +249,19 @@ on the index and the accumulator), and disclosed rather than quietly corrected, 
 * `filtered_scan`'s row arm evaluates a real per-row predicate and was never elidable, so the one
   scenario doing genuine row-wise work is unaffected.
 
-**One consequence to state rather than let a reader discover: the matrix is not homogeneous in code
-version.** Iterations 1-3 were measured with the elided loop and iterations 4-5 with the fixed one,
-so the pooled `row_engine` figures mix the two. The difference is the same 0.0019-0.038 s bounded
-above — **three orders of magnitude below the per-cell spread this corpus already shows** — so it is
-undetectable in the data by construction, and re-measuring the first three iterations to remove it
-would cost hours to chase a term smaller than the rounding in the published tables. It is recorded
-here because "the numbers were measured by two slightly different binaries" is exactly the kind of
-detail a reader is entitled to know without having to read the git log.
+**The whole matrix was measured with the ELIDED binary, uniformly.** Every number in this report
+predates the fix — there is no mixture of binaries to reason about, which makes the bound above a
+property of the entire table rather than of a subset of its cells. The fix is in the tree and
+regression-tested, so a future re-run measures the corrected path; nothing here does.
+
+**A second, related disclosure about the conditions these cells were measured under.** The harness
+now refuses to measure while the box's 1-minute load average exceeds a threshold, and records the
+load each cell ran under — but **the committed cells predate that guard**: they were measured on a
+shared box (co-scheduled cold release builds, the 7 GB Cassandra container that wrote the corpus,
+peer lanes) and carry **no load field**, so they cannot even be evaluated against the threshold
+retrospectively. The guard governs future runs. Load confounding in the existing data is precisely
+what the cold-fault covariate regression of §3.3 exists to control for, which is the second reason
+this report's verdicts rest on the residuals rather than on wall time.
 
 **(d) The DataFusion arms never exercised projection pushdown.** Every DataFusion cell records
 `pushdown=false` — deliberately, so that arm consumes byte-identical batches to the direct arms and
