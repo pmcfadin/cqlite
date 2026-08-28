@@ -306,12 +306,14 @@ impl PreparedQuery {
     /// so a prepared `WHERE pk = ?` engages the partition-targeted fast path.
     /// Non-SELECT prepared statements retain the legacy executor path.
     pub async fn execute(&self, params: &[Value]) -> Result<QueryResult> {
-        crate::query::engine::deadline::bound(
-            self.max_execution_time,
-            "prepared.execute",
-            Box::pin(self.execute_unbounded(params)),
+        record_prepared_timeout(
+            crate::query::engine::deadline::bound(
+                self.max_execution_time,
+                "prepared.execute",
+                Box::pin(self.execute_unbounded(params)),
+            )
+            .await,
         )
-        .await
     }
 
     /// UNWRAPPED body of [`Self::execute`]; the bound is applied by that caller,
@@ -379,12 +381,14 @@ impl PreparedQuery {
     /// SELECTs with no hints bind their params and run through the pipeline,
     /// matching `execute(context.positional_params)`.
     pub async fn execute_with_context(&self, context: &PreparedContext) -> Result<QueryResult> {
-        crate::query::engine::deadline::bound(
-            self.max_execution_time,
-            "prepared.execute_with_context",
-            Box::pin(self.execute_with_context_unbounded(context)),
+        record_prepared_timeout(
+            crate::query::engine::deadline::bound(
+                self.max_execution_time,
+                "prepared.execute_with_context",
+                Box::pin(self.execute_with_context_unbounded(context)),
+            )
+            .await,
         )
-        .await
     }
 
     /// UNWRAPPED body of [`Self::execute_with_context`] (bounded by that caller,
@@ -976,4 +980,28 @@ mod tests {
             "identical float params must still hit the memoized plan (no re-optimize)"
         );
     }
+}
+
+/// Record a prepared-handle timeout on the engine's own observability error stream
+/// (issue #1695, roborev rounds 3 and 15).
+///
+/// These two routes bound themselves with the bare [`deadline::bound`] rather than
+/// `AdvancedQueryEngine::bounded`, because a handle carries only its executor and its
+/// budget — it holds no engine reference. `bounded` is what records an elapse, so
+/// without this a timeout taken through `PreparedQuery::execute` was ENFORCED
+/// identically and yet invisible to `cqlite.errors.total{category="timeout"}`.
+///
+/// This is not a second recording mechanism: `record_error` is the same public sink
+/// `bounded` uses. The routes are DISJOINT — the engine's `execute_prepared` bounds
+/// (and records) its own call, while these record only when the caller came through a
+/// handle directly — so nothing is double counted.
+///
+/// Still not covered: the engine's `error_queries` counter, which is private
+/// accounting for queries the engine itself executed.
+fn record_prepared_timeout<T>(outcome: Result<T>) -> Result<T> {
+    outcome.inspect_err(|e| {
+        if matches!(e, crate::Error::QueryTimeout { .. }) {
+            crate::observability::record_error(e, "query");
+        }
+    })
 }

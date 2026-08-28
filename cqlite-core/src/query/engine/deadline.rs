@@ -84,18 +84,22 @@
 //!    already took. The reported `elapsed` is MEASURED, so the overshoot is
 //!    visible rather than hidden.
 //!
-//! # Telemetry is NOT symmetric across the two prepared routes
+//! # Telemetry across the two prepared routes: the error stream matches, the
+//! engine counter does not
 //!
-//! [`AdvancedQueryEngine::bounded`] records an elapse: it increments
-//! `error_queries` and marks the observability error stream with the timeout
-//! category. The prepared-handle route ([`crate::query::prepared::PreparedQuery`])
-//! bounds itself through the bare [`bound`] helper instead, because the handle
-//! carries only its executor and its budget — it holds no stats or observability
-//! handle to report through. So a timeout taken on that route is ENFORCED
-//! identically but is invisible to `Database::stats()` and to
-//! `cqlite.errors.total{category="timeout"}`. Do not read "both routes are
-//! bounded" as "both routes are observable"; closing that gap needs a stats handle
-//! threaded from `prepare()`.
+//! [`AdvancedQueryEngine::bounded`] records an elapse two ways: it increments the
+//! engine's `error_queries` counter AND marks the observability error stream with
+//! the timeout category. The prepared-handle route
+//! ([`crate::query::prepared::PreparedQuery`]) bounds itself through the bare
+//! [`bound`] helper, because a handle carries only its executor and its budget.
+//!
+//! It now records on the ERROR STREAM itself, so a handle-route timeout is visible
+//! to `cqlite.errors.total{category="timeout"}` — that is the same public sink, not
+//! a second mechanism, and the routes are disjoint so nothing double counts. What it
+//! still does NOT move is `error_queries`, which is private accounting for queries
+//! the ENGINE executed; `Database::stats()` therefore reflects engine-routed
+//! executions only. Do not read "both routes are bounded" as "both routes are
+//! identical" — but the dashboard-visible half is no longer asymmetric.
 
 use std::future::Future;
 use std::pin::Pin;
@@ -422,9 +426,9 @@ impl AdvancedQueryEngine {
     /// exactly ONCE on each, because the shared inner body is the `pub(crate)`
     /// unbounded one. Do not add a second wrapper here.
     ///
-    /// The two routes differ in TELEMETRY, not in enforcement: only this one
-    /// records an elapse in `error_queries` and on the observability error
-    /// stream — see the module's "Telemetry is NOT symmetric" note.
+    /// The two routes differ only in the ENGINE COUNTER now: both record on the
+    /// observability error stream, but only this one moves `error_queries` — see the
+    /// module's telemetry note.
     pub async fn execute_prepared(
         &self,
         prepared: &PreparedQuery,
