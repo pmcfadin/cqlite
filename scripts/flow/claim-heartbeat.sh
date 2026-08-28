@@ -181,6 +181,16 @@
 #   per machine" invariant the fleet was already violating — so the layout is a design
 #   decision for the owner and is escalated on #3393 rather than taken here.
 #
+#   (2b) A JUST-SPAWNED LANE READS UNKNOWN-IDENTITY FOR A SHORT WHILE, BY DESIGN. The
+#   supervisor stamps at spawn, so immediately after a lane starts its process start time and
+#   its claim `ts` are within a second or two of each other — inside the rounding band, where
+#   identity cannot be established either way. The run therefore reports UNKNOWN-IDENTITY and
+#   exits 1 for a perfectly healthy new lane. It resolves on the supervisor's next stamp
+#   refresh, after which `ts` has moved forward and the start clearly predates it. This is the
+#   accepted cost of refusing to call the band ALIVE (see the band comment below): the
+#   alternative claims health it has not established. Expect it on a lane that started
+#   seconds ago; treat it as a finding only if it persists across refreshes.
+#
 #   (3) CLOCK-STEP SENSITIVITY, same root cause, same escalation. Identity compares the
 #   claim's wall-clock `ts` against a start epoch reconstructed as `now - elapsed`. Those
 #   are the same clock but read at different times, so an NTP step between stamping and
@@ -776,7 +786,7 @@ open_pr_state() {
 cmd_dead_lanes() {
   [ "$#" -eq 0 ] || die_usage "dead-lanes takes no arguments (got '$1')"
 
-  local raw this_machine dead=0 unreadable=0 lsrc local_seen=0
+  local raw this_machine dead=0 unreadable=0 lsrc local_seen=0 row=0
   this_machine="${HEARTBEAT_MACHINE:-$(hostname -s)}"
 
   # NO `|| true` HERE (roborev round 1, Medium). Swallowing the status turned an
@@ -821,14 +831,24 @@ cmd_dead_lanes() {
     refname="$(printf '%s' "$line" | awk '{print $2}')"
     machine="${refname#refs/machine-claims/}"
 
-    if ! git fetch "$REMOTE" "$refname" >/dev/null 2>&1; then
+    # FETCH INTO AN INVOCATION-UNIQUE REF, never `FETCH_HEAD` (roborev round 11, Medium).
+    # `FETCH_HEAD` is shared per-worktree, so ANY concurrent fetch — and this repository is
+    # routinely worked by several sessions in one checkout — can overwrite it between the
+    # fetch and the read, making this row report another ref's pid and ts. That is a false
+    # ALIVE or a false DEAD attributed to the wrong machine, which is worse than either
+    # error alone. The temp ref is unique per process AND per row, and is deleted after use.
+    row=$((row + 1))
+    local tmpref
+    tmpref="refs/tmp/claim-heartbeat/$$-${row}"
+    if ! git fetch --no-tags "$REMOTE" "+${refname}:${tmpref}" >/dev/null 2>&1; then
       # An unreadable ref is "we cannot tell about THIS lane", never "this lane is
       # fine" — so it is both printed AND counted toward an incomplete measurement.
       unreadable=$((unreadable + 1))
       printf '%-20s %-8s %-12s %-18s %s\n' "$machine" "?" "?" "UNKNOWN-UNREADABLE" "fetch of $refname failed"
       continue
     fi
-    msg="$(git log -1 --format=%B FETCH_HEAD 2>/dev/null || true)"
+    msg="$(git log -1 --format=%B "$tmpref" 2>/dev/null || true)"
+    git update-ref -d "$tmpref" 2>/dev/null || true
     issue="$(printf '%s' "$msg" | sed -n 's/.*issue=\([0-9][0-9]*\).*/\1/p' | head -1)"
     pid="$(printf '%s' "$msg" | sed -n 's/.*pid=\([0-9][0-9]*\).*/\1/p' | head -1)"
     # The claim's own stamp time — the second half of the pid-identity check below.

@@ -1266,26 +1266,86 @@ if [ "$(type -t signal_probe_class 2>/dev/null)" = "function" ]; then
   sp_root="$(signal_probe_class 1)"
   # ABSENT: a pid that cannot plausibly exist.
   sp_gone="$(signal_probe_class 999999)"
-  if kill -0 1 2>/dev/null; then
-    bad "PREMISE BROKEN: this user CAN signal pid 1, so the EPERM state cannot be exercised here"
-  elif [ "$sp_self" = "present" ] && [ "$sp_root" = "denied" ] && [ "$sp_gone" = "absent" ]; then
-    ok "signal_probe_class distinguishes all three: own pid=present, root-owned pid 1=denied (EPERM, i.e. it EXISTS), 999999=absent"
+  # EPERM IS DRIVEN BY A SHIM, NOT BY PID 1's PERMISSIONS (roborev round 11, Low). The first
+  # cut asserted that this user cannot signal pid 1, which is false as root or with CAP_KILL
+  # — and since this suite is now registered in the canonical gate, a legitimately privileged
+  # environment would have gone red on correct behaviour. `kill` is a bash BUILTIN, so a PATH
+  # shim cannot reach it; but `signal_probe_class` has been sourced into THIS shell, so a
+  # local `kill` function overrides the builtin for it. Deterministic and privilege-free.
+  (
+    kill() {
+      echo "bash: kill: ($2) - Operation not permitted" >&2
+      return 1
+    }
+    r="$(signal_probe_class 4242)"
+    [ "$r" = "denied" ] && exit 0
+    echo "  (shimmed EPERM returned '$r')" >&2
+    exit 1
+  )
+  if [ "$?" -eq 0 ]; then
+    ok "signal_probe_class decodes an EPERM message as 'denied' (it EXISTS), driven by a shim so this holds as root too"
   else
-    bad "the signal probe must decode EPERM as denied and ESRCH as absent (self=$sp_self root=$sp_root gone=$sp_gone)"
+    bad "an EPERM message must decode to 'denied'"
   fi
-  # NON-VACUITY of the `denied` state: it must NOT be the same answer as `absent`, or the
-  # correlated-voter fix would be a rename.
-  if [ "$sp_root" != "$sp_gone" ]; then
-    ok "NON-VACUITY: an EPERM pid and an absent pid get DIFFERENT answers ('$sp_root' vs '$sp_gone')"
+  (
+    kill() {
+      echo "bash: kill: ($2) - No such process" >&2
+      return 1
+    }
+    r="$(signal_probe_class 4242)"
+    [ "$r" = "absent" ] && exit 0
+    echo "  (shimmed ESRCH returned '$r')" >&2
+    exit 1
+  )
+  if [ "$?" -eq 0 ]; then
+    ok "signal_probe_class decodes an ESRCH message as 'absent' — so 'denied' and 'absent' are genuinely different answers"
   else
-    bad "NON-VACUITY broken: EPERM and absent are indistinguishable ('$sp_root'), which is the defect"
+    bad "an ESRCH message must decode to 'absent'"
+  fi
+  (
+    kill() {
+      echo "bash: kill: ($2) - Some unexpected condition" >&2
+      return 1
+    }
+    r="$(signal_probe_class 4242)"
+    [ "$r" = "unknown" ] && exit 0
+    echo "  (shimmed unrecognised message returned '$r')" >&2
+    exit 1
+  )
+  if [ "$?" -eq 0 ]; then
+    ok "an UNRECOGNISED kill message decodes to 'unknown' — never folded onto present or absent"
+  else
+    bad "an unrecognised kill message must decode to 'unknown'"
+  fi
+  # A live pid still reads present through the real builtin.
+  if [ "$(signal_probe_class "$$")" = "present" ]; then
+    ok "signal_probe_class reports our own live pid as present through the REAL kill builtin"
+  else
+    bad "the real kill path must report a live pid as present"
+  fi
+  # REAL-WORLD CORROBORATION of the message TEXT, which the shims cannot give: the shims
+  # assert my ASSUMPTION about what the system says, so at least once the assumption is
+  # checked against the system itself. Exercised only where a genuinely unsignalable process
+  # exists — as root it cannot be, and that is reported rather than silently skipped, because
+  # the decode logic above is already covered and only the text corroboration is lost.
+  if kill -0 1 2>/dev/null; then
+    ok "NOT EXERCISABLE HERE: this user can signal pid 1 (root/CAP_KILL), so the real EPERM message text was not corroborated — the decode itself is covered by the shims above"
+  else
+    real_msg="$(LC_ALL=C kill -0 1 2>&1 || true)"
+    if [ "$(signal_probe_class 1)" = "denied" ]; then
+      ok "REAL EPERM corroborated: the system's own message ('${real_msg##*- }') decodes to 'denied', so the shimmed text matches reality"
+    else
+      bad "the REAL EPERM message ('$real_msg') did not decode to 'denied' — the shims are testing an assumption the system does not hold"
+    fi
   fi
 else
   bad "signal_probe_class could not be loaded from the shipped script"
 fi
-# ...and end-to-end, a pid ps cannot see but which EPERMs on signal is never called dead.
-craft_old_claim "$WORK" "epermMachine" 3412 1 0
-ep_out=$(cd "$WORK" && PATH="$hideshim:$PATH" SHIM_HIDE_PID=1 HEARTBEAT_MACHINE=epermMachine \
+
+# End-to-end with OUR OWN pid hidden from ps: privilege-neutral, and it exercises the same
+# path (a target ps cannot see, which another probe reports as present).
+craft_old_claim "$WORK" "epermMachine" 3412 "$$" 0
+ep_out=$(cd "$WORK" && PATH="$hideshim:$PATH" SHIM_HIDE_PID="$$" HEARTBEAT_MACHINE=epermMachine \
   CLAIM_OPEN_PR_CMD="$NO_OPEN_PR" bash "$HB" dead-lanes 2>&1)
 if ! printf '%s\n' "$ep_out" | grep -E '^epermMachine ' | grep -q 'DEAD'; then
   ok "end-to-end: a pid hidden from ps but EPERM-on-signal is never reported DEAD"
@@ -1294,6 +1354,58 @@ else
 $ep_out"
 fi
 (cd "$WORK" && g push -q origin ":refs/machine-claims/epermMachine" 2>/dev/null || true)
+
+# ===========================================================================
+echo "TEST 51: dead-lanes never reads shared FETCH_HEAD (round 11, Medium)"
+# ===========================================================================
+# `FETCH_HEAD` is shared per-worktree, so ANY concurrent fetch — and this repository is
+# routinely worked by several sessions in one checkout — can overwrite it between the fetch
+# and the read, making a row report ANOTHER ref's pid and ts: a false ALIVE or false DEAD
+# attributed to the wrong machine. The race is not reproducible on demand, so the invariant
+# is asserted STRUCTURALLY: behavioural cases only cover the interleavings someone thought
+# of, and this one is a window of microseconds.
+dl_body="$T/dead-lanes-body.sh"
+sed -n '/^cmd_dead_lanes()/,/^}/p' "$HB" >"$dl_body"
+if [ -s "$dl_body" ]; then
+  ok "extracted cmd_dead_lanes for the structural assert ($(wc -l <"$dl_body" | tr -d ' ') lines)"
+else
+  bad "could not extract cmd_dead_lanes from $HB"
+fi
+# Comments may MENTION FETCH_HEAD (this fix documents why it is avoided); only a git command
+# reading it is a defect.
+if ! grep -vE '^\s*#' "$dl_body" | grep -q 'FETCH_HEAD'; then
+  ok "cmd_dead_lanes contains no FETCH_HEAD read outside comments"
+else
+  bad "cmd_dead_lanes still reads FETCH_HEAD: $(grep -vE '^\s*#' "$dl_body" | grep 'FETCH_HEAD')"
+fi
+# ...and it must fetch into a ref made unique per PROCESS and per ROW, or two rows (or two
+# concurrent runs) would collide on the same temp ref and reintroduce the same defect.
+if grep -q 'refs/tmp/claim-heartbeat' "$dl_body" \
+  && grep -qE 'tmpref="refs/tmp/claim-heartbeat/\$\$-\$\{row\}"' "$dl_body"; then
+  ok "cmd_dead_lanes fetches into refs/tmp/claim-heartbeat/<pid>-<row> — unique per process AND per row"
+else
+  bad "the temp ref must be unique per process and per row: $(grep -n 'tmpref=' "$dl_body")"
+fi
+# ...and it must clean up after itself, or a long-lived checkout accumulates refs.
+if grep -q 'update-ref -d "\$tmpref"' "$dl_body"; then
+  ok "the temp ref is deleted after use (no ref accumulation in a long-lived checkout)"
+else
+  bad "cmd_dead_lanes must delete its temp ref"
+fi
+# NON-VACUITY of the whole block: the grep target really is present in the shipped file, so
+# a silently-empty extraction cannot make these three checks pass.
+if grep -q 'refs/machine-claims' "$dl_body"; then
+  ok "NON-VACUITY: the extracted body is really cmd_dead_lanes (it references refs/machine-claims)"
+else
+  bad "NON-VACUITY broken: the extracted body does not look like cmd_dead_lanes"
+fi
+# A real run must leave NO temp refs behind.
+(cd "$WORK" && bash "$HB" dead-lanes >/dev/null 2>&1) || true
+if [ -z "$(cd "$WORK" && git for-each-ref 'refs/tmp/**' 2>/dev/null)" ]; then
+  ok "after a real dead-lanes run, no refs/tmp/** remain in the checkout"
+else
+  bad "dead-lanes leaked temp refs: $(cd "$WORK" && git for-each-ref 'refs/tmp/**')"
+fi
 
 echo
 echo "=== claim-heartbeat.sh: $PASS passed, $FAIL failed ==="
