@@ -220,14 +220,14 @@ pub const READ_BYTES: &str = "cqlite.read.bytes";
 
 /// `cqlite.read.partitions` — counter `{partition}`.
 ///
-/// Total partitions scanned. On the Flight k-way merge scan (issue #2162) the
-/// delta is emitted incrementally during a long-running scan, at a bounded row
-/// threshold, so the counter climbs before the scan returns; the total is
-/// unchanged. Like [`READ_ROWS`], that merge-scan emission is FORMAT-AGNOSTIC
-/// (no attributes) — the merged partition already reconciles across possibly
-/// mixed-format input SSTables — while a direct single-SSTable read-path caller
-/// may still attach [`attr::SSTABLE_FORMAT`]. Bounded attributes:
-/// [`attr::SSTABLE_FORMAT`] OR none.
+/// Partitions a read DELIVERED rows from on the CORE path (boundaries come from EMITTED
+/// row keys, so a wholly tombstoned/TTL-expired partition contributes ZERO), and
+/// partitions SCANNED on Flight's k-way merge arm — the gap is exactly the
+/// fully-suppressed partitions, and `ReadOpMeter::record_row` records why. On that
+/// Flight merge scan (#2162) the delta is emitted incrementally at a bounded row
+/// threshold, so the counter climbs before the scan returns; the total is unchanged,
+/// and like [`READ_ROWS`] it is FORMAT-AGNOSTIC (no attributes) while a single-SSTable
+/// caller may attach [`attr::SSTABLE_FORMAT`]. Bounded: that OR none.
 pub const READ_PARTITIONS: &str = "cqlite.read.partitions";
 
 /// `cqlite.read.duration` — histogram `s`.

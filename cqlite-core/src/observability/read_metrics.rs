@@ -198,6 +198,28 @@ impl ReadOpMeter {
 
     /// Account one delivered row, and a partition boundary when its key differs
     /// from the previous row's.
+    ///
+    /// # `read.partitions` counts partitions this read DELIVERED rows from
+    ///
+    /// Boundaries come from the keys of EMITTED rows, so a partition whose every row is
+    /// shadowed by a tombstone or expired by TTL emits nothing and contributes ZERO —
+    /// while Flight's k-way MERGE arm calls its own `record_partition()` for a partition
+    /// it scanned, and so counts it. The gap between the two producers is exactly the
+    /// number of fully-suppressed partitions (issue #1701, roborev round 5).
+    ///
+    /// That asymmetry is NOT introduced here, and it is already documented on the Flight
+    /// side between Flight's OWN two arms (`cqlite-flight/src/row_source.rs`): the
+    /// single-generation arm "CANNOT" surface such partitions because "the walk emits
+    /// only SURVIVING rows … the source never learns it existed", and closing it "would
+    /// need a new partition-boundary signal threaded out of two core walks".
+    ///
+    /// Wiring that signal is deliberately NOT attempted here — this issue's scope is
+    /// emitting the metric at batch granularity from the seams that already exist, and
+    /// threading a new boundary signal through two core walks is a separate change with
+    /// its own parity risk. Recorded instead of quietly leaving the two counts to differ,
+    /// because a metric that means two things across producers is worse for an operator
+    /// than one that means a narrower thing consistently. `read.rows` is unaffected: a
+    /// suppressed partition materialises no rows on either producer.
     pub(crate) fn record_row(&mut self, key: &RowKey) {
         let Some(acc) = self.0.as_mut() else {
             return;
