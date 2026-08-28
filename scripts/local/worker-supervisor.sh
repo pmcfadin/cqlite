@@ -466,23 +466,28 @@ stamp_claim() {
     '' | *[!0-9]* | 0) lane_id="p$$" ;;
     *)                 lane_id="$issue" ;;
   esac
-  # A lane TRANSITION must not leak the previous ref (roborev round 1, Medium). Each stamp used to
-  # overwrite the tracked id while clear_claim deleted only the final one, so p1234 -> 88 (or
-  # 88 -> 91) left the earlier ref behind holding a dead PID — which dead-lanes then correctly
-  # reports as a dead lane forever. Clear the old ref before claiming the new one; `reap` refuses
-  # under an open PR, so an unfinished endgame is still left for adoption.
-  if [[ -n "$CLAIM_STAMPED_ISSUE" && "$CLAIM_STAMPED_ISSUE" != "$lane_id" ]]; then
-    if HEARTBEAT_MACHINE="$CLAIM_MACHINE" $CLAIM_CMD reap "$CLAIM_MACHINE" "$CLAIM_STAMPED_ISSUE" >/dev/null 2>&1; then
-      log "previous lane ref ${CLAIM_STAMPED_ISSUE} cleared before stamping ${lane_id}"
-    else
-      log "WARN: could not clear previous lane ref ${CLAIM_STAMPED_ISSUE} (open PR or push error) — left for adoption; it may show as a dead lane until reaped"
-    fi
-  fi
+  # A lane TRANSITION must not leak the previous ref (roborev round 1, Medium), and the ORDER
+  # matters (roborev round 2, Medium). Deleting the old ref first leaves the lane with NO claim if
+  # the replacement stamp then fails — invisible to dead-lanes and the reaper for the whole
+  # iteration, which is a liveness GAP introduced by the leak fix. So: stamp the new ref, record it,
+  # and only then best-effort delete the old one. Both refs existing briefly is harmless — the old
+  # one names this same live supervisor pid, so it reads ALIVE — and is strictly better than a gap.
+  local prev_lane_id="$CLAIM_STAMPED_ISSUE"
   if HEARTBEAT_MACHINE="$CLAIM_MACHINE" $CLAIM_CMD stamp "$lane_id" "$$" >/dev/null 2>&1; then
     # What was ACTUALLY stamped, which is not `CLAIM_ISSUE` (#3393). `CLAIM_ISSUE` is the NEXT
     # spawn's issue and is deliberately cleared on `finalized`, so by clean-exit time it is empty
     # and cannot name the ref this supervisor wrote. Recording it here is the only place that knows.
     CLAIM_STAMPED_ISSUE="$lane_id"
+    # The replacement exists, so the old ref can go. Best-effort by design: a failure here leaves a
+    # stale ref that dead-lanes will report and the reaper will collect, which is far better than the
+    # gap that deleting first could open.
+    if [[ -n "$prev_lane_id" && "$prev_lane_id" != "$lane_id" ]]; then
+      if HEARTBEAT_MACHINE="$CLAIM_MACHINE" $CLAIM_CMD reap "$CLAIM_MACHINE" "$prev_lane_id" >/dev/null 2>&1; then
+        log "previous lane ref ${prev_lane_id} cleared after stamping ${lane_id}"
+      else
+        log "WARN: could not clear previous lane ref ${prev_lane_id} (open PR or push error) — left for adoption; it may show as a dead lane until reaped"
+      fi
+    fi
     log "claim stamped: machine=$CLAIM_MACHINE issue=$lane_id pid=$$"
   else
     log "WARN: claim stamp failed (machine=$CLAIM_MACHINE issue=$lane_id) — ref not refreshed this iteration (non-fatal)"

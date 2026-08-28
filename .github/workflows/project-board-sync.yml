@@ -402,12 +402,23 @@ jobs:
           # PER-LANE claims (#3393, owner ruling A): refs/lane-claims/<machine>/<issue>, where the
           # LAST component is the issue. The legacy per-machine namespace is still listed so a
           # pre-ruling ref is drained rather than pinning its board item at In Progress forever.
-          raw=$(git ls-remote origin 'refs/lane-claims/*' 2>/dev/null || true)
-          legacy=$(git ls-remote origin 'refs/machine-claims/*' 2>/dev/null || true)
+          # NEITHER LISTING MAY FAIL SILENTLY (roborev round 2, Medium). Both were `|| true`, so an
+          # origin or auth outage produced an EMPTY result, which this job then reported as "No claim
+          # refs" and exited 0 — a green scheduled run that reaped nothing while stale claims pinned
+          # their board items. Same shape as the legacy-listing hole fixed in dead-lanes one round
+          # earlier; fixed there and not here, which is the lesson worth carrying.
+          lane_rc=0
+          raw=$(git ls-remote origin 'refs/lane-claims/*' 2>/dev/null) || lane_rc=$?
+          legacy_rc=0
+          legacy=$(git ls-remote origin 'refs/machine-claims/*' 2>/dev/null) || legacy_rc=$?
+          if [ "$lane_rc" -ne 0 ] || [ "$legacy_rc" -ne 0 ]; then
+            echo "::error::could not list claim refs on origin (lane-claims rc=$lane_rc, machine-claims rc=$legacy_rc) — refusing to report 'nothing to reap' about a namespace that was never read. Stale claims may be pinning board items."
+            exit 1
+          fi
           [ -z "$legacy" ] || raw=$(printf '%s\n%s' "$raw" "$legacy")
           raw=$(printf '%s' "$raw" | sed '/^$/d')
           if [ -z "$raw" ]; then
-            echo "No claim refs on origin — nothing to reap."
+            echo "No claim refs on origin — nothing to reap. (Both namespaces listed successfully.)"
             exit 0
           fi
 

@@ -66,7 +66,8 @@
 #   claim-heartbeat.sh stamp <issue> [pid]  # push/refresh THIS machine's claim ref
 #                                            # (supervisor-authored; pid default $$)
 #   claim-heartbeat.sh list-claims          # one line per machine: machine/issue/pid/ts/age
-#   claim-heartbeat.sh should-reap <machine> [issue] [threshold_secs]
+#   claim-heartbeat.sh should-reap <machine> [threshold_secs]           # LEGACY per-machine ref
+#   claim-heartbeat.sh should-reap <machine> <issue> <threshold_secs>   # a LANE (all three required)
 #                                            # exit 0 iff the claim ref is stale
 #                                            # (age > threshold, default 14400s/4h)
 #                                            # AND its issue has NO open PR AND

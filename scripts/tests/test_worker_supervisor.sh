@@ -656,6 +656,28 @@ EOF
   chmod +x "$path"
 }
 
+# write_claim_stub_failing_issue_stamp <path> — logs every call like the normal stub but FAILS any
+# `stamp <numeric-issue> ...`, i.e. the replacement stamp of a lane transition (#3393, roborev round
+# 2). Used to prove the transition cannot open a liveness gap: the OLD ref must survive a failed
+# replacement, because a lane with no claim ref at all is invisible to dead-lanes and the reaper.
+write_claim_stub_failing_issue_stamp() {
+  local path="$1"
+  cat >"$path" <<'EOF'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >>"${CLAIM_LOG:?CLAIM_LOG not set}"
+if [ "${1:-}" = "stamp" ]; then
+  case "${2:-}" in
+    p*) exit 0 ;;          # the placeholder stamp still succeeds
+    *[!0-9]*) exit 0 ;;
+    '') exit 0 ;;
+    *) exit 1 ;;           # an ISSUE-named stamp fails: the replacement cannot land
+  esac
+fi
+exit 0
+EOF
+  chmod +x "$path"
+}
+
 # ---------------------------------------------------------------------------
 # Test 1: happy path — 2 finalized iterations, then MAX_ISSUES=2 budget stop.
 # ---------------------------------------------------------------------------
@@ -2572,6 +2594,49 @@ test_claim_issue_learned_from_marker() {
 }
 
 # ---------------------------------------------------------------------------
+# Test 25-claim (#3393, roborev round 2): a lane TRANSITION whose replacement stamp FAILS must not
+# leave the lane with no claim ref. Deleting the old ref first would open exactly that gap — the
+# worker still starts, but dead-lanes and the reaper cannot see it for the whole iteration. So the
+# old ref must SURVIVE a failed replacement.
+# ---------------------------------------------------------------------------
+test_claim_transition_survives_failed_replacement() {
+  local d rc ph_id reaped_ph
+  d="$(new_case_dir)"
+  common_env "$d"
+  write_blocked_same_issue_stub "$d/bin/worker.sh" 88
+  export WORKER_CMD="$d/bin/worker.sh"
+  export MAX_ISSUES=100
+  export BREAKER_N=100
+  export CLAIM_LOG="$d/claim.log"
+  : >"$CLAIM_LOG"
+  write_claim_stub_failing_issue_stamp "$d/bin/claim.sh"
+  export CLAIM_CMD="bash $d/bin/claim.sh"
+  export HEARTBEAT_MACHINE="testbox"
+
+  bash "$SUPERVISOR" >"$d/stdout.log" 2>&1
+  rc=$?
+  # Iter1 stamps the placeholder (succeeds). Iter2 attempts `stamp 88` (fails). The placeholder must
+  # NOT have been reaped, or the lane is left with nothing.
+  ph_id=$(grep -E '^stamp p[0-9]+ [0-9]+$' "$CLAIM_LOG" 2>/dev/null | head -1 | awk '{print $2}')
+  # ORDER is the property, not presence. A reap of the placeholder on CLEAN EXIT is correct and
+  # expected; what must not happen is a reap during the TRANSITION, i.e. before the replacement
+  # stamp. So compare line positions rather than asking whether a reap occurred at all — the first
+  # version of this assert did the latter and failed on the legitimate exit clear.
+  local ph_reap_line first_88_line
+  ph_reap_line=$(grep -nE "^reap testbox ${ph_id}\$" "$CLAIM_LOG" 2>/dev/null | head -1 | cut -d: -f1)
+  first_88_line=$(grep -nE '^stamp 88 [0-9]+$' "$CLAIM_LOG" 2>/dev/null | head -1 | cut -d: -f1)
+  reaped_ph=no
+  if [[ -n "$ph_reap_line" && -n "$first_88_line" && "$ph_reap_line" -lt "$first_88_line" ]]; then
+    reaped_ph=yes   # reaped BEFORE the replacement was attempted: the gap this test forbids
+  fi
+  if [[ "$rc" -eq 0 && -n "$ph_id" && -n "$first_88_line" && "$reaped_ph" == "no" ]]; then
+    pass "claim: a failed replacement stamp leaves the previous lane ref in place (no liveness gap)"
+  else
+    fail "claim-transition: rc=$rc placeholder='$ph_id' reaped-before-replacement=$reaped_ph ph_reap_line='${ph_reap_line:-none}' first_88_line='${first_88_line:-none}' (see $CLAIM_LOG)"
+  fi
+}
+
+# ---------------------------------------------------------------------------
 # F1 (stale-lock reclaim double-acquire race) note: the fix makes reclaim
 # atomic via `mv "$LOCK" "$LOCK.stale.$$" && rm -rf "$LOCK.stale.$$"` instead
 # of `rm -rf "$LOCK"; mkdir "$LOCK"`. Reliably reproducing the ORIGINAL race
@@ -2767,6 +2832,7 @@ test_busy_writing_signature_not_stuck
 test_fast_exit_latency
 test_claim_stamp_each_iter_and_clear_on_exit
 test_claim_issue_learned_from_marker
+test_claim_transition_survives_failed_replacement
 test_finalized_verified_merged_counts
 test_finalized_mismatch_open_is_abnormal
 test_finalized_unverified_not_counted_no_breaker
