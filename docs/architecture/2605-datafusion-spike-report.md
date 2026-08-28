@@ -47,7 +47,7 @@ bench harness. **Zero production wiring** and **no new decode work**: every byte
 | `cqlite-flight/src/df_spike/rss.rs` | Per-run peak-RSS sampling |
 | `cqlite-flight/src/df_spike/bench.rs` | Scenario/arm matrix + the JSON result record |
 | `cqlite-flight/src/bin/df_spike_bench.rs` | The harness binary (`required-features = ["datafusion-spike"]`) |
-| `cqlite-flight/src/df_spike/tests.rs` | 11 tests: pushdown classification + the arm-equivalence oracle |
+| `cqlite-flight/src/df_spike/tests.rs` | 21 tests: pushdown classification, the arm-equivalence oracle, the harness CLI contract |
 
 **Why it lives inside `cqlite-flight` and not in a new crate:** the streaming seam it drives is
 `pub(crate)` — `MergeProducer::produce_streaming`, the `BatchSink` trait, `ScanProgress`,
@@ -136,7 +136,7 @@ shows up as the DataFusion arm being *faster because it is wrong*. `pushdown.rs`
   operand whose CQLite↔DataFusion coercion is unproven are `Unsupported` by construction.
 * `<>` becomes `NOT (col = v)` — a negation, never a silent substitution of `=`.
 
-Tests (`df_spike/tests.rs`, 11 passing) pin this: `Exact`/`Unsupported` classification incl. mirrored
+Tests (`df_spike/tests.rs`, 21 passing) pin this: `Exact`/`Unsupported` classification incl. mirrored
 literal-first operands; and, over a two-generation fixture with an LWW overwrite and a row tombstone
 at a **pinned `now`**, (a) the DataFusion arm returns the row engine's rows, values and order, and
 (b) an `Exact` pushdown selects **exactly** the rows DataFusion's own `FilterExec` selects.
@@ -392,6 +392,19 @@ Verified two ways:
   (`required-features = ["datafusion-spike"]`) and every DataFusion/`async-trait` dependency are gated.
 * The `--lite` gate (`file-size`, `fmt`, workspace-scoped `clippy`, `roborev-lints`, `scoped-tests`)
   PASSes with default features.
+* `cargo build -p cqlite-flight` produces the `cqlite-flight` server binary and **not**
+  `df_spike_bench` (verified by deleting it and rebuilding) — `required-features` holds.
+
+**The spike's own 21 tests do not run in the gate**, because they sit behind a non-default feature.
+That follows this crate's existing convention for feature-gated test code (`observability-testing`,
+`dhat-heap`); run them explicitly:
+
+```bash
+cargo test -p cqlite-flight --features datafusion-spike --lib df_spike
+```
+
+Clippy was run over BOTH configurations with `RUSTFLAGS="-D warnings"`
+(`--all-targets`, with and without `--features datafusion-spike`); both are clean.
 
 The only change to non-spike production code is one visibility widening:
 `cqlite-flight/src/filter.rs`'s `lower_predicate_expr` becomes `pub(crate)` so the spike validates a
