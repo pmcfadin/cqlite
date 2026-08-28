@@ -4558,23 +4558,81 @@ fi
 # asserted ABSENT rather than fixed, because absence is what the ruling bought: with no delivery-mode
 # inference there is nothing left for a fifth round to find wrong. A reintroduction is a design
 # regression, not a refactor, and it reds here.
+# EXECUTABLE LINES ONLY, AND THE FILTER IS THE WHOLE DIFFICULTY (#3392). A comment that RECORDS what
+# was deleted — and why it may not come back — is the durable artifact of this ruling, so scanning
+# prose would make the history itself a violation. `--help` PROSE is prose for exactly the same
+# reason and was NOT being exempted: the usage heredoc names the retired states while telling the
+# reader they are gone, which this check would read as a reintroduction.
+#
+# AND THE OLD PREDICATE WAS FAIL-OPEN, NON-DETERMINISTICALLY (found here, #3392). It was
+# `grep -hv ... | grep -qF "$needle"`, and under this file's `pipefail` the DOWNSTREAM `grep -q`
+# exits at its FIRST match, which SIGPIPEs the upstream grep, so the PIPELINE status became 141 —
+# non-zero — and a real violation was recorded as CLEAN. Whether it did so depended on whether the
+# upstream had finished writing, i.e. on the BYTE OFFSET of the match: adding an unrelated comment
+# block to the wrapper flipped this very check from clean to violated with no change to its subject.
+# A guard whose verdict depends on a pipe buffer is worse than no guard. So the text is captured ONCE
+# and matched in PURE BASH with `case` — no pipe, no subshell, no exit status to lose.
 _classifier=""
+_cls_exec=$(awk '
+  FILENAME ~ /roborev-review\.sh$/ && /^usage\(\) \{/ { in_usage = 1 }
+  in_usage && /^EOF$/ { in_usage = 0; next }
+  in_usage { next }
+  /^[[:space:]]*#/ { next }
+  { print }
+' "$ORACLES" "$CHECKS_FILE" "$WRAPPER" 2>/dev/null || true)
+# The capture must be NON-EMPTY: an awk that failed, a renamed file or a filter that swallowed
+# everything would make every `case` below miss and the check would report CLEAN having read nothing.
+if [ -z "$_cls_exec" ]; then
+  bad 'structural: the executable-line capture for the classifier scan is EMPTY, so the scan below would report CLEAN having examined nothing (an awk failure, a renamed flow script, or an over-broad filter)'
+fi
 for _gone in 'roborev_collect_review_diff_headers' 'roborev_prompt_snapshot_paths' \
   'roborev_snapshot_path_binding' 'ROBOREV_DIFF_SOURCE_STATE' 'mixed-delivery' 'delegated-oversize' \
   'snapshot-unbound' 'unparseable-instruction' 'BLOCKRESET' 'BLOCKHDR' 'in_trailer' 'in_fence' \
   '_rx_delivery_hdrs' '_rx_snap_paths' 'SNAPSHOT_NOTICE' 'ROBOREV_SNAPSHOT_PATH' \
   'ROBOREV_SNAPSHOT_CONTAINMENT'; do
-  # EXECUTABLE LINES ONLY: a comment that RECORDS what was deleted (and why it may not come back) is
-  # the durable artifact of this ruling, so scanning prose would make the history itself a violation.
-  if grep -hv '^[[:space:]]*#' "$ORACLES" "$CHECKS_FILE" "$WRAPPER" 2>/dev/null | grep -qF "$_gone"; then
-    _classifier="$_classifier $_gone"
-  fi
+  case "$_cls_exec" in
+    *"$_gone"*) _classifier="$_classifier $_gone" ;;
+  esac
 done
 if [ -z "$_classifier" ]; then
   ok 'structural: the delivery-mode classifier is GONE — no block/heading/fence/candidate state, no snapshot or delegated distinction, no NOTICE exemption'
 else
   bad "structural: delivery-mode classification is back in the flow scripts —$_classifier. Owner ruling (4) deleted it because FOUR consecutive review rounds each found a High-severity false verdict in inferring structure from prompt text that embeds repository-controlled content (#3312)"
 fi
+# THE CONTROL FOR THAT FILTER (#3392). The scan above reads the REAL files, so on a clean tree it is
+# indistinguishable from a scan that examines nothing — which is what it had degraded into. The same
+# awk filter is therefore run over a synthetic pair of files that carry the SAME forbidden token in
+# both positions, and it must keep the executable one and drop the `--help` one. Without this, the
+# prose exemption could widen until it swallowed the subject and the check would still read green.
+_cls_ctl_dir="$tmp/classifier-filter-control"
+mkdir -p "$_cls_ctl_dir"
+{
+  printf 'usage() {\n  cat <<EOF\n'
+  printf 'Block detection, fence evidence, mixed-delivery and the rest are all GONE.\n'
+  printf 'EOF\n}\n'
+  printf '# a comment mentioning mixed-delivery, which is history, not code\n'
+} >"$_cls_ctl_dir/roborev-review.sh"
+printf 'ROBOREV_DIFF_SOURCE_STATE=inline   # an EXECUTABLE reintroduction\n' \
+  >"$_cls_ctl_dir/roborev-review-oracles.sh"
+_cls_ctl=$(awk '
+  FILENAME ~ /roborev-review\.sh$/ && /^usage\(\) \{/ { in_usage = 1 }
+  in_usage && /^EOF$/ { in_usage = 0; next }
+  in_usage { next }
+  /^[[:space:]]*#/ { next }
+  { print }
+' "$_cls_ctl_dir/roborev-review-oracles.sh" "$_cls_ctl_dir/roborev-review.sh" 2>/dev/null || true)
+case "$_cls_ctl" in
+  *ROBOREV_DIFF_SOURCE_STATE*)
+    ok 'structural control: the executable-line filter KEEPS an executable reintroduction, so the scan above is discriminating rather than blind' ;;
+  *)
+    bad 'structural control: the executable-line filter DROPPED an executable reintroduction — the classifier scan above cannot see the thing it exists to catch' ;;
+esac
+case "$_cls_ctl" in
+  *mixed-delivery*)
+    bad 'structural control: the executable-line filter kept --help prose (or a comment), so the check would red on the doctrine text that records the deletion' ;;
+  *)
+    ok 'structural control: the filter drops --help prose and comments, so recording the retired states in doctrine is not itself a violation' ;;
+esac
 # THE THREE SNAPSHOT KEYS GO WITH IT: a block that still emitted them would be describing a
 # measurement the wrapper no longer makes.
 _skeys=""
