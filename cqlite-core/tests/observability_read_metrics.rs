@@ -72,7 +72,13 @@ struct Fixture {
     /// The bounded format label the emission must carry for this SSTable.
     format: &'static str,
     /// Whether a SECOND scan of this SSTable is served from the resident
-    /// decompressed-chunk cache and therefore reads NO `Data.db` bytes.
+    /// decompressed-chunk cache and therefore skips re-DECOMPRESSING each chunk.
+    ///
+    /// It does NOT mean the warm scan reads no `Data.db` bytes: the windowed feed
+    /// reads every chunk positionally BEFORE it consults the cache, so the I/O happens
+    /// either way and `read.bytes` counts it on both planes (issue #1701, roborev
+    /// round 5 — an earlier version of this fixture and its assertion both claimed
+    /// otherwise, and agreed with each other while being wrong).
     ///
     /// True for the BIG windowed scan plane, whose decode goes through the B1
     /// decompressed-chunk cache (`ChunkSource::decode_borrowed`). FALSE for the BTI
@@ -436,30 +442,30 @@ async fn exercise_read_surfaces(fx: &Fixture, mc: &testing::MetricsCapture) {
         "scan_stream_batched",
         &batched_tally,
         fx,
-        !fx.warm_scan_is_cached,
+        true,
     );
-    // ... and the read.bytes semantic in BOTH directions, pinned positively per
-    // decode plane: "bytes read from Data.db", never "bytes handed to the decoder".
-    if fx.warm_scan_is_cached {
-        assert_eq!(
-            batched_metrics.counter_sum(catalog::READ_BYTES),
-            0.0,
-            "[{}.{}] a warm scan on the CACHED decode plane must count ZERO \
-             cqlite.read.bytes — counting a cache hit would overstate the Data.db \
-             I/O the read performed",
-            fx.keyspace,
-            fx.table
-        );
-    } else {
-        assert!(
-            batched_metrics.counter_sum(catalog::READ_BYTES) > 0.0,
-            "[{}.{}] a re-scan on the UNCACHED decode plane really re-reads and \
-             re-decompresses every chunk, so cqlite.read.bytes must count them \
-             again — reporting zero would hide real I/O",
-            fx.keyspace,
-            fx.table
-        );
-    }
+    // read.bytes on a SECOND scan, and why the cached plane no longer differs
+    // (issue #1701, roborev round 5). This assertion used to be split: zero bytes when
+    // `warm_scan_is_cached`, positive otherwise. That was WRONG, and it was wrong in
+    // the worst way — the test and the code shared one false assumption, so it passed.
+    // The windowed feed calls `read_compressed_chunk_sync` /
+    // `read_uncompressed_piece_sync` UNCONDITIONALLY and only then asks the
+    // decompressed-chunk cache, and neither reader consults that cache. So a warm scan
+    // performs every Data.db read a cold one does; the cache saves DECOMPRESSION only.
+    // Reporting zero there hid real I/O from the one metric whose job is to expose it.
+    //
+    // Both planes therefore count, and `warm_scan_is_cached` no longer speaks to
+    // read.bytes at all — it records only whether the re-scan re-DECOMPRESSES.
+    assert!(
+        batched_metrics.counter_sum(catalog::READ_BYTES) > 0.0,
+        "[{}.{}] a second scan re-reads every chunk off disk on BOTH decode planes \
+         (the feed reads before it consults the cache), so cqlite.read.bytes must \
+         count them — reporting zero would hide real I/O, cached plane or not; \
+         points: {:?}",
+        fx.keyspace,
+        fx.table,
+        batched_metrics.find(catalog::READ_BYTES).map(|m| &m.points)
+    );
 
     // ---------------------------------------------------------------------
     // Phase 3 — the point read (`get`). One partition, one row.

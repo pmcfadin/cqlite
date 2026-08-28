@@ -103,9 +103,16 @@ pub(crate) fn compression_attr(algorithm: &CompressionAlgorithm) -> &'static str
 /// SSTables only (the #1406 claim boundary) — so a `"none"` read that went
 /// uncounted would make the metric silently understate real I/O.
 ///
-/// A chunk served from the resident decompressed-chunk cache is deliberately NOT
-/// counted: the metric is "bytes read from Data.db", so counting a cache hit would
-/// overstate the I/O the read performed.
+/// A resident decompressed-chunk cache HIT is counted too, and the reason is a fact
+/// about the feed rather than a preference (issue #1701, roborev round 5): the
+/// windowed scan calls `read_compressed_chunk_sync` /
+/// `read_uncompressed_piece_sync` UNCONDITIONALLY and only then asks the cache, and
+/// neither reader consults it — so the disk read has ALREADY happened and that cache
+/// saves DECOMPRESSION, not I/O. An earlier version of this doc asserted the
+/// opposite, and a test asserted it too; they agreed with each other and were both
+/// wrong, which is how a warm scan came to report zero bytes for I/O it really
+/// performed. The one place a read is genuinely skipped — `get_cached_data`'s
+/// early return, which reads no `Data.db` at all — stays uncounted.
 ///
 /// The label is a `&'static str` from [`compression_attr`]'s closed mapping, so this
 /// costs no allocation and no formatting on the per-chunk path.
