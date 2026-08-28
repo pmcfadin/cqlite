@@ -206,6 +206,49 @@ component, so a lane that only compiles adds no coverage. The distinguishing pro
 - **THEN** that target is among the ones executed, because membership is decided by `required-features`
   as well as by a cfg site
 
+### Requirement: The `legacy-heuristics` lane DECLARES the co-required cfg SITES it does not execute
+
+The lane SHALL print, on every run, the `legacy-heuristics`-gated cfg **sites** whose co-required
+features are not enabled at its feature set, with each site's file and line, and SHALL state that
+whatever each site gates does not execute in this lane.
+
+**It SHALL report SITES, not a count of test bodies.** Reporting bodies was specified in earlier cuts of
+this requirement and produced a review finding in FOUR consecutive rounds (attributes counted as bodies;
+`any(...)` assumed conjunctive; stacked attributes missed; a gated `mod tests` classified as support code
+while crate-level `#![cfg(...)]` was ignored). A body count is not derivable without parsing Rust — one
+site can gate an entire module — and it was never needed: the census exists so a human knows where gated
+code is silently absent. The site claim is also strictly more honest, because "whatever this site gates
+does not execute here" is true of a test, an import, a module or a crate root alike.
+
+The subject SHALL cover everything the lane executes — the selected integration targets **and**
+`cqlite-core/src/**`, since the lane runs `--lib` — and SHALL scan each target's `src_path` from cargo
+metadata rather than a reconstructed path.
+
+Feature tokens SHALL be accumulated across the whole attribute **cluster**, because Rust ANDs stacked
+`#[cfg]` attributes; an inner `#![cfg(...)]` attribute SHALL be its own site, since it gates the
+enclosing scope and attaches to no following item. A site whose Boolean shape the census does not
+evaluate — `not(...)`, `any(...)`, `cfg_attr` — SHALL be reported as **unclassified** and SHALL NOT be
+counted as omitted: `any(feature = "legacy-heuristics", feature = "X")` is reachable in this lane, so
+calling it omitted would be a false claim.
+
+An unreadable included source SHALL be a FAIL, and a census that cannot be taken SHALL NOT be reported
+as empty.
+
+#### Scenario: A gated module and a crate-level attribute are both reported
+- **GIVEN** a source with a crate-level `#![cfg(all(feature = "legacy-heuristics", feature = "X"))]` and,
+  separately, a `#[cfg(all(feature = "legacy-heuristics", feature = "Y"))] mod tests { … }`
+- **WHEN** the component runs
+- **AND** neither `X` nor `Y` is enabled at this feature set
+- **THEN** the census reports TWO distinct sites with their line numbers
+- **AND** it does not claim how many test bodies they gate
+
+#### Scenario: A reachable gated body is not reported as omitted
+- **GIVEN** a test gated only on `legacy-heuristics`, and another gated on
+  `any(feature = "legacy-heuristics", feature = "X")` with `X` disabled
+- **WHEN** the component runs
+- **THEN** neither is counted as an omitted site
+- **AND** the `any(...)` one is reported as unclassified rather than as a gap
+
 ### Requirement: The full gate compiles `parquet` and `delta-scan` in mutual isolation
 
 The full gate SHALL include two components that compile `cqlite-core` with `--no-default-features

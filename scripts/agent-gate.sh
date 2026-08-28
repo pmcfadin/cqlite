@@ -6008,32 +6008,46 @@ EOF
 # whose inline #[cfg(test)] bodies are gated the same way.
 #
 # No opt-out env var: the committed test files are never legitimately absent.
-# _legacy_coreq_sites — derive, STRUCTURALLY, the legacy-heuristics-gated cfg sites whose
-# OTHER co-required features are not enabled at this lane's feature set.
+# _legacy_coreq_sites — report the `legacy-heuristics`-gated cfg SITES that also require a
+# feature this lane does not enable. It reports SITES. It deliberately does NOT classify
+# what each site gates.
 #
-# roborev round-5 finding (Low): the first version grepped a single-line, FIXED-ORDER
-# attribute pattern and counted MATCHING ATTRIBUTES as "test bodies". Two consequences,
-# in opposite directions and both wrong for a census: the gated `use cqlite_core::Value`
-# import in database_interface_tests.rs was counted as a body, so the lane claimed THREE
-# omitted bodies where only TWO exist (over-report); and a reordered or multi-line cfg
-# was missed entirely (under-report — the permissive direction). In a change whose whole
-# deliverable is an ACCURATE declaration of what a lane does not run, a census that
-# miscounts its own gap IS the defect.
+# WHY THE CLASSIFIER IS GONE (this is a DESCOPE, on a pre-commitment, not a patch).
+# Earlier cuts of this function tried to say how many gated *test bodies* were omitted:
+# it distinguished test fns from imports, detected test-ness from attribute paths, and
+# inferred Boolean structure. That ambition produced a review finding in FOUR consecutive
+# rounds — counting attributes as bodies (r5), assuming conjunction so `any(...)` read as a
+# gap (r7), missing stacked attributes that Rust ANDs (r8), and classifying a gated `mod
+# tests` as "support code" while ignoring crate-level `#![cfg(...)]` entirely (r10). The
+# r10 reviewer's own remedy was "preferably using Rust syntax tooling", which is the tell:
+# counting test BODIES requires parsing Rust, and this is a bash gate component.
 #
-# So the attribute cluster is parsed rather than pattern-matched: attributes accumulate
-# until their parens balance (multi-line), `feature = "…"` tokens are collected in ANY
-# order, the attached item is classified from its own first code line (`fn` vs anything
-# else), and test-ness comes from an attribute whose path ENDS in `test` (`#[test]`,
-# `#[tokio::test]`) anywhere in the cluster — a path test, not a substring search, so a
-# feature named `test-util` cannot pose as one.
+# CLAUDE.md records the precedent and the ruling. #3229's `census-exclusion` oracle was
+# DELETED by owner ruling because its defect count was RISING across review rounds and
+# later rounds kept finding defects in code the previous fix rounds had introduced — with
+# the durable lesson that a guard whose correctness is not establishable is worse than no
+# guard. The same signal appeared here, so the PR pre-committed to descoping on the next
+# classification finding rather than making that call under pressure afterwards.
 #
-# A cfg carrying a NEGATED sub-expression is deliberately NOT classified: `not(feature =
-# "X")` means the body compiles when X is OFF, i.e. the opposite of a gap, and guessing
-# either way would be a silent miscount. Such sites are emitted as `skip` and REPORTED,
-# so the census can never quietly swallow a shape it does not model.
+# WHAT IS LOST, AND WHY IT DID NOT MATTER. The census's job is to tell a human "gated code
+# in this file does not execute here, go look". A count of bodies was never needed for
+# that, and for a gated MODULE the count is unknowable without parsing anyway (one site can
+# gate twenty tests). Reporting sites is both simpler and STRICTLY MORE HONEST: the claim
+# "anything gated by this site does not execute in this lane" is true for a test, an
+# import, a module, or a crate root, which is exactly why it needs no classification.
 #
-# Emits one TAB-separated record per co-required site:
-#   <fn|item|skip> <TAB> <istest: 0|1> <TAB> <comma-separated missing features>
+# WHAT IS KEPT, because it is the conservative half and it is cheap: a site whose Boolean
+# shape this function cannot evaluate — `not(...)`, `any(...)`, `cfg_attr` — is reported as
+# UNCLASSIFIED rather than as a gap. `any(feature = "legacy-heuristics", feature = "X")` is
+# REACHABLE here through the legacy arm, so calling it omitted would be a false claim; and
+# `not(...)` inverts the question. Tokens are still accumulated across the whole attribute
+# CLUSTER, because Rust ANDs stacked cfg attributes and a per-attribute view reports a
+# false zero-gap.
+#
+# Inner attributes (`#![cfg(...)]`) are now matched too — cheap once nothing is being
+# attributed to a following item, and they are how a whole test file gets gated.
+#
+# Emits one TAB-separated record per site: <site|skip> <TAB> <line no> <TAB> <missing,features>
 _legacy_coreq_sites() { # _legacy_coreq_sites <file> <enabled-feature-list>
   awk -v LH="legacy-heuristics" -v ENABLED=" $2 " '
     function countch(str, ch,   n, i) {
@@ -6041,32 +6055,16 @@ _legacy_coreq_sites() { # _legacy_coreq_sites <file> <enabled-feature-list>
       for (i = 1; i <= length(str); i++) if (substr(str, i, 1) == ch) n++
       return n
     }
-    function handle_attr(a,   path, tmp, m) {
-      # NOTE: has_cfg_attr / istest / cl_has_lh / cl_miss / cl_unclass are deliberately
-      # GLOBAL (cluster state), reset at each item line — awk locals are the extra params
-      # only. The cluster, not the attribute, is the unit of gating in Rust.
-      path = a
-      sub(/^#\[[ \t]*/, "", path)
-      sub(/[ \t]*[(\]].*$/, "", path)
-      if (path ~ /(^|::)test$/) istest = 1
-      # cfg_attr is a CLUSTER-level uncertainty, not a property of the arming attribute:
-      # `#[cfg_attr(feature = "x", test)]` makes TEST-NESS ITSELF conditional, so the
-      # path check above cannot see it and the item would be silently demoted to a
-      # non-test "other" — an under-report of test bodies. cfg_attr can equally carry the
-      # gating cfg. This parser evaluates neither, so any cluster containing one is
-      # reported UNCLASSIFIED rather than classified on incomplete information.
-      if (path ~ /(^|::)cfg_attr$/) has_cfg_attr = 1
-      # ACCUMULATED ACROSS THE WHOLE CLUSTER, not decided per attribute (roborev round-8
-      # finding, Low). Rust ANDs stacked cfg attributes, so
-      #     #[cfg(feature = "legacy-heuristics")]
-      #     #[cfg(feature = "experimental")]
-      #     fn t() {}
-      # is EXACTLY equivalent to the single `all(...)` form — yet a per-attribute scan sees
-      # `legacy-heuristics` with no co-requirement in one attribute and a co-requirement
-      # with no `legacy-heuristics` in the other, arms on neither, and reports a FALSE
-      # ZERO-GAP census. The cluster is the unit of gating in Rust, so it is the unit of
-      # analysis here. The verdict is therefore emitted at the ITEM line, where the cluster
-      # is complete — not from inside this function.
+    function emit(   kind) {
+      if (!(cl_has_lh && cl_miss != "")) return
+      kind = cl_unclass ? "skip" : "site"
+      printf "%s\t%d\t%s\n", kind, cl_line, cl_miss
+    }
+    function reset_cluster() {
+      cl_has_lh = 0; cl_miss = ""; cl_unclass = 0; cl_line = 0
+    }
+    function handle_attr(a,   tmp, m) {
+      if (cl_line == 0) cl_line = attr_line
       tmp = a
       while (match(tmp, /feature[ \t]*=[ \t]*"[^"]+"/)) {
         m = substr(tmp, RSTART, RLENGTH)
@@ -6077,16 +6075,8 @@ _legacy_coreq_sites() { # _legacy_coreq_sites <file> <enabled-feature-list>
           cl_miss = (cl_miss == "" ? m : cl_miss "," m)
         tmp = substr(tmp, RSTART + RLENGTH)
       }
-      # UNCLASSIFIED, never guessed, for every Boolean shape this parser does not model
-      # (roborev round-7 finding, Low). The token list alone cannot tell a CONJUNCTION
-      # from a DISJUNCTION: `all(legacy-heuristics, experimental)` is a real gap, while
-      # `any(legacy-heuristics, experimental)` is REACHABLE here through the
-      # legacy-heuristics arm and reporting it as compiled out is a false claim. `not(...)`
-      # is the same problem inverted. `cfg_attr` adds a conditional-attribute layer this
-      # parser does not evaluate at all. Reporting them is the honest option: a census
-      # exists to state what it cannot see, and a wrong entry costs more than a named
-      # unknown.
-      if (a ~ /not[ \t]*\(/ || a ~ /any[ \t]*\(/) cl_unclass = 1
+      # An unmodelled operator anywhere in the cluster makes the CLUSTER unclassifiable.
+      if (a ~ /not[ \t]*\(/ || a ~ /any[ \t]*\(/ || a ~ /cfg_attr/) cl_unclass = 1
     }
     {
       t = $0
@@ -6094,32 +6084,46 @@ _legacy_coreq_sites() { # _legacy_coreq_sites <file> <enabled-feature-list>
       if (collecting) {
         buf = buf " " t
         depth += countch(t, "(") - countch(t, ")")
-        if (depth <= 0) { collecting = 0; handle_attr(buf) }
+        if (depth <= 0) {
+          collecting = 0
+          handle_attr(buf)
+          if (collecting_inner) { emit(); reset_cluster(); collecting_inner = 0 }
+        }
         next
       }
-      if (t ~ /^#\[/) {
+      if (t ~ /^#!?\[/) {
         buf = t
+        attr_line = NR
+        # An INNER attribute (`#![...]`) gates the ENCLOSING scope and attaches to no
+        # following item, so it is its own cluster and is emitted immediately. Outer
+        # attributes are NOT separated this way: Rust attaches them to the next item across
+        # blank lines and comments, so consecutive `#[...]` groups genuinely are one
+        # cluster (that is what makes stacked-attribute conjunctions work). Without this
+        # split a crate-level `#![cfg(...)]` merged with the attributes of the next item into a
+        # single site, under-counting sites and merging their feature lists — caught by the
+        # fixture below rather than by review.
+        inner = (t ~ /^#!\[/)
         depth = countch(t, "(") - countch(t, ")")
-        if (depth > 0) collecting = 1; else handle_attr(buf)
+        if (depth > 0) { collecting = 1; collecting_inner = inner }
+        else {
+          handle_attr(buf)
+          if (inner) { emit(); reset_cluster() }
+        }
         next
       }
-      if (t ~ /^\/\// || t ~ /^$/) next   # comments and blank lines keep the cluster intact
-      # THE VERDICT IS EMITTED HERE, because only at the item is the cluster complete.
-      if (cl_has_lh && cl_miss != "") {
-        if (cl_unclass || has_cfg_attr)
-          printf "skip\t0\t%s\n", cl_miss
-        else if (t ~ /^(pub[ \t]+)?(pub\([^)]*\)[ \t]+)?(const[ \t]+)?(async[ \t]+)?(unsafe[ \t]+)?(extern[ \t]+("[^"]*"[ \t]+)?)?fn[ \t]/)
-          printf "fn\t%d\t%s\n", istest, cl_miss
-        else
-          printf "item\t%d\t%s\n", istest, cl_miss
-      }
-      istest = 0; has_cfg_attr = 0; cl_has_lh = 0; cl_miss = ""; cl_unclass = 0
+      if (t ~ /^\/\// || t ~ /^$/) next   # comments and blanks keep the cluster intact
+      # Any other line ENDS the cluster: emit its verdict, then start fresh. What the
+      # cluster gates is deliberately not inspected.
+      emit(); reset_cluster()
     }
+    END { emit() }
   ' "$1"
 }
 
 # _package_test_targets_gated <pkg> <feature> — one TAB-separated record per `test`
-# target of <pkg>: `<name>\t<abs src_path>\t<manifest|source>`, where the third field is
+# target of <pkg>: `<name>\t<abs src_path>\t<manifest|source>\t<package-relative path>`,
+# where the fourth field is the identifier cargo prints after `Running ` (so the zero-tests
+# guard and the allowed-zero list agree by construction), and the third field is
 # `manifest` when the target's `required-features` name <feature> (cargo gates it) and
 # `source` otherwise (the caller must then scan src_path itself).
 #
@@ -6137,18 +6141,26 @@ _package_test_targets_gated() {
   [ -n "$meta" ] || return 1
   command -v python3 >/dev/null 2>&1 || return 1
   out=$(printf '%s' "$meta" | python3 -c '
-import json, sys
+import json, os, sys
 pkg, feat = sys.argv[1], sys.argv[2]
 d = json.load(sys.stdin)
 for p in d.get("packages", []):
     if p.get("name") != pkg:
         continue
+    root = os.path.dirname(p.get("manifest_path", ""))
     for t in p.get("targets", []):
         if "test" not in (t.get("kind") or []):
             continue
         rf = t.get("required-features") or t.get("required_features") or []
         how = "manifest" if feat in rf else "source"
-        print("%s\t%s\t%s" % (t.get("name", ""), t.get("src_path", ""), how))
+        sp = t.get("src_path") or ""
+        # The 4th field is the PACKAGE-RELATIVE path, which is exactly what cargo prints
+        # after `Running ` and therefore what the zero-tests guard keys on. Derived from the
+        # manifest dir rather than by stripping a `tests/` prefix: an explicitly mapped
+        # `[[test]] path = "..."` target need not live under tests/ at all, and the strip
+        # would have left an ABSOLUTE path that can never match (roborev round-10 finding).
+        rel = os.path.relpath(sp, root) if root and sp else sp
+        print("%s\t%s\t%s\t%s" % (t.get("name", ""), sp, how, rel))
 ' "$pkg" "$feat") || return 1
   [ -n "$out" ] || return 1
   printf '%s\n' "$out"
@@ -6205,8 +6217,8 @@ run_legacy_heuristics() {
     echo ">>> [$name] $status ($((end - start))s)"
     return 0
   fi
-  local _mt_name _mt_src _mt_how
-  while IFS="$(printf '\t')" read -r _mt_name _mt_src _mt_how; do
+  local _mt_name _mt_src _mt_how _mt_rel
+  while IFS="$(printf '\t')" read -r _mt_name _mt_src _mt_how _mt_rel; do
     [ -n "$_mt_name" ] || continue
     f="$_mt_src"
     # Included when EITHER cargo gates the target on the feature (the arm the glob could
@@ -6254,7 +6266,15 @@ run_legacy_heuristics() {
       # spelled as the target name would never match, and a legitimately negative-polarity
       # target would FAIL the full gate. Derived from src_path so the two agree by
       # construction rather than by coincidence of naming.
-      local _az_id="${_mt_src##*/tests/}"
+      # The guard captures `Running tests/([^space]+)\.rs`, i.e. the path relative to
+      # `tests/` — `foo` for tests/foo.rs, `foo/main` for the directory-style
+      # tests/foo/main.rs. So strip that prefix from the package-relative path rather than
+      # stripping a `tests/` substring out of the ABSOLUTE path (which left an absolute path
+      # for an explicitly mapped target outside tests/, matching nothing — round-10 finding).
+      # A target whose source is not under tests/ is invisible to that guard in any case,
+      # since it never prints a `Running tests/...` line, so an entry for it simply never
+      # matches — harmless, and not a false FAIL.
+      local _az_id="${_mt_rel#tests/}"
       _az_id="${_az_id%.rs}"
       allow_zero+=("$_az_id")
       negonly="$negonly $_az_id"
@@ -6347,7 +6367,7 @@ EOF
   done <<EOF
 $(grep -rlE 'feature[[:space:]]*=[[:space:]]*"legacy-heuristics"' "$REPO_ROOT/cqlite-core/src" 2>/dev/null | sort)
 EOF
-  local lh_testfn=0 lh_other=0 lh_skip=0 _sites _k _it _ms _m f_ f_src
+  local lh_sites=0 lh_skip=0 _sites _k _ln _ms _m f_ f_src lh_where=""
   while IFS="	" read -r f_ f_src; do
     [ -n "$f_" ] || continue
     # cargo's OWN src_path, not a reconstructed `tests/<name>.rs` (roborev round-8
@@ -6381,11 +6401,10 @@ EOF
       echo ">>> [$name] $status ($((end - start))s)"
       return 0
     fi
-    while IFS=$'\t' read -r _k _it _ms; do
+    while IFS=$'\t' read -r _k _ln _ms; do
       [ -n "$_k" ] || continue
       case "$_k" in
-        fn)   if [ "$_it" = "1" ]; then lh_testfn=$((lh_testfn + 1)); else lh_other=$((lh_other + 1)); fi ;;
-        item) lh_other=$((lh_other + 1)) ;;
+        site) lh_sites=$((lh_sites + 1)); lh_where="$lh_where $f_:$_ln" ;;
         skip) lh_skip=$((lh_skip + 1)) ;;
       esac
       for _m in $(echo "$_ms" | tr ',' ' '); do
@@ -6397,34 +6416,32 @@ EOF
   done <<EOF
 $srcs
 EOF
-  coreq_n=$((lh_testfn + lh_other))
+  coreq_n=$lh_sites
   local -a lh_census=()
-  if [ "$lh_testfn" -gt 0 ] || [ "$lh_other" -gt 0 ] || [ "$lh_skip" -gt 0 ]; then
+  if [ "$lh_sites" -gt 0 ] || [ "$lh_skip" -gt 0 ]; then
     lh_census+=("COVERAGE CENSUS — WHAT THIS LANE DOES NOT EXECUTE:")
-    if [ "$lh_testfn" -gt 0 ]; then
-      local _tw="test fns"; [ "$lh_testfn" -eq 1 ] && _tw="test fn"
-      lh_census+=("  $lh_testfn legacy-heuristics-gated $_tw ALSO require$coreq, which this lane")
-      lh_census+=("  does NOT enable, so they compile out and are NOT EXECUTED here.")
-      lh_census+=("  The #2039 zero-tests guard CANNOT detect this: sibling ungated tests in the same")
-      lh_census+=("  target keep its count nonzero.")
+    if [ "$lh_sites" -gt 0 ]; then
+      local _sw="sites"; [ "$lh_sites" -eq 1 ] && _sw="site"
+      # SITES, not bodies. The count of gated test bodies is deliberately NOT claimed: one
+      # site can gate a whole module, and counting bodies needs a Rust parser (see
+      # _legacy_coreq_sites for the descope and the four review rounds behind it).
+      lh_census+=("  $lh_sites legacy-heuristics-gated cfg $_sw ALSO require$coreq, which this")
+      lh_census+=("  lane does NOT enable — so whatever each one gates (a test, a module, an")
+      lh_census+=("  import) does NOT execute here. Sites, not bodies: one site can gate a whole")
+      lh_census+=("  module, so a body count would be a guess.")
+      lh_census+=("  The #2039 zero-tests guard CANNOT detect this: sibling ungated tests in the")
+      lh_census+=("  same target keep its count nonzero.")
       lh_census+=("  Tracked by #3373 (experimental-gated tests execute in NO lane at all).")
-    fi
-    if [ "$lh_other" -gt 0 ]; then
-      local _ow="items"; [ "$lh_other" -eq 1 ] && _ow="item"
-      # Counted and reported SEPARATELY, never folded into the test-body number: a gated
-      # import or helper compiling out is support code following its callers, not omitted
-      # coverage. Folding them together is what made the round-4 census over-report.
-      lh_census+=("  ($lh_other further gated $_ow — imports / non-test fns — also compile out here;")
-      lh_census+=("   support code following its callers, NOT omitted coverage, so not counted above.)")
+      lh_census+=("  where:$lh_where")
     fi
     if [ "$lh_skip" -gt 0 ]; then
-      lh_census+=("  $lh_skip co-required cfg site(s) use a Boolean shape this census does not")
-      lh_census+=("  model (not(...) / any(...) / cfg_attr) and were NOT classified — a token list")
-      lh_census+=("  cannot tell a conjunction from a disjunction, and any(...) IS reachable here.")
-      lh_census+=("  Reported rather than guessed: a named unknown beats a wrong entry.")
+      lh_census+=("  $lh_skip further co-required site(s) use a Boolean shape this census does not")
+      lh_census+=("  evaluate (not(...) / any(...) / cfg_attr) and are NOT counted above — a token")
+      lh_census+=("  list cannot tell a conjunction from a disjunction, and any(...) IS reachable")
+      lh_census+=("  here. Reported rather than guessed: a named unknown beats a wrong entry.")
     fi
   else
-    lh_census+=("co-required-feature census: 0 — every legacy-heuristics-gated body is reachable at this feature set")
+    lh_census+=("co-required-feature census: 0 — every legacy-heuristics-gated cfg site is reachable at this feature set")
   fi
   lh_census+=("enabled features (cargo tree -p, package-scoped):$lh_enabled")
   local _cl

@@ -1914,21 +1914,18 @@ fn enabled_coreq_is_no_gap() {}
 RSFX
   coreq_out="$tmp/1699-coreq-out.txt"
   _legacy_coreq_sites "$coreq_fx" " default legacy-heuristics present-one " > "$coreq_out" 2>/dev/null
-  n_testfn=$(awk -F'\t' '$1=="fn" && $2=="1"' "$coreq_out" | wc -l | tr -d ' ')
-  n_item=$(awk -F'\t' '$1=="item"' "$coreq_out" | wc -l | tr -d ' ')
+  n_site=$(awk -F'\t' '$1=="site"' "$coreq_out" | wc -l | tr -d ' ')
   n_skip=$(awk -F'\t' '$1=="skip"' "$coreq_out" | wc -l | tr -d ' ')
   n_all=$(wc -l < "$coreq_out" | tr -d ' ')
   # 2 gated TEST fns (reordered + multiline), 1 non-test item (the gated import),
   # 1 negated site reported as unclassified, and the enabled co-req is NOT a gap at all.
-  if [ "$n_testfn" = "2" ]; then
-    ok "1699-coreq-testfn: 2 gated test fns found (reordered AND multiline cfg both parsed)"
+  # SITES, not bodies: the classifier was descoped in round 10 (see _legacy_coreq_sites).
+  # The fixture holds 3 co-required sites — a gated import, a REORDERED cfg and a
+  # MULTI-LINE cfg — so this still pins both parse shapes without claiming a body count.
+  if [ "$n_site" = "3" ]; then
+    ok "1699-coreq-sites: all 3 co-required sites found (reordered AND multi-line cfg both parsed)"
   else
-    bad "1699-coreq-testfn: expected 2 gated test fns, got $n_testfn — a reordered or multi-line cfg is being missed (under-report)"
-  fi
-  if [ "$n_item" = "1" ]; then
-    ok "1699-coreq-item: the gated import is classified as a non-test item, NOT an omitted test body"
-  else
-    bad "1699-coreq-item: expected 1 non-test gated item, got $n_item — the census is counting cfg sites as test bodies again (over-report)"
+    bad "1699-coreq-sites: expected 3 co-required sites, got $n_site — a reordered or multi-line cfg is being missed (under-report)"
   fi
   if [ "$n_skip" = "1" ]; then
     ok "1699-coreq-negated: a negated co-required cfg is reported as unclassified, never guessed"
@@ -2121,16 +2118,16 @@ RSFX2
     coreq_out2="$tmp/1699-coreq-bool-out.txt"
     _legacy_coreq_sites "$coreq_fx2" " default legacy-heuristics " > "$coreq_out2" 2>/dev/null
     b_skip=$(awk -F'\t' '$1=="skip"' "$coreq_out2" | wc -l | tr -d ' ')
-    b_fn=$(awk -F'\t' '$1=="fn" && $2=="1"' "$coreq_out2" | wc -l | tr -d ' ')
+    b_site=$(awk -F'\t' '$1=="site"' "$coreq_out2" | wc -l | tr -d ' ')
     if [ "$b_skip" = "2" ]; then
       ok "1699-coreq-bool: any(...) and cfg_attr are reported UNCLASSIFIED, not as gaps"
     else
       bad "1699-coreq-bool: expected 2 unclassified sites (any + cfg_attr), got $b_skip — a token list cannot tell a conjunction from a disjunction, and any(...) is REACHABLE in this lane"
     fi
-    if [ "$b_fn" = "1" ]; then
-      ok "1699-coreq-bool-complement: a plain all(...) conjunction is still reported as a gap (the skip arm did not swallow everything)"
+    if [ "$b_site" = "1" ]; then
+      ok "1699-coreq-bool-complement: a plain all(...) conjunction is still reported as a site (the skip arm did not swallow everything)"
     else
-      bad "1699-coreq-bool-complement: expected 1 genuine conjunctive gap, got $b_fn — the unclassified arm is over-matching and the census now under-reports"
+      bad "1699-coreq-bool-complement: expected 1 genuine conjunctive site, got $b_site — the unclassified arm is over-matching and the census now under-reports"
     fi
   fi
 fi
@@ -2194,13 +2191,13 @@ fn stacked_with_any_is_unclassified() {}
 RSFX3
   stack_out="$tmp/1699-coreq-stacked-out.txt"
   _legacy_coreq_sites "$stack_fx" " default legacy-heuristics " > "$stack_out" 2>/dev/null
-  s_fn=$(awk -F'\t' '$1=="fn" && $2=="1"' "$stack_out" | wc -l | tr -d ' ')
+  s_site=$(awk -F'\t' '$1=="site"' "$stack_out" | wc -l | tr -d ' ')
   s_skip=$(awk -F'\t' '$1=="skip"' "$stack_out" | wc -l | tr -d ' ')
   s_all=$(wc -l < "$stack_out" | tr -d ' ')
-  if [ "$s_fn" = "1" ]; then
+  if [ "$s_site" = "1" ]; then
     ok "1699-r8-stacked: stacked #[cfg] attributes are recognised as a gap (Rust ANDs them, so they equal the all(...) form)"
   else
-    bad "1699-r8-stacked: expected 1 stacked gap, got $s_fn — a per-attribute scan sees legacy-heuristics with no co-requirement in one attribute and vice versa in the other, arms on neither, and reports a FALSE ZERO-GAP census"
+    bad "1699-r8-stacked: expected 1 stacked site, got $s_site — a per-attribute scan sees legacy-heuristics with no co-requirement in one attribute and vice versa in the other, arms on neither, and reports a FALSE ZERO-GAP census"
   fi
   if [ "$s_skip" = "1" ]; then
     ok "1699-r8-stacked-any: a stacked cluster containing any(...) is unclassified, not guessed"
@@ -2268,12 +2265,84 @@ mod tests {
 RSFX4
   inline_out="$tmp/1699-coreq-inline-out.txt"
   _legacy_coreq_sites "$inline_fx" " default legacy-heuristics " > "$inline_out" 2>/dev/null
-  i_fn=$(awk -F'\t' '$1=="fn" && $2=="1"' "$inline_out" | wc -l | tr -d ' ')
+  i_site=$(awk -F'\t' '$1=="site"' "$inline_out" | wc -l | tr -d ' ')
   i_all=$(wc -l < "$inline_out" | tr -d ' ')
-  if [ "$i_fn" = "1" ] && [ "$i_all" = "1" ]; then
+  if [ "$i_site" = "1" ] && [ "$i_all" = "1" ]; then
     ok "1699-r9-inline: an inline co-required unit test inside #[cfg(test)] mod tests is detected, and the reachable sibling is not reported"
   else
-    bad "1699-r9-inline: expected exactly 1 inline gap record, got $i_fn of $i_all — the census would miss (or invent) inline unit-test gaps in cqlite-core/src"
+    bad "1699-r9-inline: expected exactly 1 inline gap record, got $i_site of $i_all — the census would miss (or invent) inline unit-test gaps in cqlite-core/src"
+  fi
+fi
+
+# --- 24. #1699: round-10 — the census reports SITES, and gating shapes it used to mangle
+#
+# roborev round-10 (Medium) found that the classifier called a gated `mod tests` "support
+# code" and ignored crate-level `#![cfg(...)]` entirely. Its suggested remedy was "preferably
+# using Rust syntax tooling", which is the tell: counting test BODIES needs a Rust parser.
+# That was the FOURTH consecutive round with a classification finding, so the classifier was
+# DESCOPED (see _legacy_coreq_sites) per the pre-commitment recorded in the PR, rather than
+# patched a fifth time. These fixtures pin the descoped contract.
+if [ -s "$coreq_h" ]; then
+  r10_fx="$tmp/1699-coreq-shapes.rs"
+  cat > "$r10_fx" <<'RSFX5'
+#![cfg(all(feature = "legacy-heuristics", feature = "absent-crate"))]
+
+#[cfg(all(feature = "legacy-heuristics", feature = "absent-mod"))]
+mod gated_tests {
+    #[test]
+    fn one() {}
+    #[test]
+    fn two() {}
+}
+
+#[cfg(feature = "legacy-heuristics")]
+#[cfg(feature = "absent-stacked")]
+#[test]
+fn stacked() {}
+
+#[cfg(any(feature = "legacy-heuristics", feature = "absent-any"))]
+#[test]
+fn reachable_via_any() {}
+
+#[cfg(feature = "legacy-heuristics")]
+#[test]
+fn fully_reachable() {}
+RSFX5
+  r10_out="$tmp/1699-coreq-shapes-out.txt"
+  _legacy_coreq_sites "$r10_fx" " default legacy-heuristics " > "$r10_out" 2>/dev/null
+  r_site=$(awk -F'\t' '$1=="site"' "$r10_out" | wc -l | tr -d ' ')
+  r_skip=$(awk -F'\t' '$1=="skip"' "$r10_out" | wc -l | tr -d ' ')
+  r_all=$(wc -l < "$r10_out" | tr -d ' ')
+  r_crate=$(awk -F'\t' '$1=="site" && $2=="1"' "$r10_out" | wc -l | tr -d ' ')
+  r_mod=$(awk -F'\t' '$1=="site" && $2=="3"' "$r10_out" | wc -l | tr -d ' ')
+  if [ "$r_site" = "3" ]; then
+    ok "1699-r10-shapes: crate-level #![cfg], a gated mod, and a stacked pair are all reported as sites"
+  else
+    bad "1699-r10-shapes: expected 3 sites (crate-level, mod, stacked), got $r_site — a gating shape is being missed or merged"
+  fi
+  if [ "$r_crate" = "1" ] && [ "$r_mod" = "1" ]; then
+    ok "1699-r10-inner-split: a crate-level #![cfg] is its OWN site, not merged with the next item's attributes"
+  else
+    bad "1699-r10-inner-split: the crate-level #![cfg] (line 1) and the mod gate (line 3) are not two distinct sites — an inner attribute gates the enclosing scope and attaches to no following item, so merging them under-counts sites and merges their feature lists"
+  fi
+  if [ "$r_skip" = "1" ]; then
+    ok "1699-r10-any-unclassified: an any(...) cluster is still unclassified, not counted as a site"
+  else
+    bad "1699-r10-any-unclassified: expected 1 unclassified any(...) cluster, got $r_skip — any(legacy-heuristics, X) is REACHABLE here, so calling it omitted is a false claim"
+  fi
+  # The complement: the fully-reachable test must produce NOTHING. Without this, a reporter
+  # that emitted a record per cluster unconditionally would satisfy every assert above.
+  if [ "$r_all" = "4" ]; then
+    ok "1699-r10-shapes-complement: the fully-reachable gated test produces no record (the reporter is not emitting unconditionally)"
+  else
+    bad "1699-r10-shapes-complement: expected exactly 4 records, got $r_all — a site with no co-required feature is being reported, so the census would invent omissions"
+  fi
+  # The descope itself is pinned: no consumer may reintroduce a body count, because the
+  # count is unknowable without parsing Rust (one site can gate a whole module).
+  if [ "$(awk -F'\t' '$1=="fn" || $1=="item"' "$r10_out" | wc -l | tr -d ' ')" = "0" ]; then
+    ok "1699-r10-no-classification: the reporter emits no fn/item classification (descoped in round 10)"
+  else
+    bad "1699-r10-no-classification: fn/item classification is back — counting gated test BODIES needs a Rust parser, and four consecutive review rounds found a defect in trying"
   fi
 fi
 
