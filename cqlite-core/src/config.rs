@@ -50,10 +50,14 @@ pub struct StorageConfig {
     /// `WriteEngineConfig::DEFAULT_HARD_LIMIT`, so an embedder could be
     /// hard-failed by a ceiling they had no way to see or change. The default is
     /// unchanged (256MB): this exposes the knob, it does not alter behaviour.
-    /// [`Config::validate`] requires it to be >= [`Self::memtable_size_threshold`],
-    /// since a lower ceiling wedges the engine — writes are rejected before a
-    /// flush can ever relieve the memtable — and requires BOTH knobs to fit in
-    /// the target's `usize` (see `validate`; only reachable on 32-bit/wasm32).
+    /// [`Config::validate`] requires it to be STRICTLY GREATER than
+    /// [`Self::memtable_size_threshold`], since a ceiling at or below the flush
+    /// threshold wedges the engine — writes are rejected before a flush can ever
+    /// relieve the memtable, and with zero headroom an ordinary write does it —
+    /// and requires BOTH knobs to fit in the target's `usize` (see `validate`;
+    /// only reachable on 32-bit/wasm32). Note that headroom alone is not a
+    /// wedge-freedom guarantee: a single mutation larger than the headroom still
+    /// wedges, which is an admission-side defect tracked as #3404.
     #[serde(default = "default_memtable_hard_limit")]
     pub memtable_hard_limit: u64,
 

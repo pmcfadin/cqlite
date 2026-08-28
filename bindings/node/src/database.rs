@@ -553,21 +553,21 @@ impl Database {
                         "flushThreshold must be at least 1 byte",
                     ));
                 }
-                // A threshold above the hard limit would never trigger an
-                // auto-flush: the memtable hits the hard limit and rejects
-                // writes first, dead-ending the binding write path
-                // (roborev jobs 2885/2890, issue #1620). Read from the CALLER's
-                // public knob, so raising the ceiling raises what is accepted.
-                //
-                // NOT gated on `write-support`: `memtable_hard_limit` is
-                // feature-independent, so a gate here would only make the same
-                // `flushThreshold` accepted in one build and rejected in
-                // another — a feature-dependent input-acceptance difference
-                // with nothing behind it.
+                // A threshold at or above the hard limit would never trigger an
+                // auto-flush: the memtable hits the ceiling and rejects writes
+                // first, dead-ending the binding write path (roborev 2885/2890,
+                // issue #1620). Read from the CALLER's public knob, so raising
+                // the ceiling raises what is accepted. NOT gated on
+                // `write-support`: `memtable_hard_limit` is feature-independent,
+                // so a gate would only make the same `flushThreshold` accepted in
+                // one build and rejected in another, with nothing behind it.
+                // `>=` matches `Config::validate`'s STRICT headroom rule (#1697
+                // r3); Node never calls `validate`, so it alone could wedge.
                 let hard_limit = config.storage.memtable_hard_limit;
-                if v > hard_limit as f64 {
+                if v >= hard_limit as f64 {
                     return Err(napi::Error::from_reason(format!(
-                        "flushThreshold ({v} bytes) must not exceed the memtable hard limit ({hard_limit} bytes)"
+                        "flushThreshold ({v} bytes) must be less than the memtable hard limit \
+                         ({hard_limit} bytes); equal leaves no headroom to flush into"
                     )));
                 }
                 // Issue #1697: applied to the PUBLIC knob rather than the
