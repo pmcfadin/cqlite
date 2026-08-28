@@ -607,20 +607,41 @@ impl SelectExecutor {
         // (#1578) is concurrently editing this same file — restructuring it now
         // would conflict with that in-flight work. A split is tracked under #1116.
         let error_tx = tx.clone();
+        // #1695 (roborev round 13): ONE cancellation race covering the WHOLE producer.
+        // `execute_streaming_background` has three branches — targeted,
+        // multi-targeted and the fallback scan — and only the fallback's batch loop
+        // observed consumer closure. The targeted branches await `scan_partition` per
+        // key, so a large `IN (...)` list or a tombstone build kept scanning after a
+        // timed-out consumer had gone. Guarding them one at a time is what left this
+        // scattered across five rounds; racing the whole future covers every branch,
+        // including any added later.
+        //
+        // This does NOT make the in-loop checks redundant. The race can only fire at
+        // an await boundary of the future it wraps, so a long SYNCHRONOUS stretch
+        // inside a branch is still only interruptible by that branch's own check.
+        // Coverage from here, promptness from there.
+        let closed_tx = tx.clone();
 
         // Spawn background task to stream rows
         tokio::spawn(async move {
-            if let Err(e) = Self::execute_streaming_background(
-                storage,
-                query_schema,
-                table_id,
-                execution_steps,
-                tx,
-                buffer_size,
-                mode,
-            )
-            .await
-            {
+            let outcome = tokio::select! {
+                // `biased` so an already-departed consumer wins over a producer that
+                // is ready to make progress.
+                biased;
+                // Dropping the producer future IS the cancellation: it releases the
+                // readers, buffers and the storage stream it was holding.
+                _ = closed_tx.closed() => None,
+                result = Self::execute_streaming_background(
+                    storage,
+                    query_schema,
+                    table_id,
+                    execution_steps,
+                    tx,
+                    buffer_size,
+                    mode,
+                ) => Some(result),
+            };
+            if let Some(Err(e)) = outcome {
                 tracing::error!("Streaming execution error: {}", e);
                 // Issue #1581 (roborev finding): surface the error through the
                 // channel as a terminal `Err` item instead of merely logging it

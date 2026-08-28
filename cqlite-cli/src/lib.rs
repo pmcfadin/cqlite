@@ -21,6 +21,11 @@
 pub mod cli;
 pub mod commands;
 pub mod config;
+
+// CLI -> core configuration mapping (issue #1695): a LIBRARY surface so the
+// wiring of `performance.query_timeout_ms` onto the enforced
+// `query.max_execution_time` is end-to-end testable.
+pub mod core_config;
 pub mod error;
 pub mod status_metrics;
 

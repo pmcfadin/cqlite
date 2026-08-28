@@ -227,6 +227,22 @@ impl SSTableReader {
                         return Err(e);
                     }
                 };
+                // #1695: observe consumer closure once per BLOCK, not only when a
+                // batch fills. The four `continue` paths below (table-id mismatch,
+                // below `start`, above `end`, tombstone-filtered) never reach a send,
+                // and `BATCH_EMIT_ROWS` gates the send even when rows DO survive — so
+                // a scan whose filters reject everything read and PARSED every block
+                // of the table after the caller already had its `QueryTimeout`.
+                //
+                // This is the BATCHED sibling of `per_row_scan_stream`'s non-stitching
+                // walk and is the surface query execution actually uses, so fixing only
+                // the per-row one (as an earlier revision did) left the common path
+                // exposed. A plain check suffices: the await above is a bounded disk
+                // read that always returns here, not an open-ended wait on another
+                // producer.
+                if tx.is_closed() {
+                    return Ok(());
+                }
                 let entries = match self.parse_batched_block(&block, schema.as_ref(), now_secs) {
                     Ok(entries) => entries,
                     Err(e) => {

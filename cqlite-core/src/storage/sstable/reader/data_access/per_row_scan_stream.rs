@@ -220,6 +220,22 @@ impl SSTableReader {
             // Non-stitching formats already read block-by-block; emit per block so
             // only one block's entries are live at a time.
             while let Some(block) = self.read_next_block(&cursor).await? {
+                // #1695: observe consumer closure once per BLOCK, not only on a send.
+                // The four `continue` paths below (table-id mismatch, below `start`,
+                // above `end`, tombstone-filtered) reach no send, so a scan whose
+                // filters reject everything used to read and PARSE every block of the
+                // table after the caller already had its `QueryTimeout`. Found by
+                // sweeping this class rather than waiting for it to be reported: it is
+                // the same defect as `generation_merge`'s producer and the query-layer
+                // producer, in a third place.
+                //
+                // A plain check suffices here, where the query layer needed a `select!`
+                // on `tx.closed()`: this loop's await is a bounded disk read, not an
+                // open-ended wait on another producer, so it always returns to the
+                // check. One block is the loop's own unit of work.
+                if tx.is_closed() {
+                    return Ok(());
+                }
                 let entries =
                     self.parse_block_entries_with_schema(&block, schema.as_ref(), true)?;
                 for (entry_table_id, entry_key, entry_value) in entries {

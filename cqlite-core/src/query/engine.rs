@@ -18,6 +18,13 @@ use super::{
     QueryStats,
 };
 
+// Issue #1695: the SINGLE query-execution time bound. A CHILD module (so it can
+// reach this type's private `config` / stats helpers) holding the public
+// `execute*` entry points as thin `tokio::time::timeout` wrappers over the
+// `*_inner` bodies below. Keeping it out of this (already over-threshold) file
+// is also the campsite rule, epic #1116.
+pub mod deadline;
+
 use super::engine_stats::AtomicQueryStats;
 #[cfg(feature = "state_machine")]
 use super::{
@@ -204,24 +211,10 @@ impl QueryEngine {
         self.stats.record_cache_hit();
     }
 
-    /// Execute a CQL query
-    ///
-    /// This is the parent of the query span tree (epic #1031, issue #1035): the
-    /// `query.execute` span created here is the context every read-path span
-    /// (issue #1034) and SELECT sub-span nests under. Bounded span attributes
-    /// (plan type, access path, rows returned) are recorded once the result is
-    /// known via [`Self::update_execution_stats`]; the query text is never
-    /// attached.
-    #[tracing::instrument(
-        name = "query.execute",
-        skip(self, cql),
-        fields(
-            cqlite.query.plan_type = tracing::field::Empty,
-            cqlite.query.access_path = tracing::field::Empty,
-            cqlite.query.rows = tracing::field::Empty,
-        )
-    )]
-    pub async fn execute(&self, cql: &str) -> Result<QueryResult> {
+    /// UNWRAPPED body of [`Self::execute`]. Its only callers are that bounded
+    /// public wrapper (`deadline.rs`) and the sibling `*_inner` bodies, so one
+    /// caller-visible query is covered by exactly ONE budget (issue #1695).
+    async fn execute_inner(&self, cql: &str) -> Result<QueryResult> {
         let start_time = Instant::now();
         self.inc_total_queries();
 
@@ -283,29 +276,11 @@ impl QueryEngine {
         Ok(result)
     }
 
-    /// Execute a CQL query with streaming results (Issue #280)
-    ///
-    /// Returns a `QueryResultIterator` that yields rows incrementally via a bounded
-    /// channel, enabling memory-efficient processing of large result sets.
-    ///
-    /// # Arguments
-    ///
-    /// * `cql` - The CQL query string to execute (must be a SELECT statement)
-    /// * `config` - Streaming configuration (buffer size, chunk hints)
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if:
-    /// - Query is not a SELECT statement
-    /// - SQL syntax is invalid
-    /// - Query execution fails
-    ///
-    /// # Memory Budget
-    ///
-    /// The streaming approach stays within the 128MB target by using bounded channels
-    /// and processing rows incrementally rather than materializing all results.
+    /// UNWRAPPED body of [`Self::execute_streaming`] — the timeout scope
+    /// (setup + time-to-first-batch, NOT row consumption) is documented on that
+    /// bounded public wrapper in `deadline.rs` (issue #1695).
     #[cfg(feature = "state_machine")]
-    pub async fn execute_streaming(
+    async fn execute_streaming_inner(
         &self,
         cql: &str,
         config: StreamingConfig,
@@ -430,34 +405,10 @@ impl QueryEngine {
             .insert(cql.to_string(), (Instant::now(), plan));
     }
 
-    /// Execute a query with positional `?` parameters (Issue #961).
-    ///
-    /// The supplied `params` are bound, in source order, into the `?` placeholders
-    /// of the parsed statement *before* planning and execution, so the bound
-    /// values participate in partition-key classification, encoding, and typed
-    /// coercion. A `WHERE pk = ?` therefore engages the same partition-targeted
-    /// fast path (#949/#956) as the equivalent literal query.
-    ///
-    /// Binding is currently supported for SELECT statements only. A non-SELECT
-    /// CQL with parameters, or any use of named (`:name`) parameters, is rejected
-    /// with a clear error (named-parameter binding is intentionally out of scope:
-    /// the SELECT grammar only tokenizes positional `?`).
-    ///
-    /// # Routing parity with `execute` (Finding 1)
-    ///
-    /// When the parsed SELECT has **zero** bind markers and `params` is empty,
-    /// this delegates straight back to [`Self::execute`] so that a markerless
-    /// `execute_with_params(sql, &[])` is byte-for-byte equivalent to
-    /// `execute(sql)` — which since issue #1750 routes every literal SELECT
-    /// through the modern SELECT optimizer + executor. Only when markers are
-    /// present (`> 0`) is the statement bound and driven through that pipeline.
-    ///
-    /// Arity stays strict in both directions: markers `> 0` with a wrong
-    /// `params.len()` is an error, and markers `== 0` with a **non-empty**
-    /// `params` is also an error (a supplied parameter with no placeholder is a
-    /// caller bug). The latter matches [`SelectStatement::bind_parameters`]'s
-    /// contract and the documented strictness of this API.
-    pub async fn execute_with_params(&self, cql: &str, params: &[Value]) -> Result<QueryResult> {
+    /// UNWRAPPED body of [`Self::execute_with_params`] — routing parity, arity
+    /// rules and the timeout scope are documented on that bounded public wrapper
+    /// in `deadline.rs` (issue #1695).
+    async fn execute_with_params_inner(&self, cql: &str, params: &[Value]) -> Result<QueryResult> {
         let is_select = cql.trim().to_uppercase().starts_with("SELECT");
 
         if !is_select {
@@ -465,7 +416,7 @@ impl QueryEngine {
             // this is just a normal statement, so defer to the regular path;
             // with parameters it is an explicit, clear error.
             if params.is_empty() {
-                return self.execute(cql).await;
+                return self.execute_inner(cql).await;
             }
             self.inc_total_queries();
             self.inc_error_queries();
@@ -500,7 +451,7 @@ impl QueryEngine {
             // with stray params is a caller bug: reject it for strict arity.
             if marker_count == 0 {
                 if params.is_empty() {
-                    return self.execute(cql).await;
+                    return self.execute_inner(cql).await;
                 }
                 self.inc_total_queries();
                 self.inc_error_queries();
@@ -543,33 +494,39 @@ impl QueryEngine {
         // bound query reaches the partition-targeted fast path (#949/#956) — the
         // same path a literal `execute()` takes. Non-SELECTs keep the legacy
         // `QueryExecutor` plan path.
+        // Issue #1695: every handle carries the engine's execution budget, so a
+        // `prepare()` + `PreparedQuery::execute()` pair is bounded exactly like
+        // `execute()` instead of being an unbounded back door into a full scan.
+        let budget = self.config.query.max_execution_time;
+
         #[cfg(feature = "state_machine")]
         let prepared = if cql.trim().to_uppercase().starts_with("SELECT") {
             let statement = select_parser::parse_select(cql)?;
             let marker_count = statement.bind_marker_count();
-            Arc::new(PreparedQuery::new_select(
-                parsed_query,
-                plan,
-                Arc::new(self.executor.clone()),
-                statement,
-                marker_count,
-                self.select_optimizer.clone(),
-                self.select_executor.clone(),
-            ))
+            Arc::new(
+                PreparedQuery::new_select(
+                    parsed_query,
+                    plan,
+                    Arc::new(self.executor.clone()),
+                    statement,
+                    marker_count,
+                    self.select_optimizer.clone(),
+                    self.select_executor.clone(),
+                )
+                .with_max_execution_time(budget),
+            )
         } else {
-            Arc::new(PreparedQuery::new(
-                parsed_query,
-                plan,
-                Arc::new(self.executor.clone()),
-            ))
+            Arc::new(
+                PreparedQuery::new(parsed_query, plan, Arc::new(self.executor.clone()))
+                    .with_max_execution_time(budget),
+            )
         };
 
         #[cfg(not(feature = "state_machine"))]
-        let prepared = Arc::new(PreparedQuery::new(
-            parsed_query,
-            plan,
-            Arc::new(self.executor.clone()),
-        ));
+        let prepared = Arc::new(
+            PreparedQuery::new(parsed_query, plan, Arc::new(self.executor.clone()))
+                .with_max_execution_time(budget),
+        );
 
         self.prepared_cache
             .insert(cql.to_string(), prepared.clone());
@@ -577,8 +534,9 @@ impl QueryEngine {
         Ok(prepared)
     }
 
-    /// Execute a prepared query
-    pub async fn execute_prepared(
+    /// UNWRAPPED body of [`Self::execute_prepared`] (bounded in `deadline.rs`,
+    /// issue #1695).
+    async fn execute_prepared_inner(
         &self,
         prepared: &PreparedQuery,
         params: &[Value],
@@ -586,7 +544,11 @@ impl QueryEngine {
         let start_time = Instant::now();
         self.inc_total_queries();
 
-        let mut result = prepared.execute(params).await?;
+        // The UNBOUNDED body: this entry point is already wrapped by
+        // `deadline.rs`, and `PreparedQuery::execute` carries its own bound for
+        // callers holding a handle — going through it here would arm a second
+        // timer with a restarted clock (issue #1695).
+        let mut result = prepared.execute_unbounded(params).await?;
         self.update_execution_stats(&mut result, start_time);
         Ok(result)
     }
@@ -680,6 +642,9 @@ impl QueryEngine {
 
         for _ in 0..self.config.query.analyze_iterations.unwrap_or(5) {
             let iter_start = Instant::now();
+            // Deliberately the BOUNDED public `execute` (issue #1695): each
+            // measured iteration gets its own `max_execution_time` budget, so a
+            // runaway query fails on the first iteration rather than N times over.
             let result = self.execute(cql).await?;
             execution_times.push(iter_start.elapsed());
             results.push(result);
