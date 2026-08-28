@@ -160,7 +160,10 @@ The pipeline measures itself so improvement is data-driven, not anecdotal:
   — retro aggregation by issue treats such multi-cycle issues as multiple deliveries, not one. Records
   hold authoritative data only — GitHub-derived timestamps (cycle time + coarse phase durations) plus
   run-observed counters (claim collisions, rebase events, agent-gate pass/fail + run count, roborev
-  findings, rework). A counter that was not observed is an error, never a fabricated `0`.
+  findings, rework). A counter that was not observed is an error, never a fabricated `0`. A delivery
+  where NO full gate of record ran is recorded as `gate: not-run` with `gate_runs: 0` (issue #3448) —
+  a legal value, never a default, coupled both ways so the pair cannot tell two stories; `retro`
+  reports those records as their own UNGATED class rather than folding them into gated passes.
 - **Diagnose** — on a cadence (per-epic or weekly) the **manager** runs `delivery-telemetry.py retro`,
   which ranks the recorded failure categories by a documented weighted tally (deterministic, not an
   inferred model) and reports the single highest-cost recurring failure. `--file` files a `flow-meta`

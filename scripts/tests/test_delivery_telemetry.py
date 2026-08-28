@@ -1,6 +1,11 @@
 #!/usr/bin/env python3
 """Unit tests for scripts/delivery-telemetry.py (stdlib unittest, no network/datasets).
 
+Stdlib-only by design — the `delivery-telemetry` gate component installs nothing.
+StandardValidatorCouplingTests is the ONE optional block: it needs `jsonschema` and
+SKIPS without it. Nothing depends on that skip for coverage — the schema-side coupling
+is also asserted structurally, with the stdlib, by SchemaCouplingDeclarationTests.
+
 Run standalone:   python3 scripts/tests/test_delivery_telemetry.py
 Or via the gate:  scripts/agent-gate.sh --only delivery-telemetry
 """
@@ -400,6 +405,189 @@ class StallObservabilityTests(unittest.TestCase):
         self.assertTrue(errors)
 
 
+class GateNotRunTests(unittest.TestCase):
+    """issue #3448: `gate: not-run` / `gate_runs: 0` — "no full gate of record ran".
+
+    Adds a legal VALUE, never a default: --gate and --gate-runs stay REQUIRED arguments,
+    and the two fields are coupled (not-run <=> 0) so the record cannot tell two stories.
+    """
+
+    def _rec_argv(self, ledger, tmp, gate, gate_runs, issue=3299, pr=3408):
+        return ["record", "--ledger", str(ledger),
+                "--issue", str(issue), "--pr", str(pr), "--slug", "x",
+                "--gate", gate, "--gate-runs", str(gate_runs),
+                "--claim-collisions", "0", "--rebase-events", "0",
+                "--roborev-findings", "0", "--rework", "0",
+                "--from-json", _from_json_file(tmp)]
+
+    # ---- AC1/AC2: the new value is accepted end-to-end -----------------------------
+    def test_record_accepts_not_run_with_zero_runs(self):
+        with tempfile.TemporaryDirectory() as d:
+            tmp = Path(d)
+            ledger = tmp / "ledger.jsonl"
+            rc = dt.main(self._rec_argv(ledger, tmp, "not-run", 0))
+            self.assertEqual(rc, 0)
+            rec = json.loads(ledger.read_text().splitlines()[0])
+            self.assertEqual(dt.validate_record(rec, SCHEMA), [])
+            self.assertEqual(rec["gate"], "not-run")
+            self.assertEqual(rec["gate_runs"], 0)
+
+    # ---- AC1: BOTH rejection directions of the coupling -----------------------------
+    def test_record_rejects_not_run_with_nonzero_runs(self):
+        with tempfile.TemporaryDirectory() as d:
+            tmp = Path(d)
+            ledger = tmp / "ledger.jsonl"
+            with self.assertRaises(SystemExit):
+                dt.main(self._rec_argv(ledger, tmp, "not-run", 2))
+            self.assertFalse(ledger.exists() and ledger.read_text().strip())
+
+    def test_record_rejects_pass_with_zero_runs(self):
+        with tempfile.TemporaryDirectory() as d:
+            tmp = Path(d)
+            ledger = tmp / "ledger.jsonl"
+            with self.assertRaises(SystemExit):
+                dt.main(self._rec_argv(ledger, tmp, "pass", 0))
+            self.assertFalse(ledger.exists() and ledger.read_text().strip())
+
+    def test_record_rejects_fail_with_zero_runs(self):
+        with tempfile.TemporaryDirectory() as d:
+            tmp = Path(d)
+            ledger = tmp / "ledger.jsonl"
+            with self.assertRaises(SystemExit):
+                dt.main(self._rec_argv(ledger, tmp, "fail", 0))
+            self.assertFalse(ledger.exists() and ledger.read_text().strip())
+
+    def test_validate_record_rejects_not_run_with_nonzero_runs_directly(self):
+        # the cross-field check runs inside validate_record, so `lint`/`retro` enforce the
+        # coupling over the WHOLE ledger, not just freshly-recorded lines.
+        rec = json.loads((FIXTURES / "sample-ledger.jsonl").read_text().splitlines()[0])
+        rec["gate"] = "not-run"     # gate_runs stays >= 1
+        errors = dt.validate_record(rec, SCHEMA)
+        self.assertTrue(any("not-run" in e and "gate_runs" in e for e in errors), errors)
+
+    def test_validate_record_rejects_pass_with_zero_runs_directly(self):
+        rec = json.loads((FIXTURES / "sample-ledger.jsonl").read_text().splitlines()[0])
+        rec["gate_runs"] = 0        # gate stays "pass"
+        errors = dt.validate_record(rec, SCHEMA)
+        self.assertTrue(any("gate_runs" in e and "not-run" in e for e in errors), errors)
+
+    def test_lint_enforces_the_coupling_over_the_ledger(self):
+        with tempfile.TemporaryDirectory() as d:
+            ledger = Path(d) / "ledger.jsonl"
+            rec = json.loads((FIXTURES / "sample-ledger.jsonl").read_text().splitlines()[0])
+            rec["gate_runs"] = 0    # gate "pass" with 0 runs -> incoherent
+            ledger.write_text(json.dumps(rec) + "\n")
+            err = io.StringIO()
+            with contextlib.redirect_stderr(err):
+                rc = dt.main(["lint", "--ledger", str(ledger)])
+            self.assertEqual(rc, 1)
+            self.assertIn("not-run", err.getvalue())
+
+    # ---- AC2: NO new defaulting path — omission is still an error --------------------
+    def test_record_still_refuses_omitted_gate(self):
+        with tempfile.TemporaryDirectory() as d:
+            tmp = Path(d)
+            ledger = tmp / "ledger.jsonl"
+            with self.assertRaises(SystemExit):
+                dt.main(["record", "--ledger", str(ledger),
+                         "--issue", "1", "--pr", "2", "--slug", "x",
+                         "--gate-runs", "1",              # --gate deliberately omitted
+                         "--claim-collisions", "0", "--rebase-events", "0",
+                         "--roborev-findings", "0", "--rework", "0",
+                         "--from-json", _from_json_file(tmp)])
+            self.assertFalse(ledger.exists() and ledger.read_text().strip())
+
+    def test_record_still_refuses_each_omitted_required_counter(self):
+        # Pinning test (issue #3448): the required-counter guard is IDENTITY-based
+        # (`is None`). A refactor to a falsy check (`if not value`) would silently accept an
+        # omitted counter as 0 for every one of these — exactly the defaulting path this
+        # change must not open. Assert omission per counter, not just for one of them.
+        for omit in dt.REQUIRED_COUNTERS:
+            with self.subTest(omitted=omit):
+                with tempfile.TemporaryDirectory() as d:
+                    tmp = Path(d)
+                    ledger = tmp / "ledger.jsonl"
+                    argv = ["record", "--ledger", str(ledger),
+                            "--issue", "1", "--pr", "2", "--slug", "x", "--gate", "pass",
+                            "--from-json", _from_json_file(tmp)]
+                    for counter in dt.REQUIRED_COUNTERS:
+                        if counter != omit:
+                            argv += [f"--{counter.replace('_', '-')}", "1"]
+                    with self.assertRaises(SystemExit):
+                        dt.main(argv)
+                    self.assertFalse(ledger.exists() and ledger.read_text().strip())
+
+    def test_zero_is_an_observed_value_not_a_missing_one(self):
+        # The counterpart pin: an explicitly supplied 0 must SURVIVE the required-counter
+        # guard (a falsy check would reject `--gate-runs 0` / `--rework 0` as "missing").
+        with tempfile.TemporaryDirectory() as d:
+            tmp = Path(d)
+            ledger = tmp / "ledger.jsonl"
+            rc = dt.main(["record", "--ledger", str(ledger),
+                          "--issue", "1", "--pr", "2", "--slug", "x",
+                          "--gate", "not-run", "--gate-runs", "0",
+                          "--claim-collisions", "0", "--rebase-events", "0",
+                          "--roborev-findings", "0", "--rework", "0",
+                          "--from-json", _from_json_file(tmp)])
+            self.assertEqual(rc, 0)
+            rec = json.loads(ledger.read_text().splitlines()[0])
+            for counter in dt.REQUIRED_COUNTERS:
+                self.assertEqual(rec[counter], 0)
+
+    # ---- AC4: retro must not fold a not-run into the gated-pass story ---------------
+    def test_aggregate_counts_no_gate_failures_for_not_run(self):
+        not_run = {"gate": "not-run", "gate_runs": 0, "claim_collisions": 0,
+                   "rebase_events": 0, "roborev_findings": 0, "rework": 0}
+        tally = dt.aggregate([not_run])
+        # zero rounds were observed, so zero rounds failed — NOT a fabricated failure...
+        self.assertEqual(tally["gate_failures"], 0)
+        # ...and NOT silently indistinguishable from a clean one-run pass either.
+        self.assertEqual(tally["gate_not_run_records"], 1)
+        self.assertEqual(dt.aggregate([{**not_run, "gate": "pass", "gate_runs": 1}])
+                         ["gate_not_run_records"], 0)
+
+    def test_gate_not_run_records_carries_no_retro_weight(self):
+        # informational extra, like roborev_nits_total: rank() iterates RETRO_WEIGHTS.
+        self.assertNotIn("gate_not_run_records", dt.RETRO_WEIGHTS)
+        tally = dt.aggregate([{"gate": "not-run", "gate_runs": 0, "claim_collisions": 0,
+                               "rebase_events": 0, "roborev_findings": 0, "rework": 0}])
+        self.assertNotIn("gate_not_run_records", [row[0] for row in dt.rank(tally)])
+
+    def test_retro_reports_the_not_run_class_distinctly(self):
+        with tempfile.TemporaryDirectory() as d:
+            ledger = Path(d) / "ledger.jsonl"
+            lines = (FIXTURES / "sample-ledger.jsonl").read_text().splitlines()
+            gated = json.loads(lines[0])
+            ungated = json.loads(lines[2])
+            ungated["gate"], ungated["gate_runs"] = "not-run", 0
+            ledger.write_text(json.dumps(gated) + "\n" + json.dumps(ungated) + "\n")
+            records, errors = dt.load_ledger(ledger, SCHEMA)
+            self.assertEqual(errors, [])
+            out = io.StringIO()
+            with contextlib.redirect_stdout(out):
+                rc = dt.main(["retro", "--ledger", str(ledger),
+                              "--open-issues-json", str(FIXTURES / "open-issues-empty.json")])
+            self.assertEqual(rc, 0)
+            self.assertIn("no full gate of record ran", out.getvalue())
+
+    def test_retro_says_nothing_about_not_run_on_an_all_gated_ledger(self):
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            rc = dt.main(["retro", "--ledger", str(FIXTURES / "sample-ledger.jsonl"),
+                          "--open-issues-json", str(FIXTURES / "open-issues-empty.json")])
+        self.assertEqual(rc, 0)
+        self.assertNotIn("no full gate of record ran", out.getvalue())
+
+    # ---- AC5: backward compatibility -------------------------------------------------
+    def test_existing_ledger_validates_unchanged_under_the_new_schema(self):
+        records, errors = dt.load_ledger(dt.DEFAULT_LEDGER, SCHEMA)
+        self.assertEqual(errors, [])
+        self.assertTrue(records)
+        # every pre-#3448 record keeps its pass/fail + >=1 runs shape (no migration).
+        legacy = [r for r in records if r["gate"] != "not-run"]
+        self.assertTrue(all(r["gate_runs"] >= 1 for r in legacy))
+
+
 class LintTests(unittest.TestCase):
     def test_clean_ledger_passes(self):
         rc = dt.main(["lint", "--ledger", str(FIXTURES / "sample-ledger.jsonl")])
@@ -713,6 +901,135 @@ class AggregateTests(unittest.TestCase):
         pass_rec = {**fail_rec, "gate": "pass"}
         self.assertEqual(dt.aggregate([fail_rec])["gate_failures"], 3)
         self.assertEqual(dt.aggregate([pass_rec])["gate_failures"], 2)
+
+
+class SchemaCouplingDeclarationTests(unittest.TestCase):
+    """issue #3448 / roborev job 67: UNCONDITIONAL coverage of the schema-side coupling.
+
+    StandardValidatorCouplingTests below proves a real Draft 2020-12 validator ENFORCES the
+    coupling, but it needs `jsonschema`, and this gate component's contract is explicitly
+    "No third-party deps, no datasets, no network" — so on a host without the lib those
+    tests SKIP, and a skip is not coverage ("a SKIP means the check never ran, which is the
+    vacuous pass itself"). These tests therefore assert, with the stdlib alone and on every
+    host, that the published schema DECLARES the coupling — so deleting or weakening the
+    allOf can never pass CI silently.
+
+    Deliberately structural, NOT a hand-rolled if/then evaluator: re-implementing JSON
+    Schema semantics here would be a second implementation whose correctness is only
+    knowable by differential testing against a real validator, which is precisely the trap
+    CLAUDE.md records. Structure is checked here; SEMANTICS are checked against the real
+    validator when it is installed.
+    """
+
+    def setUp(self):
+        self.schema = json.loads(dt.DEFAULT_SCHEMA.read_text())
+
+    def test_schema_declares_both_coupling_directions(self):
+        clauses = self.schema.get("allOf")
+        self.assertIsInstance(clauses, list, "schema lost its top-level allOf coupling block")
+        self.assertEqual(len(clauses), 2, f"expected exactly 2 coupling clauses, got {len(clauses)}")
+
+        def shape(c):
+            """(condition field, condition const, consequent field, consequent const)."""
+            if_props = c.get("if", {}).get("properties", {})
+            then_props = c.get("then", {}).get("properties", {})
+            self.assertEqual(len(if_props), 1, f"clause 'if' must constrain exactly one field: {c}")
+            self.assertEqual(len(then_props), 1, f"clause 'then' must constrain exactly one field: {c}")
+            (cf, cs), = if_props.items()
+            (tf, ts), = then_props.items()
+            # the condition must also REQUIRE its field, else it holds vacuously when absent
+            self.assertIn(cf, c.get("if", {}).get("required", []),
+                          f"clause condition on {cf!r} must list it in 'required', or it is vacuous: {c}")
+            return (cf, cs.get("const"), tf, ts.get("const"))
+
+        shapes = {shape(c) for c in clauses}
+        self.assertEqual(
+            shapes,
+            {("gate", "not-run", "gate_runs", 0), ("gate_runs", 0, "gate", "not-run")},
+            "the schema no longer declares gate 'not-run' <=> gate_runs 0 in BOTH directions")
+
+    def test_gate_enum_and_minimum_still_admit_the_state(self):
+        props = self.schema["properties"]
+        self.assertIn("not-run", props["gate"]["enum"])
+        self.assertEqual(props["gate_runs"]["minimum"], 0)
+
+    def test_coupling_is_documented_as_enforced_in_both_places(self):
+        """A reader of the published schema must not conclude it relies on the tool alone."""
+        for field in ("gate", "gate_runs"):
+            desc = self.schema["properties"][field]["description"]
+            self.assertIn("allOf", desc, f"{field} description does not mention the schema-side allOf")
+            self.assertIn("_validate_gate_coupling", desc,
+                          f"{field} description does not mention the tool-side check")
+
+
+try:  # optional: only needed by StandardValidatorCouplingTests below
+    import jsonschema as _jsonschema
+    from jsonschema import Draft202012Validator as _Draft202012Validator
+except ImportError:  # pragma: no cover - exercised on hosts without the lib
+    _jsonschema = None
+    _Draft202012Validator = None
+
+
+@unittest.skipUnless(_jsonschema is not None,
+                     "jsonschema not installed; the schema-side coupling is unverifiable here")
+class StandardValidatorCouplingTests(unittest.TestCase):
+    """issue #3448 / roborev job 66: the coupling must hold under a STANDARD validator.
+
+    The repo's own `_validate` is a minimal JSON-Schema subset (no if/then), so encoding the
+    coupling ONLY in delivery-telemetry.py left the published schema independently accepting
+    incoherent records like {"gate": "pass", "gate_runs": 0} — i.e. any third-party Draft
+    2020-12 consumer of docs/reports/delivery-telemetry.schema.json would not enforce the
+    documented contract. The schema now carries an `allOf` of two if/then clauses; these
+    tests assert against the REAL validator, not our own, because our own is exactly the one
+    that cannot see the keywords under test.
+    """
+
+    def setUp(self):
+        self.schema = json.loads(dt.DEFAULT_SCHEMA.read_text())
+        self.validator = _Draft202012Validator(self.schema)
+        self.base = json.loads(dt.DEFAULT_LEDGER.read_text().splitlines()[0])
+
+    def _valid(self, gate, gate_runs):
+        rec = dict(self.base)
+        rec["gate"] = gate
+        rec["gate_runs"] = gate_runs
+        return not list(self.validator.iter_errors(rec))
+
+    def test_schema_is_itself_a_valid_draft_2020_12_schema(self):
+        _Draft202012Validator.check_schema(self.schema)
+
+    def test_standard_validator_accepts_not_run_with_zero(self):
+        self.assertTrue(self._valid("not-run", 0))
+
+    def test_standard_validator_rejects_not_run_with_nonzero(self):
+        # the finding's second case
+        self.assertFalse(self._valid("not-run", 2))
+        self.assertFalse(self._valid("not-run", 1))
+
+    def test_standard_validator_rejects_outcome_with_zero_runs(self):
+        # the finding's first case
+        self.assertFalse(self._valid("pass", 0))
+        self.assertFalse(self._valid("fail", 0))
+
+    def test_standard_validator_still_accepts_ordinary_gated_records(self):
+        self.assertTrue(self._valid("pass", 1))
+        self.assertTrue(self._valid("fail", 3))
+
+    def test_every_committed_ledger_record_validates_under_the_standard_validator(self):
+        """AC5 backward-compatibility, checked against the real validator too.
+
+        Fail-closed on an empty corpus: a committed ledger that read as 0 records would
+        otherwise make this pass vacuously.
+        """
+        checked = 0
+        for line in dt.DEFAULT_LEDGER.read_text().splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            checked += 1
+            errors = list(self.validator.iter_errors(json.loads(line)))
+            self.assertEqual(errors, [], f"committed record {checked} no longer validates: {errors}")
+        self.assertGreater(checked, 0, "committed ledger is empty - this test would be vacuous")
 
 
 if __name__ == "__main__":
