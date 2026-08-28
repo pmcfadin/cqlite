@@ -4328,6 +4328,11 @@ STUB_GIT_REF="$mb8_base..$mb8_head"
 STUB_PROMPT="$PROMPT_WITHOUT_PATHS"
 STUB_GH_COMMENTS="\001pmcfadin\nroborev-waive: prompt-content-absent base=$mb8_base head=$mb8_head job=4656 reason=absence checked against the token accounting\n"
 run_wrapper "$mb8_work"
+# THE TERMINAL VERDICT, not just the two waiver lines (roborev round 1, Low). Without it a regression
+# in the waiver-ADMISSION path — the affirmation backstop refusing a `WAIVED` whose provenance it can
+# no longer match — would leave this case green while the waiver was unusable in practice: the two
+# asserts below only prove the waiver was FOUND and RECORDED, never that it let the run reach a pass.
+assert_verdict 'case (mb8)' PASS 0
 assert_says 'case (mb8) a marker naming the MERGE-BASE grants' \
   "^waiver: GRANTED \(author=@pmcfadin base=$mb8_base head=$mb8_head job=4656 reason=absence checked against the token accounting\)\$"
 assert_says 'case (mb8) and the absence verdict is WAIVED, not PASS' '^prompt-content: WAIVED \(1/1 code census paths absent'
