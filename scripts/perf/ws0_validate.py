@@ -417,6 +417,63 @@ def existing_dir(name: str, value: str) -> pathlib.Path:
     return p
 
 
+# The charset a perf event name may use (#3248). Deliberately conservative and an ALLOWLIST:
+# real names in use here are `cycles`, `instructions`, `ref-cycles`, `task-clock`,
+# `msr/aperf/`, `msr/mperf/`, `msr/tsc/`, plus PMU-qualified forms like `cpu/event=0x3c/`.
+# An allowlist because the value is interpolated into a `perf stat -e` argument and, more to
+# the point, an event name nobody anticipated should fail CLOSED rather than pass because no
+# deny-list entry matched it — the reason every other check in this rig is an allowlist too.
+_PERF_EVENT_RE = re.compile(r"^[A-Za-z0-9_./:=-]+$")
+
+
+def perf_event_list(label: str, value: object) -> list[str]:
+    """Parse a `perf stat -e` event list: non-empty, charset-checked, DUPLICATE-FREE.
+
+    The duplicate check is the substantive one and it is not tidiness. `read_perf_counters`
+    aggregates by event name:
+
+        counters[event] = counters.get(event, 0) + value
+
+    which is correct for a `--per-core` shape emitting several lines per event. But it means a
+    REPEATED event in `-e` — `cycles,cycles`, or the easy mistake of appending `cycles` to a
+    list that already carries it — produces two `cycles` rows that get SUMMED, reporting
+    exactly DOUBLE the true count as a perfectly ordinary integer. Nothing downstream could
+    detect it: the value is a plausible non-negative int, its enabled-percentage is 100%, and
+    every derived figure (cycles/row, IPC, the setup-subtracted delta) inherits the factor of
+    two silently. So the refusal belongs at the point the list is accepted, which is here.
+    """
+    if not isinstance(value, str) or not value.strip():
+        raise Invalid(
+            f"{label} is {value!r}, which is not a recorded event list. The report's cycles/row"
+            " and IPC are claims about specific counters, so WHICH counters is not optional."
+        )
+    tokens = [t.strip() for t in value.split(",")]
+    if any(not t for t in tokens):
+        raise Invalid(
+            f"{label} is {value!r}, which has an empty event between commas. An empty event"
+            " would be passed to perf as a bare `,` and silently counted as nothing."
+        )
+    bad = [t for t in tokens if not _PERF_EVENT_RE.match(t)]
+    if bad:
+        raise Invalid(
+            f"{label} contains event name(s) outside the permitted charset: {bad!r}."
+            " The charset is an ALLOWLIST, so an event spelling nobody anticipated fails closed"
+            " rather than passing because no deny-list entry matched it."
+        )
+    seen: dict[str, int] = {}
+    for t in tokens:
+        seen[t] = seen.get(t, 0) + 1
+    dupes = sorted(t for t, n in seen.items() if n > 1)
+    if dupes:
+        raise Invalid(
+            f"{label} repeats event(s) {dupes!r}. read_perf_counters SUMS lines by event name,"
+            " so a repeated event reports DOUBLE its true count as an ordinary integer and every"
+            " figure derived from it — cycles/row, IPC, the setup-subtracted delta — inherits the"
+            " factor of two with nothing downstream able to detect it."
+        )
+    return tokens
+
+
 def nonempty_selection(name: str, value: str, allowed: tuple[str, ...]) -> list[str]:
     """The whitespace-split selection, every member in `allowed`, or `Invalid`.
 

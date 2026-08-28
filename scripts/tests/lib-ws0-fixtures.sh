@@ -296,9 +296,17 @@ from ws0_canonical_corpus import require_canonical_or_declared
 # writing this line (a possessive in the word module), and it presented as a bash syntax error on an
 # unrelated python line.
 repo_root = pathlib.Path(sys.argv[1]).resolve().parent.parent
+# `events` and `bin_dir` are declared manifest fields since #3248, and the reader refuses an
+# INCOMPLETE config, so a fixture omitting them fails every downstream case with a
+# manifest-incompleteness error rather than the condition under test. Measured while adding
+# them: 211 checks across five suites went red at once, all with the same wrong diagnosis.
+# They are NOT parameterised here because no case varies them; a case that needs to can edit
+# the pin it just wrote, which is how the other single-value fields are exercised too.
 config = {"reps": sys.argv[4], "temps": sys.argv[5], "arms": sys.argv[6],
           "scan_passes": sys.argv[7], "server_cpus": "2,10", "client_cpus": "4,12",
           "step_duration": "45s/1s", "flight_endpoint": sys.argv[9],
+          "events": "cycles,instructions",
+          "bin_dir": "/fixture/target/release",
           "baseline_mode": sys.argv[8]}
 session, corpus = pathlib.Path(sys.argv[3]), pathlib.Path(sys.argv[2])
 # NOTHING IS STAMPED FOR A SESSION DIR THAT DOES NOT EXIST — the same load-bearing rule

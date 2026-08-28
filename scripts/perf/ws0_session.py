@@ -65,6 +65,7 @@ from ws0_validate import (
     http_endpoint,
     nonempty_selection,
     positive_int,
+    perf_event_list,
 )
 
 
@@ -337,6 +338,22 @@ MANIFEST_CONFIG_DISPOSITION: dict[str, str] = {
                        " on pinned local cores that served nothing (#3272 round 14, F2). Pinned"
                        " HERE, before the first rep, so it is the pre-measurement pin every other"
                        " identity in this manifest is an identity OF",
+    "events": "parsed into a NON-EMPTY, DUPLICATE-FREE tuple of perf event names by"
+              " ws0_validate.perf_event_list, each matching a conservative charset. Recorded"
+              " because the report's cycles/row and IPC are claims ABOUT SPECIFIC COUNTERS and"
+              " the event set became configurable in #3248 (the AC4 clock basis needs"
+              " msr/aperf,msr/mperf,msr/tsc,ref-cycles, which the default two-event set cannot"
+              " supply). DUPLICATE-FREE is the substantive part rather than tidiness:"
+              " ws0_validate.read_perf_counters SUMS lines by event name, so `-e cycles,cycles`"
+              " would emit two `cycles` rows and report DOUBLE the true count as an ordinary"
+              " integer, with every derived figure inheriting the factor of two",
+    "bin_dir": "validated as a non-empty recorded string, and — the substance — the directory"
+               " the measured binaries were taken FROM, which #3248 needs because"
+               " [profile.release] sets strip = true and a stripped binary cannot be attributed"
+               " per-function at all. Recorded rather than assumed because the reps execute FROZEN"
+               " COPIES under $OUT_DIR/measured-bin/, so the digests describe the bytes that ran"
+               " but NOT which build produced them; without this field a perfsym run and a"
+               " release run are indistinguishable in results.json",
     "baseline_mode": "validated as one of ws0_canonical_corpus.MODE_BASELINE /"
                      " MODE_NON_BASELINE, and — the substance — tied to a REAL pre-measurement"
                      " COMPARISON against the canonical pin in"
@@ -365,6 +382,8 @@ _MANIFEST_READER_KEYS = (
     "step_duration",
     "flight_endpoint",
     "baseline_mode",
+    "events",
+    "bin_dir",
 )
 
 # AT IMPORT, both directions, so a half-wired field cannot ship (the pattern
@@ -530,7 +549,12 @@ def session_manifest_config(
         " different server had its rows divided by THIS session's perf counters, collected on"
         " pinned local cores that served nothing (#3272 round 14, F2).",
     )
-    for key in ("server_cpus", "client_cpus", "step_duration"):
+    # THE COUNTED EVENTS (#3248). Through the same parser the driver applies, so a hand-edited
+    # manifest cannot smuggle an empty or duplicate-bearing event set past the reader — the
+    # duplicate case matters because `read_perf_counters` sums by event name and would silently
+    # double a repeated counter.
+    out["events"] = perf_event_list(f"{p} `config.events`", config["events"])
+    for key in ("server_cpus", "client_cpus", "step_duration", "bin_dir"):
         value = config[key]
         if not isinstance(value, str) or not value.strip():
             raise Invalid(

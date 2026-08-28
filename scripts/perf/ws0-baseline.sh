@@ -150,7 +150,22 @@ DO_BUILD=1
 # corpus must still run, and this issue has already broken three documented commands by forbidding
 # an input instead of labelling it. The two words come from `ws0_canonical_corpus.MODE_*`.
 BASELINE_MODE="baseline"
+# The counted events. CONFIGURABLE since #3248, whose AC4 clock basis needs
+# msr/aperf,msr/mperf,msr/tsc,ref-cycles, which this two-event default cannot supply. The
+# DEFAULT IS UNCHANGED so an AC0 reproduction run is configured byte-identically to the
+# #3096 session it reproduces. Validated by ws0_validate.perf_event_list (non-empty,
+# charset-allowlisted, DUPLICATE-FREE) and recorded in the session manifest, because
+# cycles/row and IPC are claims about specific counters.
+#
+# GROWING THIS SET PROVOKES PMU MULTIPLEXING, which perf handles by time-sharing counters and
+# SCALING the counts — an estimate reported as an ordinary integer. read_perf_counters refuses
+# a scaled count (it now reads perf's enabled-percentage, which nothing read before #3248), so
+# an over-large set fails closed rather than reporting quietly wrong numbers.
 EVENTS="cycles,instructions"
+# Where the measured binaries come from. Default unchanged; #3248 needs target/perfsym because
+# [profile.release] sets strip = true, so a release binary carries NO symbols and cannot be
+# attributed per-function at all. Implies --no-build (the build writes only to target/release).
+BIN_DIR=""
 # `--validate-args-only`: run every ARGUMENT check, print a stamp, and exit 0 having
 # touched NOTHING outside this process (issue #3272 review R1). See the exit point below
 # for why the alternative — asserting acceptance by running the real driver until it
@@ -183,6 +198,21 @@ ws0-baseline.sh — issue #3096 same-session Arrow-encode baseline
   --out DIR            Results dir (default \$REPO/target/perf-ws0-3096/<ts>-<pid>, created
                        atomically). REFUSED if it exists and is non-empty: measuring into a
                        used dir mixes artifacts from different sessions into one report.
+  --events LIST        Comma-separated hardware events to count (default $EVENTS).
+                       Validated non-empty, charset-allowlisted and DUPLICATE-FREE:
+                       read_perf_counters SUMS lines by event name, so a repeated event would
+                       report DOUBLE its true count as an ordinary integer. Recorded in the
+                       session manifest. NOTE a larger set can provoke PMU multiplexing, which
+                       SCALES the counts; a scaled count is refused at report time, never
+                       published.
+  --bin-dir DIR        Take the measured binaries from DIR instead of target/release, and
+                       IMPLY --no-build (the build writes only to target/release, so building
+                       would populate a directory nobody measures). Exists because
+                       [profile.release] sets strip = true: a release binary carries no symbols,
+                       so per-function attribution against it is impossible (#3248). The reps
+                       run FROZEN COPIES either way, so the digests still describe the bytes
+                       that ran — this field records WHICH BUILD they came from, which those
+                       digests cannot say.
   --no-build           Skip the release build; use the binaries already in target/release.
   --non-baseline       Measure a corpus that is NOT the canonical measurement corpus. By
                        DEFAULT the corpus is checked against the canonical pin in
@@ -230,6 +260,8 @@ while [[ $# -gt 0 ]]; do
     --out) OUT_DIR="$2"; shift 2 ;;
     --no-build) DO_BUILD=0; shift ;;
     --non-baseline) BASELINE_MODE="non-baseline"; shift ;;
+    --events) EVENTS="$2"; shift 2 ;;
+    --bin-dir) BIN_DIR="$2"; DO_BUILD=0; shift 2 ;;
     --validate-args-only) VALIDATE_ONLY=1; shift ;;
     -h|--help) usage; exit 0 ;;
     # Every unrecognized argument is an ERROR, never ignored: a typo'd flag that
@@ -399,13 +431,48 @@ fi
 # dir is refused at all, and why it is refused rather than auto-suffixed: scripts/perf/lib-outdir.sh.
 require_unused_out_dir "${OUT_DIR:-}"
 
+# --events and --bin-dir are validated HERE, ABOVE the --validate-args-only boundary, because
+# "refusing a value after acting on it is not refusing it" (#3272 round 1, finding 10: `--reps
+# 200000` passed the driver's own check and was refused only by the REPORT, after 200,000
+# full-corpus reps). The first version of these two flags had exactly that defect: the event list
+# was checked by the manifest writer and the bin dir at BIN assignment, both BELOW this line, so a
+# duplicated event or a missing directory would have been caught only after a cargo build, a cache
+# drop and a server start.
+#
+# The event list goes through THE SAME validator the manifest reader applies
+# (ws0_validate.perf_event_list) rather than a bash re-implementation, because a second
+# implementation of a rule is a second thing to drift: the driver would accept what the reporter
+# refuses, or worse the reverse. Pure computation — no build, no sysctl, no perf, no measurement.
+if ! _events_err="$(python3 -c '
+import sys
+sys.path.insert(0, sys.argv[1])
+from ws0_validate import Invalid, perf_event_list
+try:
+    perf_event_list("--events", sys.argv[2])
+except Invalid as exc:
+    print(exc, file=sys.stderr)
+    raise SystemExit(1)
+' "$HERE" "$EVENTS" 2>&1)"; then
+  echo "FATAL: --events is not a usable event list." >&2
+  echo "       $_events_err" >&2
+  exit 2
+fi
+
+if [[ -n "$BIN_DIR" && ! -d "$BIN_DIR" ]]; then
+  echo "FATAL: --bin-dir '$BIN_DIR' is not a directory." >&2
+  echo "       --bin-dir implies --no-build (the cargo build writes only to target/release), so" >&2
+  echo "       nothing will create it. Build it first, e.g." >&2
+  echo "         cargo build --profile perfsym -p cqlite-flight -p flight-loadgen" >&2
+  exit 2
+fi
+
 if [[ "$VALIDATE_ONLY" == "1" ]]; then
   # `baseline-mode` is in the stamp so the hermetic self-tests can observe WHICH claim the run
   # makes without executing anything. The canonical-corpus COMPARISON itself is necessarily below
   # this boundary (it reads the corpus's recorded identity off disk), like the schema check.
   echo "ARGUMENTS OK (--validate-args-only): reps=$REPS temps=[$TEMPS] arms=[$ARMS]" \
        "port=$PORT scan-passes=$SCAN_PASSES step=$STEP_DURATION cold-step=$COLD_STEP_DURATION" \
-       "baseline-mode=$BASELINE_MODE"
+       "baseline-mode=$BASELINE_MODE events=[$EVENTS] bin-dir=[${BIN_DIR:-<default target/release>}]"
   echo "  nothing was executed: no sysctl write, no build, no cache drop, no perf, no measurement."
   exit 0
 fi
@@ -501,7 +568,20 @@ relax_perf_sysctls
 # SITES stay here so what this driver actually does to the filesystem remains visible at its top
 # level, and so the ARGUMENT/CREATION boundary is legible in one file: the refusal is called far
 # above, `--validate-args-only` exits between them, and creation happens only here.
-BIN="$REPO_ROOT/target/release"
+BIN="${BIN_DIR:-$REPO_ROOT/target/release}"
+# THE SOURCE DIRECTORY, captured HERE and recorded in the session manifest (#3248).
+#
+# It must be captured at this line and not later, because `record_measured_binaries` REASSIGNS
+# `BIN` to `$OUT_DIR/measured-bin/` (lib-binaries.sh:177) once it has frozen copies of the three
+# executables. That freeze is what makes the digests describe the bytes that actually ran — but
+# it also means that after it, `$BIN` no longer says which BUILD they came from, and a perfsym
+# run and a release run become indistinguishable in results.json. This variable is the only
+# record of that distinction, so it is taken before the reassignment can occur.
+BIN_DIR_RECORDED="$BIN"
+# Existence was already refused above the --validate-args-only boundary; this only reports it.
+if [[ -n "$BIN_DIR" ]]; then
+  echo "measured bin source: $BIN_DIR (--bin-dir; implies --no-build)"
+fi
 # The status is checked EXPLICITLY rather than left to `set -e`. `create_out_dir` runs in a
 # COMMAND SUBSTITUTION (it must echo the default name it chose), so its `exit 2` terminates only
 # that subshell; the driver survives on `set -e` alone. That works — and a fail-closed refusal
@@ -596,6 +676,8 @@ WS0_CFG_CLIENT_CPUS="$CLIENT_CPUS" \
 WS0_CFG_STEP_DURATION="$STEP_DURATION/$COLD_STEP_DURATION" \
 WS0_CFG_FLIGHT_ENDPOINT="$FLIGHT_ENDPOINT" \
 WS0_CFG_BASELINE_MODE="$BASELINE_MODE" \
+WS0_CFG_EVENTS="$EVENTS" \
+WS0_CFG_BIN_DIR="$BIN_DIR_RECORDED" \
 python3 -c '
 import os, pathlib, sys
 sys.path.insert(0, sys.argv[1])
