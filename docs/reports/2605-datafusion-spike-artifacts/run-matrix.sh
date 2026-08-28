@@ -65,7 +65,12 @@ ${waited}s of waiting. A wall-clock benchmark on a loaded box measures the box. 
 machine is idle, or raise MAX_LOAD deliberately and accept that the numbers are contended." >&2
       exit 3
     fi
-    (( waited == 0 )) && echo ">>> waiting for the box to settle (load $load > $MAX_LOAD)"
+    # STDERR. This function is called through command substitution, so its
+    # stdout IS the return value: a progress line printed there ended up
+    # concatenated with the load number and written into machine-state.jsonl,
+    # making the provenance file invalid JSON — the guard corrupting the very
+    # record it exists to keep. stdout carries the number and nothing else.
+    (( waited == 0 )) && echo ">>> waiting for the box to settle (load $load > $MAX_LOAD)" >&2
     sleep 30
     waited=$(( waited + 30 ))
     load=$(load_now)

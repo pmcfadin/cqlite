@@ -44,7 +44,7 @@ tracing-subscriber = { workspace = true }
 # `default-features = false` + an explicit feature list: the spike needs the
 # execution engine and the SQL front end, and nothing that would drag in a second
 # object-store/parquet stack we do not read through.
-datafusion = { version = "44.0.0", optional = true, default-features = false }
+datafusion = { version = "=44.0.0", optional = true, default-features = false }
 # `#[async_trait]` is required to IMPLEMENT `datafusion::catalog::TableProvider`
 # (the trait itself is declared with it), so it is not an optional nicety — it is
 # part of that trait's ABI. Optional and gated with DataFusion; pinned to the

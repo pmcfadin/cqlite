@@ -79,6 +79,6 @@ Ratio is `row_engine / datafusion@tp1` wall time (>1 = DataFusion faster), media
 - discard-only floor BEATEN by an executing arm in 24 of 36 arm-comparisons (wall-clock noise, not an engine effect — see the sub-phase table)
 - cold-fault / elapsed ratio: 1.02..1.34 — cold-fault is a STALL ACCOUNT summed over 2 producer threads, NOT a partition of elapsed, so it legitimately EXCEEDS wall time and must never be rendered as a percentage of it
 - reconcile_entries range: 1899750..1899750
-- matrix completeness: 45 of 45 cells present against the schedule.json-DECLARED matrix (3 scenario(s) x 5 arm config(s) x 3 declared iteration(s))
+- matrix completeness: 45 of 45 cells present against the schedule.json-DECLARED matrix (3 scenario(s) x 5 declared arm config(s) x 3 declared iteration(s))
 - machine state: NOT RECORDED for any cell (the driver gained the capture after this matrix was measured); load contamination cannot be ruled out from the artifacts
 - peak RSS across ALL runs: 51.2 MiB max (B4 budget 512 MiB)

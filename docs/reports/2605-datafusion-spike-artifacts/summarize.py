@@ -65,65 +65,89 @@ def med(values):
     return statistics.median(values)
 
 
-# THE EXPECTED MATRIX, DECLARED — not inferred from what happens to be present.
+# THE EXPECTED MATRIX: AN EXACT SET COMPARISON AGAINST schedule.json.
 #
-# The first version of this check built its expectation from the OBSERVED arms
-# and iterations, which cannot close: a wholly missing arm config or a wholly
-# missing iteration is absent from the observation, so it is absent from the
-# expectation too, and the script exited 0 on an incomplete matrix while
-# advertising that it failed closed. A guard that names a guarantee it does not
-# provide is worse than no guard.
+# Two earlier versions of this check failed, both by REASONING ABOUT COUNTS.
+# Version 1 built the expectation from the OBSERVED arms and iterations, so a
+# wholly absent arm or iteration was missing from the expectation as well as the
+# data. Version 2 declared the iteration axis but checked the arm axis by COUNT,
+# so a missing arm could be masked by an unexpected extra one. Counting cannot
+# distinguish "the right five" from "any five".
 #
-# `schedule.json` is the declared axis set — the driver writes it, it is
-# committed provenance, and it records `arm_configs` and `iterations` for the run
-# the cells came from. The iteration axis is taken from it EXACTLY (1..N), and
-# the arm axis is checked by COUNT: the default-parallelism arm's key resolves to
-# the measuring box's core count (`datafusion@tp16` here), which no static
-# declaration can predict, but its complete absence still shows up as a shortfall
-# against `arm_configs`.
+# This version compares SETS and nothing else: the expected `(scenario, arm,
+# iteration)` keys are built from the arm ORDERS `schedule.json` records — the
+# driver's own statement of what it ran — the observed keys are built from the
+# cells, and the symmetric difference is reported. Absence and substitution are
+# both visible, and there is no arithmetic to get wrong.
+#
+# THE DEFAULT-PARALLELISM ARM is mapped explicitly. `datafusion:` (no pinned
+# `target_partitions`) resolves at RUN TIME to the measuring box's core count, so
+# its observed key is `datafusion@tp16` here and something else elsewhere; no
+# static declaration can predict it. Both sides are therefore compared in a
+# SYMBOLIC space where that arm is `datafusion@default`, which is exact rather
+# than approximate.
 schedule_path = cells_dir.parent / "schedule.json"
-if schedule_path.is_file():
-    schedule = json.loads(schedule_path.read_text())
-    declared_iters = list(range(1, int(schedule["iterations"]) + 1))
-    declared_arm_count = int(schedule["arm_configs"])
-else:
+if not schedule_path.is_file():
     # Unverifiable is NOT complete. Refuse to certify a matrix whose expected
     # shape was never declared, rather than inferring the expectation from the
-    # data and calling the result a check.
+    # data and calling that a check.
     schedule = None
-    declared_iters = None
-    declared_arm_count = None
     failures.append(
         "no schedule.json beside the cells, so the expected matrix is UNDECLARED and "
         "completeness cannot be verified (run the matrix through run-matrix.sh, which writes it)"
     )
+else:
+    schedule = json.loads(schedule_path.read_text())
+
+DEFAULT_DF_KEY = "datafusion@default"
+
+
+def declared_key(token):
+    """`floor:` -> `floor`; `datafusion:1` -> `datafusion@tp1`; `datafusion:` -> the default key."""
+    arm, _, tp = token.partition(":")
+    if arm != "datafusion":
+        return arm
+    return "datafusion@tp%s" % tp if tp else DEFAULT_DF_KEY
+
+
+expected_cells = set()
+declared_tps = set()
+expected_iters = []
+if schedule:
+    for iteration, order in sorted(schedule["orders"].items(), key=lambda kv: int(kv[0])):
+        expected_iters.append(int(iteration))
+        for token in order.split():
+            arm, _, tp = token.partition(":")
+            if arm == "datafusion" and tp:
+                declared_tps.add(tp)
+            for scenario in SCENARIOS:
+                expected_cells.add((scenario, declared_key(token), int(iteration)))
+
+
+def observed_key(run):
+    """The run's arm in the same SYMBOLIC space as `declared_key`."""
+    if run["arm"] != DF_ARM:
+        return run["arm"]
+    tp = str(run.get("df_target_partitions"))
+    return "datafusion@tp%s" % tp if tp in declared_tps else DEFAULT_DF_KEY
+
 
 observed_arms = sorted({k[1] for k in groups})
 observed_iters = sorted({r["iteration"] for r in runs})
-expected_iters = declared_iters if declared_iters is not None else observed_iters
-if declared_arm_count is not None and len(observed_arms) != declared_arm_count:
-    failures.append(
-        "schedule.json declares %d arm config(s) but %d appear in the cells: %s"
-        % (declared_arm_count, len(observed_arms), observed_arms)
-    )
-missing_iters = [i for i in expected_iters if i not in observed_iters]
-if missing_iters:
-    failures.append(
-        "schedule.json declares iterations %s but %s are entirely absent"
-        % (expected_iters, missing_iters)
-    )
-expected_cells = [
-    (scenario, arm, iteration)
-    for scenario in SCENARIOS
-    for arm in observed_arms
-    for iteration in expected_iters
-]
-present_cells = {(r["scenario"], key(r), r["iteration"]) for r in runs}
-missing_cells = [c for c in expected_cells if c not in present_cells]
+if not expected_iters:
+    expected_iters = observed_iters
+present_cells = {(r["scenario"], observed_key(r), r["iteration"]) for r in runs}
+missing_cells = sorted(expected_cells - present_cells)
+unexpected_cells = sorted(present_cells - expected_cells) if schedule else []
 duplicate_cells = sorted(
     c for c in present_cells
-    if sum(1 for r in runs if (r["scenario"], key(r), r["iteration"]) == c) > 1
+    if sum(1 for r in runs if (r["scenario"], observed_key(r), r["iteration"]) == c) > 1
 )
+if unexpected_cells:
+    failures.append(
+        "%d cell(s) are not in the schedule.json-declared matrix: %s"
+        % (len(unexpected_cells), unexpected_cells)
+    )
 if missing_cells:
     failures.append("%d expected cell(s) are MISSING" % len(missing_cells))
 if duplicate_cells:
@@ -275,9 +299,9 @@ else:
 # compare the per-arm mean RESIDUAL. A positive residual means "slower than this
 # run's I/O alone predicts", which is the engine signal with I/O controlled.
 #
-# It is stated with its limits: this is an observational adjustment over 45 runs
-# on one box, not a controlled experiment, and the residual spread is reported so
-# a reader can see whether a difference clears it.
+# It is stated with its limits: this is an observational adjustment over the runs
+# in this matrix on ONE box, not a controlled experiment, and the residual spread
+# is reported so a reader can see whether a difference clears it.
 print("\n## Engine comparison with I/O controlled\n")
 walls = [r["elapsed_nanos"] / 1e9 for r in runs]
 faults = [r["subphase_cold_fault_nanos"] / 1e9 for r in runs]
@@ -316,8 +340,21 @@ else:
 
 # ---------------------------------------------------------------------------
 # The STABLE half of the measurement: producer CPU sub-phases.
+#
+# The run count and the per-row normalisation basis are DERIVED, never written in
+# by hand: a hard-coded "45 runs" or "1,899,750 rows" silently becomes a lie the
+# first time the matrix changes size, and a us/row figure normalised by the wrong
+# denominator is wrong in a way no reader can see. The basis is the row count the
+# COMPARABLE arms agree on (`row_pushdown` narrows its scan on purpose, so it is
+# excluded); if they do not agree there is no single basis, the column is refused
+# rather than guessed, and the comparability precondition below fails the run.
+comparable_rows = sorted({r["rows_scanned"] for r in runs if r["arm"] != "row_pushdown"})
+row_basis = comparable_rows[0] if len(comparable_rows) == 1 else None
 print("\n## Producer CPU sub-phases (the stable signal)\n")
-print("| bucket | median ms over all 45 runs | [min, max] | us/row at 1,899,750 rows |")
+print("| bucket | median ms over all %d runs | [min, max] | %s |"
+      % (len(runs),
+         "us/row at %s rows" % format(row_basis, ",") if row_basis
+         else "us/row (NO single row basis — the comparable arms disagree)"))
 print("|---|---|---|---|")
 for label, field in [
     ("stream_encode (row->column transpose)", "subphase_encode_nanos"),
@@ -326,8 +363,9 @@ for label, field in [
     ("stream_cold_fault (page-in, 2 threads summed)", "subphase_cold_fault_nanos"),
 ]:
     vals = [r[field] / 1e6 for r in runs]
-    print("| %s | %.0f | [%.0f, %.0f] | %.2f |"
-          % (label, med(vals), min(vals), max(vals), med(vals) * 1000 / 1899750))
+    print("| %s | %.0f | [%.0f, %.0f] | %s |"
+          % (label, med(vals), min(vals), max(vals),
+             "%.2f" % (med(vals) * 1000 / row_basis) if row_basis else "n/a"))
 
 print("\n## Preconditions (every run)\n")
 bad_sources = [r["_cell"] for r in runs if r["sources"] < 2]
@@ -342,7 +380,7 @@ print("- merge arm NOT observed: %s" % (bad_arm or "NONE"))
 # which is the difference between an engine delta and a correctness delta.
 # `row_pushdown` is excluded BY DESIGN: its scan is narrowed, so it emits fewer
 # rows (that is what it is measuring).
-comparable = sorted({r["rows_scanned"] for r in runs if r["arm"] != "row_pushdown"})
+comparable = comparable_rows
 print("- rows_scanned across the COMPARABLE arms (floor/row_engine/datafusion): %s%s"
       % (comparable, "" if len(comparable) == 1
          else "  <-- FAIL: the comparable arms did not read the same rows"))
@@ -396,10 +434,11 @@ print("- reconcile_entries range: %d..%d" % (
     min(r["reconcile_entries"] for r in runs),
     max(r["reconcile_entries"] for r in runs)))
 print("- matrix completeness: %d of %d cells present against the schedule.json-DECLARED "
-      "matrix (%d scenario(s) x %d arm config(s) x %d declared iteration(s))%s"
-      % (len(present_cells), len(expected_cells), len(SCENARIOS), len(observed_arms),
-         len(expected_iters),
-         "" if not missing_cells else "  <-- FAIL, missing: %s" % (missing_cells,)))
+      "matrix (%d scenario(s) x %d declared arm config(s) x %d declared iteration(s))%s%s"
+      % (len(present_cells & expected_cells), len(expected_cells), len(SCENARIOS),
+         len(expected_cells) // max(len(SCENARIOS) * len(expected_iters), 1), len(expected_iters),
+         "" if not missing_cells else "  <-- FAIL, missing: %s" % (missing_cells,),
+         "" if not unexpected_cells else "  <-- FAIL, unexpected: %s" % (unexpected_cells,)))
 # MACHINE STATE. A cell measured on a loaded box measures the box; the driver now
 # records the load each cell ran under, and the coverage is reported honestly —
 # cells measured before the capture existed are UNKNOWN, never assumed quiet.

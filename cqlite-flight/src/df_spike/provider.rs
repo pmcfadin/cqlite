@@ -144,18 +144,31 @@ impl CqliteTableProvider {
 
     /// Build the `ScanSpec` for a request, honouring the pushdown switch.
     ///
-    /// Returns the spec, the producer's own column names (so a post-scan
-    /// projection can be mapped), and a description of what was pushed.
+    /// Returns the spec, the post-scan projection **as column NAMES in
+    /// DataFusion's requested order**, and a description of what was pushed.
+    ///
+    /// # Why names, and why a post-scan projection even when pushdown narrowed
+    /// the scan
+    ///
+    /// `MergeProducer::with_spec` honours WHICH columns to produce but emits them
+    /// in the table's KEY-FIRST schema order, not in the order they were asked
+    /// for. So a `SELECT val, ck` whose projection is pushed produces `ck, val`,
+    /// and returning that batch unchanged hands DataFusion a batch whose columns
+    /// do not match the schema the plan was built against. Resolving the
+    /// requested NAMES against the producer's actual schema — after the producer
+    /// exists — reorders them back, and costs one pointer copy per column
+    /// (`RecordBatch::project`), never a data copy.
     fn spec_for(
         &self,
         projection: Option<&Vec<usize>>,
         filters: &[Expr],
         limit: Option<usize>,
-    ) -> Result<(ScanSpec, Option<Vec<usize>>, String), SpikeError> {
+    ) -> Result<(ScanSpec, Option<Vec<String>>, String), SpikeError> {
         if !self.pushdown_enabled {
             // Nothing narrows the scan; the projection is applied post-scan.
             let described = "none (pushdown disabled)".to_string();
-            return Ok((ScanSpec::default(), projection.cloned(), described));
+            let post = projection.map(|i| self.projected_names(i)).transpose()?;
+            return Ok((ScanSpec::default(), post, described));
         }
 
         let mut spec = ScanSpec::default();
@@ -175,19 +188,21 @@ impl CqliteTableProvider {
         // projection is applied AFTER production, where `RecordBatch::project`
         // carries `row_count` through explicitly. The scan stays narrow — the
         // point of pushdown — and the row count survives.
-        let mut post_projection: Option<Vec<usize>> = None;
+        let mut post_projection: Option<Vec<String>> = None;
         if let Some(indices) = projection {
             if indices.is_empty() {
                 let anchor = self.count_anchor_column()?;
                 described.push(format!("projection={anchor} (count-only anchor)"));
                 spec.projection = Some(vec![anchor]);
-                // Against the producer's emitted columns, not the table schema:
-                // zero columns selected out of the one column produced.
+                // Zero columns selected out of the one column produced.
                 post_projection = Some(Vec::new());
             } else {
                 let names = self.projected_names(indices)?;
                 described.push(format!("projection={}", names.join(",")));
-                spec.projection = Some(names);
+                spec.projection = Some(names.clone());
+                // The producer emits these columns in KEY-FIRST order, not in the
+                // requested order, so the requested order is restored post-scan.
+                post_projection = Some(names);
             }
         }
 
@@ -204,9 +219,6 @@ impl CqliteTableProvider {
         if described.is_empty() {
             described.push("none".to_string());
         }
-        // With the projection pushed into the scan, the producer already emits
-        // exactly the output columns — hence no post-scan projection, EXCEPT for
-        // the `count(*)` anchor above, which must be projected away afterwards.
         Ok((spec, post_projection, described.join(" ")))
     }
 
@@ -302,6 +314,30 @@ impl TableProvider for CqliteTableProvider {
                 .arrow_schema()
                 .map_err(|e| DataFusionError::External(Box::new(e)))?,
         );
+
+        // Requested NAMES -> indices into what the producer actually emits. This
+        // is what restores DataFusion's requested column ORDER over a producer
+        // that emits key-first (see `spec_for`); a name the producer did not emit
+        // is an error, never a silently dropped column.
+        let post_projection = post_projection
+            .map(|names| {
+                names
+                    .iter()
+                    .map(|name| {
+                        producer_schema.index_of(name).map_err(|_| {
+                            DataFusionError::External(Box::new(SpikeError::Scan(
+                                crate::producer::ProducerError::Merge(
+                                    cqlite_core::Error::Internal(format!(
+                                        "projected column '{name}' is not among the columns the \
+                                         producer emitted"
+                                    )),
+                                ),
+                            )))
+                        })
+                    })
+                    .collect::<DfResult<Vec<usize>>>()
+            })
+            .transpose()?;
 
         let exec = CqliteScanExec::try_new(
             Arc::new(producer),
