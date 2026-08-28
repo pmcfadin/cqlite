@@ -127,6 +127,11 @@
 #  41.  RED    — a `#[path]` DECOY: a clean file at the standard path while the real,
 #                gated module lives where `#[path]` points.
 #  42.  RED    — a first-line SHEBANG ending the prologue scan and hiding a gate.
+#  43.  RED    — TWO declarations on one line (`#[cfg(any())] pub mod x; pub mod x;`,
+#                valid Rust) deduplicated into agreement by `sort -u`, skipping the
+#                UNCONDITIONAL one.
+#  44.  RED    — a raw BYTE string (`br#"`) slipping past a refusal that recognised
+#                only `r#"`.
 #  36.  GREEN  — the positive control for 32-35: a prologue of `//!` comments, blank
 #                lines and INERT inner attributes (`#![allow(...)]`, `#![doc = "…"]`)
 #                must certify normally. Without it, 32-35 would be satisfied by a
@@ -1264,6 +1269,61 @@ grep -q "INCONSISTENT" "$TMPROOT/case42.out" \
 echo "OK (42): a first-line shebang does not hide an inner \`#![cfg(...)]\` — it is caught as the NAMED defect"
 
 # ---------------------------------------------------------------------------
+# 43. RED — TWO declarations on ONE line, deduplicated into agreement (roborev r10).
+#
+#     THE FALSE PASS THIS CLOSES, and it is the subtlest one in this diff:
+#         #[cfg(any())] pub mod probe_dup; pub mod probe_dup;
+#     That is VALID Rust — the first is configured OUT, so there is no duplicate
+#     definition — and the SECOND is unconditional. The structured scan reads only the
+#     FIRST statement on a line, so it derives ONE (gated) record; the simple scan
+#     derives TWO. The cross-check used `sort -u`, which made the two derivations AGREE,
+#     and the unconditional declaration was then never examined.
+#
+#     MEASURED against the PRE-FIX guard on this exact tree: exit 0, with the success
+#     line reporting "14 unconditional; 14 module-file prologues read" — a certified
+#     tree containing an unconditional declaration whose module file gates itself.
+#
+#     The fix compares MULTISETS (`sort`, not `sort -u`), which routes this into the
+#     pre-existing "the two scans disagree" refusal — the correct verdict, because the
+#     guard genuinely cannot pin down the module set.
+# ---------------------------------------------------------------------------
+scratch_tree decl-duplicate-line; wt43="$SCRATCH"
+printf '\n#[cfg(any())] pub mod probe_dup; pub mod probe_dup;\n' >>"$wt43/cqlite-core/src/lib.rs"
+printf '#![cfg(feature = "benchmarks")]\n//! inner-gated: must NOT be certified\npub fn p() {}\n' >"$wt43/cqlite-core/src/probe_dup.rs"
+set +e
+bash "$wt43/$GUARD_REL" >"$TMPROOT/case43.out" 2>&1
+case43_rc=$?
+set -e
+[ "$case43_rc" -ne 0 ] || fail_case "case 43 — two declarations on one line were deduplicated into agreement, so the UNCONDITIONAL one was never examined and the guard certified a module that gates itself; got: $(cat "$TMPROOT/case43.out")"
+grep -qF "disagree about which modules" "$TMPROOT/case43.out" \
+  || fail_case "case 43 — the guard failed but NOT via the scan-disagreement refusal, so it failed for another reason; got: $(cat "$TMPROOT/case43.out")"
+grep -qF "probe_dup" "$TMPROOT/case43.out" \
+  || fail_case "case 43 — the failure never named \`probe_dup\`; got: $(cat "$TMPROOT/case43.out")"
+echo "OK (43): two declarations on one line are compared as MULTISETS, so dedup cannot make the two scans agree and skip an unconditional declaration"
+
+# ---------------------------------------------------------------------------
+# 44. RED — a raw BYTE string in a declaration attribute (roborev r10).
+#
+#     A FAIR HIT ON THE r9 F1 FIX, which is why it gets its own case. That fix refused
+#     `r#*"` and was anchored on a non-identifier boundary so an ordinary string ending
+#     in `r` (`doc = "for"`) would not false-fire. But `b` and `c` ARE identifier
+#     characters, so `br#"…"#` and `cr#"…"#` slipped straight past the check meant to
+#     stop them: THE LEAK WAS NARROWER THAN THE FIX. Rust has `r`, `br` and `cr` raw
+#     prefixes; all three are now refused, and the ordinary-string controls still pass.
+# ---------------------------------------------------------------------------
+scratch_tree decl-raw-byte-string; wt44="$SCRATCH"
+printf '\n#[cfg_attr(feature = "x", doc = br##"", cfg(any()), ""##)]\npub mod probe_decl;\n' >>"$wt44/cqlite-core/src/lib.rs"
+printf '//! probe\npub fn p() {}\n' >"$wt44/cqlite-core/src/probe_decl.rs"
+set +e
+bash "$wt44/$GUARD_REL" >"$TMPROOT/case44.out" 2>&1
+case44_rc=$?
+set -e
+[ "$case44_rc" -ne 0 ] || fail_case "case 44 — a raw BYTE string (\`br#\"\`) in a declaration attribute passed GREEN; the r9 raw-string refusal only recognised \`r#\"\` and \`b\` is an identifier character, so the boundary anchor let it through; got: $(cat "$TMPROOT/case44.out")"
+grep -qF "RAW STRING" "$TMPROOT/case44.out" \
+  || fail_case "case 44 — the guard failed but NOT with the raw-string diagnostic; got: $(cat "$TMPROOT/case44.out")"
+echo "OK (44): raw BYTE and raw C string prefixes (\`br#\"\`, \`cr#\"\`) are refused too, not just \`r#\"\`"
+
+# ---------------------------------------------------------------------------
 # 36. GREEN — THE POSITIVE CONTROL for 29-38.
 #
 #     Without it, every case above would be satisfied by a guard hardwired to refuse
@@ -1362,4 +1422,4 @@ grep -qF "affirmative measurement" "$TMPROOT/case39.out" \
 echo "OK (39): a crate root with ZERO unconditional declarations FAILs — the assert never reports success having examined nothing"
 
 echo ""
-echo "PASS: test_pub_surface_guard.sh — all 29 cases (5 green, 22 reds, 1 usage, 1 kill-safety)"
+echo "PASS: test_pub_surface_guard.sh — all 31 cases (5 green, 24 reds, 1 usage, 1 kill-safety)"

@@ -265,7 +265,12 @@ function attrs_verdict(a,   i, j, c, d, m, v, res) {
   #     counts is a second lexer — the class this guard has already paid for — so refuse.
   #     Anchored on a non-identifier boundary so an ordinary string ending in `r` (e.g.
   #     `doc = "for"`, which contains the two characters `r"`) does NOT match.
-  if (a ~ /(^|[^A-Za-z0-9_])r#*"/) return "REFUSE_RAWSTRING"
+  #     ALL RAW PREFIXES, not just `r` (roborev r10): Rust also has raw BYTE strings
+  #     `br#*"` and raw C strings `cr#*"`. The first version of this refusal matched
+  #     only `r#*"`, and because `b`/`c` are identifier characters the boundary anchor
+  #     made `br#"…"#` slip past the very check meant to stop it — the leak was
+  #     narrower than the fix. `(b|c)?` closes it.
+  if (a ~ /(^|[^A-Za-z0-9_])(b|c)?r#*"/) return "REFUSE_RAWSTRING"
   # (2) `#[path = "..."]` (roborev r9 F2). Module resolution assumes the two standard
   #     paths. With a DECOY `NAME.rs` present beside `#[path = "actual.rs"] pub mod
   #     NAME;`, the guard reads the decoy, finds it clean and certifies, while
@@ -671,8 +676,16 @@ grep '^D	' "$SCAN_RAW" | cut -f2- >"$DERIVED_DECLS" || true
 grep '^M	' "$SCAN_RAW" | cut -f2- >"$DERIVED_MODS" || true
 
 # Cross-check the two derivations of "which modules are declared at the crate root".
-grep '^S	' "$SCAN_RAW" | cut -f2- | LC_ALL=C sort -u >"$WORK_DIR/mods.simple"
-cut -f2 "$DERIVED_MODS" | LC_ALL=C sort -u >"$WORK_DIR/mods.structured"
+# MULTISETS, NOT SETS — `sort -u` here was a false PASS (roborev r10). The structured
+# scan reads only the FIRST statement on a line, so a line carrying TWO declarations
+# (`#[cfg(any())] pub mod probe; pub mod probe;` — valid Rust, because the first is
+# configured OUT, so there is no duplicate definition) yields TWO simple-scan records
+# and ONE structured record. Deduplication made those two derivations AGREE, and the
+# UNCONDITIONAL second declaration was then never examined. Comparing multisets turns
+# that into the existing "the two scans disagree" refusal, which is exactly the right
+# verdict: a module set the guard cannot pin down.
+grep '^S	' "$SCAN_RAW" | cut -f2- | LC_ALL=C sort >"$WORK_DIR/mods.simple"
+cut -f2 "$DERIVED_MODS" | LC_ALL=C sort >"$WORK_DIR/mods.structured"
 if ! diff -u "$WORK_DIR/mods.simple" "$WORK_DIR/mods.structured" >"$WORK_DIR/mods.diff" 2>&1; then
   echo "" >&2
   echo "simple-scan vs structured-scan module sets:" >&2
