@@ -1482,6 +1482,84 @@ set -e
 echo "OK (50): a one-line inline module is not read as a crate-root declaration, the multi-line form still is not, and a REAL crate-root declaration is still examined either side of a closing brace"
 
 # ---------------------------------------------------------------------------
+# 51. RED+GREEN — WHITESPACE IS LEGAL BETWEEN ATTRIBUTE TOKENS (roborev r15 F1).
+#
+#     rustc accepts `#! [cfg(feature = "x")]` — VERIFIED on rustc 1.98.0: it compiles and
+#     the gate APPLIES (no symbol emitted). A contiguous `#![` test read it as a shebang
+#     on line 1, or as the first item later, and CERTIFIED the module. MEASURED pre-fix:
+#     `CLEAN 3`.
+#
+#     Only two `#` shapes are legal in a prologue and they mean OPPOSITE things, so both
+#     directions are pinned: `#` ws* `!` ws* `[` is an INNER attribute (keep reading),
+#     while `#` ws* `[` is an OUTER attribute and ENDS the prologue. Anything else
+#     starting with `#` now REFUSES instead of being taken for prologue-end.
+# ---------------------------------------------------------------------------
+c51_i=0
+for c51a in '#! [cfg(feature = "benchmarks")]' '#!	[cfg(feature = "benchmarks")]' '# ! [cfg(feature = "benchmarks")]'; do
+  c51_i=$((c51_i + 1))
+  oracle_tree "attr-ws-$c51_i"; wt51="$SCRATCH"
+  printf '%s\n\n//! Self-test-only probe (#1712 r15 F1).\npub fn probe() {}\n' "$c51a" >"$wt51/cqlite-core/src/probe_oracle.rs"
+  set +e
+  bash "$wt51/$GUARD_REL" >"$TMPROOT/case51.out" 2>&1
+  c51rc=$?
+  set -e
+  [ "$c51rc" -ne 0 ] || fail_case "case 51($c51_i) — an inner cfg written with whitespace between its tokens was CERTIFIED. rustc accepts it and the gate APPLIES, so the module is absent from the compiled crate; got: $(cat "$TMPROOT/case51.out")"
+  grep -q "INCONSISTENT" "$TMPROOT/case51.out" \
+    || fail_case "case 51($c51_i) — refused rather than reported as the INCONSISTENT defect. Whitespace between tokens is exactly modellable, so the verdict must be the NAMED defect with its hoist remedy; got: $(cat "$TMPROOT/case51.out")"
+done
+
+# GREEN: an OUTER attribute (with or without a space) ends the prologue and must certify.
+c51_j=0
+for c51b in '#[derive(Debug)]' '# [derive(Debug)]'; do
+  c51_j=$((c51_j + 1))
+  oracle_tree "attr-outer-$c51_j"; wt51b="$SCRATCH"
+  printf '//! Self-test-only probe.\n%s\npub struct Probe;\n' "$c51b" >"$wt51b/cqlite-core/src/probe_oracle.rs"
+  set +e
+  bash "$wt51b/$GUARD_REL" >"$TMPROOT/case51b.out" 2>&1
+  c51b_rc=$?
+  set -e
+  [ "$c51b_rc" -eq 0 ] || fail_case "case 51(b$c51_j) — an OUTER attribute \`$c51b\` was treated as unclassifiable instead of ending the prologue; got: $(cat "$TMPROOT/case51b.out")"
+done
+echo "OK (51): an inner cfg written with whitespace between its tokens is caught as the NAMED defect, while an outer attribute (spaced or not) still ends the prologue"
+
+# ---------------------------------------------------------------------------
+# 52. RED+GREEN — a DECLARATION SPLIT ACROSS LINES (roborev r15 F2, Refusal V).
+#
+#     `pub` NEWLINE `mod probe;` is valid Rust — verified, it compiles — and EVERY scan
+#     here requires `pub` and `mod` on the SAME line, so the declaration was invisible to
+#     both derivations AND to Refusal U: they AGREE while both are blind, and an
+#     inner-gated module passed unchecked.
+#
+#     Tokenizing item declarations across newlines would be a second implementation of
+#     Rust's item grammar — the class this guard exists to avoid — so a bare visibility
+#     qualifier alone on a depth-0 line is refused BY SHAPE. It is unambiguous: nothing
+#     but a split declaration looks like that.
+# ---------------------------------------------------------------------------
+c52_i=0
+for c52 in 'pub' 'pub(crate)' 'pub(super)'; do
+  c52_i=$((c52_i + 1))
+  scratch_tree "split-decl-$c52_i"; wt52="$SCRATCH"
+  printf '\n%s\nmod probe_split;\n' "$c52" >>"$wt52/cqlite-core/src/lib.rs"
+  printf '#![cfg(feature = "benchmarks")]\n//! inner-gated\npub fn p() {}\n' >"$wt52/cqlite-core/src/probe_split.rs"
+  set +e
+  bash "$wt52/$GUARD_REL" >"$TMPROOT/case52.out" 2>&1
+  c52rc=$?
+  set -e
+  [ "$c52rc" -ne 0 ] || fail_case "case 52($c52_i) — a declaration split as \`$c52\` NEWLINE \`mod probe_split;\` passed GREEN; it is invisible to both derivations and to Refusal U; got: $(cat "$TMPROOT/case52.out")"
+  grep -qF "nothing but a visibility qualifier" "$TMPROOT/case52.out" \
+    || fail_case "case 52($c52_i) — refused, but not via Refusal V; got: $(cat "$TMPROOT/case52.out")"
+done
+
+scratch_tree split-decl-control; wt52b="$SCRATCH"
+printf '\npub fn probe_ok() {}\npub struct ProbeS;\n' >>"$wt52b/cqlite-core/src/lib.rs"
+set +e
+bash "$wt52b/$GUARD_REL" >"$TMPROOT/case52b.out" 2>&1
+c52b_rc=$?
+set -e
+[ "$c52b_rc" -eq 0 ] || fail_case "case 52(b) — ordinary one-line \`pub\` items were refused as split declarations; got: $(cat "$TMPROOT/case52b.out")"
+echo "OK (52): a declaration split across lines REFUSES (pub, pub(crate), pub(super)), while ordinary one-line \`pub\` items stay GREEN"
+
+# ---------------------------------------------------------------------------
 # 36. GREEN — THE POSITIVE CONTROL for 29-38.
 #
 #     Without it, every case above would be satisfied by a guard hardwired to refuse
@@ -1580,4 +1658,4 @@ grep -qF "affirmative measurement" "$TMPROOT/case39.out" \
 echo "OK (39): a crate root with ZERO unconditional declarations FAILs — the assert never reports success having examined nothing"
 
 echo ""
-echo "PASS: test_pub_surface_guard.sh — all 35 cases (8 green, 25 reds, 1 usage, 1 kill-safety)"
+echo "PASS: test_pub_surface_guard.sh — all 37 cases (8 green, 27 reds, 1 usage, 1 kill-safety)"

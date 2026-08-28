@@ -493,6 +493,26 @@ END {
     printf "X\tline %d: code follows a closing block-comment/string delimiter on the SAME line: `%s`\n", i, squash(substr(ltrim(N[i]), 1, 72))
   }
 
+  # --- Refusal V: a depth-0 line that is nothing but a visibility qualifier -------
+  #
+  # `pub` NEWLINE `mod probe;` is VALID RUST — verified: it compiles — and EVERY scan
+  # here requires `pub` and `mod` on the SAME line, so the declaration was invisible to
+  # both derivations AND to Refusal U, and an inner-gated module passed unchecked
+  # (roborev r15 F2). Both derivations blind together again, so the cross-check could not
+  # see it either.
+  #
+  # Tokenizing declarations across newlines would be a second implementation of Rust's
+  # item grammar — the class this guard exists to avoid. A bare visibility qualifier
+  # alone on a line is UNAMBIGUOUS, though: it can only be a split declaration, so it is
+  # refused by shape. Covers `pub`, `pub(crate)`, `pub(super)`, `pub(in path)`.
+  for (i = 1; i <= n; i++) {
+    if (!INCODE[i]) continue
+    if (!BRACE_UNRELIABLE && BRACE_MIN[i] != 0) continue
+    if (N[i] ~ /^[[:space:]]*pub([[:space:]]*\([^)]*\))?[[:space:]]*$/) {
+      printf "V\tline %d: a depth-0 line is nothing but a visibility qualifier, so a declaration is split across lines: `%s`\n", i, squash(substr(ltrim(N[i]), 1, 72))
+    }
+  }
+
   # --- Derivation S: "which modules are declared at the crate root?" answered by
   # the simplest rule that can be written, independent of all attribute parsing.
   for (i = 1; i <= n; i++) {
@@ -712,6 +732,12 @@ fi
 # A `pub mod` shape NEITHER derivation consumed. This is NOT a disagreement between
 # the two derivations — it is a blind spot they SHARE, which is precisely why the
 # cross-check further down cannot catch it and why this refusal is its own channel.
+if grep -q '^V	' "$SCAN_RAW"; then
+  echo "" >&2
+  grep '^V	' "$SCAN_RAW" | cut -f2- >&2
+  fail "the crate root $LIB_RS_REL splits a declaration across lines — a depth-0 line holds nothing but a visibility qualifier (see above). \`pub\` on one line and \`mod NAME;\` on the next is valid Rust, but every scan here requires them on the SAME line, so such a declaration is invisible to BOTH derivations and to Refusal U: they AGREE while both are blind, and a module whose file carries an inner \`#![cfg(...)]\` would be advertised unconditionally by the crate root while being absent from the compiled crate. Tokenizing item declarations across newlines would be a second implementation of Rust's item grammar, which is the defect class this guard exists to avoid, so it refuses instead. Remedy: put the declaration on one line."
+fi
+
 if grep -q '^U	' "$SCAN_RAW"; then
   echo "" >&2
   grep '^U	' "$SCAN_RAW" | cut -f2- >&2
@@ -900,7 +926,29 @@ END {
     # shebang reads as the first item, the prologue ends at line 1, and the file is
     # falsely certified. Exactly one is possible and only on line 1, so this is a
     # bounded, exact rule rather than a guess.
-    if (i == 1 && substr(t, 1, 2) == "#!" && substr(t, 1, 3) != "#![") { i++; continue }
+    # WHITESPACE IS LEGAL BETWEEN ATTRIBUTE TOKENS (roborev r15 F1). rustc accepts
+    # `#! [cfg(feature = "x")]` — VERIFIED on rustc 1.98.0: it compiles and the gate
+    # APPLIES (no symbol emitted) — while a contiguous `#![` test read it as a shebang on
+    # line 1, or as the first item later, and CERTIFIED the module. So the `#!`/`[`
+    # pairing is now recognised ACROSS whitespace, and anything else beginning with `#`
+    # that this reader cannot classify REFUSES rather than being taken for prologue-end.
+    #
+    # Only two `#` shapes are legal here and they mean opposite things:
+    #   `#` ws* `!` ws* `[`  -> an INNER attribute; keep reading it
+    #   `#` ws* `[`          -> an OUTER attribute, i.e. the first item's; prologue ENDS
+    # A shebang is `#!` NOT followed (across whitespace) by `[`, and only on line 1.
+    if (t ~ /^#[[:space:]]*![[:space:]]*\[/) {
+      sub(/^#[[:space:]]*![[:space:]]*\[/, "#![", t)   # canonicalise, then fall through
+      L[i] = t
+    } else if (t ~ /^#[[:space:]]*\[/) {
+      printf "CLEAN\t%d\n", i                          # outer attribute: prologue ends
+      exit
+    } else if (i == 1 && t ~ /^#[[:space:]]*!/) {
+      i++; continue                                     # line-1 shebang
+    } else if (substr(t, 1, 1) == "#") {
+      refuse(i, "a line begins with `#` in a shape this reader cannot classify as an inner attribute, an outer attribute or a shebang: `" squash(substr(t, 1, 72)) "`")
+      exit
+    }
     if (substr(t, 1, 3) != "#![") {
       # First outer attribute or first item: rustc forbids an inner attribute after
       # either, so the prologue — and every inner attribute in the file — ends here.
