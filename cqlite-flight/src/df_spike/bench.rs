@@ -506,7 +506,7 @@ impl BenchRunner {
     }
 
     /// The SQL text for a scenario.
-    fn sql_for(&self, kind: ScenarioKind) -> String {
+    pub(crate) fn sql_for(&self, kind: ScenarioKind) -> String {
         match kind {
             ScenarioKind::FullScanCount => "SELECT count(*) FROM t".to_string(),
             ScenarioKind::ProjectedScan => {
@@ -573,7 +573,7 @@ impl BenchRunner {
     /// pin, else DataFusion's default of one per available core. Resolved (rather
     /// than recorded as "default") so a results file read on another machine
     /// still says how much parallelism the number was produced with.
-    fn effective_df_partitions(&self) -> usize {
+    pub(crate) fn effective_df_partitions(&self) -> usize {
         self.config.df_target_partitions.unwrap_or_else(|| {
             std::thread::available_parallelism()
                 .map(|n| n.get())

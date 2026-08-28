@@ -508,6 +508,7 @@ A single cell, for debugging:
 | `run-matrix.sh` | the driver (one process per cell, iteration outermost, arm order rotated) |
 | `summarize.py` | the aggregator (median + range, the I/O-controlled regression, the comparability assert) |
 | `wide_4kb.cql` | the corpus DDL (column/key structure verbatim from Cassandra's own `schema.cql`) |
+| `corpus-manifest-2605.json` | the generator's provenance manifest, copied in so this report is self-contained (overlap measurement, per-SSTable timestamps, compression verification, the RF caveat) |
 
 Regenerate the tables from the committed cells without re-running the bench:
 
@@ -516,6 +517,6 @@ python3 docs/reports/2605-datafusion-spike-artifacts/summarize.py \
   docs/reports/2605-datafusion-spike-artifacts/cells
 ```
 
-Corpus manifest (provenance, overlap measurement, compression verification, per-SSTable timestamps):
-`/data/corpus-2605/manifest-2605.json`, produced by
-`test-data/scripts/gen-df-spike-corpus-2605.sh`.
+The manifest is copied in as `corpus-manifest-2605.json` (produced by
+`test-data/scripts/gen-df-spike-corpus-2605.sh` at `/data/corpus-2605/manifest-2605.json`, which is a
+machine-local path and not in the repository).

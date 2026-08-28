@@ -1,0 +1,139 @@
+{
+  "issue": 2605,
+  "purpose": "wide + overlapping-generation Cassandra 5.0 corpus for the DataFusion TableProvider spike bench",
+  "generated_utc": "2026-08-28T07:43:29.743192+00:00",
+  "generator": "test-data/scripts/gen-df-spike-corpus-2605.sh",
+  "image": "cassandra:5.0.2",
+  "container": "cqlite-df2605",
+  "corpus_root": "/data/corpus-2605",
+  "keyspace": "perf_2605",
+  "table": "wide_4kb",
+  "variant": "k2-two-generations",
+  "declared_replication_factor": 3,
+  "replication_note": "NOMINAL ONLY. SimpleStrategy RF=3 on a single-node container stores exactly ONE replica: real RF=3 is unreachable here, so this field describes the recorded DDL, not the bytes. M15 asks for 'wide + RF=3/overlap'; this corpus delivers the WIDE and OVERLAP halves \u2014 the property actually exercised is cross-SSTable overlap (read-time reconciliation), NOT replication. Do not cite it as an RF=3 measurement.",
+  "bytes_written_by": "Apache Cassandra cassandra:5.0.2 (cassandra-stress inside the official image) \u2014 NOT CQLite. Oracle-grade: these are real Cassandra-written nb/BIG bytes.",
+  "sstable_dir": "sstables/perf_2605/wide_4kb-18fff7b0a2b311f190b27fcf9962b5ee",
+  "compaction": {
+    "strategy": "SizeTieredCompactionStrategy",
+    "autocompaction": "DISABLED for the whole run (STCS could not merge the generations behind our back)",
+    "sequence": [
+      "load generation 1, flush, MAJOR-compact the whole table to 1 SSTable (safe: generation 2 did not exist yet)",
+      "load generation 2, flush, then `nodetool compact --user-defined` scoped to generation 2's files ONLY (a whole-table major compaction here would have merged the generations and destroyed the overlap)"
+    ],
+    "data_db_after_gen1_flush": 19,
+    "data_db_after_gen1_compaction": 1,
+    "data_db_after_gen2_flush": 7,
+    "data_db_final": 2,
+    "asserted_band": [
+      2,
+      3
+    ],
+    "merge_depth_k": 2
+  },
+  "compression": {
+    "class": "LZ4Compressor",
+    "chunk_length_in_kb": 16,
+    "verified": true,
+    "verified_how": "every published Data.db has a sibling CompressionInfo.db whose written header parses (test-data/scripts/read-compression-info.py) as LZ4Compressor with chunk_length=16384 B; the generator fails closed otherwise. Measured from the component, NOT read off the DDL.",
+    "why_it_matters": "PHASE_STREAM_DECOMPRESS is a real sub-phase of the read pipeline. An UNCOMPRESSED corpus understates decode cost and therefore OVERSTATES the vectorized-exec share, corrupting the decode-vs-exec split this spike isolates."
+  },
+  "keyspace_ddl": "\nCREATE KEYSPACE perf_2605 WITH replication = {'class': 'SimpleStrategy', 'replication_factor': '3'}  AND durable_writes = false;\n\nCREATE TABLE perf_2605.wide_4kb (\n    pk text,\n    ck int,\n    body text,\n    name text,\n    note text,\n    payload blob,\n    status text,\n    ts timestamp,\n    v_bool boolean,\n    v_dbl double,\n    v_int int,\n    v_long bigint,\n    PRIMARY KEY (pk, ck)\n) WITH CLUSTERING ORDER BY (ck ASC)\n    AND additional_write_policy = '99p'\n    AND allow_auto_snapshot = true\n    AND bloom_filter_fp_chance = 0.01\n    AND caching = {'keys': 'ALL', 'rows_per_partition': 'NONE'}\n    AND cdc = false\n    AND comment = ''\n    AND compaction = {'class': 'org.apache.cassandra.db.compaction.SizeTieredCompactionStrategy', 'max_threshold': '32', 'min_threshold': '4'}\n    AND compression = {'chunk_length_in_kb': '16', 'class': 'org.apache.cassandra.io.compress.LZ4Compressor'}\n    AND memtable = 'default'\n    AND crc_check_chance = 1.0\n    AND default_time_to_live = 0\n    AND extensions = {}\n    AND gc_grace_seconds = 864000\n    AND incremental_backups = true\n    AND max_index_interval = 2048\n    AND memtable_flush_period_in_ms = 0\n    AND min_index_interval = 128\n    AND read_repair = 'BLOCKING'\n    AND speculative_retry = '99p';\n",
+  "generations": [
+    {
+      "generation": 1,
+      "stress_seed_range": [
+        1,
+        190000
+      ],
+      "partitions": 190000,
+      "rows": 1900000,
+      "rows_per_partition": 10,
+      "load_seconds": 63,
+      "data_db_after_flush": 19,
+      "data_db_after_compaction": 1
+    },
+    {
+      "generation": 2,
+      "stress_seed_range": [
+        1,
+        57000
+      ],
+      "partitions": 57000,
+      "rows": 570000,
+      "rows_per_partition": 10,
+      "load_seconds": 21,
+      "data_db_after_flush": 7,
+      "data_db_total_after_compaction": 2,
+      "overlaps_generation_1": true,
+      "note": "same cassandra-stress seed range prefix => same partition keys, newer write timestamps",
+      "cutover_timestamp_us": 1787902758000000
+    }
+  ],
+  "logical_rows_post_reconciliation_nominal": 1900000,
+  "logical_partitions_post_reconciliation_nominal": 190000,
+  "rows_written_total_nominal": 2470000,
+  "nominal_counts_note": "Every *_nominal count (and each generation's partitions/rows) is derived from the cassandra-stress seed range, NOT counted. pk is drawn from uniform(1..1000000000), so a few seeds collide onto one pk; those partitions are distinct physical rows until a compaction merges them. Measured deviation for the default shape: 300 rows (0.012%) below nominal after the two compactions.",
+  "measured_physical_rows": {
+    "per_data_db": {
+      "nb-20-big-Data.db": 1899750,
+      "nb-27-big-Data.db": 569950
+    },
+    "total": 2469700,
+    "measured_by": "cqlite read-sstable (release, 0.16.1)",
+    "note": "physical rows as stored (pre-reconciliation); the gen1 file's count IS the post-reconciliation logical row count, since gen2's keys are a subset of gen1's"
+  },
+  "overlap": {
+    "requested_fraction": 0.3,
+    "measured_fraction": 0.288,
+    "method": "SELECT writetime(body) over a fixed 1% murmur3 token slice, before and after generation 2; measured_fraction = rows with writetime >= cutover / rows in slice",
+    "token_slice_pct": 1,
+    "slice_rows_after_gen1": 19690,
+    "slice_rows_after_gen2": 19690,
+    "slice_rows_written_by_gen2": 5670,
+    "slice_row_count_unchanged": true
+  },
+  "data_db_count": 2,
+  "data_db_total_bytes": 10350490722,
+  "data_db_files": [
+    {
+      "name": "nb-20-big-Data.db",
+      "bytes": 7961782802,
+      "min_timestamp_us": 1787902563484876,
+      "max_timestamp_us": 1787902619841075,
+      "holds_generation_2": false,
+      "compression_info_db_present": true,
+      "compressor_measured": "LZ4Compressor",
+      "chunk_length_bytes_measured": 16384
+    },
+    {
+      "name": "nb-27-big-Data.db",
+      "bytes": 2388707920,
+      "min_timestamp_us": 1787902764568761,
+      "max_timestamp_us": 1787902779693382,
+      "holds_generation_2": true,
+      "compression_info_db_present": true,
+      "compressor_measured": "LZ4Compressor",
+      "chunk_length_bytes_measured": 16384
+    }
+  ],
+  "all_components": [
+    "nb-20-big-CompressionInfo.db",
+    "nb-20-big-Data.db",
+    "nb-20-big-Digest.crc32",
+    "nb-20-big-Filter.db",
+    "nb-20-big-Index.db",
+    "nb-20-big-Statistics.db",
+    "nb-20-big-Summary.db",
+    "nb-20-big-TOC.txt",
+    "nb-27-big-CompressionInfo.db",
+    "nb-27-big-Data.db",
+    "nb-27-big-Digest.crc32",
+    "nb-27-big-Filter.db",
+    "nb-27-big-Index.db",
+    "nb-27-big-Statistics.db",
+    "nb-27-big-Summary.db",
+    "nb-27-big-TOC.txt",
+    "schema.cql"
+  ],
+  "usage": "CQLITE_DATASETS_ROOT=/data/corpus-2605"
+}
