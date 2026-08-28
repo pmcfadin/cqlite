@@ -566,8 +566,24 @@ async fn fast_arm_stream_stops_when_the_client_drops_it() {
          partition bodies so far)",
         work_counters::stream_walk_partitions_parsed()
     );
-    // Read the counter only AFTER the producer has provably exited, so this is
-    // its FINAL value and not a sample of a thread that might resume.
+    // The completion signal proves the OUTER query-row producer stopped. It does
+    // NOT prove the INNER batched scan task has (roborev, issue #3384):
+    // `drive_full_scan_rows` drops `BatchedScanStream` on its way out and that task
+    // is never joined. The trail is BOUNDED and cannot run away — the inner loop
+    // consults its consumer only when a batch fills, so once the receiver is dropped
+    // it decodes at most one more `BATCH_EMIT_ROWS` batch before its `send` fails and
+    // it returns — but "bounded" is not "finished", so let that trail land before
+    // reading rather than reading the instant the outer thread exits.
+    //
+    // MEASURED, not assumed: without this window the observed maximum was 1280; with
+    // it, 2370. The earlier reads were genuinely non-final. Convergence checked too —
+    // a 10x longer window gives 2048, i.e. LOWER, so the spread is run-to-run variance
+    // and not window-dependence. This is a drain window for a bounded amount of work,
+    // never a deadline, and no assertion here compares an elapsed duration to a
+    // threshold (#2642).
+    for _ in 0..200 {
+        tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+    }
     let settled = work_counters::stream_walk_partitions_parsed();
     // Observability for the issue-#3384 measurement: under `--nocapture` this
     // prints the observed read-ahead, so the distribution can be re-measured

@@ -136,6 +136,17 @@ pub fn mark_query_row_producer_finished() {
 /// indistinguishable from one that has stopped, so the walk can resume and drain
 /// the table right after the assertion passed.
 ///
+/// # What it proves, and what it does NOT
+///
+/// It proves the OUTER query-row producer stopped. It does NOT prove the INNER
+/// batched scan task has (roborev, issue #3384): `drive_full_scan_rows` drops
+/// `BatchedScanStream` on its way out and that task is never joined. That trail is
+/// BOUNDED — the inner loop consults its consumer only when a batch fills, so after
+/// the receiver is dropped it decodes at most one more emit batch before its `send`
+/// fails and it returns — so it cannot run away, but a reader wanting a FINAL work
+/// count should let the trail land rather than read the instant this signal moves.
+/// Joining the inner task on shutdown is tracked on #3428.
+///
 /// The `Acquire` load is load-bearing, not decoration. With `Relaxed` on both
 /// sides, observing a non-zero count would establish NO happens-before edge with
 /// the producer's earlier work-counter increments, so a reader could see
