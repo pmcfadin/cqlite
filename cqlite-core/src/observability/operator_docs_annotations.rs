@@ -14,9 +14,9 @@ pub(super) const ANNOTATIONS: &[MetricDoc] = &[
         name: catalog::READ_ROWS,
         kind: MetricKind::Counter,
         unit: catalog::unit::ROWS,
-        summary: "Total rows materialised by the read path (climbs incrementally during a long Flight merge scan).",
+        summary: "Rows a read DELIVERED to its consumer (climbs incrementally during a long Flight merge scan).",
         attributes: &[attr::SSTABLE_FORMAT],
-        interpretation: "Steadily rising under load is healthy; flat while a scan is in flight suggests a stall.",
+        interpretation: "Steadily rising under load is healthy; flat while a scan is in flight suggests a stall. It counts DELIVERED rows, not every row decoded: an abandoned stream reports the rows the consumer polled plus those already enqueued, so a row the producer was mid-send with when the consumer went away is excluded. The series can therefore read marginally below what a producer decoded, but never above the rows a query could have returned.",
         round_item: "—",
     },
     MetricDoc {
