@@ -3101,12 +3101,23 @@ fi
 # THIS BIT THE FUNCTION ON ITS FIRST RUN: the same pattern matched standalone and returned false
 # inside the gate, classifying a target `memory-budget` does run as executing nowhere. #3380 is the
 # instance that cost this PR a review round; #3387 tracks the ~696 other sites.
+# THE LIVE PREDICATE, and a guard against the dead one coming back (roborev round-22, Medium).
+# This assert used to extract `_feature_enabled_by_some_component`, which round 21 REPLACED — and
+# the replaced function was still sitting in the gate as dead code, so the assert kept passing while
+# the predicate actually in use went unchecked. A vacuous pass, in the self-test of the PR about
+# vacuous passes, created by superseding a function without deleting it. Both halves are now pinned:
+# the live predicate is linted, and the superseded name must not exist at all.
+if [ "$(grep -cF '_feature_enabled_by_some_component' "$GATE")" -eq 0 ]; then
+  ok "1699-r22-dead-predicate-gone: the superseded _feature_enabled_by_some_component is deleted, so no assert can bind to it instead of the live one"
+else
+  bad "1699-r22-dead-predicate-gone: _feature_enabled_by_some_component is back in the gate — it has no callers, and its presence lets a structural assert pass against dead code while the live predicate goes unchecked"
+fi
 pred_="$tmp/1699-r20-pred.txt"
-awk '/^_feature_enabled_by_some_component\(\) \{/, /^\}/' "$GATE" > "$pred_"
+awk '/^_component_runs_target\(\) \{/, /^\}/' "$GATE" > "$pred_"
 if [ ! -s "$pred_" ]; then
-  bad "1699-r20-pipefail-scope: could not extract _feature_enabled_by_some_component — this assert would pass vacuously"
+  bad "1699-r20-pipefail-scope: could not extract _component_runs_target — this assert would pass vacuously"
 elif [ "$(sed 's/[[:space:]]*#.*$//' "$pred_" | grep -cE '\|[[:space:]]*grep[^|]*-[a-zA-Z]*q')" -eq 0 ]; then
-  ok "1699-r20-pipefail: the component-enables-feature predicate uses grep -c + a numeric test, not '| grep -q' (which returns 141 on a successful match under pipefail)"
+  ok "1699-r20-pipefail: _component_runs_target contains no '| grep -q' (which returns 141 on a successful match under pipefail)"
 else
   bad "1699-r20-pipefail: '| grep -q' is back in the predicate — under pipefail it reports 141 on a SUCCESSFUL match, so the predicate answers FALSE precisely when it should answer TRUE (#3380/#3387)"
 fi
@@ -3159,6 +3170,88 @@ nested_all_any|#![cfg(all(feature = "on_a", any(feature = "off_x", feature = "on
 non_feature_pred|#![cfg(all(feature = "on_a", target_os = "linux"))]|UNCLASSIFIED
 bare_predicate|#![cfg(test)]|UNCLASSIFIED
 GATE_SHAPE_CASES
+fi
+
+# --- 34. #1699: _component_runs_target requires EXECUTION, not just the feature ------------
+#
+# roborev round-22 (Medium): the predicate treated any package+feature line without `--test` as
+# running every integration target. `cargo build`, `cargo clippy`, `cargo test --lib` and
+# `cargo test --no-run` all mention the package and the feature while executing NO integration
+# target, so each would have produced a false "runs elsewhere" — moving a target OUT of the #3375
+# bucket it belongs in. Round 21 fixed the weaker version of this same question; this is the
+# selector half.
+#
+# BEHAVIOURAL, driven through a substituted GATE_SELF: the predicate reads the gate's own source, so
+# a fixture "gate" containing exactly one invocation is the whole experiment. No test-only seam —
+# GATE_SELF is the variable the function already uses, set here in a subshell (#3312).
+crt_="$tmp/1699-r22-crt.sh"
+awk '/^_component_runs_target\(\) \{/, /^\}/' "$GATE" > "$crt_"
+if [ ! -s "$crt_" ]; then
+  bad "1699-r22-runs-target-scope: could not extract _component_runs_target — every case below would pass vacuously"
+else
+  while IFS='|' read -r case_ invocation_ want_; do
+    [ -n "$case_" ] || continue
+    fake_gate_="$tmp/1699-r22-gate-$case_.sh"
+    printf '#!/usr/bin/env bash\n# a comment mentioning --features decoy-feature --package cqlite-flight\n%s\n' "$invocation_" > "$fake_gate_"
+    if ( GATE_SELF="$fake_gate_"; . "$crt_"; _component_runs_target cqlite-flight dhat-heap issue_1494_producer_mem_budget ) >/dev/null 2>&1; then
+      got_=RUNS
+    else
+      got_=NO
+    fi
+    if [ "$got_" = "$want_" ]; then
+      ok "1699-r22-runs-target[$case_]: $got_"
+    else
+      bad "1699-r22-runs-target[$case_]: got $got_, expected $want_ — for invocation: $invocation_"
+    fi
+  done <<'RUNS_TARGET_CASES'
+whole_package_test|  cargo test --package cqlite-flight --features dhat-heap|RUNS
+explicit_this_target|  cargo test --package cqlite-flight --features dhat-heap --test issue_1494_producer_mem_budget|RUNS
+explicit_other_target|  cargo test --package cqlite-flight --features dhat-heap --test some_other_target|NO
+no_run_compile_only|  cargo test --package cqlite-flight --features dhat-heap --no-run|NO
+lib_only|  cargo test --package cqlite-flight --features dhat-heap --lib|NO
+bins_only|  cargo test --package cqlite-flight --features dhat-heap --lib --bins|NO
+cargo_build|  cargo build --package cqlite-flight --features dhat-heap|NO
+cargo_clippy|  cargo clippy --package cqlite-flight --features dhat-heap --all-targets|NO
+feature_substring|  cargo test --package cqlite-flight --features dhat-heap-extended|NO
+feature_in_list|  cargo test --package cqlite-flight --features arrow,dhat-heap,test-util|RUNS
+other_package|  cargo test --package cqlite-core --features dhat-heap|NO
+comment_only|  # cargo test --package cqlite-flight --features dhat-heap|NO
+RUNS_TARGET_CASES
+fi
+
+# Stacked and indented crate gates (roborev round-22, first Medium): Rust permits leading whitespace
+# and SEVERAL inner attributes, which are CONJUNCTIVE. Reading only the first one hides a gap — a
+# target whose first gate is enabled and whose second is not executes zero tests while being counted
+# as CI-covered. That is the direction that is harder to notice, which is why it needs a fixture.
+if [ -s "$gg_body_" ]; then
+  gg2_="$tmp/1699-r22-src"; mkdir -p "$gg2_"
+  while IFS='|' read -r case_ want_; do
+    [ -n "$case_" ] || continue
+    case "$case_" in
+      stacked_second_off) printf '//! prose\n#![cfg(feature = "on_a")]\n#![cfg(feature = "off_x")]\nfn t() {}\n' > "$gg2_/$case_.rs" ;;
+      stacked_both_on)    printf '//! prose\n#![cfg(feature = "on_a")]\n#![cfg(feature = "on_b")]\nfn t() {}\n' > "$gg2_/$case_.rs" ;;
+      indented_off)       printf '//! prose\n    #![cfg(feature = "off_x")]\nfn t() {}\n' > "$gg2_/$case_.rs" ;;
+      stacked_unclass)    printf '//! prose\n#![cfg(feature = "on_a")]\n#![cfg(any(feature = "off_x", feature = "on_b"))]\nfn t() {}\n' > "$gg2_/$case_.rs" ;;
+    esac
+    got_=$(
+      export GG_SRC="$gg2_/$case_.rs" GG_REL="tests/$case_.rs"
+      _package_test_targets_gated() { printf '%s\t%s\t%s\t%s\n' "${case_}_target" "$GG_SRC" source "$GG_REL"; }
+      # shellcheck disable=SC1090
+      . "$gg_body_"
+      _crate_gated_test_targets somepkg " on_a on_b " 2>/dev/null | awk -F'\t' '{print $4}'
+    )
+    got_=${got_:-NONE}
+    if [ "$got_" = "$want_" ]; then
+      ok "1699-r22-stacked-gates[$case_]: -> $got_"
+    else
+      bad "1699-r22-stacked-gates[$case_]: got '$got_', expected '$want_' — inner attributes are conjunctive, so reading only the first hides a target that executes nothing"
+    fi
+  done <<'STACKED_CASES'
+stacked_second_off|off_x
+stacked_both_on|NONE
+indented_off|off_x
+stacked_unclass|UNCLASSIFIED
+STACKED_CASES
 fi
 
 echo "----"

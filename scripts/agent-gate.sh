@@ -6417,25 +6417,43 @@ _component_runs_target() { # <pkg> <feature> <target-name>
   joined=$(sed 's/[[:space:]]*#.*$//' "$GATE_SELF" 2>/dev/null \
     | awk '{ if (sub(/\\$/, "")) { printf "%s ", $0 } else { print } }')
   [ -n "$joined" ] || return 1
+  local featlist f matched
   while IFS= read -r line; do
+    # It must be an invocation that EXECUTES tests (roborev round-22, Medium). `cargo build`,
+    # `cargo clippy`, `cargo test --no-run` and a `--lib`/`--bins`/`--doc`/`--bench` selection all
+    # mention the package and the feature while executing NO integration target, so treating any
+    # such line as a runner invents the very "runs elsewhere" claim this predicate exists to check.
+    case "$line" in
+      *"cargo test"*|*"cargo nextest run"*) ;;
+      *) continue ;;
+    esac
+    case "$line" in *"--no-run"*) continue ;; esac
     # the package, spelled either way
     case "$line" in
       *"--package $pkg"*|*"-p $pkg"*) ;;
       *) continue ;;
     esac
-    # the feature must be enabled on THIS invocation
-    case "$line" in
-      *"--features"*"$feat"*) ;;
-      *) continue ;;
-    esac
+    # The feature must be enabled on THIS invocation, matched as an EXACT token: a substring test
+    # would let `dhat` match `dhat-heap` (and vice versa) and silently reclassify a target.
+    featlist=${line#*--features }
+    featlist=${featlist%% *}
+    matched=0
+    for f in ${featlist//,/ }; do
+      [ "$f" = "$feat" ] && matched=1 && break
+    done
+    [ "$matched" = 1 ] || continue
     case "$line" in
       *"--test "*)
-        # selective: it runs only the targets it names
+        # selective: it runs only the integration targets it names
         case "$line" in
           *"--test $tgt "*|*"--test $tgt") return 0 ;;
         esac
         ;;
-      *) return 0 ;;   # whole-package invocation with the feature on
+      *"--lib"*|*"--bins"*|*"--bin "*|*"--doc"*|*"--benches"*|*"--bench "*)
+        # a unit/doc/bench selection executes no integration target
+        continue
+        ;;
+      *) return 0 ;;   # whole-package test invocation with the feature on
     esac
   done <<< "$joined"
   return 1
@@ -6462,29 +6480,6 @@ _component_runs_target() { # <pkg> <feature> <target-name>
 # Recognised gate shapes are the two this corpus uses: a single `feature = "X"` and an `all(...)` of
 # them. Anything else is emitted with off-feature `UNCLASSIFIED` rather than assumed benign — an
 # unrecognised gate is exactly where a silent gap would hide, and the caller prints it.
-# _feature_enabled_by_some_component <pkg> <feature> — does ANY component of THIS gate enable
-# <feature> for <pkg>? Derived from the gate's own source with comments stripped, because the
-# alternative is a curated "these run elsewhere" list, and the census's third iteration on this
-# finding was caused by exactly that kind of hand-maintained claim.
-#
-# Why it matters: `issue_1494_producer_mem_budget` is crate-gated on `dhat-heap`, which IS enabled
-# by the `memory-budget` component (`cargo test --package cqlite-flight --features dhat-heap`), so
-# calling it "executes nowhere" would have been a NEW false claim — and one the census contradicted
-# two lines later, where it already said memory-budget runs that target. `observability-testing`, by
-# contrast, appears in this gate only inside COMMENTS, so its 14 targets really do execute nowhere.
-_feature_enabled_by_some_component() { # <pkg> <feature>
-  local pkg="$1" feat="$2" hits
-  # `grep -c` + a numeric test, NEVER `| grep -q`. Under this script's `set -uo pipefail` a
-  # `… | grep -q` returns 141 ON A SUCCESSFUL MATCH — grep exits at the first hit, the upstream
-  # dies of SIGPIPE, and pipefail reports the signal — so the predicate reads FALSE precisely when
-  # the answer is TRUE. That is #3380's mechanism, and it bit THIS function on its first run: the
-  # identical pattern matched standalone (where I had not used `-q`) and returned false inside the
-  # gate, silently classifying a target that memory-budget does run as executing nowhere. #3387
-  # tracks the other ~696 sites of this shape.
-  hits=$(sed 's/[[:space:]]*#.*$//' "$GATE_SELF" 2>/dev/null \
-    | grep -cE -- "(--package|-p) +$pkg\b[^|]*--features[^|]*\b$feat\b|--features[^|]*\b$feat\b[^|]*(--package|-p) +$pkg\b" || true)
-  [ "${hits:-0}" -gt 0 ]
-}
 
 _crate_gated_test_targets() { # <pkg> <enabled-set>  -> name \t rel \t gate \t off
   local pkg="$1" enabled="$2" meta rel sp gate feats f off
@@ -6504,8 +6499,16 @@ _crate_gated_test_targets() { # <pkg> <enabled-set>  -> name \t rel \t gate \t o
     # against an independent `grep -l` (13 vs 15). Scanning the whole file is also SOUND rather
     # than merely safer: an inner attribute is only legal before any item, so every column-zero
     # `#![cfg(` in a Rust source file IS a crate-level gate wherever it appears.
-    gate=$(grep -m1 '^#!\[cfg(' "$sp" || true)
+    # EVERY crate-level inner gate, not just the first (roborev round-22, Medium). Rust allows
+    # leading whitespace and permits SEVERAL inner attributes, which are CONJUNCTIVE — so a target
+    # whose first gate is on and whose second is off executes zero tests while a first-gate-only
+    # read calls it CI-covered. Also the direction that hides a gap rather than inventing one,
+    # which is the harder direction to notice.
+    gate=$(grep -E '^[[:space:]]*#!\[cfg\(' "$sp" || true)
     [ -n "$gate" ] || continue
+    # Conjunction: the FIRST off feature found across all gates decides (any one off ⇒ nothing
+    # compiles); any unrecognised gate makes the whole target UNCLASSIFIED, never assumed benign.
+    local one all_off="" any_unclass=0
     # A CLOSED GRAMMAR (roborev round-21, Medium). The first cut treated ANY expression containing
     # `feature =` as a positive conjunction, so `not(feature = "x")` and
     # `any(feature = "x", feature = "<enabled>")` — both legal, and both meaning the target very
@@ -6517,41 +6520,51 @@ _crate_gated_test_targets() { # <pkg> <enabled-set>  -> name \t rel \t gate \t o
     # co-required census already reports `not`/`any`/`cfg_attr` as unclassified for the same reason.
     # Recognising only what is understood, and reporting the rest, is the rule; guessing is not.
     local expr
-    expr=${gate#'#![cfg('}
-    expr=${expr%')]'}
-    case "$expr" in
-      'feature = "'*'"')
-        # exactly one feature, nothing else
-        feats=${expr#'feature = "'}; feats=${feats%'"'}
-        case "$feats" in *'"'*|*','*|*'('*) feats="" ;; esac
-        ;;
-      'all('*')')
-        # a conjunction of plain `feature = "…"` clauses ONLY. Any operator inside (not/any/all,
-        # target_os, …) makes it a shape this does not model.
-        local inner=${expr#'all('}; inner=${inner%')'}
-        case "$inner" in
-          *'not('*|*'any('*|*'all('*) feats="" ;;
-          *)
-            feats=$(printf '%s' "$inner" | tr ',' '\n' | sed 's/^[[:space:]]*//; s/[[:space:]]*$//' \
-                    | sed -n 's/^feature = "\([^"]*\)"$/\1/p')
-            # every clause must have parsed, or the expression contains something else
-            local n_clause n_feat
-            n_clause=$(printf '%s' "$inner" | tr ',' '\n' | grep -c . || true)
-            n_feat=$(printf '%s\n' "$feats" | grep -c . || true)
-            [ "${n_clause:-0}" = "${n_feat:-0}" ] || feats=""
-            ;;
-        esac
-        ;;
-      *) feats="" ;;
-    esac
-    if [ -z "$feats" ]; then
-      printf '%s\t%s\t%s\t%s\n' "$_tn" "$rel" "$gate" "UNCLASSIFIED"; continue
+    while IFS= read -r one; do
+      [ -n "$one" ] || continue
+      one=${one#"${one%%[![:space:]]*}"}     # strip leading whitespace (Rust permits it)
+      expr=${one#'#![cfg('}
+      expr=${expr%')]'}
+      case "$expr" in
+        'feature = "'*'"')
+          # exactly one feature, nothing else
+          feats=${expr#'feature = "'}; feats=${feats%'"'}
+          case "$feats" in *'"'*|*','*|*'('*) feats="" ;; esac
+          ;;
+        'all('*')')
+          # a conjunction of plain `feature = "…"` clauses ONLY. Any operator inside (not/any/all,
+          # target_os, …) makes it a shape this does not model.
+          local inner=${expr#'all('}; inner=${inner%')'}
+          case "$inner" in
+            *'not('*|*'any('*|*'all('*) feats="" ;;
+            *)
+              feats=$(printf '%s' "$inner" | tr ',' '\n' | sed 's/^[[:space:]]*//; s/[[:space:]]*$//' \
+                      | sed -n 's/^feature = "\([^"]*\)"$/\1/p')
+              # every clause must have parsed, or the expression contains something else
+              local n_clause n_feat
+              n_clause=$(printf '%s' "$inner" | tr ',' '\n' | grep -c . || true)
+              n_feat=$(printf '%s\n' "$feats" | grep -c . || true)
+              [ "${n_clause:-0}" = "${n_feat:-0}" ] || feats=""
+              ;;
+          esac
+          ;;
+        *) feats="" ;;
+      esac
+      if [ -z "$feats" ]; then
+        any_unclass=1
+        break
+      fi
+      for f in $feats; do
+        case " $enabled " in *" $f "*) ;; *) [ -z "$all_off" ] && all_off="$f" ;; esac
+      done
+    done <<< "$gate"
+    # One line of gate text for the record, whatever the attribute count.
+    local gate_1line
+    gate_1line=$(printf '%s' "$gate" | tr '\n' ' ' | sed 's/  */ /g; s/ $//')
+    if [ "$any_unclass" = 1 ]; then
+      printf '%s\t%s\t%s\t%s\n' "$_tn" "$rel" "$gate_1line" "UNCLASSIFIED"; continue
     fi
-    off=""
-    for f in $feats; do
-      case " $enabled " in *" $f "*) ;; *) off="$f"; break ;; esac
-    done
-    [ -n "$off" ] && printf '%s\t%s\t%s\t%s\n' "$_tn" "$rel" "$gate" "$off"
+    [ -n "$all_off" ] && printf '%s\t%s\t%s\t%s\n' "$_tn" "$rel" "$gate_1line" "$all_off"
   done <<< "$meta"
 }
 
