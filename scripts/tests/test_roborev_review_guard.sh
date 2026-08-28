@@ -4684,16 +4684,24 @@ _rx_snap_paths
 SNAPSHOT_NOTICE
 ROBOREV_SNAPSHOT_PATH
 ROBOREV_SNAPSHOT_CONTAINMENT'
+# THE ONE CLASSIFIER PREDICATE (roborev job 61). The real scan, AC2, AC3 and AC3b all call this, so
+# no caller can supply its own answer. They used to: AC2 carried a literal no-op
+# (`case ... in *"$tok"*) : ;; esac`) and AC3 hard-coded two token names, which meant AC3's stated
+# criterion -- "observed firing" -- was satisfied by a control that could not fail. An AC verified by
+# a control that supplies its own answer is not verified, and this is the SECOND instance of
+# "control certifies a copy, not the enforcer" in this PR; the first had already DRIFTED by the time
+# it was found. One helper makes a third instance unexpressible rather than merely unlikely.
+_cls_hits() {
+  for _ch_tok in $_cls_ident_list; do
+    case "$1" in *"$_ch_tok"*) printf '%s\n' "$_ch_tok" ;; esac
+  done
+}
 _cls_all=$(_cls_all_lines "$ORACLES" "$CHECKS_FILE" "$WRAPPER_REAL")
 if [ -z "$_cls_all" ]; then
   bad 'structural: the all-lines capture for the classifier scan is EMPTY, so the identifier scan below would report CLEAN having examined nothing'
 fi
-# ONE source for the list, so AC2 below asserts against the same tokens the scan uses.
-for _gone in $_cls_ident_list; do
-  case "$_cls_all" in
-    *"$_gone"*) _classifier="$_classifier $_gone" ;;
-  esac
-done
+_classifier=$(_cls_hits "$_cls_all" | tr '\n' ' ')
+_classifier=${_classifier% }
 # THE 4 PROSE-SHAPED VERDICT STRINGS ARE NOT SCANNED AT ALL (roborev jobs 51/53/54/56/57/58).
 # `mixed-delivery`, `delegated-oversize`, `snapshot-unbound` and `unparseable-instruction` are
 # English, so they legitimately appear in help text and doctrine -- which forced an exemption for
@@ -4737,10 +4745,14 @@ else
   # The scan cannot trip on these because it does not look for them: the token list is the thirteen
   # CODE IDENTIFIERS only. Asserted against the list itself rather than against a filter's output,
   # so this stays true without a heredoc exemption existing at all.
+  # Asked of the PREDICATE the real scan uses, over the REAL text -- not of the token list, and not
+  # by a match this control performs itself. If the predicate ever starts reporting a prose word,
+  # this fails; if the predicate stops reporting anything at all, AC3 below fails. Between them the
+  # two directions pin the same function.
+  _ac2_hits=$(_cls_hits "$_cls_all")
   _ac2_leaked=""
   for _ac2_tok in $_ac2_prose; do
-    case "$_cls_all" in *"$_ac2_tok"*) : ;; esac
-    printf '%s\n' "$_cls_ident_list" | grep -qxF "$_ac2_tok" && _ac2_leaked="$_ac2_leaked $_ac2_tok"
+    printf '%s\n' "$_ac2_hits" | grep -qxF "$_ac2_tok" && _ac2_leaked="$_ac2_leaked $_ac2_tok"
   done
   if [ -z "$_ac2_leaked" ]; then
     ok "structural (#3367 AC2): the real wrapper's doctrine prose names$_ac2_prose and NONE of them is in the scanned token list — recording what was deleted cannot be a violation, with no heredoc exemption needed to make that true"
@@ -4758,10 +4770,7 @@ cp "$WRAPPER_REAL" "$_ac3_dir/roborev-review.sh"
 printf '\nROBOREV_DIFF_SOURCE_STATE="mixed-delivery"   # a genuine reintroduction\n' \
   >>"$_ac3_dir/roborev-review.sh"
 _ac3_exec=$(_cls_all_lines "$ORACLES" "$CHECKS_FILE" "$_ac3_dir/roborev-review.sh")
-_ac3_caught=""
-for _ac3_tok in ROBOREV_DIFF_SOURCE_STATE mixed-delivery; do
-  case "$_ac3_exec" in *"$_ac3_tok"*) _ac3_caught="$_ac3_caught $_ac3_tok" ;; esac
-done
+_ac3_caught=$(_cls_hits "$_ac3_exec" | tr '\n' ' ')
 # AC3b: THE SAME REINTRODUCTION, PARKED INSIDE usage() BEFORE ITS HEREDOC (roborev job 47). AC3
 # above appends OUTSIDE the function, which cannot see a filter that exempts from `usage() {`
 # rather than from `cat <<EOF` — a reintroduction between the two was invisible. An executable
@@ -4771,7 +4780,8 @@ mkdir -p "$_ac3b_dir"
 awk '/^usage\(\) \{/ && !done { print; print "  ROBOREV_DIFF_SOURCE_STATE=inline"; done = 1; next } { print }' \
   "$WRAPPER_REAL" >"$_ac3b_dir/roborev-review.sh"
 _ac3b_exec=$(_cls_all_lines "$ORACLES" "$CHECKS_FILE" "$_ac3b_dir/roborev-review.sh")
-case "$_ac3b_exec" in
+_ac3b_caught=$(_cls_hits "$_ac3b_exec" | tr '\n' ' ')
+case "$_ac3b_caught" in
   *ROBOREV_DIFF_SOURCE_STATE*)
     ok 'structural (#3367 AC3b): a reintroduction parked INSIDE usage() before its heredoc is caught — identifiers are scanned everywhere, so no part of the function is exempt' ;;
   *)
