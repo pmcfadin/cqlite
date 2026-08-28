@@ -254,6 +254,34 @@ def derive(
             "own failure. Add `ref-cycles` to the event set",
         )
 
+    # EACH SOURCE MUST BE A PHYSICALLY POSSIBLE OCCUPANCY, not merely agree with the other
+    # (#3248, roborev job 68 finding 2). Two CORRUPT ratios that agree produce a confident
+    # verdict: measured on the pre-fix code, mperf and ref-cycles both at twice TSC yielded
+    # `verdict: OK` with `occupancy: 2.0000` -- 200% occupancy, reported as fine. This is the
+    # same defect as accepting a negative counter (job 64 finding 5): every check compared
+    # magnitudes and none asked whether the inputs were POSSIBLE. Agreement is necessary and
+    # not sufficient.
+    #
+    # The ceiling allows a small tolerance above 1.0 because these are independently sampled
+    # counters over slightly different enabled windows, so a genuinely saturated CPU can
+    # measure marginally over unity; it does not allow 2.0.
+    OCCUPANCY_CEILING = 1.02
+    for name, value in sorted(occupancy_sources.items()):
+        if not math.isfinite(value):
+            raise Refusal(
+                "FREQ_OCCUPANCY_NOT_FINITE",
+                f"occupancy source {name} is {value!r}; a non-finite occupancy cannot be"
+                " compared, so it would disable the agreement check rather than fail it.",
+            )
+        if not 0.0 < value <= OCCUPANCY_CEILING:
+            raise Refusal(
+                "FREQ_OCCUPANCY_OUT_OF_RANGE",
+                f"occupancy source {name} is {value:.4f}, outside (0, {OCCUPANCY_CEILING}]."
+                " An occupancy is a FRACTION of a window; a value outside that range is a"
+                " corrupt counter, not a busy CPU. Two such values that AGREE would otherwise"
+                " produce a confident verdict about an impossible machine.",
+            )
+
     lo, hi = min(occupancy_sources.values()), max(occupancy_sources.values())
     spread = hi - lo
     if spread > occupancy_tolerance:
@@ -299,13 +327,18 @@ def derive(
     # would defeat the multiplexing guard. The right answer is to make this ONE consumer
     # tolerant, not to make the parser permissive.
     if "cycles" in events and "task-clock" not in events:
-        out["occupancy_times_frequency_NOT_A_CLOCK"] = {
-            "value_ghz_LOOKS_LIKE": None,
-            "WARNING": (
-                "not computed: `task-clock` was not among the counted events. The trap value"
-                " is advisory — the frequency above does not depend on it."
-            ),
-        }
+        # A SEPARATE KEY, not the trap key with a None value (#3248, roborev job 68 finding 1).
+        #
+        # The round-4 fix that made `task-clock` optional stored `None` under the trap key, and
+        # `main()` formats that key with `:.4f` — so it raised TypeError on the DOCUMENTED AC4
+        # event set (cycles + msr/* with no task-clock), AFTER the JSON had been written. A fix
+        # for "do not reject the run" that instead CRASHED the run, on the exact path this
+        # issue documents. Absence is now recorded under its own key, so no consumer can
+        # mistake it for a computed value.
+        out["occupancy_times_frequency_NOT_COMPUTED"] = (
+            "`task-clock` was not among the counted events, so the trap value is not"
+            " available. It is advisory only — the frequency above does not depend on it."
+        )
     if "cycles" in events and "task-clock" in events:
         # `task-clock`'s COUNT is accrued CPU-nanoseconds. The trap quantity is
         # cycles / task-clock-in-seconds, i.e. counts and not rates — computing it from
@@ -420,10 +453,12 @@ def main(argv: Optional[list] = None) -> int:
           f" <= {occ['agreed_within']}, {len(occ['sources'])} independent sources)")
     for k, v in sorted(occ["sources"].items()):
         print(f"    {k} = {v:.4f}")
-    if "occupancy_times_frequency_NOT_A_CLOCK" in record:
-        trap = record["occupancy_times_frequency_NOT_A_CLOCK"]
+    trap = record.get("occupancy_times_frequency_NOT_A_CLOCK")
+    if isinstance(trap, dict) and isinstance(trap.get("value_ghz_LOOKS_LIKE"), float):
         print(f"  cycles/task-clock would have read {trap['value_ghz_LOOKS_LIKE']:.4f} "
               "-- NOT A CLOCK, see the record")
+    elif "occupancy_times_frequency_NOT_COMPUTED" in record:
+        print("  cycles/task-clock: not computed (task-clock not counted) -- advisory only")
     return 0
 
 

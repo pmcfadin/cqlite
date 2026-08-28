@@ -1175,7 +1175,7 @@ perf_stat_c() {
   if [[ -n "${PROFILE_OUT:-}" && "$outfile" != *-setup.csv ]]; then
     local _ptag
     _ptag="$(basename "$outfile" .csv)"
-    perf_record_c "$PROFILE_OUT/profile-$_ptag.data" >/dev/null 2>&1 &
+    perf_record_c "$PROFILE_OUT/profile-$_ptag.data" >"$PROFILE_OUT/profile-$_ptag.stderr" 2>&1 &
     _prof_pid=$!
     # Published at file scope BEFORE the window opens, so a signal arriving at any point
     # during the measurement finds a PID to clean up.
@@ -1201,9 +1201,59 @@ perf_stat_c() {
   perf stat -x, -e "$EVENTS" -C "$SERVER_CPUS" -o "$outfile" -- "$@" || _rc=$?
   if [[ -n "$_prof_pid" ]]; then
     # SIGINT, not SIGKILL: perf finalises perf.data on INT and leaves an unreadable stub on KILL.
+    # THE PROFILER MUST STILL HAVE BEEN RUNNING, AND ITS EXIT STATUS IS READ (#3248, roborev
+    # job 68 finding 3).
+    #
+    # The previous version signalled and waited with `|| true` on both, so a `perf record`
+    # that DIED EARLY was indistinguishable from one that covered the whole window: it had
+    # written some valid data, so `data.size` was nonzero and the header check passed, and a
+    # TRUNCATED profile was accepted as complete. `data.size != 0` establishes that perf
+    # finalised SOMETHING, not that it sampled the window it was asked to.
+    #
+    # `kill -0` first: if the process is already gone, the signal would have been a no-op and
+    # the "we stopped it cleanly" story is false.
+    local _prof_was_alive=1
+    kill -0 "$_prof_pid" 2>/dev/null || _prof_was_alive=0
     kill -INT "$_prof_pid" 2>/dev/null || true
-    wait "$_prof_pid" 2>/dev/null || true
+    local _prof_status=0
+    wait "$_prof_pid" || _prof_status=$?
     _ACTIVE_PROFILER_PID=""
+    if [[ "$_prof_was_alive" -eq 0 ]]; then
+      echo "FATAL: the sampling profiler had ALREADY EXITED before the counting window closed," >&2
+      echo "       so its profile covers only part of the window it was asked to sample -- and" >&2
+      echo "       a partial profile is indistinguishable from a complete one by file size or" >&2
+      echo "       by the perf.data header alone. Its stderr:" >&2
+      sed 's/^/         /' "$PROFILE_OUT/profile-$_ptag.stderr" >&2 2>/dev/null || true
+      return 2
+    fi
+    # THE GATE IS perf's OWN SUCCESS LINE, NOT AN ENUMERATION OF EXIT STATUSES.
+    #
+    # The first version of this check accepted {0, 130} as the affirmative set, reasoning that
+    # SIGINT termination reports 128+2. THAT REASONING WAS WRONG AND IT FAILED A CORRECT RUN:
+    # perf actually exits **143** here (128+SIGTERM), because on SIGINT it stops the session,
+    # writes its data, then terminates its own child (`sleep`) with SIGTERM. Measured directly:
+    # status 143 alongside `Captured and wrote 2.278 MB ... (11704 samples)` — a complete,
+    # successful capture. I derived an "affirmative set" by reasoning instead of measuring it,
+    # which is the error this issue exists to catch, committed inside a check written to catch it.
+    #
+    # So the gate is now the AFFIRMATIVE EVIDENCE perf itself prints on success, and the exit
+    # status is RECORDED rather than adjudicated — because I have just demonstrated that I
+    # cannot reliably enumerate its values, and a check keyed on an enumeration I get wrong
+    # fails correct runs. `Captured and wrote` appears only after perf has flushed its data.
+    if ! grep -q 'Captured and wrote' "$PROFILE_OUT/profile-$_ptag.stderr" 2>/dev/null; then
+      echo "FATAL: the sampling profiler never reported a completed capture (its stderr has no" >&2
+      echo "       'Captured and wrote' line), so nothing establishes that it flushed the data" >&2
+      echo "       it collected. Exit status was $_prof_status. Its stderr:" >&2
+      sed 's/^/         /' "$PROFILE_OUT/profile-$_ptag.stderr" >&2 2>/dev/null || true
+      return 2
+    fi
+    # `>&2`, LIKE EVERY OTHER DIAGNOSTIC IN THIS FUNCTION. `perf_stat_c`'s STDOUT IS THE
+    # MEASURED COMMAND'S OUTPUT CHANNEL -- the rep's payload JSON is written through it -- so
+    # an informational line on stdout is APPENDED TO THE DATA. The first version of this echo
+    # did exactly that and corrupted scan-warm-1.json into two JSON documents, which surfaced
+    # as `JSONDecodeError: Extra data` in the reporter, three layers away from the cause.
+    # A diagnostic and a data stream must not share a channel.
+    echo "profile: $_ptag captured (profiler exit status $_prof_status, capture confirmed)" >&2
     # AND VERIFY IT FINALISED. An unterminated `perf record` leaves a file of plausible SIZE
     # whose `data size` header is 0, which `perf report` refuses — so the failure is invisible
     # at the filesystem level and only appears when someone tries to read the profile, possibly

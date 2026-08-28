@@ -59,6 +59,7 @@ import argparse
 import datetime
 import json
 import math
+import os
 import pathlib
 import sys
 from typing import Dict, List, Optional
@@ -88,7 +89,18 @@ COMPETING_COMMS = ("rustc", "cargo", "cc1", "cc1plus", "ld", "lld", "mold")
 
 # Substrings searched in /proc/<pid>/cmdline. Needed for things whose comm is `bash` or
 # `python3` and therefore indistinguishable from anything else by comm alone.
-COMPETING_CMDLINE = ("agent-gate.sh", "cargo build", "cargo test", "cargo nextest")
+# Substrings searched in /proc/<pid>/cmdline, for things whose `comm` is `bash` or `python3`
+# and therefore indistinguishable from anything else by comm alone.
+#
+# `cargo build` / `cargo test` / `cargo nextest` ARE DELIBERATELY ABSENT. They were here and
+# caused a FALSE REFUSAL of a quiet box: the shell ORCHESTRATING the measurement had
+# `cargo build ...` in its own cmdline (it had launched the build earlier in the same command),
+# so the census matched the observer's own ancestry. They are also REDUNDANT -- `cargo` is in
+# COMPETING_COMMS, so a real cargo invocation is caught by comm, which cannot be spoofed by a
+# shell that merely MENTIONS the command. This is the same defect family as `pgrep -f` matching
+# its own invocation, one level out: a cmdline substring match sees anything that talks about a
+# process, not only the process.
+COMPETING_CMDLINE = ("agent-gate.sh",)
 
 DEFAULT_MAX_LOAD1 = 2.0
 DEFAULT_MAX_LOAD1_MOVEMENT = 0.5
@@ -161,12 +173,29 @@ def census(self_pid: Optional[int] = None) -> List[Dict[str, str]]:
     command's OWN cmdline and inflates the very count it is measuring. That defect was
     observed in the first version of this lane's sampler, where the field read `0\\n0`.
     """
+    # SELF AND EVERY ANCESTOR ARE EXCLUDED. The observer must not appear in its own
+    # measurement, and neither must whatever spawned it: a wrapper shell whose cmdline mentions
+    # a build or a gate is not a competing process, it is the thing running the measurement.
+    # Walking the ppid chain handles that generally, rather than blocklisting spellings one at
+    # a time as they are discovered.
+    excluded = set()
+    probe = os.getpid() if self_pid is None else self_pid
+    for _ in range(64):  # bounded: a cycle or a very deep tree must not hang the census
+        if probe <= 1 or probe in excluded:
+            break
+        excluded.add(probe)
+        try:
+            stat_fields = pathlib.Path(f"/proc/{probe}/stat").read_text().rsplit(")", 1)[1]
+            probe = int(stat_fields.split()[1])
+        except (OSError, IndexError, ValueError):
+            break
+
     found: List[Dict[str, str]] = []
     for entry in pathlib.Path("/proc").iterdir():
         if not entry.name.isdigit():
             continue
         pid = int(entry.name)
-        if self_pid is not None and pid == self_pid:
+        if pid in excluded:
             continue
         try:
             comm = (entry / "comm").read_text().strip()
@@ -277,7 +306,21 @@ def window_census_clean(timeseries: str, start: str, end: str) -> Dict[str, obje
     # as uncontaminated. That is a pass derived from the ABSENCE of a bad signal, which is
     # exactly the rule this issue keeps restating, violated here in the guard written to
     # enforce it. The fields are required, and required to be non-negative integers.
+    # THE TIMESERIES CENSUS MUST COVER THE SAME PROCESSES AS BOUNDARY SAMPLING (#3248,
+    # roborev job 68 finding 5).
+    #
+    # The boundary sampler treats `cc1`, `cc1plus`, `ld`, `lld` and `mold` as competing, while
+    # the in-window census only had `rustc`/`cargo`/`gate` fields — so a short-lived compiler
+    # or linker appearing ONLY BETWEEN boundaries contaminated the measurement while the window
+    # was certified clean. Two halves of one gate, disagreeing about what "competing" means.
+    #
+    # A sampler that emits `competing_count` (the full census, computed from the same
+    # COMPETING_COMMS list this module uses for boundary samples) is required going forward and
+    # is authoritative when present. The individual fields remain accepted for a timeseries
+    # recorded before that field existed — but such a record is explicitly a NARROWER census,
+    # and the verdict says so rather than implying full coverage.
     CENSUS_FIELDS = ("rustc", "cargo", "gate")
+    narrow_census_records = 0
     dirty = []
     for rec in rows:
         counts = {}
@@ -297,6 +340,34 @@ def window_census_clean(timeseries: str, start: str, end: str) -> Dict[str, obje
                     " non-negative integer count.",
                 )
             counts[field] = value
+        # `competing_count` is the FULL census when the sampler provides it. Its absence is
+        # recorded, never silently treated as equivalent coverage.
+        full = rec.get("competing_count")
+        if full is None:
+            narrow_census_records += 1
+        else:
+            if isinstance(full, bool) or not isinstance(full, int) or full < 0:
+                raise NotQuiescent(
+                    "QUIESCENCE_TIMESERIES_SCHEMA",
+                    f"the sample at {rec.get('ts')!r} has competing_count={full!r}, which is"
+                    " not a non-negative integer count.",
+                )
+            if full:
+                dirty.append(rec)
+                continue
+        # LOAD1 IS REQUIRED AND MUST BE FINITE (finding 4). Without this, a census-complete
+        # timeseries carrying no `load1` was declared QUIESCENT and the verdict file was
+        # WRITTEN, and only the summary print then crashed — leaving a QUIESCENT artifact on
+        # disk that a later direct report would accept. A partially-written verdict is worse
+        # than none.
+        if "load1" not in rec:
+            raise NotQuiescent(
+                "QUIESCENCE_TIMESERIES_SCHEMA",
+                f"the sample at {rec.get('ts')!r} carries no `load1`. It is recorded as"
+                " context in the verdict, so a record without it cannot be summarised and"
+                " must not be certified.",
+            )
+        _finite(f"the sample at {rec.get('ts')!r} load1", rec["load1"])
         if any(counts.values()):
             dirty.append(rec)
     if dirty:
@@ -320,6 +391,17 @@ def window_census_clean(timeseries: str, start: str, end: str) -> Dict[str, obje
         # the session manifest declares -- a verdict from a different file establishes nothing
         # about this session (#3248 finding 2).
         "timeseries": timeseries,
+        # How many in-window records carried only the NARROW census (no `competing_count`).
+        # Nonzero means this verdict rests on a census of rustc/cargo/gate alone, not the full
+        # COMPETING_COMMS set that boundary sampling uses (#3248 finding 5).
+        "narrow_census_records": narrow_census_records,
+        "census_breadth": (
+            "FULL (competing_count present on every in-window record)"
+            if narrow_census_records == 0
+            else f"NARROW on {narrow_census_records} of {len(rows)} record(s): those carry"
+                 " rustc/cargo/gate only, so a short-lived cc1/ld/lld/mold between boundaries"
+                 " would not appear. Stated rather than implied."
+        ),
     }
 
 

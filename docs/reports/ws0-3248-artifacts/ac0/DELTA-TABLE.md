@@ -7,6 +7,17 @@ events `cycles,instructions`, `target/release`, server `taskset -c 2,10`, client
 Quiescence: **certified on 48 attributable sampler samples**, zero competing processes across the
 whole window, competing census zero at both boundaries. See `quiescence-verdict.json`.
 
+**Qualifier added after the fact, because the earlier wording overstated the coverage.** The
+timeseries recorded during this window carries the census fields `rustc`, `cargo` and `gate` — it
+predates the `competing_count` field the gate now requires, which covers the full
+`COMPETING_COMMS` set (`cc1`, `cc1plus`, `ld`, `lld`, `mold` as well). So a **short-lived compiler
+or linker appearing only between boundary samples would not have appeared in this window's
+census**. The verdict now says so itself (`census_breadth: NARROW on 48 of 48 record(s)`).
+
+In practice the gap is small — `cc1` and `ld` are children of `rustc`/`cargo`, which *were*
+censused, so a compile would have shown up through its parent — but "in practice small" is exactly
+the reasoning this issue exists to refuse, so the limitation is stated rather than argued away.
+
 Host identity recorded (`host-identity.json`) — instance `i-04ac0a860eef7f241`, `boot_id
 bb94898a-...`, microcode `0x2b000661`. The #3096 record has no host identity at all, so whether
 this is cross-session or cross-instance is **undecidable from that record**; that is a gap in the
