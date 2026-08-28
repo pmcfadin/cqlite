@@ -6846,18 +6846,32 @@ _rust_module_closure() { # <root-file>  -> one path per line; unresolved mods to
       fi
     done <<EOF
 $(awk '
-  /#\[[[:space:]]*path[[:space:]]*=/ {
+  # A `#[path = "..."]` ATTRIBUTE only, and a same-line `mod` must still be processed (roborev
+  # round-40, Medium). Two defects in one line:
+  #   * `next` fired unconditionally, so the very common single-line form
+  #     `#[path = "child.rs"] mod child;` recorded the path and then SKIPPED the `mod` — the child
+  #     was never queued, so legacy-gated tests inside it escaped discovery, the polarity scan and
+  #     the census entirely. Silent, and in the direction that under-reports coverage.
+  #   * the pattern matched anywhere on a line, so a doc comment or a string mentioning
+  #     `#[path = "..."]` set `haspath` and could bind a STALE path to the next real `mod`.
+  # Anchored at the start of the line (attributes are the first thing on their line; a `//`/`//!`
+  # comment or an inline mention therefore cannot match), and `next` only when no `mod` follows.
+  /^[[:space:]]*#\[[[:space:]]*path[[:space:]]*=/ {
     if (match($0, /"[^"]+"/)) { p = substr($0, RSTART+1, RLENGTH-2); haspath = 1 }
-    next
+    if ($0 !~ /(^|[[:space:]])mod[[:space:]]/) next
+    # falls through to the mod rule below, which consumes `haspath`
   }
   # EVERY visibility form, not just private and plain `pub` (roborev round-13 finding):
   # `pub(crate) mod`, `pub(super) mod` and `pub(in path) mod` are ordinary declarations, and
   # this corpus has 30 semicolon-terminated `pub(crate) mod` lines — so skipping them was
   # LIVE coverage loss. Their child modules were invisible to discovery, the polarity scan
   # AND the census, all three in the silent direction.
-  /^[[:space:]]*(pub([[:space:]]*\([^)]*\))?[[:space:]]+)?mod[[:space:]]+[A-Za-z_][A-Za-z0-9_]*[[:space:]]*;/ {
+  # An optional leading ATTRIBUTE is allowed before `mod` (roborev round-40): the single-line form
+  # `#[path = "child.rs"] mod child;` is idiomatic, and without this the declaration was unreachable
+  # from here even after the path rule stopped swallowing the line.
+  /^[[:space:]]*(#\[[^]]*\][[:space:]]*)?(pub([[:space:]]*\([^)]*\))?[[:space:]]+)?mod[[:space:]]+[A-Za-z_][A-Za-z0-9_]*[[:space:]]*;/ {
     n = $0
-    sub(/^[[:space:]]*(pub([[:space:]]*\([^)]*\))?[[:space:]]+)?mod[[:space:]]+/, "", n)
+    sub(/^[[:space:]]*(#\[[^]]*\][[:space:]]*)?(pub([[:space:]]*\([^)]*\))?[[:space:]]+)?mod[[:space:]]+/, "", n)
     sub(/[[:space:]]*;.*$/, "", n)
     if (haspath) { printf "P\t%s\n", p; haspath = 0 } else { printf "M\t%s\n", n }
     next

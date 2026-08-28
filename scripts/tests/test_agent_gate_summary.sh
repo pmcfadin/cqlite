@@ -3611,6 +3611,47 @@ fi
 # to print before section 36 and before the floor, so the script could announce `failed: 0` and then
 # add failures underneath it. A summary that precedes its own subject is the same shape as a verdict
 # that precedes its measurement.
+# --- 37b. #1699: same-line `#[path]` + `mod`, and doc-comment mentions (round-40, Medium) ----
+#
+# `_rust_module_closure` matched `#[path = ...]` ANYWHERE on a line and then `next`ed
+# unconditionally. Two consequences: the common single-line form `#[path = "child.rs"] mod child;`
+# recorded the path and SKIPPED the `mod`, so the child module was never queued — legacy-gated tests
+# inside it escaped discovery, polarity AND the census, silently and in the under-reporting
+# direction; and a doc comment mentioning that syntax could bind a stale path to the next real `mod`.
+mc_="$tmp/1699-r40-mc.sh"
+awk '/^_rust_module_closure\(\) \{/, /^\}/' "$GATE" > "$mc_"
+if [ ! -s "$mc_" ]; then
+  bad "1699-r40-closure-scope: could not extract _rust_module_closure — these asserts would pass vacuously"
+else
+  mc_dir_="$tmp/1699-r40-src"; mkdir -p "$mc_dir_"
+  printf 'fn t() {}\n' > "$mc_dir_/child.rs"
+  printf 'fn t() {}\n' > "$mc_dir_/plain.rs"
+  # (a) same-line #[path] + mod  -> the child MUST be in the closure
+  printf '#[path = "child.rs"] mod child;\n' > "$mc_dir_/sameline.rs"
+  got_=$( . "$mc_"; _rust_module_closure "$mc_dir_/sameline.rs" 2>/dev/null | grep -c 'child.rs' )
+  if [ "${got_:-0}" -gt 0 ]; then
+    ok "1699-r40-closure[sameline]: a same-line #[path] + mod queues the child module"
+  else
+    bad "1699-r40-closure[sameline]: the child was NOT queued — everything in that module escapes discovery, polarity and the census, silently"
+  fi
+  # (b) a DOC COMMENT mentioning the syntax must not bind a path to the following mod
+  printf '//! see #[path = "wrong.rs"] for details\nmod plain;\n' > "$mc_dir_/doccomment.rs"
+  got_=$( . "$mc_"; _rust_module_closure "$mc_dir_/doccomment.rs" 2>/dev/null | grep -c 'wrong.rs' )
+  if [ "${got_:-0}" -eq 0 ]; then
+    ok "1699-r40-closure[doccomment]: a #[path] mentioned in a doc comment does not bind a stale path"
+  else
+    bad "1699-r40-closure[doccomment]: a doc-comment mention bound 'wrong.rs' to the next mod — the closure then reads a file the compiler never sees"
+  fi
+  # (c) COMPLEMENT: the ordinary two-line form must still work (the fix must not narrow it away)
+  printf '#[path = "child.rs"]\nmod child;\n' > "$mc_dir_/twoline.rs"
+  got_=$( . "$mc_"; _rust_module_closure "$mc_dir_/twoline.rs" 2>/dev/null | grep -c 'child.rs' )
+  if [ "${got_:-0}" -gt 0 ]; then
+    ok "1699-r40-closure[twoline]: the ordinary attribute-then-mod form still resolves"
+  else
+    bad "1699-r40-closure[twoline]: the two-line form BROKE — the fix narrowed away the common case"
+  fi
+fi
+
 # --- 38. #1699: block comments must not split an attribute cluster (round-36, Medium) ----
 #
 # `_legacy_coreq_sites` treated only `//` as cluster trivia, so a `/* … */` between stacked
