@@ -784,11 +784,10 @@ done <<'SHAPES'
 #[cfg_attr(not(doc), cfg(any()))]
 #[cfg(/* explanation */ doc)]
 #[cfg_attr(doc, doc = "x")]
-#[cfg_attr(feature = "parquet", doc(hidden))]
 #[cfg( // explanation of why this is gated\n    doc\n)]
 #[cfg(all(\n    /* why this shape exists */ doc,\n    unix\n))]
 SHAPES
-[ "$c21" -eq 10 ] || fail_case "case 21 — only $c21 of the 10 pinned shapes ran; a case that does not run cannot fail"
+[ "$c21" -eq 9 ] || fail_case "case 21 — only $c21 of the 9 pinned shapes ran; a case that does not run cannot fail"
 
 # …and CONDITIONAL DOCUMENTATION, which must NOT refuse. `doc` here is an
 # ASSIGNMENT (`doc = "…"`), i.e. the attribute form `#[doc = "text"]` applied under a
@@ -803,25 +802,45 @@ SHAPES
 # documentation. "0 occurrences today" was a true measurement of the wrong thing.
 #
 # The fix stays blunt — no parser, no position analysis, no comment or string
-# handling. It is ONE lookahead character: a `doc` token immediately followed by `=`
-# is not reported, because Rust has no `cfg(doc = "…")` form (a cfg predicate
-# spelling of doc is always the BARE flag), so `doc =` cannot be a predicate. The
+# handling. It is ONE lookahead over TWO characters: a `doc` token immediately followed
+# by `=` or `(` is not reported. The justification is rustc's, and it was MEASURED, not
+# reasoned: an earlier version of this comment claimed "Rust has no `cfg(doc = …)` form"
+# and THAT IS FALSE — `#[cfg(doc = "x")]` compiles. The exclusion is still right, for two
+# verified reasons: `doc(` in PREDICATE position is a SYNTAX ERROR (`#[cfg(doc(hidden))]`
+# => `error[E0539]`), so there is no predicate to exempt; and `doc =` in predicate
+# position is valid but ALWAYS FALSE, because `cargo doc` sets `doc` as a BARE flag, so
+# an item behind `#[cfg(doc = "x")]` is absent even under `--cfg doc` — absent in BOTH
+# builds is not a DIVERGENCE, and divergence is all this refusal prevents. The
 # shapes above prove the blunt rule is otherwise untouched, and
 # `#[cfg_attr(doc, doc = "x")]` up there — bare CONDITION, assigned ATTRIBUTE — is
 # the shape that separates this fix from one that merely greps for `doc =`.
-apply21 '#[cfg_attr(feature = "parquet", doc = "conditional prose, not a cfg predicate")]'
-set +e
-bash "$wt21/$GUARD_REL" >"$TMPROOT/case21.condoc.out" 2>&1
-rc21n=$?
-set -e
-[ "$rc21n" -eq 0 ] \
-  || fail_case "case 21 — \`#[cfg_attr(feature = \"parquet\", doc = \"…\")]\` on a public item was REFUSED. Conditional documentation gates nothing and \`doc = \"…\"\` is never a cfg predicate, so refusing it bricks the public-API gate for an ordinary edit; got: $(cat "$TMPROOT/case21.condoc.out")"
-grep -q 'doc` cfg predicate' "$TMPROOT/case21.condoc.out" \
-  && fail_case "case 21 — the guard exited 0 but still printed the \`doc\`-cfg-predicate refusal for conditional documentation; got: $(cat "$TMPROOT/case21.condoc.out")"
-grep -q "public items + .* associated items" "$TMPROOT/case21.condoc.out" \
-  || fail_case "case 21 — conditional documentation passed, but the guard printed no affirmative measurement line, so the pass cannot be distinguished from a vacuous one; got: $(cat "$TMPROOT/case21.condoc.out")"
+# All THREE documentation-only shapes, each falsified a narrower rule or would have:
+#   * `doc = "…"`        conditional prose            (falsified the blunt rule, case 8)
+#   * `doc(alias = "…")` conditional docs.rs metadata (falsified the `doc =` rule, case 15)
+#   * `doc(hidden)`      conditional doc visibility   (same class; §1b is not its judge —
+#                        `attrs_verdict` decides snapshot membership, cases 8 and 15)
+c21n=0
+for exempt_shape in \
+  '#[cfg_attr(feature = "parquet", doc = "conditional prose, not a cfg predicate")]' \
+  '#[cfg_attr(docsrs, doc(alias = "cfg(foo)"))]' \
+  '#[cfg_attr(feature = "parquet", doc(hidden))]'
+do
+  c21n=$((c21n + 1))
+  apply21 "$exempt_shape"
+  set +e
+  bash "$wt21/$GUARD_REL" >"$TMPROOT/case21.condoc.$c21n.out" 2>&1
+  rc21n=$?
+  set -e
+  [ "$rc21n" -eq 0 ] \
+    || fail_case "case 21.exempt.$c21n — \`$exempt_shape\` on a public item was REFUSED. It conditions DOCUMENTATION, not item visibility, so it cannot make the rustdoc-derived surface diverge from the shipped one; refusing it bricks the public-API gate for an ordinary edit; got: $(cat "$TMPROOT/case21.condoc.$c21n.out")"
+  grep -q 'doc` cfg predicate' "$TMPROOT/case21.condoc.$c21n.out" \
+    && fail_case "case 21.exempt.$c21n — the guard exited 0 but still printed the \`doc\`-cfg-predicate refusal for \`$exempt_shape\`; got: $(cat "$TMPROOT/case21.condoc.$c21n.out")"
+  grep -q "public items + .* associated items" "$TMPROOT/case21.condoc.$c21n.out" \
+    || fail_case "case 21.exempt.$c21n — \`$exempt_shape\` passed, but the guard printed no affirmative measurement line, so the pass cannot be distinguished from a vacuous one; got: $(cat "$TMPROOT/case21.condoc.$c21n.out")"
+done
+[ "$c21n" -eq 3 ] || fail_case "case 21 — only $c21n of the 3 exempt shapes ran; a case that does not run cannot fail"
 cp "$TMPROOT/case21.orig.rs" "$t21"
-echo "OK (21): all 10 \`doc\`-in-cfg shapes REFUSE — including the three comment-bearing shapes that passed GREEN before, \`#[cfg_attr(doc, doc = \"x\")]\` (bare condition, assigned attribute) and the deliberate over-fire on attribute-position \`doc(hidden)\` — while conditional documentation (\`doc = \"…\"\`) certifies normally"
+echo "OK (21): all 9 predicate shapes REFUSE (incl. the three comment-bearing ones that passed GREEN before, and \`#[cfg_attr(doc, …)]\` whose CONDITION is bare) while all 3 documentation-only shapes — \`doc = \"…\"\`, \`doc(alias = …)\`, \`doc(hidden)\` — certify normally"
 
 # ---------------------------------------------------------------------------
 # 22. RED — a RELATIVE `CARGO_TARGET_DIR` must not make the guard inspect a
