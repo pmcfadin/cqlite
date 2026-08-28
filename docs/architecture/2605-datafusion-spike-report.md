@@ -136,10 +136,34 @@ shows up as the DataFusion arm being *faster because it is wrong*. `pushdown.rs`
   operand whose CQLite↔DataFusion coercion is unproven are `Unsupported` by construction.
 * `<>` becomes `NOT (col = v)` — a negation, never a silent substitution of `=`.
 
-Tests (`df_spike/tests.rs`, 21 passing) pin this: `Exact`/`Unsupported` classification incl. mirrored
+Tests (`df_spike/tests/`, 24 passing) pin this: `Exact`/`Unsupported` classification incl. mirrored
 literal-first operands; and, over a two-generation fixture with an LWW overwrite and a row tombstone
 at a **pinned `now`**, (a) the DataFusion arm returns the row engine's rows, values and order, and
 (b) an `Exact` pushdown selects **exactly** the rows DataFusion's own `FilterExec` selects.
+
+### 2.6 Run schedule: what the rotation fixes, and what it does not
+
+Each cell runs in **its own process** (so peak RSS is attributable to one arm — process RSS never
+returns to its starting point), with **iteration outermost** and the **arm order rotated** by
+`iteration - 1`, so no arm config is always first or always last.
+
+**Rotation counterbalances position only over a COMPLETE CYCLE.** With **5 arm configs**, the
+iteration count must be a multiple of 5 for every config to occupy every position exactly once per
+scenario. It is not a property of rotation as such, and a partial cycle leaves systematic position
+bias: at 3 iterations, `datafusion:1` can never occupy a position later than 3rd and `row_pushdown`
+never one earlier than 3rd. **An earlier draft of this report claimed the rotation had removed
+ordering bias. That was wrong, and it was wrong in the direction of comfort** — §3.1(a) records the
+correction. The published matrix therefore runs a complete cycle; §3.0 states its size, and
+`docs/reports/2605-datafusion-spike-artifacts/schedule.json` records the exact per-iteration order
+the cells were measured under. The driver now **refuses** a partial cycle unless
+`ALLOW_PARTIAL_CYCLE=1` says the bias is being accepted deliberately.
+
+**The mitigation this report actually relies on is INDEPENDENT of the schedule**, which is why the
+finding did not move a number. Position bias acts *through page-cache state* — an arm that runs late
+in an iteration sees a differently-warmed cache — and that is precisely the covariate removed by the
+cold-fault regression and the per-arm residuals of §3.3 (`R^2 = 0.980`). A counterbalanced schedule
+and a covariate adjustment are two independent controls on the same confounder; this matrix now has
+both, and every load-bearing figure in §3.3-§3.5 is stated on the adjusted one.
 
 ---
 
