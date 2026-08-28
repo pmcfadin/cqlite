@@ -31,7 +31,6 @@
 set -uo pipefail
 
 SCRIPT_DIR=$(cd "$(dirname "$0")" && pwd)
-WRAPPER="$SCRIPT_DIR/../flow/roborev-review.sh"
 # THE SAME PATH, NEVER REASSIGNED (#3367). `WRAPPER` is deliberately repointed at a scratch
 # copy by the gate-mock cases (~2251/~2354) and restored after, so ANY check that READS the
 # wrapper as a doctrine SUBJECT is order-dependent if it reads `WRAPPER`: its verdict then
@@ -45,6 +44,30 @@ WRAPPER="$SCRIPT_DIR/../flow/roborev-review.sh"
 # that lands on the scratch copy finds nothing and reports CLEAN — a false pass, which is
 # worse than the false fail that surfaced the bug.
 readonly WRAPPER_REAL="$SCRIPT_DIR/../flow/roborev-review.sh"
+# A code-only view of a file: quoted spans blanked, comments removed, continuations joined. Used by
+# the one structural scan below, so a variable NAME appearing inside a diagnostic string or a
+# comment is not mistaken for a read of it.
+_wr_code_view_min() {
+  sed -e :a -e '/\\$/N; s/\\\n//; ta' "$1" | awk '
+  {
+    n = length($0); sq = 0; dq = 0; out = ""
+    for (i = 1; i <= n; i++) {
+      c = substr($0, i, 1)
+      if (!sq && c == "\\") { i++; out = out "  "; continue }
+      # A DOUBLE-quoted span is KEPT: expansions happen inside it, and this view is used to count
+      # reads of a variable. Only SINGLE quotes (literal text) and comments are blanked. Blanking
+      # double quotes erased the one read this scan exists to find -- measured 0 reads of a variable
+      # that is read exactly once, in `bash "${RUN_WRAPPER_PATH:-$WRAPPER_REAL}"`.
+      if (sq) { out = out " "; if (c == "'"'"'") sq = 0; continue }
+      if (dq) { out = out c; if (c == "\"") dq = 0; continue }
+      if (c == "'"'"'") { sq = 1; out = out " "; continue }
+      if (c == "\"") { dq = 1; out = out c; continue }
+      if (c == "#" && (i == 1 || substr($0, i-1, 1) ~ /[ \t]/)) break
+      out = out c
+    }
+    print out
+  }'
+}
 # The structured waiver scanner the wrapper delegates to (#3312 job 26). Defined HERE, beside
 # WRAPPER, because run_wrapper passes it on every call — the structural section is too late.
 SCAN_TOOL="$SCRIPT_DIR/../flow/roborev-waiver-scan.py"
@@ -55,8 +78,8 @@ CHECKS_SRC="$SCRIPT_DIR/../flow/roborev-review-checks.sh"
 ORACLES_SRC="$SCRIPT_DIR/../flow/roborev-review-oracles.sh"
 BLOCK_HEADER="==== ROBOREV REVIEW SUMMARY ===="
 
-if [ ! -f "$WRAPPER" ]; then # wrapper-mutable-read-allow: preflight, before any case can reassign it
-  printf 'FAIL - wrapper not found at %s\n' "$WRAPPER" # wrapper-mutable-read-allow: the preflight diagnostic
+if [ ! -f "$WRAPPER_REAL" ]; then
+  printf 'FAIL - wrapper not found at %s\n' "$WRAPPER_REAL"
   exit 1
 fi
 
@@ -972,7 +995,7 @@ run_wrapper() { # run_wrapper <work-dir> [extra wrapper args...]
   # file and a host `$HOME/.roborev/` must never be able to influence a fixture run.
   STUB_INVOKED="$INVOKED" PATH="${WRAPPER_PATH_PREFIX:+$WRAPPER_PATH_PREFIX:}$stubbin:$PATH" HOME="$FIXTURE_HOME" \
     TMPDIR="${WRAPPER_TMPDIR:-$WRAPPER_TMP}" \
-    bash "$WRAPPER" --repo "$work" --agent codex --model gpt-5.6-sol \
+    bash "${RUN_WRAPPER_PATH:-$WRAPPER_REAL}" --repo "$work" --agent codex --model gpt-5.6-sol \
     --log "$tmp/transcript-$CASE_N.txt" "$@" >"$OUT" 2>&1
   RC=$?
 }
@@ -2260,12 +2283,7 @@ if [ -f "$SCRIPT_DIR/../flow/roborev-job-facts.py" ]; then
 fi
 work=$(make_fixture case_cx28 pushed)
 STUB_ANNOUNCE_SHA=$(git -C "$work" rev-parse HEAD)
-_gm_real_wrapper="$WRAPPER"
-# READONLY, so `printf -v`, `read` and every other builtin that writes a variable are refused by the
-# SHELL (roborev job 51). The mutation scan only knew `name=value` syntax, and a corrupted alias
-# would make the restore install the wrong path while the probe agreed with itself.
-readonly _gm_real_wrapper
-WRAPPER="$_gm_dir/roborev-review.sh"
+RUN_WRAPPER_PATH="$_gm_dir/roborev-review.sh"
 run_wrapper "$work"
 assert_verdict 'case (cx28 control) the UNPATCHED copy reaches PASS' PASS 0
 assert_lacks 'case (cx28 control) and reports no grammar violation' 'verdict-grammar'
@@ -2331,7 +2349,7 @@ else
   assert_says 'case (cx29) the un-run key is visible in the block' '^prompt-content: SKIP$'
   assert_lacks 'case (cx29) and the grammar check does not misreport it as unrecognised' 'verdict-grammar'
 fi
-WRAPPER="$_gm_real_wrapper"
+RUN_WRAPPER_PATH=""
 
 # ===========================================================================
 # (cx28b/cx28c): THE CLOSURE MUST NOT ITSELF BE A PREFIX TEST (#3229 round-11 M3).
@@ -2368,7 +2386,7 @@ for _np_case in cx28b:PASSthisNeverRan cx28c:PASS-MEASUREMENT-DID-NOT-HAPPEN; do
   cp "$SCRIPT_DIR/../flow/roborev-review-checks.sh" "$_gm_dir/roborev-review-checks.sh"
   work=$(make_fixture "case_$_np_label" pushed)
   STUB_ANNOUNCE_SHA=$(git -C "$work" rev-parse HEAD)
-  WRAPPER="$_gm_dir/roborev-review.sh"
+  RUN_WRAPPER_PATH="$_gm_dir/roborev-review.sh"
   # THE CONTROL, per case: the restored copy must reach PASS on this fixture, or a FAIL below
   # would prove nothing about the mutation.
   run_wrapper "$work"
@@ -2389,7 +2407,7 @@ for _np_case in cx28b:PASSthisNeverRan cx28c:PASS-MEASUREMENT-DID-NOT-HAPPEN; do
   else
     bad "case ($_np_label): could not patch the copied checks file, so the near-prefix path was never exercised (a green run here would be a probe failing in the direction that looks like success)"
   fi
-  WRAPPER="$_gm_real_wrapper"
+  RUN_WRAPPER_PATH=""
 done
 cp "$SCRIPT_DIR/../flow/roborev-review-checks.sh" "$_gm_dir/roborev-review-checks.sh"
 
@@ -2963,7 +2981,7 @@ INVOKED="$tmp/invoked-$CASE_N.txt"
 # HOME is redirected for the same reason `run_wrapper` does it: a hand-rolled invocation
 # must be as hermetic as the helper, so a host `$HOME/.roborev/` can never influence it.
 STUB_INVOKED="$INVOKED" PATH="$stubbin:$PATH" HOME="$FIXTURE_HOME" \
-  bash "$WRAPPER" --repo "$tmp/case_t7/work" \
+  bash "$WRAPPER_REAL" --repo "$tmp/case_t7/work" \
   --agent codex --model gpt-5.6-sol --log "$tmp/transcript-$CASE_N.txt" >"$OUT" 2>&1
 RC=$?
 assert_verdict 'case (t7)' FAIL 1
@@ -2987,7 +3005,7 @@ else
   OUT="$tmp/out-$CASE_N.txt"
   INVOKED="$tmp/invoked-$CASE_N.txt"
   : >"$INVOKED"
-  STUB_INVOKED="$INVOKED" PATH="$nobin" "$nobin/bash" "$WRAPPER" --repo "$work" \
+  STUB_INVOKED="$INVOKED" PATH="$nobin" "$nobin/bash" "$WRAPPER_REAL" --repo "$work" \
     --agent codex --model gpt-5.6-sol --log "$tmp/transcript-$CASE_N.txt" >"$OUT" 2>&1
   RC=$?
   assert_verdict 'case (t8)' FAIL 1
@@ -3009,7 +3027,7 @@ INVOKED="$tmp/invoked-$CASE_N.txt"
 # HOME redirected (see case t7): hermeticity, so nothing on the host can fail this case on
 # the wrong key and leave the EXIT-trap assertion below unreached.
 STUB_INVOKED="$INVOKED" PATH="$stubbin:$PATH" HOME="$FIXTURE_HOME" \
-  bash "$WRAPPER" --repo "$work" \
+  bash "$WRAPPER_REAL" --repo "$work" \
   --agent codex --model gpt-5.6-sol --log "$tmp/trapcase.log" >"$OUT" 2>&1
 RC=$?
 assert_verdict 'case (t9)' FAIL 1
@@ -3064,7 +3082,7 @@ for bad in "--repo" "--base" "--log"; do
   OUT="$tmp/out-$CASE_N.txt"
   INVOKED="$tmp/invoked-$CASE_N.txt"
   : >"$INVOKED"
-  STUB_INVOKED="$INVOKED" PATH="$stubbin:$PATH" bash "$WRAPPER" \
+  STUB_INVOKED="$INVOKED" PATH="$stubbin:$PATH" bash "$WRAPPER_REAL" \
     --agent codex --model gpt-5.6-sol "$bad" '' >"$OUT" 2>&1
   RC=$?
   if [ "$RC" -eq 2 ]; then ok "usage: an empty '$bad' value exits 2"; else bad "usage: an empty '$bad' value exited $RC (want 2)"; fi
@@ -3079,7 +3097,7 @@ for bad_invocation in "--nonsense" "--repo:$tmp/definitely-not-a-directory" "--r
     --repo:*) set -- --repo "${bad_invocation#--repo:}" ;;
     *) set -- "$bad_invocation" ;;
   esac
-  STUB_INVOKED="$INVOKED" PATH="$stubbin:$PATH" bash "$WRAPPER" \
+  STUB_INVOKED="$INVOKED" PATH="$stubbin:$PATH" bash "$WRAPPER_REAL" \
     --agent codex --model gpt-5.6-sol "$@" >"$OUT" 2>&1
   RC=$?
   if [ "$RC" -eq 2 ]; then ok "usage: '$bad_invocation' exits 2"; else bad "usage: '$bad_invocation' exited $RC (want 2)"; fi
@@ -3594,7 +3612,7 @@ for pair in "--agent codex" "--model gpt-5.6-sol"; do
   INVOKED="$tmp/invoked-$CASE_N.txt"
   : >"$INVOKED"
   # shellcheck disable=SC2086 # deliberate split of the single-option pair
-  STUB_INVOKED="$INVOKED" PATH="$stubbin:$PATH" bash "$WRAPPER" --repo "$work" $pair >"$OUT" 2>&1
+  STUB_INVOKED="$INVOKED" PATH="$stubbin:$PATH" bash "$WRAPPER_REAL" --repo "$work" $pair >"$OUT" 2>&1
   RC=$?
   if [ "$RC" -eq 2 ]; then
     ok "usage: '$pair' alone exits 2"
@@ -4403,7 +4421,7 @@ INVOKED="$tmp/invoked-$CASE_N.txt"
 # The two streams are kept apart on purpose: merged into $OUT, the error lines would have satisfied
 # nothing and failed nothing, which is exactly how this shipped.
 HELP_ERR="$tmp/help-stderr-$CASE_N.txt"
-STUB_INVOKED="$INVOKED" PATH="$stubbin:$PATH" bash "$WRAPPER" --help >"$OUT" 2>"$HELP_ERR"
+STUB_INVOKED="$INVOKED" PATH="$stubbin:$PATH" bash "$WRAPPER_REAL" --help >"$OUT" 2>"$HELP_ERR"
 RC=$?
 if [ "$RC" -eq 0 ]; then ok '--help exits 0'; else bad "--help exited $RC (want 0)"; fi
 if [ -s "$HELP_ERR" ]; then
@@ -4826,774 +4844,46 @@ if [ -z "$_skeys" ]; then
 else
   bad "structural: the block still emits —$_skeys. Those keys described the retired classifier's output (#3312 ruling (4))"
 fi
-# ===== THE DOCTRINE SCANS MUST NOT READ A MUTABLE GLOBAL (#3367) =====
-# The classifier-GONE assert FAILed once inside a gate on a branch whose diff touched no `scripts/`
-# file at all, then passed 4/4 at the same commit and an unchanged tree. Cause: it read `"$WRAPPER"`,
-# which the gate-mock cases repoint at a scratch copy ~2000 lines earlier and restore afterwards. A
-# check whose SUBJECT is chosen by a global another case mutates is order-dependent by construction,
-# and its verdict is decided by which case ran last rather than by the file it claims to audit.
+# ===== THERE IS NO MUTABLE WRAPPER PATH (#3367) =====
+# The order dependence this issue reports had one cause: `WRAPPER` was a GLOBAL that two gate-mock
+# cases repointed at a scratch copy ~2000 lines from the doctrine asserts, so a scan reading it was
+# judged against whichever file the last case had left behind.
 #
-# Note which way the hazard now points. With the `--help` prose exemption in place (#3392) the real
-# wrapper is CLEAN, so a scan that lands on the scratch copy finds nothing and reports CLEAN too —
-# a FALSE PASS, strictly worse than the false FAIL that surfaced the bug, because nothing reds.
+# THIS WAS FIRST FIXED BY GUARDING THE GLOBAL, AND THAT APPROACH WAS RETIRED AS UNSOUND. A ~250-line
+# lexical scanner classified every occurrence of `$WRAPPER` (quote state, arity, spelling, command
+# position, markers) so a doctrine scan could not read the mutable one. Eighteen roborev rounds found
+# forty-three defects in it, all valid, and the last one settled the question: `sh -c` executes a
+# name assembled from adjacent quoted strings (`export WRAP''PER; sh -c 'grep "$WRAP''PER"'`), and
+# the harness already uses `sh -c`. Banning `eval` did not close it, and the set does not close --
+# `bash -c`, `source`, `.`, `xargs sh -c`. A LEXICAL SCANNER CANNOT DECIDE WHETHER A SHELL LINE READS
+# A VARIABLE, BECAUSE THE NAME NEED NOT APPEAR IN THE LINE. No further rounds could have fixed that.
 #
-# Two pins, because fixing the call sites without pinning them just waits for the next one:
-#   (1) STRUCTURAL — a CLOSED GRAMMAR over every read of `$WRAPPER` in this file.
-#   (2) BEHAVIOURAL — with `WRAPPER` poisoned, the scan's verdict must not move, and the same scan
-#       against the poisoned path MUST move. Without the second half, (1) would pass for a scan
-#       that reads nothing at all.
-#
-# WHY A CLOSED GRAMMAR AND NOT A LEAK PATTERN. The first version of (1) was
-# `grep -nE '(grep|awk|sed|...)[^|]*"\$WRAPPER"'` — a search for the KNOWN-BAD shape. It reported
-# CLEAN while the defect was still present, because `grep` is line-oriented and the offending read
-# was a MULTI-LINE `awk` whose command word and whose `"$WRAPPER"` argument sat five lines apart.
-# It missed the exact construct it was written for. That is this repo's recurring
-# affirmative-measurement rule one level down: never derive a pass from the ABSENCE of a bad signal.
-# So every read is enumerated and each must match an AFFIRMATIVELY PERMITTED form; an unrecognised
-# line FAILs. A new way to read the mutable global cannot be a shape nobody predicted.
-#
-# COMMENTS ARE STRIPPED FIRST, and this check learned that the hard way: an earlier version flagged
-# its own explanatory comments above (they quote `"$WRAPPER"` while describing the defect), which is
-# #3367's own cause 2 — a structural assert reding on the prose that documents it. A guard that reds
-# on its own rationale is one the next person deletes.
-#
-# THE PERMITTED FORMS, and why each is not order-dependent:
-#   * `bash "$WRAPPER"` — an INVOCATION. A gate-mock case means the copy in its own context; that is
-#     the whole point of the reassignment, so it must keep reading the mutable value.
-#   * `<var>="$WRAPPER"` — a whole-value SAVE for a later restore, which must capture whatever is
-#     live at that moment or the restore would install the wrong path.
-#   * a line carrying the explicit allow marker — a reviewed, named opt-out for the two preflight
-#     lines (they run before any mutation) and for the poisoned probe below, whose entire purpose is
-#     to read the mutable value. The marker is spelled in two halves at the match site so this guard
-#     can never match its own pattern line.
-#
-# EVERY NEEDLE BELOW IS SPLIT ACROSS A QUOTE BOUNDARY. The subject of this scan is THIS FILE, so a
-# guard written with its needle spelled literally matches its own pattern lines and reports the
-# defect against itself — measured: four self-hits on the first run. Splitting is the same device
-# the scanner-substitution assert uses, for the same reason.
-#
-# THE GRAMMAR IS CLOSED OVER OCCURRENCES, NOT LINES (roborev job 34 on this PR, Medium). The first
-# version was closed over LINES and over ONE SPELLING, and was therefore not closed at all — it had
-# three bypasses, each of which would have let a mutable doctrine read back in silently:
-#   (a) `"${WRAPPER}"`  — braced; the scan only knew the unbraced spelling;
-#   (b) `$WRAPPER`      — unquoted; likewise unrecognised;
-#   (c) `bash "$WRAPPER"; grep -c x "$WRAPPER"` — a COMPOUND line, where one permitted occurrence
-#       (the invocation) caused the WHOLE line to be accepted, carrying a real scan in with it.
-# That is this issue's own defect one level up: a guard whose green means "no instance of the shape
-# I happened to think of," which is exactly the reasoning #3367 exists to retire. So the grammar now
-# asserts three things, and (1) is what makes (3) tractable — with one legal spelling, the
-# permitted-form test no longer has to parse shell:
-#   (1) SPELLING — every occurrence is written exactly `"$WRAPPER"`. Braced and unquoted forms FAIL.
-#   (2) ARITY    — at most ONE occurrence per line, so no occurrence can ride in on another's verdict.
-#   (3) FORM     — that occurrence's line is an invocation, a whole-value save, or marked.
-#
-# PROSE IS STRIPPED BEFORE ANY OF IT. Comments are dropped, and within a line both single-quoted
-# spans and backslash-escaped `\$` are literal text rather than expansions — this file's own `ok`
-# and `bad` messages NAME the variable while describing the rule, and an earlier version red on
-# exactly those, which is #3367's cause 2 reproduced inside the fix for cause 1.
-# A CODE-ONLY VIEW OF A WHOLE FILE: quoted spans blanked, comments removed, continuations joined.
-# Scans that look for a COMMAND (`eval`, a nameref declaration) must read this, never the raw text —
-# otherwise the word inside a diagnostic string or a fixture literal counts, and the only way to
-# tolerate that is a substring exclusion. Three separate exclusions of exactly that shape have now
-# been found here (the alias-declaration alternation, the alias-mutation scan, the eval ban), each
-# exempting a real violation that merely mentioned the excluded token. Blanking removes the need.
-_wr_code_view() {
-  sed -e :a -e '/\\$/N; s/\\\n//; ta' "$1" | awk '
-  {
-    n = length($0); sq = 0; dq = 0; out = ""
-    for (i = 1; i <= n; i++) {
-      c = substr($0, i, 1)
-      if (!sq && c == "\\") { i++; out = out "  "; continue }
-      if (sq) { out = out " "; if (c == "'"'"'") sq = 0; continue }
-      if (dq) { out = out " "; if (c == "\"") dq = 0; continue }
-      if (c == "'"'"'") { sq = 1; out = out " "; continue }
-      if (c == "\"") { dq = 1; out = out " "; continue }
-      if (c == "#" && (i == 1 || substr($0, i-1, 1) ~ /[ \t]/)) break
-      out = out c
-    }
-    print out
-  }'
-}
-_wr_marker='wrapper-mutable''-read-allow'
-_wr_vname='WRAP''PER'
-# ONLY THESE NAMES MAY HOLD THE MUTABLE VALUE, AND ONLY TO RESTORE IT (roborev job 35, Medium).
-# The save rule used to accept ANY `NAME="$WRAPPER"`, which is an unbounded alias: `subject="$WRAPPER"`
-# followed by a doctrine scan of `"$subject"` satisfied every rule above while staying exactly as
-# order-dependent as the read it replaced. Closing a grammar over one spelling of one name does not
-# close it over the VALUE, so the allowlist is by name and the aliases' own uses are constrained below.
-_wr_aliases='_gm_real_wrapper _wr_saved'
-_wr_ref='"$'"$_wr_vname"'"'
-# COMMAND POSITION IS COMPUTED, NOT SUBSTRING-MATCHED (roborev job 36, Medium). The invocation rule
-# was `case $line in *"bash $ref"*)`, an UNANCHORED substring — so `grep bash "$WRAPPER"` was accepted
-# as an invocation, and a doctrine read walked straight through the "closed" grammar. That is the same
-# error as (c) one round earlier: asking whether a permitted shape appears ANYWHERE on the line rather
-# than whether the line IS that shape.
-#
-# Markers were the first thing tried and do not work here: five of the eight invocation sites end in a
-# `\` continuation, and a line ending in a backslash cannot carry a trailing comment. So the line is
-# reduced to its COMMAND WORD by stripping leading whitespace and any `NAME=value` environment prefixes
-# (this file's invocations carry `STUB_INVOKED=`/`PATH=`), and the result must BEGIN with the invocation.
-# The grammar being stripped is deliberately tiny — env prefixes only, no general shell parsing.
-_wr_cmdpos() {
-  _c=$1
-  _c=${_c#"${_c%%[! ]*}"}
-  while :; do
-    case "$_c" in
-      [A-Za-z_]*=*)
-        _n=${_c%%=*}
-        case "$_n" in *[!A-Za-z0-9_]*) break ;; esac
-        _r=${_c#*=}
-        case "$_r" in
-          '"'*) _r=${_r#\"}; _r=${_r#*\"} ;;
-          *) _v=${_r%% *}; _r=${_r#"$_v"} ;;
-        esac
-        _c=${_r#"${_r%%[! ]*}"}
-        ;;
-      *) break ;;
-    esac
-  done
-  printf '%s' "$_c"
-}
-# TRUE only when the line's COMMAND is a wrapper invocation: bare `bash`, or an explicit
-# interpreter path ending in `/bash`. Anything else -- including a scan that merely mentions
-# the word `bash` in its arguments -- is not an invocation.
-_wr_is_invocation() {
-  _i=$(_wr_cmdpos "$1")
-  case "$_i" in
-    "bash $_wr_ref"*) return 0 ;;
-    '"'*"/bash\" $_wr_ref"*) return 0 ;;
-  esac
-  # A CAPTURED invocation is still an invocation (reviewer nit): `_x=$(bash "$WRAPPER" --help)` runs
-  # the wrapper, it does not scan it. Only the text after a `$(` is retried, so `$(grep bash "…")`
-  # is still a scan — the command word inside the substitution must itself be the invocation.
-  case "$1" in
-    *'$('*)
-      _i2=${1#*$\(}
-      _i2=$(_wr_cmdpos "$_i2")
-      case "$_i2" in
-        "bash $_wr_ref"*) return 0 ;;
-        '"'*"/bash\" $_wr_ref"*) return 0 ;;
-      esac ;;
-  esac
-  return 1
-}
-# THE ENFORCEMENT LOOP AND ITS CONTROL SHARE ONE CLASSIFIER (reviewer B2). They used to be two
-# implementations of the same five rules, and they had ALREADY DRIFTED: the probe knew nothing about
-# the marker arm, so one of the three documented permitted forms was uncovered in both directions,
-# and the loop itself was executed by no control at all — replacing the loop's accumulator with
-# `continue` (the exact "case typo" the control claims to guard against) left BOTH asserts green with
-# the guard fully disabled. That is the `_cls_exec_lines` lesson again: a port is a second
-# implementation, and its correctness is only knowable by differential testing against the original.
-# So there is ONE function, the loop calls it, and the control table certifies the thing that runs.
-#
-# QUOTE STATE IS PARSED, NOT APPROXIMATED — AND THAT DELETES THE PROSE MARKER (reviewer B2/B3).
-#
-# History, because three successive designs failed the same way. Occurrences were first counted on
-# text stripped by `sed "s/'[^']*'//g"`, a LEFT-TO-RIGHT pairing that has no idea what a quote means:
-#   `_probe=$(grep -c "the wrapper's tok" "$WRAPPER")`   <- the apostrophe is INSIDE double quotes,
-# so the naive pass paired it with a later one and swallowed a REAL read. Counting on the raw line
-# fixed the swallowing but made genuine prose (this file's own `ok`/`bad` messages, which NAME the
-# variable while describing the rule) indistinguishable from a read — so a `wrapper-prose-allow`
-# marker was added to excuse it, and the marker promptly became the hole: it returned early, ahead of
-# the spelling/arity/form checks, so ANY read wearing the marker was licensed; and it was matched
-# anywhere on the line, so a line whose own prose merely NAMED the marker self-authorised. That is
-# CLAUDE.md's recurring shape verbatim — an artifact that DESCRIBES the escape hatch BECOMES it, the
-# same defect as a diagnostic printing a valid waiver marker.
-#
-# The doctrinal answer there is to REMOVE THE SHARED CHANNEL rather than pick a rarer delimiter, and
-# that is what this does. A single pass over the line tracks real shell quote state (single quotes,
-# double quotes, backslash escapes, and where the trailing comment begins) and reports:
-#   code = expansions OUTSIDE single quotes  -> live reads, which must obey spelling/arity/form
-#   lit  = occurrences INSIDE single quotes  -> inert text, which needs no marker and grants nothing
-#   q    = live occurrences spelled exactly `"$WRAPPER"`
-#   mk   = the opt-out marker appears IN THE TRAILING COMMENT (never inside a string)
-#   ev   = the line contains an `eval` word
-# With `lit` recognised for what it is, the prose marker has no job left and is GONE — so neither
-# blocker it carried can be expressed. Every one of the three bypasses now classifies as a live read.
-#
-# `eval` is the one case lexical analysis genuinely cannot settle: a single-quoted string that is
-# later evaluated IS code that reads the mutable global, and no quote parser can tell it from prose.
-# It is therefore refused outright rather than guessed at.
-_WR_QS=$(cat <<'AWKEOF'
-{
-  line = $0; n = length(line); sq = 0; dq = 0
-  code = 0; lit = 0; q = 0; mk = 0; ev = 0; cut = n
-  for (i = 1; i <= n; i++) {
-    c = substr(line, i, 1)
-    if (!sq && c == "\\") { i++; continue }
-    if (sq) { if (c == "'") sq = 0 }
-    else if (dq) { if (c == "\"") dq = 0 }
-    else {
-      if (c == "'") { sq = 1; continue }
-      if (c == "\"") { dq = 1; continue }
-      if (c == "#" && (i == 1 || substr(line, i-1, 1) ~ /[ \t]/)) {
-        cm = substr(line, i + 1); sub(/^[ \t]+/, "", cm)
-        # THE MARKER IS A WHOLE TOKEN, not a prefix. `index(cm, MK) == 1` alone accepted
-        # `wrapper-mutable-read-allowance`, i.e. a comment that merely STARTS with the marker's
-        # letters authorised a forbidden read. It must be followed by a delimiter or end the comment.
-        if (index(cm, MK) == 1) {
-          nxt = substr(cm, length(MK) + 1, 1)
-          if (nxt == "" || nxt == ":" || nxt == " " || nxt == "\t") mk = 1
-        }
-        cut = i - 1
-        break
-      }
-    }
-    if (c == "$") {
-      rest = substr(line, i); hit = 0; exact = 0
-      # A BRACED expansion is complete at its brace, so the identifier-boundary rule must NOT be
-      # applied to it: `${WRAPPER}_REAL` is a live read of WRAPPER followed by the literal text
-      # `_REAL`, and testing the character after `}` discarded it as if it named another variable.
-      # `${WRAPPER:-x}` is a read too, hence "name followed by any non-identifier character".
-      if (match(rest, "^[$][{]" VN "[^A-Za-z0-9_]")) { hit = 1 }
-      else if (match(rest, "^[$]" VN)) {
-        after = substr(rest, RLENGTH + 1, 1)
-        if (after !~ /[A-Za-z0-9_]/) { hit = 1
-          if (dq && substr(line, i-1, 1) == "\"" && after == "\"") exact = 1 }
-      }
-      if (hit) { if (sq) lit++; else { code++; if (exact) q++ } }
-    }
-  }
-  # The EXECUTABLE segment, comment removed by the same quote-aware pass. Every form check reads
-  # this, never the raw line: a `sed` comment-strip is not quote-aware, so a fake invocation in a
-  # trailing comment (`grep foo "$WRAPPER" # $(bash "$WRAPPER")`) was accepted as an invocation.
-  seg = substr(line, 1, cut)
-  if (seg ~ /(^|[ \t;&|(])eval([ \t]|$)/) ev = 1
-  # QUOTE STATE THAT IS STILL OPEN AT END OF LINE MEANS THIS PARSE IS NOT TRUSTWORTHY. Shell quoting
-  # SPANS lines; this scanner reads one line at a time, so the CLOSING line of a multi-line
-  # single-quoted program begins with a `'` that the scanner reads as OPENING one — inverting state
-  # for the rest of the line and reclassifying every live read on it as inert text. The failing case
-  # is #3367's ORIGINAL defect verbatim: the closing line of the multi-line awk,
-  #   ' "$ORACLES" "$CHECKS_FILE" "$WRAPPER" 2>/dev/null || true)
-  # i.e. the guard would have green-lit the exact shape it exists to catch. `$'…'` ANSI-C quoting
-  # desyncs it the same way, since a `\'` inside is kept by the shell but closes the span here.
-  # Rather than grow the parser to cover each construct, an unbalanced line is REFUSED: a verdict
-  # derived from an unreliable parse is not a verdict. Measured cost on this file: zero lines.
-  bal = (sq || dq) ? 0 : 1
-  # ANSI-C `$'"'"'…'"'"'` IS NOT ORDINARY SINGLE QUOTING: it keeps a backslash-escaped quote INSIDE the
-  # string, which this scanner cannot model. Refusing only when the line ends UNBALANCED was not
-  # enough -- `ok $'"'"'a\'"'"'b'"'"'; grep -c z "$WRAPPER" # '"'"'` re-balances the parity using the comment
-  # apostrophe and then reads as reporter prose (roborev job 50). So the construct itself is refused
-  # on any line carrying an occurrence. Measured cost: no occurrence line uses it.
-  ansi = (line ~ /[$]'"'"'/) ? 1 : 0
-  # A COMMAND SUBSTITUTION RESTARTS QUOTING, and this flat state machine cannot model that: inside
-  # `$( )` a fresh `"` opens a NEW double-quoted context, so `ok "$(grep "a'"'"'b" "$WRAPPER" "c'"'"'d")"`
-  # is valid shell that READS the wrapper while the flat scan pairs the two apostrophes and calls it
-  # single-quoted prose. Modelling nesting properly is a real shell parser; refusing to call anything
-  # inside a substitution "prose" is one flag. Only the prose verdict is affected — a live read in a
-  # substitution is still judged on spelling/arity/form as before.
-  # BOTH command-substitution syntaxes, which is the COMPLETE set POSIX defines — `$( )` and
-  # backticks. The first version tested `$(` alone, i.e. a sample of the constructs rather than the
-  # set, so `ok "\`grep \"a'b\" \"$WRAPPER\" \"c'd\"\`"` reproduced the same quote confusion and was
-  # excused as prose. If a future shell grows a third, this line is where it goes.
-  cs = (seg ~ /[$][(]/ || seg ~ /`/) ? 1 : 0
-  # A STATE-FREE COUNT over the WHOLE line, used only to detect that the stateful scan stopped early.
-  # A quoted `#` inside a command substitution -- `_x="$(printf " #"; grep -c foo "$WRAPPER")"` --
-  # makes the flat parser believe a comment started, so it BREAKS before the read and reports nothing
-  # at all. Comparing against a count that cannot be fooled by state is how that is caught.
-  # ESCAPES ARE HONOURED HERE TOO, though quote state is not. A backslash is lexically unambiguous —
-  # `\$WRAPPER` is never an expansion, in any context — whereas quote state is exactly what this
-  # counter exists not to trust. Ignoring escapes made every `bad "... \$WRAPPER ..."` diagnostic
-  # that also contains a $( ) look like a hidden read (measured: two false FAILs).
-  tot = 0; j = 1
-  while (j <= n) {
-    if (substr(line, j, 1) == "\\") { j += 2; continue }
-    if (substr(line, j, 1) == "$") {
-      r2 = substr(line, j)
-      if (match(r2, "^[$][{]" VN "[^A-Za-z0-9_]")) tot++
-      else if (match(r2, "^[$]" VN)) {
-        a2 = substr(r2, RLENGTH + 1, 1)
-        if (a2 !~ /[A-Za-z0-9_]/) tot++
-      }
-    }
-    j++
-  }
-  printf "%d %d %d %d %d %d %d %d %d\n%s\n", code, lit, q, mk, ev, bal, cs, tot, ansi, seg
-}
-AWKEOF
-)
-# _wr_classify <raw line> -> "<verdict> <occurrence-count>"
-#   none | prose-ok | eval | spelling | arity | form | ok
-_wr_classify() {
-  _c_raw=$1
-  _c_out=$(printf '%s\n' "$_c_raw" | awk -v VN="$_wr_vname" -v MK="$_wr_marker" "$_WR_QS")
-  _c_m=$(printf '%s\n' "$_c_out" | head -1)
-  _c_seg=$(printf '%s\n' "$_c_out" | tail -n +2)
-  _c_code=${_c_m%% *}; _c_rest=${_c_m#* }
-  _c_lit=${_c_rest%% *}; _c_rest=${_c_rest#* }
-  _c_q=${_c_rest%% *}; _c_rest=${_c_rest#* }
-  _c_mk=${_c_rest%% *}; _c_rest=${_c_rest#* }
-  _c_ev=${_c_rest%% *}; _c_rest=${_c_rest#* }
-  _c_bal=${_c_rest%% *}; _c_rest=${_c_rest#* }
-  _c_cs=${_c_rest%% *}; _c_rest=${_c_rest#* }
-  _c_tot=${_c_rest%% *}; _c_ansi=${_c_rest##* }
-  # AN UNRELIABLE PARSE YIELDS NO VERDICT (reviewer). Checked FIRST: every field below is derived
-  # from the same state machine, so if it ended the line inside a quote, none of them can be trusted.
-  # DEFAULTS TO UNTRUSTWORTHY, not to balanced. This is the one field whose job is to say "do not
-  # trust the other fields", so an UNMEASURED value (a failed awk, a renamed field) must refuse
-  # rather than be believed — CLAUDE.md's `${end:-$start}` lesson, on the field that can least
-  # afford it. Key the permissive branch on the AFFIRMATIVE value, never on `!= <bad>`.
-  if [ "${_c_bal:-0}" -eq 0 ] || [ "${_c_ansi:-1}" -eq 1 ]; then
-    printf 'unbalanced %s\n' $(( ${_c_code:-0} + ${_c_lit:-0} )); return
-  fi
-  # ANY apparently-inert occurrence on a line carrying a command substitution is REFUSED, whether or
-  # not the line also has a recognised live read (roborev job 43). Gating this on `code -eq 0` was
-  # not enough: `bash "$WRAPPER" "$(grep "a'"'"'b" "$WRAPPER" "c'"'"'d")"` presents ONE occurrence as a
-  # permitted invocation while a SECOND, inside the substitution, is mis-paired into `lit` and never
-  # judged at all — the arity rule counts only `code`, so it does not see it either. Inside `$( )`
-  # the flat parse cannot be trusted about ANY occurrence, so no occurrence there may be excused.
-  # ...and an occurrence the stateful scan never reached, on a line carrying a substitution, means
-  # the parse stopped early (a quoted `#` read as a comment opener). Refuse rather than report none.
-  if [ "${_c_cs:-1}" -eq 1 ] && [ "${_c_tot:-0}" -gt $(( ${_c_code:-0} + ${_c_lit:-0} )) ]; then
-    printf 'substitution %s\n' "${_c_tot:-0}"; return
-  fi
-  if [ "${_c_cs:-1}" -eq 1 ] && [ "${_c_lit:-0}" -gt 0 ]; then
-    printf 'substitution %s\n' $(( ${_c_code:-0} + ${_c_lit:-0} )); return
-  fi
-  if [ "${_c_ev:-0}" -eq 1 ] && [ $(( ${_c_code:-0} + ${_c_lit:-0} )) -gt 0 ]; then
-    printf 'eval %s\n' $(( ${_c_code:-0} + ${_c_lit:-0} )); return
-  fi
-  if [ "${_c_code:-0}" -eq 0 ]; then
-    if [ "${_c_lit:-0}" -gt 0 ]; then
-      # INERT TEXT NEEDS AN AFFIRMATIVE PERMIT, NOT MERELY THE ABSENCE OF A LIVE READ. Single quotes
-      # make an occurrence literal ON THIS LINE, but they do not make it inert in the PROGRAM:
-      #   _cmd='grep foo "$WRAPPER"'   ...later...   eval "$_cmd"
-      # is a doctrine read assembled on one line and executed on another, and no per-line parse can
-      # see the join. So a literal occurrence is accepted only where prose legitimately lives — the
-      # command word is this harness's own `ok`/`bad` reporter. Anything else FAILs closed, which
-      # costs nothing today (all four literal occurrences are diagnostics) and cannot be widened by
-      # accident.
-      # (a substitution has already been refused above; this stays as a belt-and-braces AFFIRMATIVE
-      # test rather than relying on the earlier branch's condition never changing)
-      if [ "${_c_cs:-1}" -eq 0 ]; then
-        _c_pw=$(_wr_cmdpos "$_c_seg")
-        case "$_c_pw" in
-          'ok '*|'bad '*) printf 'prose-ok %s\n' "$_c_lit"; return ;;
-        esac
-      fi
-      printf 'prose %s\n' "$_c_lit"; return
-    fi
-    printf 'none 0\n'; return
-  fi
-  if [ "${_c_code:-0}" -ne "${_c_q:-0}" ]; then printf 'spelling %s\n' "$_c_code"; return; fi
-  # ARITY BEFORE THE MARKER: otherwise approving a marker for one read implicitly approves any
-  # number of reads on that line, which is the compound-line bypass again.
-  if [ "${_c_code:-0}" -gt 1 ]; then printf 'arity %s\n' "$_c_code"; return; fi
-  if [ "${_c_mk:-0}" -eq 1 ]; then printf 'ok %s\n' "$_c_code"; return; fi
-  if _wr_is_invocation "$_c_seg"; then printf 'ok %s\n' "$_c_code"; return; fi
-  # A SAVE IS THE WHOLE STATEMENT OR IT IS NOT A SAVE (roborev job 41). The test used to be a
-  # SUFFIX glob plus `${seg%%=*}`, which takes the text before the FIRST `=` on the line — so a
-  # compound statement whose first assignment happens to name an allowlisted alias vouched for a
-  # completely different one:
-  #   _wr_saved=x; subject="$WRAPPER"     -> `${seg%%=*}` is `_wr_saved`, accepted
-  # The read there is assigned to `subject`. Matched EXACTLY against the whole trimmed segment now,
-  # so nothing can share the line with a save. (Third instance of the same error in this file: a
-  # permitted shape found ANYWHERE standing in for the line BEING that shape.)
-  _c_trim=${_c_seg#"${_c_seg%%[! 	]*}"}
-  _c_trim=${_c_trim%"${_c_trim##*[! 	]}"}
-  # A declaration keyword and a trailing `;` are part of the SAVE, not a second statement. Without
-  # this, wrapping the poison probe in a function -- `local _wr_saved="$WRAPPER"`, the natural tidy-up
-  # -- reds the gate advising the author to use $WRAPPER_REAL, which is WRONG advice for a save. The
-  # exactness that matters (nothing may SHARE the line) is untouched: only a leading declaration and
-  # one trailing semicolon are absorbed.
-  _c_trim=${_c_trim%;}
-  _c_trim=${_c_trim#"${_c_trim%%[! 	]*}"}
-  case "$_c_trim" in
-    'local '*|'export '*|'declare '*|'typeset '*)
-      _c_trim=${_c_trim#* }
-      _c_trim=${_c_trim#"${_c_trim%%[! 	]*}"} ;;
-  esac
-  for _c_a in $_wr_aliases; do
-    if [ "$_c_trim" = "$_c_a=$_wr_ref" ]; then printf 'ok %s\n' "$_c_code"; return; fi
-  done
-  printf 'form %s\n' "$_c_code"
-}
-# THE WHOLE ENFORCEMENT PASS IS A FUNCTION, AND THE CONTROL RUNS *IT* OVER FIXTURES (reviewer B2,
-# second attempt). The first attempt only shared the CLASSIFIER between the loop and the control.
-# That removed the drift but left the LOOP's dispatch — the `case` that maps a verdict onto an
-# accumulator — certified by nothing, and the reviewer's falsification still passed: replacing the
-# `form)` arm with `:` and injecting a genuine doctrine read left the suite GREEN, because the
-# classifier was still perfect and the control only ever asked the classifier. A control that
-# exercises everything except the part that decides is not a control.
-# So the entire pass is `_wr_scan_file`, the real assert runs it over THIS file, and the control runs
-# the SAME function over fixtures whose correct verdict is known — dispatch included.
-_wr_scan_file() {
-  _sf_file=$1
-  _wr_bad_reads=""; _wr_bad_spelling=""; _wr_prose_bad=""; _wr_unknown=""; _wr_multi=""; _wr_lit_bad=""; _wr_unbal=""; _wr_subst=""
-  _wr_total=0; _wr_prose_n=0
-  while IFS= read -r _wr_num_line; do
-    [ -n "$_wr_num_line" ] || continue
-    # `grep -n` prefixes `NNNN:`; the grammar must judge the CODE, not the line number.
-    _wr_line=${_wr_num_line#*:}
-    _wr_res=$(_wr_classify "$_wr_line")
-    _wr_v=${_wr_res%% *}
-    _wr_c=${_wr_res##* }
-    case "$_wr_v" in
-      none) ;;
-      ok) _wr_total=$((_wr_total + _wr_c)) ;;
-      prose-ok) _wr_prose_n=$((_wr_prose_n + _wr_c)) ;;
-      eval) _wr_prose_bad="$_wr_prose_bad${_wr_prose_bad:+; }$_wr_num_line" ;;
-      prose) _wr_lit_bad="$_wr_lit_bad${_wr_lit_bad:+; }$_wr_num_line" ;;
-      unbalanced) _wr_unbal="$_wr_unbal${_wr_unbal:+; }$_wr_num_line" ;;
-      substitution) _wr_subst="$_wr_subst${_wr_subst:+; }$_wr_num_line" ;;
-      spelling) _wr_bad_spelling="$_wr_bad_spelling${_wr_bad_spelling:+; }$_wr_num_line" ;;
-      arity) _wr_multi="$_wr_multi${_wr_multi:+; }$_wr_num_line" ;;
-      form) _wr_bad_reads="$_wr_bad_reads${_wr_bad_reads:+; }$_wr_num_line" ;;
-      # A CLOSED GRAMMAR OVER THE VERDICTS THEMSELVES: an unplanned verdict must not fall silently
-      # into the permissive branch, which is the shape this whole section exists to retire.
-      # The line number is recorded WITH the verdict, so an EMPTY verdict cannot make this entry
-      # itself empty and leave `[ -n "$_wr_unknown" ]` false — the one unplanned value the arm
-      # that exists to catch unplanned values was letting through (reviewer nit).
-      *) _wr_unknown="$_wr_unknown${_wr_unknown:+; }${_wr_num_line%%:*}:<$_wr_v>" ;;
-    esac
-  done <<EOF
-$(sed -e :a -e '/\\$/N; s/\\\n//; ta' "$_sf_file" | grep -nE '[$][{]?'"$_wr_vname"'[}]?' | grep -vE '^[0-9]+:[[:space:]]*#')
-EOF
-  # ONE category, worst-first. `empty` is the affirmative-measurement case: no ACCEPTED occurrence
-  # means the pass had no subject, which is never a clean verdict.
-  # THE VERDICT IS RETURNED IN A GLOBAL, NEVER ON STDOUT. `v=$(_wr_scan_file …)` would run the whole
-  # pass inside a COMMAND SUBSTITUTION, i.e. a subshell, and every accumulator the diagnostics below
-  # print would be discarded with it — caught here by `set -u` rather than by review.
-  if [ -n "$_wr_unknown" ]; then _WR_VERDICT=unknown
-  elif [ "${_wr_total:-0}" -eq 0 ]; then _WR_VERDICT=empty
-  elif [ -n "$_wr_prose_bad" ]; then _WR_VERDICT=eval
-  elif [ -n "$_wr_unbal" ]; then _WR_VERDICT=unbalanced
-  elif [ -n "$_wr_subst" ]; then _WR_VERDICT=substitution
-  elif [ -n "$_wr_lit_bad" ]; then _WR_VERDICT=prose
-  elif [ -n "$_wr_bad_spelling" ]; then _WR_VERDICT=spelling
-  elif [ -n "$_wr_multi" ]; then _WR_VERDICT=arity
-  elif [ -n "$_wr_bad_reads" ]; then _WR_VERDICT=form
-  else _WR_VERDICT=clean; fi
-}
-_WR_VERDICT=
-_wr_scan_file "$TEST_SELF"
-case "$_WR_VERDICT" in
-  clean)
-    ok "structural (#3367): all $_wr_total live occurrences of the mutable wrapper variable (plus $_wr_prose_n occurrences recognised STRUCTURALLY as inert text in an ok/bad diagnostic, needing no marker) are parsed with real shell quote state on a balanced line, use the single legal spelling, sit one per line, and are an invocation, an allowlisted save, or a marked opt-out — no doctrine scan takes it as a SUBJECT" ;;
-  unknown)
-    bad "structural (#3367): the order-dependence classifier returned a verdict the dispatch does not recognise, so some line was neither accepted nor rejected —$_wr_unknown" ;;
-  empty)
-    bad 'structural (#3367): the order-dependence pass found NO accepted occurrence of the mutable wrapper variable at all, so it certified nothing — the variable was renamed, or the scan lost its subject' ;;
-  substitution)
-    bad "structural (#3367): a line carries a COMMAND SUBSTITUTION and an occurrence of the mutable wrapper variable that this flat parse read as inert. Inside \$( ) quoting restarts, so a second read can hide there while a first is waved through as a permitted invocation — no occurrence on such a line may be excused: $(printf '%s' "$_wr_subst" | cut -c1-200)" ;;
-  unbalanced)
-    bad "structural (#3367): a line carrying the mutable wrapper variable ends INSIDE an unterminated quote, so the per-line quote parse is unreliable and no verdict from it can be trusted. This is how the guard would green-light #3367's original defect — the closing line of a multi-line quoted program begins with the CLOSING quote, which a per-line scanner reads as an opening one: $(printf '%s' "$_wr_unbal" | cut -c1-200)" ;;
-  prose)
-    bad "structural (#3367): a line holds the mutable wrapper variable inside single quotes somewhere other than an ok/bad diagnostic. Single quotes make it literal on THIS line but not inert in the PROGRAM — assigning it and eval'ing it later is a doctrine read no per-line parse can see — so only the harness's own reporters may carry it as text: $(printf '%s' "$_wr_lit_bad" | cut -c1-200)" ;;
-  eval)
-    bad "structural (#3367): a line EVALs text containing the mutable wrapper variable. A single-quoted string that is later evaluated IS code reading the mutable global, and no quote parser can tell it from prose, so it is refused rather than guessed at: $(printf '%s' "$_wr_prose_bad" | cut -c1-200)" ;;
-  spelling)
-    bad "structural (#3367): an occurrence of the mutable wrapper variable is not spelled as the single legal quoted form, so the form check cannot see it (braced and unquoted spellings were live bypasses): $(printf '%s' "$_wr_bad_spelling" | cut -c1-200)" ;;
-  arity)
-    bad "structural (#3367): a line carries MORE THAN ONE occurrence of the mutable wrapper variable, so a permitted one (an invocation) would carry an unpermitted one (a doctrine scan) past the grammar: $(printf '%s' "$_wr_multi" | cut -c1-200)" ;;
-  form)
-    bad "structural (#3367): a read of the mutable wrapper variable matches no permitted form, so its verdict depends on gate-mock ordering — use \$WRAPPER_REAL for a doctrine SUBJECT: $(printf '%s' "$_wr_bad_reads" | cut -c1-200)" ;;
-  *)
-    bad "structural (#3367): the order-dependence pass returned an unrecognised category '$_WR_VERDICT', so this assert cannot say whether the file is clean" ;;
-esac
-# THE CONTROL RUNS THE ENFORCER ITSELF over fixtures whose correct verdict is known. Every bypass any
-# review has found is a fixture, alongside every form that must still be ACCEPTED — and, crucially,
-# the DISPATCH is exercised, so deleting an accumulator arm now reds here instead of passing.
-_wr_ctl_dir="$tmp/wrapper-grammar-fixtures"
-mkdir -p "$_wr_ctl_dir"
-# Each fixture carries one PERMITTED occurrence (so `empty` is not the answer) plus the case under test.
-_wr_ok_line="bash $_wr_ref --help"
-# The expected-verdict word is COMPOSED: written literally it is a bare `eval` in code position and
-# the ban above would flag this fixture table. Composing beats excluding -- see _wr_code_view.
-_wr_v_eval='ev''al'
-_wr_ctl_bad=""
-# FIXTURES ARE WRITTEN WITH `printf` AND `$_wr_ref`, NEVER A HEREDOC. The scanner is line-oriented,
-# so a literal `"$WRAPPER"` in a quoted `<<'"'"'EOF'"'"'` heredoc body reads as a live read and verdicts
-# `form` — inert in shell, but this pass cannot see the heredoc. Fail-closed, and free to avoid.
-_wr_fixture() {
-  # $1 = name, $2 = the line under test ('' for none)
-  printf '%s\n' "$_wr_ok_line" >"$_wr_ctl_dir/$1"
-  [ -z "$2" ] || printf '%s\n' "$2" >>"$_wr_ctl_dir/$1"
-}
-_wr_expect() {
-  _wr_scan_file "$_wr_ctl_dir/$1"
-  [ "$_WR_VERDICT" = "$2" ] || _wr_ctl_bad="$_wr_ctl_bad [$1: want=$2 got=$_WR_VERDICT]"
-}
-_wr_fixture f_clean    ''
-_wr_fixture f_form     "_x=\$(grep -c foo $_wr_ref)"
-_wr_fixture f_form2    "sed -n 1p $_wr_ref"
-_wr_fixture f_grepbash "grep bash $_wr_ref"
-_wr_fixture f_awkbash  "_x=\$(awk /bash/ $_wr_ref)"
-_wr_fixture f_alias    "subject=$_wr_ref"
-_wr_fixture f_braced   "_x=\$(grep -c foo \"\${$_wr_vname}\")"
-_wr_fixture f_unquoted "_x=\$(grep -c foo \$$_wr_vname)"
-_wr_fixture f_arity    "bash $_wr_ref --help; grep -c q $_wr_ref"
-_wr_fixture f_markar   "_x=\$(grep -c q $_wr_ref); bash $_wr_ref --help # $_wr_marker: one marker must not waive two reads"
-_wr_fixture f_prose    "_probe=\$(grep -c \"the wrapper's tok\" $_wr_ref) # it's a scan"
-_wr_fixture f_eval     "eval 'grep -c FOO $_wr_ref'"
-_wr_fixture f_aposmk   "printf '%s' \"it's\"; grep $_wr_ref"
-_wr_fixture f_selfauth "bad \"the wrapper's rule\"; grep -c z $_wr_ref # see 'wrapper-mutable-read-allow' above"
-_wr_fixture f_prosetag "  ok 'the mutable \$$_wr_vname is named in prose, and needs no marker'"
-_wr_fixture f_captured "_x=\$(bash $_wr_ref --help)"
-_wr_fixture f_bracesfx "_x=\$(grep -c foo \"\${$_wr_vname}_REAL\")"
-_wr_fixture f_bracedef "_x=\$(grep -c foo \"\${$_wr_vname:-/tmp/x}\")"
-_wr_fixture f_fakeinv  "grep foo $_wr_ref # \$(bash $_wr_ref)"
-_wr_fixture f_evalasm  "_cmd='grep foo $_wr_ref'"
-_wr_fixture f_multiline "' \"\$ORACLES\" \"\$CHECKS_FILE\" $_wr_ref 2>/dev/null || true)"
-_wr_fixture f_nearmk   "_x=\$(grep -c foo $_wr_ref) # ${_wr_marker}ance: a near-prefix must not grant"
-_wr_fixture f_mkcolon  "_x=\$(grep -c foo $_wr_ref) # $_wr_marker: a reviewed opt-out"
-_wr_fixture f_btprose  "ok \"\`grep \"a'b\" $_wr_ref \"c'd\"\`\""
-_wr_fixture f_cshidden "bash $_wr_ref \"\$(grep \"a'b\" $_wr_ref \"c'd\")\""
-_wr_fixture f_csprose  "ok \"\$(grep \"a'b\" $_wr_ref \"c'd\")\""
-# COMPOSED FROM $_wr_aliases, never written literally (roborev job 50). Spelled out, these fixture
-# lines ARE alias assignments, and the mutation scan below had to exclude any line containing
-# `_wr_fixture`/`_wr_expect`/`_wr_ax` to tolerate them -- a substring exclusion, so
-# `_wr_saved=/decoy # _wr_fixture` exempted a real mutation. Composing removes the need for the
-# exclusion entirely rather than narrowing it.
-_wr_a1=${_wr_aliases%% *}
-_wr_a2=${_wr_aliases##* }
-_wr_fixture f_locsave  "  local $_wr_a1=$_wr_ref"
-_wr_fixture f_semisave "$_wr_a1=$_wr_ref;"
-_wr_fixture f_cmpsave  "$_wr_a2=x; subject=$_wr_ref"
-_wr_fixture f_cmpsave2 "$_wr_a2=unused; grep pattern $_wr_ref"
-_wr_fixture f_ansic    "_x=\$'a\\'b'; grep -c z $_wr_ref"
-_wr_fixture f_marked   "_x=\$(grep -c foo $_wr_ref) # $_wr_marker: a reviewed opt-out"
-_wr_fixture f_mixed    "grep -c q $_wr_ref; ok 'mentions \$$_wr_vname'"
-_wr_fixture f_save     "_gm_real_wrapper=$_wr_ref"
-_wr_fixture f_envinv   "STUB_INVOKED=\"\$INVOKED\" PATH=\"\$stubbin:\$PATH\" bash $_wr_ref --help"
-printf '%s\n' "_x=\$(grep -c foo \"\$${_wr_vname}_REAL\")" >"$_wr_ctl_dir/f_empty"
-_wr_expect f_clean    clean
-_wr_expect f_form     form
-_wr_expect f_form2    form
-_wr_expect f_grepbash form
-_wr_expect f_awkbash  form
-_wr_expect f_alias    form
-_wr_expect f_braced   spelling
-_wr_expect f_unquoted spelling
-_wr_expect f_arity    arity
-_wr_expect f_markar   arity
-_wr_expect f_prose    form
-_wr_expect f_eval     "$_wr_v_eval"
-_wr_expect f_aposmk   form
-_wr_expect f_selfauth form
-_wr_expect f_prosetag clean
-_wr_expect f_captured clean
-_wr_expect f_bracesfx spelling
-_wr_expect f_bracedef spelling
-_wr_expect f_fakeinv  form
-_wr_expect f_evalasm  prose
-_wr_expect f_multiline unbalanced
-_wr_expect f_nearmk   form
-_wr_expect f_mkcolon  clean
-_wr_expect f_btprose  substitution
-_wr_expect f_cshidden substitution
-_wr_expect f_csprose  substitution
-_wr_expect f_locsave  clean
-_wr_expect f_semisave clean
-_wr_expect f_cmpsave  form
-_wr_expect f_cmpsave2 form
-_wr_expect f_ansic    unbalanced
-_wr_expect f_marked   clean
-_wr_expect f_mixed    form
-_wr_expect f_save     clean
-_wr_expect f_envinv   clean
-_wr_expect f_empty    empty
-# The real file's accumulators must be recomputed: the fixtures above clobbered the shared globals,
-# and the success message below prints counts from them.
-_wr_scan_file "$TEST_SELF"
-if [ -z "$_wr_ctl_bad" ]; then
-  ok 'structural control (#3367): the ENFORCEMENT PASS itself (classifier + dispatch) gives the correct verdict on all thirty-six fixtures — it rejects the braced, unquoted, compound-line, unallowlisted-alias, mentions-the-word-bash quote-swallowed, marker-self-authorising and eval bypasses, refuses to let a marker waive a second read, reports a subjectless file as empty, and still accepts invocations, allowlisted saves, marked opt-outs, captured invocations and unmarked prose'
-else
-  bad "structural control (#3367): the enforcement pass misclassifies a fixture, so its verdict on the real file is not trustworthy —$_wr_ctl_bad"
+# So the global is GONE instead of guarded. `run_wrapper` -- the single site that ever invoked the
+# wrapper on behalf of a case -- resolves its own path, and the two mock cases scope
+# `RUN_WRAPPER_PATH` around themselves rather than mutating anything the rest of the file can see.
+# Nothing is left to read wrongly, so there is nothing to police: one shell-enforced fact replaces
+# the scanner, its thirty-six fixtures and its poison probe. The property below is what remains.
+_wr_bad=""
+if grep -qE '^[[:space:]]*WRAPPER=' "$TEST_SELF"; then
+  _wr_bad="$_wr_bad a-mutable-WRAPPER-global-is-back;"
 fi
-# AND AN ALLOWLISTED ALIAS MAY ONLY RESTORE. Naming the two save variables is not enough on its
-# own: if `_wr_saved` could itself be scanned, the allowlist would just relocate the bypass. So every
-# use of an alias must be the restore assignment `WRAPPER="$alias"` (or a marked line, which is the
-# assert that the restore happened). The save `alias="$WRAPPER"` carries no `$alias` and so is not a use.
-# BOTH REMAINING SCANS READ LOGICAL LINES (roborev job 47). `grep "$_wr_\` + `saved"` and
-# `grep "$\` + `{!name}"` are joined by bash into one read but match neither physical line, so the
-# alias-use and indirect-expansion scans were blind to exactly the split `_wr_scan_file` and the
-# nameref scan already handle. Same join, same reason; this is the last pair that lacked it.
-_wr_alias_re=$(printf '%s' "$_wr_aliases" | tr ' ' '|')
-_wr_alias_bad=""
-_wr_alias_seen=0
-while IFS= read -r _wr_u; do
-  [ -n "$_wr_u" ] || continue
-  _wr_uc=${_wr_u#*:}
-  _wr_uc=$(printf '%s\n' "$_wr_uc" | sed -e 's/\\[$]/@ESC@/g' -e "s/'[^']*'//g")
-  # THE DECLARATION IS EXEMPT BY BEING THE DECLARATION, not by containing its own text. This was
-  # `case $line in *"$_wr_alias_re"*)`, an unanchored substring of the `a|b` alternation, so any line
-  # quoting that text was skipped: `grep -E "_gm_real_wrapper|_wr_saved" "$_wr_saved"` exempted
-  # itself while scanning an alias. Fourth instance of one error in this file — a permitted shape
-  # found ANYWHERE standing in for the line BEING that shape.
-  _wr_ud=${_wr_uc#"${_wr_uc%%[! 	]*}"}
-  _wr_ud=${_wr_ud%"${_wr_ud##*[! 	]}"}
-  [ "$_wr_ud" = "_wr_aliases=" ] && continue
-  _wr_alias_seen=$((_wr_alias_seen + 1))
-  # THE MARKER IS RECOGNISED ONLY AT THE START OF A QUOTE-AWARE TRAILING COMMENT, exactly as the
-  # main classifier does it. Matched anywhere, `grep "wrapper-mutable-read-allow" "$_wr_saved"`
-  # exempts ITSELF and scans the alias — the self-authorisation shape again, on the one check that
-  # had not yet been converted. The scanner already computes this; ask it rather than re-deciding.
-  _wr_umk=$(printf '%s\n' "$_wr_u" | awk -v VN="$_wr_vname" -v MK="$_wr_marker" "$_WR_QS" | head -1)
-  # Fields: code lit q mk ev bal cs tot -- strip the four after `mk`, then take the last. (Adding
-  # `tot` silently shifted this and marked the restore assert unmarked: a positional read of a
-  # widening record. Named extraction would be better; the count is asserted below instead.)
-  _wr_umk_n=$(printf '%s\n' "$_wr_umk" | tr ' ' '\n' | grep -c .)
-  if [ "${_wr_umk_n:-0}" -ne 9 ]; then
-    bad "structural (#3367): the quote scanner emits ${_wr_umk_n:-0} fields, not the 9 this extraction expects — a field was added or removed and every positional read of it is now wrong"
-  fi
-  _wr_umk=${_wr_umk% *}; _wr_umk=${_wr_umk% *}; _wr_umk=${_wr_umk% *}; _wr_umk=${_wr_umk% *}; _wr_umk=${_wr_umk% *}; _wr_umk=${_wr_umk##* }
-  [ "${_wr_umk:-0}" -eq 1 ] && continue
-  _wr_ut=${_wr_uc#"${_wr_uc%%[! ]*}"}
-  _wr_is_restore=no
-  for _wr_a in $_wr_aliases; do
-    [ "$_wr_ut" = "$_wr_vname=\"\$$_wr_a\"" ] && _wr_is_restore=yes
-  done
-  [ "$_wr_is_restore" = yes ] && continue
-  _wr_alias_bad="$_wr_alias_bad${_wr_alias_bad:+; }$_wr_u"
-done <<EOF
-$(sed -e :a -e '/\\$/N; s/\\\n//; ta' "$TEST_SELF" | grep -nE '[$][{]?('"$_wr_alias_re"')[}]?([^A-Za-z0-9_]|$)' | grep -vE '^[0-9]+:[[:space:]]*#')
-EOF
-# CONTROL for the exemption above (roborev job 42): embedding the declaration's text must NOT
-# authorise an alias use. Both probes run the same predicate the loop uses.
-#
-# THE PROBE STRINGS ARE BUILT AT RUNTIME, never written literally, because this file is its own
-# subject: a literal `"$_wr_saved"` here would be a genuine alias use and the loop above would
-# rightly flag it. Composing from `$_wr_aliases` keeps the source line free of any alias occurrence.
-_wr_ax_alias=${_wr_aliases##* }
-_wr_ax_bad=""
-_wr_ax_probe=$(printf 'grep -E "%s" "$%s"' "$_wr_alias_re" "$_wr_ax_alias")
-for _wr_ax in "_wr_aliases=|exempt" "$_wr_ax_probe|judged"; do
-  _wr_axl=${_wr_ax%|*}; _wr_axw=${_wr_ax##*|}
-  _wr_axc=$(printf '%s\n' "$_wr_axl" | sed -e 's/\\[$]/@ESC@/g' -e "s/'[^']*'//g")
-  _wr_axc=${_wr_axc#"${_wr_axc%%[! 	]*}"}; _wr_axc=${_wr_axc%"${_wr_axc##*[! 	]}"}
-  if [ "$_wr_axc" = "_wr_aliases=" ]; then _wr_axg=exempt; else _wr_axg=judged; fi
-  [ "$_wr_axg" = "$_wr_axw" ] || _wr_ax_bad="$_wr_ax_bad [want=$_wr_axw got=$_wr_axg: $_wr_axl]"
-done
-if [ -z "$_wr_ax_bad" ]; then
-  ok 'structural control (#3367): the alias-declaration exemption matches the declaration EXACTLY — a line merely quoting the alias names is still judged, so it cannot exempt itself while scanning an alias'
-else
-  bad "structural control (#3367): the alias-declaration exemption misclassifies a synthetic line, so a line quoting the declaration could skip the alias-use check —$_wr_ax_bad"
+# `RUN_WRAPPER_PATH` is the scratch-copy override. It may be ASSIGNED only by the mock cases and READ
+# only by run_wrapper -- otherwise it is the same order-dependent global under a new name.
+_wr_rwp_reads=$(_wr_code_view_min "$TEST_SELF" | grep -nE '[$][{]?RUN_WRAPPER_PATH' || true)
+_wr_rwp_n=$(printf '%s' "$_wr_rwp_reads" | grep -c . || true)
+if [ "${_wr_rwp_n:-0}" -ne 1 ]; then
+  _wr_bad="$_wr_bad RUN_WRAPPER_PATH-is-read-in-${_wr_rwp_n:-0}-places-not-just-run_wrapper;"
 fi
-# ===== THE COMPLETE SET OF WAYS TO READ A SHELL VARIABLE (roborev job 48) =====
-# `eval 'grep foo "$WRAP''PER"'` reads the wrapper and NO textual scan for `$WRAPPER` can see it:
-# shell concatenates adjacent quoted strings, so the NAME is assembled at runtime. Verified against
-# bash: `eval 'echo "$WRAP''PER"'` prints the value. Chasing spellings here is hopeless — there are
-# unboundedly many ways to spell a name by concatenation, and this file uses that very trick itself
-# to stop its guards matching their own pattern lines.
-#
-# So the argument is closed from the other end. A shell variable can be read in exactly four ways:
-#   (a) a literal `$NAME` / `${NAME}`  -> enumerated and classified by the pass above
-#   (b) indirect expansion `${!var}`   -> refused except an exact two-line allowlist
-#   (c) a nameref                      -> declaration banned outright
-#   (d) `eval` of constructed text     -> banned here
-# That is the whole set, so a constructed name has nowhere left to be executed. The ban costs
-# nothing: this harness has never used `eval` in code position (measured 0).
-_wr_evalp=$(_wr_code_view "$TEST_SELF" | grep -nE '(^|[ \t;&|(])'"eval"'([ \t]|$)' || true)
-if [ -z "$_wr_evalp" ]; then
-  ok 'structural (#3367): the harness runs no eval, so a variable name assembled by shell concatenation has nowhere to be executed — with literal reads classified, indirect expansion allowlisted and namerefs banned, that closes every way to read the mutable path'
+if [ -z "$_wr_bad" ]; then
+  ok 'structural (#3367): there is no mutable WRAPPER global, and the scratch-copy override is read at exactly one site (run_wrapper) — a doctrine scan has no mutable path available to it, so the order dependence is absent by construction rather than policed'
 else
-  bad "structural (#3367): an eval appears in code position. Shell concatenates adjacent quoted strings, so eval can read the mutable wrapper under a name no textual scan can see (\$WRAP''PER): $(printf '%s' "$_wr_evalp" | head -3 | tr '\n' ';' | cut -c1-200)"
+  bad "structural (#3367): the mutable wrapper path is back —$_wr_bad. Doctrine scans would again be judged against whichever file the last gate-mock case left behind (this is #3367; do not re-introduce a guard for it, remove the global)"
 fi
-# ...and a save alias may only ever be assigned FROM the mutable global. A bare mutation
-# (`_wr_saved=/decoy`) is invisible to a scan that looks for `$alias`, and the poison probe would
-# then "restore" the wrong path while its own equality assert happily agreed (roborev job 48).
-_wr_amut=""
-while IFS= read -r _wr_ml; do
-  [ -n "$_wr_ml" ] || continue
-  _wr_mlc=${_wr_ml#*:}
-  _wr_mlc=${_wr_mlc#"${_wr_mlc%%[! 	]*}"}
-  _wr_mlc=${_wr_mlc%"${_wr_mlc##*[! 	]}"}
-  _wr_mlc=${_wr_mlc%;}
-  case "$_wr_mlc" in 'local '*|'export '*|'declare '*|'typeset '*) _wr_mlc=${_wr_mlc#* } ;; esac
-  _wr_mlc=${_wr_mlc#"${_wr_mlc%%[! 	]*}"}
-  _wr_mok=no
-  for _wr_ma in $_wr_aliases; do
-    [ "$_wr_mlc" = "$_wr_ma=$_wr_ref" ] && _wr_mok=yes
-  done
-  [ "$_wr_mok" = yes ] && continue
-  _wr_amut="$_wr_amut${_wr_amut:+; }$_wr_ml"
-done <<EOF
-$(sed -e :a -e '/\\$/N; s/\\\n//; ta' "$TEST_SELF" \
-  | grep -nE '(^|[ 	;&|(])(local |export |declare |typeset )?('"$_wr_alias_re"')=' \
-  | grep -vE '^[0-9]+:[[:space:]]*#')
-EOF
-if [ -z "$_wr_amut" ]; then
-  ok 'structural (#3367): every assignment to a save alias takes its value from the mutable global itself — none can be pointed somewhere else, so a restore cannot silently install the wrong path'
-else
-  bad "structural (#3367): a save alias is assigned something other than the mutable global, so a later restore would install that value instead and the probe's own equality assert would agree with it: $(printf '%s' "$_wr_amut" | cut -c1-200)"
-fi
-# NO ALIAS MAY BE REACHED UNDER ANOTHER NAME (roborev job 43). Both structural scans look for the
-# alias by NAME or by `$`-expansion, so an indirect binding reaches the saved mutable path without
-# either seeing it:  declare -n subject=_wr_saved ; grep ... "$subject"
-# Two narrow checks rather than one broad one. A blanket ban on indirect expansion was the first
-# attempt and it FALSE-FAILED on two pre-existing legitimate uses (`${!_rw_i}` walking positional
-# arguments at ~960, nothing to do with aliases) — a guard that reds on correct code is the guard
-# people learn to waive, so the ban is scoped to what actually threatens an alias.
-# ANY option group containing the flag counts, in any order and any combination: `-n`, `-ng`,
-# `-g -n`. The first version anchored it as the LAST character of the FIRST group, which is a
-# spelling of the flag rather than the flag itself — `declare -g -n` and `declare -ng` both evaded
-# it. (`local _f="$1"` and friends carry no option group and are unaffected.)
-# LOGICAL lines, not physical ones: `declare \` continued onto `-n subject=_wr_saved` is one
-# declaration, and a per-physical-line grep sees neither half as a nameref. Continuations are joined
-# first (the line numbers are lost, so the diagnostic reports the joined text instead).
-_wr_nrefd=$(_wr_code_view "$TEST_SELF" \
-  | grep -nE '(^|[ \t;&|(])(declare|local|typeset)[[:space:]]+(-[A-Za-z]+[[:space:]]+)*-[A-Za-z]*'"n" || true)
-if [ -z "$_wr_nrefd" ]; then
-  ok 'structural (#3367): the harness declares no nameref, so no second name can be bound to an allowlisted alias'
-else
-  bad "structural (#3367): a nameref declaration appears in this file. It can bind an allowlisted alias to a new name that the alias-use scan (which looks for the alias by name) and the wrapper scan (which looks for \$WRAPPER) both miss: $(printf '%s' "$_wr_nrefd" | head -3 | tr '\n' ';' | cut -c1-200)"
-fi
-# ...and EVERY indirect expansion is refused except an exact allowlist. The first version only
-# refused one whose own text named an alias, which is a property of the LINE rather than of what it
-# EXPANDS TO: `_name=_wr_saved; grep "${!_name}"` — or `_name=WRAPPER` — names nothing on the line
-# that scans. What a name expands to is not decidable here, so the construct itself is allowlisted
-# by exact content: the two pre-existing positional-argument walkers, and nothing else. A reformat
-# of those lines reds and must be re-approved, which is the intended cost of an exact allowlist.
-# The allowlist entries are COMPOSED, never written literally: spelled out, they would themselves be
-# indirect expansions and this scan would flag its own allowlist. (Same self-reference as the marker
-# that authorised itself, but in the FAIL direction — the guard's artifact matching its own subject.
-# Measured: the literal form red with the allowlist lines as the two offenders.)
-_wr_ib='${'"!"
-_wr_indir_ok_1='if [ "'"$_wr_ib"'_rw_i}" = "--log" ]; then'
-_wr_indir_ok_2='WRAPPER_LOG_PATH="'"$_wr_ib"'_rw_next}"'
-_wr_indir_bad=""
-while IFS= read -r _wr_il; do
-  [ -n "$_wr_il" ] || continue
-  _wr_ilc=${_wr_il#*:}
-  _wr_ilc=${_wr_ilc#"${_wr_ilc%%[! 	]*}"}
-  _wr_ilc=${_wr_ilc%"${_wr_ilc##*[! 	]}"}
-  [ "$_wr_ilc" = "$_wr_indir_ok_1" ] && continue
-  [ "$_wr_ilc" = "$_wr_indir_ok_2" ] && continue
-  _wr_indir_bad="$_wr_indir_bad${_wr_indir_bad:+; }$_wr_il"
-done <<EOF
-$(sed -e :a -e '/\\$/N; s/\\\n//; ta' "$TEST_SELF" | grep -nE '[$][{]'"!" | grep -vE '^[0-9]+:[[:space:]]*#')
-EOF
-if [ -z "$_wr_indir_bad" ]; then
-  ok 'structural (#3367): every indirect expansion in this harness is one of the two allowlisted positional-argument walkers — a dynamically-named one could expand to a save alias, and what a name expands to is not decidable by this scan'
-else
-  bad "structural (#3367): an indirect expansion outside the exact allowlist appears in this file. It can expand to a save alias (or to the wrapper variable itself) under a name neither structural scan is looking for: $(printf '%s' "$_wr_indir_bad" | head -3 | cut -c1-200)"
-fi
-if [ "${_wr_alias_seen:-0}" -eq 0 ]; then
-  bad 'structural (#3367): no use of any save alias was found, so the alias restriction certified nothing — the aliases were renamed and the allowlist is now describing names that do not exist'
-elif [ -z "$_wr_alias_bad" ]; then
-  ok "structural (#3367): all $_wr_alias_seen uses of the save aliases are restores — an alias cannot become a second, unwatched name for the mutable path"
-else
-  bad "structural (#3367): a save alias is used for something other than restoring the mutable global, so it is a second name for the same order-dependent value: $(printf '%s' "$_wr_alias_bad" | cut -c1-200)"
-fi
-# ...and `WRAPPER_REAL` must never be reassigned, or it is just `WRAPPER` with a longer name.
-#
-# ENFORCED BY THE SHELL, ASSERTED AS A PROPERTY (roborev job 37). This used to count lines matching
-# `^WRAPPER_REAL=`, i.e. it enumerated ASSIGNMENT SYNTAX — so `export WRAPPER_REAL=…`,
-# `WRAPPER_REAL+=…` and `printf -v WRAPPER_REAL …` all mutated the supposedly immutable path while
-# the guard stayed green. Enumerating the spellings of a mutation is the same error as enumerating
-# the spellings of a read (job 34) and matching an invocation by substring (job 36): a list of
-# shapes someone thought of, standing in for the property itself. `readonly` makes the shell the
-# enforcer, so no syntax can evade it, and the check below asks the shell rather than the text.
-if grep -qE '^readonly WRAPPER_REAL=' "$TEST_SELF"; then
-  ok 'structural (#3367): WRAPPER_REAL is declared readonly, so the shell — not a syntax list — is what prevents reassignment'
-else
-  bad 'structural (#3367): WRAPPER_REAL is not declared readonly, so its immutability rests on a grep for assignment spellings, which export/+=/printf -v all evade'
-fi
-# BEHAVIOURAL: ask the shell. A subshell that tries to reassign must FAIL — this is the property
-# itself, measured, rather than a claim about the declaration's text.
+# WRAPPER_REAL is the one path anything reads, and the SHELL keeps it immutable — asked of the shell
+# rather than inferred from the declaration text, because `export`/`+=`/`printf -v` all evade a grep
+# for assignment spellings (roborev job 37).
 if ( WRAPPER_REAL=/nonexistent/decoy ) 2>/dev/null; then
-  bad 'structural (#3367): WRAPPER_REAL could be reassigned in a subshell, so the readonly declaration is not in force and every doctrine scan is back to reading a mutable path'
+  bad 'structural (#3367): WRAPPER_REAL could be reassigned in a subshell, so the readonly declaration is not in force'
 else
   ok 'structural (#3367): a reassignment of WRAPPER_REAL is REFUSED by the shell (measured, not inferred from the declaration text)'
 fi
@@ -5602,49 +4892,7 @@ if [ "$WRAPPER_REAL" = "$SCRIPT_DIR/../flow/roborev-review.sh" ]; then
 else
   bad "structural (#3367): WRAPPER_REAL does not name the real wrapper — it is immutable but wrong: $WRAPPER_REAL"
 fi
-# BEHAVIOURAL: poison `WRAPPER` and run the classifier filter over both paths.
-#
-# THE NEEDLE IS A SYNTHETIC SENTINEL, NOT A REAL RETIRED TOKEN, and that is a correctness
-# requirement rather than tidiness. The first version poisoned with `mixed-delivery`; when a RED
-# rehearsal injected a genuine reintroduction into the real wrapper, this pin ALSO fired and said
-# "the scan via $WRAPPER_REAL picked up the poisoned copy" — blaming path instability for what was
-# actually a dirty subject. A diagnostic that names the wrong cause under a real defect sends its
-# reader ~2000 lines away from the problem, which is precisely how #3367 cost two lanes their gate
-# budget. A sentinel that CANNOT occur in a real flow script makes the two conditions independent:
-# a hit via $WRAPPER_REAL can only mean the immutable path resolved to the poisoned copy.
-_wr_sentinel='ROBOREV_ORDER_DEP_PROBE_'"3367"
-_wr_poison_dir="$tmp/wrapper-poison"
-mkdir -p "$_wr_poison_dir"
-{
-  printf '%s\n' '#!/usr/bin/env bash'
-  # An EXECUTABLE line, not prose and not a --help heredoc: the filter must keep it.
-  printf '%s=inline\n' "$_wr_sentinel"
-} >"$_wr_poison_dir/roborev-review.sh"
-_wr_saved="$WRAPPER"
-readonly _wr_saved
-WRAPPER="$_wr_poison_dir/roborev-review.sh"
-_cls_via_real=$(_cls_exec_lines "$ORACLES" "$CHECKS_FILE" "$WRAPPER_REAL")
-_cls_via_mutable=$(_cls_exec_lines "$ORACLES" "$CHECKS_FILE" "$WRAPPER") # wrapper-mutable-read-allow: reading the poisoned path IS this probe
-WRAPPER="$_wr_saved"
-_wr_real_hit=no; _wr_mut_hit=no
-case "$_cls_via_real"    in *"$_wr_sentinel"*) _wr_real_hit=yes ;; esac
-case "$_cls_via_mutable" in *"$_wr_sentinel"*) _wr_mut_hit=yes ;; esac
-if [ "$_wr_real_hit" = no ] && [ "$_wr_mut_hit" = yes ]; then
-  ok 'behavioural (#3367): with $WRAPPER poisoned, the same filter reports the sentinel via $WRAPPER and NOT via $WRAPPER_REAL — the immutable path is what makes the verdict stable, and the scan is demonstrably not blind'
-elif [ "$_wr_mut_hit" = no ]; then
-  bad 'behavioural (#3367): the poisoned wrapper was NOT flagged even when scanned directly, so this case shows nothing about path stability (the fixture or the executable-line filter is wrong, not the paths)'
-else
-  bad 'behavioural (#3367): a sentinel that exists ONLY in the poisoned scratch copy was found via $WRAPPER_REAL, so the immutable path is not immutable'
-fi
-# The restore must have happened, or every later case silently audits the scratch copy — the exact
-# failure mode this section exists to prevent, reintroduced by the pin that tests for it.
-# Compared against WRAPPER_REAL, not against the alias: an assert that verifies a restore using the
-# very variable whose corruption it should detect will agree with any value (roborev job 51).
-if [ "$WRAPPER" = "$WRAPPER_REAL" ]; then # wrapper-mutable-read-allow: asserting the restore requires reading it
-  ok 'behavioural (#3367): the probe restored $WRAPPER, so no later case inherits the poisoned path'
-else
-  bad 'behavioural (#3367): the probe left $WRAPPER pointing at its scratch copy'
-fi
+
 
 # ===== ABSENCE IS A FAIL, AND THE WAIVER IS THE ONLY WAY PAST IT =====
 _pc_start=$(grep -nE '^roborev_check_prompt_content\(\) \{' "$CHECKS_FILE" | head -1 | cut -d: -f1)
