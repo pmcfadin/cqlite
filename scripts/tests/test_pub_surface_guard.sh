@@ -88,6 +88,15 @@
 #                while cargo resolves it against the repo root, so the guard locked,
 #                deleted and inspected a different tree than the one cargo wrote.
 #
+#   The COMPONENT that certifies the guard (roborev r6 F2) — also a FALSE PASS:
+#  26.  RED    — `agent-gate.sh`'s pub-surface component assigned PASS on the guard's
+#                EXIT STATUS alone, echoing the measurement line with `|| true`. So a
+#                guard that exited 0 having enumerated nothing reported
+#                `pub-surface: PASS` — a pass derived from the absence of a bad signal,
+#                in the one component that certifies the public-API guard. The
+#                component must require the affirmative measurement line and otherwise
+#                record a NAMED failure. Carries its own positive control.
+#
 # NO TEST-ONLY SEAM. The guard's subject is hard-coded on purpose, so the negative
 # cases SUBSTITUTE THE ARTIFACT: each runs in its own `git worktree add --detach HEAD`
 # scratch checkout whose files are edited in place (CLAUDE.md — a test that needs a
@@ -1039,5 +1048,96 @@ if [ "$(wc -l <"$TMPROOT/case25.changed" | tr -d ' ')" -ne 2 ] || grep -q '^-' "
 fi
 echo "OK (25): a Unicode-named associated item is named in the diff, and no ASCII item is re-spelled"
 
+# ---------------------------------------------------------------------------
+# 26. RED — the GATE COMPONENT must not report PASS when the guard measured
+#     NOTHING (roborev round 6, finding 2). A VACUOUS PASS.
+#
+#     `agent-gate.sh`'s pub-surface component used to assign PASS on the guard's
+#     exit status alone and then echo its measurement line with `grep … || true`,
+#     so an accidental early zero-exit inside the guard — a `return 0` on a path
+#     that never enumerated anything — produced a component that reports PASS
+#     while nothing was measured. Measured on the unfixed gate, with a stub guard
+#     that exits 0 after printing one unrelated line:
+#         >>> [pub-surface] bash scripts/ci/check-pub-surface.sh
+#         >>> [pub-surface] PASS (0s)
+#         pub-surface:       PASS (0s)
+#     That is CLAUDE.md's named rule violated in the one component that certifies
+#     the guard that certifies the public API: never derive a pass from the ABSENCE
+#     of a bad signal — a positive verdict requires an AFFIRMATIVE MEASUREMENT.
+#
+#     NO TEST-ONLY SEAM IN agent-gate.sh. The component's guard path is hard-coded
+#     on purpose, so this case SUBSTITUTES THE ARTIFACT: it replaces
+#     scripts/ci/check-pub-surface.sh inside a throwaway scratch worktree and runs
+#     THAT tree's gate. A seam is one more thing a real invoker can set.
+#
+#     `--only pub-surface` self-exempts from the #1825 gate slot, so this nested
+#     invocation cannot deadlock against an enclosing gate; the stub guard means no
+#     cargo runs at all, so the whole case is seconds.
+#
+#     The POSITIVE CONTROL is in the same scratch, at no extra cost: a stub that DOES
+#     print the measurement line must still reach PASS. Without it the fix could be
+#     hardwired to FAIL and this case would not notice.
+# ---------------------------------------------------------------------------
+scratch_tree gate-vacuous-pass; wt26="$SCRATCH"
+# Deliberately does NOT touch `set -e`: re-enabling it inside a function that then
+# returns non-zero exits the SUITE at the call site (measured — the case aborted with
+# no output at all). Each caller wraps the call in `set +e` / `set -e`, as every other
+# case in this suite does.
+gate26() { # <summary-file> <log>
+  ( cd "$wt26" && env AGENT_GATE_SUMMARY_FILE="$1" \
+      bash "$wt26/scripts/agent-gate.sh" --only pub-surface >"$2" 2>&1 )
+}
+
+# (a) THE RED: a guard that exits 0 having measured nothing.
+cat >"$wt26/$GUARD_REL" <<'STUB'
+#!/usr/bin/env bash
+# Self-test stub (#1712 r6 F2): stands in for an ACCIDENTAL EARLY ZERO-EXIT — the
+# guard returns success on a path that never enumerated a public surface, so it
+# emits no `pub-surface: …` measurement line. Exists only in a scratch worktree.
+echo "check-pub-surface: returned early without enumerating anything"
+exit 0
+STUB
+set +e
+gate26 "$TMPROOT/case26a-summary.txt" "$TMPROOT/case26a.out"
+case26a_rc=$?
+set -e
+# A BARE non-zero rc assert would be non-discriminating here: a SUCCESSFUL `--only`
+# run exits 3 (PARTIAL, "does NOT count as the gate"), so `-ne 0` is satisfied by the
+# vacuous pass too. The verdict lives in the SUMMARY block and in the FAIL exit (1).
+grep -qE '^pub-surface: +FAIL' "$TMPROOT/case26a-summary.txt" || {
+  echo "FAIL: case 26 — the pub-surface GATE COMPONENT did not record FAIL for a guard that"
+  echo "      exited 0 without emitting its affirmative measurement line. That is the"
+  echo "      #1712 r6 F2 VACUOUS PASS: the component certifying the public-API guard"
+  echo "      passing while nothing was measured."
+  grep -E 'pub-surface|RESULT:' "$TMPROOT/case26a-summary.txt" || echo '(no pub-surface line at all)'
+  exit 1
+}
+grep -q '^RESULT: FAIL' "$TMPROOT/case26a-summary.txt" \
+  || fail_case "case 26 — the component recorded FAIL but the run's RESULT did not become FAIL; got: $(grep -E 'RESULT:' "$TMPROOT/case26a-summary.txt" || echo '(no RESULT line)')"
+[ "$case26a_rc" -eq 1 ] \
+  || fail_case "case 26 — expected the FAIL exit status 1, got $case26a_rc (3 is a SUCCESSFUL --only run, i.e. the vacuous pass)"
+grep -qF 'affirmative measurement' "$TMPROOT/case26a.out" \
+  || fail_case "case 26 — the component failed but NOT with a NAMED diagnostic saying the affirmative measurement line was missing (a bare unexplained FAIL gets waived); got: $(cat "$TMPROOT/case26a.out")"
+
+# (b) THE POSITIVE CONTROL: the measurement line present ⇒ PASS is still reachable.
+cat >"$wt26/$GUARD_REL" <<'STUB'
+#!/usr/bin/env bash
+# Self-test stub (#1712 r6 F2) — the POSITIVE CONTROL: emits the guard's real
+# affirmative measurement line, so the component must still reach PASS.
+echo "pub-surface: 3 public items + 0 associated items + 0 re-exports + 0 globs over 1 public modules match cqlite-core/pub-surface.snapshot (3 item pages, cross-checked against rustdoc all.html); 1 crate-root declarations consistent"
+exit 0
+STUB
+set +e
+gate26 "$TMPROOT/case26b-summary.txt" "$TMPROOT/case26b.out"
+case26b_rc=$?
+set -e
+grep -qE '^pub-surface: +PASS' "$TMPROOT/case26b-summary.txt" \
+  || fail_case "case 26 control — a guard that DID emit its measurement line was not recorded PASS, so the requirement is hardwired to FAIL and case 26(a) proves nothing; got: $(grep -E 'pub-surface|RESULT:' "$TMPROOT/case26b-summary.txt" || echo '(no pub-surface line at all)')"
+[ "$case26b_rc" -eq 3 ] \
+  || fail_case "case 26 control — expected the successful --only exit status 3 (PARTIAL), got $case26b_rc"
+grep -qF 'public items + ' "$TMPROOT/case26b.out" \
+  || fail_case "case 26 control — the component passed but did not echo the measurement line, so a pasted gate log would not show the check RAN"
+echo "OK (26): the pub-surface GATE COMPONENT requires the guard's affirmative measurement line before PASS"
+
 echo ""
-echo "PASS: test_pub_surface_guard.sh — all 25 cases (7 green, 16 reds, 1 usage, 1 kill-safety)"
+echo "PASS: test_pub_surface_guard.sh — all 26 cases (7 green, 17 reds, 1 usage, 1 kill-safety)"
