@@ -185,6 +185,30 @@
 #                      package.json build script, node-release.yml); hard-FAILs on
 #                      any abort-built or missing/unparseable definition. Pure
 #                      bash/grep/awk — offline, deterministic, no datasets/network.
+#   pub-surface        CRATE-ROOT DECLARATION-CONSISTENCY guard for cqlite-core
+#                      (scripts/ci/check-pub-surface.sh, issue #1712). Asserts the
+#                      crate root TELLS THE TRUTH: for every unconditional,
+#                      non-#[doc(hidden)] top-level `pub mod NAME;` in
+#                      cqlite-core/src/lib.rs it resolves NAME's own module file
+#                      (NAME.rs xor NAME/mod.rs) and reads its PROLOGUE, failing if
+#                      the module gates ITSELF with an inner #![cfg(...)] — the
+#                      #1712 defect, where an inner #![cfg] hid `benchmarks` from
+#                      every default build while the crate root advertised it
+#                      unconditionally. Declaration-site attributes are read
+#                      structurally over meta-items, never by substring.
+#                      NOT PUBLIC-API DRIFT DETECTION: no snapshot, no --regenerate.
+#                      The rustdoc-derived snapshot half was removed deliberately
+#                      (#1712 descope; the principled route is #3366), so a green
+#                      here says nothing about whether the public API changed.
+#                      Fail-closed and affirmative — an unparseable crate root, an
+#                      unrecognised `pub mod` shape, zero declarations, zero
+#                      unconditional declarations, a module file resolving to
+#                      neither/both legal paths, an unreadable module file, a block
+#                      comment in a prologue or an inner attribute it cannot
+#                      classify are each a NAMED FAIL, never a vacuous pass. No env
+#                      opt-out. Source-only: no cargo, sub-second, offline, no
+#                      datasets.
+#                      SKIP-aware (loud): SKIPs only when cqlite-core is absent.
 #   tooling-tests      shell-tooling regression tests (fast, no datasets/network):
 #                      scripts/tests/test_agent_gate_summary.sh — proves the
 #                      SUMMARY block survives non-foreground capture (#1175). It
@@ -493,6 +517,30 @@
 #                      partial-extraction discard removed; guard state back under
 #                      TMPDIR with no consistency check; exact-`S` index-flag match;
 #                      failed nested scan read as clean).
+#                      Also runs scripts/tests/test_pub_surface_guard.sh (#1712),
+#                      the non-vacuity proof for the pub-surface component. 42 cases,
+#                      source-only (no cargo doc since the #1712 descope), each
+#                      negative case substituting the artifact in its own detached
+#                      scratch worktree — the guard has no test-only seam. The
+#                      INHERITED declaration half: the consistency assert must RED on
+#                      the pre-#1712 source shape (a bare ungated
+#                      `pub mod benchmarks;` whose cfg gate hides inside the module
+#                      file), a cosmetic `cfg_attr` must not exempt a crate-root
+#                      `pub mod`, a tell-tale token inside an attribute's STRING VALUE
+#                      must not either, a SAME-LINE `#[attr] pub mod x;` must be seen
+#                      (the first cut dropped it — a false PASS), the two independent
+#                      crate-root scans disagreeing must REFUSE, and the three SHARED
+#                      blind spots must refuse rather than agree-while-blind (inline
+#                      `pub mod x { … }`, an INDENTED depth-0 declaration, and
+#                      `*/ pub mod x;` — code after a closing delimiter). The NEW
+#                      module-file oracle half: every refusal path (module file
+#                      resolving to neither/both legal paths, not a readable regular
+#                      file, a block comment in the prologue, an inner attribute that
+#                      merely mentions `cfg`, content after an inner attribute on one
+#                      line, an unterminated inner attribute) plus green positive
+#                      controls, without which a guard hardwired to refuse everything
+#                      would satisfy them all. And case 26: THIS component must not
+#                      report PASS on a guard that exited 0 having measured nothing.
 #   minimal-build      cargo build + `cargo test --lib --no-run` (compile-only)
 #                      -p cqlite-core --no-default-features --features all-compression
 #   smoke              bash test-data/scripts/smoke-test-all-tables.sh
@@ -2163,7 +2211,7 @@ _python_build_verify_venv() {
   return 3
 }
 
-COMPONENTS=(file-size fmt clippy roborev-lints core-tests tombstones-scan scan-offload-guard work-counters-guard byte-budget-guard arrow-parity-guard memory-budget integration-tests format-compat write-tests cli-tests compaction-byte-parity bti-multiclustering query-semantics-oracle flight-query-semantics-oracle python-bindings node-bindings delivery-telemetry oom-audit parity-report operator-metrics-doc kit-dashboard-drift binding-unwind-profile tooling-tests minimal-build smoke)
+COMPONENTS=(file-size fmt clippy roborev-lints core-tests tombstones-scan scan-offload-guard work-counters-guard byte-budget-guard arrow-parity-guard memory-budget integration-tests format-compat write-tests cli-tests compaction-byte-parity bti-multiclustering query-semantics-oracle flight-query-semantics-oracle python-bindings node-bindings delivery-telemetry oom-audit parity-report operator-metrics-doc kit-dashboard-drift binding-unwind-profile pub-surface tooling-tests minimal-build smoke)
 
 # _component_lane <name> (issues #1737, #2657): SINGLE SOURCE OF TRUTH for the
 # MAIN-vs-SIDE lane split. Defined early (before the arg-parse dispatch) so the
@@ -5422,6 +5470,145 @@ run_kit_dashboard_drift() {
   echo ">>> [$name] $status ($((end - start))s)"
 }
 
+# pub-surface: the CRATE-ROOT DECLARATION-CONSISTENCY guard for cqlite-core (issue
+# #1712, epic #1688). scripts/ci/check-pub-surface.sh asserts that the crate root
+# TELLS THE TRUTH about the modules it declares: an unconditional,
+# non-`#[doc(hidden)]` top-level `pub mod NAME;` must not be gated by an inner
+# `#![cfg(...)]` inside NAME's own file. The defect that motivated it:
+# `pub mod benchmarks;` read as shipped public API for months while an inner
+# `#![cfg(feature = "benchmarks")]` hidden inside benchmarks/mod.rs configured it out
+# of every default build — the declaration site said one thing, the module's own file
+# said another, and nothing could tell the difference. BOTH FACTS ARE IN THE SOURCE
+# and each is read from a BOUNDED input: the declaration's attributes structurally
+# from lib.rs, and the module file's PROLOGUE (which rustc guarantees holds every
+# inner attribute the module has).
+# THIS IS NOT PUBLIC-API DRIFT DETECTION. There is no snapshot and no `--regenerate`:
+# the rustdoc-derived snapshot half was REMOVED deliberately (#1712 descope — five
+# review findings were all one class, an unbounded scanner that cannot abstain; the
+# principled route to drift detection is #3366). A green here says nothing about
+# whether cqlite-core's public API changed.
+# Fail-closed and affirmative: an unparseable crate root, an unrecognised `pub mod`
+# shape, zero declarations, zero unconditional declarations, a module file resolving
+# to neither or both of its legal paths, an unreadable module file, a block comment in
+# a prologue or an inner attribute it cannot classify are each a NAMED FAIL, never
+# "nothing measured, PASS", and there is no env opt-out. THIS COMPONENT holds the same
+# line for the guard itself (#1712 r6 F2): PASS requires the guard's affirmative
+# measurement line, not merely a zero exit, so an early `return 0` inside the guard is
+# a NAMED FAIL here instead of a vacuous green. Source-only — no cargo at all,
+# sub-second, offline, no datasets/network. SKIP-aware (loud, never a silent PASS):
+# SKIPs only when cqlite-core is genuinely absent (a sparse checkout). Its own
+# self-test lives in tooling-tests.
+run_pub_surface() {
+  local name=pub-surface
+  if [ -n "$ONLY" ] && ! grep -qw "$name" <<<"${ONLY//,/ }"; then
+    return 0
+  fi
+  local guard="scripts/ci/check-pub-surface.sh"
+  local log="$LOG_DIR/$name.log"
+  local start end status
+  start=$(date +%s)
+  if [ ! -d "$REPO_ROOT/cqlite-core" ]; then
+    status=SKIP
+    echo ">>> [$name] SKIP (cqlite-core is absent — sparse checkout)"
+    record_result "$name" "$status" 0
+    return 0
+  fi
+  if [ ! -f "$REPO_ROOT/$guard" ]; then
+    status=FAIL
+    echo ">>> [$name] FAIL: cqlite-core IS present but the guard $guard is MISSING"
+    echo "    (deleted/renamed) — that is breakage in a complete checkout, not a sparse"
+    echo "    checkout. Restore the guard or update this component's path."
+    record_result "$name" "$status" 0
+    return 0
+  fi
+  echo ">>> [$name] bash $guard"
+  if bash "$REPO_ROOT/$guard" >"$log" 2>&1; then
+    # AFFIRMATIVE MEASUREMENT, not "no error observed" (issue #1712 r6 F2). A zero
+    # exit is only HALF the verdict: the guard must also have PRINTED what it
+    # measured — `pub-surface: N crate-root declarations scanned … (M pub mod, of
+    # which K unconditional); K module-file prologues read from source; 0
+    # inconsistent`. Keying PASS on the exit status alone (and echoing
+    # that line with `|| true`) meant an accidental early `return 0` anywhere inside
+    # the guard reported `pub-surface: PASS` while NOTHING had been enumerated. That
+    # is CLAUDE.md's named rule — never derive a pass from the ABSENCE of a bad
+    # signal; a positive verdict requires an affirmative measurement — and it matters
+    # most HERE, because this is the component that certifies the guard that
+    # certifies cqlite-core's public API, so a vacuous PASS here silently unguards
+    # every semver decision downstream. The permissive branch is therefore keyed on
+    # the AFFIRMATIVE value (the line is present), never on the absence of an error.
+    # MATCH THE WHOLE SUCCESS LINE, NOT ITS PREFIX (roborev r7 finding 3). The first
+    # version of this check accepted any line starting `pub-surface: `, which is the
+    # SAME vacuous-pass shape one level down: a guard printing `pub-surface: starting`
+    # and then exiting 0 satisfied it and was recorded PASS. A check against a PREFIX
+    # tests a SPELLING; this one tests the STATE, by requiring every element the guard
+    # only knows AFTER it has enumerated the crate-root declarations and READ that
+    # many module files off disk — and requiring the two load-bearing counts to be
+    # NONZERO (`[1-9][0-9]*`), because "0 unconditional declarations, 0 prologues
+    # read" is the vacuous measurement itself, and `0 inconsistent` literally.
+    # KEPT IN SYNC BY HAND with the guard's own success line and with case 26(b)'s
+    # positive control in scripts/tests/test_pub_surface_guard.sh — a wording change
+    # must land in all three at once (#1712 descope).
+    local measured
+    measured="$(grep -m1 -E '^pub-surface: [0-9]+ crate-root declarations scanned in cqlite-core/src/lib\.rs \([0-9]+ pub mod, of which [1-9][0-9]* unconditional\); [1-9][0-9]* module-file prologues read from source; 0 inconsistent$' "$log" || true)"
+    # THE SHAPE IS NOT ENOUGH — the COUNTS MUST COHERE (roborev r9 F4). The regex above
+    # pins the wording and forbids a zero, but on its own it also accepts arithmetically
+    # IMPOSSIBLE lines: `14 unconditional; 1 module-file prologues read` (13 declarations
+    # silently unexamined), or `0 pub mod, of which 5 unconditional`. The guard itself
+    # asserts prologues == unconditional, so such a line means the guard is not the
+    # program that produced it — a stub, a truncation, or a stale build. This component
+    # exists to be INDEPENDENT of the guard, so it re-derives the relationships here
+    # rather than trusting them: decls >= mods >= uncond > 0, and prologues == uncond.
+    if [ -n "$measured" ]; then
+      local ps_d ps_m ps_u ps_p
+      ps_d="$(printf '%s' "$measured" | sed -E 's/^pub-surface: ([0-9]+) crate-root.*/\1/')"
+      ps_m="$(printf '%s' "$measured" | sed -E 's/.*\(([0-9]+) pub mod.*/\1/')"
+      ps_u="$(printf '%s' "$measured" | sed -E 's/.*of which ([0-9]+) unconditional.*/\1/')"
+      ps_p="$(printf '%s' "$measured" | sed -E 's/.*; ([0-9]+) module-file prologues.*/\1/')"
+      if ! { [ "$ps_d" -ge "$ps_m" ] && [ "$ps_m" -ge "$ps_u" ] && [ "$ps_u" -gt 0 ] && [ "$ps_p" -eq "$ps_u" ]; }; then
+        echo "❌ [$name] the pub-surface measurement line is ARITHMETICALLY INCOHERENT:" >&2
+        echo "    $measured" >&2
+        echo "    require: declarations($ps_d) >= pub mod($ps_m) >= unconditional($ps_u) > 0, and prologues($ps_p) == unconditional($ps_u)." >&2
+        echo "    A line matching the wording but not the arithmetic did not come from the guard" >&2
+        echo "    (stub, truncation or stale build). Refusing to record PASS." >&2
+        measured=""
+      fi
+    fi
+    if [ -n "$measured" ]; then
+      status=PASS
+      # Echo it so a pasted gate log shows the check RAN over a real surface.
+      echo "$measured"
+    else
+      status=FAIL
+      echo "--- [$name] FAILED: the guard exited 0 but printed NO affirmative measurement"
+      echo "    line (\`pub-surface: <N> crate-root declarations scanned in … (<M> pub mod, of"
+      echo "    which <K> unconditional); <K> module-file prologues read from source; 0"
+      echo "    inconsistent\`), so NOTHING was measured and this is NOT a PASS"
+      echo "    (issue #1712). A zero exit with no measurement is an early return inside"
+      echo "    $guard — a real defect in the guard, not a formatting slip; fix the guard"
+      echo "    (or, if its success wording moved, update BOTH it and this component)."
+      echo "--- last 60 lines of $log ---"
+      tail -60 "$log"
+      echo "--- end of $name output ---"
+    fi
+  else
+    status=FAIL
+    echo "--- [$name] FAILED: a crate-root \`pub mod\` in cqlite-core/src/lib.rs is"
+    echo "    advertised unconditionally while its own module file gates it with an inner"
+    echo '    `#![cfg(...)]`, or the guard REFUSED over input it cannot classify (issue'
+    echo "    #1712). The diagnostic below names the file and line."
+    echo "    If the module really is conditional, HOIST the gate to the declaration site"
+    echo '    (`#[cfg(feature = "...")] pub mod NAME;`) so the crate root tells the truth;'
+    echo "    if the guard refused, the remedy it printed is the fix. There is no snapshot"
+    echo "    to regenerate — this guard does not detect public-API drift (see #3366)."
+    echo "--- last 60 lines of $log ---"
+    tail -60 "$log"
+    echo "--- end of $name output ---"
+  fi
+  end=$(date +%s)
+  record_result "$name" "$status" "$((end - start))"
+  echo ">>> [$name] $status ($((end - start))s)"
+}
+
 # tooling-tests: fast shell-tooling regression tests that have no Rust target and
 # no dataset/network needs. Currently scripts/tests/test_agent_gate_summary.sh,
 # which verifies the SUMMARY block survives non-foreground capture (#1175), and
@@ -5463,6 +5650,17 @@ run_kit_dashboard_drift() {
 # its own tmpdir. SKIP-aware: the summary test's truncation case relies on a python3
 # reader, so with no python3 we record SKIP (loud, never silent PASS); any test
 # failure -> hard FAIL.
+# Also runs scripts/tests/test_pub_surface_guard.sh (#1712), the non-vacuity proof for
+# the pub-surface component: 42 cases driving scripts/ci/check-pub-surface.sh through
+# 10 greens, 30 reds, the usage case and the kill-safety case, substituting the artifact
+# in detached scratch worktrees rather than through any test-only seam. It pins every
+# crate-root parse shape the (lexical, not-a-Rust-parser) scan claims to handle, all
+# four SHARED blind spots that its two derivations cannot express as a disagreement,
+# and every REFUSAL path of the module-file oracle together with the green controls
+# that stop a refuse-everything guard from satisfying them. SOURCE-ONLY since the #1712
+# descope — no cargo doc, no cargo at all, seconds not minutes; never invokes the gate
+# except in case 26 (`--only pub-surface`, which self-exempts from the #1825 slot), so
+# it cannot recurse.
 run_tooling_tests() {
   local name=tooling-tests
   if [ -n "$ONLY" ] && ! grep -qw "$name" <<<"${ONLY//,/ }"; then
@@ -6635,6 +6833,32 @@ run_tooling_tests() {
   if ! bash "$REPO_ROOT/scripts/tests/test_gate_selftest_hermetic.sh" >>"$log" 2>&1; then
     status=FAIL
     echo "--- [$name] FAILED (gate self-test hermeticity lint #2874); last 40 lines of $log ---"
+    tail -40 "$log"
+    echo "--- end of $name output ---"
+    end=$(date +%s)
+    record_result "$name" "$status" "$((end - start))"
+    echo ">>> [$name] $status ($((end - start))s)"
+    return 0
+  fi
+
+  # pub-surface guard self-test (#1712): no python3/datasets/network needed, always
+  # runs. Proves scripts/ci/check-pub-surface.sh actually FIRES — the consistency
+  # assert reds on the pre-#1712 source shape (a bare ungated `pub mod benchmarks;`
+  # whose cfg gate hides inside the module file) and a bad argument exits 2. Each
+  # negative case substitutes the artifact in its own `git worktree add --detach HEAD`
+  # scratch checkout (no test-only seam in the guard); SOURCE-ONLY since the #1712
+  # descope, so the 23-case suite is seconds rather than ~125s of rustdoc. It pins
+  # every crate-root PARSE shape the scan claims to handle (same-line
+  # `#[attr] pub mod x;`, multi-line attrs, trailing comments, block-commented decls,
+  # attributes separated from their item by blank/comment lines), since that scan is
+  # lexical and its safety rests on the pinned suite; the four SHARED blind spots its
+  # two derivations cannot express as a disagreement; and every REFUSAL path of the
+  # module-file oracle, each with a green control so a refuse-everything guard cannot
+  # satisfy them. A failure FAILs the component.
+  echo ">>> [$name] bash scripts/tests/test_pub_surface_guard.sh"
+  if ! bash "$REPO_ROOT/scripts/tests/test_pub_surface_guard.sh" >>"$log" 2>&1; then
+    status=FAIL
+    echo "--- [$name] FAILED (pub-surface guard self-test #1712); last 40 lines of $log ---"
     tail -40 "$log"
     echo "--- end of $name output ---"
     end=$(date +%s)
@@ -8283,6 +8507,7 @@ dispatch_component() {
     operator-metrics-doc) run_operator_metrics_doc ;;
     kit-dashboard-drift) run_kit_dashboard_drift ;;
     binding-unwind-profile) run_component binding-unwind-profile bash "$REPO_ROOT/scripts/tests/test_binding_unwind_profile.sh" ;;
+    pub-surface) run_pub_surface ;;
     tooling-tests) run_tooling_tests ;;
     minimal-build) run_component minimal-build bash -c '
   # Match the CI "All Compression Build & Test" job byte-for-byte (issue #1981):
