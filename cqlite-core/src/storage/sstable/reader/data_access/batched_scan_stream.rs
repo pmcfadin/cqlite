@@ -81,8 +81,13 @@ impl SSTableReader {
         // an `Acquire` scan is the top-level read OPERATION and is measured with
         // this reader's format label; an `Exempt` sub-scan is not (its merge is).
         // Sampled before `self` moves into the task below.
-        let measured_format = match admission {
-            ScanAdmission::Acquire => Some(self.sstable_format_label()),
+        // START the meter BEFORE the spawn (issue #1701, roborev round 7) — see the
+        // per-row sibling: constructed after it, the producer could run before timing
+        // began. The format label is still sampled before `self` moves into the task.
+        let meter = match admission {
+            ScanAdmission::Acquire => Some(crate::observability::read_metrics::ReadOpMeter::start(
+                Some(self.sstable_format_label()),
+            )),
             ScanAdmission::Exempt => None,
         };
         let task = tokio::spawn(async move {
@@ -101,12 +106,8 @@ impl SSTableReader {
                 let _ = tx.send(Err(e)).await;
             }
         });
-        match measured_format {
-            Some(format) => BatchedScanStream::new_measured_batches(
-                rx,
-                task,
-                crate::observability::read_metrics::ReadOpMeter::start(Some(format)),
-            ),
+        match meter {
+            Some(meter) => BatchedScanStream::new_measured_batches(rx, task, meter),
             None => BatchedScanStream::new(rx, task),
         }
     }

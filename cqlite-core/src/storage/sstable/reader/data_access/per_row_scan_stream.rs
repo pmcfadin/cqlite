@@ -92,8 +92,14 @@ impl SSTableReader {
         // sub-scan is one generation of a fan-out merge — the merge's own stream is
         // the measured operation, so measuring here too would double-count its rows.
         // Sampled before `self` moves into the task below.
-        let measured_format = match admission {
-            ScanAdmission::Acquire => Some(self.sstable_format_label()),
+        // START the meter BEFORE the spawn (issue #1701, roborev round 7): constructed
+        // after it, the producer task could begin — or finish — before timing began, so
+        // `read.duration` measured less than the operation. Sampling the format label
+        // here also keeps it off `self`, which moves into the task below.
+        let meter = match admission {
+            ScanAdmission::Acquire => Some(crate::observability::read_metrics::ReadOpMeter::start(
+                Some(self.sstable_format_label()),
+            )),
             ScanAdmission::Exempt => None,
         };
         // Issue #3124 (site 2): the task's `JoinHandle` is RETAINED, not discarded.
@@ -112,12 +118,8 @@ impl SSTableReader {
                 let _ = tx.send(Err(e)).await;
             }
         });
-        match measured_format {
-            Some(format) => RowScanStream::new_measured_rows(
-                rx,
-                task,
-                crate::observability::read_metrics::ReadOpMeter::start(Some(format)),
-            ),
+        match meter {
+            Some(meter) => RowScanStream::new_measured_rows(rx, task, meter),
             None => RowScanStream::new(rx, task),
         }
     }
