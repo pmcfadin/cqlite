@@ -64,6 +64,17 @@
 #      intervening `case` measured the CASE's status (0 for most branches), so the
 #      "cleanup cannot fail the run" half of the failing-sudo case was unmeasured.
 #
+# And #3248, whose two properties are the same shape one level in — a claim published with
+# evidence that does not support it:
+#
+#  15. A QUIESCENCE VERDICT MUST COVER *THIS* SESSION'S WINDOW, and carry its caveats. The
+#      reporter checked only that the verdict named the same TIMESERIES as the manifest, but
+#      `box-load.jsonl` is ONE file spanning every session on the box — so a clean verdict from
+#      an ADJACENT window of it certified this session. And `samples`,
+#      `coverage_largest_gap_s`, `narrow_census_records` and `census_breadth` were read with
+#      `.get()`, so a verdict missing them published QUIESCENT with `null` caveats, which reads
+#      as an absent concern rather than an unmeasured one.
+#
 # And REVIEW ROUND 2, whose finding is a REGRESSION INTRODUCED BY 12 ABOVE:
 #
 #  14. THE ACCEPT DIRECTION MUST EXECUTE NOTHING. Round 1's `expect_driver_accepts`
@@ -1326,6 +1337,231 @@ else
   fail "the summary's arm label must read the block's requested_merge_path (structural)"
 fi
 
+
+# ==========================================================================
+# #3248 — the QUIESCENCE VERDICT must COVER this session's window, and carry its caveats
+# ==========================================================================
+# Two properties of the `judged against <path>` branch of the reporter's quiescence block.
+# Neither is a crash: each publishes a QUIESCENT claim the evidence does not support.
+#
+#   A. WINDOW COVERAGE. The pre-fix code checked only that the verdict named the same
+#      TIMESERIES as the manifest. `box-load.jsonl` is ONE long-lived file spanning every
+#      session on the box, so a clean verdict judged over an ADJACENT window of that same
+#      file satisfied every check and certified this session — a pass borrowed from a
+#      different measurement. The verdict's `window_census.window` must now COVER the
+#      session's own window, derived from the rep payloads' `ts_unix_ms`/`duration_s`
+#      (each rep spans [ts-duration, ts]; tools/flight-loadgen/src/ramp.rs:184-188 is the
+#      authority for `ts` being the rep END).
+#   B. REQUIRED CAVEATS. `samples`, `coverage_largest_gap_s`, `narrow_census_records` and
+#      `census_breadth` were read with `.get()`, so a verdict missing them published
+#      QUIESCENT with `null` caveats — a null caveat reads as an absent concern, which is a
+#      STRONGER claim than the evidence supports. Same for `window_census.window` itself,
+#      and for a session where NO payload record carries a `ts_unix_ms`: an unbindable
+#      verdict is refused rather than passed vacuously.
+#
+# The fixture default `config.quiescence` is `NOT VERIFIED (no timeseries supplied)`
+# (lib-ws0-fixtures.sh), so this whole branch is UNREACHABLE from the builders as shipped.
+# Every case below therefore rewrites the manifest's `config.quiescence` AFTER
+# `ws0_pin_session_corpus` stamps it, and drops in its own `quiescence-verdict.json`.
+#
+# NON-VACUITY: the POSITIVE CONTROL runs FIRST and must exit 0. Without it the four
+# refusals could all be firing on some unrelated fixture defect — the wrong-subject shape
+# this suite exists to refuse — so each negative below perturbs exactly ONE field of the
+# session the control proves healthy.
+
+# A fixed wall clock (2025-06-15T15:06:40Z), never `date`: a window comparison against a
+# clock that moves during the run is the wall-clock-race class this repo mechanized a lint
+# for. The verdict windows below are expressed as OFFSETS from it, so the covering and
+# adjacent cases differ by nothing but their offsets.
+Q_TS_MS=1750000000000
+Q_TS_PATH="/fixture/box-load.jsonl"
+
+# The rep payloads carry no `ts_unix_ms` as `make_flight_rep` writes them (it is an
+# `ignored` field of the loadgen record surface, so the reporter accepted its absence
+# before this guard existed). Stamped HERE rather than in the shared builder: the other
+# ws0 suites feed the same builder and none of them enters this branch, so widening the
+# default would change their fixtures for a property they do not test.
+q_stamp_ts() { # q_stamp_ts <session> <ts_unix_ms>
+  python3 - "$1" "$2" <<'PY'
+import json, pathlib, sys
+d, ts = pathlib.Path(sys.argv[1]), int(sys.argv[2])
+for pf in sorted(d.glob("flight-*.jsonl")):
+    out = []
+    for line in pf.read_text().splitlines():
+        if not line.strip():
+            continue
+        rec = json.loads(line)
+        rec["ts_unix_ms"] = ts
+        out.append(json.dumps(rec))
+    pf.write_text("\n".join(out) + "\n")
+PY
+}
+
+# ...and its inverse, over EVERY `*.jsonl` in the session dir rather than the flight
+# payloads alone: the reporter selects records STRUCTURALLY (any `*.jsonl` record carrying
+# the field), so a case asserting "no record carries one" must strip them all or it would
+# assert about a filename allowlist instead of about the guard.
+q_strip_ts() { # q_strip_ts <session>
+  python3 - "$1" <<'PY'
+import json, pathlib, sys
+for pf in sorted(pathlib.Path(sys.argv[1]).glob("*.jsonl")):
+    out = []
+    for line in pf.read_text().splitlines():
+        if not line.strip():
+            continue
+        try:
+            rec = json.loads(line)
+        except ValueError:
+            out.append(line)
+            continue
+        if isinstance(rec, dict):
+            rec.pop("ts_unix_ms", None)
+        out.append(json.dumps(rec))
+    pf.write_text("\n".join(out) + "\n")
+PY
+}
+
+# A verdict of the SHIPPED shape (`ws0_quiescence.window_census_clean`), with the window
+# placed by offset and at most one key removed. Composed here rather than produced by
+# running `ws0_quiescence.py` because the cases' subject is a verdict the current writer
+# CANNOT produce — one missing a field it always records — which no invocation of it yields.
+q_write_verdict() { # q_write_verdict <session> <start-offset-s> <end-offset-s> <drop-key|-none->
+  python3 - "$1" "$2" "$3" "$4" "$Q_TS_MS" "$Q_TS_PATH" <<'PY'
+import datetime, json, pathlib, sys
+d = pathlib.Path(sys.argv[1])
+off_start, off_end, drop = float(sys.argv[2]), float(sys.argv[3]), sys.argv[4]
+base = int(sys.argv[5]) / 1000.0
+def iso(t):
+    return datetime.datetime.fromtimestamp(
+        t, datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+census = {
+    "samples": 41, "competing_samples": 0,
+    "coverage_largest_gap_s": 15.0, "coverage_gap_bound_s": 20.0,
+    "load1_min": 0.10, "load1_max": 0.20, "load1_mean": 0.15,
+    "window": {"start": iso(base + off_start), "end": iso(base + off_end)},
+    "timeseries": sys.argv[6], "narrow_census_records": 0,
+    "census_breadth": "FULL (competing_count present on every in-window record)",
+}
+if drop != "-none-":
+    census.pop(drop)
+(d / "quiescence-verdict.json").write_text(
+    json.dumps({"verdict": "QUIESCENT", "window_census": census}, indent=2) + "\n")
+PY
+}
+
+# `judged against <path>`, written OVER the manifest the pin writer just stamped. The
+# reporter reads the intent from the manifest, so this is the only way into the branch;
+# `run_report_full` deliberately re-stamps the pin on every call (see its own comment),
+# which is why these cases run the reporter directly instead of through it.
+q_judged_session() { # q_judged_session <session> <corpus>
+  make_warm_session "$1"
+  rm -f "$1/session-corpus-pin.json"
+  ws0_pin_session_corpus "$1" "$2" 1 warm bypass 1
+  python3 - "$1" "$Q_TS_PATH" <<'PY'
+import json, pathlib, sys
+p = pathlib.Path(sys.argv[1]) / "session-corpus-pin.json"
+rec = json.loads(p.read_text())
+rec["config"]["quiescence"] = "judged against " + sys.argv[2]
+p.write_text(json.dumps(rec, indent=2) + "\n")
+PY
+}
+
+# --- (1) THE POSITIVE CONTROL: a covering verdict with every caveat present PASSES ---
+# Asserted AFFIRMATIVELY, and in two directions, for the reason review round 1 finding 12
+# gave: `rc=0` alone would also hold if the branch were never entered at all, so the
+# recorded block must show the coverage assert actually RAN.
+d="$TMP/q-covering"; q_judged_session "$d" "$TMP/corpus"
+q_stamp_ts "$d" "$Q_TS_MS"
+q_write_verdict "$d" -60 60 -none-
+out=$(python3 "$REPORT" --dir "$d" --corpus "$TMP/corpus" 2>&1); rc=$?
+# The affirmative signal is `results.json`, not stdout: the reporter records the quiescence
+# claim in the JSON and prints no summary line for it, and `quiescence_verdict` is populated
+# ONLY inside this branch — so its presence, beside the manifest intent it was checked
+# against, is what distinguishes "accepted" from "the branch was never entered".
+if [ "$rc" -eq 0 ] && python3 - "$d" "$Q_TS_PATH" <<'PY'
+import json, pathlib, sys
+r = json.loads((pathlib.Path(sys.argv[1]) / "results.json").read_text())
+assert r["quiescence"] == "judged against " + sys.argv[2], r["quiescence"]
+assert r["quiescence_verdict"] is not None, "the judged branch was never entered"
+assert r["quiescence_verdict"]["verdict"] == "QUIESCENT", r["quiescence_verdict"]
+PY
+then
+  pass "a QUIESCENT verdict COVERING the session's measurement window is ACCEPTED (rc=0)"
+else
+  fail "the positive control must pass: a covering, complete verdict (rc=$rc, out: $out)"
+fi
+if [ "$rc" -eq 0 ] && python3 - "$d" <<'PY'
+import json, pathlib, sys
+q = json.loads((pathlib.Path(sys.argv[1]) / "results.json").read_text())["quiescence_verdict"]
+assert q["covers_measurement_window"] is True, q
+assert q["measurement_window_rep_records"] >= 1, q
+assert q["judged_window"]["start"] and q["judged_window"]["end"], q
+for k in ("in_window_samples", "coverage_largest_gap_s",
+          "narrow_census_records", "census_breadth"):
+    assert q[k] is not None, (k, q)
+PY
+then
+  pass "the accepted verdict is RECORDED with its four caveats, judged window and coverage flag"
+else
+  fail "results.json must record the caveats + the coverage binding, not just the verdict"
+fi
+
+# --- (2) an ADJACENT window of the SAME timeseries does not certify this session ---
+# The exact pre-fix hole: shifted ~20 min earlier, this verdict still names the manifest's
+# timeseries and still says QUIESCENT, and every pre-fix check passed on it.
+d="$TMP/q-adjacent"; q_judged_session "$d" "$TMP/corpus"
+q_stamp_ts "$d" "$Q_TS_MS"
+q_write_verdict "$d" -1260 -1140 -none-
+out=$(python3 "$REPORT" --dir "$d" --corpus "$TMP/corpus" 2>&1); rc=$?
+if [ "$rc" -ne 0 ] && grep -q 'judged over' <<<"$out" \
+   && grep -q "NOT cover this session's measurement window" <<<"$out"; then
+  pass "a verdict judged over an ADJACENT window of the same timeseries is REFUSED"
+else
+  fail "an adjacent-window verdict must be refused naming the judged window (rc=$rc, out: $out)"
+fi
+
+# --- (3) a verdict with no `census_breadth` is REFUSED, naming the field ---
+# Read with `.get()` before the fix, so the report published QUIESCENT with a `null`
+# breadth — i.e. it could not say whether the census saw the full COMPETING_COMMS set or
+# rustc/cargo/gate alone, and printed nothing to say so.
+d="$TMP/q-nobreadth"; q_judged_session "$d" "$TMP/corpus"
+q_stamp_ts "$d" "$Q_TS_MS"
+q_write_verdict "$d" -60 60 census_breadth
+out=$(python3 "$REPORT" --dir "$d" --corpus "$TMP/corpus" 2>&1); rc=$?
+if [ "$rc" -ne 0 ] && grep -q 'records no ' <<<"$out" && grep -q 'census_breadth' <<<"$out"; then
+  pass "a verdict missing window_census.census_breadth is REFUSED, naming the caveat"
+else
+  fail "a missing census_breadth must be refused by name (rc=$rc, out: $out)"
+fi
+
+# --- (4) a verdict with no `window_census.window` at all is REFUSED ---
+# The coverage assert of case 2 has nothing to compare against here, and "cannot be
+# compared" must land on the REFUSING side: a window that cannot be COMPUTED is never
+# treated as covered.
+d="$TMP/q-nowindow"; q_judged_session "$d" "$TMP/corpus"
+q_stamp_ts "$d" "$Q_TS_MS"
+q_write_verdict "$d" -60 60 window
+out=$(python3 "$REPORT" --dir "$d" --corpus "$TMP/corpus" 2>&1); rc=$?
+if [ "$rc" -ne 0 ] && grep -q 'records no ' <<<"$out" && grep -q 'window_census.window' <<<"$out"; then
+  pass "a verdict recording NO window_census.window is REFUSED (coverage unprovable, not assumed)"
+else
+  fail "an absent window_census.window must be refused by name (rc=$rc, out: $out)"
+fi
+
+# --- (5) a session whose payloads carry NO `ts_unix_ms` is REFUSED, not passed vacuously ---
+# The other half of case 2's derivation. With no rep timestamp the session's own window is
+# unknown, so the verdict cannot be BOUND to it — and an unbindable verdict states nothing
+# about this session. Stamped then stripped rather than merely left unstamped, so the case
+# keeps testing the guard if the shared builder ever starts writing the field.
+d="$TMP/q-nots"; q_judged_session "$d" "$TMP/corpus"
+q_stamp_ts "$d" "$Q_TS_MS"; q_strip_ts "$d"
+q_write_verdict "$d" -60 60 -none-
+out=$(python3 "$REPORT" --dir "$d" --corpus "$TMP/corpus" 2>&1); rc=$?
+if [ "$rc" -ne 0 ] && grep -q 'no rep payload in this session carries a' <<<"$out"; then
+  pass "a session whose payloads carry no ts_unix_ms is REFUSED (window unbindable, never assumed)"
+else
+  fail "an unbindable measurement window must be refused (rc=$rc, out: $out)"
+fi
 # ==========================================================================
 # #3272 round 20 — the ERROR-CODE breakdown: see test_ws0_error_code_guards.sh
 # ==========================================================================
@@ -1398,7 +1634,12 @@ fi
 # split to `test_ws0_error_code_guards.sh` and took its 19 checks with it, so a re-run MEASURED 107
 # again. The floor is not raised to 126 (the checks left) and not lowered (nothing left besides
 # them) — 107 + 19 = 126, fully accounted in the same way.
-MIN_CHECKS=104
+#
+# #3248 added the QUIESCENCE window-coverage/caveat block above: 6 checks, no split, so a re-run
+# MEASURED 113 and the floor moves 104 -> 110 by exactly that 6. Raised rather than left alone
+# because these checks STAY in this file — the round-17/20 round trips left it unchanged only
+# because their checks left with them.
+MIN_CHECKS=110
 if [ "$checks" -lt "$MIN_CHECKS" ]; then
   echo
   echo "FAIL - only $checks check(s) ran; this suite has at least $MIN_CHECKS."
