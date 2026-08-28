@@ -443,7 +443,15 @@ implement (TDD) → --lite each fix round (summary-file redirect)
   the job-id carrier: for a range review it names only the BASE, so an unavailable record FAILs rather
   than falling back to prose that verifies nothing. A range that does not match, a SINGLE-COMMIT record
   (even one equal to HEAD), or a base-equal scope **aborts the round** — base-equality is the signature of
-  the worktree bug. **(3)** `"contains no code changes to review"` on a
+  the worktree bug. **The expected RANGE BASE is the MERGE-BASE, never the base ref's TIP (#3392)**:
+  `<base>...HEAD` *is* `merge-base(<base>, HEAD)..HEAD`, so an assert that expected the tip FAILED
+  DETERMINISTICALLY on a CORRECT review of any branch whose `main` had advanced past its branch point —
+  i.e. almost every branch not just rebased. It was misdiagnosed as a race **twice** (the falsifying
+  control: `origin/main` recorded before AND after a failing round, unmoved). The tip is still read, for
+  the T1 root-checkout signature alone, and the block now prints an informational
+  `assert-base: <merge-base> (merge-base of <base> and HEAD; <base> tip <sha>)` so the two can never be
+  confused in a pasted block. The absence waiver's `base=` field is bound to that same merge-base —
+  copy it from `assert-base:`, not from `base:`. **(3)** `"contains no code changes to review"` on a
   NON-EMPTY diff is a **HARD FAIL**, never a pass. **(4)** A docs-only (code-free) diff **cannot be
   roborev-certified at all** — and "docs-only" means a **CODE-FREE CENSUS as the wrapper classifies it,
   NEVER a `docs/` path prefix** (#3229). The mechanism, stated correctly: **roborev drops exactly what
