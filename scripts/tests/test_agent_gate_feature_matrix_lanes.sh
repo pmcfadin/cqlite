@@ -207,6 +207,18 @@ TARGET="${TMPDIR:-/tmp}/ah6-1699-target"
 
 cleanup() {
   local rc=$?
+  # A SIGNAL FORCES A NON-ZERO VERDICT (roborev round-29, Medium). `cleanup` inherits `$?`, and on a
+  # signal delivered BETWEEN commands — or delivered to the harness alone while its child exited 0 —
+  # `$?` is ZERO, so an INTERRUPTED observation exited SUCCESSFULLY. That is this issue's own defect
+  # class inside its own harness: a run that did not finish reporting the verdict of one that did.
+  # The signal traps therefore pass an explicit status (128+signo, the shell convention) and only
+  # EXIT relies on `$?`.
+  local sig="${1:-}"
+  case "$sig" in
+    INT)  rc=130 ;;
+    TERM) rc=143 ;;
+  esac
+  [ -n "$sig" ] && echo "FATAL: observation ABORTED by SIG$sig — this run is NOT evidence (rc=$rc)" >&2
   # Verify the invariant on EVERY exit path, including an interrupted run: a plant that
   # escaped into the live checkout is exactly what an aborted run is most likely to
   # leave behind, and it must never be discovered later by somebody else's gate.
@@ -219,7 +231,9 @@ cleanup() {
   rm -rf "$WORK"
   exit "$rc"
 }
-trap cleanup EXIT INT TERM
+trap 'cleanup' EXIT
+trap 'cleanup INT' INT
+trap 'cleanup TERM' TERM
 
 echo "==== AH6 FEATURE-MATRIX LANE OBSERVATION (issue #1699, design D5) ===="
 echo "repo:      $REPO_ROOT"
