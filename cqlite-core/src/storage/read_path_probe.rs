@@ -36,7 +36,7 @@
 //! must serialize against any sibling test in the same binary that also merges
 //! (one file = one process is the strongest form; a mutex is the minimum).
 
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicI64, AtomicU64, Ordering};
 
 static MERGERS_BUILT: AtomicU64 = AtomicU64::new(0);
 static RECONCILE_ENTRIES: AtomicU64 = AtomicU64::new(0);
@@ -154,6 +154,50 @@ pub fn mark_query_row_producer_finished() {
 /// signal exists to give (roborev, issue #3384).
 pub fn query_row_producers_finished() -> u64 {
     QUERY_ROW_PRODUCERS_FINISHED.load(Ordering::Acquire)
+}
+
+/// Blocking scan tasks currently running (issue #3384). A GAUGE, not a counter.
+static BLOCKING_SCAN_TASKS_INFLIGHT: AtomicI64 = AtomicI64::new(0);
+
+/// RAII marker for one blocking scan task: increments on construction, decrements on
+/// drop (issue #3384).
+///
+/// The stitching path's parse/feed halves run under `spawn_blocking`, and blocking
+/// tasks are NOT cancellable — dropping their `JoinHandle` DETACHES them. So neither
+/// the outer query-row producer's completion nor the scan future's drop guard proves
+/// decoding has stopped: both can fire while a detached blocking half is still
+/// draining. This gauge is the missing half. A gauge rather than a completion counter
+/// because the number of blocking halves is an implementation detail — a reader waits
+/// for it to reach ZERO instead of knowing how many to expect.
+///
+/// Decrement is a `Drop` impl so an unwinding task still clears its slot; a leaked
+/// increment would hang every future reader.
+pub struct BlockingScanTaskGuard;
+
+impl BlockingScanTaskGuard {
+    /// Register one running blocking scan task.
+    pub fn new() -> Self {
+        BLOCKING_SCAN_TASKS_INFLIGHT.fetch_add(1, Ordering::Release);
+        Self
+    }
+}
+
+impl Default for BlockingScanTaskGuard {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl Drop for BlockingScanTaskGuard {
+    fn drop(&mut self) {
+        BLOCKING_SCAN_TASKS_INFLIGHT.fetch_sub(1, Ordering::Release);
+    }
+}
+
+/// Blocking scan tasks still running (issue #3384). ZERO means every detached
+/// blocking half has stopped, so `stream_walk_partitions_parsed` is final.
+pub fn blocking_scan_tasks_inflight() -> i64 {
+    BLOCKING_SCAN_TASKS_INFLIGHT.load(Ordering::Acquire)
 }
 
 /// Times a batched scan took the STITCHING branch (issue #3384).

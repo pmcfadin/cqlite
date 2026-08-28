@@ -501,6 +501,10 @@ impl SSTableReader {
         let reader = Arc::clone(&self);
         let task_io_failed = Arc::clone(&io_failed);
         let parse_task = tokio::task::spawn_blocking(move || {
+            // Detached-blocking-work marker (issue #3384): a dropped `JoinHandle`
+            // DETACHES this task rather than aborting it, so this guard is how a
+            // reader learns the drain has actually stopped.
+            let _inflight = crate::storage::read_path_probe::BlockingScanTaskGuard::new();
             reader.drain_scan_window_blocking(ctx, raw_rx, batch_tx, task_io_failed)
         });
 
@@ -630,6 +634,8 @@ impl SSTableReader {
     ) -> Option<Error> {
         let io_failed_feed = Arc::clone(io_failed);
         let feed = tokio::task::spawn_blocking(move || -> Option<Error> {
+            // Detached-blocking-work marker (issue #3384) — see the parse half.
+            let _inflight = crate::storage::read_path_probe::BlockingScanTaskGuard::new();
             // Panic/early-exit guard (roborev finding, issue #1593). `raw_tx` is
             // captured (moved) into this closure and drops when the closure
             // returns OR unwinds; the parse half reads a `raw_tx` close with

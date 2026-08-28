@@ -607,24 +607,34 @@ async fn fast_arm_stream_stops_when_the_client_drops_it() {
         "this fixture is expected on the STITCHING branch; if that changed, the drain \
          window below needs re-justifying (issue #3384)"
     );
-    // CONSEQUENCE, stated rather than glossed: the stitching branch decodes in
-    // `spawn_blocking` parse/feed tasks. Blocking tasks are NOT cancellable, so the two
-    // causal signals above — the outer producer and the scan future's drop guard — do
-    // not prove those tasks have stopped. There is no causal signal for them today;
-    // publishing one from the blocking tasks is the real fix and is tracked on #3428.
+    // CONSEQUENCE: the stitching branch decodes in `spawn_blocking` parse/feed halves,
+    // and blocking tasks are NOT cancellable — dropping their `JoinHandle` DETACHES
+    // them. So the two signals above do not prove decoding stopped; a detached half is
+    // still draining. The FIX for that is the third signal below, not a longer sleep: a
+    // fixed drain only makes the race less likely, which is the defect this whole issue
+    // exists to remove, and roborev flagged it twice before I stopped reaching for it.
     //
-    // What IS true: the tail is BOUNDED. Each blocking task feeds a bounded channel and
-    // stops when its consumer is gone, so it cannot run away — which is why the ceiling
-    // below, built from those same buffer sizes, still holds. The drain lets that
-    // bounded tail land. MEASURED, not tuned: without it the observed max was 1280,
-    // with it 2370, and a 10x longer window gives 2048 — LOWER, so the spread is
-    // run-to-run variance and the window is sufficient rather than merely long. It is a
-    // drain for bounded work, never a deadline, and nothing here compares an elapsed
-    // duration to a threshold (#2642).
-    for _ in 0..200 {
+    // `blocking_scan_tasks_inflight()` is a GAUGE — each blocking half holds an RAII
+    // guard — so waiting for ZERO proves every detached half has stopped, without the
+    // test needing to know how many there are. The bound is a liveness guard, not a
+    // deadline.
+    let mut blocking_done = false;
+    for _ in 0..6_000 {
         tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+        if cqlite_core::storage::read_path_probe::blocking_scan_tasks_inflight() == 0 {
+            blocking_done = true;
+            break;
+        }
     }
-    // Both producers have provably finished, so this is the FINAL count.
+    assert!(
+        blocking_done,
+        "detached blocking scan tasks never stopped after the client dropped the \
+         stream — {} still in flight, counter at {} of {PARTITIONS} (issue #3384)",
+        cqlite_core::storage::read_path_probe::blocking_scan_tasks_inflight(),
+        work_counters::stream_walk_partitions_parsed()
+    );
+    // All THREE producers — outer thread, scan future, detached blocking halves —
+    // have provably stopped, so this is the FINAL count.
     let settled = work_counters::stream_walk_partitions_parsed();
     // Observability for the issue-#3384 measurement: under `--nocapture` this
     // prints the observed read-ahead, so the distribution can be re-measured
