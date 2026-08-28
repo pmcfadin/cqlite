@@ -2709,12 +2709,67 @@ if [ -s "$zt_h" ] && [ -s "$zn_h" ]; then
   for g_ in check_unittest_targets_ran check_no_unexpected_zero_tests; do
     gb_="$tmp/1699-color-$g_.txt"
     awk -v f="^$g_\\\\(\\\\) \\\\{" '$0 ~ f, /^\}/' "$GATE" > "$gb_"
-    if [ "$(grep -cE 'done[[:space:]]*<[[:space:]]*"\$\(_ansi_stripped_log' "$gb_")" -gt 0 ]; then
+    # Tests the PROPERTY, not a spelling: the loop must be fed by REDIRECTION and must not be
+    # the right-hand side of a pipe. The first cut of this assert matched the literal
+    # `done < "$(_ansi_stripped_log ...)"` and broke the moment round 16 hoisted that into a
+    # pre-resolved variable — pinning a spelling makes an assert fail on a correct change,
+    # which is how asserts get deleted rather than fixed.
+    if [ "$(grep -cE 'done[[:space:]]*<[[:space:]]*"\$' "$gb_")" -gt 0 ] \
+       && [ "$(grep -cE '\|[[:space:]]*while' "$gb_")" -eq 0 ]; then
       ok "1699-r15-color-nosubshell: $g_ reads the stripped log by REDIRECTION, not through a pipe (a piped loop runs in a subshell and its verdict is discarded)"
     else
       bad "1699-r15-color-nosubshell: $g_ no longer reads a stripped log by redirection — if it was changed to a pipe, the loop runs in a subshell and the accumulated verdict is LOST, which means silently passing"
     fi
   done
+fi
+
+# --- 31. #1699: a guard must know whether it measured anything (round-16, HIGH) ---------
+#
+# Round 15 gave check_no_unexpected_zero_tests / check_unittest_targets_ran a dependency
+# (_ansi_stripped_log). Round 16 found the consequence in a place I had not checked: the
+# cli-tests component runs its body under `bash -c` and `export -f`s the GUARDS but not the
+# helper, so the command substitution yielded the EMPTY STRING, `done < ""` failed, the loop
+# never ran — and the guard returned SUCCESS having parsed nothing. That silently disabled the
+# CLI zero-test protection. I had fixed the identical shape in a test extraction one commit
+# earlier and written a commit message about it.
+#
+# So the durable fix is not the export line: it is that the guard REFUSES to report OK when it
+# could not read its input. Three layers, each pinned, because each alone has a silent mode.
+if [ -s "$zn_h" ]; then
+  # LAYER 1 — the export list carries the dependency.
+  if [ "$(grep -cE '^export -f _ansi_stripped_log' "$GATE")" -gt 0 ]; then
+    ok "1699-r16-export-dep: _ansi_stripped_log is export -f'd alongside the guards that call it (the cli-tests bash -c body needs it)"
+  else
+    bad "1699-r16-export-dep: _ansi_stripped_log is NOT exported — inside the cli-tests 'bash -c' the guard resolves an empty parse source, reads nothing, and reports OK: the CLI zero-test protection silently disabled"
+  fi
+
+  # LAYER 2 — BEHAVIOURAL: the guard fails closed with its helper missing. This is the assert
+  # that would have caught round 16 regardless of any export list.
+  nohelp="$tmp/1699-r16-nohelper.sh"
+  awk '/^check_no_unexpected_zero_tests\(\) \{/,/^\}/' "$GATE" > "$nohelp"
+  zero_log="$tmp/1699-r16-zero.log"
+  printf '     Running tests/foo.rs (target/debug/deps/foo-1)\nrunning 0 tests\ntest result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out\n' > "$zero_log"
+  if ( unset -f _ansi_stripped_log 2>/dev/null; . "$nohelp"; check_no_unexpected_zero_tests "nohelper" "$zero_log" >/dev/null 2>&1 ); then
+    bad "1699-r16-failclosed: with _ansi_stripped_log undefined the guard REPORTED OK — a guard that consumed no input has measured nothing and must never pass; this is the exact vacuous pass it exists to prevent, arriving through its own plumbing"
+  else
+    ok "1699-r16-failclosed: with its helper undefined the guard FAILS CLOSED instead of passing vacuously"
+  fi
+  # ...and the complement: with the helper present it must still behave normally, or layer 2
+  # has simply broken the guard.
+  if [ -s "$cl_h" ]; then
+    if ( . "$zn_h"; check_no_unexpected_zero_tests "withhelper" "$zero_log" >/dev/null 2>&1 ); then
+      bad "1699-r16-failclosed-complement: with the helper present the guard PASSED a zero-test log — the fail-closed check has not broken the guard, but the guard itself is now wrong"
+    else
+      ok "1699-r16-failclosed-complement: with the helper present the guard still catches a zero-test target (fail-closed did not replace the real check)"
+    fi
+  fi
+
+  # LAYER 3 — the other extraction site carries the dependency too.
+  if [ "$(grep -c '_ansi_stripped_log' scripts/tests/test_agent_gate_cli_tests_enum.sh 2>/dev/null)" -gt 0 ]; then
+    ok "1699-r16-enum-dep: test_agent_gate_cli_tests_enum.sh extracts the guard's dependency as well as the guard"
+  else
+    bad "1699-r16-enum-dep: test_agent_gate_cli_tests_enum.sh extracts the guard without _ansi_stripped_log — its behavioural cases would run against a guard that parses nothing"
+  fi
 fi
 
 echo "----"

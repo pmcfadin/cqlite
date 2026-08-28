@@ -4869,6 +4869,23 @@ check_no_unexpected_zero_tests() {
   local label="$1" logfile="$2"; shift 2
   local allowed_zero=" $* "
   local bad="" target=""
+  # FAIL CLOSED if the log cannot be prepared or read (roborev round-16, HIGH). Without
+  # this, ANY failure to resolve the parse source — an unexported helper, a deleted file, a
+  # sed that could not write — leaves the read loop with nothing to consume, and a guard that
+  # consumed nothing found no problem and returns SUCCESS. That is the vacuous pass these
+  # guards exist to prevent, arriving through their own plumbing. Checked here rather than
+  # relying on every caller exporting the right helpers: the guard is responsible for knowing
+  # whether it measured anything.
+  local _parse_src
+  _parse_src=$(_ansi_stripped_log "$logfile" 2>/dev/null) || _parse_src=""
+  if [ -z "$_parse_src" ] || [ ! -r "$_parse_src" ]; then
+    echo "$label: FAIL-CLOSED — could not prepare '$logfile' for parsing (resolved to '${_parse_src:-<empty>}'), so this guard parsed NOTHING. A guard that consumed no input has measured nothing and must never report OK (issue #1699, roborev round-16)." >&2
+    return 1
+  fi
+  if [ -s "$logfile" ] && [ ! -s "$_parse_src" ]; then
+    echo "$label: FAIL-CLOSED — '$logfile' is non-empty but its prepared copy '$_parse_src' is empty, so this guard would parse nothing (issue #1699)." >&2
+    return 1
+  fi
   while IFS= read -r line; do
     # Two spellings, deliberately, and the reason is compatibility (roborev rounds 11+13).
     # A target under tests/ keys on its path RELATIVE TO tests/ (`foo`, or `foo/main` for a
@@ -4896,13 +4913,21 @@ check_no_unexpected_zero_tests() {
     elif [[ "$line" == "test result:"* ]]; then
       target=""
     fi
-  done < "$(_ansi_stripped_log "$logfile")"
+  done < "$_parse_src"
   if [ -n "$bad" ]; then
     echo "$label: FAIL-CLOSED —$bad ran 0 tests unexpectedly (issue #2039: a target whose body is #[cfg]-gated out at this component's feature set, and not on the allowed-zero list, would otherwise silently never run)" >&2
     return 1
   fi
   return 0
 }
+# Exported ALONGSIDE its callers (roborev round-16 finding, HIGH). Both guards call
+# _ansi_stripped_log, and the cli-tests component runs its body under `bash -c` — so with the
+# helper unexported the command substitution produced the EMPTY STRING, `done < ""` failed,
+# the loop body never ran, and the guard returned SUCCESS having parsed nothing. That silently
+# disabled the CLI zero-test protection. I had just fixed the same shape in the self-test
+# extraction and written a commit message about it, and missed this instance one function away
+# — which is why the fail-closed check below matters more than this export line.
+export -f _ansi_stripped_log
 export -f check_no_unexpected_zero_tests
 
 # check_unittest_targets_ran <label> <logfile> <unittest-src-path>...
@@ -4994,6 +5019,23 @@ check_unittest_targets_ran() {
   # A newline-delimited "<target><TAB><count>" list is 3.2-safe; target names come from
   # cargo's own `Running unittests <path>` output and contain no tabs or newlines.
   local line cur="" bad="" seen="" counts=""
+  # FAIL CLOSED if the log cannot be prepared or read (roborev round-16, HIGH). Without
+  # this, ANY failure to resolve the parse source — an unexported helper, a deleted file, a
+  # sed that could not write — leaves the read loop with nothing to consume, and a guard that
+  # consumed nothing found no problem and returns SUCCESS. That is the vacuous pass these
+  # guards exist to prevent, arriving through their own plumbing. Checked here rather than
+  # relying on every caller exporting the right helpers: the guard is responsible for knowing
+  # whether it measured anything.
+  local _parse_src
+  _parse_src=$(_ansi_stripped_log "$logfile" 2>/dev/null) || _parse_src=""
+  if [ -z "$_parse_src" ] || [ ! -r "$_parse_src" ]; then
+    echo "$label: FAIL-CLOSED — could not prepare '$logfile' for parsing (resolved to '${_parse_src:-<empty>}'), so this guard parsed NOTHING. A guard that consumed no input has measured nothing and must never report OK (issue #1699, roborev round-16)." >&2
+    return 1
+  fi
+  if [ -s "$logfile" ] && [ ! -s "$_parse_src" ]; then
+    echo "$label: FAIL-CLOSED — '$logfile' is non-empty but its prepared copy '$_parse_src' is empty, so this guard would parse nothing (issue #1699)." >&2
+    return 1
+  fi
   while IFS= read -r line; do
     case "$line" in
       *"Running unittests "*)
@@ -5010,7 +5052,7 @@ check_unittest_targets_ran() {
           ;;
       esac
     fi
-  done < "$(_ansi_stripped_log "$logfile")"
+  done < "$_parse_src"
   local p n
   for p in "${expected[@]}"; do
     # Exact whole-field match on the TAB-delimited pair, so one target name cannot
