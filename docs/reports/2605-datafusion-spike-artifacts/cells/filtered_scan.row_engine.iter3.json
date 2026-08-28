@@ -1,0 +1,32 @@
+{
+  "issue": 2605,
+  "corpus_dir": "/data/corpus-2605/sstables/perf_2605/wide_4kb-18fff7b0a2b311f190b27fcf9962b5ee",
+  "ddl_file": "docs/reports/2605-datafusion-spike-artifacts/wide_4kb.cql",
+  "iterations": 1,
+  "batch_size": 8192,
+  "df_target_partitions": null,
+  "runs": [
+    {
+      "scenario": "filtered_scan",
+      "arm": "row_engine",
+      "iteration": 1,
+      "elapsed_nanos": 72324660998,
+      "rows_scanned": 1899750,
+      "rows_result": 937602,
+      "batches": 1908,
+      "sources": 2,
+      "merge_arm_observed": true,
+      "reconcile_entries": 1899750,
+      "cell_metadata_maps": 3100241,
+      "subphase_cold_fault_nanos": 85007552927,
+      "subphase_decompress_nanos": 1763573850,
+      "subphase_merge_nanos": 27386527086,
+      "subphase_encode_nanos": 5499116371,
+      "subphase_grpc_write_nanos": 0,
+      "peak_rss_bytes": 38887424,
+      "pushdown": false,
+      "df_target_partitions": null,
+      "sql": null
+    }
+  ]
+}
