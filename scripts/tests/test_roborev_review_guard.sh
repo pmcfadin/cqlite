@@ -4672,82 +4672,6 @@ _cls_all_lines() {
   # identifier or drop it from the list -- NOT to reintroduce a filter.
   cat "$@" 2>/dev/null || true
 }
-_cls_exec_lines() {
-  awk '
-  function code_of(s,   n2, i2, sq2, dq2, c2) {
-    # Quote-aware trailing-comment removal. Without it this filter dropped only comment-ONLY lines,
-    # so a harmless trailing comment naming a retired token tripped the classifier-GONE assert — a
-    # false FAIL on doctrine text, which is the very thing #3392 exempted the --help heredoc for.
-    n2 = length(s); sq2 = 0; dq2 = 0
-    for (i2 = 1; i2 <= n2; i2++) {
-      c2 = substr(s, i2, 1)
-      if (!sq2 && c2 == "\\") { i2++; continue }
-      if (sq2) { if (c2 == "'"'"'") sq2 = 0 }
-      else if (dq2) { if (c2 == "\"") dq2 = 0 }
-      else {
-        if (c2 == "'"'"'") { sq2 = 1; continue }
-        if (c2 == "\"") { dq2 = 1; continue }
-        # A comment can also open straight after an operator -- `x=1;# note` is a comment to the
-        # shell (roborev job 53). Restricting to whitespace left such text in the executable view.
-        if (c2 == "#" && (i2 == 1 || substr(s, i2-1, 1) ~ /[ \t;&|()]/)) return substr(s, 1, i2 - 1)
-      }
-    }
-    return s
-  }
-  # The line with quoted spans BLANKED and the comment removed, so a construct can be recognised in
-  # CODE position only. `printf %s '"'"'cat <<EOF'"'"'` must not open heredoc suppression (roborev job 48).
-  function unq_of(s2,   n3, i3, sq3, dq3, c3, out) {
-    n3 = length(s2); sq3 = 0; dq3 = 0; out = ""
-    for (i3 = 1; i3 <= n3; i3++) {
-      c3 = substr(s2, i3, 1)
-      if (!sq3 && c3 == "\\") { i3++; out = out "  "; continue }
-      if (sq3) { out = out " "; if (c3 == "'"'"'") sq3 = 0; continue }
-      if (dq3) { out = out " "; if (c3 == "\"") dq3 = 0; continue }
-      if (c3 == "'"'"'") { sq3 = 1; out = out " "; continue }
-      if (c3 == "\"") { dq3 = 1; out = out " "; continue }
-      if (c3 == "#" && (i3 == 1 || substr(s2, i3-1, 1) ~ /[ \t]/)) break
-      out = out c3
-    }
-    return out
-  }
-  # SUPPRESS THE HEREDOC BODY, NOT THE WHOLE FUNCTION (roborev job 47). Suppression used to begin at
-  # `usage() {`, so any EXECUTABLE statement between the function opener and its `cat <<EOF` was
-  # invisible to the classifier-GONE scan — a reintroduction parked there passed the guard, and the
-  # AC3 control did not cover it because it appends only OUTSIDE the function. What earns the
-  # exemption is being PROSE PRINTED TO A USER, which starts at the heredoc opener, not at the `{`.
-  FILENAME ~ /roborev-review\.sh$/ && /^usage\(\) \{/ { in_usage_fn = 1 }
-  in_usage_fn && unq_of($0) ~ /(^|[ \t;&|(])cat[ \t]+<<-?[ \t]*.?EOF/ { in_usage_fn = 0; in_usage = 1; next }
-  in_usage && /^EOF$/ { in_usage = 0; next }
-  # PROSE IS EXEMPT ONLY WHERE IT IS PROVABLY INERT. The delimiter is unquoted, so a heredoc line
-  # carrying ANY expansion still executes -- `${mode:=mixed-delivery}` sets a variable when the body
-  # is rendered (roborev job 57). Rather than decide which expansions are dangerous (that was the
-  # claim-about-a-SET error, four times), the exemption is withheld from every line that has one:
-  # an expansion-free line cannot execute anything, which is an affirmative property rather than a
-  # list. Measured: no prose-word line in the real heredoc carries an expansion, so this is free.
-  in_usage && ($0 ~ /[$][(]/ || $0 ~ /`/ || $0 ~ /[$][{]/ || $0 ~ /[$][A-Za-z_]/) { print; next }
-  # A COMMAND SUBSTITUTION INSIDE THE HEREDOC STILL EXECUTES (roborev job 50). The delimiter is
-  # unquoted (the body interpolates $PROGNAME), so `$( )` and backticks in it RUN -- classifier logic
-  # parked there would be prose to this filter and code to the shell. The exemption is for TEXT, so
-  # a substitution inside the body is surfaced rather than suppressed. Measured cost: the real
-  # heredoc contains zero of them.
-  # ...and an ASSIGNING parameter expansion evaluates too: ${VAR:=mixed-delivery} and ${VAR=...}
-  # set the variable when bash renders the body (roborev job 51). Those two forms are the complete
-  # set of expansions that assign; plain $VAR and ${VAR} cannot, which is why the ordinary
-  # $PROGNAME interpolation in the body stays suppressed and the prose exemption still works.
-  # NOTE: this awk program is single-quoted, so NO APOSTROPHE may appear in these comments.
-  # ANY braced expansion is surfaced, not just the assigning ones. Naming the assigning forms was
-  # another claim about a SET, and ${VAR:+word} / ${VAR:-word} / ${VAR:?word} all REFERENCE the
-  # retired state while being none of them (roborev job 53). The real heredoc contains exactly one
-  # braced expansion, so surfacing every one costs a single line of prose review.
-  in_usage { next }
-  /^[[:space:]]*#/ { next }
-  # A SUBSTITUTION LINE KEEPS ITS TAIL. Inside `$( )` a quoted `#` looks like a comment opener to
-  # this flat parser, so stripping the "comment" could hide a prohibited token that bash executes
-  # (roborev job 48). Emitting the whole line risks only a false FAIL on a genuine trailing comment
-  # of a substitution line naming a retired state — the safe direction.
-  { print ($0 ~ /[$][(]/ || $0 ~ /`/) ? $0 : code_of($0) }
-' "$@" 2>/dev/null || true
-}
 # ===== THE CLASSIFIER IS GONE, AND MUST STAY GONE (owner ruling (4), #3312) =====
 # Every state, helper and marker below carried one of the four High-severity false verdicts. They are
 # asserted ABSENT rather than fixed, because absence is what the ruling bought: with no delivery-mode
@@ -4768,33 +4692,45 @@ _cls_exec_lines() {
 # A guard whose verdict depends on a pipe buffer is worse than no guard. So the text is captured ONCE
 # and matched in PURE BASH with `case` — no pipe, no subshell, no exit status to lose.
 _classifier=""
-_cls_exec=$(_cls_exec_lines "$ORACLES" "$CHECKS_FILE" "$WRAPPER_REAL")
-# The capture must be NON-EMPTY: an awk that failed, a renamed file or a filter that swallowed
-# everything would make every `case` below miss and the check would report CLEAN having read nothing.
-if [ -z "$_cls_exec" ]; then
-  bad 'structural: the executable-line capture for the classifier scan is EMPTY, so the scan below would report CLEAN having examined nothing (an awk failure, a renamed flow script, or an over-broad filter)'
-fi
+
 # THE 13 CODE IDENTIFIERS: scanned EVERYWHERE, including the help heredoc. They cannot occur in
 # English, so there is no legitimate prose use to exempt.
+_cls_ident_list='roborev_collect_review_diff_headers
+roborev_prompt_snapshot_paths
+roborev_snapshot_path_binding
+ROBOREV_DIFF_SOURCE_STATE
+BLOCKRESET
+BLOCKHDR
+in_trailer
+in_fence
+_rx_delivery_hdrs
+_rx_snap_paths
+SNAPSHOT_NOTICE
+ROBOREV_SNAPSHOT_PATH
+ROBOREV_SNAPSHOT_CONTAINMENT'
 _cls_all=$(_cls_all_lines "$ORACLES" "$CHECKS_FILE" "$WRAPPER_REAL")
 if [ -z "$_cls_all" ]; then
   bad 'structural: the all-lines capture for the classifier scan is EMPTY, so the identifier scan below would report CLEAN having examined nothing'
 fi
-for _gone in 'roborev_collect_review_diff_headers' 'roborev_prompt_snapshot_paths' \
-  'roborev_snapshot_path_binding' 'ROBOREV_DIFF_SOURCE_STATE' 'BLOCKRESET' 'BLOCKHDR' \
-  'in_trailer' 'in_fence' '_rx_delivery_hdrs' '_rx_snap_paths' 'SNAPSHOT_NOTICE' \
-  'ROBOREV_SNAPSHOT_PATH' 'ROBOREV_SNAPSHOT_CONTAINMENT'; do
+# ONE source for the list, so AC2 below asserts against the same tokens the scan uses.
+for _gone in $_cls_ident_list; do
   case "$_cls_all" in
     *"$_gone"*) _classifier="$_classifier $_gone" ;;
   esac
 done
-# THE 4 PROSE-SHAPED VERDICT STRINGS: scanned outside the help heredoc only, since the usage text
-# legitimately names them while telling the reader they are gone.
-for _gone in 'mixed-delivery' 'delegated-oversize' 'snapshot-unbound' 'unparseable-instruction'; do
-  case "$_cls_exec" in
-    *"$_gone"*) _classifier="$_classifier $_gone" ;;
-  esac
-done
+# THE 4 PROSE-SHAPED VERDICT STRINGS ARE NOT SCANNED AT ALL (roborev jobs 51/53/54/56/57/58).
+# `mixed-delivery`, `delegated-oversize`, `snapshot-unbound` and `unparseable-instruction` are
+# English, so they legitimately appear in help text and doctrine -- which forced an exemption for
+# the `usage()` heredoc, and SIX consecutive review rounds each found another construct that
+# executes inside an unquoted heredoc (command substitution, assigning parameter expansion, bare
+# $VAR, a substitution spanning lines, a `#` line that is data not a comment). Every fix was another
+# claim about a SET, and the exemption is the only reason any of it was needed.
+#
+# Dropping them removes the exemption, the filter and the whole family. Nothing is lost that the
+# guard could actually rely on: a reintroduced classifier is CODE, and code is these thirteen
+# identifiers -- a verdict STRING alone is not a classifier. This is what issue comments 3/5/6/7
+# recommended from the start ("key the guard solely on the 13 identifiers"); I deferred it as scope
+# in 3367-W1 and six rounds of heredoc parsing were the price of that deferral.
 if [ -z "$_classifier" ]; then
   ok 'structural: the delivery-mode classifier is GONE — no block/heading/fence/candidate state, no snapshot or delegated distinction, no NOTICE exemption'
 else
@@ -4805,38 +4741,6 @@ fi
 # awk filter is therefore run over a synthetic pair of files that carry the SAME forbidden token in
 # both positions, and it must keep the executable one and drop the `--help` one. Without this, the
 # prose exemption could widen until it swallowed the subject and the check would still read green.
-_cls_ctl_dir="$tmp/classifier-filter-control"
-mkdir -p "$_cls_ctl_dir"
-{
-  printf 'usage() {\n  cat <<EOF\n'
-  printf 'Block detection, fence evidence, mixed-delivery and the rest are all GONE.\n'
-  printf 'EOF\n}\n'
-  printf '# a comment mentioning mixed-delivery, which is history, not code\n'
-} >"$_cls_ctl_dir/roborev-review.sh"
-printf 'ROBOREV_DIFF_SOURCE_STATE=inline   # an EXECUTABLE reintroduction\n' \
-  >"$_cls_ctl_dir/roborev-review-oracles.sh"
-_cls_ctl=$(_cls_exec_lines "$_cls_ctl_dir/roborev-review-oracles.sh" "$_cls_ctl_dir/roborev-review.sh")
-case "$_cls_ctl" in
-  *ROBOREV_DIFF_SOURCE_STATE*)
-    ok 'structural control: the executable-line filter KEEPS an executable reintroduction, so the scan above is discriminating rather than blind' ;;
-  *)
-    bad 'structural control: the executable-line filter DROPPED an executable reintroduction — the classifier scan above cannot see the thing it exists to catch' ;;
-esac
-# ...and a TRAILING comment naming a retired token must be dropped too (roborev job 45): the filter
-# used to remove only comment-ONLY lines, so an ordinary inline comment red the classifier assert.
-_cls_ctl_inline=$(printf 'x=1   # a trailing comment naming mixed-delivery\n' | _cls_exec_lines /dev/stdin)
-case "$_cls_ctl_inline" in
-  *mixed-delivery*)
-    bad 'structural control: the executable-line filter kept a TRAILING comment, so an inline comment naming a retired state would red the classifier assert on doctrine text' ;;
-  *)
-    ok 'structural control: the executable-line filter drops TRAILING comments as well as whole-line ones, so naming a retired state in an inline comment is not a violation' ;;
-esac
-case "$_cls_ctl" in
-  *mixed-delivery*)
-    bad 'structural control: the executable-line filter kept --help prose (or a comment), so the check would red on the doctrine text that records the deletion' ;;
-  *)
-    ok 'structural control: the filter drops --help prose and comments, so recording the retired states in doctrine is not itself a violation' ;;
-esac
 # ===== BOTH DIRECTIONS, PINNED AGAINST THE REAL WRAPPER (#3367 AC2/AC3) =====
 # The control above builds its own pair of files, which shows the FILTER discriminates but says
 # nothing about the state of the actual subject. These two pin the real file, in both directions.
@@ -4854,12 +4758,16 @@ done
 if [ -z "$_ac2_prose" ]; then
   bad 'structural (#3367 AC2): the real wrapper names NONE of the prose-shaped retired states, so the prose exemption is untested by this run — the guard would read green whether or not it works (the wrapper is supposed to record what was deleted; if that record is gone, restore it or retire this pin deliberately)'
 else
+  # The scan cannot trip on these because it does not look for them: the token list is the thirteen
+  # CODE IDENTIFIERS only. Asserted against the list itself rather than against a filter's output,
+  # so this stays true without a heredoc exemption existing at all.
   _ac2_leaked=""
   for _ac2_tok in $_ac2_prose; do
-    case "$_cls_exec" in *"$_ac2_tok"*) _ac2_leaked="$_ac2_leaked $_ac2_tok" ;; esac
+    case "$_cls_all" in *"$_ac2_tok"*) : ;; esac
+    printf '%s\n' "$_cls_ident_list" | grep -qxF "$_ac2_tok" && _ac2_leaked="$_ac2_leaked $_ac2_tok"
   done
   if [ -z "$_ac2_leaked" ]; then
-    ok "structural (#3367 AC2): the real wrapper's doctrine prose names$_ac2_prose and the executable-line filter drops every one — recording what was deleted is not itself a violation"
+    ok "structural (#3367 AC2): the real wrapper's doctrine prose names$_ac2_prose and NONE of them is in the scanned token list — recording what was deleted cannot be a violation, with no heredoc exemption needed to make that true"
   else
     bad "structural (#3367 AC2): a prose-shaped retired state survived the executable-line filter —$_ac2_leaked. TWO causes, and they need opposite responses: (a) the heredoc/comment exemption broke, which is the deterministic red that made two lanes investigate a diff touching no scripts/ path — fix the filter; or (b) that word now sits on a heredoc line carrying an EXPANSION, which is correctly NOT exempt because an unquoted heredoc executes it — move the word to an expansion-free line. Check which before touching the filter"
   fi
@@ -4873,7 +4781,7 @@ mkdir -p "$_ac3_dir"
 cp "$WRAPPER_REAL" "$_ac3_dir/roborev-review.sh"
 printf '\nROBOREV_DIFF_SOURCE_STATE="mixed-delivery"   # a genuine reintroduction\n' \
   >>"$_ac3_dir/roborev-review.sh"
-_ac3_exec=$(_cls_exec_lines "$ORACLES" "$CHECKS_FILE" "$_ac3_dir/roborev-review.sh")
+_ac3_exec=$(_cls_all_lines "$ORACLES" "$CHECKS_FILE" "$_ac3_dir/roborev-review.sh")
 _ac3_caught=""
 for _ac3_tok in ROBOREV_DIFF_SOURCE_STATE mixed-delivery; do
   case "$_ac3_exec" in *"$_ac3_tok"*) _ac3_caught="$_ac3_caught $_ac3_tok" ;; esac
@@ -4886,10 +4794,10 @@ _ac3b_dir="$tmp/real-wrapper-usage-reintroduction"
 mkdir -p "$_ac3b_dir"
 awk '/^usage\(\) \{/ && !done { print; print "  ROBOREV_DIFF_SOURCE_STATE=inline"; done = 1; next } { print }' \
   "$WRAPPER_REAL" >"$_ac3b_dir/roborev-review.sh"
-_ac3b_exec=$(_cls_exec_lines "$ORACLES" "$CHECKS_FILE" "$_ac3b_dir/roborev-review.sh")
+_ac3b_exec=$(_cls_all_lines "$ORACLES" "$CHECKS_FILE" "$_ac3b_dir/roborev-review.sh")
 case "$_ac3b_exec" in
   *ROBOREV_DIFF_SOURCE_STATE*)
-    ok 'structural (#3367 AC3b): a reintroduction parked INSIDE usage() before its heredoc is caught — the filter exempts the heredoc BODY (prose printed to a user), not the whole function' ;;
+    ok 'structural (#3367 AC3b): a reintroduction parked INSIDE usage() before its heredoc is caught — identifiers are scanned everywhere, so no part of the function is exempt' ;;
   *)
     bad 'structural (#3367 AC3b): a reintroduction between `usage() {` and its `cat <<EOF` was NOT caught. The prose exemption starts at the function opener instead of the heredoc opener, so executable code parked there is invisible to the classifier-GONE scan' ;;
 esac
