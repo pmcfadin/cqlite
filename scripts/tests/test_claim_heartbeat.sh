@@ -1969,6 +1969,100 @@ else
 fi
 (cd "$WORK" && g push -q origin ":refs/lane-claims/phReap/5502" 2>/dev/null || true)
 
+# ===========================================================================
+echo "TEST 62: the lane-id grammar is EXACT — 0, 00, pdead and p- are all refused (round 4, Medium)"
+# ===========================================================================
+# The first cut was a loose character class, which MEASURABLY accepted `0`, `00`, `pdead` and `p-`.
+# `0` is the serious one: it recreates the single shared refs/lane-claims/<machine>/0 whose
+# collisions are the dead-lane masking this entire change exists to remove. A guard that admits the
+# original defect is not a guard. `pdead` passed because d/e/a are hex digits — a character class is
+# not a grammar.
+for bad_id in 0 00 pdead p- p; do
+  (cd "$WORK" && HEARTBEAT_MACHINE=gramBox bash "$HB" stamp "$bad_id" 1 >/dev/null 2>&1); bad_rc=$?
+  bad_ref=$(g -C "$WORK" ls-remote origin "refs/lane-claims/gramBox/${bad_id}" | awk '{print $1}')
+  if [ "$bad_rc" -eq 64 ] && [ -z "$bad_ref" ]; then
+    ok "lane id '$bad_id' is refused (rc=64) and creates no ref"
+  else
+    bad "lane id '$bad_id' must be refused: rc=$bad_rc ref='$bad_ref'"
+  fi
+done
+# NON-VACUITY: the two VALID shapes are still accepted, or the grammar would just be broken.
+for good_id in 3367 p123 p123-abc12345; do
+  (cd "$WORK" && HEARTBEAT_MACHINE=gramBox bash "$HB" stamp "$good_id" 1 >/dev/null 2>&1)
+  if [ -n "$(g -C "$WORK" ls-remote origin "refs/lane-claims/gramBox/${good_id}" | awk '{print $1}')" ]; then
+    ok "NON-VACUITY: valid lane id '$good_id' is accepted"
+  else
+    bad "valid lane id '$good_id' must be accepted"
+  fi
+  (cd "$WORK" && g push -q origin ":refs/lane-claims/gramBox/${good_id}" 2>/dev/null || true)
+done
+
+# ===========================================================================
+echo "TEST 63: the open-PR safeguard fails CLOSED when the claim message is unreadable (round 4)"
+# ===========================================================================
+# `ref_msg_field` returned EMPTY on a failed fetch, and delete_ref_guarded reads it to find the issue
+# for the open-PR safeguard — so a transient failure silently SKIPPED the safeguard and deleted a
+# claim whose endgame was unfinished. Absence of an answer was being used as an answer. Exercised on
+# a LEGACY ref, which is the shape that still needs the message (a per-lane ref carries the issue in
+# its path, so the guard no longer depends on parsing anything).
+dangling3="deadbeef22222222222222222222222222222222"
+printf '%s\n' "$dangling3" >"$ORIGIN/refs/machine-claims/unreadableMsg"
+fc_out=$(cd "$WORK" && CLAIM_OPEN_PR_CMD="$NO_OPEN_PR" bash "$HB" reap unreadableMsg 2>&1)
+fc_rc=$?
+still_msg=$(g -C "$WORK" ls-remote origin 'refs/machine-claims/unreadableMsg' | awk '{print $1}')
+if [ "$fc_rc" -ne 0 ] && [ -n "$still_msg" ] \
+  && printf '%s\n' "$fc_out" | grep -qi 'could not be read'; then
+  ok "an unreadable claim message REFUSES the delete (rc=$fc_rc) and the ref survives — the open-PR safeguard is not skipped"
+else
+  bad "an unreadable claim message must fail closed: rc=$fc_rc still='$still_msg' out:
+$fc_out"
+fi
+rm -f "$ORIGIN/refs/machine-claims/unreadableMsg"
+
+# ===========================================================================
+echo "TEST 64: list-claims reports an unreadable namespace instead of 'no claims found' (round 4)"
+# ===========================================================================
+lc_out=$(cd "$WORK" && HEARTBEAT_REMOTE=no-such-remote bash "$HB" list-claims 2>&1)
+lc_rc=$?
+if [ "$lc_rc" -ne 0 ] \
+  && printf '%s\n' "$lc_out" | grep -qi 'could not list claim refs' \
+  && ! printf '%s\n' "$lc_out" | grep -qi 'no claims found'; then
+  ok "list-claims on an unreadable remote exits non-zero and says the listing is incomplete"
+else
+  bad "list-claims must not render an outage as 'no claims found': rc=$lc_rc out:
+$lc_out"
+fi
+# ...and a PLACEHOLDER lane must be identifiable in the table, since placeholders are never
+# auto-reaped and an operator needs to know WHICH ref to clean up by hand.
+craft_lane_claim "$WORK" "dispBox" "p88-c0ffee" "$ABSENT_PID" 30
+disp_out=$(cd "$WORK" && bash "$HB" list-claims 2>&1)
+if printf '%s\n' "$disp_out" | grep -qE '^dispBox +p88-c0ffee '; then
+  ok "list-claims shows the placeholder lane id from the ref PATH, not '?'"
+else
+  bad "a placeholder lane must be identifiable in list-claims: out:
+$(printf '%s\n' "$disp_out" | head -5)"
+fi
+(cd "$WORK" && g push -q origin ":refs/lane-claims/dispBox/p88-c0ffee" 2>/dev/null || true)
+
+# ===========================================================================
+echo "TEST 65: no function is defined TWICE in the flow scripts (round 4 near-miss)"
+# ===========================================================================
+# A structural guard earned the hard way. Rewriting `ref_msg_field` to fail closed left the ORIGINAL
+# fail-open definition in place further down the file, and bash uses the LAST definition — so the
+# hardened version was dead code and the open-PR safeguard was still being skipped. Every behavioural
+# test passed; only a direct trace of the function showed rc=0 on an unreadable ref. CLAUDE.md already
+# warns about exactly this for agent-gate's `_tree*` helpers, which is why it deserves a guard rather
+# than a comment.
+for _fnfile in "$HB" "$SCRIPT_DIR/../flow/claim.sh" "$SCRIPT_DIR/../local/worker-supervisor.sh"; do
+  [ -r "$_fnfile" ] || continue
+  _dupes=$(grep -oE '^[a-z_][a-z0-9_]*\(\) \{' "$_fnfile" | sort | uniq -d || true)
+  if [ -z "$_dupes" ]; then
+    ok "no duplicate function definition in $(basename "$_fnfile") — a later definition would silently shadow an earlier one"
+  else
+    bad "duplicate function definition(s) in $(basename "$_fnfile"): $(printf '%s' "$_dupes" | tr '\n' ' ') — bash uses the LAST one, so the earlier is dead code"
+  fi
+done
+
 echo
 echo "=== claim-heartbeat.sh: $PASS passed, $FAIL failed ==="
 [ "$FAIL" -eq 0 ]

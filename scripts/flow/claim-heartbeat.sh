@@ -1,3 +1,26 @@
+# ref_msg_field <ref> <field> — read `<field>=<value>` from a liveness ref's commit message.
+#
+# FAILS CLOSED, AND DOES NOT TOUCH FETCH_HEAD (roborev round 4, Medium). Two defects lived here:
+#   * a failed fetch or unreadable message returned EMPTY, and `delete_ref_guarded` reads this to
+#     find the issue for its open-PR safeguard — so a transient failure silently SKIPPED the
+#     safeguard and deleted a claim whose endgame was unfinished. Absence of an answer was being
+#     used as an answer.
+#   * it read through shared `FETCH_HEAD`, which any concurrent fetch in this worktree can clobber,
+#     so the field could come from ANOTHER ref entirely. Same hazard already fixed in `dead-lanes`,
+#     not carried across to here.
+# Non-zero exit now means "could not read"; callers must treat that as unknown, never as absent.
+ref_msg_field() {
+  local ref="$1" field="$2" tmpref msg
+  tmpref="refs/tmp/claim-heartbeat-field/$$-${RANDOM}"
+  if ! git fetch --no-write-fetch-head --no-tags "$REMOTE" "+${ref}:${tmpref}" >/dev/null 2>&1; then
+    return 1
+  fi
+  msg="$(git log -1 --format=%B "$tmpref" 2>/dev/null)" || { git update-ref -d "$tmpref" 2>/dev/null || true; return 1; }
+  git update-ref -d "$tmpref" 2>/dev/null || true
+  [ -n "$msg" ] || return 1
+  printf '%s' "$msg" | sed -n "s/.*${field}=\\([^ ]*\\).*/\\1/p" | head -1
+}
+
 #!/usr/bin/env bash
 #
 # claim-heartbeat.sh — cross-machine claim liveness via a cheap origin git ref
@@ -374,18 +397,31 @@ humanize_age() {
 # Echoes the created commit sha on stdout.
 # lane_id_ok <id> — exit 0 iff <id> is a valid lane component (#3393).
 #
-# TWO SHAPES, deliberately: a bare issue number, or `p<pid>` for a supervisor whose issue is not yet
-# known. The placeholder exists because `CLAIM_ISSUE` is cleared on `finalized`, so a supervisor
-# finalising issue after issue never knows its issue at spawn time — and a SHARED placeholder (the
-# old "0") made every such supervisor on a machine write the same ref, which is the masking ruling A
-# removes. `p<pid>` is unique per supervisor and stays out of the numeric issue space, so the
-# open-PR guard and the board flip both correctly decline to treat it as an issue.
+# TWO EXACT SHAPES, and the exactness is the point (roborev round 4, Medium). The first cut was a
+# loose `p[0-9a-f-]*`, which MEASURABLY accepted `0`, `00`, `pdead` and `p-`:
+#   * `0` is the worst of them — it recreates the single shared `refs/lane-claims/<machine>/0` whose
+#     collisions are the dead-lane masking this whole change exists to remove. A guard that admits
+#     the original defect is not a guard.
+#   * `pdead` passed because d, e, a and d are all hex digits, which is a good reminder that a
+#     character-class test is not a grammar.
+# So: a POSITIVE decimal issue, or exactly `p<decimal-pid>` optionally followed by `-<hex token>`.
 lane_id_ok() {
   case "$1" in
-    '') return 1 ;;
-    # `p<pid>` or `p<pid>-<token>`: the token is per-invocation, so pid reuse across a reboot cannot
-    # collide two lanes onto one ref (roborev round 3). Hex and dashes only — no path separators.
-    p*) case "${1#p}" in '' | *[!0-9a-f-]*) return 1 ;; *) return 0 ;; esac ;;
+    '' | 0 | 0*) return 1 ;;   # no empty, no zero, no leading zero (00 is not an issue)
+    p*)
+      local rest="${1#p}" pid="" tok=""
+      case "$rest" in
+        *-*) pid="${rest%%-*}"; tok="${rest#*-}" ;;
+        *)   pid="$rest" ;;
+      esac
+      case "$pid" in '' | *[!0-9]*) return 1 ;; esac
+      if [ -n "$tok" ]; then
+        case "$tok" in *[!0-9a-f]*) return 1 ;; esac
+      else
+        case "$rest" in *-*) return 1 ;; esac   # a trailing dash with no token, e.g. `p-`
+      fi
+      return 0
+      ;;
     *) case "$1" in *[!0-9]*) return 1 ;; *) return 0 ;; esac ;;
   esac
 }
@@ -425,12 +461,6 @@ push_liveness_ref() {
 
 # ref_msg_field <refname> <key> — fetch <refname> and extract the run of
 # non-space chars after `key=` in its commit message. Empty on any failure.
-ref_msg_field() {
-  local refname="$1" key="$2" msg
-  git fetch "$REMOTE" "$refname" >/dev/null 2>&1 || return 0
-  msg="$(git log -1 --format=%B FETCH_HEAD 2>/dev/null || true)"
-  printf '%s' "$msg" | sed -n "s/.*${key}=\\([^ ][^ ]*\\).*/\\1/p" | head -1
-}
 
 cmd_beat() {
   local issue="${1:-}"
@@ -543,8 +573,22 @@ delete_ref_guarded() {
       ;;
   esac
 
-  local issue
-  issue="$(ref_msg_field "$ref" issue)"
+  # THE PATH IS AUTHORITATIVE for a per-lane ref (roborev round 4): the issue is in the ref name, so
+  # the open-PR guard no longer depends on parsing a commit message at all. Only the legacy shape
+  # needs the message, and an unreadable message there is UNKNOWN, not absent — fail closed.
+  local issue=""
+  case "$namespace/$suffix" in
+    lane-claims/*)
+      issue="${suffix##*/}"
+      lane_id_is_placeholder "$issue" && issue=""   # a placeholder names no issue to check
+      ;;
+    *)
+      if ! issue="$(ref_msg_field "$ref" issue)"; then
+        note "REFUSING to delete ${ref}: its claim message could not be read, so an open PR cannot be ruled out (the open-PR safeguard needs the issue)"
+        return 5
+      fi
+      ;;
+  esac
   if [ -n "$issue" ] && issue_has_open_pr "$issue"; then
     note "REFUSING to delete ${ref}: issue #${issue} has an open PR (endgame unfinished; #2655)"
     return 3
@@ -590,8 +634,16 @@ cmd_list_claims() {
   # BOTH namespaces (#3393). New claims live at refs/lane-claims/<machine>/<issue>; a legacy
   # refs/machine-claims/<machine> from before the per-lane ruling is still listed so it can be seen
   # and drained — an invisible legacy ref pins its board item at In Progress indefinitely.
-  raw="$(git ls-remote "$REMOTE" 'refs/lane-claims/*' 2>/dev/null || true)"
-  legacy="$(git ls-remote "$REMOTE" 'refs/machine-claims/*' 2>/dev/null || true)"
+  # NEITHER LISTING MAY FAIL SILENTLY (roborev round 4, Low; fourth instance of this class in this
+  # change). Both were `|| true`, so an origin or auth outage rendered "no claims found" or a
+  # partial table — and this command is what an operator reads to decide whether a lane is owned.
+  local lane_rc=0 legacy_rc=0
+  raw="$(git ls-remote "$REMOTE" 'refs/lane-claims/*' 2>/dev/null)" || lane_rc=$?
+  legacy="$(git ls-remote "$REMOTE" 'refs/machine-claims/*' 2>/dev/null)" || legacy_rc=$?
+  if [ "$lane_rc" -ne 0 ] || [ "$legacy_rc" -ne 0 ]; then
+    note "could not list claim refs on ${REMOTE} (lane-claims rc=${lane_rc}, machine-claims rc=${legacy_rc}) — this listing would be incomplete or empty for a reason that is NOT 'no claims exist'"
+    return 1
+  fi
   [ -z "$legacy" ] || raw="$(printf '%s\n%s' "$raw" "$legacy")"
   raw="$(printf '%s' "$raw" | sed '/^$/d')"
 
@@ -603,13 +655,15 @@ cmd_list_claims() {
   printf '%-20s %-8s %-10s %-24s %s\n' "MACHINE" "ISSUE" "PID" "TS" "AGE"
   while IFS= read -r line; do
     [ -n "$line" ] || continue
-    local refname machine msg issue pid ts epoch age_h
+    local refname machine msg issue pid ts epoch age_h lane_from_path=""
     refname="$(printf '%s' "$line" | awk '{print $2}')"
     case "$refname" in
       refs/lane-claims/*)
-        # <machine>/<issue> — the issue is the LAST component, which is why the separator is a
-        # slash and not a dash (machine names contain dashes).
+        # <machine>/<lane-id> — the id is the LAST component, which is why the separator is a
+        # slash and not a dash (machine names contain dashes). Shown from the PATH so a placeholder
+        # lane is identifiable rather than rendered `?` (roborev round 4).
         machine="${refname#refs/lane-claims/}"
+        lane_from_path="${machine##*/}"
         machine="${machine%/*}"
         ;;
       *) machine="${refname#refs/machine-claims/} (legacy)" ;;
@@ -623,6 +677,7 @@ cmd_list_claims() {
     issue="$(printf '%s' "$msg" | sed -n 's/.*issue=\([0-9][0-9]*\).*/\1/p' | head -1)"
     pid="$(printf '%s' "$msg" | sed -n 's/.*pid=\([0-9][0-9]*\).*/\1/p' | head -1)"
     ts="$(printf '%s' "$msg" | sed -n 's/.*ts=\([^ ]*\).*/\1/p' | head -1)"
+    [ -n "$lane_from_path" ] && issue="$lane_from_path"
     [ -n "$issue" ] || issue="?"
     [ -n "$pid" ] || pid="?"
     [ -n "$ts" ] || ts="?"
@@ -1064,7 +1119,13 @@ cmd_dead_lanes() {
     # `worker-supervisor.sh` stamps issue "0" when the current iteration's issue is
     # not yet known. That is a PLACEHOLDER, not issue #0: probing for a PR on it
     # would query a number that cannot exist and print a bogus issue in the report.
-    if [ -z "$issue" ] || [ "$issue" = "0" ]; then
+    # PREFER THE PATH COMPONENT (roborev round 4). The message parse is numeric-only, so a valid
+    # PLACEHOLDER lane rendered as `?` — and since placeholders are deliberately never auto-reaped,
+    # an operator could see that a lane needed manual cleanup but not WHICH ref to clean. The id is
+    # right there in the ref name.
+    if [ -n "$lane_issue" ]; then
+      issue="$lane_issue"
+    elif [ -z "$issue" ] || [ "$issue" = "0" ]; then
       issue="?"
     fi
 
