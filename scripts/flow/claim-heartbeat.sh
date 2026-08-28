@@ -75,6 +75,56 @@
 #                                            # foreign-pid unknowable); exit 2 = no ref.
 #   claim-heartbeat.sh reap <machine>        # delete a machine's claim ref, but
 #                                            # REFUSE if its issue has an open PR.
+#   claim-heartbeat.sh dead-lanes            # REPORT every claim whose owning
+#                                            # process is verifiably gone, with NO
+#                                            # age threshold and regardless of an
+#                                            # open PR. exit 3 = a dead lane was
+#                                            # found; 0 = none (incl. zero claims).
+#
+# WHY `dead-lanes` IS NOT `should-reap` (issue #3393 AC3)
+#   `should-reap` is a REAP GATE, and it consults the pid ONLY AFTER age >
+#   threshold (4h). So a worker the kernel OOM-killed a minute ago is
+#   indistinguishable from a healthy one for four hours, and even then the answer
+#   is an exit code nobody is watching. That is the silence #3393 records: three
+#   lanes died leaving a clean worktree, a held claim and an open PR, and NOTHING
+#   REPORTED IT.
+#
+#   `dead-lanes` answers the other question — "is anything dead RIGHT NOW?" — and
+#   differs deliberately on both guards that make the reaper conservative:
+#     * NO AGE GATE. A fresh claim with a dead pid is exactly the shape of an OOM
+#       kill, so waiting out the threshold would hide the very event we want.
+#     * AN OPEN PR DOES NOT SUPPRESS THE REPORT. For the reaper an open PR means
+#       KEEP (an unfinished endgame stays owned — #2499). For a report it is the
+#       MOST urgent row on the page: a dead process holding an in-flight endgame.
+#       So the row is printed and annotated `open-pr=yes`, and reaping is still
+#       refused. Reporting and reaping are different acts.
+#
+#   It is a REPORT, never a mutation: it deletes no ref and flips no board item.
+#
+#   THREE-VALUED BY CONSTRUCTION. A pid is only checkable on the machine that
+#   owns the claim, so the verdict is never folded onto a two-valued alive/dead —
+#   the permissive fold ("assume alive") is how a dead lane goes unseen, which is
+#   the vacuous-pass shape this repo's doctrine forbids:
+#     DEAD-NO-PROCESS   local claim, pid recorded, `kill -0` fails => gone.
+#     ALIVE             local claim, pid recorded and still running.
+#     UNKNOWN-FOREIGN   claim owned by another machine; its pid is unknowable
+#                       from here, so it is reported as neither.
+#     UNKNOWN-NO-PID    claim ref carries no pid (pre-#2655 or hand-made).
+#   Only DEAD-NO-PROCESS sets the exit code. An UNKNOWN is a gap in what this
+#   host can see, and it is printed as such rather than counted either way.
+#
+#   SCOPE LIMIT, stated because the acceptance criterion asks for more: #3393 AC3
+#   describes the operator's scratch check as "worktree present, tmux session
+#   absent => DEAD-NO-SESSION". That test cannot be implemented here, because the
+#   lane-directory layout (`/data/lanes/lane-<N>`) and the tmux session naming it
+#   depends on exist NOWHERE in this repository — not in this script, not in
+#   `worker-supervisor.sh`, not in the fleet runbook. Committing a tool that
+#   guessed at that convention would silently report nothing on any machine
+#   naming its sessions differently, which is a vacuous green wearing a
+#   watchdog's clothes. So this implements the same detection keyed on a signal
+#   the repository DOES own: the supervisor-authored claim ref and the pid it
+#   records (#2655). The remaining half — teaching the fleet a committed lane/
+#   session convention — needs an owner decision and is left to #3393.
 #
 # Run from inside the repo (any cwd under the working tree/worktree is fine —
 # this never touches the working tree or the current branch).
@@ -97,6 +147,11 @@
 #   0  success (including "zero heartbeats" on `list`, and "already absent" on
 #      `clear` — both are not errors)
 #   1  git operation failed (push/fetch/delete)
+#   3  `dead-lanes` only: at least one DEAD-NO-PROCESS lane was reported. A
+#      DISTINCT code, not 1: "I found a dead lane" is a successful measurement
+#      with a finding, while 1 means the measurement itself failed. A cron that
+#      conflated them would page for a network blip and stay silent on a real
+#      dead lane.
 #   64 usage error
 #
 # ---END-HELP---
@@ -427,6 +482,69 @@ cmd_should_reap() {
   return 0
 }
 
+# cmd_dead_lanes — REPORT (never mutate) every machine claim whose owning process
+# is verifiably gone. See the header for why this is not `should-reap`. Exit 3 iff
+# at least one DEAD-NO-PROCESS row was printed; 0 otherwise (including zero claims).
+cmd_dead_lanes() {
+  [ "$#" -eq 0 ] || die_usage "dead-lanes takes no arguments (got '$1')"
+
+  local raw this_machine dead=0
+  this_machine="${HEARTBEAT_MACHINE:-$(hostname -s)}"
+  raw="$(git ls-remote "$REMOTE" 'refs/machine-claims/*' 2>/dev/null || true)"
+
+  if [ -z "$raw" ]; then
+    echo "no claims found on $REMOTE — no dead lanes (an empty fleet is not a finding)"
+    return 0
+  fi
+
+  printf '%-20s %-8s %-10s %-18s %s\n' "MACHINE" "ISSUE" "PID" "VERDICT" "DETAIL"
+  while IFS= read -r line; do
+    [ -n "$line" ] || continue
+    local refname machine msg issue pid verdict detail
+    refname="$(printf '%s' "$line" | awk '{print $2}')"
+    machine="${refname#refs/machine-claims/}"
+
+    if ! git fetch "$REMOTE" "$refname" >/dev/null 2>&1; then
+      # An unreadable ref is NOT "no dead lane here" — say so and do not judge it.
+      printf '%-20s %-8s %-10s %-18s %s\n' "$machine" "?" "?" "UNKNOWN-UNREADABLE" "fetch of $refname failed"
+      continue
+    fi
+    msg="$(git log -1 --format=%B FETCH_HEAD 2>/dev/null || true)"
+    issue="$(printf '%s' "$msg" | sed -n 's/.*issue=\([0-9][0-9]*\).*/\1/p' | head -1)"
+    pid="$(printf '%s' "$msg" | sed -n 's/.*pid=\([0-9][0-9]*\).*/\1/p' | head -1)"
+    [ -n "$issue" ] || issue="?"
+
+    detail=""
+    if [ "$machine" != "$this_machine" ]; then
+      verdict="UNKNOWN-FOREIGN"
+      detail="pid not checkable from ${this_machine}"
+    elif [ -z "$pid" ]; then
+      verdict="UNKNOWN-NO-PID"
+      detail="claim ref records no pid (pre-#2655 or hand-made)"
+    elif kill -0 "$pid" 2>/dev/null; then
+      verdict="ALIVE"
+    else
+      verdict="DEAD-NO-PROCESS"
+      dead=$((dead + 1))
+      # The open-PR annotation uses the SAME fail-safe predicate the reaper uses
+      # (a gh/network failure reads as "has open PR"), so this line never invites
+      # a reap on unproven information. It does NOT gate the report.
+      if [ "$issue" != "?" ] && issue_has_open_pr "$issue"; then
+        detail="open-pr=yes — ORPHANED ENDGAME (#2499): report it, do NOT reap it"
+      else
+        detail="open-pr=no"
+      fi
+    fi
+    printf '%-20s %-8s %-18s %-18s %s\n' "$machine" "$issue" "${pid:-none}" "$verdict" "$detail"
+  done <<<"$raw"
+
+  if [ "$dead" -gt 0 ]; then
+    note "${dead} dead lane(s) reported — this is a REPORT, nothing was deleted or reaped"
+    return 3
+  fi
+  return 0
+}
+
 SUBCOMMAND="${1:-}"
 case "$SUBCOMMAND" in
   beat)
@@ -455,13 +573,17 @@ case "$SUBCOMMAND" in
     shift
     cmd_reap "${1:-}"
     ;;
+  dead-lanes)
+    shift
+    cmd_dead_lanes "$@"
+    ;;
   -h | --help)
     print_help
     ;;
   "")
-    die_usage "a subcommand is required: beat <issue> | list | clear <machine> | stamp <issue> [pid] | list-claims | should-reap <machine> [secs] | reap <machine>"
+    die_usage "a subcommand is required: beat <issue> | list | clear <machine> | stamp <issue> [pid] | list-claims | should-reap <machine> [secs] | reap <machine> | dead-lanes"
     ;;
   *)
-    die_usage "unknown subcommand: $SUBCOMMAND (expected beat|list|clear|stamp|list-claims|should-reap|reap)"
+    die_usage "unknown subcommand: $SUBCOMMAND (expected beat|list|clear|stamp|list-claims|should-reap|reap|dead-lanes)"
     ;;
 esac

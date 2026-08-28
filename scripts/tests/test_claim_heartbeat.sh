@@ -367,6 +367,156 @@ else
   bad "clear did NOT delete a no-open-PR heartbeat"
 fi
 
+# ===========================================================================
+echo "TEST 22: dead-lanes reports a LOCAL claim whose pid is DEAD, with no 4h wait (#3393 AC3)"
+# ===========================================================================
+# The silence this closes: `should-reap` only looks at the pid AFTER age > threshold
+# (4h default), so a worker OOM-killed one minute ago is indistinguishable from a
+# healthy one for four hours — and even then the answer is an exit code, not a report.
+# A FRESH claim with a dead pid is the exact shape of an OOM kill, so that is the fixture.
+craft_old_claim "$WORK" "deadFresh" 3393 999999 30   # 30s old: far INSIDE the reap threshold
+dl_out=$(cd "$WORK" && HEARTBEAT_MACHINE=deadFresh CLAIM_OPEN_PR_CMD="$NO_OPEN_PR" \
+  bash "$HB" dead-lanes 2>&1)
+dl_rc=$?
+if [ "$dl_rc" -eq 3 ] \
+  && printf '%s\n' "$dl_out" | grep -q 'DEAD-NO-PROCESS' \
+  && printf '%s\n' "$dl_out" | grep -q 'deadFresh' \
+  && printf '%s\n' "$dl_out" | grep -q '3393'; then
+  ok "dead-lanes reported DEAD-NO-PROCESS for a 30s-old claim with a dead pid (rc=3), naming machine and issue"
+else
+  bad "dead-lanes must report a fresh dead-pid claim with rc=3: rc=$dl_rc out:
+$dl_out"
+fi
+# NON-VACUITY: should-reap KEEPS that very same claim, so the new report is not a
+# restatement of an existing signal — it sees something should-reap cannot.
+if (cd "$WORK" && HEARTBEAT_MACHINE=deadFresh CLAIM_OPEN_PR_CMD="$NO_OPEN_PR" \
+  bash "$HB" should-reap deadFresh 14400 >/dev/null 2>&1); then
+  bad "NON-VACUITY broken: should-reap reaped the fresh claim, so dead-lanes adds nothing"
+else
+  ok "NON-VACUITY: should-reap KEEPS the same fresh dead-pid claim (age gate) — dead-lanes is the only signal that sees it"
+fi
+
+# ===========================================================================
+echo "TEST 23: a LIVE local pid is reported ALIVE, and does not set the dead exit code"
+# ===========================================================================
+craft_old_claim "$WORK" "aliveLocal" 3394 "$$" 30
+al_out=$(cd "$WORK" && HEARTBEAT_MACHINE=aliveLocal CLAIM_OPEN_PR_CMD="$NO_OPEN_PR" \
+  bash "$HB" dead-lanes 2>&1)
+al_rc=$?
+# machine=aliveLocal is the local identity here, so ITS row must read ALIVE — and the
+# deadFresh claim, being FOREIGN from this vantage point, is UNKNOWN-FOREIGN rather than
+# dead, so nothing sets the dead code and rc is 0. That asymmetry is the point of the
+# three-valued verdict: the same ref reads DEAD on its own machine and UNKNOWN elsewhere.
+if printf '%s\n' "$al_out" | grep -E '^aliveLocal ' | grep -q 'ALIVE' && [ "$al_rc" -eq 0 ]; then
+  ok "dead-lanes reported ALIVE for a live local pid, rc=0 (the same deadFresh ref reads UNKNOWN-FOREIGN from here, never dead)"
+else
+  bad "dead-lanes must report ALIVE for a live local pid: out:
+$al_out"
+fi
+
+# ===========================================================================
+echo "TEST 24: a FOREIGN claim is UNKNOWN-FOREIGN — never guessed alive OR dead"
+# ===========================================================================
+# A foreign machine's pid is unknowable from here (the header says so for should-reap).
+# Reporting it as dead would page an operator about a healthy box; reporting it as alive
+# would be a permissive branch keyed on an unmeasured signal, which is the vacuous-pass
+# shape doctrine forbids. So it gets its OWN token.
+fo_out=$(cd "$WORK" && HEARTBEAT_MACHINE=someThirdMachine CLAIM_OPEN_PR_CMD="$NO_OPEN_PR" \
+  bash "$HB" dead-lanes 2>&1)
+if printf '%s\n' "$fo_out" | grep -E '^deadFresh ' | grep -q 'UNKNOWN-FOREIGN'; then
+  ok "dead-lanes reported UNKNOWN-FOREIGN for a claim owned by another machine (neither alive nor dead)"
+else
+  bad "a foreign claim must be UNKNOWN-FOREIGN: out:
+$fo_out"
+fi
+
+# ===========================================================================
+echo "TEST 25: an OPEN PR does NOT suppress a dead-lane report (#2499 orphaned endgame)"
+# ===========================================================================
+# This is the sharpest difference from should-reap, which KEEPS (and stays silent about)
+# a claim with an open PR. A dead process holding an unfinished endgame is the MOST
+# important thing to say out loud — it must be reported AND must not be reaped.
+pr_out=$(cd "$WORK" && HEARTBEAT_MACHINE=deadFresh CLAIM_OPEN_PR_CMD="$HAS_OPEN_PR" \
+  bash "$HB" dead-lanes 2>&1)
+pr_rc=$?
+if [ "$pr_rc" -eq 3 ] \
+  && printf '%s\n' "$pr_out" | grep -E '^deadFresh ' | grep -q 'DEAD-NO-PROCESS' \
+  && printf '%s\n' "$pr_out" | grep -E '^deadFresh ' | grep -q 'open-pr=yes'; then
+  ok "dead-lanes still reports a dead lane that holds an OPEN PR, annotating open-pr=yes (reap would refuse; the report must not)"
+else
+  bad "an open PR must not suppress the dead-lane report: rc=$pr_rc out:
+$pr_out"
+fi
+# ...and reap still REFUSES it, so reporting has not become reaping.
+if (cd "$WORK" && HEARTBEAT_MACHINE=deadFresh CLAIM_OPEN_PR_CMD="$HAS_OPEN_PR" \
+  bash "$HB" reap deadFresh >/dev/null 2>&1); then
+  bad "reap deleted an open-PR claim — reporting must not have relaxed reaping"
+else
+  ok "reap still REFUSES the same open-PR claim: the report is loud, the reaper stays conservative"
+fi
+
+# ===========================================================================
+echo "TEST 26: a claim ref with NO pid is UNKNOWN-NO-PID, not silently alive"
+# ===========================================================================
+# A pre-#2655 or hand-crafted ref carries no pid. Two-valued logic would fold that
+# onto one answer; the permissive fold ("assume alive") is how a dead lane goes unseen.
+(
+  cd "$WORK" || exit 1
+  et=$(git hash-object -t tree --stdin </dev/null)
+  cs=$(GIT_AUTHOR_NAME=t GIT_AUTHOR_EMAIL=t@t GIT_COMMITTER_NAME=t GIT_COMMITTER_EMAIL=t@t \
+    git commit-tree "$et" -m "claim issue=3395 machine=noPid ts=$(date -u +%Y-%m-%dT%H:%M:%SZ)")
+  g push -q origin "${cs}:refs/machine-claims/noPid"
+)
+np_out=$(cd "$WORK" && HEARTBEAT_MACHINE=noPid CLAIM_OPEN_PR_CMD="$NO_OPEN_PR" \
+  bash "$HB" dead-lanes 2>&1)
+if printf '%s\n' "$np_out" | grep -E '^noPid ' | grep -q 'UNKNOWN-NO-PID'; then
+  ok "dead-lanes reported UNKNOWN-NO-PID for a claim ref carrying no pid (never folded onto ALIVE)"
+else
+  bad "a pid-less claim must be UNKNOWN-NO-PID: out:
+$np_out"
+fi
+
+# ===========================================================================
+echo "TEST 27: zero claims is exit 0 and says so (an empty fleet is not a dead lane)"
+# ===========================================================================
+empty_origin="$T/origin-empty.git"
+empty_work="$T/work-empty"
+g init --bare -q "$empty_origin"
+g clone -q "$empty_origin" "$empty_work" 2>/dev/null
+(
+  cd "$empty_work" || exit 1
+  echo seed >seed.txt; g add seed.txt; g commit -qm seed; g push -q -u origin main
+)
+ze_out=$(cd "$empty_work" && bash "$HB" dead-lanes 2>&1)
+ze_rc=$?
+if [ "$ze_rc" -eq 0 ] && printf '%s\n' "$ze_out" | grep -qi 'no claims'; then
+  ok "dead-lanes on an empty fleet exits 0 and reports no claims (never a false dead-lane)"
+else
+  bad "zero claims must be exit 0 with a stated reason: rc=$ze_rc out:
+$ze_out"
+fi
+
+# ===========================================================================
+echo "TEST 28: dead-lanes is documented in --help, and rejects a stray argument"
+# ===========================================================================
+help_out=$(cd "$WORK" && bash "$HB" --help 2>&1 || true)
+if printf '%s\n' "$help_out" | grep -q 'dead-lanes'; then
+  ok "dead-lanes appears in --help (an undocumented subcommand is one nobody runs)"
+else
+  bad "dead-lanes must be documented in --help"
+fi
+# The message must come from dead-lanes ITSELF, not from the unknown-subcommand arm —
+# both exit 64, so asserting only the code would have passed before the subcommand existed.
+stray_out=$(cd "$WORK" && bash "$HB" dead-lanes extra-arg 2>&1)
+stray_rc=$?
+if [ "$stray_rc" -eq 64 ] \
+  && printf '%s\n' "$stray_out" | grep -q 'dead-lanes takes no arguments' \
+  && ! printf '%s\n' "$stray_out" | grep -q 'unknown subcommand'; then
+  ok "dead-lanes rejects a stray argument with exit 64 and its OWN diagnostic (not the unknown-subcommand arm)"
+else
+  bad "dead-lanes must reject a stray argument with its own exit-64 diagnostic: rc=$stray_rc out: $stray_out"
+fi
+
 echo
 echo "=== claim-heartbeat.sh: $PASS passed, $FAIL failed ==="
 [ "$FAIL" -eq 0 ]
