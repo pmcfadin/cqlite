@@ -256,10 +256,23 @@ fn the_cancel_bridge_is_one_way() {
 /// the sizing it comes from.
 #[test]
 fn the_exported_read_ahead_bounds_are_derived_from_the_real_buffer_sizes() {
+    // The batch size here is the MAXIMUM of the two arms', not either arm's own
+    // (roborev, issue #3384): the token-bounded arm re-chunks to
+    // QUERY_ROWS_PER_BATCH, but the full-ring arm forwards the inner stream's
+    // BATCH_EMIT_ROWS-capped batches verbatim, and a bound that must hold on both
+    // has to assume the larger. Using QUERY_ROWS_PER_BATCH here is what made the
+    // exported bound understate the full-ring arm by a factor of two.
+    let max_handoff_batch = BATCH_EMIT_ROWS.max(QUERY_ROWS_PER_BATCH);
     assert_eq!(
         QUERY_ROWS_MAX_RESIDENT_ROWS,
-        QUERY_ROWS_PER_BATCH * (QUERY_ROWS_CHANNEL_BATCHES + 1),
-        "the handoff-channel bound is channel-resident batches + the parked send"
+        max_handoff_batch * (QUERY_ROWS_CHANNEL_BATCHES + 1),
+        "the handoff-channel bound is channel-resident batches + the parked send, \
+         each sized by the LARGER arm's batch"
+    );
+    assert!(
+        max_handoff_batch >= BATCH_EMIT_ROWS,
+        "the full-ring arm forwards BATCH_EMIT_ROWS-sized batches unchanged, so the \
+         handoff term can never be smaller than one of them"
     );
     assert_eq!(
         QUERY_ROWS_FULL_SCAN_BUFFER_ROWS,
