@@ -58,26 +58,34 @@ Properties that make the observation mean something:
 
 ## Observed results
 
-Run at **`3fbe5d2dd`** — the head this PR ships — on the worker box, `CQLITE_DATASETS_ROOT=/data/datasets`.
-Harness elapsed **815 s** (8 runs: one clean and one planted per lane). **All four lanes fired**, and the
-harness verified its own invariant: `live-tree: UNCHANGED (verified: git status --porcelain AND HEAD
-identical to start)`.
+Run at **`37385a734`** — the head this PR ships — on the worker box, `CQLITE_DATASETS_ROOT=/data/datasets`.
+Harness elapsed **432 s** (8 runs: one clean and one planted per lane). **All four lanes fired**, and the
+harness verified its own invariant: `observed-commit: 37385a734e42e6aa111ff695bdad6bb0f0259f5d (captured
+at start; the throwaway copy was made from THIS sha)` and `live-tree: UNCHANGED (verified: git status
+--porcelain AND HEAD identical to start)`.
 
 | lane | planted break | clean tree | planted tree | attributed to |
 |------|---------------|-----------|--------------|---------------|
-| `feature-iso-parquet` | a `#[cfg(feature = "parquet")]` fn at the root of `cqlite-core/src/lib.rs` calling a `#[cfg(feature = "delta-scan")]` fn — compiles with both features on (clippy's ~30-feature cqlite-core arm), unresolved with parquet alone. #1978's class. | **PASS** (exit 3, 180 s) | **FAIL** (exit 1, 19 s) | `ah6_planted_delta_scan_marker` |
-| `feature-iso-delta-scan` | the mirror: a `#[cfg(feature = "delta-scan")]` fn calling a `#[cfg(feature = "parquet")]` fn. | **PASS** (exit 3, 124 s) | **FAIL** (exit 1, 18 s) | `ah6_planted_parquet_marker` |
-| `legacy-heuristics` | a **new** `cqlite-core/tests/ah6_planted_legacy.rs` holding a `#[cfg(feature = "legacy-heuristics")] #[test]` with an inverted assertion. | **PASS** (exit 3, 273 s) | **FAIL** (exit 1, 10 s) | `ah6_planted_legacy_heuristics_break` |
-| `flight-tests` | a **new** `#[cfg(test)]` unit-test module in `cqlite-flight/src/`, wired into `src/lib.rs`. | **PASS** (exit 3, 163 s) | **FAIL** (exit 1, 28 s) | `ah6_planted_flight_break` |
+| `feature-iso-parquet` | a `#[cfg(all(test, feature = "parquet"))]` fn at the root of `cqlite-core/src/lib.rs` calling a `#[cfg(all(test, feature = "delta-scan"))]` fn — compiles with both features on (clippy's ~30-feature cqlite-core arm), unresolved with parquet alone, and **invisible to `cargo check --lib`** because it is `cfg(test)`. #1978's class exactly. | **PASS** (exit 3, 77 s) | **FAIL** (exit 1, 20 s) | `ah6_planted_delta_scan_marker` |
+| `feature-iso-delta-scan` | the mirror: a `#[cfg(all(test, feature = "delta-scan"))]` fn calling a `#[cfg(all(test, feature = "parquet"))]` fn. | **PASS** (exit 3, 76 s) | **FAIL** (exit 1, 15 s) | `ah6_planted_parquet_marker` |
+| `legacy-heuristics` | a **new** `cqlite-core/tests/ah6_planted_legacy.rs` holding a `#[cfg(feature = "legacy-heuristics")] #[test]` with an inverted assertion. | **PASS** (exit 3, 138 s) | **FAIL** (exit 1, 8 s) | `ah6_planted_legacy_heuristics_break` |
+| `flight-tests` | a **new** `#[cfg(test)]` unit-test module in `cqlite-flight/src/`, wired into `src/lib.rs`. | **PASS** (exit 3, 68 s) | **FAIL** (exit 1, 28 s) | `ah6_planted_flight_break` |
 
-**This record was RE-TAKEN, and the reason is worth stating.** The C intent audit found the previous
-record — taken at `94833d510` — **unreproducible with the committed harness**: the `flight-tests` plant had
-since moved from a new `cqlite-flight/tests/*.rs` integration target to a `#[cfg(test)]` module under
-`src/`, because the lane's descope to `--lib --bins` means an integration-target plant can no longer fire.
-The old table was therefore evidence for a harness that no longer exists — a stale record, which on this
-issue of all issues is the defect rather than a clerical slip. It has been replaced wholesale by a run at
-the shipped head, and the harness now prints `observed-commit:` from the SHA it captured at start, so a
-future record cannot silently describe a different tree than the one it examined.
+**This record has been RE-TAKEN TWICE, and both re-takes were forced by a finding rather than by a
+refresh.** The first record, taken at `94833d510`, was found by the C intent audit to be
+**unreproducible with the committed harness**: the `flight-tests` plant had since moved from a new
+`cqlite-flight/tests/*.rs` integration target to a `#[cfg(test)]` module under `src/`, because the lane's
+descope to `--lib --bins` means an integration-target plant can no longer fire. That table was evidence
+for a harness that no longer existed — on this issue of all issues, a defect rather than a clerical slip.
+The second record (`3fbe5d2dd`, 815 s) was superseded when roborev round 19 and the C re-audit
+independently found that the two isolation plants **did not discriminate the instrument** (above), so the
+plants changed and the record had to be taken again. The table above is the run at the shipped head.
+
+The harness prints `observed-commit:` from the SHA it captured at start, so a record cannot silently
+describe a different tree than the one it examined — which is the mechanism that makes a stale record
+*visible* rather than merely forbidden. The pattern across three records is worth naming: **a changed
+plant invalidates the observation as surely as changed code does**, because the plant is half the
+experiment.
 
 ### The isolation plants were NOT DISCRIMINATING until round 19, and now they are (MEASURED)
 

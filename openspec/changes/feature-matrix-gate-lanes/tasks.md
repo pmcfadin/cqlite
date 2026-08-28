@@ -100,9 +100,11 @@
 ## 6. Observation + cost record (surface: `docs/reports/`)
 - [x] Record the harness run: all four lanes observed firing, per-lane planted break, and the negative
       direction. This is the AC2 deliverable —
-      `docs/reports/ah6-1699-feature-matrix-lanes.md` (observation RE-TAKEN at `3fbe5d2dd`, i.e. the shipped
-      tree — the earlier `94833d510` run predated the flight-tests plant moving and was no longer
-      reproducible with the committed harness; all four FIRED, each attributed to its planted symbol).
+      `docs/reports/ah6-1699-feature-matrix-lanes.md` (observation re-taken TWICE, now at `37385a734` =
+      the shipped tree, 432 s, all four FIRED and each attributed to its planted symbol; `94833d510`
+      predated the flight-tests plant moving, and `3fbe5d2dd` predated round 19 making the two isolation
+      plants DISCRIMINATE the instrument. A changed plant invalidates an observation as surely as changed
+      code does — the plant is half the experiment).
 - [ ] Record per-component durations from the full-gate SUMMARY.
 - [ ] Report the added full-gate wall time as `max(0, SIDE_total − MAIN_total)` from the gate of record's
       own per-component durations, and state that it was taken with build caches pruned SYMMETRICALLY.
