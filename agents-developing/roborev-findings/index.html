@@ -220,7 +220,13 @@ falling back to prose that verifies nothing. A tool’s structured record
 is a stronger source than its human-readable prose — the same principle that moved the push assert
 off the local <code dir="auto">origin/&#x3C;branch></code> mirror ref onto <code dir="auto">git ls-remote</code>. A range that does not match, a
 <strong>single-commit record even when it equals HEAD</strong>, or a scope that <em>equals the base ref</em>, <strong>aborts the
-round</strong>; base-equality is the signature of the
+round</strong>. The expected <strong>range base is the MERGE-BASE</strong> of <code dir="auto">&#x3C;base></code> and HEAD, never the base ref’s
+<strong>tip</strong> — <code dir="auto">&#x3C;base>...HEAD</code> <em>is</em> <code dir="auto">merge-base(&#x3C;base>, HEAD)..HEAD</code>, and an assert that expected the tip
+failed deterministically on a correct review of any branch whose <code dir="auto">main</code> had advanced past its branch
+point (#3392, misdiagnosed as a race twice). The tip is still read for the root-checkout signature
+alone, and the block prints an informational
+<code dir="auto">assert-base: &#x3C;merge-base> (merge-base of &#x3C;base> and HEAD; &#x3C;base> tip &#x3C;sha>)</code>; the absence waiver’s
+<code dir="auto">base=</code> field binds to that merge-base, so copy it from <code dir="auto">assert-base:</code>. base-equality is the signature of the
 worktree bug below. Also push first — an unpushed implementation commit is itself an empty-diff
 cause, and the wrapper asserts the push and FAILs otherwise. Which fields are asserted is the
 wrapper’s business — see its <code dir="auto">--help</code>.</p>
@@ -756,7 +762,9 @@ unreviewed code fleet-wide.</p>
 <p>The hermetic regression check cannot prove the real external binary honours <code dir="auto">--repo</code>. From a real
 <code dir="auto">issue-&#x3C;N>-*</code> worktree whose commit is pushed, while the root checkout sits on <code dir="auto">main</code>, run the wrapper and
 confirm the summary block’s <code dir="auto">sha-assert: PASS</code> beside a <strong><code dir="auto">reviewed-sha:</code> RANGE</strong> of the form
-<code dir="auto">&#x3C;base40>..&#x3C;head40></code> whose <strong>HEAD endpoint is the worktree branch’s HEAD</strong> and whose base is <code dir="auto">origin/main</code>.
+<code dir="auto">&#x3C;base40>..&#x3C;head40></code> whose <strong>HEAD endpoint is the worktree branch’s HEAD</strong> and whose base is
+<code dir="auto">git merge-base origin/main HEAD</code> — <strong>not</strong> <code dir="auto">git rev-parse origin/main</code>, which is the ref’s tip and equals
+the merge-base only while the branch is not behind (#3392). The block’s <code dir="auto">assert-base:</code> key names both.
 Because the sanctioned invocation reviews a range, <code dir="auto">reviewed-sha</code> is <strong>not</strong> a bare sha — do not test it for
 equality with <code dir="auto">head-sha</code>; compare the range’s head endpoint. A <code dir="auto">reviewed-sha</code> that is <code dir="auto">origin/main</code> alone
 means the explicit <code dir="auto">--repo</code> did not defeat the root-checkout resolution. It stays out of the gate because
