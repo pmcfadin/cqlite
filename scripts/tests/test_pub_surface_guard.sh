@@ -1702,8 +1702,8 @@ set -e
 [ "$c54b_rc" -eq 0 ] || fail_case "case 54(b) — a macro token tree containing a complete \`pub mod phantom;\` was read as a crate-root declaration. It emits no module; paren depth must exclude it; got: $(cat "$TMPROOT/case54b.out")"
 
 scratch_tree attr-comment-gap-still-detects; wt54c="$SCRATCH"
-printf '\n#[cfg(feature = "benchmarks")]\n/* c */\npub mod probe_oracle;\n' >>"$wt54c/cqlite-core/src/lib.rs"
-printf '#![cfg(feature = "benchmarks")]\n//! inner-gated while the crate root is UNCONDITIONAL\npub fn probe() {}\n' >"$wt54c/cqlite-core/src/probe_oracle.rs"
+printf '\n#[allow(dead_code)]\n/* a comment\n   spanning lines\n*/\npub mod probe_gapped;\n' >>"$wt54c/cqlite-core/src/lib.rs"
+printf '#![cfg(feature = "benchmarks")]\n//! inner-gated while the crate root is UNCONDITIONAL\npub fn p() {}\n' >"$wt54c/cqlite-core/src/probe_gapped.rs"
 set +e
 bash "$wt54c/$GUARD_REL" >"$TMPROOT/case54c.out" 2>&1
 c54c_rc=$?
