@@ -5004,12 +5004,19 @@ _wr_classify() {
   if [ "${_c_code:-0}" -gt 1 ]; then printf 'arity %s\n' "$_c_code"; return; fi
   if [ "${_c_mk:-0}" -eq 1 ]; then printf 'ok %s\n' "$_c_code"; return; fi
   if _wr_is_invocation "$_c_seg"; then printf 'ok %s\n' "$_c_code"; return; fi
-  case "$_c_seg" in
-    *"=$_wr_ref"|*"=$_wr_ref"' ')
-      _c_nm=${_c_seg%%=*}
-      _c_nm=${_c_nm#"${_c_nm%%[! ]*}"}
-      case " $_wr_aliases " in *" $_c_nm "*) printf 'ok %s\n' "$_c_code"; return ;; esac ;;
-  esac
+  # A SAVE IS THE WHOLE STATEMENT OR IT IS NOT A SAVE (roborev job 41). The test used to be a
+  # SUFFIX glob plus `${seg%%=*}`, which takes the text before the FIRST `=` on the line — so a
+  # compound statement whose first assignment happens to name an allowlisted alias vouched for a
+  # completely different one:
+  #   _wr_saved=x; subject="$WRAPPER"     -> `${seg%%=*}` is `_wr_saved`, accepted
+  # The read there is assigned to `subject`. Matched EXACTLY against the whole trimmed segment now,
+  # so nothing can share the line with a save. (Third instance of the same error in this file: a
+  # permitted shape found ANYWHERE standing in for the line BEING that shape.)
+  _c_trim=${_c_seg#"${_c_seg%%[! 	]*}"}
+  _c_trim=${_c_trim%"${_c_trim##*[! 	]}"}
+  for _c_a in $_wr_aliases; do
+    if [ "$_c_trim" = "$_c_a=$_wr_ref" ]; then printf 'ok %s\n' "$_c_code"; return; fi
+  done
   printf 'form %s\n' "$_c_code"
 }
 # THE WHOLE ENFORCEMENT PASS IS A FUNCTION, AND THE CONTROL RUNS *IT* OVER FIXTURES (reviewer B2,
@@ -5129,6 +5136,8 @@ _wr_fixture f_bracedef "_x=\$(grep -c foo \"\${$_wr_vname:-/tmp/x}\")"
 _wr_fixture f_fakeinv  "grep foo $_wr_ref # \$(bash $_wr_ref)"
 _wr_fixture f_evalasm  "_cmd='grep foo $_wr_ref'"
 _wr_fixture f_multiline "' \"\$ORACLES\" \"\$CHECKS_FILE\" $_wr_ref 2>/dev/null || true)"
+_wr_fixture f_cmpsave  "_wr_saved=x; subject=$_wr_ref"
+_wr_fixture f_cmpsave2 "_wr_saved=unused; grep pattern $_wr_ref"
 _wr_fixture f_ansic    "_x=\$'a\\'b'; grep -c z $_wr_ref"
 _wr_fixture f_marked   "_x=\$(grep -c foo $_wr_ref) # $_wr_marker: a reviewed opt-out"
 _wr_fixture f_mixed    "grep -c q $_wr_ref; ok 'mentions \$$_wr_vname'"
@@ -5156,6 +5165,8 @@ _wr_expect f_bracedef spelling
 _wr_expect f_fakeinv  form
 _wr_expect f_evalasm  prose
 _wr_expect f_multiline unbalanced
+_wr_expect f_cmpsave  form
+_wr_expect f_cmpsave2 form
 _wr_expect f_ansic    unbalanced
 _wr_expect f_marked   clean
 _wr_expect f_mixed    form
@@ -5166,7 +5177,7 @@ _wr_expect f_empty    empty
 # and the success message below prints counts from them.
 _wr_scan_file "$TEST_SELF"
 if [ -z "$_wr_ctl_bad" ]; then
-  ok 'structural control (#3367): the ENFORCEMENT PASS itself (classifier + dispatch) gives the correct verdict on all twenty-seven fixtures — it rejects the braced, unquoted, compound-line, unallowlisted-alias, mentions-the-word-bash quote-swallowed, marker-self-authorising and eval bypasses, refuses to let a marker waive a second read, reports a subjectless file as empty, and still accepts invocations, allowlisted saves, marked opt-outs, captured invocations and unmarked prose'
+  ok 'structural control (#3367): the ENFORCEMENT PASS itself (classifier + dispatch) gives the correct verdict on all twenty-nine fixtures — it rejects the braced, unquoted, compound-line, unallowlisted-alias, mentions-the-word-bash quote-swallowed, marker-self-authorising and eval bypasses, refuses to let a marker waive a second read, reports a subjectless file as empty, and still accepts invocations, allowlisted saves, marked opt-outs, captured invocations and unmarked prose'
 else
   bad "structural control (#3367): the enforcement pass misclassifies a fixture, so its verdict on the real file is not trustworthy —$_wr_ctl_bad"
 fi
