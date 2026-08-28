@@ -2,6 +2,9 @@
 //! keep that file inside the campsite-rule source target (#1116).
 
 use super::*;
+use crate::observability::otel_instruments::build_instruments;
+use opentelemetry::metrics::MeterProvider as _;
+use opentelemetry_sdk::metrics::SdkMeterProvider;
 
 #[test]
 fn init_disabled_returns_inert_guard() {
@@ -42,7 +45,10 @@ fn traceparent_valid_header_is_accepted() {
 // `histogram_for` / `gauge_for` in `otel.rs`), so "registered" means *this name
 // resolves to a live, pre-built instrument*, not *this name is mentioned in the
 // otel source*. A comment, a dead `let _ = catalog::X;`, or a deleted
-// registration cannot satisfy them.
+// registration cannot satisfy them. They resolve against an ISOLATED instrument
+// set built by the production `build_instruments` from a meter the test owns, so
+// they measure the real registration table without touching the process-global
+// `INSTRUMENTS`/`METER` `OnceLock`s — see `IsolatedInstruments` below.
 //
 // WHAT RESOLUTION ALONE CANNOT SEE, and why it no longer matters (#1705, F3):
 // `Some(instrument)` proves an instrument exists for a name, never that it is the
@@ -60,21 +66,63 @@ fn traceparent_valid_header_is_accepted() {
 // narrowed to the `Registry` registration calls for that reason.
 // ---------------------------------------------------------------------------
 
-/// How many of the three instrument kinds resolve `name` to a live instrument.
-fn resolved_kinds(name: &str) -> usize {
-    let i = instruments();
-    [
-        counter_for(i, name).is_some(),
-        histogram_for(i, name).is_some(),
-        gauge_for(i, name).is_some(),
-    ]
-    .into_iter()
-    .filter(|resolved| *resolved)
-    .count()
+/// An instrument set built from a meter this test OWNS (issue #1705).
+///
+/// # These guards must never call `instruments()`
+///
+/// `otel_instruments::instruments()` is a process-wide `OnceLock`, built from
+/// `otel::meter()` — itself a `OnceLock` over `global::meter(SCOPE)`. Both are
+/// one-shot, so whichever test touches them FIRST in a binary decides what the
+/// global meter is for the rest of the process. These guards install no meter
+/// provider (they have nothing to export and no reason to), so calling
+/// `instruments()` from here would bind the global meter to the NO-OP provider
+/// whenever this file happened to run first — and every later
+/// `testing::metrics_capture()` test in the same binary would then observe no
+/// metrics at all. That is an order-dependent failure, i.e. the worst kind.
+///
+/// Running the capture first would only ORDER around the hazard. Building against a
+/// locally-owned [`SdkMeterProvider`] REMOVES it: nothing here reads or writes any
+/// `OnceLock`, in any order, and the file needs no `observability-testing` feature.
+///
+/// What is measured is unchanged. `build_instruments` runs the same three
+/// `register_*` passes the production set is built from, so the registration table
+/// read here is exactly the one the emit path resolves through `counter_for` /
+/// `histogram_for` / `gauge_for` — the very functions called below.
+struct IsolatedInstruments {
+    /// Owns the metric pipeline the instruments were built against; held for the
+    /// lifetime of the guard so nothing observes a torn-down provider.
+    _provider: SdkMeterProvider,
+    instruments: Instruments,
+}
+
+impl IsolatedInstruments {
+    fn build() -> Self {
+        let provider = SdkMeterProvider::builder().build();
+        let meter = provider.meter(SCOPE);
+        let instruments = build_instruments(&meter);
+        Self {
+            _provider: provider,
+            instruments,
+        }
+    }
+
+    /// How many of the three instrument kinds resolve `name` to a live instrument.
+    fn resolved_kinds(&self, name: &str) -> usize {
+        let i = &self.instruments;
+        [
+            counter_for(i, name).is_some(),
+            histogram_for(i, name).is_some(),
+            gauge_for(i, name).is_some(),
+        ]
+        .into_iter()
+        .filter(|resolved| *resolved)
+        .count()
+    }
 }
 
 #[test]
 fn every_catalogued_metric_resolves_to_exactly_one_live_instrument_or_is_stats_only() {
+    let iso = IsolatedInstruments::build();
     let stats_only: std::collections::HashSet<&str> =
         catalog::STATS_ONLY_METRICS.iter().map(|m| m.name).collect();
     let mut unresolved = Vec::new();
@@ -82,7 +130,7 @@ fn every_catalogued_metric_resolves_to_exactly_one_live_instrument_or_is_stats_o
     let mut stats_only_but_wired = Vec::new();
 
     for name in catalog::ALL_METRICS {
-        let kinds = resolved_kinds(name);
+        let kinds = iso.resolved_kinds(name);
         if stats_only.contains(name) {
             if kinds != 0 {
                 stats_only_but_wired.push(*name);
@@ -115,6 +163,7 @@ fn every_catalogued_metric_resolves_to_exactly_one_live_instrument_or_is_stats_o
 
 #[test]
 fn an_unregistered_name_resolves_to_no_instrument() {
+    let iso = IsolatedInstruments::build();
     // The negative half: resolution is an affirmative measurement, so a name that
     // is not registered must fail to resolve. Without this, a resolver that
     // returned `Some` for everything would make the guard above vacuous.
@@ -125,15 +174,15 @@ fn an_unregistered_name_resolves_to_no_instrument() {
         "read.rows",
     ] {
         assert_eq!(
-            resolved_kinds(bogus),
+            iso.resolved_kinds(bogus),
             0,
             "{bogus:?} must not resolve to any dedicated instrument"
         );
     }
     // And a name that IS registered resolves — proving the probe can say yes.
-    assert_eq!(resolved_kinds(catalog::READ_ROWS), 1);
-    assert_eq!(resolved_kinds(catalog::READ_DURATION), 1);
-    assert_eq!(resolved_kinds(catalog::SSTABLES_OPEN), 1);
+    assert_eq!(iso.resolved_kinds(catalog::READ_ROWS), 1);
+    assert_eq!(iso.resolved_kinds(catalog::READ_DURATION), 1);
+    assert_eq!(iso.resolved_kinds(catalog::SSTABLES_OPEN), 1);
 }
 
 #[test]
@@ -143,7 +192,8 @@ fn every_live_instrument_is_catalogued_and_resolves_only_as_its_own_kind() {
     // `catalog_tests.rs` asserts the same thing about the SOURCE; this asserts it
     // about the live objects, so a registration the parser somehow misreads is still
     // caught here.
-    let i = instruments();
+    let iso = IsolatedInstruments::build();
+    let i = &iso.instruments;
     let catalogued: std::collections::HashSet<&str> =
         catalog::ALL_METRICS.iter().copied().collect();
     let live: Vec<(&str, &str)> = i
@@ -167,7 +217,7 @@ fn every_live_instrument_is_catalogued_and_resolves_only_as_its_own_kind() {
     // kinds (which would make `add_counter` and `record_gauge` disagree about it).
     for (kind, name) in &live {
         assert_eq!(
-            resolved_kinds(name),
+            iso.resolved_kinds(name),
             1,
             "{name} (registered as a {kind}) must resolve as exactly one kind"
         );

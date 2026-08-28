@@ -63,15 +63,15 @@ pub(super) struct Instruments {
 /// Each method mentions its `name` parameter twice — as the OTel instrument name
 /// and as the map key — but it is ONE value from ONE call site, so the two cannot
 /// diverge. This is the whole mechanism by which a mis-wire is unrepresentable.
-struct Registry {
-    meter: &'static Meter,
+struct Registry<'m> {
+    meter: &'m Meter,
     counters: HashMap<&'static str, Counter<u64>>,
     histograms: HashMap<&'static str, Histogram<f64>>,
     gauges: HashMap<&'static str, Gauge<i64>>,
 }
 
-impl Registry {
-    fn new(meter: &'static Meter) -> Self {
+impl<'m> Registry<'m> {
+    fn new(meter: &'m Meter) -> Self {
         Self {
             meter,
             counters: HashMap::new(),
@@ -122,19 +122,36 @@ impl Registry {
     }
 }
 
+/// Build a FRESH instrument set bound to `meter`, touching no process-global state.
+///
+/// The production path calls this once, through [`instruments`], with the global
+/// [`meter`]. Tests call it with a meter they own, so the registration guards in
+/// `otel_tests.rs` can measure the registration table WITHOUT resolving the
+/// `INSTRUMENTS`/`METER` `OnceLock`s (issue #1705): both are one-shot, so the first
+/// caller in a process permanently binds the global meter — a guard that called
+/// `instruments()` while no meter provider was installed would bind it to the NO-OP
+/// provider and blind every later `testing::metrics_capture()` test in the same
+/// binary. Supplying the meter removes that ordering hazard rather than ordering
+/// around it.
+///
+/// The instrument set is identical either way: the same three `register_*` passes
+/// run over it, so a guard reading an isolated set reads exactly the registrations
+/// the emit path resolves.
+pub(super) fn build_instruments(meter: &Meter) -> Instruments {
+    let mut reg = Registry::new(meter);
+    register_counters(&mut reg);
+    register_histograms(&mut reg);
+    register_gauges(&mut reg);
+    reg.build()
+}
+
 pub(super) fn instruments() -> &'static Instruments {
     static INSTRUMENTS: OnceLock<Instruments> = OnceLock::new();
-    INSTRUMENTS.get_or_init(|| {
-        let mut reg = Registry::new(meter());
-        register_counters(&mut reg);
-        register_histograms(&mut reg);
-        register_gauges(&mut reg);
-        reg.build()
-    })
+    INSTRUMENTS.get_or_init(|| build_instruments(meter()))
 }
 
 /// Counter registrations. One call per metric; the name is the map key.
-fn register_counters(reg: &mut Registry) {
+fn register_counters(reg: &mut Registry<'_>) {
     reg.counter(
         catalog::READ_ROWS,
         catalog::unit::ROWS,
@@ -364,7 +381,7 @@ fn register_counters(reg: &mut Registry) {
 }
 
 /// Histogram registrations.
-fn register_histograms(reg: &mut Registry) {
+fn register_histograms(reg: &mut Registry<'_>) {
     reg.histogram(
         catalog::READ_DURATION,
         catalog::unit::SECONDS,
@@ -428,7 +445,7 @@ fn register_histograms(reg: &mut Registry) {
 }
 
 /// Gauge registrations.
-fn register_gauges(reg: &mut Registry) {
+fn register_gauges(reg: &mut Registry<'_>) {
     reg.gauge(
         catalog::READ_PARTITION_ACCESS_SAMPLE_DENOMINATOR,
         catalog::unit::DIMENSIONLESS,
