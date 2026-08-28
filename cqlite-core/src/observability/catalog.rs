@@ -197,7 +197,7 @@ pub mod attr {
 
 /// `cqlite.read.rows` — counter `{row}`.
 ///
-/// Total rows materialised by the read path. On the Flight k-way merge scan
+/// Rows a read DELIVERED (see `ReadOpMeter`). On the Flight k-way merge scan
 /// (issue #2162) the delta is emitted incrementally during a long-running scan,
 /// at a bounded row threshold, so the counter climbs before the scan returns;
 /// the total is unchanged. That merge-scan emission is FORMAT-AGNOSTIC (carries

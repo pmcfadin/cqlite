@@ -199,6 +199,19 @@ impl ReadOpMeter {
     /// Account one delivered row, and a partition boundary when its key differs
     /// from the previous row's.
     ///
+    /// # `read.rows` counts rows this read DELIVERED, not every row decoded
+    ///
+    /// An ABANDONED stream reports the rows it polled plus the rows the producer had
+    /// already enqueued (the `Drop` drain). A row the producer was mid-`send` with when
+    /// the channel closed is NOT counted: it was decoded, then rejected and discarded,
+    /// so it never reached the consumer and could never have appeared in a result set
+    /// (issue #1701, roborev round 5). Counting it would let `read.rows` exceed the rows
+    /// the query could possibly have returned, which is the less useful of the two
+    /// errors. The residual is bounded by the channel's in-flight sends, not by the
+    /// backlog — that unbounded case was the round-2 defect, and closing this one means
+    /// accounting at the producer's materialization boundary through shared state, which
+    /// is a redesign of this seam rather than a fix to it.
+    ///
     /// # `read.partitions` counts partitions this read DELIVERED rows from
     ///
     /// Boundaries come from the keys of EMITTED rows, so a partition whose every row is
@@ -254,6 +267,24 @@ impl ReadOpMeter {
 
     /// Suppress this meter permanently: neither [`finish`](Self::finish) nor `Drop`
     /// will emit (issue #1701, roborev round 4).
+    ///
+    /// # KNOWN GAP a declining boundary leaves, stated rather than implied
+    ///
+    /// The declining attempt's own latency is EXCLUDED from the logical read: the
+    /// fallback path starts a fresh meter, so whatever the attempt spent — reader
+    /// resolution, candidate pruning, and for the reverse seam possibly a promoted-index
+    /// decode — is reported by nobody (issue #1701, roborev round 5). By the
+    /// entry-at-function rule (`manager_point_read`'s module doc) it SHOULD be counted:
+    /// excluding setup hides exactly the stall an operator hunts.
+    ///
+    /// Closing it means ONE meter owned by the common caller
+    /// (`query::select_executor::lookup`) and threaded into both attempts — the pattern
+    /// `stream_generations_for_read` now uses. Not done here: it changes a public-ish
+    /// manager signature with several callers and edits `storage/sstable/mod.rs`, which is
+    /// far over the campsite threshold, so it belongs in its own reviewed change rather
+    /// than a fifth review round of this one. Bounded meanwhile: a decline on the cheap
+    /// eligibility checks (static columns, non-fixed clustering) costs almost nothing;
+    /// only a decline past those carries real excluded latency.
     ///
     /// For a read boundary that may DECLINE the read and hand it to a different,
     /// ALREADY-METERED path. `Drop` emits, so simply returning would report a
