@@ -1221,6 +1221,8 @@ set -e
 [ "$case40_rc" -ne 0 ] || fail_case "case 40 — a RAW STRING in a declaration attribute leaked structural text into the meta-item parse and the guard passed GREEN. A flipped verdict EXEMPTS the module from inspection; got: $(cat "$TMPROOT/case40.out")"
 grep -qF "RAW STRING" "$TMPROOT/case40.out" \
   || fail_case "case 40 — the guard failed but NOT with the raw-string diagnostic, so it failed for another reason; got: $(cat "$TMPROOT/case40.out")"
+echo "OK (40): a RAW STRING in a crate-root declaration attribute makes the guard REFUSE rather than let leaked structure flip it to an EXEMPTING verdict"
+
 
 scratch_tree decl-path-decoy; wt41="$SCRATCH"
 printf '\n#[path = "probe_actual.rs"]\npub mod probe_decl;\n' >>"$wt41/cqlite-core/src/lib.rs"
@@ -1234,7 +1236,7 @@ set -e
 grep -qF 'path\` attribute' "$TMPROOT/case41.out" \
   || grep -qF "path" "$TMPROOT/case41.out" \
   || fail_case "case 41 — the guard failed but never named the \`path\` attribute as the cause; got: $(cat "$TMPROOT/case41.out")"
-echo "OK (40/41): a raw string, and a \`#[path]\` decoy, in a crate-root declaration attribute each make the guard REFUSE rather than exempt or read the wrong file"
+echo "OK (41): a \`#[path]\` declaration with a CLEAN DECOY at the standard path REFUSES rather than certify from the wrong file"
 
 # ---------------------------------------------------------------------------
 # 42. RED — a first-line SHEBANG hiding an inner gate (roborev r9 F3).
