@@ -800,14 +800,14 @@ expect_report_reject "an ABSENT flight perf CSV is FATAL (the arm has no setup l
 # not. The pre-fix `.get("cycles", 0)` could not tell these apart.
 d="$TMP/csv-no-cycles"; mkdir -p "$d"
 make_scan_rep "$d" warm 1 ok
-printf '4000000,,instructions,,,,\n' > "$d/perf-scan-warm-1-setup.csv"
+printf '4000000,,instructions,1000000000,100.00,2.000,insn per cycle\n' > "$d/perf-scan-warm-1-setup.csv"
 make_flight_rep "$d" warm 1 1 "$CORPUS_ROWS" ok
 expect_report_reject "a perf CSV with no 'cycles' line is FATAL, naming the missing event" \
   "no line for required event(s) cycles" "$d" "$TMP/corpus" warm bypass 1 1
 
 d="$TMP/csv-no-instructions"; mkdir -p "$d"
 make_scan_rep "$d" warm 1 ok
-printf '100000,,cycles,,,,\n' > "$d/perf-scan-warm-1-setup.csv"
+printf '100000,,cycles,1000000000,100.00,1.000,GHz\n' > "$d/perf-scan-warm-1-setup.csv"
 make_flight_rep "$d" warm 1 1 "$CORPUS_ROWS" ok
 expect_report_reject "a perf CSV with no 'instructions' line is FATAL (IPC has no numerator)" \
   "no line for required event(s) instructions" "$d" "$TMP/corpus" warm bypass 1 1
@@ -817,7 +817,7 @@ expect_report_reject "a perf CSV with no 'instructions' line is FATAL (IPC has n
 for marker in '<not counted>' '<not supported>'; do
   d="$TMP/csv-marker-$(tr -d ' <>' <<<"$marker")"; mkdir -p "$d"
   make_scan_rep "$d" warm 1 ok
-  printf '%s,,cycles,,,,\n200000,,instructions,,,,\n' "$marker" > "$d/perf-scan-warm-1-setup.csv"
+  printf '%s,,cycles,1000000000,100.00,1.000,GHz\n200000,,instructions,1000000000,100.00,2.000,insn per cycle\n' "$marker" > "$d/perf-scan-warm-1-setup.csv"
   make_flight_rep "$d" warm 1 1 "$CORPUS_ROWS" ok
   expect_report_reject "a perf '$marker' value is FATAL (perf did not count it)" \
     "perf did not count it" "$d" "$TMP/corpus" warm bypass 1 1
@@ -826,7 +826,7 @@ done
 # A corrupt value is a corrupt artifact, not a zero.
 d="$TMP/csv-garbage"; mkdir -p "$d"
 make_scan_rep "$d" warm 1 ok
-printf 'NaNsense,,cycles,,,,\n200000,,instructions,,,,\n' > "$d/perf-scan-warm-1-setup.csv"
+printf 'NaNsense,,cycles,1000000000,100.00,1.000,GHz\n200000,,instructions,1000000000,100.00,2.000,insn per cycle\n' > "$d/perf-scan-warm-1-setup.csv"
 make_flight_rep "$d" warm 1 1 "$CORPUS_ROWS" ok
 expect_report_reject "an unparseable perf value is FATAL (corrupt artifact, not a 0)" \
   "unparseable value" "$d" "$TMP/corpus" warm bypass 1 1

@@ -320,6 +320,15 @@ def positive_derived(label: str, value: float, detail: str = "") -> float:
 # past any session anyone would run (the recorded #3096 sessions used 3).
 MAX_COUNT = 100_000
 
+# Minimum share of the measurement window a perf counter must have been enabled for
+# (#3248). perf prints this as field 4 of `-x,` output. Anything below it means the PMU
+# multiplexed the event and perf SCALED the count to a full window, so the value is an
+# estimate. Set just under 100 rather than at it so ordinary floating-point printing
+# ("100.00") is accepted while any real time-sharing (which shows up as clearly
+# fractional shares like 62.50 or 33.33) is refused. There is deliberately no env var
+# that lowers this: an escape hatch on a measurement guard can only buy a wrong number.
+PERF_MIN_ENABLED_PCT = 99.9
+
 
 def cli_count(name: str, value: object) -> int:
     """A COMMAND-LINE count as an int in `1..MAX_COUNT`, or `Invalid`.
@@ -452,6 +461,21 @@ def read_perf_counters(
       negative `cycles`/`instructions`, then a negative setup-subtracted `ins`, then a
       negative IPC in `results.json`. Every value goes through `non_negative_int`, which
       also refuses `4.7` (a bare `int()` would truncate it to 4 and report that).
+    * a value that perf SCALED because the PMU MULTIPLEXED the event (#3248). This is the
+      fifth error and it was previously UNCHECKED: this parser read only fields 0 and 2
+      (count, event) and never field 4, perf's enabled-percentage. The docstring above
+      covers a counter that was not multiplexed IN — an absent line — but said nothing
+      about the opposite and more dangerous case, a line that IS present carrying an
+      ESTIMATE. When perf cannot fit every event on the available PMU counters it
+      time-shares them and scales the counts up to a full window, so the number looks
+      entirely ordinary and is wrong by whatever fraction the event was off. Nothing in
+      the artifact says so except that one column.
+
+      This mattered the moment `--events` became configurable (#3248 needs
+      `msr/aperf,msr/mperf,msr/tsc,ref-cycles` for the AC4 clock basis): growing the event
+      set is exactly what provokes multiplexing, so the guard is the PRECONDITION for the
+      flag, not an embellishment on it. A scaled `cycles` silently corrupts cycles/row,
+      IPC, and every setup-subtracted figure derived from it.
     """
     if not path.exists():
         raise Invalid(
@@ -469,6 +493,38 @@ def read_perf_counters(
         raw, event = fields[0].strip(), fields[2].strip()
         if not event:
             continue
+        # THE MULTIPLEXING CHECK (#3248). Field 4 is the percentage of the measurement
+        # window the counter was actually enabled for. Below 100% perf has SCALED the
+        # count, making it an estimate. Read affirmatively: an absent or unparseable
+        # percentage is an ERROR, never a permissive default, because "we could not tell
+        # whether this was scaled" and "this was not scaled" are different states and only
+        # one of them licenses using the number.
+        if len(fields) > 4:
+            raw_pct = fields[4].strip()
+            if raw_pct in PERF_NOT_A_VALUE:
+                raise Invalid(
+                    f"{label}: {path.name} line {lineno} event {event!r} carries no"
+                    " enabled-percentage, so whether perf scaled this count for"
+                    " multiplexing cannot be established. An unverifiable count is not a"
+                    " usable one."
+                )
+            try:
+                pct = float(raw_pct)
+            except ValueError:
+                raise Invalid(
+                    f"{label}: {path.name} line {lineno} event {event!r} has an"
+                    f" unparseable enabled-percentage {raw_pct!r}; cannot establish"
+                    " whether the count was scaled for multiplexing."
+                ) from None
+            if pct < PERF_MIN_ENABLED_PCT:
+                raise Invalid(
+                    f"{label}: {path.name} line {lineno} event {event!r} was enabled for"
+                    f" only {pct}% of the window (< {PERF_MIN_ENABLED_PCT}%), so perf"
+                    " MULTIPLEXED it and SCALED the reported count. That is an estimate,"
+                    " not a measurement, and every quantity derived from it inherits the"
+                    " error. Reduce the event set so all events fit the PMU, or measure"
+                    " them in separate runs."
+                )
         if raw in PERF_NOT_A_VALUE:
             raise Invalid(
                 f"{label}: {path.name} line {lineno} records event {event!r} as"
