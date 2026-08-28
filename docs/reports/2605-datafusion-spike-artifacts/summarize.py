@@ -26,10 +26,17 @@ if not runs:
     sys.exit("no cell results found under %s" % cells_dir)
 
 
+# `ArmKind` serialises with serde's snake_case rename, so `DataFusion` is
+# `data_fusion` on the wire. Named as a constant because getting this wrong
+# silently MERGED the two DataFusion parallelism configurations into one cell in
+# the first version of this script.
+DF_ARM = "data_fusion"
+
+
 def key(run):
     """Arm identity including the DataFusion parallelism it ran with."""
     arm = run["arm"]
-    if arm == "datafusion":
+    if arm == DF_ARM:
         return "datafusion@tp%s" % run.get("df_target_partitions")
     return arm
 
@@ -44,9 +51,13 @@ def med(values):
 
 print("## Per-cell results (median of %d iterations; [min, max])\n" % max(
     len(v) for v in groups.values()))
-hdr = ("| scenario | arm | wall s (median) | [min, max] | rows/s scanned "
-       "| batches | encode ms | merge ms | decompress ms | cold-fault ms "
-       "| grpc-write ms | peak RSS MiB | rows result |")
+# NOTE: no `grpc-write` column. That sub-phase counter is fed by PRODUCTION's
+# `ChannelSink`, not by the spike's `SpikeSink`, so it reads 0 here because it was
+# never instrumented — not because the channel send was free. Printing it would be
+# a fabricated zero.
+hdr = ("| scenario | arm | wall s (median) | [min, max] | rows emitted/s "
+       "| batches | encode ms | merge ms | decompress ms | cold-fault ms (sum "
+       "over 2 producer threads) | peak RSS MiB | rows result |")
 print(hdr)
 print("|" + "---|" * (hdr.count("|") - 1))
 for scenario in SCENARIOS:
@@ -59,7 +70,7 @@ for scenario in SCENARIOS:
             continue
         secs = [r["elapsed_nanos"] / 1e9 for r in rs]
         rss = [r["peak_rss_bytes"] for r in rs if r["peak_rss_bytes"] is not None]
-        print("| %s | %s | %.1f | [%.1f, %.1f] | %.0f | %d | %.0f | %.0f | %.0f | %.0f | %.0f | %s | %d |" % (
+        print("| %s | %s | %.1f | [%.1f, %.1f] | %.0f | %d | %.0f | %.0f | %.0f | %.0f | %s | %d |" % (
             scenario, arm, med(secs), min(secs), max(secs),
             med([r["rows_scanned"] / (r["elapsed_nanos"] / 1e9) for r in rs]),
             med([r["batches"] for r in rs]),
@@ -67,7 +78,6 @@ for scenario in SCENARIOS:
             med([r["subphase_merge_nanos"] / 1e6 for r in rs]),
             med([r["subphase_decompress_nanos"] / 1e6 for r in rs]),
             med([r["subphase_cold_fault_nanos"] / 1e6 for r in rs]),
-            med([r["subphase_grpc_write_nanos"] / 1e6 for r in rs]),
             ("%.1f" % (med(rss) / 1048576) if rss else "unmeasured"),
             med([r["rows_result"] for r in rs]),
         ))
@@ -84,7 +94,7 @@ for scenario in SCENARIOS:
     floor = m("floor")
     row = m("row_engine")
     df1 = m("datafusion@tp1")
-    dfd = next((m("datafusion@tp%d" % n) for n in range(2, 129)
+    dfd = next((m("datafusion@tp%d" % n) for n in range(2, 1025)
                 if groups.get((scenario, "datafusion@tp%d" % n))), None)
     push = m("row_pushdown")
     enc = m("floor", "subphase_encode_nanos", 1e9)
@@ -101,11 +111,22 @@ for scenario in SCENARIOS:
 print("\n## Preconditions (every run)\n")
 bad_sources = [r["_cell"] for r in runs if r["sources"] < 2]
 bad_arm = [r["_cell"] for r in runs if not r["merge_arm_observed"]]
-scanned = sorted({r["rows_scanned"] for r in runs})
 print("- runs: %d" % len(runs))
 print("- post-prune sources < 2: %s" % (bad_sources or "NONE"))
 print("- merge arm NOT observed: %s" % (bad_arm or "NONE"))
-print("- distinct rows_scanned across every run: %s" % scanned)
+
+# THE COMPARABILITY ASSERT. The harness enforces it WITHIN one process; in
+# per-cell mode each process sees one arm, so it must be enforced here instead —
+# otherwise nothing would notice the comparable arms reading different row sets,
+# which is the difference between an engine delta and a correctness delta.
+# `row_pushdown` is excluded BY DESIGN: its scan is narrowed, so it emits fewer
+# rows (that is what it is measuring).
+comparable = sorted({r["rows_scanned"] for r in runs if r["arm"] != "row_pushdown"})
+print("- rows_scanned across the COMPARABLE arms (floor/row_engine/datafusion): %s%s"
+      % (comparable, "" if len(comparable) == 1
+         else "  <-- FAIL: the comparable arms did not read the same rows"))
+push = sorted({r["rows_scanned"] for r in runs if r["arm"] == "row_pushdown"})
+print("- rows_scanned for row_pushdown (narrowed scan, expected to differ): %s" % push)
 print("- reconcile_entries range: %d..%d" % (
     min(r["reconcile_entries"] for r in runs),
     max(r["reconcile_entries"] for r in runs)))
