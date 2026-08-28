@@ -316,14 +316,33 @@ stress_gen() {  # $1 = generation label, $2 = partitions (seeds 1..$2)
 }
 
 # ------------------------------------------------------------- k-depth control --
-# Wait for the compaction queue to drain. A `nodetool compact` returns before the
-# obsoleted inputs are unlinked, so a Data.db count taken too early is a lie.
+# Wait for the compaction queue to drain. `nodetool compact` is itself blocking,
+# so this is confirmation, not the mechanism — but a Data.db count taken while an
+# unlink is still pending is a lie, so it is measured rather than assumed.
+#
+# Read from `nodetool tpstats` (CompactionExecutor Active/Pending), NOT from
+# `nodetool compactionstats`: Cassandra 5.0.2 prints "pending tasks       0" with
+# NO COLON, so the `/pending tasks:/` awk pattern this was first written with (and
+# that gen-perf-corpus-3068.sh still carries) matches NOTHING. Under a permissive
+# `${pending:-0}` default an unparseable output reads as "drained" — a vacuous
+# pass; under a fail-closed default it spins for the full timeout. Neither is a
+# measurement, so parse a format that yields two plain integers and treat an
+# unreadable one as fatal within a minute, naming the cause.
 wait_compactions() {
-  local pending
+  local raw unparsed=0
   for _ in $(seq 1 720); do
-    pending=$($DOCKER exec "$CONTAINER" nodetool compactionstats 2>/dev/null \
-      | awk '/pending tasks:/ {print $3; exit}')
-    [[ "${pending:-1}" == "0" ]] && { sleep 3; return 0; }
+    raw=$($DOCKER exec "$CONTAINER" nodetool tpstats 2>/dev/null \
+      | awk '$1 == "CompactionExecutor" { print $2 " " $3; exit }')
+    if [[ "$raw" =~ ^([0-9]+)\ ([0-9]+)$ ]]; then
+      unparsed=0
+      if [[ "${BASH_REMATCH[1]}" == "0" && "${BASH_REMATCH[2]}" == "0" ]]; then
+        sleep 3
+        return 0
+      fi
+    else
+      unparsed=$((unparsed + 1))
+      (( unparsed <= 12 )) || die "cannot read CompactionExecutor Active/Pending from nodetool tpstats after 12 consecutive polls (output format changed?) — refusing to guess whether compactions drained"
+    fi
     sleep 5
   done
   die "compactions did not drain within 3600s"
