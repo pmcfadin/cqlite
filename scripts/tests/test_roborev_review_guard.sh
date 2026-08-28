@@ -5002,7 +5002,28 @@ _WR_QS=$(cat <<'AWKEOF'
   # set, so `ok "\`grep \"a'b\" \"$WRAPPER\" \"c'd\"\`"` reproduced the same quote confusion and was
   # excused as prose. If a future shell grows a third, this line is where it goes.
   cs = (seg ~ /[$][(]/ || seg ~ /`/) ? 1 : 0
-  printf "%d %d %d %d %d %d %d\n%s\n", code, lit, q, mk, ev, bal, cs, seg
+  # A STATE-FREE COUNT over the WHOLE line, used only to detect that the stateful scan stopped early.
+  # A quoted `#` inside a command substitution -- `_x="$(printf " #"; grep -c foo "$WRAPPER")"` --
+  # makes the flat parser believe a comment started, so it BREAKS before the read and reports nothing
+  # at all. Comparing against a count that cannot be fooled by state is how that is caught.
+  # ESCAPES ARE HONOURED HERE TOO, though quote state is not. A backslash is lexically unambiguous —
+  # `\$WRAPPER` is never an expansion, in any context — whereas quote state is exactly what this
+  # counter exists not to trust. Ignoring escapes made every `bad "... \$WRAPPER ..."` diagnostic
+  # that also contains a $( ) look like a hidden read (measured: two false FAILs).
+  tot = 0; j = 1
+  while (j <= n) {
+    if (substr(line, j, 1) == "\\") { j += 2; continue }
+    if (substr(line, j, 1) == "$") {
+      r2 = substr(line, j)
+      if (match(r2, "^[$][{]" VN "[^A-Za-z0-9_]")) tot++
+      else if (match(r2, "^[$]" VN)) {
+        a2 = substr(r2, RLENGTH + 1, 1)
+        if (a2 !~ /[A-Za-z0-9_]/) tot++
+      }
+    }
+    j++
+  }
+  printf "%d %d %d %d %d %d %d %d\n%s\n", code, lit, q, mk, ev, bal, cs, tot, seg
 }
 AWKEOF
 )
@@ -5018,7 +5039,8 @@ _wr_classify() {
   _c_q=${_c_rest%% *}; _c_rest=${_c_rest#* }
   _c_mk=${_c_rest%% *}; _c_rest=${_c_rest#* }
   _c_ev=${_c_rest%% *}; _c_rest=${_c_rest#* }
-  _c_bal=${_c_rest%% *}; _c_cs=${_c_rest##* }
+  _c_bal=${_c_rest%% *}; _c_rest=${_c_rest#* }
+  _c_cs=${_c_rest%% *}; _c_tot=${_c_rest##* }
   # AN UNRELIABLE PARSE YIELDS NO VERDICT (reviewer). Checked FIRST: every field below is derived
   # from the same state machine, so if it ended the line inside a quote, none of them can be trusted.
   # DEFAULTS TO UNTRUSTWORTHY, not to balanced. This is the one field whose job is to say "do not
@@ -5032,6 +5054,11 @@ _wr_classify() {
   # permitted invocation while a SECOND, inside the substitution, is mis-paired into `lit` and never
   # judged at all — the arity rule counts only `code`, so it does not see it either. Inside `$( )`
   # the flat parse cannot be trusted about ANY occurrence, so no occurrence there may be excused.
+  # ...and an occurrence the stateful scan never reached, on a line carrying a substitution, means
+  # the parse stopped early (a quoted `#` read as a comment opener). Refuse rather than report none.
+  if [ "${_c_cs:-1}" -eq 1 ] && [ "${_c_tot:-0}" -gt $(( ${_c_code:-0} + ${_c_lit:-0} )) ]; then
+    printf 'substitution %s\n' "${_c_tot:-0}"; return
+  fi
   if [ "${_c_cs:-1}" -eq 1 ] && [ "${_c_lit:-0}" -gt 0 ]; then
     printf 'substitution %s\n' $(( ${_c_code:-0} + ${_c_lit:-0} )); return
   fi
@@ -5132,7 +5159,7 @@ _wr_scan_file() {
       *) _wr_unknown="$_wr_unknown${_wr_unknown:+; }${_wr_num_line%%:*}:<$_wr_v>" ;;
     esac
   done <<EOF
-$(grep -nE '[$][{]?'"$_wr_vname"'[}]?' "$_sf_file" | grep -vE '^[0-9]+:[[:space:]]*#')
+$(sed -e :a -e '/\\$/N; s/\\\n//; ta' "$_sf_file" | grep -nE '[$][{]?'"$_wr_vname"'[}]?' | grep -vE '^[0-9]+:[[:space:]]*#')
 EOF
   # ONE category, worst-first. `empty` is the affirmative-measurement case: no ACCEPTED occurrence
   # means the pass had no subject, which is never a clean verdict.
@@ -5301,7 +5328,14 @@ while IFS= read -r _wr_u; do
   # exempts ITSELF and scans the alias — the self-authorisation shape again, on the one check that
   # had not yet been converted. The scanner already computes this; ask it rather than re-deciding.
   _wr_umk=$(printf '%s\n' "$_wr_u" | awk -v VN="$_wr_vname" -v MK="$_wr_marker" "$_WR_QS" | head -1)
-  _wr_umk=${_wr_umk% *}; _wr_umk=${_wr_umk% *}; _wr_umk=${_wr_umk% *}; _wr_umk=${_wr_umk##* }
+  # Fields: code lit q mk ev bal cs tot -- strip the four after `mk`, then take the last. (Adding
+  # `tot` silently shifted this and marked the restore assert unmarked: a positional read of a
+  # widening record. Named extraction would be better; the count is asserted below instead.)
+  _wr_umk_n=$(printf '%s\n' "$_wr_umk" | tr ' ' '\n' | grep -c .)
+  if [ "${_wr_umk_n:-0}" -ne 8 ]; then
+    bad "structural (#3367): the quote scanner emits ${_wr_umk_n:-0} fields, not the 8 this extraction expects — a field was added or removed and every positional read of it is now wrong"
+  fi
+  _wr_umk=${_wr_umk% *}; _wr_umk=${_wr_umk% *}; _wr_umk=${_wr_umk% *}; _wr_umk=${_wr_umk% *}; _wr_umk=${_wr_umk##* }
   [ "${_wr_umk:-0}" -eq 1 ] && continue
   _wr_ut=${_wr_uc#"${_wr_uc%%[! ]*}"}
   _wr_is_restore=no
