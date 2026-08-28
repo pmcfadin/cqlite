@@ -180,7 +180,14 @@ roborev_check_prompt_content() {
       # never completed — is reached on a different path and is untouched by it. A `WAIVED` token
       # therefore always means "the census paths were absent and a named human accepted that", never
       # anything else.
-      roborev_absence_waiver_lookup "${BASE_SHA:-}" "${HEAD_SHA:-}" "${JOB:-}"
+      # BOUND TO THE MERGE-BASE, THE SAME BASE `sha-assert` COMPARES AGAINST (#3392). The scope
+      # is the REVIEWED RANGE, and that range is `merge-base..HEAD`; binding it to the base ref's
+      # TIP gave the waiver the identical staleness defect the assert had — a waiver written for a
+      # failing run went spuriously STALE on `--recheck-job` the moment the base ref advanced,
+      # which re-deadlettered the #3312 break-glass exactly when the fleet is busiest. Nothing is
+      # weakened: base AND head AND job are all still required and all still verified, and the
+      # base is now the one sha that actually identifies the reviewed range.
+      roborev_absence_waiver_lookup "${RANGE_BASE_SHA:-}" "${HEAD_SHA:-}" "${JOB:-}"
       WAIVER_REPORT="${ROBOREV_WAIVER_STATE}"
       if [ "$ROBOREV_WAIVER_STATE" = "granted" ]; then
         # A DISTINCT VERDICT TOKEN, deliberately not `PASS (waived …)`: every reader that greps
@@ -209,7 +216,7 @@ roborev_check_prompt_content() {
         # now lives ONLY in `--help`, which the requester has to go and read; nothing printed here can be
         # pasted into a grant. The anchoring and placeholder rules make a pasted block harmless anyway,
         # but this layer means the block never carries a live credential in the first place.
-        DETAILS+=("ERROR: prompt-content: ${#missing_paths[@]} of the ${#checked_paths[@]} CODE census paths appear on NEITHER side of any 'diff --git' header in the prompt actually sent to the reviewer, so nothing establishes that the reviewer received their diffs. The census is authoritative ($CENSUS for ${BASE}...HEAD); a diff that does not carry a file cannot have reviewed it. THE MACHINE CANNOT TELL WHY THEY ARE ABSENT — a diff roborev delivered by snapshot path and a vacuous review that received nothing look IDENTICAL from here, which is the accepted cost of not inferring delivery mode from injectable prompt text. If this absence is legitimate, the review's token accounting is the evidence a human weighs (genuine reviews measured 398k-649k input / 314k-554k cached; the vacuous baseline is ~18.7k input / 0 cached), and the OWNER or the COORDINATION LEAD may waive it for THIS review only (base ${BASE_SHA:-<unknown>}, head ${HEAD_SHA:-<unknown>}, job ${JOB:-<unknown>}) with a dedicated anchored PR-comment line. THE EXACT MARKER FORM IS DELIBERATELY NOT PRINTED HERE — run 'bash scripts/flow/roborev-review.sh --help' for it — because a summary block gets pasted into PR comments as a matter of course, and a block that carried a complete marker would authorize the next run by being quoted. Waiver state for this run: ${WAIVER_REPORT} (a well-formed marker from an author outside the waiver allowlist reports UNAUTHORIZED and does not grant). Absent paths (first 10):")
+        DETAILS+=("ERROR: prompt-content: ${#missing_paths[@]} of the ${#checked_paths[@]} CODE census paths appear on NEITHER side of any 'diff --git' header in the prompt actually sent to the reviewer, so nothing establishes that the reviewer received their diffs. The census is authoritative ($CENSUS for ${BASE}...HEAD); a diff that does not carry a file cannot have reviewed it. THE MACHINE CANNOT TELL WHY THEY ARE ABSENT — a diff roborev delivered by snapshot path and a vacuous review that received nothing look IDENTICAL from here, which is the accepted cost of not inferring delivery mode from injectable prompt text. If this absence is legitimate, the review's token accounting is the evidence a human weighs (genuine reviews measured 398k-649k input / 314k-554k cached; the vacuous baseline is ~18.7k input / 0 cached), and the OWNER or the COORDINATION LEAD may waive it for THIS review only (base ${RANGE_BASE_SHA:-<unknown>} — the merge-base of ${BASE} and HEAD, which is the base of the reviewed range and NOT the tip of ${BASE}, head ${HEAD_SHA:-<unknown>}, job ${JOB:-<unknown>}) with a dedicated anchored PR-comment line. THE EXACT MARKER FORM IS DELIBERATELY NOT PRINTED HERE — run 'bash scripts/flow/roborev-review.sh --help' for it — because a summary block gets pasted into PR comments as a matter of course, and a block that carried a complete marker would authorize the next run by being quoted. Waiver state for this run: ${WAIVER_REPORT} (a well-formed marker from an author outside the waiver allowlist reports UNAUTHORIZED and does not grant). Absent paths (first 10):")
       fi
       printed=0
       for census_path in "${missing_paths[@]}"; do

@@ -180,9 +180,11 @@ pub fn validate_config(py: Python<'_>, config: &Bound<'_, PyAny>) -> PyResult<bo
     Ok(true)
 }
 
-/// Parse a Python configuration value into a core Config.
+/// Parse a Python configuration value into a core Config, then validate it.
 ///
-/// The resulting config is automatically validated before returning.
+/// The resulting config is automatically validated before returning. A caller
+/// that must fold an override in BEFORE validation wants
+/// [`parse_config_from_py`] instead.
 ///
 /// # Arguments
 ///
@@ -207,6 +209,32 @@ pub fn config_from_py(
     py: Python<'_>,
     config: Option<&Bound<'_, PyAny>>,
 ) -> PyResult<cqlite_core::Config> {
+    let core_config = parse_config_from_py(py, config)?;
+
+    // Validate the parsed config before returning
+    core_config
+        .validate()
+        .map_err(|e| PyValueError::new_err(e.to_string()))?;
+
+    Ok(core_config)
+}
+
+/// Parse a Python configuration value into a core Config WITHOUT validating it.
+///
+/// Split out of [`config_from_py`] for the one caller that must fold a
+/// documented override into the config *before* it is judged (issue #1697,
+/// roborev r2): `cqlite.open`'s `flush_threshold` replaces
+/// `storage.memtable_size_threshold`, so validating the base first rejected a
+/// config that was invalid ONLY in the field the override was about to replace —
+/// a merged config that would have been perfectly valid.
+///
+/// Every other caller wants [`config_from_py`], which validates. This returns an
+/// UNVALIDATED config, so the caller owns validating the config it finally uses;
+/// returning one that is never validated is a bug.
+pub fn parse_config_from_py(
+    py: Python<'_>,
+    config: Option<&Bound<'_, PyAny>>,
+) -> PyResult<cqlite_core::Config> {
     let core_config = match config {
         None => cqlite_core::Config::default(),
         Some(obj) => {
@@ -224,7 +252,53 @@ pub fn config_from_py(
         }
     };
 
-    // Validate the parsed config before returning
+    Ok(core_config)
+}
+
+/// Assemble the public `Config` for `cqlite.open`: parse it, fold the optional
+/// `flush_threshold` override into it, then validate the MERGED result.
+///
+/// The ORDER is the point (#1697 roborev r2). Validation used to run on the BASE
+/// config, before the fold, so a config invalid ONLY in the field the override
+/// was about to replace was rejected even though the merged config was valid —
+/// e.g. a dict whose `storage.memtable_size_threshold` sits above the caller's
+/// `memtable_hard_limit`, passed together with a `flush_threshold` that brings it
+/// back under.
+///
+/// The override is folded into the config ITSELF rather than a clone handed to
+/// the write engine: after #1697 the public config is the single source of truth,
+/// so the read side must see the same effective threshold the engine runs on.
+///
+/// NOTE: `config_from_dict` deserializes into the full `cqlite_core::Config`,
+/// which is NOT `#[serde(default)]`, so `config` must be a COMPLETE config — a
+/// full dict, a full JSON string, or a preset; a partial dict is rejected with
+/// missing-field errors. To flip one switch, take a full dict from a preset
+/// (e.g. `cqlite.performance_optimized()`), set
+/// `["storage"]["compaction"]["auto_compaction"] = False`, then pass it.
+pub fn config_for_open(
+    py: Python<'_>,
+    config: Option<&Bound<'_, PyAny>>,
+    flush_threshold: Option<u64>,
+) -> PyResult<cqlite_core::Config> {
+    let mut core_config = parse_config_from_py(py, config)?;
+
+    if let Some(v) = flush_threshold {
+        // The ceiling check MUST compare against the CALLER's
+        // `memtable_hard_limit` — never `Config::default()`'s (#1697 roborev r1).
+        // Above the caller's ceiling, auto-flush never fires and admission
+        // rejects first: the write path dead-ends permanently (roborev 2885).
+        // Kept alongside the merged `validate()` below because it names the
+        // OVERRIDE and both operands, where the core error names only the two
+        // config fields.
+        let hard_limit = core_config.storage.memtable_hard_limit;
+        if v > hard_limit {
+            return Err(PyValueError::new_err(format!(
+                "flush_threshold ({v} bytes) must not exceed the memtable hard limit ({hard_limit} bytes)"
+            )));
+        }
+        core_config.storage.memtable_size_threshold = v;
+    }
+
     core_config
         .validate()
         .map_err(|e| PyValueError::new_err(e.to_string()))?;

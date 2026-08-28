@@ -138,7 +138,7 @@ fn register_counters(reg: &mut Registry) {
     reg.counter(
         catalog::READ_ROWS,
         catalog::unit::ROWS,
-        "Total rows materialised by the read path.",
+        "Rows a read delivered to its consumer.",
     );
     reg.counter(
         catalog::READ_BYTES,

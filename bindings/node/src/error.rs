@@ -10,42 +10,59 @@
 //! - `category`: Category name from ErrorCategory (e.g., "System", "Schema")
 //! - `isRecoverable`: Boolean indicating if the error is recoverable
 //!
-//! # Error Code Mapping
+//! # Error Code Mapping — the shared FFI error contract (issue #1451)
 //!
-//! | Rust Category | JS Code | JS Message Prefix |
-//! |---------------|---------|-------------------|
-//! | System | `IO` | `IoError:` |
-//! | Schema | `SCHEMA` | `SchemaError:` |
-//! | Query | `QUERY` | `QueryError:` |
-//! | Data | `PARSE` | `ParseError:` |
-//! | Configuration | `CONFIG` | `ValueError:` |
-//! | Storage | `STORAGE` | (original) |
-//! | NotFound | `NOT_FOUND` | (original) |
-//! | Logic | `INVALID_INPUT` | `RuntimeError:` |
-//! | Concurrency | `CONCURRENCY` | (original) |
-//! | Conflict | `CONFLICT` | (original) |
-//! | Constraint | `CONSTRAINT` | (original) |
-//! | Transaction | `TRANSACTION` | (original) |
-//! | Platform | `PLATFORM` | (original) |
-//! | Internal | `INTERNAL` | (original) |
-//! | Cancelled | `CANCELLED` | `CancelledError:` (issue #2264 — never `IO`) |
+//! `code`/`category`/`isRecoverable`/prefix all come from
+//! `cqlite_core::ffi_error_contract`, the ONE authoritative table that
+//! `bindings/python` reads too, keyed **by `Error` variant**. This binding used
+//! to derive its code from `Error::category()`, which made the same core error
+//! a different thing in each binding: `CqlParse` reported `QUERY` here while
+//! Python raised `ParseError`, and `Timeout`/`Memory` both collapsed into `IO`
+//! while Python raised `TimeoutError`/`MemoryError`.
+//!
+//! | Rust variant | JS code | JS message prefix |
+//! |--------------|---------|-------------------|
+//! | `Io`, `InvalidPath` | `IO` | `IoError:` |
+//! | `Schema`, `Table` | `SCHEMA` | `SchemaError:` |
+//! | `QueryExecution`, `UnsupportedQuery`, `ResultTooLarge`, `ForcedReadPathUnavailable` | `QUERY` | `QueryError:` |
+//! | `CqlParse`, `Corruption`, `Serialization`, `Parse`, `TypeConversion`, `InvalidFormat`, `UnsupportedFormat`, `UnsupportedVersion`, `UnsupportedCommitLogVersion`, `CorruptCommitLogFrame` | `PARSE` | `ParseError:` |
+//! | `Configuration`, `InvalidReadPath` | `CONFIG` | `ValueError:` |
+//! | `InvalidInput` | `INVALID_INPUT` | `ValueError:` |
+//! | `InvalidState`, `InvalidOperation` | `INVALID_INPUT` | `RuntimeError:` |
+//! | `Timeout` | `TIMEOUT` | `TimeoutError:` |
+//! | `Memory` | `MEMORY` | `MemoryError:` |
+//! | `Storage`, `Index`, `Compaction` | `STORAGE` | (original) |
+//! | `NotFound` | `NOT_FOUND` | (original) |
+//! | `Concurrency`, `WriteDirLocked` | `CONCURRENCY` | (original) |
+//! | `AlreadyExists` | `CONFLICT` | (original) |
+//! | `ConstraintViolation` | `CONSTRAINT` | (original) |
+//! | `Transaction` | `TRANSACTION` | (original) |
+//! | `Wasm` | `PLATFORM` | (original) |
+//! | `Internal` | `INTERNAL` | (original) |
+//! | `Cancelled` | `CANCELLED` | `CancelledError:` (issue #2264 — never `IO`) |
 //!
 //! # Example
 //!
+//! The statement below is malformed *in the CQL grammar* (a `SELECT` with no
+//! table), so it reaches the parser and fails there — that is what `PARSE`
+//! means. A statement whose leading token is not a known verb (`"INVALID SQL"`)
+//! never reaches the parser: it is rejected earlier as `Error::QueryExecution`
+//! and correctly reports `QUERY`, not `PARSE`.
+//!
 //! ```javascript
 //! try {
-//!   await db.execute("INVALID SQL");
+//!   await db.execute("SELECT * FROM");
 //! } catch (e) {
-//!   console.log(e.code);          // "PARSE" or "QUERY"
-//!   console.log(e.category);      // "Query" or "Data"
+//!   console.log(e.code);          // "PARSE" (a CQL syntax failure)
+//!   console.log(e.category);      // "Query"
 //!   console.log(e.isRecoverable); // false
 //!   if (e.code === "PARSE") {
-//!     console.log("SQL syntax error");
+//!     console.log("CQL syntax error");
 //!   }
 //! }
 //! ```
 
-use cqlite_core::error::ErrorCategory;
+use cqlite_core::ffi_error_contract::contract_for;
 use cqlite_core::Error;
 
 /// Error metadata extracted from a cqlite_core::Error.
@@ -64,68 +81,28 @@ pub struct ErrorMetadata {
     pub message: String,
 }
 
-/// Convert ErrorCategory to a string code for JavaScript.
+/// Extract error metadata from a `cqlite_core::Error`.
 ///
-/// Maps the 14 ErrorCategory variants to simplified string codes
-/// matching the M4 spec requirements.
-pub fn category_to_code(category: ErrorCategory) -> &'static str {
-    match category {
-        ErrorCategory::System => "IO",
-        ErrorCategory::Data => "PARSE",
-        ErrorCategory::Schema => "SCHEMA",
-        ErrorCategory::Query => "QUERY",
-        ErrorCategory::Configuration => "CONFIG",
-        ErrorCategory::Storage => "STORAGE",
-        ErrorCategory::Concurrency => "CONCURRENCY",
-        ErrorCategory::NotFound => "NOT_FOUND",
-        ErrorCategory::Conflict => "CONFLICT",
-        ErrorCategory::Logic => "INVALID_INPUT",
-        ErrorCategory::Constraint => "CONSTRAINT",
-        ErrorCategory::Transaction => "TRANSACTION",
-        ErrorCategory::Platform => "PLATFORM",
-        ErrorCategory::Internal => "INTERNAL",
-        // Issue #2264: a cooperative cancellation gets its OWN code — it must
-        // never fall through to (or be confused with) `IO`, a genuine
-        // transport/filesystem failure.
-        ErrorCategory::Cancelled => "CANCELLED",
-    }
-}
-
-/// Get the message prefix for an error category.
-fn category_to_prefix(category: ErrorCategory) -> Option<&'static str> {
-    match category {
-        ErrorCategory::System => Some("IoError"),
-        ErrorCategory::Schema => Some("SchemaError"),
-        ErrorCategory::Query => Some("QueryError"),
-        ErrorCategory::Data => Some("ParseError"),
-        ErrorCategory::Configuration => Some("ValueError"),
-        ErrorCategory::Logic => Some("RuntimeError"),
-        ErrorCategory::Cancelled => Some("CancelledError"),
-        // Other categories don't have special prefixes
-        _ => None,
-    }
-}
-
-/// Extract error metadata from a cqlite_core::Error.
-///
-/// This provides all the structured information needed for the JavaScript error.
+/// Every field comes from the error's row in the shared FFI error contract
+/// (`cqlite_core::ffi_error_contract`), looked up **by variant** — never
+/// re-derived from `Error::category()`, which cannot distinguish `CqlParse`
+/// from a generic query failure or a `Timeout` from an I/O failure (issue
+/// #1451). `bindings/python` reads the same row, so the two bindings cannot
+/// drift apart; to change how a variant surfaces, edit the table.
 pub fn extract_metadata(err: &Error) -> ErrorMetadata {
-    let category = err.category();
-    let code = category_to_code(category);
-    let category_name = category.to_string();
-    let is_recoverable = err.is_recoverable();
+    let row = contract_for(err);
     let original_message = err.to_string();
 
-    // Format message with prefix if applicable
-    let message = match category_to_prefix(category) {
+    // Format message with the row's prefix if it has one.
+    let message = match row.message_prefix {
         Some(prefix) => format!("{prefix}: {original_message}"),
         None => original_message,
     };
 
     ErrorMetadata {
-        code,
-        category: category_name,
-        is_recoverable,
+        code: row.node_code,
+        category: row.category.to_string(),
+        is_recoverable: row.recoverable,
         message,
     }
 }
@@ -270,18 +247,7 @@ fn panic_message(payload: &(dyn std::any::Any + Send)) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn test_category_to_code() {
-        assert_eq!(category_to_code(ErrorCategory::System), "IO");
-        assert_eq!(category_to_code(ErrorCategory::Schema), "SCHEMA");
-        assert_eq!(category_to_code(ErrorCategory::Query), "QUERY");
-        assert_eq!(category_to_code(ErrorCategory::Data), "PARSE");
-        assert_eq!(category_to_code(ErrorCategory::Configuration), "CONFIG");
-        assert_eq!(category_to_code(ErrorCategory::Storage), "STORAGE");
-        assert_eq!(category_to_code(ErrorCategory::NotFound), "NOT_FOUND");
-        assert_eq!(category_to_code(ErrorCategory::Logic), "INVALID_INPUT");
-    }
+    use cqlite_core::ffi_error_contract::FfiErrorVariant;
 
     #[test]
     fn test_io_error_metadata() {
@@ -359,16 +325,19 @@ mod tests {
         assert!(napi_err.reason.contains("code=QUERY"));
     }
 
+    /// Issue #1451: a CQL syntax failure is `PARSE`, not the generic `QUERY`
+    /// bucket its Query category used to put it in — matching the Python
+    /// binding, which has always raised `ParseError` for this variant.
     #[test]
     fn test_cql_parse_error_mapping() {
         let rust_err = Error::CqlParse("syntax error at position 42".to_string());
         let napi_err = to_napi_error(rust_err);
 
-        // CqlParse has Query category (not Data), so it gets QueryError prefix
-        assert!(napi_err.reason.contains("QueryError:"));
+        assert!(napi_err.reason.contains("ParseError:"));
         assert!(napi_err.reason.contains("syntax error"));
-        assert!(napi_err.reason.contains("code=QUERY"));
+        assert!(napi_err.reason.contains("code=PARSE"));
         assert!(napi_err.reason.contains("category=Query"));
+        assert!(!napi_err.reason.contains("code=QUERY"));
     }
 
     #[test]
@@ -380,34 +349,43 @@ mod tests {
         assert!(napi_err.reason.contains("code=CONFIG"));
     }
 
+    /// Issue #1451: bad caller input is `INVALID_INPUT`, not the `PARSE` code
+    /// that belongs to a genuine CQL parse failure (Python raises `ValueError`
+    /// for this variant, so the prefix says `ValueError:` too).
     #[test]
     fn test_invalid_input_error_mapping() {
         let rust_err = Error::InvalidInput("bad input".to_string());
         let napi_err = to_napi_error(rust_err);
 
-        // InvalidInput has Data category, which maps to ParseError prefix
-        assert!(napi_err.reason.contains("ParseError:"));
-        assert!(napi_err.reason.contains("code=PARSE"));
+        assert!(napi_err.reason.contains("ValueError:"));
+        assert!(napi_err.reason.contains("code=INVALID_INPUT"));
+        assert!(!napi_err.reason.contains("code=PARSE"));
     }
 
+    /// Issue #1451: a deadline gets its OWN code. It used to collapse into `IO`
+    /// via the System category, while Python raised `TimeoutError`.
     #[test]
     fn test_timeout_error_mapping() {
         let rust_err = Error::Timeout("operation timed out".to_string());
         let napi_err = to_napi_error(rust_err);
 
-        // Timeout has System category
-        assert!(napi_err.reason.contains("IoError:"));
-        assert!(napi_err.reason.contains("code=IO"));
+        assert!(napi_err.reason.contains("TimeoutError:"));
+        assert!(napi_err.reason.contains("code=TIMEOUT"));
+        assert!(napi_err.reason.contains("category=System"));
+        assert!(!napi_err.reason.contains("code=IO"));
     }
 
+    /// Issue #1451: an allocation failure gets its OWN code. It used to collapse
+    /// into `IO` via the System category, while Python raised `MemoryError`.
     #[test]
     fn test_memory_error_mapping() {
         let rust_err = Error::Memory("out of memory".to_string());
         let napi_err = to_napi_error(rust_err);
 
-        // Memory has System category
-        assert!(napi_err.reason.contains("IoError:"));
-        assert!(napi_err.reason.contains("code=IO"));
+        assert!(napi_err.reason.contains("MemoryError:"));
+        assert!(napi_err.reason.contains("code=MEMORY"));
+        assert!(napi_err.reason.contains("category=System"));
+        assert!(!napi_err.reason.contains("code=IO"));
     }
 
     #[test]
@@ -447,7 +425,9 @@ mod tests {
         let rust_err = Error::Corruption("data corrupted".to_string());
         let napi_err = to_napi_error(rust_err);
 
-        // Corruption has Data category, which maps to ParseError
+        // Corruption keeps the Data-shaped `PARSE` code and `ParseError:` prefix
+        // (issue #1451 pins this row: Python has no closer class than the base
+        // CqliteError, and Node has no closer code than PARSE).
         assert!(napi_err.reason.contains("data corrupted"));
         assert!(napi_err.reason.contains("code=PARSE"));
     }
@@ -475,144 +455,177 @@ mod tests {
         assert!(napi_err.reason.contains("isRecoverable=false"));
     }
 
-    /// Compile-time completeness check for error variant mapping.
+    /// The JS code each core variant is EXPECTED to surface as — a hand-written
+    /// restatement of the shared contract's `node_code` column.
     ///
-    /// This test ensures all `cqlite_core::Error` variants are accounted for.
-    /// If a new variant is added to the core Error enum, this will fail to compile.
-    #[test]
-    fn test_error_mapping_completeness() {
-        fn verify_all_variants_documented(err: &Error) {
-            match err {
-                // Explicitly mapped variants with category
-                Error::Io(_) => {
-                    assert_eq!(err.category(), ErrorCategory::System);
-                }
-                Error::Schema(_) => {
-                    assert_eq!(err.category(), ErrorCategory::Schema);
-                }
-                Error::Table(_) => {
-                    assert_eq!(err.category(), ErrorCategory::Schema);
-                }
-                Error::QueryExecution(_) => {
-                    assert_eq!(err.category(), ErrorCategory::Query);
-                }
-                // Byte-bounded result budget (issue #1582): Query category,
-                // maps to the "QUERY" JS code via category().
-                Error::ResultTooLarge { .. } => {
-                    assert_eq!(err.category(), ErrorCategory::Query);
-                }
-                Error::UnsupportedQuery(_) => {
-                    assert_eq!(err.category(), ErrorCategory::Query);
-                }
-                // Issue #1918: read-path forcing knob errors. `InvalidReadPath`
-                // is Configuration-category; the fail-closed `point` error is
-                // Query-category. Both flow through `category()` like the rest.
-                Error::InvalidReadPath { .. } => {
-                    assert_eq!(err.category(), ErrorCategory::Configuration);
-                }
-                Error::ForcedReadPathUnavailable { .. } => {
-                    assert_eq!(err.category(), ErrorCategory::Query);
-                }
-                Error::CqlParse(_) => {
-                    // CqlParse is Query category in cqlite-core
-                    assert_eq!(err.category(), ErrorCategory::Query);
-                }
-                Error::Configuration(_) => {
-                    assert_eq!(err.category(), ErrorCategory::Configuration);
-                }
-                Error::InvalidInput(_) => {
-                    assert_eq!(err.category(), ErrorCategory::Data);
-                }
-                Error::Timeout(_) => {
-                    assert_eq!(err.category(), ErrorCategory::System);
-                }
-                Error::Memory(_) => {
-                    assert_eq!(err.category(), ErrorCategory::System);
-                }
-                Error::InvalidState(_) => {
-                    assert_eq!(err.category(), ErrorCategory::Logic);
-                }
-                // Issue #2264: a cooperative cancellation must classify as
-                // `Cancelled` — NEVER `System` (which `category_to_code` maps
-                // to the misleading "IO" JS code).
-                Error::Cancelled => {
-                    assert_eq!(err.category(), ErrorCategory::Cancelled);
-                    assert_eq!(category_to_code(err.category()), "CANCELLED");
-                }
-
-                // All other variants are handled by category
-                Error::Serialization { .. } => {}
-                Error::Corruption(_) => {}
-                Error::InvalidFormat(_) => {}
-                Error::UnsupportedFormat(_) => {}
-                Error::UnsupportedVersion { .. } => {}
-                // CommitLog reader (#2389) — not bound yet (v1 is library+CLI only),
-                // same Data-category handling as the sibling SSTable-format errors above.
-                Error::UnsupportedCommitLogVersion { .. } => {}
-                Error::CorruptCommitLogFrame(_) => {}
-                Error::InvalidPath(_) => {}
-                Error::TypeConversion(_) => {}
-                Error::Storage(_) => {}
-                Error::Concurrency(_) => {}
-                Error::NotFound(_) => {}
-                Error::AlreadyExists(_) => {}
-                Error::InvalidOperation(_) => {}
-                Error::ConstraintViolation(_) => {}
-                Error::Transaction(_) => {}
-                Error::Index(_) => {}
-                Error::Compaction(_) => {}
-                Error::Internal(_) => {}
-                Error::Parse(_) => {}
-
-                // Write-dir lock conflict — Concurrency category, maps to CONCURRENCY code
-                Error::WriteDirLocked { .. } => {
-                    assert_eq!(err.category(), ErrorCategory::Concurrency);
-                }
-
-                #[cfg(target_arch = "wasm32")]
-                Error::Wasm(_) => {}
+    /// Two guards in one:
+    ///
+    /// 1. **Compile-time completeness.** The match is exhaustive over
+    ///    `cqlite_core::Error`, so adding a variant to the core enum fails to
+    ///    compile here until the JS identity is reviewed.
+    /// 2. **Content.** `test_error_mapping_completeness` asserts the shared
+    ///    table (and the metadata `extract_metadata` actually emits) agrees with
+    ///    this independent statement, so an accidental edit to the table's
+    ///    `node_code` column fails HERE instead of reaching users.
+    ///
+    /// Note the codes are decided BY VARIANT (issue #1451), which is why several
+    /// variants sharing one `ErrorCategory` no longer have to share one code:
+    /// `Timeout`/`Memory`/`Io` are all `System`, and `CqlParse`/`QueryExecution`
+    /// are both `Query`.
+    fn expected_node_code(err: &Error) -> &'static str {
+        match err {
+            Error::Io(_) | Error::InvalidPath(_) => "IO",
+            Error::Schema(_) | Error::Table(_) => "SCHEMA",
+            Error::QueryExecution(_)
+            | Error::UnsupportedQuery(_)
+            // Byte-bounded result budget (issue #1582) and the forced-read-path
+            // fail-closed error (issue #1918) are both query-shaped.
+            | Error::ResultTooLarge { .. }
+            | Error::ForcedReadPathUnavailable { .. } => "QUERY",
+            // A real CQL parse failure — and the data-shaped errors that share
+            // the parse identity because JS has no closer code for them.
+            Error::CqlParse(_)
+            | Error::Corruption(_)
+            | Error::Serialization { .. }
+            | Error::Parse(_)
+            | Error::TypeConversion(_)
+            | Error::InvalidFormat(_)
+            | Error::UnsupportedFormat(_)
+            | Error::UnsupportedVersion { .. }
+            // CommitLog reader (#2389) — not bound yet (v1 is library+CLI only).
+            | Error::UnsupportedCommitLogVersion { .. }
+            | Error::CorruptCommitLogFrame(_) => "PARSE",
+            // Query execution budget elapsed (issue #1695): the SAME `TIMEOUT` code as
+            // its sibling `Timeout`, so a JS caller checking for `TIMEOUT` catches
+            // both. Deliberately NOT `QUERY`, even though its `ErrorCategory` IS
+            // `Query` — #1451's whole point is that codes are decided BY VARIANT, so
+            // the classify category and the JS code are separate axes. Python maps the
+            // same variant to the builtin `TimeoutError`, which is the cross-binding
+            // agreement the shared table exists to enforce.
+            Error::QueryTimeout { .. } => "TIMEOUT",
+            Error::Configuration(_) | Error::InvalidReadPath { .. } => "CONFIG",
+            Error::InvalidInput(_) | Error::InvalidState(_) | Error::InvalidOperation(_) => {
+                "INVALID_INPUT"
             }
-        }
+            Error::Timeout(_) => "TIMEOUT",
+            Error::Memory(_) => "MEMORY",
+            Error::Storage(_) | Error::Index(_) | Error::Compaction(_) => "STORAGE",
+            Error::NotFound(_) => "NOT_FOUND",
+            Error::Concurrency(_) | Error::WriteDirLocked { .. } => "CONCURRENCY",
+            Error::AlreadyExists(_) => "CONFLICT",
+            Error::ConstraintViolation(_) => "CONSTRAINT",
+            Error::Transaction(_) => "TRANSACTION",
+            Error::Internal(_) => "INTERNAL",
+            // Issue #2264: a cooperative cancellation gets its OWN code — never
+            // the misleading "IO" of a genuine transport/filesystem failure.
+            Error::Cancelled => "CANCELLED",
 
-        // Exercise the exhaustive match
-        let test_errors = vec![
-            Error::Io(std::io::Error::new(std::io::ErrorKind::NotFound, "test")),
-            Error::Schema("test".to_string()),
-            Error::Corruption("test".to_string()),
-            Error::Cancelled,
-        ];
-
-        for err in &test_errors {
-            verify_all_variants_documented(err);
-            // Also verify extract_metadata works
-            let _ = extract_metadata(err);
+            #[cfg(target_arch = "wasm32")]
+            Error::Wasm(_) => "PLATFORM",
         }
     }
 
+    /// Every core variant emits the documented code — in the shared contract AND
+    /// in the metadata this binding actually attaches to the JS error.
     #[test]
-    fn test_all_error_categories_have_codes() {
-        // Verify every ErrorCategory maps to a code
-        let categories = [
-            ErrorCategory::System,
-            ErrorCategory::Data,
-            ErrorCategory::Schema,
-            ErrorCategory::Query,
-            ErrorCategory::Configuration,
-            ErrorCategory::Storage,
-            ErrorCategory::Concurrency,
-            ErrorCategory::NotFound,
-            ErrorCategory::Conflict,
-            ErrorCategory::Logic,
-            ErrorCategory::Constraint,
-            ErrorCategory::Transaction,
-            ErrorCategory::Platform,
-            ErrorCategory::Internal,
-            ErrorCategory::Cancelled,
+    fn test_error_mapping_completeness() {
+        let mut checked = 0usize;
+        for &variant in FfiErrorVariant::ALL {
+            let Some(err) = variant.sample_error() else {
+                // Only `Wasm` lacks a representative value off wasm32.
+                assert_eq!(variant, FfiErrorVariant::Wasm);
+                continue;
+            };
+            let expected = expected_node_code(&err);
+            let row = contract_for(&err);
+            assert_eq!(
+                row.node_code, expected,
+                "shared contract row {} emits {}, this binding documents {}",
+                row.variant, row.node_code, expected
+            );
+
+            let metadata = extract_metadata(&err);
+            assert_eq!(metadata.code, expected, "metadata code for {}", row.variant);
+            assert_eq!(
+                metadata.category,
+                err.category().to_string(),
+                "metadata category for {}",
+                row.variant
+            );
+            assert_eq!(
+                metadata.is_recoverable,
+                err.is_recoverable(),
+                "metadata isRecoverable for {}",
+                row.variant
+            );
+            // The ORIGINAL core message always survives, prefix or not.
+            assert!(
+                metadata.message.contains(&err.to_string()),
+                "metadata message for {} must contain the core message",
+                row.variant
+            );
+            checked += 1;
+        }
+        let expected_checked =
+            FfiErrorVariant::ALL.len() - if cfg!(target_arch = "wasm32") { 0 } else { 1 };
+        assert_eq!(
+            checked, expected_checked,
+            "every contract row except Wasm (off wasm32) must be exercised"
+        );
+    }
+
+    /// Every row emits a non-empty code, and the metadata encoding the JS
+    /// wrapper parses survives for every one of them.
+    #[test]
+    fn test_every_row_encodes_parseable_metadata() {
+        for &variant in FfiErrorVariant::ALL {
+            let Some(err) = variant.sample_error() else {
+                continue;
+            };
+            let row = contract_for(&err);
+            assert!(!row.node_code.is_empty());
+            let napi_err = to_napi_error(err);
+            assert!(
+                napi_err
+                    .reason
+                    .contains(&format!("\0code={}", row.node_code)),
+                "row {} must encode its code for the JS wrapper",
+                row.variant
+            );
+            assert!(napi_err.reason.contains("\0category="));
+            assert!(napi_err.reason.contains("\0isRecoverable="));
+        }
+    }
+
+    /// The four cross-binding divergences issue #1451 fixes, pinned as a table.
+    #[test]
+    fn test_pinned_contract_rows() {
+        let cases = [
+            (Error::cql_parse("bad syntax"), "PARSE", Some("ParseError")),
+            (
+                Error::invalid_input("bad argument"),
+                "INVALID_INPUT",
+                Some("ValueError"),
+            ),
+            (
+                Error::Timeout("deadline exceeded".to_string()),
+                "TIMEOUT",
+                Some("TimeoutError"),
+            ),
+            (
+                Error::memory("allocation failed"),
+                "MEMORY",
+                Some("MemoryError"),
+            ),
+            (Error::corruption("torn page"), "PARSE", Some("ParseError")),
         ];
 
-        for category in categories {
-            let code = category_to_code(category);
-            assert!(!code.is_empty(), "Category {category:?} should have a code");
+        for (err, code, prefix) in cases {
+            let row = contract_for(&err);
+            assert_eq!(row.node_code, code, "node_code for {}", row.variant);
+            assert_eq!(row.message_prefix, prefix, "prefix for {}", row.variant);
+            let metadata = extract_metadata(&err);
+            assert_eq!(metadata.code, code);
         }
     }
 }

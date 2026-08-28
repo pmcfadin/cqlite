@@ -429,6 +429,206 @@ else
 fi
 
 # ==========================================================================
+# §26 — `expected_boundary_labels` REFUSES an implausible product (#3393)
+# ==========================================================================
+# Unbounded, this function materializes the whole temps x reps x arms product as a list, and
+# `ws0_pin_boundary_observations` then materializes a SECOND list of JSON strings over it plus the
+# joined string — ~three resident copies. On 2026-08-27/28 that reached 20-28 GB RSS and the kernel
+# issued 14 global OOM kills across two 30 GB workers, wedging sshd (a box that cannot fork cannot
+# accept an ssh session) and silently killing five sibling lane sessions.
+#
+# BOTH DIRECTIONS are pinned, because a cap tested only in its refusing direction is how a guard
+# ships that reds correct input — the failure mode this rig has recorded repeatedly. The FIRST cut of
+# this guard shipped exactly that: a flat 100,000, which refuses `--reps 100000` even though
+# `positive_int` accepts it up to `MAX_COUNT`. So the green direction is asserted AT THE ACCEPTED
+# MAXIMUM and not merely at a small sweep — a green case below the cap cannot see that gap, which is
+# why the first version passed its own tests.
+
+labels_probe() {
+  python3 - "$PERF_DIR" "$1" "${2-warm}" "${3-bypass}" <<'PY' 2>&1
+import sys
+sys.path.insert(0, sys.argv[1])
+from ws0_boundary_observations import expected_boundary_labels
+from ws0_validate import Invalid
+temps = sys.argv[3].split()
+arms = [a for a in sys.argv[4].split() if a]
+try:
+    out = expected_boundary_labels(temps, arms, int(sys.argv[2]))
+    print(f"BUILT {len(out)}")
+except Invalid as exc:
+    print(f"REFUSED {exc}")
+except Exception as exc:                      # noqa: BLE001 - the point is to NAME a wrong type
+    print(f"WRONGTYPE {type(exc).__name__}: {exc}")
+PY
+}
+
+real_out="$(labels_probe 3)"
+if [[ "$real_out" == "BUILT 6" ]]; then
+  pass "OBSERVED (#3393, GREEN direction): a real configuration still builds — 1 temp x 3 reps x (scan+bypass) = 6 labels, so the cap cannot red a legitimate sweep"
+else
+  fail "#3393: a real configuration must still build 6 labels (got: $real_out)"
+fi
+
+# THE ACCEPTED MAXIMUM, which is the case a flat cap gets wrong. The driver's `--temp`/`--arm`
+# vocabularies are closed (warm|cold, bypass|merge) and `--reps` is accepted up to
+# `ws0_validate.MAX_COUNT`, so the widest product any ACCEPTED invocation can ask for is
+# 2 x (scan+2) x MAX_COUNT. Every one of those must BUILD: refusing here would refuse a session the
+# driver and the reporter both validate as fine, and refuse it at REPORT time, after the measurement
+# has already been paid for.
+accepted_max="$(python3 - "$PERF_DIR" <<'PY' 2>&1
+import sys
+sys.path.insert(0, sys.argv[1])
+from ws0_validate import MAX_COUNT
+print(2 * 3 * MAX_COUNT)
+PY
+)"
+max_out="$(labels_probe "$(python3 -c 'import sys; sys.path.insert(0, sys.argv[1]); from ws0_validate import MAX_COUNT; print(MAX_COUNT)' "$PERF_DIR")" "warm cold" "bypass merge")"
+if [[ "$max_out" == "BUILT $accepted_max" ]]; then
+  pass "OBSERVED (#3393, GREEN direction AT THE ACCEPTED MAXIMUM): the widest matrix the rig accepts — 2 temps x (scan+2 arms) x MAX_COUNT reps = $accepted_max labels — still BUILDS, so no configuration the driver validates can be refused here"
+else
+  fail "#3393: the accepted maximum ($accepted_max labels) must still build (got: ${max_out:0:200})"
+fi
+
+# NON-VACUITY of the case above: the FLAT 100,000 cap this guard first shipped REFUSES that same
+# accepted maximum. Re-enacted by lowering the shipped constant rather than by describing it, so the
+# claim "a flat cap reds accepted input" is measured and not asserted.
+flat_out="$(python3 - "$PERF_DIR" <<'PY' 2>&1
+import sys
+sys.path.insert(0, sys.argv[1])
+import ws0_boundary_observations as m
+from ws0_validate import Invalid, MAX_COUNT
+m.MAX_EXPECTED_BOUNDARIES = 100_000          # the pre-fix flat cap
+try:
+    m.expected_boundary_labels(["warm", "cold"], ["bypass", "merge"], MAX_COUNT)
+    print("BUILT")
+except Invalid:
+    print("REFUSED")
+PY
+)"
+if [[ "$flat_out" == "REFUSED" ]]; then
+  pass "NON-VACUITY (#3393): the pre-fix FLAT 100,000 cap REFUSES the accepted maximum — so the derived cap is load-bearing and the green case above is a real regression guard, not a restatement"
+else
+  fail "#3393: the flat-cap re-enactment must refuse the accepted maximum, or the derived cap proves nothing (got: $flat_out)"
+fi
+
+# THE CAP IS DERIVED, not chosen — asserted by reading BOTH sides, the way `lib-args.sh`'s MAX_COUNT
+# is pinned against `ws0_validate.MAX_COUNT`. `TEMPS_ALLOWED`/`ARMS_ALLOWED` live in `ws0_report.py`,
+# which IMPORTS this module, so the constant cannot import them back without a cycle; this check is
+# what keeps the two spellings honest instead.
+drift_out="$(python3 - "$PERF_DIR" <<'PY' 2>&1
+import sys
+sys.path.insert(0, sys.argv[1])
+from ws0_boundary_observations import MAX_ARMS, MAX_EXPECTED_BOUNDARIES, MAX_TEMPS
+from ws0_report import ARMS_ALLOWED, TEMPS_ALLOWED
+from ws0_validate import MAX_COUNT
+problems = []
+if MAX_TEMPS != len(TEMPS_ALLOWED):
+    problems.append(f"MAX_TEMPS {MAX_TEMPS} != len(TEMPS_ALLOWED) {len(TEMPS_ALLOWED)}")
+if MAX_ARMS != 1 + len(ARMS_ALLOWED):
+    problems.append(f"MAX_ARMS {MAX_ARMS} != 1+len(ARMS_ALLOWED) {1 + len(ARMS_ALLOWED)}")
+if MAX_EXPECTED_BOUNDARIES != MAX_TEMPS * MAX_ARMS * MAX_COUNT:
+    problems.append(f"cap {MAX_EXPECTED_BOUNDARIES} is not MAX_TEMPS*MAX_ARMS*MAX_COUNT")
+print("DERIVED" if not problems else "DRIFT " + "; ".join(problems))
+PY
+)"
+if [[ "$drift_out" == "DERIVED" ]]; then
+  pass "OBSERVED (#3393): the cap is DERIVED from the reporter's own closed vocabularies and MAX_COUNT — MAX_TEMPS == len(TEMPS_ALLOWED), MAX_ARMS == 1+len(ARMS_ALLOWED), cap == their product — so raising the accepted bound cannot silently re-open the gap"
+else
+  fail "#3393: the cap must stay derived from TEMPS_ALLOWED/ARMS_ALLOWED/MAX_COUNT (got: $drift_out)"
+fi
+
+# The RED direction, JUST ABOVE the cap — the tight edge, so the boundary is pinned on both sides and
+# not merely somewhere between 6 and ten million.
+over_out="$(labels_probe "$(python3 -c 'import sys; sys.path.insert(0, sys.argv[1]); from ws0_validate import MAX_COUNT; print(MAX_COUNT + 1)' "$PERF_DIR")" "warm cold" "bypass merge")"
+if [[ "$over_out" == REFUSED* ]] && grep -q 'implausible boundary product' <<<"$over_out"; then
+  pass "OBSERVED (#3393, RED direction at the TIGHT EDGE): one rep ABOVE the accepted maximum REFUSES, so the cap is pinned on both sides"
+else
+  fail "#3393: one rep above the accepted maximum must refuse (got: ${over_out:0:200})"
+fi
+
+absurd_out="$(labels_probe 10000000)"
+if [[ "$absurd_out" == REFUSED* ]] \
+   && grep -q 'implausible boundary product' <<<"$absurd_out" \
+   && grep -q '3393' <<<"$absurd_out"; then
+  pass "OBSERVED (#3393, RED direction): an absurd product REFUSES with the count, the cap and the issue named, instead of allocating ~28 GB and being OOM-killed"
+else
+  fail "#3393: an absurd product must refuse, naming the product and the cap (got: $absurd_out)"
+fi
+
+# A REFUSAL, never a truncation: a silently-truncated expected set would report every missing
+# boundary as the operator's fault, which is exactly what `boundary_label`'s docstring warns about.
+if grep -q 'REFUSED' <<<"$absurd_out" && ! grep -q '^BUILT' <<<"$absurd_out"; then
+  pass "OBSERVED (#3393): the oversize path REFUSES rather than truncating, so a short expected set can never be blamed on the operator"
+else
+  fail "#3393: the oversize path must refuse, not truncate (got: $absurd_out)"
+fi
+
+# A NEGATIVE reps is refused too, and as the SAME exception type — the product arithmetic would
+# otherwise read as a harmless 0 and return an EMPTY expected set, i.e. a session that owed nothing.
+neg_out="$(labels_probe -1)"
+if [[ "$neg_out" == REFUSED* ]] && grep -q 'reps must be >= 0' <<<"$neg_out"; then
+  pass "OBSERVED (#3393): a NEGATIVE reps is refused as Invalid rather than yielding an EMPTY expected set (a session that owed no boundaries at all)"
+else
+  fail "#3393: a negative reps must refuse (got: $neg_out)"
+fi
+
+# THE EXCEPTION TYPE IS PART OF THE CONTRACT (#3393). `ws0_report.py` funnels every fail-closed
+# decision through ONE `except Invalid` -> `FATAL:` exit path. A refusal raised as a bare `ValueError`
+# escapes that handler and reaches the operator as an uncaught traceback — a rig defect wearing the
+# costume of a crash. The first cut of this guard raised `ValueError`; `labels_probe` prints
+# `WRONGTYPE` for anything that is not `Invalid`, so all three RED cases above would name it.
+if ! grep -q 'WRONGTYPE' <<<"$absurd_out$over_out$neg_out"; then
+  pass "OBSERVED (#3393): every refusal here is Invalid — the ONE exception ws0_report.py catches — so it lands on the reporter's single FATAL: exit path and never on a traceback"
+else
+  fail "#3393: the refusal must be Invalid, not another exception type (got: ${absurd_out:0:120} / ${over_out:0:120} / ${neg_out:0:120})"
+fi
+
+# NON-VACUITY of the check above: `Invalid` is NOT a `ValueError`, so the pre-fix `raise ValueError`
+# genuinely escaped `except Invalid` — the traceback was real and not a theoretical concern.
+esc_out="$(python3 - "$PERF_DIR" <<'PY' 2>&1
+import sys
+sys.path.insert(0, sys.argv[1])
+from ws0_validate import Invalid
+print("ESCAPES" if not issubclass(Invalid, ValueError) else "CAUGHT")
+PY
+)"
+handler_catches=$(grep -c 'except Invalid as exc:' "$REPORT")
+if [[ "$esc_out" == "ESCAPES" ]] && [ "$handler_catches" -ge 1 ]; then
+  pass "NON-VACUITY (#3393): ws0_report.py catches Invalid and Invalid is NOT a subclass of ValueError — so the pre-fix raise ValueError really did escape the reporter's only handler"
+else
+  fail "#3393: Invalid must not be a ValueError subclass and the reporter must catch Invalid (esc=$esc_out, handlers=$handler_catches)"
+fi
+
+# ...and END-TO-END THROUGH THE SHIPPED REPORTER, because the two checks above are about types and a
+# type assertion cannot show what an operator sees. A manifest at `--reps MAX_COUNT` — a count
+# `positive_int` ACCEPTS — must reach the reporter's normal refusal path: a single `FATAL:` line, NO
+# traceback, and NOT the implausible-product refusal. Pre-fix, the flat cap raised `ValueError` from
+# under `build_report` and this same session produced a traceback instead.
+make_corpus "$TMP/corpus-cap"
+mkdir -p "$TMP/rec-cap"
+(
+  # shellcheck disable=SC2034  # consumed by make_scan_rep via dynamic scope, as in boundary_record_session
+  WS0_SCAN_CORPUS="$TMP/corpus-cap"
+  for r in 1 2; do
+    make_scan_rep "$TMP/rec-cap" warm "$r" ok
+    make_flight_rep "$TMP/rec-cap" warm "$r" ok "$GOOD_FLIGHT"
+  done
+  ws0_pin_session_corpus "$TMP/rec-cap" "$TMP/corpus-cap" \
+    "$(python3 -c 'import sys; sys.path.insert(0, sys.argv[1]); from ws0_validate import MAX_COUNT; print(MAX_COUNT)' "$PERF_DIR")" \
+    warm bypass 1
+)
+cap_out=$(python3 "$REPORT" --dir "$TMP/rec-cap" --corpus "$TMP/corpus-cap" 2>&1)
+cap_rc=$?
+if [ "$cap_rc" -ne 0 ] \
+   && [ "$(grep -c '^FATAL:' <<<"$cap_out")" -eq 1 ] \
+   && ! grep -q 'Traceback' <<<"$cap_out" \
+   && ! grep -q 'implausible boundary product' <<<"$cap_out"; then
+  pass "OBSERVED (#3393, END-TO-END through ws0_report.py): a session declaring the ACCEPTED --reps MAX_COUNT reaches the reporter's normal refusal — exactly one FATAL: line, no traceback, and no implausible-product refusal (rc=$cap_rc)"
+else
+  fail "#3393: an accepted --reps MAX_COUNT session must reach a normal FATAL: refusal with no traceback and no product refusal (rc=$cap_rc, fatals=$(grep -c '^FATAL:' <<<"$cap_out"), traceback=$(grep -c 'Traceback' <<<"$cap_out"), product=$(grep -c 'implausible boundary product' <<<"$cap_out"))"
+fi
+
+# ==========================================================================
 # A MINIMUM CHECK COUNT, because `set -uo pipefail` carries no `-e`
 # ==========================================================================
 # Without `-e` a block that silently never executes LOWERS the count and registers NO failure, and
@@ -436,7 +636,7 @@ fi
 # and reports SUCCESS. That is the suite-level vacuous green, one level up from the checks.
 #
 # The floor is DERIVED FROM THE OBSERVED COUNT — run, then recorded — never counted off the source.
-MIN_CHECKS=13
+MIN_CHECKS=24
 if [ "$checks" -lt "$MIN_CHECKS" ]; then
   echo
   echo "FAIL - only $checks check(s) ran; this suite has at least $MIN_CHECKS."

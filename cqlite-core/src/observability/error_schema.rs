@@ -23,6 +23,7 @@
 //! | `Query`        | `query`          | `QueryExecution`, `UnsupportedQuery`, `InvalidInput`,             |
 //! |                |                  | `ResultTooLarge`, `ForcedReadPathUnavailable`, `InvalidReadPath`  |
 //! | `Cancelled`    | `cancelled`      | `Cancelled` (issue #2264 — a cooperative abort, never `Io`)       |
+//! | `Timeout`      | `timeout`        | `QueryTimeout` (issue #1695 — an operator budget, never data)     |
 //! | `Other`        | `other`          | `Configuration`, `InvalidState`, `InvalidOperation`, `NotFound`,  |
 //! |                |                  | `Internal`, `Wasm` (`wasm32` builds only)                         |
 //!
@@ -90,6 +91,12 @@ pub enum ErrorCategory {
     /// separately from genuine errors — a cancelled `do_get` is an expected
     /// outcome, not a fault.
     Cancelled,
+    /// A query exceeded its configured execution budget
+    /// (`query.max_execution_time`, issue #1695). Its OWN bucket, never
+    /// `Corruption` (an operator-imposed deadline is not damaged data) and never
+    /// the `Other` catch-all (a rising timeout rate is the signal that the budget
+    /// is too tight or a scan has regressed — the one thing dashboards must see).
+    Timeout,
     /// Everything else: configuration, invalid state/operation, not-found,
     /// internal, platform. NOT a catch-all — [`classify`] names every `Error`
     /// variant explicitly, so a new variant lands here only when a human puts it
@@ -112,6 +119,7 @@ impl ErrorCategory {
             ErrorCategory::Constraints => "constraints",
             ErrorCategory::Query => "query",
             ErrorCategory::Cancelled => "cancelled",
+            ErrorCategory::Timeout => "timeout",
             ErrorCategory::Other => "other",
         }
     }
@@ -128,6 +136,7 @@ impl ErrorCategory {
         ErrorCategory::Constraints,
         ErrorCategory::Query,
         ErrorCategory::Cancelled,
+        ErrorCategory::Timeout,
         ErrorCategory::Other,
     ];
 }
@@ -180,6 +189,11 @@ pub(crate) fn classify(err: &Error) -> ErrorCategory {
         // Issue #2264: a cooperative cancellation is an expected outcome, not a
         // fault — kept out of both `Io` and the generic `Other` bucket.
         Error::Cancelled => ErrorCategory::Cancelled,
+
+        // Issue #1695: an elapsed `query.max_execution_time` budget. Its own
+        // bucket so it is never indistinguishable from `Corruption` on a
+        // dashboard, and never buried in `Other`.
+        Error::QueryTimeout { .. } => ErrorCategory::Timeout,
 
         // The remaining variants, each named EXPLICITLY. This is not a catch-all
         // and there is no wildcard arm anywhere in this match, so a newly-added

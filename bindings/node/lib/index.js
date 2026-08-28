@@ -24,7 +24,7 @@
  */
 
 const nativeBinding = require('../index.js');
-const { createWrappedDatabase } = require('./error-wrapper.js');
+const { createWrappedDatabase, enhanceError } = require('./error-wrapper.js');
 
 /**
  * PreparedStatement wraps a native PreparedStatement with type consistency.
@@ -95,8 +95,53 @@ const Database = createWrappedDatabase(nativeBinding.Database, wrapPreparedState
 // Re-export version function
 const { version } = nativeBinding;
 
+/**
+ * Test-support: throw the JS error the shared FFI error contract maps a named
+ * core Rust `Error` variant to (issue #1451).
+ *
+ * Goes through the production native mapping and the same `enhanceError`
+ * wrapper every `Database` method uses, so the thrown error carries the real
+ * `code`/`category`/`isRecoverable`. This is how the test suite reaches variants
+ * no query can provoke (`Timeout`, `Memory`). The Python binding's twin is
+ * `cqlite._raise_mapped_core_error`.
+ *
+ * Not part of the stable public API — the leading underscore marks it internal
+ * test support.
+ *
+ * @private
+ * @param {string} variant - Core `Error` variant identifier, e.g. 'Timeout'
+ * @throws {Error} Always; the mapped error for `variant`.
+ */
+function _errorContractProbe(variant) {
+  try {
+    return nativeBinding.errorContractProbe(variant);
+  } catch (error) {
+    throw enhanceError(error);
+  }
+}
+
+/**
+ * Test-support: the distinct `code` values the shared FFI error contract can
+ * emit (issue #1451), sorted and deduplicated.
+ *
+ * The authoritative set comes from the Rust contract table, so the `ErrorCode`
+ * union in `index.d.ts` can be asserted against it instead of against a
+ * hand-written copy (see `__test__/typescript-definitions.test.js`).
+ *
+ * Not part of the stable public API — the leading underscore marks it internal
+ * test support.
+ *
+ * @private
+ * @returns {string[]} Sorted, deduplicated error codes.
+ */
+function _errorContractNodeCodes() {
+  return nativeBinding.errorContractNodeCodes();
+}
+
 module.exports = {
   Database,
   PreparedStatement,
   version,
+  _errorContractProbe,
+  _errorContractNodeCodes,
 };

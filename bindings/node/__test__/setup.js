@@ -37,8 +37,89 @@ const SCHEMA_OA_TEST = path.join(SCHEMAS_DIR, 'oa-test.cql');
 // Dataset Availability Detection
 // =============================================================================
 
-const DATASETS_AVAILABLE = fs.existsSync(SSTABLES_DIR) &&
-  fs.existsSync(path.join(SSTABLES_DIR, 'test_basic'));
+/**
+ * Recursively check whether `dir` contains at least one `*-Data.db` SSTable
+ * binary FILE (issue #1458).
+ *
+ * Directory existence alone is NOT evidence of a corpus: a present-but-EMPTY
+ * sstables dir is the exact shape of the original #773 failure and used to
+ * count as "available", false-greening a broken fixture setup.
+ *
+ * Three traversal rules, DELIBERATELY IDENTICAL to those of the Python guard's
+ * `_data_db_files()` in bindings/python/tests/conftest.py, which gets them for
+ * free from a recursive `Path.glob` of `*-Data.db` filtered by `Path.is_file()`:
+ *   1. a symlinked DIRECTORY is NOT traversed (recursion enters real dirs only);
+ *   2. a symlinked FILE whose target is a regular file IS counted (`is_file()`,
+ *      like `statSync`, follows the link);
+ *   3. a FIFO, socket, device node or directory named `*-Data.db` is NOT
+ *      counted -- only a regular file qualifies.
+ *
+ * The two implementations are ONE contract written twice: whoever changes the
+ * rules here must change `_data_db_files()` too, and vice versa.
+ *
+ * Consequence, recorded honestly: a symlinked KEYSPACE DIRECTORY is unsupported
+ * in BOTH languages. No corpus uses that layout (measured: zero symlinks under
+ * the fleet corpus and under the checkout's test-data/datasets), and rule 1
+ * fails in the SAFE direction -- such a root reports zero fixtures, so strict
+ * mode throws the existing loud "0 *-Data.db files" error rather than silently
+ * skipping.
+ *
+ * Rule 1 also makes symlink CYCLES structurally unreachable (only a followed
+ * directory link could close one), so this walk needs no realpath/visited-set
+ * cycle machinery.
+ *
+ * @param {string} dir
+ * @returns {boolean}
+ */
+function hasDataDbFile(dir) {
+  let entries;
+  try {
+    entries = fs.readdirSync(dir, { withFileTypes: true });
+  } catch (err) {
+    // Unreadable/absent dir contributes no fixtures.
+    return false;
+  }
+  for (const entry of entries) {
+    const full = path.join(dir, entry.name);
+    if (entry.isDirectory()) {
+      // Rule 1: withFileTypes never follows symlinks, so isDirectory() is true
+      // for REAL directories only and a symlinked dir is skipped here.
+      if (hasDataDbFile(full)) return true;
+    } else if (entry.name.endsWith('-Data.db')) {
+      // Rule 3: a regular file qualifies immediately.
+      if (entry.isFile()) return true;
+      if (entry.isSymbolicLink()) {
+        // Rule 2: follow the link -- it counts iff the target is a regular
+        // file. A broken link (or one to a FIFO/socket/dir) contributes none.
+        try {
+          if (fs.statSync(full).isFile()) return true;
+        } catch (err) {
+          continue;
+        }
+      }
+    }
+  }
+  return false;
+}
+
+// Issue #1458: content-aware AND still test_basic-scoped.
+//
+// BOTH halves are load-bearing, and content-awareness was ADDED to the original
+// `existsSync(SSTABLES_DIR/test_basic)` requirement -- never swapped for it. A
+// corpus-WIDE `hasDataDbFile(SSTABLES_DIR)` accepts a root holding only, say,
+// test_collections/ and then enables EVERY dataset-dependent suite including the
+// test_basic ones that cannot possibly pass: a net WEAKENING of this guard.
+// Asking for content INSIDE test_basic implies the dir exists AND that the
+// corpus is non-empty, so this is strictly stronger than either half alone.
+// Do not "simplify" it back to a corpus-wide check.
+const TEST_BASIC_DIR = path.join(SSTABLES_DIR, 'test_basic');
+const DATASETS_AVAILABLE = fs.existsSync(SSTABLES_DIR) && hasDataDbFile(TEST_BASIC_DIR);
+
+// Strict fixture mode (issue #1230/#1458). Mirrors the Python
+// _require_fixtures_strict() helper: same two env var names, and the same
+// accepted truthy spellings ('1', 'true'). No other names are recognised.
+const REQUIRE_FIXTURES = ['1', 'true'].includes(process.env.CQLITE_REQUIRE_FIXTURES) ||
+  ['1', 'true'].includes(process.env.CQLITE_PARITY_REQUIRE_DATASETS);
 
 // =============================================================================
 // Slow Test Handling (matching Python conftest.py RUN_SLOW_TESTS pattern)
@@ -63,6 +144,7 @@ global.testPaths = {
 };
 
 global.DATASETS_AVAILABLE = DATASETS_AVAILABLE;
+global.REQUIRE_FIXTURES = REQUIRE_FIXTURES;
 global.SHOULD_RUN_SLOW_TESTS = SHOULD_RUN_SLOW_TESTS;
 
 // Log test configuration (only in verbose mode)
@@ -71,5 +153,16 @@ if (process.env.DEBUG_TESTS) {
   console.log(`  PROJECT_ROOT: ${PROJECT_ROOT}`);
   console.log(`  SSTABLES_DIR: ${SSTABLES_DIR}`);
   console.log(`  DATASETS_AVAILABLE: ${DATASETS_AVAILABLE}`);
+  console.log(`  REQUIRE_FIXTURES: ${REQUIRE_FIXTURES}`);
   console.log(`  SHOULD_RUN_SLOW_TESTS: ${SHOULD_RUN_SLOW_TESTS}`);
+}
+
+// Issue #1458: under strict mode a missing corpus is a hard failure of the
+// WHOLE suite -- throwing here beats leaving DATASETS_AVAILABLE=false for
+// describe.skip, which would report a green run over zero real assertions.
+if (REQUIRE_FIXTURES && !DATASETS_AVAILABLE) {
+  throw new Error(
+    `No SSTable fixtures found: ${TEST_BASIC_DIR} is absent or contains 0 *-Data.db files ` +
+    '(CQLITE_REQUIRE_FIXTURES=1 — fetch with bash test-data/scripts/fetch-datasets.sh)'
+  );
 }
