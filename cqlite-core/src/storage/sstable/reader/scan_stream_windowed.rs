@@ -500,12 +500,8 @@ impl SSTableReader {
         let io_failed = Arc::new(AtomicBool::new(false));
         let reader = Arc::clone(&self);
         let task_io_failed = Arc::clone(&io_failed);
-        // Detached-blocking-work marker (issue #3384): a dropped `JoinHandle` DETACHES
-        // a blocking task rather than aborting it, so this guard is how a reader learns
-        // the drain has actually stopped. Constructed BEFORE `spawn_blocking` and MOVED
-        // in (roborev): registering inside the closure would leave a task that is
-        // queued-but-not-yet-started counted as zero, so a reader could see "nothing in
-        // flight" and read the counter before that task decodes its first row.
+        // Detached-blocking-work marker; BEFORE the spawn so a queued task is not
+        // counted as zero. Full rationale on `BlockingScanTaskGuard` (issue #3384).
         let parse_inflight = crate::storage::read_path_probe::BlockingScanTaskGuard::new();
         let parse_task = tokio::task::spawn_blocking(move || {
             let _inflight = parse_inflight;
@@ -637,7 +633,7 @@ impl SSTableReader {
         max_compressed_length: usize,
     ) -> Option<Error> {
         let io_failed_feed = Arc::clone(io_failed);
-        // Registered BEFORE the spawn and moved in — see the parse half (issue #3384).
+        // Registered BEFORE the spawn — see the parse half (issue #3384).
         let feed_inflight = crate::storage::read_path_probe::BlockingScanTaskGuard::new();
         let feed = tokio::task::spawn_blocking(move || -> Option<Error> {
             let _inflight = feed_inflight;
