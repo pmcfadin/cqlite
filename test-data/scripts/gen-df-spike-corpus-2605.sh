@@ -679,6 +679,29 @@ for p in sorted(glob.glob(os.path.join(dest, "*-Data.db"))):
         "chunk_length_bytes_measured": clen,
     })
 
+# Optional, written after the run by an actual reader over the published bytes
+# (e.g. `cqlite read-sstable <Data.db> --limit 1` reports the entry total):
+#   <Data.db name>\t<physical rows>\t<tool>
+# Absent => null, never a fabricated count.
+measured_rows = None
+mtsv = os.path.join(root, "measured-rows.tsv")
+if os.path.exists(mtsv):
+    per_file, tool = {}, None
+    for line in open(mtsv):
+        parts = line.rstrip("\n").split("\t")
+        if len(parts) >= 2 and parts[1].isdigit():
+            per_file[parts[0]] = int(parts[1])
+            if len(parts) >= 3 and parts[2]:
+                tool = parts[2]
+    if per_file:
+        measured_rows = {
+            "per_data_db": per_file,
+            "total": sum(per_file.values()),
+            "measured_by": tool,
+            "note": "physical rows as stored (pre-reconciliation); the gen1 file's count IS the "
+                    "post-reconciliation logical row count, since gen2's keys are a subset of gen1's",
+        }
+
 all_components = sorted(os.path.basename(p) for p in glob.glob(os.path.join(dest, "*")))
 schema_path = os.path.join(dest, "schema.cql")
 schema = open(schema_path).read() if os.path.exists(schema_path) else None
@@ -774,9 +797,23 @@ manifest = {
             "cutover_timestamp_us": gen2_start,
         },
     ],
-    "logical_rows_post_reconciliation": int(env["GEN1_PARTITIONS"]) * 10,
-    "logical_partitions_post_reconciliation": int(env["GEN1_PARTITIONS"]),
-    "rows_written_total": (int(env["GEN1_PARTITIONS"]) + int(env["GEN2_PARTITIONS"])) * 10,
+    # NOMINAL = derived from the cassandra-stress seed counts, not counted. The pk
+    # column is `population: uniform(1..1000000000)`, so ~190k seeds collide on a
+    # handful of pk values (birthday estimate ~18; 25 + 5 observed). Colliding
+    # partitions are separate physical rows until a compaction merges them, so the
+    # true counts run ~0.01% below nominal. Anything citing an exact row count must
+    # use measured_physical_rows below, not these.
+    "logical_rows_post_reconciliation_nominal": int(env["GEN1_PARTITIONS"]) * 10,
+    "logical_partitions_post_reconciliation_nominal": int(env["GEN1_PARTITIONS"]),
+    "rows_written_total_nominal": (int(env["GEN1_PARTITIONS"]) + int(env["GEN2_PARTITIONS"])) * 10,
+    "nominal_counts_note": (
+        "Every *_nominal count (and each generation's partitions/rows) is derived from the "
+        "cassandra-stress seed range, NOT counted. pk is drawn from uniform(1..1000000000), so "
+        "a few seeds collide onto one pk; those partitions are distinct physical rows until a "
+        "compaction merges them. Measured deviation for the default shape: 300 rows (0.012%) "
+        "below nominal after the two compactions."
+    ),
+    "measured_physical_rows": measured_rows,
     "overlap": {
         "requested_fraction": int(env["OVERLAP_PCT"]) / 100.0,
         "measured_fraction": float(env["MEASURED_OVERLAP"]),
