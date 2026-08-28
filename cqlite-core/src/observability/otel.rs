@@ -301,15 +301,58 @@ pub(super) fn counter_for<'a>(i: &'a Instruments, name: &str) -> Option<&'a Coun
     i.counters.get(name)
 }
 
+/// Whether the ad-hoc fallback must REFUSE to build an instrument for `name`.
+///
+/// `true` only for a name DECLARED in [`catalog::STATS_ONLY_METRICS`], whose
+/// contract is that it is surfaced through `MemoryStats` and is never on a scrape
+/// (issue #1705). An unknown/uncatalogued name returns `false` and keeps the ad-hoc
+/// fallback, so no call site silently drops data.
+///
+/// Called ONLY from the `None` (ad-hoc) branch of the three emit functions, never
+/// on the resolved hot path. No panic and no `debug_assert!`: refusing means *not
+/// creating an instrument*, and a `debug_assert!` would panic in every debug/test
+/// build — including the guard that proves this refusal happens — so misuse is
+/// surfaced as a `tracing` event instead.
+fn stats_only_refuses_instrument(name: &str) -> bool {
+    let refused = catalog::STATS_ONLY_METRICS.iter().any(|m| m.name == name);
+    if refused {
+        tracing::debug!(
+            metric = name,
+            "stats-only metric emitted through the OTel path; no instrument created"
+        );
+    }
+    refused
+}
+
 /// Add to a u64 counter identified by a catalog name.
 ///
 /// Catalog names use the cached instrument; unknown names build an ad-hoc
 /// counter so call sites never silently drop data (catalog names should always
-/// be used).
+/// be used). A declared stats-only name creates nothing — see
+/// [`stats_only_refuses_instrument`].
 pub(crate) fn add_counter(name: &'static str, value: u64, attributes: &[KeyValue]) {
-    match counter_for(instruments(), name) {
+    add_counter_with(instruments(), meter(), name, value, attributes)
+}
+
+/// [`add_counter`] against an explicit instrument set and meter, so a guard can
+/// exercise the real emit path without touching the process-global `OnceLock`s.
+pub(super) fn add_counter_with(
+    i: &Instruments,
+    m: &Meter,
+    name: &str,
+    value: u64,
+    attributes: &[KeyValue],
+) {
+    match counter_for(i, name) {
         Some(counter) => counter.add(value, attributes),
-        None => meter().u64_counter(name).build().add(value, attributes),
+        None => {
+            if stats_only_refuses_instrument(name) {
+                return;
+            }
+            m.u64_counter(name.to_string())
+                .build()
+                .add(value, attributes)
+        }
     }
 }
 
@@ -320,14 +363,31 @@ pub(super) fn histogram_for<'a>(i: &'a Instruments, name: &str) -> Option<&'a Hi
     i.histograms.get(name)
 }
 
-/// Record into an f64 histogram identified by a catalog name.
+/// Record into an f64 histogram identified by a catalog name. A declared
+/// stats-only name creates nothing — see [`stats_only_refuses_instrument`].
 pub(crate) fn record_histogram(name: &'static str, value: f64, attributes: &[KeyValue]) {
-    match histogram_for(instruments(), name) {
+    record_histogram_with(instruments(), meter(), name, value, attributes)
+}
+
+/// [`record_histogram`] against an explicit instrument set and meter — see
+/// [`add_counter_with`].
+pub(super) fn record_histogram_with(
+    i: &Instruments,
+    m: &Meter,
+    name: &str,
+    value: f64,
+    attributes: &[KeyValue],
+) {
+    match histogram_for(i, name) {
         Some(hist) => hist.record(value, attributes),
-        None => meter()
-            .f64_histogram(name)
-            .build()
-            .record(value, attributes),
+        None => {
+            if stats_only_refuses_instrument(name) {
+                return;
+            }
+            m.f64_histogram(name.to_string())
+                .build()
+                .record(value, attributes)
+        }
     }
 }
 
@@ -338,11 +398,31 @@ pub(super) fn gauge_for<'a>(i: &'a Instruments, name: &str) -> Option<&'a Gauge<
     i.gauges.get(name)
 }
 
-/// Record an i64 gauge identified by a catalog name.
+/// Record an i64 gauge identified by a catalog name. A declared stats-only name
+/// creates nothing — see [`stats_only_refuses_instrument`].
 pub(crate) fn record_gauge(name: &'static str, value: i64, attributes: &[KeyValue]) {
-    match gauge_for(instruments(), name) {
+    record_gauge_with(instruments(), meter(), name, value, attributes)
+}
+
+/// [`record_gauge`] against an explicit instrument set and meter — see
+/// [`add_counter_with`].
+pub(super) fn record_gauge_with(
+    i: &Instruments,
+    m: &Meter,
+    name: &str,
+    value: i64,
+    attributes: &[KeyValue],
+) {
+    match gauge_for(i, name) {
         Some(gauge) => gauge.record(value, attributes),
-        None => meter().i64_gauge(name).build().record(value, attributes),
+        None => {
+            if stats_only_refuses_instrument(name) {
+                return;
+            }
+            m.i64_gauge(name.to_string())
+                .build()
+                .record(value, attributes)
+        }
     }
 }
 
