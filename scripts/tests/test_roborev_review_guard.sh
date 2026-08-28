@@ -4888,7 +4888,15 @@ _wr_classify() {
   _c_s=$(printf '%s\n' "$_c_code" | grep -oE '[$][{]?'"$_wr_vname"'[}]?([^A-Za-z0-9_]|$)' | wc -l | tr -d '[:space:]')
   if [ "${_c_n:-0}" -ne "${_c_s:-0}" ]; then
     case "$_c_raw" in
-      *"$_wr_prose_marker"*) printf 'prose-ok %s\n' "$_c_n"; return ;;
+      *"$_wr_prose_marker"*)
+        # THE PROSE MARKER MUST NOT WAIVE ARITY EITHER (roborev job 38). It used to return
+        # `prose-ok` on sight, so a line mixing quoted prose with a LIVE read --
+        #   grep -c q "$WRAPPER"; ok 'mentions $WRAPPER'   # <prose marker>
+        # -- was accepted whole. Marked prose is only prose if the strip removed EVERY occurrence;
+        # anything surviving the strip is a live read riding on the marker, which is the
+        # compound-line bypass wearing a third disguise.
+        if [ "${_c_s:-0}" -eq 0 ]; then printf 'prose-ok %s\n' "$_c_n"; return; fi
+        printf 'arity %s\n' "$_c_n"; return ;;
     esac
     printf 'prose %s\n' "$_c_n"; return
   fi
@@ -5008,6 +5016,7 @@ _wr_fixture f_prose    "_probe=\$(grep -c \"the wrapper's tok\" $_wr_ref) # it's
 _wr_fixture f_eval     "eval 'grep -c FOO $_wr_ref'"
 _wr_fixture f_prosetag "  ok 'the mutable \$$_wr_vname is named in prose' # $_wr_prose_marker"
 _wr_fixture f_marked   "_x=\$(grep -c foo $_wr_ref) # $_wr_marker: a reviewed opt-out"
+_wr_fixture f_mixed    "grep -c q $_wr_ref; ok 'mentions \$$_wr_vname' # $_wr_prose_marker"
 _wr_fixture f_save     "_gm_real_wrapper=$_wr_ref"
 _wr_fixture f_envinv   "STUB_INVOKED=\"\$INVOKED\" PATH=\"\$stubbin:\$PATH\" bash $_wr_ref --help"
 printf '%s\n' "_x=\$(grep -c foo \"\$${_wr_vname}_REAL\")" >"$_wr_ctl_dir/f_empty"
@@ -5025,6 +5034,7 @@ _wr_expect f_prose    prose
 _wr_expect f_eval     prose
 _wr_expect f_prosetag clean
 _wr_expect f_marked   clean
+_wr_expect f_mixed    arity
 _wr_expect f_save     clean
 _wr_expect f_envinv   clean
 _wr_expect f_empty    empty
@@ -5032,7 +5042,7 @@ _wr_expect f_empty    empty
 # and the success message below prints counts from them.
 _wr_scan_file "$TEST_SELF"
 if [ -z "$_wr_ctl_bad" ]; then
-  ok 'structural control (#3367): the ENFORCEMENT PASS itself (classifier + dispatch) gives the correct verdict on all seventeen fixtures — it rejects the braced, unquoted, compound-line, unallowlisted-alias, mentions-the-word-bash and quote-swallowed bypasses, refuses to let one marker waive a second read, reports a subjectless file as empty, and still accepts invocations, allowlisted saves, marked opt-outs and marked prose'
+  ok 'structural control (#3367): the ENFORCEMENT PASS itself (classifier + dispatch) gives the correct verdict on all eighteen fixtures — it rejects the braced, unquoted, compound-line, unallowlisted-alias, mentions-the-word-bash and quote-swallowed bypasses, refuses to let either marker waive a second read, reports a subjectless file as empty, and still accepts invocations, allowlisted saves, marked opt-outs and marked prose'
 else
   bad "structural control (#3367): the enforcement pass misclassifies a fixture, so its verdict on the real file is not trustworthy —$_wr_ctl_bad"
 fi
