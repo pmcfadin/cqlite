@@ -97,7 +97,7 @@ pub enum ErrorCategory {
     /// A query exceeded its configured execution budget
     /// (`query.max_execution_time`, issue #1695). Its OWN bucket, never
     /// `Corruption` (an operator-imposed deadline is not damaged data) and never
-    /// the `Other` catch-all (a rising timeout rate is the signal that the budget
+    /// the generic `Other` bucket (a rising timeout rate is the signal that the budget
     /// is too tight or a scan has regressed — the one thing dashboards must see).
     Timeout,
     /// Everything else: configuration, invalid state/operation, not-found,
