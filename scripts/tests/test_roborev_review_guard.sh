@@ -43,6 +43,7 @@ SCRIPT_DIR=$(cd "$(dirname "$0")" && pwd)
 # Note the direction of the hazard now: with the `--help` prose exemption in place, a scan
 # that lands on the scratch copy finds nothing and reports CLEAN — a false pass, which is
 # worse than the false fail that surfaced the bug.
+unset WRAPPER 2>/dev/null || true
 readonly WRAPPER_REAL="$SCRIPT_DIR/../flow/roborev-review.sh"
 # THE SCRATCH-COPY OVERRIDE STARTS EMPTY, WHATEVER THE CALLER EXPORTED (roborev job 53). It is read
 # as `${RUN_WRAPPER_PATH:-$WRAPPER_REAL}`, so an inherited environment value would silently redirect
@@ -55,7 +56,9 @@ RUN_WRAPPER_PATH=""
 # check below matched only a bare `WRAPPER=`, which is the assignment-syntax enumeration roborev
 # already corrected me on for WRAPPER_REAL in job 37; I repeated it on the new check. Nothing reads
 # $WRAPPER any more, so leaving it unset costs nothing and makes reintroduction impossible rather
-# than merely detected.
+# than merely detected. UNSET FIRST: `readonly` on an INHERITED exported value freezes that value
+# rather than forbidding one (measured: `WRAPPER=/decoy bash -c 'readonly WRAPPER; echo $WRAPPER'`
+# prints /decoy), which would make the suite red on the caller environment (roborev job 56).
 readonly WRAPPER
 # A code-only view of a file: quoted spans blanked, comments removed, continuations joined. Used by
 # the one structural scan below, so a variable NAME appearing inside a diagnostic string or a
@@ -4657,10 +4660,14 @@ fi
 # word, so this costs nothing and closes the family. (Issue comments 3/5/6/7 recommended keying on
 # the identifiers for this reason; deferred then as scope, adopted now because it fixes a live hole.)
 _cls_all_lines() {
-  awk '
-  /^[[:space:]]*#/ { next }
-  { print }
-' "$@" 2>/dev/null || true
+  # NO FILTERING AT ALL -- not even comments. A `#`-leading line inside the UNQUOTED help heredoc is
+  # DATA, not a comment, and its expansions still execute, so skipping such lines was a hole
+  # (roborev job 56). Deciding which `#` lines are comments needs heredoc state, i.e. the parsing
+  # problem this split exists to avoid. Measured instead: the three flow scripts contain ZERO
+  # mentions of any of the thirteen identifiers in comment lines, so scanning everything costs
+  # nothing. If that ever stops being true this check reds, and the right response is to rename the
+  # identifier or drop it from the list -- NOT to reintroduce a filter.
+  cat "$@" 2>/dev/null || true
 }
 _cls_exec_lines() {
   awk '
