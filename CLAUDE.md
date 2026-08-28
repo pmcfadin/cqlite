@@ -916,11 +916,19 @@ end-to-end test. Green helper-only unit tests are not sufficient.
   claim with a dead PID *is* the shape of an OOM kill) and **an open PR does not suppress the
   report** (for the reaper an open PR means KEEP; for a report it is the most urgent row on the page
   — a dead process holding an in-flight endgame, annotated `open-pr=yes`, still never reaped).
-  It is a REPORT: it deletes no ref and moves no board item. Verdicts are three-valued because a PID
-  is only checkable on the machine that owns the claim — `DEAD-NO-PROCESS` / `ALIVE` /
-  `UNKNOWN-FOREIGN` / `UNKNOWN-NO-PID` — and only `DEAD-NO-PROCESS` sets the exit code (`3`,
-  deliberately distinct from `1` = the measurement itself failed, so a cron cannot page on a network
-  blip and stay silent on a real dead lane). An UNKNOWN is never folded onto the permissive answer.
+  It is a REPORT: it deletes no ref and moves no board item. **`claim-heartbeat.sh dead-lanes --help`
+  is the authoritative contract** — it is in the same file as the code and cannot drift from it, so
+  read it rather than this summary when the exact verdict set matters (this paragraph drifted once
+  already). In outline: verdicts are MULTI-valued because a PID is only checkable on the machine that
+  owns the claim — two `DEAD-*` verdicts (`DEAD-NO-PROCESS`, which covers a zombie, and
+  `DEAD-PID-REUSED`) and a family of `UNKNOWN-*` ones (`FOREIGN`, `NO-PID`, `STATE`, `IDENTITY`,
+  `PROBE`, `UNREADABLE`). **Both `DEAD-*` verdicts** set the finding code `3`, deliberately distinct
+  from `1` = the measurement was incomplete or failed, so a cron cannot page on a network blip and
+  stay silent on a real dead lane. Every `UNKNOWN-*` except `UNKNOWN-FOREIGN` makes the run
+  incomplete (exit 1); `FOREIGN` is excluded because it is unknowable by design and counting it would
+  pin a healthy multi-machine fleet at exit 1 forever. An UNKNOWN is never folded onto the permissive
+  answer — including "zero claim refs" and "every claim is foreign", both of which are exit 1, since
+  neither establishes an idle fleet. **It is LOCAL-ONLY**: run it ON the suspect box.
   **Not covered, by construction**: #3393 AC3's "worktree present, tmux session absent" test is
   unimplementable in committed tooling because the lane-directory layout and tmux session naming
   exist NOWHERE in this repo — a tool guessing at them would report nothing on any differently-named

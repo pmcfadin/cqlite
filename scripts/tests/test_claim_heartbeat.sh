@@ -206,6 +206,33 @@ craft_old_claim() {
   )
 }
 
+# A pid that is DETERMINISTICALLY ABSENT, verified rather than assumed (roborev round 12,
+# Low). Several cases used the literal 999999 as "a pid that cannot exist", but Linux
+# `pid_max` is commonly far higher — MEASURED 4194304 on this host — so that pid can name a
+# live process and the "dead pid" fixtures would fail nondeterministically. `pid_max + 1` can
+# never be allocated, so it is the first candidate; each candidate is then CHECKED to be
+# absent by every probe, and a suite that cannot find one FAILS rather than proceeding on a
+# pid that might be live.
+ABSENT_PID=""
+_pid_max="$(cat /proc/sys/kernel/pid_max 2>/dev/null || true)"
+case "$_pid_max" in
+  '' | *[!0-9]*) _candidates="4194305 999999 999998" ;;
+  *)             _candidates="$((_pid_max + 1)) 4194305 999999" ;;
+esac
+for _cand in $_candidates; do
+  if ! ps -p "$_cand" >/dev/null 2>&1 \
+    && ! kill -0 "$_cand" 2>/dev/null \
+    && { [ ! -d /proc ] || [ ! -e "/proc/$_cand" ]; }; then
+    ABSENT_PID="$_cand"
+    break
+  fi
+done
+if [ -n "$ABSENT_PID" ]; then
+  ok "fixture: pid $ABSENT_PID is verified absent by every probe (pid_max=${_pid_max:-unknown}) — the 'dead pid' cases cannot name a live process"
+else
+  bad "could not find a verifiably-absent pid from '$_candidates'; the dead-pid fixtures would be unsound"
+fi
+
 # A `ps` reporting a LONG-RUNNING process, for the cases that need a deterministic ALIVE.
 #
 # Why a shim rather than a real pid: identity requires the start to predate the claim ts by
@@ -308,9 +335,10 @@ fi
 # ===========================================================================
 echo "TEST 15: should-reap REAPS a stale LOCAL claim whose pid is dead"
 # ===========================================================================
-# A pid that is essentially never alive. 999999 is beyond default pid_max on
-# Linux/macOS; kill -0 fails -> dead.
-craft_old_claim "$WORK" "localMachine2" 903 999999 36000
+# A pid VERIFIED absent at suite start (see ABSENT_PID). The comment here used to claim
+# 999999 is beyond default pid_max on Linux/macOS; that is not true — MEASURED pid_max
+# 4194304 on this host — so the literal is replaced by a checked value.
+craft_old_claim "$WORK" "localMachine2" 903 "$ABSENT_PID" 36000
 if (cd "$WORK" && HEARTBEAT_MACHINE=localMachine2 CLAIM_OPEN_PR_CMD="$NO_OPEN_PR" \
   bash "$HB" should-reap localMachine2 14400 >/dev/null 2>&1); then
   ok "should-reap reaps a stale local claim whose pid is dead"
@@ -399,7 +427,7 @@ echo "TEST 22: dead-lanes reports a LOCAL claim whose pid is DEAD, with no 4h wa
 # (4h default), so a worker OOM-killed one minute ago is indistinguishable from a
 # healthy one for four hours — and even then the answer is an exit code, not a report.
 # A FRESH claim with a dead pid is the exact shape of an OOM kill, so that is the fixture.
-craft_old_claim "$WORK" "deadFresh" 3393 999999 30   # 30s old: far INSIDE the reap threshold
+craft_old_claim "$WORK" "deadFresh" 3393 "$ABSENT_PID" 30   # 30s old: far INSIDE the reap threshold
 dl_out=$(cd "$WORK" && HEARTBEAT_MACHINE=deadFresh CLAIM_OPEN_PR_CMD="$NO_OPEN_PR" \
   bash "$HB" dead-lanes 2>&1)
 dl_rc=$?
@@ -604,7 +632,7 @@ echo "TEST 31: a DEAD lane still wins the exit code over an incomplete measureme
 # ORDER MATTERS: a dangling ref in the bare origin makes EVERY subsequent push to it
 # fail ("missing necessary objects"), so the dead claim must be pushed BEFORE the
 # unreadable ref is planted — otherwise the fixture silently has no dead lane in it.
-craft_old_claim "$WORK" "deadPrecedence" 3396 999999 30
+craft_old_claim "$WORK" "deadPrecedence" 3396 "$ABSENT_PID" 30
 printf '%s\n' "$dangling" >"$ORIGIN/refs/machine-claims/unreadableMachine"
 pr2_out=$(cd "$WORK" && HEARTBEAT_MACHINE=deadPrecedence CLAIM_OPEN_PR_CMD="$NO_OPEN_PR" \
   bash "$HB" dead-lanes 2>&1)
@@ -627,7 +655,7 @@ echo "TEST 32: issue=0 (supervisor stamped before the issue was known) is not qu
 # worker-supervisor.sh stamps issue "0" when the issue is still unknown for that
 # iteration. Treating 0 as a real issue number would send the open-PR probe hunting
 # for PR #0 and print a bogus issue in the report.
-craft_old_claim "$WORK" "zeroIssue" 0 999999 30
+craft_old_claim "$WORK" "zeroIssue" 0 "$ABSENT_PID" 30
 # A MARKER FILE, not a grep of the hook's output (roborev round 3, Low): `open_pr_state`
 # sends the hook's stdout AND stderr to /dev/null, so an output-based negative assertion
 # passed whether or not the hook ran — it could not fail. A file survives the redirect.
@@ -647,7 +675,7 @@ fi
 rm -f "$probe_marker"
 (cd "$WORK" && HEARTBEAT_MACHINE=zeroIssue2 \
   CLAIM_OPEN_PR_CMD="touch '$probe_marker'; exit 0" bash "$HB" dead-lanes >/dev/null 2>&1) || true
-craft_old_claim "$WORK" "zeroIssue2" 3401 999999 30
+craft_old_claim "$WORK" "zeroIssue2" 3401 "$ABSENT_PID" 30
 rm -f "$probe_marker"
 (cd "$WORK" && HEARTBEAT_MACHINE=zeroIssue2 \
   CLAIM_OPEN_PR_CMD="touch '$probe_marker'; exit 0" bash "$HB" dead-lanes >/dev/null 2>&1) || true
@@ -778,7 +806,7 @@ echo "TEST 37: a FAILED PR probe renders open-pr=unknown, never a definite yes"
 # reads as "has open PR", so nothing is reaped on unproven information). Rendering that
 # same guess as a definite `open-pr=yes` told the operator an orphaned endgame exists
 # when the probe had simply failed. Reporting needs three states, not two.
-craft_old_claim "$WORK" "probeFail" 3400 999999 30
+craft_old_claim "$WORK" "probeFail" 3400 "$ABSENT_PID" 30
 pf_out=$(cd "$WORK" && HEARTBEAT_MACHINE=probeFail \
   CLAIM_OPEN_PR_CMD='exit 7' bash "$HB" dead-lanes 2>&1)
 if printf '%s\n' "$pf_out" | grep -E '^probeFail ' | grep -q 'open-pr=unknown' \
@@ -1265,7 +1293,7 @@ if [ "$(type -t signal_probe_class 2>/dev/null)" = "function" ]; then
   # option — if this user CAN signal pid 1 the premise is broken and that is a failure.
   sp_root="$(signal_probe_class 1)"
   # ABSENT: a pid that cannot plausibly exist.
-  sp_gone="$(signal_probe_class 999999)"
+  sp_gone="$(signal_probe_class "$ABSENT_PID")"
   # EPERM IS DRIVEN BY A SHIM, NOT BY PID 1's PERMISSIONS (roborev round 11, Low). The first
   # cut asserted that this user cannot signal pid 1, which is false as root or with CAP_KILL
   # — and since this suite is now registered in the canonical gate, a legitimately privileged
@@ -1371,12 +1399,24 @@ if [ -s "$dl_body" ]; then
 else
   bad "could not extract cmd_dead_lanes from $HB"
 fi
-# Comments may MENTION FETCH_HEAD (this fix documents why it is avoided); only a git command
-# reading it is a defect.
-if ! grep -vE '^\s*#' "$dl_body" | grep -q 'FETCH_HEAD'; then
-  ok "cmd_dead_lanes contains no FETCH_HEAD read outside comments"
+# Only a git command READING FETCH_HEAD is a defect. Two legitimate mentions are excluded:
+# comments (this fix documents why the ref is avoided) and the `--no-write-fetch-head`
+# capability flag, whose own name necessarily contains the token — a guard that flagged its
+# own remedy would be worse than no guard.
+dl_code="$T/dead-lanes-code.sh"
+grep -vE '^[[:space:]]*#' "$dl_body" \
+  | grep -vE 'GIT_SUPPORTS_NO_WRITE_FETCH_HEAD|--no-write-fetch-head' >"$dl_code" || true
+if ! grep -q 'FETCH_HEAD' "$dl_code"; then
+  ok "cmd_dead_lanes contains no FETCH_HEAD read (comments and the --no-write-fetch-head flag name excluded)"
 else
-  bad "cmd_dead_lanes still reads FETCH_HEAD: $(grep -vE '^\s*#' "$dl_body" | grep 'FETCH_HEAD')"
+  bad "cmd_dead_lanes still reads FETCH_HEAD: $(grep 'FETCH_HEAD' "$dl_code")"
+fi
+# ...and it must actively suppress the WRITE too, or a concurrent run clobbers FETCH_HEAD for
+# list / list-claims / should-reap / reap, which still fetch-then-read it.
+if grep -q 'no-write-fetch-head' "$dl_body"; then
+  ok "cmd_dead_lanes passes --no-write-fetch-head, so it cannot clobber FETCH_HEAD for its neighbours"
+else
+  bad "cmd_dead_lanes must not write FETCH_HEAD either"
 fi
 # ...and it must fetch into a ref made unique per PROCESS and per ROW, or two rows (or two
 # concurrent runs) would collide on the same temp ref and reintroduce the same defect.

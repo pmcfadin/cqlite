@@ -270,6 +270,23 @@ REMOTE="${HEARTBEAT_REMOTE:-origin}"
 # pushes — it surfaces git's raw error.
 export GIT_TERMINAL_PROMPT=0
 
+# Whether this git understands `git fetch --no-write-fetch-head` (landed in git 2.29).
+# Computed ONCE: it is a property of the binary, not of a row.
+GIT_SUPPORTS_NO_WRITE_FETCH_HEAD=no
+_git_ver="$(git --version 2>/dev/null | awk '{print $3}')"
+_git_major="${_git_ver%%.*}"
+_git_rest="${_git_ver#*.}"
+_git_minor="${_git_rest%%.*}"
+case "$_git_major$_git_minor" in
+  *[!0-9]* | '') : ;;  # unparseable version -> assume unsupported, never guess yes
+  *)
+    if [ "$_git_major" -gt 2 ] || { [ "$_git_major" -eq 2 ] && [ "$_git_minor" -ge 29 ]; }; then
+      GIT_SUPPORTS_NO_WRITE_FETCH_HEAD=yes
+    fi
+    ;;
+esac
+unset _git_ver _git_major _git_rest _git_minor
+
 # Rounding tolerance when comparing a process's start time against its claim's `ts`
 # (#3393). Both come from the SAME host and the SAME clock — `ts` is written by `date -u`
 # at stamp time, and the start epoch is `now - elapsed` — and the stamp necessarily
@@ -840,7 +857,20 @@ cmd_dead_lanes() {
     row=$((row + 1))
     local tmpref
     tmpref="refs/tmp/claim-heartbeat/$$-${row}"
-    if ! git fetch --no-tags "$REMOTE" "+${refname}:${tmpref}" >/dev/null 2>&1; then
+    # `--no-write-fetch-head` matters for our NEIGHBOURS, not for us (roborev round 12,
+    # Medium). Fetching into a private ref stopped THIS command reading a clobbered
+    # FETCH_HEAD, but the fetch still WROTE it — so a concurrent `dead-lanes` became the
+    # thing that corrupts `list`, `list-claims`, `should-reap` and `reap`, all of which
+    # still fetch-then-read FETCH_HEAD. Making a monitor into the cause of a bad REAP
+    # decision would be a poor trade. Guarded by version because the option landed in git
+    # 2.29; on older git the flag is omitted rather than failing every row with an
+    # unknown-option error whose stated cause would be "fetch failed".
+    if [ "$GIT_SUPPORTS_NO_WRITE_FETCH_HEAD" = yes ]; then
+      set -- --no-write-fetch-head
+    else
+      set --
+    fi
+    if ! git fetch "$@" --no-tags "$REMOTE" "+${refname}:${tmpref}" >/dev/null 2>&1; then
       # An unreadable ref is "we cannot tell about THIS lane", never "this lane is
       # fine" — so it is both printed AND counted toward an incomplete measurement.
       unreadable=$((unreadable + 1))
