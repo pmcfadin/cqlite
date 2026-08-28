@@ -2261,6 +2261,10 @@ fi
 work=$(make_fixture case_cx28 pushed)
 STUB_ANNOUNCE_SHA=$(git -C "$work" rev-parse HEAD)
 _gm_real_wrapper="$WRAPPER"
+# READONLY, so `printf -v`, `read` and every other builtin that writes a variable are refused by the
+# SHELL (roborev job 51). The mutation scan only knew `name=value` syntax, and a corrupted alias
+# would make the restore install the wrong path while the probe agreed with itself.
+readonly _gm_real_wrapper
 WRAPPER="$_gm_dir/roborev-review.sh"
 run_wrapper "$work"
 assert_verdict 'case (cx28 control) the UNPATCHED copy reaches PASS' PASS 0
@@ -4657,7 +4661,12 @@ _cls_exec_lines() {
   # parked there would be prose to this filter and code to the shell. The exemption is for TEXT, so
   # a substitution inside the body is surfaced rather than suppressed. Measured cost: the real
   # heredoc contains zero of them.
-  in_usage && ($0 ~ /[$][(]/ || $0 ~ /`/) { print; next }
+  # ...and an ASSIGNING parameter expansion evaluates too: ${VAR:=mixed-delivery} and ${VAR=...}
+  # set the variable when bash renders the body (roborev job 51). Those two forms are the complete
+  # set of expansions that assign; plain $VAR and ${VAR} cannot, which is why the ordinary
+  # $PROGNAME interpolation in the body stays suppressed and the prose exemption still works.
+  # NOTE: this awk program is single-quoted, so NO APOSTROPHE may appear in these comments.
+  in_usage && ($0 ~ /[$][(]/ || $0 ~ /`/ || $0 ~ /[$][{][A-Za-z_][A-Za-z0-9_]*:?=/) { print; next }
   in_usage { next }
   /^[[:space:]]*#/ { next }
   # A SUBSTITUTION LINE KEEPS ITS TAIL. Inside `$( )` a quoted `#` looks like a comment opener to
@@ -4882,6 +4891,29 @@ fi
 # spans and backslash-escaped `\$` are literal text rather than expansions — this file's own `ok`
 # and `bad` messages NAME the variable while describing the rule, and an earlier version red on
 # exactly those, which is #3367's cause 2 reproduced inside the fix for cause 1.
+# A CODE-ONLY VIEW OF A WHOLE FILE: quoted spans blanked, comments removed, continuations joined.
+# Scans that look for a COMMAND (`eval`, a nameref declaration) must read this, never the raw text —
+# otherwise the word inside a diagnostic string or a fixture literal counts, and the only way to
+# tolerate that is a substring exclusion. Three separate exclusions of exactly that shape have now
+# been found here (the alias-declaration alternation, the alias-mutation scan, the eval ban), each
+# exempting a real violation that merely mentioned the excluded token. Blanking removes the need.
+_wr_code_view() {
+  sed -e :a -e '/\\$/N; s/\\\n//; ta' "$1" | awk '
+  {
+    n = length($0); sq = 0; dq = 0; out = ""
+    for (i = 1; i <= n; i++) {
+      c = substr($0, i, 1)
+      if (!sq && c == "\\") { i++; out = out "  "; continue }
+      if (sq) { out = out " "; if (c == "'"'"'") sq = 0; continue }
+      if (dq) { out = out " "; if (c == "\"") dq = 0; continue }
+      if (c == "'"'"'") { sq = 1; out = out " "; continue }
+      if (c == "\"") { dq = 1; out = out " "; continue }
+      if (c == "#" && (i == 1 || substr($0, i-1, 1) ~ /[ \t]/)) break
+      out = out c
+    }
+    print out
+  }'
+}
 _wr_marker='wrapper-mutable''-read-allow'
 _wr_vname='WRAP''PER'
 # ONLY THESE NAMES MAY HOLD THE MUTABLE VALUE, AND ONLY TO RESTORE IT (roborev job 35, Medium).
@@ -5266,6 +5298,9 @@ _wr_ctl_dir="$tmp/wrapper-grammar-fixtures"
 mkdir -p "$_wr_ctl_dir"
 # Each fixture carries one PERMITTED occurrence (so `empty` is not the answer) plus the case under test.
 _wr_ok_line="bash $_wr_ref --help"
+# The expected-verdict word is COMPOSED: written literally it is a bare `eval` in code position and
+# the ban above would flag this fixture table. Composing beats excluding -- see _wr_code_view.
+_wr_v_eval='ev''al'
 _wr_ctl_bad=""
 # FIXTURES ARE WRITTEN WITH `printf` AND `$_wr_ref`, NEVER A HEREDOC. The scanner is line-oriented,
 # so a literal `"$WRAPPER"` in a quoted `<<'"'"'EOF'"'"'` heredoc body reads as a live read and verdicts
@@ -5333,7 +5368,7 @@ _wr_expect f_unquoted spelling
 _wr_expect f_arity    arity
 _wr_expect f_markar   arity
 _wr_expect f_prose    form
-_wr_expect f_eval     eval
+_wr_expect f_eval     "$_wr_v_eval"
 _wr_expect f_aposmk   form
 _wr_expect f_selfauth form
 _wr_expect f_prosetag clean
@@ -5449,9 +5484,7 @@ fi
 #   (d) `eval` of constructed text     -> banned here
 # That is the whole set, so a constructed name has nowhere left to be executed. The ban costs
 # nothing: this harness has never used `eval` in code position (measured 0).
-_wr_evalp=$(sed -e :a -e '/\\$/N; s/\\\n//; ta' "$TEST_SELF" \
-  | grep -nE '(^|[ \t;&|(])'"eval"'([ \t]|$)' | grep -vE '^[0-9]+:[[:space:]]*#' || true)
-_wr_evalp=$(printf '%s\n' "$_wr_evalp" | grep -vE "_wr_expect|_wr_fixture|^[0-9]+:[[:space:]]*(ok|bad) " || true)
+_wr_evalp=$(_wr_code_view "$TEST_SELF" | grep -nE '(^|[ \t;&|(])'"eval"'([ \t]|$)' || true)
 if [ -z "$_wr_evalp" ]; then
   ok 'structural (#3367): the harness runs no eval, so a variable name assembled by shell concatenation has nowhere to be executed — with literal reads classified, indirect expansion allowlisted and namerefs banned, that closes every way to read the mutable path'
 else
@@ -5499,9 +5532,8 @@ fi
 # LOGICAL lines, not physical ones: `declare \` continued onto `-n subject=_wr_saved` is one
 # declaration, and a per-physical-line grep sees neither half as a nameref. Continuations are joined
 # first (the line numbers are lost, so the diagnostic reports the joined text instead).
-_wr_nrefd=$(sed -e :a -e '/\\$/N; s/\\\n//; ta' "$TEST_SELF" \
-  | grep -nE '(^|[ \t;&|(])(declare|local|typeset)[[:space:]]+(-[A-Za-z]+[[:space:]]+)*-[A-Za-z]*'"n" \
-  | grep -vE '^[0-9]+:[[:space:]]*#' || true)
+_wr_nrefd=$(_wr_code_view "$TEST_SELF" \
+  | grep -nE '(^|[ \t;&|(])(declare|local|typeset)[[:space:]]+(-[A-Za-z]+[[:space:]]+)*-[A-Za-z]*'"n" || true)
 if [ -z "$_wr_nrefd" ]; then
   ok 'structural (#3367): the harness declares no nameref, so no second name can be bound to an allowlisted alias'
 else
@@ -5589,6 +5621,7 @@ mkdir -p "$_wr_poison_dir"
   printf '%s=inline\n' "$_wr_sentinel"
 } >"$_wr_poison_dir/roborev-review.sh"
 _wr_saved="$WRAPPER"
+readonly _wr_saved
 WRAPPER="$_wr_poison_dir/roborev-review.sh"
 _cls_via_real=$(_cls_exec_lines "$ORACLES" "$CHECKS_FILE" "$WRAPPER_REAL")
 _cls_via_mutable=$(_cls_exec_lines "$ORACLES" "$CHECKS_FILE" "$WRAPPER") # wrapper-mutable-read-allow: reading the poisoned path IS this probe
@@ -5605,7 +5638,9 @@ else
 fi
 # The restore must have happened, or every later case silently audits the scratch copy — the exact
 # failure mode this section exists to prevent, reintroduced by the pin that tests for it.
-if [ "$WRAPPER" = "$_wr_saved" ]; then # wrapper-mutable-read-allow: asserting the restore requires reading it
+# Compared against WRAPPER_REAL, not against the alias: an assert that verifies a restore using the
+# very variable whose corruption it should detect will agree with any value (roborev job 51).
+if [ "$WRAPPER" = "$WRAPPER_REAL" ]; then # wrapper-mutable-read-allow: asserting the restore requires reading it
   ok 'behavioural (#3367): the probe restored $WRAPPER, so no later case inherits the poisoned path'
 else
   bad 'behavioural (#3367): the probe left $WRAPPER pointing at its scratch copy'
