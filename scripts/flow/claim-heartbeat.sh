@@ -575,12 +575,34 @@ process_start_epoch() {
   printf '%s\n' "$((now - secs))"
 }
 
-# process_exists <pid> — exit 0 iff the pid exists, REGARDLESS of ownership.
-# `kill -0` is NOT used for this (roborev round 2, Medium): it fails with EPERM for a
+# process_exists <pid> — exit 0 iff the pid names a process that could still be running
+# a lane, REGARDLESS of ownership.
+#
+# `kill -0` is NOT used for existence (roborev round 2, Medium): it fails with EPERM for a
 # live process owned by another user, which would report a healthy lane as dead. `ps -p`
 # answers existence without needing permission to signal.
+#
+# ZOMBIES ARE NOT ALIVE (roborev round 5, Medium). `ps -p` succeeds for a process in state
+# `Z` — it has exited and is only waiting to be reaped, so it cannot drive anything, yet
+# the start-time check would then confirm its identity and report ALIVE. That is a dead
+# lane reported healthy, which is the failure this command exists to prevent. Verified in
+# the suite against a REAL zombie (a forked child whose parent has not waited).
 process_exists() {
-  ps -p "$1" >/dev/null 2>&1
+  ps -p "$1" >/dev/null 2>&1 || return 1
+  ! process_is_zombie "$1"
+}
+
+# process_is_zombie <pid> — exit 0 iff the pid is in state Z. An UNREADABLE state is NOT
+# treated as a zombie: that would turn "cannot tell" into "dead", and a false DEAD on a
+# healthy fleet is how a monitor gets ignored. Unreadable state falls through to the
+# identity check, which has its own three-valued handling.
+process_is_zombie() {
+  local st
+  st="$(ps -o stat= -p "$1" 2>/dev/null | tr -d ' ')"
+  case "$st" in
+    Z*) return 0 ;;
+    *)  return 1 ;;
+  esac
 }
 
 # open_pr_state <issue> — echo `yes` | `no` | `unknown`. THREE-VALUED on purpose
@@ -663,9 +685,17 @@ cmd_dead_lanes() {
   fi
   rm -f "$errfile"
 
+  # NO EARLY `return 0` HERE (roborev round 5, Medium). An empty namespace proves only
+  # that no ref exists — it does NOT establish an idle fleet. A lane running with
+  # `CLAIM_CMD=""` (stamping deliberately disabled, a documented supervisor option) or one
+  # whose stamps have been failing all along looks EXACTLY the same from here, so exiting
+  # 0 would report clean about lanes that were never measured. It is also the same
+  # condition as the all-foreign case: nothing local was inspected. Both now fall through
+  # to the single `local_seen` check at the end, so one rule covers both instead of an
+  # early return contradicting it.
   if [ -z "$raw" ]; then
-    echo "no claims found on $REMOTE — no dead lanes (an empty fleet is not a finding)"
-    return 0
+    note "no claim refs exist on ${REMOTE}. That is NOT the same as an idle fleet: a lane running with claim stamping disabled (CLAIM_CMD=\"\"), or one whose stamps have been failing, is indistinguishable from this. Nothing was measured, so this is NOT 'no dead lanes'."
+    return 1
   fi
 
   printf '%-20s %-8s %-12s %-18s %s\n' "MACHINE" "ISSUE" "PID" "VERDICT" "DETAIL"
@@ -757,6 +787,12 @@ cmd_dead_lanes() {
         case "$detail" in
           *yes) detail="open-pr=yes — ORPHANED ENDGAME (#2499): report it, do NOT reap it" ;;
         esac
+        # Distinguish the two ways a pid stops being able to drive a lane, because the
+        # operator sees different things: gone entirely, vs still in the process table
+        # as a zombie awaiting reap.
+        if process_is_zombie "$pid"; then
+          detail="supervisor pid ${pid} is a ZOMBIE (exited, awaiting reap — it cannot drive the lane); ${detail}"
+        fi
       fi
     fi
     printf '%-20s %-8s %-12s %-18s %s\n' "$machine" "$issue" "${pid:-none}" "$verdict" "$detail"
@@ -779,7 +815,7 @@ cmd_dead_lanes() {
   # ignore it. The distinction is "did I measure ANY local lane", not "is every lane
   # local".
   if [ "$local_seen" -eq 0 ]; then
-    note "NOTHING WAS MEASURED: no claim on ${REMOTE} is owned by this machine (${this_machine}), and a pid is only checkable where it runs. dead-lanes is LOCAL-ONLY — run it ON the suspect box, or check each machine in turn. This is NOT 'no dead lanes'."
+    note "NOTHING WAS MEASURED: claim refs exist on ${REMOTE} but none is owned by this machine (${this_machine}), and a pid is only checkable where it runs. dead-lanes is LOCAL-ONLY — run it ON the suspect box, or check each machine in turn. This is NOT 'no dead lanes'."
     return 1
   fi
   [ "$unreadable" -eq 0 ] || return 1

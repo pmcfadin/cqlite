@@ -491,12 +491,20 @@ g clone -q "$empty_origin" "$empty_work" 2>/dev/null
   cd "$empty_work" || exit 1
   echo seed >seed.txt; g add seed.txt; g commit -qm seed; g push -q -u origin main
 )
+# INVERTED in round 5 (Medium). This case used to demand exit 0, on the reasoning that
+# "an empty fleet is not a finding". But an empty NAMESPACE does not establish an idle
+# fleet: a lane running with claim stamping disabled (`CLAIM_CMD=""`, a documented
+# supervisor option) or one whose stamps have been failing looks identical from here. So
+# exit 0 would have reported clean about lanes that were never measured — the same
+# false-clean as the all-foreign case, and by the same rule (`local_seen == 0`).
 ze_out=$(cd "$empty_work" && bash "$HB" dead-lanes 2>&1)
 ze_rc=$?
-if [ "$ze_rc" -eq 0 ] && printf '%s\n' "$ze_out" | grep -qi 'no claims'; then
-  ok "dead-lanes on an empty fleet exits 0 and reports no claims (never a false dead-lane)"
+if [ "$ze_rc" -eq 1 ] \
+  && printf '%s\n' "$ze_out" | grep -qi 'not the same as an idle fleet' \
+  && printf '%s\n' "$ze_out" | grep -q 'CLAIM_CMD'; then
+  ok "zero claim refs exits 1 and explains that an empty namespace is not an idle fleet (naming the disabled-stamping case)"
 else
-  bad "zero claims must be exit 0 with a stated reason: rc=$ze_rc out:
+  bad "zero claims must be exit 1 with the reason stated: rc=$ze_rc out:
 $ze_out"
 fi
 
@@ -926,6 +934,87 @@ if grep -q 'ONE CLAIM REF PER MACHINE' "$HB" && grep -qi 'four lanes\|4 lanes' "
 else
   bad "the one-ref-per-machine limit must be documented where a reader of dead-lanes will see it"
 fi
+
+# ===========================================================================
+echo "TEST 44: a ZOMBIE supervisor is DEAD, not ALIVE (roborev round 5, Medium)"
+# ===========================================================================
+# `ps -p` succeeds for a process in state Z: it has exited and is only awaiting reap, so
+# it cannot drive a lane — but the identity check would then confirm its start time and
+# report ALIVE, i.e. a dead lane reported healthy. Driven against a REAL zombie: a forked
+# child that exits while its parent never waits.
+zparent_out="$T/zombie-pid"
+python3 - "$zparent_out" <<'PYZ' &
+import os, sys, time
+pid = os.fork()
+if pid == 0:
+    os._exit(0)          # the child exits immediately and is never waited for -> Z
+open(sys.argv[1], "w").write(str(pid))
+time.sleep(25)           # keep the parent alive so the zombie is not reparented+reaped
+PYZ
+zshell=$!
+for _ in 1 2 3 4 5 6 7 8 9 10; do
+  [ -s "$zparent_out" ] && break
+  sleep 0.3
+done
+zpid="$(cat "$zparent_out" 2>/dev/null || true)"
+zstate="$(ps -o stat= -p "$zpid" 2>/dev/null | tr -d ' ')"
+if [ -n "$zpid" ] && [ "${zstate#Z}" != "$zstate" ]; then
+  ok "PREMISE ASSERTED: pid $zpid is a real zombie (ps state '$zstate'), and ps -p reports it as existing"
+  craft_old_claim "$WORK" "zombieMachine" 3407 "$zpid" 0
+  z_out=$(cd "$WORK" && HEARTBEAT_MACHINE=zombieMachine CLAIM_OPEN_PR_CMD="$NO_OPEN_PR" \
+    bash "$HB" dead-lanes 2>&1)
+  z_rc=$?
+  if [ "$z_rc" -eq 3 ] \
+    && printf '%s\n' "$z_out" | grep -E '^zombieMachine ' | grep -q 'DEAD-NO-PROCESS' \
+    && printf '%s\n' "$z_out" | grep -E '^zombieMachine ' | grep -qi 'zombie'; then
+    ok "a ZOMBIE supervisor is reported DEAD-NO-PROCESS (rc=3), with the zombie state named in the detail"
+  else
+    bad "a zombie supervisor must be reported dead, naming the state: rc=$z_rc out:
+$z_out"
+  fi
+  # NON-VACUITY: ps -p DOES report it as existing, so the pre-fix existence test alone
+  # would have called this lane ALIVE.
+  if ps -p "$zpid" >/dev/null 2>&1; then
+    ok "NON-VACUITY: ps -p still reports the zombie as existing, so an existence-only check would have said ALIVE"
+  else
+    bad "NON-VACUITY broken: ps -p does not see the zombie, so TEST 44 proves nothing"
+  fi
+  (cd "$WORK" && g push -q origin ":refs/machine-claims/zombieMachine" 2>/dev/null || true)
+else
+  bad "could not construct a zombie fixture (pid='$zpid' state='$zstate') — this case must not be skipped silently"
+fi
+kill "$zshell" 2>/dev/null
+wait "$zshell" 2>/dev/null
+
+# ===========================================================================
+echo "TEST 45: an UNREADABLE process state is not treated as a zombie"
+# ===========================================================================
+# The zombie test must not have made "cannot read the state" mean "dead": a false DEAD on
+# a healthy fleet is how a monitor gets ignored. Shimmed so `ps -p` succeeds while
+# `ps -o stat=` returns nothing.
+zshim="$T/zshim"
+mkdir -p "$zshim"
+cat >"$zshim/ps" <<'PSEOF'
+#!/usr/bin/env bash
+for a in "$@"; do
+  case "$a" in
+    stat=) exit 0 ;;                 # state unreadable
+    etimes=) echo 999999; exit 0 ;;  # started long ago -> identity verifiable
+  esac
+done
+exit 0                               # `ps -p <pid>` succeeds: the process exists
+PSEOF
+chmod +x "$zshim/ps"
+craft_old_claim "$WORK" "unreadState" 3408 "$$" 0
+us_out=$(cd "$WORK" && PATH="$zshim:$PATH" HEARTBEAT_MACHINE=unreadState \
+  CLAIM_OPEN_PR_CMD="$NO_OPEN_PR" bash "$HB" dead-lanes 2>&1)
+if ! printf '%s\n' "$us_out" | grep -E '^unreadState ' | grep -q 'DEAD'; then
+  ok "an unreadable process state is NOT reported dead (cannot-tell must not become a false DEAD)"
+else
+  bad "an unreadable state must not be treated as a zombie: out:
+$us_out"
+fi
+(cd "$WORK" && g push -q origin ":refs/machine-claims/unreadState" 2>/dev/null || true)
 
 echo
 echo "=== claim-heartbeat.sh: $PASS passed, $FAIL failed ==="
