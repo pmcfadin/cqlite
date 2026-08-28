@@ -6612,9 +6612,17 @@ _crate_gated_test_targets() { # <pkg>  -> name \t rel \t gate-text
     # this is the direction where a defect would have been invisible until someone reformatted.
     gate=$(awk '
       # Leave the leading region at the first line that is not blank / comment / attribute.
+      # BLOCK comments count as trivia too (roborev round-37, Low) — `/* … */` and `/*! … */`,
+      # single-line or multiline. Without this a leading block comment (a very common file header,
+      # and `/*!` is idiomatic module docs) was read as the first ITEM, so every crate-level
+      # `#![cfg(...)]` after it was silently omitted from the census. Round 36 fixed exactly this
+      # shape in `_legacy_coreq_sites` and I did not carry it to this sibling scanner — the
+      # same-defect-in-a-second-place recurrence this change has now hit four times.
+      !inattr && !leading_done && in_block { if ($0 ~ /\*\//) in_block = 0; next }
       !inattr && !leading_done {
         t = $0
         gsub(/^[[:space:]]+|[[:space:]]+$/, "", t)
+        if (t ~ /^\/\*/) { if (t !~ /\*\//) in_block = 1; next }
         if (t != "" && t !~ /^\/\// && t !~ /^#!?\[/) { leading_done = 1 }
       }
       leading_done { next }
@@ -6903,6 +6911,34 @@ run_legacy_heuristics() {
   local _mt_name _mt_src _mt_how _mt_rel _mt_rf _mt_dir _mt_hit _mt_cf _obs_id
   local rf_unmet=""
   while IFS="$(printf '\t')" read -r _mt_name _mt_src _mt_how _mt_rel _mt_rf; do
+    # FIRST THING IN THE LOOP (roborev round-37, Medium). This check used to sit ~35 lines lower,
+    # AFTER `observe_ids+=(...)` — so a target excluded here had already been added to the
+    # observation set, and `check_test_targets_observed` then demanded a `Running` banner for a
+    # target the lane deliberately never invoked: a FALSE RED on valid code, produced by the fix
+    # that was meant to prevent one. Anything that records a target must run after the decision to
+    # invoke it, so the decision goes first.
+    #
+    # A target whose FULL `required-features` are not satisfied by this feature set must
+    # NOT be named explicitly (roborev round-36, Medium). Cargo REJECTS an explicit
+    # `--test <name>` whose required-features are unmet, so the lane would fail on entirely
+    # correct code — a FALSE RED, and the kind that looks like a real breakage. The helper
+    # already carries the manifest's list; this compares ALL of it, not just the presence of
+    # `legacy-heuristics`, and reports the target as a COVERAGE GAP instead of invoking it.
+    local _rf_off=""
+    if [ -n "${_mt_rf:-}" ]; then
+      local _rf1
+      for _rf1 in ${_mt_rf//,/ }; do
+        [ -n "$_rf1" ] || continue
+        case " $lh_enabled " in
+          *" $_rf1 "*) ;;
+          *) _rf_off="${_rf_off:+$_rf_off,}$_rf1" ;;
+        esac
+      done
+    fi
+    if [ -n "$_rf_off" ]; then
+      rf_unmet="$rf_unmet $base(required-features unmet:$_rf_off)"
+      continue
+    fi
     [ -n "$_mt_name" ] || continue
     f="$_mt_src"
     # Included when EITHER cargo gates the target on the feature (the arm the glob could
@@ -6965,27 +7001,6 @@ EOF
     done <<EOF
 $_mt_closure
 EOF
-    # A target whose FULL `required-features` are not satisfied by this lane's feature set must
-    # NOT be named explicitly (roborev round-36, Medium). Cargo REJECTS an explicit
-    # `--test <name>` whose required-features are unmet, so the lane would fail on entirely
-    # correct code — a FALSE RED, and the kind that looks like a real breakage. The helper
-    # already carries the manifest's list; this compares ALL of it, not just the presence of
-    # `legacy-heuristics`, and reports the target as a COVERAGE GAP instead of invoking it.
-    local _rf_off=""
-    if [ -n "${_mt_rf:-}" ]; then
-      local _rf1
-      for _rf1 in ${_mt_rf//,/ }; do
-        [ -n "$_rf1" ] || continue
-        case " $lh_enabled " in
-          *" $_rf1 "*) ;;
-          *) _rf_off="${_rf_off:+$_rf_off,}$_rf1" ;;
-        esac
-      done
-    fi
-    if [ -n "$_rf_off" ]; then
-      rf_unmet="$rf_unmet $base(required-features unmet:$_rf_off)"
-      continue
-    fi
     # Two array elements per target (`--test <name>`), so ${#targets[@]} is NOT the
     # target count — $count is.
     targets+=(--test "$base")
@@ -7125,12 +7140,31 @@ EOF
   # Pre-filtered with grep so the awk pass runs only over files that mention the feature
   # (8 of cqlite-core/src's files today, none of them co-required).
   local _libsrc
+  # The scan's EXIT STATUS is checked, and "no matches" is distinguished from a READ ERROR
+  # (roborev round-37, Low). `grep -rl … 2>/dev/null` swallowed both: an unreadable directory or a
+  # partial walk produced an empty list, and an empty list was reported as a CLEAN ZERO-GAP census.
+  # grep exits 0 = matches, 1 = none, >=2 = error; only >=2 is fatal, and it FAILs the lane naming
+  # the scan rather than reporting a census nobody took.
+  local _libsrc_list _libsrc_rc=0
+  _libsrc_list=$(grep -rlE 'feature[[:space:]]*=[[:space:]]*"legacy-heuristics"' \
+    "$REPO_ROOT/cqlite-core/src" 2>/dev/null | sort) || _libsrc_rc=$?
+  if [ "$_libsrc_rc" -ge 2 ]; then
+    status=FAIL
+    {
+      echo "[$name] FAIL-CLOSED: the library census scan of cqlite-core/src FAILED (grep exit"
+      echo "        $_libsrc_rc — an unreadable directory or a partial walk), so the co-required"
+      echo "        census would have been taken over an INCOMPLETE source set and reported as a"
+      echo "        clean zero gap. A census that could not be taken is never reported as empty."
+    } | tee -a "$log"
+    end=$(date +%s); record_result "$name" "$status" "$((end - start))"
+    echo ">>> [$name] $status ($((end - start))s)"; return 0
+  fi
   while IFS= read -r _libsrc; do
     [ -n "$_libsrc" ] || continue
     srcs="$srcs${_libsrc#$REPO_ROOT/}	$_libsrc
 "
   done <<EOF
-$(grep -rlE 'feature[[:space:]]*=[[:space:]]*"legacy-heuristics"' "$REPO_ROOT/cqlite-core/src" 2>/dev/null | sort)
+$_libsrc_list
 EOF
   # Dedupe: one file, one scan, one site list — a helper module shared by several targets
   # must not be reported once per including target.

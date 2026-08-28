@@ -3672,6 +3672,70 @@ else
   fi
 fi
 
+# --- 40. #1699: round-37 — decide before you record, and block comments in BOTH scanners --
+#
+# (a) MEDIUM: the required-features check sat AFTER `observe_ids+=(...)`, so a target the lane
+# deliberately does not invoke was still demanded to have a `Running` banner by
+# `check_test_targets_observed` — a FALSE RED produced by the fix meant to prevent one. Asserted by
+# LINE ORDER, because the property is "the decision precedes every record of the target".
+lh40_="$tmp/1699-r37-lh.txt"
+awk '/^run_legacy_heuristics\(\) \{/, /^\}/' "$GATE" > "$lh40_"
+if [ ! -s "$lh40_" ]; then
+  bad "1699-r37-order-scope: could not extract run_legacy_heuristics — this assert would pass vacuously"
+else
+  # COMMENTS STRIPPED FIRST. The first cut compared raw line numbers and matched the very comment
+  # that DESCRIBES the defect ("...sat AFTER `observe_ids+=(...)`..."), reporting observe=75 against
+  # decision=87 — an oracle reading its own rationale as evidence, which is the trap CLAUDE.md
+  # records and which already cost this file a false FAIL once (the round-14 GNU lint).
+  lh40c_="$tmp/1699-r37-lh-code.txt"
+  sed 's/[[:space:]]*#.*$//' "$lh40_" > "$lh40c_"
+  d_=$(grep -nE '_rf_off=""' "$lh40c_" | head -1 | cut -d: -f1)
+  o_=$(grep -nE 'observe_ids\+=' "$lh40c_" | head -1 | cut -d: -f1)
+  t_=$(grep -nE 'targets\+=\(--test' "$lh40c_" | head -1 | cut -d: -f1)
+  if [ -n "$d_" ] && [ -n "$o_" ] && [ -n "$t_" ] && [ "$d_" -lt "$o_" ] && [ "$d_" -lt "$t_" ]; then
+    ok "1699-r37-decide-first: the required-features decision (line $d_) precedes observe_ids ($o_) and --test ($t_)"
+  else
+    bad "1699-r37-decide-first: a target is RECORDED before the decision to invoke it (decision=$d_ observe=$o_ test=$t_) — check_test_targets_observed then demands a banner for a target the lane never runs, which is a false red on valid code"
+  fi
+fi
+
+# (b) LOW: the crate-gate leading-region scanner must treat block comments as trivia — the same
+# shape round 36 fixed in `_legacy_coreq_sites` and did NOT carry to this sibling. A leading
+# `/* … */` or `/*! … */` (idiomatic module docs) was read as the first ITEM, so every crate-level
+# `#![cfg(...)]` after it vanished from the Flight census.
+if [ -s "$gg_body_" ]; then
+  for case_ in blockhdr innerdoc multilinehdr; do
+    case "$case_" in
+      blockhdr)      printf '/* file header */\n#![cfg(feature = "x")]\nfn t() {}\n' > "$gg_src_/$case_.rs" ;;
+      innerdoc)      printf '/*! module docs */\n#![cfg(feature = "x")]\nfn t() {}\n' > "$gg_src_/$case_.rs" ;;
+      multilinehdr)  printf '/* line one\n   line two\n   line three */\n#![cfg(feature = "x")]\nfn t() {}\n' > "$gg_src_/$case_.rs" ;;
+    esac
+    got_=$(
+      export GG_SRC="$gg_src_/$case_.rs" GG_REL="tests/$case_.rs"
+      _package_test_targets_gated() { printf '%s\t%s\t%s\t%s\t%s\n' "${case_}_t" "$GG_SRC" source "$GG_REL" ""; }
+      # shellcheck disable=SC1090
+      . "$gg_body_"
+      _crate_gated_test_targets somepkg 2>/dev/null | awk -F'\t' '{print $3}'
+    )
+    if [ "$got_" = '#![cfg(feature = "x")]' ]; then
+      ok "1699-r37-blockhdr[$case_]: a crate gate after a block comment is still reported"
+    else
+      bad "1699-r37-blockhdr[$case_]: reported '$got_' — a leading block comment ended the leading region, so the gate vanished from the census and the target reads as ungated"
+    fi
+  done
+fi
+
+# (c) LOW: the library census scan must distinguish "no matches" (grep 1) from a read error
+# (grep >= 2). Suppressing both meant an unreadable directory produced an empty list, reported as a
+# clean ZERO-GAP census — a census nobody took, presented as a census with nothing to report.
+if [ -s "$lh40_" ]; then
+  if [ "$(grep -cE '_libsrc_rc' "$lh40_")" -gt 0 ] && [ "$(grep -cE '_libsrc_rc" -ge 2|_libsrc_rc\" -ge 2|-ge 2' "$lh40_")" -gt 0 ]; then
+    ok "1699-r37-libscan: the library census scan checks its exit status and fails only on a real error (>=2), not on 'no matches'"
+  else
+    bad "1699-r37-libscan: the library census scan ignores its exit status again — an unreadable source directory yields an empty list and is reported as a clean zero-gap census"
+  fi
+fi
+
 # LOWERED DELIBERATELY, 300 -> 285, and this is the ratchet working rather than being defeated.
 # Roborev round 27's descope removed the crate-gate CLASSIFIER, and with it 25 assertions that
 # tested a feature grammar, a conjunction evaluator and a selector predicate which no longer exist.
