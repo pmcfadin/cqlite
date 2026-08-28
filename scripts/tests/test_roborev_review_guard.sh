@@ -275,6 +275,17 @@ record_read_blank() {
 case "$cmd" in
   review)
     printf 'review %s\n' "$*" >>"$STUB_INVOKED"
+    # STUB_ON_REVIEW: a command run AT ENQUEUE TIME, so a case can mutate the fixture DURING the
+    # review — the only way to express a mid-run base-ref move hermetically (#3392). It FAILS LOUDLY
+    # (exit 97, distinct from every verdict path) rather than being swallowed: a hook that silently
+    # did nothing would leave its case asserting a race it never created, which is a probe failing
+    # toward success.
+    if [ -n "${STUB_ON_REVIEW:-}" ]; then
+      sh -c "$STUB_ON_REVIEW" >/dev/null 2>&1 || {
+        printf 'STUB_ON_REVIEW failed: %s\n' "$STUB_ON_REVIEW" >&2
+        exit 97
+      }
+    fi
     if [ -n "${STUB_ANNOUNCE_SHA:-}" ]; then
       printf 'Enqueued job %s for %s\n' "${STUB_JOB:-4600}" "$STUB_ANNOUNCE_SHA"
     fi
@@ -1067,6 +1078,7 @@ export STUB_GH_COMMENTS=''
 export STUB_GH_COMMENTS_JSON=''
 export STUB_GH_COMMENTS_FILE=''
 export STUB_GH_RC=0
+export STUB_ON_REVIEW=''
 reset_stub() {
   STUB_JOB=4656
   STUB_VERDICT=$'No issues found.\nSummary: reviewed the diff; no issues found.'
@@ -1090,6 +1102,7 @@ reset_stub() {
   STUB_GH_COMMENTS_JSON=''
   STUB_GH_COMMENTS_FILE=''
   STUB_GH_RC=0
+  STUB_ON_REVIEW=''
 }
 
 printf '== case (a): enqueued sha == base ref ==\n'
@@ -2627,7 +2640,7 @@ assert_verdict 'case (f)' PASS 0
 for line in 'push-assert: PASS' 'census-check: PASS' 'sha-assert: PASS' 'vacuity-tier1: PASS' 'vacuity-tier2: PASS'; do
   assert_says "case (f) $line" "^$line\$"
 done
-assert_says 'case (f) reviewed-sha reports the RANGE' "^reviewed-sha: $(git -C "$work" rev-parse origin/main)\.\.$head_sha\$"
+assert_says 'case (f) reviewed-sha reports the RANGE' "^reviewed-sha: $(git -C "$work" merge-base origin/main HEAD)\.\.$head_sha\$"
 assert_says 'case (f) job printed' '^job: 4656$'
 assert_says 'case (f) log path named' '^log: .+transcript-'
 assert_one_block 'case (f)'
@@ -2647,8 +2660,18 @@ assert_one_block 'case (f)'
 work_canon=$(cd "$(git -C "$work" rev-parse --show-toplevel)" && pwd -P)
 # The sanctioned invocation form: explicit HEAD sha, explicit ABSOLUTE --repo,
 # --wait, both --agent and --model — and never --branch, never two positionals.
-if grep -qF -- "review --branch --base origin/main --repo $work_canon --agent codex --model gpt-5.6-sol --wait" "$INVOKED"; then
-  ok 'case (f): invoked over the census RANGE with an explicit absolute --repo + --wait'
+# THE BASE IS MATCHED BY SHAPE HERE, AND BY VALUE JUST BELOW (#3392). The enqueue now pins the
+# RESOLVED 40-hex merge-base rather than the symbolic ref, so the census, the enqueue, the assert and
+# the waiver scope all name ONE immutable range. This block is EXTRACTED and mutation-tested by the
+# portability suite against a fixture that has no `origin/main` at all, so it cannot compute the
+# value — it asserts the SHAPE (`--base <40-hex>` immediately followed by `--repo`), which is what
+# makes a symbolic ref, an empty base and a dropped `--repo` all fail here. The VALUE assert (that the
+# sha is THIS fixture's merge-base) is the next assert down, outside the extracted region, where the
+# fixture can compute it. Exactly TWO assert sites live in this block: the portability probes require
+# dp==2 / df==2, so adding a third here would break their arithmetic.
+if grep -qE -- '^review --branch --base [0-9a-f]{40} --repo ' "$INVOKED" \
+  && grep -qF -- "--repo $work_canon --agent codex --model gpt-5.6-sol --wait" "$INVOKED"; then
+  ok 'case (f): invoked over the census RANGE with a 40-hex pinned base and an explicit absolute --repo + --wait'
 else
   bad "case (f): unexpected invocation form: $(cat "$INVOKED")"
 fi
@@ -2661,6 +2684,20 @@ else
   bad "case (f): --branch/--repo pairing missing: $(cat "$INVOKED")"
 fi
 # <<< END case-f-invocation-asserts (#3296)
+# THE VALUE PIN for the base the wrapper enqueued (#3392): it must be the MERGE-BASE of the base ref
+# and HEAD — the base of the range the census measured — and NOT the symbolic ref, whose re-resolution
+# by roborev is what let the enqueued range drift from the measured one between the two steps.
+_cf_pinned_base=$(git -C "$work" merge-base origin/main HEAD)
+if grep -qF -- "--base $_cf_pinned_base " "$INVOKED"; then
+  ok 'case (f): the enqueued base is the RESOLVED merge-base sha, so census/enqueue/assert name one immutable range'
+else
+  bad "case (f): the enqueued base is not the resolved merge-base '$_cf_pinned_base': $(cat "$INVOKED")"
+fi
+if grep -qF -- '--base origin/main' "$INVOKED"; then
+  bad 'case (f): the SYMBOLIC base ref reached the enqueue — roborev would re-resolve it, so the reviewed range could differ from the measured one'
+else
+  ok 'case (f): no symbolic base ref reaches the enqueue'
+fi
 if grep -qE -- 'review [0-9a-f]{7,40} [0-9a-f]{7,40}' "$INVOKED"; then
   bad 'case (f): the two-positional commit-range form was used'
 else
@@ -4216,6 +4253,63 @@ assert_says 'case (wv33c) neither preformatted context is an authorization' \
   '^waiver: NONE \(no waiver comment for this review: the marker must be the SOLE NONBLANK CONTENT'
 assert_lacks 'case (wv33c) and neither grants' '^prompt-content: WAIVED'
 reset_stub
+
+printf '== case (mb9): the ENQUEUED range is IMMUTABLE against a mid-review base-ref move ==\n'
+# THE RESIDUAL SECOND-ORDER RACE, CLOSED BY CONSTRUCTION (roborev round 1, Medium). The wrapper used
+# to pass the SYMBOLIC base ref to `roborev review --base`, so roborev re-resolved the mirror ref
+# ITSELF and computed its own merge-base. A ref move between the census and the enqueue therefore
+# reviewed a DIFFERENT range than the census measured, and the only thing that noticed was
+# `sha-assert` — AFTER a full-price review had been spent. Passing the RESOLVED sha makes the
+# divergence unexpressible instead of merely detectable.
+#
+# WHAT THIS CASE CAN AND CANNOT MEASURE, stated rather than implied. The stub reviewer cannot
+# re-derive a range from `--base` the way the real binary does, so this case does NOT measure
+# roborev's internal resolution (that is measured against the REAL binary, recorded in the wrapper's
+# comment at the enqueue: `--base <sha>` and `--base origin/main` produced the IDENTICAL
+# merge-base-anchored `git_ref` on a repo whose main had advanced). What it DOES measure, hermetically
+# and decisively, is the property the fix rests on: the argument the wrapper hands to the enqueue, and
+# the base its assert later compares against, are BOTH the sha captured by the census and are
+# UNAFFECTED by the ref moving mid-review.
+#
+# THE MOVE IS CHOSEN TO CHANGE THE MERGE-BASE, not just the tip: it force-pushes the feature branch
+# onto main, after which `merge-base(origin/main, HEAD)` is HEAD itself. So a wrapper that passed the
+# symbolic ref would have had roborev resolve a demonstrably different range, and a wrapper that
+# re-read the base after the review would assert against a different sha. Both are asserted against.
+reset_stub
+work=$(make_fixture case_mb9 advanced-base)
+assert_base_advanced 'case (mb9)' "$work"
+mb9_base=$(git -C "$work" merge-base origin/main HEAD)
+mb9_head=$(git -C "$work" rev-parse HEAD)
+STUB_ANNOUNCE_SHA="$mb9_base"
+STUB_GIT_REF="$mb9_base..$mb9_head"
+# Force-push the branch onto the remote's main, then update the mirror ref: the census has already
+# run, so this lands strictly between the census and the assert.
+STUB_ON_REVIEW="git -C '$work' push -q -f origin feature:main && git -C '$work' fetch -q origin"
+run_wrapper "$work"
+STUB_ON_REVIEW=''
+# NON-VACUITY, in the direction that matters: the mid-review move must really have changed what
+# `origin/main` denotes AND what its merge-base with HEAD would now be. If it did not, this case
+# proves nothing about immutability.
+mb9_moved_base=$(git -C "$work" merge-base origin/main HEAD)
+if [ "$mb9_moved_base" != "$mb9_base" ]; then
+  ok "case (mb9): the mid-review move really changed the merge-base ($mb9_base -> $mb9_moved_base), so the pinning is load-bearing here"
+else
+  bad "case (mb9): the mid-review move did NOT change the merge-base (still $mb9_base) — the case cannot distinguish a pinned base from a re-resolved one"
+fi
+assert_verdict 'case (mb9)' PASS 0
+assert_says 'case (mb9) sha-assert still PASSes against the PRE-MOVE range' '^sha-assert: PASS$'
+assert_says 'case (mb9) assert-base still names the census-time merge-base' "^assert-base: $mb9_base "
+assert_lacks 'case (mb9) the post-move merge-base is not what the assert used' "^assert-base: $mb9_moved_base "
+if grep -qF -- "--base $mb9_base " "$INVOKED"; then
+  ok 'case (mb9): the enqueue carried the census-time merge-base SHA, so the ref move could not change the reviewed range'
+else
+  bad "case (mb9): the enqueue did not carry the census-time merge-base '$mb9_base': $(cat "$INVOKED")"
+fi
+if grep -qF -- '--base origin/main' "$INVOKED"; then
+  bad 'case (mb9): the SYMBOLIC base ref reached the enqueue, so roborev would have re-resolved it AFTER the move — the race is still open'
+else
+  ok 'case (mb9): no symbolic base ref reaches the enqueue'
+fi
 
 printf '== case (mb8): the absence WAIVER is bound to the MERGE-BASE, not the base ref tip ==\n'
 # THE SAME STALENESS DEFECT, IN THE WAIVER (#3392). The waiver scope is `base=<sha> head=<sha>

@@ -873,9 +873,42 @@ if [ -n "$RECHECK_JOB" ]; then
   RECHECK_ACTIVE=1
   : >"$LOG"
 else
+  # ===== THE ENQUEUE IS PINNED TO THE RESOLVED MERGE-BASE, NOT THE SYMBOLIC REF (#3392) =====
+  # `--base` used to receive the SYMBOLIC `$BASE`, so roborev re-resolved the mirror ref ITSELF and
+  # computed its own merge-base. If the ref moved between the census and this call, roborev reviewed a
+  # DIFFERENT range than the census measured — and the only thing that noticed was `sha-assert`, AFTER a
+  # full-price review had been spent. That is the residual second-order race the issue names, and
+  # detecting it later is not the same as not having it.
+  #
+  # Passing the RESOLVED sha makes the range IMMUTABLE across all four consumers — census, enqueue,
+  # assert, waiver scope — so the divergence is UNEXPRESSIBLE rather than caught. The property that makes
+  # this exact rather than approximate: with the merge-base as the base, `base..HEAD` and `base...HEAD`
+  # denote the SAME range (merge-base(merge-base, HEAD) is the merge-base), so pinning it cannot change
+  # what is reviewed — there is no longer a two-dot/three-dot semantics gap for the two sides to disagree
+  # across.
+  #
+  # VERIFIED AGAINST THE REAL BINARY (roborev v0.61.2), not assumed: a raw 40-hex sha is accepted by
+  # `--base` and recorded as the range base. Measured on a throwaway repo whose main had advanced past
+  # the branch point (merge-base d6b806a…, branch head 0b226fa…, main tip 399abca…):
+  #   --base <merge-base sha>  -> "1 commits since d6b806a…", git_ref d6b806a…..0b226fa…, job_type range
+  #   --base origin/main       -> "1 commits since origin/main", git_ref d6b806a…..0b226fa…  (IDENTICAL)
+  # i.e. both forms record the same merge-base-anchored range — which is also the direct measurement
+  # that roborev anchors at the MERGE-BASE and never at the ref tip.
+  #
+  # The block still reports `base: $BASE` — the operator asked for a symbolic ref and the block must not
+  # misreport what was requested — while `assert-base:` carries the resolved sha this call used.
+  #
+  # A STRUCTURAL BACKSTOP, deliberately unreachable through the normal ordering (the census resolves
+  # `RANGE_BASE_SHA` and `finish`es on failure, before this point): an EMPTY value here would be handed to
+  # roborev as no `--base` at all, silently re-enabling its base AUTO-DETECTION and reviewing a range
+  # nothing verified. The point of a backstop is not to depend on an upstream check still being there.
+  if [ -z "${RANGE_BASE_SHA:-}" ]; then
+    DETAILS+=("ERROR: the resolved range base is empty at the enqueue, so the reviewed range would be whatever roborev auto-detected rather than the census range. This is a defect in the wrapper's own ordering (the census resolves it and fails closed before this point), not something to fix in the branch under review. Failing closed; no review was enqueued.")
+    finish FAIL 1
+  fi
   set +e
   roborev review --branch \
-    --base "$BASE" \
+    --base "$RANGE_BASE_SHA" \
     --repo "$REPO" \
     --agent "$AGENT" \
     --model "$MODEL" \
