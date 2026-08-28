@@ -159,10 +159,7 @@ pub struct RunningScan {
 }
 
 /// Build the producer for `target` under `spec`, sharing production's defaults.
-pub fn build_producer(
-    target: &ScanTarget,
-    spec: ScanSpec,
-) -> Result<MergeProducer, ProducerError> {
+pub fn build_producer(target: &ScanTarget, spec: ScanSpec) -> Result<MergeProducer, ProducerError> {
     MergeProducer::with_spec(target.schema.clone(), target.batch_size, spec)
 }
 

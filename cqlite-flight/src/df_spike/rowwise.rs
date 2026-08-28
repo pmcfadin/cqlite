@@ -73,12 +73,15 @@ impl RowOp {
     /// Apply to an `Ordering`-shaped comparison result.
     fn keeps(self, ordering: std::cmp::Ordering) -> bool {
         use std::cmp::Ordering::{Equal, Greater, Less};
-        match (self, ordering) {
-            (Self::Eq, Equal) | (Self::NotEq, Less | Greater) => true,
-            (Self::Lt, Less) | (Self::LtEq, Less | Equal) => true,
-            (Self::Gt, Greater) | (Self::GtEq, Greater | Equal) => true,
-            _ => false,
-        }
+        matches!(
+            (self, ordering),
+            (Self::Eq, Equal)
+                | (Self::NotEq, Less | Greater)
+                | (Self::Lt, Less)
+                | (Self::LtEq, Less | Equal)
+                | (Self::Gt, Greater)
+                | (Self::GtEq, Greater | Equal)
+        )
     }
 }
 
@@ -224,33 +227,43 @@ pub(crate) fn count_matching_rowwise(
         (DataType::Int32, RowLiteral::Int(lit)) => numeric_int!(Int32Array, *lit),
         (DataType::Int64, RowLiteral::Int(lit)) => {
             let typed = downcast::<Int64Array>(array, column, &data_type)?;
-            Ok(count_scalar(typed.len(), |i| {
-                (!typed.is_null(i)).then(|| typed.value(i).cmp(lit))
-            }, op))
+            Ok(count_scalar(
+                typed.len(),
+                |i| (!typed.is_null(i)).then(|| typed.value(i).cmp(lit)),
+                op,
+            ))
         }
         (DataType::Float32, RowLiteral::Float(lit)) => {
             let typed = downcast::<Float32Array>(array, column, &data_type)?;
-            Ok(count_scalar(typed.len(), |i| {
-                (!typed.is_null(i)).then(|| compare_f64(f64::from(typed.value(i)), *lit))
-            }, op))
+            Ok(count_scalar(
+                typed.len(),
+                |i| (!typed.is_null(i)).then(|| compare_f64(f64::from(typed.value(i)), *lit)),
+                op,
+            ))
         }
         (DataType::Float64, RowLiteral::Float(lit)) => {
             let typed = downcast::<Float64Array>(array, column, &data_type)?;
-            Ok(count_scalar(typed.len(), |i| {
-                (!typed.is_null(i)).then(|| compare_f64(typed.value(i), *lit))
-            }, op))
+            Ok(count_scalar(
+                typed.len(),
+                |i| (!typed.is_null(i)).then(|| compare_f64(typed.value(i), *lit)),
+                op,
+            ))
         }
         (DataType::Utf8, RowLiteral::Text(lit)) => {
             let typed = downcast::<StringArray>(array, column, &data_type)?;
-            Ok(count_scalar(typed.len(), |i| {
-                (!typed.is_null(i)).then(|| typed.value(i).cmp(lit.as_str()))
-            }, op))
+            Ok(count_scalar(
+                typed.len(),
+                |i| (!typed.is_null(i)).then(|| typed.value(i).cmp(lit.as_str())),
+                op,
+            ))
         }
         (DataType::Boolean, RowLiteral::Bool(lit)) => {
             let typed = downcast::<BooleanArray>(array, column, &data_type)?;
-            Ok(count_scalar(typed.len(), |i| {
-                (!typed.is_null(i)).then(|| typed.value(i).cmp(lit))
-            }, op))
+            Ok(count_scalar(
+                typed.len(),
+                |i| (!typed.is_null(i)).then(|| typed.value(i).cmp(lit)),
+                op,
+            ))
         }
         (
             DataType::Int8

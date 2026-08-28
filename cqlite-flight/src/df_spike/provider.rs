@@ -39,6 +39,11 @@ use crate::df_spike::pushdown;
 use crate::df_spike::scan::{self, ScanOutcome, ScanTarget};
 use crate::filter::ScanSpec;
 
+/// Where a plan publishes its finished scan's measurements. `Option` inside
+/// because the plan takes the record out once read — a benchmark must never read
+/// the same measurement twice and treat it as two runs.
+pub type OutcomeSlot = Arc<Mutex<Option<ScanOutcome>>>;
+
 /// Errors building a spike provider.
 #[derive(Debug, thiserror::Error)]
 pub enum SpikeError {
@@ -68,7 +73,7 @@ pub struct CqliteTableProvider {
     /// Whether projection/filter/limit are pushed into the scan.
     pushdown_enabled: bool,
     /// Slot the most recently finished plan publishes its measurements into.
-    last_outcome: Arc<Mutex<Option<Arc<Mutex<Option<ScanOutcome>>>>>>,
+    last_outcome: Arc<Mutex<Option<OutcomeSlot>>>,
 }
 
 impl CqliteTableProvider {
@@ -186,17 +191,14 @@ impl CqliteTableProvider {
         indices
             .iter()
             .map(|i| {
-                fields
-                    .get(*i)
-                    .map(|f| f.name().clone())
-                    .ok_or_else(|| {
-                        SpikeError::Scan(crate::producer::ProducerError::Merge(
-                            cqlite_core::Error::Internal(format!(
-                                "projection index {i} is outside the {}-column schema",
-                                fields.len()
-                            )),
-                        ))
-                    })
+                fields.get(*i).map(|f| f.name().clone()).ok_or_else(|| {
+                    SpikeError::Scan(crate::producer::ProducerError::Merge(
+                        cqlite_core::Error::Internal(format!(
+                            "projection index {i} is outside the {}-column schema",
+                            fields.len()
+                        )),
+                    ))
+                })
             })
             .collect()
     }
@@ -226,7 +228,10 @@ impl TableProvider for CqliteTableProvider {
         filters: &[&Expr],
     ) -> DfResult<Vec<TableProviderFilterPushDown>> {
         if !self.pushdown_enabled {
-            return Ok(vec![TableProviderFilterPushDown::Unsupported; filters.len()]);
+            return Ok(vec![
+                TableProviderFilterPushDown::Unsupported;
+                filters.len()
+            ]);
         }
         Ok(pushdown::classify(filters, &self.target.schema))
     }

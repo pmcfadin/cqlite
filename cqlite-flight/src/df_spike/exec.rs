@@ -54,7 +54,7 @@ pub struct CqliteScanExec {
     /// Where the finished scan's measurements are published. `Mutex` because the
     /// plan is shared (`Arc`) and `execute` takes `&self`; contention is one lock
     /// per scan, not per batch.
-    outcome: Arc<Mutex<Option<ScanOutcome>>>,
+    outcome: crate::df_spike::provider::OutcomeSlot,
     /// Human-readable description of what was pushed, for `EXPLAIN` output.
     pushed: String,
 }
@@ -104,7 +104,7 @@ impl CqliteScanExec {
     }
 
     /// Handle to the outcome slot, so a provider can read it after execution.
-    pub fn outcome_slot(&self) -> Arc<Mutex<Option<ScanOutcome>>> {
+    pub fn outcome_slot(&self) -> crate::df_spike::provider::OutcomeSlot {
         self.outcome.clone()
     }
 }
@@ -188,30 +188,27 @@ impl ExecutionPlan for CqliteScanExec {
         // Drain the producer channel into a DataFusion stream. The terminal item
         // publishes the scan's measurements, so a consumer that reaches the end
         // of the stream can always read them back.
-        let stream = futures::stream::unfold(
-            Some((batches, done, outcome_slot)),
-            move |state| {
-                let projection = projection.clone();
-                async move {
-                    let (mut batches, done, outcome_slot) = state?;
-                    match batches.recv().await {
-                        Some(Ok(batch)) => {
-                            let item = project_batch(batch, projection.as_deref());
-                            Some((item, Some((batches, done, outcome_slot))))
-                        }
-                        Some(Err(e)) => {
-                            // A producer error is terminal: surface it and stop.
-                            publish_outcome(done, &outcome_slot);
-                            Some((Err(DataFusionError::External(Box::new(e))), None))
-                        }
-                        None => {
-                            publish_outcome(done, &outcome_slot);
-                            None
-                        }
+        let stream = futures::stream::unfold(Some((batches, done, outcome_slot)), move |state| {
+            let projection = projection.clone();
+            async move {
+                let (mut batches, done, outcome_slot) = state?;
+                match batches.recv().await {
+                    Some(Ok(batch)) => {
+                        let item = project_batch(batch, projection.as_deref());
+                        Some((item, Some((batches, done, outcome_slot))))
+                    }
+                    Some(Err(e)) => {
+                        // A producer error is terminal: surface it and stop.
+                        publish_outcome(done, &outcome_slot);
+                        Some((Err(DataFusionError::External(Box::new(e))), None))
+                    }
+                    None => {
+                        publish_outcome(done, &outcome_slot);
+                        None
                     }
                 }
-            },
-        )
+            }
+        })
         .boxed();
 
         Ok(Box::pin(RecordBatchStreamAdapter::new(schema, stream)))
@@ -238,7 +235,7 @@ fn project_batch(batch: RecordBatch, projection: Option<&Vec<usize>>) -> DfResul
 /// Join the producer thread and store its measurements.
 fn publish_outcome(
     done: std::thread::JoinHandle<ScanOutcome>,
-    slot: &Arc<Mutex<Option<ScanOutcome>>>,
+    slot: &crate::df_spike::provider::OutcomeSlot,
 ) {
     // The producer has closed the channel, so the thread is finishing; the join
     // is bounded. A panicked producer thread leaves the slot empty, which the

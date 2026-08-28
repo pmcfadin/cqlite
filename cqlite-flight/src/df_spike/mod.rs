@@ -51,6 +51,8 @@ pub mod rss;
 #[doc(hidden)]
 pub mod scan;
 
-pub use bench::{ArmKind, BenchConfig, BenchError, BenchOutcome, BenchRunner, Scenario, ScenarioKind};
+pub use bench::{
+    ArmKind, BenchConfig, BenchError, BenchOutcome, BenchRunner, Scenario, ScenarioKind,
+};
 pub use provider::{CqliteTableProvider, SpikeError};
 pub use scan::{ProbeDelta, ScanOutcome, SubPhaseNanos};

@@ -89,7 +89,9 @@ fn run() -> Result<(), String> {
 
     for name in projection.iter().chain(std::iter::once(&filter_column)) {
         if !all_columns.iter().any(|c| c == name) {
-            return Err(format!("column '{name}' is not declared in the table schema"));
+            return Err(format!(
+                "column '{name}' is not declared in the table schema"
+            ));
         }
     }
 
@@ -132,7 +134,11 @@ fn run() -> Result<(), String> {
 fn schema_column_names(schema: &cqlite_core::schema::TableSchema) -> Vec<String> {
     // Three distinct column types, so three separate maps rather than one
     // `chain` over incompatible iterators.
-    let mut names: Vec<String> = schema.partition_keys.iter().map(|c| c.name.clone()).collect();
+    let mut names: Vec<String> = schema
+        .partition_keys
+        .iter()
+        .map(|c| c.name.clone())
+        .collect();
     names.extend(schema.clustering_keys.iter().map(|c| c.name.clone()));
     names.extend(schema.columns.iter().map(|c| c.name.clone()));
     names

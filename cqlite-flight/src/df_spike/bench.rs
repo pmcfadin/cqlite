@@ -52,11 +52,7 @@ pub enum ScenarioKind {
 impl ScenarioKind {
     /// Every scenario, in report order.
     pub fn all() -> [Self; 3] {
-        [
-            Self::FullScanCount,
-            Self::ProjectedScan,
-            Self::FilteredScan,
-        ]
+        [Self::FullScanCount, Self::ProjectedScan, Self::FilteredScan]
     }
 
     /// Stable identifier for the results file.
@@ -239,7 +235,11 @@ impl BenchRunner {
     }
 
     /// Run one (scenario, arm) pairing once.
-    pub fn run_one(&self, scenario: Scenario, iteration: usize) -> Result<BenchOutcome, BenchError> {
+    pub fn run_one(
+        &self,
+        scenario: Scenario,
+        iteration: usize,
+    ) -> Result<BenchOutcome, BenchError> {
         match scenario.arm {
             ArmKind::DataFusion => self.run_datafusion(scenario.kind, iteration),
             ArmKind::Floor | ArmKind::RowEngine | ArmKind::RowPushdown => {

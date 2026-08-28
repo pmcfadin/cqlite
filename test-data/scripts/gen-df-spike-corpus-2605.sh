@@ -12,9 +12,32 @@
 #     partition keys at DIFFERENT write timestamps.
 #   * A single compacted SSTable (what gen-perf-corpus-3068.sh deliberately
 #     produces for the read-plane measurement) would bench a MERGE-FREE path —
-#     i.e. measure the wrong thing for this spike. So this script NEVER runs
-#     `nodetool compact`, keeps autocompaction disabled throughout, and ASSERTS
-#     that >= MIN_DATA_DB Data.db files survive.
+#     i.e. measure the wrong thing for this spike.
+#   * But merge depth must be the SHAPE THE ISSUE ASKS FOR (~1.9M partitions,
+#     TWO generations) and not whatever the flush cadence happened to leave.
+#     docs/architecture/throughput-program-2026-07.md:158 records the "2 gens"
+#     band as "an ASSUMPTION, NOT A MEASUREMENT (STCS-derived expected-k band)",
+#     and BOTH bench arms consume the SAME post-reconciliation batches — so an
+#     accidental k=25 merge inflates the SHARED decode+merge floor and thereby
+#     SHRINKS the apparent vectorized-exec share, biasing the spike toward
+#     "don't promote DataFusion". That bias is the hard kind to notice because
+#     it looks conservative. Hence the k-depth control below, and a fail-closed
+#     assert on MIN_DATA_DB <= count <= MAX_DATA_DB.
+#
+# K-DEPTH CONTROL — sequencing is the whole trick:
+#   1. load generation 1, flush, then MAJOR-compact it to ONE SSTable. Safe
+#      precisely because generation 2 does not exist yet: there is no overlap to
+#      destroy.
+#   2. THEN load generation 2, flush, and compact ONLY generation 2's files
+#      (`nodetool compact --user-defined <gen2 paths>`), identified as "every
+#      Data.db that is not the file step 1 produced".
+#   3. NEVER a whole-table major compaction after step 1 — that would merge the
+#      generations into one SSTable and destroy the overlap this corpus exists
+#      to provide.
+#   Autocompaction stays DISABLED throughout all of it, so STCS cannot merge the
+#   generations behind our back; every compaction here is explicit and scoped.
+#   COMPACT_GEN1=0 COMPACT_GEN2=0 MAX_DATA_DB=100 reproduces the deliberate
+#   high-k (~25 flush-generation) variant as a merge-depth sensitivity data point.
 #
 # Shape produced (defaults):
 #   generation 1: WIDE_PARTITIONS=190000 partitions x 10 rows = ~1.9M rows
@@ -24,7 +47,8 @@
 #                 with NEWER write timestamps => ~2.4 GB, and a merge iterator
 #                 that must reconcile newest-wins across generations over the
 #                 whole token range.
-#   `nodetool flush` after each generation; NO major compaction.
+#   `nodetool flush` after each generation, then the scoped compactions above:
+#   end state 2 Data.db files (generation 1 | generation 2) with ~30% key overlap.
 #
 # Overlap is MEASURED, not asserted by construction: a fixed 1% token slice is
 # probed with `SELECT writetime(body)` after each generation.
@@ -40,6 +64,24 @@
 #   * keyspace durable_writes = false  -> no commitlog write amplification
 #   * nodetool disableautocompaction   -> STCS cannot merge the two generations
 #                                          behind our back
+#
+# LZ4 IS LOAD-BEARING, SO IT IS MEASURED, NOT ASSUMED. PHASE_STREAM_DECOMPRESS is
+# a real sub-phase of the read pipeline: an UNCOMPRESSED corpus understates decode
+# cost and therefore OVERSTATES the vectorized-exec share — corrupting the exact
+# number this spike isolates (M15 item 1: separate the decode-to-column delta from
+# the vectorized-exec delta). gen-perf-corpus-3068.sh's own header records the
+# trap ("the Phase-0 perf anchor was UNCOMPRESSED, so it never executed the
+# compressed read path at all"), and R12 itself was LZ4. So before the manifest is
+# written this script FAILS CLOSED unless, for EVERY published Data.db, a sibling
+# CompressionInfo.db parses (via read-compression-info.py, which reads the
+# authoritative written header rather than the DDL) as LZ4Compressor with
+# chunk_length = 16 KiB. The measured values are recorded per file in the manifest.
+#
+# REPLICATION FACTOR IS NOMINAL. RF=3 is DECLARED in the DDL (the M15 "wide +
+# RF=3/overlap" shape) but a single-node container can only STORE one replica, so
+# real RF=3 is unreachable here. The property this corpus actually exercises is
+# cross-SSTable OVERLAP, not replication; the manifest says so in a
+# replication_note field rather than letting the number imply otherwise.
 #
 # Output layout (mirrors CQLITE_DATASETS_ROOT, so CQLITE_DATASETS_ROOT=$CORPUS_ROOT
 # works directly):
@@ -63,10 +105,9 @@ CONTAINER="${CONTAINER:-cqlite-df2605}"
 CORPUS_ROOT="${CORPUS_ROOT-/data/corpus-2605}"
 KS="perf_2605"
 TBL="wide_4kb"
-# Declared replication factor. A single-node container can only STORE one
-# replica, so RF affects the DDL recorded in the manifest (the M15 "RF=3"
-# shape) and not the bytes; the property that makes reconciliation run is the
-# generation overlap below, not RF.
+# DECLARED replication factor — nominal only (see REPLICATION FACTOR above): a
+# single-node container stores ONE replica whatever this says, so it affects the
+# recorded DDL and not the bytes.
 RF="${RF:-3}"
 # 10 rows/partition (clustering fixed(10)) => rows = partitions * 10.
 WIDE_PARTITIONS="${WIDE_PARTITIONS:-190000}"
@@ -77,8 +118,17 @@ HEAP_NEW="${HEAP_NEW:-1600M}"
 # Leave headroom: this box also runs cargo builds for the same issue.
 CPUS="${CPUS:-10}"
 MEM="${MEM:-16g}"
-# Fail-closed floor on surviving SSTables (see WHY above).
+# Fail-closed BAND on surviving SSTables (see K-DEPTH CONTROL above): at least 2
+# so a merge actually runs, at most 3 so the merge depth is the shape the issue
+# asks for rather than the flush cadence's accident.
 MIN_DATA_DB="${MIN_DATA_DB:-2}"
+MAX_DATA_DB="${MAX_DATA_DB:-3}"
+# Scoped compactions that produce the k=2 shape. Both 0 (with MAX_DATA_DB raised)
+# reproduces the high-k variant.
+COMPACT_GEN1="${COMPACT_GEN1:-1}"
+COMPACT_GEN2="${COMPACT_GEN2:-1}"
+# Recorded in the manifest so a consumer can tell the variants apart.
+CORPUS_VARIANT="${CORPUS_VARIANT:-k2-two-generations}"
 # Token slice used for the overlap probe, in percent of the murmur3 ring.
 SLICE_PCT="${SLICE_PCT:-1}"
 SLICE_LIMIT="${SLICE_LIMIT:-200000}"
@@ -86,6 +136,7 @@ NEED_GIB="${NEED_GIB:-30}"
 # Plain `docker` works on this fleet box; override for hosts needing sudo.
 DOCKER="${DOCKER:-docker}"
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 STRESS="/opt/cassandra/tools/bin/cassandra-stress"
 # -(2^63): the low end of the murmur3 ring. 2^64/100 = 184467440737095516 is
 # one percent of its width (hardcoded: 2**64 overflows bash's int64 arithmetic).
@@ -115,16 +166,23 @@ validate_inputs() {
   [[ "$CORPUS_ROOT" == /* ]] || die "CORPUS_ROOT must be an absolute path, got '$CORPUS_ROOT'"
   [[ "$(printf '%s' "$CORPUS_ROOT" | sed 's:/*$::')" != "" ]] || die "refusing to use '/' as CORPUS_ROOT"
   [[ -n "${KS// }" && -n "${TBL// }" ]] || die "keyspace/table is empty"
-  for v in WIDE_PARTITIONS OVERLAP_PCT RF STRESS_THREADS MIN_DATA_DB SLICE_PCT SLICE_LIMIT NEED_GIB; do
+  for v in WIDE_PARTITIONS OVERLAP_PCT RF STRESS_THREADS MIN_DATA_DB MAX_DATA_DB SLICE_PCT SLICE_LIMIT NEED_GIB; do
     [[ "${!v}" =~ ^[0-9]+$ ]] || die "$v must be a non-negative integer, got '${!v}'"
   done
   [[ "$WIDE_PARTITIONS" -ge 1000 ]] || die "WIDE_PARTITIONS=$WIDE_PARTITIONS is too small to bench"
   (( OVERLAP_PCT >= 1 && OVERLAP_PCT <= 100 )) || die "OVERLAP_PCT must be 1..100, got $OVERLAP_PCT"
   (( SLICE_PCT >= 1 && SLICE_PCT <= 100 )) || die "SLICE_PCT must be 1..100, got $SLICE_PCT"
   (( MIN_DATA_DB >= 2 )) || die "MIN_DATA_DB must be >= 2 (a 1-SSTable corpus benches a merge-free path)"
+  (( MAX_DATA_DB >= MIN_DATA_DB )) || die "MAX_DATA_DB=$MAX_DATA_DB is below MIN_DATA_DB=$MIN_DATA_DB"
+  for v in COMPACT_GEN1 COMPACT_GEN2; do
+    [[ "${!v}" == "0" || "${!v}" == "1" ]] || die "$v must be 0 or 1, got '${!v}'"
+  done
+  [[ -n "${CORPUS_VARIANT// }" ]] || die "CORPUS_VARIANT is empty"
+  [[ -r "$SCRIPT_DIR/read-compression-info.py" ]] \
+    || die "missing $SCRIPT_DIR/read-compression-info.py — the LZ4 verification cannot be skipped"
   GEN2_PARTITIONS=$(( WIDE_PARTITIONS * OVERLAP_PCT / 100 ))
   [[ "$GEN2_PARTITIONS" -ge 1 ]] || die "generation 2 would be empty"
-  log "validated: $KS.$TBL gen1=$WIDE_PARTITIONS parts (~$((WIDE_PARTITIONS * 10)) rows), gen2=$GEN2_PARTITIONS parts (${OVERLAP_PCT}% overlap), RF=$RF, CORPUS_ROOT=$CORPUS_ROOT"
+  log "validated: $KS.$TBL gen1=$WIDE_PARTITIONS parts (~$((WIDE_PARTITIONS * 10)) rows), gen2=$GEN2_PARTITIONS parts (${OVERLAP_PCT}% overlap), RF=$RF (nominal), variant=$CORPUS_VARIANT, compact gen1=$COMPACT_GEN1 gen2=$COMPACT_GEN2, k band ${MIN_DATA_DB}..${MAX_DATA_DB}, CORPUS_ROOT=$CORPUS_ROOT"
 }
 
 preflight_space() {
@@ -257,6 +315,50 @@ stress_gen() {  # $1 = generation label, $2 = partitions (seeds 1..$2)
   log "[$gen] flushed"
 }
 
+# ------------------------------------------------------------- k-depth control --
+# Wait for the compaction queue to drain. A `nodetool compact` returns before the
+# obsoleted inputs are unlinked, so a Data.db count taken too early is a lie.
+wait_compactions() {
+  local pending
+  for _ in $(seq 1 720); do
+    pending=$($DOCKER exec "$CONTAINER" nodetool compactionstats 2>/dev/null \
+      | awk '/pending tasks:/ {print $3; exit}')
+    [[ "${pending:-1}" == "0" ]] && { sleep 3; return 0; }
+    sleep 5
+  done
+  die "compactions did not drain within 3600s"
+}
+
+# WHOLE-TABLE major compaction. Only ever safe BEFORE generation 2 exists — after
+# that it would merge the generations into one SSTable and destroy the overlap.
+compact_table_major() {
+  log "[compact] MAJOR compaction of $KS.$TBL (generation 1 only — gen2 does not exist yet)"
+  local t0 t1
+  t0=$(date +%s)
+  $DOCKER exec "$CONTAINER" nodetool compact "$KS" "$TBL" || die "major compaction failed"
+  wait_compactions
+  t1=$(date +%s)
+  log "[compact] major compaction took $((t1 - t0))s"
+}
+
+# Compaction SCOPED to an explicit file list (generation 2's flush files), so the
+# generation-1 SSTable is left untouched and the overlap survives.
+compact_user_defined() {  # $@ = absolute in-container Data.db paths
+  [[ $# -gt 0 ]] || die "compact_user_defined called with no files"
+  log "[compact] user-defined compaction of $# generation-2 file(s)"
+  local t0 t1
+  t0=$(date +%s)
+  $DOCKER exec "$CONTAINER" nodetool compact --user-defined "$@" \
+    || die "user-defined compaction failed"
+  wait_compactions
+  t1=$(date +%s)
+  log "[compact] user-defined compaction took $((t1 - t0))s"
+}
+
+list_data_db() {  # $1 = container dir; one absolute path per line
+  $DOCKER exec "$CONTAINER" bash -lc "ls '$1'/*-Data.db 2>/dev/null" | tr -d '\r'
+}
+
 container_table_dir() {
   $DOCKER exec "$CONTAINER" bash -lc "ls -d /var/lib/cassandra/data/$KS/$TBL-* | head -1" | tr -d '\r'
 }
@@ -279,6 +381,34 @@ slice_probe() {  # $1 = gen2 start timestamp in microseconds (0 before gen2)
   printf '%s\n' "$out" | awk -v since="$since" '
     $1 ~ /^[0-9]+$/ && NF == 1 { n++; if (since > 0 && $1 + 0 >= since) g2++ }
     END { printf "%d %d\n", n, g2 }'
+}
+
+# ------------------------------------------------------- compression verifier --
+# LZ4 is load-bearing for this corpus (see header). Verify it from the
+# AUTHORITATIVE written component — CompressionInfo.db, parsed by
+# read-compression-info.py — not from the DDL, which a later schema change or a
+# Cassandra-side clamp could make a lie. Fails closed; also emits a TSV the
+# manifest records per file.
+verify_compression() {  # $1 = published dir, $2 = destination tsv
+  local dest="$1" out="$2" n=0 data ci info comp chunk
+  : > "$out"
+  shopt -s nullglob
+  for data in "$dest"/*-Data.db; do
+    ci="${data%-Data.db}-CompressionInfo.db"
+    [[ -f "$ci" ]] \
+      || die "no CompressionInfo.db beside $(basename "$data") — this corpus is NOT compressed, which would understate decode cost and overstate the vectorized-exec share"
+    info="$(python3 "$SCRIPT_DIR/read-compression-info.py" "$ci" --json)" \
+      || die "could not parse $(basename "$ci")"
+    comp="$(printf '%s' "$info" | python3 -c 'import json,sys; print(json.load(sys.stdin)["compressor"])')"
+    chunk="$(printf '%s' "$info" | python3 -c 'import json,sys; print(json.load(sys.stdin)["chunk_length_bytes"])')"
+    [[ "$comp" == "LZ4Compressor" ]] || die "$(basename "$data") is compressed with '$comp', expected LZ4Compressor"
+    [[ "$chunk" == "16384" ]] || die "$(basename "$data") has chunk_length=$chunk bytes, expected 16384 (16 KiB)"
+    printf '%s\t%s\t%s\n' "$(basename "$data")" "$comp" "$chunk" >> "$out"
+    n=$((n + 1))
+  done
+  shopt -u nullglob
+  [[ "$n" -gt 0 ]] || die "verify_compression found no Data.db under $dest"
+  log "VERIFIED compression: $n/$n Data.db are LZ4Compressor @ chunk_length=16384 B (from CompressionInfo.db, not the DDL)"
 }
 
 capture_schema() {  # $1 = destination file
@@ -344,7 +474,7 @@ publish() {  # $1 = container sstable dir; echoes the published dir
 # ---------------------------------------------------------------------- main --
 validate_inputs
 if [[ "$VALIDATE_ONLY" == 1 ]]; then
-  echo "VALIDATE-OK table=$KS.$TBL gen1_partitions=$WIDE_PARTITIONS gen2_partitions=$GEN2_PARTITIONS corpus_root=$CORPUS_ROOT"
+  echo "VALIDATE-OK table=$KS.$TBL gen1_partitions=$WIDE_PARTITIONS gen2_partitions=$GEN2_PARTITIONS variant=$CORPUS_VARIANT k_band=${MIN_DATA_DB}..${MAX_DATA_DB} corpus_root=$CORPUS_ROOT"
   exit 0
 fi
 
@@ -357,8 +487,23 @@ stress_gen gen1 "$WIDE_PARTITIONS"
 GEN1_SECONDS="$GEN_SECONDS"
 CDIR="$(container_table_dir)"
 [[ -n "$CDIR" ]] || die "could not locate the container's $KS/$TBL directory"
+GEN1_FLUSH_DATA_DB=$(data_db_count "$CDIR")
+log "[gen1] Data.db count after flush: $GEN1_FLUSH_DATA_DB"
+
+# Step 1 of the k-depth control: collapse generation 1 to ONE SSTable while there
+# is still no generation 2 to lose.
+if [[ "$COMPACT_GEN1" == 1 ]]; then
+  compact_table_major
+fi
 GEN1_DATA_DB=$(data_db_count "$CDIR")
-log "[gen1] Data.db count: $GEN1_DATA_DB"
+log "[gen1] Data.db count after compaction: $GEN1_DATA_DB"
+if [[ "$COMPACT_GEN1" == 1 ]]; then
+  [[ "$GEN1_DATA_DB" == "1" ]] \
+    || die "[gen1] expected exactly 1 Data.db after the major compaction, found $GEN1_DATA_DB"
+fi
+# Remembered so generation 2's files can be identified by difference — the only
+# way to scope the second compaction without touching generation 1.
+GEN1_FILES="$(list_data_db "$CDIR")"
 
 read -r SLICE_ROWS_GEN1 _ < <(slice_probe 0)
 log "[gen1] token-slice probe (${SLICE_PCT}% of ring): $SLICE_ROWS_GEN1 rows"
@@ -370,16 +515,37 @@ GEN2_START_US=$(( $(date +%s) * 1000000 ))
 sleep 2
 stress_gen gen2 "$GEN2_PARTITIONS"
 GEN2_SECONDS="$GEN_SECONDS"
-GEN2_DATA_DB=$(data_db_count "$CDIR")
-log "[gen2] Data.db count: $GEN2_DATA_DB"
+GEN2_FLUSH_DATA_DB=$(data_db_count "$CDIR")
+log "[gen2] Data.db count after flush: $GEN2_FLUSH_DATA_DB"
 
+# Step 2: compact ONLY generation 2's flush files. NEVER `nodetool compact <ks>
+# <tbl>` here — that would merge the generations and destroy the overlap.
+declare -a GEN2_FILES=()
+while read -r f; do
+  [[ -n "$f" ]] || continue
+  grep -Fxq "$f" <<<"$GEN1_FILES" || GEN2_FILES+=("$f")
+done < <(list_data_db "$CDIR")
+log "[gen2] ${#GEN2_FILES[@]} new file(s) belong to generation 2"
+[[ "${#GEN2_FILES[@]}" -ge 1 ]] || die "[gen2] no new SSTable appeared — the second generation did not land"
+if [[ "$COMPACT_GEN2" == 1 && "${#GEN2_FILES[@]}" -gt 1 ]]; then
+  compact_user_defined "${GEN2_FILES[@]}"
+fi
+GEN2_DATA_DB=$(data_db_count "$CDIR")
+log "[gen2] Data.db count after compaction: $GEN2_DATA_DB"
+
+# Re-measured AFTER both compactions: the point is to prove the overlap SURVIVED
+# them, so an earlier measurement would prove nothing about the published bytes.
 read -r SLICE_ROWS_GEN2 SLICE_ROWS_NEW < <(slice_probe "$GEN2_START_US")
 log "[gen2] token-slice probe: $SLICE_ROWS_GEN2 rows, $SLICE_ROWS_NEW of them written by generation 2"
 
 # ------------------------------------------------------------------- asserts --
-# (1) The generations must not have been merged away.
+# (1) Merge depth must be the shape the issue asks for: at least 2 SSTables so a
+#     merge runs at all, at most MAX_DATA_DB so an accidental k=25 does not
+#     inflate the shared decode+merge floor (see K-DEPTH CONTROL in the header).
 [[ "$GEN2_DATA_DB" -ge "$MIN_DATA_DB" ]] \
   || die "only $GEN2_DATA_DB Data.db file(s) survive (need >= $MIN_DATA_DB) — a merge-free corpus benches the wrong path"
+[[ "$GEN2_DATA_DB" -le "$MAX_DATA_DB" ]] \
+  || die "$GEN2_DATA_DB Data.db files survive (max $MAX_DATA_DB) — a deeper merge than the issue's 2-generation shape biases the vectorized-exec share downward"
 # (2) Generation 2 must have REWRITTEN generation-1 partitions, not appended new
 #     ones: a rewrite leaves the slice's row count unchanged, disjoint keys would
 #     raise it by ~OVERLAP_PCT.
@@ -398,6 +564,8 @@ capture_sstable_timestamps "$CDIR" "$CORPUS_ROOT/sstable-timestamps.tsv"
 DEST="$(publish "$CDIR" | tail -1)"
 cp "$CORPUS_ROOT/schema.cql" "$DEST/schema.cql"
 log "published -> $DEST"
+# Fails closed if the published bytes are not LZ4 @ 16 KiB chunks.
+verify_compression "$DEST" "$CORPUS_ROOT/compression-info.tsv"
 
 # ------------------------------------------------------------------ manifest --
 # Written ONLY next to the corpus. Nothing in the repo is touched.
