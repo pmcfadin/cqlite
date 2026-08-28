@@ -4800,13 +4800,23 @@ if [ "$_wr_real_writes" -eq 1 ]; then
 else
   bad "structural (#3367): WRAPPER_REAL is assigned $_wr_real_writes times; it must be written exactly once"
 fi
-# BEHAVIOURAL: poison `WRAPPER` and re-run the classifier scan both ways.
+# BEHAVIOURAL: poison `WRAPPER` and run the classifier filter over both paths.
+#
+# THE NEEDLE IS A SYNTHETIC SENTINEL, NOT A REAL RETIRED TOKEN, and that is a correctness
+# requirement rather than tidiness. The first version poisoned with `mixed-delivery`; when a RED
+# rehearsal injected a genuine reintroduction into the real wrapper, this pin ALSO fired and said
+# "the scan via $WRAPPER_REAL picked up the poisoned copy" — blaming path instability for what was
+# actually a dirty subject. A diagnostic that names the wrong cause under a real defect sends its
+# reader ~2000 lines away from the problem, which is precisely how #3367 cost two lanes their gate
+# budget. A sentinel that CANNOT occur in a real flow script makes the two conditions independent:
+# a hit via $WRAPPER_REAL can only mean the immutable path resolved to the poisoned copy.
+_wr_sentinel='ROBOREV_ORDER_DEP_PROBE_'"3367"
 _wr_poison_dir="$tmp/wrapper-poison"
 mkdir -p "$_wr_poison_dir"
 {
   printf '%s\n' '#!/usr/bin/env bash'
-  # An EXECUTABLE reintroduction, not prose: an assignment the awk filter cannot exempt.
-  printf '%s\n' 'ROBOREV_DIFF_SOURCE_STATE="mixed-delivery"'
+  # An EXECUTABLE line, not prose and not a --help heredoc: the filter must keep it.
+  printf '%s=inline\n' "$_wr_sentinel"
 } >"$_wr_poison_dir/roborev-review.sh"
 _wr_saved="$WRAPPER"
 WRAPPER="$_wr_poison_dir/roborev-review.sh"
@@ -4814,14 +4824,21 @@ _cls_via_real=$(_cls_exec_lines "$ORACLES" "$CHECKS_FILE" "$WRAPPER_REAL")
 _cls_via_mutable=$(_cls_exec_lines "$ORACLES" "$CHECKS_FILE" "$WRAPPER") # wrapper-mutable-read-allow: reading the poisoned path IS this probe
 WRAPPER="$_wr_saved"
 _wr_real_hit=no; _wr_mut_hit=no
-case "$_cls_via_real"    in *'mixed-delivery'*) _wr_real_hit=yes ;; esac
-case "$_cls_via_mutable" in *'mixed-delivery'*) _wr_mut_hit=yes ;; esac
+case "$_cls_via_real"    in *"$_wr_sentinel"*) _wr_real_hit=yes ;; esac
+case "$_cls_via_mutable" in *"$_wr_sentinel"*) _wr_mut_hit=yes ;; esac
 if [ "$_wr_real_hit" = no ] && [ "$_wr_mut_hit" = yes ]; then
-  ok 'behavioural (#3367): with $WRAPPER poisoned, the scan via $WRAPPER_REAL is unaffected while the same scan via $WRAPPER flags it — the immutable path is what makes the verdict stable, and the scan is demonstrably not blind'
+  ok 'behavioural (#3367): with $WRAPPER poisoned, the same filter reports the sentinel via $WRAPPER and NOT via $WRAPPER_REAL — the immutable path is what makes the verdict stable, and the scan is demonstrably not blind'
 elif [ "$_wr_mut_hit" = no ]; then
-  bad 'behavioural (#3367): the poisoned wrapper was NOT flagged even when scanned directly, so this case cannot show anything about path stability (the fixture or the filter is wrong)'
+  bad 'behavioural (#3367): the poisoned wrapper was NOT flagged even when scanned directly, so this case shows nothing about path stability (the fixture or the executable-line filter is wrong, not the paths)'
 else
-  bad 'behavioural (#3367): the scan via $WRAPPER_REAL picked up the poisoned copy, so it is still reading a mutable path'
+  bad 'behavioural (#3367): a sentinel that exists ONLY in the poisoned scratch copy was found via $WRAPPER_REAL, so the immutable path is not immutable'
+fi
+# The restore must have happened, or every later case silently audits the scratch copy — the exact
+# failure mode this section exists to prevent, reintroduced by the pin that tests for it.
+if [ "$WRAPPER" = "$_wr_saved" ]; then # wrapper-mutable-read-allow: asserting the restore requires reading it
+  ok 'behavioural (#3367): the probe restored $WRAPPER, so no later case inherits the poisoned path'
+else
+  bad 'behavioural (#3367): the probe left $WRAPPER pointing at its scratch copy'
 fi
 
 # ===== ABSENCE IS A FAIL, AND THE WAIVER IS THE ONLY WAY PAST IT =====
