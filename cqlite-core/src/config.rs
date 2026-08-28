@@ -849,19 +849,30 @@ impl Config {
         // rejected while the memtable sits below the flush threshold, and
         // retrying it is rejected forever.
         //
-        // NO INEQUALITY BETWEEN THESE TWO KNOBS CAN CLOSE THAT, which is why this
-        // rule deliberately still admits equality rather than being tightened to
-        // `>`: with one byte of headroom a 3-byte mutation wedges, and at the
-        // DEFAULT 64 MiB/256 MiB a ~192 MiB mutation wedges. The wedge is a
-        // function of the largest single mutation, which config cannot know, so a
-        // stricter bound here would reject working configurations while still
-        // promising nothing. The fix belongs in admission (flush a nonempty
-        // memtable before rejecting a mutation that fits by itself) — #3404.
-        if self.storage.memtable_hard_limit < self.storage.memtable_size_threshold {
+        // NO INEQUALITY BETWEEN THESE TWO KNOBS CAN CLOSE THAT: with one byte of
+        // headroom a 3-byte mutation still wedges, and the wedge is a function of
+        // the largest single mutation, which config cannot know. So this rule is
+        // NOT a wedge-freedom guarantee and must not be read as one; #3404 owns
+        // the real fix (flush a nonempty memtable before rejecting a mutation
+        // that fits by itself).
+        //
+        // It nonetheless requires STRICT headroom, because equality is
+        // qualitatively worse than any positive headroom rather than merely one
+        // step along a continuum. For a mutation of `m` bytes the wedge window is
+        // `m - headroom` bytes wide, so at equality an ORDINARY 4 KiB write
+        // wedges over a 4 KiB window of memtable sizes — a state normal operation
+        // passes through routinely — while at the default 192 MiB of headroom
+        // even a 64 MiB mutation cannot wedge at all. Equality also has no
+        // legitimate use: it asks the engine to flush at exactly the size where
+        // it must instead reject. Rejecting it removes the only regime in which
+        // everyday writes livelock, which is worth doing even though it proves
+        // nothing about the general case.
+        if self.storage.memtable_hard_limit <= self.storage.memtable_size_threshold {
             return Err(crate::Error::configuration(format!(
-                "memtable_hard_limit ({} bytes) must be >= memtable_size_threshold \
-                 ({} bytes); a lower ceiling rejects writes before a flush can \
-                 relieve the memtable",
+                "memtable_hard_limit ({} bytes) must be strictly greater than \
+                 memtable_size_threshold ({} bytes); with no headroom between them \
+                 an ordinary write is rejected at the ceiling while the memtable \
+                 sits below the flush trigger, and retrying it never recovers",
                 self.storage.memtable_hard_limit, self.storage.memtable_size_threshold
             )));
         }

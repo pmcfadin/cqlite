@@ -126,7 +126,7 @@ def _preset_with_limits(hard_limit: int, threshold: int) -> dict:
     knobs set.
 
     Both are set together so the dict is INTERNALLY VALID: ``Config::validate``
-    rejects ``hard_limit < memtable_size_threshold`` outright (a wedged engine),
+    rejects ``hard_limit <= memtable_size_threshold`` outright (a wedged engine),
     and that rejection would mask the ``flush_threshold`` ceiling check these
     tests are actually about.
     """

@@ -104,10 +104,13 @@ exactly one literal, in `Config::default()`:
 | `compaction_min_threshold` | `storage.compaction.min_threshold` | 4 | STCS eligibility bar |
 | `compaction_max_threshold` | `storage.compaction.max_threshold` | 32 | STCS merge width cap |
 
-`Config::validate()` enforces `memtable_hard_limit >= memtable_size_threshold`
-(a lower ceiling wedges the engine: writes are rejected before a flush can
-relieve the memtable), `compaction.min_threshold > 0`, and
-`compaction.max_threshold >= min_threshold`.
+`Config::validate()` enforces `memtable_hard_limit > memtable_size_threshold`
+(a ceiling at or below the flush threshold wedges the engine: writes are rejected
+before a flush can relieve the memtable, and with zero headroom an ordinary write
+does it), `compaction.min_threshold > 0`, and
+`compaction.max_threshold >= min_threshold`. The memtable bound is STRICT; it is
+not a wedge-freedom guarantee, because a single mutation larger than the headroom
+still wedges — see #3404.
 
 **Constants**: none remain for the above. `DEFAULT_FLUSH_THRESHOLD`,
 `DEFAULT_HARD_LIMIT`, `DEFAULT_COMPACTION_MIN_THRESHOLD` and

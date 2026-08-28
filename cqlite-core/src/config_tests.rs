@@ -374,11 +374,12 @@ fn retained_budget_knob_deserializes_and_validates() {
 
 // ---- issue #1697 (AH4): the write-path knobs the public Config newly owns ----
 
-/// Item 5: `memtable_hard_limit >= memtable_size_threshold`. A lower ceiling
-/// wedges the engine — `check_admission` rejects the write before a flush can
-/// relieve the memtable — so it must be rejected at config time.
+/// Item 5: `memtable_hard_limit > memtable_size_threshold`, STRICTLY. A ceiling
+/// at or below the flush threshold wedges the engine — `check_admission` rejects
+/// the write before a flush can relieve the memtable — so it must be rejected at
+/// config time.
 #[test]
-fn hard_limit_below_flush_threshold_is_rejected_and_names_both_values() {
+fn hard_limit_not_above_flush_threshold_is_rejected_and_names_both_values() {
     let mut config = Config::default();
     config.storage.memtable_size_threshold = 64 * 1024 * 1024;
     config.storage.memtable_hard_limit = 32 * 1024 * 1024;
@@ -391,12 +392,33 @@ fn hard_limit_below_flush_threshold_is_rejected_and_names_both_values() {
     assert!(err.contains(&(64 * 1024 * 1024).to_string()), "{err}");
     assert!(err.contains(&(32 * 1024 * 1024).to_string()), "{err}");
 
-    // Equality is the boundary and is ALLOWED: a memtable that flushes exactly
-    // at its ceiling is tight but coherent.
+    // Equality is REJECTED (#1697 roborev r2). It was previously accepted as
+    // "tight but coherent"; that was wrong, and measurably so. With zero headroom
+    // the wedge window for a mutation of `m` bytes is `m` bytes wide, so an
+    // ORDINARY 4 KiB write livelocks whenever the memtable sits within 4 KiB
+    // below the threshold — a state normal operation passes through routinely:
+    // admission rejects at the ceiling, the memtable never reaches the flush
+    // trigger, and retrying never recovers. Equality also asks the engine to
+    // flush at exactly the size at which it must instead reject, which no
+    // legitimate configuration wants.
     config.storage.memtable_hard_limit = config.storage.memtable_size_threshold;
+    let err = config
+        .validate()
+        .expect_err("hard_limit == memtable_size_threshold leaves no headroom")
+        .to_string();
+    assert!(
+        err.contains("strictly greater"),
+        "the rejection must say the bound is STRICT, not merely name the rule: {err}"
+    );
+
+    // ...and one byte of headroom is accepted, so the rule is a boundary and not
+    // a blanket refusal. This is deliberately NOT a wedge-freedom claim: a
+    // mutation larger than the headroom still wedges, which is #3404's subject,
+    // not this rule's.
+    config.storage.memtable_hard_limit = config.storage.memtable_size_threshold + 1;
     config
         .validate()
-        .expect("hard_limit == memtable_size_threshold must be accepted");
+        .expect("one byte of headroom is a coherent, if tight, configuration");
 }
 
 /// Item 5: `compaction.min_threshold > 0`. STCS with a zero eligibility bar is

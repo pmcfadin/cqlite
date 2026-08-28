@@ -117,11 +117,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - **`Config::validate()` gained three rejection rules, so configs that
     previously validated can now be rejected** — each one a state that wedges or
     OOMs the write engine rather than merely being odd:
-    `memtable_hard_limit >= memtable_size_threshold` (a lower ceiling rejects
-    writes before a flush can relieve the memtable),
+    `memtable_hard_limit > memtable_size_threshold` (a ceiling at or below the
+    flush threshold rejects writes before a flush can relieve the memtable),
     `compaction.min_threshold > 0`, and
-    `compaction.max_threshold >= min_threshold`. Equality is allowed in both
-    ordering rules. A fourth rule rejects a memtable byte count above the
+    `compaction.max_threshold >= min_threshold`. The memtable rule is STRICT —
+    equality leaves no headroom, so an ordinary write is rejected at the ceiling
+    while the memtable never reaches the flush trigger — while the compaction
+    rule allows equality. Note the memtable rule is not a wedge-freedom
+    guarantee: a single mutation larger than the headroom still wedges, which is
+    an engine-side defect tracked as #3404. A fourth rule rejects a memtable byte count above the
     target's `usize::MAX`, reachable only on 32-bit/wasm32, where the value would
     otherwise land on `usize::MAX` and never flush AND never reject.
   - **Removed with no deprecation shim**: the four public constants

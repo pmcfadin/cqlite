@@ -11,7 +11,7 @@
 //! `Database::open` does not validate either. So the CLI validates here, at the
 //! point where it assembles the config.
 //!
-//! The rule that bites is `memtable_hard_limit >= memtable_size_threshold`:
+//! The rule that bites is `memtable_hard_limit > memtable_size_threshold`:
 //! `CQLITE_MEMTABLE_FLUSH_THRESHOLD=300000000` asks for a 300MB flush threshold
 //! above the 256MB admission ceiling, which wedges the engine permanently —
 //! auto-flush never fires, and `check_admission` rejects every write once the
