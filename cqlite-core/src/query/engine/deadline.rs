@@ -381,6 +381,28 @@ impl AdvancedQueryEngine {
     /// `params.len()` is an error, and markers `== 0` with a **non-empty**
     /// `params` is also an error (a supplied parameter with no placeholder is a
     /// caller bug).
+    ///
+    /// Carries its OWN `query.execute` span (roborev round 13). On `origin/main` the
+    /// markerless empty-`params` case delegated to [`Self::execute`] and inherited the
+    /// span from it; #1695 re-pointed that delegation at the UNBOUNDED
+    /// `execute_with_params_inner` so one call is bounded exactly once, and that
+    /// silently took the span with it — those queries lost their parent span and the
+    /// plan/access-path/row attributes `update_execution_stats` records on it.
+    ///
+    /// The lesson is structural, not local: the tracing wrapper and the deadline were
+    /// both hung on `execute`, so routing around one to avoid double-bounding routed
+    /// around the other too. A span belongs to the ENTRY POINT; the bound belongs to
+    /// the budget. Any future entry point added here owes itself a span for the same
+    /// reason.
+    #[tracing::instrument(
+        name = "query.execute",
+        skip(self, cql, params),
+        fields(
+            cqlite.query.plan_type = tracing::field::Empty,
+            cqlite.query.access_path = tracing::field::Empty,
+            cqlite.query.rows = tracing::field::Empty,
+        )
+    )]
     pub async fn execute_with_params(&self, cql: &str, params: &[Value]) -> Result<QueryResult> {
         self.bounded(
             "query.execute_with_params",
