@@ -22,25 +22,34 @@ The gap is +6,707 cycles/row. Flight-marginal code accounts for **3,842**. A fur
 ~41% is allocator work. The issue anticipated the shared/marginal split; it did not anticipate that a
 quarter of the gap would be identical code costing more.
 
-**And "identical" is now verified at the machine-code level, which makes the effect larger, not
-smaller.** The two arms are *different binaries* (`ws0-scan-bench` vs `cqlite-flight`) and the shared
-bucket is assigned by *symbol presence*, so "identical code" was a claim about codegen resting on
-evidence about names — different inlining per binary was a live competing explanation. Measured by
-disassembling every shared symbol in both binaries
-([`ac1/codegen-identity.py`](ws0-3248-artifacts/ac1/codegen-identity.py)): **291 of 363 (80%) have an
-identical instruction sequence**, and partitioning the excess by that fact *sharpens* it:
+**And "identical" has now been checked at the machine-code level, which sharpens the effect but
+shrinks its scope.** The two arms are *different binaries* (`ws0-scan-bench` vs `cqlite-flight`) and
+the shared bucket is assigned by *symbol presence*, so "identical code" was a claim about codegen
+resting on evidence about names — different inlining per binary was a live competing explanation.
+Measured by disassembling every shared symbol in both binaries and comparing operands with only the
+relocatable parts normalized ([`ac1/codegen-identity.py`](ws0-3248-artifacts/ac1/codegen-identity.py)):
+**136 of 363 (37%) are operand-identical**, and partitioning the excess by that fact gives:
 
 | shared sub-bucket | scan | Flight | excess |
 |---|---|---|---|
 | SHARED total | 7,327 | 8,879 | **+21.2%** |
-| **verified-identical instructions** | 2,658 | 4,106 | **+54.5%** |
-| different machine code | 4,372 | 4,767 | +9.0% |
+| **operand-identical** (136 syms, lower bound) | 1,133 | 2,008 | **+77.1%** |
+| different machine code (227 syms, upper bound) | 5,897 | 6,865 | +16.4% |
 
-The excess is **concentrated in provably identical instruction sequences** (+54.5%), while the
-differently-compiled functions cost only +9.0% more. So the published 21.5% *understated* the
-identical-code effect by averaging the two together, and **different codegen is excluded as the
-explanation**: same instructions, same work, 54.5% more cycles points at the memory system, which is
-what the bytes-touched differential independently measures.
+**The excess is concentrated in provably identical code — +77.1% where the instructions, registers
+and immediates all match.** But that bucket is only ~6–7% of self-time, so identical code accounts
+for **+875 cyc/row of the +6,707 gap (~13%)**, not the ~24% the shared bucket as a whole represents.
+
+**Two corrections to earlier versions of this paragraph, both found by review, because the oracle was
+wrong twice.** A *byte* comparison is far too strict (only 15/363 match, since operands relocate
+between binaries) and a *mnemonic* comparison is too loose (it reported 291/363, of which 155 are
+not — 49 differ in a register or a real immediate). The figures above come from the third oracle.
+Correspondingly, **the earlier claim that "different codegen is excluded as the explanation" is
+withdrawn**: 227 of 363 shared symbols *do* differ in machine code and they carry the majority of
+shared self-time, so their +16.4% excess may be partly codegen. What survives is narrower and still
+the interesting result: for the subset where the code is provably the same, the Flight arm pays
+**+77.1%**, which is a memory-system signature and is what the bytes-touched differential
+independently measures. 136 is a lower bound, so a tighter oracle could only enlarge that subset.
 
 **2. The shared-path lever inversion is now a measured number, not an argument.**
 The issue's central warning was that a shared-path lever "could be the largest absolute throughput win
@@ -131,11 +140,13 @@ five were this lane's own.
 path — and it moves the ratio adversely, so it belongs to a programme measured in box-level rows/s,
 not to the ratio.
 
-**The unexplored ~24%** — identical code costing more on the Flight arm — is the most interesting
-unpriced quantity here, and it is now sharper than "21.5%": restricted to the 291 shared symbols with
-a **verified-identical instruction sequence**, the penalty is **+54.5%** (2,658 → 4,106 cyc/row). Same
-instructions, same work, half again the cycles. The bytes-touched differential points at locality as
-the cause and codegen is now excluded as an alternative. It is not any of the three named levers.
+**The unexplored ~24%** — shared code costing more on the Flight arm — is the most interesting
+unpriced quantity here, and it splits into two unequal parts. Restricted to the **136** shared symbols
+that are **operand-identical**, the penalty is **+77.1%** (1,133 → 2,008 cyc/row): same instructions,
+same registers, same immediates, nearly double the cycles. That is a memory-system signature, and the
+bytes-touched differential points the same way. The remaining 227 symbols do differ in machine code
+and carry more of the weight at a smaller +16.4%, where codegen and locality cannot be separated by
+this measurement. Neither part is any of the three named levers.
 
 **#3288 is partly unblocked and partly hardware-blocked.** It now has a per-row footprint (23,745 B
 at the L2 boundary), but its "fit ~1/6 of 54 MiB LLC" target is an LLC-boundary constraint this host

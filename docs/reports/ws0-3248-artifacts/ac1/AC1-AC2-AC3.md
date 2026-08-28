@@ -89,47 +89,56 @@ buffers, and SMT contention — #3096's pinning puts the `spawn_blocking` merge/
 async gRPC framing thread on **one physical core's two hyperthreads** (`taskset -c 2,10`). That is a
 hypothesis this profile cannot settle; it is recorded as the next question, not an answer.
 
-#### "Same shared code" is verified at the machine-code level, and that makes it +54.5%
+#### "Same shared code" checked at the machine-code level: +77.1% on the part that provably matches
 
 The bucket above is assigned by **symbol presence** (`aggregate-profiles.py`), and the two arms are
 **different binaries** — `ws0-scan-bench` and `cqlite-flight`. A shared symbol is therefore the same
 *source function*; nothing in that establishes the same *machine code*, since each binary inlines and
-specialises independently. So the phrase "same shared code" was a claim about codegen supported by
-evidence about names, and **different codegen was a live competing explanation** for the excess.
+specialises independently. So "same shared code" was a claim about codegen supported by evidence about
+names, and **different codegen was a live competing explanation** for the excess.
 
-Settled by disassembling every shared symbol in both binaries
-([`codegen-identity.py`](codegen-identity.py)):
+Checked by disassembling every shared symbol in both binaries and comparing mnemonic **and operands**,
+normalizing only what must relocate ([`codegen-identity.py`](codegen-identity.py)):
 
 | | count | share |
 |---|---|---|
 | shared symbols present in both binaries | 363 | |
-| **verified-identical instruction sequence** | **291** | **80%** |
-| different machine code | 72 | 20% |
-
-Partitioning the excess by that fact **sharpens** it rather than dissolving it:
+| **operand-identical** (lower bound) | **136** | **37%** |
+| different machine code (upper bound) | 227 | 63% |
 
 | shared sub-bucket | scan cyc/row | Flight cyc/row | excess |
 |---|---|---|---|
 | SHARED total | 7,327 | 8,879 | **+21.2%** |
-| **verified-identical instructions** | 2,658 | 4,106 | **+54.5%** |
-| different machine code | 4,372 | 4,767 | +9.0% |
+| **operand-identical** | 1,133 | 2,008 | **+77.1%** |
+| different machine code | 5,897 | 6,865 | +16.4% |
 
 (The SHARED total re-derives the 21.2% headline from an independent path — flat profiles × profiled
 cyc/row — which is a useful cross-check on the bucket arithmetic.)
 
-**The excess is concentrated in provably identical instruction sequences.** The 21.5% figure
-understated the identical-code effect by averaging it with the differently-compiled functions, and
-**codegen is excluded as the cause**: same instructions, same work, 54.5% more cycles. That points at
-the memory system, which is what the bytes-touched differential measures independently — and it
-promotes cache pressure from "candidate cause" to the surviving explanation, while leaving SMT
-contention untested.
+**Where the code provably matches, the Flight arm pays +77.1%** — same instructions, same registers,
+same immediates, nearly double the cycles. That is a memory-system signature and the bytes-touched
+differential points the same way. But the identical subset is only ~6–7% of self-time, so it accounts
+for **+875 of the +6,707 cyc/row gap (~13%)**.
 
-**Bytes would have been the wrong oracle**, by as much in the other direction: only **15** of 363
-shared symbols are byte-identical, because call targets and PC-relative operands relocate differently
-in two binaries. Of the 295 same-size symbols, **291 have an identical mnemonic sequence** — same
-instructions, different operands. A byte comparison would have reported "4% identical" and been the
-same species of error as the claim it replaced. Size alone is also insufficient: 4 same-size symbols
-*do* differ in mnemonics, so both checks are applied.
+**THE ORACLE WAS WRONG TWICE, IN OPPOSITE DIRECTIONS, AND BOTH ARE RECORDED.** Each looked obviously
+right while it was in use, and each was caught by review rather than by re-reading:
+
+| oracle | verdict | why it is wrong |
+|---|---|---|
+| byte equality | 15/363 identical | far too **strict** — call targets and `%rip` displacements relocate between binaries even when the instruction stream is the same |
+| mnemonic sequence | 291/363 identical | too **loose** — discards operands, so a different register, immediate or callee compares equal. 155 of those 291 are not identical; **49** differ in a register or a real immediate |
+| **normalized operands** | **136/363 identical** | compares operands, normalizing only intra-function branch offsets, external callee *names*, and `%rip` displacements |
+
+**And one claim is withdrawn, not merely refined.** An earlier version of this section said "codegen
+is excluded as the cause". It is not: 227 of 363 shared symbols *do* differ in machine code and they
+carry the majority of shared self-time, so their +16.4% excess may be partly codegen. Locality is
+established for the operand-identical subset only.
+
+**The residual, stated rather than resolved.** 136 is a **lower** bound and 227 an **upper** bound: the
+largest divergence class is a differing *target symbol*, and some of those callees may differ only by
+monomorphisation or crate-disambiguator hash — the same code under another name. Tightening that needs
+recursive comparison of callees, which is not attempted. Every claim here is phrased against the lower
+bound, so a tighter oracle could only enlarge the identical subset and strengthen the conclusion.
 
 ---
 
