@@ -240,15 +240,23 @@ function meta_verdict(m,   nm, rest, args, parts, k, i, v, r) {
     return "OPEN"
   }
   if (nm == "cfg_attr") {
-    k = split_meta(args, parts)
-    r = "OPEN"
-    # parts[1] is the PREDICATE; parts[2..] are the attributes it would apply.
-    for (i = 2; i <= k; i++) {
-      v = meta_verdict(parts[i])
-      if (v == "GATED") return "GATED"
-      if (v == "HIDDEN") r = "HIDDEN"
-    }
-    return r
+    # A `cfg_attr` APPLIES its attributes only when its PREDICATE holds, and this scan
+    # cannot evaluate a predicate. Propagating an inner GATED/HIDDEN outward therefore
+    # asserted UNCONDITIONALLY something that is at best conditional — and both are
+    # EXEMPTING verdicts, so `#[cfg_attr(any(), doc(hidden))] pub mod probe;` (neither
+    # hidden nor gated: the predicate is FALSE) skipped its module file entirely and an
+    # inner `#![cfg(...)]` passed undetected (roborev r11).
+    #
+    # So a `cfg_attr` is always OPEN — it never exempts. OPEN is the SAFE direction
+    # here: it means "read the module file", which for a genuinely-hidden or
+    # conditionally-gated module is harmless (a clean prologue still certifies) and for
+    # a self-gating module correctly reports the defect. That is also exactly what case
+    # 8 pins: a cosmetic `cfg_attr` must not silence the assert.
+    #
+    # Deliberately NOT a refusal: refusing would red `#[cfg_attr(docsrs, doc(hidden))]`,
+    # a standard idiom, and a refusal that reds correct code is one agents learn to
+    # waive. OPEN gets the same protection at no false-FAIL cost.
+    return "OPEN"
   }
   return "OPEN"
 }
@@ -271,6 +279,14 @@ function attrs_verdict(a,   i, j, c, d, m, v, res) {
   #     made `br#"…"#` slip past the very check meant to stop it — the leak was
   #     narrower than the fix. `(b|c)?` closes it.
   if (a ~ /(^|[^A-Za-z0-9_])(b|c)?r#*"/) return "REFUSE_RAWSTRING"
+  # ORDER IS LOAD-BEARING: strings are erased HERE, between the raw-string refusal and
+  # the `path` test. The raw-string check must run on the RAW text (erasure cannot model
+  # raw delimiters), but the `path` test must run on ERASED text — running it raw made
+  # `#[doc = "the path = ..."]` read as a `#[path]` attribute and FAIL the full gate on
+  # a perfectly ordinary doc attribute (roborev r11 F3). That is a FALSE FAIL, and a
+  # refusal that reds correct code is the one agents learn to waive, which would devalue
+  # every other refusal here.
+  a = strip_strings(a)
   # (2) `#[path = "..."]` (roborev r9 F2). Module resolution assumes the two standard
   #     paths. With a DECOY `NAME.rs` present beside `#[path = "actual.rs"] pub mod
   #     NAME;`, the guard reads the decoy, finds it clean and certifies, while
@@ -280,7 +296,6 @@ function attrs_verdict(a,   i, j, c, d, m, v, res) {
   #     comment terminates attribute collection — so a doc comment mentioning `path =`
   #     cannot trip this.
   if (a ~ /(^|[^A-Za-z0-9_])path[[:space:]]*=/) return "REFUSE_PATH"
-  a = strip_strings(a)
   res = "OPEN"
   i = 1
   while (i <= length(a)) {
@@ -565,6 +580,32 @@ END {
     }
   }
 
+  # --- Refusal Q: a top-level ITEM MACRO invocation (roborev r11 F1) -------------
+  # An item macro can EXPAND to a crate-root module: `make_mod!(probe);` producing
+  # `pub mod probe { #![cfg(...)] }`. The literal `pub mod` then lives INSIDE the macro
+  # DEFINITION — indented, in another file, possibly assembled from tokens — so neither
+  # derivation sees it, the inline-module refusal never fires, and the expanded module
+  # is advertised at the crate root while gating itself. Both derivations are blind
+  # TOGETHER, so the cross-check cannot see it either: exactly the shared-blind-spot
+  # shape Refusals U and I exist for.
+  #
+  # Reading macro expansion means asking the compiler, which is a different guard
+  # (#3366's dep-info route). So this refuses instead — and refusing is cheap here:
+  # MEASURED zero depth-0 item-macro invocations in cqlite-core/src/lib.rs.
+  #
+  # `macro_rules!` is EXCLUDED deliberately: a macro DEFINITION injects no items at its
+  # own site, so refusing one would red correct code for no protection.
+  for (i = 1; i <= n; i++) {
+    if (!INCODE[i]) continue
+    t = ltrim(N[i])
+    if (t == "") continue
+    if (!BRACE_UNRELIABLE && BRACE_MIN[i] != 0) continue
+    if (t ~ /^macro_rules[[:space:]]*!/) continue
+    if (t ~ /^[A-Za-z_][A-Za-z0-9_:]*[[:space:]]*![[:space:]]*[\(\[{]/) {
+      printf "Q\tline %d: top-level ITEM MACRO invocation: `%s`\n", i, squash(substr(t, 1, 72))
+    }
+  }
+
   # --- Derivation P: the structured scan (attributes joined, same-line splits).
   CUR = 1
   while (CUR <= n) {
@@ -651,6 +692,12 @@ fi
 # A `pub mod` shape NEITHER derivation consumed. This is NOT a disagreement between
 # the two derivations — it is a blind spot they SHARE, which is precisely why the
 # cross-check further down cannot catch it and why this refusal is its own channel.
+if grep -q '^Q	' "$SCAN_RAW"; then
+  echo "" >&2
+  grep '^Q	' "$SCAN_RAW" | cut -f2- >&2
+  fail "the crate root $LIB_RS_REL contains a top-level ITEM MACRO invocation (see above). An item macro can EXPAND to a crate-root \`pub mod NAME { #![cfg(...)] }\` whose literal declaration lives inside the macro DEFINITION, where neither of this scan's two derivations can see it — so they AGREE while both are blind and the mutual cross-check cannot catch it, which is the same shared-blind-spot shape Refusals U and I exist for. Reading macro expansion means asking the compiler (issue #3366), so this guard refuses rather than certify a crate root whose module set it cannot enumerate. Remedy: declare crate-root modules literally, or extend this guard to expanded syntax."
+fi
+
 if grep -q '^U	' "$SCAN_RAW"; then
   echo "" >&2
   grep '^U	' "$SCAN_RAW" | cut -f2- >&2
