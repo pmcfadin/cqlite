@@ -97,7 +97,7 @@ from ws0_corpus_bytes import (
     SESSION_CORPUS_PIN,
     boundary_observations_path,
 )
-from ws0_validate import Invalid, positive_int
+from ws0_validate import MAX_COUNT, Invalid, positive_int
 
 # The BARE SCAN's token in a boundary label. The driver's rep loop treats the bare scan as a PEER of
 # the flight arms (`_ARM_LIST=(scan $ARMS)`) and labels its boundary with this literal, so the
@@ -120,6 +120,35 @@ REQUIRED_OBSERVATION_FIELDS = (
 )
 
 
+# The driver's `--temp` and `--arm` vocabularies are CLOSED (`ws0-baseline.sh`: `warm|cold|both` and
+# `bypass|merge|both`), so the widest matrix any accepted invocation can ask for is 2 temperatures x
+# (the bare scan + 2 flight arms). These are the bounds the cap below is DERIVED from — never a
+# second opinion about how large a session may be.
+MAX_TEMPS = 2
+MAX_ARMS = 1 + 2
+
+# The largest boundary product `expected_boundary_labels` will build (#3393), DERIVED from the
+# largest product the rig ACCEPTS: the full matrix at `ws0_validate.MAX_COUNT` reps = 2 x 3 x 100,000
+# = 600,000 labels.
+#
+# It is derived rather than picked because a cap BELOW the accepted maximum refuses a configuration
+# the driver and the reporter both validate as fine — and refuses it at REPORT time, after the
+# measurement has already run, so a legitimate session becomes unreportable having burned its whole
+# cost. That is the same wrong-cause refusal `boundary_label`'s docstring warns about, and a first
+# cut of this guard shipped it: a flat 100,000 rejected `--reps 100000`, which `positive_int` accepts.
+# Deriving from `MAX_COUNT` also means a future change to the accepted bound moves both together
+# instead of silently re-introducing the gap. `TEMPS_ALLOWED`/`ARMS_ALLOWED` live in `ws0_report.py`,
+# which imports THIS module, so these two cannot import them back without a cycle;
+# `test_ws0_boundary_record_completeness.sh` reads both sides and FAILS on a mismatch instead — the
+# same way `lib-args.sh`'s MAX_COUNT is pinned against `ws0_validate.MAX_COUNT`.
+#
+# The derived cap keeps the whole of the OOM protection it exists for. MEASURED at the accepted
+# maximum: 600,000 labels cost 41 MB as the list and 139 MB peak RSS across all three resident
+# copies (the list, the JSON-string list over it, and the joined string) — three orders of magnitude
+# under the 20-28 GB that triggered the kills, while a caller defect producing billions still refuses.
+MAX_EXPECTED_BOUNDARIES = MAX_TEMPS * MAX_ARMS * MAX_COUNT
+
+
 def boundary_label(temp: str, rep: int, arm: str) -> str:
     """The label the driver stamps for the boundary AFTER `arm`'s rep of `temp`.
 
@@ -140,7 +169,39 @@ def expected_boundary_labels(temps: list[str], arms: list[str], reps: int) -> li
     round, so a component replaced between them lands directly on the ratio. The expected set is
     therefore the full product: every temperature, every rep, and the bare scan plus every selected
     flight arm.
+
+    FAIL-CLOSED ON AN IMPLAUSIBLE PRODUCT (#3393). Unbounded, this materializes the whole product as
+    a list, and a caller then materializes a second list of JSON strings over it plus the joined
+    string — roughly three resident copies. On 2026-08-27/28 that reached 20-28 GB RSS and the kernel
+    issued 14 global OOM kills across two 30 GB workers, wedging sshd (a box that cannot fork cannot
+    accept an ssh session) and silently killing five sibling lane sessions.
+
+    So refuse an absurd product rather than try to build it — but refuse ONLY what the rig would not
+    accept in the first place. The cap is `MAX_EXPECTED_BOUNDARIES`, DERIVED from the widest accepted
+    matrix at `MAX_COUNT` reps, so no configuration the driver validates can be refused here; see
+    that constant for why a hand-picked cap below it is a defect rather than a stricter guard.
+
+    The refusal is `Invalid`, the module's one fail-closed exception, so it lands on `ws0_report.py`'s
+    single `FATAL:` exit path like every other refusal here. A bare `ValueError` would escape that
+    handler and surface as an uncaught traceback — a rig defect wearing the costume of a crash.
+
+    It is deliberately a REFUSAL and not a silent truncation: a truncated expected set would report
+    every missing boundary as the operator's fault, which is the failure mode `boundary_label`'s own
+    docstring warns about one function above.
     """
+    if reps < 0:
+        raise Invalid(f"expected_boundary_labels: reps must be >= 0, got {reps}")
+    n_arms = 1 + len(arms)
+    product = len(temps) * reps * n_arms
+    if product > MAX_EXPECTED_BOUNDARIES:
+        raise Invalid(
+            "expected_boundary_labels: refusing an implausible boundary product "
+            f"({len(temps)} temps x {reps} reps x {n_arms} arms = {product:,} labels, "
+            f"cap {MAX_EXPECTED_BOUNDARIES:,} = {MAX_TEMPS} temps x {MAX_ARMS} arms x "
+            f"{MAX_COUNT:,} reps, the widest matrix the rig ACCEPTS). No configuration the driver "
+            "validates can reach this, so it is a caller defect, not a large session. See #3393 — "
+            "building it has OOM-killed workers and taken sshd down with them."
+        )
     return [
         boundary_label(temp, rep, arm)
         for temp in temps
