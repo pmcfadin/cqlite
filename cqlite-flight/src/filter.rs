@@ -294,7 +294,14 @@ impl ScanSpec {
 
 /// Lower a ticket [`PredicateExpr`] into a typed [`FilterExpr`], resolving each
 /// comparison/membership leaf's column type and parsing its JSON operand.
-fn lower_predicate_expr(
+///
+/// `pub(crate)` (issue #2605) so the feature-gated DataFusion `TableProvider`
+/// spike can validate a translated DataFusion filter through THIS lowering — the
+/// production one — instead of re-deriving operand coercion. A second
+/// implementation of type resolution is how the two engines would come to
+/// disagree about which rows a predicate keeps; a lowering FAILURE there is the
+/// signal the filter is not pushable at all.
+pub(crate) fn lower_predicate_expr(
     expr: &PredicateExpr,
     schema: &TableSchema,
 ) -> Result<FilterExpr, FilterError> {

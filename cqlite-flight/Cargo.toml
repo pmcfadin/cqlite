@@ -31,6 +31,27 @@ clap = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 
+# DataFusion — OPTIONAL, behind the non-default `datafusion-spike` feature
+# (issue #2605). PINNED to 44.0.0 and deliberately NOT upgradeable here: DF 44 is
+# the LAST line that resolves `arrow` 53.x (verified: DF 44.0.0 -> arrow 53.4.1,
+# the EXACT version `cqlite-flight`/`arrow-flight 53` already use). DF >= 45 moves
+# to arrow 54, which forks the Arrow type graph — two structurally identical but
+# mutually incompatible `RecordBatch`/`Schema` types in one binary — and destroys
+# the whole premise of this spike, which is to hand DataFusion the batches the
+# EXISTING Flight producer already builds with ZERO conversion. If this ever fails
+# to build, report it; do NOT bump the major.
+#
+# `default-features = false` + an explicit feature list: the spike needs the
+# execution engine and the SQL front end, and nothing that would drag in a second
+# object-store/parquet stack we do not read through.
+datafusion = { version = "44.0.0", optional = true, default-features = false }
+# `#[async_trait]` is required to IMPLEMENT `datafusion::catalog::TableProvider`
+# (the trait itself is declared with it), so it is not an optional nicety — it is
+# part of that trait's ABI. Optional and gated with DataFusion; pinned to the
+# same 0.1 line the rest of the tree (tonic) already resolves, so it adds no new
+# crate to the lock.
+async-trait = { version = "0.1", optional = true }
+
 # Observability / OpenTelemetry — optional, behind the `observability` feature.
 # Used for incoming W3C `traceparent` extraction (global text-map propagator)
 # and parenting per-RPC spans to the extracted remote context. The catalog
@@ -55,6 +76,21 @@ observability = [
     "dep:opentelemetry_sdk",
     "dep:tracing-opentelemetry",
 ]
+# THROWAWAY SPIKE, off by default (issue #2605): a thin DataFusion
+# `TableProvider`/`ExecutionPlan` over the EXISTING Flight merge-producer scan
+# path, plus the bench harness that compares vectorized DataFusion execution
+# against the row engine over IDENTICAL batches. It exists to produce ONE
+# measurement — the decode-to-column delta and the vectorized-exec delta as
+# separate figures (throughput program M15) — for the #941 promotion decision.
+#
+# Why a feature and not a separate crate: the batch-production seam it drives
+# (`MergeProducer::produce_streaming` + the `BatchSink` trait) is `pub(crate)`,
+# so the provider MUST live inside `cqlite-flight`. Why non-default: it pulls
+# the whole DataFusion dependency tree (see the pinned `datafusion` dep above)
+# into a crate that ships an Arrow Flight server, and NOTHING in production
+# reads it — there is no service route, no ticket field and no CLI flag that
+# reaches this module. Deleting the feature deletes the spike.
+datafusion-spike = ["dep:datafusion", "dep:async-trait"]
 # Test-only: pull in cqlite-core's shared in-memory OTLP capture harness
 # (`observability::testing`) so the #2162 phase/attribute assertions can read
 # back the emitted `cqlite.rpc.phase.duration` / `cqlite.rpc.rows` /
@@ -142,6 +178,15 @@ prost = "0.13"
 [[bench]]
 name = "flight_do_get"
 harness = false
+
+# THROWAWAY SPIKE harness (issue #2605): the 3-scenario x 4-arm DataFusion vs
+# row-engine measurement binary. `required-features` keeps it out of every
+# default build — `cargo build -p cqlite-flight` does not compile it, and neither
+# does the gate.
+[[bin]]
+name = "df_spike_bench"
+path = "src/bin/df_spike_bench.rs"
+required-features = ["datafusion-spike"]
 
 # Flight-producer allocation/peak-memory budget guard (issue #1494, AD5). dhat
 # global allocator in its OWN test binary; only built with `dhat-heap`. The
