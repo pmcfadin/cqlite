@@ -1545,11 +1545,26 @@ $og_out"
 fi
 # NON-VACUITY: the shim really does report an old version, and the REAL git is new enough —
 # otherwise this case would pass on every host regardless of the guard.
-if [ "$(PATH="$oldgit:$PATH" git --version)" = "git version 2.20.1" ] \
-  && [ "$(git --version | awk '{print $3}' | cut -d. -f1)" -ge 2 ]; then
-  ok "NON-VACUITY: the shim reports 2.20.1 while the real git is $(git --version | awk '{print $3}') — the guard is what refused"
+# The real git must be >= 2.29, i.e. actually CAPABLE, or this case cannot show that the guard
+# is what refused (roborev round 17, Low). The first cut checked only that the major version is
+# at least 2, which is true of 2.0-2.28 as well — every version that LACKS the option.
+real_ver="$(git --version | awk '{print $3}')"
+real_major="${real_ver%%.*}"
+real_rest="${real_ver#*.}"
+real_minor="${real_rest%%.*}"
+real_capable=false
+case "$real_major$real_minor" in
+  *[!0-9]* | '') : ;;
+  *)
+    if [ "$real_major" -gt 2 ] || { [ "$real_major" -eq 2 ] && [ "$real_minor" -ge 29 ]; }; then
+      real_capable=true
+    fi
+    ;;
+esac
+if [ "$(PATH="$oldgit:$PATH" git --version)" = "git version 2.20.1" ] && [ "$real_capable" = true ]; then
+  ok "NON-VACUITY: the shim reports 2.20.1 while the real git ($real_ver) DOES support --no-write-fetch-head — so the guard, not the host, is what refused"
 else
-  bad "NON-VACUITY broken: the old-git fixture is not in the state TEST 53 assumes"
+  bad "NON-VACUITY broken: shim='$(PATH="$oldgit:$PATH" git --version)' real='$real_ver' capable=$real_capable — TEST 53 cannot attribute the refusal to the guard"
 fi
 
 # ===========================================================================
