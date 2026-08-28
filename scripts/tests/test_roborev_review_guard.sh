@@ -4808,6 +4808,12 @@ fi
 # exactly those, which is #3367's cause 2 reproduced inside the fix for cause 1.
 _wr_marker='wrapper-mutable''-read-allow'
 _wr_vname='WRAP''PER'
+# ONLY THESE NAMES MAY HOLD THE MUTABLE VALUE, AND ONLY TO RESTORE IT (roborev job 35, Medium).
+# The save rule used to accept ANY `NAME="$WRAPPER"`, which is an unbounded alias: `subject="$WRAPPER"`
+# followed by a doctrine scan of `"$subject"` satisfied every rule above while staying exactly as
+# order-dependent as the read it replaced. Closing a grammar over one spelling of one name does not
+# close it over the VALUE, so the allowlist is by name and the aliases' own uses are constrained below.
+_wr_aliases='_gm_real_wrapper _wr_saved'
 _wr_ref='"$'"$_wr_vname"'"'
 _wr_bad_reads=""
 _wr_bad_spelling=""
@@ -4841,13 +4847,12 @@ while IFS= read -r _wr_num_line; do
   case "$_wr_code" in
     *"bash $_wr_ref"*|*"bash\" $_wr_ref"*) continue ;;
   esac
-  # A whole-value SAVE: `NAME="$WRAPPER"` and nothing else on the line.
+  # A whole-value SAVE into an ALLOWLISTED alias: `NAME="$WRAPPER"` and nothing else on the line.
   case "$_wr_code" in
     *"=$_wr_ref")
-      case "${_wr_code%%=*}" in
-        ''|*[!A-Za-z0-9_]*) ;;
-        *) continue ;;
-      esac ;;
+      _wr_nm=${_wr_code%%=*}
+      _wr_nm=${_wr_nm#"${_wr_nm%%[! ]*}"}
+      case " $_wr_aliases " in *" $_wr_nm "*) continue ;; esac ;;
   esac
   _wr_bad_reads="$_wr_bad_reads${_wr_bad_reads:+; }$_wr_num_line"
 done <<EOF
@@ -4878,7 +4883,10 @@ _wr_probe_line() {
   [ "${_p_n:-0}" -gt 1 ] && { printf 'arity\n'; return; }
   case "$_p_code" in *"bash $_wr_ref"*|*"bash\" $_wr_ref"*) printf 'ok\n'; return ;; esac
   case "$_p_code" in
-    *"=$_wr_ref") case "${_p_code%%=*}" in ''|*[!A-Za-z0-9_]*) ;; *) printf 'ok\n'; return ;; esac ;;
+    *"=$_wr_ref")
+      _p_nm=${_p_code%%=*}
+      _p_nm=${_p_nm#"${_p_nm%%[! ]*}"}
+      case " $_wr_aliases " in *" $_p_nm "*) printf 'ok\n'; return ;; esac ;;
   esac
   printf 'form\n'
 }
@@ -4888,6 +4896,7 @@ for _wr_case in \
   "arity:bash $_wr_ref --help; grep -c q $_wr_ref" \
   "form:_x=\$(grep -c foo $_wr_ref)" \
   "form:sed -n 1p $_wr_ref" \
+  "form:subject=$_wr_ref" \
   "ok:  bash $_wr_ref --help" \
   "ok:_gm_real_wrapper=$_wr_ref"; do
   _wr_want=${_wr_case%%:*}
@@ -4895,9 +4904,40 @@ for _wr_case in \
   [ "$_wr_got" = "$_wr_want" ] || _wr_ctl_bad="$_wr_ctl_bad [want=$_wr_want got=$_wr_got: ${_wr_case#*:}]"
 done
 if [ -z "$_wr_ctl_bad" ]; then
-  ok 'structural control (#3367): the grammar classifies all seven synthetic lines correctly — it rejects the braced, unquoted and compound-line bypasses roborev found, rejects plain doctrine scans, and still accepts invocations and whole-value saves'
+  ok 'structural control (#3367): the grammar classifies all eight synthetic lines correctly — it rejects the braced, unquoted, compound-line and unallowlisted-alias bypasses roborev found, rejects plain doctrine scans, and still accepts invocations and whole-value saves'
 else
   bad "structural control (#3367): the permitted-form grammar misclassifies a synthetic read, so its verdict on the real file is not trustworthy —$_wr_ctl_bad"
+fi
+# AND AN ALLOWLISTED ALIAS MAY ONLY RESTORE. Naming the two save variables is not enough on its
+# own: if `_wr_saved` could itself be scanned, the allowlist would just relocate the bypass. So every
+# use of an alias must be the restore assignment `WRAPPER="$alias"` (or a marked line, which is the
+# assert that the restore happened). The save `alias="$WRAPPER"` carries no `$alias` and so is not a use.
+_wr_alias_re=$(printf '%s' "$_wr_aliases" | tr ' ' '|')
+_wr_alias_bad=""
+_wr_alias_seen=0
+while IFS= read -r _wr_u; do
+  [ -n "$_wr_u" ] || continue
+  _wr_uc=${_wr_u#*:}
+  _wr_uc=$(printf '%s\n' "$_wr_uc" | sed -e 's/\\[$]/@ESC@/g' -e "s/'[^']*'//g")
+  case "$_wr_uc" in *"$_wr_alias_re"*) continue ;; esac   # the declaration line itself
+  _wr_alias_seen=$((_wr_alias_seen + 1))
+  case "$_wr_uc" in *"$_wr_marker"*) continue ;; esac
+  _wr_ut=${_wr_uc#"${_wr_uc%%[! ]*}"}
+  _wr_is_restore=no
+  for _wr_a in $_wr_aliases; do
+    [ "$_wr_ut" = "$_wr_vname=\"\$$_wr_a\"" ] && _wr_is_restore=yes
+  done
+  [ "$_wr_is_restore" = yes ] && continue
+  _wr_alias_bad="$_wr_alias_bad${_wr_alias_bad:+; }$_wr_u"
+done <<EOF
+$(grep -nE '[$][{]?('"$_wr_alias_re"')[}]?([^A-Za-z0-9_]|$)' "$TEST_SELF" | grep -vE '^[0-9]+:[[:space:]]*#')
+EOF
+if [ "${_wr_alias_seen:-0}" -eq 0 ]; then
+  bad 'structural (#3367): no use of any save alias was found, so the alias restriction certified nothing — the aliases were renamed and the allowlist is now describing names that do not exist'
+elif [ -z "$_wr_alias_bad" ]; then
+  ok "structural (#3367): all $_wr_alias_seen uses of the save aliases are restores — an alias cannot become a second, unwatched name for the mutable path"
+else
+  bad "structural (#3367): a save alias is used for something other than restoring the mutable global, so it is a second name for the same order-dependent value: $(printf '%s' "$_wr_alias_bad" | cut -c1-200)"
 fi
 # ...and `WRAPPER_REAL` must never be reassigned, or it is just `WRAPPER` with a longer name.
 _wr_real_writes=$(grep -cE '^[[:space:]]*WRAPPER_REAL=' "$TEST_SELF")
