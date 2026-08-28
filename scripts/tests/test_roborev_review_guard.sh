@@ -4858,7 +4858,7 @@ else
   if [ -z "$_ac2_leaked" ]; then
     ok "structural (#3367 AC2): the real wrapper's doctrine prose names$_ac2_prose and the executable-line filter drops every one — recording what was deleted is not itself a violation"
   else
-    bad "structural (#3367 AC2): the real wrapper's doctrine prose survived the executable-line filter —$_ac2_leaked. This is the deterministic red that made two lanes investigate a diff touching no scripts/ path; the --help heredoc and comment exemptions must cover it"
+    bad "structural (#3367 AC2): a prose-shaped retired state survived the executable-line filter —$_ac2_leaked. TWO causes, and they need opposite responses: (a) the heredoc/comment exemption broke, which is the deterministic red that made two lanes investigate a diff touching no scripts/ path — fix the filter; or (b) that word now sits on a heredoc line carrying an EXPANSION, which is correctly NOT exempt because an unquoted heredoc executes it — move the word to an expansion-free line. Check which before touching the filter"
   fi
 fi
 # (b) A GENUINE REINTRODUCTION INTO THE REAL WRAPPER MUST STILL BE CAUGHT. Asserted against a COPY
