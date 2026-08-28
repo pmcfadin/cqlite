@@ -195,6 +195,39 @@ Two properties are worth separating, because only one of them is curated:
 not named, so omitting it would have silently stopped executing `main.rs`'s 2 unit tests
 — the change would itself have opened the never-executed hole this lane exists to close.
 
+## An INTERRUPTED observation used to exit 0 (roborev round-29) — measured, with a caveat
+
+The harness's `cleanup` was wired as `trap cleanup EXIT INT TERM` and inherits `$?`. On a signal
+delivered between commands — or delivered to the harness while its child had just exited 0 — `$?` is
+**zero**, so a killed observation exited **successfully**: an incomplete run reporting the verdict of
+a complete one, which is the defect class this whole issue exists to eliminate, in the harness that
+produces its evidence.
+
+Fixed by signal-specific traps carrying an explicit status. Measured on the committed fix:
+
+```
+$ nohup bash scripts/tests/test_agent_gate_feature_matrix_lanes.sh feature-iso-parquet & HPID=$!
+$ sleep 18; kill -TERM "$HPID"
+FATAL: observation ABORTED by SIGTERM — this run is NOT evidence (rc=143)
+harness exit status = 143      live checkout: clean      leftover throwaway worktrees: 0
+```
+
+**The caveat, because it changes what "abort" means here: the trap fired 73 s after the signal**, not
+immediately — bash defers a trap until the running foreground command returns, and the harness was
+inside a `cargo` invocation. So the run does not stop promptly; it stops at the next command
+boundary and *then* reports a correct non-zero verdict. The property that matters (a killed run is
+never mistaken for a passing one) holds; the property one might assume from the word "abort" (it
+stops now) does not.
+
+**And the first two attempts to verify this measured nothing, which is worth more than the fix.**
+Attempt one passed `--lanes feature-iso-parquet`, but the harness takes lane names positionally, so
+it exited immediately on `unknown lane`. Attempt two killed the pid `pgrep` returned first — an
+already-exited `setsid` wrapper — while the real harness (a different pid) ran to completion and
+printed `RESULT: PARTIAL`. Both attempts would have been reported as "verified" by anyone reading
+only the exit status of the *test harness around the test*. The third captured the pid from `$!` and
+signalled that. **A verification whose own subject was never signalled is indistinguishable from a
+successful verification** — the same shape as the guards this report is about, one level out.
+
 ## A COUNTEREXAMPLE TO THIS REPORT'S OWN PREMISE: the unit half is not fully deterministic either (#3420)
 
 Recorded here rather than left for someone to discover, because it weakens a claim this report makes.
