@@ -1082,6 +1082,201 @@ async fn a_public_order_by_desc_read_is_one_metered_operation() {
     );
 }
 
+// ---------------------------------------------------------------------------
+// A partition-TARGETED read reports the rows IT delivered, not the table's
+// (issue #1701, roborev round 9)
+// ---------------------------------------------------------------------------
+
+/// `read.rows` / `read.partitions` must describe the TARGETED read, in every
+/// feature build.
+///
+/// Under `--features tombstones` the manager has no bloom-prune `scan_partition`
+/// path, so a fully-constrained `WHERE pk = ?` is served by scanning the table and
+/// `retain`-ing the requested partition. The inner full scan owned the meter and
+/// recorded its FULL result, so a targeted read reported EVERY row and EVERY
+/// partition of the table — a metric contradicting the "rows a read DELIVERED"
+/// contract [`catalog::READ_ROWS`] states, and one meaning two different things
+/// across builds (the `not(tombstones)` path meters the delivered partition).
+///
+/// # Why a CLUSTERED, multi-partition fixture
+///
+/// The pre-existing cross-generation case reads a table with ONE row per partition,
+/// so its rows and partitions counts are indistinguishable and a delivered row count
+/// of 1 says little. Here 3 partitions x 3 clustering rows = 9 rows on disk and 3
+/// delivered, so all three quantities differ: a leak of the inner scan reads 9 rows /
+/// 3 partitions, the honest emission reads 3 rows / 1 partition, and neither can be
+/// mistaken for the other. The expected count is DERIVED from the scanned data (the
+/// rows sharing the probed key), not hard-coded, and the case asserts up front that
+/// the delivered count is strictly less than the table's — without that, the
+/// assertion could pass on a table where the two coincide.
+///
+/// # Exactly-once duration
+///
+/// `read.duration` is asserted at EXACTLY one recording, covering both directions in
+/// one case: the outer targeted API metering nothing gives zero, and an inner scan
+/// that still meters itself alongside the outer one gives two samples for one logical
+/// read — the over-counting roborev B1 removed.
+///
+/// # Why a CQLite-WRITTEN fixture is legitimate here
+///
+/// Per #3042 the property under test is not on-disk framing but whether OUR read path
+/// accounts its OWN delivered rows; a uniform framing error on both sides cannot hide
+/// a wrong count. No committed corpus table can serve: the case needs a known,
+/// small, multi-partition clustered table whose per-partition row count is fixed.
+#[cfg(feature = "write-support")]
+#[tokio::test(flavor = "multi_thread")]
+#[serial_test::serial(read_metrics)]
+async fn a_partition_targeted_read_reports_only_the_rows_it_delivered() {
+    use cqlite_core::schema::parse_cql_schema;
+    use cqlite_core::storage::sstable::SSTableManager;
+    use cqlite_core::storage::write_engine::{WriteEngine, WriteEngineConfig};
+
+    const KS: &str = "read_metrics_targeted_ks";
+    const TBL: &str = "clustered";
+    const PARTITIONS: i32 = 3;
+    const ROWS_PER_PARTITION: i32 = 3;
+
+    let mc = testing::metrics_capture();
+    let tmp = tempfile::TempDir::new().expect("temp dir");
+    let data_dir = tmp.path().join("data");
+    let wal_dir = tmp.path().join("wal");
+    std::fs::create_dir_all(&data_dir).expect("create data dir");
+    std::fs::create_dir_all(&wal_dir).expect("create wal dir");
+
+    let schema_cql =
+        format!("CREATE TABLE {KS}.{TBL} (id int, seq int, val text, PRIMARY KEY (id, seq));");
+    let schema = parse_cql_schema(&schema_cql).expect("parse fixture schema");
+
+    {
+        let cfg = WriteEngineConfig::new(data_dir.clone(), wal_dir.clone(), schema.clone());
+        let mut engine = WriteEngine::new(cfg).expect("write engine");
+        for id in 1..=PARTITIONS {
+            for seq in 0..ROWS_PER_PARTITION {
+                engine
+                    .execute(&format!(
+                        "INSERT INTO {KS}.{TBL} (id, seq, val) VALUES ({id}, {seq}, 'v{id}-{seq}')"
+                    ))
+                    .expect("write fixture row");
+            }
+        }
+        engine
+            .flush()
+            .await
+            .expect("flush the fixture")
+            .expect("the fixture produced no SSTable");
+        engine.close().await.expect("close engine");
+    }
+
+    let config = Config::default();
+    let platform = Arc::new(Platform::new(&config).await.expect("platform"));
+    let manager = SSTableManager::new(
+        &data_dir,
+        &config,
+        platform,
+        #[cfg(feature = "state_machine")]
+        None,
+    )
+    .await
+    .expect("open the clustered fixture");
+    let tid = TableId::new(format!("{KS}.{TBL}"));
+
+    // Learn the table's shape through the public scan surface, OUTSIDE any collect
+    // window, so it contributes nothing to the assertions below.
+    let all_rows = manager
+        .scan(&tid, None, None, None, Some(&schema))
+        .await
+        .expect("scan the clustered fixture");
+    let probe_key = all_rows
+        .first()
+        .map(|(k, _)| k.clone())
+        .expect("the fixture delivered no rows at all");
+    let delivered = all_rows
+        .iter()
+        .filter(|(k, _)| k.as_bytes() == probe_key.as_bytes())
+        .count();
+    assert_eq!(
+        (all_rows.len(), delivered),
+        (
+            (PARTITIONS * ROWS_PER_PARTITION) as usize,
+            ROWS_PER_PARTITION as usize
+        ),
+        "the fixture must hold {PARTITIONS} partitions of {ROWS_PER_PARTITION} rows for \
+         the targeted count to be distinguishable from the table's"
+    );
+    assert!(
+        delivered < all_rows.len(),
+        "a targeted read must deliver STRICTLY fewer rows than the table holds, or this \
+         case cannot tell the two accountings apart ({delivered} of {})",
+        all_rows.len()
+    );
+
+    // --- scan_partition: the rows/partitions the TARGETED read delivered -------
+    mc.reset();
+    let (targeted, _engaged) = manager
+        .scan_partition(&tid, probe_key.as_bytes(), Some(&schema))
+        .await
+        .expect("partition-targeted scan");
+    let m = mc.flush_and_collect();
+    assert_eq!(
+        targeted.len(),
+        delivered,
+        "the targeted scan returns exactly its partition's rows"
+    );
+    assert_eq!(
+        m.counter_sum(catalog::READ_ROWS),
+        delivered as f64,
+        "cqlite.read.rows must equal the rows the TARGETED read delivered ({delivered}), \
+         never the table's {}; points: {:?}",
+        all_rows.len(),
+        m.find(catalog::READ_ROWS).map(|x| &x.points)
+    );
+    assert_eq!(
+        m.counter_sum(catalog::READ_PARTITIONS),
+        1.0,
+        "a single-partition read delivered rows from exactly ONE partition, not the \
+         table's {PARTITIONS}; points: {:?}",
+        m.find(catalog::READ_PARTITIONS).map(|x| &x.points)
+    );
+    assert_eq!(
+        histogram_recordings(&m, catalog::READ_DURATION),
+        1,
+        "ONE logical targeted read is ONE operation: zero means the outer API metered \
+         nothing, two means the inner scan metered itself as well; points: {:?}",
+        m.find(catalog::READ_DURATION).map(|x| &x.points)
+    );
+
+    // --- scan_partition_with_cell_metadata: the WRITETIME/TTL twin -------------
+    mc.reset();
+    let (targeted_meta, _engaged_meta) = manager
+        .scan_partition_with_cell_metadata(&tid, probe_key.as_bytes(), Some(&schema))
+        .await
+        .expect("partition-targeted metadata scan");
+    let mm = mc.flush_and_collect();
+    assert_eq!(
+        targeted_meta.len(),
+        delivered,
+        "the targeted metadata scan returns exactly its partition's rows"
+    );
+    assert_eq!(
+        mm.counter_sum(catalog::READ_ROWS),
+        delivered as f64,
+        "the metadata path accounts the same delivered rows; points: {:?}",
+        mm.find(catalog::READ_ROWS).map(|x| &x.points)
+    );
+    assert_eq!(
+        mm.counter_sum(catalog::READ_PARTITIONS),
+        1.0,
+        "one partition on the metadata path too; points: {:?}",
+        mm.find(catalog::READ_PARTITIONS).map(|x| &x.points)
+    );
+    assert_eq!(
+        histogram_recordings(&mm, catalog::READ_DURATION),
+        1,
+        "the targeted metadata read is one operation; points: {:?}",
+        mm.find(catalog::READ_DURATION).map(|x| &x.points)
+    );
+}
+
 /// A temp `.cql` file for the reverse fixture's table, so `ingest` can register
 /// query-time decode metadata. Returns the guard: dropping it removes the file.
 fn reverse_fixture_schema_file() -> (PathBuf, tempfile::TempDir) {
