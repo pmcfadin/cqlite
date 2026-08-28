@@ -66,14 +66,14 @@
 #   claim-heartbeat.sh stamp <issue> [pid]  # push/refresh THIS machine's claim ref
 #                                            # (supervisor-authored; pid default $$)
 #   claim-heartbeat.sh list-claims          # one line per machine: machine/issue/pid/ts/age
-#   claim-heartbeat.sh should-reap <machine> [threshold_secs]
+#   claim-heartbeat.sh should-reap <machine> [issue] [threshold_secs]
 #                                            # exit 0 iff the claim ref is stale
 #                                            # (age > threshold, default 14400s/4h)
 #                                            # AND its issue has NO open PR AND
 #                                            # (pid-dead, when the claim is local);
 #                                            # exit 1 = keep (still live / open PR /
 #                                            # foreign-pid unknowable); exit 2 = no ref.
-#   claim-heartbeat.sh reap <machine>        # delete a machine's claim ref, but
+#   claim-heartbeat.sh reap <machine> [issue] # delete a LANE's claim ref, but
 #                                            # REFUSE if its issue has an open PR.
 #   claim-heartbeat.sh dead-lanes            # REPORT every claim whose owning
 #                                            # process is verifiably gone, with NO
@@ -375,6 +375,21 @@ humanize_age() {
 # working under a SHA-256 object format too. Never touches the working tree, the
 # index, or the current branch — a pure object push against an explicit refspec.
 # Echoes the created commit sha on stdout.
+# lane_claim_ref <machine> <issue> — the ref a LANE's claim lives at (#3393, owner ruling A:
+# per-lane identity, one ref each).
+#
+# WHY A NEW NAMESPACE RATHER THAN A SUB-PATH UNDER THE OLD ONE. The obvious move is
+# `refs/machine-claims/<machine>/<issue>`, and git forbids it: a ref cannot be both a file and a
+# directory, so while any legacy `refs/machine-claims/<machine>` exists the sub-path cannot be
+# created at all —
+#   fatal: cannot lock ref '...box3/3367': 'refs/machine-claims/box3' exists
+# The other single-component option, `<machine>-<issue>`, is AMBIGUOUS: real machine names already
+# contain dashes (`ip-172-31-7-163-3367` cannot be split back). So the namespace changes, the last
+# component is the issue, and the legacy namespace is left drainable rather than needing a flag day.
+lane_claim_ref() {
+  printf 'refs/lane-claims/%s/%s\n' "$1" "$2"
+}
+
 push_liveness_ref() {
   local ref="$1" message="$2" ts="$3" empty_tree commit_sha
   empty_tree="$(git hash-object -t tree --stdin </dev/null)"
@@ -426,12 +441,13 @@ cmd_stamp() {
     *[!0-9]* | '') die_usage "stamp pid must be numeric (got '${pid}')" ;;
   esac
 
-  local machine ts commit_sha
+  local machine ts commit_sha ref
   machine="${HEARTBEAT_MACHINE:-$(hostname -s)}"
   ts="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-  commit_sha="$(push_liveness_ref "refs/machine-claims/${machine}" \
+  ref="$(lane_claim_ref "$machine" "$issue")"
+  commit_sha="$(push_liveness_ref "$ref" \
     "claim issue=${issue} machine=${machine} pid=${pid} ts=${ts}" "$ts")"
-  note "claim stamped: machine=$machine issue=$issue pid=$pid ts=$ts -> refs/machine-claims/$machine ($commit_sha)"
+  note "claim stamped: machine=$machine issue=$issue pid=$pid ts=$ts -> $ref ($commit_sha)"
 }
 
 cmd_list() {
@@ -476,9 +492,11 @@ cmd_list() {
 # the liveness ref would erase the only signal that this lane is still owned and
 # invite a duplicate pickup). A missing ref is a graceful no-op. Returns 0 on
 # delete-or-absent, 3 on refuse.
+# delete_ref_guarded <namespace> <suffix> — <suffix> is everything after `refs/<namespace>/`, so it
+# is a bare machine for `refs/heartbeats/*` and `<machine>/<issue>` for a lane claim (#3393).
 delete_ref_guarded() {
-  local namespace="$1" machine="$2"
-  local ref="refs/${namespace}/${machine}"
+  local namespace="$1" suffix="$2"
+  local ref="refs/${namespace}/${suffix}"
 
   if ! git ls-remote --exit-code "$REMOTE" "$ref" >/dev/null 2>&1; then
     note "${ref} already absent on $REMOTE — nothing to clear"
@@ -503,16 +521,32 @@ cmd_clear() {
   delete_ref_guarded heartbeats "$machine"
 }
 
+# cmd_reap <machine> [issue] — delete a LANE's claim ref. With <issue> the new per-lane ref is
+# deleted; without it the LEGACY per-machine ref is, which is how a pre-ruling ref still gets
+# drained (see the legacy note in the header). Refuses under an open PR either way.
 cmd_reap() {
-  local machine="${1:-}"
-  [ -n "$machine" ] || die_usage "reap requires <machine>"
-  delete_ref_guarded machine-claims "$machine"
+  local machine="${1:-}" issue="${2:-}"
+  [ -n "$machine" ] || die_usage "reap requires <machine> [issue]"
+  if [ -n "$issue" ]; then
+    case "$issue" in
+      *[!0-9]*) die_usage "reap issue must be numeric (got '$issue')" ;;
+    esac
+    delete_ref_guarded lane-claims "${machine}/${issue}"
+  else
+    delete_ref_guarded machine-claims "$machine"
+  fi
 }
 
 cmd_list_claims() {
-  local now_epoch raw
+  local now_epoch raw legacy
   now_epoch="$(date -u +%s)"
-  raw="$(git ls-remote "$REMOTE" 'refs/machine-claims/*' 2>/dev/null || true)"
+  # BOTH namespaces (#3393). New claims live at refs/lane-claims/<machine>/<issue>; a legacy
+  # refs/machine-claims/<machine> from before the per-lane ruling is still listed so it can be seen
+  # and drained — an invisible legacy ref pins its board item at In Progress indefinitely.
+  raw="$(git ls-remote "$REMOTE" 'refs/lane-claims/*' 2>/dev/null || true)"
+  legacy="$(git ls-remote "$REMOTE" 'refs/machine-claims/*' 2>/dev/null || true)"
+  [ -z "$legacy" ] || raw="$(printf '%s\n%s' "$raw" "$legacy")"
+  raw="$(printf '%s' "$raw" | sed '/^$/d')"
 
   if [ -z "$raw" ]; then
     echo "no claims found on $REMOTE"
@@ -524,7 +558,15 @@ cmd_list_claims() {
     [ -n "$line" ] || continue
     local refname machine msg issue pid ts epoch age_h
     refname="$(printf '%s' "$line" | awk '{print $2}')"
-    machine="${refname#refs/machine-claims/}"
+    case "$refname" in
+      refs/lane-claims/*)
+        # <machine>/<issue> — the issue is the LAST component, which is why the separator is a
+        # slash and not a dash (machine names contain dashes).
+        machine="${refname#refs/lane-claims/}"
+        machine="${machine%/*}"
+        ;;
+      *) machine="${refname#refs/machine-claims/} (legacy)" ;;
+    esac
 
     if ! git fetch "$REMOTE" "$refname" >/dev/null 2>&1; then
       printf '%-20s %-8s %-10s %-24s %s\n' "$machine" "?" "?" "?" "fetch-failed"
@@ -557,13 +599,40 @@ cmd_list_claims() {
 #   2  no such claim ref.
 # Never prints a reap verdict of 0 unless ALL guards agree — a live/open-PR/
 # fresh/unknown-age claim is always kept.
+# cmd_should_reap <machine> [issue] [threshold_secs] — the predicate now names a LANE (#3393).
+#
+# With <issue> it judges the per-lane ref; WITHOUT it, the legacy per-machine ref, so a pre-ruling
+# ref is still reapable rather than stranded. The argument order keeps `should-reap <machine> <secs>`
+# working for the legacy form: a second argument is read as the issue only if a THIRD is present, or
+# if it does not look like a threshold. That ambiguity is the price of not breaking the legacy call
+# during the drain, and it disappears with the legacy branch.
 cmd_should_reap() {
-  local machine="${1:-}" threshold="${2:-$DEFAULT_REAP_THRESHOLD_SECS}"
-  [ -n "$machine" ] || die_usage "should-reap requires <machine>"
+  local machine="${1:-}" a2="${2:-}" a3="${3:-}"
+  local issue="" threshold="$DEFAULT_REAP_THRESHOLD_SECS"
+  [ -n "$machine" ] || die_usage "should-reap requires <machine> [issue] [threshold_secs]"
+  if [ -n "$a3" ]; then
+    issue="$a2"; threshold="$a3"
+  elif [ -n "$a2" ]; then
+    # One extra argument: an issue if a lane ref exists for it, else a threshold. Checked against
+    # the remote rather than guessed from the number's shape, because both are bare integers.
+    if git ls-remote --exit-code "$REMOTE" "$(lane_claim_ref "$machine" "$a2")" >/dev/null 2>&1; then
+      issue="$a2"
+    else
+      threshold="$a2"
+    fi
+  fi
   case "$threshold" in
     *[!0-9]* | '') die_usage "should-reap threshold must be numeric seconds (got '${threshold}')" ;;
   esac
-  local ref="refs/machine-claims/${machine}"
+  case "$issue" in
+    *[!0-9]*) die_usage "should-reap issue must be numeric (got '$issue')" ;;
+  esac
+  local ref
+  if [ -n "$issue" ]; then
+    ref="$(lane_claim_ref "$machine" "$issue")"
+  else
+    ref="refs/machine-claims/${machine}"
+  fi
 
   if ! git ls-remote --exit-code "$REMOTE" "$ref" >/dev/null 2>&1; then
     note "no claim ref ${ref} on $REMOTE"
@@ -1103,11 +1172,11 @@ case "$SUBCOMMAND" in
     ;;
   should-reap)
     shift
-    cmd_should_reap "${1:-}" "${2:-}"
+    cmd_should_reap "${1:-}" "${2:-}" "${3:-}"
     ;;
   reap)
     shift
-    cmd_reap "${1:-}"
+    cmd_reap "${1:-}" "${2:-}"
     ;;
   dead-lanes)
     shift
@@ -1117,7 +1186,7 @@ case "$SUBCOMMAND" in
     print_help
     ;;
   "")
-    die_usage "a subcommand is required: beat <issue> | list | clear <machine> | stamp <issue> [pid] | list-claims | should-reap <machine> [secs] | reap <machine> | dead-lanes"
+    die_usage "a subcommand is required: beat <issue> | list | clear <machine> | stamp <issue> [pid] | list-claims | should-reap <machine> [issue] [secs] | reap <machine> [issue] | dead-lanes"
     ;;
   *)
     die_usage "unknown subcommand: $SUBCOMMAND (expected beat|list|clear|stamp|list-claims|should-reap|reap|dead-lanes)"
