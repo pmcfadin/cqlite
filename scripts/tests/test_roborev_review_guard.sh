@@ -747,6 +747,17 @@ make_fixture() { # make_fixture <name> <mode> -> prints work dir
       git_q "$work" add -A
       git_q "$work" commit -q -m 'a file named "foo b/x" beside one named "foo"'
       ;;
+    advanced-base)
+      # TWO branch commits, so `HEAD~1` is a real intermediate commit and the negative control
+      # (a reviewed range that stops short of the branch tip) is a realistic scope rather than a
+      # degenerate empty range. The base ref is advanced AFTER the push, below.
+      printf 'fn helper() {}\n' >>"$work/main.rs"
+      git_q "$work" add main.rs
+      git_q "$work" commit -q -m 'branch commit 1'
+      printf 'fn helper_two() {}\n' >>"$work/main.rs"
+      git_q "$work" add main.rs
+      git_q "$work" commit -q -m 'branch commit 2'
+      ;;
     newline-name)
       # A path with a LITERAL NEWLINE, beside a path equal to its FIRST LINE. That pairing
       # is the whole point: a newline-delimited prompt path set + `grep -Fxq` turns the
@@ -797,6 +808,21 @@ make_fixture() { # make_fixture <name> <mode> -> prints work dir
     no-base)
       git_q "$work" update-ref -d refs/remotes/origin/main
       ;;
+    advanced-base)
+      # ===== THE #3392 FIXTURE: `origin/main` MOVES AHEAD OF THE BRANCH POINT =====
+      # The BRANCH HEAD is left untouched; only the base ref advances, which is the normal state
+      # of every branch older than the last merge to main. After this,
+      #   merge-base(origin/main, HEAD)  !=  rev-parse origin/main
+      # so a `sha-assert` that expects the base ref's TIP fails on a review that is entirely
+      # CORRECT — the deterministic abort this fixture exists to reproduce. The push updates
+      # `refs/remotes/origin/main`, so the mirror ref the wrapper reads really is ahead.
+      git_q "$work" checkout -q main
+      printf 'fn landed_on_main_after_the_branch_point() {}\n' >>"$work/README.md"
+      git_q "$work" add README.md
+      git_q "$work" commit -q -m 'a commit that lands on main after the branch point'
+      git_q "$work" push -q "$remote" main
+      git_q "$work" checkout -q feature
+      ;;
     detached)
       git_q "$work" checkout -q --detach HEAD
       ;;
@@ -845,8 +871,29 @@ assert_tracked_mode() { # assert_tracked_mode <label> <work> <ref> <path> <want-
   fi
 }
 
-# range_ref <work>: the git_ref shape a RANGE review records, "<base40>..<head40>".
-range_ref() { printf '%s..%s' "$(git -C "$1" rev-parse "${2:-origin/main}")" "$(git -C "$1" rev-parse HEAD)"; }
+# range_ref <work> [base-ref]: the git_ref shape a RANGE review records, "<base40>..<head40>".
+# THE BASE ENDPOINT IS THE MERGE-BASE, not `rev-parse <base-ref>` (#3392): roborev reviews
+# `<base>...HEAD`, i.e. `merge-base(<base>, HEAD)..HEAD`, and that is what its job record carries.
+# In a fixture whose base ref has not advanced past the branch point the two are the SAME commit,
+# so the old spelling still passed — it was simply describing the wrong thing, and it would have
+# silently mis-stated the record for any fixture that DOES advance the base (see the `advanced-base`
+# fixture and the `mb*` family).
+range_ref() { printf '%s..%s' "$(git -C "$1" merge-base "${2:-origin/main}" HEAD)" "$(git -C "$1" rev-parse HEAD)"; }
+
+# assert_base_advanced <label> <work>: the FIXTURE-INTEGRITY guard for every case that exists to
+# distinguish the merge-base from the base ref's TIP. If the fixture stopped advancing the base ref
+# the two collapse to one commit and every such case would pass while testing NOTHING — the exact
+# vacuity this suite exists to prevent — so the inequality is asserted explicitly rather than assumed.
+assert_base_advanced() { # assert_base_advanced <label> <work>
+  local tip mb
+  tip=$(git -C "$2" rev-parse origin/main 2>/dev/null || printf '')
+  mb=$(git -C "$2" merge-base origin/main HEAD 2>/dev/null || printf '')
+  if [ -n "$tip" ] && [ -n "$mb" ] && [ "$tip" != "$mb" ]; then
+    ok "$1: fixture is NON-VACUOUS — the origin/main tip ($tip) and the merge-base ($mb) are different commits"
+  else
+    bad "$1: fixture is VACUOUS — origin/main tip '${tip:-<unresolved>}' and merge-base '${mb:-<unresolved>}' are not two different commits, so nothing about the distinction is under test"
+  fi
+}
 
 # The wrapper's own temp directory for fixture runs. It MUST exist: the census's mode probe uses `mktemp`
 # under $TMPDIR, and a missing directory makes that probe fail — which the census correctly reports as an
@@ -1448,7 +1495,10 @@ set -uo pipefail
 # shellcheck disable=SC1090
 . "$1"          # the real oracles file
 REPO="$2"
-BASE_SHA="$3"
+# The range's LEFT endpoint is the MERGE-BASE (`RANGE_BASE_SHA`, #3392), not the base ref's
+# tip: `roborev_range_endpoint_refs` folds over HEAD and that. In this linear fixture the two
+# would coincide anyway; the name is what the oracles actually read.
+RANGE_BASE_SHA="$3"
 for p in both-exec both-plain head-only-exec head-only-plain base-only-exec \
          base-exec-head-plain head-exec-base-plain 'glob[x]*?-exec' absent-everywhere; do
   st=0
@@ -1531,10 +1581,10 @@ cx3i_mut="$tmp/cx3i-oracles.sh"
 for _mut in head base; do
   cp "$ORACLES_SRC" "$cx3i_mut"
   if [ "$_mut" = head ]; then
-    _mut_from='HEAD "${BASE_SHA:-}"'; _mut_to='HEAD'
+    _mut_from='HEAD "${RANGE_BASE_SHA:-}"'; _mut_to='HEAD'
     _mut_lost=base-only-exec; _mut_lost2=base-exec-head-plain; _mut_kept=head-only-exec
   else
-    _mut_from='HEAD "${BASE_SHA:-}"'; _mut_to='"${BASE_SHA:-}"'
+    _mut_from='HEAD "${RANGE_BASE_SHA:-}"'; _mut_to='"${RANGE_BASE_SHA:-}"'
     _mut_lost=head-only-exec; _mut_lost2=head-exec-base-plain; _mut_kept=base-only-exec
   fi
   # Patch the ENDPOINT PRODUCER, which is the single place the range is named — a mutant that
@@ -1681,8 +1731,9 @@ if [ "$cx3j_got" = OK ]; then
 else
   bad "case (cx3j): roborev_path_exec_state's shape reads '$cx3j_got' — an endpoint can be skipped again"
 fi
-# The per-endpoint predicate must stay RANGE-BLIND: if it learns about BASE_SHA it can express
-# a precedence again, which is the ambiguity the split exists to remove.
+# The per-endpoint predicate must stay RANGE-BLIND: if it learns about RANGE_BASE_SHA (or the
+# base ref's tip, BASE_TIP_SHA) it can express a precedence again, which is the ambiguity the
+# split exists to remove.
 cx3j_pred=$(awk '
   /^_roborev_mode_exec_state_at\(\) \{/ { inf = 1 }
   inf { print }
@@ -1691,7 +1742,7 @@ cx3j_pred=$(awk '
 if [ -z "$cx3j_pred" ]; then
   bad 'case (cx3j): _roborev_mode_exec_state_at was not found, so its range-blindness was not checked'
 else
-  if ! printf '%s\n' "$cx3j_pred" | grep -vE '^[[:space:]]*#' | grep -qE 'BASE_SHA|\bHEAD\b'; then
+  if ! printf '%s\n' "$cx3j_pred" | grep -vE '^[[:space:]]*#' | grep -qE 'RANGE_BASE_SHA|BASE_TIP_SHA|\bHEAD\b'; then
     ok 'case (cx3j): the per-endpoint predicate names no endpoint (range-blind, so it cannot encode an ordering)'
   else
     bad 'case (cx3j): _roborev_mode_exec_state_at references a specific endpoint — it can encode a precedence again'
@@ -2828,13 +2879,21 @@ assert_verdict 'case (t5)' FAIL 1
 assert_says 'case (t5) push-assert names the detached HEAD' '^push-assert: FAIL \(detached HEAD\)$'
 assert_never_enqueued 'case (t5)'
 
-printf '== case (t6): a census whose git diff FAILS is not "genuinely empty" ==\n'
+printf '== case (t6): a census whose RANGE cannot be measured is not "genuinely empty" ==\n'
 reset_stub
+# THE CLASS INVARIANT, which is what this case has always been for: "we could not measure the
+# range" must never render as "there is nothing to review". Unrelated histories now abort one step
+# EARLIER than they used to — at the merge-base resolution rather than at the `git diff` (#3392),
+# because the range base is resolved before the diff that uses it — so this asserts the invariant
+# and the pre-enqueue guarantee, while case (mb7) pins the merge-base diagnostic itself. The
+# `git diff failed` arm is retained as a STRUCTURAL backstop for a diff that fails for some other
+# reason (an unreadable object store), exactly like the other unreachable-by-ordering backstops in
+# these files: the point of a backstop is not to depend on an upstream check still being there.
 work=$(make_fixture case_t6 orphan-base)
 STUB_ANNOUNCE_SHA=$(git -C "$work" rev-parse HEAD)
 run_wrapper "$work" --base unrelated
 assert_verdict 'case (t6)' FAIL 1
-assert_says 'case (t6) the diff failure is named' '^census-check: FAIL \(git diff failed\)$'
+assert_says 'case (t6) the census check is what FAILs' '^census-check: FAIL \('
 assert_says 'case (t6) it is explicitly not NOTHING-TO-REVIEW' 'explicitly NOT a NOTHING-TO-REVIEW'
 assert_lacks 'case (t6) never reports NOTHING-TO-REVIEW' '^RESULT: NOTHING-TO-REVIEW$'
 assert_never_enqueued 'case (t6)'
@@ -3106,6 +3165,153 @@ assert_verdict 'case (x4)' FAIL 1
 assert_says 'case (x4) the single-commit record is refused' '^sha-assert: FAIL \(single-commit record, not the census range\)$'
 assert_says 'case (x4) explains the same-file blind spot' 'when several commits touch the same file'
 
+# =============================================================================================
+# (mb*) THE RANGE BASE IS THE MERGE-BASE, NEVER THE BASE REF'S TIP (issue #3392)
+# =============================================================================================
+# THE DEFECT THESE PIN. The census measures `<base>...HEAD`, which is
+# `merge-base(<base>, HEAD)..HEAD`, and roborev reviews the same range, so its job record's
+# `git_ref` carries the MERGE-BASE as the range base. `sha-assert` compared that against
+# `rev-parse <base>` — the base ref's TIP — so it FAILED DETERMINISTICALLY for every branch
+# whose base had advanced since the branch point, i.e. for almost every branch not just rebased.
+# It was misdiagnosed as a race twice; the controlled measurement (the base ref recorded before
+# AND after a failing review, unmoved) is what killed that hypothesis.
+#
+# WHY EVERY CASE HERE CALLS `assert_base_advanced` FIRST. Under the OLD code these cases would
+# pass just as well in a fixture where the tip and the merge-base coincide — the distinction
+# would be untested and the family would be decoration. The inequality is therefore MEASURED
+# per case, not assumed from the fixture's name.
+#
+# AND WHY THE FAMILY IS SIX CASES, NOT ONE. A guard tested only in its passing direction is how
+# a vacuous green ships: (mb1) is the headline PASS, and (mb2)-(mb6) are the discriminations —
+# a stale head, the T2 empty-tree base, the T1 tip equality, a branch-point equality, and the
+# tip-anchored RANGE the old assert used to demand — every one of which must still FAIL.
+printf '== case (mb1): a CORRECT review of a branch whose base has advanced PASSes ==\n'
+reset_stub
+work=$(make_fixture case_mb1 advanced-base)
+assert_base_advanced 'case (mb1)' "$work"
+mb_tip=$(git -C "$work" rev-parse origin/main)
+mb_base=$(git -C "$work" merge-base origin/main HEAD)
+mb_head=$(git -C "$work" rev-parse HEAD)
+# The record roborev really writes for this branch: the MERGE-BASE, then branch HEAD. The
+# announcement names only the range base, which for a range review is that same merge-base.
+STUB_ANNOUNCE_SHA="$mb_base"
+STUB_GIT_REF="$mb_base..$mb_head"
+run_wrapper "$work"
+assert_verdict 'case (mb1)' PASS 0
+assert_says 'case (mb1) sha-assert PASSes on a correct review of a branch that is behind' '^sha-assert: PASS$'
+assert_says 'case (mb1) reviewed-sha is the merge-base-anchored range' "^reviewed-sha: $mb_base\.\.$mb_head\$"
+# AC3: the block STATES which base the assert compared against, and prints the tip beside it, so a
+# reader of a pasted block can tell the two apart instead of inferring which one `base:` meant.
+assert_says 'case (mb1) assert-base names the MERGE-BASE, with the tip beside it' \
+  "^assert-base: $mb_base \(merge-base of origin/main and HEAD; origin/main tip $mb_tip\)\$"
+assert_lacks 'case (mb1) the TIP is not what the assert compared against' "^assert-base: $mb_tip "
+
+printf '== case (mb2): with the base advanced, a STALE HEAD still FAILs (negative control) ==\n'
+reset_stub
+# THE CONTROL FOR (mb1): same fixture, same advanced base, the ONLY difference being a reviewed
+# range that stops one commit short of the branch tip. If (mb1) passed because the assert stopped
+# checking, this would pass too. It must not.
+work=$(make_fixture case_mb2 advanced-base)
+assert_base_advanced 'case (mb2)' "$work"
+mb_base=$(git -C "$work" merge-base origin/main HEAD)
+mb_head=$(git -C "$work" rev-parse HEAD)
+mb_stale=$(git -C "$work" rev-parse 'HEAD^')
+STUB_ANNOUNCE_SHA="$mb_base"
+STUB_GIT_REF="$mb_base..$mb_stale"
+run_wrapper "$work"
+assert_verdict 'case (mb2)' FAIL 1
+assert_says 'case (mb2) sha-assert still FAILs on a short range' '^sha-assert: FAIL \(reviewed range does not match origin/main\.\.\.HEAD\)$'
+assert_says 'case (mb2) the short HEAD endpoint is named' "the range HEAD is '$mb_stale', not branch HEAD '$mb_head'"
+assert_says 'case (mb2) it says the scope stopped short' 'the reviewed scope stops short of the branch tip'
+
+printf '== case (mb3): with the base advanced, an EMPTY-TREE base still FAILs (T2 pin) ==\n'
+reset_stub
+# T2 is a property of the range base VALUE, so advancing the base ref must not disturb it.
+work=$(make_fixture case_mb3 advanced-base)
+assert_base_advanced 'case (mb3)' "$work"
+mb_base=$(git -C "$work" merge-base origin/main HEAD)
+mb_head=$(git -C "$work" rev-parse HEAD)
+STUB_ANNOUNCE_SHA="$mb_base"
+STUB_GIT_REF="4b825dc642cb6eb9a060e54bf8d69288fbee4904..$mb_head"
+run_wrapper "$work"
+assert_verdict 'case (mb3)' FAIL 1
+assert_says 'case (mb3) the wrong range BASE is named' 'the range BASE is .4b825dc642cb6eb9a060e54bf8d69288fbee4904.'
+assert_says 'case (mb3) the empty-tree signature survives the change' 'empty-tree base \(4b825dc6\.\.\.\) is the signature of the non-sanctioned two-positional'
+assert_says 'case (mb3) the expected base is the merge-base' "not '$mb_base'"
+
+printf '== case (mb4): a single-sha record equal to the TIP still FAILs (T1 pin) ==\n'
+reset_stub
+# AC2, AND THE REASON THE TIP IS STILL READ AT ALL. A `--branch` review resolved against the ROOT
+# checkout enqueues the base ref's TIP — so the tip, not the merge-base, is the sha this signature
+# is about. With the base advanced the two are DIFFERENT commits, which is precisely the fixture in
+# which a merge-base-only implementation would lose the T1 diagnostic.
+work=$(make_fixture case_mb4 advanced-base)
+assert_base_advanced 'case (mb4)' "$work"
+mb_tip=$(git -C "$work" rev-parse origin/main)
+mb_base=$(git -C "$work" merge-base origin/main HEAD)
+STUB_ANNOUNCE_SHA="$mb_tip"
+STUB_GIT_REF="$mb_tip"
+run_wrapper "$work"
+assert_verdict 'case (mb4)' FAIL 1
+assert_says 'case (mb4) sha-assert FAILs' '^sha-assert: FAIL \(reviewed-sha does not match head-sha\)$'
+assert_says 'case (mb4) the TIP equality is named as such' "the reviewed sha EQUALS the TIP of the base ref 'origin/main' \($mb_tip\)"
+assert_says 'case (mb4) the root-checkout resolution is still called out' "signature of a '--branch' review resolved against the ROOT checkout"
+assert_says 'case (mb4) it also names the base the range SHOULD have had' "the merge-base, $mb_base"
+
+printf '== case (mb5): a single-sha record equal to the MERGE-BASE also FAILs ==\n'
+reset_stub
+# The other base-equality: a review anchored at the branch point itself reviewed nothing either,
+# because every commit under review is a DESCENDANT of it. Both equalities FAIL; the diagnostic
+# says WHICH one matched, so an operator can tell a root-checkout resolution from a branch-point one.
+work=$(make_fixture case_mb5 advanced-base)
+assert_base_advanced 'case (mb5)' "$work"
+mb_tip=$(git -C "$work" rev-parse origin/main)
+mb_base=$(git -C "$work" merge-base origin/main HEAD)
+STUB_ANNOUNCE_SHA="$mb_base"
+STUB_GIT_REF="$mb_base"
+run_wrapper "$work"
+assert_verdict 'case (mb5)' FAIL 1
+assert_says 'case (mb5) sha-assert FAILs' '^sha-assert: FAIL \(reviewed-sha does not match head-sha\)$'
+assert_says 'case (mb5) the merge-base equality is named' "the reviewed sha EQUALS the MERGE-BASE of 'origin/main' and HEAD \($mb_base\)"
+assert_says 'case (mb5) it explains why that reviewed nothing' 'the branch point itself, so NO branch change was reviewed'
+assert_says 'case (mb5) the tip is reported beside it' "The tip of 'origin/main' is $mb_tip"
+
+printf '== case (mb6): a RANGE anchored at the base ref TIP FAILs (the old expectation) ==\n'
+reset_stub
+# THE DIRECTION THAT PROVES THE FIX IS NOT A LOOSENING. `<tip>..HEAD` is exactly the range the
+# OLD assert demanded, and it is NOT the branch diff — it subtracts commits that only main has.
+# So the shape the old code required must now FAIL, or "compare against the merge-base" would
+# just mean "accept either".
+work=$(make_fixture case_mb6 advanced-base)
+assert_base_advanced 'case (mb6)' "$work"
+mb_tip=$(git -C "$work" rev-parse origin/main)
+mb_base=$(git -C "$work" merge-base origin/main HEAD)
+mb_head=$(git -C "$work" rev-parse HEAD)
+STUB_ANNOUNCE_SHA="$mb_tip"
+STUB_GIT_REF="$mb_tip..$mb_head"
+run_wrapper "$work"
+assert_verdict 'case (mb6)' FAIL 1
+assert_says 'case (mb6) a tip-anchored range is refused' '^sha-assert: FAIL \(reviewed range does not match origin/main\.\.\.HEAD\)$'
+assert_says 'case (mb6) the expected base is the merge-base' "the range BASE is '$mb_tip', not '$mb_base'"
+assert_says 'case (mb6) the tip-anchor is diagnosed by name' "A base equal to the TIP of 'origin/main' \($mb_tip\)"
+
+printf '== case (mb7): an UNRESOLVABLE merge-base FAILs CLOSED, pre-enqueue ==\n'
+reset_stub
+# AFFIRMATIVE MEASUREMENT. With no common ancestor the base OF THE RANGE is unknown, and an
+# unknown base must never degrade to the tip (the tip is the defect) or to an empty string (which
+# would make the assert compare against nothing). It is a census FAIL, before any review is
+# enqueued, so it costs no review tokens.
+work=$(make_fixture case_mb7 orphan-base)
+STUB_ANNOUNCE_SHA=$(git -C "$work" rev-parse HEAD)
+run_wrapper "$work" --base unrelated
+assert_verdict 'case (mb7)' FAIL 1
+assert_says 'case (mb7) the unresolvable merge-base is named' "^census-check: FAIL \(no merge-base between 'unrelated' and HEAD\)\$"
+assert_says 'case (mb7) it is explicitly not NOTHING-TO-REVIEW' 'explicitly NOT a NOTHING-TO-REVIEW'
+assert_says 'case (mb7) it refuses to degrade to the tip' 'deliberately NOT degraded to the tip'
+assert_lacks 'case (mb7) never reports NOTHING-TO-REVIEW' '^RESULT: NOTHING-TO-REVIEW$'
+assert_never_enqueued 'case (mb7)'
+
+
 printf '== case (x5): a MENTIONED path without a diff header does NOT count as covered ==\n'
 reset_stub
 # The substring form of this check was satisfied by any incidental mention — including
@@ -3355,7 +3561,10 @@ done
 # waiver unable to touch any other verdict.
 w_work=$(make_fixture case_w two-code-commits)
 w_head=$(git -C "$w_work" rev-parse HEAD)
-w_base=$(git -C "$w_work" rev-parse origin/main)
+# THE MERGE-BASE, because that is the base of the reviewed range and therefore the base the waiver
+# scope is bound to (#3392). This fixture's base ref has not advanced, so it is the same commit as
+# the tip here — case (mb8) is the one that separates them.
+w_base=$(git -C "$w_work" merge-base origin/main HEAD)
 
 printf '== (wv1) a prompt naming a snapshot path is NOT special: an absent census path FAILs ==\n'
 # The shape that used to produce an exempted NOTICE. There is no snapshot mode any more, so this is
@@ -3375,7 +3584,7 @@ assert_says 'case (wv1) the diagnostic points at --help instead of printing a ma
   'THE EXACT MARKER FORM IS DELIBERATELY NOT PRINTED HERE'
 assert_lacks 'case (wv1) and no part of the marker appears anywhere in the output' 'roborev-waive'
 assert_says 'case (wv1) it names the review scope a waiver would have to bind' \
-  "base $w_base, head $w_head, job 4656"
+  "base $w_base — the merge-base of origin/main and HEAD, which is the base of the reviewed range and NOT the tip of origin/main, head $w_head, job 4656"
 assert_says 'case (wv1) the NONE cause names the SHAPE requirement (job 29)' \
   'the marker must be the SOLE NONBLANK CONTENT of a TOP-LEVEL PR comment'
 assert_says 'case (wv1) and it names the contexts that do not count' \
@@ -4000,6 +4209,46 @@ assert_says 'case (wv33c) neither preformatted context is an authorization' \
 assert_lacks 'case (wv33c) and neither grants' '^prompt-content: WAIVED'
 reset_stub
 
+printf '== case (mb8): the absence WAIVER is bound to the MERGE-BASE, not the base ref tip ==\n'
+# THE SAME STALENESS DEFECT, IN THE WAIVER (#3392). The waiver scope is `base=<sha> head=<sha>
+# job=<id>` and it identifies THE REVIEWED RANGE, whose base is the merge-base. Bound to the base
+# ref's TIP instead, a waiver written for a failing run went spuriously STALE on `--recheck-job`
+# the moment the base ref advanced — re-deadlettering the #3312 break-glass exactly when the fleet
+# is busiest. Nothing is weakened here: base AND head AND job are all still required and verified.
+reset_stub
+mb8_work=$(make_fixture case_mb8 advanced-base)
+assert_base_advanced 'case (mb8)' "$mb8_work"
+mb8_tip=$(git -C "$mb8_work" rev-parse origin/main)
+mb8_base=$(git -C "$mb8_work" merge-base origin/main HEAD)
+mb8_head=$(git -C "$mb8_work" rev-parse HEAD)
+STUB_ANNOUNCE_SHA="$mb8_base"
+STUB_GIT_REF="$mb8_base..$mb8_head"
+STUB_PROMPT="$PROMPT_WITHOUT_PATHS"
+STUB_GH_COMMENTS="\001pmcfadin\nroborev-waive: prompt-content-absent base=$mb8_base head=$mb8_head job=4656 reason=absence checked against the token accounting\n"
+run_wrapper "$mb8_work"
+assert_says 'case (mb8) a marker naming the MERGE-BASE grants' \
+  "^waiver: GRANTED \(author=@pmcfadin base=$mb8_base head=$mb8_head job=4656 reason=absence checked against the token accounting\)\$"
+assert_says 'case (mb8) and the absence verdict is WAIVED, not PASS' '^prompt-content: WAIVED \(2/2 code census paths absent'
+reset_stub
+
+printf '== case (mb8b): a marker naming the STALE base ref TIP does NOT grant ==\n'
+# THE CONTROL. Only the `base=` field differs from (mb8) — it names the base ref's TIP, which is a
+# real commit but NOT the base of the reviewed range — so the marker names a DIFFERENT review and
+# the FAIL stands. This is what makes (mb8) a measurement of the binding rather than of the parser.
+reset_stub
+STUB_ANNOUNCE_SHA="$mb8_base"
+STUB_GIT_REF="$mb8_base..$mb8_head"
+STUB_PROMPT="$PROMPT_WITHOUT_PATHS"
+STUB_GH_COMMENTS="\001pmcfadin\nroborev-waive: prompt-content-absent base=$mb8_tip head=$mb8_head job=4656 reason=bound to the wrong base\n"
+run_wrapper "$mb8_work"
+assert_verdict 'case (mb8b)' FAIL 1
+assert_says 'case (mb8b) the tip-bound marker is STALE' \
+  "^waiver: STALE \(the marker names a different review — base \($mb8_tip != $mb8_base\)"
+assert_lacks 'case (mb8b) and it grants nothing' '^prompt-content: WAIVED'
+assert_says 'case (mb8b) the absence FAIL stands' \
+  '^prompt-content: FAIL \(2/2 code census paths absent from the prompt\)$'
+reset_stub
+
 printf '== the summary header is distinct from every agent-gate header ==\n'
 reset_stub
 work=$(make_fixture case_hdr pushed)
@@ -4235,7 +4484,7 @@ _pc_start=$(grep -nE '^roborev_check_prompt_content\(\) \{' "$CHECKS_FILE" | hea
 _pc_end=$(awk -v s="${_pc_start:-0}" 'NR>s && /^}/ {print NR; exit}' "$CHECKS_FILE")
 _pc_body=$(sed -n "${_pc_start:-1},${_pc_end:-1}p" "$CHECKS_FILE")
 _pc_exec=$(printf '%s\n' "$_pc_body" | grep -v '^[[:space:]]*#')
-if printf '%s\n' "$_pc_exec" | grep -qF 'roborev_absence_waiver_lookup "${BASE_SHA:-}" "${HEAD_SHA:-}" "${JOB:-}"' \
+if printf '%s\n' "$_pc_exec" | grep -qF 'roborev_absence_waiver_lookup "${RANGE_BASE_SHA:-}" "${HEAD_SHA:-}" "${JOB:-}"' \
   && [ "$(printf '%s\n' "$_pc_exec" | grep -cF 'roborev_absence_waiver_lookup')" -eq 1 ] \
   && printf '%s\n' "$_pc_body" | grep -qF 'PROMPT_CONTENT="WAIVED ('; then
   ok 'structural: the waiver is looked up EXACTLY ONCE, inside the absence branch, so it can excuse only that verdict (constraint (c))'
@@ -4254,7 +4503,7 @@ fi
 # rather than on which key carries it: a key-scoped exemption is the shape the ruling deleted.
 _aff_start=$(grep -nF 'for keyed in "push-assert=$PUSH_ASSERT"' "$WRAPPER" | head -1 | cut -d: -f1)
 _aff_body=$(sed -n "${_aff_start:-1},$(( ${_aff_start:-1} + 30 ))p" "$WRAPPER")
-if printf '%s\n' "$_aff_body" | grep -qF 'ROBOREV_WAIVER_SCOPE:-}" = "base=${BASE_SHA:-} head=${HEAD_SHA:-} job=${JOB:-}"' \
+if printf '%s\n' "$_aff_body" | grep -qF 'ROBOREV_WAIVER_SCOPE:-}" = "base=${RANGE_BASE_SHA:-} head=${HEAD_SHA:-} job=${JOB:-}"' \
   && printf '%s\n' "$_aff_body" | grep -qF 'ROBOREV_WAIVER_STATE:-}" = "granted"' \
   && ! printf '%s\n' "$_aff_body" | grep -qF 'det_key" = "prompt-content"'; then
   ok 'structural: WAIVED is admitted only with a complete, sha-matching provenance, and the gate is not key-scoped'
@@ -4671,7 +4920,7 @@ else
     if [ "$_aff_continues" -eq 2 ] &&
       printf '%s\n' "$_aff_body" | grep -qE '^[[:space:]]*PASS\) continue ;;' &&
       printf '%s\n' "$_aff_body" | grep -qF '"${ROBOREV_WAIVER_STATE:-}" = "granted"' &&
-      printf '%s\n' "$_aff_body" | grep -qF '"${ROBOREV_WAIVER_SCOPE:-}" = "base=${BASE_SHA:-} head=${HEAD_SHA:-} job=${JOB:-}"' &&
+      printf '%s\n' "$_aff_body" | grep -qF '"${ROBOREV_WAIVER_SCOPE:-}" = "base=${RANGE_BASE_SHA:-} head=${HEAD_SHA:-} job=${JOB:-}"' &&
       ! printf '%s\n' "$_aff_body" | grep -qF 'det_key" = "prompt-content"'; then
       ok 'structural: the affirmation backstop has the affirmative PASS arm plus exactly the WAIVED admission, gated on the complete scope-matching provenance (base+head+job) and not on the key'
     else
