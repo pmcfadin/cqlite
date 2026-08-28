@@ -518,7 +518,7 @@
 #                      TMPDIR with no consistency check; exact-`S` index-flag match;
 #                      failed nested scan read as clean).
 #                      Also runs scripts/tests/test_pub_surface_guard.sh (#1712),
-#                      the non-vacuity proof for the pub-surface component. 38 cases,
+#                      the non-vacuity proof for the pub-surface component. 39 cases,
 #                      source-only (no cargo doc since the #1712 descope), each
 #                      negative case substituting the artifact in its own detached
 #                      scratch worktree — the guard has no test-only seam. The
@@ -5651,8 +5651,8 @@ run_pub_surface() {
 # reader, so with no python3 we record SKIP (loud, never silent PASS); any test
 # failure -> hard FAIL.
 # Also runs scripts/tests/test_pub_surface_guard.sh (#1712), the non-vacuity proof for
-# the pub-surface component: 38 cases driving scripts/ci/check-pub-surface.sh through
-# 8 greens, 28 reds, the usage case and the kill-safety case, substituting the artifact
+# the pub-surface component: 39 cases driving scripts/ci/check-pub-surface.sh through
+# 9 greens, 28 reds, the usage case and the kill-safety case, substituting the artifact
 # in detached scratch worktrees rather than through any test-only seam. It pins every
 # crate-root parse shape the (lexical, not-a-Rust-parser) scan claims to handle, all
 # four SHARED blind spots that its two derivations cannot express as a disagreement,

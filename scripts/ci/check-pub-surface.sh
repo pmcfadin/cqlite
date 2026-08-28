@@ -551,7 +551,12 @@ END {
       vnext = vj; break
     }
     if (vnext <= 0) continue
-    if (N[vnext] !~ /^[[:space:]]*mod[[:space:]]+[A-Za-z_]/) continue
+    # THE `mod` TOKEN IS ENOUGH — its identifier may be on a LATER line still (roborev
+    # r19 F1): `pub` / `mod` / `probe;` across three lines was missed because this
+    # required `mod NAME` together. Accepting a bare `mod` is a SIMPLIFICATION — one
+    # fewer requirement, not one more — which is the direction that says this refusal
+    # still has a correct bounded form and does not need deleting.
+    if (N[vnext] !~ /^[[:space:]]*mod([[:space:]]|$)/) continue
     printf "V\tline %d: a depth-0 line ends in a bare visibility qualifier and the next line begins a module declaration, so the declaration is split across lines: `%s` / `%s`\n", i, squash(substr(ltrim(N[i]), 1, 40)), squash(substr(ltrim(N[vnext]), 1, 30))
   }
 
@@ -580,7 +585,16 @@ END {
     # contents, so the count is reliable, and Refusal I already depends on the same
     # BRACE data. S keeps its own collection RULE (an unanchored scan, no attribute
     # parsing), which is where its independence from P actually lives.
+    # PAREN DEPTH TOO (roborev r19 F3). A macro token tree can contain a COMPLETE
+    # declaration — `swallow!( pub mod phantom; );` is valid Rust that emits no module —
+    # and brace depth alone reads it as crate-root, so S collected it, P did not, and the
+    # cross-check called a disagreement. A false FAIL on the MANDATORY gate.
+    #
+    # One more counter, not one more model: the same technique as the brace count, over
+    # text normalize() has already stripped of comments and string contents. Declarations
+    # inside `(` … `)` are skipped; nothing at true crate-root depth changes.
     sdepth = BRACE_START[i]
+    spdepth = 0
     rest = t
     consumed = 0
     while (match(rest, /pub mod [A-Za-z_][A-Za-z0-9_]*[[:space:]]*;/)) {
@@ -589,10 +603,12 @@ END {
         sc2 = substr(rest, sk, 1)
         if (sc2 == "{") sdepth++
         else if (sc2 == "}") sdepth--
+        else if (sc2 == "(") spdepth++
+        else if (sc2 == ")") spdepth--
       }
       nm = substr(rest, RSTART + 8, RLENGTH - 8)
       sub(/[[:space:]]*;$/, "", nm)
-      if (sdepth == 0) print "S\t" nm
+      if (sdepth == 0 && spdepth == 0) print "S\t" nm
       rest = substr(rest, RSTART + RLENGTH)
     }
   }
@@ -707,7 +723,13 @@ END {
         # so those must not end the attribute run: breaking on them made a genuinely
         # gated module read as unconditional and reported it INCONSISTENT.
         nxt = CUR + 1
-        while (nxt <= n && INCODE[nxt] && N[nxt] == "") nxt++
+        # CROSS COMMENT-ONLY REGIONS (roborev r19 F2). normalize() blanks comments to
+        # SPACES, not "", and a line INSIDE a block comment carries INCODE 0 — so the old
+        # `INCODE[nxt] && N[nxt] == ""` test stopped at BOTH. The attribute run was then
+        # dropped and a CORRECTLY GATED module recorded as OPEN, i.e. the guard ACCUSED a
+        # module of the very defect it does not have. A false FAIL, and the worst kind:
+        # it indicts correct code by name.
+        while (nxt <= n && N[nxt] ~ /^[[:space:]]*$/) nxt++
         if (nxt > n) break
         if (!INCODE[nxt]) break
         if (N[nxt] ~ /^[[:space:]]/) break

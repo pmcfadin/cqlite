@@ -1647,7 +1647,72 @@ for c52h in '/* a comment\n   spanning lines\n*/' '// a single-line note'; do
   grep -qF "split across lines" "$TMPROOT/case52h.out" \
     || fail_case "case 52(h$c52_m) — refused, but not via Refusal V; got: $(cat "$TMPROOT/case52h.out")"
 done
-echo "OK (52): a split MODULE declaration REFUSES (bare, parenthesised, after an attribute, across blank lines AND across comments) — while a macro token tree containing \`pub\`, a dangling \`pub\` before a NON-module item, one-line \`pub\` items and \`republic\` all stay GREEN"
+
+# (i) THE `mod` IDENTIFIER MAY BE ON A LATER LINE STILL (roborev r19 F1): `pub` / `mod` /
+#     `probe;` across THREE lines. Requiring `mod NAME` together missed it. Accepting a
+#     bare `mod` is a SIMPLIFICATION — one fewer requirement — which is why this refusal
+#     kept its bounded form instead of being deleted like the item-macro one.
+c52_p=0
+for c52i in 'pub\nmod\nprobe_split;' 'pub\n// note\nmod\nprobe_split;'; do
+  c52_p=$((c52_p + 1))
+  scratch_tree "split-decl-threeline-$c52_p"; wt52i="$SCRATCH"
+  printf '\n%b\n' "$c52i" >>"$wt52i/cqlite-core/src/lib.rs"
+  printf '#![cfg(feature = "benchmarks")]\n//! inner-gated\npub fn p() {}\n' >"$wt52i/cqlite-core/src/probe_split.rs"
+  set +e
+  bash "$wt52i/$GUARD_REL" >"$TMPROOT/case52i.out" 2>&1
+  c52i_rc=$?
+  set -e
+  [ "$c52i_rc" -ne 0 ] || fail_case "case 52(i$c52_p) — a THREE-LINE split declaration passed GREEN; the \`mod\` identifier may sit on a later line still; got: $(cat "$TMPROOT/case52i.out")"
+done
+echo "OK (52): a split MODULE declaration REFUSES across two lines, THREE lines, blank lines and comments — while a macro token tree containing \`pub\`, a dangling \`pub\` before a NON-module item, one-line \`pub\` items and \`republic\` all stay GREEN"
+
+# ---------------------------------------------------------------------------
+# 54. GREEN — TWO FALSE FAILS THE MANDATORY GATE USED TO PRODUCE (roborev r19 F2/F3).
+#
+#     (a) An attribute run separated from its declaration by a MULTI-LINE COMMENT. The
+#         collection loop skipped blanks only while INCODE was true, but normalize()
+#         blanks comments to SPACES and a line inside a block comment carries INCODE 0 —
+#         so it stopped at both, dropped the `#[cfg(...)]`, and recorded a CORRECTLY
+#         GATED module as OPEN. The guard then ACCUSED that module of the AK1 defect.
+#         That is the worst class of false FAIL: it indicts correct code by name.
+#     (b) A macro token tree containing a COMPLETE declaration —
+#         `swallow!( pub mod phantom; );` is valid Rust that emits no module. Brace depth
+#         alone read it as crate-root, so S collected it and P did not.
+#
+#     (c) RED control — the AK1 defect must still be caught through a comment gap, or
+#         these two fixes would have bought a false PASS.
+# ---------------------------------------------------------------------------
+# NO python3 (r12 F3 removed it from this suite and it must not come back):
+# scratch_tree + printf, the same idiom every other case uses.
+scratch_tree attr-comment-gap-gated; wt54="$SCRATCH"
+printf '\n#[cfg(feature = "benchmarks")]\n/* a comment\n   spanning lines\n*/\npub mod probe_oracle;\n' >>"$wt54/cqlite-core/src/lib.rs"
+printf '#![cfg(feature = "benchmarks")]\n//! correctly gated at BOTH sites\npub fn probe() {}\n' >"$wt54/cqlite-core/src/probe_oracle.rs"
+set +e
+bash "$wt54/$GUARD_REL" >"$TMPROOT/case54.out" 2>&1
+c54rc=$?
+set -e
+[ "$c54rc" -eq 0 ] || fail_case "case 54(a) — a CORRECTLY GATED module whose \`#[cfg]\` is separated from its declaration by a multi-line comment was accused of the AK1 defect. The attribute run must survive comment-only regions; got: $(cat "$TMPROOT/case54.out")"
+
+scratch_tree macro-tokentree-full-decl; wt54b="$SCRATCH"
+printf '\nswallow!( pub mod phantom; );\n' >>"$wt54b/cqlite-core/src/lib.rs"
+set +e
+bash "$wt54b/$GUARD_REL" >"$TMPROOT/case54b.out" 2>&1
+c54b_rc=$?
+set -e
+[ "$c54b_rc" -eq 0 ] || fail_case "case 54(b) — a macro token tree containing a complete \`pub mod phantom;\` was read as a crate-root declaration. It emits no module; paren depth must exclude it; got: $(cat "$TMPROOT/case54b.out")"
+
+scratch_tree attr-comment-gap-still-detects; wt54c="$SCRATCH"
+printf '\n#[cfg(feature = "benchmarks")]\n/* c */\npub mod probe_oracle;\n' >>"$wt54c/cqlite-core/src/lib.rs"
+printf '#![cfg(feature = "benchmarks")]\n//! inner-gated while the crate root is UNCONDITIONAL\npub fn probe() {}\n' >"$wt54c/cqlite-core/src/probe_oracle.rs"
+set +e
+bash "$wt54c/$GUARD_REL" >"$TMPROOT/case54c.out" 2>&1
+c54c_rc=$?
+set -e
+[ "$c54c_rc" -ne 0 ] || fail_case "case 54(c) — the r19 F2/F3 fixes bought a FALSE PASS: an unconditional declaration whose module file gates itself was certified; got: $(cat "$TMPROOT/case54c.out")"
+grep -q "INCONSISTENT" "$TMPROOT/case54c.out" \
+  || fail_case "case 54(c) — refused but not as the INCONSISTENT defect; got: $(cat "$TMPROOT/case54c.out")"
+echo "OK (54): an attribute run survives a multi-line comment gap and a macro token tree is not a declaration — while the AK1 defect is still caught"
+
 
 # ---------------------------------------------------------------------------
 # 53. RED+GREEN — `# [path = "..."]` with whitespace between `#` and `[` (roborev r18 F1).
@@ -1781,4 +1846,4 @@ grep -qF "affirmative measurement" "$TMPROOT/case39.out" \
 echo "OK (39): a crate root with ZERO unconditional declarations FAILs — the assert never reports success having examined nothing"
 
 echo ""
-echo "PASS: test_pub_surface_guard.sh — all 38 cases (8 green, 28 reds, 1 usage, 1 kill-safety)"
+echo "PASS: test_pub_surface_guard.sh — all 39 cases (9 green, 28 reds, 1 usage, 1 kill-safety)"
