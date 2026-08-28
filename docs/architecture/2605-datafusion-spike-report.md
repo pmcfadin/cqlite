@@ -204,25 +204,30 @@ The estimate does not settle — it wanders, and on `filtered_scan` it crosses 1
 one or two iterations would have published a "1.2-1.4x DataFusion win"; the drift is the reason this
 report does not quote a wall-clock ratio as the vectorized-exec delta at all.
 
-### 3.2 Raw per-cell results (median of 3 iterations, with the range)
+### 3.2 Raw per-cell results (median over each row's own `n`, with the range)
 
-| scenario | arm | wall s (median) | [min, max] | rows emitted/s | batches | encode ms | merge ms | decompress ms | cold-fault ms (sum over 2 producer threads) | peak RSS MiB | rows result |
-|---|---|---|---|---|---|---|---|---|---|---|---|
-| full_scan_count | floor | 124.1 | [99.9, 169.4] | 15308 | 1908 | 6118 | 30604 | 1722 | 156830 | 37.0 | 0 |
-| full_scan_count | row_engine | 99.8 | [92.7, 140.3] | 19026 | 1908 | 5802 | 27648 | 1733 | 130130 | 36.8 | 1899750 |
-| full_scan_count | datafusion@tp1 | 91.8 | [78.1, 95.9] | 20693 | 1908 | 5649 | 28087 | 1760 | 114299 | 48.3 | 1899750 |
-| full_scan_count | datafusion@tp16 | 73.0 | [71.5, 119.0] | 26034 | 1908 | 5645 | 27977 | 1769 | 83578 | 48.8 | 1899750 |
-| full_scan_count | row_pushdown | 88.6 | [59.2, 111.4] | 21451 | 1908 | 5809 | 29476 | 1831 | 97639 | 37.0 | 1899750 |
-| projected_scan | floor | 81.0 | [66.7, 99.8] | 23458 | 1908 | 5484 | 27975 | 1806 | 97297 | 36.8 | 0 |
-| projected_scan | row_engine | 92.1 | [81.9, 118.9] | 20621 | 1908 | 5734 | 28018 | 1752 | 120167 | 36.8 | 1899750 |
-| projected_scan | datafusion@tp1 | 89.7 | [71.3, 102.9] | 21185 | 1908 | 5769 | 27762 | 1744 | 111877 | 47.2 | 1899750 |
-| projected_scan | datafusion@tp16 | 61.8 | [61.0, 100.9] | 30749 | 1908 | 5578 | 28386 | 1824 | 64774 | 46.9 | 1899750 |
-| projected_scan | row_pushdown | 56.7 | [48.3, 76.1] | 33494 | 232 | 788 | 22112 | 1469 | 67378 | 29.4 | 1899750 |
-| filtered_scan | floor | 120.6 | [80.1, 129.7] | 15748 | 1908 | 5864 | 29786 | 1732 | 155382 | 36.8 | 0 |
-| filtered_scan | row_engine | 93.2 | [72.3, 116.4] | 20375 | 1908 | 5772 | 27387 | 1744 | 122390 | 36.9 | 937602 |
-| filtered_scan | datafusion@tp1 | 101.5 | [80.9, 108.9] | 18722 | 1908 | 5820 | 27332 | 1736 | 129061 | 50.1 | 937602 |
-| filtered_scan | datafusion@tp16 | 98.9 | [72.4, 100.6] | 19213 | 1908 | 5837 | 27709 | 1777 | 128138 | 51.2 | 937602 |
-| filtered_scan | row_pushdown | 84.4 | [57.4, 138.8] | 11113 | 942 | 3228 | 28566 | 1730 | 105482 | 36.7 | 937602 |
+Every row here is `n = 3`; the column is printed anyway, because a single-sample
+row rendered as `[81.0, 81.0]` reads as a tight, high-confidence measurement when
+it is the exact opposite. The aggregator prints an em dash for `n = 1` instead of
+a degenerate range.
+
+| scenario | arm | n | wall s (median) | [min, max] | rows emitted/s | batches | encode ms | merge ms | decompress ms | cold-fault ms (sum over 2 producer threads) | peak RSS MiB | rows result |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| full_scan_count | floor | 3 | 124.1 | [99.9, 169.4] | 15308 | 1908 | 6118 | 30604 | 1722 | 156830 | 37.0 | 0 |
+| full_scan_count | row_engine | 3 | 99.8 | [92.7, 140.3] | 19026 | 1908 | 5802 | 27648 | 1733 | 130130 | 36.8 | 1899750 |
+| full_scan_count | datafusion@tp1 | 3 | 91.8 | [78.1, 95.9] | 20693 | 1908 | 5649 | 28087 | 1760 | 114299 | 48.3 | 1899750 |
+| full_scan_count | datafusion@tp16 | 3 | 73.0 | [71.5, 119.0] | 26034 | 1908 | 5645 | 27977 | 1769 | 83578 | 48.8 | 1899750 |
+| full_scan_count | row_pushdown | 3 | 88.6 | [59.2, 111.4] | 21451 | 1908 | 5809 | 29476 | 1831 | 97639 | 37.0 | 1899750 |
+| projected_scan | floor | 3 | 81.0 | [66.7, 99.8] | 23458 | 1908 | 5484 | 27975 | 1806 | 97297 | 36.8 | 0 |
+| projected_scan | row_engine | 3 | 92.1 | [81.9, 118.9] | 20621 | 1908 | 5734 | 28018 | 1752 | 120167 | 36.8 | 1899750 |
+| projected_scan | datafusion@tp1 | 3 | 89.7 | [71.3, 102.9] | 21185 | 1908 | 5769 | 27762 | 1744 | 111877 | 47.2 | 1899750 |
+| projected_scan | datafusion@tp16 | 3 | 61.8 | [61.0, 100.9] | 30749 | 1908 | 5578 | 28386 | 1824 | 64774 | 46.9 | 1899750 |
+| projected_scan | row_pushdown | 3 | 56.7 | [48.3, 76.1] | 33494 | 232 | 788 | 22112 | 1469 | 67378 | 29.4 | 1899750 |
+| filtered_scan | floor | 3 | 120.6 | [80.1, 129.7] | 15748 | 1908 | 5864 | 29786 | 1732 | 155382 | 36.8 | 0 |
+| filtered_scan | row_engine | 3 | 93.2 | [72.3, 116.4] | 20375 | 1908 | 5772 | 27387 | 1744 | 122390 | 36.9 | 937602 |
+| filtered_scan | datafusion@tp1 | 3 | 101.5 | [80.9, 108.9] | 18722 | 1908 | 5820 | 27332 | 1736 | 129061 | 50.1 | 937602 |
+| filtered_scan | datafusion@tp16 | 3 | 98.9 | [72.4, 100.6] | 19213 | 1908 | 5837 | 27709 | 1777 | 128138 | 51.2 | 937602 |
+| filtered_scan | row_pushdown | 3 | 84.4 | [57.4, 138.8] | 11113 | 942 | 3228 | 28566 | 1730 | 105482 | 36.7 | 937602 |
 
 `datafusion@tp1` pins DataFusion's `target_partitions` to 1 so its thread count matches the
 single-threaded direct arms; `datafusion@tp16` is DataFusion's default (one per core on this
@@ -263,10 +268,10 @@ execution-bound, it is I/O-bound and then producer-CPU-bound, and DataFusion cha
 
 Two further readings of the same table:
 
-* `datafusion@tp16` (DataFusion's default parallelism) is **not** better than `tp1` once I/O is
-  controlled. Its apparent raw-wall lead (73.0 s vs 91.8 s on `full_scan_count`) tracks its lower
-  cold-fault (83.6 s vs 114.3 s) exactly. Over a **single-partition** scan DataFusion's extra
-  workers have nothing to parallelise except draining and dropping batches.
+* `datafusion@tp16` (DataFusion's default parallelism) has **no CPU advantage** over `tp1` once I/O
+  is controlled. Its raw-wall lead is real and reproducible (73.0 s vs 91.8 s on `full_scan_count`)
+  but it tracks its lower cold-fault (83.6 s vs 114.3 s) exactly: extra workers overlap page-in, they
+  do not execute faster. That is **concurrency, not vectorization**, and §3.7 separates the two.
 * `row_pushdown` on `projected_scan` is the one arm with a consistently NEGATIVE residual
   (**-4.6 s**, range `[-8.5, -1.7]`) — the only engine-attributable win in the matrix, and it comes
   from **narrowing the scan**, not from vectorizing execution (see §3.5).
@@ -282,6 +287,14 @@ Two further readings of the same table:
 
 These are stable to a few percent across all 45 runs (`stream_encode` `[5.48, 6.36] s` excluding the
 projection-pushdown cells), which is why they — and not wall time — carry the load-bearing figures.
+
+**`stream_cold_fault` is a STALL ACCOUNT summed over the 2 producer threads, NOT a partition of
+elapsed time.** Measured across the 45 runs it is **1.02x to 1.34x of wall time** — it legitimately
+exceeds the run it was measured in, because two threads stall concurrently and both stalls are
+counted. It must therefore never be rendered as a percentage of elapsed, and these buckets must never
+be presented as shares summing to 100 %: they run on concurrent pipeline threads and overlap in wall
+clock (§2.4). Where this report uses cold-fault quantitatively it is as a **covariate** (§3.3), which
+is valid precisely because no partition of elapsed is being claimed.
 
 **M15 item 1, the two deltas, reported separately:**
 
@@ -324,12 +337,150 @@ result for the connector: push *projections* eagerly; pushing a non-partition-ke
 nothing until it can prune SSTables or partitions.
 
 
+### 3.6 The elapsed ratios, and why they cannot carry the verdict
+
+For completeness, the same comparison in raw wall time (`n = 3` per cell, median; the ranges are in
+§3.2):
+
+| scenario | floor s | row s | DF@tp1 s | DF@tp16 s | pushdown s | vectorization (row / DF@tp1) | concurrency (DF@tp1 / DF@tp16) | decode-to-column share of floor wall |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| `full_scan_count` | 124.1 | 99.8 | 91.8 | 73.0 | 88.6 | **1.09x** | 1.26x | 4.9 % |
+| `projected_scan` | 81.0 | 92.1 | 89.7 | 61.8 | 56.7 | **1.03x** | 1.45x | 6.8 % |
+| `filtered_scan` | 120.6 | 93.2 | 101.5 | 98.9 | 84.4 | **0.92x** | 1.03x | 4.9 % |
+
+**These ratios do not resolve a `>1.3x` question in either direction, and the report does not ask
+them to.** Three facts from the same 45 cells say why:
+
+* **Per-cell spread is 1.23x to 2.42x** (tightest `full_scan_count/datafusion@tp1`, widest
+  `filtered_scan/row_pushdown`) against a **1.3x** decision threshold. The noise is the size of the
+  effect being tested.
+* **The row-engine and DataFusion ranges overlap in all three scenarios** — `[92.7, 140.3]` vs
+  `[78.1, 95.9]`, `[81.9, 118.9]` vs `[71.3, 102.9]`, `[72.3, 116.4]` vs `[80.9, 108.9]`. Overlapping
+  samples cannot establish a threshold crossing at any `n` this small.
+* **The discard-only floor — which does strictly less work than every executing arm — was beaten in
+  24 of 36 arm-comparisons.** An arm cannot really be faster than producing its own input, so this
+  is a direct measurement of how much of the wall-clock channel is noise. (The harness reports it
+  per run as a warning; making it an assertion would abort nearly every legitimate run.)
+
+**And the estimate drifts, which is the strongest evidence in the spike about its own reliability.**
+Recomputing the vectorization ratio as a running median over iterations `1..n` — the number a reader
+would have quoted had the run been stopped at `n` — gives:
+
+| scenario | n=1 | n=2 | n=3 (final) |
+|---|---:|---:|---:|
+| `full_scan_count` | 1.19x | 1.37x | **1.09x** |
+| `projected_scan` | 1.15x | 1.25x | **1.03x** |
+| `filtered_scan` | 1.44x | 1.15x | **0.92x** |
+
+A textbook regression toward no effect, non-monotone on the way (`full_scan_count` rose to 1.37x at
+`n = 2` before collapsing). **Written at `n = 1`, this report would have claimed a 1.15x-1.44x
+vectorization win — up to 1.44x on `filtered_scan`, comfortably past the 1.3x trigger — that does not
+exist.** No prefix of this data was stable, which is the reason §3.3 and §3.4 carry the verdict and
+these ratios do not. The table is regenerated from the committed cells by `summarize.py`; it requires
+distinct per-cell iterations and skips itself rather than inventing an ordering.
+
+### 3.7 The decomposition M15 item 1 asked for: concurrency, not vectorization
+
+DataFusion's *apparent* advantage is real in wall time and is **entirely attributable to thread
+count**, not to vectorized kernels:
+
+| scenario | row_engine s | DF@tp16 s (default) | row / DF@tp16 | DF@tp1 s (equal threads) | row / DF@tp1 |
+|---|---:|---:|---:|---:|---:|
+| `full_scan_count` | 99.8 | 73.0 | **1.37x** | 91.8 | 1.09x |
+| `projected_scan` | 92.1 | 61.8 | **1.49x** | 89.7 | 1.03x |
+| `filtered_scan` | 93.2 | 98.9 | 0.94x | 101.5 | 0.92x |
+
+At DataFusion's default parallelism (16 partitions on this 16-core box) it beats the single-threaded
+row-engine arm by **1.37x / 1.49x** on two of three scenarios. At **equal thread count** the
+advantage vanishes (**1.09x / 1.03x / 0.92x**), and with I/O controlled the residuals are within
++/-3 % (§3.3). The mechanism is visible in the counters, not inferred: `DF@tp16`'s cold-fault stall
+drops from 114.3 s to 83.6 s (`full_scan_count`) and 111.9 s to 64.8 s (`projected_scan`) — its extra
+workers overlap **page-in**, which is exactly the term that dominates this corpus. Note the arm with
+no I/O left to overlap, `filtered_scan`, shows no concurrency effect at all (1.03x), which is the
+internal consistency check on that claim.
+
+**The consequence for #941 is the whole point of the decomposition: the available win is
+CONCURRENCY, and adopting DataFusion is not required to obtain it.** A concurrent producer/drain in
+CQLite's own pipeline captures the same term.
+
+**This separation exists only because the harness gained `--df-target-partitions`.** With
+DataFusion's default left in place — the obvious way to run a "realistic configuration" — the spike
+would have measured 1.37x-1.49x and reported *threading* as *vectorization*, which is the exact
+mistake the M15 item-1 decomposition exists to prevent.
+
+### 3.8 Direction of bias, stated per bias — they do not all point one way
+
+| Bias | Direction | Status |
+|---|---|---|
+| `rowwise.rs` is faster than production's row engine (no `HashMap<String, Value>` per row, one downcast per batch) | **understates DataFusion** | live; see §2.2 |
+| `datafusion default-features = false` | **understates DataFusion**, in principle | quantified in §3.9 — nothing the three measured queries use is stripped |
+| Corpus merge depth `k = 2` is shallower than a compaction-backlogged node | either way (more merge CPU raises the shared floor for all arms) | **retired** for this headline corpus; see below |
+| Thread count | **FAVOURS DataFusion by 1.26x-1.45x** (§3.7) | pinned to `tp1` for the headline — our choice, not a bias suffered |
+
+Two of these need saying plainly:
+
+* **Merge depth is retired as a caveat for the headline number, not waved away.** The k=2 corpus is
+  the one this report's numbers come from, and its merge arm is *asserted per run*
+  (`reconcile_entries = 1,899,750` in all 45 runs, §2.3), so the measurement is genuinely
+  post-reconciliation. It remains a live question for deeper backlogs, which is why a secondary
+  **k=25** corpus exists at `/data/corpus-2605-k25` (machine-local, not in the repository) — deeper
+  merge raises `stream_merge`, the term that already dominates `stream_encode` 4.9:1, so the
+  expectation is that it moves the columnar-producer case *further* below the 1.3x trigger, not
+  toward it. Unmeasured is unmeasured; it is named here so nobody reads k=2 as the general case.
+* **The parallelism knob is a conservative CHOICE.** Pinning `target_partitions = 1` throws away
+  DataFusion's best measured result. That is deliberate: it is the only configuration in which a
+  residual delta is attributable to execution rather than to thread count, and erring against the
+  thing being evaluated is the direction an honest measurement should err in.
+
+### 3.9 What DataFusion was actually compiled with, and whether it was crippled
+
+`default-features = false` is a real question for a spike that concludes "no advantage", so the
+enabled set is enumerated rather than asserted.
+
+**Disabled** (DF 44's `default` list, all of it off): `nested_expressions`, `crypto_expressions`,
+`datetime_expressions`, `encoding_expressions`, `regex_expressions`, `string_expressions`,
+`unicode_expressions`, `compression`, `parquet`, `recursive_protection`. Every one of those is a
+**scalar-function library**, a **file-format/codec reader**, or a stack-recursion guard. **None of
+them is the planner, the optimizer, the physical execution engine, or the aggregate path.**
+
+**Present and exercised** (non-optional dependencies of the `datafusion` crate, verified in the
+resolved tree):
+
+| Component | Crate | Used by this spike |
+|---|---|---|
+| SQL parser | `sqlparser 0.53` | yes — **real SQL ran**; no `LogicalPlan` was hand-built |
+| SQL planner | `datafusion-sql 44.0.0` | yes — `SessionContext::sql("SELECT count(*) FROM t ...")` |
+| Logical optimizer | `datafusion-optimizer 44.0.0` | yes (default rule set) |
+| Physical optimizer | `datafusion-physical-optimizer 44.0.0` | yes |
+| Vectorized execution | `datafusion-physical-plan 44.0.0` | yes — `AggregateExec`, `FilterExec`, `ProjectionExec`, `RepartitionExec` |
+| `count(*)` aggregate | `datafusion-functions-aggregate 44.0.0` | yes |
+| `TableProvider` catalog | `datafusion-catalog 44.0.0` | yes — the spike's provider is registered through it |
+
+The SQL each DataFusion cell ran is recorded **in the cell itself** (the `sql` field, e.g.
+`SELECT count(*) FROM t WHERE "ck" < 5`), so this is checkable from the artifacts and not from this
+prose.
+
+**Projection and filter pushdown are implemented and were deliberately switched OFF** for the
+DataFusion arm (`CqliteTableProvider::open(..., pushdown = false)`), so that arm consumes byte-identical
+batches to the direct arms — that is what makes it a measurement of execution (§2.1). The
+`row_pushdown` arm reports what pushdown buys, and it is the only lever that paid (§3.5).
+
+**So the measured delta is a FLOOR, in a narrow and stated sense.** Nothing a `#941` deployment would
+switch on can make *these three queries* faster — the stripped features are function libraries none of
+them calls — but a deployment enabling them would be running query shapes this spike never measured
+(string/regex/date predicates, nested types), where a vectorized engine has more to offer. The
+`~0 %` result is therefore a floor for **scan-plus-count/projection** shapes, and says nothing about
+richer ones.
+
+
 ---
 
 ## 4. Peak memory vs the B4 512Mi pod budget (M15 item 3)
 
-Peak RSS is sampled per run from `/proc/self/statm` at 20 ms, in the run's OWN process, and is
-reported as `unmeasured` (never `0`) if it cannot be read.
+Peak RSS is sampled per run from **`/proc/self/status`'s `VmRSS`** on a **20 ms interval**, in the
+run's OWN process, and is reported as `unmeasured` (never `0`) if it cannot be read. `VmRSS` is
+*current* resident set size, folded into a per-run maximum by the sampler; `VmHWM` was rejected
+because it is a process-wide high-water mark that cannot attribute a peak to a scenario or arm.
 
 | scenario | floor | row_engine | datafusion@tp1 | datafusion@tp16 | row_pushdown |
 |---|---:|---:|---:|---:|---:|
@@ -352,10 +503,18 @@ Reading the table:
 * **Projection pushdown REDUCES peak RSS by 20 %** (36.8 -> 29.4 MiB), for the same reason it reduces
   encode time: the wide columns are never materialized.
 
-Caveat: `/proc/self/statm` resident pages include file-backed pages, and the page size is assumed to
-be 4 KiB (stated in `rss.rs`, not silently assumed). These are reporting figures, not an allocator
-audit; the dhat-based `memory-budget` gate component remains the authority for the production
-producer's allocation bound.
+Caveats, all three of them:
+
+* **A 20 ms sampler can miss a shorter spike.** Every figure here is the largest RSS *observed*, so a
+  sub-interval allocation peak between two samples is invisible to it. The numbers are 7x-10x under
+  budget, so no plausible missed spike changes the verdict — but a reading this far under budget is
+  the reason a coarse sampler is acceptable, not evidence that none was missed.
+* **`VmRSS` includes file-backed pages**, so these are resident-footprint figures, not an allocator
+  audit. The dhat-based `memory-budget` gate component remains the authority for the production
+  producer's allocation bound.
+* The earlier version of the sampler read `/proc/self/statm` (resident **pages**) and multiplied by a
+  hardcoded 4096, which silently under-reports 4x on a 16 KiB-page kernel. It was replaced by
+  `VmRSS`, which the kernel already denominates in kB, so no page size is assumed anywhere.
 
 
 ---
@@ -438,10 +597,30 @@ unchanged and still run.
 The brief's trigger rule is about Stage-1 throughput, and this spike cannot measure `rows/s/pod` (§0).
 What it *can* do — and did — is answer the question that made the trigger interesting: **would a
 DataFusion execution layer help?** On a wide, overlapping, LZ4-compressed, Cassandra-5.0-written
-corpus, with I/O controlled, **DataFusion is within +/-3 % of the row engine over identical batches**,
-and its default parallelism is not better than a single partition because the scan *is* a single
-partition. The DataFusion arm has nothing to accelerate: 98 % of wall-time variance is page-in, and
-the residual CPU is the merge/materialize/transpose pipeline, all of it upstream of execution.
+corpus, **at equal thread count DataFusion is within +/-3 % of the row engine over identical
+batches** (1.09x / 1.03x / 0.92x raw, +/-3 % with I/O controlled). The DataFusion arm has nothing to
+accelerate: 98 % of wall-time variance is page-in, and the residual CPU is the
+merge/materialize/transpose pipeline, all of it upstream of execution.
+
+**The one real win it showed is concurrency, and it does not require DataFusion.** At its default
+parallelism DataFusion beats the single-threaded row arm by **1.37x / 1.49x** on two of three
+scenarios — but the counters attribute that to overlapped page-in, not to kernels (§3.7), and a
+concurrent producer/drain in CQLite's own pipeline captures the same term without a 78-crate
+dependency. Had the harness lacked `--df-target-partitions`, this report would have called that
+threading a vectorization win.
+
+**This recommendation is deliberately SCOPED, because the acceptance criteria assumed a corpus that
+does not exist here.** The AC was written expecting the R12 dataset; it is not available on this box
+(§0). What is supplied is therefore **one half of the promotion input — the DataFusion delta**. The
+other half, the post-Stage-1 row-engine ceiling, is a **field measurement this spike neither makes
+nor can make**. No `rows/s/pod` figure is offered, derived or implied: §0 forfeits that claim and
+nothing here reinstates it. The `~56.4k rows/s` in §3.4 is single-consumer-thread **CPU ceiling on
+this box with I/O free**, not a pod throughput.
+
+**And the delta is a FLOOR for the shapes measured** (§3.9): the stripped DataFusion features are
+scalar-function libraries none of these three queries calls, so nothing switched off could have made
+them faster — but a deployment running string/regex/date predicates, nested types, joins or large
+sorts would be running shapes this spike never measured.
 
 So promoting #941 for 0.16 would land a heavy dependency (**+231 s of cold build time, +422 MiB of
 build output, +37 lock packages**) against a measured **~0 %** execution gain. The de-risking that
@@ -463,7 +642,17 @@ Two conditions would change this recommendation, and neither is measurable here:
 
 **Recommendation: Stage-3 prep. The `>1.3x` revisit trigger is NOT met.**
 
-The trigger asks for `>1.3x` on wide/overlap. The measured decode-to-column cost is
+The trigger asks for `>1.3x` on wide/overlap. Three independent readings of the same data all land
+below it:
+
+* **As a share of wall time**, decode-to-column is **4.9 % / 6.8 % / 4.9 %** of the floor arm's
+  elapsed (§3.6) — removing it entirely cannot move a wall-clock number that is 98 % page-in.
+* **As a share of consumer CPU** — the I/O-free ceiling, the most favourable honest framing — it is
+  16.9 %, a **1.20x** upper bound (below).
+* **Empirically**, the one change that *does* remove ~86 % of the transpose (projection pushdown,
+  §3.5) buys **~1.4x vs the floor** in wall time and no more, because what remains is still I/O.
+
+The measured decode-to-column cost is
 **`stream_encode` = 2.99 us/row = 16.9 % of merge-consumer CPU**, so eliminating the transpose
 *entirely* — a columnar producer that costs nothing, with the merge/materialize side unchanged — is a
 **1.20x** ceiling. That is an upper bound derived from a stable, directly-instrumented counter, and it
@@ -483,7 +672,24 @@ Conversely, **pushing a non-partition-key predicate is not worth it on this shap
 pushdown arm still reads every byte and its residual is `+0.8 s`. Predicate pushdown only pays once it
 can prune SSTables or partitions.
 
-### 6.4 Disposition of the spike code
+### 6.4 The caveat that keeps this question open
+
+**9.64 GiB (10.35 GB) of corpus against a 512Mi pod means I/O-bound is the REALISTIC regime, not an artifact of
+an oversized corpus.** A B4 pod cannot cache a table it is scanning; a Trino split reading a cold
+SSTable is exactly the measured situation, which is why this report treats the I/O-bound finding as
+representative rather than as a nuisance to be engineered away.
+
+**But a cache-resident working set is a different measurement, and it is the one that would truly
+test vectorization.** With page-in removed the pipeline is producer-CPU-bound (`stream_merge` +
+`stream_encode` = 33.66 s of consumer CPU per 1.9M rows, §3.4), and that is the regime in which
+execution-engine differences have room to show. This spike did not measure it: the corpus was sized
+to exceed the box's free page cache on purpose, so that the wide/overlap half of M15's shape was
+real. **The question is therefore narrowed, not closed.** The follow-up that would close it is a
+corpus small enough to be fully resident (a few GB, pre-warmed, with the same wide/overlap shape),
+run through the same five arms and the same driver — the rig is committed and the marginal cost is
+one afternoon of machine time.
+
+### 6.5 Disposition of the spike code
 
 Keep it behind the flag; do not wire it. It is `datafusion-spike`-gated, has no service route, ticket
 field or CLI flag reaching it, adds no decode logic, and would be deleted by deleting the feature. Its
@@ -532,7 +738,7 @@ A single cell, for debugging:
 | `cells/*.json` | one JSON document per (scenario, arm, iteration) run — 45 files, every field this report quotes |
 | `summary.md` | the aggregated tables in §3, regenerated by `summarize.py` |
 | `run-matrix.sh` | the driver (one process per cell, iteration outermost, arm order rotated) |
-| `summarize.py` | the aggregator (median + range, the I/O-controlled regression, the comparability assert) |
+| `summarize.py` | the aggregator (per-row `n` + range, the drift table, the I/O-controlled regression, the comparability and `rows_result` asserts, the floor-beaten count) |
 | `wide_4kb.cql` | the corpus DDL (column/key structure verbatim from Cassandra's own `schema.cql`) |
 | `corpus-manifest-2605.json` | the generator's provenance manifest, copied in so this report is self-contained (overlap measurement, per-SSTable timestamps, compression verification, the RF caveat) |
 
