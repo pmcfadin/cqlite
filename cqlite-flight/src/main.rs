@@ -2,6 +2,7 @@
 //! data. Runs co-located with a Cassandra node and reads its local SSTables.
 
 use arrow_flight::flight_service_server::FlightServiceServer;
+use tonic::transport::server::TcpIncoming;
 use tonic::transport::Server;
 
 use cqlite_flight::admission::{Admission, AdmissionConfig, WaitBudget};
@@ -100,10 +101,25 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Graceful shutdown (issue #1473): on ctrl_c / SIGTERM, tonic stops
     // accepting new connections and drains in-flight RPCs rather than tearing
     // every open stream down abruptly.
+    // Bind EXPLICITLY, then announce (issue #3384). `serve_with_shutdown` binds
+    // internally, so every line logged before this point — including
+    // `log_startup`'s configuration record — is written by a process that has not
+    // yet acquired the port and may still fail to. An operator reading the log
+    // could not tell "configured and serving" from "configured, then died of
+    // EADDRINUSE", and a test harness keying readiness on those lines cannot
+    // either: that is the residual roborev found in #3384's readiness fix. The
+    // line below is emitted only AFTER the listener exists, and carries the
+    // ACTUAL bound address, which is the only useful one when `--listen` names
+    // port 0.
+    let listener = tokio::net::TcpListener::bind(listen).await?;
+    let bound = listener.local_addr()?;
+    let incoming = TcpIncoming::from_listener(listener, true, None)
+        .map_err(|e| format!("failed to accept on {bound}: {e}"))?;
+    cli::log_listening(bound);
     Server::builder()
         .max_concurrent_streams(max_concurrent_streams)
         .add_service(FlightServiceServer::new(service))
-        .serve_with_shutdown(listen, shutdown_signal())
+        .serve_with_incoming_shutdown(incoming, shutdown_signal())
         .await?;
     Ok(())
 }

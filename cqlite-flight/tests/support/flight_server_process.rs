@@ -35,11 +35,19 @@
 //!    OUR private temp-dir log. A foreign server cannot put that there.
 //! 3. **The socket accepts.**
 //!
-//! Residual, stated rather than implied away: between (1) and (3) there remains an
-//! unclosable instant in which a live child could die and a foreign listener take
-//! its place. Distinguishing that would need the peer's process identity, which
-//! loopback TCP does not offer. It is strictly narrower than the window the old
-//! loop returned from as a matter of course.
+//! The startup line used to be the CONFIGURATION line (`cqlite-flight starting`),
+//! and roborev (issue #3384) showed that was not enough: `log_startup` runs BEFORE
+//! `serve_with_shutdown` binds, so a child could log the expected address, lose the
+//! bind race, still be alive when the probe connected to the FOREIGN listener, pass
+//! the final `try_wait`, and only then exit with `EADDRINUSE`. The server now emits
+//! a separate line AFTER `TcpListener::bind` returns (`cli::log_listening`), and
+//! that is what (2) matches — a line no process that failed to bind can have
+//! written.
+//!
+//! Residual, stated rather than implied away: a child could bind, log, and then die
+//! while a foreign process takes the freed port before (3) connects. That requires a
+//! crash in a window bounded by two adjacent statements, rather than the ordinary
+//! bind race the old loop returned from as a matter of course.
 //!
 //! No assertion here compares an elapsed duration against a threshold (#2642): the
 //! timeouts are liveness bounds on process/socket readiness, not correctness
@@ -55,8 +63,15 @@ use std::time::Duration;
 /// The startup line `cqlite_flight::cli::log_startup` emits, and the field
 /// carrying the address it was told to listen on. Together they identify OUR
 /// child's log rather than merely "some server started".
-const STARTUP_LINE: &str = "cqlite-flight starting";
-const LISTEN_FIELD: &str = "listen=";
+/// The POST-BIND readiness line (`cli::log_listening`, issue #3384).
+///
+/// Deliberately NOT the `cqlite-flight starting` configuration line: that one is
+/// written BEFORE the port is acquired, so a child can log it, lose the bind race
+/// to a sibling, and still be alive when the probe connects to the FOREIGN
+/// listener — which is precisely the residual roborev found in the first version
+/// of this readiness fix. Only a line written after `TcpListener::bind` returned
+/// proves this child owns the port.
+const LISTENING_LINE: &str = "cqlite-flight listening on";
 
 /// Readiness poll budget: 200 attempts x 50ms socket timeout + 50ms sleep.
 const READY_ATTEMPTS: usize = 200;
@@ -99,7 +114,7 @@ impl ServerProcess {
     /// Has THIS child written its own startup line for THIS listen address?
     fn logged_own_startup(&self) -> bool {
         let log = self.log();
-        log.contains(STARTUP_LINE) && log.contains(&format!("{LISTEN_FIELD}{}", self.addr))
+        log.contains(&format!("{LISTENING_LINE} {}", self.addr))
     }
 }
 

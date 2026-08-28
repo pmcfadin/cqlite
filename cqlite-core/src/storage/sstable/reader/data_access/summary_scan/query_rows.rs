@@ -125,9 +125,10 @@ const QUERY_ROWS_CHANNEL_BATCHES: usize = 4;
 /// Rows the query-row handoff channel can hold in flight ahead of a consumer that
 /// has stopped reading — [`QUERY_ROWS_CHANNEL_BATCHES`] channel-resident batches
 /// plus the ONE batch a producer parked in `SyncSender::send` still owns (a
-/// blocked send moves the value only on success). The batch currently being
-/// accumulated is not a further term: once it reaches [`QUERY_ROWS_PER_BATCH`] it
-/// BECOMES the parked send, and a parked producer accumulates no further rows.
+/// blocked send moves the value only on success), each of at most
+/// [`QUERY_ROWS_MAX_HANDOFF_BATCH_ROWS`] rows. The batch currently being
+/// accumulated is not a further term: once it reaches that size it BECOMES the
+/// parked send, and a parked producer accumulates no further rows.
 ///
 /// Crate-internal (`pub` for its doc links, not re-exported to the crate root):
 /// the bound OUTSIDE callers need is [`QUERY_ROWS_MAX_READ_AHEAD`].
@@ -139,7 +140,27 @@ const QUERY_ROWS_CHANNEL_BATCHES: usize = 4;
 /// stops. Use that constant for "how far can an abandoned walk run"; use this one
 /// only when reasoning about the channel itself.
 pub const QUERY_ROWS_MAX_RESIDENT_ROWS: usize =
-    QUERY_ROWS_PER_BATCH * (QUERY_ROWS_CHANNEL_BATCHES + 1);
+    QUERY_ROWS_MAX_HANDOFF_BATCH_ROWS * (QUERY_ROWS_CHANNEL_BATCHES + 1);
+
+/// The largest batch either arm can put on the handoff channel.
+///
+/// The two arms size their batches DIFFERENTLY, and taking the smaller of the two
+/// is how the exported read-ahead bound came to understate the full-ring arm by
+/// a factor of two (roborev, issue #3384):
+///
+/// * the token-bounded arm accumulates through [`BatchSink`] and emits at
+///   [`QUERY_ROWS_PER_BATCH`] (128) rows;
+/// * the full-ring arm ([`drive_full_scan_rows`]) does NOT re-chunk — `emit_rows`
+///   forwards the inner batched scan stream's batch VERBATIM, and those are capped
+///   at [`BATCH_EMIT_ROWS`] (256).
+///
+/// A bound that must hold on BOTH arms therefore has to use the MAXIMUM, not
+/// either arm's own figure.
+const QUERY_ROWS_MAX_HANDOFF_BATCH_ROWS: usize = if BATCH_EMIT_ROWS > QUERY_ROWS_PER_BATCH {
+    BATCH_EMIT_ROWS
+} else {
+    QUERY_ROWS_PER_BATCH
+};
 
 /// `buffer_size` the full-ring arm ([`drive_full_scan_rows`]) hands to the inner
 /// batched scan stream. Named so [`QUERY_ROWS_MAX_READ_AHEAD`] is derived
@@ -173,6 +194,17 @@ const QUERY_ROWS_FULL_SCAN_BUFFER_ROWS: usize = QUERY_ROWS_PER_BATCH * QUERY_ROW
 /// * Anything resident in the CONSUMER downstream of this stream — a Flight
 ///   producer's own Arrow batches, for instance, are bounded by that consumer's
 ///   own budget, not by this constant.
+/// * **Regions that decode to NO emitted rows.** This is a PRECONDITION, not a
+///   footnote (roborev, issue #3384). The full-ring arm observes cancellation
+///   only BETWEEN batches it receives from the inner scan, because
+///   `scan_stream_batched_admitted` is not handed the child cancel flag and does
+///   not poll one internally. So the bound holds while decoded partitions keep
+///   YIELDING rows — every decoded partition then pushes the channel toward the
+///   parked state in which cancellation is observed. Over a stretch that survives
+///   nothing (all tombstoned, or all TTL-expired at the read clock) the inner scan
+///   emits no batch, the producer never parks, and it can decode past this bound —
+///   in the limit, to the end of the table. Tracked as a real cancellation gap in
+///   the read path, NOT merely a documentation caveat: see issue #3428.
 pub const QUERY_ROWS_MAX_READ_AHEAD: usize = QUERY_ROWS_MAX_RESIDENT_ROWS
     + batched_channel_capacity(QUERY_ROWS_FULL_SCAN_BUFFER_ROWS) * BATCH_EMIT_ROWS
     + BATCH_EMIT_ROWS
