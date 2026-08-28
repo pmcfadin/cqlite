@@ -114,6 +114,21 @@ Two properties, both deliberate:
   set on either profile — it would give cheap call-graph unwinding but *does* alter codegen, which is
   the property being protected.
 
+  **CORRECTION to this section's original plan, forced by a measured capability census.** It first
+  said call-graph runs would use `perf record --call-graph dwarf`. They cannot. All three unwinding
+  mechanisms are now characterized on this host: **dwarf HANGS** past 120 s on a binary this size (a
+  committed in-tree trap, `ws0-3217-artifacts/harness/profile-oncpu.sh:8-15`); **LBR is
+  UNAVAILABLE** — measured here as `exit 255: PMU Hardware or event type doesn't support branch stack
+  sampling`, because this is a KVM guest and LBR is not virtualized; **frame pointers are the only
+  mechanism that works.**
+
+  So every call-graph statement in this work rests on a **codegen-perturbed** binary **by necessity,
+  not by preference** — worth saying plainly, because the alternative reading ("dwarf was available
+  and they chose not to use it") would overstate how freely the evidence was selected. The headline
+  figures are unaffected: they are flat self-time, which needs symbols only. Detail, including why
+  this is the **third** capability this virtualized host has cost the WS0 programme:
+  `raw/callgraph-capability-census.md`.
+
   `.text` size is a **proxy**: identical size would not prove identical code, and near-identical size
   does not prove identical speed. The pre-registered throughput control in §4 is what settles it.
   Detail: `raw/profile-codegen-fidelity.md`.

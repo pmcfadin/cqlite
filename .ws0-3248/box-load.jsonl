@@ -175,3 +175,4 @@
 {"ts":"2026-08-28T15:52:43Z","load1":1.25,"load5":2.99,"load15":11.04,"runnable":"3/797","rustc":1,"cargo":0,"perf":0,"gate":0,"flight":0,"loadgen":0}
 {"ts":"2026-08-28T15:52:56Z","load1":1.13,"load5":2.91,"load15":10.92,"runnable":"1/787","rustc":1,"cargo":0,"perf":0,"gate":0,"flight":0,"loadgen":0}
 {"ts":"2026-08-28T15:53:08Z","load1":0.95,"load5":2.78,"load15":10.75,"runnable":"1/787","rustc":1,"cargo":0,"perf":0,"gate":0,"flight":0,"loadgen":0}
+{"ts":"2026-08-28T15:53:21Z","load1":0.80,"load5":2.69,"load15":10.64,"runnable":"5/828","rustc":1,"cargo":0,"perf":0,"gate":0,"flight":0,"loadgen":0}
