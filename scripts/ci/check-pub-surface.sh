@@ -709,12 +709,32 @@ MOD_COUNT="$(wc -l <"$DERIVED_MODS" | tr -d ' ')"
 #     an attribute split across lines and a comment anywhere inside one are all caught
 #     by construction rather than by a rule someone has to maintain.
 #
+#     THE ONE EXCLUSION, AND WHY IT IS NOT A PARSER CREEPING BACK. A `doc` token
+#     immediately followed (ignoring spaces/tabs on the SAME line) by `=` is NOT
+#     reported. This is one lookahead character, decided without knowing where in the
+#     attribute the token sits:
+#       * a cfg PREDICATE spelling of doc is ALWAYS the bare flag — `doc`, `not(doc)`,
+#         `all(doc, …)`, `any(doc, …)`, `cfg_attr(doc, …)`. Rust has no
+#         `cfg(doc = "…")` form: `doc` is a cfg FLAG, never a key with a value;
+#       * `doc = "…"` is therefore unambiguously the ATTRIBUTE form `#[doc = "text"]`,
+#         which gates nothing.
+#     So the exclusion removes exactly one harmless shape — CONDITIONAL DOCUMENTATION,
+#     `#[cfg_attr(feature = "x", doc = "…")]`, a standard idiom anyone may add to this
+#     crate at any time — and nothing else. Without it, adding conditional docs to
+#     cqlite-core BRICKS this gate and the remedy text tells the author to delete their
+#     documentation; the "0 occurrences today" measurement below was true and still
+#     understated that blast radius. `#[cfg_attr(doc, doc = "x")]` STILL REFUSES: its
+#     CONDITION is the bare `doc`, and the skipped assignment does not disarm the
+#     window. A `doc` at end of line whose `=` is on the NEXT line is still reported —
+#     the scan does not look across lines, i.e. it fails in the over-firing direction.
+#
 #     THE TRADE, STATED SO NOBODY "FIXES" IT. This OVER-approximates ON PURPOSE. It
-#     fires on `doc` in `cfg_attr`'s ATTRIBUTE position (`#[cfg_attr(feature = "x",
-#     doc = "…")]` gates nothing and still refuses — see the self-test case that pins
-#     this as INTENDED), on `doc` inside a comment or a string in a cfg attribute
-#     (`#[cfg(feature = "doc")]` gates on a FEATURE named doc and still refuses), and
-#     on a bare `doc` token following any unrelated `cfg` mention that has no `]`
+#     fires on `doc` inside a COMMENT or a STRING in a cfg attribute
+#     (`#[cfg(feature = "doc")]` gates on a FEATURE named doc and still refuses), on a
+#     bare `doc` token in an ATTRIBUTE position that is not an assignment
+#     (`#[cfg_attr(feature = "x", doc(hidden))]` gates nothing and still refuses — see
+#     the self-test case that pins this as INTENDED), and on a bare `doc` token
+#     following any unrelated `cfg` mention that has no `]`
 #     after it. Every one of those is a LOUD FAIL naming a file and a line, costing
 #     whoever hits it one edit or one deliberate decision. UNDER-firing costs a SILENT
 #     FALSE PASS in the API guard. Those two costs are not comparable, so the
@@ -736,8 +756,10 @@ MOD_COUNT="$(wc -l <"$DERIVED_MODS" | tr -d ' ')"
 #     `cfg_attr` (every one `feature = "…"` applying an `allow(…)`); 38 attributes
 #     carry a bare `doc` token, all of them `#[doc(hidden)]` with no `cfg` in them;
 #     0 carry BOTH. This scan reports 0 hits on that tree — so the blunt rule fires
-#     on nothing that exists today, measured under the BLUNT rule itself and not
-#     merely under the deleted parser's narrowing.
+#     on nothing that exists today, measured under the BLUNT rule itself (re-measured
+#     after the `doc =` exclusion landed: still 481 files, still 0 hits) and not
+#     merely under the deleted parser's narrowing. "0 today" is NOT the argument for
+#     the exclusion above: the idiom it protects is one someone adds tomorrow.
 # ---------------------------------------------------------------------------
 CFGDOC_AWK="$WORK_DIR/cfgdoc.awk"
 cat >"$CFGDOC_AWK" <<'CFGDOC_AWK_EOF'
@@ -745,7 +767,27 @@ cat >"$CFGDOC_AWK" <<'CFGDOC_AWK_EOF'
 # must not become one: ARM on a bare `cfg`/`cfg_attr` token, DISARM at the next `]`,
 # report a bare `doc` token seen while armed. Comments, strings, macro bodies and
 # multi-line attributes are all deliberately un-special-cased.
+#
+# THE ONE EXCLUSION: a `doc` token immediately followed (ignoring spaces/tabs on the
+# SAME line) by `=` is NOT reported. `doc = "…"` is unambiguously the ATTRIBUTE form
+# `#[doc = "text"]`, which gates nothing; a cfg PREDICATE spelling of doc is always
+# the BARE flag (`doc`, `not(doc)`, `all(doc, …)`, `cfg_attr(doc, …)`) because Rust
+# has no `cfg(doc = "…")` form — `doc` is a cfg flag, never a key with a value. So
+# this removes exactly the harmless conditional-documentation idiom
+# (`#[cfg_attr(feature = "x", doc = "…")]`) and nothing else. It is ONE lookahead
+# character, not a grammar: no position analysis, no meta-item walk, no comment or
+# string handling. `#[cfg_attr(doc, doc = "x")]` still REFUSES — its CONDITION is the
+# bare `doc`. The window stays ARMED across a skipped `doc =`, so a bare `doc` later
+# in the same attribute still fires. A `doc` at end of line whose `=` is on the NEXT
+# line is REPORTED (the scan does not look across lines) — an over-fire, i.e. the
+# safe direction.
 function istok(c) { return (c ~ /[A-Za-z0-9_]/) }
+# One lookahead, same line only: is the next non-blank character an `=`?
+function assigned(s, p,   n) {
+  n = length(s)
+  while (p <= n && substr(s, p, 1) ~ /[ \t]/) p++
+  return (p <= n && substr(s, p, 1) == "=")
+}
 FNR == 1 { armed = 0; armline = 0 }
 {
   L = length($0)
@@ -758,7 +800,7 @@ FNR == 1 { armed = 0; armline = 0 }
     tok = substr($0, i, j - i)
     i = j - 1
     if (tok == "cfg" || tok == "cfg_attr") { armed = 1; armline = FNR }
-    else if (tok == "doc" && armed) {
+    else if (tok == "doc" && armed && !assigned($0, j)) {
       printf "%s:%d: %s   [`cfg` token opened at line %d]\n", FILENAME, FNR, squash($0), armline
       armed = 0
     }
@@ -783,7 +825,7 @@ if [ -s "$CFGDOC_HITS" ]; then
   fail "$PACKAGE mentions the \`doc\` cfg inside a \`cfg\`/\`cfg_attr\` attribute, at the file and line named above, so this guard treats it as a \`doc\` cfg predicate and REFUSES to certify. \`cargo doc\` compiles with the \`doc\` cfg SET, so the rustdoc-derived surface this guard measures can no longer be trusted to equal the surface a default build ships — an item behind \`cfg(not(doc))\` would be MISSING from the snapshot while being public in the shipped crate, and an item behind \`cfg(doc)\` would be RECORDED in it while the shipped crate does not have it at all.
        This is a property of every rustdoc-derived oracle (cargo-public-api and rustdoc JSON share it), not of this script, so it cannot be fixed by switching tools.
        REMEDY: remove the \`doc\` cfg from $PACKAGE (that is the cheap fix), or accept that this guard cannot certify this crate while it is there — extending it would mean taking a SECOND measurement without the \`doc\` cfg and comparing the two.
-       The detection is DELIBERATELY BLUNT and it over-fires on purpose: a \`doc\` token in \`cfg_attr\`'s ATTRIBUTE position (\`#[cfg_attr(feature = \"x\", doc = \"…\")]\`), or inside a comment or string in a cfg attribute, gates nothing and STILL refuses. That is INTENDED, not a bug — the precise version of this check was defeated three times, so it was replaced by a rule with no parser to get wrong. See the \"1b)\" comment block in $(basename "$0")."
+       The detection is DELIBERATELY BLUNT and it over-fires on purpose: a bare \`doc\` token inside a comment or a string in a cfg attribute, or in \`cfg_attr\`'s ATTRIBUTE position (\`#[cfg_attr(feature = \"x\", doc(hidden))]\`), gates nothing and STILL refuses. That is INTENDED, not a bug. (Conditional DOCUMENTATION is exempt: a \`doc\` token followed by \`=\`, as in \`#[cfg_attr(feature = \"x\", doc = \"…\")]\`, is the attribute form \`#[doc = \"text\"]\` and never a cfg predicate, so it does not trigger this refusal.) — the precise version of this check was defeated three times, so it was replaced by a rule with no parser to get wrong. See the \"1b)\" comment block in $(basename "$0")."
 fi
 
 # In VERIFY mode the committed snapshot is the baseline the whole run exists to
