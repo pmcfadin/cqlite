@@ -1324,6 +1324,112 @@ grep -qF "RAW STRING" "$TMPROOT/case44.out" \
 echo "OK (44): raw BYTE and raw C string prefixes (\`br#\"\`, \`cr#\"\`) are refused too, not just \`r#\"\`"
 
 # ---------------------------------------------------------------------------
+# 45. RED — a top-level ITEM MACRO invocation (roborev r11 F1).
+#
+#     An item macro can EXPAND to `pub mod probe { #![cfg(...)] }`. The literal
+#     declaration then lives inside the macro DEFINITION, where NEITHER derivation can
+#     see it — so they AGREE while both are blind and the cross-check cannot catch it.
+#     Same shared-blind-spot shape as Refusals U and I. Reading expansion means asking
+#     the compiler (#3366), so the guard refuses.
+#
+#     TWO FALSE-FAIL CONTROLS IN THE SAME CASE, because this refusal is the broadest one
+#     in the guard and the cost of over-firing is a waived guard:
+#       (b) a depth-0 `macro_rules!` DEFINITION must NOT refuse — it injects no items at
+#           its own site, so refusing buys no protection and reds correct code;
+#       (c) an INDENTED macro inside a `mod` block must NOT refuse (brace depth 1).
+#           `thread_local!` at lib.rs:86 is exactly this shape and is why (c) exists.
+# ---------------------------------------------------------------------------
+scratch_tree macro-item-invocation; wt45="$SCRATCH"
+printf '\nmake_probe_mod!(probe_q);\n' >>"$wt45/cqlite-core/src/lib.rs"
+set +e
+bash "$wt45/$GUARD_REL" >"$TMPROOT/case45.out" 2>&1
+case45_rc=$?
+set -e
+[ "$case45_rc" -ne 0 ] || fail_case "case 45 — a top-level ITEM MACRO invocation passed GREEN. It can expand to a crate-root module gating itself, and BOTH derivations are blind to it; got: $(cat "$TMPROOT/case45.out")"
+grep -qF "ITEM MACRO invocation" "$TMPROOT/case45.out" \
+  || fail_case "case 45 — the guard failed but NOT with the item-macro refusal; got: $(cat "$TMPROOT/case45.out")"
+
+scratch_tree macro-rules-definition; wt45b="$SCRATCH"
+printf '\nmacro_rules! probe_noop { () => {}; }\n' >>"$wt45b/cqlite-core/src/lib.rs"
+set +e
+bash "$wt45b/$GUARD_REL" >"$TMPROOT/case45b.out" 2>&1
+case45b_rc=$?
+set -e
+[ "$case45b_rc" -eq 0 ] || fail_case "case 45(b) — a depth-0 \`macro_rules!\` DEFINITION was REFUSED. A definition injects no items at its own site, so this reds correct code for no protection, and a refusal that reds correct code is the one agents learn to waive; got: $(cat "$TMPROOT/case45b.out")"
+
+scratch_tree macro-nested-in-mod; wt45c="$SCRATCH"
+printf '\nmod probe_wrap {\n    thread_local! { static X: u8 = 0; }\n}\n' >>"$wt45c/cqlite-core/src/lib.rs"
+set +e
+bash "$wt45c/$GUARD_REL" >"$TMPROOT/case45c.out" 2>&1
+case45c_rc=$?
+set -e
+[ "$case45c_rc" -eq 0 ] || fail_case "case 45(c) — an INDENTED macro inside a \`mod\` block (brace depth 1) was REFUSED. \`thread_local!\` in cqlite-core/src/lib.rs is exactly this shape, so this would red the real crate; got: $(cat "$TMPROOT/case45c.out")"
+echo "OK (45): a top-level ITEM MACRO invocation REFUSES, while a \`macro_rules!\` definition and a macro nested in a \`mod\` block stay GREEN"
+
+# ---------------------------------------------------------------------------
+# 46. RED — `cfg_attr` must not propagate a CONDITIONAL exemption as unconditional.
+#
+#     `#[cfg_attr(any(), doc(hidden))] pub mod probe;` is neither hidden nor gated — the
+#     predicate is FALSE — yet the inner `doc(hidden)` was propagated outward as an
+#     unconditional HIDDEN, and HIDDEN is an EXEMPTING verdict, so the module file was
+#     never read and an inner `#![cfg(...)]` passed undetected (roborev r11 F2).
+#
+#     The fix is OPEN, not a refusal: OPEN means "read the module file", which is
+#     harmless for a genuinely-hidden module and correct for a self-gating one. Refusing
+#     would red `#[cfg_attr(docsrs, doc(hidden))]`, a standard idiom, for no gain.
+# ---------------------------------------------------------------------------
+oracle_tree cfg-attr-conditional-hidden; wt46="$SCRATCH"
+# Re-declare the probe WITH a conditional doc(hidden) in front of it.
+python3 - "$wt46/cqlite-core/src/lib.rs" <<'PY'
+import sys
+p=sys.argv[1]; s=open(p).read()
+s=s.replace("\npub mod probe_oracle;\n", "\n#[cfg_attr(any(), doc(hidden))]\npub mod probe_oracle;\n", 1)
+open(p,'w').write(s)
+PY
+printf '#![cfg(feature = "benchmarks")]\n//! Self-test-only probe (#1712 r11 F2): inner-gated, must NOT be exempted.\npub fn probe() {}\n' >"$wt46/cqlite-core/src/probe_oracle.rs"
+set +e
+bash "$wt46/$GUARD_REL" >"$TMPROOT/case46.out" 2>&1
+case46_rc=$?
+set -e
+[ "$case46_rc" -ne 0 ] || fail_case "case 46 — a FALSE-predicate \`cfg_attr(any(), doc(hidden))\` bought an exemption and the inner-gated module was never examined; got: $(cat "$TMPROOT/case46.out")"
+grep -q "probe_oracle" "$TMPROOT/case46.out" \
+  || fail_case "case 46 — the guard failed but never named \`probe_oracle\`; got: $(cat "$TMPROOT/case46.out")"
+grep -q "INCONSISTENT" "$TMPROOT/case46.out" \
+  || fail_case "case 46 — the conditional exemption was not resolved into the INCONSISTENT defect verdict; got: $(cat "$TMPROOT/case46.out")"
+echo "OK (46): a conditional \`cfg_attr\` exemption never becomes an unconditional one — the module file is still read"
+
+# ---------------------------------------------------------------------------
+# 47. GREEN — the FALSE-FAIL control for the `path` refusal (roborev r11 F3).
+#
+#     THE FIRST FALSE FAIL ON THIS ISSUE, and it was in a fix added two rounds earlier:
+#     the `path =` refusal ran BEFORE ordinary string contents were erased, so
+#     `#[doc = "the path = ..."]` — an entirely ordinary doc attribute — read as a
+#     `#[path]` attribute and FAILED THE FULL GATE.
+#
+#     Order is now load-bearing: raw-string refusal on RAW text (erasure cannot model
+#     raw delimiters), then erase strings, then the structural `path` test. This case
+#     pins the GREEN side; case 41 pins the RED side. Both are needed — a refusal that
+#     reds correct code is the one agents learn to waive, and a waived refusal devalues
+#     every other refusal in this guard.
+# ---------------------------------------------------------------------------
+oracle_tree path-in-string-cosmetic; wt47="$SCRATCH"
+python3 - "$wt47/cqlite-core/src/lib.rs" <<'PY'
+import sys
+p=sys.argv[1]; s=open(p).read()
+s=s.replace("\npub mod probe_oracle;\n", "\n#[doc = \"the path = something cosmetic, and a stray r in for\"]\npub mod probe_oracle;\n", 1)
+open(p,'w').write(s)
+PY
+printf '//! Self-test-only probe (#1712 r11 F3): ordinary prologue, must CERTIFY.\npub fn probe() {}\n' >"$wt47/cqlite-core/src/probe_oracle.rs"
+set +e
+bash "$wt47/$GUARD_REL" >"$TMPROOT/case47.out" 2>&1
+case47_rc=$?
+set -e
+[ "$case47_rc" -eq 0 ] || fail_case "case 47 — a cosmetic \`#[doc = \"... path = ...\"]\` was REFUSED as if it were a \`#[path]\` attribute. That is a FALSE FAIL on ordinary code, which is the kind of refusal agents learn to waive; got: $(cat "$TMPROOT/case47.out")"
+grep -qE "$MEASURED_RE" "$TMPROOT/case47.out" \
+  || fail_case "case 47 — the guard exited 0 without its affirmative measurement line; got: $(cat "$TMPROOT/case47.out")"
+echo "OK (47): a cosmetic string mentioning \`path =\` (or containing \`r\`) does NOT trip the \`#[path]\` or raw-string refusals"
+
+# ---------------------------------------------------------------------------
 # 36. GREEN — THE POSITIVE CONTROL for 29-38.
 #
 #     Without it, every case above would be satisfied by a guard hardwired to refuse
@@ -1422,4 +1528,4 @@ grep -qF "affirmative measurement" "$TMPROOT/case39.out" \
 echo "OK (39): a crate root with ZERO unconditional declarations FAILs — the assert never reports success having examined nothing"
 
 echo ""
-echo "PASS: test_pub_surface_guard.sh — all 31 cases (5 green, 24 reds, 1 usage, 1 kill-safety)"
+echo "PASS: test_pub_surface_guard.sh — all 34 cases (6 green, 26 reds, 1 usage, 1 kill-safety)"
