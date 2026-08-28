@@ -898,5 +898,75 @@ class AggregateTests(unittest.TestCase):
         self.assertEqual(dt.aggregate([pass_rec])["gate_failures"], 2)
 
 
+try:  # optional: only needed by StandardValidatorCouplingTests below
+    import jsonschema as _jsonschema
+    from jsonschema import Draft202012Validator as _Draft202012Validator
+except ImportError:  # pragma: no cover - exercised on hosts without the lib
+    _jsonschema = None
+    _Draft202012Validator = None
+
+
+@unittest.skipUnless(_jsonschema is not None,
+                     "jsonschema not installed; the schema-side coupling is unverifiable here")
+class StandardValidatorCouplingTests(unittest.TestCase):
+    """issue #3448 / roborev job 66: the coupling must hold under a STANDARD validator.
+
+    The repo's own `_validate` is a minimal JSON-Schema subset (no if/then), so encoding the
+    coupling ONLY in delivery-telemetry.py left the published schema independently accepting
+    incoherent records like {"gate": "pass", "gate_runs": 0} — i.e. any third-party Draft
+    2020-12 consumer of docs/reports/delivery-telemetry.schema.json would not enforce the
+    documented contract. The schema now carries an `allOf` of two if/then clauses; these
+    tests assert against the REAL validator, not our own, because our own is exactly the one
+    that cannot see the keywords under test.
+    """
+
+    def setUp(self):
+        self.schema = json.loads(dt.DEFAULT_SCHEMA.read_text())
+        self.validator = _Draft202012Validator(self.schema)
+        self.base = json.loads(dt.DEFAULT_LEDGER.read_text().splitlines()[0])
+
+    def _valid(self, gate, gate_runs):
+        rec = dict(self.base)
+        rec["gate"] = gate
+        rec["gate_runs"] = gate_runs
+        return not list(self.validator.iter_errors(rec))
+
+    def test_schema_is_itself_a_valid_draft_2020_12_schema(self):
+        _Draft202012Validator.check_schema(self.schema)
+
+    def test_standard_validator_accepts_not_run_with_zero(self):
+        self.assertTrue(self._valid("not-run", 0))
+
+    def test_standard_validator_rejects_not_run_with_nonzero(self):
+        # the finding's second case
+        self.assertFalse(self._valid("not-run", 2))
+        self.assertFalse(self._valid("not-run", 1))
+
+    def test_standard_validator_rejects_outcome_with_zero_runs(self):
+        # the finding's first case
+        self.assertFalse(self._valid("pass", 0))
+        self.assertFalse(self._valid("fail", 0))
+
+    def test_standard_validator_still_accepts_ordinary_gated_records(self):
+        self.assertTrue(self._valid("pass", 1))
+        self.assertTrue(self._valid("fail", 3))
+
+    def test_every_committed_ledger_record_validates_under_the_standard_validator(self):
+        """AC5 backward-compatibility, checked against the real validator too.
+
+        Fail-closed on an empty corpus: a committed ledger that read as 0 records would
+        otherwise make this pass vacuously.
+        """
+        checked = 0
+        for line in dt.DEFAULT_LEDGER.read_text().splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            checked += 1
+            errors = list(self.validator.iter_errors(json.loads(line)))
+            self.assertEqual(errors, [], f"committed record {checked} no longer validates: {errors}")
+        self.assertGreater(checked, 0, "committed ledger is empty - this test would be vacuous")
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

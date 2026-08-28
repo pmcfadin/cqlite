@@ -26,6 +26,17 @@
     "rework",
     "stamped_at"
   ],
+  "allOf": [
+    {
+      "$comment": "issue #3448: the gate <-> gate_runs coupling, encoded so a STANDARD Draft 2020-12 validator enforces it and not only delivery-telemetry.py. gate 'not-run' means no full gate of record ran, so the only coherent run count is 0; and 0 runs cannot have produced a pass/fail outcome. delivery-telemetry.py's _validate_gate_coupling enforces the same rule for this repo's minimal validator, which ignores if/then — the two are the same fact written for two audiences, so change them together.",
+      "if": { "required": ["gate"], "properties": { "gate": { "const": "not-run" } } },
+      "then": { "properties": { "gate_runs": { "const": 0 } } }
+    },
+    {
+      "if": { "required": ["gate_runs"], "properties": { "gate_runs": { "const": 0 } } },
+      "then": { "properties": { "gate": { "const": "not-run" } } }
+    }
+  ],
   "properties": {
     "schema": { "const": 1, "type": "integer", "description": "Record schema version." },
     "issue": { "type": "integer", "minimum": 1, "description": "GitHub issue number." },
