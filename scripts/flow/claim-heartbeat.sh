@@ -78,12 +78,14 @@
 #   claim-heartbeat.sh dead-lanes            # REPORT every claim whose owning
 #                                            # process is verifiably gone, with NO
 #                                            # age threshold and regardless of an
-#                                            # open PR. exit 3 = a dead lane was
-#                                            # found; 1 = the measurement was
-#                                            # incomplete (which INCLUDES zero claim
-#                                            # refs and an all-foreign run — neither
-#                                            # establishes an idle fleet); 0 = local
-#                                            # lanes were measured and none is dead.
+#                                            # open PR. POSITIVE DETECTION ONLY —
+#                                            # it NEVER exits 0. exit 3 = a dead lane
+#                                            # was reported; exit 1 = none was
+#                                            # reported AND absence is not
+#                                            # establishable (which includes zero
+#                                            # claim refs, an all-foreign run, and an
+#                                            # incomplete measurement). Act on 3;
+#                                            # never read 1 as a clean bill of health.
 #
 # WHY `dead-lanes` IS NOT `should-reap` (issue #3393 AC3)
 #   `should-reap` is a REAP GATE, and it consults the pid ONLY AFTER age >

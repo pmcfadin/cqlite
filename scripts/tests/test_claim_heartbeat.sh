@@ -462,8 +462,8 @@ al_out=$(cd "$WORK" && PATH="$ALIVE_SHIM:$PATH" HEARTBEAT_MACHINE=aliveLocal CLA
 al_rc=$?
 # machine=aliveLocal is the local identity here, so ITS row must read ALIVE — and the
 # deadFresh claim, being FOREIGN from this vantage point, is UNKNOWN-FOREIGN rather than
-# dead, so nothing sets the dead code and rc is 0. That asymmetry is the point of the
-# three-valued verdict: the same ref reads DEAD on its own machine and UNKNOWN elsewhere.
+# dead, so nothing raises a FINDING. That asymmetry is the point of the multi-valued
+# verdict: the same ref reads DEAD on its own machine and UNKNOWN elsewhere.
 # The ROW is the property. There is no longer any exit 0 to assert (round 13): the clean
 # verdict was REMOVED because a per-machine claim cannot establish the absence of a dead lane.
 if printf '%s\n' "$al_out" | grep -E '^aliveLocal ' | grep -q 'ALIVE' && [ "$al_rc" -ne 3 ]; then
@@ -934,7 +934,7 @@ fi
 (cd "$WORK" && g push -q origin ":refs/machine-claims/warnMachine" 2>/dev/null || true)
 
 # ===========================================================================
-echo "TEST 41: one HEALTHY local lane + foreign lanes still exits 0 (round 4 balance)"
+echo "TEST 41: one HEALTHY local lane + foreign lanes raises NO finding (round 4 balance)"
 # ===========================================================================
 # The other side of TEST 34: foreign rows must not EACH count as incomplete, or a
 # healthy multi-machine fleet would sit at exit 1 forever and everyone would learn to
@@ -1130,10 +1130,18 @@ fi
 zc_out=$(cd "$empty_work" && bash "$HB" dead-lanes 2>&1); zc_rc=$?
 # The phrase is matched on ONE line: the help is a comment block, so a longer phrase
 # spans a line break and would never match however correct the text is.
-if [ "$zc_rc" -eq 1 ] && printf '%s\n' "$help_text" | grep -qi 'INCLUDES zero claim'; then
+if [ "$zc_rc" -eq 1 ] && printf '%s\n' "$help_text" | grep -qi 'zero'; then
   ok "the help's exit-code contract matches the zero-claims behaviour it documents (both say incomplete/1)"
 else
   bad "help and behaviour disagree on zero claims: rc=$zc_rc"
+fi
+# ...and the help must NOT promise an exit 0 for dead-lanes, which round 13 removed. This is
+# the drift round 14 caught: the exit-code table was corrected while the USAGE block still
+# advertised 0, so the two halves of the same help disagreed.
+if printf '%s\n' "$help_text" | grep -qi 'NEVER exits 0'; then
+  ok "the help states that dead-lanes never exits 0, matching the implementation"
+else
+  bad "the help must not advertise an exit 0 for dead-lanes (round 13 removed the clean verdict)"
 fi
 
 # ===========================================================================
@@ -1425,10 +1433,13 @@ else
 fi
 # ...and it must actively suppress the WRITE too, or a concurrent run clobbers FETCH_HEAD for
 # list / list-claims / should-reap / reap, which still fetch-then-read it.
-if grep -q 'no-write-fetch-head' "$dl_body"; then
-  ok "cmd_dead_lanes passes --no-write-fetch-head, so it cannot clobber FETCH_HEAD for its neighbours"
+# COMMENTS STRIPPED FIRST (roborev round 14, Low). The bare token search matched the comment
+# that EXPLAINS the flag, so the check stayed green with the actual flag deleted — vacuous in
+# the one direction that matters. It now asserts the executable fetch invocation.
+if grep -vE '^[[:space:]]*#' "$dl_body" | grep -qE 'git fetch[[:space:]]+--no-write-fetch-head'; then
+  ok "the executable fetch in cmd_dead_lanes passes --no-write-fetch-head, so it cannot clobber FETCH_HEAD for its neighbours"
 else
-  bad "cmd_dead_lanes must not write FETCH_HEAD either"
+  bad "the fetch command itself must carry --no-write-fetch-head: $(grep -vE '^[[:space:]]*#' "$dl_body" | grep -n 'git fetch')"
 fi
 # ...and it must fetch into a ref made unique per PROCESS and per ROW, or two rows (or two
 # concurrent runs) would collide on the same temp ref and reintroduce the same defect.
