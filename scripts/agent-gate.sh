@@ -4891,7 +4891,7 @@ export -f check_no_unexpected_zero_tests
 # derivation returns non-zero and the caller FAILs — never a fallback to a partial list,
 # which would silently shrink the guard's subject exactly like the hard-coded pair did.
 _package_unittest_srcs() {
-  local pkg="$1"
+  local pkg="$1" kinds="${2:-lib,bin}"
   local meta out
   meta=$(cargo metadata --format-version 1 --no-deps 2>/dev/null) || return 1
   [ -n "$meta" ] || return 1
@@ -4905,13 +4905,14 @@ for p in d.get("packages", []):
         continue
     root = os.path.dirname(p.get("manifest_path", ""))
     for t in p.get("targets", []):
+        want = set(sys.argv[2].split(","))
         kinds = t.get("kind") or []
-        if not any(k in ("lib", "bin") for k in kinds):
+        if not any(k in want for k in kinds):
             continue
         sp = t.get("src_path") or ""
         rel = os.path.relpath(sp, root) if root and sp.startswith(root) else sp
         print(rel)
-' "$pkg") || return 1
+' "$pkg" "$kinds") || return 1
   else
     return 1
   fi
@@ -6037,9 +6038,10 @@ _legacy_coreq_sites() { # _legacy_coreq_sites <file> <enabled-feature-list>
       for (i = 1; i <= length(str); i++) if (substr(str, i, 1) == ch) n++
       return n
     }
-    function handle_attr(a,   path, tmp, m, has_lh, miss) {
-      # NOTE: has_cfg_attr / armed / istest / missing are deliberately GLOBAL (cluster
-      # state), reset at each item line — awk locals are the extra params only.
+    function handle_attr(a,   path, tmp, m) {
+      # NOTE: has_cfg_attr / istest / cl_has_lh / cl_miss / cl_unclass are deliberately
+      # GLOBAL (cluster state), reset at each item line — awk locals are the extra params
+      # only. The cluster, not the attribute, is the unit of gating in Rust.
       path = a
       sub(/^#\[[ \t]*/, "", path)
       sub(/[ \t]*[(\]].*$/, "", path)
@@ -6051,18 +6053,27 @@ _legacy_coreq_sites() { # _legacy_coreq_sites <file> <enabled-feature-list>
       # gating cfg. This parser evaluates neither, so any cluster containing one is
       # reported UNCLASSIFIED rather than classified on incomplete information.
       if (path ~ /(^|::)cfg_attr$/) has_cfg_attr = 1
-      has_lh = 0; miss = ""
+      # ACCUMULATED ACROSS THE WHOLE CLUSTER, not decided per attribute (roborev round-8
+      # finding, Low). Rust ANDs stacked cfg attributes, so
+      #     #[cfg(feature = "legacy-heuristics")]
+      #     #[cfg(feature = "experimental")]
+      #     fn t() {}
+      # is EXACTLY equivalent to the single `all(...)` form — yet a per-attribute scan sees
+      # `legacy-heuristics` with no co-requirement in one attribute and a co-requirement
+      # with no `legacy-heuristics` in the other, arms on neither, and reports a FALSE
+      # ZERO-GAP census. The cluster is the unit of gating in Rust, so it is the unit of
+      # analysis here. The verdict is therefore emitted at the ITEM line, where the cluster
+      # is complete — not from inside this function.
       tmp = a
       while (match(tmp, /feature[ \t]*=[ \t]*"[^"]+"/)) {
         m = substr(tmp, RSTART, RLENGTH)
         sub(/^feature[ \t]*=[ \t]*"/, "", m)
         sub(/"$/, "", m)
-        if (m == LH) has_lh = 1
-        else if (index(ENABLED, " " m " ") == 0 && index(" " miss ",", " " m ",") == 0)
-          miss = (miss == "" ? m : miss "," m)
+        if (m == LH) cl_has_lh = 1
+        else if (index(ENABLED, " " m " ") == 0 && index(" " cl_miss ",", " " m ",") == 0)
+          cl_miss = (cl_miss == "" ? m : cl_miss "," m)
         tmp = substr(tmp, RSTART + RLENGTH)
       }
-      if (!has_lh || miss == "") return
       # UNCLASSIFIED, never guessed, for every Boolean shape this parser does not model
       # (roborev round-7 finding, Low). The token list alone cannot tell a CONJUNCTION
       # from a DISJUNCTION: `all(legacy-heuristics, experimental)` is a real gap, while
@@ -6072,8 +6083,7 @@ _legacy_coreq_sites() { # _legacy_coreq_sites <file> <enabled-feature-list>
       # parser does not evaluate at all. Reporting them is the honest option: a census
       # exists to state what it cannot see, and a wrong entry costs more than a named
       # unknown.
-      if (a ~ /not[ \t]*\(/ || a ~ /any[ \t]*\(/) { printf "skip\t0\t%s\n", miss; return }
-      armed = 1; missing = miss
+      if (a ~ /not[ \t]*\(/ || a ~ /any[ \t]*\(/) cl_unclass = 1
     }
     {
       t = $0
@@ -6091,15 +6101,16 @@ _legacy_coreq_sites() { # _legacy_coreq_sites <file> <enabled-feature-list>
         next
       }
       if (t ~ /^\/\// || t ~ /^$/) next   # comments and blank lines keep the cluster intact
-      if (armed) {
-        if (has_cfg_attr)
-          printf "skip\t0\t%s\n", missing
+      # THE VERDICT IS EMITTED HERE, because only at the item is the cluster complete.
+      if (cl_has_lh && cl_miss != "") {
+        if (cl_unclass || has_cfg_attr)
+          printf "skip\t0\t%s\n", cl_miss
         else if (t ~ /^(pub[ \t]+)?(pub\([^)]*\)[ \t]+)?(const[ \t]+)?(async[ \t]+)?(unsafe[ \t]+)?(extern[ \t]+("[^"]*"[ \t]+)?)?fn[ \t]/)
-          printf "fn\t%d\t%s\n", istest, missing
+          printf "fn\t%d\t%s\n", istest, cl_miss
         else
-          printf "item\t%d\t%s\n", istest, missing
+          printf "item\t%d\t%s\n", istest, cl_miss
       }
-      armed = 0; istest = 0; missing = ""; has_cfg_attr = 0
+      istest = 0; has_cfg_attr = 0; cl_has_lh = 0; cl_miss = ""; cl_unclass = 0
     }
   ' "$1"
 }
@@ -6172,7 +6183,7 @@ run_legacy_heuristics() {
   local tests_dir="$REPO_ROOT/cqlite-core/tests"
   local -a targets=() allow_zero=()
   local cfg_site='feature[[:space:]]*=[[:space:]]*"legacy-heuristics"'
-  local names="" negonly="" f base count=0
+  local names="" negonly="" f base count=0 srcs=""
   # CANDIDATES FROM CARGO, NOT A GLOB (roborev round-7 finding). See
   # _package_test_targets_gated for why: a manifest-gated or directory-style target is
   # invisible to `tests/*.rs`. A failed enumeration FAILs and names the derivation — it is
@@ -6202,6 +6213,8 @@ run_legacy_heuristics() {
       [ "$(grep -cE "$cfg_site" "$f")" -gt 0 ] || continue
     fi
     base="$_mt_name"
+    srcs="$srcs$_mt_name	$_mt_src
+"
     # Two array elements per target (`--test <name>`), so ${#targets[@]} is NOT the
     # target count — $count is.
     targets+=(--test "$base")
@@ -6219,7 +6232,16 @@ run_legacy_heuristics() {
     # mis-classified 6/6 and this form 0/6. `grep -c` consumes all input, so there is no
     # early close and no SIGPIPE — the count is an AFFIRMATIVE measurement, which is what
     # a permissive branch must key on. Same defect class as #3380.
-    if [ "$(sed -E 's/not\([[:space:]]*feature[[:space:]]*=[[:space:]]*"legacy-heuristics"[[:space:]]*\)//g' "$f" \
+    # A MANIFEST-GATED target is POSITIVELY gated by definition and can NEVER be
+    # allowed-zero (roborev round-8 finding, Medium): cargo runs it only when the feature
+    # is on, and its source may carry no cfg site at all — so the polarity scan below finds
+    # nothing and would have classified it negative-polarity-only, EXCUSING from the
+    # zero-tests guard the very target round 7 added discovery for. The round-7 fix was
+    # under-propagated: I threaded metadata discovery into the candidate loop and left the
+    # classifier reasoning about source text alone.
+    if [ "$_mt_how" = "manifest" ]; then
+      :
+    elif [ "$(sed -E 's/not\([[:space:]]*feature[[:space:]]*=[[:space:]]*"legacy-heuristics"[[:space:]]*\)//g' "$f" \
         | grep -cE "$cfg_site")" -eq 0 ]; then
       allow_zero+=("$base")
       negonly="$negonly $base"
@@ -6291,16 +6313,33 @@ EOF
     echo ">>> [$name] $status ($((end - start))s)"
     return 0
   fi
-  local lh_testfn=0 lh_other=0 lh_skip=0 _sites _k _it _ms _m
-  for f_ in $names; do
-    [ -r "$tests_dir/$f_.rs" ] || continue
+  local lh_testfn=0 lh_other=0 lh_skip=0 _sites _k _it _ms _m f_ f_src
+  while IFS="	" read -r f_ f_src; do
+    [ -n "$f_" ] || continue
+    # cargo's OWN src_path, not a reconstructed `tests/<name>.rs` (roborev round-8
+    # finding, Low): a directory-style or explicitly-mapped `[[test]]` target does not live
+    # at that reconstructed path, so the census silently skipped it while the lane claims
+    # to fail closed. And an UNREADABLE included source is a FAIL, never a `continue` — a
+    # census that cannot read its subject is unmeasurable, not empty.
+    if [ ! -r "$f_src" ]; then
+      status=FAIL
+      {
+        echo "[$name] FAIL-CLOSED: the co-required-feature census could not read the source of"
+        echo "        an INCLUDED target: $f_ ($f_src). A census that cannot read its subject is"
+        echo "        unmeasurable, and unmeasurable is never reported as empty."
+      } | tee "$log"
+      end=$(date +%s)
+      record_result "$name" "$status" "$((end - start))"
+      echo ">>> [$name] $status ($((end - start))s)"
+      return 0
+    fi
     # A census that CANNOT be taken is never reported as empty (the lane's standing rule):
     # a failed derivation FAILs and names the derivation.
-    if ! _sites=$(_legacy_coreq_sites "$tests_dir/$f_.rs" "$lh_enabled"); then
+    if ! _sites=$(_legacy_coreq_sites "$f_src" "$lh_enabled"); then
       status=FAIL
       {
         echo "[$name] FAIL-CLOSED: the co-required-feature census could not be derived from"
-        echo "        $tests_dir/$f_.rs. The derivation, not the feature, is what failed."
+        echo "        $f_src. The derivation, not the feature, is what failed."
         echo "        A census that cannot be taken is not reported as empty."
       } | tee "$log"
       end=$(date +%s)
@@ -6321,7 +6360,9 @@ EOF
     done <<EOF
 $_sites
 EOF
-  done
+  done <<EOF
+$srcs
+EOF
   coreq_n=$((lh_testfn + lh_other))
   local -a lh_census=()
   if [ "$lh_testfn" -gt 0 ] || [ "$lh_other" -gt 0 ] || [ "$lh_skip" -gt 0 ]; then
@@ -6376,6 +6417,32 @@ EOF
   # lane exists to catch at this feature set (#1981's dead-code shape: a cfg(test) helper
   # whose only caller is gated out) would have passed silently in exactly the half of the
   # lane that compiles test code. `env` both invocations so neither half is unguarded.
+  # The `--lib` half needs its OWN guard (roborev round-8 finding, Medium). The existing
+  # zero-tests guard keys on `Running tests/<name>.rs` — integration targets only — so the
+  # library unit suite could execute ZERO tests, or `--lib` could be dropped from the
+  # invocation entirely, and the lane would stay green on its integration targets alone.
+  # cqlite-core's inline `#[cfg(feature = "legacy-heuristics")]` unit tests live exactly
+  # there (3478 tests observed at this feature set), and they are half of what this lane
+  # claims to execute. Derived, not hard-coded, for the same reason as the flight lane's.
+  local -a lh_unit_srcs=()
+  local _lh_us
+  while IFS= read -r _lh_us; do
+    [ -n "$_lh_us" ] && lh_unit_srcs+=("$_lh_us")
+  done <<EOF
+$(_package_unittest_srcs cqlite-core lib)
+EOF
+  if [ "${#lh_unit_srcs[@]}" -eq 0 ]; then
+    status=FAIL
+    {
+      echo "[$name] FAIL-CLOSED: could not derive cqlite-core's lib unittest target from cargo"
+      echo "        metadata, so the --lib half of this lane would run under NO zero-test guard."
+    } | tee "$log"
+    end=$(date +%s)
+    record_result "$name" "$status" "$((end - start))"
+    echo ">>> [$name] $status ($((end - start))s)"
+    return 0
+  fi
+
   # Both halves go through _deny_warnings, which is what makes `-D warnings` real: a bare
   # `env RUSTFLAGS=...` is silently ignored when CARGO_ENCODED_RUSTFLAGS is set (round-5).
   if _deny_warnings cargo build --package cqlite-core --features legacy-heuristics >>"$log" 2>&1 \
@@ -6385,8 +6452,17 @@ EOF
     # The guard writes its verdict to stderr only, so `2>>` lands the message in the
     # component log (where the FAIL branch below tails it) while the `if` still tests
     # the GUARD's exit status directly — not a pipeline's last stage.
+    # BOTH halves are guarded: check_no_unexpected_zero_tests covers the integration
+    # targets, check_unittest_targets_ran covers the `--lib` unit suite. Either alone
+    # leaves half of this lane able to execute nothing while the lane reports PASS
+    # (roborev round-8 finding, Medium): the existing guard keys on `Running
+    # tests/<name>.rs`, so a zero-test lib suite — or `--lib` dropped from the invocation
+    # entirely — was invisible to it, and cqlite-core's inline legacy-gated unit tests
+    # (3478 observed at this feature set) are half of what this lane claims to execute.
     if check_no_unexpected_zero_tests "$name" "$log" \
-        ${allow_zero[@]+"${allow_zero[@]}"} 2>>"$log"; then
+        ${allow_zero[@]+"${allow_zero[@]}"} 2>>"$log" \
+        && check_unittest_targets_ran "$name" "$log" "${lh_unit_srcs[@]}" 2>>"$log"; then
+      echo ">>> [$name] zero-test guards: integration targets + unit suite (derived): ${lh_unit_srcs[*]}"
       status=PASS
     else
       status=FAIL

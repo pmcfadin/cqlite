@@ -2135,6 +2135,87 @@ RSFX2
   fi
 fi
 
+# --- 22. #1699: round-8 — both halves guarded, metadata threaded all the way through ---
+#
+# Three of round 8's four findings were UNDER-PROPAGATION of round 7's own fix: metadata
+# discovery was threaded into the candidate loop and NOT into the allow-zero classifier,
+# the census path resolution, or the `--lib` guard. These asserts pin each seam.
+if [ -s "$lh_code" ]; then
+  # (a) A manifest-gated target is POSITIVELY gated and can never be allowed-zero. Its
+  #     source may carry no cfg site at all, so the polarity scan finds nothing and would
+  #     have excused exactly the target round 7 added discovery for.
+  if [ "$(grep -cE '_mt_how"?[[:space:]]*=[[:space:]]*"?manifest' "$lh_code")" -gt 0 ]; then
+    ok "1699-r8-manifest-positive: a manifest-gated target is treated as positively gated (never auto allowed-zero)"
+  else
+    bad "1699-r8-manifest-positive: the manifest arm no longer bypasses the allow-zero scan — a required-features target has no cfg site, so it would be EXCUSED from the zero-tests guard"
+  fi
+  # (b) The census must scan cargo's real src_path, not a reconstructed tests/<name>.rs.
+  if [ "$(grep -cE '_legacy_coreq_sites[[:space:]]+"\$f_src"' "$lh_code")" -gt 0 ]; then
+    ok "1699-r8-census-srcpath: the census scans cargo's src_path, so directory-style and mapped targets are not skipped"
+  else
+    bad "1699-r8-census-srcpath: the census is reconstructing a source path again — a directory-style or explicitly-mapped [[test]] target does not live there and would be silently skipped"
+  fi
+  if [ "$(grep -cE 'tests_dir/\$f_\.rs' "$lh_code")" -eq 0 ]; then
+    ok "1699-r8-census-noreconstruct: no reconstructed \$tests_dir/\$f_.rs path remains"
+  else
+    bad "1699-r8-census-noreconstruct: a reconstructed \$tests_dir/\$f_.rs path is back in the census"
+  fi
+  # (c) The `--lib` half needs its OWN guard: the integration guard keys on
+  #     `Running tests/<name>.rs` and cannot see a zero-test lib suite.
+  if [ "$(grep -cE 'check_unittest_targets_ran' "$lh_code")" -gt 0 ] \
+     && [ "$(grep -cE 'check_no_unexpected_zero_tests' "$lh_code")" -gt 0 ]; then
+    ok "1699-r8-both-halves: the legacy lane guards BOTH halves (integration targets AND the --lib unit suite)"
+  else
+    bad "1699-r8-both-halves: the legacy lane guards only one half — a zero-test --lib suite (or --lib dropped entirely) would leave the lane green on its integration targets alone"
+  fi
+fi
+
+# (d) BEHAVIOURAL: stacked cfg attributes are ANDed by Rust, so they ARE a gap.
+if [ -s "$coreq_h" ]; then
+  stack_fx="$tmp/1699-coreq-stacked.rs"
+  cat > "$stack_fx" <<'RSFX3'
+#[cfg(feature = "legacy-heuristics")]
+#[cfg(feature = "absent-one")]
+#[test]
+fn stacked_is_a_gap() {}
+
+#[cfg(feature = "legacy-heuristics")]
+#[test]
+fn lh_only_is_not_a_gap() {}
+
+#[cfg(feature = "absent-one")]
+#[test]
+fn absent_only_is_not_a_gap() {}
+
+#[cfg(feature = "legacy-heuristics")]
+#[cfg(any(feature = "absent-one", feature = "absent-two"))]
+#[test]
+fn stacked_with_any_is_unclassified() {}
+RSFX3
+  stack_out="$tmp/1699-coreq-stacked-out.txt"
+  _legacy_coreq_sites "$stack_fx" " default legacy-heuristics " > "$stack_out" 2>/dev/null
+  s_fn=$(awk -F'\t' '$1=="fn" && $2=="1"' "$stack_out" | wc -l | tr -d ' ')
+  s_skip=$(awk -F'\t' '$1=="skip"' "$stack_out" | wc -l | tr -d ' ')
+  s_all=$(wc -l < "$stack_out" | tr -d ' ')
+  if [ "$s_fn" = "1" ]; then
+    ok "1699-r8-stacked: stacked #[cfg] attributes are recognised as a gap (Rust ANDs them, so they equal the all(...) form)"
+  else
+    bad "1699-r8-stacked: expected 1 stacked gap, got $s_fn — a per-attribute scan sees legacy-heuristics with no co-requirement in one attribute and vice versa in the other, arms on neither, and reports a FALSE ZERO-GAP census"
+  fi
+  if [ "$s_skip" = "1" ]; then
+    ok "1699-r8-stacked-any: a stacked cluster containing any(...) is unclassified, not guessed"
+  else
+    bad "1699-r8-stacked-any: expected 1 unclassified stacked cluster, got $s_skip"
+  fi
+  # The complement: the two single-token clusters must produce NOTHING, or cluster
+  # accumulation is leaking across item boundaries and inventing gaps.
+  if [ "$s_all" = "2" ]; then
+    ok "1699-r8-stacked-complement: single-token clusters produce no record (accumulation does not leak across items)"
+  else
+    bad "1699-r8-stacked-complement: expected exactly 2 records, got $s_all — cluster state is leaking across item boundaries and inventing gaps"
+  fi
+fi
+
 echo "----"
 echo "passed: $PASS  failed: $FAIL"
 [ "$FAIL" -eq 0 ]
