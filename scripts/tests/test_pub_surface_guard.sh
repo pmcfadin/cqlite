@@ -1324,97 +1324,6 @@ grep -qF "RAW STRING" "$TMPROOT/case44.out" \
 echo "OK (44): raw BYTE and raw C string prefixes (\`br#\"\`, \`cr#\"\`) are refused too, not just \`r#\"\`"
 
 # ---------------------------------------------------------------------------
-# 45. RED — a top-level ITEM MACRO invocation (roborev r11 F1).
-#
-#     An item macro can EXPAND to `pub mod probe { #![cfg(...)] }`. The literal
-#     declaration then lives inside the macro DEFINITION, where NEITHER derivation can
-#     see it — so they AGREE while both are blind and the cross-check cannot catch it.
-#     Same shared-blind-spot shape as Refusals U and I. Reading expansion means asking
-#     the compiler (#3366), so the guard refuses.
-#
-#     TWO FALSE-FAIL CONTROLS IN THE SAME CASE, because this refusal is the broadest one
-#     in the guard and the cost of over-firing is a waived guard:
-#       (b) a depth-0 `macro_rules!` DEFINITION must NOT refuse — it injects no items at
-#           its own site, so refusing buys no protection and reds correct code;
-#       (c) an INDENTED macro inside a `mod` block must NOT refuse (brace depth 1).
-#           `thread_local!` at lib.rs:86 is exactly this shape and is why (c) exists.
-# ---------------------------------------------------------------------------
-scratch_tree macro-item-invocation; wt45="$SCRATCH"
-printf '\nmake_probe_mod!(probe_q);\n' >>"$wt45/cqlite-core/src/lib.rs"
-set +e
-bash "$wt45/$GUARD_REL" >"$TMPROOT/case45.out" 2>&1
-case45_rc=$?
-set -e
-[ "$case45_rc" -ne 0 ] || fail_case "case 45 — a top-level ITEM MACRO invocation passed GREEN. It can expand to a crate-root module gating itself, and BOTH derivations are blind to it; got: $(cat "$TMPROOT/case45.out")"
-grep -qF "ITEM MACRO invocation" "$TMPROOT/case45.out" \
-  || fail_case "case 45 — the guard failed but NOT with the item-macro refusal; got: $(cat "$TMPROOT/case45.out")"
-
-scratch_tree macro-rules-definition; wt45b="$SCRATCH"
-printf '\nmacro_rules! probe_noop { () => {}; }\n' >>"$wt45b/cqlite-core/src/lib.rs"
-set +e
-bash "$wt45b/$GUARD_REL" >"$TMPROOT/case45b.out" 2>&1
-case45b_rc=$?
-set -e
-[ "$case45b_rc" -eq 0 ] || fail_case "case 45(b) — a depth-0 \`macro_rules!\` DEFINITION was REFUSED. A definition injects no items at its own site, so this reds correct code for no protection, and a refusal that reds correct code is the one agents learn to waive; got: $(cat "$TMPROOT/case45b.out")"
-
-scratch_tree macro-nested-in-mod; wt45c="$SCRATCH"
-printf '\nmod probe_wrap {\n    thread_local! { static X: u8 = 0; }\n}\n' >>"$wt45c/cqlite-core/src/lib.rs"
-set +e
-bash "$wt45c/$GUARD_REL" >"$TMPROOT/case45c.out" 2>&1
-case45c_rc=$?
-set -e
-[ "$case45c_rc" -eq 0 ] || fail_case "case 45(c) — an INDENTED macro inside a \`mod\` block (brace depth 1) was REFUSED. \`thread_local!\` in cqlite-core/src/lib.rs is exactly this shape, so this would red the real crate; got: $(cat "$TMPROOT/case45c.out")"
-
-# (d) THE ATTRIBUTED AND PATH-QUALIFIED FORMS (roborev r12 F1). The line-anchored sweep
-#     only saw an invocation that STARTED its line, so `#[allow(dead_code)]
-#     make_mod!(probe);` walked past it. Derivation P now checks the item head AFTER
-#     consuming the outer attribute run, which catches these with no new lexing AND
-#     cannot false-fire on a string (control (e) pins that).
-mform_i=0
-for mform in '#[allow(dead_code)] make_mod!(probe_q);' '::make_mod!(probe_q);' 'outer::make_mod!(probe_q);' 'r#make_mod!(probe_q);' 'make_mod!{ probe_q }'; do
-  # Label by INDEX, not by content: deriving it from the macro text collapsed
-  # `::make_mod!(probe_q);` and `make_mod!{ probe_q }` onto the same letters-only string,
-  # so the second `scratch_tree` hit a DUPLICATE worktree name and the suite aborted.
-  mform_i=$((mform_i + 1))
-  scratch_tree "macro-form-$mform_i"; wtm="$SCRATCH"
-  printf '\n%s\n' "$mform" >>"$wtm/cqlite-core/src/lib.rs"
-  set +e
-  bash "$wtm/$GUARD_REL" >"$TMPROOT/case45d.out" 2>&1
-  mrc=$?
-  set -e
-  [ "$mrc" -ne 0 ] || fail_case "case 45(d) — the item-macro form \`$mform\` passed GREEN. It can expand to a crate-root module that gates itself, and both derivations are blind to the literal declaration; got: $(cat "$TMPROOT/case45d.out")"
-  grep -qF "ITEM MACRO invocation" "$TMPROOT/case45d.out" \
-    || fail_case "case 45(d) — \`$mform\` failed but NOT with the item-macro refusal; got: $(cat "$TMPROOT/case45d.out")"
-done
-
-# (e) THE STRING CONTROL, and it is the one that justifies the design: a doc attribute
-#     whose STRING CONTENT looks like a macro invocation must CERTIFY. This is green
-#     only because the check sits AFTER attribute consumption — a line-anchored broadening
-#     would have needed string erasure to get here, which is the modelling this issue
-#     keeps declining.
-scratch_tree macro-string-lookalike; wt45e="$SCRATCH"
-printf '\n#[doc = "call foo!(x) somewhere"]\npub mod probe_g;\n' >>"$wt45e/cqlite-core/src/lib.rs"
-printf '//! clean prologue\npub fn p() {}\n' >"$wt45e/cqlite-core/src/probe_g.rs"
-set +e
-bash "$wt45e/$GUARD_REL" >"$TMPROOT/case45e.out" 2>&1
-case45e_rc=$?
-set -e
-[ "$case45e_rc" -eq 0 ] || fail_case "case 45(e) — a doc attribute whose STRING contains \`foo!(x)\` was REFUSED as an item macro. That is a FALSE FAIL on ordinary code; got: $(cat "$TMPROOT/case45e.out")"
-grep -qE "$MEASURED_RE" "$TMPROOT/case45e.out" \
-  || fail_case "case 45(e) — exited 0 without the affirmative measurement line; got: $(cat "$TMPROOT/case45e.out")"
-
-# (f) an ordinary one-line fn containing `assert!` must stay GREEN.
-scratch_tree macro-inside-fn-oneline; wt45f="$SCRATCH"
-printf '\npub fn probe_fn() { assert!(true); }\n' >>"$wt45f/cqlite-core/src/lib.rs"
-set +e
-bash "$wt45f/$GUARD_REL" >"$TMPROOT/case45f.out" 2>&1
-case45f_rc=$?
-set -e
-[ "$case45f_rc" -eq 0 ] || fail_case "case 45(f) — an ordinary one-line \`pub fn f() { assert!(true); }\` was REFUSED as an item macro; got: $(cat "$TMPROOT/case45f.out")"
-
-echo "OK (45): item MACRO invocations REFUSE in all five forms (bare, attributed, ::path, a::b, r#ident) — while a \`macro_rules!\` definition, a macro nested in a \`mod\` block, a doc STRING containing \`foo!(x)\`, and an inline \`assert!\` all stay GREEN"
-
-# ---------------------------------------------------------------------------
 # 46. RED — `cfg_attr` must not propagate a CONDITIONAL exemption as unconditional.
 #
 #     `#[cfg_attr(any(), doc(hidden))] pub mod probe;` is neither hidden nor gated — the
@@ -1516,37 +1425,6 @@ set -e
 grep -qF "code follows a closing" "$TMPROOT/case48d.out" \
   || fail_case "case 48(d) — refused, but not via Refusal X; got: $(cat "$TMPROOT/case48d.out")"
 echo "OK (48): string and RAW-string CONTENTS are not read as code — literals with declaration text and multi-line raw strings CERTIFY, while a real declaration after a closing delimiter still REFUSES"
-
-# ---------------------------------------------------------------------------
-# 49. RED+GREEN — an item macro AFTER ANOTHER ITEM on the same line (roborev r13 F1).
-#
-#     `pub fn f() {} make_mod!();` — missed by both the line-anchored sweep (r11) and the
-#     after-attribute check (r12). The sweep is now UNANCHORED, which is only safe
-#     because case 48's fix blanked string contents.
-#
-#     (b) GREEN, and it is the control that widening broke before it was caught by
-#     testing: a one-line `pub fn f() { assert!(true); }`. `BRACE_MIN` is the line's
-#     MINIMUM depth, so the body's `assert!` passed the depth filter; depth is now
-#     tracked ALONG the line and only a depth-0 match counts.
-# ---------------------------------------------------------------------------
-scratch_tree macro-after-item; wt49="$SCRATCH"
-printf '\npub fn zz() {} make_mod!(probe_q);\n' >>"$wt49/cqlite-core/src/lib.rs"
-set +e
-bash "$wt49/$GUARD_REL" >"$TMPROOT/case49.out" 2>&1
-c49rc=$?
-set -e
-[ "$c49rc" -ne 0 ] || fail_case "case 49 — an item macro FOLLOWING another item on the same line passed GREEN; it can expand to a self-gating crate-root module; got: $(cat "$TMPROOT/case49.out")"
-grep -qF "ITEM MACRO invocation" "$TMPROOT/case49.out" \
-  || fail_case "case 49 — refused, but not with the item-macro diagnostic; got: $(cat "$TMPROOT/case49.out")"
-
-scratch_tree macro-in-oneline-fn; wt49b="$SCRATCH"
-printf '\npub fn probe_one_line() { assert!(true); }\n' >>"$wt49b/cqlite-core/src/lib.rs"
-set +e
-bash "$wt49b/$GUARD_REL" >"$TMPROOT/case49b.out" 2>&1
-c49b_rc=$?
-set -e
-[ "$c49b_rc" -eq 0 ] || fail_case "case 49(b) — a one-line \`pub fn f() { assert!(true); }\` was refused as an item macro. The macro is inside the BODY (brace depth 1); only a depth-0 invocation is an item macro; got: $(cat "$TMPROOT/case49b.out")"
-echo "OK (49): an item macro after another item on one line REFUSES, while a one-line fn whose BODY calls a macro stays GREEN"
 
 # ---------------------------------------------------------------------------
 # 50. GREEN+RED — a ONE-LINE inline module is not a crate-root declaration.
@@ -1702,4 +1580,4 @@ grep -qF "affirmative measurement" "$TMPROOT/case39.out" \
 echo "OK (39): a crate root with ZERO unconditional declarations FAILs — the assert never reports success having examined nothing"
 
 echo ""
-echo "PASS: test_pub_surface_guard.sh — all 37 cases (8 green, 27 reds, 1 usage, 1 kill-safety)"
+echo "PASS: test_pub_surface_guard.sh — all 35 cases (8 green, 25 reds, 1 usage, 1 kill-safety)"

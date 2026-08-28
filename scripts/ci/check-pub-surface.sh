@@ -625,61 +625,6 @@ END {
     }
   }
 
-  # --- Refusal Q: a top-level ITEM MACRO invocation (roborev r11 F1) -------------
-  # An item macro can EXPAND to a crate-root module: `make_mod!(probe);` producing
-  # `pub mod probe { #![cfg(...)] }`. The literal `pub mod` then lives INSIDE the macro
-  # DEFINITION — indented, in another file, possibly assembled from tokens — so neither
-  # derivation sees it, the inline-module refusal never fires, and the expanded module
-  # is advertised at the crate root while gating itself. Both derivations are blind
-  # TOGETHER, so the cross-check cannot see it either: exactly the shared-blind-spot
-  # shape Refusals U and I exist for.
-  #
-  # Reading macro expansion means asking the compiler, which is a different guard
-  # (#3366's dep-info route). So this refuses instead — and refusing is cheap here:
-  # MEASURED zero depth-0 item-macro invocations in cqlite-core/src/lib.rs.
-  #
-  # `macro_rules!` is EXCLUDED deliberately: a macro DEFINITION injects no items at its
-  # own site, so refusing one would red correct code for no protection.
-  for (i = 1; i <= n; i++) {
-    if (!INCODE[i]) continue
-    t = ltrim(N[i])
-    if (t == "") continue
-    if (!BRACE_UNRELIABLE && BRACE_MIN[i] != 0) continue
-    if (t ~ /^macro_rules[[:space:]]*!/) continue
-    # UNANCHORED, and that is only safe BECAUSE `normalize()` now BLANKS STRING
-    # CONTENTS (roborev r13 F2). The line-anchored version missed every invocation that
-    # was not a line's first token — after an attribute (r12 F1) and after another item
-    # on the same line, `pub fn f() {} make_mod!();` (r13 F1). Broadening it was
-    # previously unsafe for exactly one reason: `N[]` carried string contents, so a
-    # `#[doc = "call foo!(x)"]` would have false-fired. With contents blanked, the
-    # residue holds no macro-looking text and an unanchored search is sound.
-    #
-    # Two rounds were spent widening this pattern one form at a time (r12, r13). The
-    # generalisable lesson: a pattern that must cover a SYNTACTIC FAMILY should be
-    # widened once, over the whole family, after removing whatever forced it to be
-    # narrow — not extended per reported instance.
-    # DEPTH AT THE MATCH POSITION, not the line's minimum. `BRACE_MIN[i]` is the lowest
-    # depth the LINE reaches, so a one-line `pub fn f() { assert!(true); }` passed the
-    # depth filter and the unanchored search then found `assert!(` INSIDE the body — a
-    # false FAIL on ordinary Rust, found while testing this very widening. An item macro
-    # is only an ITEM macro at brace depth 0, so the depth is tracked along the line and
-    # a match is only reported where it is actually 0.
-    qline = N[i]; qd = BRACE_START[i]
-    for (k = 1; k <= length(qline); k++) {
-      qc = substr(qline, k, 1)
-      if (qc == "{") { qd++; continue }
-      if (qc == "}") { qd--; continue }
-      if (qd != 0) continue
-      qprev = (k > 1) ? substr(qline, k - 1, 1) : ""
-      if (qprev ~ /[A-Za-z0-9_]/) continue
-      qrest = substr(qline, k)
-      if (qrest ~ /^macro_rules[[:space:]]*!/) continue
-      if (qrest ~ /^(::[[:space:]]*)?(r#)?[A-Za-z_][A-Za-z0-9_]*([[:space:]]*::[[:space:]]*(r#)?[A-Za-z_][A-Za-z0-9_]*)*[[:space:]]*![[:space:]]*[\(\[{]/) {
-        printf "Q\tline %d: top-level ITEM MACRO invocation: `%s`\n", i, squash(substr(ltrim(qrest), 1, 72))
-        break
-      }
-    }
-  }
 
   # --- Derivation P: the structured scan (attributes joined, same-line splits).
   CUR = 1
@@ -714,25 +659,6 @@ END {
       # following item; it must not accumulate onto one.
       if (a ~ /^#!\[/) attrs = ""
       else attrs = attrs squash(a) " "
-    }
-    # ITEM MACRO, CHECKED AFTER THE ATTRIBUTE RUN (roborev r12 F1). The standalone
-    # depth-0 sweep above only sees an invocation that STARTS its line, so
-    # `#[allow(dead_code)] make_mod!(probe);` walked past it.
-    #
-    # Checking HERE is what makes this bounded rather than a second lexer, and the
-    # reason is worth stating: this derivation has ALREADY consumed the outer attribute
-    # run into `attrs`, so (a) the attributed form converges on the same BUF as the bare
-    # form, and (b) IT CANNOT FALSE-FIRE ON A STRING — a `#[doc = "call foo!(x)"]` was
-    # consumed as an attribute, so its contents never reach `BUF`. Broadening the
-    # line-anchored sweep instead would have required erasing strings in the scan, which
-    # is the extra modelling this issue keeps refusing to take on.
-    #
-    # Covers the bare, attributed, path-qualified (`::foo!`) and raw-identifier
-    # (`r#foo!`) forms. `macro_rules!` stays excluded: a DEFINITION injects no items at
-    # its own site.
-    if (BUF !~ /^macro_rules[[:space:]]*!/ &&
-        BUF ~ /^(::[[:space:]]*)?(r#)?[A-Za-z_][A-Za-z0-9_]*([[:space:]]*::[[:space:]]*(r#)?[A-Za-z_][A-Za-z0-9_]*)*[[:space:]]*![[:space:]]*[\(\[{]/) {
-      printf "Q\tline %d: top-level ITEM MACRO invocation (after an attribute run): `%s`\n", startline, squash(substr(BUF, 1, 72))
     }
     if (BUF ~ /^pub mod [A-Za-z_][A-Za-z0-9_]*[[:space:]]*;/) {
       st2 = take_stmt()
@@ -786,12 +712,6 @@ fi
 # A `pub mod` shape NEITHER derivation consumed. This is NOT a disagreement between
 # the two derivations — it is a blind spot they SHARE, which is precisely why the
 # cross-check further down cannot catch it and why this refusal is its own channel.
-if grep -q '^Q	' "$SCAN_RAW"; then
-  echo "" >&2
-  grep '^Q	' "$SCAN_RAW" | cut -f2- >&2
-  fail "the crate root $LIB_RS_REL contains a top-level ITEM MACRO invocation (see above). An item macro can EXPAND to a crate-root \`pub mod NAME { #![cfg(...)] }\` whose literal declaration lives inside the macro DEFINITION, where neither of this scan's two derivations can see it — so they AGREE while both are blind and the mutual cross-check cannot catch it, which is the same shared-blind-spot shape Refusals U and I exist for. Reading macro expansion means asking the compiler (issue #3366), so this guard refuses rather than certify a crate root whose module set it cannot enumerate. Remedy: declare crate-root modules literally, or extend this guard to expanded syntax."
-fi
-
 if grep -q '^U	' "$SCAN_RAW"; then
   echo "" >&2
   grep '^U	' "$SCAN_RAW" | cut -f2- >&2
@@ -852,6 +772,22 @@ MOD_COUNT="$(wc -l <"$DERIVED_MODS" | tr -d ' ')"
 #    that had to FIND DECLARATIONS ANYWHERE IN ARBITRARY SOURCE — an unbounded
 #    parsing problem where the code must reach a verdict on every line and therefore
 #    CANNOT ABSTAIN. This question is the opposite in all three respects that matter:
+#
+#    STATED RESIDUAL — MACRO-GENERATED CRATE-ROOT MODULES ARE NOT SEEN (#1712, #3366).
+#    A macro can emit `pub mod NAME { #![cfg(...)] }`, and the literal declaration then
+#    lives in the macro DEFINITION where neither derivation can reach it. A refusal for
+#    this was built and REMOVED, deliberately, after four review rounds:
+#      * function-like `name!(...)` invocations were refusable, but only by a pattern
+#        broad enough to also hit ORDINARY EXPRESSION MACROS — `const X: bool =
+#        cfg!(feature = "y");` at the crate root is valid Rust and was rejected.
+#        Separating "item macro" from "expression macro" requires knowing ITEM
+#        BOUNDARIES, i.e. parsing items;
+#      * PROCEDURAL attribute and derive macros can emit a module with no `!` anywhere,
+#        so no function-like pattern closes the class at all.
+#    So the refusal reddened valid code while still not covering the hole. Measured: ZERO
+#    crate-root item macros in cqlite-core/src/lib.rs, so the gap is a hardening
+#    limitation, not a live hole. The principled fix is reachability from rustc's own
+#    dep-info (#3366), which sees EXPANDED syntax and has no macro problem to model.
 #
 #      * BOUNDED INPUT — ONE named file, and only its PROLOGUE.
 #      * ONE QUESTION — "is there an inner attribute here that mentions `cfg`?"
