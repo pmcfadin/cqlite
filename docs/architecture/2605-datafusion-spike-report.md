@@ -391,6 +391,16 @@ workers overlap **page-in**, which is exactly the term that dominates this corpu
 no I/O left to overlap, `filtered_scan`, shows no concurrency effect at all (1.03x), which is the
 internal consistency check on that claim.
 
+**Read the two columns differently, because only one of them is interpretable as an engine
+property.** The raw-wall parallelism ratios (`1.37x / 1.49x / 0.94x`) are **confounded**: they are
+measured on the same noise-dominated wall-clock channel as everything else in §3.6, and their sign
+and size move with cache state — during this spike the parallelism effect was read, on partial data,
+first as *penalising* DataFusion and then as *favouring* it, and **both readings were artifacts**.
+Only the **I/O-controlled residual** (§3.3) resolves it, and it says `tp16` has **no CPU advantage
+over `tp1`** (`+0.4` vs `-0.1`, `+1.0` vs `-0.6`, `-1.9` vs `-0.9` s). What survives is the narrow,
+mechanically-attributed statement above: the wall-clock win is real for a user, and it is bought with
+overlapped page-in, not with faster execution.
+
 **The consequence for #941 is the whole point of the decomposition: the available win is
 CONCURRENCY, and adopting DataFusion is not required to obtain it.** A concurrent producer/drain in
 CQLite's own pipeline captures the same term.
