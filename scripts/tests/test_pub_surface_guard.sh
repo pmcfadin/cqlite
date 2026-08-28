@@ -1863,6 +1863,60 @@ done
 echo "OK (56): an attribute FOLLOWING other code on a line REFUSES, and bracket-delimited token trees are not declarations — while parameter-list attributes, token-tree attributes and ordinary items stay GREEN"
 
 # ---------------------------------------------------------------------------
+# 57. GREEN+RED — CRATE-ROOT DEPTH IS COMPUTED ONCE (roborev r22 F1/F2 + the sixth site).
+#
+#     r22's two findings were not about behaviour; both said "these two implementations do
+#     not match". Five sites computed "is this position at crate-root depth?" with five
+#     different answers, and two of them were wrong in opposite ways:
+#       * Refusal Y tracked parens and brackets but NOT braces, so an attribute inside a
+#         one-line nested module false-FAILed;
+#       * Refusal U checked no delimiter depth at all, so `mod outer { pub mod inner {} }`
+#         was refused as an unrecognised top-level form.
+#     Both are valid Rust rejected by the MANDATORY gate.
+#
+#     `root_depth_at(i, pos)` now answers it once and every site calls it, deleting their
+#     private counters. THE SWEEP THEN FOUND A SIXTH SITE nobody had reported — Refusal U's
+#     own loop — which is the point: one implementation cannot disagree with itself.
+#
+#     (d)/(e) RED — the consolidation must not have bought a false PASS: Refusal U still
+#     fires at real crate-root depth, and the AK1 defect is still caught.
+# ---------------------------------------------------------------------------
+c57_i=0
+for c57 in 'mod probe_o57 { const X: () = (); #[allow(dead_code)] fn f() {} }' 'mod probe_outer57 { pub mod probe_inner57 {} }' 'mod probe_o58 {\n    pub mod probe_i58 {}\n}'; do
+  c57_i=$((c57_i + 1))
+  scratch_tree "root-depth-once-$c57_i"; wt57="$SCRATCH"
+  printf '\n%b\n' "$c57" >>"$wt57/cqlite-core/src/lib.rs"
+  set +e
+  bash "$wt57/$GUARD_REL" >"$TMPROOT/case57.out" 2>&1
+  c57rc=$?
+  set -e
+  [ "$c57rc" -eq 0 ] || fail_case "case 57($c57_i) — a construct at brace depth > 0 was treated as crate-root. Depth must be computed AT THE POSITION, by the shared helper, not per-site; got: $(cat "$TMPROOT/case57.out")"
+done
+
+# (d) RED — Refusal U must still fire on a REAL crate-root inline module.
+scratch_tree root-depth-once-u-still-fires; wt57d="$SCRATCH"
+printf '\npub mod probe_inline57 { #![cfg(feature = "benchmarks")] }\n' >>"$wt57d/cqlite-core/src/lib.rs"
+set +e
+bash "$wt57d/$GUARD_REL" >"$TMPROOT/case57d.out" 2>&1
+c57d_rc=$?
+set -e
+[ "$c57d_rc" -ne 0 ] || fail_case "case 57(d) — routing Refusal U through the shared depth helper bought a FALSE PASS: a crate-root INLINE \`pub mod\` carrying its own inner cfg was certified; got: $(cat "$TMPROOT/case57d.out")"
+grep -qF "unrecognized top-level" "$TMPROOT/case57d.out" \
+  || fail_case "case 57(d) — refused, but not via Refusal U; got: $(cat "$TMPROOT/case57d.out")"
+
+# (e) RED — and the AK1 defect itself.
+oracle_tree root-depth-once-ak1; wt57e="$SCRATCH"
+printf '#![cfg(feature = "benchmarks")]\n//! inner-gated\npub fn probe() {}\n' >"$wt57e/cqlite-core/src/probe_oracle.rs"
+set +e
+bash "$wt57e/$GUARD_REL" >"$TMPROOT/case57e.out" 2>&1
+c57e_rc=$?
+set -e
+[ "$c57e_rc" -ne 0 ] || fail_case "case 57(e) — the consolidation bought a FALSE PASS on the AK1 defect itself; got: $(cat "$TMPROOT/case57e.out")"
+grep -q "INCONSISTENT" "$TMPROOT/case57e.out" \
+  || fail_case "case 57(e) — refused but not as the INCONSISTENT defect; got: $(cat "$TMPROOT/case57e.out")"
+echo "OK (57): crate-root depth is computed ONCE and shared — nested modules and attributes below depth 0 certify, while Refusal U at real crate-root depth and the AK1 defect both still fire"
+
+# ---------------------------------------------------------------------------
 # 36. GREEN — THE POSITIVE CONTROL for 29-38.
 #
 #     Without it, every case above would be satisfied by a guard hardwired to refuse
@@ -1961,4 +2015,4 @@ grep -qF "affirmative measurement" "$TMPROOT/case39.out" \
 echo "OK (39): a crate root with ZERO unconditional declarations FAILs — the assert never reports success having examined nothing"
 
 echo ""
-echo "PASS: test_pub_surface_guard.sh — all 41 cases (9 green, 30 reds, 1 usage, 1 kill-safety)"
+echo "PASS: test_pub_surface_guard.sh — all 42 cases (10 green, 30 reds, 1 usage, 1 kill-safety)"
