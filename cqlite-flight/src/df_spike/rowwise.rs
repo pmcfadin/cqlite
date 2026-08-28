@@ -172,13 +172,35 @@ pub enum RowWiseError {
 
 /// Count rows one at a time — the row-engine analogue of `count(*)`.
 ///
-/// Deliberately a per-row loop rather than `num_rows()`: the arm under test is
-/// "the row engine walks every row", and reading the length would measure
-/// nothing at all.
+/// # `black_box` is load-bearing, not decoration
+///
+/// The obvious spelling of this loop —
+/// ```ignore
+/// for _ in 0..batch.num_rows() { counted += 1; }
+/// ```
+/// has **no observable per-row dependency**, so a release build folds it to
+/// `batch.num_rows()` and the arm measures NOTHING: it reports a row-wise walk
+/// while executing a single load. That is what the previous version did, and the
+/// figures it produced are disclosed as such in the report (§3.1(c)).
+/// `std::hint::black_box` is the documented way to stop that fold: the optimizer
+/// must assume the value is observed, so the loop body genuinely runs once per
+/// row.
+///
+/// # Why a visit and not a full row materialization
+///
+/// The arm this stands in for is DataFusion's `count(*)`, which also does not
+/// read column DATA — it counts rows. Materializing each row's cells here would
+/// make the two arms answer the same question by doing different amounts of
+/// work, which is precisely the "faster because it did less/more" error the
+/// whole harness is built to avoid. What is measured is therefore a per-row
+/// visit (~1-2 ns/row, i.e. under 0.04 % of a ~100 s scan at 1.9M rows), and the
+/// report does not claim more than that. `count_matching_rowwise` below is the
+/// arm that does real per-row work, because its query does.
 pub(crate) fn count_rows_rowwise(batch: &RecordBatch) -> u64 {
     let mut counted: u64 = 0;
-    for _ in 0..batch.num_rows() {
-        counted += 1;
+    for row in 0..batch.num_rows() {
+        std::hint::black_box(row);
+        counted = std::hint::black_box(counted + 1);
     }
     counted
 }

@@ -34,7 +34,7 @@ use cqlite_core::schema::TableSchema;
 use crate::df_spike::bench::{ArmKind, BenchConfig, BenchRunner, Scenario, ScenarioKind};
 use crate::df_spike::provider::CqliteTableProvider;
 use crate::df_spike::pushdown;
-use crate::df_spike::rowwise::{count_matching_rowwise, RowLiteral, RowOp};
+use crate::df_spike::rowwise::{count_matching_rowwise, count_rows_rowwise, RowLiteral, RowOp};
 use crate::df_spike::scan::{self, ScanTarget};
 use crate::filter::ScanSpec;
 use crate::testutil;
@@ -798,5 +798,39 @@ fn a_pushed_down_count_narrows_the_scan_to_one_column_and_keeps_the_rows() {
             outcome.rows, 7,
             "the anchored scan must emit one row per reconciled row"
         );
+    });
+}
+
+#[test]
+#[serial]
+fn the_row_wise_count_visits_every_row_of_every_batch() {
+    let (_temp, table_dir, schema) = two_generation_fixture();
+    with_pinned_now(|| {
+        let target = ScanTarget {
+            schema,
+            dir: table_dir,
+            batch_size: TEST_BATCH_SIZE,
+        };
+        let producer = Arc::new(scan::build_producer(&target, ScanSpec::default()).expect("p"));
+        let paths = scan::resolve_paths(&producer, &target).expect("resolve");
+        let mut running = scan::spawn_scan(producer, paths);
+        let (mut counted, mut batches) = (0u64, 0u32);
+        while let Some(next) = running.batches.blocking_recv() {
+            let batch = next.expect("batch");
+            counted += count_rows_rowwise(&batch);
+            batches += 1;
+        }
+        let _ = running.done.join();
+        // 7 rows survive reconciliation, spread over more than one batch at
+        // TEST_BATCH_SIZE=4 — so a per-batch off-by-one cannot hide.
+        assert!(batches > 1, "expected several batches, got {batches}");
+        assert_eq!(
+            counted, 7,
+            "the row-wise count must total the reconciled rows"
+        );
+        // NOTE: that the loop is not OPTIMIZED AWAY cannot be asserted from
+        // Rust — it is a codegen property. `count_rows_rowwise` prevents the fold
+        // structurally with `std::hint::black_box`; this test pins the ANSWER,
+        // and the doc comment there owns the timing claim.
     });
 }
