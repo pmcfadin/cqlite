@@ -500,11 +500,15 @@ impl SSTableReader {
         let io_failed = Arc::new(AtomicBool::new(false));
         let reader = Arc::clone(&self);
         let task_io_failed = Arc::clone(&io_failed);
+        // Detached-blocking-work marker (issue #3384): a dropped `JoinHandle` DETACHES
+        // a blocking task rather than aborting it, so this guard is how a reader learns
+        // the drain has actually stopped. Constructed BEFORE `spawn_blocking` and MOVED
+        // in (roborev): registering inside the closure would leave a task that is
+        // queued-but-not-yet-started counted as zero, so a reader could see "nothing in
+        // flight" and read the counter before that task decodes its first row.
+        let parse_inflight = crate::storage::read_path_probe::BlockingScanTaskGuard::new();
         let parse_task = tokio::task::spawn_blocking(move || {
-            // Detached-blocking-work marker (issue #3384): a dropped `JoinHandle`
-            // DETACHES this task rather than aborting it, so this guard is how a
-            // reader learns the drain has actually stopped.
-            let _inflight = crate::storage::read_path_probe::BlockingScanTaskGuard::new();
+            let _inflight = parse_inflight;
             reader.drain_scan_window_blocking(ctx, raw_rx, batch_tx, task_io_failed)
         });
 
@@ -633,9 +637,10 @@ impl SSTableReader {
         max_compressed_length: usize,
     ) -> Option<Error> {
         let io_failed_feed = Arc::clone(io_failed);
+        // Registered BEFORE the spawn and moved in — see the parse half (issue #3384).
+        let feed_inflight = crate::storage::read_path_probe::BlockingScanTaskGuard::new();
         let feed = tokio::task::spawn_blocking(move || -> Option<Error> {
-            // Detached-blocking-work marker (issue #3384) — see the parse half.
-            let _inflight = crate::storage::read_path_probe::BlockingScanTaskGuard::new();
+            let _inflight = feed_inflight;
             // Panic/early-exit guard (roborev finding, issue #1593). `raw_tx` is
             // captured (moved) into this closure and drops when the closure
             // returns OR unwinds; the parse half reads a `raw_tx` close with

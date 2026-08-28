@@ -190,6 +190,13 @@ pub fn start_server(spec: ServerSpec<'_>) -> ServerProcess {
         for k in spec.env_remove {
             cmd.env_remove(k);
         }
+        // Pin the child's log filter (roborev, issue #3384). Readiness below waits for
+        // an INFO line the server emits after binding, and the child would otherwise
+        // INHERIT `RUST_LOG` — so a developer or CI runner with `RUST_LOG=warn` would
+        // make a perfectly healthy server never become "ready", and the failure would
+        // look like a hung server rather than a filtered log line. Set before the
+        // caller's env so a test can still override it deliberately.
+        cmd.env("RUST_LOG", "info");
         for (k, v) in spec.env {
             cmd.env(k, v);
         }
