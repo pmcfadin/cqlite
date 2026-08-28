@@ -774,6 +774,154 @@ cp -a "$FREQRUN" "$EMPTYMAN"
 printf '\n\n' > "$EMPTYMAN/manifest.jsonl"
 expect_guard_fail FREQ_MANIFEST_EMPTY python3 "$FREQ" --results "$EMPTYMAN"
 
+# ------- the READ path validates with the WRITE path's guards (reproduction) ---
+echo
+echo "-- read-time validation of committed evidence (the reproduction path) --"
+# THE DEFECT THIS SECTION EXISTS FOR: `derive.py` accepted a committed
+# `attribution.json` after checking only s, n, window length and list length. It
+# is the tool a reader runs against the committed tree to reproduce the published
+# numbers — the REPRODUCTION PATH — so a modified row count, a duplicated worker,
+# timestamps outside the window or a shortfall over the published 0.5% bound
+# would have been aggregated straight into the table, and re-aggregation would
+# have "confirmed" it from evidence the measurement-time guards would have
+# refused. The validation now lives in `guards.py` and is the SAME code the write
+# path runs (one implementation, not two agreeing by inspection).
+#
+# The fixture is a rep in the state a COMMITTED rep is in: `guards.py window`
+# output kept, the raw progress records removed (they are far too voluminous to
+# commit), so `derive.py` must take its committed-attribution branch. Two rounds,
+# because a single rep has no dispersion to report.
+plant_committed_rep() {  # <results-dir> [workers]
+  local d="$1" w="${2:-2}" r rep
+  rm -rf "$d"; mkdir -p "$d"
+  for r in 1 2; do
+    rep="$d/s${w}-n${w}-round${r}"
+    python3 "$FIX" window --dir "$rep" --workers "$w"
+    python3 "$GUARDS" window --repdir "$rep" > "$rep/attribution.json"
+    rm -f "$rep"/worker-*.progress.jsonl "$rep"/worker-*.summary.json
+    printf '{"rundir": "s%s-n%s-round%s"}\n' "$w" "$w" "$r" >> "$d/manifest.jsonl"
+  done
+}
+
+# POSITIVE CONTROL, and it is a round trip: `guards.py window` writes the
+# attribution, `derive.py` reads it back, and the aggregate it publishes is the
+# one the fixture makes exact in advance (2 workers x 300,000 rows/s = 600,000).
+# A suite whose read-time cases all refuse would prove nothing.
+RT="$TMP/readpath"
+plant_committed_rep "$RT"
+expect_ok "read path: guard output round-trips into the table" \
+  python3 "$HERE/derive.py" --results "$RT"
+if python3 "$HERE/derive.py" --results "$RT" | grep -q '\*\*600,000\*\*'; then
+  echo "ok    [read path aggregate] the committed attribution yields the exact known 600,000 rows/s"
+  PASS=$((PASS+1))
+else
+  echo "FAIL  [read path aggregate] the round trip did not reproduce 600,000 rows/s"
+  FAIL=$((FAIL+1))
+fi
+
+# NEGATIVE CONTROLS — one per property, each OBSERVED to fire through derive.py.
+# Every op mutates a copy of the tree above, so the case differs from the passing
+# one in exactly the property it names.
+expect_read_refusal() {  # <guard-code> <tamper-op>
+  local code="$1" op="$2" d="$TMP/rt-$2"
+  rm -rf "$d"; cp -a "$RT" "$d"
+  python3 "$FIX" tamper --repdir "$d/s2-n2-round1" --op "$op"
+  expect_guard_fail "$code" python3 "$HERE/derive.py" --results "$d"
+}
+# The lead case: a row count raised and nothing else touched. It inflates the
+# published aggregate, and the rate no longer follows from the rows and the span.
+expect_read_refusal ATTRIBUTION_RATE_INCONSISTENT          rows-bumped
+expect_read_refusal ATTRIBUTION_SPAN_INCONSISTENT          span-misstated
+expect_read_refusal ATTRIBUTION_SHORTFALL_INCONSISTENT     shortfall-misstated
+# The published 0.5% bound is enforced on READ, by the same function that
+# enforced it at measurement time: 1 s unattributed out of a 60 s window.
+expect_read_refusal WINDOW_SHORTFALL                       shortfall-over-bound
+# Rows counted outside [T0, T1] are rows produced when fewer than S scans were
+# concurrent. The op resyncs span, rate and shortfall, so ONLY the containment
+# check can catch it.
+expect_read_refusal ATTRIBUTION_TIMESTAMP_OUTSIDE_WINDOW   timestamp-outside-window
+# Rows are SUMMED over the per-worker list, so a duplicated id double-counts.
+expect_read_refusal ATTRIBUTION_WORKER_DUPLICATE           duplicate-worker
+expect_read_refusal ATTRIBUTION_WORKER_UNKNOWN             unknown-worker
+expect_read_refusal WINDOW_WORKER_MISSING                  worker-dropped
+expect_read_refusal ATTRIBUTION_TOTAL_INCONSISTENT         total-misstated
+expect_read_refusal ATTRIBUTION_TOTAL_INCONSISTENT         aggregate-misstated
+expect_read_refusal ATTRIBUTION_FIELD_MISSING              record-field-dropped
+expect_read_refusal ATTRIBUTION_FIELD_MISSING              summary-field-dropped
+expect_read_refusal WINDOW_FIELD_MALFORMED                 n-misstated
+expect_read_refusal WINDOW_FIELD_MALFORMED                 window-misstated
+# The counter/row window identity is DECIDED on read too, not merely printed in a
+# provenance line: perf's enabled interval cut to 75% of the driver's window.
+expect_read_refusal WINDOW_COUNTER_MISMATCH                task-clock-drift
+
+# THE KNOWN LIMIT, ASSERTED SO THE CLAIM STAYS HONEST. The read path establishes
+# internal consistency, agreement with `window.json` and conformance to the
+# published bounds. It CANNOT establish authenticity: an edit that also resyncs
+# the record's derived fields and the summary totals is self-consistent, and only
+# the raw progress records could refute it. That is why they are RECOMPUTED
+# whenever present and why `attribution_source` is printed per run. This case
+# pins the limit rather than leaving a reader to assume it away.
+LIMIT="$TMP/rt-limit"
+rm -rf "$LIMIT"; cp -a "$RT" "$LIMIT"
+python3 "$FIX" tamper --repdir "$LIMIT/s2-n2-round1" --op rows-bumped-resynced
+if python3 "$HERE/derive.py" --results "$LIMIT" >/dev/null 2>&1; then
+  echo "ok    [read path known limit] a fully resynced edit is NOT detectable from the"
+  echo "      committed file alone — only the raw records could refute it (documented, not fixed)"
+  PASS=$((PASS+1))
+else
+  echo "FAIL  [read path known limit] the documented limit no longer holds; guards.py and"
+  echo "      derive.py both state that such an edit is undetectable — update the prose"
+  FAIL=$((FAIL+1))
+fi
+
+# ACCEPTANCE, AGAINST THE COMMITTED EVIDENCE THIS PR SHIPS. The validation must
+# not reject any of the 91 committed reps, and the table must still be the
+# PUBLISHED one — asserted by value, because a table of different numbers also
+# exits 0. Run from an unrelated cwd, like the freq case above.
+SWEEP="$HERE/../sweep"
+CS_OUT="$TMP/cs-table.md"
+if ( cd "$TMP" && python3 "$HERE/derive.py" --results "$SWEEP" \
+       --extension "$HERE/../extA" --extension "$HERE/../extB" ) > "$CS_OUT" 2>&1; then
+  miss=""
+  grep -q '^| 6 | 2,732,817 | 0.7% | 24 |' "$CS_OUT"     || miss="$miss S=6-peak=2,732,817@N=24"
+  grep -q '^| 6 | 2,732,817 .*\*\*0.935\*\*' "$CS_OUT"   || miss="$miss marg-eff=0.935"
+  grep -q 'S=6, N@peak=24 — BRACKETED' "$CS_OUT"         || miss="$miss S=6-BRACKETED"
+  if [[ -z "$miss" ]]; then
+    echo "ok    [read path acceptance] all 91 committed reps validate and still publish"
+    echo "      S=6 = 2,732,817 rows/s at N=24, marg. eff. 0.935, BRACKETED"
+    PASS=$((PASS+1))
+  else
+    echo "FAIL  [read path acceptance] the committed evidence no longer reproduces:$miss"
+    FAIL=$((FAIL+1))
+  fi
+else
+  echo "FAIL  [read path acceptance] the new validation REJECTED committed evidence:"
+  sed 's/^/      /' "$CS_OUT" | tail -5; FAIL=$((FAIL+1))
+fi
+
+# ...AND THE SAME COMMITTED TREE, TAMPERED, IS REFUSED. The acceptance case above
+# would also pass if the validation were switched off; this is what makes it a
+# measurement. One real rep's row count is raised in a scratch copy.
+TAMPERED="$TMP/sweep-tampered"
+rm -rf "$TAMPERED"; cp -a "$SWEEP" "$TAMPERED"
+python3 "$FIX" tamper --repdir "$TAMPERED/s6-n24-round1" --op rows-bumped
+expect_guard_fail ATTRIBUTION_RATE_INCONSISTENT \
+  python3 "$HERE/derive.py" --results "$TAMPERED"
+
+# STRUCTURAL: the read path must CALL the shared validator, not carry its own.
+# A second implementation is only knowable to agree by differential testing
+# against the first (CLAUDE.md, #3283), and the way it diverges is the read path
+# silently accepting something.
+if grep -q 'guards\.validate_attribution_file(' "$HERE/derive.py" \
+   && grep -q 'return validate_attribution(' "$HERE/guards.py"; then
+  echo "ok    [one validator] derive.py calls guards.validate_attribution_file, and"
+  echo "      attribute_window returns through the same validator"
+  PASS=$((PASS+1))
+else
+  echo "FAIL  [one validator] the read path no longer shares the write path's validator"
+  FAIL=$((FAIL+1))
+fi
+
 # ------------------------------------------------------ no relaxation knob ---
 echo
 echo "-- no escape hatch --"
