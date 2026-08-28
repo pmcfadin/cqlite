@@ -85,11 +85,38 @@ strip = "none"
 
 Two properties, both deliberate:
 
-* **Codegen fidelity.** It moves only debuginfo emission and symbol retention. Every optimization
-  input — `opt-level`, `lto`, `codegen-units`, `panic` — is inherited from `release` untouched.
-  `-C force-frame-pointers` is deliberately **not** set, because that *would* alter codegen; call-graph
-  runs instead use `perf record --call-graph dwarf` and are reported as **structural evidence only**,
-  never as the source of a headline per-function number.
+* **Codegen fidelity — and the first claim made here was FALSE, so it is corrected rather than
+  removed.** This section originally asserted that moving only debuginfo emission and symbol retention
+  left codegen identical. Measured: `debug = 1` grows `.text` by **+12,992 B (+0.156%)** on
+  `cqlite-flight` and **+13,632 B (+0.160%)** on `flight-loadgen`. Debuginfo is **not** codegen-neutral.
+
+  That falsification produced a better design, because the two things a profiler wants have different
+  costs and only one is needed for a headline number: the **symbol table** is what flat per-function
+  attribution needs; **debuginfo** is needed only for `perf annotate` source interleaving and
+  `--call-graph dwarf`. So a second profile carries symbols alone:
+
+  ```toml
+  [profile.perfsym]
+  inherits = "release"
+  debug = 0
+  strip = "none"
+  ```
+
+  `perfsym` differs from `release` by **+0.0185%** (`cqlite-flight`) and **−0.0037%**
+  (`flight-loadgen`) — an order of magnitude closer than `perfprof`, and **of opposite sign** on the
+  two binaries, which reads as linker/section layout noise rather than codegen divergence (a
+  systematic codegen change would not shrink one binary while growing the other).
+
+  Therefore: **AC1 headline per-function figures come from `perfsym`**; `perfprof` is used for
+  **structural evidence only** (region membership, call-graph shape, source-line annotation) and never
+  as the source of a headline number; **AC0 runs on plain `--release`**, as #3096 did, because a
+  reproduction must not silently change the binary. `-C force-frame-pointers` is deliberately **not**
+  set on either profile — it would give cheap call-graph unwinding but *does* alter codegen, which is
+  the property being protected.
+
+  `.text` size is a **proxy**: identical size would not prove identical code, and near-identical size
+  does not prove identical speed. The pre-registered throughput control in §4 is what settles it.
+  Detail: `raw/profile-codegen-fidelity.md`.
 * **No collision with the rig's provenance.** `--profile bench` also unstrips (it inherits release and
   sets `debug = true`, `strip = "none"`), but cargo writes it to `target/release/`, which would clobber
   the binaries the WS0 rig digests in `scripts/perf/ws0_binary_snapshot.py`. A named profile gets

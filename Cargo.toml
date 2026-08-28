@@ -204,6 +204,21 @@ panic = "unwind"
 # `-C force-frame-pointers` here — that WOULD alter codegen. Call-graph runs that need
 # unwinding use `perf record --call-graph dwarf` and are reported as STRUCTURAL evidence
 # only, never as the source of a headline per-function number.
+# Symbols-only profiling profile (issue #3248). See [profile.perfprof] below for why a
+# profiling profile is needed at all. This one exists because the two things a profiler
+# wants have DIFFERENT codegen costs, and only one of them is needed for the headline
+# numbers:
+#   * the SYMBOL TABLE  -> what flat per-function attribution needs. `strip = "none"`.
+#   * DEBUGINFO         -> only needed for `perf annotate` source interleaving and for
+#                          `--call-graph dwarf`. `debug = 1`, and it MOVES `.text`.
+# Measured on cqlite-flight: debug = 1 grows `.text` by 12,992 bytes (+0.156%) over
+# release, so `perfprof` is NOT codegen-identical. This profile drops debuginfo and keeps
+# only the symbol table, which is the codegen-faithful vehicle for AC1's headline figures.
+[profile.perfsym]
+inherits = "release"
+debug = 0
+strip = "none"
+
 [profile.perfprof]
 inherits = "release"
 debug = 1
