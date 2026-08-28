@@ -364,8 +364,39 @@ perf_invocation_lint() {
       # option-checked as a `record` line, or the narrower `stat` set would report it with a
       # misleading reason. Default is the STAT set, so a line whose subcommand cannot be
       # identified gets the STRICTER treatment — an unknown must not inherit the looser rule.
+      # THE SUBCOMMAND IS THE TOKEN IMMEDIATELY AFTER `perf`, AND NOTHING ELSE.
+      #
+      # The first version scanned EVERY token for `record`, which is a fail-open: a
+      # `perf stat` line whose WORKLOAD argument happens to be `record` -- e.g.
+      # `perf stat -x, -e cycles -C 0 -F 999 -o /dev/null -- ./mytool record` -- was judged by
+      # the LOOSER record allowlist, so `-F` on a COUNTING line passed silently. VERIFIED
+      # against the pre-fix code: that exact line produced no option finding. A guard that can
+      # be relaxed by the name of an unrelated argument is not a guard.
+      #
+      # Scanning stops at `--` (everything after that belongs to the workload rather than to
+      # perf) and at a comment, for the same reason.
+      #
+      # NO APOSTROPHE ANYWHERE IN THIS COMMENT. The awk program is inside SHELL SINGLE QUOTES,
+      # so one apostrophe terminates the string and truncates the library -- this file already
+      # records that trap elsewhere, and the first version of THIS comment hit it (bash
+      # reported a syntax error on an unrelated awk line, which is how it presents).
       isrec = 0
-      for (i = 1; i <= n; i++) { if (bare(tok[i]) == "record") { isrec = 1; break } }
+      for (i = 1; i <= n; i++) {
+        t = bare(tok[i])
+        if (tok[i] ~ /^#/) break
+        if (t == "--") break
+        if (t == "perf" || t ~ /[/]perf$/) {
+          for (j = i + 1; j <= n; j++) {
+            u = bare(tok[j])
+            if (u == "") continue
+            if (u == "record") isrec = 1
+            break
+          }
+          break
+        }
+        if (t == "record" && i == 1) { isrec = 1; break }
+        if (t == "stat" && i == 1) { isrec = 0; break }
+      }
       for (i = 1; i <= n; i++) {
         if (tok[i] ~ /^#/) break    # trailing comment: prose, not argv
         o = optname(bare(tok[i]))

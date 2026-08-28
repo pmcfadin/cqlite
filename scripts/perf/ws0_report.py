@@ -281,6 +281,7 @@ def build_report(args: argparse.Namespace) -> tuple[dict, list[str]]:
     # is a ratio between two binaries, so which build produced them is not a footnote.
     events = config["events"]
     bin_dir = config["bin_dir"]
+    profile = config["profile"]
     # WHICH SERVER PRODUCED THE MEASURED ROWS (#3272 round 14, F2). Read from the pre-measurement
     # manifest and passed to every Flight arm, which compares it against EVERY rep's recorded
     # `endpoint`. Deliberately NOT a reporter argument, for the reason F1 gave for the whole
@@ -434,6 +435,11 @@ def build_report(args: argparse.Namespace) -> tuple[dict, list[str]]:
         # say which BUILD produced them -- a symbol-bearing profiling build and a stripped
         # release build are otherwise indistinguishable here (#3248).
         "bin_dir": bin_dir,
+        # Whether a SAMPLING PROFILE was attached to these counting windows, and at what
+        # frequency. A profiled run pays observer overhead, so its throughput figures are not
+        # baseline figures -- and nothing else in this document could tell a reader that
+        # (#3248): the same symbol-bearing bin_dir runs both ways.
+        "profile": profile,
         "measurements": [],
     }
 

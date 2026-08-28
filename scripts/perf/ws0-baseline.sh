@@ -476,10 +476,26 @@ if ! _events_err="$(python3 -c '
 import sys
 sys.path.insert(0, sys.argv[1])
 from ws0_validate import Invalid, perf_event_list
+from ws0_collect import REQUIRED_EVENTS
 try:
-    perf_event_list("--events", sys.argv[2])
+    chosen = perf_event_list("--events", sys.argv[2])
 except Invalid as exc:
     print(exc, file=sys.stderr)
+    raise SystemExit(1)
+# THE COLLECTORS REQUIRE THESE UNCONDITIONALLY, so an event list without them completes the
+# WHOLE measurement and only then fails at report time -- "refusing a value after acting on
+# it is not refusing it", the rule this rig states for itself (#3272 round 1 finding 10). The
+# documented clock-only set for the AC4 characterisation is exactly such a list, so this is a
+# live footgun rather than a hypothetical one. Read from ws0_collect.REQUIRED_EVENTS rather
+# than re-listed here: two copies of one requirement is the drift this rig keeps finding.
+# NO APOSTROPHES IN THIS COMMENT -- it sits inside a shell single-quoted python program, so
+# one apostrophe terminates the string. The first version of this comment did exactly that.
+missing = [e for e in REQUIRED_EVENTS if e not in chosen]
+if missing:
+    print("--events omits " + ", ".join(repr(m) for m in missing)
+          + ", which every collector requires. cycles/row and IPC are derived from them, so a"
+          " list without them measures for minutes and then fails at REPORT time. Add them:"
+          " they cost nothing alongside any other events.", file=sys.stderr)
     raise SystemExit(1)
 ' "$HERE" "$EVENTS" 2>&1)"; then
   echo "FATAL: --events is not a usable event list." >&2
@@ -498,6 +514,37 @@ if [[ -n "$PROFILE_OUT" ]]; then
     echo "       A frequency of 0 samples nothing and reads exactly like a quiet profile." >&2
     exit 2
   fi
+fi
+
+# A PROFILE OF A STRIPPED BINARY IS THE SILENT FAILURE THIS FEATURE EXISTS TO AVOID.
+# `[profile.release]` sets `strip = true`, so the default binaries carry ZERO symbols and
+# `perf record` against them exits 0 and yields a confident table of raw addresses. Accepting
+# `--profile-out` with them would produce exactly the #3217-class artifact this issue was
+# funded to stop producing. Checked here rather than trusted: the symbol table is READ.
+if [[ -n "$PROFILE_OUT" ]]; then
+  _prof_bin="${BIN_DIR:-$REPO_ROOT/target/release}"
+  for _b in ws0-scan-bench cqlite-flight flight-loadgen; do
+    # `grep -c`, NOT `grep -q`, AND THE STATUS IS NOT READ FROM THE PIPELINE.
+    #
+    # This driver runs under `set -o pipefail`, and `grep -q` EXITS AS SOON AS IT MATCHES,
+    # which closes the pipe and gives `nm` a SIGPIPE -- so the pipeline reports FAILURE on the
+    # SUCCESS case. The first version of this guard therefore refused every CORRECT input: a
+    # perfsym binary with 2,997 Rust symbols was reported as carrying none, which would have
+    # blocked every legitimate profiling run. A guard that fails closed on correct input is
+    # still a defect, and it is the same family as the rest of this issue -- the observer
+    # (grep exiting early) changed the thing being measured (the producer exit status).
+    _syms=$(nm "$_prof_bin/$_b" 2>/dev/null | grep -c '_RN' || true)
+    if [[ -e "$_prof_bin/$_b" && "${_syms:-0}" -eq 0 ]]; then
+      echo "FATAL: --profile-out was given, but $_prof_bin/$_b carries NO Rust symbols." >&2
+      echo "       A sampling profile of a stripped binary reports raw addresses and attributes" >&2
+      echo "       nothing -- the profiler exits 0 and the failure is silent, which is the" >&2
+      echo "       exact class this issue was funded to stop producing." >&2
+      echo "       Build a symbol-bearing profile and point --bin-dir at it:" >&2
+      echo "         cargo build --profile perfsym -p ws0-corpus-gen -p cqlite-flight -p flight-loadgen" >&2
+      echo "         ... --bin-dir \$PWD/target/perfsym --profile-out <dir>" >&2
+      exit 2
+    fi
+  done
 fi
 
 if [[ -n "$BIN_DIR" && ! -d "$BIN_DIR" ]]; then
@@ -620,6 +667,17 @@ BIN="${BIN_DIR:-$REPO_ROOT/target/release}"
 # run and a release run become indistinguishable in results.json. This variable is the only
 # record of that distinction, so it is taken before the reassignment can occur.
 BIN_DIR_RECORDED="$BIN"
+# WHETHER A SAMPLING PROFILE WAS ATTACHED, and at what frequency (#3248, roborev job 60
+# finding 1). Recorded because `bin_dir` CANNOT establish it: the same symbol-bearing build
+# runs with and without `--profile-out`, so a committed artifact claiming bin_dir
+# distinguishes a profiled run was WRONG. It matters because a profiled run pays measurable
+# observer overhead (measured: 1.6-4.3% on rows/s), so its throughput figures must never be
+# read as a baseline -- and results.json is where a reader looks to find that out.
+if [[ -n "$PROFILE_OUT" ]]; then
+  PROFILE_RECORDED="on freq=$PROFILE_FREQ"
+else
+  PROFILE_RECORDED="off"
+fi
 # Existence was already refused above the --validate-args-only boundary; this only reports it.
 if [[ -n "$BIN_DIR" ]]; then
   echo "measured bin source: $BIN_DIR (--bin-dir; implies --no-build)"
@@ -720,6 +778,7 @@ WS0_CFG_FLIGHT_ENDPOINT="$FLIGHT_ENDPOINT" \
 WS0_CFG_BASELINE_MODE="$BASELINE_MODE" \
 WS0_CFG_EVENTS="$EVENTS" \
 WS0_CFG_BIN_DIR="$BIN_DIR_RECORDED" \
+WS0_CFG_PROFILE="$PROFILE_RECORDED" \
 python3 -c '
 import os, pathlib, sys
 sys.path.insert(0, sys.argv[1])
@@ -1001,8 +1060,21 @@ perf_stat_c() {
     # the profile silently under-represents whatever runs first.
     sleep 0.3
   fi
-  perf stat -x, -e "$EVENTS" -C "$SERVER_CPUS" -o "$outfile" -- "$@"
-  local _rc=$?
+  # `|| _rc=$?`, NOT a bare call followed by `$?`, AND THIS IS A RESOURCE-LEAK FIX.
+  #
+  # This driver runs `set -euo pipefail`, and every `perf_stat_c` call site in
+  # lib-measure.sh (:150, :156, :250) is BARE -- not in a condition, not followed by `||`.
+  # So `set -e` is live inside this function, and before the profiling hook existed that was
+  # harmless: `perf stat` was the LAST command, so its status simply became the function
+  # status. Adding cleanup after it changed that: a failing `perf stat` now exits the shell
+  # AT THAT LINE, so the SIGINT below never runs and `perf record` is ORPHANED -- still
+  # sampling, against `sleep 86400`, for 24 hours. VERIFIED by execution: with a bare call
+  # under `set -e` the cleanup line does not run at all.
+  #
+  # Testing the status with `||` suppresses `set -e` for this command only, so the cleanup
+  # always runs and the measured status is still propagated by `return $_rc` below.
+  local _rc=0
+  perf stat -x, -e "$EVENTS" -C "$SERVER_CPUS" -o "$outfile" -- "$@" || _rc=$?
   if [[ -n "$_prof_pid" ]]; then
     # SIGINT, not SIGKILL: perf finalises perf.data on INT and leaves an unreadable stub on KILL.
     kill -INT "$_prof_pid" 2>/dev/null || true
@@ -1045,6 +1117,13 @@ if struct.unpack_from("<Q", head, 48)[0] == 0:
       echo "       checked rather than assumed: the failure is invisible on the filesystem" >&2
       echo "       and surfaces only when someone tries to read the profile." >&2
       echo "       This is a profiling-hook defect, not a measurement result." >&2
+      # If the MEASUREMENT also failed, propagate THAT status rather than masking it with
+      # this one: the measurement failure is the more actionable of the two, and returning a
+      # fixed 2 would hide it.
+      if [[ "$_rc" -ne 0 ]]; then
+        echo "       (the measured command ALSO failed, status $_rc — reporting that)" >&2
+        return "$_rc"
+      fi
       return 2
     fi
   fi

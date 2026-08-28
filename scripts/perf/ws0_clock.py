@@ -52,6 +52,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import sys
 from typing import Dict, Optional
 
@@ -76,6 +77,33 @@ class Refusal(Exception):
         super().__init__(f"{cause}: {detail}")
         self.cause = cause
         self.detail = detail
+
+
+def _finite_float(label: str, raw: object) -> float:
+    """Parse a float that will be COMPARED, refusing non-finite values.
+
+    WHY THIS IS NOT DEFENSIVE STYLE. Every threshold in this file is enforced by a `>`
+    comparison, and **every comparison with NaN is False** — so a single non-finite value
+    silently disables the guard it is compared against. Demonstrated on the pre-fix code:
+    `--occupancy-tolerance nan` made `nan > 0.02` False (so the may-only-tighten check
+    passed) and then `spread > nan` False (so the mismatch check passed), disabling the
+    entire occupancy guard with one argument. An escape hatch this file's own docstring
+    claims does not exist. Infinity is refused for the same reason in the other direction.
+    """
+    try:
+        value = float(raw)
+    except (TypeError, ValueError) as exc:
+        raise Refusal(
+            "NON_NUMERIC_VALUE", f"{label} is {raw!r}, which is not a number"
+        ) from exc
+    if not math.isfinite(value):
+        raise Refusal(
+            "NON_FINITE_VALUE",
+            f"{label} is {value!r}. Every threshold here is enforced by a `>` comparison and"
+            " every comparison with NaN is False, so a non-finite value does not relax a"
+            " guard — it DISABLES it.",
+        )
+    return value
 
 
 def _exact_int(label: str, raw: str) -> int:
@@ -126,12 +154,18 @@ def parse_perf_csv(text: str, *, min_enabled_pct: float) -> Dict[str, Dict[str, 
         count = _exact_int(name, raw_count)
         enabled_ns = _exact_int(f"{name} (enabled_ns)", raw_enabled)
         try:
-            enabled_pct = float(raw_pct)
-        except ValueError as exc:
+            enabled_pct = _finite_float(f"event {name!r} enabled-percentage", raw_pct)
+        except Refusal as exc:
             raise Refusal(
                 "PERF_ENABLED_PCT_UNPARSEABLE",
-                f"event {name!r} enabled-percentage {raw_pct!r} is not a number",
-            ) from exc
+                f"event {name!r} enabled-percentage {raw_pct!r} is unusable: {exc.detail}",
+            ) from None
+        if not 0.0 <= enabled_pct <= 100.0:
+            raise Refusal(
+                "PERF_ENABLED_PCT_OUT_OF_RANGE",
+                f"event {name!r} enabled-percentage is {enabled_pct}, outside 0..100 — a"
+                " percentage outside its own range is a corrupt artifact, not a measurement",
+            )
 
         if enabled_ns <= 0:
             raise Refusal(
@@ -293,6 +327,24 @@ def main(argv: Optional[list] = None) -> int:
     ap.add_argument("--json-out", default=None, help="write the JSON record here")
     args = ap.parse_args(argv)
 
+    # Finiteness FIRST: a NaN tolerance passes the may-only-tighten check below (because
+    # `nan > x` is False) and then passes the mismatch check too, disabling the guard.
+    if not math.isfinite(args.occupancy_tolerance) or args.occupancy_tolerance <= 0.0:
+        print(
+            f"ws0_clock: REFUSED: OCCUPANCY_TOLERANCE_NOT_FINITE:"
+            f" {args.occupancy_tolerance!r} is not a finite positive number. A non-finite"
+            " tolerance does not relax the occupancy check, it DISABLES it: every comparison"
+            " with NaN is False.",
+            file=sys.stderr,
+        )
+        return 2
+    if args.window_over_lifetime is not None and not math.isfinite(args.window_over_lifetime):
+        print(
+            "ws0_clock: REFUSED: WINDOW_RATIO_NOT_FINITE: --window-over-lifetime must be"
+            " finite; it is recorded in the artifact and a non-finite value is not a ratio.",
+            file=sys.stderr,
+        )
+        return 2
     if args.occupancy_tolerance > DEFAULT_OCCUPANCY_TOLERANCE:
         # The knob exists to make the check STRICTER, never weaker. A looser tolerance is
         # the escape hatch this tool exists to not have.

@@ -56,7 +56,9 @@ artifact and a reader can judge it instead of trusting it. They may only be made
 from __future__ import annotations
 
 import argparse
+import datetime
 import json
+import math
 import pathlib
 import sys
 from typing import Dict, List, Optional
@@ -75,6 +77,14 @@ COMPETING_CMDLINE = ("agent-gate.sh", "cargo build", "cargo test", "cargo nextes
 DEFAULT_MAX_LOAD1 = 2.0
 DEFAULT_MAX_LOAD1_MOVEMENT = 0.5
 
+# The sampler writes every 10 s, so three consecutive missed samples is the coverage bound.
+# WHY A BOUND IS NEEDED AT ALL: without it, a timeseries containing ONE in-range line was
+# treated as covering the whole window, so a sampler that died a minute into a nine-minute
+# measurement would certify eight unobserved minutes as quiescent. That is the vacuous pass
+# this gate exists to prevent, inside the gate itself.
+SAMPLER_CADENCE_S = 10.0
+MAX_SAMPLE_GAP_S = 30.0
+
 
 class NotQuiescent(Exception):
     """A named refusal. `cause` is a stable token so a test can assert it."""
@@ -83,6 +93,43 @@ class NotQuiescent(Exception):
         super().__init__(f"{cause}: {detail}")
         self.cause = cause
         self.detail = detail
+
+
+def _finite(label: str, raw: object) -> float:
+    """Parse a float that will be COMPARED, refusing non-finite values.
+
+    Every threshold in this file is enforced by a `>` comparison, and every comparison with
+    NaN is False — so one non-finite value does not relax a guard, it DISABLES it. Verified
+    against the pre-fix code: `--max-load1 nan` made both the may-only-tighten check and the
+    level check pass.
+    """
+    try:
+        value = float(raw)
+    except (TypeError, ValueError) as exc:
+        raise NotQuiescent(
+            "QUIESCENCE_VALUE_NON_NUMERIC", f"{label} is {raw!r}, which is not a number"
+        ) from exc
+    if not math.isfinite(value):
+        raise NotQuiescent(
+            "QUIESCENCE_VALUE_NON_FINITE",
+            f"{label} is {value!r}; a non-finite value disables every comparison it takes"
+            " part in rather than relaxing it",
+        )
+    return value
+
+
+def _parse_ts(label: str, raw: object) -> datetime.datetime:
+    """Parse the sampler's ISO-8601 `...Z` instant. An unparseable one is fatal."""
+    if not isinstance(raw, str) or not raw:
+        raise NotQuiescent(
+            "QUIESCENCE_TIMESERIES_MALFORMED", f"{label} has no usable ts field: {raw!r}"
+        )
+    try:
+        return datetime.datetime.fromisoformat(raw.replace("Z", "+00:00"))
+    except ValueError as exc:
+        raise NotQuiescent(
+            "QUIESCENCE_TIMESERIES_MALFORMED", f"{label} ts {raw!r} is not ISO-8601"
+        ) from exc
 
 
 def _read_loadavg() -> Dict[str, float]:
@@ -169,6 +216,33 @@ def window_census_clean(timeseries: str, start: str, end: str) -> Dict[str, obje
             f"no sampler lines fall in [{start}, {end}] — the window is UNCOVERED, which"
             " reads exactly like a clean one. An absent measurement is not a pass.",
         )
+    # COVERAGE: the window must actually be OBSERVED, not merely intersected. A non-empty
+    # sample set is not coverage — see MAX_SAMPLE_GAP_S.
+    t_start = _parse_ts("--window-start", start)
+    t_end = _parse_ts("--window-end", end)
+    if t_end <= t_start:
+        raise NotQuiescent(
+            "QUIESCENCE_WINDOW_INVALID",
+            f"window end {end} is not after start {start}",
+        )
+    instants = sorted(_parse_ts(f"{timeseries} sample", r.get("ts")) for r in rows)
+    gaps = [("start", (instants[0] - t_start).total_seconds())]
+    gaps += [
+        (f"between {instants[i].isoformat()} and {instants[i + 1].isoformat()}",
+         (instants[i + 1] - instants[i]).total_seconds())
+        for i in range(len(instants) - 1)
+    ]
+    gaps.append(("end", (t_end - instants[-1]).total_seconds()))
+    worst = max(gaps, key=lambda g: g[1])
+    if worst[1] > MAX_SAMPLE_GAP_S:
+        raise NotQuiescent(
+            "QUIESCENCE_WINDOW_UNDERCOVERED",
+            f"the largest unobserved stretch inside [{start}, {end}] is {worst[1]:.0f}s"
+            f" ({worst[0]}), over the {MAX_SAMPLE_GAP_S:.0f}s bound at a"
+            f" {SAMPLER_CADENCE_S:.0f}s cadence. {len(rows)} sample(s) INTERSECT this window"
+            " but do not COVER it: a sampler that stopped early would otherwise certify the"
+            " unobserved remainder as quiescent.",
+        )
     dirty = [r for r in rows
              if r.get("rustc") or r.get("cargo") or r.get("gate")]
     if dirty:
@@ -182,6 +256,8 @@ def window_census_clean(timeseries: str, start: str, end: str) -> Dict[str, obje
     return {
         "samples": len(rows),
         "competing_samples": 0,
+        "coverage_largest_gap_s": worst[1],
+        "coverage_gap_bound_s": MAX_SAMPLE_GAP_S,
         "load1_min": min(loads) if loads else None,
         "load1_max": max(loads) if loads else None,
         "load1_mean": (sum(loads) / len(loads)) if loads else None,
@@ -245,8 +321,8 @@ def judge(before: Dict[str, object], after: Dict[str, object], *,
                 " FREQUENCY even with only 2 logical CPUs pinned (#3299's measured control),"
                 " so this is refused on presence, not on load.",
             )
-    l1_before = before["load"]["load1"]
-    l1_after = after["load"]["load1"]
+    l1_before = _finite("the before sample's load1", before["load"]["load1"])
+    l1_after = _finite("the after sample's load1", after["load"]["load1"])
     # BEFORE only — see the docstring. This is the state the window was ENTERED in.
     if l1_before > max_load1:
         raise NotQuiescent(
@@ -327,6 +403,17 @@ def main(argv: Optional[list] = None) -> int:
 
     # The knobs may only TIGHTEN. A looser threshold is the escape hatch a measurement guard
     # must not have: it can only ever buy a confident wrong number.
+    # Finiteness FIRST: a NaN threshold passes the may-only-tighten checks below (because
+    # `nan > x` is False) and then passes the level/movement checks too.
+    for name, value, floor in (("--max-load1", args.max_load1, DEFAULT_MAX_LOAD1),
+                               ("--max-load1-movement", args.max_load1_movement,
+                                DEFAULT_MAX_LOAD1_MOVEMENT)):
+        if not math.isfinite(value) or value <= 0.0:
+            print(f"ws0_quiescence: REFUSED: QUIESCENCE_THRESHOLD_NOT_FINITE: {name}"
+                  f" {value!r} is not a finite positive number. A non-finite threshold does"
+                  " not relax this guard, it DISABLES it: every comparison with NaN is False.",
+                  file=sys.stderr)
+            return 2
     if args.max_load1 > DEFAULT_MAX_LOAD1:
         print(f"ws0_quiescence: REFUSED: QUIESCENCE_THRESHOLD_LOOSENED: --max-load1"
               f" {args.max_load1} exceeds the maximum {DEFAULT_MAX_LOAD1}; this knob may"

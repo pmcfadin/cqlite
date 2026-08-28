@@ -35,6 +35,7 @@ identity is established.
 from __future__ import annotations
 
 import json
+import re
 import pathlib
 
 from ws0_canonical_corpus import MODE_BASELINE, MODE_NON_BASELINE
@@ -347,6 +348,14 @@ MANIFEST_CONFIG_DISPOSITION: dict[str, str] = {
               " ws0_validate.read_perf_counters SUMS lines by event name, so `-e cycles,cycles`"
               " would emit two `cycles` rows and report DOUBLE the true count as an ordinary"
               " integer, with every derived figure inheriting the factor of two",
+    "profile": "validated as either the literal `off` or `on freq=<N>` with a positive N."
+               " Recorded because `bin_dir` CANNOT establish whether a sampling profile was"
+               " attached -- the same symbol-bearing build runs with and without"
+               " `--profile-out`, so a claim that bin_dir distinguishes a profiled run was"
+               " simply wrong (#3248, roborev job 60 finding 1). It matters because a profiled"
+               " run pays measurable observer overhead (1.6-4.3% on rows/s as measured), so its"
+               " throughput figures must never be read as a baseline, and results.json is where"
+               " a reader looks to discover that",
     "bin_dir": "validated as a non-empty recorded string, and — the substance — the directory"
                " the measured binaries were taken FROM, which #3248 needs because"
                " [profile.release] sets strip = true and a stripped binary cannot be attributed"
@@ -384,6 +393,7 @@ _MANIFEST_READER_KEYS = (
     "baseline_mode",
     "events",
     "bin_dir",
+    "profile",
 )
 
 # AT IMPORT, both directions, so a half-wired field cannot ship (the pattern
@@ -554,6 +564,17 @@ def session_manifest_config(
     # duplicate case matters because `read_perf_counters` sums by event name and would silently
     # double a repeated counter.
     out["events"] = perf_event_list(f"{p} `config.events`", config["events"])
+    prof = str(config["profile"])
+    if prof != "off":
+        m = re.fullmatch(r"on freq=(\d+)", prof)
+        if not m or int(m.group(1)) <= 0:
+            raise Invalid(
+                f"{p} `config.profile` is {prof!r}, which is neither `off` nor `on freq=<N>`"
+                " with a positive N. A closed grammar, not a recorded string: an unrecognised"
+                " value would otherwise reach the report as a claim about whether these"
+                " figures carry profiler overhead."
+            )
+    out["profile"] = prof
     for key in ("server_cpus", "client_cpus", "step_duration", "bin_dir"):
         value = config[key]
         if not isinstance(value, str) or not value.strip():

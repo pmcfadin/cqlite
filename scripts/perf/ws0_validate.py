@@ -556,7 +556,20 @@ def read_perf_counters(
         # percentage is an ERROR, never a permissive default, because "we could not tell
         # whether this was scaled" and "this was not scaled" are different states and only
         # one of them licenses using the number.
-        if len(fields) > 4:
+        # FIELD 4 IS REQUIRED, NOT OPTIONAL. The first version of this guard ran only
+        # `if len(fields) > 4`, so a truncated row such as `100,,cycles` SKIPPED the
+        # enabled-percentage check entirely — a fail-open inside the guard added to close a
+        # fail-open. `perf stat -x,` always emits the column for a counter row, so its
+        # absence is a corrupt artifact rather than an older format to tolerate.
+        if len(fields) <= 4:
+            raise Invalid(
+                f"{label}: {path.name} line {lineno} event {event!r} has only"
+                f" {len(fields)} field(s); `perf stat -x,` emits at least five for a counter"
+                " row (value, unit, event, enabled_ns, enabled_pct). Without the"
+                " enabled-percentage there is no way to establish whether perf SCALED this"
+                " count for multiplexing, and an unverifiable count is not a usable one."
+            )
+        if True:
             raw_pct = fields[4].strip()
             if raw_pct in PERF_NOT_A_VALUE:
                 raise Invalid(
@@ -573,6 +586,22 @@ def read_perf_counters(
                     f" unparseable enabled-percentage {raw_pct!r}; cannot establish"
                     " whether the count was scaled for multiplexing."
                 ) from None
+            # NON-FINITE AND OUT-OF-RANGE FIRST. `nan < PERF_MIN_ENABLED_PCT` is False, so a
+            # NaN percentage passed the multiplexing check below — a second fail-open in the
+            # same guard, from the same cause as the missing field: the check was written as
+            # "is it BAD" rather than "is it AFFIRMATIVELY good".
+            if not math.isfinite(pct):
+                raise Invalid(
+                    f"{label}: {path.name} line {lineno} event {event!r} has a non-finite"
+                    f" enabled-percentage {raw_pct!r}. Every comparison with NaN is False, so"
+                    " this would not relax the multiplexing check — it would DISABLE it."
+                )
+            if not 0.0 <= pct <= 100.0:
+                raise Invalid(
+                    f"{label}: {path.name} line {lineno} event {event!r} reports an"
+                    f" enabled-percentage of {pct}, outside 0..100. A percentage outside its"
+                    " own range is a corrupt artifact, not a measurement."
+                )
             if pct < PERF_MIN_ENABLED_PCT:
                 raise Invalid(
                     f"{label}: {path.name} line {lineno} event {event!r} was enabled for"

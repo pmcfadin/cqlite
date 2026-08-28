@@ -6003,6 +6003,22 @@ run_tooling_tests() {
     return 0
   fi
 
+  # ws0 QUIESCENCE guards (#3248) — the box-quiescence gate for a measurement rep.
+  # Wired here because roborev job 60 finding 7 caught that it was NOT: the clock suite was
+  # added and this one was not, so 19 checks sat in the tree with no standing protection —
+  # a guard that exists and never runs, which is this issue's own subject matter.
+  echo ">>> [$name] bash scripts/tests/test_ws0_quiescence_guards.sh"
+  if ! bash "$REPO_ROOT/scripts/tests/test_ws0_quiescence_guards.sh" >>"$log" 2>&1; then
+    status=FAIL
+    echo "--- [$name] FAILED (ws0 box-quiescence guards); last 40 lines of $log ---"
+    tail -40 "$log"
+    echo "--- end of $name output ---"
+    end=$(date +%s)
+    record_result "$name" "$status" "$((end - start))"
+    echo ">>> [$name] $status ($((end - start))s)"
+    return 0
+  fi
+
   # ws0 CELL-VOLUME guards — "rows were checked and CELLS were not" (#3272 round 17).
   # Split out of the reporter suite above under the campsite rule (that file reached 1602 lines
   # against the ~1500 test target) along a SUBJECT seam, and it must be wired here or the 11

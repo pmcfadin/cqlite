@@ -32,15 +32,37 @@ def classify(sym, dso):
     return "unclassified"
 
 def load(path):
-    out = subprocess.run(["perf","report","-i",path,"--stdio","--no-children",
-                          "--percent-limit","0.01","-q"],
-                         capture_output=True, text=True).stdout
+    # THE EXIT STATUS IS READ, AND NO ROWS IS AN ERROR.
+    #
+    # The first version took `.stdout` and ignored the return code, so a failed `perf report`
+    # produced an empty string, which parsed to zero rows, which printed a plausible-looking
+    # report attributing 0.00% to everything. That is the silent-instrument shape this whole
+    # issue is about, in the tool that produced its headline numbers -- and it nearly bit:
+    # an early read of an arm returned 0 symbols because the profile was still being written,
+    # and it was caught only because 0.00% across every bucket was absurd on its face.
+    proc = subprocess.run(["perf","report","-i",path,"--stdio","--no-children",
+                           "--percent-limit","0.01","-q"],
+                          capture_output=True, text=True)
+    if proc.returncode != 0:
+        raise SystemExit(
+            f"aggregate-profiles: perf report failed on {path} (exit {proc.returncode}).\n"
+            f"  stderr: {proc.stderr.strip()[:400]}\n"
+            "  An unreadable profile is not an empty one; refusing rather than reporting 0%."
+        )
+    out = proc.stdout
     rows=[]
     for line in out.splitlines():
         m = re.match(r'\s*([\d.]+)%\s+(\S+)\s+(\S+)\s+\[[.k]\]\s+(.*)', line)
         if m:
             pct, comm, dso, sym = float(m.group(1)), m.group(2), m.group(3), m.group(4).strip()
             rows.append((pct, comm, dso, sym))
+    if not rows:
+        raise SystemExit(
+            f"aggregate-profiles: {path} yielded NO parsed symbol rows. perf exited 0, so the"
+            " file is readable, but a profile with no attributable samples is not a 0%"
+            " attribution -- it is an unusable capture (an unfinalised perf.data, a stripped"
+            " binary, or a window that sampled nothing). Refusing."
+        )
     return rows
 
 def summarize(label, path):
