@@ -2441,6 +2441,89 @@ running 12 tests
 test result: ok. 12 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out'
 fi
 
+# --- 26. #1699: ONE source set per target (module closure), shared by all consumers ------
+#
+# roborev round-12. Rounds 11 and 12 were the same shape as round 8: I changed where the data
+# comes from and left a consumer reading the old thing. Round 12 was explicit about the cost —
+# discovery looked at the module tree while the POLARITY scan and the CENSUS still read only
+# the root file, so a positive gate in a child module made a target ALLOWED-ZERO (excused from
+# the zero-tests guard) and co-required sites in that child were absent from the census. Both
+# silent. So the fix is one source set, computed once, read by everything.
+cl_h="$tmp/1699-closure.sh"
+awk '/^_rust_module_closure\(\) \{/,/^\}/' "$GATE" > "$cl_h"
+if [ ! -s "$cl_h" ]; then
+  bad "1699-closure-extract: could not extract _rust_module_closure — extraction broke, so these asserts would pass vacuously"
+else
+  ok "1699-closure-extract: extracted _rust_module_closure from the real script"
+  # shellcheck disable=SC1090
+  . "$cl_h"
+  cl_root="$tmp/1699-cl"
+  rm -rf "$cl_root"; mkdir -p "$cl_root/tests/child" "$cl_root/tests/common" "$cl_root/elsewhere"
+  # A flat target root whose gated test lives ONLY in a sibling module (the round-11/12 case)
+  cat > "$cl_root/tests/flat.rs" <<'CLF'
+mod common;
+#[path = "../elsewhere/mapped.rs"]
+mod mapped;
+#[test]
+fn root_has_no_gate() {}
+CLF
+  cat > "$cl_root/tests/common/mod.rs" <<'CLF'
+mod deeper;
+#[cfg(all(feature = "legacy-heuristics", feature = "absent-child"))]
+#[test]
+fn gated_in_child_module() {}
+CLF
+  printf '#[test]\nfn deep() {}\n' > "$cl_root/tests/common/deeper.rs"
+  printf '#[test]\nfn mapped_test() {}\n' > "$cl_root/elsewhere/mapped.rs"
+  cl_out=$(_rust_module_closure "$cl_root/tests/flat.rs" 2>"$tmp/1699-cl-unres.txt")
+  cl_n=$(printf '%s' "$cl_out" | grep -c . || true)
+  # root + common/mod.rs + common/deeper.rs + elsewhere/mapped.rs = 4
+  if [ "$cl_n" = "4" ]; then
+    ok "1699-closure-reach: the closure reaches mod NAME; (resolved as common/mod.rs), a transitive child, and a #[path]-mapped file outside the tests dir"
+  else
+    bad "1699-closure-reach: expected 4 reachable sources, got $cl_n — a module layout is being missed, and every consumer of an incomplete set fails in the SILENT direction"
+  fi
+  if [ ! -s "$tmp/1699-cl-unres.txt" ]; then
+    ok "1699-closure-resolves: no spurious UNRESOLVED report on a standard layout (a #[path] mod must not also be name-resolved)"
+  else
+    bad "1699-closure-resolves: reported UNRESOLVED on a resolvable layout — that would FAIL the lane spuriously: $(tr '\n' ' ' < "$tmp/1699-cl-unres.txt")"
+  fi
+  # An UNRESOLVED mod must be reported, because an incomplete set is silently permissive.
+  printf 'mod nowhere_to_be_found;\n' > "$cl_root/tests/broken.rs"
+  _rust_module_closure "$cl_root/tests/broken.rs" >/dev/null 2>"$tmp/1699-cl-unres2.txt"
+  if grep -q 'UNRESOLVED nowhere_to_be_found' "$tmp/1699-cl-unres2.txt"; then
+    ok "1699-closure-unresolved: an unresolvable mod is REPORTED (the lane fails closed on it)"
+  else
+    bad "1699-closure-unresolved: an unresolvable mod is silently ignored — the source set would be incomplete and the polarity scan would excuse a gated target"
+  fi
+  # And the consumers must actually read it, not just be handed it.
+  if [ -s "$lh_code" ]; then
+    if [ "$(grep -cE '_mt_closure' "$lh_code")" -ge 3 ]; then
+      ok "1699-closure-shared: the closure feeds membership, polarity AND the census (>=3 uses)"
+    else
+      bad "1699-closure-shared: fewer than 3 uses of the shared source set — a consumer is back to reading the root file alone, which is exactly the round-12 defect"
+    fi
+    if [ "$(grep -cE 'UNRESOLVED|_mt_unres' "$lh_code")" -gt 0 ]; then
+      ok "1699-closure-failclosed: the lane fails closed on an unresolved module tree"
+    else
+      bad "1699-closure-failclosed: the lane no longer fails on an unresolved module tree — an incomplete source set is silently permissive in all three consumers"
+    fi
+  fi
+fi
+
+# --- 27. #1699: _deny_warnings APPENDS to an inherited plain RUSTFLAGS ------------------
+#
+# roborev round-12 (Medium): the encoded branch preserved the operator's flags while the
+# plain branch REPLACED them — so target/sanitizer/codegen flags would be dropped for THESE
+# LANES ONLY, compiling something subtly different from every other component in the run.
+if [ -s "$dw_body" ]; then
+  if [ "$(grep -cE 'RUSTFLAGS="\$\{RUSTFLAGS:\+\$RUSTFLAGS \}-D warnings"' "$dw_body")" -gt 0 ]; then
+    ok "1699-r12-rustflags-append: the plain branch APPENDS -D warnings to an inherited RUSTFLAGS"
+  else
+    bad "1699-r12-rustflags-append: the plain branch replaces RUSTFLAGS instead of appending — an asymmetry with the encoded branch that silently drops the operator's flags for these lanes only"
+  fi
+fi
+
 echo "----"
 echo "passed: $PASS  failed: $FAIL"
 [ "$FAIL" -eq 0 ]

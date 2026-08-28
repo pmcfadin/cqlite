@@ -6166,6 +6166,92 @@ for p in d.get("packages", []):
   printf '%s\n' "$out"
 }
 
+# _rust_module_closure <root-file> — every source file reachable from a Rust crate/module
+# root, by standard `mod NAME;` resolution plus `#[path = "..."]`. Unresolved `mod`
+# declarations go to stderr as `UNRESOLVED <name> <from>`; the caller FAILs on them.
+#
+# WHY THIS EXISTS (roborev rounds 11 and 12). A cargo test target is a MODULE TREE, not one
+# file. Round 11 fixed discovery to look past the root and I approximated the tree with a
+# directory guess; round 12 showed that guess misses `#[path = "..."]` modules and modules
+# beside a flat root, AND — the part that matters — that the polarity scan and the census
+# were still reading only the root file. So a positive gate living in a child module made a
+# target ALLOWED-ZERO (excused from the zero-tests guard), and co-required sites in that
+# child were absent from the census. Both silent.
+#
+# THIS IS THE THIRD ROUND IN THE SAME SHAPE — change where the data comes from, forget a
+# consumer — so the fix is structural rather than another instance: ONE source set is
+# computed per target here, and discovery, polarity and the census all read THAT SET. There
+# is no longer a second place that decides which files a target consists of.
+#
+# It is not a Rust parser, and standard layouts are what it models: a crate root or `mod.rs`
+# resolves children in its own directory, a plain `dir/NAME.rs` module resolves children
+# under `dir/NAME/`, and `#[path]` resolves relative to the declaring file. An
+# UNRESOLVED `mod` is a FAIL, not a shrug: it means the source set is incomplete, and every
+# consumer of an incomplete set fails in the SILENT direction. Measured on this corpus:
+# 0 unresolved across all 364 cqlite-core test targets, so failing closed costs nothing
+# today and stays loud if a layout appears that this does not model.
+_rust_module_closure() { # <root-file>  -> one path per line; unresolved mods to stderr
+  # ARRAY QUEUE, not newline-delimited string surgery. The first cut used
+  # `${queue%%<newline>*}` and produced a line beginning with `}`, which truncated the
+  # `awk '/^_rust_module_closure/,/^\}/'` extraction the self-test uses — so the function
+  # could not be behaviourally tested at all, and the self-test reported a bogus 0 sources.
+  # A guard that cannot be extracted cannot be tested, so the shape matters here.
+  local root="$1"
+  local -a queue=("$root")
+  local seen=" " out="" f dir base childdir kind val
+  while [ "${#queue[@]}" -gt 0 ]; do
+    f="${queue[0]}"
+    queue=(${queue[@]+"${queue[@]:1}"})
+    [ -n "$f" ] || continue
+    case "$seen" in *" $f "*) continue ;; esac
+    seen="$seen$f "
+    [ -r "$f" ] || continue
+    out="$out$f
+"
+    dir="${f%/*}"; base="${f##*/}"
+    # Where do THIS file's child modules live? A crate root or mod.rs resolves children in
+    # its own directory; a plain `dir/NAME.rs` module resolves them under `dir/NAME/`.
+    case "$base" in
+      mod.rs|main.rs|lib.rs) childdir="$dir" ;;
+      *) if [ "$f" = "$root" ]; then childdir="$dir"; else childdir="${f%.rs}"; fi ;;
+    esac
+    while IFS="$(printf '\t')" read -r kind val; do
+      [ -n "$kind" ] || continue
+      if [ "$kind" = P ]; then
+        # #[path] resolves relative to the declaring file's directory.
+        case "$val" in
+          /*) queue+=("$val") ;;
+          *)  queue+=("$dir/$val") ;;
+        esac
+      elif [ -r "$childdir/$val.rs" ]; then
+        queue+=("$childdir/$val.rs")
+      elif [ -r "$childdir/$val/mod.rs" ]; then
+        queue+=("$childdir/$val/mod.rs")
+      else
+        # REPORTED, never shrugged off: an incomplete source set is silently permissive in
+        # every consumer (membership, polarity, census). The caller FAILs on this.
+        echo "UNRESOLVED $val $f" >&2
+      fi
+    done <<EOF
+$(awk '
+  /#\[[[:space:]]*path[[:space:]]*=/ {
+    if (match($0, /"[^"]+"/)) { p = substr($0, RSTART+1, RLENGTH-2); haspath = 1 }
+    next
+  }
+  /^[[:space:]]*(pub[[:space:]]+)?mod[[:space:]]+[A-Za-z_][A-Za-z0-9_]*[[:space:]]*;/ {
+    n = $0
+    sub(/^[[:space:]]*(pub[[:space:]]+)?mod[[:space:]]+/, "", n)
+    sub(/[[:space:]]*;.*$/, "", n)
+    if (haspath) { printf "P\t%s\n", p; haspath = 0 } else { printf "M\t%s\n", n }
+    next
+  }
+  { if ($0 !~ /^[[:space:]]*$/ && $0 !~ /^[[:space:]]*\/\//) haspath = 0 }
+' "$f")
+EOF
+  done
+  printf '%s' "$out"
+}
+
 run_legacy_heuristics() {
   local name=legacy-heuristics
   if [ -n "$ONLY" ] && ! grep -qw "$name" <<<"${ONLY//,/ }"; then
@@ -6223,65 +6309,41 @@ run_legacy_heuristics() {
     f="$_mt_src"
     # Included when EITHER cargo gates the target on the feature (the arm the glob could
     # not see) OR its own source carries a cfg reference to it.
+    # ONE source set per target, shared by membership, polarity and the census (round 12).
+    local _mt_closure _mt_unres
+    _mt_unres="$LOG_DIR/legacy-unresolved-$_mt_name.txt"
+    _mt_closure=$(_rust_module_closure "$f" 2>"$_mt_unres")
+    if [ -s "$_mt_unres" ]; then
+      status=FAIL
+      {
+        echo "[$name] FAIL-CLOSED: could not resolve the module tree of test target"
+        echo "        '$_mt_name'. An incomplete source set makes membership, the"
+        echo "        allowed-zero polarity scan and the co-required census all fail in the"
+        echo "        SILENT direction, so this is a FAIL rather than a partial scan:"
+        sed 's/^/          /' "$_mt_unres"
+      } | tee "$log"
+      end=$(date +%s)
+      record_result "$name" "$status" "$((end - start))"
+      echo ">>> [$name] $status ($((end - start))s)"
+      return 0
+    fi
     if [ "$_mt_how" != "manifest" ]; then
       [ -f "$f" ] || continue
-      # THE TARGET IS A MODULE TREE, NOT ONE FILE (roborev round-11 finding, Medium). A
-      # target root may declare `mod helper;`, resolving to a SIBLING DIRECTORY named after
-      # the root stem — `tests/foo.rs` + `tests/foo/`, or the directory-style
-      # `tests/foo/main.rs` + everything beside it. A gated test living only in a child
-      # module would be missed if the root itself never names the feature.
-      #
-      # Scanned with a DIRECTORY GLOB, not by resolving `mod` declarations: resolving them
-      # needs Rust-aware tooling, and this is a bash gate component — the same limit that
-      # descoped the census classifier in round 10. The glob is an over-approximation (it
-      # reads files the target may not actually include), and that direction is deliberate:
-      # over-inclusion adds a target to an executing lane, which is at worst wasted work,
-      # while under-inclusion silently drops coverage. Recorded here so the next reader does
-      # not "tighten" it into the failing direction.
-      _mt_dir="${f%.rs}"                       # tests/foo.rs -> tests/foo/
-      [ -d "$_mt_dir" ] || _mt_dir="${f%/*}"   # directory-style: use the containing dir
-      if [ "$(grep -cE "$cfg_site" "$f")" -eq 0 ]; then
-        # Only consult the module tree when the root is silent, and never let the
-        # containing `tests/` directory itself stand in for a module tree (that would pull
-        # in every sibling target).
-        case "$_mt_dir" in
-          */tests) continue ;;
-        esac
-        [ -d "$_mt_dir" ] || continue
-        [ "$(grep -rlE "$cfg_site" "$_mt_dir" 2>/dev/null | wc -l)" -gt 0 ] || continue
-      fi
+      # Membership over the WHOLE module tree: a gated test can live in a child module
+      # whose root never names the feature.
+      [ "$(printf '%s' "$_mt_closure" | tr '\n' '\0' | xargs -0 -r grep -lE "$cfg_site" 2>/dev/null | wc -l)" -gt 0 ] || continue
     fi
-    # The zero-test guard keys on `Running tests/<path>.rs`, so a selected target whose
-    # source is NOT under tests/ (an explicitly mapped `[[test]] path = "..."`) is never
-    # associated with a result and could run ZERO tests unnoticed — a vacuous pass
-    # (roborev round-11 finding, Medium). My own round-10 comment noted this target is
-    # "invisible to that guard" and called it harmless because it cannot cause a false
-    # FAIL; that reasoning only considered one direction and missed the silent one.
-    # FAIL CLOSED rather than widen the SHARED guard here: that helper is used by other
-    # components whose allowed-zero lists are spelled tests/-relative, so re-keying it is a
-    # separate change. No such target exists today, so this costs nothing now and converts a
-    # silent hole into a loud one if someone adds one.
-    case "$_mt_rel" in
-      tests/*) ;;
-      *)
-        status=FAIL
-        {
-          echo "[$name] FAIL-CLOSED: selected target '$_mt_name' has its source at"
-          echo "        '$_mt_rel', outside tests/. The zero-tests guard keys on"
-          echo "        'Running tests/<path>.rs', so this target would execute under NO"
-          echo "        zero-test guard and could run zero tests unnoticed. Widen"
-          echo "        check_no_unexpected_zero_tests to reconcile metadata source paths"
-          echo "        before adding such a target (issue #1699, roborev round-11)."
-        } | tee "$log"
-        end=$(date +%s)
-        record_result "$name" "$status" "$((end - start))"
-        echo ">>> [$name] $status ($((end - start))s)"
-        return 0
-        ;;
-    esac
     base="$_mt_name"
-    srcs="$srcs$_mt_name	$_mt_src
+    # The census subject is the UNION of every included target's module tree, deduped later
+    # (a shared `common/mod.rs` is one site, not one per target that includes it).
+    local _cf
+    while IFS= read -r _cf; do
+      [ -n "$_cf" ] || continue
+      srcs="$srcs${_cf#$REPO_ROOT/}	$_cf
 "
+    done <<EOF
+$_mt_closure
+EOF
     # Two array elements per target (`--test <name>`), so ${#targets[@]} is NOT the
     # target count — $count is.
     targets+=(--test "$base")
@@ -6308,7 +6370,11 @@ run_legacy_heuristics() {
     # classifier reasoning about source text alone.
     if [ "$_mt_how" = "manifest" ]; then
       :
-    elif [ "$(sed -E 's/not\([[:space:]]*feature[[:space:]]*=[[:space:]]*"legacy-heuristics"[[:space:]]*\)//g' "$f" \
+    # Polarity over the WHOLE module tree, not just the root (round 12): a positive gate in
+    # a child module must stop this target being allowed-zero, or the target is EXCUSED from
+    # the zero-tests guard on the strength of a file that happened to be silent.
+    elif [ "$(printf '%s' "$_mt_closure" | tr '\n' '\0' \
+        | xargs -0 -r sed -E 's/not\([[:space:]]*feature[[:space:]]*=[[:space:]]*"legacy-heuristics"[[:space:]]*\)//g' 2>/dev/null \
         | grep -cE "$cfg_site")" -eq 0 ]; then
       # TWO DIFFERENT IDENTIFIERS FOR TWO DIFFERENT CONSUMERS, and conflating them was a
       # real bug (roborev round-9 finding, Medium). `--test <name>` takes cargo's TARGET
@@ -6419,6 +6485,9 @@ EOF
   done <<EOF
 $(grep -rlE 'feature[[:space:]]*=[[:space:]]*"legacy-heuristics"' "$REPO_ROOT/cqlite-core/src" 2>/dev/null | sort)
 EOF
+  # Dedupe: one file, one scan, one site list — a helper module shared by several targets
+  # must not be reported once per including target.
+  srcs=$(printf '%s' "$srcs" | sort -u)
   local lh_sites=0 lh_skip=0 _sites _k _ln _ms _m f_ f_src lh_where=""
   while IFS="	" read -r f_ f_src; do
     [ -n "$f_" ] || continue
@@ -6660,7 +6729,12 @@ _deny_warnings() {
     echo "[deny-warnings] appending -D warnings to it so the guard is not silently inert." >&2
     CARGO_ENCODED_RUSTFLAGS="${CARGO_ENCODED_RUSTFLAGS}${_us}-D${_us}warnings" "$@"
   else
-    env -u CARGO_ENCODED_RUSTFLAGS RUSTFLAGS="-D warnings" "$@"
+    # APPEND, never replace (roborev round-12 finding, Medium). The encoded branch above
+    # preserves the operator's flags, and this branch replacing them was an indefensible
+    # asymmetry: it would silently drop target, sanitizer or codegen flags for THESE LANES
+    # ONLY, so the lanes would compile something subtly different from every other component
+    # in the same run. `-D warnings` goes last so it wins on conflict.
+    env -u CARGO_ENCODED_RUSTFLAGS RUSTFLAGS="${RUSTFLAGS:+$RUSTFLAGS }-D warnings" "$@"
   fi
 }
 
