@@ -22,34 +22,35 @@ The gap is +6,707 cycles/row. Flight-marginal code accounts for **3,842**. A fur
 ~41% is allocator work. The issue anticipated the shared/marginal split; it did not anticipate that a
 quarter of the gap would be identical code costing more.
 
-**And "identical" has now been checked at the machine-code level, which sharpens the effect but
-shrinks its scope.** The two arms are *different binaries* (`ws0-scan-bench` vs `cqlite-flight`) and
-the shared bucket is assigned by *symbol presence*, so "identical code" was a claim about codegen
-resting on evidence about names — different inlining per binary was a live competing explanation.
-Measured by disassembling every shared symbol in both binaries and comparing operands with only the
-relocatable parts normalized ([`ac1/codegen-identity.py`](ws0-3248-artifacts/ac1/codegen-identity.py)):
-**136 of 363 (37%) are operand-identical**, and partitioning the excess by that fact gives:
+**A machine-code decomposition of that shared bucket was attempted and is WITHDRAWN.** The arms are
+*different binaries* (`ws0-scan-bench` vs `cqlite-flight`) and the shared bucket is assigned by
+*symbol presence*, so "identical code" was always a claim about codegen resting on evidence about
+names. Four successive attempts to establish it, each correcting a real defect found by review, moved
+the answer like this:
 
-| shared sub-bucket | scan | Flight | excess |
+| oracle | "identical" symbols | its excess | its share of self-time |
 |---|---|---|---|
-| SHARED total | 7,327 | 8,879 | **+21.2%** |
-| **operand-identical** (136 syms, lower bound) | 1,133 | 2,008 | **+77.1%** |
-| different machine code (227 syms, upper bound) | 5,897 | 6,865 | +16.4% |
+| byte equality | 15 / 363 (4%) | — | far too strict: operands relocate between binaries |
+| mnemonic sequence | 291 / 363 (80%) | +54.5% | 13.80% — too loose: blind to registers, immediates, callees |
+| normalized operands | 136 / 363 (37%) | +77.1% | 5.88% |
+| + ambiguity-aware | 121 / 363 (33%) | +90.7% | **2.56%** |
 
-**The excess is concentrated in provably identical code — +77.1% where the instructions, registers
-and immediates all match.** But that bucket is only ~6–7% of self-time, so identical code accounts
-for **+875 cyc/row of the +6,707 gap (~13%)**, not the ~24% the shared bucket as a whole represents.
+**The base halves at each step while the ratio climbs — that is the signature of a quantity being
+fitted, not measured.** At the end it rests on 2.56% of self-time (493 cyc/row on the scan side), which
+three reps of 499 Hz sampling cannot support as a headline. So the sub-claim is withdrawn rather than
+narrowed a fifth time, and with it the earlier statements that the excess is "concentrated in
+identical code" and that "different codegen is excluded".
 
-**Two corrections to earlier versions of this paragraph, both found by review, because the oracle was
-wrong twice.** A *byte* comparison is far too strict (only 15/363 match, since operands relocate
-between binaries) and a *mnemonic* comparison is too loose (it reported 291/363, of which 155 are
-not — 49 differ in a register or a real immediate). The figures above come from the third oracle.
-Correspondingly, **the earlier claim that "different codegen is excluded as the explanation" is
-withdrawn**: 227 of 363 shared symbols *do* differ in machine code and they carry the majority of
-shared self-time, so their +16.4% excess may be partly codegen. What survives is narrower and still
-the interesting result: for the subset where the code is provably the same, the Flight arm pays
-**+77.1%**, which is a memory-system signature and is what the bytes-touched differential
-independently measures. 136 is a lower bound, so a tighter oracle could only enlarge that subset.
+**What the attempt did establish, and it is worth keeping:** symbol presence does **not** imply shared
+machine code. Of 363 shared names, **55 cannot be attributed at all** — they have more than one
+definition in a binary, and the flat profiles are keyed by demangled name, so a sample on such a name
+belongs to an unknown instantiation. Those 55 carry **22–23% of the shared bucket's self-time**. Any
+future analysis that partitions this bucket by symbol name must handle that 23% explicitly rather than
+assume it away. Tool + full output: [`ac1/codegen-identity.py`](ws0-3248-artifacts/ac1/codegen-identity.py).
+
+**The +21.2% itself is unaffected and is the robust number.** It comes from the bucket totals
+(7,327 → 8,879 cyc/row), needs no assumption about machine-code identity, and came out identical under
+all four oracles.
 
 **2. The shared-path lever inversion is now a measured number, not an argument.**
 The issue's central warning was that a shared-path lever "could be the largest absolute throughput win
@@ -140,13 +141,12 @@ five were this lane's own.
 path — and it moves the ratio adversely, so it belongs to a programme measured in box-level rows/s,
 not to the ratio.
 
-**The unexplored ~24%** — shared code costing more on the Flight arm — is the most interesting
-unpriced quantity here, and it splits into two unequal parts. Restricted to the **136** shared symbols
-that are **operand-identical**, the penalty is **+77.1%** (1,133 → 2,008 cyc/row): same instructions,
-same registers, same immediates, nearly double the cycles. That is a memory-system signature, and the
-bytes-touched differential points the same way. The remaining 227 symbols do differ in machine code
-and carry more of the weight at a smaller +16.4%, where codegen and locality cannot be separated by
-this measurement. Neither part is any of the three named levers.
+**The unexplored ~24%** — shared code costing 21.2% more on the Flight arm (7,327 → 8,879 cyc/row) —
+is the most interesting unpriced quantity here, and it is genuinely unexplained: the attempt to split
+it by machine-code identity is withdrawn above, and 23% of it cannot be attributed by symbol name at
+all. The bytes-touched differential (5.19× the L2 bytes for 1.22× the accesses) points at locality and
+is measured independently of any symbol attribution, so it remains the best available lead. It is not
+any of the three named levers.
 
 **#3288 is partly unblocked and partly hardware-blocked.** It now has a per-row footprint (23,745 B
 at the L2 boundary), but its "fit ~1/6 of 54 MiB LLC" target is an LLC-boundary constraint this host

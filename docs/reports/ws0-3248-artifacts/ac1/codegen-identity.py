@@ -41,6 +41,20 @@ same code under a different name. Tightening that further needs recursive compar
 which is not attempted here. The bound is stated rather than resolved, and every claim in the report
 is phrased against the LOWER bound so that a tighter oracle could only move it favourably.
 
+ALSO CHECKED, AND MEASURED TO BE A NO-OP: `%fs:0x...` TLS offsets survive normalization, and TLS
+layout differs per binary, so in principle identical source could compare DIFFERENT. Normalizing them
+changes the identical count NOT AT ALL, and ZERO symbols diverge only by a TLS offset. Recorded so a
+later reader does not read it as overlooked -- a checked-and-zero hazard is not an unconsidered one.
+Separately verified that no bare branch/call targets exist (every one carries a `<sym>` annotation),
+so the branch normalization has no gap.
+
+THE CONCLUSION THIS SCRIPT NO LONGER SUPPORTS. Four oracles gave 4%, 80%, 37% and 33% "identical",
+with the excess ratio climbing (+54.5%, +77.1%, +90.7%) as the base shrank to 2.56% of self-time. That
+regress is the signature of a FITTED quantity, so the report WITHDREW the decomposition as a headline
+claim and keeps only the bucket-total +21.2%, which assumes nothing about machine-code identity. What
+this script is still for: showing that symbol presence does not imply shared machine code, and
+quantifying the 23% of the bucket that is UNRESOLVABLE by name.
+
 Requires the perfsym binaries and the committed flat profiles. Re-derives every figure in the
 "identical code" paragraph of the report.
 """
@@ -73,7 +87,18 @@ def classify(sym: str) -> str:
 
 
 def text_symbols(binpath: str) -> dict:
-    """name -> (addr, size) for sized text symbols. `nm -S`, demangled."""
+    """name -> LIST of (addr, size) for sized text symbols. `nm -S`, demangled.
+
+    A LIST, NOT A SINGLE ENTRY (roborev job 72). This used `setdefault`, which kept an ARBITRARY
+    FIRST definition when several text symbols share one demangled name -- and then one comparison
+    of that arbitrary pick was applied to every profile sample bearing the name. Measured: 57
+    shared-pattern names are duplicated in ws0-scan-bench and 30 in cqlite-flight, and 16 / 7 of
+    those have definitions of DIFFERENT SIZES, so the pick decided the answer.
+
+    Worse, and not fixable by picking better: the flat profiles are keyed by demangled name too, so
+    a sample on a duplicated name cannot be attributed to an instantiation AT ALL. Such names are
+    therefore reported as UNRESOLVABLE rather than assigned to either bucket.
+    """
     out = subprocess.run(['nm', '-S', '--defined-only', '--demangle', binpath],
                          capture_output=True, text=True)
     if out.returncode != 0:
@@ -87,7 +112,7 @@ def text_symbols(binpath: str) -> dict:
             addr, size = int(p[0], 16), int(p[1], 16)
         except ValueError:
             continue
-        d.setdefault(p[3].strip(), (addr, size))
+        d.setdefault(p[3].strip(), []).append((addr, size))
     # A binary with no symbols is the #3217 failure mode: `[profile.release] strip = true` makes
     # per-function attribution impossible, and the guard must FAIL rather than report 0 shared.
     if not d:
@@ -160,16 +185,25 @@ def main() -> int:
         sys.exit("FATAL: no shared-pattern symbol is present in BOTH binaries. Either the "
                  "classification patterns or the binaries are wrong; a 0-symbol split is not a "
                  "result.")
-    ident, diff = set(), set()
+    ident, diff, unresolvable = set(), set(), set()
     for k in both:
-        if A[k][1] == B[k][1] > 0 and seq(pa, *A[k]) == seq(pb, *B[k]):
+        # A name with more than one definition in EITHER binary cannot be attributed from a
+        # name-keyed profile, so it is neither "identical" nor "different" -- it is UNKNOWN, and
+        # folding an unknown into either bucket is the vacuous-pass shape this rig exists to refuse.
+        if len(A[k]) > 1 or len(B[k]) > 1:
+            unresolvable.add(k)
+            continue
+        (a_addr, a_size), (b_addr, b_size) = A[k][0], B[k][0]
+        if a_size == b_size > 0 and seq(pa, a_addr, a_size) == seq(pb, b_addr, b_size):
             ident.add(k)
         else:
             diff.add(k)
-    print(f"SHARED symbols present in BOTH binaries: {len(both)}")
-    print(f"  OPERAND-IDENTICAL (lower bound):          {len(ident)} "
+    print(f"SHARED symbol NAMES present in BOTH binaries: {len(both)}")
+    print(f"  UNRESOLVABLE (name has >1 definition):    {len(unresolvable)} "
+          f"({len(unresolvable) / len(both) * 100:.0f}%)")
+    print(f"  operand-identical:                        {len(ident)} "
           f"({len(ident) / len(both) * 100:.0f}%)")
-    print(f"  DIFFERENT machine code:                  {len(diff)} "
+    print(f"  different machine code:                   {len(diff)} "
           f"({len(diff) / len(both) * 100:.0f}%)")
 
     share = {}
@@ -178,7 +212,8 @@ def main() -> int:
         if not files:
             sys.exit(f"FATAL: no flat profiles matched {pat} under {flatdir}. A missing profile "
                      "set would silently report 0% for this arm.")
-        acc = {'ident': 0.0, 'diff': 0.0, 'shared': 0.0, 'one_binary_only': 0.0}
+        acc = {'ident': 0.0, 'diff': 0.0, 'shared': 0.0, 'one_binary_only': 0.0,
+               'unresolvable': 0.0}
         # THE DENOMINATOR IS FILES THAT ACTUALLY PARSED, NOT FILES THAT EXIST (roborev job 71
         # finding 2). `len(files)` counted an empty, truncated or format-incompatible profile in
         # the average, which silently DIVIDES every attributed percentage down and yields plausible
@@ -197,7 +232,9 @@ def main() -> int:
                 if classify(sym) != 's':
                     continue
                 acc['shared'] += pct
-                if sym in ident:
+                if sym in unresolvable:
+                    acc['unresolvable'] += pct
+                elif sym in ident:
                     acc['ident'] += pct
                 elif sym in diff:
                     acc['diff'] += pct
@@ -224,11 +261,15 @@ def main() -> int:
     print(f"\nprofiled cyc/row: scan={scan_cr:.0f} flight={fl_cr:.0f}")
     print(f"\n{'bucket':<40}{'scan':>9}{'flight':>9}{'excess':>10}")
     for label, key in (('SHARED total', 'shared'),
-                       ('  operand-identical (lower bound)', 'ident'),
-                       ('  different machine code (upper bound)', 'diff')):
+                       ('  operand-identical', 'ident'),
+                       ('  different machine code', 'diff'),
+                       ('  UNRESOLVABLE (duplicated name)', 'unresolvable')):
         a = share['scan'][key] / 100 * scan_cr
         b = share['flight'][key] / 100 * fl_cr
-        print(f"{label:<40}{a:9.0f}{b:9.0f}{(b / a - 1) * 100:9.1f}%")
+        # A bucket with no scan-side self-time has no ratio; printing one would be a
+        # ZeroDivisionError at best and an invented number at worst.
+        excess = f"{(b / a - 1) * 100:8.1f}%" if a > 0 else "     n/a"
+        print(f"{label:<40}{a:9.0f}{b:9.0f}{excess:>9}")
     return 0
 
 

@@ -89,56 +89,52 @@ buffers, and SMT contention — #3096's pinning puts the `spawn_blocking` merge/
 async gRPC framing thread on **one physical core's two hyperthreads** (`taskset -c 2,10`). That is a
 hypothesis this profile cannot settle; it is recorded as the next question, not an answer.
 
-#### "Same shared code" checked at the machine-code level: +77.1% on the part that provably matches
+#### A machine-code decomposition of this bucket was attempted and is WITHDRAWN
 
 The bucket above is assigned by **symbol presence** (`aggregate-profiles.py`), and the two arms are
 **different binaries** — `ws0-scan-bench` and `cqlite-flight`. A shared symbol is therefore the same
-*source function*; nothing in that establishes the same *machine code*, since each binary inlines and
-specialises independently. So "same shared code" was a claim about codegen supported by evidence about
-names, and **different codegen was a live competing explanation** for the excess.
+*source function*; nothing in that establishes the same *machine code*. Four attempts to establish it,
+each fixing a real defect found by review, gave four different answers:
 
-Checked by disassembling every shared symbol in both binaries and comparing mnemonic **and operands**,
-normalizing only what must relocate ([`codegen-identity.py`](codegen-identity.py)):
+| oracle | "identical" | its excess | its self-time | why it was wrong |
+|---|---|---|---|---|
+| byte equality | 15/363 (4%) | — | — | far too **strict**: call targets and `%rip` displacements relocate between binaries |
+| mnemonic sequence | 291/363 (80%) | +54.5% | 13.80% | too **loose**: discards operands, so a different register, immediate or callee compares equal. 155 of the 291 are not identical; 49 differ in a register or a real immediate |
+| normalized operands | 136/363 (37%) | +77.1% | 5.88% | keyed on `nm --demangle` with `setdefault`, so several definitions sharing one demangled name collapsed to an arbitrary pick |
+| + ambiguity-aware | 121/363 (33%) | +90.7% | **2.56%** | — |
 
-| | count | share |
-|---|---|---|
-| shared symbols present in both binaries | 363 | |
-| **operand-identical** (lower bound) | **136** | **37%** |
-| different machine code (upper bound) | 227 | 63% |
+**Why this is withdrawn rather than narrowed again.** The base halves at every step while the ratio
+climbs (+54.5% → +77.1% → +90.7%). That is the signature of a **fitted** quantity rather than a
+measured one: each refinement discarded the samples that diluted the effect, and the survivor is
+2.56% of self-time — 493 cyc/row on the scan side — which three reps at 499 Hz cannot carry as a
+headline. A fifth oracle would very likely produce a fifth, larger ratio on a smaller base, and that
+regress is the tell. **Also withdrawn: "the excess is concentrated in identical code" and "different
+codegen is excluded as the cause."** Neither is established.
+
+**What the attempt DID establish, which is a real methodological result:**
+
+* **Symbol presence does not imply shared machine code.** Under the strictest oracle only 33% of
+  shared names are operand-identical.
+* **23% of the shared bucket cannot be attributed by symbol name at all.** 55 of 363 shared names have
+  more than one text definition in a binary (57 duplicated names in `ws0-scan-bench`, 30 in
+  `cqlite-flight`; 16 and 7 of those with *differing sizes*). The flat profiles are keyed by demangled
+  name, so a sample on such a name belongs to an unknown instantiation. It is reported as
+  **UNRESOLVABLE** rather than folded into either bucket — those names carry **1,625 → 2,054 cyc/row**.
+* Any future partition of this bucket by symbol name must handle that 23% explicitly.
+
+Current output of [`codegen-identity.py`](codegen-identity.py), kept as the record of what *is*
+measurable:
 
 | shared sub-bucket | scan cyc/row | Flight cyc/row | excess |
 |---|---|---|---|
 | SHARED total | 7,327 | 8,879 | **+21.2%** |
-| **operand-identical** | 1,133 | 2,008 | **+77.1%** |
-| different machine code | 5,897 | 6,865 | +16.4% |
+| operand-identical (121 names) | 493 | 941 | +90.7% |
+| different machine code (187) | 4,912 | 5,877 | +19.7% |
+| **UNRESOLVABLE** (55 duplicated names) | 1,625 | 2,054 | +26.4% |
 
-(The SHARED total re-derives the 21.2% headline from an independent path — flat profiles × profiled
-cyc/row — which is a useful cross-check on the bucket arithmetic.)
-
-**Where the code provably matches, the Flight arm pays +77.1%** — same instructions, same registers,
-same immediates, nearly double the cycles. That is a memory-system signature and the bytes-touched
-differential points the same way. But the identical subset is only ~6–7% of self-time, so it accounts
-for **+875 of the +6,707 cyc/row gap (~13%)**.
-
-**THE ORACLE WAS WRONG TWICE, IN OPPOSITE DIRECTIONS, AND BOTH ARE RECORDED.** Each looked obviously
-right while it was in use, and each was caught by review rather than by re-reading:
-
-| oracle | verdict | why it is wrong |
-|---|---|---|
-| byte equality | 15/363 identical | far too **strict** — call targets and `%rip` displacements relocate between binaries even when the instruction stream is the same |
-| mnemonic sequence | 291/363 identical | too **loose** — discards operands, so a different register, immediate or callee compares equal. 155 of those 291 are not identical; **49** differ in a register or a real immediate |
-| **normalized operands** | **136/363 identical** | compares operands, normalizing only intra-function branch offsets, external callee *names*, and `%rip` displacements |
-
-**And one claim is withdrawn, not merely refined.** An earlier version of this section said "codegen
-is excluded as the cause". It is not: 227 of 363 shared symbols *do* differ in machine code and they
-carry the majority of shared self-time, so their +16.4% excess may be partly codegen. Locality is
-established for the operand-identical subset only.
-
-**The residual, stated rather than resolved.** 136 is a **lower** bound and 227 an **upper** bound: the
-largest divergence class is a differing *target symbol*, and some of those callees may differ only by
-monomorphisation or crate-disambiguator hash — the same code under another name. Tightening that needs
-recursive comparison of callees, which is not attempted. Every claim here is phrased against the lower
-bound, so a tighter oracle could only enlarge the identical subset and strengthen the conclusion.
+**The +21.2% is unaffected.** It comes from the bucket totals, assumes nothing about machine-code
+identity, and was identical under all four oracles — which is exactly why it is the number the report
+leads with and this decomposition is not.
 
 ---
 

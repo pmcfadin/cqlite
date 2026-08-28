@@ -328,35 +328,46 @@ the more cautious-sounding assumption. **"Conservative" is not a substitute for 
 padded in the safe direction is still a guess, and it can still be wrong in the direction that costs
 you a true result.**
 
-### The ninth instance, and the cleanest one: a PROXY chosen for the property it proxies
+### The ninth instance: a PROXY chosen for the property it proxies — and the regress that followed
 
 I wanted to know whether two binaries contained the same machine code. Bytes were unusable — operands
 relocate — so I compared **instruction mnemonics** and reported the answer as *machine-code identity*.
-A mnemonic sequence is **adjacent to** machine code: it agrees with it most of the time and diverges
-exactly where the interesting cases live. It reported **291 of 363** shared symbols identical; **155 of
-those are not**, and 49 differ in a register or a real immediate — a difference a mnemonic comparison
-cannot see *by construction*. On that basis I published a headline number twice and stated that
-"different codegen is excluded", which the evidence never supported.
+A mnemonic sequence is **adjacent to** machine code: it agrees most of the time and diverges exactly
+where the interesting cases live. On that basis I published a headline number **twice**.
 
-**What makes this the cleanest instance is that the first oracle failed in the OPPOSITE direction, and
-both felt obviously right while in use.** Byte equality is too strict (15/363); mnemonics too loose
-(291/363); comparing operands with only the relocatable parts normalized gives 136/363. Three answers
-to one question, spanning 4%–80%, and **no amount of care applied to a wrong oracle would have found
-it** — each was internally consistent and produced plausible tables.
+**Then it happened three more times, and the sequence is the lesson.** Each oracle fixed a real defect
+found by review, and each produced a different answer to the same question:
 
-**The transferable rules:**
+| oracle | "identical" | its excess | its self-time |
+|---|---|---|---|
+| byte equality | 15/363 (4%) | — | — |
+| mnemonic sequence | 291/363 (80%) | +54.5% | 13.80% |
+| normalized operands | 136/363 (37%) | +77.1% | 5.88% |
+| + ambiguity-aware | 121/363 (33%) | +90.7% | 2.56% |
+
+**The base halved at every step while the ratio climbed. That pattern is itself a finding, and it is
+the one worth carrying forward.** Each refinement legitimately discarded samples — and every batch it
+discarded was diluting the effect, so the surviving subset looked ever more dramatic on an ever
+smaller base. That is what **fitting** looks like from the inside: every individual step is defensible,
+the trend is not. The end state, +90.7% on 2.56% of self-time, could not be carried by three reps at
+499 Hz, so the claim was **withdrawn** rather than narrowed a fifth time.
+
+**The rules this leaves:**
 
 1. **When you substitute a proxy for the property, say so in the claim.** "Identical mnemonics" is a
-   fact; "identical machine code" was an inference from it, and collapsing the two is where the error
-   entered. Had the table been labelled with what was measured, the gap would have been visible.
+   fact; "identical machine code" was an inference. Collapsing the two is where the error entered, and
+   labelling the table with what was *measured* would have exposed it immediately.
 2. **Ask which direction the proxy errs, and by how much.** Bytes over-report difference; mnemonics
-   over-report sameness. Neither error is symmetric, and knowing the direction tells you whether your
-   conclusion is safe. It also told me which claims survived the correction: the +77.1% on the
-   provably-identical subset is now phrased against a **lower bound**, so a better oracle can only
-   strengthen it.
-3. **A retraction is part of the result.** "Codegen is excluded" was withdrawn outright rather than
-   softened. The measurement that replaced it is narrower and true, which is worth more than a wide
-   claim resting on the wrong comparison.
+   over-report sameness. Knowing the direction is what let the surviving claim be phrased against a
+   *lower* bound while it still stood.
+3. **Treat a rising effect on a shrinking base as a stop signal, not a result.** Three consecutive
+   corrections that all moved the number the same way should prompt withdrawal, not a fourth
+   correction. The question to ask at that point is not "what is the next defect" but "is this
+   quantity measurable with this instrument at all".
+4. **A retraction is part of the result.** What survived — the bucket-total **+21.2%**, which assumes
+   nothing about machine-code identity and was identical under all four oracles — was there the whole
+   time and needed none of this. The salvage is a *methodological* fact: symbol presence does not imply
+   shared machine code, and 23% of that bucket cannot be attributed by name at all.
 
 ### The same shape in the tooling, for completeness
 
