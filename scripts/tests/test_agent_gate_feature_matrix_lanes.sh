@@ -203,7 +203,16 @@ TREE="$WORK/tree"
 # Stable, OUTSIDE the throwaway tree: the clean and planted runs of a lane must share
 # compilation (otherwise the planted run pays a full cold build), and a target dir
 # inside the copy would be swept by the revert.
-TARGET="${TMPDIR:-/tmp}/ah6-1699-target"
+#
+# PRIVATE, NOT A PREDICTABLE SHARED PATH (roborev round-30, Medium). This used to be a fixed
+# `${TMPDIR:-/tmp}/ah6-1699-target`, which had two problems: two harnesses running at once
+# corrupted each other's incremental state, and on a multi-user host another user could
+# pre-create that directory and the harness would then EXECUTE compiled artifacts out of a
+# directory they controlled. It lives under $WORK (itself an `mktemp -d`), so it is unique per
+# invocation and removed with everything else by `cleanup` — while still being SHARED between the
+# clean and planted runs of one invocation, which is the property that keeps the observation
+# affordable (each lane compiles once rather than twice).
+TARGET="$WORK/target"
 
 cleanup() {
   local rc=$?

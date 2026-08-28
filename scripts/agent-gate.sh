@@ -6051,6 +6051,51 @@ run_flight_tests() {
   # Empty today (cqlite-flight's `default = []`).
   local -a feature_args=()
 
+  # LANE-SPECIFIC FIXTURE PREFLIGHT (roborev round-30, Medium). Enrolling this lane in
+  # DATASET_COMPONENTS is NOT sufficient: the generic full-gate preflight only requires the
+  # canonical `test_basic` corpus, while the unit suite this lane executes contains a real-fixture
+  # test (`cqlite-flight/src/stats.rs`, gather_table_stats over test_timeseries/sensor_data) that
+  # RETURNS EARLY — silently, three separate ways — when the fixture or its Statistics.db is absent,
+  # EVEN WITH CQLITE_DATASETS_ROOT set. So a partial corpus produced a green lane that had not
+  # exercised the coverage it advertises, which is #3220's rule ("never let a dataset-dependent test
+  # pass on an empty dataset") and this issue's own thesis in one.
+  #
+  # Checked HERE rather than by patching another package's test: the silent skip is pre-existing
+  # behaviour in cqlite-flight and is filed separately, on the #3420/#3380 precedent that a defect
+  # this lane REVEALS is fixed in its own PR. What this lane owes is not to report a green over it.
+  #
+  # FULL gate only. `--only` and `--lite` stay lenient by design (they are probes, and `--only`
+  # cannot be a verdict — it exits 3 on success), which is the same split the #2078 fixture contract
+  # uses; an opt-out is deliberately visible rather than silent.
+  # "full" spelled the way this script spells it (`-z "$ONLY"` and `LITE -eq 0`), matching the
+  # #2078 preflight's own test rather than inventing a MODE variable that does not exist here.
+  if [ -z "$ONLY" ] && [ "$LITE" -eq 0 ] && [ -n "${CQLITE_DATASETS_ROOT:-}" ]; then
+    local _fx_dir _fx_ok=0
+    for _fx_dir in "$CQLITE_DATASETS_ROOT"/sstables/test_timeseries/sensor_data-*; do
+      [ -d "$_fx_dir" ] || continue
+      # Both halves: the directory alone is not enough — the real-fixture test also returns early
+      # when no `-Statistics.db` is present, which is exactly the partial-corpus shape.
+      if ls "$_fx_dir"/*-Statistics.db >/dev/null 2>&1; then _fx_ok=1; break; fi
+    done
+    if [ "$_fx_ok" -ne 1 ]; then
+      status=FAIL
+      {
+        echo "[$name] FAIL-CLOSED: the real-fixture stats test in this unit suite needs"
+        echo "        test_timeseries/sensor_data-*/ WITH a -Statistics.db under"
+        echo "        CQLITE_DATASETS_ROOT ($CQLITE_DATASETS_ROOT), and it is absent. That test"
+        echo "        returns early and PASSES when the fixture is missing, so this lane would"
+        echo "        report a green having skipped the coverage it advertises (#3220)."
+        echo "        Remedy: bash test-data/scripts/fetch-datasets.sh, then export the"
+        echo "        CQLITE_DATASETS_ROOT line it prints."
+      } | tee "$log"
+      end=$(date +%s)
+      record_result "$name" "$status" "$((end - start))"
+      echo ">>> [$name] $status ($((end - start))s)"
+      return 0
+    fi
+    echo ">>> [$name] fixture preflight: test_timeseries/sensor_data + Statistics.db present"
+  fi
+
   # The enabled set. A failed derivation is a FAIL naming the derivation, never a
   # fallback to "nothing enabled" — that would be a verdict with no measurement behind
   # it, which is the vacuous-green shape this lane exists to prevent.

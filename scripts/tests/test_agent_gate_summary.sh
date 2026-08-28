@@ -3352,6 +3352,52 @@ fi
 # A FLOOR, not an exact count: new asserts are added constantly and an equality check would red on
 # every addition. Raise it deliberately when you add a section — the ratchet is the point, and the
 # number below is the count measured at the commit that introduced this check.
+# --- 37. #1699: the flight lane's own fixture preflight (roborev round-30, Medium) ------
+#
+# Enrolling the lane in DATASET_COMPONENTS is not enough. The generic full-gate preflight requires
+# only the canonical `test_basic` corpus, but the unit suite this lane EXECUTES contains a
+# real-fixture test (cqlite-flight/src/stats.rs) that returns early — three separate ways — when
+# test_timeseries/sensor_data or its Statistics.db is absent, EVEN WITH CQLITE_DATASETS_ROOT set.
+# So a partial corpus produced a green lane that had skipped the coverage it advertises: #3220's
+# rule ("never let a dataset-dependent test pass on an empty dataset") and this issue's thesis at
+# once.
+#
+# STRUCTURAL, and labelled as such: the behavioural form needs a FULL gate run against a doctored
+# corpus root, which is a 30-component run and does not belong in a sub-second self-test. What is
+# pinned here is that the check exists, tests BOTH halves, and is full-gate-only.
+fl_pf_="$tmp/1699-r30-flight.txt"
+awk '/^run_flight_tests\(\) \{/, /^\}/' "$GATE" > "$fl_pf_"
+if [ ! -s "$fl_pf_" ]; then
+  bad "1699-r30-preflight-scope: could not extract run_flight_tests — these asserts would pass vacuously"
+else
+  pf_ok_=1
+  grep -q 'sensor_data-\*' "$fl_pf_" || pf_ok_=0
+  grep -q 'Statistics.db' "$fl_pf_" || pf_ok_=0
+  if [ "$pf_ok_" -eq 1 ]; then
+    ok "1699-r30-preflight-halves: the lane checks BOTH the sensor_data dir AND a -Statistics.db (the dir alone still lets the test return early)"
+  else
+    bad "1699-r30-preflight-halves: the fixture preflight no longer checks both halves — the real-fixture test returns early on a missing Statistics.db too, so the lane would report a green over skipped coverage (#3220)"
+  fi
+  # FULL gate only, spelled the way this script spells it: --only and --lite are probes.
+  if grep -qE '\[ -z "\$ONLY" \] && \[ "\$LITE" -eq 0 \]' "$fl_pf_"; then
+    ok "1699-r30-preflight-fullonly: the fixture preflight is gated on FULL-gate mode, leaving --only/--lite lenient"
+  else
+    bad "1699-r30-preflight-fullonly: the fixture preflight is no longer full-gate-only — either it has become unconditional (redding every --only probe) or it has lost its mode test entirely"
+  fi
+fi
+
+# The harness must not compile into a predictable shared directory (round-30, Medium): concurrent
+# harnesses corrupt each other, and on a multi-user host a pre-created directory means the harness
+# executes artifacts somebody else controls.
+hn_="$SCRIPT_DIR/test_agent_gate_feature_matrix_lanes.sh"
+if [ ! -r "$hn_" ]; then
+  skipped "1699-r30-private-target: harness not readable from here — NOT verified"
+elif [ "$(grep -cE '^TARGET="\$WORK/' "$hn_")" -gt 0 ] && [ "$(grep -cE '^TARGET="\$\{TMPDIR:-/tmp\}/ah6' "$hn_")" -eq 0 ]; then
+  ok "1699-r30-private-target: the harness compiles into a per-invocation private dir under \$WORK, not a predictable shared path"
+else
+  bad "1699-r30-private-target: the harness is back to a predictable shared target dir — two concurrent harnesses corrupt each other, and on a multi-user host it executes artifacts from a directory another user can pre-create"
+fi
+
 # The tally is printed AFTER every assertion and after this floor (roborev round-27, Low): it used
 # to print before section 36 and before the floor, so the script could announce `failed: 0` and then
 # add failures underneath it. A summary that precedes its own subject is the same shape as a verdict
