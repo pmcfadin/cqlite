@@ -6511,6 +6511,20 @@ _legacy_coreq_sites() { # _legacy_coreq_sites <file> <enabled-feature-list>
         }
         next
       }
+      # Line comments, BLOCK comments and blanks are all cluster trivia (roborev round-36,
+      # Medium). Treating only `//` as trivia meant a `/* … */` between stacked
+      # `#[cfg(feature = "legacy-heuristics")]` and `#[cfg(feature = "experimental")]`
+      # attributes SPLIT the cluster, so the co-required site was dropped and the census could
+      # report a FALSE ZERO GAP — the silent under-report direction, in the one output whose
+      # entire job is to state omissions.
+      #
+      # A multi-line block comment is tracked with a state flag; `in_block` deliberately does not
+      # reset the cluster, which is the whole point. Not a Rust parser: it recognises the trivia
+      # forms this corpus contains and anything else still ends the cluster, which is the
+      # conservative direction (an unrecognised line ends a cluster ⇒ at worst a site is reported
+      # separately, never silently merged away).
+      if (in_block) { if (t ~ /\*\//) in_block = 0; next }
+      if (t ~ /^\/\*/) { if (t !~ /\*\//) in_block = 1; next }
       if (t ~ /^\/\// || t ~ /^$/) next   # comments and blanks keep the cluster intact
       # Any other line ENDS the cluster: emit its verdict, then start fresh. What the
       # cluster gates is deliberately not inspected.
@@ -6560,7 +6574,11 @@ _crate_gated_test_targets() { # <pkg>  -> name \t rel \t gate-text
   local pkg="$1" meta sp rel gate
   meta=$(_package_test_targets_gated "$pkg" __none__) || return 1
   [ -n "$meta" ] || return 1
-  while IFS=$'\t' read -r _tn sp _how rel; do
+  # FIVE fields now (roborev round-36 added required-features to the producer). Reading four would
+  # silently append the 5th to `rel`, because the LAST `read` variable absorbs the remainder — so
+  # this consumer had to change with the producer even though it ignores the new field. That
+  # coupling is exactly why the producer's record shape is documented on its own line.
+  while IFS=$'\t' read -r _tn sp _how rel _rf_ignored; do
     # An EMPTY src_path is a FAILED derivation, not a target to skip (self-review of the round-25/26
     # class). Skipping it drops the target from every population, so it lands among the ungated rest
     # BY OMISSION — the same silent-exclusion shape those two rounds fixed for unreadable sources,
@@ -6654,7 +6672,8 @@ _package_test_targets_gated() {
       | [ (.name // ""), $sp,
           (if ($rf | index($feat)) then "manifest" else "source" end),
           (if ($root != "" and ($sp | startswith($root + "/")))
-           then ($sp | ltrimstr($root + "/")) else $sp end) ] | @tsv') || return 1
+           then ($sp | ltrimstr($root + "/")) else $sp end),
+          ($rf | join(",")) ] | @tsv') || return 1
     [ -n "$out" ] || return 1
     printf '%s\n' "$out"
     return 0
@@ -6680,7 +6699,13 @@ for p in d.get("packages", []):
         # `[[test]] path = "..."` target need not live under tests/ at all, and the strip
         # would have left an ABSOLUTE path that can never match (roborev round-10 finding).
         rel = sp[len(root) + 1:] if root and sp.startswith(root + os.sep) else sp
-        print("%s\t%s\t%s\t%s" % (t.get("name", ""), sp, how, rel))
+        # 5th field: the COMPLETE required-features list (roborev round-36). The caller must compare
+        # ALL of it against the resolved feature set, because cargo REJECTS an explicit
+        # `--test <name>` whose required-features are unmet, so naming such a target is a FALSE RED.
+        # NOTE no apostrophes in this comment: it sits inside a single-quoted `python3 -c` body, so
+        # one would terminate the string. That has now bitten this file twice (round 25 was the
+        # cli-tests body); `bash -n` catches it, which is why it is always worth running.
+        print("%s\t%s\t%s\t%s\t%s" % (t.get("name", ""), sp, how, rel, ",".join(rf)))
 ' "$pkg" "$feat") || return 1
   [ -n "$out" ] || return 1
   printf '%s\n' "$out"
@@ -6856,8 +6881,28 @@ run_legacy_heuristics() {
     echo ">>> [$name] $status ($((end - start))s)"
     return 0
   fi
-  local _mt_name _mt_src _mt_how _mt_rel _mt_dir _mt_hit _mt_cf _obs_id
-  while IFS="$(printf '\t')" read -r _mt_name _mt_src _mt_how _mt_rel; do
+  # HOISTED ABOVE THE TARGET LOOP (roborev round-36). It used to be resolved here, ~200 lines
+  # BELOW the loop that now needs it to compare each target's required-features — so the comparison
+  # would have run against an EMPTY set, marked every target unmet, and silently emptied the lane.
+  # I wrote that bug into this fix and caught it before it ran; it is the same
+  # unmeasured-signal-reaches-a-permissive-branch shape this whole change exists to remove.
+  local lh_enabled
+  if ! lh_enabled=$(_resolved_package_features cqlite-core --features legacy-heuristics); then
+    status=FAIL
+    {
+      echo "[$name] FAIL-CLOSED: could not derive cqlite-core's enabled feature set at"
+      echo "        default+legacy-heuristics via 'cargo tree -p cqlite-core' (a cargo"
+      echo "        failure or an offline registry), so the co-required-feature census is"
+      echo "        unmeasurable. A census that cannot be taken is not reported as empty."
+    } | tee "$log"
+    end=$(date +%s)
+    record_result "$name" "$status" "$((end - start))"
+    echo ">>> [$name] $status ($((end - start))s)"
+    return 0
+  fi
+  local _mt_name _mt_src _mt_how _mt_rel _mt_rf _mt_dir _mt_hit _mt_cf _obs_id
+  local rf_unmet=""
+  while IFS="$(printf '\t')" read -r _mt_name _mt_src _mt_how _mt_rel _mt_rf; do
     [ -n "$_mt_name" ] || continue
     f="$_mt_src"
     # Included when EITHER cargo gates the target on the feature (the arm the glob could
@@ -6920,6 +6965,27 @@ EOF
     done <<EOF
 $_mt_closure
 EOF
+    # A target whose FULL `required-features` are not satisfied by this lane's feature set must
+    # NOT be named explicitly (roborev round-36, Medium). Cargo REJECTS an explicit
+    # `--test <name>` whose required-features are unmet, so the lane would fail on entirely
+    # correct code — a FALSE RED, and the kind that looks like a real breakage. The helper
+    # already carries the manifest's list; this compares ALL of it, not just the presence of
+    # `legacy-heuristics`, and reports the target as a COVERAGE GAP instead of invoking it.
+    local _rf_off=""
+    if [ -n "${_mt_rf:-}" ]; then
+      local _rf1
+      for _rf1 in ${_mt_rf//,/ }; do
+        [ -n "$_rf1" ] || continue
+        case " $lh_enabled " in
+          *" $_rf1 "*) ;;
+          *) _rf_off="${_rf_off:+$_rf_off,}$_rf1" ;;
+        esac
+      done
+    fi
+    if [ -n "$_rf_off" ]; then
+      rf_unmet="$rf_unmet $base(required-features unmet:$_rf_off)"
+      continue
+    fi
     # Two array elements per target (`--test <name>`), so ${#targets[@]} is NOT the
     # target count — $count is.
     targets+=(--test "$base")
@@ -7001,6 +7067,10 @@ EOF
   # src_path or its required-features. Saying "from tests/*.rs" would misdescribe the
   # derivation in a lane whose subject is accurate declaration.
   echo ">>> [$name] derived${names} ($count target(s); candidates from cargo metadata, gated by cfg site or required-features)"
+  # DECLARED, not dropped (roborev round-36): a target excluded because its required-features are
+  # unmet is a COVERAGE GAP this lane must state, exactly as the flight lane states its census.
+  # Silently omitting it would shrink the subject set with no trace.
+  [ -n "$rf_unmet" ] && echo ">>> [$name] NOT invoked — cargo rejects an explicit --test whose required-features are unmet; reported as a coverage gap:$rf_unmet"
   [ -n "$negonly" ] && echo ">>> [$name] allowed-zero (NEGATIVE-polarity only — cfg(not(...)) bodies compile out here and run in core-tests):$negonly"
 
   # COVERAGE CENSUS — the co-required-feature gap (roborev round-4 finding, Medium).
@@ -7041,20 +7111,7 @@ EOF
   # pass that would actually execute them. It is a third full compile of cqlite-core at a
   # third feature set — measured cost for the existing single pass is ~292s — and the
   # general "experimental executes nowhere" hole is #3373's subject, not this lane's.
-  local lh_enabled coreq="" coreq_n=0 f_
-  if ! lh_enabled=$(_resolved_package_features cqlite-core --features legacy-heuristics); then
-    status=FAIL
-    {
-      echo "[$name] FAIL-CLOSED: could not derive cqlite-core's enabled feature set at"
-      echo "        default+legacy-heuristics via 'cargo tree -p cqlite-core' (a cargo"
-      echo "        failure or an offline registry), so the co-required-feature census is"
-      echo "        unmeasurable. A census that cannot be taken is not reported as empty."
-    } | tee "$log"
-    end=$(date +%s)
-    record_result "$name" "$status" "$((end - start))"
-    echo ">>> [$name] $status ($((end - start))s)"
-    return 0
-  fi
+  local coreq="" coreq_n=0 f_
   # THE CENSUS SUBJECT MUST COVER WHAT THE LANE EXECUTES, and `--lib` was missing from it
   # (roborev round-9 finding, Medium). The lane runs cqlite-core's inline unit tests, so an
   # inline `#[cfg(all(feature = "legacy-heuristics", feature = "X"))]` test in

@@ -3600,6 +3600,78 @@ fi
 # to print before section 36 and before the floor, so the script could announce `failed: 0` and then
 # add failures underneath it. A summary that precedes its own subject is the same shape as a verdict
 # that precedes its measurement.
+# --- 38. #1699: block comments must not split an attribute cluster (round-36, Medium) ----
+#
+# `_legacy_coreq_sites` treated only `//` as cluster trivia, so a `/* … */` between stacked
+# `#[cfg(feature = "legacy-heuristics")]` and `#[cfg(feature = "experimental")]` attributes SPLIT the
+# cluster — the co-required site was dropped and the census could report a FALSE ZERO GAP, the silent
+# under-report direction, in the one output whose whole job is to state omissions.
+cs_="$tmp/1699-r36-coreq.sh"
+awk '/^_legacy_coreq_sites\(\) \{/, /^\}/' "$GATE" > "$cs_"
+if [ ! -s "$cs_" ]; then
+  bad "1699-r36-coreq-scope: could not extract _legacy_coreq_sites — these asserts would pass vacuously"
+else
+  cs_src_="$tmp/1699-r36-src"; mkdir -p "$cs_src_"
+  # (a) a SINGLE-LINE block comment between the two attributes
+  printf '#[cfg(feature = "legacy-heuristics")]\n/* trivia */\n#[cfg(feature = "experimental")]\n#[test]\nfn t() {}\n' > "$cs_src_/inline.rs"
+  # (b) a MULTILINE block comment between them
+  printf '#[cfg(feature = "legacy-heuristics")]\n/* first\n   second\n   third */\n#[cfg(feature = "experimental")]\n#[test]\nfn t() {}\n' > "$cs_src_/multiline.rs"
+  # (c) control: no comment at all must still report the site (the fix must not have broken the base case)
+  printf '#[cfg(feature = "legacy-heuristics")]\n#[cfg(feature = "experimental")]\n#[test]\nfn t() {}\n' > "$cs_src_/plain.rs"
+  for case_ in inline multiline plain; do
+    got_=$( . "$cs_"; _legacy_coreq_sites "$cs_src_/$case_.rs" " default legacy-heuristics " 2>/dev/null | grep -c . )
+    if [ "${got_:-0}" -gt 0 ]; then
+      ok "1699-r36-coreq[$case_]: the co-required site is reported across the trivia ($got_ site line(s))"
+    else
+      bad "1699-r36-coreq[$case_]: the site was DROPPED — the cluster split on trivia, so the census would report a false zero gap for a body that cannot execute"
+    fi
+  done
+fi
+
+# --- 39. #1699: never name a target whose required-features are unmet (round-36, Medium) --
+#
+# The lane added EVERY discovered target to `--test`, while the producer discarded the manifest
+# `required-features` list. Cargo REJECTS an explicit `--test <name>` whose required-features are
+# unmet, so a target needing `legacy-heuristics` PLUS another disabled feature made the lane fail on
+# entirely correct code — a FALSE RED. Producer now emits the full list as a 5th field; the lane
+# compares ALL of it and reports unmet targets as a coverage GAP instead of invoking them.
+lh_body_="$tmp/1699-r36-lh.txt"
+awk '/^run_legacy_heuristics\(\) \{/, /^\}/' "$GATE" > "$lh_body_"
+gp_body_="$tmp/1699-r36-gp.txt"
+awk '/^_package_test_targets_gated\(\) \{/, /^\}/' "$GATE" > "$gp_body_"
+if [ ! -s "$lh_body_" ] || [ ! -s "$gp_body_" ]; then
+  bad "1699-r36-rf-scope: could not extract run_legacy_heuristics / _package_test_targets_gated — these asserts would pass vacuously"
+else
+  # the producer must emit five fields, else the 5th silently lands in the 4th for every consumer
+  if [ "$(grep -cE '(join\(","\)|",".join\(rf\))' "$gp_body_")" -ge 2 ]; then
+    ok "1699-r36-rf-emitted: the producer emits required-features in BOTH parser halves"
+  else
+    bad "1699-r36-rf-emitted: a parser half no longer emits required-features — the consumer then compares an EMPTY list, and every target looks satisfiable, restoring the false red"
+  fi
+  # every consumer must read five fields (the last read var absorbs the remainder otherwise)
+  n_rd_=$(grep -cE "read -r (_tn sp _how rel _rf_ignored|_mt_name _mt_src _mt_how _mt_rel _mt_rf)" "$GATE")
+  if [ "${n_rd_:-0}" -ge 2 ]; then
+    ok "1699-r36-rf-consumers: both consumers of the record read 5 fields ($n_rd_ found)"
+  else
+    bad "1699-r36-rf-consumers: a consumer still reads 4 fields, so required-features would be appended to the path field silently ($n_rd_ found)"
+  fi
+  # the comparison must happen BEFORE the loop needs it, and the gap must be reported
+  ord_ok_=1
+  ln_res_=$(grep -nE 'lh_enabled=\$\(_resolved_package_features' "$lh_body_" | head -1 | cut -d: -f1)
+  ln_loop_=$(grep -nE 'read -r _mt_name' "$lh_body_" | head -1 | cut -d: -f1)
+  [ -n "$ln_res_" ] && [ -n "$ln_loop_" ] && [ "$ln_res_" -lt "$ln_loop_" ] || ord_ok_=0
+  if [ "$ord_ok_" -eq 1 ]; then
+    ok "1699-r36-rf-order: the feature set is resolved (line $ln_res_) BEFORE the target loop that compares against it (line $ln_loop_)"
+  else
+    bad "1699-r36-rf-order: the resolve is not before the loop (resolve=$ln_res_ loop=$ln_loop_) — the comparison would run against an EMPTY set, mark every target unmet, and silently empty the lane"
+  fi
+  if [ "$(grep -cF 'NOT invoked' "$lh_body_")" -gt 0 ]; then
+    ok "1699-r36-rf-declared: an excluded target is DECLARED as a coverage gap, not silently dropped"
+  else
+    bad "1699-r36-rf-declared: an excluded target is dropped with no output — the subject set shrinks with no trace, which is the defect this whole change exists to remove"
+  fi
+fi
+
 # LOWERED DELIBERATELY, 300 -> 285, and this is the ratchet working rather than being defeated.
 # Roborev round 27's descope removed the crate-gate CLASSIFIER, and with it 25 assertions that
 # tested a feature grammar, a conjunction evaluator and a selector predicate which no longer exist.
