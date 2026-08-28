@@ -4715,6 +4715,13 @@ _cls_exec_lines() {
   FILENAME ~ /roborev-review\.sh$/ && /^usage\(\) \{/ { in_usage_fn = 1 }
   in_usage_fn && unq_of($0) ~ /(^|[ \t;&|(])cat[ \t]+<<-?[ \t]*.?EOF/ { in_usage_fn = 0; in_usage = 1; next }
   in_usage && /^EOF$/ { in_usage = 0; next }
+  # PROSE IS EXEMPT ONLY WHERE IT IS PROVABLY INERT. The delimiter is unquoted, so a heredoc line
+  # carrying ANY expansion still executes -- `${mode:=mixed-delivery}` sets a variable when the body
+  # is rendered (roborev job 57). Rather than decide which expansions are dangerous (that was the
+  # claim-about-a-SET error, four times), the exemption is withheld from every line that has one:
+  # an expansion-free line cannot execute anything, which is an affirmative property rather than a
+  # list. Measured: no prose-word line in the real heredoc carries an expansion, so this is free.
+  in_usage && ($0 ~ /[$][(]/ || $0 ~ /`/ || $0 ~ /[$][{]/ || $0 ~ /[$][A-Za-z_]/) { print; next }
   # A COMMAND SUBSTITUTION INSIDE THE HEREDOC STILL EXECUTES (roborev job 50). The delimiter is
   # unquoted (the body interpolates $PROGNAME), so `$( )` and backticks in it RUN -- classifier logic
   # parked there would be prose to this filter and code to the shell. The exemption is for TEXT, so
@@ -4933,6 +4940,15 @@ _wr_rwp_reads=$(_wr_code_view_min "$TEST_SELF" | grep -nE '[$][{]?RUN_WRAPPER_PA
 _wr_rwp_n=$(printf '%s' "$_wr_rwp_reads" | grep -c . || true)
 if [ "${_wr_rwp_n:-0}" -ne 1 ]; then
   _wr_bad="$_wr_bad RUN_WRAPPER_PATH-is-read-in-${_wr_rwp_n:-0}-places-not-just-run_wrapper;"
+fi
+# ...and its ASSIGNMENTS are counted too. Checking only the reads left the other half open: an extra
+# assignment elsewhere redirects run_wrapper while the read count stays at one (roborev job 57).
+# Exactly five are legitimate -- the empty initialisation, plus a set and a clear for each of the two
+# gate-mock cases. A sixth means someone is steering run_wrapper from a new place, which is #3367
+# returning under a different variable name.
+_wr_rwp_sets=$(_wr_code_view_min "$TEST_SELF" | grep -cE '^[[:space:]]*RUN_WRAPPER_PATH=' || true)
+if [ "${_wr_rwp_sets:-0}" -ne 5 ]; then
+  _wr_bad="$_wr_bad RUN_WRAPPER_PATH-is-assigned-${_wr_rwp_sets:-0}-times-not-5;"
 fi
 if [ -z "$_wr_bad" ]; then
   ok 'structural (#3367): there is no mutable WRAPPER global, and the scratch-copy override is read at exactly one site (run_wrapper) — a doctrine scan has no mutable path available to it, so the order dependence is absent by construction rather than policed'
