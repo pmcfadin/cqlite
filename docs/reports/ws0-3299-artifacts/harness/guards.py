@@ -630,13 +630,32 @@ CORPUS_TABLE = "events"
 # reports -> docs -> repo root), never from the environment.
 CORPUS_PIN_REL = os.path.join("tools", "ws0-corpus-gen", "src", "measurement_corpus.rs")
 
+# WHERE THE PER-COMPONENT DIGESTS COME FROM, and why they are not in the Rust pin.
+# `measurement_corpus.rs` pins QUANTITIES (row counts, the Data.db digest, the
+# schema digest, the component-bytes total); it pins no FILENAMES. The canonical
+# component map — every emitted component's name, size and sha256 — exists only in
+# the committed #3096 identity artifact, which is what
+# `scripts/perf/ws0_canonical_corpus.py` reads for the same comparison. This guard
+# reads the SAME artifact rather than copying its contents, so the two cannot drift.
+CORPUS_ARTIFACT_REL = os.path.join("docs", "reports", "ws0-3096-artifacts", "corpus-identity.json")
+
+# The emitted schema lives BESIDE the corpus, not inside the table directory:
+# `ws0-scan-bench` and `ws0-3299-scan-worker` both default to
+# `<corpus>/ws0-events.cql`, and it is digested against `SCHEMA_SHA256`.
+CORPUS_SCHEMA_NAME = "ws0-events.cql"
+
+SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
+
 
 def _repo_root():
     return os.path.abspath(os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", "..", ".."))
 
 
 def read_corpus_pins():
-    """`DATA_DB_BYTES` and `DATA_DB_SHA256`, parsed from the committed Rust pin.
+    """The pinned corpus quantities, parsed from the committed Rust constants.
+
+    Returns a dict of `DATA_DB_BYTES`, `DATA_DB_SHA256`, `SCHEMA_SHA256` and
+    `TOTAL_COMPONENT_BYTES`.
 
     Fails closed on every way the pin can fail to answer: missing file,
     unreadable file, absent constant, malformed constant. An unconsultable
@@ -651,13 +670,82 @@ def read_corpus_pins():
         fail("CORPUS_PIN_UNREADABLE",
              f"cannot read the pinned corpus identity at {path}: {exc}. The pin is the ONLY "
              f"oracle for corpus identity; without it no corpus can be certified.")
-    m_sha = re.search(r'pub\s+const\s+DATA_DB_SHA256\s*:\s*&str\s*=\s*"([0-9a-fA-F]{64})"', text)
-    m_bytes = re.search(r"pub\s+const\s+DATA_DB_BYTES\s*:\s*u64\s*=\s*([0-9_]+)\s*;", text)
-    if not m_sha or not m_bytes:
-        fail("CORPUS_PIN_UNPARSEABLE",
-             f"{path}: could not parse DATA_DB_SHA256 (64 hex) and/or DATA_DB_BYTES. The pin "
-             f"moved or was reformatted; fix the parse rather than skipping the check.")
-    return int(m_bytes.group(1).replace("_", "")), m_sha.group(1).lower()
+    pins = {}
+    for const, pat, cast in (
+        ("DATA_DB_SHA256", r'pub\s+const\s+DATA_DB_SHA256\s*:\s*&str\s*=\s*"([0-9a-fA-F]{64})"', str),
+        ("SCHEMA_SHA256", r'pub\s+const\s+SCHEMA_SHA256\s*:\s*&str\s*=\s*"([0-9a-fA-F]{64})"', str),
+        ("DATA_DB_BYTES", r"pub\s+const\s+DATA_DB_BYTES\s*:\s*u64\s*=\s*([0-9_]+)\s*;", int),
+        ("TOTAL_COMPONENT_BYTES", r"pub\s+const\s+TOTAL_COMPONENT_BYTES\s*:\s*u64\s*=\s*([0-9_]+)\s*;", int),
+    ):
+        m = re.search(pat, text)
+        if not m:
+            fail("CORPUS_PIN_UNPARSEABLE",
+                 f"{path}: could not parse {const}. The pin moved or was reformatted; fix the "
+                 f"parse rather than skipping the check.")
+        raw = m.group(1)
+        pins[const] = int(raw.replace("_", "")) if cast is int else raw.lower()
+    return pins
+
+
+def read_canonical_components(pins):
+    """The canonical COMPONENT MAP (name -> bytes + sha256), CORROBORATED before use.
+
+    `measurement_corpus.rs` pins quantities, not filenames, so the per-component
+    digests live in the committed #3096 identity artifact — the same single
+    source of truth `scripts/perf/ws0_canonical_corpus.py` reads, for the same
+    reason (a copy is a second source of truth with its own drift problem).
+
+    An artifact is not trusted merely because it is present: it is corroborated
+    against the independently-parsed Rust pin before it becomes the expectation,
+    so a swapped, truncated or edited artifact cannot silently BECOME canonical.
+    """
+    path = os.path.join(_repo_root(), CORPUS_ARTIFACT_REL)
+    try:
+        with open(path) as fh:
+            art = json.load(fh)
+    except (OSError, ValueError) as exc:
+        fail("CORPUS_MAP_UNREADABLE",
+             f"cannot read the canonical component map at {path}: {exc}. It is the ONLY record "
+             f"of the corpus's auxiliary components; without it the component set is UNKNOWN, "
+             f"and 'assume canonical' is the fail-open this check exists to close.")
+    comps = art.get("components") if isinstance(art, dict) else None
+    if not isinstance(comps, dict) or not comps:
+        fail("CORPUS_MAP_UNREADABLE",
+             f"{path} records no `components` map, so the canonical component set is UNKNOWN.")
+    out = {}
+    total = 0
+    for name, spec in comps.items():
+        size = spec.get("bytes") if isinstance(spec, dict) else None
+        sha = spec.get("sha256") if isinstance(spec, dict) else None
+        if not isinstance(size, int) or size <= 0 or not isinstance(sha, str) or not SHA256_RE.match(sha):
+            fail("CORPUS_MAP_UNREADABLE",
+                 f"{path}: canonical component {name!r} records bytes={size!r} sha256={sha!r}, "
+                 f"which cannot describe a component; this artifact cannot be the expectation.")
+        out[name] = {"bytes": size, "sha256": sha.lower()}
+        total += size
+    # CORROBORATION against the Rust pin, parsed independently of this file.
+    if total != pins["TOTAL_COMPONENT_BYTES"]:
+        fail("CORPUS_MAP_UNCORROBORATED",
+             f"{path}: the canonical component sizes sum to {total} but {CORPUS_PIN_REL} pins "
+             f"TOTAL_COMPONENT_BYTES={pins['TOTAL_COMPONENT_BYTES']}. The two canonical sources "
+             f"disagree, so neither can be used as the expectation.")
+    data = [n for n in out if n.endswith("-Data.db")]
+    if len(data) != 1:
+        fail("CORPUS_MAP_UNCORROBORATED",
+             f"{path}: the canonical map names {len(data)} `*-Data.db` component(s), not exactly "
+             f"one, so it cannot be corroborated against the pinned Data.db digest.")
+    d = out[data[0]]
+    if d["bytes"] != pins["DATA_DB_BYTES"] or d["sha256"] != pins["DATA_DB_SHA256"]:
+        fail("CORPUS_MAP_UNCORROBORATED",
+             f"{path}: the canonical {data[0]} records {d['bytes']} B / {d['sha256']} while "
+             f"{CORPUS_PIN_REL} pins {pins['DATA_DB_BYTES']} B / {pins['DATA_DB_SHA256']}. The "
+             f"two canonical sources disagree about the SAME component.")
+    if any(n.endswith("-CompressionInfo.db") for n in out):
+        fail("CORPUS_MAP_UNCORROBORATED",
+             f"{path}: the canonical map names a CompressionInfo.db. The #3096 measurement "
+             f"corpus is UNCOMPRESSED (issue #1406's claim boundary); an artifact saying "
+             f"otherwise is not the canonical one.")
+    return out
 
 
 def sha256_file(path):
@@ -669,11 +757,37 @@ def sha256_file(path):
 
 
 def guard_corpus(args):
-    """The file the worker will scan IS the pinned #3096 measurement corpus."""
-    expect_bytes, expect_sha = read_corpus_pins()
+    """The corpus the worker will scan IS the pinned #3096 measurement corpus.
+
+    WHAT IS HASHED, EXACTLY — read this before trusting the word "canonical".
+
+      * EVERY component in `<corpus>/ws0/events`: the component SET is compared
+        with the canonical map in BOTH directions (an absent component is a
+        different read path; an extra one means this is not the pinned corpus),
+        and each one's SIZE and SHA256 are compared against that map.
+      * The emitted schema `<corpus>/ws0-events.cql`, against the pinned
+        `measurement_corpus::SCHEMA_SHA256`.
+
+    So this IS a full-corpus verification: nothing the scan opens is left
+    unhashed. Two things are deliberately NOT covered and must not be read as
+    though they were — anything under `<corpus>` OUTSIDE the table directory and
+    the schema file (a stray sibling directory is not an input to this scan), and
+    any component the canonical artifact does not record (there are none today,
+    and an unrecorded one FAILS as an extra rather than being skipped).
+
+    WHY THIS IS NOT JUST THE Data.db. The scan also consumes the schema and the
+    auxiliary components — `Index.db`, `Statistics.db`, `Summary.db`, `Filter.db`
+    — all of which change scan BEHAVIOUR. Hashing `Data.db` alone certified a
+    corpus whose sidecars or schema had been modified as canonical, which is the
+    same shape as verifying one file and measuring another.
+    """
+    pins = read_corpus_pins()
+    canonical = read_canonical_components(pins)
+    expect_bytes, expect_sha = pins["DATA_DB_BYTES"], pins["DATA_DB_SHA256"]
     table_dir = os.path.join(args.corpus, CORPUS_KEYSPACE, CORPUS_TABLE)
     try:
-        entries = sorted(os.listdir(table_dir))
+        entries = sorted(e for e in os.listdir(table_dir)
+                         if os.path.isfile(os.path.join(table_dir, e)))
     except OSError as exc:
         fail("CORPUS_DATA_DB_ABSENT",
              f"{table_dir} is not a readable directory ({exc}). This is the EXACT path "
@@ -705,12 +819,72 @@ def guard_corpus(args):
         fail("CORPUS_SHA_MISMATCH",
              f"{data_db} digests {actual_sha}; the pin says {expect_sha}. Same size, "
              f"different bytes — exactly what a byte-count-only check misses.")
+
+    # THE COMPONENT SET, both directions. A sum is not a set and neither is one
+    # member of it: a corpus missing its `Summary.db`, or carrying an extra
+    # component, reads differently even with a byte-identical `Data.db`.
+    present = set(entries)
+    expected_names = set(canonical)
+    missing = sorted(expected_names - present)
+    if missing:
+        fail("CORPUS_COMPONENT_MISSING",
+             f"{table_dir} is missing {len(missing)} canonical component(s): "
+             f"{', '.join(missing)}. The scan opens the components it finds, so an absent "
+             f"sidecar is a DIFFERENT read path — not a corpus that merely lacks a file.")
+    extra = sorted(present - expected_names)
+    if extra:
+        fail("CORPUS_COMPONENT_EXTRA",
+             f"{table_dir} carries {len(extra)} component(s) the canonical map does not name: "
+             f"{', '.join(extra)}. The canonical corpus is {len(expected_names)} components; an "
+             f"extra one means this is not it.")
+
+    # EVERY component's bytes AND digest. `Data.db` is re-listed here rather than
+    # exempted, so the component sweep is exhaustive over the set it compared.
+    components = {}
+    for name in sorted(expected_names):
+        path = os.path.join(table_dir, name)
+        want = canonical[name]
+        got_bytes = os.path.getsize(path)
+        if got_bytes != want["bytes"]:
+            fail("CORPUS_COMPONENT_BYTES_MISMATCH",
+                 f"{path} is {got_bytes} bytes; the canonical map records {want['bytes']}. "
+                 f"This component is an input to the scan, so a different one is a different "
+                 f"measurement.")
+        got_sha = sha256_file(path)
+        if got_sha != want["sha256"]:
+            fail("CORPUS_COMPONENT_SHA_MISMATCH",
+                 f"{path} digests {got_sha}; the canonical map records {want['sha256']}. Same "
+                 f"size, different bytes — a modified sidecar changes scan behaviour while a "
+                 f"byte-count check sees nothing.")
+        components[name] = got_sha
+
+    # THE SCHEMA. It is not a component of the SSTable but it IS an input to the
+    # scan: both the worker and `ws0-scan-bench` build their table metadata from
+    # it, so a modified schema changes what the scan decodes.
+    schema_path = os.path.join(args.corpus, CORPUS_SCHEMA_NAME)
+    if not os.path.isfile(schema_path):
+        fail("CORPUS_SCHEMA_ABSENT",
+             f"{schema_path} is absent. scan-worker defaults its --schema to this path and "
+             f"refuses to start without it, so an unverified corpus here is also an unrunnable "
+             f"one; the schema is an INPUT to the scan, not documentation of it.")
+    schema_sha = sha256_file(schema_path)
+    if schema_sha != pins["SCHEMA_SHA256"]:
+        fail("CORPUS_SCHEMA_MISMATCH",
+             f"{schema_path} digests {schema_sha}; {CORPUS_PIN_REL} pins SCHEMA_SHA256="
+             f"{pins['SCHEMA_SHA256']}. A different schema decodes the same bytes differently, "
+             f"so the corpus is not the pinned one however its components hash.")
+
     print(json.dumps({
         "data_db": data_db,
         "bytes": actual_bytes,
         "sha256": actual_sha,
         "compressed": False,
+        "components_verified": len(components),
+        "components": components,
+        "schema": schema_path,
+        "schema_sha256": schema_sha,
         "pin_source": os.path.join(_repo_root(), CORPUS_PIN_REL),
+        "component_map_source": os.path.join(_repo_root(), CORPUS_ARTIFACT_REL),
     }))
     return 0
 

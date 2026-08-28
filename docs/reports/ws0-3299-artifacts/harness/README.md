@@ -220,8 +220,12 @@ per worker at the default settings.
   variable at all (negative-controlled by injecting a read and watching the
   assertion fire). An escape hatch on a measurement guard can only buy a
   confident wrong number.
-- **No cross-corpus division.** The corpus identity (byte count, and the absence
-  of a `CompressionInfo.db`) is verified before anything is measured. #3100's
+- **No cross-corpus division.** The corpus identity is verified before anything
+  is measured, and it covers EVERY INPUT the scan consumes — all eight
+  components by name, size and sha256 (so a modified `Index.db` or
+  `Statistics.db` cannot hide behind a canonical `Data.db`), the absence of a
+  `CompressionInfo.db`, and the emitted `ws0-events.cql` against the pinned
+  `SCHEMA_SHA256`. #3100's
   410,449 rows/s/core and #3217's 1,076,917 rows/s were measured on the
   LZ4-compressed 196.09 B/row "Corpus A"; this is the uncompressed 693.69 B/row
   "Corpus B". Dividing across them is forbidden on this issue.
@@ -244,10 +248,18 @@ per worker at the default settings.
 | `WINDOW_ZERO_ROWS` | a scan that observed nothing (a failure, not a measurement) |
 | `WINDOW_AFFINITY_MISMATCH` | a worker the kernel ran somewhere other than its pinned pair |
 | `WINDOW_WORKER_MISSING` / `_SPAN` | an incomplete rep, or a non-positive window |
+| `WINDOW_CPU_SET_MISMATCH` | perf counted a CPU set that is not the set the workers were observed to run on — the same CARDINALITY is not the same SET, and a substituted CPU leaves `task-clock` unchanged |
+| `WINDOW_FIELD_MISSING` / `_MALFORMED` | a window field whose absence would SKIP its own check; a `perf_cpus` naming no CPU, duplicating one, or holding a non-integer |
 | `CORPUS_DATA_DB_ABSENT` / `_AMBIGUOUS` | the EXACT path the worker opens (`<corpus>/ws0/events`) holding no Data.db, or more than one — a Data.db elsewhere under the root does not count |
 | `CORPUS_COMPRESSED` | a `CompressionInfo.db`: a compressed corpus is a DIFFERENT corpus |
 | `CORPUS_BYTES_MISMATCH` / `_SHA_MISMATCH` | a Data.db that is not the pinned #3096 Corpus B, by size or by digest (same-size-different-bytes is invisible to a size check) |
+| `CORPUS_COMPONENT_MISSING` / `_EXTRA` | a component set that is not the canonical eight, in either direction — an absent sidecar is a different read path, an extra one is a different corpus |
+| `CORPUS_COMPONENT_BYTES_MISMATCH` / `_SHA_MISMATCH` | an `Index.db`, `Statistics.db`, `Summary.db`, `Filter.db`, `CRC.db`, `TOC.txt` or `Digest.crc32` that is not the canonical one — these change scan BEHAVIOUR, so a Data.db-only digest certified a corpus that measures differently |
+| `CORPUS_SCHEMA_ABSENT` / `_MISMATCH` | `<corpus>/ws0-events.cql` absent, or not `measurement_corpus::SCHEMA_SHA256` — the worker builds its table metadata from it, so a different schema decodes the same bytes differently |
+| `CORPUS_MAP_UNREADABLE` / `_UNCORROBORATED` | the canonical component map (`docs/reports/ws0-3096-artifacts/corpus-identity.json`) unreadable, or disagreeing with the independently-parsed Rust pin — an oracle is corroborated before it becomes the expectation, never assumed |
 | `CORPUS_PIN_UNREADABLE` / `_UNPARSEABLE` | an unconsultable identity pin — refused, never passed |
 | `EQUIV_DIVERGENCE` | a worker whose residual exceeds `ws0-scan-bench`'s own measured pass-to-pass spread |
 | `EQUIV_NO_SPREAD` | fewer than two bench passes: an unmeasured bound cannot license a pass |
+| `FLIGHT_FIELD_MISSING` / `_MALFORMED` | a phase-2 step record with no `requests_ok`/`requests_error`/`requests_unavailable`/`rows_per_s`, or one that is not a number — absence of an error count is not evidence of no errors |
+| `FLIGHT_ZERO_ROWS` / `_REQUEST_ERRORS` / `_STEP_COUNT` / `_RECORD_MISSING` | a zero-row (or zero-rate) `do_get`, a rep with failed requests, a record spanning more than one concurrency step, or no record at all |
 | `PIN_NOT_EXACT` / `PIN_LOCK_MISSING` / `PIN_LOCK_DISAGREES` | a worker dependency that is not `=`-pinned, or a stale/absent record of the measured closure |

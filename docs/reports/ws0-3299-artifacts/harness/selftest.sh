@@ -304,19 +304,49 @@ FR="$TMP/fakerepo"
 FG="$FR/docs/reports/ws0-3299-artifacts/harness/guards.py"
 mkdir -p "$FR/tools/ws0-corpus-gen/src" "$(dirname "$FG")"
 cp "$GUARDS" "$FG"
-plant_pin() {  # <pin-root> <bytes> <sha256>
-  mkdir -p "$1/tools/ws0-corpus-gen/src"
-  cat > "$1/tools/ws0-corpus-gen/src/measurement_corpus.rs" <<EOF
-pub const DATA_DB_BYTES: u64 = $2;
-pub const DATA_DB_SHA256: &str = "$3";
-EOF
-}
+
+# The stand-in corpus carries the SAME COMPONENT SHAPE as the real one — the
+# eight #3096 components, plus the schema emitted beside them — because the guard
+# now verifies EVERY component and the schema, not just the Data.db.
 CORP="$TMP/corpus"
 mkdir -p "$CORP/ws0/events"
-printf 'pinned measurement corpus stand-in\n' > "$CORP/ws0/events/nb-1-big-Data.db"
+for c in Data.db Index.db Statistics.db Summary.db Filter.db CRC.db TOC.txt Digest.crc32; do
+  printf 'pinned measurement corpus stand-in: %s\n' "$c" > "$CORP/ws0/events/nb-1-big-$c"
+done
+printf 'CREATE TABLE ws0.events (...);\n' > "$CORP/ws0-events.cql"
 PIN_SHA="$(sha256sum "$CORP/ws0/events/nb-1-big-Data.db" | cut -d' ' -f1)"
 PIN_BYTES="$(stat -c %s "$CORP/ws0/events/nb-1-big-Data.db")"
-plant_pin "$FR" "$PIN_BYTES" "$PIN_SHA"
+
+# Plant BOTH oracles at the depth the guard resolves them from: the Rust pin
+# (quantities) and the #3096 identity artifact (the per-component map). They are
+# derived from the SAME stand-in files, so the fake repo is self-consistent and
+# every refusal below is reachable without the real 2.6 GB corpus.
+plant_pin() {  # <pin-root> [<corpus-dir>]
+  mkdir -p "$1/tools/ws0-corpus-gen/src" "$1/docs/reports/ws0-3096-artifacts"
+  [[ $# -ge 2 ]] || return 0
+  python3 "$TMP/plant-pin.py" "$1" "$2"
+}
+cat > "$TMP/plant-pin.py" <<'PLANT'
+"""Write a self-consistent Rust pin + #3096 component map for a stand-in corpus."""
+import hashlib, json, os, sys
+root, corp = sys.argv[1], sys.argv[2]
+tbl = os.path.join(corp, "ws0", "events")
+comps, total = {}, 0
+for name in sorted(os.listdir(tbl)):
+    b = open(os.path.join(tbl, name), "rb").read()
+    comps[name] = {"name": name, "bytes": len(b), "sha256": hashlib.sha256(b).hexdigest()}
+    total += len(b)
+data = next(n for n in comps if n.endswith("-Data.db"))
+schema = hashlib.sha256(open(os.path.join(corp, "ws0-events.cql"), "rb").read()).hexdigest()
+with open(os.path.join(root, "tools/ws0-corpus-gen/src/measurement_corpus.rs"), "w") as fh:
+    fh.write(f'pub const DATA_DB_BYTES: u64 = {comps[data]["bytes"]};\n')
+    fh.write(f'pub const DATA_DB_SHA256: &str = "{comps[data]["sha256"]}";\n')
+    fh.write(f'pub const SCHEMA_SHA256: &str = "{schema}";\n')
+    fh.write(f"pub const TOTAL_COMPONENT_BYTES: u64 = {total};\n")
+with open(os.path.join(root, "docs/reports/ws0-3096-artifacts/corpus-identity.json"), "w") as fh:
+    json.dump({"components": comps, "compression_info_present": False}, fh)
+PLANT
+plant_pin "$FR" "$CORP"
 
 # POSITIVE control: the pinned bytes, at the exact path the worker opens.
 expect_ok "corpus identity: pinned Data.db at <corpus>/ws0/events" \
@@ -364,11 +394,109 @@ expect_guard_fail CORPUS_BYTES_MISMATCH \
 # guard digests the file instead of stat-ing it.
 SHA="$TMP/corpus-sha"
 cp -a "$CORP" "$SHA"
-printf 'PINNED measurement corpus stand-in\n' > "$SHA/ws0/events/nb-1-big-Data.db"
+printf 'PINNED measurement corpus stand-in: Data.db\n' > "$SHA/ws0/events/nb-1-big-Data.db"
 [[ "$(stat -c %s "$SHA/ws0/events/nb-1-big-Data.db")" == "$PIN_BYTES" ]] \
   || { echo "FAIL  [corpus sha fixture] same-size fixture is not the same size"; FAIL=$((FAIL+1)); }
 expect_guard_fail CORPUS_SHA_MISMATCH \
   python3 "$FG" corpus --corpus "$SHA"
+
+# --- THE WHOLE CORPUS, NOT JUST THE Data.db --------------------------------
+# The scan also consumes the SCHEMA and the auxiliary components (Index.db,
+# Statistics.db, Summary.db, Filter.db, ...), all of which change scan
+# BEHAVIOUR. Hashing Data.db alone certified a corpus with a modified sidecar or
+# a modified schema as canonical. Every one of those divergences must now fire.
+CMISS="$TMP/corpus-missing-component"
+cp -a "$CORP" "$CMISS"
+rm "$CMISS/ws0/events/nb-1-big-Summary.db"
+expect_guard_fail CORPUS_COMPONENT_MISSING \
+  python3 "$FG" corpus --corpus "$CMISS"
+
+CEXTRA="$TMP/corpus-extra-component"
+cp -a "$CORP" "$CEXTRA"
+printf 'not a canonical component\n' > "$CEXTRA/ws0/events/nb-1-big-Rows.db"
+expect_guard_fail CORPUS_COMPONENT_EXTRA \
+  python3 "$FG" corpus --corpus "$CEXTRA"
+
+# A SIDECAR of the right length whose bytes differ: the case a component count,
+# a byte total, or a Data.db-only digest all miss.
+CSHA="$TMP/corpus-sidecar-sha"
+cp -a "$CORP" "$CSHA"
+printf 'PINNED measurement corpus stand-in: Index.db\n' > "$CSHA/ws0/events/nb-1-big-Index.db"
+[[ "$(stat -c %s "$CSHA/ws0/events/nb-1-big-Index.db")" \
+   == "$(stat -c %s "$CORP/ws0/events/nb-1-big-Index.db")" ]] \
+  || { echo "FAIL  [sidecar sha fixture] same-size fixture is not the same size"; FAIL=$((FAIL+1)); }
+expect_guard_fail CORPUS_COMPONENT_SHA_MISMATCH \
+  python3 "$FG" corpus --corpus "$CSHA"
+
+CBYTES="$TMP/corpus-sidecar-bytes"
+cp -a "$CORP" "$CBYTES"
+printf 'x' >> "$CBYTES/ws0/events/nb-1-big-Statistics.db"
+expect_guard_fail CORPUS_COMPONENT_BYTES_MISMATCH \
+  python3 "$FG" corpus --corpus "$CBYTES"
+
+# THE SCHEMA. scan-worker defaults --schema to <corpus>/ws0-events.cql and builds
+# its table metadata from it, so a modified schema decodes the same bytes
+# differently — an unhashed schema is an unverified corpus.
+CNOSCH="$TMP/corpus-no-schema"
+cp -a "$CORP" "$CNOSCH"
+rm "$CNOSCH/ws0-events.cql"
+expect_guard_fail CORPUS_SCHEMA_ABSENT \
+  python3 "$FG" corpus --corpus "$CNOSCH"
+
+CSCH="$TMP/corpus-schema-edited"
+cp -a "$CORP" "$CSCH"
+printf 'CREATE TABLE ws0.events (,,,);\n' > "$CSCH/ws0-events.cql"
+expect_guard_fail CORPUS_SCHEMA_MISMATCH \
+  python3 "$FG" corpus --corpus "$CSCH"
+
+# THE COMPONENT MAP IS ITSELF AN ORACLE, so it is corroborated before use: an
+# unreadable one REFUSES (it never degrades to "Data.db only"), and one that
+# disagrees with the independently-parsed Rust pin is not usable as the
+# expectation — a swapped or edited artifact must not silently BECOME canonical.
+FR3="$TMP/fakerepo-nomap"
+FG3="$FR3/docs/reports/ws0-3299-artifacts/harness/guards.py"
+mkdir -p "$(dirname "$FG3")"
+cp "$GUARDS" "$FG3"
+plant_pin "$FR3" "$CORP"
+rm "$FR3/docs/reports/ws0-3096-artifacts/corpus-identity.json"
+expect_guard_fail CORPUS_MAP_UNREADABLE \
+  python3 "$FG3" corpus --corpus "$CORP"
+printf '{"components": {}}\n' > "$FR3/docs/reports/ws0-3096-artifacts/corpus-identity.json"
+expect_guard_fail CORPUS_MAP_UNREADABLE \
+  python3 "$FG3" corpus --corpus "$CORP"
+
+FR4="$TMP/fakerepo-badmap"
+FG4="$FR4/docs/reports/ws0-3299-artifacts/harness/guards.py"
+mkdir -p "$(dirname "$FG4")"
+cp "$GUARDS" "$FG4"
+plant_pin "$FR4" "$CORP"
+# Edit ONE component's recorded size in the artifact alone: the map's sum no
+# longer equals the Rust pin's TOTAL_COMPONENT_BYTES, so the two canonical
+# sources disagree and neither may serve as the expectation.
+python3 - "$FR4/docs/reports/ws0-3096-artifacts/corpus-identity.json" <<'EDIT'
+import json, sys
+p = sys.argv[1]
+d = json.load(open(p))
+n = next(k for k in d["components"] if k.endswith("-Filter.db"))
+d["components"][n]["bytes"] += 1
+json.dump(d, open(p, "w"))
+EDIT
+expect_guard_fail CORPUS_MAP_UNCORROBORATED \
+  python3 "$FG4" corpus --corpus "$CORP"
+# ...and a map naming a CompressionInfo.db is not the #1406-boundary corpus's map.
+plant_pin "$FR4" "$CORP"
+python3 - "$FR4/docs/reports/ws0-3096-artifacts/corpus-identity.json" <<'EDIT'
+import json, sys
+p = sys.argv[1]
+d = json.load(open(p))
+n = next(k for k in d["components"] if k.endswith("-Filter.db"))
+c = dict(d["components"][n], name="nb-1-big-CompressionInfo.db")
+d["components"]["nb-1-big-CompressionInfo.db"] = c
+del d["components"][n]
+json.dump(d, open(p, "w"))
+EDIT
+expect_guard_fail CORPUS_MAP_UNCORROBORATED \
+  python3 "$FG4" corpus --corpus "$CORP"
 
 # An UNCONSULTABLE pin refuses; it never passes. (Affirmative-measurement rule.)
 FR2="$TMP/fakerepo-nopin"
@@ -383,10 +511,12 @@ printf 'pub const DATA_DB_BYTES: u64 = 12;\n// the digest constant was renamed\n
 expect_guard_fail CORPUS_PIN_UNPARSEABLE \
   python3 "$FG2" corpus --corpus "$CORP"
 
-# AND THE COMMITTED PIN ITSELF: the in-tree guards.py must parse the real
-# `measurement_corpus.rs`. The pin is read BEFORE the corpus is resolved, so an
-# empty corpus reaching CORPUS_DATA_DB_ABSENT proves the real pin parsed. A
-# renamed or reformatted constant would surface here as a PIN failure instead.
+# AND THE COMMITTED ORACLES THEMSELVES: the in-tree guards.py must parse the real
+# `measurement_corpus.rs` AND the real `ws0-3096-artifacts/corpus-identity.json`,
+# and the two must CORROBORATE each other. Both are read BEFORE the corpus is
+# resolved, so an empty corpus reaching CORPUS_DATA_DB_ABSENT proves all of that
+# happened against the committed files. A renamed constant surfaces here as
+# CORPUS_PIN_UNPARSEABLE; an edited artifact as CORPUS_MAP_UNCORROBORATED.
 mkdir -p "$TMP/corpus-empty"
 expect_guard_fail CORPUS_DATA_DB_ABSENT \
   python3 "$GUARDS" corpus --corpus "$TMP/corpus-empty"

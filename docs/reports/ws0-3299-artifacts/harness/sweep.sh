@@ -121,8 +121,17 @@ echo "[sweep] topology: $(nproc) logical / $PHYS physical; groups: ${CORE_GROUPS
 # --- corpus identity, verified before anything is measured ---------------------
 # Delegated to `guards.py corpus` so the refusal path is REACHABLE FROM A TEST
 # (selftest.sh observes every one of its codes fire). It checks the ONE path the
-# worker actually opens — `<corpus>/ws0/events/*-Data.db` — against the committed
-# `measurement_corpus::DATA_DB_BYTES`/`DATA_DB_SHA256` pin.
+# worker actually opens — `<corpus>/ws0/events` — and verifies EVERY INPUT the
+# scan consumes, not just the Data.db:
+#
+#   * the component SET, both directions, against the canonical map in
+#     `docs/reports/ws0-3096-artifacts/corpus-identity.json` (8 components, no
+#     CompressionInfo.db), with each component's size AND sha256;
+#   * the emitted schema `<corpus>/ws0-events.cql` against the committed
+#     `measurement_corpus::SCHEMA_SHA256`.
+#
+# A modified `Index.db`, `Statistics.db` or schema changes what the scan DOES, so
+# a Data.db-only digest certified as canonical a corpus that measures differently.
 #
 # WHAT THIS REPLACED, and why it mattered: the previous inline check resolved
 # `find "$CORPUS" -name '*-Data.db' -print -quit`, i.e. the first arbitrary match
