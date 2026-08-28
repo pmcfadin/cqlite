@@ -1549,6 +1549,61 @@ set -e
 echo "OK (49): an item macro after another item on one line REFUSES, while a one-line fn whose BODY calls a macro stays GREEN"
 
 # ---------------------------------------------------------------------------
+# 50. GREEN+RED — a ONE-LINE inline module is not a crate-root declaration.
+#
+#     `mod outer { pub mod inner; }` is ordinary Rust in which `inner` is NOT declared at
+#     the crate root. Derivation S scans a line UNANCHORED, so it collected `inner`
+#     anyway while P correctly ignored it, and the cross-check called a DISAGREEMENT —
+#     the MANDATORY gate rejecting valid Rust. Case 24 already pinned this property for
+#     the INDENTED multi-line form; the one-line form was uncovered. Found by probing.
+#
+#     S is now depth-aware WITHIN a line. That does not cost the cross-check its value:
+#     S keeps its own collection RULE (an unanchored scan with no attribute parsing),
+#     which is where its independence from P lives; counting braces is reliable because
+#     `normalize()` blanks comments and string contents, and Refusal I already depends on
+#     the same brace data.
+#
+#     (c)/(d) RED — the narrowing must not buy a false PASS: a genuine crate-root
+#     declaration whose module file gates itself is still INCONSISTENT, and one placed
+#     after a closing brace at depth 0 is still seen.
+# ---------------------------------------------------------------------------
+scratch_tree inline-module-one-line; wt50="$SCRATCH"
+printf '\nmod probe_outer { pub mod probe_inner; }\n' >>"$wt50/cqlite-core/src/lib.rs"
+set +e
+bash "$wt50/$GUARD_REL" >"$TMPROOT/case50.out" 2>&1
+c50rc=$?
+set -e
+[ "$c50rc" -eq 0 ] || fail_case "case 50 — a ONE-LINE inline module \`mod o { pub mod i; }\` was rejected. \`i\` is not a crate-root declaration; S collected it unanchored while P correctly ignored it, so the scans disagreed on valid Rust; got: $(cat "$TMPROOT/case50.out")"
+
+scratch_tree inline-module-multiline; wt50b="$SCRATCH"
+printf '\nmod probe_outer2 {\n    pub mod probe_inner2;\n}\n' >>"$wt50b/cqlite-core/src/lib.rs"
+set +e
+bash "$wt50b/$GUARD_REL" >"$TMPROOT/case50b.out" 2>&1
+c50b_rc=$?
+set -e
+[ "$c50b_rc" -eq 0 ] || fail_case "case 50(b) — the MULTI-LINE nested form regressed (case 24's property); got: $(cat "$TMPROOT/case50b.out")"
+
+oracle_tree inline-module-still-detects; wt50c="$SCRATCH"
+printf '#![cfg(feature = "benchmarks")]\n//! inner-gated: must still be caught\npub fn probe() {}\n' >"$wt50c/cqlite-core/src/probe_oracle.rs"
+set +e
+bash "$wt50c/$GUARD_REL" >"$TMPROOT/case50c.out" 2>&1
+c50c_rc=$?
+set -e
+[ "$c50c_rc" -ne 0 ] || fail_case "case 50(c) — making S depth-aware bought a FALSE PASS: a real crate-root declaration whose module file gates itself was certified; got: $(cat "$TMPROOT/case50c.out")"
+grep -q "INCONSISTENT" "$TMPROOT/case50c.out" \
+  || fail_case "case 50(c) — refused, but not as the INCONSISTENT defect; got: $(cat "$TMPROOT/case50c.out")"
+
+scratch_tree inline-module-after-close; wt50d="$SCRATCH"
+printf '\nmod probe_o4 {\n}\npub mod probe_after;\n' >>"$wt50d/cqlite-core/src/lib.rs"
+printf '#![cfg(feature = "benchmarks")]\n//! inner-gated\npub fn p() {}\n' >"$wt50d/cqlite-core/src/probe_after.rs"
+set +e
+bash "$wt50d/$GUARD_REL" >"$TMPROOT/case50d.out" 2>&1
+c50d_rc=$?
+set -e
+[ "$c50d_rc" -ne 0 ] || fail_case "case 50(d) — a declaration at depth 0 AFTER a closing brace was missed once S became depth-aware; got: $(cat "$TMPROOT/case50d.out")"
+echo "OK (50): a one-line inline module is not read as a crate-root declaration, the multi-line form still is not, and a REAL crate-root declaration is still examined either side of a closing brace"
+
+# ---------------------------------------------------------------------------
 # 36. GREEN — THE POSITIVE CONTROL for 29-38.
 #
 #     Without it, every case above would be satisfied by a guard hardwired to refuse
@@ -1647,4 +1702,4 @@ grep -qF "affirmative measurement" "$TMPROOT/case39.out" \
 echo "OK (39): a crate root with ZERO unconditional declarations FAILs — the assert never reports success having examined nothing"
 
 echo ""
-echo "PASS: test_pub_surface_guard.sh — all 36 cases (7 green, 27 reds, 1 usage, 1 kill-safety)"
+echo "PASS: test_pub_surface_guard.sh — all 37 cases (8 green, 27 reds, 1 usage, 1 kill-safety)"

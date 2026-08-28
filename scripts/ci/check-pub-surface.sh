@@ -503,11 +503,34 @@ END {
     # line is exotic, but if S found only the first it would AGREE with a structured
     # scan that also stops at the first, and the pair would silently under-collect.
     # Finding all of them turns that shape into a loud cross-check FAIL instead.
+    # DEPTH-AWARE WITHIN THE LINE. S stays deliberately naive about ATTRIBUTES — that
+    # independence from P is what makes the cross-check worth anything — but it must not
+    # collect a declaration that is not at the CRATE ROOT. A one-line inline module,
+    # `mod outer { pub mod inner; }`, is ordinary Rust in which `inner` is NOT a
+    # crate-root declaration: P correctly ignored it, S collected it anyway, and the
+    # cross-check called a DISAGREEMENT — the MANDATORY gate rejecting valid Rust.
+    #
+    # Case 24 already pinned that a nested `pub mod` stays green, but only in the
+    # INDENTED multi-line form; the one-line form was uncovered. Found by probing, not
+    # by review.
+    #
+    # Counting braces is not "modelling Rust": `normalize()` blanks comments AND string
+    # contents, so the count is reliable, and Refusal I already depends on the same
+    # BRACE data. S keeps its own collection RULE (an unanchored scan, no attribute
+    # parsing), which is where its independence from P actually lives.
+    sdepth = BRACE_START[i]
     rest = t
+    consumed = 0
     while (match(rest, /pub mod [A-Za-z_][A-Za-z0-9_]*[[:space:]]*;/)) {
+      # advance the brace count over everything before this match
+      for (sk = 1; sk < RSTART; sk++) {
+        sc2 = substr(rest, sk, 1)
+        if (sc2 == "{") sdepth++
+        else if (sc2 == "}") sdepth--
+      }
       nm = substr(rest, RSTART + 8, RLENGTH - 8)
       sub(/[[:space:]]*;$/, "", nm)
-      print "S\t" nm
+      if (sdepth == 0) print "S\t" nm
       rest = substr(rest, RSTART + RLENGTH)
     }
   }
