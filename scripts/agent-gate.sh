@@ -6091,10 +6091,18 @@ run_flight_tests() {
     # the test changed how it selects.
     local _fx_entry _fx_seen=0 _fx_bad=""
     for _fx_entry in "$CQLITE_DATASETS_ROOT"/sstables/test_timeseries/sensor_data-*; do
-      # An unexpanded glob means no match at all; the count check below reports that.
-      [ -e "$_fx_entry" ] || continue
+      # `-e || -L`, not `-e` alone (roborev round-33, Medium). `test -e` FOLLOWS a symlink, so it is
+      # FALSE for a DANGLING one — and this loop then skipped it entirely, while the Rust test's
+      # `read_dir` still yields that entry, may pick it FIRST, and returns early when its own
+      # `read_dir(&dir)` fails. The preflight would pass on the strength of a sibling valid fixture
+      # while the test it protects skipped. An entry that EXISTS AS A NAME is an entry the consumer
+      # can choose, so it must be counted and then judged.
+      # An unexpanded glob matches neither test; the count check below reports "nothing matches".
+      { [ -e "$_fx_entry" ] || [ -L "$_fx_entry" ]; } || continue
       _fx_seen=$((_fx_seen + 1))
-      if [ ! -d "$_fx_entry" ]; then
+      if [ -L "$_fx_entry" ] && [ ! -e "$_fx_entry" ]; then
+        _fx_bad="$_fx_bad $(basename "$_fx_entry")(dangling-symlink)"
+      elif [ ! -d "$_fx_entry" ]; then
         _fx_bad="$_fx_bad $(basename "$_fx_entry")(not-a-directory)"
       elif ! ls "$_fx_entry"/*-Statistics.db >/dev/null 2>&1; then
         _fx_bad="$_fx_bad $(basename "$_fx_entry")(no-Statistics.db)"

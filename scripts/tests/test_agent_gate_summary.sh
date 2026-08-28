@@ -3473,12 +3473,22 @@ open(os.path.join(base, "sensor_data-stray"), "w").close()
 out = run(fil)
 print("CASE prefix_file:", "FAIL-CLOSED" if ("FAIL-CLOSED" in out and "not-a-directory" in out) else "MISSED")
 
+# (d2) a DANGLING SYMLINK match -> must fail closed. `test -e` follows the link and is FALSE for a
+# broken one, so the loop used to skip it while the Rust test's read_dir still yields it and may
+# pick it first (roborev round-33).
+dang = os.path.join(tmp, "pf-dangling"); base = os.path.join(dang, "sstables/test_timeseries")
+os.makedirs(os.path.join(base, "sensor_data-a"), exist_ok=True)
+open(os.path.join(base, "sensor_data-a/nb-1-big-Statistics.db"), "w").close()
+os.symlink(os.path.join(tmp, "does-not-exist-anywhere"), os.path.join(base, "sensor_data-dangling"))
+out = run(dang)
+print("CASE dangling_symlink:", "FAIL-CLOSED" if ("FAIL-CLOSED" in out and "dangling-symlink" in out) else "MISSED")
+
 # (d) nothing matches -> must fail closed
 none = os.path.join(tmp, "pf-none"); os.makedirs(os.path.join(none, "sstables/test_timeseries"), exist_ok=True)
 out = run(none)
 print("CASE no_match:", "FAIL-CLOSED" if ("FAIL-CLOSED" in out and "NOTHING matches" in out) else "MISSED")
 PF_PY
-  for want_ in "CASE good: PASS" "CASE second_incomplete: FAIL-CLOSED" "CASE prefix_file: FAIL-CLOSED" "CASE no_match: FAIL-CLOSED"; do
+  for want_ in "CASE good: PASS" "CASE second_incomplete: FAIL-CLOSED" "CASE prefix_file: FAIL-CLOSED" "CASE dangling_symlink: FAIL-CLOSED" "CASE no_match: FAIL-CLOSED"; do
     if grep -qF "$want_" "$pf_report_"; then
       ok "1699-r32-preflight-behaviour[${want_%%:*}]: ${want_#*: }"
     else
