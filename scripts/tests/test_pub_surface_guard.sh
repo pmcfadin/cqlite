@@ -115,7 +115,13 @@
 #                `cfg` (`#![cfg_attr(...)]`) is refused, not exempted.
 #  34.  RED    — content follows an inner attribute on the SAME line. Without this,
 #                `#![doc = "]"] #![cfg(x)]` hides a real gate — a false PASS.
-#  35.  RED    — an inner attribute whose `[` never closes.
+#  35.  RED    — an inner attribute whose `[` never closes, and (b) one whose NAME
+#                cannot be read — without (b) an unreadable attribute falls through to
+#                "mentions no cfg, therefore inert".
+#  39.  RED    — a crate root with ZERO unconditional declarations. Every exemption is
+#                a `continue`, so an empty OPEN set walks the loop examining nothing;
+#                unguarded that prints a success line and exits 0. REACHABLE BY ACCIDENT
+#                from one over-broad `#[doc(hidden)]` sweep over the crate root.
 #  36.  GREEN  — the positive control for 32-35: a prologue of `//!` comments, blank
 #                lines and INERT inner attributes (`#![allow(...)]`, `#![doc = "…"]`)
 #                must certify normally. Without it, 32-35 would be satisfied by a
@@ -1065,7 +1071,26 @@ case35_rc=$?
 set -e
 [ "$case35_rc" -ne 0 ] || fail_case "case 35 — an unterminated inner attribute passed GREEN; got: $(cat "$TMPROOT/case35.out")"
 oracle_expect_refusal 35 "$TMPROOT/case35.out" "never closes its \`[\`"
-echo "OK (35): an inner attribute that never closes its \`[\` makes the oracle REFUSE"
+
+# (b) THE SAME CHANNEL'S OTHER ARM: an inner attribute whose NAME cannot be read.
+#     Classification must START from an identifier; with no identifier there is nothing
+#     to compare against `cfg`, so the reader must REFUSE rather than fall through to
+#     "mentions no cfg, therefore inert". MEASURED with the `nm == ""` branch removed:
+#     exit 0 — an unreadable attribute was treated as an inert one.
+oracle_tree prologue-unreadable-attr-name; wt35b="$SCRATCH"
+cat >"$wt35b/cqlite-core/src/probe_oracle.rs" <<'RS'
+//! Self-test-only probe (#1712 descope).
+#![ 42 ]
+
+pub fn probe() {}
+RS
+set +e
+bash "$wt35b/$GUARD_REL" >"$TMPROOT/case35b.out" 2>&1
+case35b_rc=$?
+set -e
+[ "$case35b_rc" -ne 0 ] || fail_case "case 35(b) — an inner attribute whose NAME cannot be read passed GREEN, i.e. it was treated as inert; got: $(cat "$TMPROOT/case35b.out")"
+oracle_expect_refusal "35(b)" "$TMPROOT/case35b.out" "an inner attribute whose name cannot be read"
+echo "OK (35): an inner attribute that never closes its \`[\`, or whose NAME cannot be read, makes the oracle REFUSE"
 
 # ---------------------------------------------------------------------------
 # 37. RED — a bogus `]` inside a LINE COMMENT that ENDS THE LINE (roborev r8 F1).
@@ -1202,5 +1227,42 @@ c36_read="$(sed -E 's/.*; ([0-9]+) module-file prologues read.*/\1/' "$TMPROOT/c
 [ "$c36_read" -eq "$c36_open" ] \
   || fail_case "case 36 — $c36_open unconditional declarations but only $c36_read prologues read; one was skipped"
 echo "OK (36): an ordinary prologue with INERT inner attributes certifies normally, and the added module really was examined"
+# ---------------------------------------------------------------------------
+# 39. RED — ZERO unconditional declarations must FAIL, not pass quietly.
+#
+#     THE VACUOUS PASS THIS CLOSES. Every exemption in the assert (`GATED`, `HIDDEN`) is
+#     a `continue`, so a crate root in which NO declaration is OPEN walks the whole loop,
+#     examines nothing, reads no module file — and, without the backstop, prints a success
+#     line and exits 0. That is a positive verdict from an ABSENT MEASUREMENT: the shape
+#     CLAUDE.md names, and the shape this entire issue is about.
+#
+#     IT IS ALSO REACHABLE BY ACCIDENT, which is why it is PINNED rather than trusted: ONE
+#     over-broad `#[doc(hidden)]` sweep over the crate root would silence the guard
+#     completely and green the gate, WITH NO DIFF TO THE GUARD AT ALL. An unpinned backstop
+#     is one refactor away from being deleted as dead code.
+#
+#     Here every crate-root `pub mod` is marked `#[doc(hidden)]` — the cheapest way to
+#     empty the OPEN set without deleting anything.
+# ---------------------------------------------------------------------------
+scratch_tree zero-unconditional; wt39="$SCRATCH"
+awk '
+  /^pub mod [A-Za-z_][A-Za-z0-9_]*[[:space:]]*;/ { print "#[doc(hidden)]" }
+  { print }
+' "$wt39/cqlite-core/src/lib.rs" >"$wt39/lib.rs.hidden"
+mv "$wt39/lib.rs.hidden" "$wt39/cqlite-core/src/lib.rs"
+hidden39="$(grep -c '^#\[doc(hidden)\]$' "$wt39/cqlite-core/src/lib.rs")"
+[ "$hidden39" -ge 10 ] \
+  || fail_case "case 39 setup: only $hidden39 doc(hidden) markers were inserted, so the OPEN set is probably not empty and the case would prove nothing"
+set +e
+bash "$wt39/$GUARD_REL" >"$TMPROOT/case39.out" 2>&1
+case39_rc=$?
+set -e
+[ "$case39_rc" -ne 0 ] || fail_case "case 39 — a crate root with ZERO unconditional declarations passed GREEN, so the assert reported success having examined nothing; got: $(cat "$TMPROOT/case39.out")"
+grep -qF "NOT ONE of them is an unconditional" "$TMPROOT/case39.out" \
+  || fail_case "case 39 — the guard failed but NOT with the zero-unconditional diagnostic, so it failed for some other reason; got: $(cat "$TMPROOT/case39.out")"
+grep -qF "affirmative measurement" "$TMPROOT/case39.out" \
+  || fail_case "case 39 — the diagnostic did not say WHY zero is a failure (a positive verdict requires an affirmative measurement), so it reads as an arbitrary refusal; got: $(cat "$TMPROOT/case39.out")"
+echo "OK (39): a crate root with ZERO unconditional declarations FAILs — the assert never reports success having examined nothing"
+
 echo ""
-echo "PASS: test_pub_surface_guard.sh — all 25 cases (5 green, 18 reds, 1 usage, 1 kill-safety)"
+echo "PASS: test_pub_surface_guard.sh — all 26 cases (5 green, 19 reds, 1 usage, 1 kill-safety)"
