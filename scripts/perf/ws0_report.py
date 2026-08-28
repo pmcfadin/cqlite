@@ -109,6 +109,10 @@ from ws0_canonical_record import verify_pinned_canonical_corpus  # noqa: E402
 # it verified and this asserts the manifest agrees with it.
 from ws0_pinning import verify_pinning_record  # noqa: E402
 from ws0_binaries import verify_binary_provenance  # noqa: E402
+from ws0_quiescence_evidence import (  # noqa: E402
+    EvidenceError,
+    assert_self_consistent as assert_verdict_self_consistent,
+)
 # DID EVERY MEASUREMENT BOUNDARY THIS SESSION OWED ACTUALLY HAPPEN — #3272 round 22. Round 21 wrote
 # the boundary record and round 22 wired the check that produces it; NOTHING READ IT. Own module
 # because ws0_report.py was at the ~800-line source target; full argument there.
@@ -319,100 +323,22 @@ def build_report(args: argparse.Namespace) -> tuple[dict, list[str]]:
                 f" (verdict={verdict.get('verdict') if isinstance(verdict, dict) else '?'!r})."
                 " A session whose own verdict is not QUIESCENT must not be reported as judged."
             )
-        # THE LABEL IS NOT THE EVIDENCE (#3248, roborev job 73 finding 2). Everything below this
-        # point used to check that the verdict was well-FORMED -- right timeseries, covering window,
-        # caveat fields present -- and never that its own numbers SUPPORTED the word QUIESCENT. A
-        # verdict reporting competing processes at a boundary, nonzero in-window competing samples,
-        # or an impossible sample count certified the session as long as the fields existed. That is
-        # this issue's recurring shape one level up: I validated the CLAIM and the PRESENCE of the
-        # caveats, never that the caveats were CLEAN.
+        # THE VERDICT MUST BE SELF-CONSISTENT WITH ITS OWN CONCLUSION, AND THAT CHECK IS NOW
+        # CLOSED (#3248, roborev jobs 73 + 75). This was ~95 lines of inline field checks grown
+        # one review round at a time: job 73 F2 added evidence checking at all, then job 75 found
+        # three more holes in it -- load thresholds unchecked, `coverage_gap_bound_s` optional so
+        # deleting the bound skipped its own comparison, and `census_breadth` published while
+        # contradicting `narrow_census_records`.
         #
-        # These are re-derived from the verdict's own record rather than recomputed from the
-        # timeseries: the point is that a verdict must be SELF-CONSISTENT with the conclusion it
-        # states. A verdict that disagrees with itself is refused rather than reconciled.
-        def _int_field(container: dict, name: str, where: str) -> int:
-            value = container.get(name)
-            if isinstance(value, bool) or not isinstance(value, int):
-                raise Invalid(
-                    f"{vpath.name} {where}.{name} is {value!r}, not an integer, so the QUIESCENT"
-                    " verdict cannot be checked against its own evidence."
-                )
-            if value < 0:
-                raise Invalid(
-                    f"{vpath.name} {where}.{name} is negative ({value}), which is not a possible"
-                    " observation."
-                )
-            return value
-
-        _wc_pre = verdict.get("window_census")
-        if not isinstance(_wc_pre, dict):
-            raise Invalid(
-                f"{vpath.name} has no `window_census` object, so a QUIESCENT verdict rests on"
-                " nothing that can be inspected."
-            )
-        _in_window_competing = _int_field(_wc_pre, "competing_samples", "window_census")
-        if _in_window_competing != 0:
-            raise Invalid(
-                f"{vpath.name} says QUIESCENT but records {_in_window_competing} in-window"
-                " sample(s) with a competing process. The verdict contradicts its own evidence;"
-                " the label is not the measurement."
-            )
-        _samples = _int_field(_wc_pre, "samples", "window_census")
-        if _samples < 1:
-            raise Invalid(
-                f"{vpath.name} says QUIESCENT over a window containing {_samples} sample(s)."
-                " An empty window establishes nothing about competing load -- it is UNMEASURED,"
-                " not quiet."
-            )
-        _narrow = _int_field(_wc_pre, "narrow_census_records", "window_census")
-        if _narrow > _samples:
-            raise Invalid(
-                f"{vpath.name} records {_narrow} narrow-census record(s) among only {_samples}"
-                " in-window sample(s), which is impossible. A verdict that disagrees with itself"
-                " cannot certify anything."
-            )
-        for _side in ("before", "after"):
-            _b = verdict.get(_side)
-            if not isinstance(_b, dict):
-                raise Invalid(
-                    f"{vpath.name} has no `{_side}` boundary sample, so a QUIESCENT verdict cannot"
-                    " be checked at that edge of the window."
-                )
-            _lst = _b.get("competing")
-            if not isinstance(_lst, list):
-                raise Invalid(
-                    f"{vpath.name} `{_side}.competing` is {_lst!r}, not a list; the boundary"
-                    " census cannot be read."
-                )
-            _cnt = _int_field(_b, "competing_count", _side)
-            if _cnt != len(_lst):
-                raise Invalid(
-                    f"{vpath.name} `{_side}.competing_count` is {_cnt} but `{_side}.competing`"
-                    f" holds {len(_lst)} entr(y/ies). An internally contradictory boundary sample"
-                    " is refused rather than reconciled."
-                )
-            if _cnt != 0:
-                raise Invalid(
-                    f"{vpath.name} says QUIESCENT but the {_side} boundary census lists {_cnt}"
-                    f" competing process(es): {_lst[:3]}. The verdict contradicts its own evidence."
-                )
-        # Coverage: a gap wider than the verdict's OWN stated bound means the window was not
-        # actually observed end to end, whatever the headline says.
-        _gap = _wc_pre.get("coverage_largest_gap_s")
-        _bound = _wc_pre.get("coverage_gap_bound_s")
-        if _gap is not None and _bound is not None:
-            if not all(isinstance(v, (int, float)) and not isinstance(v, bool)
-                       and math.isfinite(v) for v in (_gap, _bound)):
-                raise Invalid(
-                    f"{vpath.name} coverage values are not finite numbers"
-                    f" (gap={_gap!r}, bound={_bound!r})."
-                )
-            if _gap > _bound:
-                raise Invalid(
-                    f"{vpath.name} says QUIESCENT but its largest in-window sampling gap"
-                    f" ({_gap}s) exceeds its own stated bound ({_bound}s). A window with an"
-                    " unobserved stretch that wide was not watched end to end."
-                )
+        # Patching pointwise converged only as fast as the reviewer found holes, so the method was
+        # the defect. `ws0_quiescence_evidence` declares EVERY field of the verdict with its rule,
+        # errors on a MISSING one, and -- the part that stops the regress -- errors on an
+        # UNDECLARED one, so a new field in `judge()` fails here until someone decides what it
+        # means instead of silently going unchecked.
+        try:
+            assert_verdict_self_consistent(verdict, vpath.name)
+        except EvidenceError as exc:
+            raise Invalid(str(exc)) from None
         # THE FIELD IS REQUIRED, NOT "COMPARED IF PRESENT" (#3248, roborev job 66 finding 3).
         #
         # The first version compared only `if recorded_ts is not None`, so a verdict WITHOUT

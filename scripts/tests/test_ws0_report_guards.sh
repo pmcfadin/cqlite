@@ -1426,7 +1426,7 @@ PY
 # running `ws0_quiescence.py` because the cases' subject is a verdict the current writer
 # CANNOT produce — one missing a field it always records — which no invocation of it yields.
 q_write_verdict() { # q_write_verdict <session> <start-offset-s> <end-offset-s> <drop-key|-none->
-  python3 - "$1" "$2" "$3" "$4" "$Q_TS_MS" "$Q_TS_PATH" <<'PY'
+  python3 - "$1" "$2" "$3" "$4" "$Q_TS_MS" "$Q_TS_PATH" "$REPO_ROOT/scripts/perf" <<'PY'
 import datetime, json, pathlib, sys
 d = pathlib.Path(sys.argv[1])
 off_start, off_end, drop = float(sys.argv[2]), float(sys.argv[3]), sys.argv[4]
@@ -1451,12 +1451,44 @@ census = {
 # refusal-direction test that fires for the wrong reason measures nothing.
 verdict = {
     "verdict": "QUIESCENT",
+    # THE COMPLETE SHIPPED SHAPE, and the fixture now PROVES it is complete (see below). This
+    # block has lagged the reporter's requirements THREE times -- boundary samples missing when
+    # job 73 F2 landed, then these nine top-level fields missing when job 75's closed checker
+    # landed -- each time surfacing as a pile of mysterious failures in cases about something
+    # else. Composed by hand rather than by running the writer because several cases' SUBJECT is
+    # a verdict the writer cannot produce (one missing a field it always records).
+    "competing_before": 0,
+    "competing_after": 0,
+    "load1_before": 0.11,
+    "load1_after": 0.19,
+    "load1_movement": 0.08,
+    "load1_after_is_bounded": False,
+    "load1_after_note": ("RECORDED, NOT BOUNDED: load1 is a 1-minute decaying average, so a"
+                         " sample taken immediately after a CPU-bound window reads the window's"
+                         " own residue."),
+    "thresholds": {"max_load1": 2.0, "max_load1_movement": 0.5},
     "before": {"competing": [], "competing_count": 0,
                "load": {"load1": 0.11, "load5": 0.20, "load15": 0.30, "runnable": "1/700"}},
     "after": {"competing": [], "competing_count": 0,
               "load": {"load1": 0.19, "load5": 0.24, "load15": 0.31, "runnable": "1/702"}},
     "window_census": census,
 }
+# THE FIXTURE VALIDATES ITS OWN BASELINE, so drift fails HERE with a precise message instead of
+# as N unrelated red checks. Every negative case below perturbs exactly one field of this
+# verdict, so if the baseline is not itself acceptable the whole block is measuring nothing --
+# which is what happened twice. Deliberately run BEFORE `drop` is applied: the cases' business
+# is an INVALID verdict, this assert's business is that the starting point was VALID.
+# The perf dir arrives as an ARGUMENT, not derived from cwd or __file__: this body runs from
+# `python3 -` (no __file__) and the suite does not guarantee its working directory.
+sys.path.insert(0, sys.argv[7])
+from ws0_quiescence_evidence import assert_self_consistent, EvidenceError  # noqa: E402
+try:
+    assert_self_consistent(verdict, "the fixture's OWN baseline verdict")
+except EvidenceError as exc:
+    sys.exit(f"FIXTURE DRIFT: {exc}\n"
+             "  The composed baseline no longer satisfies the reporter's evidence checker, so"
+             " every case in this block would fail for the wrong reason. Update the verdict"
+             " composed in q_write_verdict to the current shipped shape.")
 # `drop` names ONE key to remove, from the census or from the verdict's top level, so a case
 # can perturb either layer with the same helper.
 if drop != "-none-":
@@ -1551,7 +1583,7 @@ d="$TMP/q-nobreadth"; q_judged_session "$d" "$TMP/corpus"
 q_stamp_ts "$d" "$Q_TS_MS"
 q_write_verdict "$d" -60 60 census_breadth
 out=$(python3 "$REPORT" --dir "$d" --corpus "$TMP/corpus" 2>&1); rc=$?
-if [ "$rc" -ne 0 ] && grep -q 'records no ' <<<"$out" && grep -q 'census_breadth' <<<"$out"; then
+if [ "$rc" -ne 0 ] && grep -qE 'missing .* required field' <<<"$out" && grep -q 'census_breadth' <<<"$out"; then
   pass "a verdict missing window_census.census_breadth is REFUSED, naming the caveat"
 else
   fail "a missing census_breadth must be refused by name (rc=$rc, out: $out)"
@@ -1565,7 +1597,7 @@ d="$TMP/q-nowindow"; q_judged_session "$d" "$TMP/corpus"
 q_stamp_ts "$d" "$Q_TS_MS"
 q_write_verdict "$d" -60 60 window
 out=$(python3 "$REPORT" --dir "$d" --corpus "$TMP/corpus" 2>&1); rc=$?
-if [ "$rc" -ne 0 ] && grep -q 'records no ' <<<"$out" && grep -q 'window_census.window' <<<"$out"; then
+if [ "$rc" -ne 0 ] && grep -qE 'missing .* required field' <<<"$out" && grep -q 'window_census.window' <<<"$out"; then
   pass "a verdict recording NO window_census.window is REFUSED (coverage unprovable, not assumed)"
 else
   fail "an absent window_census.window must be refused by name (rc=$rc, out: $out)"
@@ -1627,7 +1659,7 @@ q_evidence_case() { # q_evidence_case <label> <expect-substring> <mutation>
 }
 
 q_evidence_case "a verdict with NO 'before' boundary sample is REFUSED, naming the edge" \
-  "no \`before\` boundary sample" 'v.pop("before")'
+  "before.competing" 'v.pop("before")'
 q_evidence_case "a competitor at the BEFORE boundary is REFUSED despite the QUIESCENT label" \
   "before boundary census lists 1 competing" \
   'v["before"]["competing"]=["cc1"]; v["before"]["competing_count"]=1'
@@ -1640,7 +1672,7 @@ q_evidence_case "nonzero in-window competing_samples is REFUSED" \
   "in-window sample(s) with a competing process" \
   'v["window_census"]["competing_samples"]=7'
 q_evidence_case "a ZERO-sample window is REFUSED (unmeasured, not quiet)" \
-  "window containing 0 sample" 'v["window_census"]["samples"]=0'
+  "window_census.samples\` is 0" 'v["window_census"]["samples"]=0'
 q_evidence_case "narrow_census_records exceeding samples is REFUSED as impossible" \
   "which is impossible" 'v["window_census"]["narrow_census_records"]=999'
 q_evidence_case "a sampling gap wider than the verdict's OWN bound is REFUSED" \
