@@ -914,9 +914,28 @@ drop_caches_if_cold() {
 # and sample the teardown.
 perf_record_c() {
   local outfile="$1"
-  # Same standalone-extraction rule as perf_stat_c below: defaulted so a text-extracted copy
-  # under `set -u` produces behaviour rather than an unbound-variable error.
-  perf record -e cycles -F "${PROFILE_FREQ:-499}" -g -C "$SERVER_CPUS" -o "$outfile" -- sleep 86400
+  # `exec`, NOT a plain call, AND THIS IS THE WHOLE CORRECTNESS OF THE HOOK.
+  #
+  # The caller runs this function BACKGROUNDED, so `$!` is the PID of the SUBSHELL bash forked
+  # for it — not of perf. Signalling that subshell kills the subshell and orphans perf, which
+  # then never finalises its output: the first version of this hook produced a 31 MB file whose
+  # `data size` header field was ZERO, and `perf report` refused it with "Was the 'perf record'
+  # command properly terminated?". Every profile of that run was unusable, and nothing in the
+  # measurement said so — the rig exited fine and the files existed at a plausible size.
+  # `exec` REPLACES the subshell with perf, so `$!` IS perf and the caller's SIGINT reaches it.
+  #
+  # NO `-g`. Call-graph collection is deliberately absent, because this rig's profiling profile
+  # is `perfsym` — symbols WITHOUT frame pointers, chosen so codegen matches `release`. Frame
+  # pointers are the ONLY call-graph mechanism that works on this host (dwarf unwinding hangs
+  # past 120s on a binary this size; LBR is unavailable on this KVM guest, measured), so asking
+  # for stacks from a build that has no frame pointers yields unreliable ones. AC1's headline
+  # figures are FLAT SELF-TIME, which needs the sample IP and nothing else. Call-graph evidence
+  # comes from a separate, explicitly PERTURBED frame-pointer build and is reported as structural
+  # only. See docs/reports/ws0-3248-artifacts/raw/callgraph-capability-census.md.
+  #
+  # Defaults on the driver globals, same standalone-extraction rule as perf_stat_c below: two
+  # suites text-extract these functions and run them under `set -u`.
+  exec perf record -e cycles -F "${PROFILE_FREQ:-499}" -C "$SERVER_CPUS" -o "$outfile" -- sleep 86400
 }
 
 perf_stat_c() {
@@ -988,6 +1007,46 @@ perf_stat_c() {
     # SIGINT, not SIGKILL: perf finalises perf.data on INT and leaves an unreadable stub on KILL.
     kill -INT "$_prof_pid" 2>/dev/null || true
     wait "$_prof_pid" 2>/dev/null || true
+    # AND VERIFY IT FINALISED. An unterminated `perf record` leaves a file of plausible SIZE
+    # whose `data size` header is 0, which `perf report` refuses — so the failure is invisible
+    # at the filesystem level and only appears when someone tries to read the profile, possibly
+    # days later. Checked here, where the run can still be repeated.
+    # VERIFY IT FINALISED, by reading the perf.data header's `data.size` field directly.
+    #
+    # TWO THINGS HERE WERE ESTABLISHED BY POSITIVE CONTROL, not by reasoning, and the first
+    # version of this check would have failed both ways:
+    #
+    #  1. `perf report --header-only` ACCEPTS AN UNFINALISED FILE. Measured against a
+    #     deliberately SIGKILLed capture: it exits 0 on a file whose data is unreadable, so a
+    #     readback through perf would have passed the exact case it was written to catch.
+    #  2. `data.size` at byte offset 48 of the header IS the discriminating field: SIGKILLed
+    #     capture -> 0; the same capture ended with SIGINT -> 114,600. That is the field perf's
+    #     own warning names ("the file's data size field is 0 which is unexpected").
+    #
+    # So the check is a direct header read, and no third perf subcommand is introduced — which
+    # also keeps the invocation allowlist to the two subcommands this rig actually needs.
+    local _pf="$PROFILE_OUT/profile-$_ptag.data"
+    if ! python3 -c '
+import struct, sys
+path = sys.argv[1]
+try:
+    with open(path, "rb") as fh:
+        head = fh.read(56)
+except OSError as exc:
+    print(f"cannot read {path}: {exc}", file=sys.stderr); raise SystemExit(1)
+if len(head) < 56 or head[:8] != b"PERFILE2":
+    print(f"{path} is not a perf.data file", file=sys.stderr); raise SystemExit(1)
+if struct.unpack_from("<Q", head, 48)[0] == 0:
+    print(f"{path} data.size == 0", file=sys.stderr); raise SystemExit(1)
+' "$_pf" 2>/dev/null; then
+      echo "FATAL: the sampling profile $_pf did not finalise — its perf.data header records" >&2
+      echo "       data.size == 0, so perf was terminated before it could write the data it" >&2
+      echo "       had collected. The file exists at a plausible SIZE, which is why this is" >&2
+      echo "       checked rather than assumed: the failure is invisible on the filesystem" >&2
+      echo "       and surfaces only when someone tries to read the profile." >&2
+      echo "       This is a profiling-hook defect, not a measurement result." >&2
+      return 2
+    fi
   fi
   return $_rc
 }

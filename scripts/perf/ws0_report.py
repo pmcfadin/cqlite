@@ -274,6 +274,13 @@ def build_report(args: argparse.Namespace) -> tuple[dict, list[str]]:
     server_cpus = config["server_cpus"]
     client_cpus = config["client_cpus"]
     step_duration = config["step_duration"]
+    # WHICH COUNTERS AND WHICH BINARIES (#3248). Read from the manifest for the same reason as
+    # everything above: a value that cannot be supplied cannot disagree. Promoted to the report's
+    # TOP LEVEL rather than left only in the session pin, because the report makes claims ABOUT
+    # them -- cycles/row and IPC are claims about specific counters, and this rig's whole output
+    # is a ratio between two binaries, so which build produced them is not a footnote.
+    events = config["events"]
+    bin_dir = config["bin_dir"]
     # WHICH SERVER PRODUCED THE MEASURED ROWS (#3272 round 14, F2). Read from the pre-measurement
     # manifest and passed to every Flight arm, which compares it against EVERY rep's recorded
     # `endpoint`. Deliberately NOT a reporter argument, for the reason F1 gave for the whole
@@ -369,10 +376,11 @@ def build_report(args: argparse.Namespace) -> tuple[dict, list[str]]:
         "configuration_source": {
             "manifest": config["source"],
             "note": (
-                "reps, temperatures, arms, scan_passes and the CPU pins were READ FROM the"
-                " session manifest stamped before the first rep; they are not arguments to"
-                " ws0_report.py, so a re-report cannot substitute a different configuration"
-                " and claim it was verified (#3272 F1)"
+                "reps, temperatures, arms, scan_passes, the CPU pins, the counted EVENTS and"
+                " the binary SOURCE DIRECTORY were READ FROM the session manifest stamped before"
+                " the first rep; they are not arguments to ws0_report.py, so a re-report cannot"
+                " substitute a different configuration and claim it was verified (#3272 F1,"
+                " #3248)"
             ),
         },
         # ...and that the corpus is the one the SESSION STARTED against, established from a pin
@@ -420,6 +428,12 @@ def build_report(args: argparse.Namespace) -> tuple[dict, list[str]]:
         "reps": reps,
         "step_duration": step_duration,
         "scan_passes": scan_passes,
+        "events": events,
+        # The SOURCE directory of the measured binaries. The reps execute FROZEN COPIES under
+        # measured-bin/, so `binary_provenance` digests describe the bytes that ran but cannot
+        # say which BUILD produced them -- a symbol-bearing profiling build and a stripped
+        # release build are otherwise indistinguishable here (#3248).
+        "bin_dir": bin_dir,
         "measurements": [],
     }
 
