@@ -1788,13 +1788,22 @@ done
 # The fast-loop sets must NOT inherit these lanes: they are full-gate components, and
 # --lite's whole value is that it stays 1-5 min. `--lite-list` prints LITE_COMPONENTS.
 lite_list="$tmp/1699-lite-list.txt"
-bash "$GATE" --lite-list >"$lite_list" 2>/dev/null
+# The exit status is CHECKED, and the output must be non-empty, before the absence of a
+# lane name is read as evidence (C re-audit, P2 — its sibling 1699-list above already did
+# this). A failed invocation leaves the file empty, and an empty file contains no lane, so
+# the "nothing leaked" branch below would report OK having measured nothing: the vacuous
+# pass this whole issue exists to eliminate, inside this issue's own new assert.
+lite_rc=0
+bash "$GATE" --lite-list >"$lite_list" 2>/dev/null || lite_rc=$?
+lite_n=$(grep -c . "$lite_list" 2>/dev/null || true)
 leaked=""
 for lane in $FEATURE_MATRIX_LANES; do
   grep -qxF "$lane" "$lite_list" 2>/dev/null && leaked="$leaked $lane"
 done
-if [ -z "$leaked" ]; then
-  ok "1699-lite-unchanged: no feature-matrix lane leaked into LITE_COMPONENTS"
+if [ "$lite_rc" -ne 0 ] || [ "${lite_n:-0}" -eq 0 ]; then
+  bad "1699-lite-unchanged: \`--lite-list\` did not produce a readable component list (rc=$lite_rc, lines=${lite_n:-0}) — the leak check has no subject, so its PASS would mean nothing"
+elif [ -z "$leaked" ]; then
+  ok "1699-lite-unchanged: no feature-matrix lane leaked into LITE_COMPONENTS (${lite_n} lite component(s) read)"
 else
   bad "1699-lite-unchanged: LITE_COMPONENTS gained$leaked — --lite is the fast loop, not the gate of record"
 fi

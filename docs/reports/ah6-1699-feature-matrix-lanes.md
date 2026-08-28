@@ -218,7 +218,7 @@ COVERAGE CENSUS — WHAT THIS LANE DOES NOT RUN:
   This omission is DECLARED, not silent: widening the lane back is a small
        change once #3384 is fixed (the derivation machinery is retained).
 declared targets with unmet required-features: issue_1494_producer_mem_budget(required-features[dhat-heap]:off[dhat-heap])
-enabled features (cargo metadata): default test-util
+enabled features (cargo tree -p, package-scoped): default test-util test-util (*) 
 ==== end census ====
 ```
 
@@ -321,7 +321,9 @@ presented as the other.
 - Design: `openspec/changes/feature-matrix-gate-lanes/design.md` (D2, D3, D4 + its #3383 amendment and #3384 second correction, D5, D6)
 - Integration-suite non-determinism (the descope's subject): #3384; first individual victim: #3383
 - Harness: `scripts/tests/test_agent_gate_feature_matrix_lanes.sh`
-- Registration pin: `scripts/tests/test_agent_gate_summary.sh` (runs in `--lite` via `tooling-tests`)
+- Registration pin: `scripts/tests/test_agent_gate_summary.sh` (runs in the **FULL** gate via
+  `tooling-tests`, `agent-gate.sh:8443` — NOT in `--lite`: `tooling-tests` is not in `LITE_COMPONENTS`,
+  `agent-gate.sh:2234`. The `--lite` claim was measured and withdrawn.)
 
 ## Does this change make #3380 more likely? (disclosure)
 

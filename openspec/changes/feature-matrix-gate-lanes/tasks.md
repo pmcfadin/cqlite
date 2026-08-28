@@ -94,7 +94,9 @@
 ## 6. Observation + cost record (surface: `docs/reports/`)
 - [x] Record the harness run: all four lanes observed firing, per-lane planted break, and the negative
       direction. This is the AC2 deliverable —
-      `docs/reports/ah6-1699-feature-matrix-lanes.md` (observed at `94833d510`; all four FIRED, attributed).
+      `docs/reports/ah6-1699-feature-matrix-lanes.md` (observation RE-TAKEN at `3fbe5d2dd`, i.e. the shipped
+      tree — the earlier `94833d510` run predated the flight-tests plant moving and was no longer
+      reproducible with the committed harness; all four FIRED, each attributed to its planted symbol).
 - [ ] Record per-component durations from the full-gate SUMMARY.
 - [ ] Report the added full-gate wall time as `max(0, SIDE_total − MAIN_total)` from the gate of record's
       own per-component durations, and state that it was taken with build caches pruned SYMMETRICALLY.
@@ -110,7 +112,7 @@
 - [ ] Verify publication by grepping the **served** page for a phrase this change introduces (#3042). A zero
       count is not-yet-published, never "done".
 
-## 8. Delivery
+## 7. Delivery
 - [x] `--lite` green each fix round (summary-file redirect; `PASS|FAIL` probe only). 14 rounds run.
 - [~] `rust-reviewer` + sanctioned `roborev-review.sh --agent … --model …` on the lite-green diff BEFORE the
       first full gate. This diff is code-bearing (bash + a report) — roborev certification is required, and

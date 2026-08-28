@@ -19,7 +19,12 @@ taken from the audit**:
    files** plus `--lib` unit tests. The full gate runs exactly **three** of those tests, by name:
    `query_semantics_flight_parity` and `issue_3095_flight_static_columns` (`flight-query-semantics-oracle`,
    `agent-gate.sh:5198`) and one dhat test (`memory-budget`, `agent-gate.sh:8081`). Everything else is
-   compiled — by clippy's per-package pass (`agent-gate.sh:4722`, `--lib --no-run`) — and never run.
+   compiled — by clippy's per-package pass, which reaches cqlite-flight in its fourth
+   invocation (`agent-gate.sh:4764`, `cargo clippy --all-targets -p cqlite-flight …`) — and never run.
+   `--all-targets` is the load-bearing word: it is precisely why the test bodies COMPILE on every full
+   gate while executing nothing, which is this proposal's premise. (An earlier draft said `--lib
+   --no-run` here; that would not have reached the test bodies at all, so the sentence argued against
+   itself. Corrected on the C re-audit.)
 2. **`legacy-heuristics`' 95 cfg sites are never EXECUTED, and never built in isolation.** The feature is
    *test-compiled* today (it is in clippy's cqlite-core feature list, `agent-gate.sh:4700`), so the audit's
    "never test-compiled" is stale — but compiling is not running. Five `cqlite-core/tests/*.rs` files carry
@@ -63,8 +68,12 @@ lane-scope decision they drive.
    so the harness cannot pass by failing everything. Opt-in (it compiles), with the observation recorded.
 4. **Cheap structural asserts in the fast loop**: the components are registered, appear in `--list`, and
    appear in the SUMMARY — pinned in `scripts/tests/test_agent_gate_summary.sh`, which the **full gate** runs via `tooling-tests` — NOT `--lite` (that claim was measured and withdrawn: `tooling-tests` is not in `LITE_COMPONENTS`).
-5. **Wall-time accounting posted**: per-component durations from the SUMMARY plus a baseline-vs-after full
-   gate total measured sequentially on one box (one gate at a time, #2640).
+5. **Wall-time accounting posted**: the four per-component durations from the SUMMARY, plus the added
+   wall time computed as `max(0, SIDE_total − MAIN_total)` under symmetric cache conditions — NOT the
+   baseline-vs-after full-gate total this item originally prescribed. That method was WITHDRAWN (spec R7,
+   `spec.md:402-423`): on a shared box a before/after pair of full-gate totals measures the box's load
+   more than the change, so the two totals were not comparable. The figure must state its cache
+   condition, and R7 forbids publishing one whose method was not actually carried out.
 6. **Doctrine updated in the same change**: the CLAUDE.md gate table's description of what the full gate
    covers, and the website `agents-developing/gate-contract/` page.
 

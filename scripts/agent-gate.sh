@@ -10026,10 +10026,17 @@ dispatch_component() {
     flight-tests) run_flight_tests ;;
     legacy-heuristics) run_legacy_heuristics ;;
     # The two #1699 feature-ISOLATION lanes: cqlite-core with ONE of parquet /
-    # delta-scan and NOT the other. `--all-targets` and `-D warnings` are both
-    # load-bearing (#1978 was an ungated `#[cfg(test)]` module referencing a
-    # feature-gated item, which a library-only check never compiles; #1981 is why the
-    # dead-code lint must be an error) — full rationale on run_feature_iso.
+    # delta-scan and NOT the other. The instrument is `cargo test --lib --no-run` under
+    # `_deny_warnings` — NOT `--all-targets`, which section 34 of
+    # test_agent_gate_summary.sh now FORBIDS here (it pulls in ~100 default-feature
+    # integration files, measured noise), and NOT `cargo check`, which is blind to
+    # `cfg(test)` and therefore to the #1978 incident class these lanes exist to catch.
+    # `-D warnings` via `_deny_warnings` stays load-bearing (#1981: the dead-code lint
+    # must be an error, and a bare `env RUSTFLAGS=` is ignored when
+    # CARGO_ENCODED_RUSTFLAGS is set). Full rationale on run_feature_iso.
+    # (This comment previously claimed `--all-targets` was load-bearing — the opposite of
+    # what the lane does. Corrected on the C re-audit; comments beside code are not
+    # pinned by section 34, which scans the function body.)
     feature-iso-parquet) run_component feature-iso-parquet run_feature_iso parquet ;;
     feature-iso-delta-scan) run_component feature-iso-delta-scan run_feature_iso delta-scan ;;
     python-bindings) run_python_bindings ;;

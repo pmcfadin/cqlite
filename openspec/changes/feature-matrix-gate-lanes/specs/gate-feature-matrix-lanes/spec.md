@@ -310,8 +310,9 @@ additionally that no lane has leaked into `LITE_COMPONENTS`.
 **MEASURED CORRECTION (this change).** This requirement was first written claiming the self-test would red
 `--lite`. That is **false** and the claim is withdrawn rather than engineered around:
 `scripts/tests/test_agent_gate_summary.sh` is executed by the **`tooling-tests`** component
-(`scripts/agent-gate.sh:7020`), and `LITE_COMPONENTS` is `(file-size fmt clippy roborev-lints
-scoped-tests)` — `tooling-tests` is not in it. So the assert is enforced by the **FULL gate**, i.e. the gate
+(`scripts/agent-gate.sh`, `run_tooling_tests` — cited by FUNCTION rather than line number, because the
+line moved twice during this change and a stale line citation is what the C re-audit kept finding), and
+`LITE_COMPONENTS` is `(file-size fmt clippy roborev-lints scoped-tests)` — `tooling-tests` is not in it. So the assert is enforced by the **FULL gate**, i.e. the gate
 of record, which every issue must pass before merge; it is NOT enforced by the fast loop.
 
 The self-test SHALL NOT be forced into `--lite` to make the original sentence true. Two reasons, both
