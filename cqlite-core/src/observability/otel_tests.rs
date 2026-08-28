@@ -242,3 +242,79 @@ fn every_live_instrument_is_catalogued_and_resolves_only_as_its_own_kind() {
          declared STATS_ONLY"
     );
 }
+
+/// A declared stats-only name must not be able to create an instrument through the
+/// EMIT path (issue #1705).
+///
+/// The registration guards above stayed green through exactly this defect: they
+/// measure what the `Registry` registers, while the emit path's ad-hoc fallback
+/// built a live instrument for any name `counter_for`/`histogram_for`/`gauge_for`
+/// failed to resolve — which is every stats-only name by construction. So this
+/// calls the emit functions and reads the EXPORTED metric stream.
+///
+/// Locally-owned provider only, never `instruments()`/`meter()` — see the
+/// `IsolatedInstruments` doc block above. Non-vacuous by construction: three
+/// uncatalogued names emitted the same way MUST appear, so a harness that
+/// collected nothing fails rather than passing.
+#[cfg(feature = "observability-testing")]
+#[test]
+fn a_stats_only_name_cannot_create_an_instrument_through_the_emit_path() {
+    use opentelemetry_sdk::metrics::{InMemoryMetricExporterBuilder, PeriodicReader};
+
+    const UNKNOWN_COUNTER: &str = "cqlite.test.uncatalogued.counter";
+    const UNKNOWN_HISTOGRAM: &str = "cqlite.test.uncatalogued.histogram";
+    const UNKNOWN_GAUGE: &str = "cqlite.test.uncatalogued.gauge";
+
+    let exporter = InMemoryMetricExporterBuilder::new().build();
+    let reader = PeriodicReader::builder(exporter.clone()).build();
+    let provider = SdkMeterProvider::builder().with_reader(reader).build();
+    let meter = provider.meter(SCOPE);
+    let instruments = build_instruments(&meter);
+
+    assert!(
+        !catalog::STATS_ONLY_METRICS.is_empty(),
+        "no stats-only metric is declared, so this guard would assert nothing"
+    );
+    // Every declared stats-only name, through all three emit functions.
+    for m in catalog::STATS_ONLY_METRICS {
+        add_counter_with(&instruments, &meter, m.name, 1, &[]);
+        record_histogram_with(&instruments, &meter, m.name, 1.0, &[]);
+        record_gauge_with(&instruments, &meter, m.name, 1, &[]);
+    }
+    // The control: an uncatalogued name keeps the ad-hoc fallback, so call sites
+    // never silently drop data.
+    add_counter_with(&instruments, &meter, UNKNOWN_COUNTER, 1, &[]);
+    record_histogram_with(&instruments, &meter, UNKNOWN_HISTOGRAM, 1.0, &[]);
+    record_gauge_with(&instruments, &meter, UNKNOWN_GAUGE, 1, &[]);
+
+    let _ = provider.force_flush();
+    let collected = exporter
+        .get_finished_metrics()
+        .expect("the in-memory exporter must yield collected metrics");
+    let scraped: std::collections::HashSet<String> = collected
+        .iter()
+        .flat_map(|rm| rm.scope_metrics())
+        .flat_map(|sm| sm.metrics())
+        .map(|m| m.name().to_string())
+        .collect();
+
+    for control in [UNKNOWN_COUNTER, UNKNOWN_HISTOGRAM, UNKNOWN_GAUGE] {
+        assert!(
+            scraped.contains(control),
+            "{control} was emitted through the ad-hoc fallback and must be on the \
+             scrape; its absence means this guard measures nothing (collected: \
+             {scraped:?})"
+        );
+    }
+
+    let scrapeable: Vec<&str> = catalog::STATS_ONLY_METRICS
+        .iter()
+        .map(|m| m.name)
+        .filter(|name| scraped.contains(*name))
+        .collect();
+    assert!(
+        scrapeable.is_empty(),
+        "metrics declared STATS_ONLY reached a scrape through the emit path — the \
+         ad-hoc fallback must refuse to build an instrument for them: {scrapeable:?}"
+    );
+}
