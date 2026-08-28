@@ -122,6 +122,11 @@
 #                a `continue`, so an empty OPEN set walks the loop examining nothing;
 #                unguarded that prints a success line and exits 0. REACHABLE BY ACCIDENT
 #                from one over-broad `#[doc(hidden)]` sweep over the crate root.
+#  40.  RED    — a RAW STRING in a declaration attribute leaks structure into the
+#                meta-item parse and can flip OPEN to an EXEMPTING verdict.
+#  41.  RED    — a `#[path]` DECOY: a clean file at the standard path while the real,
+#                gated module lives where `#[path]` points.
+#  42.  RED    — a first-line SHEBANG ending the prologue scan and hiding a gate.
 #  36.  GREEN  — the positive control for 32-35: a prologue of `//!` comments, blank
 #                lines and INERT inner attributes (`#![allow(...)]`, `#![doc = "…"]`)
 #                must certify normally. Without it, 32-35 would be satisfied by a
@@ -803,6 +808,29 @@ grep -qE '^pub-surface: +FAIL' "$TMPROOT/case26c-summary.txt" \
   || fail_case "case 26(c) — expected the FAIL exit status 1 for a prefix-only measurement line, got $case26c_rc"
 grep -qE 'affirmative measurement' "$TMPROOT/case26c.out" \
   || fail_case "case 26(c) — the component failed but not with the NAMED missing-measurement diagnostic; got: $(cat "$TMPROOT/case26c.out")"
+# (d) THE ARITHMETIC (roborev r9 F4). A stub whose line matches the WORDING exactly
+#     but is arithmetically IMPOSSIBLE — 14 unconditional declarations, 1 prologue
+#     read, i.e. 13 silently unexamined. The regex alone accepts it. The guard itself
+#     asserts prologues == unconditional, so such a line proves the guard is not what
+#     produced it (stub, truncation, stale build), and this component exists to be
+#     INDEPENDENT of the guard rather than to trust it.
+cat >"$wt26/$GUARD_REL" <<'STUB'
+#!/usr/bin/env bash
+# Self-test stub (#1712 r9 F4): the WORDING is right, the ARITHMETIC is impossible.
+echo "pub-surface: 26 crate-root declarations scanned in cqlite-core/src/lib.rs (20 pub mod, of which 14 unconditional); 1 module-file prologues read from source; 0 inconsistent"
+exit 0
+STUB
+set +e
+gate26 "$TMPROOT/case26d-summary.txt" "$TMPROOT/case26d.out"
+case26d_rc=$?
+set -e
+grep -qE '^pub-surface: +FAIL' "$TMPROOT/case26d-summary.txt" \
+  || fail_case "case 26(d) — an ARITHMETICALLY INCOHERENT measurement line (14 unconditional, 1 prologue read) was recorded PASS. Matching the wording is not evidence of a measurement: 13 declarations went unexamined; got: $(grep -E 'pub-surface|RESULT:' "$TMPROOT/case26d-summary.txt" || echo '(no pub-surface line)')"
+grep -qF 'ARITHMETICALLY INCOHERENT' "$TMPROOT/case26d.out" \
+  || fail_case "case 26(d) — the component failed but not with the named incoherence diagnostic; got: $(cat "$TMPROOT/case26d.out")"
+[ "$case26d_rc" -eq 1 ] \
+  || fail_case "case 26(d) — expected FAIL exit 1, got $case26d_rc (3 is a successful --only run, i.e. the vacuous pass)"
+
 echo "OK (26): the pub-surface GATE COMPONENT requires the guard's affirmative measurement line before PASS — a line that merely BEGINS \`pub-surface: \` does not satisfy it"
 
 # ---------------------------------------------------------------------------
@@ -1167,6 +1195,73 @@ grep -q "INCONSISTENT" "$TMPROOT/case38.out" \
 echo "OK (38): a BOM-prefixed inner \`#![cfg(...)]\` is caught as the NAMED defect (not merely refused), which also pins LC_ALL=C on the reader"
 
 # ---------------------------------------------------------------------------
+# 40/41. RED — DECLARATION-SIDE attributes that defeat the parse (roborev r9 F1/F2).
+#
+#     POLARITY IS THE WHOLE POINT HERE. `GATED` and `HIDDEN` are the EXEMPTING
+#     verdicts — only an `OPEN` declaration gets its module file read — so anything
+#     that flips OPEN to GATED, or that makes resolution read the WRONG file, skips
+#     the inspection entirely and certifies an inner-gated module.
+#
+#     40: a RAW STRING in a declaration attribute. `strip_strings` erases ordinary
+#         string contents before structure is read, but does not model `r#*"`, so
+#         `doc = r##"", cfg(any()), ""##` leaks a comma and a `cfg(...)` into
+#         `split_meta`. MEASURED pre-fix: exit 0.
+#     41: a `#[path]` DECOY — a CLEAN `NAME.rs` beside `#[path = "actual.rs"]`, with
+#         the real gate in `actual.rs`. Resolution reads the decoy and certifies.
+#         MEASURED pre-fix: exit 0. This is the exploit, not just the attribute:
+#         `#[path]` with NO standard-path file already refused via found==0.
+# ---------------------------------------------------------------------------
+scratch_tree decl-rawstring; wt40="$SCRATCH"
+printf '\n#[cfg_attr(feature = "x", doc = r##"", cfg(any()), ""##)]\npub mod probe_decl;\n' >>"$wt40/cqlite-core/src/lib.rs"
+printf '//! probe\npub fn p() {}\n' >"$wt40/cqlite-core/src/probe_decl.rs"
+set +e
+bash "$wt40/$GUARD_REL" >"$TMPROOT/case40.out" 2>&1
+case40_rc=$?
+set -e
+[ "$case40_rc" -ne 0 ] || fail_case "case 40 — a RAW STRING in a declaration attribute leaked structural text into the meta-item parse and the guard passed GREEN. A flipped verdict EXEMPTS the module from inspection; got: $(cat "$TMPROOT/case40.out")"
+grep -qF "RAW STRING" "$TMPROOT/case40.out" \
+  || fail_case "case 40 — the guard failed but NOT with the raw-string diagnostic, so it failed for another reason; got: $(cat "$TMPROOT/case40.out")"
+
+scratch_tree decl-path-decoy; wt41="$SCRATCH"
+printf '\n#[path = "probe_actual.rs"]\npub mod probe_decl;\n' >>"$wt41/cqlite-core/src/lib.rs"
+printf '//! CLEAN DECOY — the file resolution would reach\npub fn p() {}\n' >"$wt41/cqlite-core/src/probe_decl.rs"
+printf '#![cfg(feature = "benchmarks")]\n//! the REAL module, and it GATES ITSELF\npub fn p() {}\n' >"$wt41/cqlite-core/src/probe_actual.rs"
+set +e
+bash "$wt41/$GUARD_REL" >"$TMPROOT/case41.out" 2>&1
+case41_rc=$?
+set -e
+[ "$case41_rc" -ne 0 ] || fail_case "case 41 — a \`#[path]\` declaration with a CLEAN DECOY at the standard path passed GREEN: the guard read the decoy while the real module file gates itself; got: $(cat "$TMPROOT/case41.out")"
+grep -qF 'path\` attribute' "$TMPROOT/case41.out" \
+  || grep -qF "path" "$TMPROOT/case41.out" \
+  || fail_case "case 41 — the guard failed but never named the \`path\` attribute as the cause; got: $(cat "$TMPROOT/case41.out")"
+echo "OK (40/41): a raw string, and a \`#[path]\` decoy, in a crate-root declaration attribute each make the guard REFUSE rather than exempt or read the wrong file"
+
+# ---------------------------------------------------------------------------
+# 42. RED — a first-line SHEBANG hiding an inner gate (roborev r9 F3).
+#
+#     rustc accepts `#!...` on line 1 when it is not `#![` — VERIFIED with rustc
+#     1.98.0: `#!/usr/bin/env rust` + `#![cfg(feature = "nope")]` compiles and the
+#     gate APPLIES (no symbol emitted). Pre-fix the shebang read as the first item,
+#     the prologue ended at line 1, and the module was CERTIFIED. MEASURED: CLEAN 1.
+#
+#     Asserts the NAMED DEFECT, not a refusal: exactly one shebang is possible and
+#     only on line 1, so this is exactly modellable and the honest verdict is the
+#     #1712 INCONSISTENT diagnostic with its hoist remedy.
+# ---------------------------------------------------------------------------
+oracle_tree prologue-shebang; wt42="$SCRATCH"
+printf '#!/usr/bin/env rust\n#![cfg(feature = "benchmarks")]\n\n//! Self-test-only probe (#1712 r9 F3).\npub fn probe() {}\n' >"$wt42/cqlite-core/src/probe_oracle.rs"
+set +e
+bash "$wt42/$GUARD_REL" >"$TMPROOT/case42.out" 2>&1
+case42_rc=$?
+set -e
+[ "$case42_rc" -ne 0 ] || fail_case "case 42 — a first-line shebang ended the prologue scan and HID the inner \`#![cfg(...)]\` below it; the guard passed GREEN on a module rustc configures out; got: $(cat "$TMPROOT/case42.out")"
+grep -q "probe_oracle" "$TMPROOT/case42.out" \
+  || fail_case "case 42 — the guard failed but never named \`probe_oracle\`; got: $(cat "$TMPROOT/case42.out")"
+grep -q "INCONSISTENT" "$TMPROOT/case42.out" \
+  || fail_case "case 42 — a shebang-hidden \`#![cfg(...)]\` was not reported as the INCONSISTENT #1712 defect. A shebang is exactly modellable (one, line 1 only), so the verdict must be the NAMED defect carrying the hoist remedy, not a refusal; got: $(cat "$TMPROOT/case42.out")"
+echo "OK (42): a first-line shebang does not hide an inner \`#![cfg(...)]\` — it is caught as the NAMED defect"
+
+# ---------------------------------------------------------------------------
 # 36. GREEN — THE POSITIVE CONTROL for 29-38.
 #
 #     Without it, every case above would be satisfied by a guard hardwired to refuse
@@ -1265,4 +1360,4 @@ grep -qF "affirmative measurement" "$TMPROOT/case39.out" \
 echo "OK (39): a crate root with ZERO unconditional declarations FAILs — the assert never reports success having examined nothing"
 
 echo ""
-echo "PASS: test_pub_surface_guard.sh — all 26 cases (5 green, 19 reds, 1 usage, 1 kill-safety)"
+echo "PASS: test_pub_surface_guard.sh — all 29 cases (5 green, 22 reds, 1 usage, 1 kill-safety)"
