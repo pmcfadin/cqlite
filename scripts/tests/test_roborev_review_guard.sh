@@ -4958,7 +4958,14 @@ _WR_QS=$(cat <<'AWKEOF'
   # Rather than grow the parser to cover each construct, an unbalanced line is REFUSED: a verdict
   # derived from an unreliable parse is not a verdict. Measured cost on this file: zero lines.
   bal = (sq || dq) ? 0 : 1
-  printf "%d %d %d %d %d %d\n%s\n", code, lit, q, mk, ev, bal, seg
+  # A COMMAND SUBSTITUTION RESTARTS QUOTING, and this flat state machine cannot model that: inside
+  # `$( )` a fresh `"` opens a NEW double-quoted context, so `ok "$(grep "a'"'"'b" "$WRAPPER" "c'"'"'d")"`
+  # is valid shell that READS the wrapper while the flat scan pairs the two apostrophes and calls it
+  # single-quoted prose. Modelling nesting properly is a real shell parser; refusing to call anything
+  # inside a substitution "prose" is one flag. Only the prose verdict is affected — a live read in a
+  # substitution is still judged on spelling/arity/form as before.
+  cs = (seg ~ /[$][(]/) ? 1 : 0
+  printf "%d %d %d %d %d %d %d\n%s\n", code, lit, q, mk, ev, bal, cs, seg
 }
 AWKEOF
 )
@@ -4973,7 +4980,8 @@ _wr_classify() {
   _c_lit=${_c_rest%% *}; _c_rest=${_c_rest#* }
   _c_q=${_c_rest%% *}; _c_rest=${_c_rest#* }
   _c_mk=${_c_rest%% *}; _c_rest=${_c_rest#* }
-  _c_ev=${_c_rest%% *}; _c_bal=${_c_rest##* }
+  _c_ev=${_c_rest%% *}; _c_rest=${_c_rest#* }
+  _c_bal=${_c_rest%% *}; _c_cs=${_c_rest##* }
   # AN UNRELIABLE PARSE YIELDS NO VERDICT (reviewer). Checked FIRST: every field below is derived
   # from the same state machine, so if it ended the line inside a quote, none of them can be trusted.
   # DEFAULTS TO UNTRUSTWORTHY, not to balanced. This is the one field whose job is to say "do not
@@ -4994,10 +5002,13 @@ _wr_classify() {
       # command word is this harness's own `ok`/`bad` reporter. Anything else FAILs closed, which
       # costs nothing today (all four literal occurrences are diagnostics) and cannot be widened by
       # accident.
-      _c_pw=$(_wr_cmdpos "$_c_seg")
-      case "$_c_pw" in
-        'ok '*|'bad '*) printf 'prose-ok %s\n' "$_c_lit"; return ;;
-      esac
+      # ...and never inside a command substitution, where the flat parse cannot be trusted.
+      if [ "${_c_cs:-1}" -eq 0 ]; then
+        _c_pw=$(_wr_cmdpos "$_c_seg")
+        case "$_c_pw" in
+          'ok '*|'bad '*) printf 'prose-ok %s\n' "$_c_lit"; return ;;
+        esac
+      fi
       printf 'prose %s\n' "$_c_lit"; return
     fi
     printf 'none 0\n'; return
@@ -5155,6 +5166,7 @@ _wr_fixture f_bracedef "_x=\$(grep -c foo \"\${$_wr_vname:-/tmp/x}\")"
 _wr_fixture f_fakeinv  "grep foo $_wr_ref # \$(bash $_wr_ref)"
 _wr_fixture f_evalasm  "_cmd='grep foo $_wr_ref'"
 _wr_fixture f_multiline "' \"\$ORACLES\" \"\$CHECKS_FILE\" $_wr_ref 2>/dev/null || true)"
+_wr_fixture f_csprose  "ok \"\$(grep \"a'b\" $_wr_ref \"c'd\")\""
 _wr_fixture f_locsave  "  local _gm_real_wrapper=$_wr_ref"
 _wr_fixture f_semisave "_gm_real_wrapper=$_wr_ref;"
 _wr_fixture f_cmpsave  "_wr_saved=x; subject=$_wr_ref"
@@ -5186,6 +5198,7 @@ _wr_expect f_bracedef spelling
 _wr_expect f_fakeinv  form
 _wr_expect f_evalasm  prose
 _wr_expect f_multiline unbalanced
+_wr_expect f_csprose  prose
 _wr_expect f_locsave  clean
 _wr_expect f_semisave clean
 _wr_expect f_cmpsave  form
@@ -5200,7 +5213,7 @@ _wr_expect f_empty    empty
 # and the success message below prints counts from them.
 _wr_scan_file "$TEST_SELF"
 if [ -z "$_wr_ctl_bad" ]; then
-  ok 'structural control (#3367): the ENFORCEMENT PASS itself (classifier + dispatch) gives the correct verdict on all thirty-one fixtures — it rejects the braced, unquoted, compound-line, unallowlisted-alias, mentions-the-word-bash quote-swallowed, marker-self-authorising and eval bypasses, refuses to let a marker waive a second read, reports a subjectless file as empty, and still accepts invocations, allowlisted saves, marked opt-outs, captured invocations and unmarked prose'
+  ok 'structural control (#3367): the ENFORCEMENT PASS itself (classifier + dispatch) gives the correct verdict on all thirty-two fixtures — it rejects the braced, unquoted, compound-line, unallowlisted-alias, mentions-the-word-bash quote-swallowed, marker-self-authorising and eval bypasses, refuses to let a marker waive a second read, reports a subjectless file as empty, and still accepts invocations, allowlisted saves, marked opt-outs, captured invocations and unmarked prose'
 else
   bad "structural control (#3367): the enforcement pass misclassifies a fixture, so its verdict on the real file is not trustworthy —$_wr_ctl_bad"
 fi
@@ -5215,7 +5228,14 @@ while IFS= read -r _wr_u; do
   [ -n "$_wr_u" ] || continue
   _wr_uc=${_wr_u#*:}
   _wr_uc=$(printf '%s\n' "$_wr_uc" | sed -e 's/\\[$]/@ESC@/g' -e "s/'[^']*'//g")
-  case "$_wr_uc" in *"$_wr_alias_re"*) continue ;; esac   # the declaration line itself
+  # THE DECLARATION IS EXEMPT BY BEING THE DECLARATION, not by containing its own text. This was
+  # `case $line in *"$_wr_alias_re"*)`, an unanchored substring of the `a|b` alternation, so any line
+  # quoting that text was skipped: `grep -E "_gm_real_wrapper|_wr_saved" "$_wr_saved"` exempted
+  # itself while scanning an alias. Fourth instance of one error in this file — a permitted shape
+  # found ANYWHERE standing in for the line BEING that shape.
+  _wr_ud=${_wr_uc#"${_wr_uc%%[! 	]*}"}
+  _wr_ud=${_wr_ud%"${_wr_ud##*[! 	]}"}
+  [ "$_wr_ud" = "_wr_aliases=" ] && continue
   _wr_alias_seen=$((_wr_alias_seen + 1))
   case "$_wr_uc" in *"$_wr_marker"*) continue ;; esac
   _wr_ut=${_wr_uc#"${_wr_uc%%[! ]*}"}
@@ -5228,6 +5248,27 @@ while IFS= read -r _wr_u; do
 done <<EOF
 $(grep -nE '[$][{]?('"$_wr_alias_re"')[}]?([^A-Za-z0-9_]|$)' "$TEST_SELF" | grep -vE '^[0-9]+:[[:space:]]*#')
 EOF
+# CONTROL for the exemption above (roborev job 42): embedding the declaration's text must NOT
+# authorise an alias use. Both probes run the same predicate the loop uses.
+#
+# THE PROBE STRINGS ARE BUILT AT RUNTIME, never written literally, because this file is its own
+# subject: a literal `"$_wr_saved"` here would be a genuine alias use and the loop above would
+# rightly flag it. Composing from `$_wr_aliases` keeps the source line free of any alias occurrence.
+_wr_ax_alias=${_wr_aliases##* }
+_wr_ax_bad=""
+_wr_ax_probe=$(printf 'grep -E "%s" "$%s"' "$_wr_alias_re" "$_wr_ax_alias")
+for _wr_ax in "_wr_aliases=|exempt" "$_wr_ax_probe|judged"; do
+  _wr_axl=${_wr_ax%|*}; _wr_axw=${_wr_ax##*|}
+  _wr_axc=$(printf '%s\n' "$_wr_axl" | sed -e 's/\\[$]/@ESC@/g' -e "s/'[^']*'//g")
+  _wr_axc=${_wr_axc#"${_wr_axc%%[! 	]*}"}; _wr_axc=${_wr_axc%"${_wr_axc##*[! 	]}"}
+  if [ "$_wr_axc" = "_wr_aliases=" ]; then _wr_axg=exempt; else _wr_axg=judged; fi
+  [ "$_wr_axg" = "$_wr_axw" ] || _wr_ax_bad="$_wr_ax_bad [want=$_wr_axw got=$_wr_axg: $_wr_axl]"
+done
+if [ -z "$_wr_ax_bad" ]; then
+  ok 'structural control (#3367): the alias-declaration exemption matches the declaration EXACTLY — a line merely quoting the alias names is still judged, so it cannot exempt itself while scanning an alias'
+else
+  bad "structural control (#3367): the alias-declaration exemption misclassifies a synthetic line, so a line quoting the declaration could skip the alias-use check —$_wr_ax_bad"
+fi
 if [ "${_wr_alias_seen:-0}" -eq 0 ]; then
   bad 'structural (#3367): no use of any save alias was found, so the alias restriction certified nothing — the aliases were renamed and the allowlist is now describing names that do not exist'
 elif [ -z "$_wr_alias_bad" ]; then
