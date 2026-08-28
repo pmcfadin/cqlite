@@ -141,6 +141,21 @@ def build(case, d, workers):
             win["perf_cpus"] = ","           # TRUTHY but names no CPU -> MALFORMED
         elif case == "short-worker-cpus":
             win["worker_cpus"] = worker_cpus[:-1]
+        elif case == "uncounted-worker-cpu":
+            # A CPU a worker RAN ON that perf did not count. `worker_cpus` and the
+            # workers' own affinity readback still agree, so the affinity check
+            # passes; only the counted-vs-worked comparison can see this.
+            win["perf_cpus"] = ",".join(
+                str(c) for g in worker_cpus for c in g if c != worker_cpus[-1][-1])
+        elif case == "idle-counted-cpu":
+            # A CPU perf counted that NO worker used: its cycles are attributed to
+            # these workers' rows.
+            win["perf_cpus"] = win["perf_cpus"] + ",99"
+        elif case == "duplicate-perf-cpu":
+            # The same CPU named twice inflates the counted-CPU count.
+            win["perf_cpus"] = win["perf_cpus"] + f",{worker_cpus[0][0]}"
+        elif case == "noninteger-perf-cpu":
+            win["perf_cpus"] = win["perf_cpus"] + ",cpu7"
         with open(os.path.join(d, "window.json"), "w") as fh:
             json.dump(win, fh)
 
@@ -196,6 +211,35 @@ def flight_step(path, case):
         rec["requests_ok"] = 0
     elif case == "two-steps":
         lines = [rec, dict(rec, concurrency=16)]
+    elif case == "no-rows-per-s":
+        del rec["rows_per_s"]
+    elif case == "no-requests-ok":
+        del rec["requests_ok"]
+    elif case == "no-requests-error":
+        del rec["requests_error"]
+    elif case == "no-requests-unavailable":
+        del rec["requests_unavailable"]
+    elif case == "zero-rate":
+        rec["rows_per_s"] = 0
+    elif case == "bad-rate":
+        rec["rows_per_s"] = "fast"
+    elif case == "real-shape":
+        # EXACTLY the `flight-loadgen.step/v1` key set of the committed
+        # ../phase2-run/doget-s1-r1.jsonl, so the positive control is the shape
+        # the campaign actually recorded rather than a shape invented here.
+        rec.clear()
+        rec.update({
+            "schema": "flight-loadgen.step/v1", "round": "r1",
+            "endpoint": "http://127.0.0.1:18903", "ts_unix_ms": 1787871479569,
+            "seed": 42, "step": 0, "target_concurrency": 1, "shape": "full",
+            "duration_s": 36.462841232, "requests_ok": 2,
+            "requests_unavailable": 0, "requests_error": 0, "error_codes": {},
+            "qps": 0.05485036087217439, "rows_per_s": 219401.44348869755,
+            "bytes_per_s": 2778018729.4648724, "rows_total": 8000000,
+            "bytes_total": 101294455872,
+            "latency_ms": {"p50": 18219.007, "p95": 18268.159,
+                           "p99": 18268.159, "max": 18268.159, "samples": 2},
+        })
     elif case == "no-step":
         lines = [{"round": "t", "note": "a record with no rows_total"}]
     elif case == "empty":

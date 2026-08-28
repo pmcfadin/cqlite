@@ -409,6 +409,50 @@ def guard_window(args):
                 f"worker {i} ran on CPUs {got} but was pinned to {want}. The kernel, not "
                 f"the taskset argument, is the authority on where it ran.",
             )
+    # THE COUNTED CPUs MUST BE THE WORKED CPUs — not merely the right NUMBER of
+    # them. Everything below this point attributes CPU-wide counters to the rows
+    # the workers produced, and that attribution is only sound if the set perf
+    # counted IS the set the workers ran on. Counting the CARDINALITY (which is
+    # all the counter-window check needs) cannot see a substitution: swap one
+    # pinned CPU for an idle one and `ncpus` is unchanged, `task-clock` still
+    # reads W x N because it accrues on idle CPUs too, and the rep passes while a
+    # worker's cycles were never counted and an unrelated CPU's were.
+    #
+    # sweep.sh builds `--worker-cpus` and `--perf-cpus` from ONE `$CPUS`
+    # variable, so the two agree by construction today. That is a property of the
+    # DRIVER, and a guard that relies on its driver being correct is checking
+    # nothing: this makes the driver's guarantee an OBSERVED one, so a future
+    # invocation that passes the two separately (or a hand-run rep.py, which
+    # takes them as independent flags) cannot publish mis-attributed counters.
+    perf_cpu_list = [c for c in w["perf_cpus"].split(",") if c != ""]
+    try:
+        perf_set = {int(c) for c in perf_cpu_list}
+    except ValueError:
+        fail("WINDOW_FIELD_MALFORMED",
+             f"{win} has a non-integer entry in `perf_cpus` ({w['perf_cpus']!r}); the counted CPU "
+             f"set cannot be compared with the worked one.")
+    if not perf_set:
+        fail("WINDOW_FIELD_MALFORMED",
+             f"{win} has a `perf_cpus` naming no CPU ({w['perf_cpus']!r}); there is no counted "
+             f"CPU set to compare with the worked one, and the counter-window check divides by "
+             f"the counted CPU count.")
+    if len(perf_set) != len(perf_cpu_list):
+        fail("WINDOW_FIELD_MALFORMED",
+             f"{win} lists a CPU more than once in `perf_cpus` ({w['perf_cpus']!r}); perf counts "
+             f"each CPU once, so a duplicated entry inflates the counted-CPU count and the "
+             f"counter-window comparison divides by the wrong number.")
+    worked_set = {int(c) for grp in expected for c in grp}
+    if worked_set != perf_set:
+        unc = sorted(worked_set - perf_set)
+        idle = sorted(perf_set - worked_set)
+        fail(
+            "WINDOW_CPU_SET_MISMATCH",
+            f"the workers ran on CPUs {sorted(worked_set)} but perf counted {sorted(perf_set)}. "
+            f"Uncounted worked CPU(s): {unc or 'none'}; counted CPU(s) no worker used: "
+            f"{idle or 'none'}. Every counter below is attributed to these workers' rows, so the "
+            f"counted set must BE the worked set — the same cardinality is not the same set.",
+        )
+
     # THE COUNTER WINDOW AND THE ROW WINDOW MUST BE THE SAME INTERVAL.
     #
     # That identity is the central claim of this harness, and until now it rested
@@ -420,10 +464,7 @@ def guard_window(args):
     # is where it shows up, and the rep is refused.
     csv_name = w["perf_csv"]
     csv_path = os.path.join(args.repdir, csv_name)
-    ncpus = len([c for c in w["perf_cpus"].split(",") if c != ""])
-    if ncpus == 0:
-        fail("WINDOW_FIELD_MALFORMED", f"{win} has an empty `perf_cpus`; the counter-window "
-                                       f"check divides by the counted CPU count")
+    ncpus = len(perf_set)
     counters = parse_perf_csv(csv_path)
     if "task-clock" not in counters:
         fail(
@@ -514,12 +555,53 @@ def guard_flight_step(args):
             f"measurement — and it presents as a very FAST one, because a server answering "
             f"NotFound completes every request immediately.",
         )
+    # EVERY FIELD BELOW IS REQUIRED — the same fail-open shape closed in
+    # guard_window's required-field block, in this arm.
+    #
+    # These four used to be conditional (`if key in st`, `if "requests_ok" in
+    # st`, and `rows_per_s` merely echoed through `st.get`), so a record that
+    # carried a positive `rows_total` and NOTHING ELSE passed as a valid
+    # measurement: no success accounting, no error accounting, and no
+    # throughput. That is a check reporting success having measured nothing —
+    # and it is worse here than elsewhere, because a partially-failing do_get
+    # run is exactly what this guard exists to refuse (#3224: 2,258,606
+    # `NotFound`s behind an rc=0 rep). `flight-loadgen`'s
+    # `flight-loadgen.step/v1` schema emits all four on every step (see
+    # ../phase2-run/doget-*.jsonl), so an absent one means the record is not a
+    # step record of the measured run — never that the arm had no errors.
+    for key in ("requests_ok", "requests_error", "requests_unavailable", "rows_per_s"):
+        if key not in st:
+            fail(
+                "FLIGHT_FIELD_MISSING",
+                f"{args.jsonl}: the step record carries no `{key}`. It is REQUIRED: absence of "
+                f"an error/success count is not evidence of no errors, and absence of "
+                f"`rows_per_s` leaves the step with no measured throughput at all. A guard that "
+                f"skips itself when its input is missing returns success having checked nothing.",
+            )
     for key in ("requests_error", "requests_unavailable"):
-        if key in st and int(st[key]) != 0:
+        try:
+            n_bad = int(st[key])
+        except (TypeError, ValueError):
+            fail("FLIGHT_FIELD_MALFORMED", f"{args.jsonl}: `{key}` is {st[key]!r}, not a count")
+        if n_bad != 0:
             fail("FLIGHT_REQUEST_ERRORS", f"step reported {key}={st[key]}; a rep with failed requests is not a measurement")
-    if "requests_ok" in st and int(st["requests_ok"]) <= 0:
-        fail("FLIGHT_REQUEST_ERRORS", "step reported requests_ok=0")
-    print(json.dumps({"rows_total": rows, "rows_per_s": st.get("rows_per_s"), "record": args.jsonl}))
+    try:
+        n_ok = int(st["requests_ok"])
+    except (TypeError, ValueError):
+        fail("FLIGHT_FIELD_MALFORMED", f"{args.jsonl}: `requests_ok` is {st['requests_ok']!r}, not a count")
+    if n_ok <= 0:
+        fail("FLIGHT_REQUEST_ERRORS", f"step reported requests_ok={n_ok}")
+    try:
+        rate = float(st["rows_per_s"])
+    except (TypeError, ValueError):
+        fail("FLIGHT_FIELD_MALFORMED", f"{args.jsonl}: `rows_per_s` is {st['rows_per_s']!r}, not a rate")
+    if rate <= 0:
+        fail(
+            "FLIGHT_ZERO_ROWS",
+            f"step reported rows_per_s={rate}. A step that returned {rows} rows at a "
+            f"non-positive rate is inconsistent with itself; neither number can be published.",
+        )
+    print(json.dumps({"rows_total": rows, "rows_per_s": rate, "requests_ok": n_ok, "record": args.jsonl}))
     return 0
 
 

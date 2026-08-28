@@ -225,6 +225,26 @@ done
 python3 "$FIX" window --dir "$TMP/w-notc" --case no-task-clock --workers 2
 expect_guard_fail WINDOW_NO_TASK_CLOCK python3 "$GUARDS" window --repdir "$TMP/w-notc"
 
+# --- THE COUNTED CPUs MUST BE THE WORKED CPUs ------------------------------
+# The guard counted `perf_cpus` and never compared it with the set the workers
+# actually ran on, so a SUBSTITUTED CPU was invisible: cardinality is unchanged,
+# `task-clock` still reads window x ncpus (it accrues on idle CPUs too), and the
+# rep passed with an unrelated CPU's counters attributed to worker rows. Both
+# directions of the divergence must fire, and the identity must PASS on the
+# well-formed fixture — which is also the shape every committed window.json has.
+echo
+echo "-- counted CPUs == worked CPUs --"
+expect_ok "counted CPU set IS the worked CPU set" \
+  python3 "$GUARDS" window --repdir "$TMP/w-good"
+python3 "$FIX" window --dir "$TMP/w-uncounted" --case uncounted-worker-cpu --workers 2
+expect_guard_fail WINDOW_CPU_SET_MISMATCH python3 "$GUARDS" window --repdir "$TMP/w-uncounted"
+python3 "$FIX" window --dir "$TMP/w-idlecpu" --case idle-counted-cpu --workers 2
+expect_guard_fail WINDOW_CPU_SET_MISMATCH python3 "$GUARDS" window --repdir "$TMP/w-idlecpu"
+python3 "$FIX" window --dir "$TMP/w-dupcpu" --case duplicate-perf-cpu --workers 2
+expect_guard_fail WINDOW_FIELD_MALFORMED python3 "$GUARDS" window --repdir "$TMP/w-dupcpu"
+python3 "$FIX" window --dir "$TMP/w-nonintcpu" --case noninteger-perf-cpu --workers 2
+expect_guard_fail WINDOW_FIELD_MALFORMED python3 "$GUARDS" window --repdir "$TMP/w-nonintcpu"
+
 # ------------------------------------ phase 2: the Flight do_get step record ---
 echo
 echo "-- flight-step (phase 2) --"
@@ -246,6 +266,27 @@ for c in errors unavailable no-ok; do
 done
 python3 "$FIX" flight-step --path "$TMP/fl-two.jsonl" --case two-steps
 expect_guard_fail FLIGHT_STEP_COUNT python3 "$GUARDS" flight-step --jsonl "$TMP/fl-two.jsonl"
+
+# --- THE EVIDENCE IS REQUIRED, NOT OPTIONAL --------------------------------
+# `requests_ok`, `requests_error`, `requests_unavailable` and `rows_per_s` were
+# all conditional, so a record carrying a positive `rows_total` and nothing else
+# passed as a measurement: no success accounting, no error accounting, no
+# throughput. Absence of an error count is not evidence of no errors.
+for c in no-requests-ok no-requests-error no-requests-unavailable no-rows-per-s; do
+  python3 "$FIX" flight-step --path "$TMP/fl-$c.jsonl" --case "$c"
+  expect_guard_fail FLIGHT_FIELD_MISSING python3 "$GUARDS" flight-step --jsonl "$TMP/fl-$c.jsonl"
+done
+# Present but not a number: refused as malformed rather than coerced.
+python3 "$FIX" flight-step --path "$TMP/fl-bad-rate.jsonl" --case bad-rate
+expect_guard_fail FLIGHT_FIELD_MALFORMED python3 "$GUARDS" flight-step --jsonl "$TMP/fl-bad-rate.jsonl"
+# Positive rows at a zero rate is a record inconsistent with itself.
+python3 "$FIX" flight-step --path "$TMP/fl-zero-rate.jsonl" --case zero-rate
+expect_guard_fail FLIGHT_ZERO_ROWS python3 "$GUARDS" flight-step --jsonl "$TMP/fl-zero-rate.jsonl"
+# POSITIVE control at the REAL committed shape: the exact `flight-loadgen.step/v1`
+# key set of ../phase2-run/doget-s1-r1.jsonl must still pass.
+python3 "$FIX" flight-step --path "$TMP/fl-real.jsonl" --case real-shape
+expect_ok "flight-step accepts the real committed step/v1 record" \
+  python3 "$GUARDS" flight-step --jsonl "$TMP/fl-real.jsonl"
 
 # --------------------------------------------------------- corpus identity ---
 echo
