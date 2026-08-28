@@ -2,9 +2,9 @@
 
 > GENERATED from the observability catalog (`cqlite-core/src/observability/catalog.rs` + `operator_docs.rs`) by `cargo run -p cqlite-core --example gen_operator_metrics_doc`. Do NOT edit by hand — edit the catalog/annotations and regenerate. The `operator-metrics-doc` agent-gate component fails if this file drifts from the catalog (issue #2426).
 
-Operator-facing reference for every `cqlite.*` metric name in CQLite's observability catalog, covering Arrow Flight and the storage/write/compaction paths. Names, units, and bounded attribute sets come straight from the code, so this page cannot silently diverge from what a running server exposes.
+Operator-facing reference for every `cqlite.*` metric name in CQLite's observability catalog, covering Arrow Flight and the storage/write/compaction paths. Names, units, and bounded attribute sets are generated from the code.
 
-**Two populations, and the difference matters on a scrape.** Most catalogued names are LIVE OTel instruments: they are registered with the meter and show up on a Prometheus scrape / OTel collector export. The rest are **stats-only** — real recorded values that CQLite surfaces ONLY through the in-process `Database::stats().memory_stats` snapshot and never registers as an instrument. You will NOT find a stats-only name on a scrape, however long you look; read it from memory stats instead. The two are listed in separate sections below.
+**Two populations.** Most catalogued names are LIVE OTel instruments: registered with the meter, and scrapeable once they have recorded a value. The rest are **stats-only** — no instrument is ever registered, so they are never on a scrape at all; read them from the in-process `Database::stats().memory_stats` snapshot. The two are listed in separate sections below.
 
 Related: the Flight/Trino operator docs (`docs/flight-trino/`) and the round scoreboard template (issue #2399) link back to the entries here.
 
@@ -12,7 +12,7 @@ Catalogued metrics: **84** — **78** live OTel instruments and **6** stats-only
 
 ## Live instruments
 
-Registered with the OTel meter, so these appear on a Prometheus scrape / OTel collector export.
+Registered with the OTel meter; each appears on a Prometheus scrape / OTel collector export once it has recorded a value.
 
 | Metric | Type | Unit | Attributes | Operator meaning | Healthy vs alarming |
 |---|---|---|---|---|---|

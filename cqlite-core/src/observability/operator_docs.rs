@@ -45,7 +45,7 @@ pub const WEBSITE_DOC_REL: &str =
 const WEBSITE_FRONT_MATTER: &str = "\
 ---
 title: Flight metrics reference
-description: Operator reference for every cqlite.* metric in CQLite's observability catalog — which names are live OTel instruments you can scrape, and which are stats-only and readable solely from Database::stats(). Generated from the catalog so it cannot drift.
+description: Operator reference for every cqlite.* metric in CQLite's observability catalog — which names are live OTel instruments and which are stats-only, readable solely from Database::stats().
 sidebar:
   label: Flight metrics reference
   order: 20
@@ -180,8 +180,9 @@ pub fn render_markdown() -> Result<String, DocGenError> {
     docs.sort_by(|a, b| a.name.cmp(b.name));
 
     // Split the catalog into the two populations an operator experiences
-    // DIFFERENTLY (issue #1705): a live OTel instrument is scrapeable, a
-    // `catalog::STATS_ONLY_METRICS` entry provably is not (that list is exactly
+    // DIFFERENTLY (issue #1705): a live OTel instrument becomes scrapeable once it
+    // records a value, a `catalog::STATS_ONLY_METRICS` entry never does — a
+    // provable difference (that list is exactly
     // the set of catalogued names with no instrument, enforced by
     // `stats_only_metrics_are_catalogued_and_never_otel_registered`). Rendering
     // them under one "all instruments" heading with one total told operators to
@@ -213,18 +214,15 @@ pub fn render_markdown() -> Result<String, DocGenError> {
     line(
         "Operator-facing reference for every `cqlite.*` metric name in CQLite's \
          observability catalog, covering Arrow Flight and the storage/write/compaction \
-         paths. Names, units, and bounded attribute sets come straight from the code, \
-         so this page cannot silently diverge from what a running server exposes.",
+         paths. Names, units, and bounded attribute sets are generated from the code.",
     );
     line("");
     line(
-        "**Two populations, and the difference matters on a scrape.** Most catalogued \
-         names are LIVE OTel instruments: they are registered with the meter and show \
-         up on a Prometheus scrape / OTel collector export. The rest are **stats-only** \
-         — real recorded values that CQLite surfaces ONLY through the in-process \
-         `Database::stats().memory_stats` snapshot and never registers as an \
-         instrument. You will NOT find a stats-only name on a scrape, however long you \
-         look; read it from memory stats instead. The two are listed in separate \
+        "**Two populations.** Most catalogued names are LIVE OTel instruments: \
+         registered with the meter, and scrapeable once they have recorded a value. \
+         The rest are **stats-only** — no instrument is ever registered, so they are \
+         never on a scrape at all; read them from the in-process \
+         `Database::stats().memory_stats` snapshot. The two are listed in separate \
          sections below.",
     );
     line("");
@@ -242,8 +240,8 @@ pub fn render_markdown() -> Result<String, DocGenError> {
     line("## Live instruments");
     line("");
     line(
-        "Registered with the OTel meter, so these appear on a Prometheus scrape / OTel \
-         collector export.",
+        "Registered with the OTel meter; each appears on a Prometheus scrape / OTel \
+         collector export once it has recorded a value.",
     );
     line("");
     line("| Metric | Type | Unit | Attributes | Operator meaning | Healthy vs alarming |");
@@ -432,6 +430,21 @@ mod tests {
         assert!(
             !doc.contains("Total instruments:"),
             "a single instrument total counts stats-only names as instruments"
+        );
+
+        // A synchronous OTel instrument is exported only after it records a value, so
+        // the page may promise a scrape appearance only conditionally. `COMPRESSION_RATIO`
+        // is the standing counter-example: registered, and silent forever on the
+        // production write surface, which emits no compressed SSTables (#1406).
+        assert!(
+            doc.contains("once it has recorded a value"),
+            "the live-instrument section must condition a scrape appearance on the \
+             instrument having recorded"
+        );
+        assert!(
+            !doc.contains("so these appear on a Prometheus scrape"),
+            "an unconditional 'these appear on a scrape' claim is false for a \
+             registered instrument that has never recorded"
         );
 
         // Each population is rendered in ITS OWN section, and no name is in both.
