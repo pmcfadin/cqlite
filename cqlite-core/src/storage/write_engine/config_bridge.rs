@@ -89,9 +89,12 @@ impl WriteEngineConfig {
     /// | direct core embedder (`from_config` / `new`) | NO — nothing calls `validate` |
     ///
     /// So an in-process embedder can still construct a wedged engine (e.g. a
-    /// flush threshold above `memtable_hard_limit`: never flushed, and rejected
-    /// at admission). Closing that last gap needs either a fallible bridge or
-    /// validation inside `WriteEngine::new`; a follow-up issue owns the choice.
+    /// flush threshold at or above `memtable_hard_limit`: never flushed, and
+    /// rejected at admission; and on 32-bit/wasm32 the clamp below lands in the
+    /// same state). Closing that gap needs either a fallible bridge or validation
+    /// inside `WriteEngine::new` — an API decision with workspace-wide blast
+    /// radius, so it is tracked as **#3405** rather than made here. Embedders
+    /// calling `from_config` directly should call [`Config::validate`] first.
     ///
     /// ```rust,ignore
     /// let mut config = cqlite_core::Config::default();

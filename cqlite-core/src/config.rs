@@ -884,13 +884,21 @@ impl Config {
         // Validate the STCS thresholds threaded into the write engine (#1697).
         // `STCSPolicy::new` rejects these too, but failing here surfaces the
         // problem at config time rather than at engine construction.
+        //
+        // ONLY when `auto_compaction` is on (#1697 roborev r4). Both fields are
+        // documented as "Ignored when `auto_compaction` is `false`", and that is
+        // literally true of the code: `WriteEngine::new` constructs
+        // `STCSPolicy::new(min, max, ..)` inside `if config.auto_compaction`, and
+        // leaves the policy unset otherwise. Judging them unconditionally
+        // therefore rejected configurations that work — the thresholds are never
+        // read — while contradicting their own documented contract.
         let compaction = &self.storage.compaction;
-        if compaction.min_threshold == 0 {
+        if compaction.auto_compaction && compaction.min_threshold == 0 {
             return Err(crate::Error::configuration(
                 "compaction.min_threshold must be greater than 0",
             ));
         }
-        if compaction.max_threshold < compaction.min_threshold {
+        if compaction.auto_compaction && compaction.max_threshold < compaction.min_threshold {
             return Err(crate::Error::configuration(format!(
                 "compaction.max_threshold ({}) must be >= compaction.min_threshold ({})",
                 compaction.max_threshold, compaction.min_threshold

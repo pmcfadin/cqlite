@@ -438,6 +438,51 @@ fn zero_compaction_min_threshold_is_rejected() {
     config.validate().expect("min_threshold 1 must be accepted");
 }
 
+/// Item 5, the CONDITION on both compaction rules (#1697 roborev r4): they apply
+/// only when `auto_compaction` is on.
+///
+/// Both fields are documented as "Ignored when `auto_compaction` is `false`", and
+/// that is literally true of the code — `WriteEngine::new` builds
+/// `STCSPolicy::new(min, max, ..)` inside `if config.auto_compaction` and leaves
+/// the policy unset otherwise. Judging them unconditionally rejected
+/// configurations that work, since the thresholds are never read.
+#[test]
+fn compaction_thresholds_are_only_judged_when_auto_compaction_is_on() {
+    // Values that are nonsense FOR STCS, on a config where STCS never runs.
+    let mut config = Config::default();
+    config.storage.compaction.auto_compaction = false;
+    config.storage.compaction.min_threshold = 0;
+    config.storage.compaction.max_threshold = 0;
+    config
+        .validate()
+        .expect("thresholds documented as ignored must not be judged");
+
+    // NON-VACUITY: the SAME thresholds with compaction ENABLED are still fatal,
+    // so the condition did not disable the rules — it scoped them.
+    config.storage.compaction.auto_compaction = true;
+    let err = config
+        .validate()
+        .expect_err("with compaction on, a zero eligibility bar is still refused")
+        .to_string();
+    assert!(err.contains("compaction.min_threshold"), "{err}");
+
+    // ...and the max-below-min rule is scoped the same way, checked separately so
+    // one rule's condition cannot stand in as evidence for the other's.
+    let mut config = Config::default();
+    config.storage.compaction.auto_compaction = false;
+    config.storage.compaction.min_threshold = 8;
+    config.storage.compaction.max_threshold = 4;
+    config
+        .validate()
+        .expect("an ignored merge-width cap below the bar must not be judged");
+    config.storage.compaction.auto_compaction = true;
+    let err = config
+        .validate()
+        .expect_err("with compaction on, max below min is still refused")
+        .to_string();
+    assert!(err.contains("compaction.max_threshold"), "{err}");
+}
+
 /// Item 5: `compaction.max_threshold >= min_threshold` — a merge-width cap below
 /// the eligibility bar can never admit a merge.
 #[test]

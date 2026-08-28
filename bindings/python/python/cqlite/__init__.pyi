@@ -420,9 +420,12 @@ def open(
                 default 4) and ``storage.compaction.max_threshold`` (STCS merge
                 width cap, default 32).  All three now actually reach the write
                 engine.  ``storage.memtable_size_threshold`` is validated
-                against ``storage.memtable_hard_limit``: a threshold above the
-                ceiling raises ``ValueError``, because such a memtable can never
-                flush and is rejected at admission.
+                against ``storage.memtable_hard_limit``: it must be STRICTLY
+                less, so a threshold at OR above the ceiling raises
+                ``ValueError``.  Above the ceiling such a memtable can never
+                flush and is rejected at admission; at exactly the ceiling there
+                is no headroom, so an ordinary write is rejected before the
+                memtable ever reaches the flush trigger.
         writable: Enable write support (INSERT / UPDATE / DELETE).
                   When ``True``, both ``schema`` and ``write_dir`` must be provided.
         write_dir: Directory for WAL files and flushed SSTables.
