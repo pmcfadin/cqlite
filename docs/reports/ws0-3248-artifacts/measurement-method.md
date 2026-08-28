@@ -458,3 +458,45 @@ server startup and steady-state rather than the encode region, so the bias infla
 self-time, more in the scan arm. It does not close the reported gaps — the smallest is 21.5% — but it
 is a real term that was previously reported as zero, and a reader comparing per-function shares
 between the two arms should carry it.
+
+---
+
+## 9. A guard's failure modes include REDING ON CORRECT INPUT, and that is not the safe direction
+
+Recorded at the coordination lead's request after the **third** false red on this issue. All three
+came from the same collision: a **stricter check** meeting a **fixture or a precision mismatch** — not
+from a wrong idea about what to check.
+
+| # | The stricter check | What it met | Symptom |
+|---|---|---|---|
+| 1 | window coverage bound to the session's reps | `ts_unix_ms` semantics **assumed** rather than read | window pushed 18 s past the true end; a correctly covered session **refused** |
+| 2 | a QUIESCENT verdict must carry boundary evidence | a **test fixture** predating the requirement | the positive control red, and four refusal cases fired on the wrong precondition |
+| 3 | the judged window must cover the flight reps | window stamped `date -u +%…%SZ` (**whole seconds**) vs `ts_unix_ms` (**milliseconds**) | a window that genuinely covered a rep ending at `.900` read as ending at `.000` and **refused** it |
+
+**Why this matters more than it looks.** A false red feels like the safe failure — you have refused
+something, so surely you cannot have published a wrong number. But a guard that reds on correct input
+**is the guard people learn to waive**, and a waived guard protects nothing. Instance 1 was written
+*two rounds after* that sentence was recorded in this very document, by the person who recorded it.
+**Naming a hazard does not inoculate you against it.**
+
+**What the three have in common, and the rule that follows.** Each fix required knowing something
+about the *other* side of the comparison, and in each case the temptation was to pad in the
+"conservative" direction instead of finding out:
+
+* Instance 1 was settled by **reading the producer's source** (`ramp.rs:184-188`: both
+  `started.elapsed()` and `SystemTime::now()` are taken after every worker joins, so `ts_unix_ms` is
+  the rep's END) and by an independent measurement (payload mtime equals `ts` to the second).
+  Symmetric widening had been chosen because the record "does not say which end" — a guess padded in
+  the safe direction is still a guess, and it was wrong in the direction that cost a true result.
+* Instance 2 was settled by making the **fixture assert its own baseline**, so it cannot silently
+  drift out from under the checker that consumes it.
+* Instance 3 was settled by **one second** of slack on the end bound only — the exact maximum the
+  coarser side's resolution can hide (a stamp of `T` means the true instant lies in `[T, T+1)`), and
+  applied to the end alone because truncation moves *both* edges earlier, which **widens** at the
+  start (safe) and **narrows** at the end (unsafe). Any larger tolerance would be invented; any
+  symmetric tolerance would misunderstand the asymmetry.
+
+**So: when a guard compares two recorded quantities, establish the RESOLUTION and the SEMANTICS of
+both sides from their producers before choosing a tolerance.** "Conservative" is not a substitute for
+"measured", and the cost of getting it wrong lands on correct runs — which is the direction nobody
+checks for.
