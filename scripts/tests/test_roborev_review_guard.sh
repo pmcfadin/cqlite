@@ -4228,7 +4228,7 @@ STUB_GH_COMMENTS="\001pmcfadin\nroborev-waive: prompt-content-absent base=$mb8_b
 run_wrapper "$mb8_work"
 assert_says 'case (mb8) a marker naming the MERGE-BASE grants' \
   "^waiver: GRANTED \(author=@pmcfadin base=$mb8_base head=$mb8_head job=4656 reason=absence checked against the token accounting\)\$"
-assert_says 'case (mb8) and the absence verdict is WAIVED, not PASS' '^prompt-content: WAIVED \(2/2 code census paths absent'
+assert_says 'case (mb8) and the absence verdict is WAIVED, not PASS' '^prompt-content: WAIVED \(1/1 code census paths absent'
 reset_stub
 
 printf '== case (mb8b): a marker naming the STALE base ref TIP does NOT grant ==\n'
@@ -4246,7 +4246,7 @@ assert_says 'case (mb8b) the tip-bound marker is STALE' \
   "^waiver: STALE \(the marker names a different review — base \($mb8_tip != $mb8_base\)"
 assert_lacks 'case (mb8b) and it grants nothing' '^prompt-content: WAIVED'
 assert_says 'case (mb8b) the absence FAIL stands' \
-  '^prompt-content: FAIL \(2/2 code census paths absent from the prompt\)$'
+  '^prompt-content: FAIL \(1/1 code census paths absent from the prompt\)$'
 reset_stub
 
 printf '== the summary header is distinct from every agent-gate header ==\n'
