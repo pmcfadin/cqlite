@@ -120,6 +120,12 @@ REQUIRED_OBSERVATION_FIELDS = (
 )
 
 
+# The largest boundary product `expected_boundary_labels` will build (#3393). The published sweep is
+# 25 points x 3 reps; 100k is ~three orders of magnitude above any real configuration, so this can
+# only fire on a caller defect — never on a legitimately large session.
+MAX_EXPECTED_BOUNDARIES = 100_000
+
+
 def boundary_label(temp: str, rep: int, arm: str) -> str:
     """The label the driver stamps for the boundary AFTER `arm`'s rep of `temp`.
 
@@ -140,7 +146,31 @@ def expected_boundary_labels(temps: list[str], arms: list[str], reps: int) -> li
     round, so a component replaced between them lands directly on the ratio. The expected set is
     therefore the full product: every temperature, every rep, and the bare scan plus every selected
     flight arm.
+
+    FAIL-CLOSED ON AN IMPLAUSIBLE PRODUCT (#3393). Unbounded, this materializes the whole product as
+    a list, and a caller then materializes a second list of JSON strings over it plus the joined
+    string — roughly three resident copies. On 2026-08-27/28 that reached 20-28 GB RSS and the kernel
+    issued 14 global OOM kills across two 30 GB workers, wedging sshd (a box that cannot fork cannot
+    accept an ssh session) and silently killing five sibling lane sessions. The measurement rig's
+    real configurations are small: the published S=1..6 sweep is 25 points x 3 reps.
+
+    So refuse an absurd product rather than try to build it. This is deliberately a REFUSAL and not
+    a silent truncation: a truncated expected set would report every missing boundary as the
+    operator's fault, which is the failure mode `boundary_label`'s own docstring warns about one
+    function above. The cap is far above any real configuration, so it can only fire on a defect.
     """
+    n_arms = 1 + len(arms)
+    product = len(temps) * max(reps, 0) * n_arms
+    if reps < 0:
+        raise ValueError(f"expected_boundary_labels: reps must be >= 0, got {reps}")
+    if product > MAX_EXPECTED_BOUNDARIES:
+        raise ValueError(
+            "expected_boundary_labels: refusing an implausible boundary product "
+            f"({len(temps)} temps x {reps} reps x {n_arms} arms = {product} labels, "
+            f"cap {MAX_EXPECTED_BOUNDARIES}). A real sweep is orders of magnitude smaller; this "
+            "is a caller defect, not a large session. See #3393 — building it has OOM-killed "
+            "workers and taken sshd down with them."
+        )
     return [
         boundary_label(temp, rep, arm)
         for temp in temps

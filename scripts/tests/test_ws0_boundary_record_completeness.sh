@@ -429,6 +429,55 @@ else
 fi
 
 # ==========================================================================
+# §26 — `expected_boundary_labels` REFUSES an implausible product (#3393)
+# ==========================================================================
+# Unbounded, this function materializes the whole temps x reps x arms product as a list, and
+# `ws0_pin_boundary_observations` then materializes a SECOND list of JSON strings over it plus the
+# joined string — ~three resident copies. On 2026-08-27/28 that reached 20-28 GB RSS and the kernel
+# issued 14 global OOM kills across two 30 GB workers, wedging sshd (a box that cannot fork cannot
+# accept an ssh session) and silently killing five sibling lane sessions.
+#
+# BOTH DIRECTIONS are pinned, because a cap tested only in its refusing direction is how a guard
+# ships that reds correct input — the failure mode this rig has recorded repeatedly.
+
+labels_probe() {
+  python3 - "$PERF_DIR" "$1" <<'PY' 2>&1
+import sys
+sys.path.insert(0, sys.argv[1])
+from ws0_boundary_observations import expected_boundary_labels
+try:
+    out = expected_boundary_labels(["warm"], ["bypass"], int(sys.argv[2]))
+    print(f"BUILT {len(out)}")
+except ValueError as exc:
+    print(f"REFUSED {exc}")
+PY
+}
+
+real_out="$(labels_probe 3)"
+if [[ "$real_out" == "BUILT 6" ]]; then
+  pass "OBSERVED (#3393, GREEN direction): a real configuration still builds — 1 temp x 3 reps x (scan+bypass) = 6 labels, so the cap cannot red a legitimate sweep"
+else
+  fail "#3393: a real configuration must still build 6 labels (got: $real_out)"
+fi
+
+absurd_out="$(labels_probe 10000000)"
+if [[ "$absurd_out" == REFUSED* ]] \
+   && grep -q 'implausible boundary product' <<<"$absurd_out" \
+   && grep -q '3393' <<<"$absurd_out"; then
+  pass "OBSERVED (#3393, RED direction): an absurd product REFUSES with the count, the cap and the issue named, instead of allocating ~28 GB and being OOM-killed"
+else
+  fail "#3393: an absurd product must refuse, naming the product and the cap (got: $absurd_out)"
+fi
+
+# A REFUSAL, never a truncation: a silently-truncated expected set would report every missing
+# boundary as the operator's fault, which is exactly what `boundary_label`'s docstring warns about.
+if grep -q 'REFUSED' <<<"$absurd_out" && ! grep -q '^BUILT' <<<"$absurd_out"; then
+  pass "OBSERVED (#3393): the oversize path REFUSES rather than truncating, so a short expected set can never be blamed on the operator"
+else
+  fail "#3393: the oversize path must refuse, not truncate (got: $absurd_out)"
+fi
+
+# ==========================================================================
 # A MINIMUM CHECK COUNT, because `set -uo pipefail` carries no `-e`
 # ==========================================================================
 # Without `-e` a block that silently never executes LOWERS the count and registers NO failure, and
@@ -436,7 +485,7 @@ fi
 # and reports SUCCESS. That is the suite-level vacuous green, one level up from the checks.
 #
 # The floor is DERIVED FROM THE OBSERVED COUNT — run, then recorded — never counted off the source.
-MIN_CHECKS=13
+MIN_CHECKS=16
 if [ "$checks" -lt "$MIN_CHECKS" ]; then
   echo
   echo "FAIL - only $checks check(s) ran; this suite has at least $MIN_CHECKS."
