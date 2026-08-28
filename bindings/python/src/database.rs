@@ -35,7 +35,7 @@ use tokio::sync::Mutex as AsyncMutex;
 use pyo3::exceptions::{PyRuntimeError, PyValueError};
 use pyo3::prelude::*;
 
-use crate::config::{config_from_py, StreamingConfig};
+use crate::config::{parse_config_from_py, StreamingConfig};
 use crate::error::{runtime_init_to_py_err, to_py_err};
 use crate::prepared::PreparedStatement;
 use crate::result::{QueryResult, StreamingIterator};
@@ -846,7 +846,15 @@ pub fn open(
         }
     }
 
-    let core_config = config_from_py(py, config)?;
+    // Parse WITHOUT validating, so the `flush_threshold` override below is folded
+    // in BEFORE the config is judged (#1697 roborev r2). Validating the base
+    // first rejected a config invalid ONLY in the field the override was about to
+    // replace — e.g. a dict whose `storage.memtable_size_threshold` sits above
+    // the caller's `memtable_hard_limit`, passed together with a
+    // `flush_threshold` that brings it back under. The merged config would have
+    // been valid; the caller saw a rejection anyway. The merged config IS
+    // validated below, once, and it is the config every path here uses.
+    let mut core_config = parse_config_from_py(py, config)?;
 
     // Capture the whole public config before `core_config` is moved into
     // ingestion / Database::open, so `Config.storage` is authoritative for the
@@ -859,21 +867,36 @@ pub fn open(
     // with missing-field errors. To flip one switch, take a full dict from a
     // preset (e.g. `cqlite.performance_optimized()`), set
     // `["storage"]["compaction"]["auto_compaction"] = False`, then pass it.
-    let mut write_engine_public_config = core_config.clone();
     if let Some(v) = flush_threshold {
         // The ceiling check MUST live here, beside the fold that mutates the very
         // field it constrains, and MUST compare against the CALLER's
         // `memtable_hard_limit` — never `Config::default()`'s (#1697 roborev r1).
         // Above the caller's ceiling, auto-flush never fires and admission
         // rejects first: the write path dead-ends permanently (roborev 2885).
-        let hard_limit = write_engine_public_config.storage.memtable_hard_limit;
+        //
+        // Kept even though the merged `validate()` below rejects the same
+        // condition: this names the OVERRIDE and both operands, where the core
+        // error names only the two config fields.
+        let hard_limit = core_config.storage.memtable_hard_limit;
         if v > hard_limit {
             return Err(PyValueError::new_err(format!(
                 "flush_threshold ({v} bytes) must not exceed the memtable hard limit ({hard_limit} bytes)"
             )));
         }
-        write_engine_public_config.storage.memtable_size_threshold = v;
+        // Fold into `core_config` itself, not a clone: after #1697 the public
+        // config is the single source of truth, so the effective threshold must
+        // be the one the read side sees too, not a value that exists only on a
+        // copy handed to the write engine.
+        core_config.storage.memtable_size_threshold = v;
     }
+
+    // Validate the MERGED config — the one actually used below, by both the read
+    // side and (via the bridge) the write engine.
+    core_config
+        .validate()
+        .map_err(|e| PyValueError::new_err(e.to_string()))?;
+
+    let write_engine_public_config = core_config.clone();
 
     // Open the read-side database and capture the schema registry when present.
     // We always use ingestion when a schema file is provided because that path

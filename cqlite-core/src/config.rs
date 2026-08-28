@@ -835,9 +835,28 @@ impl Config {
             }
         }
 
-        // A hard limit below the flush threshold wedges the write engine: the
-        // memtable is rejected at the ceiling before a flush can relieve it.
-        // Only expressible as a rule now that both knobs live here (#1697).
+        // A hard limit below the flush threshold wedges the write engine for
+        // EVERY write: the memtable is rejected at the ceiling before a flush can
+        // relieve it. Only expressible as a rule now that both knobs live here
+        // (#1697).
+        //
+        // SCOPE OF THIS RULE, stated because it is narrower than it looks
+        // (#1697 roborev r2, engine defect filed separately): passing it does NOT
+        // make the write path wedge-free. `WriteEngine::check_admission` rejects
+        // `memtable_size + incoming > memtable_hard_limit` without attempting a
+        // flush, while auto-flush fires only AFTER a successful insert. So any
+        // single mutation larger than `memtable_hard_limit - memtable_size` is
+        // rejected while the memtable sits below the flush threshold, and
+        // retrying it is rejected forever.
+        //
+        // NO INEQUALITY BETWEEN THESE TWO KNOBS CAN CLOSE THAT, which is why this
+        // rule deliberately still admits equality rather than being tightened to
+        // `>`: with one byte of headroom a 3-byte mutation wedges, and at the
+        // DEFAULT 64 MiB/256 MiB a ~192 MiB mutation wedges. The wedge is a
+        // function of the largest single mutation, which config cannot know, so a
+        // stricter bound here would reject working configurations while still
+        // promising nothing. The fix belongs in admission (flush a nonempty
+        // memtable before rejecting a mutation that fits by itself).
         if self.storage.memtable_hard_limit < self.storage.memtable_size_threshold {
             return Err(crate::Error::configuration(format!(
                 "memtable_hard_limit ({} bytes) must be >= memtable_size_threshold \

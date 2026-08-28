@@ -198,3 +198,76 @@ def test_flush_threshold_above_default_but_under_callers_high_hard_limit_accepte
         assert _count_data_db(tmp_path / "write_dir") == 0
     finally:
         db.close()
+
+
+# ---------------------------------------------------------------------------
+# #1697 roborev r2 — the override is folded in BEFORE the config is judged
+# ---------------------------------------------------------------------------
+# `config_from_py` validated the BASE config, and the `flush_threshold` fold ran
+# afterwards. So a dict invalid ONLY in the field the override was about to
+# replace was rejected, even though the MERGED config was valid. Note
+# `_preset_with_limits`'s own docstring above worked AROUND this: it sets both
+# knobs together specifically to keep the base dict internally valid, because a
+# base-config rejection would mask the check those tests are about. This test
+# attacks the interaction directly instead.
+
+
+def test_flush_threshold_repairs_a_base_invalid_only_in_the_overridden_field(
+    tmp_path, schema_file
+):
+    """An override that makes the merged config VALID must not be pre-empted.
+
+    The base dict is invalid on its own — a 128 MB threshold above a 64 MB
+    ceiling, which `Config::validate` rejects as a wedged engine — but
+    `flush_threshold` replaces that exact field with 16 MB, well under the
+    ceiling. Judging the base first rejected a configuration that never reaches
+    the engine.
+    """
+    cfg = _preset_with_limits(64 * 1024 * 1024, 128 * 1024 * 1024)
+    data_dir = tmp_path / "data_dir"
+    data_dir.mkdir(exist_ok=True)
+    db = cqlite.open(
+        str(data_dir),
+        schema=str(schema_file),
+        writable=True,
+        write_dir=str(tmp_path / "write_dir"),
+        config=cfg,
+        flush_threshold=16 * 1024 * 1024,  # replaces the 128 MB that made it invalid
+    )
+    try:
+        # Wiring evidence, not mere acceptance: the folded 16 MB threshold is what
+        # the engine runs on, so a handful of tiny inserts stays under the cliff.
+        for i in range(20):
+            assert (
+                db.execute(
+                    f"INSERT INTO flush_test.items (id, name, value) "
+                    f"VALUES ({i}, 'user{i}', {i})"
+                ).rows_affected
+                == 1
+            )
+        assert _count_data_db(tmp_path / "write_dir") == 0
+    finally:
+        db.close()
+
+
+def test_merged_config_still_rejected_when_the_override_cannot_repair_it(
+    tmp_path, schema_file
+):
+    """The fix did not open a hole: a merged config that is STILL invalid raises.
+
+    Same invalid base, but no `flush_threshold` to replace the offending field —
+    so the 128 MB-over-64 MB wedge survives the merge and must be refused. Without
+    this, "validate the merged config" could silently become "validate nothing".
+    """
+    cfg = _preset_with_limits(64 * 1024 * 1024, 128 * 1024 * 1024)
+    with pytest.raises(ValueError, match="memtable_hard_limit") as excinfo:
+        cqlite.open(
+            str(tmp_path / "data_dir"),
+            schema=str(schema_file),
+            writable=True,
+            write_dir=str(tmp_path / "write_dir"),
+            config=cfg,
+        )
+    message = str(excinfo.value)
+    assert str(64 * 1024 * 1024) in message, message
+    assert str(128 * 1024 * 1024) in message, message

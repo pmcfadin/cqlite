@@ -180,9 +180,11 @@ pub fn validate_config(py: Python<'_>, config: &Bound<'_, PyAny>) -> PyResult<bo
     Ok(true)
 }
 
-/// Parse a Python configuration value into a core Config.
+/// Parse a Python configuration value into a core Config, then validate it.
 ///
-/// The resulting config is automatically validated before returning.
+/// The resulting config is automatically validated before returning. A caller
+/// that must fold an override in BEFORE validation wants
+/// [`parse_config_from_py`] instead.
 ///
 /// # Arguments
 ///
@@ -207,6 +209,32 @@ pub fn config_from_py(
     py: Python<'_>,
     config: Option<&Bound<'_, PyAny>>,
 ) -> PyResult<cqlite_core::Config> {
+    let core_config = parse_config_from_py(py, config)?;
+
+    // Validate the parsed config before returning
+    core_config
+        .validate()
+        .map_err(|e| PyValueError::new_err(e.to_string()))?;
+
+    Ok(core_config)
+}
+
+/// Parse a Python configuration value into a core Config WITHOUT validating it.
+///
+/// Split out of [`config_from_py`] for the one caller that must fold a
+/// documented override into the config *before* it is judged (issue #1697,
+/// roborev r2): `cqlite.open`'s `flush_threshold` replaces
+/// `storage.memtable_size_threshold`, so validating the base first rejected a
+/// config that was invalid ONLY in the field the override was about to replace —
+/// a merged config that would have been perfectly valid.
+///
+/// Every other caller wants [`config_from_py`], which validates. This returns an
+/// UNVALIDATED config, so the caller owns validating the config it finally uses;
+/// returning one that is never validated is a bug.
+pub fn parse_config_from_py(
+    py: Python<'_>,
+    config: Option<&Bound<'_, PyAny>>,
+) -> PyResult<cqlite_core::Config> {
     let core_config = match config {
         None => cqlite_core::Config::default(),
         Some(obj) => {
@@ -223,11 +251,6 @@ pub fn config_from_py(
             }
         }
     };
-
-    // Validate the parsed config before returning
-    core_config
-        .validate()
-        .map_err(|e| PyValueError::new_err(e.to_string()))?;
 
     Ok(core_config)
 }

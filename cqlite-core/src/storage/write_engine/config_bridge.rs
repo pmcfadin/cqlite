@@ -81,10 +81,10 @@ impl WriteEngineConfig {
     /// [`Config::validate`] is the CALLER's responsibility. Today's posture,
     /// recorded honestly rather than implied:
     ///
-    /// | write path | validates the public config? |
+    /// | write path | calls `Config::validate`? |
     /// |---|---|
-    /// | Python binding | YES — `config_from_py`, plus a `flush_threshold` ceiling check |
-    /// | Node binding | YES — parse-then-check, contiguous with the fold |
+    /// | Python binding | YES — parse unvalidated, fold `flush_threshold`, then validate the MERGED config (#1697 roborev r2), plus a ceiling check naming the override |
+    /// | Node binding | NO — but neither memtable knob is settable through its options, so the wedge is inexpressible there; `flushThreshold` is checked against the ceiling |
     /// | CLI | YES — `write_engine_config::resolve` |
     /// | direct core embedder (`from_config` / `new`) | NO — nothing calls `validate` |
     ///
