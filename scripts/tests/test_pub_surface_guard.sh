@@ -79,11 +79,14 @@
 #                top-level `pub mod` form it does not recognise.
 #
 #   Trust boundaries, second pass (roborev r4 F1/F3) — both were FALSE PASSES:
-#  21.  RED    — the §1b `doc`-cfg refusal was itself a substring test, so
-#                `#[cfg(doc)]` and `#[cfg_attr(not(doc), cfg(any()))]` sailed past it
-#                and the guard CERTIFIED a snapshot listing an item the shipped crate
-#                does not have. Four condition-position shapes must refuse; `doc` in
-#                cfg_attr's ATTRIBUTE position must not.
+#  21.  RED    — the §1b `doc`-cfg refusal was itself a lexical stand-in for a
+#                structural read, and was defeated THREE times: `#[cfg(doc)]` and
+#                `#[cfg_attr(not(doc), cfg(any()))]` sailed past the original grep,
+#                and `#[cfg(/* explanation */ doc)]` sailed past the meta-item walk
+#                that replaced it — each a CERTIFIED snapshot listing an item the
+#                shipped crate does not have. Eight shapes must now refuse,
+#                including the three comment-bearing ones; plus the DELIBERATE
+#                over-approximation (attribute-position `doc`) must refuse too.
 #  22.  RED    — a RELATIVE `CARGO_TARGET_DIR` was resolved against the CALLER's cwd
 #                while cargo resolves it against the repo root, so the guard locked,
 #                deleted and inspected a different tree than the one cargo wrote.
@@ -637,6 +640,10 @@ echo "OK (17): a scratch built from a DIRTY tree (uncommitted API change + regen
 #     ships but never reaches rustdoc — invisible to this guard and to every other
 #     rustdoc-derived oracle. The guard must REFUSE rather than certify a surface it
 #     knows may differ from the compiled one.
+#
+#     This case pins the plainest shape. Case 21 pins the shapes that defeated the
+#     three detectors §1b has had, and the deliberate over-approximation of the blunt
+#     one that replaced them.
 # ---------------------------------------------------------------------------
 scratch_tree cfg-doc; wt18="$SCRATCH"
 cat >>"$wt18/cqlite-core/src/version_hints.rs" <<'RS'
@@ -690,29 +697,37 @@ grep -qE "line [0-9]+" "$TMPROOT/case20.out" \
 echo "OK (20): an inline crate-root \`pub mod NAME { … }\` makes the scan REFUSE (shared blind spot, not a disagreement)"
 
 # ---------------------------------------------------------------------------
-# 21. RED — a `doc` cfg predicate the OLD LEXICAL detector could not see (roborev
-#     r4 F1). This is the guard's own §1b refusal being an instance of the very
-#     defect class it fences off: a substring test standing in for a structural one.
+# 21. RED — every shape that mentions the `doc` cfg inside a `cfg`/`cfg_attr`
+#     attribute must make the guard REFUSE, INCLUDING the shapes that defeated its
+#     three previous, cleverer detectors (roborev r4 F1, r6 F1).
 #
-#     MEASURED against the pre-fix detector, whose pattern required a non-identifier
-#     character immediately BEFORE the `doc` token (and `^` there is a line anchor,
-#     so it can only match at column zero):
+#     HISTORY, because it is the whole reason this case exists. §1b has been the
+#     guard's own instance of the defect class it fences off — a LEXICAL pattern
+#     standing in for a STRUCTURAL read — three times over:
 #
-#       #[cfg(doc)]                          -> PASSED GREEN   (false PASS)
-#       #[cfg_attr(not(doc), cfg(any()))]    -> PASSED GREEN   (false PASS)
+#       #[cfg(doc)]                          -> PASSED GREEN   (false PASS, r4 F1)
+#       #[cfg_attr(not(doc), cfg(any()))]    -> PASSED GREEN   (false PASS, r4 F1)
 #       #[cfg_attr(doc, doc(hidden))]        -> failed, but with the SNAPSHOT-DRIFT
 #                                               diagnostic; the refusal never fired
+#       #[cfg(/* explanation */ doc)]        -> PASSED GREEN   (false PASS, r6 F1:
+#                                               the meta-item walk that fixed the
+#                                               two above did not skip comments)
 #
-#     The first two are the dangerous ones and they are not exotic: under `cargo doc`
-#     the `doc` cfg is SET, so `#[cfg(doc)]` KEEPS the item in rustdoc's output while a
-#     default build DROPS it, and `cfg_attr(not(doc), cfg(any()))` is the mirror image
-#     — rustdoc sees the item, the shipped crate does not. In both cases the guard
-#     certified a snapshot listing a public item the compiled crate does not have.
+#     MEASURED against the meta-item walk immediately before this change, all three
+#     comment-bearing shapes below exited 0 with the refusal never firing: a block
+#     comment before the predicate, a `//` comment inside a multi-line attribute, and
+#     a multi-line `cfg(all(…))` with a comment in it.
 #
-#     The last shape below is the DELIBERATE NON-FIRE: `doc` there sits in cfg_attr's
-#     ATTRIBUTE position (`doc = "…"`, ordinary conditional prose), not in its
-#     CONDITION position, and gates nothing. It must stay green, or the refusal
-#     becomes a false FAIL on a legitimate pattern.
+#     Under `cargo doc` the `doc` cfg is SET, so `#[cfg(doc)]` KEEPS an item in
+#     rustdoc's output while a default build DROPS it, and `cfg_attr(not(doc),
+#     cfg(any()))` is the mirror image — rustdoc sees the item, the shipped crate
+#     does not. In both cases the guard certified a snapshot listing a public item the
+#     compiled crate does not have.
+#
+#     The detector is now DELIBERATELY BLUNT (arm on a bare `cfg`/`cfg_attr` token,
+#     disarm at the next `]`, refuse on a bare `doc` token seen while armed), so
+#     there is no predicate-position analysis left to defeat — and the last sub-case
+#     below pins the PRICE of that as INTENDED behaviour, not a defect.
 # ---------------------------------------------------------------------------
 scratch_tree cfg-doc-shapes; wt21="$SCRATCH"
 t21="$wt21/cqlite-core/src/version_hints.rs"
@@ -720,11 +735,22 @@ cp "$t21" "$TMPROOT/case21.orig.rs"
 # Attach the attribute to an ALREADY-PUBLIC item, deliberately: a brand-new item
 # would move the snapshot and red as ordinary drift, which cannot tell a fired
 # refusal from an unfired one.
+#
+# Shapes are given with `\n` escapes and rendered with `printf %b`, so MULTI-LINE
+# attributes are testable — a single-line-only shape list is how the split-attribute
+# blind spot survived as long as it did.
 apply21() {
-  awk -v a="$1" '/^pub struct VersionHintResolver;/ && !done { print a; done = 1 } { print }' \
+  printf '%b\n' "$1" >"$TMPROOT/case21.attr"
+  awk -v f="$TMPROOT/case21.attr" \
+    '/^pub struct VersionHintResolver;/ && !done { while ((getline l < f) > 0) print l; done = 1 } { print }' \
     "$TMPROOT/case21.orig.rs" >"$t21"
-  grep -qF "$1" "$t21" \
-    || fail_case "case 21 setup: could not attach \`$1\` to an existing public item, so the case would prove nothing"
+  # Proof the substitution landed, line by line: a case whose subject never reached
+  # the file would prove nothing.
+  while IFS= read -r line21; do
+    [ -n "$line21" ] || continue
+    grep -qF "$line21" "$t21" \
+      || fail_case "case 21 setup: could not attach \`$1\` to an existing public item (line \`$line21\` missing), so the case would prove nothing"
+  done <"$TMPROOT/case21.attr"
 }
 
 c21=0
@@ -742,27 +768,45 @@ while IFS= read -r shape; do
     || fail_case "case 21.$c21 — \`$shape\` failed, but NOT with the \`doc\`-cfg-predicate refusal. A failure with another cause is not this guard firing; got: $(cat "$TMPROOT/case21.$c21.out")"
   grep -q 'version_hints.rs' "$TMPROOT/case21.$c21.out" \
     || fail_case "case 21.$c21 — the refusal did not name the offending FILE, so an operator cannot act on it; got: $(cat "$TMPROOT/case21.$c21.out")"
+  grep -qE 'version_hints\.rs:[0-9]+' "$TMPROOT/case21.$c21.out" \
+    || fail_case "case 21.$c21 — the refusal did not name the offending LINE, so an operator cannot act on it; got: $(cat "$TMPROOT/case21.$c21.out")"
 done <<'SHAPES'
 #[cfg(doc)]
+#[cfg(not(doc))]
+#[cfg(all(doc, unix))]
 #[cfg_attr(doc, doc(hidden))]
 #[cfg_attr(not(doc), cfg(any()))]
-#[cfg(all(doc, unix))]
+#[cfg(/* explanation */ doc)]
+#[cfg( // explanation of why this is gated\n    doc\n)]
+#[cfg(all(\n    /* why this shape exists */ doc,\n    unix\n))]
 SHAPES
-[ "$c21" -eq 4 ] || fail_case "case 21 — only $c21 of the 4 pinned shapes ran; a case that does not run cannot fail"
+[ "$c21" -eq 8 ] || fail_case "case 21 — only $c21 of the 8 pinned shapes ran; a case that does not run cannot fail"
 
-# …and the deliberate NON-FIRE: `doc` in cfg_attr's ATTRIBUTE position gates nothing.
+# …and the DELIBERATE OVER-APPROXIMATION. `doc` here sits in cfg_attr's ATTRIBUTE
+# position (ordinary conditional prose) and gates NOTHING, so it is harmless — and it
+# REFUSES ANYWAY.
+#
+# THIS IS INTENDED. DO NOT "FIX" IT. The precise detector that let this shape through
+# was defeated three times (see the case header); it was replaced by a rule with no
+# parser to get wrong, and firing on attribute-position `doc` is the price. The trade
+# is asymmetric: over-firing costs one loud FAIL naming a file and a line, which an
+# operator resolves with one edit or one deliberate decision, while under-firing costs
+# a SILENT FALSE PASS in the one guard whose job is noticing public-API changes. If
+# this assert ever reds because someone restored position analysis, the restoration is
+# the defect, not this case.
 apply21 '#[cfg_attr(feature = "parquet", doc = "conditional prose, not a cfg predicate")]'
 set +e
-bash "$wt21/$GUARD_REL" >"$TMPROOT/case21.nofire.out" 2>&1
+bash "$wt21/$GUARD_REL" >"$TMPROOT/case21.overfire.out" 2>&1
 rc21n=$?
 set -e
-if grep -q '`doc` cfg predicate' "$TMPROOT/case21.nofire.out"; then
-  fail_case "case 21 — the refusal OVER-fired on \`#[cfg_attr(feature = \"parquet\", doc = \"…\")]\`, where \`doc\` is in cfg_attr's ATTRIBUTE position and gates nothing. That is a false FAIL on a legitimate pattern; got: $(cat "$TMPROOT/case21.nofire.out")"
-fi
-[ "$rc21n" -eq 0 ] \
-  || fail_case "case 21 — a harmless conditional-prose \`doc = \"…\"\` attribute did not verify clean; got: $(cat "$TMPROOT/case21.nofire.out")"
+[ "$rc21n" -ne 0 ] \
+  || fail_case "case 21 — \`#[cfg_attr(feature = \"parquet\", doc = \"…\")]\` passed GREEN. The blunt detector is supposed to OVER-approximate: a rule that reasons about cfg_attr argument POSITIONS is a parser, and this guard's parsers have been defeated three times; got: $(cat "$TMPROOT/case21.overfire.out")"
+grep -q '`doc` cfg predicate' "$TMPROOT/case21.overfire.out" \
+  || fail_case "case 21 — the over-approximation case failed, but NOT with the \`doc\`-cfg-predicate refusal; got: $(cat "$TMPROOT/case21.overfire.out")"
+grep -q 'over-fires on purpose' "$TMPROOT/case21.overfire.out" \
+  || fail_case "case 21 — the refusal did not tell the operator that it over-fires on purpose, so a legitimate attribute-position \`doc\` reads as a mystery failure; got: $(cat "$TMPROOT/case21.overfire.out")"
 cp "$TMPROOT/case21.orig.rs" "$t21"
-echo "OK (21): a \`doc\` cfg predicate in cfg/cfg_attr CONDITION position makes the guard REFUSE (4 shapes), and \`doc\` in cfg_attr's ATTRIBUTE position does not"
+echo "OK (21): all 8 \`doc\`-in-cfg shapes REFUSE — including the three comment-bearing shapes that passed GREEN before — and the deliberate over-approximation (attribute-position \`doc\`) refuses too"
 
 # ---------------------------------------------------------------------------
 # 22. RED — a RELATIVE `CARGO_TARGET_DIR` must not make the guard inspect a
