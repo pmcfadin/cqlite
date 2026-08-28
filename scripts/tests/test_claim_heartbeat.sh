@@ -206,6 +206,31 @@ craft_old_claim() {
   )
 }
 
+# A `ps` reporting a LONG-RUNNING process, for the cases that need a deterministic ALIVE.
+#
+# Why a shim rather than a real pid: identity requires the start to predate the claim ts by
+# more than the tolerance, and the only pid a test can be sure is alive is its own shell —
+# whose age at this point in the suite is a few SECONDS, i.e. inside the tolerance band, so
+# the verdict flips with machine speed. MEASURED: the test shell was 2s old here and read
+# UNKNOWN-IDENTITY, correctly. Fixing the elapsed time fixes the verdict.
+#
+# It does NOT weaken the regression it guards: the shim implements only `etimes=`/`stat=`,
+# so if the identity check ever went back to parsing `ps -o lstart=` (the timezone defect of
+# round 3) the start time would come back EMPTY here and these cases would fail.
+ALIVE_SHIM="$T/aliveshim"
+mkdir -p "$ALIVE_SHIM"
+cat >"$ALIVE_SHIM/ps" <<'PSEOF'
+#!/usr/bin/env bash
+for a in "$@"; do
+  case "$a" in
+    stat=)   echo "S";      exit 0 ;;   # a normal sleeping process, not a zombie
+    etimes=) echo 999999;   exit 0 ;;   # started long ago => start predates any claim ts
+  esac
+done
+exit 0                                   # `ps -p <pid>` succeeds: the process exists
+PSEOF
+chmod +x "$ALIVE_SHIM/ps"
+
 # Hermetic open-PR hooks (never touch gh/network).
 NO_OPEN_PR='exit 1'   # $1=issue -> always "no open PR"
 HAS_OPEN_PR='exit 0'  # $1=issue -> always "has open PR"
@@ -404,7 +429,7 @@ echo "TEST 23: a LIVE local pid is reported ALIVE, and does not set the dead exi
 # and the identity check correctly reads it as UNKNOWN-IDENTITY. Realistic ordering is
 # process first, stamp after.
 craft_old_claim "$WORK" "aliveLocal" 3394 "$$" 0
-al_out=$(cd "$WORK" && HEARTBEAT_MACHINE=aliveLocal CLAIM_OPEN_PR_CMD="$NO_OPEN_PR" \
+al_out=$(cd "$WORK" && PATH="$ALIVE_SHIM:$PATH" HEARTBEAT_MACHINE=aliveLocal CLAIM_OPEN_PR_CMD="$NO_OPEN_PR" \
   bash "$HB" dead-lanes 2>&1)
 al_rc=$?
 # machine=aliveLocal is the local identity here, so ITS row must read ALIVE — and the
@@ -735,7 +760,7 @@ echo "TEST 36: a live pid CONSISTENT with its claim ts is ALIVE, and says identi
 # start < ts holds by seconds rather than by luck. A freshly-spawned helper lands within
 # the rounding window and would (correctly) read UNKNOWN-IDENTITY, making this case flaky.
 craft_old_claim "$WORK" "goodPid" 3399 "$$" 0
-gp_out=$(cd "$WORK" && HEARTBEAT_MACHINE=goodPid CLAIM_OPEN_PR_CMD="$NO_OPEN_PR" \
+gp_out=$(cd "$WORK" && PATH="$ALIVE_SHIM:$PATH" HEARTBEAT_MACHINE=goodPid CLAIM_OPEN_PR_CMD="$NO_OPEN_PR" \
   bash "$HB" dead-lanes 2>&1)
 if printf '%s\n' "$gp_out" | grep -E '^goodPid ' | grep -q 'ALIVE' \
   && printf '%s\n' "$gp_out" | grep -E '^goodPid ' | grep -q 'identity=verified'; then
@@ -783,11 +808,11 @@ echo "TEST 38: the pid-identity check is TIMEZONE-FREE (roborev round 3, Medium)
 # DEAD-PID-REUSED. Driven by running the check under a deliberately skewed TZ: the
 # verdict must not depend on it.
 craft_old_claim "$WORK" "tzMachine" 3402 "$$" 0
-tz_utc=$(cd "$WORK" && TZ=UTC HEARTBEAT_MACHINE=tzMachine CLAIM_OPEN_PR_CMD="$NO_OPEN_PR" \
+tz_utc=$(cd "$WORK" && PATH="$ALIVE_SHIM:$PATH" TZ=UTC HEARTBEAT_MACHINE=tzMachine CLAIM_OPEN_PR_CMD="$NO_OPEN_PR" \
   bash "$HB" dead-lanes 2>&1 | grep -E '^tzMachine ' | awk '{print $4}')
-tz_ist=$(cd "$WORK" && TZ=Asia/Kolkata HEARTBEAT_MACHINE=tzMachine CLAIM_OPEN_PR_CMD="$NO_OPEN_PR" \
+tz_ist=$(cd "$WORK" && PATH="$ALIVE_SHIM:$PATH" TZ=Asia/Kolkata HEARTBEAT_MACHINE=tzMachine CLAIM_OPEN_PR_CMD="$NO_OPEN_PR" \
   bash "$HB" dead-lanes 2>&1 | grep -E '^tzMachine ' | awk '{print $4}')
-tz_neg=$(cd "$WORK" && TZ=America/Los_Angeles HEARTBEAT_MACHINE=tzMachine CLAIM_OPEN_PR_CMD="$NO_OPEN_PR" \
+tz_neg=$(cd "$WORK" && PATH="$ALIVE_SHIM:$PATH" TZ=America/Los_Angeles HEARTBEAT_MACHINE=tzMachine CLAIM_OPEN_PR_CMD="$NO_OPEN_PR" \
   bash "$HB" dead-lanes 2>&1 | grep -E '^tzMachine ' | awk '{print $4}')
 # The property is AGREEMENT plus the absence of a false recycle — asserted rather than a
 # specific verdict, so the case cannot go green merely because every zone is equally wrong.
@@ -885,7 +910,7 @@ echo "TEST 41: one HEALTHY local lane + foreign lanes still exits 0 (round 4 bal
 # healthy multi-machine fleet would sit at exit 1 forever and everyone would learn to
 # ignore the code. The rule is "did I measure ANY local lane", not "is every lane local".
 craft_old_claim "$WORK" "mixedLocal" 3405 "$$" 0
-mixed_out=$(cd "$WORK" && HEARTBEAT_MACHINE=mixedLocal CLAIM_OPEN_PR_CMD="$NO_OPEN_PR" \
+mixed_out=$(cd "$WORK" && PATH="$ALIVE_SHIM:$PATH" HEARTBEAT_MACHINE=mixedLocal CLAIM_OPEN_PR_CMD="$NO_OPEN_PR" \
   bash "$HB" dead-lanes 2>&1)
 mixed_rc=$?
 foreign_rows=$(printf '%s\n' "$mixed_out" | grep -c 'UNKNOWN-FOREIGN' || true)
@@ -1108,6 +1133,90 @@ else
   bad "NON-VACUITY broken: the real ps cannot see the test shell, so TEST 47 proves nothing"
 fi
 (cd "$WORK" && g push -q origin ":refs/machine-claims/probeDown" 2>/dev/null || true)
+
+# ===========================================================================
+echo "TEST 48: the identity tolerance is SYMMETRIC — a start just BEFORE the ts is UNKNOWN"
+# ===========================================================================
+# roborev round 9 (Medium): the band was one-sided. `start <= ts` claimed ALIVE right up to
+# equality, but both numbers are whole seconds sampled at different moments, so a pid
+# recycled just after stamping reconstructs as equal to — or a hair before — the claim ts
+# and read clean. ALIVE must require the start to predate the ts by MORE than the tolerance.
+#
+# Isolated by making the TOLERANCE larger than the gap rather than by racing the clock: the
+# shim reports a start ~999999s before the claim ts, and the tolerance is set wider than
+# that, so the start lands inside the band on the NEGATIVE side by construction. Under the
+# one-sided rule this is ALIVE; under the symmetric rule it is UNKNOWN-IDENTITY. No timing
+# dependence in either direction.
+craft_old_claim "$WORK" "symBand" 3410 "$$" 0
+sym_out=$(cd "$WORK" && PATH="$ALIVE_SHIM:$PATH" PID_IDENTITY_SLACK_SECS=2000000 \
+  HEARTBEAT_MACHINE=symBand CLAIM_OPEN_PR_CMD="$NO_OPEN_PR" bash "$HB" dead-lanes 2>&1)
+sym_rc=$?
+if printf '%s\n' "$sym_out" | grep -E '^symBand ' | grep -q 'UNKNOWN-IDENTITY' \
+  && [ "$sym_rc" -eq 1 ]; then
+  ok "a start inside the tolerance band on the NEGATIVE side is UNKNOWN-IDENTITY + exit 1, not a one-sided ALIVE"
+else
+  bad "the tolerance band must be symmetric: rc=$sym_rc out:
+$sym_out"
+fi
+# NON-VACUITY: the SAME fixture with a tolerance narrower than the gap IS ALIVE, so the case
+# above is about the band and not about the shim refusing to ever verify identity.
+sym2_out=$(cd "$WORK" && PATH="$ALIVE_SHIM:$PATH" PID_IDENTITY_SLACK_SECS=2 \
+  HEARTBEAT_MACHINE=symBand CLAIM_OPEN_PR_CMD="$NO_OPEN_PR" bash "$HB" dead-lanes 2>&1)
+if printf '%s\n' "$sym2_out" | grep -E '^symBand ' | grep -q 'ALIVE'; then
+  ok "NON-VACUITY: the same fixture with a narrow tolerance IS ALIVE — the band is what decides, not the shim"
+else
+  bad "NON-VACUITY broken: the fixture never verifies identity at any tolerance: out:
+$sym2_out"
+fi
+(cd "$WORK" && g push -q origin ":refs/machine-claims/symBand" 2>/dev/null || true)
+
+# ===========================================================================
+echo "TEST 49: ps saying ABSENT while /proc says PRESENT is UNKNOWN-PROBE, not DEAD"
+# ===========================================================================
+# roborev round 9 (Medium): validating `ps` against our OWN pid proves the tool runs, not
+# that it can see THIS target. A target-specific visibility restriction (`/proc` hidepid, a
+# foreign owner) or a transient failure still made a nonzero `ps -p <target>` mean "gone",
+# reporting a LIVE supervisor as DEAD-NO-PROCESS with exit 3.
+#
+# Driven by a `ps` that answers normally EXCEPT for one pid, which it hides. That pid is the
+# live test shell, so /proc still has it: the probes disagree, and disagreement must be
+# UNKNOWN, never a verdict.
+hideshim="$T/hideshim"
+mkdir -p "$hideshim"
+cat >"$hideshim/ps" <<'PSEOF'
+#!/usr/bin/env bash
+# `-p <pid>` for the hidden pid reports no match; everything else behaves normally.
+prev=""
+for a in "$@"; do
+  case "$a" in
+    stat=)   echo "S";    exit 0 ;;
+    etimes=) echo 999999; exit 0 ;;
+  esac
+  if [ "$prev" = "-p" ] && [ "$a" = "${SHIM_HIDE_PID:-}" ]; then exit 1; fi
+  prev="$a"
+done
+exit 0
+PSEOF
+chmod +x "$hideshim/ps"
+craft_old_claim "$WORK" "hiddenPid" 3411 "$$" 0
+hp_out=$(cd "$WORK" && PATH="$hideshim:$PATH" SHIM_HIDE_PID="$$" HEARTBEAT_MACHINE=hiddenPid \
+  CLAIM_OPEN_PR_CMD="$NO_OPEN_PR" bash "$HB" dead-lanes 2>&1)
+hp_rc=$?
+if printf '%s\n' "$hp_out" | grep -E '^hiddenPid ' | grep -q 'UNKNOWN-PROBE' \
+  && ! printf '%s\n' "$hp_out" | grep -E '^hiddenPid ' | grep -q 'DEAD' \
+  && [ "$hp_rc" -eq 1 ]; then
+  ok "disagreeing presence probes (ps absent, /proc present) yield UNKNOWN-PROBE + exit 1, never a false DEAD"
+else
+  bad "a target ps cannot see must not be declared dead: rc=$hp_rc out:
+$hp_out"
+fi
+# NON-VACUITY: /proc really does hold that pid, and the shim really does hide it from ps.
+if [ -e "/proc/$$" ] && ! PATH="$hideshim:$PATH" SHIM_HIDE_PID="$$" ps -p "$$" >/dev/null 2>&1; then
+  ok "NON-VACUITY: /proc/$$ exists while the shimmed ps reports it absent — the probes genuinely disagree"
+else
+  bad "NON-VACUITY broken: the disagreement fixture is not in the state TEST 49 assumes"
+fi
+(cd "$WORK" && g push -q origin ":refs/machine-claims/hiddenPid" 2>/dev/null || true)
 
 echo
 echo "=== claim-heartbeat.sh: $PASS passed, $FAIL failed ==="
