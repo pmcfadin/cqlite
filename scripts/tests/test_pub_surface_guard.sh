@@ -1370,8 +1370,13 @@ set -e
 #     make_mod!(probe);` walked past it. Derivation P now checks the item head AFTER
 #     consuming the outer attribute run, which catches these with no new lexing AND
 #     cannot false-fire on a string (control (e) pins that).
+mform_i=0
 for mform in '#[allow(dead_code)] make_mod!(probe_q);' '::make_mod!(probe_q);' 'outer::make_mod!(probe_q);' 'r#make_mod!(probe_q);' 'make_mod!{ probe_q }'; do
-  scratch_tree "macro-form-$(printf '%s' "$mform" | tr -cd 'a-z' | cut -c1-12)"; wtm="$SCRATCH"
+  # Label by INDEX, not by content: deriving it from the macro text collapsed
+  # `::make_mod!(probe_q);` and `make_mod!{ probe_q }` onto the same letters-only string,
+  # so the second `scratch_tree` hit a DUPLICATE worktree name and the suite aborted.
+  mform_i=$((mform_i + 1))
+  scratch_tree "macro-form-$mform_i"; wtm="$SCRATCH"
   printf '\n%s\n' "$mform" >>"$wtm/cqlite-core/src/lib.rs"
   set +e
   bash "$wtm/$GUARD_REL" >"$TMPROOT/case45d.out" 2>&1
