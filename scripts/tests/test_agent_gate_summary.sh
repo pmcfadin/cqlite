@@ -2524,6 +2524,96 @@ if [ -s "$dw_body" ]; then
   fi
 fi
 
+# --- 28. #1699: round-13 — mapped targets, every visibility form, skippable targets -----
+#
+# THE FIRST OF THESE PINS A REGRESSION I CAUSED. Round 11 made the legacy lane refuse a test
+# target mapped outside tests/ (the shared guard could not see it, so it could run zero tests
+# unnoticed). A coarse round-12 edit spliced over that region and SILENTLY DELETED the
+# refusal — and nothing noticed, because with no such target in the tree the branch never
+# ran. Round 13 re-reported it, correctly. The lesson is not "be careful editing": it is that
+# a guard whose only protection is its own presence in the file has no protection at all. So
+# the fix now lives in the shared guard and is pinned BEHAVIOURALLY below.
+if [ -s "$zt_h" ]; then
+  zn_h="$tmp/1699-zeronotest.sh"
+  awk '/^check_no_unexpected_zero_tests\(\) \{/,/^\}/' "$GATE" > "$zn_h"
+  if [ ! -s "$zn_h" ]; then
+    bad "1699-r13-zn-extract: could not extract check_no_unexpected_zero_tests — extraction broke, so these asserts would pass vacuously"
+  else
+    ok "1699-r13-zn-extract: extracted check_no_unexpected_zero_tests from the real script"
+    # shellcheck disable=SC1090
+    . "$zn_h"
+    zn_case() { # <name> <expect> <log> <allowed-zero...>
+      local cname="$1" expect="$2" content="$3"; shift 3
+      local lf="$tmp/1699-zn-$cname.log"
+      printf '%s\n' "$content" > "$lf"
+      if check_no_unexpected_zero_tests "zn-$cname" "$lf" "$@" >/dev/null 2>&1; then
+        [ "$expect" = pass ] && ok "1699-zn-$cname: guard PASSES as expected" \
+          || bad "1699-zn-$cname: guard PASSED but should have FAILED — a zero-test target went unrecorded, which is the vacuous pass this guard exists to prevent"
+      else
+        [ "$expect" = fail ] && ok "1699-zn-$cname: guard FAILS as expected" \
+          || bad "1699-zn-$cname: guard FAILED but should have PASSED — a false red trains people to re-run until green"
+      fi
+    }
+    # A target MAPPED OUTSIDE tests/ running zero tests: previously invisible ⇒ vacuous PASS.
+    zn_case mapped-zero fail \
+'     Running custom/mapped_target.rs (target/debug/deps/m-1)
+running 0 tests
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out' 
+    # ...and allowable by its package-relative identifier.
+    zn_case mapped-zero-allowed pass \
+'     Running custom/mapped_target.rs (target/debug/deps/m-1)
+running 0 tests
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out' \
+      custom/mapped_target
+    # The existing tests/ spelling must keep working, byte for byte — this is the
+    # compatibility half, and breaking it would red every other caller.
+    zn_case tests-relative-still-works pass \
+'     Running tests/foo.rs (target/debug/deps/f-1)
+running 0 tests
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out' \
+      foo
+    zn_case tests-relative-unallowed fail \
+'     Running tests/foo.rs (target/debug/deps/f-1)
+running 0 tests
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out' \
+      something_else
+    # `--lib`/`--bins` unittest lines belong to the OTHER guard; this one must ignore them,
+    # or a legitimately-guarded lib suite would be double-counted and red here.
+    zn_case unittests-ignored pass \
+'     Running unittests src/lib.rs (target/debug/deps/x-1)
+running 0 tests
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out'
+  fi
+fi
+
+# Every Rust visibility form on a `mod X;` declaration (30 live `pub(crate) mod` lines here).
+if [ -s "$cl_h" ] && [ -d "$cl_root" ]; then
+  mkdir -p "$cl_root/tests/vis"
+  cat > "$cl_root/tests/visroot.rs" <<'CLV'
+pub(crate) mod a;
+pub(super) mod b;
+pub(in crate::x) mod c;
+pub mod d;
+mod e;
+CLV
+  for m in a b c d e; do printf '#[test]\nfn t() {}\n' > "$cl_root/tests/vis_$m.rs"; done
+  mv "$cl_root/tests/vis_a.rs" "$cl_root/tests/a.rs"; mv "$cl_root/tests/vis_b.rs" "$cl_root/tests/b.rs"
+  mv "$cl_root/tests/vis_c.rs" "$cl_root/tests/c.rs"; mv "$cl_root/tests/vis_d.rs" "$cl_root/tests/d.rs"
+  mv "$cl_root/tests/vis_e.rs" "$cl_root/tests/e.rs"
+  vis_out=$(_rust_module_closure "$cl_root/tests/visroot.rs" 2>"$tmp/1699-vis-unres.txt")
+  vis_n=$(printf '%s' "$vis_out" | grep -c . || true)
+  if [ "$vis_n" = "6" ]; then
+    ok "1699-r13-visibility: all five visibility forms of 'mod X;' are resolved (pub(crate)/pub(super)/pub(in ...)/pub/private)"
+  else
+    bad "1699-r13-visibility: expected root + 5 modules = 6 sources, got $vis_n — a restricted-visibility mod is being skipped, making its child modules invisible to discovery, polarity AND the census"
+  fi
+  if [ ! -s "$tmp/1699-vis-unres.txt" ]; then
+    ok "1699-r13-visibility-resolved: no spurious UNRESOLVED on restricted-visibility modules"
+  else
+    bad "1699-r13-visibility-resolved: reported UNRESOLVED on resolvable restricted-visibility modules, which would FAIL the lane spuriously"
+  fi
+fi
+
 echo "----"
 echo "passed: $PASS  failed: $FAIL"
 [ "$FAIL" -eq 0 ]

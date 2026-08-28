@@ -4838,8 +4838,24 @@ check_no_unexpected_zero_tests() {
   local allowed_zero=" $* "
   local bad="" target=""
   while IFS= read -r line; do
+    # Two spellings, deliberately, and the reason is compatibility (roborev rounds 11+13).
+    # A target under tests/ keys on its path RELATIVE TO tests/ (`foo`, or `foo/main` for a
+    # directory-style target) because that is how every existing caller's allowed-zero list
+    # is spelled. A target mapped OUTSIDE tests/ by an explicit `[[test]] path = "..."` keys
+    # on its package-relative path: previously it matched nothing, was never associated with
+    # a result, and could run ZERO tests unnoticed — a vacuous PASS. Additive, and measured
+    # as a no-op today (0 mapped targets across the workspace), so it closes the hole
+    # without re-spelling a single existing allowed-zero entry.
+    #
+    # This SUPERSEDES the round-11 fix, which refused such a target instead of guarding it.
+    # That refusal was silently DELETED by a coarse round-12 edit and nothing noticed,
+    # because with no such target in the tree the branch never ran — which is why this
+    # version is pinned by a behavioural log fixture rather than by its own existence.
     if [[ "$line" == *"Running tests/"* ]]; then
       target=$(printf "%s" "$line" | sed -E "s#.*Running tests/([^[:space:]]+)\.rs.*#\1#")
+    elif [[ "$line" == *"Running "*".rs"* ]] && [[ "$line" != *"Running unittests"* ]]; then
+      # `--lib`/`--bins` unittest lines are check_unittest_targets_ran's subject, not ours.
+      target=$(printf "%s" "$line" | sed -E "s#.*Running ([^[:space:]]+)\.rs.*#\1#")
     elif [[ "$line" == "test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out"* ]]; then
       if [ -n "$target" ] && [[ "$allowed_zero" != *" $target "* ]]; then
         bad="$bad $target"
@@ -4890,8 +4906,8 @@ export -f check_no_unexpected_zero_tests
 # Derived from cargo metadata so the guard's subject set tracks the selector. A failed
 # derivation returns non-zero and the caller FAILs — never a fallback to a partial list,
 # which would silently shrink the guard's subject exactly like the hard-coded pair did.
-_package_unittest_srcs() {
-  local pkg="$1" kinds="${2:-lib,bin}"
+_package_unittest_srcs() { # <pkg> [kinds] [enabled-features]
+  local pkg="$1" kinds="${2:-lib,bin}" enabled="${3:-}"
   local meta out
   meta=$(cargo metadata --format-version 1 --no-deps 2>/dev/null) || return 1
   [ -n "$meta" ] || return 1
@@ -4899,6 +4915,7 @@ _package_unittest_srcs() {
     out=$(printf '%s' "$meta" | python3 -c '
 import json, sys, os
 pkg = sys.argv[1]
+enabled = set(w for w in (sys.argv[3] if len(sys.argv) > 3 else "").split() if w)
 d = json.load(sys.stdin)
 for p in d.get("packages", []):
     if p.get("name") != pkg:
@@ -4909,10 +4926,20 @@ for p in d.get("packages", []):
         kinds = t.get("kind") or []
         if not any(k in want for k in kinds):
             continue
+        # Only targets cargo will actually RUN under this selection (roborev round-13,
+        # Low). `test = false` in the manifest, or required-features this lane does not
+        # enable, means cargo legitimately SKIPS the target — and demanding an observation
+        # for it would FAIL the gate on correct behaviour. A false red is not the safe
+        # direction here: it is what teaches people to re-run until green.
+        if t.get("test") is False:
+            continue
+        rf = t.get("required-features") or t.get("required_features") or []
+        if rf and not set(rf).issubset(enabled):
+            continue
         sp = t.get("src_path") or ""
         rel = os.path.relpath(sp, root) if root and sp.startswith(root) else sp
         print(rel)
-' "$pkg" "$kinds") || return 1
+' "$pkg" "$kinds" "$enabled") || return 1
   else
     return 1
   fi
@@ -5954,7 +5981,7 @@ run_flight_tests() {
     while IFS= read -r _us_line; do
       [ -n "$_us_line" ] && unit_srcs+=("$_us_line")
     done <<EOF
-$(_package_unittest_srcs cqlite-flight)
+$(_package_unittest_srcs cqlite-flight lib,bin "$enabled")
 EOF
     if [ "${#unit_srcs[@]}" -eq 0 ]; then
       echo "[$name] FAIL-CLOSED: could not derive cqlite-flight's lib/bin unittest targets" >>"$log"
@@ -6238,9 +6265,14 @@ $(awk '
     if (match($0, /"[^"]+"/)) { p = substr($0, RSTART+1, RLENGTH-2); haspath = 1 }
     next
   }
-  /^[[:space:]]*(pub[[:space:]]+)?mod[[:space:]]+[A-Za-z_][A-Za-z0-9_]*[[:space:]]*;/ {
+  # EVERY visibility form, not just private and plain `pub` (roborev round-13 finding):
+  # `pub(crate) mod`, `pub(super) mod` and `pub(in path) mod` are ordinary declarations, and
+  # this corpus has 30 semicolon-terminated `pub(crate) mod` lines — so skipping them was
+  # LIVE coverage loss. Their child modules were invisible to discovery, the polarity scan
+  # AND the census, all three in the silent direction.
+  /^[[:space:]]*(pub([[:space:]]*\([^)]*\))?[[:space:]]+)?mod[[:space:]]+[A-Za-z_][A-Za-z0-9_]*[[:space:]]*;/ {
     n = $0
-    sub(/^[[:space:]]*(pub[[:space:]]+)?mod[[:space:]]+/, "", n)
+    sub(/^[[:space:]]*(pub([[:space:]]*\([^)]*\))?[[:space:]]+)?mod[[:space:]]+/, "", n)
     sub(/[[:space:]]*;.*$/, "", n)
     if (haspath) { printf "P\t%s\n", p; haspath = 0 } else { printf "M\t%s\n", n }
     next
@@ -6392,7 +6424,12 @@ EOF
       # A target whose source is not under tests/ is invisible to that guard in any case,
       # since it never prints a `Running tests/...` line, so an entry for it simply never
       # matches — harmless, and not a false FAIL.
-      local _az_id="${_mt_rel#tests/}"
+      # Mirrors the guard's two spellings exactly (see check_no_unexpected_zero_tests):
+      # tests-relative under tests/, package-relative otherwise.
+      local _az_id="$_mt_rel"
+      case "$_mt_rel" in
+        tests/*) _az_id="${_mt_rel#tests/}" ;;
+      esac
       _az_id="${_az_id%.rs}"
       allow_zero+=("$_az_id")
       negonly="$negonly $_az_id"
@@ -6601,7 +6638,7 @@ EOF
   while IFS= read -r _lh_us; do
     [ -n "$_lh_us" ] && lh_unit_srcs+=("$_lh_us")
   done <<EOF
-$(_package_unittest_srcs cqlite-core lib)
+$(_package_unittest_srcs cqlite-core lib "$lh_enabled")
 EOF
   if [ "${#lh_unit_srcs[@]}" -eq 0 ]; then
     status=FAIL
