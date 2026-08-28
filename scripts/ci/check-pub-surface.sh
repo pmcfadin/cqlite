@@ -337,6 +337,7 @@ function normalize(   i, s, out, j, c, c2, st, depth, hashes, k, cnt, bd, bmin) 
   for (i = 1; i <= n; i++) {
     INCODE[i] = (st == "code") ? 1 : 0
     bmin = bd
+    BRACE_START[i] = bd
     s = L[i]; out = ""; j = 1
     while (j <= length(s)) {
       c = substr(s, j, 1); c2 = substr(s, j, 2)
@@ -375,16 +376,23 @@ function normalize(   i, s, out, j, c, c2, st, depth, hashes, k, cnt, bd, bmin) 
         if (c2 == "*/") { depth--; out = out "  "; j += 2; if (depth == 0) st = "code"; continue }
         out = out " "; j++
       } else if (st == "str") {
+        # BLANK STRING CONTENTS, keep the delimiters and every column (roborev r13 F2).
+        # Contents used to be copied VERBATIM, so a literal containing declaration-like
+        # text leaked into the normalized source that BOTH derivations read. Derivation S
+        # scans a line UNANCHORED while P is line-start anchored, so a one-line
+        # `const X: &str = r#"pub mod fake;"#;` was found by S, missed by P, and the
+        # cross-check reported a DISAGREEMENT — the mandatory gate REJECTING valid Rust.
+        # A false FAIL, and the kind of refusal agents learn to waive.
         if (c == "\\") { out = out "  "; j += 2; continue }
-        out = out c; j++
-        if (c == "\"") st = "code"
+        if (c == "\"") { out = out c; j++; st = "code"; continue }
+        out = out " "; j++
       } else if (st == "raw") {
         if (c == "\"") {
           k = j + 1; cnt = 0
           while (substr(s, k, 1) == "#" && cnt < hashes) { cnt++; k++ }
           if (cnt == hashes) { out = out substr(s, j, k - j); j = k; st = "code"; continue }
         }
-        out = out c; j++
+        out = out " "; j++
       }
       # `st == "line"` ends with the line; block/str/raw carry over deliberately.
     }
@@ -465,9 +473,23 @@ END {
   # code left on such a line, `pub mod` or not, and on a line that resumes after a
   # multi-line string literal too. Over-firing costs a named FAIL; under-firing costs
   # a silent false PASS.
+  # NARROWED TO RESIDUE THAT COULD CARRY A DECLARATION. The original fired on ANY
+  # non-blank residue, which the comment above accepted as safe over-approximation —
+  # but it made the MANDATORY gate reject ORDINARY RUST: the closing line of a
+  # multi-line raw string is `"#;`, and of a multi-line string `";`, so any crate root
+  # containing one was refused outright. Found while testing the r13 F2 fix, not
+  # reported. A refusal that reds correct code is the one agents learn to waive, which
+  # would devalue every other refusal here, so the over-approximation is not free.
+  #
+  # The narrowing is still sound in the false-PASS direction, which is what matters: a
+  # crate-root declaration is `pub mod NAME;` and therefore CANNOT exist without
+  # LETTERS. Residue with no letter at all (`"#;`, `";`, `*/`, `)]`, `42;`) cannot be a
+  # declaration, so skipping it cannot hide one. Residue containing any letter still
+  # fires, `pub mod` or not — `*/ pub mod x;` and `"#; pub mod x;` both refuse.
   for (i = 1; i <= n; i++) {
     if (INCODE[i]) continue
     if (N[i] == "") continue
+    if (N[i] !~ /[A-Za-z_]/) continue
     printf "X\tline %d: code follows a closing block-comment/string delimiter on the SAME line: `%s`\n", i, squash(substr(ltrim(N[i]), 1, 72))
   }
 
@@ -601,8 +623,38 @@ END {
     if (t == "") continue
     if (!BRACE_UNRELIABLE && BRACE_MIN[i] != 0) continue
     if (t ~ /^macro_rules[[:space:]]*!/) continue
-    if (t ~ /^[A-Za-z_][A-Za-z0-9_:]*[[:space:]]*![[:space:]]*[\(\[{]/) {
-      printf "Q\tline %d: top-level ITEM MACRO invocation: `%s`\n", i, squash(substr(t, 1, 72))
+    # UNANCHORED, and that is only safe BECAUSE `normalize()` now BLANKS STRING
+    # CONTENTS (roborev r13 F2). The line-anchored version missed every invocation that
+    # was not a line's first token — after an attribute (r12 F1) and after another item
+    # on the same line, `pub fn f() {} make_mod!();` (r13 F1). Broadening it was
+    # previously unsafe for exactly one reason: `N[]` carried string contents, so a
+    # `#[doc = "call foo!(x)"]` would have false-fired. With contents blanked, the
+    # residue holds no macro-looking text and an unanchored search is sound.
+    #
+    # Two rounds were spent widening this pattern one form at a time (r12, r13). The
+    # generalisable lesson: a pattern that must cover a SYNTACTIC FAMILY should be
+    # widened once, over the whole family, after removing whatever forced it to be
+    # narrow — not extended per reported instance.
+    # DEPTH AT THE MATCH POSITION, not the line's minimum. `BRACE_MIN[i]` is the lowest
+    # depth the LINE reaches, so a one-line `pub fn f() { assert!(true); }` passed the
+    # depth filter and the unanchored search then found `assert!(` INSIDE the body — a
+    # false FAIL on ordinary Rust, found while testing this very widening. An item macro
+    # is only an ITEM macro at brace depth 0, so the depth is tracked along the line and
+    # a match is only reported where it is actually 0.
+    qline = N[i]; qd = BRACE_START[i]
+    for (k = 1; k <= length(qline); k++) {
+      qc = substr(qline, k, 1)
+      if (qc == "{") { qd++; continue }
+      if (qc == "}") { qd--; continue }
+      if (qd != 0) continue
+      qprev = (k > 1) ? substr(qline, k - 1, 1) : ""
+      if (qprev ~ /[A-Za-z0-9_]/) continue
+      qrest = substr(qline, k)
+      if (qrest ~ /^macro_rules[[:space:]]*!/) continue
+      if (qrest ~ /^(::[[:space:]]*)?(r#)?[A-Za-z_][A-Za-z0-9_]*([[:space:]]*::[[:space:]]*(r#)?[A-Za-z_][A-Za-z0-9_]*)*[[:space:]]*![[:space:]]*[\(\[{]/) {
+        printf "Q\tline %d: top-level ITEM MACRO invocation: `%s`\n", i, squash(substr(ltrim(qrest), 1, 72))
+        break
+      }
     }
   }
 
