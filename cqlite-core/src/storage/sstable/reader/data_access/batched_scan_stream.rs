@@ -31,7 +31,7 @@ use super::*;
 ///
 /// A `const fn` with ONE definition because the query-row stream's exported
 /// read-ahead bound
-/// ([`QUERY_ROWS_MAX_READ_AHEAD_ROWS`](crate::storage::sstable::reader::QUERY_ROWS_MAX_READ_AHEAD_ROWS))
+/// ([`QUERY_ROWS_MAX_READ_AHEAD`](crate::storage::sstable::reader::QUERY_ROWS_MAX_READ_AHEAD))
 /// is derived from it. A second copy of this arithmetic could drift from the
 /// channel the constructor actually builds — which is precisely how a documented
 /// read-ahead bound becomes silently wrong (issue #3384).

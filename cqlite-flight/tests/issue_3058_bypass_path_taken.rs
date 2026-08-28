@@ -36,9 +36,7 @@ use tonic::Request;
 
 use cqlite_core::schema::{ClusteringColumn, Column, KeyColumn, TableSchema};
 use cqlite_core::storage::read_path_probe::ReadPathProbe;
-use cqlite_core::storage::sstable::reader::{
-    QUERY_ROWS_MAX_READ_AHEAD_ROWS, QUERY_ROWS_MAX_RESIDENT_ROWS,
-};
+use cqlite_core::storage::sstable::reader::QUERY_ROWS_MAX_READ_AHEAD;
 use cqlite_core::storage::sstable::work_counters;
 use cqlite_core::storage::write_engine::{
     CellOperation, ClusteringKey, Durability, Mutation, PartitionKey, TableId, WriteEngine,
@@ -68,23 +66,27 @@ const CANCEL_BATCH_SIZE: usize = 1;
 ///   crate-private, hence named in prose and covered generously by the `8 *`
 ///   below rather than mirrored as load-bearing literals.)
 /// * **The one core handoff batch** `ScanRowSource` holds as its current row
-///   iterator, which cannot exceed [`QUERY_ROWS_MAX_RESIDENT_ROWS`]. This is the
-///   dominant term.
-const CANCEL_DOWNSTREAM_ROWS: usize = QUERY_ROWS_MAX_RESIDENT_ROWS + 8 * CANCEL_BATCH_SIZE;
+///   iterator — the dominant term. One batch is by construction no larger than the
+///   whole handoff channel's contents, and that in turn is one term of
+///   [`QUERY_ROWS_MAX_READ_AHEAD`], so a second `QUERY_ROWS_MAX_READ_AHEAD`
+///   generously covers it. Deliberately loose: the exact per-batch row count is
+///   crate-internal to cqlite-core, and a loose bound derived from a published one
+///   beats a tight bound copied out of a private constant.
+const CANCEL_DOWNSTREAM_ROWS: usize = QUERY_ROWS_MAX_READ_AHEAD + 8 * CANCEL_BATCH_SIZE;
 
 /// Rows an ABANDONED fast-arm walk may still decode after the client stops
 /// reading — the structural bound the stop assertion is made against.
 ///
 /// It is a CONSTANT, independent of the fixture's size: the producer runs ahead
 /// only as far as the bounded buffers between disk and client allow, then parks
-/// and observes the cancellation. [`QUERY_ROWS_MAX_READ_AHEAD_ROWS`] is
+/// and observes the cancellation. [`QUERY_ROWS_MAX_READ_AHEAD`] is
 /// cqlite-core's own sum of those buffers on the arm this test runs (a
 /// no-token-bound `do_get` → the full-ring arm), derived there from the sizings
 /// that actually run; [`CANCEL_DOWNSTREAM_ROWS`] adds what is resident on the
 /// Flight side of the handoff.
 ///
 /// One row per partition in the fixture, so a row bound is a partition bound.
-const CANCEL_DECODE_CEILING: usize = QUERY_ROWS_MAX_READ_AHEAD_ROWS + CANCEL_DOWNSTREAM_ROWS;
+const CANCEL_DECODE_CEILING: usize = QUERY_ROWS_MAX_READ_AHEAD + CANCEL_DOWNSTREAM_ROWS;
 
 /// Partitions in the mid-stream-cancel fixture: a generous multiple of
 /// [`CANCEL_DECODE_CEILING`], so "the walk stopped" and "the walk drained the
@@ -475,7 +477,7 @@ async fn token_pruning_to_one_source_still_selects_the_fast_path() {
 /// (2) used to read `settled < PARTITIONS` over an 800-partition fixture, which
 /// asserted that the cancellation BEAT the producer — a race outcome, ~25-30% red
 /// in isolation (issue #3384). The producer legitimately reads ahead up to
-/// [`QUERY_ROWS_MAX_READ_AHEAD_ROWS`] rows, i.e. THREE TIMES that fixture, so a
+/// [`QUERY_ROWS_MAX_READ_AHEAD`] rows, i.e. THREE TIMES that fixture, so a
 /// full drain was permitted behaviour that the test called a bug. Bounding by the
 /// read-ahead instead keeps the real property (a cancelled walk does O(1) further
 /// work, not O(table)) and makes it a fact about the code rather than about the
@@ -562,7 +564,7 @@ async fn fast_arm_stream_stops_when_the_client_drops_it() {
         settled <= CANCEL_DECODE_CEILING as u64,
         "the abandoned scan decoded MORE than the pipeline's bounded read-ahead \
          permits: {settled} partition bodies > ceiling {CANCEL_DECODE_CEILING} \
-         (core read-ahead {QUERY_ROWS_MAX_READ_AHEAD_ROWS} + downstream \
+         (core read-ahead {QUERY_ROWS_MAX_READ_AHEAD} + downstream \
          {CANCEL_DOWNSTREAM_ROWS}), fixture {PARTITIONS}. Either the walk ignored \
          the cancellation or a buffer grew without the core bound following it"
     );

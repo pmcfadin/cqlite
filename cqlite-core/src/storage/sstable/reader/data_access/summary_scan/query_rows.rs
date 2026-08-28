@@ -129,21 +129,24 @@ const QUERY_ROWS_CHANNEL_BATCHES: usize = 4;
 /// accumulated is not a further term: once it reaches [`QUERY_ROWS_PER_BATCH`] it
 /// BECOMES the parked send, and a parked producer accumulates no further rows.
 ///
+/// Crate-internal (`pub` for its doc links, not re-exported to the crate root):
+/// the bound OUTSIDE callers need is [`QUERY_ROWS_MAX_READ_AHEAD`].
+///
 /// This bounds the HANDOFF CHANNEL ALONE. It is NOT the walk's read-ahead: the
 /// producer thread pulls from an inner batched scan stream that has bounded
 /// buffers of its own, so a cancelled or abandoned walk can decode up to
-/// [`QUERY_ROWS_MAX_READ_AHEAD_ROWS`] rows — not this many — after its consumer
+/// [`QUERY_ROWS_MAX_READ_AHEAD`] rows — not this many — after its consumer
 /// stops. Use that constant for "how far can an abandoned walk run"; use this one
 /// only when reasoning about the channel itself.
 pub const QUERY_ROWS_MAX_RESIDENT_ROWS: usize =
     QUERY_ROWS_PER_BATCH * (QUERY_ROWS_CHANNEL_BATCHES + 1);
 
 /// `buffer_size` the full-ring arm ([`drive_full_scan_rows`]) hands to the inner
-/// batched scan stream. Named so [`QUERY_ROWS_MAX_READ_AHEAD_ROWS`] is derived
+/// batched scan stream. Named so [`QUERY_ROWS_MAX_READ_AHEAD`] is derived
 /// from the SAME value the call site passes, never a restated copy of it.
 const QUERY_ROWS_FULL_SCAN_BUFFER_ROWS: usize = QUERY_ROWS_PER_BATCH * QUERY_ROWS_CHANNEL_BATCHES;
 
-/// Upper bound on the rows a [`QueryRowStream`] producer can decode AHEAD of its
+/// Upper bound, IN ROWS, on what a [`QueryRowStream`] producer can decode AHEAD of its
 /// consumer — and therefore on how much work an ABANDONED or CANCELLED walk can
 /// still do after the consumer stops reading. A CONSTANT: it does not scale with
 /// the table, so a walk over a million partitions abandoned after one row decodes
@@ -170,7 +173,7 @@ const QUERY_ROWS_FULL_SCAN_BUFFER_ROWS: usize = QUERY_ROWS_PER_BATCH * QUERY_ROW
 /// * Anything resident in the CONSUMER downstream of this stream — a Flight
 ///   producer's own Arrow batches, for instance, are bounded by that consumer's
 ///   own budget, not by this constant.
-pub const QUERY_ROWS_MAX_READ_AHEAD_ROWS: usize = QUERY_ROWS_MAX_RESIDENT_ROWS
+pub const QUERY_ROWS_MAX_READ_AHEAD: usize = QUERY_ROWS_MAX_RESIDENT_ROWS
     + batched_channel_capacity(QUERY_ROWS_FULL_SCAN_BUFFER_ROWS) * BATCH_EMIT_ROWS
     + BATCH_EMIT_ROWS
     + MAX_INFLIGHT_BATCH_ROWS;

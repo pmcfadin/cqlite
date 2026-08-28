@@ -249,7 +249,7 @@ fn the_cancel_bridge_is_one_way() {
 /// actually run — never a hand-maintained literal (issue #3384).
 ///
 /// This is the regression pin for the whole point of the constants: an integration
-/// test sizes its fixture as a multiple of [`QUERY_ROWS_MAX_READ_AHEAD_ROWS`] so
+/// test sizes its fixture as a multiple of [`QUERY_ROWS_MAX_READ_AHEAD`] so
 /// "the abandoned walk stopped early" is structural rather than scheduling luck.
 /// Were a buffer sizing change to leave the constant behind, that test would
 /// silently go back to asserting a coin flip, so each term is pinned here against
@@ -268,7 +268,7 @@ fn the_exported_read_ahead_bounds_are_derived_from_the_real_buffer_sizes() {
          `drive_full_scan_rows` passes"
     );
     assert_eq!(
-        QUERY_ROWS_MAX_READ_AHEAD_ROWS,
+        QUERY_ROWS_MAX_READ_AHEAD,
         QUERY_ROWS_MAX_RESIDENT_ROWS
             + batched_channel_capacity(QUERY_ROWS_FULL_SCAN_BUFFER_ROWS) * BATCH_EMIT_ROWS
             + BATCH_EMIT_ROWS
@@ -280,8 +280,8 @@ fn the_exported_read_ahead_bounds_are_derived_from_the_real_buffer_sizes() {
     // the property that makes using the wrong one of the two a real error rather
     // than a stylistic one.
     assert!(
-        QUERY_ROWS_MAX_READ_AHEAD_ROWS > QUERY_ROWS_MAX_RESIDENT_ROWS,
-        "read-ahead {QUERY_ROWS_MAX_READ_AHEAD_ROWS} must exceed the handoff \
+        QUERY_ROWS_MAX_READ_AHEAD > QUERY_ROWS_MAX_RESIDENT_ROWS,
+        "read-ahead {QUERY_ROWS_MAX_READ_AHEAD} must exceed the handoff \
          channel's {QUERY_ROWS_MAX_RESIDENT_ROWS}"
     );
 }
