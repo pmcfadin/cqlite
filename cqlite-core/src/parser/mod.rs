@@ -111,10 +111,9 @@ pub mod benchmarks;
 #[cfg(feature = "benchmarks")]
 pub mod collection_benchmarks;
 #[cfg(test)]
-pub mod collection_tests;
-// pub mod collection_udt_tests; // Commented out due to missing methods
-#[cfg(test)]
 pub mod collection_correctness_tests; // Property tests for Issue #61
+#[cfg(test)]
+pub mod collection_tests;
 #[cfg(test)]
 pub mod collection_validation_tests;
 pub mod complex_types;
