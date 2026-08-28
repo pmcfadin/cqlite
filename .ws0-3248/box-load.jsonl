@@ -572,3 +572,11 @@
 {"ts":"2026-08-28T17:16:48Z","load1":1.41,"load5":2.17,"load15":2.08,"runnable":"3/701","rustc":0,"cargo":0,"perf":0,"gate":0,"flight":0,"loadgen":0}
 {"ts":"2026-08-28T17:17:01Z","load1":1.34,"load5":2.13,"load15":2.07,"runnable":"1/719","rustc":0,"cargo":0,"perf":0,"gate":0,"flight":0,"loadgen":0}
 {"ts":"2026-08-28T17:17:13Z","load1":1.18,"load5":2.06,"load15":2.05,"runnable":"2/717","rustc":0,"cargo":0,"perf":0,"gate":0,"flight":0,"loadgen":0}
+{"ts":"2026-08-28T17:17:26Z","load1":1.08,"load5":2.01,"load15":2.03,"runnable":"3/721","rustc":0,"cargo":0,"perf":0,"gate":0,"flight":0,"loadgen":0}
+{"ts":"2026-08-28T17:17:39Z","load1":0.97,"load5":1.94,"load15":2.01,"runnable":"1/708","rustc":0,"cargo":0,"perf":0,"gate":0,"flight":0,"loadgen":0}
+{"ts":"2026-08-28T17:17:52Z","load1":0.82,"load5":1.87,"load15":1.98,"runnable":"1/709","rustc":0,"cargo":0,"perf":0,"gate":0,"flight":0,"loadgen":0}
+{"ts":"2026-08-28T17:18:04Z","load1":0.79,"load5":1.81,"load15":1.96,"runnable":"1/708","rustc":0,"cargo":0,"perf":0,"gate":0,"flight":0,"loadgen":0}
+{"ts":"2026-08-28T17:18:17Z","load1":0.67,"load5":1.75,"load15":1.94,"runnable":"1/704","rustc":0,"cargo":0,"perf":0,"gate":0,"flight":0,"loadgen":0}
+{"ts":"2026-08-28T17:18:30Z","load1":0.67,"load5":1.70,"load15":1.92,"runnable":"1/710","rustc":0,"cargo":0,"perf":0,"gate":0,"flight":0,"loadgen":0}
+{"ts":"2026-08-28T17:18:43Z","load1":0.57,"load5":1.64,"load15":1.90,"runnable":"1/708","rustc":0,"cargo":0,"perf":0,"gate":0,"flight":0,"loadgen":0}
+{"ts":"2026-08-28T17:18:55Z","load1":0.59,"load5":1.60,"load15":1.88,"runnable":"1/708","rustc":0,"cargo":0,"perf":0,"gate":0,"flight":0,"loadgen":0}
