@@ -206,6 +206,27 @@ craft_old_claim() {
   )
 }
 
+# craft_lane_claim <work> <machine> <issue> <pid> <age_seconds> — the PER-LANE equivalent of
+# craft_old_claim (#3393). `craft_old_claim` deliberately keeps writing the LEGACY path so the drain
+# stays covered; cases about the new layout use this.
+craft_lane_claim() {
+  local work="$1" machine="$2" issue="$3" pid="$4" age="$5"
+  (
+    cd "$work" || exit 1
+    local now_epoch old_epoch old_ts empty_tree csha
+    now_epoch=$(date -u +%s)
+    old_epoch=$((now_epoch - age))
+    if ! old_ts=$(date -u -r "$old_epoch" +%Y-%m-%dT%H:%M:%SZ 2>/dev/null); then
+      old_ts=$(date -u -d "@$old_epoch" +%Y-%m-%dT%H:%M:%SZ)
+    fi
+    empty_tree=$(git hash-object -t tree --stdin </dev/null)
+    csha=$(GIT_AUTHOR_DATE="$old_ts" GIT_COMMITTER_DATE="$old_ts" \
+      GIT_AUTHOR_NAME=t GIT_AUTHOR_EMAIL=t@t GIT_COMMITTER_NAME=t GIT_COMMITTER_EMAIL=t@t \
+      git commit-tree "$empty_tree" -m "claim issue=${issue} machine=${machine} pid=${pid} ts=${old_ts}")
+    g push -q origin "${csha}:refs/lane-claims/${machine}/${issue}"
+  )
+}
+
 # A pid that is DETERMINISTICALLY ABSENT, verified rather than assumed (roborev round 12,
 # Low). Several cases used the literal 999999 as "a pid that cannot exist", but Linux
 # `pid_max` is commonly far higher — MEASURED 4194304 on this host — so that pid can name a
@@ -258,25 +279,65 @@ exit 0                                   # `ps -p <pid>` succeeds: the process e
 PSEOF
 chmod +x "$ALIVE_SHIM/ps"
 
+# A `ps` that fakes only ELAPSED TIME and STATE, delegating EXISTENCE to the real ps.
+#
+# ALIVE_SHIM cannot be used where a case needs both a live and a dead pid: its unconditional
+# `exit 0` makes every `ps -p` succeed, so an absent pid looks present to ps while /proc and the
+# signal probe say absent — the probes disagree and the verdict is UNKNOWN-PROBE rather than DEAD.
+# MEASURED while writing the two-lanes-one-machine case, which needs a real DEAD row.
+#
+# Faking state/elapsed is safe for the absent pid because presence is decided FIRST: a pid the real
+# ps cannot see never reaches the state or identity checks.
+MIXED_SHIM="$T/mixedshim"
+mkdir -p "$MIXED_SHIM"
+cat >"$MIXED_SHIM/ps" <<'PSEOF'
+#!/usr/bin/env bash
+for a in "$@"; do
+  case "$a" in
+    stat=)   echo "S";      exit 0 ;;   # a normal sleeping process, never a zombie
+    etimes=) echo 999999;   exit 0 ;;   # started long ago => identity verifiable
+  esac
+done
+exec /usr/bin/ps "$@"                    # EXISTENCE is answered by the real ps
+PSEOF
+chmod +x "$MIXED_SHIM/ps"
+
 # Hermetic open-PR hooks (never touch gh/network).
 NO_OPEN_PR='exit 1'   # $1=issue -> always "no open PR"
 HAS_OPEN_PR='exit 0'  # $1=issue -> always "has open PR"
 
 # ===========================================================================
-echo "TEST 9: stamp creates refs/machine-claims/<machine> with issue+pid"
+echo "TEST 9: stamp creates refs/lane-claims/<machine>/<issue> with issue+pid (#3393 ruling A)"
 # ===========================================================================
+# PER-LANE since #3393. The ref path itself now carries the issue, which is what lets several lanes
+# on ONE machine coexist instead of overwriting each other.
 (cd "$WORK" && HEARTBEAT_MACHINE=claimA bash "$HB" stamp 900 4242 >/dev/null 2>&1)
-claim_sha=$(g -C "$WORK" ls-remote origin "refs/machine-claims/claimA" | awk '{print $1}')
+claim_sha=$(g -C "$WORK" ls-remote origin "refs/lane-claims/claimA/900" | awk '{print $1}')
 claim_msg=""
 if [ -n "$claim_sha" ]; then
-  g -C "$WORK" fetch -q origin "refs/machine-claims/claimA" 2>/dev/null
+  g -C "$WORK" fetch -q origin "refs/lane-claims/claimA/900" 2>/dev/null
   claim_msg=$(g -C "$WORK" log -1 --format=%B FETCH_HEAD 2>/dev/null)
 fi
 if [ -n "$claim_sha" ] && printf '%s' "$claim_msg" | grep -q 'issue=900' \
   && printf '%s' "$claim_msg" | grep -q 'pid=4242'; then
-  ok "stamp created refs/machine-claims/claimA carrying issue=900 pid=4242"
+  ok "stamp created refs/lane-claims/claimA/900 carrying issue=900 pid=4242"
 else
-  bad "stamp did not create a well-formed claim ref (sha='$claim_sha' msg='$claim_msg')"
+  bad "stamp did not create a well-formed per-lane claim ref (sha='$claim_sha' msg='$claim_msg')"
+fi
+# ...and it must NOT have written the legacy per-machine ref, or both layouts would drift in
+# parallel and the drain would never finish.
+if [ -z "$(g -C "$WORK" ls-remote origin 'refs/machine-claims/claimA' | awk '{print $1}')" ]; then
+  ok "stamp wrote ONLY the per-lane ref — no legacy refs/machine-claims/claimA left behind"
+else
+  bad "stamp also wrote the legacy ref; the two layouts would drift and the drain could not finish"
+fi
+# The layout must survive a DASH-BEARING machine name, which is the constraint that forced a slash
+# separator rather than <machine>-<issue>: 'ip-172-31-7-163-900' cannot be split back.
+(cd "$WORK" && HEARTBEAT_MACHINE=ip-172-31-7-163 bash "$HB" stamp 901 4243 >/dev/null 2>&1)
+if [ -n "$(g -C "$WORK" ls-remote origin 'refs/lane-claims/ip-172-31-7-163/901' | awk '{print $1}')" ]; then
+  ok "a dash-bearing machine name round-trips: refs/lane-claims/ip-172-31-7-163/901"
+else
+  bad "a dash-bearing machine name did not produce the expected per-lane ref"
 fi
 
 # ===========================================================================
@@ -1478,44 +1539,69 @@ else
 fi
 
 # ===========================================================================
-echo "TEST 52: there is NO clean verdict — dead-lanes never exits 0 (round 13, High)"
+echo "TEST 52: the clean verdict is BACK, because per-lane refs removed the masking (#3393 ruling A)"
 # ===========================================================================
-# The recurring finding across rounds 4/5/6/13: claims are keyed per MACHINE, the ref is
-# force-updated every supervisor iteration, and the hosts this issue is about ran FOUR lanes
-# each — so a surviving sibling's stamp overwrites a dead lane's pid and this command then
-# sees a live pid with a verified identity. Exit 0 there is a false clean about the exact
-# scenario #3393 exists to catch, and DOCUMENTING that is not a fix: the exit code is what a
-# cron reads.
-#
-# So the clean verdict is removed rather than qualified, and this pins it: over a fixture
-# whose only local claim is demonstrably HEALTHY — the best case there is — the command must
-# still not return 0.
-craft_old_claim "$WORK" "noCleanVerdict" 3413 "$$" 0
-nc_out=$(cd "$WORK" && PATH="$ALIVE_SHIM:$PATH" HEARTBEAT_MACHINE=noCleanVerdict \
+# INVERTED. Interim C removed exit 0 for a specific mechanism: claims were keyed per MACHINE and
+# force-updated every iteration, so a surviving sibling's stamp overwrote a dead lane's pid and
+# dead-lanes reported a live, identity-verified pid. Exit 0 there was a false clean about the exact
+# scenario the command exists to catch. Per-lane refs remove that mechanism — a sibling stamps a
+# DIFFERENT ref — so the clean verdict is sound again and this case pins that it returns.
+craft_lane_claim "$WORK" "cleanVerdict" 3413 "$$" 0
+cv_out=$(cd "$WORK" && PATH="$ALIVE_SHIM:$PATH" HEARTBEAT_MACHINE=cleanVerdict \
   CLAIM_OPEN_PR_CMD="$NO_OPEN_PR" bash "$HB" dead-lanes 2>&1)
-nc_rc=$?
-if [ "$nc_rc" -ne 0 ] \
-  && printf '%s\n' "$nc_out" | grep -E '^noCleanVerdict ' | grep -q 'ALIVE' \
-  && printf '%s\n' "$nc_out" | grep -qi 'NOT a clean bill of health'; then
-  ok "a fixture whose only local claim is healthy still does NOT exit 0 (rc=$nc_rc), and the text says why absence is not establishable"
+cv_rc=$?
+if [ "$cv_rc" -eq 0 ] \
+  && printf '%s\n' "$cv_out" | grep -E '^cleanVerdict ' | grep -q 'ALIVE'; then
+  ok "a measured-healthy local lane now exits 0 — the clean verdict is restored (#3393)"
 else
-  bad "there must be no clean verdict: rc=$nc_rc out:
-$nc_out"
+  bad "a healthy local lane must exit 0 under per-lane refs: rc=$cv_rc out:
+$cv_out"
 fi
-# NON-VACUITY: a positive finding is still distinguishable — exit 3 for a real dead lane, so
-# removing exit 0 has not flattened every outcome into one code.
-craft_old_claim "$WORK" "stillDetects" 3414 "$ABSENT_PID" 30
-sd_out=$(cd "$WORK" && HEARTBEAT_MACHINE=stillDetects CLAIM_OPEN_PR_CMD="$NO_OPEN_PR" \
-  bash "$HB" dead-lanes 2>&1)
-sd_rc=$?
-if [ "$sd_rc" -eq 3 ] && printf '%s\n' "$sd_out" | grep -E '^stillDetects ' | grep -q 'DEAD'; then
-  ok "NON-VACUITY: a real dead lane still returns 3 — positive detection is intact, only the clean claim is gone"
+# ...and exit 0 must STATE its scope, or it becomes the old false clean by a different route: it
+# claims nothing about lanes that never stamped, and nothing about other machines.
+if printf '%s\n' "$cv_out" | grep -qi 'NOT that lanes which never stamped' \
+  && printf '%s\n' "$cv_out" | grep -qi 'NOT anything about other machines'; then
+  ok "the clean verdict states what it does NOT claim (unstamped lanes, other machines)"
 else
-  bad "NON-VACUITY broken: a dead lane no longer returns 3 (rc=$sd_rc), so the exit codes carry no signal: out:
-$sd_out"
+  bad "exit 0 must state its scope: out:
+$cv_out"
 fi
-(cd "$WORK" && g push -q origin ":refs/machine-claims/noCleanVerdict" 2>/dev/null || true)
-(cd "$WORK" && g push -q origin ":refs/machine-claims/stillDetects" 2>/dev/null || true)
+(cd "$WORK" && g push -q origin ":refs/lane-claims/cleanVerdict/3413" 2>/dev/null || true)
+
+# ===========================================================================
+echo "TEST 52b: TWO lanes on ONE machine — a dead lane is seen beside a live sibling (#3393 AC3)"
+# ===========================================================================
+# THE CASE THAT WAS STRUCTURALLY IMPOSSIBLE BEFORE, and the whole point of ruling A. Under
+# per-machine refs the live sibling's stamp overwrote the dead lane's ref, so a 4-lane box could
+# report at most one lane and #3393's two same-host deaths were invisible. Both must now appear.
+craft_lane_claim "$WORK" "multiLane" 4001 "$ABSENT_PID" 30   # dead
+craft_lane_claim "$WORK" "multiLane" 4002 "$$" 0             # live sibling, same machine
+ml_out=$(cd "$WORK" && PATH="$MIXED_SHIM:$PATH" HEARTBEAT_MACHINE=multiLane \
+  CLAIM_OPEN_PR_CMD="$NO_OPEN_PR" bash "$HB" dead-lanes 2>&1)
+ml_rc=$?
+ml_rows=$(printf '%s\n' "$ml_out" | grep -cE '^multiLane ')
+if [ "$ml_rc" -eq 3 ] \
+  && [ "$ml_rows" -eq 2 ] \
+  && printf '%s\n' "$ml_out" | grep -E '^multiLane +4001 ' | grep -q 'DEAD' \
+  && printf '%s\n' "$ml_out" | grep -E '^multiLane +4002 ' | grep -q 'ALIVE'; then
+  ok "both lanes on one machine are reported: 4001 DEAD beside a live 4002 (rc=3) — the blind spot ruling A closes"
+else
+  bad "a dead lane must be visible beside a live sibling on the same machine: rc=$ml_rc rows=$ml_rows out:
+$ml_out"
+fi
+# NON-VACUITY: under the OLD layout these two lanes shared ONE ref, so only the last stamp survived
+# and one of them could not have been reported at all. Demonstrated on the legacy namespace, which
+# is still writable, rather than asserted in prose.
+craft_old_claim "$WORK" "collapse" 4001 "$ABSENT_PID" 30
+craft_old_claim "$WORK" "collapse" 4002 "$$" 0
+legacy_refs=$(g -C "$WORK" ls-remote origin 'refs/machine-claims/collapse*' | wc -l | tr -d ' ')
+if [ "$legacy_refs" -eq 1 ]; then
+  ok "NON-VACUITY: two lanes written to the LEGACY per-machine layout collapse to $legacy_refs ref — the second overwrote the first, which is the masking ruling A removes"
+else
+  bad "NON-VACUITY broken: the legacy layout kept $legacy_refs refs for two lanes, so the collapse this test relies on did not happen"
+fi
+(cd "$WORK" && g push -q origin ":refs/lane-claims/multiLane/4001" ":refs/lane-claims/multiLane/4002" 2>/dev/null || true)
+(cd "$WORK" && g push -q origin ":refs/machine-claims/collapse" 2>/dev/null || true)
 
 # ===========================================================================
 echo "TEST 53: an unsafe-fetch git makes the run REFUSE, not clobber FETCH_HEAD"
