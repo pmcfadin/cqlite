@@ -84,9 +84,12 @@
 #                `#[cfg_attr(not(doc), cfg(any()))]` sailed past the original grep,
 #                and `#[cfg(/* explanation */ doc)]` sailed past the meta-item walk
 #                that replaced it — each a CERTIFIED snapshot listing an item the
-#                shipped crate does not have. Eight shapes must now refuse,
-#                including the three comment-bearing ones; plus the DELIBERATE
-#                over-approximation (attribute-position `doc`) must refuse too.
+#                shipped crate does not have. TEN shapes must now refuse, including
+#                the three comment-bearing ones, `#[cfg_attr(doc, doc = "x")]` (bare
+#                CONDITION, assigned attribute) and the DELIBERATE over-fire on
+#                attribute-position `doc(hidden)` — while CONDITIONAL DOCUMENTATION
+#                (`#[cfg_attr(feature = "x", doc = "…")]`) must CERTIFY, since
+#                `doc = "…"` is never a cfg predicate.
 #  22.  RED    — a RELATIVE `CARGO_TARGET_DIR` was resolved against the CALLER's cwd
 #                while cargo resolves it against the repo root, so the guard locked,
 #                deleted and inspected a different tree than the one cargo wrote.
@@ -697,9 +700,10 @@ grep -qE "line [0-9]+" "$TMPROOT/case20.out" \
 echo "OK (20): an inline crate-root \`pub mod NAME { … }\` makes the scan REFUSE (shared blind spot, not a disagreement)"
 
 # ---------------------------------------------------------------------------
-# 21. RED — every shape that mentions the `doc` cfg inside a `cfg`/`cfg_attr`
+# 21. RED — every shape that carries a bare `doc` TOKEN inside a `cfg`/`cfg_attr`
 #     attribute must make the guard REFUSE, INCLUDING the shapes that defeated its
-#     three previous, cleverer detectors (roborev r4 F1, r6 F1).
+#     three previous, cleverer detectors (roborev r4 F1, r6 F1) — while CONDITIONAL
+#     DOCUMENTATION (`doc = "…"`, an assignment, never a cfg predicate) must CERTIFY.
 #
 #     HISTORY, because it is the whole reason this case exists. §1b has been the
 #     guard's own instance of the defect class it fences off — a LEXICAL pattern
@@ -726,8 +730,10 @@ echo "OK (20): an inline crate-root \`pub mod NAME { … }\` makes the scan REFU
 #
 #     The detector is now DELIBERATELY BLUNT (arm on a bare `cfg`/`cfg_attr` token,
 #     disarm at the next `]`, refuse on a bare `doc` token seen while armed), so
-#     there is no predicate-position analysis left to defeat — and the last sub-case
-#     below pins the PRICE of that as INTENDED behaviour, not a defect.
+#     there is no predicate-position analysis left to defeat. Its ONE exclusion is a
+#     `doc` token immediately followed by `=`; the last sub-case below pins that
+#     conditional documentation therefore CERTIFIES, and `#[cfg_attr(doc, doc = "x")]`
+#     in the shape list pins that the exclusion did not weaken the CONDITION check.
 # ---------------------------------------------------------------------------
 scratch_tree cfg-doc-shapes; wt21="$SCRATCH"
 t21="$wt21/cqlite-core/src/version_hints.rs"
@@ -777,36 +783,45 @@ done <<'SHAPES'
 #[cfg_attr(doc, doc(hidden))]
 #[cfg_attr(not(doc), cfg(any()))]
 #[cfg(/* explanation */ doc)]
+#[cfg_attr(doc, doc = "x")]
+#[cfg_attr(feature = "parquet", doc(hidden))]
 #[cfg( // explanation of why this is gated\n    doc\n)]
 #[cfg(all(\n    /* why this shape exists */ doc,\n    unix\n))]
 SHAPES
-[ "$c21" -eq 8 ] || fail_case "case 21 — only $c21 of the 8 pinned shapes ran; a case that does not run cannot fail"
+[ "$c21" -eq 10 ] || fail_case "case 21 — only $c21 of the 10 pinned shapes ran; a case that does not run cannot fail"
 
-# …and the DELIBERATE OVER-APPROXIMATION. `doc` here sits in cfg_attr's ATTRIBUTE
-# position (ordinary conditional prose) and gates NOTHING, so it is harmless — and it
-# REFUSES ANYWAY.
+# …and CONDITIONAL DOCUMENTATION, which must NOT refuse. `doc` here is an
+# ASSIGNMENT (`doc = "…"`), i.e. the attribute form `#[doc = "text"]` applied under a
+# feature — a standard Rust idiom for prose that only appears in some builds. It gates
+# NOTHING and the guard must certify normally.
 #
-# THIS IS INTENDED. DO NOT "FIX" IT. The precise detector that let this shape through
-# was defeated three times (see the case header); it was replaced by a rule with no
-# parser to get wrong, and firing on attribute-position `doc` is the price. The trade
-# is asymmetric: over-firing costs one loud FAIL naming a file and a line, which an
-# operator resolves with one edit or one deliberate decision, while under-firing costs
-# a SILENT FALSE PASS in the one guard whose job is noticing public-API changes. If
-# this assert ever reds because someone restored position analysis, the restoration is
-# the defect, not this case.
+# THIS ASSERTION WAS ONCE THE OPPOSITE, and the inversion is the point. The blunt rule
+# refused on every bare `doc` token seen while armed, and this case pinned that
+# over-fire as INTENDED. It was not acceptable: the shape is one anyone may add to
+# cqlite-core at any time, so shipping it would have bricked the public-API gate for
+# an ordinary edit, with a remedy text telling the author to delete their
+# documentation. "0 occurrences today" was a true measurement of the wrong thing.
+#
+# The fix stays blunt — no parser, no position analysis, no comment or string
+# handling. It is ONE lookahead character: a `doc` token immediately followed by `=`
+# is not reported, because Rust has no `cfg(doc = "…")` form (a cfg predicate
+# spelling of doc is always the BARE flag), so `doc =` cannot be a predicate. The
+# shapes above prove the blunt rule is otherwise untouched, and
+# `#[cfg_attr(doc, doc = "x")]` up there — bare CONDITION, assigned ATTRIBUTE — is
+# the shape that separates this fix from one that merely greps for `doc =`.
 apply21 '#[cfg_attr(feature = "parquet", doc = "conditional prose, not a cfg predicate")]'
 set +e
-bash "$wt21/$GUARD_REL" >"$TMPROOT/case21.overfire.out" 2>&1
+bash "$wt21/$GUARD_REL" >"$TMPROOT/case21.condoc.out" 2>&1
 rc21n=$?
 set -e
-[ "$rc21n" -ne 0 ] \
-  || fail_case "case 21 — \`#[cfg_attr(feature = \"parquet\", doc = \"…\")]\` passed GREEN. The blunt detector is supposed to OVER-approximate: a rule that reasons about cfg_attr argument POSITIONS is a parser, and this guard's parsers have been defeated three times; got: $(cat "$TMPROOT/case21.overfire.out")"
-grep -q '`doc` cfg predicate' "$TMPROOT/case21.overfire.out" \
-  || fail_case "case 21 — the over-approximation case failed, but NOT with the \`doc\`-cfg-predicate refusal; got: $(cat "$TMPROOT/case21.overfire.out")"
-grep -q 'over-fires on purpose' "$TMPROOT/case21.overfire.out" \
-  || fail_case "case 21 — the refusal did not tell the operator that it over-fires on purpose, so a legitimate attribute-position \`doc\` reads as a mystery failure; got: $(cat "$TMPROOT/case21.overfire.out")"
+[ "$rc21n" -eq 0 ] \
+  || fail_case "case 21 — \`#[cfg_attr(feature = \"parquet\", doc = \"…\")]\` on a public item was REFUSED. Conditional documentation gates nothing and \`doc = \"…\"\` is never a cfg predicate, so refusing it bricks the public-API gate for an ordinary edit; got: $(cat "$TMPROOT/case21.condoc.out")"
+grep -q 'doc` cfg predicate' "$TMPROOT/case21.condoc.out" \
+  && fail_case "case 21 — the guard exited 0 but still printed the \`doc\`-cfg-predicate refusal for conditional documentation; got: $(cat "$TMPROOT/case21.condoc.out")"
+grep -q "public items + .* associated items" "$TMPROOT/case21.condoc.out" \
+  || fail_case "case 21 — conditional documentation passed, but the guard printed no affirmative measurement line, so the pass cannot be distinguished from a vacuous one; got: $(cat "$TMPROOT/case21.condoc.out")"
 cp "$TMPROOT/case21.orig.rs" "$t21"
-echo "OK (21): all 8 \`doc\`-in-cfg shapes REFUSE — including the three comment-bearing shapes that passed GREEN before — and the deliberate over-approximation (attribute-position \`doc\`) refuses too"
+echo "OK (21): all 10 \`doc\`-in-cfg shapes REFUSE — including the three comment-bearing shapes that passed GREEN before, \`#[cfg_attr(doc, doc = \"x\")]\` (bare condition, assigned attribute) and the deliberate over-fire on attribute-position \`doc(hidden)\` — while conditional documentation (\`doc = \"…\"\`) certifies normally"
 
 # ---------------------------------------------------------------------------
 # 22. RED — a RELATIVE `CARGO_TARGET_DIR` must not make the guard inspect a
