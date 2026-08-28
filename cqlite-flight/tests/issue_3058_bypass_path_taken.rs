@@ -545,11 +545,13 @@ async fn fast_arm_stream_stops_when_the_client_drops_it() {
     // that is merely descheduled — or between two increments — is
     // indistinguishable from one that has stopped, so a cancellation regression
     // could pass here and drain the fixture immediately afterwards (roborev,
-    // issue #3384). `query_row_producers_finished` is incremented as the last act
-    // of the producer closure, so observing it makes "the walk stopped" a fact
-    // rather than an inference. The loop bound is a liveness guard, not a
+    // issue #3384). `query_row_producers_finished` is published BEFORE any
+    // message a consumer can act on as terminal — including
+    // `QueryRowBatch::Unsupported`, whose caller drops the stream immediately — so a
+    // producer cannot publish into a LATER case's freshly-reset counter. Observing it
+    // makes "the outer producer stopped" a fact rather than an inference. The loop bound is a liveness guard, not a
     // deadline. `PROBE_LOCK` serializes this file and one file = one process, so
-    // no sibling scan contributes to either counter.
+    // no sibling scan contributes to any of these counters.
     let mut stopped = false;
     for _ in 0..6_000 {
         // The producer runs on its own OS thread, so yielding this task is not
@@ -567,8 +569,9 @@ async fn fast_arm_stream_stops_when_the_client_drops_it() {
          partition bodies so far)",
         work_counters::stream_walk_partitions_parsed()
     );
-    // BOTH halves must be observed before the counter is final (roborev, issue
-    // #3384). The signal above proves the OUTER query-row producer stopped pulling;
+    // THREE producers must be observed before the counter is final (roborev, issue
+    // #3384) — this is the second. The signal above proves the OUTER query-row
+    // producer stopped pulling;
     // it does NOT prove the INNER batched scan task has stopped DECODING, because
     // `drive_full_scan_rows` drops `BatchedScanStream` without joining its task.
     //

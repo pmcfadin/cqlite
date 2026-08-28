@@ -166,7 +166,9 @@ static BLOCKING_SCAN_TASKS_INFLIGHT: AtomicI64 = AtomicI64::new(0);
 /// tasks are NOT cancellable — dropping their `JoinHandle` DETACHES them. So neither
 /// the outer query-row producer's completion nor the scan future's drop guard proves
 /// decoding has stopped: both can fire while a detached blocking half is still
-/// draining. This gauge is the missing half. A gauge rather than a completion counter
+/// draining. This gauge is the THIRD and last of the completion signals — the other two
+/// are `query_row_producers_finished` (outer thread) and the scan future's own drop
+/// guard, and neither covers detached blocking work. A gauge rather than a completion counter
 /// because the number of blocking halves is an implementation detail — a reader waits
 /// for it to reach ZERO instead of knowing how many to expect.
 ///
@@ -244,9 +246,9 @@ static BATCHED_SCANS_FINISHED: AtomicU64 = AtomicU64::new(0);
 
 /// Publish that one detached batched-scan task has terminated.
 ///
-/// The INNER half of the abandoned-walk completion story. `mark_query_row_producer_finished`
+/// The SECOND of three abandoned-walk completion signals. `mark_query_row_producer_finished`
 /// proves the outer query-row thread stopped pulling; this proves the detached task it
-/// dropped without joining has stopped DECODING. Only both together make
+/// dropped without joining has stopped DECODING. Only all three together make
 /// `stream_walk_partitions_parsed` final — waiting a fixed interval instead merely
 /// makes the race less likely, which is the defect this issue exists to remove.
 ///
