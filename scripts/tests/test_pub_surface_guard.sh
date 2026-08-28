@@ -1068,7 +1068,81 @@ oracle_expect_refusal 35 "$TMPROOT/case35.out" "never closes its \`[\`"
 echo "OK (35): an inner attribute that never closes its \`[\` makes the oracle REFUSE"
 
 # ---------------------------------------------------------------------------
-# 36. GREEN — THE POSITIVE CONTROL for 29-35.
+# 37. RED — a bogus `]` inside a LINE COMMENT that ENDS THE LINE (roborev r8 F1).
+#
+#     THE FALSE PASS THIS CLOSES: `#![allow(dead_code, // ]`. Bracket balance counts
+#     the `]` inside the comment, so the attribute window closes EARLY and the scan
+#     resumes MID-ATTRIBUTE, never examining the real `#![cfg(...)]` below it.
+#
+#     WHY CASE 34 DOES NOT ALREADY COVER THIS, which is the whole point of adding a
+#     separate case: 34's refusal fires on content AFTER the closing `]` on the same
+#     line. Here the bogus `]` IS THE END OF THE LINE — nothing follows it, `rest` is
+#     empty, and that refusal cannot see it. Two neighbouring shapes, two mechanisms.
+#
+#     MEASURED against the PRE-FIX reader on this exact fixture: `CLEAN 3` — a
+#     certified crate-root declaration whose module gates itself. The line comment is
+#     refused rather than parsed because lines are JOINED WITH A SPACE for balancing,
+#     so a `//`'s newline terminator is already gone and its end is not locatable.
+# ---------------------------------------------------------------------------
+oracle_tree prologue-comment-bracket; wt37="$SCRATCH"
+cat >"$wt37/cqlite-core/src/probe_oracle.rs" <<'RS'
+//! Self-test-only probe (#1712 roborev r8 F1).
+#![allow(dead_code, // ]
+    unused_imports)]
+#![cfg(feature = "benchmarks")]
+
+pub fn probe() {}
+RS
+set +e
+bash "$wt37/$GUARD_REL" >"$TMPROOT/case37.out" 2>&1
+case37_rc=$?
+set -e
+[ "$case37_rc" -ne 0 ] || fail_case "case 37 — a \`]\` inside a LINE COMMENT closed the attribute window early, hiding the real \`#![cfg(feature = \"benchmarks\")]\` two lines below it, and the guard passed GREEN. This is the false PASS roborev r8 F1 named; got: $(cat "$TMPROOT/case37.out")"
+oracle_expect_refusal 37 "$TMPROOT/case37.out" "contains a COMMENT"
+echo "OK (37): a \`]\` inside a line comment makes the oracle REFUSE rather than close the window early and miss a later gate"
+
+# ---------------------------------------------------------------------------
+# 38. RED — a leading UTF-8 BOM before `#![cfg(...)]` (roborev r8 F2).
+#
+#     rustc ACCEPTS AND IGNORES one leading BOM, so the gate really does apply. Without
+#     stripping it the `#![` test does not match, the prologue reads CLEAN, and the
+#     module is certified while the compiled crate does not contain it.
+#     MEASURED against the PRE-FIX reader on this exact fixture: `CLEAN 1`.
+#
+#     THIS CASE ASSERTS THE DEFECT VERDICT, NOT A REFUSAL, and that distinction is the
+#     reason it is written this way: a BOM is EXACTLY modellable (rustc skips exactly
+#     one), so the honest answer is the named #1712 INCONSISTENT diagnostic carrying the
+#     hoist remedy — not "cannot classify". Refusing here would have been the lazy fix
+#     and would have degraded a precise verdict into an unactionable one.
+#
+#     IT ALSO PINS `LC_ALL=C` ON THE READER, which is load-bearing and invisible: under
+#     a UTF-8 locale awk's `sprintf("%c", 239)` yields the CHARACTER U+00EF (two bytes),
+#     not the byte 0xEF, so the BOM comparison silently never matches. Demonstrated
+#     both ways on the SAME awk program: UTF-8 locale => CLEAN (the bug), LC_ALL=C =>
+#     GATED. Anyone who drops that prefix reds this case.
+# ---------------------------------------------------------------------------
+oracle_tree prologue-bom; wt38="$SCRATCH"
+{ printf '\357\273\277'
+  cat <<'RS'
+#![cfg(feature = "benchmarks")]
+
+//! Self-test-only probe (#1712 roborev r8 F2).
+pub fn probe() {}
+RS
+} >"$wt38/cqlite-core/src/probe_oracle.rs"
+set +e
+bash "$wt38/$GUARD_REL" >"$TMPROOT/case38.out" 2>&1
+case38_rc=$?
+set -e
+[ "$case38_rc" -ne 0 ] || fail_case "case 38 — a UTF-8 BOM hid an inner \`#![cfg(...)]\` from the reader and the guard passed GREEN. rustc ignores a leading BOM, so the gate APPLIES; got: $(cat "$TMPROOT/case38.out")"
+grep -q "probe_oracle" "$TMPROOT/case38.out" \
+  || fail_case "case 38 — the guard failed but never named \`probe_oracle\`, so it failed for some other reason; got: $(cat "$TMPROOT/case38.out")"
+grep -q "INCONSISTENT" "$TMPROOT/case38.out" \
+  || fail_case "case 38 — a BOM-prefixed \`#![cfg(...)]\` was not reported as the INCONSISTENT #1712 defect. A BOM is exactly modellable (rustc skips one), so the verdict must be the NAMED defect carrying the hoist remedy, not a refusal; got: $(cat "$TMPROOT/case38.out")"
+echo "OK (38): a BOM-prefixed inner \`#![cfg(...)]\` is caught as the NAMED defect (not merely refused), which also pins LC_ALL=C on the reader"
+
+# ---------------------------------------------------------------------------
+# 36. GREEN — THE POSITIVE CONTROL for 29-38.
 #
 #     Without it, every case above would be satisfied by a guard hardwired to refuse
 #     any prologue it is handed — a refusal that reds correct code gets waived, and a
@@ -1129,4 +1203,4 @@ c36_read="$(sed -E 's/.*; ([0-9]+) module-file prologues read.*/\1/' "$TMPROOT/c
   || fail_case "case 36 — $c36_open unconditional declarations but only $c36_read prologues read; one was skipped"
 echo "OK (36): an ordinary prologue with INERT inner attributes certifies normally, and the added module really was examined"
 echo ""
-echo "PASS: test_pub_surface_guard.sh — all 23 cases (5 green, 16 reds, 1 usage, 1 kill-safety)"
+echo "PASS: test_pub_surface_guard.sh — all 25 cases (5 green, 18 reds, 1 usage, 1 kill-safety)"
