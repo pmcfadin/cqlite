@@ -49,13 +49,24 @@ for run in runs:
 def med(values):
     return statistics.median(values)
 
-print("## Per-cell results (median of %d iterations; [min, max])\n" % max(
-    len(v) for v in groups.values()))
+# EVERY row carries its own `n`, and a single-sample row prints NO range.
+#
+# The first version printed one global "median of N iterations" header taken from
+# the LARGEST group and then rendered every row's range unconditionally, so a row
+# with a single sample rendered as `[81.0, 81.0]` — which reads as a tight,
+# high-confidence measurement when it is the exact opposite (one draw from a
+# distribution whose measured per-cell spread on this corpus reaches 2.4x). A
+# per-row `n`, and an em dash instead of a degenerate range, cannot be misread
+# that way.
+counts = sorted({len(v) for v in groups.values()})
+print("## Per-cell results (median over each row's own `n` iterations; "
+      "n=%s across the matrix)\n"
+      % (counts[0] if len(counts) == 1 else "%d..%d" % (counts[0], counts[-1])))
 # NOTE: no `grpc-write` column. That sub-phase counter is fed by PRODUCTION's
 # `ChannelSink`, not by the spike's `SpikeSink`, so it reads 0 here because it was
 # never instrumented — not because the channel send was free. Printing it would be
 # a fabricated zero.
-hdr = ("| scenario | arm | wall s (median) | [min, max] | rows emitted/s "
+hdr = ("| scenario | arm | n | wall s (median) | [min, max] | rows emitted/s "
        "| batches | encode ms | merge ms | decompress ms | cold-fault ms (sum "
        "over 2 producer threads) | peak RSS MiB | rows result |")
 print(hdr)
@@ -70,8 +81,11 @@ for scenario in SCENARIOS:
             continue
         secs = [r["elapsed_nanos"] / 1e9 for r in rs]
         rss = [r["peak_rss_bytes"] for r in rs if r["peak_rss_bytes"] is not None]
-        print("| %s | %s | %.1f | [%.1f, %.1f] | %.0f | %d | %.0f | %.0f | %.0f | %.0f | %s | %d |" % (
-            scenario, arm, med(secs), min(secs), max(secs),
+        # A single sample has no range to report. Say so, rather than printing
+        # `[x, x]` — see the header comment.
+        span = "—" if len(secs) < 2 else "[%.1f, %.1f]" % (min(secs), max(secs))
+        print("| %s | %s | %d | %.1f | %s | %.0f | %d | %.0f | %.0f | %.0f | %.0f | %s | %d |" % (
+            scenario, arm, len(rs), med(secs), span,
             med([r["rows_scanned"] / (r["elapsed_nanos"] / 1e9) for r in rs]),
             med([r["batches"] for r in rs]),
             med([r["subphase_encode_nanos"] / 1e6 for r in rs]),
@@ -83,10 +97,13 @@ for scenario in SCENARIOS:
         ))
 
 print("\n## Derived deltas\n")
-print("| scenario | floor s | row s | DF@tp1 s | DF@default s | pushdown s "
-      "| vectorized-exec (row/DF@tp1) | concurrency (DF@tp1/DF@default) "
-      "| pushdown vs floor | decode-to-column share of floor wall |")
-print("|" + "---|" * 9)
+deltas_hdr = ("| scenario | floor s | row s | DF@tp1 s | DF@default s | pushdown s "
+              "| vectorized-exec (row/DF@tp1) | concurrency (DF@tp1/DF@default) "
+              "| pushdown vs floor | decode-to-column share of floor wall |")
+print(deltas_hdr)
+# Derived from the header, not hand-counted: the hand-counted 9 was one column
+# short of the 10 printed, so the table rendered ragged.
+print("|" + "---|" * (deltas_hdr.count("|") - 1))
 for scenario in SCENARIOS:
     def m(arm, field="elapsed_nanos", scale=1e9):
         rs = groups.get((scenario, arm))
@@ -107,6 +124,50 @@ for scenario in SCENARIOS:
         ratio(row, df1), ratio(df1, dfd), ratio(floor, push),
         "n/a" if enc is None or floor in (None, 0) else "%.1f%%" % (100 * enc / floor),
     ))
+
+# ---------------------------------------------------------------------------
+# THE DRIFT TABLE: what this matrix would have "shown" after 1 and 2 iterations.
+#
+# The vectorization ratio is recomputed as a RUNNING median over iterations
+# 1..n, which is exactly the number a reader would have quoted had the run been
+# stopped at n. It is printed because it is the single strongest piece of
+# evidence in the spike about its own reliability: the estimate regresses toward
+# no effect as samples accumulate, so an early read of this matrix would have
+# reported a win that the completed matrix does not support.
+#
+# Iteration attribution is REQUIRED and is not inferred: each run carries its own
+# `iteration`, stamped by the harness (`--iteration-base`). If a group's
+# iterations are not distinct — the state of the cells written before that flag
+# existed — the table is SKIPPED with the reason, never computed off a
+# fabricated ordering.
+# ---------------------------------------------------------------------------
+print("\n## Running vectorization estimate by iteration count (drift)\n")
+attributable = all(
+    len({r["iteration"] for r in v}) == len(v) for v in groups.values()
+)
+max_iters = max(len(v) for v in groups.values())
+if not attributable:
+    print("- SKIPPED: the cells do not carry distinct `iteration` values, so a "
+          "running estimate cannot be attributed to an iteration order")
+elif max_iters < 2:
+    print("- SKIPPED: a single iteration per cell has no drift to show")
+else:
+    print("| scenario | " + " | ".join(
+        "n=%d%s" % (n, " (final)" if n == max_iters else "")
+        for n in range(1, max_iters + 1)) + " |")
+    print("|" + "---|" * (max_iters + 1))
+    for scenario in SCENARIOS:
+        cols = []
+        for n in range(1, max_iters + 1):
+            def prefix(arm):
+                rs = groups.get((scenario, arm), [])
+                vals = [r["elapsed_nanos"] / 1e9 for r in rs if r["iteration"] <= n]
+                return med(vals) if vals else None
+            row, df1 = prefix("row_engine"), prefix("datafusion@tp1")
+            cols.append("n/a" if not row or not df1 else "%.2fx" % (row / df1))
+        print("| %s | %s |" % (scenario, " | ".join(cols)))
+    print("\nRatio is `row_engine / datafusion@tp1` wall time (>1 = DataFusion "
+          "faster), median over iterations 1..n.")
 
 # ---------------------------------------------------------------------------
 # I/O-controlled engine comparison.
@@ -199,6 +260,42 @@ print("- rows_scanned across the COMPARABLE arms (floor/row_engine/datafusion): 
          else "  <-- FAIL: the comparable arms did not read the same rows"))
 push = sorted({r["rows_scanned"] for r in runs if r["arm"] == "row_pushdown"})
 print("- rows_scanned for row_pushdown (narrowed scan, expected to differ): %s" % push)
+# `rows_result` AGREEMENT. `rows_scanned` agreement (above) cannot see a
+# `row_pushdown` arm that dropped rows the other arms keep, because that arm is
+# excluded from it by design. The quantity that must hold across a narrowed scan
+# is the ANSWER, so it is checked here, per (scenario, iteration), over every arm
+# EXCEPT `floor` — which discards its batches, so its `rows_result` is 0 by
+# design.
+answers = {}
+for r in runs:
+    if r["arm"] == "floor":
+        continue
+    answers.setdefault((r["scenario"], r["iteration"]), set()).add(r["rows_result"])
+disagreeing = {k: sorted(v) for k, v in answers.items() if len(v) > 1}
+print("- rows_result agreement across the answering arms (floor excluded): %s"
+      % ("ALL AGREE" if not disagreeing
+         else "%s  <-- FAIL: the arms answered different queries" % disagreeing))
+
+# THE FLOOR DIAGNOSTIC, reported and not asserted. The discard-only floor does
+# strictly less work than every executing arm, so it bounds them from below — in
+# a noise-free world. Here it does not, and the size of the violation is the
+# honest measure of how little wall time can be trusted on this box. It is
+# printed rather than raised for the same reason the harness only warns: on this
+# corpus it fails far more often than it holds, so treating it as an assertion
+# would reject nearly every legitimate run.
+by_cell = {(r["scenario"], key(r), r["iteration"]): r for r in runs}
+floor_cmp = [(k, v) for k, v in by_cell.items() if k[1] != "floor"
+             and (k[0], "floor", k[2]) in by_cell]
+beaten = [k for k, v in floor_cmp
+          if v["elapsed_nanos"] < by_cell[(k[0], "floor", k[2])]["elapsed_nanos"]]
+print("- discard-only floor BEATEN by an executing arm in %d of %d arm-comparisons "
+      "(wall-clock noise, not an engine effect — see the sub-phase table)"
+      % (len(beaten), len(floor_cmp)))
+faults = [r["subphase_cold_fault_nanos"] / r["elapsed_nanos"] for r in runs]
+print("- cold-fault / elapsed ratio: %.2f..%.2f — cold-fault is a STALL ACCOUNT summed "
+      "over 2 producer threads, NOT a partition of elapsed, so it legitimately EXCEEDS "
+      "wall time and must never be rendered as a percentage of it"
+      % (min(faults), max(faults)))
 print("- reconcile_entries range: %d..%d" % (
     min(r["reconcile_entries"] for r in runs),
     max(r["reconcile_entries"] for r in runs)))

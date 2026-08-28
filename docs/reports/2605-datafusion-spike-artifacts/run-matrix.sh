@@ -48,7 +48,7 @@ for iter in $(seq 1 "$ITERS"); do
         --dir "$DIR" --ddl-file "$DDL" \
         --projection pk,ck,v_int \
         --filter-column ck --filter-op lt --filter-value 5 \
-        --scenario "$scenario" --arm "$arm" --iterations 1 \
+        --scenario "$scenario" --arm "$arm" --iterations 1 --iteration-base "$iter" \
         ${tp:+--df-target-partitions "$tp"} \
         --out "$OUT/cells/$label.json"
     done

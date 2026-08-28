@@ -9,7 +9,7 @@
     {
       "scenario": "full_scan_count",
       "arm": "data_fusion",
-      "iteration": 1,
+      "iteration": 2,
       "elapsed_nanos": 71477876729,
       "rows_scanned": 1899750,
       "rows_result": 1899750,
@@ -28,5 +28,7 @@
       "df_target_partitions": 16,
       "sql": "SELECT count(*) FROM t"
     }
-  ]
+  ],
+  "iteration_base": 2,
+  "iteration_provenance": "iteration recovered from the cell FILENAME written by run-matrix.sh, which is authoritative for run order; measurements are byte-for-byte unchanged. Cells produced after --iteration-base exists are stamped by the harness itself."
 }

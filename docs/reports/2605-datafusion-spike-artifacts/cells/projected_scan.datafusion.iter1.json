@@ -28,5 +28,7 @@
       "df_target_partitions": 16,
       "sql": "SELECT \"pk\", \"ck\", \"v_int\" FROM t"
     }
-  ]
+  ],
+  "iteration_base": 1,
+  "iteration_provenance": "iteration recovered from the cell FILENAME written by run-matrix.sh, which is authoritative for run order; measurements are byte-for-byte unchanged. Cells produced after --iteration-base exists are stamped by the harness itself."
 }

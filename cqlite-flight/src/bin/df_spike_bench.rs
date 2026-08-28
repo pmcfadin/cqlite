@@ -42,6 +42,7 @@ struct Args {
     filter_op: RowOp,
     filter_value: Option<String>,
     iterations: usize,
+    iteration_base: usize,
     batch_size: usize,
     out: Option<PathBuf>,
     df_target_partitions: Option<usize>,
@@ -126,7 +127,12 @@ fn run() -> Result<(), String> {
     let mut results: Vec<BenchOutcome> = Vec::new();
     for kind in &args.scenarios {
         for arm in &args.arms {
-            for iteration in 1..=args.iterations {
+            // Labelled from `--iteration-base`, not from a 1-based local
+            // counter: the driver runs ONE PROCESS PER CELL, so every record
+            // would otherwise be stamped `iteration=1` and a cell would not be
+            // attributable to its place in the run order from its own contents.
+            for offset in 0..args.iterations {
+                let iteration = args.iteration_base + offset;
                 let scenario = Scenario {
                     kind: *kind,
                     arm: *arm,
@@ -312,7 +318,7 @@ fn assert_results_agree(results: &[BenchOutcome]) -> Result<(), String> {
 /// by cold page-fault stalls whose magnitude depends on cache state at the moment
 /// a cell runs, while the order-independent sub-phase counters (`encode`,
 /// `batches`) are identical across arms. Measured on the committed 45-cell
-/// matrix, the floor is beaten in 17 of 24 arm-comparisons — so a hard abort
+/// matrix, the floor is beaten in 24 of 36 arm-comparisons — so a hard abort
 /// would reject nearly every legitimate run and teach the operator to disable the
 /// check. Printing it keeps the noise VISIBLE, which is the honest reading.
 fn report_floor_violations(results: &[BenchOutcome]) {
@@ -378,6 +384,7 @@ fn write_results(args: &Args, results: &[BenchOutcome]) -> Result<(), String> {
         "corpus_dir": args.dir,
         "ddl_file": args.ddl_file,
         "iterations": args.iterations,
+        "iteration_base": args.iteration_base,
         "batch_size": args.batch_size,
         "df_target_partitions": args.df_target_partitions,
         "runs": results,
@@ -399,6 +406,7 @@ fn parse_args() -> Result<Args, String> {
     let mut filter_op = RowOp::Lt;
     let mut filter_value: Option<String> = None;
     let mut iterations = 3usize;
+    let mut iteration_base = 1usize;
     let mut batch_size = 8192usize;
     let mut out: Option<PathBuf> = None;
     let mut df_target_partitions: Option<usize> = None;
@@ -434,6 +442,11 @@ fn parse_args() -> Result<Args, String> {
                 iterations = value()?
                     .parse()
                     .map_err(|e| format!("--iterations must be a positive integer: {e}"))?;
+            }
+            "--iteration-base" => {
+                iteration_base = value()?
+                    .parse()
+                    .map_err(|e| format!("--iteration-base must be a positive integer: {e}"))?;
             }
             "--batch-size" => {
                 batch_size = value()?
@@ -474,6 +487,9 @@ fn parse_args() -> Result<Args, String> {
     if iterations == 0 {
         return Err("--iterations must be >= 1".to_string());
     }
+    if iteration_base == 0 {
+        return Err("--iteration-base must be >= 1".to_string());
+    }
     if batch_size == 0 {
         return Err("--batch-size must be >= 1".to_string());
     }
@@ -485,6 +501,7 @@ fn parse_args() -> Result<Args, String> {
         filter_op,
         filter_value,
         iterations,
+        iteration_base,
         batch_size,
         out,
         df_target_partitions,
@@ -515,6 +532,9 @@ Optional:
   --filter-op <op>      eq|ne|lt|lte|gt|gte (default: lt)
   --filter-value <v>    operand; parsed as bool, then integer, then float, then text (default: 5)
   --iterations <n>      iterations per (scenario, arm) (default: 3)
+  --iteration-base <n>  index the first iteration from here (default: 1). One process per
+                        cell means the internal counter always restarts at 1; this stamps the
+                        run's real place in the matrix into the result record.
   --batch-size <n>      rows per Arrow batch (default: 8192, the production default)
   --scenario <id>       full_scan_count|projected_scan|filtered_scan (repeatable; default: all)
   --arm <id>            floor|row_engine|datafusion|row_pushdown (repeatable; default: all)

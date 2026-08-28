@@ -9,7 +9,7 @@
     {
       "scenario": "projected_scan",
       "arm": "data_fusion",
-      "iteration": 1,
+      "iteration": 3,
       "elapsed_nanos": 60994095072,
       "rows_scanned": 1899750,
       "rows_result": 1899750,
@@ -28,5 +28,7 @@
       "df_target_partitions": 16,
       "sql": "SELECT \"pk\", \"ck\", \"v_int\" FROM t"
     }
-  ]
+  ],
+  "iteration_base": 3,
+  "iteration_provenance": "iteration recovered from the cell FILENAME written by run-matrix.sh, which is authoritative for run order; measurements are byte-for-byte unchanged. Cells produced after --iteration-base exists are stamped by the harness itself."
 }
