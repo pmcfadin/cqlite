@@ -44,6 +44,11 @@ SCRIPT_DIR=$(cd "$(dirname "$0")" && pwd)
 # that lands on the scratch copy finds nothing and reports CLEAN — a false pass, which is
 # worse than the false fail that surfaced the bug.
 readonly WRAPPER_REAL="$SCRIPT_DIR/../flow/roborev-review.sh"
+# THE SCRATCH-COPY OVERRIDE STARTS EMPTY, WHATEVER THE CALLER EXPORTED (roborev job 53). It is read
+# as `${RUN_WRAPPER_PATH:-$WRAPPER_REAL}`, so an inherited environment value would silently redirect
+# every early run_wrapper call at an arbitrary script and the suite would report on that instead --
+# a hermeticity hole introduced by this very refactor. Only the two gate-mock cases may set it.
+RUN_WRAPPER_PATH=""
 # A code-only view of a file: quoted spans blanked, comments removed, continuations joined. Used by
 # the one structural scan below, so a variable NAME appearing inside a diagnostic string or a
 # comment is not mistaken for a read of it.
@@ -4645,7 +4650,9 @@ _cls_exec_lines() {
       else {
         if (c2 == "'"'"'") { sq2 = 1; continue }
         if (c2 == "\"") { dq2 = 1; continue }
-        if (c2 == "#" && (i2 == 1 || substr(s, i2-1, 1) ~ /[ \t]/)) return substr(s, 1, i2 - 1)
+        # A comment can also open straight after an operator -- `x=1;# note` is a comment to the
+        # shell (roborev job 53). Restricting to whitespace left such text in the executable view.
+        if (c2 == "#" && (i2 == 1 || substr(s, i2-1, 1) ~ /[ \t;&|()]/)) return substr(s, 1, i2 - 1)
       }
     }
     return s
@@ -4684,7 +4691,11 @@ _cls_exec_lines() {
   # set of expansions that assign; plain $VAR and ${VAR} cannot, which is why the ordinary
   # $PROGNAME interpolation in the body stays suppressed and the prose exemption still works.
   # NOTE: this awk program is single-quoted, so NO APOSTROPHE may appear in these comments.
-  in_usage && ($0 ~ /[$][(]/ || $0 ~ /`/ || $0 ~ /[$][{][A-Za-z_][A-Za-z0-9_]*:?=/) { print; next }
+  # ANY braced expansion is surfaced, not just the assigning ones. Naming the assigning forms was
+  # another claim about a SET, and ${VAR:+word} / ${VAR:-word} / ${VAR:?word} all REFERENCE the
+  # retired state while being none of them (roborev job 53). The real heredoc contains exactly one
+  # braced expansion, so surfacing every one costs a single line of prose review.
+  in_usage && ($0 ~ /[$][(]/ || $0 ~ /`/ || $0 ~ /[$][{]/) { print; next }
   in_usage { next }
   /^[[:space:]]*#/ { next }
   # A SUBSTITUTION LINE KEEPS ITS TAIL. Inside `$( )` a quoted `#` looks like a comment opener to
