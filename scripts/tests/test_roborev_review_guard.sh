@@ -4652,6 +4652,12 @@ _cls_exec_lines() {
   FILENAME ~ /roborev-review\.sh$/ && /^usage\(\) \{/ { in_usage_fn = 1 }
   in_usage_fn && unq_of($0) ~ /(^|[ \t;&|(])cat[ \t]+<<-?[ \t]*.?EOF/ { in_usage_fn = 0; in_usage = 1; next }
   in_usage && /^EOF$/ { in_usage = 0; next }
+  # A COMMAND SUBSTITUTION INSIDE THE HEREDOC STILL EXECUTES (roborev job 50). The delimiter is
+  # unquoted (the body interpolates $PROGNAME), so `$( )` and backticks in it RUN -- classifier logic
+  # parked there would be prose to this filter and code to the shell. The exemption is for TEXT, so
+  # a substitution inside the body is surfaced rather than suppressed. Measured cost: the real
+  # heredoc contains zero of them.
+  in_usage && ($0 ~ /[$][(]/ || $0 ~ /`/) { print; next }
   in_usage { next }
   /^[[:space:]]*#/ { next }
   # A SUBSTITUTION LINE KEEPS ITS TAIL. Inside `$( )` a quoted `#` looks like a comment opener to
@@ -5032,6 +5038,12 @@ _WR_QS=$(cat <<'AWKEOF'
   # Rather than grow the parser to cover each construct, an unbalanced line is REFUSED: a verdict
   # derived from an unreliable parse is not a verdict. Measured cost on this file: zero lines.
   bal = (sq || dq) ? 0 : 1
+  # ANSI-C `$'"'"'…'"'"'` IS NOT ORDINARY SINGLE QUOTING: it keeps a backslash-escaped quote INSIDE the
+  # string, which this scanner cannot model. Refusing only when the line ends UNBALANCED was not
+  # enough -- `ok $'"'"'a\'"'"'b'"'"'; grep -c z "$WRAPPER" # '"'"'` re-balances the parity using the comment
+  # apostrophe and then reads as reporter prose (roborev job 50). So the construct itself is refused
+  # on any line carrying an occurrence. Measured cost: no occurrence line uses it.
+  ansi = (line ~ /[$]'"'"'/) ? 1 : 0
   # A COMMAND SUBSTITUTION RESTARTS QUOTING, and this flat state machine cannot model that: inside
   # `$( )` a fresh `"` opens a NEW double-quoted context, so `ok "$(grep "a'"'"'b" "$WRAPPER" "c'"'"'d")"`
   # is valid shell that READS the wrapper while the flat scan pairs the two apostrophes and calls it
@@ -5064,7 +5076,7 @@ _WR_QS=$(cat <<'AWKEOF'
     }
     j++
   }
-  printf "%d %d %d %d %d %d %d %d\n%s\n", code, lit, q, mk, ev, bal, cs, tot, seg
+  printf "%d %d %d %d %d %d %d %d %d\n%s\n", code, lit, q, mk, ev, bal, cs, tot, ansi, seg
 }
 AWKEOF
 )
@@ -5081,14 +5093,17 @@ _wr_classify() {
   _c_mk=${_c_rest%% *}; _c_rest=${_c_rest#* }
   _c_ev=${_c_rest%% *}; _c_rest=${_c_rest#* }
   _c_bal=${_c_rest%% *}; _c_rest=${_c_rest#* }
-  _c_cs=${_c_rest%% *}; _c_tot=${_c_rest##* }
+  _c_cs=${_c_rest%% *}; _c_rest=${_c_rest#* }
+  _c_tot=${_c_rest%% *}; _c_ansi=${_c_rest##* }
   # AN UNRELIABLE PARSE YIELDS NO VERDICT (reviewer). Checked FIRST: every field below is derived
   # from the same state machine, so if it ended the line inside a quote, none of them can be trusted.
   # DEFAULTS TO UNTRUSTWORTHY, not to balanced. This is the one field whose job is to say "do not
   # trust the other fields", so an UNMEASURED value (a failed awk, a renamed field) must refuse
   # rather than be believed — CLAUDE.md's `${end:-$start}` lesson, on the field that can least
   # afford it. Key the permissive branch on the AFFIRMATIVE value, never on `!= <bad>`.
-  if [ "${_c_bal:-0}" -eq 0 ]; then printf 'unbalanced %s\n' $(( ${_c_code:-0} + ${_c_lit:-0} )); return; fi
+  if [ "${_c_bal:-0}" -eq 0 ] || [ "${_c_ansi:-1}" -eq 1 ]; then
+    printf 'unbalanced %s\n' $(( ${_c_code:-0} + ${_c_lit:-0} )); return
+  fi
   # ANY apparently-inert occurrence on a line carrying a command substitution is REFUSED, whether or
   # not the line also has a recognised live read (roborev job 43). Gating this on `code -eq 0` was
   # not enough: `bash "$WRAPPER" "$(grep "a'"'"'b" "$WRAPPER" "c'"'"'d")"` presents ONE occurrence as a
@@ -5290,10 +5305,17 @@ _wr_fixture f_mkcolon  "_x=\$(grep -c foo $_wr_ref) # $_wr_marker: a reviewed op
 _wr_fixture f_btprose  "ok \"\`grep \"a'b\" $_wr_ref \"c'd\"\`\""
 _wr_fixture f_cshidden "bash $_wr_ref \"\$(grep \"a'b\" $_wr_ref \"c'd\")\""
 _wr_fixture f_csprose  "ok \"\$(grep \"a'b\" $_wr_ref \"c'd\")\""
-_wr_fixture f_locsave  "  local _gm_real_wrapper=$_wr_ref"
-_wr_fixture f_semisave "_gm_real_wrapper=$_wr_ref;"
-_wr_fixture f_cmpsave  "_wr_saved=x; subject=$_wr_ref"
-_wr_fixture f_cmpsave2 "_wr_saved=unused; grep pattern $_wr_ref"
+# COMPOSED FROM $_wr_aliases, never written literally (roborev job 50). Spelled out, these fixture
+# lines ARE alias assignments, and the mutation scan below had to exclude any line containing
+# `_wr_fixture`/`_wr_expect`/`_wr_ax` to tolerate them -- a substring exclusion, so
+# `_wr_saved=/decoy # _wr_fixture` exempted a real mutation. Composing removes the need for the
+# exclusion entirely rather than narrowing it.
+_wr_a1=${_wr_aliases%% *}
+_wr_a2=${_wr_aliases##* }
+_wr_fixture f_locsave  "  local $_wr_a1=$_wr_ref"
+_wr_fixture f_semisave "$_wr_a1=$_wr_ref;"
+_wr_fixture f_cmpsave  "$_wr_a2=x; subject=$_wr_ref"
+_wr_fixture f_cmpsave2 "$_wr_a2=unused; grep pattern $_wr_ref"
 _wr_fixture f_ansic    "_x=\$'a\\'b'; grep -c z $_wr_ref"
 _wr_fixture f_marked   "_x=\$(grep -c foo $_wr_ref) # $_wr_marker: a reviewed opt-out"
 _wr_fixture f_mixed    "grep -c q $_wr_ref; ok 'mentions \$$_wr_vname'"
@@ -5377,10 +5399,10 @@ while IFS= read -r _wr_u; do
   # `tot` silently shifted this and marked the restore assert unmarked: a positional read of a
   # widening record. Named extraction would be better; the count is asserted below instead.)
   _wr_umk_n=$(printf '%s\n' "$_wr_umk" | tr ' ' '\n' | grep -c .)
-  if [ "${_wr_umk_n:-0}" -ne 8 ]; then
-    bad "structural (#3367): the quote scanner emits ${_wr_umk_n:-0} fields, not the 8 this extraction expects — a field was added or removed and every positional read of it is now wrong"
+  if [ "${_wr_umk_n:-0}" -ne 9 ]; then
+    bad "structural (#3367): the quote scanner emits ${_wr_umk_n:-0} fields, not the 9 this extraction expects — a field was added or removed and every positional read of it is now wrong"
   fi
-  _wr_umk=${_wr_umk% *}; _wr_umk=${_wr_umk% *}; _wr_umk=${_wr_umk% *}; _wr_umk=${_wr_umk% *}; _wr_umk=${_wr_umk##* }
+  _wr_umk=${_wr_umk% *}; _wr_umk=${_wr_umk% *}; _wr_umk=${_wr_umk% *}; _wr_umk=${_wr_umk% *}; _wr_umk=${_wr_umk% *}; _wr_umk=${_wr_umk##* }
   [ "${_wr_umk:-0}" -eq 1 ] && continue
   _wr_ut=${_wr_uc#"${_wr_uc%%[! ]*}"}
   _wr_is_restore=no
@@ -5456,7 +5478,7 @@ while IFS= read -r _wr_ml; do
 done <<EOF
 $(sed -e :a -e '/\\$/N; s/\\\n//; ta' "$TEST_SELF" \
   | grep -nE '(^|[ 	;&|(])(local |export |declare |typeset )?('"$_wr_alias_re"')=' \
-  | grep -vE '^[0-9]+:[[:space:]]*#' | grep -vE '_wr_fixture|_wr_expect|_wr_ax')
+  | grep -vE '^[0-9]+:[[:space:]]*#')
 EOF
 if [ -z "$_wr_amut" ]; then
   ok 'structural (#3367): every assignment to a save alias takes its value from the mutable global itself — none can be pointed somewhere else, so a restore cannot silently install the wrong path'
