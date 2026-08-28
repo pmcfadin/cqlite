@@ -3087,7 +3087,7 @@ else
   # feature is not RUNNING the target (memory-budget enables dhat-heap but selects ONE target by
   # name), so the wording was tightened along with the predicate. This assert caught the rename,
   # which is what it is for; the phrase it now pins is the one that is true.
-  for needle_ in 'EXECUTE NOWHERE' '#3375' 'WHO RUNS THE REMAINING' 'UNRECOGNISED gate shape' 'run by another component'; do
+  for needle_ in 'carry a CRATE-LEVEL gate' '#3375' 'WHO RUNS THE REST' 'DOES NOT CLASSIFY THEM' 'VERBATIM'; do
     if [ "$(grep -cF -- "$needle_" "$fl_body_")" -gt 0 ]; then
       ok "1699-r20-census-element: the census states '$needle_'"
     else
@@ -3102,10 +3102,9 @@ else
   # as a MISS). Forbidding a bad spelling is guesswork about where the badness will appear;
   # requiring the derivation is a statement about what must be true.
   derived_ok_=1
-  grep -F 'EXECUTE NOWHERE' "$fl_body_" | grep -q '\$gated_n' || derived_ok_=0
-  grep -F 'WHO RUNS THE REMAINING' "$fl_body_" | grep -q '\$ci_n' || derived_ok_=0
+  grep -F 'carry a CRATE-LEVEL gate' "$fl_body_" | grep -q '\$gated_n' || derived_ok_=0
   if [ "$derived_ok_" -eq 1 ]; then
-    ok "1699-r20-census-derived: both counting lines interpolate their DERIVED variable (\$gated_n, \$ci_n)"
+    ok "1699-r20-census-derived: the counting line interpolates its DERIVED variable (\$gated_n)"
   else
     bad "1699-r20-census-derived: a census count is no longer interpolated from its derived variable — a literal there goes stale the moment a target is added or a feature joins default, silently: $(grep -nE 'EXECUTE NOWHERE|WHO RUNS THE REMAINING' "$fl_body_" | head -2 | tr '\n' ' ')"
   fi
@@ -3123,152 +3122,96 @@ fi
 # the predicate actually in use went unchecked. A vacuous pass, in the self-test of the PR about
 # vacuous passes, created by superseding a function without deleting it. Both halves are now pinned:
 # the live predicate is linted, and the superseded name must not exist at all.
-if [ "$(grep -cF '_feature_enabled_by_some_component' "$GATE")" -eq 0 ]; then
-  ok "1699-r22-dead-predicate-gone: the superseded _feature_enabled_by_some_component is deleted, so no assert can bind to it instead of the live one"
-else
-  bad "1699-r22-dead-predicate-gone: _feature_enabled_by_some_component is back in the gate — it has no callers, and its presence lets a structural assert pass against dead code while the live predicate goes unchecked"
-fi
 pred_="$tmp/1699-r20-pred.txt"
-awk '/^_component_runs_target\(\) \{/, /^\}/' "$GATE" > "$pred_"
+awk '/^_crate_gated_test_targets\(\) \{/, /^\}/' "$GATE" > "$pred_"
 if [ ! -s "$pred_" ]; then
-  bad "1699-r20-pipefail-scope: could not extract _component_runs_target — this assert would pass vacuously"
+  bad "1699-r20-pipefail-scope: could not extract _crate_gated_test_targets — this assert would pass vacuously"
 elif [ "$(sed 's/[[:space:]]*#.*$//' "$pred_" | grep -cE '\|[[:space:]]*grep[^|]*-[a-zA-Z]*q')" -eq 0 ]; then
-  ok "1699-r20-pipefail: _component_runs_target contains no '| grep -q' (which returns 141 on a successful match under pipefail)"
+  ok "1699-r20-pipefail: _crate_gated_test_targets contains no '| grep -q' (which returns 141 on a successful match under pipefail)"
 else
   bad "1699-r20-pipefail: '| grep -q' is back in the predicate — under pipefail it reports 141 on a SUCCESSFUL match, so the predicate answers FALSE precisely when it should answer TRUE (#3380/#3387)"
 fi
 
-# --- 33. #1699: the crate-gate grammar is CLOSED (roborev round-21, Medium) --------------
+# --- 33. #1699: the crate-gate census reports the OBSERVATION, verbatim (rounds 20-27) ---
 #
-# The first cut treated any expression containing `feature =` as a positive conjunction, so legal
-# `not(feature = "x")` and `any(feature = "x", feature = "<enabled>")` gates would have been read as
-# "this feature is off, therefore the target executes nowhere" — a FALSE #3375 claim, which is the
-# census's most consequential one. Recognise only what is modelled; report the rest.
-#
-# BEHAVIOURAL, per shape, because a structural grep would only pin the spelling of today's fix. The
-# extracted function's one dependency (`_package_test_targets_gated`) is replaced by a stub in our
-# own scratch dir — the artifact-substitution pattern, never a test-only seam in the gate (#3312).
-gg_body_="$tmp/1699-r21-gategrammar.sh"
+# The classifier is GONE (see _crate_gated_test_targets for the five rounds of findings that
+# retired it). What remains must (a) report every crate-level gate form INCLUDING `cfg_attr`, which
+# r27 found the classifier missing, (b) print the gate text rather than a verdict, and (c) never
+# reintroduce the classification identifiers — because as long as they exist an assert can bind to
+# them instead of to the code that runs (round 22's lesson, learned the hard way).
+gg_body_="$tmp/1699-r27-gated.sh"
 awk '/^_crate_gated_test_targets\(\) \{/, /^\}/' "$GATE" > "$gg_body_"
 if [ ! -s "$gg_body_" ]; then
-  bad "1699-r21-gate-grammar-scope: could not extract _crate_gated_test_targets — every case below would pass vacuously"
+  bad "1699-r27-verbatim-scope: could not extract _crate_gated_test_targets — every case below would pass vacuously"
 else
-  gg_src_="$tmp/1699-r21-src"; mkdir -p "$gg_src_"
-  # <name>|<gate line>|<expected off-feature, or UNCLASSIFIED, or NONE for "not reported">
+  gg_src_="$tmp/1699-r27-src"; mkdir -p "$gg_src_"
   while IFS='|' read -r case_ gate_ want_; do
     [ -n "$case_" ] || continue
-    printf '//! prose header\n%s\n#[test]\nfn t() {}\n' "$gate_" > "$gg_src_/$case_.rs"
-    # ONE stub, parameterised through the environment. The first version defined the stub twice and
-    # the second definition's nested quoting put LITERAL quote marks in the fixture path, so the
-    # function read no file and every case reported NONE — the asserts failed rather than passing
-    # vacuously, which is the only reason it was visible at all.
+    if [ "$gate_" = "NONE" ]; then
+      printf '//! prose header\nfn t() {}\n' > "$gg_src_/$case_.rs"
+    else
+      printf '//! prose header\n%s\nfn t() {}\n' "$gate_" > "$gg_src_/$case_.rs"
+    fi
     got_=$(
       export GG_SRC="$gg_src_/$case_.rs" GG_REL="tests/$case_.rs"
       _package_test_targets_gated() { printf '%s\t%s\t%s\t%s\n' "${case_}_target" "$GG_SRC" source "$GG_REL"; }
       # shellcheck disable=SC1090
       . "$gg_body_"
-      _crate_gated_test_targets somepkg " on_a on_b " 2>/dev/null | awk -F'\t' '{print $4}'
+      _crate_gated_test_targets somepkg 2>/dev/null | awk -F'\t' '{print $3}'
     )
-    got_=${got_:-NONE}
+    got_=${got_:-ABSENT}
     if [ "$got_" = "$want_" ]; then
-      ok "1699-r21-gate-grammar[$case_]: '$gate_' -> $got_"
+      ok "1699-r27-verbatim[$case_]: reported as '$got_'"
     else
-      bad "1699-r21-gate-grammar[$case_]: '$gate_' classified as '$got_', expected '$want_' — a misread gate either invents an EXECUTE NOWHERE claim or hides one"
+      bad "1699-r27-verbatim[$case_]: reported '$got_', expected '$want_' — the census must print every crate-level gate form verbatim and nothing else"
     fi
-  done <<'GATE_SHAPE_CASES'
-single_off|#![cfg(feature = "off_x")]|off_x
-single_on|#![cfg(feature = "on_a")]|NONE
-all_one_off|#![cfg(all(feature = "on_a", feature = "off_x"))]|off_x
-all_both_on|#![cfg(all(feature = "on_a", feature = "on_b"))]|NONE
-negation|#![cfg(not(feature = "off_x"))]|UNCLASSIFIED
-disjunction|#![cfg(any(feature = "off_x", feature = "on_a"))]|UNCLASSIFIED
-nested_all_any|#![cfg(all(feature = "on_a", any(feature = "off_x", feature = "on_b")))]|UNCLASSIFIED
-non_feature_pred|#![cfg(all(feature = "on_a", target_os = "linux"))]|UNCLASSIFIED
-bare_predicate|#![cfg(test)]|UNCLASSIFIED
-GATE_SHAPE_CASES
-fi
-
-# --- 34. #1699: _component_runs_target requires EXECUTION, not just the feature ------------
-#
-# roborev round-22 (Medium): the predicate treated any package+feature line without `--test` as
-# running every integration target. `cargo build`, `cargo clippy`, `cargo test --lib` and
-# `cargo test --no-run` all mention the package and the feature while executing NO integration
-# target, so each would have produced a false "runs elsewhere" — moving a target OUT of the #3375
-# bucket it belongs in. Round 21 fixed the weaker version of this same question; this is the
-# selector half.
-#
-# BEHAVIOURAL, driven through a substituted GATE_SELF: the predicate reads the gate's own source, so
-# a fixture "gate" containing exactly one invocation is the whole experiment. No test-only seam —
-# GATE_SELF is the variable the function already uses, set here in a subshell (#3312).
-crt_="$tmp/1699-r22-crt.sh"
-awk '/^_component_runs_target\(\) \{/, /^\}/' "$GATE" > "$crt_"
-if [ ! -s "$crt_" ]; then
-  bad "1699-r22-runs-target-scope: could not extract _component_runs_target — every case below would pass vacuously"
-else
-  while IFS='|' read -r case_ invocation_ want_; do
-    [ -n "$case_" ] || continue
-    fake_gate_="$tmp/1699-r22-gate-$case_.sh"
-    printf '#!/usr/bin/env bash\n# a comment mentioning --features decoy-feature --package cqlite-flight\n%s\n' "$invocation_" > "$fake_gate_"
-    if ( GATE_SELF="$fake_gate_"; . "$crt_"; _component_runs_target cqlite-flight dhat-heap issue_1494_producer_mem_budget ) >/dev/null 2>&1; then
-      got_=RUNS
-    else
-      got_=NO
-    fi
-    if [ "$got_" = "$want_" ]; then
-      ok "1699-r22-runs-target[$case_]: $got_"
-    else
-      bad "1699-r22-runs-target[$case_]: got $got_, expected $want_ — for invocation: $invocation_"
-    fi
-  done <<'RUNS_TARGET_CASES'
-whole_package_test|  cargo test --package cqlite-flight --features dhat-heap|RUNS
-explicit_this_target|  cargo test --package cqlite-flight --features dhat-heap --test issue_1494_producer_mem_budget|RUNS
-explicit_other_target|  cargo test --package cqlite-flight --features dhat-heap --test some_other_target|NO
-no_run_compile_only|  cargo test --package cqlite-flight --features dhat-heap --no-run|NO
-lib_only|  cargo test --package cqlite-flight --features dhat-heap --lib|NO
-bins_only|  cargo test --package cqlite-flight --features dhat-heap --lib --bins|NO
-cargo_build|  cargo build --package cqlite-flight --features dhat-heap|NO
-cargo_clippy|  cargo clippy --package cqlite-flight --features dhat-heap --all-targets|NO
-feature_substring|  cargo test --package cqlite-flight --features dhat-heap-extended|NO
-feature_in_list|  cargo test --package cqlite-flight --features arrow,dhat-heap,test-util|RUNS
-other_package|  cargo test --package cqlite-core --features dhat-heap|NO
-comment_only|  # cargo test --package cqlite-flight --features dhat-heap|NO
-RUNS_TARGET_CASES
-fi
-
-# Stacked and indented crate gates (roborev round-22, first Medium): Rust permits leading whitespace
-# and SEVERAL inner attributes, which are CONJUNCTIVE. Reading only the first one hides a gap — a
-# target whose first gate is enabled and whose second is not executes zero tests while being counted
-# as CI-covered. That is the direction that is harder to notice, which is why it needs a fixture.
-if [ -s "$gg_body_" ]; then
-  gg2_="$tmp/1699-r22-src"; mkdir -p "$gg2_"
-  while IFS='|' read -r case_ want_; do
-    [ -n "$case_" ] || continue
-    case "$case_" in
-      stacked_second_off) printf '//! prose\n#![cfg(feature = "on_a")]\n#![cfg(feature = "off_x")]\nfn t() {}\n' > "$gg2_/$case_.rs" ;;
-      stacked_both_on)    printf '//! prose\n#![cfg(feature = "on_a")]\n#![cfg(feature = "on_b")]\nfn t() {}\n' > "$gg2_/$case_.rs" ;;
-      indented_off)       printf '//! prose\n    #![cfg(feature = "off_x")]\nfn t() {}\n' > "$gg2_/$case_.rs" ;;
-      stacked_unclass)    printf '//! prose\n#![cfg(feature = "on_a")]\n#![cfg(any(feature = "off_x", feature = "on_b"))]\nfn t() {}\n' > "$gg2_/$case_.rs" ;;
-    esac
-    got_=$(
-      export GG_SRC="$gg2_/$case_.rs" GG_REL="tests/$case_.rs"
-      _package_test_targets_gated() { printf '%s\t%s\t%s\t%s\n' "${case_}_target" "$GG_SRC" source "$GG_REL"; }
+  done <<'VERBATIM_CASES'
+plain_cfg|#![cfg(feature = "x")]|#![cfg(feature = "x")]
+cfg_attr|#![cfg_attr(feature = "x", cfg(feature = "y"))]|#![cfg_attr(feature = "x", cfg(feature = "y"))]
+negation|#![cfg(not(feature = "x"))]|#![cfg(not(feature = "x"))]
+disjunction|#![cfg(any(feature = "x", feature = "y"))]|#![cfg(any(feature = "x", feature = "y"))]
+indented|    #![cfg(feature = "x")]|#![cfg(feature = "x")]
+ungated|NONE|ABSENT
+VERBATIM_CASES
+  # Stacked gates: BOTH must appear, because they are conjunctive and reporting one hides the other.
+  printf '//! prose\n#![cfg(feature = "a")]\n#![cfg(feature = "b")]\nfn t() {}\n' > "$gg_src_/stacked.rs"
+  got_=$(
+    export GG_SRC="$gg_src_/stacked.rs" GG_REL="tests/stacked.rs"
+    _package_test_targets_gated() { printf '%s\t%s\t%s\t%s\n' stacked_target "$GG_SRC" source "$GG_REL"; }
+    # shellcheck disable=SC1090
+    . "$gg_body_"
+    _crate_gated_test_targets somepkg 2>/dev/null | awk -F'\t' '{print $3}'
+  )
+  if [ "$got_" = '#![cfg(feature = "a")] #![cfg(feature = "b")]' ]; then
+    ok "1699-r27-verbatim[stacked]: both conjunctive gates are reported"
+  else
+    bad "1699-r27-verbatim[stacked]: reported '$got_' — reporting only one of several stacked gates hides half the reason a target runs nothing"
+  fi
+  # An unreadable declared source is a FAILED derivation, not a skip (round 26).
+  chmod 000 "$gg_src_/plain_cfg.rs" 2>/dev/null
+  if [ -r "$gg_src_/plain_cfg.rs" ]; then
+    skipped "1699-r27-verbatim-unreadable: cannot make a file unreadable here — the failed-derivation path was NOT verified"
+  elif (
+      export GG_SRC="$gg_src_/plain_cfg.rs" GG_REL="tests/plain_cfg.rs"
+      _package_test_targets_gated() { printf '%s\t%s\t%s\t%s\n' t "$GG_SRC" source "$GG_REL"; }
       # shellcheck disable=SC1090
-      . "$gg_body_"
-      _crate_gated_test_targets somepkg " on_a on_b " 2>/dev/null | awk -F'\t' '{print $4}'
-    )
-    got_=${got_:-NONE}
-    if [ "$got_" = "$want_" ]; then
-      ok "1699-r22-stacked-gates[$case_]: -> $got_"
-    else
-      bad "1699-r22-stacked-gates[$case_]: got '$got_', expected '$want_' — inner attributes are conjunctive, so reading only the first hides a target that executes nothing"
-    fi
-  done <<'STACKED_CASES'
-stacked_second_off|off_x
-stacked_both_on|NONE
-indented_off|off_x
-stacked_unclass|UNCLASSIFIED
-STACKED_CASES
+      . "$gg_body_"; _crate_gated_test_targets somepkg >/dev/null 2>&1 ); then
+    bad "1699-r27-verbatim-unreadable: an UNREADABLE declared source returned SUCCESS — the target is dropped from the census and lands among the ungated rest by omission"
+  else
+    ok "1699-r27-verbatim-unreadable: an unreadable declared source is a failed derivation, not a silent skip"
+  fi
+  chmod 644 "$gg_src_/plain_cfg.rs" 2>/dev/null
 fi
+
+# The classification identifiers must STAY gone.
+for goneid_ in _component_runs_target _feature_enabled_by_some_component gated_names elsewhere_names unclass_names; do
+  if [ "$(grep -cF "$goneid_" "$GATE")" -eq 0 ]; then
+    ok "1699-r27-classifier-gone[$goneid_]: absent from the gate"
+  else
+    bad "1699-r27-classifier-gone[$goneid_]: back in the gate — the crate-gate classification was retired after five rounds of findings (grammar, stacked gates, conjunctions, compile-only invocations, cfg_attr); reintroducing it reintroduces them"
+  fi
+done
+
 
 # --- 35. #1699: a FAILED ANSI normalisation is not a fallback (roborev round-25, Medium) ---
 #
@@ -3324,8 +3267,6 @@ if [ -s "$zn_h" ]; then
   fi
 fi
 
-echo "----"
-echo "passed: $PASS  failed: $FAIL"
 
 
 # --- 36. #1699: a target OBSERVED but never JUDGED is a FAIL (roborev round-26, Medium) ---
@@ -3376,9 +3317,22 @@ fi
 # A FLOOR, not an exact count: new asserts are added constantly and an equality check would red on
 # every addition. Raise it deliberately when you add a section — the ratchet is the point, and the
 # number below is the count measured at the commit that introduced this check.
-ASSERT_FLOOR=300
+# The tally is printed AFTER every assertion and after this floor (roborev round-27, Low): it used
+# to print before section 36 and before the floor, so the script could announce `failed: 0` and then
+# add failures underneath it. A summary that precedes its own subject is the same shape as a verdict
+# that precedes its measurement.
+# LOWERED DELIBERATELY, 300 -> 285, and this is the ratchet working rather than being defeated.
+# Roborev round 27's descope removed the crate-gate CLASSIFIER, and with it 25 assertions that
+# tested a feature grammar, a conjunction evaluator and a selector predicate which no longer exist.
+# Their replacement (section 33, the verbatim-observation cases) is smaller BECAUSE nothing is
+# interpreted any more. A floor must be moved consciously when the subject legitimately shrinks —
+# otherwise it becomes the thing people edit to make a run green, which is the failure it exists to
+# prevent. It caught this shrink on the first run: 294 against a floor of 300.
+ASSERT_FLOOR=285
 if [ "$PASS" -lt "$ASSERT_FLOOR" ]; then
   echo "FAIL - assert-floor: only $PASS assertions ran, floor is $ASSERT_FLOOR. Sections are being SKIPPED or dying silently (an extraction that broke, a subshell aborting under set -u), and 'failed: 0' over a shrunken subject set is exactly the vacuous pass this suite tests for."
   FAIL=$((FAIL + 1))
 fi
+echo "----"
+echo "passed: $PASS  failed: $FAIL"
 [ "$FAIL" -eq 0 ]
