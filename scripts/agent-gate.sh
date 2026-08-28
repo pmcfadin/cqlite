@@ -6089,7 +6089,19 @@ run_flight_tests() {
     # chooses arbitrarily. The alternative roborev offered — replicating the test's exact selection
     # here — would be a second implementation of the test's choice, and it would go stale the moment
     # the test changed how it selects.
-    local _fx_entry _fx_seen=0 _fx_bad=""
+    # The corpus subdirectory must EXIST AND BE READABLE before "nothing matches" is a meaningful
+    # statement (self-review). `find … 2>/dev/null` swallows a missing or permission-denied
+    # directory and yields zero entries, which is fail-CLOSED (good) but reports the WRONG CAUSE —
+    # "no sensor_data-* here" instead of "this path is not readable". Naming the wrong cause is the
+    # defect round 20 opened on this very census, one layer down: the verdict is right and the
+    # remedy it points at is useless.
+    local _fx_base="$CQLITE_DATASETS_ROOT/sstables/test_timeseries"
+    local _fx_entry _fx_seen=0 _fx_bad="" _fx_basefail=""
+    if [ ! -d "$_fx_base" ]; then
+      _fx_basefail="not-a-directory"
+    elif [ ! -r "$_fx_base" ] || [ ! -x "$_fx_base" ]; then
+      _fx_basefail="unreadable"
+    fi
     # ENUMERATED BY `find`, NOT BY A GLOB, for the same reason the Statistics.db check is (round 34)
     # and one round earlier than it would otherwise have been found: a glob's meaning depends on
     # ambient shell options this script never sets and cannot control — `nullglob` empties an
@@ -6104,6 +6116,11 @@ run_flight_tests() {
         _fx_bad="$_fx_bad $(basename "$_fx_entry")(dangling-symlink)"
       elif [ ! -d "$_fx_entry" ]; then
         _fx_bad="$_fx_bad $(basename "$_fx_entry")(not-a-directory)"
+      elif [ ! -r "$_fx_entry" ] || [ ! -x "$_fx_entry" ]; then
+        # Distinguished from "no Statistics.db" for the same reason as the base directory above: a
+        # permission problem and a missing fixture need different remedies, and the check that
+        # cannot tell them apart sends the reader to the wrong one.
+        _fx_bad="$_fx_bad $(basename "$_fx_entry")(unreadable-directory)"
       elif [ -z "$(find -H "$_fx_entry" -maxdepth 1 -name '*-Statistics.db' -print -quit 2>/dev/null)" ]; then
         # `-H` so a VALID symlink to a fixture directory is followed (roborev round-35, Medium).
         # `find` defaults to `-P` and does not follow its starting point, so a `sensor_data-*`
@@ -6124,13 +6141,17 @@ run_flight_tests() {
       fi
     done < <(find "$CQLITE_DATASETS_ROOT/sstables/test_timeseries" -maxdepth 1 \
                -name 'sensor_data-*' -print0 2>/dev/null)
-    if [ "$_fx_seen" -eq 0 ] || [ -n "$_fx_bad" ]; then
+    if [ -n "$_fx_basefail" ] || [ "$_fx_seen" -eq 0 ] || [ -n "$_fx_bad" ]; then
       status=FAIL
       {
         echo "[$name] FAIL-CLOSED: the real-fixture stats test in this unit suite needs"
         echo "        test_timeseries/sensor_data-*/ WITH a -Statistics.db under"
         echo "        CQLITE_DATASETS_ROOT ($CQLITE_DATASETS_ROOT)."
-        if [ "$_fx_seen" -eq 0 ]; then
+        if [ -n "$_fx_basefail" ]; then
+          echo "        The corpus subdirectory itself is $_fx_basefail:"
+          echo "          $_fx_base"
+          echo "        (so 'nothing matches sensor_data-*' would name the wrong cause)."
+        elif [ "$_fx_seen" -eq 0 ]; then
           echo "        NOTHING matches sensor_data-* there."
         else
           echo "        $_fx_seen entry/entries match, and these are unusable:$_fx_bad"
@@ -6540,7 +6561,14 @@ _crate_gated_test_targets() { # <pkg>  -> name \t rel \t gate-text
   meta=$(_package_test_targets_gated "$pkg" __none__) || return 1
   [ -n "$meta" ] || return 1
   while IFS=$'\t' read -r _tn sp _how rel; do
-    [ -n "$sp" ] || continue
+    # An EMPTY src_path is a FAILED derivation, not a target to skip (self-review of the round-25/26
+    # class). Skipping it drops the target from every population, so it lands among the ungated rest
+    # BY OMISSION — the same silent-exclusion shape those two rounds fixed for unreadable sources,
+    # reachable here through a metadata record cargo produced without a path.
+    if [ -z "$sp" ]; then
+      echo "NO-SRC-PATH for declared target '$_tn' (cargo metadata record carried no src_path)" >&2
+      return 1
+    fi
     if [ ! -r "$sp" ]; then
       echo "UNREADABLE $sp (declared target $_tn)" >&2
       return 1
