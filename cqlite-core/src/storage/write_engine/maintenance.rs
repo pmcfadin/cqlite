@@ -2499,24 +2499,24 @@ mod tests {
         );
     }
 
-    /// Issue #1619 AH1: `Config.storage.compaction` must be non-decorative.
-    /// A `CompactionConfig` with `auto_compaction = false` mapped onto the
-    /// WriteEngineConfig must disable the default policy end-to-end (no rows
-    /// merged, no L0 reduction) — proving the config wiring reaches behavior.
+    /// Issue #1619 AH1: `Config.storage.compaction` must be non-decorative — an
+    /// `auto_compaction = false` bridged onto the `WriteEngineConfig` must disable
+    /// the default policy end-to-end: no rows merged, L0 count unchanged.
     #[test]
     fn test_compaction_config_disables_default_policy() {
         let temp_dir = TempDir::new().unwrap();
         let schema = create_test_schema();
 
-        let compaction = crate::config::CompactionConfig {
-            auto_compaction: false,
-        };
-        let config = WriteEngineConfig::new(
+        // Routed through the ONE public bridge (#1697), which is the path a real
+        // embedder travels: `Config.storage.compaction` -> `WriteEngineConfig`.
+        let mut public_config = crate::config::Config::default();
+        public_config.storage.compaction.auto_compaction = false;
+        let config = WriteEngineConfig::from_config(
+            &public_config,
             temp_dir.path().join("data"),
             temp_dir.path().join("wal"),
             schema,
-        )
-        .with_compaction_config(&compaction);
+        );
         assert!(
             !config.auto_compaction,
             "config mapping must disable compaction"
