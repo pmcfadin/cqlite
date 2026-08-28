@@ -418,6 +418,36 @@ function normalize(   i, s, out, j, c, c2, st, depth, hashes, k, cnt, bd, bmin) 
 
 # Consume one `#[...]` / `#![...]` attribute from the front of BUF, appending
 # following lines until its brackets balance. Returns "" if it never balances.
+# root_depth_at(i, pos): is character `pos` of line `i` at CRATE-ROOT depth — brace
+# depth 0 AND macro-delimiter depth 0 — walking from that line's start depths?
+#
+# THIS EXISTS BECAUSE FIVE SITES COMPUTED THIS INDEPENDENTLY AND DISAGREED. Reviews
+# r19-r22 produced five findings, and the last two were not about behaviour at all: they
+# were about two of those implementations not matching (Refusal Y tracked parens and
+# brackets but not braces; Refusal U checked no delimiter depth at all). When findings
+# stop saying "this is wrong" and start saying "these two do not match", a per-site patch
+# is the wrong move BY CONSTRUCTION — the next site nobody touched produces finding six.
+#
+# So this is computed ONCE. It makes the whole class unreachable rather than smaller, and
+# it REMOVES code rather than adding it, which is the test for whether a design is still
+# sound. Safe to walk raw: normalize() has already blanked comments and string contents,
+# so every delimiter seen here is real code.
+#
+# BRACE_MIN[] deliberately survives for Refusal I alone, where a LINE-MINIMUM
+# over-approximation is the documented intent (`    } pub mod x;` must fire); its comment
+# says so. Everywhere else, position-exact is what was always meant.
+function root_depth_at(i, pos,   k, c, b, p, ln) {
+  ln = N[i]
+  b = BRACE_START[i]; p = PDEPTH_START[i]
+  for (k = 1; k < pos; k++) {
+    c = substr(ln, k, 1)
+    if (c == "{") b++
+    else if (c == "}") b--
+    else if (c == "(" || c == "[") p++
+    else if (c == ")" || c == "]") p--
+  }
+  return (b == 0 && p == 0)
+}
 function take_attr(   d, p, ch, res, instr) {
   d = 0; p = 1; instr = 0
   while (1) {
@@ -591,13 +621,14 @@ END {
     if (!INCODE[i]) continue
     if (!BRACE_UNRELIABLE && BRACE_MIN[i] != 0) continue
     yline = N[i]
-    ypd = PDEPTH_START[i]
     for (yk = 1; yk <= length(yline) - 1; yk++) {
       yc = substr(yline, yk, 1)
-      if (yc == "(" || yc == "[") { ypd++; continue }
-      if (yc == ")" || yc == "]") { ypd--; continue }
-      if (ypd != 0) continue
       if (yc != "#") continue
+      # BRACES TOO, via the shared helper (roborev r22 F1). This walk tracked parens and
+      # brackets but not braces, so an attribute inside a one-line nested module —
+      # `mod outer { const X: () = (); #[allow(dead_code)] fn f() {} }` — was misread as a
+      # crate-root attribute and the mandatory gate rejected valid Rust.
+      if (!root_depth_at(i, yk)) continue
       yrest = substr(yline, yk)
       if (yrest !~ /^#[[:space:]]*!?[[:space:]]*\[/) continue
       ybefore = substr(yline, 1, yk - 1)
@@ -664,28 +695,15 @@ END {
     # One more counter, not one more model: the same technique as the brace count, over
     # text normalize() has already stripped of comments and string contents. Declarations
     # inside `(` … `)` are skipped; nothing at true crate-root depth changes.
-    sdepth = BRACE_START[i]
-    spdepth = PDEPTH_START[i]
     rest = t
     consumed = 0
     while (match(rest, /pub mod [A-Za-z_][A-Za-z0-9_]*[[:space:]]*;/)) {
-      # advance the brace count over everything before this match
-      for (sk = 1; sk < RSTART; sk++) {
-        sc2 = substr(rest, sk, 1)
-        if (sc2 == "{") sdepth++
-        else if (sc2 == "}") sdepth--
-        # BRACKETS TOO (roborev r21 F2). normalize()'s CROSS-LINE counter already tracked
-        # `[`/`]`; this within-line walk did not, so a single-line `swallow![ pub mod
-        # phantom; ];` was collected by S and not by P — the mandatory gate rejecting valid
-        # Rust. THIRD time one fix needed two homes on this issue, and the second time the
-        # two homes were the cross-line and within-line halves of the SAME counter. When a
-        # depth notion exists in two places, change both in one edit.
-        else if (sc2 == "(" || sc2 == "[") spdepth++
-        else if (sc2 == ")" || sc2 == "]") spdepth--
-      }
       nm = substr(rest, RSTART + 8, RLENGTH - 8)
       sub(/[[:space:]]*;$/, "", nm)
-      if (sdepth == 0 && spdepth == 0) print "S\t" nm
+      # Position-exact crate-root depth, via the shared helper — S used to carry its own
+      # brace+paren counters, which is one of the five implementations this consolidates.
+      spos = length(t) - length(rest) + RSTART
+      if (root_depth_at(i, spos)) print "S\t" nm
       rest = substr(rest, RSTART + RLENGTH)
     }
   }
@@ -723,7 +741,18 @@ END {
       # `pub` keyword at all (`repub mod`), so it declares nothing.
       pre = (RSTART > 1) ? substr(rest, RSTART - 1, 1) : ""
       tail = substr(rest, RSTART)
-      if (pre !~ /[A-Za-z0-9_]/ && tail !~ /^pub mod [A-Za-z_][A-Za-z0-9_]*[[:space:]]*;/) {
+      # POSITION-EXACT CRATE-ROOT DEPTH, via the shared helper. This loop searched the
+      # whole column-zero line with NO depth check at all, so a nested inline module
+      # `mod outer { pub mod inner {} }` — brace depth 1, not crate-root — was refused as
+      # an unrecognised top-level form. Valid Rust rejected by the MANDATORY gate.
+      #
+      # THE SIXTH SITE. Reviews r19-r22 found five depth defects across five sites; a peer
+      # predicted that patching them per-site would let "the next site nobody touched
+      # generate finding six", and this is it — found by running the consolidation's own
+      # regression sweep, not by a review. Which is the argument for the consolidation:
+      # one implementation cannot disagree with itself.
+      upos2 = length(t) - length(rest) + RSTART
+      if (pre !~ /[A-Za-z0-9_]/ && tail !~ /^pub mod [A-Za-z_][A-Za-z0-9_]*[[:space:]]*;/ && root_depth_at(i, upos2)) {
         # squash() also collapses any TAB in the snippet, which keeps the record's
         # single text field from splitting under the tab-field convention below.
         printf "U\tline %d: unrecognized top-level `pub mod` form: `%s`\n", i, squash(substr(tail, 1, 72))
@@ -776,7 +805,12 @@ END {
     while (match(rest, /pub[[:space:]]+mod([^A-Za-z0-9_]|$)/)) {
       pre = (RSTART > 1) ? substr(rest, RSTART - 1, 1) : ""
       tail = substr(rest, RSTART)
-      if (pre !~ /[A-Za-z0-9_]/) {
+      # POSITION-EXACT DEPTH (roborev r22 F2). This searched the whole line and checked
+      # only the line-minimum brace depth, so a nested inline module
+      # `mod outer { pub mod inner {} }` — and the same tokens inside a brace-delimited
+      # macro — were rejected as unrecognised top-level declarations. Valid Rust, refused.
+      upos = length(t) - length(rest) + RSTART
+      if (pre !~ /[A-Za-z0-9_]/ && root_depth_at(i, upos)) {
         printf "I\tline %d: INDENTED crate-root (brace depth 0) `pub mod`: `%s`\n", i, squash(substr(tail, 1, 72))
       }
       rest = substr(rest, RSTART + RLENGTH)
