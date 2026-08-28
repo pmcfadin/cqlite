@@ -155,10 +155,13 @@ fn parse_registrations(src: &str) -> Result<std::collections::BTreeMap<String, S
 /// * the three `Registry` helpers (`self.meter.u64_counter(name)` …) — `name` IS the
 ///   registered catalog name, bound in the same call by
 ///   [`parse_registrations`] above;
-/// * the three ad-hoc fallbacks in `otel.rs` (`meter().u64_counter(name)` in
-///   `add_counter` / `record_histogram` / `record_gauge`) — these build an instrument
-///   for a caller-supplied NON-catalog name so a call site never silently drops
-///   data. They are deliberately not registrations and must not be catalogued.
+/// * the three ad-hoc fallbacks in `otel.rs` (`meter.u64_counter(name)` in
+///   `add_counter_with` / `record_histogram_with` / `record_gauge_with`) — these
+///   build an instrument for a caller-supplied NON-catalog name so a call site never
+///   silently drops data. They are deliberately not registrations and must not be
+///   catalogued. Their meter is a PARAMETER (`meter: &Meter`), so a guard can drive
+///   the emit path against a locally-owned provider; the free function `meter()` is
+///   the same object and stays accepted.
 fn parse_builder_constructions(src: &str) -> Result<std::collections::BTreeSet<String>, String> {
     let mut out = std::collections::BTreeSet::new();
     let mut registry_helpers = 0usize;
@@ -178,18 +181,20 @@ fn parse_builder_constructions(src: &str) -> Result<std::collections::BTreeSet<S
                 .is_some_and(|rest| rest.trim_start().starts_with(')'));
             // The receiver tells the two exempt shapes apart. rustfmt may put the
             // chain on its own lines (`self\n    .meter\n    .u64_counter(name)`), so
-            // whitespace is collapsed before matching — and the two markers are
-            // disjoint: a field access reads `.meter`, the free function `meter()`.
+            // whitespace is collapsed before matching. A field access reads `.meter`
+            // (the `Registry` helper); a bare `meter` binding or the free function
+            // `meter()` is the emit path's ad-hoc fallback. `.meter` is tested FIRST
+            // because it also ends with `meter`.
             let receiver: String = src[i.saturating_sub(64)..i]
                 .split_whitespace()
                 .collect::<Vec<_>>()
                 .join("");
-            if is_name_param && receiver.ends_with("meter()") {
-                adhoc_fallbacks += 1;
-                continue;
-            }
             if is_name_param && receiver.ends_with(".meter") {
                 registry_helpers += 1;
+                continue;
+            }
+            if is_name_param && (receiver.ends_with("meter()") || receiver.ends_with("meter")) {
+                adhoc_fallbacks += 1;
                 continue;
             }
             return Err(format!(

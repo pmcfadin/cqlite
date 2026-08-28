@@ -338,8 +338,8 @@ pub(crate) fn add_counter(name: &'static str, value: u64, attributes: &[KeyValue
 /// exercise the real emit path without touching the process-global `OnceLock`s.
 pub(super) fn add_counter_with(
     i: &Instruments,
-    m: &Meter,
-    name: &str,
+    meter: &Meter,
+    name: &'static str,
     value: u64,
     attributes: &[KeyValue],
 ) {
@@ -349,9 +349,7 @@ pub(super) fn add_counter_with(
             if stats_only_refuses_instrument(name) {
                 return;
             }
-            m.u64_counter(name.to_string())
-                .build()
-                .add(value, attributes)
+            meter.u64_counter(name).build().add(value, attributes)
         }
     }
 }
@@ -373,8 +371,8 @@ pub(crate) fn record_histogram(name: &'static str, value: f64, attributes: &[Key
 /// [`add_counter_with`].
 pub(super) fn record_histogram_with(
     i: &Instruments,
-    m: &Meter,
-    name: &str,
+    meter: &Meter,
+    name: &'static str,
     value: f64,
     attributes: &[KeyValue],
 ) {
@@ -384,9 +382,7 @@ pub(super) fn record_histogram_with(
             if stats_only_refuses_instrument(name) {
                 return;
             }
-            m.f64_histogram(name.to_string())
-                .build()
-                .record(value, attributes)
+            meter.f64_histogram(name).build().record(value, attributes)
         }
     }
 }
@@ -408,8 +404,8 @@ pub(crate) fn record_gauge(name: &'static str, value: i64, attributes: &[KeyValu
 /// [`add_counter_with`].
 pub(super) fn record_gauge_with(
     i: &Instruments,
-    m: &Meter,
-    name: &str,
+    meter: &Meter,
+    name: &'static str,
     value: i64,
     attributes: &[KeyValue],
 ) {
@@ -419,9 +415,7 @@ pub(super) fn record_gauge_with(
             if stats_only_refuses_instrument(name) {
                 return;
             }
-            m.i64_gauge(name.to_string())
-                .build()
-                .record(value, attributes)
+            meter.i64_gauge(name).build().record(value, attributes)
         }
     }
 }
