@@ -258,6 +258,26 @@ CLAIM_ISSUE="${CLAIM_ISSUE:-}"
 # can delete the ref it actually created. "0" is a legitimate value — a stamp with an unknown issue
 # still creates a real ref that must be cleared.
 CLAIM_STAMPED_ISSUE=""
+# A per-INVOCATION token for the placeholder lane id (#3393, roborev round 3). `p$$` alone is unique
+# only among CURRENTLY RUNNING processes: after a crash or reboot, pid reuse lets a new supervisor
+# write the SAME placeholder ref as a dead lane's, overwriting it with a fresh timestamp and a live
+# pid — masking the dead lane, which is the exact failure per-lane refs exist to prevent.
+#
+# BUILT FROM BUILTINS, AND LAZILY. The first cut computed it at SOURCE time with `tr`/`cut`, and the
+# suite caught why that is wrong: `test_parser_absent_is_unverified` SOURCES this file under a
+# minimal PATH (bash mktemp cat rm grep dirname date) to unit-test one function, so an external
+# command at source time aborted the source and the test read an empty verdict. Sourcing this file
+# must cost nothing and require nothing. `$RANDOM`, `$EPOCHSECONDS` and `printf` are all bash
+# builtins, and the value is computed on first use rather than at load.
+# SETS the variable rather than echoing it, and the difference is load-bearing. Called as
+# `$(claim_lane_token)` the cache assignment happens in a SUBSHELL and is lost, so every stamp got a
+# FRESH token — which made each iteration look like a lane transition, reaped the previous ref, and
+# defeated the per-invocation uniqueness this exists for. Caught by the assertion that a
+# supervisor's stamps all name the SAME placeholder.
+CLAIM_LANE_TOKEN=""
+claim_lane_token() {
+  [[ -n "$CLAIM_LANE_TOKEN" ]] || CLAIM_LANE_TOKEN="$(printf '%04x%04x%x' "$RANDOM" "$RANDOM" "${EPOCHSECONDS:-0}")"
+}
 
 detect_ncpu() {
   if command -v nproc >/dev/null 2>&1; then nproc
@@ -457,13 +477,14 @@ stamp_claim() {
   # never knows its issue at spawn time and would stamp nothing at all — trading a collision for
   # zero liveness coverage. Measured as stamps=0 where 2 were expected.
   #
-  # So the lane id is the SUPERVISOR PID, prefixed `p` to keep it out of the numeric issue space:
-  # unique per supervisor by construction, and unmistakable for an issue by any consumer that
-  # requires digits (the open-PR guard and the board flip both skip it, correctly — there is no
-  # issue to protect or to flip yet).
+  # So the lane id is `p<pid>-<per-invocation token>`, prefixed `p` to keep it out of the numeric
+  # issue space: unique per supervisor INVOCATION (the token defeats pid reuse across a crash or
+  # reboot — roborev round 3), and unmistakable for an issue by any consumer that requires digits.
+  # Automated reaping declines it outright, because an id that names no issue cannot be checked
+  # against an open PR.
   local lane_id
   case "$issue" in
-    '' | *[!0-9]* | 0) lane_id="p$$" ;;
+    '' | *[!0-9]* | 0) claim_lane_token; lane_id="p$$-${CLAIM_LANE_TOKEN}" ;;
     *)                 lane_id="$issue" ;;
   esac
   # A lane TRANSITION must not leak the previous ref (roborev round 1, Medium), and the ORDER

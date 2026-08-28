@@ -1875,6 +1875,100 @@ else
   bad "a malformed lane id must be refused: rc=$mal_rc"
 fi
 
+# ===========================================================================
+echo "TEST 59: delete_ref_guarded confirms ABSENCE rather than assuming it (round 3, Medium)"
+# ===========================================================================
+# It treated every failed `ls-remote` as "already absent" and returned SUCCESS, so a transient remote
+# or auth failure made the supervisor log a successful claim clear — and CI proceed as though a ref
+# had been reaped — while the ref was still there. `--exit-code` gives 2 for a confirmed no-match and
+# something else (measured: 128) for an operational failure; only the former is absence.
+abs_out=$(cd "$WORK" && HEARTBEAT_REMOTE=no-such-remote bash "$HB" reap somebox 4242 2>&1)
+abs_rc=$?
+if [ "$abs_rc" -ne 0 ] \
+  && printf '%s\n' "$abs_out" | grep -qi 'could not determine whether' \
+  && ! printf '%s\n' "$abs_out" | grep -qi 'already absent'; then
+  ok "an unreadable remote makes reap FAIL rather than report a successful clear (rc=$abs_rc)"
+else
+  bad "an unreadable remote must not be read as 'already absent': rc=$abs_rc out:
+$abs_out"
+fi
+# NON-VACUITY: a genuinely absent ref on a REACHABLE remote is still the quiet success path.
+gone_out=$(cd "$WORK" && bash "$HB" reap somebox 4242 2>&1); gone_rc=$?
+if [ "$gone_rc" -eq 0 ] && printf '%s\n' "$gone_out" | grep -qi 'already absent'; then
+  ok "NON-VACUITY: a confirmed-absent ref still returns 0 with 'already absent' — only the unreadable case changed"
+else
+  bad "a confirmed-absent ref must still succeed quietly: rc=$gone_rc out:
+$gone_out"
+fi
+
+# ===========================================================================
+echo "TEST 60: a reap DELETE takes a compare-and-swap lease (round 3, Medium)"
+# ===========================================================================
+# Reaping was described as atomic and was not: should-reap judged one value and the delete removed
+# whatever was there NOW, so a supervisor refresh landing in between was destroyed and its board item
+# flipped back to Ready under a live lane. Same CAS discipline as `claim.sh adopt --expect`.
+craft_lane_claim "$WORK" "leaseBox" 5501 "$ABSENT_PID" 30
+lease_sha=$(g -C "$WORK" ls-remote origin 'refs/lane-claims/leaseBox/5501' | awk '{print $1}')
+stale_out=$(cd "$WORK" && CLAIM_OPEN_PR_CMD="$NO_OPEN_PR" \
+  bash "$HB" reap leaseBox 5501 deadbeefdeadbeefdeadbeefdeadbeefdeadbeef 2>&1)
+stale_rc=$?
+still_there=$(g -C "$WORK" ls-remote origin 'refs/lane-claims/leaseBox/5501' | awk '{print $1}')
+if [ "$stale_rc" -eq 4 ] && [ -n "$still_there" ] \
+  && printf '%s\n' "$stale_out" | grep -qi 'lease.*was not held'; then
+  ok "a STALE lease refuses the delete (rc=4) and the ref survives — a concurrent refresh cannot be destroyed"
+else
+  bad "a stale lease must refuse and preserve the ref: rc=$stale_rc still='$still_there' out:
+$stale_out"
+fi
+# NON-VACUITY: the CORRECT lease deletes, so the refusal is about the lease and not a broken delete.
+good_out=$(cd "$WORK" && CLAIM_OPEN_PR_CMD="$NO_OPEN_PR" \
+  bash "$HB" reap leaseBox 5501 "$lease_sha" 2>&1)
+good_rc=$?
+if [ "$good_rc" -eq 0 ] && [ -z "$(g -C "$WORK" ls-remote origin 'refs/lane-claims/leaseBox/5501' | awk '{print $1}')" ]; then
+  ok "NON-VACUITY: the correct lease DOES delete (rc=0) — the refusal above is the lease working, not a broken path"
+else
+  bad "the correct lease must delete: rc=$good_rc out:
+$good_out"
+fi
+
+# ===========================================================================
+echo "TEST 61: a PLACEHOLDER lane is never automatically reaped (round 3, Medium)"
+# ===========================================================================
+# A `p…` id names no issue, so the open-PR guard has nothing to consult — and a worker can have
+# claimed an issue and opened a PR before its supervisor received the marker. Reaping it would delete
+# the claim of a lane with an unfinished endgame (#2499). should-reap must decline it outright.
+craft_lane_claim "$WORK" "phReap" "p777-abc12345" "$ABSENT_PID" 20000
+ph_sr=$(cd "$WORK" && HEARTBEAT_MACHINE=phReap CLAIM_OPEN_PR_CMD="$NO_OPEN_PR" \
+  bash "$HB" should-reap phReap p777-abc12345 1 2>&1)
+ph_sr_rc=$?
+if [ "$ph_sr_rc" -eq 1 ] && printf '%s\n' "$ph_sr" | grep -qi 'names no issue'; then
+  ok "should-reap KEEPS a placeholder lane even when stale and pid-dead (rc=1) — an open PR cannot be ruled out"
+else
+  bad "a placeholder must never be automatically reaped: rc=$ph_sr_rc out:
+$ph_sr"
+fi
+# NON-VACUITY: an equally stale NUMERIC lane in the same state IS reapable, so the refusal is about
+# the placeholder and not about should-reap having stopped working.
+craft_lane_claim "$WORK" "phReap" 5502 "$ABSENT_PID" 20000
+num_sr_rc=0
+(cd "$WORK" && HEARTBEAT_MACHINE=phReap CLAIM_OPEN_PR_CMD="$NO_OPEN_PR" \
+  bash "$HB" should-reap phReap 5502 1 >/dev/null 2>&1) || num_sr_rc=$?
+if [ "$num_sr_rc" -eq 0 ]; then
+  ok "NON-VACUITY: an equally stale NUMERIC lane is reapable (rc=0) — only the placeholder is declined"
+else
+  bad "a stale numeric lane must still be reapable: rc=$num_sr_rc"
+fi
+# ...and the owning supervisor can still clear its OWN placeholder directly, which is how a clean
+# exit works — it knows it is finished, whereas a reaper cannot.
+(cd "$WORK" && HEARTBEAT_MACHINE=phReap CLAIM_OPEN_PR_CMD="$NO_OPEN_PR" \
+  bash "$HB" reap phReap p777-abc12345 >/dev/null 2>&1) || true
+if [ -z "$(g -C "$WORK" ls-remote origin 'refs/lane-claims/phReap/p777-abc12345' | awk '{print $1}')" ]; then
+  ok "a direct reap of a placeholder still works, so a supervisor's clean exit can clear its own lane"
+else
+  bad "a direct reap must still clear a placeholder"
+fi
+(cd "$WORK" && g push -q origin ":refs/lane-claims/phReap/5502" 2>/dev/null || true)
+
 echo
 echo "=== claim-heartbeat.sh: $PASS passed, $FAIL failed ==="
 [ "$FAIL" -eq 0 ]

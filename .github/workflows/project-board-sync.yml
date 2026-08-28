@@ -428,6 +428,10 @@ jobs:
           while IFS= read -r line; do
             [ -n "$line" ] || continue
             refname=$(printf '%s' "$line" | awk '{print $2}')
+            # The sha AS EVALUATED, carried into the delete as a lease (#3393, roborev round 3):
+            # should-reap judges this value, so the delete must refuse if a supervisor refreshed the
+            # ref in between. Without it the reap was described as atomic and was not.
+            refsha=$(printf '%s' "$line" | awk '{print $1}')
             lane_issue=""
             case "$refname" in
               refs/lane-claims/*)
@@ -469,7 +473,7 @@ jobs:
 
             # `reap` re-checks the open-PR guard atomically before deleting, so a
             # PR opened between should-reap and here still refuses the delete.
-            if bash "$HB" reap "$machine" ${lane_issue:+"$lane_issue"}; then
+            if bash "$HB" reap "$machine" "${lane_issue:-}" "$refsha"; then
               echo "reaped claim machine=$machine issue=${issue:-?}"
               reaped=$((reaped+1))
               # Flip the freed item back to Ready + leave a trace (skip issue "0"

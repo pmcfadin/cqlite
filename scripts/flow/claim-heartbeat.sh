@@ -382,10 +382,17 @@ humanize_age() {
 # open-PR guard and the board flip both correctly decline to treat it as an issue.
 lane_id_ok() {
   case "$1" in
-    '' ) return 1 ;;
-    p*) case "${1#p}" in '' | *[!0-9]*) return 1 ;; *) return 0 ;; esac ;;
+    '') return 1 ;;
+    # `p<pid>` or `p<pid>-<token>`: the token is per-invocation, so pid reuse across a reboot cannot
+    # collide two lanes onto one ref (roborev round 3). Hex and dashes only — no path separators.
+    p*) case "${1#p}" in '' | *[!0-9a-f-]*) return 1 ;; *) return 0 ;; esac ;;
     *) case "$1" in *[!0-9]*) return 1 ;; *) return 0 ;; esac ;;
   esac
+}
+
+# lane_id_is_placeholder <id> — exit 0 iff <id> names no issue (a `p…` lane).
+lane_id_is_placeholder() {
+  case "$1" in p*) return 0 ;; *) return 1 ;; esac
 }
 
 # lane_claim_ref <machine> <issue> — the ref a LANE's claim lives at (#3393, owner ruling A:
@@ -503,22 +510,53 @@ cmd_list() {
 # the liveness ref would erase the only signal that this lane is still owned and
 # invite a duplicate pickup). A missing ref is a graceful no-op. Returns 0 on
 # delete-or-absent, 3 on refuse.
-# delete_ref_guarded <namespace> <suffix> — <suffix> is everything after `refs/<namespace>/`, so it
-# is a bare machine for `refs/heartbeats/*` and `<machine>/<issue>` for a lane claim (#3393).
+# delete_ref_guarded <namespace> <suffix> [expected_sha] — <suffix> is everything after
+# `refs/<namespace>/`, so it is a bare machine for `refs/heartbeats/*` and `<machine>/<issue>` for a
+# lane claim (#3393).
+#
+# ABSENCE MUST BE CONFIRMED, NOT ASSUMED (roborev round 3, Medium). This treated every failed
+# `ls-remote` as "already absent" and returned SUCCESS, so a transient remote or auth failure made
+# the supervisor log a successful claim clear, and made CI proceed as though a ref had been reaped,
+# while the ref was still there. `--exit-code` gives 2 for a confirmed no-match and something else
+# (measured: 128) for an operational failure; only the former is absence.
+#
+# DELETION TAKES A LEASE when the caller supplies the sha it evaluated (roborev round 3, Medium).
+# Reaping was described as atomic and was not: `should-reap` judged one value and the delete removed
+# whatever was there NOW, so a supervisor refresh landing in between was destroyed and its board item
+# flipped back to Ready under a live lane. `--force-with-lease` makes the delete refuse if the ref
+# moved, which is the same compare-and-swap discipline `claim.sh adopt --expect` already uses.
 delete_ref_guarded() {
-  local namespace="$1" suffix="$2"
+  local namespace="$1" suffix="$2" expected_sha="${3:-}"
   local ref="refs/${namespace}/${suffix}"
 
-  if ! git ls-remote --exit-code "$REMOTE" "$ref" >/dev/null 2>&1; then
-    note "${ref} already absent on $REMOTE — nothing to clear"
-    return 0
-  fi
+  local ls_rc=0
+  git ls-remote --exit-code "$REMOTE" "$ref" >/dev/null 2>&1 || ls_rc=$?
+  case "$ls_rc" in
+    0) : ;;
+    2)
+      note "${ref} already absent on $REMOTE — nothing to clear"
+      return 0
+      ;;
+    *)
+      note "could not determine whether ${ref} exists on $REMOTE (git exited ${ls_rc}; 2 would mean confirmed-absent, so this is an operational failure). NOT reporting a successful clear for a ref that may still be there."
+      return 1
+      ;;
+  esac
 
   local issue
   issue="$(ref_msg_field "$ref" issue)"
   if [ -n "$issue" ] && issue_has_open_pr "$issue"; then
     note "REFUSING to delete ${ref}: issue #${issue} has an open PR (endgame unfinished; #2655)"
     return 3
+  fi
+
+  if [ -n "$expected_sha" ]; then
+    if git push "$REMOTE" --force-with-lease="${ref}:${expected_sha}" --delete "$ref"; then
+      note "cleared ${ref} on $REMOTE (lease held at ${expected_sha})"
+      return 0
+    fi
+    note "REFUSING to delete ${ref}: the lease at ${expected_sha} was not held — the ref moved, so a live supervisor refreshed it between the verdict and this delete"
+    return 4
   fi
 
   git push "$REMOTE" --delete "$ref"
@@ -536,13 +574,13 @@ cmd_clear() {
 # deleted; without it the LEGACY per-machine ref is, which is how a pre-ruling ref still gets
 # drained (see the legacy note in the header). Refuses under an open PR either way.
 cmd_reap() {
-  local machine="${1:-}" issue="${2:-}"
-  [ -n "$machine" ] || die_usage "reap requires <machine> [issue]"
+  local machine="${1:-}" issue="${2:-}" lease="${3:-}"
+  [ -n "$machine" ] || die_usage "reap requires <machine> [issue] [expected_sha]"
   if [ -n "$issue" ]; then
     lane_id_ok "$issue" || die_usage "reap lane id must be an issue number or p<pid> (got '$issue')"
-    delete_ref_guarded lane-claims "${machine}/${issue}"
+    delete_ref_guarded lane-claims "${machine}/${issue}" "$lease"
   else
-    delete_ref_guarded machine-claims "$machine"
+    delete_ref_guarded machine-claims "$machine" "$lease"
   fi
 }
 
@@ -632,6 +670,16 @@ cmd_should_reap() {
   esac
   if [ -n "$issue" ]; then
     lane_id_ok "$issue" || die_usage "should-reap lane id must be an issue number or p<pid> (got '$issue')"
+  fi
+  # A PLACEHOLDER LANE IS NEVER AUTOMATICALLY REAPED (roborev round 3, Medium). A `p…` id names no
+  # issue, so the open-PR guard has nothing to consult — and a worker can have claimed an issue and
+  # opened a PR before its supervisor ever received the marker, or left an auto-merge PR open after
+  # `CLAIM_ISSUE` was cleared. Reaping it would delete the claim of a lane with an unfinished
+  # endgame, which is the #2499 case the guard exists for. The owning supervisor still clears its own
+  # placeholder on clean exit by calling `reap` directly — it knows it is finished; a reaper cannot.
+  if [ -n "$issue" ] && lane_id_is_placeholder "$issue"; then
+    note "keep refs/lane-claims/${machine}/${issue}: placeholder lane id names no issue, so an open PR cannot be ruled out — never automatically reaped (#3393)"
+    return 1
   fi
   local ref
   if [ -n "$issue" ]; then
@@ -1206,7 +1254,7 @@ case "$SUBCOMMAND" in
     ;;
   reap)
     shift
-    cmd_reap "${1:-}" "${2:-}"
+    cmd_reap "${1:-}" "${2:-}" "${3:-}"
     ;;
   dead-lanes)
     shift

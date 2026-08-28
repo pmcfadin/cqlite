@@ -1404,7 +1404,7 @@ test_claim_stamp_each_iter_and_clear_on_exit() {
   local well_formed="yes"
   while IFS= read -r line; do
     [[ -n "$line" ]] || continue
-    [[ "$line" =~ ^stamp\ (p?[0-9]+)\ [0-9]+$ ]] || well_formed="no"
+    [[ "$line" =~ ^stamp\ ([0-9]+|p[0-9]+-[0-9a-f]+)\ [0-9]+$ ]] || well_formed="no"
     [[ "$line" =~ ^stamp\ 0\  ]] && well_formed="no"   # the shared placeholder must be gone
   done < <(grep '^stamp ' "$CLAIM_LOG" 2>/dev/null)
   # ...and both stamps must name the SAME placeholder, since it is this supervisor's identity.
@@ -2582,7 +2582,7 @@ test_claim_issue_learned_from_marker() {
   # ...and the placeholder it replaced must have been cleared, or the transition leaks a ref that
   # holds a dead pid and dead-lanes reports it as a dead lane forever.
   local placeholder_id placeholder_reaped
-  placeholder_id=$(grep -E '^stamp p[0-9]+ [0-9]+$' "$CLAIM_LOG" 2>/dev/null | head -1 | awk '{print $2}')
+  placeholder_id=$(grep -E '^stamp p[0-9]+-[0-9a-f]+ [0-9]+$' "$CLAIM_LOG" 2>/dev/null | head -1 | awk '{print $2}')
   placeholder_reaped=no
   [[ -n "$placeholder_id" ]] && grep -qE "^reap testbox ${placeholder_id}\$" "$CLAIM_LOG" 2>/dev/null && placeholder_reaped=yes
   if [[ "$rc" -eq 0 ]] && printf '%s' "$second_stamp" | grep -qE '^stamp 88 [0-9]+$' \
@@ -2617,7 +2617,7 @@ test_claim_transition_survives_failed_replacement() {
   rc=$?
   # Iter1 stamps the placeholder (succeeds). Iter2 attempts `stamp 88` (fails). The placeholder must
   # NOT have been reaped, or the lane is left with nothing.
-  ph_id=$(grep -E '^stamp p[0-9]+ [0-9]+$' "$CLAIM_LOG" 2>/dev/null | head -1 | awk '{print $2}')
+  ph_id=$(grep -E '^stamp p[0-9]+-[0-9a-f]+ [0-9]+$' "$CLAIM_LOG" 2>/dev/null | head -1 | awk '{print $2}')
   # ORDER is the property, not presence. A reap of the placeholder on CLEAN EXIT is correct and
   # expected; what must not happen is a reap during the TRANSITION, i.e. before the replacement
   # stamp. So compare line positions rather than asking whether a reap occurred at all — the first
