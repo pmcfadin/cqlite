@@ -697,3 +697,106 @@ fn the_recorded_datafusion_parallelism_is_resolved_not_left_as_default() {
     );
     assert!(resolved >= 1);
 }
+
+// ---------------------------------------------------------------------------
+// `count(*)` under pushdown — the empty projection must not empty the scan
+// ---------------------------------------------------------------------------
+
+/// Run `sql` through the DataFusion arm and return the single scalar it produces.
+fn datafusion_count(table_dir: &std::path::Path, schema: &TableSchema, pushdown: bool) -> i64 {
+    let rows = datafusion_rows(table_dir, schema, "SELECT count(*) FROM t", pushdown);
+    assert_eq!(rows.len(), 1, "count(*) returns exactly one row: {rows:?}");
+    rows[0]
+        .values()
+        .next()
+        .expect("the count column")
+        .parse()
+        .expect("the count is an integer")
+}
+
+#[test]
+#[serial]
+fn count_star_is_correct_with_pushdown_enabled_and_disabled() {
+    let (_temp, table_dir, schema) = two_generation_fixture();
+    with_pinned_now(|| {
+        // DataFusion asks a provider for ZERO columns when it only needs a row
+        // count. Pushing that empty projection into the scan makes the producer
+        // emit zero-column batches, which carry no explicit row count, so every
+        // row disappears and `count(*)` answers 0 — instantly, and wrongly. The
+        // fixture keeps 7 rows after reconciliation, so 0 (or 8, the pre-
+        // reconciliation count) fails here.
+        assert_eq!(
+            datafusion_count(&table_dir, &schema, true),
+            7,
+            "count(*) with pushdown ENABLED must count the reconciled rows"
+        );
+        assert_eq!(
+            datafusion_count(&table_dir, &schema, false),
+            7,
+            "count(*) with pushdown disabled must give the same answer"
+        );
+    });
+}
+
+#[test]
+#[serial]
+fn a_pushed_down_count_narrows_the_scan_to_one_column_and_keeps_the_rows() {
+    let (_temp, table_dir, schema) = two_generation_fixture();
+    with_pinned_now(|| {
+        let provider = Arc::new(
+            CqliteTableProvider::open(schema.clone(), table_dir.clone(), TEST_BATCH_SIZE, true)
+                .expect("provider"),
+        );
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .build()
+            .expect("runtime");
+        let provider_for_query = provider.clone();
+        runtime.block_on(async move {
+            let ctx =
+                SessionContext::new_with_config(SessionConfig::new().with_target_partitions(1));
+            ctx.register_table("t", provider_for_query)
+                .expect("register");
+            // The physical plan names what was pushed, so the narrowing is
+            // asserted from the plan rather than from an internal field.
+            let explained = ctx
+                .sql("EXPLAIN SELECT count(*) FROM t")
+                .await
+                .expect("plan")
+                .collect()
+                .await
+                .expect("explain");
+            let text: String =
+                explained
+                    .iter()
+                    .flat_map(rows_of)
+                    .fold(String::new(), |mut acc, row| {
+                        for value in row.values() {
+                            acc.push_str(value);
+                            acc.push('\n');
+                        }
+                        acc
+                    });
+            // The narrowing is the POINT of pushing an anchor column rather than
+            // pushing nothing: the scan must still be narrow.
+            assert!(
+                text.contains("count-only anchor"),
+                "the count scan should be anchored to one column:\n{text}"
+            );
+            let batches = ctx
+                .sql("SELECT count(*) FROM t")
+                .await
+                .expect("plan")
+                .collect()
+                .await
+                .expect("run");
+            assert_eq!(batches.len(), 1);
+        });
+        let outcome = provider.last_scan_outcome().expect("a scan completed");
+        // Every row must still reach the aggregate.
+        assert_eq!(
+            outcome.rows, 7,
+            "the anchored scan must emit one row per reconciled row"
+        );
+    });
+}

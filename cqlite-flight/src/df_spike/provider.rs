@@ -161,10 +161,34 @@ impl CqliteTableProvider {
         let mut spec = ScanSpec::default();
         let mut described: Vec<String> = Vec::new();
 
+        // An EMPTY projection is `count(*)`, and it must NEVER be pushed.
+        //
+        // DataFusion asks a `TableProvider` for zero columns when the query needs
+        // only a row count. Forwarding `Some(vec![])` into `ScanSpec.projection`
+        // makes the producer emit ZERO-COLUMN batches, which carry no explicit
+        // row count — so the rows vanish and `count(*)` returns 0. A benchmark
+        // arm that answers 0 instantly is the worst possible failure mode: fast
+        // AND wrong.
+        //
+        // Instead the scan is narrowed to ONE column (the first partition key,
+        // which every table has and every row populates) and the empty
+        // projection is applied AFTER production, where `RecordBatch::project`
+        // carries `row_count` through explicitly. The scan stays narrow — the
+        // point of pushdown — and the row count survives.
+        let mut post_projection: Option<Vec<usize>> = None;
         if let Some(indices) = projection {
-            let names = self.projected_names(indices)?;
-            described.push(format!("projection={}", names.join(",")));
-            spec.projection = Some(names);
+            if indices.is_empty() {
+                let anchor = self.count_anchor_column()?;
+                described.push(format!("projection={anchor} (count-only anchor)"));
+                spec.projection = Some(vec![anchor]);
+                // Against the producer's emitted columns, not the table schema:
+                // zero columns selected out of the one column produced.
+                post_projection = Some(Vec::new());
+            } else {
+                let names = self.projected_names(indices)?;
+                described.push(format!("projection={}", names.join(",")));
+                spec.projection = Some(names);
+            }
         }
 
         if let Some(candidate) = pushdown::translate_all(filters, &self.target.schema) {
@@ -181,8 +205,32 @@ impl CqliteTableProvider {
             described.push("none".to_string());
         }
         // With the projection pushed into the scan, the producer already emits
-        // exactly the output columns — hence no post-scan projection.
-        Ok((spec, None, described.join(" ")))
+        // exactly the output columns — hence no post-scan projection, EXCEPT for
+        // the `count(*)` anchor above, which must be projected away afterwards.
+        Ok((spec, post_projection, described.join(" ")))
+    }
+
+    /// The single column a `count(*)` scan is narrowed to.
+    ///
+    /// The first partition key: it is declared on every table, it is present in
+    /// every row (a row cannot exist without its key), and it is typically the
+    /// narrowest column on the table — so it is the cheapest column that still
+    /// makes the producer emit one row per row.
+    fn count_anchor_column(&self) -> Result<String, SpikeError> {
+        self.target
+            .schema
+            .partition_keys
+            .first()
+            .map(|c| c.name.clone())
+            .ok_or_else(|| {
+                SpikeError::Scan(crate::producer::ProducerError::Merge(
+                    cqlite_core::Error::Internal(
+                        "table schema declares no partition key, so a count(*) scan cannot be \
+                         anchored to a column"
+                            .to_string(),
+                    ),
+                ))
+            })
     }
 
     /// Column names for DataFusion's projection indices, against the FULL schema.
