@@ -66,6 +66,17 @@
 //! bound, so the common (passing) case pays zero extra latency, and the bound
 //! itself is NOT weakened.
 //!
+//! Measured on a contended 16-core host (48 spinners, 5 runs) with CORRECT code,
+//! the fast-path delta was 18 / 76 / 41 / 8 / 22 against a bound of 15 — four of
+//! five would have redded the old assertion — and EVERY one confirmed at exactly
+//! `4` (= `M`). Against that, the RED control (producers restored to a
+//! multi-threaded runtime) confirmed at `68`. The two regimes are separated by a
+//! gulf after the reap, and are indistinguishable before it: a jitter peak of 76
+//! and an amplified peak of 72 differ by nothing meaningful. That is precisely
+//! why the peak alone could never pin this property, and why `PER_INPUT` bounds
+//! the PERSISTENT count only — see its doc comment for what is consequently NOT
+//! pinned here.
+//!
 //! ## Process-isolation requirement
 //!
 //! The peak-thread observation is a WHOLE-PROCESS count, not a count scoped to
@@ -109,12 +120,22 @@ const ROWS_PER_INPUT: i32 = 400;
 /// Number of input SSTables (`M`) merged in one pass.
 const NUM_INPUTS: usize = 4;
 
-/// Max OS threads a single fixed (`current_thread`-runtime) producer contributes
-/// at its peak: the producer thread itself plus the bounded `spawn_blocking`
-/// parse/feed threads the compaction scan uses (a small constant, INDEPENDENT of
-/// `num_cpus`). The pre-change multi-threaded runtime instead added `num_cpus`
-/// worker threads PER producer on top of this, so the pre-change peak scales with
-/// `num_cpus` and this `O(M)` bound (coefficient fixed at `PER_INPUT`) rejects it.
+/// Max PERSISTENT OS threads a single fixed (`current_thread`-runtime) producer
+/// contributes: the producer thread itself plus headroom (a small constant,
+/// INDEPENDENT of `num_cpus`). The pre-change multi-threaded runtime instead
+/// added `num_cpus` worker threads PER producer on top of this, and those are
+/// NOT reapable, so the `O(M)` bound (coefficient fixed at `PER_INPUT`) rejects
+/// it.
+///
+/// This is deliberately NOT a bound on the momentary PEAK (issue #3385): the
+/// `spawn_blocking` pool is demand-driven, so with CORRECT code the measured peak
+/// ranged 8 → 76 over five runs on a contended 16-core host while the persistent
+/// count stayed at exactly `M`. Any peak allowance wide enough not to flake would
+/// be too wide to mean anything, so the peak is reported for DIAGNOSIS and the
+/// pin is on the persistent count. Consequence, recorded rather than implied:
+/// unbounded TRANSIENT blocking-pool growth is not pinned by this test (roborev
+/// job 59 finding 1) — it needs a different oracle, one that observes the pool
+/// directly instead of inferring it from a whole-process peak.
 const PER_INPUT: usize = 3;
 
 /// Fixed slack over the `PER_INPUT · M` bound for incidental/settle threads.
@@ -142,18 +163,31 @@ fn min_cpus_for_amplification(m: usize) -> usize {
     thread_bound(m).saturating_sub(m) / m + 1
 }
 
-/// Margin to wait out tokio's blocking-pool reaping before CONFIRMING an
-/// over-bound reading (issue #3385).
+/// Span over which the OS thread count must be CONTINUOUSLY UNCHANGED before a
+/// post-reap reading is accepted as final (issue #3385).
 ///
 /// tokio's default blocking-pool `thread_keep_alive` is **10 s**: an idle
-/// `spawn_blocking` thread is reaped only after that long without work. This
-/// margin MUST exceed it, or the re-sample would observe threads that are
-/// merely not-yet-reaped and report jitter as a persistent overshoot. It is the
-/// one unavoidable duration in this test — reaping is defined in terms of
-/// elapsed idle time, so no lifecycle signal can substitute — but it is used as
-/// a SETTLE (wait out the keep-alive, then re-stabilize and read once), never as
-/// a retry-until-green loop.
-const BLOCKING_POOL_KEEP_ALIVE_MARGIN: Duration = Duration::from_secs(13);
+/// `spawn_blocking` thread is reaped that long after it goes idle. This span
+/// MUST exceed that.
+///
+/// Why a QUIESCENCE SPAN and not a fixed sleep: the keep-alive clock starts when
+/// a thread goes IDLE, which is NOT when the hold starts. Under starvation a
+/// blocking thread can finish its work late into a fixed hold and still be
+/// unreaped when the re-sample lands — the re-sample then stabilizes within a few
+/// polls and reports jitter as persistent, preserving the very flake this change
+/// removes (roborev job 59 finding 2). An unchanged span longer than the
+/// keep-alive rules that out: a reap DECREMENTS the count and so resets the span,
+/// therefore a span of this length proves no reap occurred within it, and any
+/// thread idle at its start would have been reaped inside it. Since the producers
+/// are blocked on `send` and submit no new blocking work, every in-flight task
+/// must finish, go idle and be reaped — each resetting the span — so the span can
+/// only be achieved once reaping has genuinely quiesced.
+const REAP_QUIESCENCE_SPAN: Duration = Duration::from_secs(12);
+
+/// Fail-loud bound on the whole reap-confirm wait. Worst case is work finishing
+/// late, plus the 10 s keep-alive, plus [`REAP_QUIESCENCE_SPAN`]; this is a
+/// generous multiple of that, and is reached ONLY on the overshoot path.
+const REAP_CONFIRM_TIMEOUT: Duration = Duration::from_secs(90);
 
 // ── Direct, no-heuristics OS thread-count observation ───────────────────────
 
@@ -259,9 +293,11 @@ fn poll_until_stable(timeout: Duration) -> (usize, usize) {
 ///
 /// The discriminator is mechanical, not statistical:
 ///
-/// * `spawn_blocking` pool threads are IDLE-REAPED after
-///   [`BLOCKING_POOL_KEEP_ALIVE_MARGIN`] (> tokio's 10 s `thread_keep_alive`),
-///   so a starvation-inflated pool has provably vanished by the re-sample.
+/// * `spawn_blocking` pool threads are IDLE-REAPED 10 s after going idle, and a
+///   reap changes the thread count — so waiting for the count to hold unchanged
+///   for [`REAP_QUIESCENCE_SPAN`] (> that keep-alive) is positive evidence that a
+///   starvation-inflated pool has finished draining, rather than an assumption
+///   that a fixed hold was long enough (roborev job 59 finding 2).
 /// * A multi-threaded `Runtime`'s worker threads are NOT reapable — they live
 ///   for the lifetime of the runtime, and each producer's runtime stays alive
 ///   for as long as that producer blocks on the full `sync_channel` (which it
@@ -272,8 +308,47 @@ fn poll_until_stable(timeout: Duration) -> (usize, usize) {
 /// post-reap window; `settled` is the CONFIRMED reading (the stabilized steady
 /// state), while `peak` is reported for diagnosis only.
 fn reap_settle_and_resample() -> (usize, usize) {
-    std::thread::sleep(BLOCKING_POOL_KEEP_ALIVE_MARGIN);
-    poll_until_stable(Duration::from_secs(15))
+    poll_until_quiescent(REAP_QUIESCENCE_SPAN, REAP_CONFIRM_TIMEOUT)
+}
+
+/// Poll until the OS thread count has been CONTINUOUSLY UNCHANGED for
+/// `min_span`, returning `(peak, settled)` of the polling window.
+///
+/// Distinct from [`poll_until_stable`], which accepts a fixed number of
+/// consecutive identical readings (~200 ms) — enough to detect that thread
+/// CREATION has finished, but not that idle-time-based REAPING has. Reaping
+/// resets the span whenever it fires, so a span longer than tokio's keep-alive
+/// is positive evidence that no reap is still pending, rather than an assumption
+/// that enough time has passed.
+///
+/// `timeout` is a fail-loud BOUND ONLY, never the synchronization mechanism.
+fn poll_until_quiescent(min_span: Duration, timeout: Duration) -> (usize, usize) {
+    let deadline = Instant::now() + timeout;
+    let mut peak = 0usize;
+    let mut last: Option<usize> = None;
+    let mut unchanged_since = Instant::now();
+    while Instant::now() < deadline {
+        let n = os_thread_count().expect(
+            "thread count observation must remain available (guard 2 already confirmed it)",
+        );
+        peak = peak.max(n);
+        if last == Some(n) {
+            if unchanged_since.elapsed() >= min_span {
+                return (peak, n);
+            }
+        } else {
+            last = Some(n);
+            unchanged_since = Instant::now();
+        }
+        std::thread::sleep(POLL_INTERVAL);
+    }
+    panic!(
+        "OS thread count never quiesced within {timeout:?} (last reading {last:?}, unchanged for \
+         {:?} of the {min_span:?} required, peak observed {peak}); this is a fail-loud BOUND, not \
+         a synchronization mechanism — the blocking pool may still be churning under extreme \
+         contention",
+        unchanged_since.elapsed()
+    );
 }
 
 // ── Real multi-SSTable input construction (never an empty dataset) ──────────
@@ -480,8 +555,8 @@ fn merge_bounds_producer_threads_to_o_m() {
     let confirmed = if delta > bound {
         eprintln!(
             "[issue-2316-reap] fast-path delta={delta} exceeds bound={bound}; holding the blocked \
-             producers {BLOCKING_POOL_KEEP_ALIVE_MARGIN:?} (> tokio's 10s blocking-pool \
-             thread_keep_alive) to reap idle spawn_blocking threads, then re-sampling"
+             producers until the thread count holds unchanged for {REAP_QUIESCENCE_SPAN:?} \
+             (> tokio's 10s blocking-pool thread_keep_alive), i.e. until reaping has quiesced"
         );
         let (reap_peak, reap_settled) = reap_settle_and_resample();
         let reap_delta = reap_settled.saturating_sub(baseline);
@@ -525,8 +600,8 @@ fn merge_bounds_producer_threads_to_o_m() {
     assert!(
         confirmed <= bound,
         "merge over M={m} inputs holds {confirmed} PERSISTENT OS threads over baseline \
-         (fast-path peak={peak}, settled={settled}, delta={delta}; confirmed after a \
-         {BLOCKING_POOL_KEEP_ALIVE_MARGIN:?} blocking-pool reap settle: {confirmed}; \
+         (fast-path peak={peak}, settled={settled}, delta={delta}; confirmed after the \
+         blocking pool quiesced for {REAP_QUIESCENCE_SPAN:?}: {confirmed}; \
          baseline={baseline}); O(M) bound is {bound} (= {PER_INPUT}·M + {THREAD_SLACK}). \
          These threads outlived tokio's blocking-pool keep-alive while every producer was \
          still blocked on `send`, so they are NOT reapable spawn_blocking jitter — they are \
