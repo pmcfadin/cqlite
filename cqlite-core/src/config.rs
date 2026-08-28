@@ -841,7 +841,7 @@ impl Config {
         // (#1697).
         //
         // SCOPE OF THIS RULE, stated because it is narrower than it looks
-        // (#1697 roborev r2, engine defect filed separately): passing it does NOT
+        // (#1697 roborev r2; the engine defect is #3404): passing it does NOT
         // make the write path wedge-free. `WriteEngine::check_admission` rejects
         // `memtable_size + incoming > memtable_hard_limit` without attempting a
         // flush, while auto-flush fires only AFTER a successful insert. So any
@@ -856,7 +856,7 @@ impl Config {
         // function of the largest single mutation, which config cannot know, so a
         // stricter bound here would reject working configurations while still
         // promising nothing. The fix belongs in admission (flush a nonempty
-        // memtable before rejecting a mutation that fits by itself).
+        // memtable before rejecting a mutation that fits by itself) — #3404.
         if self.storage.memtable_hard_limit < self.storage.memtable_size_threshold {
             return Err(crate::Error::configuration(format!(
                 "memtable_hard_limit ({} bytes) must be >= memtable_size_threshold \
