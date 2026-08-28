@@ -386,11 +386,12 @@ A worker or a closer may REQUEST one — one comment, including the token accoun
 and may never apply it to its own PR.
 
 IT IS BOUND TO THE WHOLE REVIEW SCOPE, not just the head: base AND head AND job are all
-required and all verified. `base=` is the base OF THE REVIEWED RANGE — the merge-base of
-`--base` and HEAD, which the block prints as `assert-base:` — NOT the tip of the base ref
-(#3392). Copy it from `assert-base:`; the two are the same commit only while the branch is
-not behind its base, and binding to the tip made a waiver go STALE the instant the base ref
-advanced, which is what made this mechanism a dead letter under fleet load. The authorizer's judgment under (d) was about ONE review and
+required and all verified. The base= field is the base OF THE REVIEWED RANGE — the
+merge-base of --base and HEAD, which the block prints under the assert-base: key — and NOT
+the tip of the base ref (#3392). Copy it from the assert-base: line of the failing block,
+never from the base: line; the two name the same commit only while the branch is not behind
+its base, and binding to the tip made a waiver go STALE the instant the base ref advanced,
+which is what made this mechanism a dead letter under fleet load. The authorizer's judgment under (d) was about ONE review and
 its token accounting, so the waiver may not outlive it — a push, a different base or a
 re-run each need a fresh one. A marker missing any field is MALFORMED, never granted.
 

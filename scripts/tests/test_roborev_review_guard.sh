@@ -4374,9 +4374,45 @@ CASE_N=$((CASE_N + 1))
 OUT="$tmp/out-$CASE_N.txt"
 INVOKED="$tmp/invoked-$CASE_N.txt"
 : >"$INVOKED"
-STUB_INVOKED="$INVOKED" PATH="$stubbin:$PATH" bash "$WRAPPER" --help >"$OUT" 2>&1
+# ===== STDERR IS CAPTURED SEPARATELY, AND MUST BE EMPTY (#3392) =====
+# `usage()` is an UNQUOTED heredoc (`cat <<EOF`) so that $PROGNAME interpolates, which makes a
+# BACKTICK in its body COMMAND SUBSTITUTION. A markdown-style `--base` in the help text therefore
+# (a) printed `--base: command not found` on stderr and (b) SILENTLY DELETED the backticked term
+# from the rendered help. (b) is the damage: the waiver passage is the ONLY sanctioned place an
+# operator learns WHICH sha to copy into a marker — the diagnostics deliberately refuse to print
+# the marker and point here instead — so a corrupted help produces a waiver naming the wrong base,
+# which then reports STALE. This class is INVISIBLE to a source read and to a diff review; only
+# EXECUTING `--help` and looking at stderr finds it.
+# The two streams are kept apart on purpose: merged into $OUT, the error lines would have satisfied
+# nothing and failed nothing, which is exactly how this shipped.
+HELP_ERR="$tmp/help-stderr-$CASE_N.txt"
+STUB_INVOKED="$INVOKED" PATH="$stubbin:$PATH" bash "$WRAPPER" --help >"$OUT" 2>"$HELP_ERR"
 RC=$?
 if [ "$RC" -eq 0 ]; then ok '--help exits 0'; else bad "--help exited $RC (want 0)"; fi
+if [ -s "$HELP_ERR" ]; then
+  bad "--help wrote to STDERR, so the usage heredoc is being EXECUTED, not printed — a backtick (command substitution in an unquoted heredoc) also DELETES the backticked term from the rendered text: $(tr '\n' ' ' <"$HELP_ERR")"
+else
+  ok '--help writes NOTHING to stderr — no part of the usage heredoc is executed'
+fi
+# The heredoc must stay backtick-free, which is the pre-existing convention in this body: the
+# delimiter cannot be quoted (the body interpolates $PROGNAME and friends), so there is no escaping
+# strategy to get right — only the absence of backticks.
+_help_body=$(awk '/^usage\(\) \{/ { inu = 1 } inu { print } inu && /^EOF$/ { exit }' "$WRAPPER")
+case "$_help_body" in
+  '') bad '--help: the usage heredoc could not be extracted, so its backtick-freedom was not checked' ;;
+  *'`'*) bad '--help: the usage heredoc contains a BACKTICK. The delimiter is unquoted (so $PROGNAME interpolates), which makes a backtick command substitution: it prints an error to stderr AND deletes the term from the rendered help. Use plain text — the surrounding help prose names flags and keys unquoted.' ;;
+  *) ok '--help: the usage heredoc is backtick-free, so nothing in it can be executed or silently deleted' ;;
+esac
+# THE SEMANTIC HALF, because an empty stderr is not sufficient: the terms an operator has to COPY
+# must actually be PRESENT in the rendered text. A future backtick around a different term would be
+# caught by the two asserts above, but so would a well-meaning rewrite that simply dropped them.
+for _hterm in 'base=' '--base' 'assert-base:'; do
+  if grep -qF -- "$_hterm" "$OUT"; then
+    ok "--help renders the term an operator must copy: $_hterm"
+  else
+    bad "--help does not render '$_hterm' — the waiver passage cannot tell a human which sha to name, and this is what a swallowed backtick looks like"
+  fi
+done
 assert_says '--help states the exit-code contract' '0=PASS, 1=FAIL, 3=NOTHING-TO-REVIEW'
 assert_says '--help names the sanctioned range invocation' 'Sanctioned invocation'
 assert_says '--help marks --branch-without-repo non-sanctioned' "WITHOUT an explicit --repo"
