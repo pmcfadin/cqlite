@@ -4785,13 +4785,13 @@ case "$_ac3b_caught" in
   *ROBOREV_DIFF_SOURCE_STATE*)
     ok 'structural (#3367 AC3b): a reintroduction parked INSIDE usage() before its heredoc is caught — identifiers are scanned everywhere, so no part of the function is exempt' ;;
   *)
-    bad 'structural (#3367 AC3b): a reintroduction between `usage() {` and its `cat <<EOF` was NOT caught. The prose exemption starts at the function opener instead of the heredoc opener, so executable code parked there is invisible to the classifier-GONE scan' ;;
+    bad 'structural (#3367 AC3b): a reintroduction between `usage() {` and its `cat <<EOF` was NOT caught. Since the identifier/prose split there is no heredoc exemption left to blame - identifiers are scanned on every line - so look at the _cls_hits predicate and the token list, not at a filter' ;;
 esac
 case "$_ac3_caught" in
   *ROBOREV_DIFF_SOURCE_STATE*)
     ok "structural (#3367 AC3): an executable classifier reintroduction appended to a COPY of the real wrapper is still caught —$_ac3_caught — so the prose exemptions narrow the scan without blinding it" ;;
   *)
-    bad 'structural (#3367 AC3): an executable classifier reintroduction appended to a copy of the REAL wrapper was NOT caught. The prose exemption has widened until it swallows live code, so the classifier-GONE assert above is green by blindness' ;;
+    bad 'structural (#3367 AC3): an executable classifier reintroduction appended to a copy of the REAL wrapper was NOT caught. the classifier-GONE assert above is green by blindness. There is no prose exemption left to widen - check _cls_hits and the token list, which is exactly what this control exists to detect' ;;
 esac
 # THE THREE SNAPSHOT KEYS GO WITH IT: a block that still emitted them would be describing a
 # measurement the wrapper no longer makes.
