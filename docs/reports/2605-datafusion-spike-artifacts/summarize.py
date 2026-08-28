@@ -65,19 +65,58 @@ def med(values):
     return statistics.median(values)
 
 
-# THE EXPECTED MATRIX. There is no declared expectation to compare against — the
-# driver writes one file per cell and nothing states how many there should be —
-# so it is reconstructed as the full cross product of the scenarios, arm configs
-# and iterations that DO appear. That cannot detect a whole missing arm or a
-# whole missing iteration (nothing observed it), but it does detect every HOLE,
-# which is what an interrupted or partially-failed run leaves behind.
+# THE EXPECTED MATRIX, DECLARED — not inferred from what happens to be present.
+#
+# The first version of this check built its expectation from the OBSERVED arms
+# and iterations, which cannot close: a wholly missing arm config or a wholly
+# missing iteration is absent from the observation, so it is absent from the
+# expectation too, and the script exited 0 on an incomplete matrix while
+# advertising that it failed closed. A guard that names a guarantee it does not
+# provide is worse than no guard.
+#
+# `schedule.json` is the declared axis set — the driver writes it, it is
+# committed provenance, and it records `arm_configs` and `iterations` for the run
+# the cells came from. The iteration axis is taken from it EXACTLY (1..N), and
+# the arm axis is checked by COUNT: the default-parallelism arm's key resolves to
+# the measuring box's core count (`datafusion@tp16` here), which no static
+# declaration can predict, but its complete absence still shows up as a shortfall
+# against `arm_configs`.
+schedule_path = cells_dir.parent / "schedule.json"
+if schedule_path.is_file():
+    schedule = json.loads(schedule_path.read_text())
+    declared_iters = list(range(1, int(schedule["iterations"]) + 1))
+    declared_arm_count = int(schedule["arm_configs"])
+else:
+    # Unverifiable is NOT complete. Refuse to certify a matrix whose expected
+    # shape was never declared, rather than inferring the expectation from the
+    # data and calling the result a check.
+    schedule = None
+    declared_iters = None
+    declared_arm_count = None
+    failures.append(
+        "no schedule.json beside the cells, so the expected matrix is UNDECLARED and "
+        "completeness cannot be verified (run the matrix through run-matrix.sh, which writes it)"
+    )
+
 observed_arms = sorted({k[1] for k in groups})
 observed_iters = sorted({r["iteration"] for r in runs})
+expected_iters = declared_iters if declared_iters is not None else observed_iters
+if declared_arm_count is not None and len(observed_arms) != declared_arm_count:
+    failures.append(
+        "schedule.json declares %d arm config(s) but %d appear in the cells: %s"
+        % (declared_arm_count, len(observed_arms), observed_arms)
+    )
+missing_iters = [i for i in expected_iters if i not in observed_iters]
+if missing_iters:
+    failures.append(
+        "schedule.json declares iterations %s but %s are entirely absent"
+        % (expected_iters, missing_iters)
+    )
 expected_cells = [
     (scenario, arm, iteration)
     for scenario in SCENARIOS
     for arm in observed_arms
-    for iteration in observed_iters
+    for iteration in expected_iters
 ]
 present_cells = {(r["scenario"], key(r), r["iteration"]) for r in runs}
 missing_cells = [c for c in expected_cells if c not in present_cells]
@@ -123,7 +162,7 @@ for scenario in SCENARIOS:
             # the table is indistinguishable from one that was never asked for.
             print("| %s | %s | 0 | MISSING | — |%s" % (scenario, arm, " |" * 8))
             continue
-        absent = [i for i in observed_iters if i not in {r["iteration"] for r in rs}]
+        absent = [i for i in expected_iters if i not in {r["iteration"] for r in rs}]
         if absent:
             print("| %s | %s | %d | MISSING iteration(s) %s | — |%s"
                   % (scenario, arm, len(rs),
@@ -356,10 +395,10 @@ print("- cold-fault / elapsed ratio: %.2f..%.2f — cold-fault is a STALL ACCOUN
 print("- reconcile_entries range: %d..%d" % (
     min(r["reconcile_entries"] for r in runs),
     max(r["reconcile_entries"] for r in runs)))
-print("- matrix completeness: %d of %d expected cells present (%d scenario(s) x %d arm "
-      "config(s) x %d iteration(s))%s"
+print("- matrix completeness: %d of %d cells present against the schedule.json-DECLARED "
+      "matrix (%d scenario(s) x %d arm config(s) x %d declared iteration(s))%s"
       % (len(present_cells), len(expected_cells), len(SCENARIOS), len(observed_arms),
-         len(observed_iters),
+         len(expected_iters),
          "" if not missing_cells else "  <-- FAIL, missing: %s" % (missing_cells,)))
 # MACHINE STATE. A cell measured on a loaded box measures the box; the driver now
 # records the load each cell ran under, and the coverage is reported honestly —

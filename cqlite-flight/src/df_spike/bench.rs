@@ -206,8 +206,11 @@ pub struct BenchOutcome {
     /// Sub-phase: Arrow array build — the row→column TRANSPOSE, nanoseconds.
     /// This is the decode-to-column figure.
     pub subphase_encode_nanos: u64,
-    /// Sub-phase: channel send incl. backpressure park, nanoseconds.
-    pub subphase_grpc_write_nanos: u64,
+    /// Sub-phase: channel send incl. backpressure park, nanoseconds. `None` when
+    /// the sink that served the scan does not instrument it — which is always,
+    /// for this harness (see `scan::SubPhaseNanos::grpc_write`). Serialized as
+    /// `null`, never `0`.
+    pub subphase_grpc_write_nanos: Option<u64>,
     /// Peak RSS during this run, bytes. `None` when RSS could not be measured —
     /// never a fabricated zero.
     pub peak_rss_bytes: Option<u64>,

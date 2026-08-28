@@ -93,8 +93,16 @@ pub struct SubPhaseNanos {
     /// producer would eliminate, i.e. the decode-to-column figure M15 item 1 asks
     /// to be reported SEPARATELY from the vectorized-exec delta.
     pub encode: u64,
-    /// Egress channel send incl. backpressure park (here: the spike channel).
-    pub grpc_write: u64,
+    /// Egress channel send incl. backpressure park — `None` when the sink that
+    /// served the scan does not instrument it.
+    ///
+    /// The spike's own [`SpikeSink`] does NOT: the counter is fed by
+    /// PRODUCTION's `ChannelSink`, so in this harness it is always unmeasured.
+    /// Reporting the accumulator's `0` here would be a FABRICATED ZERO — "the
+    /// channel send cost nothing" is a very different statement from "nobody
+    /// measured the channel send", and the first one is false. Same rule as
+    /// `rss.rs`: an absence is reported as an absence.
+    pub grpc_write: Option<u64>,
 }
 
 impl SubPhaseNanos {
@@ -105,7 +113,11 @@ impl SubPhaseNanos {
             decompress: timings.nanos(StreamSubPhase::Decompress),
             merge: timings.nanos(StreamSubPhase::Merge),
             encode: timings.nanos(StreamSubPhase::Encode),
-            grpc_write: timings.nanos(StreamSubPhase::GrpcWrite),
+            // Unconditionally `None`, and NOT `Some(0)`-unless-nonzero: whether
+            // this phase is instrumented is a STATIC property of the sink that
+            // ran (the spike's never records it), not something to infer from
+            // whether the counter happens to be zero on this run.
+            grpc_write: None,
         }
     }
 }

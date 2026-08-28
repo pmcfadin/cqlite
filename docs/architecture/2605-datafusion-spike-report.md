@@ -116,7 +116,7 @@ Decode-to-column is read from the always-compiled `#2819` instrument
 | `stream_merge` | k-way merge + reconcile + per-row materialize, merge-consumer thread |
 | `stream_encode` | **Arrow array build — the row→column transpose.** This is the decode-to-column figure |
 | `stream_cold_fault` | Cold body-chunk page-in |
-| `stream_grpc_write` | Egress channel send incl. backpressure park |
+| `stream_grpc_write` | Egress channel send incl. backpressure park — **not instrumented by the spike's sink**, so it is reported as `null` (unmeasured), never `0` |
 
 The sub-phases run on concurrent pipeline threads and **overlap in wall clock**, so they are not
 expected to sum to elapsed time.
@@ -309,7 +309,9 @@ single-threaded direct arms; `datafusion@tp16` is DataFusion's default (one per 
 post-filter and its batch count differs — it is never compared row-for-row against the others.
 
 No `grpc-write` column: that sub-phase counter is fed by production's `ChannelSink`, not the spike's
-sink, so it reads 0 because it was never instrumented — not because the send was free.
+sink, so it is **unmeasured** here — not free. The harness reports it as `null` rather than `0`
+precisely so the two cannot be confused; the committed cells, written before that change, carry the
+misleading `0` and are the reason the column is omitted from every table.
 
 ### 3.3 The answer: with I/O controlled, all four engines are indistinguishable
 

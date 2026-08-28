@@ -69,8 +69,7 @@ fn run() -> Result<(), String> {
     // `parse_create_table` requires its input to START at the statement. The
     // FIRST such statement is used and nothing after it is inspected, so a file
     // holding several tables is a usage error the caller must not make.
-    let statement = ddl
-        .find("CREATE TABLE")
+    let statement = find_create_table(&ddl)
         .map(|at| &ddl[at..])
         .ok_or_else(|| {
             format!(
@@ -149,6 +148,21 @@ fn run() -> Result<(), String> {
     assert_preconditions(&results)?;
     write_results(&args, &results)?;
     Ok(())
+}
+
+/// Byte offset of the first `CREATE TABLE`, matched CASE-INSENSITIVELY.
+///
+/// CQL is case-insensitive and the repository's own parser accepts lowercase
+/// DDL, so an exact-case search rejected a valid `create table ...` file before
+/// parsing ever saw it. The scan is over BYTES with an ASCII-only comparison
+/// rather than over a lowercased copy, because `str::to_lowercase` is not
+/// length-preserving for every Unicode input — the offset it returned could not
+/// be trusted against the original string.
+fn find_create_table(ddl: &str) -> Option<usize> {
+    const NEEDLE: &[u8] = b"CREATE TABLE";
+    ddl.as_bytes()
+        .windows(NEEDLE.len())
+        .position(|window| window.eq_ignore_ascii_case(NEEDLE))
 }
 
 /// Every declared column name, key-first (partition keys, clustering keys, then
