@@ -1,25 +1,45 @@
 #!/usr/bin/env python3
-"""Is the SHARED bucket really the same CODE? Partition it by verified machine-code identity.
+"""Is the SHARED bucket really the same CODE? Partition it by machine-code identity.
 
 WHY THIS EXISTS. The report claimed ~24% of the Flight/scan gap was "identical code costing 21.5%
 more". The two arms are DIFFERENT BINARIES -- arm A is `ws0-scan-bench`, arm B is `cqlite-flight` --
 and the shared bucket is assigned by SYMBOL PRESENCE (see aggregate-profiles.py). A shared symbol is
 therefore the same SOURCE FUNCTION; nothing in that establishes the same MACHINE CODE, because each
-binary inlines and specialises independently. So "identical code" was a claim about codegen supported
-only by evidence about names, and different codegen was a live competing explanation for the excess
-that the wording ruled out rhetorically.
+binary inlines and specialises independently.
 
-WHAT IT MEASURES. For every shared-pattern symbol present in both binaries, compare the disassembled
-MNEMONIC SEQUENCE over the symbol's extent.
+THREE ORACLES WERE TRIED. The first two were WRONG IN OPPOSITE DIRECTIONS, and both are recorded
+because each looked obviously right while it was in use.
 
-WHY MNEMONICS AND NOT BYTES. Bytes are the wrong oracle here and using them would have overstated the
-answer badly in the other direction: only 15 of 363 shared symbols are byte-identical, because
-call targets and PC-relative operands are RELOCATED differently in two different binaries even when
-the instruction sequence is the same. Measured: of 295 shared symbols with identical size, 291 have
-an IDENTICAL mnemonic sequence -- same instructions, different operands. Reporting "4% identical"
-from a byte comparison would have been the same error as the claim it replaced, pointing the other
-way. Size alone is likewise insufficient (4 same-size symbols do differ in mnemonics), so both
-checks are applied.
+  (1) BYTE EQUALITY -- far too STRICT. Only 15 of 363 shared symbols are byte-identical, because
+      call targets and PC-relative displacements are RELOCATED differently in two different
+      binaries even when the instruction stream is the same. Reporting "4% identical" from this
+      would have been a large error.
+
+  (2) MNEMONIC SEQUENCE -- too LOOSE, and this one shipped for one round before review caught it
+      (roborev job 71 finding 1). Discarding operands keeps only the opcode names, so two functions
+      with the same shape but DIFFERENT REGISTERS, DIFFERENT IMMEDIATES or a DIFFERENT CALLEE
+      compare equal. It reported 291 of 363 identical; 155 of those 291 are NOT. Measured
+      divergences among them: 49 symbols differ in a register or a real immediate -- something a
+      mnemonic compare can never see -- and most of the rest reference a different target symbol.
+
+  (3) NORMALIZED OPERANDS -- what this script does. Compare mnemonic AND operands, normalizing ONLY
+      the parts that must relocate:
+        * an intra-function branch target becomes `L+<offset from the function start>`, which is
+          invariant; an external target becomes the callee's NAME, which is the invariant thing
+          about a call;
+        * a `0x...(%rip)` displacement becomes `RIP`, and the target symbol named in objdump's
+          trailing comment is kept -- the displacement relocates, the referent does not.
+      Registers and `$`-prefixed immediates are KEPT and compared, because those are exactly what
+      oracle (2) was blind to.
+
+  Result: 136 of 363 (37%) are operand-identical.
+
+THE RESIDUAL, because oracle (3) is not provably final either. 136 is a LOWER BOUND on "identical"
+and 227 an UPPER BOUND on "different": the largest divergence class is a differing TARGET SYMBOL, and
+some of those callees may differ only by monomorphisation or crate-disambiguator hash, i.e. be the
+same code under a different name. Tightening that further needs recursive comparison of callees,
+which is not attempted here. The bound is stated rather than resolved, and every claim in the report
+is phrased against the LOWER bound so that a tighter oracle could only move it favourably.
 
 Requires the perfsym binaries and the committed flat profiles. Re-derives every figure in the
 "identical code" paragraph of the report.
@@ -76,17 +96,51 @@ def text_symbols(binpath: str) -> dict:
     return d
 
 
-def mnemonics_by_addr(binpath: str) -> dict:
+_BRANCH = re.compile(r'^(\S+)\s+([0-9a-f]+)\s+<([^>]*)>\s*$')
+_RIP = re.compile(r'0x[0-9a-f]+\(%rip\)')
+_COMMENT = re.compile(r'\s*#\s*[0-9a-f]+\s*<([^>]*)>\s*$')
+
+
+def instructions_by_addr(binpath: str) -> dict:
+    """addr -> raw instruction text (mnemonic AND operands, whitespace-normalized)."""
     out = subprocess.run(['objdump', '-d', '--no-show-raw-insn', binpath],
                          capture_output=True, text=True)
     if out.returncode != 0:
         sys.exit(f"FATAL: objdump failed on {binpath}: {out.stderr.strip()}")
     per = {}
     for line in out.stdout.splitlines():
-        m = re.match(r'\s+([0-9a-f]+):\s+(\S+)', line)
+        m = re.match(r'\s+([0-9a-f]+):\t(.*)$', line)
         if m:
-            per[int(m.group(1), 16)] = m.group(2)
+            per[int(m.group(1), 16)] = m.group(2).strip()
+    if not per:
+        sys.exit(f"FATAL: objdump produced no instructions for {binpath}. An empty disassembly "
+                 "would make every symbol compare equal, i.e. a vacuous 100% identical.")
     return per
+
+
+def normalize(body: str, start: int, size: int) -> str:
+    """Normalize ONLY relocatable operands. Registers and $-immediates are KEPT and compared.
+
+    This is the whole substance of oracle (3): the previous version compared mnemonics alone and
+    was blind to a differing register, immediate or callee, which is what review caught.
+    """
+    m = _BRANCH.match(body)
+    if m:
+        mnemonic, target, sym = m.group(1), int(m.group(2), 16), m.group(3)
+        if start <= target < start + size:
+            # Intra-function branch: the offset from the function's OWN start is invariant, while
+            # the absolute address is not.
+            return f"{mnemonic} L+{target - start}"
+        # External: the callee's NAME is the invariant thing about the call.
+        return f"{mnemonic} <{sym}>"
+    target_sym = None
+    c = _COMMENT.search(body)
+    if c:
+        target_sym = c.group(1)
+        body = body[:c.start()]
+    # The displacement relocates; the referent named in objdump's comment does not.
+    body = _RIP.sub('RIP', body).strip()
+    return f"{body} ->{target_sym}" if target_sym else body
 
 
 def main() -> int:
@@ -96,10 +150,10 @@ def main() -> int:
         return 2
     scan_bin, flight_bin, flatdir = sys.argv[1], sys.argv[2], sys.argv[3]
     A, B = text_symbols(scan_bin), text_symbols(flight_bin)
-    pa, pb = mnemonics_by_addr(scan_bin), mnemonics_by_addr(flight_bin)
+    pa, pb = instructions_by_addr(scan_bin), instructions_by_addr(flight_bin)
 
     def seq(per, addr, size):
-        return [per[a] for a in range(addr, addr + size) if a in per]
+        return [normalize(per[a], addr, size) for a in range(addr, addr + size) if a in per]
 
     both = [k for k in A if k in B and classify(k) == 's']
     if not both:
@@ -113,7 +167,7 @@ def main() -> int:
         else:
             diff.add(k)
     print(f"SHARED symbols present in BOTH binaries: {len(both)}")
-    print(f"  VERIFIED-IDENTICAL instruction sequence: {len(ident)} "
+    print(f"  OPERAND-IDENTICAL (lower bound):          {len(ident)} "
           f"({len(ident) / len(both) * 100:.0f}%)")
     print(f"  DIFFERENT machine code:                  {len(diff)} "
           f"({len(diff) / len(both) * 100:.0f}%)")
@@ -125,12 +179,21 @@ def main() -> int:
             sys.exit(f"FATAL: no flat profiles matched {pat} under {flatdir}. A missing profile "
                      "set would silently report 0% for this arm.")
         acc = {'ident': 0.0, 'diff': 0.0, 'shared': 0.0, 'one_binary_only': 0.0}
+        # THE DENOMINATOR IS FILES THAT ACTUALLY PARSED, NOT FILES THAT EXIST (roborev job 71
+        # finding 2). `len(files)` counted an empty, truncated or format-incompatible profile in
+        # the average, which silently DIVIDES every attributed percentage down and yields plausible
+        # but low cycle estimates -- a wrong number with no error. A profile that parses to zero
+        # rows is a broken input, so it FAILS rather than being averaged in or quietly skipped:
+        # skipping would still let a 3-rep claim rest on 2 reps.
+        parsed_files = 0
         for f in files:
+            rows_in_file = 0
             for line in open(f):
                 m = re.match(r'\s*([\d.]+)%\s+\S+\s+(\S+)\s+\[\.\]\s+(.*?)\s*$', line)
                 if not m:
                     continue
                 pct, sym = float(m.group(1)), m.group(3)
+                rows_in_file += 1
                 if classify(sym) != 's':
                     continue
                 acc['shared'] += pct
@@ -140,7 +203,15 @@ def main() -> int:
                     acc['diff'] += pct
                 else:
                     acc['one_binary_only'] += pct
-        share[arm] = {k: v / len(files) for k, v in acc.items()}
+            if rows_in_file == 0:
+                sys.exit(f"FATAL: {f} parsed to ZERO profile rows. An unparseable profile counted "
+                         "in the averaging denominator would scale every attributed percentage "
+                         "down silently; it is refused instead.")
+            parsed_files += 1
+        if parsed_files != len(files):
+            sys.exit(f"FATAL: {len(files) - parsed_files} of {len(files)} {arm} profiles did not "
+                     "parse; the average would rest on fewer reps than it claims.")
+        share[arm] = {k: v / parsed_files for k, v in acc.items()}
         s = share[arm]
         print(f"\n{arm}: shared self-time {s['shared']:.2f}% "
               f"(identical {s['ident']:.2f}%, different {s['diff']:.2f}%, "
@@ -153,8 +224,8 @@ def main() -> int:
     print(f"\nprofiled cyc/row: scan={scan_cr:.0f} flight={fl_cr:.0f}")
     print(f"\n{'bucket':<40}{'scan':>9}{'flight':>9}{'excess':>10}")
     for label, key in (('SHARED total', 'shared'),
-                       ('  VERIFIED-IDENTICAL instructions', 'ident'),
-                       ('  DIFFERENT machine code', 'diff')):
+                       ('  operand-identical (lower bound)', 'ident'),
+                       ('  different machine code (upper bound)', 'diff')):
         a = share['scan'][key] / 100 * scan_cr
         b = share['flight'][key] / 100 * fl_cr
         print(f"{label:<40}{a:9.0f}{b:9.0f}{(b / a - 1) * 100:9.1f}%")

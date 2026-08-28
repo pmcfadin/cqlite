@@ -596,11 +596,17 @@ if [[ -n "$PROFILE_OUT" ]]; then
   done
 fi
 
-if [[ -n "$QUIESCENCE_TIMESERIES" && ! -r "$QUIESCENCE_TIMESERIES" ]]; then
-  echo "FATAL: --quiescence-timeseries '$QUIESCENCE_TIMESERIES' is not a readable file." >&2
+# `-f` AS WELL AS `-r`, BECAUSE THE MESSAGE ALREADY CLAIMED "file" (roborev job 71 finding 3).
+# `! -r` alone passes a readable DIRECTORY and a FIFO: a directory then fails much later inside
+# ws0_quiescence.py, and a FIFO can BLOCK the reader indefinitely -- in both cases AFTER the full
+# measurement has run, which is exactly what an up-front argument check exists to prevent. `-f`
+# follows symlinks, so a symlink to a real record still passes.
+if [[ -n "$QUIESCENCE_TIMESERIES" ]] && { [[ ! -f "$QUIESCENCE_TIMESERIES" ]] || [[ ! -r "$QUIESCENCE_TIMESERIES" ]]; }; then
+  echo "FATAL: --quiescence-timeseries '$QUIESCENCE_TIMESERIES' is not a readable regular file." >&2
   echo "       It is the external box-load record this session is judged against; an" >&2
   echo "       unreadable one cannot establish anything, so it is refused up front rather" >&2
-  echo "       than after the measurement." >&2
+  echo "       than after the measurement. A directory or FIFO is refused HERE for the same" >&2
+  echo "       reason: a FIFO would block the reader after the whole measurement had run." >&2
   exit 2
 fi
 
