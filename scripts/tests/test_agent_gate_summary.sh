@@ -2216,6 +2216,67 @@ RSFX3
   fi
 fi
 
+# --- 23. #1699: round-9 — identifier agreement, census subject covers --lib, honest labels
+if [ -s "$lh_code" ]; then
+  # (a) allowed-zero entries must be spelled the way the GUARD parses them. `--test <name>`
+  #     takes cargo's TARGET NAME, but check_no_unexpected_zero_tests keys on the PATH stem
+  #     from `Running tests/<path>.rs`. For a directory-style target those differ (`foo` vs
+  #     `foo/main`), so a name-spelled allowance never matches and a legitimately
+  #     negative-polarity target FAILS the full gate.
+  if [ "$(grep -cE '_az_id' "$lh_code")" -gt 0 ]; then
+    ok "1699-r9-azid: allowed-zero entries are derived from src_path, so they match the identifier the zero-test guard parses"
+  else
+    bad "1699-r9-azid: allowed-zero is back to the cargo target name — for a directory-style target that never matches 'Running tests/<path>.rs' and a valid negative-only target would FAIL the gate"
+  fi
+  # (b) the census subject must include the lib sources the lane executes via --lib.
+  if [ "$(grep -cE 'cqlite-core/src' "$lh_code")" -gt 0 ]; then
+    ok "1699-r9-census-lib: the census subject includes cqlite-core/src (the --lib half the lane executes)"
+  else
+    bad "1699-r9-census-lib: the census scans only integration-target roots — an inline co-required unit test in cqlite-core/src would compile out while the census reported every gated body reachable (a FALSE ZERO-GAP, and 3478 sibling unit tests keep the aggregate guard's count nonzero)"
+  fi
+fi
+# (c) no output may still name the retired oracle: a diagnostic that misdirects remediation
+#     is its own small version of this issue's defect.
+if [ "$(grep -c 'enabled features (cargo metadata)' "$GATE")" -eq 0 ]; then
+  ok "1699-r9-label: no output still labels the enabled-feature oracle 'cargo metadata' (it is package-scoped cargo tree)"
+else
+  bad "1699-r9-label: output still claims the enabled-feature oracle is 'cargo metadata' — it is package-scoped 'cargo tree -p', and a stale label misdirects both audit logs and failure remediation"
+fi
+
+# (d) BEHAVIOURAL: an inline co-required unit test (the src/** shape) is detected. This is
+#     the fixture roborev asked for; it pins the classifier against the shape the widened
+#     subject exists to catch.
+if [ -s "$coreq_h" ]; then
+  inline_fx="$tmp/1699-coreq-inline.rs"
+  cat > "$inline_fx" <<'RSFX4'
+pub fn production_code() {}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[cfg(all(feature = "legacy-heuristics", feature = "absent-one"))]
+    #[test]
+    fn inline_co_required_unit_test() {
+        production_code();
+    }
+
+    #[cfg(feature = "legacy-heuristics")]
+    #[test]
+    fn inline_reachable_unit_test() {}
+}
+RSFX4
+  inline_out="$tmp/1699-coreq-inline-out.txt"
+  _legacy_coreq_sites "$inline_fx" " default legacy-heuristics " > "$inline_out" 2>/dev/null
+  i_fn=$(awk -F'\t' '$1=="fn" && $2=="1"' "$inline_out" | wc -l | tr -d ' ')
+  i_all=$(wc -l < "$inline_out" | tr -d ' ')
+  if [ "$i_fn" = "1" ] && [ "$i_all" = "1" ]; then
+    ok "1699-r9-inline: an inline co-required unit test inside #[cfg(test)] mod tests is detected, and the reachable sibling is not reported"
+  else
+    bad "1699-r9-inline: expected exactly 1 inline gap record, got $i_fn of $i_all — the census would miss (or invent) inline unit-test gaps in cqlite-core/src"
+  fi
+fi
+
 echo "----"
 echo "passed: $PASS  failed: $FAIL"
 [ "$FAIL" -eq 0 ]

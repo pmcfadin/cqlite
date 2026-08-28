@@ -5827,8 +5827,11 @@ run_flight_tests() {
     status=FAIL
     {
       echo "[$name] FAIL-CLOSED: could not derive cqlite-flight's enabled feature set"
-      echo "        from cargo metadata (no jq/python3, a metadata failure, or no"
-      echo "        resolve node for the package). The DERIVATION failed, not the tests."
+      echo "        via 'cargo tree -p cqlite-flight' (a cargo failure, an offline registry,"
+      echo "        or no line for the package). The DERIVATION failed, not the tests."
+      echo "        NOTE: this oracle is package-scoped 'cargo tree', NOT 'cargo metadata' —"
+      echo "        metadata resolves the WHOLE workspace and reports other members'"
+      echo "        features as this package's (issue #1699, roborev round-6)."
     } | tee "$log"
     end=$(date +%s)
     record_result "$name" "$status" "$((end - start))"
@@ -5920,7 +5923,7 @@ run_flight_tests() {
   local cl
   for cl in "${census[@]}"; do echo ">>> [$name] $cl"; done
   [ -n "$rf_reasons" ] && echo ">>> [$name] declared targets with unmet required-features:$rf_reasons"
-  echo ">>> [$name] enabled features (cargo metadata):$enabled"
+  echo ">>> [$name] enabled features (cargo tree -p, package-scoped):$enabled"
 
   # The log opens WITH the census (`>` here, `>>` for cargo below), so the omission is
   # in the component log on every run whether the lane passes or fails.
@@ -5928,7 +5931,7 @@ run_flight_tests() {
     echo "==== [$name] COVERAGE CENSUS (issue #1699 / #3384) ===="
     for cl in "${census[@]}"; do echo "$cl"; done
     [ -n "$rf_reasons" ] && echo "declared targets with unmet required-features:$rf_reasons"
-    echo "enabled features (cargo metadata):$enabled"
+    echo "enabled features (cargo tree -p, package-scoped):$enabled"
     echo "==== end census ===="
   } > "$log"
 
@@ -6243,8 +6246,18 @@ run_legacy_heuristics() {
       :
     elif [ "$(sed -E 's/not\([[:space:]]*feature[[:space:]]*=[[:space:]]*"legacy-heuristics"[[:space:]]*\)//g' "$f" \
         | grep -cE "$cfg_site")" -eq 0 ]; then
-      allow_zero+=("$base")
-      negonly="$negonly $base"
+      # TWO DIFFERENT IDENTIFIERS FOR TWO DIFFERENT CONSUMERS, and conflating them was a
+      # real bug (roborev round-9 finding, Medium). `--test <name>` takes cargo's TARGET
+      # NAME, but check_no_unexpected_zero_tests parses `Running tests/<path>.rs` and keys
+      # on the PATH stem. For a directory-style or explicitly-mapped target those differ —
+      # target `foo` with `tests/foo/main.rs` yields `foo/main` — so an allowed-zero entry
+      # spelled as the target name would never match, and a legitimately negative-polarity
+      # target would FAIL the full gate. Derived from src_path so the two agree by
+      # construction rather than by coincidence of naming.
+      local _az_id="${_mt_src##*/tests/}"
+      _az_id="${_az_id%.rs}"
+      allow_zero+=("$_az_id")
+      negonly="$negonly $_az_id"
     fi
   done <<EOF
 $meta_targets
@@ -6305,7 +6318,8 @@ EOF
     status=FAIL
     {
       echo "[$name] FAIL-CLOSED: could not derive cqlite-core's enabled feature set at"
-      echo "        default+legacy-heuristics, so the co-required-feature census is"
+      echo "        default+legacy-heuristics via 'cargo tree -p cqlite-core' (a cargo"
+      echo "        failure or an offline registry), so the co-required-feature census is"
       echo "        unmeasurable. A census that cannot be taken is not reported as empty."
     } | tee "$log"
     end=$(date +%s)
@@ -6313,6 +6327,26 @@ EOF
     echo ">>> [$name] $status ($((end - start))s)"
     return 0
   fi
+  # THE CENSUS SUBJECT MUST COVER WHAT THE LANE EXECUTES, and `--lib` was missing from it
+  # (roborev round-9 finding, Medium). The lane runs cqlite-core's inline unit tests, so an
+  # inline `#[cfg(all(feature = "legacy-heuristics", feature = "X"))]` test in
+  # cqlite-core/src/** compiles out here exactly like a gated integration body — but the
+  # census only looked at integration-target roots and would therefore have reported "every
+  # gated body is reachable" while one was silently absent. A FALSE ZERO-GAP, the silent
+  # direction. The aggregate non-zero unit-test guard cannot see it either: 3478 sibling
+  # unit tests keep the count nonzero. Same shape as the guard-subject findings of rounds 7
+  # and 8 — the subject was narrower than the claim.
+  #
+  # Pre-filtered with grep so the awk pass runs only over files that mention the feature
+  # (8 of cqlite-core/src's files today, none of them co-required).
+  local _libsrc
+  while IFS= read -r _libsrc; do
+    [ -n "$_libsrc" ] || continue
+    srcs="$srcs${_libsrc#$REPO_ROOT/}	$_libsrc
+"
+  done <<EOF
+$(grep -rlE 'feature[[:space:]]*=[[:space:]]*"legacy-heuristics"' "$REPO_ROOT/cqlite-core/src" 2>/dev/null | sort)
+EOF
   local lh_testfn=0 lh_other=0 lh_skip=0 _sites _k _it _ms _m f_ f_src
   while IFS="	" read -r f_ f_src; do
     [ -n "$f_" ] || continue
@@ -6392,7 +6426,7 @@ EOF
   else
     lh_census+=("co-required-feature census: 0 — every legacy-heuristics-gated body is reachable at this feature set")
   fi
-  lh_census+=("enabled features (cargo metadata):$lh_enabled")
+  lh_census+=("enabled features (cargo tree -p, package-scoped):$lh_enabled")
   local _cl
   for _cl in "${lh_census[@]}"; do echo ">>> [$name] $_cl"; done
   # The log OPENS with the census (`>` here; the cargo build below switches to `>>`), so
