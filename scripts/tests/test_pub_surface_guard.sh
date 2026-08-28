@@ -88,6 +88,14 @@
 #                while cargo resolves it against the repo root, so the guard locked,
 #                deleted and inspected a different tree than the one cargo wrote.
 #
+#   Trust boundaries, third pass (roborev r6 F3) — a FALSE FAIL:
+#  27.  GREEN  — the same workflow as case 17 but with the change `git add`ed. The
+#                overlay reproduced `git diff HEAD` (staged content) as an UNSTAGED
+#                edit while the proof step compared porcelain EXACTLY, and porcelain
+#                distinguishes `M ` from ` M` — so staging anything aborted the suite
+#                before it tested anything. Staged and unstaged deltas are reproduced
+#                separately; both index states are pinned here.
+#
 #   The COMPONENT that certifies the guard (roborev r6 F2) — also a FALSE PASS:
 #  26.  RED    — `agent-gate.sh`'s pub-surface component assigned PASS on the guard's
 #                EXIT STATUS alone, echoing the measurement line with `|| true`. So a
@@ -1139,5 +1147,78 @@ grep -qF 'public items + ' "$TMPROOT/case26b.out" \
   || fail_case "case 26 control — the component passed but did not echo the measurement line, so a pasted gate log would not show the check RAN"
 echo "OK (26): the pub-surface GATE COMPONENT requires the guard's affirmative measurement line before PASS"
 
+# ---------------------------------------------------------------------------
+# 27. GREEN — the ORDINARY PRE-COMMIT WORKFLOW *WITH STAGED CHANGES* must pass
+#     (roborev round 6, finding 3). Case 17's sibling, and another FALSE FAIL.
+#
+#     `git add` your work, then run the tests: that is a completely normal
+#     workflow, and it used to abort the suite BEFORE it tested anything. The
+#     overlay reproduced the source's delta with `git diff HEAD` (which captures
+#     STAGED content) and replayed it with a plain `git apply` (which recreates it
+#     UNSTAGED), while the proof step compares `git status --porcelain` EXACTLY —
+#     and porcelain distinguishes `M ` (staged) from ` M` (unstaged). So every
+#     scratch case failed with "the scratch worktree does not reproduce the working
+#     tree" the moment anything was staged.
+#
+#     Pinned here in the shape that actually occurs: the API change and its
+#     regenerated snapshot are STAGED (`M `), and the source file carries a further
+#     UNSTAGED edit on top (`MM`). The child scratch must reproduce BOTH index
+#     states and the guard must verify clean inside it.
+# ---------------------------------------------------------------------------
+scratch_tree staged-worktree; wt27="$SCRATCH"
+cat >>"$wt27/cqlite-core/src/version_hints.rs" <<'RS'
+
+/// Self-test-only probe item (scripts/tests/test_pub_surface_guard.sh, issue #1712
+/// r6 F3), standing in for a STAGED public-API change. Never committed.
+pub struct PubSurfaceStagedProbe;
+RS
+set +e
+bash "$wt27/$GUARD_REL" --regenerate >"$TMPROOT/case27-regen.out" 2>&1
+case27_regen_rc=$?
+set -e
+[ "$case27_regen_rc" -eq 0 ] \
+  || fail_case "case 27 setup: --regenerate failed in the outer scratch; got: $(cat "$TMPROOT/case27-regen.out")"
+git -C "$wt27" add -- cqlite-core/src/version_hints.rs "$SNAPSHOT_REL" \
+  || fail_case "case 27 setup: could not stage the API change and its regenerated snapshot"
+# …and one further UNSTAGED edit on top of a staged file, so the case covers `MM`
+# too. A comment cannot change the public surface, so the guard must stay green.
+cat >>"$wt27/cqlite-core/src/version_hints.rs" <<'RS'
+// Self-test-only UNSTAGED trailing comment (#1712 r6 F3). Not public API.
+RS
+# Prove the SETUP is genuinely what the case is about — a staged snapshot (`M `) and a
+# staged-plus-modified source file (`MM`). Without this the case could pass by never
+# having staged anything.
+git -C "$wt27" status --porcelain | grep -qE "^M  $SNAPSHOT_REL\$" \
+  || fail_case "case 27 setup: the regenerated snapshot is not STAGED (expected porcelain \`M \`); got: $(git -C "$wt27" status --porcelain)"
+git -C "$wt27" status --porcelain | grep -qE '^MM cqlite-core/src/version_hints\.rs$' \
+  || fail_case "case 27 setup: the source file is not staged-plus-further-modified (expected porcelain \`MM\`); got: $(git -C "$wt27" status --porcelain)"
+
+scratch_tree_from "$wt27" staged-worktree-child; wt27c="$SCRATCH"
+grep -q 'PubSurfaceStagedProbe' "$wt27c/cqlite-core/src/version_hints.rs" \
+  || fail_case "case 27 — the child scratch did not receive the outer scratch's STAGED source change"
+grep -q 'PubSurfaceStagedProbe' "$wt27c/$SNAPSHOT_REL" \
+  || fail_case "case 27 — the child scratch did not receive the outer scratch's STAGED regenerated snapshot"
+grep -q 'UNSTAGED trailing comment' "$wt27c/cqlite-core/src/version_hints.rs" \
+  || fail_case "case 27 — the child scratch did not receive the outer scratch's UNSTAGED edit"
+# The index state itself must be reproduced, not just the file contents: that is what
+# keeps the overlay's proof step an EXACT porcelain comparison rather than a weakened one.
+git -C "$wt27c" status --porcelain | grep -qE "^M  $SNAPSHOT_REL\$" \
+  || fail_case "case 27 — the child scratch did not reproduce the STAGED index state of the snapshot; got: $(git -C "$wt27c" status --porcelain)"
+git -C "$wt27c" status --porcelain | grep -qE '^MM cqlite-core/src/version_hints\.rs$' \
+  || fail_case "case 27 — the child scratch did not reproduce the staged-plus-modified (\`MM\`) index state; got: $(git -C "$wt27c" status --porcelain)"
+set +e
+bash "$wt27c/$GUARD_REL" >"$TMPROOT/case27.out" 2>&1
+case27_rc=$?
+set -e
+[ "$case27_rc" -eq 0 ] || {
+  echo "FAIL: case 27 — a scratch built from a tree whose public-API change and regenerated"
+  echo "      snapshot are STAGED did not verify clean. Staging your work before running the"
+  echo "      tests is an ordinary workflow; failing it is a false FAIL in the path every"
+  echo "      contributor walks."
+  cat "$TMPROOT/case27.out"
+  exit 1
+}
+echo "OK (27): a scratch built from a tree with STAGED changes (plus an unstaged edit on top) verifies clean"
+
 echo ""
-echo "PASS: test_pub_surface_guard.sh — all 26 cases (7 green, 17 reds, 1 usage, 1 kill-safety)"
+echo "PASS: test_pub_surface_guard.sh — all 27 cases (8 green, 17 reds, 1 usage, 1 kill-safety)"
