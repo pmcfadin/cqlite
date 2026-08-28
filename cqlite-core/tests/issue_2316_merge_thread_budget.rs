@@ -309,9 +309,10 @@ fn poll_until_stable(timeout: Duration) -> (usize, usize) {
 ///   does until this test drains the merge, i.e. strictly after this call).
 ///
 /// So this confirmation can only ever turn a jitter FAIL into a PASS; a genuine
-/// #2316 amplification survives it unchanged. Returns `(peak, settled)` of the
-/// post-reap window; `settled` is the CONFIRMED reading (the stabilized steady
-/// state), while `peak` is reported for diagnosis only.
+/// #2316 amplification survives it unchanged. Returns a [`ReapOutcome`]:
+/// `Drained` (the pool reached and HELD a within-budget count — the only value
+/// that satisfies the pin) or `Unconfirmed` (the deadline expired first, which
+/// fails closed). Both carry `peak` for diagnosis only.
 fn reap_settle_and_resample(accept_at_or_below: usize) -> ReapOutcome {
     poll_until_reaped(
         accept_at_or_below,
@@ -649,8 +650,9 @@ fn merge_bounds_producer_threads_to_o_m() {
 
     // THE PIN: the merge's OS-thread delta over baseline must be within the O(M)
     // bound. Pre-change this is `M + M·num_cpus` (>> bound); post-change `M`.
-    // `confirmed` equals the fast-path delta unless that exceeded the bound, in
-    // which case it is the delta that SURVIVED the reap settle.
+    // `pin_satisfied` is true only when the fast-path delta was already within
+    // bound, or the reap confirmation returned `Drained` — never merely because
+    // nothing bad was observed. `confirm_note` records which, for the message.
     assert!(
         pin_satisfied,
         "merge over M={m} inputs failed the O(M) producer-thread pin: {confirm_note}. \
