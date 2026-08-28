@@ -60,7 +60,9 @@ streams — at **3 reps each, 75 reps total**, 60 s aligned window per rep.
   attribution bias accounts for 0.06 pp. The residual **−1.32% is within
   resolution** — it is inside `ws0-scan-bench`'s own 2.1% three-pass spread and
   below the mission doc's ~1.4% between-binary noise floor (§0). It is not a
-  claim that the two arms agree to 1.3%.
+  claim that the two arms agree to 1.3%. That comparison is DECIDED, not
+  remarked: the control refuses (`GUARD-FAIL EQUIV_DIVERGENCE`, aborting the
+  sweep) when the residual exceeds the bench arm's own measured spread.
 - **Corpus B** — the #3096 measurement corpus: 4,000,000 rows, 40,000 partitions,
   12 cells/row, `Data.db` 2,774,760,422 B, **693.69 B/row, UNCOMPRESSED**, no
   `CompressionInfo.db`. Identity verified before every run.

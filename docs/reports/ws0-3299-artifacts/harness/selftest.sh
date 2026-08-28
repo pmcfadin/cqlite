@@ -350,6 +350,70 @@ mkdir -p "$TMP/corpus-empty"
 expect_guard_fail CORPUS_DATA_DB_ABSENT \
   python3 "$GUARDS" corpus --corpus "$TMP/corpus-empty"
 
+# ---------------------------------------------------- equivalence control ---
+echo
+echo "-- equivalence control (it must be able to FAIL) --"
+# THE DEFECT THIS SECTION EXISTS FOR: `derive.py --equivalence` used to print the
+# residual and then state, unconditionally and in prose, that it was "inside the
+# bench's own single-run spread", exiting 0 whatever the numbers said. A control
+# that cannot fail is not a control — a severely divergent worker would have
+# passed it and its S-sweep points would have been published as comparable to the
+# #3096/#3272 rig's. Both directions are asserted here, because a control that
+# always REFUSES is equally useless.
+plant_equiv() {  # <dir> <worker-rows/s> <shortfall-frac> <bench pass rows/s...>
+  local d="$1" w="$2" sf="$3"; shift 3
+  mkdir -p "$d"
+  python3 - "$d" "$w" "$sf" "$@" <<'EOF'
+import json, os, sys
+d, w, sf, passes = sys.argv[1], float(sys.argv[2]), float(sys.argv[3]), sys.argv[4:]
+json.dump({"passes": [{"rows_per_sec": float(p)} for p in passes]},
+          open(os.path.join(d, "equiv-scan-bench.json"), "w"))
+json.dump({"aggregate_rows_per_s": w, "attribution_shortfall_max_frac": sf},
+          open(os.path.join(d, "equiv-worker-window.json"), "w"))
+EOF
+}
+
+# POSITIVE control, and it is the COMMITTED RUN: the exact figures published in
+# ../smoke/equivalence.md (bench passes 366,638 / 361,779 / 358,983; worker
+# 356,763; shortfall 0.0639%). Residual -1.32% against the bench's own 2.1%
+# spread — inside it, so the control must PASS and print VERDICT: EQUIVALENT.
+plant_equiv "$TMP/eq-good" 356763 0.000639 366638 361779 358983
+expect_ok "equivalence: the committed run's residual is within the bench spread" \
+  python3 "$HERE/derive.py" --equivalence "$TMP/eq-good"
+if python3 "$HERE/derive.py" --equivalence "$TMP/eq-good" | grep -q '\*\*VERDICT: EQUIVALENT\.\*\*'; then
+  echo "ok    [equivalence verdict text] the passing run states its verdict"; PASS=$((PASS+1))
+else
+  echo "FAIL  [equivalence verdict text] a passing run did not print VERDICT: EQUIVALENT"
+  FAIL=$((FAIL+1))
+fi
+
+# THE ONE IT COULD NOT SEE BEFORE: a worker 20% slower than the bench, with the
+# same 2.1% bench spread. The pre-fix code printed this and exited 0.
+plant_equiv "$TMP/eq-slow" 289423 0.000639 366638 361779 358983
+expect_guard_fail EQUIV_DIVERGENCE \
+  python3 "$HERE/derive.py" --equivalence "$TMP/eq-slow"
+# The OTHER direction is a divergence too: a worker 15% FASTER than the arm it
+# claims to be is not the same code path either.
+plant_equiv "$TMP/eq-fast" 416046 0.000639 366638 361779 358983
+expect_guard_fail EQUIV_DIVERGENCE \
+  python3 "$HERE/derive.py" --equivalence "$TMP/eq-fast"
+# JUST OUTSIDE the bound: -2.5% residual against a 2.1% spread. The bound is the
+# measured spread, so a near-miss must refuse rather than round into a pass.
+plant_equiv "$TMP/eq-edge" 352759 0.0 366638 361779 358983
+expect_guard_fail EQUIV_DIVERGENCE \
+  python3 "$HERE/derive.py" --equivalence "$TMP/eq-edge"
+# THE SHORTFALL IS ADDED BACK, not ignored: the same raw delta that refuses above
+# passes once the harness's known-low bias accounts for the part of it that is
+# instrument, not engine.
+plant_equiv "$TMP/eq-sf" 352759 0.0056 366638 361779 358983
+expect_ok "equivalence: a near-miss inside the bound once the known-low bias is added back" \
+  python3 "$HERE/derive.py" --equivalence "$TMP/eq-sf"
+
+# AN UNMEASURED BOUND CANNOT LICENSE A PASS: one bench pass measures no spread.
+plant_equiv "$TMP/eq-1pass" 356763 0.000639 361779
+expect_guard_fail EQUIV_NO_SPREAD \
+  python3 "$HERE/derive.py" --equivalence "$TMP/eq-1pass"
+
 # ------------------------------------- STRUCTURAL: process-lifecycle safety ---
 # Asks WHERE a spawn is, not what it looks like, so a new one added anywhere
 # outside a cleanup guarantee fails however it is written. Two consecutive review

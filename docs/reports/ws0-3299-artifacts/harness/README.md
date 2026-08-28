@@ -161,8 +161,21 @@ and a steady-state loop.
 That claim is not left as a comment. `sweep.sh --equivalence` runs
 `ws0-scan-bench --passes 3` and this worker at S=1 **on the same physical core,
 in the same session, over the same bytes**, and `derive.py` prints both rates and
-their delta. A large divergence means they are not the same code path and the S=1
-point is not comparable to the existing rig's.
+their delta.
+
+**And it DECIDES.** The residual — the delta after adding back the harness's
+known-low attribution bias — is compared against the bench arm's OWN measured
+pass-to-pass spread in that same session, and `derive.py --equivalence` exits
+non-zero with `GUARD-FAIL EQUIV_DIVERGENCE` when it exceeds it, aborting
+`sweep.sh` before a single sweep point is measured. Until this was fixed the
+control PRINTED the residual and then asserted, unconditionally and in prose,
+that it was inside the spread — so a severely divergent worker would have passed
+a control that could not fail, and its points would have been published as
+comparable to the rig's. The bound is MEASURED rather than chosen (fewer than two
+bench passes measures no spread, and an unmeasured bound refuses rather than
+passes), because the noise floor of the arm being compared against is the only
+non-arbitrary threshold available. The committed run:
+`../smoke/equivalence.md`.
 
 **The crate is deliberately OUTSIDE the repo workspace.** Its `Cargo.toml`
 carries its own `[workspace]` table, so neither `scripts/agent-gate.sh` nor a

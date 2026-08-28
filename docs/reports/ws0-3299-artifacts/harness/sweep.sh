@@ -145,7 +145,8 @@ WORKER_BIN="$WORKER_TARGET/release/ws0-3299-scan-worker"
 # --- equivalence control: this worker vs the rig's ws0-scan-bench, S=1 ---------
 # The worker claims to drive the SAME code path as the rig's bare-scan arm. That
 # claim is MEASURED here rather than asserted in a comment: both are run on the
-# same single physical core, in the same session, over the same bytes.
+# same single physical core, in the same session, over the same bytes — and the
+# comparison is DECIDED against the bench's own measured spread, not narrated.
 if [[ "$EQUIVALENCE" == 1 ]]; then
   BENCH="$REPO/target/release/ws0-scan-bench"
   [[ -x "$BENCH" ]] || { echo "FATAL: $BENCH not built (cargo build --release -p ws0-corpus-gen)" >&2; exit 2; }
@@ -167,7 +168,15 @@ PY
     > "$RESULTS/equiv-worker.json"
   python3 "$GUARDS" perf-csv --csv "$RESULTS/equiv-worker/perf.csv" --events "$EVENTS"
   python3 "$GUARDS" window --repdir "$RESULTS/equiv-worker" > "$RESULTS/equiv-worker-window.json"
-  python3 "$HERE/derive.py" --equivalence "$RESULTS"
+  # This DECIDES. derive.py exits non-zero (GUARD-FAIL EQUIV_DIVERGENCE) when the
+  # residual exceeds the bench arm's own measured pass-to-pass spread, so a
+  # divergent worker stops the campaign here instead of having its points
+  # published as comparable to the rig's.
+  python3 "$HERE/derive.py" --equivalence "$RESULTS" \
+    || { echo "FATAL: equivalence control REFUSED (see GUARD-FAIL above). The worker does" >&2
+         echo "  not agree with ws0-scan-bench within the bench's own spread; its S-sweep" >&2
+         echo "  points are NOT comparable to the #3096/#3272 rig's. Do not publish them." >&2
+         exit 3; }
   exit 0
 fi
 

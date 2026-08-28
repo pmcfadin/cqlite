@@ -564,6 +564,19 @@ def emit_equivalence(results):
     bench's own pass-to-pass spread and the worker's attribution shortfall are
     both printed, so a reader can see how much of any gap those two account for
     and how much is unexplained.
+
+    AND IT DECIDES. This control used to PRINT the residual and then state, in
+    prose and unconditionally, that it was "inside the bench's own single-run
+    spread" — with exit 0 whatever the numbers were. A control that cannot fail
+    is not a control: a severely divergent worker would have passed it and its
+    S-sweep points would have been published as comparable to the rig's. So the
+    residual is now COMPARED against the bench's own measured pass-to-pass spread
+    and the comparison decides the exit status (`GUARD-FAIL EQUIV_DIVERGENCE`).
+
+    The bound is the bench arm's OWN spread, measured in the same session — not a
+    constant chosen here — because that is the noise floor of the thing being
+    compared against. Fewer than two passes measures no spread at all, and an
+    unmeasured bound yields a REFUSAL, not a pass.
     """
     with open(os.path.join(results, "equiv-scan-bench.json")) as fh:
         bench = json.load(fh)
@@ -574,6 +587,21 @@ def emit_equivalence(results):
     worker_rps = worker["aggregate_rows_per_s"]
     shortfall = worker["attribution_shortfall_max_frac"]
     delta = (worker_rps - bench_rps) / bench_rps
+    # The harness's attribution shortfall is a KNOWN-LOW bias on the worker arm
+    # (rows are counted only between progress records the workers emitted), so it
+    # is added back before the residual is judged.
+    residual = delta + shortfall
+    # THE BOUND IS MEASURED, NOT CHOSEN: the bench arm's own pass-to-pass spread
+    # within this same session. With fewer than two passes there is no spread to
+    # measure, and a bound that was never measured cannot license a pass.
+    if len(passes) < 2:
+        guards.fail(
+            "EQUIV_NO_SPREAD",
+            f"ws0-scan-bench reported {len(passes)} pass(es); at least 2 are needed to "
+            f"measure the pass-to-pass spread this control judges the residual against. "
+            f"Re-run the bench arm with --passes 3 (the protocol's value)."
+        )
+    bound = spread_pct(passes) / 100.0
 
     print("## Equivalence control — #3299 worker vs the rig's `ws0-scan-bench`\n")
     print("Same physical core, same session, same bytes.\n")
@@ -591,12 +619,27 @@ def emit_equivalence(results):
           f"and the worker's figure sits at the bottom of that range — consistent with the "
           f"worker measuring continuous steady state while a 3-pass median is weighted "
           f"toward the earliest, fastest pass;")
-    print(f"- residual after the shortfall: **{delta + shortfall:+.2%}**, which is inside the "
-          f"bench's own single-run spread and is therefore not evidence of a different code "
-          f"path.\n")
-    print("A divergence LARGE against that spread — in either direction — would mean the two "
-          "are not the same code path and the S=1 point is not comparable to the existing "
-          "rig's. This run does not show one.\n")
+    print(f"- residual after the shortfall: **{residual:+.2%}**, against the bench's own "
+          f"measured pass-to-pass spread of **{bound:.1%}**.\n")
+    if abs(residual) > bound:
+        print(f"**VERDICT: DIVERGENT.** |residual| **{abs(residual):.2%}** EXCEEDS that "
+              f"spread — the two arms are not demonstrably the same code path and the "
+              f"S-sweep points are not comparable to the rig's.\n")
+        guards.fail(
+            "EQUIV_DIVERGENCE",
+            f"worker {worker_rps:.0f} rows/s vs ws0-scan-bench {bench_rps:.0f} rows/s: "
+            f"residual {residual:+.4%} after the harness's known-low attribution bias "
+            f"({shortfall:+.4%}) EXCEEDS the bench's own measured pass-to-pass spread of "
+            f"{bound:.4%}. The two arms are not demonstrably driving the same code path, so "
+            f"the S-sweep points may NOT be published as comparable to the #3096/#3272 rig's."
+        )
+    print(f"**VERDICT: EQUIVALENT.** |residual| **{abs(residual):.2%}** is within that "
+          f"spread, so this run is not evidence of a different code path.\n")
+    print("This is a DECIDED comparison, not a remark: `derive.py --equivalence` exits "
+          "non-zero with `GUARD-FAIL EQUIV_DIVERGENCE` when the residual exceeds the bench's "
+          "own spread. A divergence LARGE against it, in either direction, would mean the two "
+          "are not the same code path and the S=1 point would not be comparable to the "
+          "existing rig's.\n")
 
 
 def main():
