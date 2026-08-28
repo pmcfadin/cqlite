@@ -62,11 +62,29 @@ The census SHALL be partitioned into a CODE subset and a non-code subset by the 
 changed), while `code-free:` is decided by the non-code count equalling the total and `prompt-content:` is
 asserted over the CODE subset alone.
 
+The census range's BASE SHALL be the **MERGE-BASE** of the base ref and HEAD, resolved ONCE and reused:
+`<base>...HEAD` is by definition `merge-base(<base>, HEAD)..HEAD`, so the base ref's TIP is NOT the base of
+the range under review and SHALL NOT be used as one. The wrapper SHALL carry the two as SEPARATE named
+values — the range base (used by the census, by `sha-assert:` and by the absence-waiver scope) and the base
+ref's tip (used only where the tip itself is the subject, i.e. the ROOT-checkout signature in
+`sha-assert:`) — and the census diff SHALL be pinned to the resolved range base, so one read of a moving
+mirror ref cannot leave the census measuring one range while the assert expects another.
+
 An unmeasurable census SHALL fail closed and SHALL be DISTINGUISHABLE from an empty one:
-`FAIL (base '<ref>' unresolvable)` when the base ref does not resolve to a commit, and
-`FAIL (git diff failed)` when the diff command itself exits non-zero. Neither SHALL be aliased to
-`FAIL (empty census)` / `NOTHING-TO-REVIEW`, because "we could not tell" is not "there is nothing to
-review". The wrapper SHALL NOT fetch on the caller's behalf to repair an unresolvable base.
+`FAIL (base '<ref>' unresolvable)` when the base ref does not resolve to a commit,
+`FAIL (no merge-base between '<ref>' and HEAD)` when the two have no common ancestor,
+`FAIL (merge-base of '<ref>' and HEAD unusable)` when the merge-base command succeeds without yielding
+exactly one 40-hex sha, and `FAIL (git diff failed)` when the diff command itself exits non-zero. None
+SHALL be aliased to `FAIL (empty census)` / `NOTHING-TO-REVIEW`, because "we could not tell" is not "there
+is nothing to review". An unresolvable merge-base SHALL NOT be degraded to the base ref's tip or to an
+empty value — a permissive branch here SHALL be keyed on the AFFIRMATIVE value (one 40-hex sha), never on
+the absence of a non-zero exit. The wrapper SHALL NOT fetch on the caller's behalf to repair an
+unresolvable base.
+
+#### Scenario: An unresolvable merge-base fails closed before anything is enqueued
+- **GIVEN** a repository whose base ref and HEAD have NO common ancestor (unrelated histories)
+- **WHEN** the wrapper computes the census
+- **THEN** `census-check:` reads `FAIL (no merge-base between '<ref>' and HEAD)`, the message states that this is explicitly NOT `NOTHING-TO-REVIEW` and that the base is deliberately not degraded to the tip, no review is enqueued, and the terminal `RESULT:` is `FAIL`
 
 #### Scenario: An unresolvable base ref fails closed rather than reporting nothing to review
 - **GIVEN** a clone whose `origin/main` mirror ref does not resolve (a narrow fetch refspec that has never fetched it)
@@ -576,7 +594,10 @@ census base.
 
 The value set SHALL be:
 
-- `PASS` — range head == branch HEAD AND range base == the resolved base sha.
+- `PASS` — range head == branch HEAD AND range base == the resolved RANGE BASE, i.e. the MERGE-BASE of
+  the base ref and HEAD. It SHALL NOT be the base ref's TIP: the reviewed range is merge-base-relative, so
+  comparing its base endpoint against the tip made a CORRECT review FAIL deterministically for every branch
+  whose base ref had advanced since the branch point (issue #3392).
 - `FAIL (reviewed range does not match <base>...HEAD)` — either endpoint disagrees, with the message
   naming WHICH: a range BASE of git's empty-tree hash SHALL be named as the signature of the
   non-sanctioned two-positional form, and a range HEAD short of branch HEAD SHALL be named as a reviewed
@@ -587,8 +608,11 @@ The value set SHALL be:
   passes every path check while the earlier changes go unreviewed. The sanctioned invocation always
   records a range, so a single sha means something else ran.
 - `FAIL (reviewed-sha does not match head-sha)` — a single-commit record that is not branch HEAD;
-  attributed when it equals the base ref (the signature of `--branch` resolved against the ROOT checkout)
-  and otherwise named as matching neither endpoint.
+  attributed when it equals the base ref's TIP (the signature of `--branch` resolved against the ROOT
+  checkout, which enqueues that tip), attributed distinctly when it equals the MERGE-BASE (the branch point
+  itself, so every commit under review is a descendant of it), and otherwise named as matching neither
+  endpoint. Both equalities SHALL FAIL, and the message SHALL name WHICH one matched — when the branch is
+  not behind its base the two are the same commit and the message SHALL say so.
 - `FAIL (job record unavailable — reviewed range unverifiable)` — no `git_ref` after the bounded read.
   This SHALL FAIL rather than fall back to prose: for a RANGE review the stdout announcement names only
   the range BASE, so it cannot establish that branch HEAD was reviewed at all, and a fallback to it would
@@ -605,7 +629,7 @@ case-normalised before matching, both fields validated before use, and when seve
 present the LAST one SHALL be the effective enqueue with the multiplicity recorded as a NOTICE.
 
 #### Scenario: A matching range satisfies the assert
-- **WHEN** the job record's `git_ref` is `<base40>..<head40>` whose head equals branch HEAD and whose base equals the resolved base sha
+- **WHEN** the job record's `git_ref` is `<base40>..<head40>` whose head equals branch HEAD and whose base equals the resolved range base (the merge-base of the base ref and HEAD)
 - **THEN** `sha-assert:` reads `PASS` and `reviewed-sha:` reports the full `<base40>..<head40>` range beside `head-sha:`
 
 #### Scenario: A range whose endpoints do not match the census range fails closed
@@ -622,6 +646,16 @@ present the LAST one SHALL be the effective enqueue with the multiplicity record
 - **GIVEN** a worktree branch whose HEAD differs from its base `origin/main`
 - **WHEN** the job record reports the base ref as the reviewed commit
 - **THEN** the wrapper exits non-zero with `RESULT: FAIL`, and the message states that the reviewed sha equals the base ref, that NO branch change was reviewed, and that base-equality is the signature of a `--branch` review resolved against the ROOT checkout
+
+#### Scenario: A correct review of a branch whose base ref has advanced PASSes
+- **GIVEN** a branch whose HEAD is unchanged while its base ref has advanced past the branch point, so `merge-base(<base>, HEAD)` and `rev-parse <base>` are DIFFERENT commits
+- **WHEN** the job record's `git_ref` is `<merge-base>..<branch HEAD>` — the range roborev actually reviews
+- **THEN** `sha-assert:` reads `PASS`, `assert-base:` names the merge-base with the base ref's tip beside it, and the terminal `RESULT:` is `PASS`
+
+#### Scenario: With the base ref advanced, a tip-anchored range and a stale head still FAIL
+- **GIVEN** the same branch, whose base ref has advanced past the branch point
+- **WHEN** the job record's `git_ref` anchors the range at the base ref's TIP, or at git's empty tree, or reports a head short of the branch tip, or is a single sha equal to the tip or to the merge-base
+- **THEN** `sha-assert:` FAILs in every one of those cases with the endpoint-naming diagnostics, so the merge-base comparison is not a loosening of what the assert catches
 
 #### Scenario: An unavailable job record fails closed rather than falling back to the announcement
 - **GIVEN** a job whose record still carries no `git_ref` after the bounded read
@@ -827,12 +861,16 @@ reading `PASS` beside a `RESULT: FAIL` and cannot attribute the failure.
 The wrapper SHALL emit a single compact `==== ROBOREV REVIEW SUMMARY ====` block on every **VERDICT**
 exit path — a pass, any failed check, or an empty census — carrying one field per line, in a FIXED
 order that is part of the contract, under the greppable keys: `repo:`, `branch:`, `base:`, `head-sha:`,
-`reviewed-sha:`, `job:`, `model:`, `census:`, `tokens:`, `push-assert:`, `census-check:`, `code-free:`,
-`job-record:`, `sha-assert:`, `review-completed:`, `prompt-content:`,
+`reviewed-sha:`, `assert-base:`, `job:`, `model:`, `census:`, `tokens:`, `push-assert:`, `census-check:`,
+`code-free:`, `job-record:`, `sha-assert:`, `review-completed:`, `prompt-content:`,
 `vacuity-tier1:`, `vacuity-tier2:`, `findings:`, `roborev-exit:`, `log:`, and a terminal
-`RESULT: PASS|FAIL|NOTHING-TO-REVIEW` — **TWENTY-TWO keys in all**, counting the terminal `RESULT:`. Each
+`RESULT: PASS|FAIL|NOTHING-TO-REVIEW` — **TWENTY-THREE keys in all**, counting the terminal `RESULT:`. Each
 SHALL appear EXACTLY ONCE, and `code-free:` SHALL sit immediately after `census-check:`, mirroring its
 pre-enqueue evaluation order.
+`assert-base:` SHALL be INFORMATIONAL — outside the verdict scan and outside the affirmation backstop,
+exactly like `census:`, `tokens:` and `waiver:` — and SHALL state the sha the range assert compared against
+together with the base ref's TIP, so a reader of a pasted block can tell a merge-base from a ref tip
+instead of inferring which one `base:` meant (issue #3392).
 `reviewed-sha:` SHALL carry the reviewed RANGE `<base40>..<head40>` on a normal run (a single sha only
 when the record reports one, and `-` when it is unverifiable), so a reader SHALL NOT expect a bare sha
 there.
@@ -944,7 +982,11 @@ path (exit `0`) is likewise not a verdict and SHALL emit no block.
 
 #### Scenario: The block carries every per-check key in the contracted order
 - **WHEN** a review was enqueued and completed
-- **THEN** the block carries `repo:`, `branch:`, `base:`, `head-sha:`, `reviewed-sha:`, `job:`, `model:`, `census:`, `tokens:`, `push-assert:`, `census-check:`, `code-free:`, `job-record:`, `sha-assert:`, `review-completed:`, `prompt-content:`, `vacuity-tier1:`, `vacuity-tier2:`, `findings:`, `roborev-exit:` and `log:` in that order, ahead of the terminal `RESULT:` — twenty-two keys in all, each exactly once
+- **THEN** the block carries `repo:`, `branch:`, `base:`, `head-sha:`, `reviewed-sha:`, `assert-base:`, `job:`, `model:`, `census:`, `tokens:`, `push-assert:`, `census-check:`, `code-free:`, `job-record:`, `sha-assert:`, `review-completed:`, `prompt-content:`, `vacuity-tier1:`, `vacuity-tier2:`, `findings:`, `roborev-exit:` and `log:` in that order, ahead of the terminal `RESULT:` — twenty-three keys in all, each exactly once
+
+#### Scenario: The block states which base the range assert compared against
+- **WHEN** a normal run's block is read
+- **THEN** `assert-base:` carries the resolved range base (the merge-base of the base ref and HEAD) together with the base ref's tip, and it is informational — it appears in neither the verdict-grammar scan nor the affirmation backstop, so it can never make a run pass or fail on its own
 
 #### Scenario: An unreached check reads SKIP, never blank
 - **GIVEN** a run that fails at `push-assert:` before the census is classified
@@ -1161,8 +1203,9 @@ key, the exact-token verdict grammar (the value up to its first space, matched e
 SIX-key affirmation backstop and no per-key exemption, and the corrected `prompt-content:` values
 (an unretrievable prompt FAILS; there is no non-failing `UNAVAILABLE` for that key). Where doctrine
 documents the live probe it SHALL state the expectation in the RANGE form — the `reviewed-sha:` range's
-HEAD endpoint equals the worktree HEAD and its base equals the base ref — never as `reviewed-sha`
-equalling the worktree HEAD.
+HEAD endpoint equals the worktree HEAD and its base equals `git merge-base <base> HEAD` (NOT
+`git rev-parse <base>`, which is the ref's tip and equals the merge-base only while the branch is not
+behind — #3392) — never as `reviewed-sha` equalling the worktree HEAD.
 
 **Scenario attribution note (#3229).** The *Both AC6 doctrine surfaces carry all four rules* scenario
 below was authored as *Both **AC4** doctrine surfaces …* under #2964, where the doctrine criterion was
@@ -1207,7 +1250,7 @@ delete it as AC4 residue. The assertion is unchanged; only its criterion number 
 
 #### Scenario: The live-probe expectation is stated in the range form
 - **WHEN** the doctrine page's live worktree probe section is inspected
-- **THEN** it asks the reader to confirm the `reviewed-sha:` RANGE — its HEAD endpoint equal to the worktree branch HEAD and its base equal to the base ref — rather than a `reviewed-sha` equal to the worktree HEAD, which the range value can never satisfy
+- **THEN** it asks the reader to confirm the `reviewed-sha:` RANGE — its HEAD endpoint equal to the worktree branch HEAD and its base equal to `git merge-base <base> HEAD` — rather than a `reviewed-sha` equal to the worktree HEAD, which the range value can never satisfy
 
 #### Scenario: The mechanized-in-lite table lists the new guard
 - **WHEN** the `roborev-findings` page's table of classes mechanized in `--lite` is inspected
@@ -1222,7 +1265,7 @@ A regression check SHALL exercise the wrapper hermetically — using a stub `rob
 replays recorded real outputs, with no network, no live reviewer, no dataset corpus and no cargo — and
 SHALL assert that the wrapper:
 
-(a) FAILs when the reviewed sha equals the base ref, naming the base; (b) FAILs when the reviewed scope
+(a) FAILs when the reviewed sha equals the base ref — its tip and its merge-base with HEAD alike, each named distinctly; (b) FAILs when the reviewed scope
 does not match the census range at either endpoint; (c) FAILs a cleanliness vacuity claim against a
 non-empty code census — INCLUDING one whose sentence sits under a `## Summary` HEADING — and does NOT
 fail a findings-bearing or out-of-summary mention of the same phrase; (d) FAILs the vacuous token
@@ -1306,7 +1349,7 @@ because it is read as coverage. The suite's stub SHALL emit a VALID JSON job rec
 double quotes, so a quote-bearing prompt cannot degrade the record and mask the very comparison the case
 exists to pin.
 
-The check SHALL also pin the block's key ORDER — all twenty-two keys, each appearing EXACTLY ONCE, with
+The check SHALL also pin the block's key ORDER — all twenty-three keys, each appearing EXACTLY ONCE, with
 `code-free:` immediately after `census-check:` — the distinctness of its header from all three
 agent-gate summary headers, the usage-error path emitting no block, and hermeticity itself. It SHALL be
 registered in the agent gate's shell-tooling component set such that it runs in the fast `--lite` loop

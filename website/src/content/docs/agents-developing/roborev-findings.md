@@ -157,7 +157,13 @@ terminal `RESULT` — `NOTHING-TO-REVIEW` included — is a failed review round 
    is a stronger source than its human-readable prose — the same principle that moved the push assert
    off the local `origin/<branch>` mirror ref onto `git ls-remote`. A range that does not match, a
    **single-commit record even when it equals HEAD**, or a scope that *equals the base ref*, **aborts the
-   round**; base-equality is the signature of the
+   round**. The expected **range base is the MERGE-BASE** of `<base>` and HEAD, never the base ref's
+   **tip** — `<base>...HEAD` *is* `merge-base(<base>, HEAD)..HEAD`, and an assert that expected the tip
+   failed deterministically on a correct review of any branch whose `main` had advanced past its branch
+   point (#3392, misdiagnosed as a race twice). The tip is still read for the root-checkout signature
+   alone, and the block prints an informational
+   `assert-base: <merge-base> (merge-base of <base> and HEAD; <base> tip <sha>)`; the absence waiver's
+   `base=` field binds to that merge-base, so copy it from `assert-base:`. base-equality is the signature of the
    worktree bug below. Also push first — an unpushed implementation commit is itself an empty-diff
    cause, and the wrapper asserts the push and FAILs otherwise. Which fields are asserted is the
    wrapper's business — see its `--help`.
@@ -664,7 +670,9 @@ unreviewed code fleet-wide.
 The hermetic regression check cannot prove the real external binary honours `--repo`. From a real
 `issue-<N>-*` worktree whose commit is pushed, while the root checkout sits on `main`, run the wrapper and
 confirm the summary block's `sha-assert: PASS` beside a **`reviewed-sha:` RANGE** of the form
-`<base40>..<head40>` whose **HEAD endpoint is the worktree branch's HEAD** and whose base is `origin/main`.
+`<base40>..<head40>` whose **HEAD endpoint is the worktree branch's HEAD** and whose base is
+`git merge-base origin/main HEAD` — **not** `git rev-parse origin/main`, which is the ref's tip and equals
+the merge-base only while the branch is not behind (#3392). The block's `assert-base:` key names both.
 Because the sanctioned invocation reviews a range, `reviewed-sha` is **not** a bare sha — do not test it for
 equality with `head-sha`; compare the range's head endpoint. A `reviewed-sha` that is `origin/main` alone
 means the explicit `--repo` did not defeat the root-checkout resolution. It stays out of the gate because
