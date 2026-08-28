@@ -462,11 +462,19 @@ async fn exercise_read_surfaces(fx: &Fixture, mc: &testing::MetricsCapture) {
             partitions: 1,
         },
         fx,
-        // Bytes are counted per decompressed chunk; the point read serves its
-        // covering chunk from the resident chunk cache populated by the scans
-        // above, and a cache hit reads no Data.db bytes. So the point phase does
-        // not assert bytes — the cold scan phase does.
-        false,
+        // The point read DOES read Data.db, so its bytes are asserted (issue #1701,
+        // roborev round 8). The earlier version skipped this on the assumption that the
+        // point read would be served from the chunk cache the scans above populated —
+        // WRONG: `get_cached_data` keys the BIG point read in `NS_BIG_POINT`, which
+        // `data_access/mod.rs` documents as "disjoint from the chunk-index namespaces
+        // used by the windowed-scan and BTI sites". A disjoint namespace cannot hit
+        // those entries, so this read is COLD and a regression in the point-specific
+        // byte paths would have passed unnoticed behind the skipped assertion.
+        //
+        // (Unlike the windowed feed, this site consults the cache BEFORE the file read,
+        // so a genuine hit here really would read nothing — the defect was the
+        // namespace assumption, not the cache-hit semantics.)
+        true,
     );
 }
 
