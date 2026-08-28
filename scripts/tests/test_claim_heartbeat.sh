@@ -1545,6 +1545,103 @@ else
   bad "NON-VACUITY broken: the old-git fixture is not in the state TEST 53 assumes"
 fi
 
+# ===========================================================================
+echo "TEST 54: absence needs the INDEPENDENT probe to affirm it (round 15, Medium)"
+# ===========================================================================
+# Round 10 stopped the correlated pair (ps + /proc, hidden together by hidepid=2) from
+# declaring absence when the signal probe answered `denied`. But when the signal probe answers
+# `unknown` — a transient failure, or a message in a language it does not recognise — the pair
+# was alone again and could still establish absence: a false DEAD for a live supervisor.
+# Driven by a ps that hides the pid AND a kill whose failure message is unrecognisable.
+pp_body="$T/presence.sh"
+sed -n '/^signal_probe_class()/,/^}/p' "$HB" >"$pp_body"
+sed -n '/^process_presence()/,/^}/p' "$HB" >>"$pp_body"
+# shellcheck disable=SC1090
+. "$pp_body" 2>/dev/null || true
+if [ "$(type -t process_presence 2>/dev/null)" = "function" ]; then
+  ok "extracted process_presence + signal_probe_class from the shipped script"
+  (
+    # ps hides everything; kill fails with an unrecognisable message => signal probe unknown.
+    ps() { return 1; }
+    kill() {
+      echo "bash: kill: ($2) - Some condition nobody parsed" >&2
+      return 1
+    }
+    r="$(process_presence "$ABSENT_PID")"
+    [ "$r" = "unknown" ] && exit 0
+    echo "  (visibility-only absence returned '$r')" >&2
+    exit 1
+  )
+  if [ "$?" -eq 0 ]; then
+    ok "with the signal probe UNKNOWN, negative visibility probes alone yield 'unknown' — not 'absent'"
+  else
+    bad "visibility probes alone must not establish absence when the independent probe cannot"
+  fi
+  # NON-VACUITY: when the signal probe DOES affirm absence, the same inputs give 'absent', so
+  # the fix has not simply made absence unreachable.
+  (
+    ps() { return 1; }
+    kill() {
+      echo "bash: kill: ($2) - No such process" >&2
+      return 1
+    }
+    r="$(process_presence "$ABSENT_PID")"
+    [ "$r" = "absent" ] && exit 0
+    echo "  (affirmed absence returned '$r')" >&2
+    exit 1
+  )
+  if [ "$?" -eq 0 ]; then
+    ok "NON-VACUITY: with the signal probe affirming ESRCH, the same fixture IS 'absent' — absence is still reachable"
+  else
+    bad "NON-VACUITY broken: absence is unreachable even when the independent probe affirms it"
+  fi
+else
+  bad "could not load process_presence from the shipped script"
+fi
+
+# ===========================================================================
+echo "TEST 55: a SLOW ps cannot buy an ALIVE verdict (round 15, Medium)"
+# ===========================================================================
+# `start = now - elapsed` needs `now` and `elapsed` to name the same instant, and they cannot.
+# The first cut sampled `now` BEFORE running ps, so a slow ps shifted the computed start
+# BACKWARD — making a REUSED pid look like it predates the claim, a false ALIVE. The delay is
+# likeliest on exactly the exhausted hosts this command is for. The query is now bracketed and
+# the start is an INTERVAL; a verdict requires the whole interval to sit on one side.
+#
+# Driven by a ps that sleeps well past the tolerance before answering. The claim is stamped
+# NOW and the process reports elapsed=0, so without bracketing the delay pushes the computed
+# start before the claim ts and yields ALIVE.
+slowshim="$T/slowshim"
+mkdir -p "$slowshim"
+cat >"$slowshim/ps" <<'PSEOF'
+#!/usr/bin/env bash
+for a in "$@"; do
+  case "$a" in
+    stat=)   echo "S"; exit 0 ;;
+    etimes=) sleep 5; echo 0; exit 0 ;;   # 5s > the 2s tolerance
+  esac
+done
+exit 0
+PSEOF
+chmod +x "$slowshim/ps"
+craft_old_claim "$WORK" "slowPs" 3415 "$$" 0
+sp_out=$(cd "$WORK" && PATH="$slowshim:$PATH" HEARTBEAT_MACHINE=slowPs \
+  CLAIM_OPEN_PR_CMD="$NO_OPEN_PR" bash "$HB" dead-lanes 2>&1)
+if printf '%s\n' "$sp_out" | grep -E '^slowPs ' | grep -q 'UNKNOWN-IDENTITY' \
+  && ! printf '%s\n' "$sp_out" | grep -E '^slowPs ' | grep -q 'ALIVE'; then
+  ok "a ps slow enough to matter yields UNKNOWN-IDENTITY, not an ALIVE bought by measurement delay"
+else
+  bad "a slow ps must not produce ALIVE: out:
+$sp_out"
+fi
+# ...and the reported interval must actually be a RANGE, or the bracketing is cosmetic.
+if printf '%s\n' "$sp_out" | grep -E '^slowPs ' | grep -qE 'started somewhere in \[-?[0-9]+, -?[0-9]+\]s'; then
+  ok "the detail reports the start as an INTERVAL, so the measurement uncertainty is visible to the operator"
+else
+  bad "the identity detail must report the bracketed interval: $(printf '%s\n' "$sp_out" | grep -E '^slowPs ')"
+fi
+(cd "$WORK" && g push -q origin ":refs/machine-claims/slowPs" 2>/dev/null || true)
+
 echo
 echo "=== claim-heartbeat.sh: $PASS passed, $FAIL failed ==="
 [ "$FAIL" -eq 0 ]

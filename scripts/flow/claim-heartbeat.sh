@@ -610,27 +610,34 @@ cmd_should_reap() {
   return 0
 }
 
-# process_start_epoch <pid> — epoch seconds at which <pid> started, or EMPTY when it
-# cannot be determined. Empty is a THIRD answer and is never folded onto "consistent".
+# process_start_window <pid> — echo `<earliest> <latest>` epoch seconds bracketing when <pid>
+# started, or EMPTY when it cannot be determined. Empty is a THIRD answer and is never folded
+# onto "consistent".
 #
-# DERIVED FROM ELAPSED TIME, NOT A WALL-CLOCK STRING (roborev round 3, Medium). The
-# first cut read `ps -o lstart=` and parsed it with `date -u`, but `lstart` is LOCAL
-# wall time with no zone in it, so on any non-UTC host the epoch came out shifted by
-# the offset — MEASURED: the same lstart parses 19,800s apart between UTC and
-# Asia/Kolkata, which is far past PID_IDENTITY_SLACK_SECS and would falsely declare a
-# live supervisor DEAD-PID-REUSED (or mask a real recycle). Elapsed seconds carry no
-# timezone at all, so the whole class is gone rather than corrected.
-process_start_epoch() {
-  local pid="$1" secs now
-  now="$(date -u +%s)"
-  # `etimes` (elapsed SECONDS) is the direct form.
+# DERIVED FROM ELAPSED TIME, NOT A WALL-CLOCK STRING (roborev round 3, Medium). The first cut
+# read `ps -o lstart=` and parsed it with `date -u`, but `lstart` is LOCAL wall time with no
+# zone in it, so on any non-UTC host the epoch came out shifted by the offset — MEASURED: the
+# same lstart parses 19,800s apart between UTC and Asia/Kolkata, far past the tolerance, which
+# would falsely declare a live supervisor DEAD-PID-REUSED. Elapsed seconds carry no timezone at
+# all, so the whole class is gone rather than corrected.
+#
+# AN INTERVAL, NOT A POINT (roborev round 15, Medium). `start = now - elapsed` needs `now` and
+# `elapsed` to refer to the same instant, and they cannot: one is read before the other. The
+# first cut sampled `now` BEFORE running `ps`, so a slow `ps` shifted the computed start
+# BACKWARD — and a start that looks earlier than it is makes a REUSED pid look like it predates
+# the claim, i.e. a false ALIVE. That delay is most likely on exactly the resource-exhausted
+# hosts this command exists for. So the query is bracketed and both bounds are returned; the
+# caller must decide UNKNOWN when the interval straddles its decision boundary.
+process_start_window() {
+  local pid="$1" secs t0 t1
+  t0="$(date -u +%s)"
   secs="$(ps -o etimes= -p "$pid" 2>/dev/null | tr -d ' ')"
   case "$secs" in
     '' | *[!0-9]*) secs="" ;;
   esac
   if [ -z "$secs" ]; then
-    # Fall back to `etime` ([[DD-]HH:]MM:SS), which POSIX ps provides where `etimes`
-    # is absent. Still elapsed, still timezone-free.
+    # Fall back to `etime` ([[DD-]HH:]MM:SS), which POSIX ps provides where `etimes` is
+    # absent. Still elapsed, still timezone-free.
     local et d hms h m sec
     et="$(ps -o etime= -p "$pid" 2>/dev/null | tr -d ' ')"
     [ -n "$et" ] || return 0
@@ -648,7 +655,10 @@ process_start_epoch() {
     esac
     secs=$(( (10#$d * 86400) + (10#$h * 3600) + (10#$m * 60) + 10#$sec ))
   fi
-  printf '%s\n' "$((now - secs))"
+  t1="$(date -u +%s)"
+  # The elapsed reading was taken at some instant in [t0, t1], so the start lies in
+  # [t0 - secs, t1 - secs]. Earliest first.
+  printf '%s %s\n' "$((t0 - secs))" "$((t1 - secs))"
 }
 
 # ps_usable — exit 0 iff `ps` can be trusted to answer an existence question here.
@@ -724,7 +734,13 @@ process_presence() {
 
   if [ "$yes" -gt 0 ] && [ "$no" -eq 0 ]; then
     printf 'present\n'
-  elif [ "$yes" -eq 0 ] && [ "$no" -gt 0 ]; then
+  elif [ "$yes" -eq 0 ] && [ "$no" -gt 0 ] && [ "$sig" = absent ]; then
+    # ABSENCE REQUIRES THE INDEPENDENT PROBE TO SAY SO (roborev round 15, Medium). Round 10
+    # fixed the case where the signal probe answered `denied`, but when it answers `unknown`
+    # the only remaining voters are `ps` and `/proc` — which are BOTH visibility probes,
+    # hidden together by `hidepid=2`. They can then be unanimously and confidently wrong
+    # about a live process, and this function would call it absent: a false DEAD. So a
+    # declaration of absence needs the one non-visibility probe to have affirmed it.
     printf 'absent\n'
   else
     printf 'unknown\n'
@@ -965,21 +981,28 @@ cmd_dead_lanes() {
                 # dead lane. The claim's OWN ts settles it with no change to what `stamp`
                 # records: a process that started AFTER the claim was stamped cannot be the
                 # process that stamped it.
-                local pstart cts
-                pstart="$(process_start_epoch "$pid")"
+                local win pstart_min pstart_max cts
+                win="$(process_start_window "$pid")"
+                pstart_min="${win%% *}"
+                pstart_max="${win##* }"
                 cts=""
                 [ -n "$ts" ] && cts="$(ts_to_epoch "$ts" 2>/dev/null || true)"
-                if [ -z "$pstart" ] || [ -z "$cts" ]; then
+                if [ -z "$win" ] || [ -z "$cts" ]; then
                   # NOT "ALIVE" (round 3, Medium): an annotation is not a substitute for an
                   # exit code — nobody greps the annotation.
                   verdict="UNKNOWN-IDENTITY"
                   detail="pid ${pid} exists but its start time or the claim ts could not be read — pid reuse NOT excluded"
                   unreadable=$((unreadable + 1))
-                elif [ "$pstart" -gt "$((cts + PID_IDENTITY_SLACK_SECS))" ]; then
+                elif [ "$pstart_min" -gt "$((cts + PID_IDENTITY_SLACK_SECS))" ]; then
+                  # The EARLIEST the process can have started is still after the claim, so
+                  # the whole interval is on the reuse side.
                   verdict="DEAD-PID-REUSED"
                   dead=$((dead + 1))
-                  detail="pid ${pid} started $((pstart - cts))s AFTER the claim was stamped — a different process now holds it; open-pr=$(open_pr_state "$issue")"
-                elif [ "$pstart" -lt "$((cts - PID_IDENTITY_SLACK_SECS))" ]; then
+                  detail="pid ${pid} started at least $((pstart_min - cts))s AFTER the claim was stamped — a different process now holds it; open-pr=$(open_pr_state "$issue")"
+                elif [ "$pstart_max" -lt "$((cts - PID_IDENTITY_SLACK_SECS))" ]; then
+                  # The LATEST it can have started is still before the claim, so the whole
+                  # interval predates it. Using the far bound in each direction is what makes
+                  # the measurement delay unable to buy a verdict either way.
                   verdict="ALIVE"
                   detail="identity=verified (start predates the claim ts by more than the ${PID_IDENTITY_SLACK_SECS}s tolerance)"
                 else
@@ -987,7 +1010,7 @@ cmd_dead_lanes() {
                   # Within +/- tolerance is exactly where rounding could have produced either
                   # ordering, so it is not evidence of identity and cannot claim health.
                   verdict="UNKNOWN-IDENTITY"
-                  detail="pid ${pid} started $((pstart - cts))s relative to the claim ts, inside the +/-${PID_IDENTITY_SLACK_SECS}s rounding band — identity NOT established"
+                  detail="pid ${pid} started somewhere in [$((pstart_min - cts)), $((pstart_max - cts))]s relative to the claim ts, straddling the +/-${PID_IDENTITY_SLACK_SECS}s decision boundary — identity NOT established"
                   unreadable=$((unreadable + 1))
                 fi
                 ;;
