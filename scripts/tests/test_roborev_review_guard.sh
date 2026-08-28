@@ -32,6 +32,17 @@ set -uo pipefail
 
 SCRIPT_DIR=$(cd "$(dirname "$0")" && pwd)
 WRAPPER="$SCRIPT_DIR/../flow/roborev-review.sh"
+# THE SAME PATH, NEVER REASSIGNED (#3367). `WRAPPER` is deliberately repointed at a scratch
+# copy by the gate-mock cases (~2251/~2354) and restored after, so ANY check that READS the
+# wrapper as a doctrine SUBJECT is order-dependent if it reads `WRAPPER`: its verdict then
+# depends on a global set ~2000 lines away, which is what made the classifier-GONE assert
+# flip between runs at an unchanged tree. Structural scans read THIS variable; only the
+# cases that EXECUTE or COPY the wrapper in their own context keep using `WRAPPER`.
+#
+# Note the direction of the hazard now: with the `--help` prose exemption in place, a scan
+# that lands on the scratch copy finds nothing and reports CLEAN — a false pass, which is
+# worse than the false fail that surfaced the bug.
+WRAPPER_REAL="$SCRIPT_DIR/../flow/roborev-review.sh"
 # The structured waiver scanner the wrapper delegates to (#3312 job 26). Defined HERE, beside
 # WRAPPER, because run_wrapper passes it on every call — the structural section is too late.
 SCAN_TOOL="$SCRIPT_DIR/../flow/roborev-waiver-scan.py"
@@ -2240,7 +2251,7 @@ reset_stub
 # CHANGED the file before its run is believed.
 _gm_dir="$tmp/grammar-mutant"
 mkdir -p "$_gm_dir"
-cp "$WRAPPER" "$SCRIPT_DIR/../flow/roborev-review-oracles.sh" \
+cp "$WRAPPER_REAL" "$SCRIPT_DIR/../flow/roborev-review-oracles.sh" \
   "$SCRIPT_DIR/../flow/roborev-review-checks.sh" "$_gm_dir/"
 if [ -f "$SCRIPT_DIR/../flow/roborev-job-facts.py" ]; then
   cp "$SCRIPT_DIR/../flow/roborev-job-facts.py" "$_gm_dir/"
@@ -3466,7 +3477,7 @@ reset_stub
 work=$(make_fixture case_w3 pushed)
 lonely_checks="$tmp/lonely-checks"
 mkdir -p "$lonely_checks"
-cp "$WRAPPER" "$lonely_checks/roborev-review.sh"
+cp "$WRAPPER_REAL" "$lonely_checks/roborev-review.sh"
 cp "$SCRIPT_DIR/../flow/roborev-review-oracles.sh" "$lonely_checks/"
 cp "$SCRIPT_DIR/../flow/roborev-job-facts.py" "$lonely_checks/" 2>/dev/null || true
 CASE_N=$((CASE_N + 1))
@@ -3488,7 +3499,7 @@ reset_stub
 work=$(make_fixture case_w4 pushed)
 trunc_checks="$tmp/trunc-checks"
 mkdir -p "$trunc_checks"
-cp "$WRAPPER" "$trunc_checks/roborev-review.sh"
+cp "$WRAPPER_REAL" "$trunc_checks/roborev-review.sh"
 cp "$SCRIPT_DIR/../flow/roborev-review-oracles.sh" "$trunc_checks/"
 cp "$SCRIPT_DIR/../flow/roborev-job-facts.py" "$trunc_checks/" 2>/dev/null || true
 printf '# corrupt: defines nothing\n' >"$trunc_checks/roborev-review-checks.sh"
@@ -3533,7 +3544,7 @@ reset_stub
 work=$(make_fixture case_w pushed)
 lonely="$tmp/lonely"
 mkdir -p "$lonely"
-cp "$WRAPPER" "$lonely/roborev-review.sh"
+cp "$WRAPPER_REAL" "$lonely/roborev-review.sh"
 cp "$SCRIPT_DIR/../flow/roborev-job-facts.py" "$lonely/" 2>/dev/null || true
 CASE_N=$((CASE_N + 1))
 OUT="$tmp/out-$CASE_N.txt"
@@ -3554,7 +3565,7 @@ reset_stub
 work=$(make_fixture case_w2 pushed)
 truncated="$tmp/truncated"
 mkdir -p "$truncated"
-cp "$WRAPPER" "$truncated/roborev-review.sh"
+cp "$WRAPPER_REAL" "$truncated/roborev-review.sh"
 printf '# corrupt: defines nothing\n' >"$truncated/roborev-review-oracles.sh"
 CASE_N=$((CASE_N + 1))
 OUT="$tmp/out-$CASE_N.txt"
@@ -4138,7 +4149,7 @@ printf '== (wv31) JOB 26/27: an ABSENT scanner is UNAVAILABLE, never a text fall
 reset_stub
 noscan="$tmp/flow-without-scanner"
 mkdir -p "$noscan"
-cp "$WRAPPER" "$noscan/roborev-review.sh"
+cp "$WRAPPER_REAL" "$noscan/roborev-review.sh"
 cp "$SCRIPT_DIR/../flow/roborev-review-oracles.sh" "$noscan/"
 cp "$SCRIPT_DIR/../flow/roborev-review-checks.sh" "$noscan/"
 cp "$SCRIPT_DIR/../flow/roborev-job-facts.py" "$noscan/"
@@ -4397,7 +4408,7 @@ fi
 # The heredoc must stay backtick-free, which is the pre-existing convention in this body: the
 # delimiter cannot be quoted (the body interpolates $PROGNAME and friends), so there is no escaping
 # strategy to get right — only the absence of backticks.
-_help_body=$(awk '/^usage\(\) \{/ { inu = 1 } inu { print } inu && /^EOF$/ { exit }' "$WRAPPER")
+_help_body=$(awk '/^usage\(\) \{/ { inu = 1 } inu { print } inu && /^EOF$/ { exit }' "$WRAPPER_REAL")
 case "$_help_body" in
   '') bad '--help: the usage heredoc could not be extracted, so its backtick-freedom was not checked' ;;
   *'`'*) bad '--help: the usage heredoc contains a BACKTICK. The delimiter is unquoted (so $PROGNAME interpolates), which makes a backtick command substitution: it prints an error to stderr AND deletes the term from the rendered help. Use plain text — the surrounding help prose names flags and keys unquoted.' ;;
@@ -4515,7 +4526,7 @@ if [ "${_unq_defs:-0}" -eq 1 ]; then
 else
   bad "structural: expected exactly 1 definition of roborev_unquote_path, found ${_unq_defs:-0}"
 fi
-_unq_callers=$(grep -nE '(^|[^#])roborev_unquote_path ' "$ORACLES" "$CHECKS_FILE" "$WRAPPER" \
+_unq_callers=$(grep -nE '(^|[^#])roborev_unquote_path ' "$ORACLES" "$CHECKS_FILE" "$WRAPPER_REAL" \
   | grep -v '^[^:]*:[0-9]*: *#' || true)
 _unq_caller_files=$(printf '%s\n' "$_unq_callers" | sed -n 's|^\([^:]*\):.*|\1|p' | sort -u | wc -l | tr -d '[:space:]')
 if [ "${_unq_caller_files:-0}" -eq 1 ] && printf '%s' "$_unq_callers" | grep -qF 'roborev-review-oracles.sh'; then
@@ -4673,13 +4684,75 @@ esac
 # measurement the wrapper no longer makes.
 _skeys=""
 for _sk in snapshot-path snapshot-containment snapshot-expected; do
-  grep -qF "emit_kv '$_sk'" "$WRAPPER" && _skeys="$_skeys $_sk"
+  grep -qF "emit_kv '$_sk'" "$WRAPPER_REAL" && _skeys="$_skeys $_sk"
 done
 if [ -z "$_skeys" ]; then
   ok 'structural: the block emits no snapshot-* keys (nothing is classified, so there is nothing to record about a mode)'
 else
   bad "structural: the block still emits —$_skeys. Those keys described the retired classifier's output (#3312 ruling (4))"
 fi
+# ===== THE DOCTRINE SCANS MUST NOT READ A MUTABLE GLOBAL (#3367) =====
+# The classifier-GONE assert above FAILed once on a branch whose diff touched no `scripts/` file at
+# all, then passed 4/4 at the same commit and an unchanged tree. Cause: it read `"$WRAPPER"`, which
+# the gate-mock cases repoint at a scratch copy ~2000 lines earlier and restore afterwards. A check
+# whose SUBJECT is chosen by a global another case mutates is order-dependent by construction.
+#
+# Two pins, because fixing the call sites without pinning them just waits for the next one:
+#   (1) STRUCTURAL — no text-scanning read of `$WRAPPER` may exist in this file. Invocations
+#       (`bash "$WRAPPER"`) are exempt: those cases mean the copy in their own context.
+#   (2) BEHAVIOURAL — with `WRAPPER` deliberately poisoned, the scan's verdict must not move, and
+#       the same scan against the poisoned path MUST move. Without the second half, (2) would pass
+#       for a scan that reads nothing at all.
+_wr_scan_leaks=$(grep -nE '(grep|awk|sed|cp|wc|head|tail)[^|]*"\$WRAPPER"' "$TEST_SELF" \
+  | grep -v 'bash "\$WRAPPER"' || true)
+if [ -z "$_wr_scan_leaks" ]; then
+  ok 'structural (#3367): no doctrine scan reads the mutable $WRAPPER — every text scan uses $WRAPPER_REAL, so no verdict depends on which case ran last'
+else
+  bad "structural (#3367): a doctrine scan still reads the mutable \$WRAPPER, so its verdict depends on gate-mock ordering — $(printf '%s' "$_wr_scan_leaks" | head -3 | tr '\n' ';')"
+fi
+# ...and `WRAPPER_REAL` must never be reassigned, or it is just `WRAPPER` with a longer name.
+_wr_real_writes=$(grep -cE '^[[:space:]]*WRAPPER_REAL=' "$TEST_SELF")
+if [ "$_wr_real_writes" -eq 1 ]; then
+  ok 'structural (#3367): WRAPPER_REAL is assigned exactly once, so it cannot acquire the order dependence it exists to avoid'
+else
+  bad "structural (#3367): WRAPPER_REAL is assigned $_wr_real_writes times; it must be written exactly once"
+fi
+# BEHAVIOURAL: poison `WRAPPER` and re-run the classifier scan both ways.
+_wr_poison_dir="$tmp/wrapper-poison"
+mkdir -p "$_wr_poison_dir"
+{
+  printf '%s\n' '#!/usr/bin/env bash'
+  # An EXECUTABLE reintroduction, not prose: an assignment the awk filter cannot exempt.
+  printf '%s\n' 'ROBOREV_DIFF_SOURCE_STATE="mixed-delivery"'
+} >"$_wr_poison_dir/roborev-review.sh"
+_wr_saved="$WRAPPER"
+WRAPPER="$_wr_poison_dir/roborev-review.sh"
+_cls_via_real=$(awk '
+  FILENAME ~ /roborev-review\.sh$/ && /^usage\(\) \{/ { in_usage = 1 }
+  in_usage && /^EOF$/ { in_usage = 0; next }
+  in_usage { next }
+  /^[[:space:]]*#/ { next }
+  { print }
+' "$ORACLES" "$CHECKS_FILE" "$WRAPPER_REAL" 2>/dev/null || true)
+_cls_via_mutable=$(awk '
+  FILENAME ~ /roborev-review\.sh$/ && /^usage\(\) \{/ { in_usage = 1 }
+  in_usage && /^EOF$/ { in_usage = 0; next }
+  in_usage { next }
+  /^[[:space:]]*#/ { next }
+  { print }
+' "$ORACLES" "$CHECKS_FILE" "$WRAPPER" 2>/dev/null || true)
+WRAPPER="$_wr_saved"
+_wr_real_hit=no; _wr_mut_hit=no
+case "$_cls_via_real"    in *'mixed-delivery'*) _wr_real_hit=yes ;; esac
+case "$_cls_via_mutable" in *'mixed-delivery'*) _wr_mut_hit=yes ;; esac
+if [ "$_wr_real_hit" = no ] && [ "$_wr_mut_hit" = yes ]; then
+  ok 'behavioural (#3367): with $WRAPPER poisoned, the scan via $WRAPPER_REAL is unaffected while the same scan via $WRAPPER flags it — the immutable path is what makes the verdict stable, and the scan is demonstrably not blind'
+elif [ "$_wr_mut_hit" = no ]; then
+  bad 'behavioural (#3367): the poisoned wrapper was NOT flagged even when scanned directly, so this case cannot show anything about path stability (the fixture or the filter is wrong)'
+else
+  bad 'behavioural (#3367): the scan via $WRAPPER_REAL picked up the poisoned copy, so it is still reading a mutable path'
+fi
+
 # ===== ABSENCE IS A FAIL, AND THE WAIVER IS THE ONLY WAY PAST IT =====
 _pc_start=$(grep -nE '^roborev_check_prompt_content\(\) \{' "$CHECKS_FILE" | head -1 | cut -d: -f1)
 _pc_end=$(awk -v s="${_pc_start:-0}" 'NR>s && /^}/ {print NR; exit}' "$CHECKS_FILE")
@@ -4695,15 +4768,15 @@ fi
 # THE WAIVER TOKEN IS DISTINCT FROM `PASS`, so no reader grepping `prompt-content: PASS` counts a waived
 # run as a certification — the false-assurance shape this whole issue is about.
 if ! grep -qE 'PROMPT_CONTENT="PASS \(.*[Ww]aive' "$CHECKS_FILE" \
-  && grep -qF 'WAIVED|SKIP|NOTICE' "$WRAPPER"; then
+  && grep -qF 'WAIVED|SKIP|NOTICE' "$WRAPPER_REAL"; then
   ok 'structural: a waived absence reports the DISTINCT token WAIVED, and the grammar recognises it'
 else
   bad 'structural: a waived absence is spelled as a PASS, or WAIVED is outside the block grammar — either way a reader cannot tell a waived run from a certified one (#3312 ruling (4))'
 fi
 # THE AFFIRMATION BACKSTOP ADMITS `WAIVED` ONLY ON COMPLETE PROVENANCE, and gates on the provenance
 # rather than on which key carries it: a key-scoped exemption is the shape the ruling deleted.
-_aff_start=$(grep -nF 'for keyed in "push-assert=$PUSH_ASSERT"' "$WRAPPER" | head -1 | cut -d: -f1)
-_aff_body=$(sed -n "${_aff_start:-1},$(( ${_aff_start:-1} + 30 ))p" "$WRAPPER")
+_aff_start=$(grep -nF 'for keyed in "push-assert=$PUSH_ASSERT"' "$WRAPPER_REAL" | head -1 | cut -d: -f1)
+_aff_body=$(sed -n "${_aff_start:-1},$(( ${_aff_start:-1} + 30 ))p" "$WRAPPER_REAL")
 if printf '%s\n' "$_aff_body" | grep -qF 'ROBOREV_WAIVER_SCOPE:-}" = "base=${RANGE_BASE_SHA:-} head=${HEAD_SHA:-} job=${JOB:-}"' \
   && printf '%s\n' "$_aff_body" | grep -qF 'ROBOREV_WAIVER_STATE:-}" = "granted"' \
   && ! printf '%s\n' "$_aff_body" | grep -qF 'det_key" = "prompt-content"'; then
@@ -4921,9 +4994,9 @@ printf '== structural: NO summary value or DETAILS line is emitted un-neutralise
 # per-site escape is a list to keep complete — the next value to grow a path interpolation
 # would silently reopen the hole — so the boundary is `emit_kv` + `finish`, and it is
 # asserted against the emitting statements themselves.
-_em_start=$(grep -nE '^emit_summary\(\) \{' "$WRAPPER" | head -1 | cut -d: -f1)
+_em_start=$(grep -nE '^emit_summary\(\) \{' "$WRAPPER_REAL" | head -1 | cut -d: -f1)
 _em_end=""
-[ -z "$_em_start" ] || _em_end=$(awk -v s="$_em_start" 'NR>s && /^}/ {print NR; exit}' "$WRAPPER")
+[ -z "$_em_start" ] || _em_end=$(awk -v s="$_em_start" 'NR>s && /^}/ {print NR; exit}' "$WRAPPER_REAL")
 if [ -z "$_em_start" ] || [ -z "$_em_end" ]; then
   bad 'structural: could not locate the emit_summary() body to inspect'
 else
@@ -4931,13 +5004,13 @@ else
   # CONTROL FLOW IS ALLOWED, VALUES ARE NOT (#3312): the three snapshot keys are emitted only in snapshot
   # mode, so the body now contains `if`/`else`/`fi`. Those carry no value; what must never appear is a raw
   # `printf` of one, which is asserted separately below.
-  _em_raw=$(sed -n "$((_em_start + 1)),$((_em_end - 1))p" "$WRAPPER" \
+  _em_raw=$(sed -n "$((_em_start + 1)),$((_em_end - 1))p" "$WRAPPER_REAL" \
     | grep -vE '^[[:space:]]*(#|$)' \
     | grep -vE "^[[:space:]]*emit_kv '" \
     | grep -vE '^[[:space:]]*(if|elif|else|fi|then)\b' \
     | grep -vE '^[[:space:]]*(if|elif) \[' \
     | grep -vF "printf '==== ROBOREV REVIEW SUMMARY ====" || true)
-  _em_printfs=$(sed -n "$((_em_start + 1)),$((_em_end - 1))p" "$WRAPPER" \
+  _em_printfs=$(sed -n "$((_em_start + 1)),$((_em_end - 1))p" "$WRAPPER_REAL" \
     | grep -E '^[[:space:]]*printf' | grep -vF "printf '==== ROBOREV REVIEW SUMMARY ====" || true)
   if [ -n "$_em_printfs" ]; then
     bad "structural: emit_summary printf's a value directly, bypassing the neutralising boundary: ${_em_printfs%%$'\n'*}"
@@ -4952,14 +5025,14 @@ else
   # 22 emit_kv lines = 21 keys + the terminal `RESULT:`, which goes through the SAME
   # neutralising boundary. Was 23 before #3229's owner ruling removed `census-exclusion:`
   # with its oracle (#3283).
-  _em_n=$(sed -n "$((_em_start + 1)),$((_em_end - 1))p" "$WRAPPER" | grep -cE "^[[:space:]]*emit_kv '" || true)
+  _em_n=$(sed -n "$((_em_start + 1)),$((_em_end - 1))p" "$WRAPPER_REAL" | grep -cE "^[[:space:]]*emit_kv '" || true)
   if [ "${_em_n:-0}" -ge 22 ]; then
     ok "structural: all $_em_n block lines (21 keys + RESULT:) are emitted through the neutralising boundary"
   else
     bad "structural: only ${_em_n:-0} emit_kv call(s) in emit_summary — the block has 21 keys plus RESULT:, so some are emitted another way"
   fi
 fi
-if grep -qE '^[[:space:]]*roborev_safe_line "\$2"' "$WRAPPER"; then
+if grep -qE '^[[:space:]]*roborev_safe_line "\$2"' "$WRAPPER_REAL"; then
   ok 'structural: emit_kv neutralises its value before printing it'
 else
   bad 'structural: emit_kv does not call roborev_safe_line — the boundary is decorative'
@@ -4967,16 +5040,16 @@ fi
 # DETAILS reach the SAME stdout a reader greps for `^RESULT: `, so the bulk
 # `printf '%s\n' "${DETAILS[@]}"` (which prints a newline-bearing entry as several lines)
 # must be gone, replaced by a per-entry neutralised print.
-if grep -qE 'printf .%s..n. "\$\{DETAILS\[@\]\}"' "$WRAPPER"; then
+if grep -qE 'printf .%s..n. "\$\{DETAILS\[@\]\}"' "$WRAPPER_REAL"; then
   bad 'structural: finish still bulk-prints "${DETAILS[@]}" — a newline-bearing DETAILS entry would span lines and could forge a RESULT: line'
 else
   ok 'structural: DETAILS are not bulk-printed (each entry is neutralised individually)'
 fi
-_fin_start=$(grep -nE '^finish\(\) \{' "$WRAPPER" | head -1 | cut -d: -f1)
+_fin_start=$(grep -nE '^finish\(\) \{' "$WRAPPER_REAL" | head -1 | cut -d: -f1)
 _fin_end=""
-[ -z "$_fin_start" ] || _fin_end=$(awk -v s="$_fin_start" 'NR>s && /^}/ {print NR; exit}' "$WRAPPER")
+[ -z "$_fin_start" ] || _fin_end=$(awk -v s="$_fin_start" 'NR>s && /^}/ {print NR; exit}' "$WRAPPER_REAL")
 if [ -n "$_fin_start" ] && [ -n "$_fin_end" ] \
-  && sed -n "${_fin_start},${_fin_end}p" "$WRAPPER" | grep -q 'roborev_safe_line'; then
+  && sed -n "${_fin_start},${_fin_end}p" "$WRAPPER_REAL" | grep -q 'roborev_safe_line'; then
   ok "structural: finish neutralises every DETAILS line (lines $_fin_start-$_fin_end)"
 else
   bad 'structural: finish does not neutralise DETAILS lines'
@@ -5003,16 +5076,16 @@ printf '== structural: NOTICE is OUTSIDE the failing-capable verdict scan ==\n'
 #   _scan_keys  = the `for … ; do` KEY LIST alone (continuation-aware; this is what must
 #                 name every per-check key)
 #   _scan_case  = the classifying `case` line from within the loop
-_scan_start=$(grep -nE '^[[:space:]]*for verdict in ' "$WRAPPER" | head -1 | cut -d: -f1 || printf '')
+_scan_start=$(grep -nE '^[[:space:]]*for verdict in ' "$WRAPPER_REAL" | head -1 | cut -d: -f1 || printf '')
 _scan_end=''
 if [ -n "$_scan_start" ]; then
-  _scan_end=$(awk -v s="$_scan_start" 'NR>s && /^[[:space:]]*done[[:space:]]*$/ {print NR; exit}' "$WRAPPER")
+  _scan_end=$(awk -v s="$_scan_start" 'NR>s && /^[[:space:]]*done[[:space:]]*$/ {print NR; exit}' "$WRAPPER_REAL")
 fi
 _scan_block=''
 _scan_keys=''
 _scan_case=''
 if [ -n "$_scan_start" ] && [ -n "$_scan_end" ]; then
-  _scan_block=$(sed -n "${_scan_start},${_scan_end}p" "$WRAPPER")
+  _scan_block=$(sed -n "${_scan_start},${_scan_end}p" "$WRAPPER_REAL")
   # The key list ends at the first line that does not continue with a trailing backslash.
   _scan_keys=$(printf '%s\n' "$_scan_block" | awk '{print} !/\\$/{exit}')
   _scan_case=$(printf '%s\n' "$_scan_block" | grep -E 'case "\$verdict_token" in' | head -1 || printf '')
@@ -5082,14 +5155,14 @@ else
   # six deterministic keys, so a key added to the block later is not silently exempt from it.
   # The `PASS)` arm is EXACT, matched on the token: a `PASS*` glob would let `PASSthisNeverRan`
   # satisfy the very backstop that exists to reject non-measurements (#3229 M3).
-  if grep -qE '^[[:space:]]*not_affirmed="\$\{not_affirmed' "$WRAPPER" &&
-    grep -qE '^[[:space:]]*PASS\) continue ;;' "$WRAPPER" &&
-    grep -qE '^[[:space:]]*case "\$\{det_value%% \*\}" in' "$WRAPPER"; then
+  if grep -qE '^[[:space:]]*not_affirmed="\$\{not_affirmed' "$WRAPPER_REAL" &&
+    grep -qE '^[[:space:]]*PASS\) continue ;;' "$WRAPPER_REAL" &&
+    grep -qE '^[[:space:]]*case "\$\{det_value%% \*\}" in' "$WRAPPER_REAL"; then
     ok 'structural: a PASS requires each verdict-carrying key to be affirmatively PASS, matched on the exact token (the SKIP backstop)'
     _aff_missing=""
     for _aff_key in push-assert census-check code-free sha-assert \
       review-completed prompt-content; do
-      grep -qE "\"$_aff_key=\\\$[A-Z_]+\"" "$WRAPPER" || _aff_missing="$_aff_missing $_aff_key"
+      grep -qE "\"$_aff_key=\\\$[A-Z_]+\"" "$WRAPPER_REAL" || _aff_missing="$_aff_missing $_aff_key"
     done
     if [ -z "$_aff_missing" ]; then
       ok 'structural: all six deterministic keys are named in the affirmation backstop'
@@ -5106,7 +5179,7 @@ else
   # reach `finish PASS` on a non-measurement, which is the whole defect class). Read from the
   # backstop's own `case` body, so a `NOTICE*)` arm elsewhere in the wrapper cannot satisfy or
   # break it.
-  _aff_body=$(awk '/for keyed in "push-assert=/ { inb = 1 } inb { print } inb && /^[[:space:]]*esac[[:space:]]*$/ { exit }' "$WRAPPER")
+  _aff_body=$(awk '/for keyed in "push-assert=/ { inb = 1 } inb { print } inb && /^[[:space:]]*esac[[:space:]]*$/ { exit }' "$WRAPPER_REAL")
   if [ -z "$_aff_body" ]; then
     bad 'structural: could not locate the affirmation backstop case body to inspect for per-key exemptions'
   else
@@ -5130,7 +5203,7 @@ else
   fi
   # And the wrapper must STATE the rule, not just implement it: the next key added to this
   # block is written by someone reading the doc block, not the scan.
-  if grep -qF 'A POSITIVE VERDICT REQUIRES AN AFFIRMATIVE MEASUREMENT' "$WRAPPER"; then
+  if grep -qF 'A POSITIVE VERDICT REQUIRES AN AFFIRMATIVE MEASUREMENT' "$WRAPPER_REAL"; then
     ok 'structural: the wrapper states the affirmative-measurement rule the whole block obeys'
   else
     bad 'structural: the wrapper no longer states the affirmative-measurement rule — the invariant would have to be re-derived from the code by every reader'
@@ -5145,14 +5218,14 @@ else
   else
     ok 'structural: the deleted census-exclusion key is absent from the verdict-scan key list'
   fi
-  if grep -qE "emit_kv 'census-exclusion'" "$WRAPPER"; then
+  if grep -qE "emit_kv 'census-exclusion'" "$WRAPPER_REAL"; then
     bad 'structural: the summary block still emits a census-exclusion key whose oracle is deleted'
   else
     ok 'structural: the summary block no longer emits census-exclusion (removal visible in the OUTPUT contract, not just the source)'
   fi
   for _gone_fn in roborev_check_census_exclusion roborev_format_exclude_args \
     roborev_toml_exclude_patterns roborev_parse_toml_array roborev_corroborate_exclude_patterns; do
-    if grep -qE "(^|[^#[:alnum:]_])$_gone_fn\b" "$WRAPPER" "$SCRIPT_DIR/../flow/roborev-review-oracles.sh" \
+    if grep -qE "(^|[^#[:alnum:]_])$_gone_fn\b" "$WRAPPER_REAL" "$SCRIPT_DIR/../flow/roborev-review-oracles.sh" \
       "$SCRIPT_DIR/../flow/roborev-review-checks.sh"; then
       bad "structural: $_gone_fn is still referenced by the flow scripts — the deletion is incomplete"
     else
@@ -5201,7 +5274,7 @@ fi
 
 printf '== hermeticity: the wrapper never reaches a real roborev ==\n'
 reset_stub
-if grep -qE '^\s*roborev (review|show|list)' "$WRAPPER"; then
+if grep -qE '^\s*roborev (review|show|list)' "$WRAPPER_REAL"; then
   ok 'wrapper invokes roborev only through PATH resolution (stubbable)'
 else
   # shellcheck disable=SC2016 # the backticks are prose in the failure message
