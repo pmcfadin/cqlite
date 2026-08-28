@@ -713,12 +713,30 @@ try:
 except Invalid as exc:
     print(f"FATAL: {exc}", file=sys.stderr)
     raise SystemExit(1)
-print(f"corpus pin:   {pin[\"data_db_sha256\"]} ({pin[\"rows\"]} rows / {pin[\"data_db_bytes\"]} B,"
-      f" {len(pin[\"components\"])} components)"
+# NO BACKSLASH-ESCAPED QUOTES INSIDE AN f-STRING EXPRESSION, and no nested same-type quotes
+# either. Both are traps here, for different reasons, and the first one was a LIVE BUG that
+# made this whole step raise SyntaxError before it could pin anything (#3248):
+#   * `f"{pin[\"k\"]}"` — a backslash inside the expression part is a SyntaxError on EVERY
+#     CPython to date, including 3.12: the tokenizer reads the backslash as a line
+#     continuation ("unexpected character after line continuation character").
+#   * `f"{pin["k"]}"` — nested same-type quotes are legal only from 3.12 (PEP 701), so using
+#     them would silently move the failure onto older interpreters instead of removing it.
+# Binding the values to locals first sidesteps both and works on any version. This step is
+# FATAL when it fails, so a syntax error here blocked the entire measurement path.
+_sha = pin["data_db_sha256"]
+_rows = pin["rows"]
+_bytes = pin["data_db_bytes"]
+_ncomp = len(pin["components"])
+_reps = config["reps"]
+_temps = config["temps"]
+_arms = config["arms"]
+_passes = config["scan_passes"]
+_canon = canonical["label"]
+print(f"corpus pin:   {_sha} ({_rows} rows / {_bytes} B, {_ncomp} components)"
       " recorded in session-corpus-pin.json BEFORE the first rep")
-print(f"config pin:   reps={config[\"reps\"]} temps=[{config[\"temps\"]}] arms=[{config[\"arms\"]}]"
-      f" scan-passes={config[\"scan_passes\"]} — the reporter READS these, never its own argv")
-print(f"canonical pin: {canonical[\"label\"]} — recorded in session-corpus-pin.json"
+print(f"config pin:   reps={_reps} temps=[{_temps}] arms=[{_arms}]"
+      f" scan-passes={_passes} — the reporter READS these, never its own argv")
+print(f"canonical pin: {_canon} — recorded in session-corpus-pin.json"
       " (canonical_corpus), which the reporter REQUIRES and re-derives the verdict from")
 ' "$HERE" "$CORPUS" "$OUT_DIR" "$REPO_ROOT" \
   || { echo "FATAL: could not pin this session's corpus identity — the report REQUIRES it," >&2
@@ -778,8 +796,13 @@ if absent:
     raise SystemExit(1)
 p = pinning_record_path(pathlib.Path(sys.argv[2]))
 p.write_text(json.dumps(rec, indent=1) + "\n")
-print(f"pinning pin:  {rec[\"server_cpus\"]} verified against"
-      f" {rec[\"topology_root\"]} on {rec[\"host\"]} — recorded in {p.name} so the report cites an"
+# Locals first — same trap as the corpus-pin print above: a backslash inside an f-string
+# expression is a SyntaxError on every CPython, and this step is fatal when it fails.
+_scpus = rec["server_cpus"]
+_troot = rec["topology_root"]
+_host = rec["host"]
+print(f"pinning pin:  {_scpus} verified against"
+      f" {_troot} on {_host} — recorded in {p.name} so the report cites an"
       " OBSERVATION, not lib-cpu.sh by name")
 ' "$HERE" "$OUT_DIR" \
   || { echo "FATAL: could not record this session's CPU-pin verification — the report REQUIRES" >&2

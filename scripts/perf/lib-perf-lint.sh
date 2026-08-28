@@ -117,6 +117,24 @@ _PT_LONG='--tid'
 # not be reachable by an unanticipated spelling.
 PERF_ALLOWED_OPTS='-x -e -C -o --'
 
+# The ONLY options a `perf record` line may carry (#3248), kept SEPARATE from the `stat`
+# allowlist above rather than merged into it.
+#
+# WHY SEPARATE, AND WHY THIS IS THE WHOLE POINT. A sampling profile needs `-F` (sample
+# frequency) and `-g` (call graph); a counting run needs neither. Widening
+# `PERF_ALLOWED_OPTS` to admit them would legalise `-F`/`-g` on EVERY `perf stat` line in
+# the rig too, which is a real loss: the allowlist's job is to keep the counting path
+# minimal, and an option that is correct for one subcommand is unaudited noise on the
+# other. So layer 2 is keyed by SUBCOMMAND, and each subcommand gets the smallest set it
+# can actually work with.
+#
+# `-C` is in the set AND separately REQUIRED by the END assertions below, for exactly the
+# reason `perf stat` is: a sampling profile pinned to nothing samples the wrong CPUs, and
+# a per-process/per-thread sampling run has the same >2x observer cost the counting path
+# refuses. `--` separates the command; `-o` names the output; `-e` selects the sampled
+# event.
+PERF_RECORD_ALLOWED_OPTS='-x -e -C -o -F -g --call-graph --'
+
 # The counting-DOMAIN option families, for LAYER 3's post-command-word check.
 #
 # It lives HERE, beside the option names it is built from, because `perf_stat_c` is the
@@ -167,8 +185,14 @@ perf_invocation_lint() {
   # inside a single-quoted shell string) never has to contain one — see `is_var_command`.
   { awk -v pp_short="$_PP_SHORT" -v pp_long="$_PP_LONG" \
       -v pt_short="$_PT_SHORT" -v pt_long="$_PT_LONG" \
-      -v allowed="$PERF_ALLOWED_OPTS" -v mode="$mode" -v SQ="'" '
-    BEGIN { n = split(allowed, a, /[[:space:]]+/); for (i = 1; i <= n; i++) ok[a[i]] = 1 }
+      -v allowed="$PERF_ALLOWED_OPTS" -v recallowed="$PERF_RECORD_ALLOWED_OPTS" \
+      -v mode="$mode" -v SQ="'" '
+    BEGIN {
+      n = split(allowed, a, /[[:space:]]+/); for (i = 1; i <= n; i++) ok[a[i]] = 1
+      # The `record` allowlist is a SEPARATE set, not a superset: an option legal for a
+      # sampling profile must not become legal on a counting line (#3248).
+      m = split(recallowed, b, /[[:space:]]+/); for (i = 1; i <= m; i++) recok[b[i]] = 1
+    }
     # A token as the SHELL would see it after word-splitting and quote removal:
     # leading/trailing quotes, parens and `;` stripped. That is what makes the
     # spelling of an invocation irrelevant — `"perf"`, `perf`, `(perf` and `perf;`
@@ -306,11 +330,24 @@ perf_invocation_lint() {
       next
     }
     inwrap && /^\}/    { inwrap = 0; wrapseen = 1; next }
+    # THE SECOND SANCTIONED WRAPPER (#3248): `perf_record_c`, for sampling profiles. It lives
+    # in the SAME file as perf_stat_c deliberately — `perf_invocation_lint_tree` discovers the
+    # owner by grepping for `^perf_stat_c()`, and treats two owners as a finding, so a second
+    # wrapper in a second file would read as a rig with two owners. One file, two wrappers,
+    # one owner.
+    /^perf_record_c\(\)/ {
+      inrec = 1
+      if (mode == "library") print NR ": defines perf_record_c, but the rig has exactly ONE wrapper file (this file is not it)"
+      next
+    }
+    inrec && /^\}/     { inrec = 0; recseen = 1; next }
     {
       mentions = invokes($0)
       marked   = index($0, "perf-lint-allow") > 0
       if (inwrap) {
         if (mentions) { wrapinvoke++; if (index($0, "-C")) wrapcpuwide++ }
+      } else if (inrec) {
+        if (mentions) { recinvoke++; if (index($0, "-C")) reccpuwide++ }
       } else if (mentions && !marked) {
         print NR ": perf/stat invocation outside the single perf_stat_c wrapper, unmarked"
       }
@@ -322,17 +359,25 @@ perf_invocation_lint() {
       # allowlist of PERF options says nothing about it.
       if (!mentions) next
       n = split($0, tok, /[[:space:]]+/)
+      # WHICH ALLOWLIST APPLIES IS DECIDED BY THE SUBCOMMAND ON THE LINE (#3248), not by
+      # which wrapper we happen to be inside: a `record` line outside the wrapper must be
+      # option-checked as a `record` line, or the narrower `stat` set would report it with a
+      # misleading reason. Default is the STAT set, so a line whose subcommand cannot be
+      # identified gets the STRICTER treatment — an unknown must not inherit the looser rule.
+      isrec = 0
+      for (i = 1; i <= n; i++) { if (bare(tok[i]) == "record") { isrec = 1; break } }
       for (i = 1; i <= n; i++) {
         if (tok[i] ~ /^#/) break    # trailing comment: prose, not argv
         o = optname(bare(tok[i]))
         if (o == "") continue
-        if (o in ok) continue
+        if (isrec) { if (o in recok) continue }
+        else if (o in ok) continue
         if (o == pp_short || o == pp_long)
           print NR ": per-process option token `" tok[i] "` on a perf/stat line"
         else if (o == pt_short || o == pt_long)
           print NR ": per-thread option token `" tok[i] "` on a perf/stat line (per-thread counting is per-process counting)"
         else
-          print NR ": option token `" tok[i] "` is not in the perf option allowlist (" allowed ") — an option this rig does not need may change the counting DOMAIN"
+          print NR ": option token `" tok[i] "` is not in the perf " (isrec ? "record" : "stat") " option allowlist (" (isrec ? recallowed : allowed) ") — an option this rig does not need may change the counting DOMAIN"
       }
     }
     # An AFFIRMATIVE per-file subject check, in BOTH modes (#3272 review round 3 nit).
@@ -351,6 +396,11 @@ perf_invocation_lint() {
         if (!wrapseen)     print "0: perf_stat_c() is absent — there is no single wrapper to allow"
         if (!wrapinvoke)   print "0: perf_stat_c() invokes nothing — the allowlist would be vacuous"
         if (!wrapcpuwide)  print "0: perf_stat_c() does not pass -C — the wrapper counts nothing CPU-wide"
+        # perf_record_c is OPTIONAL — a rig with no sampling profile is legitimate — but if it
+        # is DEFINED it must be non-vacuous and CPU-wide, on the same terms as perf_stat_c. A
+        # defined-but-empty wrapper would otherwise be an allowlist entry protecting nothing.
+        if (recseen && !recinvoke)  print "0: perf_record_c() invokes nothing — the allowlist would be vacuous"
+        if (recseen && !reccpuwide) print "0: perf_record_c() does not pass -C — a sampling profile pinned to nothing samples the wrong CPUs"
       }
       printf "#LINT-COMPLETE lines=%d mode=%s\n", NR, mode
     }

@@ -316,10 +316,61 @@ for spelling in '--per-thread' '-a' '--cgroup=x'; do
   cp "$PERF_DIR/"*.sh "$treedir/"
   printf 'perf stat -x, -e cycles -C 0 %s -o /dev/null -- true\n' "$spelling" >> "$treedir/lib-args.sh"
   got=$(lint_tree "$treedir")
-  if grep -q 'not in the perf option allowlist' <<<"$got"; then
+  # The diagnostic now NAMES WHICH allowlist applied, because since #3248 there are two
+  # (`stat` and `record`) and "not in the allowlist" without saying which one is a message
+  # that cannot be acted on. Asserting the subcommand-specific text also pins that a STAT
+  # line was judged by the STAT set.
+  if grep -q 'not in the perf stat option allowlist' <<<"$got"; then
     pass "lint-tree-allowlist: an UNANTICIPATED option '$spelling' FAILS CLOSED (no deny-list entry needed)"
   else
     fail "lint-tree-allowlist: '$spelling' must fail closed (got: $got)"
+  fi
+done
+
+# ---------------------------------------------------------------------------
+# THE TWO ALLOWLISTS ARE SEPARATE SETS, NOT A MERGED SUPERSET (#3248)
+# ---------------------------------------------------------------------------
+# A sampling profile needs `-F`/`-g`; a counting run needs neither. The cheap way to admit
+# them would have been to widen PERF_ALLOWED_OPTS, which would silently legalise them on
+# EVERY `perf stat` line in the rig — so layer 2 is keyed by SUBCOMMAND instead. These cases
+# are the ones that would pass under the cheap version and must not.
+for spelling in '-F 999' '-g' '--call-graph fp'; do
+  treedir="$(mktemp -d "$TMP/recsepXXXXXX")"
+  cp "$PERF_DIR/"*.sh "$treedir/"
+  printf 'perf stat -x, -e cycles -C 0 %s -o /dev/null -- true\n' "$spelling" >> "$treedir/lib-args.sh"
+  got=$(lint_tree "$treedir")
+  if grep -q 'not in the perf stat option allowlist' <<<"$got"; then
+    pass "lint-sets-separate: a RECORD option '${spelling%% *}' on a STAT line still FAILS (sets are not merged)"
+  else
+    fail "lint-sets-separate: '$spelling' must be refused on a stat line (got: $got)"
+  fi
+done
+
+# ...and the RECORD set must actually admit its own options, or it is a set that permits
+# nothing and the separation buys a guard nobody can satisfy.
+recok_dir="$(mktemp -d "$TMP/recokXXXXXX")"
+cp "$PERF_DIR/"*.sh "$recok_dir/"
+printf 'perf record -e cycles -F 999 -g -C 2,10 -o /dev/null -- true  # perf-lint-allow: sampling profile\n' \
+  >> "$recok_dir/lib-args.sh"
+got=$(lint_tree "$recok_dir")
+if grep -q 'option allowlist' <<<"$got"; then
+  fail "lint-sets-separate: a well-formed marked RECORD line must carry no OPTION finding (got: $got)"
+else
+  pass "lint-sets-separate: a well-formed RECORD line passes the record allowlist"
+fi
+
+# A per-process/per-thread option is refused on a RECORD line too. Sampling per-process has
+# the same observer-cost problem counting per-process has, so the domain rule is not relaxed
+# just because the subcommand changed.
+for spelling in '-p 123' '--pid=123' '-t 5' '--tid=5'; do
+  treedir="$(mktemp -d "$TMP/recdomXXXXXX")"
+  cp "$PERF_DIR/"*.sh "$treedir/"
+  printf 'perf record -e cycles -F 999 -C 0 %s -o /dev/null -- true\n' "$spelling" >> "$treedir/lib-args.sh"
+  got=$(lint_tree "$treedir")
+  if grep -qE 'per-(process|thread) option token' <<<"$got"; then
+    pass "lint-sets-separate: '${spelling%% *}' on a RECORD line still FIRES the domain rule"
+  else
+    fail "lint-sets-separate: '$spelling' must fire on a record line (got: $got)"
   fi
 done
 # The tree lint's own VACUITY guards: an empty subject, no wrapper, or two wrappers all
