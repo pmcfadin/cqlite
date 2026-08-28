@@ -668,6 +668,40 @@ machine + heartbeat age (issue #2089). Interpretation:
 | Green SUMMARY but parity lines say SKIP | Datasets missing on that machine — `fetch-datasets.sh`, export the root it prints, re-run. Probe an existing root with `fetch-datasets.sh --verify-only` (mutates nothing). The FULL gate FAILs CLOSED here (`missing-fixtures: FAIL-CLOSED (#2078)`) so it can't slip through; `--lite`/`--only` stay lenient. |
 | `missing-schemas: FAIL-CLOSED (#3148)` | Either a committed `test-data/schemas/*.cql` is unreadable (broken checkout — `git restore --source=HEAD -- test-data/schemas`) or `CQLITE_SCHEMAS_ROOT` is set to a **relative** path (export an absolute one, or unset it). Never a corpus-layout problem: the schemas root is checkout-relative. No opt-out exists — do not look for one. |
 | Two machines want the same issue | Impossible past the claim: the second claim-ref push is rejected server-side (non-fast-forward on the fixed-name ref, #2665); the loser sees `CLAIM LOST` and picks the next Ready item. |
+| **SSH accepts TCP but sends no banner** (from inside the VPC) | **Check `dmesg` for an OOM kill BEFORE concluding the instance is broken** — see the diagnostic order below. This is a memory symptom far more often than a broken box, and a soft reboot may be silently ignored. |
+| A lane vanished — worktree clean, claim held, nothing reported | There is **no committed tool for this yet** (#3393 AC3, open). By hand: `bash scripts/flow/claim-heartbeat.sh list-claims` for the owning machine and PID, then `kill -0 <pid>` **on that box** — a PID is only checkable where it runs. `should-reap` will not tell you: it consults the PID only after the claim is >4h old, so a lane killed a minute ago is indistinguishable from a healthy one for four hours. |
+
+
+### Diagnostic order when a box stops answering (#3393)
+
+Recorded because getting this order wrong cost a healthy machine. On 2026-08-27/28 the kernel
+issued **10 global OOM kills** across two `c7i.4xlarge` workers, every victim a `python3` holding
+**20–28 GB** on a 30 GB box. Under memory exhaustion `sshd` cannot fork a session, so the box
+presents as *"TCP connects, no banner"* — which reads exactly like a broken instance. It was read
+that way: a **healthy box was terminated**, losing a measurement lane's 43 minutes and one
+unpushed commit. The signal that would have prevented it was one command nobody ran.
+
+So, in this order:
+
+1. **`dmesg | grep -i "out of memory"`** (or `journalctl -k | grep -i oom`). An OOM kill names the
+   victim, its RSS and its cgroup — `task_memcg=…/tmux-spawn-<uuid>.scope` identifies a **lane**
+   rather than a system service. This is step 1 because it is cheap, non-destructive, and
+   disambiguates the most likely cause.
+2. **`bash scripts/flow/claim-heartbeat.sh list-claims`**, then `kill -0 <pid>` on the owning box
+   for each claim it lists. A claim whose PID is gone is a lane that died; if that issue still has
+   an **open PR** it is an orphaned endgame (#2499) — adopt it, never reap it. This step is manual
+   because no committed tool reports it yet (#3393 AC3).
+3. **`df -h`** — a full disk is the other resource-exhaustion story that surfaces as a confusing
+   failure (#3379), and it is equally cheap to rule out.
+4. **Only then** treat the instance as broken. Note that a soft `reboot-instances` may be
+   **silently ignored** on a memory-exhausted box (observed: console stayed at the original boot,
+   CPU never dipped); a hard stop/start was required.
+
+Two standing lessons from the same incident. **Memory exhaustion is invisible to any monitor that
+iterates existing sessions** — a dead tmux session cannot report itself, so nothing noticed three
+silent lane deaths (`lane-1705` twice, `lane-1697` once), each leaving a clean worktree, a held
+claim and an open PR. And **lane density is the dial**: 4 lanes per box produced OOM kills and
+wedges on *both* boxes, while the 1-lane rig box recorded **zero** and never wedged.
 
 ---
 
