@@ -4918,6 +4918,7 @@ export -f check_test_targets_observed
 
 check_no_unexpected_zero_tests() {
   local label="$1" logfile="$2"; shift 2
+  local _orphans=""
   local allowed_zero=" $* "
   local bad="" target="" _banners=0 _results=0 _unit_banners=0
   # FAIL CLOSED if the log cannot be prepared or read (roborev round-16, HIGH). Without
@@ -4952,6 +4953,11 @@ check_no_unexpected_zero_tests() {
     # because with no such target in the tree the branch never ran — which is why this
     # version is pinned by a behavioural log fixture rather than by its own existence.
     if [[ "$line" == *"Running tests/"* ]]; then
+      # An ORPHANED previous target is a FAIL (roborev round-26, Medium). If a new banner arrives
+      # while the last integration target still has no parseable result, that target was OBSERVED
+      # and never JUDGED — a truncated log, a killed binary, or a result line the parse missed. The
+      # guard would otherwise pass, having silently skipped exactly the target it was asked about.
+      [ -n "$target" ] && _orphans="$_orphans $target"
       target=$(printf "%s" "$line" | sed -E "s#.*Running tests/([^[:space:]]+)\.rs.*#\1#")
       _banners=$((_banners + 1))
     elif [[ "$line" == *"Running unittests"* ]]; then
@@ -4960,9 +4966,11 @@ check_no_unexpected_zero_tests() {
       # unittest-only log (a `--lib` selection produces nothing else). Without this the new
       # round-17 check turned a correct log into a false red; the complement assert caught it.
       _unit_banners=$((_unit_banners + 1))
+      [ -n "$target" ] && _orphans="$_orphans $target"
       target=""
     elif [[ "$line" == *"Running "*".rs"* ]]; then
       # `--lib`/`--bins` unittest lines are check_unittest_targets_ran's subject, not ours.
+      [ -n "$target" ] && _orphans="$_orphans $target"
       target=$(printf "%s" "$line" | sed -E "s#.*Running ([^[:space:]]+)\.rs.*#\1#")
       _banners=$((_banners + 1))
     elif [[ "$line" == "test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out"* ]]; then
@@ -4976,6 +4984,9 @@ check_no_unexpected_zero_tests() {
       target=""
     fi
   done < "$_parse_src"
+  # EOF with a target still pending is the same orphan case (roborev round-26): the log ended
+  # between a banner and its result, which is what a truncated or killed run looks like.
+  [ -n "$target" ] && _orphans="$_orphans $target"
   # AN AFFIRMATIVE MEASUREMENT, not the absence of a bad signal (roborev round-17, HIGH).
   # Round 16 made this guard fail when it could not READ its input; that was not enough. A
   # non-empty, perfectly readable log can still contain no PARSEABLE `Running` banner — a
@@ -5001,6 +5012,10 @@ check_no_unexpected_zero_tests() {
   #
   # `--no-run` callers are not affected because they do not call this guard: the two isolation
   # lanes compile only and are checked by their own exit status.
+  if [ -n "$_orphans" ]; then
+    echo "$label: FAIL-CLOSED —$_orphans was OBSERVED running (a 'Running' banner) but no parseable 'test result:' line followed it, so this guard never judged whether it ran zero tests. A target observed and not judged is the gap this guard exists to close, not a pass (issue #1699, roborev round-26)." >&2
+    return 1
+  fi
   if [ "$_results" -eq 0 ]; then
     echo "$label: FAIL-CLOSED — '$logfile' contains NO parseable cargo 'test result:' line at all, so this guard judged ZERO targets. The caller's cargo run exited successfully, so results must exist: a truncated log, a killed process, a changed cargo output format or a failed ANSI normalisation. A guard that judged nothing has measured nothing and must never report OK (issue #1699, roborev round-25)." >&2
     return 1
@@ -6735,7 +6750,14 @@ _rust_module_closure() { # <root-file>  -> one path per line; unresolved mods to
     [ -n "$f" ] || continue
     case "$seen" in *" $f "*) continue ;; esac
     seen="$seen$f "
-    [ -r "$f" ] || continue
+    # An UNREADABLE source is a FAILED derivation, not a file to skip (roborev round-26, Medium):
+    # skipping it yields an incomplete closure, which makes the polarity scan and the census read a
+    # partial module tree and can drop the target from the lane entirely — a false PASS built from
+    # a file nobody could read.
+    if [ ! -r "$f" ]; then
+      echo "UNREADABLE $f (module closure of $root)" >&2
+      return 1
+    fi
     out="$out$f
 "
     dir="${f%/*}"; base="${f##*/}"
@@ -7021,15 +7043,24 @@ EOF
   # invocation — so if such a feature later becomes enabled here, it drops out of the
   # census automatically with no gate edit.
   #
-  # ON THE ORACLE'S BREADTH, since it looks alarming and was checked rather than assumed:
-  # the resolved set printed below is WIDER than cqlite-core's `default + legacy-heuristics`
-  # (it includes arrow/parquet/cli-helpers). That is NOT a workspace-resolution artifact —
-  # `cargo metadata --manifest-path cqlite-core/Cargo.toml` returns the identical set. It is
-  # DEV-DEPENDENCY feature unification, which `cargo test` applies as well. So this is the
-  # right oracle for a `cargo test` lane: it reports what the test compile really enables.
-  # The direction matters for THIS census specifically — it reports a GAP, so an
-  # over-broad enabled set would UNDER-report gaps (the permissive direction). Verified
-  # not to be over-broad, `experimental` is genuinely absent, and the count below is real.
+  # ON THE ORACLE, corrected (roborev round-26, Low). This block used to say the resolved set is
+  # WIDER than cqlite-core's `default + legacy-heuristics` because it includes
+  # arrow/parquet/cli-helpers, attributing that to dev-dependency unification. Both halves are now
+  # obsolete: round 6 replaced the oracle with a PACKAGE-SCOPED `cargo tree -p` resolve precisely
+  # BECAUSE those extras were a workspace-resolution artifact — they are turned on by
+  # cqlite-flight / cqlite-py / cqlite-node / ws0-corpus-gen, other members, measured 14 features
+  # workspace-wide against 9 package-scoped. So the set printed below no longer contains them, and
+  # the paragraph that explained why it did was describing the defect that was removed.
+  #
+  # THIS IS THE SECOND STALE ORACLE COMMENT THIS CHANGE HAS SHIPPED (round 20 fixed the header of
+  # `_resolved_package_features` itself, which had survived the same round-6 fix). The pattern is
+  # worth naming: when an oracle changes, its rationale is usually written in MORE THAN ONE place,
+  # and the copies do not move with it — so the search after such a fix is for every paragraph that
+  # ARGUES for the old behaviour, not just the one attached to the code.
+  #
+  # The direction still matters for THIS census specifically — it reports a GAP, so an over-broad
+  # enabled set would UNDER-report gaps (the permissive direction), which is why the narrower
+  # package-scoped resolve is the correct oracle here and not merely the tidier one.
   #
   # Deliberately NOT done in this change: a second `--features legacy-heuristics,experimental`
   # pass that would actually execute them. It is a third full compile of cqlite-core at a

@@ -3326,4 +3326,59 @@ fi
 
 echo "----"
 echo "passed: $PASS  failed: $FAIL"
+
+
+# --- 36. #1699: a target OBSERVED but never JUDGED is a FAIL (roborev round-26, Medium) ---
+#
+# The guard keyed each `test result:` line to the banner before it, but never checked that a banner
+# GOT one. So a log carrying every expected banner and an earlier result — a truncated log, a killed
+# test binary, a result line the parse missed — passed while one target was silently never judged.
+# That is the same hole as "no results at all" (round 25) restricted to a single target, which is
+# harder to see because the log looks healthy in every other respect.
+if [ -s "$zn_h" ]; then
+  # (a) two banners, only the FIRST gets a result: the second is an orphan.
+  orph="$tmp/1699-r26-orphan.log"
+  printf 'Running tests/first.rs\nrunning 3 tests\ntest result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out\nRunning tests/second.rs\nrunning 2 tests\n' > "$orph"
+  if ( . "$zn_h"; check_no_unexpected_zero_tests "orphan" "$orph" >/dev/null 2>&1 ); then
+    bad "1699-r26-orphan-eof: a log whose LAST target got no 'test result:' line PASSED — that target was observed running and never judged, so the guard skipped exactly the target it was asked about"
+  else
+    ok "1699-r26-orphan-eof: a target observed at EOF with no result is a FAIL"
+  fi
+
+  # (b) banner, banner, result: the first target is an orphan even though results exist.
+  orph2="$tmp/1699-r26-orphan-mid.log"
+  printf 'Running tests/first.rs\nrunning 3 tests\nRunning tests/second.rs\nrunning 2 tests\ntest result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out\n' > "$orph2"
+  if ( . "$zn_h"; check_no_unexpected_zero_tests "orphan-mid" "$orph2" >/dev/null 2>&1 ); then
+    bad "1699-r26-orphan-mid: a log where a banner is followed by ANOTHER banner without a result PASSED — the first target was observed and never judged, and the later result made the log look complete"
+  else
+    ok "1699-r26-orphan-mid: a banner superseded by the next banner without a result is a FAIL"
+  fi
+
+  # (c) COMPLEMENT: a healthy two-target log must still pass, or the check has over-reached into a
+  # false red — the mistake round 17 made twice and the reason every fixture here carries one.
+  healthy="$tmp/1699-r26-healthy.log"
+  printf 'Running tests/first.rs\nrunning 3 tests\ntest result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out\nRunning tests/second.rs\nrunning 2 tests\ntest result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out\n' > "$healthy"
+  if ( . "$zn_h"; check_no_unexpected_zero_tests "healthy" "$healthy" >/dev/null 2>&1 ); then
+    ok "1699-r26-orphan-complement: a healthy two-target log still PASSES (the orphan check is not a blanket red)"
+  else
+    bad "1699-r26-orphan-complement: a HEALTHY two-target log now FAILS — the orphan check is over-reaching, which would red every clean run"
+  fi
+fi
+
+# AN ASSERT-COUNT FLOOR, because "0 failed" is not evidence that the asserts RAN (#1699).
+# Demonstrated on this very file: a malformed `local` declaration in the gate
+# (`shift 2 _orphans=""` — bash rejects it with "shift: too many arguments") made several
+# extracted-function subshells die under `set -u`, and the suite reported
+#     passed: 296  failed: 0
+# nine asserts fewer than the run before it, with no failure anywhere. A suite that can lose
+# whole sections and still exit 0 is the vacuous pass this file exists to catch, one level up.
+#
+# A FLOOR, not an exact count: new asserts are added constantly and an equality check would red on
+# every addition. Raise it deliberately when you add a section — the ratchet is the point, and the
+# number below is the count measured at the commit that introduced this check.
+ASSERT_FLOOR=300
+if [ "$PASS" -lt "$ASSERT_FLOOR" ]; then
+  echo "FAIL - assert-floor: only $PASS assertions ran, floor is $ASSERT_FLOOR. Sections are being SKIPPED or dying silently (an extraction that broke, a subshell aborting under set -u), and 'failed: 0' over a shrunken subject set is exactly the vacuous pass this suite tests for."
+  FAIL=$((FAIL + 1))
+fi
 [ "$FAIL" -eq 0 ]
