@@ -4976,7 +4976,11 @@ _wr_classify() {
   _c_ev=${_c_rest%% *}; _c_bal=${_c_rest##* }
   # AN UNRELIABLE PARSE YIELDS NO VERDICT (reviewer). Checked FIRST: every field below is derived
   # from the same state machine, so if it ended the line inside a quote, none of them can be trusted.
-  if [ "${_c_bal:-1}" -eq 0 ]; then printf 'unbalanced %s\n' $(( ${_c_code:-0} + ${_c_lit:-0} )); return; fi
+  # DEFAULTS TO UNTRUSTWORTHY, not to balanced. This is the one field whose job is to say "do not
+  # trust the other fields", so an UNMEASURED value (a failed awk, a renamed field) must refuse
+  # rather than be believed — CLAUDE.md's `${end:-$start}` lesson, on the field that can least
+  # afford it. Key the permissive branch on the AFFIRMATIVE value, never on `!= <bad>`.
+  if [ "${_c_bal:-0}" -eq 0 ]; then printf 'unbalanced %s\n' $(( ${_c_code:-0} + ${_c_lit:-0} )); return; fi
   if [ "${_c_ev:-0}" -eq 1 ] && [ $(( ${_c_code:-0} + ${_c_lit:-0} )) -gt 0 ]; then
     printf 'eval %s\n' $(( ${_c_code:-0} + ${_c_lit:-0} )); return
   fi
@@ -5014,6 +5018,18 @@ _wr_classify() {
   # permitted shape found ANYWHERE standing in for the line BEING that shape.)
   _c_trim=${_c_seg#"${_c_seg%%[! 	]*}"}
   _c_trim=${_c_trim%"${_c_trim##*[! 	]}"}
+  # A declaration keyword and a trailing `;` are part of the SAVE, not a second statement. Without
+  # this, wrapping the poison probe in a function -- `local _wr_saved="$WRAPPER"`, the natural tidy-up
+  # -- reds the gate advising the author to use $WRAPPER_REAL, which is WRONG advice for a save. The
+  # exactness that matters (nothing may SHARE the line) is untouched: only a leading declaration and
+  # one trailing semicolon are absorbed.
+  _c_trim=${_c_trim%;}
+  _c_trim=${_c_trim#"${_c_trim%%[! 	]*}"}
+  case "$_c_trim" in
+    'local '*|'export '*|'declare '*|'typeset '*)
+      _c_trim=${_c_trim#* }
+      _c_trim=${_c_trim#"${_c_trim%%[! 	]*}"} ;;
+  esac
   for _c_a in $_wr_aliases; do
     if [ "$_c_trim" = "$_c_a=$_wr_ref" ]; then printf 'ok %s\n' "$_c_code"; return; fi
   done
@@ -5106,6 +5122,9 @@ mkdir -p "$_wr_ctl_dir"
 # Each fixture carries one PERMITTED occurrence (so `empty` is not the answer) plus the case under test.
 _wr_ok_line="bash $_wr_ref --help"
 _wr_ctl_bad=""
+# FIXTURES ARE WRITTEN WITH `printf` AND `$_wr_ref`, NEVER A HEREDOC. The scanner is line-oriented,
+# so a literal `"$WRAPPER"` in a quoted `<<'"'"'EOF'"'"'` heredoc body reads as a live read and verdicts
+# `form` — inert in shell, but this pass cannot see the heredoc. Fail-closed, and free to avoid.
 _wr_fixture() {
   # $1 = name, $2 = the line under test ('' for none)
   printf '%s\n' "$_wr_ok_line" >"$_wr_ctl_dir/$1"
@@ -5136,6 +5155,8 @@ _wr_fixture f_bracedef "_x=\$(grep -c foo \"\${$_wr_vname:-/tmp/x}\")"
 _wr_fixture f_fakeinv  "grep foo $_wr_ref # \$(bash $_wr_ref)"
 _wr_fixture f_evalasm  "_cmd='grep foo $_wr_ref'"
 _wr_fixture f_multiline "' \"\$ORACLES\" \"\$CHECKS_FILE\" $_wr_ref 2>/dev/null || true)"
+_wr_fixture f_locsave  "  local _gm_real_wrapper=$_wr_ref"
+_wr_fixture f_semisave "_gm_real_wrapper=$_wr_ref;"
 _wr_fixture f_cmpsave  "_wr_saved=x; subject=$_wr_ref"
 _wr_fixture f_cmpsave2 "_wr_saved=unused; grep pattern $_wr_ref"
 _wr_fixture f_ansic    "_x=\$'a\\'b'; grep -c z $_wr_ref"
@@ -5165,6 +5186,8 @@ _wr_expect f_bracedef spelling
 _wr_expect f_fakeinv  form
 _wr_expect f_evalasm  prose
 _wr_expect f_multiline unbalanced
+_wr_expect f_locsave  clean
+_wr_expect f_semisave clean
 _wr_expect f_cmpsave  form
 _wr_expect f_cmpsave2 form
 _wr_expect f_ansic    unbalanced
@@ -5177,7 +5200,7 @@ _wr_expect f_empty    empty
 # and the success message below prints counts from them.
 _wr_scan_file "$TEST_SELF"
 if [ -z "$_wr_ctl_bad" ]; then
-  ok 'structural control (#3367): the ENFORCEMENT PASS itself (classifier + dispatch) gives the correct verdict on all twenty-nine fixtures — it rejects the braced, unquoted, compound-line, unallowlisted-alias, mentions-the-word-bash quote-swallowed, marker-self-authorising and eval bypasses, refuses to let a marker waive a second read, reports a subjectless file as empty, and still accepts invocations, allowlisted saves, marked opt-outs, captured invocations and unmarked prose'
+  ok 'structural control (#3367): the ENFORCEMENT PASS itself (classifier + dispatch) gives the correct verdict on all thirty-one fixtures — it rejects the braced, unquoted, compound-line, unallowlisted-alias, mentions-the-word-bash quote-swallowed, marker-self-authorising and eval bypasses, refuses to let a marker waive a second read, reports a subjectless file as empty, and still accepts invocations, allowlisted saves, marked opt-outs, captured invocations and unmarked prose'
 else
   bad "structural control (#3367): the enforcement pass misclassifies a fixture, so its verdict on the real file is not trustworthy —$_wr_ctl_bad"
 fi
