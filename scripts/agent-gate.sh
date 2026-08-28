@@ -5966,6 +5966,19 @@ run_tooling_tests() {
   # A broken measurement guard publishes a wrong number instead of failing, so it
   # needs a standing test rather than a review round — and per #3249 the bar is
   # "observed to fire", not "present".
+  # The CLOSED verdict-evidence checker (#3248 jobs 73/75/78). Wired HERE rather than left to be
+  # run by hand: an unwired suite is dead weight, and this one is the standing cover for a guard
+  # that review holed three rounds running.
+  echo ">>> [$name] bash scripts/tests/test_ws0_quiescence_evidence_guards.sh"
+  if ! bash "$REPO_ROOT/scripts/tests/test_ws0_quiescence_evidence_guards.sh" >>"$log" 2>&1; then
+    status=FAIL
+    echo "--- [$name] FAILED (ws0 quiescence-evidence guards); last 40 lines of $log ---"
+    tail -40 "$log"
+    echo "--- end of $name output ---"
+    end=$(date +%s)
+    record_result "$name" "$status" "$((end - start))"
+    return 1
+  fi
   echo ">>> [$name] bash scripts/tests/test_ws0_report_guards.sh"
   if ! bash "$REPO_ROOT/scripts/tests/test_ws0_report_guards.sh" >>"$log" 2>&1; then
     status=FAIL

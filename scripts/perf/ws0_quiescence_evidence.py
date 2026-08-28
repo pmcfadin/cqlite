@@ -39,6 +39,18 @@ from typing import Any, Callable, Dict, Optional, Tuple
 _EPS = 1e-6
 
 
+# The canonical bounds a verdict's thresholds MAY ONLY TIGHTEN against. Mirrored from
+# ws0_quiescence.DEFAULT_MAX_LOAD1 / DEFAULT_MAX_LOAD1_MOVEMENT, whose CLI already refuses a
+# loosened knob ("QUIESCENCE_THRESHOLD_LOOSENED ... this knob may only tighten"). Re-asserted HERE
+# because the reporter's job is not to trust the artifact: the writer's check protects a RUN, this
+# one protects a REPORT, and a verdict reaching the reporter with `max_load1: 999` is
+# self-consistent in every other respect while describing a bar nobody would accept (job 78 F2).
+# Duplicated rather than imported to keep this module dependency-free; the values are asserted
+# against the writer's by scripts/tests/test_ws0_quiescence_evidence_guards.sh.
+CANONICAL_MAX_LOAD1 = 2.0
+CANONICAL_MAX_LOAD1_MOVEMENT = 0.5
+
+
 class EvidenceError(Exception):
     """The verdict's own record does not support its conclusion."""
 
@@ -114,10 +126,35 @@ FIELDS: Dict[str, Tuple[Callable[[Any], bool], str]] = {
 
 
 def _leaves(obj: Any, prefix: str = "") -> Dict[str, Any]:
+    """Flatten to dotted paths. A key CONTAINING a dot is refused, not flattened.
+
+    THE DOT IS THE PATH SEPARATOR, SO A KEY CONTAINING ONE CAN FORGE A PATH (roborev job 78
+    finding 1). A literal top-level key `"before.competing": []` produces the SAME dotted path as
+    the nested `before` -> `competing`, and dict order is insertion order, so whichever comes last
+    wins. Demonstrated: a verdict with a DIRTY nested `before.competing` (one competing process)
+    plus a later literal `"before.competing": []` PASSED the supposedly closed checker.
+
+    It evaded every other guard for a precise reason: the forged key is not an UNDECLARED field --
+    it collides with a DECLARED one. So the undeclared-field check, which is what makes this
+    checker closed, could not see it.
+
+    This is the control/data-channel confusion from #3312 in miniature: the path string is CONTROL
+    and the key names are DATA, and they shared an encoding. The fix removes the shared channel
+    rather than picking a rarer separator -- a key with a dot cannot be a legitimate field of this
+    record, so it is refused outright.
+    """
     out: Dict[str, Any] = {}
     if isinstance(obj, dict):
         for k, v in obj.items():
-            path = f"{prefix}.{k}" if prefix else str(k)
+            key = str(k)
+            if "." in key:
+                raise EvidenceError(
+                    f"key {key!r} (under {prefix or 'the top level'!r}) contains a '.', which is"
+                    " this checker's PATH SEPARATOR. Such a key can forge the flattened path of a"
+                    " nested field and overwrite its value, so it is refused rather than"
+                    " flattened. ws0_quiescence.judge() never emits one."
+                )
+            path = f"{prefix}.{key}" if prefix else key
             if isinstance(v, dict):
                 out.update(_leaves(v, path))
             else:
@@ -233,6 +270,16 @@ def assert_self_consistent(verdict: Any, where: str) -> None:
         )
 
     # ---- the load thresholds, with the writer's OWN asymmetry ----
+    for name, canonical in (("max_load1", CANONICAL_MAX_LOAD1),
+                            ("max_load1_movement", CANONICAL_MAX_LOAD1_MOVEMENT)):
+        recorded = present[f"thresholds.{name}"]
+        if recorded > canonical:
+            raise EvidenceError(
+                f"{where} records `thresholds.{name}` of {recorded}, LOOSER than the canonical"
+                f" {canonical}. The knob may only tighten -- ws0_quiescence refuses a loosened"
+                " one at the CLI, and a verdict carrying one describes a bar this report will not"
+                " certify, however self-consistent the rest of it is."
+            )
     max_l1 = present["thresholds.max_load1"]
     l1_before, l1_after = present["load1_before"], present["load1_after"]
     if l1_before > max_l1:

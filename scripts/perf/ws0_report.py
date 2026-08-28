@@ -463,7 +463,19 @@ def build_report(args: argparse.Namespace) -> tuple[dict, list[str]]:
 
         _v_start = _epoch("start", _win.get("start"))
         _v_end = _epoch("end", _win.get("end"))
-        if _v_start > _t_lo or _v_end < _t_hi:
+        # THE TWO SIDES ARE RECORDED AT DIFFERENT RESOLUTIONS (#3248, roborev job 78 finding 3).
+        # The driver stamps the window with `date -u +%Y-%m-%dT%H:%M:%SZ`, i.e. TRUNCATED to whole
+        # seconds, while the rep payloads carry `ts_unix_ms` at millisecond resolution. Truncation
+        # moves both edges EARLIER, and the two directions are not symmetric:
+        #   * the START moving earlier WIDENS the window -- conservative, no slack needed;
+        #   * the END moving earlier NARROWS it, so a window that genuinely covered a rep ending
+        #     at .900 can read as ending at .000 and FALSE-RED a valid session.
+        # So the end is compared with exactly one second of slack -- the maximum the recorded
+        # resolution can hide, not a guessed margin: a stamp of T means the true instant lies in
+        # [T, T+1). Anything larger would be an invented tolerance, and this guard has already
+        # cost one round by padding "conservatively" in the wrong direction.
+        _END_TRUNCATION_SLACK_S = 1.0
+        if _v_start > _t_lo or (_v_end + _END_TRUNCATION_SLACK_S) < _t_hi:
             raise Invalid(
                 f"{vpath.name} was judged over {_win.get('start')}..{_win.get('end')}, which does"
                 f" NOT cover this session's FLIGHT-REP window"
