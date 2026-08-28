@@ -59,30 +59,6 @@ readonly WRAPPER_REAL="$SCRIPT_DIR/../flow/roborev-review.sh"
 # rather than forbidding one (measured: `WRAPPER=/decoy bash -c 'readonly WRAPPER; echo $WRAPPER'`
 # prints /decoy), which would make the suite red on the caller environment (roborev job 56).
 readonly WRAPPER
-# A code-only view of a file: quoted spans blanked, comments removed, continuations joined. Used by
-# the one structural scan below, so a variable NAME appearing inside a diagnostic string or a
-# comment is not mistaken for a read of it.
-_wr_code_view_min() {
-  sed -e :a -e '/\\$/N; s/\\\n//; ta' "$1" | awk '
-  {
-    n = length($0); sq = 0; dq = 0; out = ""
-    for (i = 1; i <= n; i++) {
-      c = substr($0, i, 1)
-      if (!sq && c == "\\") { i++; out = out "  "; continue }
-      # A DOUBLE-quoted span is KEPT: expansions happen inside it, and this view is used to count
-      # reads of a variable. Only SINGLE quotes (literal text) and comments are blanked. Blanking
-      # double quotes erased the one read this scan exists to find -- measured 0 reads of a variable
-      # that is read exactly once, in `bash "${RUN_WRAPPER_PATH:-$WRAPPER_REAL}"`.
-      if (sq) { out = out " "; if (c == "'"'"'") sq = 0; continue }
-      if (dq) { out = out c; if (c == "\"") dq = 0; continue }
-      if (c == "'"'"'") { sq = 1; out = out " "; continue }
-      if (c == "\"") { dq = 1; out = out c; continue }
-      if (c == "#" && (i == 1 || substr($0, i-1, 1) ~ /[ \t]/)) break
-      out = out c
-    }
-    print out
-  }'
-}
 # The structured waiver scanner the wrapper delegates to (#3312 job 26). Defined HERE, beside
 # WRAPPER, because run_wrapper passes it on every call — the structural section is too late.
 SCAN_TOOL="$SCRIPT_DIR/../flow/roborev-waiver-scan.py"
@@ -4857,12 +4833,23 @@ if _wr_leak=$( { run_wrapper_probe() { local _rw_wrapper=inner; }; run_wrapper_p
 else
   bad "structural (#3367): a function-local leaked to the caller (got '${_wr_leak:-?}'), so run_wrapper's wrapper path is effectively global again and any caller could redirect it"
 fi
-# Read the CODE view and split the needle: the prose above names the retired global while
-# explaining why it is gone, and a raw grep matched that. Fifth self-reference of this shape in
-# this PR -- an artifact describing a rule matching the rule.
-if _wr_code_view_min "$TEST_SELF" | grep -q 'RUN_WRAPPER''_PATH'; then
-  _wr_bad="$_wr_bad the-RUN_WRAPPER_PATH-global-is-back;"
-fi
+# CAPTURED ONCE AND MATCHED IN PURE BASH -- no pipe, no exit status to lose (roborev job 59).
+# This was `<view> | grep -q <needle>` under `set -uo pipefail`, which is the inversion documented on
+# THIS issue: `grep -q` exits at the first match, SIGPIPEs the writer, and pipefail takes the 141 --
+# so a MATCH is reported as a non-match and the forbidden global rides through. Measured here: 30/30
+# detected, because the needle happens to sit at byte 175k of a 201k stream, so the reader consumes
+# nearly all of it before exiting. That is fail-open BY POSITION -- the issue's own instance inverted
+# 39 times in 40 with an early match -- and "safe at today's byte offset" is not a property worth
+# depending on. Same remedy #3416 applied to the classifier scan.
+#
+# The needle is split because the prose above names the retired global while explaining why it is
+# gone; comment lines are dropped for the same reason. (Fifth self-reference of this shape in this
+# PR -- an artifact describing a rule matching the rule.)
+_wr_rwp_view=$(grep -v '^[[:space:]]*#' "$TEST_SELF" || true)
+case "$_wr_rwp_view" in
+  *'RUN_WRAPPER''_PATH'*)
+    _wr_bad="$_wr_bad the-scratch-path-global-is-back;" ;;
+esac
 if ! grep -qE '^[[:space:]]*local _rw_wrapper="\$WRAPPER_REAL"' "$TEST_SELF"; then
   _wr_bad="$_wr_bad run_wrapper-no-longer-defaults-its-path-to-a-local-seeded-from-WRAPPER_REAL;"
 fi
