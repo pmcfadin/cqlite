@@ -135,7 +135,11 @@ fn from_name_is_fail_closed_for_an_unknown_variant() {
 /// is what keeps that field honest against `Error::classify()`.
 #[test]
 fn query_timeout_shares_the_timeout_identity_on_both_surfaces() {
-    let row = contract_for(&FfiErrorVariant::QueryTimeout.sample_error().expect("sample exists"));
+    let row = contract_for(
+        &FfiErrorVariant::QueryTimeout
+            .sample_error()
+            .expect("sample exists"),
+    );
     assert_eq!(row.py_class, PyExceptionClass::Timeout);
     assert_eq!(row.node_code, "TIMEOUT");
     assert_eq!(
