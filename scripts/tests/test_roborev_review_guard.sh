@@ -4628,7 +4628,13 @@ _cls_exec_lines() {
     }
     return s
   }
-  FILENAME ~ /roborev-review\.sh$/ && /^usage\(\) \{/ { in_usage = 1 }
+  # SUPPRESS THE HEREDOC BODY, NOT THE WHOLE FUNCTION (roborev job 47). Suppression used to begin at
+  # `usage() {`, so any EXECUTABLE statement between the function opener and its `cat <<EOF` was
+  # invisible to the classifier-GONE scan — a reintroduction parked there passed the guard, and the
+  # AC3 control did not cover it because it appends only OUTSIDE the function. What earns the
+  # exemption is being PROSE PRINTED TO A USER, which starts at the heredoc opener, not at the `{`.
+  FILENAME ~ /roborev-review\.sh$/ && /^usage\(\) \{/ { in_usage_fn = 1 }
+  in_usage_fn && /cat[ \t]*<<-?[ \t]*.?EOF/ { in_usage_fn = 0; in_usage = 1; next }
   in_usage && /^EOF$/ { in_usage = 0; next }
   in_usage { next }
   /^[[:space:]]*#/ { next }
@@ -4753,6 +4759,21 @@ _ac3_caught=""
 for _ac3_tok in ROBOREV_DIFF_SOURCE_STATE mixed-delivery; do
   case "$_ac3_exec" in *"$_ac3_tok"*) _ac3_caught="$_ac3_caught $_ac3_tok" ;; esac
 done
+# AC3b: THE SAME REINTRODUCTION, PARKED INSIDE usage() BEFORE ITS HEREDOC (roborev job 47). AC3
+# above appends OUTSIDE the function, which cannot see a filter that exempts from `usage() {`
+# rather than from `cat <<EOF` — a reintroduction between the two was invisible. An executable
+# statement there is code like any other; only the heredoc BODY is prose.
+_ac3b_dir="$tmp/real-wrapper-usage-reintroduction"
+mkdir -p "$_ac3b_dir"
+awk '/^usage\(\) \{/ && !done { print; print "  ROBOREV_DIFF_SOURCE_STATE=inline"; done = 1; next } { print }' \
+  "$WRAPPER_REAL" >"$_ac3b_dir/roborev-review.sh"
+_ac3b_exec=$(_cls_exec_lines "$ORACLES" "$CHECKS_FILE" "$_ac3b_dir/roborev-review.sh")
+case "$_ac3b_exec" in
+  *ROBOREV_DIFF_SOURCE_STATE*)
+    ok 'structural (#3367 AC3b): a reintroduction parked INSIDE usage() before its heredoc is caught — the filter exempts the heredoc BODY (prose printed to a user), not the whole function' ;;
+  *)
+    bad 'structural (#3367 AC3b): a reintroduction between `usage() {` and its `cat <<EOF` was NOT caught. The prose exemption starts at the function opener instead of the heredoc opener, so executable code parked there is invisible to the classifier-GONE scan' ;;
+esac
 case "$_ac3_caught" in
   *ROBOREV_DIFF_SOURCE_STATE*)
     ok "structural (#3367 AC3): an executable classifier reintroduction appended to a COPY of the real wrapper is still caught —$_ac3_caught — so the prose exemptions narrow the scan without blinding it" ;;
@@ -5307,6 +5328,10 @@ fi
 # own: if `_wr_saved` could itself be scanned, the allowlist would just relocate the bypass. So every
 # use of an alias must be the restore assignment `WRAPPER="$alias"` (or a marked line, which is the
 # assert that the restore happened). The save `alias="$WRAPPER"` carries no `$alias` and so is not a use.
+# BOTH REMAINING SCANS READ LOGICAL LINES (roborev job 47). `grep "$_wr_\` + `saved"` and
+# `grep "$\` + `{!name}"` are joined by bash into one read but match neither physical line, so the
+# alias-use and indirect-expansion scans were blind to exactly the split `_wr_scan_file` and the
+# nameref scan already handle. Same join, same reason; this is the last pair that lacked it.
 _wr_alias_re=$(printf '%s' "$_wr_aliases" | tr ' ' '|')
 _wr_alias_bad=""
 _wr_alias_seen=0
@@ -5345,7 +5370,7 @@ while IFS= read -r _wr_u; do
   [ "$_wr_is_restore" = yes ] && continue
   _wr_alias_bad="$_wr_alias_bad${_wr_alias_bad:+; }$_wr_u"
 done <<EOF
-$(grep -nE '[$][{]?('"$_wr_alias_re"')[}]?([^A-Za-z0-9_]|$)' "$TEST_SELF" | grep -vE '^[0-9]+:[[:space:]]*#')
+$(sed -e :a -e '/\\$/N; s/\\\n//; ta' "$TEST_SELF" | grep -nE '[$][{]?('"$_wr_alias_re"')[}]?([^A-Za-z0-9_]|$)' | grep -vE '^[0-9]+:[[:space:]]*#')
 EOF
 # CONTROL for the exemption above (roborev job 42): embedding the declaration's text must NOT
 # authorise an alias use. Both probes run the same predicate the loop uses.
@@ -5413,7 +5438,7 @@ while IFS= read -r _wr_il; do
   [ "$_wr_ilc" = "$_wr_indir_ok_2" ] && continue
   _wr_indir_bad="$_wr_indir_bad${_wr_indir_bad:+; }$_wr_il"
 done <<EOF
-$(grep -nE '[$][{]'"!" "$TEST_SELF" | grep -vE '^[0-9]+:[[:space:]]*#')
+$(sed -e :a -e '/\\$/N; s/\\\n//; ta' "$TEST_SELF" | grep -nE '[$][{]'"!" | grep -vE '^[0-9]+:[[:space:]]*#')
 EOF
 if [ -z "$_wr_indir_bad" ]; then
   ok 'structural (#3367): every indirect expansion in this harness is one of the two allowlisted positional-argument walkers — a dynamically-named one could expand to a save alias, and what a name expands to is not decidable by this scan'
