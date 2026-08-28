@@ -253,6 +253,11 @@ CLAIM_MACHINE="${HEARTBEAT_MACHINE:-$(hostname -s 2>/dev/null || echo unknown)}"
 # reused as the next spawn's stamp. "0" is stamped when still unknown — the
 # reaper treats a non-issue as "no open-PR guard applicable" and governs on age.
 CLAIM_ISSUE="${CLAIM_ISSUE:-}"
+# The issue this supervisor LAST STAMPED a lane claim for (#3393). Distinct from CLAIM_ISSUE, which
+# is the next spawn's issue and is cleared on `finalized`; this one must survive that so clean exit
+# can delete the ref it actually created. "0" is a legitimate value — a stamp with an unknown issue
+# still creates a real ref that must be cleared.
+CLAIM_STAMPED_ISSUE=""
 
 detect_ncpu() {
   if command -v nproc >/dev/null 2>&1; then nproc
@@ -430,7 +435,8 @@ notify() {
 is_gt() { awk -v a="$1" -v b="$2" 'BEGIN{ if ((a+0)>(b+0)) exit 0; exit 1 }'; }
 is_lt() { awk -v a="$1" -v b="$2" 'BEGIN{ if ((a+0)<(b+0)) exit 0; exit 1 }'; }
 
-# stamp_claim <issue>: refresh refs/machine-claims/<machine> with issue+PID+ts (issue
+# stamp_claim <issue>: refresh this lane's claim ref (refs/lane-claims/<machine>/<issue> since
+# #3393) with issue+PID+ts (issue
 # #2655). PID stamped is the SUPERVISOR's ($$) — the stable per-machine anchor,
 # not a transient worker subprocess. A non-numeric/empty issue is stamped as "0"
 # (unknown): the reaper then governs purely on age + open-PR (a "0" issue can
@@ -442,22 +448,38 @@ stamp_claim() {
   [[ -n "$CLAIM_CMD" ]] || return 0
   case "$issue" in '' | *[!0-9]*) issue=0 ;; esac
   if HEARTBEAT_MACHINE="$CLAIM_MACHINE" $CLAIM_CMD stamp "$issue" "$$" >/dev/null 2>&1; then
+    # What was ACTUALLY stamped, which is not `CLAIM_ISSUE` (#3393). `CLAIM_ISSUE` is the NEXT
+    # spawn's issue and is deliberately cleared on `finalized`, so by clean-exit time it is empty
+    # and cannot name the ref this supervisor wrote. Recording it here is the only place that knows.
+    CLAIM_STAMPED_ISSUE="$issue"
     log "claim stamped: machine=$CLAIM_MACHINE issue=$issue pid=$$"
   else
     log "WARN: claim stamp failed (machine=$CLAIM_MACHINE issue=$issue) — ref not refreshed this iteration (non-fatal)"
   fi
 }
 
-# clear_claim: delete refs/machine-claims/<machine> on a CLEAN supervisor exit (issue
-# #2655). `reap` refuses to delete a ref whose issue still has an open PR, so a
-# supervisor that stops with an unfinished endgame leaves the claim in place for
-# adoption rather than orphaning it. Non-fatal on failure.
+# clear_claim: delete this LANE's claim ref on a CLEAN supervisor exit (issue #2655; per-lane
+# since #3393). `reap` refuses to delete a ref whose issue still has an open PR, so a supervisor
+# that stops with an unfinished endgame leaves the claim in place for adoption rather than
+# orphaning it. Non-fatal on failure.
+#
+# THE ISSUE MUST BE PASSED, and getting this wrong is silent (#3393). `reap <machine>` with no
+# issue now targets the LEGACY per-machine ref, so omitting it would leave this lane's real ref
+# behind while cheerfully reporting a clean clear — and a claim ref nothing deletes pins its board
+# item at In Progress indefinitely. When the issue is still unknown, `CLAIM_ISSUE` is empty and
+# nothing was stamped, so there is no ref to clear.
 clear_claim() {
   [[ -n "$CLAIM_CMD" ]] || return 0
-  if HEARTBEAT_MACHINE="$CLAIM_MACHINE" $CLAIM_CMD reap "$CLAIM_MACHINE" >/dev/null 2>&1; then
-    log "claim cleared on clean exit: machine=$CLAIM_MACHINE"
+  local issue="$CLAIM_STAMPED_ISSUE"
+  case "$issue" in *[!0-9]*) issue="" ;; esac
+  if [[ -z "$issue" ]]; then
+    log "claim clear skipped: this supervisor never stamped a lane claim, so there is no ref to clear"
+    return 0
+  fi
+  if HEARTBEAT_MACHINE="$CLAIM_MACHINE" $CLAIM_CMD reap "$CLAIM_MACHINE" "$issue" >/dev/null 2>&1; then
+    log "claim cleared on clean exit: machine=$CLAIM_MACHINE issue=$issue"
   else
-    log "WARN: claim clear declined/failed for machine=$CLAIM_MACHINE (open PR or push error) — left for adoption (non-fatal)"
+    log "WARN: claim clear declined/failed for machine=$CLAIM_MACHINE issue=$issue (open PR or push error) — left for adoption (non-fatal)"
   fi
 }
 
