@@ -3205,6 +3205,14 @@ assert_says 'case (mb1) reviewed-sha is the merge-base-anchored range' "^reviewe
 assert_says 'case (mb1) assert-base names the MERGE-BASE, with the tip beside it' \
   "^assert-base: $mb_base \(merge-base of origin/main and HEAD; origin/main tip $mb_tip\)\$"
 assert_lacks 'case (mb1) the TIP is not what the assert compared against' "^assert-base: $mb_tip "
+# Key POSITION is part of the block contract (see case (j2)): `assert-base:` sits with the other
+# endpoints, between `reviewed-sha:` and `job:`, where a reader compares them.
+_mb1_key_order=$(summary_key_order "$OUT" 'head-sha|reviewed-sha|assert-base|job')
+if [ "$_mb1_key_order" = "head-sha,reviewed-sha,assert-base,job" ]; then
+  ok 'case (mb1): assert-base is positioned between reviewed-sha and job'
+else
+  bad "case (mb1): unexpected key order: $_mb1_key_order"
+fi
 
 printf '== case (mb2): with the base advanced, a STALE HEAD still FAILs (negative control) ==\n'
 reset_stub

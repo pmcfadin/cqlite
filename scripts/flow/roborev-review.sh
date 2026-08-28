@@ -373,7 +373,8 @@ re-run inherit a waiver written for a different review, which is the hole the jo
 binding closes.
 
 A recheck INHERITS NOTHING from the original run. sha-assert re-compares the record's
-git_ref against this base and head; the record's own review text becomes the
+git_ref against this base and head — 'this base' being the MERGE-BASE of --base and HEAD,
+the base of the range under review, which the block names under assert-base: (#3392); the record's own review text becomes the
 transcript, so review-completed, both vacuity tiers and findings are re-asserted from
 it (a record with no review text leaves the transcript empty, which fails closed);
 roborev-exit reports SKIP rather than claiming an exit status for a process that did
@@ -483,7 +484,7 @@ a worktree; the gate's hermetic check uses a stub reviewer.
      RESULT is PASS (exit 0) only when the review is also finding-free; a review with
      open findings correctly reports FINDINGS and exits 1 — that is not a probe
      failure, and the scope assertions above are what the probe is for.
-  4. Record the observed head-sha/reviewed-sha/job/census/tokens in the PR body,
+  4. Record the observed head-sha/reviewed-sha/assert-base/job/census/tokens in the PR body,
      and re-run the probe after any roborev version bump.
 EOF
 }
