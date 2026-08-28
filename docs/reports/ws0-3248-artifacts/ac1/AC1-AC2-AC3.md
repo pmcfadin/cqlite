@@ -83,7 +83,8 @@ Measured: the shared bucket is **7,348 cyc/row on the bare scan** — a large ab
 allocator, can close the ratio.
 
 **And a result the issue did not anticipate: only ~57% of the gap is Flight-only CODE.** A further
-~24% is the *same* shared code running **21.5% more expensively** on the Flight arm (8,926 vs 7,348),
+~24% is the *same* shared SYMBOLS running **21.5% more expensively** on the Flight arm (8,926 vs 7,348
+by `aggregate-profiles.py`; the machine-code reading of "same" is withdrawn below),
 and ~41% is allocator work. Candidate causes, none established here: cache pressure from Arrow
 buffers, and SMT contention — #3096's pinning puts the `spawn_blocking` merge/encode thread and the
 async gRPC framing thread on **one physical core's two hyperthreads** (`taskset -c 2,10`). That is a
@@ -132,9 +133,11 @@ measurable:
 | different machine code (187) | 4,912 | 5,877 | +19.7% |
 | **UNRESOLVABLE** (55 duplicated names) | 1,625 | 2,054 | +26.4% |
 
-**The +21.2% is unaffected.** It comes from the bucket totals, assumes nothing about machine-code
-identity, and was identical under all four oracles — which is exactly why it is the number the report
-leads with and this decomposition is not.
+**The ~21% is unaffected.** It is a sum over the whole shared bucket, so it assumes nothing about
+machine-code identity, and no oracle changed it — only its decomposition moved. Two independent paths
+agree to 0.3 pp: **+21.5%** (7,348 → 8,926) from `aggregate-profiles.py`'s bucket totals, and
+**+21.2%** (7,327 → 8,879) from this script's flat-profiles × profiled-cyc/row route. That is why it
+is the figure the report leads with and this decomposition is not.
 
 ---
 
