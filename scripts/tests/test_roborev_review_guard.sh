@@ -4815,6 +4815,48 @@ _wr_vname='WRAP''PER'
 # close it over the VALUE, so the allowlist is by name and the aliases' own uses are constrained below.
 _wr_aliases='_gm_real_wrapper _wr_saved'
 _wr_ref='"$'"$_wr_vname"'"'
+# COMMAND POSITION IS COMPUTED, NOT SUBSTRING-MATCHED (roborev job 36, Medium). The invocation rule
+# was `case $line in *"bash $ref"*)`, an UNANCHORED substring — so `grep bash "$WRAPPER"` was accepted
+# as an invocation, and a doctrine read walked straight through the "closed" grammar. That is the same
+# error as (c) one round earlier: asking whether a permitted shape appears ANYWHERE on the line rather
+# than whether the line IS that shape.
+#
+# Markers were the first thing tried and do not work here: five of the eight invocation sites end in a
+# `\` continuation, and a line ending in a backslash cannot carry a trailing comment. So the line is
+# reduced to its COMMAND WORD by stripping leading whitespace and any `NAME=value` environment prefixes
+# (this file's invocations carry `STUB_INVOKED=`/`PATH=`), and the result must BEGIN with the invocation.
+# The grammar being stripped is deliberately tiny — env prefixes only, no general shell parsing.
+_wr_cmdpos() {
+  _c=$1
+  _c=${_c#"${_c%%[! ]*}"}
+  while :; do
+    case "$_c" in
+      [A-Za-z_]*=*)
+        _n=${_c%%=*}
+        case "$_n" in *[!A-Za-z0-9_]*) break ;; esac
+        _r=${_c#*=}
+        case "$_r" in
+          '"'*) _r=${_r#\"}; _r=${_r#*\"} ;;
+          *) _v=${_r%% *}; _r=${_r#"$_v"} ;;
+        esac
+        _c=${_r#"${_r%%[! ]*}"}
+        ;;
+      *) break ;;
+    esac
+  done
+  printf '%s' "$_c"
+}
+# TRUE only when the line's COMMAND is a wrapper invocation: bare `bash`, or an explicit
+# interpreter path ending in `/bash`. Anything else -- including a scan that merely mentions
+# the word `bash` in its arguments -- is not an invocation.
+_wr_is_invocation() {
+  _i=$(_wr_cmdpos "$1")
+  case "$_i" in
+    "bash $_wr_ref"*) return 0 ;;
+    '"'*"/bash\" $_wr_ref"*) return 0 ;;
+  esac
+  return 1
+}
 _wr_bad_reads=""
 _wr_bad_spelling=""
 _wr_multi=""
@@ -4843,10 +4885,8 @@ while IFS= read -r _wr_num_line; do
     _wr_multi="$_wr_multi${_wr_multi:+; }$_wr_num_line"
     continue
   fi
-  # (3) FORM. An INVOCATION, either bare `bash` or an explicit interpreter path.
-  case "$_wr_code" in
-    *"bash $_wr_ref"*|*"bash\" $_wr_ref"*) continue ;;
-  esac
+  # (3) FORM. An INVOCATION -- decided by COMMAND POSITION, never by substring.
+  if _wr_is_invocation "$_wr_code"; then continue; fi
   # A whole-value SAVE into an ALLOWLISTED alias: `NAME="$WRAPPER"` and nothing else on the line.
   case "$_wr_code" in
     *"=$_wr_ref")
@@ -4881,7 +4921,7 @@ _wr_probe_line() {
   _p_q=$(printf '%s\n' "$_p_code" | grep -oF "$_wr_ref" | wc -l | tr -d '[:space:]')
   [ "${_p_n:-0}" -ne "${_p_q:-0}" ] && { printf 'spelling\n'; return; }
   [ "${_p_n:-0}" -gt 1 ] && { printf 'arity\n'; return; }
-  case "$_p_code" in *"bash $_wr_ref"*|*"bash\" $_wr_ref"*) printf 'ok\n'; return ;; esac
+  if _wr_is_invocation "$_p_code"; then printf 'ok\n'; return; fi
   case "$_p_code" in
     *"=$_wr_ref")
       _p_nm=${_p_code%%=*}
@@ -4896,7 +4936,10 @@ for _wr_case in \
   "arity:bash $_wr_ref --help; grep -c q $_wr_ref" \
   "form:_x=\$(grep -c foo $_wr_ref)" \
   "form:sed -n 1p $_wr_ref" \
+  "form:grep bash $_wr_ref" \
+  "form:_x=\$(awk /bash/ $_wr_ref)" \
   "form:subject=$_wr_ref" \
+  "ok:STUB_INVOKED=\"\$INVOKED\" PATH=\"\$stubbin:\$PATH\" bash $_wr_ref --help" \
   "ok:  bash $_wr_ref --help" \
   "ok:_gm_real_wrapper=$_wr_ref"; do
   _wr_want=${_wr_case%%:*}
@@ -4904,7 +4947,7 @@ for _wr_case in \
   [ "$_wr_got" = "$_wr_want" ] || _wr_ctl_bad="$_wr_ctl_bad [want=$_wr_want got=$_wr_got: ${_wr_case#*:}]"
 done
 if [ -z "$_wr_ctl_bad" ]; then
-  ok 'structural control (#3367): the grammar classifies all eight synthetic lines correctly — it rejects the braced, unquoted, compound-line and unallowlisted-alias bypasses roborev found, rejects plain doctrine scans, and still accepts invocations and whole-value saves'
+  ok 'structural control (#3367): the grammar classifies all eleven synthetic lines correctly — it rejects the braced, unquoted, compound-line, unallowlisted-alias and mentions-the-word-bash bypasses roborev found, rejects plain doctrine scans, and still accepts invocations and whole-value saves'
 else
   bad "structural control (#3367): the permitted-form grammar misclassifies a synthetic read, so its verdict on the real file is not trustworthy —$_wr_ctl_bad"
 fi
