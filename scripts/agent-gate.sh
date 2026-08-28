@@ -6077,21 +6077,44 @@ run_flight_tests() {
   # (`missing-fixtures: OPT-OUT`), which a silent per-lane veto destroys.
   if [ -z "$ONLY" ] && [ "$LITE" -eq 0 ] && [ -n "${CQLITE_DATASETS_ROOT:-}" ] \
      && [ "${AGENT_GATE_ALLOW_MISSING_FIXTURES:-0}" != 1 ]; then
-    local _fx_dir _fx_ok=0
-    for _fx_dir in "$CQLITE_DATASETS_ROOT"/sstables/test_timeseries/sensor_data-*; do
-      [ -d "$_fx_dir" ] || continue
-      # Both halves: the directory alone is not enough — the real-fixture test also returns early
-      # when no `-Statistics.db` is present, which is exactly the partial-corpus shape.
-      if ls "$_fx_dir"/*-Statistics.db >/dev/null 2>&1; then _fx_ok=1; break; fi
+    # EVERY prefix-matching entry must be usable, not just one (roborev round-32, Medium). The Rust
+    # test picks the FIRST entry whose name starts with `sensor_data-` in UNSPECIFIED `read_dir`
+    # order and commits to it — so "some matching directory is complete" does not imply the test
+    # will find a complete one. A second, incomplete `sensor_data-*` directory (or a prefix-matching
+    # REGULAR FILE, which `read_dir` also yields and which makes the test's own `read_dir(&dir)`
+    # fail into its early return) is enough to make the test skip while this lane reports PASS.
+    #
+    # Requiring every match to be a directory carrying a `-Statistics.db` makes the guarantee
+    # ORDER-INDEPENDENT, which is the only way to align a shell preflight with a consumer that
+    # chooses arbitrarily. The alternative roborev offered — replicating the test's exact selection
+    # here — would be a second implementation of the test's choice, and it would go stale the moment
+    # the test changed how it selects.
+    local _fx_entry _fx_seen=0 _fx_bad=""
+    for _fx_entry in "$CQLITE_DATASETS_ROOT"/sstables/test_timeseries/sensor_data-*; do
+      # An unexpanded glob means no match at all; the count check below reports that.
+      [ -e "$_fx_entry" ] || continue
+      _fx_seen=$((_fx_seen + 1))
+      if [ ! -d "$_fx_entry" ]; then
+        _fx_bad="$_fx_bad $(basename "$_fx_entry")(not-a-directory)"
+      elif ! ls "$_fx_entry"/*-Statistics.db >/dev/null 2>&1; then
+        _fx_bad="$_fx_bad $(basename "$_fx_entry")(no-Statistics.db)"
+      fi
     done
-    if [ "$_fx_ok" -ne 1 ]; then
+    if [ "$_fx_seen" -eq 0 ] || [ -n "$_fx_bad" ]; then
       status=FAIL
       {
         echo "[$name] FAIL-CLOSED: the real-fixture stats test in this unit suite needs"
         echo "        test_timeseries/sensor_data-*/ WITH a -Statistics.db under"
-        echo "        CQLITE_DATASETS_ROOT ($CQLITE_DATASETS_ROOT), and it is absent. That test"
-        echo "        returns early and PASSES when the fixture is missing, so this lane would"
-        echo "        report a green having skipped the coverage it advertises (#3220)."
+        echo "        CQLITE_DATASETS_ROOT ($CQLITE_DATASETS_ROOT)."
+        if [ "$_fx_seen" -eq 0 ]; then
+          echo "        NOTHING matches sensor_data-* there."
+        else
+          echo "        $_fx_seen entry/entries match, and these are unusable:$_fx_bad"
+          echo "        EVERY match must qualify: the test takes the FIRST read_dir match in"
+          echo "        unspecified order, so one bad entry is enough to make it skip."
+        fi
+        echo "        That test returns early and PASSES when the fixture is missing, so this lane"
+        echo "        would report a green having skipped the coverage it advertises (#3220)."
         echo "        Remedy: bash test-data/scripts/fetch-datasets.sh, then export the"
         echo "        CQLITE_DATASETS_ROOT line it prints."
       } | tee "$log"

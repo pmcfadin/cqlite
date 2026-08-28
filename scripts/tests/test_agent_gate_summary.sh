@@ -3422,6 +3422,71 @@ else
   fi
 fi
 
+# BEHAVIOURAL, not just structural (roborev round-32, Medium): the preflight must require EVERY
+# `sensor_data-*` match to qualify, because the Rust test takes the FIRST `read_dir` match in
+# UNSPECIFIED order. "Some match is complete" does not imply "the test will find a complete one",
+# so a second incomplete directory — or a prefix-matching regular file, which read_dir also yields —
+# is enough to make the test skip while the lane reports PASS.
+#
+# The preflight block is extracted from the gate and run against doctored corpus roots, with the few
+# variables it touches stubbed. No cargo, no gate slot, sub-second.
+if ! command -v python3 >/dev/null 2>&1; then
+  skipped "1699-r32-preflight-behaviour: needs python3 — NOT verified here"
+else
+  pf_report_="$tmp/1699-r32-pf.txt"
+  python3 - "$GATE" "$tmp" > "$pf_report_" 2>&1 <<'PF_PY'
+import os, subprocess, sys
+gate, tmp = sys.argv[1], sys.argv[2]
+src = open(gate).read()
+i = src.index("  # LANE-SPECIFIC FIXTURE PREFLIGHT")
+j = src.index("  # The enabled set.")
+block = src[i:j]
+
+def run(root):
+    harness = (
+        'ONLY=""\nLITE=0\nname=flight-tests\nlog=/dev/null\nstatus=PASS\nstart=0\n'
+        'record_result(){ :; }\nCQLITE_DATASETS_ROOT="%s"\n'
+        'f(){\n%s\n echo PREFLIGHT-PASSED\n}\nf\n' % (root, block)
+    )
+    r = subprocess.run(["bash", "-c", harness], capture_output=True, text=True)
+    return (r.stdout + r.stderr)
+
+# (a) every match complete -> the preflight passes
+good = os.path.join(tmp, "pf-good"); d = os.path.join(good, "sstables/test_timeseries/sensor_data-a")
+os.makedirs(d, exist_ok=True); open(os.path.join(d, "nb-1-big-Statistics.db"), "w").close()
+out = run(good)
+print("CASE good:", "PASS" if "PREFLIGHT-PASSED" in out else "FAIL")
+
+# (b) a SECOND, incomplete match -> must fail closed and name it
+bad = os.path.join(tmp, "pf-bad")
+for n in ("sensor_data-a", "sensor_data-b"):
+    os.makedirs(os.path.join(bad, "sstables/test_timeseries", n), exist_ok=True)
+open(os.path.join(bad, "sstables/test_timeseries/sensor_data-a/nb-1-big-Statistics.db"), "w").close()
+out = run(bad)
+print("CASE second_incomplete:", "FAIL-CLOSED" if ("FAIL-CLOSED" in out and "sensor_data-b" in out) else "MISSED")
+
+# (c) a prefix-matching regular FILE -> must fail closed
+fil = os.path.join(tmp, "pf-file"); base = os.path.join(fil, "sstables/test_timeseries")
+os.makedirs(os.path.join(base, "sensor_data-a"), exist_ok=True)
+open(os.path.join(base, "sensor_data-a/nb-1-big-Statistics.db"), "w").close()
+open(os.path.join(base, "sensor_data-stray"), "w").close()
+out = run(fil)
+print("CASE prefix_file:", "FAIL-CLOSED" if ("FAIL-CLOSED" in out and "not-a-directory" in out) else "MISSED")
+
+# (d) nothing matches -> must fail closed
+none = os.path.join(tmp, "pf-none"); os.makedirs(os.path.join(none, "sstables/test_timeseries"), exist_ok=True)
+out = run(none)
+print("CASE no_match:", "FAIL-CLOSED" if ("FAIL-CLOSED" in out and "NOTHING matches" in out) else "MISSED")
+PF_PY
+  for want_ in "CASE good: PASS" "CASE second_incomplete: FAIL-CLOSED" "CASE prefix_file: FAIL-CLOSED" "CASE no_match: FAIL-CLOSED"; do
+    if grep -qF "$want_" "$pf_report_"; then
+      ok "1699-r32-preflight-behaviour[${want_%%:*}]: ${want_#*: }"
+    else
+      bad "1699-r32-preflight-behaviour[${want_%%:*}]: expected '${want_#*: }' — got: $(grep -F "${want_%%:*}" "$pf_report_" | head -1)"
+    fi
+  done
+fi
+
 # The harness must not compile into a predictable shared directory (round-30, Medium): concurrent
 # harnesses corrupt each other, and on a multi-user host a pre-created directory means the harness
 # executes artifacts somebody else controls.
