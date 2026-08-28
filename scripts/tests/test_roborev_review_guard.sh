@@ -4701,6 +4701,22 @@ if [ -z "$_cls_all" ]; then
   bad 'structural: the all-lines capture for the classifier scan is EMPTY, so the identifier scan below would report CLEAN having examined nothing'
 fi
 _classifier=$(_cls_hits "$_cls_all" | tr '\n' ' ')
+# THE 4 PROSE-SHAPED VERDICT STRINGS, IN AN ASSIGNMENT CONTEXT ONLY (roborev job 63). Dropping them
+# outright closed six rounds of heredoc parsing but opened a real AC3 gap: a classifier rebuilt under
+# NEW variable names still emits the OLD verdict strings, so `delivery_mode=mixed-delivery` read as
+# GONE. A verdict string in PROSE is not a classifier; a verdict string being ASSIGNED is.
+#
+# This is issue comment 3's option (b) -- "require the token to appear in an assignment context
+# rather than as a bare substring" -- which that comment ranked first and I passed over for option
+# (a). It needs NO heredoc exemption, because an assignment does not occur in help text, so it does
+# not reopen the parsing family. Measured on the three real flow scripts: 0 hits, and it matches
+# both `delivery_mode=mixed-delivery` and `mode="mixed-delivery"` while leaving the usage prose alone.
+_cls_prose_assigned=$(printf '%s\n' "$_cls_all" \
+  | grep -oE '=["'"'"']?(mixed-delivery|delegated-oversize|snapshot-unbound|unparseable-instruction)' \
+  | sed 's/^=["'"'"']*//' | sort -u | tr '\n' ' ')
+_cls_prose_assigned=${_cls_prose_assigned% }
+[ -z "$_cls_prose_assigned" ] || _classifier="$_classifier $_cls_prose_assigned"
+_classifier=${_classifier# }
 _classifier=${_classifier% }
 # THE 4 PROSE-SHAPED VERDICT STRINGS ARE NOT SCANNED AT ALL (roborev jobs 51/53/54/56/57/58).
 # `mixed-delivery`, `delegated-oversize`, `snapshot-unbound` and `unparseable-instruction` are
