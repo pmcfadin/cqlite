@@ -69,6 +69,12 @@ ps_remove_worktree() {
 ps_scratch_init() {
   PS_REPO_ROOT="$1"
   PS_WORKTREES=()
+  # Worktrees a CASE stands up outside the normal scratch bookkeeping — case 19's
+  # decoys, which must exist OUTSIDE $PS_TMPROOT to be realistic. They are reclaimed
+  # only at exit/signal, never mid-run, so registering them here cannot interfere with a
+  # case that removes them explicitly as part of what it measures (roborev r16).
+  PS_EXTRA_WORKTREES=()
+  PS_EXTRA_ROOTS=()
   PS_CLEANED=0
   PS_TMPROOT="$(mktemp -d "${TMPDIR:-/tmp}/pub-surface-selftest.XXXXXX")"
   # EXIT alone is not enough — it does not fire on a signal. INT/TERM/HUP are what a
@@ -88,6 +94,13 @@ ps_cleanup() {
   local wt
   for wt in "${PS_WORKTREES[@]:-}"; do
     ps_remove_worktree "$PS_REPO_ROOT" "$wt"
+  done
+  for wt in "${PS_EXTRA_WORKTREES[@]:-}"; do
+    ps_remove_worktree "$PS_REPO_ROOT" "$wt"
+  done
+  local xr
+  for xr in "${PS_EXTRA_ROOTS[@]:-}"; do
+    [ -n "$xr" ] && rm -rf "$xr"
   done
   [ -n "${PS_TMPROOT:-}" ] && rm -rf "$PS_TMPROOT"
   return 0
@@ -184,3 +197,14 @@ ps_scratch_tree_from() {
 # duration tracks machine state, and the only real lever is FEWER doc builds, not
 # fewer worktrees. One worktree per case is kept because it is simpler and gives each
 # case total isolation.
+
+# ps_register_extra <worktree-path> [containing-root]: record a worktree a case created
+# outside $PS_TMPROOT so a signal or an assertion failure before its explicit removal
+# cannot leave the directory AND the git registration behind (roborev r16). A leaked
+# registration is worse than a leaked directory here: this repository's worktree registry
+# is shared across every /data/lanes/lane-* checkout, so it is visible to other lanes.
+ps_register_extra() {
+  PS_EXTRA_WORKTREES+=("$1")
+  [ -n "${2:-}" ] && PS_EXTRA_ROOTS+=("$2")
+  return 0
+}

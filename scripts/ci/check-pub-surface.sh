@@ -508,7 +508,18 @@ END {
   for (i = 1; i <= n; i++) {
     if (!INCODE[i]) continue
     if (!BRACE_UNRELIABLE && BRACE_MIN[i] != 0) continue
-    if (N[i] ~ /^[[:space:]]*pub([[:space:]]*\([^)]*\))?[[:space:]]*$/) {
+    # THE LINE MUST *END* IN A DANGLING VISIBILITY TOKEN — not consist solely of one.
+    # The first version matched only a whole line of `pub`, so `#[allow(dead_code)] pub`
+    # followed by `mod probe;` slipped through (roborev r16). That is the SAME "pattern
+    # narrower than the hole" shape as the macro refusal's line-anchored version, and I
+    # wrote it one round AFTER recording the lesson — so it is stated here as a rule
+    # rather than a note: MATCH THE FAMILY (a line ENDING in a dangling qualifier),
+    # never the one reported spelling.
+    #
+    # Cannot false-fire on prose or literals: `normalize()` blanks comments AND string
+    # contents. Cannot false-fire on an identifier ending in "pub" (`republic`) because
+    # the token is boundary-anchored.
+    if (N[i] ~ /(^|[^A-Za-z0-9_])pub([[:space:]]*\([^)]*\))?[[:space:]]*$/) {
       printf "V\tline %d: a depth-0 line is nothing but a visibility qualifier, so a declaration is split across lines: `%s`\n", i, squash(substr(ltrim(N[i]), 1, 72))
     }
   }

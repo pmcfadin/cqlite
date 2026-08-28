@@ -654,6 +654,7 @@ grep -qF 'PS_CLEANED=1' "$_lib" \
 leaked_root="$(mktemp -d "${TMPDIR:-/tmp}/pub-surface-selftest.leakedXXXXXX")"
 git -C "$REPO_ROOT" worktree add --detach --quiet "$leaked_root/leaked" HEAD >/dev/null 2>&1 \
   || fail_case "case 19 setup: could not create the decoy leaked worktree"
+ps_register_extra "$leaked_root/leaked" "$leaked_root"
 git -C "$REPO_ROOT" worktree list --porcelain | grep -qF "$leaked_root/leaked" \
   || fail_case "case 19 setup: the decoy worktree was never registered, so the case would prove nothing"
 git -C "$REPO_ROOT" worktree prune >/dev/null 2>&1 || true
@@ -678,6 +679,7 @@ rm -rf "$leaked_root"
 peer_root="$(mktemp -d "${TMPDIR:-/tmp}/pub-surface-selftest.peerXXXXXX")"
 git -C "$REPO_ROOT" worktree add --detach --quiet "$peer_root/live" HEAD >/dev/null 2>&1 \
   || fail_case "case 19 setup: could not create the concurrent-run decoy"
+ps_register_extra "$peer_root/live" "$peer_root"
 cat >"$TMPROOT/peer-probe.sh" <<PEER
 #!/usr/bin/env bash
 set -euo pipefail
@@ -1557,7 +1559,38 @@ bash "$wt52b/$GUARD_REL" >"$TMPROOT/case52b.out" 2>&1
 c52b_rc=$?
 set -e
 [ "$c52b_rc" -eq 0 ] || fail_case "case 52(b) — ordinary one-line \`pub\` items were refused as split declarations; got: $(cat "$TMPROOT/case52b.out")"
-echo "OK (52): a declaration split across lines REFUSES (pub, pub(crate), pub(super)), while ordinary one-line \`pub\` items stay GREEN"
+
+# (c) THE FAMILY, NOT THE SPELLING (roborev r16). Refusal V first matched only a line
+#     consisting SOLELY of `pub`, so `#[allow(dead_code)] pub` followed by `mod probe;`
+#     slipped through — the same "pattern narrower than the hole" shape as the macro
+#     sweep's line-anchored version, written one round AFTER that lesson was recorded.
+#     It now matches a line ENDING in a dangling visibility token.
+c52_k=0
+for c52c in '#[allow(dead_code)] pub' '#[allow(dead_code)] pub(crate)'; do
+  c52_k=$((c52_k + 1))
+  scratch_tree "split-decl-attr-$c52_k"; wt52c="$SCRATCH"
+  printf '\n%s\nmod probe_split;\n' "$c52c" >>"$wt52c/cqlite-core/src/lib.rs"
+  printf '#![cfg(feature = "benchmarks")]\n//! inner-gated\npub fn p() {}\n' >"$wt52c/cqlite-core/src/probe_split.rs"
+  set +e
+  bash "$wt52c/$GUARD_REL" >"$TMPROOT/case52c.out" 2>&1
+  c52c_rc=$?
+  set -e
+  [ "$c52c_rc" -ne 0 ] || fail_case "case 52(c$c52_k) — \`$c52c\` followed by \`mod probe_split;\` passed GREEN: a TRAILING visibility token after a same-line attribute is the same split declaration; got: $(cat "$TMPROOT/case52c.out")"
+  grep -qF "nothing but a visibility qualifier" "$TMPROOT/case52c.out" \
+    || fail_case "case 52(c$c52_k) — refused, but not via Refusal V; got: $(cat "$TMPROOT/case52c.out")"
+done
+
+# (d) GREEN controls for the widened match: an identifier ENDING in "pub", and a comment
+#     and a string literal ending in the word. Blanking makes the last two inert; the
+#     first relies on the token boundary anchor.
+scratch_tree split-decl-lookalikes; wt52d="$SCRATCH"
+printf '\nconst REPUBLIC: u8 = 1;\nfn republic() {}\n// a note about pub\nconst SP: &str = "trailing pub";\n' >>"$wt52d/cqlite-core/src/lib.rs"
+set +e
+bash "$wt52d/$GUARD_REL" >"$TMPROOT/case52d.out" 2>&1
+c52d_rc=$?
+set -e
+[ "$c52d_rc" -eq 0 ] || fail_case "case 52(d) — an identifier ending in \"pub\" (\`republic\`), a comment ending in \`pub\`, or a string ending in \`pub\` was refused as a split declaration; got: $(cat "$TMPROOT/case52d.out")"
+echo "OK (52): a declaration split across lines REFUSES — bare, parenthesised, and TRAILING after a same-line attribute — while ordinary one-line \`pub\` items, \`republic\`, and comments/strings ending in \`pub\` stay GREEN"
 
 # ---------------------------------------------------------------------------
 # 36. GREEN — THE POSITIVE CONTROL for 29-38.
