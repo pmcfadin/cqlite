@@ -145,8 +145,14 @@ python3 "$GUARDS" corpus --corpus "$CORPUS" > "$CORPUS_ID_JSON" \
 echo "[sweep] corpus: $(cat "$CORPUS_ID_JSON")"
 
 # --- build the worker ----------------------------------------------------------
-echo "[sweep] building worker (release, repo profile)..."
-( cd "$WORKER_SRC" && CARGO_TARGET_DIR="$WORKER_TARGET" cargo build --release ) >"$RESULTS/worker-build.log" 2>&1 \
+# `--locked` IS THE PIN. `scan-worker/` is its own workspace, so the repo's root
+# `Cargo.lock` does not reach it; its own lockfile is COMMITTED beside its
+# manifest, and `--locked` makes cargo refuse to build if that lockfile would
+# have to change. Without it a drifted or absent lockfile is silently re-resolved
+# and the measured binary is a different binary — which is what `=`-exact DIRECT
+# pins alone could not prevent, since they say nothing about TRANSITIVE versions.
+echo "[sweep] building worker (release, repo profile, --locked)..."
+( cd "$WORKER_SRC" && CARGO_TARGET_DIR="$WORKER_TARGET" cargo build --release --locked ) >"$RESULTS/worker-build.log" 2>&1 \
   || { echo "FATAL: worker build failed, see $RESULTS/worker-build.log" >&2; exit 2; }
 WORKER_BIN="$WORKER_TARGET/release/ws0-3299-scan-worker"
 [[ -x "$WORKER_BIN" ]] || { echo "FATAL: $WORKER_BIN not built" >&2; exit 2; }

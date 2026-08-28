@@ -13,21 +13,24 @@ publish = false
 
 [workspace]
 
-# WHY EVERY REGISTRY VERSION IS `=`-EXACT. This crate sits OUTSIDE the repo
-# workspace (see the `[workspace]` table above), so the root `Cargo.lock` does not
-# pin its build, and its own lockfile is gitignored — roborev appends a COMPILED-IN
-# `**/Cargo.lock` deny-list that no configuration disables (#3278), so a committed
-# lockfile here would be a file the reviewer can never receive. With caret ranges
-# the binary that produced every number in ../../ws0-3299-report.md could not be
-# rebuilt reliably: `cargo build` months later would resolve newer minors and
-# measure different codegen. The versions below are the ones ACTUALLY USED for the
-# published measurements (rustc 1.97.1, the repo's pinned toolchain).
+# HOW THE MEASURED BINARY IS PINNED. This crate sits OUTSIDE the repo workspace
+# (see the `[workspace]` table above), so the root `Cargo.lock` does not reach it.
+# Two mechanisms, and it takes both:
 #
-# SCOPE OF THE CLAIM, stated rather than implied: `=` pins every DIRECT registry
-# dependency. TRANSITIVE versions are still cargo-resolved and are NOT pinned by
-# this manifest — the full resolved graph of the measured build is recorded beside
-# it in `measured-build-lockfile.txt` (a lockfile under a reviewable name; copy it
-# to `Cargo.lock` to reproduce the exact graph).
+#   1. `Cargo.lock` BESIDE THIS FILE, committed, pinning the whole TRANSITIVE
+#      closure; `sweep.sh` builds `cargo build --release --locked`, so a drifted
+#      or absent lockfile FAILS the build instead of silently re-resolving. This
+#      is the mechanism that actually makes the binary reproducible.
+#   2. The `=`-exact direct requirements below, which state the intended version
+#      in the file a reviewer receives — roborev's compiled-in `**/Cargo.lock`
+#      deny-list (#3278) means the lockfile itself never reaches a review diff.
+#      `check-exact-pins.py` asserts the two AGREE, so neither drifts alone.
+#
+# `=` alone was NOT sufficient and was the round-4 finding: exact DIRECT pins say
+# nothing about transitive versions, so `cargo build` months later still resolves
+# a different graph and measures different codegen. The versions below are the
+# ones ACTUALLY USED for the published measurements in ../../ws0-3299-report.md
+# (rustc 1.97.1, the repo's pinned toolchain).
 [dependencies]
 # EXACTLY the feature set `tools/ws0-corpus-gen` gives cqlite-core for
 # `ws0-scan-bench`: `cli-helpers` only, and deliberately NOT `arrow` — the bare

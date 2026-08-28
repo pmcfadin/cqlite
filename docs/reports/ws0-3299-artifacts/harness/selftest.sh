@@ -589,11 +589,45 @@ expect_guard_fail EQUIV_NO_SPREAD \
 echo
 echo "-- exact dependency pins (structural) --"
 # THE DEFECT THIS SECTION EXISTS FOR: scan-worker/ is its OWN workspace, so the
-# repo's root Cargo.lock does not pin its build, and its own lockfile is
-# gitignored (roborev's compiled-in `**/Cargo.lock` deny-list, #3278). With caret
-# ranges the binary that produced every published number could not be rebuilt — a
-# later `cargo build` resolves newer minors and measures different codegen.
-expect_ok "worker deps are =exact and the recorded closure agrees" \
+# repo's root Cargo.lock does not pin its build. The first attempt pinned only
+# the DIRECT registry deps `=`-exactly and stored the resolved graph under a
+# non-lockfile name — which pinned NOTHING transitively, because cargo never
+# reads that file. The lockfile is now committed and the build is `--locked`;
+# these cases assert BOTH halves.
+LOCK="$HERE/scan-worker/Cargo.lock"
+if [[ -f "$LOCK" ]]; then
+  echo "ok    [lockfile committed] scan-worker/Cargo.lock is present, so --locked can pin"
+  PASS=$((PASS+1))
+else
+  echo "FAIL  [lockfile committed] scan-worker/Cargo.lock is absent — --locked pins nothing"
+  FAIL=$((FAIL+1))
+fi
+# ...and it must be TRACKED, not merely present: a gitignored lockfile is not
+# there for anyone who checks the tree out, which is the reproducibility claim.
+if git -C "$HERE" ls-files --error-unmatch "$LOCK" >/dev/null 2>&1; then
+  echo "ok    [lockfile tracked] scan-worker/Cargo.lock is committed, not gitignored"
+  PASS=$((PASS+1))
+else
+  echo "FAIL  [lockfile tracked] scan-worker/Cargo.lock is not tracked by git"
+  FAIL=$((FAIL+1))
+fi
+# THE BUILD MUST BE `--locked`. Committing a lockfile pins nothing if the build
+# is free to re-resolve it; the two facts only pin together. Asserted against
+# sweep.sh's text, and NEGATIVE-CONTROLLED below so it cannot pass vacuously.
+assert_locked_build() {  # <file> <label> <want: yes|no>
+  if grep -Eq 'cargo build --release --locked' "$1"; then got=yes; else got=no; fi
+  if [[ "$got" == "$3" ]]; then
+    echo "ok    [$2] cargo build --locked: $got (expected $3)"; PASS=$((PASS+1))
+  else
+    echo "FAIL  [$2] cargo build --locked: $got (expected $3)"; FAIL=$((FAIL+1))
+  fi
+}
+assert_locked_build "$HERE/sweep.sh" "worker build is --locked" yes
+sed 's/cargo build --release --locked/cargo build --release/' "$HERE/sweep.sh" \
+  > "$TMP/sweep-unlocked.sh"
+assert_locked_build "$TMP/sweep-unlocked.sh" "an unlocked build is DETECTED" no
+
+expect_ok "worker deps are =exact and the committed lockfile agrees" \
   python3 "$HERE/check-exact-pins.py" "$HERE/scan-worker/Cargo.toml"
 # NEGATIVE CONTROLS. Without these the check above could pass vacuously.
 mkdir -p "$TMP/pins"
@@ -601,26 +635,26 @@ sed 's/^clap = { version = "=4.6.6"/clap = { version = "4.4"/' \
   "$HERE/scan-worker/Cargo.toml" > "$TMP/pins/caret.toml"
 expect_guard_fail PIN_NOT_EXACT \
   python3 "$HERE/check-exact-pins.py" "$TMP/pins/caret.toml" \
-    "$HERE/scan-worker/measured-build-lockfile.txt"
+    "$LOCK"
 sed 's|^cqlite-core = { path = "\(.*\)", features|cqlite-core = { path = "\1", version = "0.16.1", features|' \
   "$HERE/scan-worker/Cargo.toml" > "$TMP/pins/pathver.toml"
 expect_guard_fail PIN_NOT_EXACT \
   python3 "$HERE/check-exact-pins.py" "$TMP/pins/pathver.toml" \
-    "$HERE/scan-worker/measured-build-lockfile.txt"
+    "$LOCK"
 printf '[package]\nname = "x"\nversion = "0.1.0"\n' > "$TMP/pins/nodeps.toml"
 expect_guard_fail PIN_NOT_EXACT \
   python3 "$HERE/check-exact-pins.py" "$TMP/pins/nodeps.toml" \
-    "$HERE/scan-worker/measured-build-lockfile.txt"
+    "$LOCK"
 expect_guard_fail PIN_MANIFEST_UNREADABLE \
   python3 "$HERE/check-exact-pins.py" "$TMP/pins/does-not-exist.toml" \
-    "$HERE/scan-worker/measured-build-lockfile.txt"
+    "$LOCK"
 expect_guard_fail PIN_LOCK_MISSING \
   python3 "$HERE/check-exact-pins.py" "$HERE/scan-worker/Cargo.toml" \
     "$TMP/pins/no-such-lock.txt"
 # THE DRIFT DIRECTION: the record must be a record OF THIS BUILD. A closure whose
 # clap version is not the pinned one is stale, and a stale record is worse than
 # none — it looks like provenance.
-python3 - "$HERE/scan-worker/measured-build-lockfile.txt" "$TMP/pins/stale.txt" <<'EOF'
+python3 - "$LOCK" "$TMP/pins/stale.txt" <<'EOF'
 import sys
 src, dst = sys.argv[1], sys.argv[2]
 text = open(src).read().replace('name = "clap"\nversion = "4.6.6"',

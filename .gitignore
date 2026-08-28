@@ -8,25 +8,25 @@ target/
 # excluded from the main one and built only under nightly by its own workflow —
 # its lockfile is not part of any shipped image build, so keep it untracked.
 fuzz/Cargo.lock
-# Same case as fuzz/ above: the #3299 measurement harness's scan-worker carries
-# its own `[workspace]` table, so it is a SEPARATE workspace that the agent gate
-# and a root `cargo build` never compile, and its lockfile is not part of any
-# shipped image build. Second, independent reason to keep it untracked: roborev
-# appends a COMPILED-IN deny-list (`**/Cargo.lock`, `**/go.sum`, ...) that no
-# configuration can switch off (#3278), so a committed lockfile here would be
-# silently dropped from the reviewer's diff while `prompt-content:` still
-# expected it — a fail-closed FAIL on a file nobody could get reviewed.
+# MEASUREMENT-HARNESS LOCKFILES ARE TRACKED, and the reasoning that once ignored
+# them is kept here because the trade is real and someone will re-propose it.
 #
-# AND REPRODUCIBILITY DOES NOT DEPEND ON THIS FILE. Ignoring a lockfile would
-# normally leave the measured binary unpinned (the root lockfile does not reach a
-# separate workspace, and caret ranges resolve newer minors later). It does not
-# here, because the pin was moved somewhere a reviewer CAN read: the harness's
-# `scan-worker/Cargo.toml` gives every direct registry dependency an `=`-EXACT
-# version, and the transitive closure of the measured build is committed beside it
-# as `scan-worker/measured-build-lockfile.txt` (a lockfile under a reviewable
-# name — `cp` it to `Cargo.lock` to rebuild the exact graph). So this line hides
-# a redundant artifact, not the pin.
-docs/reports/*-artifacts/**/Cargo.lock
+# The case FOR ignoring: roborev appends a COMPILED-IN deny-list (`**/Cargo.lock`,
+# `**/go.sum`, ...) that no configuration switches off (#3278), so a committed
+# lockfile under `docs/reports/*-artifacts/**` is silently dropped from the
+# reviewer's diff. That is real, and it is why `**/Cargo.lock` was ignored here
+# and the closure committed under a reviewable alias instead.
+#
+# WHY THAT WAS THE WRONG WAY ROUND. `=`-exact DIRECT pins do not pin TRANSITIVE
+# versions, and a lockfile stored under a name cargo does not read pins nothing
+# at all — `cargo build` still resolves a fresh graph, so the binary that produced
+# the published numbers was not reproducible. The two costs are not comparable:
+# an excluded lockfile costs NOISE (one unreviewed generated file, whose content
+# no reviewer would read line-by-line anyway), while an unpinned measured binary
+# costs REPRODUCIBILITY IN THE DELIVERABLE ITSELF. Reproducibility wins. The
+# lockfile is committed, `sweep.sh` builds `--locked` so a drifted lockfile FAILS
+# rather than silently resolving, and the `=`-exact direct pins stay as belt and
+# braces.
 # Python bytecode from the measurement harnesses' own tooling (guards.py is
 # imported by derive.py, so CPython writes one). Generated, never source.
 docs/reports/*-artifacts/**/__pycache__/
