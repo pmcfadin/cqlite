@@ -183,14 +183,23 @@ pub(crate) struct BlockingScanTaskGuard(());
 impl BlockingScanTaskGuard {
     /// Register one running blocking scan task. The ONLY way to make one.
     pub(crate) fn new() -> Self {
-        BLOCKING_SCAN_TASKS_INFLIGHT.fetch_add(1, Ordering::Release);
+        // `AcqRel` for the same chaining reason as the decrement below.
+        BLOCKING_SCAN_TASKS_INFLIGHT.fetch_add(1, Ordering::AcqRel);
         Self(())
     }
 }
 
 impl Drop for BlockingScanTaskGuard {
     fn drop(&mut self) {
-        BLOCKING_SCAN_TASKS_INFLIGHT.fetch_sub(1, Ordering::Release);
+        // `AcqRel`, not `Release` (roborev, issue #3384). A reader's `Acquire` load of
+        // ZERO synchronizes-with the FINAL decrement only. With plain `Release` stores
+        // that leaves the EARLIER tasks' work unordered: if the feed half decrements
+        // last, the reader's subsequent (Relaxed) work-counter load is not guaranteed to
+        // observe the parse half's increments — so the "final count" would not be final,
+        // which is the entire property this gauge exists to provide. `AcqRel` makes each
+        // decrement ACQUIRE the ones before it, chaining happens-before through every
+        // task so the last decrement publishes all of their work.
+        BLOCKING_SCAN_TASKS_INFLIGHT.fetch_sub(1, Ordering::AcqRel);
     }
 }
 

@@ -129,18 +129,25 @@ impl SSTableReader {
             )),
             ScanAdmission::Exempt => None,
         };
+
+        // CAUSAL completion signal for THIS detached task (issue #3384, roborev).
+        // `BatchedScanStream` is dropped without joining its task, so a consumer that
+        // stopped reading cannot otherwise tell "the scan finished" from "the scan is
+        // descheduled between two increments".
+        //
+        // A DROP guard, not a statement at the end of the block, because the common exit
+        // here is CANCELLATION, not completion: the query-row producer owns a
+        // `current_thread` runtime and drops it as it returns, cancelling this future at
+        // its next await — a trailing statement would never run. Measured: it never fired.
+        //
+        // Constructed BEFORE `tokio::spawn` and moved in (roborev): a future dropped
+        // before its FIRST POLL — a runtime shut down between spawn and schedule — would
+        // otherwise never construct the guard, so nothing would publish and every waiter
+        // would time out. Owning it outside the async block makes the guard's lifetime
+        // the TASK's, not the body's.
+        let done = ScanTaskDone;
         let task = tokio::spawn(async move {
-            // CAUSAL completion signal for THIS detached task (issue #3384,
-            // roborev). `BatchedScanStream` is dropped without joining its task, so
-            // a consumer that stopped reading cannot otherwise tell "the scan
-            // finished" from "the scan is descheduled between two increments".
-            //
-            // It is a DROP guard, not a statement at the end of the block, because
-            // the common exit here is CANCELLATION, not completion: the query-row
-            // producer owns a `current_thread` runtime and drops it as it returns,
-            // which cancels this future at its next await — so a trailing statement
-            // would never run. Measured: it never fired. Drop runs on both paths.
-            let _done = ScanTaskDone;
+            let _done = done;
             if let Err(e) = self
                 .run_scan_stream_batched(
                     table_id,
