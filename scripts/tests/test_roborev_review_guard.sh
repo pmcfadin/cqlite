@@ -49,7 +49,6 @@ readonly WRAPPER_REAL="$SCRIPT_DIR/../flow/roborev-review.sh"
 # as `${RUN_WRAPPER_PATH:-$WRAPPER_REAL}`, so an inherited environment value would silently redirect
 # every early run_wrapper call at an arbitrary script and the suite would report on that instead --
 # a hermeticity hole introduced by this very refactor. Only the two gate-mock cases may set it.
-RUN_WRAPPER_PATH=""
 # THE MUTABLE GLOBAL IS FORBIDDEN BY THE SHELL, NOT BY A GREP (roborev job 54). `readonly` on an
 # UNSET name refuses every later assignment form -- `WRAPPER=`, `export WRAPPER=`, `declare
 # WRAPPER=`, `WRAPPER+=`, `printf -v WRAPPER`, `read WRAPPER` (all six measured). The structural
@@ -979,7 +978,15 @@ WRAPPER_PATH_PREFIX=""
 # INSIDE the reviewed repo). Every other run gets the per-process capture parent.
 WRAPPER_TMPDIR=""
 
-run_wrapper() { # run_wrapper <work-dir> [extra wrapper args...]
+run_wrapper() { # run_wrapper [--wrapper <path>] <work-dir> [extra wrapper args...]
+  # THE SCRATCH-COPY PATH IS A PARAMETER, NOT A GLOBAL (roborev job 58). It was
+  # `${RUN_WRAPPER_PATH:-$WRAPPER_REAL}`, and guarding that global meant counting its assignments --
+  # which matched only `NAME=`, so `export`/`declare`/`printf -v`/`read` evaded it. That is the
+  # assignment-syntax enumeration roborev has now corrected me on THREE times (WRAPPER_REAL job 37,
+  # WRAPPER job 54, this). A `local` cannot be written from outside the function, so the third
+  # instance is not fixed but UNEXPRESSIBLE -- the same move that retired the WRAPPER global.
+  local _rw_wrapper="$WRAPPER_REAL"
+  if [ "${1:-}" = "--wrapper" ]; then _rw_wrapper="$2"; shift 2; fi
   local work="$1"; shift
   # Fail loudly on a broken fixture rather than letting the wrapper fall back to
   # $PWD (which would silently run every assert against the REAL repo). `-e`, not `-d`:
@@ -1011,7 +1018,7 @@ run_wrapper() { # run_wrapper <work-dir> [extra wrapper args...]
   # file and a host `$HOME/.roborev/` must never be able to influence a fixture run.
   STUB_INVOKED="$INVOKED" PATH="${WRAPPER_PATH_PREFIX:+$WRAPPER_PATH_PREFIX:}$stubbin:$PATH" HOME="$FIXTURE_HOME" \
     TMPDIR="${WRAPPER_TMPDIR:-$WRAPPER_TMP}" \
-    bash "${RUN_WRAPPER_PATH:-$WRAPPER_REAL}" --repo "$work" --agent codex --model gpt-5.6-sol \
+    bash "$_rw_wrapper" --repo "$work" --agent codex --model gpt-5.6-sol \
     --log "$tmp/transcript-$CASE_N.txt" "$@" >"$OUT" 2>&1
   RC=$?
 }
@@ -2299,8 +2306,7 @@ if [ -f "$SCRIPT_DIR/../flow/roborev-job-facts.py" ]; then
 fi
 work=$(make_fixture case_cx28 pushed)
 STUB_ANNOUNCE_SHA=$(git -C "$work" rev-parse HEAD)
-RUN_WRAPPER_PATH="$_gm_dir/roborev-review.sh"
-run_wrapper "$work"
+run_wrapper --wrapper "$_gm_dir/roborev-review.sh" "$work"
 assert_verdict 'case (cx28 control) the UNPATCHED copy reaches PASS' PASS 0
 assert_lacks 'case (cx28 control) and reports no grammar violation' 'verdict-grammar'
 # ONE key, ONE value, outside the grammar. `MEASUREMENT-DID-NOT-HAPPEN` is deliberately not a
@@ -2309,7 +2315,7 @@ if sed_inplace_verified "$_gm_dir/roborev-review-checks.sh" \
   's/^    TIER1="PASS"$/    TIER1="MEASUREMENT-DID-NOT-HAPPEN"/' \
   '    TIER1="MEASUREMENT-DID-NOT-HAPPEN"' '    TIER1="PASS"'; then
   ok 'case (cx28): the unrecognised-verdict patch was really applied to the copy'
-  run_wrapper "$work"
+  run_wrapper --wrapper "$_gm_dir/roborev-review.sh" "$work"
   assert_verdict 'case (cx28)' FAIL 1
   assert_says 'case (cx28) the unrecognised value is named under its own diagnostic' "^ERROR: verdict-grammar: a per-check key holds a value outside the block's documented grammar: 'MEASUREMENT-DID-NOT-HAPPEN'\. "
   assert_says 'case (cx28) it explains that an unplanned value must not inherit the non-failing branch' 'rather than letting the unplanned value inherit the non-failing branch'
@@ -2357,7 +2363,7 @@ elif ! sed_inplace_verified "$_gm_dir/roborev-review-checks.sh" \
   bad 'case (cx29): the cx28 TIER1 mutation could not be verifiably restored to PASS on the copy, so a FAIL below would be cx28 grammar violation rather than cx29 never-ran check — the case is NOT MEASURED and must not report a pass'
 else
   ok 'case (cx29): the early-return patch was really applied to the copy, and the cx28 TIER1 mutation was verified restored to PASS'
-  run_wrapper "$work"
+  run_wrapper --wrapper "$_gm_dir/roborev-review.sh" "$work"
   assert_verdict 'case (cx29)' FAIL 1
   assert_says 'case (cx29) the un-run key is named as never having affirmatively passed' "^ERROR: verdict-affirmation: this run reached the PASS branch with a VERDICT-CARRYING key that never affirmatively passed — prompt-content: 'SKIP'\. "
   assert_says 'case (cx29) it states that a non-measurement is the vacuous pass itself' 'a non-failing value that is not a measurement'
@@ -2365,7 +2371,6 @@ else
   assert_says 'case (cx29) the un-run key is visible in the block' '^prompt-content: SKIP$'
   assert_lacks 'case (cx29) and the grammar check does not misreport it as unrecognised' 'verdict-grammar'
 fi
-RUN_WRAPPER_PATH=""
 
 # ===========================================================================
 # (cx28b/cx28c): THE CLOSURE MUST NOT ITSELF BE A PREFIX TEST (#3229 round-11 M3).
@@ -2402,16 +2407,15 @@ for _np_case in cx28b:PASSthisNeverRan cx28c:PASS-MEASUREMENT-DID-NOT-HAPPEN; do
   cp "$SCRIPT_DIR/../flow/roborev-review-checks.sh" "$_gm_dir/roborev-review-checks.sh"
   work=$(make_fixture "case_$_np_label" pushed)
   STUB_ANNOUNCE_SHA=$(git -C "$work" rev-parse HEAD)
-  RUN_WRAPPER_PATH="$_gm_dir/roborev-review.sh"
   # THE CONTROL, per case: the restored copy must reach PASS on this fixture, or a FAIL below
   # would prove nothing about the mutation.
-  run_wrapper "$work"
+  run_wrapper --wrapper "$_gm_dir/roborev-review.sh" "$work"
   assert_verdict "case ($_np_label control) the restored copy reaches PASS" PASS 0
   if sed_inplace_verified "$_gm_dir/roborev-review-checks.sh" \
     "s/^    TIER1=\"PASS\"\$/    TIER1=\"$_np_value\"/" \
     "    TIER1=\"$_np_value\"" '    TIER1="PASS"'; then
     ok "case ($_np_label): the near-prefix patch was really applied to the copy"
-    run_wrapper "$work"
+    run_wrapper --wrapper "$_gm_dir/roborev-review.sh" "$work"
     assert_verdict "case ($_np_label)" FAIL 1
     assert_says "case ($_np_label) the near-prefix value is named as OUTSIDE the grammar" \
       "^ERROR: verdict-grammar: a per-check key holds a value outside the block's documented grammar: '$_np_value'\. "
@@ -2423,8 +2427,7 @@ for _np_case in cx28b:PASSthisNeverRan cx28c:PASS-MEASUREMENT-DID-NOT-HAPPEN; do
   else
     bad "case ($_np_label): could not patch the copied checks file, so the near-prefix path was never exercised (a green run here would be a probe failing in the direction that looks like success)"
   fi
-  RUN_WRAPPER_PATH=""
-done
+  done
 cp "$SCRIPT_DIR/../flow/roborev-review-checks.sh" "$_gm_dir/roborev-review-checks.sh"
 
 printf '== case (d): vacuous token signature vs non-empty census ==\n'
@@ -4934,21 +4937,26 @@ fi
 if [ -n "${WRAPPER+set}" ]; then
   _wr_bad="$_wr_bad WRAPPER-has-a-value;"
 fi
-# `RUN_WRAPPER_PATH` is the scratch-copy override. It may be ASSIGNED only by the mock cases and READ
-# only by run_wrapper -- otherwise it is the same order-dependent global under a new name.
-_wr_rwp_reads=$(_wr_code_view_min "$TEST_SELF" | grep -nE '[$][{]?RUN_WRAPPER_PATH' || true)
-_wr_rwp_n=$(printf '%s' "$_wr_rwp_reads" | grep -c . || true)
-if [ "${_wr_rwp_n:-0}" -ne 1 ]; then
-  _wr_bad="$_wr_bad RUN_WRAPPER_PATH-is-read-in-${_wr_rwp_n:-0}-places-not-just-run_wrapper;"
+# THE SCRATCH-COPY PATH IS A `local`, SO THERE IS NO SECOND GLOBAL. `RUN_WRAPPER_PATH` was the
+# first attempt: a global the two mock cases set and cleared. Guarding it meant counting its
+# assignments, which matched only `NAME=` and so missed `export`/`declare`/`printf -v`/`read` --
+# the third time this PR made the assignment-syntax enumeration error. A `local` cannot be assigned
+# from outside its function, so the class is unexpressible rather than policed. Asked of the shell,
+# not of the text: run_wrapper is invoked in a subshell that tries to leak the name outward.
+if _wr_leak=$( { run_wrapper_probe() { local _rw_wrapper=inner; }; run_wrapper_probe; printf '%s' "${_rw_wrapper-unset}"; } ) \
+   && [ "$_wr_leak" = "unset" ]; then
+  ok 'structural (#3367): a `local` in a shell function does not leak to the caller (measured), so the wrapper path run_wrapper resolves cannot be steered by anything outside it'
+else
+  bad "structural (#3367): a function-local leaked to the caller (got '${_wr_leak:-?}'), so run_wrapper's wrapper path is effectively global again and any caller could redirect it"
 fi
-# ...and its ASSIGNMENTS are counted too. Checking only the reads left the other half open: an extra
-# assignment elsewhere redirects run_wrapper while the read count stays at one (roborev job 57).
-# Exactly five are legitimate -- the empty initialisation, plus a set and a clear for each of the two
-# gate-mock cases. A sixth means someone is steering run_wrapper from a new place, which is #3367
-# returning under a different variable name.
-_wr_rwp_sets=$(_wr_code_view_min "$TEST_SELF" | grep -cE '^[[:space:]]*RUN_WRAPPER_PATH=' || true)
-if [ "${_wr_rwp_sets:-0}" -ne 5 ]; then
-  _wr_bad="$_wr_bad RUN_WRAPPER_PATH-is-assigned-${_wr_rwp_sets:-0}-times-not-5;"
+# Read the CODE view and split the needle: the prose above names the retired global while
+# explaining why it is gone, and a raw grep matched that. Fifth self-reference of this shape in
+# this PR -- an artifact describing a rule matching the rule.
+if _wr_code_view_min "$TEST_SELF" | grep -q 'RUN_WRAPPER''_PATH'; then
+  _wr_bad="$_wr_bad the-RUN_WRAPPER_PATH-global-is-back;"
+fi
+if ! grep -qE '^[[:space:]]*local _rw_wrapper="\$WRAPPER_REAL"' "$TEST_SELF"; then
+  _wr_bad="$_wr_bad run_wrapper-no-longer-defaults-its-path-to-a-local-seeded-from-WRAPPER_REAL;"
 fi
 if [ -z "$_wr_bad" ]; then
   ok 'structural (#3367): there is no mutable WRAPPER global, and the scratch-copy override is read at exactly one site (run_wrapper) — a doctrine scan has no mutable path available to it, so the order dependence is absent by construction rather than policed'
