@@ -4610,11 +4610,29 @@ fi
 # caller lenient while its own control still reads green.
 _cls_exec_lines() {
   awk '
+  function code_of(s,   n2, i2, sq2, dq2, c2) {
+    # Quote-aware trailing-comment removal. Without it this filter dropped only comment-ONLY lines,
+    # so a harmless trailing comment naming a retired token tripped the classifier-GONE assert — a
+    # false FAIL on doctrine text, which is the very thing #3392 exempted the --help heredoc for.
+    n2 = length(s); sq2 = 0; dq2 = 0
+    for (i2 = 1; i2 <= n2; i2++) {
+      c2 = substr(s, i2, 1)
+      if (!sq2 && c2 == "\\") { i2++; continue }
+      if (sq2) { if (c2 == "'"'"'") sq2 = 0 }
+      else if (dq2) { if (c2 == "\"") dq2 = 0 }
+      else {
+        if (c2 == "'"'"'") { sq2 = 1; continue }
+        if (c2 == "\"") { dq2 = 1; continue }
+        if (c2 == "#" && (i2 == 1 || substr(s, i2-1, 1) ~ /[ \t]/)) return substr(s, 1, i2 - 1)
+      }
+    }
+    return s
+  }
   FILENAME ~ /roborev-review\.sh$/ && /^usage\(\) \{/ { in_usage = 1 }
   in_usage && /^EOF$/ { in_usage = 0; next }
   in_usage { next }
   /^[[:space:]]*#/ { next }
-  { print }
+  { print code_of($0) }
 ' "$@" 2>/dev/null || true
 }
 # ===== THE CLASSIFIER IS GONE, AND MUST STAY GONE (owner ruling (4), #3312) =====
@@ -4678,6 +4696,15 @@ case "$_cls_ctl" in
     ok 'structural control: the executable-line filter KEEPS an executable reintroduction, so the scan above is discriminating rather than blind' ;;
   *)
     bad 'structural control: the executable-line filter DROPPED an executable reintroduction — the classifier scan above cannot see the thing it exists to catch' ;;
+esac
+# ...and a TRAILING comment naming a retired token must be dropped too (roborev job 45): the filter
+# used to remove only comment-ONLY lines, so an ordinary inline comment red the classifier assert.
+_cls_ctl_inline=$(printf 'x=1   # a trailing comment naming mixed-delivery\n' | _cls_exec_lines /dev/stdin)
+case "$_cls_ctl_inline" in
+  *mixed-delivery*)
+    bad 'structural control: the executable-line filter kept a TRAILING comment, so an inline comment naming a retired state would red the classifier assert on doctrine text' ;;
+  *)
+    ok 'structural control: the executable-line filter drops TRAILING comments as well as whole-line ones, so naming a retired state in an inline comment is not a violation' ;;
 esac
 case "$_cls_ctl" in
   *mixed-delivery*)
@@ -4922,7 +4949,13 @@ _WR_QS=$(cat <<'AWKEOF'
       if (c == "\"") { dq = 1; continue }
       if (c == "#" && (i == 1 || substr(line, i-1, 1) ~ /[ \t]/)) {
         cm = substr(line, i + 1); sub(/^[ \t]+/, "", cm)
-        if (index(cm, MK) == 1) mk = 1
+        # THE MARKER IS A WHOLE TOKEN, not a prefix. `index(cm, MK) == 1` alone accepted
+        # `wrapper-mutable-read-allowance`, i.e. a comment that merely STARTS with the marker's
+        # letters authorised a forbidden read. It must be followed by a delimiter or end the comment.
+        if (index(cm, MK) == 1) {
+          nxt = substr(cm, length(MK) + 1, 1)
+          if (nxt == "" || nxt == ":" || nxt == " " || nxt == "\t") mk = 1
+        }
         cut = i - 1
         break
       }
@@ -5184,6 +5217,8 @@ _wr_fixture f_bracedef "_x=\$(grep -c foo \"\${$_wr_vname:-/tmp/x}\")"
 _wr_fixture f_fakeinv  "grep foo $_wr_ref # \$(bash $_wr_ref)"
 _wr_fixture f_evalasm  "_cmd='grep foo $_wr_ref'"
 _wr_fixture f_multiline "' \"\$ORACLES\" \"\$CHECKS_FILE\" $_wr_ref 2>/dev/null || true)"
+_wr_fixture f_nearmk   "_x=\$(grep -c foo $_wr_ref) # ${_wr_marker}ance: a near-prefix must not grant"
+_wr_fixture f_mkcolon  "_x=\$(grep -c foo $_wr_ref) # $_wr_marker: a reviewed opt-out"
 _wr_fixture f_btprose  "ok \"\`grep \"a'b\" $_wr_ref \"c'd\"\`\""
 _wr_fixture f_cshidden "bash $_wr_ref \"\$(grep \"a'b\" $_wr_ref \"c'd\")\""
 _wr_fixture f_csprose  "ok \"\$(grep \"a'b\" $_wr_ref \"c'd\")\""
@@ -5218,6 +5253,8 @@ _wr_expect f_bracedef spelling
 _wr_expect f_fakeinv  form
 _wr_expect f_evalasm  prose
 _wr_expect f_multiline unbalanced
+_wr_expect f_nearmk   form
+_wr_expect f_mkcolon  clean
 _wr_expect f_btprose  substitution
 _wr_expect f_cshidden substitution
 _wr_expect f_csprose  substitution
@@ -5235,7 +5272,7 @@ _wr_expect f_empty    empty
 # and the success message below prints counts from them.
 _wr_scan_file "$TEST_SELF"
 if [ -z "$_wr_ctl_bad" ]; then
-  ok 'structural control (#3367): the ENFORCEMENT PASS itself (classifier + dispatch) gives the correct verdict on all thirty-four fixtures — it rejects the braced, unquoted, compound-line, unallowlisted-alias, mentions-the-word-bash quote-swallowed, marker-self-authorising and eval bypasses, refuses to let a marker waive a second read, reports a subjectless file as empty, and still accepts invocations, allowlisted saves, marked opt-outs, captured invocations and unmarked prose'
+  ok 'structural control (#3367): the ENFORCEMENT PASS itself (classifier + dispatch) gives the correct verdict on all thirty-six fixtures — it rejects the braced, unquoted, compound-line, unallowlisted-alias, mentions-the-word-bash quote-swallowed, marker-self-authorising and eval bypasses, refuses to let a marker waive a second read, reports a subjectless file as empty, and still accepts invocations, allowlisted saves, marked opt-outs, captured invocations and unmarked prose'
 else
   bad "structural control (#3367): the enforcement pass misclassifies a fixture, so its verdict on the real file is not trustworthy —$_wr_ctl_bad"
 fi
@@ -5308,7 +5345,11 @@ fi
 # `-g -n`. The first version anchored it as the LAST character of the FIRST group, which is a
 # spelling of the flag rather than the flag itself — `declare -g -n` and `declare -ng` both evaded
 # it. (`local _f="$1"` and friends carry no option group and are unaffected.)
-_wr_nrefd=$(grep -nE '(^|[ \t;&|(])(declare|local|typeset)[[:space:]]+(-[A-Za-z]+[[:space:]]+)*-[A-Za-z]*'"n" "$TEST_SELF" \
+# LOGICAL lines, not physical ones: `declare \` continued onto `-n subject=_wr_saved` is one
+# declaration, and a per-physical-line grep sees neither half as a nameref. Continuations are joined
+# first (the line numbers are lost, so the diagnostic reports the joined text instead).
+_wr_nrefd=$(sed -e :a -e '/\\$/N; s/\\\n//; ta' "$TEST_SELF" \
+  | grep -nE '(^|[ \t;&|(])(declare|local|typeset)[[:space:]]+(-[A-Za-z]+[[:space:]]+)*-[A-Za-z]*'"n" \
   | grep -vE '^[0-9]+:[[:space:]]*#' || true)
 if [ -z "$_wr_nrefd" ]; then
   ok 'structural (#3367): the harness declares no nameref, so no second name can be bound to an allowlisted alias'
