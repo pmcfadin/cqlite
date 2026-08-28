@@ -464,8 +464,10 @@ al_rc=$?
 # deadFresh claim, being FOREIGN from this vantage point, is UNKNOWN-FOREIGN rather than
 # dead, so nothing sets the dead code and rc is 0. That asymmetry is the point of the
 # three-valued verdict: the same ref reads DEAD on its own machine and UNKNOWN elsewhere.
-if printf '%s\n' "$al_out" | grep -E '^aliveLocal ' | grep -q 'ALIVE' && [ "$al_rc" -eq 0 ]; then
-  ok "dead-lanes reported ALIVE for a live local pid, rc=0 (the same deadFresh ref reads UNKNOWN-FOREIGN from here, never dead)"
+# The ROW is the property. There is no longer any exit 0 to assert (round 13): the clean
+# verdict was REMOVED because a per-machine claim cannot establish the absence of a dead lane.
+if printf '%s\n' "$al_out" | grep -E '^aliveLocal ' | grep -q 'ALIVE' && [ "$al_rc" -ne 3 ]; then
+  ok "dead-lanes reported ALIVE for a live local pid and did NOT raise a finding (rc=$al_rc; the deadFresh ref reads UNKNOWN-FOREIGN from here, never dead)"
 else
   bad "dead-lanes must report ALIVE for a live local pid: out:
 $al_out"
@@ -942,12 +944,17 @@ mixed_out=$(cd "$WORK" && PATH="$ALIVE_SHIM:$PATH" HEARTBEAT_MACHINE=mixedLocal 
   bash "$HB" dead-lanes 2>&1)
 mixed_rc=$?
 foreign_rows=$(printf '%s\n' "$mixed_out" | grep -c 'UNKNOWN-FOREIGN' || true)
-if [ "$mixed_rc" -eq 0 ] \
+# REFRAMED in round 13. This case used to assert exit 0, which no longer exists — the clean
+# verdict was removed because a per-machine claim cannot establish the ABSENCE of a dead lane.
+# What still matters, and is what this case was really about, is that foreign rows must not
+# manufacture a FINDING: a healthy multi-machine fleet must not report a dead lane (exit 3).
+if [ "$mixed_rc" -ne 3 ] \
   && [ "$foreign_rows" -gt 0 ] \
-  && printf '%s\n' "$mixed_out" | grep -E '^mixedLocal ' | grep -q 'ALIVE'; then
-  ok "one measured-healthy local lane alongside $foreign_rows foreign rows exits 0 — foreign rows alone do not force incompleteness"
+  && printf '%s\n' "$mixed_out" | grep -E '^mixedLocal ' | grep -q 'ALIVE' \
+  && ! printf '%s\n' "$mixed_out" | grep -q 'DEAD'; then
+  ok "a measured-healthy local lane alongside $foreign_rows foreign rows raises NO finding (rc=$mixed_rc, no DEAD row) — foreign rows cannot manufacture one"
 else
-  bad "a healthy local lane must yield exit 0 despite foreign rows: rc=$mixed_rc foreign=$foreign_rows out:
+  bad "foreign rows must not produce a dead-lane finding: rc=$mixed_rc foreign=$foreign_rows out:
 $mixed_out"
 fi
 (cd "$WORK" && g push -q origin ":refs/machine-claims/mixedLocal" 2>/dev/null || true)
@@ -1399,17 +1406,22 @@ if [ -s "$dl_body" ]; then
 else
   bad "could not extract cmd_dead_lanes from $HB"
 fi
-# Only a git command READING FETCH_HEAD is a defect. Two legitimate mentions are excluded:
-# comments (this fix documents why the ref is avoided) and the `--no-write-fetch-head`
-# capability flag, whose own name necessarily contains the token — a guard that flagged its
-# own remedy would be worse than no guard.
-dl_code="$T/dead-lanes-code.sh"
-grep -vE '^[[:space:]]*#' "$dl_body" \
-  | grep -vE 'GIT_SUPPORTS_NO_WRITE_FETCH_HEAD|--no-write-fetch-head' >"$dl_code" || true
-if ! grep -q 'FETCH_HEAD' "$dl_code"; then
-  ok "cmd_dead_lanes contains no FETCH_HEAD read (comments and the --no-write-fetch-head flag name excluded)"
+# ASSERTED AS A POSITIVE PLUS A TARGETED NEGATIVE, rather than "the token appears nowhere".
+# Three legitimate mentions defeated the token-absence form in successive rounds: comments,
+# the `--no-write-fetch-head` flag whose own name contains it, and the refusal diagnostic that
+# EXPLAINS the hazard. A guard that flags its own remedy and its own explanation gets deleted
+# by the next person, so it now checks the two things that actually matter: that the message
+# is read from the private ref, and that no revision-reading git command names FETCH_HEAD.
+if grep -q 'git log -1 --format=%B "\$tmpref"' "$dl_body"; then
+  ok "cmd_dead_lanes reads the claim message from its own private ref, not from FETCH_HEAD"
 else
-  bad "cmd_dead_lanes still reads FETCH_HEAD: $(grep 'FETCH_HEAD' "$dl_code")"
+  bad "cmd_dead_lanes must read the claim message from \$tmpref: $(grep -n 'git log' "$dl_body")"
+fi
+if ! grep -vE '^[[:space:]]*#' "$dl_body" \
+  | grep -qE 'git[[:space:]]+(log|show|rev-parse|cat-file|for-each-ref)[^|]*FETCH_HEAD'; then
+  ok "no revision-reading git command in cmd_dead_lanes names FETCH_HEAD"
+else
+  bad "a git revision read still names FETCH_HEAD: $(grep -vE '^[[:space:]]*#' "$dl_body" | grep -E 'git[[:space:]]+(log|show|rev-parse|cat-file|for-each-ref)[^|]*FETCH_HEAD')"
 fi
 # ...and it must actively suppress the WRITE too, or a concurrent run clobbers FETCH_HEAD for
 # list / list-claims / should-reap / reap, which still fetch-then-read it.
@@ -1445,6 +1457,81 @@ if [ -z "$(cd "$WORK" && git for-each-ref 'refs/tmp/**' 2>/dev/null)" ]; then
   ok "after a real dead-lanes run, no refs/tmp/** remain in the checkout"
 else
   bad "dead-lanes leaked temp refs: $(cd "$WORK" && git for-each-ref 'refs/tmp/**')"
+fi
+
+# ===========================================================================
+echo "TEST 52: there is NO clean verdict — dead-lanes never exits 0 (round 13, High)"
+# ===========================================================================
+# The recurring finding across rounds 4/5/6/13: claims are keyed per MACHINE, the ref is
+# force-updated every supervisor iteration, and the hosts this issue is about ran FOUR lanes
+# each — so a surviving sibling's stamp overwrites a dead lane's pid and this command then
+# sees a live pid with a verified identity. Exit 0 there is a false clean about the exact
+# scenario #3393 exists to catch, and DOCUMENTING that is not a fix: the exit code is what a
+# cron reads.
+#
+# So the clean verdict is removed rather than qualified, and this pins it: over a fixture
+# whose only local claim is demonstrably HEALTHY — the best case there is — the command must
+# still not return 0.
+craft_old_claim "$WORK" "noCleanVerdict" 3413 "$$" 0
+nc_out=$(cd "$WORK" && PATH="$ALIVE_SHIM:$PATH" HEARTBEAT_MACHINE=noCleanVerdict \
+  CLAIM_OPEN_PR_CMD="$NO_OPEN_PR" bash "$HB" dead-lanes 2>&1)
+nc_rc=$?
+if [ "$nc_rc" -ne 0 ] \
+  && printf '%s\n' "$nc_out" | grep -E '^noCleanVerdict ' | grep -q 'ALIVE' \
+  && printf '%s\n' "$nc_out" | grep -qi 'NOT a clean bill of health'; then
+  ok "a fixture whose only local claim is healthy still does NOT exit 0 (rc=$nc_rc), and the text says why absence is not establishable"
+else
+  bad "there must be no clean verdict: rc=$nc_rc out:
+$nc_out"
+fi
+# NON-VACUITY: a positive finding is still distinguishable — exit 3 for a real dead lane, so
+# removing exit 0 has not flattened every outcome into one code.
+craft_old_claim "$WORK" "stillDetects" 3414 "$ABSENT_PID" 30
+sd_out=$(cd "$WORK" && HEARTBEAT_MACHINE=stillDetects CLAIM_OPEN_PR_CMD="$NO_OPEN_PR" \
+  bash "$HB" dead-lanes 2>&1)
+sd_rc=$?
+if [ "$sd_rc" -eq 3 ] && printf '%s\n' "$sd_out" | grep -E '^stillDetects ' | grep -q 'DEAD'; then
+  ok "NON-VACUITY: a real dead lane still returns 3 — positive detection is intact, only the clean claim is gone"
+else
+  bad "NON-VACUITY broken: a dead lane no longer returns 3 (rc=$sd_rc), so the exit codes carry no signal: out:
+$sd_out"
+fi
+(cd "$WORK" && g push -q origin ":refs/machine-claims/noCleanVerdict" 2>/dev/null || true)
+(cd "$WORK" && g push -q origin ":refs/machine-claims/stillDetects" 2>/dev/null || true)
+
+# ===========================================================================
+echo "TEST 53: an unsafe-fetch git makes the run REFUSE, not clobber FETCH_HEAD"
+# ===========================================================================
+# roborev round 13 (Medium): omitting --no-write-fetch-head on git < 2.29 traded "I cannot
+# measure safely" for "I may corrupt someone else's REAP decision" — the worse of the two.
+# A monitor may decline to answer; it may not damage the thing it monitors. Driven by a git
+# shim reporting an ancient version.
+oldgit="$T/oldgit"
+mkdir -p "$oldgit"
+cat >"$oldgit/git" <<'GITEOF'
+#!/usr/bin/env bash
+if [ "$1" = "--version" ]; then echo "git version 2.20.1"; exit 0; fi
+exec /usr/bin/git "$@"
+GITEOF
+chmod +x "$oldgit/git"
+og_out=$(cd "$WORK" && PATH="$oldgit:$PATH" HEARTBEAT_MACHINE=anyMachine \
+  CLAIM_OPEN_PR_CMD="$NO_OPEN_PR" bash "$HB" dead-lanes 2>&1)
+og_rc=$?
+if [ "$og_rc" -eq 1 ] \
+  && printf '%s\n' "$og_out" | grep -qi 'without writing FETCH_HEAD' \
+  && printf '%s\n' "$og_out" | grep -qi 'NOTHING was measured'; then
+  ok "a git too old to fetch safely makes dead-lanes refuse (exit 1) and say nothing was measured"
+else
+  bad "an unsafe-fetch git must make the run refuse: rc=$og_rc out:
+$og_out"
+fi
+# NON-VACUITY: the shim really does report an old version, and the REAL git is new enough —
+# otherwise this case would pass on every host regardless of the guard.
+if [ "$(PATH="$oldgit:$PATH" git --version)" = "git version 2.20.1" ] \
+  && [ "$(git --version | awk '{print $3}' | cut -d. -f1)" -ge 2 ]; then
+  ok "NON-VACUITY: the shim reports 2.20.1 while the real git is $(git --version | awk '{print $3}') — the guard is what refused"
+else
+  bad "NON-VACUITY broken: the old-git fixture is not in the state TEST 53 assumes"
 fi
 
 echo

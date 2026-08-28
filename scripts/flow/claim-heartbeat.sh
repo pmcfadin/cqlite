@@ -828,6 +828,17 @@ cmd_dead_lanes() {
   fi
   rm -f "$errfile"
 
+  # REFUSE RATHER THAN CLOBBER (roborev round 13, Medium). Omitting
+  # `--no-write-fetch-head` on old git left this monitor overwriting the shared FETCH_HEAD
+  # that `list`, `list-claims`, `should-reap` and `reap` still fetch-then-read — so the
+  # fallback traded "I cannot measure safely" for "I may corrupt someone else's REAP
+  # decision", which is the worse of the two by a wide margin. A monitor may decline to
+  # answer; it may not damage the thing it is monitoring.
+  if [ "$GIT_SUPPORTS_NO_WRITE_FETCH_HEAD" != yes ]; then
+    note "this git cannot fetch without writing FETCH_HEAD (needs 2.29+; found '$(git --version 2>/dev/null || echo unknown)'). Refusing to run rather than clobbering the FETCH_HEAD that list/should-reap/reap read — upgrade git, or run dead-lanes from a checkout with a newer one. NOTHING was measured."
+    return 1
+  fi
+
   # NO EARLY `return 0` HERE (roborev round 5, Medium). An empty namespace proves only
   # that no ref exists — it does NOT establish an idle fleet. A lane running with
   # `CLAIM_CMD=""` (stamping deliberately disabled, a documented supervisor option) or one
@@ -865,12 +876,7 @@ cmd_dead_lanes() {
     # decision would be a poor trade. Guarded by version because the option landed in git
     # 2.29; on older git the flag is omitted rather than failing every row with an
     # unknown-option error whose stated cause would be "fetch failed".
-    if [ "$GIT_SUPPORTS_NO_WRITE_FETCH_HEAD" = yes ]; then
-      set -- --no-write-fetch-head
-    else
-      set --
-    fi
-    if ! git fetch "$@" --no-tags "$REMOTE" "+${refname}:${tmpref}" >/dev/null 2>&1; then
+    if ! git fetch --no-write-fetch-head --no-tags "$REMOTE" "+${refname}:${tmpref}" >/dev/null 2>&1; then
       # An unreadable ref is "we cannot tell about THIS lane", never "this lane is
       # fine" — so it is both printed AND counted toward an incomplete measurement.
       unreadable=$((unreadable + 1))
@@ -1011,8 +1017,32 @@ cmd_dead_lanes() {
     note "NOTHING WAS MEASURED: claim refs exist on ${REMOTE} but none is owned by this machine (${this_machine}), and a pid is only checkable where it runs. dead-lanes is LOCAL-ONLY — run it ON the suspect box, or check each machine in turn. This is NOT 'no dead lanes'."
     return 1
   fi
-  [ "$unreadable" -eq 0 ] || return 1
-  return 0
+  if [ "$unreadable" -gt 0 ]; then
+    return 1
+  fi
+  # POSITIVE DETECTION ONLY: THERE IS NO CLEAN VERDICT, BY CONSTRUCTION (roborev rounds
+  # 4/5/6/13, High).
+  #
+  # This command can soundly affirm that a dead lane EXISTS — if the claim names a pid that
+  # is gone, a lane is gone. It cannot affirm the ABSENCE of one, because claims are keyed
+  # per MACHINE (#2655, premised on one worker per machine, #1930) while the hosts this
+  # issue is about ran FOUR lanes each. The ref is force-updated every supervisor iteration,
+  # so a surviving sibling's next stamp overwrites a dead lane's pid and this command then
+  # sees a live pid with a verified identity. Reporting exit 0 there is a FALSE CLEAN about
+  # the exact scenario #3393 exists to catch.
+  #
+  # Documenting that was not enough — a documented false-clean is still a false-clean, and
+  # the exit code is what a cron reads. So the clean verdict is REMOVED rather than
+  # qualified: this command returns 3 (a dead lane was reported) or 1 (no dead lane was
+  # reported, and absence is not establishable), and never 0. A caller can act on 3; nobody
+  # can mistake 1 for a clean bill of health.
+  #
+  # Restoring a meaningful 0 requires lane-scoped claim refs, which changes a namespace
+  # shared with should-reap and the CI reaper and collides with the standing one-worker-per-
+  # machine invariant — an owner decision, escalated on #3393. When that lands, this is the
+  # branch to revisit.
+  note "no dead lane was reported among the $(printf '%s' "$local_seen") local claim(s) measured. This is NOT a clean bill of health: claims are keyed per MACHINE, so a surviving lane's stamp can overwrite a dead sibling's on a multi-lane box (#3393). Exit 1 = nothing found AND absence not establishable; only exit 3 is a positive finding."
+  return 1
 }
 
 SUBCOMMAND="${1:-}"

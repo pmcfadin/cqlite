@@ -922,13 +922,22 @@ end-to-end test. Green helper-only unit tests are not sufficient.
   already). In outline: verdicts are MULTI-valued because a PID is only checkable on the machine that
   owns the claim — two `DEAD-*` verdicts (`DEAD-NO-PROCESS`, which covers a zombie, and
   `DEAD-PID-REUSED`) and a family of `UNKNOWN-*` ones (`FOREIGN`, `NO-PID`, `STATE`, `IDENTITY`,
-  `PROBE`, `UNREADABLE`). **Both `DEAD-*` verdicts** set the finding code `3`, deliberately distinct
-  from `1` = the measurement was incomplete or failed, so a cron cannot page on a network blip and
-  stay silent on a real dead lane. Every `UNKNOWN-*` except `UNKNOWN-FOREIGN` makes the run
-  incomplete (exit 1); `FOREIGN` is excluded because it is unknowable by design and counting it would
-  pin a healthy multi-machine fleet at exit 1 forever. An UNKNOWN is never folded onto the permissive
-  answer — including "zero claim refs" and "every claim is foreign", both of which are exit 1, since
-  neither establishes an idle fleet. **It is LOCAL-ONLY**: run it ON the suspect box.
+  `PROBE`, `UNREADABLE`). **It is POSITIVE-DETECTION ONLY and NEVER exits 0** — there is no clean
+  verdict, by construction. Exit `3` = a dead lane was reported (both `DEAD-*` verdicts); exit `1` =
+  no dead lane was reported *and absence is not establishable*. The reason is the per-MACHINE claim
+  ref: the ref is force-updated every supervisor iteration, so on a multi-lane box a surviving
+  sibling's stamp overwrites a dead lane's pid and the command then sees a live, identity-verified
+  pid — a false clean about the exact scenario #3393 exists to catch. Documenting that was not
+  enough (a documented false-clean is still a false-clean, and the exit code is what a cron reads),
+  so the clean verdict was removed rather than qualified: act on `3`, and never read `1` as a clean
+  bill of health. Restoring a meaningful `0` needs lane-scoped claim refs — an owner decision,
+  escalated on #3393, because it changes a namespace shared with `should-reap` and the CI reaper and
+  collides with the standing one-worker-per-machine invariant (#1930) the fleet was already
+  violating. An UNKNOWN is never folded onto the permissive answer — "zero claim refs" and "every
+  claim is foreign" are both exit 1, since neither establishes an idle fleet, and `UNKNOWN-FOREIGN`
+  alone never manufactures a finding. **It is LOCAL-ONLY**: run it ON the suspect box. It also
+  refuses outright on git < 2.29, which cannot fetch without writing `FETCH_HEAD` — a monitor may
+  decline to answer, but it may not corrupt the `FETCH_HEAD` that `should-reap`/`reap` read.
   **Not covered, by construction**: #3393 AC3's "worktree present, tmux session absent" test is
   unimplementable in committed tooling because the lane-directory layout and tmux session naming
   exist NOWHERE in this repo — a tool guessing at them would report nothing on any differently-named
