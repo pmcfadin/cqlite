@@ -140,6 +140,21 @@ pub struct BenchConfig {
     pub filter_value: RowLiteral,
     /// Iterations per (scenario, arm).
     pub iterations: usize,
+    /// DataFusion `target_partitions`, or `None` for DataFusion's default (one
+    /// per core).
+    ///
+    /// **This knob exists because the first measurement was misleading and had
+    /// to be corrected.** With DataFusion's default parallelism the DataFusion
+    /// arm ran ~1.6x faster than the row/floor arms over IDENTICAL batches — not
+    /// because its kernels are faster, but because its multi-threaded runtime
+    /// drains and DROPS the wide batches on several worker threads while the
+    /// single-threaded direct arms do recv-and-drop serially behind a
+    /// 2-slot channel. That is PIPELINE CONCURRENCY, not vectorization, and
+    /// reporting it as a vectorized-exec delta would have been wrong. Pinning
+    /// `target_partitions = 1` equalises the thread count so the residual delta
+    /// is attributable to execution; the default-parallelism figure is reported
+    /// SEPARATELY as the concurrency effect, which is real and worth knowing.
+    pub df_target_partitions: Option<usize>,
 }
 
 /// One measured run.
@@ -183,6 +198,9 @@ pub struct BenchOutcome {
     pub peak_rss_bytes: Option<u64>,
     /// Whether projection/predicate were pushed into the scan for this arm.
     pub pushdown: bool,
+    /// DataFusion `target_partitions` in force for this run (`None` for the
+    /// direct arms, which have no DataFusion runtime).
+    pub df_target_partitions: Option<usize>,
     /// The query text the DataFusion arm ran, when applicable.
     pub sql: Option<String>,
 }
@@ -380,7 +398,7 @@ impl BenchRunner {
         kind: ScenarioKind,
         iteration: usize,
     ) -> Result<BenchOutcome, BenchError> {
-        use datafusion::prelude::SessionContext;
+        use datafusion::prelude::{SessionConfig, SessionContext};
         use futures::StreamExt;
 
         let provider = Arc::new(CqliteTableProvider::open(
@@ -399,8 +417,14 @@ impl BenchRunner {
         let started = Instant::now();
         let provider_for_query = provider.clone();
         let sql_for_query = sql.clone();
+        let target_partitions = self.config.df_target_partitions;
         let rows_result = runtime.block_on(async move {
-            let ctx = SessionContext::new();
+            let ctx = match target_partitions {
+                Some(n) => SessionContext::new_with_config(
+                    SessionConfig::new().with_target_partitions(n.max(1)),
+                ),
+                None => SessionContext::new(),
+            };
             ctx.register_table("t", provider_for_query)
                 .map_err(|e| BenchError::DataFusion(e.to_string()))?;
             let frame = ctx
@@ -510,8 +534,24 @@ impl BenchRunner {
             subphase_grpc_write_nanos: outcome.subphase.grpc_write,
             peak_rss_bytes,
             pushdown,
+            df_target_partitions: match scenario.arm {
+                ArmKind::DataFusion => Some(self.effective_df_partitions()),
+                _ => None,
+            },
             sql,
         }
+    }
+
+    /// The `target_partitions` a DataFusion run will actually use: the explicit
+    /// pin, else DataFusion's default of one per available core. Resolved (rather
+    /// than recorded as "default") so a results file read on another machine
+    /// still says how much parallelism the number was produced with.
+    fn effective_df_partitions(&self) -> usize {
+        self.config.df_target_partitions.unwrap_or_else(|| {
+            std::thread::available_parallelism()
+                .map(|n| n.get())
+                .unwrap_or(1)
+        })
     }
 }
 

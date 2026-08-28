@@ -44,6 +44,7 @@ struct Args {
     iterations: usize,
     batch_size: usize,
     out: Option<PathBuf>,
+    df_target_partitions: Option<usize>,
     scenarios: Vec<ScenarioKind>,
     arms: Vec<ArmKind>,
 }
@@ -118,6 +119,7 @@ fn run() -> Result<(), String> {
         filter_op: args.filter_op,
         filter_value,
         iterations: args.iterations,
+        df_target_partitions: args.df_target_partitions,
     };
     let runner = BenchRunner::new(config);
 
@@ -270,6 +272,7 @@ fn write_results(args: &Args, results: &[BenchOutcome]) -> Result<(), String> {
         "ddl_file": args.ddl_file,
         "iterations": args.iterations,
         "batch_size": args.batch_size,
+        "df_target_partitions": args.df_target_partitions,
         "runs": results,
     });
     let text = serde_json::to_string_pretty(&document)
@@ -291,6 +294,7 @@ fn parse_args() -> Result<Args, String> {
     let mut iterations = 3usize;
     let mut batch_size = 8192usize;
     let mut out: Option<PathBuf> = None;
+    let mut df_target_partitions: Option<usize> = None;
     let mut scenarios: Vec<ScenarioKind> = Vec::new();
     let mut arms: Vec<ArmKind> = Vec::new();
 
@@ -330,6 +334,15 @@ fn parse_args() -> Result<Args, String> {
                     .map_err(|e| format!("--batch-size must be a positive integer: {e}"))?;
             }
             "--out" => out = Some(PathBuf::from(value()?)),
+            "--df-target-partitions" => {
+                let n: usize = value()?.parse().map_err(|e| {
+                    format!("--df-target-partitions must be a positive integer: {e}")
+                })?;
+                if n == 0 {
+                    return Err("--df-target-partitions must be >= 1".to_string());
+                }
+                df_target_partitions = Some(n);
+            }
             "--scenario" => {
                 let raw = value()?;
                 scenarios.push(
@@ -367,6 +380,7 @@ fn parse_args() -> Result<Args, String> {
         iterations,
         batch_size,
         out,
+        df_target_partitions,
         scenarios: if scenarios.is_empty() {
             ScenarioKind::all().to_vec()
         } else {
