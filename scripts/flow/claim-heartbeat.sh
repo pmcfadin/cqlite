@@ -821,7 +821,7 @@ open_pr_state() {
 cmd_dead_lanes() {
   [ "$#" -eq 0 ] || die_usage "dead-lanes takes no arguments (got '$1')"
 
-  local raw this_machine dead=0 unreadable=0 lsrc local_seen=0 row=0
+  local raw this_machine dead=0 unreadable=0 lsrc local_seen=0 local_listed=0 row=0
   this_machine="${HEARTBEAT_MACHINE:-$(hostname -s)}"
 
   # NO `|| true` HERE (roborev round 1, Medium). Swallowing the status turned an
@@ -894,6 +894,10 @@ cmd_dead_lanes() {
     # decision would be a poor trade. Guarded by version because the option landed in git
     # 2.29; on older git the flag is omitted rather than failing every row with an
     # unknown-option error whose stated cause would be "fetch failed".
+    # Counted from the REFNAME, before any fetch: whether the claim belongs to this machine is
+    # known from the ref path, so an unreadable local ref must not be mistaken for "no local
+    # claim exists" in the closing diagnostic (roborev round 16, Low).
+    [ "$machine" = "$this_machine" ] && local_listed=$((local_listed + 1))
     if ! git fetch --no-write-fetch-head --no-tags "$REMOTE" "+${refname}:${tmpref}" >/dev/null 2>&1; then
       # An unreadable ref is "we cannot tell about THIS lane", never "this lane is
       # fine" — so it is both printed AND counted toward an incomplete measurement.
@@ -1039,7 +1043,14 @@ cmd_dead_lanes() {
   # ignore it. The distinction is "did I measure ANY local lane", not "is every lane
   # local".
   if [ "$local_seen" -eq 0 ]; then
-    note "NOTHING WAS MEASURED: claim refs exist on ${REMOTE} but none is owned by this machine (${this_machine}), and a pid is only checkable where it runs. dead-lanes is LOCAL-ONLY — run it ON the suspect box, or check each machine in turn. This is NOT 'no dead lanes'."
+    # Two different situations, and telling an operator the wrong one sends them to the wrong
+    # box (roborev round 16, Low): either no claim here belongs to this machine, or one does
+    # and could not be read.
+    if [ "$local_listed" -gt 0 ]; then
+      note "NOTHING WAS MEASURED: ${local_listed} claim ref(s) on ${REMOTE} DO belong to this machine (${this_machine}) but none could be read, so no lane was judged. This is NOT 'no dead lanes'."
+    else
+      note "NOTHING WAS MEASURED: claim refs exist on ${REMOTE} but none is owned by this machine (${this_machine}), and a pid is only checkable where it runs. dead-lanes is LOCAL-ONLY — run it ON the suspect box, or check each machine in turn. This is NOT 'no dead lanes'."
+    fi
     return 1
   fi
   if [ "$unreadable" -gt 0 ]; then

@@ -1035,12 +1035,19 @@ open(sys.argv[1], "w").write(str(pid))
 time.sleep(25)           # keep the parent alive so the zombie is not reparented+reaped
 PYZ
 zshell=$!
-for _ in 1 2 3 4 5 6 7 8 9 10; do
-  [ -s "$zparent_out" ] && break
-  sleep 0.3
+# WAIT FOR THE Z STATE, NOT FOR THE PID FILE (roborev round 16, Low). The parent writes the
+# file after forking, which can happen BEFORE the child has exited — so keying on the file made
+# the fixture nondeterministic, and a gate-registered flaky test is worse than no test.
+zpid=""
+zstate=""
+for _ in $(seq 1 40); do
+  if [ -s "$zparent_out" ]; then
+    zpid="$(cat "$zparent_out" 2>/dev/null || true)"
+    zstate="$(ps -o stat= -p "$zpid" 2>/dev/null | tr -d ' ')"
+    [ "${zstate#Z}" != "$zstate" ] && break
+  fi
+  sleep 0.25
 done
-zpid="$(cat "$zparent_out" 2>/dev/null || true)"
-zstate="$(ps -o stat= -p "$zpid" 2>/dev/null | tr -d ' ')"
 if [ -n "$zpid" ] && [ "${zstate#Z}" != "$zstate" ]; then
   ok "PREMISE ASSERTED: pid $zpid is a real zombie (ps state '$zstate'), and ps -p reports it as existing"
   craft_old_claim "$WORK" "zombieMachine" 3407 "$zpid" 0
@@ -1613,12 +1620,23 @@ echo "TEST 55: a SLOW ps cannot buy an ALIVE verdict (round 15, Medium)"
 # start before the claim ts and yields ALIVE.
 slowshim="$T/slowshim"
 mkdir -p "$slowshim"
+# THE NUMBERS ARE CHOSEN TO DISCRIMINATE (roborev round 16, Low). My first fixture used
+# elapsed=0 with a 5s sleep, which does NOT distinguish the two implementations: the point
+# calculation used the PRE-sleep clock, so its start landed inside the tolerance band and read
+# UNKNOWN either way. To separate them the point estimate must fall on the ALIVE side while the
+# interval straddles the boundary. With cts = craft time, t0 = now before ps, t1 = t0 + 20:
+#   point (old):    start = t0 - 10  =>  ALIVE requires t0 - 10 < cts - 2, true for t0 < cts+8
+#   interval (new): [t0-10, t1-10]   =>  ALIVE requires t1 - 10 < cts - 2, i.e. t0 + 8 < cts,
+#                                        false; DEAD requires t0 - 10 > cts + 2, also false
+#                                        => UNKNOWN
+# The run reaches ps a second or two after crafting, so t0-cts is ~0-8s and both hold with
+# margin. Verified: this fixture reads ALIVE against the pre-fix script and UNKNOWN here.
 cat >"$slowshim/ps" <<'PSEOF'
 #!/usr/bin/env bash
 for a in "$@"; do
   case "$a" in
     stat=)   echo "S"; exit 0 ;;
-    etimes=) sleep 5; echo 0; exit 0 ;;   # 5s > the 2s tolerance
+    etimes=) sleep 20; echo 10; exit 0 ;;
   esac
 done
 exit 0
@@ -1641,6 +1659,37 @@ else
   bad "the identity detail must report the bracketed interval: $(printf '%s\n' "$sp_out" | grep -E '^slowPs ')"
 fi
 (cd "$WORK" && g push -q origin ":refs/machine-claims/slowPs" 2>/dev/null || true)
+
+# ===========================================================================
+echo "TEST 56: an UNREADABLE LOCAL claim is not reported as 'no local claim' (round 16, Low)"
+# ===========================================================================
+# The closing diagnostic is what tells an operator where to look. A local ref whose fetch fails
+# never incremented local_seen, so the run said 'none is owned by this machine' about a machine
+# that owns one — sending the reader to the wrong box.
+dangling2="deadbeef11111111111111111111111111111111"
+printf '%s\n' "$dangling2" >"$ORIGIN/refs/machine-claims/unreadableLocal"
+ul_out=$(cd "$WORK" && HEARTBEAT_MACHINE=unreadableLocal CLAIM_OPEN_PR_CMD="$NO_OPEN_PR" \
+  bash "$HB" dead-lanes 2>&1)
+ul_rc=$?
+if [ "$ul_rc" -eq 1 ] \
+  && printf '%s\n' "$ul_out" | grep -qi 'DO belong to this machine' \
+  && ! printf '%s\n' "$ul_out" | grep -qi 'none is owned by this machine'; then
+  ok "an unreadable LOCAL claim reports 'belongs to this machine but could not be read', not 'no local claim'"
+else
+  bad "the unreadable-local diagnostic must not claim there is no local claim: rc=$ul_rc out:
+$ul_out"
+fi
+# NON-VACUITY: viewed from a machine that owns NOTHING, the same fixture still gives the
+# all-foreign message — so the two diagnostics are genuinely distinct rather than one renamed.
+uf_out=$(cd "$WORK" && HEARTBEAT_MACHINE=ownsNothingAtAll CLAIM_OPEN_PR_CMD="$NO_OPEN_PR" \
+  bash "$HB" dead-lanes 2>&1)
+if printf '%s\n' "$uf_out" | grep -qi 'none is owned by this machine'; then
+  ok "NON-VACUITY: a machine owning no claim still gets the all-foreign diagnostic — the two messages are distinct"
+else
+  bad "NON-VACUITY broken: the all-foreign diagnostic no longer appears: out:
+$uf_out"
+fi
+rm -f "$ORIGIN/refs/machine-claims/unreadableLocal"
 
 echo
 echo "=== claim-heartbeat.sh: $PASS passed, $FAIL failed ==="
