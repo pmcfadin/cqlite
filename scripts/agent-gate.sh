@@ -4855,13 +4855,19 @@ run_roborev_lints_cmd() {
 # does not honour `\x` escapes and macOS is a first-class gate host.
 _ansi_stripped_log() {
   local logfile="$1" out esc
-  [ -r "$logfile" ] || { printf '%s' "$logfile"; return 0; }
+  # FAIL CLOSED on an unreadable log (roborev round-25, Medium). Returning the original path let the
+  # caller parse a file it had just failed to read, and a guard that parses nothing reports nothing
+  # wrong. The caller's own fail-closed branch is what should decide, so tell it the truth.
+  [ -r "$logfile" ] || return 1
   esc=$(printf '\033')
   out="$logfile.ansi-stripped"
   if sed -E "s/${esc}\\[[0-9;]*[A-Za-z]//g" "$logfile" > "$out" 2>/dev/null; then
     printf '%s' "$out"
   else
-    printf '%s' "$logfile"
+    # A FAILED normalisation is not "use the coloured original": under CARGO_TERM_COLOR the
+    # coloured original is exactly what the parsers cannot read (round 15), so silently handing it
+    # back converts a normalisation failure into a vacuous PASS. Non-zero, and the caller FAILs.
+    return 1
   fi
 }
 
@@ -4983,6 +4989,20 @@ check_no_unexpected_zero_tests() {
   # everything is fine — and "the parse is broken" is never a pass.
   if [ "$_results" -gt 0 ] && [ "$_banners" -eq 0 ] && [ "$_unit_banners" -eq 0 ]; then
     echo "$label: FAIL-CLOSED — '$logfile' contains $_results cargo test-result line(s) but NOT ONE parseable 'Running <path>.rs' banner, so no result could be attributed to a target. The parse is broken (a cargo format change, a normalisation that dropped the line, or suppressed output); a guard that attributed nothing has measured nothing and must never report OK (issue #1699, roborev round-17)." >&2
+    return 1
+  fi
+  # AND ZERO RESULTS IS ALSO NOT A PASS (roborev round-25, Medium). Round 17 closed
+  # "results but no banners"; the complementary hole stayed open — a log with NO parseable
+  # `test result:` line at all leaves every counter at zero, `bad` empty, and the guard
+  # returning SUCCESS. A truncated log, a killed cargo, a changed output format or a
+  # normalisation that ate every line all land here. Every caller of this guard has just run
+  # cargo test to a SUCCESSFUL exit, so at least one result line must exist; none means the
+  # guard could not see what happened, which is never a pass.
+  #
+  # `--no-run` callers are not affected because they do not call this guard: the two isolation
+  # lanes compile only and are checked by their own exit status.
+  if [ "$_results" -eq 0 ]; then
+    echo "$label: FAIL-CLOSED — '$logfile' contains NO parseable cargo 'test result:' line at all, so this guard judged ZERO targets. The caller's cargo run exited successfully, so results must exist: a truncated log, a killed process, a changed cargo output format or a failed ANSI normalisation. A guard that judged nothing has measured nothing and must never report OK (issue #1699, roborev round-25)." >&2
     return 1
   fi
   if [ -n "$bad" ]; then
@@ -6117,8 +6137,25 @@ run_flight_tests() {
   # empty). Naming CI as the runner of those targets is a FALSE all-clear, and a census that
   # names the wrong runner is worse than one that admits ignorance because it closes the question.
   local gated_meta gated_n=0 gated_unclass=0 gated_names="" grel ggate goff ci_n
+  # A FAILED derivation is a FAIL naming it, never an empty result (roborev round-25, Medium).
+  # Treating non-zero as "" made a metadata or parser failure classify every crate-gated target as
+  # CI-COVERED — the census's own all-clear, produced by the census failing. That is the exact
+  # vacuous-excusal shape this lane exists to eliminate, and it is why `_crate_gated_test_targets`
+  # now distinguishes "nothing is gated" (exit 0, empty stdout) from "I could not tell" (exit 1).
   if ! gated_meta=$(_crate_gated_test_targets cqlite-flight "$enabled"); then
-    gated_meta=""   # no crate-gated target found is a legitimate empty result, see below
+    status=FAIL
+    {
+      echo "[$name] FAIL-CLOSED: could not derive which cqlite-flight targets are CRATE-GATED"
+      echo "        (cargo metadata, the metadata parser, or an unreadable target source). The"
+      echo "        DERIVATION failed, not the tests. Without it the census cannot separate the"
+      echo "        targets that execute NOWHERE (#3375) from the ones CI covers, and reporting"
+      echo "        them as covered would be a false all-clear about the omission this lane exists"
+      echo "        to declare."
+    } | tee "$log"
+    end=$(date +%s)
+    record_result "$name" "$status" "$((end - start))"
+    echo ">>> [$name] $status ($((end - start))s)"
+    return 0
   fi
   local gated_elsewhere=0 elsewhere_names="" unclass_names="" gname excluded_set=" " excluded_n=0
   while IFS=$'\t' read -r gname grel ggate goff; do
@@ -6500,7 +6537,13 @@ _crate_gated_test_targets() { # <pkg> <enabled-set>  -> name \t rel \t gate \t o
   [ -n "$meta" ] || return 1
   while IFS=$'\t' read -r _tn sp _how rel; do
     [ -n "$sp" ] || continue
-    [ -r "$sp" ] || continue
+    # An UNREADABLE declared source is a failed derivation, not a target to skip (roborev
+    # round-25, Medium). Skipping it silently drops the target from every population, so it lands
+    # in the CI-covered count by subtraction — a target we could not examine reported as covered.
+    if [ ! -r "$sp" ]; then
+      echo "UNREADABLE $sp (declared target $_tn)" >&2
+      return 1
+    fi
     # Inner attributes only, and only at the top of the file: an inner `#![cfg]` gates the WHOLE
     # crate, which is the shape that makes a target execute nothing at all. A `#[cfg]` on one item
     # is a different (and legitimate) thing and is deliberately not counted here.

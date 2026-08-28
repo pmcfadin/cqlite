@@ -2802,14 +2802,30 @@ if [ -s "$zn_h" ]; then
   else
     ok "1699-r17-nobanner: results with zero recognised banners is a FAIL (the parse is broken, and a broken parse is never a pass)"
   fi
-  # Complement: a log with NO results at all must not be forced to fail — some components
-  # legitimately produce no test-result lines, and reddening there would be a false red.
+  # THIS EXPECTATION IS REVERSED, and the reversal is the point (roborev round-25, Medium).
+  #
+  # Round 17 added this as a complement — "some components legitimately produce no test-result
+  # lines, and reddening there would be a false red" — and that premise was never measured. It is
+  # false for every caller of THIS guard, and while it stood it LICENSED the hole round 25 found:
+  # a log with no parseable `test result:` line left every counter at zero and the guard returned
+  # SUCCESS, so a truncated log, a killed cargo, a changed output format or a failed ANSI
+  # normalisation all read as "nothing wrong".
+  #
+  # MEASURED against real component logs before flipping it: `flight-tests` 2 result lines,
+  # `cli-tests` 32, `legacy-heuristics` likewise non-zero — every caller runs cargo test to a
+  # successful exit, so results always exist. The `--no-run` isolation lanes do not call this guard.
+  #
+  # The general lesson, which is why this comment is long: a complement assert is only as good as
+  # the premise it encodes, and an UNMEASURED complement is a licence for the permissive branch it
+  # protects. Round 17's complement caught a real over-reach at the time (an affirmative check that
+  # redded a legitimate `--lib`-only log — the case immediately above), so it was not wrong to add;
+  # it was wrong to state its scope more broadly than had been measured.
   nrl="$tmp/1699-r17-noresults.log"
   printf '   Compiling foo v0.1.0\n    Finished test profile\n' > "$nrl"
   if ( . "$zn_h"; check_no_unexpected_zero_tests "noresults" "$nrl" >/dev/null 2>&1 ); then
-    ok "1699-r17-noresults-complement: a log with no test results at all is not forced to FAIL (the check keys on results PRESENT, not on banners absent)"
+    bad "1699-r25-noresults: a log with NO parseable 'test result:' line PASSED — the guard judged zero targets and reported OK, which is the vacuous pass (a truncated log, a killed cargo, a changed format or a failed ANSI strip all land here)"
   else
-    bad "1699-r17-noresults-complement: a log with no test results now FAILS — the affirmative check is over-reaching into a false red"
+    ok "1699-r25-noresults: a log with NO parseable 'test result:' line is a FAIL — every caller of this guard has just run cargo test to a successful exit, so results must exist (measured: flight-tests 2, cli-tests 32)"
   fi
 fi
 
@@ -3252,6 +3268,60 @@ stacked_both_on|NONE
 indented_off|off_x
 stacked_unclass|UNCLASSIFIED
 STACKED_CASES
+fi
+
+# --- 35. #1699: a FAILED ANSI normalisation is not a fallback (roborev round-25, Medium) ---
+#
+# `_ansi_stripped_log` used to hand back the ORIGINAL path when it could not read the log or could
+# not write the stripped copy. Under `CARGO_TERM_COLOR` the coloured original is exactly what the
+# parsers cannot read (round 15), so the fallback converted a normalisation failure into a vacuous
+# PASS. It now returns non-zero and every caller fail-closes.
+#
+# WRITTEN BECAUSE THE RED CHECK FOUND NOTHING. Reverting the fix by hand — restoring the silent
+# `printf '%s' "$logfile"` — left the whole suite GREEN, so that half of the fix was protected only
+# by its own presence in the file. That is round 13's lesson in this same PR: a guard whose only
+# protection is its own presence has no protection at all. Two behavioural cases, one per failure
+# mode, plus a structural assert that the fallback cannot come back.
+if [ -s "$zn_h" ]; then
+  # (a) UNREADABLE log
+  unr_="$tmp/1699-r25-unreadable.log"
+  printf 'Running tests/foo.rs\nrunning 1 tests\ntest result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out\n' > "$unr_"
+  chmod 000 "$unr_" 2>/dev/null
+  if [ -r "$unr_" ]; then
+    skipped "1699-r25-unreadable: cannot make a file unreadable on this box (running as root?) — the unreadable-log path was NOT verified"
+  elif ( . "$zn_h"; check_no_unexpected_zero_tests "unreadable" "$unr_" >/dev/null 2>&1 ); then
+    bad "1699-r25-unreadable: an UNREADABLE log PASSED — the guard could not read its input and still reported OK, which is the vacuous pass these guards exist to prevent"
+  else
+    ok "1699-r25-unreadable: an unreadable log is a FAIL, not a fallback to parsing it anyway"
+  fi
+  chmod 644 "$unr_" 2>/dev/null
+
+  # (b) UNWRITABLE destination: the log is readable but the `.ansi-stripped` sibling cannot be
+  # created, which is the second failure mode the old fallback swallowed.
+  rodir_="$tmp/1699-r25-ro"; mkdir -p "$rodir_"
+  ro_log_="$rodir_/x.log"
+  printf 'Running tests/foo.rs\nrunning 1 tests\ntest result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out\n' > "$ro_log_"
+  chmod 500 "$rodir_" 2>/dev/null
+  if ( : > "$rodir_/probe" ) 2>/dev/null; then
+    rm -f "$rodir_/probe" 2>/dev/null
+    skipped "1699-r25-unwritable: cannot make a directory unwritable on this box — the failed-strip path was NOT verified"
+  elif ( . "$zn_h"; check_no_unexpected_zero_tests "unwritable" "$ro_log_" >/dev/null 2>&1 ); then
+    bad "1699-r25-unwritable: a log whose normalised copy could NOT be written PASSED — the guard fell back to the un-normalised original, which under colour is unparseable, so it measured nothing"
+  else
+    ok "1699-r25-unwritable: a failed normalisation is a FAIL, not a silent fallback to the coloured original"
+  fi
+  chmod 700 "$rodir_" 2>/dev/null
+
+  # (c) structural: the fallback must not return
+  ansi_="$tmp/1699-r25-ansi.txt"
+  awk '/^_ansi_stripped_log\(\) \{/, /^\}/' "$GATE" > "$ansi_"
+  if [ ! -s "$ansi_" ]; then
+    bad "1699-r25-ansi-scope: could not extract _ansi_stripped_log — this assert would pass vacuously"
+  elif [ "$(sed 's/[[:space:]]*#.*$//' "$ansi_" | grep -cE "printf '%s' \"\\\$logfile\"")" -eq 0 ]; then
+    ok "1699-r25-ansi-nofallback: _ansi_stripped_log never returns the un-normalised original path"
+  else
+    bad "1699-r25-ansi-nofallback: the silent fallback to \$logfile is back — a failed normalisation would again be reported as a usable parse source"
+  fi
 fi
 
 echo "----"
