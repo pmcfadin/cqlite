@@ -790,7 +790,7 @@ fn every_error_variant_classify_routes_is_documented_in_the_taxonomy_table() {
 /// this issue documents were absent here while every consistency guard stayed green.
 fn independent_expectations() -> Vec<(Error, ErrorCategory)> {
     use ErrorCategory::*;
-    vec![
+    let mut out = vec![
         (Error::from(std::io::Error::other("x")), Io),
         (Error::invalid_path("p"), Io),
         (Error::Timeout("t".into()), Io),
@@ -886,7 +886,41 @@ fn independent_expectations() -> Vec<(Error, ErrorCategory)> {
         // (misleading — it is not a transport failure) and not lumped into the
         // generic `Other` bucket (would hide cancellation rate).
         (Error::Cancelled, Cancelled),
-    ]
+    ];
+    out.extend(wasm_expectations());
+    out
+}
+
+/// The hand-written expectation for the `#[cfg(target_arch = "wasm32")]` variants:
+/// present on a `wasm32` build, empty elsewhere.
+///
+/// Issue #1705 (roborev F14): the coverage guard used to exclude `wasm32`-gated
+/// variants UNCONDITIONALLY, so on a `wasm32` build — where `Error::Wasm` really is
+/// constructible — the one oracle that does not derive from `classify()` would have
+/// had nothing to say about it, and `classify()` plus the taxonomy table could agree
+/// on a wrong category undetected. That is a vacuity hole in the guard whose whole
+/// purpose is to be un-vacuous, so the exclusion is now conditional on
+/// [`WASM_VARIANTS_COMPILED`].
+///
+/// `Other`, judged from the variant's MEANING: the telemetry taxonomy has no
+/// platform bucket (`crate::error::ErrorCategory::Platform` is the developer-facing
+/// enum, not this one), and a WASM host/JS-boundary failure is none of the specific
+/// ones — not the transport (`Io`), not the data, not the query, not a budget. With
+/// no dedicated bucket to route it to, `Other` is the honest answer.
+///
+/// UNEXECUTED today: CQLite does not build for `wasm32` (WASM bindings are M6), so
+/// on every target we compile this list is empty and only its non-`wasm32` half is
+/// exercised. It is written now so that the day a `wasm32` build exists, `Wasm` has
+/// the same independent second opinion as every other variant instead of a hole.
+fn wasm_expectations() -> Vec<(Error, ErrorCategory)> {
+    #[cfg(target_arch = "wasm32")]
+    {
+        vec![(Error::Wasm("w".into()), ErrorCategory::Other)]
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        Vec::new()
+    }
 }
 
 #[test]
@@ -925,9 +959,13 @@ fn the_independent_category_test_covers_every_variant_the_taxonomy_documents() {
 
     let missing: Vec<String> = classify_arms()
         .into_iter()
-        // A `wasm32`-gated variant cannot be constructed on this target, so it has
-        // no constructible expectation here; `actual_map` states that gap too.
-        .filter(|(variant, (_, wasm_gated))| !wasm_gated && !covered.contains(variant))
+        // A `wasm32`-gated variant is excluded ONLY where it does not compile and so
+        // cannot be constructed (`actual_map` states that gap too). Where it DOES
+        // compile it is demanded like any other variant — an unconditional exclusion
+        // left the independent oracle vacuous for it (#1705, F14).
+        .filter(|(variant, (_, wasm_gated))| {
+            (WASM_VARIANTS_COMPILED || !wasm_gated) && !covered.contains(variant)
+        })
         .map(|(variant, (category, _))| format!("Error::{variant} -> {category}"))
         .collect();
     assert!(
