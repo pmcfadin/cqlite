@@ -5550,6 +5550,29 @@ run_pub_surface() {
     # must land in all three at once (#1712 descope).
     local measured
     measured="$(grep -m1 -E '^pub-surface: [0-9]+ crate-root declarations scanned in cqlite-core/src/lib\.rs \([0-9]+ pub mod, of which [1-9][0-9]* unconditional\); [1-9][0-9]* module-file prologues read from source; 0 inconsistent$' "$log" || true)"
+    # THE SHAPE IS NOT ENOUGH — the COUNTS MUST COHERE (roborev r9 F4). The regex above
+    # pins the wording and forbids a zero, but on its own it also accepts arithmetically
+    # IMPOSSIBLE lines: `14 unconditional; 1 module-file prologues read` (13 declarations
+    # silently unexamined), or `0 pub mod, of which 5 unconditional`. The guard itself
+    # asserts prologues == unconditional, so such a line means the guard is not the
+    # program that produced it — a stub, a truncation, or a stale build. This component
+    # exists to be INDEPENDENT of the guard, so it re-derives the relationships here
+    # rather than trusting them: decls >= mods >= uncond > 0, and prologues == uncond.
+    if [ -n "$measured" ]; then
+      local ps_d ps_m ps_u ps_p
+      ps_d="$(printf '%s' "$measured" | sed -E 's/^pub-surface: ([0-9]+) crate-root.*/\1/')"
+      ps_m="$(printf '%s' "$measured" | sed -E 's/.*\(([0-9]+) pub mod.*/\1/')"
+      ps_u="$(printf '%s' "$measured" | sed -E 's/.*of which ([0-9]+) unconditional.*/\1/')"
+      ps_p="$(printf '%s' "$measured" | sed -E 's/.*; ([0-9]+) module-file prologues.*/\1/')"
+      if ! { [ "$ps_d" -ge "$ps_m" ] && [ "$ps_m" -ge "$ps_u" ] && [ "$ps_u" -gt 0 ] && [ "$ps_p" -eq "$ps_u" ]; }; then
+        echo "❌ [$name] the pub-surface measurement line is ARITHMETICALLY INCOHERENT:" >&2
+        echo "    $measured" >&2
+        echo "    require: declarations($ps_d) >= pub mod($ps_m) >= unconditional($ps_u) > 0, and prologues($ps_p) == unconditional($ps_u)." >&2
+        echo "    A line matching the wording but not the arithmetic did not come from the guard" >&2
+        echo "    (stub, truncation or stale build). Refusing to record PASS." >&2
+        measured=""
+      fi
+    fi
     if [ -n "$measured" ]; then
       status=PASS
       # Echo it so a pasted gate log shows the check RAN over a real surface.

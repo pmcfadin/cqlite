@@ -253,6 +253,28 @@ function meta_verdict(m,   nm, rest, args, parts, k, i, v, r) {
   return "OPEN"
 }
 function attrs_verdict(a,   i, j, c, d, m, v, res) {
+  # TWO REFUSALS BEFORE ANY PARSING, and they must come FIRST because both defeat the
+  # parsing itself. Note which direction is dangerous here: GATED and HIDDEN are the
+  # EXEMPTING verdicts — only an OPEN declaration gets its module file read — so
+  # anything that flips OPEN to GATED SKIPS INSPECTION and hides an inner-gated module.
+  #
+  # (1) RAW STRINGS (roborev r9 F1). `strip_strings` models only ORDINARY quoted
+  #     strings, so a raw string's CONTENT leaks into the parsed structure: a cosmetic
+  #     `doc = r##"", cfg(any()), ""##` exposes a comma and a `cfg(...)` to `split_meta`
+  #     and can flip an unconditional declaration to GATED. Modelling raw-string hash
+  #     counts is a second lexer — the class this guard has already paid for — so refuse.
+  #     Anchored on a non-identifier boundary so an ordinary string ending in `r` (e.g.
+  #     `doc = "for"`, which contains the two characters `r"`) does NOT match.
+  if (a ~ /(^|[^A-Za-z0-9_])r#*"/) return "REFUSE_RAWSTRING"
+  # (2) `#[path = "..."]` (roborev r9 F2). Module resolution assumes the two standard
+  #     paths. With a DECOY `NAME.rs` present beside `#[path = "actual.rs"] pub mod
+  #     NAME;`, the guard reads the decoy, finds it clean and certifies, while
+  #     `actual.rs` carries the inner gate. Resolving `#[path]` (including its
+  #     `cfg_attr`-applied form, and its directory-relative semantics) is real work;
+  #     refusing is bounded and correct. Only `#[...]` spans reach here — a `///` doc
+  #     comment terminates attribute collection — so a doc comment mentioning `path =`
+  #     cannot trip this.
+  if (a ~ /(^|[^A-Za-z0-9_])path[[:space:]]*=/) return "REFUSE_PATH"
   a = strip_strings(a)
   res = "OPEN"
   i = 1
@@ -265,7 +287,11 @@ function attrs_verdict(a,   i, j, c, d, m, v, res) {
       else if (c == "]") { d--; if (d == 0) break }
       j++
     }
-    if (j > length(a)) return "GATED"   # unbalanced: cannot read it, so do not exempt on OPEN
+    # UNBALANCED `#[`: previously this returned GATED, reasoning "do not exempt on
+    # OPEN". That has the polarity backwards — GATED *is* an exemption here (the module
+    # file is only read for OPEN), so an unreadable attribute was silently skipping the
+    # very inspection it could not rule out. Refuse instead.
+    if (j > length(a)) return "REFUSE_UNBALANCED"
     v = meta_verdict(substr(a, i + 2, j - i - 2))
     if (v == "GATED") return "GATED"
     if (v == "HIDDEN") res = "HIDDEN"
@@ -778,6 +804,13 @@ END {
       refuse(i, "a BLOCK COMMENT opens in the module prologue: `" squash(substr(t, 1, 72)) "`")
       exit
     }
+    # A FIRST-LINE SHEBANG (roborev r9 F3). rustc accepts `#!...` on line 1 when it is
+    # not `#![` — VERIFIED with rustc 1.98.0: a module of `#!/usr/bin/env rust` +
+    # `#![cfg(feature = "nope")]` compiles, and the gate APPLIES. Without this the
+    # shebang reads as the first item, the prologue ends at line 1, and the file is
+    # falsely certified. Exactly one is possible and only on line 1, so this is a
+    # bounded, exact rule rather than a guess.
+    if (i == 1 && substr(t, 1, 2) == "#!" && substr(t, 1, 3) != "#![") { i++; continue }
     if (substr(t, 1, 3) != "#![") {
       # First outer attribute or first item: rustc forbids an inner attribute after
       # either, so the prologue — and every inner attribute in the file — ends here.
@@ -930,6 +963,12 @@ while IFS=$'\t' read -r lineno modname gate; do
   case "$gate" in
     GATED|HIDDEN) continue ;;
     OPEN) ;;
+    REFUSE_RAWSTRING)
+      fail "\`pub mod $modname\` at $LIB_RS_REL:$lineno carries a declaration attribute containing a RAW STRING. This scan erases ordinary string contents before reading structure, but it does not model raw-string delimiters (\`r#*\"\`), so a raw string's CONTENT would leak into the parsed meta-items and could flip this declaration to an EXEMPT verdict — which would skip reading the module file entirely and hide an inner \`#![cfg(...)]\`. Refusing rather than guessing (roborev r9 F1). Remedy: use an ordinary string literal in the declaration's attributes." ;;
+    REFUSE_PATH)
+      fail "\`pub mod $modname\` at $LIB_RS_REL:$lineno carries a \`path\` attribute. This guard resolves a module to exactly one of its two STANDARD paths ($SRC_REL/NAME.rs or $SRC_REL/NAME/mod.rs); it does not follow \`#[path]\`. If a standard-path file also exists, the guard would read THAT file and certify while the real module file — the one \`#[path]\` names — carries the gate (roborev r9 F2). Refusing rather than examining the wrong file. Remedy: drop \`#[path]\` for this crate-root module, or extend this guard to resolve it." ;;
+    REFUSE_UNBALANCED)
+      fail "\`pub mod $modname\` at $LIB_RS_REL:$lineno carries a declaration attribute whose \`[\` never closes, so its attributes could not be read. An unreadable attribute is not an exemption: this guard cannot establish that the declaration is gated, so it must not skip reading the module file." ;;
     *) fail "the crate-root scan produced an unrecognised attribute verdict '$gate' for \`pub mod $modname\` at $LIB_RS_REL:$lineno. An unplanned verdict is not an exemption; refusing to pass." ;;
   esac
   OPEN_COUNT=$((OPEN_COUNT + 1))
