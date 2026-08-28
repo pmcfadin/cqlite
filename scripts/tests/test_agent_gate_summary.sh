@@ -2346,6 +2346,101 @@ RSFX5
   fi
 fi
 
+# --- 25. #1699: the zero-test parser is tested DIRECTLY, against synthetic cargo logs ---
+#
+# roborev round-11 finding (Low), and it was right about the important part: the observation
+# harness's Flight plant uses a FAILING ASSERTION, so cargo exits non-zero on its own and the
+# lane reds whether or not check_unittest_targets_ran works. The harness therefore did NOT
+# validate the parser it claimed to exercise — a guard covered only by a test that would pass
+# without it is the exact shape this whole issue is about, one level down.
+#
+# Tested here against synthetic logs instead of through a compile: the parser's subject is
+# cargo's OUTPUT FORMAT, so text fixtures are the right oracle and cost nothing. Cases cover
+# observed-nonzero, observed-zero, a missing target, several binaries, and ignored-only runs.
+zt_h="$tmp/1699-zt-helper.sh"
+awk '/^check_unittest_targets_ran\(\) \{/,/^\}/' "$GATE" > "$zt_h"
+if [ ! -s "$zt_h" ]; then
+  bad "1699-zt-extract: could not extract check_unittest_targets_ran — the extraction broke, so these asserts would pass vacuously"
+else
+  ok "1699-zt-extract: extracted check_unittest_targets_ran from the real script"
+  # shellcheck disable=SC1090
+  . "$zt_h"
+
+  zt_case() { # zt_case <name> <expect: pass|fail> <log-content> <expected-target>...
+    local cname="$1" expect="$2" content="$3"; shift 3
+    local lf="$tmp/1699-zt-$cname.log"
+    printf '%s\n' "$content" > "$lf"
+    if check_unittest_targets_ran "zt-$cname" "$lf" "$@" >/dev/null 2>&1; then
+      if [ "$expect" = "pass" ]; then
+        ok "1699-zt-$cname: guard PASSES as expected"
+      else
+        bad "1699-zt-$cname: guard PASSED but should have FAILED — this is the vacuous-pass direction, the one that matters"
+      fi
+    else
+      if [ "$expect" = "fail" ]; then
+        ok "1699-zt-$cname: guard FAILS as expected"
+      else
+        bad "1699-zt-$cname: guard FAILED but should have PASSED — a false red trains people to re-run until green"
+      fi
+    fi
+  }
+
+  zt_case observed-nonzero pass \
+'     Running unittests src/lib.rs (target/debug/deps/x-1)
+running 12 tests
+test result: ok. 12 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out' \
+    src/lib.rs
+
+  zt_case observed-zero fail \
+'     Running unittests src/lib.rs (target/debug/deps/x-1)
+running 0 tests
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out' \
+    src/lib.rs
+
+  # A target the selection named but cargo never ran: the guard must not pass on silence.
+  zt_case missing-target fail \
+'     Running unittests src/lib.rs (target/debug/deps/x-1)
+running 12 tests
+test result: ok. 12 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out' \
+    src/lib.rs src/main.rs
+
+  zt_case two-bins-both-nonzero pass \
+'     Running unittests src/lib.rs (target/debug/deps/x-1)
+running 12 tests
+test result: ok. 12 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out
+     Running unittests src/main.rs (target/debug/deps/y-2)
+running 2 tests
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out' \
+    src/lib.rs src/main.rs
+
+  # The case a --bins selection makes reachable: one binary silently empty.
+  zt_case two-bins-one-zero fail \
+'     Running unittests src/lib.rs (target/debug/deps/x-1)
+running 12 tests
+test result: ok. 12 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out
+     Running unittests src/main.rs (target/debug/deps/y-2)
+running 0 tests
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out' \
+    src/lib.rs src/main.rs
+
+  # An all-ignored run still COMPILED and REGISTERED its tests; cargo reports a non-zero
+  # `running N tests`, so it is observed. The guard's subject is "did this target execute
+  # anything at all", not "did assertions run", so this must PASS — reds here would make the
+  # guard fire on a legitimately #[ignore]d suite.
+  zt_case ignored-only pass \
+'     Running unittests src/lib.rs (target/debug/deps/x-1)
+running 3 tests
+test result: ok. 0 passed; 0 failed; 3 ignored; 0 measured; 0 filtered out' \
+    src/lib.rs
+
+  # An empty expected set must FAIL: a guard with no subject reports OK having measured
+  # nothing (#3384). Already asserted in the production path; pinned here behaviourally.
+  zt_case empty-subject fail \
+'     Running unittests src/lib.rs (target/debug/deps/x-1)
+running 12 tests
+test result: ok. 12 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out'
+fi
+
 echo "----"
 echo "passed: $PASS  failed: $FAIL"
 [ "$FAIL" -eq 0 ]

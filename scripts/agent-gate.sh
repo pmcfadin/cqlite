@@ -6217,7 +6217,7 @@ run_legacy_heuristics() {
     echo ">>> [$name] $status ($((end - start))s)"
     return 0
   fi
-  local _mt_name _mt_src _mt_how _mt_rel
+  local _mt_name _mt_src _mt_how _mt_rel _mt_dir
   while IFS="$(printf '\t')" read -r _mt_name _mt_src _mt_how _mt_rel; do
     [ -n "$_mt_name" ] || continue
     f="$_mt_src"
@@ -6225,8 +6225,60 @@ run_legacy_heuristics() {
     # not see) OR its own source carries a cfg reference to it.
     if [ "$_mt_how" != "manifest" ]; then
       [ -f "$f" ] || continue
-      [ "$(grep -cE "$cfg_site" "$f")" -gt 0 ] || continue
+      # THE TARGET IS A MODULE TREE, NOT ONE FILE (roborev round-11 finding, Medium). A
+      # target root may declare `mod helper;`, resolving to a SIBLING DIRECTORY named after
+      # the root stem — `tests/foo.rs` + `tests/foo/`, or the directory-style
+      # `tests/foo/main.rs` + everything beside it. A gated test living only in a child
+      # module would be missed if the root itself never names the feature.
+      #
+      # Scanned with a DIRECTORY GLOB, not by resolving `mod` declarations: resolving them
+      # needs Rust-aware tooling, and this is a bash gate component — the same limit that
+      # descoped the census classifier in round 10. The glob is an over-approximation (it
+      # reads files the target may not actually include), and that direction is deliberate:
+      # over-inclusion adds a target to an executing lane, which is at worst wasted work,
+      # while under-inclusion silently drops coverage. Recorded here so the next reader does
+      # not "tighten" it into the failing direction.
+      _mt_dir="${f%.rs}"                       # tests/foo.rs -> tests/foo/
+      [ -d "$_mt_dir" ] || _mt_dir="${f%/*}"   # directory-style: use the containing dir
+      if [ "$(grep -cE "$cfg_site" "$f")" -eq 0 ]; then
+        # Only consult the module tree when the root is silent, and never let the
+        # containing `tests/` directory itself stand in for a module tree (that would pull
+        # in every sibling target).
+        case "$_mt_dir" in
+          */tests) continue ;;
+        esac
+        [ -d "$_mt_dir" ] || continue
+        [ "$(grep -rlE "$cfg_site" "$_mt_dir" 2>/dev/null | wc -l)" -gt 0 ] || continue
+      fi
     fi
+    # The zero-test guard keys on `Running tests/<path>.rs`, so a selected target whose
+    # source is NOT under tests/ (an explicitly mapped `[[test]] path = "..."`) is never
+    # associated with a result and could run ZERO tests unnoticed — a vacuous pass
+    # (roborev round-11 finding, Medium). My own round-10 comment noted this target is
+    # "invisible to that guard" and called it harmless because it cannot cause a false
+    # FAIL; that reasoning only considered one direction and missed the silent one.
+    # FAIL CLOSED rather than widen the SHARED guard here: that helper is used by other
+    # components whose allowed-zero lists are spelled tests/-relative, so re-keying it is a
+    # separate change. No such target exists today, so this costs nothing now and converts a
+    # silent hole into a loud one if someone adds one.
+    case "$_mt_rel" in
+      tests/*) ;;
+      *)
+        status=FAIL
+        {
+          echo "[$name] FAIL-CLOSED: selected target '$_mt_name' has its source at"
+          echo "        '$_mt_rel', outside tests/. The zero-tests guard keys on"
+          echo "        'Running tests/<path>.rs', so this target would execute under NO"
+          echo "        zero-test guard and could run zero tests unnoticed. Widen"
+          echo "        check_no_unexpected_zero_tests to reconcile metadata source paths"
+          echo "        before adding such a target (issue #1699, roborev round-11)."
+        } | tee "$log"
+        end=$(date +%s)
+        record_result "$name" "$status" "$((end - start))"
+        echo ">>> [$name] $status ($((end - start))s)"
+        return 0
+        ;;
+    esac
     base="$_mt_name"
     srcs="$srcs$_mt_name	$_mt_src
 "
