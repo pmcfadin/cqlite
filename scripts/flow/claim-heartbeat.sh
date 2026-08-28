@@ -79,7 +79,9 @@
 #                                            # process is verifiably gone, with NO
 #                                            # age threshold and regardless of an
 #                                            # open PR. exit 3 = a dead lane was
-#                                            # found; 0 = none (incl. zero claims).
+#                                            # found; 1 = the measurement was
+#                                            # incomplete; 0 = none (incl. zero
+#                                            # claims).
 #
 # WHY `dead-lanes` IS NOT `should-reap` (issue #3393 AC3)
 #   `should-reap` is a REAP GATE, and it consults the pid ONLY AFTER age >
@@ -88,6 +90,22 @@
 #   is an exit code nobody is watching. That is the silence #3393 records: three
 #   lanes died leaving a clean worktree, a held claim and an open PR, and NOTHING
 #   REPORTED IT.
+#
+#   WHOSE PROCESS, EXACTLY (roborev round 1, High — the first draft of this text
+#   overclaimed). The pid in the claim ref is the SUPERVISOR's: `worker-supervisor.sh`
+#   stamps `$$`, "the stable per-machine anchor, not a transient worker subprocess"
+#   (its own comment). So `DEAD-NO-PROCESS` means THE LANE-OWNING PROCESS IS GONE —
+#   the whole session died, which is exactly what #3393's three silent lane deaths
+#   did (the kernel killed the tmux scope, taking the supervisor with it).
+#
+#   NOT COVERED: a WORKER-ONLY KILL under a live supervisor. That is deliberate, not
+#   an oversight — the supervisor's job is to recycle workers, so a dead worker beneath
+#   a live supervisor is a lane still being driven, and reporting it as dead would page
+#   an operator about a system that is working. Do NOT "fix" this by expecting a worker
+#   pid here without also changing what `stamp` records: that ref is shared with
+#   `should-reap` and the CI reaper, so its meaning is not this command's to redefine.
+#   `test_claim_heartbeat.sh` pins the supervisor-pid semantic so this text cannot
+#   drift from the mechanism.
 #
 #   `dead-lanes` answers the other question — "is anything dead RIGHT NOW?" — and
 #   differs deliberately on both guards that make the reaper conservative:
@@ -151,7 +169,11 @@
 #      DISTINCT code, not 1: "I found a dead lane" is a successful measurement
 #      with a finding, while 1 means the measurement itself failed. A cron that
 #      conflated them would page for a network blip and stay silent on a real
-#      dead lane.
+#      dead lane. `dead-lanes` also returns 1 when the measurement is INCOMPLETE
+#      (the ref listing failed, or a listed ref would not fetch) and no dead lane
+#      was found — "I could not tell" must never read as "all clear". A found dead
+#      lane outranks incompleteness for the exit code, and the incompleteness is
+#      still reported in the text.
 #   64 usage error
 #
 # ---END-HELP---
@@ -482,15 +504,32 @@ cmd_should_reap() {
   return 0
 }
 
-# cmd_dead_lanes — REPORT (never mutate) every machine claim whose owning process
-# is verifiably gone. See the header for why this is not `should-reap`. Exit 3 iff
-# at least one DEAD-NO-PROCESS row was printed; 0 otherwise (including zero claims).
+# cmd_dead_lanes — REPORT (never mutate) every machine claim whose owning process is
+# gone. See the header for what "owning process" means and what this does NOT cover.
+#
+# EXIT PRECEDENCE (3 outranks 1, deliberately): a found dead lane is ACTIONABLE NOW,
+# so it wins the exit code, and any incompleteness is still stated in the text rather
+# than lost. With no dead lane, an incomplete measurement is exit 1 — never 0, because
+# "I could not tell" must not read as "all clear". That direction matters most during
+# exactly the outage in which lanes are dying.
 cmd_dead_lanes() {
   [ "$#" -eq 0 ] || die_usage "dead-lanes takes no arguments (got '$1')"
 
-  local raw this_machine dead=0
+  local raw this_machine dead=0 unreadable=0 lsrc
   this_machine="${HEARTBEAT_MACHINE:-$(hostname -s)}"
-  raw="$(git ls-remote "$REMOTE" 'refs/machine-claims/*' 2>/dev/null || true)"
+
+  # NO `|| true` HERE (roborev round 1, Medium). Swallowing the status turned an
+  # outage into "no claims found" + exit 0 — a pass derived from the ABSENCE of a
+  # bad signal. `git ls-remote` exits 0 with EMPTY output when nothing matches, so a
+  # genuine empty fleet stays distinguishable from a failure without guessing.
+  set +e
+  raw="$(git ls-remote "$REMOTE" 'refs/machine-claims/*' 2>&1)"
+  lsrc=$?
+  set -e
+  if [ "$lsrc" -ne 0 ]; then
+    note "could not list claim refs on ${REMOTE} (git exited ${lsrc}) — the fleet was NOT measured, so this is NOT 'no dead lanes'. git said: ${raw}"
+    return 1
+  fi
 
   if [ -z "$raw" ]; then
     echo "no claims found on $REMOTE — no dead lanes (an empty fleet is not a finding)"
@@ -505,14 +544,21 @@ cmd_dead_lanes() {
     machine="${refname#refs/machine-claims/}"
 
     if ! git fetch "$REMOTE" "$refname" >/dev/null 2>&1; then
-      # An unreadable ref is NOT "no dead lane here" — say so and do not judge it.
+      # An unreadable ref is "we cannot tell about THIS lane", never "this lane is
+      # fine" — so it is both printed AND counted toward an incomplete measurement.
+      unreadable=$((unreadable + 1))
       printf '%-20s %-8s %-12s %-18s %s\n' "$machine" "?" "?" "UNKNOWN-UNREADABLE" "fetch of $refname failed"
       continue
     fi
     msg="$(git log -1 --format=%B FETCH_HEAD 2>/dev/null || true)"
     issue="$(printf '%s' "$msg" | sed -n 's/.*issue=\([0-9][0-9]*\).*/\1/p' | head -1)"
     pid="$(printf '%s' "$msg" | sed -n 's/.*pid=\([0-9][0-9]*\).*/\1/p' | head -1)"
-    [ -n "$issue" ] || issue="?"
+    # `worker-supervisor.sh` stamps issue "0" when the current iteration's issue is
+    # not yet known. That is a PLACEHOLDER, not issue #0: probing for a PR on it
+    # would query a number that cannot exist and print a bogus issue in the report.
+    if [ -z "$issue" ] || [ "$issue" = "0" ]; then
+      issue="?"
+    fi
 
     detail=""
     if [ "$machine" != "$this_machine" ]; then
@@ -531,6 +577,8 @@ cmd_dead_lanes() {
       # a reap on unproven information. It does NOT gate the report.
       if [ "$issue" != "?" ] && issue_has_open_pr "$issue"; then
         detail="open-pr=yes — ORPHANED ENDGAME (#2499): report it, do NOT reap it"
+      elif [ "$issue" = "?" ]; then
+        detail="issue unknown (ref stamped before the issue was known)"
       else
         detail="open-pr=no"
       fi
@@ -538,10 +586,14 @@ cmd_dead_lanes() {
     printf '%-20s %-8s %-12s %-18s %s\n' "$machine" "$issue" "${pid:-none}" "$verdict" "$detail"
   done <<<"$raw"
 
+  if [ "$unreadable" -gt 0 ]; then
+    note "INCOMPLETE measurement: ${unreadable} claim ref(s) could not be read, so those lanes were not judged either way"
+  fi
   if [ "$dead" -gt 0 ]; then
     note "${dead} dead lane(s) reported — this is a REPORT, nothing was deleted or reaped"
     return 3
   fi
+  [ "$unreadable" -eq 0 ] || return 1
   return 0
 }
 

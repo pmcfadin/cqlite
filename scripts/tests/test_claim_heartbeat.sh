@@ -517,6 +517,112 @@ else
   bad "dead-lanes must reject a stray argument with its own exit-64 diagnostic: rc=$stray_rc out: $stray_out"
 fi
 
+# ===========================================================================
+echo "TEST 29: a git FAILURE is not an empty fleet — dead-lanes exits 1, never 0"
+# ===========================================================================
+# roborev round 1 (Medium): `git ls-remote ... || true` turned an OUTAGE into
+# "no claims found" + exit 0. That is the shape doctrine forbids — a pass derived
+# from the ABSENCE of a bad signal — and for a monitor it is the worst direction:
+# during the very outage when lanes are dying, it reports all clear.
+ls_out=$(cd "$WORK" && HEARTBEAT_REMOTE=no-such-remote bash "$HB" dead-lanes 2>&1)
+ls_rc=$?
+if [ "$ls_rc" -eq 1 ] && ! printf '%s\n' "$ls_out" | grep -qi 'no claims found'; then
+  ok "dead-lanes on an unreachable remote exits 1 and does NOT claim an empty fleet"
+else
+  bad "a git failure must be exit 1, not an empty-fleet exit 0: rc=$ls_rc out:
+$ls_out"
+fi
+if printf '%s\n' "$ls_out" | grep -qiE 'could not|failed|unreachable|cannot'; then
+  ok "the git-failure diagnostic says the measurement failed (not that nothing was found)"
+else
+  bad "the git-failure path must name the failure: $ls_out"
+fi
+
+# ===========================================================================
+echo "TEST 30: an UNREADABLE claim ref makes the measurement INCOMPLETE (exit 1)"
+# ===========================================================================
+# A ref that lists but will not fetch is "we cannot tell about this lane", which must
+# not be reported as "this lane is fine". Crafted by writing a ref in the bare origin
+# that points at an object the origin does not have.
+printf '%s\n' "0000000000000000000000000000000000000000" >/dev/null
+dangling="deadbeef00000000000000000000000000000000"
+mkdir -p "$ORIGIN/refs/machine-claims"
+printf '%s\n' "$dangling" >"$ORIGIN/refs/machine-claims/unreadableMachine"
+ur_out=$(cd "$WORK" && HEARTBEAT_MACHINE=unreadableMachine CLAIM_OPEN_PR_CMD="$NO_OPEN_PR" \
+  bash "$HB" dead-lanes 2>&1)
+ur_rc=$?
+if printf '%s\n' "$ur_out" | grep -q 'UNKNOWN-UNREADABLE' && [ "$ur_rc" -eq 1 ]; then
+  ok "an unfetchable claim ref is UNKNOWN-UNREADABLE and makes the run exit 1 (incomplete, not clean)"
+else
+  bad "an unreadable ref must yield UNKNOWN-UNREADABLE + exit 1: rc=$ur_rc out:
+$ur_out"
+fi
+rm -f "$ORIGIN/refs/machine-claims/unreadableMachine"
+
+# ===========================================================================
+echo "TEST 31: a DEAD lane still wins the exit code over an incomplete measurement"
+# ===========================================================================
+# Precedence is stated in the header: a found dead lane is ACTIONABLE NOW, so exit 3
+# outranks exit 1, and the incompleteness is reported in the text rather than lost.
+# ORDER MATTERS: a dangling ref in the bare origin makes EVERY subsequent push to it
+# fail ("missing necessary objects"), so the dead claim must be pushed BEFORE the
+# unreadable ref is planted — otherwise the fixture silently has no dead lane in it.
+craft_old_claim "$WORK" "deadPrecedence" 3396 999999 30
+printf '%s\n' "$dangling" >"$ORIGIN/refs/machine-claims/unreadableMachine"
+pr2_out=$(cd "$WORK" && HEARTBEAT_MACHINE=deadPrecedence CLAIM_OPEN_PR_CMD="$NO_OPEN_PR" \
+  bash "$HB" dead-lanes 2>&1)
+pr2_rc=$?
+if [ "$pr2_rc" -eq 3 ] \
+  && printf '%s\n' "$pr2_out" | grep -q 'DEAD-NO-PROCESS' \
+  && printf '%s\n' "$pr2_out" | grep -qi 'incomplete'; then
+  ok "a dead lane returns 3 even alongside an unreadable ref, and the incompleteness is still reported"
+else
+  bad "dead (3) must outrank incomplete (1), with the incompleteness still stated: rc=$pr2_rc out:
+$pr2_out"
+fi
+# Remove the dangling ref BEFORE the cleanup push, for the same reason.
+rm -f "$ORIGIN/refs/machine-claims/unreadableMachine"
+(cd "$WORK" && g push -q origin ":refs/machine-claims/deadPrecedence" 2>/dev/null || true)
+
+# ===========================================================================
+echo "TEST 32: issue=0 (supervisor stamped before the issue was known) is not queried as a PR"
+# ===========================================================================
+# worker-supervisor.sh stamps issue "0" when the issue is still unknown for that
+# iteration. Treating 0 as a real issue number would send the open-PR probe hunting
+# for PR #0 and print a bogus issue in the report.
+craft_old_claim "$WORK" "zeroIssue" 0 999999 30
+zi_out=$(cd "$WORK" && HEARTBEAT_MACHINE=zeroIssue \
+  CLAIM_OPEN_PR_CMD='echo "PROBE-RAN-FOR-$1" >&2; exit 0' bash "$HB" dead-lanes 2>&1)
+if printf '%s\n' "$zi_out" | grep -E '^zeroIssue ' | grep -q 'DEAD-NO-PROCESS' \
+  && ! printf '%s\n' "$zi_out" | grep -q 'PROBE-RAN-FOR-0'; then
+  ok "a claim stamped issue=0 is still reported DEAD, without probing for a PR on issue 0"
+else
+  bad "issue=0 must be reported dead but never PR-probed: out:
+$zi_out"
+fi
+
+# ===========================================================================
+echo "TEST 33: the recorded pid is the SUPERVISOR's — the semantic dead-lanes actually tests"
+# ===========================================================================
+# roborev round 1 (High) was right about the mechanism: worker-supervisor.sh stamps
+# its OWN pid ($$) — "the stable per-machine anchor, not a transient worker
+# subprocess" (its own comment). So DEAD-NO-PROCESS means the LANE-OWNING process is
+# gone (the whole tmux scope died, which is what #3393's three lane deaths did), NOT
+# that some worker subprocess was killed under a live supervisor. Pinned here so the
+# documentation cannot drift from the mechanism, and so nobody "fixes" dead-lanes to
+# expect a worker pid without also changing what stamp records.
+if grep -q 'PID stamped is the SUPERVISOR' "$SCRIPT_DIR/../local/worker-supervisor.sh" \
+  && grep -qE '\$CLAIM_CMD stamp "\$issue" "\$\$"' "$SCRIPT_DIR/../local/worker-supervisor.sh"; then
+  ok "the supervisor stamps its OWN pid, so DEAD-NO-PROCESS means the lane-owning process is gone (semantic pinned)"
+else
+  bad "worker-supervisor.sh no longer stamps \$\$ — dead-lanes' documented meaning must be revisited"
+fi
+if grep -q 'the SUPERVISOR' "$HB" && grep -qi 'worker-only kill' "$HB"; then
+  ok "claim-heartbeat.sh documents WHOSE pid it checks and states the worker-only-kill non-coverage"
+else
+  bad "dead-lanes must document whose pid it checks and what it does NOT cover"
+fi
+
 echo
 echo "=== claim-heartbeat.sh: $PASS passed, $FAIL failed ==="
 [ "$FAIL" -eq 0 ]
