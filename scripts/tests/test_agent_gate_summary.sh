@@ -3442,11 +3442,11 @@ i = src.index("  # LANE-SPECIFIC FIXTURE PREFLIGHT")
 j = src.index("  # The enabled set.")
 block = src[i:j]
 
-def run(root):
+def run(root, prelude=""):
     harness = (
-        'ONLY=""\nLITE=0\nname=flight-tests\nlog=/dev/null\nstatus=PASS\nstart=0\n'
+        '%s\nONLY=""\nLITE=0\nname=flight-tests\nlog=/dev/null\nstatus=PASS\nstart=0\n'
         'record_result(){ :; }\nCQLITE_DATASETS_ROOT="%s"\n'
-        'f(){\n%s\n echo PREFLIGHT-PASSED\n}\nf\n' % (root, block)
+        'f(){\n%s\n echo PREFLIGHT-PASSED\n}\nf\n' % (prelude, root, block)
     )
     r = subprocess.run(["bash", "-c", harness], capture_output=True, text=True)
     return (r.stdout + r.stderr)
@@ -3483,12 +3483,21 @@ os.symlink(os.path.join(tmp, "does-not-exist-anywhere"), os.path.join(base, "sen
 out = run(dang)
 print("CASE dangling_symlink:", "FAIL-CLOSED" if ("FAIL-CLOSED" in out and "dangling-symlink" in out) else "MISSED")
 
+# (d3) NULLGLOB inherited: an unmatched `*-Statistics.db` pattern expands to nothing, so a bare
+# `ls` would list the CWD and SUCCEED. The check must not depend on an ambient shell option this
+# script never sets (roborev round-34). Same corpus as (b)'s bad case, run under `shopt -s nullglob`.
+out = run(bad, prelude="shopt -s nullglob")
+print("CASE nullglob:", "FAIL-CLOSED" if ("FAIL-CLOSED" in out and "sensor_data-b" in out) else "MISSED")
+# and the good corpus must still pass under nullglob (no false red)
+out = run(good, prelude="shopt -s nullglob")
+print("CASE nullglob_good:", "PASS" if "PREFLIGHT-PASSED" in out else "FAIL")
+
 # (d) nothing matches -> must fail closed
 none = os.path.join(tmp, "pf-none"); os.makedirs(os.path.join(none, "sstables/test_timeseries"), exist_ok=True)
 out = run(none)
 print("CASE no_match:", "FAIL-CLOSED" if ("FAIL-CLOSED" in out and "NOTHING matches" in out) else "MISSED")
 PF_PY
-  for want_ in "CASE good: PASS" "CASE second_incomplete: FAIL-CLOSED" "CASE prefix_file: FAIL-CLOSED" "CASE dangling_symlink: FAIL-CLOSED" "CASE no_match: FAIL-CLOSED"; do
+  for want_ in "CASE good: PASS" "CASE second_incomplete: FAIL-CLOSED" "CASE prefix_file: FAIL-CLOSED" "CASE dangling_symlink: FAIL-CLOSED" "CASE nullglob: FAIL-CLOSED" "CASE nullglob_good: PASS" "CASE no_match: FAIL-CLOSED"; do
     if grep -qF "$want_" "$pf_report_"; then
       ok "1699-r32-preflight-behaviour[${want_%%:*}]: ${want_#*: }"
     else

@@ -6090,24 +6090,32 @@ run_flight_tests() {
     # here — would be a second implementation of the test's choice, and it would go stale the moment
     # the test changed how it selects.
     local _fx_entry _fx_seen=0 _fx_bad=""
-    for _fx_entry in "$CQLITE_DATASETS_ROOT"/sstables/test_timeseries/sensor_data-*; do
-      # `-e || -L`, not `-e` alone (roborev round-33, Medium). `test -e` FOLLOWS a symlink, so it is
-      # FALSE for a DANGLING one — and this loop then skipped it entirely, while the Rust test's
-      # `read_dir` still yields that entry, may pick it FIRST, and returns early when its own
-      # `read_dir(&dir)` fails. The preflight would pass on the strength of a sibling valid fixture
-      # while the test it protects skipped. An entry that EXISTS AS A NAME is an entry the consumer
-      # can choose, so it must be counted and then judged.
-      # An unexpanded glob matches neither test; the count check below reports "nothing matches".
-      { [ -e "$_fx_entry" ] || [ -L "$_fx_entry" ]; } || continue
+    # ENUMERATED BY `find`, NOT BY A GLOB, for the same reason the Statistics.db check is (round 34)
+    # and one round earlier than it would otherwise have been found: a glob's meaning depends on
+    # ambient shell options this script never sets and cannot control — `nullglob` empties an
+    # unmatched pattern, `failglob` makes it an error — and both were reachable through BASHOPTS.
+    # `find -maxdepth 1 -name` also matches the CONSUMER's semantics exactly: Rust's `read_dir`
+    # yields NAMES, including dangling symlinks, which is the invariant round 33 established (the
+    # preflight must judge exactly the set the consumer enumerates). `-print0` because a corpus path
+    # may contain spaces.
+    while IFS= read -r -d '' _fx_entry; do
       _fx_seen=$((_fx_seen + 1))
       if [ -L "$_fx_entry" ] && [ ! -e "$_fx_entry" ]; then
         _fx_bad="$_fx_bad $(basename "$_fx_entry")(dangling-symlink)"
       elif [ ! -d "$_fx_entry" ]; then
         _fx_bad="$_fx_bad $(basename "$_fx_entry")(not-a-directory)"
-      elif ! ls "$_fx_entry"/*-Statistics.db >/dev/null 2>&1; then
+      elif [ -z "$(find "$_fx_entry" -maxdepth 1 -name '*-Statistics.db' -print -quit 2>/dev/null)" ]; then
+        # `find`, not `ls <glob>` (roborev round-34, Medium). With `nullglob` inherited through
+        # BASHOPTS an unmatched pattern EXPANDS TO NOTHING, so `ls` runs with no arguments, lists
+        # the CWD and SUCCEEDS — a directory with no Statistics.db would have passed preflight while
+        # the Rust test skipped. The failure depended on an ambient shell option this script never
+        # sets and cannot control, which is the worst kind: correct on the author's box, wrong on
+        # someone else's. `find` takes the pattern as an ARGUMENT, so no glob expansion is involved
+        # at all and the check means the same thing under every shell option.
         _fx_bad="$_fx_bad $(basename "$_fx_entry")(no-Statistics.db)"
       fi
-    done
+    done < <(find "$CQLITE_DATASETS_ROOT/sstables/test_timeseries" -maxdepth 1 \
+               -name 'sensor_data-*' -print0 2>/dev/null)
     if [ "$_fx_seen" -eq 0 ] || [ -n "$_fx_bad" ]; then
       status=FAIL
       {
