@@ -1373,14 +1373,24 @@ test_claim_stamp_each_iter_and_clear_on_exit() {
   # 2 finalized iterations => 2 stamps; a clean budget stop => exactly 1 reap.
   stamps=$(grep -c '^stamp ' "$CLAIM_LOG" 2>/dev/null || true)
   reaps=$(grep -c '^reap testbox' "$CLAIM_LOG" 2>/dev/null || true)
-  # Every stamp carries the SUPERVISOR pid as the 3rd token (numeric).
+  # Every stamp carries a LANE ID then the SUPERVISOR pid (#3393). The lane id is the issue number
+  # when known, or `p<pid>` when it is not — which is the case here, because `CLAIM_ISSUE` is
+  # cleared on `finalized`, so a supervisor finalising issue after issue never knows its issue at
+  # spawn time. The placeholder MUST be unique per supervisor: the old shared "0" made every
+  # unknown-issue supervisor on a machine write the same per-lane ref, re-creating the masking that
+  # per-lane refs exist to remove.
   local well_formed="yes"
   while IFS= read -r line; do
     [[ -n "$line" ]] || continue
-    [[ "$line" =~ ^stamp\ [0-9]+\ [0-9]+$ ]] || well_formed="no"
+    [[ "$line" =~ ^stamp\ (p?[0-9]+)\ [0-9]+$ ]] || well_formed="no"
+    [[ "$line" =~ ^stamp\ 0\  ]] && well_formed="no"   # the shared placeholder must be gone
   done < <(grep '^stamp ' "$CLAIM_LOG" 2>/dev/null)
+  # ...and both stamps must name the SAME placeholder, since it is this supervisor's identity.
+  local uniq_ids
+  uniq_ids=$(grep '^stamp ' "$CLAIM_LOG" 2>/dev/null | awk '{print $2}' | sort -u | wc -l | tr -d ' ')
+  [[ "$uniq_ids" == "1" ]] || well_formed="no"
   if [[ "$rc" -eq 0 && "$stamps" -eq 2 && "$reaps" -eq 1 && "$well_formed" == "yes" ]]; then
-    pass "claim: stamp per iteration (with pid) + one reap on clean exit"
+    pass "claim: stamp per iteration (unique p<pid> lane id + supervisor pid, never the shared 0) + one reap on clean exit"
   else
     fail "claim: rc=$rc stamps=$stamps reaps=$reaps well_formed=$well_formed (see $CLAIM_LOG)"
   fi
@@ -2543,13 +2553,21 @@ test_claim_issue_learned_from_marker() {
 
   bash "$SUPERVISOR" >"$d/stdout.log" 2>&1
   rc=$?
-  # Iter1 stamp = "stamp 0 <pid>" (issue unknown); iter2 stamp = "stamp 88 <pid>"
-  # (learned from iter1's blocked marker). Grab the 2nd stamp line.
-  second_stamp=$(grep '^stamp ' "$CLAIM_LOG" 2>/dev/null | sed -n '2p')
-  if [[ "$rc" -eq 0 ]] && printf '%s' "$second_stamp" | grep -qE '^stamp 88 [0-9]+$'; then
-    pass "claim: issue learned from a blocked marker names the next stamp (issue 88)"
+  # Iter1 stamps the `p<pid>` placeholder (issue unknown — it is no longer the shared "0", #3393);
+  # iter2 stamps issue 88, learned from iter1's blocked marker. Assert on the ISSUE-NAMED stamp
+  # rather than on line position, which is what the property is actually about.
+  second_stamp=$(grep -E '^stamp 88 [0-9]+$' "$CLAIM_LOG" 2>/dev/null | head -1)
+  # ...and the placeholder it replaced must have been cleared, or the transition leaks a ref that
+  # holds a dead pid and dead-lanes reports it as a dead lane forever.
+  local placeholder_id placeholder_reaped
+  placeholder_id=$(grep -E '^stamp p[0-9]+ [0-9]+$' "$CLAIM_LOG" 2>/dev/null | head -1 | awk '{print $2}')
+  placeholder_reaped=no
+  [[ -n "$placeholder_id" ]] && grep -qE "^reap testbox ${placeholder_id}\$" "$CLAIM_LOG" 2>/dev/null && placeholder_reaped=yes
+  if [[ "$rc" -eq 0 ]] && printf '%s' "$second_stamp" | grep -qE '^stamp 88 [0-9]+$' \
+    && [[ "$placeholder_reaped" == "yes" ]]; then
+    pass "claim: issue learned from a blocked marker names the next stamp (issue 88), and the p<pid> placeholder ref it replaced was cleared (no leaked ref)"
   else
-    fail "claim-learn: rc=$rc second_stamp='$second_stamp' (see $CLAIM_LOG)"
+    fail "claim-learn: rc=$rc second_stamp='$second_stamp' placeholder='$placeholder_id' reaped=$placeholder_reaped (see $CLAIM_LOG)"
   fi
 }
 

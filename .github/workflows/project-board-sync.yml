@@ -463,7 +463,14 @@ jobs:
               reaped=$((reaped+1))
               # Flip the freed item back to Ready + leave a trace (skip issue "0"
               # / unknown — a claim with no real issue has no board item to flip).
-              if [ -n "${issue:-}" ] && [ "$issue" != "0" ]; then
+              # NUMERIC ONLY (#3393). A lane id may be `p<pid>` — a supervisor whose issue was not
+              # yet known — and there is no board item for that, so it must not reach the flip or
+              # the comment. Previously only "0" was excluded, which was the whole placeholder space.
+              case "${issue:-}" in
+                '' | *[!0-9]*) issue="" ;;
+                0) issue="" ;;
+              esac
+              if [ -n "${issue:-}" ]; then
                 item_id=$(gh api graphql -f query='
                   query($p: ID!) { node(id: $p) { ... on ProjectV2 {
                     items(first: 100) { nodes { id content {

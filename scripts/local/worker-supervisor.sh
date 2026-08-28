@@ -446,15 +446,46 @@ is_lt() { awk -v a="$1" -v b="$2" 'BEGIN{ if ((a+0)<(b+0)) exit 0; exit 1 }'; }
 stamp_claim() {
   local issue="$1"
   [[ -n "$CLAIM_CMD" ]] || return 0
-  case "$issue" in '' | *[!0-9]*) issue=0 ;; esac
-  if HEARTBEAT_MACHINE="$CLAIM_MACHINE" $CLAIM_CMD stamp "$issue" "$$" >/dev/null 2>&1; then
+  # AN UNKNOWN ISSUE GETS A UNIQUE PER-SUPERVISOR LANE ID, NOT A SHARED PLACEHOLDER (roborev
+  # round 1, High). The old behaviour normalised it to "0", which under per-lane refs means every
+  # supervisor with a not-yet-known issue writes the SAME ref `refs/lane-claims/<machine>/0` — so
+  # concurrent first iterations overwrite each other and a live sibling can mask an OOM-killed lane.
+  # That is exactly the false clean ruling A removes, reintroduced through the placeholder.
+  #
+  # I first tried simply NOT stamping when the issue is unknown, and the suite caught why that is
+  # wrong: `CLAIM_ISSUE` is CLEARED on `finalized`, so a supervisor finalising issue after issue
+  # never knows its issue at spawn time and would stamp nothing at all — trading a collision for
+  # zero liveness coverage. Measured as stamps=0 where 2 were expected.
+  #
+  # So the lane id is the SUPERVISOR PID, prefixed `p` to keep it out of the numeric issue space:
+  # unique per supervisor by construction, and unmistakable for an issue by any consumer that
+  # requires digits (the open-PR guard and the board flip both skip it, correctly — there is no
+  # issue to protect or to flip yet).
+  local lane_id
+  case "$issue" in
+    '' | *[!0-9]* | 0) lane_id="p$$" ;;
+    *)                 lane_id="$issue" ;;
+  esac
+  # A lane TRANSITION must not leak the previous ref (roborev round 1, Medium). Each stamp used to
+  # overwrite the tracked id while clear_claim deleted only the final one, so p1234 -> 88 (or
+  # 88 -> 91) left the earlier ref behind holding a dead PID — which dead-lanes then correctly
+  # reports as a dead lane forever. Clear the old ref before claiming the new one; `reap` refuses
+  # under an open PR, so an unfinished endgame is still left for adoption.
+  if [[ -n "$CLAIM_STAMPED_ISSUE" && "$CLAIM_STAMPED_ISSUE" != "$lane_id" ]]; then
+    if HEARTBEAT_MACHINE="$CLAIM_MACHINE" $CLAIM_CMD reap "$CLAIM_MACHINE" "$CLAIM_STAMPED_ISSUE" >/dev/null 2>&1; then
+      log "previous lane ref ${CLAIM_STAMPED_ISSUE} cleared before stamping ${lane_id}"
+    else
+      log "WARN: could not clear previous lane ref ${CLAIM_STAMPED_ISSUE} (open PR or push error) — left for adoption; it may show as a dead lane until reaped"
+    fi
+  fi
+  if HEARTBEAT_MACHINE="$CLAIM_MACHINE" $CLAIM_CMD stamp "$lane_id" "$$" >/dev/null 2>&1; then
     # What was ACTUALLY stamped, which is not `CLAIM_ISSUE` (#3393). `CLAIM_ISSUE` is the NEXT
     # spawn's issue and is deliberately cleared on `finalized`, so by clean-exit time it is empty
     # and cannot name the ref this supervisor wrote. Recording it here is the only place that knows.
-    CLAIM_STAMPED_ISSUE="$issue"
-    log "claim stamped: machine=$CLAIM_MACHINE issue=$issue pid=$$"
+    CLAIM_STAMPED_ISSUE="$lane_id"
+    log "claim stamped: machine=$CLAIM_MACHINE issue=$lane_id pid=$$"
   else
-    log "WARN: claim stamp failed (machine=$CLAIM_MACHINE issue=$issue) — ref not refreshed this iteration (non-fatal)"
+    log "WARN: claim stamp failed (machine=$CLAIM_MACHINE issue=$lane_id) — ref not refreshed this iteration (non-fatal)"
   fi
 }
 
@@ -471,7 +502,8 @@ stamp_claim() {
 clear_claim() {
   [[ -n "$CLAIM_CMD" ]] || return 0
   local issue="$CLAIM_STAMPED_ISSUE"
-  case "$issue" in *[!0-9]*) issue="" ;; esac
+  # May be a `p<pid>` placeholder as well as an issue number; both are real refs to clear.
+  case "$issue" in '' | p) issue="" ;; esac
   if [[ -z "$issue" ]]; then
     log "claim clear skipped: this supervisor never stamped a lane claim, so there is no ref to clear"
     return 0

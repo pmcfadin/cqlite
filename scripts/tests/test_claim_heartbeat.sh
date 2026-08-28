@@ -761,10 +761,10 @@ echo "TEST 33: the recorded pid is the SUPERVISOR's — the semantic dead-lanes 
 # documentation cannot drift from the mechanism, and so nobody "fixes" dead-lanes to
 # expect a worker pid without also changing what stamp records.
 if grep -q 'PID stamped is the SUPERVISOR' "$SCRIPT_DIR/../local/worker-supervisor.sh" \
-  && grep -qE '\$CLAIM_CMD stamp "\$issue" "\$\$"' "$SCRIPT_DIR/../local/worker-supervisor.sh"; then
+  && grep -qE '\$CLAIM_CMD stamp "\$lane_id" "\$\$"' "$SCRIPT_DIR/../local/worker-supervisor.sh"; then
   ok "the supervisor stamps its OWN pid, so DEAD-NO-PROCESS means the lane-owning process is gone (semantic pinned)"
 else
-  bad "worker-supervisor.sh no longer stamps \$\$ — dead-lanes' documented meaning must be revisited"
+  bad "worker-supervisor.sh no longer stamps the supervisor pid alongside a lane id — dead-lanes' documented meaning must be revisited"
 fi
 if grep -q 'the SUPERVISOR' "$HB" && grep -qi 'worker-only kill' "$HB"; then
   ok "claim-heartbeat.sh documents WHOSE pid it checks and states the worker-only-kill non-coverage"
@@ -1065,18 +1065,24 @@ fi
 (cd "$WORK" && g push -q origin ":refs/machine-claims/windowPid" 2>/dev/null || true)
 
 # ===========================================================================
-echo "TEST 43: the one-ref-per-machine LIMIT is documented (round 4, High — not silently shipped)"
+echo "TEST 43: the retired per-machine bound is GONE from the help, and the per-lane layout is stated"
 # ===========================================================================
-# refs/machine-claims/<machine> is ONE ref per machine (#2655, premised on one worker per
-# machine, #1930), yet #3393's own evidence is FOUR lanes per box. So concurrent lanes on
-# one box overwrite each other's claim and only the last supervisor pid stays observable —
-# a real bound on what this command can report. Changing the ref layout is a design
-# decision on a namespace shared with should-reap and the CI reaper, so it is escalated
-# rather than made here; what must not happen is shipping the limit unstated.
-if grep -q 'ONE CLAIM REF PER MACHINE' "$HB" && grep -qi 'four lanes\|4 lanes' "$HB"; then
-  ok "the one-ref-per-machine limitation is stated in the script, with the multi-lane case named"
+# INVERTED (#3393 ruling A). This case used to assert that the one-ref-per-machine limitation was
+# DOCUMENTED, because it could not be fixed without an owner decision. The decision landed and the
+# layout changed, so continuing to assert the documentation would pin a bound that no longer exists —
+# the same way TEST 46 was found still enforcing "NEVER exits 0" after exit 0 came back. A guard
+# aimed at a retired contract defends the error.
+help43=$(cd "$WORK" && bash "$HB" --help 2>&1 || true)
+if ! printf '%s\n' "$help43" | grep -qi 'ONE CLAIM REF PER MACHINE'; then
+  ok "the help no longer presents one-ref-per-machine as a current limitation"
 else
-  bad "the one-ref-per-machine limit must be documented where a reader of dead-lanes will see it"
+  bad "the retired per-machine bound is still documented as live"
+fi
+if printf '%s\n' "$help43" | grep -q 'refs/lane-claims/<machine>/<issue>' \
+  && printf '%s\n' "$help43" | grep -qi 'never stamped is invisible\|never stamped'; then
+  ok "the help states the per-lane layout AND the bound that actually remains (a lane that never stamped is invisible)"
+else
+  bad "the help must state the per-lane layout and the remaining invisible-lane bound"
 fi
 
 # ===========================================================================
@@ -1203,13 +1209,25 @@ if [ "$zc_rc" -eq 1 ] && printf '%s\n' "$help_text" | grep -qi 'zero'; then
 else
   bad "help and behaviour disagree on zero claims: rc=$zc_rc"
 fi
-# ...and the help must NOT promise an exit 0 for dead-lanes, which round 13 removed. This is
-# the drift round 14 caught: the exit-code table was corrected while the USAGE block still
-# advertised 0, so the two halves of the same help disagreed.
-if printf '%s\n' "$help_text" | grep -qi 'NEVER exits 0'; then
-  ok "the help states that dead-lanes never exits 0, matching the implementation"
+# ...and the help's exit-0 contract must match the CURRENT implementation, which restored the clean
+# verdict once per-lane refs removed the masking (#3393 ruling A).
+#
+# THIS GUARD WAS ENFORCING THE OPPOSITE AN HOUR AGO, which is the sharpest lesson in it: it asserted
+# the help says "NEVER exits 0", so after the layout change it actively held the documentation wrong
+# and would have failed a correct help. A drift guard is only as good as the contract it is pointed
+# at, and a stale contract makes it worse than nothing — it defends the error. Flagged by roborev
+# round 1 (Low) on exactly that basis.
+if printf '%s\n' "$help_text" | grep -qi 'exit 0 = at least one LOCAL' \
+  && ! printf '%s\n' "$help_text" | grep -qi 'NEVER exits 0'; then
+  ok "the help documents the RESTORED exit-0 contract and no longer claims dead-lanes never exits 0"
 else
-  bad "the help must not advertise an exit 0 for dead-lanes (round 13 removed the clean verdict)"
+  bad "the help's exit-0 contract must match the implementation: exit 0 = at least one local lane measured and none dead"
+fi
+# ...and the retired per-machine limitation must not still be presented as current.
+if ! printf '%s\n' "$help_text" | grep -qi 'ONE CLAIM REF PER MACHINE'; then
+  ok "the help no longer presents one-ref-per-machine as a current limitation"
+else
+  bad "the help still describes the retired per-machine layout as a live bound"
 fi
 
 # ===========================================================================
@@ -1793,51 +1811,69 @@ fi
 rm -f "$ORIGIN/refs/machine-claims/unreadableLocal"
 
 # ===========================================================================
-echo "TEST 57: should-reap refuses to GUESS whether one extra argument is an issue or a threshold"
+echo "TEST 57: should-reap's two-argument form is ALWAYS the legacy threshold, never a lane"
 # ===========================================================================
-# `should-reap <machine> <N>` is ambiguous by construction: the legacy form means a threshold, the
-# per-lane form means an issue, and both are bare integers (#3393). It is resolved by probing the
-# remote for the lane ref — and the probe has THREE answers, which is the part worth pinning.
-# `ls-remote --exit-code` returns 0 = present, 2 = definitively absent, anything else = could not
-# tell. MEASURED: an unreachable remote gives 128.
+# roborev round 1 (Medium) rejected the earlier design, which probed the remote to decide whether
+# `should-reap <machine> <N>` meant a threshold or a lane issue. The flaw is that the CI workflow's
+# legacy threshold is literally `14400`, so the moment some lane legitimately carries issue 14400 the
+# same call would silently change meaning — and could then delete an unrelated legacy ref on the
+# lane's verdict. A grammar whose meaning depends on which refs happen to exist is not a grammar.
 #
-# Reading "could not tell" as "not an issue" would silently turn `should-reap box 3367` into a
-# 3367-SECOND threshold against the LEGACY ref — a wrong reap verdict from an unmeasured signal.
-amb_out=$(cd "$WORK" && HEARTBEAT_REMOTE=no-such-remote bash "$HB" should-reap somebox 3367 2>&1)
-amb_rc=$?
-if [ "$amb_rc" -eq 64 ] \
-  && printf '%s\n' "$amb_out" | grep -qi 'cannot tell whether' \
-  && printf '%s\n' "$amb_out" | grep -qi 'Refusing to guess'; then
-  ok "an unreadable probe makes should-reap refuse with a usage error (rc=64) instead of silently picking a reading"
+# So the ambiguity is REMOVED, and this pins it in the case that used to break: a lane ref named
+# exactly like a plausible threshold EXISTS, and the two-argument call must still mean the threshold.
+craft_lane_claim "$WORK" "grammarBox" 14400 "$ABSENT_PID" 20000
+gram_out=$(cd "$WORK" && HEARTBEAT_MACHINE=grammarBox CLAIM_OPEN_PR_CMD="$NO_OPEN_PR" \
+  bash "$HB" should-reap grammarBox 14400 2>&1)
+gram_rc=$?
+# rc=2 is "no such claim ref": the LEGACY ref refs/machine-claims/grammarBox does not exist. If the
+# argument had been read as a lane issue it would have judged the lane ref that DOES exist instead.
+if [ "$gram_rc" -eq 2 ] && ! printf '%s\n' "$gram_out" | grep -q 'lane-claims/grammarBox/14400'; then
+  ok "two arguments mean the THRESHOLD even though a lane ref named 14400 exists — the call cannot change meaning with the ref set"
 else
-  bad "an unreadable probe must refuse, not guess: rc=$amb_rc out:
-$amb_out"
+  bad "the two-arg form must always be the legacy threshold: rc=$gram_rc out:
+$gram_out"
 fi
-# NON-VACUITY, both directions: the two UNAMBIGUOUS forms must still work, or "refuse" would just be
-# a broken command. rc=2 is 'no such claim ref', which is the correct answer for both fixtures.
-(cd "$WORK" && bash "$HB" should-reap somebox 3367 14400 >/dev/null 2>&1); three_rc=$?
-(cd "$WORK" && bash "$HB" should-reap somebox 14400 >/dev/null 2>&1); two_rc=$?
-if [ "$three_rc" -eq 2 ] && [ "$two_rc" -eq 2 ]; then
-  ok "NON-VACUITY: the explicit 3-arg form and the legacy 2-arg form both still resolve (rc=2 = no such ref)"
+# NON-VACUITY: the lane ref really is there, and the THREE-argument form does judge it — otherwise
+# the case above would pass for a command that simply cannot see lanes at all.
+gram2_out=$(cd "$WORK" && HEARTBEAT_MACHINE=grammarBox CLAIM_OPEN_PR_CMD="$NO_OPEN_PR" \
+  bash "$HB" should-reap grammarBox 14400 14400 2>&1)
+gram2_rc=$?
+if [ "$gram2_rc" -eq 0 ] && printf '%s\n' "$gram2_out" | grep -q 'lane-claims/grammarBox/14400'; then
+  ok "NON-VACUITY: the three-arg form DOES judge lane 14400 (reaped, ref named) — so the two-arg case above is about the grammar, not about blindness"
 else
-  bad "the unambiguous forms must still work: 3-arg rc=$three_rc 2-arg rc=$two_rc"
+  bad "the three-arg form must judge the lane: rc=$gram2_rc out:
+$gram2_out"
 fi
-# ...and a REAL lane ref must be recognised as an issue rather than a threshold, which is the
-# affirmative half — without it the probe could reject everything and still pass the cases above.
-# Aged past the DEFAULT 4h threshold on purpose: this case must pass only TWO arguments (that is the
-# ambiguity under test), so the verdict has to come out of the default rather than a supplied one.
-# A 30s-old fixture is correctly "keep (fresh)" and would prove nothing about which reading won.
-craft_lane_claim "$WORK" "ambBox" 7701 "$ABSENT_PID" 20000
-amb2_out=$(cd "$WORK" && HEARTBEAT_MACHINE=ambBox CLAIM_OPEN_PR_CMD="$NO_OPEN_PR" \
-  bash "$HB" should-reap ambBox 7701 2>&1)
-amb2_rc=$?
-if [ "$amb2_rc" -eq 0 ] && printf '%s\n' "$amb2_out" | grep -q 'lane-claims/ambBox/7701'; then
-  ok "an argument that IS a live lane ref is read as the issue (verdict names that ref, reaped on the DEFAULT threshold)"
+(cd "$WORK" && g push -q origin ":refs/lane-claims/grammarBox/14400" 2>/dev/null || true)
+
+# ===========================================================================
+echo "TEST 58: a p<pid> placeholder lane id round-trips through stamp/should-reap/reap"
+# ===========================================================================
+# A supervisor whose issue is not yet known stamps `p<pid>` rather than the old shared "0" (roborev
+# round 1, High: the shared placeholder made every unknown-issue supervisor on a machine write the
+# SAME ref, re-creating the masking per-lane refs exist to remove). Every consumer must accept it.
+(cd "$WORK" && HEARTBEAT_MACHINE=phBox bash "$HB" stamp p4242 1 >/dev/null 2>&1)
+ph_ref=$(g -C "$WORK" ls-remote origin 'refs/lane-claims/phBox/p4242' | awk '{print $1}')
+if [ -n "$ph_ref" ]; then
+  ok "stamp accepts a p<pid> lane id and writes refs/lane-claims/phBox/p4242"
 else
-  bad "a real lane ref must be recognised as the issue: rc=$amb2_rc out:
-$amb2_out"
+  bad "stamp must accept a p<pid> lane id"
 fi
-(cd "$WORK" && g push -q origin ":refs/lane-claims/ambBox/7701" 2>/dev/null || true)
+# It must NOT be mistaken for an issue: the open-PR guard has no issue to consult, so reap proceeds.
+ph_reap=$(cd "$WORK" && HEARTBEAT_MACHINE=phBox CLAIM_OPEN_PR_CMD="$HAS_OPEN_PR" \
+  bash "$HB" reap phBox p4242 2>&1)
+if [ -z "$(g -C "$WORK" ls-remote origin 'refs/lane-claims/phBox/p4242' | awk '{print $1}')" ]; then
+  ok "reap accepts p<pid> and does not block on the open-PR guard — a placeholder names no issue to protect"
+else
+  bad "reap must delete a p<pid> lane ref: out: $ph_reap"
+fi
+# ...and a malformed lane id is refused rather than silently creating a junk ref.
+(cd "$WORK" && HEARTBEAT_MACHINE=phBox bash "$HB" stamp pnotanumber 1 >/dev/null 2>&1); mal_rc=$?
+if [ "$mal_rc" -eq 64 ] && [ -z "$(g -C "$WORK" ls-remote origin 'refs/lane-claims/phBox/pnotanumber' | awk '{print $1}')" ]; then
+  ok "a malformed lane id is refused (rc=64) and creates no ref"
+else
+  bad "a malformed lane id must be refused: rc=$mal_rc"
+fi
 
 echo
 echo "=== claim-heartbeat.sh: $PASS passed, $FAIL failed ==="

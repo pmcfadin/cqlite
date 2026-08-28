@@ -78,14 +78,16 @@
 #   claim-heartbeat.sh dead-lanes            # REPORT every claim whose owning
 #                                            # process is verifiably gone, with NO
 #                                            # age threshold and regardless of an
-#                                            # open PR. POSITIVE DETECTION ONLY —
-#                                            # it NEVER exits 0. exit 3 = a dead lane
-#                                            # was reported; exit 1 = none was
-#                                            # reported AND absence is not
-#                                            # establishable (which includes zero
-#                                            # claim refs, an all-foreign run, and an
-#                                            # incomplete measurement). Act on 3;
-#                                            # never read 1 as a clean bill of health.
+#                                            # open PR. exit 3 = a dead lane was
+#                                            # reported; exit 0 = at least one LOCAL
+#                                            # lane was measured and none is dead;
+#                                            # exit 1 = the measurement was incomplete
+#                                            # (which includes zero claim refs, an
+#                                            # all-foreign run, and a failed legacy
+#                                            # listing). Exit 0 became trustworthy only
+#                                            # with per-lane refs (#3393 ruling A) — see
+#                                            # the scope limits below for what it does
+#                                            # NOT claim.
 #
 # WHY `dead-lanes` IS NOT `should-reap` (issue #3393 AC3)
 #   `should-reap` is a REAP GATE, and it consults the pid ONLY AFTER age >
@@ -163,25 +165,19 @@
 #   operator box or CI would report "no dead lanes" about a fleet it never inspected
 #   (roborev round 4, High). To sweep a fleet, run it ON each box.
 #
-#   (2) ONE CLAIM REF PER MACHINE, so CONCURRENT LANES ON ONE BOX ARE NOT SEPARATELY
-#   VISIBLE. `refs/machine-claims/<machine>` is per-MACHINE by design (#2655, premised on
-#   one worker per machine, #1930), so several lanes on one box overwrite each other's
-#   claim and only the last-stamped supervisor pid stays observable — this command can
-#   then report at most one of them. That bound matters here specifically because #3393's
-#   own evidence is FOUR LANES PER BOX (and the 1-lane box recorded zero OOM kills), i.e.
-#   exactly the configuration in which lanes died.
+#   (2) A LANE THAT NEVER STAMPED IS INVISIBLE — which is what remains after ruling A, and is a
+#   much smaller bound than what stood here before. Until #3393's ruling, claims were keyed
+#   per MACHINE (`refs/machine-claims/<machine>`) and force-updated every supervisor iteration, so
+#   several lanes on one box overwrote each other and a SURVIVING sibling actively MASKED a dead
+#   lane: `dead-lanes` reported ALIVE, identity verified, for a box that had just lost a lane. That
+#   is why exit 0 was withheld entirely in the interim. Claims are now per LANE
+#   (`refs/lane-claims/<machine>/<issue>`, or `p<pid>` while a supervisor's issue is unknown), so a
+#   sibling stamps a DIFFERENT ref and a dead lane's ref survives with its dead pid.
 #
-#   WORSE THAN "ONLY ONE IS VISIBLE": A LIVE SIBLING ACTIVELY MASKS A DEAD LANE. The ref
-#   is force-updated on every supervisor iteration, so after one lane dies, the next
-#   iteration of a SURVIVING lane on the same box overwrites the ref with its own live
-#   pid — and `dead-lanes` then reports ALIVE, identity verified, for a box that just
-#   lost a lane. On a multi-lane box a clean result is therefore not evidence about any
-#   particular lane; cross-check with the board and the open PRs.
-#
-#   Giving each lane its own ref would fix it, but that namespace is shared with
-#   `should-reap` and the CI reaper, and it collides with the standing #1930 "one worker
-#   per machine" invariant the fleet was already violating — so the layout is a design
-#   decision for the owner and is escalated on #3393 rather than taken here.
+#   What is still not covered: a lane that stamps nothing at all — run with `CLAIM_CMD=""`, or whose
+#   stamps have been failing — cannot be reported, because there is no ref to read. That is why zero
+#   claim refs is exit 1 rather than 0, and why exit 0 says "at least one local lane was measured"
+#   rather than "this box is healthy". Cross-check the board and open PRs when it matters.
 #
 #   (2b) A JUST-SPAWNED LANE READS UNKNOWN-IDENTITY FOR A SHORT WHILE, BY DESIGN. The
 #   supervisor stamps at spawn, so immediately after a lane starts its process start time and
@@ -375,6 +371,22 @@ humanize_age() {
 # working under a SHA-256 object format too. Never touches the working tree, the
 # index, or the current branch — a pure object push against an explicit refspec.
 # Echoes the created commit sha on stdout.
+# lane_id_ok <id> — exit 0 iff <id> is a valid lane component (#3393).
+#
+# TWO SHAPES, deliberately: a bare issue number, or `p<pid>` for a supervisor whose issue is not yet
+# known. The placeholder exists because `CLAIM_ISSUE` is cleared on `finalized`, so a supervisor
+# finalising issue after issue never knows its issue at spawn time — and a SHARED placeholder (the
+# old "0") made every such supervisor on a machine write the same ref, which is the masking ruling A
+# removes. `p<pid>` is unique per supervisor and stays out of the numeric issue space, so the
+# open-PR guard and the board flip both correctly decline to treat it as an issue.
+lane_id_ok() {
+  case "$1" in
+    '' ) return 1 ;;
+    p*) case "${1#p}" in '' | *[!0-9]*) return 1 ;; *) return 0 ;; esac ;;
+    *) case "$1" in *[!0-9]*) return 1 ;; *) return 0 ;; esac ;;
+  esac
+}
+
 # lane_claim_ref <machine> <issue> — the ref a LANE's claim lives at (#3393, owner ruling A:
 # per-lane identity, one ref each).
 #
@@ -434,9 +446,7 @@ cmd_beat() {
 # owning PID so a SAME-machine reaper can add a process-liveness check.
 cmd_stamp() {
   local issue="${1:-}" pid="${2:-$$}"
-  case "$issue" in
-    *[!0-9]* | '') die_usage "stamp requires a numeric issue number (got '${issue:-<none>}')" ;;
-  esac
+  lane_id_ok "$issue" || die_usage "stamp requires a lane id: an issue number, or p<pid> when the issue is not yet known (got '${issue:-<none>}')"
   case "$pid" in
     *[!0-9]* | '') die_usage "stamp pid must be numeric (got '${pid}')" ;;
   esac
@@ -528,9 +538,7 @@ cmd_reap() {
   local machine="${1:-}" issue="${2:-}"
   [ -n "$machine" ] || die_usage "reap requires <machine> [issue]"
   if [ -n "$issue" ]; then
-    case "$issue" in
-      *[!0-9]*) die_usage "reap issue must be numeric (got '$issue')" ;;
-    esac
+    lane_id_ok "$issue" || die_usage "reap lane id must be an issue number or p<pid> (got '$issue')"
     delete_ref_guarded lane-claims "${machine}/${issue}"
   else
     delete_ref_guarded machine-claims "$machine"
@@ -599,45 +607,31 @@ cmd_list_claims() {
 #   2  no such claim ref.
 # Never prints a reap verdict of 0 unless ALL guards agree — a live/open-PR/
 # fresh/unknown-age claim is always kept.
-# cmd_should_reap <machine> [issue] [threshold_secs] — the predicate now names a LANE (#3393).
+# cmd_should_reap <machine> [threshold_secs] | <machine> <issue> <threshold_secs>
 #
-# With <issue> it judges the per-lane ref; WITHOUT it, the legacy per-machine ref, so a pre-ruling
-# ref is still reapable rather than stranded. The argument order keeps `should-reap <machine> <secs>`
-# working for the legacy form: a second argument is read as the issue only if a THIRD is present, or
-# if it does not look like a threshold. That ambiguity is the price of not breaking the legacy call
-# during the drain, and it disappears with the legacy branch.
+# THE TWO-ARGUMENT FORM IS ALWAYS THE LEGACY THRESHOLD; A LANE REQUIRES ALL THREE (roborev round 1,
+# Medium). An earlier cut tried to disambiguate `<machine> <N>` at runtime by probing the remote for
+# a lane ref named `<N>`, which is worse than it looks: the CI workflow's legacy threshold is
+# `14400`, so the moment some lane legitimately carries issue 14400 that call would silently switch
+# from "legacy ref, 4h threshold" to "lane 14400, default threshold" and could then delete an
+# unrelated legacy ref on the lane's verdict. A grammar whose meaning depends on which refs happen
+# to exist is not a grammar. Ambiguity removed rather than resolved: two args is the legacy form,
+# three args is a lane, and there is no case where the same call means two things.
 cmd_should_reap() {
   local machine="${1:-}" a2="${2:-}" a3="${3:-}"
   local issue="" threshold="$DEFAULT_REAP_THRESHOLD_SECS"
-  [ -n "$machine" ] || die_usage "should-reap requires <machine> [issue] [threshold_secs]"
+  [ -n "$machine" ] || die_usage "should-reap requires <machine> [threshold_secs], or <machine> <issue> <threshold_secs> for a lane"
   if [ -n "$a3" ]; then
     issue="$a2"; threshold="$a3"
   elif [ -n "$a2" ]; then
-    # One extra argument: an issue if a lane ref exists for it, else a threshold. Checked against
-    # the remote rather than guessed from the number's shape, because both are bare integers.
-    #
-    # THE PROBE'S THIRD ANSWER IS FAIL-CLOSED, and it is the whole reason this is not a one-liner.
-    # `ls-remote --exit-code` returns 0 = present, 2 = definitively absent, and anything else
-    # (measured: 128) = it could not tell — a network or auth failure. Treating "could not tell" as
-    # "not an issue" would silently reinterpret `should-reap <machine> 3367` as a 3367-SECOND
-    # THRESHOLD against the legacy ref, i.e. a wrong reap verdict derived from an unmeasured signal.
-    # Both readings are wrong here, so neither is guessed: the caller is told to disambiguate.
-    local probe_rc=0
-    git ls-remote --exit-code "$REMOTE" "$(lane_claim_ref "$machine" "$a2")" >/dev/null 2>&1 || probe_rc=$?
-    case "$probe_rc" in
-      0) issue="$a2" ;;
-      2) threshold="$a2" ;;
-      *)
-        die_usage "should-reap: cannot tell whether '$a2' is an issue or a threshold — the probe for $(lane_claim_ref "$machine" "$a2") failed (git exited $probe_rc; 2 would mean 'absent', so this is a network or auth failure, not an answer). Refusing to guess, because reading it as a threshold would silently judge the LEGACY ref instead of the lane. Pass both explicitly: should-reap <machine> <issue> <threshold_secs>"
-        ;;
-    esac
+    threshold="$a2"
   fi
   case "$threshold" in
     *[!0-9]* | '') die_usage "should-reap threshold must be numeric seconds (got '${threshold}')" ;;
   esac
-  case "$issue" in
-    *[!0-9]*) die_usage "should-reap issue must be numeric (got '$issue')" ;;
-  esac
+  if [ -n "$issue" ]; then
+    lane_id_ok "$issue" || die_usage "should-reap lane id must be an issue number or p<pid> (got '$issue')"
+  fi
   local ref
   if [ -n "$issue" ]; then
     ref="$(lane_claim_ref "$machine" "$issue")"
@@ -927,10 +921,21 @@ cmd_dead_lanes() {
   rm -f "$errfile"
 
   # Legacy per-machine refs are reported too, so a pre-ruling lane is not invisible during the
-  # drain (#3393). A failure listing THESE is not fatal: the per-lane listing above already
-  # succeeded, so the run has a subject, and the legacy set only ever adds rows.
-  local legacy
-  legacy="$(git ls-remote "$REMOTE" 'refs/machine-claims/*' 2>/dev/null || true)"
+  # drain (#3393).
+  #
+  # A FAILURE LISTING THEM MAKES THE MEASUREMENT INCOMPLETE (roborev round 1, Medium). I first wrote
+  # this as non-fatal, reasoning that the per-lane listing had already given the run a subject and
+  # the legacy set "only ever adds rows". That reasoning is wrong in the direction that matters: if
+  # the legacy listing fails while a healthy per-lane lane is measured, a DEAD LEGACY lane is
+  # invisible and the run still exits 0 — the same false-clean shape this command guards against
+  # everywhere else, reached through the drain path.
+  local legacy legacy_rc=0
+  legacy="$(git ls-remote "$REMOTE" 'refs/machine-claims/*' 2>/dev/null)" || legacy_rc=$?
+  if [ "$legacy_rc" -ne 0 ]; then
+    note "could not list LEGACY claim refs on ${REMOTE} (git exited ${legacy_rc}) — a pre-ruling lane could be dead and unseen, so this measurement is INCOMPLETE"
+    unreadable=$((unreadable + 1))
+    legacy=""
+  fi
   [ -z "$legacy" ] || raw="$(printf '%s\n%s' "$raw" "$legacy")"
   raw="$(printf '%s' "$raw" | sed '/^$/d')"
 
