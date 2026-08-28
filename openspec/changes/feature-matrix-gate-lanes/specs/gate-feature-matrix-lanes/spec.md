@@ -109,15 +109,15 @@ its per-lane fixture SKIP predicates.
 - **THEN** the Flight component records FAIL and the run's `RESULT:` is `FAIL`
 
 #### Scenario: The Flight component cannot pass without executing tests
+- **GIVEN** an invocation of the Flight component whose `--lib` unit suite compiles but executes zero tests
+- **WHEN** the component completes
+- **THEN** it records FAIL, naming the unittest target and the zero-tests condition, and never PASS
+
 #### Scenario: A newly added binary target cannot escape the zero-tests guard
 - **GIVEN** a new `[[bin]]` target added to `cqlite-flight` whose unit tests execute zero tests
 - **WHEN** the Flight component runs
 - **THEN** the guard's subject set — derived from `cargo metadata` — includes that binary
 - **AND** the component records FAIL, with no edit to `scripts/agent-gate.sh` having been required
-
-- **GIVEN** an invocation of the Flight component whose `--lib` unit suite compiles but executes zero tests
-- **WHEN** the component completes
-- **THEN** it records FAIL, naming the unittest target and the zero-tests condition, and never PASS
 
 #### Scenario: A selected unittest target that stops being selected fails the gate
 - **GIVEN** the component's cargo invocation no longer selects one of `src/lib.rs` / `src/main.rs`

@@ -96,8 +96,11 @@ in `core-tests`. The positive polarity — the code the feature flag actually tu
 executed by anything**.
 
 **The target set is DERIVED, not hard-coded.** A literal list drifts the moment someone adds a sixth gated
-test file, and the drift is invisible (the lane stays green while its subject shrinks). The component greps
-the committed `cqlite-core/tests/*.rs` for `legacy-heuristics` and builds `--test` flags from what it finds.
+test file, and the drift is invisible (the lane stays green while its subject shrinks). **CORRECTED (roborev rounds 11-13):** the component enumerates `cqlite-core`'s test targets from
+**cargo metadata** — not a `tests/*.rs` glob, which cannot see a target gated only by `required-features`
+nor a directory-style `tests/foo/main.rs` — and includes one when a `legacy-heuristics` cfg site appears
+anywhere in that target's **module closure** (`mod` in every visibility form plus `#[path]`, resolved
+transitively). The glob was what this decision originally specified; it is now forbidden by the spec.
 **Derivation is fail-closed**: zero derived targets is a FAIL naming the derivation, never a PASS — a lane
 with no subject has no verdict to give, the same rule `prompt-content:` follows. The lane additionally runs
 under the existing `check_no_unexpected_zero_tests` guard so "compiled, ran 0 tests" cannot read as green.
@@ -262,8 +265,8 @@ observation is recorded in `docs/reports/`. Enrolling it in the nightly `gate.ym
 change requiring #2910 registry enrollment — deliberately **out of scope**, proposed as a follow-up.
 
 **The cheap half stays in the fast loop.** Registration (in `COMPONENTS`, in `--list`, in the SUMMARY) is
-pinned by `scripts/tests/test_agent_gate_summary.sh`, which `--lite` already runs via `tooling-tests`. So a
-future edit that drops a lane from the array reds `--lite` in seconds, while the expensive
+pinned by `scripts/tests/test_agent_gate_summary.sh`, which the full gate runs via `tooling-tests`, NOT `--lite` via `tooling-tests`. So a
+future edit that drops a lane from the array reds the **gate of record** (via `tooling-tests`) — NOT `--lite`; that claim was measured and withdrawn, while the expensive
 does-it-actually-fire proof is re-runnable on demand.
 
 ## D6 — Cost, measured and reported (AC3)

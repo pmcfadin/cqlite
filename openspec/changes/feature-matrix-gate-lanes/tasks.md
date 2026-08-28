@@ -14,48 +14,60 @@
 > the gap is LOCAL pre-push execution (D4). Do not re-derive these.
 
 ## 1. `feature-iso-parquet` + `feature-iso-delta-scan` (surface: `scripts/agent-gate.sh`)
-- [ ] Register both names in `COMPONENTS` (`:2166`) and add dispatch arms. Do **not** add them to
+- [x] Register both names in `COMPONENTS` (`:2166`) and add dispatch arms. Do **not** add them to
       `LITE_COMPONENTS` or `DELTA_COMPONENTS`.
-- [ ] Each lane: `RUSTFLAGS="-D warnings" cargo check --all-targets -p cqlite-core --no-default-features
-      --features all-compression,<parquet|delta-scan>` — the other feature absent. `--all-targets` is
-      load-bearing (D2); record why at the call site, citing #1978.
-- [ ] Place both in the SIDE lane with their own `CARGO_TARGET_DIR` (divergent feature set ⇒ MAIN
+- [x] Each lane: `-D warnings` + `cargo test -p cqlite-core --no-default-features --features
+      all-compression,<parquet|delta-scan> --lib --no-run` — the other feature absent.
+      **SUPERSEDED INSTRUCTION:** this task originally mandated `cargo check --all-targets`. That instrument
+      was measured WRONG — `--all-targets` compiles ~100 integration test files written against the default
+      feature set (3 named failures = noise, not leakage), while `cargo check` does not compile the lib's
+      `#[cfg(test)]` modules at all and is therefore blind to the #1978 class these lanes exist to catch.
+      `--lib --no-run` is the shipped instrument, pinned by `1699-iso-instrument`/`1699-iso-forbidden`.
+- [x] Place both in the SIDE lane with their own `CARGO_TARGET_DIR` (divergent feature set ⇒ MAIN
       target-dir thrash, #2657). Neither needs fixtures ⇒ **not** in `DATASET_COMPONENTS`.
-- [ ] No opt-out env var.
+- [x] No opt-out env var.
 
 ## 2. `legacy-heuristics` (surface: `scripts/agent-gate.sh`)
-- [ ] Register in `COMPONENTS` + dispatch. Build half: `RUSTFLAGS="-D warnings" cargo build -p cqlite-core
+- [x] Register in `COMPONENTS` + dispatch. Build half: `RUSTFLAGS="-D warnings" cargo build -p cqlite-core
       --features legacy-heuristics`.
-- [ ] Execute half: derive the `--test` target set by grepping committed `cqlite-core/tests/*.rs` for
-      `legacy-heuristics`; include `--lib`. **Fail closed on zero derived targets**, naming the derivation —
-      never PASS, never SKIP.
-- [ ] Run under the existing `check_no_unexpected_zero_tests` guard.
-- [ ] Add to `DATASET_COMPONENTS` (several derived targets consume fixtures) so the existing preflight
+- [x] Execute half: derive the `--test` target set from **cargo metadata**, including a target when a
+      `legacy-heuristics` cfg site appears anywhere in its **module closure** or when `required-features`
+      names the feature; include `--lib`. **Fail closed on zero derived targets** (and on an unresolvable
+      module tree), naming the derivation — never PASS, never SKIP.
+      **SUPERSEDED INSTRUCTION:** originally "grep committed `cqlite-core/tests/*.rs`". That glob cannot see
+      a manifest-gated target or a directory-style `tests/foo/main.rs`, so it silently understated the set
+      (roborev rounds 11-13).
+- [x] Run under the existing `check_no_unexpected_zero_tests` guard.
+- [x] Add to `DATASET_COMPONENTS` (several derived targets consume fixtures) so the existing preflight
       applies.
-- [ ] SIDE lane, own `CARGO_TARGET_DIR` (feature set diverges from MAIN's).
-- [ ] **Record the first-ever execution result.** If positively-gated tests fail, apply the D3.RISK ruling
+- [x] SIDE lane, own `CARGO_TARGET_DIR` (feature set diverges from MAIN's).
+- [x] **Record the first-ever execution result.** If positively-gated tests fail, apply the D3.RISK ruling
       from Seam 1 — default recommendation (b): `#[ignore]` with a filed follow-up issue, lane lands green
       over the remainder. Never (c) compile-only.
 
 ## 3. `flight-tests` (surface: `scripts/agent-gate.sh`)
-- [ ] Register in `COMPONENTS` + dispatch, SIDE lane, own `CARGO_TARGET_DIR`, in `DATASET_COMPONENTS`.
-- [ ] Scope per D4/D6 on the measured number — RESOLVED as `--lib --bins` (D4 second correction, #3384);
+- [x] Register in `COMPONENTS` + dispatch, SIDE lane, own `CARGO_TARGET_DIR`, in `DATASET_COMPONENTS`.
+- [x] Scope per D4/D6 on the measured number — RESOLVED as `--lib --bins` (D4 second correction, #3384);
       no opt-out env var.
-- [ ] Run under a zero-tests guard THAT HAS A SUBJECT at this scope: `check_no_unexpected_zero_tests`
+- [x] Run under a zero-tests guard THAT HAS A SUBJECT at this scope: `check_no_unexpected_zero_tests`
       disclaims `--lib`, so use its `--lib` analogue (each selected unittest target OBSERVED and NON-ZERO).
-- [ ] PRINT the coverage census on every run, to BOTH stdout (`>>>`) and the component log: declared
+- [x] PRINT the coverage census on every run, to BOTH stdout (`>>>`) and the component log: declared
       integration-target count derived from `cargo metadata`, that this lane runs none of them, CI's Flight
       tier as what does, and #3384/#3383. Retire the flake-quarantine plumbing (no subject left); RETAIN
       `_package_test_targets` (feeds the census) and `check_declared_test_targets_observed` (uncalled, with a
       comment naming what will call it again).
-- [ ] Leave `flight-query-semantics-oracle` functionally untouched — including its per-lane #3095 fixture
+- [x] Leave `flight-query-semantics-oracle` functionally untouched — including its per-lane #3095 fixture
       SKIP predicates. Overlap is accepted deliberately (D4).
 
 ## 4. Structural registration self-test (surface: `scripts/tests/test_agent_gate_summary.sh`)
-- [ ] For each of the four names assert: present in `COMPONENTS`, reachable in the dispatch table, printed
+- [x] For each of the four names assert: present in `COMPONENTS`, reachable in the dispatch table, printed
       by `--list`. Hermetic, no cargo, sub-second — it must stay affordable in `--lite`.
-- [ ] Verify it is reached by `--lite` (via `tooling-tests`/`roborev-lints` as that script is currently
-      wired) and that removing a name reds `--lite`. Demonstrate the red, do not assume it.
+- [x] Verify the self-test is REACHED and that removing a name reds it. Demonstrated in a throwaway
+      `git worktree`: `rc=1`, `FAIL - 1699-dispatch: feature-iso-delta-scan has NO dispatch_component arm`.
+      **SUPERSEDED INSTRUCTION:** originally "reached by `--lite`". That is FALSE and was withdrawn —
+      `test_agent_gate_summary.sh` runs in `tooling-tests`, which is **not** in `LITE_COMPONENTS`, so the
+      enforcement is the **gate of record**. Deliberately not forced into `--lite`: 257 asserts / ~14s
+      against `roborev-lints`' sub-second hermetic charter.
 
 ## 5. Planted-break harness (surface: `scripts/tests/test_agent_gate_feature_matrix_lanes.sh`, new)
 - [x] Create a throwaway `git worktree add --detach` copy; **never** mutate the live checkout. Assert
@@ -84,20 +96,34 @@
       direction. This is the AC2 deliverable —
       `docs/reports/ah6-1699-feature-matrix-lanes.md` (observed at `94833d510`; all four FIRED, attributed).
 - [ ] Record per-component durations from the full-gate SUMMARY.
-- [ ] Measure the baseline full gate at the merge base and the gate of record on this branch, **sequentially,
-      one gate at a time** (#2640), and post both totals. Do not sum per-component seconds to claim added
-      wall time (D6).
-
-## 7. Doctrine (surface: `CLAUDE.md`, website `agents-developing/gate-contract/`)
-- [ ] Update the Full-gate row to name the added feature-matrix coverage; update the website page to match.
+- [ ] Report the added full-gate wall time as `max(0, SIDE_total − MAIN_total)` from the gate of record's
+      own per-component durations, and state that it was taken with build caches pruned SYMMETRICALLY.
+      **SUPERSEDED INSTRUCTION:** this task originally mandated a baseline full run at the merge base versus
+      the gate of record, run sequentially on one machine. It was attempted and ABANDONED mid-run — this box
+      hosts five lane worktrees and sustained load 52–86 on 16 cores, so a four-component delta is not
+      recoverable from two totals whose noise exceeds the delta. The replacement is load-independent because
+      both lanes sit inside the same run under the same load. R7 in the spec now prescribes it.
+- [x] Update the Full-gate row to name the added feature-matrix coverage; update the website page to match.
+      (Done, and CORRECTED after the C audit: both artifacts had been left describing the SUPERSEDED
+      behaviour — "whole suite"/"WHOLE package", `tests/*.rs`, and a deleted module-level `#![cfg]`
+      derivation — while only the spec was rewritten for the two descopes.)
 - [ ] Verify publication by grepping the **served** page for a phrase this change introduces (#3042). A zero
       count is not-yet-published, never "done".
 
 ## 8. Delivery
-- [ ] `--lite` green each fix round (summary-file redirect; `PASS|FAIL` probe only).
-- [ ] `rust-reviewer` + sanctioned `roborev-review.sh --agent … --model …` on the lite-green diff BEFORE the
+- [x] `--lite` green each fix round (summary-file redirect; `PASS|FAIL` probe only). 14 rounds run.
+- [~] `rust-reviewer` + sanctioned `roborev-review.sh --agent … --model …` on the lite-green diff BEFORE the
       first full gate. This diff is code-bearing (bash + a report) — roborev certification is required, and
       the docs-only substitute does not apply.
+      **PARTIAL, and deliberately not ticked.** roborev: **17 rounds** run through the sanctioned wrapper,
+      every finding fixed, none waived. `rust-reviewer`: spawned and it never returned findings, including
+      after a direct request — one of SIX subagents in this session that did work and went idle silently. So
+      the Rust-review half of this task has NOT been satisfied and is recorded as a residual rather than
+      quietly counted as done. Mitigating, but not a substitute: this diff is ~99% bash + markdown (the only
+      Rust touched is three `#[cfg]`/`#[ignore]` attribute edits in test files), which is outside
+      `rust-reviewer`'s subject matter, and those three edits were each reviewed by roborev.
+      **Residual for the closer/lead: decide whether a Rust review is required for a diff with no
+      meaningful Rust in it.** I am not making that call by ticking a box.
 - [ ] PR body: both cost numbers, the harness observation, the two corrected premises, and the full SUMMARY
       block showing the four new components.
 - [ ] `flow-closer` endgame: ONE full gate of record → C (spec-auditor) → final roborev → `premerge-assert`

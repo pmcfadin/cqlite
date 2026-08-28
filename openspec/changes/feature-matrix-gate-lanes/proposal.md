@@ -19,7 +19,7 @@ taken from the audit**:
    files** plus `--lib` unit tests. The full gate runs exactly **three** of those tests, by name:
    `query_semantics_flight_parity` and `issue_3095_flight_static_columns` (`flight-query-semantics-oracle`,
    `agent-gate.sh:5198`) and one dhat test (`memory-budget`, `agent-gate.sh:8081`). Everything else is
-   compiled — by clippy's per-package pass (`agent-gate.sh:4722`, `--all-targets`) — and never run.
+   compiled — by clippy's per-package pass (`agent-gate.sh:4722`, `--lib --no-run`) — and never run.
 2. **`legacy-heuristics`' 95 cfg sites are never EXECUTED, and never built in isolation.** The feature is
    *test-compiled* today (it is in clippy's cqlite-core feature list, `agent-gate.sh:4700`), so the audit's
    "never test-compiled" is stale — but compiling is not running. Five `cqlite-core/tests/*.rs` files carry
@@ -53,7 +53,7 @@ lane-scope decision they drive.
    - `feature-iso-parquet` — `cqlite-core --no-default-features --features all-compression,parquet`,
      **without** `delta-scan`.
    - `feature-iso-delta-scan` — the mirror, **without** `parquet`.
-2. **The isolation lanes test-compile** (`--all-targets`) under `RUSTFLAGS=-D warnings`, not a bare
+2. **The isolation lanes test-compile** (`--lib --no-run`) under `RUSTFLAGS=-D warnings`, not a bare
    `cargo check`. The issue's literal `cargo check` would build a lane blind to the very incident class it
    cites — #1978 was a `#[cfg(test)]` module, and a plain check never compiles test targets. This is a
    deliberate strengthening, recorded in `design.md` D2.
@@ -62,7 +62,7 @@ lane-scope decision they drive.
    throwaway `git worktree` and asserts that lane exits non-zero — and that the unbroken lane still passes,
    so the harness cannot pass by failing everything. Opt-in (it compiles), with the observation recorded.
 4. **Cheap structural asserts in the fast loop**: the components are registered, appear in `--list`, and
-   appear in the SUMMARY — pinned in `scripts/tests/test_agent_gate_summary.sh`, which `--lite` already runs.
+   appear in the SUMMARY — pinned in `scripts/tests/test_agent_gate_summary.sh`, which the **full gate** runs via `tooling-tests` — NOT `--lite` (that claim was measured and withdrawn: `tooling-tests` is not in `LITE_COMPONENTS`).
 5. **Wall-time accounting posted**: per-component durations from the SUMMARY plus a baseline-vs-after full
    gate total measured sequentially on one box (one gate at a time, #2640).
 6. **Doctrine updated in the same change**: the CLAUDE.md gate table's description of what the full gate
