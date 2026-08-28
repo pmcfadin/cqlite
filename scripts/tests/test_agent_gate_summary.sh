@@ -3067,7 +3067,11 @@ else
   else
     bad "1699-r20-census-unscoped-gone: the census still says 'WHO DOES RUN THEM' of the whole omitted set — false for the crate-gated targets, which run in NO tier (#3375)"
   fi
-  for needle_ in 'EXECUTE NOWHERE' '#3375' 'WHO RUNS THE REMAINING' 'UNRECOGNISED gate shape' 'enabled by another component'; do
+  # 'run by another component', not 'enabled by' — round 21's whole finding was that ENABLING a
+  # feature is not RUNNING the target (memory-budget enables dhat-heap but selects ONE target by
+  # name), so the wording was tightened along with the predicate. This assert caught the rename,
+  # which is what it is for; the phrase it now pins is the one that is true.
+  for needle_ in 'EXECUTE NOWHERE' '#3375' 'WHO RUNS THE REMAINING' 'UNRECOGNISED gate shape' 'run by another component'; do
     if [ "$(grep -cF -- "$needle_" "$fl_body_")" -gt 0 ]; then
       ok "1699-r20-census-element: the census states '$needle_'"
     else
@@ -3105,6 +3109,56 @@ elif [ "$(sed 's/[[:space:]]*#.*$//' "$pred_" | grep -cE '\|[[:space:]]*grep[^|]
   ok "1699-r20-pipefail: the component-enables-feature predicate uses grep -c + a numeric test, not '| grep -q' (which returns 141 on a successful match under pipefail)"
 else
   bad "1699-r20-pipefail: '| grep -q' is back in the predicate — under pipefail it reports 141 on a SUCCESSFUL match, so the predicate answers FALSE precisely when it should answer TRUE (#3380/#3387)"
+fi
+
+# --- 33. #1699: the crate-gate grammar is CLOSED (roborev round-21, Medium) --------------
+#
+# The first cut treated any expression containing `feature =` as a positive conjunction, so legal
+# `not(feature = "x")` and `any(feature = "x", feature = "<enabled>")` gates would have been read as
+# "this feature is off, therefore the target executes nowhere" — a FALSE #3375 claim, which is the
+# census's most consequential one. Recognise only what is modelled; report the rest.
+#
+# BEHAVIOURAL, per shape, because a structural grep would only pin the spelling of today's fix. The
+# extracted function's one dependency (`_package_test_targets_gated`) is replaced by a stub in our
+# own scratch dir — the artifact-substitution pattern, never a test-only seam in the gate (#3312).
+gg_body_="$tmp/1699-r21-gategrammar.sh"
+awk '/^_crate_gated_test_targets\(\) \{/, /^\}/' "$GATE" > "$gg_body_"
+if [ ! -s "$gg_body_" ]; then
+  bad "1699-r21-gate-grammar-scope: could not extract _crate_gated_test_targets — every case below would pass vacuously"
+else
+  gg_src_="$tmp/1699-r21-src"; mkdir -p "$gg_src_"
+  # <name>|<gate line>|<expected off-feature, or UNCLASSIFIED, or NONE for "not reported">
+  while IFS='|' read -r case_ gate_ want_; do
+    [ -n "$case_" ] || continue
+    printf '//! prose header\n%s\n#[test]\nfn t() {}\n' "$gate_" > "$gg_src_/$case_.rs"
+    # ONE stub, parameterised through the environment. The first version defined the stub twice and
+    # the second definition's nested quoting put LITERAL quote marks in the fixture path, so the
+    # function read no file and every case reported NONE — the asserts failed rather than passing
+    # vacuously, which is the only reason it was visible at all.
+    got_=$(
+      export GG_SRC="$gg_src_/$case_.rs" GG_REL="tests/$case_.rs"
+      _package_test_targets_gated() { printf '%s\t%s\t%s\t%s\n' "${case_}_target" "$GG_SRC" source "$GG_REL"; }
+      # shellcheck disable=SC1090
+      . "$gg_body_"
+      _crate_gated_test_targets somepkg " on_a on_b " 2>/dev/null | awk -F'\t' '{print $4}'
+    )
+    got_=${got_:-NONE}
+    if [ "$got_" = "$want_" ]; then
+      ok "1699-r21-gate-grammar[$case_]: '$gate_' -> $got_"
+    else
+      bad "1699-r21-gate-grammar[$case_]: '$gate_' classified as '$got_', expected '$want_' — a misread gate either invents an EXECUTE NOWHERE claim or hides one"
+    fi
+  done <<'GATE_SHAPE_CASES'
+single_off|#![cfg(feature = "off_x")]|off_x
+single_on|#![cfg(feature = "on_a")]|NONE
+all_one_off|#![cfg(all(feature = "on_a", feature = "off_x"))]|off_x
+all_both_on|#![cfg(all(feature = "on_a", feature = "on_b"))]|NONE
+negation|#![cfg(not(feature = "off_x"))]|UNCLASSIFIED
+disjunction|#![cfg(any(feature = "off_x", feature = "on_a"))]|UNCLASSIFIED
+nested_all_any|#![cfg(all(feature = "on_a", any(feature = "off_x", feature = "on_b")))]|UNCLASSIFIED
+non_feature_pred|#![cfg(all(feature = "on_a", target_os = "linux"))]|UNCLASSIFIED
+bare_predicate|#![cfg(test)]|UNCLASSIFIED
+GATE_SHAPE_CASES
 fi
 
 echo "----"
