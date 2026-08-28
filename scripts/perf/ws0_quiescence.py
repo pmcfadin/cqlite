@@ -452,6 +452,19 @@ def judge(before: Dict[str, object], after: Dict[str, object], *,
         )
     for name, s in (("before", before), ("after", after)):
         comp = s["competing"]
+        # INTERNAL CONSISTENCY (#3248, roborev job 69 finding 4). `competing_count` is written
+        # as `len(competing)`, so a sample where they disagree is a corrupt or hand-edited
+        # artifact -- and the contradiction matters in the dangerous direction: a sample
+        # claiming `competing_count: 1` with an EMPTY `competing` list was read as clean,
+        # because only the list was consulted.
+        declared = s.get("competing_count")
+        if declared is not None and declared != len(comp):
+            raise NotQuiescent(
+                "QUIESCENCE_SAMPLE_INCONSISTENT",
+                f"the {name} sample declares competing_count={declared} but lists"
+                f" {len(comp)} competing process(es). A sample that contradicts itself cannot"
+                " establish anything about the box.",
+            )
         if comp:
             names = ", ".join(f"{c['comm']}({c['pid']},{c['why']})" for c in comp[:8])
             raise NotQuiescent(

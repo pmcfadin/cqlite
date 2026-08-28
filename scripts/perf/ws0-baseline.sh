@@ -546,6 +546,25 @@ if [[ -n "$PROFILE_OUT" ]]; then
   fi
 fi
 
+# --profile-out WITHOUT --bin-dir CAN NEVER SUCCEED, so it is refused HERE rather than after a
+# build (#3248, roborev job 69 finding 3).
+#
+# `[profile.release]` sets `strip = true`, so the default build ALWAYS produces symbol-free
+# binaries and the post-build frozen-binary check must ALWAYS fail. The previous shape passed
+# argument validation, CLAIMED both output directories, ran a full release build, and only then
+# refused -- leaving claimed directories behind for a configuration that had no reachable
+# success. Refusing an impossible configuration after acting on it is the same defect as
+# refusing a bad VALUE after acting on it.
+if [[ -n "$PROFILE_OUT" && -z "$BIN_DIR" ]]; then
+  echo "FATAL: --profile-out requires --bin-dir, and this is not a preference." >&2
+  echo "       [profile.release] sets strip = true, so the default build produces binaries with" >&2
+  echo "       NO symbols and a sampling profile of them attributes nothing. This combination" >&2
+  echo "       has no reachable success, so it is refused now rather than after a build." >&2
+  echo "         cargo build --profile perfsym -p ws0-corpus-gen -p cqlite-flight -p flight-loadgen" >&2
+  echo "         ... --bin-dir \$PWD/target/perfsym --profile-out <dir>" >&2
+  exit 2
+fi
+
 # A PROFILE OF A STRIPPED BINARY IS THE SILENT FAILURE THIS FEATURE EXISTS TO AVOID.
 # `[profile.release]` sets `strip = true`, so the default binaries carry ZERO symbols and
 # `perf record` against them exits 0 and yields a confident table of raw addresses. Accepting
@@ -1180,8 +1199,16 @@ perf_stat_c() {
     # Published at file scope BEFORE the window opens, so a signal arriving at any point
     # during the measurement finds a PID to clean up.
     _ACTIVE_PROFILER_PID="$_prof_pid"
-    # Give the sampler a moment to arm, or the first fraction of the window is unsampled and
-    # the profile silently under-represents whatever runs first.
+    # ARMING DELAY, AND THE COST IS STATED RATHER THAN CLAIMED AWAY (#3248, roborev job 69
+    # finding 1). The sampler needs a moment to arm, so without this the first fraction of the
+    # window is UNSAMPLED and the profile under-represents whatever runs first. With it, the
+    # profile instead includes ~300 ms of samples from BEFORE the counting window opens.
+    #
+    # So the earlier claim that the profile "brackets EXACTLY the counted window" was WRONG in
+    # one direction or the other, and there is no setting that makes it true: one side of the
+    # boundary is always slightly off. 300 ms against this rig's 5-45 s windows is 0.7-6% of the
+    # capture, and it lands on server startup/steady-state rather than on the encode region.
+    # The direction chosen is the one that cannot silently DROP the region under study.
     sleep 0.3
   fi
   # `|| _rc=$?`, NOT a bare call followed by `$?`, AND THIS IS A RESOURCE-LEAK FIX.

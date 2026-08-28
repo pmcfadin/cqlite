@@ -339,12 +339,19 @@ def build_report(args: argparse.Namespace) -> tuple[dict, list[str]]:
                 f" {declared_ts!r}. A verdict from a DIFFERENT timeseries does not establish"
                 " anything about this session."
             )
+        # THE CAVEAT TRAVELS WITH THE VERDICT (#3248, roborev job 69 finding 2). A window whose
+        # records carry only the narrow census can still be certified -- a timeseries recorded
+        # before `competing_count` existed is legitimate -- but publishing the QUIESCENT verdict
+        # WITHOUT its breadth would state a stronger claim than the evidence supports, which is
+        # the whole failure mode this issue is about. The verdict recorded the breadth already;
+        # the reporter was dropping it on the floor.
+        _wc = verdict.get("window_census") or {}
         quiescence_verdict = {
             "verdict": verdict.get("verdict"),
-            "in_window_samples": (verdict.get("window_census") or {}).get("samples"),
-            "coverage_largest_gap_s": (verdict.get("window_census") or {}).get(
-                "coverage_largest_gap_s"
-            ),
+            "in_window_samples": _wc.get("samples"),
+            "coverage_largest_gap_s": _wc.get("coverage_largest_gap_s"),
+            "narrow_census_records": _wc.get("narrow_census_records"),
+            "census_breadth": _wc.get("census_breadth"),
         }
     quiescence = quiescence_intent
     # WHICH SERVER PRODUCED THE MEASURED ROWS (#3272 round 14, F2). Read from the pre-measurement
