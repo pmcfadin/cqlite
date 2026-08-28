@@ -640,6 +640,25 @@ END {
       if (a ~ /^#!\[/) attrs = ""
       else attrs = attrs squash(a) " "
     }
+    # ITEM MACRO, CHECKED AFTER THE ATTRIBUTE RUN (roborev r12 F1). The standalone
+    # depth-0 sweep above only sees an invocation that STARTS its line, so
+    # `#[allow(dead_code)] make_mod!(probe);` walked past it.
+    #
+    # Checking HERE is what makes this bounded rather than a second lexer, and the
+    # reason is worth stating: this derivation has ALREADY consumed the outer attribute
+    # run into `attrs`, so (a) the attributed form converges on the same BUF as the bare
+    # form, and (b) IT CANNOT FALSE-FIRE ON A STRING — a `#[doc = "call foo!(x)"]` was
+    # consumed as an attribute, so its contents never reach `BUF`. Broadening the
+    # line-anchored sweep instead would have required erasing strings in the scan, which
+    # is the extra modelling this issue keeps refusing to take on.
+    #
+    # Covers the bare, attributed, path-qualified (`::foo!`) and raw-identifier
+    # (`r#foo!`) forms. `macro_rules!` stays excluded: a DEFINITION injects no items at
+    # its own site.
+    if (BUF !~ /^macro_rules[[:space:]]*!/ &&
+        BUF ~ /^(::[[:space:]]*)?(r#)?[A-Za-z_][A-Za-z0-9_]*([[:space:]]*::[[:space:]]*(r#)?[A-Za-z_][A-Za-z0-9_]*)*[[:space:]]*![[:space:]]*[\(\[{]/) {
+      printf "Q\tline %d: top-level ITEM MACRO invocation (after an attribute run): `%s`\n", startline, squash(substr(BUF, 1, 72))
+    }
     if (BUF ~ /^pub mod [A-Za-z_][A-Za-z0-9_]*[[:space:]]*;/) {
       st2 = take_stmt()
       nm = st2
