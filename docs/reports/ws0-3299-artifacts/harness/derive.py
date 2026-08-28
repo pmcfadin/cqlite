@@ -218,15 +218,67 @@ def resolve_rundir(results, recorded):
 
 
 def collect(results):
+    """Load every rep the manifest names, REFUSING a repeated entry.
+
+    A DUPLICATE MANIFEST ENTRY MANUFACTURES REPLICATION, which is why this is a
+    refusal and not a quiet de-duplication. Everything downstream counts the reps
+    at a point: `min_reps` decides whether a point is under-replicated, the
+    `>= 3 reps` floor decides whether a tree may cast a bracketing vote, and
+    `fmt_spread` decides whether a dispersion exists to print. Repeat one entry
+    three times and a SINGLE physical measurement satisfies all three — and,
+    because the three loaded copies are identical, it reports a spread of
+    **0.00%**, i.e. perfect reproducibility derived from one draw. That is the
+    same false-assurance class as printing `0.00%` for a one-rep point, arriving
+    by a different route.
+    Two distinct identities are checked, because either alone leaves the other
+    open:
+      * the RESOLVED RUNDIR — the same directory named twice;
+      * the REP IDENTITY `(s, n, round)` — two different directories carrying the
+        same rep, e.g. a rundir copied under a new name.
+    Silently de-duplicating would be worse than refusing: a manifest that names
+    the same evidence twice is corrupt, and a tool that quietly repairs it
+    publishes a table from a tree nobody has been told is wrong.
+    """
     reps = []
+    seen_rundir = {}
+    seen_identity = {}
     manifest = os.path.join(results, "manifest.jsonl")
     if not os.path.exists(manifest):
         print(f"FATAL: {manifest} absent — nothing measured", file=sys.stderr)
         sys.exit(2)
     with open(manifest) as fh:
-        for line in fh:
-            if line.strip():
-                reps.append(load_rep(resolve_rundir(results, json.loads(line)["rundir"])))
+        for lineno, line in enumerate(fh, 1):
+            if not line.strip():
+                continue
+            recorded = json.loads(line)["rundir"]
+            rundir = resolve_rundir(results, recorded)
+            key = os.path.realpath(rundir)
+            if key in seen_rundir:
+                guards.fail(
+                    "MANIFEST_DUPLICATE_RUNDIR",
+                    f"{manifest} line {lineno} names rundir {recorded!r}, which line "
+                    f"{seen_rundir[key]} already named (both resolve to {key}). Counting it "
+                    f"twice would manufacture replication out of ONE measurement — "
+                    f"satisfying the >= 3-rep floors and reporting 0.00% spread from a single "
+                    f"draw. A manifest that names the same evidence twice is corrupt; it is "
+                    f"refused rather than silently de-duplicated.",
+                )
+            seen_rundir[key] = lineno
+            rep = load_rep(rundir)
+            ident = (rep["s"], rep["n"], rep["round"])
+            if ident in seen_identity:
+                prev_line, prev_dir = seen_identity[ident]
+                guards.fail(
+                    "MANIFEST_DUPLICATE_REP",
+                    f"{manifest} line {lineno} ({rundir}) and line {prev_line} ({prev_dir}) "
+                    f"are DIFFERENT directories carrying the SAME rep identity "
+                    f"S={ident[0]}, N={ident[1]}, round={ident[2]}. One rep measured once "
+                    f"cannot be two reps: counting both manufactures replication (and, if the "
+                    f"copies agree, a 0.00% spread from a single draw). Re-emit the manifest "
+                    f"with one entry per measured rep.",
+                )
+            seen_identity[ident] = (lineno, rundir)
+            reps.append(rep)
     return reps
 
 
@@ -280,6 +332,35 @@ def agg(points, key):
     return median([p[key] for p in points])
 
 
+def group_points(reps):
+    """reps -> {(S, N): [rep, ...]}. One implementation, shared by every consumer."""
+    by_point = {}
+    for r in reps:
+        by_point.setdefault((r["s"], r["n"]), []).append(r)
+    return by_point
+
+
+def peaks_by_s(by_point):
+    """{S: (best_N, median aggregate rows/s there)} — the best-N rule, ONCE.
+
+    Every figure that depends on "S's best point" (the grid's bold cell, the
+    marginal efficiencies, the endpoint ratios, and `derive-freq.py`'s turbo
+    split) reads it from here. A second copy of this rule elsewhere would only be
+    knowable to agree with this one by differential testing (CLAUDE.md, #3283),
+    and the way it would diverge is a published figure quietly describing a
+    different point than the table does. Ties resolve to the LOWER N (`max` keeps
+    the first maximal element and the points are visited in ascending N): same
+    throughput, cheaper configuration — the same tie-break `bracket_verdict`
+    applies to a plateau.
+    """
+    peaks = {}
+    for s in sorted({s for s, _ in by_point}):
+        pts = [(n, agg(by_point[(s, n)], "aggregate_rows_per_s"))
+               for (ss, n) in sorted(by_point) if ss == s]
+        peaks[s] = max(pts, key=lambda t: t[1])
+    return peaks
+
+
 def emit_table(reps, min_reps, derived_verdicts=None):
     """`derived_verdicts` is COMPUTED, never asserted.
 
@@ -288,9 +369,7 @@ def emit_table(reps, min_reps, derived_verdicts=None):
     points. There is deliberately no way to supply a verdict by hand.
     """
     derived_verdicts = derived_verdicts or {}
-    by_point = {}
-    for r in reps:
-        by_point.setdefault((r["s"], r["n"]), []).append(r)
+    by_point = group_points(reps)
     s_values = sorted({s for s, _ in by_point})
     n_values = sorted({n for _, n in by_point})
     bracket_notes = []
@@ -329,10 +408,7 @@ def emit_table(reps, min_reps, derived_verdicts=None):
           f"`{UNMEASURED_DISPERSION}` — a single draw has unmeasured dispersion, not zero.\n")
     print("| N | " + " | ".join(f"S={s}" for s in s_values) + " |")
     print("|--:|" + "---|" * len(s_values))
-    peaks = {}
-    for s in s_values:
-        pts = [(n, agg(by_point[(s, n)], "aggregate_rows_per_s")) for n in n_values if (s, n) in by_point]
-        peaks[s] = max(pts, key=lambda t: t[1])
+    peaks = peaks_by_s(by_point)
     for n in n_values:
         cells = []
         for s in s_values:
@@ -479,10 +555,9 @@ def extension_verdicts(path, reps, min_reps=3):
     Deriving it from the tree keeps the conclusion attached to numbers a reader
     can recompute, instead of a JSON file someone edits.
     """
-    by_point = {}
-    for r in reps:
-        by_point.setdefault((r["s"], r["n"]), []).append(r)
+    by_point = group_points(reps)
     n_values = sorted({n for _, n in by_point})
+    all_peaks = peaks_by_s(by_point)
     out = {}
     for s in sorted({s for s, _ in by_point}):
         pts = [(n, agg(by_point[(s, n)], "aggregate_rows_per_s"))
@@ -505,16 +580,64 @@ def extension_verdicts(path, reps, min_reps=3):
                   f"precisely what the N=32 sign-flip showed to be unreliable. Its points "
                   f"are still printed below for provenance.\n")
             continue
-        peaks = {s: max(pts, key=lambda t: t[1])}
+        peaks = {s: all_peaks[s]}
         verdict, why = bracket_verdict(by_point, s, peaks, n_values, 0.05)
         out[s] = {"verdict": verdict, "why": why, "source": f"extension tree `{path}`"}
     return out
 
 
+def merge_extension_verdicts(votes):
+    """Combine the extension trees' votes — ARGUMENT ORDER MAY NOT DECIDE ANYTHING.
+
+    `votes` is [(path, {S: verdict-dict})], in the order the trees were passed.
+
+    This used to be `verdicts.update(...)` in a loop, so when two trees both
+    voted on the same S the LAST one silently won and
+    `--extension A --extension B` could publish a different verdict than
+    `--extension B --extension A`. Each tree was individually valid — every point
+    replicated to the >= 3-rep floor — so nothing anywhere would have reported
+    that a choice had been made at all.
+
+    A DISAGREEMENT IS A REFUSAL, not a resolution. There is deliberately no
+    tie-break — not recency, not most-reps, not widest-N. Two valid
+    contemporaneous trees that disagree about the same S is a question about the
+    evidence, and the whole reason argument-order dependence went unnoticed for
+    three rounds is that quietly answering such a question leaves no trace.
+    Where the trees AGREE the verdict is published with EVERY source that voted
+    for it, sorted by path so the text is identical whatever order they arrived
+    in.
+    """
+    by_s = {}
+    for path, verdicts in votes:
+        for s, o in verdicts.items():
+            by_s.setdefault(s, []).append((path, o))
+    out = {}
+    for s, cast in sorted(by_s.items()):
+        cast = sorted(cast, key=lambda t: t[0])
+        distinct = sorted({o["verdict"] for _, o in cast})
+        if len(distinct) > 1:
+            detail = "; ".join(
+                f"`{path}` says {o['verdict'].upper()} ({o['why']})" for path, o in cast
+            )
+            guards.fail(
+                "EXTENSION_VERDICT_CONFLICT",
+                f"the extension trees disagree about S={s}: {detail}. Both are valid trees "
+                f"— every point they vote with is replicated past the 3-rep floor — so "
+                f"there is no rule here that picks between them, and picking one by argument "
+                f"order (which is what this code used to do), by recency or by rep count "
+                f"would publish a bracketing verdict nobody decided. Pass ONE tree for S={s}, "
+                f"or re-measure.",
+            )
+        out[s] = {
+            "verdict": distinct[0],
+            "why": " AND ".join(o["why"] for _, o in cast),
+            "source": ", ".join(o["source"] for _, o in cast),
+        }
+    return out
+
+
 def emit_extension(path, reps):
-    by_point = {}
-    for r in reps:
-        by_point.setdefault((r["s"], r["n"]), []).append(r)
+    by_point = group_points(reps)
     print(f"### Extension run `{path}`\n")
     print("Incumbent re-measured **interleaved** with each candidate in every round, so these "
           "comparisons are contemporaneous. **These medians are NOT pooled into the main table** "
@@ -709,12 +832,31 @@ def main():
         return
     if not args.results:
         ap.error("--results is required")
+    # A TREE CANNOT CORROBORATE ITSELF. Two `--extension` flags naming one tree
+    # would print one witness as two agreeing sources beside a verdict — the
+    # duplicate-manifest-entry shape one level up, repeated evidence reading as
+    # corroboration. The map is SEEDED with the main results tree, because
+    # `--results X --extension X` attributes a verdict derived from the published
+    # points to a "separate contemporaneous session" that does not exist.
+    seen = {os.path.realpath(args.results): "--results"}
+    for d in args.extension:
+        key = os.path.realpath(d)
+        if key in seen:
+            guards.fail(
+                "EXTENSION_DUPLICATE",
+                f"--extension {d!r} names the same tree as {seen[key]} ({key}). One tree is "
+                f"one witness: counted twice it prints as two agreeing sources for a single "
+                f"verdict, and the main results tree cannot be its own extension.",
+            )
+        seen[key] = f"--extension {d!r}"
     extensions = [(d, collect(d)) for d in args.extension]
     # The ONLY producer of verdicts is extension_verdicts(), which computes them
     # from measured points. No file, flag or environment variable can supply one.
-    verdicts = {}
-    for d, reps in extensions:
-        verdicts.update(extension_verdicts(d, reps))
+    # `merge_extension_verdicts` combines them ORDER-INDEPENDENTLY and refuses a
+    # disagreement rather than letting the last `--extension` win.
+    verdicts = merge_extension_verdicts(
+        [(d, extension_verdicts(d, reps)) for d, reps in extensions]
+    )
     emit_table(collect(args.results), args.min_reps, verdicts)
     for d, reps in extensions:
         emit_extension(d, reps)

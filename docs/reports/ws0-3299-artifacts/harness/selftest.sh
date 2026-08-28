@@ -707,7 +707,10 @@ expect_ok "derive.py has no hand-written verdict channel" \
 # these the check above could pass vacuously.
 sed 's/--extension", action="append"/--verdict-override", action="append"/' \
   "$HERE/derive.py" > "$TMP/vc-flag.py"
-sed 's/verdicts.update(extension_verdicts(d, reps))/verdicts.update(json.load(open("v.json")))/' \
+# The mapping is now BUILT by `merge_extension_verdicts(...)`, not accumulated
+# with `.update()`, so this control injects the file hatch into THAT expression —
+# the shape a checker looking only at `update`/`setdefault` would have missed.
+sed 's/    verdicts = merge_extension_verdicts(/    verdicts = json.load(open("v.json")) if 0 else merge_extension_verdicts(/' \
   "$HERE/derive.py" > "$TMP/vc-file.py"
 for shape in flag file; do
   if python3 "$HERE/check-no-verdict-channel.py" "$TMP/vc-$shape.py" >/dev/null 2>&1; then
@@ -718,6 +721,65 @@ for shape in flag file; do
     PASS=$((PASS+1))
   fi
 done
+
+# --------------- BEHAVIOURAL: argument order decides NOTHING ------------------
+echo
+echo "-- extension verdicts: argument order may not decide a verdict --"
+# THE DEFECT THIS SECTION EXISTS FOR (#3299 round 7). The verdicts from several
+# `--extension` trees were merged with `dict.update()` in argument order, so two
+# trees that both voted on the same S silently let the LAST one win. Each tree
+# was individually valid — every point replicated past the >= 3-rep floor — so
+# `--extension A --extension B` and `--extension B --extension A` could publish
+# DIFFERENT bracketing verdicts, and nothing anywhere reported that a choice had
+# been made at all.
+MERGE_CONFLICT="$TMP/merge-conflict.py"
+cat > "$MERGE_CONFLICT" <<'MERGEPY'
+import sys
+sys.path.insert(0, sys.argv[1])
+import derive
+a = {6: {"verdict": "bracketed", "why": "N=32 is 1.95% below N=24",
+         "source": "extension tree `A`"}}
+b = {6: {"verdict": "edge-truncated", "why": "nothing above N=32 was measured",
+         "source": "extension tree `B`"}}
+derive.merge_extension_verdicts([("A", a), ("B", b)])
+print("NOT REACHED — the disagreement was resolved silently")
+MERGEPY
+expect_guard_fail EXTENSION_VERDICT_CONFLICT python3 "$MERGE_CONFLICT" "$HERE"
+
+# ...and where they AGREE the merged verdict is IDENTICAL in either order and
+# credits BOTH trees. Without this positive control the refusal above would also
+# be satisfied by a merge that refused everything.
+MERGE_ORDER="$TMP/merge-order.py"
+cat > "$MERGE_ORDER" <<'MERGEPY'
+import sys
+sys.path.insert(0, sys.argv[1])
+import derive
+a = {6: {"verdict": "bracketed", "why": "A: N=32 is 1.95% below N=24",
+         "source": "extension tree `A`"}}
+b = {6: {"verdict": "bracketed", "why": "B: N=32 is 1.40% below N=24",
+         "source": "extension tree `B`"}}
+x = derive.merge_extension_verdicts([("A", a), ("B", b)])
+y = derive.merge_extension_verdicts([("B", b), ("A", a)])
+assert x == y, f"argument order changed the merged verdict:\n{x}\n{y}"
+assert x[6]["verdict"] == "bracketed", x
+for tree in ("A", "B"):
+    assert f"`{tree}`" in x[6]["source"], f"{tree} voted but is not credited: {x[6]['source']}"
+    assert f"{tree}:" in x[6]["why"], f"{tree}'s reasoning was dropped: {x[6]['why']}"
+print("OK")
+MERGEPY
+expect_ok "agreeing trees merge order-independently, both credited" \
+  python3 "$MERGE_ORDER" "$HERE"
+
+# THE SAME TREE TWICE IS NOT TWO WITNESSES — refused at the CLI, before anything
+# is read, because it would print one tree as two agreeing sources for one verdict.
+expect_guard_fail EXTENSION_DUPLICATE \
+  python3 "$HERE/derive.py" --results "$HERE/../sweep" \
+    --extension "$HERE/../extB" --extension "$HERE/../extB"
+# ...and a tree cannot corroborate ITSELF: the main results tree passed as its own
+# extension would attribute a verdict derived from the published points to a
+# separate contemporaneous session that does not exist.
+expect_guard_fail EXTENSION_DUPLICATE \
+  python3 "$HERE/derive.py" --results "$HERE/../sweep" --extension "$HERE/../sweep"
 
 # ------------------- the frequency tool can read its OWN committed evidence ---
 echo
@@ -749,7 +811,17 @@ if ( cd "$TMP" && python3 "$FREQ" --results "$FREQRUN" ) > "$FREQ_OUT" 2>&1; the
   miss=""
   grep -q '^| 1 | 2 | 3.509 ' "$FREQ_OUT"       || miss="$miss f(S=1)=3.509@N=2"
   grep -q '^| 6 | 24 | 3.421 ' "$FREQ_OUT"      || miss="$miss f(S=6)=3.421@N=24"
-  grep -q 'f(S=6)/f(S=1) = 0.9750' "$FREQ_OUT"  || miss="$miss ratio=0.9750"
+  # THE CLOCK RATIO IS ALWAYS PUBLISHED — it is a property of these records alone
+  # and needs no grid, and `../freq-run/README.md` documents this bare command as
+  # reproducing it. WITHOUT `--main-grid` the SPLIT is WITHHELD (#3299 round 7):
+  # its marginal efficiency and per-row ratios used to be HARD-CODED #3299 values,
+  # so any other frequency tree silently got this campaign's numbers.
+  grep -q 'f(S=6)/f(S=1) = 0.9750' "$FREQ_OUT"   || miss="$miss ratio=0.9750"
+  grep -q 'Turbo vs residual at S=6' "$FREQ_OUT" || miss="$miss no-turbo-heading"
+  grep -q 'SPLIT is WITHHELD — no main-grid tree' "$FREQ_OUT" || miss="$miss split-not-withheld"
+  ! grep -q 'efficiency 0.935' "$FREQ_OUT"       || miss="$miss STILL-HARD-CODES-0.935"
+  ! grep -q 'residual is' "$FREQ_OUT"            || miss="$miss RESIDUAL-WITHOUT-A-GRID"
+  ! grep -q 'x0.984' "$FREQ_OUT"                 || miss="$miss PER-ROW-RATIO-WITHOUT-A-GRID"
   grep -q '^| 1 | 2 | 2 | 40.004 | 1.0004 | 0.9901 | 0.8000 |' "$FREQ_OUT" \
     || miss="$miss S=1-occupancy-row"
   grep -q '^| 6 | 24 | 12 | 240.082 | 1.0001 | 0.9882 | 0.8002 |' "$FREQ_OUT" \
@@ -770,6 +842,108 @@ if ( cd "$TMP" && python3 "$FREQ" --results "$FREQRUN" ) > "$FREQ_OUT" 2>&1; the
 else
   echo "FAIL  [freq acceptance] derive-freq.py could not read its own committed evidence"
   sed 's/^/      /' "$FREQ_OUT"; FAIL=$((FAIL+1))
+fi
+
+# THE TURBO/RESIDUAL SPLIT, DERIVED FROM A SUPPLIED GRID (#3299 round 7).
+# `me = 0.935` and the per-row ratios `x0.984` / `x1.041` used to be CONSTANTS in
+# this tool: run it on any other valid frequency tree and it would have combined
+# that tree's measured clock ratio with THIS campaign's efficiency and printed
+# the mixture as one result. They are now read from the `--main-grid` tree
+# through derive.py's OWN best-N rule. The published figures must be reproduced
+# EXACTLY — a table of different numbers also exits 0.
+SPLIT_OUT="$TMP/freq-split.md"
+if ( cd "$TMP" && python3 "$FREQ" --results "$FREQRUN" --main-grid "$HERE/../sweep" ) \
+     > "$SPLIT_OUT" 2>&1; then
+  miss=""
+  grep -q 'f(S=6)/f(S=1) = 0.9750' "$SPLIT_OUT"          || miss="$miss ratio=0.9750"
+  grep -q '\*\*2.5 pp\*\* of the efficiency loss' "$SPLIT_OUT" || miss="$miss clock=2.5pp"
+  grep -q '\*\*6.5 pp\*\* (efficiency 0.935)' "$SPLIT_OUT" || miss="$miss loss=6.5pp@0.935"
+  grep -q 'clock explains \*\*38%\*\*' "$SPLIT_OUT"        || miss="$miss clock-explains-38%"
+  grep -q '\*\*residual is 4.0 pp\*\*' "$SPLIT_OUT"        || miss="$miss residual=4.0pp"
+  grep -q 'x0.984' "$SPLIT_OUT"                           || miss="$miss instr-ratio=x0.984"
+  grep -q 'x1.041' "$SPLIT_OUT"                           || miss="$miss cycles-ratio=x1.041"
+  grep -q '\*\*+4.1%\*\*' "$SPLIT_OUT"                     || miss="$miss cycles-change=+4.1%"
+  grep -q 'not extra work' "$SPLIT_OUT"                   || miss="$miss extra-work-claim"
+  if [[ -z "$miss" ]]; then
+    echo "ok    [freq split derived] --main-grid reproduces the published split exactly:"
+    echo "      ratio 0.9750, 2.5 of 6.5 pp from the clock (38%), residual 4.0 pp, x0.984/x1.041"
+    PASS=$((PASS+1))
+  else
+    echo "FAIL  [freq split derived] the derived split no longer reproduces:$miss"
+    FAIL=$((FAIL+1))
+  fi
+else
+  echo "FAIL  [freq split derived] the run failed"; sed 's/^/      /' "$SPLIT_OUT" | tail -5
+  FAIL=$((FAIL+1))
+fi
+
+# A GRID THAT DOES NOT COVER THESE ENDPOINTS REFUSES. Splitting a clock ratio
+# measured at S=1 and S=6 against an efficiency some OTHER grid measured
+# elsewhere would combine two experiments. The fixture is the committed smoke
+# grid with its S=6 rows dropped from the manifest.
+NOEND="$TMP/grid-no-s6"
+rm -rf "$NOEND"; cp -a "$HERE/../smoke" "$NOEND"
+grep -v '"s": 6' "$HERE/../smoke/manifest.jsonl" > "$NOEND/manifest.jsonl"
+expect_guard_fail FREQ_GRID_ENDPOINT_ABSENT \
+  python3 "$FREQ" --results "$FREQRUN" --main-grid "$NOEND"
+
+# THE CLOCK RATIO AND THE EFFICIENCY MUST SPAN THE SAME INTERVAL. The loss being
+# split is defined against the ONE-CORE peak, so a clock ratio measured from any
+# other base describes a different interval and part of each would be attributed
+# to the other. The fixture relabels the S=1 frequency record as S=2, so the
+# records span S=2..S=6 while the efficiency still spans S=1..S=6.
+BASEMM="$TMP/freq-base-mismatch"
+rm -rf "$BASEMM"; cp -a "$FREQRUN" "$BASEMM"
+python3 - "$BASEMM/s1/window.json" <<'BASEPY'
+import json, sys
+p = sys.argv[1]
+w = json.load(open(p))
+w["s"] = 2
+json.dump(w, open(p, "w"))
+BASEPY
+expect_guard_fail FREQ_SPLIT_BASE_MISMATCH \
+  python3 "$FREQ" --results "$BASEMM" --main-grid "$HERE/../sweep"
+
+# AND WHERE THE GRID HAS NO MEASURED DISPERSION AT ITS ENDPOINTS, THE CLAIM IS
+# WITHHELD — not made against a guessed bound. "The residual is not extra work"
+# is decided against those two points' OWN spread; the smoke grid measured each
+# point once, so there is no spread to decide against and the tool says so while
+# still printing the ratio it measured.
+if ( cd "$TMP" && python3 "$FREQ" --results "$FREQRUN" --main-grid "$HERE/../smoke" ) \
+     > "$TMP/freq-smoke-split.md" 2>&1 \
+   && grep -q 'NO claim about extra work is made here' "$TMP/freq-smoke-split.md" \
+   && grep -q 'x1.008' "$TMP/freq-smoke-split.md"; then
+  echo "ok    [freq split one-rep grid] with no measured endpoint dispersion the ratio is"
+  echo "      printed and the extra-work claim is WITHHELD"
+  PASS=$((PASS+1))
+else
+  echo "FAIL  [freq split one-rep grid] the claim was made (or the run failed) without a"
+  echo "      measured bound to judge the ratio against"
+  sed 's/^/      /' "$TMP/freq-smoke-split.md" | tail -3; FAIL=$((FAIL+1))
+fi
+
+# `--tsc-base-ghz` MUST REACH EVERY DERIVATION. It used to move the frequency
+# while the C0 occupancy kept a hard-coded 2.40, so a non-default invocation
+# printed a C0 fraction scaled by one base beside a frequency scaled by another —
+# internally inconsistent, silently. At half the base, f and C0 must BOTH double.
+HALF_OUT="$TMP/freq-half-base.md"
+if ( cd "$TMP" && python3 "$FREQ" --results "$FREQRUN" --tsc-base-ghz 1.20 ) \
+     > "$HALF_OUT" 2>&1; then
+  miss=""
+  grep -q 'TSC base 1.20 GHz' "$HALF_OUT"        || miss="$miss base-not-echoed"
+  grep -q '^| 1 | 2 | 1.755 ' "$HALF_OUT"        || miss="$miss f(S=1)-did-not-halve"
+  grep -q '^| 1 | 2 | 2 | 40.004 | 2.0009 |' "$HALF_OUT" \
+    || miss="$miss C0-did-not-follow-the-base"
+  ! grep -q '| 1.0004 |' "$HALF_OUT"             || miss="$miss C0-STILL-ON-THE-2.40-CONSTANT"
+  if [[ -z "$miss" ]]; then
+    echo "ok    [freq tsc base] --tsc-base-ghz reaches the C0 occupancy too, not just f"
+    PASS=$((PASS+1))
+  else
+    echo "FAIL  [freq tsc base]$miss"; FAIL=$((FAIL+1))
+  fi
+else
+  echo "FAIL  [freq tsc base] the run failed"; sed 's/^/      /' "$HALF_OUT" | tail -5
+  FAIL=$((FAIL+1))
 fi
 
 # THE RESOLUTION IS AGAINST `--results`, NOT cwd — negative-controlled. A DECOY
@@ -884,7 +1058,7 @@ plant_committed_rep() {  # <results-dir> [workers]
   rm -rf "$d"; mkdir -p "$d"
   for r in 1 2; do
     rep="$d/s${w}-n${w}-round${r}"
-    python3 "$FIX" window --dir "$rep" --workers "$w"
+    python3 "$FIX" window --dir "$rep" --workers "$w" --round "$r"
     python3 "$GUARDS" window --repdir "$rep" > "$rep/attribution.json"
     rm -f "$rep"/worker-*.progress.jsonl "$rep"/worker-*.summary.json
     printf '{"rundir": "s%s-n%s-round%s"}\n' "$w" "$w" "$r" >> "$d/manifest.jsonl"
@@ -970,6 +1144,53 @@ else
   FAIL=$((FAIL+1))
 fi
 
+# ------------- a DUPLICATE manifest entry MANUFACTURES replication ------------
+echo
+echo "-- manifest de-duplication (a repeated entry is corrupt evidence) --"
+# THE DEFECT THIS SECTION EXISTS FOR (#3299 round 7). `collect()` counted every
+# manifest line, de-duplicating nothing. Every downstream floor is a REP COUNT —
+# `min_reps`, the >= 3-rep gate on whether an extension tree may vote, and
+# `fmt_spread`'s "is there a second draw?" — so repeating ONE entry three times
+# satisfied all three from ONE physical measurement, and, the three copies being
+# identical, printed **0.00%** spread: perfect reproducibility manufactured from
+# a single draw. It is the same false assurance as printing 0.00% for a one-rep
+# point, reached by another route.
+#
+# FIRST, THE DEFECT IS SHOWN TO BE REAL. A scratch copy of derive.py with the two
+# de-duplication branches disabled is run on a manifest naming one rundir three
+# times; it must exit 0 and print the manufactured 0.00%. Without this the
+# refusals below could be guarding against nothing.
+DUP3="$TMP/rt-dup-x3"
+rm -rf "$DUP3"; cp -a "$RT" "$DUP3"
+head -1 "$RT/manifest.jsonl" > "$DUP3/manifest.jsonl"
+head -1 "$RT/manifest.jsonl" >> "$DUP3/manifest.jsonl"
+head -1 "$RT/manifest.jsonl" >> "$DUP3/manifest.jsonl"
+sed 's/^            if key in seen_rundir:/            if False:/; s/^            if ident in seen_identity:/            if False:/' \
+  "$HERE/derive.py" > "$TMP/dedup-off.py"
+if PYTHONPATH="$HERE" python3 "$TMP/dedup-off.py" --results "$DUP3" > "$TMP/dedup-off.md" 2>&1 \
+   && grep -q '(0.0%)' "$TMP/dedup-off.md"; then
+  echo "ok    [dup negative control] with de-duplication disabled, ONE rep named three times"
+  echo "      passes and reports 0.0% spread — the manufactured replication is real"
+  PASS=$((PASS+1))
+else
+  echo "FAIL  [dup negative control] the pre-fix shape no longer reproduces; if collect() was"
+  echo "      restructured, re-point this control at the new branches"
+  sed 's/^/      /' "$TMP/dedup-off.md" | tail -3; FAIL=$((FAIL+1))
+fi
+
+# ...AND THE REAL TOOL REFUSES IT. Named, not silently de-duplicated: a manifest
+# that names the same evidence twice is corrupt, and quietly repairing it
+# publishes a table from a tree nobody was told was wrong.
+expect_guard_fail MANIFEST_DUPLICATE_RUNDIR python3 "$HERE/derive.py" --results "$DUP3"
+
+# The OTHER identity: two DIFFERENT directories carrying the same (S, N, round).
+# A rundir copied under a new name defeats a rundir-only check, and votes twice.
+DUPI="$TMP/rt-dup-identity"
+rm -rf "$DUPI"; cp -a "$RT" "$DUPI"
+cp -a "$DUPI/s2-n2-round1" "$DUPI/s2-n2-round1-copy"
+printf '{"rundir": "s2-n2-round1-copy"}\n' >> "$DUPI/manifest.jsonl"
+expect_guard_fail MANIFEST_DUPLICATE_REP python3 "$HERE/derive.py" --results "$DUPI"
+
 # ACCEPTANCE, AGAINST THE COMMITTED EVIDENCE THIS PR SHIPS. The validation must
 # not reject any of the 91 committed reps, and the table must still be the
 # PUBLISHED one — asserted by value, because a table of different numbers also
@@ -1041,6 +1262,116 @@ if [[ -z "$cv_bad" ]]; then
 else
   echo "FAIL  [one counter validator]$cv_bad"
   FAIL=$((FAIL+1))
+fi
+
+# ------------------------- the PMU census's verdict rule, every branch --------
+echo
+echo "-- PMU census classification (host/classify-event.sh) --"
+# THE DEFECT THIS SECTION EXISTS FOR (#3299 round 7). The census is the script
+# that decides whether an instrument may be used at all, and its `REAL` verdict
+# required NONE of its own preconditions: a nonzero perf/workload exit was
+# ignored whenever a CSV row existed, and an ABSENT enabled% skipped the
+# multiplexing test entirely and fell straight through to `REAL`. So the census
+# could have certified a counter off its own short failure path — in the one
+# place whose whole job is telling a live counter from a dead one.
+#
+# The rule is exercised HERMETICALLY: synthetic `perf stat -x,` rows drive every
+# branch, including the ones a healthy box never produces, with no perf, no
+# 2 GiB buffer and no root. It is the SAME file census.sh sources.
+# shellcheck source=../host/classify-event.sh
+. "$HERE/../host/classify-event.sh"
+
+expect_verdict() {  # <expected> <event> <perf-rc> <csv-row>
+  local want="$1" ev="$2" rc="$3" raw="$4" got
+  got="$(classify_event "$ev" "$rc" "$raw")"
+  if [[ "$got" == "$want" ]]; then
+    echo "ok    [census $want] $ev rc=$rc"; PASS=$((PASS+1))
+  else
+    echo "FAIL  [census] $ev rc=$rc row=$raw: expected $want, got $got"; FAIL=$((FAIL+1))
+  fi
+}
+
+# POSITIVE CONTROLS — this box's own committed census rows must still classify
+# exactly as `host/pmu-census.txt` records them. A stricter rule that broke a
+# working counter would be a regression, not a fix.
+expect_verdict REAL          instructions 0 '4137979348,,instructions,6334774975,100.00,,'
+expect_verdict REAL          cycles       0 '22227766667,,cycles,6288538571,100.00,,'
+expect_verdict REAL          L1-dcache-loads 0 '786172946,,L1-dcache-loads,6360176622,100.00,,'
+expect_verdict REAL          L1-dcache-load-misses 0 '120303664,,L1-dcache-load-misses,6324958504,100.00,,'
+expect_verdict NOT-SUPPORTED LLC-loads    0 '<not supported>,,LLC-loads,0,100.00,,'
+expect_verdict NOT-SUPPORTED LLC-load-misses 0 '<not supported>,,LLC-load-misses,0,100.00,,'
+expect_verdict HARD-ZERO     cache-misses 0 '0,,cache-misses,6350834813,100.00,,'
+expect_verdict HARD-ZERO     r4f2e        0 '0,,r4f2e,6424464585,100.00,,'
+# A zero on an event whose quantity CAN legitimately be zero is not a dead
+# instrument, and is not reported as one.
+expect_verdict ZERO          page-faults  0 '0,,page-faults,6424464585,100.00,,'
+
+# THE LEAD CASE: a row that would otherwise read REAL, from a run that FAILED.
+# Pre-fix this was `REAL` — the census certifying an instrument on evidence from
+# a workload that never ran to completion.
+expect_verdict CONTROL-FAILED instructions 1 '4137979348,,instructions,6334774975,100.00,,'
+expect_verdict CONTROL-FAILED cache-misses 137 '0,,cache-misses,6350834813,100.00,,'
+# perf refusing the event name outright still reports as an unavailable instrument.
+expect_verdict UNKNOWN-EVENT  bogus-event 129 ''
+# ...and an instrument fact perf DID report survives a failed workload, because
+# "cannot program this event" does not depend on the workload completing.
+expect_verdict NOT-SUPPORTED  LLC-loads 1 '<not supported>,,LLC-loads,0,100.00,,'
+expect_verdict NOT-COUNTED    LLC-loads 0 '<not counted>,,LLC-loads,0,100.00,,'
+
+# THE OTHER PRE-FIX HOLE: an ABSENT or unparseable enabled% used to skip the
+# multiplexing test and land on REAL. The one field that separates a count from
+# a scaled estimate could be missing, and its absence read as compliance.
+expect_verdict NO-ENABLED-PCT instructions 0 '4137979348,,instructions,6334774975,,,'
+expect_verdict NO-ENABLED-PCT instructions 0 '4137979348,,instructions,6334774975,nan,,'
+expect_verdict NO-ENABLED-PCT instructions 0 '4137979348,,instructions,6334774975,-1.00,,'
+# REAL is gated on the AFFIRMATIVE `== 100.00`, never on "not less than 100": a
+# value ABOVE 100 is a field this rule does not understand, not a stricter pass.
+expect_verdict MULTIPLEXED         instructions 0 '4137979348,,instructions,6334774975,51.23,,'
+expect_verdict MULTIPLEXED         instructions 0 '4137979348,,instructions,6334774975,99.99,,'
+expect_verdict ENABLED-IMPLAUSIBLE instructions 0 '4137979348,,instructions,6334774975,100.01,,'
+expect_verdict UNPARSEABLE         instructions 0 'not-a-number,,instructions,6334774975,100.00,,'
+
+# WHICH VERDICTS ARE A STATEMENT ABOUT THE INSTRUMENT, AND WHICH MEAN "THIS RUN
+# COULD NOT SAY". The census exits non-zero on the second kind, because printing
+# "no verdict established" in a column and exiting 0 is the silent-success shape
+# the whole script exists to refuse. The set is AFFIRMATIVE and matched EXACTLY —
+# an unplanned or misspelled verdict must inherit the fail-closed branch, and a
+# prefix match would read `REALLY` as `REAL`.
+expect_established() {  # <yes|no> <verdict>
+  local want="$1" v="$2"
+  if verdict_established "$v"; then local got=yes; else local got=no; fi
+  if [[ "$got" == "$want" ]]; then
+    echo "ok    [census established=$want] $v"; PASS=$((PASS+1))
+  else
+    echo "FAIL  [census established] $v: expected $want, got $got"; FAIL=$((FAIL+1))
+  fi
+}
+for v in REAL HARD-ZERO ZERO NOT-SUPPORTED NOT-COUNTED UNKNOWN-EVENT MULTIPLEXED; do
+  expect_established yes "$v"
+done
+for v in CONTROL-FAILED NO-ENABLED-PCT ENABLED-IMPLAUSIBLE UNPARSEABLE UNCLASSIFIED \
+         REALLY "" real; do
+  expect_established no "$v"
+done
+
+# STRUCTURAL: census.sh must SOURCE the rule, not carry a second copy. A copy is
+# only knowable to agree with this one by differential testing (CLAUDE.md,
+# #3283), and the way it diverges is the real census being the lenient one.
+cls_bad=""
+grep -q '^\. "\$HERE/classify-event.sh"' "$HERE/../host/census.sh" \
+  || cls_bad="$cls_bad census.sh-does-not-source-it"
+grep -q 'classify_event "\$ev" "\$rc" "\$raw"' "$HERE/../host/census.sh" \
+  || cls_bad="$cls_bad census.sh-does-not-call-it"
+grep -q 'verdict=REAL' "$HERE/../host/census.sh" \
+  && cls_bad="$cls_bad census.sh-has-its-own-copy"
+grep -q 'verdict_established "\$verdict"' "$HERE/../host/census.sh" \
+  || cls_bad="$cls_bad census.sh-does-not-judge-its-own-completeness"
+if [[ -z "$cls_bad" ]]; then
+  echo "ok    [one census classifier] census.sh sources and calls classify_event; it carries"
+  echo "      no verdict rule of its own"
+  PASS=$((PASS+1))
+else
+  echo "FAIL  [one census classifier]$cls_bad"; FAIL=$((FAIL+1))
 fi
 
 # ------------------------------------------------------ no relaxation knob ---

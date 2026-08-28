@@ -67,7 +67,7 @@ zero. So this calibration carries the same positive control discipline:
 |---|---|
 | f(S) for S=1..6, its own small table | published as the measured clock |
 | `f(S=6) / f(S=1)` | the clock ratio |
-| split of the S=1→S=6 marginal-efficiency loss | the fraction the clock accounts for, and the **residual** |
+| split of the S=1→S=6 marginal-efficiency loss | the fraction the clock accounts for, and the **residual** — printed ONLY with `--main-grid <C(S,N) tree>`, from which the marginal efficiency and the per-row endpoint ratios are DERIVED. Without one the section is withheld rather than printed from constants, which would have combined another tree's clock ratio with this campaign's grid |
 
 **The residual stays UNATTRIBUTED.** There is no LLC counter on this box, so
 nothing here can say the residual is cache contention — AC3's deferral binds this

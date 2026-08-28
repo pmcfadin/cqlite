@@ -49,7 +49,12 @@ def write_summary(path, worker_id, affinity):
         )
 
 
-def build(case, d, workers):
+def build(case, d, workers, round_=1):
+    """`round_` is a REAL field, not decoration: `derive.py` refuses two rundirs
+    that carry the same (S, N, round) identity, because a repeated rep
+    manufactures replication out of one measurement. A fixture that stamped every
+    rep `round: 1` would therefore plant a tree the tool must refuse — so a
+    multi-round fixture states each rep's actual round."""
     os.makedirs(d, exist_ok=True)
     # A well-formed perf.csv accompanies every window fixture, so the
     # counter-window check has something to read; `window-drift` supplies a
@@ -118,8 +123,8 @@ def build(case, d, workers):
                     # guard must read the stream count from `n`.
             "s": workers,
             "n": workers,
-            "rep": 1,
-            "round": 1,
+            "rep": round_,
+            "round": round_,
             "t0_ns": t0,
             "t1_ns": t1,
             "worker_cpus": worker_cpus,
@@ -408,6 +413,9 @@ def main():
     w.add_argument("--dir", required=True)
     w.add_argument("--case", default="good")
     w.add_argument("--workers", type=int, default=2)
+    w.add_argument("--round", type=int, default=1, dest="round_",
+                   help="the rep's round; distinct rounds are what make two rundirs at the "
+                        "same (S, N) two REPS rather than one rep named twice")
     p = sub.add_parser("perf-csv")
     p.add_argument("--path", required=True)
     p.add_argument("--case", default="good")
@@ -423,7 +431,7 @@ def main():
     tp.add_argument("--op", required=True)
     a = ap.parse_args()
     if a.what == "window":
-        build(a.case, a.dir, a.workers)
+        build(a.case, a.dir, a.workers, a.round_)
     elif a.what == "tamper":
         tamper(a.repdir, a.op)
     elif a.what == "perf-csv":

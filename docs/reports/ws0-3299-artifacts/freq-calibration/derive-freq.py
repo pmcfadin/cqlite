@@ -103,8 +103,17 @@ def read_window(rundir):
     return win
 
 
-def occupancy(rundir, win, counters, f_ghz):
-    """The three MEASURED occupancy figures for one rep. See the module docstring."""
+def occupancy(rundir, win, counters, f_ghz, tsc_base_ghz):
+    """The three MEASURED occupancy figures for one rep. See the module docstring.
+
+    `tsc_base_ghz` is THREADED IN, never re-read from the module constant. MPERF
+    ticks at the TSC rate, so the C0 fraction below divides by it exactly as the
+    frequency multiplies by it; taking the frequency from `--tsc-base-ghz` while
+    the occupancy kept the 2.40 default made a non-default invocation print an
+    internally inconsistent pair — a C0 fraction scaled by one base beside a
+    frequency scaled by another. Occupancy is the quantity this tool already had
+    to retract a claim about, so no path here may hold its own copy of the base.
+    """
     ncpus = len([c for c in str(win["perf_cpus"]).split(",") if c])
     counted_cpu_s = counters["task-clock"] / 1e9
 
@@ -143,7 +152,7 @@ def occupancy(rundir, win, counters, f_ghz):
         "ncpus": ncpus,
         "counted_cpu_s": counted_cpu_s,
         "f_ghz": f_ghz,
-        "c0_fraction": counters["msr/mperf/"] / (TSC_BASE_GHZ * 1e9 * counted_cpu_s),
+        "c0_fraction": counters["msr/mperf/"] / (tsc_base_ghz * 1e9 * counted_cpu_s),
         "unhalted_fraction": counters["cycles"] / (f_ghz * 1e9 * counted_cpu_s),
         "window_over_perf_lifetime": cpus_utilized / ncpus,
     }
@@ -179,10 +188,172 @@ def assert_occupancy_matched(occ):
     )
 
 
+def main_grid_split(path, lo, hi):
+    """Every non-frequency figure the turbo/residual split needs, DERIVED from a tree.
+
+    WHY THIS EXISTS (#3299 round 7). The section used to hard-code `me = 0.935`
+    and quote `instructions/row x0.984`, `cycles/row x1.041` and "rises only 4.1%"
+    in prose — #3299's own main-grid values, frozen as constants. Run the tool on
+    ANY other valid frequency tree and it would have combined that tree's measured
+    clock ratio with THIS campaign's efficiency and per-row ratios, silently, and
+    printed the mixture as one result. A figure must be COMPUTED, not asserted:
+    this PR already retired a hand-written `verdict-override.json` for exactly
+    that reason, and a constant in a format string is the same thing with less
+    ceremony.
+
+    So the numbers are read from the main-grid tree the operator names, through
+    `derive.py`'s OWN grouping and best-N rule (`derive.group_points` /
+    `derive.peaks_by_s`) rather than a second copy of them, and with no tree there
+    is no section.
+
+    THE LIMIT, STATED: nothing here can establish that the grid tree and the
+    frequency tree describe the same session — they are two operator-supplied
+    paths. What it does establish is that every number in the section comes from
+    ONE of the two supplied trees and none of them from a constant.
+    """
+    # THE TWO QUANTITIES MUST SPAN THE SAME INTERVAL. The split divides a
+    # marginal-efficiency loss by a clock ratio; the loss is defined against the
+    # ONE-CORE peak (derive.py reference B), so a clock ratio measured from any
+    # other base describes a different interval and part of one would be
+    # attributed to the other. This is the same mixing the hard-coded constants
+    # produced, one level up, and it is checked BEFORE the grid is read because
+    # no grid can repair it.
+    if lo != 1:
+        guards.fail(
+            "FREQ_SPLIT_BASE_MISMATCH",
+            f"the frequency records' lowest S is {lo}, so their clock ratio spans "
+            f"S={lo}..S={hi} — but the marginal-efficiency loss it would be split against is "
+            f"defined against the S=1 peak, i.e. S=1..S={hi}. Dividing one interval's loss by "
+            f"another interval's clock ratio attributes part of each to the other. Measure the "
+            f"frequency at S=1 as well, or publish no split.",
+        )
+    by_point = derive.group_points(derive.collect(path))
+    peaks = derive.peaks_by_s(by_point)
+    # The grid must cover BOTH endpoints AND the S=1 reference the efficiency is
+    # defined against — an efficiency the grid never measured at these points
+    # would combine two different experiments.
+    absent = [s for s in sorted({1, lo, hi}) if s not in peaks]
+    if absent:
+        guards.fail(
+            "FREQ_GRID_ENDPOINT_ABSENT",
+            f"the main-grid tree {path} does not cover S={absent}, but the frequency records "
+            f"span S={lo}..S={hi} and marginal efficiency is defined against the S=1 peak. "
+            f"Splitting a clock ratio measured at these endpoints against an efficiency the "
+            f"grid never measured at them would combine two different experiments.",
+        )
+    split = {
+        "path": path,
+        "n_lo": peaks[lo][0],
+        "n_hi": peaks[hi][0],
+        # Reference B, exactly as derive.py computes the published column:
+        # S's best-N aggregate over S=1's own peak, per core.
+        "marginal_efficiency": (peaks[hi][1] / peaks[1][1]) / hi,
+        "ratios": {},
+        "dispersion_bound": {},
+    }
+    for key in ("instructions_per_row", "cycles_per_row"):
+        a, b = by_point[(lo, peaks[lo][0])], by_point[(hi, peaks[hi][0])]
+        split["ratios"][key] = derive.agg(b, key) / derive.agg(a, key)
+        # The bound any claim about that ratio is judged against is the two
+        # endpoint points' OWN measured dispersion — never a number chosen here.
+        # Where either point has a single rep there is no dispersion to judge
+        # against (UNMEASURED, not zero), so the bound is None and the caller
+        # withholds the claim rather than making it on a guess.
+        sp = [derive.spread_pct([r[key] for r in pts]) / 100.0
+              for pts in (a, b) if len(pts) >= 2]
+        split["dispersion_bound"][key] = max(sp) if len(sp) == 2 else None
+    return split
+
+
+def emit_turbo_split(med, main_grid):
+    """The clock ratio (always), and the turbo-vs-residual split (only if derivable).
+
+    THE TWO ARE SEPARATED DELIBERATELY. The clock RATIO is a property of these
+    frequency records alone and is always published. The SPLIT divides a
+    marginal-efficiency loss by it, and that loss — with the per-row endpoint
+    ratios quoted beside it — is a property of a C(S, N) GRID. Those used to be
+    hard-coded #3299 constants, so any other frequency tree silently got this
+    campaign's efficiency; now they are DERIVED from `--main-grid`, and with no
+    grid the split is withheld rather than printed from constants. Withholding
+    the ratio too would over-withhold: it needs no grid.
+    """
+    lo, hi = min(med), max(med)
+    print(f"### Turbo vs residual at S={hi}\n")
+    if lo == hi:
+        print(f"**WITHHELD.** The frequency records cover only S={hi}, so there is no clock "
+              f"RATIO at all, and nothing to split. A single endpoint licenses no "
+              f"comparison.\n")
+        return
+    ratio = med[hi] / med[lo]
+    print(f"- clock ratio **f(S={hi})/f(S={lo}) = {ratio:.4f}** ⇒ the package clock alone "
+          f"falls by **{(1.0 - ratio) * 100:.1f} pp** across S={lo} -> S={hi}.")
+    if not main_grid:
+        print("\n**The SPLIT is WITHHELD — no main-grid tree was supplied "
+              "(`--main-grid DIR`).** Dividing that clock fall into a share of the "
+              "marginal-efficiency loss needs the measured efficiency and the per-row "
+              "endpoint ratios, and those are properties of a C(S, N) grid, not of these "
+              "frequency records. They used to be HARD-CODED here as #3299's own values, so "
+              "running this tool on any other frequency tree silently combined that tree's "
+              "clock ratio with this campaign's efficiency. A figure must be computed from "
+              "evidence the reader can point at, so with no grid there is no split.\n")
+        return
+    split = main_grid_split(main_grid, lo, hi)
+    me = split["marginal_efficiency"]
+    loss = 1.0 - me
+    clock_part = 1.0 - ratio
+    instr = split["ratios"]["instructions_per_row"]
+    cyc = split["ratios"]["cycles_per_row"]
+    print(f"- of that, the clock accounts for **{clock_part*100:.1f} pp** of the "
+          f"efficiency loss below.")
+    print(f"- marginal-efficiency loss at S={hi}: **{loss*100:.1f} pp** (efficiency "
+          f"{me:.3f}) — DERIVED from the main grid `{split['path']}`: S={hi}'s best-N="
+          f"{split['n_hi']} aggregate over S=1's own peak, per core.")
+    if loss > 0:
+        print(f"- so the clock explains **{min(clock_part/loss, 1.0)*100:.0f}%** of it; the "
+              f"**residual is {max(loss-clock_part, 0.0)*100:.1f} pp**.")
+    else:
+        print(f"- there is no efficiency loss to split at S={hi} (efficiency {me:.3f}), so no "
+              f"residual is reported.")
+    # IS THE RESIDUAL EXTRA WORK? The claim is DIRECTIONAL, so the test is
+    # one-sided: extra work at the wide arm means MORE instructions per row, and
+    # a ratio at or below 1 cannot be it. The bound is those two points' own
+    # measured dispersion; with no dispersion measured the claim is withheld.
+    thr = split["dispersion_bound"]["instructions_per_row"]
+    if thr is None:
+        work = (f"`instructions/row` measured x{instr:.3f} across the same endpoints "
+                f"(S={lo},N={split['n_lo']} -> S={hi},N={split['n_hi']}), but at least one of "
+                f"those points has a single rep, so there is no measured dispersion to judge "
+                f"that ratio against and NO claim about extra work is made here")
+    elif instr - 1.0 <= thr:
+        work = (f"`instructions/row` measured x{instr:.3f} across those endpoints — NO MORE "
+                f"instructions per row at S={hi} than at S={lo} (any rise would have to exceed "
+                f"those points' own {thr:.2%} spread to be a measurement) — which establishes "
+                f"the residual is not extra work")
+    else:
+        work = (f"`instructions/row` RISES x{instr:.3f} across those endpoints, beyond those "
+                f"points' own {thr:.2%} spread — the wide arm executes more instructions per "
+                f"row, so part of the residual IS extra work rather than stalling")
+    print(f"\n**The residual is UNATTRIBUTED.** With no LLC counter on this box nothing "
+          f"here identifies its cause; AC3's deferral binds this section too. {work}, "
+          f"and the clock ratio now says how much of the `cycles/row` change (x{cyc:.3f}) "
+          f"is frequency rather than stalling. What remains is a **BOUND on what #3288 "
+          f"could recover**, not a claim about what is consuming it.\n")
+    print(f"Note the scale: `cycles/row` changes by **{(cyc-1)*100:+.1f}%** across the entire "
+          f"S={lo}->S={hi} range, and the whole quantity split above is "
+          f"**{loss*100:.1f} pp** — every figure in this paragraph is computed from the two "
+          f"supplied trees, none of them is a constant.\n")
+
+
 def main():  # noqa: C901 — one linear read, then one linear emit
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--results", required=True)
     ap.add_argument("--tsc-base-ghz", type=float, default=TSC_BASE_GHZ)
+    ap.add_argument("--main-grid", metavar="DIR",
+                    help="the C(S, N) results tree (as read by derive.py) the turbo/residual "
+                         "split's marginal efficiency and per-row endpoint ratios are DERIVED "
+                         "from. Without it that section is WITHHELD: those figures used to be "
+                         "hard-coded #3299 values, which silently mixed this campaign's grid "
+                         "with any other tree's clock ratio.")
     a = ap.parse_args()
 
     by_s = {}
@@ -229,7 +400,7 @@ def main():  # noqa: C901 — one linear read, then one linear emit
         by_s.setdefault(int(win["s"]), {"f": [], "n": set()})
         by_s[int(win["s"])]["f"].append(f_ghz)
         by_s[int(win["s"])]["n"].add(int(win["n"]))
-        occ.append(occupancy(rundir, win, counters, f_ghz))
+        occ.append(occupancy(rundir, win, counters, f_ghz, a.tsc_base_ghz))
 
     if not reps:
         guards.fail(
@@ -284,28 +455,7 @@ def main():  # noqa: C901 — one linear read, then one linear emit
           f"comparison, which is the confound that made an earlier revision publish a "
           f"`cycles`/`task-clock` quotient as a frequency.\n")
 
-    if 1 in med and 6 in med:
-        ratio = med[6] / med[1]
-        # Marginal efficiency at S=6 vs S=1's peak, from the main grid.
-        me = 0.935
-        loss = 1.0 - me
-        clock_part = 1.0 - ratio
-        print("### Turbo vs residual at S=6\n")
-        print(f"- clock ratio **f(S=6)/f(S=1) = {ratio:.4f}** ⇒ the package clock alone "
-              f"accounts for **{clock_part*100:.1f} pp** of loss.")
-        print(f"- measured marginal-efficiency loss at S=6: **{loss*100:.1f} pp** "
-              f"(efficiency {me:.3f}).")
-        if loss > 0:
-            print(f"- so the clock explains **{min(clock_part/loss,1.0)*100:.0f}%** of it; the "
-                  f"**residual is {max(loss-clock_part,0.0)*100:.1f} pp**.")
-        print(f"\n**The residual is UNATTRIBUTED.** With no LLC counter on this box nothing "
-              f"here identifies its cause; AC3's deferral binds this section too. "
-              f"`instructions/row` measured FLAT (×0.984) already establishes the residual is "
-              f"not extra work, and the clock ratio now says how much of the `cycles/row` rise "
-              f"(×1.041) is frequency rather than stalling. What remains is a **BOUND on what "
-              f"#3288 could recover**, not a claim about what is consuming it.\n")
-        print(f"Note the scale: `cycles/row` rises only 4.1% across the entire S=1→S=6 range, "
-              f"so whatever the split, **the total available here is small**.\n")
+    emit_turbo_split(med, a.main_grid)
 
 
 if __name__ == "__main__":

@@ -8,6 +8,7 @@ transferable evidence, so it was re-run here. Reproduce with `bash census.sh`.
 |---|---|
 | `pmu-census.txt` | every event spelling the issue names, with value + `pct_running` + verbatim perf row |
 | `census.sh` | the census, including its positive control |
+| `classify-event.sh` | the verdict rule (`REAL` / `HARD-ZERO` / …) census.sh sources, so `../harness/selftest.sh` can drive every branch hermetically |
 | `lscpu.txt` | CPU model / cache sizes |
 | `thread-siblings.txt` | `thread_siblings_list` read from sysfs — the pinning ground truth |
 | `sysfs-pmus.txt` | `/sys/bus/event_source/devices` — which PMUs exist at all |

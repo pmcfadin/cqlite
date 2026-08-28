@@ -10,13 +10,24 @@
 # a 2 GiB buffer many times the LLC through a serial dependency, so essentially every
 # load is an LLC miss), and classifies each event against that prediction:
 #
-#   REAL          value > 0 at 100.00% enabled                — instrument works
+#   REAL          value > 0 at EXACTLY 100.00% enabled, after
+#                 the control workload exited 0               — instrument works
 #   HARD-ZERO     value == 0 at 100.00% enabled, on a workload
 #                 that CANNOT have zero of this quantity      — INSTRUMENT UNAVAILABLE
 #   NOT-SUPPORTED perf printed <not supported>                — instrument unavailable
 #   NOT-COUNTED   perf printed <not counted>                  — instrument unavailable
-#   UNKNOWN-EVENT perf refused the event name (exit != 0)     — instrument unavailable
+#   UNKNOWN-EVENT perf refused the event name (exit != 0,
+#                 no counter row at all)                      — instrument unavailable
+#   CONTROL-FAILED perf/the workload exited != 0 THOUGH a row
+#                 was written                                 — VERDICT NOT ESTABLISHED
+#   NO-ENABLED-PCT the enabled% field is absent or unparseable — VERDICT NOT ESTABLISHED
 #   MULTIPLEXED   enabled < 100.00%                           — scaled estimate, not a count
+#   ENABLED-IMPLAUSIBLE enabled > 100.00%                     — VERDICT NOT ESTABLISHED
+#
+# The rule itself lives in `classify-event.sh` (sourced below), so the harness
+# self-test can drive every branch without perf. A `REAL` verdict requires three
+# AFFIRMATIVE facts — control workload exited 0, enabled% present and parseable,
+# enabled% EXACTLY 100.00 — and that file records why each one is required.
 #
 # "HARD-ZERO" is the whole point: it is reported as UNAVAILABLE, never published as a
 # measurement of zero. A prior session's census ran on a DIFFERENT instance and is not
@@ -31,6 +42,12 @@ REPO="$(cd "$HERE/../../../.." && pwd)"
 SRC="$REPO/docs/reports/ws0-3224-artifacts/cache-hostile.c"
 WORK="${WS0_3299_CENSUS_WORK:-/data/ws0-3299/census}"
 OUT="$HERE"
+
+# The verdict rule and its zero-impossible table live in ONE sourceable file, so
+# `../harness/selftest.sh` can drive every branch — including the ones a healthy
+# box never produces — without perf, a 2 GiB buffer or root.
+# shellcheck source=classify-event.sh
+. "$HERE/classify-event.sh"
 
 [[ -r "$SRC" ]] || { echo "FATAL: missing $SRC" >&2; exit 2; }
 mkdir -p "$WORK"
@@ -53,16 +70,6 @@ EVENTS=(
   longest_lat_cache.miss longest_lat_cache.reference
   r4f2e r412e
 )
-# Events for which a zero on THIS workload is impossible, so a hard zero proves the
-# instrument is unavailable rather than the quantity absent. (r412e/r4f2e are the raw
-# encodings of longest_lat_cache.reference/.miss on Intel.)
-declare -A ZERO_IMPOSSIBLE=(
-  [instructions]=1 [cycles]=1 [L1-dcache-loads]=1 [L1-dcache-load-misses]=1
-  [LLC-loads]=1 [LLC-load-misses]=1 [cache-references]=1 [cache-misses]=1
-  [mem_load_retired.l3_miss]=1 [mem_load_retired.l3_hit]=1
-  [longest_lat_cache.miss]=1 [longest_lat_cache.reference]=1
-  [r4f2e]=1 [r412e]=1
-)
 
 exec > >(tee "$OUT/pmu-census.txt") 2>&1
 echo "==== #3299 PMU CENSUS ===="
@@ -80,6 +87,7 @@ echo
 printf '%-32s %-14s %20s %10s  %s\n' EVENT VERDICT VALUE ENABLED% RAW
 printf '%s\n' "--------------------------------------------------------------------------------------------------"
 
+undecided=""
 for ev in "${EVENTS[@]}"; do
   csv="$WORK/ev-${ev//[^A-Za-z0-9]/_}.csv"
   rc=0
@@ -88,26 +96,21 @@ for ev in "${EVENTS[@]}"; do
   if [[ -s "$csv" ]]; then
     raw="$(grep -v '^#' "$csv" | grep -v '^[[:space:]]*$' | head -1 || true)"
   fi
-  val="$(cut -d, -f1 <<<"$raw")"
   # `perf stat -x, -o <file> -e EV` row layout:
   #   1=value 2=unit 3=event 4=run_time_ns 5=pct_running
+  val="$(cut -d, -f1 <<<"$raw")"
   pct="$(cut -d, -f5 <<<"$raw")"
-  verdict=UNCLASSIFIED
-  if (( rc != 0 )) && [[ -z "$raw" ]]; then
-    verdict=UNKNOWN-EVENT; raw="perf rc=$rc: $(head -2 "$csv.err" | tr '\n' ' ')"
-  elif [[ "$raw" == *"<not supported>"* ]]; then
-    verdict=NOT-SUPPORTED
-  elif [[ "$raw" == *"<not counted>"* ]]; then
-    verdict=NOT-COUNTED
-  elif [[ ! "$val" =~ ^[0-9]+$ ]]; then
-    verdict=UNPARSEABLE
-  elif [[ -n "$pct" ]] && awk -v p="$pct" 'BEGIN{exit !(p+0 < 99.99)}'; then
-    verdict=MULTIPLEXED
-  elif (( val == 0 )); then
-    verdict=$([[ -n "${ZERO_IMPOSSIBLE[$ev]:-}" ]] && echo HARD-ZERO || echo ZERO)
-  else
-    verdict=REAL
-  fi
+  verdict="$(classify_event "$ev" "$rc" "$raw")"
+  # perf's stderr is the only record of WHY a run that produced no usable verdict
+  # failed, so it is carried into the printed row for those two verdicts.
+  case "$verdict" in
+    UNKNOWN-EVENT)  raw="perf rc=$rc: $(head -2 "$csv.err" | tr '\n' ' ')" ;;
+    CONTROL-FAILED) raw="perf/workload rc=$rc: $(head -2 "$csv.err" | tr '\n' ' ') | row: $raw" ;;
+  esac
+  # A verdict that is not a statement about the INSTRUMENT means this run could
+  # not say — it must not be read as a finding, and a census that produced any of
+  # them did not complete.
+  verdict_established "$verdict" || undecided="$undecided $ev=$verdict"
   printf '%-32s %-14s %20s %10s  %s\n' "$ev" "$verdict" "${val:-?}" "${pct:-?}" "$raw"
 done
 
@@ -122,4 +125,28 @@ LEGEND — the distinction this census exists to draw:
                 catalogued. It MUST NOT be reported as a measured value.
   NOT-SUPPORTED / NOT-COUNTED / UNKNOWN-EVENT / UNPARSEABLE / MULTIPLEXED
                 unavailable, or an estimate rather than a count. Not usable.
+  CONTROL-FAILED / NO-ENABLED-PCT / ENABLED-IMPLAUSIBLE
+                NO VERDICT WAS ESTABLISHED. The control workload exited non-zero
+                (so the memory behaviour this census classifies against was never
+                driven), or the enabled% — the only field separating a count from
+                a scaled estimate — was absent, unparseable, or not exactly
+                100.00. These are NOT "unavailable instrument" findings and they
+                are NOT usable: they mean this run cannot say. Re-run; if it
+                persists, the census itself is broken and nothing here may be
+                cited about that event.
 NOTE
+
+# THE CENSUS REPORTS ITS OWN COMPLETENESS, and a run that could not decide an
+# event EXITS NON-ZERO. Printing "no verdict established" in a column and then
+# exiting 0 is the silent-success shape this whole script exists to refuse: the
+# operator's next step is to cite these verdicts in `guards.py`'s forbidden-event
+# list, and a census that could not say must not be read as one that did.
+if [[ -n "$undecided" ]]; then
+  echo
+  echo "CENSUS INCOMPLETE — no verdict was established for:$undecided"
+  echo "Nothing may be cited about those events from this run. Re-run; if it persists, the"
+  echo "census itself is broken (a failed control workload, or perf reporting no enabled%)."
+  exit 1
+fi
+echo
+echo "CENSUS COMPLETE — every event produced a verdict about the instrument."

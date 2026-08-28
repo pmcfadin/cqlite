@@ -178,6 +178,14 @@ python3 docs/reports/ws0-3299-artifacts/harness/derive.py \
   --results   docs/reports/ws0-3299-artifacts/sweep \
   --extension docs/reports/ws0-3299-artifacts/extA \
   --extension docs/reports/ws0-3299-artifacts/extB
+# f(S) and the occupancy table. `--main-grid` is REQUIRED to reproduce §7.1's
+# turbo/residual SPLIT: the marginal efficiency and the per-row endpoint ratios
+# it divides are properties of the C(S, N) grid, and are DERIVED from that tree
+# rather than carried as constants — without it the clock ratio still prints and
+# the split is withheld.
+python3 docs/reports/ws0-3299-artifacts/freq-calibration/derive-freq.py \
+  --results   docs/reports/ws0-3299-artifacts/freq-run \
+  --main-grid docs/reports/ws0-3299-artifacts/sweep
 ```
 
 **Only extension B votes on the verdict, and that is enforced rather than
@@ -659,7 +667,7 @@ not a truncated or empty one. It is what makes the rest of §9 meaningful, since
 ## 12. Reproduction
 
 ```bash
-bash docs/reports/ws0-3299-artifacts/harness/selftest.sh          # 41 guard cases, hermetic
+bash docs/reports/ws0-3299-artifacts/harness/selftest.sh          # 200 cases, hermetic
 bash docs/reports/ws0-3299-artifacts/host/census.sh               # the PMU census
 bash docs/reports/ws0-3299-artifacts/harness/sweep.sh --equivalence --results <dir>
 bash docs/reports/ws0-3299-artifacts/harness/sweep.sh --results <dir> --reps 3 --duration-s 60

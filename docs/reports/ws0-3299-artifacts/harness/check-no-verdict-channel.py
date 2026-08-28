@@ -31,6 +31,10 @@ import sys
 # The single sanctioned producer: it applies the pre-registered rule to an
 # extension tree's own MEASURED points.
 SANCTIONED_PRODUCER = "extension_verdicts"
+# `merge_extension_verdicts` combines the producer's output across trees and
+# REFUSES a disagreement; it manufactures no verdict of its own, so it is
+# sanctioned as a conduit. Nothing else may feed the mapping.
+SANCTIONED_PRODUCERS = (SANCTIONED_PRODUCER, "merge_extension_verdicts")
 VERDICT_NAMES = ("verdicts", "derived_verdicts", "overrides")
 
 
@@ -52,9 +56,23 @@ def main(path):
                 and n.func.value.id in VERDICT_NAMES):
             for a in n.args:
                 if not (isinstance(a, ast.Call)
-                        and getattr(a.func, "id", "") == SANCTIONED_PRODUCER):
+                        and getattr(a.func, "id", "") in SANCTIONED_PRODUCERS):
                     bad.append(f"line {n.lineno}: the verdict mapping is fed by something "
                                f"other than {SANCTIONED_PRODUCER}()")
+        # ...AND THE SAME FOR AN ASSIGNMENT. The mapping is now BUILT by
+        # `merge_extension_verdicts(...)` rather than accumulated with `.update()`,
+        # so a check that only inspected update/setdefault would have let
+        # `verdicts = json.load(...)` straight through — the file-based hatch this
+        # module exists to keep out, reintroduced by a refactor that never touched
+        # the hatch. Every CALL inside the assigned expression must be a
+        # sanctioned producer.
+        if isinstance(n, ast.Assign) and any(
+                isinstance(t, ast.Name) and t.id in VERDICT_NAMES for t in n.targets):
+            for c in ast.walk(n.value):
+                if isinstance(c, ast.Call) and getattr(c.func, "id", "") not in SANCTIONED_PRODUCERS:
+                    where = getattr(c.func, "id", None) or ast.dump(c.func)
+                    bad.append(f"line {n.lineno}: the verdict mapping is assigned from "
+                               f"{where} — only {SANCTIONED_PRODUCERS} may produce one")
         # No verdict may be read out of a file.
         if isinstance(n, ast.Call) and getattr(n.func, "attr", "") in ("load", "loads") \
                 and isinstance(getattr(n.func, "value", None), ast.Name) \
