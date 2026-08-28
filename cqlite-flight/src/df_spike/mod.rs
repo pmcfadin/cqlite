@@ -51,6 +51,13 @@ pub mod rss;
 #[doc(hidden)]
 pub mod scan;
 
+// Spike tests: pushdown classification, schema/projection mapping, and the
+// arm-equivalence oracle that stops a "faster because wrong" result. In-crate so
+// they reach `crate::testutil`'s in-process SSTable builders and the `pub(crate)`
+// producer seam.
+#[cfg(test)]
+mod tests;
+
 pub use bench::{
     ArmKind, BenchConfig, BenchError, BenchOutcome, BenchRunner, Scenario, ScenarioKind,
 };
