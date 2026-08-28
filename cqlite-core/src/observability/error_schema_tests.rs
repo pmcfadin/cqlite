@@ -440,6 +440,11 @@ fn error_samples() -> Vec<Error> {
         Error::InvalidPath("p".into()),
         Error::InvalidState("s".into()),
         Error::QueryExecution("q".into()),
+        Error::QueryTimeout {
+            operation: "query.execute".into(),
+            elapsed: std::time::Duration::from_millis(1500),
+            limit: std::time::Duration::from_millis(1000),
+        },
         Error::ResultTooLarge {
             budget_bytes: 1,
             estimated_bytes: 2,
@@ -854,6 +859,23 @@ fn independent_expectations() -> Vec<(Error, ErrorCategory)> {
                 value: "nope".into(),
             },
             Query,
+        ),
+        // Issue #1695: an elapsed `query.max_execution_time`. Judged from the
+        // variant's MEANING, not from what classify() does: the budget is set by an
+        // OPERATOR, so its elapse says nothing about the data (never `Corruption`)
+        // and nothing about the transport (never `Io`). Nor is it `Query` with the
+        // genuine query faults — a malformed or unsupported query is the caller's
+        // bug and needs the query fixed, whereas a timeout is a capacity signal
+        // needing the budget raised or the scan narrowed, and a rising rate of it is
+        // the one thing an operator dashboard must be able to see. That is its own
+        // bucket, and `Other` would bury it.
+        (
+            Error::QueryTimeout {
+                operation: "query.execute".into(),
+                elapsed: std::time::Duration::from_millis(1500),
+                limit: std::time::Duration::from_millis(1000),
+            },
+            Timeout,
         ),
         (Error::configuration("c"), Other),
         (Error::invalid_state("s"), Other),
