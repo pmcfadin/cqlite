@@ -17,6 +17,7 @@ import statistics
 import sys
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "harness"))
+import derive  # noqa: E402  — one rundir resolver, shared
 import guards  # noqa: E402  — one guard implementation, shared
 
 # `lscpu` reports BogoMIPS 4800.00 on this host => a 2.40 GHz TSC base, which is
@@ -31,27 +32,51 @@ def main():
     a = ap.parse_args()
 
     by_s = {}
-    for line in open(os.path.join(a.results, "manifest.jsonl")):
+    manifest = os.path.join(a.results, "manifest.jsonl")
+    if not os.path.exists(manifest):
+        guards.fail(
+            "FREQ_MANIFEST_MISSING",
+            f"{manifest} is absent. This tool reads its rundirs from the manifest, exactly as "
+            f"derive.py does; without one there is no recorded set of frequency reps to read, "
+            f"and guessing at directory names would be a different tool measuring a different "
+            f"thing.",
+        )
+    reps = 0
+    for line in open(manifest):
         if not line.strip():
             continue
         rec = json.loads(line)
-        c = guards.parse_perf_csv(os.path.join(rec["rundir"], "perf.csv"))
+        # RESOLVED AGAINST THE MANIFEST'S OWN DIRECTORY, not the current one.
+        # Manifests record rundirs RELATIVE to the results root (sweep.sh writes
+        # `basename`), so resolving against `os.getcwd()` made this tool unable to
+        # read its OWN committed evidence from anywhere but that one directory.
+        # `derive.resolve_rundir` is the one implementation of this rule.
+        rundir = derive.resolve_rundir(a.results, rec["rundir"])
+        reps += 1
+        c = guards.parse_perf_csv(os.path.join(rundir, "perf.csv"))
         for ev in ("msr/aperf/", "msr/mperf/"):
             if ev not in c:
-                guards.fail("PERF_EVENT_ABSENT", f"{rec['rundir']}: {ev} absent")
+                guards.fail("PERF_EVENT_ABSENT", f"{rundir}: {ev} absent")
             val, pct = c[ev]
             if "<not" in val:
-                guards.fail("PERF_EVENT_NOT_COUNTED", f"{rec['rundir']}: {ev} reads {val!r}")
+                guards.fail("PERF_EVENT_NOT_COUNTED", f"{rundir}: {ev} reads {val!r}")
             if float(pct) < 100.0:
-                guards.fail("PERF_MULTIPLEXED", f"{rec['rundir']}: {ev} at {pct}%")
+                guards.fail("PERF_MULTIPLEXED", f"{rundir}: {ev} at {pct}%")
         aperf, mperf = float(c["msr/aperf/"][0]), float(c["msr/mperf/"][0])
         if mperf <= 0 or aperf <= 0:
             guards.fail(
                 "PERF_EVENT_ZERO",
-                f"{rec['rundir']}: aperf={aperf} mperf={mperf}. A zero here is an UNAVAILABLE "
+                f"{rundir}: aperf={aperf} mperf={mperf}. A zero here is an UNAVAILABLE "
                 f"INSTRUMENT, not a measured zero — drop the decomposition, do not approximate it.",
             )
         by_s.setdefault(rec["s"], []).append(aperf / mperf * a.tsc_base_ghz)
+
+    if not reps:
+        guards.fail(
+            "FREQ_MANIFEST_EMPTY",
+            f"{manifest} records no reps. A table computed from nothing prints headers and no "
+            f"rows, which reads as a successful run that measured nothing.",
+        )
 
     print("## Measured core frequency f(S), from `msr/aperf` ÷ `msr/mperf`\n")
     print(f"Under FULL occupancy of the pinned set (N = 2S). TSC base "

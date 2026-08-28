@@ -712,6 +712,68 @@ for shape in flag file; do
   fi
 done
 
+# ------------------- the frequency tool can read its OWN committed evidence ---
+echo
+echo "-- freq calibration (it must consume the evidence this PR ships) --"
+# THE DEFECT THIS SECTION EXISTS FOR: `derive-freq.py` resolved manifest rundirs
+# against the CURRENT DIRECTORY rather than `--results`, and `freq-run/` shipped
+# with no manifest at all — so the tool could not consume the very evidence the
+# report's frequency numbers were derived from. A tool that cannot read its own
+# committed data is not a reproduction path.
+FREQ="$HERE/../freq-calibration/derive-freq.py"
+FREQRUN="$HERE/../freq-run"
+FREQ_OUT="$TMP/freq.md"
+
+# ACCEPTANCE: run from an UNRELATED cwd (which is what caught the resolution
+# bug) and reproduce the PUBLISHED numbers exactly — f(S=1)=3.509 GHz,
+# f(S=6)=3.421 GHz, clock ratio 0.9750. The values are asserted, not just the
+# exit status: a table of the wrong numbers also exits 0.
+if ( cd "$TMP" && python3 "$FREQ" --results "$FREQRUN" ) > "$FREQ_OUT" 2>&1; then
+  miss=""
+  grep -q '^| 1 | 3.509 ' "$FREQ_OUT"          || miss="$miss f(S=1)=3.509"
+  grep -q '^| 6 | 3.421 ' "$FREQ_OUT"          || miss="$miss f(S=6)=3.421"
+  grep -q 'f(S=6)/f(S=1) = 0.9750' "$FREQ_OUT" || miss="$miss ratio=0.9750"
+  if [[ -z "$miss" ]]; then
+    echo "ok    [freq acceptance] committed freq-run reproduces 3.509 / 3.421 GHz, ratio 0.9750"
+    PASS=$((PASS+1))
+  else
+    echo "FAIL  [freq acceptance] committed freq-run did not reproduce:$miss"; FAIL=$((FAIL+1))
+  fi
+else
+  echo "FAIL  [freq acceptance] derive-freq.py could not read its own committed evidence"
+  sed 's/^/      /' "$FREQ_OUT"; FAIL=$((FAIL+1))
+fi
+
+# THE RESOLUTION IS AGAINST `--results`, NOT cwd — negative-controlled. A DECOY
+# `s1/`+`s6/` in the current directory, holding perf.csv files with different
+# counters, must not be read in place of the committed evidence.
+DECOY="$TMP/freq-decoy"
+mkdir -p "$DECOY/s1" "$DECOY/s6"
+for d in s1 s6; do
+  sed 's|^140438386624|280876773248|; s|^96050207856|96050207856|' \
+    "$FREQRUN/s1/perf.csv" > "$DECOY/$d/perf.csv"
+done
+if ( cd "$DECOY" && python3 "$FREQ" --results "$FREQRUN" ) > "$TMP/freq-decoy.md" 2>&1 \
+   && grep -q '^| 1 | 3.509 ' "$TMP/freq-decoy.md"; then
+  echo "ok    [freq cwd control] a decoy rundir in the CURRENT directory is not read"
+  PASS=$((PASS+1))
+else
+  echo "FAIL  [freq cwd control] cwd substituted the evidence, or the run failed"
+  sed 's/^/      /' "$TMP/freq-decoy.md"; FAIL=$((FAIL+1))
+fi
+
+# AN ABSENT OR EMPTY MANIFEST REFUSES. Before the fix an absent manifest was an
+# unhandled traceback; an empty one would have printed a headers-only table,
+# which reads as a successful run that measured nothing.
+NOMAN="$TMP/freq-no-manifest"
+cp -a "$FREQRUN" "$NOMAN"
+rm "$NOMAN/manifest.jsonl"
+expect_guard_fail FREQ_MANIFEST_MISSING python3 "$FREQ" --results "$NOMAN"
+EMPTYMAN="$TMP/freq-empty-manifest"
+cp -a "$FREQRUN" "$EMPTYMAN"
+printf '\n\n' > "$EMPTYMAN/manifest.jsonl"
+expect_guard_fail FREQ_MANIFEST_EMPTY python3 "$FREQ" --results "$EMPTYMAN"
+
 # ------------------------------------------------------ no relaxation knob ---
 echo
 echo "-- no escape hatch --"

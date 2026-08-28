@@ -5,6 +5,20 @@ calling `../harness/rep.py` directly with an MSR event list; the committed runne
 `../freq-calibration/run.sh` was DELETED after it failed on invocation, and the
 verified commands are in the report's reproduction section.
 
+## Re-deriving these numbers from this directory
+
+```
+python3 ../freq-calibration/derive-freq.py --results .
+```
+
+reproduces f(S=1) = 3.509 GHz, f(S=6) = 3.421 GHz and the −2.50% clock ratio below.
+`manifest.jsonl` names the two rundirs in the SAME convention `../harness/sweep.sh`
+writes — relative to this directory — and `derive-freq.py` resolves them against
+`--results`, so the command works from any cwd. (It previously resolved them
+against the current directory and this tree shipped no manifest at all, so the
+tool could not consume its own committed evidence; `../harness/selftest.sh`
+asserts the reproduction, with a decoy rundir in the cwd as the negative control.)
+
 Frequency = TSC × aperf/mperf. `mperf` ticks at the TSC rate and measured
 2.401 / 2.400 G/sec at the two points, confirming TSC ≈ 2.4 GHz.
 
