@@ -29,8 +29,37 @@ pub struct StorageConfig {
     /// Maximum SSTable file size in bytes (default: 64MB)
     pub max_sstable_size: u64,
 
-    /// MemTable size threshold for flushing (default: 16MB)
+    /// MemTable size threshold for flushing, in bytes (default: 64MB).
+    ///
+    /// This is the AUTHORITATIVE flush trigger for the write path: it is the
+    /// single value `WriteEngineConfig::from_config` translates into
+    /// `WriteEngineConfig::memtable_flush_threshold` (issue #1697).
+    ///
+    /// The default changed 16MB -> 64MB in #1697: before that fix this field had
+    /// no production reader — the engine carried its own private 64MB default,
+    /// so 64MB is the value that always actually ran. Keeping the RUNNING value
+    /// preserves behaviour; adopting the decorative 16MB would have silently
+    /// quadrupled everyone's flush rate.
     pub memtable_size_threshold: u64,
+
+    /// MemTable HARD limit in bytes (default: 256MB) — the admission ceiling.
+    ///
+    /// Live knob: the write engine's `check_admission` REJECTS a write whose
+    /// mutation exceeds this on its own, or that would push the memtable over
+    /// it. Before issue #1697 it existed only as the private
+    /// `WriteEngineConfig::DEFAULT_HARD_LIMIT`, so an embedder could be
+    /// hard-failed by a ceiling they had no way to see or change. The default is
+    /// unchanged (256MB): this exposes the knob, it does not alter behaviour.
+    /// [`Config::validate`] requires it to be STRICTLY GREATER than
+    /// [`Self::memtable_size_threshold`], since a ceiling at or below the flush
+    /// threshold wedges the engine — writes are rejected before a flush can ever
+    /// relieve the memtable, and with zero headroom an ordinary write does it —
+    /// and requires BOTH knobs to fit in the target's `usize` (see `validate`;
+    /// only reachable on 32-bit/wasm32). Note that headroom alone is not a
+    /// wedge-freedom guarantee: a single mutation larger than the headroom still
+    /// wedges, which is an admission-side defect tracked as #3404.
+    #[serde(default = "default_memtable_hard_limit")]
+    pub memtable_hard_limit: u64,
 
     /// Compaction configuration
     pub compaction: CompactionConfig,
@@ -204,6 +233,12 @@ fn default_use_mmap() -> bool {
     false
 }
 
+/// Default for [`StorageConfig::memtable_hard_limit`]: 256MB, the value the
+/// write engine always used privately (issue #1697).
+fn default_memtable_hard_limit() -> u64 {
+    256 * 1024 * 1024
+}
+
 /// Default for [`StorageConfig::mmap_min_size_bytes`]: one page.
 fn default_mmap_min_size_bytes() -> usize {
     4096
@@ -222,8 +257,11 @@ fn default_direct_io_prefetch_bytes() -> usize {
 impl Default for StorageConfig {
     fn default() -> Self {
         Self {
-            max_sstable_size: 64 * 1024 * 1024,        // 64MB
-            memtable_size_threshold: 16 * 1024 * 1024, // 16MB
+            max_sstable_size: 64 * 1024 * 1024, // 64MB
+            // 64MB / 256MB: the values the write engine always used (#1697).
+            // Shared with the serde defaults so the two can never drift.
+            memtable_size_threshold: 64 * 1024 * 1024,
+            memtable_hard_limit: default_memtable_hard_limit(),
             compaction: CompactionConfig::default(),
             block_size: 64 * 1024, // 64KB
             compression: CompressionConfig::default(),
@@ -243,26 +281,49 @@ impl Default for StorageConfig {
     }
 }
 
-/// Compaction strategy configuration.
-///
-/// The write engine implements Size-Tiered Compaction Strategy (STCS) and
-/// installs it by default (issue #1619). `auto_compaction` is the authoritative
-/// on/off switch consumed by the write path via
-/// `WriteEngineConfig::with_compaction_config`. Previously this struct also
-/// carried `strategy`/`max_sstables`/`size_ratio`/`max_threads`/
-/// `background_interval` fields that were never read by any behavior; they were
-/// removed (issue #1619) rather than left decorative.
+/// Compaction strategy configuration — the authoritative source for the write
+/// path's Size-Tiered Compaction Strategy (STCS), consumed via
+/// `WriteEngineConfig::from_config` (issues #1619, #1697). Decorative
+/// `strategy`/`max_sstables`/`size_ratio`/`max_threads`/`background_interval`
+/// knobs, read by no behavior, were removed in #1619 rather than left in place.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CompactionConfig {
     /// Enable automatic (STCS) compaction. When `false`, the write engine
     /// installs no merge policy and `maintenance_step` is a no-op.
     pub auto_compaction: bool,
+
+    /// STCS `min_threshold`: minimum number of SSTables in a size bucket before
+    /// a compaction is triggered (default: 4). Ignored when
+    /// [`Self::auto_compaction`] is `false`. Wired to the write engine by
+    /// `WriteEngineConfig::from_config` (issue #1697).
+    #[serde(default = "default_compaction_min_threshold")]
+    pub min_threshold: usize,
+
+    /// STCS `max_threshold`: maximum number of SSTables merged together in one
+    /// compaction step (default: 32). Ignored when [`Self::auto_compaction`] is
+    /// `false`. Wired to the write engine by `WriteEngineConfig::from_config`
+    /// (issue #1697).
+    #[serde(default = "default_compaction_max_threshold")]
+    pub max_threshold: usize,
+}
+
+/// Default for [`CompactionConfig::min_threshold`]: Cassandra's STCS default.
+fn default_compaction_min_threshold() -> usize {
+    4
+}
+
+/// Default for [`CompactionConfig::max_threshold`]: Cassandra's STCS default.
+fn default_compaction_max_threshold() -> usize {
+    32
 }
 
 impl Default for CompactionConfig {
     fn default() -> Self {
         Self {
             auto_compaction: true,
+            // Shared with the serde defaults so the two can never drift.
+            min_threshold: default_compaction_min_threshold(),
+            max_threshold: default_compaction_max_threshold(),
         }
     }
 }
@@ -653,7 +714,9 @@ impl Config {
         let mut config = Self::default();
 
         // Increase memory usage for better performance
-        config.storage.memtable_size_threshold = 64 * 1024 * 1024; // 64MB
+        // Above the 64MB default (#1697 raised the default to the value that
+        // always ran), so this preset still trades memory for throughput.
+        config.storage.memtable_size_threshold = 128 * 1024 * 1024; // 128MB
         config.storage.max_sstable_size = 256 * 1024 * 1024; // 256MB
         config.memory.max_memory = 4 * 1024 * 1024 * 1024; // 4GB
 
@@ -743,6 +806,105 @@ impl Config {
             ));
         }
 
+        // Both memtable byte knobs are `u64` on the public surface but `usize`
+        // in the engine (see `WriteEngineConfig::from_config`). On a 32-bit or
+        // wasm32 target a value above `usize::MAX` cannot be represented, and
+        // the bridge's clamp would land it exactly on `usize::MAX` — the state
+        // `memtable.rs` names degenerate: `should_flush` never fires and
+        // `check_admission`'s `projected > hard_limit` is UNREACHABLE because
+        // `saturating_add` caps at `usize::MAX`. That is never-flush AND
+        // never-reject: grow until OOM. Reject it here instead (#1697).
+        //
+        // `usize_max_bytes` is the target's `usize::MAX` widened to `u64` — via
+        // `try_from`, never an `as` cast — so on a 64-bit target it equals
+        // `u64::MAX` and the comparisons below are trivially false rather than
+        // ill-typed. A hypothetical target with `usize` WIDER than `u64` falls
+        // back to `u64::MAX`, which is also correct: every `u64` value is then
+        // addressable. The bridge keeps its clamp as defense in depth for any
+        // path that skips `validate`.
+        let usize_max_bytes = u64::try_from(usize::MAX).unwrap_or(u64::MAX);
+        for (knob, bytes) in [
+            (
+                "memtable_size_threshold",
+                self.storage.memtable_size_threshold,
+            ),
+            ("memtable_hard_limit", self.storage.memtable_hard_limit),
+        ] {
+            if bytes > usize_max_bytes {
+                return Err(crate::Error::configuration(format!(
+                    "{knob} ({bytes} bytes) exceeds this target's addressable maximum \
+                     ({usize_max_bytes} bytes); a memtable that large can never flush \
+                     and can never reject a write"
+                )));
+            }
+        }
+
+        // A hard limit below the flush threshold wedges the write engine for
+        // EVERY write: the memtable is rejected at the ceiling before a flush can
+        // relieve it. Only expressible as a rule now that both knobs live here
+        // (#1697).
+        //
+        // SCOPE OF THIS RULE, stated because it is narrower than it looks
+        // (#1697 roborev r2; the engine defect is #3404): passing it does NOT
+        // make the write path wedge-free. `WriteEngine::check_admission` rejects
+        // `memtable_size + incoming > memtable_hard_limit` without attempting a
+        // flush, while auto-flush fires only AFTER a successful insert. So any
+        // single mutation larger than `memtable_hard_limit - memtable_size` is
+        // rejected while the memtable sits below the flush threshold, and
+        // retrying it is rejected forever.
+        //
+        // NO INEQUALITY BETWEEN THESE TWO KNOBS CAN CLOSE THAT: with one byte of
+        // headroom a 3-byte mutation still wedges, and the wedge is a function of
+        // the largest single mutation, which config cannot know. So this rule is
+        // NOT a wedge-freedom guarantee and must not be read as one; #3404 owns
+        // the real fix (flush a nonempty memtable before rejecting a mutation
+        // that fits by itself).
+        //
+        // It nonetheless requires STRICT headroom, because equality is
+        // qualitatively worse than any positive headroom rather than merely one
+        // step along a continuum. For a mutation of `m` bytes the wedge window is
+        // `m - headroom` bytes wide, so at equality an ORDINARY 4 KiB write
+        // wedges over a 4 KiB window of memtable sizes — a state normal operation
+        // passes through routinely — while at the default 192 MiB of headroom
+        // even a 64 MiB mutation cannot wedge at all. Equality also has no
+        // legitimate use: it asks the engine to flush at exactly the size where
+        // it must instead reject. Rejecting it removes the only regime in which
+        // everyday writes livelock, which is worth doing even though it proves
+        // nothing about the general case.
+        if self.storage.memtable_hard_limit <= self.storage.memtable_size_threshold {
+            return Err(crate::Error::configuration(format!(
+                "memtable_hard_limit ({} bytes) must be strictly greater than \
+                 memtable_size_threshold ({} bytes); with no headroom between them \
+                 an ordinary write is rejected at the ceiling while the memtable \
+                 sits below the flush trigger, and retrying it never recovers",
+                self.storage.memtable_hard_limit, self.storage.memtable_size_threshold
+            )));
+        }
+
+        // Validate the STCS thresholds threaded into the write engine (#1697).
+        // `STCSPolicy::new` rejects these too, but failing here surfaces the
+        // problem at config time rather than at engine construction.
+        //
+        // ONLY when `auto_compaction` is on (#1697 roborev r4). Both fields are
+        // documented as "Ignored when `auto_compaction` is `false`", and that is
+        // literally true of the code: `WriteEngine::new` constructs
+        // `STCSPolicy::new(min, max, ..)` inside `if config.auto_compaction`, and
+        // leaves the policy unset otherwise. Judging them unconditionally
+        // therefore rejected configurations that work — the thresholds are never
+        // read — while contradicting their own documented contract.
+        let compaction = &self.storage.compaction;
+        if compaction.auto_compaction && compaction.min_threshold == 0 {
+            return Err(crate::Error::configuration(
+                "compaction.min_threshold must be greater than 0",
+            ));
+        }
+        if compaction.auto_compaction && compaction.max_threshold < compaction.min_threshold {
+            return Err(crate::Error::configuration(format!(
+                "compaction.max_threshold ({}) must be >= compaction.min_threshold ({})",
+                compaction.max_threshold, compaction.min_threshold
+            )));
+        }
+
         // Validate bloom filter settings
         if self.storage.enable_bloom_filters
             && (self.storage.bloom_filter_fp_rate <= 0.0
@@ -758,376 +920,5 @@ impl Config {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_default_config() {
-        let config = Config::default();
-        assert!(config.storage.compression.enabled);
-        assert!(config.storage.enable_bloom_filters);
-        assert!(config.memory.block_cache.enabled);
-    }
-
-    #[test]
-    fn test_memory_optimized_config() {
-        let config = Config::memory_optimized();
-        assert!(
-            config.storage.memtable_size_threshold
-                < Config::default().storage.memtable_size_threshold
-        );
-        assert!(config.memory.max_memory < Config::default().memory.max_memory);
-    }
-
-    #[test]
-    fn test_performance_optimized_config() {
-        let config = Config::performance_optimized();
-        assert!(
-            config.storage.memtable_size_threshold
-                > Config::default().storage.memtable_size_threshold
-        );
-        assert!(config.memory.max_memory > Config::default().memory.max_memory);
-    }
-
-    /// Issue #1582: a `QueryConfig` serialized BEFORE the byte-budget fields
-    /// existed (e.g. a pre-upgrade Python JSON/dict config) has no
-    /// `max_result_bytes`/`max_result_rows` keys. The `#[serde(default = ...)]`
-    /// on both fields must let it deserialize, taking the shipped defaults rather
-    /// than failing with a missing-field error.
-    #[test]
-    fn budget_fields_deserialize_with_serde_default_when_absent() {
-        // Serialize a default QueryConfig, then STRIP both budget fields to
-        // emulate an old serialized config that predates them.
-        let mut value =
-            serde_json::to_value(QueryConfig::default()).expect("serialize QueryConfig");
-        let obj = value
-            .as_object_mut()
-            .expect("QueryConfig serializes as object");
-        obj.remove("max_result_bytes");
-        obj.remove("max_result_rows");
-        assert!(
-            !obj.contains_key("max_result_bytes") && !obj.contains_key("max_result_rows"),
-            "both fields must be absent for this regression to be meaningful"
-        );
-
-        let restored: QueryConfig =
-            serde_json::from_value(value).expect("old config (no budget fields) must deserialize");
-        assert_eq!(
-            restored.max_result_bytes, DEFAULT_MAX_RESULT_BYTES,
-            "absent max_result_bytes must take the serde default"
-        );
-        assert_eq!(
-            restored.max_result_rows,
-            default_max_result_rows(),
-            "absent max_result_rows must take the serde default"
-        );
-    }
-
-    #[test]
-    fn test_config_validation() {
-        let mut config = Config::default();
-        assert!(config.validate().is_ok());
-
-        // Test invalid max_memory
-        config.memory.max_memory = 0;
-        assert!(config.validate().is_err());
-
-        // Reset and test invalid cache sizes
-        config = Config::default();
-        config.memory.block_cache.max_size = config.memory.max_memory + 1;
-        assert!(config.validate().is_err());
-    }
-
-    /// Issue #1918: `forced_read_path` defaults to `None` (auto), round-trips its
-    /// lowercase encoding, and a config serialized before the field existed still
-    /// deserializes (absent → `None`).
-    #[test]
-    fn forced_read_path_defaults_absent_and_roundtrips() {
-        // Default is None (auto).
-        assert_eq!(QueryConfig::default().forced_read_path, None);
-
-        // A config predating the field (key absent) deserializes to None.
-        let mut value = serde_json::to_value(QueryConfig::default()).unwrap();
-        value
-            .as_object_mut()
-            .unwrap()
-            .remove("forced_read_path")
-            .expect("field present when serialized");
-        let restored: QueryConfig = serde_json::from_value(value).unwrap();
-        assert_eq!(restored.forced_read_path, None);
-
-        // Explicit values round-trip via the lowercase serde encoding.
-        for (mode, tag) in [
-            (ReadPathMode::Point, "point"),
-            (ReadPathMode::Full, "full"),
-            (ReadPathMode::Auto, "auto"),
-        ] {
-            let mut cfg = QueryConfig::default();
-            cfg.forced_read_path = Some(mode);
-            let json = serde_json::to_string(&cfg).unwrap();
-            assert!(
-                json.contains(tag),
-                "mode {mode:?} must serialize as {tag:?}: {json}"
-            );
-            let restored: QueryConfig = serde_json::from_str(&json).unwrap();
-            assert_eq!(restored.forced_read_path, Some(mode));
-        }
-    }
-
-    #[test]
-    fn test_storage_validation_errors() {
-        let mut config = Config::default();
-
-        // Test invalid block_size (should trigger line 573-574)
-        config.storage.block_size = 0;
-        let result = config.validate();
-        assert!(result.is_err());
-        assert!(result
-            .unwrap_err()
-            .to_string()
-            .contains("block_size must be greater than 0"));
-
-        // Reset and test invalid memtable_size_threshold (should trigger line 579-580)
-        config = Config::default();
-        config.storage.memtable_size_threshold = 0;
-        let result = config.validate();
-        assert!(result.is_err());
-        assert!(result
-            .unwrap_err()
-            .to_string()
-            .contains("memtable_size_threshold must be greater than 0"));
-
-        // Reset and test invalid bloom filter false positive rate (should trigger line 589-590)
-        config = Config::default();
-        config.storage.enable_bloom_filters = true;
-        config.storage.bloom_filter_fp_rate = 0.0; // Invalid: exactly 0
-        let result = config.validate();
-        assert!(result.is_err());
-        assert!(result
-            .unwrap_err()
-            .to_string()
-            .contains("bloom_filter_fp_rate must be between 0 and 1"));
-
-        // Test another invalid bloom filter false positive rate
-        config.storage.bloom_filter_fp_rate = 1.0; // Invalid: exactly 1
-        let result = config.validate();
-        assert!(result.is_err());
-
-        // Test bloom filter rate above 1
-        config.storage.bloom_filter_fp_rate = 1.5; // Invalid: greater than 1
-        let result = config.validate();
-        assert!(result.is_err());
-
-        // Test bloom filter rate below 0
-        config.storage.bloom_filter_fp_rate = -0.1; // Invalid: less than 0
-        let result = config.validate();
-        assert!(result.is_err());
-    }
-
-    #[test]
-    fn test_valid_bloom_filter_config() {
-        let mut config = Config::default();
-        config.storage.enable_bloom_filters = true;
-        config.storage.bloom_filter_fp_rate = 0.01; // Valid rate
-        assert!(config.validate().is_ok());
-
-        config.storage.bloom_filter_fp_rate = 0.5; // Valid rate
-        assert!(config.validate().is_ok());
-
-        config.storage.bloom_filter_fp_rate = 0.99; // Valid rate
-        assert!(config.validate().is_ok());
-    }
-
-    #[test]
-    fn test_storage_config_deserializes_without_mmap_fields() {
-        // Backward compatibility: a config payload serialized before the mmap
-        // fields existed omits `use_mmap` / `mmap_min_size_bytes`. It must still
-        // deserialize, defaulting to the safe buffered backend.
-        let mut value = serde_json::to_value(StorageConfig::default()).unwrap();
-        let obj = value.as_object_mut().unwrap();
-        obj.remove("use_mmap");
-        obj.remove("mmap_min_size_bytes");
-        assert!(!obj.contains_key("use_mmap"));
-
-        let restored: StorageConfig =
-            serde_json::from_value(value).expect("old payload must still deserialize");
-        assert!(!restored.use_mmap, "missing use_mmap must default to false");
-        assert_eq!(
-            restored.mmap_min_size_bytes, 4096,
-            "missing mmap_min_size_bytes must default to one page"
-        );
-    }
-
-    #[test]
-    fn test_full_config_deserializes_without_mmap_fields() {
-        // Same guarantee through the top-level Config, mirroring how the Python
-        // bindings parse a JSON/dict payload into `cqlite_core::Config`.
-        let mut value = serde_json::to_value(Config::default()).unwrap();
-        let storage = value
-            .get_mut("storage")
-            .and_then(|s| s.as_object_mut())
-            .unwrap();
-        storage.remove("use_mmap");
-        storage.remove("mmap_min_size_bytes");
-
-        let restored: Config =
-            serde_json::from_value(value).expect("old Config payload must still deserialize");
-        assert!(!restored.storage.use_mmap);
-        assert_eq!(restored.storage.mmap_min_size_bytes, 4096);
-        restored.validate().expect("restored config must validate");
-    }
-
-    #[test]
-    fn test_mmap_fields_roundtrip_when_present() {
-        // When the fields ARE present (e.g. a user opting in), they round-trip.
-        let mut config = StorageConfig::default();
-        config.use_mmap = true;
-        config.mmap_min_size_bytes = 8192;
-        let json = serde_json::to_string(&config).unwrap();
-        let restored: StorageConfig = serde_json::from_str(&json).unwrap();
-        assert!(restored.use_mmap);
-        assert_eq!(restored.mmap_min_size_bytes, 8192);
-    }
-
-    #[test]
-    fn test_disk_access_defaults() {
-        // The new fields default to the size-aware Auto backend with Auto
-        // prefetch, a half-RAM direct-I/O threshold, and a 1 MiB window.
-        let config = StorageConfig::default();
-        assert_eq!(config.disk_access_mode, DiskAccessMode::Auto);
-        assert_eq!(config.prefetch, PrefetchMode::Auto);
-        assert_eq!(config.direct_io_memory_fraction, 0.5);
-        assert_eq!(config.direct_io_prefetch_bytes, 1024 * 1024);
-    }
-
-    #[test]
-    fn test_storage_config_deserializes_without_disk_access_fields() {
-        // Backward compatibility: a payload predating the disk-access fields must
-        // still deserialize, defaulting to Auto / Auto / 0.5 / 1 MiB.
-        let mut value = serde_json::to_value(StorageConfig::default()).unwrap();
-        let obj = value.as_object_mut().unwrap();
-        for key in [
-            "disk_access_mode",
-            "direct_io_memory_fraction",
-            "prefetch",
-            "direct_io_prefetch_bytes",
-        ] {
-            obj.remove(key);
-        }
-
-        let restored: StorageConfig =
-            serde_json::from_value(value).expect("old payload must still deserialize");
-        assert_eq!(restored.disk_access_mode, DiskAccessMode::Auto);
-        assert_eq!(restored.prefetch, PrefetchMode::Auto);
-        assert_eq!(restored.direct_io_memory_fraction, 0.5);
-        assert_eq!(restored.direct_io_prefetch_bytes, 1024 * 1024);
-    }
-
-    #[test]
-    fn test_disk_access_fields_roundtrip() {
-        // Explicit selections round-trip, including the lowercase enum encoding.
-        let mut config = StorageConfig::default();
-        config.disk_access_mode = DiskAccessMode::Direct;
-        config.prefetch = PrefetchMode::WillNeed;
-        config.direct_io_memory_fraction = 0.25;
-        config.direct_io_prefetch_bytes = 2 * 1024 * 1024;
-        let json = serde_json::to_string(&config).unwrap();
-        assert!(json.contains("\"direct\""), "enum must serialize lowercase");
-        assert!(json.contains("\"willneed\""));
-        let restored: StorageConfig = serde_json::from_str(&json).unwrap();
-        assert_eq!(restored.disk_access_mode, DiskAccessMode::Direct);
-        assert_eq!(restored.prefetch, PrefetchMode::WillNeed);
-        assert_eq!(restored.direct_io_memory_fraction, 0.25);
-        assert_eq!(restored.direct_io_prefetch_bytes, 2 * 1024 * 1024);
-    }
-
-    #[test]
-    fn test_bloom_filter_disabled() {
-        let mut config = Config::default();
-        config.storage.enable_bloom_filters = false;
-        config.storage.bloom_filter_fp_rate = 0.0; // Should be ignored when bloom filters disabled
-        assert!(config.validate().is_ok());
-
-        config.storage.bloom_filter_fp_rate = 1.0; // Should be ignored when bloom filters disabled
-        assert!(config.validate().is_ok());
-
-        config.storage.bloom_filter_fp_rate = -1.0; // Should be ignored when bloom filters disabled
-        assert!(config.validate().is_ok());
-    }
-
-    // ---- issue #1568 (Epic B / B2): dead-cache config collapse ----
-
-    /// Spec: "A config using a removed knob is rejected." The pre-change
-    /// `MemoryConfig` shape (`row_cache` / `query_cache` / `allocator` alongside
-    /// `block_cache`) must FAIL CLOSED after the collapse — those keys are gone,
-    /// and `#[serde(deny_unknown_fields)]` rejects them instead of silently
-    /// ignoring them (which would suggest they still have effect).
-    #[test]
-    fn removed_memory_knobs_fail_closed() {
-        // The full OLD memory-config shape: valid on pre-change code (RED),
-        // rejected after the collapse (GREEN).
-        let old_shape = serde_json::json!({
-            "max_memory": 1_073_741_824u64,
-            "block_cache": { "enabled": true, "max_size": 268_435_456u64, "policy": "Lru" },
-            "row_cache":   { "enabled": true, "max_size": 134_217_728u64, "policy": "Lru" },
-            "query_cache": { "enabled": true, "max_size": 67_108_864u64,  "policy": "Lru" },
-            "allocator":   { "use_custom": false, "small_pool_size": 1u64, "large_pool_size": 2u64 }
-        });
-        assert!(
-            serde_json::from_value::<MemoryConfig>(old_shape).is_err(),
-            "a MemoryConfig naming removed knobs (row_cache/query_cache/allocator) must fail closed"
-        );
-
-        // Each removed knob, added to the retained-only base, is rejected.
-        for removed in ["row_cache", "query_cache", "allocator"] {
-            let mut v = serde_json::json!({
-                "max_memory": 1_073_741_824u64,
-                "block_cache": { "enabled": true, "max_size": 268_435_456u64, "policy": "Lru" },
-            });
-            v.as_object_mut()
-                .unwrap()
-                .insert(removed.to_string(), serde_json::json!({ "enabled": true }));
-            assert!(
-                serde_json::from_value::<MemoryConfig>(v).is_err(),
-                "a MemoryConfig naming the removed `{removed}` knob must fail closed"
-            );
-        }
-    }
-
-    /// Spec: "A config using a removed knob is rejected" (CachePolicy variants).
-    /// The never-selected `Lfu` / `Arc` variants are gone, so a cache config
-    /// naming them fails to deserialize (unknown variant) rather than silently
-    /// mapping to some default.
-    #[test]
-    fn removed_cache_policy_variants_fail_closed() {
-        for variant in ["Lfu", "Arc"] {
-            let v = serde_json::json!({ "enabled": true, "max_size": 1u64, "policy": variant });
-            assert!(
-                serde_json::from_value::<CacheConfig>(v).is_err(),
-                "a CacheConfig naming the removed CachePolicy::{variant} variant must fail closed"
-            );
-        }
-        // The retained `Lru` variant still deserializes.
-        let ok = serde_json::json!({ "enabled": true, "max_size": 1u64, "policy": "Lru" });
-        assert!(serde_json::from_value::<CacheConfig>(ok).is_ok());
-    }
-
-    /// Spec: "The retained budget knob still deserializes and validates." A
-    /// config specifying only `max_memory` and `block_cache` deserializes, passes
-    /// `Config::validate()`, and its `block_cache.max_size` is the retained knob.
-    #[test]
-    fn retained_budget_knob_deserializes_and_validates() {
-        let mem: MemoryConfig = serde_json::from_value(serde_json::json!({
-            "max_memory": 1_073_741_824u64,
-            "block_cache": { "enabled": true, "max_size": 268_435_456u64, "policy": "Lru" },
-        }))
-        .expect("retained-only MemoryConfig must deserialize");
-        assert_eq!(mem.block_cache.max_size, 268_435_456);
-
-        // A default Config (which now carries only the collapsed MemoryConfig)
-        // still validates, and the block-cache budget is the wired knob.
-        let config = Config::default();
-        assert!(config.validate().is_ok());
-        assert!(config.memory.block_cache.max_size > 0);
-    }
-}
+#[path = "config_tests.rs"]
+mod tests;

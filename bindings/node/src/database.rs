@@ -509,9 +509,7 @@ impl Database {
             .filter(|t| !t.trim().is_empty());
 
         // Extract all options and build config
-        let (schema_path, core_config, writable, write_dir, flush_threshold) = if let Some(opts) =
-            options
-        {
+        let (schema_path, core_config, writable, write_dir) = if let Some(opts) = options {
             let mut config = cqlite_core::Config::default();
 
             if let Some(limit) = opts.memory_limit {
@@ -543,52 +541,45 @@ impl Database {
 
             // Validate the optional flush threshold (issue #1620). Bytes as an
             // f64 (napi-idiomatic; matches `memoryLimit`). Must be finite, at
-            // least 1 byte, and no greater than the memtable hard limit;
-            // converted to `usize` at config-build time.
-            let flush_threshold = match opts.flush_threshold {
-                Some(v) => {
-                    if !v.is_finite() {
-                        return Err(napi::Error::from_reason(
-                            "flushThreshold must be a finite number",
-                        ));
-                    }
-                    if v < 1.0 {
-                        return Err(napi::Error::from_reason(
-                            "flushThreshold must be at least 1 byte",
-                        ));
-                    }
-                    // A threshold above the hard limit would never trigger an
-                    // auto-flush: the memtable hits the hard limit and rejects
-                    // writes first, dead-ending the binding write path
-                    // (roborev jobs 2885/2890, issue #1620). Gated on
-                    // `write-support`, matching every other `write_engine`
-                    // reference in this file — `WriteEngineConfig` is
-                    // `#[cfg(feature = "write-support")]` in core, and the
-                    // threshold is only meaningful when the write engine exists.
-                    #[cfg(feature = "write-support")]
-                    {
-                        let hard_limit =
-                            cqlite_core::storage::write_engine::WriteEngineConfig::DEFAULT_HARD_LIMIT;
-                        if v > hard_limit as f64 {
-                            return Err(napi::Error::from_reason(format!(
-                                "flushThreshold ({v} bytes) must not exceed the memtable hard limit ({hard_limit} bytes)"
-                            )));
-                        }
-                    }
-                    Some(v)
+            // least 1 byte, and no greater than the memtable hard limit.
+            if let Some(v) = opts.flush_threshold {
+                if !v.is_finite() {
+                    return Err(napi::Error::from_reason(
+                        "flushThreshold must be a finite number",
+                    ));
                 }
-                None => None,
-            };
+                if v < 1.0 {
+                    return Err(napi::Error::from_reason(
+                        "flushThreshold must be at least 1 byte",
+                    ));
+                }
+                // A threshold at or above the hard limit would never trigger an
+                // auto-flush: the memtable hits the ceiling and rejects writes
+                // first, dead-ending the binding write path (roborev 2885/2890,
+                // issue #1620). Read from the CALLER's public knob, so raising
+                // the ceiling raises what is accepted. NOT gated on
+                // `write-support`: `memtable_hard_limit` is feature-independent,
+                // so a gate would only make the same `flushThreshold` accepted in
+                // one build and rejected in another, with nothing behind it.
+                // `>=` matches `Config::validate`'s STRICT headroom rule (#1697
+                // r3); Node never calls `validate`, so it alone could wedge.
+                let hard_limit = config.storage.memtable_hard_limit;
+                if v >= hard_limit as f64 {
+                    return Err(napi::Error::from_reason(format!(
+                        "flushThreshold ({v} bytes) must be less than the memtable hard limit \
+                         ({hard_limit} bytes); equal leaves no headroom to flush into"
+                    )));
+                }
+                // Issue #1697: applied to the PUBLIC knob rather than the
+                // engine's private `with_flush_threshold` setter, so the option
+                // reaches the engine through the ONE bridge below. External
+                // behaviour is unchanged; only the route is.
+                config.storage.memtable_size_threshold = v as u64;
+            }
 
-            (
-                opts.schema.map(PathBuf::from),
-                config,
-                writable,
-                write_dir,
-                flush_threshold,
-            )
+            (opts.schema.map(PathBuf::from), config, writable, write_dir)
         } else {
-            (None, cqlite_core::Config::default(), false, None, None)
+            (None, cqlite_core::Config::default(), false, None)
         };
 
         // Clone schema path before it is potentially consumed by db open, so the
@@ -596,11 +587,12 @@ impl Database {
         #[cfg(feature = "write-support")]
         let schema_path_for_write: Option<PathBuf> = schema_path.clone();
 
-        // Capture the compaction settings before `core_config` is moved into
-        // ingestion / Database::open, so `Config.storage.compaction` is
-        // authoritative for the write path (issue #1619) rather than decorative.
+        // Capture the whole public config before `core_config` is moved into
+        // ingestion / Database::open, so `Config.storage` is authoritative for
+        // the write path (issues #1619, #1697) rather than decorative; the ONE
+        // bridge `WriteEngineConfig::from_config` translates it below.
         #[cfg(feature = "write-support")]
-        let compaction_config = core_config.storage.compaction.clone();
+        let write_engine_public_config = core_config.clone();
 
         // Validate write options
         #[cfg(feature = "write-support")]
@@ -750,18 +742,14 @@ impl Database {
                 ));
             };
 
-            let mut config = cqlite_core::storage::write_engine::WriteEngineConfig::new(
+            // Via the single bridge (#1697); `flushThreshold` was folded into
+            // `storage.memtable_size_threshold` above, else the 64 MB default.
+            let config = cqlite_core::storage::write_engine::WriteEngineConfig::from_config(
+                &write_engine_public_config,
                 wd.join("data"),
                 wd.join("wal"),
                 schema,
-            )
-            .with_compaction_config(&compaction_config);
-
-            // Apply the optional flush threshold (issue #1620); default is the
-            // engine's 64 MB when not provided.
-            if let Some(v) = flush_threshold {
-                config = config.with_flush_threshold(v as usize);
-            }
+            );
 
             let engine = cqlite_core::storage::write_engine::WriteEngine::new(config)
                 .map_err(to_napi_error)?;
@@ -771,7 +759,7 @@ impl Database {
         };
 
         #[cfg(not(feature = "write-support"))]
-        let _ = (writable, write_dir, flush_threshold); // suppress unused warning when feature off
+        let _ = (writable, write_dir); // suppress unused warning when feature off
 
         Ok(Database {
             inner: Arc::new(db),

@@ -89,6 +89,67 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **BREAKING (`cqlite-core` public config): `Config.storage` is now the single
+  source of truth for the write path, and its defaults are the values that were
+  already running (#1697).** The public `Config` facade was decorative for the
+  write path: the write engine ran off a separate, private `WriteEngineConfig`
+  with its own independent literal defaults, so setting a public knob changed
+  nothing, silently. One canonical bridge —
+  `WriteEngineConfig::from_config(&Config, data_dir, wal_dir, schema)` — is now
+  the only translation, and `WriteEngineConfig::new` is defined as that bridge
+  applied to `Config::default()`, so every knob has exactly ONE literal default.
+  All four write paths (core, CLI, Python, Node) route through it.
+  - **`storage.memtable_size_threshold` default 16 MB -> 64 MB.** This does NOT
+    change behaviour: 64 MB is the value that always actually ran (the engine's
+    private default). Adopting the decorative 16 MB would instead have silently
+    quadrupled everyone's flush rate. Code reading the default for its own sizing
+    will see the new number.
+  - **`Config::performance_optimized()` `memtable_size_threshold` 64 MB ->
+    128 MB**, keeping the preset above the raised default so it still trades
+    memory for throughput.
+  - **New public fields** (all `#[serde(default)]`, so pre-existing config
+    payloads and Python config dicts keep deserializing):
+    `storage.memtable_hard_limit` (256 MB — the admission ceiling
+    `check_admission` enforces; previously an invisible private constant that
+    could hard-fail an embedder), `storage.compaction.min_threshold` (4) and
+    `storage.compaction.max_threshold` (32) (STCS eligibility bar and merge-width
+    cap; previously with no public counterpart at all).
+  - **`Config::validate()` gained three rejection rules, so configs that
+    previously validated can now be rejected** — each one a state that wedges or
+    OOMs the write engine rather than merely being odd:
+    `memtable_hard_limit > memtable_size_threshold` (a ceiling at or below the
+    flush threshold rejects writes before a flush can relieve the memtable),
+    `compaction.min_threshold > 0`, and
+    `compaction.max_threshold >= min_threshold`. The memtable rule is STRICT —
+    equality leaves no headroom, so an ordinary write is rejected at the ceiling
+    while the memtable never reaches the flush trigger — while the compaction
+    rule allows equality. Note the memtable rule is not a wedge-freedom
+    guarantee: a single mutation larger than the headroom still wedges, which is
+    an engine-side defect tracked as #3404. A fourth rule rejects a memtable byte count above the
+    target's `usize::MAX`, reachable only on 32-bit/wasm32, where the value would
+    otherwise land on `usize::MAX` and never flush AND never reject.
+  - **Removed with no deprecation shim**: the four public constants
+    `WriteEngineConfig::DEFAULT_FLUSH_THRESHOLD`, `DEFAULT_HARD_LIMIT`,
+    `DEFAULT_COMPACTION_MIN_THRESHOLD` and `DEFAULT_COMPACTION_MAX_THRESHOLD`.
+    Each was a second literal for a value that now lives once, in
+    `Config::default()`; read `cqlite_core::Config::default().storage` instead.
+  - **Removed**: `WriteEngineConfig::with_compaction_config`. It was a SECOND
+    `CompactionConfig` -> engine translation with zero production callers, and
+    nothing asserted the two agreed, so a knob threaded into `from_config` and
+    missed there would have silently yielded engine defaults. Set
+    `config.storage.compaction` and call `from_config`.
+  - **CLI**: `CQLITE_MEMTABLE_FLUSH_THRESHOLD` is now applied to the public knob
+    and VALIDATED. A value that wedges the engine (e.g. `300000000`, above the
+    256 MB ceiling) is an error instead of being accepted in silence; a malformed
+    value is an error instead of a silent fall back to the default (an
+    empty/whitespace value still reads as unset). It is also parsed as `u64`, so
+    a 32-bit host no longer silently ignores anything above `u32::MAX`.
+  - **Python / Node bindings**: the `flush_threshold` / `flushThreshold` option is
+    folded onto the public `storage.memtable_size_threshold` (so it OVERRIDES a
+    value given in `config`) and its ceiling check now reads the CALLER's
+    `memtable_hard_limit` rather than the default's. Raising the ceiling in
+    `config` therefore raises what the option accepts; lowering it lowers it.
+
 - **Behaviour change (`cqlite-flight`): `--max-concurrent-scans` now DEFAULTS to a
   core-derived value, `clamp(2 × P, 2, 64)`, instead of the constant 64 (#3225).**
   `P` is `std::thread::available_parallelism()` — the hardware threads available to

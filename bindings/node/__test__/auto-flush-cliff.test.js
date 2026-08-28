@@ -150,4 +150,46 @@ describe('Auto-flush cliff wiring (Issue #1620)', () => {
       env.cleanup();
     }
   });
+
+  // #1697 roborev r3 — the BOUNDARY, which is where this binding could diverge
+  // from core. `Config::validate` requires STRICTLY greater, and this binding
+  // never calls it (it assembles the config field-by-field), so without this
+  // check Node would be the one write path able to build the wedged engine core
+  // rejects. Zero headroom means an ordinary write is rejected at the ceiling
+  // while the memtable never reaches the flush trigger, and retrying never
+  // recovers.
+  test('flushThreshold EQUAL to the memtable hard limit is rejected (no headroom)', async () => {
+    const env = setup();
+    try {
+      await expect(
+        Database.open(env.dataDir, {
+          schema: env.schema,
+          writable: true,
+          writeDir: env.writeDir,
+          flushThreshold: 256 * 1024 * 1024, // exactly the 256 MB hard limit
+        })
+      ).rejects.toThrow(/headroom/);
+    } finally {
+      env.cleanup();
+    }
+  });
+
+  // ...and one byte under the ceiling is still ACCEPTED, so the bound is a
+  // boundary rather than a blanket refusal of large thresholds.
+  test('flushThreshold one byte below the hard limit is accepted', async () => {
+    const env = setup();
+    let db;
+    try {
+      db = await Database.open(env.dataDir, {
+        schema: env.schema,
+        writable: true,
+        writeDir: env.writeDir,
+        flushThreshold: 256 * 1024 * 1024 - 1,
+      });
+      expect(db).toBeDefined();
+    } finally {
+      if (db) await db.close();
+      env.cleanup();
+    }
+  });
 });
