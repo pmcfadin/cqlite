@@ -185,27 +185,29 @@
 #                      package.json build script, node-release.yml); hard-FAILs on
 #                      any abort-built or missing/unparseable definition. Pure
 #                      bash/grep/awk — offline, deterministic, no datasets/network.
-#   pub-surface        standing PUBLIC-API snapshot guard for cqlite-core
-#                      (scripts/ci/check-pub-surface.sh, issue #1712). Derives the
-#                      crate's default-feature public surface by walking rustdoc's
-#                      own MODULE INDEX GRAPH (rustc's real name resolution + cfg
-#                      evaluation), including `pub use` re-exports and glob
-#                      expansions, cross-checked for completeness against rustdoc's
-#                      all.html, and diffs it against the committed
-#                      cqlite-core/pub-surface.snapshot; ALSO asserts the crate root
-#                      tells the truth — an unconditional, non-#[doc(hidden)]
-#                      `pub mod NAME;` must actually be in the default public
-#                      surface (the #1712 defect: an inner #![cfg] hid `benchmarks`
-#                      from every default build while the crate root advertised it).
-#                      Boundary: item PATHS + kinds + associated-item names and
-#                      re-export edges, never signatures. Fail-closed and
-#                      affirmative — a cargo doc failure, absent doc tree, zero-item
-#                      enumeration or missing snapshot is a NAMED FAIL, never a
-#                      vacuous pass; so is a `doc` cfg predicate in the crate, which
-#                      would make the documented surface diverge from the shipped
-#                      one. Holds a mutex over the shared doc dir, so a concurrent
-#                      run cannot swap the tree under it. No env opt-out. ~6s,
-#                      offline, no datasets.
+#   pub-surface        CRATE-ROOT DECLARATION-CONSISTENCY guard for cqlite-core
+#                      (scripts/ci/check-pub-surface.sh, issue #1712). Asserts the
+#                      crate root TELLS THE TRUTH: for every unconditional,
+#                      non-#[doc(hidden)] top-level `pub mod NAME;` in
+#                      cqlite-core/src/lib.rs it resolves NAME's own module file
+#                      (NAME.rs xor NAME/mod.rs) and reads its PROLOGUE, failing if
+#                      the module gates ITSELF with an inner #![cfg(...)] — the
+#                      #1712 defect, where an inner #![cfg] hid `benchmarks` from
+#                      every default build while the crate root advertised it
+#                      unconditionally. Declaration-site attributes are read
+#                      structurally over meta-items, never by substring.
+#                      NOT PUBLIC-API DRIFT DETECTION: no snapshot, no --regenerate.
+#                      The rustdoc-derived snapshot half was removed deliberately
+#                      (#1712 descope; the principled route is #3366), so a green
+#                      here says nothing about whether the public API changed.
+#                      Fail-closed and affirmative — an unparseable crate root, an
+#                      unrecognised `pub mod` shape, zero declarations, zero
+#                      unconditional declarations, a module file resolving to
+#                      neither/both legal paths, an unreadable module file, a block
+#                      comment in a prologue or an inner attribute it cannot
+#                      classify are each a NAMED FAIL, never a vacuous pass. No env
+#                      opt-out. Source-only: no cargo, sub-second, offline, no
+#                      datasets.
 #                      SKIP-aware (loud): SKIPs only when cqlite-core is absent.
 #   tooling-tests      shell-tooling regression tests (fast, no datasets/network):
 #                      scripts/tests/test_agent_gate_summary.sh — proves the
@@ -5463,26 +5465,34 @@ run_kit_dashboard_drift() {
   echo ">>> [$name] $status ($((end - start))s)"
 }
 
-# pub-surface: the standing PUBLIC-API snapshot guard for cqlite-core (issue #1712,
-# epic #1688). scripts/ci/check-pub-surface.sh derives the crate's default-feature
-# public surface from rustdoc's OWN emitted item tree — rustc's real name resolution
-# and real cfg evaluation, never re-derived from source text by us — and diffs it
-# against the committed cqlite-core/pub-surface.snapshot. It also asserts that the
-# crate root TELLS THE TRUTH: an unconditional, non-`#[doc(hidden)]`
-# `pub mod NAME;` at the crate root must actually be present in the default public
-# surface. The defect that motivated it: `pub mod benchmarks;` read as shipped public
-# API for months while an inner `#![cfg(feature = "benchmarks")]` hidden inside
-# benchmarks/mod.rs configured it out of every default build — the crate root said one
-# thing and the compiled API said another, and nothing could tell the difference.
-# Fail-closed and affirmative: a cargo doc failure, an absent doc tree, a zero-item
-# enumeration, or a missing committed snapshot are each a NAMED FAIL, never "nothing
-# measured, PASS", and there is no env opt-out. THIS COMPONENT holds the same line for
-# the guard itself (#1712 r6 F2): PASS requires the guard's affirmative measurement
-# line, not merely a zero exit, so an early `return 0` inside the guard is a NAMED FAIL
-# here instead of a vacuous green. Cheap (~6s: `cargo doc --no-deps
-# --lib`, deps already built) and offline — no datasets/network. SKIP-aware (loud,
-# never a silent PASS): SKIPs only when cqlite-core is genuinely absent (a sparse
-# checkout). Its own self-test lives in tooling-tests.
+# pub-surface: the CRATE-ROOT DECLARATION-CONSISTENCY guard for cqlite-core (issue
+# #1712, epic #1688). scripts/ci/check-pub-surface.sh asserts that the crate root
+# TELLS THE TRUTH about the modules it declares: an unconditional,
+# non-`#[doc(hidden)]` top-level `pub mod NAME;` must not be gated by an inner
+# `#![cfg(...)]` inside NAME's own file. The defect that motivated it:
+# `pub mod benchmarks;` read as shipped public API for months while an inner
+# `#![cfg(feature = "benchmarks")]` hidden inside benchmarks/mod.rs configured it out
+# of every default build — the declaration site said one thing, the module's own file
+# said another, and nothing could tell the difference. BOTH FACTS ARE IN THE SOURCE
+# and each is read from a BOUNDED input: the declaration's attributes structurally
+# from lib.rs, and the module file's PROLOGUE (which rustc guarantees holds every
+# inner attribute the module has).
+# THIS IS NOT PUBLIC-API DRIFT DETECTION. There is no snapshot and no `--regenerate`:
+# the rustdoc-derived snapshot half was REMOVED deliberately (#1712 descope — five
+# review findings were all one class, an unbounded scanner that cannot abstain; the
+# principled route to drift detection is #3366). A green here says nothing about
+# whether cqlite-core's public API changed.
+# Fail-closed and affirmative: an unparseable crate root, an unrecognised `pub mod`
+# shape, zero declarations, zero unconditional declarations, a module file resolving
+# to neither or both of its legal paths, an unreadable module file, a block comment in
+# a prologue or an inner attribute it cannot classify are each a NAMED FAIL, never
+# "nothing measured, PASS", and there is no env opt-out. THIS COMPONENT holds the same
+# line for the guard itself (#1712 r6 F2): PASS requires the guard's affirmative
+# measurement line, not merely a zero exit, so an early `return 0` inside the guard is
+# a NAMED FAIL here instead of a vacuous green. Source-only — no cargo at all,
+# sub-second, offline, no datasets/network. SKIP-aware (loud, never a silent PASS):
+# SKIPs only when cqlite-core is genuinely absent (a sparse checkout). Its own
+# self-test lives in tooling-tests.
 run_pub_surface() {
   local name=pub-surface
   if [ -n "$ONLY" ] && ! grep -qw "$name" <<<"${ONLY//,/ }"; then
@@ -5510,8 +5520,9 @@ run_pub_surface() {
   if bash "$REPO_ROOT/$guard" >"$log" 2>&1; then
     # AFFIRMATIVE MEASUREMENT, not "no error observed" (issue #1712 r6 F2). A zero
     # exit is only HALF the verdict: the guard must also have PRINTED what it
-    # measured — `pub-surface: N public items … match … snapshot; M crate-root
-    # declarations consistent`. Keying PASS on the exit status alone (and echoing
+    # measured — `pub-surface: N crate-root declarations scanned … (M pub mod, of
+    # which K unconditional); K module-file prologues read from source; 0
+    # inconsistent`. Keying PASS on the exit status alone (and echoing
     # that line with `|| true`) meant an accidental early `return 0` anywhere inside
     # the guard reported `pub-surface: PASS` while NOTHING had been enumerated. That
     # is CLAUDE.md's named rule — never derive a pass from the ABSENCE of a bad
@@ -5525,10 +5536,15 @@ run_pub_surface() {
     # SAME vacuous-pass shape one level down: a guard printing `pub-surface: starting`
     # and then exiting 0 satisfied it and was recorded PASS. A check against a PREFIX
     # tests a SPELLING; this one tests the STATE, by requiring every element the guard
-    # only knows AFTER it has enumerated the surface — the item count, the snapshot
-    # match, the rustdoc cross-check and the crate-root declaration consistency.
+    # only knows AFTER it has enumerated the crate-root declarations and READ that
+    # many module files off disk — and requiring the two load-bearing counts to be
+    # NONZERO (`[1-9][0-9]*`), because "0 unconditional declarations, 0 prologues
+    # read" is the vacuous measurement itself, and `0 inconsistent` literally.
+    # KEPT IN SYNC BY HAND with the guard's own success line and with case 26(b)'s
+    # positive control in scripts/tests/test_pub_surface_guard.sh — a wording change
+    # must land in all three at once (#1712 descope).
     local measured
-    measured="$(grep -m1 -E '^pub-surface: [0-9]+ public items \+ [0-9]+ associated items .*match .*snapshot .*cross-checked against rustdoc all\.html.*; [0-9]+ crate-root declarations consistent$' "$log" || true)"
+    measured="$(grep -m1 -E '^pub-surface: [0-9]+ crate-root declarations scanned in cqlite-core/src/lib\.rs \([0-9]+ pub mod, of which [1-9][0-9]* unconditional\); [1-9][0-9]* module-file prologues read from source; 0 inconsistent$' "$log" || true)"
     if [ -n "$measured" ]; then
       status=PASS
       # Echo it so a pasted gate log shows the check RAN over a real surface.
@@ -5536,8 +5552,9 @@ run_pub_surface() {
     else
       status=FAIL
       echo "--- [$name] FAILED: the guard exited 0 but printed NO affirmative measurement"
-      echo "    line (\`pub-surface: <N> public items … match … snapshot; <M> crate-root"
-      echo "    declarations consistent\`), so NOTHING was measured and this is NOT a PASS"
+      echo "    line (\`pub-surface: <N> crate-root declarations scanned in … (<M> pub mod, of"
+      echo "    which <K> unconditional); <K> module-file prologues read from source; 0"
+      echo "    inconsistent\`), so NOTHING was measured and this is NOT a PASS"
       echo "    (issue #1712). A zero exit with no measurement is an early return inside"
       echo "    $guard — a real defect in the guard, not a formatting slip; fix the guard"
       echo "    (or, if its success wording moved, update BOTH it and this component)."
@@ -5547,11 +5564,14 @@ run_pub_surface() {
     fi
   else
     status=FAIL
-    echo "--- [$name] FAILED: cqlite-core's public API drifted from the committed"
-    echo '    cqlite-core/pub-surface.snapshot, or a crate-root `pub mod` disagrees with'
-    echo "    the default public surface (issue #1712). If the API change is INTENDED,"
-    echo "    regenerate in the same commit and explain it in the PR body:"
-    echo "        bash scripts/ci/check-pub-surface.sh --regenerate"
+    echo "--- [$name] FAILED: a crate-root \`pub mod\` in cqlite-core/src/lib.rs is"
+    echo "    advertised unconditionally while its own module file gates it with an inner"
+    echo '    `#![cfg(...)]`, or the guard REFUSED over input it cannot classify (issue'
+    echo "    #1712). The diagnostic below names the file and line."
+    echo "    If the module really is conditional, HOIST the gate to the declaration site"
+    echo '    (`#[cfg(feature = "...")] pub mod NAME;`) so the crate root tells the truth;'
+    echo "    if the guard refused, the remedy it printed is the fix. There is no snapshot"
+    echo "    to regenerate — this guard does not detect public-API drift (see #3366)."
     echo "--- last 60 lines of $log ---"
     tail -60 "$log"
     echo "--- end of $name output ---"

@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
-# test_pub_surface_guard.sh — self-test for the cqlite-core public-surface snapshot
-# guard, scripts/ci/check-pub-surface.sh (issue #1712, epic #1688).
+# test_pub_surface_guard.sh — self-test for the cqlite-core crate-root
+# declaration-consistency guard, scripts/ci/check-pub-surface.sh (issue #1712,
+# epic #1688).
 #
 # The point of this suite is to prove the guard FIRES, not merely that it exists. A
 # guard nobody has watched fail is indistinguishable from a guard that always passes,
@@ -9,26 +10,41 @@
 # non-zero exit but a distinctive substring of the INTENDED diagnostic — a bare
 # exit-code assertion passes on an unrelated silent abort.
 #
+# WHAT THE GUARD IS, AFTER THE #1712 DESCOPE. It answers ONE question: does the crate
+# root tell the truth about the modules it declares? Two halves, each a bounded read
+# of source:
+#
+#   THE INHERITED HALF — the crate-root scan of cqlite-core/src/lib.rs, which reads
+#   each top-level declaration's attributes STRUCTURALLY (`attrs_verdict`) and
+#   refuses over shapes it does not handle. This half is UNCHANGED by the descope and
+#   is pinned by cases 2, 8, 9, 10, 11, 15, 16, 20, 23, 24 (and case 28, which closes
+#   the r7 F2 residual in it).
+#
+#   THE NEW HALF — the MODULE-FILE ORACLE. For each declaration the scan calls OPEN,
+#   the module's own file is resolved (NAME.rs xor NAME/mod.rs) and its PROLOGUE read,
+#   asking whether an inner `#![...]` attribute mentions `cfg`. This half replaced a
+#   rustdoc-derived item list, so it is where the risk is, and every one of its
+#   REFUSAL paths is pinned: cases 29-36.
+#
+# WHAT IS GONE, so nobody looks for its coverage: the rustdoc-derived public-API
+# snapshot, `cqlite-core/pub-surface.snapshot`, `--regenerate`, the `all.html`
+# cross-check, associated-item enumeration, the re-export/glob rendering and the §1b
+# `doc`-cfg fence were all REMOVED (#1712 lead ruling). Five review findings across
+# rounds 4-7 were one defect class — a scanner that had to find declarations anywhere
+# in arbitrary source, an unbounded parsing problem that cannot abstain. The cases
+# that tested that machinery (old 3, 4, 6, 7, 12, 13, 14, 17, 18, 21, 22, 25, 27) were
+# deleted with it. Public-API DRIFT DETECTION IS NOT A PROPERTY OF THIS GUARD any
+# more; issue #3366 is the principled route to it.
+#
 # Cases:
-#   1. GREEN  — the committed snapshot verifies clean on the real tree.
+#   1. GREEN  — the real tree verifies clean and prints its affirmative measurement.
 #   2. RED    — the CONSISTENCY ASSERT. A scratch checkout is reverted to the
 #               pre-#1712 shape (bare ungated `pub mod benchmarks;` at the crate root
 #               + the inner `#![cfg(feature = "benchmarks")]` back in
 #               benchmarks/mod.rs) and the guard must FAIL naming `benchmarks`. This
 #               is the pre-change-main red, PINNED so it can never silently stop
 #               being a red.
-#   3. RED    — snapshot drift. A new public item is added to an existing public
-#               module; VERIFY must FAIL with a diff naming it.
-#   4. RED    — the committed snapshot is missing; VERIFY must FAIL naming the
-#               regenerate command, never pass vacuously over an absent baseline.
 #   5. USAGE  — an unrecognized argument exits 2 (repo convention).
-#   6. RED    — a new `pub fn` on an EXISTING public struct is named in the diff.
-#               The first cut of the guard enumerated only standalone rustdoc pages
-#               and was blind to this (roborev round 1, blocker 1).
-#   7. RED    — a new VARIANT on an EXISTING public enum is named in the diff (same
-#               blind spot). The variant is added together with its arms in the two
-#               exhaustive matches, so the crate still compiles and the case tests
-#               variant coverage rather than the cargo-doc failure path.
 #   8. RED    — a purely cosmetic `#[cfg_attr(...)]` at the declaration site must NOT
 #               exempt a crate-root `pub mod` from the consistency assert (roborev
 #               round 1, blocker 2: treating every cfg_attr as an exemption reopened
@@ -39,68 +55,39 @@
 #   pinned here:
 #   9.  RED    — a SAME-LINE `#[attr] pub mod x;` must be seen at all. The old
 #                accumulator dropped it entirely, so the module escaped the assert
-#                AND the snapshot: a false PASS.
-#  10.  SHAPES — a multi-line attribute must join onto its declaration, a trailing
+#                and was never checked against its module file: a false PASS.
+#  10.  GREEN  — a multi-line attribute must join onto its declaration, a trailing
 #                `// comment` must not leak into the module name, and a `pub mod`
 #                inside a `/* */` block must stay a phantom. All three used to be
 #                false FAILs.
 #  11.  RED    — when the two independent crate-root derivations disagree the guard
 #                must REFUSE, not quietly use the smaller set.
-#  12.  PINNED — plain / `#[cfg]` / `#[doc(hidden)]` / multi-line `pub use`, the
-#                shapes that always worked, asserted straight off the snapshot.
 #
-#   Public-surface ENUMERATION and ATTRIBUTE reading (roborev round 2):
-#  13.  RED    — deleting a public RE-EXPORT of an otherwise-public item must red and
-#                name it. A filesystem walk cannot see this at all.
-#  14.  GREEN  — renaming a PRIVATE, only-re-exported-through module must NOT be a
-#                public API change.
+#   ATTRIBUTE reading at the declaration site (roborev round 2):
 #  15.  RED    — a tell-tale token (`doc(hidden)`, `cfg(`) inside an attribute's
 #                STRING VALUE must not exempt a declaration from the assert.
 #  16.  GREEN  — a real `#[cfg]` separated from its item by blank/comment lines must
 #                still gate it.
 #
-#   Trust boundaries of the measurement itself (roborev round 3):
-#  17.  GREEN  — a scratch built from a DIRTY tree (uncommitted API change + its
-#                regenerated snapshot) must verify clean, so the ordinary
-#                change -> regenerate -> test -> commit workflow is not a booby trap.
-#  18.  RED    — a `doc` cfg predicate must make the guard REFUSE: `cargo doc`
-#                compiles with `doc` SET, so a `#[cfg(not(doc))]` item ships while
-#                being invisible to rustdoc and to this snapshot.
 #  19.  KILL   — a killed run must not leave registered git worktrees behind (measured:
 #                a 2-minute tool timeout left 11, and `git worktree prune` could not
 #                reclaim them). Pins the trap list structurally, that cleanup reclaims
 #                such a worktree BY EXPLICIT PATH, and — the regression guard — that a
 #                fresh run leaves a CONCURRENT run's scratch worktrees alone.
 #
-#   A SHARED blind spot of the two derivations (roborev r4 F2):
+#   SHARED blind spots of the two derivations — a disagreement they cannot express:
 #  20.  RED    — an INLINE crate-root `pub mod NAME { #![cfg(…)] … }` is invisible to
 #                BOTH derivations, so they AGREE while both are blind and the gate
 #                hiding inside the body passes green. The scan must REFUSE over any
 #                top-level `pub mod` form it does not recognise.
-#
-#   Trust boundaries, second pass (roborev r4 F1/F3) — both were FALSE PASSES:
-#  21.  RED    — the §1b `doc`-cfg refusal was itself a lexical stand-in for a
-#                structural read, and was defeated THREE times: `#[cfg(doc)]` and
-#                `#[cfg_attr(not(doc), cfg(any()))]` sailed past the original grep,
-#                and `#[cfg(/* explanation */ doc)]` sailed past the meta-item walk
-#                that replaced it — each a CERTIFIED snapshot listing an item the
-#                shipped crate does not have. TEN shapes must now refuse, including
-#                the three comment-bearing ones, `#[cfg_attr(doc, doc = "x")]` (bare
-#                CONDITION, assigned attribute) and the DELIBERATE over-fire on
-#                attribute-position `doc(hidden)` — while CONDITIONAL DOCUMENTATION
-#                (`#[cfg_attr(feature = "x", doc = "…")]`) must CERTIFY, since
-#                `doc = "…"` is never a cfg predicate.
-#  22.  RED    — a RELATIVE `CARGO_TARGET_DIR` was resolved against the CALLER's cwd
-#                while cargo resolves it against the repo root, so the guard locked,
-#                deleted and inspected a different tree than the one cargo wrote.
-#
-#   Trust boundaries, third pass (roborev r6 F3) — a FALSE FAIL:
-#  27.  GREEN  — the same workflow as case 17 but with the change `git add`ed. The
-#                overlay reproduced `git diff HEAD` (staged content) as an UNSTAGED
-#                edit while the proof step compared porcelain EXACTLY, and porcelain
-#                distinguishes `M ` from ` M` — so staging anything aborted the suite
-#                before it tested anything. Staged and unstaged deltas are reproduced
-#                separately; both index states are pinned here.
+#  23.  RED    — an INDENTED `pub mod NAME;` at brace depth ZERO, same shape.
+#  24.  GREEN  — an indented `pub mod` NESTED inside a module block (depth 1) is
+#                ordinary Rust and must stay green, or the refusal reds correct code.
+#  28.  RED    — `*/ pub mod NAME;` — CODE AFTER A CLOSING DELIMITER on one line
+#                (roborev r7 finding 2). `INCODE` records only LINE-START comment
+#                state, so this declaration is invisible to BOTH derivations too. Its
+#                positive control is in the same case: the identical tree with the
+#                declaration on its own line must be GREEN.
 #
 #   The COMPONENT that certifies the guard (roborev r6 F2) — also a FALSE PASS:
 #  26.  RED    — `agent-gate.sh`'s pub-surface component assigned PASS on the guard's
@@ -109,7 +96,30 @@
 #                `pub-surface: PASS` — a pass derived from the absence of a bad signal,
 #                in the one component that certifies the public-API guard. The
 #                component must require the affirmative measurement line and otherwise
-#                record a NAMED failure. Carries its own positive control.
+#                record a NAMED failure. Carries its own positive control, plus the
+#                r7 F3 prefix red.
+#
+#   THE NEW HALF — every REFUSAL path of the module-file oracle (#1712 descope). Each
+#   one exists because the guard must REFUSE rather than guess: a skipped declaration
+#   is a silent false PASS in the one assert this guard is. Measured against the same
+#   guard with the refusal branch removed, each of these inputs exits 0 — the numbers
+#   are recorded on the individual cases.
+#  29.  RED    — the module file resolves to NEITHER of its two legal paths.
+#  30.  RED    — the module file resolves to BOTH of them.
+#  31.  RED    — the module file exists but is not a readable regular file.
+#  32.  RED    — a BLOCK COMMENT opens in the prologue. Deliberately NOT modelled:
+#                `/* #![cfg(feature = "x")] */` is a delimiter inside a comment, the
+#                same class as the five deleted findings, and the lead's ruling is to
+#                prefer the refusal because it is bounded and cannot rot.
+#  33.  RED    — an inner attribute that MENTIONS a `cfg` token without being named
+#                `cfg` (`#![cfg_attr(...)]`) is refused, not exempted.
+#  34.  RED    — content follows an inner attribute on the SAME line. Without this,
+#                `#![doc = "]"] #![cfg(x)]` hides a real gate — a false PASS.
+#  35.  RED    — an inner attribute whose `[` never closes.
+#  36.  GREEN  — the positive control for 32-35: a prologue of `//!` comments, blank
+#                lines and INERT inner attributes (`#![allow(...)]`, `#![doc = "…"]`)
+#                must certify normally. Without it, 32-35 would be satisfied by a
+#                guard hardwired to refuse every prologue.
 #
 # NO TEST-ONLY SEAM. The guard's subject is hard-coded on purpose, so the negative
 # cases SUBSTITUTE THE ARTIFACT: each runs in its own `git worktree add --detach HEAD`
@@ -117,21 +127,16 @@
 # different subject substitutes the artifact, never a path variable; a path variable
 # is one more thing a real invoker can set).
 #
-# Cost: each case is one `cargo doc --no-deps` of cqlite-core (~6s) because
-# CARGO_TARGET_DIR is pointed at the main checkout's target dir, so every dependency
-# is already built. Whole suite well under two minutes.
+# Cost: the guard is SOURCE-ONLY since the #1712 descope — no `cargo doc`, no cargo at
+# all — so every case is a sub-second awk/bash run over a scratch worktree. Only case
+# 26, which drives a nested `agent-gate.sh --only pub-surface`, takes seconds.
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 GUARD_REL="scripts/ci/check-pub-surface.sh"
 GUARD="$REPO_ROOT/$GUARD_REL"
-SNAPSHOT_REL="cqlite-core/pub-surface.snapshot"
 
 [ -f "$GUARD" ] || { echo "FAIL: guard script not found at $GUARD"; exit 1; }
-
-# Reuse the main checkout's target dir so the scratch worktrees never rebuild
-# dependencies. Respect an already-exported CARGO_TARGET_DIR (the gate sets one).
-export CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-$REPO_ROOT/target}"
 
 # Scratch-worktree management lives in a shared library so the KILL-SAFETY case can
 # drive the very same code path from a tiny second process (see case 19). It owns the
@@ -145,6 +150,10 @@ scratch_tree() { ps_scratch_tree_from "$REPO_ROOT" "$1"; }
 
 fail_case() { echo "FAIL: $*"; exit 1; }
 
+# The guard's affirmative measurement line, as a REGEX matched WHOLE. Kept in sync BY
+# HAND with the guard's own success line and with `agent-gate.sh`'s `pub-surface`
+# component — a wording change must land in all three at once (#1712 descope).
+MEASURED_RE='^pub-surface: [0-9]+ crate-root declarations scanned in cqlite-core/src/lib\.rs \([0-9]+ pub mod, of which [1-9][0-9]* unconditional\); [1-9][0-9]* module-file prologues read from source; 0 inconsistent$'
 # ---------------------------------------------------------------------------
 # 5. USAGE first — it is the cheapest and needs no worktree.
 # ---------------------------------------------------------------------------
@@ -165,16 +174,14 @@ bash "$GUARD" >"$TMPROOT/green.out" 2>&1
 green_rc=$?
 set -e
 if [ "$green_rc" -ne 0 ]; then
-  echo "FAIL: the guard FAILED on the REAL tree — the committed snapshot has drifted"
-  echo "      from cqlite-core's public API, or the crate root is inconsistent."
-  echo "      Regenerate with: bash $GUARD_REL --regenerate"
+  echo "FAIL: the guard FAILED on the REAL tree — a crate-root \`pub mod\` disagrees with"
+  echo "      its own module file, or the guard refused over input it cannot classify."
   cat "$TMPROOT/green.out"
   exit 1
 fi
-grep -q "public items + .* associated items" "$TMPROOT/green.out" \
-  || fail_case "the guard passed but printed no affirmative measurement line; got: $(cat "$TMPROOT/green.out")"
+grep -qE "$MEASURED_RE" "$TMPROOT/green.out" \
+  || fail_case "the guard passed but printed no affirmative measurement line matching the WHOLE success shape; got: $(cat "$TMPROOT/green.out")"
 echo "OK (1): real tree verifies clean — $(cat "$TMPROOT/green.out")"
-
 # ---------------------------------------------------------------------------
 # 2. RED — the consistency assert, against the pre-#1712 source shape.
 # ---------------------------------------------------------------------------
@@ -183,7 +190,7 @@ scratch_tree pre-1712; wt2="$SCRATCH"
 # `#[cfg(feature = "benchmarks")]` line that sits immediately above
 # `pub mod benchmarks;`. Pure awk — no perl/GNU-sed dependency.
 awk '
-  /^#\[cfg\(feature = "benchmarks"\)\]$/ { held = $0; next }
+  /^#\[cfg\(feature = "benchmarks"\)\]/ { held = $0; next }
   {
     if (held != "" && $0 != "pub mod benchmarks;") print held
     held = ""
@@ -195,7 +202,12 @@ mv "$wt2/lib.rs.reverted" "$wt2/cqlite-core/src/lib.rs"
 grep -qx 'pub mod benchmarks;' "$wt2/cqlite-core/src/lib.rs" \
   || fail_case "case 2 setup: could not restore the bare \`pub mod benchmarks;\` in the scratch tree"
 # The declaration-site gate must be GONE, or the case would pass for the wrong reason.
-if grep -A1 -x '#\[cfg(feature = "benchmarks")\]' "$wt2/cqlite-core/src/lib.rs" | grep -qx 'pub mod benchmarks;'; then
+# Matched WITHOUT a `$` anchor and WITHOUT `-x`: the real declaration carries a
+# trailing `// #1712: gate HERE …` comment, and an anchored pattern could not see it —
+# so this revert silently no-opped and the case certified the very shape it exists to
+# red. (#1712 descope: found by the suite failing once the guard's other half stopped
+# masking it.)
+if grep -B1 -x 'pub mod benchmarks;' "$wt2/cqlite-core/src/lib.rs" | grep -q 'cfg(feature = "benchmarks")'; then
   fail_case "case 2 setup: the declaration-site cfg gate survived the revert"
 fi
 # …and put the hidden inner gate back inside the module file.
@@ -216,82 +228,9 @@ set -e
 }
 grep -q "pub mod benchmarks" "$TMPROOT/case2.out" \
   || fail_case "case 2 — the guard failed but never named \`benchmarks\`; got: $(cat "$TMPROOT/case2.out")"
-grep -q "INCONSISTENT with the real public surface" "$TMPROOT/case2.out" \
+grep -q "INCONSISTENT with the module's own file" "$TMPROOT/case2.out" \
   || fail_case "case 2 — the guard failed for some OTHER reason than the consistency assert; got: $(cat "$TMPROOT/case2.out")"
 echo "OK (2): the consistency assert FAILS on the pre-#1712 shape and names \`benchmarks\`"
-
-# ---------------------------------------------------------------------------
-# 4. RED — the committed snapshot is missing.
-# ---------------------------------------------------------------------------
-scratch_tree no-snapshot; wt4="$SCRATCH"
-rm -f "$wt4/$SNAPSHOT_REL"
-set +e
-bash "$wt4/$GUARD_REL" >"$TMPROOT/case4.out" 2>&1
-case4_rc=$?
-set -e
-[ "$case4_rc" -ne 0 ] || fail_case "case 4 — a MISSING snapshot passed vacuously; got: $(cat "$TMPROOT/case4.out")"
-grep -q "MISSING or unreadable" "$TMPROOT/case4.out" \
-  || fail_case "case 4 — the guard failed but not with the missing-snapshot diagnostic; got: $(cat "$TMPROOT/case4.out")"
-grep -q -- "--regenerate" "$TMPROOT/case4.out" \
-  || fail_case "case 4 — the missing-snapshot diagnostic did not print the regenerate command"
-echo "OK (4): a missing snapshot FAILs and names the regenerate command"
-
-# ---------------------------------------------------------------------------
-# 3/6/7. RED — new public surface must appear in the diff, at its real path.
-#
-#    Three additions in ONE scratch checkout (they share a `cargo doc`, which keeps
-#    the suite fast) with three independent assertions:
-#      3 — a new standalone `pub struct`,
-#      6 — a new `pub fn` on an ALREADY-PUBLIC struct,
-#      7 — a new VARIANT on an ALREADY-PUBLIC enum.
-#    6 and 7 are the cases the first cut of the guard could NOT see: it enumerated
-#    only standalone rustdoc pages, so an added associated item moved nothing.
-#
-#    The variant is added together with its arms in the two exhaustive matches in
-#    the same file — without them the crate would not compile, `cargo doc` would
-#    fail, and the case would be exercising the cargo-doc failure path instead of
-#    variant coverage.
-# ---------------------------------------------------------------------------
-scratch_tree new-surface; wt3="$SCRATCH"
-awk '
-  { print }
-  /^    Unknown,$/ && !seen_variant { print "    /// Self-test-only probe variant (#1712)."; print "    PubSurfaceSelfTestVariant,"; seen_variant = 1 }
-  /VersionSource::Unknown => 255,/ { print "            VersionSource::PubSurfaceSelfTestVariant => 254," }
-  /VersionSource::Unknown => "Unknown \(no version information available\)",/ { print "            VersionSource::PubSurfaceSelfTestVariant => \"self-test probe\"," }
-' "$wt3/cqlite-core/src/version_hints.rs" >"$wt3/version_hints.probe.rs"
-mv "$wt3/version_hints.probe.rs" "$wt3/cqlite-core/src/version_hints.rs"
-grep -q 'PubSurfaceSelfTestVariant,' "$wt3/cqlite-core/src/version_hints.rs" \
-  || fail_case "case 7 setup: could not add the probe variant to VersionSource"
-cat >>"$wt3/cqlite-core/src/version_hints.rs" <<'RS'
-
-/// Self-test-only probe item (scripts/tests/test_pub_surface_guard.sh, issue #1712).
-/// Exists solely inside a throwaway scratch worktree to prove the snapshot guard
-/// notices new public surface. Never committed.
-pub struct PubSurfaceSelfTestProbe;
-
-impl ResolvedVersion {
-    /// Self-test-only probe method (#1712), added to an ALREADY-PUBLIC struct.
-    pub fn pub_surface_self_test_probe(&self) -> bool {
-        true
-    }
-}
-RS
-set +e
-bash "$wt3/$GUARD_REL" >"$TMPROOT/case3.out" 2>&1
-case3_rc=$?
-set -e
-[ "$case3_rc" -ne 0 ] || fail_case "case 3/6/7 — new public surface did not trip the snapshot diff; got: $(cat "$TMPROOT/case3.out")"
-grep -q -- "--regenerate" "$TMPROOT/case3.out" \
-  || fail_case "case 3 — the drift diagnostic did not print the regenerate command"
-grep -q "^+struct cqlite_core::version_hints::PubSurfaceSelfTestProbe$" "$TMPROOT/case3.out" \
-  || fail_case "case 3 — a new standalone \`pub struct\` was not recorded at its real path; got: $(grep PubSurfaceSelfTestProbe "$TMPROOT/case3.out")"
-echo "OK (3): a new standalone public item is named in the diff"
-grep -q "^+method cqlite_core::version_hints::ResolvedVersion::pub_surface_self_test_probe$" "$TMPROOT/case3.out" \
-  || fail_case "case 6 — a new \`pub fn\` on an existing public struct was not recorded as a \`method\` line at its real path; got: $(grep pub_surface_self_test_probe "$TMPROOT/case3.out")"
-echo "OK (6): a new pub fn on an existing public struct is named in the diff"
-grep -q "^+variant cqlite_core::version_hints::VersionSource::PubSurfaceSelfTestVariant$" "$TMPROOT/case3.out" \
-  || fail_case "case 7 — a new enum variant was not recorded at its real path; got: $(grep -i pubsurfaceselftestvariant "$TMPROOT/case3.out")"
-echo "OK (7): a new enum variant is named in the diff"
 
 # ---------------------------------------------------------------------------
 # 8. RED — a cosmetic `cfg_attr` must NOT buy an exemption from the consistency
@@ -303,7 +242,7 @@ echo "OK (7): a new enum variant is named in the diff"
 # ---------------------------------------------------------------------------
 scratch_tree cfg-attr-bypass; wt8="$SCRATCH"
 awk '
-  /^#\[cfg\(feature = "benchmarks"\)\]$/ { held = 1; next }
+  /^#\[cfg\(feature = "benchmarks"\)\]/ { held = 1; next }
   {
     if (held && $0 == "pub mod benchmarks;") {
       print "#[cfg_attr(feature = \"benchmarks\", doc = \"opt-in perf runs\")]"
@@ -333,7 +272,7 @@ set -e
   cat "$TMPROOT/case8.out"
   exit 1
 }
-grep -q "INCONSISTENT with the real public surface" "$TMPROOT/case8.out" \
+grep -q "INCONSISTENT with the module's own file" "$TMPROOT/case8.out" \
   || fail_case "case 8 — the guard failed for some OTHER reason than the consistency assert; got: $(cat "$TMPROOT/case8.out")"
 grep -q "pub mod benchmarks" "$TMPROOT/case8.out" \
   || fail_case "case 8 — the guard failed but never named \`benchmarks\`; got: $(cat "$TMPROOT/case8.out")"
@@ -351,7 +290,7 @@ echo "OK (8): a cosmetic cfg_attr does not exempt a crate-root pub mod from the 
 # ---------------------------------------------------------------------------
 scratch_tree sameline-decl; wt9="$SCRATCH"
 awk '
-  /^#\[cfg\(feature = "benchmarks"\)\]$/ { held = 1; next }
+  /^#\[cfg\(feature = "benchmarks"\)\]/ { held = 1; next }
   {
     if (held && $0 == "pub mod benchmarks;") {
       print "#[cfg_attr(feature = \"benchmarks\", doc = \"opt-in perf runs\")] pub mod benchmarks;"
@@ -374,20 +313,26 @@ bash "$wt9/$GUARD_REL" >"$TMPROOT/case9.out" 2>&1
 case9_rc=$?
 set -e
 [ "$case9_rc" -ne 0 ] || fail_case "case 9 — a same-line \`#[attr] pub mod x;\` passed; got: $(cat "$TMPROOT/case9.out")"
-grep -q "INCONSISTENT with the real public surface" "$TMPROOT/case9.out" \
+grep -q "INCONSISTENT with the module's own file" "$TMPROOT/case9.out" \
   || fail_case "case 9 — the consistency assert did NOT fire on a same-line declaration, so the declaration was dropped by the crate-root scan (the false PASS); got: $(cat "$TMPROOT/case9.out")"
 grep -q "pub mod benchmarks" "$TMPROOT/case9.out" \
   || fail_case "case 9 — the guard failed but never named \`benchmarks\`; got: $(cat "$TMPROOT/case9.out")"
 echo "OK (9): a same-line \`#[attr] pub mod x;\` is seen by the crate-root scan and asserted"
 
 # ---------------------------------------------------------------------------
-# 10. GREEN-ish — the three FALSE-FAIL shapes (lead review, defects 2-4).
+# 10. GREEN — the three FALSE-FAIL shapes (lead review, defects 2-4).
 #
 #     Multi-line attributes, a trailing `// comment`, and a `pub mod` inside a
-#     `/* */` block. Each used to produce a spurious INCONSISTENT. The guard still
-#     exits non-zero here (the snapshot legitimately changed — new declarations),
-#     so the assertion is on the CONTENT: no consistency complaint at all, and each
-#     shape rendered correctly in the declarations diff.
+#     `/* */` block. Each used to produce a spurious INCONSISTENT.
+#
+#     Since the #1712 descope this case is a STRICTER pin than it was, and for free:
+#     the guard now resolves a module FILE for every declaration it reads as
+#     unconditional. So if the multi-line attribute failed to join, `probe_multiline`
+#     would read OPEN, no `probe_multiline.rs` exists, and the run would REFUSE — the
+#     shape is pinned by the guard exiting 0 at all, not merely by rendered text.
+#     `probe_trailing` is the mirror image: it IS unconditional, its file DOES exist,
+#     so a trailing comment leaking into the module name would make the guard look
+#     for `probe_trailing;.rs` and refuse.
 # ---------------------------------------------------------------------------
 scratch_tree parse-shapes; wt10="$SCRATCH"
 cat >"$wt10/cqlite-core/src/probe_trailing.rs" <<'RS'
@@ -409,17 +354,27 @@ pub mod probe_phantom;
 RS
 set +e
 bash "$wt10/$GUARD_REL" >"$TMPROOT/case10.out" 2>&1
+case10_rc=$?
 set -e
-grep -q "INCONSISTENT" "$TMPROOT/case10.out" \
-  && fail_case "case 10 — a correctly-written crate root was reported INCONSISTENT (false FAIL); got: $(cat "$TMPROOT/case10.out")"
+[ "$case10_rc" -eq 0 ] || {
+  echo "FAIL: case 10 — a correctly-written crate root was REJECTED (false FAIL). Either a"
+  echo "      MULTI-LINE attribute did not join onto its declaration (so a gated module read"
+  echo "      as unconditional and its absent file refused), a trailing // comment leaked"
+  echo "      into the recorded module name, or a \`pub mod\` inside a /* */ block was taken"
+  echo "      for a real declaration."
+  cat "$TMPROOT/case10.out"
+  exit 1
+}
 grep -q "probe_phantom" "$TMPROOT/case10.out" \
-  && fail_case "case 10 — a \`pub mod\` inside a /* */ block was recorded as a real declaration (phantom)"
-grep -qF '+#[cfg(all( feature = "probe-a", feature = "probe-b" ))] pub mod probe_multiline;' "$TMPROOT/case10.out" \
-  || fail_case "case 10 — a MULTI-LINE attribute was not joined onto its declaration; got: $(grep probe_multiline "$TMPROOT/case10.out")"
-grep -qxF '+pub mod probe_trailing;' "$TMPROOT/case10.out" \
-  || fail_case "case 10 — a trailing // comment leaked into the recorded declaration; got: $(grep probe_trailing "$TMPROOT/case10.out")"
+  && fail_case "case 10 — a \`pub mod\` inside a /* */ block was named by the guard, so it was recorded as a real declaration (phantom); got: $(cat "$TMPROOT/case10.out")"
+grep -qE "$MEASURED_RE" "$TMPROOT/case10.out" \
+  || fail_case "case 10 — the guard exited 0 without its affirmative measurement line; got: $(cat "$TMPROOT/case10.out")"
+# The declaration counts must have MOVED, or the three shapes were not read at all.
+base_open="$(sed -E 's/.*of which ([0-9]+) unconditional.*/\1/' "$TMPROOT/green.out")"
+case10_open="$(sed -E 's/.*of which ([0-9]+) unconditional.*/\1/' "$TMPROOT/case10.out")"
+[ "$case10_open" -eq "$((base_open + 1))" ] \
+  || fail_case "case 10 — adding one unconditional (\`probe_trailing\`) and one gated (\`probe_multiline\`) declaration moved the unconditional count from $base_open to $case10_open, expected $((base_open + 1)). The shapes were not read as intended."
 echo "OK (10): multi-line attrs join, trailing comments strip, block-commented decls stay phantoms"
-
 # ---------------------------------------------------------------------------
 # 11. RED — the two independent crate-root derivations must DISAGREE loudly when
 #     the structured scan under-collects (lead review: the fail-safe split).
@@ -445,74 +400,6 @@ grep -q "probe_second" "$TMPROOT/case11.out" \
 echo "OK (11): the two crate-root derivations disagreeing is a loud FAIL, not a silent smaller set"
 
 # ---------------------------------------------------------------------------
-# 12. The three shapes that ALWAYS worked, pinned so a future rewrite cannot lose
-#     them. Read straight off the committed snapshot — no worktree, no cargo.
-# ---------------------------------------------------------------------------
-decls_section() { sed -n '/^## crate-root-declarations/,$p' "$REPO_ROOT/$SNAPSHOT_REL"; }
-decls_section | grep -qx 'pub mod config;' \
-  || fail_case "case 12 — a PLAIN \`pub mod\` is missing from the snapshot's declarations section"
-decls_section | grep -qx '#\[cfg(feature = "state_machine")\] pub mod query;' \
-  || fail_case "case 12 — a normal-form \`#[cfg]\` declaration is missing or mis-rendered"
-decls_section | grep -qx '#\[doc(hidden)\] pub mod testing;' \
-  || fail_case "case 12 — a \`#[doc(hidden)]\` declaration is missing or mis-rendered"
-decls_section | grep -q '^pub use crate::{ config::Config,' \
-  || fail_case "case 12 — a MULTI-LINE \`pub use\` was not joined onto one recorded line"
-echo "OK (12): plain / #[cfg] / #[doc(hidden)] / multi-line pub use are all pinned in the snapshot"
-
-# ---------------------------------------------------------------------------
-# 13. RED — deleting a PUBLIC RE-EXPORT of an otherwise-public item (roborev r2 F1).
-#
-#     `schema::SchemaLoadWarning` is public through `pub use aggregator::{…}`. The
-#     type itself stays public at its canonical path, so nothing about the
-#     filesystem tree changes — which is exactly why a directory walk passed this
-#     breaking change green. Removing the re-export must now RED and name it.
-# ---------------------------------------------------------------------------
-scratch_tree drop-reexport; wt13="$SCRATCH"
-awk '{ if ($0 == "    SchemaLoadWarning,") next; print }' \
-  "$wt13/cqlite-core/src/schema/mod.rs" >"$wt13/schema.mod.rs"
-mv "$wt13/schema.mod.rs" "$wt13/cqlite-core/src/schema/mod.rs"
-grep -q '^    SchemaLoadWarning,$' "$wt13/cqlite-core/src/schema/mod.rs" \
-  && fail_case "case 13 setup: could not drop SchemaLoadWarning from the re-export list"
-set +e
-bash "$wt13/$GUARD_REL" >"$TMPROOT/case13.out" 2>&1
-case13_rc=$?
-set -e
-[ "$case13_rc" -ne 0 ] || fail_case "case 13 — deleting a public re-export passed GREEN. That is a breaking change the guard must see; got: $(cat "$TMPROOT/case13.out")"
-grep -q "^-reexport cqlite_core::schema::SchemaLoadWarning = " "$TMPROOT/case13.out" \
-  || fail_case "case 13 — the guard failed but the diff did not name the deleted re-export; got: $(grep -i schemaloadwarning "$TMPROOT/case13.out")"
-echo "OK (13): deleting a public re-export REDs and names it"
-
-# ---------------------------------------------------------------------------
-# 14. GREEN — renaming a PRIVATE module that only re-exports through is NOT a
-#     public API change (roborev r2 F2).
-#
-#     `schema::udt_registry` is `mod`, not `pub mod`: nothing public reaches it, and
-#     its items are public only via `pub use udt_registry::{…}`. A directory walk
-#     recorded it and its items, so this rename read as an API change — noise, and
-#     the kind of noise that teaches people to regenerate without reading. The
-#     guard must now PASS OUTRIGHT.
-# ---------------------------------------------------------------------------
-scratch_tree rename-private-mod; wt14="$SCRATCH"
-mv "$wt14/cqlite-core/src/schema/udt_registry.rs" "$wt14/cqlite-core/src/schema/udt_registry_renamed.rs"
-sed -e 's/^mod udt_registry;$/mod udt_registry_renamed;/' \
-    -e 's/^pub use udt_registry::/pub use udt_registry_renamed::/' \
-    "$wt14/cqlite-core/src/schema/mod.rs" >"$wt14/schema.mod.rs"
-mv "$wt14/schema.mod.rs" "$wt14/cqlite-core/src/schema/mod.rs"
-grep -q '^mod udt_registry_renamed;$' "$wt14/cqlite-core/src/schema/mod.rs" \
-  || fail_case "case 14 setup: could not rename the private udt_registry module"
-set +e
-bash "$wt14/$GUARD_REL" >"$TMPROOT/case14.out" 2>&1
-case14_rc=$?
-set -e
-[ "$case14_rc" -eq 0 ] || {
-  echo "FAIL: case 14 — renaming a PRIVATE, re-exported-through module was reported as a"
-  echo "      public API change. Private module paths must not be in the snapshot at all."
-  cat "$TMPROOT/case14.out"
-  exit 1
-}
-echo "OK (14): renaming a private re-exported-through module is not a public API change"
-
-# ---------------------------------------------------------------------------
 # 15. RED — a COSMETIC attribute whose TEXT contains `doc(hidden)` / `cfg(` must not
 #     exempt a declaration from the consistency assert (roborev r2 F3).
 #
@@ -523,7 +410,7 @@ echo "OK (14): renaming a private re-exported-through module is not a public API
 # ---------------------------------------------------------------------------
 scratch_tree cosmetic-attrs; wt15="$SCRATCH"
 awk '
-  /^#\[cfg\(feature = "benchmarks"\)\]$/ {
+  /^#\[cfg\(feature = "benchmarks"\)\]/ {
     print "#[doc = \"this text mentions doc(hidden) but hides nothing\"]"
     print "#[cfg_attr(docsrs, doc(alias = \"cfg(foo)\"))]"
     next
@@ -543,7 +430,7 @@ bash "$wt15/$GUARD_REL" >"$TMPROOT/case15.out" 2>&1
 case15_rc=$?
 set -e
 [ "$case15_rc" -ne 0 ] || fail_case "case 15 — cosmetic attributes bought an exemption; got: $(cat "$TMPROOT/case15.out")"
-grep -q "INCONSISTENT with the real public surface" "$TMPROOT/case15.out" \
+grep -q "INCONSISTENT with the module's own file" "$TMPROOT/case15.out" \
   || fail_case "case 15 — the consistency assert did NOT fire: an attribute whose STRING VALUE mentions doc(hidden)/cfg( was read as structure; got: $(cat "$TMPROOT/case15.out")"
 grep -q "pub mod benchmarks" "$TMPROOT/case15.out" \
   || fail_case "case 15 — the guard failed but never named \`benchmarks\`"
@@ -561,7 +448,7 @@ echo "OK (15): a tell-tale token inside an attribute VALUE does not exempt a dec
 # ---------------------------------------------------------------------------
 scratch_tree separated-attr; wt16="$SCRATCH"
 awk '
-  /^#\[cfg\(feature = "benchmarks"\)\]$/ {
+  /^#\[cfg\(feature = "benchmarks"\)\]/ {
     print
     print ""
     print "/// A doc comment between the gate and the item."
@@ -585,86 +472,6 @@ set -e
   exit 1
 }
 echo "OK (16): a #[cfg] separated from its item by blank/comment lines still gates it"
-
-# ---------------------------------------------------------------------------
-# 17. GREEN — the ORDINARY PRE-COMMIT WORKFLOW must pass (roborev r3 F3).
-#
-#     Change the public API, regenerate the snapshot, run the tests BEFORE
-#     committing. Scratch worktrees used to carry committed HEAD sources with the
-#     live snapshot copied over them, so HEAD's API could not match the regenerated
-#     baseline and the green cases failed — a false FAIL that looks exactly like a
-#     real defect, sitting in the path every future contributor walks.
-#
-#     Proved end to end, through the REAL code path rather than a re-implementation:
-#     an outer scratch stands in for a dirty working tree (a new public item plus its
-#     regenerated snapshot, both UNCOMMITTED), and a child scratch is created from it
-#     with the same scratch_tree_from() the whole suite uses. The child must verify
-#     clean.
-# ---------------------------------------------------------------------------
-scratch_tree dirty-worktree; wt17="$SCRATCH"
-cat >>"$wt17/cqlite-core/src/version_hints.rs" <<'RS'
-
-/// Self-test-only probe item (scripts/tests/test_pub_surface_guard.sh, issue #1712),
-/// standing in for an UNCOMMITTED public-API change. Never committed.
-pub struct PubSurfaceUncommittedProbe;
-RS
-set +e
-bash "$wt17/$GUARD_REL" --regenerate >"$TMPROOT/case17-regen.out" 2>&1
-case17_regen_rc=$?
-set -e
-[ "$case17_regen_rc" -eq 0 ] \
-  || fail_case "case 17 setup: --regenerate failed in the outer scratch; got: $(cat "$TMPROOT/case17-regen.out")"
-git -C "$wt17" status --porcelain | grep -q 'pub-surface.snapshot' \
-  || fail_case "case 17 setup: the regenerated snapshot is not an uncommitted change in the outer scratch"
-
-scratch_tree_from "$wt17" dirty-worktree-child; wt17c="$SCRATCH"
-grep -q 'PubSurfaceUncommittedProbe' "$wt17c/cqlite-core/src/version_hints.rs" \
-  || fail_case "case 17 — the child scratch did not receive the outer scratch's uncommitted source change"
-grep -q 'PubSurfaceUncommittedProbe' "$wt17c/$SNAPSHOT_REL" \
-  || fail_case "case 17 — the child scratch did not receive the outer scratch's regenerated snapshot"
-set +e
-bash "$wt17c/$GUARD_REL" >"$TMPROOT/case17.out" 2>&1
-case17_rc=$?
-set -e
-[ "$case17_rc" -eq 0 ] || {
-  echo "FAIL: case 17 — a scratch checkout built from a tree with an UNCOMMITTED public-API"
-  echo "      change plus its regenerated snapshot did not verify clean. Scratch source and"
-  echo "      baseline are describing different trees, which breaks the ordinary"
-  echo "      change-API -> regenerate -> run-tests -> commit workflow."
-  cat "$TMPROOT/case17.out"
-  exit 1
-}
-echo "OK (17): a scratch built from a DIRTY tree (uncommitted API change + regenerated snapshot) verifies clean"
-
-# ---------------------------------------------------------------------------
-# 18. RED — the crate must not use a `doc` cfg predicate (roborev r3 F1).
-#
-#     `cargo doc` compiles with `doc` SET, so an item behind `#[cfg(not(doc))]`
-#     ships but never reaches rustdoc — invisible to this guard and to every other
-#     rustdoc-derived oracle. The guard must REFUSE rather than certify a surface it
-#     knows may differ from the compiled one.
-#
-#     This case pins the plainest shape. Case 21 pins the shapes that defeated the
-#     three detectors §1b has had, and the deliberate over-approximation of the blunt
-#     one that replaced them.
-# ---------------------------------------------------------------------------
-scratch_tree cfg-doc; wt18="$SCRATCH"
-cat >>"$wt18/cqlite-core/src/version_hints.rs" <<'RS'
-
-#[cfg(not(doc))]
-/// Self-test-only probe (#1712): present in a normal build, invisible to rustdoc.
-pub fn pub_surface_cfg_not_doc_probe() {}
-RS
-set +e
-bash "$wt18/$GUARD_REL" >"$TMPROOT/case18.out" 2>&1
-case18_rc=$?
-set -e
-[ "$case18_rc" -ne 0 ] || fail_case "case 18 — a \`cfg(not(doc))\` item passed GREEN. It ships but never reaches rustdoc, so the snapshot cannot be trusted; got: $(cat "$TMPROOT/case18.out")"
-grep -q 'cfg cfg\|`doc` cfg predicate' "$TMPROOT/case18.out" \
-  || fail_case "case 18 — the guard failed but not with the cfg(doc) diagnostic; got: $(cat "$TMPROOT/case18.out")"
-grep -q 'cargo-public-api' "$TMPROOT/case18.out" \
-  || fail_case "case 18 — the diagnostic did not record that the blind spot is shared by every rustdoc-derived oracle"
-echo "OK (18): a \`doc\` cfg predicate makes the guard REFUSE rather than certify"
 
 # ---------------------------------------------------------------------------
 # 20. RED — an INLINE crate-root `pub mod NAME { … }` is a SHARED BLIND SPOT of the
@@ -698,196 +505,6 @@ grep -q "probe_inline_gated" "$TMPROOT/case20.out" \
 grep -qE "line [0-9]+" "$TMPROOT/case20.out" \
   || fail_case "case 20 — the refusal did not name the offending LINE, so an operator cannot act on it; got: $(cat "$TMPROOT/case20.out")"
 echo "OK (20): an inline crate-root \`pub mod NAME { … }\` makes the scan REFUSE (shared blind spot, not a disagreement)"
-
-# ---------------------------------------------------------------------------
-# 21. RED — every shape that carries a bare `doc` TOKEN inside a `cfg`/`cfg_attr`
-#     attribute must make the guard REFUSE, INCLUDING the shapes that defeated its
-#     three previous, cleverer detectors (roborev r4 F1, r6 F1) — while CONDITIONAL
-#     DOCUMENTATION (`doc = "…"`, an assignment, never a cfg predicate) must CERTIFY.
-#
-#     HISTORY, because it is the whole reason this case exists. §1b has been the
-#     guard's own instance of the defect class it fences off — a LEXICAL pattern
-#     standing in for a STRUCTURAL read — three times over:
-#
-#       #[cfg(doc)]                          -> PASSED GREEN   (false PASS, r4 F1)
-#       #[cfg_attr(not(doc), cfg(any()))]    -> PASSED GREEN   (false PASS, r4 F1)
-#       #[cfg_attr(doc, doc(hidden))]        -> failed, but with the SNAPSHOT-DRIFT
-#                                               diagnostic; the refusal never fired
-#       #[cfg(/* explanation */ doc)]        -> PASSED GREEN   (false PASS, r6 F1:
-#                                               the meta-item walk that fixed the
-#                                               two above did not skip comments)
-#
-#     MEASURED against the meta-item walk immediately before this change, all three
-#     comment-bearing shapes below exited 0 with the refusal never firing: a block
-#     comment before the predicate, a `//` comment inside a multi-line attribute, and
-#     a multi-line `cfg(all(…))` with a comment in it.
-#
-#     Under `cargo doc` the `doc` cfg is SET, so `#[cfg(doc)]` KEEPS an item in
-#     rustdoc's output while a default build DROPS it, and `cfg_attr(not(doc),
-#     cfg(any()))` is the mirror image — rustdoc sees the item, the shipped crate
-#     does not. In both cases the guard certified a snapshot listing a public item the
-#     compiled crate does not have.
-#
-#     The detector is now DELIBERATELY BLUNT (arm on a bare `cfg`/`cfg_attr` token,
-#     disarm at the next `]`, refuse on a bare `doc` token seen while armed), so
-#     there is no predicate-position analysis left to defeat. Its ONE exclusion is a
-#     `doc` token immediately followed by `=`; the last sub-case below pins that
-#     conditional documentation therefore CERTIFIES, and `#[cfg_attr(doc, doc = "x")]`
-#     in the shape list pins that the exclusion did not weaken the CONDITION check.
-# ---------------------------------------------------------------------------
-scratch_tree cfg-doc-shapes; wt21="$SCRATCH"
-t21="$wt21/cqlite-core/src/version_hints.rs"
-cp "$t21" "$TMPROOT/case21.orig.rs"
-# Attach the attribute to an ALREADY-PUBLIC item, deliberately: a brand-new item
-# would move the snapshot and red as ordinary drift, which cannot tell a fired
-# refusal from an unfired one.
-#
-# Shapes are given with `\n` escapes and rendered with `printf %b`, so MULTI-LINE
-# attributes are testable — a single-line-only shape list is how the split-attribute
-# blind spot survived as long as it did.
-apply21() {
-  printf '%b\n' "$1" >"$TMPROOT/case21.attr"
-  awk -v f="$TMPROOT/case21.attr" \
-    '/^pub struct VersionHintResolver;/ && !done { while ((getline l < f) > 0) print l; done = 1 } { print }' \
-    "$TMPROOT/case21.orig.rs" >"$t21"
-  # Proof the substitution landed, line by line: a case whose subject never reached
-  # the file would prove nothing.
-  while IFS= read -r line21; do
-    [ -n "$line21" ] || continue
-    grep -qF "$line21" "$t21" \
-      || fail_case "case 21 setup: could not attach \`$1\` to an existing public item (line \`$line21\` missing), so the case would prove nothing"
-  done <"$TMPROOT/case21.attr"
-}
-
-c21=0
-while IFS= read -r shape; do
-  [ -n "$shape" ] || continue
-  c21=$((c21 + 1))
-  apply21 "$shape"
-  set +e
-  bash "$wt21/$GUARD_REL" >"$TMPROOT/case21.$c21.out" 2>&1
-  rc21=$?
-  set -e
-  [ "$rc21" -ne 0 ] \
-    || fail_case "case 21.$c21 — \`$shape\` on a public item passed GREEN. \`cargo doc\` compiles with the \`doc\` cfg SET, so the snapshot records a surface the shipped crate does not have; got: $(cat "$TMPROOT/case21.$c21.out")"
-  grep -q '`doc` cfg predicate' "$TMPROOT/case21.$c21.out" \
-    || fail_case "case 21.$c21 — \`$shape\` failed, but NOT with the \`doc\`-cfg-predicate refusal. A failure with another cause is not this guard firing; got: $(cat "$TMPROOT/case21.$c21.out")"
-  grep -q 'version_hints.rs' "$TMPROOT/case21.$c21.out" \
-    || fail_case "case 21.$c21 — the refusal did not name the offending FILE, so an operator cannot act on it; got: $(cat "$TMPROOT/case21.$c21.out")"
-  grep -qE 'version_hints\.rs:[0-9]+' "$TMPROOT/case21.$c21.out" \
-    || fail_case "case 21.$c21 — the refusal did not name the offending LINE, so an operator cannot act on it; got: $(cat "$TMPROOT/case21.$c21.out")"
-done <<'SHAPES'
-#[cfg(doc)]
-#[cfg(not(doc))]
-#[cfg(all(doc, unix))]
-#[cfg_attr(doc, doc(hidden))]
-#[cfg_attr(not(doc), cfg(any()))]
-#[cfg(/* explanation */ doc)]
-#[cfg_attr(doc, doc = "x")]
-#[cfg( // explanation of why this is gated\n    doc\n)]
-#[cfg(all(\n    /* why this shape exists */ doc,\n    unix\n))]
-SHAPES
-[ "$c21" -eq 9 ] || fail_case "case 21 — only $c21 of the 9 pinned shapes ran; a case that does not run cannot fail"
-
-# …and CONDITIONAL DOCUMENTATION, which must NOT refuse. `doc` here is an
-# ASSIGNMENT (`doc = "…"`), i.e. the attribute form `#[doc = "text"]` applied under a
-# feature — a standard Rust idiom for prose that only appears in some builds. It gates
-# NOTHING and the guard must certify normally.
-#
-# THIS ASSERTION WAS ONCE THE OPPOSITE, and the inversion is the point. The blunt rule
-# refused on every bare `doc` token seen while armed, and this case pinned that
-# over-fire as INTENDED. It was not acceptable: the shape is one anyone may add to
-# cqlite-core at any time, so shipping it would have bricked the public-API gate for
-# an ordinary edit, with a remedy text telling the author to delete their
-# documentation. "0 occurrences today" was a true measurement of the wrong thing.
-#
-# The fix stays blunt — no parser, no position analysis, no comment or string
-# handling. It is ONE lookahead over TWO characters: a `doc` token immediately followed
-# by `=` or `(` is not reported. The justification is rustc's, and it was MEASURED, not
-# reasoned: an earlier version of this comment claimed "Rust has no `cfg(doc = …)` form"
-# and THAT IS FALSE — `#[cfg(doc = "x")]` compiles. The exclusion is still right, for two
-# verified reasons: `doc(` in PREDICATE position is a SYNTAX ERROR (`#[cfg(doc(hidden))]`
-# => `error[E0539]`), so there is no predicate to exempt; and `doc =` in predicate
-# position is valid but ALWAYS FALSE, because `cargo doc` sets `doc` as a BARE flag, so
-# an item behind `#[cfg(doc = "x")]` is absent even under `--cfg doc` — absent in BOTH
-# builds is not a DIVERGENCE, and divergence is all this refusal prevents. The
-# shapes above prove the blunt rule is otherwise untouched, and
-# `#[cfg_attr(doc, doc = "x")]` up there — bare CONDITION, assigned ATTRIBUTE — is
-# the shape that separates this fix from one that merely greps for `doc =`.
-# All THREE documentation-only shapes, each falsified a narrower rule or would have:
-#   * `doc = "…"`        conditional prose            (falsified the blunt rule, case 8)
-#   * `doc(alias = "…")` conditional docs.rs metadata (falsified the `doc =` rule, case 15)
-#   * `doc(hidden)`      conditional doc visibility   (same class; §1b is not its judge —
-#                        `attrs_verdict` decides snapshot membership, cases 8 and 15)
-c21n=0
-for exempt_shape in \
-  '#[cfg_attr(feature = "parquet", doc = "conditional prose, not a cfg predicate")]' \
-  '#[cfg_attr(docsrs, doc(alias = "cfg(foo)"))]' \
-  '#[cfg_attr(feature = "parquet", doc(hidden))]'
-do
-  c21n=$((c21n + 1))
-  apply21 "$exempt_shape"
-  set +e
-  bash "$wt21/$GUARD_REL" >"$TMPROOT/case21.condoc.$c21n.out" 2>&1
-  rc21n=$?
-  set -e
-  [ "$rc21n" -eq 0 ] \
-    || fail_case "case 21.exempt.$c21n — \`$exempt_shape\` on a public item was REFUSED. It conditions DOCUMENTATION, not item visibility, so it cannot make the rustdoc-derived surface diverge from the shipped one; refusing it bricks the public-API gate for an ordinary edit; got: $(cat "$TMPROOT/case21.condoc.$c21n.out")"
-  grep -q 'doc` cfg predicate' "$TMPROOT/case21.condoc.$c21n.out" \
-    && fail_case "case 21.exempt.$c21n — the guard exited 0 but still printed the \`doc\`-cfg-predicate refusal for \`$exempt_shape\`; got: $(cat "$TMPROOT/case21.condoc.$c21n.out")"
-  grep -q "public items + .* associated items" "$TMPROOT/case21.condoc.$c21n.out" \
-    || fail_case "case 21.exempt.$c21n — \`$exempt_shape\` passed, but the guard printed no affirmative measurement line, so the pass cannot be distinguished from a vacuous one; got: $(cat "$TMPROOT/case21.condoc.$c21n.out")"
-done
-[ "$c21n" -eq 3 ] || fail_case "case 21 — only $c21n of the 3 exempt shapes ran; a case that does not run cannot fail"
-cp "$TMPROOT/case21.orig.rs" "$t21"
-echo "OK (21): all 9 predicate shapes REFUSE (incl. the three comment-bearing ones that passed GREEN before, and \`#[cfg_attr(doc, …)]\` whose CONDITION is bare) while all 3 documentation-only shapes — \`doc = \"…\"\`, \`doc(alias = …)\`, \`doc(hidden)\` — certify normally"
-
-# ---------------------------------------------------------------------------
-# 22. RED — a RELATIVE `CARGO_TARGET_DIR` must not make the guard inspect a
-#     DIFFERENT tree than the one cargo wrote (roborev r4 F3).
-#
-#     THE INVARIANT: the tree the script locks, deletes, enumerates and compares must
-#     be the tree cargo just wrote. The guard runs cargo from the REPO ROOT
-#     (`cd "$REPO_ROOT" && cargo doc`) and cargo resolves a relative
-#     `CARGO_TARGET_DIR` against ITS OWN cwd (measured), so a script that resolves the
-#     same value against the CALLER's cwd is pointed somewhere else entirely.
-#
-#     MEASURED pre-fix, invoked from a foreign cwd with `CARGO_TARGET_DIR=probe-target`:
-#     the guard created and LOCKED `<caller-cwd>/probe-target/.pub-surface-doc.lock`
-#     — not the lock every other run takes, so the mutual exclusion that exists to
-#     stop one run swapping the doc tree under another silently did not apply — and
-#     then reported `the emitted item tree probe-target/doc/cqlite_core is ABSENT`
-#     about a directory cargo was never asked to write.
-#
-#     The scratch's relative target dir is a SYMLINK to the suite's shared target dir,
-#     so the correct resolution is also the fast one (no dependency rebuild) and the
-#     case cannot pass merely because both paths were empty.
-# ---------------------------------------------------------------------------
-scratch_tree rel-target; wt22="$SCRATCH"
-mkdir -p "$CARGO_TARGET_DIR"
-abs22="$(cd "$CARGO_TARGET_DIR" && pwd)"
-ln -s "$abs22" "$wt22/probe-target"
-mkdir -p "$TMPROOT/case22-cwd"
-set +e
-( cd "$TMPROOT/case22-cwd" && CARGO_TARGET_DIR=probe-target bash "$wt22/$GUARD_REL" ) \
-  >"$TMPROOT/case22.out" 2>&1
-case22_rc=$?
-set -e
-[ "$case22_rc" -eq 0 ] || {
-  echo "FAIL: case 22 — under a RELATIVE CARGO_TARGET_DIR invoked from a cwd other than the"
-  echo "      repo root, the guard did not verify the tree cargo wrote. Resolve the doc dir"
-  echo "      against the same base cargo uses (the repo root), or refuse fail-closed."
-  cat "$TMPROOT/case22.out"
-  exit 1
-}
-[ ! -e "$TMPROOT/case22-cwd/probe-target" ] || {
-  echo "FAIL: case 22 — the guard operated on the CALLER-relative path"
-  echo "      $TMPROOT/case22-cwd/probe-target, which cargo never wrote. Whatever it locked,"
-  echo "      deleted and inspected there was not the tree under test."
-  find "$TMPROOT/case22-cwd" -maxdepth 3 | head -10
-  exit 1
-}
-echo "OK (22): a relative CARGO_TARGET_DIR resolves against the repo root — the guard inspects the tree cargo wrote"
 
 # ---------------------------------------------------------------------------
 # 23. RED — an INDENTED crate-root `pub mod NAME;` at BRACE DEPTH ZERO is a SHARED
@@ -1065,76 +682,6 @@ rm -rf "$peer_root"
 echo "OK (19): cleanup reclaims a registered worktree by explicit path, and a fresh run leaves a concurrent run's alone"
 
 # ---------------------------------------------------------------------------
-# 25. RED — a UNICODE-NAMED associated item added to a page that ALREADY carries
-#     ASCII members must be NAMED in the diff (roborev round 5, finding 2).
-#
-#     Rust identifiers are Unicode: `pub fn café(&self)` is ordinary public API. The
-#     anchor scan used to read the name as `[A-Za-z0-9_]+` with a required closing
-#     quote, so such an anchor matched NOTHING and the item was SILENTLY DROPPED —
-#     and neither backstop could see it. The per-section emptiness check is satisfied
-#     by the page's ASCII siblings (the section is non-empty, just incomplete), and
-#     `all.html` lists item PAGES only, never associated items. Measured on the
-#     unfixed guard: appending `pub fn café_probe` + `pub const PROBE_CONSTÉ` to
-#     `ResolvedVersion` produced `RESULT: exit 0`, "1128 public items + 3785
-#     associated items … match cqlite-core/pub-surface.snapshot" — a real public-API
-#     addition certified green. That is the sixth instance in #1712 of one class: a
-#     lexical character class standing in for a structural read.
-#
-#     WHAT RUSTDOC ACTUALLY EMITS, measured rather than assumed (a scratch crate with
-#     `café`, `日本語`, `CONSTÉ`, `Struct変 { fieldé }`, `méthode`, `Assocé`):
-#       * identifier bytes appear RAW UTF-8 in anchors — `id="method.café"`,
-#         `id="variant.Struct変.field.fieldé"` — and are NEVER percent-encoded.
-#         Percent-encoding appears only in `impl-Borrow%3CT%3E-for-T`-shaped anchors,
-#         i.e. `<`/`>`/`'` inside impl headers, which live in EXCLUDED sections.
-#       * rustc normalises a non-NFC source identifier to NFC, and rustdoc emits that
-#         NFC form in BOTH the anchor and the page filename (`struct.Café.html`,
-#         `href="struct.Café.html"` in all.html). So there is exactly ONE spelling and
-#         the item page and the all.html cross-check cannot disagree about it.
-#     Hence no decoding, re-encoding or normalisation anywhere in this guard — which
-#     is the point: the anchor's delimited value is taken verbatim.
-#
-#     The case pins the OTHER direction in the SAME scratch, at no extra `cargo doc`:
-#     the diff must contain NOTHING BUT the two added lines. Widening the anchor read
-#     must not re-spell, drop or duplicate any pre-existing ASCII item.
-# ---------------------------------------------------------------------------
-scratch_tree unicode-assoc; wt25="$SCRATCH"
-cat >>"$wt25/cqlite-core/src/version_hints.rs" <<'RS'
-
-impl ResolvedVersion {
-    /// Self-test-only probe with a NON-ASCII name
-    /// (scripts/tests/test_pub_surface_guard.sh, issue #1712 r5 F2). Exists solely
-    /// inside a throwaway scratch worktree. Never committed.
-    pub fn café_probe(&self) -> bool {
-        true
-    }
-
-    /// Self-test-only probe associated const with a NON-ASCII name (#1712 r5 F2).
-    pub const PROBE_CONSTÉ: u8 = 1;
-}
-RS
-grep -qF 'café_probe' "$wt25/cqlite-core/src/version_hints.rs" \
-  || fail_case "case 25 setup: the Unicode probe items were not written to the scratch source"
-set +e
-bash "$wt25/$GUARD_REL" >"$TMPROOT/case25.out" 2>&1
-case25_rc=$?
-set -e
-[ "$case25_rc" -ne 0 ] \
-  || fail_case "case 25 — a UNICODE-named associated item did NOT trip the snapshot diff. The anchor scan dropped it silently, which is the #1712 r5 F2 FALSE PASS: a real public-API addition with a green guard. Got: $(cat "$TMPROOT/case25.out")"
-grep -qF -- "+method cqlite_core::version_hints::ResolvedVersion::café_probe" "$TMPROOT/case25.out" \
-  || fail_case "case 25 — a \`pub fn\` with a NON-ASCII name was not recorded as a \`method\` line at its real path; got: $(grep -F 'café' "$TMPROOT/case25.out" || echo '(no line mentions it at all)')"
-grep -qF -- "+associatedconstant cqlite_core::version_hints::ResolvedVersion::PROBE_CONSTÉ" "$TMPROOT/case25.out" \
-  || fail_case "case 25 — a \`pub const\` with a NON-ASCII name was not recorded as an \`associatedconstant\` line at its real path; got: $(grep -F 'PROBE_CONST' "$TMPROOT/case25.out" || echo '(no line mentions it at all)')"
-# No spurious drift: the ONLY changed snapshot lines are the two additions.
-awk '/^\+\+\+/ || /^---/ { next } /^[+-]/ { print }' "$TMPROOT/case25.out" >"$TMPROOT/case25.changed"
-if [ "$(wc -l <"$TMPROOT/case25.changed" | tr -d ' ')" -ne 2 ] || grep -q '^-' "$TMPROOT/case25.changed"; then
-  echo "FAIL: case 25 — widening the anchor read re-spelled, dropped or duplicated"
-  echo "      pre-existing ASCII surface. Only the two added lines may change:"
-  cat "$TMPROOT/case25.changed"
-  exit 1
-fi
-echo "OK (25): a Unicode-named associated item is named in the diff, and no ASCII item is re-spelled"
-
-# ---------------------------------------------------------------------------
 # 26. RED — the GATE COMPONENT must not report PASS when the guard measured
 #     NOTHING (roborev round 6, finding 2). A VACUOUS PASS.
 #
@@ -1209,8 +756,9 @@ grep -qF 'affirmative measurement' "$TMPROOT/case26a.out" \
 cat >"$wt26/$GUARD_REL" <<'STUB'
 #!/usr/bin/env bash
 # Self-test stub (#1712 r6 F2) — the POSITIVE CONTROL: emits the guard's real
-# affirmative measurement line, so the component must still reach PASS.
-echo "pub-surface: 3 public items + 0 associated items + 0 re-exports + 0 globs over 1 public modules match cqlite-core/pub-surface.snapshot (3 item pages, cross-checked against rustdoc all.html); 1 crate-root declarations consistent"
+# affirmative measurement line (kept in sync BY HAND with the guard and with the
+# component regex in agent-gate.sh), so the component must still reach PASS.
+echo "pub-surface: 26 crate-root declarations scanned in cqlite-core/src/lib.rs (20 pub mod, of which 14 unconditional); 14 module-file prologues read from source; 0 inconsistent"
 exit 0
 STUB
 set +e
@@ -1221,7 +769,7 @@ grep -qE '^pub-surface: +PASS' "$TMPROOT/case26b-summary.txt" \
   || fail_case "case 26 control — a guard that DID emit its measurement line was not recorded PASS, so the requirement is hardwired to FAIL and case 26(a) proves nothing; got: $(grep -E 'pub-surface|RESULT:' "$TMPROOT/case26b-summary.txt" || echo '(no pub-surface line at all)')"
 [ "$case26b_rc" -eq 3 ] \
   || fail_case "case 26 control — expected the successful --only exit status 3 (PARTIAL), got $case26b_rc"
-grep -qF 'public items + ' "$TMPROOT/case26b.out" \
+grep -qF 'module-file prologues read from source' "$TMPROOT/case26b.out" \
   || fail_case "case 26 control — the component passed but did not echo the measurement line, so a pasted gate log would not show the check RAN"
 
 # (c) THE PREFIX RED (roborev r7 finding 3). The first version of the requirement
@@ -1248,77 +796,319 @@ grep -qE 'affirmative measurement' "$TMPROOT/case26c.out" \
 echo "OK (26): the pub-surface GATE COMPONENT requires the guard's affirmative measurement line before PASS — a line that merely BEGINS \`pub-surface: \` does not satisfy it"
 
 # ---------------------------------------------------------------------------
-# 27. GREEN — the ORDINARY PRE-COMMIT WORKFLOW *WITH STAGED CHANGES* must pass
-#     (roborev round 6, finding 3). Case 17's sibling, and another FALSE FAIL.
+# 28. RED — CODE AFTER A CLOSING DELIMITER on the same line (roborev r7 finding 2),
+#     with its own POSITIVE CONTROL.
 #
-#     `git add` your work, then run the tests: that is a completely normal
-#     workflow, and it used to abort the suite BEFORE it tested anything. The
-#     overlay reproduced the source's delta with `git diff HEAD` (which captures
-#     STAGED content) and replayed it with a plain `git apply` (which recreates it
-#     UNSTAGED), while the proof step compares `git status --porcelain` EXACTLY —
-#     and porcelain distinguishes `M ` (staged) from ` M` (unstaged). So every
-#     scratch case failed with "the scratch worktree does not reproduce the working
-#     tree" the moment anything was staged.
+#     `INCODE[i]` records the comment/string state only at the START of line i, so
+#     `*/ pub mod benchmarks;` is skipped by BOTH derivations (each bails on
+#     `!INCODE`). They therefore AGREE while both are blind — a shared blind spot the
+#     mutual cross-check can never see, exactly like the inline and indented forms —
+#     and an inner-gated module declared that way passed GREEN.
 #
-#     Pinned here in the shape that actually occurs: the API change and its
-#     regenerated snapshot are STAGED (`M `), and the source file carries a further
-#     UNSTAGED edit on top (`MM`). The child scratch must reproduce BOTH index
-#     states and the guard must verify clean inside it.
+#     MEASURED with Refusal X removed from the guard: exit 0, i.e. a clean
+#     certification of a crate root advertising a module whose own file gates it.
+#
+#     (b) is the control that makes (a) mean something: the SAME tree with the
+#     declaration on its own line must be GREEN, so the red in (a) is caused by the
+#     mixed line and not by the scratch setup.
 # ---------------------------------------------------------------------------
-scratch_tree staged-worktree; wt27="$SCRATCH"
-cat >>"$wt27/cqlite-core/src/version_hints.rs" <<'RS'
+mixed_line_tree() { # <label> <declaration-line>  -> $SCRATCH
+  scratch_tree "$1"
+  awk '
+    /^#\[cfg\(feature = "benchmarks"\)\]/ { next }
+    $0 == "pub mod benchmarks;" { next }
+    { print }
+  ' "$SCRATCH/cqlite-core/src/lib.rs" >"$SCRATCH/lib.rs.stripped"
+  mv "$SCRATCH/lib.rs.stripped" "$SCRATCH/cqlite-core/src/lib.rs"
+  grep -q 'pub mod benchmarks' "$SCRATCH/cqlite-core/src/lib.rs" \
+    && fail_case "case 28 setup ($1): the original benchmarks declaration survived the strip"
+  printf '%s\n%s\n%s\n' '/* a block comment that closes on the SAME line as the declaration' '   (issue #1712 roborev r7 F2)' "$2" >>"$SCRATCH/cqlite-core/src/lib.rs"
+  # …and the gate hides inside the module file, which is the whole point.
+  printf '%s\n%s\n' '#![cfg(feature = "benchmarks")]' "$(cat "$SCRATCH/cqlite-core/src/benchmarks/mod.rs")" \
+    >"$SCRATCH/cqlite-core/src/benchmarks/mod.rs.new"
+  mv "$SCRATCH/cqlite-core/src/benchmarks/mod.rs.new" "$SCRATCH/cqlite-core/src/benchmarks/mod.rs"
+}
 
-/// Self-test-only probe item (scripts/tests/test_pub_surface_guard.sh, issue #1712
-/// r6 F3), standing in for a STAGED public-API change. Never committed.
-pub struct PubSurfaceStagedProbe;
-RS
+# (a) THE RED: the declaration shares its line with the closing `*/`.
+mixed_line_tree mixed-line-decl '*/ pub mod benchmarks;'; wt28a="$SCRATCH"
 set +e
-bash "$wt27/$GUARD_REL" --regenerate >"$TMPROOT/case27-regen.out" 2>&1
-case27_regen_rc=$?
+bash "$wt28a/$GUARD_REL" >"$TMPROOT/case28a.out" 2>&1
+case28a_rc=$?
 set -e
-[ "$case27_regen_rc" -eq 0 ] \
-  || fail_case "case 27 setup: --regenerate failed in the outer scratch; got: $(cat "$TMPROOT/case27-regen.out")"
-git -C "$wt27" add -- cqlite-core/src/version_hints.rs "$SNAPSHOT_REL" \
-  || fail_case "case 27 setup: could not stage the API change and its regenerated snapshot"
-# …and one further UNSTAGED edit on top of a staged file, so the case covers `MM`
-# too. A comment cannot change the public surface, so the guard must stay green.
-cat >>"$wt27/cqlite-core/src/version_hints.rs" <<'RS'
-// Self-test-only UNSTAGED trailing comment (#1712 r6 F3). Not public API.
-RS
-# Prove the SETUP is genuinely what the case is about — a staged snapshot (`M `) and a
-# staged-plus-modified source file (`MM`). Without this the case could pass by never
-# having staged anything.
-git -C "$wt27" status --porcelain | grep -qE "^M  $SNAPSHOT_REL\$" \
-  || fail_case "case 27 setup: the regenerated snapshot is not STAGED (expected porcelain \`M \`); got: $(git -C "$wt27" status --porcelain)"
-git -C "$wt27" status --porcelain | grep -qE '^MM cqlite-core/src/version_hints\.rs$' \
-  || fail_case "case 27 setup: the source file is not staged-plus-further-modified (expected porcelain \`MM\`); got: $(git -C "$wt27" status --porcelain)"
+[ "$case28a_rc" -ne 0 ] || fail_case "case 28 — \`*/ pub mod benchmarks;\` on ONE line passed GREEN while benchmarks/mod.rs hides an inner \`#![cfg]\`. Both derivations skip a line that does not START in code, so they AGREE while neither saw the declaration; got: $(cat "$TMPROOT/case28a.out")"
+grep -q "code follows a closing block-comment/string delimiter" "$TMPROOT/case28a.out" \
+  || fail_case "case 28 — the guard failed but NOT with the mixed-line refusal, so it failed for some other reason and the blind spot is unproven; got: $(cat "$TMPROOT/case28a.out")"
+grep -qE "line [0-9]+" "$TMPROOT/case28a.out" \
+  || fail_case "case 28 — the refusal did not name the offending LINE, so an operator cannot act on it; got: $(cat "$TMPROOT/case28a.out")"
 
-scratch_tree_from "$wt27" staged-worktree-child; wt27c="$SCRATCH"
-grep -q 'PubSurfaceStagedProbe' "$wt27c/cqlite-core/src/version_hints.rs" \
-  || fail_case "case 27 — the child scratch did not receive the outer scratch's STAGED source change"
-grep -q 'PubSurfaceStagedProbe' "$wt27c/$SNAPSHOT_REL" \
-  || fail_case "case 27 — the child scratch did not receive the outer scratch's STAGED regenerated snapshot"
-grep -q 'UNSTAGED trailing comment' "$wt27c/cqlite-core/src/version_hints.rs" \
-  || fail_case "case 27 — the child scratch did not receive the outer scratch's UNSTAGED edit"
-# The index state itself must be reproduced, not just the file contents: that is what
-# keeps the overlay's proof step an EXACT porcelain comparison rather than a weakened one.
-git -C "$wt27c" status --porcelain | grep -qE "^M  $SNAPSHOT_REL\$" \
-  || fail_case "case 27 — the child scratch did not reproduce the STAGED index state of the snapshot; got: $(git -C "$wt27c" status --porcelain)"
-git -C "$wt27c" status --porcelain | grep -qE '^MM cqlite-core/src/version_hints\.rs$' \
-  || fail_case "case 27 — the child scratch did not reproduce the staged-plus-modified (\`MM\`) index state; got: $(git -C "$wt27c" status --porcelain)"
+# (b) THE POSITIVE CONTROL: same tree, declaration on its own line -> GREEN.
+#     `benchmarks` keeps its inner gate here, so the declaration must be GATED at the
+#     site for this to be green; that is what the real branch does.
+mixed_line_tree own-line-decl '*/'; wt28b="$SCRATCH"
+printf '%s\n%s\n' '#[cfg(feature = "benchmarks")]' 'pub mod benchmarks;' >>"$wt28b/cqlite-core/src/lib.rs"
 set +e
-bash "$wt27c/$GUARD_REL" >"$TMPROOT/case27.out" 2>&1
-case27_rc=$?
+bash "$wt28b/$GUARD_REL" >"$TMPROOT/case28b.out" 2>&1
+case28b_rc=$?
 set -e
-[ "$case27_rc" -eq 0 ] || {
-  echo "FAIL: case 27 — a scratch built from a tree whose public-API change and regenerated"
-  echo "      snapshot are STAGED did not verify clean. Staging your work before running the"
-  echo "      tests is an ordinary workflow; failing it is a false FAIL in the path every"
-  echo "      contributor walks."
-  cat "$TMPROOT/case27.out"
+[ "$case28b_rc" -eq 0 ] || {
+  echo "FAIL: case 28 control — the same tree with the declaration on its OWN line was"
+  echo "      REJECTED, so case 28(a)'s red is not attributable to the mixed line and the"
+  echo "      refusal may simply be firing on the scratch setup."
+  cat "$TMPROOT/case28b.out"
   exit 1
 }
-echo "OK (27): a scratch built from a tree with STAGED changes (plus an unstaged edit on top) verifies clean"
+echo "OK (28): code after a closing \`*/\` on one line makes the scan REFUSE, and the same tree with the declaration on its own line stays GREEN"
 
+# ---------------------------------------------------------------------------
+# THE MODULE-FILE ORACLE — the NEW half (#1712 descope). Cases 29-36.
+#
+# Shared setup helper: replace the crate-root `benchmarks` declaration with an
+# UNCONDITIONAL `pub mod probe_oracle;`, so every case below drives the OPEN path of
+# the oracle over a module the case controls completely. `benchmarks` itself keeps its
+# real declaration-site gate, so it stays exempt and cannot confuse the verdict.
+# ---------------------------------------------------------------------------
+oracle_tree() { # <label>  -> $SCRATCH, with `pub mod probe_oracle;` declared
+  scratch_tree "$1"
+  printf '\n%s\n' 'pub mod probe_oracle;' >>"$SCRATCH/cqlite-core/src/lib.rs"
+}
+# Every oracle case asserts the guard names the module file it could not read; a bare
+# non-zero exit would pass on an unrelated abort.
+oracle_expect_refusal() { # <case> <outfile> <needle>
+  grep -q "probe_oracle" "$2" \
+    || fail_case "case $1 — the guard failed but never named \`probe_oracle\`, so it failed for some other reason; got: $(cat "$2")"
+  grep -qF "$3" "$2" \
+    || fail_case "case $1 — the guard failed but NOT with the intended diagnostic (\"$3\"); got: $(cat "$2")"
+}
+
+# ---------------------------------------------------------------------------
+# 29. RED — the module file resolves to NEITHER legal path.
+#
+#     A declaration the guard cannot match to a file is a declaration it did not
+#     examine. MEASURED with the found==0 branch replaced by `continue`: exit 0, with
+#     the declaration silently unchecked — a false PASS, and the shape a stray
+#     `#[path = "..."]` also produces.
+# ---------------------------------------------------------------------------
+oracle_tree no-module-file; wt29="$SCRATCH"
+set +e
+bash "$wt29/$GUARD_REL" >"$TMPROOT/case29.out" 2>&1
+case29_rc=$?
+set -e
+[ "$case29_rc" -ne 0 ] || fail_case "case 29 — an unconditional \`pub mod probe_oracle;\` with NO module file passed GREEN, so the declaration was never examined; got: $(cat "$TMPROOT/case29.out")"
+oracle_expect_refusal 29 "$TMPROOT/case29.out" "NEITHER of its two legal module files"
+grep -qF "cqlite-core/src/probe_oracle.rs" "$TMPROOT/case29.out" \
+  || fail_case "case 29 — the refusal did not name the file path it looked for; got: $(cat "$TMPROOT/case29.out")"
+grep -qF "cqlite-core/src/probe_oracle/mod.rs" "$TMPROOT/case29.out" \
+  || fail_case "case 29 — the refusal did not name the directory-module path it looked for"
+echo "OK (29): a module file resolving to NEITHER legal path makes the oracle REFUSE, naming both paths"
+
+# ---------------------------------------------------------------------------
+# 30. RED — the module file resolves to BOTH legal paths.
+#
+#     rustc rejects this too ("file for module found at both"); the guard will not
+#     choose one, because choosing is guessing which file carries the gate. MEASURED
+#     with the found>1 branch removed (last-writer-wins on `resolved`): exit 0 while
+#     reading only ONE of the two files — a false PASS whenever the gate is in the
+#     other one.
+# ---------------------------------------------------------------------------
+oracle_tree both-module-files; wt30="$SCRATCH"
+cat >"$wt30/cqlite-core/src/probe_oracle.rs" <<'RS'
+//! Self-test-only probe (#1712 descope): the FILE form.
+RS
+mkdir -p "$wt30/cqlite-core/src/probe_oracle"
+cat >"$wt30/cqlite-core/src/probe_oracle/mod.rs" <<'RS'
+#![cfg(feature = "benchmarks")]
+//! Self-test-only probe (#1712 descope): the DIRECTORY form, carrying the gate — so a
+//! guard that silently picked the FILE form would certify an inner-gated module.
+RS
+set +e
+bash "$wt30/$GUARD_REL" >"$TMPROOT/case30.out" 2>&1
+case30_rc=$?
+set -e
+[ "$case30_rc" -ne 0 ] || fail_case "case 30 — a module resolving to BOTH legal paths passed GREEN, so the guard picked one of them and the gate in the other went unread; got: $(cat "$TMPROOT/case30.out")"
+oracle_expect_refusal 30 "$TMPROOT/case30.out" "resolves to BOTH of its legal module files"
+echo "OK (30): a module file resolving to BOTH legal paths makes the oracle REFUSE rather than choose"
+
+# ---------------------------------------------------------------------------
+# 31. RED — the module path exists but is not a READABLE REGULAR FILE.
+#
+#     A directory named `probe_oracle.rs`, a dangling symlink, or an unreadable mode:
+#     the guard must not read "exists" as "examined". MEASURED with the readability
+#     branch removed: awk fails, and without the branch the failure was reported as an
+#     unexplained abort rather than a named refusal.
+#
+#     A DIRECTORY is used rather than chmod 000 — root ignores the mode bits, and this
+#     suite runs in containers where the test would silently stop testing anything.
+# ---------------------------------------------------------------------------
+oracle_tree unreadable-module-file; wt31="$SCRATCH"
+mkdir -p "$wt31/cqlite-core/src/probe_oracle.rs"
+set +e
+bash "$wt31/$GUARD_REL" >"$TMPROOT/case31.out" 2>&1
+case31_rc=$?
+set -e
+[ "$case31_rc" -ne 0 ] || fail_case "case 31 — a module path that exists but is not a readable regular file passed GREEN; got: $(cat "$TMPROOT/case31.out")"
+oracle_expect_refusal 31 "$TMPROOT/case31.out" "not a READABLE REGULAR FILE"
+echo "OK (31): a module path that is not a readable regular file makes the oracle REFUSE"
+
+# ---------------------------------------------------------------------------
+# 32. RED — a BLOCK COMMENT in the prologue. THE CONDITION-2 REFUSAL.
+#
+#     `/* #![cfg(feature = "x")] */` before the first item is a delimiter inside a
+#     comment — the SAME defect class as the five findings that got the rustdoc half
+#     deleted — and handling it means a block-comment state machine (nesting, `/*`
+#     inside a string, `*/` inside a string). The lead's ruling is explicit: prefer the
+#     refusal, because it is bounded, obviously correct and cannot rot.
+#
+#     The prologue here carries a commented-out gate AND a real one after it, so a
+#     guard that tried to model the comment and got it wrong in either direction is
+#     visibly wrong: MEASURED with the `/*` refusal replaced by "skip the line", the
+#     run reported the COMMENTED-OUT attribute as the defect at the wrong line.
+# ---------------------------------------------------------------------------
+oracle_tree prologue-block-comment; wt32="$SCRATCH"
+cat >"$wt32/cqlite-core/src/probe_oracle.rs" <<'RS'
+//! Self-test-only probe (#1712 descope, condition 2).
+/* #![cfg(feature = "benchmarks")] */
+pub fn probe() {}
+RS
+set +e
+bash "$wt32/$GUARD_REL" >"$TMPROOT/case32.out" 2>&1
+case32_rc=$?
+set -e
+[ "$case32_rc" -ne 0 ] || fail_case "case 32 — a BLOCK COMMENT in a module prologue passed GREEN, so the guard is modelling block-comment state instead of refusing; got: $(cat "$TMPROOT/case32.out")"
+oracle_expect_refusal 32 "$TMPROOT/case32.out" "a BLOCK COMMENT opens in the module prologue"
+grep -qF "cqlite-core/src/probe_oracle.rs:2" "$TMPROOT/case32.out" \
+  || fail_case "case 32 — the refusal did not name the file AND line of the block comment; got: $(cat "$TMPROOT/case32.out")"
+echo "OK (32): a block comment in a module prologue makes the oracle REFUSE, naming file and line"
+
+# ---------------------------------------------------------------------------
+# 33. RED — an inner attribute that MENTIONS `cfg` without being named `cfg`.
+#
+#     `#![cfg_attr(...)]` can itself apply a `cfg`, and deciding that a particular one
+#     does not means parsing meta-items and erasing string contents — the parser this
+#     guard has already paid for five times. So it is REFUSED, not exempted. The two
+#     verdicts are deliberately DIFFERENT text (this one says "cannot be confidently
+#     classified"; the `#![cfg(...)]` defect says INCONSISTENT) so the operator knows
+#     which one they hit. MEASURED with the mentions_cfg branch removed: exit 0.
+# ---------------------------------------------------------------------------
+oracle_tree prologue-cfg-mention; wt33="$SCRATCH"
+cat >"$wt33/cqlite-core/src/probe_oracle.rs" <<'RS'
+//! Self-test-only probe (#1712 descope).
+#![cfg_attr(feature = "benchmarks", allow(dead_code))]
+
+pub fn probe() {}
+RS
+set +e
+bash "$wt33/$GUARD_REL" >"$TMPROOT/case33.out" 2>&1
+case33_rc=$?
+set -e
+[ "$case33_rc" -ne 0 ] || fail_case "case 33 — an inner \`#![cfg_attr(...)]\` in a module prologue was EXEMPTED and passed GREEN. A cfg_attr can apply a cfg; classifying it means a meta-item parser, so it must refuse; got: $(cat "$TMPROOT/case33.out")"
+oracle_expect_refusal 33 "$TMPROOT/case33.out" "mentions a \`cfg\` token and cannot be confidently classified"
+grep -q "INCONSISTENT" "$TMPROOT/case33.out" \
+  && fail_case "case 33 — a cfg MENTION was reported as the INCONSISTENT defect. The two verdicts must be distinguishable, or the operator cannot tell a refusal from a real gate; got: $(cat "$TMPROOT/case33.out")"
+echo "OK (33): an inner attribute merely MENTIONING \`cfg\` is REFUSED (not exempted), with text distinct from the defect verdict"
+
+# ---------------------------------------------------------------------------
+# 34. RED — content follows an inner attribute on the SAME line.
+#
+#     THE FALSE PASS THIS CLOSES: `#![doc = "]"] #![cfg(feature = "x")]`. Bracket
+#     balance ends the first attribute at the `]` inside the string literal, and
+#     everything after it — INCLUDING A REAL GATE — is unexamined. MEASURED with the
+#     `rest != ""` refusal removed: exit 0 on this exact file, i.e. a certified
+#     crate-root declaration whose module gates itself.
+# ---------------------------------------------------------------------------
+oracle_tree prologue-trailing-content; wt34="$SCRATCH"
+cat >"$wt34/cqlite-core/src/probe_oracle.rs" <<'RS'
+//! Self-test-only probe (#1712 descope).
+#![doc = "]"] #![cfg(feature = "benchmarks")]
+
+pub fn probe() {}
+RS
+set +e
+bash "$wt34/$GUARD_REL" >"$TMPROOT/case34.out" 2>&1
+case34_rc=$?
+set -e
+[ "$case34_rc" -ne 0 ] || fail_case "case 34 — a second inner attribute on the same line hid a real \`#![cfg]\` gate and the guard passed GREEN; got: $(cat "$TMPROOT/case34.out")"
+oracle_expect_refusal 34 "$TMPROOT/case34.out" "content follows an inner attribute on the SAME line"
+echo "OK (34): content after an inner attribute on one line makes the oracle REFUSE (a same-line gate cannot hide)"
+
+# ---------------------------------------------------------------------------
+# 35. RED — an inner attribute whose `[` never closes.
+#
+#     Unreadable input, not an exemption. MEASURED with the unterminated branch
+#     returning instead of refusing: the reader walked off the end and printed CLEAN.
+# ---------------------------------------------------------------------------
+oracle_tree prologue-unterminated-attr; wt35="$SCRATCH"
+cat >"$wt35/cqlite-core/src/probe_oracle.rs" <<'RS'
+//! Self-test-only probe (#1712 descope).
+#![cfg_attr(feature = "benchmarks",
+RS
+set +e
+bash "$wt35/$GUARD_REL" >"$TMPROOT/case35.out" 2>&1
+case35_rc=$?
+set -e
+[ "$case35_rc" -ne 0 ] || fail_case "case 35 — an unterminated inner attribute passed GREEN; got: $(cat "$TMPROOT/case35.out")"
+oracle_expect_refusal 35 "$TMPROOT/case35.out" "never closes its \`[\`"
+echo "OK (35): an inner attribute that never closes its \`[\` makes the oracle REFUSE"
+
+# ---------------------------------------------------------------------------
+# 36. GREEN — THE POSITIVE CONTROL for 29-35.
+#
+#     Without it, every case above would be satisfied by a guard hardwired to refuse
+#     any prologue it is handed — a refusal that reds correct code gets waived, and a
+#     waived guard guards nothing. So an ORDINARY prologue must certify: `//!` inner
+#     doc comments, blank lines, a multi-line INERT inner attribute, and an inner
+#     `#![doc = "…"]`.
+#
+#     It also pins the SCOPE of the case-32 refusal, which is the other half of not
+#     reding correct code: a `/* */` block comment AFTER the first item is OUTSIDE the
+#     prologue — rustc forbids an inner attribute there, so the reader has already
+#     stopped and never sees it — and must NOT refuse. (The cost this accepts, stated:
+#     a `/* */` LICENSE HEADER at the very top of a module file declared
+#     unconditionally at the crate root DOES refuse. No file in cqlite-core has one —
+#     case 1 reads all 14 of them — and the remedy is one `//`.)
+# ---------------------------------------------------------------------------
+oracle_tree prologue-inert; wt36="$SCRATCH"
+cat >"$wt36/cqlite-core/src/probe_oracle.rs" <<'RS'
+//! Self-test-only probe (#1712 descope): an ORDINARY prologue that must certify.
+//!
+//! Note that this line mentions a /* block comment */ inside a `//` comment, which
+//! is unambiguously terminated by the newline and must not trip the refusal.
+
+#![allow(
+    dead_code,
+    unused_imports
+)]
+#![doc = "an inner doc attribute mentioning nothing structural"]
+
+/// Self-test-only probe: the FIRST ITEM ends the prologue here.
+pub fn probe() {}
+
+/* A block comment AFTER the first item is OUTSIDE the prologue: rustc forbids an
+   inner attribute here (measured), so the reader has already stopped and must never
+   see this — including the `#![cfg(feature = "benchmarks")]` mentioned in this very
+   sentence, which is inert text in a file region the guard does not read. */
+pub fn probe_two() {}
+RS
+set +e
+bash "$wt36/$GUARD_REL" >"$TMPROOT/case36.out" 2>&1
+case36_rc=$?
+set -e
+[ "$case36_rc" -eq 0 ] || {
+  echo "FAIL: case 36 — an ORDINARY module prologue (//! comments, blank lines, a multi-line"
+  echo "      #![allow(...)] and an #![doc = \"...\"]) was REFUSED, or a /* */ block AFTER the"
+  echo "      first item — outside the prologue, which rustc guarantees — was read. It was"
+  echo "      REFUSED. Cases 29-35 then prove nothing: a guard that refuses everything"
+  echo "      satisfies all of them, and a refusal that reds correct code gets waived."
+  cat "$TMPROOT/case36.out"
+  exit 1
+}
+grep -qE "$MEASURED_RE" "$TMPROOT/case36.out" \
+  || fail_case "case 36 — the guard exited 0 without its affirmative measurement line; got: $(cat "$TMPROOT/case36.out")"
+c36_open="$(sed -E 's/.*of which ([0-9]+) unconditional.*/\1/' "$TMPROOT/case36.out")"
+c36_read="$(sed -E 's/.*; ([0-9]+) module-file prologues read.*/\1/' "$TMPROOT/case36.out")"
+[ "$c36_open" -eq "$((base_open + 1))" ] \
+  || fail_case "case 36 — the added unconditional declaration did not move the count ($base_open -> $c36_open), so \`probe_oracle\` was never examined and the green is vacuous"
+[ "$c36_read" -eq "$c36_open" ] \
+  || fail_case "case 36 — $c36_open unconditional declarations but only $c36_read prologues read; one was skipped"
+echo "OK (36): an ordinary prologue with INERT inner attributes certifies normally, and the added module really was examined"
 echo ""
-echo "PASS: test_pub_surface_guard.sh — all 27 cases (8 green, 17 reds, 1 usage, 1 kill-safety)"
+echo "PASS: test_pub_surface_guard.sh — all 23 cases (5 green, 16 reds, 1 usage, 1 kill-safety)"
