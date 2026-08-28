@@ -1442,10 +1442,32 @@ census = {
     "timeseries": sys.argv[6], "narrow_census_records": 0,
     "census_breadth": "FULL (competing_count present on every in-window record)",
 }
+# THE BOUNDARY SAMPLES, WHICH THIS FIXTURE ORIGINALLY OMITTED. The reporter's job-73 F2
+# check requires a QUIESCENT verdict to be checkable at BOTH edges of its window, and the
+# real writer always records them (see any rig/quiescence-verdict.json: `competing`,
+# `competing_count`, `load`). Composing a verdict without them made the reporter refuse a
+# COVERING, COMPLETE verdict -- so the POSITIVE CONTROL red, and the four refusal cases got
+# their refusal from the boundary precondition instead of from the property each names. A
+# refusal-direction test that fires for the wrong reason measures nothing.
+verdict = {
+    "verdict": "QUIESCENT",
+    "before": {"competing": [], "competing_count": 0,
+               "load": {"load1": 0.11, "load5": 0.20, "load15": 0.30, "runnable": "1/700"}},
+    "after": {"competing": [], "competing_count": 0,
+              "load": {"load1": 0.19, "load5": 0.24, "load15": 0.31, "runnable": "1/702"}},
+    "window_census": census,
+}
+# `drop` names ONE key to remove, from the census or from the verdict's top level, so a case
+# can perturb either layer with the same helper.
 if drop != "-none-":
-    census.pop(drop)
-(d / "quiescence-verdict.json").write_text(
-    json.dumps({"verdict": "QUIESCENT", "window_census": census}, indent=2) + "\n")
+    if drop in census:
+        census.pop(drop)
+    elif drop in verdict:
+        verdict.pop(drop)
+    else:
+        sys.exit(f"fixture bug: drop key {drop!r} is in neither the census nor the verdict; "
+                 "a case perturbing nothing would pass for the wrong reason")
+(d / "quiescence-verdict.json").write_text(json.dumps(verdict, indent=2) + "\n")
 PY
 }
 
@@ -1563,6 +1585,67 @@ if [ "$rc" -ne 0 ] && grep -q 'no rep payload in this session carries a' <<<"$ou
 else
   fail "an unbindable flight-rep window must be refused (rc=$rc, out: $out)"
 fi
+
+# ==========================================================================
+# #3248 job 73 F2 — A QUIESCENT *LABEL* IS NOT QUIESCENT *EVIDENCE*
+# ==========================================================================
+# The reporter used to check that the verdict was well-FORMED and never that its own numbers
+# SUPPORTED the word QUIESCENT: a verdict listing competing processes at a boundary, or
+# reporting nonzero in-window competing samples, certified the session as long as the fields
+# existed. I verified all of this BY HAND when I wrote the fix and did not pin any of it here,
+# which is how the fixture's missing boundary samples then went unnoticed until a full gate
+# red six checks. A fix verified only by hand is a fix with no regression cover.
+#
+# Each case perturbs exactly ONE value of the verdict the POSITIVE CONTROL above proves
+# healthy, and each asserts a diagnostic naming ITS OWN subject — a refusal from some other
+# precondition is the vacuous-pass shape this block exists to refuse.
+q_mutate_verdict() { # q_mutate_verdict <session> <python-expr-on-v>
+  python3 - "$1" "$2" <<'PY'
+import json, pathlib, sys
+path = pathlib.Path(sys.argv[1]) / "quiescence-verdict.json"
+v = json.loads(path.read_text())
+before = json.dumps(v, sort_keys=True)
+exec(sys.argv[2], {"v": v})
+if json.dumps(v, sort_keys=True) == before:
+    sys.exit("fixture bug: mutation changed nothing, so the case would pass for the wrong reason")
+path.write_text(json.dumps(v, indent=2) + "\n")
+PY
+}
+
+q_evidence_case() { # q_evidence_case <label> <expect-substring> <mutation>
+  local label="$1" expect="$2" mutation="$3" dd out rc
+  dd="$TMP/q-ev-$(printf '%s' "$label" | tr -cd 'a-z0-9')"
+  q_judged_session "$dd" "$TMP/corpus"; q_stamp_ts "$dd" "$Q_TS_MS"
+  q_write_verdict "$dd" -60 60 -none-
+  q_mutate_verdict "$dd" "$mutation"
+  out=$(python3 "$REPORT" --dir "$dd" --corpus "$TMP/corpus" 2>&1); rc=$?
+  if [ "$rc" -ne 0 ] && grep -q "$expect" <<<"$out"; then
+    pass "$label"
+  else
+    fail "$label: expected non-zero + '$expect' (rc=$rc, out: $out)"
+  fi
+}
+
+q_evidence_case "a verdict with NO 'before' boundary sample is REFUSED, naming the edge" \
+  "no \`before\` boundary sample" 'v.pop("before")'
+q_evidence_case "a competitor at the BEFORE boundary is REFUSED despite the QUIESCENT label" \
+  "before boundary census lists 1 competing" \
+  'v["before"]["competing"]=["cc1"]; v["before"]["competing_count"]=1'
+q_evidence_case "a competitor at the AFTER boundary is REFUSED despite the QUIESCENT label" \
+  "after boundary census lists 2 competing" \
+  'v["after"]["competing"]=["rustc","ld"]; v["after"]["competing_count"]=2'
+q_evidence_case "an internally contradictory boundary (count != len) is REFUSED" \
+  "holds 0 entr" 'v["after"]["competing_count"]=3'
+q_evidence_case "nonzero in-window competing_samples is REFUSED" \
+  "in-window sample(s) with a competing process" \
+  'v["window_census"]["competing_samples"]=7'
+q_evidence_case "a ZERO-sample window is REFUSED (unmeasured, not quiet)" \
+  "window containing 0 sample" 'v["window_census"]["samples"]=0'
+q_evidence_case "narrow_census_records exceeding samples is REFUSED as impossible" \
+  "which is impossible" 'v["window_census"]["narrow_census_records"]=999'
+q_evidence_case "a sampling gap wider than the verdict's OWN bound is REFUSED" \
+  "exceeds its own stated bound" \
+  'v["window_census"]["coverage_largest_gap_s"]=99.0'
 # ==========================================================================
 # #3272 round 20 — the ERROR-CODE breakdown: see test_ws0_error_code_guards.sh
 # ==========================================================================
@@ -1640,7 +1723,7 @@ fi
 # MEASURED 113 and the floor moves 104 -> 110 by exactly that 6. Raised rather than left alone
 # because these checks STAY in this file — the round-17/20 round trips left it unchanged only
 # because their checks left with them.
-MIN_CHECKS=110
+MIN_CHECKS=118
 if [ "$checks" -lt "$MIN_CHECKS" ]; then
   echo
   echo "FAIL - only $checks check(s) ran; this suite has at least $MIN_CHECKS."
