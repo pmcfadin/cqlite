@@ -884,9 +884,14 @@ oracle_expect_refusal() { # <case> <outfile> <needle>
 # 29. RED — the module file resolves to NEITHER legal path.
 #
 #     A declaration the guard cannot match to a file is a declaration it did not
-#     examine. MEASURED with the found==0 branch replaced by `continue`: exit 0, with
-#     the declaration silently unchecked — a false PASS, and the shape a stray
-#     `#[path = "..."]` also produces.
+#     examine. This is also the shape a stray `#[path = "..."]` produces.
+#
+#     MEASURED with the found==0 branch replaced by `continue`: the run still FAILS —
+#     caught by the guard's READ_COUNT == OPEN_COUNT backstop, which is DEFENCE IN
+#     DEPTH working as intended — but with a diagnostic that names only the COUNTS
+#     ("15 unconditional declarations … only 14 prologues read"), not the declaration
+#     or the file. Both layers are kept deliberately: the backstop makes a skip
+#     impossible, and this refusal makes it ACTIONABLE.
 # ---------------------------------------------------------------------------
 oracle_tree no-module-file; wt29="$SCRATCH"
 set +e
@@ -932,9 +937,14 @@ echo "OK (30): a module file resolving to BOTH legal paths makes the oracle REFU
 # 31. RED — the module path exists but is not a READABLE REGULAR FILE.
 #
 #     A directory named `probe_oracle.rs`, a dangling symlink, or an unreadable mode:
-#     the guard must not read "exists" as "examined". MEASURED with the readability
-#     branch removed: awk fails, and without the branch the failure was reported as an
-#     unexplained abort rather than a named refusal.
+#     the guard must not read "exists" as "examined".
+#
+#     MEASURED with the readability branch removed: exit 0 — a FALSE PASS, not an
+#     abort. awk handed a DIRECTORY emits a warning on stderr (which the guard
+#     captures and only prints on failure) and reads NO RECORDS, so the reader's END
+#     block prints CLEAN and the declaration is certified having been read from
+#     nothing. That is precisely "a positive verdict from an absent measurement", so
+#     the existence test alone can never stand in for the readability test.
 #
 #     A DIRECTORY is used rather than chmod 000 — root ignores the mode bits, and this
 #     suite runs in containers where the test would silently stop testing anything.
@@ -958,15 +968,23 @@ echo "OK (31): a module path that is not a readable regular file makes the oracl
 #     inside a string, `*/` inside a string). The lead's ruling is explicit: prefer the
 #     refusal, because it is bounded, obviously correct and cannot rot.
 #
-#     The prologue here carries a commented-out gate AND a real one after it, so a
-#     guard that tried to model the comment and got it wrong in either direction is
-#     visibly wrong: MEASURED with the `/*` refusal replaced by "skip the line", the
-#     run reported the COMMENTED-OUT attribute as the defect at the wrong line.
+#     THE FIXTURE IS BUILT TO FALSIFY THE NAIVE ALTERNATIVE, because the obvious
+#     "just skip the `/*` line" is what a future reader will reach for. It carries the
+#     lead's literal shape (`/* #![cfg(feature = "x")] */`), then a MULTI-LINE block
+#     comment whose CONTENT looks like an item, then a REAL `#![cfg]` gate. MEASURED
+#     with the refusal replaced by "skip the line": exit 0 — the skip lands on
+#     `pub fn not_really_an_item() {}` inside the comment, reads it as the first item,
+#     ends the prologue there, and never sees the real gate two lines later. A FALSE
+#     PASS, from the very simplification that looks harmless.
 # ---------------------------------------------------------------------------
 oracle_tree prologue-block-comment; wt32="$SCRATCH"
 cat >"$wt32/cqlite-core/src/probe_oracle.rs" <<'RS'
 //! Self-test-only probe (#1712 descope, condition 2).
 /* #![cfg(feature = "benchmarks")] */
+/* a multi-line block comment whose CONTENT looks like the first item:
+   pub fn not_really_an_item() {}
+*/
+#![cfg(feature = "benchmarks")]
 pub fn probe() {}
 RS
 set +e
