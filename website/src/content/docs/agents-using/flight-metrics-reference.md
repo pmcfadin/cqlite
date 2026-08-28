@@ -1,6 +1,6 @@
 ---
 title: Flight metrics reference
-description: Operator reference for every cqlite.* instrument CQLite emits over Arrow Flight and the storage/write/compaction paths — generated from the observability catalog so it cannot drift.
+description: Operator reference for every cqlite.* metric in CQLite's observability catalog — which names are live OTel instruments you can scrape, and which are stats-only and readable solely from Database::stats(). Generated from the catalog so it cannot drift.
 sidebar:
   label: Flight metrics reference
   order: 20
@@ -10,22 +10,20 @@ sidebar:
 
 > GENERATED from the observability catalog (`cqlite-core/src/observability/catalog.rs` + `operator_docs.rs`) by `cargo run -p cqlite-core --example gen_operator_metrics_doc`. Do NOT edit by hand — edit the catalog/annotations and regenerate. The `operator-metrics-doc` agent-gate component fails if this file drifts from the catalog (issue #2426).
 
-Operator-facing reference for every `cqlite.*` instrument CQLite emits over Arrow Flight and the storage/write/compaction paths. Names, units, and bounded attribute sets come straight from the code, so this page cannot silently diverge from what a running server exposes.
+Operator-facing reference for every `cqlite.*` metric name in CQLite's observability catalog, covering Arrow Flight and the storage/write/compaction paths. Names, units, and bounded attribute sets come straight from the code, so this page cannot silently diverge from what a running server exposes.
+
+**Two populations, and the difference matters on a scrape.** Most catalogued names are LIVE OTel instruments: they are registered with the meter and show up on a Prometheus scrape / OTel collector export. The rest are **stats-only** — real recorded values that CQLite surfaces ONLY through the in-process `Database::stats().memory_stats` snapshot and never registers as an instrument. You will NOT find a stats-only name on a scrape, however long you look; read it from memory stats instead. The two are listed in separate sections below.
 
 Related: the Flight/Trino operator docs (`docs/flight-trino/`) and the round scoreboard template (issue #2399) link back to the entries here.
 
-Total instruments: **84**.
+Catalogued metrics: **84** — **78** live OTel instruments and **6** stats-only (not scrapeable).
 
-## All instruments
+## Live instruments
+
+Registered with the OTel meter, so these appear on a Prometheus scrape / OTel collector export.
 
 | Metric | Type | Unit | Attributes | Operator meaning | Healthy vs alarming |
 |---|---|---|---|---|---|
-| `cqlite.cache.key.capacity_bytes` | gauge | `By` | _(none)_ | Surfaced only via `Database::stats().memory_stats` — NOT emitted as a live OTel instrument (not scrapeable from Prometheus/an OTel collector). The global key cache's fixed byte budget (0 when block caching is disabled). | A fixed named constant inside the <128MB envelope; not a user knob. Zero means the read caches are disabled. |
-| `cqlite.cache.key.evictions` | counter | `1` | _(none)_ | Surfaced only via `Database::stats().memory_stats` — NOT emitted as a live OTel instrument (not scrapeable from Prometheus/an OTel collector). Global key-cache entries evicted to stay within the byte budget (budget-driven; distinct from invalidations). | Sustained growth means the hot location set exceeds the fixed budget; expected to be flat on a small working set. |
-| `cqlite.cache.key.hits` | counter | `1` | _(none)_ | Surfaced only via `Database::stats().memory_stats` — NOT emitted as a live OTel instrument (not scrapeable from Prometheus/an OTel collector). Hits on the process-global key→partition-offset cache (a point read skips the Index.db interval parse / trie descent). | A high hit rate means hot partitions are resolving from cache; near-zero on a cold or highly-random point-read workload. |
-| `cqlite.cache.key.invalidations` | counter | `1` | _(none)_ | Surfaced only via `Database::stats().memory_stats` — NOT emitted as a live OTel instrument (not scrapeable from Prometheus/an OTel collector). Global key-cache entries dropped on generation removal/compaction/warm-evict (distinct from budget evictions). | Tracks generation turnover (compaction/refresh); a #2383 rebind over a byte-identical generation does NOT invalidate. |
-| `cqlite.cache.key.misses` | counter | `1` | _(none)_ | Surfaced only via `Database::stats().memory_stats` — NOT emitted as a live OTel instrument (not scrapeable from Prometheus/an OTel collector). Misses on the global key cache (incl. fail-closed identity mismatch); each pays one interval parse / trie descent then populates. | Rises with working-set churn or eviction pressure; a persistently high miss ratio suggests the budget is small vs the hot set. |
-| `cqlite.cache.key.resident_bytes` | gauge | `By` | _(none)_ | Surfaced only via `Database::stats().memory_stats` — NOT emitted as a live OTel instrument (not scrapeable from Prometheus/an OTel collector). Approximate resident footprint of the process-global key cache. | Bounded above by capacity_bytes; a single global cap regardless of how many readers are open. |
 | `cqlite.compaction.budget.consumed` | histogram | `s` | _(none)_ | Maintenance budget actually consumed per maintenance_step call. | Consumed materially exceeding requested means maintenance is overrunning its budget. |
 | `cqlite.compaction.budget.requested` | histogram | `s` | _(none)_ | Maintenance budget requested per maintenance_step call. | Compare against budget.consumed to confirm the scheduler honors its ~10% tolerance. |
 | `cqlite.compaction.bytes_written` | counter | `By` | _(none)_ | Bytes written to compaction output SSTables. | Compare with write.bytes/flush.bytes to reason about write amplification from compaction. |
@@ -104,6 +102,19 @@ Total instruments: **84**.
 | `cqlite.write.bytes` | counter | `By` | _(none)_ | Data.db bytes produced by the SSTable writer across all outputs. | Total on-disk write volume; use with compaction.bytes_written to reason about write amplification. |
 | `cqlite.write.mutations` | counter | `{row}` | _(none)_ | Mutations accepted by the write path (one per successful memtable insert). | Tracks write throughput; flatlining under offered load means writes are blocked. |
 | `cqlite.write.partitions` | counter | `{partition}` | _(none)_ | Partitions written by the SSTable writer (flush + compaction output). | Baseline write-shape signal; interpret alongside write.bytes. |
+
+## Stats-only metrics — NOT OTel instruments
+
+These **6** catalogued names have NO OTel instrument: nothing registers them with a meter, so a Prometheus scrape or OTel collector will never show them. Read them from the in-process `Database::stats()` snapshot at the field named in the last column. This is enforced, not documentation: `catalog::STATS_ONLY_METRICS` is what this section is generated from, and the `stats_only_metrics_are_catalogued_and_never_otel_registered` guard fails the build if one of them ever does get an instrument (issue #1705).
+
+| Metric | Type | Unit | Attributes | Operator meaning | Healthy vs alarming | Read it from |
+|---|---|---|---|---|---|---|
+| `cqlite.cache.key.capacity_bytes` | gauge | `By` | _(none)_ | Surfaced only via `Database::stats().memory_stats` — NOT emitted as a live OTel instrument (not scrapeable from Prometheus/an OTel collector). The global key cache's fixed byte budget (0 when block caching is disabled). | A fixed named constant inside the <128MB envelope; not a user knob. Zero means the read caches are disabled. | `Database::stats().memory_stats.key_cache_capacity_bytes` |
+| `cqlite.cache.key.evictions` | counter | `1` | _(none)_ | Surfaced only via `Database::stats().memory_stats` — NOT emitted as a live OTel instrument (not scrapeable from Prometheus/an OTel collector). Global key-cache entries evicted to stay within the byte budget (budget-driven; distinct from invalidations). | Sustained growth means the hot location set exceeds the fixed budget; expected to be flat on a small working set. | `Database::stats().memory_stats.key_cache_evictions` |
+| `cqlite.cache.key.hits` | counter | `1` | _(none)_ | Surfaced only via `Database::stats().memory_stats` — NOT emitted as a live OTel instrument (not scrapeable from Prometheus/an OTel collector). Hits on the process-global key→partition-offset cache (a point read skips the Index.db interval parse / trie descent). | A high hit rate means hot partitions are resolving from cache; near-zero on a cold or highly-random point-read workload. | `Database::stats().memory_stats.key_cache_hits` |
+| `cqlite.cache.key.invalidations` | counter | `1` | _(none)_ | Surfaced only via `Database::stats().memory_stats` — NOT emitted as a live OTel instrument (not scrapeable from Prometheus/an OTel collector). Global key-cache entries dropped on generation removal/compaction/warm-evict (distinct from budget evictions). | Tracks generation turnover (compaction/refresh); a #2383 rebind over a byte-identical generation does NOT invalidate. | `Database::stats().memory_stats.key_cache_invalidations` |
+| `cqlite.cache.key.misses` | counter | `1` | _(none)_ | Surfaced only via `Database::stats().memory_stats` — NOT emitted as a live OTel instrument (not scrapeable from Prometheus/an OTel collector). Misses on the global key cache (incl. fail-closed identity mismatch); each pays one interval parse / trie descent then populates. | Rises with working-set churn or eviction pressure; a persistently high miss ratio suggests the budget is small vs the hot set. | `Database::stats().memory_stats.key_cache_misses` |
+| `cqlite.cache.key.resident_bytes` | gauge | `By` | _(none)_ | Surfaced only via `Database::stats().memory_stats` — NOT emitted as a live OTel instrument (not scrapeable from Prometheus/an OTel collector). Approximate resident footprint of the process-global key cache. | Bounded above by capacity_bytes; a single global cap regardless of how many readers are open. | `Database::stats().memory_stats.key_cache_resident_bytes` |
 
 ## Round-scoreboard mapping (issue #2399)
 

@@ -27,7 +27,7 @@
 //! the catalog itself, so the generator and its freshness test build in any
 //! feature configuration.
 
-use super::catalog::ALL_METRICS;
+use super::catalog::{ALL_METRICS, STATS_ONLY_METRICS};
 use super::operator_docs_annotations::ANNOTATIONS;
 
 /// Repository-relative path of the committed operator reference. The generator
@@ -45,7 +45,7 @@ pub const WEBSITE_DOC_REL: &str =
 const WEBSITE_FRONT_MATTER: &str = "\
 ---
 title: Flight metrics reference
-description: Operator reference for every cqlite.* instrument CQLite emits over Arrow Flight and the storage/write/compaction paths — generated from the observability catalog so it cannot drift.
+description: Operator reference for every cqlite.* metric in CQLite's observability catalog — which names are live OTel instruments you can scrape, and which are stats-only and readable solely from Database::stats(). Generated from the catalog so it cannot drift.
 sidebar:
   label: Flight metrics reference
   order: 20
@@ -157,6 +157,19 @@ pub fn operator_metric_docs() -> Result<Vec<MetricDoc>, DocGenError> {
     Ok(out)
 }
 
+/// The bounded attribute keys of `d`, as a markdown table cell.
+fn render_attributes(d: &MetricDoc) -> String {
+    if d.attributes.is_empty() {
+        "_(none)_".to_string()
+    } else {
+        d.attributes
+            .iter()
+            .map(|a| format!("`{a}`"))
+            .collect::<Vec<_>>()
+            .join("<br>")
+    }
+}
+
 /// Render the deterministic operator-facing markdown reference from the catalog.
 ///
 /// Output is stable across runs (metrics sorted by name, no timestamps) so a
@@ -165,6 +178,20 @@ pub fn operator_metric_docs() -> Result<Vec<MetricDoc>, DocGenError> {
 pub fn render_markdown() -> Result<String, DocGenError> {
     let mut docs = operator_metric_docs()?;
     docs.sort_by(|a, b| a.name.cmp(b.name));
+
+    // Split the catalog into the two populations an operator experiences
+    // DIFFERENTLY (issue #1705): a live OTel instrument is scrapeable, a
+    // `catalog::STATS_ONLY_METRICS` entry provably is not (that list is exactly
+    // the set of catalogued names with no instrument, enforced by
+    // `stats_only_metrics_are_catalogued_and_never_otel_registered`). Rendering
+    // them under one "all instruments" heading with one total told operators to
+    // go looking on a Prometheus scrape for names that cannot be there.
+    let stats_only: std::collections::HashSet<&str> =
+        STATS_ONLY_METRICS.iter().map(|m| m.name).collect();
+    let (stats_only_docs, live): (Vec<MetricDoc>, Vec<MetricDoc>) = docs
+        .iter()
+        .cloned()
+        .partition(|d| stats_only.contains(d.name));
 
     let mut s = String::new();
     let mut line = |t: &str| {
@@ -184,40 +211,93 @@ pub fn render_markdown() -> Result<String, DocGenError> {
     );
     line("");
     line(
-        "Operator-facing reference for every `cqlite.*` instrument CQLite emits \
-         over Arrow Flight and the storage/write/compaction paths. Names, units, \
-         and bounded attribute sets come straight from the code, so this page \
-         cannot silently diverge from what a running server exposes.",
+        "Operator-facing reference for every `cqlite.*` metric name in CQLite's \
+         observability catalog, covering Arrow Flight and the storage/write/compaction \
+         paths. Names, units, and bounded attribute sets come straight from the code, \
+         so this page cannot silently diverge from what a running server exposes.",
+    );
+    line("");
+    line(
+        "**Two populations, and the difference matters on a scrape.** Most catalogued \
+         names are LIVE OTel instruments: they are registered with the meter and show \
+         up on a Prometheus scrape / OTel collector export. The rest are **stats-only** \
+         — real recorded values that CQLite surfaces ONLY through the in-process \
+         `Database::stats().memory_stats` snapshot and never registers as an \
+         instrument. You will NOT find a stats-only name on a scrape, however long you \
+         look; read it from memory stats instead. The two are listed in separate \
+         sections below.",
     );
     line("");
     line("Related: the Flight/Trino operator docs (`docs/flight-trino/`) and the round scoreboard template (issue #2399) link back to the entries here.");
     line("");
-    line(&format!("Total instruments: **{}**.", docs.len()));
+    line(&format!(
+        "Catalogued metrics: **{}** — **{}** live OTel instruments and **{}** \
+         stats-only (not scrapeable).",
+        docs.len(),
+        live.len(),
+        stats_only_docs.len(),
+    ));
     line("");
 
-    line("## All instruments");
+    line("## Live instruments");
+    line("");
+    line(
+        "Registered with the OTel meter, so these appear on a Prometheus scrape / OTel \
+         collector export.",
+    );
     line("");
     line("| Metric | Type | Unit | Attributes | Operator meaning | Healthy vs alarming |");
     line("|---|---|---|---|---|---|");
-    for d in &docs {
-        let attrs = if d.attributes.is_empty() {
-            "_(none)_".to_string()
-        } else {
-            d.attributes
-                .iter()
-                .map(|a| format!("`{a}`"))
-                .collect::<Vec<_>>()
-                .join("<br>")
-        };
+    for d in &live {
         line(&format!(
             "| `{}` | {} | `{}` | {} | {} | {} |",
             d.name,
             d.kind.label(),
             d.unit,
-            attrs,
+            render_attributes(d),
             d.summary,
             d.interpretation,
         ));
+    }
+    if live.is_empty() {
+        line("| _(none)_ | | | | | |");
+    }
+    line("");
+
+    line("## Stats-only metrics — NOT OTel instruments");
+    line("");
+    line(&format!(
+        "These **{}** catalogued names have NO OTel instrument: nothing registers them \
+         with a meter, so a Prometheus scrape or OTel collector will never show them. \
+         Read them from the in-process `Database::stats()` snapshot at the field named \
+         in the last column. This is enforced, not documentation: \
+         `catalog::STATS_ONLY_METRICS` is what this section is generated from, and the \
+         `stats_only_metrics_are_catalogued_and_never_otel_registered` guard fails the \
+         build if one of them ever does get an instrument (issue #1705).",
+        stats_only_docs.len(),
+    ));
+    line("");
+    line("| Metric | Type | Unit | Attributes | Operator meaning | Healthy vs alarming | Read it from |");
+    line("|---|---|---|---|---|---|---|");
+    for d in &stats_only_docs {
+        let field = STATS_ONLY_METRICS
+            .iter()
+            .find(|m| m.name == d.name)
+            .map(|m| format!("`Database::stats().{}`", m.stats_field))
+            .unwrap_or_else(|| "—".to_string());
+        line(&format!(
+            "| `{}` | {} | `{}` | {} | {} | {} | {} |",
+            d.name,
+            d.kind.label(),
+            d.unit,
+            render_attributes(d),
+            d.summary,
+            d.interpretation,
+            field,
+        ));
+    }
+    if stats_only_docs.is_empty() {
+        line("| _(none)_ | | | | | | |");
     }
     line("");
 
@@ -302,6 +382,106 @@ mod tests {
         // Every metric name appears in the rendered table.
         for name in ALL_METRICS {
             assert!(a.contains(name), "rendered doc must mention `{name}`");
+        }
+    }
+
+    /// The rendered counts and section split must be DERIVED from the catalog
+    /// (issue #1705).
+    ///
+    /// The `operator-metrics-doc` gate component only compares the committed file
+    /// against a fresh render, so it is structurally blind to a generator whose
+    /// PROSE is false: before this, the page announced "every `cqlite.*` instrument
+    /// CQLite emits" and "Total instruments: 84" under one "All instruments"
+    /// heading, while 6 of those 84 are `catalog::STATS_ONLY_METRICS` and are
+    /// GUARANTEED (by `stats_only_metrics_are_catalogued_and_never_otel_registered`)
+    /// to have no instrument at all — the page sent operators looking on a
+    /// Prometheus scrape for six names that provably cannot appear there. That is
+    /// issue #1705's own bug class: a doc promising behaviour the code does not have.
+    ///
+    /// The counts here are computed from the catalog independently of the renderer,
+    /// so a hard-coded number in the generator reds this the moment the catalog
+    /// moves — the claim has to be derived, not asserted.
+    #[test]
+    fn rendered_counts_and_sections_are_derived_from_the_catalog() {
+        let doc = render_markdown().expect("render must succeed");
+        let stats_only: std::collections::HashSet<&str> =
+            STATS_ONLY_METRICS.iter().map(|m| m.name).collect();
+        let total = ALL_METRICS.len();
+        let n_stats_only = ALL_METRICS
+            .iter()
+            .filter(|n| stats_only.contains(*n))
+            .count();
+        let n_live = total - n_stats_only;
+
+        let expected_counts = format!(
+            "Catalogued metrics: **{total}** — **{n_live}** live OTel instruments and \
+             **{n_stats_only}** stats-only (not scrapeable)."
+        );
+        assert!(
+            doc.contains(&expected_counts),
+            "the rendered counts must be derived from the catalog; expected \
+             {expected_counts:?}"
+        );
+
+        // The retired claim must not come back: there is no single "all instruments"
+        // population, because 6 catalogued names are not instruments.
+        assert!(
+            !doc.contains("## All instruments"),
+            "a single 'All instruments' section misrepresents the stats-only names"
+        );
+        assert!(
+            !doc.contains("Total instruments:"),
+            "a single instrument total counts stats-only names as instruments"
+        );
+
+        // Each population is rendered in ITS OWN section, and no name is in both.
+        let live_head = "## Live instruments";
+        let stats_head = "## Stats-only metrics — NOT OTel instruments";
+        let live_at = doc.find(live_head).expect("live-instrument section");
+        let stats_at = doc.find(stats_head).expect("stats-only section");
+        assert!(live_at < stats_at, "sections must render in a stable order");
+        let live_section = &doc[live_at..stats_at];
+        // Bounded at the next heading: the round-scoreboard table that follows lists
+        // rows in the same `| `name` |` shape, and swallowing it would make every
+        // live metric look like it were also declared stats-only.
+        let stats_end = doc[stats_at..]
+            .find("\n## ")
+            .map(|o| stats_at + o)
+            .unwrap_or(doc.len());
+        let stats_section = &doc[stats_at..stats_end];
+
+        for name in ALL_METRICS {
+            let row = format!("| `{name}` |");
+            if stats_only.contains(name) {
+                assert!(
+                    stats_section.contains(&row),
+                    "stats-only `{name}` must be listed in the stats-only section"
+                );
+                assert!(
+                    !live_section.contains(&row),
+                    "`{name}` has no OTel instrument, so it must NOT be listed as a \
+                     live instrument"
+                );
+            } else {
+                assert!(
+                    live_section.contains(&row),
+                    "`{name}` is a live instrument and must be listed as one"
+                );
+                assert!(
+                    !stats_section.contains(&row),
+                    "`{name}` has a live instrument, so it must NOT be listed as \
+                     stats-only"
+                );
+            }
+        }
+
+        // And the stats-only rows tell the operator where to actually read them.
+        for m in STATS_ONLY_METRICS {
+            assert!(
+                stats_section.contains(&format!("`Database::stats().{}`", m.stats_field)),
+                "the stats-only row for `{}` must name its stats field",
+                m.name
+            );
         }
     }
 
