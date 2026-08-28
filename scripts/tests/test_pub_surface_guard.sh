@@ -1626,7 +1626,61 @@ bash "$wt52g/$GUARD_REL" >"$TMPROOT/case52g.out" 2>&1
 c52g_rc=$?
 set -e
 [ "$c52g_rc" -ne 0 ] || fail_case "case 52(g) — a split declaration with a BLANK LINE between the halves passed GREEN; the corroboration lookahead must skip blank lines; got: $(cat "$TMPROOT/case52g.out")"
-echo "OK (52): a split MODULE declaration REFUSES (bare, parenthesised, after an attribute, across a blank line) — while a macro token tree containing \`pub\`, a dangling \`pub\` before a NON-module item, one-line \`pub\` items and \`republic\` all stay GREEN"
+
+# (h) THE LOOKAHEAD MUST CROSS COMMENT-ONLY REGIONS (roborev r18 F2). It used to bail on
+#     the first line not starting in ordinary code, so `pub`, a MULTI-LINE comment whose
+#     closing delimiter sits on its own line, then `mod probe;` defeated it — missed by
+#     both derivations AND every refusal. Safe to cross rather than model: normalize()
+#     blanks comments and string contents, so comment-body, closing-delimiter and blank
+#     lines are all indistinguishable whitespace in N[].
+c52_m=0
+for c52h in '/* a comment\n   spanning lines\n*/' '// a single-line note'; do
+  c52_m=$((c52_m + 1))
+  scratch_tree "split-decl-comment-gap-$c52_m"; wt52h="$SCRATCH"
+  printf '\npub\n%b\nmod probe_split;\n' "$c52h" >>"$wt52h/cqlite-core/src/lib.rs"
+  printf '#![cfg(feature = "benchmarks")]\n//! inner-gated\npub fn p() {}\n' >"$wt52h/cqlite-core/src/probe_split.rs"
+  set +e
+  bash "$wt52h/$GUARD_REL" >"$TMPROOT/case52h.out" 2>&1
+  c52h_rc=$?
+  set -e
+  [ "$c52h_rc" -ne 0 ] || fail_case "case 52(h$c52_m) — a split declaration separated by a COMMENT passed GREEN; the corroboration lookahead must cross comment-only regions; got: $(cat "$TMPROOT/case52h.out")"
+  grep -qF "split across lines" "$TMPROOT/case52h.out" \
+    || fail_case "case 52(h$c52_m) — refused, but not via Refusal V; got: $(cat "$TMPROOT/case52h.out")"
+done
+echo "OK (52): a split MODULE declaration REFUSES (bare, parenthesised, after an attribute, across blank lines AND across comments) — while a macro token tree containing \`pub\`, a dangling \`pub\` before a NON-module item, one-line \`pub\` items and \`republic\` all stay GREEN"
+
+# ---------------------------------------------------------------------------
+# 53. RED+GREEN — `# [path = "..."]` with whitespace between `#` and `[` (roborev r18 F1).
+#
+#     r15 canonicalised whitespace between attribute tokens in the PROLOGUE reader; the
+#     CRATE-ROOT scanner kept the contiguous test, so `# [path = "actual.rs"]` before
+#     `pub mod probe;` was DISCARDED — both scans agreed the module was OPEN and resolution
+#     certified a clean standard-path DECOY while the real, self-gated file went unread.
+#     One fix, two homes: the same lexical assumption lived in two scanners.
+#
+#     (b) GREEN — `# [derive(Debug)]` on an ordinary item must still certify.
+# ---------------------------------------------------------------------------
+scratch_tree attr-ws-path-decoy; wt53="$SCRATCH"
+printf '\n# [path = "probe_actual.rs"]\npub mod probe_decoy;\n' >>"$wt53/cqlite-core/src/lib.rs"
+printf '//! CLEAN DECOY at the standard path\npub fn p() {}\n' >"$wt53/cqlite-core/src/probe_decoy.rs"
+printf '#![cfg(feature = "benchmarks")]\n//! the REAL module, and it gates itself\npub fn p() {}\n' >"$wt53/cqlite-core/src/probe_actual.rs"
+set +e
+bash "$wt53/$GUARD_REL" >"$TMPROOT/case53.out" 2>&1
+c53rc=$?
+set -e
+[ "$c53rc" -ne 0 ] || fail_case "case 53 — a \`# [path = ...]\` attribute written with a space was discarded, so the guard certified a clean DECOY while the real module file gates itself; got: $(cat "$TMPROOT/case53.out")"
+grep -qF "path" "$TMPROOT/case53.out" \
+  || fail_case "case 53 — refused but never named the \`path\` attribute; got: $(cat "$TMPROOT/case53.out")"
+
+scratch_tree attr-ws-outer-ok; wt53b="$SCRATCH"
+printf '\n# [derive(Debug)]\npub struct ProbeSpaced;\n' >>"$wt53b/cqlite-core/src/lib.rs"
+set +e
+bash "$wt53b/$GUARD_REL" >"$TMPROOT/case53b.out" 2>&1
+c53b_rc=$?
+set -e
+[ "$c53b_rc" -eq 0 ] || fail_case "case 53(b) — a spaced outer attribute \`# [derive(Debug)]\` on an ordinary item was rejected; got: $(cat "$TMPROOT/case53b.out")"
+echo "OK (53): \`#\` and \`[\` separated by whitespace are canonicalised in the CRATE-ROOT scanner too, so a spaced \`# [path]\` cannot hide behind a decoy — while a spaced outer attribute on an ordinary item still certifies"
+
 
 # ---------------------------------------------------------------------------
 # 36. GREEN — THE POSITIVE CONTROL for 29-38.
@@ -1727,4 +1781,4 @@ grep -qF "affirmative measurement" "$TMPROOT/case39.out" \
 echo "OK (39): a crate root with ZERO unconditional declarations FAILs — the assert never reports success having examined nothing"
 
 echo ""
-echo "PASS: test_pub_surface_guard.sh — all 37 cases (8 green, 27 reds, 1 usage, 1 kill-safety)"
+echo "PASS: test_pub_surface_guard.sh — all 38 cases (8 green, 28 reds, 1 usage, 1 kill-safety)"

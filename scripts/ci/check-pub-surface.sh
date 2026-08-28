@@ -534,9 +534,19 @@ END {
     # difference, and the reason this one is kept: the split-declaration hole IS closable
     # by a bounded LOCAL rule, whereas separating an item macro from an expression macro
     # provably required item boundaries.
+    # THE LOOKAHEAD MUST CROSS COMMENT-ONLY REGIONS (roborev r18 F2). It used to BAIL on
+    # the first line not starting in ordinary code, so `pub`, then a MULTI-LINE comment
+    # whose closing delimiter sits on its own line, then `mod probe;` defeated it —
+    # missed by both derivations AND every refusal.
+    #
+    # Crossing them is safe rather than a new model: `normalize()` blanks comments AND
+    # string contents to spaces, so a comment-body line, a closing-delimiter line and a
+    # blank line are ALL whitespace-only in N[] and indistinguishable from each other. So
+    # the rule is simply "skip whitespace-only lines, stop at the first with content" —
+    # and a line with code AFTER a closing delimiter is Refusal X's business, not this
+    # loop's.
     vnext = 0
     for (vj = i + 1; vj <= n; vj++) {
-      if (!INCODE[vj]) { vnext = -1; break }
       if (N[vj] ~ /^[[:space:]]*$/) continue
       vnext = vj; break
     }
@@ -704,6 +714,18 @@ END {
         CUR = nxt
         BUF = N[CUR]
       }
+      # CANONICALISE WHITESPACE BETWEEN `#`, `!` AND `[` HERE TOO (roborev r18 F1).
+      # r15 fixed this in the PROLOGUE reader and I did not carry it to the crate-root
+      # scanner — the same pattern, fixed in ONE location instead of ALL of them. Left
+      # alone, `# [path = "actual.rs"]` on the line before `pub mod probe;` was DISCARDED,
+      # so both scans agreed the module was OPEN and resolution certified a clean
+      # standard-path DECOY while the real, self-gated file went unexamined.
+      #
+      # Rule for this guard, since this is the second time one fix needed two homes: when
+      # a LEXICAL assumption turns out to be wrong, grep for every site that shares it
+      # before calling the fix done.
+      if (BUF ~ /^#[[:space:]]*![[:space:]]*\[/) sub(/^#[[:space:]]*![[:space:]]*\[/, "#![", BUF)
+      else if (BUF ~ /^#[[:space:]]*\[/) sub(/^#[[:space:]]*\[/, "#[", BUF)
       if (BUF !~ /^#!?\[/) break
       a = take_attr()
       if (a == "") { print "E\tunterminated attribute starting at line " startline; BUF = ""; break }
