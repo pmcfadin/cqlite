@@ -4506,7 +4506,7 @@ printf '== structural: path normalisation has EXACTLY ONE boundary ==\n'
 #   (4) no consumer re-implements header parsing or newline-delimited path membership.
 ORACLES="$SCRIPT_DIR/../flow/roborev-review-oracles.sh"
 CHECKS_FILE="$SCRIPT_DIR/../flow/roborev-review-checks.sh"
-FLOW_FILES=("$ORACLES" "$CHECKS_FILE" "$WRAPPER")
+FLOW_FILES=("$ORACLES" "$CHECKS_FILE" "$WRAPPER_REAL")
 for _f in "${FLOW_FILES[@]}"; do
   if [ ! -f "$_f" ]; then bad "structural: missing $_f"; continue; fi
   # (1) EVERY `git diff` that reads PATHS must be NUL-delimited. A `--numstat`/`--name-only`
@@ -4600,6 +4600,21 @@ fi
 #     in CLAUDE.md and the doctrine page: every `test`/`[` file predicate is two-valued, so it must collapse
 #     "cannot tell" onto one of its answers, and it always picks the permissive one. The "performs NO
 #     filesystem access" assert below is what makes that empty subject set TRUE rather than assumed.
+# ONE DEFINITION OF THE EXECUTABLE-LINE FILTER (#3367). The classifier scan, its control and the
+# order-independence pin below all need the same "strip comments and the --help heredoc" pass. It
+# used to be written out three times, and a port is a second implementation whose correctness is
+# only knowable by differential testing against the original — the exact trap CLAUDE.md records for
+# #3283. So it is a function with ONE body: a filter that drifts between call sites cannot make one
+# caller lenient while its own control still reads green.
+_cls_exec_lines() {
+  awk '
+  FILENAME ~ /roborev-review\.sh$/ && /^usage\(\) \{/ { in_usage = 1 }
+  in_usage && /^EOF$/ { in_usage = 0; next }
+  in_usage { next }
+  /^[[:space:]]*#/ { next }
+  { print }
+' "$@" 2>/dev/null || true
+}
 # ===== THE CLASSIFIER IS GONE, AND MUST STAY GONE (owner ruling (4), #3312) =====
 # Every state, helper and marker below carried one of the four High-severity false verdicts. They are
 # asserted ABSENT rather than fixed, because absence is what the ruling bought: with no delivery-mode
@@ -4620,13 +4635,7 @@ fi
 # A guard whose verdict depends on a pipe buffer is worse than no guard. So the text is captured ONCE
 # and matched in PURE BASH with `case` — no pipe, no subshell, no exit status to lose.
 _classifier=""
-_cls_exec=$(awk '
-  FILENAME ~ /roborev-review\.sh$/ && /^usage\(\) \{/ { in_usage = 1 }
-  in_usage && /^EOF$/ { in_usage = 0; next }
-  in_usage { next }
-  /^[[:space:]]*#/ { next }
-  { print }
-' "$ORACLES" "$CHECKS_FILE" "$WRAPPER" 2>/dev/null || true)
+_cls_exec=$(_cls_exec_lines "$ORACLES" "$CHECKS_FILE" "$WRAPPER_REAL")
 # The capture must be NON-EMPTY: an awk that failed, a renamed file or a filter that swallowed
 # everything would make every `case` below miss and the check would report CLEAN having read nothing.
 if [ -z "$_cls_exec" ]; then
@@ -4661,13 +4670,7 @@ mkdir -p "$_cls_ctl_dir"
 } >"$_cls_ctl_dir/roborev-review.sh"
 printf 'ROBOREV_DIFF_SOURCE_STATE=inline   # an EXECUTABLE reintroduction\n' \
   >"$_cls_ctl_dir/roborev-review-oracles.sh"
-_cls_ctl=$(awk '
-  FILENAME ~ /roborev-review\.sh$/ && /^usage\(\) \{/ { in_usage = 1 }
-  in_usage && /^EOF$/ { in_usage = 0; next }
-  in_usage { next }
-  /^[[:space:]]*#/ { next }
-  { print }
-' "$_cls_ctl_dir/roborev-review-oracles.sh" "$_cls_ctl_dir/roborev-review.sh" 2>/dev/null || true)
+_cls_ctl=$(_cls_exec_lines "$_cls_ctl_dir/roborev-review-oracles.sh" "$_cls_ctl_dir/roborev-review.sh")
 case "$_cls_ctl" in
   *ROBOREV_DIFF_SOURCE_STATE*)
     ok 'structural control: the executable-line filter KEEPS an executable reintroduction, so the scan above is discriminating rather than blind' ;;
@@ -4703,7 +4706,13 @@ fi
 #   (2) BEHAVIOURAL — with `WRAPPER` deliberately poisoned, the scan's verdict must not move, and
 #       the same scan against the poisoned path MUST move. Without the second half, (2) would pass
 #       for a scan that reads nothing at all.
+# COMMENTS STRIPPED FIRST, and this check learned that the hard way: its first version flagged
+# ITS OWN explanatory comment above (the one quoting `"$WRAPPER"` while describing the defect),
+# which is exactly #3367's cause 2 — a structural assert measuring the prose that documents it.
+# A guard that reds on its own rationale is one the next person deletes. `grep -n` is kept for the
+# diagnostic, so the line numbers below still point at real code.
 _wr_scan_leaks=$(grep -nE '(grep|awk|sed|cp|wc|head|tail)[^|]*"\$WRAPPER"' "$TEST_SELF" \
+  | grep -vE '^[0-9]+:[[:space:]]*#' \
   | grep -v 'bash "\$WRAPPER"' || true)
 if [ -z "$_wr_scan_leaks" ]; then
   ok 'structural (#3367): no doctrine scan reads the mutable $WRAPPER — every text scan uses $WRAPPER_REAL, so no verdict depends on which case ran last'
@@ -4727,20 +4736,8 @@ mkdir -p "$_wr_poison_dir"
 } >"$_wr_poison_dir/roborev-review.sh"
 _wr_saved="$WRAPPER"
 WRAPPER="$_wr_poison_dir/roborev-review.sh"
-_cls_via_real=$(awk '
-  FILENAME ~ /roborev-review\.sh$/ && /^usage\(\) \{/ { in_usage = 1 }
-  in_usage && /^EOF$/ { in_usage = 0; next }
-  in_usage { next }
-  /^[[:space:]]*#/ { next }
-  { print }
-' "$ORACLES" "$CHECKS_FILE" "$WRAPPER_REAL" 2>/dev/null || true)
-_cls_via_mutable=$(awk '
-  FILENAME ~ /roborev-review\.sh$/ && /^usage\(\) \{/ { in_usage = 1 }
-  in_usage && /^EOF$/ { in_usage = 0; next }
-  in_usage { next }
-  /^[[:space:]]*#/ { next }
-  { print }
-' "$ORACLES" "$CHECKS_FILE" "$WRAPPER" 2>/dev/null || true)
+_cls_via_real=$(_cls_exec_lines "$ORACLES" "$CHECKS_FILE" "$WRAPPER_REAL")
+_cls_via_mutable=$(_cls_exec_lines "$ORACLES" "$CHECKS_FILE" "$WRAPPER")
 WRAPPER="$_wr_saved"
 _wr_real_hit=no; _wr_mut_hit=no
 case "$_cls_via_real"    in *'mixed-delivery'*) _wr_real_hit=yes ;; esac
@@ -4812,7 +4809,7 @@ fi
 # "the invoker can bypass this" becomes another round — and how the opposite error, treating a real
 # third-party hole as unpatchable, would creep in.
 _tm_missing=""
-for _f in "$ORACLES" "$WRAPPER"; do
+for _f in "$ORACLES" "$WRAPPER_REAL"; do
   grep -qF 'A HOSTILE INVOKER' "$_f" || _tm_missing="$_tm_missing $(basename "$_f")"
 done
 grep -qF 'the INVOKER can bypass this' "$ORACLES" || _tm_missing="$_tm_missing oracles-triage-rule"
@@ -4892,7 +4889,7 @@ else
 fi
 # THE SCOPED RESIDUAL IS STATED ON EVERY SURFACE, in its NARROW form.
 _resid_missing=""
-for _f in "$ORACLES" "$CHECKS_FILE" "$WRAPPER"; do
+for _f in "$ORACLES" "$CHECKS_FILE" "$WRAPPER_REAL"; do
   grep -qiF 'WHICH ALLOWLISTED HUMAN' "$_f" || _resid_missing="$_resid_missing $(basename "$_f")"
 done
 if [ -z "$_resid_missing" ]; then
@@ -4907,7 +4904,7 @@ fi
 # and the verdict values — and only AFFIRMATIVE spellings: the NOTICE deliberately says "there is no digest
 # and no content identity", and a statement of ABSENCE is exactly what must survive.
 _diag=$(grep -hnE 'DETAILS\+=\(|^[[:space:]]*(PROMPT_CONTENT|REVIEW_COMPLETED|TIER1|TIER2|FINDINGS|CENSUS_CHECK|CODE_FREE|PUSH_ASSERT|SHA_ASSERT|JOB_RECORD)=' \
-  "$WRAPPER" "$CHECKS_FILE" "$ORACLES" 2>/dev/null || true)
+  "$WRAPPER_REAL" "$CHECKS_FILE" "$ORACLES" 2>/dev/null || true)
 _diag_stale=$(printf '%s\n' "$_diag" | grep -inE 'captur|watcher|watchdog|observer|digest(ed|ing)? (of|the snapshot)|snapshot digest|mid-copy|SNAPSHOT_(DIGEST|BYTES)|bounded read|read the snapshot' || true)
 if [ -z "$_diag_stale" ]; then
   ok 'structural: no emitted diagnostic names a retired mechanism (capture/watcher/watchdog/observer/digest) as current behaviour'
