@@ -257,3 +257,66 @@ draw, so a compute-heavy encode region can clock lower than a memory-bound scan 
 Should this work's encode-arm clock land materially below 3.509 GHz, **that difference is itself a
 finding** about encode's power draw, not an error to be corrected toward the borrowed number.
 
+
+---
+
+## 6. A named hazard: asserting a state from something ADJACENT to it
+
+Recorded at the coordination lead's request, because it recurred **five times in one session**
+across two independent agents, and because it is the **human-side twin of the silent instrument**.
+
+**The shape.** You want to know whether property P holds. You measure something correlated with P —
+something adjacent, cheap, already to hand — and you report P. When the adjacency breaks, the report
+is confidently wrong and nothing signals it.
+
+**The instances, all from this issue's own delivery:**
+
+1. **This lane** told the coordination lead that AC4 "turns entirely on (a) the clock and (b) the
+   sibling-aggregate question." (b) was recorded explicitly in four places and mechanically enforced.
+   An absence was asserted **without reading for it** — in the same comment that was insisting on
+   affirmative measurement.
+2. **The coordination lead** told three lanes the root checkout contained a fix, having verified that
+   a *commit existed*, not that the checkout contained it.
+3. **The coordination lead** verified a gate pin was **present in a file** and concluded it was **in
+   effect**. It was not: `.bashrc` returns early for non-interactive shells, so every gate on the
+   fleet resolved `slots=3`, not 1. *A setting present in a file is adjacent to a setting in effect.*
+4. **The coordination lead's** probe for the #3451 `SyntaxError` searched for **backslashes at
+   end-of-line** and returned clean; the defect is a backslash **mid-expression**. A second probe
+   found **zero Python heredocs** in a file that plainly contains them. Both returned clean, and
+   **clean was indistinguishable from correct** — the defect was only found by reading a fix commit.
+5. **This lane's own quiescence gate** bounded `load1` at both boundaries and refused a clean run.
+   `load1` is adjacent to "the box is busy" but not identical to it: it is a one-minute decaying
+   average, so immediately after a CPU-bound window it measures **the measurement's own residue**.
+
+**The rule that falls out, and it is the lead's wording:** *a probe that finds nothing proves nothing
+until it is validated against known-good input.* A clean result from an unvalidated probe is not
+evidence of absence; it is evidence of nothing. Every capability check in this work is therefore
+paired with a positive control — the demangler probe was run on a **purpose-built v0-mangled binary**
+so that "it demangles" was observed rather than inferred, and the multiplexing question was settled
+by **running two perf sessions concurrently and reading the enabled-percentage column**, not by
+reasoning about counter allocation.
+
+**And the corollary that cost the most time here:** when a guard fires against your own work, the
+first question is not "how do I get past it" but **"is the guard measuring what I think it is?"** Two
+of the five instances above were guards firing correctly (#3451's fatal step; the stale-binary
+refusal) and one was a guard firing *incorrectly* on a sound run (the `load1` bound). Telling those
+apart required reading the guard, not adjusting the threshold — and in the one case where the guard
+was wrong, the fix was to **relocate the bound to where it is valid and make the binding check
+stronger**, never to loosen it.
+
+### The same shape in the tooling, for completeness
+
+Three further instances landed in *mechanism* rather than in reasoning, and they are the same error:
+
+* `pgrep -f <pattern>` matches the census command's **own cmdline**, so a process census inflates the
+  very count it is measuring. One lane's field read `0\n0`; another's probe reported a busy box that
+  was idle, with both matches being its own `ssh` command string at 0.0% CPU.
+* `pgrep -x` is not the fix: the kernel `comm` field is capped at **15 characters**, so a longer
+  binary name can never match — `pkill` itself warns the invocation "will result in zero matches".
+* A `pkill -f` whose pattern appeared in the invoking shell's own command line **killed that shell**,
+  silently skipping the remainder of a multi-step command (this lane, exit 144).
+
+A census that inflates itself, a kill that matches nothing, and a kill that kills the wrong thing are
+one defect: **the observer appeared in its own measurement.** The fix in every case was to attribute
+by identity — `/proc/<pid>/comm`, `/proc/<pid>/cmdline`, `/proc/<pid>/cwd` — rather than by a pattern
+match over a shared namespace.
