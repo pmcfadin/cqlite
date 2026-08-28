@@ -4947,7 +4947,18 @@ _WR_QS=$(cat <<'AWKEOF'
   # trailing comment (`grep foo "$WRAPPER" # $(bash "$WRAPPER")`) was accepted as an invocation.
   seg = substr(line, 1, cut)
   if (seg ~ /(^|[ \t;&|(])eval([ \t]|$)/) ev = 1
-  printf "%d %d %d %d %d\n%s\n", code, lit, q, mk, ev, seg
+  # QUOTE STATE THAT IS STILL OPEN AT END OF LINE MEANS THIS PARSE IS NOT TRUSTWORTHY. Shell quoting
+  # SPANS lines; this scanner reads one line at a time, so the CLOSING line of a multi-line
+  # single-quoted program begins with a `'` that the scanner reads as OPENING one — inverting state
+  # for the rest of the line and reclassifying every live read on it as inert text. The failing case
+  # is #3367's ORIGINAL defect verbatim: the closing line of the multi-line awk,
+  #   ' "$ORACLES" "$CHECKS_FILE" "$WRAPPER" 2>/dev/null || true)
+  # i.e. the guard would have green-lit the exact shape it exists to catch. `$'…'` ANSI-C quoting
+  # desyncs it the same way, since a `\'` inside is kept by the shell but closes the span here.
+  # Rather than grow the parser to cover each construct, an unbalanced line is REFUSED: a verdict
+  # derived from an unreliable parse is not a verdict. Measured cost on this file: zero lines.
+  bal = (sq || dq) ? 0 : 1
+  printf "%d %d %d %d %d %d\n%s\n", code, lit, q, mk, ev, bal, seg
 }
 AWKEOF
 )
@@ -4961,7 +4972,11 @@ _wr_classify() {
   _c_code=${_c_m%% *}; _c_rest=${_c_m#* }
   _c_lit=${_c_rest%% *}; _c_rest=${_c_rest#* }
   _c_q=${_c_rest%% *}; _c_rest=${_c_rest#* }
-  _c_mk=${_c_rest%% *}; _c_ev=${_c_rest##* }
+  _c_mk=${_c_rest%% *}; _c_rest=${_c_rest#* }
+  _c_ev=${_c_rest%% *}; _c_bal=${_c_rest##* }
+  # AN UNRELIABLE PARSE YIELDS NO VERDICT (reviewer). Checked FIRST: every field below is derived
+  # from the same state machine, so if it ended the line inside a quote, none of them can be trusted.
+  if [ "${_c_bal:-1}" -eq 0 ]; then printf 'unbalanced %s\n' $(( ${_c_code:-0} + ${_c_lit:-0} )); return; fi
   if [ "${_c_ev:-0}" -eq 1 ] && [ $(( ${_c_code:-0} + ${_c_lit:-0} )) -gt 0 ]; then
     printf 'eval %s\n' $(( ${_c_code:-0} + ${_c_lit:-0} )); return
   fi
@@ -5008,7 +5023,7 @@ _wr_classify() {
 # the SAME function over fixtures whose correct verdict is known — dispatch included.
 _wr_scan_file() {
   _sf_file=$1
-  _wr_bad_reads=""; _wr_bad_spelling=""; _wr_prose_bad=""; _wr_unknown=""; _wr_multi=""; _wr_lit_bad=""
+  _wr_bad_reads=""; _wr_bad_spelling=""; _wr_prose_bad=""; _wr_unknown=""; _wr_multi=""; _wr_lit_bad=""; _wr_unbal=""
   _wr_total=0; _wr_prose_n=0
   while IFS= read -r _wr_num_line; do
     [ -n "$_wr_num_line" ] || continue
@@ -5023,6 +5038,7 @@ _wr_scan_file() {
       prose-ok) _wr_prose_n=$((_wr_prose_n + _wr_c)) ;;
       eval) _wr_prose_bad="$_wr_prose_bad${_wr_prose_bad:+; }$_wr_num_line" ;;
       prose) _wr_lit_bad="$_wr_lit_bad${_wr_lit_bad:+; }$_wr_num_line" ;;
+      unbalanced) _wr_unbal="$_wr_unbal${_wr_unbal:+; }$_wr_num_line" ;;
       spelling) _wr_bad_spelling="$_wr_bad_spelling${_wr_bad_spelling:+; }$_wr_num_line" ;;
       arity) _wr_multi="$_wr_multi${_wr_multi:+; }$_wr_num_line" ;;
       form) _wr_bad_reads="$_wr_bad_reads${_wr_bad_reads:+; }$_wr_num_line" ;;
@@ -5044,6 +5060,7 @@ EOF
   if [ -n "$_wr_unknown" ]; then _WR_VERDICT=unknown
   elif [ "${_wr_total:-0}" -eq 0 ]; then _WR_VERDICT=empty
   elif [ -n "$_wr_prose_bad" ]; then _WR_VERDICT=eval
+  elif [ -n "$_wr_unbal" ]; then _WR_VERDICT=unbalanced
   elif [ -n "$_wr_lit_bad" ]; then _WR_VERDICT=prose
   elif [ -n "$_wr_bad_spelling" ]; then _WR_VERDICT=spelling
   elif [ -n "$_wr_multi" ]; then _WR_VERDICT=arity
@@ -5054,11 +5071,13 @@ _WR_VERDICT=
 _wr_scan_file "$TEST_SELF"
 case "$_WR_VERDICT" in
   clean)
-    ok "structural (#3367): all $_wr_total live occurrences of the mutable wrapper variable (plus $_wr_prose_n marked prose) are counted on the RAW line, use the single legal spelling, sit one per line, and are an invocation, an allowlisted save, or a marked opt-out — no doctrine scan takes it as a SUBJECT" ;;
+    ok "structural (#3367): all $_wr_total live occurrences of the mutable wrapper variable (plus $_wr_prose_n occurrences recognised STRUCTURALLY as inert text in an ok/bad diagnostic, needing no marker) are parsed with real shell quote state on a balanced line, use the single legal spelling, sit one per line, and are an invocation, an allowlisted save, or a marked opt-out — no doctrine scan takes it as a SUBJECT" ;;
   unknown)
     bad "structural (#3367): the order-dependence classifier returned a verdict the dispatch does not recognise, so some line was neither accepted nor rejected —$_wr_unknown" ;;
   empty)
     bad 'structural (#3367): the order-dependence pass found NO accepted occurrence of the mutable wrapper variable at all, so it certified nothing — the variable was renamed, or the scan lost its subject' ;;
+  unbalanced)
+    bad "structural (#3367): a line carrying the mutable wrapper variable ends INSIDE an unterminated quote, so the per-line quote parse is unreliable and no verdict from it can be trusted. This is how the guard would green-light #3367's original defect — the closing line of a multi-line quoted program begins with the CLOSING quote, which a per-line scanner reads as an opening one: $(printf '%s' "$_wr_unbal" | cut -c1-200)" ;;
   prose)
     bad "structural (#3367): a line holds the mutable wrapper variable inside single quotes somewhere other than an ok/bad diagnostic. Single quotes make it literal on THIS line but not inert in the PROGRAM — assigning it and eval'ing it later is a doctrine read no per-line parse can see — so only the harness's own reporters may carry it as text: $(printf '%s' "$_wr_lit_bad" | cut -c1-200)" ;;
   eval)
@@ -5109,6 +5128,8 @@ _wr_fixture f_bracesfx "_x=\$(grep -c foo \"\${$_wr_vname}_REAL\")"
 _wr_fixture f_bracedef "_x=\$(grep -c foo \"\${$_wr_vname:-/tmp/x}\")"
 _wr_fixture f_fakeinv  "grep foo $_wr_ref # \$(bash $_wr_ref)"
 _wr_fixture f_evalasm  "_cmd='grep foo $_wr_ref'"
+_wr_fixture f_multiline "' \"\$ORACLES\" \"\$CHECKS_FILE\" $_wr_ref 2>/dev/null || true)"
+_wr_fixture f_ansic    "_x=\$'a\\'b'; grep -c z $_wr_ref"
 _wr_fixture f_marked   "_x=\$(grep -c foo $_wr_ref) # $_wr_marker: a reviewed opt-out"
 _wr_fixture f_mixed    "grep -c q $_wr_ref; ok 'mentions \$$_wr_vname'"
 _wr_fixture f_save     "_gm_real_wrapper=$_wr_ref"
@@ -5134,6 +5155,8 @@ _wr_expect f_bracesfx spelling
 _wr_expect f_bracedef spelling
 _wr_expect f_fakeinv  form
 _wr_expect f_evalasm  prose
+_wr_expect f_multiline unbalanced
+_wr_expect f_ansic    unbalanced
 _wr_expect f_marked   clean
 _wr_expect f_mixed    form
 _wr_expect f_save     clean
@@ -5143,7 +5166,7 @@ _wr_expect f_empty    empty
 # and the success message below prints counts from them.
 _wr_scan_file "$TEST_SELF"
 if [ -z "$_wr_ctl_bad" ]; then
-  ok 'structural control (#3367): the ENFORCEMENT PASS itself (classifier + dispatch) gives the correct verdict on all twenty-five fixtures — it rejects the braced, unquoted, compound-line, unallowlisted-alias, mentions-the-word-bash quote-swallowed, marker-self-authorising and eval bypasses, refuses to let a marker waive a second read, reports a subjectless file as empty, and still accepts invocations, allowlisted saves, marked opt-outs, captured invocations and unmarked prose'
+  ok 'structural control (#3367): the ENFORCEMENT PASS itself (classifier + dispatch) gives the correct verdict on all twenty-seven fixtures — it rejects the braced, unquoted, compound-line, unallowlisted-alias, mentions-the-word-bash quote-swallowed, marker-self-authorising and eval bypasses, refuses to let a marker waive a second read, reports a subjectless file as empty, and still accepts invocations, allowlisted saves, marked opt-outs, captured invocations and unmarked prose'
 else
   bad "structural control (#3367): the enforcement pass misclassifies a fixture, so its verdict on the real file is not trustworthy —$_wr_ctl_bad"
 fi
