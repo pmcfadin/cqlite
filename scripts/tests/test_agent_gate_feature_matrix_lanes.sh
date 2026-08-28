@@ -249,39 +249,52 @@ git worktree add --detach "$TREE" "$LIVE_HEAD_BEFORE" >/dev/null 2>&1 || {
 # B's item does not exist and the reference fails to resolve. This is #1978's class.
 # They live in cqlite-core/src because the isolation lanes run `cargo test --lib
 # --no-run`, which pulls in no integration target.
+#
+# BOTH ITEMS ARE ALSO GATED ON `test` (roborev round-19, and the same gap the C re-audit
+# scored against R4). Without that, the plants are ordinary library items, so a bare
+# `cargo check --lib` would ALSO catch them — and then the observation, while red, would
+# not DISCRIMINATE the shipped instrument (`cargo test --lib --no-run`) from the one the
+# spec forbids. It would have been a true observation of a claim nobody doubted, standing
+# in for the claim that actually matters. `cfg(test)` code is compiled only under
+# `--test`, so with the `test` gate the plant is INVISIBLE to `cargo check --lib` and
+# visible to the lane — which is #1978's shape exactly (an ungated `#[cfg(test)]` module
+# referencing a feature-gated item), not merely its neighbourhood.
+#
+# MEASURED both directions on the planted tree before this text was written; the figures
+# are in docs/reports/ah6-1699-feature-matrix-lanes.md.
 plant_feature_iso_parquet() {
   cat >> "$TREE/cqlite-core/src/lib.rs" <<'EOF'
 
 // AH6 PLANTED BREAK (issue #1699 observation harness) — reverted by the harness.
-#[cfg(feature = "parquet")]
+#[cfg(all(test, feature = "parquet"))]
 pub fn ah6_planted_parquet_probe() -> bool {
     crate::ah6_planted_delta_scan_marker()
 }
-#[cfg(feature = "delta-scan")]
+#[cfg(all(test, feature = "delta-scan"))]
 pub fn ah6_planted_delta_scan_marker() -> bool {
     true
 }
 EOF
 }
 plant_marker_feature_iso_parquet='ah6_planted_delta_scan_marker'
-plant_desc_feature_iso_parquet='a #[cfg(feature = "parquet")] fn in cqlite-core/src/lib.rs calling a #[cfg(feature = "delta-scan")] fn (compiles with both features on; unresolved with parquet alone) — #1978 class'
+plant_desc_feature_iso_parquet='a #[cfg(all(test, feature = "parquet"))] fn in cqlite-core/src/lib.rs calling a #[cfg(all(test, feature = "delta-scan"))] fn (compiles with both features on; unresolved with parquet alone; INVISIBLE to cargo check --lib because it is cfg(test)) — #1978 class exactly'
 
 plant_feature_iso_delta_scan() {
   cat >> "$TREE/cqlite-core/src/lib.rs" <<'EOF'
 
 // AH6 PLANTED BREAK (issue #1699 observation harness) — reverted by the harness.
-#[cfg(feature = "delta-scan")]
+#[cfg(all(test, feature = "delta-scan"))]
 pub fn ah6_planted_delta_scan_probe() -> bool {
     crate::ah6_planted_parquet_marker()
 }
-#[cfg(feature = "parquet")]
+#[cfg(all(test, feature = "parquet"))]
 pub fn ah6_planted_parquet_marker() -> bool {
     true
 }
 EOF
 }
 plant_marker_feature_iso_delta_scan='ah6_planted_parquet_marker'
-plant_desc_feature_iso_delta_scan='the mirror: a #[cfg(feature = "delta-scan")] fn in cqlite-core/src/lib.rs calling a #[cfg(feature = "parquet")] fn'
+plant_desc_feature_iso_delta_scan='the mirror: a #[cfg(all(test, feature = "delta-scan"))] fn in cqlite-core/src/lib.rs calling a #[cfg(all(test, feature = "parquet"))] fn — likewise cfg(test), so likewise invisible to cargo check --lib'
 
 # A NEW file, deliberately. It does double duty: it proves the lane EXECUTES rather
 # than merely compiles (a compile-only lane stays green on a failing assertion), and

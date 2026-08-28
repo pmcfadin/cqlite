@@ -79,6 +79,35 @@ issue of all issues is the defect rather than a clerical slip. It has been repla
 the shipped head, and the harness now prints `observed-commit:` from the SHA it captured at start, so a
 future record cannot silently describe a different tree than the one it examined.
 
+### The isolation plants were NOT DISCRIMINATING until round 19, and now they are (MEASURED)
+
+roborev round 19 and the C re-audit found the same gap independently, and it is the sharpest instance of
+this report's own thesis turned on the report: **both isolation plants were ordinary library items, so a
+bare `cargo check --lib` would have caught them too.** The observation was therefore TRUE and RED and
+still did not establish the claim it was cited for — that the shipped instrument
+(`cargo test --lib --no-run`) catches a class `cargo check` cannot see. It measured a claim nobody
+doubted while standing in for the one that matters. A red that does not discriminate is the mirror image
+of a green that measured nothing.
+
+Both plants are now gated on `test` as well as the feature (`#[cfg(all(test, feature = "parquet"))]`),
+which is #1978's shape exactly rather than its neighbourhood: `cfg(test)` code is compiled only under
+`--test`, so the plant is INVISIBLE to `cargo check --lib`. Measured on the planted tree, at the lane's
+own invocation and feature set:
+
+| instrument | result | names the planted symbol? |
+|------------|--------|---------------------------|
+| `cargo check -p cqlite-core --no-default-features --features all-compression,parquet --lib` (the instrument spec R4 FORBIDS) | **rc=0 — the plant is invisible** | no (0 occurrences) |
+| `cargo test -p cqlite-core --no-default-features --features all-compression,parquet --lib --no-run` (the SHIPPED instrument) | **rc=101** | yes — `error[E0425]: cannot find function ah6_planted_delta_scan_marker in the crate root`, 3 occurrences |
+
+Both runs under `RUSTFLAGS="-D warnings"`, in a throwaway `git worktree`, cold cache. The first attempt at
+this measurement is recorded too, because it failed in the direction that matters: omitting
+`--package cqlite-core` made cargo resolve the features against the workspace root package, and BOTH
+instruments returned rc=101 — `error: the package 'cqlite' does not contain these features`. Read
+carelessly that is "not discriminating"; read properly it is a broken measurement, and the tell was that
+the planted symbol appeared **0 times** in the failing output. An oracle whose failure looks like its
+subject failing is exactly what this issue is about, so the check that saved it — requiring the output to
+NAME the planted symbol rather than merely be non-zero — is the same rule the harness applies to the lanes.
+
 Two of the plants do extra duty beyond "the lane can fail":
 
 - The `legacy-heuristics` plant is a **new file**, so the lane's red also proves its
