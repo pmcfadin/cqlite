@@ -905,7 +905,7 @@ cmd_dead_lanes() {
   local errfile
   errfile="$(mktemp "${TMPDIR:-/tmp}/claim-heartbeat-lsremote.XXXXXX")"
   set +e
-  raw="$(git ls-remote "$REMOTE" 'refs/machine-claims/*' 2>"$errfile")"
+  raw="$(git ls-remote "$REMOTE" 'refs/lane-claims/*' 2>"$errfile")"
   lsrc=$?
   set -e
   if [ "$lsrc" -ne 0 ]; then
@@ -914,6 +914,14 @@ cmd_dead_lanes() {
     return 1
   fi
   rm -f "$errfile"
+
+  # Legacy per-machine refs are reported too, so a pre-ruling lane is not invisible during the
+  # drain (#3393). A failure listing THESE is not fatal: the per-lane listing above already
+  # succeeded, so the run has a subject, and the legacy set only ever adds rows.
+  local legacy
+  legacy="$(git ls-remote "$REMOTE" 'refs/machine-claims/*' 2>/dev/null || true)"
+  [ -z "$legacy" ] || raw="$(printf '%s\n%s' "$raw" "$legacy")"
+  raw="$(printf '%s' "$raw" | sed '/^$/d')"
 
   # REFUSE RATHER THAN CLOBBER (roborev round 13, Medium). Omitting
   # `--no-write-fetch-head` on old git left this monitor overwriting the shared FETCH_HEAD
@@ -944,7 +952,15 @@ cmd_dead_lanes() {
     [ -n "$line" ] || continue
     local refname machine msg issue pid ts verdict detail
     refname="$(printf '%s' "$line" | awk '{print $2}')"
-    machine="${refname#refs/machine-claims/}"
+    local lane_issue=""
+    case "$refname" in
+      refs/lane-claims/*)
+        machine="${refname#refs/lane-claims/}"
+        lane_issue="${machine##*/}"   # LAST component is the issue; see lane_claim_ref
+        machine="${machine%/*}"
+        ;;
+      *) machine="${refname#refs/machine-claims/}" ;;
+    esac
 
     # FETCH INTO AN INVOCATION-UNIQUE REF, never `FETCH_HEAD` (roborev round 11, Medium).
     # `FETCH_HEAD` is shared per-worktree, so ANY concurrent fetch — and this repository is
@@ -1125,29 +1141,26 @@ cmd_dead_lanes() {
   if [ "$unreadable" -gt 0 ]; then
     return 1
   fi
-  # POSITIVE DETECTION ONLY: THERE IS NO CLEAN VERDICT, BY CONSTRUCTION (roborev rounds
-  # 4/5/6/13, High).
+  # THE CLEAN VERDICT IS SOUND AGAIN, because the layout changed under it (#3393, owner ruling A).
   #
-  # This command can soundly affirm that a dead lane EXISTS — if the claim names a pid that
-  # is gone, a lane is gone. It cannot affirm the ABSENCE of one, because claims are keyed
-  # per MACHINE (#2655, premised on one worker per machine, #1930) while the hosts this
-  # issue is about ran FOUR lanes each. The ref is force-updated every supervisor iteration,
-  # so a surviving sibling's next stamp overwrites a dead lane's pid and this command then
-  # sees a live pid with a verified identity. Reporting exit 0 there is a FALSE CLEAN about
-  # the exact scenario #3393 exists to catch.
+  # It was removed at interim C for a specific reason: claims were keyed per MACHINE and
+  # force-updated every supervisor iteration, so after one lane died a surviving sibling's next
+  # stamp overwrote the dead lane's pid and this command saw a live, identity-verified pid. Exit 0
+  # there was a false clean about the exact scenario the command exists to catch, and documenting
+  # that was not a fix — the exit code is what a cron reads.
   #
-  # Documenting that was not enough — a documented false-clean is still a false-clean, and
-  # the exit code is what a cron reads. So the clean verdict is REMOVED rather than
-  # qualified: this command returns 3 (a dead lane was reported) or 1 (no dead lane was
-  # reported, and absence is not establishable), and never 0. A caller can act on 3; nobody
-  # can mistake 1 for a clean bill of health.
+  # Per-lane refs remove the mechanism rather than mitigate it: a sibling now stamps a DIFFERENT
+  # ref, so a dead lane's ref survives with its dead pid and is reported. The masking is gone, so
+  # the clean verdict is honest and is restored.
   #
-  # Restoring a meaningful 0 requires lane-scoped claim refs, which changes a namespace
-  # shared with should-reap and the CI reaper and collides with the standing one-worker-per-
-  # machine invariant — an owner decision, escalated on #3393. When that lands, this is the
-  # branch to revisit.
-  note "no dead lane was reported among the $(printf '%s' "$local_seen") local claim(s) measured. This is NOT a clean bill of health: claims are keyed per MACHINE, so a surviving lane's stamp can overwrite a dead sibling's on a multi-lane box (#3393). Exit 1 = nothing found AND absence not establishable; only exit 3 is a positive finding."
-  return 1
+  # WHAT EXIT 0 CLAIMS, EXACTLY — no more than this: at least one LOCAL lane was measured, and none
+  # of the local lanes that could be seen is dead. It does NOT claim anything about lanes that never
+  # stamped (a lane run with `CLAIM_CMD=""` is still invisible, which is why zero claim refs remains
+  # exit 1), nor about other machines (a foreign pid is unknowable, which is why an all-foreign run
+  # remains exit 1). Those two guards are what keep this from becoming the old false clean by a
+  # different route.
+  note "measured ${local_seen} local lane(s); none is dead. Exit 0 means: at least one local lane was measured and none of them is dead — NOT that lanes which never stamped are healthy (they are invisible), and NOT anything about other machines. Run dead-lanes ON each box."
+  return 0
 }
 
 SUBCOMMAND="${1:-}"
