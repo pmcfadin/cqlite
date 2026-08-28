@@ -1,6 +1,11 @@
 #!/usr/bin/env python3
 """Unit tests for scripts/delivery-telemetry.py (stdlib unittest, no network/datasets).
 
+Stdlib-only by design — the `delivery-telemetry` gate component installs nothing.
+StandardValidatorCouplingTests is the ONE optional block: it needs `jsonschema` and
+SKIPS without it. Nothing depends on that skip for coverage — the schema-side coupling
+is also asserted structurally, with the stdlib, by SchemaCouplingDeclarationTests.
+
 Run standalone:   python3 scripts/tests/test_delivery_telemetry.py
 Or via the gate:  scripts/agent-gate.sh --only delivery-telemetry
 """
@@ -896,6 +901,65 @@ class AggregateTests(unittest.TestCase):
         pass_rec = {**fail_rec, "gate": "pass"}
         self.assertEqual(dt.aggregate([fail_rec])["gate_failures"], 3)
         self.assertEqual(dt.aggregate([pass_rec])["gate_failures"], 2)
+
+
+class SchemaCouplingDeclarationTests(unittest.TestCase):
+    """issue #3448 / roborev job 67: UNCONDITIONAL coverage of the schema-side coupling.
+
+    StandardValidatorCouplingTests below proves a real Draft 2020-12 validator ENFORCES the
+    coupling, but it needs `jsonschema`, and this gate component's contract is explicitly
+    "No third-party deps, no datasets, no network" — so on a host without the lib those
+    tests SKIP, and a skip is not coverage ("a SKIP means the check never ran, which is the
+    vacuous pass itself"). These tests therefore assert, with the stdlib alone and on every
+    host, that the published schema DECLARES the coupling — so deleting or weakening the
+    allOf can never pass CI silently.
+
+    Deliberately structural, NOT a hand-rolled if/then evaluator: re-implementing JSON
+    Schema semantics here would be a second implementation whose correctness is only
+    knowable by differential testing against a real validator, which is precisely the trap
+    CLAUDE.md records. Structure is checked here; SEMANTICS are checked against the real
+    validator when it is installed.
+    """
+
+    def setUp(self):
+        self.schema = json.loads(dt.DEFAULT_SCHEMA.read_text())
+
+    def test_schema_declares_both_coupling_directions(self):
+        clauses = self.schema.get("allOf")
+        self.assertIsInstance(clauses, list, "schema lost its top-level allOf coupling block")
+        self.assertEqual(len(clauses), 2, f"expected exactly 2 coupling clauses, got {len(clauses)}")
+
+        def shape(c):
+            """(condition field, condition const, consequent field, consequent const)."""
+            if_props = c.get("if", {}).get("properties", {})
+            then_props = c.get("then", {}).get("properties", {})
+            self.assertEqual(len(if_props), 1, f"clause 'if' must constrain exactly one field: {c}")
+            self.assertEqual(len(then_props), 1, f"clause 'then' must constrain exactly one field: {c}")
+            (cf, cs), = if_props.items()
+            (tf, ts), = then_props.items()
+            # the condition must also REQUIRE its field, else it holds vacuously when absent
+            self.assertIn(cf, c.get("if", {}).get("required", []),
+                          f"clause condition on {cf!r} must list it in 'required', or it is vacuous: {c}")
+            return (cf, cs.get("const"), tf, ts.get("const"))
+
+        shapes = {shape(c) for c in clauses}
+        self.assertEqual(
+            shapes,
+            {("gate", "not-run", "gate_runs", 0), ("gate_runs", 0, "gate", "not-run")},
+            "the schema no longer declares gate 'not-run' <=> gate_runs 0 in BOTH directions")
+
+    def test_gate_enum_and_minimum_still_admit_the_state(self):
+        props = self.schema["properties"]
+        self.assertIn("not-run", props["gate"]["enum"])
+        self.assertEqual(props["gate_runs"]["minimum"], 0)
+
+    def test_coupling_is_documented_as_enforced_in_both_places(self):
+        """A reader of the published schema must not conclude it relies on the tool alone."""
+        for field in ("gate", "gate_runs"):
+            desc = self.schema["properties"][field]["description"]
+            self.assertIn("allOf", desc, f"{field} description does not mention the schema-side allOf")
+            self.assertIn("_validate_gate_coupling", desc,
+                          f"{field} description does not mention the tool-side check")
 
 
 try:  # optional: only needed by StandardValidatorCouplingTests below
