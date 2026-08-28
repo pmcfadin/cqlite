@@ -157,7 +157,7 @@ at a **pinned `now`**, (a) the DataFusion arm returns the row engine's rows, val
 | Overlap | **28.8 %** measured (`writetime` over a fixed 1 % token slice, before/after gen2) |
 | Rows scanned per run | **1,899,750** — identical across every comparable arm, asserted |
 | Matrix | 3 scenarios x 5 arm configs x 3 iterations = **45 runs**, one PROCESS per run |
-| Ordering | iteration outermost, arm order **rotated** per iteration |
+| Ordering | iteration outermost, arm order **rotated** per iteration — but 3 iterations over 5 arm configs is **NOT counterbalanced** (§3.1(a)); the ordering is controlled for in the analysis instead |
 
 The 1,899,750 rows against the manifest's nominal 1,900,000 is not a loss: `cassandra-stress`
 draws `pk` from `uniform(1..1e9)` over 190,000 seeds, so a handful of seeds collide onto the same
@@ -168,7 +168,7 @@ exactly one replica. This corpus delivers M15's **wide** and **overlap** halves;
 actually exercised is cross-SSTable overlap (read-time reconciliation), **not** replication. Do not
 cite it as an RF=3 measurement.
 
-### 3.1 Two methodology corrections, made before the numbers were believed
+### 3.1 Methodology corrections and disclosed defects
 
 **(a) The first run reported a 1.6x DataFusion win that was not real.** With the harness's own
 scenario-then-arm-then-iteration loop in a single process, the DataFusion arm measured 64.6 s against
@@ -177,7 +177,21 @@ order rotated, the same cell measured 119.0 s — **slower** than the floor. The
 ordering-plus-page-cache artefact. Both properties were fixed
 (`docs/reports/2605-datafusion-spike-artifacts/run-matrix.sh`): peak RSS is now genuinely per-arm
 (process RSS never returns to its start, so a second arm in one process inherited the first's
-high-water mark), and no arm is systematically favoured by cache warming.
+high-water mark), and the arm order is rotated per iteration.
+
+**But the rotation does NOT counterbalance this matrix, and an earlier draft wrongly implied it
+did.** Rotation counterbalances position only over a **complete cycle**, and 3 iterations over
+**5 arm configs** is not one: `datafusion:1` never occupies a position later than 3rd and
+`row_pushdown` never one earlier than 3rd. Systematic position bias therefore remains in the
+committed cells. The schedule actually run is recorded in
+`docs/reports/2605-datafusion-spike-artifacts/schedule.json` (`counterbalanced: false`), and the
+driver now refuses a partial cycle unless `ALLOW_PARTIAL_CYCLE=1` says otherwise.
+
+**What actually neutralises the ordering here is the analysis, not the schedule:** the cold-fault
+covariate regression (`R^2 = 0.980`) and the per-arm residuals of §3.3. Position bias acts through
+page-cache state, which is exactly the term that regression removes — so the residual comparison
+survives this defect, and the raw wall-clock ordering in §3.2 does not. It is the second independent
+reason this report does not let a wall-time ratio carry the verdict.
 
 **(b) Raw wall time on this box cannot resolve the engine delta, and the data proves it rather than
 merely suggesting it.** Per-iteration wall time for one cell swings up to **2.4x** (e.g.
@@ -195,6 +209,36 @@ synchronous page-in this causes. §3.3 therefore controls for it.
 `1.19x -> 1.37x -> 1.09x` as the three iterations accumulate, and on `filtered_scan` it crosses 1.0.
 The full drift table, and what an early read of it would have published, is **§3.6** — it is the
 reason this report does not quote a wall-clock ratio as the vectorized-exec delta at all.
+
+**(c) The row-engine arm's count loop was optimized away, and the numbers in §3.2 were measured with
+it.** `count_rows_rowwise` walked `0..num_rows` with no observable per-row dependency, so a release
+build folded it to a single `num_rows()` load: the `full_scan_count` and `projected_scan` row-engine
+arms did **not** measure a row-wise walk, as their description claimed. Fixed (`std::hint::black_box`
+on the index and the accumulator), and disclosed rather than quietly corrected, because:
+
+* **The magnitude is bounded and negligible.** A per-row visit costs ~1-2 ns/row, i.e.
+  **0.0019 s at 1 ns/row and 0.038 s even at 20 ns/row** over 1,899,750 rows — **under 0.04 % of a
+  ~100 s scan.** No verdict in this report can move by that much.
+* **The direction is toward our own conclusion, which is why it must be said out loud.** An elided
+  loop made the row arm artificially *fast*, biasing **against** DataFusion — the same direction as
+  the finding. A defect that flatters the conclusion is the one that most needs disclosing.
+* `filtered_scan`'s row arm evaluates a real per-row predicate and was never elidable, so the one
+  scenario doing genuine row-wise work is unaffected.
+
+**(d) The DataFusion arms never exercised projection pushdown.** Every DataFusion cell records
+`pushdown=false` — deliberately, so that arm consumes byte-identical batches to the direct arms and
+the comparison measures execution rather than scan narrowing (§2.1). The consequence must be stated
+plainly, because a reader will otherwise assume symmetry: **`row_pushdown` had a lever available that
+the DataFusion arms did not**, which plausibly explains why it is the only arm with a consistently
+negative residual (§3.3, §3.5). It is not evidence that DataFusion cannot push projections — the
+provider implements `supports_filters_pushdown` and projection pushdown, and §3.5's win is available
+through it too.
+
+Relatedly, a **defect in that unused path** was found and fixed during review: with pushdown enabled,
+DataFusion's empty projection for `count(*)` was forwarded into the scan, which made the producer
+emit zero-column batches and `count(*)` return **0**. It could not have affected any number here
+(every DataFusion cell ran with pushdown off), it is now regression-tested in both modes, and the
+scan for a `count(*)` is anchored to one column instead.
 
 ### 3.2 Raw per-cell results (median over each row's own `n`, with the range)
 
@@ -266,7 +310,9 @@ Two further readings of the same table:
   do not execute faster. That is **concurrency, not vectorization**, and §3.7 separates the two.
 * `row_pushdown` on `projected_scan` is the one arm with a consistently NEGATIVE residual
   (**-4.6 s**, range `[-8.5, -1.7]`) — the only engine-attributable win in the matrix, and it comes
-  from **narrowing the scan**, not from vectorizing execution (see §3.5).
+  from **narrowing the scan**, not from vectorizing execution (see §3.5). Note the asymmetry behind
+  that result: it is the only arm that was *given* a narrowing lever, since the DataFusion arms ran
+  with pushdown deliberately off (§3.1(d)).
 
 ### 3.4 The stable signal: producer CPU sub-phases
 
@@ -418,6 +464,8 @@ mistake the M15 item-1 decomposition exists to prevent.
 | `datafusion default-features = false` | **understates DataFusion**, in principle | quantified in §3.9 — nothing the three measured queries use is stripped |
 | Corpus merge depth `k = 2` is shallower than a compaction-backlogged node | either way (more merge CPU raises the shared floor for all arms) | **retired** for this headline corpus; see below |
 | Thread count | **FAVOURS DataFusion by 1.26x-1.45x** (§3.7) | pinned to `tp1` for the headline — our choice, not a bias suffered |
+| The DataFusion arms ran with **pushdown OFF** while `row_pushdown` ran with it ON | **understates DataFusion** where a narrowing lever exists | deliberate (§2.1) and disclosed in §3.1(d) — it is what keeps the batches identical |
+| The row arm's count loop was **elided** in the committed cells | **understates DataFusion** | fixed; bounded under 0.04 % of wall, §3.1(c) |
 
 Two of these need saying plainly:
 
@@ -739,8 +787,9 @@ A single cell, for debugging:
 |---|---|
 | `cells/*.json` | one JSON document per (scenario, arm, iteration) run — 45 files, every field this report quotes |
 | `summary.md` | the aggregated tables in §3, regenerated by `summarize.py` |
-| `run-matrix.sh` | the driver (one process per cell, iteration outermost, arm order rotated) |
-| `summarize.py` | the aggregator (per-row `n` + range, the drift table, the I/O-controlled regression, the comparability and `rows_result` asserts, the floor-beaten count) |
+| `run-matrix.sh` | the driver (one process per cell, iteration outermost, arm order rotated; refuses an uncounterbalanced cycle unless `ALLOW_PARTIAL_CYCLE=1`) |
+| `schedule.json` | the arm order actually run per iteration, and whether it was counterbalanced (it was not — §3.1(a)) |
+| `summarize.py` | the aggregator (per-row `n` + range, the drift table, the I/O-controlled regression, the comparability and `rows_result` asserts, the floor-beaten count). **Exits nonzero** on a missing cell or a failed precondition, so an incomplete matrix cannot produce a usable-looking summary |
 | `wide_4kb.cql` | the corpus DDL (column/key structure verbatim from Cassandra's own `schema.cql`) |
 | `corpus-manifest-2605.json` | the generator's provenance manifest, copied in so this report is self-contained (overlap measurement, per-SSTable timestamps, compression verification, the RF caveat) |
 
