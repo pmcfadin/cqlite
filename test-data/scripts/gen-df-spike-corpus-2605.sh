@@ -329,19 +329,47 @@ stress_gen() {  # $1 = generation label, $2 = partitions (seeds 1..$2)
 # measurement, so parse a format that yields two plain integers and treat an
 # unreadable one as fatal within a minute, naming the cause.
 wait_compactions() {
-  local raw unparsed=0
+  # THREE outcomes, not two (issue #2605, lead fix). The first version had two
+  # defects that together killed a 20-minute run with NO diagnostic at all:
+  #
+  #   (a) `raw=$(...)` is a bare assignment under `set -euo pipefail`, so when
+  #       nodetool FAILED TO RUN the non-zero command substitution aborted the
+  #       whole script SILENTLY — before the poll counter below could ever speak.
+  #       That is exactly what happened: the run log ends at the "[compact] MAJOR
+  #       compaction" line with no `die` message, while the compacted SSTable is
+  #       stamped two minutes later. Hence `|| true` plus an explicit emptiness
+  #       test: an unreachable nodetool must be a HANDLED state, never an abort.
+  #
+  #   (b) "nodetool did not run" and "nodetool printed something I cannot parse"
+  #       were counted on ONE counter with a 60s budget, and the message blamed a
+  #       format change. They are different faults with different remedies, and
+  #       the common one is contention: a co-scheduled cold release build
+  #       saturating all 16 cores times out nodetool's JMX connect, which prints
+  #       NOTHING. Ordinary contention on a shared box must not be reported as a
+  #       corrupt corpus, so an unavailable nodetool is tolerated far longer than
+  #       a genuinely unparseable one.
+  #
+  # Still FAIL-CLOSED in both directions: a count taken while an unlink is
+  # pending is a lie, so neither branch ever assumes "drained".
+  local raw unparsed=0 unavailable=0
   for _ in $(seq 1 720); do
     raw=$($DOCKER exec "$CONTAINER" nodetool tpstats 2>/dev/null \
-      | awk '$1 == "CompactionExecutor" { print $2 " " $3; exit }')
-    if [[ "$raw" =~ ^([0-9]+)\ ([0-9]+)$ ]]; then
+      | awk '$1 == "CompactionExecutor" { print $2 " " $3; exit }' || true)
+    if [[ -z "${raw// }" ]]; then
+      # (a) nodetool unreachable/produced nothing — an INVOCATION failure.
+      unavailable=$((unavailable + 1))
+      (( unavailable <= 240 )) || die "nodetool tpstats produced no CompactionExecutor row for 240 consecutive polls (~20m): host too contended or container unhealthy — refusing to guess whether compactions drained"
+    elif [[ "$raw" =~ ^([0-9]+)\ ([0-9]+)$ ]]; then
       unparsed=0
+      unavailable=0
       if [[ "${BASH_REMATCH[1]}" == "0" && "${BASH_REMATCH[2]}" == "0" ]]; then
         sleep 3
         return 0
       fi
     else
+      # (b) nodetool RAN and printed a row we cannot read — a real format change.
       unparsed=$((unparsed + 1))
-      (( unparsed <= 12 )) || die "cannot read CompactionExecutor Active/Pending from nodetool tpstats after 12 consecutive polls (output format changed?) — refusing to guess whether compactions drained"
+      (( unparsed <= 12 )) || die "nodetool tpstats CompactionExecutor row is unreadable after 12 consecutive polls (got: '$raw') — output format changed; refusing to guess whether compactions drained"
     fi
     sleep 5
   done
