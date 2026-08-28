@@ -138,3 +138,50 @@ mod tests {
         assert!(!delta.any_merge_work());
     }
 }
+
+// ---------------------------------------------------------------------------
+// Query-row producer completion (issue #3384)
+// ---------------------------------------------------------------------------
+
+/// Producers that have finished decoding, published with RELEASE ordering.
+///
+/// Deliberately NOT a field of [`ReadPathProbe`]: every field there is loaded
+/// `Relaxed`, which is right for counters read after the work is known to be over,
+/// and wrong for this one — its whole job is to TELL you the work is over.
+static QUERY_ROW_PRODUCERS_FINISHED: AtomicU64 = AtomicU64::new(0);
+
+/// Publish that one `QueryRowStream` producer has finished decoding.
+///
+/// Call BEFORE the terminal message is sent, never after (roborev, issue #3384):
+/// a consumer holding the terminal message must be able to conclude that this
+/// producer can no longer publish, or a producer from a PRIOR test case can
+/// increment into a LATER case's freshly-reset counter and the later case will
+/// observe a completion that was never its own.
+pub fn mark_query_row_producer_finished() {
+    QUERY_ROW_PRODUCERS_FINISHED.fetch_add(1, Ordering::Release);
+}
+
+/// `QueryRowStream` producers that have finished decoding since the last
+/// [`reset_query_row_producers_finished`] (issue #3384).
+///
+/// The CAUSAL completion signal for an abandoned walk. A test that instead waits
+/// for a work counter to "stop growing" is sampling another thread's progress: a
+/// producer merely descheduled, or paused between two increments, is
+/// indistinguishable from one that has stopped, so the walk can resume and drain
+/// the table right after the assertion passed.
+///
+/// The `Acquire` load is load-bearing, not decoration. With `Relaxed` on both
+/// sides, observing a non-zero count would establish NO happens-before edge with
+/// the producer's earlier work-counter increments, so a reader could see
+/// "finished" and then read a STALE row count — precisely the guarantee this
+/// signal exists to give (roborev, issue #3384).
+pub fn query_row_producers_finished() -> u64 {
+    QUERY_ROW_PRODUCERS_FINISHED.load(Ordering::Acquire)
+}
+
+/// Zero the completion count. A test that will wait on
+/// [`query_row_producers_finished`] must call this first, while holding whatever
+/// lock serializes producers in its binary.
+pub fn reset_query_row_producers_finished() {
+    QUERY_ROW_PRODUCERS_FINISHED.store(0, Ordering::Release);
+}

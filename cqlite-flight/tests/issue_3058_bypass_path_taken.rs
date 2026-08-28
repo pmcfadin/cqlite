@@ -505,6 +505,9 @@ async fn fast_arm_stream_stops_when_the_client_drops_it() {
         .map(|i| write(i as i32, 1, "v", 100))
         .collect();
     work_counters::reset();
+    // Reset UNDER `PROBE_LOCK` (held for this whole test): a producer from a
+    // previous case in this binary must not be able to publish into this count.
+    cqlite_core::storage::read_path_probe::reset_query_row_producers_finished();
     let (_temp, data_dir) = build_generations(vec![rows]).await;
     assert_eq!(count_data_dbs(&data_dir), 1);
 
@@ -551,7 +554,7 @@ async fn fast_arm_stream_stops_when_the_client_drops_it() {
         // The producer runs on its own OS thread, so yielding this task is not
         // enough to let it make progress; sleep briefly instead.
         tokio::time::sleep(std::time::Duration::from_millis(1)).await;
-        if work_counters::query_row_producers_finished() > 0 {
+        if cqlite_core::storage::read_path_probe::query_row_producers_finished() > 0 {
             stopped = true;
             break;
         }

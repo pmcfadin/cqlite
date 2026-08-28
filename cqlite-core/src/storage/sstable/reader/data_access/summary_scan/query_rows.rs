@@ -354,14 +354,14 @@ impl SSTableReader {
                     Ok(Err(e)) => QueryRowMsg::Failed(e),
                     Err(panic) => QueryRowMsg::Failed(panicked_producer_error(panic.as_ref())),
                 };
+                // CAUSAL completion signal (issue #3384), published BEFORE the
+                // terminal message and never after (roborev): a consumer holding
+                // the terminal message must be able to conclude this producer can
+                // no longer publish, or a PRIOR case's producer could increment
+                // into a LATER case's freshly-reset counter. Nothing below decodes.
+                crate::storage::read_path_probe::mark_query_row_producer_finished();
                 // The consumer may already be gone; a failed send is fine.
                 let _ = sender.send(terminal);
-                // CAUSAL completion signal (issue #3384). Incremented LAST, after
-                // the terminal message, so an observer that sees it knows this
-                // producer decoded its final row: "the counter stopped moving" is
-                // a sample of another thread and cannot distinguish stopped from
-                // merely descheduled.
-                crate::storage::sstable::work_counters::add_query_row_producer_finished();
             })
             .map_err(|e| {
                 Error::Storage(format!("query row stream: failed to spawn thread: {e}"))
