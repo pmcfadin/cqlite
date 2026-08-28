@@ -99,13 +99,34 @@ SCRATCH=""
 # delta inside <worktree>, then PROVE the two describe the same tree.
 ps_overlay() {
   local src="$1" path="$2"
-  local patch="$path.live.patch"
+  local staged_patch="$path.staged.patch" unstaged_patch="$path.unstaged.patch"
 
-  # 1. tracked modifications (staged + unstaged), including the snapshot.
-  git -C "$src" diff HEAD --binary >"$patch" 2>/dev/null || true
-  if [ -s "$patch" ]; then
-    git -C "$path" apply --whitespace=nowarn "$patch" \
-      || { echo "FAIL: could not apply $src's uncommitted changes to the scratch worktree $path."
+  # 1. tracked modifications, including the snapshot — STAGED and UNSTAGED reproduced
+  #    SEPARATELY, in that order (issue #1712 r6 F3).
+  #
+  #    WHY NOT ONE `git diff HEAD` PATCH. That single patch carries staged content, but
+  #    a plain `git apply` recreates it UNSTAGED — and step 3 below compares
+  #    `git status --porcelain` EXACTLY, where `M ` (staged) and ` M` (unstaged) are
+  #    different states. So the moment anything in the source tree was `git add`ed, the
+  #    overlay aborted the whole suite with "does not reproduce" — a FALSE FAIL sitting
+  #    on the ordinary stage-then-test workflow.
+  #
+  #    The fix keeps the proof step EXACT (rather than weakening it to compare only file
+  #    content and modes, which would stop noticing an index the scratch got wrong):
+  #    `--cached` gives HEAD→index and applies with `--index` (index AND worktree), then
+  #    the worktree-vs-index diff applies to the worktree alone. Together they reproduce
+  #    `M `, ` M`, `MM`, `A `, `D ` and the rest, not just the file bytes.
+  git -C "$src" diff --cached HEAD --binary >"$staged_patch" 2>/dev/null || true
+  if [ -s "$staged_patch" ]; then
+    git -C "$path" apply --index --whitespace=nowarn "$staged_patch" \
+      || { echo "FAIL: could not apply $src's STAGED changes to the scratch worktree $path."
+           echo "      The scratch would then describe a different tree than the one under test."
+           exit 1; }
+  fi
+  git -C "$src" diff --binary >"$unstaged_patch" 2>/dev/null || true
+  if [ -s "$unstaged_patch" ]; then
+    git -C "$path" apply --whitespace=nowarn "$unstaged_patch" \
+      || { echo "FAIL: could not apply $src's UNSTAGED changes to the scratch worktree $path."
            echo "      The scratch would then describe a different tree than the one under test."
            exit 1; }
   fi
