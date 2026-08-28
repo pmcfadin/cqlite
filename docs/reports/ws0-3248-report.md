@@ -22,6 +22,26 @@ The gap is +6,707 cycles/row. Flight-marginal code accounts for **3,842**. A fur
 ~41% is allocator work. The issue anticipated the shared/marginal split; it did not anticipate that a
 quarter of the gap would be identical code costing more.
 
+**And "identical" is now verified at the machine-code level, which makes the effect larger, not
+smaller.** The two arms are *different binaries* (`ws0-scan-bench` vs `cqlite-flight`) and the shared
+bucket is assigned by *symbol presence*, so "identical code" was a claim about codegen resting on
+evidence about names — different inlining per binary was a live competing explanation. Measured by
+disassembling every shared symbol in both binaries
+([`ac1/codegen-identity.py`](ws0-3248-artifacts/ac1/codegen-identity.py)): **291 of 363 (80%) have an
+identical instruction sequence**, and partitioning the excess by that fact *sharpens* it:
+
+| shared sub-bucket | scan | Flight | excess |
+|---|---|---|---|
+| SHARED total | 7,327 | 8,879 | **+21.2%** |
+| **verified-identical instructions** | 2,658 | 4,106 | **+54.5%** |
+| different machine code | 4,372 | 4,767 | +9.0% |
+
+The excess is **concentrated in provably identical instruction sequences** (+54.5%), while the
+differently-compiled functions cost only +9.0% more. So the published 21.5% *understated* the
+identical-code effect by averaging the two together, and **different codegen is excluded as the
+explanation**: same instructions, same work, 54.5% more cycles points at the memory system, which is
+what the bytes-touched differential independently measures.
+
 **2. The shared-path lever inversion is now a measured number, not an argument.**
 The issue's central warning was that a shared-path lever "could be the largest absolute throughput win
 in the 0.17 program AND nearly worthless for AC1". Measured: removing the shared per-row `HashMap`
@@ -111,9 +131,11 @@ five were this lane's own.
 path — and it moves the ratio adversely, so it belongs to a programme measured in box-level rows/s,
 not to the ratio.
 
-**The unexplored ~24%** — identical code costing 21.5% more on the Flight arm — is the most
-interesting unpriced quantity here, and the bytes-touched differential points at locality as its
-cause. It is not any of the three named levers.
+**The unexplored ~24%** — identical code costing more on the Flight arm — is the most interesting
+unpriced quantity here, and it is now sharper than "21.5%": restricted to the 291 shared symbols with
+a **verified-identical instruction sequence**, the penalty is **+54.5%** (2,658 → 4,106 cyc/row). Same
+instructions, same work, half again the cycles. The bytes-touched differential points at locality as
+the cause and codegen is now excluded as an alternative. It is not any of the three named levers.
 
 **#3288 is partly unblocked and partly hardware-blocked.** It now has a per-row footprint (23,745 B
 at the L2 boundary), but its "fit ~1/6 of 54 MiB LLC" target is an LLC-boundary constraint this host
