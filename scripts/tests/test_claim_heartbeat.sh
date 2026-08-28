@@ -1792,6 +1792,53 @@ $uf_out"
 fi
 rm -f "$ORIGIN/refs/machine-claims/unreadableLocal"
 
+# ===========================================================================
+echo "TEST 57: should-reap refuses to GUESS whether one extra argument is an issue or a threshold"
+# ===========================================================================
+# `should-reap <machine> <N>` is ambiguous by construction: the legacy form means a threshold, the
+# per-lane form means an issue, and both are bare integers (#3393). It is resolved by probing the
+# remote for the lane ref — and the probe has THREE answers, which is the part worth pinning.
+# `ls-remote --exit-code` returns 0 = present, 2 = definitively absent, anything else = could not
+# tell. MEASURED: an unreachable remote gives 128.
+#
+# Reading "could not tell" as "not an issue" would silently turn `should-reap box 3367` into a
+# 3367-SECOND threshold against the LEGACY ref — a wrong reap verdict from an unmeasured signal.
+amb_out=$(cd "$WORK" && HEARTBEAT_REMOTE=no-such-remote bash "$HB" should-reap somebox 3367 2>&1)
+amb_rc=$?
+if [ "$amb_rc" -eq 64 ] \
+  && printf '%s\n' "$amb_out" | grep -qi 'cannot tell whether' \
+  && printf '%s\n' "$amb_out" | grep -qi 'Refusing to guess'; then
+  ok "an unreadable probe makes should-reap refuse with a usage error (rc=64) instead of silently picking a reading"
+else
+  bad "an unreadable probe must refuse, not guess: rc=$amb_rc out:
+$amb_out"
+fi
+# NON-VACUITY, both directions: the two UNAMBIGUOUS forms must still work, or "refuse" would just be
+# a broken command. rc=2 is 'no such claim ref', which is the correct answer for both fixtures.
+(cd "$WORK" && bash "$HB" should-reap somebox 3367 14400 >/dev/null 2>&1); three_rc=$?
+(cd "$WORK" && bash "$HB" should-reap somebox 14400 >/dev/null 2>&1); two_rc=$?
+if [ "$three_rc" -eq 2 ] && [ "$two_rc" -eq 2 ]; then
+  ok "NON-VACUITY: the explicit 3-arg form and the legacy 2-arg form both still resolve (rc=2 = no such ref)"
+else
+  bad "the unambiguous forms must still work: 3-arg rc=$three_rc 2-arg rc=$two_rc"
+fi
+# ...and a REAL lane ref must be recognised as an issue rather than a threshold, which is the
+# affirmative half — without it the probe could reject everything and still pass the cases above.
+# Aged past the DEFAULT 4h threshold on purpose: this case must pass only TWO arguments (that is the
+# ambiguity under test), so the verdict has to come out of the default rather than a supplied one.
+# A 30s-old fixture is correctly "keep (fresh)" and would prove nothing about which reading won.
+craft_lane_claim "$WORK" "ambBox" 7701 "$ABSENT_PID" 20000
+amb2_out=$(cd "$WORK" && HEARTBEAT_MACHINE=ambBox CLAIM_OPEN_PR_CMD="$NO_OPEN_PR" \
+  bash "$HB" should-reap ambBox 7701 2>&1)
+amb2_rc=$?
+if [ "$amb2_rc" -eq 0 ] && printf '%s\n' "$amb2_out" | grep -q 'lane-claims/ambBox/7701'; then
+  ok "an argument that IS a live lane ref is read as the issue (verdict names that ref, reaped on the DEFAULT threshold)"
+else
+  bad "a real lane ref must be recognised as the issue: rc=$amb2_rc out:
+$amb2_out"
+fi
+(cd "$WORK" && g push -q origin ":refs/lane-claims/ambBox/7701" 2>/dev/null || true)
+
 echo
 echo "=== claim-heartbeat.sh: $PASS passed, $FAIL failed ==="
 [ "$FAIL" -eq 0 ]

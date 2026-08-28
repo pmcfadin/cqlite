@@ -615,11 +615,22 @@ cmd_should_reap() {
   elif [ -n "$a2" ]; then
     # One extra argument: an issue if a lane ref exists for it, else a threshold. Checked against
     # the remote rather than guessed from the number's shape, because both are bare integers.
-    if git ls-remote --exit-code "$REMOTE" "$(lane_claim_ref "$machine" "$a2")" >/dev/null 2>&1; then
-      issue="$a2"
-    else
-      threshold="$a2"
-    fi
+    #
+    # THE PROBE'S THIRD ANSWER IS FAIL-CLOSED, and it is the whole reason this is not a one-liner.
+    # `ls-remote --exit-code` returns 0 = present, 2 = definitively absent, and anything else
+    # (measured: 128) = it could not tell — a network or auth failure. Treating "could not tell" as
+    # "not an issue" would silently reinterpret `should-reap <machine> 3367` as a 3367-SECOND
+    # THRESHOLD against the legacy ref, i.e. a wrong reap verdict derived from an unmeasured signal.
+    # Both readings are wrong here, so neither is guessed: the caller is told to disambiguate.
+    local probe_rc=0
+    git ls-remote --exit-code "$REMOTE" "$(lane_claim_ref "$machine" "$a2")" >/dev/null 2>&1 || probe_rc=$?
+    case "$probe_rc" in
+      0) issue="$a2" ;;
+      2) threshold="$a2" ;;
+      *)
+        die_usage "should-reap: cannot tell whether '$a2' is an issue or a threshold — the probe for $(lane_claim_ref "$machine" "$a2") failed (git exited $probe_rc; 2 would mean 'absent', so this is a network or auth failure, not an answer). Refusing to guess, because reading it as a threshold would silently judge the LEGACY ref instead of the lane. Pass both explicitly: should-reap <machine> <issue> <threshold_secs>"
+        ;;
+    esac
   fi
   case "$threshold" in
     *[!0-9]* | '') die_usage "should-reap threshold must be numeric seconds (got '${threshold}')" ;;
