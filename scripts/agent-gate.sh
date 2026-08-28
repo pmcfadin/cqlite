@@ -5520,8 +5520,15 @@ run_pub_surface() {
     # certifies cqlite-core's public API, so a vacuous PASS here silently unguards
     # every semver decision downstream. The permissive branch is therefore keyed on
     # the AFFIRMATIVE value (the line is present), never on the absence of an error.
+    # MATCH THE WHOLE SUCCESS LINE, NOT ITS PREFIX (roborev r7 finding 3). The first
+    # version of this check accepted any line starting `pub-surface: `, which is the
+    # SAME vacuous-pass shape one level down: a guard printing `pub-surface: starting`
+    # and then exiting 0 satisfied it and was recorded PASS. A check against a PREFIX
+    # tests a SPELLING; this one tests the STATE, by requiring every element the guard
+    # only knows AFTER it has enumerated the surface — the item count, the snapshot
+    # match, the rustdoc cross-check and the crate-root declaration consistency.
     local measured
-    measured="$(grep -m1 '^pub-surface: ' "$log" || true)"
+    measured="$(grep -m1 -E '^pub-surface: [0-9]+ public items \+ [0-9]+ associated items .*match .*snapshot .*cross-checked against rustdoc all\.html.*; [0-9]+ crate-root declarations consistent$' "$log" || true)"
     if [ -n "$measured" ]; then
       status=PASS
       # Echo it so a pasted gate log shows the check RAN over a real surface.
