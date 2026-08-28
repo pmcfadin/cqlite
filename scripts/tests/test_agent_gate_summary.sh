@@ -3173,6 +3173,41 @@ disjunction|#![cfg(any(feature = "x", feature = "y"))]|#![cfg(any(feature = "x",
 indented|    #![cfg(feature = "x")]|#![cfg(feature = "x")]
 ungated|NONE|ABSENT
 VERBATIM_CASES
+  # MULTILINE attributes (roborev round-28, Medium). rustfmt breaks a long condition across lines,
+  # and the line-based extraction reduced `#![cfg(all(` … `))]` to `#![cfg(` — discarding exactly
+  # the condition a reader needs. There is NO such attribute in this corpus today (measured: 0
+  # across cqlite-flight/tests), which is precisely why it needs a fixture: the defect would have
+  # stayed invisible until somebody reformatted a file, and then it would have moved a target into
+  # the "no gate" population silently.
+  printf '//! prose\n#![cfg(all(\n    feature = "a",\n    feature = "b"\n))]\nfn t() {}\n' > "$gg_src_/multiline.rs"
+  got_=$(
+    export GG_SRC="$gg_src_/multiline.rs" GG_REL="tests/multiline.rs"
+    _package_test_targets_gated() { printf '%s\t%s\t%s\t%s\n' multiline_target "$GG_SRC" source "$GG_REL"; }
+    # shellcheck disable=SC1090
+    . "$gg_body_"
+    _crate_gated_test_targets somepkg 2>/dev/null | awk -F'\t' '{print $3}'
+  )
+  if [ "$got_" = '#![cfg(all( feature = "a", feature = "b" ))]' ]; then
+    ok "1699-r28-multiline: a multiline crate gate is reported WHOLE, condition included"
+  else
+    bad "1699-r28-multiline: reported '$got_' — a truncated gate discards the condition the reader compares against the enabled set, and moves the target into the ungated population"
+  fi
+  # And a multiline cfg_attr, since that is the form r27 added and r28 truncated.
+  printf '//! prose\n#![cfg_attr(\n    feature = "a",\n    cfg(feature = "b")\n)]\nfn t() {}\n' > "$gg_src_/multiline_attr.rs"
+  got_=$(
+    export GG_SRC="$gg_src_/multiline_attr.rs" GG_REL="tests/multiline_attr.rs"
+    _package_test_targets_gated() { printf '%s\t%s\t%s\t%s\n' ma_target "$GG_SRC" source "$GG_REL"; }
+    # shellcheck disable=SC1090
+    . "$gg_body_"
+    _crate_gated_test_targets somepkg 2>/dev/null | awk -F'\t' '{print $3}'
+  )
+  case "$got_" in
+    '#![cfg_attr( feature = "a", cfg(feature = "b") )]')
+      ok "1699-r28-multiline-attr: a multiline cfg_attr gate is reported whole" ;;
+    *)
+      bad "1699-r28-multiline-attr: reported '$got_'" ;;
+  esac
+
   # Stacked gates: BOTH must appear, because they are conjunctive and reporting one hides the other.
   printf '//! prose\n#![cfg(feature = "a")]\n#![cfg(feature = "b")]\nfn t() {}\n' > "$gg_src_/stacked.rs"
   got_=$(

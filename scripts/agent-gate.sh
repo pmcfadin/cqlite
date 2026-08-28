@@ -6174,8 +6174,13 @@ run_flight_tests() {
   census+=("  OF THOSE, $gated_n carry a CRATE-LEVEL gate (#![cfg(...)] / #![cfg_attr(...)]),")
   census+=("       listed with their gate text VERBATIM below. A crate-level gate naming a feature")
   census+=("       that is off means the target COMPILES, runs ZERO tests and exits 0.")
-  census+=("       cqlite-flight's 'default' feature set is EMPTY, so CI's bare")
-  census+=("       'cargo test --package cqlite-flight' does not enable them either.")
+  census+=("       CI's tier passes NO --features, so it enables whatever this package's own")
+  census+=("       resolve enables — which is NOT the same as 'default' (roborev round-28, Low):")
+  census+=("       cqlite-flight's 'default' is empty, yet the self-referential dev-dependency")
+  census+=("       turns 'test-util' on for every test build, so a target gated solely on")
+  census+=("       'test-util' DOES run there. Compare each gate below against the resolved")
+  census+=("       'enabled features' line printed at the end of this census — not against")
+  census+=("       'default', and not against an inference.")
   census+=("  THIS LANE DOES NOT CLASSIFY THEM, DELIBERATELY: #3375 is the record of the targets")
   census+=("       that execute NOWHERE. A classification here was wrong in five consecutive review")
   census+=("       rounds (grammar, stacked gates, conjunctions, compile-only invocations,")
@@ -6441,8 +6446,34 @@ _crate_gated_test_targets() { # <pkg>  -> name \t rel \t gate-text
     fi
     # EVERY crate-level inner attribute, at any indentation, `cfg` or `cfg_attr`: they are
     # conjunctive and Rust permits leading whitespace. Joined onto one line, VERBATIM, not parsed.
-    gate=$(grep -E '^[[:space:]]*#!\[cfg(_attr)?\(' "$sp" \
-      | tr '\n' ' ' | sed 's/  */ /g; s/^ //; s/ $//')
+    #
+    # ONE awk PASS, not `grep | tr | sed` (roborev round-28, two Mediums in one line):
+    #   * the pipeline's exit status was IGNORED, so a read error produced empty or partial output
+    #     and the target silently vanished from the census — the fail-closed contract broken by the
+    #     one construct that cannot report failure. awk exits 0 for "no match" and non-zero for a
+    #     real error, which is exactly the distinction the pipeline could not make;
+    #   * a MULTILINE attribute — `#![cfg(all(` … `))]`, which rustfmt produces for a long
+    #     condition — was truncated to `#![cfg(`, discarding the very condition the reader needs.
+    #     Parens are balanced across lines instead, so the whole attribute is printed.
+    # No such attribute exists in this corpus today (measured: 0 across cqlite-flight/tests), so
+    # this is the direction where a defect would have been invisible until someone reformatted.
+    gate=$(awk '
+      /^[[:space:]]*#!\[cfg(_attr)?\(/ { acc = $0; depth = 0; inattr = 1 }
+      inattr {
+        if (acc != $0) acc = acc " " $0
+        n = split(acc, ch, "")
+        depth = 0
+        for (i = 1; i <= n; i++) { if (ch[i] == "(") depth++; else if (ch[i] == ")") depth-- }
+        if (depth <= 0) {
+          gsub(/^[[:space:]]+|[[:space:]]+$/, "", acc)
+          gsub(/[[:space:]]+/, " ", acc)
+          out = (out == "" ? acc : out " " acc)
+          inattr = 0; acc = ""
+        }
+        next
+      }
+      END { if (out != "") print out }
+    ' "$sp") || return 1
     [ -n "$gate" ] || continue
     printf '%s\t%s\t%s\n' "$_tn" "$rel" "$gate"
   done <<< "$meta"
