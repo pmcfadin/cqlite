@@ -662,196 +662,109 @@ MOD_COUNT="$(wc -l <"$DERIVED_MODS" | tr -d ' ')"
 
 
 # ---------------------------------------------------------------------------
-# 1b) REFUSE if the crate uses a `doc` cfg PREDICATE.
+# 1b) REFUSE if any `cfg`/`cfg_attr` attribute in the crate's sources mentions the
+#     token `doc`. DELIBERATELY BLUNT — READ THIS BEFORE "IMPROVING" IT.
 #
-#     `cargo doc` compiles with the `doc` cfg SET. So a `#[cfg(not(doc))] pub fn
-#     new_api()` is in the surface a normal default build SHIPS and absent from
-#     rustdoc — and therefore absent from this snapshot. That is a false PASS, and
-#     it is not fixable by measuring harder: the rustdoc-derived view simply is not
-#     the compiled view once `cfg(doc)` is in play.
+#     WHY THE REFUSAL EXISTS. `cargo doc` compiles with the `doc` cfg SET. So a
+#     `#[cfg(not(doc))] pub fn new_api()` is in the surface a normal default build
+#     SHIPS and absent from rustdoc — and therefore absent from this snapshot; a
+#     `#[cfg(doc)]` item is the mirror image, RECORDED in the snapshot while the
+#     shipped crate does not have it at all. Either way the guard would certify a
+#     surface the crate does not have: a false PASS in the one guard whose entire job
+#     is noticing public-API changes.
 #
 #     THIS BLIND SPOT IS SHARED BY EVERY RUSTDOC-DERIVED ORACLE — `cargo-public-api`
 #     and rustdoc JSON have it too. It is a property of the input, not of this
 #     implementation, which matters for whoever revisits this guard later: switching
-#     tools does not fix it. Closing it properly needs a SECOND measurement without
-#     the `doc` cfg, compared against the first.
+#     tools does not fix it. Closing it properly needs a SECOND measurement taken
+#     WITHOUT the `doc` cfg, compared against the first. Until then the guard REFUSES
+#     rather than certify a surface it knows may differ from the shipped one.
 #
-#     Until then the guard REFUSES rather than certify a surface it knows may differ
-#     from the shipped one.
+#     WHAT WAS DELETED HERE, AND WHY IT IS NOT COMING BACK. Detection used to be a
+#     PARSER — a meta-item walk (`has_doc()` / `split_meta()` / `strip_strings()` plus
+#     a bracket-balanced `#[…]` extractor) that asked whether a `doc` token sat in a
+#     cfg PREDICATE position, precisely so it could NOT fire on `doc` in `cfg_attr`'s
+#     ATTRIBUTE position (`#[cfg_attr(feature = "x", doc = "…")]`, harmless
+#     conditional prose). That precision was DEFEATED THREE TIMES on this one issue:
+#       1. the original `grep -E` required a non-identifier character immediately
+#          BEFORE the `doc` token, and the `^` alternative there is a LINE ANCHOR
+#          (matchable only at column zero), so a `doc` in first-argument position
+#          could never match it: `#[cfg(doc)]` PASSED GREEN;
+#       2. `#[cfg_attr(doc, doc(hidden))]` was missed entirely — the alternation
+#          matched `cfg`, then required a space or `(`, and met `_`;
+#       3. the meta-item walk did not skip Rust COMMENTS, so the perfectly valid
+#          `#[cfg(/* explanation */ doc)]` handed it a predicate starting with `/`,
+#          matched no identifier, returned "no doc", and CERTIFIED. Re-measured
+#          against that parser before this change: `#[cfg(/* explanation */ doc)]`,
+#          `#[cfg( // explanation` + newline + `doc)]` and a multi-line
+#          `#[cfg(all(/* why */ doc, unix))]` ALL exited 0 with the refusal never
+#          firing.
+#     Across issue #1712 that is the SEVENTH instance of one class: a LEXICAL pattern
+#     standing in for a STRUCTURAL read. The ruling was to stop patching instances and
+#     remove the class, so the parser is gone. What is left has no meta-item grammar,
+#     no comment handling and no string handling to get wrong: ARM on a bare `cfg` or
+#     `cfg_attr` token, DISARM at the next `]`, and refuse on a bare `doc` token seen
+#     while armed. `]` is what makes the window self-scoping — an attribute ends with
+#     one — and it needs no notion of what an attribute IS, so a spaced `# [cfg(doc)]`,
+#     an attribute split across lines and a comment anywhere inside one are all caught
+#     by construction rather than by a rule someone has to maintain.
 #
-#     THE DETECTOR IS STRUCTURAL OVER META-ITEMS, and it has to be. It used to be one
-#     `grep -rnE` whose alternation was `(cfg|any|all|not)[[:space:]]*\(` followed by
-#     a required non-identifier character immediately BEFORE the `doc` token — and the
-#     `^` alternative there is a LINE ANCHOR, matchable only at column zero. So a
-#     `doc` token in FIRST-ARGUMENT position could never match it. MEASURED against
-#     that pattern (issue #1712, roborev r4 F1): `#[cfg(doc)]` and
-#     `#[cfg_attr(not(doc), cfg(any()))]` both PASSED GREEN with the guard reporting
-#     "1128 public items … match", certifying a snapshot that lists a public item the
-#     shipped crate does not have; `#[cfg_attr(doc, doc(hidden))]` failed only as
-#     ordinary snapshot drift, with the refusal never firing. It was also blind to any
-#     attribute split across lines. A substring test standing in for a structural one
-#     is the fourth defect of that class in this issue — including, embarrassingly,
-#     inside the refusal that was accepted as the fence AROUND that class.
+#     THE TRADE, STATED SO NOBODY "FIXES" IT. This OVER-approximates ON PURPOSE. It
+#     fires on `doc` in `cfg_attr`'s ATTRIBUTE position (`#[cfg_attr(feature = "x",
+#     doc = "…")]` gates nothing and still refuses — see the self-test case that pins
+#     this as INTENDED), on `doc` inside a comment or a string in a cfg attribute
+#     (`#[cfg(feature = "doc")]` gates on a FEATURE named doc and still refuses), and
+#     on a bare `doc` token following any unrelated `cfg` mention that has no `]`
+#     after it. Every one of those is a LOUD FAIL naming a file and a line, costing
+#     whoever hits it one edit or one deliberate decision. UNDER-firing costs a SILENT
+#     FALSE PASS in the API guard. Those two costs are not comparable, so the
+#     direction of the approximation is fixed, and buying precision back means
+#     reintroducing a parser — each sub-parser being independently defeatable in the
+#     false-PASS direction. The deleted string-stripper is the instructive one: it ran
+#     per LINE, so `#[cfg(/*"*/doc)]` erased the `doc` and certified. DO NOT restore
+#     position analysis, comment stripping or string stripping here. If the noise ever
+#     becomes real, the fix is the SECOND MEASUREMENT above, not a cleverer scan.
 #
-#     So the scan reads the meta-item tree: it extracts each bracket-balanced
-#     `#[…]` / `#![…]` attribute (joining across lines) and asks whether a `doc`
-#     token appears in a cfg PREDICATE position — recursing through `cfg`/`any`/
-#     `all`/`not` arguments, and through `cfg_attr`'s FIRST argument.
+#     THE ONE ACKNOWLEDGED UNDER-FIRE, since it is a scan and not a parser: a literal
+#     `]` sitting between the `cfg` token and the `doc` token INSIDE one attribute
+#     disarms the window early (`#[cfg(feature = "a]b", doc)]`). It cannot arise from
+#     ordinary code or from rustfmt output, and no shape short of a `]` inside a
+#     string literal in a cfg predicate reaches it.
 #
-#     THE ONE NARROWING, done structurally and deliberately: `cfg_attr`'s arguments
-#     2..n are ATTRIBUTES IT WOULD APPLY, not conditions. `#[cfg_attr(feature = "x",
-#     doc = "…")]` is ordinary conditional prose that gates nothing, and it is a
-#     pattern real code uses; firing on it would be a false FAIL, so the position
-#     distinction is honoured rather than approximated. (Those arguments are still
-#     recursed into as attributes, so a nested `cfg_attr(a, cfg_attr(b, cfg(doc)))`
-#     is caught.) String-literal CONTENTS are erased before anything is parsed, for
-#     the same reason as in the crate-root scan: `#[cfg(feature = "doc")]` gates on a
-#     FEATURE named doc, and an attribute VALUE is data, never structure.
-#
-#     EVERYWHERE ELSE IT OVER-APPROXIMATES, on purpose, because over-firing costs a
-#     loud actionable FAIL while under-firing costs a silent false PASS — which is
-#     precisely the defect fixed here. It therefore also fires on a `doc` predicate
-#     inside a COMMENT or a doc-comment (comments are deliberately NOT stripped), on
-#     one inside a macro body that never expands, on an argument list whose parens do
-#     not balance, and on an attribute that never closes its bracket.
-#
-#     MEASURED TODAY in cqlite-core/src: 0 `doc` cfg predicates. The whole tree has 7
-#     `cfg_attr` attributes, every one of them `feature = "…"` in the condition
-#     applying an `allow(…)`, and 0 carrying a `doc` token in any position — so this
-#     refusal fires on nothing that exists, the same justification the original
-#     claimed but now re-measured against a detector that can actually see the shapes.
+#     MEASURED TODAY in cqlite-core/src, re-measured for this change rather than
+#     inherited: 481 `.rs` files; 1821 attributes mention `cfg`, of which 7 are
+#     `cfg_attr` (every one `feature = "…"` applying an `allow(…)`); 38 attributes
+#     carry a bare `doc` token, all of them `#[doc(hidden)]` with no `cfg` in them;
+#     0 carry BOTH. This scan reports 0 hits on that tree — so the blunt rule fires
+#     on nothing that exists today, measured under the BLUNT rule itself and not
+#     merely under the deleted parser's narrowing.
 # ---------------------------------------------------------------------------
 CFGDOC_AWK="$WORK_DIR/cfgdoc.awk"
 cat >"$CFGDOC_AWK" <<'CFGDOC_AWK_EOF'
-# Does this file use a `doc` cfg PREDICATE? Structural over meta-items — see the
-# guard's "1b)" comment block for why this is not a grep.
-function ltrim(x) { sub(/^[[:space:]]+/, "", x); return x }
-function rtrim(x) { sub(/[[:space:]]+$/, "", x); return x }
-function squash(x) { gsub(/[[:space:]]+/, " ", x); return ltrim(rtrim(x)) }
-
-# Erase string-literal CONTENTS, keeping the quotes: an attribute VALUE is data,
-# never structure (`#[cfg(feature = "doc")]` gates on a feature named doc). Same
-# discipline as the crate-root scan's strip_strings(); applied per LINE, so an
-# unterminated literal can only affect its own line.
-function strip_strings(t,   out, i, c, instr) {
-  out = ""; instr = 0
-  for (i = 1; i <= length(t); i++) {
-    c = substr(t, i, 1)
-    if (instr) {
-      if (c == "\\") { i++; continue }
-      if (c == "\"") { instr = 0; out = out "\"" }
-      continue
-    }
-    if (c == "\"") { instr = 1; out = out "\""; continue }
-    out = out c
-  }
-  return out
-}
-
-# Split a meta-list's inside into its TOP-LEVEL comma-separated items. Returns -1 if
-# the parens do not balance — the caller then REFUSES rather than read a truncated
-# list, which would be a permissive branch keyed on "could not measure".
-function split_meta(str, arr, k,   i, d, c, cur) {
-  k = 0; cur = ""; d = 0
-  for (i = 1; i <= length(str); i++) {
-    c = substr(str, i, 1)
-    if (c == "(") d++
-    else if (c == ")") { d--; if (d < 0) return -1 }
-    if (c == "," && d == 0) { if (squash(cur) != "") { k++; arr[k] = squash(cur) }; cur = ""; continue }
-    cur = cur c
-  }
-  if (d != 0) return -1
-  if (squash(cur) != "") { k++; arr[k] = squash(cur) }
-  return k
-}
-
-# has_doc(m, pos): does meta-item `m` — appearing in a cfg PREDICATE position
-# ("pred") or in an ATTRIBUTE position ("attr") — condition on the `doc` cfg?
-#
-# The position distinction IS the point, and it is why this cannot be a substring
-# test: in `#[cfg_attr(doc, doc(hidden))]` the FIRST argument is a predicate (fires)
-# while the rest are attributes to apply, and in
-# `#[cfg_attr(feature = "x", doc = "prose")]` the `doc` is in ATTRIBUTE position,
-# gates nothing, and firing on it would be a false FAIL on ordinary code.
-function has_doc(m, pos,   nm, rest, args, parts, k, i) {
-  m = squash(m)
-  # An attribute NAME can be PATH-QUALIFIED (`#[tracing::instrument(…)]`,
-  # `#[tokio::test(…)]`). Consuming only the first segment left `::instrument(…)` as
-  # the "argument list", which tripped the unreadable-arg-list refusal below on 74
-  # ordinary attributes of this crate (measured). A qualified path is never `cfg`,
-  # `cfg_attr` or `doc`, so matching the whole path removes that noise while changing
-  # no firing case.
-  if (!match(m, /^[A-Za-z_][A-Za-z0-9_]*([[:space:]]*::[[:space:]]*[A-Za-z_][A-Za-z0-9_]*)*/)) return 0
-  nm = substr(m, RSTART, RLENGTH)
-  rest = ltrim(substr(m, RLENGTH + 1))
-  # A `doc` token in PREDICATE position is exactly what we are looking for, whatever
-  # follows it: `doc` and `doc = "…"` both condition on the doc cfg.
-  if (pos == "pred" && nm == "doc") return 1
-  args = ""
-  if (substr(rest, 1, 1) == "(" && substr(rest, length(rest), 1) == ")")
-    args = substr(rest, 2, length(rest) - 2)
-  else if (index(rest, "(") > 0) return 1              # unreadable arg list: refuse
-  if (nm == "cfg" || nm == "any" || nm == "all" || nm == "not") {
-    k = split_meta(args, parts, 0)
-    if (k < 0) return 1
-    for (i = 1; i <= k; i++) if (has_doc(parts[i], "pred")) return 1
-    return 0
-  }
-  if (nm == "cfg_attr") {
-    k = split_meta(args, parts, 0)
-    if (k < 0) return 1
-    if (k >= 1 && has_doc(parts[1], "pred")) return 1
-    # 2..n are the attributes it would APPLY, so they are attribute position — but
-    # they are still walked, or a nested cfg_attr/cfg inside them would be missed.
-    for (i = 2; i <= k; i++) if (has_doc(parts[i], "attr")) return 1
-    return 0
-  }
-  return 0
-}
-
-FNR == 1 {
-  # A file that ended mid-attribute could not be read; refuse rather than exempt.
-  if (state == 1) printf "%s:%d: unterminated attribute — cannot read it, refusing to exempt it\n", PREVFILE, startln
-  state = 0; depth = 0; body = ""
-}
+# Blunt two-state scan — see the guard's "1b)" comment block. NOT a parser, and it
+# must not become one: ARM on a bare `cfg`/`cfg_attr` token, DISARM at the next `]`,
+# report a bare `doc` token seen while armed. Comments, strings, macro bodies and
+# multi-line attributes are all deliberately un-special-cased.
+function istok(c) { return (c ~ /[A-Za-z0-9_]/) }
+FNR == 1 { armed = 0; armline = 0 }
 {
-  PREVFILE = FILENAME
-  s = strip_strings($0)
-  L = length(s)
-  i = 1
-  while (i <= L) {
-    if (state == 0) {
-      p = index(substr(s, i), "#")
-      if (p == 0) break
-      i = i + p - 1
-      j = i + 1
-      if (substr(s, j, 1) == "!") j++
-      if (substr(s, j, 1) != "[") { i++; continue }
-      state = 1; depth = 0; body = ""; startln = FNR
-      i = j
+  L = length($0)
+  for (i = 1; i <= L; i++) {
+    c = substr($0, i, 1)
+    if (c == "]") { armed = 0; continue }
+    if (!istok(c)) continue
+    j = i
+    while (j <= L && istok(substr($0, j, 1))) j++
+    tok = substr($0, i, j - i)
+    i = j - 1
+    if (tok == "cfg" || tok == "cfg_attr") { armed = 1; armline = FNR }
+    else if (tok == "doc" && armed) {
+      printf "%s:%d: %s   [`cfg` token opened at line %d]\n", FILENAME, FNR, squash($0), armline
+      armed = 0
     }
-    while (i <= L) {
-      c = substr(s, i, 1)
-      if (c == "[") { depth++; if (depth > 1) body = body c; i++; continue }
-      if (c == "]") {
-        depth--
-        if (depth == 0) {
-          if (has_doc(body, "attr")) printf "%s:%d: %s\n", FILENAME, startln, squash("#[" body "]")
-          state = 0; body = ""; i++
-          break
-        }
-        body = body c; i++; continue
-      }
-      body = body c; i++
-    }
-    # Line ended mid-attribute: keep accumulating on the next line (a `#[cfg(\n doc,
-    # …)]` split across lines was invisible to the pattern this replaces).
-    if (state == 1) body = body " "
   }
 }
-END {
-  if (state == 1) printf "%s:%d: unterminated attribute — cannot read it, refusing to exempt it\n", PREVFILE, startln
-}
+function squash(x) { gsub(/[[:space:]]+/, " ", x); sub(/^ /, "", x); sub(/ $/, "", x); return x }
 CFGDOC_AWK_EOF
 
 # The subject set is measured, not assumed: zero files scanned would make this
@@ -865,12 +778,12 @@ CFGDOC_HITS="$WORK_DIR/cfgdoc.txt"
 tr '\n' '\0' <"$CFGDOC_FILES" | xargs -0 awk -f "$CFGDOC_AWK" >"$CFGDOC_HITS"
 if [ -s "$CFGDOC_HITS" ]; then
   echo "" >&2
-  echo 'Occurrences of a `doc` cfg predicate (first 10):' >&2
+  echo 'Attributes mentioning `cfg` that also carry a bare `doc` token (first 10):' >&2
   head -10 "$CFGDOC_HITS" | sed "s|$REPO_ROOT/||" >&2
-  fail "$PACKAGE now uses a \`doc\` cfg predicate (\`cfg(doc)\` / \`cfg(not(doc))\` / \`cfg_attr(doc, …)\`). \`cargo doc\` compiles with \`doc\` SET, so the rustdoc-derived surface this guard measures can no longer be trusted to equal the surface a default build ships — an item behind \`cfg(not(doc))\` would be MISSING from the snapshot while being public in the shipped crate, and an item behind \`cfg(doc)\` would be RECORDED in it while the shipped crate does not have it at all.
+  fail "$PACKAGE mentions the \`doc\` cfg inside a \`cfg\`/\`cfg_attr\` attribute, at the file and line named above, so this guard treats it as a \`doc\` cfg predicate and REFUSES to certify. \`cargo doc\` compiles with the \`doc\` cfg SET, so the rustdoc-derived surface this guard measures can no longer be trusted to equal the surface a default build ships — an item behind \`cfg(not(doc))\` would be MISSING from the snapshot while being public in the shipped crate, and an item behind \`cfg(doc)\` would be RECORDED in it while the shipped crate does not have it at all.
        This is a property of every rustdoc-derived oracle (cargo-public-api and rustdoc JSON share it), not of this script, so it cannot be fixed by switching tools.
-       Either avoid the attribute in $PACKAGE, or extend this guard to take a SECOND measurement without the \`doc\` cfg and compare the two, before it can certify again.
-       (\`doc\` in \`cfg_attr\`'s ATTRIBUTE position — \`#[cfg_attr(feature = \"x\", doc = \"…\")]\` — is NOT this, and does not fire. If a line above looks like that shape, it is a bug in the scan, not in your code.)"
+       REMEDY: remove the \`doc\` cfg from $PACKAGE (that is the cheap fix), or accept that this guard cannot certify this crate while it is there — extending it would mean taking a SECOND measurement without the \`doc\` cfg and comparing the two.
+       The detection is DELIBERATELY BLUNT and it over-fires on purpose: a \`doc\` token in \`cfg_attr\`'s ATTRIBUTE position (\`#[cfg_attr(feature = \"x\", doc = \"…\")]\`), or inside a comment or string in a cfg attribute, gates nothing and STILL refuses. That is INTENDED, not a bug — the precise version of this check was defeated three times, so it was replaced by a rule with no parser to get wrong. See the \"1b)\" comment block in $(basename "$0")."
 fi
 
 # In VERIFY mode the committed snapshot is the baseline the whole run exists to
