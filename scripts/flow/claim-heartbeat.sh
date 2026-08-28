@@ -511,21 +511,44 @@ cmd_should_reap() {
 }
 
 # process_start_epoch <pid> — epoch seconds at which <pid> started, or EMPTY when it
-# cannot be determined. `ps -o lstart=` is used because it exists on both Linux and
-# macOS, unlike /proc. Empty is a THIRD answer, never folded onto "consistent".
+# cannot be determined. Empty is a THIRD answer and is never folded onto "consistent".
+#
+# DERIVED FROM ELAPSED TIME, NOT A WALL-CLOCK STRING (roborev round 3, Medium). The
+# first cut read `ps -o lstart=` and parsed it with `date -u`, but `lstart` is LOCAL
+# wall time with no zone in it, so on any non-UTC host the epoch came out shifted by
+# the offset — MEASURED: the same lstart parses 19,800s apart between UTC and
+# Asia/Kolkata, which is far past PID_IDENTITY_SLACK_SECS and would falsely declare a
+# live supervisor DEAD-PID-REUSED (or mask a real recycle). Elapsed seconds carry no
+# timezone at all, so the whole class is gone rather than corrected.
 process_start_epoch() {
-  local pid="$1" lstart epoch
-  lstart="$(ps -o lstart= -p "$pid" 2>/dev/null | sed -e 's/^ *//' -e 's/ *$//')"
-  [ -n "$lstart" ] || return 0
-  if epoch="$(date -u -d "$lstart" +%s 2>/dev/null)"; then
-    printf '%s\n' "$epoch"
-    return 0
+  local pid="$1" secs now
+  now="$(date -u +%s)"
+  # `etimes` (elapsed SECONDS) is the direct form.
+  secs="$(ps -o etimes= -p "$pid" 2>/dev/null | tr -d ' ')"
+  case "$secs" in
+    '' | *[!0-9]*) secs="" ;;
+  esac
+  if [ -z "$secs" ]; then
+    # Fall back to `etime` ([[DD-]HH:]MM:SS), which POSIX ps provides where `etimes`
+    # is absent. Still elapsed, still timezone-free.
+    local et d hms h m sec
+    et="$(ps -o etime= -p "$pid" 2>/dev/null | tr -d ' ')"
+    [ -n "$et" ] || return 0
+    case "$et" in
+      *-*) d="${et%%-*}"; hms="${et#*-}" ;;
+      *)   d=0;           hms="$et" ;;
+    esac
+    case "$hms" in
+      *:*:*) h="${hms%%:*}"; m="$(printf '%s' "$hms" | cut -d: -f2)"; sec="${hms##*:}" ;;
+      *:*)   h=0;            m="${hms%%:*}";                          sec="${hms##*:}" ;;
+      *)     return 0 ;;
+    esac
+    case "$d$h$m$sec" in
+      *[!0-9]*) return 0 ;;
+    esac
+    secs=$(( (10#$d * 86400) + (10#$h * 3600) + (10#$m * 60) + 10#$sec ))
   fi
-  # BSD/macOS date: parse ps's own `lstart` format.
-  if epoch="$(date -u -j -f '%a %b %d %T %Y' "$lstart" +%s 2>/dev/null)"; then
-    printf '%s\n' "$epoch"
-  fi
-  return 0
+  printf '%s\n' "$((now - secs))"
 }
 
 # process_exists <pid> — exit 0 iff the pid exists, REGARDLESS of ownership.
@@ -598,14 +621,23 @@ cmd_dead_lanes() {
   # outage into "no claims found" + exit 0 — a pass derived from the ABSENCE of a
   # bad signal. `git ls-remote` exits 0 with EMPTY output when nothing matches, so a
   # genuine empty fleet stays distinguishable from a failure without guessing.
+  #
+  # stdout and stderr are kept SEPARATE (roborev round 3, Low). `2>&1` merged git/SSH
+  # warnings into the ref listing, where each warning line became a bogus "ref" row and
+  # printed a spurious UNKNOWN-UNREADABLE — noise that also flipped the exit code to 1
+  # on a perfectly healthy fleet. stderr is still captured, but only for the diagnostic.
+  local errfile
+  errfile="$(mktemp "${TMPDIR:-/tmp}/claim-heartbeat-lsremote.XXXXXX")"
   set +e
-  raw="$(git ls-remote "$REMOTE" 'refs/machine-claims/*' 2>&1)"
+  raw="$(git ls-remote "$REMOTE" 'refs/machine-claims/*' 2>"$errfile")"
   lsrc=$?
   set -e
   if [ "$lsrc" -ne 0 ]; then
-    note "could not list claim refs on ${REMOTE} (git exited ${lsrc}) — the fleet was NOT measured, so this is NOT 'no dead lanes'. git said: ${raw}"
+    note "could not list claim refs on ${REMOTE} (git exited ${lsrc}) — the fleet was NOT measured, so this is NOT 'no dead lanes'. git said: $(tr '\n' ' ' <"$errfile")"
+    rm -f "$errfile"
     return 1
   fi
+  rm -f "$errfile"
 
   if [ -z "$raw" ]; then
     echo "no claims found on $REMOTE — no dead lanes (an empty fleet is not a finding)"
@@ -670,13 +702,15 @@ cmd_dead_lanes() {
         verdict="ALIVE"
         detail="identity=verified (start precedes the claim ts)"
       else
-        # PERMISSIVE, and the reason is recorded here rather than left implicit: the
-        # start time or the claim ts could not be read, so reuse is not excluded. The
-        # alternative — refusing to report ALIVE at all — would make the command
-        # useless wherever `ps -o lstart=` is unavailable, so the gap is ANNOTATED
-        # instead of hidden.
-        verdict="ALIVE"
-        detail="identity=unverified (start time unavailable — pid reuse not excluded)"
+        # NOT "ALIVE" (roborev round 3, Medium). The first cut reported ALIVE with an
+        # `identity=unverified` annotation, which still let the run exit 0 — and a
+        # recycled pid then reproduces exactly the false-clean this monitor exists to
+        # prevent. An unverifiable identity is a gap in what this run could determine,
+        # so it gets its own verdict and counts toward an incomplete measurement. An
+        # annotation is not a substitute for an exit code: nobody greps the annotation.
+        verdict="UNKNOWN-IDENTITY"
+        detail="pid ${pid} exists but its start time or the claim ts could not be read — pid reuse NOT excluded"
+        unreadable=$((unreadable + 1))
       fi
     else
       verdict="DEAD-NO-PROCESS"

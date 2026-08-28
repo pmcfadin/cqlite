@@ -591,15 +591,36 @@ echo "TEST 32: issue=0 (supervisor stamped before the issue was known) is not qu
 # iteration. Treating 0 as a real issue number would send the open-PR probe hunting
 # for PR #0 and print a bogus issue in the report.
 craft_old_claim "$WORK" "zeroIssue" 0 999999 30
+# A MARKER FILE, not a grep of the hook's output (roborev round 3, Low): `open_pr_state`
+# sends the hook's stdout AND stderr to /dev/null, so an output-based negative assertion
+# passed whether or not the hook ran — it could not fail. A file survives the redirect.
+probe_marker="$T/probe-ran-marker"
+rm -f "$probe_marker"
 zi_out=$(cd "$WORK" && HEARTBEAT_MACHINE=zeroIssue \
-  CLAIM_OPEN_PR_CMD='echo "PROBE-RAN-FOR-$1" >&2; exit 0' bash "$HB" dead-lanes 2>&1)
+  CLAIM_OPEN_PR_CMD="touch '$probe_marker'; exit 0" bash "$HB" dead-lanes 2>&1)
 if printf '%s\n' "$zi_out" | grep -E '^zeroIssue ' | grep -q 'DEAD-NO-PROCESS' \
-  && ! printf '%s\n' "$zi_out" | grep -q 'PROBE-RAN-FOR-0'; then
+  && [ ! -e "$probe_marker" ]; then
   ok "a claim stamped issue=0 is still reported DEAD, without probing for a PR on issue 0"
 else
-  bad "issue=0 must be reported dead but never PR-probed: out:
+  bad "issue=0 must be reported dead but never PR-probed (marker present=$([ -e "$probe_marker" ] && echo yes || echo no)): out:
 $zi_out"
 fi
+# NON-VACUITY of the marker itself: with a REAL issue number the same hook DOES run and
+# DOES create the marker. Without this, an always-absent marker would prove nothing.
+rm -f "$probe_marker"
+(cd "$WORK" && HEARTBEAT_MACHINE=zeroIssue2 \
+  CLAIM_OPEN_PR_CMD="touch '$probe_marker'; exit 0" bash "$HB" dead-lanes >/dev/null 2>&1) || true
+craft_old_claim "$WORK" "zeroIssue2" 3401 999999 30
+rm -f "$probe_marker"
+(cd "$WORK" && HEARTBEAT_MACHINE=zeroIssue2 \
+  CLAIM_OPEN_PR_CMD="touch '$probe_marker'; exit 0" bash "$HB" dead-lanes >/dev/null 2>&1) || true
+if [ -e "$probe_marker" ]; then
+  ok "NON-VACUITY: the same hook DOES fire (marker created) for a real issue number, so the absent-marker assertion above is meaningful"
+else
+  bad "NON-VACUITY broken: the PR-probe hook never fires at all, so TEST 32 proves nothing"
+fi
+rm -f "$probe_marker"
+(cd "$WORK" && g push -q origin ":refs/machine-claims/zeroIssue2" 2>/dev/null || true)
 
 # ===========================================================================
 echo "TEST 33: the recorded pid is the SUPERVISOR's — the semantic dead-lanes actually tests"
@@ -736,6 +757,109 @@ else
 $pf2_out"
 fi
 (cd "$WORK" && g push -q origin ":refs/machine-claims/probeFail" 2>/dev/null || true)
+
+# ===========================================================================
+echo "TEST 38: the pid-identity check is TIMEZONE-FREE (roborev round 3, Medium)"
+# ===========================================================================
+# The first cut read `ps -o lstart=` (LOCAL wall time, no zone) and parsed it with
+# `date -u`, so on a non-UTC host the start epoch was shifted by the whole offset —
+# far past PID_IDENTITY_SLACK_SECS, which would declare a live supervisor
+# DEAD-PID-REUSED. Driven by running the check under a deliberately skewed TZ: the
+# verdict must not depend on it.
+tail -f /dev/null &
+tz_pid=$!
+craft_old_claim "$WORK" "tzMachine" 3402 "$tz_pid" 0
+tz_utc=$(cd "$WORK" && TZ=UTC HEARTBEAT_MACHINE=tzMachine CLAIM_OPEN_PR_CMD="$NO_OPEN_PR" \
+  bash "$HB" dead-lanes 2>&1 | grep -E '^tzMachine ' | awk '{print $4}')
+tz_ist=$(cd "$WORK" && TZ=Asia/Kolkata HEARTBEAT_MACHINE=tzMachine CLAIM_OPEN_PR_CMD="$NO_OPEN_PR" \
+  bash "$HB" dead-lanes 2>&1 | grep -E '^tzMachine ' | awk '{print $4}')
+tz_neg=$(cd "$WORK" && TZ=America/Los_Angeles HEARTBEAT_MACHINE=tzMachine CLAIM_OPEN_PR_CMD="$NO_OPEN_PR" \
+  bash "$HB" dead-lanes 2>&1 | grep -E '^tzMachine ' | awk '{print $4}')
+if [ "$tz_utc" = "ALIVE" ] && [ "$tz_ist" = "ALIVE" ] && [ "$tz_neg" = "ALIVE" ]; then
+  ok "the identity verdict is identical under UTC, +05:30 and -07:00 (ALIVE in all three) — no timezone dependence"
+else
+  bad "the identity check must not depend on TZ: UTC=$tz_utc IST=$tz_ist PST=$tz_neg"
+fi
+kill "$tz_pid" 2>/dev/null
+wait "$tz_pid" 2>/dev/null
+(cd "$WORK" && g push -q origin ":refs/machine-claims/tzMachine" 2>/dev/null || true)
+
+# ===========================================================================
+echo "TEST 39: an UNVERIFIABLE identity is UNKNOWN-IDENTITY + incomplete, never ALIVE"
+# ===========================================================================
+# roborev round 3 (Medium): reporting ALIVE with an `identity=unverified` annotation
+# still let the run exit 0, so a recycled pid reproduced the false-clean this monitor
+# exists to prevent. An annotation is not a substitute for an exit code — nobody greps
+# the annotation. Driven by shimming `ps` so existence succeeds but elapsed time is
+# unavailable, which is exactly the state that used to be called ALIVE.
+shimdir="$T/psshim"
+mkdir -p "$shimdir"
+cat >"$shimdir/ps" <<'PSEOF'
+#!/usr/bin/env bash
+# Existence probe (`ps -p <pid>`) succeeds; every elapsed-time query returns nothing.
+for a in "$@"; do
+  case "$a" in
+    etimes=|etime=) exit 0 ;;
+  esac
+done
+exit 0
+PSEOF
+chmod +x "$shimdir/ps"
+tail -f /dev/null &
+shim_pid=$!
+craft_old_claim "$WORK" "shimMachine" 3403 "$shim_pid" 0
+shim_out=$(cd "$WORK" && PATH="$shimdir:$PATH" HEARTBEAT_MACHINE=shimMachine \
+  CLAIM_OPEN_PR_CMD="$NO_OPEN_PR" bash "$HB" dead-lanes 2>&1)
+shim_rc=$?
+if printf '%s\n' "$shim_out" | grep -E '^shimMachine ' | grep -q 'UNKNOWN-IDENTITY' \
+  && [ "$shim_rc" -eq 1 ]; then
+  ok "an unverifiable pid identity is UNKNOWN-IDENTITY and makes the run incomplete (exit 1), never a clean ALIVE"
+else
+  bad "an unverifiable identity must be UNKNOWN-IDENTITY + exit 1: rc=$shim_rc out:
+$shim_out"
+fi
+kill "$shim_pid" 2>/dev/null
+wait "$shim_pid" 2>/dev/null
+(cd "$WORK" && g push -q origin ":refs/machine-claims/shimMachine" 2>/dev/null || true)
+
+# ===========================================================================
+echo "TEST 40: a git WARNING on stderr is not parsed as a claim ref (round 3, Low)"
+# ===========================================================================
+# `2>&1` merged git/SSH warnings into the ref listing, where every warning line became
+# a bogus row printed as UNKNOWN-UNREADABLE — and flipped the exit code to 1 on a
+# healthy fleet. Driven by shimming `git` to emit a warning on stderr while returning a
+# perfectly good listing on stdout.
+gitshim="$T/gitshim"
+mkdir -p "$gitshim"
+cat >"$gitshim/git" <<'GITEOF'
+#!/usr/bin/env bash
+for a in "$@"; do
+  if [ "$a" = "ls-remote" ]; then
+    echo "Warning: Permanently added a host key to the list of known hosts." >&2
+    echo "warning: redirecting to https://example.invalid/repo.git" >&2
+    exec /usr/bin/git "$@"
+  fi
+done
+exec /usr/bin/git "$@"
+GITEOF
+chmod +x "$gitshim/git"
+craft_old_claim "$WORK" "warnMachine" 3404 "$$" 0
+warn_out=$(cd "$WORK" && PATH="$gitshim:$PATH" HEARTBEAT_MACHINE=warnMachine \
+  CLAIM_OPEN_PR_CMD="$NO_OPEN_PR" bash "$HB" dead-lanes 2>&1)
+if ! printf '%s\n' "$warn_out" | grep -q 'UNKNOWN-UNREADABLE' \
+  && ! printf '%s\n' "$warn_out" | grep -qE '^Warning:|^warning:'; then
+  ok "git warnings on stderr produce no bogus ref rows and no spurious UNKNOWN-UNREADABLE"
+else
+  bad "stderr must not be parsed as the ref listing: out:
+$warn_out"
+fi
+# NON-VACUITY: the shim really did emit those warnings (otherwise this asserts nothing).
+if PATH="$gitshim:$PATH" git ls-remote "$ORIGIN" 'refs/machine-claims/*' 2>&1 >/dev/null | grep -q 'Permanently added'; then
+  ok "NON-VACUITY: the git shim does emit stderr warnings during ls-remote"
+else
+  bad "NON-VACUITY broken: the git shim emitted no warning, so TEST 40 proves nothing"
+fi
+(cd "$WORK" && g push -q origin ":refs/machine-claims/warnMachine" 2>/dev/null || true)
 
 echo
 echo "=== claim-heartbeat.sh: $PASS passed, $FAIL failed ==="
