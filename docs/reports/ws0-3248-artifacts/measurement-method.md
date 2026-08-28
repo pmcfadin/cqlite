@@ -320,3 +320,50 @@ A census that inflates itself, a kill that matches nothing, and a kill that kill
 one defect: **the observer appeared in its own measurement.** The fix in every case was to attribute
 by identity — `/proc/<pid>/comm`, `/proc/<pid>/cmdline`, `/proc/<pid>/cwd` — rather than by a pattern
 match over a shared namespace.
+
+
+---
+
+## 7. `grep -q` under `pipefail` is a RACE, not a shortcut — three instances in one delivery
+
+Recorded as its own section because it bit **three times** in this one issue, **in both
+polarities**, and because nothing in this repository writes it down.
+
+**The mechanism.** `grep -q` exits the instant it finds a match. Under `set -o pipefail`, the
+pipeline takes the worst status of any stage — so if the producer is still writing when `grep`
+closes the pipe, the producer receives **SIGPIPE**, exits non-zero, and **the pipeline reports
+failure on the SUCCESS path.** Whether that happens depends on how much the producer has left
+to write when the match is found, which makes it **intermittent** and therefore easy to
+misfile as a flake.
+
+**The three instances:**
+
+| where | polarity | effect |
+|---|---|---|
+| `ws0-baseline.sh` symbol check — `nm \| grep -q '_RN'` | **fails CLOSED** | refused every **correct** input: a binary with 2,997 Rust symbols read as having none, which would have blocked every legitimate profiling run |
+| `test_ws0_provenance_guards.sh` — `awk <region> \| grep -q` | **fails CLOSED, intermittently** | reported a defect that did not exist, ~45% of runs, in a **gate component** |
+| the same file's sibling sites (26 of them) | **dormant** | the match sits near the end of a short output, so the producer has already finished |
+
+**The attribution detail worth keeping**, because it is how a latent defect becomes a live one:
+the provenance race measured **0/20 failures against `origin/main`'s driver (a 170-line extracted
+region)** and **9/20 against this branch's (197 lines)**. The bug was in the test all along; a
+diff that merely **grew the file being inspected** turned it into a ~45% flake for everyone. So
+"I did not touch that line" is not a defence — **growing a producer's output is a change to every
+`grep -q` pipeline that reads it.**
+
+**The rule.** Do not pipe into `grep -q` under `pipefail`. Capture first:
+
+```bash
+region="$(awk '/start/,/end/' "$file")"
+if grep -q 'needle' <<<"$region"; then ...
+```
+
+…or use `grep -c` and compare the count, which reads all of its input and cannot SIGPIPE its
+producer. The same applies to `head -n`, which also closes early.
+
+**Why this belongs in a measurement method doc rather than a style guide.** Both failing
+instances were **guards**, and both failed in the direction that destroys trust in a guard: one
+refused correct input, the other cried wolf intermittently. A guard that fires on a correct
+tree is the guard people learn to ignore, and then delete. This defect class does not produce
+wrong *numbers* — it produces **wrong verdicts about whether the numbers can be trusted**, which
+is the same harm one level up.
