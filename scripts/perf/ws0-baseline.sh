@@ -166,6 +166,25 @@ EVENTS="cycles,instructions"
 # [profile.release] sets strip = true, so a release binary carries NO symbols and cannot be
 # attributed per-function at all. Implies --no-build (the build writes only to target/release).
 BIN_DIR=""
+# AC1 sampling profile (#3248). Empty = no profiling, which is the default: AC0 must run on an
+# UNPERTURBED instrument, and a sampling session costs measurable observer overhead (measured on
+# this box: ~5% on cycles with a concurrent record). When set, every timed counting window is
+# ALSO covered by a CPU-wide `perf record` on the same pinned CPUs.
+#
+# The two sessions do NOT multiplex — MEASURED, not assumed: `cycles` and `instructions` both
+# reported 100.00% enabled with a concurrent `perf record -e cycles -C` on the same CPUs, and the
+# sampling session collected samples with zero lost. Had they multiplexed, perf would have SCALED
+# the counts and `read_perf_counters` would now refuse them (#3248's multiplex guard).
+#
+# A profiled run is DISTINGUISHABLE FROM A BASELINE IN THE ARTIFACT without a new manifest field,
+# because a profile needs symbols and `[profile.release]` strips: such a run is necessarily
+# `--bin-dir target/perfsym`, which the manifest records. So `results.json` already says which
+# binaries produced any given figure.
+PROFILE_OUT=""
+# A PRIME sample frequency, deliberately. A round number risks lock-step with a periodic activity
+# in the workload (a batch boundary, a flush interval), which aliases the profile toward or away
+# from whatever shares its period.
+PROFILE_FREQ=499
 # `--validate-args-only`: run every ARGUMENT check, print a stamp, and exit 0 having
 # touched NOTHING outside this process (issue #3272 review R1). See the exit point below
 # for why the alternative — asserting acceptance by running the real driver until it
@@ -213,6 +232,14 @@ ws0-baseline.sh — issue #3096 same-session Arrow-encode baseline
                        run FROZEN COPIES either way, so the digests still describe the bytes
                        that ran — this field records WHICH BUILD they came from, which those
                        digests cannot say.
+  --profile-out DIR    ALSO take a CPU-wide sampling profile over every timed counting window,
+                       written to DIR as profile-<tag>.data (#3248 AC1). Off by default: a
+                       sampling session costs observer overhead, so a baseline must not carry
+                       one. Needs symbol-bearing binaries, so pair it with --bin-dir; a
+                       stripped binary yields a profile of raw addresses and says nothing.
+  --profile-freq N     Sampling frequency for --profile-out (default $PROFILE_FREQ, a prime:
+                       a round number risks lock-step with a periodic activity in the
+                       workload, which aliases the profile).
   --no-build           Skip the release build; use the binaries already in target/release.
   --non-baseline       Measure a corpus that is NOT the canonical measurement corpus. By
                        DEFAULT the corpus is checked against the canonical pin in
@@ -262,6 +289,8 @@ while [[ $# -gt 0 ]]; do
     --non-baseline) BASELINE_MODE="non-baseline"; shift ;;
     --events) EVENTS="$2"; shift 2 ;;
     --bin-dir) BIN_DIR="$2"; DO_BUILD=0; shift 2 ;;
+    --profile-out) PROFILE_OUT="$2"; shift 2 ;;
+    --profile-freq) PROFILE_FREQ="$2"; shift 2 ;;
     --validate-args-only) VALIDATE_ONLY=1; shift ;;
     -h|--help) usage; exit 0 ;;
     # Every unrecognized argument is an ERROR, never ignored: a typo'd flag that
@@ -456,6 +485,19 @@ except Invalid as exc:
   echo "FATAL: --events is not a usable event list." >&2
   echo "       $_events_err" >&2
   exit 2
+fi
+
+if [[ -n "$PROFILE_OUT" ]]; then
+  mkdir -p "$PROFILE_OUT" 2>/dev/null || true
+  if [[ ! -d "$PROFILE_OUT" ]]; then
+    echo "FATAL: --profile-out '$PROFILE_OUT' is not a directory and could not be created." >&2
+    exit 2
+  fi
+  if ! [[ "$PROFILE_FREQ" =~ ^[1-9][0-9]{0,4}$ ]]; then
+    echo "FATAL: --profile-freq '$PROFILE_FREQ' is not a positive integer below 100000." >&2
+    echo "       A frequency of 0 samples nothing and reads exactly like a quiet profile." >&2
+    exit 2
+  fi
 fi
 
 if [[ -n "$BIN_DIR" && ! -d "$BIN_DIR" ]]; then
@@ -853,6 +895,30 @@ drop_caches_if_cold() {
 # from — never defined here, because this function is EXTRACTED and driven directly by
 # scripts/tests/test_ws0_cpu_pinning_guards.sh, and a constant it could only get from the
 # driver would make the extracted copy die on an unbound variable instead of diagnosing.
+# perf_record_c <outfile> — THE SECOND SANCTIONED perf INVOCATION (#3248 AC1).
+#
+# It lives in THIS file, beside `perf_stat_c`, for the reason lib-measure.sh records about the
+# counting wrapper: `perf_invocation_lint_tree` discovers wrapper ownership by grepping this
+# file, lints exactly the owner in `owner` mode and every other `scripts/perf/*.sh` in
+# `library` mode — where DEFINING a wrapper is itself a finding. A record wrapper in a library
+# would invert layer 1 of the guard.
+#
+# CPU-WIDE ONLY, on the same verified sibling pair the counting window uses. `-C` is supplied
+# here and is separately ASSERTED by the lint's END checks: a sampling profile pinned to
+# nothing samples whichever CPUs the scheduler happened to use, which is not the measured arm.
+# No caller-supplied options are accepted, exactly as in `perf_stat_c`.
+#
+# It samples until SIGINT, which `perf_stat_c` sends when the counting window closes, so the
+# profile covers EXACTLY the counted window rather than a guessed duration. perf finalises the
+# file on SIGINT; a guessed `sleep` would either truncate the profile or run past the window
+# and sample the teardown.
+perf_record_c() {
+  local outfile="$1"
+  # Same standalone-extraction rule as perf_stat_c below: defaulted so a text-extracted copy
+  # under `set -u` produces behaviour rather than an unbound-variable error.
+  perf record -e cycles -F "${PROFILE_FREQ:-499}" -g -C "$SERVER_CPUS" -o "$outfile" -- sleep 86400
+}
+
 perf_stat_c() {
   local outfile="$1"; shift
   local a name opt in_prefix=1
@@ -891,7 +957,39 @@ perf_stat_c() {
       exit 2
     done
   done
+  # THE SAMPLING SESSION BRACKETS EXACTLY THIS WINDOW (#3248 AC1). Started here rather than in
+  # the measurement legs because this function already IS the timed window: any other insertion
+  # point would need to guess the window's duration, and a guess either truncates the profile or
+  # samples the teardown.
+  #
+  # The setup-only leg is deliberately NOT profiled: its cycles are SUBTRACTED from the reported
+  # figure, so including it in the profile would attribute corpus-open and schema-ingest work to
+  # the per-row region the profile exists to describe.
+  # `${PROFILE_OUT:-}`, NOT `$PROFILE_OUT`, and this is not defensive style — it is required.
+  # `scripts/tests/test_ws0_cpu_pinning_guards.sh` and the invocation-lint self-test EXTRACT this
+  # function by text (`awk '/^perf_stat_c\(\)/,/^}/'`) and run it standalone under `set -u`, so a
+  # bare reference to a DRIVER global dies with an unbound-variable error instead of producing the
+  # function's diagnostic. That is the exact cross-file coupling this rig already documents for
+  # `$COLD_STEP_MAX_MS` in lib-args.sh — and the first version of this profiling hook
+  # reintroduced it, breaking two argv-guard cases that had nothing to do with profiling.
+  local _prof_pid=""
+  if [[ -n "${PROFILE_OUT:-}" && "$outfile" != *-setup.csv ]]; then
+    local _ptag
+    _ptag="$(basename "$outfile" .csv)"
+    perf_record_c "$PROFILE_OUT/profile-$_ptag.data" >/dev/null 2>&1 &
+    _prof_pid=$!
+    # Give the sampler a moment to arm, or the first fraction of the window is unsampled and
+    # the profile silently under-represents whatever runs first.
+    sleep 0.3
+  fi
   perf stat -x, -e "$EVENTS" -C "$SERVER_CPUS" -o "$outfile" -- "$@"
+  local _rc=$?
+  if [[ -n "$_prof_pid" ]]; then
+    # SIGINT, not SIGKILL: perf finalises perf.data on INT and leaves an unreadable stub on KILL.
+    kill -INT "$_prof_pid" 2>/dev/null || true
+    wait "$_prof_pid" 2>/dev/null || true
+  fi
+  return $_rc
 }
 
 # ---------------------------------------------------------------------------
