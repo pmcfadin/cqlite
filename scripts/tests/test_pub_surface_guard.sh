@@ -1223,7 +1223,29 @@ grep -qE '^pub-surface: +PASS' "$TMPROOT/case26b-summary.txt" \
   || fail_case "case 26 control — expected the successful --only exit status 3 (PARTIAL), got $case26b_rc"
 grep -qF 'public items + ' "$TMPROOT/case26b.out" \
   || fail_case "case 26 control — the component passed but did not echo the measurement line, so a pasted gate log would not show the check RAN"
-echo "OK (26): the pub-surface GATE COMPONENT requires the guard's affirmative measurement line before PASS"
+
+# (c) THE PREFIX RED (roborev r7 finding 3). The first version of the requirement
+#     matched any line STARTING `pub-surface: `, which is the same vacuous-pass shape
+#     one level down: a guard that prints a progress line and exits 0 satisfied it.
+#     A check against a PREFIX tests a SPELLING; the requirement must test the STATE.
+cat >"$wt26/$GUARD_REL" <<'STUB'
+#!/usr/bin/env bash
+# Self-test stub (#1712 r7 F3) — prints a line that BEGINS `pub-surface: ` but carries
+# no measurement at all, then exits 0. The component must NOT read this as a pass.
+echo "pub-surface: starting"
+exit 0
+STUB
+set +e
+gate26 "$TMPROOT/case26c-summary.txt" "$TMPROOT/case26c.out"
+case26c_rc=$?
+set -e
+grep -qE '^pub-surface: +FAIL' "$TMPROOT/case26c-summary.txt" \
+  || fail_case "case 26(c) — a guard printing only \`pub-surface: starting\` and exiting 0 was NOT recorded FAIL. The requirement is matching a PREFIX, so it is satisfiable without measuring anything; got: $(grep -E 'pub-surface|RESULT:' "$TMPROOT/case26c-summary.txt" || echo '(no pub-surface line at all)')"
+[ "$case26c_rc" -eq 1 ] \
+  || fail_case "case 26(c) — expected the FAIL exit status 1 for a prefix-only measurement line, got $case26c_rc"
+grep -qE 'affirmative measurement' "$TMPROOT/case26c.out" \
+  || fail_case "case 26(c) — the component failed but not with the NAMED missing-measurement diagnostic; got: $(cat "$TMPROOT/case26c.out")"
+echo "OK (26): the pub-surface GATE COMPONENT requires the guard's affirmative measurement line before PASS — a line that merely BEGINS \`pub-surface: \` does not satisfy it"
 
 # ---------------------------------------------------------------------------
 # 27. GREEN — the ORDINARY PRE-COMMIT WORKFLOW *WITH STAGED CHANGES* must pass
