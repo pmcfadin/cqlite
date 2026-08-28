@@ -27,8 +27,10 @@ mod scan_stream_fanout;
 // the campsite rule (epic #1116). Owns the OPERATION-level read metrics so one
 // logical point read reports one duration sample (issue #1701).
 mod manager_point_read;
+// The `tombstones` build's partition-TARGETED materializing scans, split out of
+// `mod.rs` per the campsite rule (epic #1116). Owns the OPERATION-level read metrics
+// so a targeted read reports the rows IT delivered, not the whole table's (#1701 R9).
 #[cfg(feature = "tombstones")]
-// the tombstones-build targeted partition scans (issue #1701 R9); file is cfg-gated too.
 mod manager_tombstones_partition_scan;
 pub mod summary_reader;
 pub mod version_gate;
