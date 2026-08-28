@@ -68,6 +68,21 @@ impl ScenarioKind {
     pub fn parse(raw: &str) -> Option<Self> {
         Self::all().into_iter().find(|s| s.id() == raw)
     }
+
+    /// Whether this scenario's SQL returns a SCALAR aggregate (`count(*)`)
+    /// rather than a row stream.
+    ///
+    /// The DataFusion arm reads its `rows_result` from the scalar when — and
+    /// ONLY when — this is true. Detecting "scalar" from the batch SHAPE instead
+    /// (one row, one column) is wrong for a projected scan: at
+    /// `--batch-size 1` its first batch is 1x1 too, and the harness would report
+    /// the first projected VALUE as a row count.
+    pub fn is_scalar_aggregate(self) -> bool {
+        match self {
+            Self::FullScanCount | Self::FilteredScan => true,
+            Self::ProjectedScan => false,
+        }
+    }
 }
 
 /// Which execution arm is being measured.
@@ -418,6 +433,9 @@ impl BenchRunner {
         let provider_for_query = provider.clone();
         let sql_for_query = sql.clone();
         let target_partitions = self.config.df_target_partitions;
+        // Decided from the SCENARIO (the query we asked for), never from the
+        // shape of a batch that came back. See `is_scalar_aggregate`.
+        let scalar_result = kind.is_scalar_aggregate();
         let rows_result = runtime.block_on(async move {
             let ctx = match target_partitions {
                 Some(n) => SessionContext::new_with_config(
@@ -440,14 +458,23 @@ impl BenchRunner {
             while let Some(next) = stream.next().await {
                 let batch = next.map_err(|e| BenchError::DataFusion(e.to_string()))?;
                 drained = drained.saturating_add(batch.num_rows() as u64);
-                // Only a scalar-shaped result is retained; a projected scan's
-                // batches are dropped as they arrive so the arm stays inside the
-                // stated resident bound.
-                if collected.is_empty() && batch.num_rows() == 1 && batch.num_columns() == 1 {
+                // Only a scalar AGGREGATE result is retained, and only for the
+                // `count(*)` scenarios; a projected scan's batches are dropped as
+                // they arrive so the arm stays inside the stated resident bound
+                // AND so a 1x1 projected batch can never be mistaken for a count.
+                if scalar_result
+                    && collected.is_empty()
+                    && batch.num_rows() == 1
+                    && batch.num_columns() == 1
+                {
                     collected.push(batch);
                 }
             }
-            Ok::<u64, BenchError>(scalar_or_drained(&collected, drained))
+            Ok::<u64, BenchError>(if scalar_result {
+                scalar_or_drained(&collected, drained)
+            } else {
+                drained
+            })
         })?;
         let elapsed = started.elapsed();
         let peak_rss = rss.finish();
@@ -557,6 +584,10 @@ impl BenchRunner {
 
 /// A single-cell `Int64` result (a `count(*)`) as the result row count, else the
 /// number of rows drained.
+///
+/// Only called for a scenario whose SQL IS a scalar aggregate
+/// ([`ScenarioKind::is_scalar_aggregate`]) — the caller decides that from the
+/// query, not from the batch shape.
 fn scalar_or_drained(collected: &[RecordBatch], drained: u64) -> u64 {
     let Some(batch) = collected.first() else {
         return drained;

@@ -31,6 +31,7 @@ use serial_test::serial;
 
 use cqlite_core::schema::TableSchema;
 
+use crate::df_spike::bench::{ArmKind, BenchConfig, BenchRunner, Scenario, ScenarioKind};
 use crate::df_spike::provider::CqliteTableProvider;
 use crate::df_spike::pushdown;
 use crate::df_spike::rowwise::{count_matching_rowwise, RowLiteral, RowOp};
@@ -485,4 +486,62 @@ fn the_row_wise_arm_rejects_a_type_it_cannot_compare_instead_of_matching_nothing
     // Drain so the producer thread finishes rather than being cancelled mid-scan.
     while running.batches.blocking_recv().is_some() {}
     let _ = running.done.join();
+}
+
+// ---------------------------------------------------------------------------
+// `rows_result` provenance — a projected VALUE is never a row COUNT
+// ---------------------------------------------------------------------------
+
+#[test]
+fn only_the_count_scenarios_are_scalar_aggregates() {
+    // The DataFusion arm decides whether to read `rows_result` out of a returned
+    // scalar from THIS predicate, i.e. from the query it asked for. Deciding it
+    // from the batch SHAPE instead is what let a 1-row/1-column projected batch
+    // be reported as a row count.
+    assert!(ScenarioKind::FullScanCount.is_scalar_aggregate());
+    assert!(ScenarioKind::FilteredScan.is_scalar_aggregate());
+    assert!(
+        !ScenarioKind::ProjectedScan.is_scalar_aggregate(),
+        "a projected scan returns ROWS; its result count is the number drained"
+    );
+}
+
+#[test]
+#[serial]
+fn a_single_column_projected_scan_reports_rows_drained_not_a_cell_value() {
+    let (_temp, table_dir, schema) = two_generation_fixture();
+    with_pinned_now(|| {
+        let runner = BenchRunner::new(BenchConfig {
+            dir: table_dir.clone(),
+            schema: schema.clone(),
+            // One row per batch: the shape that made the superseded
+            // batch-shape test misclassify a projected batch as a scalar.
+            batch_size: 1,
+            projection: vec!["val".to_string()],
+            filter_column: "ck".to_string(),
+            filter_op: RowOp::Lt,
+            filter_value: RowLiteral::parse("c"),
+            iterations: 1,
+            df_target_partitions: Some(1),
+        });
+        let outcome = runner
+            .run_one(
+                Scenario {
+                    kind: ScenarioKind::ProjectedScan,
+                    arm: ArmKind::DataFusion,
+                },
+                1,
+            )
+            .expect("the projected DataFusion arm runs");
+        // 7 rows survive reconciliation, so 7 rows are drained — never `1` (a
+        // retained single-row batch) and never a `val` cell value (10/21/30/...).
+        assert_eq!(
+            outcome.rows_result, 7,
+            "rows_result must be the rows the query returned, not a cell value"
+        );
+        assert_eq!(
+            outcome.rows_scanned, 7,
+            "the scan feeds all reconciled rows"
+        );
+    });
 }

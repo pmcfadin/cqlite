@@ -11,7 +11,7 @@
 //!
 //! # It reports an absence honestly
 //!
-//! On a platform without `/proc/self/statm`, or if a read fails, the sample is
+//! On a platform without `/proc/self/status`, or if a read fails, the sample is
 //! `None` — never `0`. A fabricated zero would read as "this arm used no memory",
 //! which is the opposite of the truth, and would silently satisfy the 512Mi pod
 //! budget claim this measurement exists to test.
@@ -83,16 +83,67 @@ fn sample_into(peak: &AtomicU64, measured: &AtomicBool) {
     }
 }
 
-/// Current resident set size in bytes, from `/proc/self/statm` field 2
-/// (resident pages). `None` when unavailable or unparsable.
+/// Current resident set size in bytes, from `/proc/self/status`'s `VmRSS`.
+/// `None` when unavailable or unparsable.
+///
+/// # Why `VmRSS` and not `statm` field 2
+///
+/// They are the SAME quantity — current resident set size — but `statm` reports
+/// it in PAGES, so converting it needs the page size, and this crate has no
+/// libc dependency to call `sysconf(_SC_PAGESIZE)` with. The previous version
+/// hardcoded 4096, which silently reports a 4x-low number on a 16 KiB-page
+/// kernel (aarch64 servers ship such kernels) — a fabricated pass against the
+/// 512Mi pod budget. `VmRSS` is already denominated in kB, so it needs no
+/// page-size assumption at all.
+///
+/// # Why `VmRSS` and not `VmHWM`
+///
+/// `VmHWM` is the process-wide high-water mark and cannot attribute a peak to
+/// one scenario/arm (see the module docs); `VmRSS` is CURRENT RSS, which is what
+/// the interval sampler above folds into a per-run maximum.
 fn current_rss_bytes() -> Option<u64> {
-    let statm = std::fs::read_to_string("/proc/self/statm").ok()?;
-    let pages: u64 = statm.split_whitespace().nth(1)?.parse().ok()?;
-    // `sysconf(_SC_PAGESIZE)` without a libc dependency: every Linux target this
-    // harness runs on uses 4 KiB pages, and the value is only used for reporting.
-    // Stated explicitly rather than assumed silently.
-    Some(pages.saturating_mul(PAGE_SIZE_BYTES))
+    let status = std::fs::read_to_string("/proc/self/status").ok()?;
+    parse_vm_rss_bytes(&status)
 }
 
-/// Assumed page size (see [`current_rss_bytes`]).
-const PAGE_SIZE_BYTES: u64 = 4096;
+/// Extract `VmRSS` (kB) from `/proc/self/status` contents and return bytes.
+///
+/// Split out so the parse is testable without a live `/proc`.
+fn parse_vm_rss_bytes(status: &str) -> Option<u64> {
+    let line = status.lines().find(|l| l.starts_with("VmRSS:"))?;
+    let mut fields = line.split_whitespace().skip(1);
+    let kb: u64 = fields.next()?.parse().ok()?;
+    // The kernel always emits kB for this field; refuse to guess if it ever
+    // does not, rather than reporting a number in the wrong unit.
+    if fields.next()? != "kB" {
+        return None;
+    }
+    Some(kb.saturating_mul(1024))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_vm_rss_bytes;
+
+    #[test]
+    fn parses_vm_rss_in_kb() {
+        let status = "Name:\tdf_spike_bench\nVmHWM:\t  999999 kB\nVmRSS:\t   51200 kB\n";
+        assert_eq!(parse_vm_rss_bytes(status), Some(51_200 * 1024));
+    }
+
+    #[test]
+    fn absent_or_unexpected_unit_is_none_not_zero() {
+        assert_eq!(parse_vm_rss_bytes("VmHWM:\t 100 kB\n"), None);
+        assert_eq!(parse_vm_rss_bytes("VmRSS:\t 100 MB\n"), None);
+        assert_eq!(parse_vm_rss_bytes("VmRSS:\n"), None);
+    }
+
+    #[test]
+    fn live_proc_reports_a_nonzero_rss() {
+        // The harness only ever runs on Linux; if this ever compiles elsewhere
+        // the sampler returns `None` and the report says `unmeasured`.
+        if let Ok(status) = std::fs::read_to_string("/proc/self/status") {
+            assert!(parse_vm_rss_bytes(&status).is_some_and(|b| b > 0));
+        }
+    }
+}

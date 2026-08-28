@@ -254,7 +254,114 @@ fn assert_preconditions(results: &[BenchOutcome]) -> Result<(), String> {
             }
         }
     }
+
+    assert_results_agree(results)?;
+    report_floor_violations(results);
     Ok(())
+}
+
+/// Every ANSWERING arm of a (scenario, iteration) must produce the SAME query
+/// result.
+///
+/// `rows_scanned` agreement is not sufficient: `row_pushdown` narrows its scan
+/// on purpose, so it is excluded from the `rows_scanned` check above and would
+/// otherwise be unchecked entirely — a pushdown that dropped rows the other arms
+/// keep would read as a free speed-up. `rows_result` is the quantity that must
+/// hold across a narrowed scan, so it is checked HERE for `row_pushdown` too.
+///
+/// `floor` is excluded, and only `floor`: it discards every batch by
+/// construction, so its `rows_result` is 0 BY DESIGN and comparing it would
+/// reject every correct run.
+fn assert_results_agree(results: &[BenchOutcome]) -> Result<(), String> {
+    for kind in ScenarioKind::all() {
+        for iteration in iterations_of(results) {
+            let answering: Vec<&BenchOutcome> = results
+                .iter()
+                .filter(|o| o.scenario == kind && o.iteration == iteration)
+                .filter(|o| o.arm != ArmKind::Floor)
+                .collect();
+            let Some(first) = answering.first() else {
+                continue;
+            };
+            for o in &answering {
+                if o.rows_result != first.rows_result {
+                    return Err(format!(
+                        "{} iter={iteration}: arm '{}' produced {} result row(s) but arm '{}' \
+                         produced {} — the arms answered DIFFERENT queries, so any timing \
+                         delta between them is a correctness delta",
+                        kind.id(),
+                        o.arm.id(),
+                        o.rows_result,
+                        first.arm.id(),
+                        first.rows_result
+                    ));
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Report — but do NOT reject — (scenario, iteration) pairs where an executing
+/// arm finished FASTER than the discard-only `floor`.
+///
+/// The floor produces the same batches every other arm consumes and then throws
+/// them away, so in a noise-free world it bounds them from below. It is a
+/// DIAGNOSTIC and not an assertion because on this corpus it is routinely
+/// violated for a reason that is understood and reported: wall time is dominated
+/// by cold page-fault stalls whose magnitude depends on cache state at the moment
+/// a cell runs, while the order-independent sub-phase counters (`encode`,
+/// `batches`) are identical across arms. Measured on the committed 45-cell
+/// matrix, the floor is beaten in 17 of 24 arm-comparisons — so a hard abort
+/// would reject nearly every legitimate run and teach the operator to disable the
+/// check. Printing it keeps the noise VISIBLE, which is the honest reading.
+fn report_floor_violations(results: &[BenchOutcome]) {
+    let mut violations: Vec<String> = Vec::new();
+    for kind in ScenarioKind::all() {
+        for iteration in iterations_of(results) {
+            let floor = results.iter().find(|o| {
+                o.scenario == kind && o.iteration == iteration && o.arm == ArmKind::Floor
+            });
+            let Some(floor) = floor else {
+                continue;
+            };
+            for o in results
+                .iter()
+                .filter(|o| o.scenario == kind && o.iteration == iteration)
+                .filter(|o| o.arm != ArmKind::Floor)
+            {
+                if o.elapsed_nanos < floor.elapsed_nanos {
+                    violations.push(format!(
+                        "{} iter={iteration}: arm '{}' {:.1}s < floor {:.1}s",
+                        kind.id(),
+                        o.arm.id(),
+                        o.elapsed_nanos as f64 / 1e9,
+                        floor.elapsed_nanos as f64 / 1e9,
+                    ));
+                }
+            }
+        }
+    }
+    if violations.is_empty() {
+        return;
+    }
+    eprintln!(
+        "df_spike_bench: WARNING — the discard-only floor was BEATEN in {} arm-comparison(s); \
+         wall-time deltas of this size are page-fault noise, not engine effects. Read the \
+         order-independent sub-phase counters instead:",
+        violations.len()
+    );
+    for v in &violations {
+        eprintln!("  {v}");
+    }
+}
+
+/// The distinct iteration indices present in the results, ascending.
+fn iterations_of(results: &[BenchOutcome]) -> Vec<usize> {
+    let mut seen: Vec<usize> = results.iter().map(|o| o.iteration).collect();
+    seen.sort_unstable();
+    seen.dedup();
+    seen
 }
 
 /// Write the machine-readable results.
