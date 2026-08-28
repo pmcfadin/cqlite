@@ -4964,7 +4964,11 @@ _WR_QS=$(cat <<'AWKEOF'
   # single-quoted prose. Modelling nesting properly is a real shell parser; refusing to call anything
   # inside a substitution "prose" is one flag. Only the prose verdict is affected — a live read in a
   # substitution is still judged on spelling/arity/form as before.
-  cs = (seg ~ /[$][(]/) ? 1 : 0
+  # BOTH command-substitution syntaxes, which is the COMPLETE set POSIX defines — `$( )` and
+  # backticks. The first version tested `$(` alone, i.e. a sample of the constructs rather than the
+  # set, so `ok "\`grep \"a'b\" \"$WRAPPER\" \"c'd\"\`"` reproduced the same quote confusion and was
+  # excused as prose. If a future shell grows a third, this line is where it goes.
+  cs = (seg ~ /[$][(]/ || seg ~ /`/) ? 1 : 0
   printf "%d %d %d %d %d %d %d\n%s\n", code, lit, q, mk, ev, bal, cs, seg
 }
 AWKEOF
@@ -5180,6 +5184,7 @@ _wr_fixture f_bracedef "_x=\$(grep -c foo \"\${$_wr_vname:-/tmp/x}\")"
 _wr_fixture f_fakeinv  "grep foo $_wr_ref # \$(bash $_wr_ref)"
 _wr_fixture f_evalasm  "_cmd='grep foo $_wr_ref'"
 _wr_fixture f_multiline "' \"\$ORACLES\" \"\$CHECKS_FILE\" $_wr_ref 2>/dev/null || true)"
+_wr_fixture f_btprose  "ok \"\`grep \"a'b\" $_wr_ref \"c'd\"\`\""
 _wr_fixture f_cshidden "bash $_wr_ref \"\$(grep \"a'b\" $_wr_ref \"c'd\")\""
 _wr_fixture f_csprose  "ok \"\$(grep \"a'b\" $_wr_ref \"c'd\")\""
 _wr_fixture f_locsave  "  local _gm_real_wrapper=$_wr_ref"
@@ -5213,6 +5218,7 @@ _wr_expect f_bracedef spelling
 _wr_expect f_fakeinv  form
 _wr_expect f_evalasm  prose
 _wr_expect f_multiline unbalanced
+_wr_expect f_btprose  substitution
 _wr_expect f_cshidden substitution
 _wr_expect f_csprose  substitution
 _wr_expect f_locsave  clean
@@ -5229,7 +5235,7 @@ _wr_expect f_empty    empty
 # and the success message below prints counts from them.
 _wr_scan_file "$TEST_SELF"
 if [ -z "$_wr_ctl_bad" ]; then
-  ok 'structural control (#3367): the ENFORCEMENT PASS itself (classifier + dispatch) gives the correct verdict on all thirty-three fixtures — it rejects the braced, unquoted, compound-line, unallowlisted-alias, mentions-the-word-bash quote-swallowed, marker-self-authorising and eval bypasses, refuses to let a marker waive a second read, reports a subjectless file as empty, and still accepts invocations, allowlisted saves, marked opt-outs, captured invocations and unmarked prose'
+  ok 'structural control (#3367): the ENFORCEMENT PASS itself (classifier + dispatch) gives the correct verdict on all thirty-four fixtures — it rejects the braced, unquoted, compound-line, unallowlisted-alias, mentions-the-word-bash quote-swallowed, marker-self-authorising and eval bypasses, refuses to let a marker waive a second read, reports a subjectless file as empty, and still accepts invocations, allowlisted saves, marked opt-outs, captured invocations and unmarked prose'
 else
   bad "structural control (#3367): the enforcement pass misclassifies a fixture, so its verdict on the real file is not trustworthy —$_wr_ctl_bad"
 fi
@@ -5298,24 +5304,46 @@ fi
 # attempt and it FALSE-FAILED on two pre-existing legitimate uses (`${!_rw_i}` walking positional
 # arguments at ~960, nothing to do with aliases) — a guard that reds on correct code is the guard
 # people learn to waive, so the ban is scoped to what actually threatens an alias.
-_wr_nrefd=$(grep -nE '(declare|local|typeset)[[:space:]]+-[A-Za-z]*'"n"'[[:space:]]' "$TEST_SELF" \
+# ANY option group containing the flag counts, in any order and any combination: `-n`, `-ng`,
+# `-g -n`. The first version anchored it as the LAST character of the FIRST group, which is a
+# spelling of the flag rather than the flag itself — `declare -g -n` and `declare -ng` both evaded
+# it. (`local _f="$1"` and friends carry no option group and are unaffected.)
+_wr_nrefd=$(grep -nE '(^|[ \t;&|(])(declare|local|typeset)[[:space:]]+(-[A-Za-z]+[[:space:]]+)*-[A-Za-z]*'"n" "$TEST_SELF" \
   | grep -vE '^[0-9]+:[[:space:]]*#' || true)
 if [ -z "$_wr_nrefd" ]; then
   ok 'structural (#3367): the harness declares no nameref, so no second name can be bound to an allowlisted alias'
 else
   bad "structural (#3367): a nameref declaration appears in this file. It can bind an allowlisted alias to a new name that the alias-use scan (which looks for the alias by name) and the wrapper scan (which looks for \$WRAPPER) both miss: $(printf '%s' "$_wr_nrefd" | head -3 | tr '\n' ';' | cut -c1-200)"
 fi
-# ...and an indirect expansion must not name an alias. The needle is split so this guard cannot
-# match its own line.
-_wr_indir=$(grep -nE '[$][{]'"!" "$TEST_SELF" | grep -vE '^[0-9]+:[[:space:]]*#' || true)
+# ...and EVERY indirect expansion is refused except an exact allowlist. The first version only
+# refused one whose own text named an alias, which is a property of the LINE rather than of what it
+# EXPANDS TO: `_name=_wr_saved; grep "${!_name}"` — or `_name=WRAPPER` — names nothing on the line
+# that scans. What a name expands to is not decidable here, so the construct itself is allowlisted
+# by exact content: the two pre-existing positional-argument walkers, and nothing else. A reformat
+# of those lines reds and must be re-approved, which is the intended cost of an exact allowlist.
+# The allowlist entries are COMPOSED, never written literally: spelled out, they would themselves be
+# indirect expansions and this scan would flag its own allowlist. (Same self-reference as the marker
+# that authorised itself, but in the FAIL direction — the guard's artifact matching its own subject.
+# Measured: the literal form red with the allowlist lines as the two offenders.)
+_wr_ib='${'"!"
+_wr_indir_ok_1='if [ "'"$_wr_ib"'_rw_i}" = "--log" ]; then'
+_wr_indir_ok_2='WRAPPER_LOG_PATH="'"$_wr_ib"'_rw_next}"'
 _wr_indir_bad=""
-for _wr_ia in $_wr_aliases; do
-  case "$_wr_indir" in *"$_wr_ia"*) _wr_indir_bad="$_wr_indir_bad $_wr_ia" ;; esac
-done
+while IFS= read -r _wr_il; do
+  [ -n "$_wr_il" ] || continue
+  _wr_ilc=${_wr_il#*:}
+  _wr_ilc=${_wr_ilc#"${_wr_ilc%%[! 	]*}"}
+  _wr_ilc=${_wr_ilc%"${_wr_ilc##*[! 	]}"}
+  [ "$_wr_ilc" = "$_wr_indir_ok_1" ] && continue
+  [ "$_wr_ilc" = "$_wr_indir_ok_2" ] && continue
+  _wr_indir_bad="$_wr_indir_bad${_wr_indir_bad:+; }$_wr_il"
+done <<EOF
+$(grep -nE '[$][{]'"!" "$TEST_SELF" | grep -vE '^[0-9]+:[[:space:]]*#')
+EOF
 if [ -z "$_wr_indir_bad" ]; then
-  ok 'structural (#3367): no indirect expansion names a save alias (the pre-existing ones walk positional arguments)'
+  ok 'structural (#3367): every indirect expansion in this harness is one of the two allowlisted positional-argument walkers — a dynamically-named one could expand to a save alias, and what a name expands to is not decidable by this scan'
 else
-  bad "structural (#3367): an indirect expansion names a save alias —$_wr_indir_bad. That reaches the mutable path under a name neither structural scan is looking for"
+  bad "structural (#3367): an indirect expansion outside the exact allowlist appears in this file. It can expand to a save alias (or to the wrapper variable itself) under a name neither structural scan is looking for: $(printf '%s' "$_wr_indir_bad" | head -3 | cut -c1-200)"
 fi
 if [ "${_wr_alias_seen:-0}" -eq 0 ]; then
   bad 'structural (#3367): no use of any save alias was found, so the alias restriction certified nothing — the aliases were renamed and the allowlist is now describing names that do not exist'
