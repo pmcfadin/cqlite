@@ -575,6 +575,9 @@ DEST="$DEST" MANIFEST="$MANIFEST" RF="$RF" \
 GEN1_PARTITIONS="$WIDE_PARTITIONS" GEN2_PARTITIONS="$GEN2_PARTITIONS" \
 GEN1_SECONDS="$GEN1_SECONDS" GEN2_SECONDS="$GEN2_SECONDS" \
 GEN1_DATA_DB="$GEN1_DATA_DB" GEN2_DATA_DB="$GEN2_DATA_DB" \
+GEN1_FLUSH_DATA_DB="$GEN1_FLUSH_DATA_DB" GEN2_FLUSH_DATA_DB="$GEN2_FLUSH_DATA_DB" \
+COMPACT_GEN1="$COMPACT_GEN1" COMPACT_GEN2="$COMPACT_GEN2" \
+CORPUS_VARIANT="$CORPUS_VARIANT" MIN_DATA_DB="$MIN_DATA_DB" MAX_DATA_DB="$MAX_DATA_DB" \
 GEN2_START_US="$GEN2_START_US" OVERLAP_PCT="$OVERLAP_PCT" \
 SLICE_PCT="$SLICE_PCT" SLICE_ROWS_GEN1="$SLICE_ROWS_GEN1" \
 SLICE_ROWS_GEN2="$SLICE_ROWS_GEN2" SLICE_ROWS_NEW="$SLICE_ROWS_NEW" \
@@ -598,6 +601,16 @@ if os.path.exists(tsv):
             mx = int(parts[2]) if parts[2].isdigit() else None
             ts[parts[0]] = (mn, mx)
 
+# Written by verify_compression() from the AUTHORITATIVE CompressionInfo.db
+# header — the run has already failed closed if any file was not LZ4 @ 16 KiB.
+comp = {}
+ctsv = os.path.join(root, "compression-info.tsv")
+if os.path.exists(ctsv):
+    for line in open(ctsv):
+        parts = line.rstrip("\n").split("\t")
+        if len(parts) == 3:
+            comp[parts[0]] = (parts[1], int(parts[2]))
+
 files = []
 total = 0
 for p in sorted(glob.glob(os.path.join(dest, "*-Data.db"))):
@@ -605,6 +618,7 @@ for p in sorted(glob.glob(os.path.join(dest, "*-Data.db"))):
     size = os.path.getsize(p)
     total += size
     mn, mx = ts.get(base, (None, None))
+    ccls, clen = comp.get(base, (None, None))
     files.append({
         "name": base,
         "bytes": size,
@@ -613,6 +627,9 @@ for p in sorted(glob.glob(os.path.join(dest, "*-Data.db"))):
         # An SSTable whose newest cell postdates the generation-2 cutover holds
         # generation-2 (overlapping, newest-wins) data.
         "holds_generation_2": (mx is not None and mx >= gen2_start),
+        "compression_info_db_present": os.path.exists(p[: -len("-Data.db")] + "-CompressionInfo.db"),
+        "compressor_measured": ccls,
+        "chunk_length_bytes_measured": clen,
     })
 
 all_components = sorted(os.path.basename(p) for p in glob.glob(os.path.join(dest, "*")))
@@ -632,10 +649,58 @@ manifest = {
     "corpus_root": root,
     "keyspace": env["KS"],
     "table": env["TBL"],
+    "variant": env["CORPUS_VARIANT"],
     "declared_replication_factor": int(env["RF"]),
+    "replication_note": (
+        "NOMINAL ONLY. SimpleStrategy RF=3 on a single-node container stores exactly ONE "
+        "replica: real RF=3 is unreachable here, so this field describes the recorded DDL, "
+        "not the bytes. M15 asks for 'wide + RF=3/overlap'; this corpus delivers the WIDE "
+        "and OVERLAP halves — the property actually exercised is cross-SSTable overlap "
+        "(read-time reconciliation), NOT replication. Do not cite it as an RF=3 measurement."
+    ),
+    "bytes_written_by": (
+        "Apache Cassandra %s (cassandra-stress inside the official image) — NOT CQLite. "
+        "Oracle-grade: these are real Cassandra-written nb/BIG bytes." % env["IMAGE"]
+    ),
     "sstable_dir": rel(dest),
-    "compaction": "SizeTieredCompactionStrategy, autocompaction DISABLED (no major compaction was run)",
-    "compression": {"class": "LZ4Compressor", "chunk_length_in_kb": 16},
+    "compaction": {
+        "strategy": "SizeTieredCompactionStrategy",
+        "autocompaction": "DISABLED for the whole run (STCS could not merge the generations behind our back)",
+        "sequence": [
+            "load generation 1, flush" + (
+                ", MAJOR-compact the whole table to 1 SSTable (safe: generation 2 did not exist yet)"
+                if env["COMPACT_GEN1"] == "1" else " (no compaction: high-k variant)"),
+            "load generation 2, flush" + (
+                ", then `nodetool compact --user-defined` scoped to generation 2's files ONLY "
+                "(a whole-table major compaction here would have merged the generations and "
+                "destroyed the overlap)"
+                if env["COMPACT_GEN2"] == "1" else " (no compaction: high-k variant)"),
+        ],
+        "data_db_after_gen1_flush": int(env["GEN1_FLUSH_DATA_DB"]),
+        "data_db_after_gen1_compaction": int(env["GEN1_DATA_DB"]),
+        "data_db_after_gen2_flush": int(env["GEN2_FLUSH_DATA_DB"]),
+        "data_db_final": int(env["GEN2_DATA_DB"]),
+        "asserted_band": [int(env["MIN_DATA_DB"]), int(env["MAX_DATA_DB"])],
+        "merge_depth_k": int(env["GEN2_DATA_DB"]),
+    },
+    "compression": {
+        "class": "LZ4Compressor",
+        "chunk_length_in_kb": 16,
+        "verified": all(f["compressor_measured"] == "LZ4Compressor"
+                        and f["chunk_length_bytes_measured"] == 16384
+                        and f["compression_info_db_present"] for f in files) and bool(files),
+        "verified_how": (
+            "every published Data.db has a sibling CompressionInfo.db whose written header "
+            "parses (test-data/scripts/read-compression-info.py) as LZ4Compressor with "
+            "chunk_length=16384 B; the generator fails closed otherwise. Measured from the "
+            "component, NOT read off the DDL."
+        ),
+        "why_it_matters": (
+            "PHASE_STREAM_DECOMPRESS is a real sub-phase of the read pipeline. An "
+            "UNCOMPRESSED corpus understates decode cost and therefore OVERSTATES the "
+            "vectorized-exec share, corrupting the decode-vs-exec split this spike isolates."
+        ),
+    },
     "keyspace_ddl": schema,
     "generations": [
         {
@@ -645,7 +710,8 @@ manifest = {
             "rows": int(env["GEN1_PARTITIONS"]) * 10,
             "rows_per_partition": 10,
             "load_seconds": int(env["GEN1_SECONDS"]),
-            "data_db_after_flush": int(env["GEN1_DATA_DB"]),
+            "data_db_after_flush": int(env["GEN1_FLUSH_DATA_DB"]),
+            "data_db_after_compaction": int(env["GEN1_DATA_DB"]),
         },
         {
             "generation": 2,
@@ -654,7 +720,8 @@ manifest = {
             "rows": int(env["GEN2_PARTITIONS"]) * 10,
             "rows_per_partition": 10,
             "load_seconds": int(env["GEN2_SECONDS"]),
-            "data_db_after_flush": int(env["GEN2_DATA_DB"]),
+            "data_db_after_flush": int(env["GEN2_FLUSH_DATA_DB"]),
+            "data_db_total_after_compaction": int(env["GEN2_DATA_DB"]),
             "overlaps_generation_1": True,
             "note": "same cassandra-stress seed range prefix => same partition keys, newer write timestamps",
             "cutover_timestamp_us": gen2_start,
