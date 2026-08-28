@@ -591,7 +591,7 @@ impl SSTableReader {
 
         let mut buf = vec![0u8; len];
         point_source.read_exact_at(offset, &mut buf)?;
-        Ok(buf)
+        Ok(super::super::chunk_source::counted_raw_chunk(buf, None)) // #1701 raw exit
     }
 }
 
@@ -619,7 +619,7 @@ pub(super) fn compressed_partition_window(
     end_bound: Option<usize>,
 ) -> Result<Option<(Vec<u8>, usize)>> {
     use super::super::block_io;
-    use super::super::chunk_source::ChunkSource;
+    use super::super::chunk_source::{count_raw_chunk, ChunkSource};
 
     let len = comp_info.chunk_length as usize;
     if len == 0 {
@@ -704,10 +704,10 @@ pub(super) fn compressed_partition_window(
                 // `read_compressed_offset_window` (compressed_offset.rs) exactly. The
                 // CRC32 is already validated by `read_compressed_chunk_at` above.
                 if compressed.len() >= max_compressed_length {
+                    count_raw_chunk(&compressed, compression.map(|c| c.algorithm()));
                     window.extend_from_slice(&compressed);
                 } else {
-                    // Decompress-only (uncached), preserving this path's historical
-                    // behavior + the separate work_counters counter.
+                    // Decompress-only (uncached): historical behavior + its own counter.
                     let decompressed = ChunkSource::decompress_only(compression, compressed)?;
                     crate::storage::sstable::work_counters::add_chunk_decompressed();
                     window.extend_from_slice(&decompressed);

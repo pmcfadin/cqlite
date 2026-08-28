@@ -174,7 +174,7 @@ impl SSTableReader {
             self.verify_uncompressed_section_in_buffer(point_source.as_ref(), header_size, &whole)
                 .await?;
         }
-        Ok(whole)
+        Ok(super::super::chunk_source::counted_raw_chunk(whole, None))
     }
 
     /// Decompress only the chunk(s) needed to fully parse the target partition at

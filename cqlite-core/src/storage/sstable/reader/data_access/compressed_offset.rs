@@ -169,6 +169,13 @@ pub(super) fn read_compressed_offset_window_impl(
         // exceed `max_compressed_length`; those bytes are already plaintext.
         // Authority: CompressedSequentialWriter.java:160-177.
         let decompressed = if compressed.len() >= max_compressed_length {
+            // Already plaintext, but still Data.db bytes this read materialised, so
+            // they are counted at the plane's one raw-chunk boundary (issue #1701 F3)
+            // instead of being handed back invisibly.
+            super::super::chunk_source::count_raw_chunk(
+                &compressed,
+                compression.map(|c| c.algorithm()),
+            );
             compressed
         } else if let Some(compression) = compression {
             // Single decode plane (issue #1598, G2): the actual decompress call
