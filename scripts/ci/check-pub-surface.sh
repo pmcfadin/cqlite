@@ -759,7 +759,12 @@ function attr_name(t,   rest) {
   if (match(rest, /^[A-Za-z_][A-Za-z0-9_]*/)) return substr(rest, RSTART, RLENGTH)
   return ""
 }
-{ L[NR] = $0 }
+BEGIN { BOM = sprintf("%c%c%c", 239, 187, 191) }
+# rustc ACCEPTS AND IGNORES one leading UTF-8 BOM, so a BOM-prefixed file whose first
+# line is `#![cfg(...)]` IS gated by the compiler. Without stripping it the `#![` test
+# below fails, the prologue reads CLEAN, and the gate is HIDDEN — a false PASS
+# (roborev r8 F2). Compared as BYTES, not via a \x regex, which is not portable.
+{ if (NR == 1 && substr($0, 1, 3) == BOM) $0 = substr($0, 4); L[NR] = $0 }
 END {
   n = NR
   i = 1
@@ -779,6 +784,18 @@ END {
       printf "CLEAN\t%d\n", i
       exit
     }
+    # A `cfg`-NAMED inner attribute IS the #1712 defect, and it is decided HERE, from
+    # the NAME, BEFORE any bracket balancing. Two reasons, both load-bearing:
+    #   * the defect's canonical spelling `#![cfg(feature = "x")]` CONTAINS STRING
+    #     QUOTES and may span lines, so deciding it after the balancing scan would let
+    #     one of that scan's refusals downgrade the precise named diagnostic — which
+    #     carries the #1712 hoist remedy — to a generic "cannot classify";
+    #   * a NAME is readable without counting anything, so no bracket-counting defect
+    #     can ever hide the ONE shape this guard exists to catch.
+    if (attr_name(t) == "cfg") {
+      printf "GATED\t%d\t%s\n", i, squash(t)
+      exit
+    }
     # An inner attribute. Consume it by BRACKET BALANCE, appending lines as needed.
     buf = t
     startline = i
@@ -794,6 +811,49 @@ END {
         continue
       }
       ch = substr(buf, p, 1)
+      nx = substr(buf, p + 1, 1)
+      # A COMMENT inside an attribute window cannot be terminated by this scan: lines
+      # are JOINED WITH A SPACE above, so a `//`'s newline terminator is already gone.
+      # roborev r8 F1: `#![allow(dead_code, // ]` ends its line with a `]` INSIDE a
+      # comment, so bracket counting closes the window EARLY; `rest` is empty (nothing
+      # follows on the line, so the same-line check cannot fire) and the scan resumes
+      # MID-ATTRIBUTE, missing a LATER `#![cfg(...)]` entirely. A false PASS.
+      if (ch == "/" && (nx == "/" || nx == "*")) {
+        refuse(startline, "an inner attribute contains a COMMENT, whose end this bounded scan cannot locate, so its brackets cannot be counted: `" squash(substr(buf, 1, 72)) "`")
+        exit
+      }
+      # A RAW STRING delimiter is `r` + N hashes + `"`. Modelling N is a second lexer;
+      # refusing is bounded and obviously correct.
+      if (ch == "r" && nx == "#") {
+        refuse(startline, "an inner attribute contains a RAW STRING, whose delimiter length this bounded scan does not model: `" squash(substr(buf, 1, 72)) "`")
+        exit
+      }
+      # A bare `\047` is a char literal OR a lifetime, and telling them apart needs
+      # context. (One INSIDE a string never reaches here; the string is skipped below.)
+      if (ch == "\047") {
+        refuse(startline, "an inner attribute contains a char-literal-or-lifetime quote this bounded scan does not model: `" squash(substr(buf, 1, 72)) "`")
+        exit
+      }
+      # A NORMAL string is SKIPPED, not refused: `#![doc = "..."]` is a real idiom that
+      # case 36 pins. A guard that refused it would red CORRECT code, and a refusal
+      # that reds correct code is the one agents learn to waive — which would make
+      # every other refusal in this scan worthless.
+      if (ch == "\"") {
+        p++
+        while (1) {
+          if (p > length(buf)) {
+            cur++
+            if (cur > n) { refuse(startline, "an inner attribute contains a STRING that never closes: `" squash(substr(buf, 1, 72)) "`"); exit }
+            buf = buf " " ltrim(L[cur])
+            continue
+          }
+          sc = substr(buf, p, 1)
+          if (sc == "\\") { p += 2; continue }
+          if (sc == "\"") { p++; break }
+          p++
+        }
+        continue
+      }
       if (ch == "[") d++
       else if (ch == "]") { d--; if (d == 0) { endpos = p; break } }
       p++
@@ -905,7 +965,11 @@ while IFS=$'\t' read -r lineno modname gate; do
     fail "the module file $resolved_rel for \`pub mod $modname\` ($LIB_RS_REL:$lineno) exists but is not a READABLE REGULAR FILE (a directory, a dangling symlink, or unreadable permissions). Refusing to report a verdict over a module file it could not read."
   fi
 
-  if ! awk -f "$PROLOGUE_AWK" "$resolved" >"$PROLOGUE_OUT" 2>"$WORK_DIR/prologue.err"; then
+  # LC_ALL=C so the reader is BYTE-oriented. The BOM test compares three raw bytes,
+  # and under a UTF-8 locale `sprintf("%c", 239)` yields the CHARACTER U+00EF (two
+  # bytes) rather than the byte 0xEF, so the test silently never matches and the BOM
+  # false PASS (roborev r8 F2) comes straight back. Verified in both locales.
+  if ! LC_ALL=C awk -f "$PROLOGUE_AWK" "$resolved" >"$PROLOGUE_OUT" 2>"$WORK_DIR/prologue.err"; then
     echo "" >&2
     cat "$WORK_DIR/prologue.err" >&2
     fail "the prologue reader errored on $resolved_rel (see above). Refusing to report a verdict over a module file it could not read."
