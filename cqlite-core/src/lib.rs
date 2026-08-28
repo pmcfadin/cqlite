@@ -13,11 +13,11 @@
 pub mod config;
 pub mod cql;
 pub mod error;
+// The shared FFI error contract both bindings consume (issue #1451; see the module docs).
+pub mod ffi_error_contract;
 pub(crate) mod float_cmp;
 pub mod parser;
-// DISABLED FOR M1: Security and performance modules causing compilation errors
-// pub mod performance;
-// pub mod security; // Security framework for comprehensive protection
+// DISABLED FOR M1 (compilation errors): pub mod performance; pub mod security;
 pub mod types;
 pub mod util;
 pub mod version_hints;
