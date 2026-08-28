@@ -27,8 +27,9 @@ TMP="$(mktemp -d)"
 trap 'rm -rf "$TMP"' EXIT INT TERM HUP
 
 fails=0
-pass() { printf '  ok   %s\n' "$1"; }
-fail() { printf '  FAIL %s\n' "$1"; fails=$((fails + 1)); }
+checks=0
+pass() { checks=$((checks + 1)); printf '  ok   %s\n' "$1"; }
+fail() { checks=$((checks + 1)); printf '  FAIL %s\n' "$1"; fails=$((fails + 1)); }
 
 # A well-formed CSV taken from the shape `perf stat -x,` really emits on this box, with
 # every value internally consistent: TSC at exactly 2.4 GHz over its own enabled window,
@@ -222,10 +223,25 @@ elif python3 "$REPO_ROOT/scripts/tests/ws0_assert_window_ratio_excluded.py" "$CL
 else
   fail "window/lifetime ratio leaked into the occupancy agreement sources"
 fi
+# A SUITE-LEVEL FLOOR. Without it, a block that silently never executed would lower the
+# check count with no failure registered, and the gate reads only the exit code — a 0/0
+# suite is the vacuous pass this whole file exists to prevent, one level up. Caught on this
+# very file by scripts/tests/test_ws0_hermeticity.sh's standing `floor-present` lint, which
+# is a better outcome than a review round. Floor DERIVED BY RUNNING the suite, not counted
+# from source: a source count understates it because `mutate` can short-circuit a case.
+MIN_CHECKS=16
+if [ "$checks" -lt "$MIN_CHECKS" ]; then
+  echo
+  echo "FAIL - only $checks check(s) ran; this suite has at least $MIN_CHECKS."
+  echo "       A case that silently never executed would lower the count with no failure"
+  echo "       registered, and the gate reads only the exit code (#3272 round 3)."
+  exit 1
+fi
+
 echo
 if [ "$fails" -eq 0 ]; then
-  echo "test_ws0_clock_guards: PASS"
+  echo "test_ws0_clock_guards: PASS (all $checks checks)"
   exit 0
 fi
-echo "test_ws0_clock_guards: FAIL ($fails)"
+echo "test_ws0_clock_guards: FAIL ($fails of $checks)"
 exit 1

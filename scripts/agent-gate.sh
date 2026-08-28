@@ -365,6 +365,11 @@
 #                      real SIGINT probe on the driver's own trap wiring. Hermetic:
 #                      synthetic result dirs + synthetic perf CSVs, no
 #                      cargo/perf/sudo/corpus/network, never root.
+#                      Also runs scripts/tests/test_ws0_clock_guards.sh (#3248) — the
+#                      occupancy-enforced clock derivation (scripts/perf/ws0_clock.py).
+#                      16 cases; exists because #3299 published cycles/task-clock as a
+#                      frequency, retracted it, then made the same error again, so the
+#                      control had to become a tool that REFUSES rather than a caption.
 #                      Also runs scripts/tests/test_ws0_cpu_pinning_guards.sh (#3272
 #                      item 10) — the MEASUREMENT-APPARATUS half of the same rig, split
 #                      out because it asks whether the observations are of the RIGHT
@@ -5965,6 +5970,31 @@ run_tooling_tests() {
   if ! bash "$REPO_ROOT/scripts/tests/test_ws0_report_guards.sh" >>"$log" 2>&1; then
     status=FAIL
     echo "--- [$name] FAILED (ws0 measurement-rig integrity guards); last 40 lines of $log ---"
+    tail -40 "$log"
+    echo "--- end of $name output ---"
+    end=$(date +%s)
+    record_result "$name" "$status" "$((end - start))"
+    echo ">>> [$name] $status ($((end - start))s)"
+    return 0
+  fi
+
+  # ws0 CLOCK guards (#3248) — the occupancy-enforced clock derivation.
+  # AC4 of #3248 asked for a reconciliation "stating the clock basis". This test exists
+  # because STATING IT DEMONSTRABLY DOES NOT WORK: #3299 published `cycles / task-clock`
+  # as a frequency (under CPU-wide `perf stat -C` that is occupancy x frequency, since
+  # task-clock accrues elapsed x nCPUs INCLUDING IDLE CPUs), retracted it at a printed
+  # 1.271 "GHz", and then reached for the same quantity AGAIN hours later — the first
+  # retraction having overridden a caption written specifically to prevent it. A prose
+  # control failed twice in the hands of people who knew about it, so the control is now
+  # a tool that REFUSES, and this is the standing proof that it still refuses.
+  # 16 cases: every guard fed the input it must reject, asserting exit code AND cause
+  # token, plus an affirmative accept case that pins the frequency, the exact TSC, two
+  # independent occupancy sources and the labelled trap value. Hermetic — the tool
+  # consumes a perf CSV and invokes nothing, so no perf, corpus, cargo or network.
+  echo ">>> [$name] bash scripts/tests/test_ws0_clock_guards.sh"
+  if ! bash "$REPO_ROOT/scripts/tests/test_ws0_clock_guards.sh" >>"$log" 2>&1; then
+    status=FAIL
+    echo "--- [$name] FAILED (ws0 occupancy-enforced clock guards); last 40 lines of $log ---"
     tail -40 "$log"
     echo "--- end of $name output ---"
     end=$(date +%s)
