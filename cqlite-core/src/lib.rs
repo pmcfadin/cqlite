@@ -21,7 +21,8 @@ pub mod types;
 pub mod util;
 pub mod version_hints;
 
-#[cfg(feature = "benchmarks")] // #1712: gate HERE so the crate root tells the truth; opt-in perf runs only.
+#[cfg(feature = "benchmarks")]
+// #1712: gate HERE so the crate root tells the truth; opt-in perf runs only.
 pub mod benchmarks;
 pub mod memory;
 // Observability foundation (epic #1031, issues #1032 + #1038). Always present;

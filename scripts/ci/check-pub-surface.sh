@@ -88,12 +88,10 @@ REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 
 # Hard-coded subject — see "No invoker-selectable subject" above. Deliberately not
 # parameterised, not env-overridable.
-readonly PACKAGE="cqlite-core"
 readonly LIB_RS_REL="cqlite-core/src/lib.rs"
 readonly SRC_REL="cqlite-core/src"
 
 LIB_RS="$REPO_ROOT/$LIB_RS_REL"
-SRC_DIR="$REPO_ROOT/$SRC_REL"
 
 usage() {
   cat <<'EOF'

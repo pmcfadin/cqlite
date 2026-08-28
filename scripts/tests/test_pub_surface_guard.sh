@@ -150,6 +150,67 @@ scratch_tree() { ps_scratch_tree_from "$REPO_ROOT" "$1"; }
 
 fail_case() { echo "FAIL: $*"; exit 1; }
 
+# --- Shared fixture helpers for the `benchmarks` declaration -------------------
+#
+# WHY THESE EXIST, and why the awk they replace was a liability. Cases 2/8/9 used to
+# carry three near-identical awk programs keyed on `/^#\[cfg\(feature =
+# "benchmarks"\)\]$/` and on the gate being the line IMMEDIATELY above the
+# declaration. Both assumptions broke, twice, on cosmetic edits to lib.rs that had
+# nothing to do with them: a trailing `// #1712: gate HERE …` comment defeated the `$`
+# anchor (case 2's revert then silently NO-OPPED and it CERTIFIED the shape it exists
+# to red), and rustfmt subsequently moving that comment onto its OWN line put a line
+# between the gate and the declaration. A fixture that can quietly stop reproducing its
+# own subject is worse than no fixture, so the setup is now one helper with an
+# AFFIRMATIVE post-condition: after stripping, `lib.rs` must not mention the
+# `benchmarks` feature at all.
+bench_strip_site_gate() { # <lib.rs path> <case label>
+  awk '
+    /^#\[cfg\(feature = "benchmarks"\)\]/ { next }
+    /^\/\/ #1712: gate HERE/ { next }
+    { print }
+  ' "$1" >"$1.stripped"
+  mv "$1.stripped" "$1"
+  grep -qx 'pub mod benchmarks;' "$1" \
+    || fail_case "case $2 setup: the bare \`pub mod benchmarks;\` declaration is not there after stripping the site gate"
+  # THE POST-CONDITION. Not "the anchored pattern no longer matches" — the FEATURE is
+  # not mentioned anywhere in the crate root, which is the state these cases need and
+  # the one an anchored grep could not establish.
+  if grep -q 'cfg(feature = "benchmarks")' "$1"; then
+    grep -n 'cfg(feature = "benchmarks")' "$1" >&2
+    fail_case "case $2 setup: a declaration-site gate on the \`benchmarks\` feature SURVIVED the strip (above), so the case would pass for the wrong reason"
+  fi
+}
+
+bench_attr_above_decl() { # <lib.rs path> <attribute text> <case label>
+  awk -v attr="$2" '
+    $0 == "pub mod benchmarks;" { print attr }
+    { print }
+  ' "$1" >"$1.attr"
+  mv "$1.attr" "$1"
+  grep -qxF "$2" "$1" \
+    || fail_case "case $3 setup: could not put \`$2\` at the declaration site"
+}
+
+bench_attr_same_line() { # <lib.rs path> <attribute text> <case label>
+  awk -v attr="$2" '
+    $0 == "pub mod benchmarks;" { print attr " " $0; next }
+    { print }
+  ' "$1" >"$1.same"
+  mv "$1.same" "$1"
+  grep -qxF "$2 pub mod benchmarks;" "$1" \
+    || fail_case "case $3 setup: could not put the attribute and the declaration on ONE line"
+}
+
+# Put the gate back where #1712 found it: INSIDE the module's own file, invisible to
+# every reader of the crate root.
+bench_add_inner_gate() { # <scratch root>
+  printf '%s\n%s\n' '#![cfg(feature = "benchmarks")]' "$(cat "$1/cqlite-core/src/benchmarks/mod.rs")" \
+    >"$1/cqlite-core/src/benchmarks/mod.rs.new"
+  mv "$1/cqlite-core/src/benchmarks/mod.rs.new" "$1/cqlite-core/src/benchmarks/mod.rs"
+  head -1 "$1/cqlite-core/src/benchmarks/mod.rs" | grep -qx '#!\[cfg(feature = "benchmarks")\]' \
+    || fail_case "setup: could not put the inner gate back into benchmarks/mod.rs"
+}
+
 # The guard's affirmative measurement line, as a REGEX matched WHOLE. Kept in sync BY
 # HAND with the guard's own success line and with `agent-gate.sh`'s `pub-surface`
 # component — a wording change must land in all three at once (#1712 descope).
@@ -186,34 +247,11 @@ echo "OK (1): real tree verifies clean — $(cat "$TMPROOT/green.out")"
 # 2. RED — the consistency assert, against the pre-#1712 source shape.
 # ---------------------------------------------------------------------------
 scratch_tree pre-1712; wt2="$SCRATCH"
-# Restore the bare, ungated crate-root declaration: drop a
-# `#[cfg(feature = "benchmarks")]` line that sits immediately above
-# `pub mod benchmarks;`. Pure awk — no perl/GNU-sed dependency.
-awk '
-  /^#\[cfg\(feature = "benchmarks"\)\]/ { held = $0; next }
-  {
-    if (held != "" && $0 != "pub mod benchmarks;") print held
-    held = ""
-    print
-  }
-  END { if (held != "") print held }
-' "$wt2/cqlite-core/src/lib.rs" >"$wt2/lib.rs.reverted"
-mv "$wt2/lib.rs.reverted" "$wt2/cqlite-core/src/lib.rs"
-grep -qx 'pub mod benchmarks;' "$wt2/cqlite-core/src/lib.rs" \
-  || fail_case "case 2 setup: could not restore the bare \`pub mod benchmarks;\` in the scratch tree"
-# The declaration-site gate must be GONE, or the case would pass for the wrong reason.
-# Matched WITHOUT a `$` anchor and WITHOUT `-x`: the real declaration carries a
-# trailing `// #1712: gate HERE …` comment, and an anchored pattern could not see it —
-# so this revert silently no-opped and the case certified the very shape it exists to
-# red. (#1712 descope: found by the suite failing once the guard's other half stopped
-# masking it.)
-if grep -B1 -x 'pub mod benchmarks;' "$wt2/cqlite-core/src/lib.rs" | grep -q 'cfg(feature = "benchmarks")'; then
-  fail_case "case 2 setup: the declaration-site cfg gate survived the revert"
-fi
-# …and put the hidden inner gate back inside the module file.
-printf '%s\n%s\n' '#![cfg(feature = "benchmarks")]' "$(cat "$wt2/cqlite-core/src/benchmarks/mod.rs")" \
-  >"$wt2/cqlite-core/src/benchmarks/mod.rs.new"
-mv "$wt2/cqlite-core/src/benchmarks/mod.rs.new" "$wt2/cqlite-core/src/benchmarks/mod.rs"
+# Restore the bare, ungated crate-root declaration, then put the gate back inside the
+# module file — the exact pre-#1712 shape, which is still origin/main's shape at the
+# time of writing.
+bench_strip_site_gate "$wt2/cqlite-core/src/lib.rs" 2
+bench_add_inner_gate "$wt2"
 
 set +e
 bash "$wt2/$GUARD_REL" >"$TMPROOT/case2.out" 2>&1
@@ -241,26 +279,10 @@ echo "OK (2): the consistency assert FAILS on the pre-#1712 shape and names \`be
 #    while a purely cosmetic attribute at the declaration site silences the check.
 # ---------------------------------------------------------------------------
 scratch_tree cfg-attr-bypass; wt8="$SCRATCH"
-awk '
-  /^#\[cfg\(feature = "benchmarks"\)\]/ { held = 1; next }
-  {
-    if (held && $0 == "pub mod benchmarks;") {
-      print "#[cfg_attr(feature = \"benchmarks\", doc = \"opt-in perf runs\")]"
-    } else if (held) {
-      print "#[cfg(feature = \"benchmarks\")]"
-    }
-    held = 0
-    print
-  }
-' "$wt8/cqlite-core/src/lib.rs" >"$wt8/lib.rs.cfgattr"
-mv "$wt8/lib.rs.cfgattr" "$wt8/cqlite-core/src/lib.rs"
-grep -q '^#\[cfg_attr(feature = "benchmarks", doc = "opt-in perf runs")\]$' "$wt8/cqlite-core/src/lib.rs" \
-  || fail_case "case 8 setup: could not substitute the cosmetic cfg_attr at the declaration site"
-grep -q '^#\[cfg(feature = "benchmarks")\]$' "$wt8/cqlite-core/src/lib.rs" \
-  && fail_case "case 8 setup: a real declaration-site cfg gate survived — the case would pass for the wrong reason"
-printf '%s\n%s\n' '#![cfg(feature = "benchmarks")]' "$(cat "$wt8/cqlite-core/src/benchmarks/mod.rs")" \
-  >"$wt8/cqlite-core/src/benchmarks/mod.rs.new"
-mv "$wt8/cqlite-core/src/benchmarks/mod.rs.new" "$wt8/cqlite-core/src/benchmarks/mod.rs"
+bench_strip_site_gate "$wt8/cqlite-core/src/lib.rs" 8
+bench_attr_above_decl "$wt8/cqlite-core/src/lib.rs" \
+  '#[cfg_attr(feature = "benchmarks", doc = "opt-in perf runs")]' 8
+bench_add_inner_gate "$wt8"
 set +e
 bash "$wt8/$GUARD_REL" >"$TMPROOT/case8.out" 2>&1
 case8_rc=$?
@@ -289,25 +311,10 @@ echo "OK (8): a cosmetic cfg_attr does not exempt a crate-root pub mod from the 
 #    because the declaration did not exist as far as the guard was concerned.
 # ---------------------------------------------------------------------------
 scratch_tree sameline-decl; wt9="$SCRATCH"
-awk '
-  /^#\[cfg\(feature = "benchmarks"\)\]/ { held = 1; next }
-  {
-    if (held && $0 == "pub mod benchmarks;") {
-      print "#[cfg_attr(feature = \"benchmarks\", doc = \"opt-in perf runs\")] pub mod benchmarks;"
-      held = 0
-      next
-    }
-    if (held) print "#[cfg(feature = \"benchmarks\")]"
-    held = 0
-    print
-  }
-' "$wt9/cqlite-core/src/lib.rs" >"$wt9/lib.rs.sameline"
-mv "$wt9/lib.rs.sameline" "$wt9/cqlite-core/src/lib.rs"
-grep -qx '#\[cfg_attr(feature = "benchmarks", doc = "opt-in perf runs")\] pub mod benchmarks;' "$wt9/cqlite-core/src/lib.rs" \
-  || fail_case "case 9 setup: could not put the attribute and the declaration on one line"
-printf '%s\n%s\n' '#![cfg(feature = "benchmarks")]' "$(cat "$wt9/cqlite-core/src/benchmarks/mod.rs")" \
-  >"$wt9/cqlite-core/src/benchmarks/mod.rs.new"
-mv "$wt9/cqlite-core/src/benchmarks/mod.rs.new" "$wt9/cqlite-core/src/benchmarks/mod.rs"
+bench_strip_site_gate "$wt9/cqlite-core/src/lib.rs" 9
+bench_attr_same_line "$wt9/cqlite-core/src/lib.rs" \
+  '#[cfg_attr(feature = "benchmarks", doc = "opt-in perf runs")]' 9
+bench_add_inner_gate "$wt9"
 set +e
 bash "$wt9/$GUARD_REL" >"$TMPROOT/case9.out" 2>&1
 case9_rc=$?
@@ -409,22 +416,12 @@ echo "OK (11): the two crate-root derivations disagreeing is a loud FAIL, not a 
 #     own file — a false PASS.
 # ---------------------------------------------------------------------------
 scratch_tree cosmetic-attrs; wt15="$SCRATCH"
-awk '
-  /^#\[cfg\(feature = "benchmarks"\)\]/ {
-    print "#[doc = \"this text mentions doc(hidden) but hides nothing\"]"
-    print "#[cfg_attr(docsrs, doc(alias = \"cfg(foo)\"))]"
-    next
-  }
-  { print }
-' "$wt15/cqlite-core/src/lib.rs" >"$wt15/lib.rs.cosmetic"
-mv "$wt15/lib.rs.cosmetic" "$wt15/cqlite-core/src/lib.rs"
-grep -q 'mentions doc(hidden) but hides nothing' "$wt15/cqlite-core/src/lib.rs" \
-  || fail_case "case 15 setup: could not substitute the cosmetic attributes"
-grep -q '^#\[cfg(feature = "benchmarks")\]$' "$wt15/cqlite-core/src/lib.rs" \
-  && fail_case "case 15 setup: the real declaration-site cfg gate survived"
-printf '%s\n%s\n' '#![cfg(feature = "benchmarks")]' "$(cat "$wt15/cqlite-core/src/benchmarks/mod.rs")" \
-  >"$wt15/cqlite-core/src/benchmarks/mod.rs.new"
-mv "$wt15/cqlite-core/src/benchmarks/mod.rs.new" "$wt15/cqlite-core/src/benchmarks/mod.rs"
+bench_strip_site_gate "$wt15/cqlite-core/src/lib.rs" 15
+bench_attr_above_decl "$wt15/cqlite-core/src/lib.rs" \
+  '#[doc = "this text mentions doc(hidden) but hides nothing"]' 15
+bench_attr_above_decl "$wt15/cqlite-core/src/lib.rs" \
+  '#[cfg_attr(docsrs, doc(alias = "cfg(foo)"))]' 15
+bench_add_inner_gate "$wt15"
 set +e
 bash "$wt15/$GUARD_REL" >"$TMPROOT/case15.out" 2>&1
 case15_rc=$?
@@ -448,19 +445,21 @@ echo "OK (15): a tell-tale token inside an attribute VALUE does not exempt a dec
 # ---------------------------------------------------------------------------
 scratch_tree separated-attr; wt16="$SCRATCH"
 awk '
-  /^#\[cfg\(feature = "benchmarks"\)\]/ {
-    print
+  $0 == "pub mod benchmarks;" {
     print ""
     print "/// A doc comment between the gate and the item."
     print "// …and an ordinary comment too."
     print ""
-    next
   }
   { print }
 ' "$wt16/cqlite-core/src/lib.rs" >"$wt16/lib.rs.separated"
 mv "$wt16/lib.rs.separated" "$wt16/cqlite-core/src/lib.rs"
 grep -q 'A doc comment between the gate and the item' "$wt16/cqlite-core/src/lib.rs" \
   || fail_case "case 16 setup: could not insert the separator lines"
+# The gate must STILL be there — this case's whole point is that a real one keeps
+# gating across the separators.
+grep -q 'cfg(feature = "benchmarks")' "$wt16/cqlite-core/src/lib.rs" \
+  || fail_case "case 16 setup: the real declaration-site gate is gone, so a green here would prove nothing"
 set +e
 bash "$wt16/$GUARD_REL" >"$TMPROOT/case16.out" 2>&1
 case16_rc=$?
@@ -814,19 +813,15 @@ echo "OK (26): the pub-surface GATE COMPONENT requires the guard's affirmative m
 # ---------------------------------------------------------------------------
 mixed_line_tree() { # <label> <declaration-line>  -> $SCRATCH
   scratch_tree "$1"
-  awk '
-    /^#\[cfg\(feature = "benchmarks"\)\]/ { next }
-    $0 == "pub mod benchmarks;" { next }
-    { print }
-  ' "$SCRATCH/cqlite-core/src/lib.rs" >"$SCRATCH/lib.rs.stripped"
-  mv "$SCRATCH/lib.rs.stripped" "$SCRATCH/cqlite-core/src/lib.rs"
+  bench_strip_site_gate "$SCRATCH/cqlite-core/src/lib.rs" "28 ($1)"
+  # Drop the now-bare declaration; the case re-adds it in the shape under test.
+  grep -vx 'pub mod benchmarks;' "$SCRATCH/cqlite-core/src/lib.rs" >"$SCRATCH/lib.rs.nodecl"
+  mv "$SCRATCH/lib.rs.nodecl" "$SCRATCH/cqlite-core/src/lib.rs"
   grep -q 'pub mod benchmarks' "$SCRATCH/cqlite-core/src/lib.rs" \
     && fail_case "case 28 setup ($1): the original benchmarks declaration survived the strip"
   printf '%s\n%s\n%s\n' '/* a block comment that closes on the SAME line as the declaration' '   (issue #1712 roborev r7 F2)' "$2" >>"$SCRATCH/cqlite-core/src/lib.rs"
   # …and the gate hides inside the module file, which is the whole point.
-  printf '%s\n%s\n' '#![cfg(feature = "benchmarks")]' "$(cat "$SCRATCH/cqlite-core/src/benchmarks/mod.rs")" \
-    >"$SCRATCH/cqlite-core/src/benchmarks/mod.rs.new"
-  mv "$SCRATCH/cqlite-core/src/benchmarks/mod.rs.new" "$SCRATCH/cqlite-core/src/benchmarks/mod.rs"
+  bench_add_inner_gate "$SCRATCH"
 }
 
 # (a) THE RED: the declaration shares its line with the closing `*/`.
