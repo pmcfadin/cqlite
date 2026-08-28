@@ -481,7 +481,7 @@ $np_out"
 fi
 
 # ===========================================================================
-echo "TEST 27: zero claims is exit 0 and says so (an empty fleet is not a dead lane)"
+echo "TEST 27: zero claim refs is INCOMPLETE (exit 1) — an empty namespace is not an idle fleet"
 # ===========================================================================
 empty_origin="$T/origin-empty.git"
 empty_work="$T/work-empty"
@@ -1015,6 +1015,37 @@ else
 $us_out"
 fi
 (cd "$WORK" && g push -q origin ":refs/machine-claims/unreadState" 2>/dev/null || true)
+
+# ===========================================================================
+echo "TEST 46: every verdict the code can emit is documented in --help (round 6, Low)"
+# ===========================================================================
+# roborev round 6 found the help had drifted: it still said zero claims returns 0 and
+# that only DEAD-NO-PROCESS sets the finding code, after both had changed. Prose drift is
+# not catchable by any behavioural test, so this compares the two SIDES — the verdict
+# tokens the implementation assigns, and the tokens the help lists. Derived from the
+# source, never a hand-kept list, so a NEW verdict added later fails this until it is
+# documented.
+help_text=$(cd "$WORK" && bash "$HB" --help 2>&1 || true)
+emitted=$(grep -oE 'verdict="[A-Z][A-Z-]*"' "$HB" | sed -e 's/verdict="//' -e 's/"//' | sort -u)
+undocumented=""
+for v in $emitted; do
+  printf '%s\n' "$help_text" | grep -q "$v" || undocumented="$undocumented $v"
+done
+if [ -n "$emitted" ] && [ -z "$undocumented" ]; then
+  ok "all $(printf '%s\n' "$emitted" | wc -l | tr -d ' ') verdict tokens the code emits are documented in --help"
+else
+  bad "verdicts missing from --help:${undocumented:-<none>} (emitted: $(printf '%s' "$emitted" | tr '\n' ' '))"
+fi
+# ...and the exit codes the help claims must match what the code actually returns, for the
+# two cases round 6 caught as stale.
+zc_out=$(cd "$empty_work" && bash "$HB" dead-lanes 2>&1); zc_rc=$?
+# The phrase is matched on ONE line: the help is a comment block, so a longer phrase
+# spans a line break and would never match however correct the text is.
+if [ "$zc_rc" -eq 1 ] && printf '%s\n' "$help_text" | grep -qi 'INCLUDES zero claim'; then
+  ok "the help's exit-code contract matches the zero-claims behaviour it documents (both say incomplete/1)"
+else
+  bad "help and behaviour disagree on zero claims: rc=$zc_rc"
+fi
 
 echo
 echo "=== claim-heartbeat.sh: $PASS passed, $FAIL failed ==="

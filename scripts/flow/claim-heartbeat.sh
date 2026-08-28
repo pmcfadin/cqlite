@@ -80,8 +80,10 @@
 #                                            # age threshold and regardless of an
 #                                            # open PR. exit 3 = a dead lane was
 #                                            # found; 1 = the measurement was
-#                                            # incomplete; 0 = none (incl. zero
-#                                            # claims).
+#                                            # incomplete (which INCLUDES zero claim
+#                                            # refs and an all-foreign run — neither
+#                                            # establishes an idle fleet); 0 = local
+#                                            # lanes were measured and none is dead.
 #
 # WHY `dead-lanes` IS NOT `should-reap` (issue #3393 AC3)
 #   `should-reap` is a REAP GATE, and it consults the pid ONLY AFTER age >
@@ -123,13 +125,26 @@
 #   owns the claim, so the verdict is never folded onto a two-valued alive/dead —
 #   the permissive fold ("assume alive") is how a dead lane goes unseen, which is
 #   the vacuous-pass shape this repo's doctrine forbids:
-#     DEAD-NO-PROCESS   local claim, pid recorded, `kill -0` fails => gone.
-#     ALIVE             local claim, pid recorded and still running.
-#     UNKNOWN-FOREIGN   claim owned by another machine; its pid is unknowable
-#                       from here, so it is reported as neither.
-#     UNKNOWN-NO-PID    claim ref carries no pid (pre-#2655 or hand-made).
-#   Only DEAD-NO-PROCESS sets the exit code. An UNKNOWN is a gap in what this
-#   host can see, and it is printed as such rather than counted either way.
+#     DEAD-NO-PROCESS   local claim whose pid is gone from the process table, or is
+#                       a ZOMBIE (exited, awaiting reap — it cannot drive a lane).
+#     DEAD-PID-REUSED   the pid exists but STARTED AFTER the claim was stamped, so it
+#                       cannot be the process that stamped it: the lane owner is gone
+#                       and an unrelated process now holds its pid.
+#     ALIVE             local claim whose pid exists AND whose start time precedes the
+#                       claim ts, i.e. identity established.
+#     UNKNOWN-IDENTITY  the pid exists but identity could not be established (start
+#                       time or claim ts unreadable, or the start falls inside the
+#                       rounding window) — pid reuse is NOT excluded.
+#     UNKNOWN-FOREIGN   claim owned by another machine; its pid is unknowable from
+#                       here, so it is reported as neither.
+#     UNKNOWN-NO-PID    local claim ref carries no pid (pre-#2655 or hand-made).
+#     UNKNOWN-UNREADABLE  the ref listed but would not fetch.
+#   BOTH `DEAD-*` verdicts set the finding code 3. The `UNKNOWN-*` verdicts are gaps in
+#   what this run could determine: every one of them EXCEPT `UNKNOWN-FOREIGN` makes the
+#   measurement incomplete (exit 1 when nothing dead was found), because a local lane
+#   this host could not judge is not a lane this host may call healthy. `UNKNOWN-FOREIGN`
+#   is excluded because it is unknowable BY DESIGN and counting it would pin a healthy
+#   multi-machine fleet at exit 1 forever.
 #
 #   TWO SCOPE LIMITS, BOTH STATED RATHER THAN SHIPPED QUIETLY — a monitor whose bounds
 #   are undocumented is read as covering more than it does, which is its own false-clean.
@@ -146,10 +161,31 @@
 #   claim and only the last-stamped supervisor pid stays observable — this command can
 #   then report at most one of them. That bound matters here specifically because #3393's
 #   own evidence is FOUR LANES PER BOX (and the 1-lane box recorded zero OOM kills), i.e.
-#   exactly the configuration in which lanes died. Giving each lane its own ref would fix
-#   it, but that namespace is shared with `should-reap` and the CI reaper, so its layout
-#   is a design decision for the owner and is escalated on #3393 rather than taken here.
-#   Until then: on a multi-lane box, treat a clean `dead-lanes` as covering ONE lane.
+#   exactly the configuration in which lanes died.
+#
+#   WORSE THAN "ONLY ONE IS VISIBLE": A LIVE SIBLING ACTIVELY MASKS A DEAD LANE. The ref
+#   is force-updated on every supervisor iteration, so after one lane dies, the next
+#   iteration of a SURVIVING lane on the same box overwrites the ref with its own live
+#   pid — and `dead-lanes` then reports ALIVE, identity verified, for a box that just
+#   lost a lane. On a multi-lane box a clean result is therefore not evidence about any
+#   particular lane; cross-check with the board and the open PRs.
+#
+#   Giving each lane its own ref would fix it, but that namespace is shared with
+#   `should-reap` and the CI reaper, and it collides with the standing #1930 "one worker
+#   per machine" invariant the fleet was already violating — so the layout is a design
+#   decision for the owner and is escalated on #3393 rather than taken here.
+#
+#   (3) CLOCK-STEP SENSITIVITY, same root cause, same escalation. Identity compares the
+#   claim's wall-clock `ts` against a start epoch reconstructed as `now - elapsed`. Those
+#   are the same clock but read at different times, so an NTP step between stamping and
+#   inspection shifts the comparison: a backward step can make a reused pid look
+#   consistent (false ALIVE), a forward step can make a live supervisor look reused
+#   (false DEAD-PID-REUSED). Fixing it properly means recording a stable process identity
+#   AT STAMP TIME — boot id plus start ticks — which is the same change to `stamp` that
+#   (2) needs, hence the same owner decision. Elapsed time was chosen over parsing
+#   `ps -o lstart=` because that string carries no timezone and was measured to be
+#   19,800s wrong on a non-UTC host; between the two, a clock STEP is far rarer than a
+#   non-UTC host.
 #
 #   SCOPE LIMIT, stated because the acceptance criterion asks for more: #3393 AC3
 #   describes the operator's scratch check as "worktree present, tmux session
