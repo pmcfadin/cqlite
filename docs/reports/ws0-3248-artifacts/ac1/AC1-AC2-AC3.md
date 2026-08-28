@@ -89,6 +89,48 @@ buffers, and SMT contention — #3096's pinning puts the `spawn_blocking` merge/
 async gRPC framing thread on **one physical core's two hyperthreads** (`taskset -c 2,10`). That is a
 hypothesis this profile cannot settle; it is recorded as the next question, not an answer.
 
+#### "Same shared code" is verified at the machine-code level, and that makes it +54.5%
+
+The bucket above is assigned by **symbol presence** (`aggregate-profiles.py`), and the two arms are
+**different binaries** — `ws0-scan-bench` and `cqlite-flight`. A shared symbol is therefore the same
+*source function*; nothing in that establishes the same *machine code*, since each binary inlines and
+specialises independently. So the phrase "same shared code" was a claim about codegen supported by
+evidence about names, and **different codegen was a live competing explanation** for the excess.
+
+Settled by disassembling every shared symbol in both binaries
+([`codegen-identity.py`](codegen-identity.py)):
+
+| | count | share |
+|---|---|---|
+| shared symbols present in both binaries | 363 | |
+| **verified-identical instruction sequence** | **291** | **80%** |
+| different machine code | 72 | 20% |
+
+Partitioning the excess by that fact **sharpens** it rather than dissolving it:
+
+| shared sub-bucket | scan cyc/row | Flight cyc/row | excess |
+|---|---|---|---|
+| SHARED total | 7,327 | 8,879 | **+21.2%** |
+| **verified-identical instructions** | 2,658 | 4,106 | **+54.5%** |
+| different machine code | 4,372 | 4,767 | +9.0% |
+
+(The SHARED total re-derives the 21.2% headline from an independent path — flat profiles × profiled
+cyc/row — which is a useful cross-check on the bucket arithmetic.)
+
+**The excess is concentrated in provably identical instruction sequences.** The 21.5% figure
+understated the identical-code effect by averaging it with the differently-compiled functions, and
+**codegen is excluded as the cause**: same instructions, same work, 54.5% more cycles. That points at
+the memory system, which is what the bytes-touched differential measures independently — and it
+promotes cache pressure from "candidate cause" to the surviving explanation, while leaving SMT
+contention untested.
+
+**Bytes would have been the wrong oracle**, by as much in the other direction: only **15** of 363
+shared symbols are byte-identical, because call targets and PC-relative operands relocate differently
+in two binaries. Of the 295 same-size symbols, **291 have an identical mnemonic sequence** — same
+instructions, different operands. A byte comparison would have reported "4% identical" and been the
+same species of error as the claim it replaced. Size alone is also insufficient: 4 same-size symbols
+*do* differ in mnemonics, so both checks are applied.
+
 ---
 
 ## AC1 — per-function attribution inside the region
