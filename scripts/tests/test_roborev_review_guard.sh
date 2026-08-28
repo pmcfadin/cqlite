@@ -4643,6 +4643,25 @@ fi
 # only knowable by differential testing against the original — the exact trap CLAUDE.md records for
 # #3283. So it is a function with ONE body: a filter that drifts between call sites cannot make one
 # caller lenient while its own control still reads green.
+# THE SAME FILTER WITHOUT THE HEREDOC EXEMPTION. Only the four PROSE-SHAPED retired tokens
+# (mixed-delivery, delegated-oversize, snapshot-unbound, unparseable-instruction) can legitimately
+# appear in help text, so only they need the exemption. The thirteen CODE IDENTIFIERS never can --
+# they are snake/SCREAMING case, not English -- so they are scanned EVERYWHERE, heredoc included.
+#
+# That split is what retires the whole "is this heredoc line executable?" problem. Rounds 19-21 of
+# review each found another construct that executes inside an unquoted heredoc -- a command
+# substitution, an assigning parameter expansion, a bare `$VAR`, a substitution spanning lines --
+# and each fix was another claim about a SET. With identifiers never exempt, none of it matters:
+# a reintroduction is caught wherever it is written, and prose naming a retired STATE stays legal
+# exactly where prose belongs. Measured on the real wrapper: 0 identifiers in the heredoc, 1 prose
+# word, so this costs nothing and closes the family. (Issue comments 3/5/6/7 recommended keying on
+# the identifiers for this reason; deferred then as scope, adopted now because it fixes a live hole.)
+_cls_all_lines() {
+  awk '
+  /^[[:space:]]*#/ { next }
+  { print }
+' "$@" 2>/dev/null || true
+}
 _cls_exec_lines() {
   awk '
   function code_of(s,   n2, i2, sq2, dq2, c2) {
@@ -4703,11 +4722,6 @@ _cls_exec_lines() {
   # another claim about a SET, and ${VAR:+word} / ${VAR:-word} / ${VAR:?word} all REFERENCE the
   # retired state while being none of them (roborev job 53). The real heredoc contains exactly one
   # braced expansion, so surfacing every one costs a single line of prose review.
-  # EVERY expansion, braced or not. The heredoc delimiter is unquoted, so `$ROBOREV_DIFF_SOURCE_STATE`
-  # is as live as `${...}` -- surfacing only the braced form was one more claim about a SET
-  # (roborev job 54). Measured: the real heredoc has 4 expansion lines and none names a retired
-  # token, so surfacing all of them costs nothing.
-  in_usage && ($0 ~ /[$][(]/ || $0 ~ /`/ || $0 ~ /[$][{]/ || $0 ~ /[$][A-Za-z_]/) { print; next }
   in_usage { next }
   /^[[:space:]]*#/ { next }
   # A SUBSTITUTION LINE KEEPS ITS TAIL. Inside `$( )` a quoted `#` looks like a comment opener to
@@ -4743,11 +4757,23 @@ _cls_exec=$(_cls_exec_lines "$ORACLES" "$CHECKS_FILE" "$WRAPPER_REAL")
 if [ -z "$_cls_exec" ]; then
   bad 'structural: the executable-line capture for the classifier scan is EMPTY, so the scan below would report CLEAN having examined nothing (an awk failure, a renamed flow script, or an over-broad filter)'
 fi
+# THE 13 CODE IDENTIFIERS: scanned EVERYWHERE, including the help heredoc. They cannot occur in
+# English, so there is no legitimate prose use to exempt.
+_cls_all=$(_cls_all_lines "$ORACLES" "$CHECKS_FILE" "$WRAPPER_REAL")
+if [ -z "$_cls_all" ]; then
+  bad 'structural: the all-lines capture for the classifier scan is EMPTY, so the identifier scan below would report CLEAN having examined nothing'
+fi
 for _gone in 'roborev_collect_review_diff_headers' 'roborev_prompt_snapshot_paths' \
-  'roborev_snapshot_path_binding' 'ROBOREV_DIFF_SOURCE_STATE' 'mixed-delivery' 'delegated-oversize' \
-  'snapshot-unbound' 'unparseable-instruction' 'BLOCKRESET' 'BLOCKHDR' 'in_trailer' 'in_fence' \
-  '_rx_delivery_hdrs' '_rx_snap_paths' 'SNAPSHOT_NOTICE' 'ROBOREV_SNAPSHOT_PATH' \
-  'ROBOREV_SNAPSHOT_CONTAINMENT'; do
+  'roborev_snapshot_path_binding' 'ROBOREV_DIFF_SOURCE_STATE' 'BLOCKRESET' 'BLOCKHDR' \
+  'in_trailer' 'in_fence' '_rx_delivery_hdrs' '_rx_snap_paths' 'SNAPSHOT_NOTICE' \
+  'ROBOREV_SNAPSHOT_PATH' 'ROBOREV_SNAPSHOT_CONTAINMENT'; do
+  case "$_cls_all" in
+    *"$_gone"*) _classifier="$_classifier $_gone" ;;
+  esac
+done
+# THE 4 PROSE-SHAPED VERDICT STRINGS: scanned outside the help heredoc only, since the usage text
+# legitimately names them while telling the reader they are gone.
+for _gone in 'mixed-delivery' 'delegated-oversize' 'snapshot-unbound' 'unparseable-instruction'; do
   case "$_cls_exec" in
     *"$_gone"*) _classifier="$_classifier $_gone" ;;
   esac
