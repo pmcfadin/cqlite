@@ -185,6 +185,17 @@ PROFILE_OUT=""
 # in the workload (a batch boundary, a flush interval), which aliases the profile toward or away
 # from whatever shares its period.
 PROFILE_FREQ=499
+# THE ACTIVE SAMPLER PID, AT FILE SCOPE SO `on_exit` CAN SEE IT.
+#
+# `perf_stat_c` cleans up its own sampler on the NORMAL path, but a TERM/HUP delivered to the
+# DRIVER mid-measurement runs `on_exit` and exits without ever returning into `perf_stat_c` --
+# so the sampler and its `sleep 86400` were orphaned for 24 hours. A `local` in the function
+# is invisible to the trap handler, which is why this is a global.
+_ACTIVE_PROFILER_PID=""
+# The external box-load timeseries to judge this session's quiescence against (#3248).
+# OPT-IN, and its ABSENCE IS RECORDED rather than silent -- see the wiring below the
+# measurement loop for why it is not mandatory.
+QUIESCENCE_TIMESERIES=""
 # `--validate-args-only`: run every ARGUMENT check, print a stamp, and exit 0 having
 # touched NOTHING outside this process (issue #3272 review R1). See the exit point below
 # for why the alternative — asserting acceptance by running the real driver until it
@@ -240,6 +251,15 @@ ws0-baseline.sh — issue #3096 same-session Arrow-encode baseline
   --profile-freq N     Sampling frequency for --profile-out (default $PROFILE_FREQ, a prime:
                        a round number risks lock-step with a periodic activity in the
                        workload, which aliases the profile).
+  --quiescence-timeseries FILE
+                       Judge this session against an EXTERNAL box-load timeseries (the
+                       sampler in scripts/perf/, one JSON line per 10s with a competing-
+                       process census). Boundary samples are taken around the measurement
+                       loop and ws0_quiescence.py REFUSES the run if any in-window sample
+                       shows a competing process. Opt-in, because the timeseries is produced
+                       outside the rig and demanding one would fail every box without it --
+                       but its ABSENCE IS RECORDED in the manifest as
+                       `quiescence: NOT VERIFIED`, so a run can never silently look verified.
   --no-build           Skip the release build; use the binaries already in target/release.
   --non-baseline       Measure a corpus that is NOT the canonical measurement corpus. By
                        DEFAULT the corpus is checked against the canonical pin in
@@ -290,6 +310,7 @@ while [[ $# -gt 0 ]]; do
     --events) EVENTS="$2"; shift 2 ;;
     --bin-dir) BIN_DIR="$2"; DO_BUILD=0; shift 2 ;;
     --profile-out) PROFILE_OUT="$2"; shift 2 ;;
+    --quiescence-timeseries) QUIESCENCE_TIMESERIES="$2"; shift 2 ;;
     --profile-freq) PROFILE_FREQ="$2"; shift 2 ;;
     --validate-args-only) VALIDATE_ONLY=1; shift ;;
     -h|--help) usage; exit 0 ;;
@@ -504,9 +525,18 @@ if missing:
 fi
 
 if [[ -n "$PROFILE_OUT" ]]; then
-  mkdir -p "$PROFILE_OUT" 2>/dev/null || true
-  if [[ ! -d "$PROFILE_OUT" ]]; then
-    echo "FATAL: --profile-out '$PROFILE_OUT' is not a directory and could not be created." >&2
+  # NON-MUTATING above the boundary. `--validate-args-only` promises in words that "nothing
+  # was executed ... no state", and the first version of this check ran `mkdir -p` HERE, so a
+  # validation-only invocation CREATED a directory. Creation moved below the boundary; what is
+  # checked here is only that the path could be created -- its parent exists and is writable.
+  _prof_parent="$(dirname -- "$PROFILE_OUT")"
+  if [[ -e "$PROFILE_OUT" && ! -d "$PROFILE_OUT" ]]; then
+    echo "FATAL: --profile-out '$PROFILE_OUT' exists and is not a directory." >&2
+    exit 2
+  fi
+  if [[ ! -d "$PROFILE_OUT" && ( ! -d "$_prof_parent" || ! -w "$_prof_parent" ) ]]; then
+    echo "FATAL: --profile-out '$PROFILE_OUT' does not exist and its parent" >&2
+    echo "       '$_prof_parent' is not a writable directory, so it cannot be created." >&2
     exit 2
   fi
   if ! [[ "$PROFILE_FREQ" =~ ^[1-9][0-9]{0,4}$ ]]; then
@@ -545,6 +575,14 @@ if [[ -n "$PROFILE_OUT" ]]; then
       exit 2
     fi
   done
+fi
+
+if [[ -n "$QUIESCENCE_TIMESERIES" && ! -r "$QUIESCENCE_TIMESERIES" ]]; then
+  echo "FATAL: --quiescence-timeseries '$QUIESCENCE_TIMESERIES' is not a readable file." >&2
+  echo "       It is the external box-load record this session is judged against; an" >&2
+  echo "       unreadable one cannot establish anything, so it is refused up front rather" >&2
+  echo "       than after the measurement." >&2
+  exit 2
 fi
 
 if [[ -n "$BIN_DIR" && ! -d "$BIN_DIR" ]]; then
@@ -625,6 +663,18 @@ verify_disjoint "$SERVER_CPUS" "$CLIENT_CPUS"
 on_exit() {
   local rc=$?
   trap - EXIT INT TERM HUP
+  # THE SAMPLER FIRST. A TERM/HUP during a measurement never returns into `perf_stat_c`, so
+  # its own cleanup does not run and `perf record` -- which waits on `sleep 86400` -- would be
+  # orphaned for 24 hours, still sampling, on a box a later lane will try to measure on.
+  # SIGINT rather than SIGKILL so perf finalises its output; `|| true` throughout because a
+  # cleanup handler may not fail the run, and `wait` is bounded because the process is a
+  # direct child.
+  if [[ -n "${_ACTIVE_PROFILER_PID:-}" ]]; then
+    echo "cleanup: stopping the active sampling profile (pid $_ACTIVE_PROFILER_PID)" >&2
+    kill -INT "$_ACTIVE_PROFILER_PID" 2>/dev/null || true
+    wait "$_ACTIVE_PROFILER_PID" 2>/dev/null || true
+    _ACTIVE_PROFILER_PID=""
+  fi
   stop_server
   restore_sysctls
   exit "$rc"
@@ -666,6 +716,12 @@ BIN="${BIN_DIR:-$REPO_ROOT/target/release}"
 # it also means that after it, `$BIN` no longer says which BUILD they came from, and a perfsym
 # run and a release run become indistinguishable in results.json. This variable is the only
 # record of that distinction, so it is taken before the reassignment can occur.
+# The profile directory is CREATED here, below the --validate-args-only boundary, so a
+# validation-only run leaves no state behind (its path was already checked above).
+if [[ -n "$PROFILE_OUT" ]] && ! mkdir -p "$PROFILE_OUT"; then
+  echo "FATAL: could not create --profile-out '$PROFILE_OUT'." >&2
+  exit 2
+fi
 BIN_DIR_RECORDED="$BIN"
 # WHETHER A SAMPLING PROFILE WAS ATTACHED, and at what frequency (#3248, roborev job 60
 # finding 1). Recorded because `bin_dir` CANNOT establish it: the same symbol-bearing build
@@ -677,6 +733,14 @@ if [[ -n "$PROFILE_OUT" ]]; then
   PROFILE_RECORDED="on freq=$PROFILE_FREQ"
 else
   PROFILE_RECORDED="off"
+fi
+# WHETHER THIS SESSION IS JUDGED FOR QUIESCENCE AT ALL. Recorded either way: a run with no
+# timeseries is not "quiet", it is UNVERIFIED, and the difference has to survive into
+# results.json or a reader cannot tell a checked run from an unchecked one.
+if [[ -n "$QUIESCENCE_TIMESERIES" ]]; then
+  QUIESCENCE_RECORDED="judged against $QUIESCENCE_TIMESERIES"
+else
+  QUIESCENCE_RECORDED="NOT VERIFIED (no timeseries supplied)"
 fi
 # Existence was already refused above the --validate-args-only boundary; this only reports it.
 if [[ -n "$BIN_DIR" ]]; then
@@ -779,6 +843,7 @@ WS0_CFG_BASELINE_MODE="$BASELINE_MODE" \
 WS0_CFG_EVENTS="$EVENTS" \
 WS0_CFG_BIN_DIR="$BIN_DIR_RECORDED" \
 WS0_CFG_PROFILE="$PROFILE_RECORDED" \
+WS0_CFG_QUIESCENCE="$QUIESCENCE_RECORDED" \
 python3 -c '
 import os, pathlib, sys
 sys.path.insert(0, sys.argv[1])
@@ -1056,6 +1121,9 @@ perf_stat_c() {
     _ptag="$(basename "$outfile" .csv)"
     perf_record_c "$PROFILE_OUT/profile-$_ptag.data" >/dev/null 2>&1 &
     _prof_pid=$!
+    # Published at file scope BEFORE the window opens, so a signal arriving at any point
+    # during the measurement finds a PID to clean up.
+    _ACTIVE_PROFILER_PID="$_prof_pid"
     # Give the sampler a moment to arm, or the first fraction of the window is unsampled and
     # the profile silently under-represents whatever runs first.
     sleep 0.3
@@ -1079,6 +1147,7 @@ perf_stat_c() {
     # SIGINT, not SIGKILL: perf finalises perf.data on INT and leaves an unreadable stub on KILL.
     kill -INT "$_prof_pid" 2>/dev/null || true
     wait "$_prof_pid" 2>/dev/null || true
+    _ACTIVE_PROFILER_PID=""
     # AND VERIFY IT FINALISED. An unterminated `perf record` leaves a file of plausible SIZE
     # whose `data size` header is 0, which `perf report` refuses — so the failure is invisible
     # at the filesystem level and only appears when someone tries to read the profile, possibly
@@ -1254,6 +1323,23 @@ record_round() {
     "$2" "$3" "$4" "$now" > "$OUT_DIR/$1.round"
 }
 
+# THE QUIESCENCE BOUNDARY, OPENING SIDE (#3248). Taken here rather than at startup so it
+# brackets the MEASUREMENT rather than the build: a cargo build before rep 1 is this session's
+# own load and would read as contamination of its own window.
+#
+# DELIBERATELY ABOVE `_ARM_LIST=`, not between it and the loop. `test_ws0_round_metadata.sh`
+# extracts the rotation loop by TEXT -- `awk '/^_ARM_LIST=/,/^done$/'` -- and evals it in a
+# harness where this driver-scoped state does not exist, so code placed inside that range
+# breaks four rotation checks with an empty `order:`. That is the same text-extraction coupling
+# this rig records for `perf_stat_c` and `$COLD_STEP_MAX_MS`, and the first version of this
+# block hit it.
+_QUIESCENCE_WINDOW_START=""
+if [[ -n "$QUIESCENCE_TIMESERIES" ]]; then
+  _QUIESCENCE_WINDOW_START="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+  python3 "$HERE/ws0_quiescence.py" sample --out "$OUT_DIR/quiescence-before.json" \
+    || { echo "FATAL: could not take the opening quiescence sample." >&2; exit 2; }
+fi
+
 # The rotated arm list: the bare scan and every selected Flight arm, as PEERS.
 # shellcheck disable=SC2206  # word-splitting $ARMS into an array is intended
 _ARM_LIST=(scan $ARMS)
@@ -1278,6 +1364,37 @@ for temp in $TEMPS; do
     done
   done
 done
+
+# THE QUIESCENCE BOUNDARY, CLOSING SIDE, AND THE JUDGEMENT (#3248).
+#
+# WIRED HERE because a gate nothing calls is not a gate: roborev job 62 finding 2 caught that
+# ws0_quiescence.py shipped with no caller, so ordinary runs could still publish results from a
+# contaminated window while the tool sat in the tree looking like protection. It runs BEFORE
+# the report, so a contaminated session produces no report at all rather than a report with a
+# caveat -- the numbers from a contaminated window are not worth publishing with a footnote.
+if [[ -n "$QUIESCENCE_TIMESERIES" ]]; then
+  _quiescence_window_end="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+  python3 "$HERE/ws0_quiescence.py" sample --out "$OUT_DIR/quiescence-after.json" \
+    || { echo "FATAL: could not take the closing quiescence sample." >&2; exit 2; }
+  if ! python3 "$HERE/ws0_quiescence.py" judge \
+        --before "$OUT_DIR/quiescence-before.json" \
+        --after "$OUT_DIR/quiescence-after.json" \
+        --timeseries "$QUIESCENCE_TIMESERIES" \
+        --window-start "$_QUIESCENCE_WINDOW_START" \
+        --window-end "$_quiescence_window_end" \
+        --out "$OUT_DIR/quiescence-verdict.json"; then
+    echo "FATAL: this session is NOT certified quiescent, so no report is produced." >&2
+    echo "       The measured windows overlapped competing load, which moves frequency by up" >&2
+    echo "       to 25% (measured, #3299) — the figures would be plausible and wrong." >&2
+    echo "       Re-run on a quiet box; the verdict cause above says what was seen." >&2
+    exit 2
+  fi
+  echo "quiescence:   CERTIFIED — see $OUT_DIR/quiescence-verdict.json"
+else
+  echo "quiescence:   NOT VERIFIED — no --quiescence-timeseries was supplied, so nothing"
+  echo "              establishes this session did not overlap competing load. Recorded as"
+  echo "              such in the session manifest; it is not a claim of quietness."
+fi
 
 # The reporter takes ONLY the two paths: everything else is read from the session manifest
 # stamped above (#3272 F1). Passing `--reps`/`--temps`/`--arms`/`--scan-passes`/the CPU pins

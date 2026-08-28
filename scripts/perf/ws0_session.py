@@ -348,6 +348,14 @@ MANIFEST_CONFIG_DISPOSITION: dict[str, str] = {
               " ws0_validate.read_perf_counters SUMS lines by event name, so `-e cycles,cycles`"
               " would emit two `cycles` rows and report DOUBLE the true count as an ordinary"
               " integer, with every derived figure inheriting the factor of two",
+    "quiescence": "validated as a non-empty recorded string, and one of exactly two shapes:"
+                  " `NOT VERIFIED (no timeseries supplied)` or `judged against <path>`."
+                  " Recorded BOTH ways on purpose: a session with no external load timeseries"
+                  " is not quiet, it is UNVERIFIED, and a reader cannot otherwise tell a"
+                  " checked run from an unchecked one. The rig cannot demand a timeseries"
+                  " (it is produced outside the rig, so requiring one would fail every box"
+                  " without it), which is exactly why the absence has to be legible instead"
+                  " of implicit (#3248, roborev job 62 finding 2)",
     "profile": "validated as either the literal `off` or `on freq=<N>` with a positive N."
                " Recorded because `bin_dir` CANNOT establish whether a sampling profile was"
                " attached -- the same symbol-bearing build runs with and without"
@@ -394,6 +402,7 @@ _MANIFEST_READER_KEYS = (
     "events",
     "bin_dir",
     "profile",
+    "quiescence",
 )
 
 # AT IMPORT, both directions, so a half-wired field cannot ship (the pattern
@@ -575,6 +584,17 @@ def session_manifest_config(
                 " figures carry profiler overhead."
             )
     out["profile"] = prof
+    quies = str(config["quiescence"])
+    if quies != "NOT VERIFIED (no timeseries supplied)" and not quies.startswith(
+        "judged against "
+    ):
+        raise Invalid(
+            f"{p} `config.quiescence` is {quies!r}, which is neither the unverified sentinel"
+            " nor `judged against <path>`. A closed grammar, not a recorded string: an"
+            " unrecognised value would reach the report as a claim about whether this session"
+            " was checked for competing load."
+        )
+    out["quiescence"] = quies
     for key in ("server_cpus", "client_cpus", "step_duration", "bin_dir"):
         value = config[key]
         if not isinstance(value, str) or not value.strip():

@@ -308,6 +308,7 @@ config = {"reps": sys.argv[4], "temps": sys.argv[5], "arms": sys.argv[6],
           "events": "cycles,instructions",
           "bin_dir": "/fixture/target/release",
           "profile": "off",
+          "quiescence": "NOT VERIFIED (no timeseries supplied)",
           "baseline_mode": sys.argv[8]}
 session, corpus = pathlib.Path(sys.argv[3]), pathlib.Path(sys.argv[2])
 # NOTHING IS STAMPED FOR A SESSION DIR THAT DOES NOT EXIST — the same load-bearing rule

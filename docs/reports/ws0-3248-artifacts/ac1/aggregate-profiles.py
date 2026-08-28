@@ -82,5 +82,17 @@ def summarize(label, path):
     return buckets, rows
 
 if __name__ == "__main__":
-    for label, path in zip(sys.argv[1::2], sys.argv[2::2]):
+    # ARGV IS VALIDATED, because `zip` SILENTLY DROPS an unmatched trailing argument: an odd
+    # argument count produced an aggregate report missing one arm and exited 0, and an EMPTY
+    # argv produced an empty report and also exited 0. Either way the output looks like a
+    # complete answer to whatever was asked.
+    args = sys.argv[1:]
+    if not args or len(args) % 2 != 0:
+        raise SystemExit(
+            "usage: aggregate-profiles.py <label> <perf.data> [<label> <perf.data> ...]\n"
+            f"  got {len(args)} argument(s); pairs are required. An odd count would silently"
+            " drop the unmatched one and still print a report, and an empty one would print"
+            " an empty report — both exiting 0 as though complete."
+        )
+    for label, path in zip(args[0::2], args[1::2]):
         summarize(label, path)

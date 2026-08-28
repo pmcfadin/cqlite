@@ -282,6 +282,7 @@ def build_report(args: argparse.Namespace) -> tuple[dict, list[str]]:
     events = config["events"]
     bin_dir = config["bin_dir"]
     profile = config["profile"]
+    quiescence = config["quiescence"]
     # WHICH SERVER PRODUCED THE MEASURED ROWS (#3272 round 14, F2). Read from the pre-measurement
     # manifest and passed to every Flight arm, which compares it against EVERY rep's recorded
     # `endpoint`. Deliberately NOT a reporter argument, for the reason F1 gave for the whole
@@ -440,6 +441,10 @@ def build_report(args: argparse.Namespace) -> tuple[dict, list[str]]:
         # baseline figures -- and nothing else in this document could tell a reader that
         # (#3248): the same symbol-bearing bin_dir runs both ways.
         "profile": profile,
+        # Whether this session was judged against an external box-load timeseries, or not
+        # judged at all. Recorded both ways: an unjudged session is UNVERIFIED, not quiet
+        # (#3248).
+        "quiescence": quiescence,
         "measurements": [],
     }
 

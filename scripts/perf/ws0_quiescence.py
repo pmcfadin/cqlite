@@ -68,7 +68,23 @@ from typing import Dict, List, Optional
 # executable name can never appear here in full — which is why the gate ALSO reads
 # /proc/<pid>/cmdline for the gate script (below), and why `pgrep -x` is not a usable
 # alternative for those (it "will result in zero matches", as pkill itself warns).
-COMPETING_COMMS = ("rustc", "cargo", "cc1", "cc1plus", "ld", "lld", "mold", "sccache")
+# Processes whose PRESENCE means another lane is compiling or gating on this box.
+#
+# `sccache` IS DELIBERATELY ABSENT, and the reason is this issue's recurring hazard. sccache
+# runs as a RESIDENT DAEMON: measured on this box at 0.0% CPU with 555s elapsed while nothing
+# was building, and `bootstrap-agent-machine.sh` pins it on fleet-wide, so the gate's own
+# summary reports `sccache=on` as expected infrastructure. Its presence is ADJACENT to
+# compilation, not identical to it — and a real compile is caught anyway, because `rustc` and
+# `cargo` are present whenever sccache is doing work.
+#
+# Including it was found by WIRING THE GATE AND RUNNING IT: the first end-to-end run refused a
+# perfectly quiet box on a 0%-CPU daemon. A guard that cries wolf on the normal state of every
+# box in the fleet is the guard people learn to delete, so a false positive here is not a
+# harmless conservatism — it is the failure mode that removes the guard entirely.
+#
+# `mold` and `lld` stay: unlike sccache they are not daemons, so seeing one means a link is
+# happening now.
+COMPETING_COMMS = ("rustc", "cargo", "cc1", "cc1plus", "ld", "lld", "mold")
 
 # Substrings searched in /proc/<pid>/cmdline. Needed for things whose comm is `bash` or
 # `python3` and therefore indistinguishable from anything else by comm alone.
@@ -243,8 +259,34 @@ def window_census_clean(timeseries: str, start: str, end: str) -> Dict[str, obje
             " but do not COVER it: a sampler that stopped early would otherwise certify the"
             " unobserved remainder as quiescent.",
         )
-    dirty = [r for r in rows
-             if r.get("rustc") or r.get("cargo") or r.get("gate")]
+    # EVERY ROW MUST CARRY THE CENSUS AFFIRMATIVELY. `r.get("rustc")` returns None for an
+    # absent field, None is falsy, and a falsy census reads as CLEAN — so a malformed or
+    # schema-drifted timeseries (one with no census fields at all) certified an entire window
+    # as uncontaminated. That is a pass derived from the ABSENCE of a bad signal, which is
+    # exactly the rule this issue keeps restating, violated here in the guard written to
+    # enforce it. The fields are required, and required to be non-negative integers.
+    CENSUS_FIELDS = ("rustc", "cargo", "gate")
+    dirty = []
+    for rec in rows:
+        counts = {}
+        for field in CENSUS_FIELDS:
+            if field not in rec:
+                raise NotQuiescent(
+                    "QUIESCENCE_TIMESERIES_SCHEMA",
+                    f"the sample at {rec.get('ts')!r} carries no {field!r} field. An absent"
+                    " census field is falsy and would read as CLEAN, so a timeseries missing"
+                    " it cannot establish that the window was uncontaminated.",
+                )
+            value = rec[field]
+            if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+                raise NotQuiescent(
+                    "QUIESCENCE_TIMESERIES_SCHEMA",
+                    f"the sample at {rec.get('ts')!r} has {field}={value!r}, which is not a"
+                    " non-negative integer count.",
+                )
+            counts[field] = value
+        if any(counts.values()):
+            dirty.append(rec)
     if dirty:
         raise NotQuiescent(
             "QUIESCENCE_WINDOW_CONTAMINATED",
