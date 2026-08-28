@@ -462,7 +462,7 @@ _perf_lint_verify_complete() {
 #   * MORE THAN ONE wrapper definition is a finding ("perf is invoked in ONE place" is
 #     what layer 1 rests on, so two wrappers dissolve the allowlist).
 perf_invocation_lint_tree() {
-  local dir="$1" f owner="" count=0 owners=0 out
+  local dir="$1" f owner="" count=0 owners=0 out rec_owner="" rec_owners=0
   local -a files=() unreadable=()
   for f in "$dir"/*.sh; do
     # A glob that matched NOTHING yields the pattern itself; that is the empty-subject case
@@ -484,6 +484,15 @@ perf_invocation_lint_tree() {
       owner="$f"
       owners=$((owners + 1))
     fi
+    # THE RECORD WRAPPER IS A SECOND, INDEPENDENT OWNER ROLE (#3248) — optional, because a
+    # rig with no sampling profile is legitimate, but unique when present for the same reason
+    # the stat owner is unique: layer 1 rests on "perf is invoked in ONE place per role", so
+    # two record wrappers dissolve the record allowlist exactly as two stat wrappers would
+    # dissolve the stat one. Discovered, never enumerated.
+    if grep -q '^perf_record_c()' "$f"; then
+      rec_owner="$f"
+      rec_owners=$((rec_owners + 1))
+    fi
   done
   if [[ "${#unreadable[@]}" -gt 0 ]]; then
     echo "$dir:0: ${#unreadable[@]} rig file(s) are UNREADABLE and were therefore NOT SCANNED:"
@@ -504,8 +513,20 @@ perf_invocation_lint_tree() {
     echo "$dir:0: $owners files define perf_stat_c — layer 1 allows ONE wrapper, so two dissolve the allowlist"
     return 0
   fi
+  # The RECORD owner is optional but unique when present (#3248): two record wrappers dissolve
+  # the record allowlist exactly as two stat wrappers dissolve the stat one. ZERO is NOT a
+  # finding here — a rig that takes no sampling profile is legitimate, and demanding one would
+  # make every checkout without a profiler fail a guard about a capability it does not use.
+  if [[ "$rec_owners" -gt 1 ]]; then
+    echo "$dir:0: $rec_owners files define perf_record_c — the record allowlist rests on ONE wrapper too"
+    return 0
+  fi
   for f in "${files[@]}"; do
-    if [[ "$f" == "$owner" ]]; then
+    # A file may own EITHER role, or both. `owner` mode is what carries the END assertions, so
+    # a record-owning file must be linted in owner mode too or its wrapper's non-vacuity and
+    # its mandatory -C would never be asserted — the guard would exist and never run, which is
+    # this issue's whole subject.
+    if [[ "$f" == "$owner" || ( -n "$rec_owner" && "$f" == "$rec_owner" ) ]]; then
       out="$(perf_invocation_lint "$f" owner)"
     else
       out="$(perf_invocation_lint "$f" library)"
