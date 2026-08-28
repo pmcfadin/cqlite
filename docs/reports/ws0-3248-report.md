@@ -54,9 +54,10 @@ belongs to an unknown instantiation. Those 55 carry **22–23% of the shared buc
 future analysis that partitions this bucket by symbol name must handle that 23% explicitly rather than
 assume it away. Tool + full output: [`ac1/codegen-identity.py`](ws0-3248-artifacts/ac1/codegen-identity.py).
 
-**The +21.2% itself is unaffected and is the robust number.** It comes from the bucket totals
-(7,327 → 8,879 cyc/row), needs no assumption about machine-code identity, and came out identical under
-all four oracles.
+**The ~21% itself is unaffected and is the robust number.** It is a sum over the whole shared bucket
+(+21.2%, 7,327 → 8,879 cyc/row here; +21.5%, 7,348 → 8,926 from the independent `aggregate-profiles.py`
+path), so it needs no assumption about machine-code identity — and it came out unchanged under all
+four oracles, because none of them touched the bucket total. Only its *decomposition* moved.
 
 **2. The shared-path lever inversion is now a measured number, not an argument.**
 The issue's central warning was that a shared-path lever "could be the largest absolute throughput win
