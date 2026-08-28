@@ -140,6 +140,10 @@
 #     UNKNOWN-NO-PID    local claim ref carries no pid (pre-#2655 or hand-made).
 #     UNKNOWN-STATE     the pid exists but its process state could not be read, so
 #                       running-vs-zombie was never established.
+#     UNKNOWN-PROBE     `ps` could not answer even for a known-present pid, so nothing
+#                       about this pid was established. Especially relevant on the
+#                       exhausted hosts this command exists for: a box that cannot fork
+#                       cannot run `ps`.
 #     UNKNOWN-UNREADABLE  the ref listed but would not fetch.
 #   BOTH `DEAD-*` verdicts set the finding code 3. The `UNKNOWN-*` verdicts are gaps in
 #   what this run could determine: every one of them EXCEPT `UNKNOWN-FOREIGN` makes the
@@ -634,6 +638,20 @@ process_exists() {
   ps -p "$1" >/dev/null 2>&1
 }
 
+# ps_usable — exit 0 iff `ps` can be trusted to answer an existence question here.
+#
+# SELF-VALIDATING, because "nonzero" is not the same as "absent" (roborev round 8, Medium).
+# `process_exists` reads any nonzero `ps` status as proof the pid is GONE, so a `ps` that is
+# missing, unsupported, or simply unable to run turns every claim into DEAD-NO-PROCESS and
+# exit 3 — a fleet-wide false DEAD. That failure mode is not hypothetical on the boxes this
+# issue is about: under the memory exhaustion #3393 records, a process that cannot fork
+# cannot run `ps` either, so the ONE moment the report matters most is when the probe is
+# most likely to fail. The probe is therefore validated against a pid that is certainly
+# present — our own — before its answers are believed.
+ps_usable() {
+  ps -p "$$" >/dev/null 2>&1
+}
+
 # process_state_class <pid> — echo `zombie` | `running` | `unreadable`.
 #
 # THREE-VALUED, and that is the whole point (roborev round 7, Medium). The first cut was a
@@ -790,6 +808,12 @@ cmd_dead_lanes() {
         # run could determine — counted (roborev round 2, Medium).
         verdict="UNKNOWN-NO-PID"
         detail="claim ref records no pid (pre-#2655 or hand-made)"
+        unreadable=$((unreadable + 1))
+      elif ! ps_usable; then
+        # The probe cannot see our OWN pid, so it cannot be trusted about anyone else's.
+        # Neither DEAD nor ALIVE — incomplete (roborev round 8, Medium).
+        verdict="UNKNOWN-PROBE"
+        detail="the process probe (ps) could not answer for a known-present pid, so pid ${pid} was NOT judged — install/repair ps, or re-run when the host is not exhausted"
         unreadable=$((unreadable + 1))
       elif process_exists "$pid" && [ "$(process_state_class "$pid")" = "unreadable" ]; then
         # The pid is in the process table but its STATE could not be read, so we cannot

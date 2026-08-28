@@ -906,10 +906,32 @@ echo "TEST 42: a pid recycled INSIDE the rounding window is UNKNOWN, not ALIVE"
 # so a pid recycled within a minute read clean. The window absorbs second-resolution
 # rounding; it is not evidence of identity. Driven by crafting a claim stamped 1s BEFORE
 # a live process started, i.e. inside the tolerance but still not verifiable.
-tail -f /dev/null &
-win_pid=$!
-craft_old_claim "$WORK" "windowPid" 3406 "$win_pid" 1
-win_out=$(cd "$WORK" && PID_IDENTITY_SLACK_SECS=30 HEARTBEAT_MACHINE=windowPid \
+# DETERMINISTIC via a controlled elapsed time (roborev round 8, Low). The first cut started
+# a real process and backdated the claim by 1s, so a scheduling delay could put the start
+# BEFORE the claim ts and yield ALIVE — a flaky tooling gate. The second cut shimmed
+# elapsed=0 with an age-0 claim, which was flaky the OTHER way: craft and read can land in
+# the same second, giving start == ts and therefore ALIVE.
+#
+# Both sides are now pinned by construction: the claim is backdated 5s and the shim reports
+# elapsed=0 ("started just now"), so the computed start is the READ time and the gap is
+# 5s + however long the run takes — always strictly positive (time moves forward) and
+# always well inside the 30s window this case sets. No sub-second race in either direction.
+winshim="$T/winshim"
+mkdir -p "$winshim"
+cat >"$winshim/ps" <<'PSEOF'
+#!/usr/bin/env bash
+for a in "$@"; do
+  case "$a" in
+    stat=) echo "S"; exit 0 ;;
+    etimes=) echo 0; exit 0 ;;
+  esac
+done
+exit 0
+PSEOF
+chmod +x "$winshim/ps"
+win_pid=$$
+craft_old_claim "$WORK" "windowPid" 3406 "$win_pid" 5
+win_out=$(cd "$WORK" && PATH="$winshim:$PATH" PID_IDENTITY_SLACK_SECS=30 HEARTBEAT_MACHINE=windowPid \
   CLAIM_OPEN_PR_CMD="$NO_OPEN_PR" bash "$HB" dead-lanes 2>&1)
 win_rc=$?
 if printf '%s\n' "$win_out" | grep -E '^windowPid ' | grep -q 'UNKNOWN-IDENTITY' \
@@ -919,8 +941,6 @@ else
   bad "the slack window must not produce ALIVE: rc=$win_rc out:
 $win_out"
 fi
-kill "$win_pid" 2>/dev/null
-wait "$win_pid" 2>/dev/null
 (cd "$WORK" && g push -q origin ":refs/machine-claims/windowPid" 2>/dev/null || true)
 
 # ===========================================================================
@@ -1055,6 +1075,39 @@ if [ "$zc_rc" -eq 1 ] && printf '%s\n' "$help_text" | grep -qi 'INCLUDES zero cl
 else
   bad "help and behaviour disagree on zero claims: rc=$zc_rc"
 fi
+
+# ===========================================================================
+echo "TEST 47: a FAILING existence probe is UNKNOWN-PROBE, never a fleet-wide false DEAD"
+# ===========================================================================
+# roborev round 8 (Medium): `process_exists` read any nonzero `ps` status as proof the pid
+# was GONE, so a missing or failing `ps` turned every claim into DEAD-NO-PROCESS + exit 3.
+# That is not hypothetical on the hosts this command is for — under the memory exhaustion
+# #3393 records, a box that cannot fork cannot run `ps`, so the probe is most likely to
+# fail at exactly the moment the report matters most. Driven by a `ps` that always fails.
+psfail="$T/psfail"
+mkdir -p "$psfail"
+printf '#!/usr/bin/env bash\nexit 1\n' >"$psfail/ps"
+chmod +x "$psfail/ps"
+craft_old_claim "$WORK" "probeDown" 3409 "$$" 0
+pd_out=$(cd "$WORK" && PATH="$psfail:$PATH" HEARTBEAT_MACHINE=probeDown \
+  CLAIM_OPEN_PR_CMD="$NO_OPEN_PR" bash "$HB" dead-lanes 2>&1)
+pd_rc=$?
+if printf '%s\n' "$pd_out" | grep -E '^probeDown ' | grep -q 'UNKNOWN-PROBE' \
+  && ! printf '%s\n' "$pd_out" | grep -E '^probeDown ' | grep -q 'DEAD' \
+  && [ "$pd_rc" -eq 1 ]; then
+  ok "a failing ps yields UNKNOWN-PROBE + exit 1 for a live pid — not a false DEAD-NO-PROCESS + exit 3"
+else
+  bad "a failing existence probe must be UNKNOWN-PROBE + exit 1: rc=$pd_rc out:
+$pd_out"
+fi
+# NON-VACUITY: the pid used above really is alive, so a probe trusted blindly would have
+# called this lane dead.
+if ps -p "$$" >/dev/null 2>&1; then
+  ok "NON-VACUITY: the claimed pid IS live under the real ps, so the pre-fix path would have reported it DEAD"
+else
+  bad "NON-VACUITY broken: the real ps cannot see the test shell, so TEST 47 proves nothing"
+fi
+(cd "$WORK" && g push -q origin ":refs/machine-claims/probeDown" 2>/dev/null || true)
 
 echo
 echo "=== claim-heartbeat.sh: $PASS passed, $FAIL failed ==="
