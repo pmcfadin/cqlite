@@ -3127,6 +3127,83 @@ WEOF
 }
 
 # ---------------------------------------------------------------------------
+# Test 34-claim (#3393, roborev round 31, Medium): a lane TRANSITION must not queue an unconcluded
+# NUMERIC predecessor for reaping. Round 29 protected the shutdown path and left this one — the same
+# guard, a second route. Technical block on 88 -> no-work (unconcluded, but CLAIM_ISSUE released) -> the
+# next stamp is a placeholder and the transition reaped 88, deleting an unresolved issue's only signal.
+#
+# THREE iterations are required, which is why this case did not exist before: the defect needs a
+# transition AFTER the numeric lane, so a two-iteration run cannot reach it.
+# ---------------------------------------------------------------------------
+test_transition_keeps_an_unconcluded_numeric_lane() {
+  local d reaped88 stamped88 placeholders
+  d="$(new_case_dir)"
+  common_env "$d"
+  export CLAIM_LOG="$d/claim.log"
+  : >"$CLAIM_LOG"
+  cat >"$d/bin/worker.sh" <<'WEOF'
+#!/usr/bin/env bash
+set -euo pipefail
+n_file="${LOG_DIR:?LOG_DIR not set}/.phase"
+n=0; [[ -f "$n_file" ]] && n=$(cat "$n_file")
+n=$((n + 1)); printf '%s' "$n" >"$n_file"
+case "$n" in
+  1)  # technical block: carries issue 88 forward
+      cat >"$MARKER_FILE" <<JSON
+{"outcome":"blocked","issue":88,"pr":null,"duration_s":1,"reason":"a technical block, not an owner park"}
+JSON
+      ;;
+  2)  # no-work: leaves 88 UNCONCLUDED but releases CLAIM_ISSUE
+      cat >"$MARKER_FILE" <<JSON
+{"outcome":"no-work","issue":null,"pr":null,"duration_s":1}
+JSON
+      ;;
+  *)  # a third iteration happens, stamping a placeholder — this is the transition under test
+      cat >"$MARKER_FILE" <<JSON
+{"outcome":"no-work","issue":null,"pr":null,"duration_s":1}
+JSON
+      : >"${STOP_FILE:?STOP_FILE not set}"
+      ;;
+esac
+WEOF
+  chmod +x "$d/bin/worker.sh"
+  export WORKER_CMD="$d/bin/worker.sh"
+  export BACKOFF_NOWORK_SECS=0
+  export MAX_ISSUES=10
+  export BREAKER_N=10
+  write_claim_stub "$d/bin/claim.sh"
+  export CLAIM_CMD="bash $d/bin/claim.sh"
+  export HEARTBEAT_MACHINE="testbox"
+  bash "$SUPERVISOR" >"$d/stdout.log" 2>&1 || true
+  stamped88=$(grep -cE '^stamp 88 [0-9]+$' "$CLAIM_LOG" 2>/dev/null || true)
+  reaped88=no
+  grep -qE '^reap testbox 88( |$)' "$CLAIM_LOG" 2>/dev/null && reaped88=yes
+  if [[ "$stamped88" -ge 1 && "$reaped88" == no ]] \
+    && grep -q 'SKIPPED: its work has not concluded' "$d/stdout.log"; then
+    pass "claim: a transition past an UNCONCLUDED numeric lane (88) does not queue it for reaping"
+  else
+    fail "transition-keeps-numeric: stamp88=$stamped88 reaped88=$reaped88 log=[$(tr '\n' ';' <"$CLAIM_LOG")]"
+  fi
+  # A PLACEHOLDER predecessor must still be collected — the exception exists so the round-5 leak stays
+  # fixed, and getting it wrong in the other direction trades one leak for another.
+  placeholders=$(grep -cE '^reap testbox p[0-9]+-[0-9a-f]+' "$CLAIM_LOG" 2>/dev/null || true)
+  if [[ "$placeholders" -ge 1 ]]; then
+    pass "claim: a PLACEHOLDER predecessor is still queued and reaped ($placeholders), so the round-5 leak stays fixed"
+  else
+    fail "transition-placeholder-still-reaped: no placeholder was reaped: log=[$(tr '\n' ';' <"$CLAIM_LOG")]"
+  fi
+  # NON-VACUITY, true of the BROKEN code too: the run reached a THIRD iteration, which is what makes the
+  # transition-after-numeric reachable at all. Under the old code the same run reaps 88 instead.
+  local phases
+  phases=$(cat "$d/logs/.phase" 2>/dev/null || echo 0)
+  if [[ "$phases" -ge 3 ]]; then
+    pass "NON-VACUITY: the run reached iteration $phases, so the transition after the numeric lane really occurred"
+  else
+    fail "transition-keeps-numeric-nonvacuity: only $phases iteration(s) — the transition under test never happened"
+  fi
+}
+
+# ---------------------------------------------------------------------------
 # Test 32-claim (#3393, roborev round 28, Medium): an ENDGAME IN FLIGHT keeps its ref. Owner ruling (b)
 # on #2499 semantics — a pending auto-merge PR IS an open PR, and `delete_ref_guarded` already refuses to
 # delete an issue-named ref in that state. But `CLAIM_WORK_CONCLUDED` reflects only the LATEST iteration,
@@ -3489,6 +3566,7 @@ t test_claim_cleanup_uses_lease_and_drops_on_transfer
 t test_park_releases_issue_so_next_lane_is_a_placeholder
 t test_no_work_shutdown_clears_its_placeholder
 t test_no_work_does_not_conclude_a_numeric_lane
+t test_transition_keeps_an_unconcluded_numeric_lane
 t test_pending_pr_keeps_the_claim
 t test_finalized_verified_merged_counts
 t test_finalized_mismatch_open_is_abnormal
