@@ -3097,11 +3097,15 @@ test_pending_pr_keeps_the_claim() {
   else
     fail "pending-pr-keeps-claim: out=[$out] log=[$(tr '\n' ';' <"$CLAIM_LOG")]"
   fi
-  # NON-VACUITY, true of the BROKEN code too: the stub is reachable and a reap DOES get logged in this
-  # harness — established by the AFTER_EMPTY leg above, which must be 1. If the stub were unreachable both
-  # legs would read 0 and the first assertion would pass for the wrong reason.
-  if printf '%s' "$out" | grep -q 'AFTER_EMPTY=1'; then
-    pass "NON-VACUITY: the reap path IS reachable in this harness (AFTER_EMPTY=1), so AFTER_PENDING=0 is a refusal"
+  # NON-VACUITY, AND IT MUST HOLD ON THE BROKEN CODE TOO — which the first cut did not. It required
+  # `AFTER_EMPTY=1` exactly, but with the fix removed BOTH calls reap, so the count becomes 2 and the
+  # probe failed alongside the assertion it was meant to qualify. That is the round-24 rule violated by
+  # the very case that cites it. Keyed on "at least one reap happened" instead, which is true whether or
+  # not the pending-PR hold is present, so it establishes reachability rather than the fix.
+  local reaps_seen
+  reaps_seen=$(printf '%s' "$out" | sed -n 's/.*AFTER_EMPTY=\([0-9][0-9]*\).*/\1/p' | head -1)
+  if [[ -n "$reaps_seen" && "$reaps_seen" -ge 1 ]]; then
+    pass "NON-VACUITY: the reap path IS reachable in this harness (${reaps_seen} reap(s) seen), so AFTER_PENDING=0 is a refusal"
   else
     fail "pending-pr-nonvacuity: the reap path never fires here, so the refusal proves nothing: out=[$out]"
   fi
