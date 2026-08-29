@@ -1240,9 +1240,17 @@ class TestCollectionIdentityContract:
         """LIMITATION b-4 (host-shape collision at COMPARISON time): list AND tuple order is not verified.
 
         `values_equal` tries an ordered comparison and then falls back to an
-        UNORDERED (sorted) one for arrays of non-dict primitives, so a reordered
-        `list<int>` compares EQUAL — even though §5.3's `list<T>` row says
-        "positional; order preserved on both sides".
+        UNORDERED (sorted) one, so a reordered `list<int>` compares EQUAL — even
+        though §5.3's `list<T>` row says "positional; order preserved on both
+        sides".
+
+        SCOPE, from the guard's semantics rather than by example: the guard is
+        `not any(isinstance(v, dict) for v in py_val)`, which inspects only that
+        level's IMMEDIATE elements, and the ordered path RECURSES. So the
+        fallback applies independently at EVERY array level whose immediate
+        elements hold no dict, at ANY nesting depth. A level that does hold
+        dicts (a map-repr array) is ordered-only at that level — but its nested
+        arrays are still swallowed.
 
         This pins the CURRENT behavior as a recorded gap, NOT as a desirable
         property. The fallback is a deliberate accommodation whose reason is
@@ -1278,6 +1286,18 @@ class TestCollectionIdentityContract:
         # ...and the normalized tuple is indistinguishable from the normalized
         # list, which is WHY one fallback covers both.
         assert py_tuple == normalize_python_value([1, 2, 3], is_row_level=False)
+
+        # NESTED arrays are swallowed too — the guard inspects only immediate
+        # elements and the ordered path recurses, so the INNER level applies the
+        # fallback even though the outer element is a list, not a primitive.
+        assert values_equal([[1, 2]], [[2, 1]]) is True
+
+        # Contrast, pinning the guard's actual boundary: a level holding dicts
+        # (a map-repr array) is ordered-only AT THAT LEVEL, so reordering it is
+        # correctly caught. This is why maps are sorted by key during
+        # normalization rather than left to the comparison layer.
+        map_repr = [{"key": "a", "value": 1}, {"key": "b", "value": 2}]
+        assert values_equal(map_repr, list(reversed(map_repr))) is False
 
         # The accommodation this exists for: a set, normalized/sorted differently
         # by the two sides, still compares equal.
