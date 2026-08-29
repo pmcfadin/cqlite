@@ -207,6 +207,24 @@ def census(self_pid: Optional[int] = None) -> List[Dict[str, str]]:
         except OSError:
             cmdline = ""
         # Never count THIS tool or its own parent shell as a competitor.
+        #
+        # DEFERRED DEFECT, MEASURED: THIS SUBSTRING TEST ALSO SWALLOWS GENUINE COMPETITORS.
+        # (#3248 roborev job 84 F3; follow-up https://github.com/pmcfadin/cqlite/issues/3469
+        # family 5.)
+        #
+        # It fires BEFORE the `comm` check below, so a process such as `cargo test ws0_quiescence`
+        # is skipped even though `cargo` is explicitly in COMPETING_COMMS -- which would let a
+        # contaminated window be certified quiet.
+        #
+        # MEASURED IMPACT: none on any published run -- all 7 verdicts carrying
+        # `competing_samples` recorded 0, and no such invocation exists in the #3248 delivery (the
+        # suites are bash and run directly). Deferred on that basis.
+        #
+        # THIS IS THE OBSERVER-IN-ITS-OWN-MEASUREMENT SHAPE, which this delivery hit three times
+        # already (`pgrep -f` self-inflation, `pgrep -x` defeated by the 15-char `comm` cap, and a
+        # `pkill -f` that killed its own shell). The fix is the same each time: exclude by IDENTITY
+        # -- self PID plus an ancestor walk, which this file already does elsewhere -- rather than
+        # by a substring over a namespace the competitor also occupies.
         if "ws0_quiescence" in cmdline:
             continue
         why = ""

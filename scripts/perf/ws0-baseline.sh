@@ -1243,7 +1243,26 @@ perf_stat_c() {
     # Published at file scope BEFORE the window opens, so a signal arriving at any point
     # during the measurement finds a PID to clean up.
     _ACTIVE_PROFILER_PID="$_prof_pid"
-    # ARMING DELAY, AND THE COST IS STATED RATHER THAN CLAIMED AWAY (#3248, roborev job 69
+    # DEFERRED DEFECT, MEASURED: THIS PROFILE COVERS setup+scan, THE cyc/row DENOMINATOR DOES NOT.
+  # (#3248 roborev job 84 F1; follow-up https://github.com/pmcfadin/cqlite/issues/3469 family 3.)
+  #
+  # The profiler attaches to the FULL counted window -- the guard below skips only `*-setup.csv` --
+  # while the reported cycles/row is setup-subtracted (`cycles_scan = cycles_total - cycles_setup`,
+  # see ws0_collect.py). So profile SHARES are fractions of a setup-INCLUSIVE capture and are
+  # multiplied by a setup-EXCLUSIVE total, and setup symbols (corpus open, schema ingest) are
+  # attributable into buckets that should not contain them.
+  #
+  # MEASURED MAGNITUDE, so the next reader does not re-derive it: setup is 0.0164% / 0.0164% /
+  # 0.0171% of the profiled window across the three AC1 reps (12.5-13.2M cycles against 76.4-77.5
+  # BILLION). That is 67x SMALLER than the 1.1% per-rep spread already published beside the
+  # figures, so it cannot move a number at any precision the report states. Deferred as an
+  # arithmetic defect in a derivation, NOT as a wrong number.
+  #
+  # A fix converts shares against `cycles_total` and subtracts setup from the buckets, rather than
+  # narrowing the profile -- the profile legitimately covers setup, so the honest denominator is
+  # the one that matches it.
+  #
+  # ARMING DELAY, AND THE COST IS STATED RATHER THAN CLAIMED AWAY (#3248, roborev job 69
     # finding 1). The sampler needs a moment to arm, so without this the first fraction of the
     # window is UNSAMPLED and the profile under-represents whatever runs first. With it, the
     # profile instead includes ~300 ms of samples from BEFORE the counting window opens.

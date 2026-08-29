@@ -709,6 +709,21 @@ def build_report(args: argparse.Namespace) -> tuple[dict, list[str]]:
     # A run is a baseline only if the corpus is canonical AND no sampling profiler was attached:
     # observer overhead measures 1.6-4.3% on rows/s, so a profiled run's throughput is not a
     # baseline however canonical its corpus.
+    # DEFERRED DEFECT, MEASURED: `--bin-dir` CAN PUT A NON-RELEASE BUILD UNDER THIS LABEL.
+    # (#3248 roborev job 84 F2; follow-up https://github.com/pmcfadin/cqlite/issues/3469 family 4.)
+    #
+    # This asks about the corpus and the profiler and NOT about which BUILD produced the measured
+    # binaries. `--bin-dir` accepts any directory of executables, so a debug or custom-profile
+    # build whose codegen is not the release baseline can be reported under `BASELINE`.
+    #
+    # MEASURED IMPACT: none on any published run -- every measurement used target/perfsym or
+    # target/release, and `binary_provenance` digests each measured binary, so a reader can check
+    # which bytes ran. Deferred on that basis.
+    #
+    # THIS IS THE THIRD WAY A RUN COULD BE MISLABELLED A BASELINE (after the corpus, fixed in
+    # #3272 round 13, and the profiler, fixed in job 80 F3). The recurrence says the right shape
+    # is an ALLOWLIST of build profiles permitted to claim BASELINE, not a fourth condition bolted
+    # onto this boolean.
     is_baseline_run = canonical["is_baseline"] and profile == "off"
 
     lines = [
