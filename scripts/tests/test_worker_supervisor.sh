@@ -2683,44 +2683,54 @@ STUBEOF
   else
     fail "clear-claim-wiring: finalize_exit must pass \$CLAIM_WORK_CONCLUDED, not an exit-code flag"
   fi
-  # ...and the state must be DERIVED from the outcome, per outcome, or the flag is decorative.
-  local derived
-  derived="$(
-    CLAIM_CMD="" bash -c '
-      source "$1"
-      for spec in "finalized:" "blocked:needs-decision" "blocked:seam1-approval" "blocked:some technical reason" "abnormal:" "aborted:"; do
-        outcome="${spec%%:*}"; reason="${spec#*:}"
-        CLAIM_WORK_CONCLUDED=9
-        case "$outcome" in
-          finalized) CLAIM_WORK_CONCLUDED=1 ;;
-          blocked)
-            case "$reason" in
-              seam1-approval | needs-decision) CLAIM_WORK_CONCLUDED=1 ;;
-              *) CLAIM_WORK_CONCLUDED=0 ;;
-            esac
-            ;;
-          no-work) : ;;
-          *) CLAIM_WORK_CONCLUDED=0 ;;
-        esac
-        printf "%s=%s " "$outcome/${reason:-none}" "$CLAIM_WORK_CONCLUDED"
-      done
-    ' _ "$SUPERVISOR" 2>/dev/null
-  )"
-  if [[ "$derived" == *"finalized/none=1"* && "$derived" == *"blocked/needs-decision=1"* \
-    && "$derived" == *"blocked/seam1-approval=1"* && "$derived" == *"blocked/some technical reason=0"* \
-    && "$derived" == *"abnormal/none=0"* && "$derived" == *"aborted/none=0"* ]]; then
-    pass "claim: work-concluded is 1 only for finalize and an owner park; a technical block, abnormal and aborted all leave it 0"
+  # ...and the LIFECYCLE must hold, which the round-23 version of this case did not check. It asserted
+  # that the shipped file contained particular `case` arms — i.e. it tested a MODEL of the code, and
+  # when round 24 moved the assignment to the accept points the model went stale while the property it
+  # was standing in for was never being measured at all. Replaced with behaviour.
+  #
+  # (a) UNCONCLUDED AT SPAWN. The flag must be reset where the ref is stamped, so every path that
+  #     returns early — a crash, the stuck watchdog, an early finalize_exit — inherits the SAFE value.
+  #     Round 24: it kept its initial 1, so a breaker after abnormal iterations deleted the live ref.
+  local spawn_block
+  spawn_block="$(sed -n '/^run_iteration()/,/^}/p' "$SUPERVISOR" | sed -n '1,/CLAIM_WORK_CONCLUDED=0/p')"
+  if printf '%s' "$spawn_block" | grep -q 'stamp_claim' \
+    && printf '%s' "$spawn_block" | grep -q 'CLAIM_WORK_CONCLUDED=0'; then
+    pass "claim: run_iteration resets work-concluded to 0 at the stamp, so every early exit inherits the safe value"
   else
-    fail "clear-claim-derivation: got [$derived]"
+    fail "clear-claim-spawn-reset: run_iteration must set CLAIM_WORK_CONCLUDED=0 at/after stamp_claim"
   fi
-  # NON-VACUITY for the derivation table: it must be the SUPERVISOR's own classification, so assert the
-  # same case arms exist in the shipped file rather than only in this test's copy of them.
-  if grep -q 'CLAIM_WORK_CONCLUDED=1' "$SUPERVISOR" \
-    && grep -qE 'seam1-approval \| needs-decision\) CLAIM_WORK_CONCLUDED=1' "$SUPERVISOR" \
-    && grep -qE '\*\) CLAIM_WORK_CONCLUDED=0' "$SUPERVISOR"; then
-    pass "NON-VACUITY: the same outcome->concluded arms are present in the shipped supervisor, not just in this case"
+  # (b) A MALFORMED `finalized` MARKER MUST NOT CONCLUDE THE WORK. Behavioural: the marker claims
+  #     success with no pr, the supervisor judges it abnormal, and the lane's ref must SURVIVE.
+  #     Round 24: the flag was set from the outcome STRING before that validation ran.
+  local d2
+  d2="$(new_case_dir)"
+  common_env "$d2"
+  export CLAIM_LOG="$d2/claim.log"
+  : >"$CLAIM_LOG"
+  write_finalize_missing_pr_stub "$d2/bin/worker.sh"
+  export WORKER_CMD="$d2/bin/worker.sh"
+  export MAX_ISSUES=1
+  export BREAKER_N=1
+  write_claim_stub "$d2/bin/claim.sh"
+  export CLAIM_CMD="bash $d2/bin/claim.sh"
+  export HEARTBEAT_MACHINE="testbox"
+  bash "$SUPERVISOR" >"$d2/stdout.log" 2>&1 || true
+  local stamped reaped_it
+  stamped=$(grep -oE '^stamp [^ ]+' "$CLAIM_LOG" 2>/dev/null | head -1 | awk '{print $2}')
+  reaped_it=no
+  [[ -n "$stamped" ]] && grep -qE "^reap testbox ${stamped}( |$)" "$CLAIM_LOG" 2>/dev/null && reaped_it=yes
+  if [[ -n "$stamped" && "$reaped_it" == no ]] \
+    && grep -q 'has not concluded' "$d2/stdout.log"; then
+    pass "claim: a malformed 'finalized' marker does NOT conclude the work — lane $stamped keeps its ref"
   else
-    fail "clear-claim-derivation-nonvacuity: the shipped supervisor does not carry the arms this case asserts"
+    fail "clear-claim-untrusted-finalize: stamped='$stamped' reaped=$reaped_it log=[$(tr '\n' ';' <"$CLAIM_LOG")]"
+  fi
+  # NON-VACUITY: the run really did stamp a lane and really did reach an exit, so "no reap" is a
+  # decision and not an absence of activity.
+  if grep -qE '^stamp ' "$CLAIM_LOG" && grep -qE 'worker-supervisor stopped|claim clear DECLINED' "$d2/stdout.log"; then
+    pass "NON-VACUITY: the run stamped a lane and reached its exit path, so the surviving ref is a decision"
+  else
+    fail "clear-claim-untrusted-finalize-nonvacuity: no stamp or no exit reached: log=[$(tr '\n' ';' <"$CLAIM_LOG")]"
   fi
 }
 

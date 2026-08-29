@@ -1309,6 +1309,17 @@ run_iteration() {
   # longer look alive for the whole threshold window. Uses the best-known issue
   # from the previous iteration's marker (empty/unknown -> "0").
   stamp_claim "$CLAIM_ISSUE"
+  # UNCONCLUDED FROM THE MOMENT THE REF EXISTS (roborev round 24, High). The round-23 fix tracked
+  # whether the claimed work had concluded but never RESET the flag, so it kept its initial `1` — or
+  # inherited `1` from a previous finalize — and every path that returns before the outcome case
+  # (a crash, the stuck watchdog, an early `finalize_exit`) left it saying "concluded". A breaker after
+  # abnormal iterations then called `clear_claim 1` and deleted the current lane's only liveness ref:
+  # THE EXACT FAILURE THE ROUND-23 FIX EXISTS TO PREVENT, REINTRODUCED BY THAT FIX.
+  #
+  # Set here, immediately after the stamp, so "in progress" is the state from the instant the ref
+  # exists and every early exit inherits the SAFE value. Concluded is now something an outcome must
+  # EARN, at the point its own validation accepts it — never a default and never a leftover.
+  CLAIM_WORK_CONCLUDED=0
   local logfile="$LOG_DIR/iter-${ITER}.log"
   local stuck_flag="$LOG_DIR/.iter-${ITER}.stuck"
   rm -f "$stuck_flag"
@@ -1446,22 +1457,10 @@ run_iteration() {
     CLAIM_ISSUE=""
   fi
 
-  # HAS THE CLAIMED WORK CONCLUDED? (roborev round 23, Medium.) `clear_claim` needs this, and NOTHING
-  # ELSE ANSWERS IT: not the exit code, not the lane id's shape, and above all not the absence of an
-  # open PR. Concluded means `finalized` (endgame done) or an owner park (the issue is released and
-  # excluded from the next pickup). Every other outcome — a technical block, an abnormal marker, a
-  # crash — leaves work IN PROGRESS, and its claim ref is the only signal that the lane held it.
-  case "$outcome" in
-    finalized) CLAIM_WORK_CONCLUDED=1 ;;
-    blocked)
-      case "$reason" in
-        seam1-approval | needs-decision) CLAIM_WORK_CONCLUDED=1 ;;
-        *) CLAIM_WORK_CONCLUDED=0 ;;
-      esac
-      ;;
-    no-work) : ;;   # nothing was claimed this iteration; the previous state still stands
-    *) CLAIM_WORK_CONCLUDED=0 ;;
-  esac
+  # NOTE: `CLAIM_WORK_CONCLUDED` is NOT classified here. It was, in round 23, and that read the
+  # outcome string BEFORE the validation below judged it — so an untrusted `finalized` marker missing
+  # its issue/pr, or one whose PR is not actually merged, marked the work concluded and got the lane's
+  # ref deleted on exit (roborev round 24, High). It is set only where an outcome is ACCEPTED.
 
   case "$outcome" in
     finalized)
@@ -1482,6 +1481,10 @@ run_iteration() {
         verify="$(verify_finalized_pr "$pr")"
         case "$verify" in
           merged)
+            # EARNED HERE, and only here, for a finalize: the marker was well-formed AND the PR is
+            # verified merged on GitHub. Anything less leaves the work unconcluded, so the lane keeps
+            # its claim ref (roborev round 24).
+            CLAIM_WORK_CONCLUDED=1
             CONSECUTIVE_ABNORMAL=0
             CONSECUTIVE_UNVERIFIED=0
             forget_pending_pr "$pr"
@@ -1575,6 +1578,9 @@ run_iteration() {
           # label clears, so the loop moves straight to the next Ready issue. Fire
           # ONE high-priority page whose title carries the issue # and the first
           # line of the question (the marker's optional "question" field).
+          # EARNED HERE for a park: the issue is RELEASED — excluded from the next pickup until the
+          # owner answers — so this lane no longer holds it and its ref should go on a clean exit.
+          CLAIM_WORK_CONCLUDED=1
           journal_line "$ITER" "parked-on-owner" "$issue" "$pr" "$duration" "$rc" "$reason"
           if [[ -n "$issue" && "$issue" == "$LAST_PARKED_ISSUE" ]]; then
             # Head-block-on-decision guard (mirrors the F2 blocked-path guard,
