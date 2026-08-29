@@ -641,7 +641,7 @@ as the hashable projection `value_to_hashable_key` produces (a `frozenset` of
 `(field_name, value)` pairs, per note 4 above), while Node and the CLI render the same key as a
 UDT **object** — so the two shapes are different in kind and **nothing in the normalizer
 reconciles them**. Reconciling them requires schema-aware normalization (knowing the declared
-key type), which is a behavior change and out of scope for #1454; it is tracked as a follow-up.
+key type), which is a behavior change and out of scope for #1454; it is tracked as **#3497**.
 Until then, **#1455 must treat a UDT map key as UNSUPPORTED** and must not assume the projected
 frozenset shape is canonical. The projected shape is pinned by a test only so that the divergence
 is recorded, never as an assertion that it is comparable.

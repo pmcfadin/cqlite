@@ -891,7 +891,7 @@ class TestCollectionIdentityContract:
         a genuine `list<T>`, whose order is semantically meaningful — so sorting
         it would corrupt every `list<T>`. Distinguishing the two needs the
         declared CQL type, i.e. schema-aware normalization, which is a behavior
-        change and out of scope for #1454.
+        change and out of scope for #1454 (tracked as #3497).
 
         #1455 must handle this row explicitly (compare it order-insensitively
         itself, or declare it unsupported); it may not assume the canonical form
@@ -939,7 +939,8 @@ class TestCollectionIdentityContract:
         normalizes to a sorted array of `[name, value]` pairs — while Node and
         the CLI render the same key as a UDT **object**. The two shapes differ
         in kind and nothing here reconciles them; doing so needs schema-aware
-        normalization, which is a behavior change and out of scope for #1454.
+        normalization, which is a behavior change and out of scope for #1454
+        (tracked as #3497).
 
         This test therefore pins the *divergent* shape as a recorded gap, NOT as
         a canonical form: #1455 must treat a UDT map key as UNSUPPORTED rather
