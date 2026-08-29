@@ -1043,11 +1043,57 @@ class TestCollectionIdentityContract:
             {"key": "b", "value": 2},
         ]
 
-    def test_map_with_projected_collection_key(self):
-        """A `map<frozen<list<int>>, text>` key arrives as a `tuple` (`value_to_hashable_key`)."""
+    def test_benign_projection_list_and_set_keys_canonicalize_unchanged(self):
+        """BENIGN (family a, non-instance): a `list`/`set`/`tuple` key projection does NOT diverge.
+
+        `value_to_hashable_key` discards the host TYPE — a `map<frozen<list<int>>, text>` key
+        arrives as a `tuple` — but the *canonical form* is unchanged, because a
+        `list`, a `tuple` and a `frozenset` all canonicalize to a JSON array and
+        Node/the CLI render those same keys as arrays too. So the criterion for
+        family (a) is narrower than "a non-scalar in a projection position":
+
+            a lossy projection diverges iff the projected type's canonical form
+            is not a plain JSON array
+
+        which is why only `map` (a-2) and `udt` (a-1, a-3) generate instances.
+        This test exists so those benign cases are demonstrated rather than left
+        as an unremarked pass — #1455 must NOT special-case them
+        (M4_spec §5.3, family (a) table).
+        """
+        # list key → projected to a tuple → array. Node/CLI: array. Identical.
         assert normalize_python_value({(1, 2): "x"}, is_row_level=False) == [
             {"key": [1, 2], "value": "x"},
         ]
+        # set key → frozenset → SORTED array. Node/CLI: sorted array. Identical.
+        assert normalize_python_value({frozenset({2, 1}): "x"}, is_row_level=False) == [
+            {"key": [1, 2], "value": "x"},
+        ]
+        # A projected `list` key and a projected `set` key with the same elements
+        # canonicalize to the SAME array: the lost host-type distinction costs
+        # nothing at the canonical level, which is the whole point of "benign".
+        assert normalize_python_value({(1, 2): "x"}, is_row_level=False) == normalize_python_value(
+            {frozenset({1, 2}): "x"}, is_row_level=False
+        )
+
+    def test_duplicate_non_scalar_map_keys_are_unsupported(self):
+        """LIMITATION b-3 (host-shape collision, key identity): duplicate non-scalar keys.
+
+        A Python `dict` cannot hold two structurally-equal non-scalar keys at
+        all — they collapse by hash/`__eq__`, last value wins — while a Node
+        `Map` compares object keys by reference and keeps **both**, so the two
+        canonical forms differ in LENGTH and no sorting reconciles them.
+
+        The collapse itself happens in `map_to_py`, before any normalizer runs,
+        so what is observable here is the consequence: one entry where Node would
+        have two. Well-formed Cassandra data never produces duplicate map keys,
+        so this is out of contract rather than a live read-path bug; closing it
+        (dedup or rejection) is a behavior change tracked by #3497.
+        """
+        collapsed = {(1, 2): "first"}
+        collapsed[(1, 2)] = "second"  # a structurally-equal key: collapses, last wins
+        assert normalize_python_value(collapsed, is_row_level=False) == [
+            {"key": [1, 2], "value": "second"},
+        ], "Python collapses equal non-scalar keys; a Node Map would keep both entries"
 
     def test_map_with_udt_key_is_an_unsupported_divergent_shape(self):
         """LIMITATION a-1 (lossy projection): a UDT map key is NOT canonicalizable.
