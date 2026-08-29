@@ -2725,12 +2725,20 @@ STUBEOF
   else
     fail "clear-claim-untrusted-finalize: stamped='$stamped' reaped=$reaped_it log=[$(tr '\n' ';' <"$CLAIM_LOG")]"
   fi
-  # NON-VACUITY: the run really did stamp a lane and really did reach an exit, so "no reap" is a
-  # decision and not an absence of activity.
-  if grep -qE '^stamp ' "$CLAIM_LOG" && grep -qE 'worker-supervisor stopped|claim clear DECLINED' "$d2/stdout.log"; then
-    pass "NON-VACUITY: the run stamped a lane and reached its exit path, so the surviving ref is a decision"
+  # NON-VACUITY: the run really did stamp a lane and really did reach its exit path, so "no reap" is a
+  # DECISION rather than an absence of activity.
+  #
+  # KEYED ON A SIGNAL THAT EXISTS IN BOTH DIRECTIONS. The first cut looked for the DECLINE message —
+  # which only appears when the fix works, so under RED (fix removed) this probe failed too. A
+  # non-vacuity check that can only pass when the assertion passes measures nothing; it has to be true
+  # of the broken code as well. The journal's `summary` record is written by `finalize_exit` on every
+  # exit path, whatever the claim decision was.
+  local jf_summary=no
+  grep -rqs '"outcome":"summary"' "$d2/logs" 2>/dev/null && jf_summary=yes
+  if grep -qE '^stamp ' "$CLAIM_LOG" && [[ "$jf_summary" == yes ]]; then
+    pass "NON-VACUITY: the run stamped a lane and journalled an exit summary, so the surviving ref is a decision"
   else
-    fail "clear-claim-untrusted-finalize-nonvacuity: no stamp or no exit reached: log=[$(tr '\n' ';' <"$CLAIM_LOG")]"
+    fail "clear-claim-untrusted-finalize-nonvacuity: stamp=$(grep -cE '^stamp ' "$CLAIM_LOG") summary=$jf_summary"
   fi
 }
 
