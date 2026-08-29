@@ -51,9 +51,17 @@ if [ ! -r "$GATE" ]; then
   exit 1
 fi
 
+# FAIL CLOSED, never `exit 0`. The component that runs this file sees only an exit code, so a
+# dependency-absent `exit 0` is reported as PASS and the SKIP is invisible in the SUMMARY -- the
+# exact "a guard reported OK having measured nothing" shape this file exists to prevent, and the
+# same rule the sibling tooling-tests selftest states as "never silent PASS". The verdict names
+# what could not be verified rather than claiming the property holds.
 if ! command -v python3 >/dev/null 2>&1; then
-  echo "SKIP: python3 unavailable (the guard extraction below needs it)"
-  exit 0
+  echo "FAIL: python3 unavailable, so the guard extraction below could not run and the ANSI-handling"
+  echo "      behaviour of check_no_unexpected_zero_tests is UNVERIFIED (issue #3400). Refusing to"
+  echo "      exit 0: this file's subject is guards that pass without measuring, so a silent skip"
+  echo "      here would be an instance of the defect under test. Remedy: install python3."
+  exit 1
 fi
 
 tmp="$(mktemp -d)"
@@ -290,7 +298,11 @@ else
   cut_at=$(grep -nE 'Running.*tests/' "$tmp/zero-colour.log" | sed -n '2p' | cut -d: -f1)
   awk -v c="$cut_at" 'NR < c' "$tmp/zero-colour.log" >"$tmp/truncated.log"
   trunc_banners=$(grep -cE 'Running.*tests/' "$tmp/truncated.log" || true)
-  ( set +e; . "$tmp/current_guard.sh"; check_no_unexpected_zero_tests "Pass 1" "$tmp/truncated.log" 2 >/dev/null 2>&1; exit $? ) || truncated_rc=$?
+  # `empty` is ALLOWED here on purpose: the truncated fixture still holds the zero-test `empty`
+  # target, so without this the guard would red on the unexpected-zero-test condition and the
+  # assertion below would pass whether or not the banner-count check exists. Excusing `empty`
+  # leaves the COUNT mismatch (1 banner recognised, 2 requested) as the SOLE possible cause.
+  ( set +e; . "$tmp/current_guard.sh"; check_no_unexpected_zero_tests "Pass 1" "$tmp/truncated.log" 2 empty >/dev/null 2>&1; exit $? ) || truncated_rc=$?
   if [ "$truncated_rc" -ne 0 ]; then
     ok "E1: a log TRUNCATED after the first banner FAILs — the guard judged fewer targets than were requested, which is not a measurement of its subject"
   else
@@ -301,6 +313,18 @@ else
     ok "E1: the truncated fixture is genuinely PARTIAL (non-empty, $trunc_banners of 2 banners) — so the red above is the COUNT, not emptiness"
   else
     bad "E1: the truncated fixture is not the partial case (banners=${trunc_banners:-0}, size=$( [ -s "$tmp/truncated.log" ] && echo nonempty || echo empty )) — the case above would red for the wrong reason"
+  fi
+  # POSITIVE CONTROL, so the discrimination is MEASURED and not merely argued by the comment
+  # above: the SAME fixture with the requested count set to the 1 banner it actually holds must
+  # PASS. Red there and green here isolates the count as the only thing that changed, which is
+  # the property under test. Without this, "the red above is the COUNT" is an assertion about
+  # the fixture rather than evidence about the guard.
+  trunc_ctrl_rc=0
+  ( set +e; . "$tmp/current_guard.sh"; check_no_unexpected_zero_tests "Pass 1" "$tmp/truncated.log" 1 empty >/dev/null 2>&1; exit $? ) || trunc_ctrl_rc=$?
+  if [ "$trunc_ctrl_rc" -eq 0 ]; then
+    ok "E1 (control): the SAME truncated fixture PASSes when the requested count is 1 — so the red above is PROVEN to be the count mismatch, not the fixture"
+  else
+    bad "E1 (control): the truncated fixture reds even when the requested count matches its 1 banner (rc=$trunc_ctrl_rc) — the case above cannot be attributed to the count"
   fi
   # The expected-count argument is itself fail-closed: a guard told to expect nothing is back to
   # accepting whatever the log happened to contain.
