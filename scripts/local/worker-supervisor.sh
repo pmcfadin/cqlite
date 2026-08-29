@@ -212,7 +212,25 @@ PENDING_AUTOMERGE_MAX="${PENDING_AUTOMERGE_MAX:-3}"
 # CI time). Default 20 min.
 PENDING_AUTOMERGE_MIN_SECS="${PENDING_AUTOMERGE_MIN_SECS:-1200}"
 
-SUPERVISOR_LOCK="${SUPERVISOR_LOCK:-${TMPDIR:-/tmp}/cqlite-worker-supervisor.lock}"
+# ONE SUPERVISOR PER LANE, NOT PER MACHINE (roborev round 19, Medium). The default lock was
+# machine-global, so a SECOND lane started with the documented default invocation exited during lock
+# acquisition — which makes the per-lane claim refs this change adds unreachable in production with
+# defaults, and N-lanes-per-box is the standing model (#3393 retracted #1930's one-worker-per-machine
+# reading). This is that retracted invariant surviving in a SECOND mechanism: fixing the ref namespace
+# left the flock still enforcing the assumption the namespace change exists to remove.
+#
+# Scoped by the LANE's checkout root, which is what "one instance" should have meant all along — the
+# lock still prevents two supervisors in the SAME worktree, which is the failure it was built for. The
+# basename is kept readable so an operator can tell which lane owns which lock, and a cksum of the
+# full path disambiguates two lanes whose directories share a basename.
+# Resolved LAZILY and with BUILTINS ONLY, never at source time (#3464 family 2, reintroduced and
+# caught here). The first cut computed the lane discriminator with `tr` and `cksum` on the line
+# below, at SOURCE time — which is exactly the mechanism that broke the placeholder token earlier in
+# this change: several tests SOURCE this file with a deliberately stripped PATH to prove the no-jq /
+# no-python3 paths, and an external tool in a source-time assignment fails there and silently yields
+# an empty value. Two suite cases went red on it immediately. So: empty by default, filled in by
+# `supervisor_lock_path` at acquisition, using only bash substitution and arithmetic.
+SUPERVISOR_LOCK="${SUPERVISOR_LOCK:-}"
 STOP_FILE="${STOP_FILE:-$REPO_ROOT/.worker-stop}"
 MARKER_FILE="${MARKER_FILE:-$REPO_ROOT/.worker-last-iteration.json}"
 LOG_DIR="${LOG_DIR:-$REPO_ROOT/logs/worker-supervisor}"
@@ -220,14 +238,17 @@ LOG_DIR="${LOG_DIR:-$REPO_ROOT/logs/worker-supervisor}"
 # ---------------------------------------------------------------------------
 # Supervisor-authored git-ref claim (issue #2655 / #2499 design).
 #
-# The supervisor — a long-lived, machine-scoped process — stamps a
-# refs/machine-claims/<machine> liveness ref (issue+PID+ts) at every worker spawn and
-# clears it when it exits cleanly, so claim liveness is MECHANISM-driven and no
+# The supervisor — a long-lived, LANE-scoped process — stamps a
+# refs/lane-claims/<machine>/<lane-id> liveness ref (issue+PID+ts) at every worker spawn
+# and clears it when it exits cleanly, so claim liveness is MECHANISM-driven and no
 # longer depends on the worker LLM remembering to `beat`. The PID recorded is
-# the SUPERVISOR's own ($$): it is the stable per-machine anchor that outlives
+# the SUPERVISOR's own ($$): it is the stable per-LANE anchor that outlives
 # each recycled worker, so a same-machine reaper's process-liveness check tracks
-# "is this machine's supervisor still running" rather than a transient worker
-# subprocess. When the supervisor dies, nothing refreshes the ref and it goes
+# "is this lane's supervisor still running" rather than a transient worker
+# subprocess. PER LANE, not per machine, since #3393: a box runs several lanes at once, and
+# a single per-machine ref was force-updated by each of them, so siblings overwrote one
+# another and at most one was observable. `refs/machine-claims/<machine>` is legacy and
+# read-only — still drained, never written. When the supervisor dies, nothing refreshes the ref and it goes
 # stale within the reap threshold.
 #
 # CLAIM_CMD is the claim-heartbeat.sh entrypoint; overridable so the tests can
@@ -258,6 +279,10 @@ CLAIM_ISSUE="${CLAIM_ISSUE:-}"
 # can delete the ref it actually created. "0" is a legitimate value — a stamp with an unknown issue
 # still creates a real ref that must be cleared.
 CLAIM_STAMPED_ISSUE=""
+# The SHA this supervisor last stamped for CLAIM_STAMPED_ISSUE, used as the `reap` LEASE so a delete
+# can never remove a ref another supervisor has since refreshed (roborev round 19, Medium). Empty
+# means "not known" — a lease is then not passed, and that is logged rather than silently skipped.
+CLAIM_STAMPED_SHA=""
 # A per-INVOCATION token for the placeholder lane id (#3393, roborev round 3). `p$$` alone is unique
 # only among CURRENTLY RUNNING processes: after a crash or reboot, pid reuse lets a new supervisor
 # write the SAME placeholder ref as a dead lane's, overwriting it with a fresh timestamp and a live
@@ -292,18 +317,32 @@ CLAIM_LANE_TOKEN=""
 claim_drain_pending_cleanup() {
   [[ -n "$CLAIM_CMD" ]] || return 0
   [[ -n "${CLAIM_PENDING_CLEANUP// /}" ]] || return 0
-  local protect="${1:-}" still="" id
-  for id in $CLAIM_PENDING_CLEANUP; do
+  local protect="${1:-}" still="" entry id lease rc
+  for entry in $CLAIM_PENDING_CLEANUP; do
+    [[ -n "$entry" ]] || continue
+    # `<lane-id>:<sha>`; a bare id (no colon) means no lease is known, which stays supported so an
+    # entry queued by an older process is still drained rather than silently dropped.
+    id="${entry%%:*}"
+    lease="${entry#*:}"
+    [[ "$lease" == "$entry" ]] && lease=""
     [[ -n "$id" ]] || continue
     if [[ -n "$protect" && "$id" == "$protect" ]]; then
       log "pending cleanup of ${id} dropped: it is the lane currently stamped, not a stale ref"
       continue
     fi
-    if HEARTBEAT_MACHINE="$CLAIM_MACHINE" $CLAIM_CMD reap "$CLAIM_MACHINE" "$id" >/dev/null 2>&1; then
-      log "stale lane ref ${id} cleared"
+    rc=0
+    HEARTBEAT_MACHINE="$CLAIM_MACHINE" $CLAIM_CMD reap "$CLAIM_MACHINE" "$id" "$lease" >/dev/null 2>&1 || rc=$?
+    if [[ "$rc" == 0 ]]; then
+      log "stale lane ref ${id} cleared${lease:+ (lease held at ${lease})}"
+    elif [[ "$rc" == 4 ]]; then
+      # LEASE NOT HELD => OWNERSHIP TRANSFERRED, so DROP rather than retry (roborev round 19). The
+      # ref moved after we stamped it, which means another supervisor now owns this lane id. Retrying
+      # could only ever delete THAT supervisor's live claim, and the whole point of the lease is to
+      # refuse. Retaining it would retry forever against a ref that is no longer ours.
+      log "pending cleanup of ${id} dropped: the lease at ${lease:-<none>} is no longer held, so another supervisor owns this lane now"
     else
-      still="${still} ${id}"
-      log "WARN: lane ref ${id} still not cleared (open PR or push error) — retained for retry"
+      still="${still} ${id}:${lease}"
+      log "WARN: lane ref ${id} still not cleared (rc=${rc}: open PR, unreadable message or push error) — retained for retry"
     fi
   done
   CLAIM_PENDING_CLEANUP="$still"
@@ -527,12 +566,19 @@ stamp_claim() {
   # iteration, which is a liveness GAP introduced by the leak fix. So: stamp the new ref, record it,
   # and only then best-effort delete the old one. Both refs existing briefly is harmless — the old
   # one names this same live supervisor pid, so it reads ALIVE — and is strictly better than a gap.
-  local prev_lane_id="$CLAIM_STAMPED_ISSUE"
-  if HEARTBEAT_MACHINE="$CLAIM_MACHINE" $CLAIM_CMD stamp "$lane_id" "$$" >/dev/null 2>&1; then
+  local prev_lane_id="$CLAIM_STAMPED_ISSUE" prev_sha="$CLAIM_STAMPED_SHA" stamp_sha=""
+  # `stamp` prints the sha it wrote on STDOUT (one line, a field). Captured rather than parsed out of
+  # the log note: a sha read from a sentence is #3464 family 5 in the subsystem where a misread
+  # message deletes someone's lease.
+  if stamp_sha="$(HEARTBEAT_MACHINE="$CLAIM_MACHINE" $CLAIM_CMD stamp "$lane_id" "$$" 2>/dev/null)"; then
+    stamp_sha="${stamp_sha%%$'\n'*}"
+    case "$stamp_sha" in *[!0-9a-f]* | '') stamp_sha="" ;; esac
     # What was ACTUALLY stamped, which is not `CLAIM_ISSUE` (#3393). `CLAIM_ISSUE` is the NEXT
     # spawn's issue and is deliberately cleared on `finalized`, so by clean-exit time it is empty
     # and cannot name the ref this supervisor wrote. Recording it here is the only place that knows.
     CLAIM_STAMPED_ISSUE="$lane_id"
+    CLAIM_STAMPED_SHA="$stamp_sha"
+    [[ -n "$stamp_sha" ]] || log "WARN: stamp did not report a sha for lane $lane_id — a later reap of it will run without a lease (it could delete a ref refreshed by another supervisor)"
     # The replacement exists, so the old ref can go. Best-effort by design: a failure here leaves a
     # stale ref that dead-lanes will report and the reaper will collect, which is far better than the
     # gap that deleting first could open.
@@ -542,8 +588,10 @@ stamp_claim() {
     # lane (it names no issue, so an open PR cannot be ruled out), so a transient push failure would
     # leave a permanent stale claim that dead-lanes then reports as a dead lane forever. Carried in a
     # pending list and retried on every later stamp and on clean exit.
+    # QUEUED WITH ITS LEASE, as `<lane-id>:<sha>` (roborev round 19). Without the sha, a retry that
+    # lands after another supervisor has taken over this lane id deletes THAT supervisor's live claim.
     [[ -n "$prev_lane_id" && "$prev_lane_id" != "$lane_id" ]] && \
-      CLAIM_PENDING_CLEANUP="${CLAIM_PENDING_CLEANUP} ${prev_lane_id}"
+      CLAIM_PENDING_CLEANUP="${CLAIM_PENDING_CLEANUP} ${prev_lane_id}:${prev_sha}"
     claim_drain_pending_cleanup "$lane_id"
     log "claim stamped: machine=$CLAIM_MACHINE issue=$lane_id pid=$$"
   else
@@ -595,10 +643,18 @@ clear_claim() {
     log "claim clear skipped: this supervisor never stamped a lane claim, so there is no ref to clear"
     return 0
   fi
-  if HEARTBEAT_MACHINE="$CLAIM_MACHINE" $CLAIM_CMD reap "$CLAIM_MACHINE" "$issue" >/dev/null 2>&1; then
-    log "claim cleared on clean exit: machine=$CLAIM_MACHINE issue=$issue"
+  # UNDER THE LEASE THIS SUPERVISOR STAMPED (roborev round 19). A late exit — the breaker firing while
+  # a successor has already taken this lane id — would otherwise delete the successor's LIVE claim on
+  # its way out, making that lane unobservable. rc=4 means exactly that case and is reported as a
+  # transfer, not a failure.
+  local rc=0
+  HEARTBEAT_MACHINE="$CLAIM_MACHINE" $CLAIM_CMD reap "$CLAIM_MACHINE" "$issue" "$CLAIM_STAMPED_SHA" >/dev/null 2>&1 || rc=$?
+  if [[ "$rc" == 0 ]]; then
+    log "claim cleared on clean exit: machine=$CLAIM_MACHINE issue=$issue${CLAIM_STAMPED_SHA:+ (lease held at $CLAIM_STAMPED_SHA)}"
+  elif [[ "$rc" == 4 ]]; then
+    log "claim clear declined for machine=$CLAIM_MACHINE issue=$issue: the lease at ${CLAIM_STAMPED_SHA:-<none>} is no longer held, so another supervisor owns this lane — its live claim is left alone"
   else
-    log "WARN: claim clear declined/failed for machine=$CLAIM_MACHINE issue=$issue (open PR or push error) — left for adoption (non-fatal)"
+    log "WARN: claim clear declined/failed for machine=$CLAIM_MACHINE issue=$issue (rc=$rc: open PR, unreadable message or push error) — left for adoption (non-fatal)"
   fi
 }
 
@@ -865,9 +921,35 @@ journal_line() {
 
 # ---------------------------------------------------------------------------
 # Single-instance lock. macOS ships no flock(1); an atomic mkdir + pid-liveness
-# check gives the same "only one supervisor per machine" guarantee portably.
+# check gives the same "only one supervisor per LANE" guarantee portably.
+#
+# PER LANE, NOT PER MACHINE (roborev round 19, Medium). The default was machine-global, so a second
+# lane started with the documented default invocation exited during lock acquisition — making the
+# per-lane claim refs this change adds unreachable in production with defaults, while N lanes per box
+# is the standing model (#3393 retracted #1930). That is the retracted invariant surviving in a
+# SECOND mechanism: fixing the ref namespace left the lock still enforcing the assumption the
+# namespace change exists to remove. Scoped by the lane's own checkout root, which is what "one
+# instance" should always have meant — it still refuses two supervisors in the SAME worktree, the
+# failure it was built for.
 # ---------------------------------------------------------------------------
+# supervisor_lock_path: set SUPERVISOR_LOCK if the caller did not. Builtins only — no `tr`, `cksum`,
+# `awk` or `sed` — because this must also work under the stripped PATH the parser tests source with.
+# The basename stays readable so an operator can tell which lane owns which lock; the arithmetic hash
+# of the FULL path disambiguates two lanes whose directories share a basename.
+supervisor_lock_path() {
+  [[ -n "$SUPERVISOR_LOCK" ]] && return 0
+  local slug="${REPO_ROOT##*/}" full="$REPO_ROOT" i h=0 c
+  slug="${slug//[^A-Za-z0-9._-]/_}"
+  [[ -n "$slug" ]] || slug=lane
+  for ((i = 0; i < ${#full}; i++)); do
+    printf -v c '%d' "'${full:i:1}"
+    h=$(((h * 31 + c) & 0x7fffffff))
+  done
+  SUPERVISOR_LOCK="${TMPDIR:-/tmp}/cqlite-worker-supervisor-${slug}-${h}.lock"
+}
+
 acquire_lock() {
+  supervisor_lock_path
   if mkdir "$SUPERVISOR_LOCK" 2>/dev/null; then
     echo $$ >"$SUPERVISOR_LOCK/pid"
     trap 'rm -rf "$SUPERVISOR_LOCK" 2>/dev/null || true' EXIT

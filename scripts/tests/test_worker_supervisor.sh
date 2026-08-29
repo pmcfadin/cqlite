@@ -651,6 +651,11 @@ write_claim_stub() {
   cat >"$path" <<'EOF'
 #!/usr/bin/env bash
 printf '%s\n' "$*" >>"${CLAIM_LOG:?CLAIM_LOG not set}"
+# `stamp` prints the sha it wrote on STDOUT (roborev round 19), which the supervisor captures and
+# passes back as a `reap` LEASE. A stub that printed nothing would exercise the NO-lease path instead,
+# and every lease assertion below would pass vacuously while proving the opposite of the property.
+# Fixed and hex so assertions can name it exactly.
+[ "${1:-}" = stamp ] && printf 'deadbeefdeadbeefdeadbeefdeadbeefdeadbeef\n'
 exit 0
 EOF
   chmod +x "$path"
@@ -2584,7 +2589,9 @@ test_claim_issue_learned_from_marker() {
   local placeholder_id placeholder_reaped
   placeholder_id=$(grep -E '^stamp p[0-9]+-[0-9a-f]+ [0-9]+$' "$CLAIM_LOG" 2>/dev/null | head -1 | awk '{print $2}')
   placeholder_reaped=no
-  [[ -n "$placeholder_id" ]] && grep -qE "^reap testbox ${placeholder_id}\$" "$CLAIM_LOG" 2>/dev/null && placeholder_reaped=yes
+  # WITH THE LEASE the stamp reported (roborev round 19): a reap of a lane ref must never run
+  # unleased, or a retry landing after another supervisor took the lane id deletes ITS live claim.
+  [[ -n "$placeholder_id" ]] && grep -qE "^reap testbox ${placeholder_id} deadbeefdeadbeefdeadbeefdeadbeefdeadbeef\$" "$CLAIM_LOG" 2>/dev/null && placeholder_reaped=yes
   if [[ "$rc" -eq 0 ]] && printf '%s' "$second_stamp" | grep -qE '^stamp 88 [0-9]+$' \
     && [[ "$placeholder_reaped" == "yes" ]]; then
     pass "claim: issue learned from a blocked marker names the next stamp (issue 88), and the p<pid> placeholder ref it replaced was cleared (no leaked ref)"
@@ -2638,9 +2645,9 @@ STUBEOF
     ' _ "$SUPERVISOR" 2>&1
   )"
   if printf '%s' "$out" | grep -q 'claim clear DECLINED: lane p777-dead1 is a placeholder and this exit is not clean' \
-    && ! grep -qE '^reap testbox p777-dead1$' "$CLAIM_LOG" \
-    && grep -qE '^reap testbox p888-dead2$' "$CLAIM_LOG" \
-    && grep -qE '^reap testbox 4242$' "$CLAIM_LOG"; then
+    && ! grep -qE '^reap testbox p777-dead1( |$)' "$CLAIM_LOG" \
+    && grep -qE '^reap testbox p888-dead2( |$)' "$CLAIM_LOG" \
+    && grep -qE '^reap testbox 4242( |$)' "$CLAIM_LOG"; then
     pass "claim: a placeholder lane survives an ABNORMAL exit, is cleared on a CLEAN one, and a numeric lane is cleared either way"
   else
     fail "clear-claim-abnormal: out=[$out] log=[$(tr '\n' ';' <"$CLAIM_LOG")]"
@@ -2691,9 +2698,9 @@ STUBEOF
   # Three things must hold: the current lane is announced as skipped, it is NOT reaped, and the other
   # id IS retried and retained (its reap failed).
   if printf '%s' "$out" | grep -q 'pending cleanup of p123-abc dropped: it is the lane currently stamped' \
-    && ! grep -qE '^reap testbox p123-abc$' "$CLAIM_LOG" \
-    && grep -qE '^reap testbox 88$' "$CLAIM_LOG" \
-    && printf '%s' "$out" | grep -q 'PENDING_AFTER=\[ 88\]'; then
+    && ! grep -qE '^reap testbox p123-abc( |$)' "$CLAIM_LOG" \
+    && grep -qE '^reap testbox 88( |$)' "$CLAIM_LOG" \
+    && printf '%s' "$out" | grep -q 'PENDING_AFTER=\[ 88:\]'; then
     pass "claim: the drain SKIPS the lane currently stamped, retries the other, and retains it on failure"
   else
     fail "claim-drain-current: protection did not hold. out=[$out] log=[$(tr '\n' ';' <"$CLAIM_LOG")]"

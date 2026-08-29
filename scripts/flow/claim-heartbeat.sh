@@ -554,6 +554,15 @@ cmd_stamp() {
   commit_sha="$(push_liveness_ref "$ref" \
     "claim issue=${issue} machine=${machine} pid=${pid} ts=${ts}" "$ts")"
   note "claim stamped: machine=$machine issue=$issue pid=$pid ts=$ts -> $ref ($commit_sha)"
+  # THE SHA IS A FIELD ON STDOUT, NOT A NUMBER INSIDE A SENTENCE (roborev round 19, Medium).
+  # `worker-supervisor.sh` needs the sha it just wrote so it can pass it back as a `reap` LEASE and
+  # never delete a ref another supervisor has since refreshed. The only other ways to obtain it are
+  # to parse the human-readable `note` above — which is #3464 family 5, deciding from a message
+  # rather than a field, in the subsystem where that costs someone their work — or to re-read the ref
+  # with `ls-remote`, which is slower and weaker, since the value is already known here at the moment
+  # of writing. `stamp`'s stdout was empty and nothing parsed it, so this is additive: notes stay on
+  # stderr, and stdout is exactly one line, the sha.
+  printf '%s\n' "$commit_sha"
 }
 
 cmd_list() {
