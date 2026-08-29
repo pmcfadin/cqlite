@@ -578,7 +578,7 @@ are cited instead of line numbers because line numbers drift.
 |---|---|---|---|---|
 | `list<T>` | `list` (`list_to_py`) | `Array` (`list_to_array`) | positional; order preserved on both sides; no dedupe | **symmetric** |
 | `set<scalar>` | `frozenset` (`set_to_py`, non-UDT branch; elements go through `value_to_hashable_key`) | `Set` (`set_to_js_set`, `new Set(array)`) | Python: hash/`__eq__` value-equality. Node: SameValueZero — for scalars this is also value-equality | container type differs; **element identity agrees** for scalars. Iteration order differs: `frozenset` is hash-ordered, JS `Set` is insertion-ordered — canonicalize by sorting |
-| `set<frozen<udt>>` | `list` — **fallback**, because UDTs become `dict`s and `dict` is unhashable (`set_to_py` takes this branch when `contains_udt` is true for any element) | `Set` of objects (`set_to_js_set`; no UDT fallback exists on the Node side) | Python: none — a `list` does not dedupe. Node: SameValueZero on **objects = reference identity**, so structurally-equal UDT elements are *not* deduped either | **asymmetric container**: Python degrades to `list`, Node keeps `Set`. Both are effectively order-preserving and non-deduping, so a set-of-UDT round-trips as a sequence on both sides. **Consequence for canonicalization:** because the Python side is a plain `list`, it cannot be sorted without also reordering genuine `list<T>` values, so this row's canonical form is **order-sensitive** — two structurally-equal UDT sets in different orders compare unequal (see the canonicalization rules below) |
+| `set<frozen<udt>>` | `list` — **fallback**, because UDTs become `dict`s and `dict` is unhashable (`set_to_py` takes this branch when `contains_udt` is true for any element) | `Set` of objects (`set_to_js_set`; no UDT fallback exists on the Node side) | Python: none — a `list` does not dedupe. Node: SameValueZero on **objects = reference identity**, so structurally-equal UDT elements are *not* deduped either | **asymmetric container**: Python degrades to `list`, Node keeps `Set`. Both are effectively order-preserving and non-deduping, so a set-of-UDT round-trips as a sequence on both sides. **Consequence for canonicalization:** because the Python side is a plain `list`, it cannot be sorted without also reordering genuine `list<T>` values, so this row's canonical form is **order-sensitive** — two structurally-equal UDT sets in different orders compare unequal (instance **b-1** in the canonicalization section below) |
 | `map<k,v>` | `dict` (`map_to_py`); keys are the **hashable projection** `value_to_hashable_key` (`list`→`tuple`, `set`→`frozenset`, `map`→tuple of pairs, `udt`→`frozenset` of `(name, value)` pairs incl. `_type`/`_keyspace`, sorted by field name), values are the ordinary `value_to_py` | `Map` (`map_to_js_map`, `new Map(entries)`); **both** key and value use the ordinary `value_to_napi` | Python: keys collapse by hash/`__eq__` — writing an equal key overwrites, last-value-wins. Node: keys collapse by SameValueZero, so scalar keys collapse but **object keys (UDT / list / tuple keys) are compared by reference and never collapse** | **two asymmetries.** (1) *dict-key collapse*: structurally-equal non-scalar keys collapse in Python and survive as distinct entries on Node. (2) *key shape*: a Python map **key** is a hashable projection (a UDT key is a `frozenset` of pairs), while the same UDT as a map **value** is a `dict` — on Node a key and a value of the same CQL type have the same host shape |
 | `tuple<...>` | `tuple` (`tuple_to_py`) | `Array` (`list_to_array` — the `Value::Tuple` arm delegates to the list converter) | positional on both sides | **asymmetric discriminability**: Node **cannot distinguish `tuple<...>` from `list<T>`** — both are plain `Array`s. Python can (`tuple` vs `list`). Any comparison must therefore treat tuple and list as the same canonical shape |
 | `frozen<T>` | unwrapped to the inner type's mapping | unwrapped to the inner type's mapping (`Value::Frozen(inner) => value_to_napi(ctx, inner)`) | as the inner type | **symmetric** — `frozen` is transparent on both sides |
@@ -596,15 +596,16 @@ Notes on identity that the table compresses:
    order. Canonicalization must sort; it must never assert an iteration order.
 3. **`set<frozen<list<T>>>` etc. stay hashable on the Python side** via
    `value_to_hashable_key` (`list`→`tuple`), so such a set is still a `frozenset` — the `list`
-   fallback in `set_to_py` triggers on UDTs only (`contains_udt`).
+   fallback in `set_to_py` triggers on UDTs only (`contains_udt`). Hashable does not mean
+   canonical: a `set<frozen<map<k,v>>>` element is projected to a *tuple of pairs*, a shape
+   Node/the CLI never produce (instance **a-2** below).
 4. **A UDT used as a MAP KEY does not have the UDT value shape on the Python side.** Because
    `map_to_py` routes keys through `value_to_hashable_key`, a `map<frozen<udt>, v>` key is a
    `frozenset` of `(field_name, value)` pairs (including `_type`/`_keyspace`) rather than the
    `dict` the same UDT would be in value position — so it canonicalizes to a sorted array of
-   `[name, value]` pairs, **not** to the `{"_type": …}` object the CLI renders. This is a known,
-   pinned divergence, not a defect to paper over: reconstructing a UDT object from an anonymous
-   `frozenset` of 2-tuples would be a shape guess, and no fixture table currently has a UDT map
-   key. Changing it is a behavior change and out of scope for #1454.
+   `[name, value]` pairs, **not** to the `{"_type": …}` object the CLI renders. This is instance
+   **a-1** in the canonicalization section below; the same projection is why a nested `map` in a
+   set element diverges (**a-2**).
 
 **Empirical confirmation (2026-08-29).** The Python column was not only read from source but
 observed against real Cassandra 5.0 fixtures: `test_collections.collection_table` returns
@@ -615,42 +616,61 @@ observed against real Cassandra 5.0 fixtures: `test_collections.collection_table
 column is source-verified (`value_to_napi` and the three converters named above).
 
 **Canonicalization rules (consumed by #1455).** The 3-way golden parity harness (#1455, Y1)
-takes its canonicalization rules from this table; it does not re-derive them:
+takes its canonicalization rules from this table; it does not re-derive them.
+
+**The general principle — read this before the rules.** Canonicalization is reliable **exactly
+when the Python host shape uniquely determines the CQL type.** Where it does not, no
+host-value-only normalizer can recover the difference, and the rule for that row does not hold.
+There are exactly two ways it fails, and **every known limitation below is an instance of one of
+them**:
+
+- **(a) Lossy projection.** `map_to_py` routes map KEYS, and `set_to_py` routes SET ELEMENTS,
+  through `value_to_hashable_key`, which **discards the CQL type**: `map`→tuple of pairs,
+  `udt`→`frozenset` of pairs, `list`→`tuple`, `set`→`frozenset`. The projected shape is not the
+  shape Node/the CLI produce for that type, so the two sides differ *in kind*, not in ordering.
+- **(b) Host-shape collision.** Two different CQL types arrive as the same Python host type, so
+  the normalizer cannot tell them apart: `set<frozen<udt>>` vs `list<T>` (both `list`); a `map`
+  containing a literal `"_type"` key vs a `udt` (both `dict`); `tuple<...>` vs `list<T>` (both
+  sequences — this one is **benign**, because the canonical form deliberately merges them anyway,
+  Node having already erased the distinction).
+
+Resolving (a) or (b) needs the **declared CQL type** threaded into normalization — i.e.
+schema-aware normalization. That is a behavior change, out of scope for #1454, and tracked as
+**#3497**; all four non-benign instances below belong to it.
+
+**Rules that hold:**
 
 - `list<T>`, `tuple<...>`, `set<*>` → a JSON **array**. Tuple and list canonicalize
   identically (Node cannot tell them apart).
-- `set<scalar>` and `set<frozen<list|set|map>>` → a **sorted** array. Sorting is what makes
-  them order-insensitive, and it is possible only because they arrive as a Python `frozenset`,
-  a shape no `list<T>` can have.
-- **EXCEPTION — `set<frozen<udt>>` is NOT sorted, so its canonical form is order-SENSITIVE.**
-  It arrives as a Python `list` (the `contains_udt` fallback in `set_to_py`), i.e. the *same*
-  host shape as `list<T>`, and the normalizer sees only the host value — sorting it would also
-  reorder every genuine `list<T>`, which it must not do. Consequence, stated plainly: two
-  structurally-equal UDT sets whose elements are in different orders canonicalize to
-  **different** arrays and compare **unequal**. #1455 must handle this row explicitly (compare
-  order-insensitively itself, or declare the row unsupported) — it cannot assume the canonical
-  form has erased set ordering here.
+- `set<scalar>` and `set<frozen<list|set>>` → a **sorted** array, hence order-insensitive.
+  Sorting is available only because these arrive as a Python `frozenset`, a shape no `list<T>`
+  can have. (`set<frozen<map>>` also sorts, but its *elements* do not canonicalize — instance
+  **a-2**.)
 - `map<k,v>` → a **sorted array of `{"key": k, "value": v}` objects**, keyed on the
-  canonicalized key. This is also the CLI's JSON rendering of a map.
+  canonicalized key. This is also the CLI's JSON rendering of a map. Holds for every key type
+  the host shape identifies, i.e. all but instances **a-1** and **b-2**.
 - `udt` → an object keyed by field name, with `_keyspace` dropped (the CLI omits it) and
   `_type` retained.
 
-**Known LIMITATION — a UDT used as a map key is NOT canonicalizable under this contract.**
-This is deliberately *not* a canonicalization rule. A Python `map<frozen<udt>, v>` key arrives
-as the hashable projection `value_to_hashable_key` produces (a `frozenset` of
-`(field_name, value)` pairs, per note 4 above), while Node and the CLI render the same key as a
-UDT **object** — so the two shapes are different in kind and **nothing in the normalizer
-reconciles them**. Reconciling them requires schema-aware normalization (knowing the declared
-key type), which is a behavior change and out of scope for #1454; it is tracked as **#3497**.
-Until then, **#1455 must treat a UDT map key as UNSUPPORTED** and must not assume the projected
-frozenset shape is canonical. The projected shape is pinned by a test only so that the divergence
-is recorded, never as an assertion that it is comparable.
+**The closed list of instances.** Each is pinned by a test in `TestCollectionIdentityContract`
+(`bindings/python/tests/test_cli_parity.py`) that records the divergent shape as a **gap**, never
+as a desirable canonical form. All four are tracked by **#3497**.
+
+| # | Class | Instance | What actually happens | What #1455 must do |
+|---|---|---|---|---|
+| **a-1** | lossy projection | **UDT as a map KEY** (`map<frozen<udt>, v>`) | `value_to_hashable_key` projects the key to a `frozenset` of `(field_name, value)` pairs (incl. `_type`/`_keyspace`), which canonicalizes to a sorted array of `[name, value]` pairs; Node and the CLI render the same key as a UDT **object**. Different in kind — nothing in the normalizer reconciles them. Reconstructing a UDT object from an anonymous `frozenset` of 2-tuples would be a shape guess, and no fixture table currently has a UDT map key. | Treat a UDT map key as **UNSUPPORTED**. Do not assume the projected frozenset shape is canonical. |
+| **a-2** | lossy projection | **`map` inside a `set` element** (`set<frozen<map<k,v>>>`) | The element is projected to a **tuple of pairs**, so it canonicalizes to `[["a", 1]]`, while Node and the CLI render that nested map as `[{"key": "a", "value": 1}]`. The same nested map in *value* position goes through `value_to_py` → `dict` and canonicalizes correctly, so the divergence is specific to hashable-projection positions (set elements and map keys). | Treat a `map` nested in a set element (or map key) as **UNSUPPORTED**. The enclosing set still sorts; the element shape is what diverges. |
+| **b-1** | host-shape collision | **`set<frozen<udt>>` vs `list<T>`** | Both are a plain Python `list` (`set_to_py`'s `contains_udt` fallback), so the set cannot be sorted without also reordering genuine `list<T>` values, whose order is semantically meaningful. Consequence: this row's canonical form is **order-SENSITIVE** — two structurally-equal UDT sets whose elements are in different orders canonicalize to **different** arrays and compare **unequal**. | Handle the row explicitly: compare it order-insensitively itself, or declare it unsupported. Do **not** assume the canonical form has erased set ordering here. |
+| **b-2** | host-shape collision | **`map<text, X>` containing a literal `"_type"` key vs a `udt`** | Both are a Python `dict`, and the normalizer's `if "_type" in value:` branch classifies such a map as a UDT: it returns an **object** instead of the documented key/value array, and **drops a `_keyspace` entry** if the map has one. `"_type"`/`_keyspace` are legal `text` map keys, so this is a real (if unusual) false positive. Requiring `_keyspace` as well would only pick a rarer delimiter on an already-ambiguous channel — a legal map can carry both — so it is documented, not narrowed (see the control/data lesson in `CLAUDE.md`). | Treat a `map<text, X>` whose keys may include `"_type"` as **UNSUPPORTED** until #3497 threads the declared type. |
+
+Benign non-instance, recorded so it is not mistaken for a gap: `tuple<...>` vs `list<T>` collide
+in the host shape on the Node side, but the canonical form merges them **by design**, so nothing
+is lost.
 
 The executable half of this contract is `normalize_python_value` in
 `bindings/python/tests/test_cli_parity.py` (issue #319) — see
-`TestCollectionIdentityContract` there, which asserts the normalized shape of each row above and
-**pins the two limitations** (the order-sensitivity of `set<frozen<udt>>` and the unsupported,
-divergent shape of a UDT map key) so neither can be mistaken for a solved case.
+`TestCollectionIdentityContract` there, which asserts the normalized shape of every row of the
+table above **and** pins all four instances, so none can be mistaken for a solved case.
 
 **Temporal Type Precision Notes (Issue #299)**:
 
