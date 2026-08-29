@@ -51,11 +51,21 @@ if [ ! -r "$GATE" ]; then
   exit 1
 fi
 
-# FAIL CLOSED, never `exit 0`. The component that runs this file sees only an exit code, so a
-# dependency-absent `exit 0` is reported as PASS and the SKIP is invisible in the SUMMARY -- the
-# exact "a guard reported OK having measured nothing" shape this file exists to prevent, and the
-# same rule the sibling tooling-tests selftest states as "never silent PASS". The verdict names
-# what could not be verified rather than claiming the property holds.
+# FAIL CLOSED, never `exit 0` -- but be precise about WHICH path this protects, because an earlier
+# version of this comment claimed a gate-level hole that does not exist.
+#
+#   * Through the FULL gate it protects NOTHING: run_tooling_tests checks python3 itself and returns
+#     `status=SKIP` for the whole component BEFORE invoking this file, and that `tooling-tests: SKIP`
+#     IS visible in the SUMMARY. Repo policy there is deliberate ("no python3 -> SKIP, loud, never a
+#     silent PASS") and covers all 15 tests that component runs, so it is not this file's business.
+#     Deferred, with the SKIP line's missing detail filed separately.
+#   * Through `--delta` it protects a REAL vacuous pass: run_delta_shell_selftests (agent-gate.sh)
+#     executes changed `scripts/tests/*.sh` directly with NO python3 guard of its own and maps the
+#     exit status straight to PASS/FAIL, so an `exit 0` here would have produced
+#     `shell-selftests: PASS` having verified nothing.
+#   * On DIRECT invocation it tells a developer on a python3-less box the truth instead of a pass.
+#
+# So: `exit 1`, and the message names what went unverified rather than claiming the property holds.
 if ! command -v python3 >/dev/null 2>&1; then
   echo "FAIL: python3 unavailable, so the guard extraction below could not run and the ANSI-handling"
   echo "      behaviour of check_no_unexpected_zero_tests is UNVERIFIED (issue #3400). Refusing to"
