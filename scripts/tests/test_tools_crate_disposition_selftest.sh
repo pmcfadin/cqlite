@@ -9,7 +9,7 @@
 # copy of the tree), rewrites the three recorded lists for that tree, and asserts
 # the verdict.
 #
-# THREE GREEN CONTROLS, not one. Without a green control per shape, a guard
+# FIVE GREEN CONTROLS, not one. Without a green control per shape, a guard
 # hardwired to refuse everything — or one that rejects every MIXED crate, or every
 # crate with a real dependent — would satisfy all the red cases and look tested.
 set -uo pipefail
@@ -38,7 +38,12 @@ fail_case() { echo "FAIL: $*" >&2; fails=$((fails + 1)); }
 #                 (crates not named get no README at all)
 #   consumer-of : if non-empty, create a `consumer` workspace member (package
 #                 `scratch-consumer`) that path-depends on tools/<that crate>, so
-#                 `cargo tree --workspace --invert` reports a REAL dependent
+#                 `cargo tree --workspace --invert` reports a REAL dependent.
+#                 Accepts `<crate>` , `<crate>:optional` (dependency behind a
+#                 non-default feature) or `<crate>:target` (dependency inside a
+#                 `[target.'cfg(...)'.dependencies]` table). The latter two are the
+#                 shapes `cargo tree` hides unless queried with `--all-features`
+#                 and `--target all` (roborev job 79).
 #   a literal "-" for any list means "empty list"
 make_ws() {
   local case_name="$1" wired="$2" unwired="$3" mixed="$4" disk="$5" readmes="${6:-}" consumer_of="${7:-}"
@@ -67,10 +72,26 @@ make_ws() {
   } > "$ws/Cargo.toml"
   : > "$ws/src/lib.rs"
   if [ -n "$consumer_of" ]; then
+    local dep_crate="${consumer_of%%:*}" dep_kind="plain"
+    case "$consumer_of" in *:*) dep_kind="${consumer_of##*:}" ;; esac
     mkdir -p "$ws/consumer/src"
     {
       printf '[package]\nname = "scratch-consumer"\nversion = "0.1.0"\nedition = "2021"\npublish = false\n\n'
-      printf '[dependencies.scratch-%s]\npath = "../tools/%s"\n' "$consumer_of" "$consumer_of"
+      case "$dep_kind" in
+        optional)
+          # Behind a NON-DEFAULT feature: invisible to a default-feature resolve.
+          printf '[features]\ndefault = []\nextra = ["scratch-%s"]\n\n' "$dep_crate"
+          printf '[dependencies.scratch-%s]\npath = "../tools/%s"\noptional = true\n' "$dep_crate" "$dep_crate"
+          ;;
+        target)
+          # Target-gated on a cfg that is NOT this host: invisible to a host-only
+          # resolve. windows is chosen because the fleet is linux.
+          printf '[target."cfg(windows)".dependencies.scratch-%s]\npath = "../tools/%s"\n' "$dep_crate" "$dep_crate"
+          ;;
+        *)
+          printf '[dependencies.scratch-%s]\npath = "../tools/%s"\n' "$dep_crate" "$dep_crate"
+          ;;
+      esac
     } > "$ws/consumer/Cargo.toml"
     : > "$ws/consumer/src/lib.rs"
   fi
@@ -205,6 +226,26 @@ expect_red "UNWIRED recorded but a workspace package DOES depend on it" \
   "that is a FALSE census" \
   unwireddep 'wiredone' 'orphanone' '-' 'wiredone orphanone' 'orphanone:labeled' 'orphanone'
 
+# --- roborev job 79: a dependency behind an OPTIONAL FEATURE or a NON-HOST TARGET
+# --- is invisible to a default `cargo tree` resolve, so an UNWIRED record would
+# --- look correct while something really depends on the crate. These two cases
+# --- fail unless the query carries BOTH --all-features and --target all.
+expect_red "UNWIRED but an OPTIONAL-FEATURE dependency exists (roborev job 79)" \
+  "that is a FALSE census" \
+  optdep 'wiredone' 'orphanone' '-' 'wiredone orphanone' 'orphanone:labeled' 'orphanone:optional'
+
+expect_red "UNWIRED but a NON-HOST TARGET dependency exists (roborev job 79)" \
+  "that is a FALSE census" \
+  targetdep 'wiredone' 'orphanone' '-' 'wiredone orphanone' 'orphanone:labeled' 'orphanone:target'
+
+# ...and the same two shapes must SATISFY a MIXED record, so the widened query is
+# shown to find real dependents rather than merely to reject more.
+expect_green "GREEN 4 (MIXED via an OPTIONAL-FEATURE dependent) PASSes" \
+  optmixed 'wiredone' '-' 'mixedone' 'wiredone mixedone' 'mixedone:namesdep' 'mixedone:optional'
+
+expect_green "GREEN 5 (MIXED via a NON-HOST TARGET dependent) PASSes" \
+  targetmixed 'wiredone' '-' 'mixedone' 'wiredone mixedone' 'mixedone:namesdep' 'mixedone:target'
+
 # --- fail-closed on an absent subject
 ws=$(make_ws notools 'wiredone' 'orphanone' '-' 'wiredone orphanone' 'orphanone:labeled')
 rm -rf "$ws/tools"
@@ -223,4 +264,4 @@ if [ "$fails" -ne 0 ]; then
   echo "FAIL: $fails tools/ disposition self-test case(s) failed" >&2
   exit 1
 fi
-echo "PASS: tools/ crate disposition self-test (#1716) — 3 green controls + 13 negative controls"
+echo "PASS: tools/ crate disposition self-test (#1716) — 5 green controls + 15 negative controls"

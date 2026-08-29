@@ -123,6 +123,15 @@ package_name_of() {
 # recorded UNWIRED. Measured: `cargo tree --invert format-validator` reports no
 # dependents; adding `--workspace` reports format-compatibility-tests.
 #
+# `--all-features` and `--target all` are equally REQUIRED, and for the same class
+# of reason (roborev job 79): `cargo tree` otherwise resolves only the DEFAULT
+# feature set and the HOST target, so a workspace package depending on a tool crate
+# behind an OPTIONAL FEATURE, or under a `[target.'cfg(...)'.dependencies]` table,
+# is INVISIBLE — and that crate would then be recorded UNWIRED while something
+# really does depend on it. Every narrowing of this query is a way for the census to
+# be wrong in the permissive direction, so the query is widened to everything cargo
+# can see.
+#
 # Direct dependents suffice: if nothing depends on a crate directly, nothing
 # depends on it transitively either.
 #
@@ -139,7 +148,8 @@ package_name_of() {
 # filtering — whose emptiness is meaningful, not an error — is `|| true`.
 workspace_dependents() {
   local crate="$1" out rc
-  out=$(cd "$ROOT" && cargo tree --workspace --invert "$crate" --depth 1 2>/dev/null)
+  out=$(cd "$ROOT" && cargo tree --workspace --invert "$crate" --depth 1 \
+          --all-features --target all 2>/dev/null)
   rc=$?
   [ "$rc" -eq 0 ] || return 1
   # cargo always echoes the subject itself as the tree root, so empty output here
