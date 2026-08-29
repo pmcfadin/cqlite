@@ -31,6 +31,20 @@
 //! For the file surface that means **parse-and-ignore PLUS a named warning**:
 //! the config still loads, and the user is told exactly which keys are dead.
 //!
+//! # One mechanism, one table per DOCUMENT SCHEMA
+//!
+//! [`Removed`], the filter and the warning text are `cqlite_core`'s
+//! (`cqlite_core::config_removed_keys`), re-exported here, so the CLI's file
+//! surface and the core/bindings deserialization surface cannot drift apart in
+//! wording, matching rule or shape (#1696 roborev F1).
+//!
+//! Only the TABLE is local, and that is a correctness requirement rather than
+//! duplication: this table describes a `cqlite.toml`/`.yaml`/`.json`, core's
+//! describes a `cqlite_core::Config` document. Crossing them would be WRONG —
+//! the CLI's `[performance]` section is LIVE (`query_timeout_ms`,
+//! `memory_limit_mb`, `cache_size_mb`) while core's `performance` tree was
+//! removed, so a shared table would scold a user for a key that works.
+//!
 //! # Why a raw-document scan
 //!
 //! The check runs on the PARSED DOCUMENT (`toml::Value` / `serde_yaml::Value` /
@@ -47,16 +61,10 @@
 //! raw text, and nothing removes the dead keys from it. See
 //! [`super::Config::parse_with_removed_key_report`].
 
-use std::fmt::Write as _;
-
-/// A config-file key removed by an issue, and the issue that removed it.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct Removed {
-    /// Dotted path as it appears in the config file, e.g. `output.pager`.
-    pub path: &'static str,
-    /// Short note shown to the user: what it did, or that it never did anything.
-    pub note: &'static str,
-}
+/// The shared removal record and warning text (`cqlite_core`, #1696 roborev F1):
+/// one definition for the CLI's file surface and the core/bindings
+/// deserialization surface, so neither can drift.
+pub use cqlite_core::config_removed_keys::{deprecation_warning, Removed};
 
 /// Every config-file key the CLI has removed.
 ///
@@ -86,34 +94,9 @@ pub const REMOVED_KEYS: &[Removed] = &[
 /// The document is walked by dotted path, so `output.pager` matches only a `pager`
 /// under `output`, never a top-level `pager` or an unrelated `repl.pager`.
 pub fn removed_keys_present(document: &Document) -> Vec<&'static Removed> {
-    REMOVED_KEYS
-        .iter()
-        .filter(|removed| document.has_path(removed.path))
-        .collect()
-}
-
-/// The operator-facing deprecation warning for a set of still-named removed keys,
-/// or `None` when the document names none.
-///
-/// Returned as a string (rather than printed here) so the caller decides the sink
-/// and a test can assert the exact text.
-pub fn deprecation_warning(source: &str, present: &[&'static Removed]) -> Option<String> {
-    if present.is_empty() {
-        return None;
-    }
-    let mut out = format!(
-        "warning: {source} names {} configuration key{} that CQLite has REMOVED. \
-         They are IGNORED — the file still loads, but these settings have no effect:\n",
-        present.len(),
-        if present.len() == 1 { "" } else { "s" }
-    );
-    for removed in present {
-        // Writing into a String is infallible; `let _` keeps this free of an
-        // `unwrap()` in library code.
-        let _ = writeln!(out, "  - {}: {}", removed.path, removed.note);
-    }
-    out.push_str("Delete them from the file to silence this warning.");
-    Some(out)
+    cqlite_core::config_removed_keys::removed_keys_present(REMOVED_KEYS, |path| {
+        document.has_path(path)
+    })
 }
 
 /// A format-agnostic view of a parsed config document.
@@ -160,16 +143,9 @@ impl Document {
                 }
                 true
             }
-            Self::Json(root) => {
-                let mut cursor = root;
-                for segment in path.split('.') {
-                    match cursor.as_object().and_then(|o| o.get(segment)) {
-                        Some(next) => cursor = next,
-                        None => return false,
-                    }
-                }
-                true
-            }
+            // One definition of the JSON walk, shared with the core/bindings
+            // surface that has no TOML or YAML to walk.
+            Self::Json(root) => cqlite_core::config_removed_keys::json_has_path(root, path),
         }
     }
 }

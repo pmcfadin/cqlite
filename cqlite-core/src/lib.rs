@@ -11,6 +11,8 @@
 #![deny(clippy::large_enum_variant)]
 
 pub mod config;
+/// Deprecation reporting for REMOVED configuration keys (issue #1696).
+pub mod config_removed_keys;
 pub mod cql;
 pub mod error;
 // FFI error contract moved to `cqlite_ffi_common::error_contract` (#1452; no re-export, see CHANGELOG).
