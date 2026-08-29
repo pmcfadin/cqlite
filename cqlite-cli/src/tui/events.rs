@@ -43,18 +43,42 @@ pub(super) async fn tui_iteration<B: Backend, S: TuiEventSource>(
     dirty: &mut bool,
 ) -> Result<bool> {
     // Refresh metrics if stale (every 5 seconds). A refresh that actually fired
-    // changed the status bar, so it needs a repaint; a no-op call does not.
-    app.refresh_metrics().await;
+    // re-collected the status bar's values, so the screen changed; a call that
+    // found the metrics fresh changed nothing and must not force a repaint.
+    if app.refresh_metrics().await {
+        *dirty = true;
+    }
 
-    terminal.draw(|f| ui(f, app))?;
-    *dirty = false;
+    // Issue #1718: draw ONLY on change. The poll cadence below stays at 100ms
+    // (it is the input-latency bound); it is the draw that is now conditional.
+    if *dirty {
+        terminal.draw(|f| ui(f, app))?;
+        *dirty = false;
+    }
 
     if events.poll(POLL_INTERVAL)? {
-        if let Event::Key(key) = events.read()? {
-            // Handle key events
-            if handle_key_event(app, key).await {
-                return Ok(true); // Exit requested
+        match events.read()? {
+            // A key is fed to the handlers, which mutate app state; even a key
+            // no panel handler acts on can change mode/focus state, so treat
+            // every consumed key as dirty rather than second-guessing it.
+            Event::Key(key) => {
+                if handle_key_event(app, key).await {
+                    return Ok(true); // Exit requested
+                }
+                *dirty = true;
             }
+            // The terminal geometry changed: the whole layout must be redrawn.
+            Event::Resize(_, _) => *dirty = true,
+            // Mouse capture is enabled by `start_tui_mode`, but no handler
+            // consumes mouse input, so a mouse event changes no state and must
+            // NOT repaint — dropping these idle redraws is part of this fix.
+            Event::Mouse(_) => {}
+            // Terminal focus changes alter no application state and the UI
+            // renders nothing focus-dependent, so no repaint.
+            Event::FocusGained | Event::FocusLost => {}
+            // Bracketed paste is not enabled and no handler consumes a paste,
+            // so it changes nothing on screen either.
+            Event::Paste(_) => {}
         }
     }
 
