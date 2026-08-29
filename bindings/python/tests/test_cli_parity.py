@@ -1023,8 +1023,42 @@ class TestCollectionIdentityContract:
             [{"_type": "address", "street": "1 Main St"}]
         ]
 
+    def test_udt_field_named_keyspace_is_dropped(self):
+        """LIMITATION b-2, SITE "UDT fields": a field named `_keyspace` is LOST (#3504).
+
+        `_type`/`_keyspace` are control markers the bindings inject into the same
+        namespace that carries user-controlled names — and `_keyspace` is a legal
+        quoted UDT FIELD name. Both bindings inject the markers and *then* set the
+        fields (`udt_to_py`: `set_item("_type")`, `set_item("_keyspace")`, then
+        `set_item(field.name)`; `udt_to_object` does the identical thing), so a
+        field with that name **overwrites the metadata** — symmetrically, in Python
+        and Node. The canonical rule then drops `_keyspace` because the CLI omits it
+        for UDTs, so the FIELD is lost, while the CLI (which injects nothing) keeps
+        it.
+
+        Two properties worth keeping in view. (1) The class is **symmetric**: both
+        bindings make the same mistake, so a Python↔Node comparison cannot reveal
+        it — only a CLI/`sstabledump` comparison can. (2) The fix is NOT to require
+        `_type` and `_keyspace` together, nor to pick a rarer marker: that just
+        chooses a rarer delimiter on a channel the data controls. UDT identity has
+        to be carried out of band (#3504; the canonicalization half is #3497).
+
+        This pins the current, defective behavior as a recorded gap.
+        """
+        # A UDT whose field is genuinely named "_keyspace" — after the binding's
+        # overwrite this is exactly the dict the normalizer receives.
+        udt_with_colliding_field = {"_type": "address", "_keyspace": "user-supplied-value"}
+        assert normalize_python_value(udt_with_colliding_field, is_row_level=False) == {
+            "_type": "address",
+        }, "the `_keyspace` FIELD is dropped by the canonical UDT rule (#3504)"
+
+        # Contrast: an ordinary field survives, so the loss is specific to the marker name.
+        assert normalize_python_value(
+            {"_type": "address", "street": "1 Main St"}, is_row_level=False
+        ) == {"_type": "address", "street": "1 Main St"}
+
     def test_map_with_literal_type_key_is_misclassified_as_a_udt(self):
-        """LIMITATION b-2 (host-shape collision), CELL LEVEL ONLY: a `map<text,X>` holding `"_type"`.
+        """LIMITATION b-2, SITE "cell-level map": a `map<text,X>` holding `"_type"` reads as a UDT.
 
         `"_type"` and `"_keyspace"` are legal `text` map keys, and a CQL `map`
         and a `udt` are both a Python `dict`, so the normalizer's
