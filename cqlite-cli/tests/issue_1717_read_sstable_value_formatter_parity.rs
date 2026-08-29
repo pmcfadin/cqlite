@@ -175,11 +175,16 @@ fn candidate_roots() -> Vec<PathBuf> {
     roots
 }
 
-/// Does any candidate root hold this keyspace directory?
+/// Are this keyspace's SSTable BINARIES present under any candidate root?
+///
+/// Measured by EVIDENCE — the presence of a `*-Data.db` — never by directory
+/// shape (#3220). `is_dir()` would be wrong here: `test-data/datasets/sstables/`
+/// ships git-TRACKED metadata directories (e.g. `test_types/` carries 116 tracked
+/// `.jsonl`/TOC/digest/Statistics files and ZERO committed `*-Data.db`), so a
+/// directory test answers `true` on every checkout from metadata alone and would
+/// turn an optional fixture's legitimate absence into a false failure.
 fn keyspace_present(keyspace: &str) -> bool {
-    candidate_roots()
-        .iter()
-        .any(|root| root.join("sstables").join(keyspace).is_dir() || root.join(keyspace).is_dir())
+    first_data_db(keyspace, None).is_some()
 }
 
 /// Resolve a `*-Data.db` for `<keyspace>/<table>` by walking every candidate
@@ -187,7 +192,14 @@ fn keyspace_present(keyspace: &str) -> bool {
 /// table directory. Returns the lexicographically first match so the choice is
 /// deterministic.
 fn find_table_data_db(keyspace: &str, table: &str) -> Option<PathBuf> {
-    let prefix = format!("{}-", table);
+    first_data_db(keyspace, Some(&format!("{}-", table)))
+}
+
+/// The one directory walk both presence questions are answered from: the first
+/// `*-Data.db` under `<candidate root>[/sstables]/<keyspace>/<table-dir>`, where
+/// `table_prefix` (when given) restricts the UUID-suffixed table directories to
+/// one table. `None` accepts any table, i.e. "does this keyspace have binaries".
+fn first_data_db(keyspace: &str, table_prefix: Option<&str>) -> Option<PathBuf> {
     for root in candidate_roots() {
         for keyspace_dir in [root.join("sstables").join(keyspace), root.join(keyspace)] {
             let Ok(entries) = std::fs::read_dir(&keyspace_dir) else {
@@ -198,9 +210,11 @@ fn find_table_data_db(keyspace: &str, table: &str) -> Option<PathBuf> {
                 .map(|e| e.path())
                 .filter(|p| {
                     p.is_dir()
-                        && p.file_name()
-                            .map(|n| n.to_string_lossy().starts_with(&prefix))
-                            .unwrap_or(false)
+                        && table_prefix.is_none_or(|prefix| {
+                            p.file_name()
+                                .map(|n| n.to_string_lossy().starts_with(prefix))
+                                .unwrap_or(false)
+                        })
                 })
                 .collect();
             table_dirs.sort();
