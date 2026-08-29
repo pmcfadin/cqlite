@@ -411,9 +411,18 @@ pub fn init(cfg: ObservabilityConfig) -> Result<ObservabilityGuard> {
     // the message must not assert that the env var is set. It names the env var
     // as the common spelling — operators grep for it — without claiming
     // provenance.
+    //
+    // The warning carries NO fields, deliberately (roborev r2, blocker). An
+    // earlier version attached `requested_endpoint = %cfg.endpoint`, i.e. a
+    // user-controlled URL rendered verbatim by the fmt layer. That is two defect
+    // classes in one field: an endpoint of the form
+    // `http://user:pass@collector:4317` writes credentials into the log, and an
+    // endpoint containing newlines/control characters can FORGE additional log
+    // lines. Neither is sanitized here — the field is simply gone, which removes
+    // the class instead of filtering it. Nothing diagnostic is lost: this build
+    // never contacts the endpoint, and the message says so.
     if cfg.enabled {
         tracing::warn!(
-            requested_endpoint = %cfg.endpoint,
             "OpenTelemetry export is ENABLED in configuration (CQLITE_OTEL_ENABLED / \
              --otel-enabled / config file) but this binary was built WITHOUT the \
              `observability` cargo feature: OpenTelemetry is compiled out, so NO \
