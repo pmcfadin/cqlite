@@ -85,7 +85,7 @@ back into one.
 - **No-heuristics mandate (#28):** authoritative metadata only — schema, else `Statistics.db`. No type
   guessing; legacy heuristic fallbacks live only behind the opt-in **`legacy-heuristics`** feature flag
   (NOT `experimental`, which gates a different set: `Database::flush()`/`compact()`, the INSERT executor
-  path, the schema JSON exporter, bloom-filter tests, and the `Storage::put`/`delete` stubs).
+  path, bloom-filter tests, and the `Storage::put`/`delete` stubs).
 - **The gate is `scripts/agent-gate.sh` — the only run that counts.** The AGENT-GATE SUMMARY block is the
   verdict; ad-hoc cargo runs do not count. Run `scripts/agent-gate.sh --list` for the component set. **The
   ONE gate of record runs inside `flow-closer`, not in your context (issue #2084):** you never run the full
