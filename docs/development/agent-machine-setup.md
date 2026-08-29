@@ -38,6 +38,15 @@ without it, it prints the exact command for each gap. It verifies, in order:
    host**, and the token value is never written to disk. That check is a *configuration*
    probe (`git credential fill`, which never contacts the network): it proves a helper
    ANSWERS, never that a push would succeed. The push claim belongs to 3b below.
+   The **fallback** repair — the `$GH_TOKEN`-dereferencing helper, used only when
+   `gh auth setup-git` yields no usable credential — is additionally gated on
+   `gh auth status --hostname <push host>` **confirming** that host. The host is read from
+   local git config (`git remote get-url --push`), so a typo, a leftover fork/mirror
+   `pushurl` or a stale `insteadOf` would otherwise configure git to hand a real GitHub
+   token to a host nobody intended, during a preflight the launcher runs automatically.
+   Not confirmed ⇒ the repair is **refused**, one `[warn]` names the host, and `--strict`
+   exits 1. `gh auth setup-git` itself stays unconditional: it makes `gh` the helper, and
+   `gh` decides what it will answer for.
 3b. **git PUSH capability** (#3369) — the section above validates *configuration*
    (`git credential fill` never contacts the network); this one performs **the
    operation**, delegating to `scripts/flow/claim.sh smoke` to create, read back and
@@ -79,6 +88,7 @@ The bootstrap now checks the first two and fails loudly; the third is a hand-typ
 |---|---|---|
 | `fatal: could not read Username for 'https://github.com'` | `gh` is authenticated but **git is not** — they are separate credential paths. `scripts/flow/claim.sh` + `claim-heartbeat.sh` push with plain git on 10+ call sites, so the claim protocol itself does not work. | `gh auth setup-git`, or `bash scripts/bootstrap-agent-machine.sh --yes` (configures an origin-host-scoped helper that dereferences `$GH_TOKEN` at call time). |
 | `git push` fails on a box where `gh auth status` is green **and** `git ls-remote origin HEAD` succeeds | Same shape, one subsystem over: a read is evidence about reachability, not about the write. `claim.sh claim <N>` — the first thing a lane does — is a `git push`, so the box looks healthy and no lane can start (#3369). | `bash scripts/bootstrap-agent-machine.sh --fix-credentials`, then read its `git-push:` line. That check is the direct application of the doctrine sentence below: it PERFORMS the push instead of inferring it. |
+| `git push has NO credentials for <host> and this run REFUSED to configure any` under `--fix-credentials` | The push host was resolved from local git config and `gh auth status --hostname <host>` did not confirm authentication for it, so the run would have configured git to hand `$GH_TOKEN` to that host. Fail-closed by design (#3369). | If the host is right: `gh auth login --hostname <host>`, then re-run. If it is wrong: `git remote set-url --push origin <the intended url>` — check for a leftover fork/mirror `pushurl` or a stale `insteadOf`. |
 | `gh project …` fails for a missing **`read:org`** scope on a token whose scopes DO include `project` | A scope match is evidence about a token, not about the operation. `gh project item-edit` needs `read:org`; the equivalent GraphQL mutation does not. | Widen the token (`gh auth refresh -s read:org`), **or** do board writes through the `updateProjectV2ItemFieldValue` GraphQL mutation — it succeeds with the same token. |
 | `stale info` from a **bare** `git push --force-with-lease`, even when local and remote refs demonstrably match | The bare form leases against a remote-tracking ref your checkout may never have fetched. | Always the explicit CAS form: `git push --force-with-lease=<ref>:<sha>` (what the flow scripts already use). |
 

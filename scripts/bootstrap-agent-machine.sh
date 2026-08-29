@@ -1167,6 +1167,30 @@ git_local_helper_configured() {
   git -C "$REPO_ROOT" config --local --get-regexp '^credential\..*helper$' >/dev/null 2>&1
 }
 
+# gh_auth_confirms_host <host> — 0 iff `gh` AFFIRMS that it is authenticated to THAT
+# EXACT host. Used for ONE purpose (issue #3369 review): to gate the fallback repair
+# below, which installs a helper that hands $GH_TOKEN — a real GitHub credential — to
+# whatever host the repair is scoped to.
+#
+# The host is resolved from LOCAL GIT CONFIG (`git remote get-url --push`), so a typo, a
+# leftover fork/mirror pushurl or a stale `insteadOf` names a host nobody intended — and
+# .agent-ami/profile.yaml runs this script with --fix-credentials at every onboard, so the
+# accident path is automatic. An invoker who controls the box is out of the threat model;
+# a MISCONFIGURED REMOTE is not, and by this repo's triage rule ("can be bypassed BY
+# ACCIDENT ⇒ defect") that makes it in scope.
+#
+# `gh` is the AUTHORITY and is asked directly. Nothing here allowlists hosts or pattern-
+# matches the URL: trust inferred from a string is the guessing shape this whole change
+# exists to remove. And the branch is keyed on the AFFIRMATIVE answer — an absent gh, an
+# unbounded-call failure, a network hiccup and a genuine "not logged in" all land on the
+# same NON-confirming side, because an unmeasured confirmation is not a confirmation.
+gh_auth_confirms_host() {
+  local host="$1"
+  [ -n "$host" ] || return 1
+  have gh || return 1
+  bounded 20 gh auth status --hostname "$host" >/dev/null 2>&1
+}
+
 # git_env_token_helper_active — 0 iff a configured helper (any scope, any host key) is
 # an ENV-DEREFERENCING one. Used to attach the "$GH_TOKEN must be exported" caveat to
 # an otherwise-green verdict. Both markers must appear in the SAME line (--get-regexp
@@ -1282,6 +1306,10 @@ else
     info "git push has NO credentials for $GIT_ORIGIN_HOST yet — an authenticated 'gh' does NOT authenticate git; attempting to configure one"
     cred_fixed=0
     cred_how=""
+    # Set only by the refusal branch below, so the ONE verdict can name what happened
+    # without a second warning. It is a state of the FINAL machine (no credential was
+    # configured, deliberately), which is what this section reports.
+    cred_refused_host=0
     # Preferred form: let gh wire itself in. Verified by RE-PROBING — on the box
     # that motivated #2942 the gh credential path was precisely what was not wired,
     # so "the command exited 0" is not evidence. Every branch below is likewise
@@ -1300,6 +1328,17 @@ else
         # repair counts ONCE rather than twice.
         info "cannot auto-configure: neither GH_TOKEN nor GITHUB_TOKEN is set in this environment"
         info "export GH_TOKEN=<token>, then re-run:  bash scripts/bootstrap-agent-machine.sh --fix-credentials"
+      elif ! gh_auth_confirms_host "$GIT_ORIGIN_HOST"; then
+        # AFFIRMATIVE CONFIRMATION OR NO REPAIR (issue #3369 review). The fallback below
+        # would configure git to hand $GH_TOKEN to $GIT_ORIGIN_HOST, and the push probe in
+        # §3b-push then performs a real push to it — all from a host resolved out of local
+        # git config, which a typo, a leftover fork/mirror pushurl or a stale `insteadOf`
+        # can point anywhere. So the repair is gated on `gh` CONFIRMING authentication for
+        # that exact host, and refuses otherwise. `gh auth setup-git` above stays
+        # unconditional: it makes gh the helper and gh decides what it answers for; the
+        # dangerous path is specifically dereferencing the RAW token for an arbitrary host.
+        cred_refused_host=1
+        info "REFUSING to configure a \$GH_TOKEN-dereferencing helper for $GIT_ORIGIN_HOST: 'gh auth status --hostname $GIT_ORIGIN_HOST' did not confirm authentication for that host"
       else
         # The value written is a shell snippet that DEREFERENCES $GH_TOKEN when git
         # asks — the token itself never lands on disk, so rotating it needs no
@@ -1335,6 +1374,21 @@ else
         info "this helper reads \$GH_TOKEN from the ENVIRONMENT — an unattended worker (systemd/cron)"
         info "started without GH_TOKEN exported will still fail every push; prefer 'gh auth setup-git' there"
       fi
+    elif [ "$cred_refused_host" = 1 ]; then
+      # A DISTINCT verdict, not a second one: exactly one warning is still emitted, and it
+      # reports the final state (no credential configured) together with WHY, because the
+      # remedy differs completely from the generic "could not configure any" case below —
+      # there the operator supplies a credential; here the operator first decides whether
+      # that host should be receiving a GitHub token at all.
+      #
+      # The HOST is named; the push URL deliberately is NOT. A remote URL can embed a
+      # credential (claim.sh classifies push stderr for exactly that reason and never
+      # prints it), so echoing it here would trade one leak for another.
+      warn "git push has NO credentials for $GIT_ORIGIN_HOST and this run REFUSED to configure any: 'gh' does not report authentication for that host, so a token will NOT be configured for it"
+      info "why: the fallback helper hands \$GH_TOKEN — a real GitHub credential — to whichever host it is scoped to, and this host came from LOCAL GIT CONFIG ('git remote get-url --push $PUSH_PROBE_REMOTE'), which a typo, a leftover fork/mirror pushurl or a stale 'insteadOf' can point anywhere"
+      info "fix (host is correct):   gh auth login --hostname $GIT_ORIGIN_HOST    then re-run with --fix-credentials"
+      info "fix (host is WRONG):     git -C $REPO_ROOT remote set-url --push $PUSH_PROBE_REMOTE <the intended url>"
+      info "impact until then: scripts/flow/claim.sh + claim-heartbeat.sh push on 10+ call sites — the claim protocol does not work"
     else
       warn "git push has NO credentials for $GIT_ORIGIN_HOST and this run could NOT configure any — an authenticated 'gh' does NOT authenticate git"
       cred_diag
