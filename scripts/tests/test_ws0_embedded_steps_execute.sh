@@ -129,7 +129,19 @@ command -v python3 >/dev/null 2>&1 || {
 # shellcheck source=scripts/tests/lib-ws0-fixtures.sh
 source "$REPO_ROOT/scripts/tests/lib-ws0-fixtures.sh"
 
-TMP="$(mktemp -d)"
+# A NAMED TEMPLATE, and the result VERIFIED before anything derives a path from it or a trap is
+# installed. This file is `set -uo pipefail` with no `-e`, so an unchecked `mktemp -d` failure
+# would leave `$TMP` EMPTY: every path below becomes an absolute one (`/corpus`, `/session`,
+# `/step-output.txt`), a privileged runner writes persistent artifacts at the filesystem root, and
+# `cleanup` then `rm -rf`s a path built the same way. Non-empty AND an existing directory, checked
+# BEFORE `trap`, is the whole fix.
+TMP="$(mktemp -d "${TMPDIR:-/tmp}/ws0-embedded-steps.XXXXXX")" || TMP=""
+if [ -z "$TMP" ] || [ ! -d "$TMP" ]; then
+  echo "FAIL - could not create a scratch directory under ${TMPDIR:-/tmp}; refusing to run, because"
+  echo "       every path below would otherwise be built from an EMPTY prefix and the cleanup trap"
+  echo "       would rm -rf it."
+  exit 1
+fi
 cleanup() { rm -rf "$TMP"; }
 trap cleanup EXIT
 # Where an executed step's combined output lands. A FILE rather than a command substitution, so
@@ -482,7 +494,10 @@ control_compile() { # control_compile <label> <placeholder> <mapping> <key>
     return
   fi
   out="$(compile_blocks "$dest")"
-  if grep -q 'DOES NOT COMPILE' <<<"$out" && grep -q 'unexpected character after line continuation' <<<"$out"; then
+  # Asserts the FAILURE and its CLASS, never CPython's phrasing: the wording of that diagnostic is
+  # interpreter-specific, so grepping it would red on the 3.9-3.11 this repository pins. Both
+  # tokens are produced by the checker itself (`DOES NOT COMPILE`, and the exception class name).
+  if grep -q 'DOES NOT COMPILE' <<<"$out" && grep -q 'SyntaxError' <<<"$out"; then
     pass "compile CONTROL fired ($label): $(grep 'DOES NOT COMPILE' <<<"$out" | head -1 | cut -c1-120)"
   else
     fail "compile CONTROL did NOT fire ($label): the injected defect must be reported, got: $(findings_of "$out" | head -2)"
@@ -606,6 +621,7 @@ tmp = pathlib.Path(sys.argv[1])
 INJECT
 limit_missed=0
 limit_parses=0
+limit_oracle="$(sed -n 's/.*oracle=\([a-z]*\).*/\1/p' <<<"$(nested_quote_source "$TMP/pep701-multiline.py")" | head -1)"
 for limit_case in pep701-multiline pep701-comment; do
   if python3 -c "import pathlib,sys; compile(pathlib.Path(sys.argv[1]).read_text(), 'x', 'exec')" \
        "$TMP/$limit_case.py" 2>/dev/null; then
@@ -614,10 +630,29 @@ for limit_case in pep701-multiline pep701-comment; do
   [ -z "$(findings_of "$(nested_quote_source "$TMP/$limit_case.py")")" ] \
     && limit_missed=$((limit_missed + 1))
 done
-if [ "$limit_missed" -eq 2 ]; then
-  pass "nested-quote STATED LIMIT (pinned): the 2 OTHER 3.12-only constructs measured here (a multiline f-string expression, a comment inside one) are NOT caught — the claim in this file's header is exactly this narrow, and widening the oracle without widening the claim REDS this case ($limit_parses/2 parse on this interpreter)"
+# WHICH ANSWER IS CORRECT DEPENDS ON THE ORACLE THAT ANSWERED, and the marker reports it — so the
+# expectation is derived from `oracle=` rather than from the interpreter this box happens to have.
+# Under the TOKENIZER oracle (3.12+) both constructs are missed, which is the limit being pinned.
+# Under the COMPILE fallback (< 3.12) they do not parse at all, so that oracle CATCHES them and
+# the limit does not arise. Asserting "missed" unconditionally would have red on 3.11.
+if [ "$limit_oracle" = "tokenizer" ]; then
+  if [ "$limit_missed" -eq 2 ]; then
+    pass "nested-quote STATED LIMIT (pinned, oracle=tokenizer): the 2 OTHER 3.12-only constructs measured here (a multiline f-string expression, a comment inside one) are NOT caught — the claim in this file's header is exactly this narrow, and widening the oracle without widening the claim REDS this case ($limit_parses/2 parse on this interpreter)"
+  else
+    fail "nested-quote STATED LIMIT: under oracle=tokenizer, $limit_missed of 2 known-uncaught constructs were still uncaught. If the oracle was WIDENED, that is good news — update this case AND the claim in the header and the gate comment, which currently say only the nested same-type quote spelling is decided"
+  fi
+elif [ "$limit_oracle" = "compile" ]; then
+  # ONE conjunct, deliberately: under the compile fallback the property is simply that the
+  # constructs are CAUGHT, so the 3.12-only limit does not arise. Whether they also fail to parse
+  # is the same interpreter fact restated through a second probe, and asserting it would be one
+  # more thing to be wrong about on a box this suite cannot reach. `$limit_parses` is reported.
+  if [ "$limit_missed" -eq 0 ]; then
+    pass "nested-quote STATED LIMIT (oracle=compile, pre-3.12): both constructs are CAUGHT by the fallback oracle, so the 3.12-only limit does not arise — the limit is a property of the tokenizer oracle, not a claim about every box ($limit_parses/2 parse here)"
+  else
+    fail "nested-quote STATED LIMIT: under oracle=compile the constructs must be CAUGHT, but $limit_missed of 2 were missed"
+  fi
 else
-  fail "nested-quote STATED LIMIT: $limit_missed of 2 known-uncaught constructs were still uncaught. If the oracle was WIDENED, that is good news — update this case AND the claim in the header and the gate comment, which currently say only the nested same-type quote spelling is decided"
+  fail "nested-quote STATED LIMIT: the marker reported no recognisable oracle ('$limit_oracle'), so this case cannot say which answer is correct — an unanswerable oracle must not read as a clean answer"
 fi
 
 # ============================================================================
@@ -653,17 +688,31 @@ fi
 # `ws0_session.MANIFEST_CONFIG_FIELDS`, so this suite must not carry a guessed list: the key set
 # below is asserted EQUAL to the shipped tuple, and a field added there without a value here is a
 # failure rather than a step refusing at run time for a reason nobody expected.
-declare -A CFG=(
-  [reps]=1 [temps]=warm [arms]=bypass [scan_passes]=1
-  [server_cpus]=2,10 [client_cpus]=4,12 [step_duration]=45s/1s
-  [flight_endpoint]=grpc://127.0.0.1:1
+# An INDEXED array of `name=value`, not `declare -A`: associative arrays are bash 4.0+, and macOS
+# ships /bin/bash 3.2, which this repository treats as a supported target (see
+# `test_agent_gate_tree_portability.sh` and the `BASH_VERSINFO` probe in
+# `test_agent_gate_delta.sh`). This file was the only ws0 suite using one, so it would have failed
+# `tooling-tests` there. ONE source of truth still — the names are derived from the pairs by
+# `cfg_names`, so a value and its key cannot drift apart.
+CFG_PAIRS=(
+  "reps=1" "temps=warm" "arms=bypass" "scan_passes=1"
+  "server_cpus=2,10" "client_cpus=4,12" "step_duration=45s/1s"
+  "flight_endpoint=grpc://127.0.0.1:1"
   # `non-baseline`, and that is the only honest value available here: this is a few-KB synthetic
   # corpus, and the shipped `require_canonical_or_declared` REFUSES a divergent corpus in
   # `baseline` mode — correctly. Declaring the mode is the supported way past it, not a way round
   # it: the step still runs the real comparison and records every divergence it finds.
-  [baseline_mode]=non-baseline
+  "baseline_mode=non-baseline"
 )
-cfg_keys="$(printf '%s\n' "${!CFG[@]}" | sort | tr '\n' ' ')"
+cfg_names() { local pair; for pair in "${CFG_PAIRS[@]}"; do printf '%s\n' "${pair%%=*}"; done; }
+cfg_value() {
+  local pair
+  for pair in "${CFG_PAIRS[@]}"; do
+    [ "${pair%%=*}" = "$1" ] && { printf '%s' "${pair#*=}"; return 0; }
+  done
+  return 1
+}
+cfg_keys="$(cfg_names | sort | tr '\n' ' ')"
 shipped_keys="$(python3 - "$PERF_DIR" <<'PY'
 import sys
 sys.path.insert(0, sys.argv[1])
@@ -770,7 +819,7 @@ run_pin_step() {
   # after the assignments is taken as a command to execute (measured: `env: -u: No such file or
   # directory`, rc 127) — a control that dies before reaching its subject.
   local -a unset_args=() env_args=()
-  for field in "${!CFG[@]}"; do
+  for field in $(cfg_names); do
     if [ "$field" = "$omit" ]; then
       # UNSET, not merely "not passed" (#3451 review round 1, finding 3). `env` INHERITS the
       # caller environment, so omitting the assignment leaves a value the operator happened to
@@ -780,12 +829,16 @@ run_pin_step() {
       unset_args+=("-u" "WS0_CFG_$(echo "$field" | tr '[:lower:]' '[:upper:]')")
       continue
     fi
-    env_args+=("WS0_CFG_$(echo "$field" | tr '[:lower:]' '[:upper:]')=${CFG[$field]}")
+    env_args+=("WS0_CFG_$(echo "$field" | tr '[:lower:]' '[:upper:]')=$(cfg_value "$field")")
   done
   idx="$(find_block "$drv" 'write_session_corpus_pin')"
   [[ "$idx" =~ ^[0-9]+$ ]] || { run_pin_rc=90; echo "block not located: $idx" > "$STEP_OUT"; return; }
   body="$(emit_block "$drv" "$idx")"
-  env "${unset_args[@]}" "${env_args[@]}" python3 -c "$body" "$PERF_DIR" "$CORPUS" "$out" \
+  # `${arr[@]+"${arr[@]}"}` — an EMPTY array expands to NOTHING under `set -u` instead of
+  # aborting the shell, which is the repo-wide idiom (`test_fetch_datasets_tracked_guard.sh`).
+  # `unset_args` is empty on every call that omits nothing.
+  env ${unset_args[@]+"${unset_args[@]}"} "${env_args[@]}" \
+    python3 -c "$body" "$PERF_DIR" "$CORPUS" "$out" \
     "$REPO_ROOT" > "$STEP_OUT" 2>&1
   run_pin_rc=$?
 }
@@ -914,7 +967,8 @@ run_cpu_step() { # run_cpu_step <driver> <out-dir>
   idx="$(find_block "$drv" 'pinning_record_path')"
   [[ "$idx" =~ ^[0-9]+$ ]] || { run_cpu_rc=90; echo "block not located: $idx" > "$STEP_OUT"; return; }
   body="$(emit_block "$drv" "$idx")"
-  env WS0_PIN_SERVER_CPUS="${CFG[server_cpus]}" WS0_PIN_CLIENT_CPUS="${CFG[client_cpus]}" \
+  env WS0_PIN_SERVER_CPUS="$(cfg_value server_cpus)" \
+      WS0_PIN_CLIENT_CPUS="$(cfg_value client_cpus)" \
       WS0_PIN_SIBLINGS="server cpu 2 siblings 2,10; server cpu 10 siblings 2,10" \
       WS0_PIN_TOPOLOGY_ROOT="$TMP/fake-topology" \
       python3 -c "$body" "$PERF_DIR" "$out" > "$STEP_OUT" 2>&1
@@ -940,7 +994,7 @@ if grep -q 'pinning pin:' <<<"$cpu_out"; then
 else
   fail "EXECUTE cpu-pin-verification: the step did not print 'pinning pin:' (output: $(head -3 <<<"$cpu_out"))"
 fi
-if python3 - "$PERF_DIR" "$OUT" "${CFG[server_cpus]}" "${CFG[client_cpus]}" <<'PY'
+if python3 - "$PERF_DIR" "$OUT" "$(cfg_value server_cpus)" "$(cfg_value client_cpus)" <<'PY'
 import pathlib, sys
 sys.path.insert(0, sys.argv[1])
 from ws0_pinning import PINNING_RECORD_FIELDS, verify_pinning_record
