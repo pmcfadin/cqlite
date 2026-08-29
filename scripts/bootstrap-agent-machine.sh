@@ -1188,7 +1188,12 @@ elif [ "$GIT_ORIGIN_KIND" = ssh ]; then
 elif [ "$GIT_ORIGIN_KIND" = other ]; then
   info "origin is a '$GIT_ORIGIN_KIND' remote (neither http(s) nor SSH) — no credential helper applies"
 elif git_cred_probe "$GIT_ORIGIN_HOST"; then
-  ok "git push credentials resolve for $GIT_ORIGIN_HOST (a helper answers with a non-empty secret)"
+  # Says ONLY what `git credential fill` proved: a configured helper answered. It does
+  # NOT say a push would succeed — the previous wording ("git push credentials resolve
+  # for <host>") claimed push resolution on the strength of a configuration probe that
+  # never contacts the network, which is the #3369 overclaim in one sentence. The push
+  # claim belongs to the push probe below, and only to it.
+  ok "a git credential helper ANSWERS for $GIT_ORIGIN_HOST with a non-empty secret (configuration only — push capability is measured in the next section)"
   if git_local_helper_configured && ! git_global_helper_configured; then
     info "note: the helper is configured at REPO-LOCAL scope only — a fresh clone or a"
     info "      new checkout on this box will NOT inherit it. Re-run with --yes to add a global one."
@@ -1296,6 +1301,23 @@ fi
 # Hang safety: the whole probe runs under `bounded`, with GIT_TERMINAL_PROMPT=0 and a
 # deliberately nonexistent askpass, so neither a credential prompt nor a wedged remote
 # can stall a boot.
+#
+# THE COST, STATED OUT LOUD, because it is paid on EVERY invocation of this script —
+# a developer laptop run included, not just an image launch. Measuring the operation
+# means performing it:
+#   - two network round trips beyond the reachability read (the create push and the
+#     cleanup delete), plus one `ls-remote`;
+#   - a TRANSIENT `refs/claims/smoke-<nonce>` ref CREATED AND DELETED on the SHARED
+#     origin. claim.sh's cmd_smoke describes itself as a "ONE-TIME preflight ... NOT
+#     part of the hermetic test suite" because it mutates the real remote; invoking it
+#     here makes that mutation routine, which is accepted deliberately: making the
+#     measurement opt-in would restore "a read by default", the exact defect #3369
+#     exists to remove.
+# RESIDUAL: cmd_smoke only WARNS if its cleanup delete fails, so an interrupted or
+# partially-failing run can strand a `refs/claims/smoke-*` ref on the origin. Not fixed
+# here (cmd_smoke's hot path is out of scope for #3369). List and clean them with:
+#   git ls-remote origin 'refs/claims/smoke-*'
+#   git push origin --delete refs/claims/smoke-<nonce>
 PUSH_PROBE_REMOTE="${CLAIM_REMOTE:-origin}"   # the remote claim.sh itself will use
 CLAIM_SH="$REPO_ROOT/scripts/flow/claim.sh"
 PUSH_PROBE_BOUND=60   # 3 network round trips (push, ls-remote, delete) + slack

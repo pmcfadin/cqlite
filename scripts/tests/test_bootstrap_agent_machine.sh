@@ -1100,6 +1100,53 @@ else
   [ -s "$trip7pf" ] && cat "$trip7pf"
 fi
 
+# 7p-g. `--strict` AND "All checks green." MUST NOT DIVERGE — asserted in BOTH
+#   directions. They are two channels for ONE fact: the green string is printed iff
+#   WARNINGS is 0, and --strict exits 0 iff WARNINGS is 0. A reviewer proposed keying
+#   --strict on a narrower "blocking faults only" counter; that would have made a box
+#   with an ADVISORY warning exit 0 from --strict while the unchanged `expect` string
+#   still failed the same run — two channels disagreeing, which is worse than either
+#   alone. This case exists so the next person to have that idea trips a test.
+#
+#   The advisory run below is what gives the case teeth: a machine whose push probe
+#   VERIFIES but which carries an unrelated advisory warning (no Data.db fixtures).
+#   Under a blocking-only --strict it would exit 0 while withholding green.
+repo7pg="$tmp/repo7pg"; mk_push_repo "$repo7pg" "file://$bare7pa"
+rm -f "$repo7pg/test-data/datasets/sstables/ks/tbl/nb-1-big-Data.db"   # one ADVISORY warn
+bin7pg="$tmp/bin7pg"; mk_push_bin "$bin7pg"
+gc7pg="$tmp/gc7pg"; : >"$gc7pg"
+run_push "$repo7pg" "$bin7pg" "$gc7pg" --strict; out7pg=$push_out; rc7pg=$push_rc
+if printf '%s' "$out7pg" | grep -q '\[ok\].*git-push: VERIFIED' \
+   && printf '%s' "$out7pg" | grep -q 'no \*-Data.db files found' \
+   && ! push_green "$out7pg" && [ "$rc7pg" -ne 0 ]; then
+  ok "push: an ADVISORY warning withholds green AND fails --strict, even with push VERIFIED (--strict is not blocking-only)"
+else
+  bad "push: advisory-warning run diverged (rc=$rc7pg, green=$(push_green "$out7pg" && echo yes || echo no))"
+  push_verdict "$out7pg"
+fi
+
+divergence=0; green_runs=0; nongreen_runs=0
+check_divergence() {   # <label> <output> <rc-of-a---strict-run>
+  if push_green "$2"; then
+    green_runs=$((green_runs + 1))
+    [ "$3" -eq 0 ] || { divergence=1; echo "   divergence: $1 printed 'All checks green.' but --strict exited $3"; }
+  else
+    nongreen_runs=$((nongreen_runs + 1))
+    [ "$3" -ne 0 ] || { divergence=1; echo "   divergence: $1 withheld 'All checks green.' but --strict exited 0"; }
+  fi
+}
+check_divergence 7p-a "$out7pa" "$rc7pa"    # verified, clean   -> expect green + 0
+check_divergence 7p-d "$out7pd" "$rc7pd"    # opt-out           -> expect no green + nonzero
+check_divergence 7p-b "$out7pb" "$rc7pb"    # push FAILED       -> expect no green + nonzero
+check_divergence 7p-g "$out7pg" "$rc7pg"    # advisory warning  -> expect no green + nonzero
+if [ "$divergence" -eq 0 ] && [ "$green_runs" -ge 1 ] && [ "$nongreen_runs" -ge 1 ]; then
+  ok "push: --strict's exit code and 'All checks green.' agree in BOTH directions ($green_runs green, $nongreen_runs non-green runs)"
+elif [ "$divergence" -ne 0 ]; then
+  bad "push: --strict and the 'All checks green.' string DIVERGED (see the divergence lines above)"
+else
+  echo "skip - push: divergence check needs both directions (green=$green_runs nongreen=$nongreen_runs on this host)"
+fi
+
 # 7p-h. FLAG HYGIENE. --skip-push-probe and --skip-smoke are different subjects (the
 #   git push probe vs the gate fmt run) and the name similarity is a live hazard, so
 #   both must be documented and each must skip only its own thing. 7p-a ran with
