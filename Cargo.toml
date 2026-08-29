@@ -18,6 +18,48 @@ members = [
 exclude = [
     "fuzz",
 ]
+
+# default-members (issue #1716, epic #1688 finding AK5) — what a BARE `cargo
+# build` / `cargo test` at the workspace root compiles.
+#
+# `members` above globs `tools/*`, and with no `default-members` every bare build
+# compiled all seven tools/ crates. Three of them are invoked by no CI workflow,
+# no script and no doc (census in #1716): `tools/cqlite-validator`,
+# `tools/memory-safety-runner`, and the four BINARIES of
+# `tools/format-validator`. They are manual dev tools — see each crate's README.
+#
+# They stay workspace MEMBERS on purpose; `exclude`-ing them would break three
+# live things:
+#   * `tests/format-compatibility` (package `format-compatibility-tests`, the
+#     full gate's `format-compat` component) path-depends on format-validator's
+#     LIB and uses `format_validator::{format_constants, utils}`. That lib is
+#     wired, so it still builds here as that package's dependency — only its
+#     four unwired bins leave the default set.
+#   * `scripts/tests/test_agent_gate_summary.sh` uses
+#     `tools/format-validator/src/lib.rs` as the fixture for the gate's
+#     path -> package "owners" resolution, which reads `cargo metadata`.
+#   * `xtask/src/oom_audit/scope.rs` asserts on a format-validator path.
+#
+# Nothing is lint-exempted by this: the gate lints with
+# `cargo clippy --workspace --all-targets --all-features`, and `--workspace`
+# overrides default-members, so all three crates stay under `-D warnings`.
+# Build them explicitly with `cargo build -p <name>` (or `--workspace`).
+default-members = [
+    ".",
+    "cqlite-core",
+    "cqlite-cli",
+    "cqlite-flight",
+    "bindings/python",
+    "bindings/node",
+    "tests",
+    "tests/format-compatibility",
+    "examples",
+    "tools/cassandra-parity",
+    "tools/flight-loadgen",
+    "tools/sstabledump-validator",
+    "tools/ws0-corpus-gen",
+    "xtask",
+]
 resolver = "2"
 
 [package]
