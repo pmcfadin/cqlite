@@ -385,8 +385,11 @@ pub fn init(cfg: ObservabilityConfig) -> Result<ObservabilityGuard> {
         cfg.verify_presence_oracle,
     );
 
-    // Issue #1702. Emitted with `tracing::warn!`, not `log::warn!` as the issue
-    // text spells it: `cqlite-core` has no `log` dependency at all — its facade
+    // Issue #1702. Emitted with `tracing::warn!`, not the `log` crate's `warn!`
+    // as the issue text spells it (that literal spelling is deliberately avoided
+    // here: the `logging_facade_tracing` guard scans this directory textually and
+    // is not comment-aware, so writing it out trips the residual-macro check):
+    // `cqlite-core` has no `log` dependency at all — its facade
     // is `tracing` (the #1706 log->tracing migration) — and `tracing` satisfies
     // the same constraint, since every host composes the fmt layer onto STDERR
     // so stdout stays clean for `--out json/csv` (issue #129).
