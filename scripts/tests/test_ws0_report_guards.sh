@@ -1463,9 +1463,12 @@ verdict = {
     "load1_after": 0.19,
     "load1_movement": 0.08,
     "load1_after_is_bounded": False,
+    # EXACT, not approximate: the evidence checker asserts this BY DERIVATION (job 80 F2), so a
+    # paraphrase is refused. The self-validation below caught this the moment the derivation check
+    # landed and named the field -- which is what it is for.
     "load1_after_note": ("RECORDED, NOT BOUNDED: load1 is a 1-minute decaying average, so a"
                          " sample taken immediately after a CPU-bound window reads the window's"
-                         " own residue."),
+                         " own residue. The binding in-window check is the timeseries census."),
     "thresholds": {"max_load1": 2.0, "max_load1_movement": 0.5},
     "before": {"competing": [], "competing_count": 0,
                "load": {"load1": 0.11, "load5": 0.20, "load15": 0.30, "runnable": "1/700"}},

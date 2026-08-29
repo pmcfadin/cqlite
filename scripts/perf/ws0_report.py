@@ -808,7 +808,29 @@ def build_report(args: argparse.Namespace) -> tuple[dict, list[str]]:
         f" {pinning_verification['server_siblings_expanded'].split('(')[-1].rstrip(')')} verified"
         f" on {pinning_verification['host']} pre-measurement, recorded in"
         f" {pathlib.Path(pinning_verification['source']).name}), client {client_cpus}",
-        f"counters     : perf stat -C {server_cpus}  [CPU-WIDE; no -p anywhere]",
+        f"counters     : perf stat -C {server_cpus}  [CPU-WIDE; no -p anywhere]"
+        f"   events: {','.join(events)}",
+        # EVERY FIELD THAT CHANGES HOW A NUMBER SHOULD BE READ, IN THE PRINTED REPORT (#3248,
+        # roborev job 80 finding 3). These four were added to results.json and NEVER to the human
+        # summary, so a PROFILED run -- which pays 1.6-4.3% measured observer overhead and is
+        # therefore NOT a baseline -- printed IDENTICALLY to an unprofiled one, and a session whose
+        # quiescence was `NOT VERIFIED` printed identically to a certified one. A reader of the
+        # printed report could not tell them apart, which makes the machine-readable field a
+        # record nobody consults.
+        #
+        # `profile` and `quiescence` carry an explicit warning rather than a bare value: the value
+        # alone requires the reader to know what `on freq=499` implies about the throughput
+        # figures above it.
+        f"binaries     : {bin_dir}"
+        + ("   [SYMBOL-BEARING BUILD]" if "perfsym" in str(bin_dir)
+           or "perfprof" in str(bin_dir) else ""),
+        f"profile      : {profile}"
+        + ("   !! PROFILED — observer overhead is INSIDE the throughput figures above;"
+           " these are NOT baseline numbers" if profile != "off" else "   (no sampling profiler"
+           " attached; throughput is a baseline)"),
+        f"quiescence   : {quiescence}"
+        + ("" if quiescence.startswith("judged against")
+           else "   !! this session was NOT checked for competing load — UNVERIFIED, not quiet"),
         # WHICH SERVER SERVED THE ROWS THOSE COUNTERS DESCRIBE (#3272 round 14, F2). Printed
         # directly under the `counters` line deliberately: the pairing of the two is the property —
         # `perf -C` measures the pinned cores, and this states that the rows divided by those cycles

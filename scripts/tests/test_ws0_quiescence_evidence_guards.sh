@@ -34,8 +34,14 @@ import sys
 sys.path.insert(0, sys.argv[1])
 import ws0_quiescence as w
 import ws0_quiescence_evidence as e
+# ALL THREE bounds, because job 80 F1 was a bound that existed in the writer and not here.
 pairs = [("MAX_LOAD1", w.DEFAULT_MAX_LOAD1, e.CANONICAL_MAX_LOAD1),
-         ("MAX_LOAD1_MOVEMENT", w.DEFAULT_MAX_LOAD1_MOVEMENT, e.CANONICAL_MAX_LOAD1_MOVEMENT)]
+         ("MAX_LOAD1_MOVEMENT", w.DEFAULT_MAX_LOAD1_MOVEMENT, e.CANONICAL_MAX_LOAD1_MOVEMENT),
+         ("MAX_SAMPLE_GAP_S", w.MAX_SAMPLE_GAP_S, e.CANONICAL_COVERAGE_GAP_BOUND_S)]
+# ...and the table must not have grown a bound the drift check does not cover.
+if len(e.CANONICAL_BOUNDS) != len(pairs):
+    sys.exit(f"DRIFT: CANONICAL_BOUNDS has {len(e.CANONICAL_BOUNDS)} entries but this check "
+             f"covers {len(pairs)}. A bound with no drift check is the job-80 F1 defect again.")
 bad = [f"{n}: writer={a!r} evidence={b!r}" for n, a, b in pairs if a != b]
 if bad:
     sys.exit("DRIFT: " + "; ".join(bad))
@@ -118,10 +124,10 @@ CASES = [
      lambda v: v["window_census"].__setitem__("narrow_census_records", 999)),
     ("a gap wider than the verdict's OWN bound is refused", "exceeds",
      lambda v: v["window_census"].__setitem__("coverage_largest_gap_s", 999.0)),
-    ("census_breadth claiming FULL while narrow>0 is refused", "claims",
+    ("census_breadth claiming FULL while narrow>0 is refused", "NOT what narrow_census_records",
      lambda v: (v["window_census"].__setitem__("narrow_census_records", 3),
                 v["window_census"].__setitem__("census_breadth", "FULL (all records)"))),
-    ("census_breadth claiming NARROW while narrow==0 is refused", "overstates",
+    ("census_breadth claiming NARROW while narrow==0 is refused", "NOT what narrow_census_records",
      lambda v: (v["window_census"].__setitem__("narrow_census_records", 0),
                 v["window_census"].__setitem__("census_breadth", "NARROW on 2 of 5"))),
     ("load1_mean outside its own min/max is refused", "impossible",
@@ -134,6 +140,27 @@ CASES = [
      lambda v: (v.__setitem__("load1_before", 99.0),
                 v["before"]["load"].__setitem__("load1", 99.0),
                 v.__setitem__("load1_movement", abs(v["load1_after"] - 99.0)))),
+    # --- job 80: the FAMILY sweep, not the three reported instances ---
+    ("coverage_gap_bound_s LOOSER than canonical is refused (the third bound, missed in job 78)",
+     "LOOSER than the canonical",
+     lambda v: (v["window_census"].__setitem__("coverage_gap_bound_s", 9999.0),
+                v["window_census"].__setitem__("coverage_largest_gap_s", 9998.0))),
+    ("census_breadth as ARBITRARY text beside a nonzero narrow count is refused",
+     "NOT what narrow_census_records",
+     lambda v: (v["window_census"].__setitem__("narrow_census_records", 2),
+                v["window_census"].__setitem__("census_breadth", "everything is fine"))),
+    ("census_breadth with the WRONG sample count in its own text is refused",
+     "NOT what narrow_census_records",
+     lambda v: (v["window_census"].__setitem__("narrow_census_records", 2),
+                v["window_census"].__setitem__(
+                    "census_breadth",
+                    "NARROW on 2 of 999 record(s): those carry rustc/cargo/gate only, so a"
+                    " short-lived cc1/ld/lld/mold between boundaries would not appear. Stated"
+                    " rather than implied."))),
+    ("load1_after_note disagreeing with load1_after_is_bounded is refused (swept, not reported)",
+     "NOT what load1_after_is_bounded",
+     lambda v: v.__setitem__("load1_after_note", "bounded: the caller asserted this sample was"
+                                                " taken after settling")),
     ("a non-dict verdict is refused", "not a JSON object", lambda v: None),
 ]
 for label, expect, mut in CASES:
@@ -159,7 +186,7 @@ while IFS='|' read -r verdict label; do
   esac
 done < <(run_matrix)
 
-MIN_CHECKS=22
+MIN_CHECKS=26
 if [ "$checks" -lt "$MIN_CHECKS" ]; then
   echo
   echo "FAIL - only $checks check(s) ran; this suite has at least $MIN_CHECKS."

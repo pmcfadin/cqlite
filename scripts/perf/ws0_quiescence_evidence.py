@@ -47,8 +47,53 @@ _EPS = 1e-6
 # self-consistent in every other respect while describing a bar nobody would accept (job 78 F2).
 # Duplicated rather than imported to keep this module dependency-free; the values are asserted
 # against the writer's by scripts/tests/test_ws0_quiescence_evidence_guards.sh.
-CANONICAL_MAX_LOAD1 = 2.0
-CANONICAL_MAX_LOAD1_MOVEMENT = 0.5
+# EVERY SELF-DECLARED BOUND, NOT THE TWO I HAPPENED TO FIX (roborev job 80 finding 1). Job 78 F2
+# said "a self-declared bound is not conformance-checked". I fixed `thresholds.max_load1` and
+# `thresholds.max_load1_movement` and MISSED `coverage_gap_bound_s`, which is the same kind of
+# field: a limit the verdict declares and then judges its own observations against. Raising BOTH
+# the bound and the observed gap certified an effectively unobserved window.
+#
+# The family is now ENUMERATED rather than patched instance-by-instance. The verdict declares
+# exactly three numeric bounds, and all three appear here; `load1_after_is_bounded` is a boolean
+# mode flag, not a bound. Adding a fourth bound to `judge()` trips the undeclared-field check,
+# which is what forces it into this table.
+CANONICAL_BOUNDS = {
+    "thresholds.max_load1": 2.0,                    # ws0_quiescence.DEFAULT_MAX_LOAD1
+    "thresholds.max_load1_movement": 0.5,           # ws0_quiescence.DEFAULT_MAX_LOAD1_MOVEMENT
+    "window_census.coverage_gap_bound_s": 30.0,     # ws0_quiescence.MAX_SAMPLE_GAP_S
+}
+# Kept as names for readability at the use sites below.
+CANONICAL_MAX_LOAD1 = CANONICAL_BOUNDS["thresholds.max_load1"]
+CANONICAL_MAX_LOAD1_MOVEMENT = CANONICAL_BOUNDS["thresholds.max_load1_movement"]
+CANONICAL_COVERAGE_GAP_BOUND_S = CANONICAL_BOUNDS["window_census.coverage_gap_bound_s"]
+
+
+def _expected_census_breadth(narrow: int, samples: int) -> str:
+    """Recompose `census_breadth` exactly as ws0_quiescence.judge() does.
+
+    ASSERTED BY DERIVATION, NOT BY INSPECTION (roborev job 80 finding 2). Job 78 F3 said "a derived
+    field must be asserted against its inputs, not passed through", and I implemented that as
+    `startswith("FULL")` -- which is the same weakness one level down. Sniffing a prefix is not
+    asserting a derivation: for a narrow census, ANY other nonempty text passed, so a misleading
+    caveat could be published verbatim beside a nonzero `narrow_census_records`.
+    """
+    if narrow == 0:
+        return "FULL (competing_count present on every in-window record)"
+    return (f"NARROW on {narrow} of {samples} record(s): those carry"
+            " rustc/cargo/gate only, so a short-lived cc1/ld/lld/mold between boundaries"
+            " would not appear. Stated rather than implied.")
+
+
+def _expected_load1_after_note(is_bounded: bool) -> str:
+    """Recompose `load1_after_note` exactly as ws0_quiescence.judge() does. Same family as above:
+    a descriptive string composed from another field, so it is checked by regeneration. This one
+    was NOT reported by review -- it is the second member of the family, swept rather than waited
+    for."""
+    if is_bounded:
+        return "bounded: the caller asserted this sample was taken after settling"
+    return ("RECORDED, NOT BOUNDED: load1 is a 1-minute decaying average, so a sample taken"
+            " immediately after a CPU-bound window reads the window's own residue. The"
+            " binding in-window check is the timeseries census.")
 
 
 class EvidenceError(Exception):
@@ -233,18 +278,23 @@ def assert_self_consistent(verdict: Any, where: str) -> None:
     # Job 75 F3: the published caveat string must AGREE with the count it describes, or the
     # report prints `FULL` over a narrow census.
     narrow = present["window_census.narrow_census_records"]
-    breadth = present["window_census.census_breadth"]
-    claims_full = breadth.startswith("FULL")
-    if claims_full and narrow != 0:
+    samples = present["window_census.samples"]
+    expected_breadth = _expected_census_breadth(narrow, samples)
+    if present["window_census.census_breadth"] != expected_breadth:
         raise EvidenceError(
-            f"{where} `census_breadth` claims {breadth!r} while"
-            f" `narrow_census_records` is {narrow}. The caveat the report PUBLISHES would"
-            " understate the evidence; a caveat that disagrees with its own count is refused."
+            f"{where} `census_breadth` is {present['window_census.census_breadth']!r}, which is"
+            f" NOT what narrow_census_records={narrow} over samples={samples} composes to."
+            f" Expected {expected_breadth!r}. The caveat the report PUBLISHES must be DERIVED from"
+            " the counts, not merely consistent with a prefix of them -- otherwise arbitrary text"
+            " rides into the published result beside a nonzero narrow count."
         )
-    if not claims_full and narrow == 0:
+    expected_note = _expected_load1_after_note(present["load1_after_is_bounded"])
+    if present["load1_after_note"] != expected_note:
         raise EvidenceError(
-            f"{where} `census_breadth` is {breadth!r} but `narrow_census_records` is 0."
-            " The caveat overstates the limitation; the two must agree."
+            f"{where} `load1_after_note` is {present['load1_after_note']!r}, which is NOT what"
+            f" load1_after_is_bounded={present['load1_after_is_bounded']} composes to. Expected"
+            f" {expected_note!r}. The note states WHETHER the after boundary was bounded, so a"
+            " note disagreeing with the flag misreports the guard that was actually applied."
         )
     gap = present["window_census.coverage_largest_gap_s"]
     bound = present["window_census.coverage_gap_bound_s"]
@@ -270,15 +320,14 @@ def assert_self_consistent(verdict: Any, where: str) -> None:
         )
 
     # ---- the load thresholds, with the writer's OWN asymmetry ----
-    for name, canonical in (("max_load1", CANONICAL_MAX_LOAD1),
-                            ("max_load1_movement", CANONICAL_MAX_LOAD1_MOVEMENT)):
-        recorded = present[f"thresholds.{name}"]
+    for path, canonical in CANONICAL_BOUNDS.items():
+        recorded = present[path]
         if recorded > canonical:
             raise EvidenceError(
-                f"{where} records `thresholds.{name}` of {recorded}, LOOSER than the canonical"
-                f" {canonical}. The knob may only tighten -- ws0_quiescence refuses a loosened"
-                " one at the CLI, and a verdict carrying one describes a bar this report will not"
-                " certify, however self-consistent the rest of it is."
+                f"{where} records `{path}` of {recorded}, LOOSER than the canonical {canonical}."
+                " A bound may only TIGHTEN -- ws0_quiescence enforces each of these, and a verdict"
+                " carrying a loosened one describes a bar this report will not certify, however"
+                " self-consistent the rest of it is."
             )
     max_l1 = present["thresholds.max_load1"]
     l1_before, l1_after = present["load1_before"], present["load1_after"]
