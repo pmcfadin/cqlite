@@ -20,9 +20,12 @@
 #
 # REF LAYOUT
 #   refs/heartbeats/<machine>
-#     ONE ref per machine (one worker per machine, issue #1930), force-updated
-#     on every `beat` — never a history of commits, just the latest liveness
-#     proof. The commit is a root commit (no parent) pointing at the empty
+#     ONE ref per machine — and that is still correct, but NOT for the reason this
+#     line used to give. It cited #1930's "one worker per machine", which #3393
+#     RETRACTED; a heartbeat is a per-MACHINE liveness proof by its own nature, and
+#     stays one-per-machine however many lanes the box runs. (The per-LANE refs are
+#     `refs/lane-claims/<machine>/<lane-id>` below.) Force-updated on every `beat` —
+#     never a history of commits, just the latest liveness proof. The commit is a root commit (no parent) pointing at the empty
 #     tree; its ONLY payload is the commit message:
 #       "heartbeat issue=<N> machine=<machine> ts=<ISO8601 UTC>"
 #     The commit's author/committer date is also set to `ts` (informational —
@@ -86,9 +89,12 @@
 #   claim-heartbeat.sh list               # one line per machine: machine/issue/ts/age
 #   claim-heartbeat.sh clear <machine>    # delete a machine's heartbeat ref (reap)
 #
-#   claim-heartbeat.sh stamp <issue> [pid]  # push/refresh THIS machine's claim ref
+#   claim-heartbeat.sh stamp <lane-id> [pid] # push/refresh THIS LANE's claim ref
+#                                            # (<lane-id> = an issue number, or p<pid>-<token>
+#                                            #  while the issue is not yet known)
 #                                            # (supervisor-authored; pid default $$)
-#   claim-heartbeat.sh list-claims          # one line per machine: machine/issue/pid/ts/age
+#   claim-heartbeat.sh list-claims          # one line per LANE: machine/lane-id/pid/ts/age
+#                                            # (several lines per machine — N lanes per box)
 #   claim-heartbeat.sh should-reap <machine> [threshold_secs]           # LEGACY per-machine ref
 #   claim-heartbeat.sh should-reap <machine> <issue> <threshold_secs>   # a LANE (all three required)
 #                                            # exit 0 iff the claim ref is stale
@@ -589,9 +595,9 @@ cmd_beat() {
   local machine ts commit_sha
   machine="${HEARTBEAT_MACHINE:-$(hostname -s)}"
   ts="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-  # Force-update: ONE ref per machine (issue #1930 — one worker per machine),
-  # so every beat replaces the previous liveness proof rather than growing a
-  # history.
+  # Force-update: ONE ref per machine, so every beat replaces the previous liveness proof rather
+  # than growing a history. NOT justified by #1930's "one worker per machine" (retracted by #3393) —
+  # a heartbeat is per-MACHINE by nature and is unaffected by how many lanes the box runs.
   commit_sha="$(push_liveness_ref "refs/heartbeats/${machine}" \
     "heartbeat issue=${issue} machine=${machine} ts=${ts}" "$ts")"
   note "heartbeat pushed: machine=$machine issue=$issue ts=$ts -> refs/heartbeats/$machine ($commit_sha)"

@@ -1241,6 +1241,37 @@ if printf '%s\n' "$help_text" | grep -q 'refs/lane-claims/<machine>/<lane-id>' \
 else
   bad "--help must document refs/lane-claims/<machine>/<lane-id> and mark the per-machine namespace legacy"
 fi
+# ...and the help must not describe the PER-LANE world in PER-MACHINE terms (round 30, Low). Three
+# separate spots in this help block have drifted across the change now — the ref layout (round 18), the
+# should-reap forms (round 26), and `stamp`/`list-claims` here — so the phrases are pinned rather than
+# re-read by eye each round. Brittle by construction, and accepted: doctrine treats this help as the
+# authoritative contract precisely because it cannot drift from the code, which is only true if
+# something checks.
+if printf '%s\n' "$help_text" | grep -q 'stamp <lane-id>' \
+  && printf '%s\n' "$help_text" | grep -qi 'list-claims .*one line per LANE'; then
+  ok "--help describes stamp as taking a <lane-id> and list-claims as one line per LANE"
+else
+  bad "--help still describes the per-lane world in per-machine terms: $(printf '%s\n' "$help_text" | grep -E 'stamp <|list-claims ' | head -3)"
+fi
+# ...and no line may cite #1930's retracted "one worker per machine" as a LIVE justification. The two
+# surviving citations are both explicitly marked as retracted, so the guard requires the retraction
+# marker on the same line rather than banning the phrase (which would forbid recording the history).
+retracted_live=""
+while IFS= read -r line; do
+  case "$line" in
+    *"one worker per machine"*)
+      case "$line" in
+        *RETRACT*|*retract*|*"used to give"*) : ;;
+        *) retracted_live="${retracted_live}|${line}" ;;
+      esac
+      ;;
+  esac
+done < <(printf '%s\n' "$help_text")
+if [ -z "$retracted_live" ]; then
+  ok "no help line cites #1930's retracted one-worker-per-machine as a live justification"
+else
+  bad "the help still asserts the retracted invariant: ${retracted_live}"
+fi
 # ...and the ONE-LINE subcommand summary must name BOTH should-reap forms (round 21, Medium). It
 # advertised `should-reap <machine> [issue] [secs]` while a two-argument call is ALWAYS the legacy
 # threshold form, so an operator following it got a verdict about the legacy ref with the issue number
