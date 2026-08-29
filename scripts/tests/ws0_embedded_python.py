@@ -62,6 +62,13 @@ spelled:
 
 Anything else — `-c` with a shape that cannot be delimited, `-m`, a bare `-`, a variable where the
 code should be — is UNKNOWN, which is a finding.
+
+## The direction it errs in, stated
+
+Over-inclusion, deliberately. A `python3 -c '…'` written INSIDE a shell string (an `echo` of an
+example, say) is censused as a block and compiled, which costs a spurious finding at worst. The
+opposite posture — skipping anything that might not be real code — is how a step reaches an
+operator having been parsed by nothing, and it is the state this file was written to end.
 """
 
 from __future__ import annotations

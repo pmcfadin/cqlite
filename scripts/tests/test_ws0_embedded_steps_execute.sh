@@ -247,6 +247,37 @@ else
   fail "census CONTROL did not fire: the block locator must report ABSENT when its subject is not in the driver"
 fi
 
+# --- POSITIVE CONTROL 1d: a FUTURE step written as a heredoc is censused and compiled ----------
+# The driver carries no python heredoc today. The census handles the shape anyway, and an
+# unexercised branch in a fail-closed extractor is exactly the code that is discovered to be broken
+# by the first person who needs it — which is the complaint #3451 records. So the shape is
+# exercised against a scratch copy: the block must be COUNTED, and a defect inside it must be
+# REPORTED, or a step added that way would fall outside the compile check entirely.
+HEREDOC_DRIVER="$TMP/heredoc-step-ws0-driver.sh"
+python3 - "$DRIVER" "$HEREDOC_DRIVER" <<'INJECT'
+import pathlib, sys
+# A minimal future step in the heredoc shape, carrying the same defect class the two `-c` steps
+# shipped: a subscript inside an f-string expression, built from character codes so that no
+# committed file holds a literal example of the spelling.
+backslash, dquote = chr(92), chr(34)
+bad = "{d[" + backslash + dquote + "k" + backslash + dquote + "]}"
+tag = "PY" + "STEP"
+step = ("python3 - \"$OUT_DIR\" <<'" + tag + "'\n"
+        "d = {'k': 1}\n"
+        "print(f'" + bad + "')\n"
+        + tag + "\n")
+pathlib.Path(sys.argv[2]).write_text(pathlib.Path(sys.argv[1]).read_text() + step)
+INJECT
+hd_census="$(census "$HEREDOC_DRIVER")"
+hd_compile="$(compile_blocks "$HEREDOC_DRIVER")"
+hd_blocks="$(grep -c '^BLOCK	' <<<"$hd_census")"
+if [ "$hd_blocks" -eq "$((block_count + 1))" ] && grep -q 'heredoc' <<<"$hd_census" \
+   && grep -q 'DOES NOT COMPILE' <<<"$hd_compile"; then
+  pass "census CONTROL fired (heredoc shape): a step written as a python heredoc is COUNTED ($hd_blocks blocks) and a defect inside it is REPORTED — a future step in that shape cannot fall outside the compile check"
+else
+  fail "census CONTROL did not fire (heredoc shape): blocks=$hd_blocks (expected $((block_count + 1))), compile said: $(findings_of "$hd_compile" | head -2)"
+fi
+
 # ============================================================================
 # PART 2 — THE TOTAL PROPERTY: EVERY EMBEDDED BLOCK COMPILES
 # ============================================================================
