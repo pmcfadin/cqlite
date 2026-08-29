@@ -975,11 +975,16 @@ repo7pb2="$tmp/repo7pb2"; mk_push_repo "$repo7pb2" "file://$bare7pb2"
 bin7pb2="$tmp/bin7pb2"; mk_push_bin "$bin7pb2"
 gc7pb2="$tmp/gc7pb2"; : >"$gc7pb2"
 run_push "$repo7pb2" "$bin7pb2" "$gc7pb2"; out7pb2=$push_out; rc7pb2=$push_rc
-if printf '%s' "$out7pb2" | grep -q '\[warn\].*git-push: FAILED.*ref namespace' \
+# The catch-all QUOTES claim.sh's verdict rather than re-wording it (#3369 review): a
+# re-worded catch-all mis-attributed every unrecognised reason code and discarded detail
+# claim.sh had just been fixed to report. So the assertion is that the ORIGINAL verdict
+# line survives into bootstrap's output, and that bootstrap adds no cause of its own.
+if printf '%s' "$out7pb2" | grep -q '\[warn\].*git-push: FAILED' \
+   && push_plain "$out7pb2" | grep -q '^ *CLAIM: SMOKE-FAIL.*reason=push-rejected' \
    && ! printf '%s' "$out7pb2" | grep -q 'git-push: FAILED.*AUTHENTICATE'; then
-  ok "push: a non-credential rejection is reported as a namespace refusal, not as an auth fault"
+  ok "push: an unrecognised SMOKE-FAIL is QUOTED verbatim (reason survives; no auth mis-attribution)"
 else
-  bad "push: namespace rejection misclassified"
+  bad "push: catch-all re-classified instead of quoting"
   push_verdict "$out7pb2"
 fi
 if [ "$rc7pb2" -eq 0 ] && ! push_green "$out7pb2"; then
@@ -1133,7 +1138,7 @@ else
   echo "skip - push: AC1+AC3 exit-0 assertion needs an otherwise-clean sandbox (baseline=$base_warns warnings)"
 fi
 
-# 7p-k. DELETE REJECTION (#3369 blocker 2). `cmd_smoke` used to emit SMOKE-OK — text and
+# 7p-k. AN UNSUCCESSFUL CLEANUP DELETE (#3369 blocker 2). `cmd_smoke` used to emit SMOKE-OK — text and
 #   all: "(create + ls-remote + delete verified)" — after only a stderr `note` when the
 #   cleanup delete failed. Bootstrap then reported VERIFIED and passed --strict on a
 #   machine that had just stranded a ref on the shared origin: a verdict claiming more
@@ -1148,30 +1153,33 @@ repo7pk="$tmp/repo7pk"; mk_push_repo "$repo7pk" "file://$bare7pk"
 bin7pk="$tmp/bin7pk"; mk_push_bin "$bin7pk"
 gc7pk="$tmp/gc7pk"; : >"$gc7pk"
 run_push "$repo7pk" "$bin7pk" "$gc7pk" --strict; out7pk=$push_out; rc7pk=$push_rc
-if printf '%s' "$out7pk" | grep -q '\[warn\].*git-push: FAILED.*REFUSED the delete' \
+if printf '%s' "$out7pk" | grep -q '\[warn\].*git-push: FAILED' \
+   && push_plain "$out7pk" | grep -q 'reason=cleanup-unverified' \
    && ! printf '%s' "$out7pk" | grep -q 'git-push: VERIFIED' \
    && ! push_green "$out7pk" && [ "$rc7pk" -ne 0 ]; then
-  ok "push: a remote that accepts create but REFUSES delete is FAILED, never VERIFIED (green withheld, --strict exits $rc7pk)"
+  ok "push: an unsuccessful cleanup delete is FAILED, never VERIFIED (green withheld, --strict exits $rc7pk)"
 else
-  bad "push: delete rejection was reported as success (rc=$rc7pk)"
+  bad "push: delete failure was reported as success (rc=$rc7pk)"
   push_verdict "$out7pk"
 fi
-if printf '%s' "$out7pk" | grep -q "git ls-remote .* 'refs/claims/smoke-\*'"; then
-  ok "push: the delete-rejected verdict tells the operator how to list the ref it stranded"
+if push_plain "$out7pk" | grep -q "git ls-remote .* refs/claims/smoke-"; then
+  ok "push: the quoted verdict reaches the operator with the ls-remote check for the possibly-stranded ref"
 else
-  bad "push: delete-rejected verdict gave no stray-ref cleanup guidance"
+  bad "push: cleanup-unverified verdict lost its stray-ref guidance in transit"
+  push_plain "$out7pk" | grep -E 'CLAIM:|git-push' | head -3
 fi
-# The advice must be ACTIONABLE for THIS fault: a successful create already proved
-# authentication, so recommending 'gh auth setup-git' / --fix-credentials would send the
-# operator to fix something that is not broken (#3369 review). It must name the
-# ref-deletion policy instead.
+# NO CAUSE MAY BE ATTRIBUTED (#3369 review). One nonzero exit cannot tell a deletion
+# policy from a network drop from a post-readback auth failure, so neither claim.sh nor
+# bootstrap may name one — and in particular bootstrap must not fall back to credential
+# advice, which was the wrong-remedy defect one round earlier.
 if ! printf '%s' "$out7pk" | grep -q 'gh auth setup-git' \
    && ! printf '%s' "$out7pk" | grep -q -- '--fix-credentials' \
-   && printf '%s' "$out7pk" | grep -q 'ref-deletion policy, NOT a credential fault'; then
-  ok "push: delete rejection advises the ref-deletion policy, NOT credentials (the create already authenticated)"
+   && ! printf '%s' "$out7pk" | grep -qi 'ref-deletion policy' \
+   && push_plain "$out7pk" | grep -q 'no cause is attributed'; then
+  ok "push: a failed cleanup attributes NO cause and gives no credential advice — it reports the observation"
 else
-  bad "push: delete rejection gave credential advice that cannot fix a deletion policy"
-  push_plain "$out7pk" | grep -E 'cause|fix|setup-git' | head -4
+  bad "push: an unsupportable cause (or credential advice) was attached to a failed cleanup"
+  push_plain "$out7pk" | grep -E 'CLAIM:|cause|setup-git' | head -4
 fi
 # The verdict must come from claim.sh's ANCHORED verdict line AND its exit status, not
 # from a substring anywhere in the captured stream. A claim.sh that prints the token in

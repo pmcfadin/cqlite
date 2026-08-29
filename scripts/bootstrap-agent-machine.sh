@@ -1447,28 +1447,27 @@ else
     elif printf '%s\n' "$push_probe_out" | grep -q '^CLAIM: SMOKE-FAIL.*reason=auth'; then
       warn "git-push: FAILED (git cannot AUTHENTICATE the refs/claims/* push to '$PUSH_PROBE_REMOTE' — an authenticated 'gh' does NOT authenticate git)"
       push_probe_fix_advice
-    elif printf '%s\n' "$push_probe_out" | grep -q '^CLAIM: SMOKE-FAIL.*reason=delete-rejected'; then
-      # Create+read-back worked and the DELETE was refused. A namespace that cannot be
-      # deleted from is unusable for claims (`release` deletes refs/claims/issue-<N>), and
-      # this run has stranded a ref — so it is FAILED, never VERIFIED.
-      warn "git-push: FAILED ('$PUSH_PROBE_REMOTE' accepted the refs/claims/* create but REFUSED the delete — unusable for the claim protocol, and a smoke ref is now STRANDED)"
-      # NOT push_probe_fix_advice (#3369 review): that advises 'gh auth setup-git' /
-      # --fix-credentials, and a SUCCESSFUL CREATE already proves authentication worked.
-      # No credential change can move a server-side ref-deletion policy, so the generic
-      # remediation would send the operator to fix something that is not broken — the
-      # same class of defect as a health signal pointing the wrong way, which is the
-      # whole subject of this issue. Two lines, inline, naming the actual remedy.
-      info "cause:  the create AUTHENTICATED fine — this is $PUSH_PROBE_REMOTE's ref-deletion policy, NOT a credential fault"
-      info "fix:    permit deletion of refs/claims/* on $PUSH_PROBE_REMOTE — 'claim.sh release' deletes refs/claims/issue-<N>, so the claim protocol cannot run there until it is allowed"
-      info "list strays:  git ls-remote $PUSH_PROBE_REMOTE 'refs/claims/smoke-*'"
-      info "delete one:   git push $PUSH_PROBE_REMOTE --delete refs/claims/smoke-<nonce>   (always safe — it is not a claim lock)"
     elif printf '%s\n' "$push_probe_out" | grep -q '^CLAIM: SMOKE-FAIL.*reason=commit-build'; then
       # A LOCAL failure building the throwaway claim commit: the push never happened,
       # so nothing was learned about push capability.
       warn "git-push: UNMEASURED (the throwaway claim commit could not be built locally — the push was never attempted)"
     elif printf '%s\n' "$push_probe_out" | grep -q '^CLAIM: SMOKE-FAIL'; then
-      warn "git-push: FAILED ('$PUSH_PROBE_REMOTE' rejected the refs/claims/* push — does the remote permit that ref namespace?)"
-      push_probe_fix_advice
+      # THE CATCH-ALL QUOTES; IT DOES NOT RE-CLASSIFY (#3369 review). It used to re-word
+      # every unrecognised reason code as "rejected the push — does the remote permit that
+      # ref namespace?", which mis-attributed `ls-remote-mismatch` AND discarded the
+      # cleanup detail claim.sh had just been fixed to report: a diagnostic improved in
+      # one file, thrown away by its consumer one file over. Quoting claim.sh's own
+      # verdict line means no reason code — present or FUTURE — can lose detail or be
+      # given a cause bootstrap cannot know, and it is why the specific branches whose
+      # only job was re-wording are gone. Dedicated branches survive ONLY where bootstrap
+      # says something claim.sh cannot: `reason=auth` (the #2942 credential remediation)
+      # and `reason=commit-build` (a LOCAL failure, so UNMEASURED rather than FAILED).
+      # No credential advice here: the cause is unknown, and guessing it wrong is what
+      # sent an operator after `gh auth setup-git` for a fault credentials cannot fix.
+      warn "git-push: FAILED — the claim protocol cannot run on this machine until this is resolved. claim.sh reports:"
+      printf '%s\n' "$push_probe_out" | grep '^CLAIM: SMOKE-FAIL' | while IFS= read -r push_probe_line; do
+        info "$push_probe_line"
+      done
     elif [ "$push_probe_rc" = 124 ] || [ "$push_probe_rc" = 137 ]; then
       warn "git-push: UNMEASURED (the probe exceeded its ${PUSH_PROBE_BOUND}s bound and was killed — push capability is UNKNOWN, not ok)"
     else

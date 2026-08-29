@@ -665,7 +665,7 @@ else
 $outSmokeAuth"
 fi
 
-# (g) smoke on a remote that ACCEPTS the create and REFUSES the delete (#3369). It used
+# (g) smoke on a remote that ACCEPTS the create and refuses the delete (#3369). It used
 # to emit SMOKE-OK — whose own text says "delete verified" — after a stderr-only warning,
 # so a caller could not tell a clean cycle from a stranded ref. Delete capability is
 # REQUIRED: `release` deletes refs/claims/issue-<N>, so such a namespace is unusable.
@@ -682,12 +682,18 @@ HOOK
 chmod +x "$DELORIGIN/hooks/pre-receive"
 rc=0; outSmokeDel=$( cd "$A" && CLAIM_MACHINE=machineA CLAIM_REMOTE="$DELORIGIN" bash "$CLAIM" smoke 2>/dev/null ) || rc=$?
 strayDel=$(gg -C "$A" ls-remote "$DELORIGIN" 'refs/claims/smoke-*' | wc -l | tr -d ' ')
+# The reason code states the OBSERVATION (a nonzero cleanup exit) and attributes NO
+# cause: one exit status cannot distinguish this remote's deletion policy from a network
+# drop or a post-readback auth failure, and naming one would be the affirmative-
+# measurement violation this whole change exists to remove (#3369 review).
 if [ "$rc" -ne 0 ] && printf '%s\n' "$outSmokeDel" | grep -q 'SMOKE-FAIL' \
-   && printf '%s\n' "$outSmokeDel" | grep -q 'reason=delete-rejected' \
+   && printf '%s\n' "$outSmokeDel" | grep -q 'reason=cleanup-unverified' \
+   && printf '%s\n' "$outSmokeDel" | grep -q 'no cause is attributed' \
+   && printf '%s\n' "$outSmokeDel" | grep -q 'UNPROVEN' \
    && ! printf '%s\n' "$outSmokeDel" | grep -q 'SMOKE-OK'; then
-  ok "(g) smoke on a delete-refusing remote → SMOKE-FAIL reason=delete-rejected, never SMOKE-OK (stray refs on that remote: $strayDel)"
+  ok "(g) smoke whose cleanup delete fails → SMOKE-FAIL reason=cleanup-unverified, no cause attributed, never SMOKE-OK (refs left on that remote: $strayDel)"
 else
-  bad "(g) expected SMOKE-FAIL reason=delete-rejected; got rc=$rc
+  bad "(g) expected SMOKE-FAIL reason=cleanup-unverified attributing no cause; got rc=$rc
 $outSmokeDel"
 fi
 # Positive control: the SAME probe against the ordinary origin still succeeds, so (g) is

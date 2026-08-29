@@ -1109,9 +1109,11 @@ cmd_status() {
 # `refs/claims/smoke-<nonce>` ref). Some managed Git hosts restrict custom ref
 # namespaces; if this fails, the whole claim mechanism is unusable on that remote
 # and MUST be caught before the fleet relies on it. ALL THREE steps are part of the
-# verdict (#3369): a remote that accepts the create and refuses the DELETE is equally
-# unusable, because `release` deletes refs/claims/issue-<N> — that is
-# `reason=delete-rejected`, never a SMOKE-OK with a stderr warning. NOT part of the hermetic test
+# verdict (#3369): a cleanup delete that does not succeed leaves delete capability
+# UNPROVEN, and `release` deletes refs/claims/issue-<N> — that is
+# `reason=cleanup-unverified`, never a SMOKE-OK with a stderr warning. The reason code
+# names the OBSERVATION (a nonzero exit); it attributes no cause, because one exit status
+# cannot tell a deletion policy from a network drop. NOT part of the hermetic test
 # suite — it mutates the REAL origin. (Verified on github.com/pmcfadin/cqlite
 # 2026-07-17: refs/claims/* is pushable.)
 cmd_smoke() {
@@ -1160,10 +1162,19 @@ cmd_smoke() {
   fi
   if [ "$delete_ok" = 0 ]; then
     # DELETE CAPABILITY IS REQUIRED BY THE CLAIM PROTOCOL, not a tidiness nicety:
-    # `claim.sh release` deletes refs/claims/issue-<N>, and the reaper depends on it. A
-    # namespace that accepts a create and refuses a delete is BROKEN for claims, so this
-    # is a FAIL, not a warning — and it names the ref it stranded.
-    emit "SMOKE-FAIL remote=$REMOTE ref=$ref reason=delete-rejected (create + ls-remote worked, but $REMOTE REFUSED the delete — 'claim.sh release' deletes refs/claims/issue-<N>, so this namespace is unusable for claims; the throwaway ref is STRANDED: remove it with 'git push $REMOTE --delete $ref')"
+    # `claim.sh release` deletes refs/claims/issue-<N>, and the reaper depends on it. So a
+    # cleanup delete that did not succeed is a FAIL, never a SMOKE-OK with a stderr note.
+    #
+    # BUT THE REASON CODE STATES THE OBSERVATION, NOT A CAUSE (#3369 review). The first
+    # cut called this `delete-rejected` and blamed the remote's ref-deletion policy — a
+    # definite causal verdict inferred from ONE bit (a nonzero exit), which a transient
+    # network drop or a post-readback auth failure produces identically. That is the
+    # affirmative-measurement violation this whole change exists to remove, committed by
+    # the change itself. Distinguishing the causes would mean re-deriving them from git's
+    # stderr text, which is the same guessing shape one level down. So: what is KNOWN is
+    # that the delete exited nonzero, and therefore that delete capability is UNPROVEN
+    # and the ref's existence UNKNOWN. Nothing else is claimed.
+    emit "SMOKE-FAIL remote=$REMOTE ref=$ref reason=cleanup-unverified (the cleanup delete exited NONZERO — no cause is attributed. Whether $ref still exists on $REMOTE is UNKNOWN: check with 'git ls-remote $REMOTE $ref' and remove it with 'git push $REMOTE --delete $ref' if present. Delete capability is therefore UNPROVEN, and 'claim.sh release' deletes refs/claims/issue-<N>, so this namespace is NOT confirmed usable for claims.)"
     return 1
   fi
   emit "SMOKE-OK remote=$REMOTE namespace=refs/claims/* (create + ls-remote + delete verified)"
