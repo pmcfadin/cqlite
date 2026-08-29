@@ -8,6 +8,32 @@
 //! Coverage mirrors the edge cases the change's spec enumerates for DECIMAL,
 //! VARINT and INET, and each table carries at least one entry whose expected
 //! outcome is a typed error.
+//!
+//! # The three [`Expect::Digested`] entries, and where their hashes come from
+//!
+//! Three DECIMAL renderings run to thousands of digits, so committing them
+//! literally would be unreadable. They carry a readable `digest` PLUS the
+//! SHA-256 hex of the FULL rendering, which is the check that actually binds the
+//! digits — a digest alone pins only the digit COUNT and the surrounding form,
+//! so two bindings emitting different digits of the same length would both
+//! satisfy it.
+//!
+//! Each hash was derived in CPython, from the entry's input bytes and NOT from
+//! this crate's output:
+//!
+//! ```text
+//! sys.set_int_max_str_digits(0)
+//! v = int.from_bytes(b"\x7f" * n, "big", signed=True)
+//! positional (n <= DECIMAL_POSITIONAL_MAX_BYTES): text = str(v)[:-scale] + "." + str(v)[-scale:]
+//! exponent   (n >  DECIMAL_POSITIONAL_MAX_BYTES): text = str(v) + "e-" + str(scale)
+//! hashlib.sha256(text.encode("utf-8")).hexdigest()
+//! ```
+//!
+//! The two derivations are independent in the part that matters: CPython's
+//! bignum produced the digits, while the committed `digest` beside each hash
+//! independently pins the rendering FORM (positional vs exponent, exponent
+//! value, digit count) that the script above assumes — so a form disagreement
+//! surfaces as a digest failure and a digit disagreement as a hash failure.
 
 use super::{DecimalVector, Expect, InetVector, Input, VarintVector};
 use crate::decimal::{DECIMAL_MAX_UNSCALED_BYTES, DECIMAL_POSITIONAL_MAX_BYTES};
@@ -132,7 +158,10 @@ pub const DECIMAL_VECTORS: &[DecimalVector] = &[
             byte: 0x7f,
             len: DECIMAL_POSITIONAL_MAX_BYTES,
         },
-        expect: Expect::Value("{2464}.83"),
+        expect: Expect::Digested {
+            digest: "{2464}.83",
+            sha256: "37a4b95da17180c651e4941c13565a13f91d7cc315ed77d27067d7cebb734245",
+        },
     },
     // ONE byte past the threshold switches to exponent form, preserving all
     // 2469 digits.
@@ -143,7 +172,10 @@ pub const DECIMAL_VECTORS: &[DecimalVector] = &[
             byte: 0x7f,
             len: DECIMAL_POSITIONAL_MAX_BYTES + 1,
         },
-        expect: Expect::Value("{2469}e-2"),
+        expect: Expect::Digested {
+            digest: "{2469}e-2",
+            sha256: "3aae6f7d370ae9d471ff85a78d69f8d78f931319ed791e9d6456b42ea8c38724",
+        },
     },
     // THE convergence case (issue #1452): before the shared implementation, Node
     // rendered this and Python raised `CqliteError`. Both must now render it.
@@ -154,7 +186,10 @@ pub const DECIMAL_VECTORS: &[DecimalVector] = &[
             byte: 0x7f,
             len: 2000,
         },
-        expect: Expect::Value("{4817}e-3"),
+        expect: Expect::Digested {
+            digest: "{4817}e-3",
+            sha256: "e1ec7b41fe833049052e89e01d3cdda36fcfc6dd69ec5deb03d52c116aa55214",
+        },
     },
     // One byte past the refusal ceiling: a typed refusal in BOTH bindings,
     // carrying the one canonical message.

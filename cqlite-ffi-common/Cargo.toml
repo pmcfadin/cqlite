@@ -24,3 +24,12 @@ workspace = true
 # either binding; it IS inside the measured closure, which is deliberate — the
 # no-FFI-framework rule covers dev-dependencies too.
 serde_json = { workspace = true }
+# SHA-256, for the exact half of the committed vector expectations: a
+# multi-kilobyte rendering is committed as its digest (readable) plus the
+# SHA-256 hex of the FULL rendering (exact). A DEV-dependency, so neither
+# binding links it — each binding suite hashes with its own standard library
+# (`hashlib` / `crypto`), which is what makes the hash a cross-implementation
+# check instead of one more shared function. Already in the workspace's
+# dependency closure via `cqlite-core`, so no new external crate enters the tree,
+# and it pulls in no FFI framework (`tests/dependency_boundary.rs` measures that).
+sha2 = { workspace = true }
