@@ -553,3 +553,9 @@ mod tests;
 #[cfg(all(test, feature = "observability-testing"))]
 #[path = "joined_scan_stream_read_metric_tests.rs"]
 mod read_metric_tests;
+
+// Scan-error counting at this boundary (issue #1704): the exactly-once latch and the
+// nested-stream delegation, neither of which an integration test can reach.
+#[cfg(all(test, feature = "observability-testing"))]
+#[path = "joined_scan_stream_error_metric_tests.rs"]
+mod error_metric_tests;
