@@ -146,10 +146,21 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # Both lower boundaries of `engines.node`. Exact patch versions, not
-        # majors: `'18'` resolves to the newest 18.x and would leave the actual
-        # boundary unexercised.
-        node: ['18.17.0', '20.3.0']
+        # The two lower BOUNDARIES of `engines.node`, plus the current
+        # maintained MAJOR. Boundaries are exact patch versions — `'18'`
+        # resolves to the newest 18.x and would leave the actual boundary
+        # unexercised — while `24` is a bare major because no specific patch is
+        # being claimed there. floor-smoke.js asserts exactly and by-major
+        # respectively, chosen by the shape of the value.
+        #
+        # 24 is here because `engines.node` is unbounded ABOVE `20.3.0`, so the
+        # newest maintained major is inside the advertised range; Node-API ABI
+        # stability does NOT cover regressions in the JS loader or wrapper. It is
+        # also the major `node-release.yml:163` already publishes with, so
+        # without this leg the release path itself ran on an untested major.
+        # Time-sensitive, like the Python list: when a new major becomes current
+        # it belongs here.
+        node: ['18.17.0', '20.3.0', '24']
 
     steps:
       - name: Checkout
@@ -530,7 +541,7 @@ jobs:
             echo ""
             echo "### Tier"
             echo "- Ordinary PRs run the Ubuntu smoke build, typecheck, and loader/package smoke Jest subset."
-            echo "- Every PR also runs a floor smoke on BOTH advertised \`engines.node\` boundaries — Node 18.17.0 and 20.3.0 — reusing the prebuilt native module from the smoke job. Each leg restores the canonical corpus and runs one real query, failing on a 0-row result (issue #1459)."
+            echo "- Every PR also runs a floor smoke on both advertised \`engines.node\` boundaries (18.17.0, 20.3.0) plus the current maintained major (24) reusing the prebuilt native module from the smoke job. Each leg restores the canonical corpus and runs one real query, failing on a 0-row result (issue #1459)."
             echo "- Full cross-platform builds, the full dataset-backed Jest suite, and merged native artifacts run on push to main, nightly schedule, workflow_dispatch, or PRs labeled \`ci:bindings-full\`."
             echo ""
             echo "### Native Module Builds"
@@ -555,7 +566,7 @@ jobs:
           if [ "${RUN_FULL}" = "true" ]; then
             echo "Tests passed on 3 native platforms (ARM64 Linux and x86_64 macOS are build-only)" >> "$GITHUB_STEP_SUMMARY"
           else
-            echo "Smoke checks passed on Ubuntu: the \`smoke\` job itself is dataset-free, while both floor legs (Node 18.17.0 and 20.3.0) restored the canonical corpus and ran one real query (issue #1459)." >> "$GITHUB_STEP_SUMMARY"
+            echo "Smoke checks passed on Ubuntu: the \`smoke\` job itself is dataset-free, while all three floor legs (Node 18.17.0, 20.3.0 and 24) restored the canonical corpus and ran one real query (issue #1459)." >> "$GITHUB_STEP_SUMMARY"
           fi
           {
             echo ""

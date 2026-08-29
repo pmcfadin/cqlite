@@ -119,7 +119,7 @@ jobs:
 
   smoke-floors:
     # Issue #1459: `pyproject.toml` advertises `requires-python = ">=3.9"` and
-    # classifiers up to 3.13, but every other job in this workflow pins 3.12 —
+    # classifiers up to 3.14, but every other job in this workflow pins 3.12 —
     # so both ends of the advertised range went untested and a 3.9-incompatible
     # change (or an abi3 packaging break) would have reached users first. This
     # job closes that honesty gap at the cost of one artifact download per

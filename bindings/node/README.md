@@ -60,10 +60,13 @@ await db.close();
 
 ## Requirements
 
-- Node.js `^18.17.0 || >= 20.3.0` — both boundaries are CI-tested, not just
-  advertised: every PR loads the prebuilt native module on exactly 18.17.0 AND
-  exactly 20.3.0, running one real query against the canonical corpus on each
-  (`Floor smoke (Node …)` in `.github/workflows/node-ci.yml`, issue #1459).
+- Node.js `^18.17.0 || >= 20.3.0` — the boundaries are CI-tested, not just
+  advertised: every PR loads the prebuilt native module on exactly 18.17.0, exactly
+  20.3.0, and the current maintained major (24), running one real query against the
+  canonical corpus on each (`Floor smoke (Node …)` in
+  `.github/workflows/node-ci.yml`, issue #1459). The range is unbounded above 20.3.0,
+  and Node-API ABI stability does not cover regressions in the JS loader — hence the
+  current-major leg.
 
   The range is discontinuous because the module is built against Node-API 9
   (`napi9`), which ships in Node 18.17.0+ and 20.3.0+ but **never in 19.x or

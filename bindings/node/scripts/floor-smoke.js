@@ -84,25 +84,35 @@ function checkNodeVersion() {
     console.error(
       '::error::floor smoke: CQLITE_FLOOR_EXPECT_NODE_VERSION is unset, so the ' +
         `running interpreter (${process.version}) could not be checked against ` +
-        'the floor this job claims to test. Set it in the workflow step.'
+        'the version this job claims to test. Set it in the workflow step.'
     );
     return false;
   }
-  // EXACT, not major-only. `engines.node` is `^18.17.0 || >= 20.3.0` because
-  // Cargo.toml enables napi9 (Node-API 9), which ships in 18.17.0+ and 20.3.0+
-  // but never in 19.x or 20.0-20.2 — so each advertised boundary is a specific
-  // PATCH release, and "some 18.x ran" would not prove it. A major-only compare
-  // would let setup-node resolving to 18.20.x report the boundary as tested
-  // while 18.17.0 stayed unexercised.
-  if (actual !== expected) {
+
+  // TWO modes, chosen by the shape of the expected value. Both are assertions —
+  // neither is a permissive fallback, because an unmeasured interpreter is the
+  // whole defect this script exists to prevent.
+  //
+  //   'X.Y.Z' (a BOUNDARY of engines.node) -> EXACT match. `napi9` becomes
+  //     available AT a patch boundary (18.17.0, 20.3.0), so for those legs
+  //     "some 18.x ran" would not prove the boundary; setup-node resolving to
+  //     18.20.x must FAIL rather than report the boundary as tested.
+  //   'X' (the current maintained MAJOR, whose newest patch is what we want)
+  //     -> major match, because there is no specific patch being claimed.
+  const exact = expected.includes('.');
+  const actualMajor = actual.split('.')[0];
+  if (exact ? actual !== expected : actualMajor !== expected) {
     console.error(
-      `::error::floor smoke: expected Node ${expected} (an advertised ` +
-        `engines.node boundary) but this process is ${process.version}. ` +
-        'The floor was NOT tested.'
+      `::error::floor smoke: expected Node ${expected} ` +
+        `(${exact ? 'an advertised engines.node boundary, matched exactly' : 'the current maintained major'}) ` +
+        `but this process is ${process.version}. The version was NOT tested.`
     );
     return false;
   }
-  console.log(`node version OK: ${process.version} is exactly the advertised boundary`);
+  console.log(
+    `node version OK: ${process.version} matches expected ${expected} ` +
+      `(${exact ? 'exact boundary' : 'major'})`
+  );
   return true;
 }
 

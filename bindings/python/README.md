@@ -41,8 +41,11 @@ with cqlite.open('path/to/sstables', schema='schema.cql') as db:
 ## Requirements
 
 - Python 3.9+ — the boundaries are CI-tested, not just advertised: every PR installs
-  the `abi3` wheel on Python 3.9, 3.13 and 3.14 and runs an import plus one real query against
-  the canonical corpus (`Floor smoke` in `.github/workflows/python-ci.yml`, issue #1459).
+  the `abi3` wheel on **3.9** (the floor), **3.14** (the current top of the range) and
+  **3.13** (an additional compatibility leg), running an import plus one real query
+  against the canonical corpus on each (`Floor smoke` in
+  `.github/workflows/python-ci.yml`, issue #1459). The range is unbounded above, so its
+  top is the newest released CPython — when 3.15 ships it belongs in that matrix.
 - Cassandra 5.0 SSTable files
 
 ## API Reference
