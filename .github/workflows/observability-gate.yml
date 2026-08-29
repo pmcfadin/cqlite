@@ -170,9 +170,9 @@ jobs:
             fi
           }
           # `error_metric_tests`  -> joined_scan_stream::error_metric_tests (seam 1)
-          # `error_metrics`       -> setup_fail_closed_tests::error_metrics (setup seam)
+          # `setup_error_metric_tests` -> setup_fail_closed_tests::setup_error_metric_tests
           run_lib_filter error_metric_tests
-          run_lib_filter error_metrics
+          run_lib_filter setup_error_metric_tests
 
       # Scan-path error counting end to end (issue #1704): the three disjoint scan
       # exit seams (`JoinedStream::recv`, `scan_delta`'s terminal send, the

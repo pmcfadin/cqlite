@@ -207,6 +207,11 @@ async fn a_merger_ineligible_input_still_degrades_to_the_documented_concat() {
 // because that file is over the ~800-line campsite target (#1116) and adding a
 // declaration to it would trip the gate's growth ratchet; this suite is its natural
 // parent anyway — same fixture, same injected construction faults.
+// Named after its FILE, deliberately: `grep "mod setup_error_metric_tests"` and
+// `cargo test --lib setup_error_metric_tests` must both find it. A shorter alias made
+// the module look ORPHANED to both, and a second declaration was added in
+// `generation_merge.rs` to "fix" that — compiling this file TWICE under two module
+// paths until it was caught by the file-size ratchet.
 #[cfg(feature = "observability-testing")]
 #[path = "setup_error_metric_tests.rs"]
-mod error_metrics;
+mod setup_error_metric_tests;
