@@ -597,6 +597,22 @@ Notes on identity that the table compresses:
 3. **`set<frozen<list<T>>>` etc. stay hashable on the Python side** via
    `value_to_hashable_key` (`list`→`tuple`), so such a set is still a `frozenset` — the `list`
    fallback in `set_to_py` triggers on UDTs only (`contains_udt`).
+4. **A UDT used as a MAP KEY does not have the UDT value shape on the Python side.** Because
+   `map_to_py` routes keys through `value_to_hashable_key`, a `map<frozen<udt>, v>` key is a
+   `frozenset` of `(field_name, value)` pairs (including `_type`/`_keyspace`) rather than the
+   `dict` the same UDT would be in value position — so it canonicalizes to a sorted array of
+   `[name, value]` pairs, **not** to the `{"_type": …}` object the CLI renders. This is a known,
+   pinned divergence, not a defect to paper over: reconstructing a UDT object from an anonymous
+   `frozenset` of 2-tuples would be a shape guess, and no fixture table currently has a UDT map
+   key. Changing it is a behavior change and out of scope for #1454.
+
+**Empirical confirmation (2026-08-29).** The Python column was not only read from source but
+observed against real Cassandra 5.0 fixtures: `test_collections.collection_table` returns
+`frozenset` for `set<text>`/`set<int>`, `dict` for `map`, `list` for `list`;
+`test_collections.collections_with_udts` returns a **`list`** for `contacts SET<FROZEN<contact_info>>`
+(the fallback row) and a `dict` of UDT `dict`s for `emergency_contacts MAP<TEXT, FROZEN<contact_info>>`;
+`test_types.cx_tuple_field_order` returns a Python `tuple` for `tuple<int, text, boolean>`. The Node
+column is source-verified (`value_to_napi` and the three converters named above).
 
 **Canonicalization rules (consumed by #1455).** The 3-way golden parity harness (#1455, Y1)
 takes its canonicalization rules from this table; it does not re-derive them:
