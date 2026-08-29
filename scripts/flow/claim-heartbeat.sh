@@ -354,6 +354,27 @@ DEFAULT_REAP_THRESHOLD_SECS="${DEFAULT_REAP_THRESHOLD_SECS:-14400}"
 # <issue>`). Default consults `gh`. A gh/network FAILURE is treated fail-SAFE:
 # "we could not prove there is NO open PR" -> return "has open PR" (exit 0), so a
 # transient outage never causes a reap of a possibly-live claim.
+# issue_number_ok <value> — true only for a positive decimal issue number.
+#
+# A SHARED PREDICATE, NOT A TIGHTENED SHARED GETTER (roborev round 21, Medium; #3464 family 4).
+# `ref_msg_field` stays generic on purpose — `pid` and `ts` are read through it and neither is a
+# positive decimal — so the validation lives at the two places an ISSUE is consumed, not in the getter
+# every field shares. Tightening the getter would break the callers for which the value is legitimately
+# not a number, which is family 4 exactly.
+#
+# WHY IT EXISTS: `issue_has_open_pr` answers "no open PR" for a NON-NUMERIC issue, because it cannot
+# query one — a correct answer to the wrong question. A legacy claim whose message says `issue=abc`
+# therefore passed the open-PR safeguard by failing to be checkable, and `should-reap`/`reap` deleted it.
+# A value the safeguard cannot USE is not a reason to proceed; it is the same "could not tell" that
+# every other branch here treats as KEEP.
+issue_number_ok() {
+  case "${1:-}" in
+    '' | *[!0-9]*) return 1 ;;
+    0*) return 1 ;; # `0` and leading-zero forms are not issue numbers
+  esac
+  return 0
+}
+
 issue_has_open_pr() {
   local issue="$1"
   case "$issue" in
@@ -682,6 +703,13 @@ delete_ref_guarded() {
         note "REFUSING to delete ${ref}: its claim message could not be read, so an open PR cannot be ruled out (the open-PR safeguard needs the issue)"
         return 5
       fi
+      # THE SIBLING SITE, fixed in the same change (roborev round 21 named only `should-reap`). Both
+      # read a legacy issue and both feed the same safeguard, so fixing one and leaving the other is
+      # the guard-width mistake this branch has already made three times.
+      if ! issue_number_ok "$issue"; then
+        note "REFUSING to delete ${ref}: its claim message names issue='${issue}', which is not an issue number, so the open-PR safeguard cannot query it"
+        return 5
+      fi
       ;;
   esac
   if [ -n "$issue" ] && issue_has_open_pr "$issue"; then
@@ -925,6 +953,9 @@ cmd_should_reap() {
     issue="$lane_issue"
   elif ! issue="$(ref_msg_field "$ref" issue)"; then
     note "keep ${ref}: its claim message could not be read, so its issue is unknown and an open PR cannot be ruled out (#2499). Only pid is optional here."
+    return 1
+  elif ! issue_number_ok "$issue"; then
+    note "keep ${ref}: its claim message names issue='${issue}', which is not an issue number, so the open-PR safeguard cannot query it (#2499). Unusable is the same as unknown here — never a licence to reap."
     return 1
   fi
   pid="$(ref_msg_field "$ref" pid)" || pid=""
@@ -1517,7 +1548,13 @@ case "$SUBCOMMAND" in
     print_help
     ;;
   "")
-    die_usage "a subcommand is required: beat <issue> | list | clear <machine> | stamp <issue> [pid] | list-claims | should-reap <machine> [issue] [secs] | reap <machine> [issue] | dead-lanes"
+    # BOTH FORMS SPELLED OUT (roborev round 21, Medium). This line advertised
+    # `should-reap <machine> [issue] [secs]`, but a TWO-argument call is ALWAYS the legacy
+    # `<machine> <threshold_secs>` form — deliberately, so the grammar is unambiguous (pinned by
+    # TEST 57) — so an operator following this text ran `should-reap <box> <issue>` and got a verdict
+    # about the LEGACY ref with the issue number read as a threshold: a real answer to a different
+    # question. The --help block already documented both forms; this one-line summary did not.
+    die_usage "a subcommand is required: beat <issue> | list | clear <machine> | stamp <lane-id> [pid] | list-claims | should-reap <machine> [threshold_secs] | should-reap <machine> <issue> <threshold_secs> | reap <machine> [lane-id] [expected_sha] | dead-lanes"
     ;;
   *)
     die_usage "unknown subcommand: $SUBCOMMAND (expected beat|list|clear|stamp|list-claims|should-reap|reap|dead-lanes)"

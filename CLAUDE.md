@@ -933,10 +933,14 @@ end-to-end test. Green helper-only unit tests are not sufficient.
   owned for adoption, never orphaned). **The ref is PER LANE — `refs/lane-claims/<machine>/<issue>`
   — since #3393's ruling**; the old per-machine `refs/machine-claims/<machine>` is legacy and is
   still *read* by `list-claims`, `dead-lanes` and the CI reaper purely so a pre-ruling ref gets
-  drained (an un-enumerated claim ref pins its board item at In Progress indefinitely). `reap` and
-  `should-reap` take `<machine> [issue]`: with an issue they act on the lane, without one on the
-  legacy ref. This namespace is distinct from `claim.sh`'s per-issue lock
-  `refs/claims/issue-<N>`. `claim-heartbeat.sh should-reap <machine> [secs]` is the single, fail-safe
+  drained (an un-enumerated claim ref pins its board item at In Progress indefinitely). `reap` takes
+  `<machine> [lane-id] [expected_sha]`. **`should-reap` has TWO forms and a two-argument call is
+  ALWAYS the legacy one** — `should-reap <machine> [threshold_secs]` acts on the legacy ref, and a
+  lane needs all three, `should-reap <machine> <issue> <threshold_secs>`. The grammar is deliberately
+  unambiguous rather than positional-guessing, so `should-reap <box> <issue>` reads the issue number
+  as a THRESHOLD and answers about the legacy ref (#3393 round 21: this doc previously advertised
+  `<machine> [issue]`, which is that trap written down). This namespace is distinct from `claim.sh`'s per-issue lock
+  `refs/claims/issue-<N>`. `claim-heartbeat.sh should-reap` (both forms above) is the single, fail-safe
   reap predicate (exit 0 = reap, 1 = keep, 2 = no ref): reap ONLY on age > threshold (4h) AND no open
   PR AND (pid-dead, when the claim is local — a foreign machine's PID is unknowable). It KEEPS on a
   fresh ref, an open PR, a live local PID, or an unparseable age; a `gh`/network hiccup in the
