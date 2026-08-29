@@ -231,6 +231,16 @@
 #                      fail-SAFE: treated as "has open PR" so a transient outage
 #                      never reaps a possibly-live claim.
 #
+# REQUIREMENTS
+#   git 2.29+ for every subcommand that READS a ref (`list`, `list-claims`, `clear`,
+#   `reap`, `should-reap`, `dead-lanes`). Those fetch into a private ref with
+#   `--no-write-fetch-head`, which landed in 2.29; on an older git they REFUSE with a
+#   named message and exit 1 rather than fetch without it, because the fetch would
+#   overwrite the `FETCH_HEAD` that other tooling in the same checkout reads. `beat` and
+#   `stamp` only PUSH and work on any git. There is no fallback and no override: writing
+#   someone else's `FETCH_HEAD` can corrupt a REAP decision, which is worse than
+#   declining to answer.
+#
 # EXIT CODES
 #   0  success (including "zero heartbeats" on `list`, and "already absent" on
 #      `clear` — both are not errors)
@@ -284,6 +294,24 @@ case "$_git_major$_git_minor" in
     ;;
 esac
 unset _git_ver _git_major _git_rest _git_minor
+
+# EVERY FETCHING SUBCOMMAND NEEDS THIS GUARD, NOT JUST THE NEWEST ONE (roborev round 17,
+# Medium). `dead-lanes` refused on a git that cannot fetch privately; `list`,
+# `list-claims`, `clear`, `reap` and `should-reap` did not, though they fetch exactly the
+# same way. On git < 2.29 they read the unknown-option failure as a per-ROW answer:
+# `list`/`list-claims` printed every row `fetch-failed` and still exited 0 — a listing that
+# measured NOTHING, reporting success — and the `ref_msg_field` readers behind
+# `clear`/`reap`/`should-reap` silently lost the claim metadata their open-PR safeguards
+# depend on. One version fact deserves one refusal in one spelling, checked at DISPATCH so
+# a subcommand added later cannot forget to ask.
+#
+# Keyed on the AFFIRMATIVE value (`= yes`), never on `!= no`: an unparseable version sets
+# neither, and an unmeasured state must never fall into the permissive branch.
+require_private_fetch() {
+  [ "$GIT_SUPPORTS_NO_WRITE_FETCH_HEAD" = yes ] && return 0
+  note "'$1' needs a git that can fetch without writing FETCH_HEAD (--no-write-fetch-head, git 2.29+; found '$(git --version 2>/dev/null || echo unknown)'). Refusing to run rather than clobbering the shared FETCH_HEAD that other tooling in this checkout may read — upgrade git, or run from a checkout with a newer one. NOTHING was measured."
+  return 1
+}
 
 # Rounding tolerance when comparing a process's start time against its claim's `ts`
 # (#3393). Both come from the SAME host and the SAME clock — `ts` is written by `date -u`
@@ -1074,16 +1102,11 @@ cmd_dead_lanes() {
   [ -z "$legacy" ] || raw="$(printf '%s\n%s' "$raw" "$legacy")"
   raw="$(printf '%s' "$raw" | sed '/^$/d')"
 
-  # REFUSE RATHER THAN CLOBBER (roborev round 13, Medium). Omitting
-  # `--no-write-fetch-head` on old git left this monitor overwriting the shared FETCH_HEAD
-  # that `list`, `list-claims`, `should-reap` and `reap` still fetch-then-read — so the
-  # fallback traded "I cannot measure safely" for "I may corrupt someone else's REAP
-  # decision", which is the worse of the two by a wide margin. A monitor may decline to
-  # answer; it may not damage the thing it is monitoring.
-  if [ "$GIT_SUPPORTS_NO_WRITE_FETCH_HEAD" != yes ]; then
-    note "this git cannot fetch without writing FETCH_HEAD (needs 2.29+; found '$(git --version 2>/dev/null || echo unknown)'). Refusing to run rather than clobbering the shared FETCH_HEAD that other tooling in this checkout may read — upgrade git, or run dead-lanes from a checkout with a newer one. NOTHING was measured."
-    return 1
-  fi
+  # The git-version refusal that used to live here now runs at DISPATCH, so it covers every
+  # fetching subcommand instead of this one alone (roborev round 17, Medium). Keeping a
+  # second copy here would be two spellings of one fact, which is how they drift apart —
+  # and the drift had already started: the comment below still described a fallback that
+  # omits the flag on old git, a design replaced by refusal two rounds earlier.
 
   # NO EARLY `return 0` HERE (roborev round 5, Medium). An empty namespace proves only
   # that no ref exists — it does NOT establish an idle fleet. A lane running with
@@ -1094,6 +1117,16 @@ cmd_dead_lanes() {
   # to the single `local_seen` check at the end, so one rule covers both instead of an
   # early return contradicting it.
   if [ -z "$raw" ]; then
+    # AN EMPTINESS CLAIM NEEDS BOTH LISTINGS TO HAVE ANSWERED (roborev round 17, Low). With
+    # the per-lane namespace empty and the LEGACY listing FAILED, `raw` is empty for two
+    # different reasons at once, and the message asserted the wrong one: "no claim refs
+    # exist" is a statement about a namespace nobody read. The exit code was already 1 and
+    # the incompleteness was already noted above, so only the sentence was wrong — but a
+    # false sentence in a monitor's output is what an operator acts on.
+    if [ "$legacy_rc" -ne 0 ]; then
+      note "the per-lane namespace is empty AND the LEGACY listing FAILED (git exited ${legacy_rc}) on ${REMOTE} — so whether any legacy claim exists was never determined. This measurement is INCOMPLETE; it is NOT 'no claim refs exist' and NOT 'no dead lanes'."
+      return 1
+    fi
     note "no claim refs exist on ${REMOTE}. That is NOT the same as an idle fleet: a lane running with claim stamping disabled (CLAIM_CMD=\"\"), or one whose stamps have been failing, is indistinguishable from this. Nothing was measured, so this is NOT 'no dead lanes'."
     return 1
   fi
@@ -1126,10 +1159,13 @@ cmd_dead_lanes() {
     # Medium). Fetching into a private ref stopped THIS command reading a clobbered
     # FETCH_HEAD, but the fetch still WROTE it — so a concurrent `dead-lanes` became the
     # thing that corrupts `list`, `list-claims`, `should-reap` and `reap`, all of which
-    # still fetch-then-read FETCH_HEAD. Making a monitor into the cause of a bad REAP
-    # decision would be a poor trade. Guarded by version because the option landed in git
-    # 2.29; on older git the flag is omitted rather than failing every row with an
-    # unknown-option error whose stated cause would be "fetch failed".
+    # still fetch-then-read a private ref of their own. Making a monitor into the cause of a
+    # bad REAP decision would be a poor trade. Unconditional here, and correct because the
+    # DISPATCH guard already refused on a git that lacks the option — so this line is only
+    # ever reached on a capable git. It is NOT a fallback: an earlier version of this comment
+    # claimed the flag is "omitted on older git", which was true of a design replaced two
+    # rounds before it and would have failed every row with an unknown-option error reported
+    # as "fetch failed" (roborev round 17, Medium).
     # Counted from the REFNAME, before any fetch: whether the claim belongs to this machine is
     # known from the ref path, so an unreadable local ref must not be mistaken for "no local
     # claim exists" in the closing diagnostic (roborev round 16, Low).
@@ -1325,10 +1361,12 @@ case "$SUBCOMMAND" in
     cmd_beat "${1:-}"
     ;;
   list)
+    require_private_fetch list || exit 1
     cmd_list
     ;;
   clear)
     shift
+    require_private_fetch clear || exit 1
     cmd_clear "${1:-}"
     ;;
   stamp)
@@ -1336,18 +1374,25 @@ case "$SUBCOMMAND" in
     cmd_stamp "${1:-}" "${2:-}"
     ;;
   list-claims)
+    require_private_fetch list-claims || exit 1
     cmd_list_claims
     ;;
   should-reap)
     shift
+    # Exit 1 here is this subcommand's KEEP, which is the safe answer: a reaper that
+    # cannot read the claim must not reap it. The refusal names git as the cause, so
+    # "keep because I could not tell" is never silent.
+    require_private_fetch should-reap || exit 1
     cmd_should_reap "${1:-}" "${2:-}" "${3:-}"
     ;;
   reap)
     shift
+    require_private_fetch reap || exit 1
     cmd_reap "${1:-}" "${2:-}" "${3:-}"
     ;;
   dead-lanes)
     shift
+    require_private_fetch dead-lanes || exit 1
     cmd_dead_lanes "$@"
     ;;
   -h | --help)

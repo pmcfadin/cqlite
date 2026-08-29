@@ -2171,6 +2171,121 @@ $mf_out"
 fi
 (cd "$WORK" && g push -q origin ":refs/machine-claims/malformedBox" 2>/dev/null || true)
 
+# ===========================================================================
+echo "TEST 69: the old-git refusal covers EVERY fetching subcommand (round 17, Medium)"
+# ===========================================================================
+# `dead-lanes` refused on a git that cannot fetch privately; the five OTHER subcommands that
+# fetch the same way did not. On git < 2.29 `list`/`list-claims` printed every row
+# `fetch-failed` and still exited 0 — a listing that measured NOTHING while reporting success —
+# and `clear`/`reap`/`should-reap` lost the claim metadata their open-PR safeguard reads.
+# Driven by the TEST 53 shim, so one version fact is checked at every entry point.
+craft_lane_claim "$WORK" "oldgitBox" "7001" "$ABSENT_PID" 30
+for sub in "list" "list-claims" "clear oldgitBox" "reap oldgitBox 7001" "should-reap oldgitBox 7001" "dead-lanes"; do
+  # shellcheck disable=SC2086
+  og2_out=$(cd "$WORK" && PATH="$oldgit:$PATH" HEARTBEAT_MACHINE=oldgitBox \
+    CLAIM_OPEN_PR_CMD="$NO_OPEN_PR" bash "$HB" $sub 2>&1)
+  og2_rc=$?
+  if [ "$og2_rc" -ne 0 ] \
+    && printf '%s\n' "$og2_out" | grep -qi 'without writing FETCH_HEAD' \
+    && printf '%s\n' "$og2_out" | grep -qi 'NOTHING was measured' \
+    && ! printf '%s\n' "$og2_out" | grep -qi 'fetch-failed'; then
+    ok "'$sub' refuses on a git too old to fetch privately (rc=$og2_rc), naming git as the cause and printing no per-row verdict"
+  else
+    bad "'$sub' must refuse rather than measure nothing and report success: rc=$og2_rc out:
+$og2_out"
+  fi
+done
+# THE REFUSAL MUST NOT SPREAD TO THE PUSH-ONLY SUBCOMMANDS (the FAIL-SHUT family, #3464).
+# `beat` and `stamp` never fetch, so an old git is irrelevant to them; a guard that stopped
+# them too would break a caller for which the missing capability is legitimately unneeded —
+# which is exactly how the round-5 `ref_msg_field` tightening broke `should-reap`.
+for pushsub in "beat 7001" "stamp 7001 $$"; do
+  # shellcheck disable=SC2086
+  ps_out=$(cd "$WORK" && PATH="$oldgit:$PATH" HEARTBEAT_MACHINE=oldgitBox bash "$HB" $pushsub 2>&1)
+  ps_rc=$?
+  if [ "$ps_rc" -eq 0 ] && ! printf '%s\n' "$ps_out" | grep -qi 'NOTHING was measured'; then
+    ok "'$pushsub' still succeeds on an old git — it only pushes, so the fetch guard must not reach it"
+  else
+    bad "the fetch guard must NOT break a push-only subcommand: '$pushsub' rc=$ps_rc out:
+$ps_out"
+  fi
+done
+(cd "$WORK" && g push -q origin ":refs/lane-claims/oldgitBox/7001" ":refs/heartbeats/oldgitBox" 2>/dev/null || true)
+(cd "$WORK" && g push -q origin ":refs/lane-claims/oldgitBox/p$$" 2>/dev/null || true)
+
+# ===========================================================================
+echo "TEST 70: empty per-lane + FAILED legacy listing reports INCOMPLETE (round 17, Low)"
+# ===========================================================================
+# With no per-lane refs AND the legacy listing failing, `raw` is empty for two different
+# reasons and the message asserted the wrong one: "no claim refs exist" is a claim about a
+# namespace nobody read. The exit code was already 1, so only the sentence was wrong — and a
+# monitor's sentence is what an operator acts on. Driven by a git shim that fails ls-remote
+# for the LEGACY refspec only, while reporting a modern version so the dispatch guard passes.
+legacyfail="$T/legacyfail"
+mkdir -p "$legacyfail"
+cat >"$legacyfail/git" <<'LFEOF'
+#!/usr/bin/env bash
+# Scan ALL arguments, not $1: git takes global options before the subcommand
+# (`git -C <dir> ls-remote ...`), so a $1-only shim silently passes through every
+# invocation that carries one — which is how the first cut of this test's own
+# NON-VACIUTY probe failed to prove anything.
+_is_lsremote=false
+_hits_legacy=false
+for a in "$@"; do
+  [ "$a" = "ls-remote" ] && _is_lsremote=true
+  case "$a" in refs/machine-claims/*) _hits_legacy=true ;; esac
+done
+if [ "$_is_lsremote" = true ] && [ "$_hits_legacy" = true ]; then
+  echo "fatal: injected legacy-listing failure" >&2
+  exit 2
+fi
+exec /usr/bin/git "$@"
+LFEOF
+chmod +x "$legacyfail/git"
+# A SEPARATE, GENUINELY EMPTY REMOTE. Against `origin` the earlier cases have left
+# lane-claims refs behind, so `raw` is non-empty, the new branch is never reached, and the
+# assertion passes on the legacy note's own "INCOMPLETE" instead — a vacuous pass of exactly
+# the kind this PR exists to remove. Caught here by the two NON-VACUITY halves below.
+EMPTYREMOTE="$T/empty-origin.git"
+g init --bare -q "$EMPTYREMOTE"
+lf_out=$(cd "$WORK" && PATH="$legacyfail:$PATH" HEARTBEAT_MACHINE=noSuchLaneBox \
+  HEARTBEAT_REMOTE="$EMPTYREMOTE" CLAIM_OPEN_PR_CMD="$NO_OPEN_PR" bash "$HB" dead-lanes 2>&1)
+lf_rc=$?
+# ASSERT ON A PHRASE THE DENIAL CANNOT CONTAIN. The first cut forbade the substring
+# "no claim refs exist", which the new message itself quotes in order to deny it
+# ("...it is NOT 'no claim refs exist'") — so a correct fix failed its own test. A negative
+# text assertion is defeated by any message that names the thing it rules out; key it on the
+# ASSERTING sentence's own tail instead, which only the empty-namespace claim carries.
+if [ "$lf_rc" -ne 0 ] \
+  && printf '%s\n' "$lf_out" | grep -qi 'never determined' \
+  && ! printf '%s\n' "$lf_out" | grep -q 'That is NOT the same as an idle fleet'; then
+  ok "an empty per-lane namespace with a FAILED legacy listing reports INCOMPLETE (rc=$lf_rc), never 'no claim refs exist'"
+else
+  bad "an unread legacy namespace must not be asserted empty: rc=$lf_rc out:
+$lf_out"
+fi
+# NON-VACUITY, BOTH HALVES. (a) the shim really does break ONLY the legacy refspec, so the
+# per-lane listing genuinely succeeded-empty; (b) with the shim absent the SAME state prints
+# the empty-namespace sentence, so the branch above is reached by the injected failure and not
+# by something incidental.
+if (cd "$WORK" && PATH="$legacyfail:$PATH" git ls-remote "$EMPTYREMOTE" 'refs/machine-claims/*' >/dev/null 2>&1); then
+  bad "NON-VACUITY broken: the shim did not fail the legacy refspec, so TEST 70 proved nothing"
+else
+  if (cd "$WORK" && PATH="$legacyfail:$PATH" git ls-remote "$EMPTYREMOTE" 'refs/lane-claims/*' >/dev/null 2>&1); then
+    ok "NON-VACUITY: the shim fails the LEGACY refspec while the per-lane refspec still lists — so the per-lane half really did succeed-empty"
+  else
+    bad "NON-VACUITY broken: the shim broke the per-lane listing too, so the run failed earlier for another reason"
+  fi
+fi
+ctl_out=$(cd "$WORK" && HEARTBEAT_MACHINE=noSuchLaneBox \
+  HEARTBEAT_REMOTE="$EMPTYREMOTE" CLAIM_OPEN_PR_CMD="$NO_OPEN_PR" bash "$HB" dead-lanes 2>&1)
+if printf '%s\n' "$ctl_out" | grep -q 'That is NOT the same as an idle fleet'; then
+  ok "NON-VACUITY: without the shim the same empty state DOES print the empty-namespace sentence, so the INCOMPLETE branch was reached by the injected failure"
+else
+  bad "NON-VACUITY broken: the control run did not reach the empty-namespace sentence, so TEST 70's two branches are not distinguished: out:
+$ctl_out"
+fi
+
 echo
 echo "=== claim-heartbeat.sh: $PASS passed, $FAIL failed ==="
 [ "$FAIL" -eq 0 ]
