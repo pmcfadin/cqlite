@@ -882,11 +882,19 @@ run_push() {
   push_out=$(PATH="$bin:$PATH" HOME="$repo/.home" CARGO_HOME="$repo/.home/.cargo" \
     GIT_CONFIG_GLOBAL="$gc" GIT_CONFIG_NOSYSTEM=1 CLAIM_MACHINE=push-probe-test \
     CODEX_NOTIFY_WEBHOOK='https://ntfy.example.com/t' \
+    CQLITE_PROJECT_OWNER=pmcfadin CQLITE_PROJECT_NUMBER=1 \
     bash "$repo/scripts/bootstrap-agent-machine.sh" --skip-smoke "$@" 2>&1) || push_rc=$?
 }
-push_warns()  { printf '%s' "$1" | grep -cF '[warn]'; }
+# ANSI colour is stripped with a printf-built ESC, not a `\x1b` escape: BSD sed (the
+# fleet's macOS hosts) does not understand \x1b and would silently match nothing.
+PUSH_ESC=$(printf '\033')
+push_plain()  { printf '%s' "$1" | sed "s/${PUSH_ESC}\[[0-9;]*m//g"; }
+# Count only real warn LINES. `grep -cF '[warn]'` also matched the summary's
+# "Address the [warn] lines above", making every count one too high — and the counts
+# below are the whole basis of the delta assertion.
+push_warns()  { push_plain "$1" | grep -cE '^[[:space:]]+\[warn\] '; }
 push_green()  { printf '%s' "$1" | grep -qF 'All checks green.'; }
-push_verdict(){ printf '%s' "$1" | grep -F 'git-push:' | sed 's/\x1b\[[0-9;]*m//g'; }
+push_verdict(){ push_plain "$1" | grep -F 'git-push:'; }
 
 # 7p-a/d. THE POSITIVE CONTROL and the OPT-OUT, measured as a pair against ONE sandbox
 #   whose only variable is the flag. Run the opt-out FIRST so its warning count
@@ -1012,6 +1020,29 @@ if printf '%s' "$out7pc2" | grep -q "\[warn\].*git-push: UNMEASURED.*no 'origin'
 else
   bad "push: missing origin was not reported as UNMEASURED"
   push_verdict "$out7pc2"
+fi
+
+# 7p-c3. THE MUTATION THIS BLOCK EXISTS FOR. The probe delegates to claim.sh, so the
+#   permissive branch must be keyed on the AFFIRMATIVE `SMOKE-OK`, never on the ABSENCE
+#   of `SMOKE-FAIL`: a probe that produced NO verdict at all (killed, or a claim.sh
+#   whose output contract moved) would otherwise be read as success. Verified as a real
+#   mutation: rewriting the branch to `! grep SMOKE-FAIL` leaves every OTHER case in
+#   this block green, and only this one reds. The remote here is a bare repo that
+#   ACCEPTS pushes, so reachability is not what is being measured — the verdict is.
+repo7pc3="$tmp/repo7pc3"; bare7pc3="$tmp/bare7pc3.git"
+mk_push_bare "$bare7pc3"
+mk_push_repo "$repo7pc3" "file://$bare7pc3"
+printf '#!/usr/bin/env bash\nexit 0\n' >"$repo7pc3/scripts/flow/claim.sh"   # mute: no verdict
+chmod +x "$repo7pc3/scripts/flow/claim.sh"
+bin7pc3="$tmp/bin7pc3"; mk_push_bin "$bin7pc3"
+gc7pc3="$tmp/gc7pc3"; : >"$gc7pc3"
+run_push "$repo7pc3" "$bin7pc3" "$gc7pc3"; out7pc3=$push_out
+if printf '%s' "$out7pc3" | grep -q '\[warn\].*git-push: UNMEASURED.*no SMOKE-OK/SMOKE-FAIL verdict' \
+   && ! printf '%s' "$out7pc3" | grep -q '\[ok\].*git-push'; then
+  ok "push: a probe that returns NO verdict is UNMEASURED — success is keyed on SMOKE-OK, not on the absence of failure"
+else
+  bad "push: a verdict-less probe was not reported UNMEASURED (the permissive branch is keyed on '!= failed')"
+  push_verdict "$out7pc3"
 fi
 
 # 7p-e. ORDERING: the probe must run AFTER section 3b's credential fix, so what it
