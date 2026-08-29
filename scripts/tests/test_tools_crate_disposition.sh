@@ -158,8 +158,15 @@ package_name_of() {
 # still propagates.
 workspace_dependents() {
   local crate="$1" out rc parsed
+  # `--locked --offline` keeps this inside the tooling-tests contract (fast, no
+  # network): --offline forbids registry access and --locked refuses to REWRITE
+  # Cargo.lock, so the guard cannot mutate the tree it is inspecting. Neither
+  # changes the ANSWER — resolution comes from Cargo.lock plus the local cache
+  # (verified: identical output with and without both flags). A cold cargo cache
+  # makes this FAIL rather than silently reach the network, which is the correct
+  # direction; the caller's message names the remedy.
   out=$(cd "$ROOT" && cargo tree --workspace --invert "$crate" --depth 1 \
-          --all-features --target all 2>/dev/null)
+          --all-features --target all --locked --offline 2>/dev/null)
   rc=$?
   [ "$rc" -eq 0 ] || return 1
   # cargo always echoes the subject itself as the tree root, so empty output here
@@ -170,12 +177,21 @@ workspace_dependents() {
   # the tree glyphs cargo prefixes and the trailing (/path). The SUBJECT itself is
   # dropped HERE, inside awk, rather than by a downstream `grep -v` — see the
   # fail-closed note above the function for why that grep had to go entirely.
+  # The parse must PROVE it understood the output before an empty dependent set is
+  # allowed to mean "no dependents" (roborev job 82). cargo ALWAYS prints the
+  # subject as the tree root, so seeing the subject is positive evidence that the
+  # pattern still matches cargo's format; NOT seeing it means the format changed or
+  # the filter silently matched nothing — under which an UNWIRED crate with real
+  # dependents would have passed. awk exits 3 for that case, distinct from a real
+  # awk failure, and both are non-zero so both fail closed.
   parsed=$(printf '%s\n' "$out" | awk -v self="$crate" '
     match($0, /[A-Za-z0-9_-]+ v[0-9]/) {
       name = substr($0, RSTART, RLENGTH)
       sub(/ v[0-9]$/, "", name)
-      if (name != self) print name
-    }' | sort -u)
+      if (name == self) { seen_self = 1; next }
+      print name
+    }
+    END { if (!seen_self) exit 3 }' | sort -u)
   rc=$?
   [ "$rc" -eq 0 ] || return 1
 
@@ -300,7 +316,7 @@ while IFS= read -r crate; do
   pkg=$(package_name_of "$crate") \
     || fail "cannot read the package name from tools/$crate/Cargo.toml — unmeasurable is not a pass"
   deps=$(workspace_dependents "$pkg") \
-    || fail "cannot derive workspace dependents of tools/$crate (package '$pkg'; cargo tree --workspace --invert failed) — unmeasurable is not a pass"
+    || fail "cannot derive workspace dependents of tools/$crate (package '$pkg'; cargo tree --workspace --invert failed, or its output no longer contains the subject as the tree root) — unmeasurable is not a pass. If the cargo REGISTRY CACHE is cold this guard fails by design rather than reach the network: run \`cargo fetch --locked\` once. If cargo's tree FORMAT changed, fix the parser in $(basename "$0")."
   if [ -n "$deps" ]; then
     fail "tools/$crate is recorded UNWIRED (nothing runs it AND nothing depends on it) but these workspace package(s) DEPEND on it: $(printf '%s ' $deps)- that is a FALSE census. Move it to MIXED_TOOLS (and label its README accordingly), because deleting or workspace-excluding it would break them (issue #1716)."
   fi
@@ -314,7 +330,7 @@ if [ "$n_mixed" -gt 0 ]; then
     pkg=$(package_name_of "$crate") \
       || fail "cannot read the package name from tools/$crate/Cargo.toml — unmeasurable is not a pass"
     deps=$(workspace_dependents "$pkg") \
-      || fail "cannot derive workspace dependents of tools/$crate (package '$pkg'; cargo tree --workspace --invert failed) — unmeasurable is not a pass"
+      || fail "cannot derive workspace dependents of tools/$crate (package '$pkg'; cargo tree --workspace --invert failed, or its output no longer contains the subject as the tree root) — unmeasurable is not a pass. If the cargo REGISTRY CACHE is cold this guard fails by design rather than reach the network: run \`cargo fetch --locked\` once. If cargo's tree FORMAT changed, fix the parser in $(basename "$0")."
     [ -n "$deps" ] \
       || fail "tools/$crate is recorded MIXED (some targets live, some orphaned) but NO workspace package depends on it — the 'live half' claim is unsupported. If nothing runs it either, it belongs in UNWIRED_TOOLS (issue #1716)."
     # --- and its README must NAME each real dependent. The required strings are

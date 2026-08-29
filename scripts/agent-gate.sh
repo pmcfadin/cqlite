@@ -222,8 +222,15 @@
 #                      "something RUNS it" is not mechanically checkable, so it
 #                      stays recorded + diff-reviewed, never grep-inferred.
 #                      Needs cargo (always present in a gate); no python3/Docker.
-#                      Fails CLOSED on an absent or unmeasurable subject; never
-#                      SKIPs.
+#                      Stays inside this component's fast/no-network contract:
+#                      the cargo query carries --locked --offline, so it cannot
+#                      reach the registry and cannot rewrite Cargo.lock (i.e. it
+#                      cannot mutate the tree its own gate is certifying, #2926).
+#                      A COLD cargo cache therefore FAILs it rather than silently
+#                      going to the network; remedy `cargo fetch --locked` is named
+#                      in the failure. Fails CLOSED on an absent or unmeasurable
+#                      subject — including cargo output that is non-empty but no
+#                      longer parseable — and never SKIPs.
 #                      scripts/tests/test_agent_gate_summary.sh — proves the
 #                      SUMMARY block survives non-foreground capture (#1175). It
 #                      only drives `agent-gate.sh --emit-summary-selftest`, which

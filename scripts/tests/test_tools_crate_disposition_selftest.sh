@@ -9,7 +9,7 @@
 # copy of the tree), rewrites the three recorded lists for that tree, and asserts
 # the verdict.
 #
-# FIVE GREEN CONTROLS, not one. Without a green control per shape, a guard
+# SIX GREEN CONTROLS, not one. Without a green control per shape, a guard
 # hardwired to refuse everything — or one that rejects every MIXED crate, or every
 # crate with a real dependent — would satisfy all the red cases and look tested.
 set -uo pipefail
@@ -125,6 +125,13 @@ make_ws() {
     { print }
   ' "$GUARD" > "$ws/scripts/tests/$GUARD_BASE"
   chmod +x "$ws/scripts/tests/$GUARD_BASE"
+  # The guard queries cargo with `--locked`, which REFUSES to create or rewrite a
+  # lockfile — correct for the real repo (it is what stops the guard mutating the
+  # tree it inspects), but it means a scratch workspace needs its own Cargo.lock
+  # first. These crates have no external dependencies, so this resolves offline.
+  # Failure is ignored on purpose: the stub-cargo cases below never reach real
+  # cargo, and the cases that DO would fail loudly on their own assertion anyway.
+  (cd "$ws" && cargo generate-lockfile --offline --quiet >/dev/null 2>&1) || true
   echo "$ws"
 }
 
@@ -304,6 +311,59 @@ else
   pass_case "filtering-stage failure: guard FAILs closed rather than reading a broken filter as zero dependents"
 fi
 
+# --- roborev job 82: cargo output that is NON-EMPTY but UNPARSEABLE. A successful
+# --- awk run matching nothing used to be read as "zero dependents", so a change in
+# --- cargo's tree format would let an UNWIRED crate with REAL dependents pass. The
+# --- parser must now prove it recognised the SUBJECT (cargo always prints it as the
+# --- tree root) before an empty dependent set is allowed to mean anything.
+ws=$(make_ws unparseable 'wiredone' 'orphanone' '-' 'wiredone orphanone' 'orphanone:labeled')
+mkdir -p "$ws/stubbin"
+# exits 0, prints plausible-looking output that contains NO "<name> v<digit>" record
+printf '#!/usr/bin/env bash\nprintf "some future cargo format\\nwith no version records\\n"\nexit 0\n' \
+  > "$ws/stubbin/cargo"
+chmod +x "$ws/stubbin/cargo"
+out=$(PATH="$ws/stubbin:$PATH" run_guard "$ws"); rc=$?
+if [ $rc -eq 0 ]; then
+  fail_case "unparseable cargo output: guard PASSED — a successful parse matching NOTHING was read as 'zero dependents', so an UNWIRED crate with real dependents would pass"
+  printf '%s\n' "$out" | sed 's/^/    /' >&2
+elif ! grep -qF "unmeasurable is not a pass" <<<"$out"; then
+  fail_case "unparseable cargo output: guard failed but not via the fail-closed measurement path:"
+  printf '%s\n' "$out" | sed 's/^/    /' >&2
+else
+  pass_case "unparseable cargo output (exit 0, no version records): guard FAILs closed"
+fi
+
+# --- and the complement: output whose ONLY record is the subject must still be a
+# --- legitimate "zero dependents" PASS, so the new subject check cannot be
+# --- satisfied by simply rejecting every empty result.
+ws=$(make_ws subjectonly 'wiredone' 'orphanone' '-' 'wiredone orphanone' 'orphanone:labeled')
+mkdir -p "$ws/stubbin"
+cat > "$ws/stubbin/cargo" <<'STUB'
+#!/usr/bin/env bash
+# Echo ONLY the subject, as real cargo does for a crate with no dependents.
+# The subject is the argument immediately after `--invert`. Scanning for "the
+# first non-flag argument" does NOT work: `--target all` contributes a bare
+# `all`, which is how the first version of this stub picked the wrong subject
+# and made this green control fail.
+subj=""
+prev=""
+for a in "$@"; do
+  if [ "$prev" = "--invert" ]; then subj="$a"; break; fi
+  prev="$a"
+done
+[ -n "$subj" ] || { echo "stub: no --invert argument found" >&2; exit 64; }
+printf "%s v0.1.0 (/scratch/%s)\n" "$subj" "$subj"
+exit 0
+STUB
+chmod +x "$ws/stubbin/cargo"
+out=$(PATH="$ws/stubbin:$PATH" run_guard "$ws"); rc=$?
+if [ $rc -eq 0 ] && grep -q '^PASS:' <<<"$out"; then
+  pass_case "GREEN 6: cargo output containing ONLY the subject is a legitimate zero-dependents PASS"
+else
+  fail_case "GREEN 6 — subject-only cargo output did NOT pass (rc=$rc); the subject check must not reject every empty result:"
+  printf '%s\n' "$out" | sed 's/^/    /' >&2
+fi
+
 # --- fail-closed on an absent subject
 ws=$(make_ws notools 'wiredone' 'orphanone' '-' 'wiredone orphanone' 'orphanone:labeled')
 rm -rf "$ws/tools"
@@ -322,4 +382,4 @@ if [ "$fails" -ne 0 ]; then
   echo "FAIL: $fails tools/ disposition self-test case(s) failed" >&2
   exit 1
 fi
-echo "PASS: tools/ crate disposition self-test (#1716) — 5 green controls + 18 negative controls"
+echo "PASS: tools/ crate disposition self-test (#1716) — 6 green controls + 19 negative controls"
