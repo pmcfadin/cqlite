@@ -164,9 +164,11 @@ jobs:
 
       - name: Install the wheel
         shell: bash
+        # No `pip install --upgrade pip` on purpose: it is not needed to install
+        # a local wheel, and on the 3.9 leg it is one more moving part that can
+        # fail for reasons unrelated to the floor being tested.
         run: |
           set -euo pipefail
-          python -m pip install --upgrade pip
           python -m pip install floor-wheel/*.whl
 
       - name: Restore canonical datasets
