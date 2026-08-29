@@ -7,7 +7,7 @@
 //! and needed a profiler on the box. The four `cqlite.read.phase.*` histograms split
 //! ONE completed scan's wall time into io / decompress / decode / merge, and the
 //! three resource gauges (`cqlite.reader.fds.open`, `cqlite.wal.size`,
-//! `cqlite.wal.replay.duration`) report what the readers and the write engine
+//! `cqlite.wal.recovery.duration`) report what the readers and the write engine
 //! already know.
 //!
 //! So the assertions here are about EMISSION AT A REAL READ SURFACE over REAL
@@ -507,7 +507,7 @@ mod wal_gauges {
 
     #[test]
     #[serial_test::serial(read_metrics)]
-    fn a_writable_session_reports_wal_size_and_last_replay_duration() {
+    fn a_writable_session_reports_wal_size_and_recovery_duration() {
         let mc = testing::metrics_capture();
         let tmp = tempfile::TempDir::new().expect("tmp");
         let cfg = WriteEngineConfig::new(tmp.path().join("data"), tmp.path().join("wal"), schema());
@@ -538,16 +538,16 @@ mod wal_gauges {
             metrics.find(catalog::WAL_SIZE).map(|m| &m.points)
         );
         assert!(
-            metrics.contains(catalog::WAL_REPLAY_DURATION),
-            "cqlite.wal.replay.duration must be reported at engine OPEN, including \
-             the 0-entry case (a fresh WAL genuinely replayed nothing in ~0s, which \
-             is a real measurement); collected metrics: {:?}",
+            metrics.contains(catalog::WAL_RECOVERY_DURATION),
+            "cqlite.wal.recovery.duration must be reported at engine OPEN, including \
+             the 0-entry case (a fresh WAL genuinely had nothing to recover, in \
+             ~0s, which is a real measurement); collected metrics: {:?}",
             metric_names(&metrics)
         );
         assert_eq!(
-            metrics.unit(catalog::WAL_REPLAY_DURATION),
+            metrics.unit(catalog::WAL_RECOVERY_DURATION),
             Some(catalog::unit::SECONDS),
-            "the replay-duration gauge must carry the catalogued base-unit seconds"
+            "the recovery-duration histogram must carry the catalogued base-unit seconds"
         );
 
         // Phase 2 — REOPEN over the same WAL, which really replays the mutation
@@ -557,18 +557,18 @@ mod wal_gauges {
         let reopened = WriteEngine::new(cfg).expect("reopen engine");
         let metrics = mc.flush_and_collect();
         assert!(
-            metrics.contains(catalog::WAL_REPLAY_DURATION),
-            "a reopen that replays a non-empty WAL must report its replay duration; \
+            metrics.contains(catalog::WAL_RECOVERY_DURATION),
+            "a reopen that recovers a non-empty WAL must report its recovery duration; \
              collected metrics: {:?}",
             metric_names(&metrics)
         );
         assert!(
             metrics
-                .find(catalog::WAL_REPLAY_DURATION)
+                .find(catalog::WAL_RECOVERY_DURATION)
                 .is_some_and(|m| m.points.iter().all(|p| p.value >= 0.0)),
-            "a replay duration is never negative; points: {:?}",
+            "a recovery duration is never negative; points: {:?}",
             metrics
-                .find(catalog::WAL_REPLAY_DURATION)
+                .find(catalog::WAL_RECOVERY_DURATION)
                 .map(|m| &m.points)
         );
         drop(reopened);

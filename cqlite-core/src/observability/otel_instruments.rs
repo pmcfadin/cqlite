@@ -445,13 +445,15 @@ fn register_histograms(reg: &mut Registry<'_>) {
     // Per-scan read PHASE timings (#1707): ONE sample per phase per completed
     // scan, base-unit seconds (the issue's `_ms` spelling was normalised — see
     // the catalog doc comments).
-    // WAL replay at engine open (#1707). A histogram, not a gauge, because the
-    // gauge plane is i64 and a sub-second replay would truncate to a fabricated 0 —
-    // see the catalog doc comment. Normally ONE sample per process.
+    // WAL recovery at engine open (#1707) — the CRC validation scan plus the
+    // replay, which is why it is `recovery` and not `replay`. A histogram, not a
+    // gauge, because the gauge plane is i64 and a sub-second recovery would truncate
+    // to a fabricated 0 — see the catalog doc comment. Normally ONE sample per
+    // process.
     reg.histogram(
-        catalog::WAL_REPLAY_DURATION,
+        catalog::WAL_RECOVERY_DURATION,
         catalog::unit::SECONDS,
-        "Duration in seconds of the WAL replay at engine open (#1707).",
+        "Duration in seconds of WAL recovery (validation scan + replay) at engine open (#1707).",
     );
     reg.histogram(
         catalog::READ_PHASE_IO,

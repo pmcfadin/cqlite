@@ -6,7 +6,7 @@
 //! * [`record_wal_size`] — the size the [`super::wal::WriteAheadLog`] TRACKS, emitted
 //!   at the same post-write seam as the memtable gauges so "memtable growing / WAL
 //!   growing" are two readings taken at one instant;
-//! * [`record_wal_replay_duration`] — how long the replay at engine open took.
+//! * [`record_wal_recovery_duration`] — how long WAL recovery at engine open took.
 //!
 //! A sibling file, not more lines in `mod.rs`, per the campsite rule (#1116): that
 //! file is far over the source target already.
@@ -38,15 +38,14 @@ pub(super) fn record_wal_size(size: u64) {
     obs::record_gauge(catalog::WAL_SIZE, size as i64, &[]);
 }
 
-/// Emit the duration of the WAL RECOVERY performed at engine open — the CRC
-/// validation scan run while opening the log plus the replay of its entries, not
-/// the replay pass alone (the metric name keeps `replay` for continuity).
+/// Emit the duration of the WAL recovery performed at engine open — the CRC
+/// validation scan run while opening the log plus the replay of its entries.
 ///
 /// A free function because recovery runs during CONSTRUCTION, before a
-/// `WriteEngine` value exists. See [`catalog::WAL_REPLAY_DURATION`] for why this is
+/// `WriteEngine` value exists. See [`catalog::WAL_RECOVERY_DURATION`] for why this is
 /// a histogram in base-unit seconds rather than an `i64` gauge (a sub-second
 /// recovery would truncate to a fabricated `0`), and why it is recorded even when
 /// there was nothing to recover and even when replay found corruption.
-pub(super) fn record_wal_replay_duration(elapsed: Duration) {
-    obs::record_histogram(catalog::WAL_REPLAY_DURATION, elapsed.as_secs_f64(), &[]);
+pub(super) fn record_wal_recovery_duration(elapsed: Duration) {
+    obs::record_histogram(catalog::WAL_RECOVERY_DURATION, elapsed.as_secs_f64(), &[]);
 }

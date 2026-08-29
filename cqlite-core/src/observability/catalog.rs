@@ -597,27 +597,25 @@ pub const WAL_SYNC_DURATION: &str = "cqlite.wal.sync.duration";
 /// **Healthy vs alarming**: saw-tooths — it grows with writes and drops back when a
 /// flush truncates/rotates the log. A level that only ever climbs means flushes are
 /// not keeping up (or are not happening), which is both a durability-replay-time
-/// problem and a disk-space one: replay cost at next open is a function of this
-/// size, so cross-check [`WAL_REPLAY_DURATION`]. **Attributes**: none.
+/// problem and a disk-space one: recovery cost at next open is a function of this
+/// size, so cross-check [`WAL_RECOVERY_DURATION`]. **Attributes**: none.
 pub const WAL_SIZE: &str = "cqlite.wal.size";
 
-/// `cqlite.wal.replay.duration` — histogram `s` (issue #1707).
+/// `cqlite.wal.recovery.duration` — histogram `s` (issue #1707).
 ///
-/// How long write-ahead-log RECOVERY at engine open took, in seconds. Covers the
-/// whole recovery window: the CRC validation scan performed while opening the log
-/// (plus any torn-tail trim) AND the replay of its entries into the memtable. On a
-/// large or corrupt-tail WAL the validation scan is the dominant half, so a
-/// replay-only timing would understate exactly the startup an operator is asking
-/// about. Recovery happens EXACTLY ONCE per engine open, so this series normally
-/// carries ONE sample per process — read it as a value, not as a distribution.
-///
-/// The metric NAME says `replay` for continuity with the operator-facing docs and
-/// dashboards; read it as "recovery at open".
+/// How long write-ahead-log recovery at engine open took, in seconds. Recovery is
+/// BOTH halves of what open does to the log: the CRC validation scan (plus any
+/// torn-tail trim) and the replay of its entries into the memtable. On a large or
+/// corrupt-tail WAL the validation scan is the dominant half, which is why the
+/// timer spans the whole window — a replay-only timing would understate exactly the
+/// startup an operator is asking about. Recovery happens EXACTLY ONCE per engine
+/// open, so this series normally carries ONE sample per process — read it as a
+/// value, not as a distribution.
 ///
 /// **Why a histogram and not a gauge, which is what one-sample-per-process argues
 /// for**: the gauge plane in this crate is `i64` (`Gauge<i64>`, and OTel's gauge
 /// builders here are `i64`/`u64`), and this value is sub-second in the common case.
-/// An `i64` gauge in base-unit SECONDS would report `0` for a 400 ms replay — a
+/// An `i64` gauge in base-unit SECONDS would report `0` for a 400 ms recovery — a
 /// FABRICATED zero, which is the precise defect class epic #1686 exists to remove,
 /// and worse than the wart of a one-sample distribution. Reporting milliseconds
 /// instead would break the catalog's base-unit rule (see the `read.phase.*`
@@ -630,13 +628,13 @@ pub const WAL_SIZE: &str = "cqlite.wal.size";
 /// one that happens to be small. It is also recorded when replay found CORRUPTION,
 /// before the lossy-recovery branch, because that is exactly when an operator cares
 /// what open cost. Absence of this series therefore means "no engine was opened in
-/// this process", never "replay was skipped".
+/// this process", never "recovery was skipped".
 ///
 /// **Healthy vs alarming**: near-zero after a clean shutdown; seconds means a crash
 /// left a large log to validate and replay, which directly delays open — pair it
 /// with [`WAL_SIZE`], whose growth is what makes this number grow.
 /// **Attributes**: none.
-pub const WAL_REPLAY_DURATION: &str = "cqlite.wal.replay.duration";
+pub const WAL_RECOVERY_DURATION: &str = "cqlite.wal.recovery.duration";
 
 /// `cqlite.flush.duration` — histogram `s`.
 ///

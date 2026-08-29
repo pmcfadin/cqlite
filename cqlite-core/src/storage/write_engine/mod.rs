@@ -616,14 +616,15 @@ impl WriteEngine {
             }
             Ok(())
         })?;
-        // Emitted UNCONDITIONALLY, including the 0-entry case: a fresh WAL that
-        // replayed nothing genuinely took ~0s, and that IS a measurement (the #2314
-        // rule forbids inventing a value nobody took, not reporting a real one that
-        // is small). Covers the WHOLE recovery window opened above — validation scan
-        // plus replay — not the replay pass alone. Recorded BEFORE the
-        // lossy-recovery branch below so a CORRUPT-WAL open, which is exactly when
-        // recovery latency matters most, still reports the time it spent.
-        wal_gauges::record_wal_replay_duration(recovery_started.elapsed());
+        // Emitted UNCONDITIONALLY, including the 0-entry case: a fresh WAL with
+        // nothing to recover genuinely took ~0s, and that IS a measurement (the
+        // #2314 rule forbids inventing a value nobody took, not reporting a real one
+        // that is small). Covers the WHOLE recovery window opened above — validation
+        // scan plus replay — which is why the metric is `cqlite.wal.recovery.duration`
+        // and not `…replay…`. Recorded BEFORE the lossy-recovery branch below so a
+        // CORRUPT-WAL open, which is exactly when recovery latency matters most,
+        // still reports the time it spent.
+        wal_gauges::record_wal_recovery_duration(recovery_started.elapsed());
 
         if !wal_recovery.is_clean() {
             // Preserve the raw WAL segment aside BEFORE anything (a later flush,

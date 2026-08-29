@@ -89,8 +89,8 @@
 //!    the non-reader footprint (sockets, WAL).
 //! 5. **Check startup / durability stalls.** [`catalog::WAL_SIZE`] should saw-tooth;
 //!    a level that only climbs means flushes are not keeping up, and next open's
-//!    [`catalog::WAL_REPLAY_DURATION`] grows with it. A slow FIRST query after a
-//!    restart is usually replay, not the read path.
+//!    [`catalog::WAL_RECOVERY_DURATION`] grows with it. A slow FIRST query after a
+//!    restart is usually WAL recovery, not the read path.
 //!
 //! **The accounting caveat, and it matters for step 1:** the read pipeline is
 //! CONCURRENT — an IO/decompress feed thread, a blocking parse thread, a merge

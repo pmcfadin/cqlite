@@ -62,9 +62,9 @@ pub const ALL_METRICS: &[&str] = &[
     MEMTABLE_SIZE_BYTES,
     MEMTABLE_ROWS,
     WAL_SYNC_DURATION,
-    // WAL size + last-replay duration gauges (#1707)
+    // WAL size + recovery-at-open duration (#1707)
     WAL_SIZE,
-    WAL_REPLAY_DURATION,
+    WAL_RECOVERY_DURATION,
     FLUSH_DURATION,
     FLUSH_ROWS,
     FLUSH_BYTES,
