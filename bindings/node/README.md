@@ -281,7 +281,7 @@ try {
 
 **Error Codes:**
 
-Codes come from the shared FFI error contract (`cqlite_core::ffi_error_contract`),
+Codes come from the shared FFI error contract (`cqlite_ffi_common::error_contract`),
 keyed by the core error VARIANT — the same table the Python binding reads, so a
 given failure has the same identity in both bindings (issue #1451). A code is
 therefore finer-grained than the `category` it reports (a timeout is `TIMEOUT`

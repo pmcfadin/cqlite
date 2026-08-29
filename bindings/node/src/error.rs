@@ -13,7 +13,7 @@
 //! # Error Code Mapping — the shared FFI error contract (issue #1451)
 //!
 //! `code`/`category`/`isRecoverable`/prefix all come from
-//! `cqlite_core::ffi_error_contract`, the ONE authoritative table that
+//! `cqlite_ffi_common::error_contract`, the ONE authoritative table that
 //! `bindings/python` reads too, keyed **by `Error` variant**. This binding used
 //! to derive its code from `Error::category()`, which made the same core error
 //! a different thing in each binding: `CqlParse` reported `QUERY` here while
@@ -62,7 +62,7 @@
 //! }
 //! ```
 
-use cqlite_core::ffi_error_contract::contract_for;
+use cqlite_ffi_common::error_contract::contract_for;
 use cqlite_core::Error;
 
 /// Error metadata extracted from a cqlite_core::Error.
@@ -84,7 +84,7 @@ pub struct ErrorMetadata {
 /// Extract error metadata from a `cqlite_core::Error`.
 ///
 /// Every field comes from the error's row in the shared FFI error contract
-/// (`cqlite_core::ffi_error_contract`), looked up **by variant** — never
+/// (`cqlite_ffi_common::error_contract`), looked up **by variant** — never
 /// re-derived from `Error::category()`, which cannot distinguish `CqlParse`
 /// from a generic query failure or a `Timeout` from an I/O failure (issue
 /// #1451). `bindings/python` reads the same row, so the two bindings cannot
@@ -247,7 +247,7 @@ fn panic_message(payload: &(dyn std::any::Any + Send)) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use cqlite_core::ffi_error_contract::FfiErrorVariant;
+    use cqlite_ffi_common::error_contract::FfiErrorVariant;
 
     #[test]
     fn test_io_error_metadata() {

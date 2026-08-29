@@ -1464,6 +1464,7 @@ name = "cqlite-py"
 version = "0.16.1"
 dependencies = [
  "cqlite-core",
+ "cqlite-ffi-common",
  "hex",
  "opentelemetry",
  "opentelemetry_sdk",
@@ -4206,6 +4207,7 @@ dependencies = [
  "inventory",
  "libc",
  "memoffset",
+ "num-bigint",
  "once_cell",
  "portable-atomic",
  "pyo3-build-config",

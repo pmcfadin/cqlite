@@ -48,7 +48,7 @@
 //! (catch-all)" claim survived here).
 //!
 //! **Scope: telemetry only.** The language bindings do NOT derive from
-//! [`classify`]: `crate::ffi_error_contract` (issue #1451) mirrors the distinct
+//! [`classify`]: `cqlite_ffi_common::error_contract` (issue #1451) mirrors the distinct
 //! [`Error::category`](crate::error::Error::category) enum, and nothing pins the
 //! two together — `QueryTimeout` is `Timeout` here and `Query` there.
 //!
