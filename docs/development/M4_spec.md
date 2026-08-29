@@ -621,8 +621,12 @@ takes its canonicalization rules from this table; it does not re-derive them.
 **The general principle — read this before the rules.** Canonicalization is reliable **exactly
 when the Python host shape uniquely determines the CQL type.** Where it does not, no
 host-value-only normalizer can recover the difference, and the rule for that row does not hold.
-There are exactly two ways it fails, and **every known limitation below is an instance of one of
-them**:
+Failure comes in exactly two **families** — that part is structural, a property of the two
+mechanisms below — but the families are **GENERATIVE, not a taxonomy of a fixed set of cases**:
+they produce an instance wherever a *projection position* (a set element or a map key) holds a
+non-scalar value, and **nesting multiplies them**, because every nested collection inside a
+projected value is another opportunity for the same two failures. So the instance list further
+down is a floor, not a ceiling:
 
 - **(a) Lossy projection.** `map_to_py` routes map KEYS, and `set_to_py` routes SET ELEMENTS,
   through `value_to_hashable_key`, which **discards the CQL type**: `map`→tuple of pairs,
@@ -636,7 +640,7 @@ them**:
 
 Resolving (a) or (b) needs the **declared CQL type** threaded into normalization — i.e.
 schema-aware normalization. That is a behavior change, out of scope for #1454, and tracked as
-**#3497**; all four non-benign instances below belong to it.
+**#3497**, to which every non-benign instance below belongs.
 
 **Rules that hold:**
 
@@ -647,21 +651,40 @@ schema-aware normalization. That is a behavior change, out of scope for #1454, a
   can have. (`set<frozen<map>>` also sorts, but its *elements* do not canonicalize — instance
   **a-2**.)
 - `map<k,v>` → a **sorted array of `{"key": k, "value": v}` objects**, keyed on the
-  canonicalized key. This is also the CLI's JSON rendering of a map. Holds for every key type
-  the host shape identifies, i.e. all but instances **a-1** and **b-2**.
+  canonicalized key. This is also the CLI's JSON rendering of a map. It holds only where the host
+  shape identifies the key type — a scalar key always, a non-scalar key only if no instance of
+  family (a) or (b) applies to it (see **a-1**, **a-3** and **b-2** for known cases).
 - `udt` → an object keyed by field name, with `_keyspace` dropped (the CLI omits it) and
   `_type` retained.
 
-**The closed list of instances.** Each is pinned by a test in `TestCollectionIdentityContract`
-(`bindings/python/tests/test_cli_parity.py`) that records the divergent shape as a **gap**, never
-as a desirable canonical form. All four are tracked by **#3497**.
+**Known instances (NOT exhaustive).** This table records the instances **identified so far**; it
+is a floor, not a ceiling, and it cannot be closed — the nesting space the two families range
+over is unbounded, so an enumeration could never be complete. **Do not read absence from this
+table as absence of a problem:** check any newly-encountered nested shape against the principle
+above, and add it here when found. Each listed instance is pinned by a test in
+`TestCollectionIdentityContract` (`bindings/python/tests/test_cli_parity.py`) that records the
+divergent shape as a **gap**, never as a desirable canonical form, and each is tracked by
+**#3497**.
 
 | # | Class | Instance | What actually happens | What #1455 must do |
 |---|---|---|---|---|
 | **a-1** | lossy projection | **UDT as a map KEY** (`map<frozen<udt>, v>`) | `value_to_hashable_key` projects the key to a `frozenset` of `(field_name, value)` pairs (incl. `_type`/`_keyspace`), which canonicalizes to a sorted array of `[name, value]` pairs; Node and the CLI render the same key as a UDT **object**. Different in kind — nothing in the normalizer reconciles them. Reconstructing a UDT object from an anonymous `frozenset` of 2-tuples would be a shape guess, and no fixture table currently has a UDT map key. | Treat a UDT map key as **UNSUPPORTED**. Do not assume the projected frozenset shape is canonical. |
 | **a-2** | lossy projection | **`map` inside a `set` element** (`set<frozen<map<k,v>>>`) | The element is projected to a **tuple of pairs**, so it canonicalizes to `[["a", 1]]`, while Node and the CLI render that nested map as `[{"key": "a", "value": 1}]`. The same nested map in *value* position goes through `value_to_py` → `dict` and canonicalizes correctly, so the divergence is specific to hashable-projection positions (set elements and map keys). | Treat a `map` nested in a set element (or map key) as **UNSUPPORTED**. The enclosing set still sorts; the element shape is what diverges. |
+| **a-3** | lossy projection | **a UDT nested deeper inside a projected value** — e.g. `set<frozen<list<frozen<udt>>>>` | `value_to_hashable_key`'s `List` arm recurses, so the inner UDT is projected to a `frozenset` of `(field_name, value)` pairs: the element canonicalizes to `[[["_keyspace", …], ["_type", …], ["street", …]]]` — an array of `[name, value]` pairs — while Node and the CLI produce `[[{"_type": …, "street": …}]]`, i.e. an array holding a UDT **object**. This is not a new carve-out: it is a-1's projection reached one level deeper, and it is the concrete demonstration that **nesting generates instances**. Any further nesting of a projected non-scalar should be assumed to do the same until checked. | Treat a UDT nested anywhere inside a projection position as **UNSUPPORTED**. |
 | **b-1** | host-shape collision | **`set<frozen<udt>>` vs `list<T>`** | Both are a plain Python `list` (`set_to_py`'s `contains_udt` fallback), so the set cannot be sorted without also reordering genuine `list<T>` values, whose order is semantically meaningful. Consequence: this row's canonical form is **order-SENSITIVE** — two structurally-equal UDT sets whose elements are in different orders canonicalize to **different** arrays and compare **unequal**. | Handle the row explicitly: compare it order-insensitively itself, or declare it unsupported. Do **not** assume the canonical form has erased set ordering here. |
 | **b-2** | host-shape collision | **`map<text, X>` containing a literal `"_type"` key vs a `udt`** | Both are a Python `dict`, and the normalizer's `if "_type" in value:` branch classifies such a map as a UDT: it returns an **object** instead of the documented key/value array, and **drops a `_keyspace` entry** if the map has one. `"_type"`/`_keyspace` are legal `text` map keys, so this is a real (if unusual) false positive. Requiring `_keyspace` as well would only pick a rarer delimiter on an already-ambiguous channel — a legal map can carry both — so it is documented, not narrowed (see the control/data lesson in `CLAUDE.md`). | Treat a `map<text, X>` whose keys may include `"_type"` as **UNSUPPORTED** until #3497 threads the declared type. |
+
+**Some nested shapes RAISE rather than diverge (issue #3500).** `contains_udt` and
+`value_to_hashable_key` are **not total over `Value`**: `contains_udt` recurses only through
+`Frozen`, and `value_to_hashable_key` has arms for `List`/`Map`/`Frozen`/`Udt` but **none for
+`Tuple` or `Set`** (both fall through to `value_to_py`). So for shapes such as
+`set<frozen<tuple<frozen<udt>, int>>>` and `set<frozen<set<frozen<udt>>>>`, `set_to_py` commits to
+the `frozenset` path — `contains_udt` never sees the nested UDT — and the fall-through then yields
+an unhashable `dict`/`list`, raising `TypeError: unhashable type` **inside the binding, before any
+normalizer runs**. That is a production `value.rs` defect, tracked separately as **#3500** (#3497
+is shape-only), and fixing it is out of scope for #1454, which forbids `value.rs` edits.
+Consequence for #1455: a harness hitting one of these gets an **exception, not a mismatch**, and
+must not record it as a parity failure — it is an unsupported-shape error to be reported as such.
 
 Benign non-instance, recorded so it is not mistaken for a gap: `tuple<...>` vs `list<T>` collide
 in the host shape on the Node side, but the canonical form merges them **by design**, so nothing
@@ -670,7 +693,9 @@ is lost.
 The executable half of this contract is `normalize_python_value` in
 `bindings/python/tests/test_cli_parity.py` (issue #319) — see
 `TestCollectionIdentityContract` there, which asserts the normalized shape of every row of the
-table above **and** pins all four instances, so none can be mistaken for a solved case.
+table above **and** pins each known instance, so none can be mistaken for a solved case. The
+crash cases of #3500 are deliberately not pinned there: they raise inside the binding, so the
+normalizer never sees them.
 
 **Temporal Type Precision Notes (Issue #299)**:
 
