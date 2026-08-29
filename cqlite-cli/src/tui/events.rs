@@ -4,6 +4,7 @@
 //! handlers. State lives in [`super::model::TuiApp`]; drawing lives in
 //! [`super::render`].
 
+use super::event_source::TuiEventSource;
 use super::model::{FocusPanel, TuiApp};
 use super::render::ui;
 use anyhow::Result;
@@ -11,26 +12,77 @@ use crossterm::event::{self, Event, KeyCode, KeyModifiers};
 use ratatui::{backend::Backend, Terminal};
 use std::time::Duration;
 
+/// Input poll cadence. This is the input-latency bound and stays as it is
+/// (issue #1718): the *draw* is gated, not the poll.
+pub(super) const POLL_INTERVAL: Duration = Duration::from_millis(100);
+
 /// Main TUI event loop
-pub(super) async fn run_tui<B: Backend>(
+pub(super) async fn run_tui<B: Backend, S: TuiEventSource>(
     terminal: &mut Terminal<B>,
     app: &mut TuiApp,
+    events: &mut S,
 ) -> Result<()> {
+    // Start dirty so the first iteration paints the initial screen.
+    let mut dirty = true;
+
     loop {
-        // Refresh metrics if stale (every 5 seconds)
-        app.refresh_metrics().await;
-
-        terminal.draw(|f| ui(f, app))?;
-
-        if event::poll(Duration::from_millis(100))? {
-            if let Event::Key(key) = event::read()? {
-                // Handle key events
-                if handle_key_event(app, key).await {
-                    return Ok(()); // Exit requested
-                }
-            }
+        if tui_iteration(terminal, app, events, &mut dirty).await? {
+            return Ok(()); // Exit requested
         }
     }
+}
+
+/// One cycle of the TUI loop: refresh, conditionally draw, then poll for input.
+///
+/// Returns `Ok(true)` when the user asked to exit. `dirty` carries the
+/// "something changed, repaint next cycle" state across iterations.
+pub(super) async fn tui_iteration<B: Backend, S: TuiEventSource>(
+    terminal: &mut Terminal<B>,
+    app: &mut TuiApp,
+    events: &mut S,
+    dirty: &mut bool,
+) -> Result<bool> {
+    // Refresh metrics if stale (every 5 seconds). A refresh that actually fired
+    // re-collected the status bar's values, so the screen changed; a call that
+    // found the metrics fresh changed nothing and must not force a repaint.
+    if app.refresh_metrics().await {
+        *dirty = true;
+    }
+
+    // Issue #1718: draw ONLY on change. The poll cadence below stays at 100ms
+    // (it is the input-latency bound); it is the draw that is now conditional.
+    if *dirty {
+        terminal.draw(|f| ui(f, app))?;
+        *dirty = false;
+    }
+
+    if events.poll(POLL_INTERVAL)? {
+        match events.read()? {
+            // A key is fed to the handlers, which mutate app state; even a key
+            // no panel handler acts on can change mode/focus state, so treat
+            // every consumed key as dirty rather than second-guessing it.
+            Event::Key(key) => {
+                if handle_key_event(app, key).await {
+                    return Ok(true); // Exit requested
+                }
+                *dirty = true;
+            }
+            // The terminal geometry changed: the whole layout must be redrawn.
+            Event::Resize(_, _) => *dirty = true,
+            // Mouse capture is enabled by `start_tui_mode`, but no handler
+            // consumes mouse input, so a mouse event changes no state and must
+            // NOT repaint — dropping these idle redraws is part of this fix.
+            Event::Mouse(_) => {}
+            // Terminal focus changes alter no application state and the UI
+            // renders nothing focus-dependent, so no repaint.
+            Event::FocusGained | Event::FocusLost => {}
+            // Bracketed paste is not enabled and no handler consumes a paste,
+            // so it changes nothing on screen either.
+            Event::Paste(_) => {}
+        }
+    }
+
+    Ok(false)
 }
 
 /// Handle key events - returns true if should exit
