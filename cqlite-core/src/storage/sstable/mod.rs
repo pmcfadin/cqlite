@@ -2131,18 +2131,7 @@ impl SSTableManager {
                             setup.into_error()
                         );
                     }
-                    Err(setup) => {
-                        let e = setup.into_error();
-                        // Issue #1704: an EARLY RETURN, before any `JoinedStream`
-                        // exists — the streaming seam (`JoinedStream::recv`) can
-                        // never see it, so this failed scan recorded nothing at
-                        // all. No double count is possible here: this arm RETURNS,
-                        // so no stream is constructed to count it a second time,
-                        // and the sibling `fallback_eligible` arm above returns
-                        // `Ok` (a degraded read is not a failed scan).
-                        crate::observability::record_error(&e, "reader");
-                        return Err(e);
-                    }
+                    Err(setup) => return Err(setup.into_counted_error()),
                 }
             }
         }

@@ -158,7 +158,7 @@ jobs:
             --lib error_metric_tests
           cargo test -p cqlite-core \
             --features observability-testing,cli-helpers \
-            --lib setup_error_metric_tests
+            --lib error_metrics
 
       # Scan-path error counting end to end (issue #1704): the three disjoint scan
       # exit seams (`JoinedStream::recv`, `scan_delta`'s terminal send, the

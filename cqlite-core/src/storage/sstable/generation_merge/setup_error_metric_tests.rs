@@ -28,14 +28,18 @@
 //! Gated on `observability-testing` for the in-memory capture harness, and
 //! `#[serial(read_metrics)]` against every other test that resets that
 //! process-global, DELTA-temporality harness.
+//!
+//! Declared from `setup_fail_closed_tests.rs` (its natural parent — same fixture,
+//! same faults) rather than from `generation_merge.rs`, which is over the ~800-line
+//! campsite target, so the fixture is reached by its absolute path.
 
 use tempfile::TempDir;
 
-use super::multi_gen_fixture::{
-    assert_reconciled_control, flush_overlapping_generations, open_manager, open_reconciling_stream,
-};
 use crate::observability::{catalog, testing};
 use crate::storage::producer_fault::{arm_merge_construction_error, MergeConstructionFault};
+use crate::storage::sstable::generation_merge::multi_gen_fixture::{
+    assert_reconciled_control, flush_overlapping_generations, open_manager, open_reconciling_stream,
+};
 
 /// This capture window's `cqlite.errors.total{subsystem="reader"}` total.
 fn reader_errors(m: &testing::CapturedMetrics) -> f64 {

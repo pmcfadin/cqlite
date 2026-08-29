@@ -176,3 +176,13 @@ async fn a_merger_ineligible_input_still_degrades_to_the_documented_concat() {
          merely returned the right number of rows. Got: {values:?}"
     );
 }
+
+// The METRIC half of this same property (issue #1704): a propagating setup failure
+// must also land in `cqlite.errors.total{subsystem="reader"}`, and the concat
+// fallback must not. Declared from HERE rather than from `generation_merge.rs`
+// because that file is over the ~800-line campsite target (#1116) and adding a
+// declaration to it would trip the gate's growth ratchet; this suite is its natural
+// parent anyway — same fixture, same injected construction faults.
+#[cfg(feature = "observability-testing")]
+#[path = "setup_error_metric_tests.rs"]
+mod error_metrics;
