@@ -356,6 +356,13 @@ fi
 # into this driver next. Exercised against a SCRATCH copy rather than one of those files, so the
 # control cannot drift when they change: the block must be delimited (not reported undelimited) AND
 # a defect inside it must still be reported.
+#
+# NO APOSTROPHE anywhere in the injected body, and that is load-bearing rather than style: the body
+# sits inside SHELL SINGLE QUOTES, so one closes the string early. An earlier version of this
+# fixture used a dict literal with quoted keys, was truncated at its first apostrophe, and STILL
+# "reported a defect" — the truncation, not the injected one. Round 5's word-boundary check turned
+# that into a visible failure, which is the check working; the fixture is now apostrophe-free, the
+# same rule `lib-ws0-fixtures.sh` records about its own bodies.
 TRAILING_DRIVER="$TMP/trailing-closer-ws0-driver.sh"
 python3 - "$DRIVER" "$TRAILING_DRIVER" <<'INJECT'
 import pathlib, sys
@@ -364,7 +371,8 @@ import pathlib, sys
 backslash, dquote = chr(92), chr(34)
 bad = "{d[" + backslash + dquote + "k" + backslash + dquote + "]}"
 q = chr(39)
-step = ("python3 -c " + q + "\nd = {'k': 1}\nprint(f'" + bad + "')" + q + " \"$OUT_DIR\"\n")
+step = ("python3 -c " + q + "\nd = dict(k=1)\nprint(f" + dquote + bad + dquote + ")"
+        + q + " \"$OUT_DIR\"\n")
 pathlib.Path(sys.argv[2]).write_text(pathlib.Path(sys.argv[1]).read_text() + step)
 INJECT
 tr_census="$(census "$TRAILING_DRIVER")"
@@ -473,6 +481,70 @@ if [ "$tab_blocks" -eq "$((block_count + 1))" ] && [ -z "$(findings_of "$tab_cen
   pass "census CONTROL fired (<<- form): a TAB-indented terminator delimits and the body's leading tabs are stripped as the shell strips them — the extracted source compiles ($tab_blocks blocks)"
 else
   fail "census CONTROL did not fire (<<- form): blocks=$tab_blocks (expected $((block_count + 1))), census='$(findings_of "$tab_census" | head -1)', compile='$(findings_of "$tab_compile" | head -1)'"
+fi
+
+# --- CONTROL 1e: a block's closing quote must be followed by a shell WORD BOUNDARY -------------
+# Bash CONCATENATES adjacent word fragments, so a block written `-c 'pass'" +"` runs `pass +`.
+# Extracting the quoted part alone would approve a program python never receives — a FALSE PASS,
+# measured: bash raised SyntaxError while the census reported `compiled=1 findings=0`.
+#
+# BOTH DIRECTIONS, and the ACCEPT half is the one that matters most here. The driver's own inline
+# block closes `')" || {` — a `)` immediately after the quote — so a whitespace-only boundary rule
+# would flag 1 of the driver's 3 real blocks on its first run. That exact shape is pinned below so
+# a future tightening cannot break the real subject silently; the false-red direction is what got
+# the previous oracle deleted.
+BOUNDARY_OK="$TMP/boundary-ok-ws0-driver.sh"
+python3 - "$BOUNDARY_OK" <<'INJECT'
+import pathlib, sys
+q = chr(39)
+# The driver's own closer shape, reproduced exactly: `')" || {`.
+pathlib.Path(sys.argv[1]).write_text(
+    'now="$(python3 -c ' + q + 'import time; print(time.monotonic_ns())' + q + ')" || {\n'
+    '  exit 2\n}\n')
+INJECT
+BOUNDARY_BAD="$TMP/boundary-bad-ws0-driver.sh"
+python3 - "$BOUNDARY_BAD" <<'INJECT'
+import pathlib, sys
+q, dq = chr(39), chr(34)
+# An ADJACENT FRAGMENT: bash appends it, so the program python runs is not the quoted text.
+pathlib.Path(sys.argv[1]).write_text(
+    'python3 -c ' + q + 'pass' + q + dq + ' +' + dq + '\n')
+INJECT
+bound_ok="$(census "$BOUNDARY_OK")"
+bound_bad="$(census "$BOUNDARY_BAD")"
+if [ "$(grep -c '^BLOCK	' <<<"$bound_ok")" -eq 1 ] && [ -z "$(findings_of "$bound_ok")" ] \
+   && grep -q 'word boundary' <<<"$bound_bad"; then
+  pass "census word-boundary, BOTH directions: the driver's own \`')\" || {\` closer is ACCEPTED (a shell metacharacter is a boundary, not just whitespace) while an adjacent fragment is a FINDING — bash would concatenate it and python would receive different source"
+else
+  fail "census word-boundary: accept-blocks=$(grep -c '^BLOCK	' <<<"$bound_ok") accept-findings='$(findings_of "$bound_ok" | head -1)' reject='$(findings_of "$bound_bad" | head -1)'"
+fi
+
+# --- CONTROL 1f: only a QUOTED heredoc delimiter is compiled -----------------------------------
+# With `<<PY` the shell expands parameters, commands, arithmetic and backslashes in the body
+# BEFORE python sees it, so the verbatim text is not the program that runs. Measured with a body
+# that is valid python verbatim and a SyntaxError once expanded: bash refused it, the census said
+# `compiled=1 findings=0`. Refused rather than modelled — this file will not imitate shell
+# expansion. With `<<'PY'` no expansion happens and the premise "verbatim is what python receives"
+# is exactly true, which is the accept half.
+HEREDOC_Q="$TMP/heredoc-quoted-ws0-driver.sh"
+HEREDOC_U="$TMP/heredoc-unquoted-ws0-driver.sh"
+python3 - "$HEREDOC_Q" "$HEREDOC_U" <<'INJECT'
+import pathlib, sys
+q, dq = chr(39), chr(34)
+tag = "PY" + "Q"
+body = "v = " + dq + "$X" + dq + "\nprint(v)\n"
+# Quoted delimiter: literal body, so compiling the verbatim text is exactly right.
+pathlib.Path(sys.argv[1]).write_text("python3 - <<" + q + tag + q + "\n" + body + tag + "\n")
+# Unquoted delimiter: the same body, but $X is substituted before python sees it.
+pathlib.Path(sys.argv[2]).write_text("python3 - <<" + tag + "\n" + body + tag + "\n")
+INJECT
+hq_out="$(census "$HEREDOC_Q")"
+hu_out="$(census "$HEREDOC_U")"
+if [ "$(grep -c '^BLOCK	' <<<"$hq_out")" -eq 1 ] && [ -z "$(findings_of "$hq_out")" ] \
+   && grep -q 'UNQUOTED delimiter' <<<"$hu_out"; then
+  pass "census heredoc-quoting, BOTH directions: a QUOTED delimiter is compiled (no expansion, so verbatim IS the program) while an UNQUOTED one is a FINDING (the shell rewrites the body before python sees it)"
+else
+  fail "census heredoc-quoting: quoted-blocks=$(grep -c '^BLOCK	' <<<"$hq_out") quoted-findings='$(findings_of "$hq_out" | head -1)' unquoted='$(findings_of "$hu_out" | head -1)'"
 fi
 
 # ============================================================================

@@ -64,8 +64,10 @@ spelled:
 
     -c '…'        embedded, single-quoted — the shape both defective steps use. Extracted, by
                   the rule below rather than by a line pattern.
-    <<'EOF'       embedded via a heredoc on stdin. Extracted. (None today; covered because a
-                  future step written this way must not fall outside the census.)
+    <<'EOF'       embedded via a heredoc on stdin, delimiter QUOTED. Extracted. (None today;
+                  covered because a future step written this way must not fall outside the
+                  census.) An UNQUOTED `<<EOF` is a FINDING: the shell expands the body before
+                  python sees it, so the verbatim text is not the program that runs.
     <path>.py     a SCRIPT FILE. Not embedded — it is an ordinary python file every other tool
                   already sees — so it is recorded and not extracted.
     (no argument) a MENTION **only** for the one presence-probe construct this driver uses — the
@@ -148,6 +150,20 @@ _PY_TOKEN = re.compile(r"(?<![\w./-])python3(?![\w.])")
 # string. Where it CLOSES is decided by scanning bash's quoting rules (`_scan_single_quoted`),
 # never by a line pattern — see the header's three-shape section.
 _OPEN_DASH_C = re.compile(r"^\s*-c\s+'")
+# WHAT MAY LEGALLY FOLLOW A BLOCK'S CLOSING QUOTE (#3451 review round 5, finding 1).
+#
+# Bash CONCATENATES adjacent word fragments, so `python3 -c 'pass'" +"` runs `pass +`. Extracting
+# the quoted part alone approves a program python NEVER RECEIVES — measured: bash raised
+# `SyntaxError: invalid syntax` while the census reported `compiled=1 findings=0`. A FALSE PASS.
+#
+# The fix REFUSES rather than models: adjacent fragments are not parsed, they are a finding. What
+# makes that safe is the boundary SET, and getting it wrong reds the real driver — its inline
+# block at `ws0-baseline.sh:941` closes `')" || {`, i.e. with a `)` immediately after the quote, so
+# a whitespace-only rule would flag 1 of the driver's own 3 blocks on the first run. That false-red
+# direction is what got the previous oracle deleted, so the set is shell metacharacters, not just
+# space. (The two multi-line blocks close `' "$HERE" …`, a space, and are unaffected either way.)
+_WORD_BOUNDARY_AFTER_CLOSE = frozenset(" \t\n)&;|<>")
+
 # The `'"'"'` idiom: close, emit a literal apostrophe from a double-quoted segment, reopen. The one
 # exception to "a single-quoted string runs to the next quote".
 _QUOTE_IDIOM = "'" + '"' + "'" + '"' + "'"
@@ -319,6 +335,17 @@ def census(path: pathlib.Path) -> tuple[list[dict], list[dict]]:
                 # The opening quote is the LAST character the match consumed.
                 open_quote = m.end() + dash_c.end() - 1
                 body, close = _scan_single_quoted(text, open_quote)
+                after = text[close + 1 : close + 2]
+                if after and after not in _WORD_BOUNDARY_AFTER_CLOSE:
+                    raise Unclassifiable(
+                        idx + 1,
+                        "this block's closing quote is followed by "
+                        f"{after!r} rather than a shell word boundary, so bash CONCATENATES what"
+                        " follows onto the program — python would receive something other than"
+                        " the quoted text, and compiling the quoted text alone would approve a"
+                        " program that is never run. Adjacent fragments are refused, not"
+                        " reassembled: put the whole program inside one quoted string.",
+                    )
                 end_line = text.count("\n", 0, close)
                 pos = close + 1
                 records.append(
@@ -330,6 +357,25 @@ def census(path: pathlib.Path) -> tuple[list[dict], list[dict]]:
                 continue
             hd = _HEREDOC.search(rest)
             if hd:
+                if not hd.group("q"):
+                    # AN UNQUOTED DELIMITER EXPANDS (#3451 review round 5, finding 2). With
+                    # `<<PY` the shell performs parameter, command, arithmetic and backslash
+                    # expansion on the body BEFORE python sees it, so the verbatim text is not the
+                    # program. Measured with a body that is valid python verbatim and a
+                    # SyntaxError once expanded: bash refused it, the census reported
+                    # `compiled=1 findings=0`. A FALSE PASS.
+                    #
+                    # Refused, not modelled: shell expansion is not something this file will
+                    # imitate. With a QUOTED delimiter (`<<'PY'`) no expansion happens and the
+                    # premise "verbatim is what python receives" is exactly true, which is why
+                    # that case is compiled and this one is a finding.
+                    raise Unclassifiable(
+                        idx + 1,
+                        f"this python heredoc uses an UNQUOTED delimiter (`{hd.group('tag')}`),"
+                        " so the shell EXPANDS the body before python sees it and the verbatim"
+                        " text is not the program that runs. Compiling it would approve source"
+                        " nobody executes. Quote the delimiter to make the body literal.",
+                    )
                 body, end = _delimit_heredoc(
                     lines, idx, hd.group("tag"), hd.group("dash") == "-"
                 )
