@@ -130,9 +130,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     own shipped `examples/example-config.toml`, which named all three. On load,
     each still-present removed key is reported by name on stderr, so a dead
     setting can no longer look like a live one. Delete the keys to silence it.
-  - **Migration (embedders):** drop the field assignment. None of these knobs
-    had an effect, so there is no behavior to preserve and no replacement to
-    adopt.
+  - **Migration (embedders writing Rust):** drop the field assignment. None of
+    these knobs had an effect, so there is no behavior to preserve and no
+    replacement to adopt.
+  - **Migration (Python / any JSON or dict config surface): the old shape STILL
+    LOADS, and now WARNS.** A Rust embedder gets a compile error, but the Python
+    bindings' dict/JSON bridge is a `serde_json::from_str`, and serde DISCARDS
+    unknown fields — so a saved pre-change config naming `performance`,
+    `storage.block_size`, `query.parallel` and the rest deserialized
+    successfully and was silently ignored. `cqlite_core::Config::from_json_str`
+    (and the bindings on top of it) now report every removed key the document
+    still sets: a Python `DeprecationWarning` naming each dead path, raised only
+    once the load has SUCCEEDED. Same posture as the CLI file surface, one
+    posture crate-wide: parse-and-ignore PLUS a named warning, never
+    `deny_unknown_fields`, which would hard-fail an existing caller with no
+    migration path over keys that never did anything.
 
 - **BREAKING (public API): the schema JSON exporter and the never-compiled CQL
   generator are deleted (#1715, epic #1688 / audit finding AK4; ~2.0k LOC).**
@@ -177,7 +189,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   infinities fell back to the `0.5` default; anything `> 1.0` was pinned to
   `1.0`), so an operator who wrote `2.0` got the default and no word about it.
   `Config::validate` now rejects anything outside the documented `(0.0, 1.0]`,
-  naming the knob and the offending value.
+  naming the knob and the offending value — and the rejection is REACHABLE from
+  the public surfaces that were doing the clamping: `Database::open` validates
+  the config it is handed (a failure mode that method already documented but
+  never checked), and `SSTableReader::open` — reachable without a `Database` —
+  enforces the range itself before any file I/O. `1.0` is legal; `0.0` is
+  REJECTED rather than read as "never use direct I/O", because a zero threshold
+  makes every nonempty file exceed it, i.e. it reads as "never" and behaves as
+  "always" (say `disk_access_mode = Direct` for always, `Mmap`/`Buffered` for
+  never). A tiny/subnormal positive fraction is legal and honoured literally.
 - **A standing knob-behavior guard (#1696):**
   `cqlite-core/tests/config_knob_behavior_guard.rs`. Every leaf field of the
   public config structs must be registered with either a set-knob →

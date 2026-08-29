@@ -2,9 +2,11 @@
 //!
 //! # Why this module exists
 //!
-//! Epic #1685 ("config honesty") deletes knobs nothing reads. In `cqlite-core`
-//! that is free: `Config` is a Rust struct, so an embedder who still sets a
-//! deleted field gets a COMPILE error — the loudest signal there is.
+//! Epic #1685 ("config honesty") deletes knobs nothing reads. For an embedder
+//! writing RUST that is free: `cqlite_core::Config` is a Rust struct, so setting
+//! a deleted field is a COMPILE error — the loudest signal there is. Every OTHER
+//! authoring surface needs this mechanism, `cqlite_core::Config`'s own JSON
+//! deserialization included (#1696 roborev F1, `cqlite_core::config_removed_keys`).
 //!
 //! The CLI's config is a **file** surface (`cqlite.toml` / `.yaml` / `.json`), and
 //! serde silently discards unknown keys. So the same deletion would leave a user

@@ -4,10 +4,12 @@
 //! # The property
 //!
 //! `cqlite-core`'s `Config` is a Rust struct, so deleting a decorative field
-//! gives an embedder a compile error — the loudest signal possible. The CLI's
-//! config is a FILE, where serde discards unknown keys in silence, so the same
-//! deletion would leave a user whose `cqlite.toml` still says `[connection]`
-//! believing they had configured something.
+//! gives an embedder writing RUST a compile error — the loudest signal possible.
+//! The CLI's config is a FILE, where serde discards unknown keys in silence, so
+//! the same deletion would leave a user whose `cqlite.toml` still says
+//! `[connection]` believing they had configured something. (The same is true of
+//! `Config`'s OWN JSON/dict surface, which is why core carries this mechanism
+//! too — see `cqlite_core::config_removed_keys`, #1696 roborev F1.)
 //!
 //! The posture (stated once, crate-wide, in #1696):
 //!

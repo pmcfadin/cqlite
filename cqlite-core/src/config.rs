@@ -13,11 +13,25 @@ use std::time::Duration;
 /// `plan_cache_size` / `enable_optimization` / `parallel`, and the entire
 /// `performance` tree. Setting any of them changed nothing, silently.
 ///
-/// Deleting a field is deliberately a COMPILE error for an embedder: this is a
-/// Rust API, so that is the loudest signal available, and it is preferred over a
-/// field that keeps deserializing while doing nothing. (The CLI's config is a
-/// FILE surface where serde would swallow a removed key, so it warns by name
-/// instead — see `cqlite_cli::config::removed_keys`.)
+/// Deleting a field is deliberately a COMPILE error for an embedder writing
+/// Rust: that is the loudest signal available, and it is preferred over a field
+/// that keeps deserializing while doing nothing.
+///
+/// # But this is ALSO a deserialization surface (#1696 roborev F1)
+///
+/// `Config` derives `Deserialize`, and serde DISCARDS unknown fields — so a
+/// caller who configures CQLite through JSON or a dict (the Python bindings'
+/// bridge) gets no compile step and, before #1696's F1 fix, no signal at all: a
+/// pre-change document naming a deleted knob loaded successfully and was
+/// silently ignored. The rule is stated at the layer where a knob is SET, so
+/// every non-Rust authoring surface reports removed keys by name instead:
+/// [`Self::from_json_str`] / [`Self::from_json_str_reporting_removed`] for this
+/// crate's JSON surface (see [`crate::config_removed_keys`]), and
+/// `cqlite_cli::config::removed_keys` for the CLI's file surface. Both use the
+/// same posture — parse-and-ignore PLUS a named warning, never
+/// `deny_unknown_fields` — because ONE posture crate-wide is the requirement,
+/// and hard-failing would leave an existing caller with no migration path over
+/// keys that never did anything.
 ///
 /// The standing guard is `cqlite-core/tests/config_knob_behavior_guard.rs`:
 /// every leaf field below must be registered there with either a set-knob →

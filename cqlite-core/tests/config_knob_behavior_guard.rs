@@ -429,9 +429,18 @@ const KNOBS: &[Knob] = &[
 /// which is the same dishonesty as a decorative knob wearing a different hat.
 ///
 /// `Config::validate` now REJECTS the whole documented-illegal range, and the
-/// message names the knob and the offending value. This is the observable
-/// difference: setting the knob outside `(0.0, 1.0]` changes what `validate`
-/// returns.
+/// message names the knob and the offending value.
+///
+/// SCOPE OF THIS TEST, stated because it was once overstated (#1696 roborev F2):
+/// it pins the RULE, at the one place the rule is written
+/// (`StorageConfig::validated_direct_io_memory_fraction`, via `validate`). It is
+/// NOT the wiring evidence — a test that calls `validate()` by hand cannot show
+/// that any public surface calls it, and for a while none did, so an operator
+/// setting `2.0` through `Database::open` was still silently clamped with this
+/// test green beside them. The PUBLIC-surface evidence is
+/// `tests/issue_1696_direct_io_fraction_validation.rs`, which drives every case
+/// through `Database::open` and `SSTableReader::open` and never through
+/// `validate`. Both are needed: this one for the rule, that one for the reach.
 #[test]
 fn out_of_range_direct_io_memory_fraction_is_rejected() {
     // Every value the field doc calls illegal.
