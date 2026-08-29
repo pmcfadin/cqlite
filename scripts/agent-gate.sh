@@ -6515,26 +6515,39 @@ EOF
 # findings continued, which is the evidence that the surface is unbounded rather than merely
 # large.
 #
-# THE PROPERTY THAT MAKES IT SHIPPABLE ANYWAY, and the only one you may rely on — READ THE SCOPE,
-# IT IS NARROWER THAN IT FIRST READ: an unrecognised ATTRIBUTE or CLUSTER shape is reported as
-# UNCLASSIFIED, never as ABSENT (and at runtime, not merely here — an unmodelled string-literal
-# shape actually prints `[UNCLASSIFIED: ...]`). For those shapes a miss costs NOISE (an
-# unattributable entry a human must read) and never BLINDNESS (a clean zero over gated code).
-# Every change here must preserve that direction. If you cannot tell, say so — do not resolve.
+# WHAT THIS SCAN DOES AND DOES NOT GIVE YOU. Read this instead of relying on a guarantee — there
+# deliberately is not one, and the two attempts to state one are recorded below because the second
+# was falsified within a day of the first.
 #
-# DECLARATION RECOGNITION CARRIES NO SUCH GUARANTEE, and this sentence exists because the
-# guarantee above was written unscoped and was therefore FALSE for this path (roborev job 103,
-# and found by hand before that review ran). A `mod` declaration in a form the patterns do not
-# match — a raw identifier `mod r#type;`, a declaration broken across lines — is NOT reported as
-# unclassified. It is not seen at all: the child never enters the closure, nothing reaches
-# stderr, and every consumer (target discovery, the polarity scan, the co-required census) then
-# reports over a silently smaller tree while the lane PASSES. For that path the direction is
-# BLINDNESS, not noise. Measured at the time of writing: 0 such declarations across cqlite-core,
-# cqlite-cli and cqlite-flight against 595 recognised in cqlite-core alone — so this is a latent
-# exposure, not a live miscount, and it is NOT fixed here because another pattern is the seventh
-# instance of the family. #3472 carries it, and an overclaimed guarantee is worse than an
-# omission: an omission leaves you uninformed, an overclaim has you relying on cover you
-# do not have.
+# THE INTENT: an unrecognised shape should be reported as UNCLASSIFIED rather than omitted, so that
+# a miss costs NOISE (an unattributable entry a human reads) rather than BLINDNESS (a clean zero
+# over gated code). Every change here must push in that direction, and where the scan can detect
+# that it cannot tell, it says so at runtime — an unmodelled string-literal shape prints
+# `[UNCLASSIFIED: ...]` rather than resolving.
+#
+# THE INTENT IS NOT ENFORCED, AND IT CANNOT BE. By construction this scan cannot enumerate the
+# shapes it fails to detect: an undetected shape produces no output to mark unclassified. So the
+# direction is a design aim, NOT a property you may rely on, and the following are MEASURED
+# counterexamples rather than hypotheticals:
+#   * a delimiter inside a string literal (`doc = "]"`) closed a cluster early     — FIXED (job 101)
+#   * a `mod` form the patterns do not match (`mod r#type;`, a split declaration)  — OPEN  (job 103)
+#   * a delimiter inside a line comment (`feature = "x" // ]`)                     — OPEN  (job 105)
+# The two open ones resolve to ABSENT, not UNCLASSIFIED, and emit nothing at all.
+#
+# THEREFORE, THE ONE SENTENCE TO CARRY AWAY: a clean census is evidence that nothing was
+# RECOGNISED — never evidence that nothing is THERE.
+#
+# WHY THIS IS STATED AS A DISCLAIMER AND NOT AS A NARROWER GUARANTEE. It was a guarantee twice.
+# Unscoped, it said an unrecognised shape is always UNCLASSIFIED; job 103 falsified that. Scoped to
+# ATTRIBUTE AND CLUSTER shapes, it excluded declaration recognition; job 105 falsified that too,
+# with a comment-borne delimiter, which IS a cluster shape. A guarantee qualified per path acquires
+# a new exception per review round, for exactly the reason the scanner does — so a third
+# qualification would be the prose equivalent of an eighth pattern. An overclaimed guarantee is
+# worse than an omission: an omission leaves a reader uninformed, an overclaim has them relying on
+# cover that is not there, and a reader of this line does not read #3472.
+#
+# DO NOT FIX EITHER OPEN ITEM WITH ANOTHER PATTERN. #3472 holds the seven measured lexical contexts
+# and the reasoning; the answers there are syntax-aware tooling or deleting the scanning half.
 #
 # WHAT NOT TO DO: do not add a thirteenth shape and call the family closed. If correctness rather
 # than advice is ever required of this scan, the answer is syntax-aware tooling or deleting the
@@ -6871,26 +6884,39 @@ for p in d.get("packages", []):
 # findings continued, which is the evidence that the surface is unbounded rather than merely
 # large.
 #
-# THE PROPERTY THAT MAKES IT SHIPPABLE ANYWAY, and the only one you may rely on — READ THE SCOPE,
-# IT IS NARROWER THAN IT FIRST READ: an unrecognised ATTRIBUTE or CLUSTER shape is reported as
-# UNCLASSIFIED, never as ABSENT (and at runtime, not merely here — an unmodelled string-literal
-# shape actually prints `[UNCLASSIFIED: ...]`). For those shapes a miss costs NOISE (an
-# unattributable entry a human must read) and never BLINDNESS (a clean zero over gated code).
-# Every change here must preserve that direction. If you cannot tell, say so — do not resolve.
+# WHAT THIS SCAN DOES AND DOES NOT GIVE YOU. Read this instead of relying on a guarantee — there
+# deliberately is not one, and the two attempts to state one are recorded below because the second
+# was falsified within a day of the first.
 #
-# DECLARATION RECOGNITION CARRIES NO SUCH GUARANTEE, and this sentence exists because the
-# guarantee above was written unscoped and was therefore FALSE for this path (roborev job 103,
-# and found by hand before that review ran). A `mod` declaration in a form the patterns do not
-# match — a raw identifier `mod r#type;`, a declaration broken across lines — is NOT reported as
-# unclassified. It is not seen at all: the child never enters the closure, nothing reaches
-# stderr, and every consumer (target discovery, the polarity scan, the co-required census) then
-# reports over a silently smaller tree while the lane PASSES. For that path the direction is
-# BLINDNESS, not noise. Measured at the time of writing: 0 such declarations across cqlite-core,
-# cqlite-cli and cqlite-flight against 595 recognised in cqlite-core alone — so this is a latent
-# exposure, not a live miscount, and it is NOT fixed here because another pattern is the seventh
-# instance of the family. #3472 carries it, and an overclaimed guarantee is worse than an
-# omission: an omission leaves you uninformed, an overclaim has you relying on cover you
-# do not have.
+# THE INTENT: an unrecognised shape should be reported as UNCLASSIFIED rather than omitted, so that
+# a miss costs NOISE (an unattributable entry a human reads) rather than BLINDNESS (a clean zero
+# over gated code). Every change here must push in that direction, and where the scan can detect
+# that it cannot tell, it says so at runtime — an unmodelled string-literal shape prints
+# `[UNCLASSIFIED: ...]` rather than resolving.
+#
+# THE INTENT IS NOT ENFORCED, AND IT CANNOT BE. By construction this scan cannot enumerate the
+# shapes it fails to detect: an undetected shape produces no output to mark unclassified. So the
+# direction is a design aim, NOT a property you may rely on, and the following are MEASURED
+# counterexamples rather than hypotheticals:
+#   * a delimiter inside a string literal (`doc = "]"`) closed a cluster early     — FIXED (job 101)
+#   * a `mod` form the patterns do not match (`mod r#type;`, a split declaration)  — OPEN  (job 103)
+#   * a delimiter inside a line comment (`feature = "x" // ]`)                     — OPEN  (job 105)
+# The two open ones resolve to ABSENT, not UNCLASSIFIED, and emit nothing at all.
+#
+# THEREFORE, THE ONE SENTENCE TO CARRY AWAY: a clean census is evidence that nothing was
+# RECOGNISED — never evidence that nothing is THERE.
+#
+# WHY THIS IS STATED AS A DISCLAIMER AND NOT AS A NARROWER GUARANTEE. It was a guarantee twice.
+# Unscoped, it said an unrecognised shape is always UNCLASSIFIED; job 103 falsified that. Scoped to
+# ATTRIBUTE AND CLUSTER shapes, it excluded declaration recognition; job 105 falsified that too,
+# with a comment-borne delimiter, which IS a cluster shape. A guarantee qualified per path acquires
+# a new exception per review round, for exactly the reason the scanner does — so a third
+# qualification would be the prose equivalent of an eighth pattern. An overclaimed guarantee is
+# worse than an omission: an omission leaves a reader uninformed, an overclaim has them relying on
+# cover that is not there, and a reader of this line does not read #3472.
+#
+# DO NOT FIX EITHER OPEN ITEM WITH ANOTHER PATTERN. #3472 holds the seven measured lexical contexts
+# and the reasoning; the answers there are syntax-aware tooling or deleting the scanning half.
 #
 # WHAT NOT TO DO: do not add a thirteenth shape and call the family closed. If correctness rather
 # than advice is ever required of this scan, the answer is syntax-aware tooling or deleting the
