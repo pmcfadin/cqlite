@@ -167,8 +167,14 @@ fn metric_names(metrics: &CapturedMetrics) -> Vec<String> {
 
 /// Assert the emission GRAIN and the cardinality contract for every phase present:
 /// exactly ONE sample per phase per completed scan (never one per chunk or per row),
-/// the catalogued unit, and no attribute key beyond the one a single-SSTable read
-/// could honestly know.
+/// the catalogued unit, and NO attribute at all.
+///
+/// The attribute assertion is written against the DECLARATION, not the
+/// implementation: `catalog_read_phase` says "**Attributes**: none" for all four
+/// series and every `operator_docs_annotations_read_phase` row carries
+/// `attributes: &[]`. An earlier form of this helper asserted each emitted key
+/// EQUALS `sstable.format`, which permitted exactly the drift it was there to
+/// catch — a test written from the code cannot falsify the code.
 fn assert_phase_grain_and_attributes(metrics: &CapturedMetrics, phase: &str) {
     for (name, label) in PHASES {
         let Some(entry) = metrics.find(name) else {
@@ -188,16 +194,16 @@ fn assert_phase_grain_and_attributes(metrics: &CapturedMetrics, phase: &str) {
             "[{phase}] {label} must carry the catalogued base-unit seconds"
         );
         for point in &entry.points {
-            for (key, _) in &point.attributes {
-                assert_eq!(
-                    key.as_str(),
-                    catalog::attr::SSTABLE_FORMAT,
-                    "[{phase}] {label} may carry no attribute other than the bounded \
-                     {} — every dimension multiplies cardinality; points: {:?}",
-                    catalog::attr::SSTABLE_FORMAT,
-                    entry.points
-                );
-            }
+            let keys: Vec<&str> = point.attributes.iter().map(|(k, _)| k.as_str()).collect();
+            assert!(
+                keys.is_empty(),
+                "[{phase}] {label} is DECLARED attribute-free (catalog_read_phase says \
+                 \"Attributes: none\"; every operator_docs_annotations_read_phase row \
+                 sets attributes: &[]), so it must emit NO attribute key — every \
+                 dimension multiplies cardinality, and an emitted key the docs do not \
+                 declare is a disagreement between the metric and its own contract; \
+                 got: {keys:?}"
+            );
         }
     }
 }

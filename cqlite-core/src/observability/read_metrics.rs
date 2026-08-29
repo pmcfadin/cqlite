@@ -375,6 +375,29 @@ impl ReadOpMeter {
         // merges nothing. Recording `0.0` would assert a measurement that was never
         // taken, and would drag every percentile of a real phase toward zero for
         // every read that does not perform it.
+        //
+        // ATTRIBUTE-FREE, deliberately, and NOT `attrs`: this family is declared
+        // "**Attributes**: none" by `catalog_read_phase` and carries an empty
+        // `attributes` in every `operator_docs_annotations_read_phase` row, so
+        // emitting `cqlite.sstable.format` here would make the emission and the
+        // declaration disagree — two statements of one fact, one of them wrong.
+        // The declaration is the one to keep: the merge phase is format-agnostic
+        // (it spans generations), so a per-format phase dimension could not be
+        // honestly populated across the family anyway. `read.duration` above keeps
+        // `attrs` — its format attribute IS declared.
+        //
+        // PARTIAL-SNAPSHOT CAVEAT (issue #1707): the surrounding prose says "ONE
+        // sample per phase per COMPLETED scan", and completion here means THIS
+        // METER completed — `finish()` runs when the stream is dropped. The
+        // detached feed/parse tasks hold their own `Arc<ReadPhaseTimings>` clone
+        // and keep accumulating into it after that, so an ABANDONED scan (a `LIMIT`
+        // the consumer stopped reading, a dropped stream) emits a PARTIAL snapshot
+        // of an operation still in flight, not a final total. That is the same
+        // shape `read.duration` already has (it measures until the drop, not until
+        // the pipeline quiesces) and is why the emission is here rather than behind
+        // a join: waiting for the detached tasks would make an abandoned scan's
+        // metric arrive late, or never.
+        let phase_attrs: &[(&'static str, AttrValue)] = &[];
         for (phase, name) in [
             (ReadPhase::Io, catalog::READ_PHASE_IO),
             (ReadPhase::Decompress, catalog::READ_PHASE_DECOMPRESS),
@@ -383,7 +406,11 @@ impl ReadOpMeter {
         ] {
             let nanos = acc.phases.nanos(phase);
             if nanos > 0 {
-                obs::record_histogram(name, Duration::from_nanos(nanos).as_secs_f64(), attrs);
+                obs::record_histogram(
+                    name,
+                    Duration::from_nanos(nanos).as_secs_f64(),
+                    phase_attrs,
+                );
             }
         }
     }
