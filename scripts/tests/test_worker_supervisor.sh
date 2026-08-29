@@ -20,6 +20,30 @@ fail() {
   FAIL_COUNT=$((FAIL_COUNT + 1))
   echo "FAIL: $1"
 }
+
+# t <test-fn> — run a top-level test. IT MUST EXIST, AND IT MUST RETURN ZERO.
+#
+# THE SUITE REPORTED GREEN THROUGH A TEST THAT DID NOT EXIST (roborev round 27, Medium).
+# `test_claim_transition_survives_failed_replacement` was invoked at the bottom of this file and never
+# defined. The harness runs under `set -uo pipefail` with NO errexit, so bash printed
+# "command not found" to stderr, the status was discarded, and the summary still said
+# "80 passed, 0 failed" — through ELEVEN gates. A suite that can report success while a named case never
+# runs is the vacuity failure one level up from the individual asserts: every non-vacuity probe in here
+# was guarding its own case while the HARNESS had no guard at all.
+#
+# Both halves are closed: an undefined name is a FAILURE rather than a silent no-op, and a test that
+# returns non-zero without having called `fail` is also a failure — otherwise an early `return 1` inside a
+# case would vanish the same way.
+t() {
+  local name="$1" rc=0
+  if ! declare -F "$name" >/dev/null 2>&1; then
+    fail "harness: test function '$name' is INVOKED but UNDEFINED — it has never run"
+    return 0
+  fi
+  "$name" || rc=$?
+  [[ "$rc" -eq 0 ]] || fail "harness: test function '$name' returned non-zero ($rc) without reporting a failure"
+}
+
 # skip: an ENVIRONMENTAL non-result (e.g. a live control process that never
 # scheduled within the wait cap) — explicitly reported, never counted as failure.
 skip() {
@@ -3036,6 +3060,69 @@ WEOF
   fi
 }
 
+# ---------------------------------------------------------------------------
+# Test 25-claim (#3393, roborev round 2, Medium): a lane TRANSITION must not open a liveness GAP. The
+# replacement is stamped BEFORE the old ref is deleted, so if the replacement FAILS the OLD ref must
+# SURVIVE — a lane with no claim ref at all is invisible to dead-lanes and to the reaper for the whole
+# iteration, which is a gap introduced by the leak fix rather than by the leak.
+#
+# THIS FUNCTION WAS INVOKED AND NEVER DEFINED until roborev round 27 (Medium). The suite reported
+# "80 passed, 0 failed" through eleven gates while this case never ran; the `t` wrapper above now makes an
+# undefined invocation a failure. The regression it was meant to pin is finally pinned here.
+# ---------------------------------------------------------------------------
+test_claim_transition_survives_failed_replacement() {
+  local d placeholder stamped_issue reaped
+  d="$(new_case_dir)"
+  common_env "$d"
+  export CLAIM_LOG="$d/claim.log"
+  : >"$CLAIM_LOG"
+  # A technical block (free-text reason, NOT a park token) retains the issue, so iteration 2 attempts the
+  # ISSUE-named replacement stamp — which this stub fails, while letting the placeholder stamp succeed.
+  write_blocked_same_issue_stub "$d/bin/worker.sh" 88
+  export WORKER_CMD="$d/bin/worker.sh"
+  export MAX_ISSUES=100
+  export BREAKER_N=100
+  write_claim_stub_failing_issue_stamp "$d/bin/claim.sh"
+  export CLAIM_CMD="bash $d/bin/claim.sh"
+  export HEARTBEAT_MACHINE="testbox"
+  bash "$SUPERVISOR" >"$d/stdout.log" 2>&1 || true
+  placeholder=$(grep -oE '^stamp p[0-9]+-[0-9a-f]+' "$CLAIM_LOG" 2>/dev/null | head -1 | awk '{print $2}')
+  stamped_issue=$(grep -cE '^stamp 88 [0-9]+$' "$CLAIM_LOG" 2>/dev/null || true)
+  reaped=no
+  [[ -n "$placeholder" ]] && grep -qE "^reap testbox ${placeholder}( |$)" "$CLAIM_LOG" 2>/dev/null && reaped=yes
+  # The failed replacement must have been ATTEMPTED (or the case proves nothing), and the old ref must
+  # still be there.
+  if [[ -n "$placeholder" && "$stamped_issue" -ge 1 && "$reaped" == no ]]; then
+    pass "claim: a FAILED replacement stamp leaves the old ref ($placeholder) in place — no liveness gap"
+  else
+    fail "claim-transition-gap: placeholder='$placeholder' issue_stamp_attempts=$stamped_issue reaped=$reaped log=[$(tr '\n' ';' <"$CLAIM_LOG")]"
+  fi
+  # NON-VACUITY / CONTROL: with a stub whose replacement SUCCEEDS, the old placeholder IS cleared. So the
+  # survival above is caused by the failure, not by the transition never happening or by a reap that never
+  # runs in this shape.
+  local d2 ph2 reaped2
+  d2="$(new_case_dir)"
+  common_env "$d2"
+  export CLAIM_LOG="$d2/claim.log"
+  : >"$CLAIM_LOG"
+  write_blocked_same_issue_stub "$d2/bin/worker.sh" 88
+  export WORKER_CMD="$d2/bin/worker.sh"
+  export MAX_ISSUES=100
+  export BREAKER_N=100
+  write_claim_stub "$d2/bin/claim.sh"
+  export CLAIM_CMD="bash $d2/bin/claim.sh"
+  export HEARTBEAT_MACHINE="testbox"
+  bash "$SUPERVISOR" >"$d2/stdout.log" 2>&1 || true
+  ph2=$(grep -oE '^stamp p[0-9]+-[0-9a-f]+' "$CLAIM_LOG" 2>/dev/null | head -1 | awk '{print $2}')
+  reaped2=no
+  [[ -n "$ph2" ]] && grep -qE "^reap testbox ${ph2}( |$)" "$CLAIM_LOG" 2>/dev/null && reaped2=yes
+  if [[ -n "$ph2" && "$reaped2" == yes ]]; then
+    pass "NON-VACUITY: when the replacement SUCCEEDS the old placeholder IS cleared, so the survival above is attributable to the failure"
+  else
+    fail "claim-transition-gap-control: ph2='$ph2' reaped2=$reaped2 — the control must clear the old ref"
+  fi
+}
+
 test_claim_drain_never_deletes_current_lane() {
   local d out
   d="$(new_case_dir)"
@@ -3253,72 +3340,72 @@ test_real_pgrep_usages_are_pid_scoped() {
 # Main
 # ---------------------------------------------------------------------------
 echo "=== worker-supervisor test suite ==="
-test_happy_path_budget_stop
-test_breaker_stops_on_abnormal
-test_stop_file_honored
-test_preflight_load_hold
-test_nowork_not_counted
-test_single_instance_lock
-test_stale_marker_removed
-test_repeated_blocked_head_of_queue_stops
-test_finalized_missing_pr_is_abnormal
-test_journal_escapes_nasty_reason
-test_park_seam1_parked_on_owner
-test_park_needs_decision_question_in_title
-test_unknown_outcome_is_abnormal
-test_stuck_on_question_detected
-test_prompt_signature_grep
-test_stuck_breaks_abnormal_chain
-test_repeated_park_same_issue_stops
-test_different_issue_parks_do_not_head_block
-test_stray_signature_scrollback_is_abnormal
-test_genuine_wedge_frozen_is_stuck
-test_busy_writing_signature_not_stuck
-test_fast_exit_latency
-test_claim_stamp_each_iter_and_clear_on_exit
-test_claim_issue_learned_from_marker
-test_claim_transition_survives_failed_replacement
-test_claim_drain_never_deletes_current_lane
-test_clear_claim_keeps_placeholder_on_abnormal_exit
-test_supervisor_lock_is_per_lane
-test_claim_cleanup_uses_lease_and_drops_on_transfer
-test_park_releases_issue_so_next_lane_is_a_placeholder
-test_no_work_shutdown_clears_its_placeholder
-test_finalized_verified_merged_counts
-test_finalized_mismatch_open_is_abnormal
-test_finalized_unverified_not_counted_no_breaker
-test_proc_probe_discriminates_worker_claude
-test_leftover_hold_bounded_stops
-test_persistent_unverified_stops
-test_forged_pr_is_unresolved_mismatch
-test_stop_file_honored_mid_hold
-test_probe_no_self_match
-test_parser_absent_is_unverified
-test_pending_automerge_verdict
-test_mismatch_grace_absorbs_lag
-test_foreign_url_is_unresolved
-test_alternating_holds_still_bounded
-test_maxhours_only_hold_no_abort
-test_transport_notfound_is_unverified
-test_python_only_parser_automerge
-test_stop_file_honored_mid_grace
-test_persistent_pending_automerge_stops
-test_healthy_multi_pr_no_false_stop
-test_pending_time_floor_blocks_fast_stuck
-test_pending_pr_closed_pages_high
-test_unverified_streak_survives_intervening_abnormal
-test_deferred_stuck_stop_clean_exit
-test_pending_time_floor_crossed_trips
-test_numeric_knob_validation
-test_build_hold_uses_loose_bound
-test_build_hold_clears_then_proceeds
-test_probe_list_derives_from_count_set
-test_grace_cap_disabled_semantics
-test_mid_grace_stop_is_aborted
-test_default_worker_cmd_is_headless
-test_healthy_worker_iterlog_nonempty
-test_claim_cmd_empty_truly_disables_no_network
-test_real_pgrep_usages_are_pid_scoped
-test_default_notify_path_publishes
+t test_happy_path_budget_stop
+t test_breaker_stops_on_abnormal
+t test_stop_file_honored
+t test_preflight_load_hold
+t test_nowork_not_counted
+t test_single_instance_lock
+t test_stale_marker_removed
+t test_repeated_blocked_head_of_queue_stops
+t test_finalized_missing_pr_is_abnormal
+t test_journal_escapes_nasty_reason
+t test_park_seam1_parked_on_owner
+t test_park_needs_decision_question_in_title
+t test_unknown_outcome_is_abnormal
+t test_stuck_on_question_detected
+t test_prompt_signature_grep
+t test_stuck_breaks_abnormal_chain
+t test_repeated_park_same_issue_stops
+t test_different_issue_parks_do_not_head_block
+t test_stray_signature_scrollback_is_abnormal
+t test_genuine_wedge_frozen_is_stuck
+t test_busy_writing_signature_not_stuck
+t test_fast_exit_latency
+t test_claim_stamp_each_iter_and_clear_on_exit
+t test_claim_issue_learned_from_marker
+t test_claim_transition_survives_failed_replacement
+t test_claim_drain_never_deletes_current_lane
+t test_clear_claim_keeps_placeholder_on_abnormal_exit
+t test_supervisor_lock_is_per_lane
+t test_claim_cleanup_uses_lease_and_drops_on_transfer
+t test_park_releases_issue_so_next_lane_is_a_placeholder
+t test_no_work_shutdown_clears_its_placeholder
+t test_finalized_verified_merged_counts
+t test_finalized_mismatch_open_is_abnormal
+t test_finalized_unverified_not_counted_no_breaker
+t test_proc_probe_discriminates_worker_claude
+t test_leftover_hold_bounded_stops
+t test_persistent_unverified_stops
+t test_forged_pr_is_unresolved_mismatch
+t test_stop_file_honored_mid_hold
+t test_probe_no_self_match
+t test_parser_absent_is_unverified
+t test_pending_automerge_verdict
+t test_mismatch_grace_absorbs_lag
+t test_foreign_url_is_unresolved
+t test_alternating_holds_still_bounded
+t test_maxhours_only_hold_no_abort
+t test_transport_notfound_is_unverified
+t test_python_only_parser_automerge
+t test_stop_file_honored_mid_grace
+t test_persistent_pending_automerge_stops
+t test_healthy_multi_pr_no_false_stop
+t test_pending_time_floor_blocks_fast_stuck
+t test_pending_pr_closed_pages_high
+t test_unverified_streak_survives_intervening_abnormal
+t test_deferred_stuck_stop_clean_exit
+t test_pending_time_floor_crossed_trips
+t test_numeric_knob_validation
+t test_build_hold_uses_loose_bound
+t test_build_hold_clears_then_proceeds
+t test_probe_list_derives_from_count_set
+t test_grace_cap_disabled_semantics
+t test_mid_grace_stop_is_aborted
+t test_default_worker_cmd_is_headless
+t test_healthy_worker_iterlog_nonempty
+t test_claim_cmd_empty_truly_disables_no_network
+t test_real_pgrep_usages_are_pid_scoped
+t test_default_notify_path_publishes
 echo "=== $PASS_COUNT passed, $FAIL_COUNT failed, $SKIP_COUNT skipped ==="
 [[ "$FAIL_COUNT" -eq 0 ]]
