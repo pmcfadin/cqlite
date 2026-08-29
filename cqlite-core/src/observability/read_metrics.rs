@@ -406,11 +406,7 @@ impl ReadOpMeter {
         ] {
             let nanos = acc.phases.nanos(phase);
             if nanos > 0 {
-                obs::record_histogram(
-                    name,
-                    Duration::from_nanos(nanos).as_secs_f64(),
-                    phase_attrs,
-                );
+                obs::record_histogram(name, Duration::from_nanos(nanos).as_secs_f64(), phase_attrs);
             }
         }
     }

@@ -943,40 +943,55 @@ impl SSTableReader {
             let _borrow_guard = ActiveWindowGuard::install(window);
             // decode PHASE (issue #1707): ONE accumulation per PARTITION parse — the
             // coarsest boundary that still separates decode from io, and deliberately
-            // NOT inside the row/cell decoder (the read path's hottest loop). The
-            // timer drops at the end of this statement's enclosing scope.
-            let _decode_phase =
-                crate::observability::read_phase::scoped(crate::observability::ReadPhase::Decode);
-            let step = parser.parse_one_partition_with_timestamps(
-                window.as_slice(),
-                ctx.schema.as_ref(),
-                self,
-                at_final_chunk,
-                &mut |(_entry_table_id, key, value, _ts)| {
-                    // Issue #1578: this stitching path deliberately does NOT filter
-                    // by `table_ids_match` — it mirrors the authoritative
-                    // materializing `sequential_scan` stitch path, which skips it
-                    // because the nb parser may report header-default table_ids.
-                    // Applying it here dropped EVERY row of an nb SSTable whose parsed
-                    // table_id diverged from the query (e.g. CQLite-written output).
-                    if let Some(start) = ctx.start_key.as_ref() {
-                        if &key < start {
+            // NOT inside the row/cell decoder (the read path's hottest loop).
+            //
+            // The timer is scoped to the PARSE CALL ALONE, by a block expression, and
+            // that tightness is load-bearing rather than tidiness: bound at
+            // loop-iteration scope it also covered `window.consume`, the
+            // `scratch.drain`/`batch.push` re-chunking, the batch `Vec` allocation and
+            // — decisively — `tx.blocking_send`, which PARKS this thread whenever the
+            // consumer is slow. A client that pages slowly would then make
+            // `read.phase.decode` dominated by waiting for the CONSUMER, sending the
+            // operator to the runbook's "decode dominant → wide partitions, many
+            // collection/UDT cells" and into a schema investigation that finds
+            // nothing. It would also contradict the catalogued definition ("decode out
+            // of already-resident decompressed bytes") and invert the care taken for
+            // the merge phase, which deliberately subtracts its recv-wait.
+            let step = {
+                let _decode_phase = crate::observability::read_phase::scoped(
+                    crate::observability::ReadPhase::Decode,
+                );
+                parser.parse_one_partition_with_timestamps(
+                    window.as_slice(),
+                    ctx.schema.as_ref(),
+                    self,
+                    at_final_chunk,
+                    &mut |(_entry_table_id, key, value, _ts)| {
+                        // Issue #1578: this stitching path deliberately does NOT filter
+                        // by `table_ids_match` — it mirrors the authoritative
+                        // materializing `sequential_scan` stitch path, which skips it
+                        // because the nb parser may report header-default table_ids.
+                        // Applying it here dropped EVERY row of an nb SSTable whose parsed
+                        // table_id diverged from the query (e.g. CQLite-written output).
+                        if let Some(start) = ctx.start_key.as_ref() {
+                            if &key < start {
+                                return Ok(std::ops::ControlFlow::Continue(()));
+                            }
+                        }
+                        if let Some(end) = ctx.end_key.as_ref() {
+                            if &key > end {
+                                return Ok(std::ops::ControlFlow::Continue(()));
+                            }
+                        }
+                        // Suppress row tombstones from user-facing scan output (#505).
+                        if !self.filter_tombstone(&value) {
                             return Ok(std::ops::ControlFlow::Continue(()));
                         }
-                    }
-                    if let Some(end) = ctx.end_key.as_ref() {
-                        if &key > end {
-                            return Ok(std::ops::ControlFlow::Continue(()));
-                        }
-                    }
-                    // Suppress row tombstones from user-facing scan output (#505).
-                    if !self.filter_tombstone(&value) {
-                        return Ok(std::ops::ControlFlow::Continue(()));
-                    }
-                    scratch.push((key, value));
-                    Ok(std::ops::ControlFlow::Continue(()))
-                },
-            )?;
+                        scratch.push((key, value));
+                        Ok(std::ops::ControlFlow::Continue(()))
+                    },
+                )?
+            };
 
             // Record whether this partition forced `scratch` to (re)allocate its
             // backing store. With the hoist this happens only while the buffer
