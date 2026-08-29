@@ -30,7 +30,14 @@ mod streaming;
 mod value;
 // Test-support: the committed cross-binding vector table, rendered through this
 // binding's production paths (issue #1452).
-mod vectors;
+//
+// `pub` because napi_derive cfg's its `#[napi]` registration out under
+// `cfg(test)` (`#[cfg(all(not(test), ...))]` on the generated ctor), so in a
+// `cargo test` build of this cdylib nothing inside the module has a Rust caller
+// and `dead_code` — denied via `RUSTFLAGS=-D warnings` — would fail the build.
+// Public reachability is the honest fix: the surface really is reachable, just
+// from JavaScript rather than from Rust.
+pub mod vectors;
 
 pub use database::ColumnInfo;
 pub use database::Database;
