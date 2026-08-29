@@ -54,6 +54,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
+use cqlite_core::config::DiskAccessMode;
 use cqlite_core::observability::catalog;
 use cqlite_core::observability::read_phase::io_delay;
 use cqlite_core::observability::testing::{self, CapturedMetrics};
@@ -115,8 +116,11 @@ fn committed_data_db((keyspace, table): (&str, &str)) -> PathBuf {
 }
 
 async fn open_reader(fixture: (&str, &str)) -> Arc<SSTableReader> {
+    open_reader_with(fixture, Config::default()).await
+}
+
+async fn open_reader_with(fixture: (&str, &str), config: Config) -> Arc<SSTableReader> {
     let data_db = committed_data_db(fixture);
-    let config = Config::default();
     let platform = Arc::new(
         Platform::new(&config)
             .await
@@ -321,22 +325,31 @@ async fn an_uncompressed_scan_records_no_decompress_sample_at_all() {
     assert_phase_grain_and_attributes(&metrics, "uncompressed scan");
 }
 
+/// A `Config` pinned to one disk-access backend, so the fd assertions do not depend
+/// on the `Auto` heuristic (which picks mmap for any file over 4 KiB, i.e. for every
+/// committed fixture — the reason this test cannot just use `Config::default()`).
+fn config_with_backend(mode: DiskAccessMode) -> Config {
+    let mut config = Config::default();
+    config.storage.disk_access_mode = mode;
+    config
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[serial_test::serial(read_metrics)]
-async fn the_reader_fd_gauge_reports_handles_a_scan_holds() {
+async fn the_reader_fd_gauge_reports_the_descriptors_a_buffered_scan_holds() {
     let mc = testing::metrics_capture();
     let (keyspace, table) = COMPRESSED;
 
     mc.reset();
-    let reader = open_reader(COMPRESSED).await;
+    let reader = open_reader_with(COMPRESSED, config_with_backend(DiskAccessMode::Buffered)).await;
     let rows = full_scan(Arc::clone(&reader), keyspace, table).await;
     let metrics = mc.flush_and_collect();
     assert!(rows > 0, "the committed fixture delivered 0 rows");
 
     let entry = metrics.find(catalog::READER_FDS_OPEN).unwrap_or_else(|| {
         panic!(
-            "cqlite.reader.fds.open must be reported by a read that opened SSTable \
-             handles; collected metrics: {:?}",
+            "cqlite.reader.fds.open must be reported by a BUFFERED read, which really \
+             opens descriptors; collected metrics: {:?}",
             metric_names(&metrics)
         )
     });
@@ -353,10 +366,70 @@ async fn the_reader_fd_gauge_reports_handles_a_scan_holds() {
     );
     assert!(
         entry.points.iter().any(|p| p.value > 0.0),
-        "the gauge must have reported at least one NON-ZERO reading while the scan \
-         held its handles open; points: {:?}",
+        "the gauge must have reported at least one NON-ZERO level while the reader \
+         and its scan held descriptors open; points: {:?}",
         entry.points
     );
+    assert!(
+        entry.points.iter().all(|p| p.attributes.is_empty()),
+        "the fd gauge is total-only — no attributes; points: {:?}",
+        entry.points
+    );
+
+    // And the level comes BACK DOWN: dropping the reader releases its handles, so
+    // the last reading of a window that ends after the drop must be 0. A gauge that
+    // only ever climbs is the unpaired-decrement bug this catches.
+    mc.reset();
+    drop(reader);
+    let after = mc.flush_and_collect();
+    if let Some(entry) = after.find(catalog::READER_FDS_OPEN) {
+        let last = entry
+            .points
+            .iter()
+            .map(|p| p.value)
+            .fold(f64::NAN, |_, v| v);
+        assert_eq!(
+            last, 0.0,
+            "after the last reader is dropped the gauge must read 0, not a level \
+             that never falls; points: {:?}",
+            entry.points
+        );
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[serial_test::serial(read_metrics)]
+async fn an_mmap_backed_read_reports_no_descriptors_rather_than_a_plausible_number() {
+    // The catalog claims mmap contributes 0 because it holds a MAPPING, not a
+    // descriptor. That claim is only worth making if it is pinned: an implementation
+    // that counted "one fd per source" would look right on the buffered case above
+    // and silently overstate fd pressure for every mmap reader.
+    let mc = testing::metrics_capture();
+    let (keyspace, table) = COMPRESSED;
+
+    mc.reset();
+    let reader = open_reader_with(COMPRESSED, config_with_backend(DiskAccessMode::Mmap)).await;
+    let rows = full_scan(Arc::clone(&reader), keyspace, table).await;
+    let metrics = mc.flush_and_collect();
+    assert!(rows > 0, "the committed fixture delivered 0 rows");
+
+    // The phases still record — this really is a full read, just without descriptors.
+    assert_eq!(
+        samples(&metrics, catalog::READ_PHASE_IO),
+        1,
+        "an mmap-backed scan still performs (and times) its Data.db reads; collected \
+         metrics: {:?}",
+        metric_names(&metrics)
+    );
+    if let Some(entry) = metrics.find(catalog::READER_FDS_OPEN) {
+        assert!(
+            entry.points.iter().all(|p| p.value <= 0.0),
+            "an mmap-backed reader holds NO file descriptors, so this gauge must not \
+             report a positive level for it (a mapping is not an fd, and an Arc clone \
+             of a mapping is not one either); points: {:?}",
+            entry.points
+        );
+    }
 }
 
 /// The WAL half of AC2, in its own module because it needs the write engine rather

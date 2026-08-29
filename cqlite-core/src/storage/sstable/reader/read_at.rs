@@ -253,6 +253,12 @@ impl<R: ReadAt> ReadAt for SerializingReadAt<R> {
 /// serializing Windows point reads for correctness while still opening the fd only
 /// once. The Unix arm keeps its lock-free `Arc<File>` (issue #1573 roborev finding).
 pub(crate) struct PlainFileReadAt {
+    /// `Some` when THIS value's construction performed the `open(2)`
+    /// ([`Self::open`]), so `cqlite.reader.fds.open` counts the descriptor for
+    /// exactly as long as this reader holds it (issue #1707). `None` for
+    /// [`Self::new`], which wraps a handle somebody else opened and therefore
+    /// somebody else accounts for — counting it here would double-count one fd.
+    _fd: Option<super::fd_gauge::OpenFdGauge>,
     /// Unix: shared handle, read lock-free via positional `pread` (no cursor).
     #[cfg(unix)]
     file: Arc<std::fs::File>,
@@ -267,6 +273,7 @@ impl PlainFileReadAt {
     /// Wrap an already-open file handle whose length is `len`.
     pub(crate) fn new(file: std::fs::File, len: u64) -> Self {
         Self {
+            _fd: None,
             #[cfg(unix)]
             file: Arc::new(file),
             #[cfg(windows)]
@@ -281,7 +288,13 @@ impl PlainFileReadAt {
     pub(crate) fn open(path: &std::path::Path, len: u64) -> Result<Self> {
         crate::storage::sstable::read_work_counters::record_file_open();
         let file = std::fs::File::open(path)?;
-        Ok(Self::new(file, len))
+        // Account the descriptor only AFTER the open succeeded (issue #1707): a
+        // refused open holds nothing, so counting before would report an fd that
+        // does not exist.
+        Ok(Self {
+            _fd: Some(super::fd_gauge::OpenFdGauge::minted()),
+            ..Self::new(file, len)
+        })
     }
 }
 
@@ -364,6 +377,9 @@ const DIRECT_IO_ALIGN: usize = 4096;
 /// concurrent `read_at`s never touch the same buffer.
 #[cfg(unix)]
 pub(crate) struct DirectReadAt {
+    /// See [`PlainFileReadAt::fd`] — `Some` only when this value's own
+    /// construction opened the descriptor (issue #1707).
+    _fd: Option<super::fd_gauge::OpenFdGauge>,
     file: Arc<std::fs::File>,
     len: u64,
 }
@@ -377,6 +393,7 @@ impl DirectReadAt {
         let file = super::source::open_direct_file(path)?;
         crate::storage::sstable::read_work_counters::record_file_open();
         Ok(Self {
+            _fd: Some(super::fd_gauge::OpenFdGauge::minted()),
             file: Arc::new(file),
             len,
         })
@@ -393,6 +410,8 @@ impl DirectReadAt {
     #[cfg(test)]
     pub(crate) fn from_plain_fd_for_test(file: std::fs::File, len: u64) -> Self {
         Self {
+            // The caller opened the handle, so it is not accounted here.
+            _fd: None,
             file: Arc::new(file),
             len,
         }

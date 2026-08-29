@@ -46,6 +46,11 @@ pub(crate) enum BlockSource {
     Buffered {
         reader: BufReader<File>,
         len: Option<u64>,
+        /// One descriptor's presence in `cqlite.reader.fds.open` (issue #1707).
+        /// Every buffered source owns its own `open(2)` — the reader's cold-open
+        /// handle and each per-scan reopen alike (issue #815: no reader pool) — so
+        /// the gauge falls back to the real level when the scan's cursor drops.
+        _fd: super::fd_gauge::OpenFdGauge,
     },
     /// Memory-mapped file view served directly from the page cache.
     Mapped(MmapCursor),
@@ -63,6 +68,7 @@ impl BlockSource {
         BlockSource::Buffered {
             reader: BufReader::new(file),
             len: None,
+            _fd: super::fd_gauge::OpenFdGauge::minted(),
         }
     }
 
@@ -72,6 +78,7 @@ impl BlockSource {
         BlockSource::Buffered {
             reader: BufReader::new(file),
             len: Some(len),
+            _fd: super::fd_gauge::OpenFdGauge::minted(),
         }
     }
 
@@ -80,7 +87,7 @@ impl BlockSource {
     /// immutable) rather than re-probed with `seek(End)` per chunk (issue #1586).
     pub(crate) async fn len(&mut self) -> io::Result<u64> {
         match self {
-            BlockSource::Buffered { reader, len } => match *len {
+            BlockSource::Buffered { reader, len, .. } => match *len {
                 Some(l) => Ok(l),
                 None => {
                     let l = reader.get_ref().metadata().await?.len();
@@ -412,6 +419,9 @@ const DIRECT_IO_ALIGN: usize = 4096;
 /// already perform synchronous page faults.
 #[cfg(unix)]
 pub(crate) struct DirectCursor {
+    /// One descriptor's presence in `cqlite.reader.fds.open` (issue #1707) — the
+    /// direct-I/O twin of the `Buffered` variant's `fd`.
+    _fd: super::fd_gauge::OpenFdGauge,
     file: std::fs::File,
     /// Total file length, used for EOF detection.
     len: u64,
@@ -455,6 +465,10 @@ impl DirectCursor {
             .unwrap_or(usize::MAX & !(align - 1));
         let buf = AlignedBuf::new(window, align)?;
         Ok(Self {
+            // Accounted only on the SUCCESSFUL direct open (issue #1707), for the
+            // same reason the read-work counter above is: a refused direct open
+            // falls back to a buffered one, which counts its own descriptor.
+            _fd: super::fd_gauge::OpenFdGauge::minted(),
             file,
             len,
             pos: 0,
