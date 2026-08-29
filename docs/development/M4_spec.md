@@ -560,6 +560,60 @@ napi-build = "2.1"
    - `MAP<TEXT, FROZEN<SET<TEXT>>>` → `dict[str, frozenset[str]]`
    - `LIST<FROZEN<udt>>` → `list[dict]` with UDT metadata
 
+### 5.3 Collection Identity Semantics: Python ↔ Node (Issue #1454)
+
+The two bindings represent CQL collections with **different host types and different
+identity rules**. This section states those semantics explicitly so that anything
+comparing the bindings — in particular the 3-way golden parity harness (**#1455**, Y1) —
+canonicalizes by contract rather than by accident.
+
+**Authority.** Every row below was read from source (re-verified 2026-08-29). Python:
+`bindings/python/src/value.rs` — `list_to_py`, `set_to_py` (+ its `contains_udt` helper),
+`map_to_py`, `tuple_to_py`, `value_to_hashable_key`. Node:
+`bindings/node/src/value.rs` — `list_to_array`, `set_to_js_set`, `map_to_js_map`, and the
+`Value::Tuple(items) => list_to_array(ctx, items)` arm of `value_to_napi`. Function names
+are cited instead of line numbers because line numbers drift.
+
+| CQL type | Python host type | Node host type | Identity semantics | Asymmetry |
+|---|---|---|---|---|
+| `list<T>` | `list` (`list_to_py`) | `Array` (`list_to_array`) | positional; order preserved on both sides; no dedupe | **symmetric** |
+| `set<scalar>` | `frozenset` (`set_to_py`, non-UDT branch; elements go through `value_to_hashable_key`) | `Set` (`set_to_js_set`, `new Set(array)`) | Python: hash/`__eq__` value-equality. Node: SameValueZero — for scalars this is also value-equality | container type differs; **element identity agrees** for scalars. Iteration order differs: `frozenset` is hash-ordered, JS `Set` is insertion-ordered — canonicalize by sorting |
+| `set<frozen<udt>>` | `list` — **fallback**, because UDTs become `dict`s and `dict` is unhashable (`set_to_py` takes this branch when `contains_udt` is true for any element) | `Set` of objects (`set_to_js_set`; no UDT fallback exists on the Node side) | Python: none — a `list` does not dedupe. Node: SameValueZero on **objects = reference identity**, so structurally-equal UDT elements are *not* deduped either | **asymmetric container**: Python degrades to `list`, Node keeps `Set`. Both are effectively order-preserving and non-deduping, so a set-of-UDT round-trips as a sequence on both sides |
+| `map<k,v>` | `dict` (`map_to_py`); keys are the **hashable projection** `value_to_hashable_key` (`list`→`tuple`, `set`→`frozenset`, `map`→tuple of pairs, `udt`→`frozenset` of `(name, value)` pairs incl. `_type`/`_keyspace`, sorted by field name), values are the ordinary `value_to_py` | `Map` (`map_to_js_map`, `new Map(entries)`); **both** key and value use the ordinary `value_to_napi` | Python: keys collapse by hash/`__eq__` — writing an equal key overwrites, last-value-wins. Node: keys collapse by SameValueZero, so scalar keys collapse but **object keys (UDT / list / tuple keys) are compared by reference and never collapse** | **two asymmetries.** (1) *dict-key collapse*: structurally-equal non-scalar keys collapse in Python and survive as distinct entries on Node. (2) *key shape*: a Python map **key** is a hashable projection (a UDT key is a `frozenset` of pairs), while the same UDT as a map **value** is a `dict` — on Node a key and a value of the same CQL type have the same host shape |
+| `tuple<...>` | `tuple` (`tuple_to_py`) | `Array` (`list_to_array` — the `Value::Tuple` arm delegates to the list converter) | positional on both sides | **asymmetric discriminability**: Node **cannot distinguish `tuple<...>` from `list<T>`** — both are plain `Array`s. Python can (`tuple` vs `list`). Any comparison must therefore treat tuple and list as the same canonical shape |
+| `frozen<T>` | unwrapped to the inner type's mapping | unwrapped to the inner type's mapping (`Value::Frozen(inner) => value_to_napi(ctx, inner)`) | as the inner type | **symmetric** — `frozen` is transparent on both sides |
+| `udt` | `dict` with `_type` + `_keyspace` metadata keys (`udt_to_py`) | object with `_type` + `_keyspace` properties (`udt_to_object`) | Python `dict`: keys collapse by value. Node object: string property keys | symmetric in shape; relevant here because it is what makes `set<frozen<udt>>` and UDT map keys behave as they do |
+
+Notes on identity that the table compresses:
+
+1. **Well-formed Cassandra data contains no duplicate set elements or map keys**, so the
+   collapse divergences above are not normally observable through a read path. They matter
+   because a parity harness must not *depend* on that: the canonical form has to be stable
+   whether or not the input holds duplicates.
+2. **Ordering is not part of CQL set/map identity but is part of the host containers.**
+   `frozenset` iteration is hash-ordered (and unstable across values/interpreters), JS `Set`
+   and `Map` iteration is insertion-ordered, and Cassandra stores sets/map keys in clustering
+   order. Canonicalization must sort; it must never assert an iteration order.
+3. **`set<frozen<list<T>>>` etc. stay hashable on the Python side** via
+   `value_to_hashable_key` (`list`→`tuple`), so such a set is still a `frozenset` — the `list`
+   fallback in `set_to_py` triggers on UDTs only (`contains_udt`).
+
+**Canonicalization rules (consumed by #1455).** The 3-way golden parity harness (#1455, Y1)
+takes its canonicalization rules from this table; it does not re-derive them:
+
+- `list<T>`, `tuple<...>`, `set<*>` → a JSON **array**. Tuple and list canonicalize
+  identically (Node cannot tell them apart). Sets are **sorted** for determinism.
+- `map<k,v>` → a **sorted array of `{"key": k, "value": v}` objects**, keyed on the
+  canonicalized key. This is also the CLI's JSON rendering of a map.
+- `udt` → an object keyed by field name, with `_keyspace` dropped (the CLI omits it) and
+  `_type` retained.
+- A Python map **key** must be canonicalized from its hashable projection (a `frozenset` of
+  `(name, value)` pairs for a UDT key), not from the value-side shape.
+
+The executable half of this contract is `normalize_python_value` in
+`bindings/python/tests/test_cli_parity.py` (issue #319) — see
+`TestCollectionIdentityContract` there, which asserts the normalized shape of each row above.
+
 **Temporal Type Precision Notes (Issue #299)**:
 
 > **Note:** superseded in v0.13 (#1450) — the `duration`/`time` precision losses below no longer apply. `duration`→`cqlite.Duration(months, days, nanos)` and `time`→`int` (ns since midnight) are both exact/lossless. See the [v0.13 Migration Guide](./v0.13-migration-guide.md).
