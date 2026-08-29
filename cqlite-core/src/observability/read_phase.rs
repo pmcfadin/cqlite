@@ -190,6 +190,11 @@ pub fn elapsed_nanos(start: Instant) -> u64 {
 /// time to `phase`. When no sink is installed this is a single thread-local peek
 /// plus the bare closure — no `Instant::now()`, no atomic write.
 pub fn timed<T>(phase: ReadPhase, f: impl FnOnce() -> T) -> T {
+    // Fast path FIRST: one `Cell<bool>` load, so an unmetered read pays neither a
+    // `RefCell` borrow nor an `Arc` refcount bump on a per-chunk seam.
+    if !sink_active() {
+        return f();
+    }
     match current() {
         None => f(),
         Some(sink) => {
@@ -216,6 +221,9 @@ pub fn timed<T>(phase: ReadPhase, f: impl FnOnce() -> T) -> T {
 /// Saturating: if a nested/foreign recv were somehow attributed a longer wait than
 /// this step's wall time, the phase gets 0 rather than a wrapped enormous value.
 pub fn timed_merge_excluding_recv_wait<T>(f: impl FnOnce() -> T) -> T {
+    if !sink_active() {
+        return f();
+    }
     match current() {
         None => f(),
         Some(sink) => {
@@ -262,6 +270,12 @@ impl Drop for ReadPhaseTimer {
 /// A [`ReadPhaseTimer`] for `phase`, or `None` (and zero `Instant::now`) when no
 /// sink is installed.
 pub fn scoped(phase: ReadPhase) -> Option<ReadPhaseTimer> {
+    // Same fast path as [`timed`]: the io seam calls this once per chunk read, and
+    // an unmetered scan must pay only a `Cell<bool>` load — no `RefCell` borrow, no
+    // `Arc` clone, no `Instant::now()`.
+    if !sink_active() {
+        return None;
+    }
     scoped_captured(&current(), phase)
 }
 

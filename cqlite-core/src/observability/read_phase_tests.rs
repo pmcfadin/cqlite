@@ -147,3 +147,16 @@ fn merge_timing_never_underflows_when_the_wait_exceeds_the_wall_time() {
     });
     assert_eq!(sink.nanos(ReadPhase::Merge), 0);
 }
+
+#[test]
+fn an_unmetered_seam_never_builds_a_timer() {
+    // The zero-cost-when-off promise at the seams: with no sink installed, the io
+    // seam's `scoped` must return `None` (so no `Instant::now()` and no `Arc` clone
+    // happen), and `timed` must still run its closure exactly once.
+    assert!(!sink_active());
+    assert!(scoped(ReadPhase::Io).is_none());
+    let mut runs = 0;
+    timed(ReadPhase::Decode, || runs += 1);
+    timed_merge_excluding_recv_wait(|| runs += 1);
+    assert_eq!(runs, 2, "the closure runs on the unmetered fast path too");
+}
