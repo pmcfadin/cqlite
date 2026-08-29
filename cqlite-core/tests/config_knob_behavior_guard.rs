@@ -274,10 +274,12 @@ const KNOBS: &[Knob] = &[
         declared_on: "CompressionConfig",
         field: "enabled",
         evidence: Evidence::Reserved(
-            "DECORATIVE: zero production readers (read-path compression comes from \
-             CompressionInfo.db; the write path is uncompressed-only per #1406). Not in \
-             #1696's census — owning follow-up: the CompressionConfig audit filed off \
-             #1696.",
+            "DECORATIVE: zero production readers. The read path takes its algorithm from \
+             CompressionInfo.db, as the no-heuristics mandate requires, and the write \
+             path is uncompressed-only per #1406 — so there is nothing for these knobs to \
+             steer. Found while auditing #1696 but NOT in its census, so deleting it was \
+             out of that lane's scope. NO dedicated issue exists; it belongs to the open \
+             config-honesty epic #1685, which owns the remaining decorative surface.",
         ),
     },
     Knob {
@@ -393,8 +395,9 @@ const KNOBS: &[Knob] = &[
              QueryEngine::cache_stats(), which the public Database facade does not expose, \
              and only after a query has EXECUTED against a populated store. The in-crate \
              attempt at that observation (query::engine::tests::test_query_caching) is \
-             #[ignore]d for hanging, so no non-flaky observation exists today. Owning \
-             follow-up: the Database-facade config-observability gap filed off #1696.",
+             #[ignore]d for hanging, so no non-flaky observation exists today. NO \
+             dedicated issue exists for this facade-observability gap; it belongs to the \
+             open config-honesty epic #1685.",
         ),
     },
     Knob {
@@ -410,8 +413,9 @@ const KNOBS: &[Knob] = &[
         evidence: Evidence::Reserved(
             "LIVE (bounds the QueryEngine::analyze measurement loop) but QueryEngine::analyze \
              is not reachable from the public Database facade — there is no \
-             Database::analyze — so the knob has no publicly observable effect. Owning \
-             follow-up: the Database-facade config-observability gap filed off #1696.",
+             Database::analyze — so the knob has no publicly observable effect. NO \
+             dedicated issue exists for this facade-observability gap; it belongs to the \
+             open config-honesty epic #1685.",
         ),
     },
 ];
@@ -762,6 +766,100 @@ fn covered_by_evidence_names_a_real_test() {
     }
 }
 
+/// Every issue number this file's evidence strings may cite.
+///
+/// The point of the list is that adding a citation is a VISIBLE act. Three of the
+/// original `Reserved` reasons cited an issue that did not exist — each said an
+/// audit had been "filed off #1696" when nothing had been filed — which is
+/// precisely the rot this file exists to prevent: an escape hatch whose
+/// justification points at a tracking issue nobody can open is indistinguishable
+/// from no justification at all.
+///
+/// Each entry below was checked against the tracker on 2026-08-29 to exist AND to
+/// be the right owner for the knob citing it:
+///
+/// | issue | state | owns |
+/// |-------|-------|------|
+/// | #1143 | closed | mmap/prefetch p99 (`prefetch`, `direct_io_prefetch_bytes`) |
+/// | #1406 | closed | uncompressed-write claim boundary |
+/// | #1568 | closed | dead-cache collapse (`memory.*`) |
+/// | #1582 | closed | byte-bounded result budget |
+/// | #1593 | closed | blocking I/O off async workers (mmap backends) |
+/// | #1619 | closed | STCS compaction wiring |
+/// | #1685 | OPEN | epic AH — config/feature/dependency honesty |
+/// | #1695 | closed | `query.max_execution_time` enforcement |
+/// | #1696 | OPEN | this lane (AH3) |
+/// | #1697 | closed | config source of truth (memtable + STCS knobs) |
+/// | #1918 | closed | forced read path |
+/// | #2632 | OPEN | wire murmur3 h2 into the `Filter.db` bloom plumbing |
+///
+/// A closed issue is a legitimate citation: it names the lane that WIRED the knob,
+/// which is what the evidence is pointing at.
+const VERIFIED_ISSUE_REFS: &[u32] = &[
+    1143, 1406, 1568, 1582, 1593, 1619, 1685, 1695, 1696, 1697, 1918, 2632,
+];
+
+/// Every issue number cited anywhere in [`KNOBS`] must be in
+/// [`VERIFIED_ISSUE_REFS`], and no evidence string may promise a FUTURE issue.
+///
+/// Both halves target one observed defect: an evidence string that names a
+/// tracking issue which does not exist. The allowlist makes a new citation a
+/// visible edit a reviewer can check; the phrase ban kills the specific shape the
+/// three real instances took — describing an issue in the future tense ("filed
+/// off #1696", "to be filed") rather than naming one that exists.
+///
+/// This cannot verify that an allowlisted number is still the right OWNER — that
+/// is the same non-mechanizable limit `CoveredBy` has, and it is stated here for
+/// the same reason.
+#[test]
+fn cited_issue_numbers_are_verified_and_never_promised() {
+    const FORWARD_LOOKING: &[&str] = &[
+        "filed off",
+        "to be filed",
+        "will be filed",
+        "will file",
+        "follow-up filed",
+        "issue pending",
+    ];
+
+    for knob in KNOBS {
+        let text = match knob.evidence {
+            Evidence::Reserved(reason) => reason,
+            _ => continue,
+        };
+
+        let lowered = text.to_ascii_lowercase();
+        for phrase in FORWARD_LOOKING {
+            assert!(
+                !lowered.contains(phrase),
+                "{}'s Reserved reason promises a FUTURE issue ({phrase:?}). Cite an issue                  that EXISTS, or say plainly that none does: {text:?}",
+                knob.path
+            );
+        }
+
+        // Every `#NNN...` must be an allowlisted, verified issue.
+        let bytes = text.as_bytes();
+        for (i, _) in text.char_indices().filter(|(_, c)| *c == '#') {
+            let digits: String = bytes[i + 1..]
+                .iter()
+                .take_while(|b| b.is_ascii_digit())
+                .map(|b| *b as char)
+                .collect();
+            if digits.is_empty() {
+                continue; // a bare '#', e.g. inside `#[cfg(...)]`
+            }
+            let number: u32 = digits
+                .parse()
+                .unwrap_or_else(|e| panic!("{}: unparseable issue ref #{digits}: {e}", knob.path));
+            assert!(
+                VERIFIED_ISSUE_REFS.contains(&number),
+                "{} cites #{number}, which is not in VERIFIED_ISSUE_REFS. Confirm the issue                  EXISTS and owns this knob, then add it to that list (and its table row) so                  the citation is a checked claim rather than prose.",
+                knob.path
+            );
+        }
+    }
+}
+
 /// `Evidence::Reserved` is the escape hatch, so it must at least be SUBSTANTIVE:
 /// a real sentence naming a reason, not a placeholder.
 #[test]
@@ -793,6 +891,18 @@ fn reserved_evidence_carries_a_substantive_reason() {
 /// outside, so this asserts it against the source of truth: `src/config.rs` must
 /// not declare them again. (An embedder that still sets one gets a COMPILE
 /// error, which is the loudest signal available and the documented posture.)
+///
+/// # "Nothing read them" is about WIRING, not about missing implementations
+///
+/// Worth stating for the two bloom knobs, because the loose version of the claim
+/// is false: `storage/sstable/bloom.rs` is a real, Cassandra-parity
+/// `BloomFilter` — its double-hashing operand order and `Filter.db` binary
+/// layout are verified against `BloomFilterSerializer.java` /
+/// `OffHeapBitSet.java` in `storage/sstable/s4_verification_test.rs`. The path
+/// EXISTS and is tested; what did not exist was any read path consulting
+/// `Filter.db`, so the knobs steered nothing. They are deleted rather than wired
+/// speculatively, since a knob should arrive WITH its consumer; #2632 is the open
+/// issue that will reintroduce one when there is something to control.
 #[test]
 fn deleted_decorative_knobs_are_not_reintroduced() {
     let source = read(&crate_dir().join("src").join("config.rs"));
