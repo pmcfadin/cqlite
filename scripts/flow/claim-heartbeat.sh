@@ -566,7 +566,7 @@ cmd_stamp() {
 }
 
 cmd_list() {
-  local now_epoch raw
+  local now_epoch raw unreadable_rows=0
   now_epoch="$(date -u +%s)"
   # NOT SWALLOWED (#3393 self-sweep). `flow-board` reads this to render the fleet view and decide
   # what is owned, so an origin or auth outage rendering "no heartbeats found" is the same fail-open
@@ -597,6 +597,14 @@ cmd_list() {
     local tmpref_l
     tmpref_l="refs/tmp/claim-heartbeat-list/$$-${RANDOM}"
     if ! git fetch --no-write-fetch-head --no-tags "$REMOTE" "+${refname}:${tmpref_l}" >/dev/null 2>&1; then
+      # A ROW THAT COULD NOT BE MEASURED REACHES THE EXIT STATUS (roborev round 20, Low — the
+      # PROPERTY behind census instance 6). Guarding the git version at dispatch closed the CAUSE
+      # that instance was found through (git < 2.29) and left the property open: a row fetch failing
+      # for network, auth, or a ref deleted mid-run still printed `fetch-failed` and the command
+      # still exited 0 — a listing that measured nothing, reporting success. Cause fixed, property
+      # violated. The table still renders (an operator wants the rows that DID read), and the exit
+      # status now tells a caller the listing is incomplete.
+      unreadable_rows=$((unreadable_rows + 1))
       printf '%-20s %-8s %-24s %s\n' "$machine" "?" "?" "fetch-failed"
       continue
     fi
@@ -614,6 +622,11 @@ cmd_list() {
     fi
     printf '%-20s %-8s %-24s %s\n' "$machine" "$issue" "$ts" "$age_h"
   done <<<"$raw"
+
+  if [ "$unreadable_rows" -gt 0 ]; then
+    note "${unreadable_rows} heartbeat ref(s) could not be read — this listing is INCOMPLETE; the rows above are the ones that DID read, and a missing machine here is not evidence that it has no heartbeat"
+    return 1
+  fi
 }
 
 # delete_ref_guarded <ref-namespace> <machine> — shared delete for a machine's
@@ -681,8 +694,37 @@ delete_ref_guarded() {
       note "cleared ${ref} on $REMOTE (lease held at ${expected_sha})"
       return 0
     fi
-    note "REFUSING to delete ${ref}: the lease at ${expected_sha} was not held — the ref moved, so a live supervisor refreshed it between the verdict and this delete"
-    return 4
+    # ONLY A GENUINE LEASE MISMATCH IS 4 (roborev round 20, Medium — FAIL-OPEN in a new spelling). A
+    # failed push collapsed onto "the lease was not held", so an auth failure, a network blip or a
+    # server error all reported OWNERSHIP TRANSFERRED. `worker-supervisor.sh` reads 4 as exactly that
+    # and PERMANENTLY DROPS the cleanup entry — and automated reaping deliberately refuses a
+    # placeholder lane, so a transient failure leaked a stale ref forever and `dead-lanes` then
+    # reported a dead lane that does not exist. The lease fix of the previous round created that leak.
+    #
+    # So the claim is VERIFIED rather than inferred from the push's failure: re-read the ref and return
+    # 4 only when its sha genuinely differs from the lease. Unchanged sha, confirmed-absent, or an
+    # unreadable listing are all OPERATIONAL failures (1) and the caller keeps the entry queued.
+    local ls_out ls_rc=0 now_sha=""
+    ls_out="$(git ls-remote --exit-code "$REMOTE" "$ref" 2>/dev/null)" || ls_rc=$?
+    case "$ls_rc" in
+      0) now_sha="$(printf '%s' "$ls_out" | awk 'NR==1{print $1}')" ;;
+      2)
+        # The ref is gone. Somebody else deleted it, so there is nothing left to clean up and nothing
+        # was destroyed by us: report success rather than inventing a transfer or an outage.
+        note "nothing to delete: ${ref} is already absent on $REMOTE (the leased push failed, and the ref has since gone)"
+        return 0
+        ;;
+      *)
+        note "REFUSING to delete ${ref}: the leased push failed AND the ref could not be re-read (git ls-remote exited ${ls_rc}) — whether the lease still holds is UNKNOWN, so this is an operational failure, not a transfer"
+        return 1
+        ;;
+    esac
+    if [ -n "$now_sha" ] && [ "$now_sha" != "$expected_sha" ]; then
+      note "REFUSING to delete ${ref}: the lease at ${expected_sha} was not held — the ref is now at ${now_sha}, so a live supervisor refreshed it between the verdict and this delete"
+      return 4
+    fi
+    note "REFUSING to delete ${ref}: the leased push failed while the ref is STILL at ${expected_sha:-<none>} — the lease holds, so this is an operational failure (auth, network or server), not a transfer"
+    return 1
   fi
 
   git push "$REMOTE" --delete "$ref"
@@ -711,7 +753,7 @@ cmd_reap() {
 }
 
 cmd_list_claims() {
-  local now_epoch raw legacy
+  local now_epoch raw legacy unreadable_rows=0
   now_epoch="$(date -u +%s)"
   # BOTH namespaces (#3393). New claims live at refs/lane-claims/<machine>/<issue>; a legacy
   # refs/machine-claims/<machine> from before the per-lane ruling is still listed so it can be seen
@@ -755,6 +797,9 @@ cmd_list_claims() {
     local tmpref_c
     tmpref_c="refs/tmp/claim-heartbeat-listclaims/$$-${RANDOM}"
     if ! git fetch --no-write-fetch-head --no-tags "$REMOTE" "+${refname}:${tmpref_c}" >/dev/null 2>&1; then
+      # Same property as `cmd_list` above (roborev round 20, Low): an unmeasured row must reach the
+      # exit status, or an outage renders a table of `fetch-failed` rows and still exits 0.
+      unreadable_rows=$((unreadable_rows + 1))
       printf '%-20s %-8s %-10s %-24s %s\n' "$machine" "?" "?" "?" "fetch-failed"
       continue
     fi
@@ -775,6 +820,11 @@ cmd_list_claims() {
     fi
     printf '%-20s %-8s %-10s %-24s %s\n' "$machine" "$issue" "$pid" "$ts" "$age_h"
   done <<<"$raw"
+
+  if [ "$unreadable_rows" -gt 0 ]; then
+    note "${unreadable_rows} claim ref(s) could not be read — this listing is INCOMPLETE; a lane missing from the table above is NOT evidence that it is unowned, which is what an operator would otherwise conclude"
+    return 1
+  fi
 }
 
 # cmd_should_reap <machine> [threshold_secs] — the deterministic, FAIL-SAFE reap

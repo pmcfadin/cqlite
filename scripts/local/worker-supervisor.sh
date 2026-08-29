@@ -1399,15 +1399,37 @@ run_iteration() {
   reason="$(marker_field reason)"
   question="$(marker_field question)"
 
-  # Learn the issue this iteration worked so the NEXT spawn's claim stamp names
-  # it (issue #2655). A recycled worker that resumes the same machine's claim
-  # branch stays on the same issue, so carrying it forward keeps the claim ref's
-  # open-PR reap guard accurate. A finalized issue is released (its endgame is
-  # done); anything else keeps the issue for the next stamp.
+  # Learn the issue this iteration worked so the NEXT spawn's claim stamp names it (issue #2655). A
+  # recycled worker that resumes the same issue keeps the claim ref's open-PR reap guard accurate.
+  #
+  # CARRYING IT FORWARD IS THE UNSAFE DIRECTION, SO IT IS THE ONE THAT MUST BE EARNED (roborev round
+  # 20, High). Only `finalized` used to release the issue, but a `blocked` park on
+  # `seam1-approval`/`needs-decision` ALSO releases it: the worker posts its question, the issue is
+  # excluded from the next pickup until the owner answers, and this supervisor moves on. Carrying that
+  # issue forward stamped the NEXT worker under the RELEASED issue's ref — so another lane legitimately
+  # resuming that issue overwrote the ref, and a dead supervisor behind it became invisible. That is
+  # precisely the ref collision per-lane claims exist to remove, reached through the commonest park path.
+  #
+  # Keyed on the AFFIRMATIVE case, not on a list of releasing reasons (#3464 family 6: an enumeration
+  # of reasons is a subject set that drifts the moment someone adds an exit). The issue is carried
+  # forward ONLY when this iteration demonstrably continues working it — a `blocked` outcome that is NOT
+  # an owner park. Every other outcome, including any park reason added later and any outcome nobody has
+  # thought of yet, falls through to the SAFE branch: `CLAIM_ISSUE` is cleared and the next spawn stamps
+  # its own unique `p<pid>-<token>` lane, which cannot collide with anything.
+  local retains_issue=no
   case "$outcome" in
-    finalized) CLAIM_ISSUE="" ;;
-    *) [[ -n "$issue" ]] && CLAIM_ISSUE="$issue" ;;
+    blocked)
+      case "$reason" in
+        seam1-approval | needs-decision) : ;;   # owner park => the issue is RELEASED
+        *) retains_issue=yes ;;                 # a technical block => this lane keeps working it
+      esac
+      ;;
   esac
+  if [[ "$retains_issue" == yes && -n "$issue" ]]; then
+    CLAIM_ISSUE="$issue"
+  else
+    CLAIM_ISSUE=""
+  fi
 
   case "$outcome" in
     finalized)
