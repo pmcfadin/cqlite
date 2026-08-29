@@ -222,6 +222,9 @@ TOKEN_ASSIGN = re.compile(r'^\s*(?:local\s+|declare\s+[-\w]*\s+|export\s+|readon
 ANY_INPUT_REDIR = re.compile(r'(?<![0-9<>])<')
 # V=$(_ansi_stripped_log …)  — the affirmative evidence that V holds a stripped path.
 STRIP_ASSIGN = re.compile(r'(?:^|[\s;&|(])([A-Za-z_]\w*)=\"?\$\(\s*_ansi_stripped_log\b')
+# V=$(<anything>) — the candidate CONTENT-valued assignment; the body is inspected separately
+# for a content-reading command over a stripped path.
+CONTENT_ASSIGN = re.compile(r'(?:^|[\s;&|(])([A-Za-z_]\w*)=\"?\$\(([^()]*)\)')
 HELPER = '_ansi_stripped_log'
 LOOP_HEADER = re.compile(r'\bwhile\b.*\bread\b')
 DONE_LINE = re.compile(r'^\s*done\b')
@@ -307,8 +310,11 @@ def enclosing_case_subject(lines, n):
     why B4's raw site was invisible: `case "$line" in` carried the operator and
     `*"Running tests/"*)` carried the token, so neither line qualified on its own. Walk
     backward to the block header, stopping at any structural marker that proves we are not
-    inside one."""
-    for k in range(n - 1, -1, -1):
+    inside one. The walk STARTS AT n (inclusive), because a single-line `case "$v" in <pat>)
+    … esac` carries the header and the pattern on the SAME line — starting at n-1 made such a
+    site fall through to the generic RAW verdict, which is the right red for the wrong reason
+    and would have hidden a PATH-valued subject behind a raw-source message."""
+    for k in range(n, -1, -1):
         line = lines[k]
         if is_comment(line):
             continue
@@ -337,7 +343,13 @@ CONTENT_READER = (r'\b(?:cat|sed|awk|grep|egrep|fgrep|rg|tr|tail|head|sort|uniq|
 # VALUE) and NOT `< <(` (a process substitution, judged on its command instead).
 DIRECT_REDIR = re.compile(r'(?<!<)<(?!<)\s*(?!\()"?\$\{?([A-Za-z_]\w*)')
 FILE_OPERAND = re.compile(CONTENT_READER + r'[^|<>]*?"?\$\{?([A-Za-z_]\w*)\}?"?')
-INLINE_HELPER_READ = re.compile(r'<\s*"?\$\(\s*' + HELPER + r'\b')
+CONTENT_READER_RE = re.compile(CONTENT_READER)
+# `exec 3< "$p"` / `mapfile -t v < "$p"`: the file IS dereferenced, but the match happens at a
+# later read from the descriptor or the array, which this scanner does not follow. Named
+# explicitly so they land on the UNRESOLVED (loud) side instead of being read as a plain
+# content read (roborev C1/C2 class: an unfollowed indirection must never look like a pass).
+EXEC_REDIR = re.compile(r'\bexec\b[^|]*[0-9]*<')
+MAPFILE_READ = re.compile(r'\b(?:mapfile|readarray)\b')
 
 
 def done_redirect(line):
@@ -373,32 +385,101 @@ for path in paths:
         violations.append((path, 0, 'unreadable scan target (%s)' % exc, ''))
         continue
     lines = text.split('\n')
-    stripped_vars = set(STRIP_ASSIGN.findall(text))
+    # PATH-valued variables: assigned from the helper, so they hold a FILENAME.
+    path_vars = set(STRIP_ASSIGN.findall(text))
+    # CONTENT-valued variables: assigned from a command substitution that READS one of those
+    # paths, so they hold the log's TEXT. Two passes, because a content var can only be
+    # recognised once the path vars are known.
+    content_vars = set()
+    for m in CONTENT_ASSIGN.finditer(text):
+        name, inner = m.group(1), m.group(2)
+        if CONTENT_READER_RE.search(inner) and (
+                HELPER in inner or bool(set(re.findall(r'\$\{?([A-Za-z_]\w*)', inner)) & path_vars)):
+            content_vars.add(name)
+    # ── THE MODEL: CLASSIFY THE VALUE, DO NOT ENUMERATE THE READ FORMS ────────────────
+    # This is an INVERSION of the lint's first model, forced by three findings of one class
+    # (roborev B1, then C1 and C2 — a count that was not decreasing, which said the model was
+    # wrong rather than the predicates). The old model asked "does this construct read a
+    # stripped source?" and answered by enumerating the ways a path can be read — `< "$v"`,
+    # `<<< "$(cat "$v")"`, a file operand, a process substitution. That enumeration DOES NOT
+    # CLOSE: every review round found the next spelling that named a stripped path without
+    # reading it, and each one was an approved parse of a FILENAME.
+    #
+    # The new model asks what the matched VALUE IS:
+    #   PATH-valued    — it is (or came from) `_ansi_stripped_log`, i.e. a filename. Matching a
+    #                    cargo token against a path-valued value is ALWAYS an error, in EVERY
+    #                    syntactic position, with no exceptions. One rule; B1, C1 and C2 all die
+    #                    to it.
+    #   CONTENT-valued — the bytes of a stripped log: a `while read` variable fed by a
+    #                    dereferencing redirect of a stripped path, a `$(cat "$stripped")`
+    #                    substitution, or a variable assigned from one. Correct to match.
+    #   otherwise      — RAW (an unstripped source) or UNRESOLVED, both loud.
+    # A false PASS now requires misclassifying a PATH as CONTENT — a far smaller surface than
+    # "did we enumerate every read form" — and residual error lands on the loud side.
+    #
+    # DEREFERENCE is the single hinge, and it is a property of the CONSTRUCT, not the value:
+    # `< "$p"` and `grep tok "$p"` OPEN the file (so a path there yields CONTENT), while
+    # `<<< "$p"` and `case "$p" in` use the VALUE (so a path there is the defect).
 
-    def source_is_stripped(expr):
-        if HELPER in expr:
-            return True
-        return bool(var_refs(expr) & stripped_vars)
+    def names_stripped_path(expr):
+        """Does `expr` evaluate to a path produced by the helper?"""
+        return HELPER in expr or bool(var_refs(expr) & path_vars)
 
-    def reads_stripped_contents(expr):
-        """Does `expr` read the CONTENTS of an ANSI-stripped log?
-
-        The distinction this function exists for: naming a stripped PATH is not reading it.
-        `<<< "$src"` and `echo "$src" | …` both reference a stripped variable and both feed a
-        one-line FILENAME to the parser, which then matches nothing and reports clean. So a
-        stripped variable only counts when it appears in a CONTENT-READING position — the
-        target of a direct `< ` redirection, or the file operand of a command that reads its
-        operand's contents. ACCEPT only on an affirmative match; there is no permissive
-        fall-through."""
-        if INLINE_HELPER_READ.search(expr):
-            return True
-        for m in DIRECT_REDIR.finditer(expr):
-            if m.group(1) in stripped_vars:
-                return True
-        for m in FILE_OPERAND.finditer(expr):
-            if m.group(1) in stripped_vars:
+    def content_substitution(expr):
+        """Does `expr` contain a command substitution that READS a stripped path, making the
+        value the log's TEXT rather than its name? `$(cat "$src")` yes; `$(_ansi_stripped_log
+        "$log")` NO — that returns a filename, which is roborev C1."""
+        for m in re.finditer(r'\$\(([^()]*)\)', expr):
+            inner = m.group(1)
+            if CONTENT_READER_RE.search(inner) and names_stripped_path(inner):
                 return True
         return False
+
+    def subject_verdict(expr, dereferenced):
+        """('content'|'path'|'raw'|'unknown') for the value a cargo token is matched against."""
+        if dereferenced:
+            # The construct opens the file named by expr and matches against its BYTES.
+            if names_stripped_path(expr):
+                return 'content'
+            if var_refs(expr) & content_vars:
+                # Dereferencing something that already holds text is not a shape this scanner
+                # can reason about. Refuse rather than guess in either direction.
+                return 'unknown'
+            return 'raw'
+        # NOT dereferenced: the token is matched against the VALUE itself.
+        if content_substitution(expr):
+            return 'content'
+        if names_stripped_path(expr):
+            return 'path'          # <-- the absolute veto (B1 / C1 / C2)
+        if var_refs(expr) & content_vars:
+            return 'content'
+        return 'raw' if var_refs(expr) else 'unknown'
+
+    def command_subject(unit):
+        """What value does this logical command match against?
+
+        Returns (expr, dereferenced) or (None, reason) when the read lands somewhere this
+        scanner cannot follow, or (None, None) when the command takes no input at all."""
+        if EXEC_REDIR.search(unit):
+            return None, ('opens a file descriptor with `exec`; the matching happens at a later '
+                          'read from that descriptor, which this scanner does not follow')
+        if MAPFILE_READ.search(unit):
+            return None, ('reads into an array with `mapfile`/`readarray`; the matching happens '
+                          'wherever that array is used, which this scanner does not follow')
+        m = re.search(r'<<<\s*(.+?)\s*(?:\||$)', unit)
+        if m:
+            return m.group(1), False
+        m = re.search(r'<\s*<\((.*?)\)', unit)
+        if m:
+            # The value is the substituted command's OUTPUT — judge it as a substitution.
+            return '$(%s)' % m.group(1), False
+        redir = [g for g in DIRECT_REDIR.findall(unit)]
+        if redir:
+            return ' '.join('$%s' % v for v in redir), True
+        operands = [g for g in FILE_OPERAND.findall(unit)]
+        if operands:
+            return ' '.join('$%s' % v for v in operands), True
+        return None, None
 
     joined = logical_units(lines)
 
@@ -411,13 +492,37 @@ for path in paths:
         # A cargo token makes this line a CANDIDATE. It is deliberately NOT required to carry
         # a match operator itself (defect B4): `case` splits the operator from the pattern
         # across lines, so a same-line requirement made every multi-line parse invisible while
-        # the affirmative N/N line kept printing off the single-line ones. Mention-vs-match is
-        # decided below, from the enclosing construct.
+        # the affirmative N/N line kept printing off the single-line ones.
         unit = joined[n] if joined[n] is not None else line
         lineno = n + 1
         snippet = ' '.join(line.split())
         if len(snippet) > 130:
             snippet = snippet[:127] + '...'
+
+        def fail(reason):
+            violations.append((path, lineno, reason, snippet))
+
+        def judge(expr, dereferenced, where):
+            """Apply the verdict for a resolved subject. Returns True when the site is clean."""
+            v = subject_verdict(expr, dereferenced)
+            if v == 'content':
+                return True
+            if v == 'path':
+                fail("matches a cargo token against a PATH-VALUED value (%s `%s`): that value is "
+                     "a FILENAME produced by `%s`, so the match runs against one line of path "
+                     "text, finds nothing, and reports clean. Matching a token against a "
+                     "path-valued value is an error in EVERY syntactic position — read the file "
+                     "instead (`< \"$p\"`, `$(cat \"$p\")`, or `$p` as a file operand)"
+                     % (where, expr.strip(), HELPER))
+                return False
+            if v == 'raw':
+                fail("reads a RAW source (%s `%s`): it is not derived from `%s`, so the parse "
+                     "runs against COLOURED cargo text" % (where, expr.strip(), HELPER))
+                return False
+            fail("UNRESOLVED (%s `%s`): this scanner cannot tell whether that value holds a "
+                 "stripped log's CONTENTS. Read the log through `%s` at the parse itself, or "
+                 "mark the site with a rationale" % (where, expr.strip(), HELPER))
+            return False
 
         # R3 — explicit allow, rationale required.
         found, rationale = allow_rationale(lines, n)
@@ -425,161 +530,107 @@ for path in paths:
             sites += 1
             bare = rationale.lower().strip(' .')
             if bare in PLACEHOLDER or UNSUBSTITUTED.search(rationale) or len(bare) < 12:
-                violations.append((
-                    path, lineno,
-                    "MALFORMED `%s`: a marker needs a one-line RATIONALE, not a "
-                    "placeholder (got %r)" % (ALLOW, rationale), snippet))
+                fail("MALFORMED `%s`: a marker needs a one-line RATIONALE, not a placeholder "
+                     "(got %r)" % (ALLOW, rationale))
             else:
                 allowed += 1
             continue
 
+        # R1 — the enclosing `while … read` loop. Its read variable is CONTENT-valued exactly
+        # when the `done` redirect DEREFERENCES a stripped path.
         in_loop, done_idx = enclosing_loop_done(lines, n)
         if in_loop:
             sites += 1
-            # R1 — the loop's `done` redirect is the parse source.
             if done_idx < 0:
-                violations.append((
-                    path, lineno,
-                    "inside a `while … read` loop with NO terminating `done` the scanner "
-                    "could find, so its parse source is unknowable", snippet))
+                fail("inside a `while … read` loop with NO terminating `done` the scanner could "
+                     "find, so its parse source is unknowable")
                 continue
             kind, expr = done_redirect(lines[done_idx])
-            if kind not in ('file', 'herestring', 'procsub', 'none'):
-                # Closed grammar: an unrecognised redirect kind FAILs. A new shape must be
-                # classified deliberately, never inherit the permissive branch.
-                violations.append((
-                    path, lineno,
-                    "the enclosing loop's `done` (line %d) uses an input redirection this "
-                    "scanner does not classify (%r), so whether it reads the log's CONTENTS "
-                    "is unknown — classify it here or mark the site" % (done_idx + 1, kind),
-                    snippet))
-                continue
+            where = "the enclosing loop's `done` on line %d" % (done_idx + 1)
             if kind == 'none':
-                violations.append((
-                    path, lineno,
-                    "the enclosing `while … read` loop (line %d `done`) has NO input "
-                    "REDIRECT, so it is PIPE-FED: the loop body runs in a SUBSHELL and its "
-                    "accumulated verdict is DISCARDED on exit — the guard passes silently. "
-                    "Use `done < \"$(%s <log>)\"`-derived redirection (issue #3400 AC3)"
-                    % (done_idx + 1, HELPER), snippet))
-                continue
-            if not source_is_stripped(expr):
-                violations.append((
-                    path, lineno,
-                    "reads a RAW source: the enclosing loop's `done` (line %d) redirects "
-                    "from `%s`, which is not derived from `%s`"
-                    % (done_idx + 1, expr.strip(), HELPER), snippet))
+                fail("the enclosing `while … read` loop (line %d `done`) has NO input REDIRECT, "
+                     "so it is PIPE-FED: the loop body runs in a SUBSHELL and its accumulated "
+                     "verdict is DISCARDED on exit — the guard passes silently. Use redirection "
+                     "from a `%s`-derived read (issue #3400 AC3)" % (done_idx + 1, HELPER))
                 continue
             if kind == 'file':
-                # A direct `< X` redirection reads X's CONTENTS. Stripped path, done.
-                continue
-            # 'herestring' / 'procsub': naming a stripped path is NOT reading it. A
-            # here-string feeds the loop the VALUE — one line of FILENAME — so the parser
-            # consumes no cargo output at all and reports clean, which is precisely the
-            # vacuous pass this lint exists to catch. A process substitution reads whatever
-            # its command produces. Both must read the contents EXPLICITLY.
-            if reads_stripped_contents(expr):
-                continue
-            violations.append((
-                path, lineno,
-                "the enclosing loop's `done` (line %d) uses a %s (`%s`) that names a stripped "
-                "path WITHOUT READING IT: %s feed the loop the VALUE, so the parser consumes a "
-                "one-line FILENAME and matches NOTHING while reporting clean. Read the contents "
-                "explicitly (`done < \"$src\"`, `done < <(cat \"$src\")`, "
-                "`done <<< \"$(cat \"$src\")\"`)"
-                % (done_idx + 1,
-                   'here-string' if kind == 'herestring' else 'process substitution',
-                   expr.strip(),
-                   'here-strings' if kind == 'herestring'
-                   else 'process substitutions of a non-reading command'),
-                snippet))
+                judge(expr, True, where)
+            elif kind == 'herestring':
+                judge(expr, False, where + " (a here-string, which feeds the loop a VALUE)")
+            elif kind == 'procsub':
+                judge('$(%s)' % expr, False, where + " (a process substitution)")
+            else:
+                # Closed grammar: an unrecognised redirect kind FAILs rather than inheriting
+                # the permissive branch.
+                fail("the enclosing loop's `done` (line %d) uses an input redirection this "
+                     "scanner does not classify (%r)" % (done_idx + 1, kind))
             continue
 
-        # R1b — an enclosing `case … in` block, when the candidate is one of its PATTERNS.
-        # This is B4's reported shape once the loop resolution above declines: the operator
-        # lives on the header and the token on the pattern, so the construct — not the line —
-        # is what has a source.
+        # R1b — an enclosing `case … in` block, when the candidate is one of its PATTERNS. The
+        # subject is used as a VALUE (never dereferenced), which is roborev C2.
         if CASE_PATTERN.match(line):
             subject = enclosing_case_subject(lines, n)
             if subject is not None:
                 sites += 1
-                if reads_stripped_contents(subject) or source_is_stripped(subject):
-                    # The subject is a stripped value; whether it is a loop read variable or a
-                    # command substitution over the stripped log, the pattern matches stripped
-                    # text. (A loop read variable would have been resolved by R1 above.)
-                    continue
-                violations.append((
-                    path, lineno,
-                    "is a `case` PATTERN whose block subject `%s` is not derived from `%s`, so "
-                    "it matches RAW cargo text. The operator and the pattern sit on different "
-                    "lines, which is why this must be judged as a construct" % (subject, HELPER),
-                    snippet))
+                judge(subject, False,
+                      "the enclosing `case … in` block subject (matched as a VALUE, never read)")
                 continue
 
-        # R2 — the candidate's own logical command must READ a stripped source, not merely
-        # name one. Judged on `unit` (the joined command), never on the physical line: a
-        # continuation-line token measured against its fragment sees no source at all, which
-        # is B4's second half.
-        if reads_stripped_contents(unit):
+        # R2 — the candidate's own JOINED logical command. Judged on `unit`, never on the
+        # physical line: a continuation-line token measured against its fragment sees no source
+        # at all, which is B4's second half.
+        expr, deref = command_subject(unit)
+        if expr is not None:
             sites += 1
+            judge(expr, deref,
+                  "this command's input (%s)" % ('read from a file' if deref else 'used as a value'))
             continue
-        if source_is_stripped(unit):
+        if isinstance(deref, str):
+            # A recognised construct whose read lands somewhere this scanner does not follow.
             sites += 1
-            violations.append((
-                path, lineno,
-                "names a stripped source but does not READ IT: the reference is in a VALUE "
-                "position (a here-string, or an `echo`/`printf` piped into the parser), which "
-                "passes the one-line PATH instead of the log's contents — the parser then "
-                "matches nothing and reports clean. Use `< \"$src\"` or pass `$src` as the file "
-                "operand of the parsing command", snippet))
+            fail("UNRESOLVED: this command %s. Match against a `%s`-derived read at the parse "
+                 "itself, or mark the site with a rationale" % (deref, HELPER))
             continue
 
-        # R4 — a cargo token STORED IN A VARIABLE. This scanner does not follow variables to
-        # their match sites, and it says so rather than guessing in either direction: a silent
-        # skip would be the B4 hole again, and a RAW verdict would be an accusation it cannot
-        # support. REFUSAL, textually distinct from every other cause.
+        # R4 — a cargo token STORED IN A VARIABLE. Not followed to its match site, and said so
+        # rather than guessed in either direction: a silent skip would be the B4 hole again, and
+        # a RAW verdict would be an accusation this scanner cannot support.
         if TOKEN_ASSIGN.match(unit):
             sites += 1
-            violations.append((
-                path, lineno,
-                "UNRESOLVED (cargo token held in a variable): this scanner does not follow a "
-                "variable to the place it is matched, so it cannot tell whether that match "
-                "reads a stripped source. Match against a `%s`-derived read at the parse "
-                "itself, or mark the site" % HELPER, snippet))
+            fail("UNRESOLVED (cargo token held in a variable): this scanner does not follow a "
+                 "variable to the place it is matched, so it cannot tell whether that match "
+                 "reads a stripped source. Match against a `%s`-derived read at the parse "
+                 "itself, or mark the site" % HELPER)
             continue
 
-        # R5 — the logical command performs a MATCH but names no source this scanner can
-        # attribute: a raw read is the only reading of it that is safe to report.
+        # R5 — the logical command matches cargo output but takes no input this scanner can
+        # attribute at all.
         if MATCH_OP.search(unit):
             sites += 1
-            violations.append((
-                path, lineno,
-                "reads a RAW source: this logical command matches cargo output but neither it "
-                "nor an enclosing `while … read` loop or `case` block reads the contents of a "
-                "value derived from `%s`" % HELPER, snippet))
+            fail("reads a RAW source: this logical command matches cargo output but neither it "
+                 "nor an enclosing `while … read` loop or `case` block reads the contents of a "
+                 "value derived from `%s`" % HELPER)
             continue
 
         # R6 — a MENTION, and this is an AFFIRMATIVE classification, not a fall-through: the
         # logical command performs no match AND takes no input redirection AND the token sits
         # inside a quoted string, so it can only be DATA (a message, a summary line, a
-        # diagnostic). Such a candidate is NOT a parse site and is not counted. Measured on the
-        # shipped agent-gate.sh: the four `emit_summary … "error: …"` argument lines.
+        # diagnostic). Measured on the shipped agent-gate.sh: the four `emit_summary …
+        # "error: …"` argument lines. Not a site, not counted.
         if (not MATCH_OP.search(unit) and not ANY_INPUT_REDIR.search(unit)
                 and token_in_quotes(line, tok)):
             continue
 
-        # R7 — CLOSED GRAMMAR. Everything else is a candidate this scanner could not attribute
-        # to any construct. It FAILs, naming what it could not classify, and its text is
-        # deliberately distinct from the empty-subject-set FAIL so a pasted summary can never
-        # confuse "I could not classify this one site" with "I found no sites at all".
+        # R7 — CLOSED GRAMMAR. Everything else could not be attributed to any construct. It
+        # FAILs naming that, with text deliberately DISTINCT from the empty-subject-set FAIL so
+        # a pasted summary can never confuse "could not classify one site" with "found no
+        # sites at all".
         sites += 1
-        violations.append((
-            path, lineno,
-            "UNCLASSIFIED cargo-output candidate: this scanner could not attribute the token "
-            "to any parse construct it recognises (no enclosing `while … read` loop or `case` "
-            "block, no readable source on the line, no match operator, and not a quoted "
-            "message), so whether it reads coloured text is UNKNOWN. Route it through `%s` at "
-            "the parse, or mark the site with a rationale" % HELPER, snippet))
+        fail("UNCLASSIFIED cargo-output candidate: this scanner could not attribute the token "
+             "to any parse construct it recognises (no enclosing `while … read` loop or `case` "
+             "block, no attributable input on the line, no match operator, and not a quoted "
+             "message), so whether it reads coloured text is UNKNOWN. Route it through `%s` at "
+             "the parse, or mark the site with a rationale" % HELPER)
 
 if violations:
     print("FAIL: cargo-output parse site(s) that do not read from an ANSI-stripped source")

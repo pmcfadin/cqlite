@@ -683,10 +683,10 @@ plant_shape raw_positional fail \
 # The B1 rejection must name the CONTENT-vs-VALUE cause, not a generic "raw source" —
 # an accurate diagnosis is what makes the finding actionable rather than confusing.
 run_lint "$tmp/shape_herestring_bare_path.sh"
-if printf '%s' "$lint_out" | grep -qi 'WITHOUT READING IT'; then
-  ok "B12: the here-string rejection names the CONTENT-vs-VALUE cause (not a generic raw-source message)"
+if printf '%s' "$lint_out" | grep -q 'PATH-VALUED value'; then
+  ok "B12: the here-string rejection names the PATH-VALUED cause (not a generic raw-source message)"
 else
-  bad "B12: the here-string rejection does not explain that the path was named but not read: $lint_out"
+  bad "B12: the here-string rejection does not explain that the matched value is a path: $lint_out"
 fi
 
 # ─────────────────────────────────────────────────────────────────────────────────────
@@ -841,7 +841,7 @@ myguard() {
 }
 F
 run_lint "$tmp/f_b4_case_nonloop.sh"
-if [ "$lint_rc" -ne 0 ] && printf '%s' "$lint_out" | grep -q 'case. PATTERN whose block subject'; then
+if [ "$lint_rc" -ne 0 ] && printf '%s' "$lint_out" | grep -q 'block subject'; then
   ok "B14: a non-loop \`case\` block over a raw variable reds, naming the BLOCK SUBJECT"
 else
   bad "B14: the non-loop case block did not red on its subject — rc=$lint_rc / '$lint_out'"
@@ -938,6 +938,157 @@ if [ "$lint_rc" -eq 0 ] && printf '%s' "$lint_out" | grep -q '^cargo-output-pars
   ok "B14: a quoted MESSAGE argument on a continuation line is DATA, not a parse site (1/1, the real parse only)"
 else
   bad "B14: the message-argument fixture was misjudged — rc=$lint_rc / '$lint_out'"
+fi
+
+# ─────────────────────────────────────────────────────────────────────────────────────
+# (B15) THE INVERSION: classify the VALUE, do not enumerate the read forms
+#       (roborev C1 + C2, consolidated — and B1 was the same class one round earlier).
+#
+#       B1 was `done <<< "$src"`. C1 is `grep tok <<< "$(_ansi_stripped_log "$log")"`. C2 is
+#       a non-loop `case "$src" in`. Three spellings, ONE conceptual error: treating "names a
+#       stripped path" as "reads stripped content". The class count across rounds went 2, 2 —
+#       not decreasing — so the MODEL was wrong, not the predicates, and enumerating read
+#       forms could only ever find the next spelling.
+#
+#       MEASURED before the inversion: this fixture pair reported
+#       `2/2 parse sites read from an ANSI-stripped source`, exit 0. Both parses run against
+#       one line of FILENAME.
+#
+#       The rule now: matching a cargo token against a PATH-VALUED value is an error in EVERY
+#       syntactic position, with no exceptions. A false PASS therefore requires misclassifying
+#       a PATH as CONTENT, which is a far smaller surface than "did we enumerate every read
+#       form", and everything unresolved lands on the loud side.
+# ─────────────────────────────────────────────────────────────────────────────────────
+cat >"$tmp/f_c1_inline_herestring.sh" <<'F'
+c1_guard() {
+  local log="$1"
+  grep -c "test result:" <<< "$(_ansi_stripped_log "$log")"
+}
+F
+run_lint "$tmp/f_c1_inline_herestring.sh"
+if [ "$lint_rc" -ne 0 ] && printf '%s' "$lint_out" | grep -q 'PATH-VALUED value'; then
+  ok "B15/C1: an INLINE-helper here-string (\`<<< \"\$(_ansi_stripped_log …)\"\`) reds as PATH-VALUED (was approved: it parsed the returned FILENAME)"
+else
+  bad "B15/C1: the inline-helper here-string was not rejected — rc=$lint_rc / '$lint_out'"
+fi
+
+cat >"$tmp/f_c2_case_path.sh" <<'F'
+c2_guard() {
+  local src
+  src=$(_ansi_stripped_log "$1") || return 1
+  case "$src" in
+    *"Running tests/"*)
+      echo hit
+      ;;
+  esac
+}
+F
+run_lint "$tmp/f_c2_case_path.sh"
+if [ "$lint_rc" -ne 0 ] && printf '%s' "$lint_out" | grep -q 'PATH-VALUED value'; then
+  ok "B15/C2: a non-loop \`case \"\$src\"\` over a PATH-valued variable reds (was approved because \$src came from the helper — but it holds a filename)"
+else
+  bad "B15/C2: the non-loop case over a path-valued variable was not rejected — rc=$lint_rc / '$lint_out'"
+fi
+
+# The two indirections the lead named: the file IS dereferenced, but the MATCH happens at a
+# later read this scanner does not follow. They must land UNRESOLVED — loud — never PASS.
+cat >"$tmp/f_c2_exec_fd.sh" <<'F'
+myguard() {
+  local src
+  src=$(_ansi_stripped_log "$1") || return 1
+  exec 3< "$src"
+  while IFS= read -r line <&3; do
+    case "$line" in *"Running tests/"*) echo hit ;; esac
+  done
+  exec 3<&-
+}
+F
+run_lint "$tmp/f_c2_exec_fd.sh"
+if [ "$lint_rc" -ne 0 ]; then
+  ok "B15: \`exec 3< \"\$src\"\` + a read from fd 3 does NOT pass (the match is at an indirection this scanner does not follow, so it is loud)"
+else
+  bad "B15: the exec-fd shape PASSED — an unfollowed indirection must never look like a clean read"
+fi
+
+cat >"$tmp/f_c2_mapfile.sh" <<'F'
+myguard() {
+  local src
+  src=$(_ansi_stripped_log "$1") || return 1
+  mapfile -t lines < "$src"
+  printf '%s\n' "${lines[@]}" | grep -c "Running tests/"
+}
+F
+run_lint "$tmp/f_c2_mapfile.sh"
+if [ "$lint_rc" -ne 0 ]; then
+  ok "B15: \`mapfile -t lines < \"\$src\"\` then matching the array does NOT pass (same unfollowed-indirection rule)"
+else
+  bad "B15: the mapfile shape PASSED — an unfollowed indirection must never look like a clean read"
+fi
+
+# POSITIVE CONTROLS — the inversion must not turn into reject-everything, and these three are
+# the shapes the SHIPPED gate actually uses. NOTE on `grep <token> "$src"` with no loop: the
+# lead's fixture list asked for this to FAIL or be UNRESOLVED, and it must NOT. `grep PATTERN
+# FILE` DEREFERENCES its operand — it matches the file's BYTES, not its name — and that is
+# precisely the shipped arrow-parity-guard parse (`sed -n '…' "$stripped"`). Making it red
+# would red the gate of record for a correct construct. Dereference is the hinge of the whole
+# model: a path in a READ position yields CONTENT; the same path in a VALUE position is C1/C2.
+cat >"$tmp/f_c2_grep_operand.sh" <<'F'
+myguard() {
+  local src
+  src=$(_ansi_stripped_log "$1") || return 1
+  grep -c "test result:" "$src"
+}
+F
+run_lint "$tmp/f_c2_grep_operand.sh"
+if [ "$lint_rc" -eq 0 ] && printf '%s' "$lint_out" | grep -q '^cargo-output-parsers: 1/1 '; then
+  ok "B15 control: \`grep <token> \"\$src\"\` with no loop is ACCEPTED — grep DEREFERENCES its operand, and this is the shipped arrow-parity parse shape"
+else
+  bad "B15 control: \`grep <token> \"\$src\"\` was rejected — that reds the shipped gate for a construct that reads the file correctly (rc=$lint_rc / '$lint_out')"
+fi
+
+cat >"$tmp/f_c2_content_var.sh" <<'F'
+myguard() {
+  local src out
+  src=$(_ansi_stripped_log "$1") || return 1
+  out=$(cat "$src")
+  case "$out" in
+    *"Running tests/"*)
+      echo hit
+      ;;
+  esac
+}
+F
+run_lint "$tmp/f_c2_content_var.sh"
+if [ "$lint_rc" -eq 0 ]; then
+  ok "B15 control: a CONTENT-valued variable (\`out=\$(cat \"\$src\")\`) matched by a non-loop \`case\` is ACCEPTED — the value is the log's text, not its name"
+else
+  bad "B15 control: the content-valued variable was rejected — rc=$lint_rc / '$lint_out'"
+fi
+
+# The SAME variable name, one letter of provenance apart: proof the verdict follows the VALUE'S
+# PROVENANCE and not the spelling of the construct.
+cat >"$tmp/f_c2_provenance.sh" <<'F'
+path_valued() {
+  local v
+  v=$(_ansi_stripped_log "$1") || return 1
+  case "$v" in *"Doc-tests"*) echo hit ;; esac
+}
+F
+run_lint "$tmp/f_c2_provenance.sh"
+pv_rc=$lint_rc
+cat >"$tmp/f_c2_provenance_ok.sh" <<'F'
+content_valued() {
+  local p v
+  p=$(_ansi_stripped_log "$1") || return 1
+  v=$(cat "$p")
+  case "$v" in *"Doc-tests"*) echo hit ;; esac
+}
+F
+run_lint "$tmp/f_c2_provenance_ok.sh"
+if [ "$pv_rc" -ne 0 ] && [ "$lint_rc" -eq 0 ]; then
+  ok "B15: the SAME \`case \"\$v\"\` construct reds when \$v is PATH-valued and passes when it is CONTENT-valued — the verdict follows the value's provenance, not the syntax"
+else
+  bad "B15: provenance does not decide the verdict (path-valued rc=$pv_rc, content-valued rc=$lint_rc)"
 fi
 
 echo
