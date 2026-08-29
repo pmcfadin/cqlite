@@ -134,9 +134,20 @@ have() { command -v "$1" >/dev/null 2>&1; }
 TIMEOUT_BIN="$(command -v timeout 2>/dev/null || command -v gtimeout 2>/dev/null || true)"
 # bounded <secs> <cmd...> — run <cmd...> under the resolved timeout binary if there is
 # one, else run it directly. Use `env VAR=... cmd` when the call needs env prefixes.
+#
+# --kill-after IS THE BOUND (#3369 review). Plain `timeout <secs>` sends SIGTERM and then
+# WAITS: a child that traps or ignores SIGTERM — git, ssh, a Git Credential Manager, a
+# credential helper — runs on indefinitely, so the advertised bound bounds nothing.
+# Measured: `timeout 3` on a TERM-ignoring child returned after 30s (rc 124); with
+# `--kill-after=2` it returned after 5s (rc 137). This is boot-path code where a hang is
+# the worst outcome, and this change newly routes a NETWORK PUSH through here. 5s is
+# ample grace for a well-behaved child to finish its own cleanup. Both `timeout` and
+# `gtimeout` accept the flag, and the degrade-visibly-when-neither-exists path below is
+# unchanged.
+BOUNDED_KILL_GRACE=5
 bounded() {
   local secs="$1"; shift
-  if [ -n "$TIMEOUT_BIN" ]; then "$TIMEOUT_BIN" "$secs" "$@"; else "$@"; fi
+  if [ -n "$TIMEOUT_BIN" ]; then "$TIMEOUT_BIN" --kill-after="$BOUNDED_KILL_GRACE" "$secs" "$@"; else "$@"; fi
 }
 ok()   { printf '  \033[32m[ok]\033[0m   %s\n' "$1"; }
 warn() { printf '  \033[33m[warn]\033[0m %s\n' "$1"; WARNINGS=$((WARNINGS + 1)); }
@@ -1472,6 +1483,9 @@ else
         info "$push_probe_line"
       done
     elif [ "$push_probe_rc" = 124 ] || [ "$push_probe_rc" = 137 ]; then
+      # 124 = SIGTERM'd at the bound; 137 = it ignored SIGTERM and `bounded`'s
+      # --kill-after escalated to SIGKILL. 137 was UNREACHABLE until that flag was added
+      # (#3369 review): the code anticipated an outcome the wrapper could not produce.
       warn "git-push: UNMEASURED (the probe exceeded its ${PUSH_PROBE_BOUND}s bound and was killed — push capability is UNKNOWN, not ok)"
     else
       warn "git-push: UNMEASURED (scripts/flow/claim.sh smoke produced no SMOKE-OK/SMOKE-FAIL verdict, rc=$push_probe_rc — push capability is UNKNOWN, not ok)"

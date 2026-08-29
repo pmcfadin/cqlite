@@ -1241,6 +1241,45 @@ else
   push_plain "$out7pl2" | grep -E 'credential|remote' | head -5
 fi
 
+# 7p-m. THE BOUND MUST ACTUALLY BOUND (#3369 review). `timeout <secs>` sends SIGTERM and
+#   then waits, so a child that traps or ignores it runs on forever and the advertised
+#   60s bound bounds nothing — in BOOT-PATH code, where a hang is the worst outcome.
+#   `bounded` now passes --kill-after, which also makes the probe's rc=137 branch
+#   reachable for the first time (it previously anticipated an outcome the wrapper could
+#   not produce). The stand-in for a TERM-ignoring git/ssh/credential-manager is a
+#   claim.sh that traps TERM: it is `bounded`'s DIRECT child (env execs it), which is the
+#   process timeout signals.
+#
+#   COST: this case necessarily waits out the real 60s bound plus the 5s grace (~65s) —
+#   the bound is production behaviour and must not be shrunk to suit a test. Its own
+#   outer ceiling is the negative control: WITHOUT --kill-after the bootstrap never
+#   returns, the ceiling fires, and rc is 124.
+if [ -n "$TIMEOUT_BIN_TEST" ]; then
+  bare7pm="$tmp/bare7pm.git"; mk_push_bare "$bare7pm"
+  repo7pm="$tmp/repo7pm"; mk_push_repo "$repo7pm" "file://$bare7pm"
+  printf '#!/usr/bin/env bash\ntrap "" TERM\nsleep 300\n' >"$repo7pm/scripts/flow/claim.sh"
+  chmod +x "$repo7pm/scripts/flow/claim.sh"
+  bin7pm="$tmp/bin7pm"; mk_push_bin "$bin7pm"
+  gc7pm="$tmp/gc7pm"; : >"$gc7pm"
+  hang_start=$(date +%s)
+  hang_rc=0
+  hang_out=$("$TIMEOUT_BIN_TEST" 150 env PATH="$bin7pm:$PATH" HOME="$repo7pm/.home" \
+    CARGO_HOME="$repo7pm/.home/.cargo" GIT_CONFIG_GLOBAL="$gc7pm" GIT_CONFIG_NOSYSTEM=1 \
+    CLAIM_MACHINE=push-probe-test CODEX_NOTIFY_WEBHOOK='https://ntfy.example.com/t' \
+    CQLITE_PROJECT_OWNER=pmcfadin CQLITE_PROJECT_NUMBER=1 \
+    bash "$repo7pm/scripts/bootstrap-agent-machine.sh" --skip-smoke 2>&1) || hang_rc=$?
+  hang_elapsed=$(( $(date +%s) - hang_start ))
+  if [ "$hang_rc" -ne 124 ] && printf '%s' "$hang_out" | grep -q '\[warn\].*git-push: UNMEASURED.*exceeded its 60s bound and was killed' \
+     && [ "$hang_elapsed" -lt 120 ]; then
+    ok "push: a SIGTERM-ignoring probe child is KILLED at the bound + grace — bootstrap still completes (${hang_elapsed}s) and reports UNMEASURED"
+  else
+    bad "push: the bound did not bound a TERM-ignoring child (rc=$hang_rc elapsed=${hang_elapsed}s)"
+    push_verdict "$hang_out"
+  fi
+else
+  echo "skip - push: bound-escalation guard needs timeout/gtimeout (neither on this host)"
+fi
+
 # 7p-g. `--strict` AND "All checks green." MUST NOT DIVERGE — asserted in BOTH
 #   directions. They are two channels for ONE fact: the green string is printed iff
 #   WARNINGS is 0, and --strict exits 0 iff WARNINGS is 0. A reviewer proposed keying
