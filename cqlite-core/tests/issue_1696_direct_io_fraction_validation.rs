@@ -187,3 +187,53 @@ async fn two_point_zero_no_longer_silently_becomes_one_point_zero() {
         "2.0 must be an ERROR, not a silent 1.0"
     );
 }
+
+/// The config check runs before ANY filesystem call, proven by a path that does
+/// not exist (#1696 roborev r2 F4).
+///
+/// The case above used a file that DOES exist, so it could not tell "validated
+/// before file I/O" from "validated after the metadata read succeeded" — and the
+/// second was the truth: `open_inner` called `tokio::fs::metadata` first, so a
+/// missing or unreadable file MASKED the invalid config behind an I/O error and
+/// the caller was told about the wrong problem. With a nonexistent path the two
+/// orders give different errors, so this pins the order rather than restating it.
+#[tokio::test]
+async fn sstable_reader_open_reports_the_config_error_not_the_missing_file() {
+    let temp = TempDir::new().expect("temp dir");
+    let missing = temp.path().join("nb-1-big-Data.db");
+    assert!(!missing.exists(), "the subject path must NOT exist");
+
+    for (fraction, why) in illegal_fractions() {
+        let config = config_with_fraction(fraction);
+        let platform = Arc::new(
+            Platform::new(&config)
+                .await
+                .expect("platform for a config whose only defect is the fraction"),
+        );
+        let error = SSTableReader::open(&missing, &config, platform)
+            .await
+            .err()
+            .unwrap_or_else(|| {
+                panic!("SSTableReader::open MUST reject fraction = {fraction} ({why})")
+            });
+        let message = error.to_string();
+        assert!(
+            message.contains("direct_io_memory_fraction"),
+            "a nonexistent file must NOT mask the config error \
+             (fraction {fraction}, {why}): {message}"
+        );
+    }
+
+    // Control: with a LEGAL fraction the same missing path fails as an I/O
+    // error, so the assertions above report the config check running first and
+    // not merely that every open of this path fails.
+    let config = config_with_fraction(0.5);
+    let platform = Arc::new(Platform::new(&config).await.expect("platform"));
+    let control = SSTableReader::open(&missing, &config, platform).await;
+    let control_message = control.err().map(|e| e.to_string()).unwrap_or_default();
+    assert!(
+        !control_message.is_empty() && !control_message.contains("direct_io_memory_fraction"),
+        "a legal fraction on a missing file must fail for the FILE's reason: \
+         {control_message}"
+    );
+}

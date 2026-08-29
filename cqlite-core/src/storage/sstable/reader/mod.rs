@@ -494,6 +494,16 @@ impl SSTableReader {
         chunk_cache: Arc<crate::storage::cache::DecompressedChunkCache>,
         cancel: crate::storage::scan_cancel::ScanCancel,
     ) -> Result<Self> {
+        // #1696 (roborev r2 F4): validate the direct-I/O fraction FIRST, before
+        // any `tokio::fs` call. It was validated at its point of use — after
+        // `tokio::fs::metadata` had already run — so a missing or unreadable file
+        // masked an invalid config with an I/O error, and the caller was told
+        // about the wrong problem. A config error needs no bytes to diagnose, so
+        // it is diagnosed before the first byte is touched. The value is carried
+        // to the resolver below rather than re-derived, keeping
+        // `StorageConfig::validated_direct_io_memory_fraction` the single
+        // definition of the rule.
+        let direct_io_memory_fraction = config.storage.validated_direct_io_memory_fraction()?;
         // Retain the open-time Config before any local `config` shadowing so
         // `perform_integrity_check` can delegate to `verify::verify_sstable`
         // (single source of truth, issue #1283) under the same config.
@@ -545,7 +555,7 @@ impl SSTableReader {
             configured_mode,
             file_size,
             reader_config.mmap_min_size_bytes as u64,
-            config.storage.validated_direct_io_memory_fraction()?, // #1696 F2: reject, not clamp
+            direct_io_memory_fraction, // #1696 F2: rejected above, never clamped
             system_memory_bytes(),
             direct_io_available(),
         );
