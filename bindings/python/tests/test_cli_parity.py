@@ -1057,6 +1057,42 @@ class TestCollectionIdentityContract:
             {"_type": "address", "street": "1 Main St"}, is_row_level=False
         ) == {"_type": "address", "street": "1 Main St"}
 
+    def test_json_object_cell_normalizes_as_a_cql_map(self):
+        """LIMITATION b-5 (host-shape collision): a JSON cell is not distinguishable.
+
+        `Value::Json` reaches Python through `json_to_py`, which maps a JSON
+        **object** to a `PyDict` and a JSON **array** to a `PyList`. So the `dict`
+        row of the host-shape lattice (M4_spec §5.3) has THREE cell-level
+        sources — `map<k,v>`, `udt`, JSON object — and the normalizer, seeing only
+        the host value, canonicalizes a JSON object as a **CQL map**: a sorted
+        array of `{"key": ..., "value": ...}`, where the CLI keeps an object. A
+        JSON object carrying a literal `"_type"` key is additionally read as a UDT.
+
+        Reachability, stated honestly: the reader does produce `Value::Json` for a
+        `"json"` comparator (`custom_scalar.rs`,
+        `comparator_value_parsing.rs`), but no current fixture uses one, so this is
+        unreachable from today's corpus while being a real hole in the type
+        lattice. #1455 must exclude columns whose comparator is `"json"`; the fix
+        is the declared type (#3497).
+
+        Characterization only — this pins current behavior as a known gap.
+        """
+        json_object_cell = {"a": 1, "b": "two"}
+        assert normalize_python_value(json_object_cell, is_row_level=False) == [
+            {"key": "a", "value": 1},
+            {"key": "b", "value": "two"},
+        ], "a JSON object is canonicalized as a CQL map, not kept as an object (b-5)"
+
+        # A JSON object carrying "_type" takes the UDT branch instead — the third
+        # source colliding with the marker class (b-2).
+        assert normalize_python_value({"_type": "x", "a": 1}, is_row_level=False) == {
+            "_type": "x",
+            "a": 1,
+        }
+
+        # A JSON array is indistinguishable from `list<T>`: both become an array.
+        assert normalize_python_value([1, "two"], is_row_level=False) == [1, "two"]
+
     def test_map_with_literal_type_key_is_misclassified_as_a_udt(self):
         """LIMITATION b-2, SITE "cell-level map": a `map<text,X>` holding `"_type"` reads as a UDT.
 
