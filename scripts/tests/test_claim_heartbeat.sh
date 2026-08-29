@@ -1241,6 +1241,18 @@ if printf '%s\n' "$help_text" | grep -q 'refs/lane-claims/<machine>/<lane-id>' \
 else
   bad "--help must document refs/lane-claims/<machine>/<lane-id> and mark the per-machine namespace legacy"
 fi
+# ...and the ONE-LINE subcommand summary must name BOTH should-reap forms (round 21, Medium). It
+# advertised `should-reap <machine> [issue] [secs]` while a two-argument call is ALWAYS the legacy
+# threshold form, so an operator following it got a verdict about the legacy ref with the issue number
+# read as a threshold. The --help block was right and this summary was not, which is why both are
+# asserted rather than just the one that happened to be wrong.
+usage_text=$(cd "$WORK" && bash "$HB" 2>&1 || true)
+if printf '%s\n' "$usage_text" | grep -q 'should-reap <machine> \[threshold_secs\]' \
+  && printf '%s\n' "$usage_text" | grep -q 'should-reap <machine> <issue> <threshold_secs>'; then
+  ok "the no-subcommand usage line names BOTH should-reap forms, so the two-argument trap is not advertised as a lane call"
+else
+  bad "the usage line must spell out both should-reap forms: $(printf '%s\n' "$usage_text" | tr '\n' ' ' | head -c 400)"
+fi
 # ...and the help's exit-0 contract must match the CURRENT implementation, which restored the clean
 # verdict once per-lane refs removed the masking (#3393 ruling A).
 #
@@ -2545,6 +2557,65 @@ for sub in list list-claims; do
   fi
 done
 (cd "$WORK" && g push -q origin ":refs/lane-claims/rowBox/6002" ":refs/heartbeats/rowBox" 2>/dev/null || true)
+
+# ===========================================================================
+echo "TEST 75: a legacy issue that is NOT a number is unusable, not a licence to reap (round 21)"
+# ===========================================================================
+# `issue_has_open_pr` answers "no open PR" for a non-numeric issue because it cannot query one — a
+# correct answer to the WRONG question — so a legacy claim saying `issue=abc` passed the #2499 safeguard
+# BY FAILING TO BE CHECKABLE, and both `should-reap` and `reap` acted on it. Asserted at BOTH sites: the
+# review named only should-reap, and delete_ref_guarded reads a legacy issue the same way.
+craft_legacy_issue() {  # <machine> <issue-literal> <age-secs>
+  local machine="$1" lit="$2" age="$3"
+  (
+    cd "$WORK" || exit 1
+    local now_epoch old_epoch old_ts et cs
+    now_epoch=$(date -u +%s); old_epoch=$((now_epoch - age))
+    old_ts=$(date -u -r "$old_epoch" +%Y-%m-%dT%H:%M:%SZ 2>/dev/null) \
+      || old_ts=$(date -u -d "@$old_epoch" +%Y-%m-%dT%H:%M:%SZ)
+    et=$(git hash-object -t tree --stdin </dev/null)
+    cs=$(GIT_AUTHOR_DATE="$old_ts" GIT_COMMITTER_DATE="$old_ts" \
+      GIT_AUTHOR_NAME=t GIT_AUTHOR_EMAIL=t@t GIT_COMMITTER_NAME=t GIT_COMMITTER_EMAIL=t@t \
+      git commit-tree "$et" -m "claim issue=${lit} machine=${machine} pid=${ABSENT_PID} ts=${old_ts}")
+    g push -q origin "${cs}:refs/machine-claims/${machine}"
+  )
+}
+for bad_issue in abc 0 007 12x; do
+  craft_legacy_issue "badIssue" "$bad_issue" 40000
+  sr_out=$(cd "$WORK" && HEARTBEAT_MACHINE=badIssue CLAIM_OPEN_PR_CMD="$NO_OPEN_PR" \
+    bash "$HB" should-reap badIssue 1 2>&1)
+  sr_rc=$?
+  rp_out=$(cd "$WORK" && HEARTBEAT_MACHINE=badIssue CLAIM_OPEN_PR_CMD="$NO_OPEN_PR" \
+    bash "$HB" reap badIssue 2>&1)
+  rp_rc=$?
+  survived=$(g -C "$WORK" ls-remote origin 'refs/machine-claims/badIssue' | awk '{print $1}')
+  if [ "$sr_rc" -eq 1 ] && [ "$rp_rc" -eq 5 ] && [ -n "$survived" ] \
+    && printf '%s\n' "$sr_out" | grep -qi 'not an issue number' \
+    && printf '%s\n' "$rp_out" | grep -qi 'not an issue number'; then
+    ok "issue='${bad_issue}' makes should-reap KEEP (rc=1) and reap REFUSE (rc=5), and the ref survives"
+  else
+    bad "issue='${bad_issue}' must not reach a reap: sr_rc=$sr_rc rp_rc=$rp_rc survived='${survived:-<gone>}' sr:
+$sr_out
+rp:
+$rp_out"
+  fi
+  (cd "$WORK" && g push -q origin ":refs/machine-claims/badIssue" 2>/dev/null || true)
+done
+# NON-VACUITY: the SAME legacy shape with a VALID issue and no open PR still reaches REAP and is
+# deleted, so the four refusals above are caused by the issue value and not by the age, the legacy path
+# or the open-PR stub.
+craft_legacy_issue "okIssue" "4242" 40000
+ok_sr_rc=0
+(cd "$WORK" && HEARTBEAT_MACHINE=okIssue CLAIM_OPEN_PR_CMD="$NO_OPEN_PR" \
+  bash "$HB" should-reap okIssue 1 >/dev/null 2>&1) || ok_sr_rc=$?
+(cd "$WORK" && HEARTBEAT_MACHINE=okIssue CLAIM_OPEN_PR_CMD="$NO_OPEN_PR" \
+  bash "$HB" reap okIssue >/dev/null 2>&1) || true
+ok_gone=$(g -C "$WORK" ls-remote origin 'refs/machine-claims/okIssue' | awk '{print $1}')
+if [ "$ok_sr_rc" -eq 0 ] && [ -z "$ok_gone" ]; then
+  ok "NON-VACUITY: the same legacy shape with issue=4242 DOES reach reap (rc=0) and the ref is deleted"
+else
+  bad "NON-VACUITY broken: valid-issue control gave should-reap rc=$ok_sr_rc, ref '${ok_gone:-<gone>}' — TEST 75's refusals are not attributable to the issue value"
+fi
 
 echo
 echo "=== claim-heartbeat.sh: $PASS passed, $FAIL failed ==="
