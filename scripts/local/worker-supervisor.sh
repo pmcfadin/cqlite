@@ -283,6 +283,10 @@ CLAIM_STAMPED_ISSUE=""
 # can never remove a ref another supervisor has since refreshed (roborev round 19, Medium). Empty
 # means "not known" — a lease is then not passed, and that is logged rather than silently skipped.
 CLAIM_STAMPED_SHA=""
+# Whether the work this supervisor last claimed has CONCLUDED — finalized, or released to someone else
+# (an owner park). 1 also covers "nothing has been claimed yet", so a supervisor that exits before its
+# first iteration deletes nothing it did not create (roborev round 23, Medium).
+CLAIM_WORK_CONCLUDED=1
 # A per-INVOCATION token for the placeholder lane id (#3393, roborev round 3). `p$$` alone is unique
 # only among CURRENTLY RUNNING processes: after a crash or reboot, pid reuse lets a new supervisor
 # write the SAME placeholder ref as a dead lane's, overwriting it with a fresh timestamp and a live
@@ -622,21 +626,31 @@ stamp_claim() {
 # PR before the supervisor ever received the marker, so clearing there destroys the only liveness
 # signal of a lane with an unfinished endgame: the exact #2499 case, reached from the other side.
 #
-# Discriminated by the EXIT CODE, not a list of reasons — a reason list is a subject set that drifts
-# the moment someone adds an exit path (#3464, the guard-width lesson). Left behind, the placeholder
-# is reported by `dead-lanes` and adoptable by hand, which is the intended end state for an
-# unfinished lane.
+# THE EXIT CODE WAS THE WRONG DISCRIMINATOR, AND SO WAS THE LANE ID'S SHAPE (roborev round 23, Medium).
+# The previous rule preserved only a PLACEHOLDER on an abnormal exit, reasoning that a numeric lane id
+# is safe because `reap`'s open-PR guard runs. It is not: **an absence of an open PR is a correct answer
+# to the wrong question.** Pre-PR work — an issue claimed, implementation under way, no PR opened yet —
+# has no open PR, so the guard passes and the ref is deleted. A breaker or a `head-blocked` stop then
+# erases the ONLY liveness signal for unfinished work: `dead-lanes` cannot report it (no ref), and the
+# CI reaper cannot flip its board item back to Ready (nothing to reap), so the item is pinned at In
+# Progress indefinitely. That is the same shape as round 21's `issue_has_open_pr` finding, in a
+# different caller — which is why the discriminator is now the PROPERTY rather than any proxy for it.
+#
+# The property: has the work this supervisor claimed CONCLUDED? Only `finalized` and an owner park
+# answer yes. A clean stop mid-issue (stop-file, budget) answers NO and deliberately leaves the ref —
+# that is the #2499 intent, an unfinished lane stays owned for adoption, and the CI reaper collects it
+# on age + no-open-PR + dead-pid once it is genuinely stale.
 clear_claim() {
   [[ -n "$CLAIM_CMD" ]] || return 0
-  local clean="${1:-}"
+  local concluded="${1:-}"
   # Retry anything a transition could not clean up, before clearing this lane's own ref. Nothing is
   # protected here: on a clean exit this lane's own ref is being removed too.
   claim_drain_pending_cleanup
   local issue="$CLAIM_STAMPED_ISSUE"
   # May be a `p<pid>` placeholder as well as an issue number; both are real refs to clear.
   case "$issue" in '' | p) issue="" ;; esac
-  if [[ -n "$issue" && "$clean" != 1 ]] && [[ "$issue" == p* ]]; then
-    log "claim clear DECLINED: lane $issue is a placeholder and this exit is not clean, so reap cannot rule out an open PR — left for dead-lanes to report and for adoption (#2499)"
+  if [[ -n "$issue" && "$concluded" != 1 ]]; then
+    log "claim clear DECLINED: the work on lane $issue has not concluded (no finalize, no owner park), so this ref is the only signal that the lane held it — left for dead-lanes to report and the reaper to collect (#2499)"
     return 0
   fi
   if [[ -z "$issue" ]]; then
@@ -650,7 +664,7 @@ clear_claim() {
   local rc=0
   HEARTBEAT_MACHINE="$CLAIM_MACHINE" $CLAIM_CMD reap "$CLAIM_MACHINE" "$issue" "$CLAIM_STAMPED_SHA" >/dev/null 2>&1 || rc=$?
   if [[ "$rc" == 0 ]]; then
-    log "claim cleared on clean exit: machine=$CLAIM_MACHINE issue=$issue${CLAIM_STAMPED_SHA:+ (lease held at $CLAIM_STAMPED_SHA)}"
+    log "claim cleared (work concluded): machine=$CLAIM_MACHINE issue=$issue${CLAIM_STAMPED_SHA:+ (lease held at $CLAIM_STAMPED_SHA)}"
   elif [[ "$rc" == 4 ]]; then
     log "claim clear declined for machine=$CLAIM_MACHINE issue=$issue: the lease at ${CLAIM_STAMPED_SHA:-<none>} is no longer held, so another supervisor owns this lane — its live claim is left alone"
   else
@@ -1166,9 +1180,10 @@ finalize_exit() {
   # EVERY EXIT, not only a clean one — the comment here used to say "on a clean stop" and was simply
   # false (roborev round 18) — so the clean/abnormal distinction is passed down instead of assumed:
   # a placeholder lane id has no issue for that guard to consult and is kept on an abnormal exit.
-  local clean_exit=0
-  [[ "$code" == 0 ]] && clean_exit=1
-  clear_claim "$clean_exit"
+  # Keyed on whether the CLAIMED WORK concluded, not on this exit's code (roborev round 23): a clean
+  # stop mid-issue must keep the ref exactly as a breaker must, because in both cases the work is
+  # unfinished and the ref is the only signal that this lane held it.
+  clear_claim "$CLAIM_WORK_CONCLUDED"
   local elapsed=$(($(date +%s) - START_TS))
   mkdir -p "$LOG_DIR"
   report_pending_at_exit
@@ -1430,6 +1445,23 @@ run_iteration() {
   else
     CLAIM_ISSUE=""
   fi
+
+  # HAS THE CLAIMED WORK CONCLUDED? (roborev round 23, Medium.) `clear_claim` needs this, and NOTHING
+  # ELSE ANSWERS IT: not the exit code, not the lane id's shape, and above all not the absence of an
+  # open PR. Concluded means `finalized` (endgame done) or an owner park (the issue is released and
+  # excluded from the next pickup). Every other outcome — a technical block, an abnormal marker, a
+  # crash — leaves work IN PROGRESS, and its claim ref is the only signal that the lane held it.
+  case "$outcome" in
+    finalized) CLAIM_WORK_CONCLUDED=1 ;;
+    blocked)
+      case "$reason" in
+        seam1-approval | needs-decision) CLAIM_WORK_CONCLUDED=1 ;;
+        *) CLAIM_WORK_CONCLUDED=0 ;;
+      esac
+      ;;
+    no-work) : ;;   # nothing was claimed this iteration; the previous state still stands
+    *) CLAIM_WORK_CONCLUDED=0 ;;
+  esac
 
   case "$outcome" in
     finalized)

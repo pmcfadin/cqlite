@@ -2645,11 +2645,14 @@ test_clear_claim_keeps_placeholder_on_abnormal_exit() {
   cat >"$d/bin/claim.sh" <<'STUBEOF'
 #!/usr/bin/env bash
 printf '%s\n' "$*" >>"${CLAIM_LOG:?CLAIM_LOG not set}"
+[ "${1:-}" = stamp ] && printf 'deadbeefdeadbeefdeadbeefdeadbeefdeadbeef\n'
 exit 0
 STUBEOF
   chmod +x "$d/bin/claim.sh"
-  # Four cases in one sourced shell: placeholder/abnormal (KEEP), placeholder/clean (CLEAR),
-  # numeric/abnormal (CLEAR — reap's own guard covers it), numeric/clean (CLEAR).
+  # FOUR cases. The two NUMERIC ones are the round-23 correction: a numeric lane id used to be cleared
+  # on any exit, on the reasoning that reap's open-PR guard makes it safe. It does not — PRE-PR work has
+  # no open PR, so the guard passes and the ref is deleted, erasing the only signal that an unfinished
+  # lane held that issue. "No open PR" is a correct answer to the wrong question.
   : >"$CLAIM_LOG"
   out="$(
     CLAIM_CMD="bash $d/bin/claim.sh" HEARTBEAT_MACHINE=testbox CLAIM_LOG="$CLAIM_LOG" \
@@ -2658,23 +2661,66 @@ STUBEOF
       CLAIM_STAMPED_ISSUE="p777-dead1"; clear_claim 0
       CLAIM_STAMPED_ISSUE="p888-dead2"; clear_claim 1
       CLAIM_STAMPED_ISSUE="4242";       clear_claim 0
+      CLAIM_STAMPED_ISSUE="5353";       clear_claim 1
     ' _ "$SUPERVISOR" 2>&1
   )"
-  if printf '%s' "$out" | grep -q 'claim clear DECLINED: lane p777-dead1 is a placeholder and this exit is not clean' \
+  if printf '%s' "$out" | grep -q 'the work on lane p777-dead1 has not concluded' \
+    && printf '%s' "$out" | grep -q 'the work on lane 4242 has not concluded' \
     && ! grep -qE '^reap testbox p777-dead1( |$)' "$CLAIM_LOG" \
+    && ! grep -qE '^reap testbox 4242( |$)' "$CLAIM_LOG" \
     && grep -qE '^reap testbox p888-dead2( |$)' "$CLAIM_LOG" \
-    && grep -qE '^reap testbox 4242( |$)' "$CLAIM_LOG"; then
-    pass "claim: a placeholder lane survives an ABNORMAL exit, is cleared on a CLEAN one, and a numeric lane is cleared either way"
+    && grep -qE '^reap testbox 5353( |$)' "$CLAIM_LOG"; then
+    pass "claim: an UNCONCLUDED lane survives regardless of its id shape (placeholder AND numeric), and a concluded one is cleared either way"
   else
-    fail "clear-claim-abnormal: out=[$out] log=[$(tr '\n' ';' <"$CLAIM_LOG")]"
+    fail "clear-claim-concluded: out=[$out] log=[$(tr '\n' ';' <"$CLAIM_LOG")]"
   fi
-  # NON-VACUITY: finalize_exit must actually DERIVE clean from the exit code rather than hardcode
-  # one value — otherwise the case above tests a function nothing calls correctly.
-  if grep -qE 'clear_claim "\$clean_exit"' "$SUPERVISOR" \
-    && grep -qE '\[\[ "\$code" == 0 \]\] && clean_exit=1' "$SUPERVISOR"; then
-    pass "claim: finalize_exit derives clean/abnormal from its EXIT CODE and passes it down (no reason list to drift)"
+  # WIRING: finalize_exit must pass the WORK-CONCLUDED state, not a code-derived clean flag. The exit
+  # code was the previous discriminator and it is exactly what this round falsified — a clean stop
+  # mid-issue must keep the ref just as a breaker must.
+  if grep -qE 'clear_claim "\$CLAIM_WORK_CONCLUDED"' "$SUPERVISOR" \
+    && ! grep -qE 'clear_claim "\$clean_exit"' "$SUPERVISOR"; then
+    pass "claim: finalize_exit passes CLAIM_WORK_CONCLUDED and no longer derives a clean flag from the exit code"
   else
-    fail "clear-claim-wiring: finalize_exit does not pass a code-derived clean flag to clear_claim"
+    fail "clear-claim-wiring: finalize_exit must pass \$CLAIM_WORK_CONCLUDED, not an exit-code flag"
+  fi
+  # ...and the state must be DERIVED from the outcome, per outcome, or the flag is decorative.
+  local derived
+  derived="$(
+    CLAIM_CMD="" bash -c '
+      source "$1"
+      for spec in "finalized:" "blocked:needs-decision" "blocked:seam1-approval" "blocked:some technical reason" "abnormal:" "aborted:"; do
+        outcome="${spec%%:*}"; reason="${spec#*:}"
+        CLAIM_WORK_CONCLUDED=9
+        case "$outcome" in
+          finalized) CLAIM_WORK_CONCLUDED=1 ;;
+          blocked)
+            case "$reason" in
+              seam1-approval | needs-decision) CLAIM_WORK_CONCLUDED=1 ;;
+              *) CLAIM_WORK_CONCLUDED=0 ;;
+            esac
+            ;;
+          no-work) : ;;
+          *) CLAIM_WORK_CONCLUDED=0 ;;
+        esac
+        printf "%s=%s " "$outcome/${reason:-none}" "$CLAIM_WORK_CONCLUDED"
+      done
+    ' _ "$SUPERVISOR" 2>/dev/null
+  )"
+  if [[ "$derived" == *"finalized/none=1"* && "$derived" == *"blocked/needs-decision=1"* \
+    && "$derived" == *"blocked/seam1-approval=1"* && "$derived" == *"blocked/some technical reason=0"* \
+    && "$derived" == *"abnormal/none=0"* && "$derived" == *"aborted/none=0"* ]]; then
+    pass "claim: work-concluded is 1 only for finalize and an owner park; a technical block, abnormal and aborted all leave it 0"
+  else
+    fail "clear-claim-derivation: got [$derived]"
+  fi
+  # NON-VACUITY for the derivation table: it must be the SUPERVISOR's own classification, so assert the
+  # same case arms exist in the shipped file rather than only in this test's copy of them.
+  if grep -q 'CLAIM_WORK_CONCLUDED=1' "$SUPERVISOR" \
+    && grep -qE 'seam1-approval \| needs-decision\) CLAIM_WORK_CONCLUDED=1' "$SUPERVISOR" \
+    && grep -qE '\*\) CLAIM_WORK_CONCLUDED=0' "$SUPERVISOR"; then
+    pass "NON-VACUITY: the same outcome->concluded arms are present in the shipped supervisor, not just in this case"
+  else
+    fail "clear-claim-derivation-nonvacuity: the shipped supervisor does not carry the arms this case asserts"
   fi
 }
 
