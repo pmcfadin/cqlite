@@ -1053,14 +1053,42 @@ cmd_should_reap() {
       note "keep ${ref}: LOCAL claim with no usable pid, so 'pid-dead-if-local' cannot be established — an unsatisfiable clause fails the predicate rather than dropping out of it"
       return 1
     fi
+    # PRESENT IS NOT THE SAME AS ALIVE (roborev round 36, Low). `process_presence` answers a
+    # VISIBILITY question, and a ZOMBIE is visible: `ps -p` lists it, `/proc/<pid>` exists, and
+    # `kill -0` succeeds. So a zombie supervisor read as `present` and its claim was KEPT
+    # INDEFINITELY — while `dead-lanes`, in this same file, has classified exactly that case as
+    # DEAD-NO-PROCESS since round 7. The two predicates disagreed about one fact, which is the
+    # guard-width shape this command has now met four times: `dead-lanes` gained a check and
+    # `should-reap` was never brought up to it.
+    #
+    # Reusing `process_state_class` rather than reimplementing it is the point — a second
+    # implementation of "is this a zombie" is a second thing to keep in step.
+    #
+    # `unreadable` stays KEEP, deliberately: it is neither a confirmed zombie nor a confirmed live
+    # process, and this is a reap GATE, so the unknown takes the conservative branch. PID REUSE is
+    # NOT decided here — `dead-lanes` owns that verdict because it needs the claim's own timestamp
+    # to bracket a start window, and inferring it inside a reaper that has already passed the age
+    # gate would be a second, weaker copy of that reasoning.
     case "$(process_presence "$pid")" in
       absent)
         note "reap ${ref}: age ${age}s > ${threshold}s, no open PR, local pid ${pid} CONFIRMED absent"
         return 0
         ;;
       present)
-        note "keep ${ref}: local pid ${pid} is still alive"
-        return 1
+        case "$(process_state_class "$pid")" in
+          zombie)
+            note "reap ${ref}: age ${age}s > ${threshold}s, no open PR, local pid ${pid} is a ZOMBIE — visible to ps and /proc but not running (dead-lanes classifies this DEAD-NO-PROCESS)"
+            return 0
+            ;;
+          unreadable)
+            note "keep ${ref}: local pid ${pid} is present but its state is UNREADABLE — neither a confirmed zombie nor a confirmed live process, so the reap gate takes the conservative branch"
+            return 1
+            ;;
+          *)
+            note "keep ${ref}: local pid ${pid} is still alive"
+            return 1
+            ;;
+        esac
         ;;
       *)
         note "keep ${ref}: local pid ${pid} presence is UNKNOWN (denied or unmeasurable) — not proof it is gone"

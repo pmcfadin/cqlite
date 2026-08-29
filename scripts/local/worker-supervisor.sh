@@ -751,8 +751,48 @@ clear_claim() {
   # (b) says exactly that state must keep its ref — so "concluded" is necessary and not sufficient:
   # there must also be nothing pending.
   if [[ -n "$issue" && -n "${PENDING_PR_LIST// /}" ]]; then
-    log "claim clear DECLINED: lane $issue kept because an auto-merge PR is still pending — an endgame in flight stays owned for adoption (#2499)"
-    return 0
+    # A PLACEHOLDER CANNOT CARRY THIS PROTECTION PAST OUR OWN EXIT (roborev round 36, Medium).
+    #
+    # Keeping the ref is right — ruling (b) on #2499 says an endgame in flight stays owned. But when
+    # the stamped lane is a `p<pid>` PLACEHOLDER, keeping it is a TRAP of my own making: `should-reap`
+    # permanently refuses placeholders (round 3, because an id naming no issue cannot be checked
+    # against an open PR), so once this supervisor exits NOTHING can ever clear that ref — not the CI
+    # reaper, not a later merge of the very PR it is protecting. The result is a stale ref and a
+    # permanent false dead-lane report needing manual cleanup.
+    #
+    # So TRANSFER the protection to ISSUE-numbered refs, which the reaper CAN evaluate: an issue lane
+    # has an open PR (KEEP) until the PR merges, and is then collectable on the next sweep. The
+    # per-lane namespace makes this natural — an issue IS a lane id.
+    #
+    # ALL-OR-NOTHING, and the direction is deliberate: the placeholder is cleared ONLY if every
+    # pending issue was stamped. A partial transfer would drop protection for the unstamped ones,
+    # which is worse than the stale ref this fixes. A pending PR with no recorded issue is
+    # untransferable, so it keeps the placeholder — a stale ref beats an unprotected endgame.
+    if [[ "$issue" == p* ]]; then
+      local pr_e iss_e rest_e transferred=0 untransferable=0
+      while IFS=$'\t' read -r pr_e iss_e rest_e; do
+        [[ -n "$pr_e" ]] || continue
+        case "$iss_e" in
+          '' | *[!0-9]* | 0) untransferable=$((untransferable + 1)); continue ;;
+        esac
+        if HEARTBEAT_MACHINE="$CLAIM_MACHINE" $CLAIM_CMD stamp "$iss_e" "$$" >/dev/null 2>&1; then
+          transferred=$((transferred + 1))
+          log "endgame protection transferred off the placeholder: lane $iss_e stamped for pending PR $pr_e, so the reaper can collect it once that PR lands"
+        else
+          untransferable=$((untransferable + 1))
+          log "WARN: could not stamp lane $iss_e for pending PR $pr_e; the placeholder is kept instead"
+        fi
+      done <<<"$PENDING_PR_LIST"
+      if [[ "$untransferable" -eq 0 && "$transferred" -gt 0 ]]; then
+        log "placeholder lane $issue is now clearable: all $transferred pending endgame(s) are protected by issue-numbered refs"
+      else
+        log "claim clear DECLINED: placeholder lane $issue kept — $untransferable pending endgame(s) could not be transferred to an issue-numbered ref (a stale ref beats an unprotected endgame)"
+        return 0
+      fi
+    else
+      log "claim clear DECLINED: lane $issue kept because an auto-merge PR is still pending — an endgame in flight stays owned for adoption (#2499)"
+      return 0
+    fi
   fi
   if [[ -n "$issue" && "$concluded" != 1 ]]; then
     log "claim clear DECLINED: the work on lane $issue has not concluded (no finalize, no owner park), so this ref is the only signal that the lane held it — left for dead-lanes to report and the reaper to collect (#2499)"
