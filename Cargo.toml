@@ -18,6 +18,17 @@ members = [
 exclude = [
     "fuzz",
 ]
+
+# NOTE (issue #1716, epic #1688 finding AK5): do NOT add `default-members` here
+# expecting it to make a bare root build cheaper — it would do the OPPOSITE.
+# This workspace has a ROOT PACKAGE (`cqlite`, below), and cargo's default for
+# `default-members` in that case is THE ROOT PACKAGE ALONE (it is "all members"
+# only for a VIRTUAL workspace). Verified on this manifest: `cargo tree
+# --depth 0` at the root resolves to `cqlite` and nothing else. So a bare
+# `cargo build` already compiles the narrowest possible set, and spelling out a
+# `default-members` list would EXPAND it from 1 package to 14.
+# The unwired `tools/` crates (see each one's README) are compiled only by an
+# explicit `--workspace` or `-p`, never by a bare build.
 resolver = "2"
 
 [package]

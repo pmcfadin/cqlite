@@ -308,7 +308,15 @@ mod tests {
     fn test_hex_dump_formatting() {
         let data = b"Hello, World! This is a test.";
         let dump = format_hex_dump(data, 0, data.len());
-        assert!(dump.contains("48656c6c6f")); // "Hello" in hex
-        assert!(dump.contains("Hello")); // ASCII representation
+        // `format_hex_dump` emits a conventional `hexdump -C` layout — an address
+        // prefix, SPACE-SEPARATED hex pairs with a gap after the 8th byte, then an
+        // ASCII gutter. Asserting the UNSEPARATED "48656c6c6f" (as this test did
+        // until #1716) can never hold for any input; it was simply never run,
+        // because nothing invoked this crate. Verified actual output for this input:
+        //   00000000: 48 65 6c 6c 6f 2c 20 57  6f 72 6c 64 21 20 54 68  |Hello, World! Th|
+        assert!(dump.contains("48 65 6c 6c 6f")); // "Hello", hex pairs
+        assert!(dump.contains("Hello")); // ASCII gutter
+        assert!(dump.starts_with("00000000: ")); // address prefix
+        assert!(dump.contains("6f 72 6c 64 21")); // the post-gap half of line 1
     }
 }

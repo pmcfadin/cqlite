@@ -208,9 +208,52 @@ cqlite-cli/      # Command-line interface
 bindings/python/ # Python bindings (PyO3) — M4 complete
 bindings/node/   # Node.js bindings (napi-rs) — Phase 3 complete
 test-data/       # Real Cassandra 5.0 SSTables for testing
-tools/           # sstabledump-validator, format-validator
+tools/           # 7 crates, each with a RECORDED disposition in one of THREE
+                 #   categories, pinned by the gate guard
+                 #   scripts/tests/test_tools_crate_disposition.sh (#1716):
+                 #   WIRED   — cassandra-parity, flight-loadgen,
+                 #             sstabledump-validator, ws0-corpus-gen.
+                 #   UNWIRED — nothing runs them AND nothing depends on them:
+                 #             cqlite-validator, memory-safety-runner. Each needs
+                 #             a README saying it is NOT CI-wired.
+                 #   MIXED   — format-validator: its 4 BINS are orphaned but its
+                 #             LIB is WIRED (tests/format-compatibility = the
+                 #             gate's `format-compat` component). Its README must
+                 #             name BOTH halves, and the crate must stay a
+                 #             workspace member — never `exclude` it.
+                 #   A NEW tools/ crate must be classified there or the gate FAILs.
+                 #   That guard is deliberately SMALL: it checks a disposition
+                 #   was RECORDED and LABELED, not that the record is TRUE, and it
+                 #   is per-CRATE (an orphaned bin added to a WIRED crate passes
+                 #   unchanged). It needs no cargo/python3/network. A
+                 #   cargo-derived cross-check that verified truth was built and
+                 #   REMOVED (#1716) — 11 review findings landed in it and none in
+                 #   the list/README part, and its scratch workspaces sat outside
+                 #   the repo so they did not inherit rust-toolchain.toml, making a
+                 #   MANDATORY gate component host-toolchain-dependent. Doing it
+                 #   properly is its own issue under epic #1688.
 fuzz/            # cargo-fuzz crate — own workspace, EXCLUDED from the main one
 ```
+
+**A bare `cargo build` here already builds only the ROOT package — do not "optimize" it with
+`default-members` (#1716).** This workspace has a root package (`cqlite`), and cargo's default for
+`default-members` in that case is **that package alone** ("all members" is the default only for a
+VIRTUAL workspace). Verified: `cargo tree --depth 0` at the root resolves to `cqlite` and nothing
+else. So adding an explicit `default-members` list would **expand** the bare build from 1 package to
+14 — the opposite of the intent, and the trap #1716 was originally written around ("these crates are
+compiled by every workspace build" was false). The `tools/` crates are compiled only by an explicit
+`--workspace`/`--all-targets` (the gate's clippy) or `-p`. So those crates stay fully linted under
+`-D warnings` no matter their disposition.
+
+**Their unit tests, though, run ONLY when your diff touches their package (#1716).** No CI job and
+no gate component runs workspace-wide tests, so an untouched `tools/` crate's tests never execute —
+but `--lite`'s blast-radius maps a touched path to its package and runs that package's `--lib`
+tests. Consequence, found the hard way on #1716: editing only `tools/format-validator/README.md`
+made `--lite` run that crate's tests **for the first time**, and one failed —
+`test_hex_dump_formatting` asserted an unseparated `"48656c6c6f"` against a `hexdump -C`-style
+formatter that emits `48 65 6c 6c 6f`, an expectation that could never hold for any input. **Expect
+latent failures the first time you touch a long-unwired crate**; they are pre-existing, not yours,
+but they are yours to fix because your diff is what runs them.
 
 **Planned (M6)**: `bindings/wasm/`. Full source map (parsers, writers, query engine, bindings
 layout, binding structure trees):
