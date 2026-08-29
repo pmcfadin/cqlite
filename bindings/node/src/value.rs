@@ -311,9 +311,16 @@ fn duration_to_object(env: &Env, months: i32, days: i32, nanos: i64) -> Result<J
 /// files; issue #1452 removed the copy). Per the no-heuristics mandate (issue
 /// #28) there is no passthrough branch: the only outcomes are IPv4, IPv6 and a
 /// typed error.
+///
+/// The refusal is mapped through [`to_napi_error`] — exactly as the sibling
+/// DECIMAL adapter does — so it carries the ONE FFI error contract's identity
+/// for a data fault (`code: 'PARSE'`, `category: 'Data'`, issue #1451). A bare
+/// `napi::Error::from_reason` carries no `\0code=` metadata, so
+/// `lib/error-wrapper.js` fell back to its INTERNAL/Internal defaults and a
+/// corrupt SSTable cell claimed an internal-bug identity.
 fn inet_to_string_js(env: &Env, bytes: &[u8]) -> Result<JsUnknown> {
     let ip_str = cqlite_ffi_common::inet::inet_bytes_to_string(bytes)
-        .map_err(|err| napi::Error::from_reason(err.to_string()))?;
+        .map_err(|err| to_napi_error(cqlite_core::Error::corruption(err.to_string())))?;
     env.create_string(&ip_str).map(|s| s.into_unknown())
 }
 

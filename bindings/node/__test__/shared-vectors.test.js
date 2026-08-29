@@ -40,6 +40,7 @@
 const crypto = require('node:crypto');
 
 const { _ffiCommonRenderVectors } = require('../lib/index.js');
+const { parseErrorMetadata } = require('../lib/error-wrapper.js');
 
 /** Lower-case SHA-256 hex of a string's UTF-8 bytes. */
 const sha256Hex = (text) =>
@@ -120,6 +121,39 @@ describe('shared cross-binding vector table (issue #1452)', () => {
     expect(sha256Hex(entry.rendered)).toBe(
       'e1ec7b41fe833049052e89e01d3cdda36fcfc6dd69ec5deb03d52c116aa55214',
     );
+  });
+
+  // Every refusal must carry the shared FFI error contract's identity for a
+  // DATA fault (issue #1451): a corrupt cell is a data fault, never an internal
+  // bug. `actual` is the raw native `reason`, i.e. exactly the string
+  // `lib/error-wrapper.js` parses on a real throw, so this asserts the metadata
+  // a caller of `executeNative()` would see.
+  //
+  // This is the assertion that caught the INET adapter bypassing
+  // `to_napi_error()` and mapping with `napi::Error::from_reason` instead: with
+  // no `\0code=` metadata in the message, `parseErrorMetadata` fell back to its
+  // INTERNAL/Internal defaults and a corrupt inet cell claimed an internal-bug
+  // identity. The DECIMAL refusal in the same table always had it right, so a
+  // per-type sweep is what makes the two adapters comparable.
+  test('every refusal carries the #1451 contract identity, not the INTERNAL default', () => {
+    const refusals = VECTORS.filter((entry) => entry.kind === 'error');
+    expect(refusals.length).toBeGreaterThan(0);
+    const seenTypes = new Set();
+    for (const entry of refusals) {
+      const metadata = parseErrorMetadata(entry.actual);
+      expect({ name: entry.name, ...metadata, message: undefined }).toEqual({
+        name: entry.name,
+        code: 'PARSE',
+        category: 'Data',
+        isRecoverable: false,
+        message: undefined,
+      });
+      // The human-readable half survives the metadata suffix.
+      expect(metadata.message).toContain(entry.expected);
+      seenTypes.add(entry.cqlType);
+    }
+    // Both refusing adapters are covered, not just one.
+    expect([...seenTypes].sort()).toEqual(['decimal', 'inet']);
   });
 
   // A malformed inet must never come back as raw bytes, hex, or any other
