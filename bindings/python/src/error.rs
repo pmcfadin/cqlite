@@ -117,8 +117,8 @@ pub fn runtime_init_to_py_err(err: std::io::Error) -> PyErr {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use cqlite_ffi_common::error_contract::FfiErrorVariant;
     use cqlite_core::Error;
+    use cqlite_ffi_common::error_contract::FfiErrorVariant;
 
     /// Helper to extract error message from PyErr
     fn get_error_message(py: Python<'_>, err: PyErr) -> String {

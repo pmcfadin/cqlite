@@ -62,8 +62,8 @@
 //! }
 //! ```
 
-use cqlite_ffi_common::error_contract::contract_for;
 use cqlite_core::Error;
+use cqlite_ffi_common::error_contract::contract_for;
 
 /// Error metadata extracted from a cqlite_core::Error.
 ///

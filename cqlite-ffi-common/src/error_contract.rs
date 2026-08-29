@@ -49,8 +49,8 @@
 //! new `FfiErrorVariant` requires a row in the table below (the macro generates
 //! the exhaustive `row()` match from it).
 
-pub use cqlite_core::error::ErrorCategory;
 use cqlite_core::error::Error;
+pub use cqlite_core::error::ErrorCategory;
 
 /// Identifier of the Python exception class a core [`Error`] maps to.
 ///

@@ -13,10 +13,10 @@
 use pyo3::prelude::*;
 use pyo3::types::{PyBytes, PyDict, PyList};
 
+use cqlite_core::Value;
 use cqlite_ffi_common::vectors::{
     vector_outcome, VectorOutcome, DECIMAL_VECTORS, INET_VECTORS, VARINT_VECTORS,
 };
-use cqlite_core::Value;
 
 /// Turn one reported outcome into the dict shape both binding suites consume.
 ///

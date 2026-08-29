@@ -91,7 +91,9 @@ fn cargo_metadata_json() -> Result<String, String> {
 /// graph, or an error naming what could not be measured.
 fn resolved_closure(json: &str) -> Result<BTreeSet<String>, String> {
     let meta: serde_json::Value = serde_json::from_str(json).map_err(|e| {
-        format!("cannot measure the dependency closure: `cargo metadata` output did not parse ({e})")
+        format!(
+            "cannot measure the dependency closure: `cargo metadata` output did not parse ({e})"
+        )
     })?;
 
     // package id -> name, for turning resolve ids back into names.

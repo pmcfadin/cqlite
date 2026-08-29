@@ -92,7 +92,10 @@ mod tests {
             inet_bytes_to_string(&[192, 168, 1, 1]),
             Ok("192.168.1.1".to_string())
         );
-        assert_eq!(inet_bytes_to_string(&[0, 0, 0, 0]), Ok("0.0.0.0".to_string()));
+        assert_eq!(
+            inet_bytes_to_string(&[0, 0, 0, 0]),
+            Ok("0.0.0.0".to_string())
+        );
         assert_eq!(
             inet_bytes_to_string(&[255, 255, 255, 255]),
             Ok("255.255.255.255".to_string())

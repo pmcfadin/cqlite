@@ -118,7 +118,11 @@ fn positional_boundary_is_exact() {
     let rendered = decimal_to_string(2, &at).expect("at the threshold must render");
     // 2466 digits (CPython `int`, cross-checked with floor(log10(v))+1), of
     // which the last two are the fractional part.
-    assert_eq!(rendered.len(), 2466 + 1, "expected `<2464>.<2>` positional form");
+    assert_eq!(
+        rendered.len(),
+        2466 + 1,
+        "expected `<2464>.<2>` positional form"
+    );
     assert_eq!(rendered.matches('.').count(), 1);
     assert!(!rendered.contains('e'));
 
