@@ -40,21 +40,28 @@ describe('PreparedStatement', () => {
       expect(mod.wrapPreparedStatement).toBeUndefined();
     });
 
-    // The PUBLIC surface is exactly these three. Internal test-support exports
-    // are underscore-prefixed by convention (`_errorContractProbe`,
-    // `_errorContractNodeCodes` from issue #1451, `_ffiCommonRenderVectors` from
-    // issue #1452) and are deliberately not part of it — so this asserts the
-    // public keys AND that every remaining key is marked internal, rather than
-    // an exact whole-object match that any new internal helper falsifies.
+    // Both surfaces are pinned by NAME, and each list is an independent
+    // expectation the module can actually violate.
+    //
+    // The PUBLIC surface is exactly three names. The internal test-support
+    // exports are underscore-prefixed by convention — `_errorContractProbe` and
+    // `_errorContractNodeCodes` (issue #1451) and `_ffiCommonRenderVectors`
+    // (issue #1452) — and are deliberately not part of the public surface. They
+    // are enumerated rather than merely counted so that adding a fourth internal
+    // export is a deliberate edit here, not a silent widening.
     test('only Database, PreparedStatement, and version are exported publicly', () => {
       const mod = require('../lib/index.js');
       const allKeys = Object.keys(mod).sort();
-      const publicKeys = allKeys.filter((key) => !key.startsWith('_'));
-      expect(publicKeys).toEqual(['Database', 'PreparedStatement', 'version']);
-      // Nothing may sneak in un-marked: every non-public key is underscored.
-      expect(allKeys.filter((key) => key.startsWith('_')).length).toBe(
-        allKeys.length - publicKeys.length,
-      );
+      expect(allKeys.filter((key) => !key.startsWith('_'))).toEqual([
+        'Database',
+        'PreparedStatement',
+        'version',
+      ]);
+      expect(allKeys.filter((key) => key.startsWith('_'))).toEqual([
+        '_errorContractNodeCodes',
+        '_errorContractProbe',
+        '_ffiCommonRenderVectors',
+      ]);
     });
   });
 
