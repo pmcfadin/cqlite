@@ -853,7 +853,8 @@ class TestCollectionIdentityContract:
     aspirational.
 
     The tests named `LIMITATION <id>` pin the cases §5.3 records as NOT
-    canonicalizable — family (a), lossy projection through
+    canonicalizable — including one (b-4) that lives in the COMPARISON layer
+    (`values_equal`) rather than the normalizer — family (a), lossy projection through
     `value_to_hashable_key`, which discards the CQL type; and family (b), two CQL
     types arriving as the same Python host shape. The two FAMILIES are closed;
     the list of INSTANCES is **not** — the families are generative, and nesting
@@ -1159,6 +1160,44 @@ class TestCollectionIdentityContract:
         assert normalize_python_value(("a", 1), is_row_level=False) == normalize_python_value(
             ["a", 1], is_row_level=False
         )
+
+    def test_values_equal_accepts_a_reordered_scalar_list(self):
+        """LIMITATION b-4 (host-shape collision at COMPARISON time): list order is not verified.
+
+        `values_equal` tries an ordered comparison and then falls back to an
+        UNORDERED (sorted) one for arrays of non-dict primitives, so a reordered
+        `list<int>` compares EQUAL — even though §5.3's `list<T>` row says
+        "positional; order preserved on both sides".
+
+        This pins the CURRENT behavior as a recorded gap, NOT as a desirable
+        property. The fallback is a deliberate accommodation whose reason is
+        recorded at the branch: a CQL `SET` is sorted by `_sort_key` on the
+        Python side and emitted in Cassandra's internal byte-order by the CLI, so
+        removing the fallback would red genuine set comparisons in the existing
+        #319 suite — trading a false pass for a false failure. The canonical form
+        merges sets and lists into arrays by design, so the comparison layer
+        cannot tell them apart either; separating them needs the declared CQL
+        type (#3497).
+
+        Consequence for #1455: a genuine `list<T>` ORDERING regression would not
+        be caught by this comparison. A harness that must verify list order has
+        to compare those columns ordered-only, which requires schema information.
+        """
+        # A reordered scalar list compares EQUAL — the documented gap.
+        assert values_equal([1, 2, 3], [3, 1, 2]) is True
+
+        # The accommodation this exists for: a set, normalized/sorted differently
+        # by the two sides, still compares equal.
+        py_set = normalize_python_value(frozenset({3, 1, 2}), is_row_level=False)
+        cli_set_order = [3, 1, 2]  # CLI follows Cassandra byte-order, not _sort_key
+        assert values_equal(py_set, cli_set_order) is True
+
+        # Guardrails on the fallback's scope, so a future widening is visible here:
+        # differing LENGTH still fails, differing CONTENT still fails, and arrays of
+        # map-repr dicts are compared without the unordered fallback.
+        assert values_equal([1, 2, 3], [1, 2]) is False
+        assert values_equal([1, 2, 3], [1, 2, 4]) is False
+        assert values_equal([{"key": "a", "value": 1}], [{"key": "b", "value": 1}]) is False
 
     def test_row_with_type_and_keyspace_columns_normalizes_as_a_row(self):
         """REGRESSION (#1454): a row whose COLUMNS are named `_type`/`_keyspace` is a ROW.
