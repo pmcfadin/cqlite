@@ -165,6 +165,19 @@ impl Document {
     }
 }
 
+/// The deprecation warning a config FILE should produce, or `None` when it names
+/// no removed keys (or is not an inspectable config format).
+///
+/// The single entry point [`crate::config::Config::load_from_file`] calls, and
+/// the one an integration test can call for the same `(path, content)` pair — so
+/// the wiring has no private step a test cannot reach.
+pub fn warning_for_file(path: &std::path::Path, content: &str) -> Option<String> {
+    let extension = path.extension().and_then(|ext| ext.to_str());
+    let document = parse_for_inspection(extension, content)?;
+    let present = removed_keys_present(&document);
+    deprecation_warning(&path.display().to_string(), &present)
+}
+
 /// Parse `content` as `extension` purely to inspect it for removed keys.
 ///
 /// Returns `None` when the extension is not a config format we accept or the

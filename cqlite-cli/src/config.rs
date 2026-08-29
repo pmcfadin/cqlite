@@ -360,16 +360,7 @@ impl Config {
     /// entirely to the real parse in [`Self::load_from_file`], which owns the
     /// error message.
     fn warn_about_removed_keys(path: &Path, content: &str) {
-        use crate::config_removed_keys::{
-            deprecation_warning, parse_for_inspection, removed_keys_present,
-        };
-
-        let extension = path.extension().and_then(|ext| ext.to_str());
-        let Some(document) = parse_for_inspection(extension, content) else {
-            return;
-        };
-        let present = removed_keys_present(&document);
-        if let Some(warning) = deprecation_warning(&path.display().to_string(), &present) {
+        if let Some(warning) = crate::config_removed_keys::warning_for_file(path, content) {
             eprintln!("{warning}");
         }
     }
