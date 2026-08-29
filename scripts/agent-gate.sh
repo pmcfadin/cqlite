@@ -210,6 +210,13 @@
 #                      datasets.
 #                      SKIP-aware (loud): SKIPs only when cqlite-core is absent.
 #   tooling-tests      shell-tooling regression tests (fast, no datasets/network):
+#                      scripts/tests/test_tools_crate_disposition.sh (+ its
+#                      selftest) — #1716/AK5: every crate under tools/ must be
+#                      EXPLICITLY classified CI-wired vs unwired manual dev tool,
+#                      and every unwired one must carry a README saying so. Needs
+#                      no python3/cargo, so it ALWAYS runs (never SKIPs). Fails
+#                      closed on an absent/unclassifiable subject; wiredness is
+#                      recorded and diff-reviewed, never grep-inferred.
 #                      scripts/tests/test_agent_gate_summary.sh — proves the
 #                      SUMMARY block survives non-foreground capture (#1175). It
 #                      only drives `agent-gate.sh --emit-summary-selftest`, which
@@ -6928,6 +6935,30 @@ run_tooling_tests() {
   if ! bash "$REPO_ROOT/scripts/tests/test_agent_gate_tree_provenance.sh" >>"$log" 2>&1; then
     status=FAIL
     echo "--- [$name] FAILED (tree-integrity PROVENANCE self-test #2926); last 40 lines of $log ---"
+    tail -40 "$log"
+    echo "--- end of $name output ---"
+    end=$(date +%s)
+    record_result "$name" "$status" "$((end - start))"
+    echo ">>> [$name] $status ($((end - start))s)"
+    return 0
+  fi
+
+  # tools/ crate disposition census (#1716, epic #1688 finding AK5): no
+  # python3/Docker/cargo needed, always runs. Every crate under tools/ must be
+  # EXPLICITLY classified as CI-wired or as an unwired manual dev tool, and every
+  # unwired one must carry a README stating it. The defect it exists for: three
+  # tools/ crates were invoked by no workflow, no script and no doc for months
+  # while reading as live tooling. `members` globs `tools/*`, so a new crate
+  # otherwise joins the workspace with no statement of whether anything runs it,
+  # and a deleted README is invisible. Fails closed on an absent/unclassifiable
+  # subject; wiredness is RECORDED and reviewed in the diff, never grep-inferred
+  # (a grep gets it wrong both ways — see the guard's header). A failure FAILs the
+  # component, mirroring the keyspace-scoping guard.
+  echo ">>> [$name] bash scripts/tests/test_tools_crate_disposition.sh; bash scripts/tests/test_tools_crate_disposition_selftest.sh"
+  if ! bash "$REPO_ROOT/scripts/tests/test_tools_crate_disposition.sh" >>"$log" 2>&1 ||
+     ! bash "$REPO_ROOT/scripts/tests/test_tools_crate_disposition_selftest.sh" >>"$log" 2>&1; then
+    status=FAIL
+    echo "--- [$name] FAILED (tools/ crate disposition census #1716); last 40 lines of $log ---"
     tail -40 "$log"
     echo "--- end of $name output ---"
     end=$(date +%s)
