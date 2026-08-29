@@ -84,10 +84,19 @@ jobs:
       # Node 18 is THIS one, not a fresh Node-18 build. Uploading it here —
       # rather than in the label-gated `build` job, the only other producer of a
       # linux x86_64 module — is what makes the floor testable on an ORDINARY PR.
+      #
+      # The name MUST stay outside the `bindings-*` namespace. `quality-gate`
+      # collects `pattern: bindings-*` with `merge-multiple: true` and
+      # republishes the result as the `cqlite-node-binaries` artifact. That
+      # merge flattens every artifact into ONE directory, and this upload's
+      # `path` is the same `${APP_NAME}.*.node` basename the production
+      # x86_64-unknown-linux-gnu build emits — so inside the `bindings-*`
+      # namespace this module would not merely be an extra file, it would
+      # OVERWRITE the production module and be published in its place.
       - name: Upload smoke native module (reused by the floor job)
         uses: actions/upload-artifact@v6
         with:
-          name: bindings-smoke-linux
+          name: floor-smoke-bindings-linux
           path: bindings/node/${{ env.APP_NAME }}.*.node
           if-no-files-found: error
           retention-days: 7
@@ -124,7 +133,7 @@ jobs:
       - name: Download the native module built by the smoke job
         uses: actions/download-artifact@v7
         with:
-          name: bindings-smoke-linux
+          name: floor-smoke-bindings-linux
           path: bindings/node
 
       - name: Install dependencies
