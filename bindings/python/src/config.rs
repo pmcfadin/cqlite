@@ -235,8 +235,8 @@ pub fn parse_config_from_py(
     py: Python<'_>,
     config: Option<&Bound<'_, PyAny>>,
 ) -> PyResult<cqlite_core::Config> {
-    let core_config = match config {
-        None => cqlite_core::Config::default(),
+    let (core_config, removed_key_warning) = match config {
+        None => (cqlite_core::Config::default(), None),
         Some(obj) => {
             // Check if it's a string (JSON or preset name)
             if let Ok(s) = obj.extract::<String>() {
@@ -251,6 +251,11 @@ pub fn parse_config_from_py(
             }
         }
     };
+
+    // The deserialize SUCCEEDED, so the removed-key warning may now be raised
+    // (issue #1696): every non-Rust authoring surface funnels through here, which
+    // is why the warning lives at this one chokepoint rather than per format.
+    raise_removed_key_warning(py, removed_key_warning)?;
 
     Ok(core_config)
 }
@@ -306,33 +311,68 @@ pub fn config_for_open(
     Ok(core_config)
 }
 
-/// Parse a string as either a preset name or JSON config.
-fn config_from_string(s: &str) -> PyResult<cqlite_core::Config> {
+/// Parse a string as either a preset name or JSON config, returning the config
+/// and any REMOVED-key deprecation warning it earned (issue #1696).
+///
+/// A preset is CQLite's own current shape and can never name a removed key, so it
+/// carries no warning by construction.
+fn config_from_string(s: &str) -> PyResult<(cqlite_core::Config, Option<String>)> {
     // Check for preset names
     match s {
-        "memory_optimized" => Ok(cqlite_core::Config::memory_optimized()),
-        "performance_optimized" => Ok(cqlite_core::Config::performance_optimized()),
-        _ => {
-            // Try parsing as JSON
-            serde_json::from_str(s).map_err(|e| {
-                PyValueError::new_err(format!(
-                    "Invalid config: not a preset name and invalid JSON: {}",
-                    e
-                ))
-            })
-        }
+        "memory_optimized" => Ok((cqlite_core::Config::memory_optimized(), None)),
+        "performance_optimized" => Ok((cqlite_core::Config::performance_optimized(), None)),
+        // Try parsing as JSON
+        _ => cqlite_core::Config::from_json_str_reporting_removed(s, "JSON config string").map_err(
+            |e| PyValueError::new_err(format!("Invalid config: not a preset name and {e}")),
+        ),
     }
 }
 
-/// Convert a Python dict to Config via JSON bridge.
-fn config_from_dict(py: Python<'_>, dict: &Bound<'_, PyDict>) -> PyResult<cqlite_core::Config> {
+/// Convert a Python dict to Config via JSON bridge, returning the config and any
+/// REMOVED-key deprecation warning it earned (issue #1696).
+fn config_from_dict(
+    py: Python<'_>,
+    dict: &Bound<'_, PyDict>,
+) -> PyResult<(cqlite_core::Config, Option<String>)> {
     // Use Python's json module to serialize the dict
     let json_module = py.import("json")?;
     let json_str: String = json_module.call_method1("dumps", (dict,))?.extract()?;
 
-    // Parse JSON to Config
-    serde_json::from_str(&json_str)
-        .map_err(|e| PyValueError::new_err(format!("Invalid config dict: {}", e)))
+    cqlite_core::Config::from_json_str_reporting_removed(&json_str, "config dict")
+        .map_err(|e| PyValueError::new_err(e.to_string()))
+}
+
+/// Raise a Python `DeprecationWarning` naming every REMOVED key the caller's
+/// config still sets (issue #1696, roborev F1).
+///
+/// # Why the bindings need this
+///
+/// `cqlite_core::Config` is a Rust struct, so an embedder writing Rust who still
+/// sets a deleted field gets a compile error — the loudest signal available.
+/// Through this bridge there is no compile step: serde DISCARDS unknown fields, so
+/// a pre-change config naming `performance`, `storage.block_size` or
+/// `query.parallel` loaded SUCCESSFULLY and was silently ignored, the user
+/// believing they had configured something. #1696 requires a LOUD signal at the
+/// layer where a knob is set, and this is that layer for every non-Rust caller.
+///
+/// The posture matches the CLI's config file, deliberately and crate-wide:
+/// **parse-and-ignore PLUS a named warning**, never `deny_unknown_fields`, which
+/// would hard-fail an existing caller with no migration path over keys that never
+/// did anything.
+///
+/// A Python `DeprecationWarning` — not a `tracing` log (nothing subscribes in a
+/// Python process) and not stderr — so it obeys the caller's own `warnings`
+/// filters and is assertable with `pytest.warns`.
+///
+/// Called only once a load has SUCCEEDED: the warning asserts the configuration
+/// still loads, so it must not be raised before that is true (#1696 roborev F3).
+fn raise_removed_key_warning(py: Python<'_>, warning: Option<String>) -> PyResult<()> {
+    if let Some(warning) = warning {
+        let warnings = py.import("warnings")?;
+        let category = py.get_type::<pyo3::exceptions::PyDeprecationWarning>();
+        warnings.call_method1("warn", (warning, category))?;
+    }
+    Ok(())
 }
 
 /// Convert a core Config to a Python dict via JSON bridge.
@@ -400,13 +440,13 @@ mod tests {
 
     #[test]
     fn test_config_from_preset_memory_optimized() {
-        let config = config_from_string("memory_optimized").unwrap();
+        let (config, _) = config_from_string("memory_optimized").unwrap();
         assert_eq!(config.memory.max_memory, 256 * 1024 * 1024);
     }
 
     #[test]
     fn test_config_from_preset_performance_optimized() {
-        let config = config_from_string("performance_optimized").unwrap();
+        let (config, _) = config_from_string("performance_optimized").unwrap();
         assert_eq!(config.memory.max_memory, 4 * 1024 * 1024 * 1024);
     }
 
@@ -421,7 +461,7 @@ mod tests {
     #[test]
     fn test_config_from_json_string() {
         let json = r#"{"memory": {"max_memory": 134217728}}"#;
-        let config = config_from_string(json).unwrap();
+        let (config, _) = config_from_string(json).unwrap();
         assert_eq!(config.memory.max_memory, 128 * 1024 * 1024);
     }
 

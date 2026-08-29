@@ -222,3 +222,100 @@ class TestConfigFromDict:
             assert removed not in storage
         # The knob the write engine actually reads survives.
         assert "memtable_size_threshold" in storage
+
+
+class TestRemovedConfigKeysWarn:
+    """Issue #1696 (roborev F1): a Python config naming a REMOVED key must LOAD
+    and WARN — never be silently ignored, and never hard-fail.
+
+    ``cqlite_core::Config`` is a Rust struct, so an embedder writing Rust who
+    still sets a deleted field gets a compile error. Through this bridge there is
+    no compile step: serde discards unknown fields, so a pre-change config named
+    dead knobs, deserialized successfully, and was ignored in silence. #1696's
+    rule — *a removed knob must produce a LOUD signal at the layer where it is
+    set* — was therefore false at exactly the layer that cannot get a compile
+    error.
+
+    The posture is the same one the CLI's config file uses, deliberately and
+    crate-wide: parse-and-ignore PLUS a named warning, never
+    ``deny_unknown_fields`` (which would hard-fail a caller whose config predates
+    the removal, with no migration path, over keys that never did anything).
+    """
+
+    @staticmethod
+    def _old_shape_config():
+        """A current-shape config with every #1696-removed key put back in.
+
+        Derived from a shipped preset so the surviving half cannot rot, with the
+        dead keys written out literally — the shape a saved pre-change config
+        still has.
+        """
+        config = cqlite.performance_optimized()
+        config["storage"].update(
+            {
+                "max_sstable_size": 268435456,
+                "block_size": 65536,
+                "enable_bloom_filters": True,
+                "bloom_filter_fp_rate": 0.01,
+                "io_threads": 8,
+                "sync_mode": "Normal",
+            }
+        )
+        config["query"].update(
+            {
+                "plan_cache_size": 1000,
+                "enable_optimization": True,
+                "parallel": {
+                    "enabled": True,
+                    "max_threads": 4,
+                    "min_parallel_rows": 1000,
+                },
+            }
+        )
+        config["performance"] = {
+            "enable_metrics": True,
+            "metrics_interval": {"secs": 60, "nanos": 0},
+            "enable_profiling": False,
+            "background_tasks": {
+                "enable_stats": True,
+                "stats_interval": {"secs": 300, "nanos": 0},
+                "enable_cleanup": True,
+                "cleanup_interval": {"secs": 3600, "nanos": 0},
+            },
+        }
+        return config
+
+    def test_old_shape_dict_loads_and_warns_by_name(self):
+        """An old-shape dict still validates (it LOADS) and names every dead key."""
+        config = self._old_shape_config()
+        with pytest.warns(DeprecationWarning) as record:
+            assert cqlite.validate_config(config) is True
+
+        message = "\n".join(str(w.message) for w in record)
+        for removed in (
+            "performance",
+            "storage.max_sstable_size",
+            "storage.block_size",
+            "storage.enable_bloom_filters",
+            "storage.bloom_filter_fp_rate",
+            "storage.io_threads",
+            "storage.sync_mode",
+            "query.plan_cache_size",
+            "query.enable_optimization",
+            "query.parallel",
+        ):
+            assert removed in message, f"the warning must name {removed}: {message}"
+
+    def test_old_shape_json_string_loads_and_warns(self):
+        """The JSON-string surface warns too — not only the dict surface."""
+        json_config = json.dumps(self._old_shape_config())
+        with pytest.warns(DeprecationWarning, match="REMOVED"):
+            assert cqlite.validate_config(json_config) is True
+
+    def test_current_shape_config_does_not_warn(self):
+        """A clean config is SILENT: the signal must not become per-load noise."""
+        import warnings
+
+        with warnings.catch_warnings():
+            warnings.simplefilter("error", DeprecationWarning)
+            assert cqlite.validate_config(cqlite.performance_optimized()) is True
