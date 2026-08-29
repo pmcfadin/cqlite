@@ -665,6 +665,142 @@ else
 $outSmokeAuth"
 fi
 
+# (g) smoke on a remote that ACCEPTS the create and refuses the delete (#3369). It used
+# to emit SMOKE-OK — whose own text says "delete verified" — after a stderr-only warning,
+# so a caller could not tell a clean cycle from a stranded ref. Delete capability is
+# REQUIRED: `release` deletes refs/claims/issue-<N>, so such a namespace is unusable.
+DELORIGIN="$T/deleteproof.git"
+gg init --bare -q "$DELORIGIN"
+cat >"$DELORIGIN/hooks/pre-receive" <<'HOOK'
+#!/usr/bin/env bash
+zero=0000000000000000000000000000000000000000
+while read -r old new ref; do
+  if [ "$new" = "$zero" ]; then echo "deletion of $ref denied by policy" >&2; exit 1; fi
+done
+exit 0
+HOOK
+chmod +x "$DELORIGIN/hooks/pre-receive"
+rc=0; outSmokeDel=$( cd "$A" && CLAIM_MACHINE=machineA CLAIM_REMOTE="$DELORIGIN" bash "$CLAIM" smoke 2>/dev/null ) || rc=$?
+strayDel=$(gg -C "$A" ls-remote "$DELORIGIN" 'refs/claims/smoke-*' | wc -l | tr -d ' ')
+# The reason code states the OBSERVATION (a nonzero cleanup exit) and attributes NO
+# cause: one exit status cannot distinguish this remote's deletion policy from a network
+# drop or a post-readback auth failure, and naming one would be the affirmative-
+# measurement violation this whole change exists to remove (#3369 review).
+if [ "$rc" -ne 0 ] && printf '%s\n' "$outSmokeDel" | grep -q 'SMOKE-FAIL' \
+   && printf '%s\n' "$outSmokeDel" | grep -q 'reason=cleanup-unverified' \
+   && printf '%s\n' "$outSmokeDel" | grep -q 'no cause is attributed' \
+   && printf '%s\n' "$outSmokeDel" | grep -q 'UNPROVEN' \
+   && ! printf '%s\n' "$outSmokeDel" | grep -q 'SMOKE-OK'; then
+  ok "(g) smoke whose cleanup delete fails → SMOKE-FAIL reason=cleanup-unverified, no cause attributed, never SMOKE-OK (refs left on that remote: $strayDel)"
+else
+  bad "(g) expected SMOKE-FAIL reason=cleanup-unverified attributing no cause; got rc=$rc
+$outSmokeDel"
+fi
+# Positive control: the SAME probe against the ordinary origin still succeeds, so (g) is
+# measuring the delete refusal and not a broken probe.
+# Count NEW strays only: TEST 19 above deliberately leaves a `refs/claims/smoke-stray`
+# on origin, so an absolute count of 0 is the wrong oracle — the property is that THIS
+# probe adds none.
+strayBefore=$(gg -C "$A" ls-remote origin 'refs/claims/smoke-*' | wc -l | tr -d ' ')
+rc=0; outSmokeOk=$( cd "$A" && CLAIM_MACHINE=machineA CLAIM_REMOTE=origin bash "$CLAIM" smoke 2>/dev/null ) || rc=$?
+strayAfter=$(gg -C "$A" ls-remote origin 'refs/claims/smoke-*' | wc -l | tr -d ' ')
+if [ "$rc" -eq 0 ] && printf '%s\n' "$outSmokeOk" | grep -q 'SMOKE-OK' && [ "$strayAfter" = "$strayBefore" ]; then
+  ok "(g) positive control: a normal remote still yields SMOKE-OK and leaves NO new stray ref"
+else
+  bad "(g) positive control failed: rc=$rc strays $strayBefore -> $strayAfter
+$outSmokeOk"
+fi
+
+# (h) readback failure AND delete failure at once (#3369 review). The mismatch branch
+# returned before reporting the delete result, so the ONE path that can leave a ref on the
+# shared origin said nothing about it. Reproduced honestly: a post-receive hook removes
+# whatever was just pushed, so the readback finds nothing AND the delete then fails
+# ("remote ref does not exist"). The verdict must keep reason=ls-remote-mismatch (no new
+# variant) and carry the cleanup-delete failure with the ls-remote check.
+GHOSTORIGIN="$T/ghost.git"
+gg init --bare -q "$GHOSTORIGIN"
+# post-receive removes what the create just wrote -> the readback finds nothing;
+# pre-receive refuses deletions (all-zeros new sha) -> the cleanup delete also fails.
+# Both halves are needed: deleting an already-absent ref is a no-op SUCCESS for
+# receive-pack, so the post-receive alone leaves delete_ok=1 (measured).
+cat >"$GHOSTORIGIN/hooks/post-receive" <<'HOOK'
+#!/usr/bin/env bash
+while read -r old new ref; do git update-ref -d "$ref" 2>/dev/null || true; done
+exit 0
+HOOK
+cat >"$GHOSTORIGIN/hooks/pre-receive" <<'HOOK'
+#!/usr/bin/env bash
+zero=0000000000000000000000000000000000000000
+while read -r old new ref; do
+  if [ "$new" = "$zero" ]; then echo "deletion of $ref denied by policy" >&2; exit 1; fi
+done
+exit 0
+HOOK
+chmod +x "$GHOSTORIGIN/hooks/post-receive" "$GHOSTORIGIN/hooks/pre-receive"
+rc=0; outGhost=$( cd "$A" && CLAIM_MACHINE=machineA CLAIM_REMOTE="$GHOSTORIGIN" bash "$CLAIM" smoke 2>/dev/null ) || rc=$?
+if [ "$rc" -ne 0 ] && printf '%s\n' "$outGhost" | grep -q 'reason=ls-remote-mismatch' \
+   && printf '%s\n' "$outGhost" | grep -q 'cleanup-delete=FAILED' \
+   && printf '%s\n' "$outGhost" | grep -q 'git ls-remote' \
+   && ! printf '%s\n' "$outGhost" | grep -q 'SMOKE-OK'; then
+  ok "(h) readback mismatch + failed cleanup → one verdict naming BOTH, with the ls-remote check"
+else
+  bad "(h) expected reason=ls-remote-mismatch carrying cleanup-delete=FAILED; got rc=$rc
+$outGhost"
+fi
+# Control: a readback mismatch whose cleanup SUCCEEDS must NOT claim a cleanup failure,
+# or the field above would be noise rather than a signal. Same ghost remote, but the hook
+# deletes only on a CREATE (new != zeros), so the probe's own delete still succeeds.
+CLEANORIGIN="$T/ghost-clean.git"
+gg init --bare -q "$CLEANORIGIN"
+cat >"$CLEANORIGIN/hooks/post-receive" <<'HOOK'
+#!/usr/bin/env bash
+zero=0000000000000000000000000000000000000000
+while read -r old new ref; do
+  [ "$new" = "$zero" ] || git update-ref -d "$ref" 2>/dev/null || true
+done
+exit 0
+HOOK
+chmod +x "$CLEANORIGIN/hooks/post-receive"
+rc=0; outGhost2=$( cd "$A" && CLAIM_MACHINE=machineA CLAIM_REMOTE="$CLEANORIGIN" bash "$CLAIM" smoke 2>/dev/null ) || rc=$?
+if [ "$rc" -ne 0 ] && printf '%s\n' "$outGhost2" | grep -q 'reason=ls-remote-mismatch' \
+   && ! printf '%s\n' "$outGhost2" | grep -q 'cleanup-delete=FAILED'; then
+  ok "(h) control: a mismatch whose cleanup SUCCEEDED reports no cleanup failure"
+else
+  bad "(h) control: cleanup-delete=FAILED reported on a successful cleanup; rc=$rc
+$outGhost2"
+fi
+
+# (i) THE SMOKE REF NAME IS CONTENT-ADDRESSED, NOT AN AD-HOC NONCE (#3369 review).
+# It used to be `$$-${RANDOM}-$(date -u +%s)`. Bash seeds $RANDOM from pid+time, so on
+# identically provisioned machines booting simultaneously — a fleet launched from ONE AMI,
+# this issue's own subject — pid, $RANDOM and a second-resolution timestamp are correlated
+# rather than independent, and two boxes can pick the SAME name against the shared origin:
+# a spurious push rejection, `git-push: FAILED`, and `--strict` refusing a healthy box.
+# No race is provoked here (a passing race proves nothing); the PROPERTY is asserted —
+# distinct names across runs, each one the sha of THIS run's claim commit, which is unique
+# to its machine+pid+two-$RANDOMs+timestamp message.
+strayI_before=$(gg -C "$A" ls-remote origin 'refs/claims/smoke-*' | wc -l | tr -d ' ')
+rcI1=0; outI1=$( cd "$A" && CLAIM_MACHINE=machineA CLAIM_REMOTE=origin bash "$CLAIM" smoke 2>&1 ) || rcI1=$?
+rcI2=0; outI2=$( cd "$A" && CLAIM_MACHINE=machineA CLAIM_REMOTE=origin bash "$CLAIM" smoke 2>&1 ) || rcI2=$?
+strayI_after=$(gg -C "$A" ls-remote origin 'refs/claims/smoke-*' | wc -l | tr -d ' ')
+# The name is announced in the probe's own note line, which is where an operator chasing a
+# stranded ref reads it — so that is what is parsed, not an internal variable.
+refI1=$(printf '%s\n' "$outI1" | grep -oE 'refs/claims/smoke-[0-9a-f]{40}' | head -1)
+refI2=$(printf '%s\n' "$outI2" | grep -oE 'refs/claims/smoke-[0-9a-f]{40}' | head -1)
+# Guard the guard: a 40-hex suffix could be hex-shaped by accident. It must be the OBJECT
+# NAME of this run's smoke claim commit, which is the whole content-addressed claim.
+objI1=$(gg -C "$A" cat-file commit "${refI1##*-}" 2>/dev/null | grep -c 'claim issue=smoke' || true)
+if [ "$rcI1" -eq 0 ] && [ "$rcI2" -eq 0 ] \
+   && printf '%s\n' "$outI1" | grep -q 'SMOKE-OK' && printf '%s\n' "$outI2" | grep -q 'SMOKE-OK' \
+   && [ -n "$refI1" ] && [ -n "$refI2" ] && [ "$refI1" != "$refI2" ] \
+   && [ "${objI1:-0}" -ge 1 ] && [ "$strayI_after" = "$strayI_before" ]; then
+  ok "(i) two smoke runs on ONE origin use DISTINCT content-addressed refs (each = its own claim commit's sha), both SMOKE-OK, no strays left"
+else
+  bad "(i) smoke ref names are not distinct/content-addressed: rc=$rcI1/$rcI2 ref1=$refI1 ref2=$refI2 commit-match=${objI1:-0} strays $strayI_before -> $strayI_after
+$outI1
+$outI2"
+fi
+
 # ===========================================================================
 echo
 echo "==== CLAIM-LOCK TEST SUMMARY: PASS=$PASS FAIL=$FAIL ===="

@@ -924,7 +924,13 @@ end-to-end test. Green helper-only unit tests are not sufficient.
   `fatal: could not read Username`, and `claim.sh` now calls that `ERROR reason=auth (NOT
   retryable)` instead of the old misleading `reason=infra (transient — retry)` — do not retry it,
   fix the box (`gh auth setup-git`, or `bash scripts/bootstrap-agent-machine.sh --yes`, which also
-  probes board access functionally rather than trusting the `project` scope string). The three
+  probes board access functionally rather than trusting the `project` scope string). Since #3369 the
+  same script MEASURES git push capability by **performing the push** — a throwaway
+  `refs/claims/smoke-<commit-sha>` create/read-back/delete via `claim.sh smoke` — rather than trusting a
+  credential-helper answer or a green `git ls-remote`, and reports it three-valued
+  (`git-push: VERIFIED` / `FAILED` / `UNMEASURED`); an unmeasurable result is UNKNOWN, never `ok`.
+  `--fix-credentials` wires the credential path only (no toolchain installs) and `--strict` turns any
+  warning into exit 1, which is what `.agent-ami/profile.yaml`'s `verify.run` uses. The three
   worker-environment deltas and the messages that identify them: `docs/development/fleet-runbook.md`.
 - **Supervisor-authored machine claim + CI reaper (#2655/#2499)**: liveness is now MECHANISM-driven,
   not prose. `worker-supervisor.sh` stamps `refs/machine-claims/<machine>` (issue+supervisor-PID+ts)

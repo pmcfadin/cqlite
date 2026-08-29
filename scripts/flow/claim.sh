@@ -1076,7 +1076,7 @@ cmd_status() {
     sha="$(printf '%s' "$line" | awk '{print $1}')"
     ref="$(printf '%s' "$line" | awk '{print $2}')"
     # Only issue claim refs are rendered — skip stray refs under refs/claims/*
-    # that are NOT issue claims (e.g. a leftover `refs/claims/smoke-<nonce>` from
+    # that are NOT issue claims (e.g. a leftover `refs/claims/smoke-<commit-sha>` from
     # an interrupted preflight), so they never masquerade as an issue row.
     case "$ref" in
       refs/claims/issue-*) : ;;
@@ -1106,17 +1106,36 @@ cmd_status() {
 # ---------------------------------------------------------------------------
 # cmd_smoke — ONE-TIME preflight for a new remote/host: prove that origin accepts
 # a push to the `refs/claims/*` namespace (create + ls-remote + delete a throwaway
-# `refs/claims/smoke-<nonce>` ref). Some managed Git hosts restrict custom ref
+# `refs/claims/smoke-<commit-sha>` ref). Some managed Git hosts restrict custom ref
 # namespaces; if this fails, the whole claim mechanism is unusable on that remote
-# and MUST be caught before the fleet relies on it. NOT part of the hermetic test
+# and MUST be caught before the fleet relies on it. ALL THREE steps are part of the
+# verdict (#3369): a cleanup delete that does not succeed leaves delete capability
+# UNPROVEN, and `release` deletes refs/claims/issue-<N> — that is
+# `reason=cleanup-unverified`, never a SMOKE-OK with a stderr warning. The reason code
+# names the OBSERVATION (a nonzero exit); it attributes no cause, because one exit status
+# cannot tell a deletion policy from a network drop. NOT part of the hermetic test
 # suite — it mutates the REAL origin. (Verified on github.com/pmcfadin/cqlite
 # 2026-07-17: refs/claims/* is pushable.)
 cmd_smoke() {
-  local nonce ref sha seen
-  nonce="$$-${RANDOM}-$(date -u +%s)"
-  ref="refs/claims/smoke-${nonce}"
-  note "smoke preflight: does $REMOTE accept a push to refs/claims/* ? (ref=$ref)"
+  local ref sha seen
+  # THE REF NAME IS DERIVED FROM THE COMMIT SHA, never from an ad-hoc nonce (#3369
+  # review). It used to be `$$-${RANDOM}-$(date -u +%s)`: a pid, ONE 15-bit $RANDOM and a
+  # second-resolution timestamp. Bash seeds $RANDOM from pid+time, so on identically
+  # provisioned machines booting simultaneously — literally this issue's subject, a fleet
+  # launched from ONE AMI — all three components are CORRELATED rather than independent.
+  # Since every bootstrap now runs this probe against the SHARED origin, a collision
+  # presents as a spurious push rejection => `git-push: FAILED` => `--strict` refusing a
+  # healthy box, the same failure class as this issue's earlier blockers.
+  #
+  # `build_claim_commit` is already called here and its message carries machine + pid +
+  # TWO $RANDOMs + timestamp, so the commit object is content-addressed over strictly
+  # more entropy than the old nonce had — and two runs that differ in any of those fields
+  # cannot share a sha. The `refs/claims/smoke-` PREFIX is load-bearing (the docs, the
+  # `git ls-remote origin 'refs/claims/smoke-*'` cleanup command, and cmd_status's
+  # "never an issue claim" skip all key on it) and is kept.
   sha="$(build_claim_commit "smoke" "smoke")" || { emit "SMOKE-FAIL remote=$REMOTE reason=commit-build"; return 1; }
+  ref="refs/claims/smoke-${sha}"
+  note "smoke preflight: does $REMOTE accept a push to refs/claims/* ? (ref=$ref)"
   local smoke_err
   if ! smoke_err="$(git push "$REMOTE" "${sha}:${ref}" 2>&1 >/dev/null)"; then
     # An unauthenticated git is the #1 reason this preflight fails on a fresh box,
@@ -1132,14 +1151,48 @@ cmd_smoke() {
   # `|| true`: an ls-remote failure here must NOT abort before the cleanup delete
   # below (a stranded smoke ref is the worst outcome). A "" seen → SMOKE-FAIL.
   seen="$(git ls-remote "$REMOTE" "$ref" 2>/dev/null | awk '{print $1}' | head -1 || true)"
-  # Always clean up the throwaway ref, whatever the ls-remote said.
-  git push "$REMOTE" --delete "$ref" >/dev/null 2>&1 || note "WARNING: could not delete $ref on $REMOTE — remove it manually"
-  if [ "$seen" = "$sha" ]; then
-    emit "SMOKE-OK remote=$REMOTE namespace=refs/claims/* (create + ls-remote + delete verified)"
-    return 0
+  # Always clean up the throwaway ref, whatever the ls-remote said — and RECORD whether
+  # the cleanup worked. It used to be `|| note "WARNING: ..."`, after which SMOKE-OK was
+  # emitted UNCONDITIONALLY with the text "(create + ls-remote + delete verified)" — a
+  # verdict claiming more than it measured (#3369). Two costs: a caller (bootstrap's
+  # push-capability probe) read SMOKE-OK as proof of the whole cycle and passed a machine
+  # that had just STRANDED a ref on the shared origin; and the diagnosis was a `note` on
+  # stderr, invisible to any caller capturing the verdict.
+  local delete_ok=1
+  git push "$REMOTE" --delete "$ref" >/dev/null 2>&1 || delete_ok=0
+  if [ "$seen" != "$sha" ]; then
+    # The readback failed — but the cleanup delete was already attempted above, and if
+    # that ALSO failed, returning here used to suppress it entirely: the operator got a
+    # mismatch verdict with no hint that a ref might be sitting on the shared origin
+    # (#3369 review). Same reason code, one appended field — not a fourth variant.
+    # Deliberately "UNKNOWN" rather than "STRANDED": the readback says the ref is not
+    # there and the delete says it could not be removed, so the two signals disagree and
+    # neither may be asserted. That is the same three-valued discipline this whole probe
+    # is built on.
+    local mismatch_extra=""
+    [ "$delete_ok" = 0 ] && mismatch_extra=" cleanup-delete=FAILED (whether $ref exists on $REMOTE is UNKNOWN — check 'git ls-remote $REMOTE $ref' and remove it with 'git push $REMOTE --delete $ref' if present)"
+    emit "SMOKE-FAIL remote=$REMOTE ref=$ref reason=ls-remote-mismatch seen=${seen:-<none>} expected=$sha$mismatch_extra"
+    return 1
   fi
-  emit "SMOKE-FAIL remote=$REMOTE ref=$ref reason=ls-remote-mismatch seen=${seen:-<none>} expected=$sha"
-  return 1
+  if [ "$delete_ok" = 0 ]; then
+    # DELETE CAPABILITY IS REQUIRED BY THE CLAIM PROTOCOL, not a tidiness nicety:
+    # `claim.sh release` deletes refs/claims/issue-<N>, and the reaper depends on it. So a
+    # cleanup delete that did not succeed is a FAIL, never a SMOKE-OK with a stderr note.
+    #
+    # BUT THE REASON CODE STATES THE OBSERVATION, NOT A CAUSE (#3369 review). The first
+    # cut called this `delete-rejected` and blamed the remote's ref-deletion policy — a
+    # definite causal verdict inferred from ONE bit (a nonzero exit), which a transient
+    # network drop or a post-readback auth failure produces identically. That is the
+    # affirmative-measurement violation this whole change exists to remove, committed by
+    # the change itself. Distinguishing the causes would mean re-deriving them from git's
+    # stderr text, which is the same guessing shape one level down. So: what is KNOWN is
+    # that the delete exited nonzero, and therefore that delete capability is UNPROVEN
+    # and the ref's existence UNKNOWN. Nothing else is claimed.
+    emit "SMOKE-FAIL remote=$REMOTE ref=$ref reason=cleanup-unverified (the cleanup delete exited NONZERO — no cause is attributed. Whether $ref still exists on $REMOTE is UNKNOWN: check with 'git ls-remote $REMOTE $ref' and remove it with 'git push $REMOTE --delete $ref' if present. Delete capability is therefore UNPROVEN, and 'claim.sh release' deletes refs/claims/issue-<N>, so this namespace is NOT confirmed usable for claims.)"
+    return 1
+  fi
+  emit "SMOKE-OK remote=$REMOTE namespace=refs/claims/* (create + ls-remote + delete verified)"
+  return 0
 }
 
 # ---------------------------------------------------------------------------
