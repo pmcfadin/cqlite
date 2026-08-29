@@ -2617,6 +2617,66 @@ else
   bad "NON-VACUITY broken: valid-issue control gave should-reap rc=$ok_sr_rc, ref '${ok_gone:-<gone>}' — TEST 75's refusals are not attributable to the issue value"
 fi
 
+# ===========================================================================
+echo "TEST 76: a numeric PREFIX is not a parse — a malformed pid is UNKNOWN, never probed (round 25)"
+# ===========================================================================
+# The row parsers extracted `\([0-9][0-9]*\)`, which matches the numeric PREFIX of a malformed token:
+# `pid=123x` yielded `123`, and that pid was then PROBED — so dead-lanes reported ALIVE or DEAD about a
+# DIFFERENT PROCESS, and a false ALIVE masks exactly the dead lane the command exists to find.
+# Driven with a pid whose numeric prefix is THIS TEST'S OWN LIVE PID, so a prefix parse would answer
+# ALIVE with certainty while the real value is malformed and unknowable.
+live_prefix="$$"
+craft_malformed_pid() {  # <machine> <issue> <pid-literal>
+  local machine="$1" issue="$2" lit="$3"
+  (
+    cd "$WORK" || exit 1
+    local now_epoch old_ts et cs
+    now_epoch=$(date -u +%s)
+    old_ts=$(date -u -r "$((now_epoch - 60))" +%Y-%m-%dT%H:%M:%SZ 2>/dev/null) \
+      || old_ts=$(date -u -d "@$((now_epoch - 60))" +%Y-%m-%dT%H:%M:%SZ)
+    et=$(git hash-object -t tree --stdin </dev/null)
+    cs=$(GIT_AUTHOR_DATE="$old_ts" GIT_COMMITTER_DATE="$old_ts" \
+      GIT_AUTHOR_NAME=t GIT_AUTHOR_EMAIL=t@t GIT_COMMITTER_NAME=t GIT_COMMITTER_EMAIL=t@t \
+      git commit-tree "$et" -m "claim issue=${issue} machine=${machine} pid=${lit} ts=${old_ts}")
+    g push -q origin "${cs}:refs/lane-claims/${machine}/${issue}"
+  )
+}
+craft_malformed_pid "prefixBox" "7100" "${live_prefix}x"
+mp_out=$(cd "$WORK" && HEARTBEAT_MACHINE=prefixBox CLAIM_OPEN_PR_CMD="$NO_OPEN_PR" \
+  bash "$HB" dead-lanes 2>&1)
+mp_rc=$?
+# NOTE the two renderings differ by command and that is not a defect: `dead-lanes` prints `none` for an
+# absent pid, `list-claims` prints `?`. The first cut of this case asserted `?` for both and failed
+# against a CORRECT fix — the assertion was wrong about the output, not the code.
+if printf '%s\n' "$mp_out" | grep -qE '^prefixBox +7100 +none +UNKNOWN-NO-PID' \
+  && ! printf '%s\n' "$mp_out" | grep -qE "^prefixBox +7100 +${live_prefix}"; then
+  ok "a malformed pid '${live_prefix}x' reads as UNKNOWN-NO-PID, never coerced to its live numeric prefix"
+else
+  bad "a numeric prefix must not be parsed as the pid: rc=$mp_rc out:
+$(printf '%s\n' "$mp_out" | grep prefixBox)"
+fi
+# ...and the same token must not reach `list-claims` as a number either.
+lc_mp=$(cd "$WORK" && bash "$HB" list-claims 2>&1)
+if printf '%s\n' "$lc_mp" | grep -qE '^prefixBox +7100 +\? ' \
+  && ! printf '%s\n' "$lc_mp" | grep -qE "^prefixBox +7100 +${live_prefix} "; then
+  ok "list-claims shows '?' for the malformed pid rather than its numeric prefix"
+else
+  bad "list-claims coerced the malformed pid: $(printf '%s\n' "$lc_mp" | grep prefixBox)"
+fi
+# NON-VACUITY, TRUE OF THE BROKEN CODE TOO: a WELL-FORMED pid equal to that same live pid must be read
+# and probed, producing a pid column with the number in it. If this failed, the case above could pass
+# merely because nothing is ever parsed.
+(cd "$WORK" && g push -q origin ":refs/lane-claims/prefixBox/7100" 2>/dev/null || true)
+craft_malformed_pid "prefixBox" "7101" "${live_prefix}"
+wf_out=$(cd "$WORK" && HEARTBEAT_MACHINE=prefixBox CLAIM_OPEN_PR_CMD="$NO_OPEN_PR" \
+  bash "$HB" dead-lanes 2>&1)
+if printf '%s\n' "$wf_out" | grep -qE "^prefixBox +7101 +${live_prefix} "; then
+  ok "NON-VACUITY: a WELL-FORMED pid equal to the same value IS read and reported, so the '?' above is a refusal and not a parser that never works"
+else
+  bad "NON-VACUITY broken: a well-formed pid was not parsed either: $(printf '%s\n' "$wf_out" | grep prefixBox)"
+fi
+(cd "$WORK" && g push -q origin ":refs/lane-claims/prefixBox/7101" 2>/dev/null || true)
+
 echo
 echo "=== claim-heartbeat.sh: $PASS passed, $FAIL failed ==="
 [ "$FAIL" -eq 0 ]

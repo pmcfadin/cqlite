@@ -2958,6 +2958,84 @@ test_park_releases_issue_so_next_lane_is_a_placeholder() {
   fi
 }
 
+# ---------------------------------------------------------------------------
+# Test 31-claim (#3393, roborev round 25, Medium — a REGRESSION from round 24): an idle shutdown must
+# CLEAR the placeholder it stamped. Round 24 reset work-concluded to 0 at the stamp (correct, so early
+# exits inherit the safe value) which left `no-work` permanently unconcluded — and placeholders are never
+# automatically reaped, so every NORMAL idle shutdown leaked a stale ref that dead-lanes then reported as
+# a dead lane. A monitor that fires falsely on every idle stop is one an operator learns to ignore.
+# ---------------------------------------------------------------------------
+test_no_work_shutdown_clears_its_placeholder() {
+  local d out stamped
+  d="$(new_case_dir)"
+  common_env "$d"
+  export CLAIM_LOG="$d/claim.log"
+  : >"$CLAIM_LOG"
+  # A worker that reports no-work AND asks the loop to stop, so the run is exactly one idle iteration
+  # followed by the normal stop-file exit — the commonest shutdown shape on an empty Ready queue.
+  cat >"$d/bin/worker.sh" <<'WEOF'
+#!/usr/bin/env bash
+set -euo pipefail
+cat >"$MARKER_FILE" <<JSON
+{"outcome":"no-work","issue":null,"pr":null,"duration_s":1}
+JSON
+: >"${STOP_FILE:?STOP_FILE not set}"
+WEOF
+  chmod +x "$d/bin/worker.sh"
+  export WORKER_CMD="$d/bin/worker.sh"
+  export BACKOFF_NOWORK_SECS=0
+  export MAX_ISSUES=5
+  export BREAKER_N=5
+  write_claim_stub "$d/bin/claim.sh"
+  export CLAIM_CMD="bash $d/bin/claim.sh"
+  export HEARTBEAT_MACHINE="testbox"
+  bash "$SUPERVISOR" >"$d/stdout.log" 2>&1 || true
+  stamped=$(grep -oE '^stamp p[0-9]+-[0-9a-f]+' "$CLAIM_LOG" 2>/dev/null | head -1 | awk '{print $2}')
+  if [[ -n "$stamped" ]] && grep -qE "^reap testbox ${stamped}( |$)" "$CLAIM_LOG"; then
+    pass "claim: a no-work idle shutdown CLEARS the placeholder it stamped ($stamped) — no leaked ref for dead-lanes to misreport"
+  else
+    fail "no-work-clears-placeholder: stamped='$stamped' log=[$(tr '\n' ';' <"$CLAIM_LOG")] out=[$(tail -5 "$d/stdout.log")]"
+  fi
+  # NON-VACUITY, true of the BROKEN code too: the run must have stamped a placeholder and journalled an
+  # exit summary. Both hold whether or not the clear happens, so this establishes the run did the work
+  # rather than that the fix fired.
+  local jf_summary=no
+  grep -rqs '"outcome":"summary"' "$d/logs" 2>/dev/null && jf_summary=yes
+  if [[ -n "$stamped" && "$jf_summary" == yes ]] && grep -rqs '"outcome":"no-work"' "$d/logs"; then
+    pass "NON-VACUITY: the run stamped a placeholder, journalled a no-work iteration and reached its exit summary"
+  else
+    fail "no-work-clears-placeholder-nonvacuity: stamped='$stamped' summary=$jf_summary"
+  fi
+  # ...and a no-work marker that DOES name an issue must NOT conclude it — a no-work carrying an issue is
+  # not evidence that issue finished, so the ref stays.
+  local d2 stamped2
+  d2="$(new_case_dir)"
+  common_env "$d2"
+  export CLAIM_LOG="$d2/claim.log"
+  : >"$CLAIM_LOG"
+  cat >"$d2/bin/worker.sh" <<'WEOF'
+#!/usr/bin/env bash
+set -euo pipefail
+cat >"$MARKER_FILE" <<JSON
+{"outcome":"no-work","issue":777,"pr":null,"duration_s":1}
+JSON
+: >"${STOP_FILE:?STOP_FILE not set}"
+WEOF
+  chmod +x "$d2/bin/worker.sh"
+  export WORKER_CMD="$d2/bin/worker.sh"
+  export BACKOFF_NOWORK_SECS=0
+  write_claim_stub "$d2/bin/claim.sh"
+  export CLAIM_CMD="bash $d2/bin/claim.sh"
+  export HEARTBEAT_MACHINE="testbox"
+  bash "$SUPERVISOR" >"$d2/stdout.log" 2>&1 || true
+  stamped2=$(grep -oE '^stamp [^ ]+' "$CLAIM_LOG" 2>/dev/null | head -1 | awk '{print $2}')
+  if [[ -n "$stamped2" ]] && ! grep -qE "^reap testbox ${stamped2}( |$)" "$CLAIM_LOG"; then
+    pass "claim: a no-work marker that NAMES an issue does not conclude it — lane $stamped2 keeps its ref"
+  else
+    fail "no-work-with-issue: lane '$stamped2' must not be cleared: log=[$(tr '\n' ';' <"$CLAIM_LOG")]"
+  fi
+}
+
 test_claim_drain_never_deletes_current_lane() {
   local d out
   d="$(new_case_dir)"
@@ -3205,6 +3283,7 @@ test_clear_claim_keeps_placeholder_on_abnormal_exit
 test_supervisor_lock_is_per_lane
 test_claim_cleanup_uses_lease_and_drops_on_transfer
 test_park_releases_issue_so_next_lane_is_a_placeholder
+test_no_work_shutdown_clears_its_placeholder
 test_finalized_verified_merged_counts
 test_finalized_mismatch_open_is_abnormal
 test_finalized_unverified_not_counted_no_breaker
