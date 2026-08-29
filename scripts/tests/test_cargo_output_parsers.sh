@@ -732,6 +732,181 @@ F
   fi
 done
 
+# ─────────────────────────────────────────────────────────────────────────────────────
+# (B14) CONSTRUCT ATTRIBUTION, not same-line matching (roborev B4 — the sharpest finding
+#       of the round, and the one that changed the model).
+#
+#       The detector used to require a cargo token AND a match operator on the SAME LINE.
+#       A `case` block splits them — `case "$line" in` carries the operator,
+#       `*"Running tests/"*)` carries the token — so a RAW multi-line parse was INVISIBLE,
+#       and the affirmative `N/N` line still printed off the single-line sites: a hole
+#       shaped exactly like coverage. MEASURED before the fix: the mixed fixture below
+#       reported `1/1 parse sites read from an ANSI-stripped source`, exit 0.
+#
+#       Note honestly what the empty-subject-set rule did and did not buy. Handed the raw
+#       site ALONE, the pre-fix lint DID exit 1 — via `ZERO cargo-output parse sites`, the
+#       right refusal for the wrong reason. That rule is what kept this from being a
+#       silently undetectable hole, and it is NOT sufficient: it disappears the moment the
+#       file contains any other site, which every real file does.
+# ─────────────────────────────────────────────────────────────────────────────────────
+# The exact reported shape: one stripped site, one raw `case`-based parse.
+cat >"$tmp/f_b4_mixed.sh" <<'F'
+good() {
+  local src
+  src=$(_ansi_stripped_log "$1") || return 1
+  while IFS= read -r line; do
+    case "$line" in *"test result:"*) echo hit ;; esac
+  done < "$src"
+}
+bad_raw() {
+  local logfile="$1" seen=""
+  while IFS= read -r line; do
+    case "$line" in
+      *"Running tests/"*) seen="x" ;;
+    esac
+  done < "$logfile"
+}
+F
+run_lint "$tmp/f_b4_mixed.sh"
+if [ "$lint_rc" -ne 0 ] && printf '%s' "$lint_out" | grep -q 'RAW source'; then
+  ok "B14: a RAW multi-line \`case\` parse beside a stripped site is CAUGHT (was invisible: the same-line model reported 1/1 and exit 0)"
+else
+  bad "B14: the mixed fixture did not red — rc=$lint_rc / '$lint_out'"
+fi
+if printf '%s\n' "$lint_out" | grep -q '^cargo-output-parsers: '; then
+  bad "B14: the lint printed an AFFIRMATIVE line for a file containing a raw site — a finding and a clean verdict must never appear together"
+else
+  ok "B14: no affirmative line is printed when a site reds (a FAIL never reads as coverage)"
+fi
+# ...and the raw site ALONE must red for the RIGHT reason now, not via the empty-subject net.
+cat >"$tmp/f_b4_alone.sh" <<'F'
+bad_raw() {
+  local logfile="$1" seen=""
+  while IFS= read -r line; do
+    case "$line" in
+      *"Running tests/"*) seen="x" ;;
+    esac
+  done < "$logfile"
+}
+F
+run_lint "$tmp/f_b4_alone.sh"
+if [ "$lint_rc" -ne 0 ] && printf '%s' "$lint_out" | grep -q 'RAW source' \
+   && ! printf '%s' "$lint_out" | grep -q 'ZERO cargo-output parse sites'; then
+  ok "B14: the raw \`case\` site alone reds as a RAW SOURCE, not via the empty-subject-set net (right reason, not just the right verdict)"
+else
+  bad "B14: the lone raw site did not red as a raw source — rc=$lint_rc / '$lint_out'"
+fi
+# A CASE block NOT inside a loop, over a raw variable, must red on the block SUBJECT.
+cat >"$tmp/f_b4_case_nonloop.sh" <<'F'
+myguard() {
+  local out="$1"
+  case "$out" in
+    *"Doc-tests"*)
+      echo hit
+      ;;
+  esac
+}
+F
+run_lint "$tmp/f_b4_case_nonloop.sh"
+if [ "$lint_rc" -ne 0 ] && printf '%s' "$lint_out" | grep -q 'case. PATTERN whose block subject'; then
+  ok "B14: a non-loop \`case\` block over a raw variable reds, naming the BLOCK SUBJECT"
+else
+  bad "B14: the non-loop case block did not red on its subject — rc=$lint_rc / '$lint_out'"
+fi
+# ...and the same shape over a STRIPPED read must PASS (so the rule is not reject-everything).
+cat >"$tmp/f_b4_case_stripped.sh" <<'F'
+myguard() {
+  local src out
+  src=$(_ansi_stripped_log "$1") || return 1
+  out=$(cat "$src")
+  case "$(cat "$src")" in
+    *"Doc-tests"*)
+      echo hit
+      ;;
+  esac
+}
+F
+run_lint "$tmp/f_b4_case_stripped.sh"
+if [ "$lint_rc" -eq 0 ] && printf '%s' "$lint_out" | grep -q '^cargo-output-parsers: 1/1 '; then
+  ok "B14: the same non-loop \`case\` block over a stripped read is ACCEPTED (1/1) — positive control"
+else
+  bad "B14: the stripped non-loop case block did not pass — rc=$lint_rc / '$lint_out'"
+fi
+# A token on a CONTINUATION line of a multi-line command.
+cat >"$tmp/f_b4_continuation.sh" <<'F'
+myguard() {
+  grep -q \
+    "Running tests/" \
+    "$1"
+}
+F
+run_lint "$tmp/f_b4_continuation.sh"
+if [ "$lint_rc" -ne 0 ] && printf '%s' "$lint_out" | grep -q 'RAW source'; then
+  ok "B14: a token on a CONTINUATION line is attributed to its joined logical command and reds"
+else
+  bad "B14: the continuation-line fixture did not red — rc=$lint_rc / '$lint_out'"
+fi
+cat >"$tmp/f_b4_continuation_ok.sh" <<'F'
+myguard() {
+  local src
+  src=$(_ansi_stripped_log "$1") || return 1
+  grep -q \
+    "Running tests/" \
+    "$src"
+}
+F
+run_lint "$tmp/f_b4_continuation_ok.sh"
+if [ "$lint_rc" -eq 0 ] && printf '%s' "$lint_out" | grep -q '^cargo-output-parsers: 1/1 '; then
+  ok "B14: the same continuation-line command over a stripped source is ACCEPTED (1/1) — positive control"
+else
+  bad "B14: the stripped continuation fixture did not pass — rc=$lint_rc / '$lint_out'"
+fi
+# A PATTERN HELD IN A VARIABLE: the scanner does not follow variables, and REFUSES rather
+# than guessing in either direction. The refusal text must be distinct from every other cause.
+cat >"$tmp/f_b4_var_pattern.sh" <<'F'
+myguard() {
+  local pat="Running tests/"
+  grep -q "$pat" "$1"
+}
+F
+run_lint "$tmp/f_b4_var_pattern.sh"
+if [ "$lint_rc" -ne 0 ] && printf '%s' "$lint_out" | grep -q 'UNRESOLVED (cargo token held in a variable)'; then
+  ok "B14: a pattern held in a VARIABLE is REFUSED with its own named cause (not silently skipped, not falsely accused of a raw read)"
+else
+  bad "B14: the variable-held pattern was not refused with a distinct cause — rc=$lint_rc / '$lint_out'"
+fi
+# The three refusal/failure causes must be TEXTUALLY DISTINCT from the empty-subject-set FAIL,
+# so a pasted summary can never confuse "could not classify one site" with "found no sites".
+run_lint "$tmp/f_empty.sh"
+empty_out="$lint_out"
+run_lint "$tmp/f_b4_var_pattern.sh"
+if printf '%s' "$empty_out" | grep -q 'ZERO cargo-output parse sites' \
+   && ! printf '%s' "$lint_out" | grep -q 'ZERO cargo-output parse sites' \
+   && ! printf '%s' "$empty_out" | grep -q 'UNRESOLVED'; then
+  ok "B14: the UNRESOLVED refusal and the EMPTY-SUBJECT-SET FAIL are textually distinct (neither message appears in the other's output)"
+else
+  bad "B14: the refusal and empty-subject-set diagnostics overlap — the two causes could be confused in a pasted summary"
+fi
+# The mention classification must survive the model change: a quoted message argument on a
+# continuation line of a non-matching command is DATA. Measured on the shipped gate: four
+# `emit_summary … "error: …"` lines. Reproduced here so the property is pinned, not incidental.
+cat >"$tmp/f_b4_message_arg.sh" <<'F'
+myguard() {
+  local src
+  src=$(_ansi_stripped_log "$1") || return 1
+  emit_summary ERROR \
+    "delta-anchor: none" \
+    "error: anchor summary RESULT is not PASS — cannot anchor a delta re-cert"
+  grep -c "test result:" "$src"
+}
+F
+run_lint "$tmp/f_b4_message_arg.sh"
+if [ "$lint_rc" -eq 0 ] && printf '%s' "$lint_out" | grep -q '^cargo-output-parsers: 1/1 '; then
+  ok "B14: a quoted MESSAGE argument on a continuation line is DATA, not a parse site (1/1, the real parse only)"
+else
+  bad "B14: the message-argument fixture was misjudged — rc=$lint_rc / '$lint_out'"
+fi
+
 echo
 printf 'passed=%d failed=%d\n' "$PASSES" "$FAILS"
 if [ "$FAILS" -gt 0 ]; then
