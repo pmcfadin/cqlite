@@ -2784,9 +2784,13 @@ test_supervisor_lock_is_per_lane() {
   local body a b same
   body="$T_LOCKFN/lockfn.sh"
   mkdir -p "$T_LOCKFN"
-  # The function alone, so the case does not depend on sourcing the whole supervisor.
+  # The functions alone, so the case does not depend on sourcing the whole supervisor. BOTH are needed:
+  # `supervisor_lock_path` now BUILDS ON `supervisor_lane_id` (roborev round 34) rather than carrying a
+  # second copy of its body, so extracting the lock function alone yields an undefined call and an EMPTY
+  # path — which is how this case caught the change, loudly and in the right place.
   {
     printf '%s\n' '#!/usr/bin/env bash'
+    sed -n '/^supervisor_lane_id()/,/^}/p' "$SUPERVISOR"
     sed -n '/^supervisor_lock_path()/,/^}/p' "$SUPERVISOR"
     printf '%s\n' 'supervisor_lock_path; printf "%s\n" "$SUPERVISOR_LOCK"'
   } >"$body"
