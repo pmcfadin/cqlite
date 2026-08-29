@@ -1167,28 +1167,41 @@ git_local_helper_configured() {
   git -C "$REPO_ROOT" config --local --get-regexp '^credential\..*helper$' >/dev/null 2>&1
 }
 
-# gh_auth_confirms_host <host> — 0 iff `gh` AFFIRMS that it is authenticated to THAT
-# EXACT host. Used for ONE purpose (issue #3369 review): to gate the fallback repair
-# below, which installs a helper that hands $GH_TOKEN — a real GitHub credential — to
-# whatever host the repair is scoped to.
+# gh_token_is_authoritative_for_host <host> — 0 iff the ENVIRONMENT token this script
+# would install ($GH_TOKEN, else $GITHUB_TOKEN) is the very token `gh` holds FOR THAT
+# EXACT HOST. Gates the fallback repair below, which configures git to hand that token to
+# whatever host the helper is scoped to (issue #3369 review).
 #
-# The host is resolved from LOCAL GIT CONFIG (`git remote get-url --push`), so a typo, a
+# The host comes from LOCAL GIT CONFIG (`git remote get-url --push`), so a typo, a
 # leftover fork/mirror pushurl or a stale `insteadOf` names a host nobody intended — and
 # .agent-ami/profile.yaml runs this script with --fix-credentials at every onboard, so the
 # accident path is automatic. An invoker who controls the box is out of the threat model;
 # a MISCONFIGURED REMOTE is not, and by this repo's triage rule ("can be bypassed BY
 # ACCIDENT ⇒ defect") that makes it in scope.
 #
-# `gh` is the AUTHORITY and is asked directly. Nothing here allowlists hosts or pattern-
-# matches the URL: trust inferred from a string is the guessing shape this whole change
-# exists to remove. And the branch is keyed on the AFFIRMATIVE answer — an absent gh, an
-# unbounded-call failure, a network hiccup and a genuine "not logged in" all land on the
-# same NON-confirming side, because an unmeasured confirmation is not a confirmation.
-gh_auth_confirms_host() {
-  local host="$1"
+# THE PREDICATE IS TOKEN AUTHORITY, NOT A LOGIN. The first cut asked
+# `gh auth status --hostname <host>`, which answers "does gh hold SOME credential for that
+# host?" — a different fact from "is THIS token the credential for that host?". On a box
+# authenticated to both github.com and a GitHub Enterprise host, with `origin` on the
+# enterprise host, that check PASSES and the repair then hands the github.com token to the
+# enterprise host: a proxy standing in for the property, the same shape as every other
+# defect in this change. So `gh` is asked for the host's OWN token and it must MATCH.
+#
+# `gh` is the AUTHORITY and is asked directly. Nothing here allowlists hosts, and nothing
+# infers enterprise-ness (or anything else) from the hostname string. The branch is keyed
+# on the AFFIRMATIVE answer — an absent gh, a bounded-call failure, no token for that
+# host, an empty answer and a genuine mismatch all land on the same NON-confirming side,
+# because an unmeasured authority is not an authority. Neither value is ever printed,
+# logged or compared through a file: both stay in local shell variables.
+gh_token_is_authoritative_for_host() {
+  local host="$1" env_tok gh_tok
   [ -n "$host" ] || return 1
   have gh || return 1
-  bounded 20 gh auth status --hostname "$host" >/dev/null 2>&1
+  env_tok="${GH_TOKEN:-${GITHUB_TOKEN:-}}"
+  [ -n "$env_tok" ] || return 1
+  gh_tok=$(bounded 20 gh auth token --hostname "$host" 2>/dev/null) || return 1
+  [ -n "$gh_tok" ] || return 1
+  [ "$gh_tok" = "$env_tok" ]
 }
 
 # git_env_token_helper_active — 0 iff a configured helper (any scope, any host key) is
@@ -1328,17 +1341,18 @@ else
         # repair counts ONCE rather than twice.
         info "cannot auto-configure: neither GH_TOKEN nor GITHUB_TOKEN is set in this environment"
         info "export GH_TOKEN=<token>, then re-run:  bash scripts/bootstrap-agent-machine.sh --fix-credentials"
-      elif ! gh_auth_confirms_host "$GIT_ORIGIN_HOST"; then
-        # AFFIRMATIVE CONFIRMATION OR NO REPAIR (issue #3369 review). The fallback below
-        # would configure git to hand $GH_TOKEN to $GIT_ORIGIN_HOST, and the push probe in
-        # §3b-push then performs a real push to it — all from a host resolved out of local
-        # git config, which a typo, a leftover fork/mirror pushurl or a stale `insteadOf`
-        # can point anywhere. So the repair is gated on `gh` CONFIRMING authentication for
-        # that exact host, and refuses otherwise. `gh auth setup-git` above stays
-        # unconditional: it makes gh the helper and gh decides what it answers for; the
-        # dangerous path is specifically dereferencing the RAW token for an arbitrary host.
+      elif ! gh_token_is_authoritative_for_host "$GIT_ORIGIN_HOST"; then
+        # AFFIRMATIVE AUTHORITY OR NO REPAIR (issue #3369 review). The fallback below
+        # would configure git to hand the ENVIRONMENT token to $GIT_ORIGIN_HOST, and the
+        # push probe in §3b-push then performs a real push to it — all from a host
+        # resolved out of local git config, which a typo, a leftover fork/mirror pushurl
+        # or a stale `insteadOf` can point anywhere. So the repair is gated on that token
+        # being the one `gh` holds FOR THAT HOST, and refuses otherwise.
+        # `gh auth setup-git` above stays unconditional: it makes gh the helper and gh
+        # decides what it answers for, per host. The dangerous path is specifically
+        # dereferencing a RAW token for a host that token does not belong to.
         cred_refused_host=1
-        info "REFUSING to configure a \$GH_TOKEN-dereferencing helper for $GIT_ORIGIN_HOST: 'gh auth status --hostname $GIT_ORIGIN_HOST' did not confirm authentication for that host"
+        info "REFUSING to configure a \$GH_TOKEN-dereferencing helper for $GIT_ORIGIN_HOST: 'gh auth token --hostname $GIT_ORIGIN_HOST' did not return the token this environment holds (gh may hold none for that host, or a DIFFERENT one — e.g. a github.com token on a box that also has a GitHub Enterprise host)"
       else
         # The value written is a shell snippet that DEREFERENCES $GH_TOKEN when git
         # asks — the token itself never lands on disk, so rotating it needs no
@@ -1384,9 +1398,9 @@ else
       # The HOST is named; the push URL deliberately is NOT. A remote URL can embed a
       # credential (claim.sh classifies push stderr for exactly that reason and never
       # prints it), so echoing it here would trade one leak for another.
-      warn "git push has NO credentials for $GIT_ORIGIN_HOST and this run REFUSED to configure any: 'gh' does not report authentication for that host, so a token will NOT be configured for it"
-      info "why: the fallback helper hands \$GH_TOKEN — a real GitHub credential — to whichever host it is scoped to, and this host came from LOCAL GIT CONFIG ('git remote get-url --push $PUSH_PROBE_REMOTE'), which a typo, a leftover fork/mirror pushurl or a stale 'insteadOf' can point anywhere"
-      info "fix (host is correct):   gh auth login --hostname $GIT_ORIGIN_HOST    then re-run with --fix-credentials"
+      warn "git push has NO credentials for $GIT_ORIGIN_HOST and this run REFUSED to configure any: \$GH_TOKEN is not the token 'gh' holds for that host, so a token will NOT be configured for it"
+      info "why: the fallback helper hands that token — a real credential — to whichever host it is scoped to, and this host came from LOCAL GIT CONFIG ('git remote get-url --push $PUSH_PROBE_REMOTE'), which a typo, a leftover fork/mirror pushurl or a stale 'insteadOf' can point anywhere. A login for the host is NOT enough: on a box authenticated to both github.com and a GitHub Enterprise host, the token for one must not be handed to the other"
+      info "fix (host is correct):   gh auth login --hostname $GIT_ORIGIN_HOST    then re-run with --fix-credentials (preferably WITHOUT \$GH_TOKEN set, so 'gh auth setup-git' supplies that host's own token)"
       info "fix (host is WRONG):     git -C $REPO_ROOT remote set-url --push $PUSH_PROBE_REMOTE <the intended url>"
       info "impact until then: scripts/flow/claim.sh + claim-heartbeat.sh push on 10+ call sites — the claim protocol does not work"
     else

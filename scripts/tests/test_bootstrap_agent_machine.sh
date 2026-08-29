@@ -1442,47 +1442,70 @@ else
   push_plain "$out7pq" | grep -E 'git-push|fix:|scopes' | head -5
 fi
 
-# 7p-r. THE FALLBACK REPAIR IS GATED ON AN AFFIRMATIVE gh CONFIRMATION OF THE PUSH HOST
-#   (#3369 review). §3b resolves the host from LOCAL GIT CONFIG (`git remote get-url
-#   --push`), then under --fix-credentials installs a helper that dereferences $GH_TOKEN
-#   FOR THAT HOST, and §3b-push immediately performs a real push to it. Nothing confirmed
-#   the host was one `gh` is authenticated to — so a typo, a leftover fork/mirror pushurl
-#   or a stale `insteadOf` handed a real GitHub token to an unintended host, during a probe
-#   .agent-ami/profile.yaml runs AUTOMATICALLY at every onboard. An invoker who controls the
-#   box is out of the threat model; a MISCONFIGURED REMOTE is reachable BY ACCIDENT, which
-#   this repo's triage rule makes a defect.
+# 7p-r. THE FALLBACK REPAIR IS GATED ON THE ENVIRONMENT TOKEN BEING AUTHORITATIVE FOR THE
+#   PUSH HOST (#3369 review, twice). §3b resolves the host from LOCAL GIT CONFIG (`git
+#   remote get-url --push`), then under --fix-credentials installs a helper that
+#   dereferences $GH_TOKEN FOR THAT HOST, and §3b-push immediately performs a real push to
+#   it — all during a preflight .agent-ami/profile.yaml runs AUTOMATICALLY at every onboard.
+#   A typo, a leftover fork/mirror pushurl or a stale `insteadOf` therefore handed a real
+#   credential to an unintended host. An invoker who controls the box is out of the threat
+#   model; a MISCONFIGURED REMOTE is reachable BY ACCIDENT, which this repo's triage rule
+#   makes a defect.
 #
-#   MEASURED AS A PAIR against one sandbox shape whose ONLY variable is what the gh stub
-#   confirms — without the positive control, "no helper was written" would also be
-#   satisfied by a repair that stopped working altogether.
+#   THE PREDICATE IS TOKEN AUTHORITY, NOT A LOGIN — and this case is built to falsify the
+#   weaker one. The first fix asked `gh auth status --hostname <host>`, which answers "does
+#   gh hold SOME credential for that host?". The sandbox below is the box where those two
+#   facts diverge: gh is authenticated to BOTH github.com and the push host (so the
+#   status check PASSES for both) while the push host's own token is a DIFFERENT value from
+#   $GH_TOKEN — exactly a github.com token on a machine that also has a GitHub Enterprise
+#   host. The preconditions assert that divergence rather than assuming it.
+#
+#   MEASURED AS A PAIR against one sandbox shape whose ONLY variable is which token gh
+#   reports for the push host — without the positive control, "no helper was written"
+#   would also be satisfied by a repair that stopped working altogether.
 #   Both stubs' `gh auth setup-git` installs ONLY the url.<local>.insteadOf rewrite and NO
 #   credential helper, which is what routes the run into the FALLBACK (the branch under
 #   test) while keeping the push itself offline on a local bare repo.
 
-# mk_push_gh_hostaware <dir> <host-gh-confirms> <setup-git-body> — like mk_push_gh, but
-# `gh auth status --hostname H` succeeds ONLY for <host-gh-confirms> and otherwise fails
-# the way the real gh does (stderr + exit 1). A bare `gh auth status` still succeeds, so
-# section 3 and the setup-git branch behave exactly as in every other 7p case.
-mk_push_gh_hostaware() {
-  local dir="$1" confirmed="$2" setup="${3:-:}"
+# mk_push_gh_tokenhost <dir> <host> <token-gh-holds-for-that-host> <setup-git-body> — like
+# mk_push_gh, but modelling a TWO-HOST box:
+#   `gh auth status`              succeeds, listing github.com AND <host>
+#   `gh auth status --hostname H` succeeds for BOTH of them (the insufficient predicate)
+#   `gh auth token --hostname H`  prints $GH_TOKEN for github.com, <token…> for <host>,
+#                                 and fails the way real gh does for anything else
+mk_push_gh_tokenhost() {
+  local dir="$1" host="$2" tok="$3" setup="${4:-:}"
   cat >"$dir/gh" <<EOF
 #!/usr/bin/env bash
+host_arg() {   # the value of --hostname in "\$@", or ""
+  while [ \$# -gt 0 ]; do
+    [ "\$1" = --hostname ] && { printf '%s' "\$2"; return 0; }
+    shift
+  done
+}
 case "\$1" in
   auth)
     if [ "\$2" = status ]; then
-      want=""
-      shift 2
-      while [ \$# -gt 0 ]; do
-        [ "\$1" = --hostname ] && { want="\$2"; shift; }
-        shift
-      done
-      if [ -n "\$want" ] && [ "\$want" != "$confirmed" ]; then
-        echo "You are not logged into any accounts on \$want" >&2
-        exit 1
-      fi
+      shift 2; want="\$(host_arg "\$@")"
+      case "\$want" in
+        ""|github.com|$host) : ;;
+        *) echo "You are not logged into any accounts on \$want" >&2; exit 1 ;;
+      esac
       echo "github.com"
       echo "  ✓ Logged in to github.com account tester (GH_TOKEN)"
       echo "  - Token scopes: 'gist', 'project', 'read:org', 'repo', 'workflow'"
+      echo "$host"
+      echo "  ✓ Logged in to $host account tester (keyring)"
+      echo "  - Token scopes: 'repo', 'workflow'"
+      exit 0
+    elif [ "\$2" = token ]; then
+      shift 2; want="\$(host_arg "\$@")"
+      case "\$want" in
+        ""|github.com) printf '%s\\n' "\${GH_TOKEN:-}" ;;
+        $host)         printf '%s\\n' '$tok' ;;
+        *) echo "no oauth token found for \$want" >&2; exit 1 ;;
+      esac
+      exit 0
     elif [ "\$2" = setup-git ]; then
       $setup
     fi
@@ -1499,22 +1522,26 @@ EOF
 # Saved and restored so no later case inherits it.
 gh_tok_was_set=${GH_TOKEN+1}; gh_tok_saved="${GH_TOKEN-}"
 export GH_TOKEN="$FAKE_TOKEN"
+ENTERPRISE_TOKEN='ghp_ENTERPRISEtoken3369ENTERPRISEtoken33'
 
-# (i) NEGATIVE: gh confirms github.com only, while the push host is push-probe.invalid.
+# (i) NEGATIVE: gh is logged in to the push host, but that host's token is NOT $GH_TOKEN.
 bare7pr="$tmp/bare7pr.git"; mk_push_bare "$bare7pr"
 repo7pr="$tmp/repo7pr"; mk_push_repo "$repo7pr" "https://push-probe.invalid/cqlite.git"
 bin7pr="$tmp/bin7pr"; mk_push_bin "$bin7pr"
-mk_push_gh_hostaware "$bin7pr" github.com \
+mk_push_gh_tokenhost "$bin7pr" push-probe.invalid "$ENTERPRISE_TOKEN" \
   "git config --global \"url.file://$bare7pr/.insteadOf\" 'https://push-probe.invalid/cqlite.git'"
 gc7pr="$tmp/gc7pr"; : >"$gc7pr"
-# Guard the guard, BOTH directions: the stub must refuse the push host and still satisfy a
-# bare `gh auth status` — otherwise the run would stop for an unrelated reason and the
-# assertions below would be vacuous.
-if ! PATH="$bin7pr:$PATH" gh auth status --hostname push-probe.invalid >/dev/null 2>&1 \
-   && PATH="$bin7pr:$PATH" gh auth status >/dev/null 2>&1; then
-  ok "push: (precondition) the gh stub refuses --hostname push-probe.invalid yet is authenticated overall"
+# Guard the guard, and it is the whole point of the case: the WEAKER predicate must PASS
+# here (gh really is logged in to the push host) while the token for that host DIFFERS
+# from $GH_TOKEN. Without this, the assertions below could be satisfied by a stub that
+# simply refuses everything.
+pr_status_ok=0; PATH="$bin7pr:$PATH" gh auth status --hostname push-probe.invalid >/dev/null 2>&1 && pr_status_ok=1
+pr_tok_host=$(PATH="$bin7pr:$PATH" gh auth token --hostname push-probe.invalid 2>/dev/null)
+pr_tok_gh=$(PATH="$bin7pr:$PATH" gh auth token --hostname github.com 2>/dev/null)
+if [ "$pr_status_ok" -eq 1 ] && [ "$pr_tok_host" = "$ENTERPRISE_TOKEN" ] && [ "$pr_tok_gh" = "$FAKE_TOKEN" ]; then
+  ok "push: (precondition) the two-host gh stub CONFIRMS a login for the push host while holding a DIFFERENT token for it"
 else
-  bad "push: 7p-r precondition FAILED — the hostname-aware gh stub does not discriminate"
+  bad "push: 7p-r precondition FAILED — stub does not model the two-host box (status=$pr_status_ok host-token-differs=$([ "$pr_tok_host" != "$FAKE_TOKEN" ] && echo yes || echo no))"
 fi
 run_push "$repo7pr" "$bin7pr" "$gc7pr" --fix-credentials --strict; out7pr=$push_out; rc7pr=$push_rc
 helper7pr=$(git config --file "$gc7pr" --get-all 'credential.https://push-probe.invalid.helper' 2>/dev/null | wc -l | tr -d ' ')
@@ -1522,10 +1549,17 @@ tokleak7pr=$(grep -cF "$FAKE_TOKEN" "$gc7pr" 2>/dev/null || true)
 if [ "${helper7pr:-0}" -eq 0 ] && [ "${tokleak7pr:-0}" -eq 0 ] \
    && printf '%s' "$out7pr" | grep -q '\[warn\].*push-probe.invalid.*REFUSED to configure any' \
    && ! push_green "$out7pr" && [ "$rc7pr" -ne 0 ]; then
-  ok "push: an unconfirmed push host gets NO \$GH_TOKEN helper — the refusal warns, green is withheld, --strict exits $rc7pr"
+  ok "push: a token that is NOT authoritative for the push host is NOT configured for it — the refusal warns, green is withheld, --strict exits $rc7pr"
 else
-  bad "push: a token helper was configured for a host gh does not confirm (helpers=${helper7pr:-0} rc=$rc7pr)"
+  bad "push: a foreign token was configured for the push host (helpers=${helper7pr:-0} rc=$rc7pr)"
   push_plain "$out7pr" | grep -E 'credential|REFUS|git-push' | head -6
+fi
+# Neither token may appear anywhere in the output: the comparison is in-process, and the
+# diagnosis names the HOST, never a secret.
+if ! printf '%s' "$out7pr" | grep -qF "$FAKE_TOKEN" && ! printf '%s' "$out7pr" | grep -qF "$ENTERPRISE_TOKEN"; then
+  ok "push: the authority check prints NEITHER token — the refusal names only the host"
+else
+  bad "push: a token value leaked into the bootstrap output"
 fi
 # ONE verdict, as everywhere else in §3b: the refusal must not also emit the generic
 # "could not configure any" warning, or a single fault would be counted twice.
@@ -1541,12 +1575,12 @@ else
   echo "skip - push: one-warning assertion needs an otherwise-clean sandbox (baseline=$base_warns warnings)"
 fi
 
-# (ii) POSITIVE CONTROL: the SAME sandbox, the SAME fallback path, the ONLY change being
-#      that gh confirms push-probe.invalid — the repair must still happen exactly as before.
+# (ii) POSITIVE CONTROL: the SAME sandbox and the SAME fallback path, the ONLY change being
+#      that gh reports $GH_TOKEN as the push host's own token — the repair must still happen.
 bare7pr2="$tmp/bare7pr2.git"; mk_push_bare "$bare7pr2"
 repo7pr2="$tmp/repo7pr2"; mk_push_repo "$repo7pr2" "https://push-probe.invalid/cqlite.git"
 bin7pr2="$tmp/bin7pr2"; mk_push_bin "$bin7pr2"
-mk_push_gh_hostaware "$bin7pr2" push-probe.invalid \
+mk_push_gh_tokenhost "$bin7pr2" push-probe.invalid "$FAKE_TOKEN" \
   "git config --global \"url.file://$bare7pr2/.insteadOf\" 'https://push-probe.invalid/cqlite.git'"
 gc7pr2="$tmp/gc7pr2"; : >"$gc7pr2"
 run_push "$repo7pr2" "$bin7pr2" "$gc7pr2" --fix-credentials --strict; out7pr2=$push_out; rc7pr2=$push_rc
@@ -1555,9 +1589,9 @@ if [ "${helper7pr2:-0}" -ge 1 ] \
    && printf '%s' "$out7pr2" | grep -q '\[ok\].*git credentials WIRED BY THIS RUN.*push-probe.invalid' \
    && printf '%s' "$out7pr2" | grep -q '\[ok\].*git-push: VERIFIED' \
    && ! printf '%s' "$out7pr2" | grep -q 'REFUSED to configure any'; then
-  ok "push: (positive control) a gh-CONFIRMED host is repaired exactly as before — helper written, credentials WIRED, push VERIFIED"
+  ok "push: (positive control) the AUTHORITATIVE token is repaired exactly as before — helper written, credentials WIRED, push VERIFIED"
 else
-  bad "push: the confirmation gate broke the repair on a confirmed host (helpers=${helper7pr2:-0} rc=$rc7pr2)"
+  bad "push: the authority gate broke the repair on its own host (helpers=${helper7pr2:-0} rc=$rc7pr2)"
   push_plain "$out7pr2" | grep -E 'credential|git-push' | head -6
 fi
 
