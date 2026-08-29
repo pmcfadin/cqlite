@@ -1399,12 +1399,33 @@ git_push_probe_stderr_is_auth() {
   return 1
 }
 
-# push_probe_fix_advice — the remediation both non-verified verdicts print.
+# push_probe_fix_advice — the remediation the AUTH verdicts print.
+#
+# PROTOCOL-AWARE, keyed on GIT_ORIGIN_KIND (#3369 review). That value is derived from the
+# REMOTE URL in §3b — authoritative by construction — never from git's error text, so
+# this adds no classification and no new failure cause. It matters because an SSH remote
+# authenticates with a KEY: `gh auth setup-git` wires an https credential helper and
+# cannot affect it, so advising it there sends the operator to fix something that is not
+# even in the path. This change routed SSH origins into the push probe for the first
+# time, which is what made that reachable.
+#
+# The scope line in the https branch STATES A POSSIBILITY rather than detecting one: a
+# token can authenticate perfectly and still lack `contents:write`, which no credential
+# rewiring fixes. We cannot tell that state from here and do not pretend to — the line
+# points at the scope report the board-access section already prints.
 push_probe_fix_advice() {
   info "impact: scripts/flow/claim.sh + claim-heartbeat.sh push on 10+ call sites — a lane cannot even START"
-  info "fix:    gh auth setup-git    (preferred; wires gh as git's credential helper)"
-  info "        then re-run:  bash scripts/bootstrap-agent-machine.sh --fix-credentials"
-  info "        verify by hand:  bash scripts/flow/claim.sh smoke"
+  if [ "$GIT_ORIGIN_KIND" = ssh ]; then
+    info "fix:    this is an SSH remote ($GIT_ORIGIN_URL) — git authenticates with your SSH KEY, not a credential helper"
+    info "        check the key:  ssh -T git@<host>   and that it is loaded:  ssh-add -l"
+    info "        'gh auth setup-git' does NOT apply here — it configures https credentials only"
+  else
+    info "fix:    gh auth setup-git    (preferred; wires gh as git's credential helper)"
+    info "        then re-run:  bash scripts/bootstrap-agent-machine.sh --fix-credentials"
+    info "        if a helper is ALREADY wired, the token may authenticate yet lack WRITE access —"
+    info "        check the scopes reported in the 'gh auth + board access' section above (contents:write / repo)"
+  fi
+  info "verify by hand:  bash scripts/flow/claim.sh smoke"
 }
 
 hdr "git PUSH capability (issue #3369)"

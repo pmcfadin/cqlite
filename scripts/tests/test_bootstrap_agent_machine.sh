@@ -961,10 +961,12 @@ else
   push_verdict "$out7pb"
 fi
 if printf '%s' "$out7pb" | grep -q 'gh auth setup-git' \
-   && printf '%s' "$out7pb" | grep -q -- '--fix-credentials'; then
-  ok "push: the FAILED verdict prints the remediation (gh auth setup-git / --fix-credentials)"
+   && printf '%s' "$out7pb" | grep -q -- '--fix-credentials' \
+   && printf '%s' "$out7pb" | grep -q 'contents:write'; then
+  ok "push: an HTTPS auth failure prints the credential remediation AND the write-scope possibility"
 else
-  bad "push: FAILED verdict printed no remediation"
+  bad "push: https FAILED verdict printed no remediation / omitted the scope line"
+  push_plain "$out7pb" | grep -E 'fix:|scopes' | head -4
 fi
 
 # 7p-b2. PUSH FAILS, namespace-shaped: a rejection git's stderr does NOT identify as a
@@ -1278,6 +1280,29 @@ if [ -n "$TIMEOUT_BIN_TEST" ]; then
   fi
 else
   echo "skip - push: bound-escalation guard needs timeout/gtimeout (neither on this host)"
+fi
+
+# 7p-n. SSH REMOTES GET SSH ADVICE (#3369 review). `gh auth setup-git` configures an
+#   HTTPS credential helper and cannot affect key-based auth, so printing it for an SSH
+#   remote sends the operator to fix something that is not in the path — the same
+#   wrong-remedy class as the delete-path advice two rounds ago. It is newly reachable
+#   because this change routes SSH origins into the push probe instead of exempting them.
+#   The branch is keyed on GIT_ORIGIN_KIND (derived from the remote URL, authoritative by
+#   construction), NOT on git's error text: no cause is being classified here.
+#   An `ssh` stub supplies the auth-shaped failure, so nothing contacts a real host.
+repo7pn="$tmp/repo7pn"; mk_push_repo "$repo7pn" "git@push-probe.invalid:owner/repo.git"
+bin7pn="$tmp/bin7pn"; mk_push_bin "$bin7pn"
+mk_stub "$bin7pn" ssh 'echo "git@push-probe.invalid: Permission denied (publickey)." >&2; exit 255'
+gc7pn="$tmp/gc7pn"; : >"$gc7pn"
+run_push "$repo7pn" "$bin7pn" "$gc7pn"; out7pn=$push_out
+if printf '%s' "$out7pn" | grep -q '\[warn\].*git-push: FAILED' \
+   && printf '%s' "$out7pn" | grep -q 'authenticates with your SSH KEY' \
+   && printf '%s' "$out7pn" | grep -q 'ssh-add -l' \
+   && ! push_plain "$out7pn" | grep -E '^ *fix:|^ *  *then re-run' | grep -q 'gh auth setup-git'; then
+  ok "push: an SSH remote's push failure advises SSH keys, NOT 'gh auth setup-git' (which cannot affect key auth)"
+else
+  bad "push: SSH push failure got https credential advice"
+  push_plain "$out7pn" | grep -E 'git-push|fix:|ssh' | head -5
 fi
 
 # 7p-g. `--strict` AND "All checks green." MUST NOT DIVERGE — asserted in BOTH
