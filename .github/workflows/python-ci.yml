@@ -85,10 +85,18 @@ jobs:
       # `requires-python` claims. Uploading it here — rather than in the
       # label-gated `test` job, the only other producer of a linux x86_64
       # wheel — is what makes the floors testable on an ORDINARY PR.
-      - name: Upload smoke wheel artifact (abi3, reused by the floor jobs)
+      #
+      # The name MUST stay outside the `wheel-*` namespace. `quality-gate`
+      # collects `pattern: wheel-*` with `merge-multiple: true` and republishes
+      # the result as the 30-day `cqlite-wheels` artifact a human grabs to
+      # publish; this wheel is built `--manylinux off`, so it is tied to the
+      # runner's glibc and must never land there. Keeping it out also keeps that
+      # job's `WHEEL_COUNT -lt 5` guard exact: 5 production targets, 5 wheels,
+      # so a MISSING production wheel cannot be masked by this one.
+      - name: Upload floor-smoke wheel artifact (abi3, reused by the floor jobs)
         uses: actions/upload-artifact@v6
         with:
-          name: wheel-smoke-abi3-linux
+          name: floor-smoke-wheel-abi3-linux
           path: bindings/python/dist/*.whl
           if-no-files-found: error
           retention-days: 7
@@ -128,7 +136,8 @@ jobs:
       - name: Download the abi3 wheel built by the smoke job
         uses: actions/download-artifact@v7
         with:
-          name: wheel-smoke-abi3-linux
+          # Deliberately NOT `wheel-*`-shaped — see the upload step in `smoke`.
+          name: floor-smoke-wheel-abi3-linux
           path: floor-wheel
 
       - name: Assert the interpreter and the wheel are the ones we mean to test

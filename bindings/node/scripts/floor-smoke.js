@@ -14,8 +14,10 @@
  *   1. The interpreter really is the major we meant to test. `setup-node`
  *      silently leaving the runner's default Node in place would otherwise
  *      make this whole job a second, redundant Node-20 run that reports a
- *      floor it never touched. Enforced when
- *      `CQLITE_FLOOR_EXPECT_NODE_MAJOR` is set.
+ *      floor it never touched. `CQLITE_FLOOR_EXPECT_NODE_MAJOR` is a MANDATORY
+ *      input: an unset value FAILS rather than skipping the check, so the
+ *      guarantee is unconditional — matching the Python leg, which asserts its
+ *      interpreter unconditionally in the workflow itself.
  *   2. The native module loads and `version()` returns a semver string.
  *      Catches an ABI/loader break on this major.
  *   3. One real query against the canonical corpus. ZERO rows is a FAILURE
@@ -52,13 +54,27 @@ const SCHEMA_BASIC_TYPES = path.join(SCHEMAS_DIR, 'basic-types.cql');
 const SMOKE_KEYSPACE_TABLE = 'test_basic.simple_table';
 const SMOKE_QUERY = `SELECT * FROM ${SMOKE_KEYSPACE_TABLE} LIMIT 1`;
 
-/** Check 1: assert we are running on the Node major this job claims to test. */
+/**
+ * Check 1: assert we are running on the Node major this job claims to test.
+ *
+ * `CQLITE_FLOOR_EXPECT_NODE_MAJOR` is MANDATORY, and its absence FAILS. A
+ * positive verdict requires an affirmative measurement (CLAUDE.md): if the
+ * variable is unset we do not know which interpreter this is, and "we could not
+ * tell" must never take the permissive branch. Concretely — for an issue whose
+ * whole subject is "CI claimed a floor it never tested", a copied job or a
+ * typo'd variable name would otherwise make this script report green having
+ * never checked the interpreter at all.
+ */
 function checkNodeMajor() {
   const expected = process.env.CQLITE_FLOOR_EXPECT_NODE_MAJOR;
   const actualMajor = process.versions.node.split('.')[0];
   if (!expected) {
-    console.log(`node version: ${process.version} (no expected major pinned)`);
-    return true;
+    console.error(
+      '::error::floor smoke: CQLITE_FLOOR_EXPECT_NODE_MAJOR is unset, so the ' +
+        `running interpreter (${process.version}) could not be checked against ` +
+        'the floor this job claims to test. Set it in the workflow step.'
+    );
+    return false;
   }
   if (actualMajor !== expected) {
     console.error(
