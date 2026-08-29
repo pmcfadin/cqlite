@@ -21,9 +21,9 @@
 //!
 //! # One atomic op per change, and the increment cannot be skipped
 //!
-//! [`OpenFdGauge::minted`] is the ONLY constructor and it increments; `Drop`
-//! decrements. The type has a private unit field, so it cannot be built by a struct
-//! literal that forgets the increment (the same structural guarantee
+//! [`OpenFdGauge::minted`] is the only PRODUCTION constructor and it increments;
+//! `Drop` decrements. The type's single field is private, so it cannot be built by a
+//! struct literal that forgets the increment (the same structural guarantee
 //! `read_path_probe::BlockingScanTaskGuard` uses), and it is deliberately NOT
 //! `Clone`/`Copy` — cloning it would decrement twice for one descriptor.
 //!
@@ -65,8 +65,18 @@ static READER_FDS_OPEN: AtomicI64 = AtomicI64::new(0);
 /// Stored BESIDE the handle it accounts for, so its lifetime is the descriptor's:
 /// every close path — a clean drop, an early return, an unwind — decrements exactly
 /// once, with no `close`-site bookkeeping to forget.
+///
+/// The single field is PRIVATE, so this cannot be built by a struct literal that
+/// forgets the increment (the same structural guarantee
+/// `read_path_probe::BlockingScanTaskGuard` uses), and the type is deliberately not
+/// `Clone`/`Copy` — cloning it would decrement twice for one descriptor.
 #[derive(Debug)]
-pub(crate) struct OpenFdGauge(());
+pub(crate) struct OpenFdGauge {
+    /// The counter this guard accounts into. Always [`READER_FDS_OPEN`] in a
+    /// production build, where [`Self::minted`] is the only constructor; a
+    /// TEST-LOCAL counter under `cfg(test)` via [`Self::minted_into`].
+    counter: &'static AtomicI64,
+}
 
 impl OpenFdGauge {
     /// Account one descriptor that was JUST opened, and report the new level.
@@ -78,14 +88,42 @@ impl OpenFdGauge {
         // reported level is one that was genuinely current.
         let now = READER_FDS_OPEN.fetch_add(1, Ordering::AcqRel) + 1;
         record(now);
-        Self(())
+        Self {
+            counter: &READER_FDS_OPEN,
+        }
+    }
+
+    /// TEST-ONLY: account into `counter` instead of the process-global one, and emit
+    /// nothing (a test-local counter has no metric series behind it).
+    ///
+    /// # Why the counter has to be injectable to test this at all
+    ///
+    /// The pairing properties — mint increments, `Drop` decrements, an UNWIND still
+    /// decrements — are statements about ONE guard, but [`READER_FDS_OPEN`] is
+    /// process-global and sibling unit tests in this binary open and close their own
+    /// readers CONCURRENTLY. Sampling that global before and after does not isolate
+    /// this test's delta; it just reads a foreign thread's transition as this test's
+    /// own, which is a race that really fired (a gate run observed `before = 24`,
+    /// `after = 23`). Widening the assertion to a range or a direction would not fix
+    /// it — the reading is still one a sibling can move. Giving the guard its own
+    /// counter removes the shared channel instead of trying to filter it, and still
+    /// exercises the same increment / `Drop` / unwind logic.
+    #[cfg(test)]
+    pub(crate) fn minted_into(counter: &'static AtomicI64) -> Self {
+        counter.fetch_add(1, Ordering::AcqRel);
+        Self { counter }
     }
 }
 
 impl Drop for OpenFdGauge {
     fn drop(&mut self) {
-        let now = READER_FDS_OPEN.fetch_sub(1, Ordering::AcqRel) - 1;
-        record(now);
+        let now = self.counter.fetch_sub(1, Ordering::AcqRel) - 1;
+        // Emit only for the process-global counter — a test-local one has no series.
+        // In a production build `minted` is the only constructor, so this compares a
+        // `&'static` against the very address it was initialised with.
+        if std::ptr::eq(self.counter, &READER_FDS_OPEN) {
+            record(now);
+        }
     }
 }
 
@@ -106,20 +144,26 @@ pub(crate) fn open_fds() -> i64 {
 mod tests {
     use super::*;
 
+    /// A counter of this test's OWN, so the assertions can be exact equalities. See
+    /// [`OpenFdGauge::minted_into`] for why the process-global counter cannot carry
+    /// these properties.
+    static PAIRING_FDS: AtomicI64 = AtomicI64::new(0);
+    /// A second private counter, so the two tests cannot perturb each other even
+    /// when the harness runs them on different threads at the same time.
+    static UNWIND_FDS: AtomicI64 = AtomicI64::new(0);
+
     #[test]
     fn a_guard_increments_on_mint_and_decrements_on_drop() {
-        // Relative, never absolute: sibling tests in this binary hold their own
-        // readers' descriptors concurrently, so only the DELTA is this test's.
-        let before = open_fds();
+        assert_eq!(PAIRING_FDS.load(Ordering::Acquire), 0);
         {
-            let _a = OpenFdGauge::minted();
-            assert_eq!(open_fds(), before + 1);
-            let _b = OpenFdGauge::minted();
-            assert_eq!(open_fds(), before + 2);
+            let _a = OpenFdGauge::minted_into(&PAIRING_FDS);
+            assert_eq!(PAIRING_FDS.load(Ordering::Acquire), 1);
+            let _b = OpenFdGauge::minted_into(&PAIRING_FDS);
+            assert_eq!(PAIRING_FDS.load(Ordering::Acquire), 2);
         }
         assert_eq!(
-            open_fds(),
-            before,
+            PAIRING_FDS.load(Ordering::Acquire),
+            0,
             "both guards decremented — an unpaired increment would leak the level \
              upward for the rest of the process"
         );
@@ -127,16 +171,33 @@ mod tests {
 
     #[test]
     fn an_unwind_still_decrements() {
-        let before = open_fds();
+        assert_eq!(UNWIND_FDS.load(Ordering::Acquire), 0);
         let unwound = std::panic::catch_unwind(|| {
-            let _g = OpenFdGauge::minted();
+            let _g = OpenFdGauge::minted_into(&UNWIND_FDS);
+            assert_eq!(UNWIND_FDS.load(Ordering::Acquire), 1);
             panic!("simulated failure while a descriptor is held");
         });
         assert!(unwound.is_err());
         assert_eq!(
-            open_fds(),
-            before,
+            UNWIND_FDS.load(Ordering::Acquire),
+            0,
             "an unwinding open path must not leave the descriptor counted forever"
+        );
+    }
+
+    #[test]
+    fn the_production_constructor_accounts_into_the_process_global_counter() {
+        // The injected-counter tests above would still pass if `minted()` accounted
+        // somewhere else entirely, so pin the wiring itself: hold a guard from the
+        // PRODUCTION constructor and require the global level to be at least 1 while
+        // it lives. A lower bound, because concurrent siblings hold descriptors too —
+        // this asserts the wiring, never the level (the pairing properties are the
+        // deterministic tests above).
+        let _g = OpenFdGauge::minted();
+        assert!(
+            open_fds() >= 1,
+            "minted() must account into READER_FDS_OPEN, the counter the \
+             cqlite.reader.fds.open gauge reports"
         );
     }
 }
