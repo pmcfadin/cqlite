@@ -8652,7 +8652,16 @@ dispatch_component() {
   _cli_tmp=$(mktemp -d "${TMPDIR:-/tmp}/agent-gate-cli.XXXXXX") || exit 1
   chmod 700 "$_cli_tmp" 2>/dev/null || true
   log1="$_cli_tmp/pass1.log"; log2="$_cli_tmp/pass2.log"
-  trap "rm -rf \"$_cli_tmp\"" EXIT
+  # DEFERRED expansion (issue #3400). A double-quoted trap string expands $_cli_tmp at
+  # trap-SET time and bakes the literal path into a command string bash RE-PARSES when the
+  # trap fires, so a TMPDIR carrying a $, a backtick or a quote alters the cleanup command:
+  # it can skip cleanup or run unintended syntax. TMPDIR is environment-influenceable (a
+  # workflow can set it) even where files are not, which is the cheap-hardening case.
+  # Single-quoted here via this file bash -c escaping, so the expansion happens when the
+  # trap RUNS. Safe because _cli_tmp is NOT local (see above: this body is not a function),
+  # so it is still in scope at EXIT; a function-local would have expanded to empty and
+  # silently stopped cleaning up.
+  trap '"'"'rm -rf -- "$_cli_tmp"'"'"' EXIT
 
   # Each pass appends --test twice per target, so the requested count is half the flag count.
   # This is what the guard measures its parsed banner count AGAINST, so it must be derived from
