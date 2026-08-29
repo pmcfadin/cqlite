@@ -1349,7 +1349,7 @@ exec '"$TIMEOUT_BIN_TEST"' "$@"'
   if printf '%s' "$out7po" | grep -q '\[ok\].*git-push: VERIFIED' \
      && printf '%s' "$out7po" | grep -q 'does not accept --kill-after' \
      && ! printf '%s' "$out7po" | grep -q '\[warn\].*git-push'; then
-    ok "push: a timeout that rejects --kill-after still bounds (SIGTERM-only) — the probe VERIFIES and the degradation is STATED"
+    ok "push: a timeout that rejects --kill-after is still SELECTED and USED — probes keep working and the SIGTERM-only degradation is STATED"
   else
     bad "push: a flag-rejecting timeout broke the bounded calls (rc=$rc7po)"
     push_plain "$out7po" | grep -E 'git-push|kill-after' | head -4
