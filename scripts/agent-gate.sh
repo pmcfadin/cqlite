@@ -8549,9 +8549,28 @@ dispatch_component() {
   # ground-truth names are allowed to run 0 there; NOTHING is allowed to run 0 in
   # Pass 2 (every real write-support target must execute at least one test).
   check_no_unexpected_zero_tests() {
-    local pass_name="$1" logfile="$2"; shift 2
+    # `${3:-}` not `$3`: under `set -u` a caller that has not been updated for the new
+    # expected-count argument would die with "unbound variable" instead of reaching the
+    # fail-closed branch below, turning an actionable diagnosis into a raw bash error.
+    local pass_name="$1" logfile="$2" expected="${3:-}"; shift 2
+    [ "$#" -gt 0 ] && shift
     local allowed_zero=" $* "
     local bad="" target="" _banners=0
+    # The EXPECTED TARGET COUNT is a required argument, and it is fail-closed on its own
+    # (issue #3400 roborev E1): a guard told to expect nothing would be back to taking whatever
+    # the log happened to contain.
+    # Deliberately NOT a `case`: a line ending in `;;` inside this bash -c blob TRUNCATES the
+    # dispatch-block extraction in scripts/tests/test_agent_gate_cli_tests_enum.sh, whose awk
+    # stops at the first `;;$` — measured, it silently dropped both cargo invocations from the
+    # block and red two unrelated assertions. Digit-strip test instead.
+    if [ -z "$expected" ] || [ -n "${expected//[0-9]/}" ]; then
+      echo "cli-tests: FAIL-CLOSED — check_no_unexpected_zero_tests called with a non-numeric expected-target count (${expected:-<empty>}). The count is the affirmative measurement this guard makes; without it there is nothing to measure against (issue #3400)." >&2
+      return 1
+    fi
+    if [ "$expected" -lt 1 ]; then
+      echo "cli-tests: FAIL-CLOSED — check_no_unexpected_zero_tests called expecting 0 targets, which is an empty subject set: it could only ever report OK having judged nothing (issue #3400)." >&2
+      return 1
+    fi
     # Parse an ANSI-STRIPPED copy, never the raw log (issue #3400). Under
     # CARGO_TERM_COLOR=always — set by 18 workflows incl. the nightly FULL gate.yml, and by
     # scripts/local/pre-merge.sh — cargo writes the reset sequence BETWEEN the status word and
@@ -8590,16 +8609,23 @@ dispatch_component() {
         target=""
       fi
     done < "$_parse_src"
-    # AFFIRMATIVE MEASUREMENT, the rule that governs this whole issue (#3400, roborev C3).
-    # Everything above only checks that nothing BAD was seen, and every one of those checks
-    # is satisfied by parsing NOTHING: an empty log, a truncated log, a killed cargo, or a
-    # cargo whose banner text has changed shape executes ZERO loop iterations and falls
-    # straight through to `return 0`. That is the vacuous pass this issue exists to remove,
-    # surviving inside the fix for it. The callers both run at least one --test target, so a
-    # successful cargo run MUST have printed at least one banner: zero banners means this
-    # guard judged no target, and a guard that judged nothing has measured nothing.
-    if [ "$_banners" -eq 0 ]; then
-      echo "cli-tests: FAIL-CLOSED — parsed '"'"'$logfile'"'"' and found ZERO recognised cargo target banners, so this guard judged NO target at all. The cargo run exited successfully, so banners must exist: an empty or truncated log, a killed process, a changed cargo output format, or a failed ANSI normalisation. A guard that measured nothing must never report OK (issue #3400)." >&2
+    # AFFIRMATIVE MEASUREMENT, the rule that governs this whole issue (#3400, roborev C3/E1).
+    # Everything above only checks that nothing BAD was seen, and every one of those checks is
+    # satisfied by parsing NOTHING: an empty log, a truncated log, a killed cargo, or a cargo
+    # whose banner text changed shape executes ZERO loop iterations and falls straight through
+    # to `return 0`. That is the vacuous pass this issue exists to remove, surviving inside the
+    # fix for it.
+    #
+    # EQUALITY WITH THE REQUESTED TARGET COUNT, not `>= 1` (roborev E1). A `>= 1` test is
+    # PARTIAL CREDIT and the same hole with a smaller mouth: a log truncated after the first
+    # banner satisfies it while a later zero-test target is simply ABSENT from the file, so the
+    # guard passes having judged one target out of N. Equality is sound because a cargo run that
+    # did not execute every requested target exits NONZERO, and the caller exits on rc != 0
+    # before this guard runs — so on the success path every requested target must have printed
+    # a banner. (PR #3403 adds the stronger NAME-level form, check_test_targets_observed, which
+    # supersedes counting; this caller keeps the count until that lands.)
+    if [ "$_banners" -ne "$expected" ]; then
+      echo "cli-tests: FAIL-CLOSED — parsed '"'"'$logfile'"'"' and recognised $_banners cargo target banner(s) but $expected --test target(s) were requested in $pass_name, so this guard judged only $_banners of $expected. The cargo run exited successfully, so every requested target must have printed a banner: a TRUNCATED log (a failed tee), a killed process, a changed cargo output format, or a failed ANSI normalisation. A guard that judged a SUBSET has not measured its subject (issue #3400)." >&2
       return 1
     fi
     if [ -n "$bad" ]; then
@@ -8628,15 +8654,40 @@ dispatch_component() {
   log1="$_cli_tmp/pass1.log"; log2="$_cli_tmp/pass2.log"
   trap "rm -rf \"$_cli_tmp\"" EXIT
 
+  # Each pass appends --test twice per target, so the requested count is half the flag count.
+  # This is what the guard measures its parsed banner count AGAINST, so it must be derived from
+  # the SAME array the cargo invocation uses, never re-counted from the filesystem.
+  def_expected=$(( ${#def_flags[@]} / 2 ))
+  ws_expected=$(( ${#ws_flags[@]} / 2 ))
+
+  # BOTH pipeline statuses (issue #3400 roborev E1). Reading only PIPESTATUS[0] makes a tee
+  # failure INVISIBLE — a full disk or a killed tee leaves a TRUNCATED log while cargo itself
+  # exited 0, and the guard then parses a prefix of its subject and can pass on partial credit.
+  # The tee status is checked SEPARATELY from cargo so the message names which half failed.
   cargo test --package cqlite-cli "${def_flags[@]}" 2>&1 | tee "$log1"
-  rc=${PIPESTATUS[0]}
+  # ONE assignment captures the whole array, and this is not style: `rc=${PIPESTATUS[0]}` is
+  # itself a command, so it RESETS PIPESTATUS to a single element and a following
+  # `tee_rc=${PIPESTATUS[1]}` reads an unbound/EMPTY value. `[ "" -ne 0 ]` then exits 2 rather
+  # than true, so the tee check would never fire — a vacuous check, the exact defect class of
+  # this issue, arriving inside its own fix. Caught by the self-test, not by review.
+  _ps=("${PIPESTATUS[@]}")
+  rc=${_ps[0]}; tee_rc=${_ps[1]}
   [ "$rc" -eq 0 ] || exit "$rc"
-  check_no_unexpected_zero_tests "Pass 1 (default)" "$log1" write_readback_content_tests graceful_shutdown_tests || exit 1
+  if [ "$tee_rc" -ne 0 ]; then
+    echo "cli-tests: FAIL-CLOSED — cargo exited 0 for Pass 1 but tee exited $tee_rc, so $log1 may be TRUNCATED. Every check below parses that file, and a truncated log can satisfy them while omitting a zero-test target entirely (issue #3400)." >&2
+    exit 1
+  fi
+  check_no_unexpected_zero_tests "Pass 1 (default)" "$log1" "$def_expected" write_readback_content_tests graceful_shutdown_tests || exit 1
 
   cargo test --package cqlite-cli --features write-support "${ws_flags[@]}" 2>&1 | tee "$log2"
-  rc=${PIPESTATUS[0]}
+  _ps=("${PIPESTATUS[@]}")
+  rc=${_ps[0]}; tee_rc=${_ps[1]}
   [ "$rc" -eq 0 ] || exit "$rc"
-  check_no_unexpected_zero_tests "Pass 2 (write-support)" "$log2"' ;;
+  if [ "$tee_rc" -ne 0 ]; then
+    echo "cli-tests: FAIL-CLOSED — cargo exited 0 for Pass 2 but tee exited $tee_rc, so $log2 may be TRUNCATED (issue #3400)." >&2
+    exit 1
+  fi
+  check_no_unexpected_zero_tests "Pass 2 (write-support)" "$log2" "$ws_expected"' ;;
     compaction-byte-parity) run_compaction_byte_parity ;;
     bti-multiclustering) run_bti_multiclustering ;;
     query-semantics-oracle) run_query_semantics_oracle ;;

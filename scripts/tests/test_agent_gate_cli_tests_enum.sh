@@ -261,6 +261,10 @@ fi
 #     "resolved to <empty>" — measured PASS=20 FAIL=3 — and because this test runs in
 #     `tooling-tests`, a FULL-gate-only component, no `--lite` run can see it. In the real gate
 #     the helper reaches this `bash -c` body via `export -f`; here it has to be extracted.
+#     The `2` after each logfile is the EXPECTED TARGET COUNT (#3400 roborev E1): the guard now
+#     requires its parsed banner count to EQUAL the number of requested --test targets, because
+#     `>= 1` was partial credit that a log truncated after the first banner satisfies. Every zg
+#     fixture below carries exactly two `Running tests/` banners.
 HELPER_SRC=$(awk '/^_ansi_stripped_log\(\) \{/{f=1} f{print} f&&/^\}$/{exit}' "$GATE")
 FUNC_SRC=$(awk '/^  check_no_unexpected_zero_tests\(\) \{/{f=1} f{print} f&&/^  \}$/{exit}' "$GATE")
 if [ -z "$HELPER_SRC" ]; then
@@ -285,7 +289,7 @@ running 0 tests
 
 test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
 LOG
-  if check_no_unexpected_zero_tests "Pass 1 (default)" "$tmp/zg/pass1_ok.log" write_readback_content_tests graceful_shutdown_tests; then
+  if check_no_unexpected_zero_tests "Pass 1 (default)" "$tmp/zg/pass1_ok.log" 2 write_readback_content_tests graceful_shutdown_tests; then
     ok "zero-tests guard: known-0 ground-truth target does NOT false-positive in Pass 1"
   else
     bad "zero-tests guard: false-positived on the known-0 Pass-1 ground-truth target"
@@ -303,7 +307,7 @@ running 0 tests
 
 test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
 LOG
-  if check_no_unexpected_zero_tests "Pass 1 (default)" "$tmp/zg/pass1_bad.log" write_readback_content_tests graceful_shutdown_tests; then
+  if check_no_unexpected_zero_tests "Pass 1 (default)" "$tmp/zg/pass1_bad.log" 2 write_readback_content_tests graceful_shutdown_tests; then
     bad "zero-tests guard: did NOT catch a THIRD write-support-#[cfg]-gated target running 0 tests"
   else
     ok "zero-tests guard: catches a THIRD unexpected 0-test target (the exact gap roborev found)"
@@ -321,7 +325,7 @@ running 0 tests
 
 test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
 LOG
-  if check_no_unexpected_zero_tests "Pass 2 (write-support)" "$tmp/zg/pass2_bad.log"; then
+  if check_no_unexpected_zero_tests "Pass 2 (write-support)" "$tmp/zg/pass2_bad.log" 2; then
     bad "zero-tests guard: Pass 2 did NOT fail on a 0-test target (nothing is allowed 0 there)"
   else
     ok "zero-tests guard: Pass 2 fails on ANY 0-test target (no allowed-zero exceptions there)"
@@ -338,7 +342,7 @@ test result: ok. 12 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; fin
 running 2 tests
 test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 2.56s
 LOG
-  if check_no_unexpected_zero_tests "Pass 2 (write-support)" "$tmp/zg/pass2_ok.log"; then
+  if check_no_unexpected_zero_tests "Pass 2 (write-support)" "$tmp/zg/pass2_ok.log" 2; then
     ok "zero-tests guard: an all-green Pass 2 passes cleanly (no false-positive)"
   else
     bad "zero-tests guard: false-positived on an all-green Pass 2"
@@ -359,7 +363,7 @@ test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; fini
 running 3 tests
 test result: ok. 0 passed; 0 failed; 3 ignored; 0 measured; 0 filtered out; finished in 0.00s
 LOG
-  if check_no_unexpected_zero_tests "Pass 1 (default)" "$tmp/zg/pass1_all_ignored.log" write_readback_content_tests graceful_shutdown_tests; then
+  if check_no_unexpected_zero_tests "Pass 1 (default)" "$tmp/zg/pass1_all_ignored.log" 2 write_readback_content_tests graceful_shutdown_tests; then
     ok "zero-tests guard: an all-#[ignore]d target does NOT trip the guard (distinguished from a truly-empty run)"
   else
     bad "zero-tests guard: false-positived on an all-#[ignore]d target (roborev regression)"

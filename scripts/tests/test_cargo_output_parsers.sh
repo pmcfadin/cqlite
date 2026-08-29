@@ -146,9 +146,9 @@ check_no_unexpected_zero_tests() {
 PREFIX
 
 prefix_rc_colour=0
-( set +e; . "$tmp/prefix_guard.sh"; check_no_unexpected_zero_tests "Pass 1" "$tmp/zero-colour.log" >/dev/null 2>&1; exit $? ) || prefix_rc_colour=$?
+( set +e; . "$tmp/prefix_guard.sh"; check_no_unexpected_zero_tests "Pass 1" "$tmp/zero-colour.log" 2 >/dev/null 2>&1; exit $? ) || prefix_rc_colour=$?
 prefix_rc_plain=0
-( set +e; . "$tmp/prefix_guard.sh"; check_no_unexpected_zero_tests "Pass 1" "$tmp/zero-plain.log" >/dev/null 2>&1; exit $? ) || prefix_rc_plain=$?
+( set +e; . "$tmp/prefix_guard.sh"; check_no_unexpected_zero_tests "Pass 1" "$tmp/zero-plain.log" 2 >/dev/null 2>&1; exit $? ) || prefix_rc_plain=$?
 
 if [ "$prefix_rc_colour" -eq 0 ]; then
   ok "RED (pinned defect): the PRE-FIX guard exits 0 on the COLOURED zero-test log — the vacuous pass, reproduced"
@@ -208,9 +208,9 @@ else
   fi
 
   cur_rc_colour=0
-  ( set +e; . "$tmp/current_guard.sh"; check_no_unexpected_zero_tests "Pass 1" "$tmp/zero-colour.log" >/dev/null 2>&1; exit $? ) || cur_rc_colour=$?
+  ( set +e; . "$tmp/current_guard.sh"; check_no_unexpected_zero_tests "Pass 1" "$tmp/zero-colour.log" 2 >/dev/null 2>&1; exit $? ) || cur_rc_colour=$?
   cur_rc_plain=0
-  ( set +e; . "$tmp/current_guard.sh"; check_no_unexpected_zero_tests "Pass 1" "$tmp/zero-plain.log" >/dev/null 2>&1; exit $? ) || cur_rc_plain=$?
+  ( set +e; . "$tmp/current_guard.sh"; check_no_unexpected_zero_tests "Pass 1" "$tmp/zero-plain.log" 2 >/dev/null 2>&1; exit $? ) || cur_rc_plain=$?
 
   if [ "$cur_rc_colour" -eq 1 ]; then
     ok "GREEN: the SHIPPED guard exits 1 on the COLOURED zero-test log (the #3400 fix, measured)"
@@ -226,7 +226,7 @@ else
   # A guard that reds everything is not a fix. Positive control: the same coloured log
   # with the zero-test target on the allowed-zero list must PASS.
   cur_rc_allowed=0
-  ( set +e; . "$tmp/current_guard.sh"; check_no_unexpected_zero_tests "Pass 1" "$tmp/zero-colour.log" empty >/dev/null 2>&1; exit $? ) || cur_rc_allowed=$?
+  ( set +e; . "$tmp/current_guard.sh"; check_no_unexpected_zero_tests "Pass 1" "$tmp/zero-colour.log" 2 empty >/dev/null 2>&1; exit $? ) || cur_rc_allowed=$?
   if [ "$cur_rc_allowed" -eq 0 ]; then
     ok "positive control: the SHIPPED guard PASSes the coloured log when 'empty' is on the allowed-zero list (so it parsed the target NAME out of coloured text, not just 'something is wrong')"
   else
@@ -235,7 +235,7 @@ else
 
   # Fail-closed control: an unreadable log must FAIL, never pass having parsed nothing.
   cur_rc_missing=0
-  ( set +e; . "$tmp/current_guard.sh"; check_no_unexpected_zero_tests "Pass 1" "$tmp/does-not-exist.log" >/dev/null 2>&1; exit $? ) || cur_rc_missing=$?
+  ( set +e; . "$tmp/current_guard.sh"; check_no_unexpected_zero_tests "Pass 1" "$tmp/does-not-exist.log" 2 >/dev/null 2>&1; exit $? ) || cur_rc_missing=$?
   if [ "$cur_rc_missing" -ne 0 ]; then
     ok "fail-closed control: the SHIPPED guard FAILs on an unreadable log rather than passing having parsed nothing"
   else
@@ -250,7 +250,7 @@ else
   # normalised log, so they isolate the banner count as the only thing that can red them.
   zero_banner_rc=0
   printf 'some cargo noise\nnothing recognisable here\n' >"$tmp/no-banners.log"
-  ( set +e; . "$tmp/current_guard.sh"; check_no_unexpected_zero_tests "Pass 1" "$tmp/no-banners.log" >/dev/null 2>&1; exit $? ) || zero_banner_rc=$?
+  ( set +e; . "$tmp/current_guard.sh"; check_no_unexpected_zero_tests "Pass 1" "$tmp/no-banners.log" 2 >/dev/null 2>&1; exit $? ) || zero_banner_rc=$?
   if [ "$zero_banner_rc" -ne 0 ]; then
     ok "C3: a NON-EMPTY log with no recognised target banners FAILs (the guard judged no target, so it measured nothing)"
   else
@@ -258,7 +258,7 @@ else
   fi
   empty_log_rc=0
   : >"$tmp/empty.log"
-  ( set +e; . "$tmp/current_guard.sh"; check_no_unexpected_zero_tests "Pass 1" "$tmp/empty.log" >/dev/null 2>&1; exit $? ) || empty_log_rc=$?
+  ( set +e; . "$tmp/current_guard.sh"; check_no_unexpected_zero_tests "Pass 1" "$tmp/empty.log" 2 >/dev/null 2>&1; exit $? ) || empty_log_rc=$?
   if [ "$empty_log_rc" -ne 0 ]; then
     ok "C3: an EMPTY log FAILs (zero iterations is zero measurement, not a clean bill of health)"
   else
@@ -268,11 +268,88 @@ else
   # coloured log has banners, so it still reds for the RIGHT reason (a zero-test target) and
   # still PASSes when that target is allowed.
   c3_ctrl_rc=0
-  ( set +e; . "$tmp/current_guard.sh"; check_no_unexpected_zero_tests "Pass 1" "$tmp/zero-colour.log" empty >/dev/null 2>&1; exit $? ) || c3_ctrl_rc=$?
+  ( set +e; . "$tmp/current_guard.sh"; check_no_unexpected_zero_tests "Pass 1" "$tmp/zero-colour.log" 2 empty >/dev/null 2>&1; exit $? ) || c3_ctrl_rc=$?
   if [ "$c3_ctrl_rc" -eq 0 ]; then
     ok "C3: a log WITH banners still PASSes when its zero-test target is allowed (the banner assert is not a blanket reject)"
   else
     bad "C3: the banner assert reds a legitimate log — rc=$c3_ctrl_rc"
+  fi
+
+  # E1: `>= 1` BANNER IS PARTIAL CREDIT. A log TRUNCATED after the first banner satisfies a
+  # "at least one target was parsed" test while a later zero-test target is simply ABSENT from
+  # the file — the same vacuous pass as an empty log, just needing a partial write instead of
+  # no write. The guard must compare its parsed banner count against the number of REQUESTED
+  # --test targets. This fixture is the coloured log cut off mid-way: readable, non-empty,
+  # normalises fine, ONE banner recognised, TWO requested.
+  truncated_rc=0
+  # Cut just before the SECOND target banner, so the fixture holds exactly one. The line is
+  # located ANSI-INSENSITIVELY (`Running.*tests/`) because in the coloured log the literal
+  # `Running tests/` does not exist — that asymmetry is this whole issue, and counting with the
+  # literal here is how the first version of this fixture measured 0 banners and would have red
+  # for emptiness rather than for the count.
+  cut_at=$(grep -nE 'Running.*tests/' "$tmp/zero-colour.log" | sed -n '2p' | cut -d: -f1)
+  awk -v c="$cut_at" 'NR < c' "$tmp/zero-colour.log" >"$tmp/truncated.log"
+  trunc_banners=$(grep -cE 'Running.*tests/' "$tmp/truncated.log" || true)
+  ( set +e; . "$tmp/current_guard.sh"; check_no_unexpected_zero_tests "Pass 1" "$tmp/truncated.log" 2 >/dev/null 2>&1; exit $? ) || truncated_rc=$?
+  if [ "$truncated_rc" -ne 0 ]; then
+    ok "E1: a log TRUNCATED after the first banner FAILs — the guard judged fewer targets than were requested, which is not a measurement of its subject"
+  else
+    bad "E1: the guard PASSed a truncated log — one early banner bought credit for targets absent from the file"
+  fi
+  # ...and the fixture must actually BE the partial case, or the assertion above proves nothing.
+  if [ "${trunc_banners:-0}" -ge 1 ] && [ "${trunc_banners:-0}" -lt 2 ] && [ -s "$tmp/truncated.log" ]; then
+    ok "E1: the truncated fixture is genuinely PARTIAL (non-empty, $trunc_banners of 2 banners) — so the red above is the COUNT, not emptiness"
+  else
+    bad "E1: the truncated fixture is not the partial case (banners=${trunc_banners:-0}, size=$( [ -s "$tmp/truncated.log" ] && echo nonempty || echo empty )) — the case above would red for the wrong reason"
+  fi
+  # The expected-count argument is itself fail-closed: a guard told to expect nothing is back to
+  # accepting whatever the log happened to contain.
+  for badcount in "" 0 abc; do
+    argrc=0
+    ( set +e; . "$tmp/current_guard.sh"; check_no_unexpected_zero_tests "Pass 1" "$tmp/zero-colour.log" "$badcount" empty >/dev/null 2>&1; exit $? ) || argrc=$?
+    if [ "$argrc" -ne 0 ]; then
+      ok "E1: an expected-target count of '${badcount:-<empty>}' is refused (an empty subject set cannot certify anything)"
+    else
+      bad "E1: the guard accepted an expected-target count of '${badcount:-<empty>}'"
+    fi
+  done
+
+  # E1, the other half: a `tee` FAILURE must be surfaced. The callers pipe cargo through tee and
+  # historically read only ${PIPESTATUS[0]}, so a full disk or a killed tee left a TRUNCATED log
+  # while cargo itself exited 0 — feeding the case above. Demonstrated, then asserted structurally.
+  set +e
+  true 2>&1 | tee "$tmp/no-such-dir/out.log" >/dev/null 2>&1
+  # ONE assignment for the whole array. `ps0=${PIPESTATUS[0]}` is itself a command and RESETS
+  # PIPESTATUS, so a second statement reading [1] gets an unbound/empty value — which is how
+  # this very test caught the same mistake in the gate.
+  e1_ps=("${PIPESTATUS[@]}")
+  set -e
+  ps0=${e1_ps[0]}; ps1=${e1_ps[1]}
+  if [ "$ps0" -eq 0 ] && [ "$ps1" -ne 0 ]; then
+    ok "E1 (behavioural): a failing \`tee\` leaves PIPESTATUS[0]=0 and PIPESTATUS[1]=$ps1 — reading only [0] is exactly how a truncated log passes for a successful run"
+  else
+    bad "E1 (behavioural): expected PIPESTATUS[0]=0 with a nonzero [1], got [0]=$ps0 [1]=$ps1 — the premise did not reproduce on this shell"
+  fi
+  cli_blob_src=$(awk "/cli-tests\\) run_component cli-tests bash -c/{f=1} f{print} f&&/^ *;;\$/{exit}" "$GATE")
+  if [ "$(printf '%s' "$cli_blob_src" | grep -c '_ps=("${PIPESTATUS\[@\]}")')" -ge 2 ] \
+     && [ "$(printf '%s' "$cli_blob_src" | grep -c 'tee_rc=${_ps\[1\]}')" -ge 2 ] \
+     && [ "$(printf '%s' "$cli_blob_src" | grep -c 'tee_rc" -ne 0')" -ge 2 ]; then
+    ok "E1 (structural): both cli-tests passes capture the WHOLE PIPESTATUS array in one assignment and fail closed on a nonzero tee status"
+  else
+    bad "E1 (structural): the cli-tests passes do not check the tee half of the pipeline (or read PIPESTATUS across two statements, which yields an EMPTY tee status and a check that never fires)"
+  fi
+  # The one-assignment rule, pinned as its own property: a second statement reading PIPESTATUS
+  # is a check that silently never fires, so no caller may reintroduce that shape.
+  if printf '%s' "$cli_blob_src" | grep -qE 'rc=\$\{PIPESTATUS\[0\]\}; *tee_rc=\$\{PIPESTATUS\[1\]\}'; then
+    bad "E1: a cli-tests pass reads PIPESTATUS across TWO statements — the first assignment resets the array, so the tee status is empty and its check never fires"
+  else
+    ok "E1: no cli-tests pass reads PIPESTATUS across two statements (the first assignment would reset the array)"
+  fi
+  if printf '%s' "$cli_blob_src" | grep -q 'def_expected=$(( ${#def_flags\[@\]} / 2 ))' \
+     && printf '%s' "$cli_blob_src" | grep -q 'ws_expected=$(( ${#ws_flags\[@\]} / 2 ))'; then
+    ok "E1 (structural): each pass derives its expected target count from the SAME flag array the cargo invocation uses (never re-counted from the filesystem)"
+  else
+    bad "E1 (structural): the expected target counts are not derived from def_flags/ws_flags"
   fi
 
   # AC3, structurally: the shipped guard must be REDIRECTION-fed, not pipe-fed.
