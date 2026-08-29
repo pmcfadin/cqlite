@@ -1500,6 +1500,17 @@ elif [ "$PUSH_PROBE_URL_COUNT" -gt 1 ]; then
   # so the machine is never certified on the strength of it.
   warn "git-push: UNMEASURED (remote '$PUSH_PROBE_REMOTE' has $PUSH_PROBE_URL_COUNT push URLs — refusing to run a MUTATING probe against multiple destinations)"
   info "verify by hand against one destination:  CLAIM_REMOTE=<single-url-remote> bash scripts/flow/claim.sh smoke"
+elif [ "$TIMEOUT_KILL_AFTER" != 1 ] && [ -n "$TIMEOUT_BIN" ]; then
+  # IF YOU CANNOT BOUND THE MUTATION, DO NOT MUTATE (#3369 review). `bounded` degrades to
+  # SIGTERM-only when the resolved timeout lacks --kill-after, which keeps the NON-mutating
+  # probes working — but this one performs a real network PUSH, and a SIGTERM-only bound
+  # provably waits forever on a child that ignores SIGTERM (measured: 3s bound, 30s wait).
+  # Hanging the launcher is worse than a red verdict, so the mutation is refused. Note the
+  # fall-through to the probe below therefore requires the AFFIRMATIVE
+  # TIMEOUT_KILL_AFTER=1 — a hard bound is a precondition of pushing, not a nice-to-have.
+  warn "git-push: UNMEASURED (the resolved timeout cannot hard-kill (no --kill-after), so a wedged child could hang this run — refusing to perform a MUTATING push it cannot bound)"
+  info "install GNU coreutils (macOS: brew install coreutils) so the probe can be hard-bounded, then re-run"
+  info "or check by hand where a hang is survivable:  bash scripts/flow/claim.sh smoke"
 elif [ -z "$TIMEOUT_BIN" ]; then
   # Refuse rather than run unbounded: an unbounded network push during boot can wedge
   # the onboarder indefinitely, and reporting `ok` for a probe we declined to run is

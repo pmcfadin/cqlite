@@ -1341,17 +1341,20 @@ if [ -n "$TIMEOUT_BIN_TEST" ]; then
 exec '"$TIMEOUT_BIN_TEST"' "$@"'
   gc7po="$tmp/gc7po"; : >"$gc7po"
   run_push "$repo7po" "$bin7po" "$gc7po" --strict; out7po=$push_out; rc7po=$push_rc
-  # The property is that BOUNDED CALLS STILL WORK and the degradation is stated — not
-  # that the whole run stays green. A flag-rejecting timeout also makes the notify
-  # self-test SKIP, which is PRE-EXISTING behaviour (that check has required
-  # --kill-after since before this change), so asserting rc=0 here would be asserting
-  # something about an unrelated section.
-  if printf '%s' "$out7po" | grep -q '\[ok\].*git-push: VERIFIED' \
-     && printf '%s' "$out7po" | grep -q 'does not accept --kill-after' \
-     && ! printf '%s' "$out7po" | grep -q '\[warn\].*git-push'; then
-    ok "push: a timeout that rejects --kill-after is still SELECTED and USED — probes keep working and the SIGTERM-only degradation is STATED"
+  # TWO properties, and the second is the one that matters most. (1) The flag-rejecting
+  # binary is still SELECTED and USED, so the non-mutating probes keep working and the
+  # degradation is STATED — without that, every bounded call would fail and --strict would
+  # reject a healthy machine. (2) The MUTATING push is REFUSED, because a SIGTERM-only
+  # bound provably does not bound a child that ignores SIGTERM and hanging the launcher is
+  # worse than a red verdict. Nothing is pushed, green is withheld, --strict exits nonzero.
+  refs7po=$(git ls-remote "$bare7po" 'refs/claims/*' 2>/dev/null | wc -l | tr -d ' ')
+  if printf '%s' "$out7po" | grep -q 'does not accept --kill-after' \
+     && printf '%s' "$out7po" | grep -q '\[warn\].*git-push: UNMEASURED.*cannot hard-kill' \
+     && ! printf '%s' "$out7po" | grep -q '\[ok\].*git-push' \
+     && [ "${refs7po:-0}" -eq 0 ] && ! push_green "$out7po" && [ "$rc7po" -ne 0 ]; then
+    ok "push: a timeout that cannot hard-kill is still used for other probes, but the MUTATING push is REFUSED — nothing pushed, green withheld, --strict exits $rc7po"
   else
-    bad "push: a flag-rejecting timeout broke the bounded calls (rc=$rc7po)"
+    bad "push: a mutating push ran under a bound that cannot hard-kill (rc=$rc7po refs=${refs7po:-0})"
     push_plain "$out7po" | grep -E 'git-push|kill-after' | head -4
   fi
 else
