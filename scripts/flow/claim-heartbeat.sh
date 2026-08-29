@@ -367,6 +367,23 @@ DEFAULT_REAP_THRESHOLD_SECS="${DEFAULT_REAP_THRESHOLD_SECS:-14400}"
 # therefore passed the open-PR safeguard by failing to be checkable, and `should-reap`/`reap` deleted it.
 # A value the safeguard cannot USE is not a reason to proceed; it is the same "could not tell" that
 # every other branch here treats as KEEP.
+# msg_token <message> <field> — the value of the WHOLE `<field>=<value>` token, matched on an EXACT key.
+#
+# A SUBSTRING KEY IS NOT A KEY (roborev round 26, Low by severity, headline-class by consequence). Both
+# readers matched `.*${field}=` , which has no token boundary before the key — so `notissue=42` satisfied
+# `issue`, `rapid=123` satisfied `pid`, and `nots=...` satisfied `ts`. A malformed or hand-made claim
+# message could therefore SUPPLY a value that the fail-closed parsing was meant to refuse, and a wrong pid
+# is PROBED: `dead-lanes` then answers about a different process, which is the same masking failure round
+# 25 closed on the value side. Round 25 required the whole VALUE to be well-formed and left the KEY a
+# substring match — the same class, one field over, which is the sixth instance of that shape here.
+#
+# Splitting on whitespace and anchoring `^<field>=` makes the key exact and the value whole in one step,
+# with no regex alternation (portable across GNU and BSD sed).
+msg_token() {
+  local msg="$1" field="$2"
+  printf '%s' "$msg" | tr ' \t\n' '\n\n\n' | sed -n "s/^${field}=\\(..*\\)$/\\1/p" | head -1
+}
+
 # msg_numeric_field <message> <field> — the field's COMPLETE token, echoed only when the WHOLE token is
 # a decimal number; empty otherwise.
 #
@@ -381,9 +398,9 @@ DEFAULT_REAP_THRESHOLD_SECS="${DEFAULT_REAP_THRESHOLD_SECS:-14400}"
 # treat empty as UNKNOWN, which is what they already do for an absent field.
 msg_numeric_field() {
   local msg="$1" field="$2" tok
-  tok="$(printf '%s' "$msg" | sed -n "s/.*${field}=\\([^ ][^ ]*\\).*/\\1/p" | head -1)"
+  tok="$(msg_token "$msg" "$field")"
   case "$tok" in
-    '' | *[!0-9]*) return 0 ;;   # absent, or not wholly numeric => UNKNOWN (empty)
+    '' | *[!0-9]*) return 0 ;;   # absent, malformed, or not wholly numeric => UNKNOWN (empty)
   esac
   printf '%s\n' "$tok"
 }
@@ -490,7 +507,8 @@ ref_msg_field() {
   # safeguard, so "no issue" and "message did not say" were indistinguishable and the safeguard was
   # skipped. The fix that made an unreadable FETCH failure fail closed left this second path open.
   local value
-  value="$(printf '%s' "$msg" | sed -n "s/.*${field}=\\([^ ][^ ]*\\).*/\\1/p" | head -1)"
+  # EXACT key, WHOLE token (roborev round 26) — see msg_token.
+  value="$(msg_token "$msg" "$field")"
   [ -n "$value" ] || return 1
   printf '%s' "$value"
 }
@@ -653,7 +671,7 @@ cmd_list() {
     msg="$(git log -1 --format=%B "$tmpref_l" 2>/dev/null || true)"
     git update-ref -d "$tmpref_l" 2>/dev/null || true
     issue="$(msg_numeric_field "$msg" issue)"
-    ts="$(printf '%s' "$msg" | sed -n 's/.*ts=\([^ ]*\).*/\1/p' | head -1)"
+    ts="$(msg_token "$msg" ts)"
     [ -n "$issue" ] || issue="?"
     [ -n "$ts" ] || ts="?"
 
@@ -856,7 +874,7 @@ cmd_list_claims() {
     git update-ref -d "$tmpref_c" 2>/dev/null || true
     issue="$(msg_numeric_field "$msg" issue)"
     pid="$(msg_numeric_field "$msg" pid)"
-    ts="$(printf '%s' "$msg" | sed -n 's/.*ts=\([^ ]*\).*/\1/p' | head -1)"
+    ts="$(msg_token "$msg" ts)"
     [ -n "$lane_from_path" ] && issue="$lane_from_path"
     [ -n "$issue" ] || issue="?"
     [ -n "$pid" ] || pid="?"
@@ -1352,7 +1370,7 @@ cmd_dead_lanes() {
     issue="$(msg_numeric_field "$msg" issue)"
     pid="$(msg_numeric_field "$msg" pid)"
     # The claim's own stamp time — the second half of the pid-identity check below.
-    ts="$(printf '%s' "$msg" | sed -n 's/.*ts=\([^ ]*\).*/\1/p' | head -1)"
+    ts="$(msg_token "$msg" ts)"
     # `worker-supervisor.sh` stamps issue "0" when the current iteration's issue is
     # not yet known. That is a PLACEHOLDER, not issue #0: probing for a PR on it
     # would query a number that cannot exist and print a bogus issue in the report.

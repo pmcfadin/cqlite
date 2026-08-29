@@ -2677,6 +2677,78 @@ else
 fi
 (cd "$WORK" && g push -q origin ":refs/lane-claims/prefixBox/7101" 2>/dev/null || true)
 
+# ===========================================================================
+echo "TEST 77: a SUBSTRING key is not a key — notissue/rapid/nots must not satisfy issue/pid/ts (round 26)"
+# ===========================================================================
+# Both readers matched `.*${field}=`, with no token boundary before the key, so `notissue=42` satisfied
+# `issue`, `rapid=123` satisfied `pid` and `nots=…` satisfied `ts`. A malformed or hand-made claim message
+# could therefore SUPPLY a value the fail-closed parsing was meant to refuse — and a wrong pid is PROBED,
+# so dead-lanes answers about a different process. Round 25 required the whole VALUE to be well-formed and
+# left the KEY a substring match: the same class, one field over.
+#
+# Exercised through the SHIPPED readers rather than a copy of them, by crafting refs whose messages carry
+# only the decoy keys.
+craft_decoy_msg() {  # <machine> <lane-id> <message>
+  local machine="$1" lane="$2" msg="$3"
+  (
+    cd "$WORK" || exit 1
+    local et cs
+    et=$(git hash-object -t tree --stdin </dev/null)
+    cs=$(GIT_AUTHOR_NAME=t GIT_AUTHOR_EMAIL=t@t GIT_COMMITTER_NAME=t GIT_COMMITTER_EMAIL=t@t \
+      git commit-tree "$et" -m "$msg")
+    g push -q origin "${cs}:refs/lane-claims/${machine}/${lane}"
+  )
+}
+decoy_pid="$$"
+# A message with NO real pid/ts keys, only decoys whose names CONTAIN them.
+craft_decoy_msg "decoyBox" "7200" "claim notissue=99 machine=decoyBox rapid=${decoy_pid} nots=2026-08-29T00:00:00Z"
+dc_out=$(cd "$WORK" && HEARTBEAT_MACHINE=decoyBox CLAIM_OPEN_PR_CMD="$NO_OPEN_PR" \
+  bash "$HB" dead-lanes 2>&1)
+if printf '%s\n' "$dc_out" | grep -qE '^decoyBox +7200 +none ' \
+  && ! printf '%s\n' "$dc_out" | grep -qE "^decoyBox +7200 +${decoy_pid}"; then
+  ok "'rapid=${decoy_pid}' does NOT satisfy the pid key — the decoy value is never probed"
+else
+  bad "a substring key must not be accepted: $(printf '%s\n' "$dc_out" | grep decoyBox)"
+fi
+lc_dc=$(cd "$WORK" && bash "$HB" list-claims 2>&1)
+if printf '%s\n' "$lc_dc" | grep -qE '^decoyBox +7200 +\? +\? ' ; then
+  ok "list-claims shows '?' for both pid and ts when only decoy keys are present"
+else
+  bad "list-claims accepted a decoy key: $(printf '%s\n' "$lc_dc" | grep decoyBox)"
+fi
+# And the LEGACY reap path: `notissue=` must not supply the issue the open-PR safeguard needs.
+(
+  cd "$WORK" || exit 1
+  et=$(git hash-object -t tree --stdin </dev/null)
+  old_ts=$(date -u -r $(( $(date -u +%s) - 40000 )) +%Y-%m-%dT%H:%M:%SZ 2>/dev/null) \
+    || old_ts=$(date -u -d "@$(( $(date -u +%s) - 40000 ))" +%Y-%m-%dT%H:%M:%SZ)
+  cs=$(GIT_AUTHOR_DATE="$old_ts" GIT_COMMITTER_DATE="$old_ts" \
+    GIT_AUTHOR_NAME=t GIT_AUTHOR_EMAIL=t@t GIT_COMMITTER_NAME=t GIT_COMMITTER_EMAIL=t@t \
+    git commit-tree "$et" -m "claim notissue=4242 machine=decoyLegacy pid=$ABSENT_PID ts=${old_ts}")
+  g push -q origin "${cs}:refs/machine-claims/decoyLegacy"
+)
+dl_out=$(cd "$WORK" && HEARTBEAT_MACHINE=decoyLegacy CLAIM_OPEN_PR_CMD="$NO_OPEN_PR" \
+  bash "$HB" should-reap decoyLegacy 1 2>&1)
+dl_rc=$?
+if [ "$dl_rc" -eq 1 ] && printf '%s\n' "$dl_out" | grep -qi 'could not be read\|issue is unknown'; then
+  ok "'notissue=4242' does NOT supply the legacy issue — should-reap KEEPS (rc=1) rather than reaping"
+else
+  bad "a decoy issue key must not reach a reap verdict: rc=$dl_rc out:
+$dl_out"
+fi
+# NON-VACUITY, true of the BROKEN code too: the SAME refs with REAL keys are read normally, so the
+# refusals above are refusals and not a parser that never works.
+(cd "$WORK" && g push -q origin ":refs/lane-claims/decoyBox/7200" ":refs/machine-claims/decoyLegacy" 2>/dev/null || true)
+craft_decoy_msg "decoyBox" "7201" "claim issue=7201 machine=decoyBox pid=${decoy_pid} ts=2026-08-29T00:00:00Z"
+rk_out=$(cd "$WORK" && HEARTBEAT_MACHINE=decoyBox CLAIM_OPEN_PR_CMD="$NO_OPEN_PR" \
+  bash "$HB" dead-lanes 2>&1)
+if printf '%s\n' "$rk_out" | grep -qE "^decoyBox +7201 +${decoy_pid}"; then
+  ok "NON-VACUITY: the REAL pid key on the same shape IS read and reported, so the decoy refusals are decisions"
+else
+  bad "NON-VACUITY broken: a real pid key was not read either: $(printf '%s\n' "$rk_out" | grep decoyBox)"
+fi
+(cd "$WORK" && g push -q origin ":refs/lane-claims/decoyBox/7201" 2>/dev/null || true)
+
 echo
 echo "=== claim-heartbeat.sh: $PASS passed, $FAIL failed ==="
 [ "$FAIL" -eq 0 ]
