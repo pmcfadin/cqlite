@@ -176,7 +176,7 @@ unprivileged `perf stat`/`perf record`, nothing more.
 
 **Security posture — read this before copying the file anywhere.** This is a **deliberate
 loosening**, appropriate for **dedicated single-tenant measurement/agent boxes** (what the fleet is:
-one worker per machine, no other tenants, no untrusted logins). It **must not** be applied to shared
+dedicated agent/measurement lanes, no other tenants, no untrusted logins). It **must not** be applied to shared
 or multi-tenant hosts: unrestricted `perf_event_open` plus unmasked kernel pointers lets any local
 user observe other users' execution and leak kernel addresses.
 
@@ -531,8 +531,9 @@ What it guarantees:
 - **It cannot overload the box**: preflight holds the next iteration while load is high, a dead
   iteration's cargo/gate processes **or an orphaned worker Claude CLI** (the unattended
   `claude -p … --agent flow-lead` spawn shape, #2670/#2841)
-  linger, or disk is low — it waits, it never spins. A flock makes a second supervisor on the same
-  machine refuse to start. (The Claude probe keys on the supervisor's own `-p … --agent flow-lead`
+  linger, or disk is low — it waits, it never spins. A **per-LANE** lock makes a second supervisor in the same
+  **lane** refuse to start, while leaving other lanes on the box free (per-machine until #3393 retracted
+  one-worker-per-machine; the default lock path is scoped to the lane's checkout root). (The Claude probe keys on the supervisor's own `-p … --agent flow-lead`
   spawn shape, so a legitimate interactive `claude` REPL or an interactive `claude --agent flow-lead`
   lead session — neither carries `-p` — is not matched.) A
   hold cannot latch it silently: every hold pass re-checks the stop-file and the wall-clock budget,

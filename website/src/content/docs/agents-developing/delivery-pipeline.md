@@ -308,7 +308,9 @@ For unattended/overnight runs a **worker supervisor** (`scripts/local/worker-sup
 recycles one worker process per issue — the hard context bound is process exit: the worker rehydrates from
 the board, resumes this machine's own claim branch first (crash recovery) else claims the next Ready item,
 runs it to merged + finalized, writes a `.worker-last-iteration.json` marker, and **exits** (never a second
-issue per session). The supervisor adds a flock single-instance (mechanizing one-worker-per-machine),
+issue per session). The supervisor adds a **per-LANE** single-instance lock (scoped to the lane's checkout root, so a box runs
+several lanes while two supervisors in the *same* worktree still refuse to coexist — it mechanized
+one-worker-per-machine until #3393 retracted that),
 fail-closed preflight (load/disk/leftover-process/stop-file), a crash-loop breaker, budgets, and ntfy
 notifications. See the [fleet runbook](https://github.com/pmcfadin/cqlite/blob/main/docs/development/fleet-runbook.md).
 
@@ -328,7 +330,13 @@ still *read* so a pre-ruling ref is drained rather than pinning its board item a
 forever. A new namespace was required rather than a sub-path because git forbids a ref being both a
 file and a directory, and `<machine>-<issue>` is ambiguous when machine names contain dashes.
 
-`claim-heartbeat.sh should-reap <machine> [issue]` is the single, **fail-safe** reap predicate (exit `0` = reap,
+`claim-heartbeat.sh should-reap` is the single, **fail-safe** reap predicate. It has **two forms, and a
+two-argument call is ALWAYS the legacy one** — `should-reap <machine> [threshold_secs]` acts on the legacy
+per-machine ref, and a lane needs all three: `should-reap <machine> <issue> <threshold_secs>`. The grammar
+refuses to guess from arity, so `should-reap <box> <issue>` reads the issue number as a **threshold** and
+answers about the *legacy* ref — a real answer to a different question, which can report an active
+per-lane claim as absent. (#3393 round 21: this page previously advertised `<machine> [issue]`, i.e. that
+trap written down as doctrine.) Exit `0` = reap,
 `1` = keep, `2` = no ref): it reaps ONLY when age > threshold (4h) **AND** the issue has no open PR **AND**
 (the PID is dead, *when the claim is local* — a foreign machine's PID is unknowable, so from CI that clause
 is skipped and age + no-open-PR govern). It KEEPS on a fresh ref, an open PR, a live local PID, or an
