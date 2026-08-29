@@ -20,6 +20,32 @@ Key Differences Handled:
     - Python `IPv4Address`/`IPv6Address` → CLI `"ip-string"`
     - Python `frozenset` → CLI JSON array
     - Python `dict` (for maps) → CLI array of `{"key": k, "value": v}`
+    - Python `tuple` → CLI JSON array (same canonical shape as a `list`)
+
+Collection Identity Asymmetries (issue #1454):
+    The Python and Node bindings use different host containers for CQL
+    collections, so the canonical form below is deliberately *lossier* than
+    either binding. The authoritative table is
+    `docs/development/M4_spec.md` §5.3 "Collection Identity Semantics"; the
+    3-way golden parity harness (#1455, Y1) takes its canonicalization rules
+    from that table, and `TestCollectionIdentityContract` in this file asserts
+    that this normalizer implements every row of it. The three asymmetries the
+    canonical form has to erase:
+
+    - `set<frozen<udt>>` → Python `list`, **not** `frozenset` (`set_to_py`
+      falls back to a list because UDTs become unhashable `dict`s), while Node
+      returns a JS `Set` of objects. Canonical form: a JSON array either way.
+    - `map<k,v>` → Python `dict`, whose keys **collapse** by hash/`__eq__`
+      (structurally equal non-scalar keys merge, last value wins), while a Node
+      `Map` compares object keys by *reference* so equal keys stay distinct.
+      Canonical form: a sorted array of `{"key": k, "value": v}`. Python map
+      keys additionally arrive as the hashable projection produced by
+      `value_to_hashable_key` (`list`→`tuple`, `set`→`frozenset`,
+      `udt`→`frozenset` of `(name, value)` pairs), so a UDT used as a map *key*
+      does not have the same host shape as the same UDT used as a *value*.
+    - `tuple<...>` → Python `tuple` but a Node `Array`, i.e. Node cannot
+      distinguish `tuple<...>` from `list<T>`. Canonical form: a JSON array, so
+      tuple and list normalize identically.
 """
 
 import json
@@ -130,13 +156,33 @@ def normalize_python_value(value: Any, is_row_level: bool = True) -> Any:
         return str(value)
 
     if isinstance(value, frozenset):
-        # CLI outputs sets as JSON arrays (sorted for determinism)
+        # CLI outputs sets as JSON arrays (sorted for determinism).
+        #
+        # Issue #1454 / M4_spec §5.3: a `frozenset` reaches this branch from two
+        # distinct places. (a) `set<scalar>` (and `set<frozen<list|set|map>>`,
+        # whose elements stay hashable via `value_to_hashable_key`). (b) a UDT
+        # used as a MAP KEY, which `value_to_hashable_key` projects to a
+        # `frozenset` of `(field_name, value)` pairs including `_type` and
+        # `_keyspace` — so such a key canonicalizes to a sorted array of
+        # `[name, value]` pairs, NOT to the `{"_type": ..., field: ...}` object
+        # the CLI renders for a UDT. That divergence is documented rather than
+        # papered over: reconstructing a UDT object from an anonymous frozenset
+        # of 2-tuples would be a shape guess, and no corpus table currently has
+        # a UDT map key. Changing it is a behavior change, out of scope for
+        # #1454.
         return sorted([normalize_python_value(v, is_row_level=False) for v in value], key=_sort_key)
 
     if isinstance(value, list):
+        # `list<T>` and — per #1454 — `set<frozen<udt>>`, which `set_to_py`
+        # returns as a Python `list` (UDT dicts are unhashable, so no
+        # `frozenset` is possible). Both canonicalize to a JSON array;
+        # `frozen<T>` is already unwrapped by the binding, so it needs no branch.
         return [normalize_python_value(v, is_row_level=False) for v in value]
 
     if isinstance(value, tuple):
+        # `tuple<...>` → JSON array, the same canonical shape as `list<T>`,
+        # because Node returns an `Array` for both and cannot tell them apart
+        # (#1454; `Value::Tuple` delegates to `list_to_array`).
         return [normalize_python_value(v, is_row_level=False) for v in value]
 
     if isinstance(value, dict):
@@ -152,7 +198,12 @@ def normalize_python_value(value: Any, is_row_level: bool = True) -> Any:
             return {str(k): normalize_python_value(v, is_row_level=False) for k, v in value.items()}
         else:
             # This is a CQL map inside a cell - CLI outputs ALL maps as array of {"key": k, "value": v}
-            # Sort by key for determinism (like sets) - Issue #336
+            # Sort by key for determinism (like sets) - Issue #336.
+            # #1454: the `dict` has already collapsed structurally-equal keys
+            # (last value wins); a Node `Map` would have kept equal OBJECT keys
+            # distinct. Well-formed Cassandra data has no duplicate map keys, so
+            # the canonical form is identical in practice — but it is why the
+            # canonical form is a sorted array rather than a host map.
             return sorted(
                 [{"key": normalize_python_value(k, is_row_level=False), "value": normalize_python_value(v, is_row_level=False)}
                  for k, v in value.items()],
