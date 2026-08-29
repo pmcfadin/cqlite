@@ -10,6 +10,7 @@
 //! Architecture test: `tests/chunk_decode_single_plane.rs`.
 
 use crate::observability::read_metrics;
+use crate::observability::read_phase::ReadPhase;
 use crate::storage::cache::{ChunkKey, DecompressedChunkCache};
 use crate::storage::sstable::compression::{Compression, CompressionAlgorithm};
 use crate::storage::sstable::compression_info::CompressionInfo;
@@ -233,8 +234,17 @@ impl<'a> ChunkSource<'a> {
             return Ok(self.cache.insert(key, compressed));
         }
         let decompressed = if let Some(compression) = self.compression {
-            // Decompress: the single query-path decompress call site
-            let d = compression.decompress(&compressed).map_err(|e| {
+            // Decompress: the single query-path decompress call site.
+            //
+            // decompress PHASE (issue #1707): the timed region is the COMPRESSOR CALL
+            // ONLY — not the read that fetched the bytes (that is the io phase) and
+            // not the cache insert. Wrapping it HERE, inside the architecturally
+            // single decompress plane (`chunk_decode_single_plane.rs` proves there is
+            // only one), covers every entry point at once.
+            let d = crate::observability::read_phase::timed(ReadPhase::Decompress, || {
+                compression.decompress(&compressed)
+            })
+            .map_err(|e| {
                 Error::corruption(format!(
                     "ChunkSource: failed to decompress chunk (key={:?}): {}",
                     key, e
@@ -281,7 +291,13 @@ impl<'a> ChunkSource<'a> {
     /// the windowed path, where compression is always resolved).
     pub(crate) fn decode_borrowed(&self, key: ChunkKey, compressed: &[u8]) -> Result<Bytes> {
         let decompressed = if let Some(compression) = self.compression {
-            let d = compression.decompress(compressed).map_err(|e| {
+            // decompress PHASE (issue #1707): the windowed scan's decode entry — the
+            // compressor call ONLY, same region rule as the two siblings above. This
+            // is the arm a full `SELECT *` over a compressed SSTable takes.
+            let d = crate::observability::read_phase::timed(ReadPhase::Decompress, || {
+                compression.decompress(compressed)
+            })
+            .map_err(|e| {
                 Error::corruption(format!(
                     "ChunkSource: failed to decompress chunk (key={:?}): {}",
                     key, e
@@ -321,12 +337,18 @@ impl<'a> ChunkSource<'a> {
     ) -> Result<Vec<u8>> {
         if let Some(c) = compression {
             let compressed_len = compressed.len();
-            let decompressed = c.decompress(&compressed).map_err(|e| {
-                Error::corruption(format!(
-                    "ChunkSource: decompress failed ({} compressed bytes): {}",
-                    compressed_len, e
-                ))
-            })?;
+            // decompress PHASE (issue #1707): the uncached decompress sites, same
+            // compressor-call-only region as `decode_and_cache`.
+            let decompressed =
+                crate::observability::read_phase::timed(ReadPhase::Decompress, || {
+                    c.decompress(&compressed)
+                })
+                .map_err(|e| {
+                    Error::corruption(format!(
+                        "ChunkSource: decompress failed ({} compressed bytes): {}",
+                        compressed_len, e
+                    ))
+                })?;
             // cqlite.read.bytes (issue #1701): the uncached decompress sites (the
             // sequential-scan block decode, the stitch path, the BIG reverse/seek
             // window) read Data.db bytes exactly like the cached ones, so they are

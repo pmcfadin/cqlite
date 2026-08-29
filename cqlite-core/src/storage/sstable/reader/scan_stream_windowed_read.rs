@@ -56,6 +56,7 @@
 //! Kept in a sibling file (campsite rule, epic #1116); included via
 //! `#[path = "scan_stream_windowed_read.rs"] impl`-carrying module in the parent.
 
+use crate::observability::read_phase::ReadPhase;
 use std::sync::Arc;
 
 use tokio::sync::mpsc;
@@ -158,6 +159,13 @@ impl SSTableReader {
         scratch: &mut Vec<u8>,
         direct_scratch: &mut DirectScratch,
     ) -> Result<Option<Vec<u8>>> {
+        // io PHASE (issue #1707): this whole function IS the windowed scan's
+        // `Data.db` read — chunk geometry, the one positional read, and the trailing
+        // CRC verify — so the RAII timer spans it and charges every exit path,
+        // including the error ones (a slow failing read is still io time). Zero
+        // `Instant::now()` when the scan is unmetered.
+        let _io_phase = crate::observability::read_phase::scoped(ReadPhase::Io);
+        crate::observability::read_phase::io_delay::sleep_if_armed();
         let comp_info = match self.compression_info.as_ref() {
             Some(ci) => ci,
             // Callers gate on `compression_info.is_some()`; a None here is a bug.
@@ -298,6 +306,11 @@ impl SSTableReader {
         pos: u64,
         direct_scratch: &mut DirectScratch,
     ) -> Result<Option<(Vec<u8>, u64)>> {
+        // io PHASE (issue #1707): the UNCOMPRESSED feed's read — the positional piece
+        // read plus every covering-chunk CRC verify. Same region rule as the
+        // compressed sibling above.
+        let _io_phase = crate::observability::read_phase::scoped(ReadPhase::Io);
+        crate::observability::read_phase::io_delay::sleep_if_armed();
         let file_size = self.scan_positional_source.len();
         let remaining = file_size.saturating_sub(pos);
         if remaining == 0 {

@@ -62,8 +62,9 @@
 //! that branch and the emission helpers compile to no-ops.
 
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
+use super::read_phase::{ReadPhase, ReadPhaseTimings};
 use super::{catalog, AttrValue};
 use crate::observability as obs;
 use crate::storage::sstable::compression::CompressionAlgorithm;
@@ -163,6 +164,13 @@ struct Accounting {
     ///
     /// Retained as an `Arc` clone (a refcount bump, no key copy).
     last_partition: Option<Arc<[u8]>>,
+    /// This operation's read-PHASE accumulator (issue #1707), shared with the
+    /// pipeline threads that do the io/decompress/decode/merge work. Owned here so
+    /// the four `cqlite.read.phase.*` histograms inherit the whole `ReadOpMeter`
+    /// lifecycle — idempotent [`finish`](ReadOpMeter::finish), `Drop`-safe, and
+    /// absent entirely on an [`inert`](ReadOpMeter::inert) sub-scan, so a fan-out
+    /// merge's per-generation scans can never double-count.
+    phases: Arc<ReadPhaseTimings>,
     emitted: bool,
 }
 
@@ -182,6 +190,7 @@ impl ReadOpMeter {
             rows: 0,
             partitions: 0,
             last_partition: None,
+            phases: Arc::new(ReadPhaseTimings::default()),
             emitted: false,
         }))
     }
@@ -194,6 +203,18 @@ impl ReadOpMeter {
     /// Measuring those would count the same rows two or three times.
     pub(crate) fn inert() -> Self {
         Self(None)
+    }
+
+    /// This operation's read-phase accumulator, for propagation to the threads that
+    /// actually perform the work (issue #1707), or `None` for an inert meter.
+    ///
+    /// Handed to each `spawn_blocking` / producer-thread closure at its SPAWN SITE
+    /// and re-installed there: thread-locals are not inherited across a spawn, and
+    /// the io/decompress/decode/merge phases all run on threads that never see this
+    /// meter. `None` (an inert meter, or metrics not being collected) propagates as
+    /// "no sink", which makes every seam a single thread-local peek.
+    pub(crate) fn phase_sink(&self) -> Option<Arc<ReadPhaseTimings>> {
+        self.0.as_ref().map(|acc| Arc::clone(&acc.phases))
     }
 
     /// Account one delivered row, and a partition boundary when its key differs
@@ -343,6 +364,28 @@ impl ReadOpMeter {
             acc.started.elapsed().as_secs_f64(),
             attrs,
         );
+
+        // The four read PHASES (issue #1707): ONE sample per phase per completed
+        // operation, from the counters the pipeline threads accumulated into.
+        //
+        // A phase with ZERO accumulated nanos is SKIPPED, not recorded as `0.0`, and
+        // that asymmetry with `read.duration` above is deliberate: a zero there means
+        // "measured, and it was fast", while a zero here means the phase NEVER RAN —
+        // an uncompressed SSTable decompresses nothing, a single-generation scan
+        // merges nothing. Recording `0.0` would assert a measurement that was never
+        // taken, and would drag every percentile of a real phase toward zero for
+        // every read that does not perform it.
+        for (phase, name) in [
+            (ReadPhase::Io, catalog::READ_PHASE_IO),
+            (ReadPhase::Decompress, catalog::READ_PHASE_DECOMPRESS),
+            (ReadPhase::Decode, catalog::READ_PHASE_DECODE),
+            (ReadPhase::Merge, catalog::READ_PHASE_MERGE),
+        ] {
+            let nanos = acc.phases.nanos(phase);
+            if nanos > 0 {
+                obs::record_histogram(name, Duration::from_nanos(nanos).as_secs_f64(), attrs);
+            }
+        }
     }
 }
 
