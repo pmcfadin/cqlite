@@ -169,7 +169,7 @@ cat /tmp/gate-summary.txt   # the SUMMARY block is the ONLY gate text an agent r
   the last round's three defects were inside the two preceding fix rounds — the same shape, and the
   same ruling, as #3229's removed `census-exclusion:` key, because a guard with known documented
   false-PASSes is worse than no guard, since it invites reliance it cannot support. Mechanization is
-  deferred to **#TBD**; until it lands, this is a review-time rule, and the standing coverage is
+  deferred to **#3499**; until it lands, this is a review-time rule, and the standing coverage is
   behavioural (`scripts/tests/test_cargo_output_parsers.sh`, in `tooling-tests`), which pins the
   defect against real code rather than predicting it from source shape.
   `CARGO_TERM_COLOR=never` at the invocation is belt, not the fix; `gate.yml` KEEPS
@@ -850,7 +850,7 @@ loop, not a review round. The rest stay hand-checked (no low-false-positive stat
 - **Cargo-output parses keyed on literal status text** — route through `_ansi_stripped_log`,
   read by redirection not a pipe (#3400). NOT mechanized: the lint written for this was
   descoped for an increasing false-PASS count (see the gate section above); mechanization is
-  deferred to #TBD, so this one is hand-checked.
+  deferred to #3499, so this one is hand-checked.
 - **No-heuristics violations** — never infer type/behavior from byte patterns.
 - **Gitignored reference binaries** — `git add -f` tiny parity references; verify against a fresh
   `git worktree add --detach HEAD`, not the dirty tree.
