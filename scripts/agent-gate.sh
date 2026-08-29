@@ -6515,10 +6515,26 @@ EOF
 # findings continued, which is the evidence that the surface is unbounded rather than merely
 # large.
 #
-# THE PROPERTY THAT MAKES IT SHIPPABLE ANYWAY, and the only one you may rely on: an unrecognised
-# shape is reported as UNCLASSIFIED, never as ABSENT. A missed shape therefore costs NOISE (an
+# THE PROPERTY THAT MAKES IT SHIPPABLE ANYWAY, and the only one you may rely on — READ THE SCOPE,
+# IT IS NARROWER THAN IT FIRST READ: an unrecognised ATTRIBUTE or CLUSTER shape is reported as
+# UNCLASSIFIED, never as ABSENT (and at runtime, not merely here — an unmodelled string-literal
+# shape actually prints `[UNCLASSIFIED: ...]`). For those shapes a miss costs NOISE (an
 # unattributable entry a human must read) and never BLINDNESS (a clean zero over gated code).
 # Every change here must preserve that direction. If you cannot tell, say so — do not resolve.
+#
+# DECLARATION RECOGNITION CARRIES NO SUCH GUARANTEE, and this sentence exists because the
+# guarantee above was written unscoped and was therefore FALSE for this path (roborev job 103,
+# and found by hand before that review ran). A `mod` declaration in a form the patterns do not
+# match — a raw identifier `mod r#type;`, a declaration broken across lines — is NOT reported as
+# unclassified. It is not seen at all: the child never enters the closure, nothing reaches
+# stderr, and every consumer (target discovery, the polarity scan, the co-required census) then
+# reports over a silently smaller tree while the lane PASSES. For that path the direction is
+# BLINDNESS, not noise. Measured at the time of writing: 0 such declarations across cqlite-core,
+# cqlite-cli and cqlite-flight against 595 recognised in cqlite-core alone — so this is a latent
+# exposure, not a live miscount, and it is NOT fixed here because another pattern is the seventh
+# instance of the family. #3472 carries it, and an overclaimed guarantee is worse than an
+# omission: an omission leaves you uninformed, an overclaim has you relying on cover you
+# do not have.
 #
 # WHAT NOT TO DO: do not add a thirteenth shape and call the family closed. If correctness rather
 # than advice is ever required of this scan, the answer is syntax-aware tooling or deleting the
@@ -6855,10 +6871,26 @@ for p in d.get("packages", []):
 # findings continued, which is the evidence that the surface is unbounded rather than merely
 # large.
 #
-# THE PROPERTY THAT MAKES IT SHIPPABLE ANYWAY, and the only one you may rely on: an unrecognised
-# shape is reported as UNCLASSIFIED, never as ABSENT. A missed shape therefore costs NOISE (an
+# THE PROPERTY THAT MAKES IT SHIPPABLE ANYWAY, and the only one you may rely on — READ THE SCOPE,
+# IT IS NARROWER THAN IT FIRST READ: an unrecognised ATTRIBUTE or CLUSTER shape is reported as
+# UNCLASSIFIED, never as ABSENT (and at runtime, not merely here — an unmodelled string-literal
+# shape actually prints `[UNCLASSIFIED: ...]`). For those shapes a miss costs NOISE (an
 # unattributable entry a human must read) and never BLINDNESS (a clean zero over gated code).
 # Every change here must preserve that direction. If you cannot tell, say so — do not resolve.
+#
+# DECLARATION RECOGNITION CARRIES NO SUCH GUARANTEE, and this sentence exists because the
+# guarantee above was written unscoped and was therefore FALSE for this path (roborev job 103,
+# and found by hand before that review ran). A `mod` declaration in a form the patterns do not
+# match — a raw identifier `mod r#type;`, a declaration broken across lines — is NOT reported as
+# unclassified. It is not seen at all: the child never enters the closure, nothing reaches
+# stderr, and every consumer (target discovery, the polarity scan, the co-required census) then
+# reports over a silently smaller tree while the lane PASSES. For that path the direction is
+# BLINDNESS, not noise. Measured at the time of writing: 0 such declarations across cqlite-core,
+# cqlite-cli and cqlite-flight against 595 recognised in cqlite-core alone — so this is a latent
+# exposure, not a live miscount, and it is NOT fixed here because another pattern is the seventh
+# instance of the family. #3472 carries it, and an overclaimed guarantee is worse than an
+# omission: an omission leaves you uninformed, an overclaim has you relying on cover you
+# do not have.
 #
 # WHAT NOT TO DO: do not add a thirteenth shape and call the family closed. If correctness rather
 # than advice is ever required of this scan, the answer is syntax-aware tooling or deleting the
