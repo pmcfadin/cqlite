@@ -369,12 +369,53 @@ impl ObservabilityGuard {
 /// stack is linked, so a config-only build without the `observability` feature
 /// can still enable the confirmation-scan correctness check (its counter emit is
 /// simply a no-op in that build, per the module's zero-cost-when-off contract).
+///
+/// # Observability honesty (issue #1702, epic #1686)
+///
+/// When `cfg.enabled` is `true` this build CANNOT export anything, so it emits
+/// ONE `WARN` naming the knob, the missing cargo feature and the consequence.
+/// Without it, `CQLITE_OTEL_ENABLED=1` is a completely silent no-op and an
+/// operator cannot tell "collector down / endpoint misconfigured" from "this
+/// binary was built without the feature". It stays a warning, never an error:
+/// degraded-but-running is the correct behavior — the defect was VISIBILITY.
 #[cfg(not(feature = "observability"))]
 #[inline]
 pub fn init(cfg: ObservabilityConfig) -> Result<ObservabilityGuard> {
     crate::storage::sstable::reader::presence_verification::apply_config(
         cfg.verify_presence_oracle,
     );
+
+    // Issue #1702. Emitted with `tracing::warn!`, not `log::warn!` as the issue
+    // text spells it: `cqlite-core` has no `log` dependency at all — its facade
+    // is `tracing` (the #1706 log->tracing migration) — and `tracing` satisfies
+    // the same constraint, since every host composes the fmt layer onto STDERR
+    // so stdout stays clean for `--out json/csv` (issue #129).
+    //
+    // Fired unconditionally on each `init` call rather than behind a `Once`:
+    // `init` IS the once-per-process startup entry point (CLI `run_main`, the
+    // Flight server, `init_once` in both bindings), so "once at init" is already
+    // "once per process", while a `Once` would additionally make the warning
+    // unobservable to the second of two tests in one binary.
+    //
+    // `cfg.enabled` is the ONLY field a feature-off build silently discards, so
+    // it is the only one that warns. `verify_presence_oracle` is genuinely
+    // honored above. The remaining `CQLITE_OTEL_*` vars (endpoint, protocol,
+    // service name/version, sampling ratio, timeout) are all subordinate to
+    // `enabled`: with `enabled == false` they change nothing even in a
+    // feature-ON build, so a separate warning for them would be noise, not
+    // honesty. This omission is deliberate, not an oversight.
+    if cfg.enabled {
+        tracing::warn!(
+            requested_endpoint = %cfg.endpoint,
+            "CQLITE_OTEL_ENABLED is set but this binary was built WITHOUT the \
+             `observability` cargo feature: OpenTelemetry is compiled out, so NO \
+             metrics and NO traces will be emitted and the OTLP endpoint is never \
+             contacted (this is NOT a collector or endpoint problem). Rebuild with \
+             `--features observability` to export telemetry, or unset \
+             CQLITE_OTEL_ENABLED to silence this warning."
+        );
+    }
+
     Ok(ObservabilityGuard { _private: () })
 }
 
