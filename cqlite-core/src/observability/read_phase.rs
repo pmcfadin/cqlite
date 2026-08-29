@@ -45,6 +45,53 @@
 //! the same shape `stream_subphase` uses, and deliberately not a "walk up some
 //! ambient context" scheme, which cannot work across a thread boundary.
 //!
+//! # Coverage boundary — which read surfaces record phases, and which do NOT
+//!
+//! A sink only reaches the code that does the work if it is INSTALLED on the thread
+//! doing it, and installation happens at SPAWN SITES (see above). So coverage is
+//! exactly the set of surfaces whose work runs on a thread this crate spawns for
+//! them:
+//!
+//! **Measured** — the windowed scan driver, reached by both streaming surfaces
+//! (`scan_stream` per-row and `scan_stream_batched`) for a chunk-stitching reader
+//! (io + decompress + decode); and `generation_merge::stream_generations_for_read`,
+//! the streaming cross-generation reconciling merge (merge, plus the io/decompress
+//! its producer thread performs).
+//!
+//! **NOT measured — these emit `read.duration` with NO `read.phase.*` series at
+//! all**: the materializing `SSTableManager::scan` / `scan_with_meter` and the
+//! materializing `merge_generations_for_read` beneath it; the BIG reverse-clustering
+//! scan (`reverse_scan.rs`); the BTI trie walk (`stream_bti_scan`); the
+//! non-chunk-stitching block-by-block branch; point reads (`get`, the manager point
+//! read); and compaction reads.
+//!
+//! **An absent phase series from one of those surfaces means NOT MEASURED — never
+//! "fast".** The rule for distinguishing the two cases is the surface, not the
+//! metric: a measured surface's absent phase is a real absence (an uncompressed
+//! SSTable decompresses nothing), while these surfaces are silent about every phase
+//! at once. If you see `read.duration` rising with no phase breakdown, you are
+//! looking at one of them.
+//!
+//! ## Why they are not simply instrumented too (issue #1707)
+//!
+//! Their phase work sits BELOW `.await` points, on the async worker threads, reached
+//! through the shared seams that read this thread-local (`chunk_source`,
+//! `block_io`). Two consequences:
+//!
+//! * installing a sink around such a call would hold the guard ACROSS an `.await`,
+//!   and a parked task's worker thread runs OTHER tasks — so another scan's decode
+//!   would be attributed to this one's counters. Cross-attribution is worse than no
+//!   data, because it is indistinguishable from data.
+//! * installing it only around the SYNCHRONOUS prologue instead would be worse
+//!   still: it would produce phase samples that systematically UNDERSTATE the read
+//!   (an `io` of microseconds for a read that spent tens of milliseconds in io),
+//!   which an operator cannot tell from a genuinely fast read. Absence they can at
+//!   least look up; a plausible wrong number they cannot.
+//!
+//! Covering them needs async-safe propagation (a task-local carried across awaits,
+//! or the sink threaded explicitly through `SSTableReader::scan` and the reverse
+//! walk) — a read-path design change, deliberately not smuggled in here.
+//!
 //! # Zero cost when off
 //!
 //! `ReadOpMeter::start` consults [`obs::metrics_active`](super::metrics_active)

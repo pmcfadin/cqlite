@@ -27,7 +27,7 @@ pub(super) const ANNOTATIONS: &[MetricDoc] = &[
         unit: catalog::unit::SECONDS,
         summary: "Wall time ONE completed scan spent reading Data.db bytes (positional chunk/piece reads incl. CRC verify, decompression excluded) — exactly one sample per scan, never per chunk.",
         attributes: &[],
-        interpretation: "Read this FIRST when a scan is slow: io dominating the four read.phase.* series means the scan is disk/page-cache bound, so decode or merge tuning cannot help it. Small on a warm page cache. The phases run on concurrent pipeline threads, so they OVERLAP and do not sum to read.duration — compare them against EACH OTHER, not against wall time. Recorded on the windowed scan driver; a read that never enters it records nothing rather than a fabricated 0.",
+        interpretation: "Read this FIRST when a scan is slow: io dominating the four read.phase.* series means the scan is disk/page-cache bound, so decode or merge tuning cannot help it. Small on a warm page cache. The phases run on concurrent pipeline threads, so they OVERLAP and do not sum to read.duration — compare them against EACH OTHER, not against wall time. SURFACE COVERAGE IS PARTIAL: phases are recorded by the streaming scan surfaces (scan_stream / scan_stream_batched over a chunk-stitching reader) and by the streaming cross-generation merge; the materializing SSTableManager::scan, the BIG reverse-clustering scan, the BTI trie walk, point reads and compaction reads emit read.duration with NO phase series at all — so an absent read.phase.* breakdown beside a rising read.duration means the phase was NOT MEASURED on that read path, never that it was fast.",
         round_item: "—",
     },
     MetricDoc {
@@ -36,7 +36,7 @@ pub(super) const ANNOTATIONS: &[MetricDoc] = &[
         unit: catalog::unit::SECONDS,
         summary: "Wall time ONE completed scan spent decompressing chunk payloads, measured in the single chunk-decode plane around the compressor call only.",
         attributes: &[],
-        interpretation: "Proportional to compressed bytes read; a growing share points at chunk length / compressor choice, or at re-decompressing the same chunks (a decompressed-chunk cache too small for the scan's window). ABSENT — not zero — for an uncompressed SSTable, which decompresses nothing; a 0.0 sample would claim a measurement that never happened.",
+        interpretation: "Proportional to compressed bytes read; a growing share points at chunk length / compressor choice, or at re-decompressing the same chunks (a decompressed-chunk cache too small for the scan's window). ABSENT — not zero — for an uncompressed SSTable, which decompresses nothing; a 0.0 sample would claim a measurement that never happened. SURFACE COVERAGE IS PARTIAL (cqlite.read.phase.io lists the instrumented and uninstrumented surfaces): an absent read.phase.* breakdown beside a rising read.duration means the phase was NOT MEASURED on that read path, never that it was fast.",
         round_item: "—",
     },
     MetricDoc {
@@ -45,7 +45,7 @@ pub(super) const ANNOTATIONS: &[MetricDoc] = &[
         unit: catalog::unit::SECONDS,
         summary: "Wall time ONE completed scan spent decoding rows/cells from already-resident bytes, accumulated per PARTITION at the parse boundary (never per row).",
         attributes: &[],
-        interpretation: "Usually the largest phase of a WARM full scan — that is healthy, it is the CPU work of the read. Alarming when it grows relative to the rows delivered: wide partitions, many collection/UDT cells, or a schema-less fallback decode doing more work per row.",
+        interpretation: "Usually the largest phase of a WARM full scan — that is healthy, it is the CPU work of the read. Alarming when it grows relative to the rows delivered: wide partitions, many collection/UDT cells, or a schema-less fallback decode doing more work per row. SURFACE COVERAGE IS PARTIAL (cqlite.read.phase.io lists the instrumented and uninstrumented surfaces): an absent read.phase.* breakdown beside a rising read.duration means the phase was NOT MEASURED on that read path, never that it was fast.",
         round_item: "—",
     },
     MetricDoc {
@@ -54,7 +54,7 @@ pub(super) const ANNOTATIONS: &[MetricDoc] = &[
         unit: catalog::unit::SECONDS,
         summary: "Wall time ONE completed cross-generation read spent in the k-way merge/reconcile step, with the blocking merge-input recv-wait SUBTRACTED so producer starvation is not counted as merge CPU.",
         attributes: &[],
-        interpretation: "Recorded ONLY on the cross-generation merge route: a single-generation scan has nothing to merge and records no sample, so absence means \"nothing to merge\", never \"merge was free\". Grows with the number of overlapping generations and with reconcile work (tombstones, LWW collapse) — a merge-dominated read delivering few rows is the compaction-lag smell, so cross-check cqlite.compaction.lag.",
+        interpretation: "Recorded ONLY on the cross-generation merge route: a single-generation scan has nothing to merge and records no sample, so absence means \"nothing to merge\", never \"merge was free\". Grows with the number of overlapping generations and with reconcile work (tombstones, LWW collapse) — a merge-dominated read delivering few rows is the compaction-lag smell, so cross-check cqlite.compaction.lag. SURFACE COVERAGE IS PARTIAL: the STREAMING cross-generation merge records this; the materializing merge_generations_for_read beneath SSTableManager::scan records nothing — so absence here is \"nothing to merge\" only when the other read.phase.* series ARE present for the same traffic, and otherwise means NOT MEASURED on that read path, never that it was fast.",
         round_item: "—",
     },
     MetricDoc {

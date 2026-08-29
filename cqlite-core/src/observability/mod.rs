@@ -73,13 +73,21 @@
 //!    uncompressed (the #1406 write-surface shape), and no `merge` series means the
 //!    read had a single generation. Absence is a fact about the read; `0.0` would be
 //!    a claim that a measurement was taken.
-//! 3. **Check fd pressure.** [`catalog::READER_FDS_OPEN`] is what the readers hold
+//! 3. **Know which surfaces are instrumented before you read an absence.** The
+//!    phases come from the STREAMING scan surfaces and the streaming
+//!    cross-generation merge. The materializing `SSTableManager::scan`, the BIG
+//!    reverse-clustering scan, the BTI trie walk, point reads and compaction reads
+//!    emit [`catalog::READ_DURATION`] with NO phase series at all — for those, an
+//!    empty breakdown means NOT MEASURED, never "fast". The full list, and why
+//!    instrumenting them needs async-safe propagation rather than another seam, is in
+//!    [`read_phase`]'s "Coverage boundary" section.
+//! 4. **Check fd pressure.** [`catalog::READER_FDS_OPEN`] is what the readers hold
 //!    (exact, every platform, no `/proc`); [`catalog::PROC_FDS`] is the whole process
 //!    (sampled ~2s, Linux). A reader level climbing toward `ulimit -n` explains
 //!    latency that is really queueing behind failing/retried opens — and it is
 //!    visible BEFORE the first `EMFILE`. `PROC_FDS` minus the reader level is roughly
 //!    the non-reader footprint (sockets, WAL).
-//! 4. **Check startup / durability stalls.** [`catalog::WAL_SIZE`] should saw-tooth;
+//! 5. **Check startup / durability stalls.** [`catalog::WAL_SIZE`] should saw-tooth;
 //!    a level that only climbs means flushes are not keeping up, and next open's
 //!    [`catalog::WAL_REPLAY_DURATION`] grows with it. A slow FIRST query after a
 //!    restart is usually replay, not the read path.
