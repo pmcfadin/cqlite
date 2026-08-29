@@ -174,8 +174,25 @@ count_begin() {
 # fast and offline during these mold cases, which run bootstrap under the full PATH
 # with CARGO_HOME pointed at a throwaway dir (a real `cargo --version` there would
 # trigger a multi-minute rustup toolchain provision into the empty CARGO_HOME).
+# GH_STUB_TOKEN_BODY — every `gh` stub must answer `gh auth token --hostname github.com`
+# with the ENVIRONMENT token, because that is what real gh does: GH_TOKEN/GITHUB_TOKEN take
+# precedence for github.com, and gh reports per-host tokens for anything else. §3b's
+# fallback repair is gated on that answer MATCHING the token it would install (#3369 FIX L),
+# so a stub that stays silent makes every --yes fallback case REFUSE — a test artifact
+# rather than behaviour. Any other host correctly gets gh's "no token" failure.
+GH_STUB_TOKEN_BODY='if [ "$1" = auth ] && [ "$2" = token ]; then
+  want=""; shift 2
+  while [ $# -gt 0 ]; do [ "$1" = --hostname ] && { want="$2"; shift; }; shift; done
+  case "${want:-github.com}" in
+    github.com) echo "${GH_TOKEN:-${GITHUB_TOKEN:-}}" ;;
+    *) echo "no oauth token found for $want" >&2; exit 1 ;;
+  esac
+  exit 0
+fi'
+
 stub_net() {
-  mk_stub "$1" gh 'exit 0'
+  mk_stub "$1" gh "$GH_STUB_TOKEN_BODY
+exit 0"
   mk_stub "$1" roborev 'exit 0'
   mk_stub "$1" cargo '[ "$1" = --version ] && echo "cargo 1.88.0"; exit 0'
 }
@@ -534,7 +551,9 @@ fi
 sb7b=$(mktemp -d "$tmp/cred7b.XXXXXX"); stub7b="$tmp/stub7b"
 mk_hermetic_bin "$stub7b"
 gh7b_log="$tmp/gh7b.log"; : >"$gh7b_log"
-mk_stub "$stub7b" gh "echo \"\$*\" >>\"$gh7b_log\"; exit 0"   # setup-git succeeds but wires nothing
+mk_stub "$stub7b" gh "echo \"\$*\" >>\"$gh7b_log\"
+$GH_STUB_TOKEN_BODY
+exit 0"   # setup-git succeeds but wires nothing; `auth token` answers as real gh does
 repo7b="$tmp/repo7b"; mk_fake_repo "$repo7b" "https://github.com/pmcfadin/cqlite.git"
 gc7b="$sb7b/gitconfig"
 out7b=$(PATH="$stub7b" HOME="$sb7b" CARGO_HOME="$sb7b/.cargo" GIT_CONFIG_GLOBAL="$gc7b" \
@@ -778,7 +797,8 @@ fi
 #     is a real footgun (git consults each entry in order).
 sb7e=$(mktemp -d "$tmp/cred7e.XXXXXX"); stub7e="$tmp/stub7e"
 mk_hermetic_bin "$stub7e"
-mk_stub "$stub7e" gh 'exit 0'   # setup-git is a no-op -> the fallback helper is used
+mk_stub "$stub7e" gh "$GH_STUB_TOKEN_BODY
+exit 0"   # setup-git is a no-op -> the fallback helper is used
 repo7e="$tmp/repo7e"; mk_fake_repo "$repo7e" "https://github.com/pmcfadin/cqlite.git"
 gc7e="$sb7e/gitconfig"
 for _ in 1 2; do
@@ -879,6 +899,16 @@ case "\$1" in
       echo "github.com"
       echo "  ✓ Logged in to github.com account tester (GH_TOKEN)"
       echo "  - Token scopes: 'gist', 'project', 'read:org', 'repo', 'workflow'"
+    elif [ "\$2" = token ]; then
+      # As real gh: the environment token IS github.com's token, and any other host has
+      # none here (#3369 FIX L gates the fallback repair on this answer).
+      want=""; shift 2
+      while [ \$# -gt 0 ]; do [ "\$1" = --hostname ] && { want="\$2"; shift; }; shift; done
+      case "\${want:-github.com}" in
+        github.com) echo "\${GH_TOKEN:-\${GITHUB_TOKEN:-}}" ;;
+        *) echo "no oauth token found for \$want" >&2; exit 1 ;;
+      esac
+      exit 0
     elif [ "\$2" = setup-git ]; then
       $setup
     fi
