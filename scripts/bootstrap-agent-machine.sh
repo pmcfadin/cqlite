@@ -41,10 +41,19 @@
 #   3b. git push CREDENTIALS (issue #2942) — separate from `gh` auth. The claim
 #      protocol (scripts/flow/claim.sh, claim-heartbeat.sh) pushes with plain git
 #      on 10+ call sites, so an authenticated gh with an unauthenticated git means
-#      the cross-machine lock does not work. Under --yes this configures a
-#      credential path scoped to the origin host, preferring `gh auth setup-git`,
-#      else a helper that dereferences $GH_TOKEN at call time. The token is never
-#      written to disk.
+#      the cross-machine lock does not work. Under --yes (or --fix-credentials) this
+#      configures a credential path scoped to the origin host, preferring
+#      `gh auth setup-git`, else a helper that dereferences $GH_TOKEN at call time.
+#      The token is never written to disk.
+#      It then measures git PUSH CAPABILITY (issue #3369) by performing THE
+#      OPERATION — `scripts/flow/claim.sh smoke` creates, reads back and deletes a
+#      throwaway refs/claims/smoke-<nonce> ref on the origin — because every check
+#      before it is evidence about CONFIGURATION, not about the operation: the box
+#      that motivated #3369 passed `gh auth status` AND `git ls-remote origin HEAD`
+#      and still failed every claim push. The verdict is THREE-valued and prints one
+#      greppable `git-push:` line — VERIFIED (affirmatively measured), FAILED, or
+#      UNMEASURED (no remote/unreachable/no bound available). UNMEASURED is a [warn],
+#      never an [ok]: an unmeasured capability must not inherit the permissive branch.
 #   4. roborev installed and its LOCAL config resolves — roborev follows THIS
 #      machine's configured agent (commonly codex via .roborev.toml); we warn
 #      only if the local config is broken, never prescribe an agent.
@@ -55,7 +64,25 @@
 # Usage:
 #   bash scripts/bootstrap-agent-machine.sh            # check + print install cmds
 #   bash scripts/bootstrap-agent-machine.sh --yes      # also auto-run installs + git credentials
-#   bash scripts/bootstrap-agent-machine.sh --skip-smoke   # skip the final gate run
+#   bash scripts/bootstrap-agent-machine.sh --fix-credentials  # wire git push credentials ONLY
+#                                                      #   (section 3b's auto-fix, the same
+#                                                      #   `gh auth setup-git`-preferring path
+#                                                      #   --yes uses); every other check stays
+#                                                      #   read-only — no toolchain installs.
+#   bash scripts/bootstrap-agent-machine.sh --strict   # exit 1 when there is any [warn]
+#                                                      #   (default stays exit 0 so this script
+#                                                      #   still composes into setup scripts)
+#   bash scripts/bootstrap-agent-machine.sh --skip-push-probe  # skip ONLY section 3b's push
+#                                                      #   probe (the refs/claims/* smoke push).
+#                                                      #   Loud + non-passing: it emits
+#                                                      #   `git-push: OPT-OUT` as a [warn], so it
+#                                                      #   withholds "All checks green." and can
+#                                                      #   never buy a vacuous green. For offline
+#                                                      #   boxes and hermetic self-tests.
+#   bash scripts/bootstrap-agent-machine.sh --skip-smoke   # skip the final GATE run (section 6).
+#                                                      #   DISTINCT from --skip-push-probe: this
+#                                                      #   one is about the gate fmt smoke, that
+#                                                      #   one about the git push probe.
 #   bash scripts/bootstrap-agent-machine.sh --help
 set -uo pipefail
 
@@ -64,10 +91,19 @@ GATE="$REPO_ROOT/scripts/agent-gate.sh"
 
 AUTO_YES=0
 SKIP_SMOKE=0
+# --skip-push-probe is deliberately NOT spelled --skip-smoke-push or folded into
+# --skip-smoke: --skip-smoke skips the GATE fmt run in section 6 and has nothing to do
+# with git. Two different subjects, two different flags (issue #3369).
+SKIP_PUSH_PROBE=0
+FIX_CREDENTIALS=0
+STRICT=0
 for arg in "$@"; do
   case "$arg" in
     --yes|-y) AUTO_YES=1 ;;
     --skip-smoke) SKIP_SMOKE=1 ;;
+    --skip-push-probe) SKIP_PUSH_PROBE=1 ;;
+    --fix-credentials) FIX_CREDENTIALS=1 ;;
+    --strict) STRICT=1 ;;
     -h|--help)
       # Print the whole leading comment block, bounded by the FIRST `set -` line
       # rather than a hardcoded line number: a fixed `2,45p` silently truncates the
@@ -1144,6 +1180,9 @@ elif [ "$GIT_ORIGIN_KIND" = none ]; then
 elif [ "$GIT_ORIGIN_KIND" = ssh ]; then
   # SSH (git@host:… / ssh://…): git authenticates with your SSH key, and an https
   # credential helper is irrelevant. Report it and configure nothing.
+  # NOT an exemption from the push probe below: an SSH origin is push-probed like any
+  # other (the smoke push works over ssh), so a machine with no usable key still gets a
+  # FAILED verdict rather than a green "no helper needed" (issue #3369).
   ok "origin is an SSH remote — git push authenticates via SSH keys, not a credential helper (no helper needed)"
   info "verify separately if pushes fail:  ssh -T git@github.com"
 elif [ "$GIT_ORIGIN_KIND" = other ]; then
@@ -1164,8 +1203,12 @@ else
   info "symptom: every push fails with  fatal: could not read Username for 'https://$GIT_ORIGIN_HOST'"
   info "impact: scripts/flow/claim.sh + claim-heartbeat.sh push on 10+ call sites — the claim protocol does not work"
   info "fix:    gh auth setup-git    (preferred; wires gh as git's credential helper)"
-  info "        or re-run with --yes to configure a helper that reads \$GH_TOKEN at call time"
-  if [ "$AUTO_YES" = 1 ]; then
+  info "        or re-run with --fix-credentials (or --yes) to configure a helper that reads \$GH_TOKEN at call time"
+  # --fix-credentials wires ONLY this section, leaving every other check read-only
+  # (issue #3369): the AMI onboarder's verify step needs the credential path wired
+  # after token injection, and turning a VERIFICATION step into a full toolchain
+  # installer (which --yes also is) would be a far larger change than that needs.
+  if [ "$AUTO_YES" = 1 ] || [ "$FIX_CREDENTIALS" = 1 ]; then
     cred_fixed=0
     # Preferred form: let gh wire itself in. Verified by RE-PROBING — on the box
     # that motivated #2942 the gh credential path was precisely what was not wired,
@@ -1214,7 +1257,135 @@ else
       fi
     fi
   else
-    info "(re-run with --yes to auto-configure)"
+    info "(re-run with --fix-credentials to wire credentials only, or --yes to also install)"
+  fi
+fi
+# ---- 3b-push. git PUSH CAPABILITY — measured, not inferred (issue #3369) ----
+# Everything above this line validates CONFIGURATION. `git credential fill` runs the
+# configured helper chain and answers "would git find a credential for this host?"
+# without ever contacting the network and without pushing anything; the section's own
+# comment says so. That is not the property the fleet depends on. A token with no
+# `contents:write`, an expired or unrotated token, an SSO authorization never granted,
+# and a host that refuses the `refs/claims/*` namespace ALL pass every check above and
+# still fail the very first thing a lane does — `bash scripts/flow/claim.sh claim <N>`,
+# a plain `git push` of a claim ref. That is the defect this exists for: the affected
+# box passed `gh auth status` AND `git ls-remote origin HEAD` and therefore LOOKED
+# healthy, so the preflight certified a machine on which no lane could start.
+# Generalized in docs/development/agent-machine-setup.md: "A scope match is evidence
+# about a token, not about the operation." Neither is a credential-helper answer, and
+# neither is a read.
+#
+# So the verdict below comes from performing THE OPERATION: create + read back +
+# delete a throwaway `refs/claims/smoke-<nonce>` ref. It DELEGATES to
+# `scripts/flow/claim.sh smoke`, the repo's existing sanctioned push probe — which
+# pushes the same ref namespace the claim protocol uses, already classifies an auth
+# fault (`reason=auth`) apart from a namespace refusal, and always deletes the ref it
+# created. `git push --dry-run` is deliberately NOT used: it stops short of the ref
+# update, which is the part the server decides, so it is one more piece of evidence
+# about configuration. It runs AFTER the auto-fix above, so what gets measured is the
+# machine as the fix left it.
+#
+# THREE-VALUED, NEVER TWO. A positive verdict requires an AFFIRMATIVE measurement, so
+# the `ok` branch is keyed on the smoke ref having really been created and read back —
+# never on the absence of a failure signal. Anything unmeasurable (no remote, an
+# unreachable remote, no claim.sh in this checkout, no `timeout`/`gtimeout` to bound
+# the network calls, the bound firing) is UNMEASURED, which is a [warn]: an unmeasured
+# push capability must not inherit the permissive branch, and "All checks green." must
+# not be printed for a machine whose claim protocol was never exercised.
+#
+# Hang safety: the whole probe runs under `bounded`, with GIT_TERMINAL_PROMPT=0 and a
+# deliberately nonexistent askpass, so neither a credential prompt nor a wedged remote
+# can stall a boot.
+PUSH_PROBE_REMOTE="${CLAIM_REMOTE:-origin}"   # the remote claim.sh itself will use
+CLAIM_SH="$REPO_ROOT/scripts/flow/claim.sh"
+PUSH_PROBE_BOUND=60   # 3 network round trips (push, ls-remote, delete) + slack
+
+# git_push_probe_stderr_is_auth <text> — mirrors git_stderr_is_auth in
+# scripts/flow/claim.sh (keep the two in sync). Used for ONE purpose: when the
+# reachability precheck fails, tell a CREDENTIAL refusal (FAILED — actionable, names
+# the fix) from an unreachable remote (UNMEASURED — nothing was learned about push).
+# Deliberately conservative: anything unrecognized stays UNMEASURED rather than being
+# asserted as a credential fault. The classified text is NEVER printed — a remote URL
+# can carry an embedded token, which is why claim.sh never echoes git's stderr either.
+git_push_probe_stderr_is_auth() {
+  case "$1" in
+    *"could not read Username"*      | *"could not read Password"*        | \
+    *"Authentication failed"*        | *"authentication failed"*          | \
+    *"terminal prompts disabled"*    | *"Invalid username or token"*      | \
+    *"Invalid username or password"* | *"Permission denied (publickey)"*  | \
+    *"Permission to "*" denied"*     | *"Write access to repository not granted"* | \
+    *"Support for password authentication was removed"* | *"401 Unauthorized"*)
+      return 0 ;;
+  esac
+  return 1
+}
+
+# push_probe_fix_advice — the remediation both non-verified verdicts print.
+push_probe_fix_advice() {
+  info "impact: scripts/flow/claim.sh + claim-heartbeat.sh push on 10+ call sites — a lane cannot even START"
+  info "fix:    gh auth setup-git    (preferred; wires gh as git's credential helper)"
+  info "        then re-run:  bash scripts/bootstrap-agent-machine.sh --fix-credentials"
+  info "        verify by hand:  bash scripts/flow/claim.sh smoke"
+}
+
+hdr "git PUSH capability (issue #3369)"
+if [ "$SKIP_PUSH_PROBE" = 1 ]; then
+  # Loud and NON-PASSING by construction: an opt-out that returned `ok` would be a
+  # switch for buying a vacuous green, which is the whole failure mode above.
+  warn "git-push: OPT-OUT (--skip-push-probe) — push capability was NOT measured on this machine"
+  info "this run cannot certify that the claim protocol works here; drop the flag to measure it"
+elif ! have git; then
+  warn "git-push: UNMEASURED (git is not installed — nothing to probe with)"
+elif [ ! -f "$CLAIM_SH" ]; then
+  warn "git-push: UNMEASURED (no scripts/flow/claim.sh under $REPO_ROOT — the sanctioned push probe is not in this checkout)"
+elif ! git -C "$REPO_ROOT" remote get-url "$PUSH_PROBE_REMOTE" >/dev/null 2>&1; then
+  warn "git-push: UNMEASURED (no '$PUSH_PROBE_REMOTE' remote in $REPO_ROOT — nothing to push to)"
+elif [ -z "$TIMEOUT_BIN" ]; then
+  # Refuse rather than run unbounded: an unbounded network push during boot can wedge
+  # the onboarder indefinitely, and reporting `ok` for a probe we declined to run is
+  # exactly the permissive-unknown branch this section rejects.
+  warn "git-push: UNMEASURED (no timeout/gtimeout on PATH — refusing to run an UNBOUNDED network push during bootstrap)"
+  info "install GNU coreutils so the probe can be bounded (macOS: brew install coreutils), then re-run"
+else
+  # Reachability precheck. Its ONLY job is to separate "the remote is unreachable, so
+  # nothing was measured" from "the remote refused you" — it is NEVER a success
+  # signal, because a passing read is precisely what made the broken box look healthy.
+  push_probe_ls_err=""
+  push_probe_ls_rc=0
+  push_probe_ls_err=$(bounded "$PUSH_PROBE_BOUND" env GIT_TERMINAL_PROMPT=0 \
+    GIT_ASKPASS=cqlite-bootstrap-no-askpass SSH_ASKPASS=cqlite-bootstrap-no-askpass \
+    git -C "$REPO_ROOT" ls-remote "$PUSH_PROBE_REMOTE" 2>&1 >/dev/null) || push_probe_ls_rc=$?
+  if [ "$push_probe_ls_rc" -ne 0 ] && git_push_probe_stderr_is_auth "$push_probe_ls_err"; then
+    warn "git-push: FAILED (git cannot AUTHENTICATE to '$PUSH_PROBE_REMOTE' — an authenticated 'gh' does NOT authenticate git)"
+    push_probe_fix_advice
+  elif [ "$push_probe_ls_rc" -ne 0 ]; then
+    warn "git-push: UNMEASURED (cannot reach '$PUSH_PROBE_REMOTE' — no network, or the remote does not exist; push capability is UNKNOWN, not ok)"
+    info "re-run once the remote is reachable, or verify by hand:  bash scripts/flow/claim.sh smoke"
+  else
+    # THE OPERATION. Run from REPO_ROOT because claim.sh drives the git repo at $PWD.
+    push_probe_out=""
+    push_probe_rc=0
+    push_probe_out=$(cd "$REPO_ROOT" && bounded "$PUSH_PROBE_BOUND" env GIT_TERMINAL_PROMPT=0 \
+      GIT_ASKPASS=cqlite-bootstrap-no-askpass SSH_ASKPASS=cqlite-bootstrap-no-askpass \
+      bash "$CLAIM_SH" smoke 2>&1) || push_probe_rc=$?
+    if printf '%s\n' "$push_probe_out" | grep -q 'SMOKE-OK'; then
+      # The one affirmative branch: the ref was created on the remote AND read back.
+      ok "git-push: VERIFIED (refs/claims/* create+ls-remote+delete on '$PUSH_PROBE_REMOTE') — the claim protocol can run on this machine"
+    elif printf '%s\n' "$push_probe_out" | grep -q 'SMOKE-FAIL.*reason=auth'; then
+      warn "git-push: FAILED (git cannot AUTHENTICATE the refs/claims/* push to '$PUSH_PROBE_REMOTE' — an authenticated 'gh' does NOT authenticate git)"
+      push_probe_fix_advice
+    elif printf '%s\n' "$push_probe_out" | grep -q 'SMOKE-FAIL.*reason=commit-build'; then
+      # A LOCAL failure building the throwaway claim commit: the push never happened,
+      # so nothing was learned about push capability.
+      warn "git-push: UNMEASURED (the throwaway claim commit could not be built locally — the push was never attempted)"
+    elif printf '%s\n' "$push_probe_out" | grep -q 'SMOKE-FAIL'; then
+      warn "git-push: FAILED ('$PUSH_PROBE_REMOTE' rejected the refs/claims/* push — does the remote permit that ref namespace?)"
+      push_probe_fix_advice
+    elif [ "$push_probe_rc" = 124 ] || [ "$push_probe_rc" = 137 ]; then
+      warn "git-push: UNMEASURED (the probe exceeded its ${PUSH_PROBE_BOUND}s bound and was killed — push capability is UNKNOWN, not ok)"
+    else
+      warn "git-push: UNMEASURED (scripts/flow/claim.sh smoke produced no SMOKE-OK/SMOKE-FAIL verdict, rc=$push_probe_rc — push capability is UNKNOWN, not ok)"
+    fi
   fi
 fi
 
@@ -1420,5 +1591,16 @@ else
   printf '  \033[33m%d warning(s).\033[0m Address the [warn] lines above (or re-run with --yes to auto-install).\n' "$WARNINGS"
 fi
 info "Full doctrine: docs/development/agent-machine-setup.md"
-# Informational bootstrap: always exit 0 so it composes into setup scripts.
+# Informational bootstrap: DEFAULT is always exit 0 so it composes into setup scripts.
+# That contract is preserved deliberately (issue #3369) — callers rely on it.
+#
+# --strict is the opt-in fail-closed signal for a machine PREFLIGHT (the agent-ami
+# profile's verify.run uses it). Before it existed, the ONLY fail-closed signal was
+# the presence of the literal string "All checks green." in stdout, so any caller that
+# forgot to string-match — or matched it loosely — onboarded a broken box while this
+# script exited 0. An exit code cannot be forgotten by accident.
+if [ "$STRICT" = 1 ] && [ "$WARNINGS" -ne 0 ]; then
+  info "--strict: exiting 1 ($WARNINGS warning(s)) — this machine is NOT certified ready"
+  exit 1
+fi
 exit 0
