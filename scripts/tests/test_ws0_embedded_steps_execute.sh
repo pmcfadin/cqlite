@@ -58,8 +58,11 @@
 #     green while the real rig hits the step's own `FATAL: … was not exported` and its caller
 #     exits 2, i.e. #3451's exact symptom. The same cross-check covers the CPU-pin step's four
 #     `WS0_PIN_*` inputs, there against the literal names the extracted block reads;
-#   * EVERY embedded block in the driver COMPILES — the total property, so instance #8 anywhere in
-#     that file is caught and not only the two steps this issue repaired;
+#   * EVERY DISCOVERED embedded block in the driver COMPILES, so instance #8 anywhere in that file
+#     is caught and not only the two steps this issue repaired. DISCOVERED is the operative word
+#     and its scope is stated exactly: every `-c`-form invocation REGARDLESS of how its command
+#     word is spelled (the census anchors on the flag), plus every invocation whose command word
+#     contains a literal `python`. What that does not reach is in NOT REACHED below;
 #   * the extractor's delimiter in BOTH directions: it reports a defect, AND it does not
 #     manufacture one on good input. A block is delimited by bash's quoting rules rather than by a
 #     line pattern, so all three closer shapes this repository actually uses are handled — the
@@ -101,6 +104,16 @@
 #
 #     What survives is the oracle that is real: no CPython accepts the BACKSLASH form, so the
 #     compile check catches the defect this issue is actually about on 3.9 through 3.12 alike.
+#   * COMPLETE DISCOVERY OF EMBEDDED PYTHON, which is NOT STATICALLY ACHIEVABLE and is therefore a
+#     stated decision rather than an oversight. A shell command word can be spelled arbitrarily —
+#     a variable, a concatenation, `$(which python3)`, an alias, `eval` — so enumerating the
+#     spellings is the same open list the round-6 inversion escaped, one level down. The two
+#     anchors cover the decidable part: the `-c` FLAG (any command-word spelling) and a literal
+#     `python` word (any argument shape). NOT discovered: an indirectly-spelled command word
+#     COMBINED with a non-`-c` form — `$PYTHON <<'PY'`, or code reaching python through `eval`.
+#     Closing that would require interpreting bash, which is the thing this file does not do.
+#     If a future review reports another command-word spelling, the answer is this limit, not
+#     more matching.
 #   * anything measured: no `perf`, no Flight server, no rep loop, no 2.8 GB corpus.
 #
 # Hermetic: python3, a few KB under `$TMPDIR`. No sudo, cargo, perf, taskset, network, root, and no
@@ -242,8 +255,16 @@ fi
 # so a reordering of the driver cannot silently point this suite at the wrong step — and a step
 # that DISAPPEARED is a failure here rather than a suite that quietly tests one block twice.
 find_block() { # find_block <driver> <needle> — the index of the ONE block containing <needle>
-  local drv="$1" needle="$2" n total hit="" body
-  total="$(python3 "$EXTRACT" census "$drv" 2>/dev/null | grep -c '^BLOCK	')"
+  local drv="$1" needle="$2" n total hit="" body out
+  out="$(python3 "$EXTRACT" census "$drv" 2>&1)"
+  # THE MARKER IS REQUIRED, as every other caller requires it (#3451 review round 7, finding 2).
+  # Without it a census that died — or never had a subject — yields zero BLOCK lines, and this
+  # function would report a confident `ABSENT` that a positive control reads as success.
+  if ! grep -q '^#COMPLETE ' <<<"$out"; then
+    echo "INCOMPLETE"
+    return 1
+  fi
+  total="$(grep -c '^BLOCK	' <<<"$out")"
   for ((n = 1; n <= total; n++)); do
     body="$(emit_block "$drv" "$n")"
     if grep -q -- "$needle" <<<"$body"; then
@@ -315,8 +336,15 @@ import pathlib, sys
 text = pathlib.Path(sys.argv[1]).read_text()
 pathlib.Path(sys.argv[2]).write_text(text.replace("write_session_corpus_pin", "some_other_writer"))
 PY
-if [ "$(find_block "$NO_PIN_STEP" 'write_session_corpus_pin')" = "ABSENT" ]; then
-  pass "census CONTROL fired: with the session-pin writer gone from the driver, the locator reports ABSENT rather than picking another block"
+no_pin_rc=$?
+# THE FIXTURE MUST HAVE BEEN WRITTEN (#3451 review round 7, finding 2). If it could not be, the
+# locator reads a MISSING FILE as `ABSENT` and this positive control passes having observed
+# nothing — a control that cannot fail, inside the suite whose whole subject is refusing exactly
+# that. The status is checked, and the file's existence with it.
+if [ "$no_pin_rc" -ne 0 ] || [ ! -s "$NO_PIN_STEP" ]; then
+  fail "census CONTROL: the disappeared-step fixture could not be written (rc=$no_pin_rc), so the control could not fire — it would otherwise read a missing file as ABSENT and pass vacuously"
+elif [ "$(find_block "$NO_PIN_STEP" 'write_session_corpus_pin')" = "ABSENT" ]; then
+  pass "census CONTROL fired: with the session-pin writer gone from a REAL fixture (existence asserted), the locator reports ABSENT rather than picking another block"
 else
   fail "census CONTROL did not fire: the block locator must report ABSENT when its subject is not in the driver"
 fi
@@ -492,6 +520,42 @@ if [ "$(grep -c '^BLOCK	' <<<"$hd_any")" -eq 0 ] && grep -q 'matches none of the
   pass "census CONTROL fired (heredoc removed): a python heredoc is a FINDING, not a block — the three false passes heredoc support cost are unreachable because the support is gone"
 else
   fail "census CONTROL did not fire (heredoc removed): a heredoc must be a finding, got: $(head -2 <<<"$hd_any")"
+fi
+
+# --- CONTROL 1h: AN INDIRECTLY-SPELLED COMMAND WORD IS DISCOVERED VIA THE FLAG -----------------
+# The allowlist closed CLASSIFICATION but not DISCOVERY: a candidate must be FOUND before it can
+# be classified, and `$PYTHON -c '…'` contains no literal `python` word, so it was invisible — an
+# invalid block passing the "every embedded block compiles" guard with the count unchanged. The
+# census now has a SECOND anchor, the `-c` flag itself, which is independent of how the command
+# word is spelled.
+INDIRECT="$TMP/indirect-command-word.sh"
+python3 - "$INDIRECT" <<'INJECT'
+import pathlib, sys
+q = chr(39)
+pathlib.Path(sys.argv[1]).write_text("$PYTHON -c " + q + "import os," + q + "\n")
+INJECT
+indirect_rc=$?
+if [ "$indirect_rc" -ne 0 ] || [ ! -s "$INDIRECT" ]; then
+  fail "census CONTROL: the indirect-command-word fixture could not be written (rc=$indirect_rc), so the control could not fire"
+else
+  ind_out="$(census "$INDIRECT")"
+  if grep -q 'command word is' <<<"$ind_out"; then
+    pass "census CONTROL fired (indirect command word): \$PYTHON -c is DISCOVERED via the flag anchor and named — $(findings_of "$ind_out" | head -1 | cut -c1-96)"
+  else
+    fail "census CONTROL did not fire (indirect command word): an indirectly-spelled -c invocation must be a finding, got: $(head -2 <<<"$ind_out")"
+  fi
+fi
+
+# --- CONTROL 1i: A MISSING SUBJECT EXITS NONZERO ------------------------------------------------
+# `census <a path that does not exist>` used to print a message and exit 0, so a caller that
+# checks the STATUS read "no subject at all" as "nothing wrong" — the vacuous pass one level up
+# from everything else this suite asserts.
+python3 "$EXTRACT" census "$TMP/definitely-not-a-driver.sh" >/dev/null 2>&1
+missing_rc=$?
+if [ "$missing_rc" -ne 0 ]; then
+  pass "census CONTROL fired (missing subject): an absent driver exits NONZERO (rc=$missing_rc), so a status-checking caller cannot read 'no subject' as 'nothing wrong'"
+else
+  fail "census CONTROL did not fire: an absent driver must exit nonzero, got rc=$missing_rc"
 fi
 
 # ============================================================================

@@ -6584,9 +6584,10 @@ run_tooling_tests() {
   # What survives is the oracle that is real: no CPython accepts the backslash form, so the defect
   # this issue is about is caught on 3.9 through 3.12 alike.
   # The block text is EXTRACTED from the shipped driver on every run (`ws0_embedded_python.py`,
-  # which casts a WIDE candidate net — any word whose basename is python/python3, path-qualified or
-  # not — and then ALLOWLISTS exactly the shapes this driver uses, making everything else a
-  # FINDING) rather than copied,
+  # which discovers candidates on TWO anchors — any word whose basename is python/python3, and the
+  # `-c` FLAG itself so an indirectly-spelled command word like `$PYTHON -c` is still found — and
+  # then ALLOWLISTS exactly the shapes this driver uses, making everything else a FINDING) rather
+  # than copied,
   # because a copy stays green while the shipped step is broken — the exact state #3451 found. The
   # delimiter is bash's own quoting rule, not a line pattern, and is asserted in BOTH directions:
   # a column-0-closer-only rule was MEASURED finding 31 blocks tree-wide where the correct rule

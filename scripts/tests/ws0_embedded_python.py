@@ -74,7 +74,18 @@ Now the candidate net is as wide as it goes and exactly four shapes are interpre
     anything else     A FINDING. Not classified, not skipped, not modelled.
 
 A construct nobody anticipated therefore becomes a finding by FAILING TO MATCH, rather than by
-someone having thought to refuse it. HEREDOCS ARE NOT SUPPORTED and are findings: support for them
+someone having thought to refuse it.
+
+THE ALLOWLIST CLOSES CLASSIFICATION, NOT DISCOVERY, and the difference is worth stating because it
+is the residual (#3451 round 7). A candidate must be FOUND before it can be classified, and a
+shell command word can be spelled arbitrarily — a variable, a concatenation, `$(which python3)`,
+an alias, `eval`. Enumerating those spellings is the same open list one level down, so it is not
+attempted. Instead there are TWO anchors covering the decidable part: a literal `python` word (any
+argument shape), and the `-c` FLAG (any command-word spelling — `$PYTHON -c '…'` is found because
+the anchor does not depend on the word). What remains undiscovered is an indirectly-spelled
+command word combined with a NON-`-c` form (`$PYTHON <<'PY'`) or code reaching python through
+`eval`. Closing that needs an interpreter for bash. It is a decision, not an oversight; the
+caller's NOT-REACHED list says the same thing where an operator will read it. HEREDOCS ARE NOT SUPPORTED and are findings: support for them
 was speculative (this driver has none) and produced three separate false passes — an unquoted
 delimiter is shell-expanded before python sees it, a composed delimiter makes bash use a different
 tag, and with several redirects bash uses the last. Each compiled a body python never receives. A
@@ -152,6 +163,20 @@ import sys
 # not a word of its own (`requires python3.` inside an `echo` string, `python3x`). That is a rule
 # about identifiers, not about shell.
 _PY_WORD = re.compile(r"python[0-9]*(?:\.[0-9]+)*(?![\w.])")
+
+# THE SECOND DISCOVERY ANCHOR: the FLAG, not the command word (#3451 review round 7, finding 1).
+#
+# The allowlist closed CLASSIFICATION — anything not allowlisted is a finding — but not
+# DISCOVERY: a candidate has to be found before it can be classified, and `$PYTHON -c '…'` or
+# `py"thon3" -c '…'` contains no literal `python` word, so it was INVISIBLE. Anchoring on `-c`
+# followed by whitespace and a quote catches EVERY command-word spelling of the `-c` form,
+# because the anchor no longer depends on how the command word is written.
+#
+# Verified false-red-free for this driver before adopting: its only `-c '` occurrences are the
+# three python3 blocks (599, 697, 941), each consumed by the python-word branch before this
+# anchor is reached; the sole other `-c` is `taskset -c 1` inside a whole-line COMMENT, excluded
+# twice over (comment, and no quote follows). No bash/sh/zsh/perl/ruby/node/env `-c` exists here.
+_DASH_C_ANCHOR = re.compile(r"(?<![\w-])-c\s+['\"]")
 
 # Characters that cannot appear inside one shell word, used to find where a candidate's word
 # STARTS so a path prefix is captured with it.
@@ -287,12 +312,39 @@ def census(path: pathlib.Path) -> tuple[list[dict], list[dict]]:
     findings: list[dict] = []
     pos = 0
     while True:
-        m = _PY_WORD.search(text, pos)
-        if not m:
+        # TWO anchors, earliest wins. A `python3 -c '…'` matches the WORD first (lower offset) and
+        # its branch consumes through the closing quote, so the `-c` inside it is never reached —
+        # no double report. A `-c '` reached FIRST means no literal python word preceded it, i.e.
+        # the command word is spelled indirectly, which is a finding.
+        mp = _PY_WORD.search(text, pos)
+        mc = _DASH_C_ANCHOR.search(text, pos)
+        if mp is not None and (mc is None or mp.start() <= mc.start()):
+            m, anchored_on_flag = mp, False
+        elif mc is not None:
+            m, anchored_on_flag = mc, True
+        else:
             break
         idx = bisect.bisect_right(starts, m.start()) - 1
         line = lines[idx]
         line_start = starts[idx]
+        if anchored_on_flag:
+            pos = m.end()
+            if line.lstrip().startswith("#"):
+                continue  # a whole-line shell comment carries no code
+            # The word before the flag, for the diagnostic only — enough to name what was found
+            # without pretending to resolve it.
+            before = text[line_start : m.start()].rstrip()
+            cmd_word = before[max((before.rfind(c) for c in _WORD_BREAK), default=-1) + 1 :]
+            findings.append({
+                "line": idx + 1,
+                "reason": "a `-c '<program>'` invocation whose command word is"
+                          f" {cmd_word or '(unresolvable)'!r}, not the literal `python3` the"
+                          " allowlist recognises. Anchored on the FLAG rather than the command"
+                          " word, because an indirectly-spelled word (a variable, a"
+                          " concatenation) carries code exactly as a literal one does and was"
+                          " INVISIBLE before #3451 round 7. Teach the allowlist if intended.",
+            })
+            continue
         # Walk left to the start of the shell WORD, so a path prefix travels with the candidate.
         word_start = m.start()
         while word_start > line_start and text[word_start - 1] not in _WORD_BREAK:
@@ -379,9 +431,13 @@ def main(argv: list[str]) -> int:
         return 2
     mode, driver = argv[1], pathlib.Path(argv[2])
     if not driver.is_file():
+        # NONZERO (#3451 review round 7, finding 2). This used to `return 0`, so an absent or
+        # unreadable driver produced a message and a SUCCESS exit — and a caller that checks the
+        # status (rather than parsing the text) read "no subject at all" as "nothing wrong". The
+        # message is kept for a human; the status is what a script must be able to trust.
         print(f"{driver}:0: the driver is not a readable file, so the census has NO SUBJECT —"
               " which prints exactly like a driver with nothing wrong in it.")
-        return 0
+        return 4
     records, findings = census(driver)
     blocks = _blocks(records)
     if mode == "census":
