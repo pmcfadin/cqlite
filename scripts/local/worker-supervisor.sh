@@ -1107,7 +1107,12 @@ supervisor_migrate_legacy_claim() {
   # An operator-pinned actor is not ours to migrate away from.
   [[ "${CLAIM_ACTOR:-}" == "$LEGACY_CLAIM_ACTOR" || -z "${CLAIM_ACTOR:-}" ]] && return 0
   local branch n st sha holder_machine holder_actor
-  branch="$(git -C "$REPO_ROOT" rev-parse --abbrev-ref HEAD 2>/dev/null)" || return 0
+  # `symbolic-ref --short`, not `rev-parse --abbrev-ref`: it asks the question actually being asked —
+  # "which BRANCH is this worktree on" — and answers it without resolving a commit, so it also works on
+  # an unborn HEAD. `rev-parse --abbrev-ref HEAD` fails outright there ("ambiguous argument 'HEAD'"),
+  # which is how the positive control for this function first came back with no call at all. A DETACHED
+  # worktree makes `symbolic-ref` exit non-zero, which is the right answer: it names no issue.
+  branch="$(git -C "$REPO_ROOT" symbolic-ref --short HEAD 2>/dev/null)" || return 0
   case "$branch" in
     issue-[0-9]*) n="${branch#issue-}"; n="${n%%-*}" ;;
     *) return 0 ;;

@@ -3861,6 +3861,11 @@ mig_case() {
   mkdir -p "$repo" "$d/bin"
   git -C "$repo" init -q 2>/dev/null
   git -C "$repo" checkout -q -b "$branch_issue" 2>/dev/null
+  # A REAL COMMIT, because a real lane always has one. The first cut left the repo unborn, and with the
+  # old `rev-parse --abbrev-ref HEAD` probe that made the happy path resolve NO branch — so it made no
+  # call, and all NINE refusal cases below passed VACUOUSLY (they assert the absence of an adopt, and
+  # nothing was called at all). The positive control is the only reason that was visible.
+  git -C "$repo" -c user.email=t@t -c user.name=t commit -q --allow-empty -m init 2>/dev/null
   # The stub records every invocation and answers `status` with the staged line.
   cat >"$d/bin/claim.sh" <<STUB
 #!/usr/bin/env bash
