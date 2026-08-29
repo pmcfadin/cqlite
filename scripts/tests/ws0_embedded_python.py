@@ -8,12 +8,6 @@ reason — a DEFINITION and an ORACLE must not be the same thing:
                            shape this file cannot classify or a block it cannot delimit
     emit <driver> <n>      print embedded block <n>'s SOURCE, exactly as the driver ships it
     compile <driver>       compile EVERY embedded block; print one finding per block that does not
-    nested-quote <driver>  does any embedded block use the PEP 701 NESTED SAME-TYPE QUOTE
-                           spelling — the one alternative the driver's comment rejects? (ONE
-                           construct class, not general portability — see below)
-    nested-quote-source <file>
-                           the same question about an ordinary python file, so the check's accept
-                           direction can be controlled without a driver
 
 Every mode prints a `#COMPLETE …` marker on success. The CALLER counts findings, so a crash
 must not read as "clean" — the marker is what makes that distinguishable, and every caller
@@ -44,58 +38,15 @@ A self-test carrying its own copy of the block certifies THE COPY. The copy does
 the driver does — it stays green while the shipped step is broken, which is precisely the state
 this issue found. So the subject is read out of the shipped file on every run.
 
-# ONE SPELLING IS DECIDED HERE, AND IT IS NOT "PORTABILITY" (#3451 review rounds 1-2)
+# WHICH INTERPRETER `compile` SPEAKS FOR
 
-`compile()` answers "does this parse HERE". The regression the driver's repaired steps are exposed
-to is narrower and specific: a subscript inside an f-string expression written with NESTED
-SAME-TYPE QUOTES. PEP 701 made that legal in 3.12 and it is a SyntaxError on everything older, so
-a regression to it — the exact alternative the driver's own comment says it rejected — passes
-`compile()` on a 3.12 box and breaks a 3.11 one.
-
-The exposure is real rather than theoretical: this repository pins Python 3.11 in
-`.github/workflows/parity-failure-issue.yml` and `parity-failure-issue-tests.yml`,
-`bindings/python/pyproject.toml` declares `requires-python = ">=3.9"`, and the driver itself
-declares NO floor — it requires `python3` and takes whatever the host has.
-
-`ast.parse(..., feature_version=(3, 9))` DOES NOT DETECT IT (measured at (3,9)/(3,11)/(3,12), all
-accepting): `feature_version` gates the AST grammar, not the tokenizer, and PEP 701 is a tokenizer
-change. So the check is at the TOKENIZER: walk the tokens, track the quote character of each
-enclosing `FSTRING_START`, and flag any `STRING` token inside it whose OPENING QUOTE EQUALS that
-character.
-
-THE SAME-TYPE/DIFFERENT-TYPE BOUNDARY IS THE WHOLE CHECK. `f"{x['k']}"` is legal on every
-interpreter and flagging it would be a false red; `f"{x["k"]}"` is 3.12-only and must be refused.
-The caller controls BOTH directions.
-
-## WHAT THIS DOES **NOT** DECIDE — the claim was narrowed rather than the oracle widened
-
-It does NOT establish that a block parses on every interpreter this repository runs. PEP 701
-legalised OTHER constructs too, and two of them are MEASURED to pass this check silently while
-being 3.12-only:
-
-    a MULTILINE f-string expression                 -> 3.12 compiles, this check is CLEAN
-    a COMMENT inside an f-string expression         -> 3.12 compiles, this check is CLEAN
-
-Those are not oversights to be closed by adding cases. THE CONSTRUCT LIST DOES NOT CLOSE BY
-ENUMERATION, and widening the model here would make this file a SECOND IMPLEMENTATION of CPython's
-tokenizer — whose correctness would then be knowable only by differential testing against the
-original, which is the trap CLAUDE.md records (a bash port of Go's trim rules, tested against a
-MODEL of Go rather than Go, whose NBSP divergence was unfindable by care).
-
-THE CORRECT ORACLE IS THE REAL INTERPRETER: compile the blocks under an actual 3.9/3.11. That is a
-CI lane, not a hermetic self-test, and it cannot be done honestly on the machines this suite runs
-on (no python3.9/3.10/3.11 present). So the general property is recorded as NOT REACHED in the
-caller's header, and what is claimed here is exactly what is measured: the nested same-type quote
-spelling, and nothing else.
-
-TWO ORACLES FOR THAT ONE SPELLING, EACH SOUND OVER ITS OWN RANGE, AND WHICH ONE RAN IS PRINTED. On
-3.12+ the tokenizer walk is the oracle, because `compile()` there accepts the bad form. On < 3.12
-`compile()` IS the oracle — the bad form does not parse at all — and the token types the walk needs
-(`FSTRING_START`/`FSTRING_END`) do not exist. Either way the answer is affirmative and the
-`#COMPLETE` line names the oracle and the interpreter, so a reader can never mistake this for one
-check that silently skipped. Nothing here is conditional on an optional interpreter being
-installed: a check that skips when a dependency is absent is the coverage gap this whole issue is
-about.
+`compile()` answers "does this parse on the interpreter running this check", and that is the whole
+of what `compile` mode claims. A PEP 701 tokenizer model that tried to answer the cross-interpreter
+question lived here for two rounds and was removed (#3451 review round 4): it was wrong twice, the
+second time in the FALSE-RED direction on legal triple-quoted code, and a second implementation of
+CPython's tokenizer is correct only insofar as it is differentially tested against the original —
+which needs the interpreters we do not have. The caller's NOT-REACHED list records the limit and
+names the only honest oracle for it.
 
 # FAIL-CLOSED, because an extractor that finds nothing prints like a clean driver
 
@@ -117,8 +68,13 @@ spelled:
                   future step written this way must not fall outside the census.)
     <path>.py     a SCRIPT FILE. Not embedded — it is an ordinary python file every other tool
                   already sees — so it is recorded and not extracted.
-    (no argument) a MENTION: a `command -v`-style presence probe, or the word inside prose. It
-                  carries no code, so there is nothing to compile.
+    (no argument) a MENTION **only** for the one presence-probe construct this driver uses — the
+                  word inside a `for … in <list>` membership test. EVERY OTHER argumentless
+                  invocation is UNKNOWN, because `python3` with no argument reads its program from
+                  STDIN: `producer | python3` is embedded code with no argument at all, and
+                  classifying it as harmless was a hole in the fail-closed census (#3451 review
+                  round 4). Fail-closed means the shapes do NOT have to be enumerated — recognise
+                  the one that occurs, and let the rest be findings.
 
 Anything else — `-c` with a shape that cannot be delimited, `-m`, a bare `-`, a variable where the
 code should be — is UNKNOWN, which is a finding.
@@ -179,11 +135,9 @@ operator having been parsed by nothing, and it is the state this file was writte
 from __future__ import annotations
 
 import bisect
-import io
 import pathlib
 import re
 import sys
-import tokenize
 
 # The word, matched only where it is a standalone token. `requires python3.` inside an `echo`
 # string is not an invocation and must not be censused as an unknown shape; a trailing
@@ -202,6 +156,11 @@ _QUOTE_IDIOM = "'" + '"' + "'" + '"' + "'"
 _HEREDOC = re.compile(
     r"<<(?P<dash>-?)\s*(?P<q>['\"]?)(?P<tag>[A-Za-z_][A-Za-z0-9_]*)(?P=q)"
 )
+# The ONE presence-probe construct the driver contains: `for tool in perf taskset python3; do`.
+# The token is a word in a LIST, not a command. Recognised explicitly so that every OTHER
+# argumentless invocation can fall through to UNKNOWN — see the MENTION branch in `census`.
+_FOR_WORD_LIST = re.compile(r"^\s*for\s+[A-Za-z_][A-Za-z0-9_]*\s+in\s")
+
 # A script-file argument, quoted or not, possibly carrying a shell expansion in its directory
 # part: `"$HERE/ws0_report.py"`.
 _SCRIPT = re.compile(r"^[\"']?[^\s\"']*\.py[\"']?(\s|$)")
@@ -336,10 +295,25 @@ def census(path: pathlib.Path) -> tuple[list[dict], list[dict]]:
         pos = m.end()
         try:
             if not rest or rest.lstrip(";&|)").strip() in ("", "do", "then"):
-                # A presence probe (`for tool in perf taskset python3; do`) or a bare mention:
-                # no argument can carry code.
-                records.append({"kind": "MENTION", "line": idx + 1, "text": line.strip()})
-                continue
+                # AN ARGUMENTLESS `python3` IS NOT AUTOMATICALLY HARMLESS (#3451 review round 4).
+                # With no argument python3 reads its program from STDIN, so `producer | python3`
+                # is embedded code carrying no argument at all — and treating every argumentless
+                # invocation as a MENTION let exactly that bypass the census.
+                #
+                # So only the ONE presence-probe construct this driver contains is recognised: the
+                # word inside a `for … in <list>` membership test, which is a word in a LIST and
+                # not a command at all. Everything else falls through to UNKNOWN below. That is
+                # what fail-closed buys — the shapes do not have to be enumerated.
+                if _FOR_WORD_LIST.match(line):
+                    records.append({"kind": "MENTION", "line": idx + 1, "text": line.strip()})
+                    continue
+                raise Unclassifiable(
+                    idx + 1,
+                    "this `python3` invocation has NO ARGUMENT, so it reads its program from"
+                    " STDIN — a pipe or a redirect can carry embedded code the compile check"
+                    " would never see. Only a `for … in <list>` membership test is recognised as"
+                    " a presence probe; anything else is a finding rather than a skip.",
+                )
             dash_c = _OPEN_DASH_C.match(raw_rest)
             if dash_c:
                 # The opening quote is the LAST character the match consumed.
@@ -385,67 +359,6 @@ def census(path: pathlib.Path) -> tuple[list[dict], list[dict]]:
     return records, findings
 
 
-# Whether this interpreter tokenizes f-strings into their own token types (PEP 701, 3.12+). On an
-# older one the nested same-type form is not tokenizable at all, so `compile()` is the oracle.
-_HAS_FSTRING_TOKENS = hasattr(tokenize, "FSTRING_START")
-NESTED_QUOTE_ORACLE = "tokenizer" if _HAS_FSTRING_TOKENS else "compile"
-
-
-def _string_open_quote(tok: str) -> str:
-    """The quote character a STRING token opens with, past any prefix letters (`rb'…'`)."""
-    for ch in tok:
-        if ch in "\"'":
-            return ch
-    return ""
-
-
-def nested_same_type_quote_findings(src: str) -> list[str]:
-    """Occurrences in `src` of the PEP 701 NESTED SAME-TYPE QUOTE spelling. Nothing else.
-
-    A string inside an f-string expression opening with the SAME quote character as the f-string
-    itself. A DIFFERENT-type nested quote (`f"{x['k']}"`) is legal everywhere and must not be
-    reported. This is ONE construct class and NOT a portability verdict — see the module header
-    for the two 3.12-only constructs it is measured NOT to catch, and why the answer is a CI lane
-    rather than a deeper model here.
-    """
-    if not _HAS_FSTRING_TOKENS:
-        # `compile()` is the oracle on this interpreter: the 3.12-only form is a SyntaxError here,
-        # and `compile`/`nested-quote` therefore report it through the same path. Returning nothing is
-        # correct rather than a skip — the caller prints WHICH oracle answered.
-        try:
-            compile(src, "<nested-quote>", "exec")
-        except SyntaxError as exc:
-            return [
-                f"does not parse on this interpreter ({sys.version_info.major}."
-                f"{sys.version_info.minor}) — {exc.msg} (line {exc.lineno})"
-            ]
-        return []
-    out: list[str] = []
-    stack: list[str] = []
-    try:
-        for tok in tokenize.generate_tokens(io.StringIO(src).readline):
-            if tok.type == tokenize.FSTRING_START:
-                stack.append(tok.string[-1])
-            elif tok.type == tokenize.FSTRING_END:
-                if stack:
-                    stack.pop()
-            elif tok.type == tokenize.STRING and stack:
-                quote = _string_open_quote(tok.string)
-                if quote and quote == stack[-1]:
-                    out.append(
-                        f"line {tok.start[0]}: {tok.string} is nested inside an f-string"
-                        f" delimited by the SAME quote ({stack[-1]}). PEP 701 made that legal in"
-                        " 3.12 and it is a SyntaxError on every earlier interpreter, which this"
-                        " repository still runs (3.11 in two workflows, >=3.9 declared by the"
-                        " python bindings) and this driver does not exclude. Bind the subscript"
-                        " to a LOCAL before the f-string."
-                    )
-    except (SyntaxError, tokenize.TokenError) as exc:
-        out.append(f"could not be tokenized ({type(exc).__name__}: {exc}) — reported rather than"
-                   " skipped, because an unanswerable oracle must not read as a clean answer")
-    return out
-
-
 def _blocks(records: list[dict]) -> list[dict]:
     return [r for r in records if r["kind"] == "BLOCK"]
 
@@ -453,23 +366,13 @@ def _blocks(records: list[dict]) -> list[dict]:
 def main(argv: list[str]) -> int:
     if len(argv) < 3:
         print(__doc__.splitlines()[0], file=sys.stderr)
-        print("usage: ws0_embedded_python.py census|compile|nested-quote|nested-quote-source|emit"
+        print("usage: ws0_embedded_python.py census|compile|emit"
           " <file> [n]", file=sys.stderr)
         return 2
     mode, driver = argv[1], pathlib.Path(argv[2])
     if not driver.is_file():
         print(f"{driver}:0: the driver is not a readable file, so the census has NO SUBJECT —"
               " which prints exactly like a driver with nothing wrong in it.")
-        return 0
-    if mode == "nested-quote-source":
-        # The same question about an ORDINARY python file. Exists so the accept direction (a
-        # DIFFERENT-type nested quote, legal everywhere) can be controlled without smuggling an
-        # apostrophe into a shell single-quoted block, where it would terminate the string.
-        for note in nested_same_type_quote_findings(driver.read_text()):
-            print(f"{driver}: uses the 3.12-ONLY NESTED SAME-TYPE QUOTE spelling — {note}")
-        print(f"#COMPLETE nested-quote-source=1 oracle={NESTED_QUOTE_ORACLE}"
-              f" interpreter={sys.version_info.major}.{sys.version_info.minor}"
-              f".{sys.version_info.micro}")
         return 0
     records, findings = census(driver)
     blocks = _blocks(records)
@@ -500,19 +403,6 @@ def main(argv: list[str]) -> int:
                       f" {exc.lineno}). This step is fatal-on-failure, so the driver cannot run"
                       " past it.")
         print(f"#COMPLETE compiled={len(blocks)} findings={len(findings)}")
-        return 0
-    if mode == "nested-quote":
-        # EVERY embedded block, against the ONE spelling `compile` cannot see on a 3.12 box.
-        for f in findings:
-            print(f"{driver}:{f['line']}: {f['reason']}")
-        for i, r in enumerate(blocks, start=1):
-            for note in nested_same_type_quote_findings(r["body"]):
-                print(f"{driver}:{r['line']}: embedded python block {i} uses the 3.12-ONLY"
-                      f" NESTED SAME-TYPE QUOTE spelling — {note}")
-        print(f"#COMPLETE nested-quote-scanned={len(blocks)} findings={len(findings)}"
-              f" oracle={NESTED_QUOTE_ORACLE}"
-              f" interpreter={sys.version_info.major}.{sys.version_info.minor}"
-              f".{sys.version_info.micro}")
         return 0
     if mode == "emit":
         if len(argv) < 4:

@@ -6574,16 +6574,15 @@ run_tooling_tests() {
   # all agree, because executing the blocks alone cannot see a RENAMED EXPORT: the python is
   # untouched, everything stays green, and the real rig hits the step's own `FATAL: … was not
   # exported` and exits 2 — #3451's exact symptom again; EVERY embedded block in the driver COMPILES,
-  # so instance #8 anywhere in that file is caught and not only the two repaired steps; and no block
-  # uses the PEP 701 NESTED SAME-TYPE QUOTE spelling — ONE construct class, and exactly the
-  # alternative the driver's comment says it rejected, which `compile()` on a 3.12 host ACCEPTS
-  # while the 3.11 workflows this repo pins would break. A tokenizer-level oracle on 3.12+ and
-  # `compile()` below it, with the one that answered NAMED in the output so it can never read as a
-  # check that skipped. Deliberately NOT a general portability verdict: PEP 701 legalised other
-  # constructs, a case MEASURES two of them passing this check silently, and establishing the
-  # general property needs the blocks compiled by a real 3.9/3.11 — a CI lane, not a hermetic
-  # self-test. Widening the model here would make the checker a second implementation of CPython's
-  # tokenizer, correct only insofar as it is differentially tested against the original.
+  # so instance #8 anywhere in that file is caught and not only the two repaired steps. That compile
+  # check speaks for THE INTERPRETER RUNNING IT and claims nothing about cross-interpreter
+  # portability; the suite's NOT-REACHED list records the one regression that therefore escapes it
+  # and names a real 3.9/3.11 CI compile as the only honest oracle. A tokenizer model of that
+  # regression lived here for two review rounds and was REMOVED (#3451 round 4) after being wrong
+  # twice, the second time flagging legal code — a second implementation of CPython's tokenizer is
+  # correct only insofar as it is differentially tested against an original this box does not have.
+  # What survives is the oracle that is real: no CPython accepts the backslash form, so the defect
+  # this issue is about is caught on 3.9 through 3.12 alike.
   # The block text is EXTRACTED from the shipped driver on every run (`ws0_embedded_python.py`,
   # fail-closed on an unclassifiable python3 shape or an unterminated block) rather than copied,
   # because a copy stays green while the shipped step is broken — the exact state #3451 found. The
