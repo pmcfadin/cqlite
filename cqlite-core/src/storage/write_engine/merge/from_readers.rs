@@ -255,6 +255,16 @@ impl SSTableRowIteratorAdapter {
         // page-in) is NOT reached by this single-hop propagation and is not
         // covered. `None` (no-op) for every non-flight caller.
         let subphase_sink = crate::observability::stream_subphase::current();
+        // Issue #1707: the read-PHASE sink is propagated the SAME way and for the
+        // same reason. `generation_merge::stream_generations_for_read` installs it on
+        // the merge/CONSUMER thread, but the chunk decode of a cross-generation read
+        // happens HERE, on this per-input producer thread — so without this
+        // capture/install pair the route recorded `merge` and nothing else. It reaches
+        // the shared chunk-decode plane (`reader::chunk_source`), so DECOMPRESS is
+        // measured through it; the io seam is a separate matter, see
+        // `observability::read_phase`'s coverage boundary. `None` (no-op) for an
+        // unmetered caller.
+        let read_phase_sink = crate::observability::read_phase::current();
         // Issue #3120: whatever fault a test armed FOR THIS INPUT is captured HERE
         // (never re-read mid-walk) and owned by the producer thread. Always empty —
         // and a zero-sized no-op whose scope closure is never called — in a
@@ -262,6 +272,7 @@ impl SSTableRowIteratorAdapter {
         let fault = MergeProducerFault::capture_for(|| reader.file_path());
         let producer = match std::thread::Builder::new().spawn(move || {
             let _subphase_guard = crate::observability::stream_subphase::install(subphase_sink);
+            let _read_phase_guard = crate::observability::read_phase::install(read_phase_sink);
             Self::producer_thread_from_reader(
                 reader,
                 run_index,

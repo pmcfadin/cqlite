@@ -662,9 +662,14 @@ mod merge_phase {
     use cqlite_core::storage::sstable::SSTableManager;
     use cqlite_core::storage::write_engine::{WriteEngine, WriteEngineConfig};
 
-    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-    #[serial_test::serial(read_metrics)]
-    async fn a_cross_generation_read_records_the_merge_phase() {
+    /// Build TWO generations of one table, scan them through the CROSS-GENERATION
+    /// reconciling merge, and return `(rows delivered, metrics for that scan)`.
+    ///
+    /// Shared by the two tests below so the io case and the merge case exercise
+    /// literally the same route; `arm_io_delay` makes the physical `Data.db` reads
+    /// unmissably slow, so an io assertion is about WIRING and never about host
+    /// timing (#2642).
+    async fn scan_two_generations(arm_io_delay: bool) -> (usize, CapturedMetrics) {
         let mc = testing::metrics_capture();
         let tmp = tempfile::TempDir::new().expect("tmp");
         let data_dir = tmp.path().join("data");
@@ -704,6 +709,7 @@ mod merge_phase {
 
         let table_id = TableId::new("obs1707.rows".to_string());
         let schema = schema();
+        let _armed = arm_io_delay.then(|| io_delay::arm(Duration::from_millis(4)));
         mc.reset();
         let mut rows = 0usize;
         {
@@ -716,7 +722,13 @@ mod merge_phase {
                 rows += 1;
             }
         }
-        let metrics = mc.flush_and_collect();
+        (rows, mc.flush_and_collect())
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    #[serial_test::serial(read_metrics)]
+    async fn a_cross_generation_read_records_the_merge_phase() {
+        let (rows, metrics) = scan_two_generations(false).await;
 
         assert!(
             rows > 0,
@@ -746,6 +758,13 @@ mod merge_phase {
         );
         // CQLite's own write surface emits UNCOMPRESSED SSTables (#1406), so this
         // read decompresses nothing and the series must be absent, not 0.0.
+        //
+        // NOTE this assertion passes for a REASON THAT IS NOT THE PROPERTY: these
+        // generations are CQLite-written and therefore uncompressed, so no
+        // decompression happens on any thread. It cannot distinguish "nothing to
+        // decompress" from "the decompress seam is unreachable from this route", and
+        // the io assertion above is what actually exercises producer-thread
+        // propagation.
         assert!(
             !metrics.contains(catalog::READ_PHASE_DECOMPRESS),
             "an uncompressed cross-generation read must record NO decompress sample; \
@@ -753,6 +772,42 @@ mod merge_phase {
             metrics
                 .find(catalog::READ_PHASE_DECOMPRESS)
                 .map(|m| &m.points)
+        );
+    }
+    /// KNOWN GAP (issue #1707): the cross-generation merge route records NO
+    /// `read.phase.io` sample, so this test is RED and `#[ignore]`d rather than
+    /// deleted.
+    ///
+    /// It is NOT a propagation gap — that half is fixed and shipped in this change:
+    /// the sink IS captured on the merge/consumer thread and installed on both
+    /// per-input producer threads (`merge::from_readers`, `merge::producer_iter`),
+    /// which is what makes `decompress` reachable on this route through the shared
+    /// chunk-decode plane. The gap is that THE IO SEAM DOES NOT EXIST on this read
+    /// route at all: `read_phase::scoped(ReadPhase::Io)` appears only in
+    /// `scan_stream_windowed_read`, and a merge producer reads through
+    /// `stream_all_partitions_for_compaction` / `_for_query`, which has no io seam at
+    /// any depth. Closing it means instrumenting a SECOND read route, a change to the
+    /// read path rather than to metric wiring.
+    ///
+    /// Kept as an executable RED test because the alternative — deleting it — would
+    /// leave nothing that fails the day someone believes the route is io-measured.
+    /// `observability::read_phase`'s coverage boundary states the same gap in prose,
+    /// so an operator is not misled in the meantime. Un-`#[ignore]` it when the seam
+    /// lands; nothing else about it should need to change.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    #[serial_test::serial(read_metrics)]
+    #[ignore = "issue #1707: the merge route's read path has no io seam (propagation is done; the seam is not) — un-ignore when it is instrumented"]
+    async fn a_cross_generation_read_records_the_io_phase() {
+        let (rows, metrics) = scan_two_generations(true).await;
+        assert!(rows > 0, "a read that delivered no rows proves nothing");
+        assert!(
+            samples(&metrics, catalog::READ_PHASE_IO) >= 1,
+            "a cross-generation read PHYSICALLY READS Data.db (with a 4ms delay armed \
+             at every instrumented read), so read.phase.io must carry at least one \
+             sample — an absent series on a route an operator believes is measured \
+             reads as \"io was free\" on exactly the path where io is most likely the \
+             problem; collected metrics: {:?}",
+            metric_names(&metrics)
         );
     }
 }

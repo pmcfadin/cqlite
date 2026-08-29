@@ -55,8 +55,24 @@
 //! **Measured** — the windowed scan driver, reached by both streaming surfaces
 //! (`scan_stream` per-row and `scan_stream_batched`) for a chunk-stitching reader
 //! (io + decompress + decode); and `generation_merge::stream_generations_for_read`,
-//! the streaming cross-generation reconciling merge (merge, plus the io/decompress
-//! its producer thread performs).
+//! the streaming cross-generation reconciling merge (merge, plus the DECOMPRESS its
+//! per-input producer threads perform).
+//!
+//! **PARTIALLY measured, and the omission is named rather than implied**: that
+//! cross-generation merge route records NO `io` sample. The sink IS propagated into
+//! both producer-thread spawn sites (`merge::from_readers`, `merge::producer_iter`),
+//! so the work those threads do through the SHARED chunk-decode plane
+//! (`reader::chunk_source`) is attributed — that is where `decompress` comes from.
+//! But the `io` seam itself exists ONLY in the windowed scan's read helpers
+//! (`scan_stream_windowed_read`), and a merge producer reads through
+//! `stream_all_partitions_for_compaction` / `_for_query` instead, which has no io
+//! seam at any depth. So io on this route is unmeasured for want of a SEAM, not for
+//! want of propagation, and closing it means instrumenting a second read route —
+//! deliberately not smuggled in here. An earlier version of this paragraph claimed
+//! the route recorded "the io/decompress its producer thread performs", which was
+//! false in its io half and, under the rule stated below, would have taught an
+//! operator to read an absent `io` as "io was free" on exactly the path where io is
+//! most likely the problem.
 //!
 //! **NOT measured — these emit `read.duration` with NO `read.phase.*` series at
 //! all**: the materializing `SSTableManager::scan` / `scan_with_meter` and the
