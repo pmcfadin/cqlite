@@ -10,6 +10,14 @@ on:
       - 'bindings/python/**'
       - 'cqlite-core/**'
       - '.github/workflows/python-ci.yml'
+      # Issue #1459: the ABI-critical dependency versions are inherited from the
+      # workspace root, NOT declared in bindings/python — `napi` and `pyo3` are
+      # `{ workspace = true }`. So a root manifest/lockfile bump can change the
+      # Node-API level or the abi3 floor, which is exactly what the floor jobs
+      # below certify. Without these two paths such a bump merges WITHOUT
+      # running them, and the floor claim's own premise changes untested.
+      - 'Cargo.toml'
+      - 'Cargo.lock'
   pull_request:
     branches: [main]
     types: [opened, synchronize, reopened, ready_for_review, labeled, unlabeled]
@@ -17,6 +25,14 @@ on:
       - 'bindings/python/**'
       - 'cqlite-core/**'
       - '.github/workflows/python-ci.yml'
+      # Issue #1459: the ABI-critical dependency versions are inherited from the
+      # workspace root, NOT declared in bindings/python — `napi` and `pyo3` are
+      # `{ workspace = true }`. So a root manifest/lockfile bump can change the
+      # Node-API level or the abi3 floor, which is exactly what the floor jobs
+      # below certify. Without these two paths such a bump merges WITHOUT
+      # running them, and the floor claim's own premise changes untested.
+      - 'Cargo.toml'
+      - 'Cargo.lock'
   workflow_dispatch:
 
 concurrency:
@@ -130,6 +146,19 @@ jobs:
         # makes this list time-sensitive: when 3.15 ships it belongs here and in
         # the classifier list, in one commit. Issue #1459 was filed when 3.13 was
         # newest; 3.14 is the top today.
+        #
+        # MAJOR.MINOR, not exact patch — deliberately asymmetric with the Node
+        # leg, which DOES pin an exact patch. The asymmetry is real, not an
+        # oversight: `napi9` becomes available AT a patch boundary (Node
+        # 18.17.0), so the patch level is load-bearing there. Here it is not.
+        # `requires-python = ">=3.9"` admits 3.9.0, and both halves of this
+        # package are patch-independent across 3.9.x — the extension is
+        # `abi3-py39` (the stable ABI exists from 3.9.0), and the pure-Python
+        # wrapper is 87 lines that import nothing from the stdlib, so there is no
+        # post-3.9.0 stdlib surface to regress on. Pinning `3.9.0` would test
+        # nothing additional that could plausibly break, while risking that
+        # setup-python has no 3.9.0 build for the current runner image, which
+        # would red this lane for no gain.
         python: ["3.9", "3.13", "3.14"]
 
     steps:

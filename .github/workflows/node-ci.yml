@@ -10,6 +10,14 @@ on:
       - 'bindings/node/**'
       - 'cqlite-core/**'
       - '.github/workflows/node-ci.yml'
+      # Issue #1459: the ABI-critical dependency versions are inherited from the
+      # workspace root, NOT declared in bindings/node — `napi` and `pyo3` are
+      # `{ workspace = true }`. So a root manifest/lockfile bump can change the
+      # Node-API level or the abi3 floor, which is exactly what the floor jobs
+      # below certify. Without these two paths such a bump merges WITHOUT
+      # running them, and the floor claim's own premise changes untested.
+      - 'Cargo.toml'
+      - 'Cargo.lock'
   pull_request:
     branches: [main]
     types: [opened, synchronize, reopened, ready_for_review, labeled, unlabeled]
@@ -17,6 +25,14 @@ on:
       - 'bindings/node/**'
       - 'cqlite-core/**'
       - '.github/workflows/node-ci.yml'
+      # Issue #1459: the ABI-critical dependency versions are inherited from the
+      # workspace root, NOT declared in bindings/node — `napi` and `pyo3` are
+      # `{ workspace = true }`. So a root manifest/lockfile bump can change the
+      # Node-API level or the abi3 floor, which is exactly what the floor jobs
+      # below certify. Without these two paths such a bump merges WITHOUT
+      # running them, and the floor claim's own premise changes untested.
+      - 'Cargo.toml'
+      - 'Cargo.lock'
   workflow_dispatch:
 
 concurrency:
