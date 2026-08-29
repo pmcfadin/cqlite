@@ -4805,9 +4805,21 @@ run_clippy() {
 #     every pattern carries a positive control) and behaviourally (the guard test's own
 #     helpers, extracted verbatim, exercised under BSD `sed`/`paste` shims), so the
 #     platform difference is caught on ANY platform. Hermetic, ~1s.
+#   * check-cargo-output-parsers.sh — the #3400 COLOUR-INHERITANCE class: a gate parser
+#     keyed on cargo's literal status text (`Running tests/`, `warning:`) silently
+#     matches NOTHING under CARGO_TERM_COLOR=always, because cargo writes the reset
+#     BETWEEN the status word and the payload — and colour SURVIVES redirection to a
+#     file, so the gate's own mandated `> gate.log 2>&1` capture is affected. MEASURED
+#     consequence on main: the cli-tests zero-tests guard reported OK having judged no
+#     target at all. The lint requires every cargo-output parse to read from an
+#     ANSI-stripped source AT THE PARSE SITE (never inherited from a caller's env, the
+#     coupling that hid this for months), and reds a PIPE-FED while-read loop whose
+#     verdict would die with its subshell. An EMPTY SUBJECT SET is a FAIL, not a green.
+#     Source-only, sub-second, offline; SKIP-aware (no python3 -> loud SKIP).
 run_roborev_lints_cmd() {
   bash "$REPO_ROOT/scripts/ci/check-workflow-injection.sh" &&
     bash "$REPO_ROOT/scripts/tests/check-no-wallclock-asserts.sh" &&
+    bash "$REPO_ROOT/scripts/ci/check-cargo-output-parsers.sh" &&
     bash "$REPO_ROOT/scripts/tests/test_roborev_review_guard.sh" &&
     bash "$REPO_ROOT/scripts/tests/test_roborev_guard_portability.sh"
 }
@@ -5704,6 +5716,16 @@ run_pub_surface() {
 # descope — no cargo doc, no cargo at all, seconds not minutes; never invokes the gate
 # except in case 26 (`--only pub-surface`, which self-exempts from the #1825 slot), so
 # it cannot recurse.
+# Also runs scripts/tests/test_cargo_output_parsers.sh (#3400), the non-vacuity proof for the
+# `roborev-lints` colour lint AND the RED-first pin of the defect it exists for: a verbatim copy
+# of the pre-#3400 cli-tests zero-tests guard is shown to exit 0 on a COLOURED zero-test cargo
+# log and 1 on the same log plain, while the guard EXTRACTED FROM the shipped agent-gate.sh exits
+# 1 on both. Fixtures carry real ESC bytes injected via printf, transcribed from a `cat -v`
+# capture of cargo output under CARGO_TERM_COLOR=always redirected TO A FILE. Also asserts the
+# redirection-not-pipe property both structurally and behaviourally (same log: a pipe-fed
+# while-read loop silently exits 0, the redirect-fed one exits 1), and that the lint FAILs an
+# EMPTY SUBJECT SET rather than printing `0/0 PASS`. Hermetic: temp dir only, no cargo, no
+# datasets, no network, never invokes the gate — so it cannot recurse.
 run_tooling_tests() {
   local name=tooling-tests
   if [ -n "$ONLY" ] && ! grep -qw "$name" <<<"${ONLY//,/ }"; then
@@ -6985,7 +7007,7 @@ run_tooling_tests() {
     record_result "$name" "$status" 0
     return 0
   fi
-  echo ">>> [$name] bash scripts/tests/test_agent_gate_summary.sh; bash scripts/tests/test_agent_gate_notify.sh; bash scripts/tests/test_gate_notify_contract.sh; bash scripts/tests/test_agent_gate_smoke_target_dir.sh; bash scripts/tests/test_gate_concurrency_cap.sh; bash scripts/tests/test_bootstrap_agent_machine.sh; bash scripts/tests/test_perf_capability.sh; bash scripts/tests/test_perf_capability_bootstrap.sh; bash scripts/tests/test_claim_lock.sh; bash scripts/flow/tests/claim-resume.test.sh; bash scripts/tests/test_premerge_assert.sh; bash scripts/tests/test_board_label_mirror.sh; bash scripts/tests/test_worker_supervisor.sh; bash scripts/tests/test_gate_failure_mode.sh"
+  echo ">>> [$name] bash scripts/tests/test_agent_gate_summary.sh; bash scripts/tests/test_agent_gate_notify.sh; bash scripts/tests/test_gate_notify_contract.sh; bash scripts/tests/test_agent_gate_smoke_target_dir.sh; bash scripts/tests/test_gate_concurrency_cap.sh; bash scripts/tests/test_bootstrap_agent_machine.sh; bash scripts/tests/test_perf_capability.sh; bash scripts/tests/test_perf_capability_bootstrap.sh; bash scripts/tests/test_claim_lock.sh; bash scripts/flow/tests/claim-resume.test.sh; bash scripts/tests/test_premerge_assert.sh; bash scripts/tests/test_board_label_mirror.sh; bash scripts/tests/test_worker_supervisor.sh; bash scripts/tests/test_gate_failure_mode.sh; bash scripts/tests/test_cargo_output_parsers.sh"
   if bash "$REPO_ROOT/scripts/tests/test_agent_gate_summary.sh" >>"$log" 2>&1 &&
      bash "$REPO_ROOT/scripts/tests/test_agent_gate_notify.sh" >>"$log" 2>&1 &&
      bash "$REPO_ROOT/scripts/tests/test_gate_notify_contract.sh" >>"$log" 2>&1 &&
@@ -6999,7 +7021,8 @@ run_tooling_tests() {
      bash "$REPO_ROOT/scripts/tests/test_premerge_assert.sh" >>"$log" 2>&1 &&
      bash "$REPO_ROOT/scripts/tests/test_board_label_mirror.sh" >>"$log" 2>&1 &&
      bash "$REPO_ROOT/scripts/tests/test_worker_supervisor.sh" >>"$log" 2>&1 &&
-     bash "$REPO_ROOT/scripts/tests/test_gate_failure_mode.sh" >>"$log" 2>&1; then
+     bash "$REPO_ROOT/scripts/tests/test_gate_failure_mode.sh" >>"$log" 2>&1 &&
+     bash "$REPO_ROOT/scripts/tests/test_cargo_output_parsers.sh" >>"$log" 2>&1; then
     status=PASS
   else
     status=FAIL
