@@ -49,13 +49,23 @@
 # ── WHAT COUNTS AS AN ANSI-STRIPPED SOURCE ────────────────────────────────────────────
 # Exactly three RECOGNISED shapes; anything else is a named FAIL rather than a guess
 # (the `check-pub-surface.sh` posture — refuse, never assume):
-#   R1  the parse is inside a `while … read` loop whose `done` REDIRECT names a stripped
-#       source. A `done` with NO redirect is a FAIL in its own right: a piped
-#       `while read` loop runs in a SUBSHELL, so the loop's accumulated verdict variable
-#       is discarded on exit and the guard silently PASSES — the identical failure these
-#       guards exist to prevent, arriving through their own plumbing (issue #3400 AC3).
-#   R2  the parse line references a variable assigned from `_ansi_stripped_log`
-#       (`V=$(_ansi_stripped_log …)`), or calls `_ansi_stripped_log` itself.
+#   R1  the parse is inside a `while … read` loop whose `done` redirect reads the CONTENTS
+#       of a stripped source. Two FAILs live here, and both are silent passes otherwise:
+#         * a `done` with NO redirect is PIPE-FED — the loop body runs in a SUBSHELL, so its
+#           accumulated verdict variable is discarded on exit and the guard PASSES having
+#           found the problem and thrown it away (issue #3400 AC3);
+#         * `done <<< "$src"` names a stripped source and still reads NOTHING: a here-string
+#           feeds the loop the FILENAME, one line, so the parser consumes no cargo output at
+#           all. Referencing a stripped PATH is not the same as reading its CONTENTS, so the
+#           redirect KIND is classified and each kind judged on its own terms — direct file
+#           redirection (`< "$src"`) reads contents; a here-string or process substitution
+#           must do so EXPLICITLY (`<<< "$(cat "$src")"`, `< <(cat "$src")`). An
+#           unclassifiable redirect is a FAIL, never a fall-through to permissive.
+#   R2  the parse line reads the CONTENTS of a stripped source — a `< "$src"` redirect, or
+#       `$src` as the file operand of a content-reading command (cat/sed/awk/grep/…), or an
+#       inline `_ansi_stripped_log` in a content-reading position. The same value-vs-contents
+#       distinction applies: `sed … <<< "$src"` and `echo "$src" | grep …` pass the PATH, not
+#       the log, and are reported as such rather than accepted for naming a stripped variable.
 #   R3  the site carries `cargo-colour-lint-allow` plus a one-line rationale.
 #
 # ── AN EMPTY SUBJECT SET IS A FAIL, NOT A GREEN ───────────────────────────────────────
@@ -196,9 +206,27 @@ def enclosing_loop_done(lines, n):
     return False, -1
 
 
+# Commands that read a FILE OPERAND'S CONTENTS. `echo`/`printf` are deliberately absent:
+# they emit their ARGUMENT, so `echo "$src" | grep …` greps the FILENAME.
+CONTENT_READER = (r'\b(?:cat|sed|awk|grep|egrep|fgrep|rg|tr|tail|head|sort|uniq|wc|nl|cut'
+                  r'|tac|rev|od|xxd|strings)\b')
+# A direct input redirection `< X` — and specifically NOT `<<<` (a here-string, which feeds a
+# VALUE) and NOT `< <(` (a process substitution, judged on its command instead).
+DIRECT_REDIR = re.compile(r'(?<!<)<(?!<)\s*(?!\()"?\$\{?([A-Za-z_]\w*)')
+FILE_OPERAND = re.compile(CONTENT_READER + r'[^|<>]*?"?\$\{?([A-Za-z_]\w*)\}?"?')
+INLINE_HELPER_READ = re.compile(r'<\s*"?\$\(\s*' + HELPER + r'\b')
+
+
 def done_redirect(line):
     """Classify a `done …` line's input redirect.
-    Returns (kind, expr): kind in {'file', 'herestring', 'procsub', 'none'}."""
+    Returns (kind, expr): kind in {'file', 'herestring', 'procsub', 'none'}.
+
+    The KIND matters, it is not a formality: only 'file' reads the referenced path's
+    CONTENTS by itself. 'herestring' feeds the loop the VALUE of its operand — so
+    `done <<< "$src"` hands the parser a one-line filename and it consumes no cargo output
+    whatsoever, which is the vacuous pass this whole lint exists to catch. 'procsub' reads
+    whatever its command produces, which may or may not be the file. Hence each kind is
+    judged separately by the caller, and an unrecognised shape FAILs (closed grammar)."""
     m = re.search(r'done\s*<\s*<\((.*)\)', line)
     if m:
         return 'procsub', m.group(1)
@@ -228,6 +256,26 @@ for path in paths:
         if HELPER in expr:
             return True
         return bool(var_refs(expr) & stripped_vars)
+
+    def reads_stripped_contents(expr):
+        """Does `expr` read the CONTENTS of an ANSI-stripped log?
+
+        The distinction this function exists for: naming a stripped PATH is not reading it.
+        `<<< "$src"` and `echo "$src" | …` both reference a stripped variable and both feed a
+        one-line FILENAME to the parser, which then matches nothing and reports clean. So a
+        stripped variable only counts when it appears in a CONTENT-READING position — the
+        target of a direct `< ` redirection, or the file operand of a command that reads its
+        operand's contents. ACCEPT only on an affirmative match; there is no permissive
+        fall-through."""
+        if INLINE_HELPER_READ.search(expr):
+            return True
+        for m in DIRECT_REDIR.finditer(expr):
+            if m.group(1) in stripped_vars:
+                return True
+        for m in FILE_OPERAND.finditer(expr):
+            if m.group(1) in stripped_vars:
+                return True
+        return False
 
     for n, line in enumerate(lines):
         if is_comment(line):
@@ -265,6 +313,16 @@ for path in paths:
                     "could find, so its parse source is unknowable", snippet))
                 continue
             kind, expr = done_redirect(lines[done_idx])
+            if kind not in ('file', 'herestring', 'procsub', 'none'):
+                # Closed grammar: an unrecognised redirect kind FAILs. A new shape must be
+                # classified deliberately, never inherit the permissive branch.
+                violations.append((
+                    path, lineno,
+                    "the enclosing loop's `done` (line %d) uses an input redirection this "
+                    "scanner does not classify (%r), so whether it reads the log's CONTENTS "
+                    "is unknown — classify it here or mark the site" % (done_idx + 1, kind),
+                    snippet))
+                continue
             if kind == 'none':
                 violations.append((
                     path, lineno,
@@ -281,15 +339,47 @@ for path in paths:
                     "from `%s`, which is not derived from `%s`"
                     % (done_idx + 1, expr.strip(), HELPER), snippet))
                 continue
+            if kind == 'file':
+                # A direct `< X` redirection reads X's CONTENTS. Stripped path, done.
+                continue
+            # 'herestring' / 'procsub': naming a stripped path is NOT reading it. A
+            # here-string feeds the loop the VALUE — one line of FILENAME — so the parser
+            # consumes no cargo output at all and reports clean, which is precisely the
+            # vacuous pass this lint exists to catch. A process substitution reads whatever
+            # its command produces. Both must read the contents EXPLICITLY.
+            if reads_stripped_contents(expr):
+                continue
+            violations.append((
+                path, lineno,
+                "the enclosing loop's `done` (line %d) uses a %s (`%s`) that names a stripped "
+                "path WITHOUT READING IT: %s feed the loop the VALUE, so the parser consumes a "
+                "one-line FILENAME and matches NOTHING while reporting clean. Read the contents "
+                "explicitly (`done < \"$src\"`, `done < <(cat \"$src\")`, "
+                "`done <<< \"$(cat \"$src\")\"`)"
+                % (done_idx + 1,
+                   'here-string' if kind == 'herestring' else 'process substitution',
+                   expr.strip(),
+                   'here-strings' if kind == 'herestring'
+                   else 'process substitutions of a non-reading command'),
+                snippet))
             continue
 
-        # R2 — the parse line itself names a stripped source.
+        # R2 — the parse line itself must READ a stripped source, not merely name one.
+        if reads_stripped_contents(line):
+            continue
         if source_is_stripped(line):
+            violations.append((
+                path, lineno,
+                "names a stripped source but does not READ IT: the reference is in a VALUE "
+                "position (a here-string, or an `echo`/`printf` piped into the parser), which "
+                "passes the one-line PATH instead of the log's contents — the parser then "
+                "matches nothing and reports clean. Use `< \"$src\"` or pass `$src` as the file "
+                "operand of the parsing command", snippet))
             continue
         violations.append((
             path, lineno,
             "reads a RAW source: neither this line nor an enclosing `while … read` loop "
-            "names a value derived from `%s`" % HELPER, snippet))
+            "reads the contents of a value derived from `%s`" % HELPER, snippet))
 
 if violations:
     print("FAIL: cargo-output parse site(s) that do not read from an ANSI-stripped source")

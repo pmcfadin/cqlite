@@ -558,6 +558,98 @@ else
   bad "lint B11: expected a non-zero RAW-source verdict for the mixed fixture, got rc=$lint_rc"
 fi
 
+# ─────────────────────────────────────────────────────────────────────────────────────
+# (B12) CONTENT vs VALUE: naming a stripped path is NOT reading it (roborev B1, #3400).
+#       `done <<< "$src"` references a stripped source and still reads NOTHING — a
+#       here-string feeds the loop one line of FILENAME, so the parser consumes no cargo
+#       output at all and reports clean. The lint must classify the redirect KIND and
+#       judge each on its own terms, with an unclassifiable shape FAILing rather than
+#       falling through to permissive. Every accepted shape gets a positive fixture and
+#       every rejected shape a negative one, driven from one table so neither side can be
+#       quietly dropped.
+# ─────────────────────────────────────────────────────────────────────────────────────
+# plant_shape <name> <expect: pass|fail> <body-line...>  — wraps the body in a function
+# whose source variable IS stripped, so strippedness is never the reason for the verdict.
+plant_shape() {
+  local name="$1" expect="$2"; shift 2
+  local f="$tmp/shape_$name.sh"
+  {
+    echo 'myguard() {'
+    echo '  local src'
+    echo '  src=$(_ansi_stripped_log "$1") || return 1'
+    printf '%s\n' "$@"
+    echo '}'
+  } >"$f"
+  run_lint "$f"
+  if [ "$expect" = pass ]; then
+    if [ "$lint_rc" -eq 0 ]; then
+      ok "B12 shape '$name': ACCEPTED (reads the stripped log's CONTENTS)"
+    else
+      bad "B12 shape '$name': expected ACCEPT, got rc=$lint_rc — $lint_out"
+    fi
+  else
+    if [ "$lint_rc" -ne 0 ]; then
+      ok "B12 shape '$name': REJECTED (names a stripped path without reading it, or reads a raw one)"
+    else
+      bad "B12 shape '$name': expected REJECT, the lint PASSED it — a shape that consumes no cargo output must never green"
+    fi
+  fi
+}
+
+# ── ACCEPTED: the redirect/operand actually delivers the file's contents ──
+plant_shape direct_redirect pass \
+  '  while IFS= read -r line; do' \
+  '    case "$line" in *"Running tests/"*) echo hit ;; esac' \
+  '  done < "$src"'
+plant_shape procsub_cat pass \
+  '  while IFS= read -r line; do' \
+  '    case "$line" in *"Running tests/"*) echo hit ;; esac' \
+  '  done < <(cat "$src")'
+plant_shape herestring_cmdsub pass \
+  '  while IFS= read -r line; do' \
+  '    case "$line" in *"Running tests/"*) echo hit ;; esac' \
+  '  done <<< "$(cat "$src")"'
+plant_shape operand_of_reader pass \
+  '  sed -n "s/^test result: ok\. \([0-9]*\) passed.*/\1/p" "$src"'
+plant_shape reader_with_redirect pass \
+  '  grep -c "test result:" < "$src"'
+
+# ── REJECTED: every one of these references a STRIPPED path and still reads no log ──
+# THE B1 DEFECT ITSELF. Before the fix the lint accepted this because the here-string
+# operand named a stripped variable; the loop reads one line of filename.
+plant_shape herestring_bare_path fail \
+  '  while IFS= read -r line; do' \
+  '    case "$line" in *"Running tests/"*) echo hit ;; esac' \
+  '  done <<< "$src"'
+plant_shape procsub_echo fail \
+  '  while IFS= read -r line; do' \
+  '    case "$line" in *"Running tests/"*) echo hit ;; esac' \
+  '  done < <(echo "$src")'
+plant_shape reader_herestring fail \
+  '  grep -c "test result:" <<< "$src"'
+plant_shape echo_piped fail \
+  '  echo "$src" | grep -c "test result:"'
+plant_shape printf_piped fail \
+  '  printf "%s\n" "$src" | sed -n "s/^test result: ok\. \([0-9]*\).*/\1/p"'
+# ...and the two pre-existing rejection classes, re-asserted through the same table.
+plant_shape pipe_fed fail \
+  '  cat "$src" | while IFS= read -r line; do' \
+  '    case "$line" in *"Running tests/"*) echo hit ;; esac' \
+  '  done'
+plant_shape raw_positional fail \
+  '  while IFS= read -r line; do' \
+  '    case "$line" in *"Running tests/"*) echo hit ;; esac' \
+  '  done < "$1"'
+
+# The B1 rejection must name the CONTENT-vs-VALUE cause, not a generic "raw source" —
+# an accurate diagnosis is what makes the finding actionable rather than confusing.
+run_lint "$tmp/shape_herestring_bare_path.sh"
+if printf '%s' "$lint_out" | grep -qi 'WITHOUT READING IT'; then
+  ok "B12: the here-string rejection names the CONTENT-vs-VALUE cause (not a generic raw-source message)"
+else
+  bad "B12: the here-string rejection does not explain that the path was named but not read: $lint_out"
+fi
+
 echo
 printf 'passed=%d failed=%d\n' "$PASSES" "$FAILS"
 if [ "$FAILS" -gt 0 ]; then
