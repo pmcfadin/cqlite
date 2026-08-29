@@ -125,10 +125,7 @@ pub const REMOVED_KEYS: &[Removed] = &[
 /// `has_path` answers "does the document contain this dotted path as a mapping
 /// key" for one concrete document type, so the FILTER is written once and every
 /// surface (this crate's JSON, the CLI's TOML/YAML/JSON) shares it.
-pub fn removed_keys_present<'a>(
-    table: &'a [Removed],
-    has_path: impl Fn(&str) -> bool,
-) -> Vec<&'a Removed> {
+pub fn removed_keys_present(table: &[Removed], has_path: impl Fn(&str) -> bool) -> Vec<&Removed> {
     table
         .iter()
         .filter(|removed| has_path(removed.path))
