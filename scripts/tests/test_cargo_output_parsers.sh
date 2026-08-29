@@ -330,31 +330,83 @@ else
   else
     bad "E1 (behavioural): expected PIPESTATUS[0]=0 with a nonzero [1], got [0]=$ps0 [1]=$ps1 — the premise did not reproduce on this shell"
   fi
+  # STRUCTURAL asserts over the cli-tests blob, as FIXED STRINGS with a discrimination proof.
+  #
+  # Not a style preference. `grep` on this fleet is ugrep, and a BRE pattern containing `$((`
+  # did not match a line it visibly occurs in — so the first version of these asserts was a
+  # QUOTING PUZZLE whose verdict I could not reproduce by hand. An assert that greens because
+  # its pattern is broken is the exact false-PASS shape this whole issue is about, one level up.
+  # So: `grep -F` only, and every needle is then re-checked against a copy of the blob with that
+  # needle REMOVED — if the predicate still passes, it is not measuring anything.
   cli_blob_src=$(awk "/cli-tests\\) run_component cli-tests bash -c/{f=1} f{print} f&&/^ *;;\$/{exit}" "$GATE")
-  if [ "$(printf '%s' "$cli_blob_src" | grep -c '_ps=("${PIPESTATUS\[@\]}")')" -ge 2 ] \
-     && [ "$(printf '%s' "$cli_blob_src" | grep -c 'tee_rc=${_ps\[1\]}')" -ge 2 ] \
-     && [ "$(printf '%s' "$cli_blob_src" | grep -c 'tee_rc" -ne 0')" -ge 2 ]; then
-    ok "E1 (structural): both cli-tests passes capture the WHOLE PIPESTATUS array in one assignment and fail closed on a nonzero tee status"
+  if [ -n "$cli_blob_src" ]; then
+    ok "extracted the cli-tests dispatch blob from the shipped gate for structural assertions"
   else
-    bad "E1 (structural): the cli-tests passes do not check the tee half of the pipeline (or read PIPESTATUS across two statements, which yields an EMPTY tee status and a check that never fires)"
+    bad "could not extract the cli-tests dispatch blob — every structural assertion below would pass or fail for no reason"
   fi
-  # The one-assignment rule, pinned as its own property: a second statement reading PIPESTATUS
-  # is a check that silently never fires, so no caller may reintroduce that shape.
-  if printf '%s' "$cli_blob_src" | grep -qE 'rc=\$\{PIPESTATUS\[0\]\}; *tee_rc=\$\{PIPESTATUS\[1\]\}'; then
+
+  # blob_needs <label> <count> <fixed-string> — the string must occur at least <count> times in
+  # the blob, AND the same test must FAIL on a blob with the string stripped out.
+  blob_needs() {
+    local label="$1" want="$2" needle="$3" got mutated_got
+    got=$(printf '%s\n' "$cli_blob_src" | grep -Fc -- "$needle" || true)
+    mutated_got=$(printf '%s\n' "${cli_blob_src//"$needle"/}" | grep -Fc -- "$needle" || true)
+    if [ "${got:-0}" -ge "$want" ] && [ "${mutated_got:-0}" -eq 0 ]; then
+      ok "E1 (structural): $label — found ${got} occurrence(s), and the check is PROVEN to fire (0 on a blob with it removed)"
+    elif [ "${got:-0}" -lt "$want" ]; then
+      bad "E1 (structural): $label — expected >= $want occurrence(s) of the required text, found ${got:-0}"
+    else
+      bad "E1 (structural): $label — the check does NOT discriminate: it still reports ${mutated_got} on a blob with the text removed, so its green means nothing"
+    fi
+  }
+
+  blob_needs "both passes capture the WHOLE PIPESTATUS array in one assignment" 2 \
+    '_ps=("${PIPESTATUS[@]}")'
+  blob_needs "both passes read the tee half from that captured array" 2 \
+    'tee_rc=${_ps[1]}'
+  blob_needs "both passes fail closed on a nonzero tee status" 2 \
+    'tee_rc" -ne 0'
+  blob_needs "Pass 1 derives its expected target count from def_flags" 1 \
+    'def_expected=$(( ${#def_flags[@]} / 2 ))'
+  blob_needs "Pass 2 derives its expected target count from ws_flags" 1 \
+    'ws_expected=$(( ${#ws_flags[@]} / 2 ))'
+  blob_needs "each pass passes its derived count to the guard" 1 \
+    '"$log1" "$def_expected"'
+  # The needle is matched against the RAW blob text, where the single quotes are still in this
+  # file's `bash -c` escaped form — so key on the quote-free payload and let the NEGATIVE assert
+  # below (no `trap "rm -rf`) establish that the quoting is the deferred kind.
+  blob_needs "the EXIT trap removes the private dir by an explicitly-terminated path" 1 \
+    'rm -rf -- "$_cli_tmp"'
+
+  # The one-assignment rule, pinned as its own NEGATIVE property: a second statement reading
+  # PIPESTATUS is a check that silently never fires, so no caller may reintroduce that shape.
+  if printf '%s\n' "$cli_blob_src" | grep -Fq -- 'rc=${PIPESTATUS[0]}; tee_rc=${PIPESTATUS[1]}'; then
     bad "E1: a cli-tests pass reads PIPESTATUS across TWO statements — the first assignment resets the array, so the tee status is empty and its check never fires"
   else
     ok "E1: no cli-tests pass reads PIPESTATUS across two statements (the first assignment would reset the array)"
   fi
-  if printf '%s' "$cli_blob_src" | grep -q 'def_expected=$(( ${#def_flags\[@\]} / 2 ))' \
-     && printf '%s' "$cli_blob_src" | grep -q 'ws_expected=$(( ${#ws_flags\[@\]} / 2 ))'; then
-    ok "E1 (structural): each pass derives its expected target count from the SAME flag array the cargo invocation uses (never re-counted from the filesystem)"
+  # ...and the DOUBLE-QUOTED trap form must not return: it bakes the literal path into a string
+  # bash re-parses, so a TMPDIR carrying a $ or a backtick both RUNS injected syntax and SKIPS
+  # cleanup. Both consequences measured on this box before the fix.
+  if printf '%s\n' "$cli_blob_src" | grep -Fq -- 'trap "rm -rf'; then
+    bad "E1: the cli-tests EXIT trap is DOUBLE-QUOTED again — a TMPDIR containing \$ or a backtick can alter the cleanup command"
   else
-    bad "E1 (structural): the expected target counts are not derived from def_flags/ws_flags"
+    ok "E1: the cli-tests EXIT trap is not double-quoted (expansion is deferred to when the trap runs)"
   fi
 
   # AC3, structurally: the shipped guard must be REDIRECTION-fed, not pipe-fed.
-  if grep -q 'done < "\$_parse_src"' "$tmp/current_guard.sh" && ! grep -qE '\|[[:space:]]*while IFS= read' "$tmp/current_guard.sh"; then
-    ok "AC3 (structural): the shipped guard reads via REDIRECTION (done < \"\$_parse_src\"), not through a pipe into while-read"
+  # FIXED strings, not regexes (see the note on the blob asserts below): `grep` here is ugrep,
+  # and a NEGATIVE assert whose pattern silently fails to match passes VACUOUSLY — which is the
+  # defect class this file exists for. The positive half is proven to discriminate by re-running
+  # it against a copy with the needle removed.
+  if grep -Fq -- 'done < "$_parse_src"' "$tmp/current_guard.sh" \
+     && ! grep -Fq -- '| while IFS= read' "$tmp/current_guard.sh"; then
+    sed 's/done < "\$_parse_src"//' "$tmp/current_guard.sh" >"$tmp/current_guard_mutated.sh"
+    if grep -Fq -- 'done < "$_parse_src"' "$tmp/current_guard_mutated.sh"; then
+      bad "AC3 (structural): the redirection check does NOT discriminate — it still matches a guard with that line removed"
+    else
+      ok "AC3 (structural): the shipped guard reads via REDIRECTION (done < \"\$_parse_src\"), not through a pipe into while-read — and the check is proven to fire"
+    fi
   else
     bad "AC3 (structural): the shipped guard is not redirection-fed — a piped while-read loop runs in a subshell and discards its verdict"
   fi
@@ -459,7 +511,7 @@ STUB
   # the belt. The prefix must stay a BARE assignment: `env CARGO_TERM_COLOR=never …` execs an
   # external binary and would bypass the stub, silently turning both cases above into real
   # cargo builds. That is why this assert pins the exact spelling.
-  if grep -q 'CARGO_TERM_COLOR=never cargo test --package cqlite-core --features arrow' "$tmp/arrow_guard.sh"; then
+  if grep -Fq -- 'CARGO_TERM_COLOR=never cargo test --package cqlite-core --features arrow' "$tmp/arrow_guard.sh"; then
     ok "AC4 part 2: the arrow-parity-guard cargo invocation carries the CARGO_TERM_COLOR=never belt (and the two cases above, run against a stub cargo the prefix cannot reach, show the STRIP is what actually carries it)"
   else
     bad "AC4 part 2: the arrow-parity-guard cargo invocation is missing the CARGO_TERM_COLOR=never belt"
@@ -474,17 +526,18 @@ fi
 #      symlink window. Both shipped callers must use a private 0700 mktemp -d and remove
 #      it wholesale (issue #3400).
 # ─────────────────────────────────────────────────────────────────────────────────────
-if grep -qE 'mktemp -d .*agent-gate-cli' "$GATE" && grep -qE 'trap "rm -rf .*_cli_tmp' "$GATE"; then
+if grep -Fq -- 'mktemp -d "${TMPDIR:-/tmp}/agent-gate-cli.XXXXXX"' "$GATE" \
+   && grep -Fq -- 'rm -rf -- "$_cli_tmp"' "$GATE"; then
   ok "A5: cli-tests logs into a private mktemp -d and removes it wholesale (the .ansi-stripped siblings go with it)"
 else
   bad "A5: cli-tests does not use a private mktemp -d + rm -rf trap — the derived .ansi-stripped siblings leak into TMPDIR"
 fi
-if grep -qE '^ *log1=\$\(mktemp\) && log2=\$\(mktemp\)' "$GATE"; then
+if grep -Fq -- 'log1=$(mktemp) && log2=$(mktemp)' "$GATE"; then
   bad "A5: cli-tests is back to two bare mktemp files in the shared tmp"
 else
   ok "A5: cli-tests no longer creates two bare mktemp files in the shared tmp"
 fi
-if grep -qE 'tmpd=\$\(mktemp -d\)' "$GATE" && grep -qE 'rm -rf "\$tmpd"' "$GATE"; then
+if grep -Fq -- 'tmpd=$(mktemp -d)' "$GATE" && grep -Fq -- 'rm -rf "$tmpd"' "$GATE"; then
   ok "A5: run_arrow_parity_guard_cmd normalises inside a private mktemp -d and removes it (consistent with the cli-tests caller)"
 else
   bad "A5: run_arrow_parity_guard_cmd is not using a private mktemp -d — the two callers disagree"
