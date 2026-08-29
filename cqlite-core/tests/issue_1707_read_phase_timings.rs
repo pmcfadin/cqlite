@@ -165,6 +165,17 @@ fn metric_names(metrics: &CapturedMetrics) -> Vec<String> {
     metrics.entries().iter().map(|m| m.name.clone()).collect()
 }
 
+/// The LAST reported value of a gauge in this collect window, or `None` when the
+/// series is absent or carries no point.
+///
+/// `Option`, deliberately: a "the level came back down" assertion needs the final
+/// reading, and an earlier form folded the points with `fold(f64::NAN, |_, v| v)`,
+/// which yields `NaN` for an empty point list and then fails `assert_eq!(NaN, 0.0)`
+/// opaquely — a real absence reported as an arithmetic mismatch.
+fn last_gauge_value(metrics: &CapturedMetrics, name: &str) -> Option<f64> {
+    metrics.find(name)?.points.last().map(|p| p.value)
+}
+
 /// Assert the emission GRAIN and the cardinality contract for every phase present:
 /// exactly ONE sample per phase per completed scan (never one per chunk or per row),
 /// the catalogued unit, and NO attribute at all.
@@ -389,13 +400,9 @@ async fn the_reader_fd_gauge_reports_the_descriptors_a_buffered_scan_holds() {
     drop(reader);
     let after = mc.flush_and_collect();
     if let Some(entry) = after.find(catalog::READER_FDS_OPEN) {
-        let last = entry
-            .points
-            .iter()
-            .map(|p| p.value)
-            .fold(f64::NAN, |_, v| v);
         assert_eq!(
-            last, 0.0,
+            last_gauge_value(&after, catalog::READER_FDS_OPEN),
+            Some(0.0),
             "after the last reader is dropped the gauge must read 0, not a level \
              that never falls; points: {:?}",
             entry.points
@@ -444,7 +451,28 @@ async fn an_mmap_backed_read_reports_no_descriptors_rather_than_a_plausible_numb
 mod wal_gauges {
     use super::*;
     use cqlite_core::schema::{Column, KeyColumn, TableSchema};
-    use cqlite_core::storage::write_engine::{WriteEngine, WriteEngineConfig};
+    use cqlite_core::storage::write_engine::{
+        CellOperation, Mutation, PartitionKey, TableId as WriteTableId, WriteEngine,
+        WriteEngineConfig,
+    };
+    use cqlite_core::types::Value;
+
+    /// A fixed write timestamp (µs) — nothing here depends on wall clock (#2642).
+    const T0: i64 = 1_704_067_200_000_000;
+
+    fn mutation(id: i32, name: &str) -> Mutation {
+        Mutation::new(
+            WriteTableId::new("obs1707", "rows"),
+            PartitionKey::single("id", Value::Integer(id)),
+            None,
+            vec![CellOperation::Write {
+                column: "name".to_string(),
+                value: Value::text(name.to_string()),
+            }],
+            T0,
+            None,
+        )
+    }
 
     pub(super) fn schema() -> TableSchema {
         TableSchema {
@@ -544,6 +572,83 @@ mod wal_gauges {
                 .map(|m| &m.points)
         );
         drop(reopened);
+    }
+
+    /// The gauge must be emitted from the ASYNC write path too, and it must COME BACK
+    /// DOWN when a flush truncates the WAL.
+    ///
+    /// Both halves are regressions this test exists for, and the sibling test above
+    /// is blind to both: it writes via `engine.execute(...)`, the SYNC path, and never
+    /// flushes.
+    ///
+    /// * `record_wal_gauges` had a single call site inside the sync
+    ///   `write_into_memtable`, and `write_async_inner` duplicates that logic — so an
+    ///   async-API caller got NO `cqlite.wal.size` series at all.
+    /// * the post-flush truncate emitted nothing, so the gauge only ever CLIMBED,
+    ///   while the operator doc promises a saw-tooth and reads a monotonic climb as
+    ///   "flushes are not keeping up". A working flush therefore manufactured an
+    ///   alarm.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    #[serial_test::serial(read_metrics)]
+    async fn the_async_write_path_reports_wal_size_and_a_flush_brings_it_back_down() {
+        let mc = testing::metrics_capture();
+        let tmp = tempfile::TempDir::new().expect("tmp");
+        let cfg = WriteEngineConfig::new(tmp.path().join("data"), tmp.path().join("wal"), schema());
+        let mut engine = WriteEngine::new(cfg).expect("engine");
+
+        // Half 1 — the ASYNC write path alone (no `execute`, no flush).
+        mc.reset();
+        for (id, name) in [(1, "one"), (2, "two")] {
+            engine.write_async(mutation(id, name)).await.expect("write");
+        }
+        let after_writes = mc.flush_and_collect();
+
+        assert!(
+            after_writes.contains(catalog::WAL_SIZE),
+            "cqlite.wal.size must be reported by the ASYNC write path, not only by the \
+             sync one — the two paths duplicate the same logic and a caller using \
+             write_async got no series at all; collected metrics: {:?}",
+            metric_names(&after_writes)
+        );
+        let grown = last_gauge_value(&after_writes, catalog::WAL_SIZE)
+            .expect("the async write path reported a WAL size point");
+        assert!(
+            grown > 0.0,
+            "two appended mutations leave a NON-EMPTY WAL; points: {:?}",
+            after_writes.find(catalog::WAL_SIZE).map(|m| &m.points)
+        );
+
+        // Half 2 — a flush truncates the WAL, so the NEXT reported level must be
+        // strictly lower than the level the writes reached. Asserting "lower than the
+        // pre-flush level" rather than "== 0" keeps the assertion about the SAW-TOOTH
+        // the docs promise without pinning an implementation detail of what an empty
+        // WAL file weighs.
+        mc.reset();
+        engine
+            .flush()
+            .await
+            .expect("flush")
+            .expect("the flush produced an sstable");
+        let after_flush = mc.flush_and_collect();
+
+        let truncated = last_gauge_value(&after_flush, catalog::WAL_SIZE).unwrap_or_else(|| {
+            panic!(
+                "a flush TRUNCATES the WAL, so it must report the new (lower) level — \
+                 without that emission the gauge only ever climbs and the operator doc's \
+                 \"a level that only climbs means flushes are not keeping up\" turns a \
+                 healthy flush into a false alarm; collected metrics: {:?}",
+                metric_names(&after_flush)
+            )
+        });
+        assert!(
+            truncated < grown,
+            "the post-flush WAL level ({truncated}) must be BELOW the pre-flush level \
+             ({grown}) — that fall is the saw-tooth the operator doc promises; points: \
+             {:?}",
+            after_flush.find(catalog::WAL_SIZE).map(|m| &m.points)
+        );
+
+        drop(engine);
     }
 }
 
