@@ -941,22 +941,10 @@ impl SSTableReader {
             // at the end of this scope (loop iteration), restoring the prior
             // (`None`) state before the next chunk's refill.
             let _borrow_guard = ActiveWindowGuard::install(window);
-            // decode PHASE (issue #1707): ONE accumulation per PARTITION parse — the
-            // coarsest boundary that still separates decode from io, and deliberately
-            // NOT inside the row/cell decoder (the read path's hottest loop).
-            //
-            // The timer is scoped to the PARSE CALL ALONE, by a block expression, and
-            // that tightness is load-bearing rather than tidiness: bound at
-            // loop-iteration scope it also covered `window.consume`, the
-            // `scratch.drain`/`batch.push` re-chunking, the batch `Vec` allocation and
-            // — decisively — `tx.blocking_send`, which PARKS this thread whenever the
-            // consumer is slow. A client that pages slowly would then make
-            // `read.phase.decode` dominated by waiting for the CONSUMER, sending the
-            // operator to the runbook's "decode dominant → wide partitions, many
-            // collection/UDT cells" and into a schema investigation that finds
-            // nothing. It would also contradict the catalogued definition ("decode out
-            // of already-resident decompressed bytes") and invert the care taken for
-            // the merge phase, which deliberately subtracts its recv-wait.
+            // decode PHASE (issue #1707): ONE accumulation per PARTITION parse, and
+            // the block expression scoping the timer to the PARSE CALL ALONE is
+            // load-bearing — see `observability::read_phase`, "Why the decode timer
+            // is scoped to the parse call".
             let step = {
                 let _decode_phase = crate::observability::read_phase::scoped(
                     crate::observability::ReadPhase::Decode,

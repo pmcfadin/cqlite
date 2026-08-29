@@ -10,6 +10,23 @@
 //!
 //! A sibling file, not more lines in `mod.rs`, per the campsite rule (#1116): that
 //! file is far over the source target already.
+//!
+//! # Why the WAL gauge is emitted through the engine's paired `record_size_gauges`
+//!
+//! [`record_wal_size`] and the memtable gauges are emitted by ONE engine helper
+//! called at all THREE seams — the sync write, the async write, and after the
+//! post-flush WAL truncate — so the two readings are taken at one instant and
+//! neither can be wired into a code path the other is missing from.
+//!
+//! That pairing exists because the unpaired version failed in both directions
+//! (issue #1707): the WAL gauge originally had a SINGLE call site inside the sync
+//! `write_into_memtable`, while `write_async_inner` duplicates that logic and
+//! emitted only the memtable gauges — so an async-API caller got no
+//! `cqlite.wal.size` series AT ALL — and the post-flush truncate emitted nothing, so
+//! a sync caller's gauge only ever CLIMBED. The operator doc reads a monotonic climb
+//! as "flushes are not keeping up", so a flush that worked perfectly manufactured an
+//! alarm. The healthy shape the doc promises is a saw-tooth, and the post-truncate
+//! emission is the falling edge of it.
 
 use std::time::Duration;
 

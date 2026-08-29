@@ -1008,25 +1008,15 @@ impl WriteEngine {
     }
 
     /// Emit BOTH engine size gauges — memtable (issue #1036) and WAL (issue #1707) —
-    /// as one call, so the two readings are taken at one instant and NEITHER can be
-    /// wired into a code path the other is missing from.
-    ///
-    /// That pairing is the whole point of the helper. `record_wal_gauges` originally
-    /// had a SINGLE call site, inside the sync `write_into_memtable`: the async
-    /// `write_async_inner` duplicates that logic and emitted only the memtable
-    /// gauges, so an async-API caller got no `cqlite.wal.size` series AT ALL, and the
-    /// post-flush truncate emitted nothing, so a sync caller's gauge only ever
-    /// climbed — manufacturing the docs' "flushes are not keeping up" alarm while
-    /// flushes worked perfectly. One helper at all three seams (sync write, async
-    /// write, post-flush) is what makes that class of omission hard to repeat.
+    /// at one instant. Called at all THREE write/flush seams; see [`wal_gauges`] for
+    /// why the pairing is what keeps either from going missing on a path.
     fn record_size_gauges(&self) {
         self.record_memtable_gauges();
         self.record_wal_gauges();
     }
 
-    /// Emit the current WAL size gauge (issue #1707) — see [`wal_gauges`] for the
-    /// two WAL readings and why they live in a sibling file. Under
-    /// `Durability::Disabled` the size is unchanged by a write; reporting the
+    /// Emit the current WAL size gauge (issue #1707) — see [`wal_gauges`]. Under
+    /// `Durability::Disabled` a write leaves the size unchanged; reporting the
     /// unchanged value is still the truth.
     fn record_wal_gauges(&self) {
         wal_gauges::record_wal_size(self.wal.size());
@@ -1349,11 +1339,8 @@ impl WriteEngine {
             obs::add_counter(catalog::FLUSH_SSTABLES, 1, &[]);
             obs::record_gauge(catalog::COMPACTION_LAG, self.l0_count as i64, &[]);
         }
-        // Issue #1707: BOTH size gauges, and the WAL one MATTERS here — the flush
-        // above truncated the WAL, so this is the emission that produces the
-        // saw-tooth `cqlite.wal.size` the operator docs promise. Without it the
-        // gauge only ever climbed, and the docs' "a level that only climbs means
-        // flushes are not keeping up" turned a working flush into a false alarm.
+        // Issue #1707: the flush above TRUNCATED the WAL, so this is the emission
+        // that produces the saw-tooth `cqlite.wal.size` the operator doc promises.
         self.record_size_gauges();
 
         // Surface a post-mutation WAL-truncate failure AFTER state has been

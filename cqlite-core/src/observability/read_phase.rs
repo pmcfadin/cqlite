@@ -108,6 +108,26 @@
 //! or the sink threaded explicitly through `SSTableReader::scan` and the reverse
 //! walk) — a read-path design change, deliberately not smuggled in here.
 //!
+//! # Why the decode timer is scoped to the parse call (issue #1707)
+//!
+//! The `Decode` seam in `scan_stream_windowed` wraps
+//! `parse_one_partition_with_timestamps` and NOTHING ELSE, by a block expression.
+//! That tightness is load-bearing rather than tidiness: bound at loop-iteration
+//! scope — which it was — the timer also covered `window.consume`, the
+//! `scratch.drain`/`batch.push` re-chunking, the batch `Vec` allocation, and
+//! decisively `tx.blocking_send`, which PARKS the parse thread whenever the consumer
+//! is slow.
+//!
+//! A client that pages slowly would then make `read.phase.decode` dominated by
+//! waiting for the CONSUMER. The operator follows the runbook — "decode dominant →
+//! wide partitions, many collection/UDT cells" — investigates the schema and finds
+//! nothing, because the schema was never the problem. It would also contradict the
+//! catalogued definition of the phase ("decode out of already-resident decompressed
+//! bytes") and invert the care taken for [`ReadPhase::Merge`], which deliberately
+//! SUBTRACTS its recv-wait for exactly this reason. Any future phase seam gets the
+//! same treatment: a timer's scope must contain only work the phase names, never a
+//! blocking handoff to someone else.
+//!
 //! # Zero cost when off
 //!
 //! `ReadOpMeter::start` consults [`obs::metrics_active`](super::metrics_active)
