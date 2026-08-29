@@ -377,7 +377,7 @@ const DIRECT_IO_ALIGN: usize = 4096;
 /// concurrent `read_at`s never touch the same buffer.
 #[cfg(unix)]
 pub(crate) struct DirectReadAt {
-    /// See [`PlainFileReadAt::fd`] — `Some` only when this value's own
+    /// See [`PlainFileReadAt`]'s `_fd` field — `Some` only when this value's own
     /// construction opened the descriptor (issue #1707).
     _fd: Option<super::fd_gauge::OpenFdGauge>,
     file: Arc<std::fs::File>,

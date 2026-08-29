@@ -32,6 +32,22 @@
 //! handle; the gauge emission then reports the value the same atomic op returned,
 //! never a separate `load` (a load-then-record pair can report a value that was
 //! never current under concurrency).
+//!
+//! # What that does and does NOT promise (issue #1707)
+//!
+//! It promises that every value REPORTED was the true level at some instant — no
+//! reading is fabricated, and none is a stale re-read of a counter that has since
+//! moved. It does NOT promise the last reported value is the CURRENT level: the
+//! atomic op and the gauge emission are two steps, so two threads transitioning at
+//! once (A `fetch_add`→1, B `fetch_sub`→0) can emit in the opposite order to the one
+//! they transitioned in, leaving `1` as the last reported value until the NEXT
+//! transition corrects it. The window is one emission and it is self-healing, which
+//! is why there is deliberately no `Mutex` here: serialising every open and close of
+//! a descriptor to tighten a gauge would be paying real contention on the read path
+//! for a reading that is already eventually right, and the pre-existing
+//! `SSTABLES_OPEN` counter has the byte-for-byte identical shape — one lock here
+//! would leave two patterns for one problem. Read the gauge as a level with a
+//! transition-latency of one event, not as a serialised ledger.
 
 use std::sync::atomic::{AtomicI64, Ordering};
 

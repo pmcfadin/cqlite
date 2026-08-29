@@ -152,6 +152,12 @@ fn merge_timing_subtracts_the_recv_wait_accrued_inside_it() {
 #[cfg(not(feature = "tombstones"))]
 #[test]
 fn merge_timing_never_underflows_when_the_wait_exceeds_the_wall_time() {
+    // NOTE: this saturates the per-thread `PULL_WAIT_NANOS` accumulator to `u64::MAX`
+    // and there is no reset API, so from here on THIS THREAD's recv-wait delta is
+    // permanently 0 and every later `timed_merge_excluding_recv_wait` on it charges
+    // its full wall time to merge. Harmless because cargo gives each test its own
+    // thread and this test asserts last on its own sink — but a case added BELOW that
+    // relies on a non-zero wait must not assume it runs on a clean thread.
     let sink = Arc::new(ReadPhaseTimings::default());
     let _g = install(Some(sink.clone()));
     timed_merge_excluding_recv_wait(|| {
