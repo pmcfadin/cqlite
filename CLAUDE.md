@@ -926,7 +926,7 @@ end-to-end test. Green helper-only unit tests are not sufficient.
   fix the box (`gh auth setup-git`, or `bash scripts/bootstrap-agent-machine.sh --yes`, which also
   probes board access functionally rather than trusting the `project` scope string). Since #3369 the
   same script MEASURES git push capability by **performing the push** — a throwaway
-  `refs/claims/smoke-<nonce>` create/read-back/delete via `claim.sh smoke` — rather than trusting a
+  `refs/claims/smoke-<commit-sha>` create/read-back/delete via `claim.sh smoke` — rather than trusting a
   credential-helper answer or a green `git ls-remote`, and reports it three-valued
   (`git-push: VERIFIED` / `FAILED` / `UNMEASURED`); an unmeasurable result is UNKNOWN, never `ok`.
   `--fix-credentials` wires the credential path only (no toolchain installs) and `--strict` turns any
