@@ -288,7 +288,7 @@ class TestRemovedConfigKeysWarn:
     def test_old_shape_dict_loads_and_warns_by_name(self):
         """An old-shape dict still validates (it LOADS) and names every dead key."""
         config = self._old_shape_config()
-        with pytest.warns(DeprecationWarning) as record:
+        with pytest.warns(UserWarning) as record:
             assert cqlite.validate_config(config) is True
 
         message = "\n".join(str(w.message) for w in record)
@@ -309,7 +309,7 @@ class TestRemovedConfigKeysWarn:
     def test_old_shape_json_string_loads_and_warns(self):
         """The JSON-string surface warns too — not only the dict surface."""
         json_config = json.dumps(self._old_shape_config())
-        with pytest.warns(DeprecationWarning, match="REMOVED"):
+        with pytest.warns(UserWarning, match="REMOVED"):
             assert cqlite.validate_config(json_config) is True
 
     def test_current_shape_config_does_not_warn(self):
@@ -317,5 +317,92 @@ class TestRemovedConfigKeysWarn:
         import warnings
 
         with warnings.catch_warnings():
-            warnings.simplefilter("error", DeprecationWarning)
+            warnings.simplefilter("error", UserWarning)
             assert cqlite.validate_config(cqlite.performance_optimized()) is True
+
+    def test_removed_key_warning_is_visible_under_default_filters(self, tmp_path):
+        """The warning must reach a user who set NO warning filters at all.
+
+        Issue #1696 roborev r2 F1. The category used to be ``DeprecationWarning``,
+        which Python HIDES by default: the stdlib installs
+        ``ignore::DeprecationWarning`` with one ``default::...:__main__``
+        exception, so an ordinary user importing ``cqlite`` from any module other
+        than ``__main__`` saw nothing — the "LOUD signal" was silent at exactly
+        the layer this fix exists for.
+
+        Every other test in this class uses ``pytest.warns``, which enables ALL
+        warnings and therefore passes for a hidden category too. So this case runs
+        a SUBPROCESS with untouched default filters and reads its stderr, and it
+        triggers the warning from an IMPORTED module rather than ``__main__``,
+        because ``__main__`` is precisely where the hidden category WOULD have
+        been shown. Without both properties the test cannot see the defect.
+        """
+        import os
+        import subprocess
+        import sys
+
+        probe = tmp_path / "cqlite_removed_key_probe.py"
+        probe.write_text(
+            "import cqlite\n"
+            "\n"
+            "def run():\n"
+            "    config = cqlite.performance_optimized()\n"
+            "    config['storage']['block_size'] = 65536\n"
+            "    cqlite.validate_config(config)\n"
+        )
+
+        env = dict(os.environ)
+        # Inherit the interpreter's import path so the built extension is found,
+        # plus the probe module. No warning-filter variable is set: PYTHONWARNINGS
+        # is REMOVED so an outer environment cannot make this pass.
+        env.pop("PYTHONWARNINGS", None)
+        env["PYTHONPATH"] = os.pathsep.join([str(tmp_path), *sys.path])
+
+        result = subprocess.run(
+            [sys.executable, "-c", "import cqlite_removed_key_probe as p; p.run()"],
+            capture_output=True,
+            text=True,
+            env=env,
+            timeout=120,
+        )
+
+        assert result.returncode == 0, (
+            f"the probe must LOAD the config, not fail: {result.stderr}"
+        )
+        assert "UserWarning" in result.stderr, (
+            "the removed-key warning must be VISIBLE under Python's default "
+            f"filters; stderr was: {result.stderr!r}"
+        )
+        assert "storage.block_size" in result.stderr, (
+            f"the visible warning must NAME the removed key: {result.stderr!r}"
+        )
+
+    def test_removed_key_plus_invalid_value_fails_without_the_still_loads_claim(self):
+        """A removed key beside an invalid SURVIVING value: reject, and say nothing.
+
+        Issue #1696 roborev r2 F2 — the same defect fixed for the CLI in F3,
+        reintroduced on this surface. The warning was raised during PARSING, so a
+        document naming a removed key AND carrying an invalid value told the user
+        "the configuration still loads" and then the public operation REJECTED it:
+        two contradictory answers to one call.
+        """
+        import warnings
+
+        config = self._old_shape_config()
+        # Invalid in a field that SURVIVED the purge, so the failure is validation
+        # and not the removed keys (which never fail a load).
+        config["memory"]["max_memory"] = 0
+
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            with pytest.raises(ValueError, match="max_memory"):
+                cqlite.validate_config(config)
+
+        messages = [str(w.message) for w in caught]
+        assert not any("still loads" in m for m in messages), (
+            "a REJECTED configuration must not be told it still loads: "
+            f"{messages}"
+        )
+        assert not any("REMOVED" in m for m in messages), (
+            f"the removed-key warning must not precede the rejection: {messages}"
+        )

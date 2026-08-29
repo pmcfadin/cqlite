@@ -209,17 +209,22 @@ pub fn config_from_py(
     py: Python<'_>,
     config: Option<&Bound<'_, PyAny>>,
 ) -> PyResult<cqlite_core::Config> {
-    let core_config = parse_config_from_py(py, config)?;
+    let (core_config, removed_key_warning) = parse_config_from_py(py, config)?;
 
     // Validate the parsed config before returning
     core_config
         .validate()
         .map_err(|e| PyValueError::new_err(e.to_string()))?;
 
+    // ONLY now — the warning asserts the configuration still loads, and this
+    // operation has only just finished deciding that (#1696 roborev r2 F2).
+    raise_removed_key_warning(py, removed_key_warning)?;
+
     Ok(core_config)
 }
 
-/// Parse a Python configuration value into a core Config WITHOUT validating it.
+/// Parse a Python configuration value into a core Config WITHOUT validating it,
+/// returning it alongside any REMOVED-key warning the document earned.
 ///
 /// Split out of [`config_from_py`] for the one caller that must fold a
 /// documented override into the config *before* it is judged (issue #1697,
@@ -231,11 +236,20 @@ pub fn config_from_py(
 /// Every other caller wants [`config_from_py`], which validates. This returns an
 /// UNVALIDATED config, so the caller owns validating the config it finally uses;
 /// returning one that is never validated is a bug.
+///
+/// # The warning is RETURNED, not raised (#1696 roborev r2 F2)
+///
+/// This function used to raise it here, which reintroduced on the Python surface
+/// the exact defect fixed for the CLI in F3: a document naming a removed key AND
+/// carrying an invalid surviving value warned "the configuration still loads" and
+/// then the public operation REJECTED it. So the warning travels with the config
+/// and the caller raises it only once its own validation has SUCCEEDED — which is
+/// the moment "still loads" becomes true.
 pub fn parse_config_from_py(
     py: Python<'_>,
     config: Option<&Bound<'_, PyAny>>,
-) -> PyResult<cqlite_core::Config> {
-    let (core_config, removed_key_warning) = match config {
+) -> PyResult<(cqlite_core::Config, Option<String>)> {
+    let parsed = match config {
         None => (cqlite_core::Config::default(), None),
         Some(obj) => {
             // Check if it's a string (JSON or preset name)
@@ -252,12 +266,7 @@ pub fn parse_config_from_py(
         }
     };
 
-    // The deserialize SUCCEEDED, so the removed-key warning may now be raised
-    // (issue #1696): every non-Rust authoring surface funnels through here, which
-    // is why the warning lives at this one chokepoint rather than per format.
-    raise_removed_key_warning(py, removed_key_warning)?;
-
-    Ok(core_config)
+    Ok(parsed)
 }
 
 /// Assemble the public `Config` for `cqlite.open`: parse it, fold the optional
@@ -285,7 +294,7 @@ pub fn config_for_open(
     config: Option<&Bound<'_, PyAny>>,
     flush_threshold: Option<u64>,
 ) -> PyResult<cqlite_core::Config> {
-    let mut core_config = parse_config_from_py(py, config)?;
+    let (mut core_config, removed_key_warning) = parse_config_from_py(py, config)?;
 
     if let Some(v) = flush_threshold {
         // The ceiling check MUST compare against the CALLER's
@@ -307,6 +316,12 @@ pub fn config_for_open(
     core_config
         .validate()
         .map_err(|e| PyValueError::new_err(e.to_string()))?;
+
+    // Raised LAST, after the override fold and the merged validation both
+    // succeeded: every earlier `return Err` above leaves the caller with the
+    // rejection and no "the configuration still loads" assurance beside it
+    // (#1696 roborev r2 F2).
+    raise_removed_key_warning(py, removed_key_warning)?;
 
     Ok(core_config)
 }
@@ -342,8 +357,8 @@ fn config_from_dict(
         .map_err(|e| PyValueError::new_err(e.to_string()))
 }
 
-/// Raise a Python `DeprecationWarning` naming every REMOVED key the caller's
-/// config still sets (issue #1696, roborev F1).
+/// Raise a Python `UserWarning` naming every REMOVED key the caller's config
+/// still sets (issue #1696, roborev F1).
 ///
 /// # Why the bindings need this
 ///
@@ -360,16 +375,36 @@ fn config_from_dict(
 /// would hard-fail an existing caller with no migration path over keys that never
 /// did anything.
 ///
-/// A Python `DeprecationWarning` — not a `tracing` log (nothing subscribes in a
-/// Python process) and not stderr — so it obeys the caller's own `warnings`
-/// filters and is assertable with `pytest.warns`.
+/// A Python warning — not a `tracing` log (nothing subscribes in a Python
+/// process) and not stderr — so it obeys the caller's own `warnings` filters and
+/// is assertable from a test.
 ///
-/// Called only once a load has SUCCEEDED: the warning asserts the configuration
-/// still loads, so it must not be raised before that is true (#1696 roborev F3).
+/// # Why `UserWarning` and not `DeprecationWarning` (#1696 roborev r2 F1)
+///
+/// Because Python HIDES `DeprecationWarning` under its default filters: the
+/// stdlib installs `ignore::DeprecationWarning` with a single `default::…:__main__`
+/// exception, so an ordinary user importing `cqlite` from any module other than
+/// `__main__` saw NOTHING — the "loud signal at the layer where the knob is set"
+/// was silent at exactly the layer this fix exists for. `UserWarning` matches no
+/// `ignore` entry in the default list, so it is displayed without `-W` or a
+/// `PYTHONWARNINGS` setting.
+///
+/// `UserWarning` over `FutureWarning` deliberately: `FutureWarning` means
+/// "behaviour WILL change", while these keys are ALREADY removed and already
+/// ignored. Nothing about them is pending.
+///
+/// The visibility itself is pinned by
+/// `bindings/python/tests/test_config.py::test_removed_key_warning_is_visible_under_default_filters`,
+/// which runs a subprocess under Python's own default filters — `pytest.warns`
+/// enables ALL warnings, so it would pass for a hidden category too.
+///
+/// Called only once the operation has SUCCEEDED: the warning asserts the
+/// configuration still loads, so it must not be raised before that is true
+/// (#1696 roborev F3, and again on this surface at roborev r2 F2).
 fn raise_removed_key_warning(py: Python<'_>, warning: Option<String>) -> PyResult<()> {
     if let Some(warning) = warning {
         let warnings = py.import("warnings")?;
-        let category = py.get_type::<pyo3::exceptions::PyDeprecationWarning>();
+        let category = py.get_type::<pyo3::exceptions::PyUserWarning>();
         warnings.call_method1("warn", (warning, category))?;
     }
     Ok(())
