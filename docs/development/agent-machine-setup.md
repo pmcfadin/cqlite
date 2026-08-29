@@ -48,7 +48,7 @@ without it, it prints the exact command for each gap. It verifies, in order:
    | Line | Meaning |
    |---|---|
    | `[ok]   git-push: VERIFIED (refs/claims/* create+ls-remote+delete on 'origin')` | affirmatively measured — the claim protocol works here |
-   | `[warn] git-push: FAILED (...)` | the remote refused the push (credentials, or the `refs/claims/*` namespace) |
+   | `[warn] git-push: FAILED (...)` | the remote refused the operation — credentials, the `refs/claims/*` namespace, or a namespace that accepts the create but **refuses the delete** (unusable for claims: `release` deletes `refs/claims/issue-<N>`, and that case strands a ref, so the line tells you how to list it) |
    | `[warn] git-push: UNMEASURED (...)` | no remote / unreachable / no `timeout` to bound it / no verdict — capability is **UNKNOWN, not ok** |
    | `[warn] git-push: OPT-OUT (--skip-push-probe)` | deliberately not measured; still a warning, so it can never buy a green |
 
