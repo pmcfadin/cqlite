@@ -603,9 +603,16 @@ pub const WAL_SIZE: &str = "cqlite.wal.size";
 
 /// `cqlite.wal.replay.duration` — histogram `s` (issue #1707).
 ///
-/// How long the write-ahead-log replay at engine open took, in seconds. Replay
-/// happens EXACTLY ONCE per engine open, so this series normally carries ONE sample
-/// per process — read it as a value, not as a distribution.
+/// How long write-ahead-log RECOVERY at engine open took, in seconds. Covers the
+/// whole recovery window: the CRC validation scan performed while opening the log
+/// (plus any torn-tail trim) AND the replay of its entries into the memtable. On a
+/// large or corrupt-tail WAL the validation scan is the dominant half, so a
+/// replay-only timing would understate exactly the startup an operator is asking
+/// about. Recovery happens EXACTLY ONCE per engine open, so this series normally
+/// carries ONE sample per process — read it as a value, not as a distribution.
+///
+/// The metric NAME says `replay` for continuity with the operator-facing docs and
+/// dashboards; read it as "recovery at open".
 ///
 /// **Why a histogram and not a gauge, which is what one-sample-per-process argues
 /// for**: the gauge plane in this crate is `i64` (`Gauge<i64>`, and OTel's gauge
@@ -618,7 +625,7 @@ pub const WAL_SIZE: &str = "cqlite.wal.size";
 /// duration in this catalog is an `f64` histogram in seconds anyway.
 ///
 /// **Recorded unconditionally at every engine open, including the 0-entry case**: a
-/// fresh WAL with nothing to replay genuinely took ~0s, and that IS a measurement —
+/// fresh WAL with nothing to recover genuinely took ~0s, and that IS a measurement —
 /// the absence rule forbids inventing a value nobody measured, not reporting a real
 /// one that happens to be small. It is also recorded when replay found CORRUPTION,
 /// before the lossy-recovery branch, because that is exactly when an operator cares
@@ -626,8 +633,9 @@ pub const WAL_SIZE: &str = "cqlite.wal.size";
 /// this process", never "replay was skipped".
 ///
 /// **Healthy vs alarming**: near-zero after a clean shutdown; seconds means a crash
-/// left a large log to replay, which directly delays open — pair it with
-/// [`WAL_SIZE`], whose growth is what makes this number grow. **Attributes**: none.
+/// left a large log to validate and replay, which directly delays open — pair it
+/// with [`WAL_SIZE`], whose growth is what makes this number grow.
+/// **Attributes**: none.
 pub const WAL_REPLAY_DURATION: &str = "cqlite.wal.replay.duration";
 
 /// `cqlite.flush.duration` — histogram `s`.

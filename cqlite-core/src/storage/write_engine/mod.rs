@@ -555,6 +555,17 @@ impl WriteEngine {
 
         // Initialize WAL
         let wal_path = config.wal_dir.join(WriteAheadLog::WAL_FILENAME);
+        // WAL RECOVERY duration (issue #1707). The timer starts HERE, BEFORE the
+        // open, not at the `replay_each` call below: `open_existing` already reads
+        // the whole log once, running a full CRC validation scan
+        // (`scan_valid_prefix`) plus any torn-tail trim, so a large WAL is read
+        // TWICE and a timer started after the open would report only the second
+        // pass. This metric exists to answer "why was startup slow?", and on a large
+        // or corrupt-tail log the validation scan is the dominant cost — excluding
+        // it would understate precisely the case the metric was created to expose.
+        // Recovery happens EXACTLY ONCE per engine open. The fresh-WAL branch is
+        // inside the window too; creating an empty log is honestly ~0s of recovery.
+        let recovery_started = std::time::Instant::now();
         let mut wal = if wal_path.exists() {
             // Recover from existing WAL
             WriteAheadLog::open_existing(&wal_path)?
@@ -590,11 +601,6 @@ impl WriteEngine {
         // full RecoveryReport; the error is surfaced only after preserve/reset
         // below. The streaming memory win is unaffected — no whole-log Vec.
         let mut apply_error: Option<Error> = None;
-        // WAL REPLAY duration (issue #1707): replay happens EXACTLY ONCE per engine
-        // open, and its cost is the startup latency an operator is looking for after
-        // a crash. Timed around the whole scan+apply, which is what "replay" means
-        // to them.
-        let replay_started = std::time::Instant::now();
         let wal_recovery = wal.replay_each(|mutation| {
             if apply_error.is_some() {
                 // An earlier mutation already failed; keep scanning to reach any
@@ -613,11 +619,11 @@ impl WriteEngine {
         // Emitted UNCONDITIONALLY, including the 0-entry case: a fresh WAL that
         // replayed nothing genuinely took ~0s, and that IS a measurement (the #2314
         // rule forbids inventing a value nobody took, not reporting a real one that
-        // is small). A GAUGE, not a histogram — one sample per process is not a
-        // distribution. Recorded BEFORE the lossy-recovery branch below so a
-        // CORRUPT-WAL open, which is exactly when replay latency matters most, still
-        // reports the time it spent.
-        wal_gauges::record_wal_replay_duration(replay_started.elapsed());
+        // is small). Covers the WHOLE recovery window opened above — validation scan
+        // plus replay — not the replay pass alone. Recorded BEFORE the
+        // lossy-recovery branch below so a CORRUPT-WAL open, which is exactly when
+        // recovery latency matters most, still reports the time it spent.
+        wal_gauges::record_wal_replay_duration(recovery_started.elapsed());
 
         if !wal_recovery.is_clean() {
             // Preserve the raw WAL segment aside BEFORE anything (a later flush,

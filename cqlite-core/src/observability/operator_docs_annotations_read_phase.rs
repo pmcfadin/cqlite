@@ -79,9 +79,9 @@ pub(super) const ANNOTATIONS: &[MetricDoc] = &[
         name: catalog::WAL_REPLAY_DURATION,
         kind: MetricKind::Histogram,
         unit: catalog::unit::SECONDS,
-        summary: "How long the WAL replay at engine open took, in seconds. Normally ONE sample per process (replay runs exactly once per open), so read it as a value rather than a distribution.",
+        summary: "How long write-ahead-log RECOVERY at engine open took, in seconds — the CRC validation scan of the log (plus any torn-tail trim) AND the replay of its entries into the memtable, not the replay pass alone. Normally ONE sample per process (recovery runs exactly once per open), so read it as a value rather than a distribution.",
         attributes: &[],
-        interpretation: "Near-zero after a clean shutdown; seconds means a crash left a large log to replay, which directly delays open — pair it with cqlite.wal.size, whose growth makes this grow. A histogram rather than a gauge because the gauge plane is i64 and a sub-second replay would truncate to a fabricated 0. Recorded at EVERY open, including when there was nothing to replay (a fresh WAL genuinely took ~0s, which is a real measurement) and including a corrupt-WAL open, so absence means no engine was opened in this process, never that replay was skipped.",
+        interpretation: "Near-zero after a clean shutdown; seconds means a crash left a large log to validate and replay, which directly delays open — pair it with cqlite.wal.size, whose growth makes this grow. On a large or corrupt-tail WAL the validation scan is the dominant half, which is why the timer spans the whole open-and-recover window rather than the replay pass (the name says replay for continuity; read it as recovery at open). A histogram rather than a gauge because the gauge plane is i64 and a sub-second recovery would truncate to a fabricated 0. Recorded at EVERY open, including when there was nothing to recover (a fresh WAL genuinely took ~0s, which is a real measurement) and including a corrupt-WAL open, so absence means no engine was opened in this process, never that recovery was skipped.",
         round_item: "—",
     },
 ];
