@@ -6951,7 +6951,12 @@ $(awk '
     }
     next
   }
-  { if ($0 !~ /^[[:space:]]*$/ && $0 !~ /^[[:space:]]*\/\//) haspath = 0 }
+  # BOTH pendings die with the cluster (roborev job 97, Medium). Clearing `haspath` while leaving
+  # `gatetxt` let a cfg on ANY item — a function, a struct, an impl — leak forward and tag the next
+  # UNGATED `mod` as gated, i.e. a false DECLARED GAP on ordinary code. Same class as the
+  # `haspath` leak of round-42, and the noleak assert missed it because it only covered a cfg
+  # attached to a mod, never a cfg attached to something else entirely.
+  { if ($0 !~ /^[[:space:]]*$/ && $0 !~ /^[[:space:]]*\/\//) { haspath = 0; gatetxt = "" } }
 ' "$f")
 EOF
   done
@@ -6980,8 +6985,9 @@ EOF
 }
 
 run_legacy_heuristics() {
-  # reset per run: a counter carried in from a previous lane would misreport this one
+  # reset per run: state carried in from a previous lane would misreport this one
   _lh_cfg_gaps=0
+  local lh_gap_detail=() _gd
   local name=legacy-heuristics
   if [ -n "$ONLY" ] && ! grep -qw "$name" <<<"${ONLY//,/ }"; then
     return 0
@@ -7059,7 +7065,7 @@ run_legacy_heuristics() {
     # Included when EITHER cargo gates the target on the feature (the arm the glob could
     # not see) OR its own source carries a cfg reference to it.
     # ONE source set per target, shared by membership, polarity and the census (round 12).
-    local _mt_closure _mt_unres
+    local _mt_closure _mt_unres _mt_gaps_pending=""
     _mt_unres="$LOG_DIR/legacy-unresolved-$_mt_name.txt"
     _mt_closure=$(_rust_module_closure "$f" 2>"$_mt_unres")
     # TWO report kinds, TWO different consequences, and a CLOSED grammar over the rest.
@@ -7097,17 +7103,18 @@ run_legacy_heuristics() {
         echo ">>> [$name] $status ($((end - start))s)"
         return 0
       fi
-      if [ -s "$_mt_gaps" ]; then
-        {
-          echo "[$name] DECLARED GAP: test target '$_mt_name' reaches child module(s) through a"
-          echo "        cfg this scan does not evaluate, so their contribution to legacy coverage"
-          echo "        is UNCLASSIFIED — the subtree is scanned, but a zero or nonzero result"
-          echo "        from it cannot be attributed. Compare the cfg against the enabled set by"
-          echo "        hand; move gated tests to their own target if the attribution matters:"
-          sed 's/^/          /' "$_mt_gaps"
-        } | tee -a "$log"
-        _lh_cfg_gaps=$((_lh_cfg_gaps + 1))
-      fi
+      # BUFFERED, not emitted here (roborev job 97, Medium + Low). Two reasons, and both were
+      # live defects:
+      #   (1) this point is BEFORE the membership and required-features filters, so declaring here
+      #       reported a "gap" for targets that are not subjects of this lane at all — measured on
+      #       issue_2827_partition_access_bytes, which carries no legacy site. A census diluted
+      #       with irrelevant entries is a census nobody reads. Decide, THEN record — the same
+      #       ordering this lane already enforces for observe_ids and --test.
+      #   (2) the detail lines were `tee -a`'d to "$log", which the census below then TRUNCATES
+      #       with `>` — so the aggregate said "listed above" and the listing was gone. The
+      #       comment three lines under that redirect says it outright: a gap that only appears on
+      #       stdout is a gap nobody reads.
+      if [ -s "$_mt_gaps" ]; then _mt_gaps_pending="$_mt_gaps"; fi
     fi
     if [ "$_mt_how" != "manifest" ]; then
       [ -f "$f" ] || continue
@@ -7201,6 +7208,20 @@ EOF
     case "$_mt_rel" in
       tests/*) _obs_id="${_mt_rel#tests/}" ;;
     esac
+    # THE TARGET IS NOW A CONFIRMED SUBJECT — membership passed and required-features are met —
+    # so a buffered cfg-gated-subtree gap becomes a DECLARED one here and nowhere earlier.
+    if [ -n "${_mt_gaps_pending:-}" ] && [ -s "$_mt_gaps_pending" ]; then
+      lh_gap_detail+=("DECLARED GAP: test target '$_mt_name' reaches child module(s) through a cfg")
+      lh_gap_detail+=("  this scan does not evaluate, so their contribution to legacy coverage is")
+      lh_gap_detail+=("  UNCLASSIFIED — the subtree IS scanned, but a zero or nonzero result from it")
+      lh_gap_detail+=("  cannot be attributed. Compare the cfg against the enabled set by hand; move")
+      lh_gap_detail+=("  gated tests to their own target if the attribution matters:")
+      while IFS= read -r _gd; do
+        [ -n "$_gd" ] || continue
+        lh_gap_detail+=("    $_gd")
+      done < "$_mt_gaps_pending"
+      _lh_cfg_gaps=$((_lh_cfg_gaps + 1))
+    fi
     observe_ids+=("${_obs_id%.rs}")
     # The census subject is the UNION of every included target's module tree, deduped later
     # (a shared `common/mod.rs` is one site, not one per target that includes it).
@@ -7460,8 +7481,14 @@ EOF
   # subtree whose reachability was not evaluated cannot be counted either way, and the census
   # claiming "0 gaps" over it would be the silent direction (roborev root pass at aabae56ea).
   if [ "$_lh_cfg_gaps" -gt 0 ]; then
-    lh_census+=("cfg-gated-subtree gaps: $_lh_cfg_gaps target(s) reach a child module through a cfg")
-    lh_census+=("  this scan does not evaluate — their legacy coverage is UNCLASSIFIED, listed above.")
+    lh_census+=("cfg-gated-subtree gaps: $_lh_cfg_gaps subject target(s) reach a child module through")
+    lh_census+=("  a cfg this scan does not evaluate — their legacy coverage is UNCLASSIFIED:")
+    # the DETAIL goes in the census itself, so it lands in the component log rather than being
+    # truncated out of it by the `>` below (roborev job 97, Low). "listed above" has to be true.
+    for _gd in "${lh_gap_detail[@]:-}"; do
+      [ -n "$_gd" ] || continue
+      lh_census+=("  $_gd")
+    done
   else
     lh_census+=("cfg-gated-subtree gaps: 0 — every module reached is reached unconditionally")
   fi

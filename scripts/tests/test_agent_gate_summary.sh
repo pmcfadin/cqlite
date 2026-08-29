@@ -3974,6 +3974,20 @@ else
       bad "1699-cfggate-inline: same-line cfg+mod produced no report — the form the mod rule sees directly"
     fi
 
+    # A cfg attached to something that is NOT a module must not leak forward onto a later
+    # ungated `mod` (roborev job 97, Medium). The noleak case above cannot see this: it only
+    # covered a cfg attached to a mod, where the mod rule resets the pending text itself.
+    printf '#[cfg(feature = "experimental")]\nfn helper() {}\n\nmod plain_child;\n' > "$cg_root/tests/leakfn.rs"
+    printf '#[cfg(feature = "experimental")]\nstruct S;\nmod plain_child;\n' > "$cg_root/tests/leakstruct.rs"
+    for lk in leakfn leakstruct; do
+      _rust_module_closure "$cg_root/tests/$lk.rs" >/dev/null 2>"$tmp/1699-cg-$lk.txt"
+      if [ -s "$tmp/1699-cg-$lk.txt" ]; then
+        bad "1699-cfggate-leak[$lk]: a cfg on a non-module item leaked onto a later UNGATED mod — a false gap report on ordinary code: $(tr '\n' ' ' < "$tmp/1699-cg-$lk.txt")"
+      else
+        ok "1699-cfggate-leak[$lk]: a cfg on a non-module item does not tag the following ungated mod"
+      fi
+    done
+
     _rust_module_closure "$cg_root/tests/ungated.rs" >/dev/null 2>"$tmp/1699-cg-e3.txt"
     if [ -s "$tmp/1699-cg-e3.txt" ]; then
       bad "1699-cfggate-quiet: an UNGATED module tree produced stderr output — the caller FAILs on any stderr, so this reds the lane on ordinary code: $(cat "$tmp/1699-cg-e3.txt")"
@@ -4019,6 +4033,38 @@ else
   bad "1699-cfggate-zero: no affirmative zero line — absence of a gap report is indistinguishable from the scan not running"
 fi
 
+# A gap is DECLARED only for a confirmed SUBJECT of the lane (roborev job 97, Medium). Declaring
+# at the closure — before membership and required-features — reported gaps for targets carrying no
+# legacy site at all (measured: issue_2827_partition_access_bytes), and a census diluted with
+# irrelevant entries is a census nobody reads. Same decide-then-record ordering as observe_ids.
+lh_code=$(printf '%s\n' "$lh_fn" | sed 's/^[[:space:]]*#.*$//')
+lh_gapline=$(printf '%s\n' "$lh_code" | grep -n 'lh_gap_detail+=' | head -1 | cut -d: -f1)
+lh_obsline=$(printf '%s\n' "$lh_code" | grep -n 'observe_ids+=' | head -1 | cut -d: -f1)
+lh_memline=$(printf '%s\n' "$lh_code" | grep -n '_mt_hit" -eq 1' | head -1 | cut -d: -f1)
+if [ -n "$lh_gapline" ] && [ -n "$lh_memline" ] && [ "$lh_memline" -lt "$lh_gapline" ]; then
+  ok "1699-cfggate-order: membership (line $lh_memline) is decided BEFORE a gap is recorded (line $lh_gapline)"
+else
+  bad "1699-cfggate-order: a cfg-gated gap is recorded at line ${lh_gapline:-?} but membership is decided at line ${lh_memline:-?} — a non-subject target would be declared a coverage gap"
+fi
+if [ -n "$lh_gapline" ] && [ -n "$lh_obsline" ] && [ "$lh_gapline" -lt "$lh_obsline" ]; then
+  ok "1699-cfggate-atsubject: the gap is recorded at the point the target becomes a subject"
+else
+  bad "1699-cfggate-atsubject: gap record (${lh_gapline:-?}) is not adjacent to observe_ids (${lh_obsline:-?})"
+fi
+# and it must not be written to a log the census then truncates with `>` (job 97, Low)
+lh_gaptext=$(printf '%s\n' "$lh_code" | grep -F 'DECLARED GAP' || true)
+lh_gapbad=$(printf '%s\n' "$lh_gaptext" | grep -vF 'lh_gap_detail+=' | grep -c . || true)
+if [ "${lh_gapbad:-0}" -gt 0 ]; then
+  bad "1699-cfggate-persist: 'DECLARED GAP' text appears outside lh_gap_detail+= ($lh_gapbad line(s)) — an emit outside the buffer is either declared before membership or truncated by the census '>' redirect"
+else
+  ok "1699-cfggate-persist: the gap text exists only as buffered census detail, so it is neither premature nor truncated"
+fi
+if [ "$(printf '%s' "$lh_fn" | grep -cF 'lh_census+=("  $_gd")')" -gt 0 ]; then
+  ok "1699-cfggate-incensus: the gap DETAIL travels in the census, so it survives into the component log"
+else
+  bad "1699-cfggate-incensus: the gap detail never reaches lh_census — only the aggregate count would land in the log a reader inspects"
+fi
+
 # Low: the report must not CLAIM verbatim text it does not capture.
 if awk '/^_crate_gated_test_targets\(\) \{/,/^\}/' "$GATE" | grep -qi 'verbatim'; then
   bad "1699-cfgsite-noverbatim: the occurrence report still claims 'verbatim' while capturing only an attribute opening line — the claim is falsifiable by any multiline #![cfg(all("
@@ -4052,7 +4098,7 @@ else
   bad "1699-cfgsite-singleline: single-line attribute rendered as [$(cs_render "$cs_single")] — a false truncation marker on complete input"
 fi
 
-ASSERT_FLOOR=299
+ASSERT_FLOOR=305
 if [ "$PASS" -lt "$ASSERT_FLOOR" ]; then
   echo "FAIL - assert-floor: only $PASS assertions ran, floor is $ASSERT_FLOOR. Sections are being SKIPPED or dying silently (an extraction that broke, a subshell aborting under set -u), and 'failed: 0' over a shrunken subject set is exactly the vacuous pass this suite tests for."
   FAIL=$((FAIL + 1))
