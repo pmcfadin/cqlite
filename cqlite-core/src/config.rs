@@ -678,8 +678,15 @@ impl Config {
         // Reduce timeouts for faster test execution
         config.query.max_execution_time = std::time::Duration::from_secs(1);
 
-        // Smaller memory usage for tests
+        // Smaller memory usage for tests. The cache budget is scaled WITH
+        // `max_memory` (the same 1/4 ratio `MemoryConfig::default` uses), not
+        // left at the 1GB default's 256MB: `validate` requires
+        // `block_cache.max_size <= max_memory`, and `Database::open` now enforces
+        // that (#1696 roborev F2). A constructor that emitted a config its own
+        // `validate` rejects was a latent contradiction — it only went unnoticed
+        // because nothing on the open path ever validated.
         config.memory.max_memory = 64 * 1024 * 1024; // 64MB
+        config.memory.block_cache.max_size = config.memory.max_memory / 4; // 16MB
         config.storage.memtable_size_threshold = 1024 * 1024; // 1MB
 
         config
