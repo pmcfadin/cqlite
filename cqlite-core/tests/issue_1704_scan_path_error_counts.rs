@@ -73,6 +73,11 @@ use std::sync::Arc;
 /// Relative path of the corrupt COMPRESSED `Data.db` under the datasets root.
 const CORRUPT_DATA_DB: &str = "corruption/test_comp_corrupt/data_db_bit_flip/nb-1-big-Data.db";
 
+/// Relative path of the CLEAN source `Data.db` the corrupt fixture was derived from.
+/// Used by the negative control: a SUCCESSFUL scan must record nothing.
+const CLEAN_DATA_DB: &str =
+    "sstables/test_comp/lz4_table-25801a0071a911f19b3225f9984c6a77/nb-1-big-Data.db";
+
 /// Fully-qualified table the corrupt fixture was derived from.
 const TABLE: &str = "test_comp.lz4_table";
 
@@ -115,6 +120,29 @@ fn corrupt_data_db_or_gate() -> Option<PathBuf> {
             );
             eprintln!(
                 "SKIP: corruption fixture absent ({CORRUPT_DATA_DB}); \
+                 set CQLITE_REQUIRE_FIXTURES=1 to enforce."
+            );
+            None
+        }
+    }
+}
+
+/// The CLEAN fixture, under the same #1094 gate as [`corrupt_data_db_or_gate`]. It is
+/// a FETCHED (gitignored) corpus binary, so it is skip-clean when absent and a hard
+/// failure under `CQLITE_REQUIRE_FIXTURES=1` — never a silent skip that would let the
+/// negative control stop running behind a green suite (#3220).
+fn clean_data_db_or_gate() -> Option<PathBuf> {
+    match datasets_root().map(|r| r.join(CLEAN_DATA_DB)) {
+        Some(p) if p.is_file() => Some(p),
+        _ => {
+            assert!(
+                !require_fixtures(),
+                "CQLITE_REQUIRE_FIXTURES=1 but the clean lz4_table fixture is absent: \
+                 {CLEAN_DATA_DB}. Fetch the corpus \
+                 (bash test-data/scripts/fetch-datasets.sh)."
+            );
+            eprintln!(
+                "SKIP: clean lz4_table fixture absent ({CLEAN_DATA_DB}); \
                  set CQLITE_REQUIRE_FIXTURES=1 to enforce."
             );
             None
@@ -400,19 +428,9 @@ async fn full_scan_over_corrupt_chunk_records_one_reader_error() {
 #[tokio::test(flavor = "multi_thread")]
 #[serial]
 async fn successful_scan_records_no_reader_error() {
-    let Some(corrupt) = corrupt_data_db_or_gate() else {
+    let Some(clean) = clean_data_db_or_gate() else {
         return;
     };
-    // The CLEAN source the corrupt fixture was derived from lives in the same corpus.
-    let clean = match datasets_root() {
-        Some(root) => root
-            .join("sstables/test_comp/lz4_table-25801a0071a911f19b3225f9984c6a77/nb-1-big-Data.db"),
-        None => return,
-    };
-    if !clean.is_file() {
-        eprintln!("SKIP: clean lz4_table fixture absent next to {corrupt:?}");
-        return;
-    }
 
     let mc = testing::metrics_capture();
     let reader = open_reader(&clean).await;
