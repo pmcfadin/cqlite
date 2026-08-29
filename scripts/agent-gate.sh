@@ -4812,6 +4812,49 @@ run_roborev_lints_cmd() {
     bash "$REPO_ROOT/scripts/tests/test_roborev_guard_portability.sh"
 }
 
+# _ansi_stripped_log <logfile> — echo a path to <logfile> with ANSI escapes removed.
+#
+# roborev round-15 finding (HIGH), and the premise checked out: `.github/workflows/gate.yml`
+# (the nightly FULL gate) sets `CARGO_TERM_COLOR: always`, as do seven other workflows and
+# scripts/local/pre-merge.sh. Cargo then emits
+#     ESC[1mESC[92m     RunningESC[0m unittests src/lib.rs (...)
+# with the reset sequence sitting BETWEEN `Running` and the path — so every parser keyed on
+# the literal text sees nothing. MEASURED on both guards, and the two directions differ:
+#   * check_unittest_targets_ran  -> FALSE FAIL: the new lanes would red on every clean
+#     nightly run, reporting "no Running unittests line" about a perfectly healthy log.
+#   * check_no_unexpected_zero_tests -> VACUOUS PASS: a target running ZERO tests is never
+#     associated with its result, so the #2039 guard silently reports OK. That one is
+#     PRE-EXISTING and affects its other callers (core-tests, cli-tests) on nightly CI too;
+#     filed separately.
+#
+# Stripping is done ONCE into a sibling file, not per line and not through a pipe. A pipe
+# would put the reading loop in a SUBSHELL and its accumulated verdict variables would be
+# discarded — which for these guards means silently passing, the exact failure they exist to
+# prevent. The ESC byte is injected via printf rather than written as `\x1b`, because BSD sed
+# does not honour `\x` escapes and macOS is a first-class gate host.
+_ansi_stripped_log() {
+  local logfile="$1" out esc
+  # FAIL CLOSED on an unreadable log (roborev round-25, Medium). Returning the original path let the
+  # caller parse a file it had just failed to read, and a guard that parses nothing reports nothing
+  # wrong. The caller's own fail-closed branch is what should decide, so tell it the truth.
+  [ -r "$logfile" ] || return 1
+  esc=$(printf '\033')
+  out="$logfile.ansi-stripped"
+  if sed -E "s/${esc}\\[[0-9;]*[A-Za-z]//g" "$logfile" > "$out" 2>/dev/null; then
+    printf '%s' "$out"
+  else
+    # A FAILED normalisation is not "use the coloured original": under CARGO_TERM_COLOR the
+    # coloured original is exactly what the parsers cannot read (round 15), so silently handing it
+    # back converts a normalisation failure into a vacuous PASS. Non-zero, and the caller FAILs.
+    return 1
+  fi
+}
+# Exported because the cli-tests component body runs under `bash -c`: with the helper
+# unexported the command substitution inside that body yields the EMPTY STRING, `done < ""`
+# fails, the read loop never runs, and the zero-tests guard returns SUCCESS having parsed
+# nothing — the CLI zero-test protection silently disabled (issue #1699 round-16 / #3400).
+export -f _ansi_stripped_log
+
 run_component() { # run_component <name> <cmd...>
   local name="$1"; shift
   if [ -n "$ONLY" ] && ! grep -qw "$name" <<<"${ONLY//,/ }"; then
@@ -8231,8 +8274,30 @@ run_arrow_parity_guard_cmd() {
   echo "$out"
   # Require at least one test to have actually run (guard against a vacuous
   # required-features skip that cargo reports as success with 0 tests).
-  local passed
-  passed=$(echo "$out" | sed -n 's/^test result: ok\. \([0-9][0-9]*\) passed.*/\1/p' | tail -1)
+  #
+  # Parse through _ansi_stripped_log, never the raw capture (issue #3400). `test result:` is
+  # libtest text and carries NO escapes today — cargo does not pass --color through to the
+  # test harness, MEASURED byte-identical under CARGO_TERM_COLOR=always and =never — so this
+  # site is colour-safe for a reason that is invisible at the parse. Normalising anyway makes
+  # the property LOCAL to the parse instead of inherited from cargo's plumbing, which is the
+  # exact coupling that left the cli-tests zero-tests guard inert. The failure direction here
+  # is a FALSE RED (empty `passed` -> explicit FAIL), so this is belt, not a bug fix.
+  #
+  # A PRIVATE dir, not a bare mktemp file: _ansi_stripped_log writes a PREDICTABLE
+  # `<file>.ansi-stripped` sibling, which another local user could pre-create as a symlink for
+  # the sed to follow.
+  local passed tmpd raw stripped
+  tmpd=$(mktemp -d) || { echo "arrow-parity-guard: FAIL-CLOSED — could not create a private temp dir to normalise cargo output (#3400)" >&2; return 1; }
+  raw="$tmpd/cargo.log"
+  printf '%s\n' "$out" > "$raw" || { rm -rf "$tmpd"; echo "arrow-parity-guard: FAIL-CLOSED — could not write cargo output for parsing (#3400)" >&2; return 1; }
+  stripped=$(_ansi_stripped_log "$raw" 2>/dev/null) || stripped=""
+  if [ -z "$stripped" ] || [ ! -r "$stripped" ]; then
+    rm -rf "$tmpd"
+    echo "arrow-parity-guard: FAIL-CLOSED — could not prepare cargo output for parsing, so this guard parsed NOTHING (#3400)" >&2
+    return 1
+  fi
+  passed=$(sed -n 's/^test result: ok\. \([0-9][0-9]*\) passed.*/\1/p' "$stripped" | tail -1)
+  rm -rf "$tmpd"
   if [ -z "$passed" ] || [ "$passed" -lt 1 ]; then
     echo "arrow-parity-guard: FAIL — 0 tests ran (target skipped/absent, not a real PASS)" >&2
     return 1
@@ -8459,6 +8524,26 @@ dispatch_component() {
     local pass_name="$1" logfile="$2"; shift 2
     local allowed_zero=" $* "
     local bad="" target=""
+    # Parse an ANSI-STRIPPED copy, never the raw log (issue #3400). Under
+    # CARGO_TERM_COLOR=always — set by 18 workflows incl. the nightly FULL gate.yml, and by
+    # scripts/local/pre-merge.sh — cargo writes the reset sequence BETWEEN the status word and
+    # the payload (`Running<ESC>[0m tests/foo.rs`), and it SURVIVES redirection to a file, so
+    # the gate'"'"'s own mandated `> gate.log 2>&1` capture is coloured too. MEASURED: the literal
+    # `Running tests/` then never matches, no target is ever associated with a result, and the
+    # `0 passed` branch'"'"'s `[ -n "$target" ]` test is false — so this guard silently reported OK
+    # about a target that ran zero tests. Redirection (`done < "$_parse_src"`), never a pipe: a
+    # piped `while read` loop runs in a SUBSHELL, so `$bad` would be discarded and the guard
+    # would pass for a second, independent reason.
+    local _parse_src
+    _parse_src=$(_ansi_stripped_log "$logfile" 2>/dev/null) || _parse_src=""
+    if [ -z "$_parse_src" ] || [ ! -r "$_parse_src" ]; then
+      echo "cli-tests: FAIL-CLOSED — could not prepare '"'"'$logfile'"'"' for parsing (resolved to '"'"'${_parse_src:-<empty>}'"'"'), so this guard parsed NOTHING. A guard that consumed no input has measured nothing and must never report OK (issue #3400)." >&2
+      return 1
+    fi
+    if [ -s "$logfile" ] && [ ! -s "$_parse_src" ]; then
+      echo "cli-tests: FAIL-CLOSED — '"'"'$logfile'"'"' is non-empty but its prepared copy '"'"'$_parse_src'"'"' is empty, so this guard would parse nothing (issue #3400)." >&2
+      return 1
+    fi
     while IFS= read -r line; do
       if [[ "$line" == *"Running tests/"* ]]; then
         target=$(printf "%s" "$line" | sed -E "s#.*Running tests/([^[:space:]]+)\.rs.*#\1#")
@@ -8475,7 +8560,7 @@ dispatch_component() {
       elif [[ "$line" == "test result:"* ]]; then
         target=""
       fi
-    done < "$logfile"
+    done < "$_parse_src"
     if [ -n "$bad" ]; then
       echo "cli-tests: FAIL-CLOSED —$bad ran 0 tests in $pass_name unexpectedly (issue #2039: a write-support-#[cfg]-gated target with no declared required-features, not on the allowed-zero list, would otherwise silently never run)" >&2
       return 1
