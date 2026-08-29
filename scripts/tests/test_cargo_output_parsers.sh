@@ -372,7 +372,16 @@ else
   # its pattern is broken is the exact false-PASS shape this whole issue is about, one level up.
   # So: `grep -F` only, and every needle is then re-checked against a copy of the blob with that
   # needle REMOVED — if the predicate still passes, it is not measuring anything.
-  cli_blob_src=$(awk "/cli-tests\\) run_component cli-tests bash -c/{f=1} f{print} f&&/^ *;;\$/{exit}" "$GATE")
+  # Terminate on /;;$/, NOT on a standalone /^ *;;$/ (roborev job 130, Low). The cli-tests branch
+  # ends with `... "$ws_expected"'"'"' ;;` -- the `;;` is TRAILING, not on its own line, and there is
+  # NO standalone `;;` anywhere after the branch start. So the old terminator NEVER FIRED and this
+  # blob captured 558 lines to EOF instead of the branch's 277: every structural assert below was
+  # scanning the rest of agent-gate.sh, and could be satisfied by unrelated later code. Measured:
+  # /;;$/ stops at exactly the branch's closing line. `test_agent_gate_cli_tests_enum.sh` already
+  # does it this way. The needle-removal control below is what kept these asserts from being fully
+  # vacuous -- it proves each needle is load-bearing -- but a needle can be load-bearing and still
+  # sit OUTSIDE the branch, which is what the wrong SCOPE allowed.
+  cli_blob_src=$(awk "/cli-tests\\) run_component cli-tests bash -c/{f=1} f{print} f&&/;;\$/{exit}" "$GATE")
   if [ -n "$cli_blob_src" ]; then
     ok "extracted the cli-tests dispatch blob from the shipped gate for structural assertions"
   else
