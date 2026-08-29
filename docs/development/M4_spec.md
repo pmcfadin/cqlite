@@ -621,9 +621,24 @@ column is source-verified (`value_to_napi` and the three converters named above)
 **Canonicalization rules (consumed by #1455).** The 3-way golden parity harness (#1455, Y1)
 takes its canonicalization rules from this table; it does not re-derive them.
 
-**The general principle — read this before the rules.** Canonicalization is reliable **exactly
-when the Python host shape uniquely determines the CQL type.** Where it does not, no
-host-value-only normalizer can recover the difference, and the rule for that row does not hold.
+**The general principle — read this before the rules.** Canonicalization is reliable for a value
+**iff, at every node of its value tree, every CQL type that could have produced that host shape
+yields the same canonical form.** Two ways to satisfy it:
+
+- the host shape **determines** the CQL type; or
+- the several CQL types sharing that host shape **agree** on the canonical form — `tuple<...>` and
+  `list<T>` are both a sequence and both canonicalize to an array, so their collision costs
+  nothing.
+
+Determination is therefore **sufficient but not necessary.** (An earlier formulation of this
+section said "reliable exactly when the host shape uniquely determines the CQL type"; that is too
+strong, and this document's own `tuple`/`list` row contradicted it.)
+
+Because the criterion ranges over the **whole value tree**, **a container is benign only if all of
+its descendants are.** A projected `list<T>` is benign for scalar `T` and **divergent** the moment
+`T` contains a `map` or a `udt` — which is exactly instance **a-3**: a projected `list` that
+diverges because of what is inside it. Never read a benign verdict on a container as unconditional.
+
 Failure comes in exactly two **families** — that part is structural, a property of the two
 mechanisms below — but the families are **GENERATIVE, not a taxonomy of a fixed set of cases**:
 they produce an instance wherever a *projection position* (a set element or a map key) holds a
@@ -635,16 +650,19 @@ the instance list further down is a floor, not a ceiling:
   through `value_to_hashable_key`, which **discards the CQL type**. Losing the host TYPE is not
   by itself a defect, so the criterion is narrower than "a non-scalar in a projection position":
 
-  > **A lossy projection diverges if and only if the projected type's canonical form is not a
-  > plain JSON array.**
+  > **A lossy projection diverges if and only if, at some node of the projected value, the
+  > projected type's canonical form differs from the one Node/the CLI produce** — in practice: the
+  > projection is benign while every node canonicalizes to a plain JSON array, and diverges at the
+  > first node that does not.
 
-  Worked through for every projected type:
+  Worked through for every projected type. The three benign verdicts are **conditional on the
+  descendants**, per the recursion above:
 
   | Projected type | Python projection | Canonical form | Node/CLI canonical form | Verdict |
   |---|---|---|---|---|
-  | `list<T>` | `List` arm → `tuple` | array | array | **benign** |
-  | `set<T>` | no `Set` arm — falls through to `value_to_py` → `set_to_py` → `frozenset` | sorted array | sorted array | **benign** |
-  | `tuple<...>` | no `Tuple` arm — falls through to `value_to_py` → `tuple` | array | array | **benign** |
+  | `list<T>` | `List` arm → `tuple` | array | array | **benign iff every descendant is benign** — divergent when `T` holds a `map`/`udt` (a-3) |
+  | `set<T>` | no `Set` arm — falls through to `value_to_py` → `set_to_py` → `frozenset` | sorted array | sorted array | **benign iff every descendant is benign** — and see #3500 when a UDT is nested |
+  | `tuple<...>` | no `Tuple` arm — falls through to `value_to_py` → `tuple` | array | array | **benign iff every descendant is benign** — and see #3500 when a UDT is nested |
   | `map<k,v>` | `Map` arm → tuple of pairs | array of arrays | array of `{"key": …, "value": …}` | **DIVERGES** (a-2) |
   | `udt` | `Udt` arm → `frozenset` of `(name, value)` pairs | array of `[name, value]` | **object** | **DIVERGES** (a-1; a-3 when nested) |
 
@@ -652,7 +670,8 @@ the instance list further down is a floor, not a ceiling:
   anything that nests them. **Benign projections, named explicitly so #1455 does not special-case
   them:** a `list`, `set` or `tuple` in a projection position loses its Python **host-type
   identity** (a `list` key arrives as a `tuple`) but its **canonical form is unchanged**, so it
-  compares equal across bindings and needs no handling. The defect is a *changed canonical form*,
+  compares equal across bindings and needs no handling — **provided its elements are themselves
+  benign.** `set<frozen<list<int>>>` is benign; `set<frozen<list<frozen<udt>>>>` is a-3. The defect is a *changed canonical form*,
   never a *lost host type*. (The two fall-through rows are also where #3500's `TypeError` cases
   live — see below — but that is a totality bug in the binding, not a canonicalization divergence.)
 - **(b) Host-shape collision.** Two different CQL types arrive as the same Python host type, so
@@ -700,6 +719,7 @@ would hold two.
 | **b-1** | host-shape collision | **`set<frozen<udt>>` vs `list<T>`** | Both are a plain Python `list` (`set_to_py`'s `contains_udt` fallback), so the set cannot be sorted without also reordering genuine `list<T>` values, whose order is semantically meaningful. Consequence: this row's canonical form is **order-SENSITIVE** — two structurally-equal UDT sets whose elements are in different orders canonicalize to **different** arrays and compare **unequal**. | Handle the row explicitly: compare it order-insensitively itself, or declare it unsupported. Do **not** assume the canonical form has erased set ordering here. |
 | **b-2** | host-shape collision | **CELL LEVEL ONLY — `map<text, X>` containing a literal `"_type"` key vs a `udt`** | Both are a Python `dict`, and at cell level `"_type"` is the ONLY discriminator available, so the normalizer's `if "_type" in value:` branch classifies such a map as a UDT: it returns an **object** instead of the documented key/value array, and **drops a `_keyspace` entry** if the map has one. `"_type"`/`_keyspace` are legal `text` map keys, so this is a real (if unusual) false positive. Requiring `_keyspace` as well would only pick a rarer delimiter on an already-ambiguous channel — a legal map can carry both — so it is documented, not narrowed (see the control/data lesson in `CLAUDE.md`). **The ROW-LEVEL twin of this defect is FIXED, not documented** — see the note directly below. | Treat a **cell-level** `map<text, X>` whose keys may include `"_type"` as **UNSUPPORTED** until #3497 threads the declared type. Row level needs no handling. |
 | **b-3** | host-shape collision (key identity) | **duplicate structurally-equal NON-SCALAR map keys** | A Python `dict` cannot hold two such keys at all: they collapse by hash/`__eq__`, last value wins, one entry — while a Node `Map` compares object keys by **reference** and keeps **both**. The canonical forms then differ in **length**, which no sorting reconciles. Well-formed Cassandra data never produces duplicate map keys, so this is out of contract rather than a live read-path bug; the collapse happens in `map_to_py`, before any normalizer runs. Deduplicating the Node side (or rejecting the input) would be a behavior change. | Treat duplicate non-scalar map keys as **UNSUPPORTED**; do not compare lengths across bindings for such input. |
+| **b-4** | host-shape collision (at COMPARISON time) | **`list<T>` vs `set<T>` in `values_equal`** — so **`list<T>` element ORDER is NOT verified by the #319 parity comparison** | The canonical form merges sets and lists into arrays (by design), so the comparison layer cannot tell them apart either: `values_equal` tries an ordered comparison first and then falls back to an **unordered** (sorted) comparison for arrays of non-dict primitives. A reordered `list<int>` therefore compares **EQUAL**, contradicting the table's `list<T>` row ("positional; order preserved"). The fallback is a **deliberate accommodation with its reason recorded at the branch**: CQL `SET` columns are sorted by `_sort_key` on the Python side and emitted in Cassandra's internal byte-order by the CLI, so without it genuine set comparisons in the existing #319 suite would red. Removing it naively trades a false pass for a false failure; telling the two apart needs the declared type (#3497). | Do not rely on the #319 comparison to catch a `list<T>` ordering regression — it cannot. A harness that must verify list order has to compare those columns **ordered-only**, which means knowing which columns are lists, i.e. schema information. |
 
 **Where a structured signal exists, USE IT — the row-level half of b-2 is fixed, not documented.**
 A ROW is also a Python `dict`, so a row with a column named `"_type"` (a legal quoted identifier)
@@ -729,8 +749,8 @@ Benign non-instance, recorded so it is not mistaken for a gap: `tuple<...>` vs `
 in the host shape on the Node side, but the canonical form merges them **by design**, so nothing
 is lost.
 
-The executable half of this contract is `normalize_python_value` in
-`bindings/python/tests/test_cli_parity.py` (issue #319) — see
+The executable half of this contract is `normalize_python_value` **and its comparison layer
+`values_equal`** in `bindings/python/tests/test_cli_parity.py` (issue #319) — see
 `TestCollectionIdentityContract` there, which asserts the normalized shape of every row of the
 table above **and** pins each known instance, so none can be mistaken for a solved case. The
 crash cases of #3500 are deliberately not pinned there: they raise inside the binding, so the
