@@ -1023,6 +1023,13 @@ journal_line() {
 # supervisor_lane_id — echo a stable, lane-unique token derived from this lane's checkout root, using
 # BUILTINS ONLY (no `tr`/`cksum`/`awk`: several suite cases source this file under a stripped PATH, and a
 # source-time external tool broke them twice — #3464 family 2).
+# THE HASH COMES FIRST AND THE SLUG IS BOUNDED (roborev round 34, Medium). The first cut appended the
+# hash AFTER an unbounded directory basename, and `claim.sh`'s `sanitize_field` caps a field at 120
+# characters — so a lane directory with a long basename truncated the HASH AWAY and two distinct lanes
+# collapsed onto one actor. That is the very aliasing this identifier exists to prevent, reintroduced by
+# the shape of the identifier itself. Hash first makes truncation cost only READABILITY; bounding the
+# slug means the whole token is ~40 chars, so it also cannot approach a filesystem NAME_MAX in the lock
+# filename. Ordering is doing real work here, not cosmetics.
 supervisor_lane_id() {
   local slug="${REPO_ROOT##*/}" full="$REPO_ROOT" i h=0 c
   slug="${slug//[^A-Za-z0-9._-]/_}"
@@ -1031,7 +1038,7 @@ supervisor_lane_id() {
     printf -v c '%d' "'${full:i:1}"
     h=$(((h * 31 + c) & 0x7fffffff))
   done
-  printf '%s-%s\n' "$slug" "$h"
+  printf '%s-%s\n' "$h" "${slug:0:24}"
 }
 
 # supervisor_claim_actor: EXPORT a lane-unique `CLAIM_ACTOR` unless the operator set one.
@@ -1059,16 +1066,13 @@ supervisor_claim_actor() {
   log "claim actor defaulted to lane-unique '$CLAIM_ACTOR' (the claim lock's holder identity is machine+actor; a shared default would alias two lanes on one box)"
 }
 
+# ONE construction, reused (roborev round 34, Medium). This duplicated `supervisor_lane_id`'s body
+# verbatim, so the bound added there would have silently not applied here — two spellings of one identity
+# is the drift shape #3464 records. A shell function call is not an external tool, so the builtins-only
+# constraint still holds.
 supervisor_lock_path() {
   [[ -n "$SUPERVISOR_LOCK" ]] && return 0
-  local slug="${REPO_ROOT##*/}" full="$REPO_ROOT" i h=0 c
-  slug="${slug//[^A-Za-z0-9._-]/_}"
-  [[ -n "$slug" ]] || slug=lane
-  for ((i = 0; i < ${#full}; i++)); do
-    printf -v c '%d' "'${full:i:1}"
-    h=$(((h * 31 + c) & 0x7fffffff))
-  done
-  SUPERVISOR_LOCK="${TMPDIR:-/tmp}/cqlite-worker-supervisor-${slug}-${h}.lock"
+  SUPERVISOR_LOCK="${TMPDIR:-/tmp}/cqlite-worker-supervisor-$(supervisor_lane_id).lock"
 }
 
 acquire_lock() {

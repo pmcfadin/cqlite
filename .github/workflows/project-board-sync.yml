@@ -495,6 +495,12 @@ jobs:
             # a retained ref is collectable on the next sweep, a stranded board item is not self-healing.
             if [ -z "$lane_issue" ] && [ -z "${issue:-}" ]; then
               echo "::notice::skipping legacy claim ${refname}: its issue could not be read, so reaping it would strand the board item (kept for the next sweep)"
+              # COUNTED AS KEPT (roborev round 34, Low). This branch retains the ref, which is the
+              # right call, and then did not increment `kept` — so the run summary UNDERCOUNTED
+              # retained claims and the two numbers no longer accounted for every ref examined. A
+              # summary that silently omits a category is the reporting half of the same
+              # fail-quiet shape this branch was added to fix.
+              kept=$((kept+1))
             elif bash "$HB" reap "$machine" "${lane_issue:-}" "$refsha"; then
               echo "reaped claim machine=$machine issue=${issue:-?}"
               reaped=$((reaped+1))

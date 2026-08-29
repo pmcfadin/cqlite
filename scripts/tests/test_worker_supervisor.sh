@@ -2816,6 +2816,14 @@ test_supervisor_lock_is_per_lane() {
   else
     fail "lock-per-lane-override: got [$ov]"
   fi
+  # ONE CONSTRUCTION (roborev round 34, Medium): the lock path must be built FROM `supervisor_lane_id`,
+  # not from a second copy of its body — two spellings of one identity drift, and the bound added to one
+  # would silently not apply to the other.
+  if sed -n '/^supervisor_lock_path()/,/^}/p' "$SUPERVISOR" | grep -q 'supervisor_lane_id'; then
+    pass "lock-path: built from supervisor_lane_id rather than a duplicated construction"
+  else
+    fail "lock-path-duplication: supervisor_lock_path does not call supervisor_lane_id"
+  fi
   # BUILTINS ONLY (#3464 family 2, reintroduced in the first cut of this very fix). Several cases
   # SOURCE the supervisor under a stripped PATH to prove the no-jq/no-python3 paths, so an external
   # tool anywhere in this resolution breaks them. Driven by an EMPTY PATH.
@@ -3671,6 +3679,36 @@ test_claim_actor_is_lane_unique() {
   else
     fail "claim-actor-shape: [$a] is not a recordable single token of >=3 chars"
   fi
+  # THE BOUND, which is finding 2's actual property (roborev round 34, Medium). `claim.sh`'s
+  # `sanitize_field` caps a field at 120 chars, so with the hash LAST a long lane-directory basename
+  # truncated the hash away and two distinct lanes shared one actor. The token must therefore stay well
+  # under the cap AND keep the hash where truncation cannot reach it. Driven by a 200-char basename.
+  local longroot longactor otherlong
+  longroot="/data/lanes/$(printf 'l%.0s' $(seq 1 200))"
+  otherlong="/data/other/$(printf 'l%.0s' $(seq 1 200))"
+  longactor=$(T_UNSET_ACTOR=1 REPO_ROOT="$longroot" "$BASH" "$body")
+  if [[ "${#longactor}" -le 120 && "${#longactor}" -ge 3 ]]; then
+    pass "claim-actor: a 200-char lane basename still yields a <=120-char actor (${#longactor} chars) — under claim.sh's cap"
+  else
+    fail "claim-actor-bound: [$longactor] is ${#longactor} chars — claim.sh truncates at 120, which would drop the uniqueness half"
+  fi
+  # And the two long-basename lanes must still DIFFER, which is the property truncation destroyed.
+  local otherlongactor
+  otherlongactor=$(T_UNSET_ACTOR=1 REPO_ROOT="$otherlong" "$BASH" "$body")
+  if [[ "$longactor" != "$otherlongactor" ]]; then
+    pass "claim-actor: two 200-char-basename lanes still get DIFFERENT actors (truncation cannot alias them)"
+  else
+    fail "claim-actor-bound-alias: both long lanes resolved to [$longactor]"
+  fi
+  # NON-VACUITY, true of the broken code too: the hash must sit BEFORE the readable slug, so that a
+  # truncation at ANY length preserves the distinguishing half. Asserted on the token's shape rather
+  # than on a length, because a bound alone would still alias if the hash were last.
+  if [[ "$longactor" =~ ^flow-[0-9]+- ]]; then
+    pass "claim-actor: the hash precedes the readable slug, so truncation costs only readability"
+  else
+    fail "claim-actor-order: [$longactor] does not carry its hash before the slug"
+  fi
+
   # An operator-set actor still wins — the fix must not seize the override.
   local ov
   ov=$(CLAIM_ACTOR=owner-run REPO_ROOT=/data/lanes/lane-1111 "$BASH" "$body")
