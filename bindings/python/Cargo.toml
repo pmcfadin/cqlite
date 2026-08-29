@@ -23,7 +23,6 @@ pyo3 = { workspace = true, features = ["extension-module", "abi3-py39", "multipl
 tokio = { workspace = true, features = ["rt-multi-thread", "sync"] }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
-hex = "0.4"
 
 # Tracing — always available so per-call spans (`python.execute*`) are emitted
 # unconditionally. They are zero-cost unless a subscriber + OTel layer is wired
