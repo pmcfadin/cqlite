@@ -1579,9 +1579,19 @@ run_iteration() {
       # then reported as a dead lane — turning the monitor this change ships into one an operator learns
       # to ignore.
       #
-      # Guarded on the marker naming NO issue: a `no-work` iteration that somehow carries one is not
-      # evidence that the issue concluded, so it stays unconcluded and keeps its ref.
-      [[ -z "$issue" ]] && CLAIM_WORK_CONCLUDED=1
+      # GUARDED ON THE STAMPED LANE, NOT ON THE MARKER'S ISSUE FIELD (roborev round 29, Medium — a
+      # REGRESSION from round 25's own guard). Round 25 keyed on `[ -z "$issue" ]`, the marker's issue,
+      # which is empty for every `no-work`. But the STAMPED ref can be a NUMERIC issue carried forward
+      # from a prior technical block — so an empty no-work concluded work on an issue that is still
+      # unresolved, and the shutdown then cleared that issue's only liveness signal.
+      #
+      # The question is not "did this iteration name an issue" but "does the ref this lane currently
+      # holds name one". A placeholder (or nothing stamped) means nothing is in progress; a numeric lane
+      # means an issue is still held and must keep its ref.
+      case "${CLAIM_STAMPED_ISSUE:-}" in
+        '' | p*) [[ -z "$issue" ]] && CLAIM_WORK_CONCLUDED=1 ;;
+        *) : ;;   # a numeric lane is still held — no-work says nothing about that issue
+      esac
       journal_line "$ITER" "no-work" "$issue" "$pr" "$duration" "$rc"
       log "no work available; backing off ${BACKOFF_NOWORK_SECS}s"
       sleep "$BACKOFF_NOWORK_SECS"

@@ -473,7 +473,14 @@ jobs:
               git fetch --no-write-fetch-head --no-tags origin "+${refname}:${tmpref}" >/dev/null 2>&1 || true
               msg=$(git log -1 --format=%B "$tmpref" 2>/dev/null || true)
               git update-ref -d "$tmpref" 2>/dev/null || true
-              issue=$(printf '%s' "$msg" | sed -n 's/.*issue=\([0-9][0-9]*\).*/\1/p' | head -1)
+              # EXACT KEY, WHOLE TOKEN — mirrors claim-heartbeat.sh's msg_numeric_field (roborev round
+              # 29, Low; round 26 fixed the script's parsers and left this copy behind, which is the
+              # guard-width shape one carrier over). The greedy form matched `issue=` as a SUBSTRING and
+              # the value as a PREFIX, so `issue=42 notissue=99` could make this workflow flip the board
+              # and comment on issue 99 while the script correctly reaped 42 — a wrong action on an
+              # unrelated issue. Splitting on whitespace and anchoring `^issue=<digits>$` makes the key
+              # exact and the value whole, with no regex alternation.
+              issue=$(printf '%s' "$msg" | tr ' \t\n' '\n\n\n' | sed -n 's/^issue=\([0-9][0-9]*\)$/\1/p' | head -1)
             fi
 
             # `reap` re-checks the open-PR guard atomically before deleting, so a
