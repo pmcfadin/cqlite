@@ -1161,6 +1161,18 @@ if printf '%s' "$out7pk" | grep -q "git ls-remote .* 'refs/claims/smoke-\*'"; th
 else
   bad "push: delete-rejected verdict gave no stray-ref cleanup guidance"
 fi
+# The advice must be ACTIONABLE for THIS fault: a successful create already proved
+# authentication, so recommending 'gh auth setup-git' / --fix-credentials would send the
+# operator to fix something that is not broken (#3369 review). It must name the
+# ref-deletion policy instead.
+if ! printf '%s' "$out7pk" | grep -q 'gh auth setup-git' \
+   && ! printf '%s' "$out7pk" | grep -q -- '--fix-credentials' \
+   && printf '%s' "$out7pk" | grep -q 'ref-deletion policy, NOT a credential fault'; then
+  ok "push: delete rejection advises the ref-deletion policy, NOT credentials (the create already authenticated)"
+else
+  bad "push: delete rejection gave credential advice that cannot fix a deletion policy"
+  push_plain "$out7pk" | grep -E 'cause|fix|setup-git' | head -4
+fi
 # The verdict must come from claim.sh's ANCHORED verdict line AND its exit status, not
 # from a substring anywhere in the captured stream. A claim.sh that prints the token in
 # prose (or on stderr) and then FAILS must not pass.

@@ -1452,9 +1452,16 @@ else
       # deleted from is unusable for claims (`release` deletes refs/claims/issue-<N>), and
       # this run has stranded a ref — so it is FAILED, never VERIFIED.
       warn "git-push: FAILED ('$PUSH_PROBE_REMOTE' accepted the refs/claims/* create but REFUSED the delete — unusable for the claim protocol, and a smoke ref is now STRANDED)"
+      # NOT push_probe_fix_advice (#3369 review): that advises 'gh auth setup-git' /
+      # --fix-credentials, and a SUCCESSFUL CREATE already proves authentication worked.
+      # No credential change can move a server-side ref-deletion policy, so the generic
+      # remediation would send the operator to fix something that is not broken — the
+      # same class of defect as a health signal pointing the wrong way, which is the
+      # whole subject of this issue. Two lines, inline, naming the actual remedy.
+      info "cause:  the create AUTHENTICATED fine — this is $PUSH_PROBE_REMOTE's ref-deletion policy, NOT a credential fault"
+      info "fix:    permit deletion of refs/claims/* on $PUSH_PROBE_REMOTE — 'claim.sh release' deletes refs/claims/issue-<N>, so the claim protocol cannot run there until it is allowed"
       info "list strays:  git ls-remote $PUSH_PROBE_REMOTE 'refs/claims/smoke-*'"
       info "delete one:   git push $PUSH_PROBE_REMOTE --delete refs/claims/smoke-<nonce>   (always safe — it is not a claim lock)"
-      push_probe_fix_advice
     elif printf '%s\n' "$push_probe_out" | grep -q '^CLAIM: SMOKE-FAIL.*reason=commit-build'; then
       # A LOCAL failure building the throwaway claim commit: the push never happened,
       # so nothing was learned about push capability.
