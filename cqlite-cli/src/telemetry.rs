@@ -25,7 +25,10 @@ use cqlite_core::observability::{ObservabilityConfig, ObservabilityGuard};
 /// is what makes that warning reach stderr instead of being a second silent
 /// no-op layered on the first.
 #[cfg(feature = "observability")]
-pub fn init_telemetry(core_cfg: ObservabilityConfig, log_level: &str) -> Result<ObservabilityGuard> {
+pub fn init_telemetry(
+    core_cfg: ObservabilityConfig,
+    log_level: &str,
+) -> Result<ObservabilityGuard> {
     let guard = cqlite_core::observability::init(core_cfg)
         .map_err(|e| anyhow::anyhow!("Failed to initialize observability: {}", e))?;
     init_tracing_subscriber(log_level);
@@ -35,7 +38,10 @@ pub fn init_telemetry(core_cfg: ObservabilityConfig, log_level: &str) -> Result<
 /// Feature-off counterpart: subscriber FIRST, so the #1702 warning is visible.
 /// See the feature-on twin above for the full ordering rationale.
 #[cfg(not(feature = "observability"))]
-pub fn init_telemetry(core_cfg: ObservabilityConfig, log_level: &str) -> Result<ObservabilityGuard> {
+pub fn init_telemetry(
+    core_cfg: ObservabilityConfig,
+    log_level: &str,
+) -> Result<ObservabilityGuard> {
     init_tracing_subscriber(log_level);
     cqlite_core::observability::init(core_cfg)
         .map_err(|e| anyhow::anyhow!("Failed to initialize observability: {}", e))

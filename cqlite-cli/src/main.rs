@@ -1189,7 +1189,6 @@ async fn shutdown_flush_and_exit(engine: &mut WriteEngine) -> Result<()> {
     std::process::exit(code);
 }
 
-
 /// Initialize the database engine with proper configuration
 async fn initialize_database(db_path: &PathBuf, config: &config::Config) -> Result<Database> {
     // Create the database directory if it doesn't exist
