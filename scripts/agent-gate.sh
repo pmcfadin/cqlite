@@ -8603,8 +8603,24 @@ dispatch_component() {
     return 0
   }
 
-  log1=$(mktemp) && log2=$(mktemp)
-  trap "rm -f \"$log1\" \"$log2\"" EXIT
+  # A PRIVATE 0700 DIRECTORY, not two bare mktemp files in the shared tmp (issue #3400).
+  # TWO reasons, and the first one is the concrete defect: _ansi_stripped_log writes a
+  # <log>.ansi-stripped SIBLING, so the old trap (which removed only the two originals) leaked
+  # two world-readable files into TMPDIR per gate run. Second, that sibling name is PREDICTABLE
+  # from the log name and these tests run for MINUTES, so a local peer watching TMPDIR could
+  # create it as a SYMLINK in the window before the sed write and have it overwrite any file the
+  # gate user can write. The mktemp name is random, which makes the sibling unguessable AHEAD of
+  # time but not unguessable once the log exists, so that is a real if narrow TOCTOU race rather
+  # than an impractical one. A 0700 mktemp -d closes both at once: nothing to enumerate, nothing
+  # another user can create inside, and one rm -rf collects everything. Same reasoning already
+  # applied to run_arrow_parity_guard_cmd, so the two callers are now consistent.
+  # NO local here: this body runs under bash -c, not inside a function, and bash rejects local at
+  # the top level at RUN time (bash -n accepts it), which would fail the component on first use.
+  # NO apostrophes in this comment: the cli-tests body is a single-quoted bash -c string.
+  _cli_tmp=$(mktemp -d "${TMPDIR:-/tmp}/agent-gate-cli.XXXXXX") || exit 1
+  chmod 700 "$_cli_tmp" 2>/dev/null || true
+  log1="$_cli_tmp/pass1.log"; log2="$_cli_tmp/pass2.log"
+  trap "rm -rf \"$_cli_tmp\"" EXIT
 
   cargo test --package cqlite-cli "${def_flags[@]}" 2>&1 | tee "$log1"
   rc=${PIPESTATUS[0]}

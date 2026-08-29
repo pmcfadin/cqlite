@@ -356,6 +356,30 @@ STUB
 fi
 
 # ─────────────────────────────────────────────────────────────────────────────────────
+# (A5) The DERIVED SIBLING must be collected. _ansi_stripped_log writes
+#      `<log>.ansi-stripped` beside its input, so any caller that cleans only the
+#      original leaks a world-readable file per run — and the sibling name is derivable
+#      from the log name, which for a minutes-long run is a narrow but real TOCTOU
+#      symlink window. Both shipped callers must use a private 0700 mktemp -d and remove
+#      it wholesale (issue #3400).
+# ─────────────────────────────────────────────────────────────────────────────────────
+if grep -qE 'mktemp -d .*agent-gate-cli' "$GATE" && grep -qE 'trap "rm -rf .*_cli_tmp' "$GATE"; then
+  ok "A5: cli-tests logs into a private mktemp -d and removes it wholesale (the .ansi-stripped siblings go with it)"
+else
+  bad "A5: cli-tests does not use a private mktemp -d + rm -rf trap — the derived .ansi-stripped siblings leak into TMPDIR"
+fi
+if grep -qE '^ *log1=\$\(mktemp\) && log2=\$\(mktemp\)' "$GATE"; then
+  bad "A5: cli-tests is back to two bare mktemp files in the shared tmp"
+else
+  ok "A5: cli-tests no longer creates two bare mktemp files in the shared tmp"
+fi
+if grep -qE 'tmpd=\$\(mktemp -d\)' "$GATE" && grep -qE 'rm -rf "\$tmpd"' "$GATE"; then
+  ok "A5: run_arrow_parity_guard_cmd normalises inside a private mktemp -d and removes it (consistent with the cli-tests caller)"
+else
+  bad "A5: run_arrow_parity_guard_cmd is not using a private mktemp -d — the two callers disagree"
+fi
+
+# ─────────────────────────────────────────────────────────────────────────────────────
 # (B) The structural lint.
 # ─────────────────────────────────────────────────────────────────────────────────────
 lint_out=""
