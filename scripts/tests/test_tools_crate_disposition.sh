@@ -192,13 +192,32 @@ workspace_dependents() {
 wired_sorted=$(printf '%s\n' "$WIRED_TOOLS" | grep . | sort -u)
 unwired_sorted=$(printf '%s\n' "$UNWIRED_TOOLS" | grep . | sort -u)
 mixed_sorted=$(printf '%s\n' "$MIXED_TOOLS" | grep . | sort -u)
-n_wired=$(printf '%s\n' "$wired_sorted" | grep -c .)
-n_unwired=$(printf '%s\n' "$unwired_sorted" | grep -c .)
-n_mixed=$(printf '%s\n' "$mixed_sorted" | grep -c .)
+# `grep -c` exits 1 for a count of ZERO while still PRINTING "0", so its status is
+# deliberately not used as a signal here — the printed count is the datum, and the
+# floors below are what reject zero. count_lines guards the one thing that would
+# otherwise slip through: a value that is not a number at all (a grep that died
+# printing nothing), which would reach `[ "$n" -gt 0 ]` as a bash syntax error
+# rather than as a named cause.
+# RETURNS non-zero rather than calling fail(): fail() ends with `exit`, and an
+# `exit` inside a command substitution leaves only the SUBSHELL — the parent would
+# carry on with an empty value and hit `[ "" -gt 0 ]` as a bash syntax error
+# instead of a named cause. So the status is propagated and checked at each call
+# site with `|| fail`.
+count_lines() {
+  local n
+  n=$(printf '%s\n' "$1" | grep -c .)
+  case "$n" in
+    ''|*[!0-9]*) return 1 ;;
+  esac
+  printf '%s\n' "$n"
+}
+n_wired=$(count_lines "$wired_sorted")     || fail "cannot count WIRED_TOOLS (grep -c returned no usable number) — unmeasurable is not a pass"
+n_unwired=$(count_lines "$unwired_sorted") || fail "cannot count UNWIRED_TOOLS (grep -c returned no usable number) — unmeasurable is not a pass"
+n_mixed=$(count_lines "$mixed_sorted")     || fail "cannot count MIXED_TOOLS (grep -c returned no usable number) — unmeasurable is not a pass"
 # Crates that carry orphaned targets: UNWIRED (wholly) + MIXED (partly). Both owe
 # a label; only MIXED additionally owes a statement of its live half.
 labelled_sorted=$(printf '%s\n%s\n' "$unwired_sorted" "$mixed_sorted" | grep . | sort -u)
-n_labelled=$(printf '%s\n' "$labelled_sorted" | grep -c .)
+n_labelled=$(count_lines "$labelled_sorted") || fail "cannot count the label-bearing crate set (grep -c returned no usable number) — unmeasurable is not a pass"
 
 # --- affirmative-measurement floor: the label-bearing set must be non-empty, or
 # --- the label loop below would enforce nothing while still reporting PASS.
@@ -209,9 +228,17 @@ n_labelled=$(printf '%s\n' "$labelled_sorted" | grep -c .)
 # ---    satisfy the accounted-for loop below while making its label requirement
 # ---    ambiguous — which is the exact defect the third category exists to fix
 # ---    (roborev job 75), so it is asserted rather than assumed.
+#
+# `comm`'s exit status is CHECKED, not discarded. An unchecked `both=$(comm ...)`
+# yields an empty string when comm FAILS, and "empty intersection" is precisely
+# this check's PASS condition — so a comm failure would silently certify the lists
+# as disjoint. Same shape as roborev jobs 78/80: never let a permissive verdict
+# rest on the absence of output that a failure also produces.
 check_disjoint() {
-  local a="$1" b="$2" name_a="$3" name_b="$4" both
+  local a="$1" b="$2" name_a="$3" name_b="$4" both rc
   both=$(comm -12 <(printf '%s\n' "$a") <(printf '%s\n' "$b"))
+  rc=$?
+  [ "$rc" -eq 0 ] || fail "cannot compare $name_a against $name_b (comm exited $rc) — an unmeasurable comparison is not a pass; a comm failure and an EMPTY intersection both produce no output, so this status must be checked"
   [ -z "$both" ] || fail "crate(s) recorded in BOTH $name_a and $name_b: $(printf '%s ' $both)- a crate has exactly ONE disposition"
 }
 check_disjoint "$wired_sorted"   "$unwired_sorted" WIRED_TOOLS   UNWIRED_TOOLS
