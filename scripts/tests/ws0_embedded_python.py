@@ -56,30 +56,29 @@ the driver and the line — never a silent omission from the census. The alterna
 what you do not understand) is the one that would let instance #8 ship in a shape slightly unlike
 the first seven.
 
-## The classification, and what makes it closed
+## THE CLASSIFICATION IS AN ALLOWLIST, and that is why it closes
 
-A `python3` invocation can only receive code four ways: `-c`, a script path, standard input, or
-`-m`. So the census keys on WHICH of those a given occurrence uses rather than on how it is
-spelled:
+Earlier versions recognised DANGEROUS shapes in order to refuse them. That is a BLOCKLIST over an
+open set — the list of shell constructs does not close — and it cost SEVEN findings across five
+review rounds, ending with a path-qualified `/usr/bin/python3` that was not refused but INVISIBLE.
+`census` lists all seven with their measurements.
 
-    -c '…'        embedded, single-quoted — the shape both defective steps use. Extracted, by
-                  the rule below rather than by a line pattern.
-    <<'EOF'       embedded via a heredoc on stdin, delimiter QUOTED. Extracted. (None today;
-                  covered because a future step written this way must not fall outside the
-                  census.) An UNQUOTED `<<EOF` is a FINDING: the shell expands the body before
-                  python sees it, so the verbatim text is not the program that runs.
-    <path>.py     a SCRIPT FILE. Not embedded — it is an ordinary python file every other tool
-                  already sees — so it is recorded and not extracted.
-    (no argument) a MENTION **only** for the one presence-probe construct this driver uses — the
-                  word inside a `for … in <list>` membership test. EVERY OTHER argumentless
-                  invocation is UNKNOWN, because `python3` with no argument reads its program from
-                  STDIN: `producer | python3` is embedded code with no argument at all, and
-                  classifying it as harmless was a hole in the fail-closed census (#3451 review
-                  round 4). Fail-closed means the shapes do NOT have to be enumerated — recognise
-                  the one that occurs, and let the rest be findings.
+Now the candidate net is as wide as it goes and exactly four shapes are interpreted:
 
-Anything else — `-c` with a shape that cannot be delimited, `-m`, a bare `-`, a variable where the
-code should be — is UNKNOWN, which is a finding.
+    python3 -c '…'    bare `python3`, single-quoted, the quote closing at a shell word boundary.
+                      Extracted. Covers the driver's two multi-line steps and its inline block.
+    python3 <f>.py    bare `python3` running a SCRIPT FILE. Recorded, not extracted — an ordinary
+                      python file is something every other tool already reads.
+    for … in <list>   the membership probe at `ws0-baseline.sh:421`: a word in a LIST, not a
+                      command, so it carries no code.
+    anything else     A FINDING. Not classified, not skipped, not modelled.
+
+A construct nobody anticipated therefore becomes a finding by FAILING TO MATCH, rather than by
+someone having thought to refuse it. HEREDOCS ARE NOT SUPPORTED and are findings: support for them
+was speculative (this driver has none) and produced three separate false passes — an unquoted
+delimiter is shell-expanded before python sees it, a composed delimiter makes bash use a different
+tag, and with several redirects bash uses the last. Each compiled a body python never receives. A
+future heredoc step is told to teach the census, which is the correct outcome.
 
 ## HOW A `-c '…'` BLOCK IS DELIMITED, and the three closer shapes that forced the rule
 
@@ -115,23 +114,22 @@ Both wrong versions are instructive in OPPOSITE directions and neither is safe:
 So the suite asserts BOTH directions: a defect must be reported, and a good file carrying the
 idiom must NOT be.
 
-## SCOPE: this file's caller lints `ws0-baseline.sh`, and the UNKNOWN class is calibrated for it
+## SCOPE: the caller lints `ws0-baseline.sh`, and the allowlist is that driver's shapes
 
-The census is used by `test_ws0_embedded_steps_execute.sh` against ONE driver. Run tree-wide it
-reports UNKNOWN on shapes that driver does not contain and that this file deliberately does not
-guess about: a script path held in a VARIABLE (`python3 "$ROWS_PY" …`, where nothing on the line
-says whether it is python), a DOUBLE-quoted `-c` body (the shell expands it, so the bytes python
-receives are not the bytes on disk), and `python3 >/dev/null` reading stdin from a pipe. Each is a
-real shape in this repository, each is fail-closed here, and each would have to be taught — not
-skipped — before this census could lint the whole tree. That generalisation is deliberately NOT
-this issue.
+Run over other files this census reports findings on shapes that driver does not contain — a
+script path held in a VARIABLE, a DOUBLE-quoted `-c` body, a heredoc, `python3` reading a pipe.
+Those are findings BY DESIGN rather than gaps: each would have to be TAUGHT before this census
+could lint the whole tree, and teaching is a deliberate act someone reviews. That generalisation
+is not this issue.
 
 ## The direction it errs in, stated
 
-Over-inclusion, deliberately. A `python3 -c '…'` written INSIDE a shell string (an `echo` of an
-example, say) is censused as a block and compiled, which costs a spurious finding at worst. The
-opposite posture — skipping anything that might not be real code — is how a step reaches an
-operator having been parsed by nothing, and it is the state this file was written to end.
+Over-inclusion, deliberately, and now at BOTH levels: the candidate net matches more words than
+are invocations, and the allowlist admits fewer shapes than are safe. A `python3 -c '…'` written
+INSIDE a shell string (an `echo` of an example) is censused as a block; a legitimate construct the
+allowlist has not been taught is a finding. Both cost noise, which is recoverable. The opposite
+posture — skipping what you do not understand — is how a step reaches an operator having been
+parsed by nothing, and it is the state this file was written to end.
 """
 
 from __future__ import annotations
@@ -141,44 +139,55 @@ import pathlib
 import re
 import sys
 
-# The word, matched only where it is a standalone token. `requires python3.` inside an `echo`
-# string is not an invocation and must not be censused as an unknown shape; a trailing
-# word/dot character is the discriminator.
-_PY_TOKEN = re.compile(r"(?<![\w./-])python3(?![\w.])")
+# THE CANDIDATE NET, CAST AS WIDE AS IT GOES (#3451 review round 6).
+#
+# Any word whose BASENAME is `python`/`python3`/`python3.11` — path-qualified or not — is a
+# candidate: `/usr/bin/python3`, `./python3`, `$HOME/bin/python3`, bare `python3`. Deliberately
+# over-matching, because a candidate that is SEEN and refused is safe while one that is never seen
+# is invisible. That was r6F3: `/usr/bin/python3 -c '<a syntax error>'` produced
+# `blocks=0 findings=0 occurrences=0` — a defective block the census did not merely mis-handle but
+# never noticed, reported as clean.
+#
+# The only lexical narrowing is a token boundary: a trailing word or `.` character means this is
+# not a word of its own (`requires python3.` inside an `echo` string, `python3x`). That is a rule
+# about identifiers, not about shell.
+_PY_WORD = re.compile(r"python[0-9]*(?:\.[0-9]+)*(?![\w.])")
 
-# The OPENING of a `-c '…'` block: the `-c` flag and the single quote that starts the shell
-# string. Where it CLOSES is decided by scanning bash's quoting rules (`_scan_single_quoted`),
-# never by a line pattern — see the header's three-shape section.
+# Characters that cannot appear inside one shell word, used to find where a candidate's word
+# STARTS so a path prefix is captured with it.
+_WORD_BREAK = frozenset(" \t\n;&|<>()'\"`")
+
+# ---------------------------------------------------------------------------
+# THE ALLOWLIST — the only shapes this census will interpret
+# ---------------------------------------------------------------------------
+# `-c` followed by a single quote. ONE branch covers both the multi-line form (the quote ends the
+# line, driver blocks 1-2) and the inline form (driver block 3), because where the string CLOSES is
+# found by scanning bash's quoting rules rather than by a line pattern.
 _OPEN_DASH_C = re.compile(r"^\s*-c\s+'")
+
+# The `'"'"'` idiom: close, emit a literal apostrophe from a double-quoted segment, reopen. The one
+# exception to "a single-quoted string runs to the next quote".
+_QUOTE_IDIOM = "'" + '"' + "'" + '"' + "'"
+
 # WHAT MAY LEGALLY FOLLOW A BLOCK'S CLOSING QUOTE (#3451 review round 5, finding 1).
 #
 # Bash CONCATENATES adjacent word fragments, so `python3 -c 'pass'" +"` runs `pass +`. Extracting
 # the quoted part alone approves a program python NEVER RECEIVES — measured: bash raised
 # `SyntaxError: invalid syntax` while the census reported `compiled=1 findings=0`. A FALSE PASS.
 #
-# The fix REFUSES rather than models: adjacent fragments are not parsed, they are a finding. What
-# makes that safe is the boundary SET, and getting it wrong reds the real driver — its inline
-# block at `ws0-baseline.sh:941` closes `')" || {`, i.e. with a `)` immediately after the quote, so
-# a whitespace-only rule would flag 1 of the driver's own 3 blocks on the first run. That false-red
-# direction is what got the previous oracle deleted, so the set is shell metacharacters, not just
-# space. (The two multi-line blocks close `' "$HERE" …`, a space, and are unaffected either way.)
+# The boundary set is shell metacharacters, NOT whitespace: the driver's own inline block at
+# `ws0-baseline.sh:941` closes `')" || {`, i.e. with a `)` immediately after the quote, so a
+# whitespace-only rule would flag 1 of the driver's own 3 blocks on the first run. (The two
+# multi-line blocks close `' "$HERE" …`, a space, and are unaffected either way.)
 _WORD_BOUNDARY_AFTER_CLOSE = frozenset(" \t\n)&;|<>")
 
-# The `'"'"'` idiom: close, emit a literal apostrophe from a double-quoted segment, reopen. The one
-# exception to "a single-quoted string runs to the next quote".
-_QUOTE_IDIOM = "'" + '"' + "'" + '"' + "'"
-# A heredoc redirect: `<<'PY'`, `<<PY`, `<<-'PY'`. The `dash` group is captured because `<<-`
-# and `<<` have DIFFERENT terminator rules — see `_delimit_heredoc`.
-_HEREDOC = re.compile(
-    r"<<(?P<dash>-?)\s*(?P<q>['\"]?)(?P<tag>[A-Za-z_][A-Za-z0-9_]*)(?P=q)"
-)
 # The ONE presence-probe construct the driver contains: `for tool in perf taskset python3; do`.
-# The token is a word in a LIST, not a command. Recognised explicitly so that every OTHER
-# argumentless invocation can fall through to UNKNOWN — see the MENTION branch in `census`.
+# The token is a word in a LIST, not a command.
 _FOR_WORD_LIST = re.compile(r"^\s*for\s+[A-Za-z_][A-Za-z0-9_]*\s+in\s")
 
 # A script-file argument, quoted or not, possibly carrying a shell expansion in its directory
-# part: `"$HERE/ws0_report.py"`.
+# part: `"$HERE/ws0_report.py"` (driver line 981). Recorded, never extracted — an ordinary python
+# file is something every other tool already reads.
 _SCRIPT = re.compile(r"^[\"']?[^\s\"']*\.py[\"']?(\s|$)")
 
 
@@ -231,60 +240,44 @@ def _scan_single_quoted(text: str, open_quote: int) -> tuple[str, int]:
     )
 
 
-def _delimit_heredoc(
-    lines: list[str], start: int, tag: str, dash: bool
-) -> tuple[str, int]:
-    """Body of the heredoc opened on `lines[start]`, plus the line its terminator sits on.
-
-    THE TERMINATOR RULE IS THE SHELL'S, not `.strip()` (#3451 review round 1, finding 2). The two
-    forms differ and conflating them is wrong in both directions:
-
-    * `<<TAG`  — the terminator must be the line EXACTLY. A space-indented `  TAG` is ORDINARY
-      BODY to the shell, so accepting it truncates the block early and hands python a body it
-      never receives. A `.strip()` comparison accepted it.
-    * `<<-TAG` — leading TABS (never spaces) are stripped from the terminator AND from every body
-      line. A `.strip()` comparison found the terminator but left the body's tabs in place, so a
-      tab-indented body compiled as an IndentationError the shell would never produce.
-
-    Both are latent today — this driver carries no heredoc — but the branch SHIPS and is
-    exercised, and a wrong implementation of a shipped branch is a trap for whoever first writes
-    a step in that shape.
-    """
-    body: list[str] = []
-    for i in range(start + 1, len(lines)):
-        line = lines[i]
-        candidate = line.lstrip("\t") if dash else line
-        if candidate == tag:
-            return "\n".join(body) + "\n", i
-        body.append(candidate)
-    raise Unclassifiable(
-        start + 1,
-        f"an embedded python heredoc opened with `{'<<-' if dash else '<<'}{tag}` is never"
-        " terminated by a line the SHELL would accept as its terminator"
-        + (" (leading tabs stripped)" if dash else " (an exact match, indentation included)")
-        + ", so its body cannot be delimited.",
-    )
-
-
 def census(path: pathlib.Path) -> tuple[list[dict], list[dict]]:
-    """Classify every `python3` occurrence. Returns (records, findings).
+    """Classify every `python`/`python3` candidate. Returns (records, findings).
 
-    THE SCAN IS BY POSITION, NOT BY LINE (#3451 review round 2, finding 3). An earlier version
-    searched each line ONCE and then skipped whole lines, so a SECOND invocation on the same
-    line — after a `;`, an `&&`, or an inline block's closing quote — was silently dropped, which
-    contradicted the "every occurrence" guarantee this file's fail-closed posture rests on.
-    MEASURED against `python3 -c 'import sys'; python3 -c '<a syntax error>'`: `blocks=1
-    occurrences=1`, and the defect in the second block was invisible to the compile check.
+    AN ALLOWLIST, NOT A BLOCKLIST (#3451 review round 6). Seven findings across five review rounds
+    were one cause: the census recognised DANGEROUS shapes in order to refuse them, and a
+    recogniser of dangerous shapes is a blocklist over an open set. It could not close.
 
-    So the cursor advances past exactly what each classification CONSUMED — the closing quote of
-    a `-c` block, the line after a heredoc terminator, the token itself for a mention or a script
-    invocation — and the remainder of every line is rescanned.
+        r2F3  only the FIRST candidate per line was censused
+        r4F2  argumentless python3 (stdin / a pipe) classified harmless
+        r5F1  adjacent shell-word fragments after the closing quote
+        r5F2  an unquoted heredoc body is shell-expanded before python sees it
+        r6F1  a composed heredoc delimiter (`<<'PY'X` -> bash uses `PYX`)
+        r6F2  multiple heredoc redirects -> bash uses the LAST, this took the first
+        r6F3  a path-qualified `/usr/bin/python3` was not matched at all — INVISIBLE
+
+    So the net is cast as wide as possible and only FOUR shapes are interpreted:
+
+        1. bare `python3 -c '<single-quoted>'`, the quote closing at a shell word boundary
+           (covers the driver's multi-line blocks 1-2 and its inline block 3);
+        2. bare `python3 <path>.py …` — a SCRIPT file, recorded and not extracted;
+        3. the `for … in <list>` membership probe, which is a word in a list and not a command;
+        4. nothing else.
+
+    EVERYTHING ELSE IS A FINDING — not classified, not skipped, not modelled. A shell construct
+    nobody has thought of becomes a finding automatically, by failing to match, so the enumeration
+    stops being ours to complete. This is the repository's own posture: allowlist-validate fail
+    closed rather than blocklist the dangerous form.
+
+    NOTE the allowlist requires the BARE word `python3`. A path-qualified invocation is a
+    candidate (so it is seen) and a finding (so it is named) — that is r6F3 going from invisible
+    to reported.
+
+    THE SCAN IS BY POSITION, not by line (r2F3): the cursor advances past exactly what each
+    classification consumed, so a second candidate after a `;`, an `&&` or an inline block's
+    closing quote is still examined.
     """
     text = path.read_text()
     lines = text.split("\n")
-    # Offset of each line start, so a match position can be turned back into a line number and a
-    # per-line remainder. The quoting scanner works over the whole text because a block's closer
-    # is not a property of any single line (shapes 1-3 in the header).
     starts: list[int] = []
     off = 0
     for line in lines:
@@ -294,45 +287,47 @@ def census(path: pathlib.Path) -> tuple[list[dict], list[dict]]:
     findings: list[dict] = []
     pos = 0
     while True:
-        m = _PY_TOKEN.search(text, pos)
+        m = _PY_WORD.search(text, pos)
         if not m:
             break
         idx = bisect.bisect_right(starts, m.start()) - 1
         line = lines[idx]
+        line_start = starts[idx]
+        # Walk left to the start of the shell WORD, so a path prefix travels with the candidate.
+        word_start = m.start()
+        while word_start > line_start and text[word_start - 1] not in _WORD_BREAK:
+            word_start -= 1
+        word = text[word_start : m.end()]
+        pos = m.end()
         if line.lstrip().startswith("#"):
-            # A whole-line shell comment carries no code. Advance past THIS occurrence only, not
-            # past the line: nothing else on a comment line matters, but the cursor rule stays one
-            # rule everywhere.
-            pos = m.end()
+            continue  # a whole-line shell comment carries no code
+        if word.rsplit("/", 1)[-1] != text[m.start() : m.end()]:
+            # The word's BASENAME is not the matched token, i.e. the token is a SUFFIX of a longer
+            # program name (`mypython3`, `jython3`). That is a different program, not a
+            # path-qualified python — the path case (`/usr/bin/python3`) has the token AS its
+            # basename and is examined. This is the one lexical exclusion, and it is a statement
+            # about names rather than about shell.
             continue
-        line_end = starts[idx] + len(line)
+        line_end = line_start + len(line)
         raw_rest = text[m.end() : line_end]
         rest = _strip_comment(raw_rest).strip()
-        pos = m.end()
         try:
-            if not rest or rest.lstrip(";&|)").strip() in ("", "do", "then"):
-                # AN ARGUMENTLESS `python3` IS NOT AUTOMATICALLY HARMLESS (#3451 review round 4).
-                # With no argument python3 reads its program from STDIN, so `producer | python3`
-                # is embedded code carrying no argument at all — and treating every argumentless
-                # invocation as a MENTION let exactly that bypass the census.
-                #
-                # So only the ONE presence-probe construct this driver contains is recognised: the
-                # word inside a `for … in <list>` membership test, which is a word in a LIST and
-                # not a command at all. Everything else falls through to UNKNOWN below. That is
-                # what fail-closed buys — the shapes do not have to be enumerated.
-                if _FOR_WORD_LIST.match(line):
-                    records.append({"kind": "MENTION", "line": idx + 1, "text": line.strip()})
-                    continue
+            if word != "python3":
                 raise Unclassifiable(
                     idx + 1,
-                    "this `python3` invocation has NO ARGUMENT, so it reads its program from"
-                    " STDIN — a pipe or a redirect can carry embedded code the compile check"
-                    " would never see. Only a `for … in <list>` membership test is recognised as"
-                    " a presence probe; anything else is a finding rather than a skip.",
+                    f"this python invocation is spelled {word!r}, not the bare `python3` the"
+                    " allowlist recognises. It is REPORTED rather than skipped because a"
+                    " path-qualified invocation carries code exactly as a bare one does, and"
+                    " until #3451 round 6 this shape was INVISIBLE to the census — a defective"
+                    " block reported as clean. Teach the allowlist if the spelling is intended.",
                 )
+            if _FOR_WORD_LIST.match(line) and rest.lstrip(";&|)").strip() in ("", "do", "then"):
+                # ALLOWLIST 3: a word in a `for … in <list>` membership test, not a command.
+                records.append({"kind": "MENTION", "line": idx + 1, "text": line.strip()})
+                continue
             dash_c = _OPEN_DASH_C.match(raw_rest)
             if dash_c:
-                # The opening quote is the LAST character the match consumed.
+                # ALLOWLIST 1.
                 open_quote = m.end() + dash_c.end() - 1
                 body, close = _scan_single_quoted(text, open_quote)
                 after = text[close + 1 : close + 2]
@@ -355,53 +350,20 @@ def census(path: pathlib.Path) -> tuple[list[dict], list[dict]]:
                      "body": body if body.endswith("\n") else body + "\n"}
                 )
                 continue
-            hd = _HEREDOC.search(rest)
-            if hd:
-                if not hd.group("q"):
-                    # AN UNQUOTED DELIMITER EXPANDS (#3451 review round 5, finding 2). With
-                    # `<<PY` the shell performs parameter, command, arithmetic and backslash
-                    # expansion on the body BEFORE python sees it, so the verbatim text is not the
-                    # program. Measured with a body that is valid python verbatim and a
-                    # SyntaxError once expanded: bash refused it, the census reported
-                    # `compiled=1 findings=0`. A FALSE PASS.
-                    #
-                    # Refused, not modelled: shell expansion is not something this file will
-                    # imitate. With a QUOTED delimiter (`<<'PY'`) no expansion happens and the
-                    # premise "verbatim is what python receives" is exactly true, which is why
-                    # that case is compiled and this one is a finding.
-                    raise Unclassifiable(
-                        idx + 1,
-                        f"this python heredoc uses an UNQUOTED delimiter (`{hd.group('tag')}`),"
-                        " so the shell EXPANDS the body before python sees it and the verbatim"
-                        " text is not the program that runs. Compiling it would approve source"
-                        " nobody executes. Quote the delimiter to make the body literal.",
-                    )
-                body, end = _delimit_heredoc(
-                    lines, idx, hd.group("tag"), hd.group("dash") == "-"
-                )
-                pos = starts[end] + len(lines[end])
-                records.append(
-                    {"kind": "BLOCK", "shape": "heredoc", "line": idx + 1, "end": end + 1,
-                     "body": body}
-                )
-                continue
             if _SCRIPT.match(rest):
+                # ALLOWLIST 2.
                 records.append({"kind": "SCRIPT", "line": idx + 1, "text": rest})
                 continue
             raise Unclassifiable(
                 idx + 1,
-                "this `python3` invocation is in a shape the census does not recognise"
+                "this `python3` invocation matches none of the shapes the census interprets"
                 f" ({rest[:60]!r}). It may be carrying embedded code the compile check would"
-                " therefore never see, so it is a finding rather than a skip. If the shape is"
-                " legitimate, TEACH THE CENSUS THE SHAPE — this finding is about the extractor,"
-                " not about the python.",
+                " therefore never see — via stdin, a heredoc, a variable, a double-quoted `-c`"
+                " body — so it is a finding rather than a skip. If the shape is legitimate,"
+                " TEACH THE ALLOWLIST — this finding is about the census, not about the python.",
             )
         except Unclassifiable as exc:
             findings.append({"line": exc.lineno, "reason": exc.reason})
-            # An occurrence that could not be delimited must not leave the cursor inside whatever
-            # it failed to delimit: resume after the line it started on, so the scan terminates
-            # and the rest of the file is still censused.
-            pos = max(pos, line_end)
     return records, findings
 
 

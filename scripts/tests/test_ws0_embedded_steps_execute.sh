@@ -302,7 +302,7 @@ fi
 UNKNOWN_SHAPE="$TMP/unknown-shape-ws0-driver.sh"
 { cat "$DRIVER"; printf '%s\n' 'python3 -m ws0_something --run'; } > "$UNKNOWN_SHAPE"
 unk_out="$(census "$UNKNOWN_SHAPE")"
-if grep -q 'does not recognise' <<<"$unk_out"; then
+if grep -q 'matches none of the shapes' <<<"$unk_out"; then
   pass "census CONTROL fired: an unrecognised python3 invocation shape is a FINDING (fail-closed, so a future step cannot fall outside the compile check)"
 else
   fail "census CONTROL did not fire: an unrecognised python3 shape must be a finding, got: $(findings_of "$unk_out" | head -2)"
@@ -342,11 +342,19 @@ idiom_apostrophe=0
 for ((bn = 1; bn <= idiom_blocks; bn++)); do
   emit_block "$IDIOM_FILE" "$bn" | grep -q "'" && idiom_apostrophe=1
 done
-if [ "$idiom_blocks" -ge 1 ] && [ -z "$(findings_of "$idiom_census")" ] \
-   && [ -z "$(findings_of "$idiom_compile")" ] && [ "$idiom_apostrophe" -eq 1 ]; then
-  pass "census NO-FALSE-FINDING: $idiom_blocks block(s) in lib-ws0-fixtures.sh (which uses the literal-apostrophe idiom) are delimited and ALL COMPILE — the extractor rejoins the idiom instead of cutting the body there"
+# THE SUBJECT IS THE IDIOM, NOT A FINDING COUNT. This file also contains a python HEREDOC at
+# `lib-ws0-fixtures.sh:149`, and since round 6 removed heredoc support that is a finding BY
+# DESIGN — the allowlist tells its author to teach the census rather than compiling a body the
+# shell may have rewritten. So the assertion is about the blocks that ARE delimited (they must all
+# compile, and one must carry a literal apostrophe, which a truncating delimiter cannot produce)
+# plus the requirement that every finding on this file is the heredoc one. Asserted by CONTENT
+# rather than by count, so a NEW kind of false finding here still fails.
+idiom_other="$(findings_of "$idiom_census" | grep -v 'matches none of the shapes' || true)"
+if [ "$idiom_blocks" -ge 1 ] && [ "$idiom_apostrophe" -eq 1 ] \
+   && [ -z "$idiom_other" ] && [ -z "$(findings_of "$idiom_compile" | grep -v 'matches none of the shapes' || true)" ]; then
+  pass "census NO-FALSE-FINDING: $idiom_blocks block(s) in lib-ws0-fixtures.sh (which uses the literal-apostrophe idiom) are delimited, ALL COMPILE, and one body carries a literal apostrophe — the extractor rejoins the idiom instead of cutting the body there (its heredoc at :149 is an expected allowlist finding, not a false one)"
 else
-  fail "census manufactured a finding on GOOD input: lib-ws0-fixtures.sh gave blocks=$idiom_blocks apostrophe-in-a-body=$idiom_apostrophe census='$(findings_of "$idiom_census" | head -1)' compile='$(findings_of "$idiom_compile" | head -1)'"
+  fail "census manufactured a finding on GOOD input: lib-ws0-fixtures.sh gave blocks=$idiom_blocks apostrophe-in-a-body=$idiom_apostrophe unexpected-finding='$(head -1 <<<"$idiom_other")'"
 fi
 
 # --- CONTROL 1c-ter: the closer at the END of the last body line, bash arguments trailing -------
@@ -385,37 +393,6 @@ else
   fail "census CONTROL did not fire (trailing-closer shape): blocks=$tr_blocks (expected $((block_count + 1))), census='$(findings_of "$tr_census" | head -1)', compile='$(findings_of "$tr_compile" | head -1)'"
 fi
 
-# --- POSITIVE CONTROL 1d: a FUTURE step written as a heredoc is censused and compiled ----------
-# The driver carries no python heredoc today. The census handles the shape anyway, and an
-# unexercised branch in a fail-closed extractor is exactly the code that is discovered to be broken
-# by the first person who needs it — which is the complaint #3451 records. So the shape is
-# exercised against a scratch copy: the block must be COUNTED, and a defect inside it must be
-# REPORTED, or a step added that way would fall outside the compile check entirely.
-HEREDOC_DRIVER="$TMP/heredoc-step-ws0-driver.sh"
-python3 - "$DRIVER" "$HEREDOC_DRIVER" <<'INJECT'
-import pathlib, sys
-# A minimal future step in the heredoc shape, carrying the same defect class the two `-c` steps
-# shipped: a subscript inside an f-string expression, built from character codes so that no
-# committed file holds a literal example of the spelling.
-backslash, dquote = chr(92), chr(34)
-bad = "{d[" + backslash + dquote + "k" + backslash + dquote + "]}"
-tag = "PY" + "STEP"
-step = ("python3 - \"$OUT_DIR\" <<'" + tag + "'\n"
-        "d = {'k': 1}\n"
-        "print(f'" + bad + "')\n"
-        + tag + "\n")
-pathlib.Path(sys.argv[2]).write_text(pathlib.Path(sys.argv[1]).read_text() + step)
-INJECT
-hd_census="$(census "$HEREDOC_DRIVER")"
-hd_compile="$(compile_blocks "$HEREDOC_DRIVER")"
-hd_blocks="$(grep -c '^BLOCK	' <<<"$hd_census")"
-if [ "$hd_blocks" -eq "$((block_count + 1))" ] && grep -q 'heredoc' <<<"$hd_census" \
-   && grep -q 'DOES NOT COMPILE' <<<"$hd_compile"; then
-  pass "census CONTROL fired (heredoc shape): a step written as a python heredoc is COUNTED ($hd_blocks blocks) and a defect inside it is REPORTED — a future step in that shape cannot fall outside the compile check"
-else
-  fail "census CONTROL did not fire (heredoc shape): blocks=$hd_blocks (expected $((block_count + 1))), compile said: $(findings_of "$hd_compile" | head -2)"
-fi
-
 # --- CONTROL 1c-quater: TWO invocations on ONE line, the SECOND carrying the defect ------------
 # The census advertises "every occurrence". An earlier version searched each line ONCE and then
 # skipped whole lines, so a second invocation after a `;`, an `&&` or an inline block's closing
@@ -439,48 +416,6 @@ if [ "$two_blocks" -eq "$((block_count + 2))" ] && grep -q 'DOES NOT COMPILE' <<
   pass "census CONTROL fired (two per line): BOTH invocations on one line are counted ($two_blocks blocks) and the defect in the SECOND is REPORTED — the scan advances by what each classification consumed, not by whole lines"
 else
   fail "census CONTROL did not fire (two per line): blocks=$two_blocks (expected $((block_count + 2))), compile said '$(findings_of "$two_compile" | head -1)'"
-fi
-
-# --- CONTROL 1d-bis: the heredoc terminator rule is the SHELL's, per form ----------------------
-# `<<TAG` takes the terminator EXACTLY — a space-indented `  TAG` is ordinary body to the shell, so
-# accepting it truncates the block and hands python a body it never receives. `<<-TAG` strips
-# leading TABS from the terminator AND from every body line, so leaving them in place turns a
-# perfectly good body into an IndentationError the shell would never produce. Both are asserted,
-# because a `.strip()` comparison was wrong in both directions at once.
-SPACE_TERM_DRIVER="$TMP/space-terminator-ws0-driver.sh"
-python3 - "$DRIVER" "$SPACE_TERM_DRIVER" <<'INJECT'
-import pathlib, sys
-tag = "PY" + "SPACED"
-# The ONLY line matching the tag is INDENTED WITH SPACES, which the shell does not accept for a
-# plain `<<`, so the heredoc is genuinely unterminated.
-step = ("python3 - <<'" + tag + "'\nprint(1)\n  " + tag + "\n")
-pathlib.Path(sys.argv[2]).write_text(pathlib.Path(sys.argv[1]).read_text() + step)
-INJECT
-sp_out="$(census "$SPACE_TERM_DRIVER")"
-if grep -q 'never terminated' <<<"$sp_out" && grep -q 'exact match' <<<"$sp_out"; then
-  pass "census CONTROL fired (plain <<): a SPACE-INDENTED line matching the tag is body, not a terminator — the block is reported unterminated rather than silently truncated"
-else
-  fail "census CONTROL did not fire (plain <<): a space-indented terminator must not delimit a plain-form heredoc, got: $(findings_of "$sp_out" | head -2)"
-fi
-
-TAB_TERM_DRIVER="$TMP/tab-terminator-ws0-driver.sh"
-python3 - "$DRIVER" "$TAB_TERM_DRIVER" <<'INJECT'
-import pathlib, sys
-tag = "PY" + "TABBED"
-tab = chr(9)
-# `<<-`: tabs are stripped from the terminator AND from the body. If the body's tabs survive, the
-# extracted source is indented and does not compile — which is how this control discriminates.
-step = ("python3 - <<-'" + tag + "'\n" + tab + "print(1)\n" + tab + tag + "\n")
-pathlib.Path(sys.argv[2]).write_text(pathlib.Path(sys.argv[1]).read_text() + step)
-INJECT
-tab_census="$(census "$TAB_TERM_DRIVER")"
-tab_compile="$(compile_blocks "$TAB_TERM_DRIVER")"
-tab_blocks="$(grep -c '^BLOCK	' <<<"$tab_census")"
-if [ "$tab_blocks" -eq "$((block_count + 1))" ] && [ -z "$(findings_of "$tab_census")" ] \
-   && [ -z "$(findings_of "$tab_compile")" ]; then
-  pass "census CONTROL fired (<<- form): a TAB-indented terminator delimits and the body's leading tabs are stripped as the shell strips them — the extracted source compiles ($tab_blocks blocks)"
-else
-  fail "census CONTROL did not fire (<<- form): blocks=$tab_blocks (expected $((block_count + 1))), census='$(findings_of "$tab_census" | head -1)', compile='$(findings_of "$tab_compile" | head -1)'"
 fi
 
 # --- CONTROL 1e: a block's closing quote must be followed by a shell WORD BOUNDARY -------------
@@ -519,32 +454,44 @@ else
   fail "census word-boundary: accept-blocks=$(grep -c '^BLOCK	' <<<"$bound_ok") accept-findings='$(findings_of "$bound_ok" | head -1)' reject='$(findings_of "$bound_bad" | head -1)'"
 fi
 
-# --- CONTROL 1f: only a QUOTED heredoc delimiter is compiled -----------------------------------
-# With `<<PY` the shell expands parameters, commands, arithmetic and backslashes in the body
-# BEFORE python sees it, so the verbatim text is not the program that runs. Measured with a body
-# that is valid python verbatim and a SyntaxError once expanded: bash refused it, the census said
-# `compiled=1 findings=0`. Refused rather than modelled — this file will not imitate shell
-# expansion. With `<<'PY'` no expansion happens and the premise "verbatim is what python receives"
-# is exactly true, which is the accept half.
-HEREDOC_Q="$TMP/heredoc-quoted-ws0-driver.sh"
-HEREDOC_U="$TMP/heredoc-unquoted-ws0-driver.sh"
-python3 - "$HEREDOC_Q" "$HEREDOC_U" <<'INJECT'
+# --- CONTROL 1f: A PATH-QUALIFIED INVOCATION IS SEEN AND NAMED (r6F3 regression) ---------------
+# The prior matcher required the bare word, so `/usr/bin/python3 -c '<defect>'` was not
+# mis-handled — it was INVISIBLE: `blocks=0 findings=0 occurrences=0`, a defective block reported
+# as clean. The candidate net now matches any word whose BASENAME is python/python3, and the
+# allowlist admits only the bare spelling, so the path-qualified form is a FINDING.
+PATHQ="$TMP/path-qualified.sh"
+python3 - "$PATHQ" <<'INJECT'
 import pathlib, sys
-q, dq = chr(39), chr(34)
-tag = "PY" + "Q"
-body = "v = " + dq + "$X" + dq + "\nprint(v)\n"
-# Quoted delimiter: literal body, so compiling the verbatim text is exactly right.
-pathlib.Path(sys.argv[1]).write_text("python3 - <<" + q + tag + q + "\n" + body + tag + "\n")
-# Unquoted delimiter: the same body, but $X is substituted before python sees it.
-pathlib.Path(sys.argv[2]).write_text("python3 - <<" + tag + "\n" + body + tag + "\n")
+q = chr(39)
+pathlib.Path(sys.argv[1]).write_text("/usr/bin/python3 -c " + q + "import os," + q + "\n")
 INJECT
-hq_out="$(census "$HEREDOC_Q")"
-hu_out="$(census "$HEREDOC_U")"
-if [ "$(grep -c '^BLOCK	' <<<"$hq_out")" -eq 1 ] && [ -z "$(findings_of "$hq_out")" ] \
-   && grep -q 'UNQUOTED delimiter' <<<"$hu_out"; then
-  pass "census heredoc-quoting, BOTH directions: a QUOTED delimiter is compiled (no expansion, so verbatim IS the program) while an UNQUOTED one is a FINDING (the shell rewrites the body before python sees it)"
+pathq_out="$(census "$PATHQ")"
+if grep -q 'not the bare' <<<"$pathq_out"; then
+  pass "census CONTROL fired (path-qualified): /usr/bin/python3 is SEEN and NAMED rather than invisible — $(findings_of "$pathq_out" | head -1 | cut -c1-96)"
 else
-  fail "census heredoc-quoting: quoted-blocks=$(grep -c '^BLOCK	' <<<"$hq_out") quoted-findings='$(findings_of "$hq_out" | head -1)' unquoted='$(findings_of "$hu_out" | head -1)'"
+  fail "census CONTROL did not fire (path-qualified): a path-qualified invocation must be a finding, got: $(head -2 <<<"$pathq_out")"
+fi
+
+# --- CONTROL 1g: A HEREDOC IS A FINDING — support was REMOVED, deliberately --------------------
+# Heredoc handling was speculative (the driver has none) and cost THREE findings: an unquoted
+# delimiter is shell-expanded before python sees it, a composed delimiter means bash uses a
+# different tag, and with multiple redirects bash uses the LAST. Each was a FALSE PASS — a body
+# compiled that python never receives. Under the allowlist a heredoc step is a FINDING, which is
+# the correct outcome: it tells its author to teach the census rather than silently approving an
+# expanded or truncated body.
+HEREDOC_ANY="$TMP/heredoc-any.sh"
+python3 - "$HEREDOC_ANY" <<'INJECT'
+import pathlib, sys
+q = chr(39)
+tag = "PY" + "ANY"
+pathlib.Path(sys.argv[1]).write_text(
+    "python3 - <<" + q + tag + q + "\nimport os,\n" + tag + "\n")
+INJECT
+hd_any="$(census "$HEREDOC_ANY")"
+if [ "$(grep -c '^BLOCK	' <<<"$hd_any")" -eq 0 ] && grep -q 'matches none of the shapes' <<<"$hd_any"; then
+  pass "census CONTROL fired (heredoc removed): a python heredoc is a FINDING, not a block — the three false passes heredoc support cost are unreachable because the support is gone"
+else
+  fail "census CONTROL did not fire (heredoc removed): a heredoc must be a finding, got: $(head -2 <<<"$hd_any")"
 fi
 
 # ============================================================================
