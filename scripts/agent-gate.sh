@@ -212,8 +212,11 @@
 #   tooling-tests      shell-tooling regression tests (fast, no datasets/network):
 #                      scripts/tests/test_tools_crate_disposition.sh (+ its
 #                      selftest) — #1716/AK5: every crate under tools/ must be
-#                      EXPLICITLY classified CI-wired vs unwired manual dev tool,
-#                      and every unwired one must carry a README saying so. Needs
+#                      EXPLICITLY classified WIRED / UNWIRED / MIXED, and every
+#                      crate carrying orphaned targets must carry a README saying
+#                      so (a MIXED one must ALSO name its live half, or a
+#                      partly-live crate reads as wholly dead — roborev job 75
+#                      caught a two-way split asserting exactly that). Needs
 #                      no python3/cargo, so it ALWAYS runs (never SKIPs). Fails
 #                      closed on an absent/unclassifiable subject; wiredness is
 #                      recorded and diff-reviewed, never grep-inferred.

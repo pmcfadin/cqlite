@@ -208,17 +208,20 @@ cqlite-cli/      # Command-line interface
 bindings/python/ # Python bindings (PyO3) — M4 complete
 bindings/node/   # Node.js bindings (napi-rs) — Phase 3 complete
 test-data/       # Real Cassandra 5.0 SSTables for testing
-tools/           # 7 crates, each with a RECORDED disposition (#1716), pinned by
-                 #   scripts/tests/test_tools_crate_disposition.sh:
-                 #   CI-wired: cassandra-parity, flight-loadgen,
-                 #     sstabledump-validator, ws0-corpus-gen.
-                 #   UNWIRED manual dev tools (no workflow/script/live doc runs
-                 #     them; each carries a README saying so): cqlite-validator,
-                 #     memory-safety-runner, and format-validator's 4 BINS.
-                 #   format-validator's LIB is WIRED — tests/format-compatibility
-                 #     (the gate's `format-compat` component) path-depends on it —
-                 #     so that crate must stay a workspace member. A NEW tools/
-                 #     crate must be classified in that guard or the gate FAILs.
+tools/           # 7 crates, each with a RECORDED disposition in one of THREE
+                 #   categories, pinned by the gate guard
+                 #   scripts/tests/test_tools_crate_disposition.sh (#1716):
+                 #   WIRED   — cassandra-parity, flight-loadgen,
+                 #             sstabledump-validator, ws0-corpus-gen.
+                 #   UNWIRED — nothing runs them AND nothing depends on them:
+                 #             cqlite-validator, memory-safety-runner. Each needs
+                 #             a README saying it is NOT CI-wired.
+                 #   MIXED   — format-validator: its 4 BINS are orphaned but its
+                 #             LIB is WIRED (tests/format-compatibility = the
+                 #             gate's `format-compat` component). Its README must
+                 #             name BOTH halves, and the crate must stay a
+                 #             workspace member — never `exclude` it.
+                 #   A NEW tools/ crate must be classified there or the gate FAILs.
 fuzz/            # cargo-fuzz crate — own workspace, EXCLUDED from the main one
 ```
 
