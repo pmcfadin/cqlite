@@ -594,8 +594,29 @@ stamp_claim() {
     # pending list and retried on every later stamp and on clean exit.
     # QUEUED WITH ITS LEASE, as `<lane-id>:<sha>` (roborev round 19). Without the sha, a retry that
     # lands after another supervisor has taken over this lane id deletes THAT supervisor's live claim.
-    [[ -n "$prev_lane_id" && "$prev_lane_id" != "$lane_id" ]] && \
-      CLAIM_PENDING_CLEANUP="${CLAIM_PENDING_CLEANUP} ${prev_lane_id}:${prev_sha}"
+    #
+    # A NUMERIC PREDECESSOR WHOSE WORK HAS NOT CONCLUDED IS NOT QUEUED (roborev round 31, Medium). The
+    # round-29 fix stopped the SHUTDOWN path from clearing such a ref, and left the TRANSITION path — the
+    # same guard, a second route. A technical block on issue 88 followed by a `no-work` leaves the work
+    # unconcluded but releases `CLAIM_ISSUE`, so the next iteration stamps a placeholder and this line
+    # queued 88 for immediate reaping: the unresolved issue's liveness signal deleted, and its board item
+    # potentially pinned with nothing left to reap. A `finalized` marker that fails its F5/verify checks
+    # reaches the same transition, which is why the guard is here at the QUEUEING SITE and keyed on the
+    # property — it covers every transition, including ones nobody has enumerated.
+    #
+    # `CLAIM_WORK_CONCLUDED` still holds the PREVIOUS iteration's verdict at this point (run_iteration
+    # resets it to 0 immediately AFTER this stamp), which is exactly the value needed to judge whether the
+    # PREVIOUS ref may be collected.
+    #
+    # A PLACEHOLDER predecessor is always queued, concluded or not: it names no issue, so deleting it
+    # destroys no issue-linked signal, and NOT queueing it is the permanent leak round 5 fixed.
+    if [[ -n "$prev_lane_id" && "$prev_lane_id" != "$lane_id" ]]; then
+      if [[ "$prev_lane_id" == p* || "$CLAIM_WORK_CONCLUDED" == 1 ]]; then
+        CLAIM_PENDING_CLEANUP="${CLAIM_PENDING_CLEANUP} ${prev_lane_id}:${prev_sha}"
+      else
+        log "claim cleanup of lane $prev_lane_id SKIPPED: its work has not concluded, so the issue-linked liveness signal stays (#2499)"
+      fi
+    fi
     claim_drain_pending_cleanup "$lane_id"
     log "claim stamped: machine=$CLAIM_MACHINE issue=$lane_id pid=$$"
   else
