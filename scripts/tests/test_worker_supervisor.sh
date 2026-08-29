@@ -3989,5 +3989,165 @@ $out"
 }
 
 t test_legacy_claim_migration
+
+# ---------------------------------------------------------------------------
+# Test 33-claim (#3393, roborev round 35 High): the worker orphan probe must be attributed to THIS
+# LANE. Counting every matching worker on the box made each supervisor read its SIBLINGS' healthy
+# workers as leftover debris and stop after LEFTOVER_HOLD_MAX polls — so per-lane claim refs would
+# have shipped while multi-lane operation stayed serialized by a different machine-global mechanism.
+# ---------------------------------------------------------------------------
+test_worker_probe_is_lane_attributed() {
+  local d filt lane sib a b c out
+  d="$(new_case_dir)"
+  lane="$d/lane"; sib="$d/sibling"
+  mkdir -p "$lane/sub" "$sib"
+  filt="$d/filt.sh"
+  {
+    printf '%s\n' '#!/usr/bin/env bash'
+    printf '%s\n' 'REPO_ROOT="$1"'
+    # The SHIPPED filter definition, evaluated with this REPO_ROOT — not a reimplementation of it.
+    printf '%s\n' 'eval "$(sed -n "/^LANE_PID_FILTER=/p" "$2")"'
+    printf '%s\n' 'eval "$LANE_PID_FILTER"'
+  } >"$filt"
+  # Ordinary processes, distinguished ONLY by their working directory. No fake `claude` argv is needed:
+  # the property under test is the ATTRIBUTION half, and driving it with real cwds keeps the case
+  # hermetic and free of any dependence on the machine's actual process table.
+  ( cd "$lane" && exec sleep 30 ) & a=$!
+  ( cd "$sib" && exec sleep 30 ) & b=$!
+  ( cd "$lane/sub" && exec sleep 30 ) & c=$!
+  sleep 1
+  out=$(printf '%s\n%s\n%s\n' "$a" "$b" "$c" | bash "$filt" "$lane" "$SUPERVISOR")
+  if printf '%s\n' "$out" | grep -qxF "$a" && printf '%s\n' "$out" | grep -qxF "$c" \
+    && ! printf '%s\n' "$out" | grep -qxF "$b"; then
+    pass "worker-probe: lane root and lane SUBDIR are attributed to the lane; a SIBLING lane's process is not"
+  else
+    fail "worker-probe-attribution: lane=[$a] sub=[$c] sibling=[$b] but filter returned:
+$out"
+  fi
+  # NON-VACUITY, and it must be true of the broken code too: the SAME three pids, filtered for the
+  # SIBLING's root, must return the sibling and neither lane pid. Without this, an always-empty filter
+  # would satisfy the case above.
+  out=$(printf '%s\n%s\n%s\n' "$a" "$b" "$c" | bash "$filt" "$sib" "$SUPERVISOR")
+  if printf '%s\n' "$out" | grep -qxF "$b" && ! printf '%s\n' "$out" | grep -qxF "$a"; then
+    pass "NON-VACUITY: the same pids filtered for the SIBLING root return the sibling — the filter discriminates rather than returning nothing"
+  else
+    fail "worker-probe-nonvacuity: filtering for the sibling root returned:
+$out"
+  fi
+  # A pid whose cwd cannot be read is attributed to NOBODY (affirmative attribution). Driven with a
+  # pid that does not exist, which is the same unreadable condition as a process exiting mid-probe.
+  out=$(printf '%s\n' 999999 | bash "$filt" "$lane" "$SUPERVISOR")
+  if [[ -z "$out" ]]; then
+    pass "worker-probe: an unreadable cwd is attributed to nobody — a positive verdict needs a positive measurement"
+  else
+    fail "worker-probe-unreadable: a nonexistent pid was attributed: [$out]"
+  fi
+  kill "$a" "$b" "$c" 2>/dev/null
+  wait "$a" "$b" "$c" 2>/dev/null
+  # The BUILD family must stay machine-wide: one gate at a time per MACHINE is a resource bound that
+  # survived #1930's retraction, so a sibling's cargo IS this lane's business. Asserted structurally,
+  # because the distinction is the whole point of scoping only one family.
+  if sed -n '/^if \[\[ -z "${PROC_PROBE_BUILD_CMD:-}"/,/^fi/p' "$SUPERVISOR" | grep -q 'LANE_PID_FILTER'; then
+    fail "worker-probe-build-scoped: the BUILD probe was lane-scoped too — a sibling's gate is still this lane's business"
+  else
+    pass "worker-probe: the BUILD family is deliberately NOT lane-scoped (machine-wide gate serialization survives)"
+  fi
+  # LIST-FROM-COUNT-SET (roborev 1839/1821) must survive the change: both probes must apply the filter.
+  local cnt lst
+  cnt=$(sed -n '/^if \[\[ -z "${PROC_PROBE_WORKER_CMD:-}"/,/^fi/p' "$SUPERVISOR" | grep -c 'LANE_PID_FILTER')
+  lst=$(sed -n '/^if \[\[ -z "${PROC_LIST_WORKER_CMD:-}"/,/^fi/p' "$SUPERVISOR" | grep -c 'LANE_PID_FILTER')
+  if [[ "$cnt" -ge 1 && "$lst" -ge 1 ]]; then
+    pass "worker-probe: COUNT and LIST both derive from the same lane filter — the named set cannot drift from the triggering set"
+  else
+    fail "worker-probe-drift: count=$cnt list=$lst references to LANE_PID_FILTER — the two sets can diverge"
+  fi
+}
+
+# ---------------------------------------------------------------------------
+# Test 34-claim (#3393, roborev round 35 Medium/Low): the migration must never leave the lane
+# permanently foreign to its own lock, and must accept a SHA-256 lease.
+# ---------------------------------------------------------------------------
+mig2_case() {
+  # mig2_case <fail-first-N> <sha> ; echoes the recorded claim.sh calls
+  local failn="$1" sha="$2" d repo
+  d="$(new_case_dir)"; repo="$d/lane"; mkdir -p "$repo" "$d/bin"
+  git -C "$repo" init -q 2>/dev/null
+  git -C "$repo" checkout -q -b issue-88-x 2>/dev/null
+  git -C "$repo" -c user.email=t@t -c user.name=t commit -q --allow-empty -m init 2>/dev/null
+  cat >"$d/bin/claim.sh" <<STUB
+#!/usr/bin/env bash
+printf '%s\n' "\$*" >>"$d/calls.log"
+if [ "\$1" = status ]; then
+  n=\$(grep -c '^status' "$d/calls.log")
+  if [ "\$n" -le "$failn" ]; then exit 1; fi
+  printf '%s\n' "CLAIM: STATUS issue=88 sha=$sha machine=boxA actor=flow"
+fi
+exit 0
+STUB
+  chmod +x "$d/bin/claim.sh"; : >"$d/calls.log"
+  {
+    printf '%s\n' '#!/usr/bin/env bash' 'log() { :; }'
+    sed -n '/^CLAIM_MIGRATION_SETTLED=/p' "$SUPERVISOR"
+    sed -n '/^CLAIM_MIGRATION_RETRIES=/p' "$SUPERVISOR"
+    sed -n '/^supervisor_msg_token()/,/^}/p' "$SUPERVISOR"
+    sed -n '/^supervisor_migrate_legacy_claim()/,/^}/p' "$SUPERVISOR"
+    printf '%s\n' 'supervisor_migrate_legacy_claim'
+  } >"$d/mig.sh"
+  LOCK_CMD="bash $d/bin/claim.sh" CLAIM_ACTOR=flow-9-lane CLAIM_MACHINE=boxA \
+    LEGACY_CLAIM_ACTOR=flow CLAIM_MIGRATION_RETRIES=3 REPO_ROOT="$repo" \
+    bash "$d/mig.sh" >/dev/null 2>&1
+  cat "$d/calls.log"
+}
+
+test_migration_retries_and_sha256() {
+  local sha40 sha64 out
+  sha40="1111111111111111111111111111111111111111"
+  sha64="$(printf '2%.0s' $(seq 1 64))"
+  # A BLIP: the first two status reads fail, the third succeeds -> the adopt still happens.
+  out=$(mig2_case 2 "$sha40")
+  if printf '%s\n' "$out" | grep -q "^adopt 88 --expect $sha40"; then
+    pass "migration-retry: two failed status reads are retried and the adopt still happens (a blip does not strand the lane)"
+  else
+    fail "migration-retry: expected an adopt after retries, got:
+$out"
+  fi
+  # ALL attempts fail -> NO adopt (never guess), and the bounded burst really did retry rather than
+  # giving up after one read. The count is the evidence the retry loop ran.
+  out=$(mig2_case 99 "$sha40")
+  local tries
+  tries=$(printf '%s\n' "$out" | grep -c '^status')
+  if [[ "$tries" -eq 3 ]] && ! printf '%s\n' "$out" | grep -q '^adopt'; then
+    pass "migration-retry: a total outage is retried CLAIM_MIGRATION_RETRIES=3 times and never adopts on a guess"
+  else
+    fail "migration-retry-exhausted: status attempts=$tries (expected 3), calls:
+$out"
+  fi
+  # A 64-hex SHA-256 object id is a valid CAS lease.
+  out=$(mig2_case 0 "$sha64")
+  if printf '%s\n' "$out" | grep -q "^adopt 88 --expect $sha64"; then
+    pass "migration-sha256: a 64-hex object id is accepted as a CAS lease (claim.sh imposes no length check of its own)"
+  else
+    fail "migration-sha256: a 64-hex sha was skipped, calls:
+$out"
+  fi
+  # A 41-hex value is neither, and must still be refused — widening to 64 must not become "any length".
+  out=$(mig2_case 0 "${sha40}1")
+  if ! printf '%s\n' "$out" | grep -q '^adopt'; then
+    pass "migration-sha256: 41 hex is still refused — the widening is 40-OR-64, not 'any length'"
+  else
+    fail "migration-sha256-any: a 41-char sha was accepted:
+$out"
+  fi
+  # THE RE-ENTRY IS WIRED: an unsettled migration must be re-attempted from the main loop, or a
+  # transient outage is still permanent for the run.
+  if grep -cE '^[[:space:]]*supervisor_migrate_legacy_claim$' "$SUPERVISOR" | grep -qE '^[2-9]'; then
+    pass "migration-retry: the migration is invoked from BOTH lock acquisition and the iteration loop"
+  else
+    fail "migration-retry-unwired: only one call site — an unsettled migration would never be retried"
+  fi
+}
+
+t test_worker_probe_is_lane_attributed
+t test_migration_retries_and_sha256
 echo "=== $PASS_COUNT passed, $FAIL_COUNT failed, $SKIP_COUNT skipped ==="
 [[ "$FAIL_COUNT" -eq 0 ]]
