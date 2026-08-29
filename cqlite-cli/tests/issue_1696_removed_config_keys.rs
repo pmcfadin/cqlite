@@ -170,3 +170,80 @@ fn the_shipped_example_config_names_no_removed_keys() {
         warning_for_file(&example, &content).unwrap_or_default()
     );
 }
+
+/// The warning must not PROMISE a load that then fails (#1696 roborev F3).
+///
+/// Its text says the keys "are IGNORED — the file still loads". A syntactically
+/// valid document that names a removed key AND carries an invalid surviving value
+/// used to print exactly that assurance and then fail to load: a false promise
+/// inside a change whose whole subject is config honesty.
+///
+/// Asserted over `parse_with_removed_key_report` — the seam `load_from_file`
+/// itself runs, so the ordering under test is the real one, not a copy: on the
+/// failure path there is no warning to print, and on the success path there is.
+#[test]
+fn a_failed_load_produces_no_still_loads_assurance() {
+    let temp = TempDir::new().expect("temp dir");
+
+    // Names a removed key (`[connection]`) AND gives a SURVIVING key
+    // (`output.max_rows`, an `Option<usize>`) a value of the wrong type, so the
+    // document parses as TOML but cannot deserialize into `Config`.
+    let content = r#"
+default_keyspace = "ks"
+
+[connection]
+timeout_ms = 5000
+
+[output]
+max_rows = "not a number"
+colors = true
+"#;
+    let path = temp.path().join("cqlite.toml");
+    fs::write(&path, content).expect("write config");
+
+    // Precondition: the removed key IS present, so this case really does exercise
+    // the ordering rather than passing because there was nothing to warn about.
+    assert!(
+        warning_for_file(&path, content).is_some(),
+        "fixture must name a removed key, else this test proves nothing"
+    );
+
+    let outcome = Config::parse_with_removed_key_report(&path, content);
+    assert!(
+        outcome.is_err(),
+        "an invalid surviving value must still fail the load"
+    );
+    // `is_err()` carries no warning by construction: the tuple that would hold
+    // one only exists on the `Ok` path. Stated as an assertion so the coupling is
+    // not merely implied by the type.
+    assert!(
+        outcome
+            .map(|(_, warning)| warning)
+            .unwrap_or(None)
+            .is_none(),
+        "a failed load must not emit the \"the file still loads\" assurance"
+    );
+
+    // Control: the SAME removed key with every surviving value valid loads AND
+    // warns — so the fix removed the false promise, not the warning.
+    let good = r#"
+default_keyspace = "ks"
+
+[connection]
+timeout_ms = 5000
+
+[output]
+max_rows = 500
+colors = true
+"#;
+    let good_path = temp.path().join("good.toml");
+    fs::write(&good_path, good).expect("write config");
+    let (config, warning) = Config::parse_with_removed_key_report(&good_path, good)
+        .expect("a valid config naming a removed key must load");
+    assert_eq!(config.output.max_rows, Some(500));
+    let warning = warning.expect("a successful load naming a removed key MUST warn");
+    assert!(
+        warning.contains("connection") && warning.contains("the file still loads"),
+        "the warning must name the dead key and assert the load succeeded: {warning}"
+    );
+}

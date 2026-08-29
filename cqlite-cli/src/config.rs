@@ -333,40 +333,55 @@ impl Config {
         let content = fs::read_to_string(path)
             .with_context(|| format!("Failed to read config file: {}", path.display()))?;
 
-        // Report REMOVED keys before deserializing (issue #1696). serde discards
-        // unknown keys silently, and after the deserialize below the evidence is
-        // gone — so the raw document is the only place this can be seen. The file
-        // still loads: the posture is parse-and-ignore PLUS a named warning, not
-        // `deny_unknown_fields`, because our own shipped example named these keys.
-        // See the `removed_keys` submodule for the full rationale.
-        Self::warn_about_removed_keys(path, &content);
+        let (config, warning) = Self::parse_with_removed_key_report(path, &content)?;
+        if let Some(warning) = warning {
+            eprintln!("{warning}");
+        }
+        Ok(config)
+    }
 
+    /// Deserialize `content` as `path`'s format, returning the loaded config and
+    /// the deprecation warning naming every REMOVED key it still sets (#1696).
+    ///
+    /// # The ORDER is the property (#1696 roborev F3)
+    ///
+    /// The warning asserts "the file still loads", so it may only be produced
+    /// once the load has actually SUCCEEDED. Emitting it first meant a
+    /// syntactically valid document that named a removed key AND carried an
+    /// invalid surviving value printed that assurance and then failed to load —
+    /// a false promise inside a change whose whole subject is config honesty.
+    ///
+    /// The raw document scan still works after deserializing because `content`
+    /// is retained: serde drops the removed keys from `Config`, but nothing
+    /// drops them from the text they were read out of.
+    ///
+    /// `pub` so a test can assert BOTH halves of the ordering — that a good load
+    /// yields the warning, and that a failed load yields no warning at all —
+    /// over the exact code path `load_from_file` runs.
+    pub fn parse_with_removed_key_report(
+        path: &Path,
+        content: &str,
+    ) -> Result<(Self, Option<String>)> {
         let config: Config = match path.extension().and_then(|ext| ext.to_str()) {
             Some("toml") => {
-                toml::from_str(&content).with_context(|| "Failed to parse TOML config")?
+                toml::from_str(content).with_context(|| "Failed to parse TOML config")?
             }
             Some("yaml") | Some("yml") => {
-                serde_yaml::from_str(&content).with_context(|| "Failed to parse YAML config")?
+                serde_yaml::from_str(content).with_context(|| "Failed to parse YAML config")?
             }
             Some("json") => {
-                serde_json::from_str(&content).with_context(|| "Failed to parse JSON config")?
+                serde_json::from_str(content).with_context(|| "Failed to parse JSON config")?
             }
             _ => return Err(anyhow::anyhow!("Unsupported config file format")),
         };
 
-        Ok(config)
-    }
-
-    /// Print a deprecation warning naming every REMOVED config key `content`
-    /// still sets (issue #1696).
-    ///
-    /// Best-effort and never fatal: a document that does not parse here is left
-    /// entirely to the real parse in [`Self::load_from_file`], which owns the
-    /// error message.
-    fn warn_about_removed_keys(path: &Path, content: &str) {
-        if let Some(warning) = removed_keys::warning_for_file(path, content) {
-            eprintln!("{warning}");
-        }
+        // Only now that the load has succeeded: serde discarded the removed keys
+        // silently, so the retained raw document is the only place they can still
+        // be seen. The posture is parse-and-ignore PLUS a named warning, never
+        // `deny_unknown_fields` — our own shipped example named these keys. See
+        // the `removed_keys` submodule for the full rationale.
+        let warning = removed_keys::warning_for_file(path, content);
+        Ok((config, warning))
     }
 
     #[allow(dead_code)]

@@ -34,9 +34,18 @@
 //! # Why a raw-document scan
 //!
 //! The check runs on the PARSED DOCUMENT (`toml::Value` / `serde_yaml::Value` /
-//! `serde_json::Value`) before deserializing into `Config`, because by the time
-//! serde is done the removed keys are gone and unrecoverable. One `Removed` table
-//! drives all three formats, so a format cannot drift out of coverage.
+//! `serde_json::Value`), because by the time serde has produced a `Config` the
+//! removed keys are gone and unrecoverable. One `Removed` table drives all three
+//! formats, so a format cannot drift out of coverage.
+//!
+//! # ORDER: the scan runs AFTER a SUCCESSFUL deserialize (#1696 roborev F3)
+//!
+//! The warning text asserts "the file still loads", so it may only be produced
+//! once the load has succeeded. Scanning first meant a document that named a
+//! removed key AND carried an invalid surviving value printed that assurance and
+//! then failed to load. Scanning afterwards costs nothing: the caller retains the
+//! raw text, and nothing removes the dead keys from it. See
+//! [`super::Config::parse_with_removed_key_report`].
 
 use std::fmt::Write as _;
 
@@ -168,9 +177,10 @@ impl Document {
 /// The deprecation warning a config FILE should produce, or `None` when it names
 /// no removed keys (or is not an inspectable config format).
 ///
-/// The single entry point [`super::Config::load_from_file`] calls, and
-/// the one an integration test can call for the same `(path, content)` pair — so
-/// the wiring has no private step a test cannot reach.
+/// The single entry point [`super::Config::parse_with_removed_key_report`] calls
+/// — AFTER its deserialize succeeded — and the one an integration test can call
+/// for the same `(path, content)` pair, so the wiring has no private step a test
+/// cannot reach.
 pub fn warning_for_file(path: &std::path::Path, content: &str) -> Option<String> {
     let extension = path.extension().and_then(|ext| ext.to_str());
     let document = parse_for_inspection(extension, content)?;
@@ -182,7 +192,8 @@ pub fn warning_for_file(path: &std::path::Path, content: &str) -> Option<String>
 ///
 /// Returns `None` when the extension is not a config format we accept or the
 /// content does not parse: this check must never be the thing that rejects a
-/// file. `load_from_file` does the real parse and owns the real error.
+/// file. `parse_with_removed_key_report` does the real parse, owns the real
+/// error, and only reaches this scan once that parse SUCCEEDED.
 pub fn parse_for_inspection(extension: Option<&str>, content: &str) -> Option<Document> {
     match extension {
         Some("toml") => toml::from_str::<toml::Value>(content)
