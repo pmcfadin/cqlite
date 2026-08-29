@@ -1145,7 +1145,17 @@ cmd_smoke() {
   local delete_ok=1
   git push "$REMOTE" --delete "$ref" >/dev/null 2>&1 || delete_ok=0
   if [ "$seen" != "$sha" ]; then
-    emit "SMOKE-FAIL remote=$REMOTE ref=$ref reason=ls-remote-mismatch seen=${seen:-<none>} expected=$sha"
+    # The readback failed — but the cleanup delete was already attempted above, and if
+    # that ALSO failed, returning here used to suppress it entirely: the operator got a
+    # mismatch verdict with no hint that a ref might be sitting on the shared origin
+    # (#3369 review). Same reason code, one appended field — not a fourth variant.
+    # Deliberately "UNKNOWN" rather than "STRANDED": the readback says the ref is not
+    # there and the delete says it could not be removed, so the two signals disagree and
+    # neither may be asserted. That is the same three-valued discipline this whole probe
+    # is built on.
+    local mismatch_extra=""
+    [ "$delete_ok" = 0 ] && mismatch_extra=" cleanup-delete=FAILED (whether $ref exists on $REMOTE is UNKNOWN — check 'git ls-remote $REMOTE $ref' and remove it with 'git push $REMOTE --delete $ref' if present)"
+    emit "SMOKE-FAIL remote=$REMOTE ref=$ref reason=ls-remote-mismatch seen=${seen:-<none>} expected=$sha$mismatch_extra"
     return 1
   fi
   if [ "$delete_ok" = 0 ]; then

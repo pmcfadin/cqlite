@@ -705,6 +705,65 @@ else
 $outSmokeOk"
 fi
 
+# (h) readback failure AND delete failure at once (#3369 review). The mismatch branch
+# returned before reporting the delete result, so the ONE path that can leave a ref on the
+# shared origin said nothing about it. Reproduced honestly: a post-receive hook removes
+# whatever was just pushed, so the readback finds nothing AND the delete then fails
+# ("remote ref does not exist"). The verdict must keep reason=ls-remote-mismatch (no new
+# variant) and carry the cleanup-delete failure with the ls-remote check.
+GHOSTORIGIN="$T/ghost.git"
+gg init --bare -q "$GHOSTORIGIN"
+# post-receive removes what the create just wrote -> the readback finds nothing;
+# pre-receive refuses deletions (all-zeros new sha) -> the cleanup delete also fails.
+# Both halves are needed: deleting an already-absent ref is a no-op SUCCESS for
+# receive-pack, so the post-receive alone leaves delete_ok=1 (measured).
+cat >"$GHOSTORIGIN/hooks/post-receive" <<'HOOK'
+#!/usr/bin/env bash
+while read -r old new ref; do git update-ref -d "$ref" 2>/dev/null || true; done
+exit 0
+HOOK
+cat >"$GHOSTORIGIN/hooks/pre-receive" <<'HOOK'
+#!/usr/bin/env bash
+zero=0000000000000000000000000000000000000000
+while read -r old new ref; do
+  if [ "$new" = "$zero" ]; then echo "deletion of $ref denied by policy" >&2; exit 1; fi
+done
+exit 0
+HOOK
+chmod +x "$GHOSTORIGIN/hooks/post-receive" "$GHOSTORIGIN/hooks/pre-receive"
+rc=0; outGhost=$( cd "$A" && CLAIM_MACHINE=machineA CLAIM_REMOTE="$GHOSTORIGIN" bash "$CLAIM" smoke 2>/dev/null ) || rc=$?
+if [ "$rc" -ne 0 ] && printf '%s\n' "$outGhost" | grep -q 'reason=ls-remote-mismatch' \
+   && printf '%s\n' "$outGhost" | grep -q 'cleanup-delete=FAILED' \
+   && printf '%s\n' "$outGhost" | grep -q 'git ls-remote' \
+   && ! printf '%s\n' "$outGhost" | grep -q 'SMOKE-OK'; then
+  ok "(h) readback mismatch + failed cleanup → one verdict naming BOTH, with the ls-remote check"
+else
+  bad "(h) expected reason=ls-remote-mismatch carrying cleanup-delete=FAILED; got rc=$rc
+$outGhost"
+fi
+# Control: a readback mismatch whose cleanup SUCCEEDS must NOT claim a cleanup failure,
+# or the field above would be noise rather than a signal. Same ghost remote, but the hook
+# deletes only on a CREATE (new != zeros), so the probe's own delete still succeeds.
+CLEANORIGIN="$T/ghost-clean.git"
+gg init --bare -q "$CLEANORIGIN"
+cat >"$CLEANORIGIN/hooks/post-receive" <<'HOOK'
+#!/usr/bin/env bash
+zero=0000000000000000000000000000000000000000
+while read -r old new ref; do
+  [ "$new" = "$zero" ] || git update-ref -d "$ref" 2>/dev/null || true
+done
+exit 0
+HOOK
+chmod +x "$CLEANORIGIN/hooks/post-receive"
+rc=0; outGhost2=$( cd "$A" && CLAIM_MACHINE=machineA CLAIM_REMOTE="$CLEANORIGIN" bash "$CLAIM" smoke 2>/dev/null ) || rc=$?
+if [ "$rc" -ne 0 ] && printf '%s\n' "$outGhost2" | grep -q 'reason=ls-remote-mismatch' \
+   && ! printf '%s\n' "$outGhost2" | grep -q 'cleanup-delete=FAILED'; then
+  ok "(h) control: a mismatch whose cleanup SUCCEEDED reports no cleanup failure"
+else
+  bad "(h) control: cleanup-delete=FAILED reported on a successful cleanup; rc=$rc
+$outGhost2"
+fi
+
 # ===========================================================================
 echo
 echo "==== CLAIM-LOCK TEST SUMMARY: PASS=$PASS FAIL=$FAIL ===="
