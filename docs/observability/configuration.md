@@ -13,10 +13,10 @@ The runtime observability foundation must be compiled in: build with the
 all telemetry calls are inert no-ops, and configuration still parses but exports
 nothing.
 
-**That state is no longer silent (issue #1702).** If OpenTelemetry is enabled in
-configuration on a binary built WITHOUT the `observability` feature — the default
-build — `observability::init` emits ONE `WARN` at startup, on **stderr**
-(never stdout, so `--out json`/`csv` stays clean):
+**On the CLI, that state is no longer silent (issue #1702).** If OpenTelemetry is
+enabled in configuration on a binary built WITHOUT the `observability` feature —
+the default build — `observability::init` emits ONE `WARN` at startup, on
+**stderr** (never stdout, so `--out json`/`csv` stays clean):
 
 ```text
 WARN cqlite_core::observability: OpenTelemetry export is ENABLED in configuration
@@ -28,12 +28,38 @@ this is NOT a collector or endpoint problem. Rebuild with
 (CQLITE_OTEL_ENABLED=0) to silence this warning.
 ```
 
-So "nothing arrives at my collector" is now diagnosable from the startup log
-alone: this warning means the feature is missing, and its ABSENCE means the
-export stack is compiled in and the problem is elsewhere (collector down,
-endpoint, protocol, sampling). It is a warning, never an error — the process
-runs normally, just without telemetry. Suppress it by fixing the cause, not by
-raising the log level.
+It is a warning, never an error — the process runs normally, just without
+telemetry.
+
+### Where this warning is actually visible
+
+`observability::init` emits it through `tracing`, so it reaches a human only if a
+`tracing` subscriber is already installed when `init` runs. That is a per-surface
+property, not a global guarantee:
+
+| Surface | Visible? | Why |
+|---------|----------|-----|
+| CLI (`cqlite`) | **Yes** | With the feature off, `cqlite-cli/src/telemetry.rs` installs the fmt→stderr subscriber BEFORE calling `init`, precisely so this warning has a sink (issue #1702). With the feature ON the order is reversed, because `init` must first install the provider that the OTel layer composes. |
+| Arrow Flight server | **Yes, but its own line** | `cqlite-flight` calls `init` before installing its subscriber, so the core warning above is discarded — but it then emits an equivalent startup `WARN` of its own (issue #2128) after the subscriber exists. Expect that wording, not the one quoted here. |
+| Python binding | **Only if the host set up `tracing` first** | Feature-off, `install_subscriber()` is a no-op and runs after `init`, so nothing in the binding provides a sink. |
+| Node.js binding | **Only if the host set up `tracing` first** | Feature-off, the binding deliberately installs NO subscriber (a bare `Registry` would enable span callsites on hot paths), and `init` runs before that install anyway. |
+
+So the useful inference holds **on the CLI at its default log level**: the
+warning means the feature is missing, and its absence there means the export
+stack is compiled in and the problem is elsewhere (collector down, endpoint,
+protocol, sampling). Do NOT read absence as "compiled in" on the bindings — an
+embedder with no `tracing` subscriber gets no signal either way. Closing that
+binding gap needs a host-native report rather than a library installing a global
+subscriber over the embedder's own logging; tracked as a follow-up under epic
+#1686.
+
+### It respects your log level
+
+This is an ordinary `WARN` event, so an operator's explicit filtering choice wins:
+`--quiet` (which maps to `error`) or `RUST_LOG=error` suppresses it, exactly as it
+suppresses any other warning. That is deliberate — library code writing to stderr
+behind the subscriber's back would be worse. When diagnosing missing telemetry,
+run at the default level (or `RUST_LOG=warn` and above) rather than with `-q`.
 
 ---
 
