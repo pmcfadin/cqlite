@@ -2094,6 +2094,77 @@ else
   bad "NON-VACUITY broken: the guard pattern cannot even match a planted read"
 fi
 
+# ===========================================================================
+echo "TEST 67: --help emits HELP, and the shebang is on line 1 (round 5 blind spot)"
+# ===========================================================================
+# THE SUITE MISSED A BROKEN SCRIPT FOR AN ENTIRE ROUND. An edit inserted a function ABOVE the
+# shebang, so line 1 was no longer `#!/usr/bin/env bash` and `print_help` — which awks from line 2 to
+# the `---END-HELP---` marker — emitted the FUNCTION'S comment block as help text. 129 tests passed
+# through it, because every one of them invokes the script as `bash "$HB"`, which does not care about
+# line 1, and none of them read `--help` for its content. A structural property no test asserted.
+if [ "$(head -1 "$HB")" = '#!/usr/bin/env bash' ]; then
+  ok "the shebang is on line 1 (an edit above it silently corrupts print_help, which awks from line 2)"
+else
+  bad "line 1 of $(basename "$HB") is not the shebang: '$(head -1 "$HB")'"
+fi
+_help67=$(cd "$WORK" && bash "$HB" --help 2>&1 || true)
+# The help must open with the script's own banner and must NOT contain a function definition.
+if printf '%s\n' "$_help67" | head -5 | grep -q 'claim-heartbeat.sh' \
+  && ! printf '%s\n' "$_help67" | grep -qE '^[a-z_][a-z0-9_]*\(\) \{'; then
+  ok "--help emits the help block and leaks no function body"
+else
+  bad "--help does not look like help: first lines:
+$(printf '%s\n' "$_help67" | head -3)"
+fi
+# NON-VACUITY, and the probe has to MIRROR THE REAL DEFECT to be worth anything. My first attempt
+# planted a bare function definition at line 1 and failed — because `print_help` awks from line 2,
+# so line 1 is the one thing it can never emit. The actual defect leaked the function's COMMENT
+# BLOCK, which sat above its definition and therefore inside the awk range. Planted the same way.
+_bad_copy="$T/hdr-probe.sh"
+# The marker goes on line TWO, not line one: `print_help` awks from NR>=2, so line 1 is the single
+# line it can never emit. Getting that wrong is what made my first two probe attempts fail.
+{ printf '%s\n' '# displaced header line one' '# leaked_marker_67 this line is above the shebang' \
+    'leaked_fn() { :; }'; cat "$HB"; } >"$_bad_copy"
+# CAPTURED, NOT PIPED. `bash … | grep -q` under this file's `pipefail` is the #3387 flake: grep -q
+# exits at the first match, SIGPIPEs the upstream, and the PIPELINE status becomes 141 — so a
+# SUCCESSFUL match reads as a failed condition, non-deterministically depending on whether the
+# upstream had finished writing. Observed here as pass-then-fail with no change in between, which is
+# exactly how #3387 presents. I diagnosed that class this morning and then wrote one.
+_bad_help="$(bash "$_bad_copy" --help 2>&1 || true)"
+if [ "$(head -1 "$_bad_copy")" != '#!/usr/bin/env bash' ] \
+  && case "$_bad_help" in *leaked_marker_67*) true ;; *) false ;; esac; then
+  ok "NON-VACUITY: content planted above the shebang IS leaked into --help and detected by both halves"
+else
+  bad "NON-VACUITY broken: the check cannot detect content planted above the shebang"
+fi
+
+# ===========================================================================
+echo "TEST 68: an ABSENT field in a readable claim message fails closed (round 5, Medium)"
+# ===========================================================================
+# `ref_msg_field` ended in a pipeline, so a readable-but-MALFORMED message (no `issue=` token) gave
+# an empty value and exit 0 — indistinguishable from "there is no issue". delete_ref_guarded reads it
+# for the open-PR safeguard, so the safeguard was skipped. The round-4 fix closed the unreadable-FETCH
+# path and left this one open, which is the same shape one branch over.
+(
+  cd "$WORK" || exit 1
+  et=$(git hash-object -t tree --stdin </dev/null)
+  # A well-formed commit whose message carries NO issue= field.
+  cs=$(GIT_AUTHOR_NAME=t GIT_AUTHOR_EMAIL=t@t GIT_COMMITTER_NAME=t GIT_COMMITTER_EMAIL=t@t \
+    git commit-tree "$et" -m "claim machine=malformedBox pid=4242 ts=2026-08-29T00:00:00Z")
+  g push -q origin "${cs}:refs/machine-claims/malformedBox"
+)
+mf_out=$(cd "$WORK" && CLAIM_OPEN_PR_CMD="$NO_OPEN_PR" bash "$HB" reap malformedBox 2>&1)
+mf_rc=$?
+mf_still=$(g -C "$WORK" ls-remote origin 'refs/machine-claims/malformedBox' | awk '{print $1}')
+if [ "$mf_rc" -ne 0 ] && [ -n "$mf_still" ] \
+  && printf '%s\n' "$mf_out" | grep -qi 'could not be read'; then
+  ok "a claim message with no issue= field REFUSES the delete (rc=$mf_rc) and the ref survives — the open-PR safeguard is not skipped"
+else
+  bad "an absent issue field must fail closed: rc=$mf_rc still='$mf_still' out:
+$mf_out"
+fi
+(cd "$WORK" && g push -q origin ":refs/machine-claims/malformedBox" 2>/dev/null || true)
+
 echo
 echo "=== claim-heartbeat.sh: $PASS passed, $FAIL failed ==="
 [ "$FAIL" -eq 0 ]

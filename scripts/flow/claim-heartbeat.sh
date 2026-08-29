@@ -1,26 +1,3 @@
-# ref_msg_field <ref> <field> — read `<field>=<value>` from a liveness ref's commit message.
-#
-# FAILS CLOSED, AND DOES NOT TOUCH FETCH_HEAD (roborev round 4, Medium). Two defects lived here:
-#   * a failed fetch or unreadable message returned EMPTY, and `delete_ref_guarded` reads this to
-#     find the issue for its open-PR safeguard — so a transient failure silently SKIPPED the
-#     safeguard and deleted a claim whose endgame was unfinished. Absence of an answer was being
-#     used as an answer.
-#   * it read through shared `FETCH_HEAD`, which any concurrent fetch in this worktree can clobber,
-#     so the field could come from ANOTHER ref entirely. Same hazard already fixed in `dead-lanes`,
-#     not carried across to here.
-# Non-zero exit now means "could not read"; callers must treat that as unknown, never as absent.
-ref_msg_field() {
-  local ref="$1" field="$2" tmpref msg
-  tmpref="refs/tmp/claim-heartbeat-field/$$-${RANDOM}"
-  if ! git fetch --no-write-fetch-head --no-tags "$REMOTE" "+${ref}:${tmpref}" >/dev/null 2>&1; then
-    return 1
-  fi
-  msg="$(git log -1 --format=%B "$tmpref" 2>/dev/null)" || { git update-ref -d "$tmpref" 2>/dev/null || true; return 1; }
-  git update-ref -d "$tmpref" 2>/dev/null || true
-  [ -n "$msg" ] || return 1
-  printf '%s' "$msg" | sed -n "s/.*${field}=\\([^ ]*\\).*/\\1/p" | head -1
-}
-
 #!/usr/bin/env bash
 #
 # claim-heartbeat.sh — cross-machine claim liveness via a cheap origin git ref
@@ -394,6 +371,37 @@ humanize_age() {
 # working under a SHA-256 object format too. Never touches the working tree, the
 # index, or the current branch — a pure object push against an explicit refspec.
 # Echoes the created commit sha on stdout.
+# ref_msg_field <ref> <field> — read `<field>=<value>` from a liveness ref's commit message.
+#
+# FAILS CLOSED, AND DOES NOT TOUCH FETCH_HEAD (roborev round 4, Medium). Two defects lived here:
+#   * a failed fetch or unreadable message returned EMPTY, and `delete_ref_guarded` reads this to
+#     find the issue for its open-PR safeguard — so a transient failure silently SKIPPED the
+#     safeguard and deleted a claim whose endgame was unfinished. Absence of an answer was being
+#     used as an answer.
+#   * it read through shared `FETCH_HEAD`, which any concurrent fetch in this worktree can clobber,
+#     so the field could come from ANOTHER ref entirely. Same hazard already fixed in `dead-lanes`,
+#     not carried across to here.
+# Non-zero exit now means "could not read"; callers must treat that as unknown, never as absent.
+ref_msg_field() {
+  local ref="$1" field="$2" tmpref msg
+  tmpref="refs/tmp/claim-heartbeat-field/$$-${RANDOM}"
+  if ! git fetch --no-write-fetch-head --no-tags "$REMOTE" "+${ref}:${tmpref}" >/dev/null 2>&1; then
+    return 1
+  fi
+  msg="$(git log -1 --format=%B "$tmpref" 2>/dev/null)" || { git update-ref -d "$tmpref" 2>/dev/null || true; return 1; }
+  git update-ref -d "$tmpref" 2>/dev/null || true
+  [ -n "$msg" ] || return 1
+  # AN ABSENT FIELD IS ALSO A FAILURE (roborev round 5, Medium). The previous form ended in a
+  # pipeline, so a readable-but-MALFORMED message (no `<field>=…` token at all) produced an empty
+  # value and exit 0 — and `delete_ref_guarded` reads this to find the issue for its open-PR
+  # safeguard, so "no issue" and "message did not say" were indistinguishable and the safeguard was
+  # skipped. The fix that made an unreadable FETCH failure fail closed left this second path open.
+  local value
+  value="$(printf '%s' "$msg" | sed -n "s/.*${field}=\\([^ ][^ ]*\\).*/\\1/p" | head -1)"
+  [ -n "$value" ] || return 1
+  printf '%s' "$value"
+}
+
 # lane_id_ok <id> — exit 0 iff <id> is a valid lane component (#3393).
 #
 # TWO EXACT SHAPES, and the exactness is the point (roborev round 4, Medium). The first cut was a

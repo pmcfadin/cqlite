@@ -274,7 +274,29 @@ CLAIM_STAMPED_ISSUE=""
 # FRESH token — which made each iteration look like a lane transition, reaped the previous ref, and
 # defeated the per-invocation uniqueness this exists for. Caught by the assertion that a
 # supervisor's stamps all name the SAME placeholder.
+# Lane refs whose cleanup has not yet succeeded (#3393, roborev round 5). Retried on every stamp and
+# on clean exit; a placeholder that stays here is a permanent stale claim, because automated reaping
+# refuses placeholders by design.
+CLAIM_PENDING_CLEANUP=""
 CLAIM_LANE_TOKEN=""
+# claim_drain_pending_cleanup: retry every lane ref whose deletion has not yet succeeded. Keeps the
+# ones that still fail, so a transient push error is retried rather than lost.
+claim_drain_pending_cleanup() {
+  [[ -n "$CLAIM_CMD" ]] || return 0
+  [[ -n "${CLAIM_PENDING_CLEANUP// /}" ]] || return 0
+  local still="" id
+  for id in $CLAIM_PENDING_CLEANUP; do
+    [[ -n "$id" ]] || continue
+    if HEARTBEAT_MACHINE="$CLAIM_MACHINE" $CLAIM_CMD reap "$CLAIM_MACHINE" "$id" >/dev/null 2>&1; then
+      log "stale lane ref ${id} cleared"
+    else
+      still="${still} ${id}"
+      log "WARN: lane ref ${id} still not cleared (open PR or push error) — retained for retry"
+    fi
+  done
+  CLAIM_PENDING_CLEANUP="$still"
+}
+
 claim_lane_token() {
   [[ -n "$CLAIM_LANE_TOKEN" ]] || CLAIM_LANE_TOKEN="$(printf '%04x%04x%x' "$RANDOM" "$RANDOM" "${EPOCHSECONDS:-0}")"
 }
@@ -502,13 +524,15 @@ stamp_claim() {
     # The replacement exists, so the old ref can go. Best-effort by design: a failure here leaves a
     # stale ref that dead-lanes will report and the reaper will collect, which is far better than the
     # gap that deleting first could open.
-    if [[ -n "$prev_lane_id" && "$prev_lane_id" != "$lane_id" ]]; then
-      if HEARTBEAT_MACHINE="$CLAIM_MACHINE" $CLAIM_CMD reap "$CLAIM_MACHINE" "$prev_lane_id" >/dev/null 2>&1; then
-        log "previous lane ref ${prev_lane_id} cleared after stamping ${lane_id}"
-      else
-        log "WARN: could not clear previous lane ref ${prev_lane_id} (open PR or push error) — left for adoption; it may show as a dead lane until reaped"
-      fi
-    fi
+    # A FAILED CLEANUP IS RETAINED AND RETRIED, not forgotten (roborev round 5, Medium). Best-effort
+    # was right about ordering — never delete before the replacement lands — but forgetting the ref
+    # on failure is not recoverable for a PLACEHOLDER: automated reaping deliberately REFUSES a `p…`
+    # lane (it names no issue, so an open PR cannot be ruled out), so a transient push failure would
+    # leave a permanent stale claim that dead-lanes then reports as a dead lane forever. Carried in a
+    # pending list and retried on every later stamp and on clean exit.
+    [[ -n "$prev_lane_id" && "$prev_lane_id" != "$lane_id" ]] && \
+      CLAIM_PENDING_CLEANUP="${CLAIM_PENDING_CLEANUP} ${prev_lane_id}"
+    claim_drain_pending_cleanup
     log "claim stamped: machine=$CLAIM_MACHINE issue=$lane_id pid=$$"
   else
     log "WARN: claim stamp failed (machine=$CLAIM_MACHINE issue=$lane_id) — ref not refreshed this iteration (non-fatal)"
@@ -527,6 +551,8 @@ stamp_claim() {
 # nothing was stamped, so there is no ref to clear.
 clear_claim() {
   [[ -n "$CLAIM_CMD" ]] || return 0
+  # Retry anything a transition could not clean up, before clearing this lane's own ref.
+  claim_drain_pending_cleanup
   local issue="$CLAIM_STAMPED_ISSUE"
   # May be a `p<pid>` placeholder as well as an issue number; both are real refs to clear.
   case "$issue" in '' | p) issue="" ;; esac
