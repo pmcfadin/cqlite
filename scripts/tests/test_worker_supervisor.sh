@@ -2515,6 +2515,42 @@ test_numeric_knob_validation() {
   else
     fail "knob-validation(float): rc=$rc spawned=$([[ -f "$counter2" ]] && echo yes || echo no) (see $d2)"
   fi
+  # (c) ZERO is not a lax bound for CLAIM_MIGRATION_RETRIES, it is a SILENT SKIP (roborev round 35).
+  # A 0 makes the retry loop body never execute, so the legacy claim is never read and the lane runs
+  # foreign to its own lock with no error anywhere. It therefore belongs to a strictly-POSITIVE group,
+  # unlike the count knobs where 0 is a meaningful value. Found because a harness left it unset — the
+  # same failure a plist typo would produce in production, where nothing would be watching.
+  local d3 counter3 rc3
+  d3="$(new_case_dir)"; counter3="$d3/counter"
+  common_env "$d3"
+  write_finalize_stub "$d3/bin/worker.sh" "$counter3"
+  export WORKER_CMD="$d3/bin/worker.sh"
+  export CLAIM_MIGRATION_RETRIES=0
+  bash "$SUPERVISOR" >"$d3/stdout.log" 2>&1
+  rc3=$?
+  if [[ "$rc3" -eq 2 && ! -f "$counter3" ]] &&
+     grep -q "CLAIM_MIGRATION_RETRIES" "$d3/stdout.log"; then
+    pass "knob validation: CLAIM_MIGRATION_RETRIES=0 fails closed and names the knob (0 would silently skip the migration)"
+  else
+    fail "knob-validation(zero-retries): rc=$rc3 (want 2) spawned=$([[ -f "$counter3" ]] && echo yes || echo no)"
+  fi
+  # NON-VACUITY: a positive value is accepted, so (c) is about ZERO and not about the knob being
+  # rejected outright.
+  local d4 counter4 rc4
+  d4="$(new_case_dir)"; counter4="$d4/counter"
+  common_env "$d4"
+  write_finalize_stub "$d4/bin/worker.sh" "$counter4"
+  export WORKER_CMD="$d4/bin/worker.sh"
+  export MAX_ISSUES=1
+  export CLAIM_MIGRATION_RETRIES=2
+  bash "$SUPERVISOR" >"$d4/stdout.log" 2>&1
+  rc4=$?
+  unset CLAIM_MIGRATION_RETRIES
+  if [[ "$rc4" -eq 0 && -f "$counter4" ]]; then
+    pass "NON-VACUITY: CLAIM_MIGRATION_RETRIES=2 is accepted and the run proceeds"
+  else
+    fail "knob-validation(positive-retries): rc=$rc4 spawned=$([[ -f "$counter4" ]] && echo yes || echo no)"
+  fi
 }
 
 # ---------------------------------------------------------------------------
@@ -3881,6 +3917,12 @@ STUB
   {
     printf '%s\n' '#!/usr/bin/env bash'
     printf '%s\n' 'log() { :; }'
+    # The KNOBS the function depends on, extracted too (roborev round 35). Leaving them out silently
+    # unset CLAIM_MIGRATION_RETRIES, the retry loop body never ran, and the happy path made no call —
+    # a green-looking harness hiding a disabled subject. It also revealed the production hazard:
+    # the knob is now validated as strictly positive.
+    sed -n '/^CLAIM_MIGRATION_SETTLED=/p' "$SUPERVISOR"
+    sed -n '/^CLAIM_MIGRATION_RETRIES=/p' "$SUPERVISOR"
     sed -n '/^supervisor_msg_token()/,/^}/p' "$SUPERVISOR"
     sed -n '/^supervisor_migrate_legacy_claim()/,/^}/p' "$SUPERVISOR"
     printf '%s\n' 'supervisor_migrate_legacy_claim'

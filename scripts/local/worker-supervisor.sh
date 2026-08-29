@@ -1963,6 +1963,18 @@ validate_numeric_knobs() {
     val="${!name}"
     [[ "$val" =~ ^[0-9]+$ ]] || _bad_knob "$name" "$val" "a non-negative integer"
   done
+  # STRICTLY POSITIVE integer knobs — a group of its own because for these, ZERO is not a lax bound
+  # but a SILENT SKIP. `CLAIM_MIGRATION_RETRIES=0` makes the retry loop body never execute, so the
+  # legacy-claim status is never read, the migration never happens, and the lane runs foreign to its
+  # own lock with no error anywhere: exactly the fail-open shape this function's own docstring
+  # describes ("evaluate to 0 and SILENTLY disable"). Found because a test harness left the knob
+  # unset and the migration quietly did nothing — the same failure a plist typo would produce in
+  # production, where nothing would have been watching.
+  for name in CLAIM_MIGRATION_RETRIES; do
+    val="${!name}"
+    [[ "$val" =~ ^[0-9]+$ ]] || _bad_knob "$name" "$val" "a positive integer"
+    [[ "$val" -ge 1 ]] || _bad_knob "$name" "$val" "a positive integer (0 would silently skip the migration entirely)"
+  done
   # SIGNED integer knobs — the two with a documented `<=0 disables` contract.
   for name in BUILD_HOLD_MAX MISMATCH_GRACE_CAP_SECS; do
     val="${!name}"
