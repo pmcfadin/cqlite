@@ -282,11 +282,8 @@ async fn scan_delta_over_corrupt_chunk_records_one_reader_error() {
         comments: std::collections::HashMap::new(),
     };
 
-    let (mut rx, _summary) = cqlite_core::storage::sstable::reader::delta_scan::scan_delta(
-        dir.clone(),
-        schema,
-        8,
-    );
+    let (mut rx, _summary) =
+        cqlite_core::storage::sstable::reader::delta_scan::scan_delta(dir.clone(), schema, 8);
 
     let mut delivered: Option<Error> = None;
     while let Some(item) = rx.recv().await {
@@ -369,9 +366,8 @@ async fn successful_scan_records_no_reader_error() {
     };
     // The CLEAN source the corrupt fixture was derived from lives in the same corpus.
     let clean = match datasets_root() {
-        Some(root) => root.join(
-            "sstables/test_comp/lz4_table-25801a0071a911f19b3225f9984c6a77/nb-1-big-Data.db",
-        ),
+        Some(root) => root
+            .join("sstables/test_comp/lz4_table-25801a0071a911f19b3225f9984c6a77/nb-1-big-Data.db"),
         None => return,
     };
     if !clean.is_file() {
