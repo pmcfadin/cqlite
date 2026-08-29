@@ -698,16 +698,43 @@ fi
 #     where GNU coreutils installs `gtimeout` — keying this case off `timeout` alone
 #     would skip it on the one platform whose hang scenarios (locked osxkeychain, a GCM
 #     browser flow) motivated the bound, leaving it uncovered exactly where it matters.
-TIMEOUT_BIN_TEST="$(command -v timeout 2>/dev/null || command -v gtimeout 2>/dev/null || true)"
-# A watchdog for a fixture that IGNORES SIGTERM must be able to escalate to SIGKILL, so
-# it is resolved by the SAME behavioural probe the bootstrap uses (`--kill-after=1 1
-# true`) rather than assumed — a plain `timeout` aimed at a TERM-ignoring child waits
-# FOREVER, and `tooling-tests` is a full-gate component, where a hang is worse than a
-# failure because nothing reports it (#3369 review).
+# MIRRORS PRODUCTION'S CANDIDATE LOOP (#3369 review). Two values, two meanings:
+#   TIMEOUT_BIN_TEST  — the FIRST present candidate (what 7h/7hm need: "is there one?")
+#   TIMEOUT_KILL_TEST — the first present candidate that ACCEPTS --kill-after, which may
+#                       be the SECOND one. A watchdog for a fixture that IGNORES SIGTERM
+#                       must be able to escalate to SIGKILL: a plain `timeout` aimed at
+#                       such a child waits FOREVER, and `tooling-tests` is a full-gate
+#                       component where a hang is worse than a failure (nothing reports
+#                       it). Resolved by the SAME behavioural probe the bootstrap uses.
+# Checking only the FIRST candidate is how the 7p-o portability defect hid: the harness
+# and the code under test disagreed about which binary was in play.
+TIMEOUT_BIN_TEST=""
 TIMEOUT_KILL_TEST=""
-if [ -n "$TIMEOUT_BIN_TEST" ] && "$TIMEOUT_BIN_TEST" --kill-after=1 1 true >/dev/null 2>&1; then
-  TIMEOUT_KILL_TEST="$TIMEOUT_BIN_TEST"
-fi
+for _tbt_name in timeout gtimeout; do
+  _tbt_path="$(command -v "$_tbt_name" 2>/dev/null || true)"
+  [ -n "$_tbt_path" ] || continue
+  [ -n "$TIMEOUT_BIN_TEST" ] || TIMEOUT_BIN_TEST="$_tbt_path"
+  if [ -z "$TIMEOUT_KILL_TEST" ] && "$_tbt_path" --kill-after=1 1 true >/dev/null 2>&1; then
+    TIMEOUT_KILL_TEST="$_tbt_path"
+  fi
+done
+unset _tbt_name _tbt_path
+
+# mk_no_killafter_timeouts <dir> — stub EVERY timeout candidate the production loop tries
+# (`timeout` THEN `gtimeout`) so it cannot escape past the stub to a real binary further
+# along PATH. Stubbing only `timeout` made 7p-o pass on this Linux box (no gtimeout) and
+# FAIL on stock macOS, where GNU coreutils installs `gtimeout` — a supported fleet
+# platform, per bounded()'s own comment. Each stub rejects --kill-after and otherwise
+# delegates to the real binary, so what is measured is the SELECTION logic.
+mk_no_killafter_timeouts() {
+  local dir="$1" real="$2" name
+  for name in timeout gtimeout; do
+    mk_stub "$dir" "$name" 'for a in "$@"; do case "$a" in --kill-after*)
+      echo "'"$name"': unrecognized option '"'"'$a'"'"'" >&2; exit 125 ;;
+    esac; done
+exec '"$real"' "$@"'
+  done
+}
 if [ -n "$TIMEOUT_BIN_TEST" ]; then
   sb7h=$(mktemp -d "$tmp/cred7h.XXXXXX"); stub7h="$tmp/stub7h"
   mk_hermetic_bin "$stub7h"
@@ -1329,16 +1356,16 @@ fi
 #   non-GNU `timeout` earlier on PATH than a GNU `gtimeout` would win a first-match-wins
 #   lookup. If the selected binary rejects the flag, EVERY bounded call fails — board
 #   probe, credential probe, push probe — and --strict then rejects a healthy machine.
-#   The stub rejects the flag and otherwise delegates to the real binary, so this
-#   measures the SELECTION logic, not a crippled timeout.
+#   The stubs reject the flag and otherwise delegate to the real binary, so this measures
+#   the SELECTION logic, not a crippled timeout. BOTH candidates are stubbed: stubbing
+#   only `timeout` left the loop free to select a real `gtimeout` further along PATH, so
+#   the probe ran, no UNMEASURED appeared, and the case FAILED on stock macOS — green
+#   here (Linux, no gtimeout) and red on a supported platform (#3369 review).
 if [ -n "$TIMEOUT_BIN_TEST" ]; then
   bare7po="$tmp/bare7po.git"; mk_push_bare "$bare7po"
   repo7po="$tmp/repo7po"; mk_push_repo "$repo7po" "file://$bare7po"
   bin7po="$tmp/bin7po"; mk_push_bin "$bin7po"
-  mk_stub "$bin7po" timeout 'for a in "$@"; do case "$a" in --kill-after*)
-      echo "timeout: unrecognized option '"'"'$a'"'"'" >&2; exit 125 ;;
-    esac; done
-exec '"$TIMEOUT_BIN_TEST"' "$@"'
+  mk_no_killafter_timeouts "$bin7po" "$TIMEOUT_BIN_TEST"
   gc7po="$tmp/gc7po"; : >"$gc7po"
   run_push "$repo7po" "$bin7po" "$gc7po" --strict; out7po=$push_out; rc7po=$push_rc
   # TWO properties, and the second is the one that matters most. (1) The flag-rejecting
@@ -1497,6 +1524,19 @@ if [ -z "$bad_remote" ]; then
 else
   bad "push: a sandbox that can PUSH is pointed at a non-local remote:"
   printf '%s\n' "$bad_remote"
+fi
+# Same shape, third instance: a case that stubs ONE timeout candidate leaves the
+# production loop free to select a real one further along PATH. That is what made 7p-o
+# pass here and fail on stock macOS, and it is invisible on any host lacking the OTHER
+# candidate — so it is asserted structurally, not behaviourally. The needle is built by
+# concatenation so this guard cannot match its own source line.
+tstub_needle='mk_stub'' "[^"]*" timeout'
+lone_tstub=$(grep -nE "$tstub_needle" "$TEST_SELF" || true)
+if [ -z "$lone_tstub" ]; then
+  ok "push: no case stubs a single timeout candidate — use mk_no_killafter_timeouts (stubs timeout AND gtimeout)"
+else
+  bad "push: a case stubs one timeout candidate; the production loop can escape to the other:"
+  printf '%s\n' "$lone_tstub"
 fi
 unguarded=$(grep -n 'bash "\$BOOTSTRAP" --skip-smoke' "$TEST_SELF" | grep -v -- '--skip-push-probe' || true)
 if [ -z "$unguarded" ]; then
