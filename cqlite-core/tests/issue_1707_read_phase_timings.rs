@@ -440,7 +440,7 @@ mod wal_gauges {
     use cqlite_core::schema::{Column, KeyColumn, TableSchema};
     use cqlite_core::storage::write_engine::{WriteEngine, WriteEngineConfig};
 
-    fn schema() -> TableSchema {
+    pub(super) fn schema() -> TableSchema {
         TableSchema {
             keyspace: "obs1707".to_string(),
             table: "rows".to_string(),
@@ -538,5 +538,110 @@ mod wal_gauges {
                 .map(|m| &m.points)
         );
         drop(reopened);
+    }
+}
+
+/// The MERGE phase, which is recorded only on the CROSS-GENERATION read route — so
+/// it needs two generations of one table, which the write engine can produce.
+#[cfg(feature = "write-support")]
+mod merge_phase {
+    use super::wal_gauges::schema;
+    use super::*;
+    use cqlite_core::schema::registry::{SchemaRegistry, SchemaRegistryConfig, SchemaSource};
+    use cqlite_core::storage::sstable::SSTableManager;
+    use cqlite_core::storage::write_engine::{WriteEngine, WriteEngineConfig};
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    #[serial_test::serial(read_metrics)]
+    async fn a_cross_generation_read_records_the_merge_phase() {
+        let mc = testing::metrics_capture();
+        let tmp = tempfile::TempDir::new().expect("tmp");
+        let data_dir = tmp.path().join("data");
+        let cfg = WriteEngineConfig::new(data_dir.clone(), tmp.path().join("wal"), schema());
+
+        // TWO generations of one table: write + flush, twice. The k-way reconciling
+        // merge is what the read path takes when a table has more than one
+        // generation and a schema is available.
+        let mut engine = WriteEngine::new(cfg).expect("engine");
+        for (id, name) in [(1, "one"), (2, "two")] {
+            engine
+                .execute(&format!(
+                    "INSERT INTO obs1707.rows (id, name) VALUES ({id}, '{name}')"
+                ))
+                .expect("write");
+            engine.flush().await.expect("flush").expect("sstable");
+        }
+        drop(engine);
+
+        let config = Config::default();
+        let platform = Arc::new(Platform::new(&config).await.expect("platform"));
+        let registry = SchemaRegistry::new(
+            SchemaRegistryConfig::default(),
+            platform.clone(),
+            config.clone(),
+        )
+        .await
+        .expect("build registry");
+        registry
+            .register_schema(schema(), SchemaSource::Manual)
+            .await
+            .expect("register schema");
+        let registry = Arc::new(tokio::sync::RwLock::new(registry));
+        let manager = SSTableManager::new(&data_dir, &config, platform, Some(registry))
+            .await
+            .expect("open manager over both generations");
+
+        let table_id = TableId::new("obs1707.rows".to_string());
+        let schema = schema();
+        mc.reset();
+        let mut rows = 0usize;
+        {
+            let mut stream = manager
+                .scan_stream(&table_id, None, None, Some(&schema), 16)
+                .await
+                .expect("cross-generation streaming scan");
+            while let Some(item) = stream.recv().await {
+                item.expect("stream item");
+                rows += 1;
+            }
+        }
+        let metrics = mc.flush_and_collect();
+
+        assert!(
+            rows > 0,
+            "the two generations hold rows, so a read that delivered none would make \
+             every assertion below vacuous"
+        );
+        assert_eq!(
+            samples(&metrics, catalog::READ_PHASE_MERGE),
+            1,
+            "a CROSS-GENERATION read must record exactly ONE merge sample for the \
+             whole operation (the per-generation sub-scans are metered inert, so they \
+             cannot add a second); collected metrics: {:?}",
+            metric_names(&metrics)
+        );
+        assert_eq!(
+            metrics.unit(catalog::READ_PHASE_MERGE),
+            Some(catalog::unit::SECONDS),
+            "the merge phase must carry the catalogued base-unit seconds"
+        );
+        assert!(
+            metrics
+                .find(catalog::READ_PHASE_MERGE)
+                .is_some_and(|m| m.points.iter().all(|p| p.value >= 0.0)),
+            "recv-wait subtraction must never produce a negative (or wrapped) merge \
+             time; points: {:?}",
+            metrics.find(catalog::READ_PHASE_MERGE).map(|m| &m.points)
+        );
+        // CQLite's own write surface emits UNCOMPRESSED SSTables (#1406), so this
+        // read decompresses nothing and the series must be absent, not 0.0.
+        assert!(
+            !metrics.contains(catalog::READ_PHASE_DECOMPRESS),
+            "an uncompressed cross-generation read must record NO decompress sample; \
+             points: {:?}",
+            metrics
+                .find(catalog::READ_PHASE_DECOMPRESS)
+                .map(|m| &m.points)
+        );
     }
 }
