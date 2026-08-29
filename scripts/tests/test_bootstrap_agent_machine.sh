@@ -1133,6 +1133,49 @@ else
   echo "skip - push: AC1+AC3 exit-0 assertion needs an otherwise-clean sandbox (baseline=$base_warns warnings)"
 fi
 
+# 7p-k. DELETE REJECTION (#3369 blocker 2). `cmd_smoke` used to emit SMOKE-OK — text and
+#   all: "(create + ls-remote + delete verified)" — after only a stderr `note` when the
+#   cleanup delete failed. Bootstrap then reported VERIFIED and passed --strict on a
+#   machine that had just stranded a ref on the shared origin: a verdict claiming more
+#   than it measured, the same shape as the §3b wording defect one layer down.
+bare7pk="$tmp/bare7pk.git"
+mk_push_bare "$bare7pk" 'zero=0000000000000000000000000000000000000000
+while read -r old new ref; do
+  if [ "$new" = "$zero" ]; then echo "deletion of $ref denied by policy" >&2; exit 1; fi
+done
+exit 0'
+repo7pk="$tmp/repo7pk"; mk_push_repo "$repo7pk" "file://$bare7pk"
+bin7pk="$tmp/bin7pk"; mk_push_bin "$bin7pk"
+gc7pk="$tmp/gc7pk"; : >"$gc7pk"
+run_push "$repo7pk" "$bin7pk" "$gc7pk" --strict; out7pk=$push_out; rc7pk=$push_rc
+if printf '%s' "$out7pk" | grep -q '\[warn\].*git-push: FAILED.*REFUSED the delete' \
+   && ! printf '%s' "$out7pk" | grep -q 'git-push: VERIFIED' \
+   && ! push_green "$out7pk" && [ "$rc7pk" -ne 0 ]; then
+  ok "push: a remote that accepts create but REFUSES delete is FAILED, never VERIFIED (green withheld, --strict exits $rc7pk)"
+else
+  bad "push: delete rejection was reported as success (rc=$rc7pk)"
+  push_verdict "$out7pk"
+fi
+if printf '%s' "$out7pk" | grep -q "git ls-remote .* 'refs/claims/smoke-\*'"; then
+  ok "push: the delete-rejected verdict tells the operator how to list the ref it stranded"
+else
+  bad "push: delete-rejected verdict gave no stray-ref cleanup guidance"
+fi
+# The verdict must come from claim.sh's ANCHORED verdict line AND its exit status, not
+# from a substring anywhere in the captured stream. A claim.sh that prints the token in
+# prose (or on stderr) and then FAILS must not pass.
+printf '#!/usr/bin/env bash\necho "hint: a healthy run prints CLAIM: SMOKE-OK here" >&2\nexit 1\n' \
+  >"$repo7pk/scripts/flow/claim.sh"
+chmod +x "$repo7pk/scripts/flow/claim.sh"
+run_push "$repo7pk" "$bin7pk" "$gc7pk"; out7pk2=$push_out
+if printf '%s' "$out7pk2" | grep -q '\[warn\].*git-push: UNMEASURED' \
+   && ! printf '%s' "$out7pk2" | grep -q '\[ok\].*git-push'; then
+  ok "push: the SMOKE-OK token in unanchored prose (plus a nonzero exit) does NOT satisfy the probe"
+else
+  bad "push: a prose mention of SMOKE-OK was accepted as the verdict"
+  push_verdict "$out7pk2"
+fi
+
 # 7p-g. `--strict` AND "All checks green." MUST NOT DIVERGE — asserted in BOTH
 #   directions. They are two channels for ONE fact: the green string is printed iff
 #   WARNINGS is 0, and --strict exits 0 iff WARNINGS is 0. A reviewer proposed keying

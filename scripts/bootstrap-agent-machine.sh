@@ -1418,17 +1418,33 @@ else
     push_probe_out=$(cd "$REPO_ROOT" && bounded "$PUSH_PROBE_BOUND" env GIT_TERMINAL_PROMPT=0 \
       GIT_ASKPASS=cqlite-bootstrap-no-askpass SSH_ASKPASS=cqlite-bootstrap-no-askpass \
       bash "$CLAIM_SH" smoke 2>&1) || push_probe_rc=$?
-    if printf '%s\n' "$push_probe_out" | grep -q 'SMOKE-OK'; then
-      # The one affirmative branch: the ref was created on the remote AND read back.
+    # Every match below is ANCHORED on `^CLAIM: ` — claim.sh's `emit` prefix — and the
+    # affirmative branch ALSO requires rc 0 (#3369). Unanchored, the verdict is decided
+    # from a stream that carries claim.sh's own control tokens AND arbitrary payload
+    # (remediation prose, an echoed command, a SMOKE-FAIL message that quotes another
+    # verdict), so a data line could pose as the verdict — the control/data-in-one-channel
+    # hazard CLAUDE.md documents. And a verdict token alone is a TEXT PROXY for a process
+    # status: requiring both means a claim.sh that dies after printing cannot pass.
+    if [ "$push_probe_rc" -eq 0 ] && printf '%s\n' "$push_probe_out" | grep -q '^CLAIM: SMOKE-OK'; then
+      # The one affirmative branch: the ref was created on the remote, read back, AND
+      # deleted — all three, because claim.sh now fails the delete rather than warning.
       ok "git-push: VERIFIED (refs/claims/* create+ls-remote+delete on '$PUSH_PROBE_REMOTE') — the claim protocol can run on this machine"
-    elif printf '%s\n' "$push_probe_out" | grep -q 'SMOKE-FAIL.*reason=auth'; then
+    elif printf '%s\n' "$push_probe_out" | grep -q '^CLAIM: SMOKE-FAIL.*reason=auth'; then
       warn "git-push: FAILED (git cannot AUTHENTICATE the refs/claims/* push to '$PUSH_PROBE_REMOTE' — an authenticated 'gh' does NOT authenticate git)"
       push_probe_fix_advice
-    elif printf '%s\n' "$push_probe_out" | grep -q 'SMOKE-FAIL.*reason=commit-build'; then
+    elif printf '%s\n' "$push_probe_out" | grep -q '^CLAIM: SMOKE-FAIL.*reason=delete-rejected'; then
+      # Create+read-back worked and the DELETE was refused. A namespace that cannot be
+      # deleted from is unusable for claims (`release` deletes refs/claims/issue-<N>), and
+      # this run has stranded a ref — so it is FAILED, never VERIFIED.
+      warn "git-push: FAILED ('$PUSH_PROBE_REMOTE' accepted the refs/claims/* create but REFUSED the delete — unusable for the claim protocol, and a smoke ref is now STRANDED)"
+      info "list strays:  git ls-remote $PUSH_PROBE_REMOTE 'refs/claims/smoke-*'"
+      info "delete one:   git push $PUSH_PROBE_REMOTE --delete refs/claims/smoke-<nonce>   (always safe — it is not a claim lock)"
+      push_probe_fix_advice
+    elif printf '%s\n' "$push_probe_out" | grep -q '^CLAIM: SMOKE-FAIL.*reason=commit-build'; then
       # A LOCAL failure building the throwaway claim commit: the push never happened,
       # so nothing was learned about push capability.
       warn "git-push: UNMEASURED (the throwaway claim commit could not be built locally — the push was never attempted)"
-    elif printf '%s\n' "$push_probe_out" | grep -q 'SMOKE-FAIL'; then
+    elif printf '%s\n' "$push_probe_out" | grep -q '^CLAIM: SMOKE-FAIL'; then
       warn "git-push: FAILED ('$PUSH_PROBE_REMOTE' rejected the refs/claims/* push — does the remote permit that ref namespace?)"
       push_probe_fix_advice
     elif [ "$push_probe_rc" = 124 ] || [ "$push_probe_rc" = 137 ]; then

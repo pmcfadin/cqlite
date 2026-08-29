@@ -1108,7 +1108,10 @@ cmd_status() {
 # a push to the `refs/claims/*` namespace (create + ls-remote + delete a throwaway
 # `refs/claims/smoke-<nonce>` ref). Some managed Git hosts restrict custom ref
 # namespaces; if this fails, the whole claim mechanism is unusable on that remote
-# and MUST be caught before the fleet relies on it. NOT part of the hermetic test
+# and MUST be caught before the fleet relies on it. ALL THREE steps are part of the
+# verdict (#3369): a remote that accepts the create and refuses the DELETE is equally
+# unusable, because `release` deletes refs/claims/issue-<N> — that is
+# `reason=delete-rejected`, never a SMOKE-OK with a stderr warning. NOT part of the hermetic test
 # suite — it mutates the REAL origin. (Verified on github.com/pmcfadin/cqlite
 # 2026-07-17: refs/claims/* is pushable.)
 cmd_smoke() {
@@ -1132,14 +1135,29 @@ cmd_smoke() {
   # `|| true`: an ls-remote failure here must NOT abort before the cleanup delete
   # below (a stranded smoke ref is the worst outcome). A "" seen → SMOKE-FAIL.
   seen="$(git ls-remote "$REMOTE" "$ref" 2>/dev/null | awk '{print $1}' | head -1 || true)"
-  # Always clean up the throwaway ref, whatever the ls-remote said.
-  git push "$REMOTE" --delete "$ref" >/dev/null 2>&1 || note "WARNING: could not delete $ref on $REMOTE — remove it manually"
-  if [ "$seen" = "$sha" ]; then
-    emit "SMOKE-OK remote=$REMOTE namespace=refs/claims/* (create + ls-remote + delete verified)"
-    return 0
+  # Always clean up the throwaway ref, whatever the ls-remote said — and RECORD whether
+  # the cleanup worked. It used to be `|| note "WARNING: ..."`, after which SMOKE-OK was
+  # emitted UNCONDITIONALLY with the text "(create + ls-remote + delete verified)" — a
+  # verdict claiming more than it measured (#3369). Two costs: a caller (bootstrap's
+  # push-capability probe) read SMOKE-OK as proof of the whole cycle and passed a machine
+  # that had just STRANDED a ref on the shared origin; and the diagnosis was a `note` on
+  # stderr, invisible to any caller capturing the verdict.
+  local delete_ok=1
+  git push "$REMOTE" --delete "$ref" >/dev/null 2>&1 || delete_ok=0
+  if [ "$seen" != "$sha" ]; then
+    emit "SMOKE-FAIL remote=$REMOTE ref=$ref reason=ls-remote-mismatch seen=${seen:-<none>} expected=$sha"
+    return 1
   fi
-  emit "SMOKE-FAIL remote=$REMOTE ref=$ref reason=ls-remote-mismatch seen=${seen:-<none>} expected=$sha"
-  return 1
+  if [ "$delete_ok" = 0 ]; then
+    # DELETE CAPABILITY IS REQUIRED BY THE CLAIM PROTOCOL, not a tidiness nicety:
+    # `claim.sh release` deletes refs/claims/issue-<N>, and the reaper depends on it. A
+    # namespace that accepts a create and refuses a delete is BROKEN for claims, so this
+    # is a FAIL, not a warning — and it names the ref it stranded.
+    emit "SMOKE-FAIL remote=$REMOTE ref=$ref reason=delete-rejected (create + ls-remote worked, but $REMOTE REFUSED the delete — 'claim.sh release' deletes refs/claims/issue-<N>, so this namespace is unusable for claims; the throwaway ref is STRANDED: remove it with 'git push $REMOTE --delete $ref')"
+    return 1
+  fi
+  emit "SMOKE-OK remote=$REMOTE namespace=refs/claims/* (create + ls-remote + delete verified)"
+  return 0
 }
 
 # ---------------------------------------------------------------------------

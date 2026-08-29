@@ -665,6 +665,46 @@ else
 $outSmokeAuth"
 fi
 
+# (g) smoke on a remote that ACCEPTS the create and REFUSES the delete (#3369). It used
+# to emit SMOKE-OK — whose own text says "delete verified" — after a stderr-only warning,
+# so a caller could not tell a clean cycle from a stranded ref. Delete capability is
+# REQUIRED: `release` deletes refs/claims/issue-<N>, so such a namespace is unusable.
+DELORIGIN="$T/deleteproof.git"
+gg init --bare -q "$DELORIGIN"
+cat >"$DELORIGIN/hooks/pre-receive" <<'HOOK'
+#!/usr/bin/env bash
+zero=0000000000000000000000000000000000000000
+while read -r old new ref; do
+  if [ "$new" = "$zero" ]; then echo "deletion of $ref denied by policy" >&2; exit 1; fi
+done
+exit 0
+HOOK
+chmod +x "$DELORIGIN/hooks/pre-receive"
+rc=0; outSmokeDel=$( cd "$A" && CLAIM_MACHINE=machineA CLAIM_REMOTE="$DELORIGIN" bash "$CLAIM" smoke 2>/dev/null ) || rc=$?
+strayDel=$(gg -C "$A" ls-remote "$DELORIGIN" 'refs/claims/smoke-*' | wc -l | tr -d ' ')
+if [ "$rc" -ne 0 ] && printf '%s\n' "$outSmokeDel" | grep -q 'SMOKE-FAIL' \
+   && printf '%s\n' "$outSmokeDel" | grep -q 'reason=delete-rejected' \
+   && ! printf '%s\n' "$outSmokeDel" | grep -q 'SMOKE-OK'; then
+  ok "(g) smoke on a delete-refusing remote → SMOKE-FAIL reason=delete-rejected, never SMOKE-OK (stray refs on that remote: $strayDel)"
+else
+  bad "(g) expected SMOKE-FAIL reason=delete-rejected; got rc=$rc
+$outSmokeDel"
+fi
+# Positive control: the SAME probe against the ordinary origin still succeeds, so (g) is
+# measuring the delete refusal and not a broken probe.
+# Count NEW strays only: TEST 19 above deliberately leaves a `refs/claims/smoke-stray`
+# on origin, so an absolute count of 0 is the wrong oracle — the property is that THIS
+# probe adds none.
+strayBefore=$(gg -C "$A" ls-remote origin 'refs/claims/smoke-*' | wc -l | tr -d ' ')
+rc=0; outSmokeOk=$( cd "$A" && CLAIM_MACHINE=machineA CLAIM_REMOTE=origin bash "$CLAIM" smoke 2>/dev/null ) || rc=$?
+strayAfter=$(gg -C "$A" ls-remote origin 'refs/claims/smoke-*' | wc -l | tr -d ' ')
+if [ "$rc" -eq 0 ] && printf '%s\n' "$outSmokeOk" | grep -q 'SMOKE-OK' && [ "$strayAfter" = "$strayBefore" ]; then
+  ok "(g) positive control: a normal remote still yields SMOKE-OK and leaves NO new stray ref"
+else
+  bad "(g) positive control failed: rc=$rc strays $strayBefore -> $strayAfter
+$outSmokeOk"
+fi
+
 # ===========================================================================
 echo
 echo "==== CLAIM-LOCK TEST SUMMARY: PASS=$PASS FAIL=$FAIL ===="
