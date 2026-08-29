@@ -30,7 +30,6 @@ pub fn create_test_config() -> Config {
     // Optimize for testing - smaller cache sizes. `row_cache` was removed in
     // issue #1568; `block_cache.max_size` is the single real cache knob.
     config.memory.block_cache.max_size = 8 * 1024 * 1024; // 8MB
-    config.storage.max_sstable_size = 16 * 1024 * 1024; // 16MB for tests
 
     config
 }

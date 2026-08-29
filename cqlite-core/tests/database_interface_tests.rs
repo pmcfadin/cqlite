@@ -67,8 +67,13 @@ async fn test_database_lifecycle_with_cassandra_tables() {
     assert_eq!(explain.query_type, "Select");
 
     let _stats = db.stats().await.expect("stats");
-    // NOTE: Issue #176 removed memtable stats
-    assert_eq!(db.config().storage.block_size, config.storage.block_size);
+    // NOTE: Issue #176 removed memtable stats. `block_size` was deleted as
+    // decoration in #1696; `memtable_size_threshold` is a knob the engine
+    // actually reads.
+    assert_eq!(
+        db.config().storage.memtable_size_threshold,
+        config.storage.memtable_size_threshold
+    );
 
     db.flush().await.expect("flush");
     db.compact().await.expect("compact noop");
@@ -98,7 +103,10 @@ async fn test_database_initialization_success() {
 
     // Verify all components are initialized properly
     // Test line 114-118: Ok(Self { storage, query, memory, config })
-    assert_eq!(db.config().storage.block_size, config.storage.block_size);
+    assert_eq!(
+        db.config().storage.memtable_size_threshold,
+        config.storage.memtable_size_threshold
+    );
 
     // Verify the query engine is functional (line 108-111)
     let result = db
@@ -117,7 +125,8 @@ async fn test_database_initialization_failures() {
     // Test Platform::new failure
     let _invalid_config = Config {
         storage: cqlite_core::config::StorageConfig {
-            max_sstable_size: 0, // Invalid size should cause issues
+            // Invalid: `validate` rejects a zero flush threshold.
+            memtable_size_threshold: 0,
             ..Default::default()
         },
         ..Config::default()
@@ -167,8 +176,8 @@ async fn test_database_clone_functionality() {
 
     // Verify clone has same configuration
     assert_eq!(
-        db.config().storage.block_size,
-        db_clone.config().storage.block_size
+        db.config().storage.memtable_size_threshold,
+        db_clone.config().storage.memtable_size_threshold
     );
     assert_eq!(
         db.config().memory.max_memory,

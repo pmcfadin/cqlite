@@ -498,9 +498,7 @@ fn benchmark_index_compatibility(c: &mut Criterion) {
     group.bench_function("bloom_filter_compatibility", |b| {
         b.to_async(&rt).iter(|| async {
             let temp_dir = TempDir::new().unwrap();
-            let mut config = Config::default();
-            config.storage.enable_bloom_filters = true;
-            config.storage.bloom_filter_fp_rate = 0.01;
+            let config = Config::default();
 
             let platform = Arc::new(Platform::new(&config).await.unwrap());
             let engine = StorageEngine::open(temp_dir.path(), &config, platform, None)

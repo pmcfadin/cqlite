@@ -7,8 +7,6 @@ use std::path::{Path, PathBuf};
 pub struct Config {
     pub default_database: Option<PathBuf>,
     #[serde(default)]
-    pub connection: ConnectionConfig,
-    #[serde(default)]
     pub output: OutputSettings,
     #[serde(default)]
     pub performance: PerformanceConfig,
@@ -67,37 +65,16 @@ pub struct Config {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ConnectionConfig {
-    pub timeout_ms: u64,
-    pub retry_attempts: u32,
-    pub pool_size: u32,
-}
-
-impl Default for ConnectionConfig {
-    fn default() -> Self {
-        Self {
-            timeout_ms: 30000,
-            retry_attempts: 3,
-            pool_size: 10,
-        }
-    }
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct OutputSettings {
     pub max_rows: Option<usize>,
-    pub pager: Option<String>,
     pub colors: bool,
-    pub timestamp_format: String,
 }
 
 impl Default for OutputSettings {
     fn default() -> Self {
         Self {
             max_rows: Some(1000),
-            pager: None,
             colors: true,
-            timestamp_format: "%Y-%m-%d %H:%M:%S".to_string(),
         }
     }
 }
@@ -235,7 +212,6 @@ impl Default for Config {
     fn default() -> Self {
         Self {
             default_database: None,
-            connection: ConnectionConfig::default(),
             output: OutputSettings::default(),
             performance: PerformanceConfig::default(),
             logging: LoggingConfig::default(),
@@ -353,6 +329,14 @@ impl Config {
         let content = fs::read_to_string(path)
             .with_context(|| format!("Failed to read config file: {}", path.display()))?;
 
+        // Report REMOVED keys before deserializing (issue #1696). serde discards
+        // unknown keys silently, and after the deserialize below the evidence is
+        // gone — so the raw document is the only place this can be seen. The file
+        // still loads: the posture is parse-and-ignore PLUS a named warning, not
+        // `deny_unknown_fields`, because our own shipped example named these keys.
+        // See `crate::config_removed_keys` for the full rationale.
+        Self::warn_about_removed_keys(path, &content);
+
         let config: Config = match path.extension().and_then(|ext| ext.to_str()) {
             Some("toml") => {
                 toml::from_str(&content).with_context(|| "Failed to parse TOML config")?
@@ -367,6 +351,27 @@ impl Config {
         };
 
         Ok(config)
+    }
+
+    /// Print a deprecation warning naming every REMOVED config key `content`
+    /// still sets (issue #1696).
+    ///
+    /// Best-effort and never fatal: a document that does not parse here is left
+    /// entirely to the real parse in [`Self::load_from_file`], which owns the
+    /// error message.
+    fn warn_about_removed_keys(path: &Path, content: &str) {
+        use crate::config_removed_keys::{
+            deprecation_warning, parse_for_inspection, removed_keys_present,
+        };
+
+        let extension = path.extension().and_then(|ext| ext.to_str());
+        let Some(document) = parse_for_inspection(extension, content) else {
+            return;
+        };
+        let present = removed_keys_present(&document);
+        if let Some(warning) = deprecation_warning(&path.display().to_string(), &present) {
+            eprintln!("{warning}");
+        }
     }
 
     #[allow(dead_code)]
@@ -612,12 +617,9 @@ fn merge_partial_config(base: Config, overlay: Config) -> Config {
         query_limit: overlay.query_limit.or(base.query_limit),
 
         // Nested structs - merge carefully
-        connection: overlay.connection,
         output: OutputSettings {
             max_rows: overlay.output.max_rows.or(base.output.max_rows),
-            pager: overlay.output.pager.or(base.output.pager),
             colors: final_output_colors,
-            timestamp_format: overlay.output.timestamp_format,
         },
         repl: ReplConfig {
             enable_history: overlay.repl.enable_history,

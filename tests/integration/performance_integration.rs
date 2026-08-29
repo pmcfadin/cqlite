@@ -456,10 +456,8 @@ async fn test_recovery_performance() {
 #[tokio::test]
 async fn test_bloom_filter_performance() {
     let temp_dir = TempDir::new().unwrap();
-    let mut config = Config::performance_optimized();
-    config.storage.enable_bloom_filters = true;
-    config.storage.bloom_filter_fp_rate = 0.01;
-    
+    let config = Config::performance_optimized();
+
     let platform = Arc::new(Platform::new(&config).await.unwrap());
     let engine = StorageEngine::open(temp_dir.path(), &config, platform, None).await.unwrap();
     let table_id = TableId::new("bloom_test_table");
