@@ -8292,7 +8292,13 @@ run_scan_offload_guard_cmd() {
 # QueryRows, so it needs no datasets.
 run_arrow_parity_guard_cmd() {
   local out
-  out=$(cargo test --package cqlite-core --features arrow \
+  # CARGO_TERM_COLOR=never is BELT, not the fix (issue #3400 AC4 part 2): the parse below is
+  # colour-immune on its own via _ansi_stripped_log, and it stays that way if this prefix is
+  # ever dropped or overridden by an outer env. Applied to the invocation THIS component owns.
+  # Deliberately NOT added to the two cli-tests invocations: PR #3403 owns those lines and sets
+  # it there itself, and the strip makes both sites correct regardless — a second edit to the
+  # same lines would buy nothing and cost a conflict.
+  out=$(CARGO_TERM_COLOR=never cargo test --package cqlite-core --features arrow \
     --test issue_1495_arrow_accessor_parity 2>&1) || { echo "$out"; return 1; }
   echo "$out"
   # Require at least one test to have actually run (guard against a vacuous

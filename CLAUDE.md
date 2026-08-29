@@ -153,19 +153,22 @@ cat /tmp/gate-summary.txt   # the SUMMARY block is the ONLY gate text an agent r
   peer's, not yours; on a mismatch, read the `.integrity-fail.<run-id>` sibling / `logs:` bundle instead.
 - **A gate parser must be colour-immune AT THE PARSE SITE (#3400).** 18 workflows set
   `CARGO_TERM_COLOR: always` (incl. the nightly `gate.yml`) plus `scripts/local/pre-merge.sh`, and
-  **colour SURVIVES redirection to a file** — the gate's own mandated `> gate.log 2>&1` capture is
-  coloured too, so this is not a tty-only artifact. Cargo writes the reset BETWEEN the status word
-  and the payload (`Running<ESC>[0m tests/foo.rs`), so a parse keyed on the literal `Running tests/`
-  or `warning:` matches NOTHING; MEASURED consequence, live on `main` for months: the cli-tests
-  zero-tests guard reported OK having judged no target at all. Route every cargo-output parse
+  **colour SURVIVES redirection to a file** (measured: 25 ESC bytes vs 0) — the gate's own mandated
+  `> gate.log 2>&1` capture is coloured too, so this is not a tty-only artifact. Cargo colours the
+  STATUS WORD and emits the reset immediately after it (`Running<ESC>[0m tests/foo.rs`), so a
+  pattern anchored on the status word alone survives while one spanning `<status> <payload>` — the
+  literal `Running tests/`, or `warning:` — matches NOTHING; MEASURED consequence, live on `main`
+  for months: the cli-tests zero-tests guard reported OK having judged no target at all. Conversely
+  `test result:` / `running N tests` are libtest's, and cargo does not pass `--color` through to the
+  harness, so they carry no escapes — safe for a reason that is NOT in the code, which is why this
+  is a lint and not a comment. Route every cargo-output parse
   through `_ansi_stripped_log` and read by **redirection, never a pipe** (a piped `while read` runs
   in a subshell and its verdict is discarded — a second, independent silent pass). Enforced by the
-  `roborev-lints` component's `scripts/ci/check-cargo-output-parsers.sh`, which reds a raw or
-  pipe-fed site and FAILs on an empty subject set. `CARGO_TERM_COLOR=never` on parsed invocations is
-  belt, not the fix; `gate.yml` KEEPS `always` — colour is a presentation property of a log for
-  humans, and moving correctness into a workflow file 18 files from the parse is a worse coupling
-  than the one being removed. (`test result:` / `running N tests` are libtest text and carry no
-  escapes — safe today, for a reason invisible at the parse, which is why they are normalised anyway.)
+  `roborev-lints` component's `scripts/ci/check-cargo-output-parsers.sh` (`--lite`), which reds a raw
+  or pipe-fed site and **FAILs on an empty subject set** (`0/0 PASS` would be the same vacuous shape
+  one level up). `CARGO_TERM_COLOR=never` at the invocation is belt, not the fix; `gate.yml` KEEPS
+  `always` — colour is a presentation property of a log for humans, and moving correctness into a
+  workflow file 18 files from the parse is a worse coupling than the one being removed.
 - clippy is scoped per-package (#1844): whole workspace `-D warnings` but skips the source-built
   DuckDB amalgamation (cqlite-cli `duckdb-tests`) + OTel stack (`observability`/
   `observability-testing`); parquet/arrow stay linted. `CQLITE_CLIPPY_FULL=1` (nightly `gate.yml`)
