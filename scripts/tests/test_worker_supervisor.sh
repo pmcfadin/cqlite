@@ -3061,6 +3061,72 @@ WEOF
 }
 
 # ---------------------------------------------------------------------------
+# Test 33-claim (#3393, roborev round 29, Medium — a REGRESSION from round 25's guard): a `no-work`
+# iteration must conclude only a PLACEHOLDER lane. Round 25 keyed on the MARKER's issue field, which is
+# empty for every no-work — but the STAMPED ref can be a NUMERIC issue carried forward from a prior
+# technical block, and concluding that cleared the only liveness signal for a still-unresolved issue.
+# ---------------------------------------------------------------------------
+test_no_work_does_not_conclude_a_numeric_lane() {
+  local d stamped_issue reaped
+  d="$(new_case_dir)"
+  common_env "$d"
+  export CLAIM_LOG="$d/claim.log"
+  : >"$CLAIM_LOG"
+  # BEHAVIOURAL, not a model of the code. The first cut of this case COPIED the supervisor's `case` arms
+  # into the test and classified with the copy — which is exactly the defect round 24 found and fixed
+  # here: a test that validates a MODEL stays green when the shipped logic moves. Driven instead through
+  # the real loop with a two-phase worker: iteration 1 blocks on issue 88 for a TECHNICAL reason (so the
+  # issue is carried forward), iteration 2 reports no-work and asks the loop to stop.
+  cat >"$d/bin/worker.sh" <<'WEOF'
+#!/usr/bin/env bash
+set -euo pipefail
+n_file="${LOG_DIR:?LOG_DIR not set}/.phase"
+n=0; [[ -f "$n_file" ]] && n=$(cat "$n_file")
+n=$((n + 1)); printf '%s' "$n" >"$n_file"
+if [[ "$n" -eq 1 ]]; then
+  cat >"$MARKER_FILE" <<JSON
+{"outcome":"blocked","issue":88,"pr":null,"duration_s":1,"reason":"a technical block, not an owner park"}
+JSON
+else
+  cat >"$MARKER_FILE" <<JSON
+{"outcome":"no-work","issue":null,"pr":null,"duration_s":1}
+JSON
+  : >"${STOP_FILE:?STOP_FILE not set}"
+fi
+WEOF
+  chmod +x "$d/bin/worker.sh"
+  export WORKER_CMD="$d/bin/worker.sh"
+  export BACKOFF_NOWORK_SECS=0
+  export MAX_ISSUES=10
+  export BREAKER_N=10
+  write_claim_stub "$d/bin/claim.sh"
+  export CLAIM_CMD="bash $d/bin/claim.sh"
+  export HEARTBEAT_MACHINE="testbox"
+  bash "$SUPERVISOR" >"$d/stdout.log" 2>&1 || true
+  stamped_issue=$(grep -cE '^stamp 88 [0-9]+$' "$CLAIM_LOG" 2>/dev/null || true)
+  reaped=no
+  grep -qE '^reap testbox 88( |$)' "$CLAIM_LOG" 2>/dev/null && reaped=yes
+  # The numeric lane must have been stamped (iteration 2 carried issue 88 forward) and must NOT be reaped:
+  # a no-work says nothing about an issue this lane is still holding.
+  if [[ "$stamped_issue" -ge 1 && "$reaped" == no ]] \
+    && grep -q 'has not concluded' "$d/stdout.log"; then
+    pass "claim: a no-work after a technical block does NOT conclude the numeric lane (88) it still holds"
+  else
+    fail "no-work-numeric-lane: stamp88=$stamped_issue reaped=$reaped log=[$(tr '\n' ';' <"$CLAIM_LOG")]"
+  fi
+  # NON-VACUITY, true of the BROKEN code too: the run really did reach a second iteration and a shutdown.
+  # Both hold whether or not the fix is present — under the old guard the same run reaps 88 instead.
+  local phases jf_summary=no
+  phases=$(cat "$d/logs/.phase" 2>/dev/null || echo 0)
+  grep -rqs '"outcome":"summary"' "$d/logs" 2>/dev/null && jf_summary=yes
+  if [[ "$phases" -ge 2 && "$jf_summary" == yes ]]; then
+    pass "NON-VACUITY: the run reached iteration $phases and journalled an exit summary, so the surviving ref is a decision"
+  else
+    fail "no-work-numeric-lane-nonvacuity: phases=$phases summary=$jf_summary"
+  fi
+}
+
+# ---------------------------------------------------------------------------
 # Test 32-claim (#3393, roborev round 28, Medium): an ENDGAME IN FLIGHT keeps its ref. Owner ruling (b)
 # on #2499 semantics — a pending auto-merge PR IS an open PR, and `delete_ref_guarded` already refuses to
 # delete an issue-named ref in that state. But `CLAIM_WORK_CONCLUDED` reflects only the LATEST iteration,
@@ -3422,6 +3488,7 @@ t test_supervisor_lock_is_per_lane
 t test_claim_cleanup_uses_lease_and_drops_on_transfer
 t test_park_releases_issue_so_next_lane_is_a_placeholder
 t test_no_work_shutdown_clears_its_placeholder
+t test_no_work_does_not_conclude_a_numeric_lane
 t test_pending_pr_keeps_the_claim
 t test_finalized_verified_merged_counts
 t test_finalized_mismatch_open_is_abnormal
