@@ -100,7 +100,7 @@ jobs:
       # single wheel (cp39-abi3) must install and import on every interpreter
       # `requires-python` claims. Uploading it here — rather than in the
       # label-gated `test` job, the only other producer of a linux x86_64
-      # wheel — is what makes the floors testable on an ORDINARY PR.
+      # wheel — is what lets the floor legs REBUILD NOTHING.
       #
       # The name MUST stay outside the `wheel-*` namespace. `quality-gate`
       # collects `pattern: wheel-*` with `merge-multiple: true` and republishes
@@ -128,6 +128,11 @@ jobs:
     # import plus one real query is what proves the wheel works on a major;
     # behavioural coverage is the `test` job's business.
     name: Floor smoke (Python ${{ matrix.python }})
+    if: >-
+      ${{
+        github.event_name != 'pull_request' ||
+        contains(github.event.pull_request.labels.*.name, 'ci:bindings-full')
+      }}
     runs-on: ubuntu-latest
     needs: smoke
     timeout-minutes: 15
@@ -547,11 +552,19 @@ jobs:
           fi
 
       - name: Check floor smoke results
+        # Only assert when the floor tier actually ran. RUN_FULL is the SAME
+        # condition that gates the floor job itself, so on a routine unlabeled PR
+        # the job is legitimately `skipped` and this check must not fire — an
+        # unconditional `!= success` here would red every ordinary PR.
+        if: env.RUN_FULL == 'true'
         env:
           FLOOR_RESULT: ${{ needs.smoke-floors.result }}
         run: |
-          # Issue #1459: unconditional — the advertised floors are a promise on
-          # every PR, not a full-tier extra.
+          # Issue #1459: asserted whenever the floor tier RAN. Guarded by
+          # RUN_FULL above because `smoke-floors` is a binding matrix job and repo
+          # policy (scripts/ci/validate-workflows.rb) requires those to be
+          # label-gated — so on a routine unlabeled PR it is legitimately
+          # `skipped`, and an unconditional `!= success` would red every such PR.
           echo "Floor smoke results: ${FLOOR_RESULT}"
           if [ "${FLOOR_RESULT}" != "success" ]; then
             echo "::error::Python floor smoke failed (advertised requires-python floor/ceiling)"
@@ -583,7 +596,7 @@ jobs:
             echo ""
             echo "### Tier"
             echo "- Ordinary PRs run one Ubuntu Python 3.12 wheel build plus non-dataset smoke pytest files."
-            echo "- Every PR also runs a floor smoke on Python 3.9, 3.13 and 3.14 — the floor and the top of the advertised range — reusing the abi3 wheel from the smoke job. Each leg restores the canonical corpus and runs one real query, failing on a 0-row result (issue #1459)."
+            echo "- Floor smoke covers Python 3.9 (the floor), 3.13 and 3.14 (the current top of the advertised range), reusing the abi3 wheel from the smoke job; each leg restores the canonical corpus and runs one real query, failing on a 0-row result. It is a binding MATRIX tier, so per repo policy it runs on every push to \`main\`, on the nightly schedule, and on PRs labeled \`ci:bindings-full\` — NOT on a routine unlabeled PR (issue #1459)."
             echo "- Full cross-platform wheel builds, the full dataset-backed pytest suite, slow CLI parity, and wheel artifacts run on push to main, nightly schedule, workflow_dispatch, or PRs labeled \`ci:bindings-full\`."
             echo ""
           } >> "$GITHUB_STEP_SUMMARY"

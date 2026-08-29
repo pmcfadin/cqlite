@@ -40,12 +40,20 @@ with cqlite.open('path/to/sstables', schema='schema.cql') as db:
 
 ## Requirements
 
-- Python 3.9+ — the boundaries are CI-tested, not just advertised: every PR installs
-  the `abi3` wheel on **3.9** (the floor), **3.14** (the current top of the range) and
+- Python 3.9+ — the boundaries are CI-tested, not merely advertised. CI installs the
+  `abi3` wheel on **3.9** (the floor), **3.14** (the current top of the range) and
   **3.13** (an additional compatibility leg), running an import plus one real query
   against the canonical corpus on each (`Floor smoke` in
-  `.github/workflows/python-ci.yml`, issue #1459). The range is unbounded above, so its
-  top is the newest released CPython — when 3.15 ships it belongs in that matrix.
+  `.github/workflows/python-ci.yml`, issue #1459).
+
+  That check is a binding matrix tier, so per repo CI-cost policy it runs on **every
+  push to `main`**, on the **nightly schedule**, and on PRs labeled
+  `ci:bindings-full` — not on a routine unlabeled PR. `main` is therefore
+  continuously floor-tested and releases are cut from it, but a floor break is caught
+  just after merge rather than before it.
+
+  The range is unbounded above, so its top is the newest released CPython — when 3.15
+  ships it belongs in that matrix.
 - Cassandra 5.0 SSTable files
 
 ## API Reference
