@@ -265,6 +265,16 @@ LOG_DIR="${LOG_DIR:-$REPO_ROOT/logs/worker-supervisor}"
 # CLAIM_CMD="" but hit the real network path anyway). The colonless form preserves
 # an explicitly-empty override so disabling truly disables.
 CLAIM_CMD="${CLAIM_CMD-bash $REPO_ROOT/scripts/flow/claim-heartbeat.sh}"
+
+# LOCK_CMD is the `claim.sh` entrypoint — the PER-ISSUE LOCK, a different script and a different
+# namespace from `CLAIM_CMD`'s per-lane liveness ref. The supervisor had no claim.sh seam at all, which
+# is why round 34's finding 1 needed one. Colonless default like `CLAIM_CMD`, so `LOCK_CMD=""` genuinely
+# DISABLES it (a `:-` form would silently re-enable the real network path — the #3464 trap that seam
+# already fell into once).
+LOCK_CMD="${LOCK_CMD-bash $REPO_ROOT/scripts/flow/claim.sh}"
+
+# The actor every pre-upgrade claim was stamped with: `claim.sh`'s own fallback when nothing sets one.
+LEGACY_CLAIM_ACTOR="flow"
 # The machine identity the claim ref is scoped to — must match what the reaper
 # clears. Defaults to claim-heartbeat.sh's own default (`hostname -s`), honoring
 # HEARTBEAT_MACHINE when the fleet overrides it.
@@ -1070,6 +1080,74 @@ supervisor_claim_actor() {
 # verbatim, so the bound added there would have silently not applied here — two spellings of one identity
 # is the drift shape #3464 records. A shell function call is not an external tool, so the builtins-only
 # constraint still holds.
+# supervisor_migrate_legacy_claim — CAS-adopt THIS LANE'S OWN pre-upgrade claim to the lane actor.
+#
+# WHY THIS EXISTS (roborev round 34, finding 1). The claim lock's holder identity is machine+actor. Every
+# claim stamped before the lane-actor change carries `actor=flow`, so once a lane resolves a lane-unique
+# actor its OWN claim reads as FOREIGN: measured against a live claim, `claim.sh verify` answers
+# VERIFY-FAIL with `holder-machine` and `wanted-machine` IDENTICAL and only the actor differing. Left
+# alone, every lane in flight at the moment that change lands is stranded — it can neither verify nor
+# non-forcibly release its own lock. That is this change's own doing, so it is this change's to migrate.
+#
+# WHAT IDENTIFIES "MY" CLAIM, and why it is not the ref. On a four-lane box all four legacy claims read
+# `machine+flow` — IDENTICAL — so the ref carries nothing that distinguishes them. Only the LANE'S OWN
+# BRANCH does. So the issue is taken from this worktree's branch and nothing else: a lane can never
+# reach a sibling's claim, which would be the aliasing bug with extra steps.
+#
+# AFFIRMATIVE MEASUREMENT, not absence of a bad signal (#3229's rule). The adopt runs ONLY when the
+# status read AFFIRMATIVELY shows this machine AND exactly the legacy actor. An unreadable status, a
+# missing ref, a different machine, or any other actor => DO NOTHING. The cost of doing nothing is a
+# DIAGNOSED refusal on the worker's next `verify` (the documented `adopt` procedure then applies), which
+# is strictly better than a guess that could take a claim that is not ours.
+#
+# CAS, never a bare write: `--expect <sha>` means a live peer that moved the ref wins (ADOPT-LOST), and
+# the adopt commit records who took it and why.
+supervisor_migrate_legacy_claim() {
+  [[ -n "$LOCK_CMD" ]] || return 0
+  # An operator-pinned actor is not ours to migrate away from.
+  [[ "${CLAIM_ACTOR:-}" == "$LEGACY_CLAIM_ACTOR" || -z "${CLAIM_ACTOR:-}" ]] && return 0
+  local branch n st sha holder_machine holder_actor
+  branch="$(git -C "$REPO_ROOT" rev-parse --abbrev-ref HEAD 2>/dev/null)" || return 0
+  case "$branch" in
+    issue-[0-9]*) n="${branch#issue-}"; n="${n%%-*}" ;;
+    *) return 0 ;;
+  esac
+  case "$n" in
+    '' | *[!0-9]* | 0*) return 0 ;;
+  esac
+  st="$($LOCK_CMD status "$n" 2>/dev/null)" || return 0
+  sha="$(supervisor_msg_token "$st" sha)"
+  holder_machine="$(supervisor_msg_token "$st" machine)"
+  holder_actor="$(supervisor_msg_token "$st" actor)"
+  # EVERY field must be affirmatively right. A missing token is not a match.
+  [[ -n "$sha" && ${#sha} -eq 40 && "$sha" != *[!0-9a-f]* ]] || return 0
+  [[ "$holder_machine" == "$CLAIM_MACHINE" ]] || return 0
+  [[ "$holder_actor" == "$LEGACY_CLAIM_ACTOR" ]] || return 0
+  log "migrating issue $n's pre-upgrade claim (actor=$LEGACY_CLAIM_ACTOR) to this lane's actor '$CLAIM_ACTOR' via compare-and-swap on $sha"
+  if $LOCK_CMD adopt "$n" --expect "$sha" \
+    --reason "upgrade-lane-actor:pre-upgrade-claim-held-by-${LEGACY_CLAIM_ACTOR}-on-this-machine-adopted-by-lane-actor" \
+    >/dev/null 2>&1; then
+    log "claim for issue $n adopted under '$CLAIM_ACTOR'"
+  else
+    # NOT fatal, and deliberately not retried: a peer may have moved the ref (ADOPT-LOST is the CAS
+    # working), or the remote may be unreachable. Either way the claim is untouched and the worker's
+    # next verify gives the documented refusal.
+    log "WARN: could not adopt issue $n's pre-upgrade claim (a peer moved the ref, or the remote is unreachable); the claim is untouched and the next verify will diagnose it"
+  fi
+}
+
+# supervisor_msg_token <msg> <field> — the WHOLE token for an EXACT key, never a substring (#3464
+# family 6: `notissue=42` must not answer `issue`). Builtins only.
+supervisor_msg_token() {
+  local msg="$1" field="$2" tok
+  for tok in $msg; do
+    case "$tok" in
+      "$field"=?*) printf '%s\n' "${tok#*=}"; return 0 ;;
+    esac
+  done
+  return 0
+}
+
 supervisor_lock_path() {
   [[ -n "$SUPERVISOR_LOCK" ]] && return 0
   SUPERVISOR_LOCK="${TMPDIR:-/tmp}/cqlite-worker-supervisor-$(supervisor_lane_id).lock"
@@ -1078,6 +1156,7 @@ supervisor_lock_path() {
 acquire_lock() {
   supervisor_lock_path
   supervisor_claim_actor
+  supervisor_migrate_legacy_claim
   if mkdir "$SUPERVISOR_LOCK" 2>/dev/null; then
     echo $$ >"$SUPERVISOR_LOCK/pid"
     trap 'rm -rf "$SUPERVISOR_LOCK" 2>/dev/null || true' EXIT

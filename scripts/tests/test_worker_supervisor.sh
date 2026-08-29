@@ -645,6 +645,10 @@ common_env() {
   : >"$NOTIFY_LOG"
   write_notify_stub "$d/bin/notify.sh"
   export NOTIFY_CMD="$d/bin/notify.sh"
+  # The per-issue LOCK seam off by default: `REPO_ROOT` is the REAL lane checkout in these cases, so its
+  # branch genuinely names an issue and the legacy-claim migration would fire a network `claim.sh status`
+  # in every one of them. Dedicated cases below supply a stub instead.
+  export LOCK_CMD=""
   export LOAD_PROBE_CMD="echo 0"
   export DISK_PROBE_CMD="echo 999999"
   # roborev 1839: preflight bounds the two leftover families separately, so it reads
@@ -3841,5 +3845,144 @@ test_worker_contract_does_not_assert_one_worker_per_machine() {
 t test_claim_actor_is_lane_unique
 t test_conclusion_must_match_the_stamped_lane
 t test_worker_contract_does_not_assert_one_worker_per_machine
+
+# ---------------------------------------------------------------------------
+# Test 32-claim (#3393, roborev round 34 finding 1): the legacy-claim migration. Every claim stamped
+# before the lane-actor change carries `actor=flow`, so a lane that resolves a lane-unique actor reads
+# its OWN claim as foreign and can neither verify nor non-forcibly release its lock. The migration
+# CAS-adopts it — but ONLY on an affirmative reading, and ONLY for the issue this lane's own branch
+# names, because on a four-lane box all four legacy claims are textually identical.
+# ---------------------------------------------------------------------------
+mig_case() {
+  # mig_case <status-line-or-FAIL> <actor> <branch-issue> -> echoes the stub's recorded call log
+  local status_line="$1" actor="$2" branch_issue="$3" d body repo
+  d="$(new_case_dir)"
+  repo="$d/lane"
+  mkdir -p "$repo" "$d/bin"
+  git -C "$repo" init -q 2>/dev/null
+  git -C "$repo" checkout -q -b "$branch_issue" 2>/dev/null
+  # The stub records every invocation and answers `status` with the staged line.
+  cat >"$d/bin/claim.sh" <<STUB
+#!/usr/bin/env bash
+printf '%s\n' "\$*" >>"$d/calls.log"
+if [ "\$1" = status ]; then
+  [ "$status_line" = FAIL ] && exit 1
+  printf '%s\n' "$status_line"
+fi
+exit 0
+STUB
+  chmod +x "$d/bin/claim.sh"
+  : >"$d/calls.log"
+  {
+    printf '%s\n' '#!/usr/bin/env bash'
+    printf '%s\n' 'log() { :; }'
+    sed -n '/^supervisor_msg_token()/,/^}/p' "$SUPERVISOR"
+    sed -n '/^supervisor_migrate_legacy_claim()/,/^}/p' "$SUPERVISOR"
+    printf '%s\n' 'supervisor_migrate_legacy_claim'
+  } >"$d/mig.sh"
+  LOCK_CMD="bash $d/bin/claim.sh" CLAIM_ACTOR="$actor" CLAIM_MACHINE=boxA \
+    LEGACY_CLAIM_ACTOR=flow REPO_ROOT="$repo" bash "$d/mig.sh" >/dev/null 2>&1
+  cat "$d/calls.log"
+}
+
+test_legacy_claim_migration() {
+  local sha40 out
+  sha40="1111111111111111111111111111111111111111"
+  # (a) HAPPY PATH: this machine, legacy actor => CAS-adopt on the exact sha.
+  out=$(mig_case "CLAIM: STATUS issue=88 sha=$sha40 machine=boxA actor=flow" flow-9-lane issue-88-x)
+  if printf '%s\n' "$out" | grep -q "^adopt 88 --expect $sha40"; then
+    pass "legacy-migration: a pre-upgrade claim on THIS machine is CAS-adopted on its exact sha"
+  else
+    fail "legacy-migration: expected 'adopt 88 --expect $sha40', got:
+$out"
+  fi
+  # (b) A DIFFERENT MACHINE is not ours to take.
+  out=$(mig_case "CLAIM: STATUS issue=88 sha=$sha40 machine=boxZ actor=flow" flow-9-lane issue-88-x)
+  if ! printf '%s\n' "$out" | grep -q '^adopt'; then
+    pass "legacy-migration: a claim held by ANOTHER machine is never adopted"
+  else
+    fail "legacy-migration-foreign-machine: adopted anyway:
+$out"
+  fi
+  # (c) An actor that is ALREADY lane-scoped needs no migration.
+  out=$(mig_case "CLAIM: STATUS issue=88 sha=$sha40 machine=boxA actor=flow-7-other" flow-9-lane issue-88-x)
+  if ! printf '%s\n' "$out" | grep -q '^adopt'; then
+    pass "legacy-migration: a claim already under a lane actor is left alone (no cross-lane grab)"
+  else
+    fail "legacy-migration-other-lane: adopted a sibling lane's claim:
+$out"
+  fi
+  # (d) AN UNREADABLE STATUS IS NOT A LICENCE (#3229's affirmative-measurement rule). A failed probe
+  # must not reach the adopt; doing nothing costs a diagnosed refusal, guessing costs someone's lock.
+  out=$(mig_case FAIL flow-9-lane issue-88-x)
+  if ! printf '%s\n' "$out" | grep -q '^adopt'; then
+    pass "legacy-migration: an UNREADABLE status does not reach the adopt (affirmative measurement)"
+  else
+    fail "legacy-migration-unreadable: adopted on a failed probe:
+$out"
+  fi
+  # (e) A branch that names no issue must not even ASK — there is no candidate to migrate.
+  out=$(mig_case "CLAIM: STATUS issue=88 sha=$sha40 machine=boxA actor=flow" flow-9-lane main)
+  if [[ -z "$out" ]]; then
+    pass "legacy-migration: a branch naming no issue makes no claim.sh call at all"
+  else
+    fail "legacy-migration-no-issue-branch: called claim.sh anyway:
+$out"
+  fi
+  # (f) An OPERATOR-PINNED legacy actor is not ours to migrate away from.
+  out=$(mig_case "CLAIM: STATUS issue=88 sha=$sha40 machine=boxA actor=flow" flow issue-88-x)
+  if [[ -z "$out" ]]; then
+    pass "legacy-migration: an operator-pinned actor=flow is left exactly as the operator set it"
+  else
+    fail "legacy-migration-pinned: touched a pinned actor:
+$out"
+  fi
+  # (g) A MALFORMED sha cannot be a CAS lease. Adopting on a short sha would either fail or, worse,
+  # be interpreted; neither belongs in a lock path.
+  out=$(mig_case "CLAIM: STATUS issue=88 sha=1111 machine=boxA actor=flow" flow-9-lane issue-88-x)
+  if ! printf '%s\n' "$out" | grep -q '^adopt'; then
+    pass "legacy-migration: a malformed sha is not used as a CAS lease"
+  else
+    fail "legacy-migration-badsha: adopted on a non-40-hex sha:
+$out"
+  fi
+  # (h) A SUBSTRING KEY IS NOT A KEY (#3464 family 6): `notmachine=boxA` must not satisfy `machine`.
+  # Staged so the ONLY `machine=` token is a foreign one, with a decoy that ends in our machine name.
+  out=$(mig_case "CLAIM: STATUS issue=88 sha=$sha40 notmachine=boxA machine=boxZ actor=flow" flow-9-lane issue-88-x)
+  if ! printf '%s\n' "$out" | grep -q '^adopt'; then
+    pass "legacy-migration: a decoy 'notmachine=' token does not satisfy the machine match"
+  else
+    fail "legacy-migration-substring: a decoy key satisfied the machine match:
+$out"
+  fi
+  # (i) THE SEAM GENUINELY DISABLES. `LOCK_CMD=""` must make no call — the colonless default exists
+  # precisely so an empty value is not silently replaced by the real network path.
+  local d2 repo2
+  d2="$(new_case_dir)"; repo2="$d2/lane"; mkdir -p "$repo2"
+  git -C "$repo2" init -q 2>/dev/null; git -C "$repo2" checkout -q -b issue-88-x 2>/dev/null
+  {
+    printf '%s\n' '#!/usr/bin/env bash'
+    printf '%s\n' 'log() { :; }'
+    sed -n '/^supervisor_msg_token()/,/^}/p' "$SUPERVISOR"
+    sed -n '/^supervisor_migrate_legacy_claim()/,/^}/p' "$SUPERVISOR"
+    printf '%s\n' 'supervisor_migrate_legacy_claim; echo RETURNED'
+  } >"$d2/mig.sh"
+  local dis
+  dis=$(LOCK_CMD="" CLAIM_ACTOR=flow-9-lane CLAIM_MACHINE=boxA LEGACY_CLAIM_ACTOR=flow \
+    REPO_ROOT="$repo2" bash "$d2/mig.sh" 2>&1)
+  if [[ "$dis" == "RETURNED" ]]; then
+    pass "legacy-migration: LOCK_CMD='' disables the migration and returns cleanly"
+  else
+    fail "legacy-migration-seam: LOCK_CMD='' produced [$dis]"
+  fi
+  # WIRED: a migration nothing calls is #3464's check-whose-subject-never-ran.
+  if grep -qE '^[[:space:]]*supervisor_migrate_legacy_claim$' "$SUPERVISOR"; then
+    pass "legacy-migration: supervisor_migrate_legacy_claim is CALLED (not just defined)"
+  else
+    fail "legacy-migration-unwired: defined but never invoked"
+  fi
+}
+
+t test_legacy_claim_migration
 echo "=== $PASS_COUNT passed, $FAIL_COUNT failed, $SKIP_COUNT skipped ==="
 [[ "$FAIL_COUNT" -eq 0 ]]
