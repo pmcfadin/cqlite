@@ -191,29 +191,44 @@ def normalize_python_value(value: Any, is_row_level: bool = True) -> Any:
         return [normalize_python_value(v, is_row_level=False) for v in value]
 
     if isinstance(value, dict):
-        # Check if this is a UDT (has _type key)
-        if "_type" in value:
-            # UDT: CLI outputs as {"_type": name, field1: v1, ...}
-            # Filter out _keyspace as CLI doesn't include it
-            filtered = {k: v for k, v in value.items() if k != "_keyspace"}
-            return {k: normalize_python_value(v, is_row_level=False) for k, v in filtered.items()}
-
+        # THE CALLER'S EXPLICIT SIGNAL BEATS SNIFFING THE CONTENT (#1454).
+        # `is_row_level=True` is passed only by a caller that KNOWS it holds a
+        # row (every such call site normalizes `row.to_dict()`), and a UDT is
+        # always a CELL, so it can only ever arrive with `is_row_level=False`.
+        # Checking the signal first therefore leaves the UDT branch untouched
+        # while removing a real misclassification: `"_type"` and `"_keyspace"`
+        # are legal (quoted) COLUMN names, and sniffing `"_type"` first made such
+        # a row normalize as a UDT — silently DROPPING its `"_keyspace"` column.
+        # At cell level no such signal exists (a `map<text,X>` and a UDT are both
+        # a `dict`), which is why the ambiguity is fixed here but remains a
+        # documented limitation there: M4_spec §5.3 instance b-2, tracked by #3497.
         if is_row_level:
             # This is a row dict - keep as dict, recurse into cell values
             return {str(k): normalize_python_value(v, is_row_level=False) for k, v in value.items()}
-        else:
-            # This is a CQL map inside a cell - CLI outputs ALL maps as array of {"key": k, "value": v}
-            # Sort by key for determinism (like sets) - Issue #336.
-            # #1454: the `dict` has already collapsed structurally-equal keys
-            # (last value wins); a Node `Map` would have kept equal OBJECT keys
-            # distinct. Well-formed Cassandra data has no duplicate map keys, so
-            # the canonical form is identical in practice — but it is why the
-            # canonical form is a sorted array rather than a host map.
-            return sorted(
-                [{"key": normalize_python_value(k, is_row_level=False), "value": normalize_python_value(v, is_row_level=False)}
-                 for k, v in value.items()],
-                key=lambda x: _sort_key(x["key"])
-            )
+
+        # Cell level from here on.
+        if "_type" in value:
+            # UDT: CLI outputs as {"_type": name, field1: v1, ...}
+            # Filter out _keyspace as CLI doesn't include it.
+            # LIMITATION b-2: a `map<text,X>` that happens to carry a literal
+            # `"_type"` key is indistinguishable from a UDT here and lands in this
+            # branch. Requiring `_keyspace` too would only pick a rarer delimiter
+            # on an ambiguous channel; the real fix is the declared CQL type (#3497).
+            filtered = {k: v for k, v in value.items() if k != "_keyspace"}
+            return {k: normalize_python_value(v, is_row_level=False) for k, v in filtered.items()}
+
+        # This is a CQL map inside a cell - CLI outputs ALL maps as array of {"key": k, "value": v}
+        # Sort by key for determinism (like sets) - Issue #336.
+        # #1454: the `dict` has already collapsed structurally-equal keys
+        # (last value wins); a Node `Map` would have kept equal OBJECT keys
+        # distinct. Well-formed Cassandra data has no duplicate map keys, so
+        # the canonical form is identical in practice — but it is why the
+        # canonical form is a sorted array rather than a host map (instance b-3).
+        return sorted(
+            [{"key": normalize_python_value(k, is_row_level=False), "value": normalize_python_value(v, is_row_level=False)}
+             for k, v in value.items()],
+            key=lambda x: _sort_key(x["key"])
+        )
 
     if isinstance(value, str):
         return value
@@ -1008,7 +1023,7 @@ class TestCollectionIdentityContract:
         ]
 
     def test_map_with_literal_type_key_is_misclassified_as_a_udt(self):
-        """LIMITATION b-2 (host-shape collision): a `map<text,X>` holding `"_type"` reads as a UDT.
+        """LIMITATION b-2 (host-shape collision), CELL LEVEL ONLY: a `map<text,X>` holding `"_type"`.
 
         `"_type"` and `"_keyspace"` are legal `text` map keys, and a CQL `map`
         and a `udt` are both a Python `dict`, so the normalizer's
@@ -1016,6 +1031,13 @@ class TestCollectionIdentityContract:
         normalizes to an **object** instead of the documented sorted array of
         `{"key": ..., "value": ...}`, and a `"_keyspace"` entry is silently
         **dropped** (the UDT branch filters it, since the CLI omits it for UDTs).
+
+        This is scoped to CELL level. The row-level twin of this defect is FIXED,
+        not documented: `normalize_python_value` now checks the caller's
+        `is_row_level` signal BEFORE the `"_type"` sniff, so a row with a
+        `"_type"` column is no longer read as a UDT — see
+        `test_row_with_type_and_keyspace_columns_normalizes_as_a_row`. No such
+        signal exists at cell level, which is why this half remains a limitation.
 
         Pinned as a recorded gap, not a desirable shape. It is deliberately NOT
         "fixed" by also requiring `_keyspace`: a legal map can carry both keys,
@@ -1137,6 +1159,44 @@ class TestCollectionIdentityContract:
         assert normalize_python_value(("a", 1), is_row_level=False) == normalize_python_value(
             ["a", 1], is_row_level=False
         )
+
+    def test_row_with_type_and_keyspace_columns_normalizes_as_a_row(self):
+        """REGRESSION (#1454): a row whose COLUMNS are named `_type`/`_keyspace` is a ROW.
+
+        `"_type"` and `"_keyspace"` are legal column names (quoted identifiers).
+        Before the fix, the `"_type"` content sniff ran ahead of the caller's
+        `is_row_level` signal, so such a row normalized as a UDT and its
+        `"_keyspace"` column was silently DROPPED.
+
+        The caller's explicit signal beats sniffing the content: `is_row_level=True`
+        comes from a caller that knows it holds a row, and a UDT is always a cell
+        (so it always arrives with `is_row_level=False`). Both columns must survive,
+        and cell values inside the row must still normalize normally.
+        """
+        row = {"_type": "user", "_keyspace": "ks", "pk": 1, "m": {"b": 2, "a": 1}}
+        assert normalize_python_value(row, is_row_level=True) == {
+            "_type": "user",
+            "_keyspace": "ks",  # NOT dropped: this is a column, not UDT metadata
+            "pk": 1,
+            "m": [{"key": "a", "value": 1}, {"key": "b", "value": 2}],
+        }
+
+        # A row named only `_type` (no `_keyspace`) is likewise still a row.
+        assert normalize_python_value({"_type": "user", "pk": 1}, is_row_level=True) == {
+            "_type": "user",
+            "pk": 1,
+        }
+
+        # ...while the SAME dict at CELL level is still read as a UDT, so there
+        # `_keyspace` IS dropped — the observable contrast between the two levels,
+        # and the reason b-2 remains a cell-level limitation.
+        cell = {"_type": "user", "_keyspace": "ks", "pk": 1}
+        assert normalize_python_value(cell, is_row_level=False) == {"_type": "user", "pk": 1}
+        assert normalize_python_value(cell, is_row_level=True) == {
+            "_type": "user",
+            "_keyspace": "ks",
+            "pk": 1,
+        }
 
     def test_row_level_dict_stays_a_dict(self):
         """A row is a `dict` too — only *cell*-level dicts are CQL maps."""
