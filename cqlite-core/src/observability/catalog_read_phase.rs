@@ -20,15 +20,15 @@
 //
 // NAMING (#1707): the issue text spelled these `read.phase.io_ms` etc. The `_ms`
 // suffix was deliberately NOT adopted — every timing metric in this catalog is
-// base-unit SECONDS ([`READ_DURATION`], [`WAL_SYNC_DURATION`], the `cqlite.rpc.*`
+// base-unit SECONDS ([`super::READ_DURATION`], [`super::WAL_SYNC_DURATION`], the `cqlite.rpc.*`
 // durations), which is what OTel's semantic conventions ask for, so an `_ms`-named
-// metric carrying [`unit::SECONDS`] would misdescribe its own values and an `ms`
+// metric carrying [`super::unit::SECONDS`] would misdescribe its own values and an `ms`
 // unit would break the repo-wide (and OTel) base-unit convention.
 //
 // ACCOUNTING CAVEAT, stated here because it changes how the numbers are read: the
 // read pipeline is CONCURRENT (an IO/decode feed thread, a blocking parse thread, a
 // merge consumer thread), so these phases OVERLAP in wall-clock and DO NOT sum to
-// the scan's [`READ_DURATION`]. They are per-phase totals for attribution — which
+// the scan's [`super::READ_DURATION`]. They are per-phase totals for attribution — which
 // phase dominates, and how it moves between two runs — not a decomposition of
 // latency. Same caveat as the #2819 `stream_*` sub-phases.
 // ---------------------------------------------------------------------------
@@ -101,7 +101,7 @@ pub const READ_PHASE_DECODE: &str = "cqlite.read.phase.decode";
 /// **Healthy vs alarming**: grows with the number of overlapping generations and
 /// with reconcile work (tombstones, LWW collapse); a merge-dominated read with few
 /// delivered rows is the compaction-lag smell — cross-check
-/// [`COMPACTION_LAG`]. **Attributes**: none.
+/// [`super::COMPACTION_LAG`]. **Attributes**: none.
 pub const READ_PHASE_MERGE: &str = "cqlite.read.phase.merge";
 
 /// `cqlite.reader.fds.open` — gauge `{fd}` (issue #1707).
@@ -120,7 +120,7 @@ pub const READ_PHASE_MERGE: &str = "cqlite.read.phase.merge";
 /// a level that climbs toward the process `ulimit -n` is the `EMFILE` pressure this
 /// gauge exists to make visible BEFORE an open fails.
 ///
-/// DISTINCT from [`PROC_FDS`], and the difference is the point: `PROC_FDS` is the
+/// DISTINCT from [`super::PROC_FDS`], and the difference is the point: `PROC_FDS` is the
 /// PROCESS total sampled from `/proc/self/fd` (~2s cadence, Linux only), so it
 /// includes sockets, the WAL, and everything else. This gauge is the READER-OWNED
 /// subset, needs no `/proc`, and is exact at its update points. `PROC_FDS` minus

@@ -46,6 +46,53 @@
 //! [`catalog::ERRORS_TOTAL`] keyed by the bounded `{category, subsystem}` label
 //! set and marks the active span errored. Never attach the raw error message.
 //!
+//! # Why was this query slow? (issue #1707)
+//!
+//! [`catalog::READ_DURATION`] tells you a read was slow. These four histograms tell
+//! you WHERE the time went, so the next step is a decision rather than a profiler:
+//!
+//! 1. **Localise with `cqlite.read.phase.*`.** One sample per phase per completed
+//!    scan — [`catalog::READ_PHASE_IO`], [`catalog::READ_PHASE_DECOMPRESS`],
+//!    [`catalog::READ_PHASE_DECODE`], [`catalog::READ_PHASE_MERGE`]. Compare them
+//!    against EACH OTHER:
+//!    * **io dominant** → disk / page-cache bound (cold storage, evicted cache, a
+//!      network filesystem). Decode and merge tuning cannot help this read.
+//!    * **decompress dominant** → chunk length / compressor choice, or the same
+//!      chunks being decompressed repeatedly (a decompressed-chunk cache too small
+//!      for the scan's window).
+//!    * **decode dominant** → normally HEALTHY on a warm scan (decode is the CPU
+//!      work of a read). Suspicious only when it grows relative to the rows
+//!      DELIVERED: wide partitions, many collection/UDT cells, or a schema-less
+//!      fallback decode.
+//!    * **merge dominant** → too many overlapping generations, or heavy reconcile
+//!      (tombstones, LWW collapse). Cross-check [`catalog::COMPACTION_LAG`]; the
+//!      recv-wait is already excluded, so this really is merge work and not a
+//!      producer starving.
+//! 2. **Read the ABSENCES, they are informative.** A phase that never ran records NO
+//!    sample rather than `0.0`: no `decompress` series means the SSTable is
+//!    uncompressed (the #1406 write-surface shape), and no `merge` series means the
+//!    read had a single generation. Absence is a fact about the read; `0.0` would be
+//!    a claim that a measurement was taken.
+//! 3. **Check fd pressure.** [`catalog::READER_FDS_OPEN`] is what the readers hold
+//!    (exact, every platform, no `/proc`); [`catalog::PROC_FDS`] is the whole process
+//!    (sampled ~2s, Linux). A reader level climbing toward `ulimit -n` explains
+//!    latency that is really queueing behind failing/retried opens — and it is
+//!    visible BEFORE the first `EMFILE`. `PROC_FDS` minus the reader level is roughly
+//!    the non-reader footprint (sockets, WAL).
+//! 4. **Check startup / durability stalls.** [`catalog::WAL_SIZE`] should saw-tooth;
+//!    a level that only climbs means flushes are not keeping up, and next open's
+//!    [`catalog::WAL_REPLAY_DURATION`] grows with it. A slow FIRST query after a
+//!    restart is usually replay, not the read path.
+//!
+//! **The accounting caveat, and it matters for step 1:** the read pipeline is
+//! CONCURRENT — an IO/decompress feed thread, a blocking parse thread, a merge
+//! producer thread — so the phases OVERLAP in wall-clock and DO NOT sum to
+//! `read.duration`. Their sum can even exceed it. They are per-phase TOTALS for
+//! attribution ("which phase dominates, and how did that move between two runs?"),
+//! never a decomposition of latency, and a dashboard that stacks them as a
+//! breakdown of wall time will mislead. Same caveat as the #2819 `stream_*`
+//! sub-phases.
+//!
 //! # Always-compiled vs feature-gated
 //!
 //! [`catalog`], [`config`], the [`ObsErrorCategory`] taxonomy, and the helper

@@ -7,7 +7,7 @@
 //! answered from metrics at all — it needed a profiler on the box. This module
 //! accumulates ONE scan's wall time into four buckets — io / decompress / decode /
 //! merge — at the read path's EXISTING function seams, and the owning
-//! [`ReadOpMeter`](super::read_metrics::ReadOpMeter) emits them as exactly ONE
+//! `ReadOpMeter` (`super::read_metrics`) emits them as exactly ONE
 //! sample per phase when the scan completes.
 //!
 //! # Why it is a sibling of [`super::stream_subphase`] and not an extension of it

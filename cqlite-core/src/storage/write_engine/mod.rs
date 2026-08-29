@@ -80,10 +80,13 @@ pub(crate) mod durability;
 mod maintenance;
 #[cfg(feature = "write-support")]
 mod stats;
+// WAL size + replay-duration observability gauges (issue #1707), in a sibling file
+// per the campsite rule (#1116).
 #[cfg(feature = "write-support")]
 mod sweep;
 #[cfg(all(test, feature = "write-support"))]
 pub(crate) mod test_support;
+mod wal_gauges;
 // Issue #1625: honest memtable hard-limit admission tests live in a sibling
 // module to avoid growing the already-oversized `mod.rs` (epic #1116/#1135).
 #[cfg(all(test, feature = "write-support"))]
@@ -614,7 +617,7 @@ impl WriteEngine {
         // distribution. Recorded BEFORE the lossy-recovery branch below so a
         // CORRUPT-WAL open, which is exactly when replay latency matters most, still
         // reports the time it spent.
-        record_wal_replay_duration(replay_started.elapsed());
+        wal_gauges::record_wal_replay_duration(replay_started.elapsed());
 
         if !wal_recovery.is_clean() {
             // Preserve the raw WAL segment aside BEFORE anything (a later flush,
@@ -1007,24 +1010,10 @@ impl WriteEngine {
         Ok(())
     }
 
-    /// Emit the current WAL size gauge (issue #1707). No-op when the `observability`
-    /// feature is off.
-    ///
-    /// (The replay-duration twin is the free function
-    /// [`record_wal_replay_duration`], because replay runs BEFORE the engine value
-    /// exists.)
-    ///
-    /// Reported from the size the WAL already TRACKS (`WriteAheadLog::size`), so this
-    /// stats nothing and reads nothing off disk. Called from the same post-write seam
-    /// as [`record_memtable_gauges`](Self::record_memtable_gauges), so the two move
-    /// together: an operator comparing "memtable growing / WAL growing" is looking at
-    /// two readings taken at the same instant.
+    /// Emit the current WAL size gauge (issue #1707) — see [`wal_gauges`] for the
+    /// two WAL readings and why they live in a sibling file.
     fn record_wal_gauges(&self) {
-        crate::observability::record_gauge(
-            crate::observability::catalog::WAL_SIZE,
-            self.wal.size() as i64,
-            &[],
-        );
+        wal_gauges::record_wal_size(self.wal.size());
     }
 
     /// Emit the current memtable size/row gauges (issue #1036). No-op when the
@@ -3506,18 +3495,4 @@ mod tests {
             "close() flushed the memtable; Drop must not warn, captured: {warnings:?}"
         );
     }
-}
-
-/// Record the WAL replay duration at engine open (issue #1707).
-///
-/// A free function, not a method: replay runs during construction, before a
-/// `WriteEngine` value exists. See [`crate::observability::catalog::WAL_REPLAY_DURATION`]
-/// for why this is a histogram in base-unit seconds rather than an `i64` gauge, and
-/// why it is recorded even when there was nothing to replay.
-fn record_wal_replay_duration(elapsed: std::time::Duration) {
-    crate::observability::record_histogram(
-        crate::observability::catalog::WAL_REPLAY_DURATION,
-        elapsed.as_secs_f64(),
-        &[],
-    );
 }

@@ -19,22 +19,22 @@
 /// `cqlite.rpc.requests` — counter `1`.
 ///
 /// Total Arrow Flight RPC requests served, one increment per completed RPC.
-/// Bounded attributes: [`attr::RPC_METHOD`] (fixed `FlightService` method set)
-/// and [`attr::RPC_STATUS`] (`ok`/`error`) so a dashboard computes per-method
+/// Bounded attributes: [`super::attr::RPC_METHOD`] (fixed `FlightService` method set)
+/// and [`super::attr::RPC_STATUS`] (`ok`/`error`) so a dashboard computes per-method
 /// error rate from one series. NEVER carries request payloads or ticket data.
 pub const RPC_REQUESTS: &str = "cqlite.rpc.requests";
 
 /// `cqlite.rpc.duration` — histogram `s`.
 ///
 /// Distribution of Arrow Flight RPC handler durations in seconds (handler entry
-/// to response/stream construction). Bounded attributes: [`attr::RPC_METHOD`],
-/// [`attr::RPC_STATUS`].
+/// to response/stream construction). Bounded attributes: [`super::attr::RPC_METHOD`],
+/// [`super::attr::RPC_STATUS`].
 pub const RPC_DURATION: &str = "cqlite.rpc.duration";
 
 /// `cqlite.rpc.in_flight` — gauge `1`.
 ///
 /// Number of Arrow Flight RPCs currently being handled (incremented on entry,
-/// decremented on completion). Bounded attributes: [`attr::RPC_METHOD`].
+/// decremented on completion). Bounded attributes: [`super::attr::RPC_METHOD`].
 pub const RPC_IN_FLIGHT: &str = "cqlite.rpc.in_flight";
 
 /// `cqlite.rpc.rows` — counter `{row}`.
@@ -45,7 +45,7 @@ pub const RPC_IN_FLIGHT: &str = "cqlite.rpc.in_flight";
 /// climbing value reads as a healthy long scan and a flat one (while
 /// [`RPC_IN_FLIGHT`] > 0) as a stall. The counter total over a fully-drained
 /// stream is unchanged — only the emission cadence moved from stream-end to
-/// per-batch. Bounded attributes: [`attr::RPC_METHOD`].
+/// per-batch. Bounded attributes: [`super::attr::RPC_METHOD`].
 pub const RPC_ROWS: &str = "cqlite.rpc.rows";
 
 /// `cqlite.rpc.bytes` — counter `By`.
@@ -54,7 +54,7 @@ pub const RPC_ROWS: &str = "cqlite.rpc.rows";
 /// Arrow batch size, pre-IPC-framing). Emitted incrementally during a
 /// long-running scan (issue #2162): a monotonic counter delta per record batch;
 /// the total over a fully-drained stream is byte-identical to the pre-#2162
-/// single end-of-stream emission. Bounded attributes: [`attr::RPC_METHOD`].
+/// single end-of-stream emission. Bounded attributes: [`super::attr::RPC_METHOD`].
 pub const RPC_BYTES: &str = "cqlite.rpc.bytes";
 
 /// `cqlite.rpc.phase.duration` — histogram `s` (issue #2162; `admission` phase
@@ -76,7 +76,7 @@ pub const RPC_BYTES: &str = "cqlite.rpc.bytes";
 /// tickets) that emits zero rows still localizes to a phase. `cqlite.rpc.duration`
 /// already includes admission wait time in the RPC total; this is the per-phase
 /// breakdown field triage uses to localize WHERE that time went (e.g. #2398).
-/// Bounded attributes: [`attr::RPC_METHOD`], [`attr::RPC_PHASE`] (the closed
+/// Bounded attributes: [`super::attr::RPC_METHOD`], [`super::attr::RPC_PHASE`] (the closed
 /// five-value set). NEVER carries a ticket, key, token range, or query-text
 /// attribute.
 pub const RPC_PHASE_DURATION: &str = "cqlite.rpc.phase.duration";
@@ -91,8 +91,8 @@ pub const RPC_PHASE_DURATION: &str = "cqlite.rpc.phase.duration";
 /// that never returns a batch) recorded NOTHING — this gauge shows `stream = 1`
 /// for the entire hang, so a stall is observable BEFORE completion; likewise a
 /// `do_get` queued behind a saturated admission ceiling shows `admission = 1`
-/// for the whole wait. Bounded attributes: [`attr::RPC_METHOD`],
-/// [`attr::RPC_PHASE`] (the closed five-value set) — low cardinality (methods ×
+/// for the whole wait. Bounded attributes: [`super::attr::RPC_METHOD`],
+/// [`super::attr::RPC_PHASE`] (the closed five-value set) — low cardinality (methods ×
 /// 5 phases). NEVER a ticket/key/query value.
 pub const RPC_PHASE_ACTIVE: &str = "cqlite.rpc.phase.active";
 
@@ -117,7 +117,7 @@ pub const WARM_CACHE_EVICTS: &str = "cqlite.warm.cache.evicts";
 
 /// `cqlite.warm.cache.refresh` — counter `{1}` (issue #2310).
 ///
-/// Warm-handle refresh outcomes, tagged by [`attr::WARM_REFRESH_OUTCOME`]
+/// Warm-handle refresh outcomes, tagged by [`super::attr::WARM_REFRESH_OUTCOME`]
 /// (`unchanged` / `rebuilt_delta` / `fail_closed_retained`) — the single bounded
 /// dimension. Distinguishes a warm hit from a delta rebuild from a fail-closed
 /// retention in metrics alone (spec Requirement 6).
