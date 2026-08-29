@@ -4322,7 +4322,11 @@ pol_fn=$(awk '/^_lh_positive_in_closure\(\) \{/,/^\}/' "$GATE" | sed 's/^[[:spac
 pol_missing=""
 printf '%s\n' "$pol_fn" | grep -qE 'return 2' || pol_missing="$pol_missing fn-returns-2"
 printf '%s\n' "$pol_fn" | grep -qE '_pc_rc" -ge 2' || pol_missing="$pol_missing fn-tests-ge2"
-printf '%s\n' "$pol_fn" | grep -qE '_pc_sed_rc" -ne 0' || pol_missing="$pol_missing fn-tests-sed-status"
+if printf '%s\n' "$pol_fn" | grep -qE "sed -E 's/not"; then
+  pol_missing="$pol_missing fn-still-strips"
+fi
+printf '%s\n' "$pol_fn" | grep -qE '_pc_allow=' || pol_missing="$pol_missing fn-has-allowlist"
+printf '%s\n' "$pol_fn" | grep -qE '_pc_sites.*-ne.*_pc_allowed' || pol_missing="$pol_missing fn-compares-sites-to-allowed"
 if printf '%s\n' "$pol_fn" | grep -qE '\|[[:space:]]*grep'; then
   pol_missing="$pol_missing fn-uses-a-pipeline"
 fi
@@ -4333,7 +4337,7 @@ printf '%s\n' "$pol_caller" | grep -qE '\[ "\$_pol_rc" -ge 2 \]' || pol_missing=
 if [ -n "$pol_missing" ]; then
   bad "1699-polarity-tristate: the polarity scan or its caller collapses 'could not tell' onto 'no positive site' — missing:$pol_missing. A failed scan then routes the target into allow_zero and a positively-gated target can pass with zero tests"
 else
-  ok "1699-polarity-tristate: the polarity scan observes BOTH stages independently (no pipeline — pipefail reports the rightmost non-zero, so sed=2 with grep=1 would arrive as 1), returns a third state, and the call site tests for it before the two-valued chain"
+  ok "1699-polarity-tristate: allow-zero is granted only by an ALLOWLIST of the one recognised direct-negative shape (no strip, so no residue to miss), the scan returns a third state on a read error, and the call site tests for it before the two-valued chain"
 fi
 
 # --- 51. #1699: the polarity strip is nesting-blind, so nested negation must not allow-zero (119) -
@@ -4345,10 +4349,10 @@ fi
 # unbounded-surface trap this change is about.
 pol_h="$tmp/1699-pol-fn.sh"
 awk '/^_lh_positive_in_closure\(\) \{/,/^\}/' "$GATE" > "$pol_h"
-if ! grep -q 'POLARITY-UNMODELLED' "$pol_h"; then
-  bad "1699-pol-extract: extracted polarity fn has no POLARITY-UNMODELLED branch — extraction broke or the fix is gone, so the cases below would pass vacuously"
+if ! grep -q 'POLARITY-UNRECOGNISED' "$pol_h"; then
+  bad "1699-pol-extract: extracted polarity fn has no POLARITY-UNRECOGNISED branch — extraction broke or the fix is gone, so the cases below would pass vacuously"
 else
-  ok "1699-pol-extract: extracted the polarity scan and it carries the unmodelled-nesting branch"
+  ok "1699-pol-extract: extracted the polarity scan and it carries the unrecognised-shape branch"
   pol_dir="$tmp/1699-pol"; mkdir -p "$pol_dir"
   printf '#[cfg(not(not(feature = "legacy-heuristics")))]\n#[test]\nfn t() {}\n' > "$pol_dir/double.rs"
   printf '#[cfg(not(feature = "legacy-heuristics"))]\n#[test]\nfn t() {}\n'      > "$pol_dir/neg.rs"
@@ -4368,11 +4372,35 @@ else
     _pol_case double.rs 0 "nested negation is NOT treated as negative-only, so the target is never allow-zero'd"
     _pol_case neg.rs    1 "a simple negative gate is still negative — the one target relying on allow-zero keeps it"
     _pol_case pos.rs    0 "a plain positive gate is positive"
-    _pol_case andneg.rs 1 "all(not(LH), test) is negative w.r.t. LH and must stay excusable"
+    # job 120: an OUTER not around a compound containing not(LH). Strips to `not(all(, test))` —
+    # no feature reference AND no `not()` residue — so both the strip and job 119's residue check
+    # read it as negative-only, while the expression is TRUE when the feature is on.
+    printf '#[cfg(not(all(not(feature = "legacy-heuristics"), test)))]\nfn t() {}\n' > "$pol_dir/outer.rs"
+    printf '#[cfg(all(feature = "legacy-heuristics", feature = "experimental"))]\nfn t() {}\n' > "$pol_dir/coreq.rs"
+    _pol_case outer.rs  0 "an outer not() around a compound containing not(LH) is NOT excusable"
+    _pol_case coreq.rs  0 "a co-required positive gate is not excusable"
+    # andneg is now POSITIVE, not negative: the allowlist recognises exactly one shape, and
+    # `all(not(LH), test)` is not it. Conservative, and it costs only an excusal.
+    _pol_case andneg.rs 0 "all(not(LH), test) is not the recognised direct-negative form, so it is not excused"
   }
 fi
 
-ASSERT_FLOOR=381
+# --- 52. #1699: the excusal POLICY must reach the component log, not only stdout -----------------
+# The per-file POLARITY-UNRECOGNISED notes go to stderr, which lands on gate stdout and NOT in the
+# component log — measured 4 on stdout, 0 in the log. Same class as rf_unmet. The census now states
+# the policy and the counts, which is what a reader needs to interpret an excusal at all.
+lh_fn52=$(awk '/^run_legacy_heuristics\(\) \{/,/^\}/' "$GATE")
+pol_cen_missing=""
+printf '%s\n' "$lh_fn52" | grep -qE 'lh_census\+=\("polarity: \$\{#allow_zero\[@\]\} of \$count' \
+  || pol_cen_missing="$pol_cen_missing counts"
+printf '%s\n' "$lh_fn52" | grep -qF 'excusable ONLY when EVERY' || pol_cen_missing="$pol_cen_missing policy"
+if [ -n "$pol_cen_missing" ]; then
+  bad "1699-pol-census: the excusal policy/counts do not reach the census — missing:$pol_cen_missing. A reader of the component log would see an allowed-zero entry with no way to tell what earned it"
+else
+  ok "1699-pol-census: the census states how many targets are excusable, out of how many, and the one shape that earns it"
+fi
+
+ASSERT_FLOOR=382
 if [ "$PASS" -lt "$ASSERT_FLOOR" ]; then
   echo "FAIL - assert-floor: only $PASS assertions ran, floor is $ASSERT_FLOOR. Sections are being SKIPPED or dying silently (an extraction that broke, a subshell aborting under set -u), and 'failed: 0' over a shrunken subject set is exactly the vacuous pass this suite tests for."
   FAIL=$((FAIL + 1))

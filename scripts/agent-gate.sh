@@ -7182,37 +7182,33 @@ EOF
 # supports stock macOS, where the lane would otherwise have mis-scanned every target. `sed |
 # grep -c` consumes each file whole, so there is no early-close SIGPIPE race either (#3380).
 _lh_positive_in_closure() {
-  # THREE-VALUED: 0 = a positive site exists, 1 = none, 2 = COULD NOT TELL (roborev job 117,
-  # Medium). The old form captured only the COUNT, so a scan that failed produced empty output,
-  # compared as 0, and read as "no positive site" — which routes the target into `allow_zero`, and
-  # an allowed-zero target that is in fact positively gated can then run zero tests and PASS. A
-  # false green in the polarity scan, which is the one place it must not be. `sed` failing is
-  # caught too: under this script's `pipefail` the pipeline status is non-zero if EITHER stage
-  # fails, and grep 1 (no match) is the only non-zero we may treat as an answer.
-  local closure="$1" cfg_site="$2" cf _pc_out _pc_rc _pc_stripped _pc_sed_rc
+  # Returns 0 = POSITIVE (do NOT excuse this target), 1 = negative-only (excusable), 2 = could not
+  # read. Note the polarity of the default: anything not affirmatively recognised as the direct
+  # negative form yields 0, so a shape this function has never seen costs a target its excusal and
+  # never costs the gate a zero-tests check.
+  local closure="$1" cfg_site="$2" cf _pc_sites _pc_allowed _pc_rc
+  # THE ONE RECOGNISED SHAPE, as a whole attribute: `#[cfg(not(feature = "legacy-heuristics"))]` or
+  # its inner `#![...]` form, alone on its line. Anchored end-to-end deliberately — a substring
+  # match is what let a nested `not(feature = …)` inside a larger expression look direct.
+  local _pc_allow='^[[:space:]]*#!?\[cfg\(not\(feature[[:space:]]*=[[:space:]]*"legacy-heuristics"\)\)\][[:space:]]*$'
   while IFS= read -r cf; do
     [ -n "$cf" ] || continue
-    # TWO SEPARATE COMMANDS, each status observed. A pipeline cannot express this: under pipefail
-    # its status is the RIGHTMOST non-zero, so sed=2 with grep=1 (no match) reports 1 — a failed
-    # read wearing the exit code of a legitimate answer.
-    _pc_sed_rc=0
-    _pc_stripped=$(sed -E 's/not\([[:space:]]*feature[[:space:]]*=[[:space:]]*"legacy-heuristics"[[:space:]]*\)//g' "$cf" 2>/dev/null) || _pc_sed_rc=$?
-    if [ "$_pc_sed_rc" -ne 0 ]; then
-      echo "POLARITY-SCAN-ERROR sed exit $_pc_sed_rc on $cf" >&2
-      return 2
-    fi
-    if grep -qE 'not\([[:space:]]*\)' <<<"$_pc_stripped"; then
-      echo "POLARITY-UNMODELLED nested negation on $cf (treated as positive: not excused)" >&2
-      return 0
-    fi
     _pc_rc=0
-    _pc_out=$(grep -cE "$cfg_site" <<<"$_pc_stripped") || _pc_rc=$?
-    # grep 1 = no match, which IS an answer. >=2 means grep could not do its job.
+    _pc_sites=$(grep -cE "$cfg_site" "$cf") || _pc_rc=$?
     if [ "$_pc_rc" -ge 2 ]; then
       echo "POLARITY-SCAN-ERROR grep exit $_pc_rc on $cf" >&2
       return 2
     fi
-    if [ "${_pc_out:-0}" -gt 0 ]; then
+    [ "${_pc_sites:-0}" -gt 0 ] || continue
+    _pc_rc=0
+    _pc_allowed=$(grep -cE "$_pc_allow" "$cf") || _pc_rc=$?
+    if [ "$_pc_rc" -ge 2 ]; then
+      echo "POLARITY-SCAN-ERROR grep exit $_pc_rc on $cf (allowlist pass)" >&2
+      return 2
+    fi
+    if [ "${_pc_sites:-0}" -ne "${_pc_allowed:-0}" ]; then
+      # Not a claim that the site IS positive — a refusal to claim it is safely negative.
+      echo "POLARITY-UNRECOGNISED $cf ($_pc_sites site(s), $_pc_allowed recognised-negative) — not excused" >&2
       return 0
     fi
   done <<EOF
@@ -7751,6 +7747,12 @@ EOF
   # they land AFTER the header, exactly as the cfg-gated-subtree detail is.
   [ -n "$rf_unmet" ] && lh_census+=("NOT invoked (required-features unmet) — DECLARED coverage gap:$rf_unmet")
   [ -n "$negonly" ] && lh_census+=("allowed-zero (NEGATIVE-polarity cfg(not(...)) only):$negonly")
+  lh_census+=("polarity: ${#allow_zero[@]} of $count target(s) excusable (allowed-zero). A target is")
+  lh_census+=("  excusable ONLY when EVERY legacy-heuristics cfg site in its module closure is the")
+  lh_census+=("  recognised direct-negative attribute #[cfg(not(feature = \"legacy-heuristics\"))].")
+  lh_census+=("  Any other shape — nested, compound, multiline, unfamiliar — is NOT excused, so an")
+  lh_census+=("  unrecognised expression costs a target its excusal and never costs a zero-tests")
+  lh_census+=("  check. Per-target reasons are on stdout as POLARITY-UNRECOGNISED.")
   if [ "$lh_sites" -gt 0 ] || [ "$lh_skip" -gt 0 ]; then
     lh_census+=("COVERAGE CENSUS — WHAT THIS LANE DOES NOT EXECUTE:")
     if [ "$lh_sites" -gt 0 ]; then
