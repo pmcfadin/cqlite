@@ -347,7 +347,13 @@ render in one binding and be refused by the other:
 |---|---|
 | Unscaled magnitude **> 32 KiB** | Refused as corrupt: a typed error naming the scale, the unscaled length and the ceiling |
 | Magnitude **> 1024 bytes**, or `abs(scale) > 1_000_000` | Precision-preserving **exponent form**, `<digits>e<-scale>` — every digit exact |
-| Otherwise | **Positional** form, e.g. `1.23`, `0.00123`, `123e2` |
+| `scale` **< 0** — a legal and common Cassandra encoding | **Exponent form** at *any* magnitude, independent of the thresholds above: e.g. `unscaled = 123, scale = -2` renders `123e2` |
+| Otherwise (`scale >= 0`) | **Positional** form, e.g. `1.23`, `0.00123`, `-0.123` |
+
+A negative `scale` multiplies by a power of ten, so there is no positional form
+for it and none of the size thresholds apply. A consumer that parses these
+strings must therefore accept exponent form at any magnitude:
+`^-?[0-9]+(\.[0-9]+)?$` alone is **not** sufficient.
 
 Below the 32 KiB ceiling the render is **infallible**: a well-formed value always
 renders, whatever its scale. Above it the refusal is a typed, catchable error — a
