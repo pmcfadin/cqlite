@@ -1155,14 +1155,28 @@ git_origin_host() {
   printf '%s' "${hostport#*@}"
 }
 
+# ---- the ONE remote this whole section is about (issue #3369 review) ----
+# Resolved ONCE, and every consumer below — the credential probe, the repair, and the
+# push probe — reads THIS value. The first cut derived credentials from `origin`'s FETCH
+# url while the push probe pushed to `${CLAIM_REMOTE:-origin}`, so with CLAIM_REMOTE set
+# (test_claim_lock.sh drives claim.sh exactly that way) or an `origin` carrying a
+# `pushurl`, the credential half wired and blessed host A while the probe pushed to host
+# B — a verdict about a host that is not the subject, and a second route to blocker 1's
+# symptom (`--fix-credentials --strict` failing on a validly configured box).
+#
+# `get-url --push` is deliberately ONE call for both cases: it returns the `pushurl`
+# when one is configured and falls back to the fetch url when none is. A second host
+# variable is what created the defect, so there is exactly one.
+PUSH_PROBE_REMOTE="${CLAIM_REMOTE:-origin}"   # the remote claim.sh itself will use
+
 hdr "git push credentials (issue #2942)"
-# Classify origin BEFORE probing: only an http(s) remote uses a credential helper.
+# Classify the remote BEFORE probing: only an http(s) remote uses a credential helper.
 # An SSH remote authenticates with a key (a helper is irrelevant), and a local/file
 # remote needs no credential at all — mislabeling either would send an operator
 # after the wrong fix, which is the exact failure mode this whole change exists to end.
 GIT_ORIGIN_URL=""; GIT_ORIGIN_HOST=""; GIT_ORIGIN_KIND=none
 if have git; then
-  GIT_ORIGIN_URL=$(git -C "$REPO_ROOT" remote get-url origin 2>/dev/null || true)
+  GIT_ORIGIN_URL=$(git -C "$REPO_ROOT" remote get-url --push "$PUSH_PROBE_REMOTE" 2>/dev/null || true)
   case "$GIT_ORIGIN_URL" in
     "")                    GIT_ORIGIN_KIND=none ;;
     https://*|http://*)    GIT_ORIGIN_KIND=https; GIT_ORIGIN_HOST=$(git_origin_host "$GIT_ORIGIN_URL") ;;
@@ -1176,17 +1190,17 @@ fi
 if ! have git; then
   warn "git NOT installed — the claim protocol pushes with plain git"
 elif [ "$GIT_ORIGIN_KIND" = none ]; then
-  warn "no 'origin' remote in $REPO_ROOT — cannot check push credentials"
+  warn "no '$PUSH_PROBE_REMOTE' remote in $REPO_ROOT — cannot check push credentials"
 elif [ "$GIT_ORIGIN_KIND" = ssh ]; then
   # SSH (git@host:… / ssh://…): git authenticates with your SSH key, and an https
   # credential helper is irrelevant. Report it and configure nothing.
   # NOT an exemption from the push probe below: an SSH origin is push-probed like any
   # other (the smoke push works over ssh), so a machine with no usable key still gets a
   # FAILED verdict rather than a green "no helper needed" (issue #3369).
-  ok "origin is an SSH remote — git push authenticates via SSH keys, not a credential helper (no helper needed)"
+  ok "'$PUSH_PROBE_REMOTE' is an SSH remote — git push authenticates via SSH keys, not a credential helper (no helper needed)"
   info "verify separately if pushes fail:  ssh -T git@github.com"
 elif [ "$GIT_ORIGIN_KIND" = other ]; then
-  info "origin is a '$GIT_ORIGIN_KIND' remote (neither http(s) nor SSH) — no credential helper applies"
+  info "'$PUSH_PROBE_REMOTE' is a '$GIT_ORIGIN_KIND' remote (neither http(s) nor SSH) — no credential helper applies"
 elif git_cred_probe "$GIT_ORIGIN_HOST"; then
   # Says ONLY what `git credential fill` proved: a configured helper answered. It does
   # NOT say a push would succeed — the previous wording ("git push credentials resolve
@@ -1346,7 +1360,8 @@ fi
 # here (cmd_smoke's hot path is out of scope for #3369). List and clean them with:
 #   git ls-remote origin 'refs/claims/smoke-*'
 #   git push origin --delete refs/claims/smoke-<nonce>
-PUSH_PROBE_REMOTE="${CLAIM_REMOTE:-origin}"   # the remote claim.sh itself will use
+# PUSH_PROBE_REMOTE is resolved ONCE above §3b — the credential half and this probe MUST
+# address the same remote (see the note there).
 CLAIM_SH="$REPO_ROOT/scripts/flow/claim.sh"
 PUSH_PROBE_BOUND=60   # 3 network round trips (push, ls-remote, delete) + slack
 

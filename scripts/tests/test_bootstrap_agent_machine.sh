@@ -1176,6 +1176,51 @@ else
   push_verdict "$out7pk2"
 fi
 
+# 7p-l. ONE REMOTE, RESOLVED ONCE (#3369 review). The credential half used to read
+#   `origin`'s FETCH url while the push probe pushed to `${CLAIM_REMOTE:-origin}` and
+#   honoured any `pushurl` — so the run could wire and bless host A while pushing to host
+#   B. Both divergences are covered: a non-origin CLAIM_REMOTE, and an origin whose
+#   pushurl differs from its fetch url.
+#
+#   (i) CLAIM_REMOTE names a different remote. `origin` here is a local bare repo that
+#   needs no credential at all; if the credential half still read `origin`, it would emit
+#   the "'other' remote — no credential helper applies" line and never repair anything,
+#   and the push to `upstream` would then be unwired.
+bare7pl="$tmp/bare7pl.git"; mk_push_bare "$bare7pl"
+repo7pl="$tmp/repo7pl"; mk_push_repo "$repo7pl" "file://$tmp/decoy7pl.git"
+git -C "$repo7pl" remote add upstream "https://push-probe.invalid/cqlite.git" >/dev/null 2>&1
+bin7pl="$tmp/bin7pl"
+mk_push_bin "$bin7pl" "git config --global --add 'credential.https://push-probe.invalid.helper' '!f(){ test \"\$1\" = get || exit 0; echo username=gh-stub; echo password=wired; };f'
+      git config --global \"url.file://$bare7pl/.insteadOf\" 'https://push-probe.invalid/cqlite.git'"
+gc7pl="$tmp/gc7pl"; : >"$gc7pl"
+export CLAIM_REMOTE=upstream      # unset immediately after: it must not leak into later cases
+run_push "$repo7pl" "$bin7pl" "$gc7pl" --fix-credentials --strict; out7pl=$push_out; rc7pl=$push_rc
+unset CLAIM_REMOTE
+if printf '%s' "$out7pl" | grep -q '\[ok\].*git credentials WIRED BY THIS RUN.*push-probe.invalid' \
+   && printf '%s' "$out7pl" | grep -q "\[ok\].*git-push: VERIFIED.*'upstream'" \
+   && ! printf '%s' "$out7pl" | grep -q "no credential helper applies"; then
+  ok "push: with CLAIM_REMOTE set, the credential half and the push probe address the SAME remote"
+else
+  bad "push: credential half and push probe addressed different remotes (rc=$rc7pl)"
+  push_plain "$out7pl" | grep -E 'credential|git-push|remote' | head -6
+fi
+
+#   (ii) `origin` with a pushurl that differs from its fetch url. `git push` honours the
+#   pushurl, so the credential subject is the PUSH host — reading the fetch url would
+#   classify this as a local 'other' remote needing no helper at all.
+repo7pl2="$tmp/repo7pl2"; mk_push_repo "$repo7pl2" "file://$tmp/decoy7pl2.git"
+git -C "$repo7pl2" remote set-url --push origin "https://push-probe.invalid/cqlite.git" >/dev/null 2>&1
+bin7pl2="$tmp/bin7pl2"; mk_push_bin "$bin7pl2"
+gc7pl2="$tmp/gc7pl2"; : >"$gc7pl2"
+run_push "$repo7pl2" "$bin7pl2" "$gc7pl2"; out7pl2=$push_out
+if printf '%s' "$out7pl2" | grep -q '\[warn\].*git push has NO credentials for push-probe.invalid' \
+   && ! printf '%s' "$out7pl2" | grep -q "no credential helper applies"; then
+  ok "push: an origin with a differing pushurl is judged on its PUSH host, not its fetch host"
+else
+  bad "push: pushurl was ignored — the credential verdict is about the wrong host"
+  push_plain "$out7pl2" | grep -E 'credential|remote' | head -5
+fi
+
 # 7p-g. `--strict` AND "All checks green." MUST NOT DIVERGE — asserted in BOTH
 #   directions. They are two channels for ONE fact: the green string is printed iff
 #   WARNINGS is 0, and --strict exits 0 iff WARNINGS is 0. A reviewer proposed keying
