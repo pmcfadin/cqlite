@@ -4191,5 +4191,83 @@ $out"
 
 t test_worker_probe_is_lane_attributed
 t test_migration_retries_and_sha256
+
+# ---------------------------------------------------------------------------
+# Test 35-claim (#3393, roborev round 36 Medium): a p<pid> PLACEHOLDER cannot carry endgame
+# protection past our own exit. `should-reap` permanently refuses placeholders (round 3), so keeping
+# one for a pending auto-merge PR meant NOTHING could ever clear it — not the CI reaper, not a later
+# merge of the very PR it protected. The protection must move to issue-numbered refs.
+# ---------------------------------------------------------------------------
+clearclaim_case() {
+  # clearclaim_case <stamped-lane> <pending-list> <stamp-rc> -> echoes the recorded claim-cmd calls
+  local stamped="$1" pending="$2" stamp_rc="$3" d
+  d="$(new_case_dir)"; mkdir -p "$d/bin"
+  cat >"$d/bin/hb.sh" <<STUB
+#!/usr/bin/env bash
+printf '%s\n' "\$*" >>"$d/calls.log"
+[ "\$1" = stamp ] && exit $stamp_rc
+exit 0
+STUB
+  chmod +x "$d/bin/hb.sh"; : >"$d/calls.log"
+  {
+    printf '%s\n' '#!/usr/bin/env bash' 'log() { :; }' 'claim_drain_pending_cleanup() { :; }'
+    sed -n '/^clear_claim()/,/^}/p' "$SUPERVISOR"
+    printf '%s\n' 'clear_claim 1'
+  } >"$d/cc.sh"
+  CLAIM_CMD="bash $d/bin/hb.sh" CLAIM_MACHINE=boxA CLAIM_STAMPED_ISSUE="$stamped" \
+    CLAIM_STAMPED_SHA=deadbeef PENDING_PR_LIST="$pending" bash "$d/cc.sh" >/dev/null 2>&1
+  cat "$d/calls.log"
+}
+
+test_placeholder_endgame_protection_transfers() {
+  local out nl
+  nl=$'\n'
+  # (a) A PLACEHOLDER with a pending PR naming issue 88: stamp lane 88, THEN clear the placeholder.
+  out=$(clearclaim_case "p1234-abc" "3467${nl:0:0}"$'\t'"88"$'\t'"1"$'\t'"1000$nl" 0)
+  if printf '%s\n' "$out" | grep -q '^stamp 88' && printf '%s\n' "$out" | grep -q '^reap boxA p1234-abc'; then
+    pass "placeholder-transfer: the pending endgame is re-stamped as lane 88 and the placeholder is then cleared"
+  else
+    fail "placeholder-transfer: expected 'stamp 88' then 'reap boxA p1234-abc', got:
+$out"
+  fi
+  # (b) IF THE TRANSFER FAILS the placeholder must be KEPT — a stale ref beats an unprotected
+  # endgame. Driven by a stamp that exits non-zero.
+  out=$(clearclaim_case "p1234-abc" "3467"$'\t'"88"$'\t'"1"$'\t'"1000$nl" 1)
+  if printf '%s\n' "$out" | grep -q '^stamp 88' && ! printf '%s\n' "$out" | grep -q '^reap'; then
+    pass "placeholder-transfer: a FAILED stamp keeps the placeholder (all-or-nothing — a stale ref beats an unprotected endgame)"
+  else
+    fail "placeholder-transfer-failed-stamp: the placeholder was cleared anyway:
+$out"
+  fi
+  # (c) A pending PR with NO recorded issue is UNTRANSFERABLE, so the placeholder is kept. This is the
+  # case that must not silently clear: there is nothing for the reaper to evaluate.
+  out=$(clearclaim_case "p1234-abc" "3467"$'\t'""$'\t'"1"$'\t'"1000$nl" 0)
+  if ! printf '%s\n' "$out" | grep -q '^reap'; then
+    pass "placeholder-transfer: a pending PR with no issue is untransferable and keeps the placeholder"
+  else
+    fail "placeholder-transfer-no-issue: cleared the placeholder with an untransferable endgame:
+$out"
+  fi
+  # (d) AN ISSUE-NUMBERED lane with a pending PR is unchanged — it keeps, as #2499 ruling (b) requires,
+  # and must NOT be re-stamped. Without this the fix could have widened into the case that was correct.
+  out=$(clearclaim_case "88" "3467"$'\t'"88"$'\t'"1"$'\t'"1000$nl" 0)
+  if ! printf '%s\n' "$out" | grep -qE '^(reap|stamp)'; then
+    pass "placeholder-transfer: an ISSUE-numbered lane with a pending PR still just KEEPS (#2499 ruling (b) untouched)"
+  else
+    fail "placeholder-transfer-issue-lane: an issue lane was altered:
+$out"
+  fi
+  # (e) NON-VACUITY: with NO pending PR at all, a placeholder is cleared with no stamping — so the
+  # transfer above is attributable to the pending endgame rather than to placeholders always clearing.
+  out=$(clearclaim_case "p1234-abc" "" 0)
+  if printf '%s\n' "$out" | grep -q '^reap boxA p1234-abc' && ! printf '%s\n' "$out" | grep -q '^stamp'; then
+    pass "NON-VACUITY: with no pending PR the placeholder clears WITHOUT any stamp — the transfer is caused by the endgame"
+  else
+    fail "placeholder-transfer-nonvacuity: got:
+$out"
+  fi
+}
+
+t test_placeholder_endgame_protection_transfers
 echo "=== $PASS_COUNT passed, $FAIL_COUNT failed, $SKIP_COUNT skipped ==="
 [[ "$FAIL_COUNT" -eq 0 ]]

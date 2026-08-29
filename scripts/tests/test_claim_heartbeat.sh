@@ -16,6 +16,13 @@ PASS=0
 FAIL=0
 ok()  { printf 'ok   - %s\n' "$1"; PASS=$((PASS + 1)); }
 bad() { printf 'FAIL - %s\n' "$1"; FAIL=$((FAIL + 1)); }
+# skip: an ENVIRONMENTAL non-result — a premise this host will not stage. COUNTED and printed in the
+# summary, because this suite previously had NO skip helper: a case that called `skip` got
+# "command not found" on stderr, the status was discarded under `set -uo pipefail` with no errexit,
+# and the run still reported "181 passed, 0 failed" having asserted NOTHING. That is the same
+# harness-level vacuity the supervisor suite's `t` wrapper exists for (#3393 round 27), one file over.
+SKIP=0
+skip() { printf 'SKIP - %s\n' "$1"; SKIP=$((SKIP + 1)); }
 
 # git in a throwaway identity so commits/pushes work in any sandbox, matching
 # scripts/flow/tests/finalize-cleanup.test.sh's convention.
@@ -2921,6 +2928,84 @@ else
 fi
 (cd "$WORK" && g push -q origin ":refs/lane-claims/phBox/p999998" 2>/dev/null || true)
 
+echo "TEST 80: a ZOMBIE local pid is not alive — should-reap must reap it (round 36)"
+# ===========================================================================
+# `process_presence` answers a VISIBILITY question, and a zombie is visible: `ps -p` lists it,
+# `/proc/<pid>` exists and `kill -0` succeeds. So a zombie supervisor read as `present` and its claim
+# was KEPT INDEFINITELY — while `dead-lanes`, in this same file, has classified that case as
+# DEAD-NO-PROCESS since round 7. Two predicates in one file disagreeing about one fact.
+#
+# Staged with a REAL zombie: a child that exits while its parent never reaps it. If the host will not
+# produce one within the wait cap the case SKIPs rather than faking the premise.
+# A GENUINE zombie needs a parent that outlives the child and NEVER reaps it. A shell cannot be
+# relied on for that — bash reaps background children opportunistically, and `exec`ing the parent
+# orphans the child to init, which reaps it immediately. So the parent is a python process that
+# forks, lets the child _exit, and then sleeps WITHOUT waitpid(). The first cut used two competing
+# shell tricks, produced no zombie, and the case skipped — which is how the missing `skip` helper
+# was found.
+zombie_pid=""
+python3 -c '
+import os, sys, time
+pid = os.fork()
+if pid == 0:
+    os._exit(0)
+sys.stdout.write(str(pid) + "\n")
+sys.stdout.flush()
+time.sleep(25)
+' >"$WORK/zombie.pid" 2>/dev/null &
+zparent=$!
+sleep 1
+zombie_pid="$(head -1 "$WORK/zombie.pid" 2>/dev/null | tr -d ' ')"
+zstate="$(ps -o stat= -p "${zombie_pid:-0}" 2>/dev/null | tr -d ' ')"
+if [ -z "$zombie_pid" ] || [ -z "$zstate" ] || [ "${zstate#Z}" = "$zstate" ]; then
+  skip "TEST 80: the host did not yield an observable zombie (state='${zstate:-<none>}') — premise unstageable, not faked"
+else
+  (
+    cd "$WORK" || exit 1
+    et=$(git hash-object -t tree --stdin </dev/null)
+    old_ts=$(date -u -r $(( $(date -u +%s) - 40000 )) +%Y-%m-%dT%H:%M:%SZ 2>/dev/null) \
+      || old_ts=$(date -u -d "@$(( $(date -u +%s) - 40000 ))" +%Y-%m-%dT%H:%M:%SZ)
+    cs=$(GIT_AUTHOR_DATE="$old_ts" GIT_COMMITTER_DATE="$old_ts" \
+      GIT_AUTHOR_NAME=t GIT_AUTHOR_EMAIL=t@t GIT_COMMITTER_NAME=t GIT_COMMITTER_EMAIL=t@t \
+      git commit-tree "$et" -m "claim issue=7401 machine=zBox pid=${zombie_pid} ts=${old_ts}")
+    g push -q origin "${cs}:refs/lane-claims/zBox/7401"
+  )
+  z_rc=0
+  z_out=$(cd "$WORK" && HEARTBEAT_MACHINE=zBox CLAIM_OPEN_PR_CMD="$NO_OPEN_PR" \
+    bash "$HB" should-reap zBox 7401 1 2>&1) || z_rc=$?
+  if [ "$z_rc" -eq 0 ] && printf '%s\n' "$z_out" | grep -qi 'zombie'; then
+    ok "a ZOMBIE local pid is REAPED (rc=0) and the verdict names the zombie state"
+  else
+    bad "a zombie local pid must be reaped: rc=$z_rc out:
+$z_out"
+  fi
+  # NON-VACUITY, and it must be true of the BROKEN code too: a LIVE local pid in the same shape is
+  # still KEPT. Without this, a should-reap that reaped every local claim would satisfy the case above.
+  ( sleep 25 ) & live_pid=$!
+  (
+    cd "$WORK" || exit 1
+    et=$(git hash-object -t tree --stdin </dev/null)
+    old_ts=$(date -u -r $(( $(date -u +%s) - 40000 )) +%Y-%m-%dT%H:%M:%SZ 2>/dev/null) \
+      || old_ts=$(date -u -d "@$(( $(date -u +%s) - 40000 ))" +%Y-%m-%dT%H:%M:%SZ)
+    cs=$(GIT_AUTHOR_DATE="$old_ts" GIT_COMMITTER_DATE="$old_ts" \
+      GIT_AUTHOR_NAME=t GIT_AUTHOR_EMAIL=t@t GIT_COMMITTER_NAME=t GIT_COMMITTER_EMAIL=t@t \
+      git commit-tree "$et" -m "claim issue=7402 machine=zBox pid=${live_pid} ts=${old_ts}")
+    g push -q origin "${cs}:refs/lane-claims/zBox/7402"
+  )
+  l_rc=0
+  l_out=$(cd "$WORK" && HEARTBEAT_MACHINE=zBox CLAIM_OPEN_PR_CMD="$NO_OPEN_PR" \
+    bash "$HB" should-reap zBox 7402 1 2>&1) || l_rc=$?
+  if [ "$l_rc" -eq 1 ] && printf '%s\n' "$l_out" | grep -qi 'still alive'; then
+    ok "NON-VACUITY: a LIVE local pid is still KEPT (rc=1) — so the zombie reap is about the STATE, not about reaping every local claim"
+  else
+    bad "NON-VACUITY broken: a live local pid gave rc=$l_rc out:
+$l_out"
+  fi
+  kill "$live_pid" 2>/dev/null || true
+  (cd "$WORK" && g push -q origin ":refs/lane-claims/zBox/7401" ":refs/lane-claims/zBox/7402" 2>/dev/null || true)
+fi
+kill "${zparent:-0}" 2>/dev/null || true
+
 echo
-echo "=== claim-heartbeat.sh: $PASS passed, $FAIL failed ==="
+echo "=== claim-heartbeat.sh: $PASS passed, $FAIL failed, $SKIP skipped ==="
 [ "$FAIL" -eq 0 ]
