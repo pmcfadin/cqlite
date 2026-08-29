@@ -3061,6 +3061,53 @@ WEOF
 }
 
 # ---------------------------------------------------------------------------
+# Test 32-claim (#3393, roborev round 28, Medium): an ENDGAME IN FLIGHT keeps its ref. Owner ruling (b)
+# on #2499 semantics — a pending auto-merge PR IS an open PR, and `delete_ref_guarded` already refuses to
+# delete an issue-named ref in that state. But `CLAIM_WORK_CONCLUDED` reflects only the LATEST iteration,
+# so after a pending-automerge finalize a later no-work/finalize/park set it to 1 and the shutdown cleared
+# the lane's ref anyway. "Concluded" is necessary and NOT sufficient: nothing may be pending either.
+# ---------------------------------------------------------------------------
+test_pending_pr_keeps_the_claim() {
+  local d out
+  d="$(new_case_dir)"
+  common_env "$d"
+  export CLAIM_LOG="$d/claim.log"
+  : >"$CLAIM_LOG"
+  write_claim_stub "$d/bin/claim.sh"
+  # Unit-tested deliberately: reaching this state end to end needs a pending-automerge finalize followed
+  # by a concluding iteration AND a budget exit, which no existing stub sequences. The invariant is one
+  # condition in one function, so it is exercised directly — the approach the parser tests take.
+  out="$(
+    CLAIM_CMD="bash $d/bin/claim.sh" HEARTBEAT_MACHINE=testbox CLAIM_LOG="$CLAIM_LOG" \
+    bash -c '
+      source "$1"
+      CLAIM_STAMPED_ISSUE="p999-abc"
+      PENDING_PR_LIST="4242'$'\t''88'$'\t''1'$'\t''0"
+      clear_claim 1          # CONCLUDED=1, but a PR is pending
+      printf "AFTER_PENDING=%s\n" "$(grep -c "^reap" "$CLAIM_LOG" 2>/dev/null || echo 0)"
+      PENDING_PR_LIST=""
+      clear_claim 1          # concluded AND nothing pending => clears
+      printf "AFTER_EMPTY=%s\n" "$(grep -c "^reap" "$CLAIM_LOG" 2>/dev/null || echo 0)"
+    ' _ "$SUPERVISOR" 2>&1
+  )"
+  if printf '%s' "$out" | grep -q 'auto-merge PR is still pending' \
+    && printf '%s' "$out" | grep -q 'AFTER_PENDING=0' \
+    && printf '%s' "$out" | grep -q 'AFTER_EMPTY=1'; then
+    pass "claim: a pending auto-merge PR KEEPS the lane ref even when concluded=1, and the same call clears once nothing is pending"
+  else
+    fail "pending-pr-keeps-claim: out=[$out] log=[$(tr '\n' ';' <"$CLAIM_LOG")]"
+  fi
+  # NON-VACUITY, true of the BROKEN code too: the stub is reachable and a reap DOES get logged in this
+  # harness — established by the AFTER_EMPTY leg above, which must be 1. If the stub were unreachable both
+  # legs would read 0 and the first assertion would pass for the wrong reason.
+  if printf '%s' "$out" | grep -q 'AFTER_EMPTY=1'; then
+    pass "NON-VACUITY: the reap path IS reachable in this harness (AFTER_EMPTY=1), so AFTER_PENDING=0 is a refusal"
+  else
+    fail "pending-pr-nonvacuity: the reap path never fires here, so the refusal proves nothing: out=[$out]"
+  fi
+}
+
+# ---------------------------------------------------------------------------
 # Test 25-claim (#3393, roborev round 2, Medium): a lane TRANSITION must not open a liveness GAP. The
 # replacement is stamped BEFORE the old ref is deleted, so if the replacement FAILS the OLD ref must
 # SURVIVE — a lane with no claim ref at all is invisible to dead-lanes and to the reaper for the whole
@@ -3371,6 +3418,7 @@ t test_supervisor_lock_is_per_lane
 t test_claim_cleanup_uses_lease_and_drops_on_transfer
 t test_park_releases_issue_so_next_lane_is_a_placeholder
 t test_no_work_shutdown_clears_its_placeholder
+t test_pending_pr_keeps_the_claim
 t test_finalized_verified_merged_counts
 t test_finalized_mismatch_open_is_abnormal
 t test_finalized_unverified_not_counted_no_breaker

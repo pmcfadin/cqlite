@@ -2749,6 +2749,97 @@ else
 fi
 (cd "$WORK" && g push -q origin ":refs/lane-claims/decoyBox/7201" 2>/dev/null || true)
 
+# ===========================================================================
+echo "TEST 78: should-reap must PROVE a local pid gone — EPERM and no-pid are KEEP (round 28)"
+# ===========================================================================
+# Two ways this reaped a LIVE lane. `kill -0` was used two-valued, so EPERM — which means the process
+# EXISTS and is not ours — read as "dead"; and when `pid` was empty the `[ -n "$pid" ]` guard was false,
+# so a LOCAL claim fell through to the FOREIGN branch and was reaped with no pid check at all. The
+# predicate is age AND no-open-PR AND pid-dead-IF-LOCAL: an unsatisfiable clause must FAIL the
+# conjunction, not vanish from it.
+#
+# (a) LOCAL claim with NO pid => KEEP. Driven by a real claim message that omits `pid=`.
+(
+  cd "$WORK" || exit 1
+  et=$(git hash-object -t tree --stdin </dev/null)
+  old_ts=$(date -u -r $(( $(date -u +%s) - 40000 )) +%Y-%m-%dT%H:%M:%SZ 2>/dev/null) \
+    || old_ts=$(date -u -d "@$(( $(date -u +%s) - 40000 ))" +%Y-%m-%dT%H:%M:%SZ)
+  cs=$(GIT_AUTHOR_DATE="$old_ts" GIT_COMMITTER_DATE="$old_ts" \
+    GIT_AUTHOR_NAME=t GIT_AUTHOR_EMAIL=t@t GIT_COMMITTER_NAME=t GIT_COMMITTER_EMAIL=t@t \
+    git commit-tree "$et" -m "claim issue=7300 machine=localNoPid ts=${old_ts}")
+  g push -q origin "${cs}:refs/lane-claims/localNoPid/7300"
+)
+np_out=$(cd "$WORK" && HEARTBEAT_MACHINE=localNoPid CLAIM_OPEN_PR_CMD="$NO_OPEN_PR" \
+  bash "$HB" should-reap localNoPid 7300 1 2>&1)
+np_rc=$?
+if [ "$np_rc" -eq 1 ] && printf '%s\n' "$np_out" | grep -qi 'no usable pid'; then
+  ok "a LOCAL claim with no usable pid is KEPT (rc=1) — the unsatisfiable clause fails the predicate"
+else
+  bad "a local claim with no pid must not be reaped: rc=$np_rc out:
+$np_out"
+fi
+# NON-VACUITY: the SAME ref on a FOREIGN machine still reaches the documented foreign reap, so the KEEP
+# above is about locality-plus-no-pid rather than about this ref being unreapable in general.
+fr_rc=0
+(cd "$WORK" && HEARTBEAT_MACHINE=someOtherBox CLAIM_OPEN_PR_CMD="$NO_OPEN_PR" \
+  bash "$HB" should-reap localNoPid 7300 1 >/dev/null 2>&1) || fr_rc=$?
+if [ "$fr_rc" -eq 0 ]; then
+  ok "NON-VACUITY: the same ref judged from a FOREIGN machine still reaps (rc=0), so the KEEP is the local no-pid rule"
+else
+  bad "NON-VACUITY broken: the foreign path did not reap (rc=$fr_rc), so TEST 78a proves nothing"
+fi
+(cd "$WORK" && g push -q origin ":refs/lane-claims/localNoPid/7300" 2>/dev/null || true)
+# (b) EPERM => NOT ABSENT. Staged with a pid we genuinely cannot signal rather than with a shim:
+# `kill` is a bash BUILTIN, so a PATH shim named `kill` is never consulted — the first cut of this case
+# tried exactly that and the probe sailed past it. pid 1 is owned by root, so as an unprivileged user
+# `kill -0 1` really returns "Operation not permitted", which is the input under test.
+#
+# The property is that EPERM is NEVER read as absent. `signal_probe_class 1` = `denied` and
+# `process_presence 1` = `present` here (the visibility voters can see init), and BOTH of those are KEEP.
+# The old two-valued `kill -0` read the same EPERM as "dead" and REAPED. Skipped rather than faked if the
+# host lets us signal pid 1 — a case that cannot stage its input must not pretend to have run.
+if kill -0 1 2>/dev/null; then
+  skip "EPERM sub-case: this host can signal pid 1, so 'Operation not permitted' cannot be staged (would be a fabricated input)"
+else
+  craft_lane_claim_pid1() {
+    (
+      cd "$WORK" || exit 1
+      local now_epoch old_ts et cs
+      now_epoch=$(date -u +%s)
+      old_ts=$(date -u -r "$((now_epoch - 40000))" +%Y-%m-%dT%H:%M:%SZ 2>/dev/null) \
+        || old_ts=$(date -u -d "@$((now_epoch - 40000))" +%Y-%m-%dT%H:%M:%SZ)
+      et=$(git hash-object -t tree --stdin </dev/null)
+      cs=$(GIT_AUTHOR_DATE="$old_ts" GIT_COMMITTER_DATE="$old_ts" \
+        GIT_AUTHOR_NAME=t GIT_AUTHOR_EMAIL=t@t GIT_COMMITTER_NAME=t GIT_COMMITTER_EMAIL=t@t \
+        git commit-tree "$et" -m "claim issue=7301 machine=epermBox pid=1 ts=${old_ts}")
+      g push -q origin "${cs}:refs/lane-claims/epermBox/7301"
+    )
+  }
+  craft_lane_claim_pid1
+  ep_out=$(cd "$WORK" && HEARTBEAT_MACHINE=epermBox CLAIM_OPEN_PR_CMD="$NO_OPEN_PR" \
+    bash "$HB" should-reap epermBox 7301 1 2>&1)
+  ep_rc=$?
+  if [ "$ep_rc" -eq 1 ] && ! printf '%s\n' "$ep_out" | grep -qi 'CONFIRMED absent'; then
+    ok "a pid we cannot signal (EPERM) is KEPT (rc=1) — 'not permitted' means the process EXISTS, never that it is gone"
+  else
+    bad "EPERM must not be read as dead: rc=$ep_rc out:
+$ep_out"
+  fi
+  # NON-VACUITY: the SAME shape with a deterministically ABSENT pid DOES reap, so the KEEP above is the
+  # presence decode and not the age, the open-PR stub, or the ref being unreapable.
+  (cd "$WORK" && g push -q origin ":refs/lane-claims/epermBox/7301" 2>/dev/null || true)
+  craft_lane_claim "$WORK" "epermBox" "7302" "$ABSENT_PID" 40000
+  ns_rc=0
+  (cd "$WORK" && HEARTBEAT_MACHINE=epermBox CLAIM_OPEN_PR_CMD="$NO_OPEN_PR" \
+    bash "$HB" should-reap epermBox 7302 1 >/dev/null 2>&1) || ns_rc=$?
+  if [ "$ns_rc" -eq 0 ]; then
+    ok "NON-VACUITY: the same shape with a deterministically ABSENT pid reaps (rc=0), so the KEEP is the presence decode"
+  else
+    bad "NON-VACUITY broken: the absent-pid control did not reap (rc=$ns_rc)"
+  fi
+  (cd "$WORK" && g push -q origin ":refs/lane-claims/epermBox/7302" 2>/dev/null || true)
+fi
+
 echo
 echo "=== claim-heartbeat.sh: $PASS passed, $FAIL failed ==="
 [ "$FAIL" -eq 0 ]
