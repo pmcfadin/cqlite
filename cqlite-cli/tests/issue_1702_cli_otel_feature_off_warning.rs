@@ -57,9 +57,16 @@ const ARGS: &[&str] = &["info"];
 /// `RUST_LOG` and every `CQLITE_OTEL_*` var are cleared first so an ambient
 /// environment can neither raise the filter above WARN nor pre-set the knob.
 fn run(otel_enabled: Option<&str>) -> Output {
+    run_with(otel_enabled, None, &[])
+}
+
+/// As [`run`], but with an explicit `RUST_LOG` value and/or extra CLI flags, so
+/// the log-filtering cases below can drive `-q` and `RUST_LOG=error`.
+fn run_with(otel_enabled: Option<&str>, rust_log: Option<&str>, extra_args: &[&str]) -> Output {
     let cwd = TempDir::new().expect("tempdir");
     let mut cmd = Command::new(env!("CARGO_BIN_EXE_cqlite"));
-    cmd.args(ARGS)
+    cmd.args(extra_args)
+        .args(ARGS)
         .current_dir(cwd.path())
         .env_remove("RUST_LOG")
         .env_remove("CQLITE_OTEL_ENABLED")
@@ -72,10 +79,14 @@ fn run(otel_enabled: Option<&str>) -> Output {
     if let Some(v) = otel_enabled {
         cmd.env("CQLITE_OTEL_ENABLED", v);
     }
+    if let Some(v) = rust_log {
+        cmd.env("RUST_LOG", v);
+    }
     let out = cmd.output().expect("cqlite binary runs");
     assert!(
         out.status.success(),
-        "`cqlite {}` must succeed; stderr:\n{}",
+        "`cqlite {} {}` must succeed; stderr:\n{}",
+        extra_args.join(" "),
         ARGS.join(" "),
         String::from_utf8_lossy(&out.stderr)
     );
@@ -148,6 +159,45 @@ fn no_warning_when_otel_is_not_requested() {
             warning_hits(&stderr),
             0,
             "CQLITE_OTEL_ENABLED={case:?} must not warn; stderr:\n{stderr}"
+        );
+    }
+}
+
+/// The warning is an ORDINARY `WARN` event, so it respects the operator's
+/// explicit filtering choice — it does NOT bypass the subscriber.
+///
+/// This pins that as a deliberate, documented property rather than leaving it an
+/// accident: `--quiet` maps to the `error` level (`main.rs`'s `-v`/`-q` mapping)
+/// and `RUST_LOG=error` sets the same floor through `EnvFilter`, so both hide a
+/// WARN. Making the warning unfilterable would mean writing to stderr from
+/// library code behind the subscriber's back, which is worse than respecting
+/// `-q`. The default level (no `RUST_LOG`, no `-q`) is asserted here too, so a
+/// future filter change that hid the warning by default cannot pass as "just
+/// filtering".
+#[test]
+fn warning_respects_the_operator_log_level() {
+    // Baseline: default level shows it. (Same property as the stderr test above,
+    // re-asserted here so the three cases are comparable in one place.)
+    let default_level = run_with(Some("1"), None, &[]);
+    assert_eq!(
+        warning_hits(&String::from_utf8_lossy(&default_level.stderr)),
+        1,
+        "the default log level must show the warning"
+    );
+
+    for (label, rust_log, extra) in [
+        ("--quiet", None, &["--quiet"][..]),
+        ("RUST_LOG=error", Some("error"), &[][..]),
+    ] {
+        let out = run_with(Some("1"), rust_log, extra);
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert_eq!(
+            warning_hits(&stderr),
+            0,
+            "{label} filters WARN out, so the #1702 warning is suppressed BY \
+             DESIGN — the operator asked for errors only. If this case starts \
+             failing, something made the warning bypass the subscriber; that is \
+             a regression, not a fix. stderr:\n{stderr}"
         );
     }
 }
