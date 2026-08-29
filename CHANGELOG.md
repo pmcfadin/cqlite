@@ -19,13 +19,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     `JsonColumn`, `JsonPrimaryKey`, `JsonClusteringKey`, `JsonIndex`, `JsonUDT`,
     `JsonMetadata`, `JsonTableOptions`, `JsonPerformanceMetrics`,
     `JsonValidationResults`).
-  - Removed `SchemaRegistry::export_schema_json{,_with_config,_compact,_openapi,_pipeline}`
-    and `SchemaDiscoveryEngine::export_json{,_with_config}`. **Note these five
-    registry methods existed in DEFAULT builds too**, as
+  - Removed seven `SchemaRegistry` methods —
+    `export_schema_json`, `export_schema_json_with_config`,
+    `export_schema_json_compact`, `export_schema_json_openapi`,
+    `export_schema_json_pipeline`, `export_multiple_schemas_json` and
+    `export_keyspace_schemas_json` — and two `SchemaDiscoveryEngine` methods,
+    `export_json` and `export_json_with_config`.
+  - **All nine existed in DEFAULT builds too**, as
     `#[cfg(not(feature = "experimental"))]` stubs that unconditionally returned
-    `Error::UnsupportedFormat`, so the removal narrows the default public API and
-    not only the `experimental`-gated one. No caller could ever have depended on a
-    successful result from them.
+    `Error::UnsupportedFormat`. So this removal narrows the DEFAULT public API,
+    not only the `experimental`-gated one — that is the breaking part, and it is
+    called out here rather than left to be discovered at upgrade time. No caller
+    could ever have depended on a successful result from any of them, since
+    without `experimental` they could only ever return an error.
   - Removed `cqlite-core/src/schema/cql_generator.rs`, which had **no `mod`
     declaration anywhere in the repository** and was therefore never in any build
     graph; the file's only repo-wide mention was a doc comment. Any past change to
