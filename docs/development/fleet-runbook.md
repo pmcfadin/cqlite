@@ -51,11 +51,14 @@ bash scripts/flow/claim.sh smoke               # same probe the bootstrap runs (
 
 **Cost and residual of the automatic probe.** Every bootstrap run — laptop runs included — makes two
 extra network round trips and CREATES AND DELETES a transient `refs/claims/smoke-<nonce>` ref on the
-shared origin. A remote that REFUSES the cleanup delete now FAILS the probe
-(`SMOKE-FAIL … reason=delete-rejected` → `git-push: FAILED`, #3369) rather than reporting success with
-a stderr warning — delete capability is required by the claim protocol, since `claim.sh release`
-deletes `refs/claims/issue-<N>`. A ref can still be stranded if a run is KILLED between the create and
-the delete, and by the delete-rejected case itself. **Deleting a stray `refs/claims/smoke-*` is always
+shared origin. A cleanup delete that exits nonzero now FAILS the probe
+(`SMOKE-FAIL … reason=cleanup-unverified` → `git-push: FAILED`, #3369) rather than reporting success
+with a stderr warning: delete capability is required by the claim protocol, since `claim.sh release`
+deletes `refs/claims/issue-<N>`. That verdict deliberately attributes **no cause** — one nonzero exit
+cannot tell a remote's deletion policy from a network drop — so it reports the observation and tells
+you how to check. A ref can still be stranded two ways: by that case (the delete did not succeed, so
+the ref's fate is unknown), and by a run KILLED between the create and the delete, which leaves no
+verdict at all. **Deleting a stray `refs/claims/smoke-*` is always
 safe** — it is a throwaway root commit that nothing reads, and it is NOT a claim lock (those are
 `refs/claims/issue-<N>`, never `smoke-`). List and clean them:
 

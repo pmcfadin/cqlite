@@ -48,7 +48,7 @@ without it, it prints the exact command for each gap. It verifies, in order:
    | Line | Meaning |
    |---|---|
    | `[ok]   git-push: VERIFIED (refs/claims/* create+ls-remote+delete on 'origin')` | affirmatively measured — the claim protocol works here |
-   | `[warn] git-push: FAILED (...)` | the remote refused the operation — credentials, the `refs/claims/*` namespace, or a namespace that accepts the create but **refuses the delete** (unusable for claims: `release` deletes `refs/claims/issue-<N>`, and that case strands a ref, so the line tells you how to list it) |
+   | `[warn] git-push: FAILED (...)` | the operation did not complete. For a credential fault the line names it and gives the #2942 remedy; for anything else bootstrap **quotes `claim.sh`'s own verdict verbatim** rather than guessing a cause — including `reason=cleanup-unverified`, where the cleanup delete exited nonzero so delete capability is unproven (`release` deletes `refs/claims/issue-<N>`) and the ref may survive; the quoted line carries the `ls-remote` check |
    | `[warn] git-push: UNMEASURED (...)` | no remote / unreachable / no `timeout` to bound it / no verdict — capability is **UNKNOWN, not ok** |
    | `[warn] git-push: OPT-OUT (--skip-push-probe)` | deliberately not measured; still a warning, so it can never buy a green |
 
@@ -58,10 +58,12 @@ without it, it prints the exact command for each gap. It verifies, in order:
 
    **Cost:** measuring the operation means performing it — two extra network round trips
    and a transient `refs/claims/smoke-<nonce>` ref created and deleted on the shared
-   origin, on **every** run of this script. `claim.sh smoke` only warns if its cleanup
-   delete fails, so an interrupted run can strand one; list them with
-   `git ls-remote origin 'refs/claims/smoke-*'` and delete with
-   `git push origin --delete refs/claims/smoke-<nonce>`.
+   origin, on **every** run of this script. An **observed** cleanup failure FAILS the
+   probe (`reason=cleanup-unverified` — the delete exited nonzero, so whether the ref
+   survives is unknown), so it can never pass quietly. A run **interrupted before
+   cleanup** is the residual: it leaves no verdict at all and can still strand a ref.
+   List them with `git ls-remote origin 'refs/claims/smoke-*'` and delete with
+   `git push origin --delete refs/claims/smoke-<nonce>` — always safe.
 4. **roborev** — installed, and this machine's *configured* agent resolves.
 5. **Datasets** + `CQLITE_DATASETS_ROOT` guidance.
 6. **Health check** — runs the gate's fmt smoke and prints the authoritative

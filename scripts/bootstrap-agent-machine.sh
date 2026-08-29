@@ -1355,9 +1355,12 @@ fi
 #     here makes that mutation routine, which is accepted deliberately: making the
 #     measurement opt-in would restore "a read by default", the exact defect #3369
 #     exists to remove.
-# RESIDUAL: cmd_smoke only WARNS if its cleanup delete fails, so an interrupted or
-# partially-failing run can strand a `refs/claims/smoke-*` ref on the origin. Not fixed
-# here (cmd_smoke's hot path is out of scope for #3369). List and clean them with:
+# RESIDUAL, stated precisely because the two halves differ. An OBSERVED cleanup failure
+# now FAILS the probe (`reason=cleanup-unverified`) instead of passing with a stderr
+# warning, so it cannot pass silently. But a run KILLED between the create and the
+# delete produces NO verdict at all and can still leave a `refs/claims/smoke-*` ref on
+# the origin — nothing can close that window from inside the probe. So the cleanup
+# commands stay documented:
 #   git ls-remote origin 'refs/claims/smoke-*'
 #   git push origin --delete refs/claims/smoke-<nonce>
 # PUSH_PROBE_REMOTE is resolved ONCE above §3b — the credential half and this probe MUST
