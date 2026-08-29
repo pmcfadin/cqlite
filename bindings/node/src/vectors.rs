@@ -15,6 +15,7 @@ use cqlite_ffi_common::vectors::{
     vector_outcome, VectorOutcome, DECIMAL_VECTORS, INET_VECTORS, VARINT_VECTORS,
 };
 use napi::{Env, JsUnknown, Result};
+use napi_derive::napi;
 
 use crate::value::{value_to_napi, ConvCtx};
 
@@ -22,7 +23,7 @@ use crate::value::{value_to_napi, ConvCtx};
 ///
 /// `cqlType`, `scale` and `bytes` are carried so a suite can re-drive the same
 /// input through another surface without a second test-support function.
-#[napi_derive::napi(object)]
+#[napi(object)]
 pub struct VectorReport {
     /// `"decimal"`, `"varint"` or `"inet"`.
     #[napi(js_name = "cqlType")]
@@ -75,7 +76,7 @@ fn render_through_dispatch(env: &Env, value: &Value) -> Result<String> {
 /// All three types go through the full [`value_to_napi`] dispatch — the same
 /// call `row_to_object` makes for a real result row — so a binding that re-grew
 /// a private implementation would be caught here.
-#[napi_derive::napi]
+#[napi]
 pub fn ffi_common_render_vectors(env: Env) -> Result<Vec<VectorReport>> {
     let mut reports = Vec::new();
 

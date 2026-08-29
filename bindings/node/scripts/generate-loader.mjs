@@ -39,6 +39,10 @@ const IDENTS = [
   // `_errorContractProbe` / `_errorContractNodeCodes`.
   'errorContractProbe',
   'errorContractNodeCodes',
+  // Test-support: the committed cross-binding vector table rendered through this
+  // binding's production paths (issue #1452). `lib/index.js` re-exports it as
+  // `_ffiCommonRenderVectors`.
+  'ffiCommonRenderVectors',
 ]
 
 // Native binary loader template.

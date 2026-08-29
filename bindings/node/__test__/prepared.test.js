@@ -40,10 +40,21 @@ describe('PreparedStatement', () => {
       expect(mod.wrapPreparedStatement).toBeUndefined();
     });
 
-    test('only Database, PreparedStatement, and version are exported', () => {
+    // The PUBLIC surface is exactly these three. Internal test-support exports
+    // are underscore-prefixed by convention (`_errorContractProbe`,
+    // `_errorContractNodeCodes` from issue #1451, `_ffiCommonRenderVectors` from
+    // issue #1452) and are deliberately not part of it — so this asserts the
+    // public keys AND that every remaining key is marked internal, rather than
+    // an exact whole-object match that any new internal helper falsifies.
+    test('only Database, PreparedStatement, and version are exported publicly', () => {
       const mod = require('../lib/index.js');
-      const exportedKeys = Object.keys(mod).sort();
-      expect(exportedKeys).toEqual(['Database', 'PreparedStatement', 'version']);
+      const allKeys = Object.keys(mod).sort();
+      const publicKeys = allKeys.filter((key) => !key.startsWith('_'));
+      expect(publicKeys).toEqual(['Database', 'PreparedStatement', 'version']);
+      // Nothing may sneak in un-marked: every non-public key is underscored.
+      expect(allKeys.filter((key) => key.startsWith('_')).length).toBe(
+        allKeys.length - publicKeys.length,
+      );
     });
   });
 
