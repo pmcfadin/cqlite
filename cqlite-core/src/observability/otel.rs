@@ -13,8 +13,8 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::OnceLock;
 use std::time::Duration;
 
-use super::otel_instruments::instruments;
-use opentelemetry::metrics::Meter;
+use super::otel_instruments::{instruments, Instruments};
+use opentelemetry::metrics::{Counter, Gauge, Histogram, Meter};
 use opentelemetry::trace::TracerProvider as _;
 use opentelemetry::{global, KeyValue};
 use opentelemetry_otlp::{MetricExporter, Protocol, SpanExporter, WithExportConfig};
@@ -230,7 +230,9 @@ pub(crate) fn metrics_active() -> bool {
 /// set (no invented `{category, subsystem}` values that would pollute the bounded
 /// taxonomy); real errors add their own labeled series alongside it.
 pub(crate) fn register_baseline_instruments() {
-    instruments().errors_total.add(0, &[]);
+    // Routed through the emit path so this seeds the SAME instrument a real error
+    // increments; there is no per-metric field to reach for any more (#1705 F3).
+    add_counter(catalog::ERRORS_TOTAL, 0, &[]);
 }
 
 #[cfg(feature = "observability-testing")]
@@ -277,127 +279,145 @@ pub(super) fn meter() -> &'static Meter {
     METER.get_or_init(|| global::meter(SCOPE))
 }
 
+/// Resolve a catalog metric name to its pre-built u64 counter.
+///
+/// **ONE implementation, two callers** (issue #1705, roborev B2): the emit path
+/// [`add_counter`] below, and the registration-completeness guard in `otel_tests.rs`
+/// which asks this function to RESOLVE every catalogued name — an affirmative
+/// runtime measurement of "an instrument exists for this name", rather than a text
+/// search for a mention of it. `None` means the name has no dedicated instrument
+/// and the caller falls back to an ad-hoc one, so a guard can distinguish a wired
+/// metric from an unwired one by calling this.
+///
+/// **No per-metric code** (issue #1705, roborev F3). This used to be a hand-written
+/// `catalog::NAME => &i.field` match, i.e. a SECOND statement of each metric's name
+/// that could disagree with the one used to build the instrument — a mis-wired arm
+/// emitted under the wrong series while every guard stayed green. The instruments
+/// are now keyed by the name they were constructed with
+/// (`otel_instruments::Registry`), so resolution is a lookup and a mismatch is
+/// unrepresentable. Re-introducing a per-metric arm here reds
+/// `catalog_tests::a_handwritten_dispatch_arm_is_rejected_because_it_can_mis_wire`.
+pub(super) fn counter_for<'a>(i: &'a Instruments, name: &str) -> Option<&'a Counter<u64>> {
+    i.counters.get(name)
+}
+
+/// Whether the ad-hoc fallback must REFUSE to build an instrument for `name`.
+///
+/// `true` only for a name DECLARED in [`catalog::STATS_ONLY_METRICS`], whose
+/// contract is that it is surfaced through `MemoryStats` and is never on a scrape
+/// (issue #1705). An unknown/uncatalogued name returns `false` and keeps the ad-hoc
+/// fallback, so no call site silently drops data.
+///
+/// Called ONLY from the `None` (ad-hoc) branch of the three emit functions, never
+/// on the resolved hot path. No panic and no `debug_assert!`: refusing means *not
+/// creating an instrument*, and a `debug_assert!` would panic in every debug/test
+/// build — including the guard that proves this refusal happens — so misuse is
+/// surfaced as a `tracing` event instead.
+fn stats_only_refuses_instrument(name: &str) -> bool {
+    let refused = catalog::STATS_ONLY_METRICS.iter().any(|m| m.name == name);
+    if refused {
+        tracing::debug!(
+            metric = name,
+            "stats-only metric emitted through the OTel path; no instrument created"
+        );
+    }
+    refused
+}
+
 /// Add to a u64 counter identified by a catalog name.
 ///
 /// Catalog names use the cached instrument; unknown names build an ad-hoc
 /// counter so call sites never silently drop data (catalog names should always
-/// be used).
+/// be used). A declared stats-only name creates nothing — see
+/// [`stats_only_refuses_instrument`].
 pub(crate) fn add_counter(name: &'static str, value: u64, attributes: &[KeyValue]) {
-    let i = instruments();
-    let counter = match name {
-        catalog::READ_ROWS => &i.read_rows,
-        catalog::READ_BYTES => &i.read_bytes,
-        catalog::READ_PARTITIONS => &i.read_partitions,
-        catalog::READ_PARTITION_LOOKUP => &i.read_partition_lookup,
-        catalog::READ_BLOOM_CHECKS => &i.read_bloom_checks,
-        catalog::READ_SCAN_WINDOW_REFILL => &i.read_scan_window_refill,
-        catalog::READ_SSTABLES_PRUNED => &i.read_sstables_pruned,
-        catalog::READ_BLOOM_FALSE_NEGATIVES => &i.read_bloom_false_negatives,
-        catalog::READ_BTI_ROWS_ROOT_REJECTED => &i.read_bti_rows_root_rejected,
-        catalog::READ_PARTITION_ACCESS_DISTINCT_PARTITIONS => &i.read_partition_access_distinct,
-        catalog::READ_PARTITION_ACCESS_ACCESSES => &i.read_partition_access_accesses,
-        catalog::READ_PARTITION_ACCESS_BYTES => &i.read_partition_access_bytes,
-        catalog::READ_PARTITION_ACCESS_DROPPED => &i.read_partition_access_dropped,
-        catalog::MERGE_ROWS_IN => &i.merge_rows_in,
-        catalog::MERGE_ROWS_OUT => &i.merge_rows_out,
-        catalog::QUERY_DEGRADED_PATH => &i.query_degraded_path,
-        catalog::INDEX_PARSES_TOTAL => &i.index_parses_total,
-        catalog::INDEX_INTERVAL_PARSES_TOTAL => &i.index_interval_parses_total,
-        catalog::STORAGE_OPEN_SSTABLES => &i.storage_open_sstables,
-        catalog::STORAGE_OPEN_BYTES => &i.storage_open_bytes,
-        catalog::STORAGE_OPEN_TABLES => &i.storage_open_tables,
-        catalog::QUERY_ROWS => &i.query_rows,
-        catalog::QUERY_ROWS_SCANNED => &i.query_rows_scanned,
-        catalog::ERRORS_TOTAL => &i.errors_total,
-        catalog::WRITE_MUTATIONS => &i.write_mutations,
-        catalog::FLUSH_ROWS => &i.flush_rows,
-        catalog::FLUSH_BYTES => &i.flush_bytes,
-        catalog::FLUSH_SSTABLES => &i.flush_sstables,
-        catalog::WRITE_PARTITIONS => &i.write_partitions,
-        catalog::WRITE_BYTES => &i.write_bytes,
-        catalog::COMPACTION_ROWS_MERGED => &i.compaction_rows_merged,
-        catalog::COMPACTION_BYTES_WRITTEN => &i.compaction_bytes_written,
-        catalog::COMPACTION_SSTABLES_IN => &i.compaction_sstables_in,
-        catalog::COMPACTION_SSTABLES_OUT => &i.compaction_sstables_out,
-        catalog::COMPACTION_TOMBSTONES_PURGED => &i.compaction_tombstones_purged,
-        catalog::COMPACTION_TOMBSTONES_SUPPRESSED => &i.compaction_tombstones_suppressed,
-        catalog::COMPACTION_TOMBSTONES_EMITTED => &i.compaction_tombstones_emitted,
-        catalog::RPC_REQUESTS => &i.rpc_requests,
-        catalog::RPC_ROWS => &i.rpc_rows,
-        catalog::RPC_BYTES => &i.rpc_bytes,
-        catalog::WARM_CACHE_HITS => &i.warm_cache_hits,
-        catalog::WARM_CACHE_MISSES => &i.warm_cache_misses,
-        catalog::WARM_CACHE_EVICTS => &i.warm_cache_evicts,
-        catalog::WARM_CACHE_REFRESH => &i.warm_cache_refresh,
-        catalog::FLIGHT_ADMISSION_REJECTED_TOTAL => &i.flight_admission_rejected_total,
-        _ => {
-            meter().u64_counter(name).build().add(value, attributes);
-            return;
-        }
-    };
-    counter.add(value, attributes);
+    add_counter_with(instruments(), meter(), name, value, attributes)
 }
 
-/// Record into an f64 histogram identified by a catalog name.
+/// [`add_counter`] against an explicit instrument set and meter, so a guard can
+/// exercise the real emit path without touching the process-global `OnceLock`s.
+pub(super) fn add_counter_with(
+    i: &Instruments,
+    meter: &Meter,
+    name: &'static str,
+    value: u64,
+    attributes: &[KeyValue],
+) {
+    match counter_for(i, name) {
+        Some(counter) => counter.add(value, attributes),
+        None => {
+            if stats_only_refuses_instrument(name) {
+                return;
+            }
+            meter.u64_counter(name).build().add(value, attributes)
+        }
+    }
+}
+
+/// Resolve a catalog metric name to its pre-built f64 histogram. Shared by the
+/// emit path and the registration guard, and a keyed lookup rather than a
+/// per-metric match — see [`counter_for`].
+pub(super) fn histogram_for<'a>(i: &'a Instruments, name: &str) -> Option<&'a Histogram<f64>> {
+    i.histograms.get(name)
+}
+
+/// Record into an f64 histogram identified by a catalog name. A declared
+/// stats-only name creates nothing — see [`stats_only_refuses_instrument`].
 pub(crate) fn record_histogram(name: &'static str, value: f64, attributes: &[KeyValue]) {
-    let i = instruments();
-    let hist = match name {
-        catalog::READ_DURATION => &i.read_duration,
-        catalog::QUERY_DURATION => &i.query_duration,
-        catalog::COMPACTION_DURATION => &i.compaction_duration,
-        catalog::WAL_SYNC_DURATION => &i.wal_sync_duration,
-        catalog::FLUSH_DURATION => &i.flush_duration,
-        catalog::COMPRESSION_RATIO => &i.compression_ratio,
-        catalog::COMPACTION_FINALIZE_DURATION => &i.compaction_finalize_duration,
-        catalog::COMPACTION_BUDGET_REQUESTED => &i.compaction_budget_requested,
-        catalog::COMPACTION_BUDGET_CONSUMED => &i.compaction_budget_consumed,
-        catalog::RPC_DURATION => &i.rpc_duration,
-        catalog::RPC_PHASE_DURATION => &i.rpc_phase_duration,
-        catalog::FLIGHT_ADMISSION_WAIT_SECONDS => &i.flight_admission_wait_seconds,
-        _ => {
-            meter()
-                .f64_histogram(name)
-                .build()
-                .record(value, attributes);
-            return;
-        }
-    };
-    hist.record(value, attributes);
+    record_histogram_with(instruments(), meter(), name, value, attributes)
 }
 
-/// Record an i64 gauge identified by a catalog name.
+/// [`record_histogram`] against an explicit instrument set and meter — see
+/// [`add_counter_with`].
+pub(super) fn record_histogram_with(
+    i: &Instruments,
+    meter: &Meter,
+    name: &'static str,
+    value: f64,
+    attributes: &[KeyValue],
+) {
+    match histogram_for(i, name) {
+        Some(hist) => hist.record(value, attributes),
+        None => {
+            if stats_only_refuses_instrument(name) {
+                return;
+            }
+            meter.f64_histogram(name).build().record(value, attributes)
+        }
+    }
+}
+
+/// Resolve a catalog metric name to its pre-built i64 gauge. Shared by the emit
+/// path and the registration guard, and a keyed lookup rather than a per-metric
+/// match — see [`counter_for`].
+pub(super) fn gauge_for<'a>(i: &'a Instruments, name: &str) -> Option<&'a Gauge<i64>> {
+    i.gauges.get(name)
+}
+
+/// Record an i64 gauge identified by a catalog name. A declared stats-only name
+/// creates nothing — see [`stats_only_refuses_instrument`].
 pub(crate) fn record_gauge(name: &'static str, value: i64, attributes: &[KeyValue]) {
-    let i = instruments();
-    let gauge = match name {
-        catalog::SSTABLES_OPEN => &i.sstables_open,
-        catalog::READ_PARTITION_ACCESS_SAMPLE_DENOMINATOR => {
-            &i.read_partition_access_sample_denominator
+    record_gauge_with(instruments(), meter(), name, value, attributes)
+}
+
+/// [`record_gauge`] against an explicit instrument set and meter — see
+/// [`add_counter_with`].
+pub(super) fn record_gauge_with(
+    i: &Instruments,
+    meter: &Meter,
+    name: &'static str,
+    value: i64,
+    attributes: &[KeyValue],
+) {
+    match gauge_for(i, name) {
+        Some(gauge) => gauge.record(value, attributes),
+        None => {
+            if stats_only_refuses_instrument(name) {
+                return;
+            }
+            meter.i64_gauge(name).build().record(value, attributes)
         }
-        catalog::READ_PARTITION_ACCESS_SAMPLING_FLOOR => &i.read_partition_access_sampling_floor,
-        catalog::READ_PARTITION_ACCESS_WINDOW_DROPPED => &i.read_partition_access_window_dropped,
-        catalog::MEMTABLE_SIZE_BYTES => &i.memtable_size_bytes,
-        catalog::MEMTABLE_ROWS => &i.memtable_rows,
-        catalog::COMPACTION_LAG => &i.compaction_lag,
-        catalog::RPC_IN_FLIGHT => &i.rpc_in_flight,
-        catalog::RPC_PHASE_ACTIVE => &i.rpc_phase_active,
-        catalog::MERGE_PRODUCER_THREADS => &i.merge_producer_threads,
-        catalog::FLIGHT_ADMISSION_LIMIT => &i.flight_admission_limit,
-        catalog::FLIGHT_ADMISSION_IN_USE => &i.flight_admission_in_use,
-        catalog::FLIGHT_ADMISSION_WAITING => &i.flight_admission_waiting,
-        catalog::MERGE_EGRESS_CHANNEL_DEPTH => &i.merge_egress_channel_depth,
-        catalog::MERGE_ACTIVE_MERGES => &i.merge_active_merges,
-        catalog::PROC_THREADS => &i.proc_threads,
-        catalog::PROC_FDS => &i.proc_fds,
-        catalog::PROC_RSS_BYTES => &i.proc_rss_bytes,
-        catalog::FLIGHT_BLOCKING_TASKS_IN_USE => &i.flight_blocking_tasks_in_use,
-        catalog::FLIGHT_TABLES_DISCOVERED => &i.flight_tables_discovered,
-        catalog::FLIGHT_WARM_TABLES => &i.flight_warm_tables,
-        _ => {
-            meter().i64_gauge(name).build().record(value, attributes);
-            return;
-        }
-    };
-    gauge.record(value, attributes);
+    }
 }
 
 /// Mark the currently-active `tracing` span as errored and tag it with the
