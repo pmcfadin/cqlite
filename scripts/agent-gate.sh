@@ -7635,6 +7635,9 @@ EOF
       lh_census+=("  same target keep its count nonzero.")
       lh_census+=("  Tracked by #3373 (experimental-gated tests execute in NO lane at all).")
       lh_census+=("  where:$lh_where")
+      lh_census+=("  This census is NON-EXHAUSTIVE (#3472): these are the sites it RECOGNISED, not")
+      lh_census+=("  necessarily all that exist — a cfg or declaration shape it does not model is")
+      lh_census+=("  invisible to it and is absent from the list above, not marked.")
     fi
     if [ "$lh_skip" -gt 0 ]; then
       lh_census+=("  $lh_skip further co-required site(s) use a Boolean shape this census does not")
@@ -7643,7 +7646,9 @@ EOF
       lh_census+=("  here. Reported rather than guessed: a named unknown beats a wrong entry.")
     fi
   else
-    lh_census+=("co-required-feature census: 0 — every legacy-heuristics-gated cfg site is reachable at this feature set")
+    lh_census+=("co-required-feature census: 0 RECOGNISED — no recognised legacy-heuristics-gated cfg")
+    lh_census+=("  site requires a feature this lane omits. The scan is NON-EXHAUSTIVE (#3472): this is")
+    lh_census+=("  evidence that none was RECOGNISED, never evidence that none is THERE.")
   fi
   # DECLARED alongside the co-required census, because it is the same kind of blind spot: a
   # subtree whose reachability was not evaluated cannot be counted either way, and the census
@@ -7651,6 +7656,7 @@ EOF
   if [ "$_lh_cfg_gaps" -gt 0 ]; then
     lh_census+=("cfg-gated-subtree gaps: $_lh_cfg_gaps subject target(s) reach a child module through")
     lh_census+=("  a cfg this scan does not evaluate — their legacy coverage is UNCLASSIFIED:")
+    lh_census+=("  NON-EXHAUSTIVE (#3472): these are the gaps it RECOGNISED, not necessarily all.")
     # the DETAIL goes in the census itself, so it lands in the component log rather than being
     # truncated out of it by the `>` below (roborev job 97, Low). "listed above" has to be true.
     for _gd in "${lh_gap_detail[@]:-}"; do
@@ -7658,7 +7664,8 @@ EOF
       lh_census+=("  $_gd")
     done
   else
-    lh_census+=("cfg-gated-subtree gaps: 0 — every module reached is reached unconditionally")
+    lh_census+=("cfg-gated-subtree gaps: 0 RECOGNISED — every module the scan RECOGNISED is reached")
+    lh_census+=("  unconditionally; a declaration form it does not recognise is invisible to it (#3472).")
   fi
   lh_census+=("enabled features (cargo tree -p, package-scoped):$lh_enabled")
   local _cl

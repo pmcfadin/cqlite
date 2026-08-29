@@ -4089,10 +4089,10 @@ else
   bad "1699-cfggate-census: the gap count is tracked but never reported — the census would still read as if every module were reached unconditionally"
 fi
 # and the count must be affirmative in BOTH states: a key with no subject still has to say so
-if [ "$(printf '%s' "$lh_fn" | grep -cF 'reached unconditionally')" -gt 0 ]; then
-  ok "1699-cfggate-zero: the zero case is stated affirmatively, so a pasted census shows the check RAN"
+if [ "$(printf '%s' "$lh_fn" | grep -cF 'gaps: 0 RECOGNISED')" -gt 0 ]; then
+  ok "1699-cfggate-zero: the zero case is stated affirmatively AND qualified as RECOGNISED, so a pasted census shows the check ran without reading as verified absence"
 else
-  bad "1699-cfggate-zero: no affirmative zero line — absence of a gap report is indistinguishable from the scan not running"
+  bad "1699-cfggate-zero: no affirmative qualified zero line — a bare 0 reads as verified absence, and no zero line at all is indistinguishable from the scan not running"
 fi
 
 # A gap is DECLARED only for a confirmed SUBJECT of the lane (roborev job 97, Medium). Declaring
@@ -4160,7 +4160,55 @@ else
   bad "1699-cfgsite-singleline: single-line attribute rendered as [$(cs_render "$cs_single")] — a false truncation marker on complete input"
 fi
 
-ASSERT_FLOOR=360
+# --- 44. #1699: the CENSUS a reader pastes must not claim an exhaustive all-clear (job 108) -----
+# The seam disclaimer is read by whoever EDITS the scanner. These two lines are what every agent
+# reading a gate log sees, and they said "every legacy-heuristics-gated cfg site is reachable" and
+# "every module reached is reached unconditionally" — universal claims from a scan the same file
+# declares NON-EXHAUSTIVE forty lines above. That is this change's own headline sentence applied to
+# the one place it had not been: a clean result presented as a verified one. Pinned here because the
+# qualifier is otherwise one careless edit from regressing, and this is the third unpinned claim on
+# this branch to drift.
+lh_fn44=$(awk '/^run_legacy_heuristics\(\) \{/,/^\}/' "$GATE")
+# every affirmative-ZERO census line must say RECOGNISED — a bare 0 reads as verified absence
+z_lines=$(printf '%s\n' "$lh_fn44" | grep -E 'lh_census\+=\("(co-required-feature census|cfg-gated-subtree gaps): 0' || true)
+z_n=$(printf '%s\n' "$z_lines" | grep -c . || true)
+if [ "${z_n:-0}" -eq 0 ]; then
+  bad "1699-census-zero-present: found NO affirmative-zero census line — either the census stopped reporting the zero case (so absence of a gap is indistinguishable from the scan not running) or this assert stopped matching"
+else
+  ok "1699-census-zero-present: found $z_n affirmative-zero census line(s) to check"
+  z_bad=$(printf '%s\n' "$z_lines" | grep -vF 'RECOGNISED' | grep -c . || true)
+  if [ "${z_bad:-0}" -gt 0 ]; then
+    bad "1699-census-recognised: $z_bad affirmative-zero census line(s) report a bare 0 without RECOGNISED — an agent pasting that census reads a verified all-clear from a non-exhaustive scan"
+  else
+    ok "1699-census-recognised: every affirmative-zero census line qualifies its 0 as RECOGNISED"
+  fi
+fi
+# and the non-exhaustiveness must be stated ON the census, not only in the seam comments
+if [ "$(printf '%s' "$lh_fn44" | grep -cE 'lh_census\+=\("[^"]*(NON-EXHAUSTIVE|does not recognise is invisible)')" -ge 4 ]; then
+  ok "1699-census-nonexhaustive: every census branch — zero AND non-zero — states its own non-exhaustiveness in the emitted text"
+else
+  bad "1699-census-nonexhaustive: the emitted census does not state that the scan is non-exhaustive — the disclaimer would reach maintainers reading the source and not agents reading a gate log"
+fi
+# The NON-ZERO branch is the one that renders on any tree that actually has sites, so it is pinned
+# BY BRANCH and not merely by an occurrence count: the first version of this fix qualified only the
+# zero branches, and a count-based assert would have accepted it while the rendered census stayed
+# unqualified. Found by running the lane, which is why the emitted surface is asserted at all.
+if [ "$(printf '%s' "$lh_fn44" | grep -A6 'lh_census+=("  where:' | grep -cF 'NON-EXHAUSTIVE')" -gt 0 ]; then
+  ok "1699-census-nonzero-branch: the POPULATED census branch (the one that renders when sites exist) states its non-exhaustiveness"
+else
+  bad "1699-census-nonzero-branch: the populated census branch lists sites under 'WHAT THIS LANE DOES NOT EXECUTE' with no non-exhaustiveness note — a reader takes the list for the complete set of omissions"
+fi
+
+# the exact falsified wordings must never come back
+for phrase in "every legacy-heuristics-gated cfg site is reachable" "every module reached is reached unconditionally"; do
+  if [ "$(printf '%s' "$lh_fn44" | grep -cF "$phrase")" -gt 0 ]; then
+    bad "1699-census-noregress: the census again claims '$phrase' — a universal the scan cannot support"
+  else
+    ok "1699-census-noregress: the census no longer claims '$(echo "$phrase" | cut -c1-34)...'"
+  fi
+done
+
+ASSERT_FLOOR=366
 if [ "$PASS" -lt "$ASSERT_FLOOR" ]; then
   echo "FAIL - assert-floor: only $PASS assertions ran, floor is $ASSERT_FLOOR. Sections are being SKIPPED or dying silently (an extraction that broke, a subshell aborting under set -u), and 'failed: 0' over a shrunken subject set is exactly the vacuous pass this suite tests for."
   FAIL=$((FAIL + 1))
