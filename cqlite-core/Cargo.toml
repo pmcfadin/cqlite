@@ -255,6 +255,16 @@ required-features = ["state_machine", "cli-helpers"]
 name = "issue_2148_statistics_toc_single_walk"
 required-features = ["cli-helpers"]
 
+# Scan-path error counting (issue #1704). It is
+# `#![cfg(all(feature = "observability-testing", feature = "delta-scan"))]` — the
+# in-memory metric capture harness needs the SDK testing exporters, and the
+# `scan_delta` seam only exists under `delta-scan` — so BOTH gates are declared
+# here: without them cargo would build the target feature-less and it would
+# compile to an empty test binary that passes vacuously.
+[[test]]
+name = "issue_1704_scan_path_error_counts"
+required-features = ["observability-testing", "delta-scan"]
+
 [[bench]]
 name = "partition_lookup"
 harness = false
