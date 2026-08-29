@@ -7,6 +7,44 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Removed
+
+- **BREAKING (public API): the schema JSON exporter and the never-compiled CQL
+  generator are deleted (#1715, epic #1688 / audit finding AK4; ~2.0k LOC).**
+  Owner-DECIDED delete (capstone ledger #9, 2026-07-01) — the surface had zero
+  callers anywhere in the workspace and no Cassandra-side parity coverage.
+  - Removed `cqlite_core::schema::json_exporter` and the 14 types it re-exported
+    through `cqlite_core::schema` under the `experimental` feature
+    (`JsonExporter`, `JsonExportConfig`, `JsonFormat`, `JsonSchema`, `JsonTable`,
+    `JsonColumn`, `JsonPrimaryKey`, `JsonClusteringKey`, `JsonIndex`, `JsonUDT`,
+    `JsonMetadata`, `JsonTableOptions`, `JsonPerformanceMetrics`,
+    `JsonValidationResults`).
+  - Removed seven `SchemaRegistry` methods —
+    `export_schema_json`, `export_schema_json_with_config`,
+    `export_schema_json_compact`, `export_schema_json_openapi`,
+    `export_schema_json_pipeline`, `export_multiple_schemas_json` and
+    `export_keyspace_schemas_json` — and two `SchemaDiscoveryEngine` methods,
+    `export_json` and `export_json_with_config`.
+  - **All nine existed in DEFAULT builds too**, as
+    `#[cfg(not(feature = "experimental"))]` stubs that unconditionally returned
+    `Error::UnsupportedFormat`. So this removal narrows the DEFAULT public API,
+    not only the `experimental`-gated one — that is the breaking part, and it is
+    called out here rather than left to be discovered at upgrade time. No caller
+    could ever have depended on a successful result from any of them, since
+    without `experimental` they could only ever return an error.
+  - Removed `cqlite-core/src/schema/cql_generator.rs`, which had **no `mod`
+    declaration anywhere in the repository** and was therefore never in any build
+    graph; the file's only repo-wide mention was a doc comment. Any past change to
+    it was a no-op.
+  - **Migration:** there is no replacement, by design. A `schema export --json`
+    surface is a future product decision that would restore this code from version
+    control alongside a real design; it is deliberately not preserved as deprecated
+    shims. Callers needing schema JSON today should serialize the public
+    `TableSchema` / `SchemaInfo` types themselves.
+  - The `experimental` feature flag itself is unchanged — it still gates
+    `Database::flush()`/`compact()`, the INSERT executor path, bloom-filter tests
+    and the `Storage::put`/`delete` stubs.
+
 ### Fixed
 
 - **A dead producer no longer completes a query SUCCESSFULLY with a silently

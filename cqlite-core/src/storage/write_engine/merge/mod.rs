@@ -1245,8 +1245,8 @@ pub fn effective_compaction_schema(schema: &TableSchema, input_paths: &[PathBuf]
 /// Cassandra purges a tombstone during compaction when its on-disk
 /// `localDeletionTime` is strictly less than `gcBefore = now - gc_grace_seconds`
 /// (parity `8d47ebb2`). CQLite reads `gc_grace_seconds` from the table schema
-/// (the `comments` option map — the same surface `cql_parser` / `cql_generator`
-/// use), since it is a table parameter not recorded inside SSTable files.
+/// (the `comments` option map — the same surface `cql_parser` uses), since it
+/// is a table parameter not recorded inside SSTable files.
 ///
 /// When the table declares NO `gc_grace_seconds` (#921 finding 3), CQLite falls
 /// back to Cassandra's table DEFAULT of `864000` seconds (10 days) — CQL tables

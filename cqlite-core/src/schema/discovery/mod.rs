@@ -156,40 +156,6 @@ impl SchemaDiscoveryEngine {
         self.exporter.generate_cql(schema).await
     }
 
-    /// Export schema as JSON
-    #[cfg(feature = "experimental")]
-    pub async fn export_json(&self, schema: &SchemaInfo) -> Result<String> {
-        self.exporter.export_json(schema).await
-    }
-
-    #[cfg(not(feature = "experimental"))]
-    pub async fn export_json(&self, _schema: &SchemaInfo) -> Result<String> {
-        Err(crate::error::Error::unsupported_format(
-            "JSON export requires experimental feature",
-        ))
-    }
-
-    /// Export schema as JSON with custom configuration
-    #[cfg(feature = "experimental")]
-    pub async fn export_json_with_config(
-        &self,
-        schema: &SchemaInfo,
-        config: &crate::schema::json_exporter::JsonExportConfig,
-    ) -> Result<String> {
-        self.exporter.export_json_with_config(schema, config).await
-    }
-
-    #[cfg(not(feature = "experimental"))]
-    pub async fn export_json_with_config<T>(
-        &self,
-        _schema: &SchemaInfo,
-        _config: &T,
-    ) -> Result<String> {
-        Err(crate::error::Error::unsupported_format(
-            "JSON export requires experimental feature",
-        ))
-    }
-
     /// Generate schema comparison report
     pub async fn compare_schemas(
         &self,

@@ -187,7 +187,7 @@ cqlite-core = { git = "…", default-features = false, features = ["all-compress
 | `write-support` | yes | Write path: SSTable writer + STCS compaction |
 | `cli-helpers` | no | CLI-specific ingestion and REPL API |
 | `metrics` | no | Performance metrics collection |
-| `experimental` | no | Unstable/unfinished paths: `flush()`/`compact()`, the INSERT executor, the schema JSON exporter, bloom-filter tests, and unimplemented `Storage::put`/`delete` stubs |
+| `experimental` | no | Unstable/unfinished paths: `flush()`/`compact()`, the INSERT executor, bloom-filter tests, and unimplemented `Storage::put`/`delete` stubs |
 
 ## Verify your installation
 

@@ -7,8 +7,6 @@
 pub mod aggregator;
 pub mod cql_parser;
 pub mod discovery;
-#[cfg(feature = "experimental")]
-pub mod json_exporter;
 pub mod parser;
 pub mod registry;
 
@@ -107,13 +105,6 @@ thread_local! {
 }
 
 pub use parser::SchemaParser;
-
-#[cfg(feature = "experimental")]
-pub use json_exporter::{
-    JsonClusteringKey, JsonColumn, JsonExportConfig, JsonExporter, JsonFormat, JsonIndex,
-    JsonMetadata, JsonPerformanceMetrics, JsonPrimaryKey, JsonSchema, JsonTable, JsonTableOptions,
-    JsonUDT, JsonValidationResults,
-};
 
 // Type alias for backward compatibility
 pub type ColumnSpec = Column;
