@@ -155,6 +155,39 @@ pub struct JoinedStream<T: ScanStreamItem> {
     /// private field rather than a public-trait method, so the metric wiring adds
     /// nothing to [`ScanStreamItem`]'s published surface.
     account: ItemAccounting<T>,
+    /// Whether a failed scan is reported into `cqlite.errors.total` HERE, and
+    /// whether it already has (issue #1704). See [`ScanErrorReporting`].
+    errors: ScanErrorReporting,
+}
+
+/// Whether THIS stream is the boundary that counts a failed scan into
+/// `cqlite.errors.total{category, subsystem="reader"}` (issue #1704).
+///
+/// # Why the grain is per-OPERATION, not per-stream
+///
+/// Streams nest: a fan-out k-way merge drains one [`JoinedStream`] per generation
+/// and re-sends a sub-scan's `Err` on its own channel, and the per-row → batch
+/// re-chunker drains a per-row stream and re-sends its `Err` too. The SAME failure
+/// therefore crosses two or three `recv` boundaries, and a per-stream emission
+/// would count one failed query two or three times.
+///
+/// This is the identical grain problem [`ReadOpMeter`] already solved for
+/// `read.rows`/`read.partitions`, and it takes the identical answer: exactly the
+/// streams built by [`JoinedStream::new_measured`] — the TOP-LEVEL read operations —
+/// report, and every nested stream built by [`JoinedStream::new`] delegates to the
+/// one above it. Keeping the two decisions in the same two constructors is what
+/// stops them drifting apart.
+enum ScanErrorReporting {
+    /// A nested stream: an enclosing measured stream sees (and counts) the same
+    /// error when the merge/re-chunker forwards it.
+    Delegated,
+    /// A top-level operation that has not yet failed.
+    Pending,
+    /// A top-level operation whose failure has been counted. LATCHED: the sticky
+    /// dead-task verdict is re-REPORTED to the consumer on every later `recv`
+    /// (see [`TaskState::Died`]) and must not be re-COUNTED, and neither must a
+    /// consumer that keeps polling after a terminal channel error.
+    Reported,
 }
 
 /// What a [`JoinedStream`] knows about its producer task (issue #3106, roborev).
@@ -196,6 +229,9 @@ impl<T: ScanStreamItem> JoinedStream<T> {
             task: TaskState::Running(task),
             meter: ReadOpMeter::inert(),
             account: account_nothing,
+            // Nested stream: the enclosing measured stream counts the failure it
+            // forwards (issue #1704).
+            errors: ScanErrorReporting::Delegated,
         }
     }
 
@@ -217,6 +253,22 @@ impl<T: ScanStreamItem> JoinedStream<T> {
             task: TaskState::Running(task),
             meter,
             account,
+            // Top-level read operation: this is the ONE boundary that counts a
+            // failed scan (issue #1704).
+            errors: ScanErrorReporting::Pending,
+        }
+    }
+
+    /// Count a terminal scan failure into `cqlite.errors.total` exactly once
+    /// (issue #1704).
+    ///
+    /// A pure side effect: the caller returns the SAME `Err` it would have returned
+    /// before, with the same variant and message. The category is derived by the
+    /// classifier via [`crate::observability::record_error`] — never chosen here.
+    fn count_scan_error(&mut self, err: &Error) {
+        if matches!(self.errors, ScanErrorReporting::Pending) {
+            self.errors = ScanErrorReporting::Reported;
+            crate::observability::record_error(err, "reader");
         }
     }
 
@@ -233,6 +285,15 @@ impl<T: ScanStreamItem> JoinedStream<T> {
     /// A dead task is STICKY: every subsequent call re-reports the failure, so
     /// polling again can never downgrade it to a clean end of stream.
     ///
+    /// # Error counting (issue #1704)
+    ///
+    /// Every `Err` this method returns — a producer-reported terminal item, a dead
+    /// task, a cancellation, and the sticky re-reports of the last two — counts ONCE
+    /// into `cqlite.errors.total{category, subsystem="reader"}` when this stream is
+    /// the top-level operation (see [`ScanErrorReporting`]). The counting is a pure
+    /// side effect: the `Err` returned is bit-for-bit the one that would have been
+    /// returned before, and the category comes from the classifier, never from here.
+    ///
     /// # Cancellation safety (issue #3106, roborev)
     ///
     /// This method is cancel-safe in the way that matters here: cancelling it
@@ -247,14 +308,23 @@ impl<T: ScanStreamItem> JoinedStream<T> {
     pub async fn recv(&mut self) -> Option<Result<T>> {
         if let TaskState::Died { cancelled } = self.task {
             self.meter.finish();
-            return Some(Err(sticky_dead_task_error::<T>(cancelled)));
+            let err = sticky_dead_task_error::<T>(cancelled);
+            // Latched (issue #1704): the join-error arm below already counted this
+            // failure, so re-reporting it to a still-polling consumer adds nothing.
+            self.count_scan_error(&err);
+            return Some(Err(err));
         }
         if let Some(item) = self.rx.recv().await {
             // Read-metric bookkeeping (issue #1701) for the rows this item
             // DELIVERED. An `Err` item carries no rows, and the meter's own totals
             // are emitted at the terminal transition below.
-            if let Ok(delivered) = &item {
-                (self.account)(delivered, &mut self.meter);
+            match &item {
+                Ok(delivered) => (self.account)(delivered, &mut self.meter),
+                // The producer reported a failure as a terminal stream item — the
+                // ordinary mid-scan failure path (issue #1704). Counted here, at the
+                // one boundary every streaming surface crosses, and passed through
+                // untouched.
+                Err(e) => self.count_scan_error(e),
             }
             return Some(item);
         }
@@ -271,7 +341,9 @@ impl<T: ScanStreamItem> JoinedStream<T> {
             // A proven-clean completion is the ONLY route to end-of-stream.
             TaskState::Finished => return None,
             TaskState::Died { cancelled } => {
-                return Some(Err(sticky_dead_task_error::<T>(*cancelled)))
+                let err = sticky_dead_task_error::<T>(*cancelled);
+                self.count_scan_error(&err);
+                return Some(Err(err));
             }
         };
         // No `.await` between observing the outcome and recording it, so the verdict
@@ -290,11 +362,16 @@ impl<T: ScanStreamItem> JoinedStream<T> {
                 // internal-invariant-violated report.
                 let cancelled = join_err.is_cancelled();
                 self.task = TaskState::Died { cancelled };
-                Some(Err(if cancelled {
+                let err = if cancelled {
                     Error::Cancelled
                 } else {
                     dead_scan_task_error::<T>(&join_err)
-                }))
+                };
+                // A dead producer IS a failed scan (issue #1704) — the case that
+                // previously reached the consumer as an error while the operator's
+                // error dashboard stayed clean.
+                self.count_scan_error(&err);
+                Some(Err(err))
             }
         }
     }

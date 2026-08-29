@@ -54,7 +54,10 @@ pub type ScanDeltaOutput = (
 /// ## Errors
 ///
 /// A hard parse error (corrupt SSTable, missing schema, etc.) is forwarded
-/// as an `Err(…)` item in the channel stream and terminates the scan.
+/// as an `Err(…)` item in the channel stream and terminates the scan, and is
+/// counted ONCE into `cqlite.errors.total{category, subsystem="reader"}`
+/// (issue #1704). Counting is a pure side effect: the `Err` the consumer receives
+/// is unchanged.
 ///
 /// [`scan_delta`] returns immediately with an error if the SSTable directory
 /// does not exist or contains no `Data.db` file.
@@ -67,7 +70,15 @@ pub fn scan_delta(
     let summary = ScanSummaryHandle::new();
     let summary_for_task = summary.clone();
     tokio::spawn(async move {
-        if let Err(e) = run_scan_delta(sstable_dir, schema, tx.clone(), summary_for_task).await {
+        let outcome = run_scan_delta(sstable_dir, schema, tx.clone(), summary_for_task).await;
+        // Issue #1704: this is the SOLE terminal-`Err` send of a delta scan, so it is
+        // the scan's error exit seam. `scan_delta` hands back a RAW `mpsc::Receiver`
+        // rather than a `JoinedStream`, so the streaming surfaces' seam
+        // (`JoinedStream::recv`) does not cover it and a failed delta scan was
+        // invisible to `cqlite.errors.total{subsystem="reader"}`. `record_result`
+        // counts on the `Err` arm and returns the result UNCHANGED — the category
+        // comes from the classifier (`Error::obs_category`), never from here.
+        if let Err(e) = crate::observability::record_result("reader", outcome) {
             let _ = tx.send(Err(e)).await;
         }
     });

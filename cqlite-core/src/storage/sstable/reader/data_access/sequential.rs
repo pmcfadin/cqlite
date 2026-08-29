@@ -66,7 +66,39 @@ impl SSTableReader {
     /// * `schema` - Optional table schema for schema-aware parsing. When provided,
     ///   enables accurate type detection and avoids heuristic-based parsing.
     ///   Strongly recommended for Cassandra 5.0+ formats.
+    ///
+    /// # Error counting (issue #1704)
+    ///
+    /// A failure is counted ONCE into
+    /// `cqlite.errors.total{category, subsystem="reader"}` at this boundary. This
+    /// is the top-level exit seam of the MATERIALIZING scan (the streaming
+    /// surfaces are counted at [`JoinedStream::recv`], and `scan_delta` at its own
+    /// terminal send), so the inner steps it delegates to — `sequential_scan`,
+    /// `bti_scan_with_metadata`, the index walk — deliberately do NOT count: they
+    /// are also reached from `iterate_all_partitions` and the full-index stream,
+    /// and counting there too would report one failed scan two or three times.
+    /// The category comes from the classifier via
+    /// [`crate::observability::record_result`], never from this call site, and the
+    /// `Err` is returned unchanged.
     pub async fn scan(
+        &self,
+        table_id: &TableId,
+        start_key: Option<&RowKey>,
+        end_key: Option<&RowKey>,
+        limit: Option<usize>,
+        schema: Option<&crate::schema::TableSchema>,
+    ) -> Result<Vec<(RowKey, ScanRow)>> {
+        crate::observability::record_result(
+            "reader",
+            self.scan_inner(table_id, start_key, end_key, limit, schema)
+                .await,
+        )
+    }
+
+    /// Implementation of [`scan`](Self::scan); see there for the contract. Kept
+    /// separate so the error-counting seam is a single, unmissable wrapper rather
+    /// than a `record_error` at each of this function's several early returns.
+    async fn scan_inner(
         &self,
         table_id: &TableId,
         start_key: Option<&RowKey>,

@@ -195,6 +195,30 @@ fn assert_one_reader_error_classified_as(m: &testing::CapturedMetrics, err: &Err
     );
 }
 
+/// The `test_comp.lz4_table` schema the corrupt fixture was written from — `scan_delta`
+/// takes a schema by value rather than reading one from disk.
+fn lz4_table_schema() -> cqlite_core::schema::TableSchema {
+    cqlite_core::schema::TableSchema {
+        keyspace: "test_comp".to_string(),
+        table: "lz4_table".to_string(),
+        partition_keys: vec![cqlite_core::schema::KeyColumn {
+            name: "pk".to_string(),
+            data_type: "int".to_string(),
+            position: 0,
+        }],
+        clustering_keys: vec![],
+        dropped_columns: std::collections::HashMap::new(),
+        columns: vec![cqlite_core::schema::Column {
+            name: "v".to_string(),
+            data_type: "text".to_string(),
+            nullable: true,
+            is_static: false,
+            default: None,
+        }],
+        comments: std::collections::HashMap::new(),
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Seam 1 — the streaming surfaces (`JoinedStream::recv`)
 // ---------------------------------------------------------------------------
@@ -262,28 +286,11 @@ async fn scan_delta_over_corrupt_chunk_records_one_reader_error() {
     let mc = testing::metrics_capture();
     mc.reset();
 
-    let schema = cqlite_core::schema::TableSchema {
-        keyspace: "test_comp".to_string(),
-        table: "lz4_table".to_string(),
-        partition_keys: vec![cqlite_core::schema::KeyColumn {
-            name: "pk".to_string(),
-            data_type: "int".to_string(),
-            position: 0,
-        }],
-        clustering_keys: vec![],
-        dropped_columns: std::collections::HashMap::new(),
-        columns: vec![cqlite_core::schema::Column {
-            name: "v".to_string(),
-            data_type: "text".to_string(),
-            nullable: true,
-            is_static: false,
-            default: None,
-        }],
-        comments: std::collections::HashMap::new(),
-    };
-
-    let (mut rx, _summary) =
-        cqlite_core::storage::sstable::reader::delta_scan::scan_delta(dir.clone(), schema, 8);
+    let (mut rx, _summary) = cqlite_core::storage::sstable::reader::delta_scan::scan_delta(
+        dir.clone(),
+        lz4_table_schema(),
+        8,
+    );
 
     let mut delivered: Option<Error> = None;
     while let Some(item) = rx.recv().await {
@@ -302,15 +309,47 @@ async fn scan_delta_over_corrupt_chunk_records_one_reader_error() {
 
     let m = mc.flush_and_collect();
     assert_one_reader_error_classified_as(&m, &err, "scan_delta");
+}
 
-    // LITERAL `{category=corruption}` coverage (the issue's AC1 wording), on a path
-    // that genuinely constructs `Error::Corruption` rather than by hand-rolling one.
-    assert_eq!(
-        err.obs_category().as_str(),
-        "corruption",
-        "scan_delta wraps its scan failures in Error::corruption(..), so the terminal \
-         error must classify as `corruption`: {err}"
+/// LITERAL `{category=corruption, subsystem=reader}` coverage — the issue's AC1
+/// wording — on a path that genuinely constructs `Error::Corruption`.
+///
+/// The bit-flip fixture cannot serve this: its CRC mismatch is `Error::InvalidFormat`
+/// (`parsing`), by deliberate design documented on #1397/#1411. `scan_delta`'s
+/// `find_data_db` DOES raise `Error::corruption(..)` for a generation directory with
+/// no `Data.db`, and it raises it INSIDE the spawned driver — so the failure travels
+/// the same terminal-send seam a mid-scan failure does, with no `SSTableReader::open`
+/// (whose own instrumentation would add a second, unrelated increment) in the way.
+/// Hermetic: an empty temp dir, no corpus needed.
+#[tokio::test(flavor = "multi_thread")]
+#[serial]
+async fn scan_delta_corruption_error_is_counted_under_the_corruption_category() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let mc = testing::metrics_capture();
+    mc.reset();
+
+    let (mut rx, _summary) = cqlite_core::storage::sstable::reader::delta_scan::scan_delta(
+        dir.path().to_path_buf(),
+        lz4_table_schema(),
+        8,
     );
+
+    let mut delivered: Option<Error> = None;
+    while let Some(item) = rx.recv().await {
+        if let Err(e) = item {
+            delivered = Some(e);
+            break;
+        }
+    }
+    let err = delivered.expect("a generation directory with no Data.db must fail the scan");
+    assert!(
+        matches!(err, Error::Corruption(_)),
+        "find_data_db raises Error::corruption for a directory with no Data.db, got: {err:?}"
+    );
+    while rx.recv().await.is_some() {}
+
+    let m = mc.flush_and_collect();
+    assert_one_reader_error_classified_as(&m, &err, "scan_delta (no Data.db)");
     assert_eq!(
         m.sum_where(
             catalog::ERRORS_TOTAL,
