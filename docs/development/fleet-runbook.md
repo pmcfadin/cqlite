@@ -31,11 +31,29 @@ issues itself). Other machines run pure **workers**. A lead is a worker with a h
 git clone https://github.com/pmcfadin/cqlite && cd cqlite
 bash scripts/bootstrap-agent-machine.sh        # or manually: sccache, cargo-nextest, bash>=4.3, mold (Linux)
 bash test-data/scripts/fetch-datasets.sh       # real SSTable binaries — REQUIRED; export the line it prints
-gh auth setup-git                              # git push credentials — SEPARATE from gh auth (#2942)
 gh auth status                                  # must include the 'project' scope (board access)
-bash scripts/flow/claim.sh smoke               # preflight: prove origin accepts refs/claims/* (see below)
-                                               #   (bootstrap now runs this probe itself and reports
-                                               #    git-push: VERIFIED / FAILED / UNMEASURED, #3369)
+```
+
+**git push credentials and the `refs/claims/*` preflight are no longer manual steps (#3369).**
+`bootstrap-agent-machine.sh --fix-credentials` wires the credential path itself (preferring
+`gh auth setup-git`), and every bootstrap run then MEASURES push capability by performing the
+operation — it invokes `claim.sh smoke` and reports one of `git-push: VERIFIED` / `FAILED` /
+`UNMEASURED`. The two commands below are now the **fallback** when you are diagnosing by hand, not
+the primary path:
+
+```bash
+gh auth setup-git                              # fallback: wire git push credentials (SEPARATE from gh auth, #2942)
+bash scripts/flow/claim.sh smoke               # fallback: prove origin accepts refs/claims/* (see below)
+```
+
+**Cost and residual of the automatic probe.** Every bootstrap run — laptop runs included — makes two
+extra network round trips and CREATES AND DELETES a transient `refs/claims/smoke-<nonce>` ref on the
+shared origin. `claim.sh smoke` only *warns* if its cleanup delete fails, so an interrupted run can
+strand one. List and clean them:
+
+```bash
+git ls-remote origin 'refs/claims/smoke-*'
+git push origin --delete refs/claims/smoke-<nonce>
 ```
 
 ### Notification channel (ntfy) — one env var, no per-machine binary (#3119)
@@ -116,8 +134,9 @@ again.
 **Claim-ref preflight (#2665):** the cross-machine lock is a push to the `refs/claims/*` ref
 namespace on origin — `claim.sh smoke` creates, `ls-remote`s, and deletes a throwaway
 `refs/claims/smoke-<nonce>` ref to confirm the remote permits it (`SMOKE-OK` = good). This is
-**verified working on github.com/pmcfadin/cqlite** (2026-07-17). Run it **once when adopting a new
-remote or host** — a managed Git host that restricts custom ref namespaces would make the whole
+**verified working on github.com/pmcfadin/cqlite** (2026-07-17). Since #3369
+`bootstrap-agent-machine.sh` runs this probe on every invocation (that is its `git-push:` line), so
+you rarely need it by hand; run it directly **when adopting a new remote or host** — a managed Git host that restricts custom ref namespaces would make the whole
 claim mechanism unusable, and that must be caught before the fleet relies on it. **Non-unique
 hostnames:** the claim holder identity is `hostname -s`; on a fleet of cloud images/containers/cloned
 VMs that report the *same* short hostname, export a UNIQUE `CLAIM_MACHINE` per box (else two machines

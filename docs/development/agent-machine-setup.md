@@ -35,7 +35,9 @@ without it, it prints the exact command for each gap. It verifies, in order:
    `CQLITE_PROJECT_OWNER` / `CQLITE_PROJECT_NUMBER` / `CQLITE_PROJECT_ACCOUNT`.
    It also checks **git push credentials** (#2942) — a *separate* credential path from
    `gh`. Under `--yes` (or `--fix-credentials`) it configures one, **scoped to the origin
-   host**, and the token value is never written to disk.
+   host**, and the token value is never written to disk. That check is a *configuration*
+   probe (`git credential fill`, which never contacts the network): it proves a helper
+   ANSWERS, never that a push would succeed. The push claim belongs to 3b below.
 3b. **git PUSH capability** (#3369) — the section above validates *configuration*
    (`git credential fill` never contacts the network); this one performs **the
    operation**, delegating to `scripts/flow/claim.sh smoke` to create, read back and
@@ -53,6 +55,13 @@ without it, it prints the exact command for each gap. It verifies, in order:
    UNMEASURED is a warning on purpose: an unmeasured capability must never inherit the
    permissive branch. `--skip-push-probe` is for offline boxes and hermetic tests, and is
    **not** `--skip-smoke` (which skips the final *gate* run).
+
+   **Cost:** measuring the operation means performing it — two extra network round trips
+   and a transient `refs/claims/smoke-<nonce>` ref created and deleted on the shared
+   origin, on **every** run of this script. `claim.sh smoke` only warns if its cleanup
+   delete fails, so an interrupted run can strand one; list them with
+   `git ls-remote origin 'refs/claims/smoke-*'` and delete with
+   `git push origin --delete refs/claims/smoke-<nonce>`.
 4. **roborev** — installed, and this machine's *configured* agent resolves.
 5. **Datasets** + `CQLITE_DATASETS_ROOT` guidance.
 6. **Health check** — runs the gate's fmt smoke and prints the authoritative
@@ -67,6 +76,7 @@ The bootstrap now checks the first two and fails loudly; the third is a hand-typ
 | You see | Real cause | Working form |
 |---|---|---|
 | `fatal: could not read Username for 'https://github.com'` | `gh` is authenticated but **git is not** — they are separate credential paths. `scripts/flow/claim.sh` + `claim-heartbeat.sh` push with plain git on 10+ call sites, so the claim protocol itself does not work. | `gh auth setup-git`, or `bash scripts/bootstrap-agent-machine.sh --yes` (configures an origin-host-scoped helper that dereferences `$GH_TOKEN` at call time). |
+| `git push` fails on a box where `gh auth status` is green **and** `git ls-remote origin HEAD` succeeds | Same shape, one subsystem over: a read is evidence about reachability, not about the write. `claim.sh claim <N>` — the first thing a lane does — is a `git push`, so the box looks healthy and no lane can start (#3369). | `bash scripts/bootstrap-agent-machine.sh --fix-credentials`, then read its `git-push:` line. That check is the direct application of the doctrine sentence below: it PERFORMS the push instead of inferring it. |
 | `gh project …` fails for a missing **`read:org`** scope on a token whose scopes DO include `project` | A scope match is evidence about a token, not about the operation. `gh project item-edit` needs `read:org`; the equivalent GraphQL mutation does not. | Widen the token (`gh auth refresh -s read:org`), **or** do board writes through the `updateProjectV2ItemFieldValue` GraphQL mutation — it succeeds with the same token. |
 | `stale info` from a **bare** `git push --force-with-lease`, even when local and remote refs demonstrably match | The bare form leases against a remote-tracking ref your checkout may never have fetched. | Always the explicit CAS form: `git push --force-with-lease=<ref>:<sha>` (what the flow scripts already use). |
 
