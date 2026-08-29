@@ -334,6 +334,13 @@ claim_drain_pending_cleanup() {
       log "pending cleanup of ${id} dropped: it is the lane currently stamped, not a stale ref"
       continue
     fi
+    # NO LEASE => NO DELETE (roborev round 32). Also covers a bare `<id>` entry queued by an older
+    # process, where no lease was ever recorded: the entry is dropped from the queue rather than retried
+    # forever, because retrying cannot acquire a lease that was never captured.
+    if [[ -z "$lease" ]]; then
+      log "pending cleanup of ${id} DROPPED: no lease was recorded for it, and an unleased delete could remove a successor's live claim — the CI reaper collects it with its own lease"
+      continue
+    fi
     rc=0
     HEARTBEAT_MACHINE="$CLAIM_MACHINE" $CLAIM_CMD reap "$CLAIM_MACHINE" "$id" "$lease" >/dev/null 2>&1 || rc=$?
     if [[ "$rc" == 0 ]]; then
@@ -582,7 +589,17 @@ stamp_claim() {
     # and cannot name the ref this supervisor wrote. Recording it here is the only place that knows.
     CLAIM_STAMPED_ISSUE="$lane_id"
     CLAIM_STAMPED_SHA="$stamp_sha"
-    [[ -n "$stamp_sha" ]] || log "WARN: stamp did not report a sha for lane $lane_id — a later reap of it will run without a lease (it could delete a ref refreshed by another supervisor)"
+    # NO SHA MEANS NO AUTOMATED DELETE, NOT A DELETE WITHOUT A LEASE (roborev round 32, Medium). The
+    # round-19 lease work logged a WARN here and then carried on, so an empty lease reached `reap` and
+    # `delete_ref_guarded` performed an UNCONDITIONAL delete — the lease protection silently degrading to
+    # none, in exactly the case it exists for. The reachable path is not exotic: `CLAIM_CMD` names a
+    # script, so during ANY rollout where the invoked `claim-heartbeat.sh` predates the sha-on-stdout
+    # contract this change introduces, EVERY stamp yields an empty lease and EVERY reap is unleased.
+    #
+    # Fail closed on the safe side: without a lease this supervisor does not delete that lane at all.
+    # A retained ref is collectable — the CI reaper supplies its own lease from the listing — whereas a
+    # successor's live claim deleted by an unleased push is not recoverable.
+    [[ -n "$stamp_sha" ]] || log "WARN: stamp reported no sha for lane $lane_id — automated deletion of that lane is DISABLED for this supervisor (an unleased delete could remove a successor's live claim); the CI reaper will collect it with its own lease"
     # The replacement exists, so the old ref can go. Best-effort by design: a failure here leaves a
     # stale ref that dead-lanes will report and the reaper will collect, which is far better than the
     # gap that deleting first could open.
@@ -692,6 +709,10 @@ clear_claim() {
   # a successor has already taken this lane id — would otherwise delete the successor's LIVE claim on
   # its way out, making that lane unobservable. rc=4 means exactly that case and is reported as a
   # transfer, not a failure.
+  if [[ -z "$CLAIM_STAMPED_SHA" ]]; then
+    log "claim clear DECLINED for lane $issue: no lease was recorded, and an unleased delete could remove a successor's live claim — left for the CI reaper, which supplies its own lease (roborev round 32)"
+    return 0
+  fi
   local rc=0
   HEARTBEAT_MACHINE="$CLAIM_MACHINE" $CLAIM_CMD reap "$CLAIM_MACHINE" "$issue" "$CLAIM_STAMPED_SHA" >/dev/null 2>&1 || rc=$?
   if [[ "$rc" == 0 ]]; then

@@ -483,9 +483,19 @@ jobs:
               issue=$(printf '%s' "$msg" | tr ' \t\n' '\n\n\n' | sed -n 's/^issue=\([0-9][0-9]*\)$/\1/p' | head -1)
             fi
 
-            # `reap` re-checks the open-PR guard atomically before deleting, so a
-            # PR opened between should-reap and here still refuses the delete.
-            if bash "$HB" reap "$machine" "${lane_issue:-}" "$refsha"; then
+            # A LEGACY REF WHOSE ISSUE CANNOT BE READ IS NOT REAPED (roborev round 32, Medium — and I
+            # examined this exact site at round 17 and wrongly cleared it). The fetch/parse above is
+            # best-effort, and my round-17 note said a failure "loses only the board flip while the reap
+            # stays atomic". That evaluated the two consequences SEPARATELY. Jointly they are worse than
+            # either: the ref is DELETED and the issue is UNKNOWN, so nothing will ever flip that board
+            # item back to Ready and it is STRANDED at In Progress with no claim left to collect.
+            #
+            # A per-LANE ref carries its issue in the ref path, so it is unaffected. Only the LEGACY
+            # per-machine shape depends on the message, and for it an unreadable issue now means KEEP:
+            # a retained ref is collectable on the next sweep, a stranded board item is not self-healing.
+            if [ -z "$lane_issue" ] && [ -z "${issue:-}" ]; then
+              echo "::notice::skipping legacy claim ${refname}: its issue could not be read, so reaping it would strand the board item (kept for the next sweep)"
+            elif bash "$HB" reap "$machine" "${lane_issue:-}" "$refsha"; then
               echo "reaped claim machine=$machine issue=${issue:-?}"
               reaped=$((reaped+1))
               # Flip the freed item back to Ready + leave a trace (skip issue "0"

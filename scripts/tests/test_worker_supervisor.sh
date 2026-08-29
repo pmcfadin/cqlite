@@ -2682,10 +2682,16 @@ STUBEOF
     CLAIM_CMD="bash $d/bin/claim.sh" HEARTBEAT_MACHINE=testbox CLAIM_LOG="$CLAIM_LOG" \
     bash -c '
       source "$1"
+      # A real supervisor always holds a lease unless the stamp reported no sha; round 32 makes an
+      # empty lease refuse outright, so these legs supply one and the empty case is asserted below.
+      CLAIM_STAMPED_SHA="feed0001"
       CLAIM_STAMPED_ISSUE="p777-dead1"; clear_claim 0
       CLAIM_STAMPED_ISSUE="p888-dead2"; clear_claim 1
       CLAIM_STAMPED_ISSUE="4242";       clear_claim 0
       CLAIM_STAMPED_ISSUE="5353";       clear_claim 1
+      # ROUND 32: no lease => no automated delete, even when concluded.
+      CLAIM_STAMPED_SHA=""
+      CLAIM_STAMPED_ISSUE="6464";       clear_claim 1
     ' _ "$SUPERVISOR" 2>&1
   )"
   if printf '%s' "$out" | grep -q 'the work on lane p777-dead1 has not concluded' \
@@ -2693,7 +2699,9 @@ STUBEOF
     && ! grep -qE '^reap testbox p777-dead1( |$)' "$CLAIM_LOG" \
     && ! grep -qE '^reap testbox 4242( |$)' "$CLAIM_LOG" \
     && grep -qE '^reap testbox p888-dead2( |$)' "$CLAIM_LOG" \
-    && grep -qE '^reap testbox 5353( |$)' "$CLAIM_LOG"; then
+    && grep -qE '^reap testbox 5353( |$)' "$CLAIM_LOG" \
+    && ! grep -qE '^reap testbox 6464' "$CLAIM_LOG" \
+    && printf '%s' "$out" | grep -q 'DECLINED for lane 6464: no lease was recorded'; then
     pass "claim: an UNCONCLUDED lane survives regardless of its id shape (placeholder AND numeric), and a concluded one is cleared either way"
   else
     fail "clear-claim-concluded: out=[$out] log=[$(tr '\n' ';' <"$CLAIM_LOG")]"
@@ -3225,6 +3233,7 @@ test_pending_pr_keeps_the_claim() {
     bash -c '
       source "$1"
       CLAIM_STAMPED_ISSUE="p999-abc"
+      CLAIM_STAMPED_SHA="feed0002"
       PENDING_PR_LIST="4242'$'\t''88'$'\t''1'$'\t''0"
       clear_claim 1          # CONCLUDED=1, but a PR is pending
       printf "AFTER_PENDING=%s\n" "$(grep -c "^reap" "$CLAIM_LOG" 2>/dev/null || echo 0)"
@@ -3344,19 +3353,29 @@ STUBEOF
     CLAIM_LOG="$CLAIM_LOG" \
     bash -c '
       source "$1"
-      CLAIM_PENDING_CLEANUP=" p123-abc 88 "
+      CLAIM_PENDING_CLEANUP=" p123-abc:aaa111 88:bbb222 "
       # Draining while lane p123-abc is the CURRENT one must skip it and retry only 88.
       claim_drain_pending_cleanup "p123-abc"
       printf "PENDING_AFTER=[%s]\n" "$CLAIM_PENDING_CLEANUP"
+      # ROUND 32: a BARE entry (no lease recorded) must be DROPPED, not drained. Round 19 deliberately
+      # kept draining those "so an entry queued by an older process is still cleaned" — and that was
+      # itself the defect: draining without a lease IS the unleased delete that can remove a
+      # successor'"'"'s live claim.
+      CLAIM_PENDING_CLEANUP=" 77 "
+      claim_drain_pending_cleanup
+      printf "BARE_AFTER=[%s]\n" "$CLAIM_PENDING_CLEANUP"
     ' _ "$SUPERVISOR" 2>&1
   )"
   # Three things must hold: the current lane is announced as skipped, it is NOT reaped, and the other
   # id IS retried and retained (its reap failed).
   if printf '%s' "$out" | grep -q 'pending cleanup of p123-abc dropped: it is the lane currently stamped' \
     && ! grep -qE '^reap testbox p123-abc( |$)' "$CLAIM_LOG" \
-    && grep -qE '^reap testbox 88( |$)' "$CLAIM_LOG" \
-    && printf '%s' "$out" | grep -q 'PENDING_AFTER=\[ 88:\]'; then
-    pass "claim: the drain SKIPS the lane currently stamped, retries the other, and retains it on failure"
+    && grep -qE '^reap testbox 88 bbb222$' "$CLAIM_LOG" \
+    && ! grep -qE '^reap testbox 77' "$CLAIM_LOG" \
+    && printf '%s' "$out" | grep -q 'DROPPED: no lease was recorded' \
+    && printf '%s' "$out" | grep -q 'BARE_AFTER=\[\]' \
+    && printf '%s' "$out" | grep -q 'PENDING_AFTER=\[ 88:bbb222\]'; then
+    pass "claim: the drain SKIPS the current lane, retries the other and RETAINS it with its lease on failure, and DROPS a bare leaseless entry"
   else
     fail "claim-drain-current: protection did not hold. out=[$out] log=[$(tr '\n' ';' <"$CLAIM_LOG")]"
   fi
