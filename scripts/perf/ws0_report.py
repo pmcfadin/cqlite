@@ -701,6 +701,16 @@ def build_report(args: argparse.Namespace) -> tuple[dict, list[str]]:
         "measurements": [],
     }
 
+    # THE SINGLE SOURCE OF TRUTH FOR BASELINE-NESS. Read by the title AND by the `profile` line, so
+    # the two cannot contradict each other -- which they did, in BOTH directions, one round apart
+    # (job 80 F3: title claimed BASELINE on a profiled run; job 82 F1: the profile line claimed
+    # "throughput is a baseline" on a non-canonical corpus while the title denied it).
+    #
+    # A run is a baseline only if the corpus is canonical AND no sampling profiler was attached:
+    # observer overhead measures 1.6-4.3% on rows/s, so a profiled run's throughput is not a
+    # baseline however canonical its corpus.
+    is_baseline_run = canonical["is_baseline"] and profile == "off"
+
     lines = [
         "",
         # THE HEADLINE SAYS WHETHER THIS IS A BASELINE (#3272 round 13, F3). The title used to read
@@ -725,7 +735,7 @@ def build_report(args: argparse.Namespace) -> tuple[dict, list[str]]:
         # does, and the title now says so for either cause.
         (
             "==== WS0 SAME-SESSION BASELINE (issue #3096 rig, hardened #3272) ===="
-            if canonical["is_baseline"] and profile == "off"
+            if is_baseline_run
             else "==== WS0 SAME-SESSION MEASUREMENT — *** NOT A BASELINE *** (issue #3096 rig,"
             " hardened #3272) ===="
         ),
@@ -733,7 +743,7 @@ def build_report(args: argparse.Namespace) -> tuple[dict, list[str]]:
         # reader should not have to reconcile the title with a field further down.
         *(["               (not a baseline because a SAMPLING PROFILER was attached:"
            f" {profile} — observer overhead is inside every throughput figure below)"]
-          if canonical["is_baseline"] and profile != "off" else []),
+          if canonical["is_baseline"] and not is_baseline_run else []),
         # ...and the label IN WORDS, on its own line, in BOTH modes — an affirmative statement in
         # the baseline case too, so a reader can tell "this run was checked and IS canonical" from
         # "this rig does not check", which the absence of a line cannot express.
@@ -844,10 +854,22 @@ def build_report(args: argparse.Namespace) -> tuple[dict, list[str]]:
         f"binaries     : {bin_dir}"
         + ("   [SYMBOL-BEARING BUILD]" if "perfsym" in str(bin_dir)
            or "perfprof" in str(bin_dir) else ""),
+        # THE BASELINE CLAIM IS MADE IN ONE PLACE AND READ IN TWO (#3248, roborev job 82 F1).
+        #
+        # This line was a conditional on `profile` ALONE, so with no profiler attached it said
+        # "throughput is a baseline" UNCONDITIONALLY -- including on a non-canonical corpus, where
+        # the title correctly says NOT A BASELINE. The fix for job 80 F3 therefore introduced the
+        # SAME contradiction in the opposite direction, one line below, in the same commit.
+        #
+        # THE GENERALISABLE FORM: FIXING A CONTRADICTION IN ONE DIRECTION DOES NOT FIX THE PAIR.
+        # When two fields must agree, assert the AGREEMENT rather than each field against a
+        # constant -- a conditional title and an unconditional string cannot agree by construction.
         f"profile      : {profile}"
         + ("   !! PROFILED — observer overhead is INSIDE the throughput figures above;"
-           " these are NOT baseline numbers" if profile != "off" else "   (no sampling profiler"
-           " attached; throughput is a baseline)"),
+           " these are NOT baseline numbers" if profile != "off"
+           else ("   (no sampling profiler attached; throughput is a baseline)" if is_baseline_run
+                 else "   (no sampling profiler attached — but this run is NOT a baseline; see the"
+                      " title above)")),
         f"quiescence   : {quiescence}"
         + ("" if quiescence.startswith("judged against")
            else "   !! this session was NOT checked for competing load — UNVERIFIED, not quiet"),

@@ -1760,7 +1760,66 @@ q_evidence_case "a sampling gap wider than the verdict's OWN bound is REFUSED" \
 # MEASURED 113 and the floor moves 104 -> 110 by exactly that 6. Raised rather than left alone
 # because these checks STAY in this file — the round-17/20 round trips left it unchanged only
 # because their checks left with them.
-MIN_CHECKS=118
+# ==========================================================================
+# #3248 job 82 F1 — THE TITLE AND THE `profile` LINE MUST AGREE ABOUT BASELINE-NESS
+# ==========================================================================
+# Pinned as an AGREEMENT, not as three separate expected strings, per the coordination ruling:
+# "when two fields must agree, assert the AGREEMENT, not one field against a constant." The report
+# contradicted itself in BOTH directions, one round apart:
+#   job 80 F3 -- the TITLE said BASELINE on a profiled run;
+#   job 82 F1 -- the `profile` line said "throughput is a baseline" on a non-canonical corpus.
+# Fixing the first introduced the second, one line below, in the same commit. A conditional title
+# and an unconditional string cannot agree by construction, so the invariant is what gets pinned:
+#
+#     the title says BASELINE  <=>  the profile line says "throughput is a baseline"
+#
+# Both directions are exercised, because a one-directional pin is exactly what let the pair drift.
+q_baseline_agreement() { # q_baseline_agreement <label> <dir> <expect-baseline:0|1>
+  local label="$1" dir="$2" want="$3" out t pl
+  out=$(python3 "$REPORT" --dir "$dir" --corpus "$TMP/corpus" 2>&1) || true
+  t=$(printf '%s' "$out" | grep -m1 '^====' | grep -c 'SAME-SESSION BASELINE' || true)
+  pl=$(printf '%s' "$out" | grep -m1 '^profile ' | grep -c 'throughput is a baseline' || true)
+  if [ "$t" != "$pl" ]; then
+    fail "$label: the report CONTRADICTS ITSELF — title-baseline=$t profile-baseline=$pl"
+  elif [ "$t" != "$want" ]; then
+    fail "$label: agreed, but on the WRONG answer (got $t, want $want) — agreement alone is not
+       enough: both lines saying the same false thing is still wrong"
+  else
+    pass "$label: title and profile line AGREE (baseline=$t)"
+  fi
+}
+
+# The fixture corpus is deliberately NON-canonical, which makes this case EXACTLY the job-82 F1
+# scenario: unprofiled, non-baseline. Before the fix the title said NOT A BASELINE while the
+# profile line said "throughput is a baseline".
+d="$TMP/agree-plain"; q_judged_session "$d" "$TMP/corpus"; q_stamp_ts "$d" "$Q_TS_MS"
+q_write_verdict "$d" -60 60 -none-
+q_baseline_agreement "unprofiled NON-canonical run (job 82 F1 direction)" "$d" 0
+
+# THE POSITIVE DIRECTION IS NOT PINNED HERE, AND THE REASON IS ITSELF A GUARD WORKING.
+# `is_baseline` is RE-DERIVED by the reporter from a live corpus comparison, so a synthetic fixture
+# corpus can never yield it. I tried to force it by writing `is_baseline: true` into the pin -- and
+# that is precisely what test_ws0_canonical_corpus.sh:332 refuses as self-contradictory ("a
+# recorded boolean nobody re-derives cannot publish a smoke corpus as a baseline"). Defeating that
+# guard to satisfy this one would have been the trade this whole issue is about.
+#
+# So the positive direction lives where it can be exercised honestly:
+#   * test_ws0_canonical_corpus.sh covers the title's BASELINE/NOT-A-BASELINE branch directly;
+#   * verified by hand against the REAL canonical corpus while fixing job 82 F1 -- unprofiled
+#     canonical renders title=BASELINE and profile="throughput is a baseline", i.e. AGREE on 1.
+# What IS pinned here is the agreement invariant in both directions a hermetic fixture can reach.
+
+d="$TMP/agree-prof"; q_judged_session "$d" "$TMP/corpus"; q_stamp_ts "$d" "$Q_TS_MS"
+q_write_verdict "$d" -60 60 -none-
+python3 - "$d" <<'PY'
+import json, pathlib, sys
+p = pathlib.Path(sys.argv[1]) / "session-corpus-pin.json"
+d = json.loads(p.read_text()); d["config"]["profile"] = "on freq=499"
+p.write_text(json.dumps(d))
+PY
+q_baseline_agreement "PROFILED canonical run (job 80 F3 direction)" "$d" 0
+
+MIN_CHECKS=120
 if [ "$checks" -lt "$MIN_CHECKS" ]; then
   echo
   echo "FAIL - only $checks check(s) ran; this suite has at least $MIN_CHECKS."
