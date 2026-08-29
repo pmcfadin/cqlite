@@ -1,0 +1,19 @@
+[package]
+name = "cqlite-ffi-common"
+publish = false  # internal glue for the language bindings, not a crates.io artifact
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+description = "Pure-Rust scalar rendering and error-identity logic shared by the CQLite language bindings"
+
+[dependencies]
+cqlite-core = { path = "../cqlite-core" }
+# Declared locally at "0.4" to match cqlite-core, cqlite-cli and bindings/node.
+# There is deliberately no `[workspace.dependencies]` entry (issue #1452 non-goal).
+num-bigint = "0.4"
+
+[lints]
+workspace = true

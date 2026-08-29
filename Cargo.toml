@@ -1,6 +1,7 @@
 [workspace]
 members = [
     "cqlite-core",
+    "cqlite-ffi-common",
     "cqlite-cli",
     "cqlite-flight",
     "bindings/python",
