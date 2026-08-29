@@ -16,6 +16,58 @@ fn otel_sources() -> String {
     concat!(include_str!("otel.rs"), include_str!("otel_instruments.rs")).to_string()
 }
 
+/// The catalog metric-name DECLARATION sources, as ONE string (issue #1707).
+///
+/// The `pub const IDENT: &str = "cqlite. …";` declarations no longer all live in
+/// `catalog.rs`: the Arrow Flight family was split into `catalog_flight.rs` (#1707,
+/// campsite rule #1116). Every guard that recovers a declaration from SOURCE reads
+/// this concatenation, so a constant is found wherever it is declared — reading
+/// `catalog.rs` alone would make each moved constant look UNDECLARED, which the
+/// guards report as a hard error rather than a skip.
+pub(super) const fn catalog_sources() -> &'static str {
+    concat!(
+        include_str!("catalog.rs"),
+        include_str!("catalog_flight.rs")
+    )
+}
+
+/// Fail if a future split adds a `catalog*.rs` DECLARATION source that
+/// [`catalog_sources`] does not scan (issue #1707).
+///
+/// Same shape, and the same reason, as [`assert_every_otel_source_is_scanned`]: the
+/// file list is unavoidably hand-maintained (`include_str!` needs a literal), so the
+/// completeness check has to come from the filesystem. Without it, splitting
+/// `catalog.rs` again would silently shrink every declaration guard's subject set —
+/// and a guard whose subject set shrinks passes vacuously.
+///
+/// `catalog_registry.rs` (the `ALL_METRICS`/`STATS_ONLY_METRICS` tables) and the two
+/// `catalog_*tests.rs` files declare NO metric-name constants, so they are named
+/// here as deliberately-unscanned rather than left to be discovered.
+pub(super) fn assert_every_catalog_source_is_scanned() {
+    const SCANNED: [&str; 2] = ["catalog.rs", "catalog_flight.rs"];
+    const NO_DECLARATIONS: [&str; 3] = [
+        "catalog_registry.rs",
+        "catalog_tests.rs",
+        "catalog_registration_tests.rs",
+    ];
+    let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/observability");
+    let mut found: Vec<String> = std::fs::read_dir(&dir)
+        .expect("observability source dir must be readable")
+        .filter_map(|e| e.ok())
+        .filter_map(|e| e.file_name().into_string().ok())
+        .filter(|n| n.starts_with("catalog") && n.ends_with(".rs"))
+        .collect();
+    found.sort();
+    for name in &found {
+        assert!(
+            SCANNED.contains(&name.as_str()) || NO_DECLARATIONS.contains(&name.as_str()),
+            "{name} is a catalog source that no declaration guard scans — add it to \
+             `catalog_sources()` (and to SCANNED here), or the guards go blind to the \
+             metric-name constants it declares"
+        );
+    }
+}
+
 /// Fail if a future split adds an `otel*.rs` that [`otel_sources`] does not scan.
 ///
 /// The file list is unavoidably hand-maintained (`include_str!` needs a literal), so
@@ -321,7 +373,8 @@ fn the_shared_catalog_const_parser_reads_wrapped_and_semicolon_bearing_declarati
     assert_eq!(mixed.len(), 1, "the usize const must not appear: {mixed:?}");
 
     // And it recovers the real catalog constants, including the wrapped ones.
-    let real = parse_str_consts(include_str!("catalog.rs"));
+    assert_every_catalog_source_is_scanned();
+    let real = parse_str_consts(catalog_sources());
     for name in ALL_METRICS {
         assert!(
             real.values().any(|v| v == name),
@@ -370,12 +423,13 @@ fn annotation_blocks() -> std::collections::HashMap<String, String> {
 /// `catalog.rs` sharing a value (a metric name colliding with an `attr`/`unit`
 /// value, or a duplicated name) is a catalog bug in its own right.
 fn value_to_ident() -> std::collections::HashMap<&'static str, &'static str> {
-    let ident_to_value = parse_str_consts(include_str!("catalog.rs"));
+    assert_every_catalog_source_is_scanned();
+    let ident_to_value = parse_str_consts(catalog_sources());
     let mut out: std::collections::HashMap<&str, &str> = std::collections::HashMap::new();
     for (ident, value) in ident_to_value {
         if let Some(prior) = out.insert(value, ident) {
             panic!(
-                "catalog.rs declares two &str constants with the value {value:?} \
+                "the catalog sources declare two &str constants with the value {value:?} \
                  (catalog::{prior} and catalog::{ident}) — the registration guards \
                  resolve a metric name back to its identifier through this map, so a \
                  collision would silently point a guard at the wrong constant"

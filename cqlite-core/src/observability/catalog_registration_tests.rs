@@ -454,8 +454,10 @@ fn every_instrument_registered_in_otel_is_catalogued() {
     // drops the constant from the map — so the very metrics most likely to be new
     // (long names) would slip past this guard, which is the bug class it exists to
     // catch. Scan from each `pub const ` to its terminating `;` instead.
-    let this_src = include_str!("catalog.rs");
-    let ident_to_value = parse_str_consts(this_src);
+    // Issue #1707: the declarations live in `catalog.rs` AND `catalog_flight.rs`,
+    // so the map is built from BOTH (a moved constant must not read as undeclared).
+    assert_every_catalog_source_is_scanned();
+    let ident_to_value = parse_str_consts(catalog_sources());
 
     // Names with SOME instrument binding — constructed, routed, or both. The UNION
     // is the fail-closed choice HERE (#1705, roborev B2): a half-wired instrument
@@ -466,7 +468,7 @@ fn every_instrument_registered_in_otel_is_catalogued() {
     refs.sort();
     for ident in refs {
         let value = ident_to_value.get(ident.as_str()).copied().unwrap_or_else(|| {
-            panic!("otel.rs binds an instrument to catalog::{ident}, which is not a metric-name constant in catalog.rs")
+            panic!("otel.rs binds an instrument to catalog::{ident}, which is not a metric-name constant in the catalog sources")
         });
         if !catalogued.contains(value) {
             missing.push(format!("catalog::{ident} (\"{value}\")"));
@@ -509,7 +511,9 @@ fn every_catalogued_metric_is_otel_registered_or_declared_stats_only() {
     let mut phantom = Vec::new();
     for name in ALL_METRICS {
         let ident = value_to_ident.get(name).copied().unwrap_or_else(|| {
-            panic!("ALL_METRICS entry {name:?} has no `pub const` declaration in catalog.rs")
+            panic!(
+                "ALL_METRICS entry {name:?} has no `pub const` declaration in the catalog sources"
+            )
         });
         if !refs.contains(ident) && !stats_only.contains(name) {
             phantom.push(format!("catalog::{ident} (\"{name}\")"));
