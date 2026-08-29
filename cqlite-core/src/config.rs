@@ -23,8 +23,8 @@ use std::time::Duration;
 /// caller who configures CQLite through JSON or a dict (the Python bindings'
 /// bridge) gets no compile step and, before #1696's F1 fix, no signal at all: a
 /// pre-change document naming a deleted knob loaded successfully and was
-/// silently ignored. The rule is stated at the layer where a knob is SET, so
-/// every non-Rust authoring surface reports removed keys by name instead:
+/// silently ignored. The rule is stated at the layer where a knob is SET, so the
+/// authoring surfaces report removed keys by name instead:
 /// [`Self::from_json_str`] / [`Self::from_json_str_reporting_removed`] for this
 /// crate's JSON surface (see [`crate::config_removed_keys`]), and
 /// `cqlite_cli::config::removed_keys` for the CLI's file surface. Both use the
@@ -32,6 +32,18 @@ use std::time::Duration;
 /// `deny_unknown_fields` — because ONE posture crate-wide is the requirement,
 /// and hard-failing would leave an existing caller with no migration path over
 /// keys that never did anything.
+///
+/// # ENFORCED where, exactly — and the ONE surface that is not (#3520)
+///
+/// Those constructors are OPTIONAL, so they do not cover the serde boundary
+/// itself: `serde_json::from_str::<Config>` / `from_value::<Config>` bypass them
+/// and still DISCARD removed keys in SILENCE. Enforced surfaces are the CLI
+/// config-file loader, the Python bindings entry points, and Rust field access (a
+/// compile error, for Rust callers only). The unenforced one is a direct serde
+/// deserialization by an embedder — **issue #3520**, scoped out of #1696
+/// deliberately (roborev r2 F3) and pinned by
+/// `direct_serde_deserialization_is_the_unreported_surface`. Nothing here should
+/// be read as universal coverage.
 ///
 /// The standing guard is `cqlite-core/tests/config_knob_behavior_guard.rs`:
 /// every leaf field below must be registered there with either a set-knob →

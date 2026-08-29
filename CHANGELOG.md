@@ -140,11 +140,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     `storage.block_size`, `query.parallel` and the rest deserialized
     successfully and was silently ignored. `cqlite_core::Config::from_json_str`
     (and the bindings on top of it) now report every removed key the document
-    still sets: a Python `DeprecationWarning` naming each dead path, raised only
-    once the load has SUCCEEDED. Same posture as the CLI file surface, one
-    posture crate-wide: parse-and-ignore PLUS a named warning, never
+    still sets: a Python `UserWarning` naming each dead path, raised only once
+    the operation has SUCCEEDED — validation included, so a document that names a
+    removed key AND carries an invalid surviving value is rejected without being
+    told "the configuration still loads". `UserWarning` and not
+    `DeprecationWarning` because Python HIDES the latter under its default
+    filters (shown only from `__main__` or under `-W`), which would have left the
+    signal silent for an ordinary caller. Same posture as the CLI file surface,
+    one posture crate-wide: parse-and-ignore PLUS a named warning, never
     `deny_unknown_fields`, which would hard-fail an existing caller with no
     migration path over keys that never did anything.
+  - **Known residual, stated because the rule above is NOT universal (#3520):**
+    the removed-key report is enforced on the CLI config-file loader, the Python
+    bindings entry points, and Rust field access (a compile error, Rust callers
+    only). It is NOT enforced on a DIRECT serde deserialization of
+    `cqlite_core::Config` — `serde_json::from_str::<Config>` /
+    `from_value::<Config>` bypass the reporting constructors and still discard
+    removed keys silently. Enforcing it at the serde boundary needs a custom
+    `Deserialize` capturing unknown keys across every nested config struct, which
+    is tracked as #3520 rather than absorbed here.
 
 - **BREAKING (public API): the schema JSON exporter and the never-compiled CQL
   generator are deleted (#1715, epic #1688 / audit finding AK4; ~2.0k LOC).**
@@ -193,7 +207,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the public surfaces that were doing the clamping: `Database::open` validates
   the config it is handed (a failure mode that method already documented but
   never checked), and `SSTableReader::open` — reachable without a `Database` —
-  enforces the range itself before any file I/O. `1.0` is legal; `0.0` is
+  enforces the range itself as the FIRST thing it does, before any `tokio::fs`
+  call — so a missing or unreadable file cannot mask an invalid config behind an
+  I/O error, and the caller is told about the problem it actually has. `1.0` is
+  legal; `0.0` is
   REJECTED rather than read as "never use direct I/O", because a zero threshold
   makes every nonempty file exceed it, i.e. it reads as "never" and behaves as
   "always" (say `disk_access_mode = Direct` for always, `Mmap`/`Buffered` for

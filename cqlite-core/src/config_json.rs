@@ -29,8 +29,16 @@ impl Config {
     /// migration path.
     ///
     /// The warning is logged at WARN via `tracing`. A caller that must SURFACE it
-    /// (the bindings raise a Python `DeprecationWarning`) or assert it wants
+    /// (the bindings raise a Python `UserWarning`) or assert it wants
     /// [`Self::from_json_str_reporting_removed`].
+    ///
+    /// # This constructor is OPTIONAL, so it does not enforce the rule
+    ///
+    /// `Config` derives `Deserialize`, so an embedder can call
+    /// `serde_json::from_str::<Config>` directly and bypass this entirely — serde
+    /// then DISCARDS the removed keys in silence. Enforcement at the serde
+    /// boundary itself is **issue #3520** (#1696 roborev r2 F3, scoped out
+    /// deliberately); do not read this constructor as universal coverage.
     ///
     /// # Errors
     ///

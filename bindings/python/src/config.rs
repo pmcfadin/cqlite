@@ -375,6 +375,12 @@ fn config_from_dict(
 /// would hard-fail an existing caller with no migration path over keys that never
 /// did anything.
 ///
+/// SCOPE, stated so this is not read as universal coverage: this makes the rule
+/// true for callers who come through THESE entry points, which is every Python
+/// caller. A Rust embedder who deserializes a `cqlite_core::Config` document with
+/// plain serde bypasses the reporting constructor and still gets silence — issue
+/// #3520 (#1696 roborev r2 F3).
+///
 /// A Python warning — not a `tracing` log (nothing subscribes in a Python
 /// process) and not stderr — so it obeys the caller's own `warnings` filters and
 /// is assertable from a test.

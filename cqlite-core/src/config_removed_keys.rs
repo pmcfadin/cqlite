@@ -21,6 +21,30 @@
 //!
 //! false for anyone configuring CQLite through the bindings (#1696 roborev F1).
 //!
+//! # WHERE THE RULE IS ENFORCED — and where it is NOT (#1696 roborev r2 F3)
+//!
+//! Stated exactly, because a rule quoted without its scope reads as universal
+//! coverage and this one does not have it. The rule holds on:
+//!
+//! * the CLI's config-file loader (`cqlite_cli::config::removed_keys`) — a named
+//!   warning on stderr;
+//! * the Python bindings' dict/JSON entry points — a `UserWarning` naming each
+//!   dead path (visible under Python's DEFAULT filters, which is why the category
+//!   is not `DeprecationWarning`);
+//! * Rust FIELD ACCESS — a compile error, and only for callers writing Rust.
+//!
+//! It does NOT hold on a DIRECT serde deserialization of [`crate::Config`].
+//! `Config` derives `Deserialize`, so `serde_json::from_str::<Config>` /
+//! `from_value::<Config>` bypass [`crate::Config::from_json_str`] and
+//! [`crate::Config::from_json_str_reporting_removed`] entirely, and serde
+//! silently DISCARDS the removed keys. An embedder deserializing a `Config`
+//! document themselves therefore still gets silence: a reporting constructor is
+//! OPTIONAL, and an optional constructor enforces nothing at the boundary it sits
+//! beside. That residual is **issue #3520**, pinned by
+//! `direct_serde_deserialization_is_the_unreported_surface` in this module's
+//! tests. It was scoped out of #1696 rather than fixed: closing it needs a custom
+//! `Deserialize` capturing unknown keys across every nested config struct.
+//!
 //! # Why not `deny_unknown_fields`
 //!
 //! Because it would HARD-FAIL a Python caller whose config predates the removal,
@@ -136,8 +160,8 @@ pub fn removed_keys_present(table: &[Removed], has_path: impl Fn(&str) -> bool) 
 /// or `None` when the document names none.
 ///
 /// Returned as a string rather than logged here so the caller picks the sink (the
-/// CLI prints to stderr, the bindings raise a Python `DeprecationWarning`) and a
-/// test can assert the exact text.
+/// CLI prints to stderr, the bindings raise a Python `UserWarning`) and a test can
+/// assert the exact text.
 ///
 /// The text asserts "the configuration still loads", which is only true once the load
 /// HAS succeeded — so every caller must produce this AFTER a successful
