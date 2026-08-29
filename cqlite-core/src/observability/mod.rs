@@ -63,10 +63,16 @@ pub mod partition_access;
 // that makes cqlite.read.{rows,bytes,partitions,duration} live instruments
 // instead of documented-but-never-written ones.
 pub(crate) mod read_metrics;
+// Per-SCAN read-phase accumulator (issue #1707): the io/decompress/decode/merge
+// buckets `ReadOpMeter` emits as `cqlite.read.phase.*` when a scan completes.
+// `pub` (like `stream_subphase`) because the seams live across the storage layer
+// and the observability integration tests arm its test-only io delay.
+pub mod read_phase;
 pub mod stream_subphase;
 
 pub use config::{ObservabilityConfig, ObservabilityConfigBuilder, OtelProtocol};
 pub use error_schema::ObsErrorCategory;
+pub use read_phase::{ReadPhase, ReadPhaseGuard, ReadPhaseTimings};
 pub use stream_subphase::{StreamSubPhase, StreamSubPhaseGuard, StreamSubPhaseTimings};
 
 use crate::error::{Error, Result};
