@@ -837,13 +837,23 @@ class TestCollectionIdentityContract:
     3-way golden parity harness (#1455, Y1) consumes is verified rather than
     aspirational.
 
-    The tests named `LIMITATION <id>` pin the four cases §5.3 lists as NOT
-    canonicalizable — a-1/a-2 (lossy projection through
-    `value_to_hashable_key`, which discards the CQL type) and b-1/b-2 (two CQL
-    types arriving as the same Python host shape). They record the divergent
-    shape as a GAP, never as a desirable canonical form. Closing any of them
-    requires the declared CQL type threaded into normalization, i.e. schema-aware
-    normalization: a behavior change, out of scope for #1454, tracked as #3497.
+    The tests named `LIMITATION <id>` pin the cases §5.3 records as NOT
+    canonicalizable — family (a), lossy projection through
+    `value_to_hashable_key`, which discards the CQL type; and family (b), two CQL
+    types arriving as the same Python host shape. The two FAMILIES are closed;
+    the list of INSTANCES is **not** — the families are generative, and nesting
+    multiplies them, so these tests are a floor and not a ceiling. They record
+    each divergent shape as a GAP, never as a desirable canonical form. Closing
+    any of them requires the declared CQL type threaded into normalization, i.e.
+    schema-aware normalization: a behavior change, out of scope for #1454,
+    tracked as #3497.
+
+    Not pinned here: the nested shapes that RAISE instead of diverging
+    (`set<frozen<tuple<frozen<udt>, int>>>`, `set<frozen<set<frozen<udt>>>>`).
+    `contains_udt` and `value_to_hashable_key` are not total over `Value`, so
+    those fail with `TypeError: unhashable type` **inside the binding**, before
+    any normalizer runs — a production `value.rs` defect tracked as #3500, which
+    #1454 cannot touch and which no normalizer-level test can observe.
 
     These tests are intentionally pure: they feed the normalizer the host values
     the Python binding is documented to produce (`bindings/python/src/value.rs`:
@@ -952,6 +962,50 @@ class TestCollectionIdentityContract:
         # The enclosing set still SORTS (it is a frozenset); only the element shape diverges.
         two = normalize_python_value(frozenset({(("a", 1),), (("b", 2),)}), is_row_level=False)
         assert two == sorted(two, key=_sort_key)
+
+    def test_udt_nested_deeper_in_a_projection_position_is_unsupported(self):
+        """LIMITATION a-3 (lossy projection): nesting generates more instances.
+
+        `set<frozen<list<frozen<udt>>>>`: `value_to_hashable_key`'s `List` arm
+        recurses, so the inner UDT is projected to a `frozenset` of
+        `(field_name, value)` pairs and the set element normalizes to an array of
+        `[name, value]` pairs — while Node and the CLI produce an array holding a
+        UDT **object** (`[[{"_type": ..., "street": ...}]]`).
+
+        This is a-1's projection reached one level deeper, i.e. the demonstration
+        that the two failure families are GENERATIVE: the instance list in
+        M4_spec §5.3 is a floor, not a ceiling, and a newly-encountered nested
+        shape must be checked against the principle rather than assumed absent.
+
+        The sibling nested shapes that RAISE rather than diverge
+        (`set<frozen<tuple<frozen<udt>, int>>>`, `set<frozen<set<frozen<udt>>>>`)
+        are NOT pinned here: `contains_udt`/`value_to_hashable_key` are not total
+        over `Value`, so those fail with `TypeError` inside the binding before the
+        normalizer is reached. That is #3500 (a `value.rs` defect), out of scope
+        for #1454 and unobservable at this level.
+        """
+        # What the binding actually hands over: a tuple (the projected inner list)
+        # holding the UDT's frozenset projection.
+        projected_udt = frozenset(
+            {("_type", "address"), ("_keyspace", "test_collections"), ("street", "1 Main St")}
+        )
+        element = (projected_udt,)
+        assert normalize_python_value(frozenset({element}), is_row_level=False) == [
+            [
+                [
+                    ["_keyspace", "test_collections"],
+                    ["_type", "address"],
+                    ["street", "1 Main St"],
+                ]
+            ]
+        ]
+
+        # For contrast, the shape Node/CLI produce for the same CQL value is an
+        # array holding a UDT OBJECT — which is what a UDT in a non-projection
+        # position normalizes to here, and is different in kind from the above.
+        assert normalize_python_value([[_udt("address", street="1 Main St")]], is_row_level=False) == [
+            [{"_type": "address", "street": "1 Main St"}]
+        ]
 
     def test_map_with_literal_type_key_is_misclassified_as_a_udt(self):
         """LIMITATION b-2 (host-shape collision): a `map<text,X>` holding `"_type"` reads as a UDT.
