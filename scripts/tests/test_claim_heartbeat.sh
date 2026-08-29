@@ -288,6 +288,12 @@ chmod +x "$ALIVE_SHIM/ps"
 #
 # Faking state/elapsed is safe for the absent pid because presence is decided FIRST: a pid the real
 # ps cannot see never reaches the state or identity checks.
+# Resolved rather than hardcoded (roborev round 6, Low): macOS ships ps at /bin/ps, and this suite
+# is registered in the canonical gate, which runs there too. A hardcoded /usr/bin/ps would be a
+# permanent red on macOS rather than a finding about this code — the same shape as the /proc
+# assumption caught earlier.
+REAL_PS="$(command -v ps)"
+export REAL_PS
 MIXED_SHIM="$T/mixedshim"
 mkdir -p "$MIXED_SHIM"
 cat >"$MIXED_SHIM/ps" <<'PSEOF'
@@ -298,7 +304,7 @@ for a in "$@"; do
     etimes=) echo 999999;   exit 0 ;;   # started long ago => identity verifiable
   esac
 done
-exec /usr/bin/ps "$@"                    # EXISTENCE is answered by the real ps
+exec "${REAL_PS:?REAL_PS not set}" "$@"  # EXISTENCE is answered by the real ps
 PSEOF
 chmod +x "$MIXED_SHIM/ps"
 

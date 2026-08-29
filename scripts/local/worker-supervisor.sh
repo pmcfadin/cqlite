@@ -281,12 +281,24 @@ CLAIM_PENDING_CLEANUP=""
 CLAIM_LANE_TOKEN=""
 # claim_drain_pending_cleanup: retry every lane ref whose deletion has not yet succeeded. Keeps the
 # ones that still fail, so a transient push error is retried rather than lost.
+# claim_drain_pending_cleanup [protect_id]: retry every lane ref whose deletion has not yet
+# succeeded, NEVER touching <protect_id> — the lane currently stamped.
+#
+# THE PROTECTION IS THE WHOLE POINT (roborev round 6, Medium). Without it the queue can delete the
+# ref it just stamped: if cleaning placeholder P fails during P -> issue, P stays queued; after
+# finalization the next issue -> P transition REFRESHES P and then drains the queue, deleting that
+# fresh CURRENT ref and leaving the running lane unobservable. That is the failure this whole change
+# exists to prevent, produced by the retry logic added to fix a leak.
 claim_drain_pending_cleanup() {
   [[ -n "$CLAIM_CMD" ]] || return 0
   [[ -n "${CLAIM_PENDING_CLEANUP// /}" ]] || return 0
-  local still="" id
+  local protect="${1:-}" still="" id
   for id in $CLAIM_PENDING_CLEANUP; do
     [[ -n "$id" ]] || continue
+    if [[ -n "$protect" && "$id" == "$protect" ]]; then
+      log "pending cleanup of ${id} dropped: it is the lane currently stamped, not a stale ref"
+      continue
+    fi
     if HEARTBEAT_MACHINE="$CLAIM_MACHINE" $CLAIM_CMD reap "$CLAIM_MACHINE" "$id" >/dev/null 2>&1; then
       log "stale lane ref ${id} cleared"
     else
@@ -532,7 +544,7 @@ stamp_claim() {
     # pending list and retried on every later stamp and on clean exit.
     [[ -n "$prev_lane_id" && "$prev_lane_id" != "$lane_id" ]] && \
       CLAIM_PENDING_CLEANUP="${CLAIM_PENDING_CLEANUP} ${prev_lane_id}"
-    claim_drain_pending_cleanup
+    claim_drain_pending_cleanup "$lane_id"
     log "claim stamped: machine=$CLAIM_MACHINE issue=$lane_id pid=$$"
   else
     log "WARN: claim stamp failed (machine=$CLAIM_MACHINE issue=$lane_id) — ref not refreshed this iteration (non-fatal)"
@@ -551,7 +563,8 @@ stamp_claim() {
 # nothing was stamped, so there is no ref to clear.
 clear_claim() {
   [[ -n "$CLAIM_CMD" ]] || return 0
-  # Retry anything a transition could not clean up, before clearing this lane's own ref.
+  # Retry anything a transition could not clean up, before clearing this lane's own ref. Nothing is
+  # protected here: on a clean exit this lane's own ref is being removed too.
   claim_drain_pending_cleanup
   local issue="$CLAIM_STAMPED_ISSUE"
   # May be a `p<pid>` placeholder as well as an issue number; both are real refs to clear.

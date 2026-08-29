@@ -774,10 +774,15 @@ cmd_should_reap() {
     return 2
   fi
 
+  # `pid` is OPTIONAL, and after round 5 that needed saying in code (roborev round 6, Low).
+  # `ref_msg_field` now fails when a field is ABSENT — correct for the open-PR safeguard — but under
+  # `set -e` an absent `pid` then terminated should-reap outright, so a legacy or foreign claim whose
+  # PID is deliberately not required could no longer reach the documented age + open-PR decision. A
+  # fail-closed change in one caller became a fail-SHUT regression in another.
   local issue pid ts epoch now_epoch age
-  issue="$(ref_msg_field "$ref" issue)"
-  pid="$(ref_msg_field "$ref" pid)"
-  ts="$(ref_msg_field "$ref" ts)"
+  issue="$(ref_msg_field "$ref" issue)" || issue=""
+  pid="$(ref_msg_field "$ref" pid)" || pid=""
+  ts="$(ref_msg_field "$ref" ts)" || ts=""
 
   # Unparseable/absent age -> KEEP (never reap on an unknown age).
   if [ -z "$ts" ] || ! epoch="$(ts_to_epoch "$ts" 2>/dev/null)"; then

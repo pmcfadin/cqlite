@@ -2599,40 +2599,55 @@ test_claim_issue_learned_from_marker() {
 # worker still starts, but dead-lanes and the reaper cannot see it for the whole iteration. So the
 # old ref must SURVIVE a failed replacement.
 # ---------------------------------------------------------------------------
-test_claim_transition_survives_failed_replacement() {
-  local d rc ph_id reaped_ph
+# ---------------------------------------------------------------------------
+# Test 26-claim (#3393, roborev round 6): the pending-cleanup queue must NEVER delete the lane ref
+# just stamped. If cleaning placeholder P fails during P -> issue, P stays queued; a later
+# issue -> P transition REFRESHES P and then drains, which without protection deletes that fresh
+# CURRENT ref and leaves the running lane unobservable — the failure this change exists to prevent,
+# produced by the retry logic that was added to fix a leak.
+# ---------------------------------------------------------------------------
+test_claim_drain_never_deletes_current_lane() {
+  local d out
   d="$(new_case_dir)"
   common_env "$d"
-  write_blocked_same_issue_stub "$d/bin/worker.sh" 88
-  export WORKER_CMD="$d/bin/worker.sh"
-  export MAX_ISSUES=100
-  export BREAKER_N=100
   export CLAIM_LOG="$d/claim.log"
   : >"$CLAIM_LOG"
-  write_claim_stub_failing_issue_stamp "$d/bin/claim.sh"
-  export CLAIM_CMD="bash $d/bin/claim.sh"
-  export HEARTBEAT_MACHINE="testbox"
+  # A reap stub that always FAILS, so a queued cleanup stays queued and the drain keeps retrying it.
+  cat >"$d/bin/claim.sh" <<'STUBEOF'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >>"${CLAIM_LOG:?CLAIM_LOG not set}"
+[ "${1:-}" = "reap" ] && exit 1
+exit 0
+STUBEOF
+  chmod +x "$d/bin/claim.sh"
 
-  bash "$SUPERVISOR" >"$d/stdout.log" 2>&1
-  rc=$?
-  # Iter1 stamps the placeholder (succeeds). Iter2 attempts `stamp 88` (fails). The placeholder must
-  # NOT have been reaped, or the lane is left with nothing.
-  ph_id=$(grep -E '^stamp p[0-9]+-[0-9a-f]+ [0-9]+$' "$CLAIM_LOG" 2>/dev/null | head -1 | awk '{print $2}')
-  # ORDER is the property, not presence. A reap of the placeholder on CLEAN EXIT is correct and
-  # expected; what must not happen is a reap during the TRANSITION, i.e. before the replacement
-  # stamp. So compare line positions rather than asking whether a reap occurred at all — the first
-  # version of this assert did the latter and failed on the legitimate exit clear.
-  local ph_reap_line first_88_line
-  ph_reap_line=$(grep -nE "^reap testbox ${ph_id}\$" "$CLAIM_LOG" 2>/dev/null | head -1 | cut -d: -f1)
-  first_88_line=$(grep -nE '^stamp 88 [0-9]+$' "$CLAIM_LOG" 2>/dev/null | head -1 | cut -d: -f1)
-  reaped_ph=no
-  if [[ -n "$ph_reap_line" && -n "$first_88_line" && "$ph_reap_line" -lt "$first_88_line" ]]; then
-    reaped_ph=yes   # reaped BEFORE the replacement was attempted: the gap this test forbids
-  fi
-  if [[ "$rc" -eq 0 && -n "$ph_id" && -n "$first_88_line" && "$reaped_ph" == "no" ]]; then
-    pass "claim: a failed replacement stamp leaves the previous lane ref in place (no liveness gap)"
+  # UNIT-TESTED, deliberately. Reaching the protected state end to end needs three stamps in the
+  # order placeholder -> issue -> placeholder, which requires a worker that blocks on one iteration
+  # and finalizes on the next; no existing stub alternates that way, and building one would test the
+  # stub more than the invariant. The invariant itself is one function, so it is exercised directly —
+  # the same approach the parser tests take with verify_finalized_pr.
+  out="$(
+    # HEARTBEAT_MACHINE, not CLAIM_MACHINE: sourcing the supervisor DERIVES CLAIM_MACHINE from it,
+    # so presetting CLAIM_MACHINE is overwritten at source time and the reap lands on the real hostname.
+    CLAIM_CMD="bash $d/bin/claim.sh" HEARTBEAT_MACHINE=testbox \
+    CLAIM_LOG="$CLAIM_LOG" \
+    bash -c '
+      source "$1"
+      CLAIM_PENDING_CLEANUP=" p123-abc 88 "
+      # Draining while lane p123-abc is the CURRENT one must skip it and retry only 88.
+      claim_drain_pending_cleanup "p123-abc"
+      printf "PENDING_AFTER=[%s]\n" "$CLAIM_PENDING_CLEANUP"
+    ' _ "$SUPERVISOR" 2>&1
+  )"
+  # Three things must hold: the current lane is announced as skipped, it is NOT reaped, and the other
+  # id IS retried and retained (its reap failed).
+  if printf '%s' "$out" | grep -q 'pending cleanup of p123-abc dropped: it is the lane currently stamped' \
+    && ! grep -qE '^reap testbox p123-abc$' "$CLAIM_LOG" \
+    && grep -qE '^reap testbox 88$' "$CLAIM_LOG" \
+    && printf '%s' "$out" | grep -q 'PENDING_AFTER=\[ 88\]'; then
+    pass "claim: the drain SKIPS the lane currently stamped, retries the other, and retains it on failure"
   else
-    fail "claim-transition: rc=$rc placeholder='$ph_id' reaped-before-replacement=$reaped_ph ph_reap_line='${ph_reap_line:-none}' first_88_line='${first_88_line:-none}' (see $CLAIM_LOG)"
+    fail "claim-drain-current: protection did not hold. out=[$out] log=[$(tr '\n' ';' <"$CLAIM_LOG")]"
   fi
 }
 
@@ -2833,6 +2848,7 @@ test_fast_exit_latency
 test_claim_stamp_each_iter_and_clear_on_exit
 test_claim_issue_learned_from_marker
 test_claim_transition_survives_failed_replacement
+test_claim_drain_never_deletes_current_lane
 test_finalized_verified_merged_counts
 test_finalized_mismatch_open_is_abnormal
 test_finalized_unverified_not_counted_no_breaker
