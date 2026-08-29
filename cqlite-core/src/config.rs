@@ -15,9 +15,6 @@ pub struct Config {
     /// Query engine configuration
     pub query: QueryConfig,
 
-    /// Performance and optimization settings
-    pub performance: PerformanceConfig,
-
     /// WASM-specific configuration
     #[cfg(target_arch = "wasm32")]
     pub wasm: WasmConfig,
@@ -26,9 +23,6 @@ pub struct Config {
 /// Storage engine configuration
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StorageConfig {
-    /// Maximum SSTable file size in bytes (default: 64MB)
-    pub max_sstable_size: u64,
-
     /// MemTable size threshold for flushing, in bytes (default: 64MB).
     ///
     /// This is the AUTHORITATIVE flush trigger for the write path: it is the
@@ -64,23 +58,8 @@ pub struct StorageConfig {
     /// Compaction configuration
     pub compaction: CompactionConfig,
 
-    /// Block size for SSTable data blocks (default: 64KB)
-    pub block_size: u32,
-
     /// Compression configuration
     pub compression: CompressionConfig,
-
-    /// Enable bloom filters for SSTables
-    pub enable_bloom_filters: bool,
-
-    /// Bloom filter false positive rate (default: 0.01)
-    pub bloom_filter_fp_rate: f64,
-
-    /// Number of background threads for I/O operations
-    pub io_threads: usize,
-
-    /// Sync mode for durability
-    pub sync_mode: SyncMode,
 
     /// Legacy promote-only flag: it upgrades an **explicit**
     /// [`DiskAccessMode::Buffered`] request to [`DiskAccessMode::Mmap`].
@@ -263,18 +242,12 @@ fn default_direct_io_prefetch_bytes() -> usize {
 impl Default for StorageConfig {
     fn default() -> Self {
         Self {
-            max_sstable_size: 64 * 1024 * 1024, // 64MB
             // 64MB / 256MB: the values the write engine always used (#1697).
             // Shared with the serde defaults so the two can never drift.
             memtable_size_threshold: 64 * 1024 * 1024,
             memtable_hard_limit: default_memtable_hard_limit(),
             compaction: CompactionConfig::default(),
-            block_size: 64 * 1024, // 64KB
             compression: CompressionConfig::default(),
-            enable_bloom_filters: true,
-            bloom_filter_fp_rate: 0.01,
-            io_threads: num_cpus::get().min(4),
-            sync_mode: SyncMode::Normal,
             // Opt-in; buffered I/O is the portable, safe default. Shared with
             // the serde defaults so the two can never drift.
             use_mmap: default_use_mmap(),
@@ -517,15 +490,6 @@ pub struct QueryConfig {
     #[serde(default = "default_max_result_bytes")]
     pub max_result_bytes: u64,
 
-    /// Query plan cache size
-    pub plan_cache_size: usize,
-
-    /// Enable query optimization
-    pub enable_optimization: bool,
-
-    /// Parallel query execution configuration
-    pub parallel: ParallelQueryConfig,
-
     /// Query cache size (for plan caching)
     pub query_cache_size: Option<usize>,
 
@@ -543,89 +507,9 @@ impl Default for QueryConfig {
             forced_read_path: None,
             max_result_rows: 1_000_000,
             max_result_bytes: DEFAULT_MAX_RESULT_BYTES,
-            plan_cache_size: 1000,
-            enable_optimization: true,
-            parallel: ParallelQueryConfig::default(),
             query_cache_size: Some(100),
             query_parallelism: Some(num_cpus::get()),
             analyze_iterations: Some(5),
-        }
-    }
-}
-
-/// Parallel query execution configuration
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ParallelQueryConfig {
-    /// Enable parallel query execution
-    pub enabled: bool,
-
-    /// Maximum number of parallel threads
-    pub max_threads: usize,
-
-    /// Minimum result set size to trigger parallel execution
-    pub min_parallel_rows: u64,
-}
-
-impl Default for ParallelQueryConfig {
-    fn default() -> Self {
-        Self {
-            enabled: true,
-            max_threads: num_cpus::get(),
-            min_parallel_rows: 10_000,
-        }
-    }
-}
-
-/// Performance and optimization configuration
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct PerformanceConfig {
-    /// Enable performance metrics collection
-    pub enable_metrics: bool,
-
-    /// Metrics collection interval
-    pub metrics_interval: Duration,
-
-    /// Enable detailed profiling
-    pub enable_profiling: bool,
-
-    /// Background task configuration
-    pub background_tasks: BackgroundTaskConfig,
-}
-
-impl Default for PerformanceConfig {
-    fn default() -> Self {
-        Self {
-            enable_metrics: true,
-            metrics_interval: Duration::from_secs(60),
-            enable_profiling: false,
-            background_tasks: BackgroundTaskConfig::default(),
-        }
-    }
-}
-
-/// Background task configuration
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct BackgroundTaskConfig {
-    /// Enable background statistics collection
-    pub enable_stats: bool,
-
-    /// Statistics collection interval
-    pub stats_interval: Duration,
-
-    /// Enable background cleanup tasks
-    pub enable_cleanup: bool,
-
-    /// Cleanup task interval
-    pub cleanup_interval: Duration,
-}
-
-impl Default for BackgroundTaskConfig {
-    fn default() -> Self {
-        Self {
-            enable_stats: true,
-            stats_interval: Duration::from_secs(300), // 5 minutes
-            enable_cleanup: true,
-            cleanup_interval: Duration::from_secs(3600), // 1 hour
         }
     }
 }
@@ -705,17 +589,6 @@ impl Default for CompressionConfig {
     }
 }
 
-/// Durability sync modes
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub enum SyncMode {
-    /// No explicit syncing (fastest, least durable)
-    None,
-    /// Normal syncing (balanced)
-    Normal,
-    /// Full sync for every write (slowest, most durable)
-    Full,
-}
-
 impl Config {
     /// Create a configuration optimized for memory usage
     pub fn memory_optimized() -> Self {
@@ -723,7 +596,6 @@ impl Config {
 
         // Reduce memory usage
         config.storage.memtable_size_threshold = 4 * 1024 * 1024; // 4MB
-        config.storage.max_sstable_size = 16 * 1024 * 1024; // 16MB
         config.memory.max_memory = 256 * 1024 * 1024; // 256MB
         config.memory.block_cache.max_size = 64 * 1024 * 1024; // 64MB
 
@@ -742,7 +614,6 @@ impl Config {
         // Above the 64MB default (#1697 raised the default to the value that
         // always ran), so this preset still trades memory for throughput.
         config.storage.memtable_size_threshold = 128 * 1024 * 1024; // 128MB
-        config.storage.max_sstable_size = 256 * 1024 * 1024; // 256MB
         config.memory.max_memory = 4 * 1024 * 1024 * 1024; // 4GB
 
         // Use faster compression
@@ -751,9 +622,6 @@ impl Config {
 
         // More aggressive caching
         config.memory.block_cache.max_size = 1024 * 1024 * 1024; // 1GB
-
-        // More I/O threads
-        config.storage.io_threads = num_cpus::get();
 
         config
     }
@@ -771,12 +639,9 @@ impl Config {
         // Reduce overall memory usage for WASM
         config.memory.max_memory = 128 * 1024 * 1024; // 128MB
         config.storage.memtable_size_threshold = 2 * 1024 * 1024; // 2MB
-        config.storage.max_sstable_size = 8 * 1024 * 1024; // 8MB
 
-        // Disable background tasks that may not work well in WASM
+        // Disable background compaction, which may not work well in WASM.
         config.storage.compaction.auto_compaction = false;
-        config.performance.background_tasks.enable_stats = false;
-        config.performance.background_tasks.enable_cleanup = false;
 
         config
     }
@@ -786,10 +651,8 @@ impl Config {
     pub fn test_config() -> Self {
         let mut config = Config::default();
 
-        // Disable background tasks that can cause test hangs
+        // Disable background compaction, which can cause test hangs.
         config.storage.compaction.auto_compaction = false;
-        config.performance.background_tasks.enable_stats = false;
-        config.performance.background_tasks.enable_cleanup = false;
 
         // Reduce timeouts for faster test execution
         config.query.max_execution_time = std::time::Duration::from_secs(1);
@@ -797,7 +660,6 @@ impl Config {
         // Smaller memory usage for tests
         config.memory.max_memory = 64 * 1024 * 1024; // 64MB
         config.storage.memtable_size_threshold = 1024 * 1024; // 1MB
-        config.storage.max_sstable_size = 4 * 1024 * 1024; // 4MB
 
         config
     }
@@ -819,12 +681,6 @@ impl Config {
         }
 
         // Validate storage settings
-        if self.storage.block_size == 0 {
-            return Err(crate::Error::configuration(
-                "block_size must be greater than 0",
-            ));
-        }
-
         if self.storage.memtable_size_threshold == 0 {
             return Err(crate::Error::configuration(
                 "memtable_size_threshold must be greater than 0",

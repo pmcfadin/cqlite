@@ -44,10 +44,6 @@ pub fn to_core_config(cli_config: &CliConfig) -> Result<CoreConfig> {
     core_config.query.max_execution_time =
         std::time::Duration::from_millis(cli_config.performance.query_timeout_ms);
 
-    // Enable optimizations for better performance
-    core_config.query.enable_optimization = true;
-    core_config.storage.enable_bloom_filters = true;
-
     // Validate the configuration
     core_config
         .validate()
