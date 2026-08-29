@@ -1204,33 +1204,50 @@ elif git_cred_probe "$GIT_ORIGIN_HOST"; then
     info "      fail every push. For unattended workers prefer:  gh auth setup-git"
   fi
 else
-  warn "git push has NO credentials for $GIT_ORIGIN_HOST — an authenticated 'gh' does NOT authenticate git"
-  info "symptom: every push fails with  fatal: could not read Username for 'https://$GIT_ORIGIN_HOST'"
-  info "impact: scripts/flow/claim.sh + claim-heartbeat.sh push on 10+ call sites — the claim protocol does not work"
-  info "fix:    gh auth setup-git    (preferred; wires gh as git's credential helper)"
-  info "        or re-run with --fix-credentials (or --yes) to configure a helper that reads \$GH_TOKEN at call time"
+  # UNWIRED AS FOUND. Whether that is a WARNING depends on the machine's state when this
+  # section ENDS, not on its state when the section began (issue #3369). The first cut
+  # warned here, before the repair below, and nothing could retract it: with
+  # --fix-credentials the run then REPAIRED the box, the push probe reported VERIFIED,
+  # and the summary still withheld "All checks green." and --strict still exited 1 — so
+  # the AMI onboarder's verify FAILED on exactly the box it had just fixed, which is the
+  # whole scenario #3369 exists for. Every test stayed green while it did.
+  #
+  # So the diagnosis is gathered first, ONE verdict is emitted last, and it reports the
+  # FINAL state. WARNINGS is never decremented: a counter that can go down would let an
+  # unrelated later success cancel a genuine earlier fault. The fix is not to retract a
+  # warning — it is not to emit one until the answer is known.
+  cred_diag() {
+    info "symptom: every push fails with  fatal: could not read Username for 'https://$GIT_ORIGIN_HOST'"
+    info "impact: scripts/flow/claim.sh + claim-heartbeat.sh push on 10+ call sites — the claim protocol does not work"
+    info "fix:    gh auth setup-git    (preferred; wires gh as git's credential helper)"
+    info "        or re-run with --fix-credentials (or --yes) to configure a helper that reads \$GH_TOKEN at call time"
+  }
   # --fix-credentials wires ONLY this section, leaving every other check read-only
   # (issue #3369): the AMI onboarder's verify step needs the credential path wired
   # after token injection, and turning a VERIFICATION step into a full toolchain
   # installer (which --yes also is) would be a far larger change than that needs.
   if [ "$AUTO_YES" = 1 ] || [ "$FIX_CREDENTIALS" = 1 ]; then
+    info "git push has NO credentials for $GIT_ORIGIN_HOST yet — an authenticated 'gh' does NOT authenticate git; attempting to configure one"
     cred_fixed=0
+    cred_how=""
     # Preferred form: let gh wire itself in. Verified by RE-PROBING — on the box
     # that motivated #2942 the gh credential path was precisely what was not wired,
-    # so "the command exited 0" is not evidence.
+    # so "the command exited 0" is not evidence. Every branch below is likewise
+    # confirmed by a re-probe, never by the repair command's own exit status.
     if have gh && gh auth status >/dev/null 2>&1; then
       info "configuring: gh auth setup-git"
       if gh auth setup-git >/dev/null 2>&1 && git_cred_probe "$GIT_ORIGIN_HOST"; then
-        ok "git credentials configured via 'gh auth setup-git' (no secret written to disk)"
-        cred_fixed=1
+        cred_fixed=1; cred_how="'gh auth setup-git'"
       else
         info "'gh auth setup-git' did not yield a usable credential — falling back to the \$GH_TOKEN helper"
       fi
     fi
     if [ "$cred_fixed" = 0 ]; then
       if [ -z "${GH_TOKEN:-${GITHUB_TOKEN:-}}" ]; then
-        warn "cannot auto-configure: neither GH_TOKEN nor GITHUB_TOKEN is set in this environment"
-        info "export GH_TOKEN=<token>, then re-run:  bash scripts/bootstrap-agent-machine.sh --yes"
+        # `info`, not `warn`: the single verdict below owns the warning, so a failed
+        # repair counts ONCE rather than twice.
+        info "cannot auto-configure: neither GH_TOKEN nor GITHUB_TOKEN is set in this environment"
+        info "export GH_TOKEN=<token>, then re-run:  bash scripts/bootstrap-agent-machine.sh --fix-credentials"
       else
         # The value written is a shell snippet that DEREFERENCES $GH_TOKEN when git
         # asks — the token itself never lands on disk, so rotating it needs no
@@ -1250,18 +1267,29 @@ else
         # key we write — a copy scoped to some other host is unrelated and must not
         # suppress this one.
         if git config --global --get-all "$cred_key" 2>/dev/null | grep -qF 'x-access-token'; then
-          warn "a \$GH_TOKEN-style helper is ALREADY configured for $GIT_ORIGIN_HOST yet the probe still fails — check that GH_TOKEN is set, valid and unexpired (not re-adding it)"
+          info "a \$GH_TOKEN-style helper is ALREADY configured for $GIT_ORIGIN_HOST yet the probe still fails — check that GH_TOKEN is set, valid and unexpired (not re-adding it)"
         elif git config --global --add "$cred_key" "$GIT_CRED_HELPER" 2>/dev/null \
            && git_cred_probe "$GIT_ORIGIN_HOST"; then
-          ok "git credentials configured for $GIT_ORIGIN_HOST via a \$GH_TOKEN-dereferencing helper (no secret written to disk)"
-          info "this helper reads \$GH_TOKEN from the ENVIRONMENT — an unattended worker (systemd/cron)"
-          info "started without GH_TOKEN exported will still fail every push; prefer 'gh auth setup-git' there"
+          cred_fixed=1; cred_how="a \$GH_TOKEN-dereferencing helper"
         else
-          warn "could not configure a working git credential helper — fix manually: gh auth setup-git"
+          info "could not configure a working git credential helper"
         fi
       fi
     fi
+    # THE SINGLE VERDICT, on the state the machine is in NOW.
+    if [ "$cred_fixed" = 1 ]; then
+      ok "git credentials WIRED BY THIS RUN via $cred_how for $GIT_ORIGIN_HOST (confirmed by re-probe; no secret written to disk)"
+      if git_env_token_helper_active; then
+        info "this helper reads \$GH_TOKEN from the ENVIRONMENT — an unattended worker (systemd/cron)"
+        info "started without GH_TOKEN exported will still fail every push; prefer 'gh auth setup-git' there"
+      fi
+    else
+      warn "git push has NO credentials for $GIT_ORIGIN_HOST and this run could NOT configure any — an authenticated 'gh' does NOT authenticate git"
+      cred_diag
+    fi
   else
+    warn "git push has NO credentials for $GIT_ORIGIN_HOST — an authenticated 'gh' does NOT authenticate git"
+    cred_diag
     info "(re-run with --fix-credentials to wire credentials only, or --yes to also install)"
   fi
 fi

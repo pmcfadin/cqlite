@@ -1100,6 +1100,39 @@ else
   [ -s "$trip7pf" ] && cat "$trip7pf"
 fi
 
+# 7p-j. THE AC1+AC3 END-TO-END CASE — the one whose absence let a defect through with
+#   102 tests green. A fresh UNWIRED box (no credential helper, exactly the pinned-AMI
+#   state) + `--fix-credentials --strict` must end at exit 0 AND print
+#   "All checks green.". The first implementation warned about the missing helper BEFORE
+#   repairing it and could not retract that warning, so verify.run FAILED on a box it had
+#   just successfully repaired — AC1 and AC3 both defeated, invisibly. The §3b verdict is
+#   now emitted once, after the repair, on the FINAL state.
+bare7pj="$tmp/bare7pj.git"; mk_push_bare "$bare7pj"
+repo7pj="$tmp/repo7pj"; mk_push_repo "$repo7pj" "https://push-probe.invalid/cqlite.git"
+bin7pj="$tmp/bin7pj"
+mk_push_bin "$bin7pj" "git config --global --add 'credential.https://push-probe.invalid.helper' '!f(){ test \"\$1\" = get || exit 0; echo username=gh-stub; echo password=wired-by-setup-git; };f'
+      git config --global \"url.file://$bare7pj/.insteadOf\" 'https://push-probe.invalid/cqlite.git'"
+gc7pj="$tmp/gc7pj"; : >"$gc7pj"   # UNWIRED: no helper, no rewrite, as the image ships
+run_push "$repo7pj" "$bin7pj" "$gc7pj" --fix-credentials --strict; out7pj=$push_out; rc7pj=$push_rc
+if printf '%s' "$out7pj" | grep -q '\[ok\].*git credentials WIRED BY THIS RUN' \
+   && ! printf '%s' "$out7pj" | grep -q '\[warn\].*git push has NO credentials' \
+   && printf '%s' "$out7pj" | grep -q '\[ok\].*git-push: VERIFIED'; then
+  ok "push: an unwired box repaired by --fix-credentials reports ONE [ok] verdict — no pre-repair warning survives the repair"
+else
+  bad "push: the repaired box still carries a credential WARNING (verify.run would fail on a box it just fixed)"
+  push_plain "$out7pj" | grep -E 'credential|git-push' | head -6
+fi
+if [ "$base_warns" -eq 1 ]; then
+  if [ "$rc7pj" -eq 0 ] && push_green "$out7pj" && [ "$(push_warns "$out7pj")" -eq 0 ]; then
+    ok "push: AC1+AC3 end to end — unwired box + --fix-credentials --strict => exit 0 AND 'All checks green.'"
+  else
+    bad "push: repaired box did not certify (rc=$rc7pj warns=$(push_warns "$out7pj") green=$(push_green "$out7pj" && echo yes || echo no))"
+    push_plain "$out7pj" | grep -E '\[warn\]' | head -5
+  fi
+else
+  echo "skip - push: AC1+AC3 exit-0 assertion needs an otherwise-clean sandbox (baseline=$base_warns warnings)"
+fi
+
 # 7p-g. `--strict` AND "All checks green." MUST NOT DIVERGE — asserted in BOTH
 #   directions. They are two channels for ONE fact: the green string is printed iff
 #   WARNINGS is 0, and --strict exits 0 iff WARNINGS is 0. A reviewer proposed keying
