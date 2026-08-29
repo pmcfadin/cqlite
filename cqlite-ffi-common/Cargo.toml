@@ -10,7 +10,20 @@ rust-version.workspace = true
 description = "Pure-Rust scalar rendering and error-identity logic shared by the CQLite language bindings"
 
 [dependencies]
-cqlite-core = { path = "../cqlite-core" }
+# `default-features = false` (issue #1452): this crate uses ONLY `Error` /
+# `ErrorCategory`, so it must not be the reason a consumer links
+# `all-compression` / `state_machine` / `write-support`. Cargo unifies features
+# across a build graph, so a default-taking line here widens every consumer's
+# cqlite-core feature set from one hop away, where the binding's own manifest
+# does not show it. Measured with
+# `cargo tree -p cqlite-ffi-common -e features -i cqlite-core`: this crate now
+# contributes no cqlite-core feature at all.
+#
+# It does NOT currently change what `bindings/node` links: that manifest's own
+# cqlite-core line adds to the default features rather than replacing them, so
+# the binding already enables `write-support` itself. Narrowing THAT is a
+# separate call.
+cqlite-core = { path = "../cqlite-core", default-features = false }
 # Declared locally at "0.4" to match cqlite-core, cqlite-cli and bindings/node.
 # There is deliberately no `[workspace.dependencies]` entry (issue #1452 non-goal).
 num-bigint = "0.4"
