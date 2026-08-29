@@ -155,9 +155,15 @@ pub struct StorageConfig {
 
     /// Fraction of total system memory above which [`DiskAccessMode::Auto`]
     /// switches a file from memory-mapped to direct I/O. Defaults to `0.5`
-    /// (half of RAM). Clamped to `(0.0, 1.0]`; values outside that range fall
-    /// back to the default. Ignored when system memory cannot be determined
-    /// (in which case `Auto` never escalates to direct I/O).
+    /// (half of RAM). Ignored when system memory cannot be determined (in which
+    /// case `Auto` never escalates to direct I/O).
+    ///
+    /// The legal range is `(0.0, 1.0]` and [`Config::validate`] REJECTS anything
+    /// outside it, NaN and the infinities included (issue #1696). It used to be
+    /// silently clamped instead — a `2.0` or a `-1` quietly became the `0.5`
+    /// default — so the value an operator set was not the value that ran. It is a
+    /// FRACTION, never a byte count; to always bypass the page cache, ask for
+    /// [`DiskAccessMode::Direct`].
     #[serde(default = "default_direct_io_memory_fraction")]
     pub direct_io_memory_fraction: f64,
 
@@ -933,14 +939,28 @@ impl Config {
         // further to reject here. This arm exists so a future "must be > 0" rule
         // cannot be added without confronting the sentinel contract.
 
-        // Validate bloom filter settings
-        if self.storage.enable_bloom_filters
-            && (self.storage.bloom_filter_fp_rate <= 0.0
-                || self.storage.bloom_filter_fp_rate >= 1.0)
-        {
-            return Err(crate::Error::configuration(
-                "bloom_filter_fp_rate must be between 0 and 1",
-            ));
+        // `direct_io_memory_fraction` is a FRACTION of system RAM (issue #1696,
+        // AH3). Before this arm existed it was live but unvalidated: the reader's
+        // `resolve_disk_access_mode` silently CLAMPED nonsense — `<= 0.0`, NaN and
+        // the infinities fell back to the 0.5 default, and anything above `1.0`
+        // was pinned at `1.0`. An operator who wrote `2.0` (meaning "twice RAM")
+        // or `-1` therefore got the default and no word about it, which is the
+        // same dishonesty as a decorative knob: the value they set was not the
+        // value that ran.
+        //
+        // The legal range is the documented `(0.0, 1.0]` — open at zero because a
+        // zero (or negative) fraction asks `Auto` to escalate EVERY file to direct
+        // I/O, which is not what the field means and is spelled
+        // `DiskAccessMode::Direct`; closed at one because "all of RAM" is a
+        // coherent ceiling. `!(range)` rather than a chain of `<`/`>` so NaN — for
+        // which every ordered comparison is false — is REJECTED rather than
+        // sailing through. The reader keeps its clamp as defense in depth for any
+        // caller that reaches it without validating.
+        let fraction = self.storage.direct_io_memory_fraction;
+        if !(fraction > 0.0 && fraction <= 1.0) {
+            return Err(crate::Error::configuration(format!(
+                "direct_io_memory_fraction ({fraction}) must be a fraction of system memory                  in (0.0, 1.0]; it is not a byte count, and a value outside that range was                  previously clamped silently. Use DiskAccessMode::Direct to always bypass                  the page cache"
+            )));
         }
 
         Ok(())
