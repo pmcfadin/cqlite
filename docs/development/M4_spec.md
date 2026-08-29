@@ -721,14 +721,25 @@ nesting space and therefore cannot be closed. `Value::Frozen` adds no row: it re
 | `decimal.Decimal` | `Value::Decimal` | no | — |
 | `cqlite.Duration` | `Value::Duration` | no | — |
 | `IPv4Address` / `IPv6Address` | `Value::Inet` | no | — |
-| `list` | `list<T>`, `set<frozen<udt>>` (the `contains_udt` fallback), **JSON array** | yes (3) | **DIVERGES** — `set` vs `list` order-sensitivity is **b-1**; the JSON array is **b-5** |
-| `frozenset` | `set<T>` (non-UDT elements), a **projected `udt`** (`value_to_hashable_key`'s `Udt` arm), a **projected `set`** (fall-through → `set_to_py`) | yes (3) | **DIVERGES** — the projected UDT is **a-1**/**a-3**; `set` vs projected `set` is benign |
-| `tuple` | `tuple<...>`, a **projected `list<T>`**, a **projected `tuple<...>`** (fall-through) | yes (3) | **benign** — all three canonicalize to an array |
+| `list` | `list<T>`, `set<frozen<udt>>` (the `contains_udt` fallback), **JSON array**. (A *projected* `set<frozen<udt>>` would also produce a `list`, but a `list` is unhashable, so that path raises rather than canonicalizing — #3500.) | yes (3) | **DIVERGES** — `set` vs `list` order-sensitivity is **b-1**; the JSON array is **b-5** |
+| `frozenset` | `set<T>` (non-UDT elements), a **projected `udt`** (`value_to_hashable_key`'s `Udt` arm), a **projected `set`** (fall-through → `set_to_py`) | yes (3) | **MIXED** — the projected UDT **DIVERGES** (**a-1**, and **a-3** when nested); `set<T>` vs a projected `set` is benign |
+| `tuple` | `tuple<...>`, a **projected `list<T>`** (`List` arm), a **projected `tuple<...>`** (fall-through), a **projected `map<k,v>`** (`Map` arm → a tuple of pairs) | yes (4) | **MIXED** — benign for `tuple<...>`, a projected `list<T>` and a projected `tuple<...>` (all canonicalize to an array); **DIVERGENT for a projected `map`**, whose array-of-arrays is not the CLI/Node array of `{"key": …, "value": …}` — instance **a-2** |
 | `dict` | `map<k,v>` (cell level), `udt`, **JSON object**, and a **ROW** at row level | yes (4) | **DIVERGES** — map vs UDT is **b-2**; the JSON object is **b-5**; the ROW source is disambiguated by the explicit `is_row_level` signal and is therefore **FIXED**, not a divergence |
 
 Reading rule: a shape with no collision needs no thought; a **benign** collision needs none either
-(that is what benign means); only the three **DIVERGES** rows — `list`, `frozenset`, `dict` — require
-#1455 to act, and their instances are named in the next table.
+(that is what benign means); the **four** rows carrying a divergent source — `list`, `frozenset`,
+`tuple` (for a projected `map` only) and `dict` — are the ones requiring #1455 to act, and their
+instances are named in the next table. A projection position that would need an unhashable shape
+(`dict`, `list`) does not reach the normalizer at all: it raises inside the binding (#3500).
+
+**How each row was derived, and the verification trap to avoid.** A row answers "**which producers
+can emit this host shape**", counted over BOTH `value_to_py`'s arms AND `value_to_hashable_key`'s
+projections (`List`→`tuple`, `Map`→tuple of pairs, `Udt`→`frozenset`, `Frozen`→recurse, everything
+else falling through to `value_to_py`) AND `json_to_py`'s arms. **Confirming that all 26 `Value::`
+variants appear somewhere in this section is NOT the same check** — that is *variant coverage*, and
+it is strictly weaker: it passed while the `tuple` row was missing its projected-`map` source
+(`Value::Map` appeared in the `dict` row, so the variant was "covered" while a row was incomplete).
+Per-row source completeness is the property this table claims; verify it that way.
 
 **Known instances (NOT exhaustive).** This table records the instances **identified so far**; it
 is a floor, not a ceiling, and it cannot be closed — the nesting space the two families range
@@ -767,7 +778,7 @@ patched one at a time instead of the class being swept. The four known sites:
 | **Row dict** | column names | **FIXED.** A row with a column named `_type` used to be sniffed as a UDT, dropping a `_keyspace` column. `normalize_python_value` now checks the caller's explicit `is_row_level` signal **before** the `"_type"` content sniff. The signal is authoritative (every `is_row_level=True` call site normalizes a `row.to_dict()`, and a UDT is always a CELL, so it can only arrive with `is_row_level=False`) — which is also why the reorder cannot affect the UDT branch. **An unambiguous signal existed, so it was used instead of guessing.** #1455 needs no row-level handling. |
 | **JSON object** | JSON keys | **OPEN.** A JSON object cell reaching Python as a `dict` (`json_to_py`) can carry a literal `"_type"` key of its own, so it is read as a UDT — the same collision with a third source. Instance **b-5**; unreachable from today's corpus (no fixture uses a `"json"` comparator). |
 | **Cell-level map** | map keys | **OPEN.** A `map<text, X>` holding a literal `"_type"` key is read as a UDT: an **object** instead of the documented `{"key": …, "value": …}` array, with a `"_keyspace"` entry dropped. No signal distinguishes a map from a UDT at cell level — both are a `dict`, and `_type` is the only discriminator available. Treat such a map as **UNSUPPORTED**. |
-| **UDT fields** | field names | **OPEN.** `_type`/`_keyspace` are legal quoted UDT field names, and because both bindings inject the markers *before* setting fields, **the field OVERWRITES the metadata** — symmetrically, in Python and Node. The canonical rule then drops `_keyspace` (the CLI omits it for UDTs), so a field genuinely named `_keyspace` is **lost**, while the CLI — which injects nothing — keeps it. Pinned at normalizer level by `test_udt_field_named_keyspace_is_dropped`. |
+| **UDT fields** | field names | **OPEN.** `_type`/`_keyspace` are legal quoted UDT field names, and because both bindings inject the markers *before* setting fields, **the field OVERWRITES the metadata** — symmetrically, in Python and Node. The canonical rule then drops `_keyspace` (the CLI omits it for UDTs), so a field genuinely named `_keyspace` is **lost**, while the CLI — which never injects `_keyspace` — keeps it as a field. For a field named `_type` the CLI is **not** an oracle: its JSON writer injects `_type` and is overwritten in the same way (see the marker/oracle table below). Pinned at normalizer level by `test_udt_field_named_keyspace_is_dropped`. |
 | **UDT-as-map-key projection** | field names | **OPEN.** `value_to_hashable_key`'s `Udt` arm pushes a pair for `_type`, then `_keyspace`, then one per field, so a field named `_type` yields a **duplicate** `_type` pair inside the projected `frozenset` (the two pairs differ in value, so nothing dedupes them) and the canonical array holds both. Compounds instance a-1. |
 
 **Why the obvious narrowings are wrong.** Requiring *both* `_type` and `_keyspace` before treating a
@@ -779,12 +790,22 @@ choose a rarer delimiter.** The real fix carries UDT identity **out of band** (a
 sidecar type map, or the declared CQL type threaded in) — three options are written up in **#3504**;
 the canonicalization half is **#3497**.
 
-**What makes this class especially nasty: it is SYMMETRIC across the bindings.** Python and Node
-inject the same markers in the same order and make the identical mistake, so a **Python↔Node
-comparison can never reveal it** — both sides agree, and agreement reads as parity. Only a
-comparison against the CLI / `sstabledump`, which injects nothing, exposes it. This is exactly the
-shared-error blind spot `CLAUDE.md` describes for symmetric round-trip tests: the oracle has to be
-the *other* implementation's bytes, never the same family's output.
+**What makes this class especially nasty: it is SYMMETRIC — and the two markers need DIFFERENT
+oracles.** Python and Node inject the same markers in the same order and make the identical
+mistake, so a **Python↔Node comparison can never reveal either half**: both sides agree, and
+agreement reads as parity. But the two markers differ in how far the symmetry reaches, and an
+earlier version of this section got it wrong by asserting "the CLI injects nothing" — the CLI's
+JSON writer (`cqlite-cli/src/output/json.rs`, `Value::Udt` arm) inserts `"_type"` **and then the
+fields**, exactly like the bindings:
+
+| Marker | Who injects it | Detectable by | Valid oracle |
+|---|---|---|---|
+| **`_type`** | Python (`udt_to_py`), Node (`udt_to_object`) **and the CLI** (`json.rs`) — all three inject-then-overwrite | **nothing in this family** — all three agree and all three are wrong | **`sstabledump` / the raw SSTable bytes** |
+| **`_keyspace`** | the two bindings only; the CLI never injects it, so it retains a `_keyspace` **field** | a binding↔CLI comparison | **the CLI** (and `sstabledump`) |
+
+This is exactly the shared-error blind spot `CLAUDE.md` describes for symmetric round-trip tests:
+the oracle has to be the *other* implementation's bytes, never the same family's output — and for
+`_type` the CLI is inside the same family. The correction is recorded on **#3504**.
 
 **Some nested shapes RAISE rather than diverge (issue #3500).** `contains_udt` and
 `value_to_hashable_key` are **not total over `Value`**: `contains_udt` recurses only through

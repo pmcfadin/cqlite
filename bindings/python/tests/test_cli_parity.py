@@ -1033,12 +1033,17 @@ class TestCollectionIdentityContract:
         `set_item(field.name)`; `udt_to_object` does the identical thing), so a
         field with that name **overwrites the metadata** — symmetrically, in Python
         and Node. The canonical rule then drops `_keyspace` because the CLI omits it
-        for UDTs, so the FIELD is lost, while the CLI (which injects nothing) keeps
-        it.
+        for UDTs, so the FIELD is lost, while the CLI — which never injects
+        `_keyspace` — keeps it as a field.
 
-        Two properties worth keeping in view. (1) The class is **symmetric**: both
-        bindings make the same mistake, so a Python↔Node comparison cannot reveal
-        it — only a CLI/`sstabledump` comparison can. (2) The fix is NOT to require
+        Two properties worth keeping in view. (1) The class is **symmetric**, and
+        the two markers need DIFFERENT oracles: for `_keyspace` the CLI is a valid
+        oracle (it injects nothing of that name), but for `_type` it is NOT — the
+        CLI's JSON writer (`cqlite-cli/src/output/json.rs`, `Value::Udt` arm)
+        inserts `"_type"` and then the fields, so it is overwritten exactly like
+        the bindings. All three implementations agree and all three are wrong, so
+        only `sstabledump`/the raw bytes can detect the `_type` half (correction
+        recorded on #3504). (2) The fix is NOT to require
         `_type` and `_keyspace` together, nor to pick a rarer marker: that just
         chooses a rarer delimiter on a channel the data controls. UDT identity has
         to be carried out of band (#3504; the canonicalization half is #3497).
