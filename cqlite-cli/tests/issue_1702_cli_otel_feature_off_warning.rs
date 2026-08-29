@@ -82,9 +82,14 @@ fn run(otel_enabled: Option<&str>) -> Output {
     out
 }
 
-/// Count occurrences of the warning's anchor token in a stream.
+/// Count occurrences of the warning's anchor phrase in a stream. Anchored on
+/// the "built WITHOUT the feature" clause — the part that IS the diagnosis —
+/// rather than on the env-var name, which the message only cites as one of
+/// several possible sources of `enabled`.
 fn warning_hits(stream: &str) -> usize {
-    stream.matches("CQLITE_OTEL_ENABLED is set").count()
+    stream
+        .matches("built WITHOUT the `observability` cargo feature")
+        .count()
 }
 
 /// AC1: the warning reaches STDERR on the real binary, exactly once, carrying

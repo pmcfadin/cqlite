@@ -404,15 +404,23 @@ pub fn init(cfg: ObservabilityConfig) -> Result<ObservabilityGuard> {
     // `enabled`: with `enabled == false` they change nothing even in a
     // feature-ON build, so a separate warning for them would be noise, not
     // honesty. This omission is deliberate, not an oversight.
+    //
+    // Wording note: `init` receives an already-RESOLVED config and cannot know
+    // which source enabled it (the CLI accepts `CQLITE_OTEL_ENABLED`, the
+    // `--otel-enabled` flag, and a config file, all feeding this one field), so
+    // the message must not assert that the env var is set. It names the env var
+    // as the common spelling — operators grep for it — without claiming
+    // provenance.
     if cfg.enabled {
         tracing::warn!(
             requested_endpoint = %cfg.endpoint,
-            "CQLITE_OTEL_ENABLED is set but this binary was built WITHOUT the \
+            "OpenTelemetry export is ENABLED in configuration (CQLITE_OTEL_ENABLED / \
+             --otel-enabled / config file) but this binary was built WITHOUT the \
              `observability` cargo feature: OpenTelemetry is compiled out, so NO \
              metrics and NO traces will be emitted and the OTLP endpoint is never \
-             contacted (this is NOT a collector or endpoint problem). Rebuild with \
-             `--features observability` to export telemetry, or unset \
-             CQLITE_OTEL_ENABLED to silence this warning."
+             contacted — this is NOT a collector or endpoint problem. Rebuild with \
+             `--features observability` to export telemetry, or disable \
+             OpenTelemetry (CQLITE_OTEL_ENABLED=0) to silence this warning."
         );
     }
 
