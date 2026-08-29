@@ -161,8 +161,8 @@ fn the_shipped_example_config_names_no_removed_keys() {
         .join("..")
         .join("examples")
         .join("example-config.toml");
-    let content = fs::read_to_string(&example)
-        .unwrap_or_else(|e| panic!("read {}: {e}", example.display()));
+    let content =
+        fs::read_to_string(&example).unwrap_or_else(|e| panic!("read {}: {e}", example.display()));
 
     assert!(
         warning_for_file(&example, &content).is_none(),

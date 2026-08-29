@@ -705,7 +705,11 @@ fn registry_paths_are_unique_and_end_in_their_field() {
 /// strongest disposition is unverified prose.
 #[test]
 fn here_evidence_names_a_test_in_this_file() {
-    let this_file = read(&crate_dir().join("tests").join("config_knob_behavior_guard.rs"));
+    let this_file = read(
+        &crate_dir()
+            .join("tests")
+            .join("config_knob_behavior_guard.rs"),
+    );
     for knob in KNOBS {
         if let Evidence::Here(test_fn) = knob.evidence {
             assert!(

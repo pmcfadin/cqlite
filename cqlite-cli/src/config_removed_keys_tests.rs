@@ -97,7 +97,10 @@ max_rows = 500
 colors = true
 "#;
     let found = detected("toml", clean);
-    assert!(found.is_empty(), "clean config must report nothing: {found:?}");
+    assert!(
+        found.is_empty(),
+        "clean config must report nothing: {found:?}"
+    );
 
     let document = parse_for_inspection(Some("toml"), clean).expect("parses");
     let present = removed_keys_present(&document);
@@ -140,8 +143,14 @@ fn the_warning_names_every_dead_key_and_the_file() {
     let present = removed_keys_present(&document);
     let warning = deprecation_warning("/etc/cqlite.toml", &present).expect("keys are present");
 
-    assert!(warning.contains("/etc/cqlite.toml"), "must name the file: {warning}");
-    assert!(warning.contains("IGNORED"), "must say the keys do nothing: {warning}");
+    assert!(
+        warning.contains("/etc/cqlite.toml"),
+        "must name the file: {warning}"
+    );
+    assert!(
+        warning.contains("IGNORED"),
+        "must say the keys do nothing: {warning}"
+    );
     for removed in REMOVED_KEYS {
         assert!(
             warning.contains(removed.path),

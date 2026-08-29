@@ -185,7 +185,9 @@ pub fn warning_for_file(path: &std::path::Path, content: &str) -> Option<String>
 /// file. `load_from_file` does the real parse and owns the real error.
 pub fn parse_for_inspection(extension: Option<&str>, content: &str) -> Option<Document> {
     match extension {
-        Some("toml") => toml::from_str::<toml::Value>(content).ok().map(Document::Toml),
+        Some("toml") => toml::from_str::<toml::Value>(content)
+            .ok()
+            .map(Document::Toml),
         Some("yaml") | Some("yml") => serde_yaml::from_str::<serde_yaml::Value>(content)
             .ok()
             .map(Document::Yaml),
