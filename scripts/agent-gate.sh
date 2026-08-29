@@ -6887,6 +6887,27 @@ $(awk '
   /^[[:space:]]*\/\*/ { if ($0 !~ /\*\//) in_block = 1; next }
   # A single-line `/* … */` anywhere on an otherwise-trivia line is also trivia.
   /^[[:space:]]*\/\*.*\*\/[[:space:]]*$/ { next }
+  # A MULTILINE ATTRIBUTE IS ONE CLUSTER (roborev job 99, Medium). rustfmt legitimately writes
+  #     #[cfg(all(
+  #         feature = "state_machine",
+  #         feature = "cli-helpers"
+  #     ))]
+  #     mod child;
+  # and those continuation lines match no attribute pattern, so they fell through to the
+  # cluster-end rule, which discarded the pending gate text and left the child reading as
+  # UNCONDITIONAL — reintroducing for the multiline form the exact defect just fixed for the
+  # single-line one. Note the direction: this was a REGRESSION INTRODUCED BY THAT FIX, since
+  # clearing gatetxt at cluster end is what made a continuation line destructive.
+  # Balance is counted on SQUARE BRACKETS: an attribute is not over until its `]` arrives,
+  # whatever sits on the lines between. A `[` or `]` inside an attribute string literal would
+  # skew the count; that is accepted and bounded — it can only leave the cluster open longer,
+  # i.e. report a gap that is not there, never hide one.
+  attrdepth > 0 {
+    if (incfg) { t = $0; gsub(/^[[:space:]]+|[[:space:]]+$/, "", t); gatetxt = gatetxt " " t }
+    attrdepth += gsub(/\[/, "[") - gsub(/\]/, "]")
+    if (attrdepth < 1) { attrdepth = 0; incfg = 0 }
+    next
+  }
   # A `#[path = "..."]` ATTRIBUTE only, and a same-line `mod` must still be processed (roborev
   # round-40, Medium). Two defects in one line:
   #   * `next` fired unconditionally, so the very common single-line form
@@ -6945,10 +6966,15 @@ $(awk '
   # ends the cluster, which stays the conservative direction.
   /^[[:space:]]*#\[/ {
     # Remember a cfg on this declaration so the `mod` rule can DECLARE it with the child.
-    if ($0 ~ /#\[[[:space:]]*cfg(_attr)?[[:space:]]*\(/) {
+    iscfg = ($0 ~ /#\[[[:space:]]*cfg(_attr)?[[:space:]]*\(/)
+    if (iscfg) {
       t = $0; gsub(/^[[:space:]]+|[[:space:]]+$/, "", t)
       gatetxt = (gatetxt == "" ? t : gatetxt " " t)
     }
+    # OPEN the cluster when the brackets do not close on this line, so the continuation rule
+    # above collects the rest instead of the cluster-end rule destroying it.
+    attrdepth = gsub(/\[/, "[") - gsub(/\]/, "]")
+    if (attrdepth > 0) { incfg = iscfg } else { attrdepth = 0 }
     next
   }
   # BOTH pendings die with the cluster (roborev job 97, Medium). Clearing `haspath` while leaving

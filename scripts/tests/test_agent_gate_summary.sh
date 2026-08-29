@@ -3940,7 +3940,13 @@ else
   : > "$cg_root/tests/gated_child.rs"; : > "$cg_root/tests/plain_child.rs"; : > "$cg_root/tests/gated_inline.rs"
 
   # shellcheck source=/dev/null
-  ( . "$cg_h"
+  # A BRACES GROUP, NEVER A SUBSHELL. `bad()` increments a shell variable, so a failing assert
+  # inside `( … )` PRINTS its FAIL line and is never counted — the suite would report
+  # "failed: 0" and exit 0 with 22 assert calls unaccounted for. That is the vacuous pass this
+  # suite exists to detect, in the suite itself; the tally, the floor and the exit status all
+  # depend on the counters living in ONE shell. Introduced here and caught by the tally not
+  # growing when four asserts were added.
+  { . "$cg_h"
 
     cg_out=$(_rust_module_closure "$cg_root/tests/preceding.rs" 2>"$tmp/1699-cg-e1.txt")
     if grep -q '^CFG-GATED-MOD gated_child ' "$tmp/1699-cg-e1.txt"; then
@@ -3988,13 +3994,47 @@ else
       fi
     done
 
+    # A MULTILINE parent gate (roborev job 99, Medium). rustfmt writes `#[cfg(all(` across lines,
+    # and those continuation lines match no attribute pattern — so the cluster-end reset destroyed
+    # the pending gate text and the child read as UNCONDITIONAL. This is a REGRESSION FIXTURE in
+    # the strict sense: the defect was introduced by the fix for the cfg-on-a-function leak, since
+    # clearing gatetxt at cluster end is exactly what made a continuation line destructive.
+    mkdir -p "$cg_root/tests/support"
+    : > "$cg_root/tests/support/datasets_root.rs"
+    printf '#[cfg(all(\n    feature = "state_machine",\n    feature = "cli-helpers"\n))]\n#[path = "support/datasets_root.rs"]\nmod gated_child;\n\nmod plain_child;\n' > "$cg_root/tests/multiattr.rs"
+    mc_out=$(_rust_module_closure "$cg_root/tests/multiattr.rs" 2>"$tmp/1699-cg-multi.txt")
+    if grep -q '^CFG-GATED-MOD gated_child ' "$tmp/1699-cg-multi.txt"; then
+      ok "1699-cfggate-multiline: a MULTILINE parent gate is still reported (continuation lines do not clear the pending cfg)"
+    else
+      bad "1699-cfggate-multiline: a rustfmt-valid multiline #[cfg(all(...))] before \`mod\` produced NO report — the child reads as unconditional and a gated test inside it counts as executable"
+    fi
+    # the WHOLE condition must survive, not just the opening line: the reader is told to compare
+    # it against the enabled feature set, and `cfg(all(` alone cannot be compared to anything
+    if grep -q 'cli-helpers' "$tmp/1699-cg-multi.txt"; then
+      ok "1699-cfggate-multitext: the full multiline condition is carried in the report"
+    else
+      bad "1699-cfggate-multitext: only the opening line of the multiline cfg was reported — the conditions the reader must compare are missing"
+    fi
+    # and the ungated sibling after a MULTILINE cluster must still be clean
+    if grep -q '^CFG-GATED-MOD plain_child ' "$tmp/1699-cg-multi.txt"; then
+      bad "1699-cfggate-multileak: the multiline gate leaked onto the ungated sibling that follows it"
+    else
+      ok "1699-cfggate-multileak: the multiline gate does not leak onto the following ungated sibling"
+    fi
+    # the child must still RESOLVE through its #[path], i.e. the balance rule did not eat the path
+    if printf '%s\n' "$mc_out" | grep -q 'support/datasets_root.rs'; then
+      ok "1699-cfggate-multipath: the #[path] after a multiline cfg still resolves the child"
+    else
+      bad "1699-cfggate-multipath: the child did not resolve through its #[path] — the balance rule swallowed the path attribute, shrinking the source set"
+    fi
+
     _rust_module_closure "$cg_root/tests/ungated.rs" >/dev/null 2>"$tmp/1699-cg-e3.txt"
     if [ -s "$tmp/1699-cg-e3.txt" ]; then
       bad "1699-cfggate-quiet: an UNGATED module tree produced stderr output — the caller FAILs on any stderr, so this reds the lane on ordinary code: $(cat "$tmp/1699-cg-e3.txt")"
     else
       ok "1699-cfggate-quiet: an ungated module tree stays silent (no false fail-closed)"
     fi
-  )
+  }
 fi
 
 # the caller must name the RIGHT cause — a wrong diagnosis costs the next reader the investigation
@@ -4098,7 +4138,7 @@ else
   bad "1699-cfgsite-singleline: single-line attribute rendered as [$(cs_render "$cs_single")] — a false truncation marker on complete input"
 fi
 
-ASSERT_FLOOR=305
+ASSERT_FLOOR=355
 if [ "$PASS" -lt "$ASSERT_FLOOR" ]; then
   echo "FAIL - assert-floor: only $PASS assertions ran, floor is $ASSERT_FLOOR. Sections are being SKIPPED or dying silently (an extraction that broke, a subshell aborting under set -u), and 'failed: 0' over a shrunken subject set is exactly the vacuous pass this suite tests for."
   FAIL=$((FAIL + 1))
