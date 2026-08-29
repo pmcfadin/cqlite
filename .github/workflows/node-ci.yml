@@ -114,7 +114,7 @@ jobs:
     # incompatibility in the harness itself. It does NOT run the full `npm test`
     # suite: behavioural coverage is the `test` job's business, and duplicating
     # it per Node major on every PR buys the same assertions twice.
-    name: Floor smoke (Node 18)
+    name: Floor smoke (Node 18.17.0)
     runs-on: ubuntu-latest
     needs: smoke
     timeout-minutes: 20
@@ -123,10 +123,10 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v5
 
-      - name: Setup Node.js 18 (the advertised engines.node floor)
+      - name: Setup Node.js 18.17.0 (the advertised engines.node floor, exactly)
         uses: actions/setup-node@v5
         with:
-          node-version: '18'
+          node-version: '18.17.0'
           cache: 'npm'
           cache-dependency-path: bindings/node/package-lock.json
 
@@ -160,12 +160,12 @@ jobs:
           CQLITE_DATASETS_ROOT: ${{ github.workspace }}/test-data/datasets
           # Asserted inside the script: a `setup-node` no-op would otherwise
           # make this a second Node-20 run reporting a floor it never touched.
-          CQLITE_FLOOR_EXPECT_NODE_MAJOR: '18'
+          CQLITE_FLOOR_EXPECT_NODE_VERSION: '18.17.0'
         run: |
           set -euo pipefail
           node scripts/floor-smoke.js
 
-      - name: Run smoke Jest subset on Node 18
+      - name: Run smoke Jest subset on Node 18.17.0
         working-directory: bindings/node
         run: |
           set -euo pipefail

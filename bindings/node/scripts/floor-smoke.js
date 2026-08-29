@@ -1,9 +1,13 @@
 /**
  * Floor smoke for the CQLite Node.js bindings (issue #1459).
  *
- * `package.json` advertises `engines.node: ">= 18"`, but CI only ever ran Node
- * 20 — so the advertised floor was never executed. This script is what the
- * `smoke-floor` job in `.github/workflows/node-ci.yml` runs on Node 18 against
+ * `package.json` advertises `engines.node: ">= 18.17.0"`, but CI only ever ran
+ * Node 20 — so the advertised floor was never executed. (The floor is 18.17.0,
+ * not 18.0.0, because `Cargo.toml` enables napi9 — Node-API 9 first ships in
+ * Node 18.17.0. The previous `">= 18"` was a FALSE claim: 18.0.0-18.16.x cannot
+ * load the module at all. See issue #1459.) This script is what the
+ * `smoke-floor` job in `.github/workflows/node-ci.yml` runs on that exact
+ * version against
  * the *already-built* prebuilt `.node` artifact. It deliberately does NOT
  * rebuild: we ship that prebuilt binary, and a napi-rs module built once must
  * load across every Node major we claim (Node-API is ABI-stable). If it does
@@ -11,13 +15,13 @@
  *
  * Three checks, in order of increasing strength:
  *
- *   1. The interpreter really is the major we meant to test. `setup-node`
- *      silently leaving the runner's default Node in place would otherwise
- *      make this whole job a second, redundant Node-20 run that reports a
- *      floor it never touched. `CQLITE_FLOOR_EXPECT_NODE_MAJOR` is a MANDATORY
- *      input: an unset value FAILS rather than skipping the check, so the
- *      guarantee is unconditional — matching the Python leg, which asserts its
- *      interpreter unconditionally in the workflow itself.
+ *   1. The interpreter really is the EXACT version we meant to test.
+ *      `setup-node` silently leaving the runner's default Node in place would
+ *      otherwise make this whole job a second, redundant Node-20 run that
+ *      reports a floor it never touched. `CQLITE_FLOOR_EXPECT_NODE_VERSION` is
+ *      a MANDATORY input: an unset value FAILS rather than skipping the check,
+ *      so the guarantee is unconditional — matching the Python leg, which
+ *      asserts its interpreter unconditionally in the workflow itself.
  *   2. The native module loads and `version()` returns a semver string.
  *      Catches an ABI/loader break on this major.
  *   3. One real query against the canonical corpus. ZERO rows is a FAILURE
@@ -55,9 +59,9 @@ const SMOKE_KEYSPACE_TABLE = 'test_basic.simple_table';
 const SMOKE_QUERY = `SELECT * FROM ${SMOKE_KEYSPACE_TABLE} LIMIT 1`;
 
 /**
- * Check 1: assert we are running on the Node major this job claims to test.
+ * Check 1: assert we run on the EXACT Node version this job claims to test.
  *
- * `CQLITE_FLOOR_EXPECT_NODE_MAJOR` is MANDATORY, and its absence FAILS. A
+ * `CQLITE_FLOOR_EXPECT_NODE_VERSION` is MANDATORY, and its absence FAILS. A
  * positive verdict requires an affirmative measurement (CLAUDE.md): if the
  * variable is unset we do not know which interpreter this is, and "we could not
  * tell" must never take the permissive branch. Concretely — for an issue whose
@@ -65,25 +69,31 @@ const SMOKE_QUERY = `SELECT * FROM ${SMOKE_KEYSPACE_TABLE} LIMIT 1`;
  * typo'd variable name would otherwise make this script report green having
  * never checked the interpreter at all.
  */
-function checkNodeMajor() {
-  const expected = process.env.CQLITE_FLOOR_EXPECT_NODE_MAJOR;
-  const actualMajor = process.versions.node.split('.')[0];
+function checkNodeVersion() {
+  const expected = process.env.CQLITE_FLOOR_EXPECT_NODE_VERSION;
+  const actual = process.versions.node;
   if (!expected) {
     console.error(
-      '::error::floor smoke: CQLITE_FLOOR_EXPECT_NODE_MAJOR is unset, so the ' +
+      '::error::floor smoke: CQLITE_FLOOR_EXPECT_NODE_VERSION is unset, so the ' +
         `running interpreter (${process.version}) could not be checked against ` +
         'the floor this job claims to test. Set it in the workflow step.'
     );
     return false;
   }
-  if (actualMajor !== expected) {
+  // EXACT, not major-only. `engines.node` is `>= 18.17.0` because Cargo.toml
+  // enables napi9 (Node-API 9), which does not exist before 18.17.0 — so the
+  // floor is a specific PATCH release, and "some 18.x ran" would not prove it.
+  // A major-only compare would let setup-node resolving to 18.20.x report the
+  // floor as tested while 18.17.0 stayed unexercised.
+  if (actual !== expected) {
     console.error(
-      `::error::floor smoke: expected Node major ${expected} but this process ` +
-        `is ${process.version}. The floor was NOT tested.`
+      `::error::floor smoke: expected Node ${expected} (the advertised ` +
+        `engines.node floor) but this process is ${process.version}. ` +
+        'The floor was NOT tested.'
     );
     return false;
   }
-  console.log(`node version OK: ${process.version} matches expected major ${expected}`);
+  console.log(`node version OK: ${process.version} is exactly the advertised floor`);
   return true;
 }
 
@@ -145,7 +155,7 @@ async function checkRealQuery(cqlite) {
 
 async function main() {
   console.log(`cqlite floor smoke on ${process.version}`);
-  let ok = checkNodeMajor();
+  let ok = checkNodeVersion();
   const cqlite = checkLoad();
   if (cqlite === null) {
     return 1;
