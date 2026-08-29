@@ -811,3 +811,134 @@ class TestRowCountParity:
             f"Row count mismatch for {keyspace}.{table}: "
             f"Python={py_count}, CLI={cli_count}"
         )
+
+
+# =============================================================================
+# Collection Identity Contract (Issue #1454)
+# =============================================================================
+
+
+# A UDT as the Python binding renders it (`udt_to_py`): a dict carrying the
+# `_type` / `_keyspace` metadata keys plus the named fields.
+def _udt(type_name: str, **fields: Any) -> dict:
+    return {"_type": type_name, "_keyspace": "test_collections", **fields}
+
+
+class TestCollectionIdentityContract:
+    """The collection-identity table of `docs/development/M4_spec.md` §5.3, executable.
+
+    Issue #1454. Each test asserts that `normalize_python_value` produces the
+    canonical shape documented for one row of that table, so the contract the
+    3-way golden parity harness (#1455, Y1) consumes is verified rather than
+    aspirational.
+
+    These tests are intentionally pure: they feed the normalizer the host values
+    the Python binding is documented to produce (`bindings/python/src/value.rs`:
+    `list_to_py`, `set_to_py`, `map_to_py`, `tuple_to_py`,
+    `value_to_hashable_key`) and need no dataset and no query, so a failure here
+    is unambiguously a contract violation and never a fixture problem.
+    """
+
+    def test_list_of_scalars_is_an_array(self):
+        """`list<T>` → Python `list` → JSON array, order preserved."""
+        assert normalize_python_value(["b", "a", "c"], is_row_level=False) == ["b", "a", "c"]
+
+    def test_set_of_scalars_is_a_sorted_array(self):
+        """`set<scalar>` → Python `frozenset` → **sorted** JSON array.
+
+        Sorting is required: `frozenset` iteration is hash-ordered while a JS
+        `Set` is insertion-ordered, so neither side's order may be asserted.
+        """
+        assert normalize_python_value(frozenset({3, 1, 2}), is_row_level=False) == [1, 2, 3]
+        assert normalize_python_value(frozenset({"b", "a"}), is_row_level=False) == ["a", "b"]
+
+    def test_set_of_hashable_collections_stays_a_frozenset(self):
+        """`set<frozen<list<int>>>` → `frozenset` of tuples → sorted array of arrays.
+
+        The `list` fallback in `set_to_py` triggers on UDTs only
+        (`contains_udt`), so nested *collections* still arrive as a frozenset.
+        """
+        normalized = normalize_python_value(frozenset({(1, 2), (3,)}), is_row_level=False)
+        assert sorted(normalized, key=_sort_key) == normalized
+        assert sorted(normalized, key=len) == [[3], [1, 2]]
+
+    def test_set_of_frozen_udt_is_a_list_not_a_frozenset(self):
+        """`set<frozen<udt>>` → Python **`list`** (asymmetry row 1).
+
+        `set_to_py` cannot use a `frozenset` because UDTs become unhashable
+        `dict`s, so it falls back to a `list`; Node keeps a JS `Set` of objects.
+        Canonical form on both sides is an array of UDT objects, with
+        `_keyspace` dropped (the CLI omits it) and `_type` retained.
+        """
+        value = [_udt("address", street="1 Main St"), _udt("address", street="2 Oak Ave")]
+        assert normalize_python_value(value, is_row_level=False) == [
+            {"_type": "address", "street": "1 Main St"},
+            {"_type": "address", "street": "2 Oak Ave"},
+        ]
+
+    def test_map_is_a_sorted_array_of_key_value_objects(self):
+        """`map<k,v>` → Python `dict` → sorted array of `{"key": k, "value": v}` (asymmetry row 2)."""
+        assert normalize_python_value({"b": 2, "a": 1}, is_row_level=False) == [
+            {"key": "a", "value": 1},
+            {"key": "b", "value": 2},
+        ]
+
+    def test_map_with_projected_collection_key(self):
+        """A `map<frozen<list<int>>, text>` key arrives as a `tuple` (`value_to_hashable_key`)."""
+        assert normalize_python_value({(1, 2): "x"}, is_row_level=False) == [
+            {"key": [1, 2], "value": "x"},
+        ]
+
+    def test_map_with_udt_key_canonicalizes_from_the_hashable_projection(self):
+        """A UDT map key is a `frozenset` of `(name, value)` pairs, not a UDT object.
+
+        Documented divergence (M4_spec §5.3): `map_to_py` routes keys through
+        `value_to_hashable_key`, which projects a UDT to a `frozenset` of
+        `(field_name, value)` pairs, so the key canonicalizes to a sorted array
+        of `[name, value]` pairs — unlike the same UDT in value position. This
+        test pins the *actual* shape; changing it would be a behavior change,
+        out of scope for #1454.
+        """
+        key = frozenset({("_type", "address"), ("_keyspace", "test_collections"), ("street", "1 Main St")})
+        normalized = normalize_python_value({key: 7}, is_row_level=False)
+        assert normalized == [
+            {
+                "key": [
+                    ["_keyspace", "test_collections"],
+                    ["_type", "address"],
+                    ["street", "1 Main St"],
+                ],
+                "value": 7,
+            }
+        ]
+
+    def test_tuple_is_an_array(self):
+        """`tuple<...>` → JSON array (asymmetry row 3)."""
+        assert normalize_python_value(("x", 1, None), is_row_level=False) == ["x", 1, None]
+
+    def test_tuple_and_list_canonicalize_identically(self):
+        """Node returns an `Array` for both `tuple<...>` and `list<T>`.
+
+        So the canonical form must erase the distinction Python preserves,
+        otherwise a Node↔Python comparison can never agree (#1454, #1455).
+        """
+        assert normalize_python_value(("a", 1), is_row_level=False) == normalize_python_value(
+            ["a", 1], is_row_level=False
+        )
+
+    def test_row_level_dict_stays_a_dict(self):
+        """A row is a `dict` too — only *cell*-level dicts are CQL maps."""
+        row = {"pk": 1, "m": {"b": 2, "a": 1}}
+        assert normalize_python_value(row, is_row_level=True) == {
+            "pk": 1,
+            "m": [{"key": "a", "value": 1}, {"key": "b", "value": 2}],
+        }
+
+    def test_nested_collection_shapes(self):
+        """`map<text, frozen<set<text>>>` and `list<frozen<udt>>` recurse correctly."""
+        assert normalize_python_value({"k": frozenset({"z", "y"})}, is_row_level=False) == [
+            {"key": "k", "value": ["y", "z"]},
+        ]
+        assert normalize_python_value([_udt("point", x=1)], is_row_level=False) == [
+            {"_type": "point", "x": 1},
+        ]
