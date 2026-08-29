@@ -152,7 +152,15 @@ function _errorContractNodeCodes() {
  *
  * @private
  * @returns {Array<{cqlType: string, name: string, kind: string, expected: string,
- *                  outcome: string, actual: string, scale: number, bytes: Buffer}>}
+ *                  expectedSha256: (string|null), outcome: string, actual: string,
+ *                  rendered: (string|null), scale: number, bytes: Buffer}>}
+ *   One entry per committed vector. `expected` is the committed expectation —
+ *   collapsed to a digest for a multi-kilobyte rendering, in which case
+ *   `expectedSha256` carries the lower-case SHA-256 hex of the UTF-8 bytes of the
+ *   FULL expected rendering (`null` when `expected` is itself exact).
+ *   `rendered` is the full, un-digested string this binding produced (`null` on a
+ *   refusal); `actual` is the readable half — the digest, or the native error's
+ *   `reason` — and is never the oracle for a long rendering.
  */
 function _ffiCommonRenderVectors() {
   try {
