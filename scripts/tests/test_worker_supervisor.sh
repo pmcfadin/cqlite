@@ -28,6 +28,7 @@ skip() {
 }
 
 TMP_ROOT="$(mktemp -d "${TMPDIR:-/tmp}/cqlite-supervisor-test.XXXXXX")"
+T_LOCKFN="$TMP_ROOT/lockfn"
 cleanup() { rm -rf "$TMP_ROOT" 2>/dev/null || true; }
 trap cleanup EXIT
 
@@ -2662,6 +2663,167 @@ STUBEOF
   fi
 }
 
+# ---------------------------------------------------------------------------
+# Test 28-claim (#3393, roborev round 19): the single-instance lock must be PER LANE. A
+# machine-global default made a second lane exit during lock acquisition, so the per-lane claim refs
+# this change adds were unreachable with the documented default invocation — the retracted #1930
+# invariant surviving in a second mechanism.
+# ---------------------------------------------------------------------------
+test_supervisor_lock_is_per_lane() {
+  local body a b same
+  body="$T_LOCKFN/lockfn.sh"
+  mkdir -p "$T_LOCKFN"
+  # The function alone, so the case does not depend on sourcing the whole supervisor.
+  {
+    printf '%s\n' '#!/usr/bin/env bash'
+    sed -n '/^supervisor_lock_path()/,/^}/p' "$SUPERVISOR"
+    printf '%s\n' 'supervisor_lock_path; printf "%s\n" "$SUPERVISOR_LOCK"'
+  } >"$body"
+  a=$(SUPERVISOR_LOCK="" REPO_ROOT=/data/lanes/lane-1111 TMPDIR=/tmp bash "$body")
+  b=$(SUPERVISOR_LOCK="" REPO_ROOT=/data/lanes/lane-2222 TMPDIR=/tmp bash "$body")
+  same=$(SUPERVISOR_LOCK="" REPO_ROOT=/data/lanes/lane-1111 TMPDIR=/tmp bash "$body")
+  if [[ -n "$a" && -n "$b" && "$a" != "$b" && "$a" == "$same" ]]; then
+    pass "claim: two lanes get DIFFERENT default locks and one lane is stable across runs ($a vs $b)"
+  else
+    fail "lock-per-lane: a=[$a] b=[$b] same=[$same] — two lanes must differ and one lane must be stable"
+  fi
+  # Two lanes whose directories share a BASENAME must still differ, or the readable half would alias
+  # them onto one lock and reintroduce the machine-global failure for the common fleet layout.
+  local c e
+  c=$(SUPERVISOR_LOCK="" REPO_ROOT=/data/boxA/lane TMPDIR=/tmp bash "$body")
+  e=$(SUPERVISOR_LOCK="" REPO_ROOT=/data/boxB/lane TMPDIR=/tmp bash "$body")
+  if [[ "$c" != "$e" ]]; then
+    pass "claim: two lanes sharing a directory BASENAME still get different locks"
+  else
+    fail "lock-per-lane-basename: both resolved to [$c]"
+  fi
+  # An explicit SUPERVISOR_LOCK still wins — the fix must not take the override away.
+  local ov
+  ov=$(SUPERVISOR_LOCK=/tmp/explicit.lock REPO_ROOT=/data/lanes/lane-1111 bash "$body")
+  if [[ "$ov" == "/tmp/explicit.lock" ]]; then
+    pass "claim: an explicit SUPERVISOR_LOCK is still honoured"
+  else
+    fail "lock-per-lane-override: got [$ov]"
+  fi
+  # BUILTINS ONLY (#3464 family 2, reintroduced in the first cut of this very fix). Several cases
+  # SOURCE the supervisor under a stripped PATH to prove the no-jq/no-python3 paths, so an external
+  # tool anywhere in this resolution breaks them. Driven by an EMPTY PATH.
+  local stripped
+  # `$BASH` is the ABSOLUTE path of the running shell. `PATH="" bash …` cannot find bash itself, so
+  # the first cut of this case failed with "bash: No such file or directory" — and its NON-VACUITY
+  # control PASSED for that same wrong reason, which is the shape this whole change keeps meeting.
+  stripped=$(SUPERVISOR_LOCK="" REPO_ROOT=/data/lanes/lane-1111 TMPDIR=/tmp PATH="" "$BASH" "$body" 2>&1)
+  if [[ "$stripped" == "$a" ]]; then
+    pass "claim: the lock path resolves with an EMPTY PATH — builtins only, no tr/cksum/awk"
+  else
+    fail "lock-per-lane-builtins: with PATH='' got [$stripped], expected [$a] — an external tool crept into the resolution"
+  fi
+  # NON-VACUITY: the same harness with a deliberately external-tool implementation DOES fail under
+  # the stripped PATH, so the case above is a measurement rather than a tautology.
+  local ext_body ext_out
+  ext_body="$T_LOCKFN/ext.sh"
+  {
+    printf '%s\n' '#!/usr/bin/env bash'
+    printf '%s\n' 'h="$(printf %s "$REPO_ROOT" | cksum | awk "{print \$1}")"'
+    printf '%s\n' 'printf "%s\n" "/tmp/x-$h.lock"'
+  } >"$ext_body"
+  local ext_expected
+  ext_expected="/tmp/x-$(printf %s /data/lanes/lane-1111 | cksum | awk '{print $1}').lock"
+  # Sanity: WITH a normal PATH the control must produce that value, or the comparison below is
+  # meaningless regardless of what the stripped run does.
+  local ext_ok
+  ext_ok=$(REPO_ROOT=/data/lanes/lane-1111 "$BASH" "$ext_body" 2>/dev/null)
+  ext_out=$(REPO_ROOT=/data/lanes/lane-1111 PATH="" "$BASH" "$ext_body" 2>/dev/null)
+  if [[ "$ext_ok" == "$ext_expected" && "$ext_out" != "$ext_expected" ]]; then
+    pass "NON-VACUITY: an external-tool implementation of the same resolution DOES break under PATH='' (so the builtin case above measures something)"
+  else
+    fail "NON-VACUITY broken: control with PATH gave [$ext_ok] (expected [$ext_expected]) and with PATH='' gave [$ext_out] — the external-tool control must WORK normally and BREAK stripped, or the builtins assertion proves nothing"
+  fi
+}
+
+# ---------------------------------------------------------------------------
+# Test 29-claim (#3393, roborev round 19): a lane-ref reap must carry the LEASE this supervisor
+# stamped, and a lease-not-held result (rc=4) means ownership TRANSFERRED — drop the entry rather
+# than retry, because retrying can only delete the new owner's live claim.
+# ---------------------------------------------------------------------------
+test_claim_cleanup_uses_lease_and_drops_on_transfer() {
+  local d out
+  d="$(new_case_dir)"
+  common_env "$d"
+  export CLAIM_LOG="$d/claim.log"
+  : >"$CLAIM_LOG"
+  # A reap stub that reports rc=4 (lease not held) for lane 77, and success otherwise.
+  cat >"$d/bin/claim.sh" <<'STUBEOF'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >>"${CLAIM_LOG:?CLAIM_LOG not set}"
+if [ "${1:-}" = reap ] && [ "${3:-}" = 77 ]; then exit 4; fi
+[ "${1:-}" = stamp ] && printf 'deadbeefdeadbeefdeadbeefdeadbeefdeadbeef\n'
+exit 0
+STUBEOF
+  chmod +x "$d/bin/claim.sh"
+  out="$(
+    CLAIM_CMD="bash $d/bin/claim.sh" HEARTBEAT_MACHINE=testbox CLAIM_LOG="$CLAIM_LOG" \
+    bash -c '
+      source "$1"
+      CLAIM_PENDING_CLEANUP=" 77:cafe1234 88:beef5678 "
+      claim_drain_pending_cleanup
+      printf "PENDING_AFTER=[%s]\n" "$CLAIM_PENDING_CLEANUP"
+    ' _ "$SUPERVISOR" 2>&1
+  )"
+  if grep -qE '^reap testbox 77 cafe1234$' "$CLAIM_LOG" \
+    && grep -qE '^reap testbox 88 beef5678$' "$CLAIM_LOG" \
+    && printf '%s' "$out" | grep -q 'pending cleanup of 77 dropped: the lease at cafe1234 is no longer held' \
+    && printf '%s' "$out" | grep -q 'PENDING_AFTER=\[\]'; then
+    pass "claim: the drain passes each entry's LEASE and DROPS the one whose lease transferred (never retries it)"
+  else
+    fail "claim-lease-drain: out=[$out] log=[$(tr '\n' ';' <"$CLAIM_LOG")]"
+  fi
+  # CONTROL: an entry whose reap SUCCEEDS is also removed, so the drop above is attributable to the
+  # rc=4 branch rather than to "the drain empties the queue regardless".
+  : >"$CLAIM_LOG"
+  out="$(
+    CLAIM_CMD="bash $d/bin/claim.sh" HEARTBEAT_MACHINE=testbox CLAIM_LOG="$CLAIM_LOG" \
+    bash -c '
+      source "$1"
+      CLAIM_PENDING_CLEANUP=" 99:aaa111 "
+      claim_drain_pending_cleanup
+      printf "PENDING_AFTER=[%s]\n" "$CLAIM_PENDING_CLEANUP"
+    ' _ "$SUPERVISOR" 2>&1
+  )"
+  if grep -qE '^reap testbox 99 aaa111$' "$CLAIM_LOG" \
+    && printf '%s' "$out" | grep -q 'stale lane ref 99 cleared (lease held at aaa111)' \
+    && printf '%s' "$out" | grep -q 'PENDING_AFTER=\[\]'; then
+    pass "claim: a successful leased reap clears the entry and names the lease it held"
+  else
+    fail "claim-lease-success: out=[$out] log=[$(tr '\n' ';' <"$CLAIM_LOG")]"
+  fi
+  # A NON-TRANSFER FAILURE MUST STILL BE RETAINED — dropping every non-zero rc would turn the lease
+  # fix into a ref leak, the mirror mistake (#3464 family 4, fail-shut).
+  : >"$CLAIM_LOG"
+  cat >"$d/bin/claim-fail.sh" <<'STUBEOF'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >>"${CLAIM_LOG:?CLAIM_LOG not set}"
+[ "${1:-}" = reap ] && exit 3
+exit 0
+STUBEOF
+  chmod +x "$d/bin/claim-fail.sh"
+  out="$(
+    CLAIM_CMD="bash $d/bin/claim-fail.sh" HEARTBEAT_MACHINE=testbox CLAIM_LOG="$CLAIM_LOG" \
+    bash -c '
+      source "$1"
+      CLAIM_PENDING_CLEANUP=" 55:bbb222 "
+      claim_drain_pending_cleanup
+      printf "PENDING_AFTER=[%s]\n" "$CLAIM_PENDING_CLEANUP"
+    ' _ "$SUPERVISOR" 2>&1
+  )"
+  if printf '%s' "$out" | grep -q 'PENDING_AFTER=\[ 55:bbb222\]' \
+    && printf '%s' "$out" | grep -q 'retained for retry'; then
+    pass "claim: an open-PR refusal (rc=3) is RETAINED with its lease, not dropped — only a transfer drops"
+  else
+    fail "claim-lease-retain: a non-transfer failure must be retained: out=[$out]"
+  fi
+}
+
 test_claim_drain_never_deletes_current_lane() {
   local d out
   d="$(new_case_dir)"
@@ -2906,6 +3068,8 @@ test_claim_issue_learned_from_marker
 test_claim_transition_survives_failed_replacement
 test_claim_drain_never_deletes_current_lane
 test_clear_claim_keeps_placeholder_on_abnormal_exit
+test_supervisor_lock_is_per_lane
+test_claim_cleanup_uses_lease_and_drops_on_transfer
 test_finalized_verified_merged_counts
 test_finalized_mismatch_open_is_abnormal
 test_finalized_unverified_not_counted_no_breaker
