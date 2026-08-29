@@ -241,6 +241,39 @@ else
     bad "fail-closed control: the SHIPPED guard PASSed on an unreadable log — a guard that consumed no input has measured nothing"
   fi
 
+  # C3: AFFIRMATIVE MEASUREMENT. Every check before the loop only establishes that nothing
+  # BAD was seen, and all of them are satisfied by parsing NOTHING — an empty log, a
+  # truncated log, or a log whose banners cargo has reformatted runs zero iterations and
+  # falls through to `return 0`. That is the vacuous pass #3400 exists to remove, surviving
+  # inside the fix for it. Both cases below have a READABLE, NON-EMPTY, successfully
+  # normalised log, so they isolate the banner count as the only thing that can red them.
+  zero_banner_rc=0
+  printf 'some cargo noise\nnothing recognisable here\n' >"$tmp/no-banners.log"
+  ( set +e; . "$tmp/current_guard.sh"; check_no_unexpected_zero_tests "Pass 1" "$tmp/no-banners.log" >/dev/null 2>&1; exit $? ) || zero_banner_rc=$?
+  if [ "$zero_banner_rc" -ne 0 ]; then
+    ok "C3: a NON-EMPTY log with no recognised target banners FAILs (the guard judged no target, so it measured nothing)"
+  else
+    bad "C3: the guard PASSed a log it found no target banners in — it reported OK having judged nothing, the exact vacuous pass #3400 removes"
+  fi
+  empty_log_rc=0
+  : >"$tmp/empty.log"
+  ( set +e; . "$tmp/current_guard.sh"; check_no_unexpected_zero_tests "Pass 1" "$tmp/empty.log" >/dev/null 2>&1; exit $? ) || empty_log_rc=$?
+  if [ "$empty_log_rc" -ne 0 ]; then
+    ok "C3: an EMPTY log FAILs (zero iterations is zero measurement, not a clean bill of health)"
+  else
+    bad "C3: the guard PASSed an EMPTY log — zero loop iterations reported as success"
+  fi
+  # ...and the positive control that keeps C3 from being a reject-everything rule: the real
+  # coloured log has banners, so it still reds for the RIGHT reason (a zero-test target) and
+  # still PASSes when that target is allowed.
+  c3_ctrl_rc=0
+  ( set +e; . "$tmp/current_guard.sh"; check_no_unexpected_zero_tests "Pass 1" "$tmp/zero-colour.log" empty >/dev/null 2>&1; exit $? ) || c3_ctrl_rc=$?
+  if [ "$c3_ctrl_rc" -eq 0 ]; then
+    ok "C3: a log WITH banners still PASSes when its zero-test target is allowed (the banner assert is not a blanket reject)"
+  else
+    bad "C3: the banner assert reds a legitimate log — rc=$c3_ctrl_rc"
+  fi
+
   # AC3, structurally: the shipped guard must be REDIRECTION-fed, not pipe-fed.
   if grep -q 'done < "\$_parse_src"' "$tmp/current_guard.sh" && ! grep -qE '\|[[:space:]]*while IFS= read' "$tmp/current_guard.sh"; then
     ok "AC3 (structural): the shipped guard reads via REDIRECTION (done < \"\$_parse_src\"), not through a pipe into while-read"

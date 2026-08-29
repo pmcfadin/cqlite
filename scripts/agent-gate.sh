@@ -8558,7 +8558,7 @@ dispatch_component() {
   check_no_unexpected_zero_tests() {
     local pass_name="$1" logfile="$2"; shift 2
     local allowed_zero=" $* "
-    local bad="" target=""
+    local bad="" target="" _banners=0
     # Parse an ANSI-STRIPPED copy, never the raw log (issue #3400). Under
     # CARGO_TERM_COLOR=always — set by 18 workflows incl. the nightly FULL gate.yml, and by
     # scripts/local/pre-merge.sh — cargo writes the reset sequence BETWEEN the status word and
@@ -8581,6 +8581,7 @@ dispatch_component() {
     fi
     while IFS= read -r line; do
       if [[ "$line" == *"Running tests/"* ]]; then
+        _banners=$((_banners + 1))
         target=$(printf "%s" "$line" | sed -E "s#.*Running tests/([^[:space:]]+)\.rs.*#\1#")
       elif [[ "$line" == "test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out"* ]]; then
         # Match the FULL zero-line (roborev finding, #2039): "0 passed; 0 failed"
@@ -8596,6 +8597,18 @@ dispatch_component() {
         target=""
       fi
     done < "$_parse_src"
+    # AFFIRMATIVE MEASUREMENT, the rule that governs this whole issue (#3400, roborev C3).
+    # Everything above only checks that nothing BAD was seen, and every one of those checks
+    # is satisfied by parsing NOTHING: an empty log, a truncated log, a killed cargo, or a
+    # cargo whose banner text has changed shape executes ZERO loop iterations and falls
+    # straight through to `return 0`. That is the vacuous pass this issue exists to remove,
+    # surviving inside the fix for it. The callers both run at least one --test target, so a
+    # successful cargo run MUST have printed at least one banner: zero banners means this
+    # guard judged no target, and a guard that judged nothing has measured nothing.
+    if [ "$_banners" -eq 0 ]; then
+      echo "cli-tests: FAIL-CLOSED — parsed '"'"'$logfile'"'"' and found ZERO recognised cargo target banners, so this guard judged NO target at all. The cargo run exited successfully, so banners must exist: an empty or truncated log, a killed process, a changed cargo output format, or a failed ANSI normalisation. A guard that measured nothing must never report OK (issue #3400)." >&2
+      return 1
+    fi
     if [ -n "$bad" ]; then
       echo "cli-tests: FAIL-CLOSED —$bad ran 0 tests in $pass_name unexpectedly (issue #2039: a write-support-#[cfg]-gated target with no declared required-features, not on the allowed-zero list, would otherwise silently never run)" >&2
       return 1
