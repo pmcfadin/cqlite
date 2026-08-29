@@ -52,7 +52,8 @@ A `python3` invocation can only receive code four ways: `-c`, a script path, sta
 `-m`. So the census keys on WHICH of those a given occurrence uses rather than on how it is
 spelled:
 
-    -c '…'        embedded, single-quoted — the shape both defective steps use. Extracted.
+    -c '…'        embedded, single-quoted — the shape both defective steps use. Extracted, by
+                  the rule below rather than by a line pattern.
     <<'EOF'       embedded via a heredoc on stdin. Extracted. (None today; covered because a
                   future step written this way must not fall outside the census.)
     <path>.py     a SCRIPT FILE. Not embedded — it is an ordinary python file every other tool
@@ -62,6 +63,51 @@ spelled:
 
 Anything else — `-c` with a shape that cannot be delimited, `-m`, a bare `-`, a variable where the
 code should be — is UNKNOWN, which is a finding.
+
+## HOW A `-c '…'` BLOCK IS DELIMITED, and the three closer shapes that forced the rule
+
+A bash single-quoted string HAS NO ESCAPE MECHANISM, so the body runs to the NEXT `'` — with one
+exception, the `'"'"'` idiom, which CLOSES the string, emits a literal apostrophe from a
+double-quoted segment, and REOPENS it. That single sentence is the whole delimiter, and it is
+stated as a property of bash rather than as a pattern over lines, because a pattern over lines is
+what got this wrong twice:
+
+  shape 1  the closer alone at column 0            `' "$HERE" "$CORPUS" …`   (this driver)
+  shape 2  the closer at the END of the last python line, bash arguments trailing
+                                                    `print(rows)' "$DEST/x.jsonl"`
+  shape 3  `'"'"'` MID-BLOCK — a literal apostrophe inside the body
+
+MEASURED over this repository, same probe, three delimiters:
+
+  column-0 closer only    31 blocks, 5 reported UNDELIMITED (shape 2 is idiomatic and in use at
+                          `test-data/scripts/gen-perf-corpus-bti.sh`, `scripts/lib/gate-notify.sh`
+                          and `docs/reports/ws0-3217-artifacts/harness/common.sh`)
+  exact next quote        59 blocks, 1 FALSE SyntaxError (shape 3 cut mid-body)
+  the rule above          59 blocks, 0 undelimited, 0 failing to parse
+
+Both wrong versions are instructive in OPPOSITE directions and neither is safe:
+
+* the column-0 rule UNDER-COUNTS — 31 subjects instead of 59. A loose delimiter does not merely
+  mis-cut, it silently drops blocks from the census, which is the vacuous-green shape; and it
+  reds the gate on CORRECT code, which is how a guard gets waived into uselessness.
+* the exact-next-quote rule MANUFACTURES a finding on a good file. `lib-ws0-fixtures.sh` carries
+  the `'"'"'` idiom, and its own comment records what happens when it is mishandled: the library
+  is "silently truncated … and it presented as every OTHER case in the suite failing on an absent
+  pinning-verification.json."
+
+So the suite asserts BOTH directions: a defect must be reported, and a good file carrying the
+idiom must NOT be.
+
+## SCOPE: this file's caller lints `ws0-baseline.sh`, and the UNKNOWN class is calibrated for it
+
+The census is used by `test_ws0_embedded_steps_execute.sh` against ONE driver. Run tree-wide it
+reports UNKNOWN on shapes that driver does not contain and that this file deliberately does not
+guess about: a script path held in a VARIABLE (`python3 "$ROWS_PY" …`, where nothing on the line
+says whether it is python), a DOUBLE-quoted `-c` body (the shell expands it, so the bytes python
+receives are not the bytes on disk), and `python3 >/dev/null` reading stdin from a pipe. Each is a
+real shape in this repository, each is fail-closed here, and each would have to be taught — not
+skipped — before this census could lint the whole tree. That generalisation is deliberately NOT
+this issue.
 
 ## The direction it errs in, stated
 
@@ -82,11 +128,13 @@ import sys
 # word/dot character is the discriminator.
 _PY_TOKEN = re.compile(r"(?<![\w./-])python3(?![\w.])")
 
-# The shape both defective steps use: the line ENDS with the opening quote and the body follows on
-# subsequent lines, terminated by a line whose first character is the closing quote.
-_OPEN_MULTILINE = re.compile(r"^-c\s+'$")
-# The same thing on one line: `-c 'import time; print(…)'`.
-_INLINE = re.compile(r"^-c\s+'(?P<body>(?:[^']*))'")
+# The OPENING of a `-c '…'` block: the `-c` flag and the single quote that starts the shell
+# string. Where it CLOSES is decided by scanning bash's quoting rules (`_scan_single_quoted`),
+# never by a line pattern — see the header's three-shape section.
+_OPEN_DASH_C = re.compile(r"^\s*-c\s+'")
+# The `'"'"'` idiom: close, emit a literal apostrophe from a double-quoted segment, reopen. The one
+# exception to "a single-quoted string runs to the next quote".
+_QUOTE_IDIOM = "'" + '"' + "'" + '"' + "'"
 # A heredoc redirect: `<<'PY'`, `<<PY`, `<<-'PY'`.
 _HEREDOC = re.compile(r"<<-?\s*(?P<q>['\"]?)(?P<tag>[A-Za-z_][A-Za-z0-9_]*)(?P=q)")
 # A script-file argument, quoted or not, possibly carrying a shell expansion in its directory
@@ -113,21 +161,33 @@ def _strip_comment(rest: str) -> str:
     return rest[: m.start()] if m else rest
 
 
-def _delimit_multiline(lines: list[str], start: int) -> tuple[str, int]:
-    """Body of the `-c '` block opened on `lines[start]`, plus the line its closer sits on.
+def _scan_single_quoted(text: str, open_quote: int) -> tuple[str, int]:
+    """The bash single-quoted string opening at `text[open_quote]`, and the offset after it.
 
-    The closer is the first following line whose FIRST character is a single quote — which is how
-    the driver writes it (`' "$HERE" "$CORPUS" …`). A block with no such line is a finding rather
-    than a body silently truncated at end-of-file.
+    Bash gives a single-quoted string NO escape mechanism, so the body runs to the next `'` —
+    unless that quote opens the `'"'"'` idiom, which closes the string, emits a literal apostrophe
+    and reopens it. Both facts are bash's, which is why this is a scan and not a pattern: the
+    closer appears at column 0 in this driver, at the end of the last body line in three other
+    files in this repository, and mid-body as the idiom. See the header for the measurements.
     """
-    for i in range(start + 1, len(lines)):
-        if lines[i].startswith("'"):
-            return "\n".join(lines[start + 1 : i]) + "\n", i
+    body: list[str] = []
+    i = open_quote + 1
+    while i < len(text):
+        ch = text[i]
+        if ch != "'":
+            body.append(ch)
+            i += 1
+            continue
+        if text[i : i + len(_QUOTE_IDIOM)] == _QUOTE_IDIOM:
+            body.append("'")
+            i += len(_QUOTE_IDIOM)
+            continue
+        return "".join(body), i
     raise Unclassifiable(
-        start + 1,
-        "an embedded `python3 -c '` block is never closed by a line beginning with the closing"
-        " quote, so its body cannot be delimited. Extracting to end-of-file would compile a"
-        " truncated body and report a defect that is the extractor's.",
+        text.count("\n", 0, open_quote) + 1,
+        "an embedded `python3 -c '` block is never closed: no terminating single quote before"
+        " end-of-file. Extracting to end-of-file would compile a truncated body and report a"
+        " defect that is the extractor's own.",
     )
 
 
@@ -147,24 +207,46 @@ def census(path: pathlib.Path) -> tuple[list[dict], list[dict]]:
     """Classify every `python3` occurrence. Returns (records, findings)."""
     text = path.read_text()
     lines = text.split("\n")
+    # Offset of each line start, so a per-line match can hand an ABSOLUTE position to the
+    # quoting scanner. The scanner works over the whole text because a block's closer is not a
+    # property of any single line (shapes 1-3 in the header).
+    starts: list[int] = []
+    off = 0
+    for line in lines:
+        starts.append(off)
+        off += len(line) + 1
     records: list[dict] = []
     findings: list[dict] = []
     skip_until = -1
     for idx, line in enumerate(lines):
         if idx <= skip_until:
             continue
-        stripped = line.lstrip()
-        if stripped.startswith("#"):
+        if line.lstrip().startswith("#"):
             continue  # a whole-line shell comment carries no code
         m = _PY_TOKEN.search(line)
         if not m:
             continue
-        rest = _strip_comment(line[m.end() :]).strip()
+        raw_rest = line[m.end() :]
+        rest = _strip_comment(raw_rest).strip()
         try:
             if not rest or rest.lstrip(";&|)").strip() in ("", "do", "then"):
                 # A presence probe (`for tool in perf taskset python3; do`) or a bare mention:
                 # no argument can carry code.
                 records.append({"kind": "MENTION", "line": idx + 1, "text": line.strip()})
+                continue
+            dash_c = _OPEN_DASH_C.match(raw_rest)
+            if dash_c:
+                # The opening quote is the LAST character the match consumed.
+                open_quote = starts[idx] + m.end() + dash_c.end() - 1
+                body, close = _scan_single_quoted(text, open_quote)
+                end_line = text.count("\n", 0, close)
+                skip_until = end_line
+                records.append(
+                    {"kind": "BLOCK",
+                     "shape": "dash-c-multiline" if "\n" in body else "dash-c-inline",
+                     "line": idx + 1, "end": end_line + 1,
+                     "body": body if body.endswith("\n") else body + "\n"}
+                )
                 continue
             hd = _HEREDOC.search(rest)
             if hd:
@@ -175,21 +257,6 @@ def census(path: pathlib.Path) -> tuple[list[dict], list[dict]]:
                      "body": body}
                 )
                 continue
-            if _OPEN_MULTILINE.match(rest):
-                body, end = _delimit_multiline(lines, idx)
-                skip_until = end
-                records.append(
-                    {"kind": "BLOCK", "shape": "dash-c-multiline", "line": idx + 1,
-                     "end": end + 1, "body": body}
-                )
-                continue
-            inline = _INLINE.match(rest)
-            if inline:
-                records.append(
-                    {"kind": "BLOCK", "shape": "dash-c-inline", "line": idx + 1,
-                     "end": idx + 1, "body": inline.group("body") + "\n"}
-                )
-                continue
             if _SCRIPT.match(rest):
                 records.append({"kind": "SCRIPT", "line": idx + 1, "text": rest})
                 continue
@@ -197,7 +264,9 @@ def census(path: pathlib.Path) -> tuple[list[dict], list[dict]]:
                 idx + 1,
                 "this `python3` invocation is in a shape the census does not recognise"
                 f" ({rest[:60]!r}). It may be carrying embedded code the compile check would"
-                " therefore never see, so it is a finding rather than a skip.",
+                " therefore never see, so it is a finding rather than a skip. If the shape is"
+                " legitimate, TEACH THE CENSUS THE SHAPE — this finding is about the extractor,"
+                " not about the python.",
             )
         except Unclassifiable as exc:
             findings.append({"line": exc.lineno, "reason": exc.reason})

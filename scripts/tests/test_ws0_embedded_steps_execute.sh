@@ -56,6 +56,11 @@
 #     a driver export is a failure here rather than a refusal at report time;
 #   * EVERY embedded block in the driver COMPILES — the total property, so instance #8 anywhere in
 #     that file is caught and not only the two steps this issue repaired.
+#   * the extractor's delimiter in BOTH directions: it reports a defect, AND it does not
+#     manufacture one on good input. A block is delimited by bash's quoting rules rather than by a
+#     line pattern, so all three closer shapes this repository actually uses are handled — the
+#     column-0 closer, the closer at the end of the last body line with bash arguments trailing,
+#     and the `'"'"'` literal-apostrophe idiom mid-body.
 #
 # NOT REACHED (and therefore NOT claimed):
 #   * the driver's SHELL path into these steps. Reaching them in situ means passing the CPU-sibling
@@ -162,15 +167,19 @@ else
 fi
 
 block_count="$(grep -c '^BLOCK	' <<<"$census_out")"
-# A FLOOR, not an equality. Equality would red on a legitimately-added block while adding no
-# safety: the TOTAL compile property below covers any new block whatever the count, and the two
-# SUBJECT blocks are identified by content (next check) rather than by position. What the floor
-# catches is wholesale extractor breakage — a census that suddenly sees one block, or none.
-MIN_BLOCKS=3
-if [ "$block_count" -ge "$MIN_BLOCKS" ]; then
-  pass "census: $block_count embedded python block(s) found in the driver (floor $MIN_BLOCKS)"
+# EXACTLY the blocks this driver carries, not a floor. An under-count is the vacuous-green shape
+# and a floor cannot see it once the floor is met: a delimiter that silently stopped recognising
+# one shape would drop that block from BOTH the census and the compile check while the count still
+# cleared a floor. (MEASURED tree-wide while building this: a column-0-only closer rule found 31
+# blocks where the correct rule finds 59 — a loose delimiter under-counts SUBJECTS, it does not
+# merely mis-cut them.) The three are the two fatal pin STEPS plus the inline monotonic-clock read.
+# Adding an embedded step to this driver is a deliberate act, so bump this constant deliberately;
+# the compile property below then covers the new block automatically.
+EXPECTED_BLOCKS=3
+if [ "$block_count" -eq "$EXPECTED_BLOCKS" ]; then
+  pass "census: exactly $block_count embedded python block(s) in the driver — the 2 fatal pin steps plus the inline monotonic-clock read"
 else
-  fail "census: only $block_count embedded block(s) found in $DRIVER; this driver carries at least $MIN_BLOCKS, so the extractor is not seeing its subject"
+  fail "census: $block_count embedded block(s) found in $DRIVER, expected $EXPECTED_BLOCKS. If a step was ADDED, bump EXPECTED_BLOCKS; if the count DROPPED, the extractor has stopped seeing a shape and the missing block is being compiled by nothing"
 fi
 
 # WHICH block is which, by CONTENT. The two steps are located by a shipped symbol each body calls,
@@ -204,22 +213,31 @@ else
 fi
 
 # --- POSITIVE CONTROL 1a: a block that cannot be DELIMITED is a finding, not a silent skip -----
-# The closing-quote line of the corpus-pin block is deleted in a scratch copy. Extracting to
+# A scratch copy truncated at the opening quote of the first embedded block, with a body that
+# contains no apostrophe of its own, so the shell string is genuinely never closed. Extracting to
 # end-of-file would compile a truncated body and report a defect that is the extractor's own, so
 # the extractor must refuse instead.
+#
+# The construction targets the scanner's end-of-file branch DIRECTLY. An earlier version of this
+# control deleted every line beginning with a quote, which stopped working the moment the
+# delimiter learned bash's real rule (any later quote in the file closes the string) — a control
+# that silently stopped constructing its own subject, which is the class this suite exists to
+# refuse. It failed loudly, which is the floor working.
 UNDELIMITED="$TMP/undelimited-ws0-driver.sh"
-python3 - "$DRIVER" "$UNDELIMITED" <<'PY'
+python3 - "$DRIVER" "$UNDELIMITED" <<'INJECT'
 import pathlib, sys
-lines = pathlib.Path(sys.argv[1]).read_text().split("\n")
-# Every line that CLOSES an embedded block (a leading single quote) is removed, which is the
-# shape a mis-edited driver leaves behind.
-pathlib.Path(sys.argv[2]).write_text("\n".join(l for l in lines if not l.startswith("'")))
-PY
+text = pathlib.Path(sys.argv[1]).read_text()
+q = chr(39)
+opener = "python3 -c " + q + "\n"
+i = text.index(opener)
+# Everything through the opening quote, then a body with no quote anywhere in it and no closer.
+pathlib.Path(sys.argv[2]).write_text(text[: i + len(opener)] + "import sys\nprint(1)\n")
+INJECT
 und_out="$(census "$UNDELIMITED")"
-if [ -n "$(findings_of "$und_out")" ] && grep -q 'cannot be delimited' <<<"$und_out"; then
-  pass "census CONTROL fired: an undelimited block is a FINDING — $(findings_of "$und_out" | head -1 | cut -c1-110)"
+if [ -n "$(findings_of "$und_out")" ] && grep -q 'never closed' <<<"$und_out"; then
+  pass "census CONTROL fired: an unterminated block is a FINDING — $(findings_of "$und_out" | head -1 | cut -c1-110)"
 else
-  fail "census CONTROL did not fire: an undelimited embedded block must be a finding, got: $(head -3 <<<"$und_out")"
+  fail "census CONTROL did not fire: an unterminated embedded block must be a finding, got: $(head -3 <<<"$und_out")"
 fi
 
 # --- POSITIVE CONTROL 1b: an UNRECOGNISED python3 shape is a finding ---------------------------
@@ -245,6 +263,62 @@ if [ "$(find_block "$NO_PIN_STEP" 'write_session_corpus_pin')" = "ABSENT" ]; the
   pass "census CONTROL fired: with the session-pin writer gone from the driver, the locator reports ABSENT rather than picking another block"
 else
   fail "census CONTROL did not fire: the block locator must report ABSENT when its subject is not in the driver"
+fi
+
+# --- CONTROL 1c-bis: THE OTHER DIRECTION — the extractor must not MANUFACTURE a finding --------
+# Every control above observes the census REPORTING something. A delimiter can also be wrong the
+# other way, and that failure is worse in practice: it reds the gate on correct code, and a key
+# that reds on correct input is the key agents learn to waive.
+#
+# The subject is a REAL sibling that carries the `'"'"'` idiom — the bash spelling that closes the
+# single-quoted string, emits a literal apostrophe from a double-quoted segment and reopens. A
+# delimiter that stops at the next quote cuts that block mid-body. `lib-ws0-fixtures.sh` says so
+# itself, at the line that uses it: mishandling it "silently truncated this whole library — and it
+# presented as every OTHER case in the suite failing on an absent pinning-verification.json."
+#
+# MEASURED, and this is why the file is the control rather than an illustration: under a
+# next-quote delimiter this file yields exactly ONE false `SyntaxError` ('{' was never closed).
+IDIOM_FILE="$REPO_ROOT/scripts/tests/lib-ws0-fixtures.sh"
+idiom_census="$(census "$IDIOM_FILE")"
+idiom_compile="$(compile_blocks "$IDIOM_FILE")"
+idiom_blocks="$(grep -c '^BLOCK	' <<<"$idiom_census")"
+idiom_apostrophe=0
+for ((bn = 1; bn <= idiom_blocks; bn++)); do
+  emit_block "$IDIOM_FILE" "$bn" | grep -q "'" && idiom_apostrophe=1
+done
+if [ "$idiom_blocks" -ge 1 ] && [ -z "$(findings_of "$idiom_census")" ] \
+   && [ -z "$(findings_of "$idiom_compile")" ] && [ "$idiom_apostrophe" -eq 1 ]; then
+  pass "census NO-FALSE-FINDING: $idiom_blocks block(s) in lib-ws0-fixtures.sh (which uses the literal-apostrophe idiom) are delimited and ALL COMPILE — the extractor rejoins the idiom instead of cutting the body there"
+else
+  fail "census manufactured a finding on GOOD input: lib-ws0-fixtures.sh gave blocks=$idiom_blocks apostrophe-in-a-body=$idiom_apostrophe census='$(findings_of "$idiom_census" | head -1)' compile='$(findings_of "$idiom_compile" | head -1)'"
+fi
+
+# --- CONTROL 1c-ter: the closer at the END of the last body line, bash arguments trailing -------
+# Shape 2 of three (see the extractor header). It is idiomatic and already in use at
+# `test-data/scripts/gen-perf-corpus-bti.sh`, `scripts/lib/gate-notify.sh` and
+# `docs/reports/ws0-3217-artifacts/harness/common.sh`, so it is the shape most likely to be written
+# into this driver next. Exercised against a SCRATCH copy rather than one of those files, so the
+# control cannot drift when they change: the block must be delimited (not reported undelimited) AND
+# a defect inside it must still be reported.
+TRAILING_DRIVER="$TMP/trailing-closer-ws0-driver.sh"
+python3 - "$DRIVER" "$TRAILING_DRIVER" <<'INJECT'
+import pathlib, sys
+# The same defect class as the two shipped steps, built from character codes so no committed file
+# holds a literal example of the spelling.
+backslash, dquote = chr(92), chr(34)
+bad = "{d[" + backslash + dquote + "k" + backslash + dquote + "]}"
+q = chr(39)
+step = ("python3 -c " + q + "\nd = {'k': 1}\nprint(f'" + bad + "')" + q + " \"$OUT_DIR\"\n")
+pathlib.Path(sys.argv[2]).write_text(pathlib.Path(sys.argv[1]).read_text() + step)
+INJECT
+tr_census="$(census "$TRAILING_DRIVER")"
+tr_compile="$(compile_blocks "$TRAILING_DRIVER")"
+tr_blocks="$(grep -c '^BLOCK	' <<<"$tr_census")"
+if [ "$tr_blocks" -eq "$((block_count + 1))" ] && [ -z "$(findings_of "$tr_census")" ] \
+   && grep -q 'DOES NOT COMPILE' <<<"$tr_compile"; then
+  pass "census CONTROL fired (trailing-closer shape): a block closed at the END of its last body line is DELIMITED ($tr_blocks blocks, no undelimited finding) and a defect inside it is REPORTED"
+else
+  fail "census CONTROL did not fire (trailing-closer shape): blocks=$tr_blocks (expected $((block_count + 1))), census='$(findings_of "$tr_census" | head -1)', compile='$(findings_of "$tr_compile" | head -1)'"
 fi
 
 # --- POSITIVE CONTROL 1d: a FUTURE step written as a heredoc is censused and compiled ----------

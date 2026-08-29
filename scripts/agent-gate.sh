@@ -6572,8 +6572,14 @@ run_tooling_tests() {
   # `MANIFEST_CONFIG_FIELDS` and asserted equal to it; and EVERY embedded block in the driver
   # COMPILES, so instance #8 anywhere in that file is caught and not only the two repaired steps.
   # The block text is EXTRACTED from the shipped driver on every run (`ws0_embedded_python.py`,
-  # fail-closed on an unclassifiable python3 shape or an undelimitable block) rather than copied,
-  # because a copy stays green while the shipped step is broken — the exact state #3451 found.
+  # fail-closed on an unclassifiable python3 shape or an unterminated block) rather than copied,
+  # because a copy stays green while the shipped step is broken — the exact state #3451 found. The
+  # delimiter is bash's own quoting rule, not a line pattern, and is asserted in BOTH directions:
+  # a column-0-closer-only rule was MEASURED finding 31 blocks tree-wide where the correct rule
+  # finds 59 (a loose delimiter under-COUNTS subjects, the vacuous-green shape) while a
+  # next-quote rule manufactures a false SyntaxError on `lib-ws0-fixtures.sh`, which uses the
+  # literal-apostrophe idiom — and a key that reds on correct input is the key agents learn to
+  # waive. Both are controls in the suite.
   # Every accept is paired with a positive control OBSERVED to fire against a scratch copy of the
   # driver under $TMPDIR carrying the injected defect, which is this issue's own lesson: a `grep -c`
   # for the bad spelling returned 0 against a file holding all seven instances, and a check that
