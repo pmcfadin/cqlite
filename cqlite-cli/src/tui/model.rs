@@ -393,13 +393,27 @@ impl TuiApp {
         }
     }
 
-    /// Refresh status metrics if stale
-    pub(super) async fn refresh_metrics(&mut self) {
+    /// Refresh status metrics if stale.
+    ///
+    /// Returns `true` only when the staleness branch actually fired (i.e. the
+    /// status bar's values were re-collected), so the event loop can repaint on
+    /// exactly those cycles (issue #1718).
+    pub(super) async fn refresh_metrics(&mut self) -> bool {
         if self.metrics_stale() {
             self.status_metrics =
                 Some(StatusMetrics::collect(Some(&self.db_path), Some(&self.database)).await);
             self.metrics_last_updated = Some(Instant::now());
+            return true;
         }
+        false
+    }
+
+    /// Test seam (issue #1718): force the next [`Self::refresh_metrics`] call to
+    /// take the staleness branch, so the draw-gating tests are deterministic and
+    /// never depend on the wall clock.
+    #[cfg(test)]
+    pub(super) fn mark_metrics_stale(&mut self) {
+        self.metrics_last_updated = None;
     }
 
     /// Load tables into the tables browser (Issue #251)

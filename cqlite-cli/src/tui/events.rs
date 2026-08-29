@@ -4,6 +4,7 @@
 //! handlers. State lives in [`super::model::TuiApp`]; drawing lives in
 //! [`super::render`].
 
+use super::event_source::TuiEventSource;
 use super::model::{FocusPanel, TuiApp};
 use super::render::ui;
 use anyhow::Result;
@@ -11,26 +12,53 @@ use crossterm::event::{self, Event, KeyCode, KeyModifiers};
 use ratatui::{backend::Backend, Terminal};
 use std::time::Duration;
 
+/// Input poll cadence. This is the input-latency bound and stays as it is
+/// (issue #1718): the *draw* is gated, not the poll.
+pub(super) const POLL_INTERVAL: Duration = Duration::from_millis(100);
+
 /// Main TUI event loop
-pub(super) async fn run_tui<B: Backend>(
+pub(super) async fn run_tui<B: Backend, S: TuiEventSource>(
     terminal: &mut Terminal<B>,
     app: &mut TuiApp,
+    events: &mut S,
 ) -> Result<()> {
+    // Start dirty so the first iteration paints the initial screen.
+    let mut dirty = true;
+
     loop {
-        // Refresh metrics if stale (every 5 seconds)
-        app.refresh_metrics().await;
+        if tui_iteration(terminal, app, events, &mut dirty).await? {
+            return Ok(()); // Exit requested
+        }
+    }
+}
 
-        terminal.draw(|f| ui(f, app))?;
+/// One cycle of the TUI loop: refresh, conditionally draw, then poll for input.
+///
+/// Returns `Ok(true)` when the user asked to exit. `dirty` carries the
+/// "something changed, repaint next cycle" state across iterations.
+pub(super) async fn tui_iteration<B: Backend, S: TuiEventSource>(
+    terminal: &mut Terminal<B>,
+    app: &mut TuiApp,
+    events: &mut S,
+    dirty: &mut bool,
+) -> Result<bool> {
+    // Refresh metrics if stale (every 5 seconds). A refresh that actually fired
+    // changed the status bar, so it needs a repaint; a no-op call does not.
+    app.refresh_metrics().await;
 
-        if event::poll(Duration::from_millis(100))? {
-            if let Event::Key(key) = event::read()? {
-                // Handle key events
-                if handle_key_event(app, key).await {
-                    return Ok(()); // Exit requested
-                }
+    terminal.draw(|f| ui(f, app))?;
+    *dirty = false;
+
+    if events.poll(POLL_INTERVAL)? {
+        if let Event::Key(key) = events.read()? {
+            // Handle key events
+            if handle_key_event(app, key).await {
+                return Ok(true); // Exit requested
             }
         }
     }
+
+    Ok(false)
 }
 
 /// Handle key events - returns true if should exit

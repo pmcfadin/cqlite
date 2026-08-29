@@ -3,11 +3,15 @@
 //! Split by responsibility (Issue #1130, epic #1116):
 //! - [`model`]: application state and state transitions ([`model::TuiApp`]).
 //! - [`events`]: the `crossterm` event loop and per-panel key handlers.
+//! - [`event_source`]: the input-source seam the loop reads events through.
 //! - [`render`]: `ratatui` layout and widget drawing.
 //!
 //! The sole public entry point is [`start_tui_mode`].
 
+mod event_source;
 mod events;
+#[cfg(test)]
+mod events_tests;
 mod model;
 mod render;
 
@@ -23,6 +27,7 @@ use ratatui::{backend::CrosstermBackend, Terminal};
 use std::path::Path;
 use std::sync::Arc;
 
+use event_source::CrosstermEventSource;
 use events::run_tui;
 use model::TuiApp;
 
@@ -45,7 +50,8 @@ pub async fn start_tui_mode(db_path: &Path, config: &Config, database: Database)
 
     // Create app state
     let mut app = TuiApp::new(db_path, config, db).await?;
-    let res = run_tui(&mut terminal, &mut app).await;
+    let mut event_source = CrosstermEventSource;
+    let res = run_tui(&mut terminal, &mut app, &mut event_source).await;
 
     // Restore terminal
     disable_raw_mode()?;
