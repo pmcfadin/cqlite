@@ -54,8 +54,19 @@ const ARGS: &[&str] = &["info"];
 
 /// Run the shipped binary in a throwaway cwd (`info` creates `cqlite.db`
 /// relative to cwd, so this keeps the repo clean and each case isolated).
-/// `RUST_LOG` and every `CQLITE_OTEL_*` var are cleared first so an ambient
-/// environment can neither raise the filter above WARN nor pre-set the knob.
+///
+/// The child environment is built from EMPTY (`env_clear`) rather than filtered
+/// (roborev r2). Clearing only `RUST_LOG` + `CQLITE_OTEL_*` left two concrete
+/// machine-dependent failure modes: the child inherited `HOME` /
+/// `XDG_CONFIG_HOME`, so a developer's or fleet box's CQLite config file that
+/// enables telemetry made the "no warning when not requested" case fail; and it
+/// inherited the other env-bound CLI flags (`CQLITE_SCHEMA`, `CQLITE_DATA_DIR`,
+/// `CQLITE_OUT`, `CQLITE_WRITABLE`, … — every `env = "CQLITE_*"` in
+/// `cli_types.rs`), any of which can alter or break the `info` invocation. An
+/// allowlist has to be maintained against that growing list; starting from empty
+/// cannot drift. `HOME`/`XDG_CONFIG_HOME` are pointed at a fresh temp dir so
+/// config discovery finds nothing, and only `PATH` (+ `TMPDIR` when set) is
+/// carried over.
 fn run(otel_enabled: Option<&str>) -> Output {
     run_with(otel_enabled, None, &[])
 }
@@ -63,19 +74,24 @@ fn run(otel_enabled: Option<&str>) -> Output {
 /// As [`run`], but with an explicit `RUST_LOG` value and/or extra CLI flags, so
 /// the log-filtering cases below can drive `-q` and `RUST_LOG=error`.
 fn run_with(otel_enabled: Option<&str>, rust_log: Option<&str>, extra_args: &[&str]) -> Output {
-    let cwd = TempDir::new().expect("tempdir");
+    let cwd = TempDir::new().expect("tempdir for cwd");
+    // Held until after `output()` so the child's HOME still exists while it runs.
+    let home = TempDir::new().expect("tempdir for HOME");
     let mut cmd = Command::new(env!("CARGO_BIN_EXE_cqlite"));
     cmd.args(extra_args)
         .args(ARGS)
         .current_dir(cwd.path())
-        .env_remove("RUST_LOG")
-        .env_remove("CQLITE_OTEL_ENABLED")
-        .env_remove("CQLITE_OTEL_ENDPOINT")
-        .env_remove("CQLITE_OTEL_PROTOCOL")
-        .env_remove("CQLITE_OTEL_SERVICE_NAME")
-        .env_remove("CQLITE_OTEL_SERVICE_VERSION")
-        .env_remove("CQLITE_OTEL_SAMPLING_RATIO")
-        .env_remove("CQLITE_OTEL_TIMEOUT_MS");
+        .env_clear()
+        .env("HOME", home.path())
+        .env("XDG_CONFIG_HOME", home.path());
+    // The one inherited variable the child genuinely needs, plus TMPDIR when the
+    // host sets it (temp-file creation honours it).
+    if let Ok(path) = std::env::var("PATH") {
+        cmd.env("PATH", path);
+    }
+    if let Ok(tmp) = std::env::var("TMPDIR") {
+        cmd.env("TMPDIR", tmp);
+    }
     if let Some(v) = otel_enabled {
         cmd.env("CQLITE_OTEL_ENABLED", v);
     }
