@@ -577,9 +577,19 @@ jobs:
             echo "### Test Results"
           } >> "$GITHUB_STEP_SUMMARY"
           if [ "${RUN_FULL}" = "true" ]; then
-            echo "Tests passed on 3 native platforms (ARM64 Linux and x86_64 macOS are build-only)" >> "$GITHUB_STEP_SUMMARY"
+            {
+              echo "Tests passed on 3 native platforms (ARM64 Linux and x86_64 macOS are build-only)"
+              echo "Floor legs (Node 18.17.0, 20.3.0 and 24) each restored the canonical corpus and ran one real query (issue #1459)."
+            } >> "$GITHUB_STEP_SUMMARY"
           else
-            echo "Smoke checks passed on Ubuntu: the \`smoke\` job itself is dataset-free, while all three floor legs (Node 18.17.0, 20.3.0 and 24) restored the canonical corpus and ran one real query (issue #1459)." >> "$GITHUB_STEP_SUMMARY"
+            # RUN_FULL is false, which is EXACTLY when the label-gated floor
+            # matrix was skipped — so this branch must not claim the floor legs
+            # ran. Saying otherwise would make the CI summary itself assert an
+            # untested floor, which is the defect issue #1459 exists to remove.
+            {
+              echo "Smoke checks passed on Ubuntu (the \`smoke\` job is dataset-free)."
+              echo "Floor legs did NOT run: \`smoke-floor\` is a binding matrix tier, gated on push to \`main\`, the nightly schedule, or the \`ci:bindings-full\` label (issue #1459)."
+            } >> "$GITHUB_STEP_SUMMARY"
           fi
           {
             echo ""
