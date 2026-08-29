@@ -3,7 +3,28 @@
 use serde::{Deserialize, Serialize};
 use std::time::Duration;
 
-/// Main configuration structure for CQLite database
+/// Main configuration structure for CQLite database.
+///
+/// # Every field here is read by something (issue #1696)
+///
+/// Epic #1685 ("config honesty") removed the knobs that were not: `storage`'s
+/// `max_sstable_size` / `block_size` / `enable_bloom_filters` /
+/// `bloom_filter_fp_rate` / `io_threads` / `sync_mode`, `query`'s
+/// `plan_cache_size` / `enable_optimization` / `parallel`, and the entire
+/// `performance` tree. Setting any of them changed nothing, silently.
+///
+/// Deleting a field is deliberately a COMPILE error for an embedder: this is a
+/// Rust API, so that is the loudest signal available, and it is preferred over a
+/// field that keeps deserializing while doing nothing. (The CLI's config is a
+/// FILE surface where serde would swallow a removed key, so it warns by name
+/// instead — see `cqlite_cli::config::removed_keys`.)
+///
+/// The standing guard is `cqlite-core/tests/config_knob_behavior_guard.rs`:
+/// every leaf field below must be registered there with either a set-knob →
+/// assert-observable-difference test or an explicit reason why no observable
+/// difference is expressible. A newly added `pub` field with neither FAILS that
+/// test — which is the point, since "nobody asked whether this knob is read" is
+/// how the removed ones accumulated.
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct Config {
     /// Storage engine configuration
