@@ -58,7 +58,7 @@ export GIT_CONFIG_NOSYSTEM=1
 
 # --- REAL-ORIGIN isolation for the push probe (issue #3369) ----------------
 # Section 3b now MEASURES push capability by actually pushing a throwaway
-# refs/claims/smoke-<nonce> ref (scripts/flow/claim.sh smoke). Every case that runs
+# refs/claims/smoke-<commit-sha> ref (scripts/flow/claim.sh smoke). Every case that runs
 # "$BOOTSTRAP" IN PLACE therefore has the real checkout as REPO_ROOT and the real
 # github.com origin as its remote — with this box's real credentials. Those runs pass
 # --skip-push-probe so this suite can NEVER mutate the real origin; the probe's own
@@ -827,7 +827,7 @@ fi
 # motivated #3369 passed every one of them while every `git push` failed, so the
 # launcher's preflight certified a machine on which no lane could start. These cases
 # pin the probe that performs THE OPERATION (create + read back + delete a throwaway
-# refs/claims/smoke-<nonce> ref, via scripts/flow/claim.sh smoke) and — just as
+# refs/claims/smoke-<commit-sha> ref, via scripts/flow/claim.sh smoke) and — just as
 # importantly — pin that an UNKNOWN answer is never reported green.
 #
 # Hermetic in three layers, because a push probe that escaped the sandbox would mutate

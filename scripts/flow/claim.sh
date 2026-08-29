@@ -1076,7 +1076,7 @@ cmd_status() {
     sha="$(printf '%s' "$line" | awk '{print $1}')"
     ref="$(printf '%s' "$line" | awk '{print $2}')"
     # Only issue claim refs are rendered — skip stray refs under refs/claims/*
-    # that are NOT issue claims (e.g. a leftover `refs/claims/smoke-<nonce>` from
+    # that are NOT issue claims (e.g. a leftover `refs/claims/smoke-<commit-sha>` from
     # an interrupted preflight), so they never masquerade as an issue row.
     case "$ref" in
       refs/claims/issue-*) : ;;
@@ -1106,7 +1106,7 @@ cmd_status() {
 # ---------------------------------------------------------------------------
 # cmd_smoke — ONE-TIME preflight for a new remote/host: prove that origin accepts
 # a push to the `refs/claims/*` namespace (create + ls-remote + delete a throwaway
-# `refs/claims/smoke-<nonce>` ref). Some managed Git hosts restrict custom ref
+# `refs/claims/smoke-<commit-sha>` ref). Some managed Git hosts restrict custom ref
 # namespaces; if this fails, the whole claim mechanism is unusable on that remote
 # and MUST be caught before the fleet relies on it. ALL THREE steps are part of the
 # verdict (#3369): a cleanup delete that does not succeed leaves delete capability
@@ -1117,11 +1117,25 @@ cmd_status() {
 # suite — it mutates the REAL origin. (Verified on github.com/pmcfadin/cqlite
 # 2026-07-17: refs/claims/* is pushable.)
 cmd_smoke() {
-  local nonce ref sha seen
-  nonce="$$-${RANDOM}-$(date -u +%s)"
-  ref="refs/claims/smoke-${nonce}"
-  note "smoke preflight: does $REMOTE accept a push to refs/claims/* ? (ref=$ref)"
+  local ref sha seen
+  # THE REF NAME IS DERIVED FROM THE COMMIT SHA, never from an ad-hoc nonce (#3369
+  # review). It used to be `$$-${RANDOM}-$(date -u +%s)`: a pid, ONE 15-bit $RANDOM and a
+  # second-resolution timestamp. Bash seeds $RANDOM from pid+time, so on identically
+  # provisioned machines booting simultaneously — literally this issue's subject, a fleet
+  # launched from ONE AMI — all three components are CORRELATED rather than independent.
+  # Since every bootstrap now runs this probe against the SHARED origin, a collision
+  # presents as a spurious push rejection => `git-push: FAILED` => `--strict` refusing a
+  # healthy box, the same failure class as this issue's earlier blockers.
+  #
+  # `build_claim_commit` is already called here and its message carries machine + pid +
+  # TWO $RANDOMs + timestamp, so the commit object is content-addressed over strictly
+  # more entropy than the old nonce had — and two runs that differ in any of those fields
+  # cannot share a sha. The `refs/claims/smoke-` PREFIX is load-bearing (the docs, the
+  # `git ls-remote origin 'refs/claims/smoke-*'` cleanup command, and cmd_status's
+  # "never an issue claim" skip all key on it) and is kept.
   sha="$(build_claim_commit "smoke" "smoke")" || { emit "SMOKE-FAIL remote=$REMOTE reason=commit-build"; return 1; }
+  ref="refs/claims/smoke-${sha}"
+  note "smoke preflight: does $REMOTE accept a push to refs/claims/* ? (ref=$ref)"
   local smoke_err
   if ! smoke_err="$(git push "$REMOTE" "${sha}:${ref}" 2>&1 >/dev/null)"; then
     # An unauthenticated git is the #1 reason this preflight fails on a fresh box,

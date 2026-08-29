@@ -57,7 +57,7 @@ verify:
   #     printed only when there are zero warnings, which is exactly --strict's condition
   #     — belt and braces on the same fact, from two independent channels.
   # Section 3b now measures git PUSH capability by performing the operation (create +
-  # read back + delete a throwaway refs/claims/smoke-<nonce> ref), not by probing the
+  # read back + delete a throwaway refs/claims/smoke-<commit-sha> ref), not by probing the
   # credential helper: the affected box passed `gh auth status` AND
   # `git ls-remote origin HEAD` and still could not push.
   run: "bash scripts/bootstrap-agent-machine.sh --fix-credentials --strict"

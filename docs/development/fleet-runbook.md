@@ -50,7 +50,7 @@ bash scripts/flow/claim.sh smoke               # same probe the bootstrap runs (
 ```
 
 **Cost and residual of the automatic probe.** Every bootstrap run — laptop runs included — makes two
-extra network round trips and CREATES AND DELETES a transient `refs/claims/smoke-<nonce>` ref on the
+extra network round trips and CREATES AND DELETES a transient `refs/claims/smoke-<commit-sha>` ref on the
 shared origin. A cleanup delete that exits nonzero now FAILS the probe
 (`SMOKE-FAIL … reason=cleanup-unverified` → `git-push: FAILED`, #3369) rather than reporting success
 with a stderr warning: delete capability is required by the claim protocol, since `claim.sh release`
@@ -64,7 +64,7 @@ safe** — it is a throwaway root commit that nothing reads, and it is NOT a cla
 
 ```bash
 git ls-remote origin 'refs/claims/smoke-*'
-git push origin --delete refs/claims/smoke-<nonce>
+git push origin --delete refs/claims/smoke-<commit-sha>
 ```
 
 ### Notification channel (ntfy) — one env var, no per-machine binary (#3119)
@@ -144,7 +144,7 @@ again.
 
 **Claim-ref preflight (#2665):** the cross-machine lock is a push to the `refs/claims/*` ref
 namespace on origin — `claim.sh smoke` creates, `ls-remote`s, and deletes a throwaway
-`refs/claims/smoke-<nonce>` ref to confirm the remote permits it (`SMOKE-OK` = good). This is
+`refs/claims/smoke-<commit-sha>` ref to confirm the remote permits it (`SMOKE-OK` = good). This is
 **verified working on github.com/pmcfadin/cqlite** (2026-07-17). Since #3369
 `bootstrap-agent-machine.sh` runs this probe on every invocation (that is its `git-push:` line), so
 you rarely need it by hand; run it directly **when adopting a new remote or host** — a managed Git host that restricts custom ref namespaces would make the whole

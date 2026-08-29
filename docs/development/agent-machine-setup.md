@@ -41,7 +41,7 @@ without it, it prints the exact command for each gap. It verifies, in order:
 3b. **git PUSH capability** (#3369) — the section above validates *configuration*
    (`git credential fill` never contacts the network); this one performs **the
    operation**, delegating to `scripts/flow/claim.sh smoke` to create, read back and
-   delete a throwaway `refs/claims/smoke-<nonce>` ref. It runs **after** the credential
+   delete a throwaway `refs/claims/smoke-<commit-sha>` ref. It runs **after** the credential
    fix, so it measures the machine as the fix left it. The verdict is **three-valued**
    and prints one greppable line:
 
@@ -57,13 +57,13 @@ without it, it prints the exact command for each gap. It verifies, in order:
    **not** `--skip-smoke` (which skips the final *gate* run).
 
    **Cost:** measuring the operation means performing it — two extra network round trips
-   and a transient `refs/claims/smoke-<nonce>` ref created and deleted on the shared
+   and a transient `refs/claims/smoke-<commit-sha>` ref created and deleted on the shared
    origin, on **every** run of this script. An **observed** cleanup failure FAILS the
    probe (`reason=cleanup-unverified` — the delete exited nonzero, so whether the ref
    survives is unknown), so it can never pass quietly. A run **interrupted before
    cleanup** is the residual: it leaves no verdict at all and can still strand a ref.
    List them with `git ls-remote origin 'refs/claims/smoke-*'` and delete with
-   `git push origin --delete refs/claims/smoke-<nonce>` — always safe.
+   `git push origin --delete refs/claims/smoke-<commit-sha>` — always safe.
 4. **roborev** — installed, and this machine's *configured* agent resolves.
 5. **Datasets** + `CQLITE_DATASETS_ROOT` guidance.
 6. **Health check** — runs the gate's fmt smoke and prints the authoritative

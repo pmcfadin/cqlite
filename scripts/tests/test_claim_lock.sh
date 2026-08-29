@@ -770,6 +770,37 @@ else
 $outGhost2"
 fi
 
+# (i) THE SMOKE REF NAME IS CONTENT-ADDRESSED, NOT AN AD-HOC NONCE (#3369 review).
+# It used to be `$$-${RANDOM}-$(date -u +%s)`. Bash seeds $RANDOM from pid+time, so on
+# identically provisioned machines booting simultaneously — a fleet launched from ONE AMI,
+# this issue's own subject — pid, $RANDOM and a second-resolution timestamp are correlated
+# rather than independent, and two boxes can pick the SAME name against the shared origin:
+# a spurious push rejection, `git-push: FAILED`, and `--strict` refusing a healthy box.
+# No race is provoked here (a passing race proves nothing); the PROPERTY is asserted —
+# distinct names across runs, each one the sha of THIS run's claim commit, which is unique
+# to its machine+pid+two-$RANDOMs+timestamp message.
+strayI_before=$(gg -C "$A" ls-remote origin 'refs/claims/smoke-*' | wc -l | tr -d ' ')
+rcI1=0; outI1=$( cd "$A" && CLAIM_MACHINE=machineA CLAIM_REMOTE=origin bash "$CLAIM" smoke 2>&1 ) || rcI1=$?
+rcI2=0; outI2=$( cd "$A" && CLAIM_MACHINE=machineA CLAIM_REMOTE=origin bash "$CLAIM" smoke 2>&1 ) || rcI2=$?
+strayI_after=$(gg -C "$A" ls-remote origin 'refs/claims/smoke-*' | wc -l | tr -d ' ')
+# The name is announced in the probe's own note line, which is where an operator chasing a
+# stranded ref reads it — so that is what is parsed, not an internal variable.
+refI1=$(printf '%s\n' "$outI1" | grep -oE 'refs/claims/smoke-[0-9a-f]{40}' | head -1)
+refI2=$(printf '%s\n' "$outI2" | grep -oE 'refs/claims/smoke-[0-9a-f]{40}' | head -1)
+# Guard the guard: a 40-hex suffix could be hex-shaped by accident. It must be the OBJECT
+# NAME of this run's smoke claim commit, which is the whole content-addressed claim.
+objI1=$(gg -C "$A" cat-file commit "${refI1##*-}" 2>/dev/null | grep -c 'claim issue=smoke' || true)
+if [ "$rcI1" -eq 0 ] && [ "$rcI2" -eq 0 ] \
+   && printf '%s\n' "$outI1" | grep -q 'SMOKE-OK' && printf '%s\n' "$outI2" | grep -q 'SMOKE-OK' \
+   && [ -n "$refI1" ] && [ -n "$refI2" ] && [ "$refI1" != "$refI2" ] \
+   && [ "${objI1:-0}" -ge 1 ] && [ "$strayI_after" = "$strayI_before" ]; then
+  ok "(i) two smoke runs on ONE origin use DISTINCT content-addressed refs (each = its own claim commit's sha), both SMOKE-OK, no strays left"
+else
+  bad "(i) smoke ref names are not distinct/content-addressed: rc=$rcI1/$rcI2 ref1=$refI1 ref2=$refI2 commit-match=${objI1:-0} strays $strayI_before -> $strayI_after
+$outI1
+$outI2"
+fi
+
 # ===========================================================================
 echo
 echo "==== CLAIM-LOCK TEST SUMMARY: PASS=$PASS FAIL=$FAIL ===="

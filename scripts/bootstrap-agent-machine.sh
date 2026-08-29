@@ -47,7 +47,7 @@
 #      The token is never written to disk.
 #      It then measures git PUSH CAPABILITY (issue #3369) by performing THE
 #      OPERATION — `scripts/flow/claim.sh smoke` creates, reads back and deletes a
-#      throwaway refs/claims/smoke-<nonce> ref on the origin — because every check
+#      throwaway refs/claims/smoke-<commit-sha> ref on the origin — because every check
 #      before it is evidence about CONFIGURATION, not about the operation: the box
 #      that motivated #3369 passed `gh auth status` AND `git ls-remote origin HEAD`
 #      and still failed every claim push. The verdict is THREE-valued and prints one
@@ -1361,7 +1361,7 @@ fi
 # neither is a read.
 #
 # So the verdict below comes from performing THE OPERATION: create + read back +
-# delete a throwaway `refs/claims/smoke-<nonce>` ref. It DELEGATES to
+# delete a throwaway `refs/claims/smoke-<commit-sha>` ref. It DELEGATES to
 # `scripts/flow/claim.sh smoke`, the repo's existing sanctioned push probe — which
 # pushes the same ref namespace the claim protocol uses, already classifies an auth
 # fault (`reason=auth`) apart from a namespace refusal, and always deletes the ref it
@@ -1387,7 +1387,7 @@ fi
 # means performing it:
 #   - two network round trips beyond the reachability read (the create push and the
 #     cleanup delete), plus one `ls-remote`;
-#   - a TRANSIENT `refs/claims/smoke-<nonce>` ref CREATED AND DELETED on the SHARED
+#   - a TRANSIENT `refs/claims/smoke-<commit-sha>` ref CREATED AND DELETED on the SHARED
 #     origin. claim.sh's cmd_smoke describes itself as a "ONE-TIME preflight ... NOT
 #     part of the hermetic test suite" because it mutates the real remote; invoking it
 #     here makes that mutation routine, which is accepted deliberately: making the
@@ -1400,7 +1400,7 @@ fi
 # the origin — nothing can close that window from inside the probe. So the cleanup
 # commands stay documented:
 #   git ls-remote origin 'refs/claims/smoke-*'
-#   git push origin --delete refs/claims/smoke-<nonce>
+#   git push origin --delete refs/claims/smoke-<commit-sha>
 # PUSH_PROBE_REMOTE is resolved ONCE above §3b — the credential half and this probe MUST
 # address the same remote (see the note there).
 CLAIM_SH="$REPO_ROOT/scripts/flow/claim.sh"
