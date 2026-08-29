@@ -66,6 +66,16 @@ static READER_FDS_OPEN: AtomicI64 = AtomicI64::new(0);
 /// every close path — a clean drop, an early return, an unwind — decrements exactly
 /// once, with no `close`-site bookkeeping to forget.
 ///
+/// # Declare it AFTER the handle — the field order is load-bearing
+///
+/// Rust drops struct (and enum-variant) fields in DECLARATION order, so a guard
+/// declared BEFORE the handle decrements while the process still holds the
+/// descriptor: the gauge briefly reports FEWER open fds than are really open, which
+/// is the wrong direction for a metric whose whole purpose is spotting `EMFILE`
+/// pressure. Every holder in this module tree therefore declares
+/// `field-holding-the-handle` first and the `OpenFdGauge` last, with a note at the
+/// site so a later tidy-up does not silently reorder them.
+///
 /// The single field is PRIVATE, so this cannot be built by a struct literal that
 /// forgets the increment (the same structural guarantee
 /// `read_path_probe::BlockingScanTaskGuard` uses), and the type is deliberately not

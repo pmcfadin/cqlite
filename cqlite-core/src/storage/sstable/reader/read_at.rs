@@ -253,12 +253,13 @@ impl<R: ReadAt> ReadAt for SerializingReadAt<R> {
 /// serializing Windows point reads for correctness while still opening the fd only
 /// once. The Unix arm keeps its lock-free `Arc<File>` (issue #1573 roborev finding).
 pub(crate) struct PlainFileReadAt {
-    /// `Some` when THIS value's construction performed the `open(2)`
-    /// ([`Self::open`]), so `cqlite.reader.fds.open` counts the descriptor for
-    /// exactly as long as this reader holds it (issue #1707). `None` for
-    /// [`Self::new`], which wraps a handle somebody else opened and therefore
-    /// somebody else accounts for — counting it here would double-count one fd.
-    _fd: Option<super::fd_gauge::OpenFdGauge>,
+    // FIELD ORDER IS LOAD-BEARING (issue #1707): Rust drops fields in DECLARATION
+    // order, so `file` must be declared BEFORE `_fd`. The descriptor then closes
+    // first and the gauge records the decrement afterwards; declared the other way
+    // round, the gauge would emit the lower level while the process still held the
+    // fd — under-reporting, the wrong direction for a metric whose job is spotting
+    // `EMFILE` pressure. (`file` is an `Arc` that is never cloned, so its drop IS
+    // the `close(2)`.) Do not reorder these two while tidying.
     /// Unix: shared handle, read lock-free via positional `pread` (no cursor).
     #[cfg(unix)]
     file: Arc<std::fs::File>,
@@ -266,6 +267,13 @@ pub(crate) struct PlainFileReadAt {
     /// guarded and read+seek happen atomically under the lock (see struct docs).
     #[cfg(windows)]
     file: std::sync::Mutex<std::fs::File>,
+    /// `Some` when THIS value's construction performed the `open(2)`
+    /// ([`Self::open`]), so `cqlite.reader.fds.open` counts the descriptor for
+    /// exactly as long as this reader holds it (issue #1707). `None` for
+    /// [`Self::new`], which wraps a handle somebody else opened and therefore
+    /// somebody else accounts for — counting it here would double-count one fd.
+    /// Declared AFTER `file` on purpose — see the field-order note above.
+    _fd: Option<super::fd_gauge::OpenFdGauge>,
     len: u64,
 }
 
@@ -377,10 +385,14 @@ const DIRECT_IO_ALIGN: usize = 4096;
 /// concurrent `read_at`s never touch the same buffer.
 #[cfg(unix)]
 pub(crate) struct DirectReadAt {
-    /// See [`PlainFileReadAt`]'s `_fd` field — `Some` only when this value's own
-    /// construction opened the descriptor (issue #1707).
-    _fd: Option<super::fd_gauge::OpenFdGauge>,
+    // FIELD ORDER IS LOAD-BEARING (issue #1707): `file` before `_fd` so the
+    // descriptor closes BEFORE the gauge records the decrement — see the same note
+    // on [`PlainFileReadAt`]. Do not reorder these two while tidying.
     file: Arc<std::fs::File>,
+    /// See [`PlainFileReadAt`]'s `_fd` field — `Some` only when this value's own
+    /// construction opened the descriptor (issue #1707). Declared AFTER `file` on
+    /// purpose.
+    _fd: Option<super::fd_gauge::OpenFdGauge>,
     len: u64,
 }
 
