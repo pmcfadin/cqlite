@@ -22,10 +22,17 @@ Two checks, in order of increasing strength:
    meant to catch (see CLAUDE.md, "never let a dataset-dependent test pass on
    an empty dataset").
 
-If the corpus is absent the query check is SKIPPED, loudly and visibly (a
-GitHub `::warning::` naming the path it looked in), and check 1 still governs
-the exit status. CI restores the corpus before invoking this, so a skip in a CI
-log is a signal worth chasing, not background noise.
+Fixture handling is TWO-MODE, because "the fixtures were missing" and "the
+query ran and was fine" must never reach the same verdict:
+
+  - ``CQLITE_FLOOR_STRICT_FIXTURES=1`` (set by CI, which restores the corpus
+    first): an absent corpus/schema is a FAILURE. Otherwise a broken restore
+    step would let this job report a green floor having never executed the query
+    it exists to guarantee — the permissive-branch shape CLAUDE.md forbids ("a
+    positive verdict requires an affirmative measurement").
+  - unset (local invocation): absent fixtures SKIP the query check loudly and
+    visibly with a `::warning::` naming the path, and check 1 still governs the
+    exit status, so a developer without the corpus can still smoke the wheel.
 
 Kept syntactically compatible with Python 3.9 (the advertised floor): no
 `match`, no PEP 604 `X | Y` annotations, no PEP 585 builtin generics in
@@ -98,6 +105,25 @@ def check_import():
     return True
 
 
+def _missing_fixture(what, where, remedy):
+    """Report an absent fixture; fail under strict mode, skip loudly otherwise.
+
+    Returns True to leave the exit status alone, False to fail it.
+    """
+    if os.environ.get("CQLITE_FLOOR_STRICT_FIXTURES") == "1":
+        sys.stderr.write(
+            "::error::floor smoke: %s at %s, and CQLITE_FLOOR_STRICT_FIXTURES=1 "
+            "— the real-query check could not run, so this job cannot certify "
+            "the floor it claims to test. %s\n" % (what, where, remedy)
+        )
+        return False
+    print(
+        "::warning::floor smoke: SKIPPING the real-query check — %s at %s. The "
+        "import check still ran. %s" % (what, where, remedy)
+    )
+    return True
+
+
 def check_real_query():
     """Check 2: one real query. Zero rows fails; an absent corpus skips loudly.
 
@@ -107,19 +133,17 @@ def check_real_query():
     schema_file = resolve_schema_file()
 
     if not os.path.isdir(datasets_dir):
-        print(
-            "::warning::floor smoke: SKIPPING the real-query check — no corpus "
-            "directory at %s. Set CQLITE_DATASETS_ROOT or run "
-            "test-data/scripts/fetch-datasets.sh. The import check still ran."
-            % datasets_dir
+        return _missing_fixture(
+            "no corpus directory",
+            datasets_dir,
+            "Set CQLITE_DATASETS_ROOT or run test-data/scripts/fetch-datasets.sh.",
         )
-        return True
     if not os.path.isfile(schema_file):
-        print(
-            "::warning::floor smoke: SKIPPING the real-query check — no schema "
-            "file at %s. The import check still ran." % schema_file
+        return _missing_fixture(
+            "no schema file",
+            schema_file,
+            "The CQL schemas are committed source; check CQLITE_SCHEMAS_ROOT.",
         )
-        return True
 
     print("query check: %s (corpus %s)" % (SMOKE_QUERY, datasets_dir))
     with cqlite.open(datasets_dir, schema=schema_file) as database:

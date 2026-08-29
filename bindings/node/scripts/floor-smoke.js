@@ -1,13 +1,14 @@
 /**
  * Floor smoke for the CQLite Node.js bindings (issue #1459).
  *
- * `package.json` advertises `engines.node: ">= 18.17.0"`, but CI only ever ran
- * Node 20 — so the advertised floor was never executed. (The floor is 18.17.0,
- * not 18.0.0, because `Cargo.toml` enables napi9 — Node-API 9 first ships in
- * Node 18.17.0. The previous `">= 18"` was a FALSE claim: 18.0.0-18.16.x cannot
- * load the module at all. See issue #1459.) This script is what the
- * `smoke-floor` job in `.github/workflows/node-ci.yml` runs on that exact
- * version against
+ * `package.json` advertises `engines.node: "^18.17.0 || >= 20.3.0"`, but CI only
+ * ever ran a recent Node 20 — so the advertised boundaries were never executed.
+ * The range is DISCONTINUOUS because `Cargo.toml` enables napi9, and Node-API 9
+ * ships in 18.17.0+ and 20.3.0+ but NEVER in 19.x or 20.0-20.2. Two earlier
+ * spellings were both FALSE claims: `">= 18"` (18.0.0-18.16.x cannot load the
+ * module at all) and `">= 18.17.0"` (which still swept in 19.x and 20.0-20.2).
+ * See issue #1459. This script is what each leg of the `smoke-floor` matrix in
+ * `.github/workflows/node-ci.yml` runs on its exact boundary version against
  * the *already-built* prebuilt `.node` artifact. It deliberately does NOT
  * rebuild: we ship that prebuilt binary, and a napi-rs module built once must
  * load across every Node major we claim (Node-API is ABI-stable). If it does
@@ -29,10 +30,17 @@
  *      the bug this is meant to catch (see CLAUDE.md, "never let a
  *      dataset-dependent test pass on an empty dataset").
  *
- * If the corpus is absent, check 3 is SKIPPED loudly and visibly (a GitHub
- * `::warning::` naming the path it looked in) while checks 1-2 still govern
- * the exit status. CI restores the corpus before invoking this, so a skip in a
- * CI log is a signal worth chasing, not background noise.
+ * Fixture handling is TWO-MODE, because "the fixtures were missing" and "the
+ * query ran and was fine" must never reach the same verdict:
+ *
+ *   - `CQLITE_FLOOR_STRICT_FIXTURES=1` (set by CI, which restores the corpus
+ *     first): absent corpus/schema is a FAILURE. Otherwise a broken restore
+ *     step would let this job report a green floor having never executed the
+ *     query it exists to guarantee — the permissive-branch shape CLAUDE.md
+ *     forbids ("a positive verdict requires an affirmative measurement").
+ *   - unset (local invocation): absent fixtures SKIP check 3 loudly and visibly
+ *     with a `::warning::` naming the path, and checks 1-2 still govern the exit
+ *     status, so a developer without the corpus can still smoke the wheel.
  */
 
 'use strict';
@@ -80,20 +88,21 @@ function checkNodeVersion() {
     );
     return false;
   }
-  // EXACT, not major-only. `engines.node` is `>= 18.17.0` because Cargo.toml
-  // enables napi9 (Node-API 9), which does not exist before 18.17.0 — so the
-  // floor is a specific PATCH release, and "some 18.x ran" would not prove it.
-  // A major-only compare would let setup-node resolving to 18.20.x report the
-  // floor as tested while 18.17.0 stayed unexercised.
+  // EXACT, not major-only. `engines.node` is `^18.17.0 || >= 20.3.0` because
+  // Cargo.toml enables napi9 (Node-API 9), which ships in 18.17.0+ and 20.3.0+
+  // but never in 19.x or 20.0-20.2 — so each advertised boundary is a specific
+  // PATCH release, and "some 18.x ran" would not prove it. A major-only compare
+  // would let setup-node resolving to 18.20.x report the boundary as tested
+  // while 18.17.0 stayed unexercised.
   if (actual !== expected) {
     console.error(
-      `::error::floor smoke: expected Node ${expected} (the advertised ` +
-        `engines.node floor) but this process is ${process.version}. ` +
+      `::error::floor smoke: expected Node ${expected} (an advertised ` +
+        `engines.node boundary) but this process is ${process.version}. ` +
         'The floor was NOT tested.'
     );
     return false;
   }
-  console.log(`node version OK: ${process.version} is exactly the advertised floor`);
+  console.log(`node version OK: ${process.version} is exactly the advertised boundary`);
   return true;
 }
 
@@ -116,20 +125,37 @@ function checkLoad() {
 
 /** Check 3: one real query. Zero rows fails; an absent corpus skips loudly. */
 async function checkRealQuery(cqlite) {
-  if (!fs.existsSync(SSTABLES_DIR)) {
+  const strict = process.env.CQLITE_FLOOR_STRICT_FIXTURES === '1';
+  const missingFixture = (what, where, remedy) => {
+    if (strict) {
+      console.error(
+        `::error::floor smoke: ${what} at ${where}, and ` +
+          'CQLITE_FLOOR_STRICT_FIXTURES=1 — the real-query check could not run, ' +
+          'so this job cannot certify the floor it claims to test. ' +
+          `${remedy}`
+      );
+      return false;
+    }
     console.log(
-      `::warning::floor smoke: SKIPPING the real-query check — no corpus ` +
-        `directory at ${SSTABLES_DIR}. Set CQLITE_DATASETS_ROOT or run ` +
-        'test-data/scripts/fetch-datasets.sh. The load check still ran.'
+      `::warning::floor smoke: SKIPPING the real-query check — ${what} at ` +
+        `${where}. The version and load checks still ran. ${remedy}`
     );
     return true;
+  };
+
+  if (!fs.existsSync(SSTABLES_DIR)) {
+    return missingFixture(
+      'no corpus directory',
+      SSTABLES_DIR,
+      'Set CQLITE_DATASETS_ROOT or run test-data/scripts/fetch-datasets.sh.'
+    );
   }
   if (!fs.existsSync(SCHEMA_BASIC_TYPES)) {
-    console.log(
-      `::warning::floor smoke: SKIPPING the real-query check — no schema file ` +
-        `at ${SCHEMA_BASIC_TYPES}. The load check still ran.`
+    return missingFixture(
+      'no schema file',
+      SCHEMA_BASIC_TYPES,
+      'The CQL schemas are committed source; check CQLITE_SCHEMAS_ROOT.'
     );
-    return true;
   }
 
   console.log(`query check: ${SMOKE_QUERY} (corpus ${SSTABLES_DIR})`);

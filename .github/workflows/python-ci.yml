@@ -191,6 +191,10 @@ jobs:
         shell: bash
         env:
           CQLITE_DATASETS_ROOT: ${{ github.workspace }}/test-data/datasets
+          # The step above restores the corpus, so an absent one here is a
+          # BROKEN RESTORE, not a legitimate skip. Fail rather than report a
+          # green floor whose query never ran.
+          CQLITE_FLOOR_STRICT_FIXTURES: '1'
         run: |
           set -euo pipefail
           python bindings/python/scripts/floor_smoke.py

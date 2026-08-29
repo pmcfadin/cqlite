@@ -60,12 +60,15 @@ await db.close();
 
 ## Requirements
 
-- Node.js 18.17.0+ — the floor is CI-tested, not just advertised: every PR loads
-  the prebuilt native module on exactly 18.17.0 and runs one real query against
-  the canonical corpus (`Floor smoke (Node 18.17.0)` in
-  `.github/workflows/node-ci.yml`, issue #1459). The floor is 18.17.0 rather than
-  18.0.0 because the module is built against Node-API 9 (`napi9`), which first
-  ships in Node 18.17.0 — earlier 18.x releases cannot load it.
+- Node.js `^18.17.0 || >= 20.3.0` — both boundaries are CI-tested, not just
+  advertised: every PR loads the prebuilt native module on exactly 18.17.0 AND
+  exactly 20.3.0, running one real query against the canonical corpus on each
+  (`Floor smoke (Node …)` in `.github/workflows/node-ci.yml`, issue #1459).
+
+  The range is discontinuous because the module is built against Node-API 9
+  (`napi9`), which ships in Node 18.17.0+ and 20.3.0+ but **never in 19.x or
+  20.0–20.2** — those releases satisfy a naive `>= 18` or `>= 18.17.0` constraint
+  yet cannot load the module at all.
 - Cassandra 5.0 SSTable files
 
 ## API Reference

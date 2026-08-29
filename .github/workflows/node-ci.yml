@@ -102,31 +102,47 @@ jobs:
           retention-days: 7
 
   smoke-floor:
-    # Issue #1459: `package.json` advertises `engines.node: ">= 18"`, but every
+    # Issue #1459: `package.json` advertised `engines.node: ">= 18"` while every
     # other job here pinned Node 20 — so the advertised floor went untested and
-    # a Node-18 break would have reached users first. This job closes that
-    # honesty gap cheaply: it REBUILDS NOTHING, loading the prebuilt `.node` the
-    # `smoke` job already produced (Node-API is ABI-stable across majors).
+    # a floor break would have reached users first. This job closes that honesty
+    # gap cheaply: it REBUILDS NOTHING, loading the prebuilt `.node` the `smoke`
+    # job already produced (Node-API is ABI-stable across majors).
     #
-    # Scope is deliberate. It runs the floor smoke script (load + version + ONE
-    # real query, failing on a 0-row result) plus the SAME dataset-free jest
-    # subset the Node-20 `smoke` job runs — enough to catch a jest/Node-18
+    # The matrix is BOTH ends of the advertised range, and the range is
+    # DISCONTINUOUS on purpose: `Cargo.toml` enables napi9, and Node-API 9 ships
+    # in 18.17.0+ and 20.3.0+ but NEVER in 19.x or 20.0-20.2. So `engines.node`
+    # is `^18.17.0 || >= 20.3.0`, which has TWO lower boundaries — and a claim
+    # is only tested if every boundary it asserts is executed. Testing 18.17.0
+    # alone would leave the 20.3.0 boundary advertised-but-unproven, which is
+    # the exact shape of the bug this issue exists to close.
+    #
+    # Scope is deliberate. Each leg runs the floor smoke script (version + load
+    # + ONE real query, failing on a 0-row result) plus the SAME dataset-free
+    # jest subset the `smoke` job runs — enough to catch a jest/Node
     # incompatibility in the harness itself. It does NOT run the full `npm test`
     # suite: behavioural coverage is the `test` job's business, and duplicating
-    # it per Node major on every PR buys the same assertions twice.
-    name: Floor smoke (Node 18.17.0)
+    # it per boundary on every PR buys the same assertions twice.
+    name: Floor smoke (Node ${{ matrix.node }})
     runs-on: ubuntu-latest
     needs: smoke
     timeout-minutes: 20
+
+    strategy:
+      fail-fast: false
+      matrix:
+        # Both lower boundaries of `engines.node`. Exact patch versions, not
+        # majors: `'18'` resolves to the newest 18.x and would leave the actual
+        # boundary unexercised.
+        node: ['18.17.0', '20.3.0']
 
     steps:
       - name: Checkout
         uses: actions/checkout@v5
 
-      - name: Setup Node.js 18.17.0 (the advertised engines.node floor, exactly)
+      - name: Setup Node.js ${{ matrix.node }} (an advertised engines.node boundary, exactly)
         uses: actions/setup-node@v5
         with:
-          node-version: '18.17.0'
+          node-version: ${{ matrix.node }}
           cache: 'npm'
           cache-dependency-path: bindings/node/package-lock.json
 
@@ -160,12 +176,16 @@ jobs:
           CQLITE_DATASETS_ROOT: ${{ github.workspace }}/test-data/datasets
           # Asserted inside the script: a `setup-node` no-op would otherwise
           # make this a second Node-20 run reporting a floor it never touched.
-          CQLITE_FLOOR_EXPECT_NODE_VERSION: '18.17.0'
+          CQLITE_FLOOR_EXPECT_NODE_VERSION: ${{ matrix.node }}
+          # The step above restores the corpus, so an absent one here is a
+          # BROKEN RESTORE, not a legitimate skip. Fail rather than report a
+          # green floor whose query never ran.
+          CQLITE_FLOOR_STRICT_FIXTURES: '1'
         run: |
           set -euo pipefail
           node scripts/floor-smoke.js
 
-      - name: Run smoke Jest subset on Node 18.17.0
+      - name: Run smoke Jest subset on Node ${{ matrix.node }}
         working-directory: bindings/node
         run: |
           set -euo pipefail
