@@ -886,22 +886,69 @@ impl Config {
         // same dishonesty as a decorative knob: the value they set was not the
         // value that ran.
         //
-        // The legal range is the documented `(0.0, 1.0]` — open at zero because a
-        // zero (or negative) fraction asks `Auto` to escalate EVERY file to direct
-        // I/O, which is not what the field means and is spelled
-        // `DiskAccessMode::Direct`; closed at one because "all of RAM" is a
-        // coherent ceiling. `!(range)` rather than a chain of `<`/`>` so NaN — for
-        // which every ordered comparison is false — is REJECTED rather than
-        // sailing through. The reader keeps its clamp as defense in depth for any
-        // caller that reaches it without validating.
-        let fraction = self.storage.direct_io_memory_fraction;
-        if !(fraction > 0.0 && fraction <= 1.0) {
-            return Err(crate::Error::configuration(format!(
-                "direct_io_memory_fraction ({fraction}) must be a fraction of system memory                  in (0.0, 1.0]; it is not a byte count, and a value outside that range was                  previously clamped silently. Use DiskAccessMode::Direct to always bypass                  the page cache"
-            )));
-        }
+        // The rule itself, the range's endpoints and the reasoning for each live
+        // on `StorageConfig::validated_direct_io_memory_fraction`, because
+        // `SSTableReader::open` enforces the same rule without going through
+        // here (#1696 roborev F2) and one rule must have one definition.
+        self.storage.validated_direct_io_memory_fraction()?;
 
         Ok(())
+    }
+}
+
+impl StorageConfig {
+    /// [`Self::direct_io_memory_fraction`] if it is a legal fraction, else a
+    /// configuration error (issue #1696, AH3).
+    ///
+    /// # Why this is a method and not an inline check in `validate`
+    ///
+    /// It is enforced at TWO boundaries — [`Config::validate`] (called by
+    /// `Database::open`) and `SSTableReader::open`, which is reachable without a
+    /// `Database` — so the rule needs ONE definition or the two can drift.
+    ///
+    /// # The rule, and why the ends of the range are where they are
+    ///
+    /// The legal range is the documented `(0.0, 1.0]`. Before this existed the
+    /// value was live but unvalidated: the reader's `resolve_disk_access_mode`
+    /// silently CLAMPED nonsense — `<= 0.0`, NaN and the infinities fell back to
+    /// the `0.5` default, and anything above `1.0` was pinned at `1.0`. An
+    /// operator who wrote `2.0` (meaning "twice RAM") or `-1` got the default and
+    /// no word about it, which is the same dishonesty as a decorative knob: the
+    /// value they set was not the value that ran.
+    ///
+    /// * **`1.0` is LEGAL** — "all of RAM" is a coherent ceiling.
+    /// * **`0.0` is REJECTED, and is NOT read as "never use direct I/O"** — that
+    ///   is the whole reason it cannot be accepted. A zero threshold makes EVERY
+    ///   nonempty file exceed it, so `Auto` would escalate everything to direct
+    ///   I/O: the value reads as "never" and behaves as "always". Inferring which
+    ///   one the operator meant would be a guess, and CQLite does not guess
+    ///   (issue #28). "Never use direct I/O" is spelled
+    ///   [`DiskAccessMode::Mmap`] (or [`DiskAccessMode::Buffered`]); "always" is
+    ///   spelled [`DiskAccessMode::Direct`].
+    /// * **A subnormal or otherwise tiny positive fraction is LEGAL** and is
+    ///   honoured LITERALLY: `1e-300` of RAM rounds to a 0-byte threshold, so
+    ///   every nonempty file uses direct I/O. That is the honest consequence of
+    ///   what was asked for, and unlike `0.0` it is unambiguous — a real, if
+    ///   degenerate, fraction rather than a value whose plain reading contradicts
+    ///   its behaviour. It is not clamped and not second-guessed.
+    /// * **NaN and both infinities are REJECTED.** The test is written as
+    ///   `!(fraction > 0.0 && fraction <= 1.0)` rather than a chain of `<`/`>`
+    ///   precisely so NaN — for which every ordered comparison is false — is
+    ///   rejected instead of sailing through.
+    ///
+    /// The reader keeps its internal clamp as defense in depth for any future
+    /// caller that reaches `resolve_disk_access_mode` without validating.
+    pub fn validated_direct_io_memory_fraction(&self) -> crate::Result<f64> {
+        let fraction = self.direct_io_memory_fraction;
+        if !(fraction > 0.0 && fraction <= 1.0) {
+            return Err(crate::Error::configuration(format!(
+                "direct_io_memory_fraction ({fraction}) must be a fraction of system memory in \
+                 (0.0, 1.0]; it is not a byte count, and a value outside that range was \
+                 previously clamped silently. For \"always bypass the page cache\" set \
+                 disk_access_mode = Direct; for \"never\" set Mmap or Buffered"
+            )));
+        }
+        Ok(fraction)
     }
 }
 

@@ -498,6 +498,17 @@ impl SSTableReader {
         // `perform_integrity_check` can delegate to `verify::verify_sstable`
         // (single source of truth, issue #1283) under the same config.
         let open_config = config.clone();
+
+        // REJECT an out-of-range `direct_io_memory_fraction` before ANY file I/O
+        // (#1696 roborev F2). `resolve_disk_access_mode` below clamps a nonsense
+        // value to the 0.5 default or to 1.0, so without this the backend the
+        // reader runs on is not the one the operator configured — silently. This
+        // boundary is where that matters: a reader can be opened without a
+        // `Database`, hence without `Config::validate`. A config error needs no
+        // bytes to diagnose, so it is raised here rather than after `metadata`;
+        // the resolver keeps its clamp as defense in depth for any caller that
+        // reaches it directly.
+        let memory_fraction = config.storage.validated_direct_io_memory_fraction()?;
         // #1249 (spec R1): reject below-floor versions BEFORE any file I/O.
         // Gates derive solely from the filename, so this is the earliest point
         // that can enforce the na+ floor — a pre-`na` (BIG) or non-`da` (BTI)
@@ -545,7 +556,7 @@ impl SSTableReader {
             configured_mode,
             file_size,
             reader_config.mmap_min_size_bytes as u64,
-            config.storage.direct_io_memory_fraction,
+            memory_fraction,
             system_memory_bytes(),
             direct_io_available(),
         );
