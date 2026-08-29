@@ -191,3 +191,44 @@ fn every_removed_key_documents_its_removal() {
         );
     }
 }
+
+/// A DIRECT serde deserialization of `Config` reports NOTHING — the one surface
+/// the #1696 rule does not reach, pinned as an honest, tested fact (issue #3520).
+///
+/// `Config` derives `Deserialize`, so `serde_json::from_str::<Config>` /
+/// `from_value::<Config>` bypass the reporting constructors entirely and serde
+/// DISCARDS the removed keys in silence. That is a real residual, NOT a decision
+/// this test endorses: closing it needs a custom `Deserialize` capturing unknown
+/// keys across every nested config struct, which is an architectural change well
+/// outside AH3's decorative-knob purge (#1696 roborev r2 F3, scoped by owner
+/// decision rather than fixed).
+///
+/// It is pinned rather than left implicit so the gap is recorded where the next
+/// person meets it, and so the day #3520 lands, THIS test is the thing that tells
+/// them the behavior they changed: a `Deserialize` that reports (or rejects)
+/// removed keys makes the plain `from_str` below stop being silent, and the fix
+/// is to invert this case rather than delete it.
+#[test]
+fn direct_serde_deserialization_is_the_unreported_surface() {
+    let json = old_shape_json();
+
+    // The REPORTING constructor names the dead keys...
+    let (_, warning) = Config::from_json_str_reporting_removed(&json, "config dict")
+        .expect("the fixture is a loadable document");
+    let warning = warning.expect("the reporting constructor must name the removed keys");
+    assert!(warning.contains("storage.block_size"));
+
+    // ...while plain serde on the SAME document succeeds with no signal at all.
+    // There is nowhere for a warning to appear here: `from_str` returns only the
+    // config, which is exactly why an optional constructor cannot enforce the
+    // rule at this boundary (#3520).
+    let direct: Config =
+        serde_json::from_str(&json).expect("serde accepts the removed keys silently");
+    // The removed keys are gone from the struct — they were DISCARDED, not
+    // rejected and not reported — while the surviving keys took effect.
+    assert_eq!(
+        direct.storage.memtable_size_threshold, 33_554_432,
+        "the surviving half of the document must still be honoured, else this \
+         test is about a failed parse instead of a silent discard"
+    );
+}
