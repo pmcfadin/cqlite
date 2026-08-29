@@ -62,7 +62,9 @@
 #     is caught and not only the two steps this issue repaired. DISCOVERED is the operative word
 #     and its scope is stated exactly: every `-c`-form invocation REGARDLESS of how its command
 #     word is spelled (the census anchors on the flag), plus every invocation whose command word
-#     contains a literal `python`. What that does not reach is in NOT REACHED below;
+#     contains a literal `python` — both searched over the LOGICAL-LINE reconstruction, so a
+#     backslash-newline continuation cannot hide either anchor. What that does not reach is in
+#     NOT REACHED below;
 #   * the extractor's delimiter in BOTH directions: it reports a defect, AND it does not
 #     manufacture one on good input. A block is delimited by bash's quoting rules rather than by a
 #     line pattern, so all three closer shapes this repository actually uses are handled — the
@@ -109,8 +111,11 @@
 #     a variable, a concatenation, `$(which python3)`, an alias, `eval` — so enumerating the
 #     spellings is the same open list the round-6 inversion escaped, one level down. The two
 #     anchors cover the decidable part: the `-c` FLAG (any command-word spelling) and a literal
-#     `python` word (any argument shape). NOT discovered: an indirectly-spelled command word
-#     COMBINED with a non-`-c` form — `$PYTHON <<'PY'`, or code reaching python through `eval`.
+#     `python` word (any argument shape), both over the logical-line reconstruction (bash deletes
+#     backslash-newline before tokenising, and so does discovery — a single closed rule bash
+#     itself applies, not another spelling on a list). NOT discovered: an indirectly-spelled
+#     command word COMBINED with a non-`-c` form — `$PYTHON <<'PY'`, or code reaching python
+#     through `eval`.
 #     Closing that would require interpreting bash, which is the thing this file does not do.
 #     If a future review reports another command-word spelling, the answer is this limit, not
 #     more matching.
@@ -522,28 +527,39 @@ else
   fail "census CONTROL did not fire (heredoc removed): a heredoc must be a finding, got: $(head -2 <<<"$hd_any")"
 fi
 
-# --- CONTROL 1h: AN INDIRECTLY-SPELLED COMMAND WORD IS DISCOVERED VIA THE FLAG -----------------
+# --- CONTROL 1h: AN INDIRECTLY-SPELLED COMMAND WORD IS DISCOVERED, WRAPPED OR NOT --------------
 # The allowlist closed CLASSIFICATION but not DISCOVERY: a candidate must be FOUND before it can
-# be classified, and `$PYTHON -c '…'` contains no literal `python` word, so it was invisible — an
-# invalid block passing the "every embedded block compiles" guard with the count unchanged. The
-# census now has a SECOND anchor, the `-c` flag itself, which is independent of how the command
-# word is spelled.
-INDIRECT="$TMP/indirect-command-word.sh"
-python3 - "$INDIRECT" <<'INJECT'
+# be classified. Three cases, and the third needed BOTH ingredients before it was invisible —
+# `$PYTHON` defeats the word matcher, and a backslash-newline puts the quote on the next line
+# where the `-c` anchor cannot see it. Measured before the fix: A and C were findings, B was
+# `findings=0 occurrences=0` with the block count unchanged, i.e. an invalid program passing the
+# "every embedded block compiles" guard.
+#
+#   A  literal python3, continuation   already caught (unrecognised shape)
+#   B  $PYTHON,         continuation   INVISIBLE -> now caught, via logical-line joining
+#   C  $PYTHON,         same line      caught by the `-c` flag anchor (round 7)
+#
+# All three are asserted together, because the fix for B (joining backslash-newline before
+# discovery) is a transformation that could plausibly disturb A or C.
+indirect_ok=1
+python3 - "$TMP" <<'INJECT'
 import pathlib, sys
-q = chr(39)
-pathlib.Path(sys.argv[1]).write_text("$PYTHON -c " + q + "import os," + q + "\n")
+q, bs = chr(39), chr(92)
+tmp = pathlib.Path(sys.argv[1])
+prog = q + "import os," + q
+(tmp / "indirect-A.sh").write_text("python3 -c " + bs + "\n" + prog + "\n")
+(tmp / "indirect-B.sh").write_text("$PYTHON -c " + bs + "\n" + prog + "\n")
+(tmp / "indirect-C.sh").write_text("$PYTHON -c " + prog + "\n")
 INJECT
 indirect_rc=$?
-if [ "$indirect_rc" -ne 0 ] || [ ! -s "$INDIRECT" ]; then
-  fail "census CONTROL: the indirect-command-word fixture could not be written (rc=$indirect_rc), so the control could not fire"
+for indirect_case in A B C; do
+  [ -s "$TMP/indirect-$indirect_case.sh" ] || indirect_ok=0
+  [ -n "$(findings_of "$(census "$TMP/indirect-$indirect_case.sh")")" ] || indirect_ok=0
+done
+if [ "$indirect_rc" -eq 0 ] && [ "$indirect_ok" -eq 1 ]; then
+  pass "census CONTROL fired (indirect command word, all 3 cases): a \$PYTHON -c invocation is DISCOVERED whether the quote is on the same line or past a backslash-newline continuation — discovery runs over the logical-line reconstruction bash itself builds"
 else
-  ind_out="$(census "$INDIRECT")"
-  if grep -q 'command word is' <<<"$ind_out"; then
-    pass "census CONTROL fired (indirect command word): \$PYTHON -c is DISCOVERED via the flag anchor and named — $(findings_of "$ind_out" | head -1 | cut -c1-96)"
-  else
-    fail "census CONTROL did not fire (indirect command word): an indirectly-spelled -c invocation must be a finding, got: $(head -2 <<<"$ind_out")"
-  fi
+  fail "census CONTROL did not fire (indirect command word): fixture-rc=$indirect_rc all-three-found=$indirect_ok — case B (indirect word + continuation) is the one that was invisible"
 fi
 
 # --- CONTROL 1i: A MISSING SUBJECT EXITS NONZERO ------------------------------------------------
@@ -634,7 +650,13 @@ fi
 CFG_PAIRS=(
   "reps=1" "temps=warm" "arms=bypass" "scan_passes=1"
   "server_cpus=2,10" "client_cpus=4,12" "step_duration=45s/1s"
-  "flight_endpoint=grpc://127.0.0.1:1"
+  # THE DRIVER'S OWN SHAPE (#3451 review round 8, finding 2). `ws0-baseline.sh:298` sets
+  # `FLIGHT_ENDPOINT="http://127.0.0.1:$PORT"` and `ws0_session` validates the field with
+  # `http_endpoint` as an ABSOLUTE http URL, so the `grpc://…` this suite used before was a value
+  # the driver never produces and the shipped reader would REJECT — the round trip was approving
+  # an artifact production would refuse. Taken from the sibling fixture constant rather than
+  # spelled again, so the two cannot drift.
+  "flight_endpoint=$WS0_FIXTURE_ENDPOINT"
   # `non-baseline`, and that is the only honest value available here: this is a few-KB synthetic
   # corpus, and the shipped `require_canonical_or_declared` REFUSES a divergent corpus in
   # `baseline` mode — correctly. Declaring the mode is the supported way past it, not a way round
@@ -810,10 +832,19 @@ done
 if python3 - "$PERF_DIR" "$OUT" "$CORPUS" <<'PY'
 import pathlib, sys
 sys.path.insert(0, sys.argv[1])
-from ws0_session import verify_session_corpus_pin
+from ws0_report import ARMS_ALLOWED, TEMPS_ALLOWED
+from ws0_session import session_manifest_config, verify_session_corpus_pin
 from ws0_validate import load_corpus_identity
 session, corpus = pathlib.Path(sys.argv[2]), pathlib.Path(sys.argv[3])
 report = verify_session_corpus_pin(session, corpus, load_corpus_identity(corpus))
+# ...AND the shipped CONFIGURATION reader, which `verify_session_corpus_pin` does not call
+# (#3451 review round 8, finding 2). Without it "the SHIPPED reader accepts what the SHIPPED step
+# wrote" was verified by a WEAKER reader than the one that runs in production: the pin verifier
+# checks corpus identity and says nothing about the configuration, so a manifest the real reporter
+# would refuse passed here. `session_manifest_config` is what `ws0_report.py:250` calls.
+cfg = session_manifest_config(session, TEMPS_ALLOWED, ARMS_ALLOWED)
+assert cfg.get("flight_endpoint", "").startswith("http://"), cfg
+assert cfg.get("reps") == 1 and cfg.get("scan_passes") == 1, cfg
 # The reader's own report, asserted field by field so this case cannot pass on a verifier that
 # returned an empty dict: the pin was taken BEFORE measurement, and it carries the digests of the
 # corpus, the schema and the Flight ticket the step measured from disk.
@@ -824,9 +855,51 @@ assert len(report.get("pinned_ticket_sha256", "")) == 64, report
 assert report.get("pinned_components", 0) >= 5, report
 PY
 then
-  pass "EXECUTE session-corpus-pin: the SHIPPED READER (verify_session_corpus_pin) accepts the pin the shipped STEP wrote — writer and reader agree end to end"
+  pass "EXECUTE session-corpus-pin: the SHIPPED READERS accept what the shipped STEP wrote — verify_session_corpus_pin for the corpus identity AND session_manifest_config (what ws0_report.py itself calls) for the configuration, so the round trip is against the production reader rather than a weaker one"
 else
-  fail "EXECUTE session-corpus-pin: the shipped reader refused the pin the shipped step wrote"
+  fail "EXECUTE session-corpus-pin: a shipped reader refused what the shipped step wrote"
+fi
+
+# --- CONTROL 3a-pre: the configuration reader DISCRIMINATES, it does not accept everything ------
+# The accept above is only evidence if the same reader can refuse. A `grpc://` endpoint — the
+# spelling this suite used before round 8, and one the driver never produces — must be REJECTED by
+# `session_manifest_config`. Note the STEP accepts it (it records configuration verbatim); the
+# refusal comes from the production reader, which is exactly the gap that made the old round trip
+# weaker than it read.
+run_pin_rc=0
+OUT_BADCFG="$TMP/session-badcfg"; mkdir -p "$OUT_BADCFG"
+python3 - "$PERF_DIR" "$OUT_BADCFG" "$CORPUS" <<'PY'
+import pathlib, sys
+sys.path.insert(0, sys.argv[1])
+from ws0_ticket_input import write_ticket_template
+write_ticket_template(pathlib.Path(sys.argv[2]), pathlib.Path(sys.argv[3]) / "ws0-events.cql")
+PY
+CFG_PAIRS_SAVED=("${CFG_PAIRS[@]}")
+CFG_PAIRS=()
+for pair in "${CFG_PAIRS_SAVED[@]}"; do
+  case "$pair" in
+    flight_endpoint=*) CFG_PAIRS+=("flight_endpoint=grpc://127.0.0.1:1") ;;
+    *) CFG_PAIRS+=("$pair") ;;
+  esac
+done
+run_pin_step "$DRIVER" "$OUT_BADCFG"; badcfg_out="$(cat "$STEP_OUT")"
+CFG_PAIRS=("${CFG_PAIRS_SAVED[@]}")
+if [ "$run_pin_rc" -eq 0 ] && python3 - "$PERF_DIR" "$OUT_BADCFG" <<'PY'
+import pathlib, sys
+sys.path.insert(0, sys.argv[1])
+from ws0_report import ARMS_ALLOWED, TEMPS_ALLOWED
+from ws0_session import session_manifest_config
+from ws0_validate import Invalid
+try:
+    session_manifest_config(pathlib.Path(sys.argv[2]), TEMPS_ALLOWED, ARMS_ALLOWED)
+except Invalid:
+    raise SystemExit(0)
+raise SystemExit(1)
+PY
+then
+  pass "config-reader CONTROL fired: a grpc:// endpoint is written by the step and REFUSED by session_manifest_config — so the accept above is a measurement, not a reader that takes anything"
+else
+  fail "config-reader CONTROL did not fire: session_manifest_config must refuse a non-http endpoint (step rc=$run_pin_rc, out: $(head -2 <<<"$badcfg_out"))"
 fi
 
 # --- POSITIVE CONTROL 3a: the same harness OBSERVES the defective step failing -----------------

@@ -225,6 +225,40 @@ class Unclassifiable(Exception):
         self.reason = reason
 
 
+def _join_continuations(text: str) -> tuple[str, list[int]]:
+    """`text` with backslash-newline pairs removed, plus a map back to ORIGINAL offsets.
+
+    Bash reconstructs a LOGICAL LINE by deleting `\\` + newline before it tokenises anything, so
+    `$PYTHON -c \\` / `'prog'` is the single command `$PYTHON -c 'prog'`. Discovery that reads
+    physical lines cannot see it: the word matcher misses `$PYTHON`, and the `-c` anchor misses
+    because the quote is on the next line. MEASURED — that pair, and only that pair, was invisible
+    (`findings=0 occurrences=0`); either ingredient alone is already caught.
+
+    THIS IS A DECIDABLE TRANSFORMATION, NOT ANOTHER SHAPE ON A LIST — one closed rule that bash
+    itself applies. It makes the EXISTING anchors strictly stronger (after joining, the case above
+    IS literally `$PYTHON -c 'prog'`, which the `-c` anchor already catches) rather than adding a
+    special case to an enumeration.
+
+    USED FOR DISCOVERY ONLY, and that restriction is load-bearing: inside SINGLE QUOTES a
+    backslash is LITERAL and no continuation happens, so joining a block's BODY would hand the
+    compiler source that differs from what python receives. Anchors are located in the joined
+    text; every subsequent read — the rest of the line, the quote scan, the body, the reported
+    line numbers — is done against the ORIGINAL. The returned map exists for exactly that
+    hand-back, so a finding never names a line that only exists in the joined view.
+    """
+    out: list[str] = []
+    omap: list[int] = []
+    i, n = 0, len(text)
+    while i < n:
+        if text[i] == "\\" and i + 1 < n and text[i + 1] == "\n":
+            i += 2
+            continue
+        out.append(text[i])
+        omap.append(i)
+        i += 1
+    return "".join(out), omap
+
+
 def _strip_comment(rest: str) -> str:
     """Drop a trailing `# …` comment from the text FOLLOWING a python3 token.
 
@@ -308,6 +342,8 @@ def census(path: pathlib.Path) -> tuple[list[dict], list[dict]]:
     for line in lines:
         starts.append(off)
         off += len(line) + 1
+    # DISCOVERY runs over the logical-line reconstruction; everything else reads the original.
+    scan, omap = _join_continuations(text)
     records: list[dict] = []
     findings: list[dict] = []
     pos = 0
@@ -316,24 +352,27 @@ def census(path: pathlib.Path) -> tuple[list[dict], list[dict]]:
         # its branch consumes through the closing quote, so the `-c` inside it is never reached —
         # no double report. A `-c '` reached FIRST means no literal python word preceded it, i.e.
         # the command word is spelled indirectly, which is a finding.
-        mp = _PY_WORD.search(text, pos)
-        mc = _DASH_C_ANCHOR.search(text, pos)
+        mp = _PY_WORD.search(scan, pos)
+        mc = _DASH_C_ANCHOR.search(scan, pos)
         if mp is not None and (mc is None or mp.start() <= mc.start()):
             m, anchored_on_flag = mp, False
         elif mc is not None:
             m, anchored_on_flag = mc, True
         else:
             break
-        idx = bisect.bisect_right(starts, m.start()) - 1
+        # Hand the match back to ORIGINAL offsets before anything is read or reported.
+        match_start = omap[m.start()]
+        match_end = omap[m.end() - 1] + 1
+        pos = m.end()
+        idx = bisect.bisect_right(starts, match_start) - 1
         line = lines[idx]
         line_start = starts[idx]
         if anchored_on_flag:
-            pos = m.end()
             if line.lstrip().startswith("#"):
                 continue  # a whole-line shell comment carries no code
             # The word before the flag, for the diagnostic only — enough to name what was found
             # without pretending to resolve it.
-            before = text[line_start : m.start()].rstrip()
+            before = text[line_start:match_start].rstrip()
             cmd_word = before[max((before.rfind(c) for c in _WORD_BREAK), default=-1) + 1 :]
             findings.append({
                 "line": idx + 1,
@@ -346,14 +385,13 @@ def census(path: pathlib.Path) -> tuple[list[dict], list[dict]]:
             })
             continue
         # Walk left to the start of the shell WORD, so a path prefix travels with the candidate.
-        word_start = m.start()
+        word_start = match_start
         while word_start > line_start and text[word_start - 1] not in _WORD_BREAK:
             word_start -= 1
-        word = text[word_start : m.end()]
-        pos = m.end()
+        word = text[word_start:match_end]
         if line.lstrip().startswith("#"):
             continue  # a whole-line shell comment carries no code
-        if word.rsplit("/", 1)[-1] != text[m.start() : m.end()]:
+        if word.rsplit("/", 1)[-1] != text[match_start:match_end]:
             # The word's BASENAME is not the matched token, i.e. the token is a SUFFIX of a longer
             # program name (`mypython3`, `jython3`). That is a different program, not a
             # path-qualified python — the path case (`/usr/bin/python3`) has the token AS its
@@ -361,7 +399,7 @@ def census(path: pathlib.Path) -> tuple[list[dict], list[dict]]:
             # about names rather than about shell.
             continue
         line_end = line_start + len(line)
-        raw_rest = text[m.end() : line_end]
+        raw_rest = text[match_end:line_end]
         rest = _strip_comment(raw_rest).strip()
         try:
             if word != "python3":
@@ -380,7 +418,7 @@ def census(path: pathlib.Path) -> tuple[list[dict], list[dict]]:
             dash_c = _OPEN_DASH_C.match(raw_rest)
             if dash_c:
                 # ALLOWLIST 1.
-                open_quote = m.end() + dash_c.end() - 1
+                open_quote = match_end + dash_c.end() - 1
                 body, close = _scan_single_quoted(text, open_quote)
                 after = text[close + 1 : close + 2]
                 if after and after not in _WORD_BOUNDARY_AFTER_CLOSE:
@@ -394,7 +432,8 @@ def census(path: pathlib.Path) -> tuple[list[dict], list[dict]]:
                         " reassembled: put the whole program inside one quoted string.",
                     )
                 end_line = text.count("\n", 0, close)
-                pos = close + 1
+                # Advance the SCAN cursor past the closing quote, mapping through the offset map.
+                pos = bisect.bisect_right(omap, close)
                 records.append(
                     {"kind": "BLOCK",
                      "shape": "dash-c-multiline" if "\n" in body else "dash-c-inline",

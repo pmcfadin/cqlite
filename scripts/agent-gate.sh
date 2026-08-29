@@ -6585,7 +6585,8 @@ run_tooling_tests() {
   # this issue is about is caught on 3.9 through 3.12 alike.
   # The block text is EXTRACTED from the shipped driver on every run (`ws0_embedded_python.py`,
   # which discovers candidates on TWO anchors — any word whose basename is python/python3, and the
-  # `-c` FLAG itself so an indirectly-spelled command word like `$PYTHON -c` is still found — and
+  # `-c` FLAG itself so an indirectly-spelled command word like `$PYTHON -c` is still found — both
+  # searched over the LOGICAL-LINE reconstruction, so a backslash-newline cannot hide either — and
   # then ALLOWLISTS exactly the shapes this driver uses, making everything else a FINDING) rather
   # than copied,
   # because a copy stays green while the shipped step is broken — the exact state #3451 found. The
