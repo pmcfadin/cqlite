@@ -1217,6 +1217,30 @@ if [ "$zc_rc" -eq 1 ] && printf '%s\n' "$help_text" | grep -qi 'zero'; then
 else
   bad "help and behaviour disagree on zero claims: rc=$zc_rc"
 fi
+
+# ...and every REF NAMESPACE the code touches must appear in the help (round 18, Low). The layout
+# section still described one `refs/machine-claims/<machine>` per machine after the per-lane ruling,
+# which is a defect rather than a typo: doctrine treats this help as the authoritative contract
+# BECAUSE it lives in the same file as the code and therefore cannot drift from it. Derived from the
+# source like the verdict half above, so a namespace added later fails this until it is documented.
+ns_emitted=$(grep -oE "refs/(lane-claims|machine-claims|heartbeats|tmp)/" "$HB" | sed 's|/$||' | sort -u)
+ns_missing=""
+for ns in $ns_emitted; do
+  printf '%s\n' "$help_text" | grep -q "$ns" || ns_missing="$ns_missing $ns"
+done
+if [ -n "$ns_emitted" ] && [ -z "$ns_missing" ]; then
+  ok "every ref namespace the code touches is documented in --help ($(printf '%s' "$ns_emitted" | tr '\n' ' '))"
+else
+  bad "ref namespaces missing from --help:${ns_missing:-<none>} (emitted: $(printf '%s' "$ns_emitted" | tr '\n' ' '))"
+fi
+# The per-lane shape specifically, since that is the one that drifted: the help must show the
+# lane-id component and must mark the legacy namespace as legacy.
+if printf '%s\n' "$help_text" | grep -q 'refs/lane-claims/<machine>/<lane-id>' \
+  && printf '%s\n' "$help_text" | grep -qi 'LEGACY'; then
+  ok "--help documents the per-lane ref shape and marks refs/machine-claims/* as legacy"
+else
+  bad "--help must document refs/lane-claims/<machine>/<lane-id> and mark the per-machine namespace legacy"
+fi
 # ...and the help's exit-0 contract must match the CURRENT implementation, which restored the clean
 # verdict once per-lane refs removed the masking (#3393 ruling A).
 #

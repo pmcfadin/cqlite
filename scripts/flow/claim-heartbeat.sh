@@ -57,6 +57,13 @@
 #     and still accepted by `clear`/`reap`/`should-reap` when no lane id is
 #     given. Nothing writes it any more.
 #
+#   refs/tmp/<subcommand>/<pid>-<n>   LOCAL scratch, never pushed
+#     Every subcommand that READS a claim fetches it into a private ref here and
+#     deletes it immediately, rather than through the shared `FETCH_HEAD` that any
+#     concurrent fetch in the same checkout can clobber between the fetch and the
+#     read. Nothing outside this script consumes them; a killed run can leave one
+#     behind, and `git update-ref -d` on it is always safe.
+#
 #     NOTE both namespaces are deliberately DISTINCT from
 #     `scripts/flow/claim.sh`'s per-issue LOCK refs `refs/claims/issue-<N>`
 #     (#2665) — these are liveness proofs, not the issue lock, and the
