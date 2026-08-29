@@ -208,9 +208,31 @@ cqlite-cli/      # Command-line interface
 bindings/python/ # Python bindings (PyO3) — M4 complete
 bindings/node/   # Node.js bindings (napi-rs) — Phase 3 complete
 test-data/       # Real Cassandra 5.0 SSTables for testing
-tools/           # sstabledump-validator, format-validator
+tools/           # 7 crates, each with a RECORDED disposition (#1716), pinned by
+                 #   scripts/tests/test_tools_crate_disposition.sh:
+                 #   CI-wired: cassandra-parity, flight-loadgen,
+                 #     sstabledump-validator, ws0-corpus-gen.
+                 #   UNWIRED manual dev tools (no workflow/script/live doc runs
+                 #     them; each carries a README saying so): cqlite-validator,
+                 #     memory-safety-runner, and format-validator's 4 BINS.
+                 #   format-validator's LIB is WIRED — tests/format-compatibility
+                 #     (the gate's `format-compat` component) path-depends on it —
+                 #     so that crate must stay a workspace member. A NEW tools/
+                 #     crate must be classified in that guard or the gate FAILs.
 fuzz/            # cargo-fuzz crate — own workspace, EXCLUDED from the main one
 ```
+
+**A bare `cargo build` here already builds only the ROOT package — do not "optimize" it with
+`default-members` (#1716).** This workspace has a root package (`cqlite`), and cargo's default for
+`default-members` in that case is **that package alone** ("all members" is the default only for a
+VIRTUAL workspace). Verified: `cargo tree --depth 0` at the root resolves to `cqlite` and nothing
+else. So adding an explicit `default-members` list would **expand** the bare build from 1 package to
+14 — the opposite of the intent, and the trap #1716 was originally written around ("these crates are
+compiled by every workspace build" was false). The `tools/` crates are compiled only by an explicit
+`--workspace`/`--all-targets` (the gate's clippy) or `-p`. Two corollaries: those crates stay fully
+linted under `-D warnings` no matter their disposition; and their own unit tests are run by **no**
+automated lane and never were (no CI job or gate component runs workspace-wide tests) — run them
+with `cargo test -p <name>`.
 
 **Planned (M6)**: `bindings/wasm/`. Full source map (parsers, writers, query engine, bindings
 layout, binding structure trees):

@@ -2,8 +2,7 @@
 
 **Status: manual developer tool.** No CI workflow, no script, and no live doc invokes this crate
 or its `cqlite-validator` binary — verified by census in issue #1716 (epic #1688, audit finding
-AK5). It is therefore **not** in the workspace `default-members`, so a bare `cargo build` at the
-repo root does not compile it.
+AK5).
 
 ```bash
 cargo run -p cqlite-validator -- --help     # build + run on demand
@@ -11,9 +10,15 @@ cargo build -p cqlite-validator             # build only
 cargo test  -p cqlite-validator             # this crate's own tests (it currently has none)
 ```
 
-It is still a workspace **member**, so the agent gate's
-`cargo clippy --workspace --all-targets --all-features` lints it under `-D warnings` — dropping out
-of `default-members` costs build time, never lint coverage.
+A bare `cargo build` at the repo root does not compile this crate — but **not because of
+anything #1716 changed**: this workspace has a root package (`cqlite`), so cargo's default member
+set is *that package alone*, and every `tools/` crate is compiled only by an explicit
+`--workspace` or `-p`. See the `default-members` note in the root `Cargo.toml` before "optimizing"
+that.
+
+It is a workspace **member**, and stays one, so the agent gate's
+`cargo clippy --workspace --all-targets --all-features` lints it under `-D warnings`. Being
+unwired costs it no lint coverage.
 
 ## What it does
 

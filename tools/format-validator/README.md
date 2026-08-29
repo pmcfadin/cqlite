@@ -19,15 +19,17 @@ issue #1716 (epic #1688, audit finding AK5):
 3. **`xtask/src/oom_audit/scope.rs`** asserts on a `tools/format-validator/` path.
 
 **Therefore this crate must stay a workspace member and must NOT be added to the workspace
-`exclude` list** — doing so breaks all three. See the `default-members` comment in the root
-`Cargo.toml`.
+`exclude` list** — doing so breaks all three.
 
 ## The four binaries are not wired
 
-No CI workflow, no script and no live doc invokes any of them. So the crate is **not** in
-`default-members`: a bare `cargo build` at the repo root no longer compiles the four binaries,
-while the library still builds as `format-compatibility-tests`' dependency — which is exactly the
-coverage the `format-compat` gate component needs.
+No CI workflow, no script and no live doc invokes any of them. They are built only by an explicit
+`--workspace`/`--all-targets` (notably the gate's clippy) or by the `-p` commands below — a bare
+`cargo build` at the repo root compiles only the root `cqlite` package, so it never built them.
+Measured on 16 cores with dependencies warm, these four binaries cost **51.1 s** of a
+`cargo build --workspace --all-targets`, which is 82% of all three unwired crates' combined 62.6 s
+(issue #1716). Deleting or feature-gating them is proposed as a follow-up there; #1716's own rules
+do not authorize it (they permit deletion only for a tool that duplicates a live gate check).
 
 ```bash
 cargo run -p format-validator --bin hex-analyzer -- --help    # or format-checker,
@@ -35,9 +37,9 @@ cargo build -p format-validator --bins                        # deviation-detect
 cargo test  -p format-validator                               # benchmark-validator
 ```
 
-The crate is still a workspace **member**, so the gate's
+The crate is a workspace **member**, so the gate's
 `cargo clippy --workspace --all-targets --all-features` lints every target here under
-`-D warnings` — dropping out of `default-members` costs build time, never lint coverage. (Note the
+`-D warnings`. (Note the
 crate-level `#![allow(clippy::all)]` in `src/lib.rs`, an old "EMERGENCY M1 FIX", suppresses most of
 that within the lib; unrelated to #1716 and left alone.)
 
