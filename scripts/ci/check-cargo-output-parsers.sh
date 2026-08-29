@@ -348,8 +348,26 @@ CONTENT_READER_RE = re.compile(CONTENT_READER)
 # later read from the descriptor or the array, which this scanner does not follow. Named
 # explicitly so they land on the UNRESOLVED (loud) side instead of being read as a plain
 # content read (roborev C1/C2 class: an unfollowed indirection must never look like a pass).
-EXEC_REDIR = re.compile(r'\bexec\b[^|]*[0-9]*<')
-MAPFILE_READ = re.compile(r'\b(?:mapfile|readarray)\b')
+# `exec 3< "$p"` opens a descriptor; `mapfile -t v < "$p"` fills an array. BOTH DEREFERENCE
+# the file, so a stripped path in that OPERAND position is a correct content read and must be
+# APPROVED — they were briefly treated as unfollowable indirections, which red two correct
+# constructs (and, worse, red them with the WRONG diagnosis: `exec`+`read <&3` was reported
+# PIPE-FED and the mapfile array RAW). A guard that reds correct code with a wrong reason is
+# the guard people learn to waive.
+# `(?![<&])` matters: without it `exec 3<&-` — CLOSING the descriptor — parsed as an OPEN on
+# the file `&-`, which is not a stripped path, so a later `finditer` pass overwrote the real
+# open and a correct exec-based read reported RAW. Found by the fixture that was passing for
+# the wrong reason.
+EXEC_FD_OPEN = re.compile(r'\bexec\b[^|]*?([0-9]+)\s*<\s*(?![<&])(\S+)')
+MAPFILE_ASSIGN = re.compile(r'\b(?:mapfile|readarray)\b[^|<]*?(?:-t\s+)?([A-Za-z_]\w*)\s*<\s*(?!<)(\S+)')
+# A `while … read` loop can take its input from a DESCRIPTOR rather than a `done` redirect:
+# `read -r line <&3` or `read -r -u 3 line`. Without this the loop looks redirect-less and is
+# misreported as pipe-fed.
+LOOP_FD = re.compile(r'\bread\b[^;]*?(?:<&\s*([0-9]+)|-u\s*([0-9]+))')
+# `[[ X == pattern ]]` / `!=` / `=~` — X is matched AS A VALUE, i.e. SUBJECT position. Without
+# this a path-valued `[[ "$src" == *tok* ]]` red with the generic RAW cause: the right verdict
+# for the wrong reason, which hides the actual mistake (the path was never read).
+BRACKET_COMPARE = re.compile(r'\[\[\s*(.+?)\s*(?:==|!=|=~)')
 
 
 def done_redirect(line):
@@ -391,11 +409,25 @@ for path in paths:
     # paths, so they hold the log's TEXT. Two passes, because a content var can only be
     # recognised once the path vars are known.
     content_vars = set()
+    def _names_path(expr):
+        return HELPER in expr or bool(set(re.findall(r'\$\{?([A-Za-z_]\w*)', expr)) & path_vars)
+
     for m in CONTENT_ASSIGN.finditer(text):
         name, inner = m.group(1), m.group(2)
-        if CONTENT_READER_RE.search(inner) and (
-                HELPER in inner or bool(set(re.findall(r'\$\{?([A-Za-z_]\w*)', inner)) & path_vars)):
+        if CONTENT_READER_RE.search(inner) and _names_path(inner):
             content_vars.add(name)
+    # `mapfile -t lines < "$stripped"` DEREFERENCES the path, so the array holds the log's
+    # TEXT. Recognised here so a later match against "${lines[@]}" is judged CONTENT rather
+    # than falling through to a RAW verdict about a construct that read the file correctly.
+    for m in MAPFILE_ASSIGN.finditer(text):
+        name, operand = m.group(1), m.group(2)
+        if _names_path(operand):
+            content_vars.add(name)
+    # `exec 3< "$stripped"` — map the descriptor to the strippedness of what it opens, so a
+    # loop reading `<&3` can be judged instead of misreported as pipe-fed.
+    fd_stripped = {}
+    for m in EXEC_FD_OPEN.finditer(text):
+        fd_stripped[m.group(1)] = _names_path(m.group(2))
     # ── THE MODEL: CLASSIFY THE VALUE, DO NOT ENUMERATE THE READ FORMS ────────────────
     # This is an INVERSION of the lint's first model, forced by three findings of one class
     # (roborev B1, then C1 and C2 — a count that was not decreasing, which said the model was
@@ -406,20 +438,33 @@ for path in paths:
     # reading it, and each one was an approved parse of a FILENAME.
     #
     # The new model asks what the matched VALUE IS:
-    #   PATH-valued    — it is (or came from) `_ansi_stripped_log`, i.e. a filename. Matching a
-    #                    cargo token against a path-valued value is ALWAYS an error, in EVERY
-    #                    syntactic position, with no exceptions. One rule; B1, C1 and C2 all die
-    #                    to it.
-    #   CONTENT-valued — the bytes of a stripped log: a `while read` variable fed by a
-    #                    dereferencing redirect of a stripped path, a `$(cat "$stripped")`
-    #                    substitution, or a variable assigned from one. Correct to match.
-    #   otherwise      — RAW (an unstripped source) or UNRESOLVED, both loud.
-    # A false PASS now requires misclassifying a PATH as CONTENT — a far smaller surface than
-    # "did we enumerate every read form" — and residual error lands on the loud side.
+    # The rule, stated in the form that is actually TRUE — and the qualifier is the whole rule,
+    # because the unqualified version ("matching a cargo token against a path-valued value is
+    # always an error, in every syntactic position") WOULD RED THE SHIPPED GATE: site
+    # `run_arrow_parity_guard_cmd` is `sed -n '…test result:…' "$stripped"`, a stripped path
+    # matched against, and it is CORRECT.
     #
-    # DEREFERENCE is the single hinge, and it is a property of the CONSTRUCT, not the value:
-    # `< "$p"` and `grep tok "$p"` OPEN the file (so a path there yields CONTENT), while
-    # `<<< "$p"` and `case "$p" in` use the VALUE (so a path there is the defect).
+    #   SUBJECT POSITION — the value IS the thing matched. `[[ "$p" == *tok* ]]`,
+    #                      `case "$p" in *tok*)`, `done <<< "$p"`, `grep tok <<< "$p"`,
+    #                      `<<< "$(_ansi_stripped_log …)"`. A PATH here is ALWAYS an error: the
+    #                      parser sees one line of filename, matches nothing, reports clean.
+    #                      All four instances of this defect class (B1, C1, C2) are here.
+    #   OPERAND POSITION — the value NAMES A FILE a tool reads. `grep tok "$p"`, `sed … "$p"`,
+    #                      `awk … "$p"`, `done < "$p"`, `mapfile -t v < "$p"`, `exec 3< "$p"`.
+    #                      A stripped path here is a CORRECT content read; a raw one is the
+    #                      #3400 defect and still reds.
+    #   UNRESOLVED       — anything that cannot be placed in either position. FAIL, loud.
+    #
+    # So DEREFERENCE is the hinge, and it is a property of the CONSTRUCT, not of the value. A
+    # false PASS now requires misclassifying a SUBJECT position as an OPERAND one — a far
+    # smaller surface than "did we enumerate every read form" — and residual error lands loud.
+    #
+    # Value provenance is what the position is then judged against:
+    #   PATH-valued    — assigned from `_ansi_stripped_log`, directly or inline: a filename.
+    #   CONTENT-valued — the log's BYTES: a `while read` variable behind a dereferencing
+    #                    redirect or descriptor, a `$(cat "$stripped")` capture, a
+    #                    `mapfile`-filled array.
+    #   otherwise      — RAW or UNRESOLVED.
 
     def names_stripped_path(expr):
         """Does `expr` evaluate to a path produced by the helper?"""
@@ -460,12 +505,18 @@ for path in paths:
 
         Returns (expr, dereferenced) or (None, reason) when the read lands somewhere this
         scanner cannot follow, or (None, None) when the command takes no input at all."""
-        if EXEC_REDIR.search(unit):
-            return None, ('opens a file descriptor with `exec`; the matching happens at a later '
-                          'read from that descriptor, which this scanner does not follow')
-        if MAPFILE_READ.search(unit):
-            return None, ('reads into an array with `mapfile`/`readarray`; the matching happens '
-                          'wherever that array is used, which this scanner does not follow')
+        m = EXEC_FD_OPEN.search(unit)
+        if m:
+            # OPERAND position: `exec 3< X` reads X. Judge X.
+            return m.group(2), True
+        m = MAPFILE_ASSIGN.search(unit)
+        if m:
+            # OPERAND position: `mapfile -t v < X` reads X. Judge X.
+            return m.group(2), True
+        m = BRACKET_COMPARE.search(unit)
+        if m:
+            # SUBJECT position: the left-hand value IS what the pattern is matched against.
+            return m.group(1), False
         m = re.search(r'<<<\s*(.+?)\s*(?:\||$)', unit)
         if m:
             return m.group(1), False
@@ -508,11 +559,11 @@ for path in paths:
             if v == 'content':
                 return True
             if v == 'path':
-                fail("matches a cargo token against a PATH-VALUED value (%s `%s`): that value is "
-                     "a FILENAME produced by `%s`, so the match runs against one line of path "
-                     "text, finds nothing, and reports clean. Matching a token against a "
-                     "path-valued value is an error in EVERY syntactic position — read the file "
-                     "instead (`< \"$p\"`, `$(cat \"$p\")`, or `$p` as a file operand)"
+                fail("matches a cargo token against a PATH-VALUED value in SUBJECT POSITION "
+                     "(%s `%s`): that value is a FILENAME produced by `%s`, so the match runs "
+                     "against one line of path text, finds nothing, and reports clean. Move the "
+                     "path to OPERAND position, where a tool reads the file (`< \"$p\"`, "
+                     "`$(cat \"$p\")`, or `$p` as a file operand of the parsing command)"
                      % (where, expr.strip(), HELPER))
                 return False
             if v == 'raw':
@@ -548,6 +599,29 @@ for path in paths:
             kind, expr = done_redirect(lines[done_idx])
             where = "the enclosing loop's `done` on line %d" % (done_idx + 1)
             if kind == 'none':
+                # A descriptor-fed loop (`read … <&3` / `read -u 3`) is NOT pipe-fed. Resolve
+                # the fd to the `exec N< X` that opened it and judge X, so a correct
+                # exec-based read is approved and a raw one still reds — for the right reason.
+                fdm = None
+                for k in range(n - 1, -1, -1):
+                    if LOOP_HEADER.search(lines[k]):
+                        fdm = LOOP_FD.search(lines[k])
+                        break
+                    if DONE_LINE.match(lines[k]) or FUNC_DEF.match(lines[k]):
+                        break
+                if fdm:
+                    fd = fdm.group(1) or fdm.group(2)
+                    if fd in fd_stripped:
+                        if fd_stripped[fd]:
+                            continue
+                        fail("reads a RAW source: this loop reads descriptor %s, which `exec` "
+                             "opened on a path not derived from `%s`, so the parse runs "
+                             "against COLOURED cargo text" % (fd, HELPER))
+                        continue
+                    fail("UNRESOLVED: this loop reads descriptor %s, and no `exec %s< <path>` "
+                         "in this file says what it was opened on, so whether it carries a "
+                         "stripped log is unknown" % (fd, fd))
+                    continue
                 fail("the enclosing `while … read` loop (line %d `done`) has NO input REDIRECT, "
                      "so it is PIPE-FED: the loop body runs in a SUBSHELL and its accumulated "
                      "verdict is DISCARDED on exit — the guard passes silently. Use redirection "
@@ -601,6 +675,13 @@ for path in paths:
                  "variable to the place it is matched, so it cannot tell whether that match "
                  "reads a stripped source. Match against a `%s`-derived read at the parse "
                  "itself, or mark the site" % HELPER)
+            continue
+
+        # R4b — the logical command matches against a CONTENT-valued variable or array (e.g. a
+        # `mapfile`-filled array, or a `$(cat "$stripped")` capture). The value already holds
+        # the log's TEXT, so there is nothing to dereference and the match is correct.
+        if var_refs(unit) & content_vars:
+            sites += 1
             continue
 
         # R5 — the logical command matches cargo output but takes no input this scanner can

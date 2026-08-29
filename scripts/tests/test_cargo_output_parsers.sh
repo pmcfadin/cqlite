@@ -990,41 +990,6 @@ else
   bad "B15/C2: the non-loop case over a path-valued variable was not rejected — rc=$lint_rc / '$lint_out'"
 fi
 
-# The two indirections the lead named: the file IS dereferenced, but the MATCH happens at a
-# later read this scanner does not follow. They must land UNRESOLVED — loud — never PASS.
-cat >"$tmp/f_c2_exec_fd.sh" <<'F'
-myguard() {
-  local src
-  src=$(_ansi_stripped_log "$1") || return 1
-  exec 3< "$src"
-  while IFS= read -r line <&3; do
-    case "$line" in *"Running tests/"*) echo hit ;; esac
-  done
-  exec 3<&-
-}
-F
-run_lint "$tmp/f_c2_exec_fd.sh"
-if [ "$lint_rc" -ne 0 ]; then
-  ok "B15: \`exec 3< \"\$src\"\` + a read from fd 3 does NOT pass (the match is at an indirection this scanner does not follow, so it is loud)"
-else
-  bad "B15: the exec-fd shape PASSED — an unfollowed indirection must never look like a clean read"
-fi
-
-cat >"$tmp/f_c2_mapfile.sh" <<'F'
-myguard() {
-  local src
-  src=$(_ansi_stripped_log "$1") || return 1
-  mapfile -t lines < "$src"
-  printf '%s\n' "${lines[@]}" | grep -c "Running tests/"
-}
-F
-run_lint "$tmp/f_c2_mapfile.sh"
-if [ "$lint_rc" -ne 0 ]; then
-  ok "B15: \`mapfile -t lines < \"\$src\"\` then matching the array does NOT pass (same unfollowed-indirection rule)"
-else
-  bad "B15: the mapfile shape PASSED — an unfollowed indirection must never look like a clean read"
-fi
-
 # POSITIVE CONTROLS — the inversion must not turn into reject-everything, and these three are
 # the shapes the SHIPPED gate actually uses. NOTE on `grep <token> "$src"` with no loop: the
 # lead's fixture list asked for this to FAIL or be UNRESOLVED, and it must NOT. `grep PATTERN
@@ -1089,6 +1054,130 @@ if [ "$pv_rc" -ne 0 ] && [ "$lint_rc" -eq 0 ]; then
   ok "B15: the SAME \`case \"\$v\"\` construct reds when \$v is PATH-valued and passes when it is CONTENT-valued — the verdict follows the value's provenance, not the syntax"
 else
   bad "B15: provenance does not decide the verdict (path-valued rc=$pv_rc, content-valued rc=$lint_rc)"
+fi
+
+# ─────────────────────────────────────────────────────────────────────────────────────
+# (B16) SUBJECT POSITION vs OPERAND POSITION — the corrected form of the rule, pinned in
+#       BOTH directions for every shape.
+#
+#       The unqualified rule ("a cargo token matched against a path-valued value is always
+#       an error, in every syntactic position") is FALSE, and taken literally it reds the
+#       gate of record: the shipped `run_arrow_parity_guard_cmd` parse is
+#       `sed -n '…test result:…' "$stripped"` — a stripped path, matched against, and
+#       CORRECT. The distinction is POSITION:
+#         SUBJECT — the value IS matched            -> a path here is ALWAYS the defect
+#         OPERAND — the value NAMES A FILE that is read -> a stripped path here is correct,
+#                                                          a raw one is the #3400 defect
+#
+#       Two of these shapes were previously mis-verdicted, and — worse — mis-DIAGNOSED,
+#       which is how they slipped through: an `exec 3< "$stripped"` + `read <&3` loop was
+#       reported PIPE-FED (it is not; it reads a descriptor) and a `mapfile`-filled array
+#       was reported RAW (it is not; the array holds stripped text). Both fixtures were
+#       asserting only a non-zero exit, so they were GREEN ON A WRONG REASON — which is why
+#       every case below asserts the CAUSE, not just the verdict. Fixing that also surfaced
+#       `exec 3<&-` (a CLOSE) parsing as an OPEN on the file `&-`.
+# ─────────────────────────────────────────────────────────────────────────────────────
+# pos_case <name> <expect: pass|fail> <preamble-line...>  — `%SRC%` is substituted with a
+# stripped path variable in the PASS run and a raw one in the FAIL run, so the two directions
+# differ in EXACTLY the provenance of the source and nothing else.
+pos_case() {
+  local name="$1"; shift
+  local f_ok="$tmp/pos_${name}_stripped.sh" f_raw="$tmp/pos_${name}_raw.sh"
+  {
+    echo 'myguard() {'
+    echo '  local src'
+    echo '  src=$(_ansi_stripped_log "$1") || return 1'
+    printf '%s\n' "$@" | sed 's/%SRC%/src/g'
+    echo '}'
+  } >"$f_ok"
+  {
+    echo 'myguard() {'
+    echo '  local raw="$1"'
+    printf '%s\n' "$@" | sed 's/%SRC%/raw/g'
+    echo '}'
+  } >"$f_raw"
+  run_lint "$f_ok"
+  local ok_rc=$lint_rc ok_out=$lint_out
+  run_lint "$f_raw"
+  if [ "$ok_rc" -eq 0 ] && printf '%s' "$ok_out" | grep -q '^cargo-output-parsers: ' \
+     && [ "$lint_rc" -ne 0 ] && printf '%s' "$lint_out" | grep -q 'RAW source'; then
+    ok "B16 operand '$name': stripped source ACCEPTED, raw source reds as a RAW SOURCE (both directions, differing only in provenance)"
+  else
+    bad "B16 operand '$name': stripped rc=$ok_rc ('$ok_out'); raw rc=$lint_rc ('$lint_out') — expected accept/RAW-red"
+  fi
+}
+
+# ── OPERAND POSITION: a tool reads the file the value names. Correct when stripped. ──
+# This first one IS the shipped arrow-parity-guard shape: if it reds, the gate of record reds.
+pos_case grep_operand      '  grep -c "test result:" "$%SRC%"'
+pos_case sed_operand       '  sed -n "s/^test result: ok\. \([0-9]*\) passed.*/\1/p" "$%SRC%"'
+pos_case awk_operand       '  awk "/Running tests\//{n++} END{print n}" "$%SRC%"'
+pos_case done_redirect_op  '  while IFS= read -r line; do' \
+                           '    case "$line" in *"Running tests/"*) echo hit ;; esac' \
+                           '  done < "$%SRC%"'
+pos_case mapfile_operand   '  mapfile -t lines < "$%SRC%"' \
+                           '  printf "%s\n" "${lines[@]}" | grep -c "Running tests/"'
+pos_case exec_fd_operand   '  exec 3< "$%SRC%"' \
+                           '  while IFS= read -r line <&3; do' \
+                           '    case "$line" in *"Running tests/"*) echo hit ;; esac' \
+                           '  done' \
+                           '  exec 3<&-'
+
+# ── SUBJECT POSITION: the value itself is matched. A path here is ALWAYS the defect. ──
+subj_case() {
+  local name="$1"; shift
+  local f="$tmp/subj_$name.sh"
+  {
+    echo 'myguard() {'
+    echo '  local src'
+    echo '  src=$(_ansi_stripped_log "$1") || return 1'
+    printf '%s\n' "$@"
+    echo '}'
+  } >"$f"
+  run_lint "$f"
+  if [ "$lint_rc" -ne 0 ] && printf '%s' "$lint_out" | grep -q 'SUBJECT POSITION'; then
+    ok "B16 subject '$name': a stripped PATH in SUBJECT position reds, naming the position (the parser would see one line of filename)"
+  else
+    bad "B16 subject '$name': expected a SUBJECT-POSITION red, got rc=$lint_rc / '$lint_out'"
+  fi
+}
+
+subj_case herestring_loop  '  while IFS= read -r line; do' \
+                           '    case "$line" in *"Running tests/"*) echo hit ;; esac' \
+                           '  done <<< "$src"'
+subj_case herestring_grep  '  grep -c "test result:" <<< "$src"'
+subj_case herestring_inline '  grep -c "test result:" <<< "$(_ansi_stripped_log "$1")"'
+subj_case case_subject     '  case "$src" in' \
+                           '    *"Running tests/"*)' \
+                           '      echo hit' \
+                           '      ;;' \
+                           '  esac'
+subj_case bracket_compare  '  if [[ "$src" == *"Running tests/"* ]]; then echo hit; fi'
+
+# A CLOSE is not an OPEN: `exec 3<&-` must not be read as opening the file `&-`, which would
+# overwrite the real open and report a correct read as RAW.
+if grep -q 'exec 3<&-' "$tmp/pos_exec_fd_operand_stripped.sh"; then
+  ok "B16: the exec fixture includes the descriptor CLOSE, so the open-vs-close confusion stays pinned"
+else
+  bad "B16: the exec fixture no longer closes the descriptor — the open/close regression is unpinned"
+fi
+
+# And a genuinely PIPE-FED loop must still be diagnosed as pipe-fed, not swept into the
+# descriptor path: the two have different causes and different fixes.
+cat >"$tmp/pos_still_pipe.sh" <<'F'
+myguard() {
+  local src
+  src=$(_ansi_stripped_log "$1") || return 1
+  cat "$src" | while IFS= read -r line; do
+    case "$line" in *"Running tests/"*) echo hit ;; esac
+  done
+}
+F
+run_lint "$tmp/pos_still_pipe.sh"
+if [ "$lint_rc" -ne 0 ] && printf '%s' "$lint_out" | grep -q 'PIPE-FED'; then
+  ok "B16: a genuinely pipe-fed loop is still diagnosed PIPE-FED (the descriptor resolution did not swallow the subshell cause)"
+else
+  bad "B16: the pipe-fed diagnosis was lost — rc=$lint_rc / '$lint_out'"
 fi
 
 echo
