@@ -38,6 +38,22 @@
 //! seven NAMED structs, one line at a time, and **refuses rather than guesses**:
 //! a struct it cannot find, or one whose body does not close, is a failure.
 //!
+//! # What `CoveredBy` does NOT prove (a deliberate, bounded proxy)
+//!
+//! [`Evidence::CoveredBy`] asserts that the named file exists and declares the
+//! named function. It does **not** — and cannot — assert that that function
+//! actually observes a behavioral difference. A test in another lane could be
+//! weakened to a structural or round-trip assertion, keep its name, and this
+//! guard would still pass.
+//!
+//! That is an accepted limit rather than an oversight: proving "some function in
+//! another crate's test target asserts a behavioral difference" is not
+//! mechanizable from here. It is recorded at the seam because the entire purpose
+//! of this file is honesty about what is verified, and a guard that overstates
+//! its own reach is the same defect class as a decorative knob. The mitigation is
+//! social, not mechanical: `CoveredBy` names a specific function so a reviewer
+//! deleting or weakening it can see what depended on it.
+//!
 //! # Scope boundaries (deliberate)
 //!
 //! * `storage.compaction.*` is owned by #1619, `memory.*` by #1568,
@@ -124,7 +140,9 @@ const KNOBS: &[Knob] = &[
         evidence: Evidence::Reserved(
             "cfg(target_arch = \"wasm32\") only; WasmConfig was NOT in #1696's census and \
              M6 (WASM bindings) has not landed, so nothing on any supported target reads \
-             it. Owning follow-up: the WasmConfig audit filed off #1696.",
+             it. Owned by the M6 (WASM bindings) milestone; there is deliberately NO \
+             follow-up issue, because a target-gated struct for an unlanded milestone is \
+             not a decorative knob.",
         ),
     },
     // ---- StorageConfig ----
