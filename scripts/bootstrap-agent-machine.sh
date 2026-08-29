@@ -131,7 +131,28 @@ have() { command -v "$1" >/dev/null 2>&1; }
 # the one where two of the three hang scenarios live (a locked osxkeychain, a Git
 # Credential Manager browser flow). Resolve both, and degrade visibly (unbounded) only
 # when neither exists.
-TIMEOUT_BIN="$(command -v timeout 2>/dev/null || command -v gtimeout 2>/dev/null || true)"
+# Resolution PROBES the candidate rather than trusting it (#3369 review). --kill-after is
+# a GNU coreutils flag: BusyBox and older implementations REJECT it, and a non-GNU
+# `timeout` earlier on PATH than a GNU `gtimeout` would be selected by a
+# first-match-wins lookup. A selected binary that rejects the flag makes EVERY bounded
+# call fail — board access, credential probe, push probe — so --strict would then reject
+# a perfectly healthy machine: the bound-hardening would have inverted this change's
+# purpose. So each candidate is tried WITH the flag; a candidate that supports it wins
+# even if it is second, and a candidate that does not is still usable with the bound
+# degraded to SIGTERM-only (the pre-hardening behaviour, and far better than every
+# bounded call failing). The probe asks about BEHAVIOUR; nothing here sniffs a vendor.
+TIMEOUT_BIN=""
+TIMEOUT_KILL_AFTER=0
+for _tb_name in timeout gtimeout; do
+  _tb_path="$(command -v "$_tb_name" 2>/dev/null || true)"
+  [ -n "$_tb_path" ] || continue
+  if "$_tb_path" --kill-after=1 1 true >/dev/null 2>&1; then
+    TIMEOUT_BIN="$_tb_path"; TIMEOUT_KILL_AFTER=1; break
+  fi
+  # Usable, but without the escalation. Keep it as the fallback and keep looking.
+  [ -n "$TIMEOUT_BIN" ] || TIMEOUT_BIN="$_tb_path"
+done
+unset _tb_name _tb_path
 # bounded <secs> <cmd...> — run <cmd...> under the resolved timeout binary if there is
 # one, else run it directly. Use `env VAR=... cmd` when the call needs env prefixes.
 #
@@ -147,7 +168,13 @@ TIMEOUT_BIN="$(command -v timeout 2>/dev/null || command -v gtimeout 2>/dev/null
 BOUNDED_KILL_GRACE=5
 bounded() {
   local secs="$1"; shift
-  if [ -n "$TIMEOUT_BIN" ]; then "$TIMEOUT_BIN" --kill-after="$BOUNDED_KILL_GRACE" "$secs" "$@"; else "$@"; fi
+  if [ -n "$TIMEOUT_BIN" ] && [ "$TIMEOUT_KILL_AFTER" = 1 ]; then
+    "$TIMEOUT_BIN" --kill-after="$BOUNDED_KILL_GRACE" "$secs" "$@"
+  elif [ -n "$TIMEOUT_BIN" ]; then
+    "$TIMEOUT_BIN" "$secs" "$@"
+  else
+    "$@"
+  fi
 }
 ok()   { printf '  \033[32m[ok]\033[0m   %s\n' "$1"; }
 warn() { printf '  \033[33m[warn]\033[0m %s\n' "$1"; WARNINGS=$((WARNINGS + 1)); }
@@ -1377,6 +1404,14 @@ fi
 # PUSH_PROBE_REMOTE is resolved ONCE above §3b — the credential half and this probe MUST
 # address the same remote (see the note there).
 CLAIM_SH="$REPO_ROOT/scripts/flow/claim.sh"
+# How many destinations `git push $PUSH_PROBE_REMOTE` would write to. `--all` is what
+# distinguishes "the first push URL" (what the classification above reads) from "every
+# push URL" (what a push actually hits).
+PUSH_PROBE_URL_COUNT=0
+if have git; then
+  PUSH_PROBE_URL_COUNT=$(git -C "$REPO_ROOT" remote get-url --push --all "$PUSH_PROBE_REMOTE" 2>/dev/null | grep -c . || true)
+  PUSH_PROBE_URL_COUNT=${PUSH_PROBE_URL_COUNT:-0}
+fi
 PUSH_PROBE_BOUND=60   # 3 network round trips (push, ls-remote, delete) + slack
 
 # git_push_probe_stderr_is_auth <text> — mirrors git_stderr_is_auth in
@@ -1429,6 +1464,10 @@ push_probe_fix_advice() {
 }
 
 hdr "git PUSH capability (issue #3369)"
+if [ -n "$TIMEOUT_BIN" ] && [ "$TIMEOUT_KILL_AFTER" = 0 ]; then
+  info "note: $TIMEOUT_BIN does not accept --kill-after, so every bound here degrades to SIGTERM-only —"
+  info "      a child that ignores SIGTERM can still outlive its bound. Install GNU coreutils for the hard bound."
+fi
 if [ "$SKIP_PUSH_PROBE" = 1 ]; then
   # Loud and NON-PASSING by construction: an opt-out that returned `ok` would be a
   # switch for buying a vacuous green, which is the whole failure mode above.
@@ -1440,6 +1479,16 @@ elif [ ! -f "$CLAIM_SH" ]; then
   warn "git-push: UNMEASURED (no scripts/flow/claim.sh under $REPO_ROOT — the sanctioned push probe is not in this checkout)"
 elif ! git -C "$REPO_ROOT" remote get-url "$PUSH_PROBE_REMOTE" >/dev/null 2>&1; then
   warn "git-push: UNMEASURED (no '$PUSH_PROBE_REMOTE' remote in $REPO_ROOT — nothing to push to)"
+elif [ "$PUSH_PROBE_URL_COUNT" -gt 1 ]; then
+  # A remote may carry SEVERAL pushurls, and `git push <remote>` pushes to EVERY one, so
+  # the probe would mutate N destinations while `get-url --push` describes only the first
+  # (#3369 review). It could create the ref on A, fail on B, and return having cleaned
+  # neither — an uninterpretable result from a MUTATING measurement. This change's own
+  # discipline says do not run a measurement you cannot interpret, so it refuses instead
+  # of enumerating destinations or growing per-destination credential logic. UNMEASURED,
+  # so the machine is never certified on the strength of it.
+  warn "git-push: UNMEASURED (remote '$PUSH_PROBE_REMOTE' has $PUSH_PROBE_URL_COUNT push URLs — refusing to run a MUTATING probe against multiple destinations)"
+  info "verify by hand against one destination:  CLAIM_REMOTE=<single-url-remote> bash scripts/flow/claim.sh smoke"
 elif [ -z "$TIMEOUT_BIN" ]; then
   # Refuse rather than run unbounded: an unbounded network push during boot can wedge
   # the onboarder indefinitely, and reporting `ok` for a probe we declined to run is

@@ -1305,6 +1305,62 @@ else
   push_plain "$out7pn" | grep -E 'git-push|fix:|ssh' | head -5
 fi
 
+# 7p-o. A `timeout` THAT REJECTS --kill-after MUST NOT BREAK EVERY BOUND (#3369 review).
+#   --kill-after is GNU coreutils; BusyBox and older implementations reject it, and a
+#   non-GNU `timeout` earlier on PATH than a GNU `gtimeout` would win a first-match-wins
+#   lookup. If the selected binary rejects the flag, EVERY bounded call fails — board
+#   probe, credential probe, push probe — and --strict then rejects a healthy machine.
+#   The stub rejects the flag and otherwise delegates to the real binary, so this
+#   measures the SELECTION logic, not a crippled timeout.
+if [ -n "$TIMEOUT_BIN_TEST" ]; then
+  bare7po="$tmp/bare7po.git"; mk_push_bare "$bare7po"
+  repo7po="$tmp/repo7po"; mk_push_repo "$repo7po" "file://$bare7po"
+  bin7po="$tmp/bin7po"; mk_push_bin "$bin7po"
+  mk_stub "$bin7po" timeout 'for a in "$@"; do case "$a" in --kill-after*)
+      echo "timeout: unrecognized option '"'"'$a'"'"'" >&2; exit 125 ;;
+    esac; done
+exec '"$TIMEOUT_BIN_TEST"' "$@"'
+  gc7po="$tmp/gc7po"; : >"$gc7po"
+  run_push "$repo7po" "$bin7po" "$gc7po" --strict; out7po=$push_out; rc7po=$push_rc
+  # The property is that BOUNDED CALLS STILL WORK and the degradation is stated — not
+  # that the whole run stays green. A flag-rejecting timeout also makes the notify
+  # self-test SKIP, which is PRE-EXISTING behaviour (that check has required
+  # --kill-after since before this change), so asserting rc=0 here would be asserting
+  # something about an unrelated section.
+  if printf '%s' "$out7po" | grep -q '\[ok\].*git-push: VERIFIED' \
+     && printf '%s' "$out7po" | grep -q 'does not accept --kill-after' \
+     && ! printf '%s' "$out7po" | grep -q '\[warn\].*git-push'; then
+    ok "push: a timeout that rejects --kill-after still bounds (SIGTERM-only) — the probe VERIFIES and the degradation is STATED"
+  else
+    bad "push: a flag-rejecting timeout broke the bounded calls (rc=$rc7po)"
+    push_plain "$out7po" | grep -E 'git-push|kill-after' | head -4
+  fi
+else
+  echo "skip - push: --kill-after fallback case needs a real timeout/gtimeout to delegate to"
+fi
+
+# 7p-p. A REMOTE WITH SEVERAL PUSH URLs (#3369 review). `git push <remote>` writes to
+#   EVERY configured pushurl while `get-url --push` names only the first, so the probe
+#   would mutate N destinations and could create the ref on A, fail on B and clean
+#   neither. It refuses instead: UNMEASURED, nothing pushed anywhere, green withheld.
+bare7pp1="$tmp/bare7pp1.git"; mk_push_bare "$bare7pp1"
+bare7pp2="$tmp/bare7pp2.git"; mk_push_bare "$bare7pp2"
+repo7pp="$tmp/repo7pp"; mk_push_repo "$repo7pp" "file://$bare7pp1"
+git -C "$repo7pp" remote set-url --add --push origin "file://$bare7pp1" >/dev/null 2>&1
+git -C "$repo7pp" remote set-url --add --push origin "file://$bare7pp2" >/dev/null 2>&1
+bin7pp="$tmp/bin7pp"; mk_push_bin "$bin7pp"
+gc7pp="$tmp/gc7pp"; : >"$gc7pp"
+run_push "$repo7pp" "$bin7pp" "$gc7pp" --strict; out7pp=$push_out; rc7pp=$push_rc
+refs7pp=$(( $(git ls-remote "$bare7pp1" 'refs/claims/*' 2>/dev/null | wc -l) + $(git ls-remote "$bare7pp2" 'refs/claims/*' 2>/dev/null | wc -l) ))
+if printf '%s' "$out7pp" | grep -q '\[warn\].*git-push: UNMEASURED.*2 push URLs' \
+   && ! printf '%s' "$out7pp" | grep -q '\[ok\].*git-push' \
+   && [ "$refs7pp" -eq 0 ] && ! push_green "$out7pp" && [ "$rc7pp" -ne 0 ]; then
+  ok "push: a multi-push-URL remote is UNMEASURED and NOTHING is pushed to either destination (green withheld)"
+else
+  bad "push: multi-destination remote was probed anyway (refs created=$refs7pp rc=$rc7pp)"
+  push_verdict "$out7pp"
+fi
+
 # 7p-g. `--strict` AND "All checks green." MUST NOT DIVERGE — asserted in BOTH
 #   directions. They are two channels for ONE fact: the green string is printed iff
 #   WARNINGS is 0, and --strict exits 0 iff WARNINGS is 0. A reviewer proposed keying
