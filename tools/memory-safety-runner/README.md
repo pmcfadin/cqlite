@@ -35,6 +35,15 @@ Wraps three external memory-safety checkers behind one `MemorySafetyRunner` type
 (`run_miri_tests`, `run_valgrind_tests`, `run_asan_tests`, `run_stress_tests`,
 `run_all_available_tests`, `print_available_tools`). Std-only, no dependencies.
 
+## Its tests run only when you touch it
+
+No CI job or gate component runs workspace-wide tests, so this crate's own unit tests do not
+execute on an unrelated change — but the agent gate's `--lite` blast-radius maps a touched path to
+its package, so **editing anything in this directory (this README included) makes `--lite` run
+`cargo test -p memory-safety-runner --lib`**. Expect latent failures the first time that happens: on #1716,
+touching `tools/format-validator/README.md` ran that crate's tests for the first time and one had
+never been correct. Run them yourself first with `cargo test -p memory-safety-runner`.
+
 ## Before you delete it
 
 Retained deliberately, and **not** wired into the gate on purpose. Issue #1716 allows wiring a tool

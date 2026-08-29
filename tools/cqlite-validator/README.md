@@ -27,6 +27,15 @@ and `dir <path>` (walk a Cassandra data directory). It predates the `cqlite` CLI
 surface. The archived quick-start that used to drive it is
 `docs/archive/user-guides-superseded/UAT_QUICK_START.md` — archived, not live.
 
+## Its tests run only when you touch it
+
+No CI job or gate component runs workspace-wide tests, so this crate's own unit tests do not
+execute on an unrelated change — but the agent gate's `--lite` blast-radius maps a touched path to
+its package, so **editing anything in this directory (this README included) makes `--lite` run
+`cargo test -p cqlite-validator --lib`**. Expect latent failures the first time that happens: on #1716,
+touching `tools/format-validator/README.md` ran that crate's tests for the first time and one had
+never been correct. Run them yourself first with `cargo test -p cqlite-validator`.
+
 ## Before you delete it
 
 Retained deliberately: issue #1716 permits deletion only for a tool that **duplicates a live gate

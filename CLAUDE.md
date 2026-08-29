@@ -229,10 +229,18 @@ VIRTUAL workspace). Verified: `cargo tree --depth 0` at the root resolves to `cq
 else. So adding an explicit `default-members` list would **expand** the bare build from 1 package to
 14 — the opposite of the intent, and the trap #1716 was originally written around ("these crates are
 compiled by every workspace build" was false). The `tools/` crates are compiled only by an explicit
-`--workspace`/`--all-targets` (the gate's clippy) or `-p`. Two corollaries: those crates stay fully
-linted under `-D warnings` no matter their disposition; and their own unit tests are run by **no**
-automated lane and never were (no CI job or gate component runs workspace-wide tests) — run them
-with `cargo test -p <name>`.
+`--workspace`/`--all-targets` (the gate's clippy) or `-p`. So those crates stay fully linted under
+`-D warnings` no matter their disposition.
+
+**Their unit tests, though, run ONLY when your diff touches their package (#1716).** No CI job and
+no gate component runs workspace-wide tests, so an untouched `tools/` crate's tests never execute —
+but `--lite`'s blast-radius maps a touched path to its package and runs that package's `--lib`
+tests. Consequence, found the hard way on #1716: editing only `tools/format-validator/README.md`
+made `--lite` run that crate's tests **for the first time**, and one failed —
+`test_hex_dump_formatting` asserted an unseparated `"48656c6c6f"` against a `hexdump -C`-style
+formatter that emits `48 65 6c 6c 6f`, an expectation that could never hold for any input. **Expect
+latent failures the first time you touch a long-unwired crate**; they are pre-existing, not yours,
+but they are yours to fix because your diff is what runs them.
 
 **Planned (M6)**: `bindings/wasm/`. Full source map (parsers, writers, query engine, bindings
 layout, binding structure trees):

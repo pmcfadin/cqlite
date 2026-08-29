@@ -51,6 +51,25 @@ that within the lib; unrelated to #1716 and left alone.)
 - **`deviation-detector`** — flags deviations/anomalies against the expected Cassandra 5+ layout.
 - **`benchmark-validator`** — benchmarks the validation operations themselves.
 
+## Its tests run only when you touch it — and one was wrong for years
+
+No CI job or gate component runs workspace-wide tests, so this crate's unit tests did not execute on
+unrelated changes. But the agent gate's `--lite` blast-radius maps a touched path to its package, so
+**editing anything in this directory (this README included) makes `--lite` run
+`cargo test -p format-validator --lib`**.
+
+On #1716 that happened for the first time and `utils::tests::test_hex_dump_formatting` **failed**:
+it asserted `dump.contains("48656c6c6f")`, an unseparated hex run that `format_hex_dump` can never
+emit for any input — it produces a conventional `hexdump -C` layout:
+
+```text
+00000000: 48 65 6c 6c 6f 2c 20 57  6f 72 6c 64 21 20 54 68  |Hello, World! Th|
+```
+
+The **test** was wrong, not the formatter, so the expectation was corrected (and tightened to also
+pin the address prefix and the post-gap half of the line). Run `cargo test -p format-validator`
+before touching anything here.
+
 ## Before you delete anything
 
 The library is wired — deleting it breaks the gate. The binaries are retained deliberately: issue

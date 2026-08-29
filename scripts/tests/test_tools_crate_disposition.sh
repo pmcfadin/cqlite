@@ -45,6 +45,17 @@ ws0-corpus-gen"
 
 # Invoked by NO workflow, NO script and NO live doc (census: issue #1716).
 # Each MUST carry a README.md carrying the label marker below.
+#
+# "Unwired" here is a statement about what anything RUNS, which is not the same as
+# what anything DEPENDS ON, and tools/format-validator is the case that separates
+# them: nothing invokes any of its four binaries, so it belongs on this list — yet
+# its LIBRARY is a path dependency of tests/format-compatibility (the gate's
+# `format-compat` component). So membership here means "no CI workflow or script
+# runs this crate", never "this crate is unused", and it is emphatically NOT a
+# licence to delete or to workspace-`exclude`: excluding format-validator breaks
+# that gate component, scripts/tests/test_agent_gate_summary.sh (which uses its
+# lib.rs as the owners-resolution fixture) and xtask/src/oom_audit/scope.rs. Each
+# README states its own crate's split.
 UNWIRED_TOOLS="cqlite-validator
 format-validator
 memory-safety-runner"
