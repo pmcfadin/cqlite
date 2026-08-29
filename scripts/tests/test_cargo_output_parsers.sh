@@ -554,7 +554,7 @@ STUB
   # external binary and would bypass the stub, silently turning both cases above into real
   # cargo builds. That is why this assert pins the exact spelling.
   if grep -Fq -- 'CARGO_TERM_COLOR=never cargo test --package cqlite-core --features arrow' "$tmp/arrow_guard.sh"; then
-    ok "AC4 part 2: the arrow-parity-guard cargo invocation carries the CARGO_TERM_COLOR=never belt (and the two cases above, run against a stub cargo the prefix cannot reach, show the STRIP is what actually carries it)"
+    ok "AC4 part 2: the arrow-parity-guard cargo invocation carries the CARGO_TERM_COLOR=never belt (and the two cases above, run against a stub cargo that IGNORES CARGO_TERM_COLOR, show the STRIP is what actually carries it)"
   else
     bad "AC4 part 2: the arrow-parity-guard cargo invocation is missing the CARGO_TERM_COLOR=never belt"
   fi
