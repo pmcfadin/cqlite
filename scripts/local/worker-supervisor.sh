@@ -649,6 +649,16 @@ clear_claim() {
   local issue="$CLAIM_STAMPED_ISSUE"
   # May be a `p<pid>` placeholder as well as an issue number; both are real refs to clear.
   case "$issue" in '' | p) issue="" ;; esac
+  # AN ENDGAME IN FLIGHT KEEPS THE REF, AND A PENDING AUTO-MERGE PR IS ONE (roborev round 28, Medium;
+  # owner ruling (b) on #2499 semantics). `concluded` reflects only the LATEST iteration, so after a
+  # pending-automerge finalize a subsequent `no-work`, merged finalize or owner park could set it to 1
+  # and the shutdown would delete this lane's ref while an EARLIER auto-merge PR is still open. Ruling
+  # (b) says exactly that state must keep its ref — so "concluded" is necessary and not sufficient:
+  # there must also be nothing pending.
+  if [[ -n "$issue" && -n "${PENDING_PR_LIST// /}" ]]; then
+    log "claim clear DECLINED: lane $issue kept because an auto-merge PR is still pending — an endgame in flight stays owned for adoption (#2499)"
+    return 0
+  fi
   if [[ -n "$issue" && "$concluded" != 1 ]]; then
     log "claim clear DECLINED: the work on lane $issue has not concluded (no finalize, no owner park), so this ref is the only signal that the lane held it — left for dead-lanes to report and the reaper to collect (#2499)"
     return 0

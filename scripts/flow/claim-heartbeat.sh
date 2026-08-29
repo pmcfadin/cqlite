@@ -1022,13 +1022,39 @@ cmd_should_reap() {
   # still running even if a beat is overdue — never reap it.
   local this_machine
   this_machine="${HEARTBEAT_MACHINE:-$(hostname -s)}"
-  if [ "$machine" = "$this_machine" ] && [ -n "$pid" ]; then
-    if kill -0 "$pid" 2>/dev/null; then
-      note "keep ${ref}: local pid ${pid} is still alive"
+  # THE THREE-VALUED PROBE, AND A LOCAL CLAIM WITH NO USABLE PID IS NOT REAPABLE (roborev round 28,
+  # Medium). Two defects in one block, both reaping a LIVE lane:
+  #
+  #   * `kill -0` is TWO-valued here, so every failure read as "dead". But EPERM means the process
+  #     EXISTS and simply is not ours — `process_presence` decodes that, and `dead-lanes` has used it
+  #     since round 10. `should-reap` is the caller that never got it: guard-width again, with the
+  #     harm pointing at the worst possible outcome.
+  #   * when `pid` was empty — absent, or malformed and now correctly rejected by the round-25/26
+  #     parsing — the `[ -n "$pid" ]` guard was FALSE, so a LOCAL claim fell through to the
+  #     foreign-machine branch and was reaped with NO pid check at all, under a message that said
+  #     "pid not checkable". The doctrine's predicate is age AND no-open-PR AND pid-dead-IF-LOCAL;
+  #     an unsatisfiable third clause must fail the conjunction, not vanish from it.
+  local this_machine
+  this_machine="${HEARTBEAT_MACHINE:-$(hostname -s)}"
+  if [ "$machine" = "$this_machine" ]; then
+    if [ -z "$pid" ]; then
+      note "keep ${ref}: LOCAL claim with no usable pid, so 'pid-dead-if-local' cannot be established — an unsatisfiable clause fails the predicate rather than dropping out of it"
       return 1
     fi
-    note "reap ${ref}: age ${age}s > ${threshold}s, no open PR, local pid ${pid} is dead"
-    return 0
+    case "$(process_presence "$pid")" in
+      absent)
+        note "reap ${ref}: age ${age}s > ${threshold}s, no open PR, local pid ${pid} CONFIRMED absent"
+        return 0
+        ;;
+      present)
+        note "keep ${ref}: local pid ${pid} is still alive"
+        return 1
+        ;;
+      *)
+        note "keep ${ref}: local pid ${pid} presence is UNKNOWN (denied or unmeasurable) — not proof it is gone"
+        return 1
+        ;;
+    esac
   fi
 
   note "reap ${ref}: age ${age}s > ${threshold}s, no open PR (foreign machine — pid not checkable)"
