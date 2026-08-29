@@ -313,6 +313,7 @@ pub fn streaming_span(traceparent: Option<&str>) -> tracing::Span {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::BTreeSet;
 
     #[test]
     fn options_default_to_env_config() {
@@ -435,5 +436,60 @@ mod tests {
         let second = GUARD.get().map(|g| g as *const _);
         assert!(first.is_some(), "guard installed after first init_once");
         assert_eq!(first, second, "second init_once must not replace the guard");
+    }
+
+    /// Issue #1452: `KNOWN_OTEL_KEYS` must not become "one binding's private
+    /// constant with a new address". The Python binding consumes it as its
+    /// allowlist; this is the Node binding's ENFORCING consumer — the
+    /// snake_case field names of [`OtelOptions`] and the shared list must be the
+    /// same set, in BOTH directions.
+    ///
+    /// The field names are read from THIS FILE's source rather than hand-listed,
+    /// because a hand-listed copy would be a third spelling of the same fact and
+    /// would not fail when a field is added. (Same technique as `cqlite-core`'s
+    /// `classify()` arm parser.) Parsing is fail-closed: an unfindable struct or
+    /// an empty field set fails rather than passing vacuously.
+    #[test]
+    fn otel_options_fields_and_shared_key_list_are_the_same_set() {
+        const SOURCE: &str = include_str!("observability.rs");
+        // Split so this needle cannot match its own line in the source.
+        let opener = concat!("pub struct ", "OtelOptions {");
+        let body_start = SOURCE
+            .find(opener)
+            .map(|i| i + opener.len())
+            .expect("the OtelOptions struct declaration must be present");
+        let body_end = SOURCE[body_start..]
+            .find("\n}")
+            .map(|i| body_start + i)
+            .expect("the OtelOptions struct declaration must be closed");
+
+        let mut fields: BTreeSet<String> = BTreeSet::new();
+        for line in SOURCE[body_start..body_end].lines() {
+            let line = line.trim();
+            // Field declarations only: `pub <name>: Option<...>,`. Doc comments
+            // and `#[napi(...)]` attributes are skipped.
+            if let Some(rest) = line.strip_prefix("pub ") {
+                if let Some((name, _)) = rest.split_once(':') {
+                    fields.insert(name.trim().to_string());
+                }
+            }
+        }
+        assert!(
+            !fields.is_empty(),
+            "no OtelOptions fields were parsed — the assertion would pass vacuously"
+        );
+
+        let shared: BTreeSet<String> = cqlite_ffi_common::KNOWN_OTEL_KEYS
+            .iter()
+            .map(|k| (*k).to_string())
+            .collect();
+        let missing_from_list: Vec<&String> = fields.difference(&shared).collect();
+        let missing_from_struct: Vec<&String> = shared.difference(&fields).collect();
+        assert!(
+            missing_from_list.is_empty() && missing_from_struct.is_empty(),
+            "OtelOptions fields and cqlite_ffi_common::KNOWN_OTEL_KEYS must be the \
+             same set: in the struct but not the list {missing_from_list:?}; in the \
+             list but not the struct {missing_from_struct:?}"
+        );
     }
 }

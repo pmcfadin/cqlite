@@ -28,6 +28,9 @@ mod refresh;
 mod runtime;
 mod streaming;
 mod value;
+// Test-support: the committed cross-binding vector table, rendered through this
+// binding's production paths (issue #1452).
+mod vectors;
 
 pub use database::ColumnInfo;
 pub use database::Database;

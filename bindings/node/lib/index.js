@@ -138,10 +138,35 @@ function _errorContractNodeCodes() {
   return nativeBinding.errorContractNodeCodes();
 }
 
+/**
+ * Test-support: every committed cross-binding vector (issue #1452), rendered
+ * through this binding's PRODUCTION conversion path.
+ *
+ * The tables live in `cqlite_ffi_common::vectors` and the Python binding's twin
+ * surface (`cqlite._ffi_common_render_vectors`) reads the same ones, so a
+ * divergence between the bindings — or a re-introduced private implementation in
+ * either — fails BOTH suites. See `__test__/shared-vectors.test.js`.
+ *
+ * Not part of the stable public API — the leading underscore marks it internal
+ * test support.
+ *
+ * @private
+ * @returns {Array<{cqlType: string, name: string, kind: string, expected: string,
+ *                  outcome: string, actual: string, scale: number, bytes: Buffer}>}
+ */
+function _ffiCommonRenderVectors() {
+  try {
+    return nativeBinding.ffiCommonRenderVectors();
+  } catch (error) {
+    throw enhanceError(error);
+  }
+}
+
 module.exports = {
   Database,
   PreparedStatement,
   version,
   _errorContractProbe,
   _errorContractNodeCodes,
+  _ffiCommonRenderVectors,
 };
