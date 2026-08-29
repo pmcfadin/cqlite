@@ -4028,6 +4028,28 @@ else
       bad "1699-cfggate-multipath: the child did not resolve through its #[path] — the balance rule swallowed the path attribute, shrinking the source set"
     fi
 
+    # A DELIMITER INSIDE A STRING LITERAL (roborev job 101, Medium). `doc = "]"` closed the
+    # cluster EARLY, so the real closing line cleared the pending cfg and the child read as
+    # UNCONDITIONAL — it HID a gap. The comment at that seam had claimed the skew could only ever
+    # report a gap that was not there; true of an unmatched `[`, false of an unmatched `]`.
+    printf '#[cfg(all(\n    feature = "state_machine",\n    doc = "]"\n))]\nmod gated_child;\n' > "$cg_root/tests/strbracket.rs"
+    _rust_module_closure "$cg_root/tests/strbracket.rs" >/dev/null 2>"$tmp/1699-cg-strb.txt"
+    if grep -q '^CFG-GATED-MOD gated_child ' "$tmp/1699-cg-strb.txt"; then
+      ok "1699-cfggate-strdelim: a `]` inside an attribute string literal does not close the cluster early"
+    else
+      bad "1699-cfggate-strdelim: a delimiter inside a string literal closed the cluster early, so the gated child read as unconditional and the gap was HIDDEN"
+    fi
+    # A shape the strip CANNOT handle must be DECLARED, not resolved. Carrying an UNCLASSIFIED
+    # marker forward did NOT work — the cluster-end rule wiped it before any `mod` saw it, so the
+    # code meant to declare the unknown hid it instead. Declared at the point of detection now.
+    printf '#[cfg(all(\n    feature = "state_machine",\n    doc = r#"weird ) ] stuff"#\n))]\nmod gated_child;\n' > "$cg_root/tests/rawstr.rs"
+    _rust_module_closure "$cg_root/tests/rawstr.rs" >/dev/null 2>"$tmp/1699-cg-raw.txt"
+    if grep -q 'UNCLASSIFIED' "$tmp/1699-cg-raw.txt"; then
+      ok "1699-cfggate-unmodelled: a raw-string attribute shape is DECLARED unclassified, not silently resolved"
+    else
+      bad "1699-cfggate-unmodelled: an unmodelled string shape produced NO report — the set of Rust attribute shapes this scan does not model is OPEN, so silence there is a hidden gap"
+    fi
+
     _rust_module_closure "$cg_root/tests/ungated.rs" >/dev/null 2>"$tmp/1699-cg-e3.txt"
     if [ -s "$tmp/1699-cg-e3.txt" ]; then
       bad "1699-cfggate-quiet: an UNGATED module tree produced stderr output — the caller FAILs on any stderr, so this reds the lane on ordinary code: $(cat "$tmp/1699-cg-e3.txt")"
@@ -4138,7 +4160,7 @@ else
   bad "1699-cfgsite-singleline: single-line attribute rendered as [$(cs_render "$cs_single")] — a false truncation marker on complete input"
 fi
 
-ASSERT_FLOOR=355
+ASSERT_FLOOR=360
 if [ "$PASS" -lt "$ASSERT_FLOOR" ]; then
   echo "FAIL - assert-floor: only $PASS assertions ran, floor is $ASSERT_FLOOR. Sections are being SKIPPED or dying silently (an extraction that broke, a subshell aborting under set -u), and 'failed: 0' over a shrunken subject set is exactly the vacuous pass this suite tests for."
   FAIL=$((FAIL + 1))

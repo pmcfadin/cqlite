@@ -6503,6 +6503,27 @@ EOF
 # attributed to a following item, and they are how a whole test file gets gated.
 #
 # Emits one TAB-separated record per site: <site|skip> <TAB> <line no> <TAB> <missing,features>
+# ============================================================================================
+# STATED LIMIT OF THIS SCANNER — read this before adding a shape to it (issue #1699, #3472).
+#
+# THIS IS AN OCCURRENCE REPORT, NOT A PARSER, AND ITS COVERAGE IS DELIBERATELY INCOMPLETE.
+# It reports the Rust attribute and module shapes it RECOGNISES. The set of shapes it does NOT
+# model is OPEN — Rust attribute and module syntax is defined by rustc, not here — so no amount
+# of iteration finishes it. Twelve review findings across this branch were all one family: a
+# further shape the scanner did not model. Rounds 41 and 42 already made the correct structural
+# move (real trivia state; descope the crate-gate scanner to an occurrence report) and the
+# findings continued, which is the evidence that the surface is unbounded rather than merely
+# large.
+#
+# THE PROPERTY THAT MAKES IT SHIPPABLE ANYWAY, and the only one you may rely on: an unrecognised
+# shape is reported as UNCLASSIFIED, never as ABSENT. A missed shape therefore costs NOISE (an
+# unattributable entry a human must read) and never BLINDNESS (a clean zero over gated code).
+# Every change here must preserve that direction. If you cannot tell, say so — do not resolve.
+#
+# WHAT NOT TO DO: do not add a thirteenth shape and call the family closed. If correctness rather
+# than advice is ever required of this scan, the answer is syntax-aware tooling or deleting the
+# scanning half — not another pattern. #3472 carries the family and the reasoning.
+# ============================================================================================
 _legacy_coreq_sites() { # _legacy_coreq_sites <file> <enabled-feature-list>
   awk -v LH="legacy-heuristics" -v ENABLED=" $2 " '
     function countch(str, ch,   n, i) {
@@ -6510,6 +6531,16 @@ _legacy_coreq_sites() { # _legacy_coreq_sites <file> <enabled-feature-list>
       for (i = 1; i <= length(str); i++) if (substr(str, i, 1) == ch) n++
       return n
     }
+    # A DELIMITER INSIDE A STRING LITERAL IS TEXT, NOT STRUCTURE (roborev job 101, Medium).
+    # A stacked multiline attribute containing `")"` terminated collection early, split the
+    # cluster, and dropped a later co-required feature — so the census reported ZERO gaps while
+    # gated code was compiled out. That is the census under-reporting, i.e. the SILENT direction.
+    # Quoted spans are removed before counting. Where the removal itself cannot be trusted — an
+    # escaped quote or a raw string, both shapes this scan does not model — the CLUSTER is marked
+    # UNCLASSIFIED via the existing path rather than counted on a guess. Declaring the unknown is
+    # the whole reason cl_unclass exists; this is one more producer of it, not a new mechanism.
+    function nostr(str) { gsub(/"[^"\\]*"/, "", str); return str }
+    function litok(str) { return (str !~ /\\"/ && str !~ /r#"/ && nostr(str) !~ /"/) }
     function emit(   kind) {
       if (!(cl_has_lh && cl_miss != "")) return
       kind = cl_unclass ? "skip" : "site"
@@ -6538,7 +6569,8 @@ _legacy_coreq_sites() { # _legacy_coreq_sites <file> <enabled-feature-list>
       sub(/^[ \t]+/, "", t)
       if (collecting) {
         buf = buf " " t
-        depth += countch(t, "(") - countch(t, ")")
+        if (!litok(t)) cl_unclass = 1
+        depth += countch(nostr(t), "(") - countch(nostr(t), ")")
         if (depth <= 0) {
           collecting = 0
           handle_attr(buf)
@@ -6558,7 +6590,8 @@ _legacy_coreq_sites() { # _legacy_coreq_sites <file> <enabled-feature-list>
         # single site, under-counting sites and merging their feature lists — caught by the
         # fixture below rather than by review.
         inner = (t ~ /^#!\[/)
-        depth = countch(t, "(") - countch(t, ")")
+        if (!litok(t)) cl_unclass = 1
+        depth = countch(nostr(t), "(") - countch(nostr(t), ")")
         if (depth > 0) { collecting = 1; collecting_inner = inner }
         else {
           handle_attr(buf)
@@ -6810,6 +6843,27 @@ for p in d.get("packages", []):
 # consumer of an incomplete set fails in the SILENT direction. Measured on this corpus:
 # 0 unresolved across all 364 cqlite-core test targets, so failing closed costs nothing
 # today and stays loud if a layout appears that this does not model.
+# ============================================================================================
+# STATED LIMIT OF THIS SCANNER — read this before adding a shape to it (issue #1699, #3472).
+#
+# THIS IS AN OCCURRENCE REPORT, NOT A PARSER, AND ITS COVERAGE IS DELIBERATELY INCOMPLETE.
+# It reports the Rust attribute and module shapes it RECOGNISES. The set of shapes it does NOT
+# model is OPEN — Rust attribute and module syntax is defined by rustc, not here — so no amount
+# of iteration finishes it. Twelve review findings across this branch were all one family: a
+# further shape the scanner did not model. Rounds 41 and 42 already made the correct structural
+# move (real trivia state; descope the crate-gate scanner to an occurrence report) and the
+# findings continued, which is the evidence that the surface is unbounded rather than merely
+# large.
+#
+# THE PROPERTY THAT MAKES IT SHIPPABLE ANYWAY, and the only one you may rely on: an unrecognised
+# shape is reported as UNCLASSIFIED, never as ABSENT. A missed shape therefore costs NOISE (an
+# unattributable entry a human must read) and never BLINDNESS (a clean zero over gated code).
+# Every change here must preserve that direction. If you cannot tell, say so — do not resolve.
+#
+# WHAT NOT TO DO: do not add a thirteenth shape and call the family closed. If correctness rather
+# than advice is ever required of this scan, the answer is syntax-aware tooling or deleting the
+# scanning half — not another pattern. #3472 carries the family and the reasoning.
+# ============================================================================================
 # STDERR carries TWO fail-closed report kinds, and the caller FAILs on either:
 #   UNRESOLVED <name> <from>              — a declared `mod` whose file was not found
 #   CFG-GATED-MOD <name> <from> [<cfg>]   — a `mod` gated by a cfg this scan does not evaluate
@@ -6898,13 +6952,36 @@ $(awk '
   # UNCONDITIONAL — reintroducing for the multiline form the exact defect just fixed for the
   # single-line one. Note the direction: this was a REGRESSION INTRODUCED BY THAT FIX, since
   # clearing gatetxt at cluster end is what made a continuation line destructive.
-  # Balance is counted on SQUARE BRACKETS: an attribute is not over until its `]` arrives,
-  # whatever sits on the lines between. A `[` or `]` inside an attribute string literal would
-  # skew the count; that is accepted and bounded — it can only leave the cluster open longer,
-  # i.e. report a gap that is not there, never hide one.
+  # Balance is counted on SQUARE BRACKETS OUTSIDE STRING LITERALS.
+  #
+  # THE PREVIOUS COMMENT HERE CLAIMED A SAFETY PROPERTY THIS CODE DOES NOT HAVE, and it is
+  # deleted rather than softened: it said a delimiter inside a string literal "can only leave
+  # the cluster open longer ... never hide one". That is true of an unmatched `[`, which is the
+  # case it was reasoned about, and FALSE of an unmatched `]` — which closes the cluster EARLY,
+  # so the real closing line then clears the pending cfg and a gated child reads as
+  # UNCONDITIONAL. That HIDES a gap (roborev job 101, Medium). A claimed bound that holds in
+  # only one direction is worse than none, because the next reader trusts it.
+  #
+  # Quoted spans are stripped before counting. Where the strip cannot be trusted — an escaped
+  # quote or a raw string — the pending gate becomes UNCLASSIFIED rather than resolved, so the
+  # following module is DECLARED as unattributable instead of silently treated as unconditional.
+  # This is the same declare-do-not-model choice as the coreq scanner: the set of Rust attribute
+  # shapes not modelled here is OPEN, so the only safe behaviour on an unrecognised one is to
+  # say so.
+  function nostr(str) { gsub(/"[^"\\]*"/, "", str); return str }
+  function litok(str) { return (str !~ /\\"/ && str !~ /r#"/ && nostr(str) !~ /"/) }
   attrdepth > 0 {
-    if (incfg) { t = $0; gsub(/^[[:space:]]+|[[:space:]]+$/, "", t); gatetxt = gatetxt " " t }
-    attrdepth += gsub(/\[/, "[") - gsub(/\]/, "]")
+    t = $0; gsub(/^[[:space:]]+|[[:space:]]+$/, "", t)
+    if (incfg) gatetxt = gatetxt " " t
+    if (!litok($0)) {
+      printf "CFG-GATED-MOD <attribute-at-line-%d> %s [UNCLASSIFIED: string-literal shape this scan does not model; cluster balance unknown]\n", NR, FILENAME > "/dev/stderr"
+      attrdepth = 0
+      incfg = 0
+      gatetxt = ""
+      next
+    }
+    nostr_line = nostr($0)
+    attrdepth += gsub(/\[/, "[", nostr_line) - gsub(/\]/, "]", nostr_line)
     if (attrdepth < 1) { attrdepth = 0; incfg = 0 }
     next
   }
@@ -6972,9 +7049,16 @@ $(awk '
       gatetxt = (gatetxt == "" ? t : gatetxt " " t)
     }
     # OPEN the cluster when the brackets do not close on this line, so the continuation rule
-    # above collects the rest instead of the cluster-end rule destroying it.
-    attrdepth = gsub(/\[/, "[") - gsub(/\]/, "]")
+    # above collects the rest instead of the cluster-end rule destroying it. Counted the SAME
+    # way as the continuation rule — on the string-stripped line — or the two halves disagree
+    # about where a cluster starts and ends, which is its own defect.
+    nostr_open = nostr($0)
+    attrdepth = gsub(/\[/, "[", nostr_open) - gsub(/\]/, "]", nostr_open)
     if (attrdepth > 0) { incfg = iscfg } else { attrdepth = 0 }
+    if (!litok($0) && iscfg) {
+      printf "CFG-GATED-MOD <attribute-at-line-%d> %s [UNCLASSIFIED: string-literal shape this scan does not model; cluster balance unknown]\n", NR, FILENAME > "/dev/stderr"
+      gatetxt = ""
+    }
     next
   }
   # BOTH pendings die with the cluster (roborev job 97, Medium). Clearing `haspath` while leaving
