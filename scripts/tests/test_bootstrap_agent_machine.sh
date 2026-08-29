@@ -56,6 +56,17 @@ export GIT_CONFIG_GLOBAL="$tmp/global-gitconfig"
 export GIT_CONFIG_NOSYSTEM=1
 : >"$GIT_CONFIG_GLOBAL"
 
+# --- REAL-ORIGIN isolation for the push probe (issue #3369) ----------------
+# Section 3b now MEASURES push capability by actually pushing a throwaway
+# refs/claims/smoke-<nonce> ref (scripts/flow/claim.sh smoke). Every case that runs
+# "$BOOTSTRAP" IN PLACE therefore has the real checkout as REPO_ROOT and the real
+# github.com origin as its remote — with this box's real credentials. Those runs pass
+# --skip-push-probe so this suite can NEVER mutate the real origin; the probe's own
+# behaviour is covered hermetically in block 7p below, against sandbox remotes only.
+# Cases that run a COPY of bootstrap in a fake repo are safe without the flag: the
+# probe short-circuits to UNMEASURED when the copy's tree has no scripts/flow/claim.sh
+# (mk_fake_repo only installs it on explicit request), so no network call is made.
+
 # --- BOARD env isolation (issue #2942) -------------------------------------
 # The board section reads CQLITE_PROJECT_{OWNER,NUMBER,ACCOUNT} and PROJECT_TITLE from
 # the environment, and a worker shell commonly EXPORTS them (the fleet exports
@@ -65,19 +76,22 @@ export GIT_CONFIG_NOSYSTEM=1
 unset CQLITE_PROJECT_NUMBER CQLITE_PROJECT_OWNER CQLITE_PROJECT_ACCOUNT PROJECT_TITLE
 
 mkshim() {
-  # mkshim <name>: a fake tool that records "install"/"add" invocations and is
-  # otherwise a harmless no-op (version/status queries succeed emptily).
-  local name="$1"
-  cat >"$tmp/$name" <<EOF
+  # mkshim <name> [dir] [log]: a fake tool that records "install"/"add" invocations
+  # and is otherwise a harmless no-op (version/status queries succeed emptily).
+  # dir/log default to the shared sandbox + tripwire; a case that needs its OWN
+  # install tripwire (7p-f, issue #3369) passes its own and leaves the shared shims
+  # every later case depends on untouched.
+  local name="$1" dir="${2:-$tmp}" log="${3:-$tripwire}"
+  cat >"$dir/$name" <<EOF
 #!/usr/bin/env bash
 for a in "\$@"; do
   case "\$a" in
-    install|add) echo "$name \$*" >>"$tripwire" ;;
+    install|add) echo "$name \$*" >>"$log" ;;
   esac
 done
 exit 0
 EOF
-  chmod +x "$tmp/$name"
+  chmod +x "$dir/$name"
 }
 mkshim brew
 mkshim cargo
@@ -91,7 +105,7 @@ host_home="$tmp/host-home"; mkdir -p "$host_home/.cargo"
 
 # Run with the shims FIRST on PATH, default mode (no --yes), skipping the smoke.
 run_out=$(PATH="$tmp:$PATH" HOME="$host_home" CARGO_HOME="$host_home/.cargo" \
-  bash "$BOOTSTRAP" --skip-smoke 2>&1); run_rc=$?
+  bash "$BOOTSTRAP" --skip-smoke --skip-push-probe 2>&1); run_rc=$?
 
 if [ "$run_rc" -eq 0 ]; then
   ok "default (no --yes) run exits 0"
@@ -122,7 +136,7 @@ done
 # Reset the tripwire so the no-install assertion below reflects ONLY this run.
 : >"$tripwire"
 guard_out=$(PATH="$tmp:/usr/bin:/bin" HOME="$host_home" CARGO_HOME="$host_home/.cargo" \
-  bash "$BOOTSTRAP" --skip-smoke 2>&1)
+  bash "$BOOTSTRAP" --skip-smoke --skip-push-probe 2>&1)
 if printf '%s' "$guard_out" | grep -Eq "install sccache:|sccache MISSING"; then
   ok "missing accelerator prints install guidance (does not auto-install)"
 else
@@ -193,7 +207,7 @@ stub_net "$stubA"
 mk_stub "$stubA" mold '[ "$1" = --version ] && echo "mold 2.4.0"; exit 0'
 mk_stub "$stubA" cc 'exit 0'
 outA=$(PATH="$stubA:$PATH" HOME="$sbA" CARGO_HOME="$sbA/.cargo" \
-  bash "$BOOTSTRAP" --skip-smoke 2>&1)
+  bash "$BOOTSTRAP" --skip-smoke --skip-push-probe 2>&1)
 cfgA="$sbA/.cargo/config.toml"
 if printf '%s' "$outA" | grep -q "Link accelerator: mold"; then
   ok "mold: Linux run emits the mold section"
@@ -221,7 +235,7 @@ fi
 #     identical to the first run.
 firstA=$(cat "$cfgA")
 PATH="$stubA:$PATH" HOME="$sbA" CARGO_HOME="$sbA/.cargo" \
-  bash "$BOOTSTRAP" --skip-smoke >/dev/null 2>&1
+  bash "$BOOTSTRAP" --skip-smoke --skip-push-probe >/dev/null 2>&1
 secondA=$(cat "$cfgA")
 if [ "$(count_begin "$cfgA")" = 1 ] && [ "$firstA" = "$secondA" ]; then
   ok "mold: re-run idempotent (exactly one block, file byte-identical)"
@@ -234,7 +248,7 @@ sbC=$(mktemp -d "$tmp/moldC.XXXXXX"); mkdir -p "$sbC/.cargo"
 cfgC="$sbC/.cargo/config.toml"
 printf '[build]\njobs = 7\n\n[net]\nretry = 9\n' >"$cfgC"
 PATH="$stubA:$PATH" HOME="$sbC" CARGO_HOME="$sbC/.cargo" \
-  bash "$BOOTSTRAP" --skip-smoke >/dev/null 2>&1
+  bash "$BOOTSTRAP" --skip-smoke --skip-push-probe >/dev/null 2>&1
 if grep -qx 'jobs = 7' "$cfgC" && grep -qx 'retry = 9' "$cfgC" \
    && grep -qx '\[build\]' "$cfgC" && grep -qx '\[net\]' "$cfgC" \
    && grep -q '^# BEGIN cqlite-mold' "$cfgC"; then
@@ -246,7 +260,7 @@ fi
 # Idempotent even with user content present.
 firstC=$(cat "$cfgC")
 PATH="$stubA:$PATH" HOME="$sbC" CARGO_HOME="$sbC/.cargo" \
-  bash "$BOOTSTRAP" --skip-smoke >/dev/null 2>&1
+  bash "$BOOTSTRAP" --skip-smoke --skip-push-probe >/dev/null 2>&1
 if [ "$firstC" = "$(cat "$cfgC")" ] && [ "$(count_begin "$cfgC")" = 1 ]; then
   ok "mold: re-run with user content stays byte-identical (one block)"
 else
@@ -261,7 +275,7 @@ mk_stub "$stubD" mold 'exit 0'
 mk_stub "$stubD" cc 'exit 1'
 mk_stub "$stubD" clang 'exit 1'
 outD=$(PATH="$stubD:$PATH" HOME="$sbD" CARGO_HOME="$sbD/.cargo" \
-  bash "$BOOTSTRAP" --skip-smoke 2>&1)
+  bash "$BOOTSTRAP" --skip-smoke --skip-push-probe 2>&1)
 if printf '%s' "$outD" | grep -q "link probe FAILED" \
    && [ ! -f "$sbD/.cargo/config.toml" ]; then
   ok "mold: failed link probe warns and writes no linker config"
@@ -278,7 +292,7 @@ mk_stub "$stubE" mold 'exit 0'
 mk_stub "$stubE" cc 'exit 1'
 mk_stub "$stubE" clang 'exit 0'
 PATH="$stubE:$PATH" HOME="$sbE" CARGO_HOME="$sbE/.cargo" \
-  bash "$BOOTSTRAP" --skip-smoke >/dev/null 2>&1
+  bash "$BOOTSTRAP" --skip-smoke --skip-push-probe >/dev/null 2>&1
 cfgE="$sbE/.cargo/config.toml"
 if [ -f "$cfgE" ] && [ "$(grep -c '^linker = "clang"' "$cfgE")" = 2 ]; then
   ok "mold: clang-only probe writes linker = \"clang\" for both triples"
@@ -294,7 +308,7 @@ stub_net "$stubF"
 mk_stub "$stubF" mold '[ "$1" = --version ] && echo "mold 2.4.0"; exit 0'
 mk_stub "$stubF" cc 'exit 0'
 outF=$(PATH="$stubF:$PATH" HOME="$sbF" CARGO_HOME="$sbF/.cargo" \
-  bash "$BOOTSTRAP" --skip-smoke 2>&1)
+  bash "$BOOTSTRAP" --skip-smoke --skip-push-probe 2>&1)
 if ! printf '%s' "$outF" | grep -q "Link accelerator: mold" \
    && [ ! -f "$sbF/.cargo/config.toml" ]; then
   ok "mold: Darwin performs no mold detection/config (no-op)"
@@ -311,7 +325,7 @@ mk_hermetic_bin "$stubG"
 tripG="$stubG/tripwire.log"; : >"$tripG"
 mk_stub "$stubG" apt-get "echo \"apt-get \$*\" >>\"$tripG\"; exit 0"
 outG=$(PATH="$stubG" HOME="$sbG" CARGO_HOME="$sbG/.cargo" \
-  bash "$BOOTSTRAP" --skip-smoke 2>&1)
+  bash "$BOOTSTRAP" --skip-smoke --skip-push-probe 2>&1)
 if printf '%s' "$outG" | grep -q "mold MISSING" \
    && printf '%s' "$outG" | grep -q "install mold:.*apt-get install -y mold" \
    && [ ! -s "$tripG" ] \
@@ -327,7 +341,7 @@ fi
 sbH=$(mktemp -d "$tmp/moldH.XXXXXX"); stubH="$tmp/stubH"
 mk_hermetic_bin "$stubH"
 outH=$(PATH="$stubH" HOME="$sbH" CARGO_HOME="$sbH/.cargo" \
-  bash "$BOOTSTRAP" --skip-smoke 2>&1)
+  bash "$BOOTSTRAP" --skip-smoke --skip-push-probe 2>&1)
 if printf '%s' "$outH" | grep -q "no supported package manager" \
    && [ ! -f "$sbH/.cargo/config.toml" ]; then
   ok "mold: missing + no package manager warns and writes no config"
@@ -342,7 +356,7 @@ fi
 sbJ=$(mktemp -d "$tmp/moldJ.XXXXXX"); mkdir -p "$sbJ/.cargo"
 printf '[net]\nretry = 4\n' >"$sbJ/.cargo/config"
 PATH="$stubA:$PATH" HOME="$sbJ" CARGO_HOME="$sbJ/.cargo" \
-  bash "$BOOTSTRAP" --skip-smoke >/dev/null 2>&1
+  bash "$BOOTSTRAP" --skip-smoke --skip-push-probe >/dev/null 2>&1
 if grep -q '^# BEGIN cqlite-mold' "$sbJ/.cargo/config" \
    && grep -qx 'retry = 4' "$sbJ/.cargo/config" \
    && [ ! -f "$sbJ/.cargo/config.toml" ]; then
@@ -361,7 +375,7 @@ cfgK="$sbK/.cargo/config.toml"
 printf '[target.x86_64-unknown-linux-gnu]\nrustflags = ["-C", "target-cpu=native"]\n' >"$cfgK"
 beforeK=$(cat "$cfgK")
 outK=$(PATH="$stubA:$PATH" HOME="$sbK" CARGO_HOME="$sbK/.cargo" \
-  bash "$BOOTSTRAP" --skip-smoke 2>&1)
+  bash "$BOOTSTRAP" --skip-smoke --skip-push-probe 2>&1)
 if printf '%s' "$outK" | grep -q "existing \[target" \
    && [ "$beforeK" = "$(cat "$cfgK")" ] \
    && ! grep -q '^# BEGIN cqlite-mold' "$cfgK"; then
@@ -378,7 +392,7 @@ printf '[net]\nretry = 1\n' >"$sbL/.cargo/config"
 printf '[net]\nretry = 2\n' >"$sbL/.cargo/config.toml"
 tomlL_before=$(cat "$sbL/.cargo/config.toml")
 PATH="$stubA:$PATH" HOME="$sbL" CARGO_HOME="$sbL/.cargo" \
-  bash "$BOOTSTRAP" --skip-smoke >/dev/null 2>&1
+  bash "$BOOTSTRAP" --skip-smoke --skip-push-probe >/dev/null 2>&1
 if grep -q '^# BEGIN cqlite-mold' "$sbL/.cargo/config" \
    && ! grep -q '^# BEGIN cqlite-mold' "$sbL/.cargo/config.toml" \
    && [ "$tomlL_before" = "$(cat "$sbL/.cargo/config.toml")" ]; then
@@ -395,7 +409,7 @@ cfgM="$sbM/.cargo/config.toml"
 printf '[build]\nrustflags = ["-C", "target-cpu=native"]\n' >"$cfgM"
 beforeM=$(cat "$cfgM")
 outM=$(PATH="$stubA:$PATH" HOME="$sbM" CARGO_HOME="$sbM/.cargo" \
-  bash "$BOOTSTRAP" --skip-smoke 2>&1)
+  bash "$BOOTSTRAP" --skip-smoke --skip-push-probe 2>&1)
 if printf '%s' "$outM" | grep -q "existing \[build\] rustflags" \
    && [ "$beforeM" = "$(cat "$cfgM")" ] \
    && ! grep -q '^# BEGIN cqlite-mold' "$cfgM"; then
@@ -461,12 +475,22 @@ fi
 # helper. The copy makes BASH_SOURCE-derived REPO_ROOT resolve to <dir>, so the
 # credential probe reads THIS remote/config, never the real checkout's — and the
 # --yes dataset fetch is a fast no-op (no test-data/scripts/fetch-datasets.sh here).
+# A THIRD argument, `with-claim`, additionally installs scripts/flow/claim.sh — the
+# push-capability probe (issue #3369) delegates to it, and short-circuits to UNMEASURED
+# without ever touching the network when it is absent. That default is what keeps every
+# pre-existing case above from pushing to the real origin: they are unchanged, and their
+# copies have no claim.sh, so no case acquires a network call by inheritance.
 mk_fake_repo() {
-  local dir="$1" url="$2"
+  local dir="$1" url="$2" claim="${3:-}"
   mkdir -p "$dir/scripts"
   cp "$BOOTSTRAP" "$dir/scripts/bootstrap-agent-machine.sh"
+  if [ "$claim" = with-claim ]; then
+    mkdir -p "$dir/scripts/flow"
+    cp "$SCRIPT_DIR/../flow/claim.sh" "$dir/scripts/flow/claim.sh"
+  fi
   git -c init.defaultBranch=main init -q "$dir" >/dev/null 2>&1
-  git -C "$dir" remote add origin "$url" >/dev/null 2>&1
+  [ -n "$url" ] && git -C "$dir" remote add origin "$url" >/dev/null 2>&1
+  return 0
 }
 
 FAKE_TOKEN='ghp_FAKEtoken2942FAKEtoken2942FAKEtoken'
@@ -759,6 +783,312 @@ if printf '%s' "$out7i" | grep -q 'REPO-LOCAL scope only'; then
 else
   bad "cred: repo-local-scope note missed a host-scoped local helper"
   printf '%s\n' "$out7i" | grep -i -A3 "git push credentials"
+fi
+
+# --- 7p. git PUSH capability is MEASURED, not inferred (issue #3369) --------
+# Block 7 covers the CONFIGURATION probe (`git credential fill`). That probe, plus
+# `gh auth status` and `git ls-remote origin HEAD`, are all READS — and the box that
+# motivated #3369 passed every one of them while every `git push` failed, so the
+# launcher's preflight certified a machine on which no lane could start. These cases
+# pin the probe that performs THE OPERATION (create + read back + delete a throwaway
+# refs/claims/smoke-<nonce> ref, via scripts/flow/claim.sh smoke) and — just as
+# importantly — pin that an UNKNOWN answer is never reported green.
+#
+# Hermetic in three layers, because a push probe that escaped the sandbox would mutate
+# the REAL origin:
+#   1. every case runs a COPY of bootstrap in a throwaway repo, so REPO_ROOT is never
+#      this checkout;
+#   2. every origin is either a local `file://` bare repo or `push-probe.invalid` — the
+#      RFC 2606 guaranteed-unresolvable TLD — never a reachable public remote;
+#   3. every whole-checkout run elsewhere in this suite passes --skip-push-probe.
+
+# mk_push_repo <dir> <origin-url|""> — a throwaway checkout that reports ZERO warnings
+# except the ones a case deliberately provokes. Getting to zero matters: "All checks
+# green." is printed only when WARNINGS is 0, so it is the oracle for BOTH "the probe
+# verified" and "the probe withheld green"; a sandbox warning for unrelated reasons
+# would make every green assertion here vacuous. (The precondition below MEASURES that
+# rather than assuming it.)
+mk_push_repo() {
+  local dir="$1" url="$2"
+  mk_fake_repo "$dir" "$url" with-claim
+  mkdir -p "$dir/scripts/lib" "$dir/test-data/datasets/sstables/ks/tbl" "$dir/.home/.cargo"
+  cp "$SCRIPT_DIR/../lib/gate-notify.sh" "$dir/scripts/lib/gate-notify.sh"
+  cp "$SCRIPT_DIR/../perf-capability.sh" "$dir/scripts/perf-capability.sh"
+  : >"$dir/test-data/datasets/sstables/ks/tbl/nb-1-big-Data.db"
+}
+
+# mk_push_bare <dir> [pre-receive-body] — a local bare repo that accepts pushes. With a
+# body, its pre-receive hook decides the push's fate OFFLINE, which is how the FAILED
+# verdicts below are produced deterministically and without a network.
+mk_push_bare() {
+  local dir="$1" hook="${2:-}"
+  git -c init.defaultBranch=main init -q --bare "$dir" >/dev/null 2>&1
+  if [ -n "$hook" ]; then
+    mkdir -p "$dir/hooks"
+    printf '#!/usr/bin/env bash\n%s\n' "$hook" >"$dir/hooks/pre-receive"
+    chmod +x "$dir/hooks/pre-receive"
+  fi
+}
+
+# mk_push_gh <dir> [setup-git-body] — a gh stub that satisfies the auth + board
+# sections (so neither contributes a warning) and runs <setup-git-body> on
+# `gh auth setup-git`.
+mk_push_gh() {
+  local dir="$1" setup="${2:-:}"
+  cat >"$dir/gh" <<EOF
+#!/usr/bin/env bash
+case "\$1" in
+  auth)
+    if [ "\$2" = status ]; then
+      echo "github.com"
+      echo "  ✓ Logged in to github.com account tester (GH_TOKEN)"
+      echo "  - Token scopes: 'gist', 'project', 'read:org', 'repo', 'workflow'"
+    elif [ "\$2" = setup-git ]; then
+      $setup
+    fi
+    exit 0 ;;
+  project) echo '{"id":"PVT_stub"}'; exit 0 ;;
+  api)     echo '{"data":{"node":{"id":"PVT_stub"}}}'; exit 0 ;;
+esac
+exit 0
+EOF
+  chmod +x "$dir/gh"
+}
+
+# mk_push_bin <dir> [setup-git-body] — PATH stubs that keep every OTHER section quiet.
+# `uname` reports Darwin so the Linux-only mold + perf sections (whose verdicts depend
+# on the HOST's kernel settings) cannot leak host state into these cases.
+mk_push_bin() {
+  local dir="$1" setup="${2:-:}"
+  mkdir -p "$dir"
+  mk_stub "$dir" uname 'echo Darwin'
+  mk_stub "$dir" sccache 'exit 0'
+  mk_stub "$dir" cargo-nextest 'exit 0'
+  mk_stub "$dir" cargo 'exit 0'
+  mk_stub "$dir" roborev 'exit 0'
+  mk_push_gh "$dir" "$setup"
+}
+
+# run_push <repo> <bin> <gitconfig> [bootstrap args...] — sets push_out and push_rc in
+# the CALLER's shell. Deliberately NOT `out=$(run_push …)`: a command substitution runs
+# the function in a subshell, so push_rc would be discarded — and the EXIT CODE is half
+# of what these cases assert (--strict). Never --yes: nothing here may install. Always
+# --skip-smoke: the gate fmt run is a different subject (and minutes long).
+push_rc=0
+push_out=""
+run_push() {
+  local repo="$1" bin="$2" gc="$3"; shift 3
+  push_rc=0
+  push_out=$(PATH="$bin:$PATH" HOME="$repo/.home" CARGO_HOME="$repo/.home/.cargo" \
+    GIT_CONFIG_GLOBAL="$gc" GIT_CONFIG_NOSYSTEM=1 CLAIM_MACHINE=push-probe-test \
+    CODEX_NOTIFY_WEBHOOK='https://ntfy.example.com/t' \
+    bash "$repo/scripts/bootstrap-agent-machine.sh" --skip-smoke "$@" 2>&1) || push_rc=$?
+}
+push_warns()  { printf '%s' "$1" | grep -cF '[warn]'; }
+push_green()  { printf '%s' "$1" | grep -qF 'All checks green.'; }
+push_verdict(){ printf '%s' "$1" | grep -F 'git-push:' | sed 's/\x1b\[[0-9;]*m//g'; }
+
+# 7p-a/d. THE POSITIVE CONTROL and the OPT-OUT, measured as a pair against ONE sandbox
+#   whose only variable is the flag. Run the opt-out FIRST so its warning count
+#   establishes what the sandbox costs before the probe is even considered.
+bare7pa="$tmp/bare7pa.git"; mk_push_bare "$bare7pa"
+repo7pa="$tmp/repo7pa"; mk_push_repo "$repo7pa" "file://$bare7pa"
+bin7pa="$tmp/bin7pa"; mk_push_bin "$bin7pa"
+gc7pa="$tmp/gc7pa"; : >"$gc7pa"
+run_push "$repo7pa" "$bin7pa" "$gc7pa" --skip-push-probe --strict; out7pd=$push_out; rc7pd=$push_rc
+run_push "$repo7pa" "$bin7pa" "$gc7pa" --strict; out7pa=$push_out; rc7pa=$push_rc
+base_warns=$(push_warns "$out7pd"); probe_warns=$(push_warns "$out7pa")
+
+if printf '%s' "$out7pa" | grep -q '\[ok\].*git-push: VERIFIED' \
+   && printf '%s' "$out7pa" | grep -q 'refs/claims/\*'; then
+  ok "push: a REAL push (create+ls-remote+delete on a local bare repo) is reported VERIFIED as [ok]"
+else
+  bad "push: the probe could not report VERIFIED even against a bare repo that accepts pushes"
+  push_verdict "$out7pa"
+fi
+# The delta is host-independent: the ONLY difference between the two runs is the flag.
+if [ "$probe_warns" -eq $((base_warns - 1)) ]; then
+  ok "push: a VERIFIED probe adds no warning, and --skip-push-probe adds exactly one"
+else
+  bad "push: warning delta wrong (opt-out=$base_warns verified=$probe_warns)"
+fi
+if printf '%s' "$out7pd" | grep -q '\[warn\].*git-push: OPT-OUT (--skip-push-probe)'; then
+  ok "push: --skip-push-probe emits a LOUD [warn] OPT-OUT line (it cannot buy a silent pass)"
+else
+  bad "push: --skip-push-probe was silent or reported ok"
+  push_verdict "$out7pd"
+fi
+if [ "$rc7pd" -ne 0 ] && ! push_green "$out7pd"; then
+  ok "push: --skip-push-probe WITHHOLDS 'All checks green.' and fails --strict (rc=$rc7pd)"
+else
+  bad "push: the opt-out bought a green/zero-exit run (rc=$rc7pd)"
+fi
+# Absolute-green assertions need the sandbox to be otherwise-warning-free. MEASURE that
+# (baseline = exactly the one OPT-OUT warning) instead of assuming it: an exotic host
+# that warns for its own reasons must not produce a mystery red here.
+if [ "$base_warns" -eq 1 ]; then
+  if push_green "$out7pa" && [ "$rc7pa" -eq 0 ]; then
+    ok "push: VERIFIED yields 'All checks green.' and --strict exits 0 (zero warnings)"
+  else
+    bad "push: a verified machine did not go green / --strict did not exit 0 (rc=$rc7pa)"
+    push_verdict "$out7pa"
+  fi
+else
+  echo "skip - push: absolute-green assertions need an otherwise-clean sandbox (baseline=$base_warns warnings)"
+  printf '%s' "$out7pd" | grep -F '[warn]' | sed 's/\x1b\[[0-9;]*m//g' | head -5
+fi
+
+# 7p-b. PUSH FAILS, credential-shaped. The bare repo's pre-receive hook speaks the
+#   signature claim.sh classifies as auth, so this needs no network and no real token.
+bare7pb="$tmp/bare7pb.git"; mk_push_bare "$bare7pb" 'echo "Authentication failed" >&2; exit 1'
+repo7pb="$tmp/repo7pb"; mk_push_repo "$repo7pb" "file://$bare7pb"
+bin7pb="$tmp/bin7pb"; mk_push_bin "$bin7pb"
+gc7pb="$tmp/gc7pb"; : >"$gc7pb"
+run_push "$repo7pb" "$bin7pb" "$gc7pb" --strict; out7pb=$push_out; rc7pb=$push_rc
+if printf '%s' "$out7pb" | grep -q '\[warn\].*git-push: FAILED.*AUTHENTICATE' \
+   && ! push_green "$out7pb" && [ "$rc7pb" -ne 0 ]; then
+  ok "push: a rejected push is a [warn] FAILED naming authentication, green withheld, --strict exits $rc7pb"
+else
+  bad "push: credential-shaped rejection not reported as FAILED (rc=$rc7pb, green=$(push_green "$out7pb" && echo yes || echo no))"
+  push_verdict "$out7pb"
+fi
+if printf '%s' "$out7pb" | grep -q 'gh auth setup-git' \
+   && printf '%s' "$out7pb" | grep -q -- '--fix-credentials'; then
+  ok "push: the FAILED verdict prints the remediation (gh auth setup-git / --fix-credentials)"
+else
+  bad "push: FAILED verdict printed no remediation"
+fi
+
+# 7p-b2. PUSH FAILS, namespace-shaped: a rejection git's stderr does NOT identify as a
+#   credential fault must not be mislabelled as one — and the DEFAULT (no --strict) run
+#   must still exit 0, which is the composability contract this script has always had.
+bare7pb2="$tmp/bare7pb2.git"; mk_push_bare "$bare7pb2" 'echo "denied by ref policy" >&2; exit 1'
+repo7pb2="$tmp/repo7pb2"; mk_push_repo "$repo7pb2" "file://$bare7pb2"
+bin7pb2="$tmp/bin7pb2"; mk_push_bin "$bin7pb2"
+gc7pb2="$tmp/gc7pb2"; : >"$gc7pb2"
+run_push "$repo7pb2" "$bin7pb2" "$gc7pb2"; out7pb2=$push_out; rc7pb2=$push_rc
+if printf '%s' "$out7pb2" | grep -q '\[warn\].*git-push: FAILED.*ref namespace' \
+   && ! printf '%s' "$out7pb2" | grep -q 'git-push: FAILED.*AUTHENTICATE'; then
+  ok "push: a non-credential rejection is reported as a namespace refusal, not as an auth fault"
+else
+  bad "push: namespace rejection misclassified"
+  push_verdict "$out7pb2"
+fi
+if [ "$rc7pb2" -eq 0 ] && ! push_green "$out7pb2"; then
+  ok "push: WITHOUT --strict the script still exits 0 despite warnings (contract preserved)"
+else
+  bad "push: default exit contract broken (rc=$rc7pb2)"
+fi
+
+# 7p-c. THE MOST IMPORTANT CASE: an UNKNOWN answer must not inherit the permissive
+#   branch. The remote does not exist, so NOTHING was learned about push capability —
+#   the verdict must be UNMEASURED, a [warn], and must never be an [ok].
+repo7pc="$tmp/repo7pc"; mk_push_repo "$repo7pc" "file://$tmp/no-such-bare.git"
+bin7pc="$tmp/bin7pc"; mk_push_bin "$bin7pc"
+gc7pc="$tmp/gc7pc"; : >"$gc7pc"
+run_push "$repo7pc" "$bin7pc" "$gc7pc"; out7pc=$push_out; rc7pc=$push_rc
+if printf '%s' "$out7pc" | grep -q '\[warn\].*git-push: UNMEASURED' \
+   && printf '%s' "$out7pc" | grep -q 'git-push: UNMEASURED.*UNKNOWN, not ok'; then
+  ok "push: an unreachable remote is UNMEASURED, and the text names it as UNKNOWN"
+else
+  bad "push: unreachable remote did not produce the UNMEASURED verdict"
+  push_verdict "$out7pc"
+fi
+if ! printf '%s' "$out7pc" | grep -q '\[ok\].*git-push' && ! push_green "$out7pc"; then
+  ok "push: an UNMEASURED probe is NEVER [ok] and NEVER green (affirmative-measurement rule)"
+else
+  bad "push: an unmeasured push capability took the permissive branch"
+  push_verdict "$out7pc"
+fi
+
+# 7p-c2. The other unmeasurable shape: no origin remote at all.
+repo7pc2="$tmp/repo7pc2"; mk_push_repo "$repo7pc2" ""
+bin7pc2="$tmp/bin7pc2"; mk_push_bin "$bin7pc2"
+gc7pc2="$tmp/gc7pc2"; : >"$gc7pc2"
+run_push "$repo7pc2" "$bin7pc2" "$gc7pc2"; out7pc2=$push_out
+if printf '%s' "$out7pc2" | grep -q "\[warn\].*git-push: UNMEASURED.*no 'origin' remote" \
+   && ! printf '%s' "$out7pc2" | grep -q '\[ok\].*git-push'; then
+  ok "push: no origin remote -> UNMEASURED [warn], never [ok]"
+else
+  bad "push: missing origin was not reported as UNMEASURED"
+  push_verdict "$out7pc2"
+fi
+
+# 7p-e. ORDERING: the probe must run AFTER section 3b's credential fix, so what it
+#   measures is the machine as the fix LEFT it. Asserted as a SEQUENCE, not as
+#   co-presence: the `gh auth setup-git` stub is what makes the push reachable at all
+#   (it installs the url.<local>.insteadOf rewrite), so a probe running BEFORE the fix
+#   cannot possibly report VERIFIED — and the negative twin below proves it does not.
+#   The origin is `push-probe.invalid` (RFC 2606: guaranteed not to resolve), so the
+#   unwired run fails offline instead of reaching a real host.
+bare7pe="$tmp/bare7pe.git"; order7pe="$tmp/order7pe.log"; : >"$order7pe"
+mk_push_bare "$bare7pe" "echo PUSH >>\"$order7pe\"; exit 0"
+repo7pe="$tmp/repo7pe"; mk_push_repo "$repo7pe" "https://push-probe.invalid/cqlite.git"
+bin7pe="$tmp/bin7pe"
+mk_push_bin "$bin7pe" "echo SETUP-GIT >>\"$order7pe\"
+      git config --global --add 'credential.https://push-probe.invalid.helper' '!f(){ test \"\$1\" = get || exit 0; echo username=gh-stub; echo password=wired-by-setup-git; };f'
+      git config --global \"url.file://$bare7pe/.insteadOf\" 'https://push-probe.invalid/cqlite.git'"
+# Negative twin FIRST: without --fix-credentials nothing wires the machine, so the
+# probe must NOT report VERIFIED. Without this, "VERIFIED after the fix" would not
+# distinguish a probe that ran after the fix from one that always passes.
+gc7pe1="$tmp/gc7pe1"; : >"$gc7pe1"
+run_push "$repo7pe" "$bin7pe" "$gc7pe1"; out7pe1=$push_out
+twin_log=$(tr '\n' ' ' <"$order7pe")
+if ! printf '%s' "$out7pe1" | grep -q 'git-push: VERIFIED' && [ -z "${twin_log// /}" ]; then
+  ok "push: (negative twin) with no credential fix the probe never reaches the remote and never VERIFIES"
+else
+  bad "push: the unwired machine reported VERIFIED (log=[$twin_log])"
+  push_verdict "$out7pe1"
+fi
+: >"$order7pe"; gc7pe2="$tmp/gc7pe2"; : >"$gc7pe2"
+run_push "$repo7pe" "$bin7pe" "$gc7pe2" --fix-credentials; out7pe2=$push_out
+order_seq=$(sed 's/[^A-Z-]//g' "$order7pe" | tr '\n' ' ' | tr -s ' ')
+if printf '%s' "$out7pe2" | grep -q '\[ok\].*git-push: VERIFIED' \
+   && printf '%s\n' "$order_seq" | grep -q '^SETUP-GIT PUSH'; then
+  ok "push: the probe runs AFTER the credential fix — observed order [$order_seq], verdict VERIFIED"
+else
+  bad "push: fix/probe ordering not established (order=[$order_seq])"
+  push_verdict "$out7pe2"
+fi
+
+# 7p-f. --fix-credentials is NARROW: it wires credentials and installs NOTHING. Turning
+#   the launcher's VERIFY step into a full toolchain installer (which reusing --yes
+#   would have done) is a far larger change to an external contract than #3369 needs,
+#   so the install tripwire must stay empty.
+trip7pf="$tmp/tripwire7pf.log"; : >"$trip7pf"
+bin7pf="$tmp/bin7pf"
+mk_push_bin "$bin7pf" "git config --global --add 'credential.https://push-probe.invalid.helper' '!f(){ test \"\$1\" = get || exit 0; echo username=gh-stub; echo password=wired-by-setup-git; };f'"
+for shim in brew cargo roborev; do mkshim "$shim" "$bin7pf" "$trip7pf"; done
+repo7pf="$tmp/repo7pf"; mk_push_repo "$repo7pf" "https://push-probe.invalid/cqlite.git"
+gc7pf="$tmp/gc7pf"; : >"$gc7pf"
+run_push "$repo7pf" "$bin7pf" "$gc7pf" --fix-credentials; out7pf=$push_out
+if grep -qF 'push-probe.invalid' "$gc7pf" 2>/dev/null && [ ! -s "$trip7pf" ]; then
+  ok "push: --fix-credentials wires the credential helper and installs NOTHING (tripwire empty)"
+else
+  bad "push: --fix-credentials was not narrow (helper=$(grep -c . "$gc7pf" 2>/dev/null) tripwire=$(wc -l <"$trip7pf" 2>/dev/null))"
+  [ -s "$trip7pf" ] && cat "$trip7pf"
+fi
+
+# 7p-h. FLAG HYGIENE. --skip-push-probe and --skip-smoke are different subjects (the
+#   git push probe vs the gate fmt run) and the name similarity is a live hazard, so
+#   both must be documented and each must skip only its own thing. 7p-a ran with
+#   --skip-smoke ALONE and still probed; 7p-d ran with BOTH and skipped only the probe.
+push_help=$(bash "$BOOTSTRAP" --help 2>&1)
+if printf '%s' "$push_help" | grep -q -- '--skip-push-probe' \
+   && printf '%s' "$push_help" | grep -q -- '--skip-smoke' \
+   && printf '%s' "$push_help" | grep -q -- '--fix-credentials' \
+   && printf '%s' "$push_help" | grep -q -- '--strict'; then
+  ok "push: --help documents --skip-push-probe, --skip-smoke, --fix-credentials and --strict"
+else
+  bad "push: --help does not document the new flags"
+fi
+if printf '%s' "$out7pa" | grep -q 'git-push: VERIFIED' \
+   && printf '%s' "$out7pa" | grep -q 'skipped (--skip-smoke)' \
+   && printf '%s' "$out7pd" | grep -q 'git-push: OPT-OUT' \
+   && printf '%s' "$out7pd" | grep -q 'skipped (--skip-smoke)'; then
+  ok "push: --skip-smoke skips only the gate run; --skip-push-probe skips only the push probe"
+else
+  bad "push: the two skip flags are not independent"
 fi
 
 # --- 8. Board check is a FUNCTIONAL, READ-ONLY probe (issue #2942) ----------
@@ -1184,7 +1514,7 @@ fi
 # reported value must name the HOST only.
 redact_out=$(PATH="$tmp:$PATH" HOME="$host_home" CARGO_HOME="$host_home/.cargo" \
   CODEX_NOTIFY_WEBHOOK='https://alice:s3cr3t-token@ntfy.example.com/private-topic' \
-  bash "$BOOTSTRAP" --skip-smoke 2>&1)
+  bash "$BOOTSTRAP" --skip-smoke --skip-push-probe 2>&1)
 if printf '%s' "$redact_out" | grep -q 'notify target configured' \
    && ! printf '%s' "$redact_out" | grep -qE 's3cr3t-token|alice:'; then
   ok "notify: URL userinfo is redacted from the reported target"
