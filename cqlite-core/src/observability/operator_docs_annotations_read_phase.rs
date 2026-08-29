@@ -77,11 +77,11 @@ pub(super) const ANNOTATIONS: &[MetricDoc] = &[
     },
     MetricDoc {
         name: catalog::WAL_REPLAY_DURATION,
-        kind: MetricKind::Gauge,
+        kind: MetricKind::Histogram,
         unit: catalog::unit::SECONDS,
-        summary: "How long the LAST write-ahead-log replay took, in seconds. A gauge, not a histogram: replay happens exactly once per engine open, so a histogram would hold one sample per process.",
+        summary: "How long the WAL replay at engine open took, in seconds. Normally ONE sample per process (replay runs exactly once per open), so read it as a value rather than a distribution.",
         attributes: &[],
-        interpretation: "Near-zero after a clean shutdown; seconds means a crash left a large log to replay, which directly delays open. Emitted even when there was nothing to replay — a fresh WAL genuinely took ~0s, which is a real measurement, so absence of this series means no engine was opened in this process, never that replay was skipped.",
+        interpretation: "Near-zero after a clean shutdown; seconds means a crash left a large log to replay, which directly delays open — pair it with cqlite.wal.size, whose growth makes this grow. A histogram rather than a gauge because the gauge plane is i64 and a sub-second replay would truncate to a fabricated 0. Recorded at EVERY open, including when there was nothing to replay (a fresh WAL genuinely took ~0s, which is a real measurement) and including a corrupt-WAL open, so absence means no engine was opened in this process, never that replay was skipped.",
         round_item: "—",
     },
 ];

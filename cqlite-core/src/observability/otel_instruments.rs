@@ -445,6 +445,14 @@ fn register_histograms(reg: &mut Registry<'_>) {
     // Per-scan read PHASE timings (#1707): ONE sample per phase per completed
     // scan, base-unit seconds (the issue's `_ms` spelling was normalised — see
     // the catalog doc comments).
+    // WAL replay at engine open (#1707). A histogram, not a gauge, because the
+    // gauge plane is i64 and a sub-second replay would truncate to a fabricated 0 —
+    // see the catalog doc comment. Normally ONE sample per process.
+    reg.histogram(
+        catalog::WAL_REPLAY_DURATION,
+        catalog::unit::SECONDS,
+        "Duration in seconds of the WAL replay at engine open (#1707).",
+    );
     reg.histogram(
         catalog::READ_PHASE_IO,
         catalog::unit::SECONDS,
@@ -585,10 +593,5 @@ fn register_gauges(reg: &mut Registry<'_>) {
         catalog::WAL_SIZE,
         catalog::unit::BYTES,
         "Current write-ahead log size in bytes (#1707).",
-    );
-    reg.gauge(
-        catalog::WAL_REPLAY_DURATION,
-        catalog::unit::SECONDS,
-        "Duration in seconds of the last WAL replay at engine open (#1707).",
     );
 }

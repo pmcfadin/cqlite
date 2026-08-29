@@ -601,23 +601,33 @@ pub const WAL_SYNC_DURATION: &str = "cqlite.wal.sync.duration";
 /// size, so cross-check [`WAL_REPLAY_DURATION`]. **Attributes**: none.
 pub const WAL_SIZE: &str = "cqlite.wal.size";
 
-/// `cqlite.wal.replay.duration` — gauge `s` (issue #1707).
+/// `cqlite.wal.replay.duration` — histogram `s` (issue #1707).
 ///
-/// How long the LAST write-ahead-log replay took, in seconds. A GAUGE rather than a
-/// histogram on purpose: replay happens EXACTLY ONCE per engine open, so a
-/// histogram would hold a single sample per process — a distribution with nothing to
-/// distribute — while a gauge reads correctly as "this process's startup replay cost
-/// N seconds".
+/// How long the write-ahead-log replay at engine open took, in seconds. Replay
+/// happens EXACTLY ONCE per engine open, so this series normally carries ONE sample
+/// per process — read it as a value, not as a distribution.
 ///
-/// **Emitted unconditionally at engine open, including the 0-entry case**: a fresh
-/// WAL with nothing to replay genuinely took ~0s, and that IS a measurement — the
-/// absence rule forbids inventing a value nobody measured, not reporting a real
-/// measurement that happens to be small. Absence of this series therefore means
-/// "no engine was opened in this process", never "replay was skipped".
+/// **Why a histogram and not a gauge, which is what one-sample-per-process argues
+/// for**: the gauge plane in this crate is `i64` (`Gauge<i64>`, and OTel's gauge
+/// builders here are `i64`/`u64`), and this value is sub-second in the common case.
+/// An `i64` gauge in base-unit SECONDS would report `0` for a 400 ms replay — a
+/// FABRICATED zero, which is the precise defect class epic #1686 exists to remove,
+/// and worse than the wart of a one-sample distribution. Reporting milliseconds
+/// instead would break the catalog's base-unit rule (see the `read.phase.*`
+/// naming note). So the instrument follows the value's precision, and every other
+/// duration in this catalog is an `f64` histogram in seconds anyway.
 ///
-/// **Healthy vs alarming**: near-zero on a clean shutdown; seconds means a crash
-/// left a large log, which directly delays open — pair it with [`WAL_SIZE`], whose
-/// growth is what makes this number grow. **Attributes**: none.
+/// **Recorded unconditionally at every engine open, including the 0-entry case**: a
+/// fresh WAL with nothing to replay genuinely took ~0s, and that IS a measurement —
+/// the absence rule forbids inventing a value nobody measured, not reporting a real
+/// one that happens to be small. It is also recorded when replay found CORRUPTION,
+/// before the lossy-recovery branch, because that is exactly when an operator cares
+/// what open cost. Absence of this series therefore means "no engine was opened in
+/// this process", never "replay was skipped".
+///
+/// **Healthy vs alarming**: near-zero after a clean shutdown; seconds means a crash
+/// left a large log to replay, which directly delays open — pair it with
+/// [`WAL_SIZE`], whose growth is what makes this number grow. **Attributes**: none.
 pub const WAL_REPLAY_DURATION: &str = "cqlite.wal.replay.duration";
 
 /// `cqlite.flush.duration` — histogram `s`.
