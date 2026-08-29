@@ -119,10 +119,18 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # The two ENDS of the advertised range. Interior versions are covered
+        # The ENDS of the advertised range. Interior versions are covered
         # transitively by abi3 plus the 3.12 `test` job; testing the boundaries
         # is what catches a floor/ceiling claim going stale.
-        python: ["3.9", "3.13"]
+        #
+        # `requires-python = ">=3.9"` is deliberately UNBOUNDED (capping it is a
+        # packaging anti-pattern — it cannot be relaxed retroactively for an
+        # already-published release), so the top of the advertised range is
+        # simply the newest released CPython, NOT the newest classifier. That
+        # makes this list time-sensitive: when 3.15 ships it belongs here and in
+        # the classifier list, in one commit. Issue #1459 was filed when 3.13 was
+        # newest; 3.14 is the top today.
+        python: ["3.9", "3.13", "3.14"]
 
     steps:
       - name: Checkout
@@ -546,7 +554,7 @@ jobs:
             echo ""
             echo "### Tier"
             echo "- Ordinary PRs run one Ubuntu Python 3.12 wheel build plus non-dataset smoke pytest files."
-            echo "- Every PR also runs a floor smoke on Python 3.9 and 3.13, reusing the abi3 wheel from the smoke job. Each leg restores the canonical corpus and runs one real query, failing on a 0-row result (issue #1459)."
+            echo "- Every PR also runs a floor smoke on Python 3.9, 3.13 and 3.14 — the floor and the top of the advertised range — reusing the abi3 wheel from the smoke job. Each leg restores the canonical corpus and runs one real query, failing on a 0-row result (issue #1459)."
             echo "- Full cross-platform wheel builds, the full dataset-backed pytest suite, slow CLI parity, and wheel artifacts run on push to main, nightly schedule, workflow_dispatch, or PRs labeled \`ci:bindings-full\`."
             echo ""
           } >> "$GITHUB_STEP_SUMMARY"

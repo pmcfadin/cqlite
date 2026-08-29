@@ -539,7 +539,7 @@ jobs:
           if [ "${RUN_FULL}" = "true" ]; then
             echo "Tests passed on 3 native platforms (ARM64 Linux and x86_64 macOS are build-only)" >> "$GITHUB_STEP_SUMMARY"
           else
-            echo "Smoke checks passed on Ubuntu without fetching the dataset corpus." >> "$GITHUB_STEP_SUMMARY"
+            echo "Smoke checks passed on Ubuntu: the \`smoke\` job itself is dataset-free, while both floor legs (Node 18.17.0 and 20.3.0) restored the canonical corpus and ran one real query (issue #1459)." >> "$GITHUB_STEP_SUMMARY"
           fi
           {
             echo ""

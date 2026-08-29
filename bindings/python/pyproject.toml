@@ -24,10 +24,13 @@ classifiers = [
     "Programming Language :: Python :: 3.10",
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
-    # 3.13 is claimed only because the floor matrix actually exercises it
-    # (issue #1459); 3.10/3.11 are covered transitively by abi3 plus the two
-    # tested boundaries.
+    # 3.13 and 3.14 are claimed only because the floor matrix actually
+    # exercises them (issue #1459); 3.10/3.11 are covered transitively by abi3
+    # plus the tested boundaries. `requires-python` is unbounded, so the newest
+    # released CPython is part of the advertised range whether or not it is
+    # listed here — which is why it is TESTED, not merely claimed.
     "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
     "Programming Language :: Python :: Implementation :: CPython",
 ]
 
