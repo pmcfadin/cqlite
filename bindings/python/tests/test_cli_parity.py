@@ -837,6 +837,14 @@ class TestCollectionIdentityContract:
     3-way golden parity harness (#1455, Y1) consumes is verified rather than
     aspirational.
 
+    The tests named `LIMITATION <id>` pin the four cases §5.3 lists as NOT
+    canonicalizable — a-1/a-2 (lossy projection through
+    `value_to_hashable_key`, which discards the CQL type) and b-1/b-2 (two CQL
+    types arriving as the same Python host shape). They record the divergent
+    shape as a GAP, never as a desirable canonical form. Closing any of them
+    requires the declared CQL type threaded into normalization, i.e. schema-aware
+    normalization: a behavior change, out of scope for #1454, tracked as #3497.
+
     These tests are intentionally pure: they feed the normalizer the host values
     the Python binding is documented to produce (`bindings/python/src/value.rs`:
     `list_to_py`, `set_to_py`, `map_to_py`, `tuple_to_py`,
@@ -882,7 +890,7 @@ class TestCollectionIdentityContract:
         ]
 
     def test_set_of_frozen_udt_canonical_form_is_order_sensitive(self):
-        """LIMITATION: `set<frozen<udt>>` is NOT sorted, so its canonical form keeps order.
+        """LIMITATION b-1 (host-shape collision): `set<frozen<udt>>` is NOT sorted.
 
         Two structurally-equal UDT sets whose elements arrive in different orders
         normalize to DIFFERENT arrays and compare unequal. This is a documented
@@ -918,6 +926,62 @@ class TestCollectionIdentityContract:
             frozenset({"a", "b"}), is_row_level=False
         )
 
+    def test_map_nested_in_a_set_element_is_an_unsupported_projected_shape(self):
+        """LIMITATION a-2 (lossy projection): a `map` inside a set element does not canonicalize.
+
+        A `set<frozen<map<text,int>>>` element is routed through
+        `value_to_hashable_key`, whose `Value::Map` arm projects the map to a
+        **tuple of pairs** — so it normalizes to `[["a", 1]]`, while Node and the
+        CLI render that nested map as `[{"key": "a", "value": 1}]`. Different in
+        kind, not in ordering.
+
+        The contrast case below shows the same nested map in *value* position
+        canonicalizing correctly (it goes through `value_to_py` -> `dict`), which
+        is what makes this a projection defect rather than a map-rendering one.
+        Pinned as a recorded gap for #1455 (must treat it as UNSUPPORTED), not as
+        a desirable shape; the fix needs the declared type (#3497).
+        """
+        element = (("a", 1),)  # what value_to_hashable_key makes of {"a": 1}
+        assert normalize_python_value(frozenset({element}), is_row_level=False) == [[["a", 1]]]
+
+        # Contrast: the same nested map as a map VALUE canonicalizes correctly.
+        assert normalize_python_value({"k": {"a": 1}}, is_row_level=False) == [
+            {"key": "k", "value": [{"key": "a", "value": 1}]},
+        ]
+
+        # The enclosing set still SORTS (it is a frozenset); only the element shape diverges.
+        two = normalize_python_value(frozenset({(("a", 1),), (("b", 2),)}), is_row_level=False)
+        assert two == sorted(two, key=_sort_key)
+
+    def test_map_with_literal_type_key_is_misclassified_as_a_udt(self):
+        """LIMITATION b-2 (host-shape collision): a `map<text,X>` holding `"_type"` reads as a UDT.
+
+        `"_type"` and `"_keyspace"` are legal `text` map keys, and a CQL `map`
+        and a `udt` are both a Python `dict`, so the normalizer's
+        `if "_type" in value:` branch cannot tell them apart: such a map
+        normalizes to an **object** instead of the documented sorted array of
+        `{"key": ..., "value": ...}`, and a `"_keyspace"` entry is silently
+        **dropped** (the UDT branch filters it, since the CLI omits it for UDTs).
+
+        Pinned as a recorded gap, not a desirable shape. It is deliberately NOT
+        "fixed" by also requiring `_keyspace`: a legal map can carry both keys,
+        so that would only pick a rarer delimiter on an already-ambiguous channel
+        (the control/data lesson in CLAUDE.md). The real fix is the declared CQL
+        type (#3497); until then #1455 must treat such a map as UNSUPPORTED.
+        """
+        # A genuine map that happens to use "_type" as a key.
+        assert normalize_python_value({"_type": "not_a_udt", "a": 1}, is_row_level=False) == {
+            "_type": "not_a_udt",
+            "a": 1,
+        }
+        # ...and with a literal "_keyspace" entry, that entry is dropped outright.
+        assert normalize_python_value(
+            {"_type": "not_a_udt", "_keyspace": "ks", "a": 1}, is_row_level=False
+        ) == {"_type": "not_a_udt", "a": 1}
+
+        # Contrast: a map without "_type" canonicalizes as documented.
+        assert normalize_python_value({"a": 1}, is_row_level=False) == [{"key": "a", "value": 1}]
+
     def test_map_is_a_sorted_array_of_key_value_objects(self):
         """`map<k,v>` → Python `dict` → sorted array of `{"key": k, "value": v}` (asymmetry row 2)."""
         assert normalize_python_value({"b": 2, "a": 1}, is_row_level=False) == [
@@ -932,7 +996,7 @@ class TestCollectionIdentityContract:
         ]
 
     def test_map_with_udt_key_is_an_unsupported_divergent_shape(self):
-        """LIMITATION: a UDT map key is NOT canonicalizable under this contract.
+        """LIMITATION a-1 (lossy projection): a UDT map key is NOT canonicalizable.
 
         `map_to_py` routes keys through `value_to_hashable_key`, which projects
         a UDT to a `frozenset` of `(field_name, value)` pairs, so the Python key
