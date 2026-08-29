@@ -256,11 +256,20 @@ fi
 #     file. Extract check_no_unexpected_zero_tests() VERBATIM from the gate (source
 #     of truth, no re-typed copy to drift) and drive it against synthetic cargo-style
 #     "Running tests/<name>.rs" / "test result:" log text.
+#     The extraction must carry _ansi_stripped_log TOO (issue #3400): the guard now parses an
+#     ANSI-STRIPPED COPY of the log, so without the helper every case below fail-closes with
+#     "resolved to <empty>" — measured PASS=20 FAIL=3 — and because this test runs in
+#     `tooling-tests`, a FULL-gate-only component, no `--lite` run can see it. In the real gate
+#     the helper reaches this `bash -c` body via `export -f`; here it has to be extracted.
+HELPER_SRC=$(awk '/^_ansi_stripped_log\(\) \{/{f=1} f{print} f&&/^\}$/{exit}' "$GATE")
 FUNC_SRC=$(awk '/^  check_no_unexpected_zero_tests\(\) \{/{f=1} f{print} f&&/^  \}$/{exit}' "$GATE")
-if [ -z "$FUNC_SRC" ]; then
+if [ -z "$HELPER_SRC" ]; then
+  bad "could not extract _ansi_stripped_log() from $GATE — the guard calls it, and without it every case below fail-closes on an empty parse source"
+elif [ -z "$FUNC_SRC" ]; then
   bad "could not extract check_no_unexpected_zero_tests() from $GATE"
 else
-  ok "extracted check_no_unexpected_zero_tests() from the gate for behavioral testing"
+  ok "extracted check_no_unexpected_zero_tests() + _ansi_stripped_log() from the gate for behavioral testing"
+  eval "$HELPER_SRC"
   eval "$FUNC_SRC"
 
   mkdir -p "$tmp/zg"
