@@ -9,7 +9,7 @@
 # copy of the tree), rewrites the three recorded lists for that tree, and asserts
 # the verdict.
 #
-# SIX GREEN CONTROLS, not one. Without a green control per shape, a guard
+# SEVEN GREEN CONTROLS, not one. Without a green control per shape, a guard
 # hardwired to refuse everything — or one that rejects every MIXED crate, or every
 # crate with a real dependent — would satisfy all the red cases and look tested.
 set -uo pipefail
@@ -44,16 +44,36 @@ fail_case() { echo "FAIL: $*" >&2; fails=$((fails + 1)); }
 #                 `[target.'cfg(...)'.dependencies]` table). The latter two are the
 #                 shapes `cargo tree` hides unless queried with `--all-features`
 #                 and `--target all` (roborev job 79).
+#   mixed-live  : 8th arg, the MIXED_LIVE body (`<crate>|dependency` or
+#                 `<crate>|invoked:<bin>,...`). Defaults to `<mixed>|dependency`.
 #   a literal "-" for any list means "empty list"
 make_ws() {
-  local case_name="$1" wired="$2" unwired="$3" mixed="$4" disk="$5" readmes="${6:-}" consumer_of="${7:-}"
+  local case_name="$1" wired="$2" unwired="$3" mixed="$4" disk="$5" readmes="${6:-}" consumer_of="${7:-}" mixed_live="${8:-}"
+  # "-" means "use the default"; "NONE" means a genuinely EMPTY MIXED_LIVE, which
+  # is what an UNRECORDED MIXED crate looks like and cannot be expressed by "-"
+  # (the default would fill it back in).
+  [ "$mixed_live" = "-" ] && mixed_live=""
+  # default: any MIXED crate is recorded as live-via-dependency
+  if [ "$mixed_live" = "NONE" ]; then
+    mixed_live=""
+  elif [ -z "$mixed_live" ] && [ -n "$mixed" ] && [ "$mixed" != "-" ]; then
+    mixed_live="$mixed|dependency"
+  fi
   local ws="$TMPROOT/$case_name" c spec crate kind
   mkdir -p "$ws/src" "$ws/scripts/tests"
   for c in $disk; do
     mkdir -p "$ws/tools/$c/src"
-    printf '[package]\nname = "scratch-%s"\nversion = "0.1.0"\nedition = "2021"\npublish = false\n' "$c" \
-      > "$ws/tools/$c/Cargo.toml"
+    {
+      printf '[package]\nname = "scratch-%s"\nversion = "0.1.0"\nedition = "2021"\npublish = false\n' "$c"
+      # Two [[bin]] targets, so a crate can legitimately be MIXED with one bin
+      # invoked by CI and the other orphaned — the shape that has NO reverse cargo
+      # dependency at all (roborev job 83).
+      printf '\n[[bin]]\nname = "live-bin"\npath = "src/live.rs"\n'
+      printf '\n[[bin]]\nname = "dead-bin"\npath = "src/dead.rs"\n'
+    } > "$ws/tools/$c/Cargo.toml"
     : > "$ws/tools/$c/src/lib.rs"
+    printf 'fn main() {}\n' > "$ws/tools/$c/src/live.rs"
+    printf 'fn main() {}\n' > "$ws/tools/$c/src/dead.rs"
   done
   {
     echo '[workspace]'
@@ -101,6 +121,8 @@ make_ws() {
       labeled)      printf '# scratch %s\n\nThis crate is NOT CI-wired.\n' "$crate" ;;
       namesdep)     printf '# scratch %s\n\nIts binaries are NOT CI-wired; its library is used by scratch-consumer.\n' "$crate" ;;
       genericwired) printf '# scratch %s\n\nPreviously WIRED, now entirely NOT CI-wired.\n' "$crate" ;;
+      namesbins)    printf '# scratch %s\n\nCI runs live-bin; the other binaries are NOT CI-wired.\n' "$crate" ;;
+      namesnobins)  printf '# scratch %s\n\nSome binaries are NOT CI-wired.\n' "$crate" ;;
       *)            printf '# scratch %s\n\nProse that never says whether anything runs it.\n' "$crate" ;;
     esac > "$ws/tools/$crate/README.md"
   done
@@ -115,11 +137,12 @@ make_ws() {
   # `"`-terminated line — `LABEL_MARKER=` — leaving every scratch guard with an
   # unbound variable. It broke the GREEN control rather than producing a wrong
   # verdict, which is why the green controls exist.
-  awk -v w="$wired" -v u="$unwired" -v m="$mixed" '
+  awk -v w="$wired" -v u="$unwired" -v m="$mixed" -v ml="$mixed_live" '
     function multiline(line) { return gsub(/"/, "\"", line) < 2 }
     /^WIRED_TOOLS="/   { print "WIRED_TOOLS=\"" w "\"";   skip=multiline($0); next }
     /^UNWIRED_TOOLS="/ { print "UNWIRED_TOOLS=\"" u "\""; skip=multiline($0); next }
     /^MIXED_TOOLS="/   { print "MIXED_TOOLS=\"" m "\"";   skip=multiline($0); next }
+    /^MIXED_LIVE="/    { print "MIXED_LIVE=\"" ml "\"";    skip=multiline($0); next }
     skip && /"$/ { skip=0; next }
     skip { next }
     { print }
@@ -226,7 +249,7 @@ expect_red "MIXED README carries the word WIRED but never names its dependent (r
   job78 'wiredone' '-' 'mixedone' 'wiredone mixedone' 'mixedone:genericwired' 'mixedone'
 
 expect_red "MIXED recorded but NOTHING in the workspace depends on it" \
-  "the 'live half' claim is unsupported" \
+  "recorded MIXED via 'dependency' but NO workspace package depends on it" \
   mixednodep 'wiredone' '-' 'mixedone' 'wiredone mixedone' 'mixedone:namesdep'
 
 expect_red "UNWIRED recorded but a workspace package DOES depend on it" \
@@ -364,6 +387,41 @@ else
   printf '%s\n' "$out" | sed 's/^/    /' >&2
 fi
 
+# --- roborev job 83: a MIXED crate whose live half is an INVOKED BINARY, not a
+# --- library dependency. A multi-binary tool with one bin wired into CI and
+# --- another orphaned has NO reverse cargo dependency at all, so requiring a
+# --- workspace dependent for every MIXED crate REJECTED a correct classification
+# --- and told its author to record it UNWIRED — which is false.
+expect_green "GREEN 7 (MIXED via an INVOKED BINARY, no workspace dependent at all) PASSes" \
+  invokedmixed 'wiredone' '-' 'mixedone' 'wiredone mixedone' 'mixedone:namesbins' '' 'mixedone|invoked:live-bin'
+
+# ...and the recorded form is still CROSS-CHECKED, so "invoked:" is not a way to
+# assert anything you like: the target must be a DECLARED [[bin]], and the README
+# must name it.
+expect_red "MIXED invoked target that is not a declared [[bin]]" \
+  "declares no [[bin]] by that name" \
+  invokedghost 'wiredone' '-' 'mixedone' 'wiredone mixedone' 'mixedone:namesbins' '' 'mixedone|invoked:no-such-bin'
+
+expect_red "MIXED invoked target never named in the README" \
+  "never mentions 'dead-bin'" \
+  invokedunnamed 'wiredone' '-' 'mixedone' 'wiredone mixedone' 'mixedone:namesnobins' '' 'mixedone|invoked:dead-bin'
+
+expect_red "MIXED crate with no MIXED_LIVE entry at all" \
+  "has no entry in MIXED_LIVE" \
+  nolive 'wiredone' '-' 'mixedone' 'wiredone mixedone' 'mixedone:namesbins' '' 'NONE'
+
+expect_red "MIXED_LIVE kind that is neither 'dependency' nor 'invoked:'" \
+  "unrecognised MIXED_LIVE kind" \
+  badkind 'wiredone' '-' 'mixedone' 'wiredone mixedone' 'mixedone:namesbins' '' 'mixedone|sortof'
+
+expect_red "MIXED_LIVE with an empty invoked target list" \
+  "names no target" \
+  emptyinvoked 'wiredone' '-' 'mixedone' 'wiredone mixedone' 'mixedone:namesbins' '' 'mixedone|invoked:'
+
+expect_red "stale MIXED_LIVE entry for a crate that is not MIXED" \
+  "which is not in MIXED_TOOLS" \
+  stalelive 'wiredone' 'orphanone' '-' 'wiredone orphanone' 'orphanone:labeled' '' 'ghostcrate|dependency'
+
 # --- fail-closed on an absent subject
 ws=$(make_ws notools 'wiredone' 'orphanone' '-' 'wiredone orphanone' 'orphanone:labeled')
 rm -rf "$ws/tools"
@@ -382,4 +440,4 @@ if [ "$fails" -ne 0 ]; then
   echo "FAIL: $fails tools/ disposition self-test case(s) failed" >&2
   exit 1
 fi
-echo "PASS: tools/ crate disposition self-test (#1716) — 6 green controls + 19 negative controls"
+echo "PASS: tools/ crate disposition self-test (#1716) — 7 green controls + 25 negative controls"

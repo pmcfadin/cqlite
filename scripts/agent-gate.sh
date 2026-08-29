@@ -217,8 +217,12 @@
 #                      so. TWO HALVES: "something DEPENDS on it" is DERIVED from
 #                      cargo tree --workspace --invert and CROSS-CHECKED (UNWIRED
 #                      must have ZERO workspace dependents, MIXED at least one, and
-#                      a MIXED README must NAME its real dependents), so neither
-#                      category can be asserted falsely in either direction;
+#                      a MIXED README must NAME its live half). A MIXED crate
+#                      records WHICH half is live — `dependency` (derived from
+#                      cargo) or `invoked:<bin>` (recorded, but cross-checked
+#                      against the declared [[bin]]s), because a multi-binary tool
+#                      with one bin wired and one orphaned has NO reverse cargo
+#                      dependency at all; so no category can be asserted falsely;
 #                      "something RUNS it" is not mechanically checkable, so it
 #                      stays recorded + diff-reviewed, never grep-inferred.
 #                      Needs cargo (always present in a gate); no python3/Docker.

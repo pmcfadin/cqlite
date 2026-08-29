@@ -222,10 +222,14 @@ tools/           # 7 crates, each with a RECORDED disposition in one of THREE
                  #             name BOTH halves, and the crate must stay a
                  #             workspace member — never `exclude` it.
                  #   A NEW tools/ crate must be classified there or the gate FAILs.
-                 #   The DEPENDENCY half is DERIVED (cargo tree --workspace
-                 #   --invert) and cross-checked both ways, so UNWIRED/MIXED
-                 #   cannot be claimed falsely; only "something RUNS it" is
-                 #   recorded by hand.
+                 #   A MIXED crate records WHICH half is live, in one of two
+                 #   kinds: `dependency` (a library some workspace package needs
+                 #   — DERIVED from `cargo tree --workspace --invert`, so it
+                 #   cannot be claimed falsely) or `invoked:<bin>` (binaries CI
+                 #   runs — recorded, since invocation is not mechanically
+                 #   checkable, but each target is still cross-checked against
+                 #   the crate's declared [[bin]]s). Both require the README to
+                 #   NAME the live half.
 fuzz/            # cargo-fuzz crate — own workspace, EXCLUDED from the main one
 ```
 

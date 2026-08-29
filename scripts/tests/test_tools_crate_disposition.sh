@@ -86,6 +86,23 @@ memory-safety-runner"
 #   asserted on by xtask/src/oom_audit/scope.rs. NEVER workspace-`exclude` it.
 MIXED_TOOLS="format-validator"
 
+# For each MIXED crate, WHAT its live half is. Two kinds exist because "live" has
+# two sources, and only one of them is derivable (roborev job 83):
+#
+#   dependency      the live half is a LIBRARY some workspace package depends on.
+#                   DERIVED from cargo; the README must name the real dependents.
+#   invoked:a,b,... the live half is BINARIES that CI invokes. Invocation is NOT
+#                   mechanically checkable, so the target names are RECORDED — but
+#                   each is still cross-checked against the crate's DECLARED
+#                   [[bin]] targets, and the README must name each one.
+#
+# The second kind exists because requiring a workspace dependent for every MIXED
+# crate rejected a legitimate shape: a multi-binary tool with one bin wired into CI
+# and another orphaned has NO reverse cargo dependency at all, and the guard would
+# have told its author to record it UNWIRED — which is false.
+# Format: <crate>|<kind>. Every MIXED crate must appear here or the guard FAILs.
+MIXED_LIVE="format-validator|dependency"
+
 # The marker every README with orphaned targets must contain, so the label states
 # the actual fact rather than merely existing as a file.
 LABEL_MARKER="NOT CI-wired"
@@ -95,6 +112,38 @@ LABEL_MARKER="NOT CI-wired"
 
 fail() { echo "FAIL: $*" >&2; exit 1; }
 ok()   { echo "ok: $*"; }
+
+# The recorded live-half KIND for a MIXED crate, from MIXED_LIVE. Returns non-zero
+# when the crate has no entry, so an unrecorded MIXED crate fails closed rather
+# than defaulting to either kind.
+mixed_live_kind() {
+  local crate="$1" line
+  line=$(printf '%s\n' "$MIXED_LIVE" | grep "^$crate|" | head -1)
+  [ -n "$line" ] || return 1
+  printf '%s\n' "${line#*|}"
+}
+
+# The [[bin]] target names declared by tools/<dir>/Cargo.toml. Used to cross-check
+# a RECORDED invoked target against something mechanical: a target CI supposedly
+# runs must at least EXIST. Returns non-zero if the manifest cannot be read (an
+# unreadable manifest is unmeasurable, not "no bins").
+declared_bins() {
+  # Two statements, not one: within a SINGLE `local`, bash creates every name
+  # before assigning them, so a later word referencing an earlier one expands an
+  # UNSET local and dies under `set -u` ("dir: unbound variable"). This only
+  # surfaced in the scratch self-tests, because the real repo's one MIXED crate
+  # takes the `dependency` branch and never calls this function.
+  local dir="$1"
+  local manifest="$ROOT/tools/$dir/Cargo.toml"
+  [ -r "$manifest" ] || return 1
+  awk '
+    /^[[:space:]]*\[\[bin\]\]/ { inbin = 1; next }
+    /^[[:space:]]*\[/            { inbin = 0 }
+    inbin && /^[[:space:]]*name[[:space:]]*=/ {
+      if (match($0, /"[^"]+"/)) print substr($0, RSTART + 1, RLENGTH - 2)
+    }
+  ' "$manifest"
+}
 
 # The PACKAGE name declared by tools/<dir>/Cargo.toml. The recorded lists and the
 # README live under the DIRECTORY name, but cargo is queried by PACKAGE name, and
@@ -327,23 +376,67 @@ if [ "$n_mixed" -gt 0 ]; then
   while IFS= read -r crate; do
     [ -n "$crate" ] || continue
     readme="$ROOT/tools/$crate/README.md"
-    pkg=$(package_name_of "$crate") \
-      || fail "cannot read the package name from tools/$crate/Cargo.toml — unmeasurable is not a pass"
-    deps=$(workspace_dependents "$pkg") \
-      || fail "cannot derive workspace dependents of tools/$crate (package '$pkg'; cargo tree --workspace --invert failed, or its output no longer contains the subject as the tree root) — unmeasurable is not a pass. If the cargo REGISTRY CACHE is cold this guard fails by design rather than reach the network: run \`cargo fetch --locked\` once. If cargo's tree FORMAT changed, fix the parser in $(basename "$0")."
-    [ -n "$deps" ] \
-      || fail "tools/$crate is recorded MIXED (some targets live, some orphaned) but NO workspace package depends on it — the 'live half' claim is unsupported. If nothing runs it either, it belongs in UNWIRED_TOOLS (issue #1716)."
-    # --- and its README must NAME each real dependent. The required strings are
-    # --- DERIVED above, so this cannot be satisfied by a generic word like
-    # --- "WIRED" that a README could carry while saying the opposite
-    # --- ("previously WIRED, now entirely NOT CI-wired") — roborev job 78.
-    while IFS= read -r dep; do
-      [ -n "$dep" ] || continue
-      grep -qF "$dep" "$readme" \
-        || fail "tools/$crate is recorded MIXED and '$dep' really does depend on it, but its README.md never mentions '$dep'. A mixed crate's label must NAME the live half — otherwise it reads as wholly dead and invites deleting or workspace-excluding the part '$dep' needs (issue #1716)."
-    done <<< "$deps"
-    ok "tools/$crate (MIXED) names its real dependent(s) in the README: $(printf '%s ' $deps)"
+    kind=$(mixed_live_kind "$crate") \
+      || fail "tools/$crate is recorded MIXED but has no entry in MIXED_LIVE — record WHAT its live half is ('$crate|dependency' if a workspace package depends on its library, or '$crate|invoked:<bin>[,<bin>...]' if CI runs some of its binaries). Refusing to guess (issue #1716)."
+    case "$kind" in
+      dependency)
+        # --- DERIVED: cargo must actually report a dependent, and the README must
+        # --- name each one.
+        pkg=$(package_name_of "$crate") \
+          || fail "cannot read the package name from tools/$crate/Cargo.toml — unmeasurable is not a pass"
+        deps=$(workspace_dependents "$pkg") \
+          || fail "cannot derive workspace dependents of tools/$crate (package '$pkg'; cargo tree --workspace --invert failed, or its output no longer contains the subject as the tree root) — unmeasurable is not a pass. If the cargo REGISTRY CACHE is cold this guard fails by design rather than reach the network: run \`cargo fetch --locked\` once. If cargo's tree FORMAT changed, fix the parser in $(basename "$0")."
+        [ -n "$deps" ] \
+          || fail "tools/$crate is recorded MIXED via 'dependency' but NO workspace package depends on it. If its live half is instead a BINARY that CI runs, record '$crate|invoked:<bin>' in MIXED_LIVE. If nothing runs it and nothing depends on it, it belongs in UNWIRED_TOOLS (issue #1716)."
+        while IFS= read -r dep; do
+          [ -n "$dep" ] || continue
+          grep -qF "$dep" "$readme" \
+            || fail "tools/$crate is recorded MIXED and '$dep' really does depend on it, but its README.md never mentions '$dep'. A mixed crate's label must NAME the live half — otherwise it reads as wholly dead and invites deleting or workspace-excluding the part '$dep' needs (issue #1716)."
+        done <<< "$deps"
+        ok "tools/$crate (MIXED via dependency) names its real dependent(s) in the README: $(printf '%s ' $deps)"
+        ;;
+      invoked:*)
+        # --- RECORDED, but still cross-checked: a target CI supposedly runs must at
+        # --- least be DECLARED as a [[bin]], and the README must name it. This is
+        # --- the shape that has no reverse cargo dependency at all — a multi-binary
+        # --- tool with one bin wired and another orphaned (roborev job 83).
+        targets="${kind#invoked:}"
+        [ -n "$targets" ] \
+          || fail "tools/$crate is recorded MIXED via 'invoked:' but names no target — record which binaries CI runs, e.g. '$crate|invoked:<bin>' (issue #1716)."
+        bins=$(declared_bins "$crate") \
+          || fail "cannot read tools/$crate/Cargo.toml to list its [[bin]] targets — unmeasurable is not a pass"
+        n_checked=0
+        old_ifs=$IFS; IFS=','
+        for target in $targets; do
+          IFS=$old_ifs
+          [ -n "$target" ] || continue
+          printf '%s\n' "$bins" | grep -qxF "$target" \
+            || fail "tools/$crate records invoked target '$target' in MIXED_LIVE, but the crate declares no [[bin]] by that name (declared: $(printf '%s ' $bins)) — a target CI runs must at least exist (issue #1716)."
+          grep -qF "$target" "$readme" \
+            || fail "tools/$crate records invoked target '$target' as its live half, but its README.md never mentions '$target'. A mixed crate's label must NAME the live half, or the crate reads as wholly dead (issue #1716)."
+          n_checked=$((n_checked + 1))
+          IFS=','
+        done
+        IFS=$old_ifs
+        [ "$n_checked" -gt 0 ] \
+          || fail "tools/$crate is recorded MIXED via 'invoked:$targets' but no target was actually checked — refusing to pass vacuously"
+        ok "tools/$crate (MIXED via $n_checked invoked target(s)) declares and documents each: $targets"
+        ;;
+      *)
+        fail "tools/$crate has an unrecognised MIXED_LIVE kind '$kind' — the only accepted forms are 'dependency' and 'invoked:<bin>[,<bin>...]'. An unrecognised value is refused rather than treated as either (issue #1716)."
+        ;;
+    esac
   done <<< "$mixed_sorted"
 fi
+
+# --- 6. every MIXED_LIVE entry must name a crate that IS recorded MIXED, so a
+# ---    stale entry cannot sit there implying coverage it does not provide.
+while IFS= read -r entry; do
+  [ -n "$entry" ] || continue
+  entry_crate="${entry%%|*}"
+  printf '%s\n' "$mixed_sorted" | grep -qxF "$entry_crate" \
+    || fail "MIXED_LIVE has an entry for '$entry_crate', which is not in MIXED_TOOLS — remove the stale entry (issue #1716)"
+done <<< "$(printf '%s\n' "$MIXED_LIVE" | grep .)"
+ok "every MIXED_LIVE entry corresponds to a recorded MIXED crate"
 
 echo "PASS: tools/ crate disposition census (#1716)"
