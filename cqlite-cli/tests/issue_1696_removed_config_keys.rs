@@ -26,8 +26,8 @@
 
 use std::fs;
 
+use cqlite_cli::config::removed_keys::{warning_for_file, REMOVED_KEYS};
 use cqlite_cli::config::Config;
-use cqlite_cli::config_removed_keys::{warning_for_file, REMOVED_KEYS};
 use tempfile::TempDir;
 
 /// A config naming every removed key alongside surviving ones, per format.

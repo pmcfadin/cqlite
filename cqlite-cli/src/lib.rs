@@ -22,11 +22,6 @@ pub mod cli;
 pub mod commands;
 pub mod config;
 
-// Deprecation reporting for REMOVED config-file keys (issue #1696). A LIBRARY
-// surface so each format's detection is directly testable: the CLI config is a
-// file surface, where serde would otherwise discard a removed key in silence.
-pub mod config_removed_keys;
-
 // CLI -> core configuration mapping (issue #1695): a LIBRARY surface so the
 // wiring of `performance.query_timeout_ms` onto the enforced
 // `query.max_execution_time` is end-to-end testable.

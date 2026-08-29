@@ -3,6 +3,10 @@ use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::{Path, PathBuf};
 
+/// Deprecation reporting for REMOVED config-file keys (issue #1696).
+#[path = "config_removed_keys.rs"]
+pub mod removed_keys;
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Config {
     pub default_database: Option<PathBuf>,
@@ -334,7 +338,7 @@ impl Config {
         // gone — so the raw document is the only place this can be seen. The file
         // still loads: the posture is parse-and-ignore PLUS a named warning, not
         // `deny_unknown_fields`, because our own shipped example named these keys.
-        // See `crate::config_removed_keys` for the full rationale.
+        // See the `removed_keys` submodule for the full rationale.
         Self::warn_about_removed_keys(path, &content);
 
         let config: Config = match path.extension().and_then(|ext| ext.to_str()) {
@@ -360,7 +364,7 @@ impl Config {
     /// entirely to the real parse in [`Self::load_from_file`], which owns the
     /// error message.
     fn warn_about_removed_keys(path: &Path, content: &str) {
-        if let Some(warning) = crate::config_removed_keys::warning_for_file(path, content) {
+        if let Some(warning) = removed_keys::warning_for_file(path, content) {
             eprintln!("{warning}");
         }
     }

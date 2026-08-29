@@ -168,7 +168,7 @@ impl Document {
 /// The deprecation warning a config FILE should produce, or `None` when it names
 /// no removed keys (or is not an inspectable config format).
 ///
-/// The single entry point [`crate::config::Config::load_from_file`] calls, and
+/// The single entry point [`super::Config::load_from_file`] calls, and
 /// the one an integration test can call for the same `(path, content)` pair — so
 /// the wiring has no private step a test cannot reach.
 pub fn warning_for_file(path: &std::path::Path, content: &str) -> Option<String> {
