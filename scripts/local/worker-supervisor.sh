@@ -678,6 +678,24 @@ stamp_claim() {
 # answer yes. A clean stop mid-issue (stop-file, budget) answers NO and deliberately leaves the ref —
 # that is the #2499 intent, an unfinished lane stays owned for adoption, and the CI reaper collects it
 # on age + no-open-PR + dead-pid once it is genuinely stale.
+# conclusion_matches_stamped_lane <marker-issue> — true when a terminal marker may conclude THIS lane.
+#
+# A CONCLUSION IS ABOUT AN ISSUE, AND THE FLAG IS ABOUT A LANE (roborev round 33, High). Both accept
+# points set `CLAIM_WORK_CONCLUDED=1` from the MARKER, without checking that the marker's issue is the
+# one this supervisor actually stamped. `CLAIM_ISSUE` is carried forward across iterations, so a
+# supervisor holding lane 88 whose worker finalises or parks issue 99 concluded 88 — and the shutdown
+# then deleted 88's liveness ref while its work was unresolved.
+#
+# A PLACEHOLDER or unstamped lane has no issue-linked ref to protect, so any conclusion is fine there.
+# A NUMERIC lane requires an exact match; a mismatch leaves the work unconcluded and the ref in place.
+conclusion_matches_stamped_lane() {
+  local marker_issue="${1:-}"
+  case "${CLAIM_STAMPED_ISSUE:-}" in
+    '' | p*) return 0 ;;
+    *) [[ "$marker_issue" == "$CLAIM_STAMPED_ISSUE" ]] ;;
+  esac
+}
+
 clear_claim() {
   [[ -n "$CLAIM_CMD" ]] || return 0
   local concluded="${1:-}"
@@ -1002,6 +1020,45 @@ journal_line() {
 # `awk` or `sed` — because this must also work under the stripped PATH the parser tests source with.
 # The basename stays readable so an operator can tell which lane owns which lock; the arithmetic hash
 # of the FULL path disambiguates two lanes whose directories share a basename.
+# supervisor_lane_id — echo a stable, lane-unique token derived from this lane's checkout root, using
+# BUILTINS ONLY (no `tr`/`cksum`/`awk`: several suite cases source this file under a stripped PATH, and a
+# source-time external tool broke them twice — #3464 family 2).
+supervisor_lane_id() {
+  local slug="${REPO_ROOT##*/}" full="$REPO_ROOT" i h=0 c
+  slug="${slug//[^A-Za-z0-9._-]/_}"
+  [[ -n "$slug" ]] || slug=lane
+  for ((i = 0; i < ${#full}; i++)); do
+    printf -v c '%d' "'${full:i:1}"
+    h=$(((h * 31 + c) & 0x7fffffff))
+  done
+  printf '%s-%s\n' "$slug" "$h"
+}
+
+# supervisor_claim_actor: EXPORT a lane-unique `CLAIM_ACTOR` unless the operator set one.
+#
+# THE CLAIM LOCK'S HOLDER IDENTITY IS machine+actor, AND THE DEFAULT ACTOR IS SHARED (roborev round 33,
+# High). `claim.sh` documents the hazard for the machine half — "two machines share one identity and each
+# treats the other's claim as its own (false re-entrancy / cross-release)" — and the actor exists precisely
+# so distinct roles on ONE box do not alias. Nothing set it: every lane defaulted to `flow`.
+#
+# That was harmless while a machine-global lock made a second lane impossible to start. THIS CHANGE made
+# the lock per-LANE, so two default lanes can now run — and with one holder identity between them,
+# `verify` can report that lane A holds lane B's claim and `release` can delete it. **Removing a coarse
+# guard exposed a finer defect the guard had been masking**, which is this change's own doing and so its
+# own responsibility.
+#
+# EXPORTED, not just set: `claim.sh` is invoked by the WORKER this supervisor spawns, which inherits the
+# environment. Setting it locally would leave the worker on the shared default.
+#
+# `claim.sh` sanitises the actor to one token and REFUSES fewer than 3 recordable characters, so the value
+# is prefixed `flow-` and carries the lane id — recognisable in a claim message and never degenerate.
+supervisor_claim_actor() {
+  [[ -n "${CLAIM_ACTOR:-}" ]] && return 0
+  CLAIM_ACTOR="flow-$(supervisor_lane_id)"
+  export CLAIM_ACTOR
+  log "claim actor defaulted to lane-unique '$CLAIM_ACTOR' (the claim lock's holder identity is machine+actor; a shared default would alias two lanes on one box)"
+}
+
 supervisor_lock_path() {
   [[ -n "$SUPERVISOR_LOCK" ]] && return 0
   local slug="${REPO_ROOT##*/}" full="$REPO_ROOT" i h=0 c
@@ -1016,6 +1073,7 @@ supervisor_lock_path() {
 
 acquire_lock() {
   supervisor_lock_path
+  supervisor_claim_actor
   if mkdir "$SUPERVISOR_LOCK" 2>/dev/null; then
     echo $$ >"$SUPERVISOR_LOCK/pid"
     trap 'rm -rf "$SUPERVISOR_LOCK" 2>/dev/null || true' EXIT
@@ -1535,8 +1593,13 @@ run_iteration() {
           merged)
             # EARNED HERE, and only here, for a finalize: the marker was well-formed AND the PR is
             # verified merged on GitHub. Anything less leaves the work unconcluded, so the lane keeps
-            # its claim ref (roborev round 24).
-            CLAIM_WORK_CONCLUDED=1
+            # its claim ref (roborev round 24). AND the marker's issue must be the lane this supervisor
+            # stamped (roborev round 33) — concluding a DIFFERENT issue's work must not release this one.
+            if conclusion_matches_stamped_lane "$issue"; then
+              CLAIM_WORK_CONCLUDED=1
+            else
+              log "WARN: marker finalises issue $issue but this lane stamped ${CLAIM_STAMPED_ISSUE:-<none>} — NOT concluding; lane ${CLAIM_STAMPED_ISSUE} keeps its ref"
+            fi
             CONSECUTIVE_ABNORMAL=0
             CONSECUTIVE_UNVERIFIED=0
             forget_pending_pr "$pr"
@@ -1653,7 +1716,13 @@ run_iteration() {
           # line of the question (the marker's optional "question" field).
           # EARNED HERE for a park: the issue is RELEASED — excluded from the next pickup until the
           # owner answers — so this lane no longer holds it and its ref should go on a clean exit.
-          CLAIM_WORK_CONCLUDED=1
+          # Same lane check as the finalize path (roborev round 33): a park of a DIFFERENT issue says
+          # nothing about the issue this lane stamped.
+          if conclusion_matches_stamped_lane "$issue"; then
+            CLAIM_WORK_CONCLUDED=1
+          else
+            log "WARN: marker parks issue $issue but this lane stamped ${CLAIM_STAMPED_ISSUE:-<none>} — NOT concluding; lane ${CLAIM_STAMPED_ISSUE} keeps its ref"
+          fi
           journal_line "$ITER" "parked-on-owner" "$issue" "$pr" "$duration" "$rc" "$reason"
           if [[ -n "$issue" && "$issue" == "$LAST_PARKED_ISSUE" ]]; then
             # Head-block-on-decision guard (mirrors the F2 blocked-path guard,

@@ -2871,6 +2871,56 @@ $ep_out"
   (cd "$WORK" && g push -q origin ":refs/lane-claims/epermBox/7302" 2>/dev/null || true)
 fi
 
+echo "TEST 79: a NONEXISTENT placeholder must answer 2 (no ref), not 1 (keep) (round 33)"
+# ===========================================================================
+# The placeholder no-auto-reap rule ran BEFORE the `ls-remote --exit-code` existence check, so
+# `should-reap <machine> pXXXX` returned 1 ("keep") for a lane that has no ref at all. The two answers
+# mean different things to a caller — 1 says "a claim exists and is alive", 2 says "there is nothing
+# here" — and a placeholder is the DEFAULT lane id, so this is the common path, not a corner. Ordering
+# is the whole fix: the rule is correct, it was just consulted about a subject that did not exist.
+missing_rc=0
+missing_out=$(cd "$WORK" && HEARTBEAT_MACHINE=phBox CLAIM_OPEN_PR_CMD="$NO_OPEN_PR" \
+  bash "$HB" should-reap phBox p999999 1 2>&1) || missing_rc=$?
+if [ "$missing_rc" -eq 2 ]; then
+  ok "a nonexistent placeholder lane answers rc=2 (no ref) — the documented confirmed-absence status"
+else
+  bad "nonexistent placeholder gave rc=$missing_rc (expected 2) out:
+$missing_out"
+fi
+# NON-VACUITY, and it must be true of the BROKEN code too: an EXISTING placeholder still KEEPS (rc=1)
+# under the placeholder rule. If this said 2 as well, the case above would be passing because
+# placeholders are unreachable rather than because the ordering was fixed.
+(
+  cd "$WORK" || exit 1
+  et=$(git hash-object -t tree --stdin </dev/null)
+  old_ts=$(date -u -r $(( $(date -u +%s) - 40000 )) +%Y-%m-%dT%H:%M:%SZ 2>/dev/null) \
+    || old_ts=$(date -u -d "@$(( $(date -u +%s) - 40000 ))" +%Y-%m-%dT%H:%M:%SZ)
+  cs=$(GIT_AUTHOR_DATE="$old_ts" GIT_COMMITTER_DATE="$old_ts" \
+    GIT_AUTHOR_NAME=t GIT_AUTHOR_EMAIL=t@t GIT_COMMITTER_NAME=t GIT_COMMITTER_EMAIL=t@t \
+    git commit-tree "$et" -m "claim machine=phBox ts=${old_ts}")
+  g push -q origin "${cs}:refs/lane-claims/phBox/p999998"
+)
+present_rc=0
+present_out=$(cd "$WORK" && HEARTBEAT_MACHINE=phBox CLAIM_OPEN_PR_CMD="$NO_OPEN_PR" \
+  bash "$HB" should-reap phBox p999998 1 2>&1) || present_rc=$?
+if [ "$present_rc" -eq 1 ]; then
+  ok "NON-VACUITY: an EXISTING placeholder still KEEPS (rc=1), so the rc=2 above is the ordering fix"
+else
+  bad "NON-VACUITY broken: an existing placeholder gave rc=$present_rc (expected 1) out:
+$present_out"
+fi
+# And a nonexistent NUMERIC lane must answer 2 as well — the two lane kinds agree about absence, which
+# is what makes 2 mean "no ref" rather than "no ref, unless the id looks like a placeholder".
+num_rc=0
+(cd "$WORK" && HEARTBEAT_MACHINE=phBox CLAIM_OPEN_PR_CMD="$NO_OPEN_PR" \
+  bash "$HB" should-reap phBox 999997 1 >/dev/null 2>&1) || num_rc=$?
+if [ "$num_rc" -eq 2 ]; then
+  ok "a nonexistent NUMERIC lane also answers rc=2 — absence is reported the same way for both kinds"
+else
+  bad "nonexistent numeric lane gave rc=$num_rc (expected 2)"
+fi
+(cd "$WORK" && g push -q origin ":refs/lane-claims/phBox/p999998" 2>/dev/null || true)
+
 echo
 echo "=== claim-heartbeat.sh: $PASS passed, $FAIL failed ==="
 [ "$FAIL" -eq 0 ]

@@ -3623,5 +3623,176 @@ t test_healthy_worker_iterlog_nonempty
 t test_claim_cmd_empty_truly_disables_no_network
 t test_real_pgrep_usages_are_pid_scoped
 t test_default_notify_path_publishes
+
+# ---------------------------------------------------------------------------
+# Test 29-claim (#3393, roborev round 33 High): the claim lock's holder identity is machine+ACTOR, and
+# every lane defaulted to the shared actor `flow`. Harmless while a machine-global lock made a second
+# lane impossible; THIS change made the lock per-lane, so two default lanes can now run and each would
+# read the other's claim as its own (`verify` false-positive / `release` cross-delete). Removing the
+# coarse guard exposed the finer defect it was masking.
+# ---------------------------------------------------------------------------
+test_claim_actor_is_lane_unique() {
+  local body a b same c e
+  body="$T_LOCKFN/actorfn.sh"
+  mkdir -p "$T_LOCKFN"
+  {
+    printf '%s\n' '#!/usr/bin/env bash'
+    printf '%s\n' 'log() { :; }'
+    sed -n '/^supervisor_lane_id()/,/^}/p' "$SUPERVISOR"
+    sed -n '/^supervisor_claim_actor()/,/^}/p' "$SUPERVISOR"
+    # Read it back out of the ENVIRONMENT, not the shell variable: the worker that calls claim.sh is a
+    # CHILD process, so a merely-set value would leave it on the shared default. `env` is the assertion.
+    printf '%s\n' 'supervisor_claim_actor; "$BASH" -c '"'"'printf "%s\n" "${CLAIM_ACTOR:-UNSET-IN-CHILD}"'"'"''
+  } >"$body"
+  a=$(CLAIM_ACTOR="" REPO_ROOT=/data/lanes/lane-1111 "$BASH" "$body")
+  b=$(CLAIM_ACTOR="" REPO_ROOT=/data/lanes/lane-2222 "$BASH" "$body")
+  same=$(CLAIM_ACTOR="" REPO_ROOT=/data/lanes/lane-1111 "$BASH" "$body")
+  if [[ "$a" != "UNSET-IN-CHILD" && "$a" != "$b" && "$a" == "$same" ]]; then
+    pass "claim-actor: EXPORTED to the child, lane-unique, and stable for one lane ($a vs $b)"
+  else
+    fail "claim-actor: a=[$a] b=[$b] same=[$same] — must reach the child, differ per lane, and be stable"
+  fi
+  c=$(CLAIM_ACTOR="" REPO_ROOT=/data/boxA/lane "$BASH" "$body")
+  e=$(CLAIM_ACTOR="" REPO_ROOT=/data/boxB/lane "$BASH" "$body")
+  if [[ "$c" != "$e" ]]; then
+    pass "claim-actor: two lanes sharing a directory BASENAME still get different actors"
+  else
+    fail "claim-actor-basename: both resolved to [$c]"
+  fi
+  # claim.sh REFUSES an actor with fewer than 3 recordable characters, so a degenerate value would be a
+  # fail-closed claim rather than an alias. Assert the shape the lock will actually accept.
+  if [[ "${#a}" -ge 3 && "$a" == flow-* && "$a" != *[!A-Za-z0-9._-]* ]]; then
+    pass "claim-actor: recordable single token >=3 chars, claim.sh-acceptable ($a)"
+  else
+    fail "claim-actor-shape: [$a] is not a recordable single token of >=3 chars"
+  fi
+  # An operator-set actor still wins — the fix must not seize the override.
+  local ov
+  ov=$(CLAIM_ACTOR=owner-run REPO_ROOT=/data/lanes/lane-1111 "$BASH" "$body")
+  if [[ "$ov" == "owner-run" ]]; then
+    pass "claim-actor: an explicit CLAIM_ACTOR is still honoured"
+  else
+    fail "claim-actor-override: got [$ov]"
+  fi
+  # Builtins only, same reason as the lock path (#3464 family 2): cases source this file under a
+  # stripped PATH. `$BASH` absolute, since PATH='' cannot find bash itself.
+  local stripped
+  stripped=$(CLAIM_ACTOR="" REPO_ROOT=/data/lanes/lane-1111 PATH="" "$BASH" "$body" 2>&1)
+  if [[ "$stripped" == "$a" ]]; then
+    pass "claim-actor: resolves with an EMPTY PATH — builtins only"
+  else
+    fail "claim-actor-builtins: with PATH='' got [$stripped], expected [$a]"
+  fi
+  # WIRED, not merely defined: the resolution must run on the documented path before any worker spawn.
+  # A helper nothing calls is #3464's check-whose-subject-never-ran family.
+  if grep -qE '^[[:space:]]*supervisor_claim_actor$' "$SUPERVISOR"; then
+    pass "claim-actor: supervisor_claim_actor is CALLED (not just defined)"
+  else
+    fail "claim-actor-unwired: supervisor_claim_actor is defined but never invoked"
+  fi
+}
+
+# ---------------------------------------------------------------------------
+# Test 30-claim (#3393, roborev round 33 High): A CONCLUSION IS ABOUT AN ISSUE, AND THE FLAG IS ABOUT A
+# LANE. A marker concluding issue 99 set the global flag while the stamped lane was issue 88, so
+# `clear_claim` could delete issue 88's liveness ref with its work unresolved.
+# ---------------------------------------------------------------------------
+test_conclusion_must_match_the_stamped_lane() {
+  local body out
+  body="$T_LOCKFN/conclfn.sh"
+  mkdir -p "$T_LOCKFN"
+  {
+    printf '%s\n' '#!/usr/bin/env bash'
+    sed -n '/^conclusion_matches_stamped_lane()/,/^}/p' "$SUPERVISOR"
+    printf '%s\n' 'CLAIM_STAMPED_ISSUE="$1"; if conclusion_matches_stamped_lane "$2"; then echo MATCH; else echo MISMATCH; fi'
+  } >"$body"
+  # The defect's exact shape: stamped 88, marker concludes 99.
+  out=$("$BASH" "$body" 88 99)
+  if [[ "$out" == "MISMATCH" ]]; then
+    pass "conclusion-lane: stamped 88 + marker concluding 99 is a MISMATCH (ref preserved)"
+  else
+    fail "conclusion-lane: stamped 88 / marker 99 reported [$out] — the round-33 defect"
+  fi
+  out=$("$BASH" "$body" 88 88)
+  if [[ "$out" == "MATCH" ]]; then
+    pass "conclusion-lane: the matching issue still concludes (the fix does not strand the normal path)"
+  else
+    fail "conclusion-lane: stamped 88 / marker 88 reported [$out] — over-tightened"
+  fi
+  # A PLACEHOLDER lane has no issue to match, and an EMPTY stamped value means no lease was recorded.
+  # Both must stay permissive, or a placeholder iteration could never conclude and its ref would be
+  # refused by automated reaping forever (the round-28/31 failure mode, in reverse).
+  out=$("$BASH" "$body" p1234 77)
+  if [[ "$out" == "MATCH" ]]; then
+    pass "conclusion-lane: a PLACEHOLDER stamped lane still concludes (no issue to match)"
+  else
+    fail "conclusion-lane-placeholder: reported [$out]"
+  fi
+  out=$("$BASH" "$body" "" 77)
+  if [[ "$out" == "MATCH" ]]; then
+    pass "conclusion-lane: an EMPTY stamped lane still concludes"
+  else
+    fail "conclusion-lane-empty: reported [$out]"
+  fi
+  # WIRED at BOTH accept points. The predicate exists to guard them; guarding one is half a fix.
+  local guarded
+  guarded=$(grep -cE 'conclusion_matches_stamped_lane' "$SUPERVISOR")
+  if [[ "$guarded" -ge 3 ]]; then
+    pass "conclusion-lane: the predicate guards both accept points ($guarded references incl. definition)"
+  else
+    fail "conclusion-lane-unwired: only $guarded reference(s) — definition plus BOTH accept points expected"
+  fi
+}
+
+# ---------------------------------------------------------------------------
+# Test 31-claim (#3393, roborev round 33 High, second half): the RETRACTED #1930 invariant in the
+# OPERATIVE worker contract. `.claude/commands/worker.md` is what a `/worker` session actually obeys, so
+# leaving "Exactly ONE flow-lead worker runs per machine" there means the second lane STOPS in preflight
+# and every mechanism this change adds is unreachable by the documented invocation. Third instance of
+# #3464's retracted-invariant-in-a-second-carrier family.
+# ---------------------------------------------------------------------------
+test_worker_contract_does_not_assert_one_worker_per_machine() {
+  local doc="$REPO_ROOT/.claude/commands/worker.md" bad=""
+  if [[ ! -r "$doc" ]]; then
+    fail "worker-contract: $doc is not readable — the carrier this case exists for is missing"
+    return 0
+  fi
+  # The retracted claim, in the spellings the file used. Comment lines are not a concern: this is
+  # markdown, all of it operative.
+  while IFS= read -r line; do bad="${bad}${line}\n"; done < <(
+    grep -nE 'Exactly ONE flow-lead worker|One worker per machine — you are the sole' "$doc" |
+      grep -v 'RETRACTED'
+  )
+  if [[ -z "$bad" ]]; then
+    pass "worker-contract: worker.md no longer asserts the retracted one-worker-per-machine invariant"
+  else
+    fail "worker-contract: retracted #1930 invariant still live in worker.md:\n$(printf '%b' "$bad")"
+  fi
+  # The retraction must be POSITIVE, not just an absence — a silent deletion leaves a reader with no
+  # statement either way, and #1930 is cited across the fleet docs.
+  if grep -q 'RETRACTED by #3393' "$doc"; then
+    pass "worker-contract: the retraction is stated explicitly, citing #3393"
+  else
+    fail "worker-contract: nothing in worker.md records that #1930 was retracted"
+  fi
+  # AND THE TRUE PARTS MUST SURVIVE. The retraction is scoped to the worker-COUNT invariant; the
+  # full-gate concurrency bound is a RESOURCE bound and still holds, and dropping it with the
+  # retraction would trade one wrong doc for another.
+  if grep -qE 'full-gate concurrency = \*\*1\*\*|full-gate concurrency = 1' "$doc"; then
+    pass "worker-contract: the surviving resource bound (full-gate concurrency = 1) is retained"
+  else
+    fail "worker-contract: the full-gate concurrency bound was dropped along with the retraction"
+  fi
+  # The actor requirement is the thing that makes multi-lane SAFE, so the contract must name it.
+  if grep -q 'CLAIM_ACTOR' "$doc"; then
+    pass "worker-contract: worker.md names the per-lane CLAIM_ACTOR requirement"
+  else
+    fail "worker-contract: multi-lane is now permitted but CLAIM_ACTOR is unmentioned"
+  fi
+}
+
+t test_claim_actor_is_lane_unique
+t test_conclusion_must_match_the_stamped_lane
+t test_worker_contract_does_not_assert_one_worker_per_machine
 echo "=== $PASS_COUNT passed, $FAIL_COUNT failed, $SKIP_COUNT skipped ==="
 [[ "$FAIL_COUNT" -eq 0 ]]

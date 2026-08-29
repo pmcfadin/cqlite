@@ -935,16 +935,6 @@ cmd_should_reap() {
   if [ -n "$issue" ]; then
     lane_id_ok "$issue" || die_usage "should-reap lane id must be an issue number or p<pid> (got '$issue')"
   fi
-  # A PLACEHOLDER LANE IS NEVER AUTOMATICALLY REAPED (roborev round 3, Medium). A `p…` id names no
-  # issue, so the open-PR guard has nothing to consult — and a worker can have claimed an issue and
-  # opened a PR before its supervisor ever received the marker, or left an auto-merge PR open after
-  # `CLAIM_ISSUE` was cleared. Reaping it would delete the claim of a lane with an unfinished
-  # endgame, which is the #2499 case the guard exists for. The owning supervisor still clears its own
-  # placeholder on clean exit by calling `reap` directly — it knows it is finished; a reaper cannot.
-  if [ -n "$issue" ] && lane_id_is_placeholder "$issue"; then
-    note "keep refs/lane-claims/${machine}/${issue}: placeholder lane id names no issue, so an open PR cannot be ruled out — never automatically reaped (#3393)"
-    return 1
-  fi
   local ref
   if [ -n "$issue" ]; then
     ref="$(lane_claim_ref "$machine" "$issue")"
@@ -973,6 +963,22 @@ cmd_should_reap() {
       return 1
       ;;
   esac
+  # A PLACEHOLDER LANE IS NEVER AUTOMATICALLY REAPED (roborev round 3, Medium). A `p…` id names no
+  # issue, so the open-PR guard has nothing to consult — and a worker can have claimed an issue and
+  # opened a PR before its supervisor ever received the marker, or left an auto-merge PR open after
+  # `CLAIM_ISSUE` was cleared. Reaping it would delete the claim of a lane with an unfinished
+  # endgame, which is the #2499 case the guard exists for. The owning supervisor still clears its own
+  # placeholder on clean exit by calling `reap` directly — it knows it is finished; a reaper cannot.
+  #
+  # ORDERED AFTER THE EXISTENCE CHECK (roborev round 33, Medium). This rule used to run FIRST, so
+  # querying a placeholder that does not exist answered 1 ("keep") instead of the documented 2 ("no
+  # ref") — a caller distinguishing "owned" from "absent" got the wrong one of the two, and 1 is the
+  # answer that says something is there. The keep-rule is about a ref that EXISTS and cannot be
+  # checked against an open PR; it has nothing to say about a ref that is not there.
+  if [ -n "$issue" ] && lane_id_is_placeholder "$issue"; then
+    note "keep refs/lane-claims/${machine}/${issue}: placeholder lane id names no issue, so an open PR cannot be ruled out — never automatically reaped (#3393)"
+    return 1
+  fi
 
   # `pid` is OPTIONAL, and after round 5 that needed saying in code (roborev round 6, Low).
   # `ref_msg_field` now fails when a field is ABSENT — correct for the open-PR safeguard — but under
