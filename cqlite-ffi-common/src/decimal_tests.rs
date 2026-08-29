@@ -195,18 +195,26 @@ fn magnitude_past_the_ceiling_is_refused() {
     );
 }
 
-/// The refusal is an O(1) length check, taken BEFORE the base conversion: a
-/// ~415 KB magnitude must be rejected fast, not converted and then rejected.
+/// A ~415 KB magnitude — far beyond any realistic value — is refused, and refused
+/// by the O(1) length check that precedes the single base conversion.
+///
+/// The ordering is STRUCTURAL in `decimal_to_string`: the `unscaled.len()` test
+/// returns before `BigInt::from_signed_bytes_be` is ever called. It is asserted
+/// here by outcome rather than by an elapsed-time threshold on purpose — a
+/// wall-clock bound in a correctness test is a flake class (CLAUDE.md #2642), and
+/// a reordering would make this case pathologically slow, which surfaces as a
+/// suite timeout rather than as a silent pass.
 #[test]
-fn refusal_is_taken_before_the_base_conversion() {
+fn a_pathological_magnitude_is_refused_by_the_length_check() {
     let unscaled = vec![0xff; 415_000];
-    let start = std::time::Instant::now();
     let err = decimal_to_string(0, &unscaled).expect_err("beyond the ceiling must fail closed");
-    let elapsed = start.elapsed();
-    assert!(matches!(err, DecimalError::UnscaledTooLarge { .. }));
-    assert!(
-        elapsed < std::time::Duration::from_millis(500),
-        "expected an O(1) rejection, took {elapsed:?} — the base conversion ran"
+    assert_eq!(
+        err,
+        DecimalError::UnscaledTooLarge {
+            scale: 0,
+            unscaled_len: 415_000,
+            max_unscaled_bytes: DECIMAL_MAX_UNSCALED_BYTES,
+        }
     );
 }
 

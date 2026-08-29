@@ -13,10 +13,7 @@
 pub mod config;
 pub mod cql;
 pub mod error;
-// The shared FFI error contract both bindings consume moved OUT of this crate to
-// `cqlite-ffi-common` (issue #1452): it is pure binding-facing data, and one item
-// gets exactly one import path — `cqlite_ffi_common::error_contract`. No
-// deprecated re-export is left behind here on purpose (issue #1452 design D5).
+// FFI error contract moved to `cqlite_ffi_common::error_contract` (#1452; no re-export, see CHANGELOG).
 pub(crate) mod float_cmp;
 pub mod parser;
 pub mod types;
