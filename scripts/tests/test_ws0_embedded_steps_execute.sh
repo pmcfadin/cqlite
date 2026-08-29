@@ -51,9 +51,13 @@
 #   * both embedded steps EXECUTED, with the argv and the environment the driver gives them, over a
 #     few-KB fixture corpus: exit 0, the artifact written, the pin lines on stdout, and the SHIPPED
 #     READER (`verify_session_corpus_pin` / `verify_pinning_record`) accepting what the step wrote;
-#   * the environment-variable names the corpus-pin step reads are DERIVED from the shipped
-#     `ws0_session.MANIFEST_CONFIG_FIELDS` and asserted equal to it, so a field added there without
-#     a driver export is a failure here rather than a refusal at report time;
+#   * THREE SETS OF ENVIRONMENT-VARIABLE NAMES AGREE: the names THE DRIVER EXPORTS (read from its
+#     bash source), the shipped `ws0_session.MANIFEST_CONFIG_FIELDS` (read by importing it), and
+#     the environment this suite builds. Executing the blocks alone cannot see a renamed export —
+#     the python is untouched, so the census, the compile check and the execute cases all stay
+#     green while the real rig hits the step's own `FATAL: … was not exported` and its caller
+#     exits 2, i.e. #3451's exact symptom. The same cross-check covers the CPU-pin step's four
+#     `WS0_PIN_*` inputs, there against the literal names the extracted block reads;
 #   * EVERY embedded block in the driver COMPILES — the total property, so instance #8 anywhere in
 #     that file is caught and not only the two steps this issue repaired;
 #   * EVERY embedded block parses on EVERY INTERPRETER THIS REPOSITORY RUNS, not merely on this
@@ -74,6 +78,14 @@
 #     step's python runs; that the driver's env exports match the names the block reads is asserted
 #     structurally (the `MANIFEST_CONFIG_FIELDS` equality above and the driver's own fatal-on-absent
 #     branch, exercised below), not by executing the shell around it.
+#   * THE BASH ERROR HANDLING AROUND THE STEPS. This suite executes the embedded PYTHON; the
+#     `|| { echo "FATAL: …" >&2; exit 2; }` clause that makes a step's failure fatal is not a
+#     subject. MEASURED: deleting that clause is invisible here — the python is unchanged, so the
+#     census, the compile check and the execute cases all stay green while a failed pin silently
+#     becomes non-fatal and the session proceeds with no corpus pin, refused much later by the
+#     reporter. Deliberately NOT asserted structurally: a check keyed on where `|| {` sits is
+#     brittle, and a brittle assert on correct code is the false-red that gets a guard waived.
+#     Stated here so the limit is known rather than assumed away.
 #   * anything measured: no `perf`, no Flight server, no rep loop, no 2.8 GB corpus.
 #
 # Hermetic: python3, a few KB under `$TMPDIR`. No sudo, cargo, perf, taskset, network, root, and no
@@ -577,6 +589,84 @@ if [ "$cfg_keys" = "$shipped_keys" ]; then
   pass "config-fields: this suite supplies EXACTLY ws0_session.MANIFEST_CONFIG_FIELDS ($(echo "$shipped_keys" | wc -w) fields), so the environment it builds is the shipped list rather than a guess"
 else
   fail "config-fields: the suite's WS0_CFG_* keys [$cfg_keys] differ from the shipped MANIFEST_CONFIG_FIELDS [$shipped_keys]"
+fi
+
+# ...and the THIRD set, which is the one that actually ships: the names THE DRIVER EXPORTS.
+#
+# The two checks above compare this SUITE's environment against the shipped field list. Neither
+# says anything about the driver's bash plumbing, because the execute cases build their own
+# environment — so a renamed export was invisible. MEASURED attack: `WS0_CFG_TEMPS=` ->
+# `WS0_CFG_TEMSP=` in the driver leaves the embedded python untouched, so the census and the
+# compile check stay clean (`#COMPLETE compiled=3 findings=0`) and the blocks still execute
+# perfectly under the environment this suite builds — while the real rig hits the step's own
+# `FATAL: WS0_CFG_TEMPS was not exported`, the `|| exit 2` fires, and the driver is unrunnable end
+# to end. That is #3451's exact symptom, discovered by whoever next tries to run it.
+#
+# THREE SETS MUST AGREE, and the two sides of each comparison come from GENUINELY DIFFERENT
+# SOURCES — the driver's BASH SOURCE on one side, the python import on the other. A set-equality
+# check whose halves came from one place would agree by construction and prove nothing.
+driver_cfg_keys="$(grep -oE '^WS0_CFG_[A-Z_]+=' "$DRIVER" | sed 's/^WS0_CFG_//; s/=$//' \
+  | tr '[:upper:]' '[:lower:]' | sort | tr '\n' ' ')"
+if [ "$driver_cfg_keys" = "$shipped_keys" ]; then
+  pass "config-exports: the DRIVER exports exactly the WS0_CFG_* names the shipped MANIFEST_CONFIG_FIELDS requires — a renamed export is caught statically, not by an operator discovering the rig is unrunnable"
+else
+  fail "config-exports: the driver exports [$driver_cfg_keys] but the step reads MANIFEST_CONFIG_FIELDS [$shipped_keys]. The step refuses at run time on the difference and its caller exits 2, so the rig is unrunnable end to end"
+fi
+
+# --- CONTROL: the renamed export is OBSERVED to fire ------------------------------------------
+RENAMED_EXPORT="$TMP/renamed-export-ws0-driver.sh"
+inject_rc=0
+python3 - "$DRIVER" "$RENAMED_EXPORT" 2>"$TMP/inject-renamed.err" <<'INJECT'
+import pathlib, sys
+text = pathlib.Path(sys.argv[1]).read_text()
+needle = "WS0_CFG_TEMPS="
+if text.count(needle) != 1:
+    print(f"INJECTION IMPOSSIBLE: {needle} occurs {text.count(needle)} time(s)", file=sys.stderr)
+    raise SystemExit(1)
+pathlib.Path(sys.argv[2]).write_text(text.replace(needle, "WS0_CFG_TEMSP="))
+INJECT
+inject_rc=$?
+renamed_keys="$(grep -oE '^WS0_CFG_[A-Z_]+=' "$RENAMED_EXPORT" | sed 's/^WS0_CFG_//; s/=$//' \
+  | tr '[:upper:]' '[:lower:]' | sort | tr '\n' ' ')"
+renamed_compile="$(compile_blocks "$RENAMED_EXPORT")"
+if [ "$inject_rc" -ne 0 ]; then
+  fail "config-exports CONTROL: the rename could not be injected, so the control could not fire — $(head -2 "$TMP/inject-renamed.err")"
+elif [ "$renamed_keys" != "$shipped_keys" ] && [ -z "$(findings_of "$renamed_compile")" ]; then
+  pass "config-exports CONTROL fired: a single renamed export is caught by the set comparison — and the compile check is SILENT about it (the python is untouched), which is why this check exists separately"
+else
+  fail "config-exports CONTROL did not fire: renamed=[$renamed_keys] shipped=[$shipped_keys], compile said '$(findings_of "$renamed_compile" | head -1)'"
+fi
+
+# ...and the SAME class for the CPU-pin step, whose four inputs have no shipped field list. Here
+# the two sources are the driver's BASH exports and the LITERAL names the extracted BLOCK reads,
+# which is again two independent derivations of one fact.
+driver_pin_keys="$(grep -oE '^WS0_PIN_[A-Z_]+=' "$DRIVER" | sed 's/=$//' | sort -u | tr '\n' ' ')"
+block_pin_keys="$(emit_block "$DRIVER" "$CPU_BLOCK" | grep -oE 'WS0_PIN_[A-Z_]+' | sort -u | tr '\n' ' ')"
+if [ -n "$block_pin_keys" ] && [ "$driver_pin_keys" = "$block_pin_keys" ]; then
+  pass "pin-exports: the DRIVER exports exactly the WS0_PIN_* names the CPU-pin step reads ($(echo "$block_pin_keys" | wc -w) of them) — the step reads them with os.environ[...], which raises KeyError on a rename and exits 2"
+else
+  fail "pin-exports: the driver exports [$driver_pin_keys] and the CPU-pin step reads [$block_pin_keys]"
+fi
+
+RENAMED_PIN="$TMP/renamed-pin-ws0-driver.sh"
+inject_rc=0
+python3 - "$DRIVER" "$RENAMED_PIN" 2>"$TMP/inject-renamed_pin.err" <<'INJECT'
+import pathlib, sys
+text = pathlib.Path(sys.argv[1]).read_text()
+needle = "WS0_PIN_SIBLINGS="
+if text.count(needle) != 1:
+    print(f"INJECTION IMPOSSIBLE: {needle} occurs {text.count(needle)} time(s)", file=sys.stderr)
+    raise SystemExit(1)
+pathlib.Path(sys.argv[2]).write_text(text.replace(needle, "WS0_PIN_SIBLING="))
+INJECT
+inject_pin_rc=$?
+renamed_pin_keys="$(grep -oE '^WS0_PIN_[A-Z_]+=' "$RENAMED_PIN" | sed 's/=$//' | sort -u | tr '\n' ' ')"
+if [ "$inject_pin_rc" -ne 0 ]; then
+  fail "pin-exports CONTROL: the rename could not be injected, so the control could not fire — $(head -2 "$TMP/inject-renamed_pin.err")"
+elif [ "$renamed_pin_keys" != "$block_pin_keys" ]; then
+  pass "pin-exports CONTROL fired: a renamed WS0_PIN_* export no longer matches the names the step reads"
+else
+  fail "pin-exports CONTROL did not fire: renamed=[$renamed_pin_keys] block=[$block_pin_keys]"
 fi
 
 # run_pin_step <driver> <out-dir> [omit-field] — execute the corpus-pin block extracted from
