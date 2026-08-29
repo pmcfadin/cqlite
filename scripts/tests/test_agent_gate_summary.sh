@@ -4322,6 +4322,10 @@ pol_fn=$(awk '/^_lh_positive_in_closure\(\) \{/,/^\}/' "$GATE" | sed 's/^[[:spac
 pol_missing=""
 printf '%s\n' "$pol_fn" | grep -qE 'return 2' || pol_missing="$pol_missing fn-returns-2"
 printf '%s\n' "$pol_fn" | grep -qE '_pc_rc" -ge 2' || pol_missing="$pol_missing fn-tests-ge2"
+printf '%s\n' "$pol_fn" | grep -qE '_pc_sed_rc" -ne 0' || pol_missing="$pol_missing fn-tests-sed-status"
+if printf '%s\n' "$pol_fn" | grep -qE '\|[[:space:]]*grep'; then
+  pol_missing="$pol_missing fn-uses-a-pipeline"
+fi
 pol_caller=$(awk '/^run_legacy_heuristics\(\) \{/,/^\}/' "$GATE" | sed 's/^[[:space:]]*#.*$//')
 printf '%s\n' "$pol_caller" | grep -qE '_lh_positive_in_closure "\$_mt_closure" "\$cfg_site" \|\| _pol_rc=\$\?' \
   || pol_missing="$pol_missing caller-captures-status"
@@ -4329,7 +4333,7 @@ printf '%s\n' "$pol_caller" | grep -qE '\[ "\$_pol_rc" -ge 2 \]' || pol_missing=
 if [ -n "$pol_missing" ]; then
   bad "1699-polarity-tristate: the polarity scan or its caller collapses 'could not tell' onto 'no positive site' — missing:$pol_missing. A failed scan then routes the target into allow_zero and a positively-gated target can pass with zero tests"
 else
-  ok "1699-polarity-tristate: the polarity scan returns a third state and the call site tests for it before the two-valued chain"
+  ok "1699-polarity-tristate: the polarity scan observes BOTH stages independently (no pipeline — pipefail reports the rightmost non-zero, so sed=2 with grep=1 would arrive as 1), returns a third state, and the call site tests for it before the two-valued chain"
 fi
 
 ASSERT_FLOOR=377

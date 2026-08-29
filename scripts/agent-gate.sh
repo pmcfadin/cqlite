@@ -7189,16 +7189,23 @@ _lh_positive_in_closure() {
   # false green in the polarity scan, which is the one place it must not be. `sed` failing is
   # caught too: under this script's `pipefail` the pipeline status is non-zero if EITHER stage
   # fails, and grep 1 (no match) is the only non-zero we may treat as an answer.
-  local closure="$1" cfg_site="$2" cf _pc_out _pc_rc
+  local closure="$1" cfg_site="$2" cf _pc_out _pc_rc _pc_stripped _pc_sed_rc
   while IFS= read -r cf; do
     [ -n "$cf" ] || continue
+    # TWO SEPARATE COMMANDS, each status observed. A pipeline cannot express this: under pipefail
+    # its status is the RIGHTMOST non-zero, so sed=2 with grep=1 (no match) reports 1 — a failed
+    # read wearing the exit code of a legitimate answer.
+    _pc_sed_rc=0
+    _pc_stripped=$(sed -E 's/not\([[:space:]]*feature[[:space:]]*=[[:space:]]*"legacy-heuristics"[[:space:]]*\)//g' "$cf" 2>/dev/null) || _pc_sed_rc=$?
+    if [ "$_pc_sed_rc" -ne 0 ]; then
+      echo "POLARITY-SCAN-ERROR sed exit $_pc_sed_rc on $cf" >&2
+      return 2
+    fi
     _pc_rc=0
-    _pc_out=$(sed -E 's/not\([[:space:]]*feature[[:space:]]*=[[:space:]]*"legacy-heuristics"[[:space:]]*\)//g' "$cf" 2>/dev/null \
-      | grep -cE "$cfg_site") || _pc_rc=$?
-    # grep exit 1 = no match, and the pipeline then reports 1 under pipefail: that IS an answer.
-    # Anything else means a stage could not do its job, and the caller must not guess.
+    _pc_out=$(grep -cE "$cfg_site" <<<"$_pc_stripped") || _pc_rc=$?
+    # grep 1 = no match, which IS an answer. >=2 means grep could not do its job.
     if [ "$_pc_rc" -ge 2 ]; then
-      echo "POLARITY-SCAN-ERROR exit $_pc_rc on $cf" >&2
+      echo "POLARITY-SCAN-ERROR grep exit $_pc_rc on $cf" >&2
       return 2
     fi
     if [ "${_pc_out:-0}" -gt 0 ]; then
