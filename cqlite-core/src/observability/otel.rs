@@ -423,7 +423,7 @@ pub(super) fn record_gauge_with(
 /// Mark the currently-active `tracing` span as errored and tag it with the
 /// telemetry error category. Maps to OTel `otel.status_code = ERROR` plus the
 /// bounded `cqlite.error.category` attribute. No raw error message is recorded.
-pub(crate) fn mark_span_error(category: crate::observability::ErrorCategory) {
+pub(crate) fn mark_span_error(category: crate::observability::ObsErrorCategory) {
     use tracing_opentelemetry::OpenTelemetrySpanExt;
     let span = tracing::Span::current();
     span.set_attribute("otel.status_code", "ERROR");

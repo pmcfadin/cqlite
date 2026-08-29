@@ -2,7 +2,7 @@
 //!
 //! This module is the single shared foundation every other observability issue
 //! builds on. It owns OpenTelemetry initialisation, the `CQLITE_OTEL_*` config,
-//! the metric-naming [`catalog`], the error-rate schema ([`ErrorCategory`] +
+//! the metric-naming [`catalog`], the error-rate schema ([`ObsErrorCategory`] +
 //! [`record_error`]), and graceful shutdown — and it is designed so that
 //! **instrumentation call sites are identical whether or not the
 //! `observability` feature is enabled.** When the feature is off, every helper
@@ -48,7 +48,7 @@
 //!
 //! # Always-compiled vs feature-gated
 //!
-//! [`catalog`], [`config`], the [`ErrorCategory`] taxonomy, and the helper
+//! [`catalog`], [`config`], the [`ObsErrorCategory`] taxonomy, and the helper
 //! signatures here are ALWAYS compiled (they pull in no OTel types), so call
 //! sites and tests build in any configuration. Only the exporter/runtime wiring
 //! ([`otel`]) is gated behind `observability`.
@@ -66,7 +66,7 @@ pub(crate) mod read_metrics;
 pub mod stream_subphase;
 
 pub use config::{ObservabilityConfig, ObservabilityConfigBuilder, OtelProtocol};
-pub use error_schema::ErrorCategory;
+pub use error_schema::ObsErrorCategory;
 pub use stream_subphase::{StreamSubPhase, StreamSubPhaseGuard, StreamSubPhaseTimings};
 
 use crate::error::{Error, Result};

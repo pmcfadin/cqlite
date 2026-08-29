@@ -498,11 +498,11 @@ mod tests {
         .expect_err("must elapse");
         assert_eq!(
             err.obs_category(),
-            crate::observability::ErrorCategory::Timeout
+            crate::observability::ObsErrorCategory::Timeout
         );
         assert_ne!(
             err.obs_category(),
-            crate::observability::ErrorCategory::Corruption
+            crate::observability::ObsErrorCategory::Corruption
         );
         assert_eq!(err.category(), crate::error::ErrorCategory::Query);
         assert!(!err.is_recoverable());

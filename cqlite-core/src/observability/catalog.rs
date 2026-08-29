@@ -61,7 +61,7 @@ pub mod unit {
 /// cardinality stays bounded.
 pub mod attr {
     /// Low-cardinality error category. Values come from
-    /// [`crate::observability::ErrorCategory::as_str`] (≈10 distinct values).
+    /// [`crate::observability::ObsErrorCategory::as_str`] (≈10 distinct values).
     pub const ERROR_CATEGORY: &str = "cqlite.error.category";
     /// Subsystem that produced an event, e.g. `"reader"`, `"query"`,
     /// `"compaction"`. Callers pass a `&'static str`, so the value space is
