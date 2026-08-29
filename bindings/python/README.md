@@ -264,6 +264,23 @@ CQL types are automatically converted to Python native types:
 | `frozen<T>` | Unwrapped inner type |
 | UDT | `dict` with `_type` and `_keyspace` keys |
 
+### CQL `decimal` rendering policy
+
+A CQL `decimal` is `unscaled x 10^(-scale)` where `unscaled` is an
+arbitrary-precision two's-complement integer. Both CQLite language bindings share
+**one** implementation and **one** policy (issue #1452), so a value can never
+render in one binding and be refused by the other:
+
+| Condition | Outcome |
+|---|---|
+| Unscaled magnitude **> 32 KiB** | Refused as corrupt: a typed error naming the scale, the unscaled length and the ceiling |
+| Magnitude **> 1024 bytes**, or `abs(scale) > 1_000_000` | Precision-preserving **exponent form**, `<digits>e<-scale>` — every digit exact |
+| Otherwise | **Positional** form, e.g. `1.23`, `0.00123`, `123e2` |
+
+Below the 32 KiB ceiling the render is **infallible**: a well-formed value always
+renders, whatever its scale. Above it the refusal is a typed, catchable error — a
+corrupt SSTable never aborts the host process.
+
 ## Write Operations
 
 CQLite v0.9.0 adds write support to the Python bindings. Open the database with

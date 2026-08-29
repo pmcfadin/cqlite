@@ -7,7 +7,69 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **BREAKING (Python binding, observable): CQL `decimal` now has ONE rendering
+  policy across both language bindings (#1452, epic #1434).** The byte-math both
+  bindings share was extracted into a new internal crate `cqlite-ffi-common`,
+  which holds the single implementation of `decimal`, `varint` and `inet`
+  rendering. Because the two DECIMAL implementations had been hardened
+  independently (#1741 Python, #1754 Node) they had come to **disagree on
+  observable output for inputs both accepted**; converging them required picking
+  one, and the #1754 policy was chosen for both:
+  - **Refusal ceiling: 32 KiB of unscaled magnitude.** Above it, a typed
+    corruption error (`CqliteError` in Python, `code: "PARSE"` in Node) naming the
+    scale, the unscaled length and the ceiling. Below it the render is
+    **infallible**.
+  - **Exponent form** (`<digits>e<-scale>`, every digit preserved) instead of a
+    positional expansion when the magnitude exceeds 1024 bytes or `|scale|`
+    exceeds 1,000,000.
+  - **What changes for Python callers:** a large-but-well-formed value no longer
+    raises. The previous guard refused any magnitude whose digit count exceeded
+    `sys.get_int_max_str_digits()` (default **4300**), because the old code called
+    Python `str()` on the unscaled *Python int* — an uncatchable `ValueError`. Rust
+    renders the digits now, so that failure mode is structurally gone. Concretely:
+    a 2000-byte unscaled magnitude with `scale = 3` (4817 digits) and
+    `scale = i32::MIN` **used to raise `CqliteError` in Python while the Node
+    binding rendered them**; both now render, in both bindings. The guarantee the
+    guard existed for (#1437/#1440 — a corrupt SSTable raises a typed, catchable
+    error and never aborts the interpreter) is **preserved**.
+  - **What changes for Node callers:** nothing, except that a *well-formed* value
+    with `65535 < |scale| <= 1_000_000` no longer **panics**. The #1754 positional
+    branch fed `scale` to a `{:0>width$}` format spec, and `core::fmt` packs the
+    width into a `u16`, so such a scale raised "Formatting argument out of range"
+    on the render path. The padding is now built explicitly.
+
+- **`cqlite_core::observability::error_schema::ErrorCategory` is renamed
+  `ObsErrorCategory` (#1452, for #1705).** `cqlite-core` had two
+  error-handling-relevant enums both named `ErrorCategory`, distinguished only by
+  import line, both stored in a field called `category`, and genuinely
+  disagreeing (`QueryTimeout` is `Query` in one and `Timeout` in the other). The
+  **telemetry** one is renamed; `cqlite_core::error::ErrorCategory` — what
+  `Error::category()` returns and what the FFI error contract mirrors — is
+  **unchanged**, as is `cql::error`'s module-local enum. One of the two being
+  uniquely named is what makes a wrong import fail to compile instead of
+  mis-classifying. Re-exported as `cqlite_core::observability::ObsErrorCategory`.
+
 ### Removed
+
+- **BREAKING (public API): `cqlite_core::ffi_error_contract` is gone; the table
+  moved to `cqlite_ffi_common::error_contract` (#1452).** The #1451 FFI error
+  contract (`PyExceptionClass`, `FfiErrorRow`, `FfiErrorVariant`, `variant_of`,
+  `contract_for`) is pure binding-facing data and now lives in the shared FFI
+  crate, which its own module doc had pre-authorised. The move is
+  behaviour-preserving: the rows, the exhaustive `variant_of` match over
+  `Error`, the fail-closed `from_name` and the compile-time obligation that a new
+  core `Error` variant cannot ship without a row all carry over unchanged, and the
+  table's test suite moved with it and passes unmodified. The `category` column
+  still mirrors `Error::category()`.
+  - **No deprecated re-export is left in `cqlite-core`, deliberately.** Two paths
+    to one item is the failure shape this change removes. **Migration:** replace
+    `cqlite_core::ffi_error_contract::X` with
+    `cqlite_ffi_common::error_contract::X`; no type or function names changed.
+  - Note for reviewers: the gate's `pub-surface` component checks
+    declaration/inner-`cfg` consistency and is **not** an API-drift detector
+    (#1712/#3366), so nothing flags this mechanically — hence this entry.
 
 - **BREAKING (public API): the schema JSON exporter and the never-compiled CQL
   generator are deleted (#1715, epic #1688 / audit finding AK4; ~2.0k LOC).**
