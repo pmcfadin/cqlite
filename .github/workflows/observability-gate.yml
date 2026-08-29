@@ -153,12 +153,26 @@ jobs:
       # so they execute ONLY here.
       - name: Scan-error counting boundary tests (library)
         run: |
-          cargo test -p cqlite-core \
-            --features observability-testing,cli-helpers \
-            --lib error_metric_tests
-          cargo test -p cqlite-core \
-            --features observability-testing,cli-helpers \
-            --lib error_metrics
+          # A cargo test FILTER that matches nothing EXITS 0 ("running 0 tests"), so a
+          # renamed, un-declared or cfg'd-out module leaves the step GREEN FOREVER while
+          # asserting nothing — the "coverage that exists and never runs" failure mode
+          # issue #1704 is itself about, one level up. Fail closed on a zero-match filter
+          # so the trap cannot be re-set by a later refactor.
+          run_lib_filter() {
+            local out
+            out=$(cargo test -p cqlite-core \
+              --features observability-testing,cli-helpers --lib "$1" 2>&1)
+            printf '%s\n' "$out"
+            if printf '%s' "$out" | grep -q 'running 0 tests'; then
+              echo "::error::--lib filter '$1' matched NO tests: the module was renamed, \
+          un-declared, or configured out. A zero-match filter is a vacuous pass."
+              return 1
+            fi
+          }
+          # `error_metric_tests`  -> joined_scan_stream::error_metric_tests (seam 1)
+          # `error_metrics`       -> setup_fail_closed_tests::error_metrics (setup seam)
+          run_lib_filter error_metric_tests
+          run_lib_filter error_metrics
 
       # Scan-path error counting end to end (issue #1704): the three disjoint scan
       # exit seams (`JoinedStream::recv`, `scan_delta`'s terminal send, the

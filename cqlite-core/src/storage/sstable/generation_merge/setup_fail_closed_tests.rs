@@ -108,6 +108,14 @@ async fn assert_construction_failure_propagates(
 /// This is the likelier of the two propagating triggers — an I/O hiccup needs no bug at
 /// all — and pre-fix it silently produced the concat's wrong answer under `Ok`.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+// Issue #1704: a propagating setup failure now RECORDS into the process-global
+// `cqlite.errors.total` capture (`MergeStreamSetupError::into_counted_error`), so
+// these three must serialize against the tests that ASSERT on that capture — the
+// harness is process-wide and DELTA-temporality, so a concurrent emitter lands
+// inside someone else's measurement window. Measured, not theorised: without this
+// tag the sibling `error_metrics::a_fallback_eligible_setup_failure_counts_nothing`
+// read 1.0 where it must read 0.0.
+#[serial_test::serial(read_metrics)]
 async fn an_io_error_from_merger_construction_fails_the_read_instead_of_serving_the_concat() {
     assert_construction_failure_propagates(
         MergeConstructionFault::Io,
@@ -122,6 +130,14 @@ async fn an_io_error_from_merger_construction_fails_the_read_instead_of_serving_
 /// Answering it with the concat would serve data from a file already known to be bad,
 /// under `Ok`.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+// Issue #1704: a propagating setup failure now RECORDS into the process-global
+// `cqlite.errors.total` capture (`MergeStreamSetupError::into_counted_error`), so
+// these three must serialize against the tests that ASSERT on that capture — the
+// harness is process-wide and DELTA-temporality, so a concurrent emitter lands
+// inside someone else's measurement window. Measured, not theorised: without this
+// tag the sibling `error_metrics::a_fallback_eligible_setup_failure_counts_nothing`
+// read 1.0 where it must read 0.0.
+#[serial_test::serial(read_metrics)]
 async fn a_corruption_error_from_merger_construction_fails_the_read_instead_of_serving_the_concat()
 {
     assert_construction_failure_propagates(
@@ -140,6 +156,14 @@ async fn a_corruption_error_from_merger_construction_fails_the_read_instead_of_s
 /// own regression: it turns a query that used to return the documented (Issue #883)
 /// unreconciled answer into a hard failure.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+// Issue #1704: a propagating setup failure now RECORDS into the process-global
+// `cqlite.errors.total` capture (`MergeStreamSetupError::into_counted_error`), so
+// these three must serialize against the tests that ASSERT on that capture — the
+// harness is process-wide and DELTA-temporality, so a concurrent emitter lands
+// inside someone else's measurement window. Measured, not theorised: without this
+// tag the sibling `error_metrics::a_fallback_eligible_setup_failure_counts_nothing`
+// read 1.0 where it must read 0.0.
+#[serial_test::serial(read_metrics)]
 async fn a_merger_ineligible_input_still_degrades_to_the_documented_concat() {
     let temp_dir = TempDir::new().expect("tempdir");
     let data_dir = flush_overlapping_generations(&temp_dir).await;
