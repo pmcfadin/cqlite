@@ -13,6 +13,28 @@ The runtime observability foundation must be compiled in: build with the
 all telemetry calls are inert no-ops, and configuration still parses but exports
 nothing.
 
+**That state is no longer silent (issue #1702).** If OpenTelemetry is enabled in
+configuration on a binary built WITHOUT the `observability` feature — the default
+build — `observability::init` emits ONE `WARN` at startup, on **stderr**
+(never stdout, so `--out json`/`csv` stays clean):
+
+```text
+WARN cqlite_core::observability: OpenTelemetry export is ENABLED in configuration
+(CQLITE_OTEL_ENABLED / --otel-enabled / config file) but this binary was built
+WITHOUT the `observability` cargo feature: OpenTelemetry is compiled out, so NO
+metrics and NO traces will be emitted and the OTLP endpoint is never contacted —
+this is NOT a collector or endpoint problem. Rebuild with
+`--features observability` to export telemetry, or disable OpenTelemetry
+(CQLITE_OTEL_ENABLED=0) to silence this warning.
+```
+
+So "nothing arrives at my collector" is now diagnosable from the startup log
+alone: this warning means the feature is missing, and its ABSENCE means the
+export stack is compiled in and the problem is elsewhere (collector down,
+endpoint, protocol, sampling). It is a warning, never an error — the process
+runs normally, just without telemetry. Suppress it by fixing the cause, not by
+raising the log level.
+
 ---
 
 ## Shared environment variables (`CQLITE_OTEL_*`)
