@@ -9,7 +9,13 @@ place, and `gh`/roborev configured so a local gate run predicts CI.
 ```bash
 bash scripts/bootstrap-agent-machine.sh          # check everything; print any install commands
 bash scripts/bootstrap-agent-machine.sh --yes    # also auto-run brew/cargo installs + dataset fetch
+bash scripts/bootstrap-agent-machine.sh --fix-credentials --strict   # image/launcher preflight (#3369):
+                                                 # wire git push credentials ONLY, and exit 1 on any [warn]
 ```
+
+`--strict` is what the agent-ami profile's `verify.run` uses. Without it the script always
+exits 0 (so it composes into setup scripts) and the ONLY failure signal is the literal
+string `All checks green.` in its stdout — a signal a caller can forget to check.
 
 Idempotent and safe to re-run. macOS + Linux. It **never installs without `--yes`** —
 without it, it prints the exact command for each gap. It verifies, in order:
@@ -28,8 +34,25 @@ without it, it prints the exact command for each gap. It verifies, in order:
    changed. The output names the account it measured. Point it elsewhere with
    `CQLITE_PROJECT_OWNER` / `CQLITE_PROJECT_NUMBER` / `CQLITE_PROJECT_ACCOUNT`.
    It also checks **git push credentials** (#2942) — a *separate* credential path from
-   `gh`. Under `--yes` it configures one, **scoped to the origin host**, and the token
-   value is never written to disk.
+   `gh`. Under `--yes` (or `--fix-credentials`) it configures one, **scoped to the origin
+   host**, and the token value is never written to disk.
+3b. **git PUSH capability** (#3369) — the section above validates *configuration*
+   (`git credential fill` never contacts the network); this one performs **the
+   operation**, delegating to `scripts/flow/claim.sh smoke` to create, read back and
+   delete a throwaway `refs/claims/smoke-<nonce>` ref. It runs **after** the credential
+   fix, so it measures the machine as the fix left it. The verdict is **three-valued**
+   and prints one greppable line:
+
+   | Line | Meaning |
+   |---|---|
+   | `[ok]   git-push: VERIFIED (refs/claims/* create+ls-remote+delete on 'origin')` | affirmatively measured — the claim protocol works here |
+   | `[warn] git-push: FAILED (...)` | the remote refused the push (credentials, or the `refs/claims/*` namespace) |
+   | `[warn] git-push: UNMEASURED (...)` | no remote / unreachable / no `timeout` to bound it / no verdict — capability is **UNKNOWN, not ok** |
+   | `[warn] git-push: OPT-OUT (--skip-push-probe)` | deliberately not measured; still a warning, so it can never buy a green |
+
+   UNMEASURED is a warning on purpose: an unmeasured capability must never inherit the
+   permissive branch. `--skip-push-probe` is for offline boxes and hermetic tests, and is
+   **not** `--skip-smoke` (which skips the final *gate* run).
 4. **roborev** — installed, and this machine's *configured* agent resolves.
 5. **Datasets** + `CQLITE_DATASETS_ROOT` guidance.
 6. **Health check** — runs the gate's fmt smoke and prints the authoritative

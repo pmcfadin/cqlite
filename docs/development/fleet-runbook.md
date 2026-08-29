@@ -34,6 +34,8 @@ bash test-data/scripts/fetch-datasets.sh       # real SSTable binaries — REQUI
 gh auth setup-git                              # git push credentials — SEPARATE from gh auth (#2942)
 gh auth status                                  # must include the 'project' scope (board access)
 bash scripts/flow/claim.sh smoke               # preflight: prove origin accepts refs/claims/* (see below)
+                                               #   (bootstrap now runs this probe itself and reports
+                                               #    git-push: VERIFIED / FAILED / UNMEASURED, #3369)
 ```
 
 ### Notification channel (ntfy) — one env var, no per-machine binary (#3119)
