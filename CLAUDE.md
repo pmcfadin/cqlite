@@ -163,10 +163,16 @@ cat /tmp/gate-summary.txt   # the SUMMARY block is the ONLY gate text an agent r
   harness, so they carry no escapes — safe for a reason that is NOT in the code, which is why this
   is a lint and not a comment. Route every cargo-output parse
   through `_ansi_stripped_log` and read by **redirection, never a pipe** (a piped `while read` runs
-  in a subshell and its verdict is discarded — a second, independent silent pass). Enforced by the
-  `roborev-lints` component's `scripts/ci/check-cargo-output-parsers.sh` (`--lite`), which reds a raw
-  or pipe-fed site and **FAILs on an empty subject set** (`0/0 PASS` would be the same vacuous shape
-  one level up). `CARGO_TERM_COLOR=never` at the invocation is belt, not the fix; `gate.yml` KEEPS
+  in a subshell and its verdict is discarded — a second, independent silent pass). **This rule is
+  DOCTRINE and is NOT mechanically enforced.** A structural lint over the parse sites was built on
+  #3400 and **descoped**: its own false-PASS count rose across review rounds (2, 2, 3) and two of
+  the last round's three defects were inside the two preceding fix rounds — the same shape, and the
+  same ruling, as #3229's removed `census-exclusion:` key, because a guard with known documented
+  false-PASSes is worse than no guard, since it invites reliance it cannot support. Mechanization is
+  deferred to **#TBD**; until it lands, this is a review-time rule, and the standing coverage is
+  behavioural (`scripts/tests/test_cargo_output_parsers.sh`, in `tooling-tests`), which pins the
+  defect against real code rather than predicting it from source shape.
+  `CARGO_TERM_COLOR=never` at the invocation is belt, not the fix; `gate.yml` KEEPS
   `always` — colour is a presentation property of a log for humans, and moving correctness into a
   workflow file 18 files from the parse is a worse coupling than the one being removed.
 - clippy is scoped per-package (#1844): whole workspace `-D warnings` but skips the source-built
@@ -842,9 +848,9 @@ loop, not a review round. The rest stay hand-checked (no low-false-positive stat
   MECHANIZED (`roborev-lints`/`tooling-tests`, #2642): a wall-clock threshold assert in the
   correctness test path FAILs; mark a deliberate `#[ignore]`d perf assert `perf-gate-allow`.
 - **Cargo-output parses keyed on literal status text** — route through `_ansi_stripped_log`,
-  read by redirection not a pipe. MECHANIZED (`roborev-lints`, #3400): a raw or pipe-fed
-  cargo-output parse in `scripts/agent-gate.sh` FAILs `--lite`; deliberate exception gets
-  `cargo-colour-lint-allow <one-line rationale>`.
+  read by redirection not a pipe (#3400). NOT mechanized: the lint written for this was
+  descoped for an increasing false-PASS count (see the gate section above); mechanization is
+  deferred to #TBD, so this one is hand-checked.
 - **No-heuristics violations** — never infer type/behavior from byte patterns.
 - **Gitignored reference binaries** — `git add -f` tiny parity references; verify against a fresh
   `git worktree add --detach HEAD`, not the dirty tree.
