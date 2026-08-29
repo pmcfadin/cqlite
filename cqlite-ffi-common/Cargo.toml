@@ -17,3 +17,10 @@ num-bigint = "0.4"
 
 [lints]
 workspace = true
+
+[dev-dependencies]
+# JSON parsing for the `cargo metadata` dependency-closure measurement
+# (`tests/dependency_boundary.rs`). A dev-dependency, so it is not linked into
+# either binding; it IS inside the measured closure, which is deliberate — the
+# no-FFI-framework rule covers dev-dependencies too.
+serde_json = { workspace = true }

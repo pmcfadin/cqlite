@@ -10,19 +10,21 @@
 //! `ParseError` in Python but code `QUERY` in Node; `Timeout`/`Memory` collapsed
 //! into `IO`). Both bindings now read the rows below **by variant**.
 //!
-//! # Relocation
+//! # Where this module lives, and why
 //!
-//! The contract lives in `cqlite-core` only because the shared FFI crate does
-//! not exist yet. When `cqlite-ffi-common` (issue #1452) lands, this module
-//! moves there verbatim and the bindings re-point their import; nothing else
-//! changes. It is deliberately a top-level module (a sibling of [`crate::error`])
-//! so that move is a file move.
+//! It used to live in `cqlite-core` (as `cqlite_core::ffi_error_contract`)
+//! because the shared FFI crate did not exist yet. Issue #1452 created
+//! `cqlite-ffi-common` and moved it here; `cqlite-core` no longer declares the
+//! module and deliberately provides **no re-export**, so there is exactly one
+//! import path to these items.
 //!
 //! # No binding dependency may enter this module
 //!
 //! The rows are **inert data**. The Python class is carried as an *identifier*
 //! ([`PyExceptionClass`]), never a PyO3 type, and the Node code as a plain
-//! `&'static str`; `cqlite-core` therefore gains no `pyo3`/`napi` dependency.
+//! `&'static str`. That is why this crate can be shared: it links neither
+//! `pyo3` nor `napi`, at any depth, and `tests/dependency_boundary.rs` measures
+//! that rather than asserting it.
 //!
 //! # Column meanings
 //!
@@ -47,11 +49,12 @@
 //! new `FfiErrorVariant` requires a row in the table below (the macro generates
 //! the exhaustive `row()` match from it).
 
-use crate::error::{Error, ErrorCategory};
+pub use cqlite_core::error::ErrorCategory;
+use cqlite_core::error::Error;
 
 /// Identifier of the Python exception class a core [`Error`] maps to.
 ///
-/// An *identifier*, not a PyO3 type: `cqlite-core` must not depend on `pyo3`.
+/// An *identifier*, not a PyO3 type: this crate must not depend on `pyo3`.
 /// The Python binding matches on this enum to pick the concrete class, so a new
 /// member fails that binding's build until it is handled. Members are named
 /// without an `Error` suffix (the enum already says "exception class"); the

@@ -1368,6 +1368,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "cqlite-ffi-common"
+version = "0.16.1"
+dependencies = [
+ "cqlite-core",
+ "num-bigint",
+ "serde_json",
+]
+
+[[package]]
 name = "cqlite-flight"
 version = "0.16.1"
 dependencies = [
