@@ -78,6 +78,90 @@ jobs:
         # -required smoke subset so it guards every PR, not just ci:bindings-full.
         run: npx jest __test__/loader.test.js __test__/publish.test.js __test__/smoke.test.js __test__/write-smoke.test.js --runInBand
 
+      # Issue #1459: the floor job below REUSES this binary instead of building
+      # its own. Node-API is ABI-stable across Node majors, which is the whole
+      # reason we ship a prebuilt `.node` — so the artifact that must load on
+      # Node 18 is THIS one, not a fresh Node-18 build. Uploading it here —
+      # rather than in the label-gated `build` job, the only other producer of a
+      # linux x86_64 module — is what makes the floor testable on an ORDINARY PR.
+      - name: Upload smoke native module (reused by the floor job)
+        uses: actions/upload-artifact@v6
+        with:
+          name: bindings-smoke-linux
+          path: bindings/node/${{ env.APP_NAME }}.*.node
+          if-no-files-found: error
+          retention-days: 7
+
+  smoke-floor:
+    # Issue #1459: `package.json` advertises `engines.node: ">= 18"`, but every
+    # other job here pinned Node 20 — so the advertised floor went untested and
+    # a Node-18 break would have reached users first. This job closes that
+    # honesty gap cheaply: it REBUILDS NOTHING, loading the prebuilt `.node` the
+    # `smoke` job already produced (Node-API is ABI-stable across majors).
+    #
+    # Scope is deliberate. It runs the floor smoke script (load + version + ONE
+    # real query, failing on a 0-row result) plus the SAME dataset-free jest
+    # subset the Node-20 `smoke` job runs — enough to catch a jest/Node-18
+    # incompatibility in the harness itself. It does NOT run the full `npm test`
+    # suite: behavioural coverage is the `test` job's business, and duplicating
+    # it per Node major on every PR buys the same assertions twice.
+    name: Floor smoke (Node 18)
+    runs-on: ubuntu-latest
+    needs: smoke
+    timeout-minutes: 20
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Setup Node.js 18 (the advertised engines.node floor)
+        uses: actions/setup-node@v5
+        with:
+          node-version: '18'
+          cache: 'npm'
+          cache-dependency-path: bindings/node/package-lock.json
+
+      - name: Download the native module built by the smoke job
+        uses: actions/download-artifact@v7
+        with:
+          name: bindings-smoke-linux
+          path: bindings/node
+
+      - name: Install dependencies
+        working-directory: bindings/node
+        run: npm ci
+
+      - name: Generate the platform loader
+        # index.js is generated, not committed (scripts/generate-loader.mjs, run
+        # by the `postbuild`/`pretest` hooks). The floor smoke requires it
+        # directly, so generate it explicitly rather than relying on a hook.
+        working-directory: bindings/node
+        run: node scripts/generate-loader.mjs
+
+      - name: Restore canonical datasets
+        uses: ./.github/actions/restore-canonical-datasets
+        with:
+          dataset-tag: ${{ env.DATASET_TAG }}
+          dataset-asset: ${{ env.DATASET_ASSET }}
+          dataset-sha256: ${{ env.DATASET_SHA256 }}
+
+      - name: Run floor smoke (load + one real query, 0 rows fails)
+        working-directory: bindings/node
+        env:
+          CQLITE_DATASETS_ROOT: ${{ github.workspace }}/test-data/datasets
+          # Asserted inside the script: a `setup-node` no-op would otherwise
+          # make this a second Node-20 run reporting a floor it never touched.
+          CQLITE_FLOOR_EXPECT_NODE_MAJOR: '18'
+        run: |
+          set -euo pipefail
+          node scripts/floor-smoke.js
+
+      - name: Run smoke Jest subset on Node 18
+        working-directory: bindings/node
+        run: |
+          set -euo pipefail
+          npx jest __test__/loader.test.js __test__/publish.test.js __test__/smoke.test.js __test__/write-smoke.test.js --runInBand
+
   build:
     name: Build (${{ matrix.target }})
     if: >-
@@ -315,7 +399,7 @@ jobs:
   quality-gate:
     name: Node.js CI Quality Gate
     runs-on: ubuntu-latest
-    needs: [smoke, build, test]
+    needs: [smoke, smoke-floor, build, test]
     if: always()
     env:
       RUN_FULL: >-
@@ -330,6 +414,18 @@ jobs:
           echo "Smoke results: ${{ needs.smoke.result }}"
           if [ "${{ needs.smoke.result }}" != "success" ]; then
             echo "::error::Node.js smoke checks failed"
+            exit 1
+          fi
+
+      - name: Check floor smoke results
+        env:
+          FLOOR_RESULT: ${{ needs.smoke-floor.result }}
+        run: |
+          # Issue #1459: unconditional — the advertised engines.node floor is a
+          # promise on every PR, not a full-tier extra.
+          echo "Floor smoke results: ${FLOOR_RESULT}"
+          if [ "${FLOOR_RESULT}" != "success" ]; then
+            echo "::error::Node.js floor smoke failed (advertised engines.node floor)"
             exit 1
           fi
 
@@ -389,6 +485,7 @@ jobs:
             echo ""
             echo "### Tier"
             echo "- Ordinary PRs run the Ubuntu smoke build, typecheck, and loader/package smoke Jest subset."
+            echo "- Every PR also runs a Node 18 floor smoke reusing the prebuilt native module from the smoke job (issue #1459)."
             echo "- Full cross-platform builds, dataset-backed tests, and merged native artifacts run on push to main, nightly schedule, workflow_dispatch, or PRs labeled \`ci:bindings-full\`."
             echo ""
             echo "### Native Module Builds"

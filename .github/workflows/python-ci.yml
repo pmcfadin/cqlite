@@ -79,6 +79,111 @@ jobs:
             bindings/python/tests/test_write_api.py \
             -v --tb=short
 
+      # Issue #1459: the floor jobs below REUSE this wheel instead of building
+      # their own. `bindings/python/Cargo.toml` enables pyo3's `abi3-py39`, so a
+      # single wheel (cp39-abi3) must install and import on every interpreter
+      # `requires-python` claims. Uploading it here — rather than in the
+      # label-gated `test` job, the only other producer of a linux x86_64
+      # wheel — is what makes the floors testable on an ORDINARY PR.
+      - name: Upload smoke wheel artifact (abi3, reused by the floor jobs)
+        uses: actions/upload-artifact@v6
+        with:
+          name: wheel-smoke-abi3-linux
+          path: bindings/python/dist/*.whl
+          if-no-files-found: error
+          retention-days: 7
+
+  smoke-floors:
+    # Issue #1459: `pyproject.toml` advertises `requires-python = ">=3.9"` and
+    # classifiers up to 3.13, but every other job in this workflow pins 3.12 —
+    # so both ends of the advertised range went untested and a 3.9-incompatible
+    # change (or an abi3 packaging break) would have reached users first. This
+    # job closes that honesty gap at the cost of one artifact download per
+    # boundary interpreter: it REBUILDS NOTHING, installing the cp39-abi3 wheel
+    # the `smoke` job already produced. Deliberately NOT a pytest matrix — an
+    # import plus one real query is what proves the wheel works on a major;
+    # behavioural coverage is the `test` job's business.
+    name: Floor smoke (Python ${{ matrix.python }})
+    runs-on: ubuntu-latest
+    needs: smoke
+    timeout-minutes: 15
+
+    strategy:
+      fail-fast: false
+      matrix:
+        # The two ENDS of the advertised range. Interior versions are covered
+        # transitively by abi3 plus the 3.12 `test` job; testing the boundaries
+        # is what catches a floor/ceiling claim going stale.
+        python: ["3.9", "3.13"]
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Setup Python ${{ matrix.python }}
+        uses: actions/setup-python@v6
+        with:
+          python-version: ${{ matrix.python }}
+
+      - name: Download the abi3 wheel built by the smoke job
+        uses: actions/download-artifact@v7
+        with:
+          name: wheel-smoke-abi3-linux
+          path: floor-wheel
+
+      - name: Assert the interpreter and the wheel are the ones we mean to test
+        shell: bash
+        env:
+          EXPECTED_PYTHON: ${{ matrix.python }}
+        run: |
+          set -euo pipefail
+          # A `setup-python` no-op would otherwise make this a third 3.12 run
+          # reporting a floor it never touched.
+          actual="$(python -c 'import sys; print("%d.%d" % sys.version_info[:2])')"
+          if [ "${actual}" != "${EXPECTED_PYTHON}" ]; then
+            echo "::error::expected Python ${EXPECTED_PYTHON}, got ${actual}; the floor was NOT tested"
+            exit 1
+          fi
+          echo "interpreter OK: Python ${actual}"
+          # An abi3 wheel is the whole premise of reusing one build across
+          # majors. A version-specific (cp3XX-cp3XX) wheel would install on
+          # exactly one interpreter and silently narrow what we can claim.
+          wheel="$(find floor-wheel -maxdepth 1 -type f -name '*.whl' | head -n 1)"
+          if [ -z "${wheel}" ]; then
+            echo "::error::no wheel in the downloaded artifact"
+            exit 1
+          fi
+          echo "wheel: ${wheel}"
+          case "${wheel}" in
+            *-abi3-*) echo "wheel tag OK: abi3 (installs on 3.9+)" ;;
+            *)
+              echo "::error::${wheel} is not an abi3 wheel; reusing one build across majors is unsound"
+              exit 1
+              ;;
+          esac
+
+      - name: Install the wheel
+        shell: bash
+        run: |
+          set -euo pipefail
+          python -m pip install --upgrade pip
+          python -m pip install floor-wheel/*.whl
+
+      - name: Restore canonical datasets
+        uses: ./.github/actions/restore-canonical-datasets
+        with:
+          dataset-tag: ${{ env.DATASET_TAG }}
+          dataset-asset: ${{ env.DATASET_ASSET }}
+          dataset-sha256: ${{ env.DATASET_SHA256 }}
+
+      - name: Run floor smoke (import + one real query, 0 rows fails)
+        shell: bash
+        env:
+          CQLITE_DATASETS_ROOT: ${{ github.workspace }}/test-data/datasets
+        run: |
+          set -euo pipefail
+          python bindings/python/scripts/floor_smoke.py
+
   build-only-wheels:
     name: Build wheel (${{ matrix.target }})
     if: >-
@@ -371,7 +476,7 @@ jobs:
   quality-gate:
     name: Python CI Quality Gate
     runs-on: ubuntu-latest
-    needs: [smoke, build-only-wheels, test]
+    needs: [smoke, smoke-floors, build-only-wheels, test]
     if: always()
     env:
       RUN_FULL: >-
@@ -386,6 +491,18 @@ jobs:
           echo "Smoke results: ${{ needs.smoke.result }}"
           if [ "${{ needs.smoke.result }}" != "success" ]; then
             echo "::error::Python smoke checks failed"
+            exit 1
+          fi
+
+      - name: Check floor smoke results
+        env:
+          FLOOR_RESULT: ${{ needs.smoke-floors.result }}
+        run: |
+          # Issue #1459: unconditional — the advertised floors are a promise on
+          # every PR, not a full-tier extra.
+          echo "Floor smoke results: ${FLOOR_RESULT}"
+          if [ "${FLOOR_RESULT}" != "success" ]; then
+            echo "::error::Python floor smoke failed (advertised requires-python floor/ceiling)"
             exit 1
           fi
 
@@ -414,6 +531,7 @@ jobs:
             echo ""
             echo "### Tier"
             echo "- Ordinary PRs run one Ubuntu Python 3.12 wheel build plus non-dataset smoke pytest files."
+            echo "- Every PR also runs a floor smoke on Python 3.9 and 3.13, reusing the abi3 wheel from the smoke job (issue #1459)."
             echo "- Full cross-platform wheel builds, dataset-backed tests, slow CLI parity, and wheel artifacts run on push to main, nightly schedule, workflow_dispatch, or PRs labeled \`ci:bindings-full\`."
             echo ""
           } >> "$GITHUB_STEP_SUMMARY"

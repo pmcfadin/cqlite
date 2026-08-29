@@ -40,7 +40,9 @@ with cqlite.open('path/to/sstables', schema='schema.cql') as db:
 
 ## Requirements
 
-- Python 3.9+
+- Python 3.9+ — the floor is CI-tested, not just advertised: every PR installs the
+  `abi3` wheel on Python 3.9 and 3.13 and runs an import plus one real query against
+  the canonical corpus (`Floor smoke` in `.github/workflows/python-ci.yml`, issue #1459).
 - Cassandra 5.0 SSTable files
 
 ## API Reference

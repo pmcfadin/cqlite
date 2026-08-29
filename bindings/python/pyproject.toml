@@ -7,6 +7,11 @@ name = "cqlite-py"
 version = "0.16.1"
 description = "Python bindings for CQLite - read Cassandra 5.0 SSTables locally without a cluster"
 readme = "README.md"
+# Issue #1459: this floor is now TESTED, not merely advertised — the
+# `smoke-floors` job in .github/workflows/python-ci.yml installs the cp39-abi3
+# wheel on 3.9 (the floor) and 3.13 (the top of the classifier range) and runs
+# an import plus one real query on each. Raising or lowering this line means
+# changing that matrix in the same commit.
 requires-python = ">=3.9"
 license = {text = "MIT OR Apache-2.0"}
 keywords = ["cassandra", "sstable", "database", "nosql", "cql"]
@@ -19,6 +24,10 @@ classifiers = [
     "Programming Language :: Python :: 3.10",
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
+    # 3.13 is claimed only because the floor matrix actually exercises it
+    # (issue #1459); 3.10/3.11 are covered transitively by abi3 plus the two
+    # tested boundaries.
+    "Programming Language :: Python :: 3.13",
     "Programming Language :: Python :: Implementation :: CPython",
 ]
 
