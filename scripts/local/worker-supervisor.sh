@@ -1133,6 +1133,39 @@ supervisor_lane_id() {
   printf '%s-%s\n' "$h" "${slug:0:24}"
 }
 
+# supervisor_lane_identity_check — SAY SO when this supervisor's lane identity cannot distinguish it
+# from its siblings (roborev round 36, part C).
+#
+# EVERY per-lane mechanism added by #3393 is derived from `REPO_ROOT`, and `REPO_ROOT` is derived from
+# THIS SCRIPT'S OWN LOCATION (line ~141). That is per-lane only when the supervisor runs inside a lane's
+# own worktree. Launched from the ROOT checkout instead, all lanes on the box resolve the SAME
+# `REPO_ROOT`, and then: the "per-lane" lock is machine-global again, the lane-unique `CLAIM_ACTOR` is
+# shared, the legacy-claim migration finds no issue (the root sits on `main`), and the worker orphan
+# probe attributes ZERO workers because they live in OTHER worktrees — a probe that cannot fire.
+#
+# Whether that layout is supported is a DESIGN question escalated on #3393 and not decided here. What is
+# decidable here is that silently degrading is the wrong behaviour either way: a mechanism that does
+# nothing must not look like one that works. So this reports, once, at startup.
+#
+# THE TEST IS STRUCTURAL, NOT A PATH HEURISTIC: git answers it. In a LINKED worktree `--git-dir` and
+# `--git-common-dir` differ; in the MAIN worktree they are the same. No lane-directory naming convention
+# is assumed anywhere — which is the trap that made #3393's AC3 unimplementable.
+#
+# A WARN rather than a refusal, deliberately: if this fleet does launch from the root, refusing to start
+# would take every lane down to fix a diagnostic. The escalation may upgrade it.
+supervisor_lane_identity_check() {
+  local gd cd_
+  gd="$(git -C "$REPO_ROOT" rev-parse --absolute-git-dir 2>/dev/null)" || return 0
+  cd_="$(git -C "$REPO_ROOT" rev-parse --git-common-dir 2>/dev/null)" || return 0
+  case "$cd_" in
+    /*) : ;;
+    *) cd_="$(cd "$REPO_ROOT/$cd_" 2>/dev/null && pwd)" || return 0 ;;
+  esac
+  if [[ "$gd" == "$cd_" ]]; then
+    log "WARN: this supervisor's REPO_ROOT ($REPO_ROOT) is the MAIN worktree, not a lane worktree. Every per-lane identity here is derived from REPO_ROOT, so ALL lanes on this machine would resolve the SAME lock, the SAME CLAIM_ACTOR, no migratable issue branch, and a worker-orphan probe that attributes nothing. Per-lane liveness is NOT in effect for this invocation (#3393)."
+  fi
+}
+
 # supervisor_claim_actor: EXPORT a lane-unique `CLAIM_ACTOR` unless the operator set one.
 #
 # THE CLAIM LOCK'S HOLDER IDENTITY IS machine+actor, AND THE DEFAULT ACTOR IS SHARED (roborev round 33,
@@ -1279,6 +1312,7 @@ supervisor_lock_path() {
 
 acquire_lock() {
   supervisor_lock_path
+  supervisor_lane_identity_check
   supervisor_claim_actor
   supervisor_migrate_legacy_claim
   if mkdir "$SUPERVISOR_LOCK" 2>/dev/null; then

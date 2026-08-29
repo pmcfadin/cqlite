@@ -4278,5 +4278,66 @@ $out"
 }
 
 t test_placeholder_endgame_protection_transfers
+
+# ---------------------------------------------------------------------------
+# Test 36-claim (#3393, roborev round 36 part C): a supervisor whose REPO_ROOT is the MAIN worktree
+# cannot distinguish itself from its siblings — every per-lane identity here derives from REPO_ROOT.
+# Whether that layout is supported is escalated and undecided; that it must not degrade SILENTLY is
+# not. The check is structural (git's own worktree answer), never a lane-directory naming heuristic —
+# assuming a layout is what made #3393's AC3 unimplementable.
+# ---------------------------------------------------------------------------
+test_lane_identity_check_reports_a_shared_root() {
+  local d main linked body out
+  d="$(new_case_dir)"
+  main="$d/mainwt"
+  mkdir -p "$main"
+  git -C "$main" init -q 2>/dev/null
+  git -C "$main" -c user.email=t@t -c user.name=t commit -q --allow-empty -m init 2>/dev/null
+  linked="$d/lanewt"
+  git -C "$main" worktree add -q -b issue-88-x "$linked" 2>/dev/null
+  if [[ ! -e "$linked/.git" ]]; then
+    skip "lane-identity: this host would not create a linked worktree — premise unstageable, not faked"
+    return 0
+  fi
+  body="$d/lic.sh"
+  {
+    printf '%s\n' '#!/usr/bin/env bash'
+    printf '%s\n' 'log() { printf "LOG: %s\n" "$*"; }'
+    sed -n '/^supervisor_lane_identity_check()/,/^}/p' "$SUPERVISOR"
+    printf '%s\n' 'supervisor_lane_identity_check'
+  } >"$body"
+  # (a) the MAIN worktree must WARN and name the consequence.
+  out=$(REPO_ROOT="$main" bash "$body" 2>&1)
+  if printf '%s\n' "$out" | grep -q 'WARN' && printf '%s\n' "$out" | grep -qi 'MAIN worktree'; then
+    pass "lane-identity: a supervisor rooted at the MAIN worktree WARNs that per-lane liveness is not in effect"
+  else
+    fail "lane-identity-main: expected a WARN naming the main worktree, got: [$out]"
+  fi
+  # (b) NON-VACUITY, and true of the broken code too: a LINKED worktree is SILENT. Without this, a
+  # function that always warned would satisfy (a).
+  out=$(REPO_ROOT="$linked" bash "$body" 2>&1)
+  if [[ -z "$out" ]]; then
+    pass "NON-VACUITY: a LANE (linked) worktree produces NO warning — the check discriminates rather than always firing"
+  else
+    fail "lane-identity-linked: a lane worktree warned anyway: [$out]"
+  fi
+  # (c) NO LAYOUT HEURISTIC. The lane worktree above is named `lanewt`, and the main one `mainwt`;
+  # neither matches any fleet naming convention, so (a)/(b) cannot be passing on a path pattern. Asserted
+  # structurally too: the implementation must not reference a lane-directory name.
+  if sed -n '/^supervisor_lane_identity_check()/,/^}/p' "$SUPERVISOR" | grep -qiE '/data/lanes|lane-\[0-9\]|lane-\*'; then
+    fail "lane-identity-heuristic: the check references a lane-directory naming convention — the trap that made AC3 unimplementable"
+  else
+    pass "lane-identity: the check assumes NO lane-directory naming convention (git answers it structurally)"
+  fi
+  # WIRED at startup, or it reports nothing.
+  if grep -qE '^[[:space:]]*supervisor_lane_identity_check$' "$SUPERVISOR"; then
+    pass "lane-identity: supervisor_lane_identity_check is CALLED (not just defined)"
+  else
+    fail "lane-identity-unwired: defined but never invoked"
+  fi
+  git -C "$main" worktree remove --force "$linked" 2>/dev/null || true
+}
+
+t test_lane_identity_check_reports_a_shared_root
 echo "=== $PASS_COUNT passed, $FAIL_COUNT failed, $SKIP_COUNT skipped ==="
 [[ "$FAIL_COUNT" -eq 0 ]]
