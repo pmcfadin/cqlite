@@ -3642,18 +3642,23 @@ test_claim_actor_is_lane_unique() {
     sed -n '/^supervisor_claim_actor()/,/^}/p' "$SUPERVISOR"
     # Read it back out of the ENVIRONMENT, not the shell variable: the worker that calls claim.sh is a
     # CHILD process, so a merely-set value would leave it on the shared default. `env` is the assertion.
+    # THE PREMISE HAS TO BE **UNSET**, NOT EMPTY. `CLAIM_ACTOR="" cmd` marks the name EXPORTED in the
+    # child's environment, so a later plain assignment propagates to grandchildren with no `export` at
+    # all — the first cut of this case staged it that way and its own RED did not fire, because the
+    # assert was true of the un-exported code too. `unset` is a builtin, so it survives PATH="".
+    printf '%s\n' '[[ "${T_UNSET_ACTOR:-}" == 1 ]] && unset CLAIM_ACTOR'
     printf '%s\n' 'supervisor_claim_actor; "$BASH" -c '"'"'printf "%s\n" "${CLAIM_ACTOR:-UNSET-IN-CHILD}"'"'"''
   } >"$body"
-  a=$(CLAIM_ACTOR="" REPO_ROOT=/data/lanes/lane-1111 "$BASH" "$body")
-  b=$(CLAIM_ACTOR="" REPO_ROOT=/data/lanes/lane-2222 "$BASH" "$body")
-  same=$(CLAIM_ACTOR="" REPO_ROOT=/data/lanes/lane-1111 "$BASH" "$body")
+  a=$(T_UNSET_ACTOR=1 REPO_ROOT=/data/lanes/lane-1111 "$BASH" "$body")
+  b=$(T_UNSET_ACTOR=1 REPO_ROOT=/data/lanes/lane-2222 "$BASH" "$body")
+  same=$(T_UNSET_ACTOR=1 REPO_ROOT=/data/lanes/lane-1111 "$BASH" "$body")
   if [[ "$a" != "UNSET-IN-CHILD" && "$a" != "$b" && "$a" == "$same" ]]; then
     pass "claim-actor: EXPORTED to the child, lane-unique, and stable for one lane ($a vs $b)"
   else
     fail "claim-actor: a=[$a] b=[$b] same=[$same] — must reach the child, differ per lane, and be stable"
   fi
-  c=$(CLAIM_ACTOR="" REPO_ROOT=/data/boxA/lane "$BASH" "$body")
-  e=$(CLAIM_ACTOR="" REPO_ROOT=/data/boxB/lane "$BASH" "$body")
+  c=$(T_UNSET_ACTOR=1 REPO_ROOT=/data/boxA/lane "$BASH" "$body")
+  e=$(T_UNSET_ACTOR=1 REPO_ROOT=/data/boxB/lane "$BASH" "$body")
   if [[ "$c" != "$e" ]]; then
     pass "claim-actor: two lanes sharing a directory BASENAME still get different actors"
   else
@@ -3677,7 +3682,7 @@ test_claim_actor_is_lane_unique() {
   # Builtins only, same reason as the lock path (#3464 family 2): cases source this file under a
   # stripped PATH. `$BASH` absolute, since PATH='' cannot find bash itself.
   local stripped
-  stripped=$(CLAIM_ACTOR="" REPO_ROOT=/data/lanes/lane-1111 PATH="" "$BASH" "$body" 2>&1)
+  stripped=$(T_UNSET_ACTOR=1 REPO_ROOT=/data/lanes/lane-1111 PATH="" "$BASH" "$body" 2>&1)
   if [[ "$stripped" == "$a" ]]; then
     pass "claim-actor: resolves with an EMPTY PATH — builtins only"
   else
