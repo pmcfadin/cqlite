@@ -4815,17 +4815,34 @@ run_roborev_lints_cmd() {
 # _ansi_stripped_log <logfile> — echo a path to <logfile> with ANSI escapes removed.
 #
 # roborev round-15 finding (HIGH), and the premise checked out: `.github/workflows/gate.yml`
-# (the nightly FULL gate) sets `CARGO_TERM_COLOR: always`, as do seven other workflows and
-# scripts/local/pre-merge.sh. Cargo then emits
+# (the nightly FULL gate) sets `CARGO_TERM_COLOR: always`, as do 17 others -- 18 workflows in
+# TOTAL, measured on #3400 via `grep -rln "CARGO_TERM_COLOR: always" .github/workflows/ | wc -l`,
+# not the "eight" this comment originally claimed -- plus scripts/local/pre-merge.sh:29, which
+# defaults it through `${CARGO_TERM_COLOR:-always}`. Cargo then emits
 #     ESC[1mESC[92m     RunningESC[0m unittests src/lib.rs (...)
 # with the reset sequence sitting BETWEEN `Running` and the path — so every parser keyed on
 # the literal text sees nothing. MEASURED on both guards, and the two directions differ:
-#   * check_unittest_targets_ran  -> FALSE FAIL: the new lanes would red on every clean
+#   * check_unittest_targets_ran -> FALSE FAIL: the new lanes would red on every clean
 #     nightly run, reporting "no Running unittests line" about a perfectly healthy log.
+#     NOTE: that function is introduced by PR #3403 (#1699) and this file DEFINES NO SUCH
+#     FUNCTION -- a definition-anchored scan (`grep -cE '^[[:space:]]*check_unittest[_a-z]*\(\)'`)
+#     finds none. The check is written definition-anchored ON PURPOSE: a bare substring grep for
+#     the name matches THIS COMMENT and would report the symbol present, which is the same
+#     self-matching trap the rest of this file exists to avoid. The name appears here only to
+#     record the other failure direction; do not read it as a symbol this file provides.
 #   * check_no_unexpected_zero_tests -> VACUOUS PASS: a target running ZERO tests is never
 #     associated with its result, so the #2039 guard silently reports OK. That one is
-#     PRE-EXISTING and affects its other callers (core-tests, cli-tests) on nightly CI too;
-#     filed separately.
+#     PRE-EXISTING and, measured on #3400, affects EXACTLY TWO callers -- the cli-tests
+#     component's Pass 1 (default) and Pass 2 (write-support). `core-tests` does NOT call this
+#     guard, contrary to this comment's original claim. That matters for whoever extends the
+#     caller set: core-tests runs under NEXTEST, whose output carries no `Running tests/`
+#     banners at all, so the guard would be inert there for a second reason that has nothing
+#     to do with colour and that this helper cannot fix. Filed separately as #3400.
+#
+# PROVENANCE: this block originated in PR #3403 (#1699). The three corrections above were
+# measured on #3400 and reported on that PR (comment 5464172510). The divergence from #3403's
+# copy is DELIBERATE, not drift -- #3400 declines to ship a stale count, a dangling symbol
+# reference, and a false caller claim merely to keep the two copies byte-identical.
 #
 # Stripping is done ONCE into a sibling file, not per line and not through a pipe. A pipe
 # would put the reading loop in a SUBSHELL and its accumulated verdict variables would be
