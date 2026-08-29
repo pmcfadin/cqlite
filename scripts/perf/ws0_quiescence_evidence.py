@@ -47,27 +47,6 @@ _EPS = 1e-6
 # self-consistent in every other respect while describing a bar nobody would accept (job 78 F2).
 # Duplicated rather than imported to keep this module dependency-free; the values are asserted
 # against the writer's by scripts/tests/test_ws0_quiescence_evidence_guards.sh.
-# EVERY SELF-DECLARED BOUND, NOT THE TWO I HAPPENED TO FIX (roborev job 80 finding 1). Job 78 F2
-# said "a self-declared bound is not conformance-checked". I fixed `thresholds.max_load1` and
-# `thresholds.max_load1_movement` and MISSED `coverage_gap_bound_s`, which is the same kind of
-# field: a limit the verdict declares and then judges its own observations against. Raising BOTH
-# the bound and the observed gap certified an effectively unobserved window.
-#
-# The family is now ENUMERATED rather than patched instance-by-instance. The verdict declares
-# exactly three numeric bounds, and all three appear here; `load1_after_is_bounded` is a boolean
-# mode flag, not a bound. Adding a fourth bound to `judge()` trips the undeclared-field check,
-# which is what forces it into this table.
-CANONICAL_BOUNDS = {
-    "thresholds.max_load1": 2.0,                    # ws0_quiescence.DEFAULT_MAX_LOAD1
-    "thresholds.max_load1_movement": 0.5,           # ws0_quiescence.DEFAULT_MAX_LOAD1_MOVEMENT
-    "window_census.coverage_gap_bound_s": 30.0,     # ws0_quiescence.MAX_SAMPLE_GAP_S
-}
-# Kept as names for readability at the use sites below.
-CANONICAL_MAX_LOAD1 = CANONICAL_BOUNDS["thresholds.max_load1"]
-CANONICAL_MAX_LOAD1_MOVEMENT = CANONICAL_BOUNDS["thresholds.max_load1_movement"]
-CANONICAL_COVERAGE_GAP_BOUND_S = CANONICAL_BOUNDS["window_census.coverage_gap_bound_s"]
-
-
 def _expected_census_breadth(narrow: int, samples: int) -> str:
     """Recompose `census_breadth` exactly as ws0_quiescence.judge() does.
 
@@ -170,6 +149,110 @@ FIELDS: Dict[str, Tuple[Callable[[Any], bool], str]] = {
 }
 
 
+# =============================================================================================
+# THE PROPERTY MATRIX. Properties x fields, and every field MUST appear in exactly one cell.
+#
+# WHY THIS EXISTS (#3248, coordination ruling on roborev job 80). Closing the FIELD enumeration
+# bounded WHICH things get checked and said nothing about HOW WELL. Two rounds then found instances
+# of property families I had already named -- P1 applied to two of its three fields, P2 implemented
+# as a prefix sniff. Fixing those as instances would have left the same hole open one field over.
+#
+# So the matrix is the SOURCE of the checks below, not a description of them: the enforcement loops
+# iterate these tables. And `_assert_matrix_total()` requires every declared field to be classified,
+# so a new field in FIELDS fails until someone decides which property applies. "Which cells did I
+# fill?" therefore has a complete answer by construction, the way "which fields did I check?" does.
+# =============================================================================================
+
+# P1 -- A SELF-DECLARED LIMIT MUST CONFORM TO A CANONICAL CONSTANT. The verdict declares the bar it
+# judged itself against; nothing stops it declaring a bar nobody would accept. Values mirrored from
+# ws0_quiescence and drift-checked against it by the guard suite.
+P1_CANONICAL: Dict[str, float] = {
+    "thresholds.max_load1": 2.0,                    # DEFAULT_MAX_LOAD1
+    "thresholds.max_load1_movement": 0.5,           # DEFAULT_MAX_LOAD1_MOVEMENT
+    "window_census.coverage_gap_bound_s": 30.0,     # MAX_SAMPLE_GAP_S (writer enforces at :294)
+}
+
+# P2 -- A DERIVED OR DUPLICATED FIELD MUST BE ASSERTED AGAINST ITS INPUTS, never inspected. Each
+# entry recomputes the field from what it is derived from; the loop requires equality. Nine members,
+# not the two review happened to report: a value recorded twice is derived from itself.
+P2_DERIVATIONS: Dict[str, Any] = {
+    "load1_movement": (
+        lambda f: abs(f["load1_after"] - f["load1_before"]),
+        "abs(load1_after - load1_before)", 1e-3),
+    "load1_before": (lambda f: f["before.load.load1"], "before.load.load1", _EPS),
+    "load1_after": (lambda f: f["after.load.load1"], "after.load.load1", _EPS),
+    "competing_before": (lambda f: f["before.competing_count"], "before.competing_count", 0),
+    "competing_after": (lambda f: f["after.competing_count"], "after.competing_count", 0),
+    "before.competing_count": (lambda f: len(f["before.competing"]), "len(before.competing)", 0),
+    "after.competing_count": (lambda f: len(f["after.competing"]), "len(after.competing)", 0),
+    "window_census.census_breadth": (
+        lambda f: _expected_census_breadth(f["window_census.narrow_census_records"],
+                                           f["window_census.samples"]),
+        "f(narrow_census_records, samples)", None),
+    "load1_after_note": (
+        lambda f: _expected_load1_after_note(f["load1_after_is_bounded"]),
+        "f(load1_after_is_bounded)", None),
+}
+
+# TYPE_ONLY -- neither self-declared nor derived: a primary observation, or a literal. Listed
+# EXPLICITLY so the matrix is total and a new field cannot land here by default.
+TYPE_ONLY: frozenset = frozenset({
+    "verdict",
+    "load1_after_is_bounded",
+    "before.competing", "after.competing",
+    "before.load.load1", "before.load.load5", "before.load.load15", "before.load.runnable",
+    "after.load.load1", "after.load.load5", "after.load.load15", "after.load.runnable",
+    "window_census.samples", "window_census.competing_samples",
+    "window_census.coverage_largest_gap_s",
+    "window_census.load1_min", "window_census.load1_max", "window_census.load1_mean",
+    "window_census.narrow_census_records", "window_census.timeseries",
+    "window_census.window.start", "window_census.window.end",
+})
+
+
+# Readability aliases, SOURCED FROM P1_CANONICAL so there is exactly one table. An earlier version
+# of this file carried a second literal copy of these three values -- a duplicated constant with no
+# drift check is the same shape as the defect the matrix exists to close, one level down.
+CANONICAL_MAX_LOAD1 = P1_CANONICAL["thresholds.max_load1"]
+CANONICAL_MAX_LOAD1_MOVEMENT = P1_CANONICAL["thresholds.max_load1_movement"]
+CANONICAL_COVERAGE_GAP_BOUND_S = P1_CANONICAL["window_census.coverage_gap_bound_s"]
+# Back-compat name for the guard suite's drift check, which asserts the table against the writer.
+CANONICAL_BOUNDS = P1_CANONICAL
+
+
+def _assert_matrix_total() -> None:
+    """Every declared field is classified by exactly one property. THE PIN.
+
+    Without this the matrix is a comment: someone adds a field to FIELDS, no cell claims it, and it
+    silently gets type-checking only -- which is exactly how P1 came to cover two of its three
+    fields. Raising here converts that into an immediate, named failure.
+    """
+    classified = set(P1_CANONICAL) | set(P2_DERIVATIONS) | set(TYPE_ONLY)
+    unclassified = sorted(set(FIELDS) - classified)
+    if unclassified:
+        raise EvidenceError(
+            f"PROPERTY MATRIX INCOMPLETE: {len(unclassified)} declared field(s) have no property"
+            f" cell: {', '.join(unclassified)}. Classify each as P1_CANONICAL (a self-declared"
+            " limit), P2_DERIVATIONS (derived or duplicated from another field), or TYPE_ONLY (a"
+            " primary observation). An unclassified field gets type-checking only, which is the"
+            " job-80 defect."
+        )
+    stray = sorted(classified - set(FIELDS))
+    if stray:
+        raise EvidenceError(
+            f"PROPERTY MATRIX names {len(stray)} field(s) absent from FIELDS:"
+            f" {', '.join(stray)}. A cell for a field that does not exist enforces nothing."
+        )
+    overlap = sorted((set(P1_CANONICAL) & set(P2_DERIVATIONS))
+                     | (set(P1_CANONICAL) & set(TYPE_ONLY))
+                     | (set(P2_DERIVATIONS) & set(TYPE_ONLY)))
+    if overlap:
+        raise EvidenceError(
+            f"PROPERTY MATRIX double-classifies: {', '.join(overlap)}. Exactly one cell per field,"
+            " so the enforcement loops cannot disagree about which rule governs."
+        )
+
+
 def _leaves(obj: Any, prefix: str = "") -> Dict[str, Any]:
     """Flatten to dotted paths. A key CONTAINING a dot is refused, not flattened.
 
@@ -211,6 +294,7 @@ def assert_self_consistent(verdict: Any, where: str) -> None:
     """Raise EvidenceError unless the verdict's own record supports QUIESCENT."""
     if not isinstance(verdict, dict):
         raise EvidenceError(f"{where} is not a JSON object, so it carries no evidence at all.")
+    _assert_matrix_total()
     present = _leaves(verdict)
 
     missing = sorted(set(FIELDS) - set(present))
@@ -236,33 +320,29 @@ def assert_self_consistent(verdict: Any, where: str) -> None:
                 f"{where} `{path}` is {present[path]!r}, which is not {desc}."
             )
 
-    # ---- cross-field consistency: a verdict must not disagree with itself ----
-    for side in ("before", "after"):
-        lst, cnt = present[f"{side}.competing"], present[f"{side}.competing_count"]
-        if cnt != len(lst):
+    # ---- P2: every derived/duplicated field, recomputed from its inputs ----
+    for path, (derive, description, tol) in P2_DERIVATIONS.items():
+        expected = derive(present)
+        actual = present[path]
+        if tol is None:
+            agrees = actual == expected
+        else:
+            agrees = abs(actual - expected) <= tol
+        if not agrees:
             raise EvidenceError(
-                f"{where} `{side}.competing_count` is {cnt} but `{side}.competing` holds"
-                f" {len(lst)} entr(y/ies). An internally contradictory boundary sample is"
-                " refused rather than reconciled."
-            )
-        if cnt != 0:
-            raise EvidenceError(
-                f"{where} says QUIESCENT but the {side} boundary census lists {cnt} competing"
-                f" process(es): {lst[:3]}. The verdict contradicts its own evidence."
-            )
-        if present[f"competing_{side}"] != cnt:
-            raise EvidenceError(
-                f"{where} top-level `competing_{side}` is {present[f'competing_{side}']} but"
-                f" `{side}.competing_count` is {cnt}. The same quantity recorded twice must"
-                " agree."
-            )
-        if abs(present[f"load1_{side}"] - present[f"{side}.load.load1"]) > _EPS:
-            raise EvidenceError(
-                f"{where} top-level `load1_{side}` is {present[f'load1_{side}']} but"
-                f" `{side}.load.load1` is {present[f'{side}.load.load1']}. The same"
-                " observation recorded twice must agree."
+                f"{where} `{path}` is {actual!r}, but its own inputs ({description}) give"
+                f" {expected!r}. A derived field must AGREE with what it is derived from -- a"
+                " verdict that disagrees with itself certifies nothing."
             )
 
+    # ---- the remaining cross-field facts, which are not single-field derivations ----
+    for side in ("before", "after"):
+        if present[f"{side}.competing_count"] != 0:
+            raise EvidenceError(
+                f"{where} says QUIESCENT but the {side} boundary census lists"
+                f" {present[f'{side}.competing_count']} competing process(es):"
+                f" {present[f'{side}.competing'][:3]}. The verdict contradicts its own evidence."
+            )
     if present["window_census.competing_samples"] != 0:
         raise EvidenceError(
             f"{where} says QUIESCENT but records"
@@ -274,27 +354,6 @@ def assert_self_consistent(verdict: Any, where: str) -> None:
             f"{where} records {present['window_census.narrow_census_records']} narrow-census"
             f" record(s) among only {present['window_census.samples']} in-window sample(s),"
             " which is impossible."
-        )
-    # Job 75 F3: the published caveat string must AGREE with the count it describes, or the
-    # report prints `FULL` over a narrow census.
-    narrow = present["window_census.narrow_census_records"]
-    samples = present["window_census.samples"]
-    expected_breadth = _expected_census_breadth(narrow, samples)
-    if present["window_census.census_breadth"] != expected_breadth:
-        raise EvidenceError(
-            f"{where} `census_breadth` is {present['window_census.census_breadth']!r}, which is"
-            f" NOT what narrow_census_records={narrow} over samples={samples} composes to."
-            f" Expected {expected_breadth!r}. The caveat the report PUBLISHES must be DERIVED from"
-            " the counts, not merely consistent with a prefix of them -- otherwise arbitrary text"
-            " rides into the published result beside a nonzero narrow count."
-        )
-    expected_note = _expected_load1_after_note(present["load1_after_is_bounded"])
-    if present["load1_after_note"] != expected_note:
-        raise EvidenceError(
-            f"{where} `load1_after_note` is {present['load1_after_note']!r}, which is NOT what"
-            f" load1_after_is_bounded={present['load1_after_is_bounded']} composes to. Expected"
-            f" {expected_note!r}. The note states WHETHER the after boundary was bounded, so a"
-            " note disagreeing with the flag misreports the guard that was actually applied."
         )
     gap = present["window_census.coverage_largest_gap_s"]
     bound = present["window_census.coverage_gap_bound_s"]
@@ -311,16 +370,16 @@ def assert_self_consistent(verdict: Any, where: str) -> None:
             f"{where} in-window load1 mean {mean} lies outside its own min/max [{lo}, {hi}],"
             " which is impossible."
         )
-    start, end = (_iso(present["window_census.window.start"]),
-                  _iso(present["window_census.window.end"]))
-    if start is None or end is None or not start < end:
+    start_ts, end_ts = (_iso(present["window_census.window.start"]),
+                        _iso(present["window_census.window.end"]))
+    if start_ts is None or end_ts is None or not start_ts < end_ts:
         raise EvidenceError(
             f"{where} judged window {present['window_census.window.start']!r} .."
             f" {present['window_census.window.end']!r} does not run forwards."
         )
 
     # ---- the load thresholds, with the writer's OWN asymmetry ----
-    for path, canonical in CANONICAL_BOUNDS.items():
+    for path, canonical in P1_CANONICAL.items():
         recorded = present[path]
         if recorded > canonical:
             raise EvidenceError(

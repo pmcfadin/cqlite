@@ -61,6 +61,58 @@ TMP="$(mktemp -d)"
 trap 'rm -rf "$TMP"' EXIT
 
 # --------------------------------------------------------------------------------------------
+# THE PROPERTY MATRIX IS TOTAL, DISJOINT, AND HAS NO STRAY CELLS.
+#
+# This is the pin the coordination ruling on job 80 asked for: "properties x fields enumerated is a
+# finite matrix, and 'which cells did I fill?' has a complete answer the way 'which fields did I
+# check?' did." Without this, the matrix is a comment -- a field added to FIELDS with no cell would
+# silently get type-checking only, which IS the job-80 defect.
+# --------------------------------------------------------------------------------------------
+if out=$(python3 - "$PERF" <<'PY'
+import sys
+sys.path.insert(0, sys.argv[1])
+import ws0_quiescence_evidence as e
+p1, p2, to, fields = set(e.P1_CANONICAL), set(e.P2_DERIVATIONS), set(e.TYPE_ONLY), set(e.FIELDS)
+problems = []
+if fields - (p1 | p2 | to):
+    problems.append(f"unclassified: {sorted(fields - (p1 | p2 | to))}")
+if (p1 | p2 | to) - fields:
+    problems.append(f"stray cells: {sorted((p1 | p2 | to) - fields)}")
+for a, b, n in ((p1, p2, "P1&P2"), (p1, to, "P1&TYPE_ONLY"), (p2, to, "P2&TYPE_ONLY")):
+    if a & b:
+        problems.append(f"double-classified {n}: {sorted(a & b)}")
+if problems:
+    sys.exit("; ".join(problems))
+print(f"total={len(fields)} P1={len(p1)} P2={len(p2)} TYPE_ONLY={len(to)}")
+PY
+); then
+  pass "the property matrix is TOTAL, DISJOINT and stray-free ($out)"
+else
+  fail "property matrix defect: $out"
+fi
+
+# ...and the pin must FIRE, not merely be present (#3249: observed to fire, not present).
+if out=$(python3 - "$PERF" <<'PY'
+import sys
+sys.path.insert(0, sys.argv[1])
+import ws0_quiescence_evidence as e
+e.FIELDS["window_census.__unclassified_probe"] = (lambda v: True, "anything")
+try:
+    e.assert_self_consistent({}, "probe")
+except e.EvidenceError as exc:
+    if "PROPERTY MATRIX INCOMPLETE" in str(exc) and "__unclassified_probe" in str(exc):
+        print("fired, naming the field")
+        raise SystemExit(0)
+    sys.exit(f"raised, but not the matrix pin: {exc}")
+sys.exit("the matrix pin did NOT fire on an unclassified field")
+PY
+); then
+  pass "the matrix pin FIRES on an unclassified field ($out)"
+else
+  fail "matrix pin did not fire: $out"
+fi
+
+# --------------------------------------------------------------------------------------------
 # THE BASELINE IS HERMETIC. IT USED TO DEPEND ON A QUIET BOX, AND THAT WAS THREE DEFECTS AT ONCE.
 #
 # The first version judged against the LIVE /data/ws0-3248/sampler/box-load.jsonl. Running this
@@ -156,13 +208,19 @@ CASES = [
      lambda v: v.__setitem__("brand_new_field", 1)),
     ("a MISSING declared field is refused", "missing",
      lambda v: v.pop("thresholds")),
+    # PERTURB EXACTLY ONE PROPERTY. An earlier version set only `before.competing`/`_count`,
+    # leaving the top-level `competing_before` duplicate stale -- so the P2 derivation fired first
+    # and the case passed for the wrong reason. A real verdict with a boundary competitor is
+    # internally consistent; only the QUIESCENT conclusion is wrong.
     ("a competitor at the before boundary is refused", "before boundary census lists",
      lambda v: (v["before"].__setitem__("competing", ["cc1"]),
-                v["before"].__setitem__("competing_count", 1))),
+                v["before"].__setitem__("competing_count", 1),
+                v.__setitem__("competing_before", 1))),
     ("a competitor at the after boundary is refused", "after boundary census lists",
      lambda v: (v["after"].__setitem__("competing", ["ld", "rustc"]),
-                v["after"].__setitem__("competing_count", 2))),
-    ("competing_count disagreeing with len(competing) is refused", "holds 0 entr",
+                v["after"].__setitem__("competing_count", 2),
+                v.__setitem__("competing_after", 2))),
+    ("competing_count disagreeing with len(competing) is refused", "`competing_after` is 0, but its own inputs",
      lambda v: v["after"].__setitem__("competing_count", 3)),
     ("a top-level/nested duplicate that disagrees is refused", "must",
      lambda v: v.__setitem__("competing_before", 4)),
@@ -170,21 +228,30 @@ CASES = [
      lambda v: v["window_census"].__setitem__("competing_samples", 7)),
     ("a zero-sample window is refused (unmeasured, not quiet)", "not an integer >= 1",
      lambda v: v["window_census"].__setitem__("samples", 0)),
-    ("narrow_census_records exceeding samples is refused as impossible", "impossible",
-     lambda v: v["window_census"].__setitem__("narrow_census_records", 999)),
+    # The breadth string is COMPUTED from the baseline's own `samples`, not hardcoded: a literal
+    # copied from the fixture is a drift pair, which is the defect class this suite is about. The
+    # case perturbs exactly one property -- narrow > samples is impossible -- and keeps
+    # census_breadth correctly DERIVED so the impossibility check is what fires.
+    ("narrow_census_records exceeding samples is refused as impossible", "which is impossible",
+     lambda v: (v["window_census"].__setitem__("narrow_census_records", 999),
+                v["window_census"].__setitem__(
+                    "census_breadth",
+                    f"NARROW on 999 of {v['window_census']['samples']} record(s): those carry"
+                    " rustc/cargo/gate only, so a short-lived cc1/ld/lld/mold between boundaries"
+                    " would not appear. Stated rather than implied."))),
     ("a gap wider than the verdict's OWN bound is refused", "exceeds",
      lambda v: v["window_census"].__setitem__("coverage_largest_gap_s", 999.0)),
-    ("census_breadth claiming FULL while narrow>0 is refused", "NOT what narrow_census_records",
+    ("census_breadth claiming FULL while narrow>0 is refused", "`window_census.census_breadth` is \x27FULL (all records)\x27, but its own inputs",
      lambda v: (v["window_census"].__setitem__("narrow_census_records", 3),
                 v["window_census"].__setitem__("census_breadth", "FULL (all records)"))),
-    ("census_breadth claiming NARROW while narrow==0 is refused", "NOT what narrow_census_records",
+    ("census_breadth claiming NARROW while narrow==0 is refused", "`window_census.census_breadth` is \x27NARROW on 2 of 5\x27, but its own inputs",
      lambda v: (v["window_census"].__setitem__("narrow_census_records", 0),
                 v["window_census"].__setitem__("census_breadth", "NARROW on 2 of 5"))),
     ("load1_mean outside its own min/max is refused", "impossible",
      lambda v: v["window_census"].__setitem__("load1_mean", 99.0)),
     ("a judged window running backwards is refused", "does not run forwards",
      lambda v: v["window_census"]["window"].__setitem__("end", "2020-01-01T00:00:00Z")),
-    ("a recorded load1_movement disagreeing with the boundaries is refused", "differ by",
+    ("a recorded load1_movement disagreeing with the boundaries is refused", "`load1_movement` is 7.77, but its own inputs",
      lambda v: v.__setitem__("load1_movement", 7.77)),
     ("load1_before above its own max_load1 is refused", "above its own",
      lambda v: (v.__setitem__("load1_before", 99.0),
@@ -196,11 +263,11 @@ CASES = [
      lambda v: (v["window_census"].__setitem__("coverage_gap_bound_s", 9999.0),
                 v["window_census"].__setitem__("coverage_largest_gap_s", 9998.0))),
     ("census_breadth as ARBITRARY text beside a nonzero narrow count is refused",
-     "NOT what narrow_census_records",
+     "`window_census.census_breadth` is 'everything is fine', but its own inputs",
      lambda v: (v["window_census"].__setitem__("narrow_census_records", 2),
                 v["window_census"].__setitem__("census_breadth", "everything is fine"))),
     ("census_breadth with the WRONG sample count in its own text is refused",
-     "NOT what narrow_census_records",
+     "but its own inputs (f(narrow_census_records, samples))",
      lambda v: (v["window_census"].__setitem__("narrow_census_records", 2),
                 v["window_census"].__setitem__(
                     "census_breadth",
@@ -208,7 +275,7 @@ CASES = [
                     " short-lived cc1/ld/lld/mold between boundaries would not appear. Stated"
                     " rather than implied."))),
     ("load1_after_note disagreeing with load1_after_is_bounded is refused (swept, not reported)",
-     "NOT what load1_after_is_bounded",
+     "`load1_after_note` is 'bounded: the caller asserted",
      lambda v: v.__setitem__("load1_after_note", "bounded: the caller asserted this sample was"
                                                 " taken after settling")),
     ("a non-dict verdict is refused", "not a JSON object", lambda v: None),
@@ -236,7 +303,7 @@ while IFS='|' read -r verdict label; do
   esac
 done < <(run_matrix)
 
-MIN_CHECKS=26
+MIN_CHECKS=28
 if [ "$checks" -lt "$MIN_CHECKS" ]; then
   echo
   echo "FAIL - only $checks check(s) ran; this suite has at least $MIN_CHECKS."
