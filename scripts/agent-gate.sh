@@ -6168,7 +6168,11 @@ run_flight_tests() {
       find -H "$_fx_base" -maxdepth 1 -name 'sensor_data-*' -print0 > "$_fx_list" 2>/dev/null
       _fx_enum_rc=$?
     fi
-    if [ "$_fx_enum_rc" -ne 0 ]; then
+    # Only when no PRECISE cause is already recorded (roborev job 117, Low — a regression from the
+    # previous round). `_fx_base` missing or unreadable is already diagnosed above, and find then
+    # fails for that same reason; overwriting `not-a-directory` with a generic enumeration failure
+    # sends the reader to the wrong remedy, which is the exact thing the per-cause split exists for.
+    if [ "$_fx_enum_rc" -ne 0 ] && [ -z "$_fx_basefail" ]; then
       # FAIL-CLOSED on an unenumerable corpus: the alternative is a check over an unknown subset.
       _fx_basefail="fixture enumeration FAILED (find exit $_fx_enum_rc under $_fx_base) — the"
       _fx_basefail="$_fx_basefail per-fixture checks below would have run over an unknown subset"
@@ -7178,11 +7182,26 @@ EOF
 # supports stock macOS, where the lane would otherwise have mis-scanned every target. `sed |
 # grep -c` consumes each file whole, so there is no early-close SIGPIPE race either (#3380).
 _lh_positive_in_closure() {
-  local closure="$1" cfg_site="$2" cf
+  # THREE-VALUED: 0 = a positive site exists, 1 = none, 2 = COULD NOT TELL (roborev job 117,
+  # Medium). The old form captured only the COUNT, so a scan that failed produced empty output,
+  # compared as 0, and read as "no positive site" — which routes the target into `allow_zero`, and
+  # an allowed-zero target that is in fact positively gated can then run zero tests and PASS. A
+  # false green in the polarity scan, which is the one place it must not be. `sed` failing is
+  # caught too: under this script's `pipefail` the pipeline status is non-zero if EITHER stage
+  # fails, and grep 1 (no match) is the only non-zero we may treat as an answer.
+  local closure="$1" cfg_site="$2" cf _pc_out _pc_rc
   while IFS= read -r cf; do
     [ -n "$cf" ] || continue
-    if [ "$(sed -E 's/not\([[:space:]]*feature[[:space:]]*=[[:space:]]*"legacy-heuristics"[[:space:]]*\)//g' "$cf" 2>/dev/null \
-        | grep -cE "$cfg_site")" -gt 0 ]; then
+    _pc_rc=0
+    _pc_out=$(sed -E 's/not\([[:space:]]*feature[[:space:]]*=[[:space:]]*"legacy-heuristics"[[:space:]]*\)//g' "$cf" 2>/dev/null \
+      | grep -cE "$cfg_site") || _pc_rc=$?
+    # grep exit 1 = no match, and the pipeline then reports 1 under pipefail: that IS an answer.
+    # Anything else means a stage could not do its job, and the caller must not guess.
+    if [ "$_pc_rc" -ge 2 ]; then
+      echo "POLARITY-SCAN-ERROR exit $_pc_rc on $cf" >&2
+      return 2
+    fi
+    if [ "${_pc_out:-0}" -gt 0 ]; then
       return 0
     fi
   done <<EOF
@@ -7264,7 +7283,7 @@ run_legacy_heuristics() {
     echo ">>> [$name] $status ($((end - start))s)"
     return 0
   fi
-  local _mt_name _mt_src _mt_how _mt_rel _mt_rf _mt_dir _mt_hit _mt_cf _obs_id _mt_cnt _mt_rc
+  local _mt_name _mt_src _mt_how _mt_rel _mt_rf _mt_dir _mt_hit _mt_cf _obs_id _mt_cnt _mt_rc _pol_rc
   local rf_unmet=""
   while IFS="$(printf '\t')" read -r _mt_name _mt_src _mt_how _mt_rel _mt_rf; do
     [ -n "$_mt_name" ] || continue
@@ -7495,12 +7514,34 @@ EOF
     # zero-tests guard the very target round 7 added discovery for. The round-7 fix was
     # under-propagated: I threaded metadata discovery into the candidate loop and left the
     # classifier reasoning about source text alone.
+    # THE THIRD STATE IS DECIDED BEFORE THE CHAIN, because `elif cmd; then` treats every non-zero
+    # alike: exit 2 (could not tell) would have taken the same branch as exit 1 (no positive site)
+    # and routed the target into allow_zero — the fail-open the function change closes, reintroduced
+    # one line away from it. Precomputing keeps the chain two-valued, which is all it can express.
+    _pol_rc=0
+    if [ "$_mt_how" != "manifest" ]; then
+      _lh_positive_in_closure "$_mt_closure" "$cfg_site" || _pol_rc=$?
+      if [ "$_pol_rc" -ge 2 ]; then
+        status=FAIL
+        {
+          echo "[$name] FAIL-CLOSED: the polarity scan could not read a file in the module closure"
+          echo "        of test target '$_mt_name' (exit $_pol_rc). A failed scan reads as 'no"
+          echo "        positive cfg site', which routes the target into allowed-zero — and an"
+          echo "        allowed-zero target that IS positively gated can then run zero tests and"
+          echo "        PASS. This is the one scan that must not guess."
+        } | tee "$log"
+        end=$(date +%s)
+        record_result "$name" "$status" "$((end - start))"
+        echo ">>> [$name] $status ($((end - start))s)"
+        return 0
+      fi
+    fi
     if [ "$_mt_how" = "manifest" ]; then
       :
     # Polarity over the WHOLE module tree, not just the root (round 12): a positive gate in
     # a child module must stop this target being allowed-zero, or the target is EXCUSED from
     # the zero-tests guard on the strength of a file that happened to be silent.
-    elif _lh_positive_in_closure "$_mt_closure" "$cfg_site"; then
+    elif [ "$_pol_rc" -eq 0 ]; then
       :
     else
       # TWO DIFFERENT IDENTIFIERS FOR TWO DIFFERENT CONSUMERS, and conflating them was a

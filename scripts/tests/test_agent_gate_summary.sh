@@ -4299,13 +4299,40 @@ if [ "$(printf '%s' "$lh_fn48" | grep -cE "grep +(-v )?'\^CFG-GATED-MOD ' \"\\\$
 else
   ok "1699-split-status: neither splitting grep discards its exit status"
 fi
-if [ "$(printf '%s' "$lh_fn48" | grep -cF 'into two empty halves means a read failed')" -gt 0 ]; then
-  ok "1699-split-grammar: the closed grammar is IMPLEMENTED — a non-empty stream that classifies to nothing FAILs"
+lh_fn48_code=$(printf '%s\n' "$lh_fn48" | sed 's/^[[:space:]]*#.*$//')
+sg_missing=""
+printf '%s\n' "$lh_fn48_code" | grep -qE '_sp_rc1=\$\?' || sg_missing="$sg_missing status-capture-1"
+printf '%s\n' "$lh_fn48_code" | grep -qE '_sp_rc2=\$\?' || sg_missing="$sg_missing status-capture-2"
+printf '%s\n' "$lh_fn48_code" | grep -qE '\[ "\$_sp_rc[12]" -ge 2 \]' || sg_missing="$sg_missing status-test"
+printf '%s\n' "$lh_fn48_code" | grep -qE '\[ ! -s "\$_mt_fatal" \].*\[ ! -s "\$_mt_gaps" \]' || sg_missing="$sg_missing both-empty-test"
+if [ -n "$sg_missing" ]; then
+  bad "1699-split-grammar: the closed grammar is not IMPLEMENTED — missing:$sg_missing. Asserted on control flow (comments stripped), because grepping the diagnostic TEXT would stay green if the branch were deleted and its explanation left behind"
 else
-  bad "1699-split-grammar: no branch fires when a non-empty report stream splits into two empty halves — the comment claims a closed grammar the code does not implement"
+  ok "1699-split-grammar: the closed grammar is implemented in code — both statuses captured, tested >=2, and the both-halves-empty case decided"
 fi
 
-ASSERT_FLOOR=376
+# --- 50. #1699: the polarity scan is THREE-valued and its caller must honour that (job 117) -----
+# `[ "$(sed … | grep -c …)" -gt 0 ]` captured only the COUNT, so a failed scan produced empty output,
+# compared as 0, and read as "no positive cfg site" — which routes the target into allow_zero, and an
+# allowed-zero target that IS positively gated can then run zero tests and PASS. A false green in the
+# one scan that must not guess. The caller matters equally: `elif cmd; then` treats every non-zero
+# alike, so exit 2 would have taken the same branch as exit 1 — the same fail-open one line away
+# from its own fix. Asserted on the FUNCTION and on the CALL SITE, comments stripped.
+pol_fn=$(awk '/^_lh_positive_in_closure\(\) \{/,/^\}/' "$GATE" | sed 's/^[[:space:]]*#.*$//')
+pol_missing=""
+printf '%s\n' "$pol_fn" | grep -qE 'return 2' || pol_missing="$pol_missing fn-returns-2"
+printf '%s\n' "$pol_fn" | grep -qE '_pc_rc" -ge 2' || pol_missing="$pol_missing fn-tests-ge2"
+pol_caller=$(awk '/^run_legacy_heuristics\(\) \{/,/^\}/' "$GATE" | sed 's/^[[:space:]]*#.*$//')
+printf '%s\n' "$pol_caller" | grep -qE '_lh_positive_in_closure "\$_mt_closure" "\$cfg_site" \|\| _pol_rc=\$\?' \
+  || pol_missing="$pol_missing caller-captures-status"
+printf '%s\n' "$pol_caller" | grep -qE '\[ "\$_pol_rc" -ge 2 \]' || pol_missing="$pol_missing caller-tests-ge2"
+if [ -n "$pol_missing" ]; then
+  bad "1699-polarity-tristate: the polarity scan or its caller collapses 'could not tell' onto 'no positive site' — missing:$pol_missing. A failed scan then routes the target into allow_zero and a positively-gated target can pass with zero tests"
+else
+  ok "1699-polarity-tristate: the polarity scan returns a third state and the call site tests for it before the two-valued chain"
+fi
+
+ASSERT_FLOOR=377
 if [ "$PASS" -lt "$ASSERT_FLOOR" ]; then
   echo "FAIL - assert-floor: only $PASS assertions ran, floor is $ASSERT_FLOOR. Sections are being SKIPPED or dying silently (an extraction that broke, a subshell aborting under set -u), and 'failed: 0' over a shrunken subject set is exactly the vacuous pass this suite tests for."
   FAIL=$((FAIL + 1))
