@@ -42,10 +42,12 @@ pub fn varint_to_sign_and_le_words(bytes: &[u8]) -> (bool, Vec<u64>) {
 /// Reassemble a `(is_negative, little-endian u64 words)` pair back into a
 /// [`BigInt`].
 ///
-/// Exists so tests can prove [`varint_to_sign_and_le_words`] is a faithful
-/// projection of [`varint_to_bigint`] for every input, and so a reader can see
-/// exactly what the word form means.
-pub fn bigint_from_sign_and_le_words(is_negative: bool, words: &[u64]) -> BigInt {
+/// Exists so this module's tests can prove [`varint_to_sign_and_le_words`] is a
+/// faithful projection of [`varint_to_bigint`] for every input, and so a reader
+/// can see exactly what the word form means. `#[cfg(test)]` and private: no
+/// binding needs it, and the crate exports nothing without a binding caller.
+#[cfg(test)]
+fn bigint_from_sign_and_le_words(is_negative: bool, words: &[u64]) -> BigInt {
     let sign = if words.iter().all(|w| *w == 0) {
         Sign::NoSign
     } else if is_negative {

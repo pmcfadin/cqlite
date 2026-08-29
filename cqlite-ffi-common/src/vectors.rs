@@ -9,6 +9,12 @@
 //! Because both suites read the same committed data, a divergence between the
 //! bindings — or a re-introduced local implementation in either — fails both.
 //!
+//! Only what a binding actually calls is `pub`: the tables, [`Input::bytes`],
+//! [`vector_outcome`] and [`VectorOutcome`]. The comparison rules
+//! (`check_outcome`), the `digest` reduction and the [`Expect`] accessors are
+//! crate-internal — they have no binding caller, and this crate exports no
+//! routine that lacks one.
+//!
 //! The tables are ordinary `pub const` data with no feature gate: they are inert
 //! and tiny, and gating them would make them unreachable from the bindings' own
 //! test builds, which is the entire point.
@@ -30,7 +36,7 @@
 //! A few DECIMAL magnitudes are multi-kilobyte by design (the positional
 //! threshold and the refusal ceiling live up there), and their exact renderings
 //! run to thousands of digits. Committing those as literals would be
-//! unreadable, so [`digest`] collapses any digit run longer than
+//! unreadable, so `digest` collapses any digit run longer than
 //! [`DIGEST_RUN_THRESHOLD`] to `{<length>}`. Short renderings — every VARINT and
 //! INET entry, and every small DECIMAL one — digest to themselves and so are
 //! committed verbatim.
@@ -39,7 +45,7 @@ pub mod tables;
 
 pub use tables::{DECIMAL_VECTORS, INET_VECTORS, VARINT_VECTORS};
 
-/// Digit runs longer than this collapse to `{<length>}` in a [`digest`].
+/// Digit runs longer than this collapse to `{<length>}` in a `digest`.
 ///
 /// 64 is above the widest rendering any VARINT or small DECIMAL entry produces
 /// (a 17-byte varint reaches 41 digits), so every ordinary expectation is
@@ -74,7 +80,7 @@ impl Input {
 /// The single expected outcome of rendering an entry.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Expect {
-    /// The rendering, as a [`digest`] (identical to the rendering itself unless
+    /// The rendering, as a `digest` (identical to the rendering itself unless
     /// it contains a digit run longer than [`DIGEST_RUN_THRESHOLD`]).
     Value(&'static str),
     /// A refusal, carrying the exact error message both bindings must surface.
@@ -84,15 +90,15 @@ pub enum Expect {
 impl Expect {
     /// `"value"` for a rendering, `"error"` for a refusal — the field that tells
     /// a suite which of the two comparison rules to apply.
-    pub const fn kind(&self) -> &'static str {
+    pub(crate) const fn kind(&self) -> &'static str {
         match self {
             Expect::Value(_) => "value",
             Expect::Error(_) => "error",
         }
     }
 
-    /// The expected text: the rendering's [`digest`], or the refusal message.
-    pub const fn text(&self) -> &'static str {
+    /// The expected text: the rendering's `digest`, or the refusal message.
+    pub(crate) const fn text(&self) -> &'static str {
         match self {
             Expect::Value(value) => value,
             Expect::Error(message) => message,
@@ -112,7 +118,7 @@ pub struct VectorOutcome {
     pub expected: String,
     /// `"ok"` if the production path rendered, `"err"` if it refused.
     pub outcome: &'static str,
-    /// The rendering's [`digest`], or the binding's full error message.
+    /// The rendering's `digest`, or the binding's full error message.
     pub actual: String,
 }
 
@@ -143,10 +149,11 @@ pub fn vector_outcome(
 /// Apply the two comparison rules to a reported outcome, returning `Err` with a
 /// human-readable reason when it does not satisfy its expectation.
 ///
-/// Shared so the crate's own vector test and any future consumer state the rules
-/// once. The binding suites deliberately apply them in Python/JavaScript instead,
-/// so what a suite asserts is visible in the suite.
-pub fn check_outcome(reported: &VectorOutcome) -> Result<(), String> {
+/// Used by this crate's own vector test. The binding suites deliberately apply
+/// the same two rules in Python/JavaScript instead, so what a suite asserts is
+/// visible in the suite — which is why this is test-only and unexported.
+#[cfg(test)]
+fn check_outcome(reported: &VectorOutcome) -> Result<(), String> {
     match reported.kind {
         "value" => {
             if reported.outcome != "ok" {
@@ -192,7 +199,7 @@ pub fn check_outcome(reported: &VectorOutcome) -> Result<(), String> {
 /// This keeps a multi-thousand-digit expectation readable while still pinning
 /// the exact digit COUNT (full precision preservation) and the exact surrounding
 /// form (positional vs exponent, sign, exponent value).
-pub fn digest(rendered: &str) -> String {
+pub(crate) fn digest(rendered: &str) -> String {
     let mut out = String::with_capacity(rendered.len());
     let mut run = 0usize;
     // Push the digit run that just ended, collapsed if it is long enough.
