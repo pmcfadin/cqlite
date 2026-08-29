@@ -1243,24 +1243,41 @@ perf_stat_c() {
     # Published at file scope BEFORE the window opens, so a signal arriving at any point
     # during the measurement finds a PID to clean up.
     _ACTIVE_PROFILER_PID="$_prof_pid"
-    # DEFERRED DEFECT, MEASURED: THIS PROFILE COVERS setup+scan, THE cyc/row DENOMINATOR DOES NOT.
-  # (#3248 roborev job 84 F1; follow-up https://github.com/pmcfadin/cqlite/issues/3469 family 3.)
+    # DEFERRED DEFECT, MEASURED: THE PROFILE WINDOW AND THE cyc/row DENOMINATOR COVER DIFFERENT
+  # REGIONS. (#3248 roborev job 84 F1 + job 86 F1; follow-up
+  # https://github.com/pmcfadin/cqlite/issues/3469 family 3.)
   #
-  # The profiler attaches to the FULL counted window -- the guard below skips only `*-setup.csv` --
-  # while the reported cycles/row is setup-subtracted (`cycles_scan = cycles_total - cycles_setup`,
-  # see ws0_collect.py). So profile SHARES are fractions of a setup-INCLUSIVE capture and are
-  # multiplied by a setup-EXCLUSIVE total, and setup symbols (corpus open, schema ingest) are
-  # attributable into buckets that should not contain them.
+  # The profiler attaches to the FULL counted window -- the guard below skips only `*-setup.csv`
+  # -- and it opens 300 ms BEFORE the window (the arming delay documented immediately below).
+  # The reported cycles/row is setup-subtracted scan (`cycles_scan = cycles_total - cycles_setup`,
+  # ws0_collect.py). So profile SHARES are fractions of a window that includes 300 ms of
+  # pre-window capture plus the setup leg, and they are multiplied by a setup-EXCLUSIVE total.
+  # Buckets are therefore UNDERSTATED by the contaminated fraction of their own arm.
   #
-  # MEASURED MAGNITUDE, so the next reader does not re-derive it: setup is 0.0164% / 0.0164% /
-  # 0.0171% of the profiled window across the three AC1 reps (12.5-13.2M cycles against 76.4-77.5
-  # BILLION). That is 67x SMALLER than the 1.1% per-rep spread already published beside the
-  # figures, so it cannot move a number at any precision the report states. Deferred as an
-  # arithmetic defect in a derivation, NOT as a wrong number.
+  # BOTH TERMS, MEASURED. An earlier version of this comment carried only the setup term and
+  # therefore understated the defect by ~150x -- the arming delay is the dominant term and it is
+  # ASYMMETRIC between the two arms being differenced:
   #
-  # A fix converts shares against `cycles_total` and subtracts setup from the buckets, rather than
-  # narrowing the profile -- the profile legitimately covers setup, so the honest denominator is
-  # the one that matches it.
+  #                          bare_scan          flight_bypass
+  #   setup leg             0.0164-0.0171%      n/a (no setup subtraction on this arm)
+  #   300 ms arming         2.47-2.52%          0.48-0.51%
+  #   combined              ~2.49%              ~0.49%      => ~2.0 pp differential bias
+  #
+  # WHICH PUBLISHED FIGURES THIS CAN MOVE -- checked per result, not asserted (#3469 family 3
+  # carries the arithmetic). Every conclusion survives; ONE figure moves in its second digit:
+  #   * the +21.5% shared-bucket excess -> ~+19.0% (-2.4 pp). Direction and rough size hold.
+  #   * everything counter-derived is IMMUNE: the +6,707 gap, the 5.19x L2 bytes-touched result
+  #     (l2_lines_in x 64B / rows, different events, different run), and all of AC0, which was
+  #     run with NO profiler attached.
+  #   * the HashMap-lever result is robust because its denominators come from the UNPROFILED
+  #     control: gains shift <0.2 pp and the ratio INVERSION -- which is the actual conclusion --
+  #     holds either way (1.4107x -> 1.4430x published, -> 1.4439x corrected).
+  #   * the lever ceiling shifts by 0.0009x against a claim with ~0.2x of slack.
+  #
+  # A fix converts shares against `cycles_total` and subtracts setup from the buckets, or brackets
+  # the profile to the counted window exactly -- but the arming delay makes exact bracketing
+  # impossible in one direction or the other, which is why the delay is documented below rather
+  # than eliminated.
   #
   # ARMING DELAY, AND THE COST IS STATED RATHER THAN CLAIMED AWAY (#3248, roborev job 69
     # finding 1). The sampler needs a moment to arm, so without this the first fraction of the
