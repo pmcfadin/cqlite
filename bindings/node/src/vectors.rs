@@ -32,12 +32,20 @@ pub struct VectorReport {
     pub name: String,
     /// `"value"` or `"error"`: which comparison rule the suite applies.
     pub kind: String,
-    /// The committed expectation.
+    /// The committed expectation (a digest, for a multi-kilobyte rendering).
     pub expected: String,
+    /// Lower-case SHA-256 hex of the UTF-8 bytes of the expected rendering, for
+    /// an entry committed as a digest; `null` when `expected` is itself exact.
+    #[napi(js_name = "expectedSha256")]
+    pub expected_sha256: Option<String>,
     /// `"ok"` if the production path rendered, `"err"` if it refused.
     pub outcome: String,
-    /// The rendering's digest, or the production error's message.
+    /// The rendering's digest, or the production error's message — the readable
+    /// field for failure messages, never the oracle for a long rendering.
     pub actual: String,
+    /// The FULL, un-digested rendering this binding produced (`null` on a
+    /// refusal). The suite hashes THIS, so the exact digits get checked.
+    pub rendered: Option<String>,
     /// The DECIMAL scale (`0` for the other types).
     pub scale: i32,
     /// The entry's input bytes.
@@ -51,8 +59,10 @@ impl VectorReport {
             name: reported.name.to_string(),
             kind: reported.kind.to_string(),
             expected: reported.expected.clone(),
+            expected_sha256: reported.expected_sha256.map(|hex| hex.to_string()),
             outcome: reported.outcome.to_string(),
             actual: reported.actual.clone(),
+            rendered: reported.rendered.clone(),
             scale,
             bytes: input.to_vec(),
         }

@@ -35,8 +35,14 @@ fn outcome_dict<'py>(
     dict.set_item("name", reported.name)?;
     dict.set_item("kind", reported.kind)?;
     dict.set_item("expected", reported.expected.as_str())?;
+    // Lower-case SHA-256 hex of the UTF-8 bytes of the expected rendering, for
+    // an entry committed as a digest; `None` when `expected` is itself exact.
+    dict.set_item("expected_sha256", reported.expected_sha256)?;
     dict.set_item("outcome", reported.outcome)?;
     dict.set_item("actual", reported.actual.as_str())?;
+    // The FULL, un-digested rendering this binding produced (`None` on a
+    // refusal): the suite hashes THIS, so the exact digits get checked.
+    dict.set_item("rendered", reported.rendered.as_deref())?;
     dict.set_item("scale", scale)?;
     dict.set_item("bytes", PyBytes::new(py, input))?;
     Ok(dict)

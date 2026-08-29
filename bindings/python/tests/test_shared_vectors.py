@@ -14,22 +14,40 @@ with no per-binding edit.
 
 The two comparison rules come from the shared crate's ``VectorOutcome`` contract:
 
-* ``kind == "value"`` → the path must render, and ``actual`` must equal
-  ``expected`` exactly. A multi-thousand-digit rendering is compared as a
-  *digest* (a digit run longer than 64 collapses to ``{<length>}``), which still
-  pins the exact digit count and the exact surrounding form.
+* ``kind == "value"`` → the path must render, and the **full** rendering must
+  satisfy the entry's exact check: ``rendered == expected`` for a short
+  rendering, or ``sha256(rendered) == expected_sha256`` for a multi-kilobyte one
+  whose literal form is committed as a digest. ``actual`` (the digest) is
+  compared too, but only as the readable half of a failure message — a digest
+  collapses a long digit run to ``{<length>}``, so on its own it would compare a
+  digit COUNT and pass two bindings that render *different digits of the same
+  length*.
 * ``kind == "error"`` → the path must refuse, and ``expected`` must appear
   **verbatim inside** ``actual``. Containment only because each binding wraps the
   one canonical message in its own typed-error envelope.
+
+The hash is SHA-256 over the **UTF-8 bytes** of the rendered string, lower-case
+hex — the same statement the shared crate's ``vectors`` module makes, so this
+suite, the Node suite and the crate's own test cannot disagree about encoding.
+Each side hashes with its own standard library (``hashlib`` here, ``crypto`` in
+Node, ``sha2`` in the crate): three independent implementations over one
+committed hex string.
 """
 
 from __future__ import annotations
 
+import hashlib
+import re
 from decimal import Decimal
 
 import pytest
 
 import cqlite
+
+
+def _sha256_hex(text: str) -> str:
+    """Lower-case SHA-256 hex of a string's UTF-8 bytes."""
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()
 
 
 def _vectors():
@@ -66,7 +84,18 @@ def test_every_vector_renders_as_the_committed_table_says(entry):
             f"{entry['name']}: expected a rendering, the production path refused "
             f"with: {entry['actual']}"
         )
+        # The readable half.
         assert entry["actual"] == entry["expected"], entry["name"]
+        # The EXACT half, on the full rendering this binding produced.
+        rendered = entry["rendered"]
+        assert isinstance(rendered, str), entry["name"]
+        if entry["expected_sha256"] is None:
+            assert rendered == entry["expected"], entry["name"]
+        else:
+            assert _sha256_hex(rendered) == entry["expected_sha256"], (
+                f"{entry['name']}: the rendering digests to the expected "
+                f"{entry['expected']!r} but its digits differ"
+            )
     elif entry["kind"] == "error":
         assert entry["outcome"] == "err", (
             f"{entry['name']}: expected a refusal, the production path rendered "
@@ -142,6 +171,54 @@ def test_inet_full_object_path_matches_the_table(entry):
         with pytest.raises(cqlite.CqliteError) as excinfo:
             cqlite._inet_from_bytes(entry["bytes"])
         assert entry["expected"] in str(excinfo.value)
+
+
+def test_every_value_entry_carries_an_exact_oracle_not_just_a_digest():
+    """No value entry may be checked by digit count alone.
+
+    Either its expectation is committed verbatim (so equality is exact) or it
+    carries the SHA-256 of the full rendering. Without this, a future long entry
+    could quietly regress to the digest-only comparison this pairing exists to
+    prevent: a digest pins the digit COUNT and the surrounding form, so two
+    bindings rendering different digits of the same length would both pass.
+    """
+    values = [entry for entry in _vectors() if entry["kind"] == "value"]
+    assert values
+    digested = 0
+    for entry in values:
+        collapsed = "{" in entry["expected"]
+        has_hash = entry["expected_sha256"] is not None
+        assert collapsed == has_hash, entry["name"]
+        if has_hash:
+            assert re.fullmatch(r"[0-9a-f]{64}", entry["expected_sha256"]), entry["name"]
+            digested += 1
+    # The multi-kilobyte boundary magnitudes are the reason this exists.
+    assert digested >= 3
+
+
+def test_the_digested_renderings_match_the_committed_hashes_digit_for_digit():
+    """The digested entries, hashed here with ``hashlib`` from this binding's own
+    rendering — the check the Node suite makes with ``crypto`` over the same
+    committed hex."""
+    digested = [
+        entry
+        for entry in _by_type("decimal")
+        if entry["kind"] == "value" and entry["expected_sha256"] is not None
+    ]
+    assert len(digested) >= 3
+    for entry in digested:
+        assert _sha256_hex(entry["rendered"]) == entry["expected_sha256"], entry["name"]
+    convergence = next(
+        entry
+        for entry in digested
+        if entry["name"] == "decimal/large-well-formed-2000-bytes-scale-3"
+    )
+    # Every one of the 4817 digits, not just how many there are.
+    assert re.fullmatch(r"[0-9]{4817}e-3", convergence["rendered"])
+    assert (
+        convergence["expected_sha256"]
+        == "e1ec7b41fe833049052e89e01d3cdda36fcfc6dd69ec5deb03d52c116aa55214"
+    )
 
 
 def test_the_2000_byte_decimal_that_used_to_diverge_now_renders():

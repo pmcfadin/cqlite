@@ -17,16 +17,33 @@
  * The two comparison rules come from the shared crate's `VectorOutcome`
  * contract:
  *
- *  - `kind === 'value'` → the path must render, and `actual` must equal
- *    `expected` exactly. A multi-thousand-digit rendering is compared as a
- *    *digest* (a digit run longer than 64 collapses to `{<length>}`), which
- *    still pins the exact digit count and the exact surrounding form.
+ *  - `kind === 'value'` → the path must render, and the **full** rendering must
+ *    satisfy the entry's exact check: `rendered === expected` for a short
+ *    rendering, or `sha256(rendered) === expectedSha256` for a multi-kilobyte
+ *    one whose literal form is committed as a digest. `actual` (the digest) is
+ *    compared too, but only as the readable half of a failure message — a digest
+ *    collapses a long digit run to `{<length>}`, so on its own it would compare
+ *    a digit COUNT and pass two bindings that render *different digits of the
+ *    same length*.
  *  - `kind === 'error'` → the path must refuse, and `expected` must appear
  *    **verbatim inside** `actual`. Containment only because each binding wraps
  *    the one canonical message in its own typed-error envelope.
+ *
+ * The hash is SHA-256 over the **UTF-8 bytes** of the rendered string, lower-case
+ * hex — the same statement the shared crate's `vectors` module makes, so this
+ * suite, the Python suite and the crate's own test cannot disagree about
+ * encoding. Each side hashes with its own standard library (`crypto` here,
+ * `hashlib` in Python, `sha2` in the crate): three independent implementations
+ * over one committed hex string.
  */
 
+const crypto = require('node:crypto');
+
 const { _ffiCommonRenderVectors } = require('../lib/index.js');
+
+/** Lower-case SHA-256 hex of a string's UTF-8 bytes. */
+const sha256Hex = (text) =>
+  crypto.createHash('sha256').update(text, 'utf8').digest('hex');
 
 const VECTORS = _ffiCommonRenderVectors();
 const byType = (cqlType) => VECTORS.filter((entry) => entry.cqlType === cqlType);
@@ -50,7 +67,15 @@ describe('shared cross-binding vector table (issue #1452)', () => {
     (_name, entry) => {
       if (entry.kind === 'value') {
         expect(entry.outcome).toBe('ok');
+        // The readable half.
         expect(entry.actual).toBe(entry.expected);
+        // The EXACT half, on the full rendering this binding produced.
+        expect(typeof entry.rendered).toBe('string');
+        if (entry.expectedSha256 === null || entry.expectedSha256 === undefined) {
+          expect(entry.rendered).toBe(entry.expected);
+        } else {
+          expect(sha256Hex(entry.rendered)).toBe(entry.expectedSha256);
+        }
       } else if (entry.kind === 'error') {
         expect(entry.outcome).toBe('err');
         expect(entry.actual).toContain(entry.expected);
@@ -59,6 +84,27 @@ describe('shared cross-binding vector table (issue #1452)', () => {
       }
     },
   );
+
+  // No value entry may be checked by digit count alone: either its expectation
+  // is committed verbatim (so equality is exact) or it carries a SHA-256 of the
+  // full rendering. Without this, a future long entry could quietly regress to
+  // the digest-only comparison this pairing exists to prevent.
+  test('every value entry carries an exact oracle, not just a digest', () => {
+    const values = VECTORS.filter((entry) => entry.kind === 'value');
+    expect(values.length).toBeGreaterThan(0);
+    let digested = 0;
+    for (const entry of values) {
+      const collapsed = entry.expected.includes('{');
+      const hasHash = typeof entry.expectedSha256 === 'string';
+      expect(collapsed).toBe(hasHash);
+      if (hasHash) {
+        expect(entry.expectedSha256).toMatch(/^[0-9a-f]{64}$/);
+        digested += 1;
+      }
+    }
+    // The multi-kilobyte boundary magnitudes are the reason this exists.
+    expect(digested).toBeGreaterThanOrEqual(3);
+  });
 
   // The concrete divergence issue #1452 closed: a 2000-byte well-formed unscaled
   // magnitude with scale 3 rendered here and raised `CqliteError` in Python.
@@ -69,6 +115,11 @@ describe('shared cross-binding vector table (issue #1452)', () => {
     expect(entry).toBeDefined();
     expect(entry.outcome).toBe('ok');
     expect(entry.actual).toBe('{4817}e-3');
+    // Every one of the 4817 digits, not just how many there are.
+    expect(entry.rendered).toMatch(/^[0-9]{4817}e-3$/);
+    expect(sha256Hex(entry.rendered)).toBe(
+      'e1ec7b41fe833049052e89e01d3cdda36fcfc6dd69ec5deb03d52c116aa55214',
+    );
   });
 
   // A malformed inet must never come back as raw bytes, hex, or any other
