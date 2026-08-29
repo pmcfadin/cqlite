@@ -100,6 +100,65 @@ impl SSTableReader {
         cache: Arc<crate::storage::cache::DecompressedChunkCache>,
         cancel: crate::storage::scan_cancel::ScanCancel,
     ) -> Result<Self> {
+        Self::open_instrumented(
+            path,
+            config,
+            platform,
+            cache,
+            cancel,
+            OpenErrorReporting::SelfReported,
+        )
+        .await
+    }
+
+    /// [`open`](Self::open) for an open that is an INNER STEP of a larger operation
+    /// whose own error seam already records — it does NOT report its own failure
+    /// (issue #1704).
+    ///
+    /// # When to use this instead of [`open`](Self::open)
+    ///
+    /// Use it when, and only when, a failure returned here is guaranteed to reach an
+    /// enclosing boundary that counts it. Using [`open`](Self::open) in such a
+    /// position counts one failure twice; using THIS where there is no enclosing seam
+    /// loses the signal entirely — so the name states the PRECONDITION rather than the
+    /// mechanism, because the precondition is the thing a caller has to check.
+    ///
+    /// # Behavioural identity, which is now real rather than claimed
+    ///
+    /// Exactly ONE action differs from [`open`](Self::open): the `record_error` call on
+    /// the `Err` arm. Both routes go through [`open_instrumented`](Self::open_instrumented),
+    /// so the `sstable.reader.open` span, its `file_size`/`sstable_format` fields, the
+    /// parenting of the nested open-phase spans, and the `SSTABLES_OPEN` gauge are
+    /// literally the same code. The first version of this function called `open_inner`
+    /// directly and silently dropped the span while its doc claimed identity — the
+    /// shared helper is what makes the claim checkable instead of aspirational.
+    pub(crate) async fn open_unrecorded(
+        path: &Path,
+        config: &Config,
+        platform: Arc<Platform>,
+    ) -> Result<Self> {
+        let cache = super::super::build_chunk_cache(config);
+        Self::open_instrumented(
+            path,
+            config,
+            platform,
+            cache,
+            ScanCancel::default(),
+            OpenErrorReporting::DeferredToCaller,
+        )
+        .await
+    }
+
+    /// The ONE open implementation: span, success gauge, and — for
+    /// [`OpenErrorReporting::SelfReported`] only — the failed-open increment.
+    async fn open_instrumented(
+        path: &Path,
+        config: &Config,
+        platform: Arc<Platform>,
+        cache: Arc<crate::storage::cache::DecompressedChunkCache>,
+        cancel: crate::storage::scan_cancel::ScanCancel,
+        reporting: OpenErrorReporting,
+    ) -> Result<Self> {
         use crate::observability::{self as obs, catalog};
         use tracing::Instrument as _;
 
@@ -124,7 +183,8 @@ impl SSTableReader {
                 // SSTABLES_OPEN is a snapshot gauge of the live reader count;
                 // record the current PER-FORMAT count after this open succeeds so
                 // the format-attributed gauge series stays correct under mixed
-                // BIG/BTI readers.
+                // BIG/BTI readers. A SUCCESSFUL open is identical in both modes:
+                // the reporting mode is only ever about who counts a FAILURE.
                 let now = sstables_open_count_for(format).fetch_add(1, Ordering::Relaxed) + 1;
                 obs::record_gauge(
                     catalog::SSTABLES_OPEN,
@@ -133,55 +193,26 @@ impl SSTableReader {
                 );
             }
             Err(e) => {
-                // Record the error WHILE the open span is current so
-                // `mark_span_error` marks THIS `sstable.reader.open` span. The
-                // instrumented future has already completed here, so the span is
-                // no longer entered; `in_scope` re-enters it for the duration of
-                // the error-recording call.
-                span.in_scope(|| obs::record_error(e, "reader"));
+                if matches!(reporting, OpenErrorReporting::SelfReported) {
+                    // Record the error WHILE the open span is current so
+                    // `mark_span_error` marks THIS `sstable.reader.open` span. The
+                    // instrumented future has already completed here, so the span is
+                    // no longer entered; `in_scope` re-enters it for the duration of
+                    // the error-recording call.
+                    span.in_scope(|| obs::record_error(e, "reader"));
+                }
             }
         }
         result
     }
+}
 
-    /// [`open`](Self::open) for an open that is an INNER STEP of a larger operation
-    /// whose own error seam already records — it does NOT report its own failure
-    /// (issue #1704).
-    ///
-    /// # When to use this instead of [`open`](Self::open)
-    ///
-    /// Use it when, and only when, a failure returned here is guaranteed to reach an
-    /// enclosing boundary that counts it: the reopen inside a `KWayMerger` producer
-    /// thread (whose error surfaces mid-stream and is counted by the measured
-    /// `JoinedStream`, or by `record_result("compaction", ..)` on the write path),
-    /// and `scan_delta`'s setup (counted by its own terminal-send seam).
-    ///
-    /// Using [`open`](Self::open) in those positions is what produced the same defect
-    /// three times: `open` records, the enclosing seam records the SAME error again,
-    /// and one failed scan reports two increments. Using THIS in a position with no
-    /// enclosing seam is the opposite defect and loses the signal entirely — so the
-    /// name states the precondition rather than the mechanism.
-    ///
-    /// Behaviourally identical to [`open`](Self::open) in every other respect,
-    /// including the `SSTABLES_OPEN` gauge, which is about a SUCCESSFUL open and is
-    /// unaffected by who counts a failure.
-    pub(crate) async fn open_unrecorded(
-        path: &Path,
-        config: &Config,
-        platform: Arc<Platform>,
-    ) -> Result<Self> {
-        let cache = super::super::build_chunk_cache(config);
-        let reader = Self::open_inner(path, config, platform, cache, ScanCancel::default()).await?;
-        let format = reader.sstable_format_label();
-        let now = sstables_open_count_for(format).fetch_add(1, Ordering::Relaxed) + 1;
-        crate::observability::record_gauge(
-            crate::observability::catalog::SSTABLES_OPEN,
-            now,
-            &[(
-                crate::observability::catalog::attr::SSTABLE_FORMAT,
-                format.into(),
-            )],
-        );
-        Ok(reader)
-    }
+/// Who counts a failed open into `cqlite.errors.total{subsystem="reader"}`
+/// (issue #1704). The ONLY thing that varies between the two open routes.
+#[derive(Clone, Copy)]
+enum OpenErrorReporting {
+    /// This open IS the operation: it records its own failure.
+    SelfReported,
+    /// This open is an inner step; the caller's operation seam records instead.
+    DeferredToCaller,
 }
