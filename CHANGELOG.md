@@ -9,6 +9,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **Node binding (observable): a malformed `inet` cell is a typed `PARSE` error
+  on BOTH read paths, and `execute()` no longer returns `null` for one
+  (#1452).** Two defects found reviewing the shared-crate extraction:
+  - `executeNative()` mapped the shared crate's malformed-length error with a
+    bare napi error carrying no contract metadata, so `lib/error-wrapper.js` fell
+    back to its defaults and a corrupt SSTable inet cell surfaced as
+    `code: 'INTERNAL'`, `category: 'Internal'` — an internal-bug identity for a
+    data fault. It is now `code: 'PARSE'`, `category: 'Data'`,
+    `isRecoverable: false`, matching the sibling DECIMAL refusal and the one
+    #1451 error contract.
+  - The DEPRECATED `execute()` path kept a second, private inet 4/16 length
+    dispatch whose malformed-length branch produced a JSON `null` —
+    indistinguishable from a genuine NULL, i.e. silent data loss — while
+    `executeNative()` raised on the same cell. It now uses the shared dispatch
+    and **throws** that same typed error; a malformed cell nested in a
+    `list`/`set`/`map`/`tuple`/`frozen`/UDT propagates rather than being
+    flattened to `null`.
+
+  The Python binding is unaffected: its inet arm already raised, and its
+  exception class stays `ParseError` (routing it through the contract table would
+  change the class, deferred deliberately).
+
 - **BREAKING (Python binding, observable): CQL `decimal` now has ONE rendering
   policy across both language bindings (#1452, epic #1434).** The byte-math both
   bindings share was extracted into a new internal crate `cqlite-ffi-common`,
