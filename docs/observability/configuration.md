@@ -44,14 +44,31 @@ property, not a global guarantee:
 | Python binding | **Only if the host set up `tracing` first** | Feature-off, `install_subscriber()` is a no-op and runs after `init`, so nothing in the binding provides a sink. |
 | Node.js binding | **Only if the host set up `tracing` first** | Feature-off, the binding deliberately installs NO subscriber (a bare `Registry` would enable span callsites on hot paths), and `init` runs before that install anyway. |
 
-So the useful inference holds **on the CLI at its default log level**: the
-warning means the feature is missing, and its absence there means the export
-stack is compiled in and the problem is elsewhere (collector down, endpoint,
-protocol, sampling). Do NOT read absence as "compiled in" on the bindings — an
-embedder with no `tracing` subscriber gets no signal either way. Closing that
-binding gap needs a host-native report rather than a library installing a global
-subscriber over the embedder's own logging; tracked as a follow-up under epic
-#1686.
+### Presence is conclusive; absence is not
+
+On the CLI at its default log level, the **presence** of this warning is
+conclusive: the export stack is compiled out, and no collector-side change can
+help. Its **absence proves nothing** — read it as neither a diagnosis nor an
+all-clear. Absence has two causes, and they are indistinguishable from the log:
+
+1. the `observability` feature IS compiled in (so a missing-telemetry problem
+   really is elsewhere: collector down, endpoint, protocol, sampling), **or**
+2. the configuration never resolved `enabled = true` in the first place, so
+   nothing asked for OpenTelemetry and there was nothing to warn about.
+
+Cause 2 is easy to hit and just as silent: `CQLITE_OTEL_ENABLED=ture` (typo) or
+`CQLITE_OTEL_ENABLE=1` (wrong variable name) both leave the master switch at its
+`false` default. An unrecognized value is deliberately failed safe to off rather
+than treated as an error, and today that rejection is not itself reported — a
+follow-up under epic #1686 covers warning about a rejected value, which is what
+would make absence genuinely diagnostic. So before concluding your collector is
+at fault, confirm what was actually RESOLVED (check the spelling of the variable
+and its value, or pass `--otel-enabled=true` explicitly).
+
+On the **bindings** absence is weaker still: an embedder with no `tracing`
+subscriber gets no signal either way, whatever the feature state. Closing that
+gap needs a host-native report rather than a library installing a global
+subscriber over the embedder's own logging; also tracked under epic #1686.
 
 ### It respects your log level
 
