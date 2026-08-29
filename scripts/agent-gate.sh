@@ -6569,8 +6569,13 @@ run_tooling_tests() {
   # argv and environment the driver gives them — exit 0, the artifact written, every pin line
   # printed, and the SHIPPED reader (`verify_session_corpus_pin`/`verify_pinning_record`)
   # accepting what the step wrote; the `WS0_CFG_*` names are DERIVED from the shipped
-  # `MANIFEST_CONFIG_FIELDS` and asserted equal to it; and EVERY embedded block in the driver
-  # COMPILES, so instance #8 anywhere in that file is caught and not only the two repaired steps.
+  # `MANIFEST_CONFIG_FIELDS` and asserted equal to it; EVERY embedded block in the driver COMPILES,
+  # so instance #8 anywhere in that file is caught and not only the two repaired steps; and every
+  # block parses on EVERY INTERPRETER THIS REPO RUNS rather than on the gate box alone — PEP 701
+  # made the nested same-type quote spelling legal in 3.12, so `compile()` on a 3.12 host accepts
+  # the very alternative the driver's comment says it rejected while the 3.11 workflows this repo
+  # pins would break. That is a tokenizer-level oracle on 3.12+ and `compile()` below it, with the
+  # one that answered NAMED in the output so it can never read as a check that skipped.
   # The block text is EXTRACTED from the shipped driver on every run (`ws0_embedded_python.py`,
   # fail-closed on an unclassifiable python3 shape or an unterminated block) rather than copied,
   # because a copy stays green while the shipped step is broken — the exact state #3451 found. The

@@ -55,7 +55,12 @@
 #     `ws0_session.MANIFEST_CONFIG_FIELDS` and asserted equal to it, so a field added there without
 #     a driver export is a failure here rather than a refusal at report time;
 #   * EVERY embedded block in the driver COMPILES — the total property, so instance #8 anywhere in
-#     that file is caught and not only the two steps this issue repaired.
+#     that file is caught and not only the two steps this issue repaired;
+#   * EVERY embedded block parses on EVERY INTERPRETER THIS REPOSITORY RUNS, not merely on this
+#     box. `compile()` cannot answer that: PEP 701 made the nested SAME-TYPE quote spelling legal
+#     in 3.12, so a regression to it — the alternative the driver's own comment says it rejected —
+#     passes on a 3.12 box and breaks the 3.11 workflows this repo pins. Two oracles, each sound
+#     over its own interpreter range, with the one that answered NAMED in the output.
 #   * the extractor's delimiter in BOTH directions: it reports a defect, AND it does not
 #     manufacture one on good input. A block is delimited by bash's quoting rules rather than by a
 #     line pattern, so all three closer shapes this repository actually uses are handled — the
@@ -127,19 +132,28 @@ emit_block() { python3 "$EXTRACT" emit "$1" "$2"; }
 # gives: a diagnostic a human must remember to ignore is one they will read as a finding.
 findings_of() { grep -v '^#COMPLETE ' <<<"$1" | grep -vE '^(BLOCK|MENTION|SCRIPT)\b' | grep -v '^$'; }
 
-# defective_copy <src> <dest> <placeholder> <mapping> <key> — a scratch copy of the driver whose
-# f-string placeholder `{<placeholder>}` has been rewritten to the INLINE SUBSCRIPT spelling that
-# no CPython parses. Exits non-zero when the placeholder is not found EXACTLY once, so a control
-# that silently injected nothing is a failure rather than a green "the check found no defect".
+# defective_copy <src> <dest> <placeholder> <mapping> <key> [flavour] — a scratch copy of the
+# driver whose f-string placeholder `{<placeholder>}` has been rewritten to an INLINE SUBSCRIPT.
+#
+# Two flavours, because they fail on DIFFERENT interpreters and the suite must observe both:
+#   escaped  a backslash inside the expression. No CPython parses it — the shipped defect.
+#   nested   the SAME quote character as the enclosing f-string. Legal from 3.12 (PEP 701) and a
+#            SyntaxError on everything older, so `compile()` on a 3.12 box CANNOT see it. This is
+#            the alternative the driver's comment says was rejected.
+#
+# Exits non-zero when the placeholder is not found EXACTLY once, so a control that silently
+# injected nothing is a failure rather than a green "the check found no defect".
 defective_copy() {
   python3 - "$@" <<'PY'
 import pathlib, sys
 src, dest, placeholder, mapping, key = sys.argv[1:6]
-# The defect is CONSTRUCTED from character codes rather than written out, so this file does not
-# ship a literal example of the spelling whose absence the rig cares about (#3312's rule about
-# prose inside a diff naming its own oracle, applied to a test that must build its own bad input).
+flavour = sys.argv[6] if len(sys.argv) > 6 else "escaped"
+# Both spellings are CONSTRUCTED from character codes rather than written out, so this file does
+# not ship a literal example of either (#3312's rule about prose inside a diff naming its own
+# oracle, applied to a test that must build its own bad input).
 backslash, dquote = chr(92), chr(34)
-bad = "{" + mapping + "[" + backslash + dquote + key + backslash + dquote + "]}"
+lead = backslash + dquote if flavour == "escaped" else dquote
+bad = "{" + mapping + "[" + lead + key + lead + "]}"
 text = pathlib.Path(src).read_text()
 needle = "{" + placeholder + "}"
 found = text.count(needle)
@@ -151,6 +165,11 @@ if found != 1:
 pathlib.Path(dest).write_text(text.replace(needle, bad))
 PY
 }
+
+# portable <file> / portable_source <file> — the PEP 701 oracle over a driver's blocks, or over an
+# ordinary python file.
+portable() { python3 "$EXTRACT" portable "$1" 2>&1; }
+portable_source() { python3 "$EXTRACT" portable-source "$1" 2>&1; }
 
 # ============================================================================
 # PART 1 — THE EXTRACTOR READS THE SHIPPED DRIVER, AND FAILS CLOSED
@@ -352,6 +371,48 @@ else
   fail "census CONTROL did not fire (heredoc shape): blocks=$hd_blocks (expected $((block_count + 1))), compile said: $(findings_of "$hd_compile" | head -2)"
 fi
 
+# --- CONTROL 1d-bis: the heredoc terminator rule is the SHELL's, per form ----------------------
+# `<<TAG` takes the terminator EXACTLY — a space-indented `  TAG` is ordinary body to the shell, so
+# accepting it truncates the block and hands python a body it never receives. `<<-TAG` strips
+# leading TABS from the terminator AND from every body line, so leaving them in place turns a
+# perfectly good body into an IndentationError the shell would never produce. Both are asserted,
+# because a `.strip()` comparison was wrong in both directions at once.
+SPACE_TERM_DRIVER="$TMP/space-terminator-ws0-driver.sh"
+python3 - "$DRIVER" "$SPACE_TERM_DRIVER" <<'INJECT'
+import pathlib, sys
+tag = "PY" + "SPACED"
+# The ONLY line matching the tag is INDENTED WITH SPACES, which the shell does not accept for a
+# plain `<<`, so the heredoc is genuinely unterminated.
+step = ("python3 - <<'" + tag + "'\nprint(1)\n  " + tag + "\n")
+pathlib.Path(sys.argv[2]).write_text(pathlib.Path(sys.argv[1]).read_text() + step)
+INJECT
+sp_out="$(census "$SPACE_TERM_DRIVER")"
+if grep -q 'never terminated' <<<"$sp_out" && grep -q 'exact match' <<<"$sp_out"; then
+  pass "census CONTROL fired (plain <<): a SPACE-INDENTED line matching the tag is body, not a terminator — the block is reported unterminated rather than silently truncated"
+else
+  fail "census CONTROL did not fire (plain <<): a space-indented terminator must not delimit a plain-form heredoc, got: $(findings_of "$sp_out" | head -2)"
+fi
+
+TAB_TERM_DRIVER="$TMP/tab-terminator-ws0-driver.sh"
+python3 - "$DRIVER" "$TAB_TERM_DRIVER" <<'INJECT'
+import pathlib, sys
+tag = "PY" + "TABBED"
+tab = chr(9)
+# `<<-`: tabs are stripped from the terminator AND from the body. If the body's tabs survive, the
+# extracted source is indented and does not compile — which is how this control discriminates.
+step = ("python3 - <<-'" + tag + "'\n" + tab + "print(1)\n" + tab + tag + "\n")
+pathlib.Path(sys.argv[2]).write_text(pathlib.Path(sys.argv[1]).read_text() + step)
+INJECT
+tab_census="$(census "$TAB_TERM_DRIVER")"
+tab_compile="$(compile_blocks "$TAB_TERM_DRIVER")"
+tab_blocks="$(grep -c '^BLOCK	' <<<"$tab_census")"
+if [ "$tab_blocks" -eq "$((block_count + 1))" ] && [ -z "$(findings_of "$tab_census")" ] \
+   && [ -z "$(findings_of "$tab_compile")" ]; then
+  pass "census CONTROL fired (<<- form): a TAB-indented terminator delimits and the body's leading tabs are stripped as the shell strips them — the extracted source compiles ($tab_blocks blocks)"
+else
+  fail "census CONTROL did not fire (<<- form): blocks=$tab_blocks (expected $((block_count + 1))), census='$(findings_of "$tab_census" | head -1)', compile='$(findings_of "$tab_compile" | head -1)'"
+fi
+
 # ============================================================================
 # PART 2 — THE TOTAL PROPERTY: EVERY EMBEDDED BLOCK COMPILES
 # ============================================================================
@@ -382,6 +443,84 @@ control_compile() { # control_compile <label> <placeholder> <mapping> <key>
 }
 control_compile "session-corpus-pin step" pin_sha pin data_db_sha256
 control_compile "CPU-pin-verification step" rec_server_cpus rec server_cpus
+
+# ============================================================================
+# PART 2b — THE BLOCKS PARSE ON EVERY INTERPRETER THIS REPO RUNS, NOT JUST THIS BOX
+# ============================================================================
+# `compile()` answers "does this parse HERE". The property the repaired steps need is "does this
+# parse on every interpreter this repository runs on", and the two differ for exactly one
+# spelling: a subscript inside an f-string expression written with NESTED SAME-TYPE QUOTES. PEP
+# 701 made it legal in 3.12; it is a SyntaxError on everything older. That is the alternative the
+# driver's own comment says was rejected — and until this part existed, nothing enforced it: a
+# regression to that form passes `compile()` on a 3.12 box and breaks the 3.11 workflows this
+# repository pins (and the `>=3.9` the python bindings declare).
+#
+# TWO ORACLES, EACH SOUND OVER ITS OWN RANGE, AND THE PASS LINE NAMES WHICH ONE ANSWERED. On 3.12+
+# a tokenizer walk is the oracle, because `compile()` there accepts the bad form; below 3.12
+# `compile()` IS the oracle, because the bad form does not parse at all. Nothing is conditional on
+# an optional interpreter being installed — a check that skips when a dependency is absent is the
+# coverage gap this whole issue is about.
+port_out="$(portable "$DRIVER")"
+port_marker="$(grep -m1 '^#COMPLETE ' <<<"$port_out")"
+if [ -n "$port_marker" ] && [ -z "$(findings_of "$port_out")" ]; then
+  pass "portable: every embedded block parses on EVERY interpreter this repo runs, not just this box ($port_marker)"
+else
+  fail "portable: an embedded block in $DRIVER uses a spelling that only parses on this box — $(findings_of "$port_out" | head -2)"
+fi
+
+# --- CONTROL 2b-i: the 3.12-only spelling is REFUSED, and `compile` alone cannot see it ---------
+NESTED_DRIVER="$TMP/nested-quote-ws0-driver.sh"
+if defective_copy "$DRIVER" "$NESTED_DRIVER" pin_sha pin data_db_sha256 nested 2>"$TMP/inject-nested.err"; then
+  nest_port="$(portable "$NESTED_DRIVER")"
+  nest_comp="$(compile_blocks "$NESTED_DRIVER")"
+  nest_oracle="$(sed -n 's/.*oracle=\([a-z]*\).*/\1/p' <<<"$nest_port" | head -1)"
+  if grep -q 'NOT PORTABLE' <<<"$nest_port"; then
+    pass "portable CONTROL fired: the nested SAME-TYPE quote spelling is REFUSED — $(grep -m1 'NOT PORTABLE' <<<"$nest_port" | cut -c1-118)"
+  else
+    fail "portable CONTROL did NOT fire: the 3.12-only spelling must be refused, got: $(findings_of "$nest_port" | head -2)"
+  fi
+  # ...and WHY the new oracle earns its place, asserted rather than argued: on a 3.12+ box the
+  # plain compile check is SILENT about this input. On an older box compile is the oracle and must
+  # report it. Both branches assert; neither is a skip, and the pass line says which ran.
+  if [ "$nest_oracle" = "tokenizer" ]; then
+    if [ -z "$(findings_of "$nest_comp")" ]; then
+      pass "portable CONTROL discriminates: on this 3.12+ interpreter (oracle=tokenizer) the plain compile check is SILENT about the same input — so the portability oracle is doing work compile cannot"
+    else
+      fail "on a 3.12+ interpreter compile() must ACCEPT the nested spelling (that is the trap); it reported: $(findings_of "$nest_comp" | head -1)"
+    fi
+  else
+    if grep -q 'DOES NOT COMPILE' <<<"$nest_comp"; then
+      pass "portable CONTROL discriminates: on this pre-3.12 interpreter (oracle=compile) the nested spelling does not parse at all, and the compile check reports it"
+    else
+      fail "on a pre-3.12 interpreter the nested spelling must fail to compile; it did not"
+    fi
+  fi
+else
+  fail "portable CONTROL: the nested-quote defect could not be injected — $(head -2 "$TMP/inject-nested.err")"
+fi
+
+# --- CONTROL 2b-ii: THE ACCEPT DIRECTION — a DIFFERENT-type nested quote is legal everywhere -----
+# `f"{x['k']}"` parses on every interpreter, and flagging it would be a false red on ordinary code.
+# The same-type/different-type boundary IS the check, so both sides of it are asserted. Driven over
+# a standalone source file rather than an injected block: an apostrophe inside a `python3 -c '…'`
+# body would terminate the shell string, which is why the driver cannot use that spelling either.
+python3 - "$TMP" <<'INJECT'
+import pathlib, sys
+dq, sq = chr(34), chr(39)
+tmp = pathlib.Path(sys.argv[1])
+(tmp / "portable-ok.py").write_text(
+    "x = {'k': 1}\nprint(f" + dq + "{x[" + sq + "k" + sq + "]}" + dq + ")\n")
+(tmp / "portable-remedy.py").write_text(
+    "x = {'k': 1}\nv = x['k']\nprint(f" + dq + "{v}" + dq + ")\n")
+INJECT
+ok_out="$(portable_source "$TMP/portable-ok.py")"
+rem_out="$(portable_source "$TMP/portable-remedy.py")"
+if [ -z "$(findings_of "$ok_out")" ] && [ -z "$(findings_of "$rem_out")" ] \
+   && grep -q '^#COMPLETE ' <<<"$ok_out" && grep -q '^#COMPLETE ' <<<"$rem_out"; then
+  pass "portable ACCEPT direction: a DIFFERENT-type nested quote (legal on every interpreter) and the local-binding remedy are BOTH clean — the check discriminates rather than refusing every subscript"
+else
+  fail "portable manufactured a finding on portable code: different-type='$(findings_of "$ok_out" | head -1)' remedy='$(findings_of "$rem_out" | head -1)'"
+fi
 
 # ============================================================================
 # PART 3 — THE SESSION-CORPUS-PIN STEP **RUNS**
@@ -451,16 +590,27 @@ fi
 # refused to parse.
 run_pin_step() {
   local drv="$1" out="$2" omit="${3:-}" idx field body
-  local -a env_args=()
+  # `-u` OPTIONS FIRST: `env` stops reading options at the first NAME=VALUE, so a `-u` appended
+  # after the assignments is taken as a command to execute (measured: `env: -u: No such file or
+  # directory`, rc 127) — a control that dies before reaching its subject.
+  local -a unset_args=() env_args=()
   for field in "${!CFG[@]}"; do
-    [ "$field" = "$omit" ] && continue
+    if [ "$field" = "$omit" ]; then
+      # UNSET, not merely "not passed" (#3451 review round 1, finding 3). `env` INHERITS the
+      # caller environment, so omitting the assignment leaves a value the operator happened to
+      # have exported — and the control then measures nothing while reporting a failure. `-u`
+      # rather than an empty value: the step treats an empty string as absent too, but "was not
+      # exported" is the condition being tested and `-u` is the only spelling that states it.
+      unset_args+=("-u" "WS0_CFG_$(echo "$field" | tr '[:lower:]' '[:upper:]')")
+      continue
+    fi
     env_args+=("WS0_CFG_$(echo "$field" | tr '[:lower:]' '[:upper:]')=${CFG[$field]}")
   done
   idx="$(find_block "$drv" 'write_session_corpus_pin')"
   [[ "$idx" =~ ^[0-9]+$ ]] || { run_pin_rc=90; echo "block not located: $idx" > "$STEP_OUT"; return; }
   body="$(emit_block "$drv" "$idx")"
-  env "${env_args[@]}" python3 -c "$body" "$PERF_DIR" "$CORPUS" "$out" "$REPO_ROOT" \
-    > "$STEP_OUT" 2>&1
+  env "${unset_args[@]}" "${env_args[@]}" python3 -c "$body" "$PERF_DIR" "$CORPUS" "$out" \
+    "$REPO_ROOT" > "$STEP_OUT" 2>&1
   run_pin_rc=$?
 }
 
@@ -554,6 +704,28 @@ else
   fail "EXECUTE CONTROL did NOT fire: an unexported WS0_CFG_TEMPS must make the step refuse by name (rc=$run_pin_rc, out: $(head -3 <<<"$omit_out"))"
 fi
 
+# ...and the same control with the variable ALREADY EXPORTED in the caller's environment, which is
+# the state it silently failed in before (#3451 review round 1, finding 3): `env` inherits, so an
+# operator who happened to have `WS0_CFG_TEMPS` set made the "absent" variable present and the
+# control red on a correct tree. A control that reds on a correct tree is the control people learn
+# to waive, and it was also not measuring what it claimed.
+run_pin_rc=0
+OUT_INHERIT="$TMP/session-inherit"; mkdir -p "$OUT_INHERIT"
+python3 - "$PERF_DIR" "$OUT_INHERIT" "$CORPUS" <<'PY'
+import pathlib, sys
+sys.path.insert(0, sys.argv[1])
+from ws0_ticket_input import write_ticket_template
+write_ticket_template(pathlib.Path(sys.argv[2]), pathlib.Path(sys.argv[3]) / "ws0-events.cql")
+PY
+export WS0_CFG_TEMPS="inherited-from-the-callers-shell"
+run_pin_step "$DRIVER" "$OUT_INHERIT" temps; inherit_out="$(cat "$STEP_OUT")"
+unset WS0_CFG_TEMPS
+if [ "$run_pin_rc" -ne 0 ] && grep -q 'WS0_CFG_TEMPS' <<<"$inherit_out"; then
+  pass "EXECUTE CONTROL fired (env inheritance): the omitted field is UNSET for the child, so the control still measures absence even when the caller has WS0_CFG_TEMPS exported"
+else
+  fail "EXECUTE CONTROL leaked the caller's environment: with WS0_CFG_TEMPS exported the step did not see it as absent (rc=$run_pin_rc, out: $(head -3 <<<"$inherit_out"))"
+fi
+
 # ============================================================================
 # PART 4 — THE CPU-PIN-VERIFICATION STEP **RUNS**
 # ============================================================================
@@ -628,7 +800,7 @@ fi
 # `set -uo pipefail` (no `-e`) means a block that silently never executes lowers the count and
 # registers NO failure, while the gate reads only the exit code. Deliberately below the current
 # count (so adding a case does not red it) and far above zero.
-MIN_CHECKS=18
+MIN_CHECKS=26
 echo
 if [ "$checks" -lt "$MIN_CHECKS" ]; then
   echo "FAIL - only $checks check(s) ran; this suite has at least $MIN_CHECKS."

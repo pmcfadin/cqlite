@@ -8,6 +8,10 @@ reason — a DEFINITION and an ORACLE must not be the same thing:
                            shape this file cannot classify or a block it cannot delimit
     emit <driver> <n>      print embedded block <n>'s SOURCE, exactly as the driver ships it
     compile <driver>       compile EVERY embedded block; print one finding per block that does not
+    portable <driver>      does every embedded block parse on EVERY interpreter this repo runs,
+                           not merely on this box's? (the PEP 701 trap — see below)
+    portable-source <file> the same question about an ordinary python file, so the check's
+                           accept direction can be controlled without a driver
 
 Every mode prints a `#COMPLETE …` marker on success. The CALLER counts findings, so a crash
 must not read as "clean" — the marker is what makes that distinguishable, and every caller
@@ -37,6 +41,39 @@ So the code was PARSED BY NOTHING until an operator ran the rig.
 A self-test carrying its own copy of the block certifies THE COPY. The copy does not drift when
 the driver does — it stays green while the shipped step is broken, which is precisely the state
 this issue found. So the subject is read out of the shipped file on every run.
+
+# COMPILING ON THIS BOX IS NOT THE PROPERTY (#3451 review round 1, finding 1)
+
+`compile()` answers "does this parse HERE". The property the driver's repaired steps need is "does
+this parse on EVERY interpreter this repository runs on", and the two differ for exactly one
+spelling: a subscript inside an f-string expression written with NESTED SAME-TYPE QUOTES. PEP 701
+made that legal in 3.12 and it is a SyntaxError on everything older. So a regression to that form
+passes `compile()` on a 3.12 box and breaks a 3.11 one — and it is the very alternative the
+driver's own comment says was rejected, protected by nothing.
+
+The exposure is real rather than theoretical: this repository pins Python 3.11 in
+`.github/workflows/parity-failure-issue.yml` and `parity-failure-issue-tests.yml`,
+`bindings/python/pyproject.toml` declares `requires-python = ">=3.9"`, and the driver itself
+declares NO floor — it requires `python3` and takes whatever the host has.
+
+`ast.parse(..., feature_version=(3, 9))` DOES NOT DETECT IT (measured at (3,9)/(3,11)/(3,12), all
+accepting): `feature_version` gates the AST grammar, not the tokenizer, and PEP 701 is a tokenizer
+change. So the check is at the TOKENIZER: walk the tokens, track the quote character of each
+enclosing `FSTRING_START`, and flag any `STRING` token inside it whose OPENING QUOTE EQUALS that
+character.
+
+THE SAME-TYPE/DIFFERENT-TYPE BOUNDARY IS THE WHOLE CHECK. `f"{x['k']}"` is legal on every
+interpreter and flagging it would be a false red; `f"{x["k"]}"` is 3.12-only and must be refused.
+The suite controls BOTH directions.
+
+TWO ORACLES, EACH SOUND OVER ITS OWN RANGE, AND WHICH ONE RAN IS PRINTED. On 3.12+ the tokenizer
+walk is the oracle, because `compile()` there accepts the bad form. On < 3.12 `compile()` IS the
+oracle — the bad form does not parse at all — and the token types the walk needs
+(`FSTRING_START`/`FSTRING_END`) do not exist. Either way the answer is affirmative and the
+`#COMPLETE` line names the oracle and the interpreter, so a reader can never mistake this for one
+check that silently skipped. Nothing here is conditional on an optional interpreter being
+installed: a check that skips when a dependency is absent is the coverage gap this whole issue is
+about.
 
 # FAIL-CLOSED, because an extractor that finds nothing prints like a clean driver
 
@@ -119,9 +156,11 @@ operator having been parsed by nothing, and it is the state this file was writte
 
 from __future__ import annotations
 
+import io
 import pathlib
 import re
 import sys
+import tokenize
 
 # The word, matched only where it is a standalone token. `requires python3.` inside an `echo`
 # string is not an invocation and must not be censused as an unknown shape; a trailing
@@ -135,8 +174,11 @@ _OPEN_DASH_C = re.compile(r"^\s*-c\s+'")
 # The `'"'"'` idiom: close, emit a literal apostrophe from a double-quoted segment, reopen. The one
 # exception to "a single-quoted string runs to the next quote".
 _QUOTE_IDIOM = "'" + '"' + "'" + '"' + "'"
-# A heredoc redirect: `<<'PY'`, `<<PY`, `<<-'PY'`.
-_HEREDOC = re.compile(r"<<-?\s*(?P<q>['\"]?)(?P<tag>[A-Za-z_][A-Za-z0-9_]*)(?P=q)")
+# A heredoc redirect: `<<'PY'`, `<<PY`, `<<-'PY'`. The `dash` group is captured because `<<-`
+# and `<<` have DIFFERENT terminator rules — see `_delimit_heredoc`.
+_HEREDOC = re.compile(
+    r"<<(?P<dash>-?)\s*(?P<q>['\"]?)(?P<tag>[A-Za-z_][A-Za-z0-9_]*)(?P=q)"
+)
 # A script-file argument, quoted or not, possibly carrying a shell expansion in its directory
 # part: `"$HERE/ws0_report.py"`.
 _SCRIPT = re.compile(r"^[\"']?[^\s\"']*\.py[\"']?(\s|$)")
@@ -191,15 +233,38 @@ def _scan_single_quoted(text: str, open_quote: int) -> tuple[str, int]:
     )
 
 
-def _delimit_heredoc(lines: list[str], start: int, tag: str) -> tuple[str, int]:
-    """Body of the heredoc opened on `lines[start]`, plus the line its terminator sits on."""
+def _delimit_heredoc(
+    lines: list[str], start: int, tag: str, dash: bool
+) -> tuple[str, int]:
+    """Body of the heredoc opened on `lines[start]`, plus the line its terminator sits on.
+
+    THE TERMINATOR RULE IS THE SHELL'S, not `.strip()` (#3451 review round 1, finding 2). The two
+    forms differ and conflating them is wrong in both directions:
+
+    * `<<TAG`  — the terminator must be the line EXACTLY. A space-indented `  TAG` is ORDINARY
+      BODY to the shell, so accepting it truncates the block early and hands python a body it
+      never receives. A `.strip()` comparison accepted it.
+    * `<<-TAG` — leading TABS (never spaces) are stripped from the terminator AND from every body
+      line. A `.strip()` comparison found the terminator but left the body's tabs in place, so a
+      tab-indented body compiled as an IndentationError the shell would never produce.
+
+    Both are latent today — this driver carries no heredoc — but the branch SHIPS and is
+    exercised, and a wrong implementation of a shipped branch is a trap for whoever first writes
+    a step in that shape.
+    """
+    body: list[str] = []
     for i in range(start + 1, len(lines)):
-        if lines[i].strip() == tag:
-            return "\n".join(lines[start + 1 : i]) + "\n", i
+        line = lines[i]
+        candidate = line.lstrip("\t") if dash else line
+        if candidate == tag:
+            return "\n".join(body) + "\n", i
+        body.append(candidate)
     raise Unclassifiable(
         start + 1,
-        f"an embedded python heredoc opened with `{tag}` is never terminated, so its body cannot"
-        " be delimited.",
+        f"an embedded python heredoc opened with `{'<<-' if dash else '<<'}{tag}` is never"
+        " terminated by a line the SHELL would accept as its terminator"
+        + (" (leading tabs stripped)" if dash else " (an exact match, indentation included)")
+        + ", so its body cannot be delimited.",
     )
 
 
@@ -250,7 +315,9 @@ def census(path: pathlib.Path) -> tuple[list[dict], list[dict]]:
                 continue
             hd = _HEREDOC.search(rest)
             if hd:
-                body, end = _delimit_heredoc(lines, idx, hd.group("tag"))
+                body, end = _delimit_heredoc(
+                    lines, idx, hd.group("tag"), hd.group("dash") == "-"
+                )
                 skip_until = end
                 records.append(
                     {"kind": "BLOCK", "shape": "heredoc", "line": idx + 1, "end": end + 1,
@@ -273,6 +340,65 @@ def census(path: pathlib.Path) -> tuple[list[dict], list[dict]]:
     return records, findings
 
 
+# Whether this interpreter tokenizes f-strings into their own token types (PEP 701, 3.12+). On an
+# older one the nested same-type form is not tokenizable at all, so `compile()` is the oracle.
+_HAS_FSTRING_TOKENS = hasattr(tokenize, "FSTRING_START")
+PORTABILITY_ORACLE = "tokenizer" if _HAS_FSTRING_TOKENS else "compile"
+
+
+def _string_open_quote(tok: str) -> str:
+    """The quote character a STRING token opens with, past any prefix letters (`rb'…'`)."""
+    for ch in tok:
+        if ch in "\"'":
+            return ch
+    return ""
+
+
+def portability_findings(src: str) -> list[str]:
+    """Spellings in `src` that parse on 3.12+ and NOT on older interpreters.
+
+    Exactly one such spelling exists and it is the one this issue is about: a string inside an
+    f-string expression opening with the SAME quote character as the f-string itself. A
+    DIFFERENT-type nested quote (`f"{x['k']}"`) is legal everywhere and must not be reported.
+    """
+    if not _HAS_FSTRING_TOKENS:
+        # `compile()` is the oracle on this interpreter: the 3.12-only form is a SyntaxError here,
+        # and `compile`/`portable` therefore report it through the same path. Returning nothing is
+        # correct rather than a skip — the caller prints WHICH oracle answered.
+        try:
+            compile(src, "<portability>", "exec")
+        except SyntaxError as exc:
+            return [
+                f"does not parse on this interpreter ({sys.version_info.major}."
+                f"{sys.version_info.minor}) — {exc.msg} (line {exc.lineno})"
+            ]
+        return []
+    out: list[str] = []
+    stack: list[str] = []
+    try:
+        for tok in tokenize.generate_tokens(io.StringIO(src).readline):
+            if tok.type == tokenize.FSTRING_START:
+                stack.append(tok.string[-1])
+            elif tok.type == tokenize.FSTRING_END:
+                if stack:
+                    stack.pop()
+            elif tok.type == tokenize.STRING and stack:
+                quote = _string_open_quote(tok.string)
+                if quote and quote == stack[-1]:
+                    out.append(
+                        f"line {tok.start[0]}: {tok.string} is nested inside an f-string"
+                        f" delimited by the SAME quote ({stack[-1]}). PEP 701 made that legal in"
+                        " 3.12 and it is a SyntaxError on every earlier interpreter, which this"
+                        " repository still runs (3.11 in two workflows, >=3.9 declared by the"
+                        " python bindings) and this driver does not exclude. Bind the subscript"
+                        " to a LOCAL before the f-string."
+                    )
+    except (SyntaxError, tokenize.TokenError) as exc:
+        out.append(f"could not be tokenized ({type(exc).__name__}: {exc}) — reported rather than"
+                   " skipped, because an unanswerable oracle must not read as a clean answer")
+    return out
+
+
 def _blocks(records: list[dict]) -> list[dict]:
     return [r for r in records if r["kind"] == "BLOCK"]
 
@@ -280,12 +406,23 @@ def _blocks(records: list[dict]) -> list[dict]:
 def main(argv: list[str]) -> int:
     if len(argv) < 3:
         print(__doc__.splitlines()[0], file=sys.stderr)
-        print("usage: ws0_embedded_python.py census|compile|emit <driver> [n]", file=sys.stderr)
+        print("usage: ws0_embedded_python.py census|compile|portable|portable-source|emit"
+          " <file> [n]", file=sys.stderr)
         return 2
     mode, driver = argv[1], pathlib.Path(argv[2])
     if not driver.is_file():
         print(f"{driver}:0: the driver is not a readable file, so the census has NO SUBJECT —"
               " which prints exactly like a driver with nothing wrong in it.")
+        return 0
+    if mode == "portable-source":
+        # The same question about an ORDINARY python file. Exists so the accept direction (a
+        # DIFFERENT-type nested quote, legal everywhere) can be controlled without smuggling an
+        # apostrophe into a shell single-quoted block, where it would terminate the string.
+        for note in portability_findings(driver.read_text()):
+            print(f"{driver}: NOT PORTABLE — {note}")
+        print(f"#COMPLETE portable-source=1 oracle={PORTABILITY_ORACLE}"
+              f" interpreter={sys.version_info.major}.{sys.version_info.minor}"
+              f".{sys.version_info.micro}")
         return 0
     records, findings = census(driver)
     blocks = _blocks(records)
@@ -316,6 +453,19 @@ def main(argv: list[str]) -> int:
                       f" {exc.lineno}). This step is fatal-on-failure, so the driver cannot run"
                       " past it.")
         print(f"#COMPLETE compiled={len(blocks)} findings={len(findings)}")
+        return 0
+    if mode == "portable":
+        # EVERY embedded block, against the property `compile` cannot see on this box.
+        for f in findings:
+            print(f"{driver}:{f['line']}: {f['reason']}")
+        for i, r in enumerate(blocks, start=1):
+            for note in portability_findings(r["body"]):
+                print(f"{driver}:{r['line']}: embedded python block {i} is NOT PORTABLE —"
+                      f" {note}")
+        print(f"#COMPLETE portable={len(blocks)} findings={len(findings)}"
+              f" oracle={PORTABILITY_ORACLE}"
+              f" interpreter={sys.version_info.major}.{sys.version_info.minor}"
+              f".{sys.version_info.micro}")
         return 0
     if mode == "emit":
         if len(argv) < 4:
