@@ -3,7 +3,6 @@ use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::{Path, PathBuf};
 
-/// Deprecation reporting for REMOVED config-file keys (issue #1696).
 #[path = "config_removed_keys.rs"]
 pub mod removed_keys;
 
@@ -343,21 +342,10 @@ impl Config {
     /// Deserialize `content` as `path`'s format, returning the loaded config and
     /// the deprecation warning naming every REMOVED key it still sets (#1696).
     ///
-    /// # The ORDER is the property (#1696 roborev F3)
-    ///
-    /// The warning asserts "the file still loads", so it may only be produced
-    /// once the load has actually SUCCEEDED. Emitting it first meant a
-    /// syntactically valid document that named a removed key AND carried an
-    /// invalid surviving value printed that assurance and then failed to load —
-    /// a false promise inside a change whose whole subject is config honesty.
-    ///
-    /// The raw document scan still works after deserializing because `content`
-    /// is retained: serde drops the removed keys from `Config`, but nothing
-    /// drops them from the text they were read out of.
-    ///
-    /// `pub` so a test can assert BOTH halves of the ordering — that a good load
-    /// yields the warning, and that a failed load yields no warning at all —
-    /// over the exact code path `load_from_file` runs.
+    /// The deserialize runs FIRST and the scan only on success: the warning
+    /// asserts "the configuration still loads" — a promise it must not make
+    /// before it is true (#1696 F3; see `removed_keys`). `pub` so a test can
+    /// assert both halves of that ordering on the real load path.
     pub fn parse_with_removed_key_report(
         path: &Path,
         content: &str,

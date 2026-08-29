@@ -56,8 +56,8 @@
 //!
 //! # ORDER: the scan runs AFTER a SUCCESSFUL deserialize (#1696 roborev F3)
 //!
-//! The warning text asserts "the file still loads", so it may only be produced
-//! once the load has succeeded. Scanning first meant a document that named a
+//! The warning text asserts the configuration still loads, so it may only be
+//! produced once the load succeeded. Scanning first meant a document naming a
 //! removed key AND carried an invalid surviving value printed that assurance and
 //! then failed to load. Scanning afterwards costs nothing: the caller retains the
 //! raw text, and nothing removes the dead keys from it. See

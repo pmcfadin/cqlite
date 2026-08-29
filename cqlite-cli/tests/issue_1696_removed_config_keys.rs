@@ -175,7 +175,7 @@ fn the_shipped_example_config_names_no_removed_keys() {
 
 /// The warning must not PROMISE a load that then fails (#1696 roborev F3).
 ///
-/// Its text says the keys "are IGNORED — the file still loads". A syntactically
+/// Its text says the keys "are IGNORED — the configuration still loads". A
 /// valid document that names a removed key AND carries an invalid surviving value
 /// used to print exactly that assurance and then fail to load: a false promise
 /// inside a change whose whole subject is config honesty.
@@ -223,7 +223,7 @@ colors = true
             .map(|(_, warning)| warning)
             .unwrap_or(None)
             .is_none(),
-        "a failed load must not emit the \"the file still loads\" assurance"
+        "a failed load must not emit the \"still loads\" assurance"
     );
 
     // Control: the SAME removed key with every surviving value valid loads AND
@@ -245,7 +245,7 @@ colors = true
     assert_eq!(config.output.max_rows, Some(500));
     let warning = warning.expect("a successful load naming a removed key MUST warn");
     assert!(
-        warning.contains("connection") && warning.contains("the file still loads"),
+        warning.contains("connection") && warning.contains("still loads"),
         "the warning must name the dead key and assert the load succeeded: {warning}"
     );
 }
