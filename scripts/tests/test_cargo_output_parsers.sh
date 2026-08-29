@@ -370,8 +370,13 @@ else
     'def_expected=$(( ${#def_flags[@]} / 2 ))'
   blob_needs "Pass 2 derives its expected target count from ws_flags" 1 \
     'ws_expected=$(( ${#ws_flags[@]} / 2 ))'
-  blob_needs "each pass passes its derived count to the guard" 1 \
+  # One assert PER PASS, each labelled with only what it measures. A single "each pass" assert
+  # keyed on Pass 1's call site alone would let Pass 2 stop passing its derived count while the
+  # green kept claiming both -- the stated-scope-exceeds-measured-scope shape this issue is about.
+  blob_needs "Pass 1 passes its derived count to the guard" 1 \
     '"$log1" "$def_expected"'
+  blob_needs "Pass 2 passes its derived count to the guard" 1 \
+    '"$log2" "$ws_expected"'
   # The needle is matched against the RAW blob text, where the single quotes are still in this
   # file's `bash -c` escaped form — so key on the quote-free payload and let the NEGATIVE assert
   # below (no `trap "rm -rf`) establish that the quoting is the deferred kind.
