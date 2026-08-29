@@ -30,8 +30,8 @@
 #     commit date, so a re-push through a clock-skewed relay or a rebasing
 #     proxy can't silently corrupt the age computation).
 #
-#   refs/machine-claims/<machine>   (issue #2655 / #2499 design)
-#     A SUPERVISOR-authored claim ref — the machine-driven complement to the
+#   refs/lane-claims/<machine>/<lane-id>   (issue #2655 / #2499 design, per-LANE since #3393)
+#     A SUPERVISOR-authored claim ref, ONE PER LANE — the machine-driven complement to the
 #     LLM-driven `beat`. `worker-supervisor.sh` (#2090) stamps it at spawn,
 #     refreshes it every iteration, and clears it on a clean exit, so claim
 #     liveness no longer depends on the worker LLM *remembering* to beat. Same
@@ -41,9 +41,25 @@
 #     process-liveness check (a beat-then-crash no longer looks alive for the
 #     whole threshold window). A reaper running elsewhere (the project-board-sync
 #     CI cron) can't see the PID, so it falls back to age + no-open-PR only.
-#     NOTE the namespace is `refs/machine-claims/*`, deliberately DISTINCT from
+#     <lane-id> is the issue number, or `p<pid>-<token>` while a supervisor has
+#     stamped before its issue is known. ONE REF PER LANE, because a box runs
+#     several lanes at once (#3393 retracted the old one-worker-per-machine
+#     reading): a single per-machine ref was force-updated by every lane on the
+#     box, so siblings overwrote each other and `dead-lanes` could see at most
+#     one of them. A separate NAMESPACE rather than `<machine>-<issue>` because
+#     git forbids a ref being both a file and a directory, and a machine name
+#     may itself contain dashes.
+#
+#   refs/machine-claims/<machine>   LEGACY, read-only
+#     The pre-#3393 per-machine shape. Still ENUMERATED by `list-claims`,
+#     `dead-lanes` and the CI reaper so a pre-ruling ref gets drained — an
+#     un-enumerated claim ref pins its board item at In Progress indefinitely —
+#     and still accepted by `clear`/`reap`/`should-reap` when no lane id is
+#     given. Nothing writes it any more.
+#
+#     NOTE both namespaces are deliberately DISTINCT from
 #     `scripts/flow/claim.sh`'s per-issue LOCK refs `refs/claims/issue-<N>`
-#     (#2665) — this is a per-MACHINE liveness proof, not the issue lock, and the
+#     (#2665) — these are liveness proofs, not the issue lock, and the
 #     reaper must never glob up (let alone delete) the issue-lock refs.
 #
 # THRESHOLD SEMANTICS (documented once, here — flow-board defers to this file)
@@ -797,18 +813,54 @@ cmd_should_reap() {
     ref="refs/machine-claims/${machine}"
   fi
 
-  if ! git ls-remote --exit-code "$REMOTE" "$ref" >/dev/null 2>&1; then
-    note "no claim ref ${ref} on $REMOTE"
-    return 2
-  fi
+  # ONLY EXIT 2 IS ABSENCE (roborev round 18, Medium — FAIL-OPEN instance 7). `! git ls-remote`
+  # collapsed every failure onto "no claim ref … return 2", so an auth failure, a DNS blip or a
+  # remote outage reported CONFIRMED ABSENCE for a ref nobody could look at — and a caller acting on
+  # 2 concludes there is nothing to own. `--exit-code` distinguishes them: 2 is git's confirmed
+  # no-match, anything else is operational. `delete_ref_guarded` already cased this correctly and
+  # `should-reap` was simply never brought up to it, which is the same guard-width shape as round 17.
+  local ls_rc=0
+  git ls-remote --exit-code "$REMOTE" "$ref" >/dev/null 2>&1 || ls_rc=$?
+  case "$ls_rc" in
+    0) : ;;
+    2)
+      note "no claim ref ${ref} on $REMOTE"
+      return 2
+      ;;
+    *)
+      # KEEP, not "no ref": this is a reap GATE, so the answer to "I could not tell" is the
+      # conservative one, and the cause is named rather than swallowed.
+      note "keep ${ref}: could not determine whether it exists (git ls-remote exited ${ls_rc} — operational failure, NOT git's no-match status 2). An unverified claim is never confirmed absent."
+      return 1
+      ;;
+  esac
 
   # `pid` is OPTIONAL, and after round 5 that needed saying in code (roborev round 6, Low).
   # `ref_msg_field` now fails when a field is ABSENT — correct for the open-PR safeguard — but under
   # `set -e` an absent `pid` then terminated should-reap outright, so a legacy or foreign claim whose
   # PID is deliberately not required could no longer reach the documented age + open-PR decision. A
   # fail-closed change in one caller became a fail-SHUT regression in another.
-  local issue pid ts epoch now_epoch age
-  issue="$(ref_msg_field "$ref" issue)" || issue=""
+  # THE REF PATH OUTRANKS THE MESSAGE, AND AN UNREADABLE LEGACY ISSUE IS KEEP (roborev round 18,
+  # Medium — FAIL-OPEN instance 8). Two defects in three lines. `local issue` RESET the caller's
+  # lane id, and the message parse then overwrote the one AUTHORITATIVE source of the issue with a
+  # best-effort one; `|| issue=""` turned an unreadable message into "no issue", and the open-PR
+  # check below is `[ -n "$issue" ] && …`, so an absent issue SKIPPED the #2499 orphaned-endgame
+  # safeguard and returned REAP. `delete_ref_guarded`, `list-claims` and `dead-lanes` all prefer the
+  # path already — `should-reap` was the one subcommand never brought up to the pattern.
+  #
+  # Only `pid` is legitimately optional (a foreign machine's PID is unknowable, which is why the
+  # predicate is age AND no-open-PR AND pid-dead-IF-LOCAL). `issue` is not: for a per-lane claim it
+  # is IN the ref path, and for a legacy claim the message is the only source, so failing to read it
+  # means the safeguard cannot run and the answer is KEEP. That is fail-CLOSED without being
+  # fail-SHUT (#3464 family 4): the caller still reaches a documented decision, it just reaches the
+  # conservative one.
+  local lane_issue="$issue" pid ts epoch now_epoch age
+  if [ -n "$lane_issue" ]; then
+    issue="$lane_issue"
+  elif ! issue="$(ref_msg_field "$ref" issue)"; then
+    note "keep ${ref}: its claim message could not be read, so its issue is unknown and an open PR cannot be ruled out (#2499). Only pid is optional here."
+    return 1
+  fi
   pid="$(ref_msg_field "$ref" pid)" || pid=""
   ts="$(ref_msg_field "$ref" ts)" || ts=""
 

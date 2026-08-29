@@ -561,14 +561,36 @@ stamp_claim() {
 # behind while cheerfully reporting a clean clear — and a claim ref nothing deletes pins its board
 # item at In Progress indefinitely. When the issue is still unknown, `CLAIM_ISSUE` is empty and
 # nothing was stamped, so there is no ref to clear.
+# clear_claim [clean] — release this lane's claim ref. `clean` is 1 only when the supervisor is
+# stopping deliberately (finalize_exit code 0).
+#
+# A PLACEHOLDER IS NOT CLEARED ON AN ABNORMAL EXIT (roborev round 18, Medium). `finalize_exit` runs
+# this on EVERY exit — `breaker`, `leftover-worker`, `leftover-build`, `automerge-stuck`,
+# `verify-unavailable` included — while its own comment said "on a clean stop", and the whole
+# safeguard rests on `reap` refusing when the issue has an open PR. For a NUMERIC lane id that guard
+# runs and the clear is safe on any exit. For a `p<pid>-…` PLACEHOLDER there is no issue to consult,
+# so `reap` deletes unconditionally (by design: the owner knows it finished, a reaper cannot) — and
+# on an abnormal exit the owner does NOT know that. A worker can have claimed an issue and opened a
+# PR before the supervisor ever received the marker, so clearing there destroys the only liveness
+# signal of a lane with an unfinished endgame: the exact #2499 case, reached from the other side.
+#
+# Discriminated by the EXIT CODE, not a list of reasons — a reason list is a subject set that drifts
+# the moment someone adds an exit path (#3464, the guard-width lesson). Left behind, the placeholder
+# is reported by `dead-lanes` and adoptable by hand, which is the intended end state for an
+# unfinished lane.
 clear_claim() {
   [[ -n "$CLAIM_CMD" ]] || return 0
+  local clean="${1:-}"
   # Retry anything a transition could not clean up, before clearing this lane's own ref. Nothing is
   # protected here: on a clean exit this lane's own ref is being removed too.
   claim_drain_pending_cleanup
   local issue="$CLAIM_STAMPED_ISSUE"
   # May be a `p<pid>` placeholder as well as an issue number; both are real refs to clear.
   case "$issue" in '' | p) issue="" ;; esac
+  if [[ -n "$issue" && "$clean" != 1 ]] && [[ "$issue" == p* ]]; then
+    log "claim clear DECLINED: lane $issue is a placeholder and this exit is not clean, so reap cannot rule out an open PR — left for dead-lanes to report and for adoption (#2499)"
+    return 0
+  fi
   if [[ -z "$issue" ]]; then
     log "claim clear skipped: this supervisor never stamped a lane claim, so there is no ref to clear"
     return 0
@@ -1057,10 +1079,14 @@ finalize_exit() {
   export GATE_NOTIFY_PAYLOAD_TIMEOUT="$NOTIFY_EXIT_PAYLOAD_TIMEOUT"
   export GATE_NOTIFY_CURL_TIMEOUT="$NOTIFY_EXIT_CURL_TIMEOUT"
   export GATE_NOTIFY_ADJUNCT_TIMEOUT="$NOTIFY_EXIT_ADJUNCT_TIMEOUT"
-  # Release this machine's claim ref on a clean stop (issue #2655). `reap`
-  # refuses when the claim's issue still has an open PR, so an unfinished endgame
-  # is preserved for adoption rather than orphaned.
-  clear_claim
+  # Release this lane's claim ref (issue #2655). `reap` refuses when the claim's issue still has an
+  # open PR, so an unfinished endgame is preserved for adoption rather than orphaned. THIS RUNS ON
+  # EVERY EXIT, not only a clean one — the comment here used to say "on a clean stop" and was simply
+  # false (roborev round 18) — so the clean/abnormal distinction is passed down instead of assumed:
+  # a placeholder lane id has no issue for that guard to consult and is kept on an abnormal exit.
+  local clean_exit=0
+  [[ "$code" == 0 ]] && clean_exit=1
+  clear_claim "$clean_exit"
   local elapsed=$(($(date +%s) - START_TS))
   mkdir -p "$LOG_DIR"
   report_pending_at_exit

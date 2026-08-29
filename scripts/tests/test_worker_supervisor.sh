@@ -2606,6 +2606,55 @@ test_claim_issue_learned_from_marker() {
 # CURRENT ref and leaves the running lane unobservable — the failure this change exists to prevent,
 # produced by the retry logic that was added to fix a leak.
 # ---------------------------------------------------------------------------
+# ---------------------------------------------------------------------------
+# Test 27-claim (#3393, roborev round 18): clear_claim must NOT delete a PLACEHOLDER lane ref on an
+# ABNORMAL exit. finalize_exit runs on every exit path (breaker, leftover-*, automerge-stuck,
+# verify-unavailable), and a `p<pid>` id names no issue, so `reap` cannot consult the open-PR
+# safeguard and deletes unconditionally — destroying the only liveness signal of a lane whose worker
+# may have claimed an issue and opened a PR before the supervisor ever saw the marker (#2499 reached
+# from the other side). A NUMERIC lane id is unaffected: there the guard runs inside reap.
+# ---------------------------------------------------------------------------
+test_clear_claim_keeps_placeholder_on_abnormal_exit() {
+  local d out
+  d="$(new_case_dir)"
+  common_env "$d"
+  export CLAIM_LOG="$d/claim.log"
+  cat >"$d/bin/claim.sh" <<'STUBEOF'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >>"${CLAIM_LOG:?CLAIM_LOG not set}"
+exit 0
+STUBEOF
+  chmod +x "$d/bin/claim.sh"
+  # Four cases in one sourced shell: placeholder/abnormal (KEEP), placeholder/clean (CLEAR),
+  # numeric/abnormal (CLEAR — reap's own guard covers it), numeric/clean (CLEAR).
+  : >"$CLAIM_LOG"
+  out="$(
+    CLAIM_CMD="bash $d/bin/claim.sh" HEARTBEAT_MACHINE=testbox CLAIM_LOG="$CLAIM_LOG" \
+    bash -c '
+      source "$1"
+      CLAIM_STAMPED_ISSUE="p777-dead1"; clear_claim 0
+      CLAIM_STAMPED_ISSUE="p888-dead2"; clear_claim 1
+      CLAIM_STAMPED_ISSUE="4242";       clear_claim 0
+    ' _ "$SUPERVISOR" 2>&1
+  )"
+  if printf '%s' "$out" | grep -q 'claim clear DECLINED: lane p777-dead1 is a placeholder and this exit is not clean' \
+    && ! grep -qE '^reap testbox p777-dead1$' "$CLAIM_LOG" \
+    && grep -qE '^reap testbox p888-dead2$' "$CLAIM_LOG" \
+    && grep -qE '^reap testbox 4242$' "$CLAIM_LOG"; then
+    pass "claim: a placeholder lane survives an ABNORMAL exit, is cleared on a CLEAN one, and a numeric lane is cleared either way"
+  else
+    fail "clear-claim-abnormal: out=[$out] log=[$(tr '\n' ';' <"$CLAIM_LOG")]"
+  fi
+  # NON-VACUITY: finalize_exit must actually DERIVE clean from the exit code rather than hardcode
+  # one value — otherwise the case above tests a function nothing calls correctly.
+  if grep -qE 'clear_claim "\$clean_exit"' "$SUPERVISOR" \
+    && grep -qE '\[\[ "\$code" == 0 \]\] && clean_exit=1' "$SUPERVISOR"; then
+    pass "claim: finalize_exit derives clean/abnormal from its EXIT CODE and passes it down (no reason list to drift)"
+  else
+    fail "clear-claim-wiring: finalize_exit does not pass a code-derived clean flag to clear_claim"
+  fi
+}
+
 test_claim_drain_never_deletes_current_lane() {
   local d out
   d="$(new_case_dir)"
@@ -2849,6 +2898,7 @@ test_claim_stamp_each_iter_and_clear_on_exit
 test_claim_issue_learned_from_marker
 test_claim_transition_survives_failed_replacement
 test_claim_drain_never_deletes_current_lane
+test_clear_claim_keeps_placeholder_on_abnormal_exit
 test_finalized_verified_merged_counts
 test_finalized_mismatch_open_is_abnormal
 test_finalized_unverified_not_counted_no_breaker

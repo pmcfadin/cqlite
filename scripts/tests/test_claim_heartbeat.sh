@@ -2286,6 +2286,125 @@ else
 $ctl_out"
 fi
 
+# ===========================================================================
+echo "TEST 71: should-reap maps an OPERATIONAL ls-remote failure to KEEP, not 'no ref' (round 18)"
+# ===========================================================================
+# FAIL-OPEN instance 7. `! git ls-remote --exit-code` collapsed every failure onto "no claim ref …
+# return 2", so an auth failure or a network blip reported CONFIRMED ABSENCE for a ref nobody could
+# look at. Only git's status 2 is no-match; 128 is operational. `delete_ref_guarded` already cased
+# this correctly, so this is the same guard-width shape as round 17.
+sr_out=$(cd "$WORK" && HEARTBEAT_REMOTE=no-such-remote CLAIM_OPEN_PR_CMD="$NO_OPEN_PR" \
+  bash "$HB" should-reap someBox 4242 1 2>&1)
+sr_rc=$?
+if [ "$sr_rc" -eq 1 ] \
+  && printf '%s\n' "$sr_out" | grep -qi 'operational failure' \
+  && printf '%s\n' "$sr_out" | grep -qi 'never confirmed absent'; then
+  ok "an unreachable remote makes should-reap KEEP (rc=1) and name the operational failure — never rc=2 'no ref'"
+else
+  bad "an unverified claim must not read as confirmed absent: rc=$sr_rc out:
+$sr_out"
+fi
+# NON-VACUITY: on a GOOD remote a genuinely absent ref still returns 2, so the case above is about
+# the failure status and not about the ref being missing.
+(cd "$WORK" && CLAIM_OPEN_PR_CMD="$NO_OPEN_PR" bash "$HB" should-reap someBox 4242 1 >/dev/null 2>&1)
+if [ $? -eq 2 ]; then
+  ok "NON-VACUITY: a genuinely absent ref on a reachable remote still returns 2 (confirmed absence)"
+else
+  bad "NON-VACUITY broken: absence on a good remote no longer returns 2, so TEST 71 cannot tell the two apart"
+fi
+
+# ===========================================================================
+echo "TEST 72: should-reap trusts the ref PATH, and KEEPS an unreadable legacy issue (round 18)"
+# ===========================================================================
+# FAIL-OPEN instance 8, two defects in three lines: `local issue` reset the caller's lane id and the
+# message parse overwrote the AUTHORITATIVE path value, while `|| issue=""` turned an unreadable
+# message into "no issue" — and the open-PR check is `[ -n "$issue" ] && …`, so the #2499
+# orphaned-endgame safeguard was SKIPPED and the verdict was REAP.
+# (a) A per-lane claim whose MESSAGE names a different issue. The path issue has an open PR; the
+#     message's does not. Whichever one the code consults decides the verdict, so this discriminates.
+craft_claim_msg_issue() {  # <machine> <lane-id> <message-issue> <pid> <age>
+  local machine="$1" lane="$2" msgissue="$3" pid="$4" age="$5"
+  (
+    cd "$WORK" || exit 1
+    local now_epoch old_epoch old_ts empty_tree csha
+    now_epoch=$(date -u +%s); old_epoch=$((now_epoch - age))
+    old_ts=$(date -u -r "$old_epoch" +%Y-%m-%dT%H:%M:%SZ 2>/dev/null) \
+      || old_ts=$(date -u -d "@$old_epoch" +%Y-%m-%dT%H:%M:%SZ)
+    empty_tree=$(git hash-object -t tree --stdin </dev/null)
+    csha=$(GIT_AUTHOR_DATE="$old_ts" GIT_COMMITTER_DATE="$old_ts" \
+      GIT_AUTHOR_NAME=t GIT_AUTHOR_EMAIL=t@t GIT_COMMITTER_NAME=t GIT_COMMITTER_EMAIL=t@t \
+      git commit-tree "$empty_tree" -m "claim issue=${msgissue} machine=${machine} pid=${pid} ts=${old_ts}")
+    g push -q origin "${csha}:refs/lane-claims/${machine}/${lane}"
+  )
+}
+craft_claim_msg_issue pathBox 5555 9999 "$ABSENT_PID" 30
+# A SNIPPET, NOT AN EXECUTABLE. `issue_has_open_pr` runs `bash -c "$CLAIM_OPEN_PR_CMD" _ "$issue"`,
+# so the value is shell source in which $1 is the issue — a script PATH here would be invoked with
+# NO arguments (the `_ <issue>` become the -c string's own $0/$1), see it as empty, and answer "no
+# open PR" for every issue, which is precisely how the first cut of TEST 72a failed. The existing
+# NO_OPEN_PR='exit 1' / HAS_OPEN_PR='exit 0' stubs are the shape to copy.
+only5555='[ "$1" = 5555 ] && exit 0; exit 1'   # "has an open PR" for 5555 ONLY
+pa_out=$(cd "$WORK" && HEARTBEAT_MACHINE=someOtherMachine CLAIM_OPEN_PR_CMD="$only5555" \
+  bash "$HB" should-reap pathBox 5555 1 2>&1)
+pa_rc=$?
+if [ "$pa_rc" -eq 1 ] && printf '%s\n' "$pa_out" | grep -q 'issue #5555 has an open PR'; then
+  ok "should-reap consults the issue from the REF PATH (5555), not the message's (9999) — so the open-PR safeguard runs"
+else
+  bad "the ref path must outrank the claim message: rc=$pa_rc out:
+$pa_out"
+fi
+# NON-VACUITY: the stub really does answer differently for the two issues, so the assertion above
+# distinguishes path from message rather than passing whichever was used.
+if bash -c "$only5555" _ 5555 && ! bash -c "$only5555" _ 9999; then
+  ok "NON-VACUITY: the open-PR stub answers YES for 5555 and NO for 9999, so TEST 72a discriminates"
+else
+  bad "NON-VACUITY broken: the stub does not distinguish 5555 from 9999"
+fi
+(cd "$WORK" && g push -q origin ":refs/lane-claims/pathBox/5555" 2>/dev/null || true)
+
+# (b) A LEGACY claim whose message carries NO issue= at all. The message is the only source there,
+#     so failing to read it means the safeguard cannot run: KEEP, never reap. Fail-CLOSED without
+#     being fail-SHUT (#3464 family 4) — the caller still reaches a documented decision.
+(
+  cd "$WORK" || exit 1
+  et=$(git hash-object -t tree --stdin </dev/null)
+  old_ts=$(date -u -r $(( $(date -u +%s) - 40000 )) +%Y-%m-%dT%H:%M:%SZ 2>/dev/null) \
+    || old_ts=$(date -u -d "@$(( $(date -u +%s) - 40000 ))" +%Y-%m-%dT%H:%M:%SZ)
+  cs=$(GIT_AUTHOR_DATE="$old_ts" GIT_COMMITTER_DATE="$old_ts" \
+    GIT_AUTHOR_NAME=t GIT_AUTHOR_EMAIL=t@t GIT_COMMITTER_NAME=t GIT_COMMITTER_EMAIL=t@t \
+    git commit-tree "$et" -m "claim machine=legacyNoIssue pid=$ABSENT_PID ts=${old_ts}")
+  g push -q origin "${cs}:refs/machine-claims/legacyNoIssue"
+)
+ln_out=$(cd "$WORK" && HEARTBEAT_MACHINE=legacyNoIssue CLAIM_OPEN_PR_CMD="$NO_OPEN_PR" \
+  bash "$HB" should-reap legacyNoIssue 1 2>&1)
+ln_rc=$?
+if [ "$ln_rc" -eq 1 ] && printf '%s\n' "$ln_out" | grep -qi 'issue is unknown'; then
+  ok "a legacy claim whose issue cannot be read is KEPT (rc=1), so the open-PR safeguard is never skipped"
+else
+  bad "an unreadable legacy issue must not reach a reap verdict: rc=$ln_rc out:
+$ln_out"
+fi
+# NON-VACUITY: the SAME legacy shape WITH a readable issue and no open PR still reaches REAP, so the
+# KEEP above is caused by the unreadable field and not by the age/threshold or the legacy path.
+(
+  cd "$WORK" || exit 1
+  et=$(git hash-object -t tree --stdin </dev/null)
+  old_ts=$(date -u -r $(( $(date -u +%s) - 40000 )) +%Y-%m-%dT%H:%M:%SZ 2>/dev/null) \
+    || old_ts=$(date -u -d "@$(( $(date -u +%s) - 40000 ))" +%Y-%m-%dT%H:%M:%SZ)
+  cs=$(GIT_AUTHOR_DATE="$old_ts" GIT_COMMITTER_DATE="$old_ts" \
+    GIT_AUTHOR_NAME=t GIT_AUTHOR_EMAIL=t@t GIT_COMMITTER_NAME=t GIT_COMMITTER_EMAIL=t@t \
+    git commit-tree "$et" -m "claim issue=6161 machine=legacyOk pid=$ABSENT_PID ts=${old_ts}")
+  g push -q origin "${cs}:refs/machine-claims/legacyOk"
+)
+(cd "$WORK" && HEARTBEAT_MACHINE=legacyOk CLAIM_OPEN_PR_CMD="$NO_OPEN_PR" \
+  bash "$HB" should-reap legacyOk 1 >/dev/null 2>&1)
+if [ $? -eq 0 ]; then
+  ok "NON-VACUITY: the same legacy shape with a READABLE issue and no open PR still reaches REAP (rc=0)"
+else
+  bad "NON-VACUITY broken: the readable-issue control did not reach a reap verdict, so TEST 72b's KEEP is not attributable to the unreadable field"
+fi
+(cd "$WORK" && g push -q origin ":refs/machine-claims/legacyNoIssue" ":refs/machine-claims/legacyOk" 2>/dev/null || true)
+
 echo
 echo "=== claim-heartbeat.sh: $PASS passed, $FAIL failed ==="
 [ "$FAIL" -eq 0 ]
