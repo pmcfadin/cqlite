@@ -1169,6 +1169,28 @@ else
   bad "push: the two skip flags are not independent"
 fi
 
+# 7p-i. STRUCTURAL GUARD: no case in this suite may point the push probe at a REAL
+#   remote. Behavioural cases only cover the shapes someone already thought of; this
+#   one covers the case NOBODY HAS WRITTEN YET. The probe pushes for real, so a case
+#   that gave a claim.sh-bearing sandbox a github.com origin — or a whole-checkout run
+#   that forgot --skip-push-probe — would mutate the shared origin from a unit test.
+TEST_SELF="$SCRIPT_DIR/$(basename "$0")"
+bad_remote=$(grep -n 'mk_push_repo "\$repo' "$TEST_SELF" \
+  | grep -vE 'file://|push-probe\.invalid|mk_push_repo "\$repo[a-z0-9]*" ""' || true)
+if [ -z "$bad_remote" ]; then
+  ok "push: every claim.sh-bearing sandbox points at a local file:// repo, an empty remote, or push-probe.invalid"
+else
+  bad "push: a sandbox that can PUSH is pointed at a non-local remote:"
+  printf '%s\n' "$bad_remote"
+fi
+unguarded=$(grep -n 'bash "\$BOOTSTRAP" --skip-smoke' "$TEST_SELF" | grep -v -- '--skip-push-probe' || true)
+if [ -z "$unguarded" ]; then
+  ok "push: every run against the REAL checkout passes --skip-push-probe (the suite cannot reach the real origin)"
+else
+  bad "push: a real-checkout run would probe the REAL origin:"
+  printf '%s\n' "$unguarded"
+fi
+
 # --- 8. Board check is a FUNCTIONAL, READ-ONLY probe (issue #2942) ----------
 # The false OK this exists to prevent: a token whose scopes INCLUDE `project` while
 # `gh project` still fails for a missing `read:org`, and the equivalent
