@@ -21,6 +21,8 @@ mod cli;
 mod cli_types;
 mod commands;
 mod config;
+// Deprecation reporting for REMOVED config-file keys (issue #1696).
+mod config_removed_keys;
 mod core_config;
 mod error;
 mod formatter;

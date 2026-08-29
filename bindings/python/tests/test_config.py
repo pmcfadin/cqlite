@@ -183,7 +183,10 @@ class TestConfigFromDict:
         assert "storage" in config
         assert "memory" in config
         assert "query" in config
-        assert "performance" in config
+        # Issue #1696 (AH3): the whole `performance` tree (enable_metrics,
+        # metrics_interval, enable_profiling, background_tasks.*) was removed —
+        # nothing read any of it.
+        assert "performance" not in config
 
     def test_config_memory_section(self):
         """Config memory section should have expected fields."""
@@ -205,4 +208,17 @@ class TestConfigFromDict:
 
         assert "compression" in storage
         assert "compaction" in storage
-        assert "enable_bloom_filters" in storage
+        # Issue #1696 (AH3): the decorative storage knobs were removed. They had
+        # zero production readers, so a config that still names one was silently
+        # doing nothing.
+        for removed in (
+            "max_sstable_size",
+            "block_size",
+            "enable_bloom_filters",
+            "bloom_filter_fp_rate",
+            "io_threads",
+            "sync_mode",
+        ):
+            assert removed not in storage
+        # The knob the write engine actually reads survives.
+        assert "memtable_size_threshold" in storage

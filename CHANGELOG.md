@@ -92,6 +92,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Note for reviewers: the gate's `pub-surface` component checks
     declaration/inner-`cfg` consistency and is **not** an API-drift detector
     (#1712/#3366), so nothing flags this mechanically — hence this entry.
+- **BREAKING (public API): decorative configuration knobs are deleted (#1696,
+  epic #1685 "config honesty" / audit finding AH3).** Every knob below had ZERO
+  production readers: setting it changed nothing, silently. A deleted field on
+  `cqlite_core::Config` is now a COMPILE error for an embedder, which is the
+  loudest signal available and the intended posture.
+  - `cqlite_core::config::StorageConfig`: `max_sstable_size`, `block_size`,
+    `enable_bloom_filters`, `bloom_filter_fp_rate`, `io_threads`, `sync_mode`
+    (and with it the now-unreferenced `SyncMode` enum).
+  - `cqlite_core::config::QueryConfig`: `plan_cache_size`, `enable_optimization`,
+    `parallel` (and with it the `ParallelQueryConfig` struct).
+  - `cqlite_core::config::Config::performance` entirely, with the
+    `PerformanceConfig` and `BackgroundTaskConfig` structs.
+  - The `Config::validate` arms that judged deleted fields (`block_size`,
+    `bloom_filter_fp_rate`) went with them: validating a field nothing reads is
+    theatre.
+  - **CLI config-file keys**: the whole `[connection]` section
+    (`timeout_ms`/`retry_attempts`/`pool_size` — CQLite reads local files and
+    never opens a network connection), `output.pager` (nothing ever spawned a
+    pager) and `output.timestamp_format` (no formatter ever read it).
+  - **Migration (CLI files): a config that still names a removed key STILL
+    LOADS.** The CLI surface is a file, not a Rust type, so the posture is
+    *parse-and-ignore PLUS a named deprecation warning* rather than
+    `deny_unknown_fields` — hard-failing would break every user who copied our
+    own shipped `examples/example-config.toml`, which named all three. On load,
+    each still-present removed key is reported by name on stderr, so a dead
+    setting can no longer look like a live one. Delete the keys to silence it.
+  - **Migration (embedders):** drop the field assignment. None of these knobs
+    had an effect, so there is no behavior to preserve and no replacement to
+    adopt.
 
 - **BREAKING (public API): the schema JSON exporter and the never-compiled CQL
   generator are deleted (#1715, epic #1688 / audit finding AK4; ~2.0k LOC).**
@@ -128,6 +157,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - The `experimental` feature flag itself is unchanged — it still gates
     `Database::flush()`/`compact()`, the INSERT executor path, bloom-filter tests
     and the `Storage::put`/`delete` stubs.
+
+### Added
+
+- **`storage.direct_io_memory_fraction` is now VALIDATED (#1696).** It was live
+  but unvalidated: the reader silently CLAMPED nonsense (`<= 0.0`, NaN and the
+  infinities fell back to the `0.5` default; anything `> 1.0` was pinned to
+  `1.0`), so an operator who wrote `2.0` got the default and no word about it.
+  `Config::validate` now rejects anything outside the documented `(0.0, 1.0]`,
+  naming the knob and the offending value.
+- **A standing knob-behavior guard (#1696):**
+  `cqlite-core/tests/config_knob_behavior_guard.rs`. Every leaf field of the
+  public config structs must be registered with either a set-knob →
+  assert-observable-difference test, or an explicit reason why no observable
+  difference is expressible. The registry is checked against `src/config.rs` in
+  BOTH directions, so a NEWLY ADDED public knob with no evidence entry fails the
+  build rather than joining the backlog that created epic #1685.
 
 ### Fixed
 
@@ -355,6 +400,7 @@ format — CommitLog segment files — alongside SSTables. No breaking changes; 
 module and CLI subcommand are purely additive.
 
 ### Added
+
 
 - Cassandra 5.0 CommitLog reader: `cqlite_core::storage::commitlog` with
   `CommitLogReader::open` / `open_with_schemas` and a lazy streaming `MutationIter`

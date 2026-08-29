@@ -30,18 +30,10 @@
 # Disable colored output
 # no_color = false
 
-# Connection settings
-[connection]
-timeout_ms = 30000
-retry_attempts = 3
-pool_size = 10
-
 # Output settings
 [output]
 max_rows = 1000
 colors = true
-timestamp_format = "%Y-%m-%d %H:%M:%S"
-# pager = "less"
 
 # REPL settings
 [repl]
@@ -67,3 +59,21 @@ cache_size_mb = 64
 level = "info"
 # file = "/path/to/cqlite.log"
 format = "Pretty"  # Options: Plain, Json, Pretty
+
+# ---------------------------------------------------------------------------
+# REMOVED KEYS (issue #1696)
+#
+# These keys used to appear in this example and are now DELETED. CQLite still
+# LOADS a config file that names them — it will not hard-fail on a file you
+# copied from an older release — but it prints a deprecation warning naming each
+# one, because none of them ever had any effect:
+#
+#   [connection] (timeout_ms / retry_attempts / pool_size)
+#       CQLite reads local SSTable files and never opens a network connection.
+#   output.pager
+#       No code ever spawned a pager. Use a shell pipe: `cqlite ... | less`.
+#   output.timestamp_format
+#       No formatter ever read it; timestamps render in the writer's own format.
+#
+# Delete them from your config to silence the warning.
+# ---------------------------------------------------------------------------
