@@ -4336,7 +4336,43 @@ else
   ok "1699-polarity-tristate: the polarity scan observes BOTH stages independently (no pipeline — pipefail reports the rightmost non-zero, so sed=2 with grep=1 would arrive as 1), returns a third state, and the call site tests for it before the two-valued chain"
 fi
 
-ASSERT_FLOOR=377
+# --- 51. #1699: the polarity strip is nesting-blind, so nested negation must not allow-zero (119) -
+# BEHAVIOURAL, not structural: the reviewer asked for a double-negation fixture and a structural
+# assert would not have caught this. The strip removes every `not(feature = "legacy-heuristics")`
+# globally with no nesting awareness, so `not(not(LH))` — a POSITIVE expression — became `not()`,
+# matched nothing, and classified negative-only: the target was allow-zero'd and could pass having
+# executed no tests. Fixed conservatively rather than with a cfg-expression parser, which is the
+# unbounded-surface trap this change is about.
+pol_h="$tmp/1699-pol-fn.sh"
+awk '/^_lh_positive_in_closure\(\) \{/,/^\}/' "$GATE" > "$pol_h"
+if ! grep -q 'POLARITY-UNMODELLED' "$pol_h"; then
+  bad "1699-pol-extract: extracted polarity fn has no POLARITY-UNMODELLED branch — extraction broke or the fix is gone, so the cases below would pass vacuously"
+else
+  ok "1699-pol-extract: extracted the polarity scan and it carries the unmodelled-nesting branch"
+  pol_dir="$tmp/1699-pol"; mkdir -p "$pol_dir"
+  printf '#[cfg(not(not(feature = "legacy-heuristics")))]\n#[test]\nfn t() {}\n' > "$pol_dir/double.rs"
+  printf '#[cfg(not(feature = "legacy-heuristics"))]\n#[test]\nfn t() {}\n'      > "$pol_dir/neg.rs"
+  printf '#[cfg(feature = "legacy-heuristics")]\n#[test]\nfn t() {}\n'           > "$pol_dir/pos.rs"
+  printf '#[cfg(all(not(feature = "legacy-heuristics"), test))]\nfn t() {}\n'    > "$pol_dir/andneg.rs"
+  # shellcheck source=/dev/null
+  { . "$pol_h"
+    pol_site='feature[[:space:]]*=[[:space:]]*"legacy-heuristics"'
+    _pol_case() { # <file> <expected-rc> <label>
+      _lh_positive_in_closure "$pol_dir/$1" "$pol_site" >/dev/null 2>&1; local rc=$?
+      if [ "$rc" -eq "$2" ]; then
+        ok "1699-pol[$1]: $3 (rc=$rc)"
+      else
+        bad "1699-pol[$1]: expected rc=$2 ($3) but got rc=$rc — a wrong polarity here either excuses a positively-gated target from the zero-tests guard, or reds a legitimately negative one"
+      fi
+    }
+    _pol_case double.rs 0 "nested negation is NOT treated as negative-only, so the target is never allow-zero'd"
+    _pol_case neg.rs    1 "a simple negative gate is still negative — the one target relying on allow-zero keeps it"
+    _pol_case pos.rs    0 "a plain positive gate is positive"
+    _pol_case andneg.rs 1 "all(not(LH), test) is negative w.r.t. LH and must stay excusable"
+  }
+fi
+
+ASSERT_FLOOR=381
 if [ "$PASS" -lt "$ASSERT_FLOOR" ]; then
   echo "FAIL - assert-floor: only $PASS assertions ran, floor is $ASSERT_FLOOR. Sections are being SKIPPED or dying silently (an extraction that broke, a subshell aborting under set -u), and 'failed: 0' over a shrunken subject set is exactly the vacuous pass this suite tests for."
   FAIL=$((FAIL + 1))

@@ -7201,6 +7201,10 @@ _lh_positive_in_closure() {
       echo "POLARITY-SCAN-ERROR sed exit $_pc_sed_rc on $cf" >&2
       return 2
     fi
+    if grep -qE 'not\([[:space:]]*\)' <<<"$_pc_stripped"; then
+      echo "POLARITY-UNMODELLED nested negation on $cf (treated as positive: not excused)" >&2
+      return 0
+    fi
     _pc_rc=0
     _pc_out=$(grep -cE "$cfg_site" <<<"$_pc_stripped") || _pc_rc=$?
     # grep 1 = no match, which IS an answer. >=2 means grep could not do its job.
