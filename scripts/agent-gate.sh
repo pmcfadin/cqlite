@@ -7095,9 +7095,16 @@ $(awk '
     next
   }
   # An ATTRIBUTE line preserves a pending `#[path]` (roborev round-42). An outer-attribute cluster
-  # is legal — `#[path = "mapped.rs"] #[cfg(...)] mod child;` or the same across lines — and clearing
-  # `haspath` on the intervening attribute resolved the module to the WRONG file, or failed the lane
-  # as unresolved. Attributes join blank lines and comments as cluster trivia; anything else still
+  # ACROSS LINES is legal and IS handled here — clearing `haspath` on the intervening attribute
+  # resolved the module to the WRONG file, or failed the lane as unresolved.
+  #
+  # THE SAME-LINE MULTI-ATTRIBUTE FORM IS NOT HANDLED, and this comment used to imply it was
+  # (roborev job 111, Medium): it offered `#[path = "mapped.rs"] #[cfg(...)] mod child;` as an
+  # example of what works, while the `mod` rule below accepts exactly ONE leading attribute, so
+  # that declaration is skipped and its child leaves the closure entirely. The example named the
+  # one shape that fails. It is corrected rather than implemented: another regex would be the
+  # ninth pattern, and the eighth lexical context belongs in #3472 as a counterexample under the
+  # disclaimer above. Measured: 0 such declarations in this workspace, so it is latent. Attributes join blank lines and comments as cluster trivia; anything else still
   # ends the cluster, which stays the conservative direction.
   /^[[:space:]]*#\[/ {
     # Remember a cfg on this declaration so the `mod` rule can DECLARE it with the child.
@@ -7321,6 +7328,15 @@ run_legacy_heuristics() {
 $_mt_closure
 EOF
       [ "$_mt_hit" -eq 1 ] || continue
+      # THE NON-MANIFEST BRANCH ENDS HERE (roborev job 111, Medium). The required-features
+      # check below used to sit INSIDE it, so a target cargo gates on the feature — classified
+      # `manifest` — skipped validation entirely and was then handed to cargo explicitly. Cargo
+      # rejects a target whose required-features are unmet, so the lane FAILED on a correct
+      # target: a lane that reds on correct input is the lane agents learn to waive, which is
+      # the rule this component set is built on. Latent today (0 of 13 required-features targets
+      # name legacy-heuristics) and therefore also UNEXERCISED at runtime, which is this issue
+      # own distinction applied to its own code.
+    fi
     # AFTER MEMBERSHIP, BEFORE INVOCATION (roborev root pass, Low). Round 37 hoisted this to the
     # top of the loop to fix an ordering bug, and created another: the check ran BEFORE the
     # legacy-membership test, so EVERY target with any unmet required-feature was reported as a
@@ -7366,7 +7382,6 @@ EOF
       # it sends the reader to a target that is fine.
       rf_unmet="$rf_unmet $_mt_name(required-features unmet:$_rf_off)"
       continue
-    fi
     fi
     base="$_mt_name"
     # The observation set is EVERY selected target, spelled the guard's way, so the lane can
@@ -7620,6 +7635,15 @@ $srcs
 EOF
   coreq_n=$lh_sites
   local -a lh_census=()
+  # THE SAME TWO DECLARATIONS, INTO THE COMPONENT LOG (found by probing the job-111 fix, which is
+  # the only reason it surfaced). Both are echoed to stdout above, and stdout-only was the whole of
+  # job 108's Low finding: the census write below opens "$log" with `>`, so anything appended before
+  # it is TRUNCATED, and a reader inspecting the component log saw neither declaration. The comment
+  # beside those echoes already states the principle in this file — a coverage gap this lane must
+  # state — and they were stating it only where nobody reads. Routed through the census array so
+  # they land AFTER the header, exactly as the cfg-gated-subtree detail is.
+  [ -n "$rf_unmet" ] && lh_census+=("NOT invoked (required-features unmet) — DECLARED coverage gap:$rf_unmet")
+  [ -n "$negonly" ] && lh_census+=("allowed-zero (NEGATIVE-polarity cfg(not(...)) only):$negonly")
   if [ "$lh_sites" -gt 0 ] || [ "$lh_skip" -gt 0 ]; then
     lh_census+=("COVERAGE CENSUS — WHAT THIS LANE DOES NOT EXECUTE:")
     if [ "$lh_sites" -gt 0 ]; then

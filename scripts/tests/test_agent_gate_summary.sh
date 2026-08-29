@@ -4208,7 +4208,51 @@ for phrase in "every legacy-heuristics-gated cfg site is reachable" "every modul
   fi
 done
 
-ASSERT_FLOOR=366
+# --- 45. #1699: required-features must be validated for EVERY included target (job 111) --------
+# The check used to sit INSIDE `if [ "$_mt_how" != "manifest" ]`, so a target cargo itself gates on
+# the feature skipped validation and was then passed to cargo explicitly — which rejects a target
+# whose required-features are unmet, FAILING the lane on a correct target.
+#
+# MEASURED BY if/fi DEPTH, NOT BY INDENTATION. The first version of this assert compared indent
+# widths and PASSED ON THE BROKEN CODE: in the defective version the check was written at the SAME
+# 4-space indent as the branch that contained it, which is very likely why the nesting error went
+# unnoticed by every human reader for 46 rounds. Indentation is a PROXY for nesting; the property
+# is nesting. Counting `if` openers against `fi` closers is the property itself.
+lh_fn45=$(awk '/^run_legacy_heuristics\(\) \{/,/^\}/' "$GATE")
+rf_scope=$(printf '%s\n' "$lh_fn45" | awk '
+  BEGIN { started = 0; depth = 0; verdict = "NOT-FOUND" }
+  # open the tracked region at the manifest branch
+  !started && /^[[:space:]]*if \[ "\$_mt_how" != "manifest" \]/ { started = 1; depth = 1; next }
+  !started { next }
+  # the required-features check: INSIDE if we are still nested, OUTSIDE once depth hit 0
+  /^[[:space:]]*if \[ -n "\$\{_mt_rf:-\}" \]/ && verdict == "NOT-FOUND" {
+    verdict = (depth > 0) ? "INSIDE" : "OUTSIDE"
+  }
+  # if/fi only: they nest independently of while/done, so this balances correctly
+  /^[[:space:]]*(el)?if [^;]*; then$|^[[:space:]]*if .*; then$/ { depth++ }
+  /^[[:space:]]*fi$/ { depth-- }
+  END { print verdict }')
+case "$rf_scope" in
+  OUTSIDE) ok "1699-rf-scope: the required-features check sits OUTSIDE the manifest branch (if/fi depth), so manifest-gated targets are validated too" ;;
+  INSIDE)  bad "1699-rf-scope: the required-features check is nested INSIDE the manifest branch — a manifest-gated target skips validation and is then handed to cargo, which rejects it and reds the lane on a CORRECT target" ;;
+  *)       bad "1699-rf-scope-extract: could not locate the manifest branch or the required-features check (verdict '$rf_scope') — the assert would otherwise pass vacuously" ;;
+esac
+
+# --- 46. #1699: a DECLARED coverage gap must reach the component log, not only stdout ----------
+# Found by probing the job-111 fix with a synthetic manifest-gated target: the exclusion WAS
+# declared — on stdout. The census opens "$log" with `>`, so anything appended earlier is truncated,
+# and a reader inspecting the component log saw nothing. Same class as job 108's Low finding, and
+# the file already stated the principle beside the offending echoes.
+lh_fn46=$(awk '/^run_legacy_heuristics\(\) \{/,/^\}/' "$GATE")
+for decl in rf_unmet negonly; do
+  if [ "$(printf '%s' "$lh_fn46" | grep -cE "lh_census\+=\(\"[^\"]*\\\$$decl")" -gt 0 ]; then
+    ok "1699-decl-in-log[$decl]: the declaration travels in the census, so it reaches the component log"
+  else
+    bad "1699-decl-in-log[$decl]: \$$decl is declared on stdout only — the census '>' redirect truncates anything written to \$log before it, so a reader inspecting the component log sees no coverage gap"
+  fi
+done
+
+ASSERT_FLOOR=370
 if [ "$PASS" -lt "$ASSERT_FLOOR" ]; then
   echo "FAIL - assert-floor: only $PASS assertions ran, floor is $ASSERT_FLOOR. Sections are being SKIPPED or dying silently (an extraction that broke, a subshell aborting under set -u), and 'failed: 0' over a shrunken subject set is exactly the vacuous pass this suite tests for."
   FAIL=$((FAIL + 1))
