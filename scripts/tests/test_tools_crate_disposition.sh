@@ -26,14 +26,29 @@
 # is invisible. Both are caught here, at zero cost, with no false positives:
 # the rule is a list, not an inference.
 #
-# Deliberately NOT what this guard does: it does not try to DERIVE wiredness by
-# grepping for invocations. A grep is a proxy that gets both directions wrong —
-# tools/format-validator is referenced twice under scripts/ purely as a PATH
-# FIXTURE (neither reference runs it), and a crate can be wired via a binary
-# name that differs from its package name (tools/ws0-corpus-gen ships
-# `ws0-scan-bench`). A guard whose FAIL an agent learns to waive is worse than
-# no guard (CLAUDE.md), so wiredness is RECORDED here by a human and reviewed in
-# the diff, never guessed.
+# TWO HALVES, and the split matters — one is DERIVED, the other RECORDED:
+#
+#   "something DEPENDS on it" is MECHANICALLY CHECKABLE from the manifests, so it
+#   is DERIVED (via `cargo tree --workspace --invert`, cargo as its own authority)
+#   and CROSS-CHECKED against the recorded disposition. UNWIRED must have ZERO
+#   workspace dependents and MIXED must have AT LEAST ONE — so neither category
+#   can be asserted falsely, in either direction.
+#
+#   "something RUNS it" is NOT mechanically checkable — invocations live in
+#   workflows, scripts and prose — so it is RECORDED by a human and reviewed in
+#   the diff. It is deliberately NOT grep-inferred: a grep for invocations gets
+#   both directions wrong (tools/format-validator is referenced twice under
+#   scripts/ purely as a PATH FIXTURE that runs nothing, and tools/ws0-corpus-gen
+#   is wired via a binary name that differs from its package name), and a guard
+#   whose FAIL an agent learns to waive is worse than no guard (CLAUDE.md).
+#
+# This split is the fix for roborev job 78: the MIXED label had been verified by
+# grepping the README for the generic word "WIRED", which a README could satisfy
+# while saying the opposite ("previously WIRED, now entirely NOT CI-wired").
+# Verifying a claim by pattern-matching prose is unbounded — the prose author
+# chooses the wording — so the load-bearing check moved OFF the prose and onto the
+# manifests, and the prose requirement is now to name the crate's ACTUAL,
+# DERIVED dependents rather than any fixed word.
 #
 # FAILS CLOSED: an unclassifiable or unmeasurable tree is a FAIL, never a pass.
 # Self-test / negative controls: scripts/tests/test_tools_crate_disposition_selftest.sh
@@ -62,8 +77,9 @@ UNWIRED_TOOLS="cqlite-validator
 memory-safety-runner"
 
 # Some targets live, some orphaned. Each MUST carry a README.md containing BOTH
-# LABEL_MARKER (for the orphaned targets) and MIXED_WIRED_MARKER (naming the live
-# ones), so the label cannot describe the crate as wholly unwired.
+# LABEL_MARKER (for the orphaned targets) and the names of its DERIVED dependents (the live
+# ones, named below from the DERIVED dependent set), so the label cannot describe
+# the crate as wholly unwired.
 #   format-validator: 4 binaries orphaned; LIBRARY wired into
 #   tests/format-compatibility (gate component `format-compat`), and also used as
 #   a fixture by scripts/tests/test_agent_gate_summary.sh (owners resolution) and
@@ -73,12 +89,68 @@ MIXED_TOOLS="format-validator"
 # The marker every README with orphaned targets must contain, so the label states
 # the actual fact rather than merely existing as a file.
 LABEL_MARKER="NOT CI-wired"
-# Additionally required of a MIXED crate's README: it must name the LIVE half, so
-# a partly-live crate can never be labeled as though it were wholly dead.
-MIXED_WIRED_MARKER="WIRED"
+# A MIXED crate's README must additionally name each of its ACTUAL workspace
+# dependents — the package names are DERIVED below, never hard-coded here, so this
+# requirement cannot be satisfied by a generic word (roborev job 78).
 
 fail() { echo "FAIL: $*" >&2; exit 1; }
 ok()   { echo "ok: $*"; }
+
+# The PACKAGE name declared by tools/<dir>/Cargo.toml. The recorded lists and the
+# README live under the DIRECTORY name, but cargo is queried by PACKAGE name, and
+# the two are not the same thing — assuming they were made every scratch-tree
+# self-test case report "cargo could not answer". All seven of this repo's tools/
+# crates happen to match, which is exactly why the assumption would have stayed
+# invisible here until someone added one that did not.
+#
+# Takes the FIRST `name =` line in the manifest: that is the `[package]` one, since
+# `[package]` precedes any `[lib]`/`[[bin]]` table that also carries a `name`
+# (tools/cassandra-parity has both). Fails closed if none is found.
+package_name_of() {
+  local dir="$1" name
+  name=$(sed -n 's/^name[[:space:]]*=[[:space:]]*"\([^"]\{1,\}\)".*/\1/p' "$ROOT/tools/$dir/Cargo.toml" 2>/dev/null | head -1)
+  [ -n "$name" ] || return 1
+  printf '%s\n' "$name"
+}
+
+# Workspace packages that DIRECTLY depend on $1 (a PACKAGE name), derived from cargo's own
+# resolution — never a hand-parse of Cargo.toml, and never a grep for prose.
+#
+# `--workspace` is REQUIRED: without it `cargo tree` operates on the DEFAULT
+# member set, which in this workspace is the root package alone (see the
+# `default-members` note in the root Cargo.toml), and every crate would appear to
+# have zero dependents — a silent false negative that would let a MIXED crate be
+# recorded UNWIRED. Measured: `cargo tree --invert format-validator` reports no
+# dependents; adding `--workspace` reports format-compatibility-tests.
+#
+# Direct dependents suffice: if nothing depends on a crate directly, nothing
+# depends on it transitively either.
+#
+# Prints one package name per line (the subject itself excluded). Returns
+# non-zero if cargo could not answer, so the caller can fail CLOSED.
+# NOTE the deliberate separation of the two failure modes below. Under
+# `pipefail`, a `grep -v` that matches nothing exits 1, so folding the cargo call
+# and the filtering into ONE pipeline made "cargo could not answer" and "the crate
+# has ZERO dependents" return the SAME status — and zero dependents is the NORMAL,
+# EXPECTED case for an UNWIRED crate. That is the two-valued-predicate trap: a
+# probe that cannot distinguish "no result" from "could not measure" must collapse
+# them, and it collapsed the legitimate case onto the error branch (every UNWIRED
+# crate reported "unmeasurable"). So cargo's exit status is captured ALONE, and the
+# filtering — whose emptiness is meaningful, not an error — is `|| true`.
+workspace_dependents() {
+  local crate="$1" out rc
+  out=$(cd "$ROOT" && cargo tree --workspace --invert "$crate" --depth 1 2>/dev/null)
+  rc=$?
+  [ "$rc" -eq 0 ] || return 1
+  # cargo always echoes the subject itself as the tree root, so empty output here
+  # means cargo answered nothing at all — a measurement failure, not "no deps".
+  [ -n "$out" ] || return 1
+  printf '%s\n' "$out" \
+    | sed -n 's/^[^A-Za-z0-9_-]*\([A-Za-z0-9_-]\{1,\}\) v[0-9].*/\1/p' \
+    | { grep -vxF "$crate" || true; } \
+    | sort -u
+  return 0
+}
 
 [ -d "$ROOT/tools" ] || fail "no tools/ directory under $ROOT — this guard's subject is missing; refusing to pass vacuously"
 
@@ -157,18 +229,43 @@ while IFS= read -r crate; do
 done <<< "$labelled_sorted"
 ok "all $n_labelled crate(s) with orphaned targets carry a README.md stating '$LABEL_MARKER'"
 
-# --- 5. a MIXED crate's README must ALSO name its LIVE half. Without this, a
-# ---    mixed crate's label is indistinguishable from a wholly-unwired one — the
-# ---    false census roborev job 75 caught — and a future reader could delete or
-# ---    workspace-`exclude` a dependency the gate needs.
+# --- 5. CROSS-CHECK the recorded disposition against the MANIFESTS. This is the
+# ---    half that cannot be talked around: "something depends on it" is derived
+# ---    from cargo's own resolution, so UNWIRED cannot be claimed for a crate the
+# ---    workspace depends on, and MIXED cannot be claimed for one it does not.
+while IFS= read -r crate; do
+  [ -n "$crate" ] || continue
+  pkg=$(package_name_of "$crate") \
+    || fail "cannot read the package name from tools/$crate/Cargo.toml — unmeasurable is not a pass"
+  deps=$(workspace_dependents "$pkg") \
+    || fail "cannot derive workspace dependents of tools/$crate (package '$pkg'; cargo tree --workspace --invert failed) — unmeasurable is not a pass"
+  if [ -n "$deps" ]; then
+    fail "tools/$crate is recorded UNWIRED (nothing runs it AND nothing depends on it) but these workspace package(s) DEPEND on it: $(printf '%s ' $deps)- that is a FALSE census. Move it to MIXED_TOOLS (and label its README accordingly), because deleting or workspace-excluding it would break them (issue #1716)."
+  fi
+done <<< "$unwired_sorted"
+ok "every UNWIRED crate has zero workspace dependents (derived from cargo, not asserted)"
+
 if [ "$n_mixed" -gt 0 ]; then
   while IFS= read -r crate; do
     [ -n "$crate" ] || continue
     readme="$ROOT/tools/$crate/README.md"
-    grep -qF "$MIXED_WIRED_MARKER" "$readme" \
-      || fail "tools/$crate is recorded MIXED (some targets live, some orphaned) but its README.md never says '$MIXED_WIRED_MARKER' — a mixed crate labeled only '$LABEL_MARKER' reads as wholly dead, which invites deleting or workspace-excluding the half the gate depends on (issue #1716)"
+    pkg=$(package_name_of "$crate") \
+      || fail "cannot read the package name from tools/$crate/Cargo.toml — unmeasurable is not a pass"
+    deps=$(workspace_dependents "$pkg") \
+      || fail "cannot derive workspace dependents of tools/$crate (package '$pkg'; cargo tree --workspace --invert failed) — unmeasurable is not a pass"
+    [ -n "$deps" ] \
+      || fail "tools/$crate is recorded MIXED (some targets live, some orphaned) but NO workspace package depends on it — the 'live half' claim is unsupported. If nothing runs it either, it belongs in UNWIRED_TOOLS (issue #1716)."
+    # --- and its README must NAME each real dependent. The required strings are
+    # --- DERIVED above, so this cannot be satisfied by a generic word like
+    # --- "WIRED" that a README could carry while saying the opposite
+    # --- ("previously WIRED, now entirely NOT CI-wired") — roborev job 78.
+    while IFS= read -r dep; do
+      [ -n "$dep" ] || continue
+      grep -qF "$dep" "$readme" \
+        || fail "tools/$crate is recorded MIXED and '$dep' really does depend on it, but its README.md never mentions '$dep'. A mixed crate's label must NAME the live half — otherwise it reads as wholly dead and invites deleting or workspace-excluding the part '$dep' needs (issue #1716)."
+    done <<< "$deps"
+    ok "tools/$crate (MIXED) names its real dependent(s) in the README: $(printf '%s ' $deps)"
   done <<< "$mixed_sorted"
-  ok "all $n_mixed mixed crate(s) name their live half ('$MIXED_WIRED_MARKER') in the README"
 fi
 
 echo "PASS: tools/ crate disposition census (#1716)"

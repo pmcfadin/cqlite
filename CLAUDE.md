@@ -222,6 +222,10 @@ tools/           # 7 crates, each with a RECORDED disposition in one of THREE
                  #             name BOTH halves, and the crate must stay a
                  #             workspace member — never `exclude` it.
                  #   A NEW tools/ crate must be classified there or the gate FAILs.
+                 #   The DEPENDENCY half is DERIVED (cargo tree --workspace
+                 #   --invert) and cross-checked both ways, so UNWIRED/MIXED
+                 #   cannot be claimed falsely; only "something RUNS it" is
+                 #   recorded by hand.
 fuzz/            # cargo-fuzz crate — own workspace, EXCLUDED from the main one
 ```
 

@@ -214,12 +214,16 @@
 #                      selftest) — #1716/AK5: every crate under tools/ must be
 #                      EXPLICITLY classified WIRED / UNWIRED / MIXED, and every
 #                      crate carrying orphaned targets must carry a README saying
-#                      so (a MIXED one must ALSO name its live half, or a
-#                      partly-live crate reads as wholly dead — roborev job 75
-#                      caught a two-way split asserting exactly that). Needs
-#                      no python3/cargo, so it ALWAYS runs (never SKIPs). Fails
-#                      closed on an absent/unclassifiable subject; wiredness is
-#                      recorded and diff-reviewed, never grep-inferred.
+#                      so. TWO HALVES: "something DEPENDS on it" is DERIVED from
+#                      cargo tree --workspace --invert and CROSS-CHECKED (UNWIRED
+#                      must have ZERO workspace dependents, MIXED at least one, and
+#                      a MIXED README must NAME its real dependents), so neither
+#                      category can be asserted falsely in either direction;
+#                      "something RUNS it" is not mechanically checkable, so it
+#                      stays recorded + diff-reviewed, never grep-inferred.
+#                      Needs cargo (always present in a gate); no python3/Docker.
+#                      Fails CLOSED on an absent or unmeasurable subject; never
+#                      SKIPs.
 #                      scripts/tests/test_agent_gate_summary.sh — proves the
 #                      SUMMARY block survives non-foreground capture (#1175). It
 #                      only drives `agent-gate.sh --emit-summary-selftest`, which
