@@ -631,12 +631,42 @@ try:
 except Invalid as exc:
     print(f"FATAL: {exc}", file=sys.stderr)
     raise SystemExit(1)
-print(f"corpus pin:   {pin[\"data_db_sha256\"]} ({pin[\"rows\"]} rows / {pin[\"data_db_bytes\"]} B,"
-      f" {len(pin[\"components\"])} components)"
+# THE SUBSCRIPTS ARE BOUND TO LOCALS BEFORE THE f-STRINGS THAT PRINT THEM (#3451), and this
+# is a correctness requirement rather than a style preference. A dict subscript written INSIDE
+# an f-string expression needs one of two spellings, and both are traps:
+#
+#   * a BACKSLASH-ESCAPED double quote around the key. No CPython to date accepts a backslash
+#     inside the expression part; the tokenizer reads it as a line continuation and raises
+#     `SyntaxError: unexpected character after line continuation character`. This is what
+#     shipped here, and because these two steps are FATAL-on-failure it made the whole WS0
+#     measurement path unrunnable end to end on main.
+#   * NESTED SAME-TYPE QUOTES around the key. Legal only from Python 3.12 (PEP 701), so it
+#     would have MOVED the failure onto pre-3.12 interpreters rather than removed it — a
+#     narrower version of the same defect, and one this rig would not have noticed until it ran
+#     somewhere older.
+#
+# The two bad spellings are DESCRIBED rather than reproduced here on purpose: a literal example
+# of the defect inside the very block whose parse is the subject would be one more thing for a
+# reader (or a future text-level probe) to mistake for the defect itself.
+#
+# Binding to a local sidesteps both: it parses on every interpreter. Note also that this whole
+# block is a bash single-quoted `python3 -c` string, so a single quote cannot be used here to
+# dodge the nesting question either.
+pin_sha = pin["data_db_sha256"]
+pin_rows = pin["rows"]
+pin_bytes = pin["data_db_bytes"]
+pin_components = len(pin["components"])
+cfg_reps = config["reps"]
+cfg_temps = config["temps"]
+cfg_arms = config["arms"]
+cfg_scan_passes = config["scan_passes"]
+canonical_label = canonical["label"]
+print(f"corpus pin:   {pin_sha} ({pin_rows} rows / {pin_bytes} B,"
+      f" {pin_components} components)"
       " recorded in session-corpus-pin.json BEFORE the first rep")
-print(f"config pin:   reps={config[\"reps\"]} temps=[{config[\"temps\"]}] arms=[{config[\"arms\"]}]"
-      f" scan-passes={config[\"scan_passes\"]} — the reporter READS these, never its own argv")
-print(f"canonical pin: {canonical[\"label\"]} — recorded in session-corpus-pin.json"
+print(f"config pin:   reps={cfg_reps} temps=[{cfg_temps}] arms=[{cfg_arms}]"
+      f" scan-passes={cfg_scan_passes} — the reporter READS these, never its own argv")
+print(f"canonical pin: {canonical_label} — recorded in session-corpus-pin.json"
       " (canonical_corpus), which the reporter REQUIRES and re-derives the verdict from")
 ' "$HERE" "$CORPUS" "$OUT_DIR" "$REPO_ROOT" \
   || { echo "FATAL: could not pin this session's corpus identity — the report REQUIRES it," >&2
@@ -696,8 +726,14 @@ if absent:
     raise SystemExit(1)
 p = pinning_record_path(pathlib.Path(sys.argv[2]))
 p.write_text(json.dumps(rec, indent=1) + "\n")
-print(f"pinning pin:  {rec[\"server_cpus\"]} verified against"
-      f" {rec[\"topology_root\"]} on {rec[\"host\"]} — recorded in {p.name} so the report cites an"
+# Bound to locals for the reason spelled out at the session-corpus-pin step above (#3451): a
+# subscript inside an f-string expression is a SyntaxError with a backslash on every
+# interpreter, and 3.12-only with nested quotes.
+rec_server_cpus = rec["server_cpus"]
+rec_topology_root = rec["topology_root"]
+rec_host = rec["host"]
+print(f"pinning pin:  {rec_server_cpus} verified against"
+      f" {rec_topology_root} on {rec_host} — recorded in {p.name} so the report cites an"
       " OBSERVATION, not lib-cpu.sh by name")
 ' "$HERE" "$OUT_DIR" \
   || { echo "FATAL: could not record this session's CPU-pin verification — the report REQUIRES" >&2
