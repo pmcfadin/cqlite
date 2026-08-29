@@ -6,6 +6,7 @@
 //! does **not** route through the query engine (which merges generations and
 //! suppresses tombstones — the opposite contract).
 
+use crate::storage::sstable::reader::SSTableReader;
 use crate::types::{ColumnId, TombstoneType, Value};
 
 use super::model::{CellDelta, CellMeta, DeltaRecord, RangeBound, RowKeys, ScanSummaryHandle};
@@ -56,8 +57,9 @@ pub type ScanDeltaOutput = (
 /// A hard parse error (corrupt SSTable, missing schema, etc.) is forwarded
 /// as an `Err(…)` item in the channel stream and terminates the scan, and is
 /// counted ONCE into `cqlite.errors.total{category, subsystem="reader"}`
-/// (issue #1704). Counting is a pure side effect: the `Err` the consumer receives
-/// is unchanged.
+/// (issue #1704) — by [`drive_delta_scan`], except for an `SSTableReader::open`
+/// failure, which [`SSTableReader::open`] counts itself. Counting is a pure side
+/// effect: the `Err` the consumer receives is unchanged.
 ///
 /// [`scan_delta`] returns immediately with an error if the SSTable directory
 /// does not exist or contains no `Data.db` file.
@@ -70,47 +72,105 @@ pub fn scan_delta(
     let summary = ScanSummaryHandle::new();
     let summary_for_task = summary.clone();
     tokio::spawn(async move {
-        let outcome = run_scan_delta(sstable_dir, schema, tx.clone(), summary_for_task).await;
-        // Issue #1704: this is the SOLE terminal-`Err` send of a delta scan, so it is
-        // the scan's error exit seam. `scan_delta` hands back a RAW `mpsc::Receiver`
-        // rather than a `JoinedStream`, so the streaming surfaces' seam
-        // (`JoinedStream::recv`) does not cover it and a failed delta scan was
-        // invisible to `cqlite.errors.total{subsystem="reader"}`. `record_result`
-        // counts on the `Err` arm and returns the result UNCHANGED — the category
-        // comes from the classifier (`Error::obs_category`), never from here.
-        if let Err(e) = crate::observability::record_result("reader", outcome) {
+        if let Err(e) = drive_delta_scan(sstable_dir, schema, tx.clone(), summary_for_task).await {
             let _ = tx.send(Err(e)).await;
         }
     });
     (rx, summary)
 }
 
-/// Internal async driver for [`scan_delta`].
-async fn run_scan_delta(
+/// Which side of the delta scan's error-counting seam a SETUP failure fell on
+/// (issue #1704).
+///
+/// Setup is not uniform: one of its steps counts its own failures and the rest do
+/// not, so "count everything at the seam" and "count nothing at the seam" are both
+/// wrong. Naming the two cases keeps the choice at the call site that knows the
+/// answer, instead of leaving it to be re-derived (wrongly) later.
+enum DeltaOpenFailure {
+    /// Raised by a step with NO instrumentation of its own (locating `Data.db`,
+    /// platform init). The delta seam is authoritative for it and must count it.
+    Uncounted(crate::Error),
+    /// Raised by [`SSTableReader::open`], which records its OWN failure into
+    /// `cqlite.errors.total{subsystem="reader"}`. Must NOT be counted again.
+    CountedByOpen(crate::Error),
+}
+
+/// Setup for one delta scan: locate the generation's `Data.db`, build a platform,
+/// open the reader.
+///
+/// Split out of [`run_scan_delta`] so the ONE self-instrumenting step sits outside
+/// the counted region (issue #1704) — see [`drive_delta_scan`].
+async fn open_delta_scan_reader(
+    sstable_dir: &std::path::Path,
+) -> std::result::Result<std::sync::Arc<SSTableReader>, DeltaOpenFailure> {
+    let data_db = find_data_db(sstable_dir).map_err(DeltaOpenFailure::Uncounted)?;
+
+    let config = crate::Config::default();
+    let platform = std::sync::Arc::new(crate::Platform::new(&config).await.map_err(|e| {
+        DeltaOpenFailure::Uncounted(crate::Error::corruption(format!(
+            "scan_delta: platform init failed: {e}"
+        )))
+    })?);
+
+    SSTableReader::open(&data_db, &config, platform)
+        .await
+        .map(std::sync::Arc::new)
+        .map_err(|e| {
+            // The open error is propagated VERBATIM rather than rewrapped as
+            // `Error::corruption(..)` (issue #1704). The rewrap relabelled every
+            // cause as corruption, so a plain unreadable/absent file reached the
+            // caller as `corruption` while `SSTableReader::open`'s own increment
+            // carried the true category (e.g. `io`) — the delivered error and the
+            // metric disagreed about the same failure. The path context the rewrap
+            // added is kept here, where it belongs, as a log field.
+            tracing::error!(
+                data_db = ?data_db,
+                error = %e,
+                "scan_delta: failed to open the generation's Data.db"
+            );
+            DeltaOpenFailure::CountedByOpen(e)
+        })
+}
+
+/// [`scan_delta`]'s driver plus its error-counting seam (issue #1704).
+///
+/// # Why the open is OUTSIDE the counted region
+///
+/// [`SSTableReader::open`] SELF-INSTRUMENTS: its `Err` arm already calls
+/// `record_error(e, "reader")` (`reader/mod.rs`), and that is the AUTHORITATIVE
+/// boundary for an open failure because it is the innermost place that sees the
+/// real error — its increment therefore carries the classifier's answer for the
+/// ACTUAL cause. Counting again out here would report ONE failed open TWICE.
+///
+/// Every other step — locating `Data.db`, platform init, and the whole
+/// stitch/parse/emit body — has no instrumentation of its own, so this seam is
+/// authoritative for them, and it is the only place they are counted.
+async fn drive_delta_scan(
     sstable_dir: std::path::PathBuf,
     schema: crate::schema::TableSchema,
     tx: tokio::sync::mpsc::Sender<crate::Result<DeltaRecord>>,
     summary: ScanSummaryHandle,
 ) -> crate::Result<()> {
-    use crate::storage::sstable::reader::SSTableReader;
+    let reader = match open_delta_scan_reader(&sstable_dir).await {
+        Ok(reader) => reader,
+        Err(DeltaOpenFailure::CountedByOpen(e)) => return Err(e),
+        Err(DeltaOpenFailure::Uncounted(e)) => {
+            crate::observability::record_error(&e, "reader");
+            return Err(e);
+        }
+    };
+    // `record_result` counts on the `Err` arm and returns the result UNCHANGED — the
+    // category comes from the classifier (`Error::obs_category`), never from here.
+    crate::observability::record_result("reader", run_scan_delta(reader, schema, tx, summary).await)
+}
 
-    // Find the Data.db file in this directory.
-    let data_db = find_data_db(&sstable_dir)?;
-
-    let config = crate::Config::default();
-    let platform =
-        std::sync::Arc::new(crate::Platform::new(&config).await.map_err(|e| {
-            crate::Error::corruption(format!("scan_delta: platform init failed: {e}"))
-        })?);
-
-    let reader = std::sync::Arc::new(
-        SSTableReader::open(&data_db, &config, platform)
-            .await
-            .map_err(|e| {
-                crate::Error::corruption(format!("scan_delta: failed to open {:?}: {e}", data_db))
-            })?,
-    );
-
+/// Internal async driver for [`scan_delta`], over an ALREADY-OPEN reader.
+async fn run_scan_delta(
+    reader: std::sync::Arc<SSTableReader>,
+    schema: crate::schema::TableSchema,
+    tx: tokio::sync::mpsc::Sender<crate::Result<DeltaRecord>>,
+    summary: ScanSummaryHandle,
+) -> crate::Result<()> {
     // Wrap schema in Arc once — both the emit closure and parse call share the
     // same allocation rather than cloning the struct twice.
     let schema_arc = std::sync::Arc::new(schema);

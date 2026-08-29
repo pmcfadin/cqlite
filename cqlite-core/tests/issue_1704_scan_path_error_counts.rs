@@ -392,6 +392,65 @@ async fn scan_delta_corruption_error_is_counted_under_the_corruption_category() 
     );
 }
 
+/// An OPEN failure inside `scan_delta` must count ONCE, not twice (roborev, #1704).
+///
+/// `SSTableReader::open` self-instruments its own `Err` arm, so before this test the
+/// delta seam counted the SAME failed open a second time — and, because the open
+/// error was rewrapped as `Error::corruption(..)` on the way out, under a DIFFERENT
+/// category than `open` had recorded. One failed operation, two increments, two
+/// categories: exactly the double count the three-seam design exists to prevent.
+///
+/// The corpus corruption cases cannot catch this — they fail MID-SCAN, long after a
+/// successful open — so the fixture here is a directory whose `-Data.db` is not an
+/// SSTable at all. Hermetic; no corpus needed.
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread")]
+#[serial]
+async fn scan_delta_open_failure_is_counted_once_not_twice() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    // A DANGLING SYMLINK named `*-Data.db`: `find_data_db` lists it by name (it does
+    // not stat the entry), and the subsequent `File::open` fails with ENOENT — for
+    // every uid, root included, so the arrangement is deterministic rather than
+    // permission-dependent. Deliberately NOT "a file of garbage bytes": that OPENS
+    // fine (the reader tolerates an absent TOC) and fails later mid-parse, which is
+    // the mid-scan case the corpus tests already cover, not the open case.
+    std::os::unix::fs::symlink(
+        dir.path().join("does-not-exist"),
+        dir.path().join("nb-1-big-Data.db"),
+    )
+    .expect("create the dangling Data.db symlink");
+
+    let mc = testing::metrics_capture();
+    mc.reset();
+
+    let (mut rx, _summary) = cqlite_core::storage::sstable::reader::delta_scan::scan_delta(
+        dir.path().to_path_buf(),
+        lz4_table_schema(),
+        8,
+    );
+
+    let mut delivered: Option<Error> = None;
+    while let Some(item) = rx.recv().await {
+        if let Err(e) = item {
+            delivered = Some(e);
+            break;
+        }
+    }
+    let err = delivered.expect("a generation whose Data.db cannot be opened must fail the scan");
+    assert!(
+        !matches!(err, Error::Corruption(_)),
+        "the open error must propagate VERBATIM, not rewrapped as corruption — an \
+         unreadable file is an io failure, and the rewrap made the delivered error \
+         disagree with the category `SSTableReader::open` recorded. Got: {err:?}"
+    );
+    while rx.recv().await.is_some() {}
+
+    let m = mc.flush_and_collect();
+    // ONE increment total — the assertion that fails if the open is counted at both
+    // `SSTableReader::open` and the delta seam.
+    assert_one_reader_error_classified_as(&m, &err, "scan_delta (open failure)");
+}
+
 // ---------------------------------------------------------------------------
 // Seam 3 — the materializing `SSTableReader::scan`
 // ---------------------------------------------------------------------------
