@@ -3919,7 +3919,140 @@ fi
 # interpreted any more. A floor must be moved consciously when the subject legitimately shrinks —
 # otherwise it becomes the thing people edit to make a run green, which is the failure it exists to
 # prevent. It caught this shrink on the first run: 294 against a floor of 300.
-ASSERT_FLOOR=285
+# --- 43. #1699: root pass at aabae56ea — a cfg-GATED child module, and no false "verbatim" ---
+# Medium: the closure followed child modules while DISCARDING the cfg attributes gating them, so
+# `#[cfg(feature = "experimental")] mod child;` read as reachable at this lane feature set — a
+# legacy-gated test inside `child` counted as executable while an ungated sibling kept the target
+# nonzero, and the co-required census reported NO gap. Low: the occurrence report claimed to be
+# verbatim while capturing only the OPENING line of a multiline attribute, and the assert that was
+# supposed to pin it only checked the `L<line>:` prefix — so it could not see the truncation.
+cg_h="$tmp/1699-cfggate-fn.sh"
+awk '/^_rust_module_closure\(\) \{/,/^\}/' "$GATE" > "$cg_h"
+if ! grep -q 'CFG-GATED-MOD' "$cg_h"; then
+  bad "1699-cfggate-extract: extracted closure has no CFG-GATED-MOD report — extraction broke or the fix is gone, so the cases below would pass vacuously"
+else
+  ok "1699-cfggate-extract: extracted the closure and it carries the CFG-GATED-MOD report"
+
+  cg_root="$tmp/1699-cfggate"; mkdir -p "$cg_root/tests"
+  printf '#[cfg(feature = "experimental")]\nmod gated_child;\nmod plain_child;\n' > "$cg_root/tests/preceding.rs"
+  printf '#[cfg(feature = "experimental")] mod gated_inline;\n' > "$cg_root/tests/inline.rs"
+  printf 'mod plain_child;\n' > "$cg_root/tests/ungated.rs"
+  : > "$cg_root/tests/gated_child.rs"; : > "$cg_root/tests/plain_child.rs"; : > "$cg_root/tests/gated_inline.rs"
+
+  # shellcheck source=/dev/null
+  ( . "$cg_h"
+
+    cg_out=$(_rust_module_closure "$cg_root/tests/preceding.rs" 2>"$tmp/1699-cg-e1.txt")
+    if grep -q '^CFG-GATED-MOD gated_child ' "$tmp/1699-cg-e1.txt"; then
+      ok "1699-cfggate-preceding: a cfg on the line ABOVE \`mod\` is reported, not silently followed"
+    else
+      bad "1699-cfggate-preceding: \`#[cfg(...)]\` + \`mod gated_child;\` produced no CFG-GATED-MOD — a gated child would count as executable coverage"
+    fi
+    # the cfg TEXT must travel with the report: file+line alone cannot be compared to a feature set
+    if grep -q 'experimental' "$tmp/1699-cg-e1.txt"; then
+      ok "1699-cfggate-text: the report carries the gating cfg text"
+    else
+      bad "1699-cfggate-text: CFG-GATED-MOD named the module but not the cfg gating it"
+    fi
+    # and it must NOT leak onto the next declaration
+    if grep -q '^CFG-GATED-MOD plain_child ' "$tmp/1699-cg-e1.txt"; then
+      bad "1699-cfggate-noleak: the gate text leaked onto the UNGATED sibling — a false gap report on ordinary code teaches agents to waive this lane"
+    else
+      ok "1699-cfggate-noleak: the gate text does not leak onto the ungated sibling"
+    fi
+    # the child is still RESOLVED — the source set must stay complete, only its status is unknown
+    if printf '%s\n' "$cg_out" | grep -q 'gated_child.rs'; then
+      ok "1699-cfggate-resolved: the gated child is still in the source set (reported, not dropped)"
+    else
+      bad "1699-cfggate-resolved: the gated child vanished from the source set — dropping it is the SILENT direction this fix exists to close"
+    fi
+
+    _rust_module_closure "$cg_root/tests/inline.rs" >/dev/null 2>"$tmp/1699-cg-e2.txt"
+    if grep -q '^CFG-GATED-MOD gated_inline ' "$tmp/1699-cg-e2.txt"; then
+      ok "1699-cfggate-inline: the SAME-LINE \`#[cfg(...)] mod x;\` form is reported too"
+    else
+      bad "1699-cfggate-inline: same-line cfg+mod produced no report — the form the mod rule sees directly"
+    fi
+
+    _rust_module_closure "$cg_root/tests/ungated.rs" >/dev/null 2>"$tmp/1699-cg-e3.txt"
+    if [ -s "$tmp/1699-cg-e3.txt" ]; then
+      bad "1699-cfggate-quiet: an UNGATED module tree produced stderr output — the caller FAILs on any stderr, so this reds the lane on ordinary code: $(cat "$tmp/1699-cg-e3.txt")"
+    else
+      ok "1699-cfggate-quiet: an ungated module tree stays silent (no false fail-closed)"
+    fi
+  )
+fi
+
+# the caller must name the RIGHT cause — a wrong diagnosis costs the next reader the investigation
+# `grep -c`, NOT `| grep -q`: under `set -o pipefail` a matching `grep -q` exits immediately, awk
+# dies of SIGPIPE, and the PIPELINE reports 141 on a SUCCESSFUL match — the #3380 shape this very PR
+# documents. It bit this assert first time out, reporting the fix absent while it was present.
+lh_fn=$(awk '/^run_legacy_heuristics\(\) \{/,/^\}/' "$GATE")
+if [ "$(printf '%s' "$lh_fn" | grep -cF 'CFG-GATED-MOD')" -gt 0 ]; then
+  ok "1699-cfggate-cause: run_legacy_heuristics distinguishes the cfg-gated report from unresolved"
+else
+  bad "1699-cfggate-cause: the caller does not mention CFG-GATED-MOD — it would report a cfg-gated child as 'could not resolve the module tree', the wrong remedy"
+fi
+# THE SPLIT, both directions. Failing the lane on a cfg-gated mod was tried and reverted: the tree
+# legitimately carries `#[cfg(all(feature=..))] #[path=..] mod support;` on shared test helpers, and
+# a lane that reds on correct input is the lane agents learn to waive. So the gap must be DECLARED
+# and must NOT reach the fatal branch — two separate claims, asserted separately.
+if [ "$(printf '%s' "$lh_fn" | grep -cF "grep -v '^CFG-GATED-MOD '")" -gt 0 ]; then
+  ok "1699-cfggate-split: the fatal branch is fed the NON-cfg-gated half only"
+else
+  bad "1699-cfggate-split: the fatal branch is not filtered — a cfg-gated helper module would FAIL the lane on ordinary committed code (measured: 3 such targets in cqlite-core)"
+fi
+if [ "$(printf '%s' "$lh_fn" | grep -cF 'DECLARED GAP')" -gt 0 ]; then
+  ok "1699-cfggate-declared: an unevaluated subtree is DECLARED, not silently followed"
+else
+  bad "1699-cfggate-declared: no DECLARED GAP report — an unclassified subtree would be invisible, which is the silent direction the finding names"
+fi
+if [ "$(printf '%s' "$lh_fn" | grep -cF 'cfg-gated-subtree gaps:')" -gt 0 ]; then
+  ok "1699-cfggate-census: the gap COUNT reaches the census (a counter nobody reads is the same defect one level down)"
+else
+  bad "1699-cfggate-census: the gap count is tracked but never reported — the census would still read as if every module were reached unconditionally"
+fi
+# and the count must be affirmative in BOTH states: a key with no subject still has to say so
+if [ "$(printf '%s' "$lh_fn" | grep -cF 'reached unconditionally')" -gt 0 ]; then
+  ok "1699-cfggate-zero: the zero case is stated affirmatively, so a pasted census shows the check RAN"
+else
+  bad "1699-cfggate-zero: no affirmative zero line — absence of a gap report is indistinguishable from the scan not running"
+fi
+
+# Low: the report must not CLAIM verbatim text it does not capture.
+if awk '/^_crate_gated_test_targets\(\) \{/,/^\}/' "$GATE" | grep -qi 'verbatim'; then
+  bad "1699-cfgsite-noverbatim: the occurrence report still claims 'verbatim' while capturing only an attribute opening line — the claim is falsifiable by any multiline #![cfg(all("
+else
+  ok "1699-cfgsite-noverbatim: the occurrence report no longer claims verbatim capture"
+fi
+# and the truncation must be MARKED, tested on real multiline input rather than on the prefix alone
+cs_fn=$(awk '/^_crate_gated_test_targets\(\) \{/,/^\}/' "$GATE")
+if printf '%s' "$cs_fn" | grep -q 's/\$/+/'; then
+  ok "1699-cfgsite-marker: a continued attribute is marked with a truncation indicator"
+else
+  bad "1699-cfgsite-marker: no truncation marker in the cfg-site report — a multiline attribute is silently reported as if complete"
+fi
+cs_multi="$tmp/1699-cfgsite-multi.rs"
+printf '#![cfg(all(\n    test,\n    feature = "legacy-heuristics"\n))]\nfn x() {}\n' > "$cs_multi"
+cs_single="$tmp/1699-cfgsite-single.rs"
+printf '#![cfg(feature = "legacy-heuristics")]\nfn y() {}\n' > "$cs_single"
+cs_render() { # replicate the report pipeline over one file
+  local _o; _o=$(grep -nE '^[[:space:]]*#!\[[[:space:]]*cfg(_attr)?[[:space:]]*\(' "$1") || true
+  printf '%s\n' "$_o" | sed 's/^\([0-9]*\):[[:space:]]*/L\1: /' \
+    | sed 's/$/+/; s/\()\][[:space:]]*\)+$/\1/' | tr '\n' ' ' | sed 's/  */ /g; s/^ //; s/ $//'
+}
+if [ "$(cs_render "$cs_multi")" = 'L1: #![cfg(all(+' ]; then
+  ok "1699-cfgsite-multiline: a multiline attribute renders with the truncation marker"
+else
+  bad "1699-cfgsite-multiline: multiline attribute rendered as [$(cs_render "$cs_multi")], expected the opening line plus a truncation marker"
+fi
+if [ "$(cs_render "$cs_single")" = 'L1: #![cfg(feature = "legacy-heuristics")]' ]; then
+  ok "1699-cfgsite-singleline: a COMPLETE single-line attribute is not falsely marked truncated"
+else
+  bad "1699-cfgsite-singleline: single-line attribute rendered as [$(cs_render "$cs_single")] — a false truncation marker on complete input"
+fi
+
+ASSERT_FLOOR=299
 if [ "$PASS" -lt "$ASSERT_FLOOR" ]; then
   echo "FAIL - assert-floor: only $PASS assertions ran, floor is $ASSERT_FLOOR. Sections are being SKIPPED or dying silently (an extraction that broke, a subshell aborting under set -u), and 'failed: 0' over a shrunken subject set is exactly the vacuous pass this suite tests for."
   FAIL=$((FAIL + 1))

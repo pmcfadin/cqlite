@@ -6690,7 +6690,25 @@ _crate_gated_test_targets() { # <pkg>  -> name \t rel \t gate-text
       echo "SCAN-ERROR grep exit $_gr_rc on $sp (declared target $_tn)" >&2
       return 1
     fi
-    gate=$(printf '%s\n' "$_gr_out" | sed 's/^\([0-9]*\):[[:space:]]*/L\1: /' | tr '\n' ' ' | sed 's/  */ /g; s/^ //; s/ $//')
+    # "OPENING LINE", not "verbatim" (roborev root pass at aabae56ea, Low). The previous label
+    # over-claimed: for a multiline `#![cfg(all(` this captures only the first line, so the census
+    # omitted the very conditions it tells the reader to compare against the enabled feature set —
+    # and the self-test only checked the `L<line>:` prefix, so it could not see the truncation.
+    # Collecting the whole attribute needs a Rust parser (see the descope note above), so the claim
+    # is narrowed to what the scan can support: file, line, and the opening line, explicitly marked
+    # `+` when more of the attribute follows. The line number is what a reader acts on.
+    # GUARDED on non-empty: `printf '%s\n' ""` emits ONE BLANK LINE, so the marker sed below
+    # turned a file with NO inner cfg attribute into a bare "+" — a false occurrence report on
+    # ordinary code. Caught by this suite's own r42 ungated case, not by either hand-built fixture:
+    # two fixtures that both HAVE the thing cannot see the empty case.
+    if [ -z "$_gr_out" ]; then
+      gate=""
+    else
+      gate=$(printf '%s\n' "$_gr_out" \
+        | sed 's/^\([0-9]*\):[[:space:]]*/L\1: /' \
+        | sed 's/$/+/; s/\()\][[:space:]]*\)+$/\1/' \
+        | tr '\n' ' ' | sed 's/  */ /g; s/^ //; s/ $//')
+    fi
     [ -n "$gate" ] || continue
     printf '%s\t%s\t%s\n' "$_tn" "$rel" "$gate"
   done <<< "$meta"
@@ -6792,7 +6810,15 @@ for p in d.get("packages", []):
 # consumer of an incomplete set fails in the SILENT direction. Measured on this corpus:
 # 0 unresolved across all 364 cqlite-core test targets, so failing closed costs nothing
 # today and stays loud if a layout appears that this does not model.
-_rust_module_closure() { # <root-file>  -> one path per line; unresolved mods to stderr
+# STDERR carries TWO fail-closed report kinds, and the caller FAILs on either:
+#   UNRESOLVED <name> <from>              — a declared `mod` whose file was not found
+#   CFG-GATED-MOD <name> <from> [<cfg>]   — a `mod` gated by a cfg this scan does not evaluate
+# The second exists because the closure used to follow children while DISCARDING the attributes
+# gating them, so a gated child's legacy test read as executable at this lane's feature set.
+# Count of DECLARED cfg-gated-subtree gaps in the current legacy-heuristics run. Declared, not
+# fatal — see the split in run_legacy_heuristics.
+_lh_cfg_gaps=0
+_rust_module_closure() { # <root-file>  -> one path per line; both report kinds to stderr
   # ARRAY QUEUE, not newline-delimited string surgery. The first cut used
   # `${queue%%<newline>*}` and produced a line beginning with `}`, which truncated the
   # `awk '/^_rust_module_closure/,/^\}/'` extraction the self-test uses — so the function
@@ -6824,8 +6850,18 @@ _rust_module_closure() { # <root-file>  -> one path per line; unresolved mods to
       mod.rs|main.rs|lib.rs) childdir="$dir" ;;
       *) if [ "$f" = "$root" ]; then childdir="$dir"; else childdir="${f%.rs}"; fi ;;
     esac
-    while IFS="$(printf '\t')" read -r kind val; do
+    # THREE fields: the `G` record carries a gate text, and a 2-field `read` would absorb it
+    # into `val` and then mis-report the child as UNRESOLVED — a wrong cause on every lane.
+    while IFS="$(printf '\t')" read -r kind val extra; do
       [ -n "$kind" ] || continue
+      if [ "$kind" = G ]; then
+        # A cfg ON the `mod` declaration. Reported, never followed silently: the subtree's
+        # reachability at this lane's feature set is UNKNOWN, and every consumer of the source
+        # set (membership, allowed-zero polarity, the co-required census) is permissive on an
+        # unknown — which is precisely how a gated child's test was counted as executable.
+        echo "CFG-GATED-MOD $val $f [$extra]" >&2
+        continue
+      fi
       if [ "$kind" = P ]; then
         # #[path] resolves relative to the declaring file's directory.
         case "$val" in
@@ -6875,10 +6911,31 @@ $(awk '
   # `#[path = "child.rs"] mod child;` is idiomatic, and without this the declaration was unreachable
   # from here even after the path rule stopped swallowing the line.
   /^[[:space:]]*(#\[[^]]*\][[:space:]]*)?(pub([[:space:]]*\([^)]*\))?[[:space:]]+)?mod[[:space:]]+[A-Za-z_][A-Za-z0-9_]*[[:space:]]*;/ {
+    # a SAME-LINE cfg attribute counts too: `#[cfg(feature = "x")] mod child;`
+    if ($0 ~ /#\[[[:space:]]*cfg(_attr)?[[:space:]]*\(/) {
+      gt = $0; gsub(/^[[:space:]]+|[[:space:]]+$/, "", gt)
+      gatetxt = (gatetxt == "" ? gt : gatetxt " " gt)
+    }
     n = $0
     sub(/^[[:space:]]*(#\[[^]]*\][[:space:]]*)?(pub([[:space:]]*\([^)]*\))?[[:space:]]+)?mod[[:space:]]+/, "", n)
     sub(/[[:space:]]*;.*$/, "", n)
+    # A cfg ON THE `mod` DECLARATION is reported alongside the child (roborev root pass at
+    # aabae56ea, Medium). The closure followed children while DISCARDING the attributes that gate
+    # them, so `#[cfg(feature = "experimental")] mod child;` read as reachable at the feature
+    # set of this lane. NO APOSTROPHE MAY APPEAR IN THIS AWK PROGRAM: it is single-quoted, so one
+    # closes the quote early and bash then parses awk source as shell — and `bash -n` can PASS
+    # anyway when the stray quotes happen to re-balance, which is how this slipped through twice.
+    # A legacy-gated test inside `child` was then counted as executable, an ungated
+    # sibling kept the target non-zero, and the co-required census reported NO gap — which is the
+    # one thing that census exists to find.
+    #
+    # Not evaluated here, DECLARED: emitting the gating cfg text with the child lets the caller
+    # treat the subtree as an unclassified co-required site instead of silently assuming
+    # reachability. Evaluating nested cfg reachability is a Rust-parser problem, and this file has
+    # already paid five rounds for approximating one.
+    if (gatetxt != "") { printf "G\t%s\t%s\n", n, gatetxt }
     if (haspath) { printf "P\t%s\n", p; haspath = 0 } else { printf "M\t%s\n", n }
+    gatetxt = ""
     next
   }
   # An ATTRIBUTE line preserves a pending `#[path]` (roborev round-42). An outer-attribute cluster
@@ -6886,7 +6943,14 @@ $(awk '
   # `haspath` on the intervening attribute resolved the module to the WRONG file, or failed the lane
   # as unresolved. Attributes join blank lines and comments as cluster trivia; anything else still
   # ends the cluster, which stays the conservative direction.
-  /^[[:space:]]*#\[/ { next }
+  /^[[:space:]]*#\[/ {
+    # Remember a cfg on this declaration so the `mod` rule can DECLARE it with the child.
+    if ($0 ~ /#\[[[:space:]]*cfg(_attr)?[[:space:]]*\(/) {
+      t = $0; gsub(/^[[:space:]]+|[[:space:]]+$/, "", t)
+      gatetxt = (gatetxt == "" ? t : gatetxt " " t)
+    }
+    next
+  }
   { if ($0 !~ /^[[:space:]]*$/ && $0 !~ /^[[:space:]]*\/\//) haspath = 0 }
 ' "$f")
 EOF
@@ -6916,6 +6980,8 @@ EOF
 }
 
 run_legacy_heuristics() {
+  # reset per run: a counter carried in from a previous lane would misreport this one
+  _lh_cfg_gaps=0
   local name=legacy-heuristics
   if [ -n "$ONLY" ] && ! grep -qw "$name" <<<"${ONLY//,/ }"; then
     return 0
@@ -6996,19 +7062,52 @@ run_legacy_heuristics() {
     local _mt_closure _mt_unres
     _mt_unres="$LOG_DIR/legacy-unresolved-$_mt_name.txt"
     _mt_closure=$(_rust_module_closure "$f" 2>"$_mt_unres")
+    # TWO report kinds, TWO different consequences, and a CLOSED grammar over the rest.
+    #
+    # UNRESOLVED is fatal: a `mod` whose file was not found means the source set is INCOMPLETE,
+    # and an incomplete set is permissive in membership, the polarity scan and the census alike.
+    #
+    # CFG-GATED-MOD is a DECLARED COVERAGE GAP, not a failure. The child stays in the source set
+    # (conservative for membership — a gated test still makes its target a subject), but its
+    # reachability at this feature set is unevaluated, so the census must SAY SO instead of
+    # reporting no gap (roborev root pass at aabae56ea, Medium). Failing the lane here was tried
+    # and is WRONG: the tree legitimately carries `#[cfg(all(feature=..))] #[path=..] mod support;`
+    # on shared test helpers, so fail-closed reds ordinary code — and a lane that reds on correct
+    # input is the lane agents learn to waive. Declaring the narrowing at run time is what this
+    # whole component set is built on.
+    #
+    # Anything else in that stream FAILs: an unrecognised report is an unmeasured state, and
+    # inheriting the permissive branch for it is the shape this PR exists to remove.
     if [ -s "$_mt_unres" ]; then
-      status=FAIL
-      {
-        echo "[$name] FAIL-CLOSED: could not resolve the module tree of test target"
-        echo "        '$_mt_name'. An incomplete source set makes membership, the"
-        echo "        allowed-zero polarity scan and the co-required census all fail in the"
-        echo "        SILENT direction, so this is a FAIL rather than a partial scan:"
-        sed 's/^/          /' "$_mt_unres"
-      } | tee "$log"
-      end=$(date +%s)
-      record_result "$name" "$status" "$((end - start))"
-      echo ">>> [$name] $status ($((end - start))s)"
-      return 0
+      local _mt_fatal="$LOG_DIR/legacy-fatal-$_mt_name.txt"
+      local _mt_gaps="$LOG_DIR/legacy-cfggaps-$_mt_name.txt"
+      grep -v '^CFG-GATED-MOD ' "$_mt_unres" > "$_mt_fatal" || true
+      grep    '^CFG-GATED-MOD ' "$_mt_unres" > "$_mt_gaps"  || true
+      if [ -s "$_mt_fatal" ]; then
+        status=FAIL
+        {
+          echo "[$name] FAIL-CLOSED: could not resolve the module tree of test target"
+          echo "        '$_mt_name'. An incomplete source set makes membership, the"
+          echo "        allowed-zero polarity scan and the co-required census all fail in the"
+          echo "        SILENT direction, so this is a FAIL rather than a partial scan:"
+          sed 's/^/          /' "$_mt_fatal"
+        } | tee "$log"
+        end=$(date +%s)
+        record_result "$name" "$status" "$((end - start))"
+        echo ">>> [$name] $status ($((end - start))s)"
+        return 0
+      fi
+      if [ -s "$_mt_gaps" ]; then
+        {
+          echo "[$name] DECLARED GAP: test target '$_mt_name' reaches child module(s) through a"
+          echo "        cfg this scan does not evaluate, so their contribution to legacy coverage"
+          echo "        is UNCLASSIFIED — the subtree is scanned, but a zero or nonzero result"
+          echo "        from it cannot be attributed. Compare the cfg against the enabled set by"
+          echo "        hand; move gated tests to their own target if the attribution matters:"
+          sed 's/^/          /' "$_mt_gaps"
+        } | tee -a "$log"
+        _lh_cfg_gaps=$((_lh_cfg_gaps + 1))
+      fi
     fi
     if [ "$_mt_how" != "manifest" ]; then
       [ -f "$f" ] || continue
@@ -7356,6 +7455,15 @@ EOF
     fi
   else
     lh_census+=("co-required-feature census: 0 — every legacy-heuristics-gated cfg site is reachable at this feature set")
+  fi
+  # DECLARED alongside the co-required census, because it is the same kind of blind spot: a
+  # subtree whose reachability was not evaluated cannot be counted either way, and the census
+  # claiming "0 gaps" over it would be the silent direction (roborev root pass at aabae56ea).
+  if [ "$_lh_cfg_gaps" -gt 0 ]; then
+    lh_census+=("cfg-gated-subtree gaps: $_lh_cfg_gaps target(s) reach a child module through a cfg")
+    lh_census+=("  this scan does not evaluate — their legacy coverage is UNCLASSIFIED, listed above.")
+  else
+    lh_census+=("cfg-gated-subtree gaps: 0 — every module reached is reached unconditionally")
   fi
   lh_census+=("enabled features (cargo tree -p, package-scoped):$lh_enabled")
   local _cl

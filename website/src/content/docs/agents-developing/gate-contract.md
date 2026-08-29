@@ -234,7 +234,25 @@ edit:
 
 A cfg shape the census cannot evaluate — `any(…)`, `not(…)`, `cfg_attr` — is reported **unclassified**, never
 excused: a token list cannot tell a conjunction from a disjunction, and `any(legacy-heuristics, X)` is
-*reachable* here. A failed derivation is a FAIL naming the
+*reachable* here.
+
+The **module closure has the same class of blind spot, one level down**, and it is reported the same way. A
+target can reach a child module through a cfg on the `mod` declaration itself —
+`#[cfg(all(feature = "state_machine", feature = "cli-helpers"))] #[path = "support/datasets_root.rs"] mod
+datasets_root;`, the shape shared test helpers actually use (3 such targets in `cqlite-core` today). The
+closure followed such a child while **discarding the attribute gating it**, so a legacy-gated test inside the
+subtree counted as *executable* at this lane's feature set, an ungated sibling kept the target non-zero, and
+the co-required census reported **no gap** — the one thing that census exists to find. Such a subtree is now
+emitted as a `DECLARED GAP` naming the target, the module and the cfg text, with a `cfg-gated-subtree gaps: N`
+census line that is affirmative at `0` (so a pasted census shows the scan ran).
+
+It is **declared, not fatal**, and the distinction is load-bearing: failing the lane on it was implemented,
+measured against the real tree, and reverted — those helpers are correct code, and **a lane that reds on
+correct input is the lane agents learn to waive**. The `UNRESOLVED` half stays fail-closed, because the two
+unknowns are not equivalent: an *incomplete* source set is permissive in membership, the polarity scan and the
+census alike, whereas an *unevaluated* one is merely unattributable. Anything appearing in that stream matching
+neither report is a FAIL — a closed grammar, since an unrecognised report is an unmeasured state and
+inheriting the permissive branch for it is the shape this component set exists to remove. A failed derivation is a FAIL naming the
 derivation, never a fallback to "nothing enabled", which would silently excuse every gated target.
 
 **`--no-fail-fast` on both executing lanes.** `cargo test` stops after the first failing test *binary*, and a

@@ -115,7 +115,15 @@ module closure, so a manifest-gated or directory-style target is not missed) and
 a fallback to "nothing enabled", which would silently excuse every gated target. **And a narrowed lane
 DECLARES the narrowing at run time**: `flight-tests` prints what it does not execute on every run, because a
 lane that omits coverage silently is indistinguishable from one that covers it — the same reason this whole
-component set exists. And
+component set exists. `legacy-heuristics` declares a second, subtler narrowing the same way: a test target can
+reach a child module through a cfg the derivation does not evaluate (`#[cfg(all(feature = …))] #[path = …] mod
+support;` on a shared helper — 3 such targets in `cqlite-core` today), and the closure used to follow that child
+while DISCARDING the attribute gating it, so a gated test inside counted as executable while an ungated sibling
+kept the target non-zero and the co-required census reported **no gap**. Such a subtree is now reported as a
+`DECLARED GAP` with a `cfg-gated-subtree gaps: N` census line (affirmative at `0`). Deliberately **declared, not
+fatal**: failing the lane on it was tried and reverted, because those helpers are correct code and **a lane that
+reds on correct input is the lane agents learn to waive**. The `UNRESOLVED` half stays fail-closed — an
+incomplete source set is permissive everywhere, an unevaluated one is merely unattributable. And
 **a lane in `--list` is not a lane that works**: `feature-iso-parquet` reports `PASS (0s)` warm, so presence
 proves nothing. `scripts/tests/test_agent_gate_feature_matrix_lanes.sh` (opt-in) plants each lane's
 incident-class break in a throwaway `git worktree` and requires the lane to red **and** to NAME the planted
