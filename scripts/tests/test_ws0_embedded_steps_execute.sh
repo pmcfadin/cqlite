@@ -60,11 +60,11 @@
 #     `WS0_PIN_*` inputs, there against the literal names the extracted block reads;
 #   * EVERY embedded block in the driver COMPILES — the total property, so instance #8 anywhere in
 #     that file is caught and not only the two steps this issue repaired;
-#   * EVERY embedded block parses on EVERY INTERPRETER THIS REPOSITORY RUNS, not merely on this
-#     box. `compile()` cannot answer that: PEP 701 made the nested SAME-TYPE quote spelling legal
-#     in 3.12, so a regression to it — the alternative the driver's own comment says it rejected —
-#     passes on a 3.12 box and breaks the 3.11 workflows this repo pins. Two oracles, each sound
-#     over its own interpreter range, with the one that answered NAMED in the output.
+#   * NO embedded block uses the PEP 701 NESTED SAME-TYPE QUOTE spelling — ONE construct class,
+#     and precisely the alternative the driver's own comment says it rejected. `compile()` cannot
+#     answer it on a 3.12 box, where the spelling is legal, while the 3.11 workflows this repo pins
+#     would break. Two oracles for that one spelling, each sound over its own interpreter range,
+#     with the one that answered NAMED in the output.
 #   * the extractor's delimiter in BOTH directions: it reports a defect, AND it does not
 #     manufacture one on good input. A block is delimited by bash's quoting rules rather than by a
 #     line pattern, so all three closer shapes this repository actually uses are handled — the
@@ -86,6 +86,15 @@
 #     reporter. Deliberately NOT asserted structurally: a check keyed on where `|| {` sits is
 #     brittle, and a brittle assert on correct code is the false-red that gets a guard waived.
 #     Stated here so the limit is known rather than assumed away.
+#   * GENERAL CROSS-INTERPRETER PORTABILITY. The nested-quote check above decides ONE construct
+#     class and is NOT a portability verdict: PEP 701 legalised others, and a case in part 2b
+#     MEASURES two of them (a multiline f-string expression, a comment inside one) passing it
+#     silently while being 3.12-only. Establishing the general property needs the blocks compiled
+#     by a REAL 3.9/3.11 — a CI lane, not a hermetic self-test, and not doable honestly on a box
+#     that has only 3.12. Widening the model here instead would make the checker a second
+#     implementation of CPython's tokenizer, correct only insofar as it is differentially tested
+#     against the original. So: a 3.12-only construct OTHER than the nested same-type quote
+#     spelling would NOT be caught here.
 #   * anything measured: no `perf`, no Flight server, no rep loop, no 2.8 GB corpus.
 #
 # Hermetic: python3, a few KB under `$TMPDIR`. No sudo, cargo, perf, taskset, network, root, and no
@@ -178,10 +187,11 @@ pathlib.Path(dest).write_text(text.replace(needle, bad))
 PY
 }
 
-# portable <file> / portable_source <file> — the PEP 701 oracle over a driver's blocks, or over an
-# ordinary python file.
-portable() { python3 "$EXTRACT" portable "$1" 2>&1; }
-portable_source() { python3 "$EXTRACT" portable-source "$1" 2>&1; }
+# nested_quote <file> / nested_quote_source <file> — the PEP 701 NESTED SAME-TYPE QUOTE check over
+# a driver's blocks, or over an ordinary python file. ONE construct class, deliberately: see the
+# "known limit" case in part 2b.
+nested_quote() { python3 "$EXTRACT" nested-quote "$1" 2>&1; }
+nested_quote_source() { python3 "$EXTRACT" nested-quote-source "$1" 2>&1; }
 
 # ============================================================================
 # PART 1 — THE EXTRACTOR READS THE SHIPPED DRIVER, AND FAILS CLOSED
@@ -383,6 +393,31 @@ else
   fail "census CONTROL did not fire (heredoc shape): blocks=$hd_blocks (expected $((block_count + 1))), compile said: $(findings_of "$hd_compile" | head -2)"
 fi
 
+# --- CONTROL 1c-quater: TWO invocations on ONE line, the SECOND carrying the defect ------------
+# The census advertises "every occurrence". An earlier version searched each line ONCE and then
+# skipped whole lines, so a second invocation after a `;`, an `&&` or an inline block's closing
+# quote was silently dropped — a vacuous pass inside the TOTAL property itself. MEASURED against
+# `python3 -c '<ok>'; python3 -c '<defect>'`: `blocks=1 occurrences=1`, and the defect in the
+# second block was invisible to the compile check.
+#
+# The defect is put in the SECOND block deliberately: with it in the first, a line-at-a-time
+# scanner still reports it and the control proves nothing.
+TWO_PER_LINE="$TMP/two-per-line-ws0-driver.sh"
+python3 - "$DRIVER" "$TWO_PER_LINE" <<'INJECT'
+import pathlib, sys
+q = chr(39)
+step = ("python3 -c " + q + "import sys" + q + "; python3 -c " + q + "import os," + q + "\n")
+pathlib.Path(sys.argv[2]).write_text(pathlib.Path(sys.argv[1]).read_text() + step)
+INJECT
+two_census="$(census "$TWO_PER_LINE")"
+two_compile="$(compile_blocks "$TWO_PER_LINE")"
+two_blocks="$(grep -c '^BLOCK	' <<<"$two_census")"
+if [ "$two_blocks" -eq "$((block_count + 2))" ] && grep -q 'DOES NOT COMPILE' <<<"$two_compile"; then
+  pass "census CONTROL fired (two per line): BOTH invocations on one line are counted ($two_blocks blocks) and the defect in the SECOND is REPORTED — the scan advances by what each classification consumed, not by whole lines"
+else
+  fail "census CONTROL did not fire (two per line): blocks=$two_blocks (expected $((block_count + 2))), compile said '$(findings_of "$two_compile" | head -1)'"
+fi
+
 # --- CONTROL 1d-bis: the heredoc terminator rule is the SHELL's, per form ----------------------
 # `<<TAG` takes the terminator EXACTLY — a space-indented `  TAG` is ordinary body to the shell, so
 # accepting it truncates the block and hands python a body it never receives. `<<-TAG` strips
@@ -457,58 +492,65 @@ control_compile "session-corpus-pin step" pin_sha pin data_db_sha256
 control_compile "CPU-pin-verification step" rec_server_cpus rec server_cpus
 
 # ============================================================================
-# PART 2b — THE BLOCKS PARSE ON EVERY INTERPRETER THIS REPO RUNS, NOT JUST THIS BOX
+# PART 2b — NO 3.12-ONLY NESTED SAME-TYPE QUOTE (ONE SPELLING, NOT "PORTABILITY")
 # ============================================================================
-# `compile()` answers "does this parse HERE". The property the repaired steps need is "does this
-# parse on every interpreter this repository runs on", and the two differ for exactly one
-# spelling: a subscript inside an f-string expression written with NESTED SAME-TYPE QUOTES. PEP
-# 701 made it legal in 3.12; it is a SyntaxError on everything older. That is the alternative the
-# driver's own comment says was rejected — and until this part existed, nothing enforced it: a
-# regression to that form passes `compile()` on a 3.12 box and breaks the 3.11 workflows this
-# repository pins (and the `>=3.9` the python bindings declare).
+# `compile()` answers "does this parse HERE". The regression the repaired steps are exposed to is
+# narrower and specific: a subscript inside an f-string expression written with NESTED SAME-TYPE
+# QUOTES. PEP 701 made it legal in 3.12; it is a SyntaxError on everything older. That is the exact
+# alternative the driver's own comment says it rejected — and until this part existed nothing
+# enforced it: a regression to that form passes `compile()` on a 3.12 box and breaks the 3.11
+# workflows this repository pins (and the `>=3.9` the python bindings declare).
 #
-# TWO ORACLES, EACH SOUND OVER ITS OWN RANGE, AND THE PASS LINE NAMES WHICH ONE ANSWERED. On 3.12+
-# a tokenizer walk is the oracle, because `compile()` there accepts the bad form; below 3.12
-# `compile()` IS the oracle, because the bad form does not parse at all. Nothing is conditional on
-# an optional interpreter being installed — a check that skips when a dependency is absent is the
-# coverage gap this whole issue is about.
-port_out="$(portable "$DRIVER")"
+# WHAT IS CLAIMED IS EXACTLY WHAT IS DECIDED: that ONE spelling is absent. NOT that the blocks
+# parse on every interpreter this repo runs — PEP 701 legalised other constructs, two of which are
+# MEASURED below to pass this check silently. The general property needs the blocks compiled by a
+# REAL 3.9/3.11, which is a CI lane and not a hermetic self-test; it is in the NOT-REACHED list in
+# this file's header. Widening the model instead would make the checker a second implementation of
+# CPython's tokenizer, whose correctness is knowable only by differential testing against the
+# original — the trap CLAUDE.md records.
+#
+# TWO ORACLES FOR THAT ONE SPELLING, EACH SOUND OVER ITS OWN RANGE, AND THE PASS LINE NAMES WHICH
+# ONE ANSWERED. On 3.12+ a tokenizer walk is the oracle, because `compile()` there accepts the bad
+# form; below 3.12 `compile()` IS the oracle, because the bad form does not parse at all. Nothing
+# is conditional on an optional interpreter being installed — a check that skips when a dependency
+# is absent is the coverage gap this whole issue is about.
+port_out="$(nested_quote "$DRIVER")"
 port_marker="$(grep -m1 '^#COMPLETE ' <<<"$port_out")"
 if [ -n "$port_marker" ] && [ -z "$(findings_of "$port_out")" ]; then
-  pass "portable: every embedded block parses on EVERY interpreter this repo runs, not just this box ($port_marker)"
+  pass "nested-quote: no embedded block uses the 3.12-only nested SAME-TYPE quote spelling — the one alternative the driver's comment rejects ($port_marker)"
 else
-  fail "portable: an embedded block in $DRIVER uses a spelling that only parses on this box — $(findings_of "$port_out" | head -2)"
+  fail "nested-quote: an embedded block in $DRIVER uses the 3.12-only spelling — $(findings_of "$port_out" | head -2)"
 fi
 
 # --- CONTROL 2b-i: the 3.12-only spelling is REFUSED, and `compile` alone cannot see it ---------
 NESTED_DRIVER="$TMP/nested-quote-ws0-driver.sh"
 if defective_copy "$DRIVER" "$NESTED_DRIVER" pin_sha pin data_db_sha256 nested 2>"$TMP/inject-nested.err"; then
-  nest_port="$(portable "$NESTED_DRIVER")"
+  nest_port="$(nested_quote "$NESTED_DRIVER")"
   nest_comp="$(compile_blocks "$NESTED_DRIVER")"
   nest_oracle="$(sed -n 's/.*oracle=\([a-z]*\).*/\1/p' <<<"$nest_port" | head -1)"
-  if grep -q 'NOT PORTABLE' <<<"$nest_port"; then
-    pass "portable CONTROL fired: the nested SAME-TYPE quote spelling is REFUSED — $(grep -m1 'NOT PORTABLE' <<<"$nest_port" | cut -c1-118)"
+  if grep -q 'NESTED SAME-TYPE QUOTE' <<<"$nest_port"; then
+    pass "nested-quote CONTROL fired: the 3.12-only spelling is REFUSED — $(grep -m1 'NESTED SAME-TYPE QUOTE' <<<"$nest_port" | cut -c1-112)"
   else
-    fail "portable CONTROL did NOT fire: the 3.12-only spelling must be refused, got: $(findings_of "$nest_port" | head -2)"
+    fail "nested-quote CONTROL did NOT fire: the 3.12-only spelling must be refused, got: $(findings_of "$nest_port" | head -2)"
   fi
   # ...and WHY the new oracle earns its place, asserted rather than argued: on a 3.12+ box the
   # plain compile check is SILENT about this input. On an older box compile is the oracle and must
   # report it. Both branches assert; neither is a skip, and the pass line says which ran.
   if [ "$nest_oracle" = "tokenizer" ]; then
     if [ -z "$(findings_of "$nest_comp")" ]; then
-      pass "portable CONTROL discriminates: on this 3.12+ interpreter (oracle=tokenizer) the plain compile check is SILENT about the same input — so the portability oracle is doing work compile cannot"
+      pass "nested-quote CONTROL discriminates: on this 3.12+ interpreter (oracle=tokenizer) the plain compile check is SILENT about the same input — so the nested-quote oracle is doing work compile cannot"
     else
       fail "on a 3.12+ interpreter compile() must ACCEPT the nested spelling (that is the trap); it reported: $(findings_of "$nest_comp" | head -1)"
     fi
   else
     if grep -q 'DOES NOT COMPILE' <<<"$nest_comp"; then
-      pass "portable CONTROL discriminates: on this pre-3.12 interpreter (oracle=compile) the nested spelling does not parse at all, and the compile check reports it"
+      pass "nested-quote CONTROL discriminates: on this pre-3.12 interpreter (oracle=compile) the nested spelling does not parse at all, and the compile check reports it"
     else
       fail "on a pre-3.12 interpreter the nested spelling must fail to compile; it did not"
     fi
   fi
 else
-  fail "portable CONTROL: the nested-quote defect could not be injected — $(head -2 "$TMP/inject-nested.err")"
+  fail "nested-quote CONTROL: the defect could not be injected — $(head -2 "$TMP/inject-nested.err")"
 fi
 
 # --- CONTROL 2b-ii: THE ACCEPT DIRECTION — a DIFFERENT-type nested quote is legal everywhere -----
@@ -520,18 +562,62 @@ python3 - "$TMP" <<'INJECT'
 import pathlib, sys
 dq, sq = chr(34), chr(39)
 tmp = pathlib.Path(sys.argv[1])
-(tmp / "portable-ok.py").write_text(
+(tmp / "nested-quote-legal.py").write_text(
     "x = {'k': 1}\nprint(f" + dq + "{x[" + sq + "k" + sq + "]}" + dq + ")\n")
-(tmp / "portable-remedy.py").write_text(
+(tmp / "nested-quote-remedy.py").write_text(
     "x = {'k': 1}\nv = x['k']\nprint(f" + dq + "{v}" + dq + ")\n")
 INJECT
-ok_out="$(portable_source "$TMP/portable-ok.py")"
-rem_out="$(portable_source "$TMP/portable-remedy.py")"
+ok_out="$(nested_quote_source "$TMP/nested-quote-legal.py")"
+rem_out="$(nested_quote_source "$TMP/nested-quote-remedy.py")"
 if [ -z "$(findings_of "$ok_out")" ] && [ -z "$(findings_of "$rem_out")" ] \
    && grep -q '^#COMPLETE ' <<<"$ok_out" && grep -q '^#COMPLETE ' <<<"$rem_out"; then
-  pass "portable ACCEPT direction: a DIFFERENT-type nested quote (legal on every interpreter) and the local-binding remedy are BOTH clean — the check discriminates rather than refusing every subscript"
+  pass "nested-quote ACCEPT direction: a DIFFERENT-type nested quote (legal on every interpreter) and the local-binding remedy are BOTH clean — the check discriminates rather than refusing every subscript"
 else
-  fail "portable manufactured a finding on portable code: different-type='$(findings_of "$ok_out" | head -1)' remedy='$(findings_of "$rem_out" | head -1)'"
+  fail "nested-quote manufactured a finding on legal code: different-type='$(findings_of "$ok_out" | head -1)' remedy='$(findings_of "$rem_out" | head -1)'"
+fi
+
+# --- THE STATED LIMIT, PINNED BY MEASUREMENT ---------------------------------------------------
+# The check above decides ONE construct class. PEP 701 legalised others, and this case measures two
+# of them so the limit is a MEASUREMENT rather than a sentence someone hopes is still true:
+#
+#   a MULTILINE f-string expression            3.12 compiles it; this check is CLEAN
+#   a COMMENT inside an f-string expression    3.12 compiles it; this check is CLEAN
+#
+# Asserted deliberately in the NEGATIVE. It looks strange to assert that a check MISSES something,
+# and that is exactly its job: it binds the claim in this file's header to something falsifiable.
+# If someone later widens the oracle, THIS CASE REDS and they must come here and update the claim
+# — which is the only mechanism that stops the header's wording drifting away from the code.
+#
+# The remedy for the general property is NOT a deeper model here: it is compiling the blocks under
+# a REAL 3.9/3.11, a CI lane. Widening the tokenizer walk would make this a second implementation
+# of CPython's tokenizer, whose correctness is knowable only by differential testing against the
+# original — and the construct list does not close by enumeration, so each round would find the
+# next unnamed member.
+python3 - "$TMP" <<'INJECT'
+import pathlib, sys
+dq = chr(34)
+tmp = pathlib.Path(sys.argv[1])
+# A MULTILINE f-string expression: legal from 3.12, SyntaxError before it.
+(tmp / "pep701-multiline.py").write_text(
+    "x = {'k': 1}\nprint(f" + dq + "{x[\n    'k'\n]}" + dq + ")\n")
+# A COMMENT inside an f-string expression: same.
+(tmp / "pep701-comment.py").write_text(
+    "x = {'k': 1}\nprint(f" + dq + "{x['k']  # a comment\n}" + dq + ")\n")
+INJECT
+limit_missed=0
+limit_parses=0
+for limit_case in pep701-multiline pep701-comment; do
+  if python3 -c "import pathlib,sys; compile(pathlib.Path(sys.argv[1]).read_text(), 'x', 'exec')" \
+       "$TMP/$limit_case.py" 2>/dev/null; then
+    limit_parses=$((limit_parses + 1))
+  fi
+  [ -z "$(findings_of "$(nested_quote_source "$TMP/$limit_case.py")")" ] \
+    && limit_missed=$((limit_missed + 1))
+done
+if [ "$limit_missed" -eq 2 ]; then
+  pass "nested-quote STATED LIMIT (pinned): the 2 OTHER 3.12-only constructs measured here (a multiline f-string expression, a comment inside one) are NOT caught — the claim in this file's header is exactly this narrow, and widening the oracle without widening the claim REDS this case ($limit_parses/2 parse on this interpreter)"
+else
+  fail "nested-quote STATED LIMIT: $limit_missed of 2 known-uncaught constructs were still uncaught. If the oracle was WIDENED, that is good news — update this case AND the claim in the header and the gate comment, which currently say only the nested same-type quote spelling is decided"
 fi
 
 # ============================================================================

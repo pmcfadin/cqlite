@@ -8,10 +8,12 @@ reason — a DEFINITION and an ORACLE must not be the same thing:
                            shape this file cannot classify or a block it cannot delimit
     emit <driver> <n>      print embedded block <n>'s SOURCE, exactly as the driver ships it
     compile <driver>       compile EVERY embedded block; print one finding per block that does not
-    portable <driver>      does every embedded block parse on EVERY interpreter this repo runs,
-                           not merely on this box's? (the PEP 701 trap — see below)
-    portable-source <file> the same question about an ordinary python file, so the check's
-                           accept direction can be controlled without a driver
+    nested-quote <driver>  does any embedded block use the PEP 701 NESTED SAME-TYPE QUOTE
+                           spelling — the one alternative the driver's comment rejects? (ONE
+                           construct class, not general portability — see below)
+    nested-quote-source <file>
+                           the same question about an ordinary python file, so the check's accept
+                           direction can be controlled without a driver
 
 Every mode prints a `#COMPLETE …` marker on success. The CALLER counts findings, so a crash
 must not read as "clean" — the marker is what makes that distinguishable, and every caller
@@ -42,14 +44,13 @@ A self-test carrying its own copy of the block certifies THE COPY. The copy does
 the driver does — it stays green while the shipped step is broken, which is precisely the state
 this issue found. So the subject is read out of the shipped file on every run.
 
-# COMPILING ON THIS BOX IS NOT THE PROPERTY (#3451 review round 1, finding 1)
+# ONE SPELLING IS DECIDED HERE, AND IT IS NOT "PORTABILITY" (#3451 review rounds 1-2)
 
-`compile()` answers "does this parse HERE". The property the driver's repaired steps need is "does
-this parse on EVERY interpreter this repository runs on", and the two differ for exactly one
-spelling: a subscript inside an f-string expression written with NESTED SAME-TYPE QUOTES. PEP 701
-made that legal in 3.12 and it is a SyntaxError on everything older. So a regression to that form
-passes `compile()` on a 3.12 box and breaks a 3.11 one — and it is the very alternative the
-driver's own comment says was rejected, protected by nothing.
+`compile()` answers "does this parse HERE". The regression the driver's repaired steps are exposed
+to is narrower and specific: a subscript inside an f-string expression written with NESTED
+SAME-TYPE QUOTES. PEP 701 made that legal in 3.12 and it is a SyntaxError on everything older, so
+a regression to it — the exact alternative the driver's own comment says it rejected — passes
+`compile()` on a 3.12 box and breaks a 3.11 one.
 
 The exposure is real rather than theoretical: this repository pins Python 3.11 in
 `.github/workflows/parity-failure-issue.yml` and `parity-failure-issue-tests.yml`,
@@ -64,11 +65,32 @@ character.
 
 THE SAME-TYPE/DIFFERENT-TYPE BOUNDARY IS THE WHOLE CHECK. `f"{x['k']}"` is legal on every
 interpreter and flagging it would be a false red; `f"{x["k"]}"` is 3.12-only and must be refused.
-The suite controls BOTH directions.
+The caller controls BOTH directions.
 
-TWO ORACLES, EACH SOUND OVER ITS OWN RANGE, AND WHICH ONE RAN IS PRINTED. On 3.12+ the tokenizer
-walk is the oracle, because `compile()` there accepts the bad form. On < 3.12 `compile()` IS the
-oracle — the bad form does not parse at all — and the token types the walk needs
+## WHAT THIS DOES **NOT** DECIDE — the claim was narrowed rather than the oracle widened
+
+It does NOT establish that a block parses on every interpreter this repository runs. PEP 701
+legalised OTHER constructs too, and two of them are MEASURED to pass this check silently while
+being 3.12-only:
+
+    a MULTILINE f-string expression                 -> 3.12 compiles, this check is CLEAN
+    a COMMENT inside an f-string expression         -> 3.12 compiles, this check is CLEAN
+
+Those are not oversights to be closed by adding cases. THE CONSTRUCT LIST DOES NOT CLOSE BY
+ENUMERATION, and widening the model here would make this file a SECOND IMPLEMENTATION of CPython's
+tokenizer — whose correctness would then be knowable only by differential testing against the
+original, which is the trap CLAUDE.md records (a bash port of Go's trim rules, tested against a
+MODEL of Go rather than Go, whose NBSP divergence was unfindable by care).
+
+THE CORRECT ORACLE IS THE REAL INTERPRETER: compile the blocks under an actual 3.9/3.11. That is a
+CI lane, not a hermetic self-test, and it cannot be done honestly on the machines this suite runs
+on (no python3.9/3.10/3.11 present). So the general property is recorded as NOT REACHED in the
+caller's header, and what is claimed here is exactly what is measured: the nested same-type quote
+spelling, and nothing else.
+
+TWO ORACLES FOR THAT ONE SPELLING, EACH SOUND OVER ITS OWN RANGE, AND WHICH ONE RAN IS PRINTED. On
+3.12+ the tokenizer walk is the oracle, because `compile()` there accepts the bad form. On < 3.12
+`compile()` IS the oracle — the bad form does not parse at all — and the token types the walk needs
 (`FSTRING_START`/`FSTRING_END`) do not exist. Either way the answer is affirmative and the
 `#COMPLETE` line names the oracle and the interpreter, so a reader can never mistake this for one
 check that silently skipped. Nothing here is conditional on an optional interpreter being
@@ -156,6 +178,7 @@ operator having been parsed by nothing, and it is the state this file was writte
 
 from __future__ import annotations
 
+import bisect
 import io
 import pathlib
 import re
@@ -269,12 +292,24 @@ def _delimit_heredoc(
 
 
 def census(path: pathlib.Path) -> tuple[list[dict], list[dict]]:
-    """Classify every `python3` occurrence. Returns (records, findings)."""
+    """Classify every `python3` occurrence. Returns (records, findings).
+
+    THE SCAN IS BY POSITION, NOT BY LINE (#3451 review round 2, finding 3). An earlier version
+    searched each line ONCE and then skipped whole lines, so a SECOND invocation on the same
+    line — after a `;`, an `&&`, or an inline block's closing quote — was silently dropped, which
+    contradicted the "every occurrence" guarantee this file's fail-closed posture rests on.
+    MEASURED against `python3 -c 'import sys'; python3 -c '<a syntax error>'`: `blocks=1
+    occurrences=1`, and the defect in the second block was invisible to the compile check.
+
+    So the cursor advances past exactly what each classification CONSUMED — the closing quote of
+    a `-c` block, the line after a heredoc terminator, the token itself for a mention or a script
+    invocation — and the remainder of every line is rescanned.
+    """
     text = path.read_text()
     lines = text.split("\n")
-    # Offset of each line start, so a per-line match can hand an ABSOLUTE position to the
-    # quoting scanner. The scanner works over the whole text because a block's closer is not a
-    # property of any single line (shapes 1-3 in the header).
+    # Offset of each line start, so a match position can be turned back into a line number and a
+    # per-line remainder. The quoting scanner works over the whole text because a block's closer
+    # is not a property of any single line (shapes 1-3 in the header).
     starts: list[int] = []
     off = 0
     for line in lines:
@@ -282,17 +317,23 @@ def census(path: pathlib.Path) -> tuple[list[dict], list[dict]]:
         off += len(line) + 1
     records: list[dict] = []
     findings: list[dict] = []
-    skip_until = -1
-    for idx, line in enumerate(lines):
-        if idx <= skip_until:
-            continue
-        if line.lstrip().startswith("#"):
-            continue  # a whole-line shell comment carries no code
-        m = _PY_TOKEN.search(line)
+    pos = 0
+    while True:
+        m = _PY_TOKEN.search(text, pos)
         if not m:
+            break
+        idx = bisect.bisect_right(starts, m.start()) - 1
+        line = lines[idx]
+        if line.lstrip().startswith("#"):
+            # A whole-line shell comment carries no code. Advance past THIS occurrence only, not
+            # past the line: nothing else on a comment line matters, but the cursor rule stays one
+            # rule everywhere.
+            pos = m.end()
             continue
-        raw_rest = line[m.end() :]
+        line_end = starts[idx] + len(line)
+        raw_rest = text[m.end() : line_end]
         rest = _strip_comment(raw_rest).strip()
+        pos = m.end()
         try:
             if not rest or rest.lstrip(";&|)").strip() in ("", "do", "then"):
                 # A presence probe (`for tool in perf taskset python3; do`) or a bare mention:
@@ -302,10 +343,10 @@ def census(path: pathlib.Path) -> tuple[list[dict], list[dict]]:
             dash_c = _OPEN_DASH_C.match(raw_rest)
             if dash_c:
                 # The opening quote is the LAST character the match consumed.
-                open_quote = starts[idx] + m.end() + dash_c.end() - 1
+                open_quote = m.end() + dash_c.end() - 1
                 body, close = _scan_single_quoted(text, open_quote)
                 end_line = text.count("\n", 0, close)
-                skip_until = end_line
+                pos = close + 1
                 records.append(
                     {"kind": "BLOCK",
                      "shape": "dash-c-multiline" if "\n" in body else "dash-c-inline",
@@ -318,7 +359,7 @@ def census(path: pathlib.Path) -> tuple[list[dict], list[dict]]:
                 body, end = _delimit_heredoc(
                     lines, idx, hd.group("tag"), hd.group("dash") == "-"
                 )
-                skip_until = end
+                pos = starts[end] + len(lines[end])
                 records.append(
                     {"kind": "BLOCK", "shape": "heredoc", "line": idx + 1, "end": end + 1,
                      "body": body}
@@ -337,13 +378,17 @@ def census(path: pathlib.Path) -> tuple[list[dict], list[dict]]:
             )
         except Unclassifiable as exc:
             findings.append({"line": exc.lineno, "reason": exc.reason})
+            # An occurrence that could not be delimited must not leave the cursor inside whatever
+            # it failed to delimit: resume after the line it started on, so the scan terminates
+            # and the rest of the file is still censused.
+            pos = max(pos, line_end)
     return records, findings
 
 
 # Whether this interpreter tokenizes f-strings into their own token types (PEP 701, 3.12+). On an
 # older one the nested same-type form is not tokenizable at all, so `compile()` is the oracle.
 _HAS_FSTRING_TOKENS = hasattr(tokenize, "FSTRING_START")
-PORTABILITY_ORACLE = "tokenizer" if _HAS_FSTRING_TOKENS else "compile"
+NESTED_QUOTE_ORACLE = "tokenizer" if _HAS_FSTRING_TOKENS else "compile"
 
 
 def _string_open_quote(tok: str) -> str:
@@ -354,19 +399,21 @@ def _string_open_quote(tok: str) -> str:
     return ""
 
 
-def portability_findings(src: str) -> list[str]:
-    """Spellings in `src` that parse on 3.12+ and NOT on older interpreters.
+def nested_same_type_quote_findings(src: str) -> list[str]:
+    """Occurrences in `src` of the PEP 701 NESTED SAME-TYPE QUOTE spelling. Nothing else.
 
-    Exactly one such spelling exists and it is the one this issue is about: a string inside an
-    f-string expression opening with the SAME quote character as the f-string itself. A
-    DIFFERENT-type nested quote (`f"{x['k']}"`) is legal everywhere and must not be reported.
+    A string inside an f-string expression opening with the SAME quote character as the f-string
+    itself. A DIFFERENT-type nested quote (`f"{x['k']}"`) is legal everywhere and must not be
+    reported. This is ONE construct class and NOT a portability verdict — see the module header
+    for the two 3.12-only constructs it is measured NOT to catch, and why the answer is a CI lane
+    rather than a deeper model here.
     """
     if not _HAS_FSTRING_TOKENS:
         # `compile()` is the oracle on this interpreter: the 3.12-only form is a SyntaxError here,
-        # and `compile`/`portable` therefore report it through the same path. Returning nothing is
+        # and `compile`/`nested-quote` therefore report it through the same path. Returning nothing is
         # correct rather than a skip — the caller prints WHICH oracle answered.
         try:
-            compile(src, "<portability>", "exec")
+            compile(src, "<nested-quote>", "exec")
         except SyntaxError as exc:
             return [
                 f"does not parse on this interpreter ({sys.version_info.major}."
@@ -406,7 +453,7 @@ def _blocks(records: list[dict]) -> list[dict]:
 def main(argv: list[str]) -> int:
     if len(argv) < 3:
         print(__doc__.splitlines()[0], file=sys.stderr)
-        print("usage: ws0_embedded_python.py census|compile|portable|portable-source|emit"
+        print("usage: ws0_embedded_python.py census|compile|nested-quote|nested-quote-source|emit"
           " <file> [n]", file=sys.stderr)
         return 2
     mode, driver = argv[1], pathlib.Path(argv[2])
@@ -414,13 +461,13 @@ def main(argv: list[str]) -> int:
         print(f"{driver}:0: the driver is not a readable file, so the census has NO SUBJECT —"
               " which prints exactly like a driver with nothing wrong in it.")
         return 0
-    if mode == "portable-source":
+    if mode == "nested-quote-source":
         # The same question about an ORDINARY python file. Exists so the accept direction (a
         # DIFFERENT-type nested quote, legal everywhere) can be controlled without smuggling an
         # apostrophe into a shell single-quoted block, where it would terminate the string.
-        for note in portability_findings(driver.read_text()):
-            print(f"{driver}: NOT PORTABLE — {note}")
-        print(f"#COMPLETE portable-source=1 oracle={PORTABILITY_ORACLE}"
+        for note in nested_same_type_quote_findings(driver.read_text()):
+            print(f"{driver}: uses the 3.12-ONLY NESTED SAME-TYPE QUOTE spelling — {note}")
+        print(f"#COMPLETE nested-quote-source=1 oracle={NESTED_QUOTE_ORACLE}"
               f" interpreter={sys.version_info.major}.{sys.version_info.minor}"
               f".{sys.version_info.micro}")
         return 0
@@ -454,16 +501,16 @@ def main(argv: list[str]) -> int:
                       " past it.")
         print(f"#COMPLETE compiled={len(blocks)} findings={len(findings)}")
         return 0
-    if mode == "portable":
-        # EVERY embedded block, against the property `compile` cannot see on this box.
+    if mode == "nested-quote":
+        # EVERY embedded block, against the ONE spelling `compile` cannot see on a 3.12 box.
         for f in findings:
             print(f"{driver}:{f['line']}: {f['reason']}")
         for i, r in enumerate(blocks, start=1):
-            for note in portability_findings(r["body"]):
-                print(f"{driver}:{r['line']}: embedded python block {i} is NOT PORTABLE —"
-                      f" {note}")
-        print(f"#COMPLETE portable={len(blocks)} findings={len(findings)}"
-              f" oracle={PORTABILITY_ORACLE}"
+            for note in nested_same_type_quote_findings(r["body"]):
+                print(f"{driver}:{r['line']}: embedded python block {i} uses the 3.12-ONLY"
+                      f" NESTED SAME-TYPE QUOTE spelling — {note}")
+        print(f"#COMPLETE nested-quote-scanned={len(blocks)} findings={len(findings)}"
+              f" oracle={NESTED_QUOTE_ORACLE}"
               f" interpreter={sys.version_info.major}.{sys.version_info.minor}"
               f".{sys.version_info.micro}")
         return 0
