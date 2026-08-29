@@ -19,15 +19,17 @@ fn otel_sources() -> String {
 /// The catalog metric-name DECLARATION sources, as ONE string (issue #1707).
 ///
 /// The `pub const IDENT: &str = "cqlite. …";` declarations no longer all live in
-/// `catalog.rs`: the Arrow Flight family was split into `catalog_flight.rs` (#1707,
-/// campsite rule #1116). Every guard that recovers a declaration from SOURCE reads
+/// `catalog.rs`: the Arrow Flight family was split into `catalog_flight.rs` and the
+/// read-phase family declared in `catalog_read_phase.rs` (#1707, campsite rule
+/// #1116). Every guard that recovers a declaration from SOURCE reads
 /// this concatenation, so a constant is found wherever it is declared — reading
 /// `catalog.rs` alone would make each moved constant look UNDECLARED, which the
 /// guards report as a hard error rather than a skip.
 pub(super) const fn catalog_sources() -> &'static str {
     concat!(
         include_str!("catalog.rs"),
-        include_str!("catalog_flight.rs")
+        include_str!("catalog_flight.rs"),
+        include_str!("catalog_read_phase.rs"),
     )
 }
 
@@ -44,7 +46,7 @@ pub(super) const fn catalog_sources() -> &'static str {
 /// `catalog_*tests.rs` files declare NO metric-name constants, so they are named
 /// here as deliberately-unscanned rather than left to be discovered.
 pub(super) fn assert_every_catalog_source_is_scanned() {
-    const SCANNED: [&str; 2] = ["catalog.rs", "catalog_flight.rs"];
+    const SCANNED: [&str; 3] = ["catalog.rs", "catalog_flight.rs", "catalog_read_phase.rs"];
     const NO_DECLARATIONS: [&str; 3] = [
         "catalog_registry.rs",
         "catalog_tests.rs",
@@ -64,6 +66,32 @@ pub(super) fn assert_every_catalog_source_is_scanned() {
             "{name} is a catalog source that no declaration guard scans — add it to \
              `catalog_sources()` (and to SCANNED here), or the guards go blind to the \
              metric-name constants it declares"
+        );
+    }
+}
+
+/// Fail if a future split adds an `operator_docs_annotations*.rs` that the
+/// annotation-block parser does not scan (issue #1707) — same shape and same
+/// reason as [`assert_every_catalog_source_is_scanned`].
+pub(super) fn assert_every_annotation_source_is_scanned() {
+    const SCANNED: [&str; 2] = [
+        "operator_docs_annotations.rs",
+        "operator_docs_annotations_read_phase.rs",
+    ];
+    let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/observability");
+    let mut found: Vec<String> = std::fs::read_dir(&dir)
+        .expect("observability source dir must be readable")
+        .filter_map(|e| e.ok())
+        .filter_map(|e| e.file_name().into_string().ok())
+        .filter(|n| n.starts_with("operator_docs_annotations") && n.ends_with(".rs"))
+        .collect();
+    found.sort();
+    for name in &found {
+        assert!(
+            SCANNED.contains(&name.as_str()),
+            "{name} is an operator-annotation table that the annotation-block parser \
+             does not scan — add it here (and to `operator_docs_annotations::\
+             ANNOTATION_TABLES`), or the disclosure guards go blind to its entries"
         );
     }
 }
@@ -396,7 +424,14 @@ const STATS_ONLY_DOC_DISCLOSURE: &str = "NOT emitted as a live OTel instrument";
 /// belonging to that entry.
 fn annotation_blocks() -> std::collections::HashMap<String, String> {
     const NAME: &str = "name: catalog::";
-    let src = include_str!("operator_docs_annotations.rs");
+    // BOTH annotation tables (issue #1707: the read-phase family is declared in a
+    // sibling file), or a moved/added entry's prose would be invisible to the
+    // disclosure guards — a guard whose subject set silently shrinks passes.
+    assert_every_annotation_source_is_scanned();
+    let src = concat!(
+        include_str!("operator_docs_annotations.rs"),
+        include_str!("operator_docs_annotations_read_phase.rs"),
+    );
     let starts: Vec<usize> = src.match_indices(NAME).map(|(i, _)| i).collect();
     let mut out = std::collections::HashMap::new();
     for (n, &start) in starts.iter().enumerate() {

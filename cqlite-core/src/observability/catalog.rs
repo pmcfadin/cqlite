@@ -587,6 +587,39 @@ pub const MEMTABLE_ROWS: &str = "cqlite.memtable.rows";
 /// attributes.
 pub const WAL_SYNC_DURATION: &str = "cqlite.wal.sync.duration";
 
+/// `cqlite.wal.size` — gauge `By` (issue #1707).
+///
+/// Current on-disk size of the active write-ahead log segment, in bytes, reported
+/// by the write engine after each successful mutation (the same seam that reports
+/// the memtable gauges) — the engine already tracks it, so nothing is sampled or
+/// stat'ed to produce this.
+///
+/// **Healthy vs alarming**: saw-tooths — it grows with writes and drops back when a
+/// flush truncates/rotates the log. A level that only ever climbs means flushes are
+/// not keeping up (or are not happening), which is both a durability-replay-time
+/// problem and a disk-space one: replay cost at next open is a function of this
+/// size, so cross-check [`WAL_REPLAY_DURATION`]. **Attributes**: none.
+pub const WAL_SIZE: &str = "cqlite.wal.size";
+
+/// `cqlite.wal.replay.duration` — gauge `s` (issue #1707).
+///
+/// How long the LAST write-ahead-log replay took, in seconds. A GAUGE rather than a
+/// histogram on purpose: replay happens EXACTLY ONCE per engine open, so a
+/// histogram would hold a single sample per process — a distribution with nothing to
+/// distribute — while a gauge reads correctly as "this process's startup replay cost
+/// N seconds".
+///
+/// **Emitted unconditionally at engine open, including the 0-entry case**: a fresh
+/// WAL with nothing to replay genuinely took ~0s, and that IS a measurement — the
+/// absence rule forbids inventing a value nobody measured, not reporting a real
+/// measurement that happens to be small. Absence of this series therefore means
+/// "no engine was opened in this process", never "replay was skipped".
+///
+/// **Healthy vs alarming**: near-zero on a clean shutdown; seconds means a crash
+/// left a large log, which directly delays open — pair it with [`WAL_SIZE`], whose
+/// growth is what makes this number grow. **Attributes**: none.
+pub const WAL_REPLAY_DURATION: &str = "cqlite.wal.replay.duration";
+
 /// `cqlite.flush.duration` — histogram `s`.
 ///
 /// Distribution of memtable→SSTable flush durations in seconds. No
@@ -922,6 +955,17 @@ pub const FLIGHT_WARM_TABLES: &str = "cqlite.flight.warm_tables";
 /// here. Such post-END_STREAM resets are an expected, benign transport event, not
 /// an application error.
 pub const ERRORS_TOTAL: &str = "cqlite.errors.total";
+
+/// Read-path PHASE timing histograms + the reader-reported fd gauge (issue #1707)
+/// live in a sibling file so `catalog.rs` stays inside the campsite-rule source
+/// target (#1116). Re-exported so every public path (`catalog::READ_PHASE_IO`, …)
+/// is unchanged.
+#[path = "catalog_read_phase.rs"]
+mod read_phase;
+
+pub use read_phase::{
+    READER_FDS_OPEN, READ_PHASE_DECODE, READ_PHASE_DECOMPRESS, READ_PHASE_IO, READ_PHASE_MERGE,
+};
 
 /// Arrow Flight gRPC metric names (`cqlite.rpc.*`, `cqlite.warm.cache.*`,
 /// `cqlite.flight.admission.*`) live in a sibling file so `catalog.rs` stays
