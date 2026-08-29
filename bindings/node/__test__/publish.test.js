@@ -187,9 +187,38 @@ describe('npm Publishing Validation (Issue #314)', () => {
   });
 
   describe('Engine Requirements', () => {
-    test('requires Node.js 18+', () => {
+    // Issue #1459. This assertion is EXACT rather than a loose `/>=?\s*18/`
+    // match, because that pattern accepted two ranges that were both FALSE:
+    //
+    //   ">= 18"        — 18.0.0-18.16.x cannot load the module at all
+    //   ">= 18.17.0"   — still swept in 19.x and 20.0-20.2
+    //
+    // The module is built against Node-API 9 (`napi9` in Cargo.toml), which
+    // ships in 18.17.0+ and 20.3.0+ but NEVER in 19.x or 20.0-20.2 — so the
+    // supported set is genuinely discontinuous and no single `>=` can express
+    // it. The `smoke-floor` matrix in .github/workflows/node-ci.yml executes
+    // BOTH lower boundaries; this test is what keeps the advertised range and
+    // that matrix from drifting apart.
+    //
+    // Deliberately a string compare, not a semver range evaluation: `semver` is
+    // only a TRANSITIVE dependency here (devDependencies are @napi-rs/cli,
+    // @types/node, jest, ts-node, typescript), and asserting a published
+    // compatibility claim through an undeclared package would be a hidden
+    // coupling. Any edit to the range fails this test loudly, which is the
+    // behaviour we want on a claim that has already been wrong twice.
+    const SUPPORTED_NODE_RANGE = '^18.17.0 || >= 20.3.0';
+
+    test('advertises the exact discontinuous napi9-compatible range', () => {
       expect(pkg.engines).toBeDefined();
-      expect(pkg.engines.node).toMatch(/>=?\s*18/);
+      expect(pkg.engines.node).toBe(SUPPORTED_NODE_RANGE);
+    });
+
+    test('the lockfile root mirrors engines.node (npm writes it there too)', () => {
+      const lock = JSON.parse(
+        fs.readFileSync(path.join(__dirname, '..', 'package-lock.json'), 'utf8')
+      );
+      expect(lock.packages['']).toBeDefined();
+      expect(lock.packages[''].engines.node).toBe(SUPPORTED_NODE_RANGE);
     });
   });
 
