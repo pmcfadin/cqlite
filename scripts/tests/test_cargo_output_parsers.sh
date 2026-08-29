@@ -283,6 +283,68 @@ else
 fi
 
 # ─────────────────────────────────────────────────────────────────────────────────────
+# (A4) The OTHER shipped parse site: run_arrow_parity_guard_cmd (`arrow-parity-guard`).
+#      Its `test result:` parse is colour-SAFE today (libtest text, measured identical
+#      both ways) and its failure direction is a FALSE RED, so #3400 routes it through
+#      _ansi_stripped_log as BELT. Exercised here with a stub `cargo` so the belt is
+#      proven not to have broken the guard in either direction.
+# ─────────────────────────────────────────────────────────────────────────────────────
+python3 - "$GATE" "$tmp/arrow_guard.sh" <<'ARROWPY'
+import re, sys
+gate, out = sys.argv[1], sys.argv[2]
+lines = open(gate, encoding='utf-8').read().split('\n')
+
+
+def extract(start_re, end_re):
+    for i, l in enumerate(lines):
+        if re.match(start_re, l):
+            for j in range(i + 1, len(lines)):
+                if re.match(end_re, lines[j]):
+                    return '\n'.join(lines[i:j + 1])
+            break
+    return ''
+
+
+helper = extract(r'^_ansi_stripped_log\(\) \{', r'^\}')
+guard = extract(r'^run_arrow_parity_guard_cmd\(\) \{', r'^\}')
+if not helper.strip() or not guard.strip():
+    print('EXTRACT-FAIL', file=sys.stderr); sys.exit(2)
+if '_ansi_stripped_log' not in guard:
+    print('EXTRACT-FAIL: run_arrow_parity_guard_cmd does not call _ansi_stripped_log',
+          file=sys.stderr)
+    sys.exit(2)
+open(out, 'w', encoding='utf-8').write(helper + '\n\n' + guard + '\n')
+ARROWPY
+arrow_extract_rc=$?
+if [ "$arrow_extract_rc" -ne 0 ]; then
+  bad "extraction of run_arrow_parity_guard_cmd (+ helper) from agent-gate.sh FAILED (rc=$arrow_extract_rc) — the arrow-parity-guard parse is uncertified"
+else
+  ok "extracted run_arrow_parity_guard_cmd from the shipped agent-gate.sh (it calls _ansi_stripped_log)"
+  # Stub `cargo`: emits a COLOURED cargo log. $STUB_PASSED controls the reported count.
+  cat >"$tmp/arrow_stub.sh" <<STUB
+cargo() {
+  printf '%s     Running%s tests/issue_1495.rs (target/debug/deps/x-1)\n' '${ESC}[1m${ESC}[92m' '${ESC}[0m'
+  printf '\nrunning %s tests\n\n' "\$STUB_PASSED"
+  printf 'test result: ok. %s passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s\n' "\$STUB_PASSED"
+}
+STUB
+  arrow_rc_ok=0
+  ( set +e; . "$tmp/arrow_guard.sh"; STUB_PASSED=3; . "$tmp/arrow_stub.sh"; run_arrow_parity_guard_cmd >/dev/null 2>&1; exit $? ) || arrow_rc_ok=$?
+  arrow_rc_zero=0
+  ( set +e; . "$tmp/arrow_guard.sh"; STUB_PASSED=0; . "$tmp/arrow_stub.sh"; run_arrow_parity_guard_cmd >/dev/null 2>&1; exit $? ) || arrow_rc_zero=$?
+  if [ "$arrow_rc_ok" -eq 0 ]; then
+    ok "arrow-parity-guard: exits 0 on a COLOURED cargo log reporting 3 passed (the belt introduced no false red)"
+  else
+    bad "arrow-parity-guard: exited $arrow_rc_ok (expected 0) on a coloured log reporting 3 passed — FALSE RED"
+  fi
+  if [ "$arrow_rc_zero" -ne 0 ]; then
+    ok "arrow-parity-guard: still FAILs on a COLOURED cargo log reporting 0 passed (the vacuous-skip protection survives)"
+  else
+    bad "arrow-parity-guard: PASSed a coloured log reporting 0 passed — the vacuous-skip protection is gone"
+  fi
+fi
+
+# ─────────────────────────────────────────────────────────────────────────────────────
 # (B) The structural lint.
 # ─────────────────────────────────────────────────────────────────────────────────────
 lint_out=""
