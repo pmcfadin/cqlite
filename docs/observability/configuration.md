@@ -25,7 +25,7 @@ WITHOUT the `observability` cargo feature: OpenTelemetry is compiled out, so NO
 metrics and NO traces will be emitted and the OTLP endpoint is never contacted —
 this is NOT a collector or endpoint problem. Rebuild with
 `--features observability` to export telemetry, or disable OpenTelemetry
-(CQLITE_OTEL_ENABLED=0) to silence this warning.
+(e.g. CQLITE_OTEL_ENABLED=0, or drop --otel-enabled) to silence this warning.
 ```
 
 It is a warning, never an error — the process runs normally, just without

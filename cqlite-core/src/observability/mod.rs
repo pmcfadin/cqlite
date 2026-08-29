@@ -391,11 +391,16 @@ pub fn init(cfg: ObservabilityConfig) -> Result<ObservabilityGuard> {
     // the same constraint, since every host composes the fmt layer onto STDERR
     // so stdout stays clean for `--out json/csv` (issue #129).
     //
-    // Fired unconditionally on each `init` call rather than behind a `Once`:
-    // `init` IS the once-per-process startup entry point (CLI `run_main`, the
-    // Flight server, `init_once` in both bindings), so "once at init" is already
-    // "once per process", while a `Once` would additionally make the warning
-    // unobservable to the second of two tests in one binary.
+    // Fired unconditionally on each `init` call rather than behind a `Once`.
+    // Every in-repo caller invokes `init` exactly once per process (CLI
+    // `run_main`, the Flight server, `init_once` in both bindings), so "once at
+    // init" is "once per process" for them — but that is a CONVENTION of those
+    // callers, NOT something this function enforces. `cqlite-core` is a library:
+    // an out-of-tree embedder that calls `init` per connection or per request
+    // with `enabled = true` on a default build gets one WARN per call. A `Once`
+    // would bound that, at the cost of making the warning unobservable to the
+    // second of two tests in one binary; if per-call spam ever shows up in the
+    // field, that is the tradeoff to revisit.
     //
     // `cfg.enabled` is the ONLY field a feature-off build silently discards, so
     // it is the only one that warns. `verify_presence_oracle` is genuinely
@@ -429,7 +434,8 @@ pub fn init(cfg: ObservabilityConfig) -> Result<ObservabilityGuard> {
              metrics and NO traces will be emitted and the OTLP endpoint is never \
              contacted — this is NOT a collector or endpoint problem. Rebuild with \
              `--features observability` to export telemetry, or disable \
-             OpenTelemetry (CQLITE_OTEL_ENABLED=0) to silence this warning."
+             OpenTelemetry (e.g. CQLITE_OTEL_ENABLED=0, or drop --otel-enabled) \
+             to silence this warning."
         );
     }
 
