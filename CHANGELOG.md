@@ -9,11 +9,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Removed
 
-- **BREAKING (pre-1.0): the schema JSON exporter and the never-compiled CQL
+- **BREAKING (public API): the schema JSON exporter and the never-compiled CQL
   generator are deleted (#1715, epic #1688 / audit finding AK4; ~2.0k LOC).**
   Owner-DECIDED delete (capstone ledger #9, 2026-07-01) — the surface had zero
   callers anywhere in the workspace and no Cassandra-side parity coverage.
-  - Removed `cqlite_core::schema::json_exporter` and the 13 types it re-exported
+  - Removed `cqlite_core::schema::json_exporter` and the 14 types it re-exported
     through `cqlite_core::schema` under the `experimental` feature
     (`JsonExporter`, `JsonExportConfig`, `JsonFormat`, `JsonSchema`, `JsonTable`,
     `JsonColumn`, `JsonPrimaryKey`, `JsonClusteringKey`, `JsonIndex`, `JsonUDT`,
