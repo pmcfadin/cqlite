@@ -10,6 +10,7 @@ use std::path::Path;
 use std::sync::Arc;
 
 use crate::cli::OutputFormat;
+use crate::output::value_fmt::ValueFormatter;
 
 /// Execute the read-sstable command
 #[allow(clippy::too_many_arguments)]
@@ -208,7 +209,7 @@ fn display_table_format(
         ]);
 
         if !keys_only {
-            let value_str = format_value(value, raw);
+            let value_str = render_scan_row(value, raw);
             row.add_cell(Cell::new(&value_str));
         }
 
@@ -237,7 +238,7 @@ fn display_json_format(
                 "key": key_str,
             })
         } else {
-            let value_str = format_value(value, raw);
+            let value_str = render_scan_row(value, raw);
             serde_json::json!({
                 "table_id": table_id_str,
                 "key": key_str,
@@ -275,7 +276,7 @@ fn display_csv_format(
         if keys_only {
             wtr.write_record([&table_id_str, &key_str])?;
         } else {
-            let value_str = format_value(value, raw);
+            let value_str = render_scan_row(value, raw);
             wtr.write_record([&table_id_str, &key_str, &value_str])?;
         }
     }
@@ -291,28 +292,45 @@ fn format_row_key(key: &RowKey, _raw: bool) -> String {
     format!("{:?}", key)
 }
 
-/// Format a scanned row's value for display.
+/// Render a scanned row for display.
 ///
 /// Issue #1334: the scan carries the row as a [`ScanRow`]. A live row is rendered
-/// as a `{name: value, …}` object (using each cell value's `Display`); a marker
-/// (row tombstone / null row) renders its inner value.
-fn format_value(value: &ScanRow, raw: bool) -> String {
+/// as a `{name: value, …}` object; a marker (row tombstone / null row) renders its
+/// inner value.
+///
+/// Issue #1717 (AK7): every VALUE is rendered by the canonical
+/// [`ValueFormatter`] — the same cqlsh-compatible mapping the table/JSON/CSV
+/// output writers use. This function previously hand-rolled its own
+/// `format_value`, rendering each cell with `Value`'s `Display` impl (a
+/// debug-oriented, type-tagged form: `'text'`, `BLOB(n bytes)`,
+/// `TIMESTAMP(1759713126059)`, `counter:41`, `UUID(<unhyphenated hex>)`), so a
+/// formatting fix landing in `ValueFormatter` silently missed `read-sstable`.
+/// That fork is gone: the only logic left here is the row-shape wrapper, which
+/// contains no value formatting of its own.
+///
+/// `raw` is unchanged and deliberately NOT routed through the formatter: it is a
+/// verbatim structural dump of the scan carrier (`Debug`), not a value rendering.
+pub fn render_scan_row(row: &ScanRow, raw: bool) -> String {
     if raw {
         // Show raw representation
-        return format!("{:?}", value);
+        return format!("{:?}", row);
     }
-    match value {
-        ScanRow::Row(cells) => {
-            let inner: Vec<String> = cells
-                .iter()
-                .map(|(name, v)| format!("{}: {}", name, v))
-                .collect();
-            format!("{{{}}}", inner.join(", "))
-        }
+    match row {
+        ScanRow::Row(cells) => render_cells(cells.iter().map(|(name, v)| (name.as_ref(), v))),
         // A raw undecoded fallback row renders its bytes as a single "data" blob.
         ScanRow::RawRow(bytes) => {
-            format!("{{data: {}}}", cqlite_core::Value::blob(bytes.clone()))
+            let blob = Value::blob(bytes.clone());
+            render_cells(std::iter::once(("data", &blob)))
         }
-        ScanRow::Marker(v) => format!("{}", v),
+        ScanRow::Marker(v) => ValueFormatter::format_value(v),
     }
+}
+
+/// Render `name: value` cells as a `{…}` object, formatting every value with the
+/// canonical [`ValueFormatter`] (issue #1717).
+fn render_cells<'a>(cells: impl Iterator<Item = (&'a str, &'a Value)>) -> String {
+    let inner: Vec<String> = cells
+        .map(|(name, v)| format!("{}: {}", name, ValueFormatter::format_value(v)))
+        .collect();
+    format!("{{{}}}", inner.join(", "))
 }
