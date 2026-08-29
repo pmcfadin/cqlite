@@ -70,7 +70,8 @@
 # Put `cargo-colour-lint-allow` in the parse line, or in a comment within TWO lines above
 # it, followed by a one-line rationale. A bare placeholder (`why`, `todo`, `tbd`,
 # `fixme`) or an unsubstituted `<…>` template is REFUSED as MALFORMED (claim.sh's rule) —
-# a marker with nothing recordable in it is not a rationale.
+# a marker with nothing recordable in it is not a rationale. The rationale must be at least
+# 12 characters after placeholder-stripping — enough to say WHY, not enough to be a word.
 #
 # ── KNOWN COVERAGE BOUNDARIES, stated rather than implied ──────────────────────────────
 #   * Default scan target is `scripts/agent-gate.sh` ONLY. It is the only non-test shell
@@ -78,6 +79,10 @@
 #     `grep -rln 'test result:|Running tests/|Running unittests' --include='*.sh'` returns
 #     it and one self-test that PLANTS such text as a fixture). Scan another file by
 #     passing its path as an argument.
+#   * A `#` comment is recognised only as a WHOLE LINE (first non-blank character). Cargo text
+#     quoted in an INLINE trailing comment on a line that also performs a match would be read as
+#     part of the parse. The consequence is a false FAIL with a visible remedy (move the note to
+#     its own line, or mark the site), never a false pass — the direction this guard must err in.
 #   * `STRIPPED_VARS` is collected file-globally and is not flow-sensitive: a variable
 #     assigned from `_ansi_stripped_log` somewhere and REASSIGNED from a raw source
 #     elsewhere would still read as stripped. Bash dataflow analysis is out of scope; the
