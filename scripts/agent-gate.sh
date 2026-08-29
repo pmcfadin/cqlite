@@ -6144,7 +6144,7 @@ run_flight_tests() {
     # defect round 20 opened on this very census, one layer down: the verdict is right and the
     # remedy it points at is useless.
     local _fx_base="$CQLITE_DATASETS_ROOT/sstables/test_timeseries"
-    local _fx_entry _fx_seen=0 _fx_bad="" _fx_basefail=""
+    local _fx_entry _fx_seen=0 _fx_bad="" _fx_basefail="" _fx_st_out _fx_st_rc _fx_list _fx_enum_rc
     if [ ! -d "$_fx_base" ]; then
       _fx_basefail="not-a-directory"
     elif [ ! -r "$_fx_base" ] || [ ! -x "$_fx_base" ]; then
@@ -6158,6 +6158,21 @@ run_flight_tests() {
     # yields NAMES, including dangling symlinks, which is the invariant round 33 established (the
     # preflight must judge exactly the set the consumer enumerates). `-print0` because a corpus path
     # may contain spaces.
+    # mktemp, NOT "$LOG_DIR/..." — the behavioural harness extracts this block and runs it with
+    # no LOG_DIR, and depending on an ambient variable to enumerate the subject set fails open in
+    # precisely the way this status capture was added to close (caught by the r32 cases).
+    _fx_list=$(mktemp "${TMPDIR:-/tmp}/agent-gate-fixtures.XXXXXX") || _fx_list=""
+    if [ -z "$_fx_list" ]; then
+      _fx_enum_rc=99
+    else
+      find -H "$_fx_base" -maxdepth 1 -name 'sensor_data-*' -print0 > "$_fx_list" 2>/dev/null
+      _fx_enum_rc=$?
+    fi
+    if [ "$_fx_enum_rc" -ne 0 ]; then
+      # FAIL-CLOSED on an unenumerable corpus: the alternative is a check over an unknown subset.
+      _fx_basefail="fixture enumeration FAILED (find exit $_fx_enum_rc under $_fx_base) — the"
+      _fx_basefail="$_fx_basefail per-fixture checks below would have run over an unknown subset"
+    fi
     while IFS= read -r -d '' _fx_entry; do
       _fx_seen=$((_fx_seen + 1))
       if [ -L "$_fx_entry" ] && [ ! -e "$_fx_entry" ]; then
@@ -6169,7 +6184,15 @@ run_flight_tests() {
         # permission problem and a missing fixture need different remedies, and the check that
         # cannot tell them apart sends the reader to the wrong one.
         _fx_bad="$_fx_bad $(basename "$_fx_entry")(unreadable-directory)"
-      elif [ -z "$(find -H "$_fx_entry" -maxdepth 1 -name '*-Statistics.db' -print -quit 2>/dev/null)" ]; then
+      elif _fx_st_out=$(find -H "$_fx_entry" -maxdepth 1 -name '*-Statistics.db' -print -quit 2>/dev/null); _fx_st_rc=$?; [ "$_fx_st_rc" -ne 0 ]; then
+        # A FAILED SCAN IS NOT AN ABSENT FIXTURE (roborev job 114, Medium). `[ -z "$(find ...)" ]`
+        # collapsed both onto one branch: a find that died partway produced empty output and was
+        # reported `no-Statistics.db`, sending the reader to fetch a corpus they already have. The
+        # status is now captured and reported as its own cause. Same three-valued discipline as the
+        # grep sites: 0 = answered, non-zero = could not answer, and "could not answer" is never
+        # folded into an answer.
+        _fx_bad="$_fx_bad $(basename "$_fx_entry")(statistics-scan-failed:find-exit-$_fx_st_rc)"
+      elif [ -z "$_fx_st_out" ]; then
         # `-H` so a VALID symlink to a fixture directory is followed (roborev round-35, Medium).
         # `find` defaults to `-P` and does not follow its starting point, so a `sensor_data-*`
         # symlink pointing at a real fixture dir yielded nothing and was reported
@@ -6187,7 +6210,14 @@ run_flight_tests() {
         # at all and the check means the same thing under every shell option.
         _fx_bad="$_fx_bad $(basename "$_fx_entry")(no-Statistics.db)"
       fi
-    done < <(find -H "$_fx_base" -maxdepth 1 -name 'sensor_data-*' -print0 2>/dev/null)
+    done < "$_fx_list"
+    [ -n "$_fx_list" ] && rm -f "$_fx_list"
+    # ENUMERATED VIA A FILE, NOT A PROCESS SUBSTITUTION (roborev job 114, Medium). `done < <(find
+    # ...)` DISCARDS find's exit status, so a partial enumeration — a permission error midway, a
+    # vanished directory — yielded fewer entries and the "every match must qualify" check passed
+    # over the survivors. That is the empty/partial-subject-set shape this component set exists to
+    # remove, in the component set itself: fewer subjects cannot fail a per-subject check.
+    # A file makes the status observable; it is read AFTER the loop, below.
     # `-H` on the OUTER enumeration as well (roborev round-38, Medium). Round 35 added it to the
     # per-entry find and left this one at the default `-P`, so a corpus whose `test_timeseries`
     # BASE directory is itself a symlink enumerated NOTHING — the preflight then failed the whole
@@ -6346,7 +6376,9 @@ run_flight_tests() {
     gated_lines="$gated_lines $grel[$ggate]"
   done <<< "$gated_meta"
   census+=("  OF THOSE, $gated_n contain an INNER cfg attribute (#![cfg(...)] / #![cfg_attr(...)]),")
-  census+=("       reported as OCCURRENCES with file:line, verbatim, below. NOT a claim that each is")
+  census+=("       reported as OCCURRENCES with file:line and the attribute OPENING LINE below —")
+  census+=("       not verbatim: a multiline attribute is truncated at its first line, so compare the")
+  census+=("       file:line, which is authoritative. NOT a claim that each is")
   census+=("       CRATE-level: deciding that needs a Rust parser, and five review rounds showed a")
   census+=("       line scan cannot approximate it (a module-level inner attribute looks identical")
   census+=("       here). The file:line is authoritative — open it. A crate-level gate naming a feature")
@@ -6376,7 +6408,7 @@ run_flight_tests() {
   local cl
   for cl in "${census[@]}"; do echo ">>> [$name] $cl"; done
   [ -n "$rf_reasons" ] && echo ">>> [$name] declared targets with unmet required-features:$rf_reasons"
-  [ -n "$gated_lines" ] && echo ">>> [$name] targets with an inner cfg attribute (file:line, verbatim; crate-level-ness NOT claimed):$gated_lines"
+  [ -n "$gated_lines" ] && echo ">>> [$name] targets with an inner cfg attribute (file:line + attribute OPENING LINE, truncated if multiline; crate-level-ness NOT claimed):$gated_lines"
   echo ">>> [$name] enabled features (cargo tree -p, package-scoped):$enabled"
 
   # The log opens WITH the census (`>` here, `>>` for cargo below), so the omission is
@@ -6385,7 +6417,7 @@ run_flight_tests() {
     echo "==== [$name] COVERAGE CENSUS (issue #1699 / #3384) ===="
     for cl in "${census[@]}"; do echo "$cl"; done
     [ -n "$rf_reasons" ] && echo "declared targets with unmet required-features:$rf_reasons"
-    [ -n "$gated_lines" ] && echo "targets with an inner cfg attribute (file:line, verbatim; crate-level-ness NOT claimed):$gated_lines"
+    [ -n "$gated_lines" ] && echo "targets with an inner cfg attribute (file:line + attribute OPENING LINE, truncated if multiline; crate-level-ness NOT claimed):$gated_lines"
     echo "enabled features (cargo tree -p, package-scoped):$enabled"
     echo "==== end census ===="
   } > "$log"

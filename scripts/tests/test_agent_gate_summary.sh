@@ -4252,7 +4252,40 @@ for decl in rf_unmet negonly; do
   fi
 done
 
-ASSERT_FLOOR=370
+# --- 47. #1699: the EMITTED labels must not claim verbatim, and find must not fail open (job 114)
+# Two findings, one shape each. (a) `_crate_gated_test_targets` stopped claiming "verbatim" at job
+# 101 — but the CENSUS still emitted it, so the retired claim survived on the surface a reader acts
+# on. FOURTH instance of source-vs-emitted on this branch, which is why the assert targets EMITTED
+# strings specifically. (b) `[ -z "$(find ... 2>/dev/null)" ]` cannot tell "no match" from "find
+# failed", and `done < <(find ...)` discards the status entirely — so a partial enumeration
+# satisfied a per-subject check over the survivors, which is the empty-subject-set shape this
+# component set exists to remove, inside the component set.
+gate_src=$(cat "$GATE")
+emit_verbatim=$(printf '%s\n' "$gate_src" | grep -nE '^[[:space:]]*(census\+=|lh_census\+=|echo )' | grep -F 'verbatim' | grep -vF 'not verbatim' | grep -c . || true)
+if [ "${emit_verbatim:-0}" -gt 0 ]; then
+  bad "1699-emit-noverbatim: $emit_verbatim EMITTED string(s) still claim 'verbatim' while the scan captures only an attribute opening line — the retired claim survives on the surface a reader acts on"
+else
+  ok "1699-emit-noverbatim: no emitted string claims verbatim capture (the sole 'not verbatim' mention is the disclaimer)"
+fi
+# the opening-line wording must actually be present in the emitted census, not merely absent-of-lie
+if [ "$(printf '%s\n' "$gate_src" | grep -cE '(census\+=|echo )[^#]*OPENING LINE')" -ge 3 ]; then
+  ok "1699-emit-openingline: the emitted census states that the attribute is an OPENING LINE"
+else
+  bad "1699-emit-openingline: the emitted census does not say what it DOES report — dropping a false claim without stating the true one leaves the reader guessing"
+fi
+# (b) both find sites must observe the exit status
+if [ "$(printf '%s\n' "$gate_src" | grep -cE 'done < <\(find ')" -gt 0 ]; then
+  bad "1699-find-status: a find is consumed by process substitution, whose exit status is DISCARDED — a partial enumeration would satisfy the per-subject checks over the survivors"
+else
+  ok "1699-find-status: no find is consumed by a status-discarding process substitution"
+fi
+if [ "$(printf '%s\n' "$gate_src" | sed 's/^[[:space:]]*#.*$//' | grep -cE '\[ -z "\$\(find ')" -gt 0 ]; then
+  bad "1699-find-tristate: a find result is tested with [ -z \"\$(find ...)\" ], which reads a FAILED scan as 'no match' — the two need different remedies"
+else
+  ok "1699-find-tristate: no find result is collapsed onto a two-valued emptiness test"
+fi
+
+ASSERT_FLOOR=374
 if [ "$PASS" -lt "$ASSERT_FLOOR" ]; then
   echo "FAIL - assert-floor: only $PASS assertions ran, floor is $ASSERT_FLOOR. Sections are being SKIPPED or dying silently (an extraction that broke, a subshell aborting under set -u), and 'failed: 0' over a shrunken subject set is exactly the vacuous pass this suite tests for."
   FAIL=$((FAIL + 1))
