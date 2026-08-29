@@ -470,8 +470,33 @@ PROC_MATCH_WORKER='[c]laude.* (-p|--print)( |$).*--agent flow-lead'
 # not the probe subshell's. RESIDUAL LIMIT: the match is still an argv substring test,
 # so a `claude --agent worker` process ELSEWHERE in the ancestry, or an unrelated
 # process carrying the literal substring, could still be counted.
+# LANE ATTRIBUTION (roborev round 35, High) — THE WORKER FAMILY IS PER-LANE, NOT PER-MACHINE.
+#
+# This probe counted EVERY matching worker on the box. That was right while one worker per machine was
+# the model; it is wrong now, and it is wrong in the direction that defeats this whole change: with
+# several lanes running, each supervisor sees its SIBLINGS' healthy workers, counts them as leftover
+# debris, holds, and after LEFTOVER_HOLD_MAX polls STOPS. So per-lane claim refs would have shipped
+# while multi-lane operation stayed serialized by a DIFFERENT machine-global mechanism — the FOURTH
+# carrier of the retracted #1930 invariant found in this PR (after the supervisor lock, `worker.md`'s
+# hard rule, and the shared claim actor).
+#
+# A pid is attributed to THIS lane by its working directory being REPO_ROOT or below. That catches the
+# case a recorded pid cannot — an orphan from a PRIOR RUN of this lane, whose pid this process never
+# knew — which is exactly what the probe exists for.
+#
+# AFFIRMATIVE ATTRIBUTION: a pid is counted only when its cwd is READ and matches. An unreadable cwd
+# (the process exited mid-probe, a permission boundary, or a platform without /proc) is NOT counted.
+# That is deliberate in both directions: the positive verdict here is "there IS leftover debris in my
+# lane", so it needs a positive measurement, and the failure mode of guessing YES is the false STOP
+# this finding is about. The cost is stated rather than hidden: on a platform without /proc, this
+# probe stops detecting cross-run orphans instead of falsely stopping healthy lanes. Override
+# PROC_PROBE_WORKER_CMD to restore machine-wide counting on such a host.
+#
+# The BUILD family is deliberately NOT lane-scoped: one gate at a time per MACHINE is a resource bound
+# that survived #1930's retraction, so a sibling's cargo/nextest is genuinely this lane's business.
+LANE_PID_FILTER="while read -r p; do c=\$(readlink \"/proc/\$p/cwd\" 2>/dev/null) || continue; case \"\$c\" in '$REPO_ROOT' | '$REPO_ROOT'/*) printf '%s\\n' \"\$p\" ;; esac; done"
 if [[ -z "${PROC_PROBE_WORKER_CMD:-}" ]]; then
-  PROC_PROBE_WORKER_CMD="pgrep -f '$PROC_MATCH_WORKER' 2>/dev/null | grep -vxF -e '$$' -e '$PPID' | wc -l | tr -d ' '"
+  PROC_PROBE_WORKER_CMD="pgrep -f '$PROC_MATCH_WORKER' 2>/dev/null | grep -vxF -e '$$' -e '$PPID' | $LANE_PID_FILTER | wc -l | tr -d ' '"
 fi
 if [[ -z "${PROC_PROBE_BUILD_CMD:-}" ]]; then
   PROC_PROBE_BUILD_CMD="pgrep -f '$PROC_MATCH_BUILD' 2>/dev/null | grep -vxF -e '$$' -e '$PPID' | wc -l | tr -d ' '"
@@ -482,7 +507,11 @@ fi
 # count-set so they can't drift, with the same $$/$PPID self-exclusion. Best-effort — an
 # empty result yields "<unavailable>" in the page.
 if [[ -z "${PROC_LIST_WORKER_CMD:-}" ]]; then
-  PROC_LIST_WORKER_CMD="pgrep -lf '$PROC_MATCH_WORKER' 2>/dev/null | grep -vE '^($$|$PPID) '"
+  # LIST-FROM-COUNT-SET still holds (roborev 1839/1821): the same pgrep, the same self-exclusion and the
+  # same $LANE_PID_FILTER, so the set named in a page cannot drift from the set that triggered it. Only
+  # the rendering differs — pids are mapped to command lines at the end rather than up front, because the
+  # attribution filter needs bare pids.
+  PROC_LIST_WORKER_CMD="pgrep -f '$PROC_MATCH_WORKER' 2>/dev/null | grep -vxF -e '$$' -e '$PPID' | $LANE_PID_FILTER | { ids=\$(tr '\\n' ' '); [ -n \"\$ids\" ] && ps -o pid=,args= -p \$(printf '%s' \"\$ids\" | tr ' ' ',' | sed 's/,\$//') 2>/dev/null; }"
 fi
 if [[ -z "${PROC_LIST_BUILD_CMD:-}" ]]; then
   PROC_LIST_BUILD_CMD="pgrep -lf '$PROC_MATCH_BUILD' 2>/dev/null | grep -vE '^($$|$PPID) '"
@@ -1102,30 +1131,66 @@ supervisor_claim_actor() {
 #
 # CAS, never a bare write: `--expect <sha>` means a live peer that moved the ref wins (ADOPT-LOST), and
 # the adopt commit records who took it and why.
+# NEVER PERMANENTLY FOREIGN FOR THE RUN (roborev round 35, Medium). The first cut read the claim once
+# and returned silently on failure — so a transient outage at startup left the lane running under an
+# actor its own claim does not recognise for the WHOLE run: precisely the stranding this migration
+# exists to prevent, merely rarer and harder to see.
+#
+# Retried on two timescales: a bounded burst here for a blip, and again at the top of EVERY iteration
+# until it settles, so a longer outage self-heals the moment the remote comes back.
+#
+# DELIBERATE DEVIATION from the review's suggested fix, stated rather than glossed. The reviewer asked
+# for a preflight FAILURE until migration succeeds. That trades a transient failure for a permanent
+# one — a supervisor that refuses to start whenever the remote is unreachable. Re-attempting every
+# iteration removes "permanently foreign" at no availability cost, and a lane cannot do useful work
+# without the remote anyway. The WARN names the state on every attempt, so a persistent outage is loud.
+CLAIM_MIGRATION_SETTLED=0
+CLAIM_MIGRATION_RETRIES="${CLAIM_MIGRATION_RETRIES:-3}"
 supervisor_migrate_legacy_claim() {
-  [[ -n "$LOCK_CMD" ]] || return 0
-  # An operator-pinned actor is not ours to migrate away from.
-  [[ "${CLAIM_ACTOR:-}" == "$LEGACY_CLAIM_ACTOR" || -z "${CLAIM_ACTOR:-}" ]] && return 0
-  local branch n st sha holder_machine holder_actor
+  # SETTLED = migrated, or affirmatively nothing to migrate. A cheap no-op on every later call.
+  [[ "$CLAIM_MIGRATION_SETTLED" == 1 ]] && return 0
+  [[ -n "$LOCK_CMD" ]] || { CLAIM_MIGRATION_SETTLED=1; return 0; }
+  # An operator-pinned actor is not ours to migrate away from — SETTLED, not merely skipped.
+  [[ "${CLAIM_ACTOR:-}" == "$LEGACY_CLAIM_ACTOR" || -z "${CLAIM_ACTOR:-}" ]] && { CLAIM_MIGRATION_SETTLED=1; return 0; }
+  local branch n st sha holder_machine holder_actor attempt
   # `symbolic-ref --short`, not `rev-parse --abbrev-ref`: it asks the question actually being asked —
   # "which BRANCH is this worktree on" — and answers it without resolving a commit, so it also works on
   # an unborn HEAD. `rev-parse --abbrev-ref HEAD` fails outright there ("ambiguous argument 'HEAD'"),
   # which is how the positive control for this function first came back with no call at all. A DETACHED
   # worktree makes `symbolic-ref` exit non-zero, which is the right answer: it names no issue.
-  branch="$(git -C "$REPO_ROOT" symbolic-ref --short HEAD 2>/dev/null)" || return 0
+  branch="$(git -C "$REPO_ROOT" symbolic-ref --short HEAD 2>/dev/null)" || { CLAIM_MIGRATION_SETTLED=1; return 0; }
   case "$branch" in
     issue-[0-9]*) n="${branch#issue-}"; n="${n%%-*}" ;;
-    *) return 0 ;;
+    *) CLAIM_MIGRATION_SETTLED=1; return 0 ;;
   esac
   case "$n" in
-    '' | *[!0-9]* | 0*) return 0 ;;
+    '' | *[!0-9]* | 0*) CLAIM_MIGRATION_SETTLED=1; return 0 ;;
   esac
-  st="$($LOCK_CMD status "$n" 2>/dev/null)" || return 0
+  # A BOUNDED BURST for a blip. Deliberately NOT settled when every attempt fails: the loop re-enters.
+  st=""
+  for ((attempt = 1; attempt <= CLAIM_MIGRATION_RETRIES; attempt++)); do
+    if st="$($LOCK_CMD status "$n" 2>/dev/null)"; then break; fi
+    st=""
+    [[ "$attempt" -lt "$CLAIM_MIGRATION_RETRIES" ]] && sleep 2
+  done
+  if [[ -z "$st" ]]; then
+    log "WARN: could not read issue $n's claim after $CLAIM_MIGRATION_RETRIES attempts; this lane runs as '$CLAIM_ACTOR' while a pre-upgrade claim is held by '$LEGACY_CLAIM_ACTOR', so its own lock may read as FOREIGN until this settles. Retrying next iteration."
+    return 0
+  fi
   sha="$(supervisor_msg_token "$st" sha)"
   holder_machine="$(supervisor_msg_token "$st" machine)"
   holder_actor="$(supervisor_msg_token "$st" actor)"
   # EVERY field must be affirmatively right. A missing token is not a match.
-  [[ -n "$sha" && ${#sha} -eq 40 && "$sha" != *[!0-9a-f]* ]] || return 0
+  # 40 OR 64 lowercase hex (roborev round 35, Low): a SHA-256 repository's object ids are 64 chars, and
+  # `claim.sh` imposes NO length check of its own — it hands `--expect` straight to git — so a hard 40
+  # here was STRICTER THAN THE THING IT FEEDS and would silently skip every valid claim on such a repo.
+  # Today's reachability is zero (this repo is SHA-1), so this is consistency rather than a live bug;
+  # the asymmetry is what deserved removing, because a needlessly narrow guard reads as intentional.
+  [[ -n "$sha" && "$sha" != *[!0-9a-f]* ]] || return 0
+  case "${#sha}" in
+    40 | 64) : ;;
+    *) return 0 ;;
+  esac
   [[ "$holder_machine" == "$CLAIM_MACHINE" ]] || return 0
   [[ "$holder_actor" == "$LEGACY_CLAIM_ACTOR" ]] || return 0
   log "migrating issue $n's pre-upgrade claim (actor=$LEGACY_CLAIM_ACTOR) to this lane's actor '$CLAIM_ACTOR' via compare-and-swap on $sha"
@@ -1133,6 +1198,7 @@ supervisor_migrate_legacy_claim() {
     --reason "upgrade-lane-actor:pre-upgrade-claim-held-by-${LEGACY_CLAIM_ACTOR}-on-this-machine-adopted-by-lane-actor" \
     >/dev/null 2>&1; then
     log "claim for issue $n adopted under '$CLAIM_ACTOR'"
+    CLAIM_MIGRATION_SETTLED=1
   else
     # NOT fatal, and deliberately not retried: a peer may have moved the ref (ADOPT-LOST is the CAS
     # working), or the remote may be unreachable. Either way the claim is untouched and the worker's
@@ -1928,6 +1994,11 @@ main() {
     # stuck — done before the ceiling check so a retroactive credit can satisfy it.
     credit_merged_pending_prs
     [[ "$ISSUES_DONE" -ge "$MAX_ISSUES" ]] && finalize_exit "budget-issues" 0
+
+    # Re-attempt an UNSETTLED legacy-claim migration (roborev round 35, Medium): a transient outage at
+    # startup must not leave this lane foreign to its own lock for the rest of the run. Once settled
+    # this returns immediately, so it costs nothing.
+    supervisor_migrate_legacy_claim
 
     preflight_wait
 
