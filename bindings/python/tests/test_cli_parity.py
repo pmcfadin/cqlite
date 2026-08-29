@@ -34,7 +34,10 @@ Collection Identity Asymmetries (issue #1454):
 
     - `set<frozen<udt>>` → Python `list`, **not** `frozenset` (`set_to_py`
       falls back to a list because UDTs become unhashable `dict`s), while Node
-      returns a JS `Set` of objects. Canonical form: a JSON array either way.
+      returns a JS `Set` of objects. Canonical form: a JSON array either way —
+      but **NOT a sorted one**, because the Python value is indistinguishable
+      from a genuine `list<T>` here, so this row's canonical form is
+      order-SENSITIVE (a documented limitation, see M4_spec §5.3).
     - `map<k,v>` → Python `dict`, whose keys **collapse** by hash/`__eq__`
       (structurally equal non-scalar keys merge, last value wins), while a Node
       `Map` compares object keys by *reference* so equal keys stay distinct.
@@ -42,7 +45,9 @@ Collection Identity Asymmetries (issue #1454):
       keys additionally arrive as the hashable projection produced by
       `value_to_hashable_key` (`list`→`tuple`, `set`→`frozenset`,
       `udt`→`frozenset` of `(name, value)` pairs), so a UDT used as a map *key*
-      does not have the same host shape as the same UDT used as a *value*.
+      does not have the same host shape as the same UDT used as a *value* — and
+      because Node and the CLI render such a key as a UDT *object*, a UDT map
+      key is **UNSUPPORTED** under this contract rather than canonicalized.
     - `tuple<...>` → Python `tuple` but a Node `Array`, i.e. Node cannot
       distinguish `tuple<...>` from `list<T>`. Canonical form: a JSON array, so
       tuple and list normalize identically.
@@ -876,6 +881,43 @@ class TestCollectionIdentityContract:
             {"_type": "address", "street": "2 Oak Ave"},
         ]
 
+    def test_set_of_frozen_udt_canonical_form_is_order_sensitive(self):
+        """LIMITATION: `set<frozen<udt>>` is NOT sorted, so its canonical form keeps order.
+
+        Two structurally-equal UDT sets whose elements arrive in different orders
+        normalize to DIFFERENT arrays and compare unequal. This is a documented
+        gap (#1454, M4_spec §5.3 "EXCEPTION"), not a bug to fix here: the value
+        reaches the normalizer as a plain Python `list` — the same host shape as
+        a genuine `list<T>`, whose order is semantically meaningful — so sorting
+        it would corrupt every `list<T>`. Distinguishing the two needs the
+        declared CQL type, i.e. schema-aware normalization, which is a behavior
+        change and out of scope for #1454.
+
+        #1455 must handle this row explicitly (compare it order-insensitively
+        itself, or declare it unsupported); it may not assume the canonical form
+        has erased set ordering.
+        """
+        a = [_udt("address", street="1 Main St"), _udt("address", street="2 Oak Ave")]
+        b = list(reversed(a))
+        na = normalize_python_value(a, is_row_level=False)
+        nb = normalize_python_value(b, is_row_level=False)
+        assert na != nb, (
+            "order-sensitivity is the documented limitation; if this now passes "
+            "order-insensitively the canonicalization rules in M4_spec §5.3 must be updated"
+        )
+        # ...and the ONLY difference is element order: the sets are equal as sets.
+        assert sorted(na, key=_sort_key) == sorted(nb, key=_sort_key)
+
+    def test_set_of_scalars_order_insensitivity_is_the_contrast_case(self):
+        """`set<scalar>` DOES canonicalize order-insensitively — it is a `frozenset`.
+
+        The contrast with the test above is the whole point: sorting is available
+        exactly when the host shape (`frozenset`) proves the value is a set.
+        """
+        assert normalize_python_value(frozenset({"b", "a"}), is_row_level=False) == normalize_python_value(
+            frozenset({"a", "b"}), is_row_level=False
+        )
+
     def test_map_is_a_sorted_array_of_key_value_objects(self):
         """`map<k,v>` → Python `dict` → sorted array of `{"key": k, "value": v}` (asymmetry row 2)."""
         assert normalize_python_value({"b": 2, "a": 1}, is_row_level=False) == [
@@ -889,15 +931,20 @@ class TestCollectionIdentityContract:
             {"key": [1, 2], "value": "x"},
         ]
 
-    def test_map_with_udt_key_canonicalizes_from_the_hashable_projection(self):
-        """A UDT map key is a `frozenset` of `(name, value)` pairs, not a UDT object.
+    def test_map_with_udt_key_is_an_unsupported_divergent_shape(self):
+        """LIMITATION: a UDT map key is NOT canonicalizable under this contract.
 
-        Documented divergence (M4_spec §5.3): `map_to_py` routes keys through
-        `value_to_hashable_key`, which projects a UDT to a `frozenset` of
-        `(field_name, value)` pairs, so the key canonicalizes to a sorted array
-        of `[name, value]` pairs — unlike the same UDT in value position. This
-        test pins the *actual* shape; changing it would be a behavior change,
-        out of scope for #1454.
+        `map_to_py` routes keys through `value_to_hashable_key`, which projects
+        a UDT to a `frozenset` of `(field_name, value)` pairs, so the Python key
+        normalizes to a sorted array of `[name, value]` pairs — while Node and
+        the CLI render the same key as a UDT **object**. The two shapes differ
+        in kind and nothing here reconciles them; doing so needs schema-aware
+        normalization, which is a behavior change and out of scope for #1454.
+
+        This test therefore pins the *divergent* shape as a recorded gap, NOT as
+        a canonical form: #1455 must treat a UDT map key as UNSUPPORTED rather
+        than assume this projection is comparable across bindings
+        (M4_spec §5.3, "Known LIMITATION").
         """
         key = frozenset({("_type", "address"), ("_keyspace", "test_collections"), ("street", "1 Main St")})
         normalized = normalize_python_value({key: 7}, is_row_level=False)
