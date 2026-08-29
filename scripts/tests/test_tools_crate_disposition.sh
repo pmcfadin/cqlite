@@ -137,17 +137,27 @@ package_name_of() {
 #
 # Prints one package name per line (the subject itself excluded). Returns
 # non-zero if cargo could not answer, so the caller can fail CLOSED.
-# NOTE the deliberate separation of the two failure modes below. Under
-# `pipefail`, a `grep -v` that matches nothing exits 1, so folding the cargo call
-# and the filtering into ONE pipeline made "cargo could not answer" and "the crate
-# has ZERO dependents" return the SAME status — and zero dependents is the NORMAL,
-# EXPECTED case for an UNWIRED crate. That is the two-valued-predicate trap: a
-# probe that cannot distinguish "no result" from "could not measure" must collapse
-# them, and it collapsed the legitimate case onto the error branch (every UNWIRED
-# crate reported "unmeasurable"). So cargo's exit status is captured ALONE, and the
-# filtering — whose emptiness is meaningful, not an error — is `|| true`.
+# FAIL-CLOSED CONTRACT, and the two traps designed out of it.
+#
+# (1) Under `pipefail`, `grep -v` exits 1 when it matches NOTHING — the NORMAL,
+#     EXPECTED result for an UNWIRED crate. Folding cargo's call and the filtering
+#     into ONE pipeline therefore made "cargo could not answer" and "zero
+#     dependents" return the SAME status, collapsing the legitimate case onto the
+#     error branch. That is the two-valued-predicate trap: a probe that cannot tell
+#     "no result" from "could not measure" must collapse them.
+# (2) The obvious patch for (1) — `grep ... || true` — is WORSE, because `|| true`
+#     also swallows grep's exit 2 (a REAL error) and any `sed`/`sort` failure,
+#     converting an UNMEASURABLE dependency graph into "zero dependents". That
+#     inverts the contract: a permissive answer derived from the ABSENCE of a
+#     signal, which is the one shape CLAUDE.md says never to build (roborev job 80).
+#
+# Neither is special-cased. The SHAPE that created the dilemma is gone instead:
+# cargo's status is captured ALONE, and the parse is ONE `awk` stage plus `sort` —
+# NEITHER of which exits non-zero for empty output. So `pipefail` stays armed with
+# no `|| true` anywhere, emptiness is DATA, and a genuine failure in any stage
+# still propagates.
 workspace_dependents() {
-  local crate="$1" out rc
+  local crate="$1" out rc parsed
   out=$(cd "$ROOT" && cargo tree --workspace --invert "$crate" --depth 1 \
           --all-features --target all 2>/dev/null)
   rc=$?
@@ -155,10 +165,25 @@ workspace_dependents() {
   # cargo always echoes the subject itself as the tree root, so empty output here
   # means cargo answered nothing at all — a measurement failure, not "no deps".
   [ -n "$out" ] || return 1
-  printf '%s\n' "$out" \
-    | sed -n 's/^[^A-Za-z0-9_-]*\([A-Za-z0-9_-]\{1,\}\) v[0-9].*/\1/p' \
-    | { grep -vxF "$crate" || true; } \
-    | sort -u
+
+  # Package name = the token immediately preceding " v<digit>", which skips both
+  # the tree glyphs cargo prefixes and the trailing (/path). The SUBJECT itself is
+  # dropped HERE, inside awk, rather than by a downstream `grep -v` — see the
+  # fail-closed note above the function for why that grep had to go entirely.
+  parsed=$(printf '%s\n' "$out" | awk -v self="$crate" '
+    match($0, /[A-Za-z0-9_-]+ v[0-9]/) {
+      name = substr($0, RSTART, RLENGTH)
+      sub(/ v[0-9]$/, "", name)
+      if (name != self) print name
+    }' | sort -u)
+  rc=$?
+  [ "$rc" -eq 0 ] || return 1
+
+  # Reaching here means cargo answered AND the parse succeeded — each validated
+  # above — so success is asserted from those checks, not assumed. An EMPTY result
+  # prints NOTHING, never a blank line (a caller's `[ -n "$deps" ]` would read one
+  # blank line as a single dependent named "").
+  [ -z "$parsed" ] || printf '%s\n' "$parsed"
   return 0
 }
 

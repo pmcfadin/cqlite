@@ -246,6 +246,64 @@ expect_green "GREEN 4 (MIXED via an OPTIONAL-FEATURE dependent) PASSes" \
 expect_green "GREEN 5 (MIXED via a NON-HOST TARGET dependent) PASSes" \
   targetmixed 'wiredone' '-' 'mixedone' 'wiredone mixedone' 'mixedone:namesdep' 'mixedone:target'
 
+# --- roborev job 80: an UNMEASURABLE dependency graph must FAIL, never be read as
+# --- "zero dependents". Forced by substituting a `cargo` ARTIFACT in the scratch
+# --- tree's PATH that fails — not by any env seam in the guard, which has none.
+ws=$(make_ws unmeasurable 'wiredone' 'orphanone' '-' 'wiredone orphanone' 'orphanone:labeled')
+mkdir -p "$ws/stubbin"
+printf '#!/usr/bin/env bash\nexit 1\n' > "$ws/stubbin/cargo"
+chmod +x "$ws/stubbin/cargo"
+out=$(PATH="$ws/stubbin:$PATH" run_guard "$ws"); rc=$?
+if [ $rc -eq 0 ]; then
+  fail_case "unmeasurable dependency graph: guard PASSED when cargo could not answer — an unmeasurable graph was read as 'zero dependents' (the fail-closed contract inverted)"
+  printf '%s\n' "$out" | sed 's/^/    /' >&2
+elif ! grep -qF "unmeasurable is not a pass" <<<"$out"; then
+  fail_case "unmeasurable dependency graph: guard failed but not via the fail-closed measurement path:"
+  printf '%s\n' "$out" | sed 's/^/    /' >&2
+else
+  pass_case "unmeasurable dependency graph: guard FAILs closed rather than inferring zero dependents"
+fi
+
+# ...and the SAME stub must not be able to fake a PASS the other way: a cargo that
+# prints nothing is equally unmeasurable (cargo always echoes the subject as the
+# tree root, so empty output means it answered nothing).
+ws=$(make_ws emptycargo 'wiredone' 'orphanone' '-' 'wiredone orphanone' 'orphanone:labeled')
+mkdir -p "$ws/stubbin"
+printf '#!/usr/bin/env bash\nexit 0\n' > "$ws/stubbin/cargo"
+chmod +x "$ws/stubbin/cargo"
+out=$(PATH="$ws/stubbin:$PATH" run_guard "$ws"); rc=$?
+if [ $rc -eq 0 ]; then
+  fail_case "silent cargo: guard PASSED on empty cargo output (measured nothing, reported no dependents)"
+  printf '%s\n' "$out" | sed 's/^/    /' >&2
+elif ! grep -qF "unmeasurable is not a pass" <<<"$out"; then
+  fail_case "silent cargo: guard failed but not via the fail-closed measurement path:"
+  printf '%s\n' "$out" | sed 's/^/    /' >&2
+else
+  pass_case "silent cargo (exit 0, no output): guard FAILs closed rather than reporting zero dependents"
+fi
+
+# --- and the FILTERING stage itself must fail closed (the specific ask of roborev
+# --- job 80). `awk` is used ONLY inside workspace_dependents, so substituting a
+# --- failing `awk` artifact isolates the parse stage exactly: cargo still answers
+# --- correctly, and only the filtering breaks. The construct this replaces —
+# --- `sed | grep -v || true | sort` followed by an unconditional `return 0` —
+# --- discarded the pipeline status entirely, so a broken filter yielded EMPTY
+# --- output that read as "zero dependents": a false PASS for an UNWIRED record.
+ws=$(make_ws filterfail 'wiredone' 'orphanone' '-' 'wiredone orphanone' 'orphanone:labeled')
+mkdir -p "$ws/stubbin"
+printf '#!/usr/bin/env bash\nexit 2\n' > "$ws/stubbin/awk"
+chmod +x "$ws/stubbin/awk"
+out=$(PATH="$ws/stubbin:$PATH" run_guard "$ws"); rc=$?
+if [ $rc -eq 0 ]; then
+  fail_case "filtering-stage failure: guard PASSED though the parse stage failed — a broken filter was read as 'zero dependents'"
+  printf '%s\n' "$out" | sed 's/^/    /' >&2
+elif ! grep -qF "unmeasurable is not a pass" <<<"$out"; then
+  fail_case "filtering-stage failure: guard failed but not via the fail-closed measurement path:"
+  printf '%s\n' "$out" | sed 's/^/    /' >&2
+else
+  pass_case "filtering-stage failure: guard FAILs closed rather than reading a broken filter as zero dependents"
+fi
+
 # --- fail-closed on an absent subject
 ws=$(make_ws notools 'wiredone' 'orphanone' '-' 'wiredone orphanone' 'orphanone:labeled')
 rm -rf "$ws/tools"
@@ -264,4 +322,4 @@ if [ "$fails" -ne 0 ]; then
   echo "FAIL: $fails tools/ disposition self-test case(s) failed" >&2
   exit 1
 fi
-echo "PASS: tools/ crate disposition self-test (#1716) — 5 green controls + 15 negative controls"
+echo "PASS: tools/ crate disposition self-test (#1716) — 5 green controls + 18 negative controls"
