@@ -367,6 +367,27 @@ DEFAULT_REAP_THRESHOLD_SECS="${DEFAULT_REAP_THRESHOLD_SECS:-14400}"
 # therefore passed the open-PR safeguard by failing to be checkable, and `should-reap`/`reap` deleted it.
 # A value the safeguard cannot USE is not a reason to proceed; it is the same "could not tell" that
 # every other branch here treats as KEEP.
+# msg_numeric_field <message> <field> — the field's COMPLETE token, echoed only when the WHOLE token is
+# a decimal number; empty otherwise.
+#
+# A PREFIX MATCH IS NOT A PARSE (roborev round 25, Low by severity, headline-class by consequence). The
+# row parsers extracted `\([0-9][0-9]*\)`, which matches the numeric PREFIX of a malformed token: `pid=123x`
+# yielded `123` and `issue=42x` yielded `42`. A coerced pid then gets PROBED — so `dead-lanes` reports
+# ALIVE or DEAD about a DIFFERENT PROCESS, and a false ALIVE masks exactly the dead lane this command
+# exists to find. Silent coercion of a malformed value into a valid-looking one is worse than either
+# rejecting it or reporting it unknown.
+#
+# Extract the whole space-delimited token first, THEN require the entire value to be decimal. Callers
+# treat empty as UNKNOWN, which is what they already do for an absent field.
+msg_numeric_field() {
+  local msg="$1" field="$2" tok
+  tok="$(printf '%s' "$msg" | sed -n "s/.*${field}=\\([^ ][^ ]*\\).*/\\1/p" | head -1)"
+  case "$tok" in
+    '' | *[!0-9]*) return 0 ;;   # absent, or not wholly numeric => UNKNOWN (empty)
+  esac
+  printf '%s\n' "$tok"
+}
+
 issue_number_ok() {
   case "${1:-}" in
     '' | *[!0-9]*) return 1 ;;
@@ -631,7 +652,7 @@ cmd_list() {
     fi
     msg="$(git log -1 --format=%B "$tmpref_l" 2>/dev/null || true)"
     git update-ref -d "$tmpref_l" 2>/dev/null || true
-    issue="$(printf '%s' "$msg" | sed -n 's/.*issue=\([0-9][0-9]*\).*/\1/p' | head -1)"
+    issue="$(msg_numeric_field "$msg" issue)"
     ts="$(printf '%s' "$msg" | sed -n 's/.*ts=\([^ ]*\).*/\1/p' | head -1)"
     [ -n "$issue" ] || issue="?"
     [ -n "$ts" ] || ts="?"
@@ -833,8 +854,8 @@ cmd_list_claims() {
     fi
     msg="$(git log -1 --format=%B "$tmpref_c" 2>/dev/null || true)"
     git update-ref -d "$tmpref_c" 2>/dev/null || true
-    issue="$(printf '%s' "$msg" | sed -n 's/.*issue=\([0-9][0-9]*\).*/\1/p' | head -1)"
-    pid="$(printf '%s' "$msg" | sed -n 's/.*pid=\([0-9][0-9]*\).*/\1/p' | head -1)"
+    issue="$(msg_numeric_field "$msg" issue)"
+    pid="$(msg_numeric_field "$msg" pid)"
     ts="$(printf '%s' "$msg" | sed -n 's/.*ts=\([^ ]*\).*/\1/p' | head -1)"
     [ -n "$lane_from_path" ] && issue="$lane_from_path"
     [ -n "$issue" ] || issue="?"
@@ -1328,8 +1349,8 @@ cmd_dead_lanes() {
     fi
     msg="$(git log -1 --format=%B "$tmpref" 2>/dev/null || true)"
     git update-ref -d "$tmpref" 2>/dev/null || true
-    issue="$(printf '%s' "$msg" | sed -n 's/.*issue=\([0-9][0-9]*\).*/\1/p' | head -1)"
-    pid="$(printf '%s' "$msg" | sed -n 's/.*pid=\([0-9][0-9]*\).*/\1/p' | head -1)"
+    issue="$(msg_numeric_field "$msg" issue)"
+    pid="$(msg_numeric_field "$msg" pid)"
     # The claim's own stamp time — the second half of the pid-identity check below.
     ts="$(printf '%s' "$msg" | sed -n 's/.*ts=\([^ ]*\).*/\1/p' | head -1)"
     # `worker-supervisor.sh` stamps issue "0" when the current iteration's issue is

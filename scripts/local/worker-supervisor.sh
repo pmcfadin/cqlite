@@ -1561,6 +1561,17 @@ run_iteration() {
       ;;
     no-work)
       CONSECUTIVE_ABNORMAL=0
+      # NOTHING WAS CLAIMED, SO NOTHING IS IN PROGRESS (roborev round 25, Medium — a REGRESSION from
+      # round 24). Round 24 correctly reset the flag to 0 at the stamp so early exits inherit the safe
+      # value, but that made `no-work` permanently unconcluded: the Ready queue was empty, a placeholder
+      # was stamped, and a later stop or wall-clock exit then PRESERVED that placeholder. Placeholders are
+      # never automatically reaped, so every NORMAL IDLE SHUTDOWN leaked a stale ref that `dead-lanes`
+      # then reported as a dead lane — turning the monitor this change ships into one an operator learns
+      # to ignore.
+      #
+      # Guarded on the marker naming NO issue: a `no-work` iteration that somehow carries one is not
+      # evidence that the issue concluded, so it stays unconcluded and keeps its ref.
+      [[ -z "$issue" ]] && CLAIM_WORK_CONCLUDED=1
       journal_line "$ITER" "no-work" "$issue" "$pr" "$duration" "$rc"
       log "no work available; backing off ${BACKOFF_NOWORK_SECS}s"
       sleep "$BACKOFF_NOWORK_SECS"
