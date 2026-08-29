@@ -546,8 +546,8 @@ jobs:
             echo ""
             echo "### Tier"
             echo "- Ordinary PRs run one Ubuntu Python 3.12 wheel build plus non-dataset smoke pytest files."
-            echo "- Every PR also runs a floor smoke on Python 3.9 and 3.13, reusing the abi3 wheel from the smoke job (issue #1459)."
-            echo "- Full cross-platform wheel builds, dataset-backed tests, slow CLI parity, and wheel artifacts run on push to main, nightly schedule, workflow_dispatch, or PRs labeled \`ci:bindings-full\`."
+            echo "- Every PR also runs a floor smoke on Python 3.9 and 3.13, reusing the abi3 wheel from the smoke job. Each leg restores the canonical corpus and runs one real query, failing on a 0-row result (issue #1459)."
+            echo "- Full cross-platform wheel builds, the full dataset-backed pytest suite, slow CLI parity, and wheel artifacts run on push to main, nightly schedule, workflow_dispatch, or PRs labeled \`ci:bindings-full\`."
             echo ""
           } >> "$GITHUB_STEP_SUMMARY"
           if [ "${RUN_FULL}" = "true" ]; then
