@@ -182,9 +182,8 @@ fn idles(n: usize) -> Vec<Step> {
 /// so it outlives the app.
 async fn test_app() -> Result<(TempDir, TuiApp)> {
     let dir = tempfile::tempdir()?;
-    let database = Arc::new(
-        cqlite_core::Database::open(dir.path(), cqlite_core::Config::default()).await?,
-    );
+    let database =
+        Arc::new(cqlite_core::Database::open(dir.path(), cqlite_core::Config::default()).await?);
     let config = Config::default();
     let app = TuiApp::new(dir.path(), &config, database).await?;
     Ok((dir, app))
