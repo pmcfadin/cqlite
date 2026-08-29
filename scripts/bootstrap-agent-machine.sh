@@ -1219,6 +1219,11 @@ git_env_token_helper_active() {
 # git_origin_host <url> — host of an http(s) origin ("" for any other form). The
 # path is stripped FIRST so an '@' inside the path can never be mistaken for the
 # user[:password]@ prefix.
+#
+# The userinfo is stripped at the LAST '@', not the first (issue #3369 review). That is
+# where git itself splits an authority, and it matters here because this value is PRINTED:
+# with `#*@`, a URL whose password contains an '@' (e.g. `https://u:p@ss@host/…`) left the
+# tail of the password in the "host" and put a credential fragment into onboarding logs.
 git_origin_host() {
   local url="$1" rest hostport
   case "$url" in
@@ -1227,7 +1232,7 @@ git_origin_host() {
     *) return 0 ;;
   esac
   hostport="${rest%%/*}"
-  printf '%s' "${hostport#*@}"
+  printf '%s' "${hostport##*@}"
 }
 
 # ---- the ONE remote this whole section is about (issue #3369 review) ----
@@ -1526,7 +1531,7 @@ push_probe_fix_advice() {
   # `other`. Three affirmative arms, one per protocol class; nothing falls through into
   # advice written for a different transport.
   if [ "$GIT_ORIGIN_KIND" = ssh ]; then
-    info "fix:    this is an SSH remote ($GIT_ORIGIN_URL) — git authenticates with your SSH KEY, not a credential helper"
+    info "fix:    remote '$PUSH_PROBE_REMOTE' is an SSH remote — git authenticates with your SSH KEY, not a credential helper"
     info "        check the key:  ssh -T git@<host>   and that it is loaded:  ssh-add -l"
     info "        'gh auth setup-git' does NOT apply here — it configures https credentials only"
   elif [ "$GIT_ORIGIN_KIND" = https ]; then
@@ -1535,10 +1540,19 @@ push_probe_fix_advice() {
     info "        if a helper is ALREADY wired, the token may authenticate yet lack WRITE access —"
     info "        check the scopes reported in the 'gh auth + board access' section above (contents:write / repo)"
   else
-    info "fix:    the remote is a '$GIT_ORIGIN_KIND' remote ($GIT_ORIGIN_URL) — neither https nor SSH, so a git"
+    info "fix:    remote '$PUSH_PROBE_REMOTE' is a '$GIT_ORIGIN_KIND' remote — neither https nor SSH, so a git"
     info "        credential helper may not apply at all; check that transport's own access path"
     info "        ('gh auth setup-git' configures https credentials only, and would not affect this remote)"
   fi
+  # THE REMOTE URL IS NEVER PRINTED (issue #3369 review). Both non-https arms used to
+  # print $GIT_ORIGIN_URL verbatim, and a remote URL can carry `https://user:token@host/…`
+  # — while this script's output is persisted in onboarding logs, so those two lines wrote
+  # a live credential into a log file. §3b already treats remote URLs as secret-bearing
+  # (it classifies push stderr rather than echoing it); these sites had diverged from it.
+  # What identifies the subject unambiguously is the remote NAME plus the protocol class,
+  # both of which are printed above; the operator can read the URL locally.
+  info "        (the URL is deliberately NOT printed here — it can embed a credential and this output is logged;"
+  info "         read it locally with:  git -C $REPO_ROOT remote get-url --push $PUSH_PROBE_REMOTE)"
   info "verify by hand:  bash scripts/flow/claim.sh smoke"
 }
 

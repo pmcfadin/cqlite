@@ -1031,7 +1031,7 @@ fi
 # passed only because the advice branched on `!= ssh` and swept `other` into the https
 # arm, i.e. the test asserted a property it never exercised (#3369 review). The genuine
 # https path is 7p-q below.
-if printf '%s' "$out7pb" | grep -q "remote is a 'other' remote" \
+if printf '%s' "$out7pb" | grep -q "remote 'origin' is a 'other' remote" \
    && printf '%s' "$out7pb" | grep -q 'credential helper may not apply' \
    && ! push_plain "$out7pb" | grep -E '^ *fix:' | grep -q 'gh auth setup-git'; then
   ok "push: a file:// remote's auth-shaped failure gets protocol-neutral advice, NOT https credential advice"
@@ -1381,6 +1381,55 @@ else
   push_plain "$out7pn" | grep -E 'git-push|fix:|ssh' | head -5
 fi
 
+# 7p-s. NOTHING PRINTED MAY CARRY A CREDENTIAL FROM THE REMOTE URL (#3369 review). A
+#   remote URL can be `https://user:token@host/…` or `ssh://user:token@host/…`, and this
+#   script's output is persisted in ONBOARDING LOGS — so the two advice lines that printed
+#   $GIT_ORIGIN_URL verbatim wrote a live credential into a log file. Both sub-cases below
+#   put a distinctive secret in the URL and assert it never appears in the output, which is
+#   the property; the structural guard in 7p-i covers the sites nobody has written yet.
+URL_SECRET='ghp_URLembeddedSECRET3369URLembeddedSEC'
+
+#   (i) An SSH remote whose URL embeds a secret. The `ssh` stub supplies an auth-shaped
+#   failure (as in 7p-n) so the advice branch — the code under test — is really reached.
+repo7ps="$tmp/repo7ps"; mk_push_repo "$repo7ps" "ssh://cq:$URL_SECRET@push-probe.invalid/owner/repo.git"
+bin7ps="$tmp/bin7ps"; mk_push_bin "$bin7ps"
+mk_stub "$bin7ps" ssh 'echo "git@push-probe.invalid: Permission denied (publickey)." >&2; exit 255'
+gc7ps="$tmp/gc7ps"; : >"$gc7ps"
+run_push "$repo7ps" "$bin7ps" "$gc7ps"; out7ps=$push_out
+# Guard the guard: without the FAILED verdict + SSH advice the run never reached the lines
+# under test, and "the secret is absent" would be true for the wrong reason.
+if printf '%s' "$out7ps" | grep -q '\[warn\].*git-push: FAILED' \
+   && printf '%s' "$out7ps" | grep -q 'authenticates with your SSH KEY'; then
+  ok "push: (precondition) 7p-s(i) reaches the FAILED verdict and the SSH advice branch"
+else
+  bad "push: 7p-s(i) precondition FAILED — the advice branch was not reached, the secret assert would be vacuous"
+  push_plain "$out7ps" | grep -E 'git-push|fix:' | head -4
+fi
+if ! printf '%s' "$out7ps" | grep -qF "$URL_SECRET" \
+   && printf '%s' "$out7ps" | grep -q "remote 'origin' is an SSH remote" \
+   && printf '%s' "$out7ps" | grep -q 'remote get-url --push origin'; then
+  ok "push: a credential embedded in an SSH remote URL is NEVER printed — the advice names the remote and where to read the URL locally"
+else
+  bad "push: the remote URL (and its embedded secret) reached the output"
+  push_plain "$out7ps" | grep -E 'fix:|URL' | head -4
+fi
+
+#   (ii) An https remote whose PASSWORD contains an '@'. The host is printed on many lines,
+#   so parsing the userinfo at the FIRST '@' left the tail of the password inside the
+#   "host" and logged a credential fragment. git splits an authority at the LAST '@'.
+repo7ps2="$tmp/repo7ps2"; mk_push_repo "$repo7ps2" "https://cq:p@${URL_SECRET}@push-probe.invalid/cqlite.git"
+bin7ps2="$tmp/bin7ps2"; mk_push_bin "$bin7ps2"
+gc7ps2="$tmp/gc7ps2"; : >"$gc7ps2"
+run_push "$repo7ps2" "$bin7ps2" "$gc7ps2"; out7ps2=$push_out
+if printf '%s' "$out7ps2" | grep -q 'git push has NO credentials for push-probe.invalid' \
+   && ! printf '%s' "$out7ps2" | grep -qF "$URL_SECRET" \
+   && ! printf '%s' "$out7ps2" | grep -q '@push-probe.invalid'; then
+  ok "push: a password containing '@' does not leak into the printed host (userinfo is split at the LAST '@')"
+else
+  bad "push: the parsed host carried a credential fragment"
+  push_plain "$out7ps2" | grep -E 'push-probe' | head -4
+fi
+
 # 7p-o. A `timeout` THAT REJECTS --kill-after MUST NOT BREAK EVERY BOUND (#3369 review).
 #   --kill-after is GNU coreutils; BusyBox and older implementations reject it, and a
 #   non-GNU `timeout` earlier on PATH than a GNU `gtimeout` would win a first-match-wins
@@ -1456,7 +1505,7 @@ run_push "$repo7pq" "$bin7pq" "$gc7pq" --fix-credentials --strict; out7pq=$push_
 # Guard the guard: if the classification were not https, this case would be testing the
 # same `other` path as 7p-b and its assertion would be vacuous again.
 if printf '%s' "$out7pq" | grep -q 'push-probe.invalid' \
-   && ! printf '%s' "$out7pq" | grep -q "remote is a 'other' remote"; then
+   && ! printf '%s' "$out7pq" | grep -q "is a 'other' remote"; then
   ok "push: (precondition) 7p-q's remote really is classified https"
 else
   bad "push: 7p-q precondition FAILED — not an https classification, the advice assertion below is vacuous"
@@ -1722,6 +1771,18 @@ if [ -z "$lone_tstub" ]; then
 else
   bad "push: a case stubs one timeout candidate; the production loop can escape to the other:"
   printf '%s\n' "$lone_tstub"
+fi
+# Same shape, fourth instance, and this one guards the SCRIPT rather than the suite: no
+# line the bootstrap EMITS may pass the raw remote URL, which can embed a credential while
+# this output is persisted in onboarding logs (#3369 review). Behavioural cases (7p-s)
+# cover the two sites that did; this covers the next one somebody adds. The classification
+# uses of $GIT_ORIGIN_URL in section 3b are untouched — it is only PRINTING that is banned.
+urlprint=$(grep -nE '^[[:space:]]*(info|warn|ok|note|hdr)[[:space:]].*\$GIT_ORIGIN_URL' "$BOOTSTRAP" || true)
+if [ -z "$urlprint" ]; then
+  ok "push: no emitted line prints the raw remote URL (it can embed a credential, and this output is logged)"
+else
+  bad "push: an emitted line prints \$GIT_ORIGIN_URL — print the remote NAME + protocol + parsed host instead:"
+  printf '%s\n' "$urlprint"
 fi
 unguarded=$(grep -n 'bash "\$BOOTSTRAP" --skip-smoke' "$TEST_SELF" | grep -v -- '--skip-push-probe' || true)
 if [ -z "$unguarded" ]; then
