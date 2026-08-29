@@ -56,7 +56,7 @@ use std::time::Duration;
 
 use cqlite_core::config::DiskAccessMode;
 use cqlite_core::observability::catalog;
-use cqlite_core::observability::read_phase::io_delay;
+use cqlite_core::observability::io_delay;
 use cqlite_core::observability::testing::{self, CapturedMetrics};
 use cqlite_core::storage::sstable::SSTableReader;
 use cqlite_core::{Config, Platform, TableId};

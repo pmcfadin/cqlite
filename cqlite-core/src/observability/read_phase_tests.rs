@@ -63,17 +63,21 @@ fn sink_propagates_across_a_spawned_thread() {
     let captured = current();
     std::thread::spawn(move || {
         let _child = install(captured);
-        record_nanos(ReadPhase::Io, 4242);
+        timed(ReadPhase::Io, || {
+            std::thread::sleep(std::time::Duration::from_millis(2))
+        });
     })
     .join()
     .expect("child thread joins");
-    assert_eq!(sink.nanos(ReadPhase::Io), 4242);
+    assert!(
+        sink.nanos(ReadPhase::Io) > 0,
+        "the child thread's io must land in the SAME Arc the parent's meter reads"
+    );
 }
 
 #[test]
-fn record_nanos_and_scoped_are_noops_without_a_sink() {
+fn scoped_is_a_noop_without_a_sink() {
     assert!(current().is_none());
-    record_nanos(ReadPhase::Merge, 999);
     assert!(
         scoped(ReadPhase::Merge).is_none(),
         "no sink means no timer is even constructed (no Instant::now)"
@@ -81,20 +85,28 @@ fn record_nanos_and_scoped_are_noops_without_a_sink() {
 }
 
 #[test]
-fn scoped_captured_survives_a_thread_move() {
-    // `scoped_captured` binds the Arc at construction, so a timer built from a
-    // captured sink records correctly even where the thread-local is absent.
+fn a_timer_records_into_the_sink_it_captured_not_the_one_installed_at_drop() {
+    // `ReadPhaseTimer` binds the `Arc` at CONSTRUCTION and never re-reads the
+    // thread-local at drop. That is what keeps it correct when it is held across an
+    // `.await` that resumes the future on a DIFFERENT executor thread — a thread
+    // that may have no sink installed, or another scan's.
     let sink = Arc::new(ReadPhaseTimings::default());
-    let captured = Some(sink.clone());
-    std::thread::spawn(move || {
-        assert!(current().is_none(), "the child has no thread-local sink");
-        let timer = scoped_captured(&captured, ReadPhase::Decode);
-        assert!(timer.is_some());
-        drop(timer);
-    })
-    .join()
-    .expect("child thread joins");
-    assert!(sink.nanos(ReadPhase::Decode) > 0);
+    let guard = install(Some(sink.clone()));
+    let timer = scoped(ReadPhase::Decode);
+    assert!(timer.is_some(), "a metered thread builds a timer");
+
+    // Uninstall the sink while the timer is still alive: a drop-time thread-local
+    // read would now find nothing and silently lose the measurement.
+    drop(guard);
+    assert!(current().is_none());
+    std::thread::sleep(std::time::Duration::from_millis(2));
+    drop(timer);
+
+    assert!(
+        sink.nanos(ReadPhase::Decode) > 0,
+        "the timer must record into the sink it CAPTURED, not into whatever is \
+         installed when it happens to drop"
+    );
 }
 
 #[test]
@@ -109,6 +121,7 @@ fn add_nanos_saturates_rather_than_wrapping() {
     );
 }
 
+#[cfg(not(feature = "tombstones"))]
 #[test]
 fn merge_timing_subtracts_the_recv_wait_accrued_inside_it() {
     // The property: producer starvation (blocking recv on the merge inputs) is NOT
@@ -136,6 +149,7 @@ fn merge_timing_subtracts_the_recv_wait_accrued_inside_it() {
     );
 }
 
+#[cfg(not(feature = "tombstones"))]
 #[test]
 fn merge_timing_never_underflows_when_the_wait_exceeds_the_wall_time() {
     let sink = Arc::new(ReadPhaseTimings::default());
@@ -157,6 +171,11 @@ fn an_unmetered_seam_never_builds_a_timer() {
     assert!(scoped(ReadPhase::Io).is_none());
     let mut runs = 0;
     timed(ReadPhase::Decode, || runs += 1);
+    #[cfg(not(feature = "tombstones"))]
     timed_merge_excluding_recv_wait(|| runs += 1);
+    #[cfg(feature = "tombstones")]
+    {
+        runs += 1; // the merge helper is configured out with its only call site
+    }
     assert_eq!(runs, 2, "the closure runs on the unmetered fast path too");
 }

@@ -120,14 +120,32 @@ pub mod partition_access;
 pub(crate) mod read_metrics;
 // Per-SCAN read-phase accumulator (issue #1707): the io/decompress/decode/merge
 // buckets `ReadOpMeter` emits as `cqlite.read.phase.*` when a scan completes.
-// `pub` (like `stream_subphase`) because the seams live across the storage layer
-// and the observability integration tests arm its test-only io delay.
-pub mod read_phase;
+//
+// `pub(crate)`, NOT `pub`: its seams live across the storage layer but entirely
+// INSIDE this crate, and no downstream crate consumes any of it. That is the
+// difference from `stream_subphase`, which is genuinely `pub` because
+// `cqlite-flight` installs its sink. Exporting this module made ~12 items part of
+// `cqlite-core`'s public API — a surface nobody asked for, that nothing in this
+// repo detects a change to (#3366), and that would then have to be kept
+// compatible. The ONE item a test outside the crate needs is re-exported below.
+pub(crate) mod read_phase;
 pub mod stream_subphase;
 
 pub use config::{ObservabilityConfig, ObservabilityConfigBuilder, OtelProtocol};
 pub use error_schema::ObsErrorCategory;
-pub use read_phase::{ReadPhase, ReadPhaseGuard, ReadPhaseTimings};
+// `ReadPhaseGuard` is deliberately NOT re-exported: it is only ever named as
+// `install`'s return type, which callers bind with `let _g = …`.
+pub(crate) use read_phase::{ReadPhase, ReadPhaseTimings};
+
+/// TEST-ONLY arming surface for the read-phase io delay (issue #1707), the ONE
+/// item of the crate-internal [`read_phase`] module an out-of-crate test needs.
+///
+/// Hidden from the rendered docs and compiled out entirely unless
+/// `observability-testing` (or `cfg(test)`) is on, so a production build of
+/// `cqlite-core` exports nothing here.
+#[cfg(any(test, feature = "observability-testing"))]
+#[doc(hidden)]
+pub use read_phase::io_delay;
 pub use stream_subphase::{StreamSubPhase, StreamSubPhaseGuard, StreamSubPhaseTimings};
 
 use crate::error::{Error, Result};

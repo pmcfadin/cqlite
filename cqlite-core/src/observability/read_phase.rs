@@ -194,6 +194,10 @@ thread_local! {
     /// init.
     static CURRENT_SINK: RefCell<Option<Arc<ReadPhaseTimings>>> = const { RefCell::new(None) };
 
+    /// Monotonically increasing id stamped on each [`ReadPhaseGuard`] this thread
+    /// creates, and asserted (debug builds only) on drop — see the guard's `Drop`.
+    static INSTALL_GENERATION: Cell<u64> = const { Cell::new(0) };
+
     /// Fast `Cell<bool>` mirror of "a sink is installed", kept in lock-step with
     /// `CURRENT_SINK` by [`install`] and the guard's `Drop`. A hot caller gates its
     /// `Instant::now()` on this single load instead of a `RefCell` borrow plus an
@@ -207,10 +211,29 @@ thread_local! {
 pub struct ReadPhaseGuard {
     prev: Option<Arc<ReadPhaseTimings>>,
     prev_active: bool,
+    /// This guard's position in its thread's install stack, checked on drop.
+    generation: u64,
 }
 
 impl Drop for ReadPhaseGuard {
     fn drop(&mut self) {
+        // Drop restores UNCONDITIONALLY, which is right for correct (LIFO) nesting
+        // and wrong-but-silent for out-of-order nesting: dropping an OUTER guard
+        // first would restore its `prev` over the inner sink and leave the inner one
+        // installed forever on a POOLED blocking thread — the cross-scan attribution
+        // leak this module exists to prevent, and the one failure mode that is
+        // indistinguishable from data. All four call sites are LIFO today; the
+        // `debug_assert` is what makes a future fifth one fail LOUDLY in tests
+        // instead of silently mis-attributing in production.
+        debug_assert_eq!(
+            INSTALL_GENERATION.with(|c| c.get()),
+            self.generation,
+            "ReadPhaseGuard dropped OUT OF ORDER: guards must nest LIFO, or an inner \
+             sink stays installed on this (possibly pooled) thread and the next scan \
+             to run on it is attributed to the previous scan's counters"
+        );
+        INSTALL_GENERATION.with(|c| c.set(self.generation.saturating_sub(1)));
+
         let prev = self.prev.take();
         CURRENT_SINK.with(|c| *c.borrow_mut() = prev);
         SINK_ACTIVE.with(|c| c.set(self.prev_active));
@@ -225,12 +248,25 @@ pub fn install(sink: Option<Arc<ReadPhaseTimings>>) -> ReadPhaseGuard {
     let active = sink.is_some();
     let prev = CURRENT_SINK.with(|c| std::mem::replace(&mut *c.borrow_mut(), sink));
     let prev_active = SINK_ACTIVE.with(|c| c.replace(active));
-    ReadPhaseGuard { prev, prev_active }
+    // Depth of this thread's install stack; the guard's `Drop` asserts it is still
+    // the top when it unwinds. `saturating_add` so the counter can never wrap into
+    // a value a live guard already holds.
+    let generation = INSTALL_GENERATION.with(|c| {
+        let next = c.get().saturating_add(1);
+        c.set(next);
+        next
+    });
+    ReadPhaseGuard {
+        prev,
+        prev_active,
+        generation,
+    }
 }
 
 /// Whether a read-phase sink is installed on this thread — a cheap `Cell<bool>`
 /// load (no `RefCell` borrow, no `Arc` clone), for a hot caller that wants to skip
 /// `Instant::now()` entirely when unmetered.
+#[inline]
 pub fn sink_active() -> bool {
     SINK_ACTIVE.with(|c| c.get())
 }
@@ -238,6 +274,7 @@ pub fn sink_active() -> bool {
 /// This thread's installed sink, if any. A spawn site calls this on the PARENT
 /// thread and re-[`install`]s the captured value on the CHILD thread, so the child's
 /// io/decompress/decode/merge reach the scan's accumulator.
+#[inline]
 pub fn current() -> Option<Arc<ReadPhaseTimings>> {
     CURRENT_SINK.with(|c| c.borrow().clone())
 }
@@ -252,6 +289,7 @@ pub fn elapsed_nanos(start: Instant) -> u64 {
 /// Time `f` and, IF a sink is installed on this thread, attribute its elapsed wall
 /// time to `phase`. When no sink is installed this is a single thread-local peek
 /// plus the bare closure — no `Instant::now()`, no atomic write.
+#[inline]
 pub fn timed<T>(phase: ReadPhase, f: impl FnOnce() -> T) -> T {
     // Fast path FIRST: one `Cell<bool>` load, so an unmetered read pays neither a
     // `RefCell` borrow nor an `Arc` refcount bump on a per-chunk seam.
@@ -283,6 +321,12 @@ pub fn timed<T>(phase: ReadPhase, f: impl FnOnce() -> T) -> T {
 ///
 /// Saturating: if a nested/foreign recv were somehow attributed a longer wait than
 /// this step's wall time, the phase gets 0 rather than a wrapped enormous value.
+///
+/// Carries the SAME `not(feature = "tombstones")` gate as its only call site,
+/// `generation_merge::stream_generations_for_read` — under `tombstones` the
+/// streaming cross-generation merge is configured out, so there is no merge step to
+/// time and an ungated definition would be provably dead code in that build.
+#[cfg(not(feature = "tombstones"))]
 pub fn timed_merge_excluding_recv_wait<T>(f: impl FnOnce() -> T) -> T {
     if !sink_active() {
         return f();
@@ -299,16 +343,6 @@ pub fn timed_merge_excluding_recv_wait<T>(f: impl FnOnce() -> T) -> T {
             out
         }
     }
-}
-
-/// Add `nanos` directly to `phase` on this thread's sink, if installed (no-op
-/// otherwise) — for a caller that measured the elapsed time itself.
-pub fn record_nanos(phase: ReadPhase, nanos: u64) {
-    CURRENT_SINK.with(|c| {
-        if let Some(sink) = c.borrow().as_ref() {
-            sink.add_nanos(phase, nanos);
-        }
-    });
 }
 
 /// RAII timer recording elapsed wall time into `phase` on drop — the tight-scope
@@ -332,6 +366,14 @@ impl Drop for ReadPhaseTimer {
 
 /// A [`ReadPhaseTimer`] for `phase`, or `None` (and zero `Instant::now`) when no
 /// sink is installed.
+///
+/// This module deliberately exposes a SMALLER entry surface than its
+/// [`super::stream_subphase`] twin: the twin's `record_nanos` and `scoped_captured`
+/// have no counterpart here because nothing in this crate calls them, and the module
+/// is `pub(crate)` so nothing outside can either (issue #1707). Dead code kept alive
+/// "for symmetry" is still dead code; the twin's versions remain where they have real
+/// callers (`data_access`). Add them back the day a seam needs them.
+#[inline]
 pub fn scoped(phase: ReadPhase) -> Option<ReadPhaseTimer> {
     // Same fast path as [`timed`]: the io seam calls this once per chunk read, and
     // an unmetered scan must pay only a `Cell<bool>` load — no `RefCell` borrow, no
@@ -339,18 +381,10 @@ pub fn scoped(phase: ReadPhase) -> Option<ReadPhaseTimer> {
     if !sink_active() {
         return None;
     }
-    scoped_captured(&current(), phase)
-}
-
-/// A [`ReadPhaseTimer`] built from an ALREADY-CAPTURED sink, so NO thread-local read
-/// happens here. Use when the timer must be constructed after an `.await` that may
-/// resume on a different executor thread: capture the sink ONCE before the await,
-/// then build each timer from that captured `Option`.
-pub fn scoped_captured(
-    sink: &Option<Arc<ReadPhaseTimings>>,
-    phase: ReadPhase,
-) -> Option<ReadPhaseTimer> {
-    sink.clone().map(|sink| ReadPhaseTimer {
+    // ONE `Arc` clone, not two: `current()` already clones out of the thread-local,
+    // so handing its `Option` to `scoped_captured` (which clones its borrowed
+    // argument) doubled the refcount traffic on a per-chunk seam.
+    current().map(|sink| ReadPhaseTimer {
         phase,
         start: Instant::now(),
         sink,
