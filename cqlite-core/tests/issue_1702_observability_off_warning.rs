@@ -143,7 +143,7 @@ fn enabled_config_warns_once_naming_feature_and_consequence() {
         "warning must say metrics and traces are affected: {msg}"
     );
     assert!(
-        lower.contains("not be emitted") || lower.contains("no metrics"),
+        lower.contains("no metrics") && lower.contains("will be emitted"),
         "warning must state that nothing will be emitted: {msg}"
     );
 }
@@ -162,8 +162,10 @@ fn disabled_config_emits_no_warning() {
 }
 
 /// Sibling-toggle consistency (issue #1702 item 3). `verify_presence_oracle` is
-/// the only other `ObservabilityConfig` field, and it IS honored with the
-/// feature off — `init` plumbs it into the always-compiled presence-verification
+/// the only other `ObservabilityConfig` field a feature-off build acts on (the
+/// remaining six — endpoint, protocol, service_name, service_version,
+/// sampling_ratio, timeout — are subordinate to `enabled` and mean nothing once
+/// it is off), and it IS honored with the feature off — `init` plumbs it into the always-compiled presence-verification
 /// switch — so it is NOT silently dropped and must NOT warn. `enabled` is the
 /// only input a feature-off build discards.
 #[test]
@@ -180,11 +182,12 @@ fn presence_oracle_toggle_alone_does_not_warn() {
         sink.events()
     );
 
-    // Restore the process-global switch this test flipped through `init` so it
-    // cannot leak into other tests in this binary.
-    let reset = ObservabilityConfig::builder()
-        .enabled(false)
-        .verify_presence_oracle(false)
-        .build();
-    let _ = init(reset);
+    // No cleanup of the process-global presence-verification switch this `init`
+    // flipped: no test in this binary consults it (directly or through a
+    // reader), so there is nothing here for it to leak into. A reset would also
+    // be worse than nothing — it pins the switch OFF rather than restoring
+    // UNINIT, it is unordered against the sibling tests cargo runs on parallel
+    // threads, and it would be skipped entirely if an assertion above panicked.
+    // A future test in this file that DOES read the switch must serialize
+    // instead (e.g. `serial_test`), not rely on a trailing reset.
 }

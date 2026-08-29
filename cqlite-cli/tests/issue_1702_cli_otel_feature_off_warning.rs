@@ -9,7 +9,8 @@
 //! CQLITE_OTEL_ENABLED=1                                   (the operator knob)
 //!   -> cqlite_cli::config::Config::load                   (env/file/flag precedence)
 //!   -> config.observability.to_core()                      (ObservabilityConfig)
-//!   -> cqlite_cli::telemetry::init_telemetry               (the ORDERING fix, #1702)
+//!   -> cqlite-cli/src/telemetry.rs::init_telemetry         (the ORDERING fix, #1702)
+//!        (bin-only: `telemetry` is declared in main.rs, not lib.rs)
 //!        subscriber FIRST with the feature off, so the warn has a sink
 //!   -> cqlite_core::observability::init                    (the emit site)
 //!   -> tracing fmt layer -> STDERR                        (never stdout, #129)
@@ -38,14 +39,12 @@ use std::process::{Command, Output};
 use tempfile::TempDir;
 
 /// Substrings the warning must carry for an operator to act on it: the knob they
-/// set, the cargo feature that is missing (this is what separates "built without
-/// the feature" from "collector down"), and the consequence.
-const REQUIRED_SUBSTRINGS: &[&str] = &[
-    "CQLITE_OTEL_ENABLED",
-    "observability",
-    "will be emitted",
-    "NOT a collector",
-];
+/// set and the consequence. The missing cargo feature is NOT listed here: the
+/// bare needle "observability" would be satisfied by the fmt layer printing the
+/// event TARGET (`cqlite_core::observability:`) even if the message never named
+/// the feature, so it proves nothing — [`warning_hits`] anchors on the full
+/// "built WITHOUT the `observability` cargo feature" phrase instead, which does.
+const REQUIRED_SUBSTRINGS: &[&str] = &["CQLITE_OTEL_ENABLED", "will be emitted", "NOT a collector"];
 
 /// A stable, cheap invocation that reaches `run_main` (so telemetry init runs)
 /// and writes deterministic bytes to stdout. `--version`/`--help` are NOT usable:
@@ -84,13 +83,23 @@ fn run_with(otel_enabled: Option<&str>, rust_log: Option<&str>, extra_args: &[&s
         .env_clear()
         .env("HOME", home.path())
         .env("XDG_CONFIG_HOME", home.path());
-    // The one inherited variable the child genuinely needs, plus TMPDIR when the
-    // host sets it (temp-file creation honours it).
-    if let Ok(path) = std::env::var("PATH") {
-        cmd.env("PATH", path);
-    }
-    if let Ok(tmp) = std::env::var("TMPDIR") {
-        cmd.env("TMPDIR", tmp);
+    // The few inherited variables the child genuinely needs. `env_clear` also
+    // drops the dynamic-loader search paths, so carry those: today's
+    // default-feature `cqlite` links no dylib that needs them, but a future
+    // default-on feature that does (the `duckdb-tests` amalgamation is the shape
+    // to watch) would fail every case here with a loader error that reads as a
+    // CLI bug. None of these can influence CQLite config resolution, so carrying
+    // them does not reintroduce the ambient-config drift `env_clear` fixed.
+    for var in [
+        "PATH",
+        "TMPDIR",
+        "LD_LIBRARY_PATH",
+        "DYLD_LIBRARY_PATH",
+        "DYLD_FALLBACK_LIBRARY_PATH",
+    ] {
+        if let Ok(v) = std::env::var(var) {
+            cmd.env(var, v);
+        }
     }
     if let Some(v) = otel_enabled {
         cmd.env("CQLITE_OTEL_ENABLED", v);
@@ -102,6 +111,18 @@ fn run_with(otel_enabled: Option<&str>, rust_log: Option<&str>, extra_args: &[&s
     assert!(
         out.status.success(),
         "`cqlite {} {}` must succeed; stderr:\n{}",
+        extra_args.join(" "),
+        ARGS.join(" "),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    // Positive control for EVERY case in this file, including the ones whose only
+    // assertion is an absence (stdout hygiene, `-q`/`RUST_LOG=error` suppression):
+    // `cqlite info` prints its report on stdout, so empty stdout means the command
+    // did not actually do its work and an "absence" assertion would pass vacuously.
+    assert!(
+        !out.stdout.is_empty(),
+        "`cqlite {} {}` produced no stdout, so this run proves nothing about what \
+         it did or did not emit; stderr:\n{}",
         extra_args.join(" "),
         ARGS.join(" "),
         String::from_utf8_lossy(&out.stderr)
