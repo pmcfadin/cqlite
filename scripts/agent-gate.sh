@@ -8298,6 +8298,12 @@ run_arrow_parity_guard_cmd() {
   # Deliberately NOT added to the two cli-tests invocations: PR #3403 owns those lines and sets
   # it there itself, and the strip makes both sites correct regardless — a second edit to the
   # same lines would buy nothing and cost a conflict.
+  #
+  # A BARE assignment prefix, deliberately NOT `env CARGO_TERM_COLOR=never …`: the #3400
+  # self-test drives this function with `cargo` replaced by a shell FUNCTION emitting a
+  # coloured fixture log, which is how it proves the STRIP (not the belt) carries the
+  # correctness. `env` execs an external binary, so it would bypass that stub and run the
+  # real cargo. Do not "tidy" this into `env` without rewriting that test.
   out=$(CARGO_TERM_COLOR=never cargo test --package cqlite-core --features arrow \
     --test issue_1495_arrow_accessor_parity 2>&1) || { echo "$out"; return 1; }
   echo "$out"

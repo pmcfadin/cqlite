@@ -343,8 +343,11 @@ STUB
     bad "arrow-parity-guard: PASSed a coloured log reporting 0 passed — the vacuous-skip protection is gone"
   fi
   # AC4 part 2: the BELT is applied to the invocation this component owns. Note both cases
-  # above ran against a stub `cargo` shell function, which the env prefix cannot affect — so
-  # they prove the STRIP alone carries the correctness, and this assert covers the belt.
+  # above ran against a stub `cargo` shell FUNCTION, which the assignment prefix cannot
+  # affect — so they prove the STRIP alone carries the correctness, and this assert covers
+  # the belt. The prefix must stay a BARE assignment: `env CARGO_TERM_COLOR=never …` execs an
+  # external binary and would bypass the stub, silently turning both cases above into real
+  # cargo builds. That is why this assert pins the exact spelling.
   if grep -q 'CARGO_TERM_COLOR=never cargo test --package cqlite-core --features arrow' "$tmp/arrow_guard.sh"; then
     ok "AC4 part 2: the arrow-parity-guard cargo invocation carries the CARGO_TERM_COLOR=never belt (and the two cases above, run against a stub cargo the prefix cannot reach, show the STRIP is what actually carries it)"
   else
