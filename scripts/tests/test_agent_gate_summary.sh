@@ -3865,6 +3865,53 @@ else
   bad "1699-r38-attrib: the gap diagnostic is back to a variable assigned AFTER the append — it will name the previous target or nothing, misattributing the census gap"
 fi
 
+# --- 42. #1699: root-pass findings — decide, then filter, then record; and no fail-open scans ---
+#
+# The root-checkout roborev pass on the GATED sha found three, all fail-open or mis-scoped, and the
+# gate was green at the time — which is the whole argument for running a review on the certified sha.
+#
+# (a) ORDER: membership decides whether the target is our SUBJECT; required-features decides whether
+# we may INVOKE it; nothing may RECORD it before both. Round 37 hoisted the filter above the
+# membership test and the census then invented gaps: 5 measured false claims in shipped output, none
+# legacy-gated (issue_1495_arrow_accessor_parity(arrow), issue_1695_query_timeout(cli-helpers),
+# issue_1869_big_clustering_slice_readat(work-counters), issue_2148_statistics_toc_single_walk,
+# issue_2302_written_index_resolve). A census that invents gaps is worse than one that omits them.
+lh42_="$tmp/1699-r43-lh.txt"
+awk '/^run_legacy_heuristics\(\) \{/, /^\}/' "$GATE" | sed 's/[[:space:]]*#.*$//' > "$lh42_"
+if [ ! -s "$lh42_" ]; then
+  bad "1699-r43-order-scope: could not extract run_legacy_heuristics — these asserts would pass vacuously"
+else
+  m_=$(grep -nE '_mt_hit" -eq 1' "$lh42_" | head -1 | cut -d: -f1)
+  f_=$(grep -nE '_rf_off=""' "$lh42_" | head -1 | cut -d: -f1)
+  r_=$(grep -nE 'rf_unmet="' "$lh42_" | tail -1 | cut -d: -f1)
+  o_=$(grep -nE 'observe_ids\+=' "$lh42_" | head -1 | cut -d: -f1)
+  t_=$(grep -nE 'targets\+=\(--test' "$lh42_" | head -1 | cut -d: -f1)
+  if [ -n "$m_" ] && [ -n "$f_" ] && [ -n "$o_" ] && [ -n "$t_" ] \
+     && [ "$m_" -lt "$f_" ] && [ "$f_" -lt "$o_" ] && [ "$f_" -lt "$t_" ]; then
+    ok "1699-r43-order: membership ($m_) precedes the required-features filter ($f_), which precedes every record (observe_ids $o_, --test $t_)"
+  else
+    bad "1699-r43-order: the loop decides in the wrong order (membership=$m_ filter=$f_ record=$o_/$t_) — filtering before membership makes the census invent gaps for targets that are not its subject; recording before filtering demands a banner for a target never invoked"
+  fi
+  # (b) the membership scan must be TRI-STATE: match / no match / ERROR
+  if [ "$(grep -cE 'grep -cE "\$cfg_site" "\$_mt_cf"\)?; _mt_rc=\$\?|_mt_rc" -ge 2' "$lh42_")" -ge 1 ] \
+     && [ "$(grep -cE 'grep -cE "\$cfg_site" "\$_mt_cf" 2>/dev/null' "$lh42_")" -eq 0 ]; then
+    ok "1699-r43-membership-tristate: the cfg-site scan captures grep's status and fails on >=2, instead of reading a read-error as 'no legacy site'"
+  else
+    bad "1699-r43-membership-tristate: the cfg-site scan is back to swallowing errors — a scan failure then silently drops the target from the lane, and a dropped target cannot fail the zero-tests guard, so an empty run passes"
+  fi
+fi
+
+# (c) the census occurrence scan must not end in `|| true`
+gg43_="$tmp/1699-r43-gg.txt"
+awk '/^_crate_gated_test_targets\(\) \{/, /^\}/' "$GATE" | sed 's/[[:space:]]*#.*$//' > "$gg43_"
+if [ ! -s "$gg43_" ]; then
+  bad "1699-r43-census-scope: could not extract _crate_gated_test_targets — this assert would pass vacuously"
+elif [ "$(grep -cE '\|\| true' "$gg43_")" -eq 0 ] && [ "$(grep -cE '_gr_rc" -ge 2' "$gg43_")" -gt 0 ]; then
+  ok "1699-r43-census-tristate: the occurrence scan propagates read errors (grep >=2) instead of ending in '|| true'"
+else
+  bad "1699-r43-census-tristate: the occurrence scan swallows failures again — a partial or failed scan is then reported as 'no gated occurrences', which is the census's own all-clear produced by the census failing"
+fi
+
 # LOWERED DELIBERATELY, 300 -> 285, and this is the ratchet working rather than being defeated.
 # Roborev round 27's descope removed the crate-gate CLASSIFIER, and with it 25 assertions that
 # tested a feature grammar, a conjunction evaluator and a selector predicate which no longer exist.

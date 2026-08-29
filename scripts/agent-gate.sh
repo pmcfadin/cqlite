@@ -6679,8 +6679,18 @@ _crate_gated_test_targets() { # <pkg>  -> name \t rel \t gate-text
     # crate-level one HERE and can open the file — which is the same call this change already made
     # twice (the classifier became an observation in round 27; the legacy census reports sites, not
     # bodies). What is lost is a claim nobody could support; what remains needs no grammar at all.
-    gate=$(grep -nE '^[[:space:]]*#!\[[[:space:]]*cfg(_attr)?[[:space:]]*\(' "$sp" \
-      | sed 's/^\([0-9]*\):[[:space:]]*/L\1: /' | tr '\n' ' ' | sed 's/  */ /g; s/^ //; s/ $//') || true
+    # TRI-STATE, not `|| true` (roborev root pass, Medium). `|| true` swallowed a source-read
+    # failure and every transform error, so a partial or failed scan reported "no gated
+    # occurrences" — the census's own all-clear, produced by the census failing. grep exits 0 for
+    # matches, 1 for none, >=2 for a real error; only the last is fatal, and it FAILs the
+    # derivation rather than returning a shorter list.
+    local _gr_out _gr_rc=0
+    _gr_out=$(grep -nE '^[[:space:]]*#!\[[[:space:]]*cfg(_attr)?[[:space:]]*\(' "$sp") || _gr_rc=$?
+    if [ "$_gr_rc" -ge 2 ]; then
+      echo "SCAN-ERROR grep exit $_gr_rc on $sp (declared target $_tn)" >&2
+      return 1
+    fi
+    gate=$(printf '%s\n' "$_gr_out" | sed 's/^\([0-9]*\):[[:space:]]*/L\1: /' | tr '\n' ' ' | sed 's/  */ /g; s/^ //; s/ $//')
     [ -n "$gate" ] || continue
     printf '%s\t%s\t%s\n' "$_tn" "$rel" "$gate"
   done <<< "$meta"
@@ -6975,42 +6985,9 @@ run_legacy_heuristics() {
     echo ">>> [$name] $status ($((end - start))s)"
     return 0
   fi
-  local _mt_name _mt_src _mt_how _mt_rel _mt_rf _mt_dir _mt_hit _mt_cf _obs_id
+  local _mt_name _mt_src _mt_how _mt_rel _mt_rf _mt_dir _mt_hit _mt_cf _obs_id _mt_cnt _mt_rc
   local rf_unmet=""
   while IFS="$(printf '\t')" read -r _mt_name _mt_src _mt_how _mt_rel _mt_rf; do
-    # FIRST THING IN THE LOOP (roborev round-37, Medium). This check used to sit ~35 lines lower,
-    # AFTER `observe_ids+=(...)` — so a target excluded here had already been added to the
-    # observation set, and `check_test_targets_observed` then demanded a `Running` banner for a
-    # target the lane deliberately never invoked: a FALSE RED on valid code, produced by the fix
-    # that was meant to prevent one. Anything that records a target must run after the decision to
-    # invoke it, so the decision goes first.
-    #
-    # A target whose FULL `required-features` are not satisfied by this feature set must
-    # NOT be named explicitly (roborev round-36, Medium). Cargo REJECTS an explicit
-    # `--test <name>` whose required-features are unmet, so the lane would fail on entirely
-    # correct code — a FALSE RED, and the kind that looks like a real breakage. The helper
-    # already carries the manifest's list; this compares ALL of it, not just the presence of
-    # `legacy-heuristics`, and reports the target as a COVERAGE GAP instead of invoking it.
-    local _rf_off=""
-    if [ -n "${_mt_rf:-}" ]; then
-      local _rf1
-      for _rf1 in ${_mt_rf//,/ }; do
-        [ -n "$_rf1" ] || continue
-        case " $lh_enabled " in
-          *" $_rf1 "*) ;;
-          *) _rf_off="${_rf_off:+$_rf_off,}$_rf1" ;;
-        esac
-      done
-    fi
-    if [ -n "$_rf_off" ]; then
-      # `$_mt_name`, NOT `$base` (roborev round-38, Medium). `base` is assigned ~60 lines below this
-      # point — a consequence of round 37 hoisting this decision to the top of the loop — so the
-      # diagnostic named the PREVIOUS iteration's target, or nothing at all on the first one. A
-      # coverage census that misattributes its own gaps is worse than one that omits them, because
-      # it sends the reader to a target that is fine.
-      rf_unmet="$rf_unmet $_mt_name(required-features unmet:$_rf_off)"
-      continue
-    fi
     [ -n "$_mt_name" ] || continue
     f="$_mt_src"
     # Included when EITHER cargo gates the target on the feature (the arm the glob could
@@ -7048,11 +7025,74 @@ run_legacy_heuristics() {
       _mt_hit=0
       while IFS= read -r _mt_cf; do
         [ -n "$_mt_cf" ] || continue
-        if [ "$(grep -cE "$cfg_site" "$_mt_cf" 2>/dev/null)" -gt 0 ]; then _mt_hit=1; break; fi
+        # TRI-STATE (roborev root pass, Medium): `grep -c … 2>/dev/null` reported 0 both for "no
+        # match" and for "could not read", so a scan failure silently omitted a source-gated target
+        # from the lane — and an omitted target cannot fail the zero-tests guard, which is how an
+        # empty run passes. grep: 0 = matched, 1 = no match, >=2 = error.
+        _mt_cnt=$(grep -cE "$cfg_site" "$_mt_cf"); _mt_rc=$?
+        if [ "$_mt_rc" -ge 2 ]; then
+          echo "SCAN-ERROR grep exit $_mt_rc on $_mt_cf (target $_mt_name)" >&2
+          status=FAIL
+          {
+            echo "[$name] FAIL-CLOSED: the legacy cfg-site scan could not read $_mt_cf (grep exit"
+            echo "        $_mt_rc). A failed scan reads as 'no legacy site', which silently drops"
+            echo "        the target from the lane — and a dropped target cannot fail the"
+            echo "        zero-tests guard, so an empty run would pass."
+          } | tee -a "$log"
+          end=$(date +%s); record_result "$name" "$status" "$((end - start))"
+          echo ">>> [$name] $status ($((end - start))s)"; return 0
+        fi
+        if [ "${_mt_cnt:-0}" -gt 0 ]; then _mt_hit=1; break; fi
       done <<EOF
 $_mt_closure
 EOF
       [ "$_mt_hit" -eq 1 ] || continue
+    # AFTER MEMBERSHIP, BEFORE INVOCATION (roborev root pass, Low). Round 37 hoisted this to the
+    # top of the loop to fix an ordering bug, and created another: the check ran BEFORE the
+    # legacy-membership test, so EVERY target with any unmet required-feature was reported as a
+    # legacy coverage gap. MEASURED false claims in the shipped census — 5 of them, none
+    # legacy-gated: issue_1495_arrow_accessor_parity(arrow),
+    # issue_1695_query_timeout(cli-helpers), issue_1869_big_clustering_slice_readat(work-counters),
+    # issue_2148_statistics_toc_single_walk(cli-helpers), issue_2302_written_index_resolve. A census
+    # inventing gaps is worse than one omitting them: it sends the reader to targets that are fine.
+    #
+    # The invariant, now stated where both orderings can be seen: membership decides WHETHER this
+    # target is our subject; the required-features check decides whether we may INVOKE it; and
+    # nothing may RECORD it before both. Round 37 got the second half right and the first wrong.
+    #
+    # (round 37, Medium) The check must still precede every record of the target —
+    # AFTER `observe_ids+=(...)` — so a target excluded here had already been added to the
+    # observation set, and `check_test_targets_observed` then demanded a `Running` banner for a
+    # target the lane deliberately never invoked: a FALSE RED on valid code, produced by the fix
+    # that was meant to prevent one. Anything that records a target must run after the decision to
+    # invoke it, so the decision goes first.
+    #
+    # A target whose FULL `required-features` are not satisfied by this feature set must
+    # NOT be named explicitly (roborev round-36, Medium). Cargo REJECTS an explicit
+    # `--test <name>` whose required-features are unmet, so the lane would fail on entirely
+    # correct code — a FALSE RED, and the kind that looks like a real breakage. The helper
+    # already carries the manifest's list; this compares ALL of it, not just the presence of
+    # `legacy-heuristics`, and reports the target as a COVERAGE GAP instead of invoking it.
+    local _rf_off=""
+    if [ -n "${_mt_rf:-}" ]; then
+      local _rf1
+      for _rf1 in ${_mt_rf//,/ }; do
+        [ -n "$_rf1" ] || continue
+        case " $lh_enabled " in
+          *" $_rf1 "*) ;;
+          *) _rf_off="${_rf_off:+$_rf_off,}$_rf1" ;;
+        esac
+      done
+    fi
+    if [ -n "$_rf_off" ]; then
+      # `$_mt_name`, NOT `$base` (roborev round-38, Medium). `base` is assigned ~60 lines below this
+      # point — a consequence of round 37 hoisting this decision to the top of the loop — so the
+      # diagnostic named the PREVIOUS iteration's target, or nothing at all on the first one. A
+      # coverage census that misattributes its own gaps is worse than one that omits them, because
+      # it sends the reader to a target that is fine.
+      rf_unmet="$rf_unmet $_mt_name(required-features unmet:$_rf_off)"
+      continue
+    fi
     fi
     base="$_mt_name"
     # The observation set is EVERY selected target, spelled the guard's way, so the lane can
