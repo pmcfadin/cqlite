@@ -708,12 +708,32 @@ def build_report(args: argparse.Namespace) -> tuple[dict, list[str]]:
         # published under the word BASELINE in the first line of the report. The label is the ONLY
         # thing distinguishing the two to a reader, so it goes in the title rather than in a field
         # somebody would have to know to look for.
+        # A PROFILED RUN IS NOT A BASELINE EITHER, AND THE TITLE USED TO SAY IT WAS (#3248,
+        # coordination ruling on roborev job 80: make the distinction "impossible to miss rather
+        # than merely present").
+        #
+        # `is_baseline` asked only whether the CORPUS was canonical. So a profiled run on the
+        # canonical corpus printed `==== WS0 SAME-SESSION BASELINE ====` in its first line while
+        # the `profile` line six lines below said "these are NOT baseline numbers". THE REPORT
+        # CONTRADICTED ITSELF, and the title is what a reader who reads one line reads. Adding the
+        # `profile` field (F3's first half) put the truth in the document and left the headline
+        # lying, which is a worse state than not having the field: two statements, one wrong, and
+        # the wrong one louder.
+        #
+        # Observer overhead measures 1.6-4.3% on rows/s here, so it is inside every throughput
+        # figure below. That disqualifies the run as a baseline exactly as a non-canonical corpus
+        # does, and the title now says so for either cause.
         (
             "==== WS0 SAME-SESSION BASELINE (issue #3096 rig, hardened #3272) ===="
-            if canonical["is_baseline"]
+            if canonical["is_baseline"] and profile == "off"
             else "==== WS0 SAME-SESSION MEASUREMENT — *** NOT A BASELINE *** (issue #3096 rig,"
             " hardened #3272) ===="
         ),
+        # ...and WHY it is not one, when the corpus was canonical but a profiler was attached: the
+        # reader should not have to reconcile the title with a field further down.
+        *(["               (not a baseline because a SAMPLING PROFILER was attached:"
+           f" {profile} — observer overhead is inside every throughput figure below)"]
+          if canonical["is_baseline"] and profile != "off" else []),
         # ...and the label IN WORDS, on its own line, in BOTH modes — an affirmative statement in
         # the baseline case too, so a reader can tell "this run was checked and IS canonical" from
         # "this rig does not check", which the absence of a line cannot express.

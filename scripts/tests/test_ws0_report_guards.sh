@@ -1665,19 +1665,21 @@ q_evidence_case "a verdict with NO 'before' boundary sample is REFUSED, naming t
   "before.competing" 'v.pop("before")'
 q_evidence_case "a competitor at the BEFORE boundary is REFUSED despite the QUIESCENT label" \
   "before boundary census lists 1 competing" \
-  'v["before"]["competing"]=["cc1"]; v["before"]["competing_count"]=1'
+  'v["before"]["competing"]=["cc1"]; v["before"]["competing_count"]=1; v["competing_before"]=1'
 q_evidence_case "a competitor at the AFTER boundary is REFUSED despite the QUIESCENT label" \
   "after boundary census lists 2 competing" \
-  'v["after"]["competing"]=["rustc","ld"]; v["after"]["competing_count"]=2'
-q_evidence_case "an internally contradictory boundary (count != len) is REFUSED" \
-  "holds 0 entr" 'v["after"]["competing_count"]=3'
+  'v["after"]["competing"]=["rustc","ld"]; v["after"]["competing_count"]=2; v["competing_after"]=2'
+q_evidence_case "count != len(competing) is REFUSED as a DERIVATION violation" \
+  "its own inputs (len(after.competing))" \
+  'v["after"]["competing_count"]=3; v["competing_after"]=3'
 q_evidence_case "nonzero in-window competing_samples is REFUSED" \
   "in-window sample(s) with a competing process" \
   'v["window_census"]["competing_samples"]=7'
 q_evidence_case "a ZERO-sample window is REFUSED (unmeasured, not quiet)" \
   "window_census.samples\` is 0" 'v["window_census"]["samples"]=0'
 q_evidence_case "narrow_census_records exceeding samples is REFUSED as impossible" \
-  "which is impossible" 'v["window_census"]["narrow_census_records"]=999'
+  "which is impossible" \
+  'wc=v["window_census"]; wc["narrow_census_records"]=999; wc["census_breadth"]="NARROW on 999 of %d record(s): those carry rustc/cargo/gate only, so a short-lived cc1/ld/lld/mold between boundaries would not appear. Stated rather than implied." % wc["samples"]'
 q_evidence_case "a sampling gap wider than the verdict's OWN bound is REFUSED" \
   "exceeds its own stated bound" \
   'v["window_census"]["coverage_largest_gap_s"]=99.0'
