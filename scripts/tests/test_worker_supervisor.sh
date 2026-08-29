@@ -167,6 +167,21 @@ EOF
   chmod +x "$path"
 }
 
+# Parks on the EXACT reason token the supervisor keys on (#3393 round 20). Note the sibling stub above
+# uses free text ("needs owner decision"), which is deliberately NOT a park token — that is why it
+# retains its issue and this one releases it.
+write_park_stub() {
+  local path="$1" issue="$2" reason="$3"
+  cat >"$path" <<EOF
+#!/usr/bin/env bash
+set -euo pipefail
+cat >"\$MARKER_FILE" <<JSON
+{"outcome":"blocked","issue":$issue,"pr":null,"duration_s":1,"reason":"$reason"}
+JSON
+EOF
+  chmod +x "$path"
+}
+
 # F5 regression: writes outcome=finalized with issue set but pr MISSING
 # entirely (not just null) — the marker contract requires BOTH issue and pr
 # on "finalized"; a marker missing either must be judged abnormal.
@@ -2824,6 +2839,61 @@ STUBEOF
   fi
 }
 
+# ---------------------------------------------------------------------------
+# Test 30-claim (#3393, roborev round 20, High): a park on `seam1-approval`/`needs-decision` RELEASES
+# the issue — it is excluded from the next pickup until the owner answers — so the next spawn must NOT
+# be stamped under that issue's ref. It was, which let another lane legitimately resuming the issue
+# overwrite the ref and hide a dead supervisor behind it: the collision per-lane refs exist to remove.
+# ---------------------------------------------------------------------------
+test_park_releases_issue_so_next_lane_is_a_placeholder() {
+  local d rc stamps placeholders named
+  for reason in needs-decision seam1-approval; do
+    d="$(new_case_dir)"
+    common_env "$d"
+    write_park_stub "$d/bin/worker.sh" 88 "$reason"
+    export WORKER_CMD="$d/bin/worker.sh"
+    export MAX_ISSUES=100
+    export BREAKER_N=100
+    export CLAIM_LOG="$d/claim.log"
+    : >"$CLAIM_LOG"
+    write_claim_stub "$d/bin/claim.sh"
+    export CLAIM_CMD="bash $d/bin/claim.sh"
+    export HEARTBEAT_MACHINE="testbox"
+    bash "$SUPERVISOR" >"$d/stdout.log" 2>&1
+    rc=$?
+    stamps=$(grep -cE '^stamp ' "$CLAIM_LOG" 2>/dev/null || true)
+    placeholders=$(grep -cE '^stamp p[0-9]+-[0-9a-f]+ [0-9]+$' "$CLAIM_LOG" 2>/dev/null || true)
+    named=$(grep -cE '^stamp 88 [0-9]+$' "$CLAIM_LOG" 2>/dev/null || true)
+    # NON-VACUITY is built in: the run must actually have stamped more than once, or "no stamp names
+    # 88" would hold trivially for a supervisor that never reached a second iteration.
+    if [[ "$stamps" -ge 2 && "$named" -eq 0 && "$placeholders" -eq "$stamps" ]]; then
+      pass "claim: a '$reason' park releases issue 88, so all $stamps stamps are unique placeholders and none names the released issue"
+    else
+      fail "park-releases-issue ($reason): stamps=$stamps placeholders=$placeholders named=$named rc=$rc log=[$(tr '\n' ';' <"$CLAIM_LOG")]"
+    fi
+  done
+  # CONTROL: a TECHNICAL block (free-text reason, not a park token) must still CARRY the issue forward,
+  # or the fix would have thrown away the liveness accuracy it exists to protect. This is the existing
+  # claim-learn behaviour, asserted here so the two directions sit side by side.
+  d="$(new_case_dir)"
+  common_env "$d"
+  write_blocked_same_issue_stub "$d/bin/worker.sh" 88
+  export WORKER_CMD="$d/bin/worker.sh"
+  export MAX_ISSUES=100
+  export BREAKER_N=100
+  export CLAIM_LOG="$d/claim.log"
+  : >"$CLAIM_LOG"
+  write_claim_stub "$d/bin/claim.sh"
+  export CLAIM_CMD="bash $d/bin/claim.sh"
+  export HEARTBEAT_MACHINE="testbox"
+  bash "$SUPERVISOR" >"$d/stdout.log" 2>&1 || true
+  if grep -qE '^stamp 88 [0-9]+$' "$CLAIM_LOG"; then
+    pass "claim: CONTROL — a technical block still carries the issue forward (stamp names 88), so only the park path releases"
+  else
+    fail "park-releases-issue control: a technical block must still name the issue: log=[$(tr '\n' ';' <"$CLAIM_LOG")]"
+  fi
+}
+
 test_claim_drain_never_deletes_current_lane() {
   local d out
   d="$(new_case_dir)"
@@ -3070,6 +3140,7 @@ test_claim_drain_never_deletes_current_lane
 test_clear_claim_keeps_placeholder_on_abnormal_exit
 test_supervisor_lock_is_per_lane
 test_claim_cleanup_uses_lease_and_drops_on_transfer
+test_park_releases_issue_so_next_lane_is_a_placeholder
 test_finalized_verified_merged_counts
 test_finalized_mismatch_open_is_abnormal
 test_finalized_unverified_not_counted_no_breaker

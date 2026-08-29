@@ -2429,6 +2429,123 @@ else
 fi
 (cd "$WORK" && g push -q origin ":refs/machine-claims/legacyNoIssue" ":refs/machine-claims/legacyOk" 2>/dev/null || true)
 
+# ===========================================================================
+echo "TEST 73: a failed LEASED push is only a transfer when the ref actually MOVED (round 20)"
+# ===========================================================================
+# FAIL-OPEN in a new spelling. A failed `--force-with-lease` push returned 4 ("lease not held") for
+# auth, network and server failures alike — and worker-supervisor reads 4 as ownership TRANSFERRED and
+# permanently DROPS the cleanup entry. Automated reaping refuses a placeholder lane, so a transient
+# failure leaked a stale ref forever and dead-lanes then reported a lane that does not exist. The
+# previous round's lease fix created that leak. Driven by a git shim that fails the leased push while
+# leaving ls-remote working, so the three outcomes can be told apart.
+pushfail="$T/pushfail"
+mkdir -p "$pushfail"
+cat >"$pushfail/git" <<'PFEOF'
+#!/usr/bin/env bash
+# Scan ALL args (git takes global options before the subcommand), and fail ONLY a leased delete.
+_is_push=false; _leased=false
+for a in "$@"; do
+  [ "$a" = push ] && _is_push=true
+  case "$a" in --force-with-lease=*) _leased=true ;; esac
+done
+if [ "$_is_push" = true ] && [ "$_leased" = true ]; then
+  echo "fatal: injected push failure (simulating auth/network)" >&2
+  exit 1
+fi
+exec /usr/bin/git "$@"
+PFEOF
+chmod +x "$pushfail/git"
+
+# (a) ref UNCHANGED at the lease => OPERATIONAL failure (1), never 4, so the caller keeps retrying.
+craft_lane_claim "$WORK" "leaseBox" "6001" "$ABSENT_PID" 30
+lease_sha=$(g -C "$WORK" ls-remote origin 'refs/lane-claims/leaseBox/6001' | awk '{print $1}')
+lp_out=$(cd "$WORK" && PATH="$pushfail:$PATH" CLAIM_OPEN_PR_CMD="$NO_OPEN_PR" \
+  bash "$HB" reap leaseBox 6001 "$lease_sha" 2>&1)
+lp_rc=$?
+if [ "$lp_rc" -eq 1 ] && printf '%s\n' "$lp_out" | grep -qi 'operational failure'; then
+  ok "a failed leased push with the ref STILL at the lease is an operational failure (rc=1), not a transfer"
+else
+  bad "an operational push failure must not report a transfer: rc=$lp_rc out:
+$lp_out"
+fi
+
+# (b) ref MOVED away from the lease => genuine transfer (4).
+mv_out=$(cd "$WORK" && PATH="$pushfail:$PATH" CLAIM_OPEN_PR_CMD="$NO_OPEN_PR" \
+  bash "$HB" reap leaseBox 6001 0000000000000000000000000000000000000001 2>&1)
+mv_rc=$?
+if [ "$mv_rc" -eq 4 ] && printf '%s\n' "$mv_out" | grep -qi 'was not held'; then
+  ok "a failed leased push whose ref is at a DIFFERENT sha is a genuine transfer (rc=4)"
+else
+  bad "a real lease mismatch must still report 4: rc=$mv_rc out:
+$mv_out"
+fi
+# NON-VACUITY: the shim really does fail the leased push, and the ref really does still exist — so (a)
+# and (b) differ only in the lease value, which is the thing under test.
+still=$(g -C "$WORK" ls-remote origin 'refs/lane-claims/leaseBox/6001' | awk '{print $1}')
+if [ -n "$still" ] && [ "$still" = "$lease_sha" ]; then
+  ok "NON-VACUITY: the ref survived both attempts at its original sha, so neither push succeeded and the two verdicts came from the lease comparison"
+else
+  bad "NON-VACUITY broken: ref is now '$still' (was '$lease_sha') — a push got through, so TEST 73 is not comparing leases"
+fi
+
+# (c) ref ABSENT => nothing left to delete, report success rather than inventing a transfer.
+(cd "$WORK" && g push -q origin ":refs/lane-claims/leaseBox/6001" 2>/dev/null || true)
+ab_out=$(cd "$WORK" && PATH="$pushfail:$PATH" CLAIM_OPEN_PR_CMD="$NO_OPEN_PR" \
+  bash "$HB" reap leaseBox 6001 "$lease_sha" 2>&1)
+ab_rc=$?
+if [ "$ab_rc" -eq 0 ] && printf '%s\n' "$ab_out" | grep -qi 'already absent'; then
+  ok "a failed leased push against an ALREADY-ABSENT ref reports success — nothing remained to delete"
+else
+  bad "an absent ref after a failed push must not be an error or a transfer: rc=$ab_rc out:
+$ab_out"
+fi
+
+# ===========================================================================
+echo "TEST 74: list/list-claims REPORT an unreadable row in the exit status (round 20)"
+# ===========================================================================
+# The PROPERTY behind census instance 6. Guarding the git version at dispatch closed the CAUSE that
+# instance was found through (git < 2.29) and left the property open: a row fetch failing for network,
+# auth or a ref deleted mid-run still printed `fetch-failed` and the command still exited 0 — a listing
+# that measured nothing, reporting success. Driven by a shim that fails only per-row FETCHES.
+rowfail="$T/rowfail"
+mkdir -p "$rowfail"
+cat >"$rowfail/git" <<'RFEOF'
+#!/usr/bin/env bash
+_is_fetch=false
+for a in "$@"; do [ "$a" = fetch ] && _is_fetch=true; done
+if [ "$_is_fetch" = true ]; then
+  echo "fatal: injected row-fetch failure" >&2
+  exit 1
+fi
+exec /usr/bin/git "$@"
+RFEOF
+chmod +x "$rowfail/git"
+craft_lane_claim "$WORK" "rowBox" "6002" "$ABSENT_PID" 30
+(cd "$WORK" && bash "$HB" beat 6002 >/dev/null 2>&1) || true
+for sub in list list-claims; do
+  rf_out=$(cd "$WORK" && PATH="$rowfail:$PATH" bash "$HB" "$sub" 2>&1)
+  rf_rc=$?
+  if [ "$rf_rc" -ne 0 ] \
+    && printf '%s\n' "$rf_out" | grep -q 'fetch-failed' \
+    && printf '%s\n' "$rf_out" | grep -qi 'INCOMPLETE'; then
+    ok "'$sub' exits non-zero (rc=$rf_rc) when a row could not be read, while still rendering the rows that did"
+  else
+    bad "'$sub' must not exit 0 having measured nothing: rc=$rf_rc out:
+$rf_out"
+  fi
+done
+# NON-VACUITY: WITHOUT the shim the same commands exit 0 on the same refs, so the non-zero above is
+# caused by the injected row failure and not by the listing being empty or the refs being malformed.
+for sub in list list-claims; do
+  (cd "$WORK" && bash "$HB" "$sub" >/dev/null 2>&1)
+  if [ $? -eq 0 ]; then
+    ok "NON-VACUITY: '$sub' exits 0 on the same refs with a working git"
+  else
+    bad "NON-VACUITY broken: '$sub' already failed without the shim, so TEST 74 proves nothing"
+  fi
+done
+(cd "$WORK" && g push -q origin ":refs/lane-claims/rowBox/6002" ":refs/heartbeats/rowBox" 2>/dev/null || true)
+
 echo
 echo "=== claim-heartbeat.sh: $PASS passed, $FAIL failed ==="
 [ "$FAIL" -eq 0 ]
