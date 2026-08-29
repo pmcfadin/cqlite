@@ -222,16 +222,16 @@ tools/           # 7 crates, each with a RECORDED disposition in one of THREE
                  #             name BOTH halves, and the crate must stay a
                  #             workspace member — never `exclude` it.
                  #   A NEW tools/ crate must be classified there or the gate FAILs.
-                 #   A MIXED crate's live half is the UNION of two INDEPENDENT
-                 #   sources, at least one non-empty, both always checked:
-                 #   workspace dependents (DERIVED from `cargo tree --workspace
-                 #   --invert`, so unclaimable falsely) and invoked binaries
-                 #   (RECORDED in MIXED_INVOKED, since invocation is not
-                 #   mechanically checkable, but each is cross-checked against
-                 #   the crate's declared [[bin]]s). The README must NAME every
-                 #   item from both. Granularity is per-CRATE, not per-target:
-                 #   adding an orphaned bin to a WIRED crate passes unchanged —
-                 #   a recorded limitation, not an oversight.
+                 #   That guard is deliberately SMALL: it checks a disposition
+                 #   was RECORDED and LABELED, not that the record is TRUE, and it
+                 #   is per-CRATE (an orphaned bin added to a WIRED crate passes
+                 #   unchanged). It needs no cargo/python3/network. A
+                 #   cargo-derived cross-check that verified truth was built and
+                 #   REMOVED (#1716) — 11 review findings landed in it and none in
+                 #   the list/README part, and its scratch workspaces sat outside
+                 #   the repo so they did not inherit rust-toolchain.toml, making a
+                 #   MANDATORY gate component host-toolchain-dependent. Doing it
+                 #   properly is its own issue under epic #1688.
 fuzz/            # cargo-fuzz crate — own workspace, EXCLUDED from the main one
 ```
 

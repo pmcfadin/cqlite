@@ -2,16 +2,21 @@
 # Self-test for scripts/tests/test_tools_crate_disposition.sh (issue #1716).
 #
 # A guard is only worth its green if it is capable of red. Every case builds a
-# minimal, dependency-free scratch cargo workspace, copies the guard into it at
-# the same relative path (the guard resolves its root from its OWN location, so
-# there is deliberately NO path/env seam to point at a fixture — CLAUDE.md #3312:
-# a case needing a different subject SUBSTITUTES THE ARTIFACT in its own scratch
-# copy of the tree), rewrites the three recorded lists for that tree, and asserts
-# the verdict.
+# scratch tools/ tree, copies the guard into it at the same relative path (the guard
+# resolves its root from its OWN location, so there is deliberately NO path/env seam
+# to point at a fixture — CLAUDE.md #3312: a case needing a different subject
+# SUBSTITUTES THE ARTIFACT in its own scratch copy of the tree), rewrites the three
+# recorded lists for that tree, and asserts the verdict.
 #
-# EIGHT GREEN CONTROLS, not one. Without a green control per shape, a guard
-# hardwired to refuse everything — or one that rejects every MIXED crate, or every
-# crate with a real dependent — would satisfy all the red cases and look tested.
+# NO CARGO ANYWHERE. An earlier version built scratch cargo workspaces to exercise a
+# dependency-derivation half of the guard that has since been removed. Those
+# workspaces lived OUTSIDE the repository, so they did not inherit
+# rust-toolchain.toml, which made a MANDATORY gate component's behaviour depend on
+# the host's default toolchain (roborev job 86). The guard is now filesystem-and-list
+# only, so this self-test is too: deterministic, offline, toolchain-independent.
+#
+# TWO GREEN CONTROLS: without one per shape, a guard hardwired to refuse everything
+# would satisfy every red case below and look fully tested.
 set -uo pipefail
 
 SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
@@ -19,7 +24,6 @@ GUARD="$SCRIPT_DIR/test_tools_crate_disposition.sh"
 GUARD_BASE=$(basename "$GUARD")
 [ -f "$GUARD" ] || { echo "FAIL: guard under test not found at $GUARD" >&2; exit 1; }
 
-export CARGO_NET_OFFLINE=1
 TMPROOT=$(mktemp -d "${TMPDIR:-/tmp}/toolsdisp.XXXXXX") || exit 1
 trap 'rm -rf "$TMPROOT"' EXIT
 
@@ -27,104 +31,27 @@ fails=0
 pass_case() { echo "ok: $*"; }
 fail_case() { echo "FAIL: $*" >&2; fails=$((fails + 1)); }
 
-# make_ws <case> <wired> <unwired> <mixed> <disk crates> <readme spec> [consumer-of]
+# make_ws <case> <wired> <unwired> <mixed> <disk crates> [readme spec]
 #   disk crates : space-separated dir names to create under tools/
 #   readme spec : space-separated `crate:kind`, kind =
-#                   labeled      -> says "NOT CI-wired" only
-#                   namesdep     -> says "NOT CI-wired" AND names scratch-consumer
-#                   genericwired -> says "NOT CI-wired" AND the bare word WIRED,
-#                                   but NEVER names the dependent (roborev job 78)
-#                   unlabeled    -> says neither
+#                   labeled   -> contains "NOT CI-wired"
+#                   unlabeled -> a README that never states the fact
 #                 (crates not named get no README at all)
-#   consumer-of : if non-empty, create a `consumer` workspace member (package
-#                 `scratch-consumer`) that path-depends on tools/<that crate>, so
-#                 `cargo tree --workspace --invert` reports a REAL dependent.
-#                 Accepts `<crate>` , `<crate>:optional` (dependency behind a
-#                 non-default feature) or `<crate>:target` (dependency inside a
-#                 `[target.'cfg(...)'.dependencies]` table). The latter two are the
-#                 shapes `cargo tree` hides unless queried with `--all-features`
-#                 and `--target all` (roborev job 79).
-#   mixed-inv   : 8th arg, the MIXED_INVOKED body (`<crate>|none` or
-#                 `<crate>|<bin>[,<bin>...]`). Defaults to `<mixed>|none`.
 #   a literal "-" for any list means "empty list"
 make_ws() {
-  local case_name="$1" wired="$2" unwired="$3" mixed="$4" disk="$5" readmes="${6:-}" consumer_of="${7:-}" mixed_invoked="${8:-}"
-  # "-" means "use the default"; "NONE" means a genuinely EMPTY MIXED_INVOKED, which
-  # is what an UNRECORDED MIXED crate looks like and cannot be expressed by "-"
-  # (the default would fill it back in).
-  [ "$mixed_invoked" = "-" ] && mixed_invoked=""
-  # default: any MIXED crate is recorded as live-via-dependency
-  if [ "$mixed_invoked" = "NONE" ]; then
-    mixed_invoked=""
-  elif [ -z "$mixed_invoked" ] && [ -n "$mixed" ] && [ "$mixed" != "-" ]; then
-    mixed_invoked="$mixed|none"
-  fi
+  local case_name="$1" wired="$2" unwired="$3" mixed="$4" disk="$5" readmes="${6:-}"
   local ws="$TMPROOT/$case_name" c spec crate kind
-  mkdir -p "$ws/src" "$ws/scripts/tests"
+  mkdir -p "$ws/scripts/tests"
   for c in $disk; do
-    mkdir -p "$ws/tools/$c/src"
-    {
-      printf '[package]\nname = "scratch-%s"\nversion = "0.1.0"\nedition = "2021"\npublish = false\n' "$c"
-      # Two [[bin]] targets, so a crate can legitimately be MIXED with one bin
-      # invoked by CI and the other orphaned — the shape that has NO reverse cargo
-      # dependency at all (roborev job 83).
-      printf '\n[[bin]]\nname = "live-bin"\npath = "src/live.rs"\n'
-      printf '\n[[bin]]\nname = "dead-bin"\npath = "src/dead.rs"\n'
-    } > "$ws/tools/$c/Cargo.toml"
-    : > "$ws/tools/$c/src/lib.rs"
-    printf 'fn main() {}\n' > "$ws/tools/$c/src/live.rs"
-    printf 'fn main() {}\n' > "$ws/tools/$c/src/dead.rs"
+    mkdir -p "$ws/tools/$c"
+    printf '[package]\nname = "%s"\nversion = "0.1.0"\nedition = "2021"\npublish = false\n' "$c" \
+      > "$ws/tools/$c/Cargo.toml"
   done
-  {
-    echo '[workspace]'
-    if [ -n "$consumer_of" ]; then
-      echo 'members = ["tools/*", "consumer"]'
-    else
-      echo 'members = ["tools/*"]'
-    fi
-    echo 'resolver = "2"'
-    echo
-    echo '[package]'
-    echo 'name = "scratch-root"'
-    echo 'version = "0.1.0"'
-    echo 'edition = "2021"'
-    echo 'publish = false'
-  } > "$ws/Cargo.toml"
-  : > "$ws/src/lib.rs"
-  if [ -n "$consumer_of" ]; then
-    local dep_crate="${consumer_of%%:*}" dep_kind="plain"
-    case "$consumer_of" in *:*) dep_kind="${consumer_of##*:}" ;; esac
-    mkdir -p "$ws/consumer/src"
-    {
-      printf '[package]\nname = "scratch-consumer"\nversion = "0.1.0"\nedition = "2021"\npublish = false\n\n'
-      case "$dep_kind" in
-        optional)
-          # Behind a NON-DEFAULT feature: invisible to a default-feature resolve.
-          printf '[features]\ndefault = []\nextra = ["scratch-%s"]\n\n' "$dep_crate"
-          printf '[dependencies.scratch-%s]\npath = "../tools/%s"\noptional = true\n' "$dep_crate" "$dep_crate"
-          ;;
-        target)
-          # Target-gated on a cfg that is NOT this host: invisible to a host-only
-          # resolve. windows is chosen because the fleet is linux.
-          printf '[target."cfg(windows)".dependencies.scratch-%s]\npath = "../tools/%s"\n' "$dep_crate" "$dep_crate"
-          ;;
-        *)
-          printf '[dependencies.scratch-%s]\npath = "../tools/%s"\n' "$dep_crate" "$dep_crate"
-          ;;
-      esac
-    } > "$ws/consumer/Cargo.toml"
-    : > "$ws/consumer/src/lib.rs"
-  fi
   for spec in $readmes; do
     crate="${spec%%:*}"; kind="${spec##*:}"
     case "$kind" in
-      labeled)      printf '# scratch %s\n\nThis crate is NOT CI-wired.\n' "$crate" ;;
-      namesdep)     printf '# scratch %s\n\nIts binaries are NOT CI-wired; its library is used by scratch-consumer.\n' "$crate" ;;
-      genericwired) printf '# scratch %s\n\nPreviously WIRED, now entirely NOT CI-wired.\n' "$crate" ;;
-      namesbins)    printf '# scratch %s\n\nCI runs live-bin; the other binaries are NOT CI-wired.\n' "$crate" ;;
-      namesboth)    printf '# scratch %s\n\nCI runs live-bin and scratch-consumer uses the lib; the rest is NOT CI-wired.\n' "$crate" ;;
-      namesnobins)  printf '# scratch %s\n\nSome binaries are NOT CI-wired.\n' "$crate" ;;
-      *)            printf '# scratch %s\n\nProse that never says whether anything runs it.\n' "$crate" ;;
+      labeled) printf '# scratch %s\n\nThis crate is NOT CI-wired.\n' "$crate" ;;
+      *)       printf '# scratch %s\n\nProse that never says whether anything runs it.\n' "$crate" ;;
     esac > "$ws/tools/$crate/README.md"
   done
   [ "$wired" = "-" ] && wired=""
@@ -133,29 +60,21 @@ make_ws() {
   # Substitute the three recorded lists for this scratch tree's crates.
   #
   # `skip` must NOT be armed for a SELF-CONTAINED assignment. A single-line list
-  # such as `MIXED_TOOLS="format-validator"` both opens and closes its string on
-  # one line, so arming skip-until-quote made the rewriter swallow the NEXT
+  # such as `MIXED_TOOLS="format-validator"` both opens and closes its string on one
+  # line, so arming skip-until-quote made the rewriter swallow the NEXT
   # `"`-terminated line — `LABEL_MARKER=` — leaving every scratch guard with an
   # unbound variable. It broke the GREEN control rather than producing a wrong
   # verdict, which is why the green controls exist.
-  awk -v w="$wired" -v u="$unwired" -v m="$mixed" -v ml="$mixed_invoked" '
+  awk -v w="$wired" -v u="$unwired" -v m="$mixed" '
     function multiline(line) { return gsub(/"/, "\"", line) < 2 }
     /^WIRED_TOOLS="/   { print "WIRED_TOOLS=\"" w "\"";   skip=multiline($0); next }
     /^UNWIRED_TOOLS="/ { print "UNWIRED_TOOLS=\"" u "\""; skip=multiline($0); next }
     /^MIXED_TOOLS="/   { print "MIXED_TOOLS=\"" m "\"";   skip=multiline($0); next }
-    /^MIXED_INVOKED="/    { print "MIXED_INVOKED=\"" ml "\"";    skip=multiline($0); next }
     skip && /"$/ { skip=0; next }
     skip { next }
     { print }
   ' "$GUARD" > "$ws/scripts/tests/$GUARD_BASE"
   chmod +x "$ws/scripts/tests/$GUARD_BASE"
-  # The guard queries cargo with `--locked`, which REFUSES to create or rewrite a
-  # lockfile — correct for the real repo (it is what stops the guard mutating the
-  # tree it inspects), but it means a scratch workspace needs its own Cargo.lock
-  # first. These crates have no external dependencies, so this resolves offline.
-  # Failure is ignored on purpose: the stub-cargo cases below never reach real
-  # cargo, and the cases that DO would fail loudly on their own assertion anyway.
-  (cd "$ws" && cargo generate-lockfile --offline --quiet >/dev/null 2>&1) || true
   echo "$ws"
 }
 
@@ -193,11 +112,8 @@ expect_red() {
 expect_green "GREEN 1: a correctly-classified WIRED+UNWIRED tree PASSes" \
   green 'wiredone' 'orphanone' '-' 'wiredone orphanone' 'orphanone:labeled'
 
-expect_green "GREEN 2 (MIXED): a real dependent + a README naming it PASSes" \
-  mixedgreen 'wiredone' '-' 'mixedone' 'wiredone mixedone' 'mixedone:namesdep' 'mixedone'
-
-expect_green "GREEN 3: UNWIRED alongside a consumer of a DIFFERENT crate PASSes" \
-  unwiredgreen 'wiredone' 'orphanone' '-' 'wiredone orphanone' 'orphanone:labeled' 'wiredone'
+expect_green "GREEN 2: a correctly-labeled MIXED crate PASSes" \
+  mixedgreen 'wiredone' '-' 'mixedone' 'wiredone mixedone' 'mixedone:labeled'
 
 # ============================== RED CASES ===================================
 # --- classification completeness / consistency
@@ -218,15 +134,19 @@ orphanone' 'orphanone' '-' 'wiredone orphanone' 'orphanone:labeled'
 expect_red "crate recorded in BOTH WIRED and MIXED" \
   "recorded in BOTH WIRED_TOOLS and MIXED_TOOLS" \
   bothwm 'wiredone
-mixedone' '-' 'mixedone' 'wiredone mixedone' 'mixedone:namesdep' 'mixedone'
+mixedone' '-' 'mixedone' 'wiredone mixedone' 'mixedone:labeled'
 
 expect_red "crate recorded in BOTH UNWIRED and MIXED" \
   "recorded in BOTH UNWIRED_TOOLS and MIXED_TOOLS" \
-  bothum 'wiredone' 'mixedone' 'mixedone' 'wiredone mixedone' 'mixedone:namesdep' 'mixedone'
+  bothum 'wiredone' 'mixedone' 'mixedone' 'wiredone mixedone' 'mixedone:labeled'
 
 expect_red "empty UNWIRED_TOOLS and MIXED_TOOLS lists" \
   "refusing to pass vacuously" \
   emptyboth 'wiredone' '-' '-' 'wiredone' ''
+
+expect_red "empty WIRED_TOOLS list" \
+  "WIRED_TOOLS list is empty" \
+  emptywired '-' 'orphanone' '-' 'orphanone' 'orphanone:labeled'
 
 # --- the labeling half (#1716's actual acceptance criterion)
 expect_red "UNWIRED crate with no README" \
@@ -239,197 +159,11 @@ expect_red "UNWIRED crate README missing the label marker" \
 
 expect_red "MIXED crate with no README" \
   "has no README.md" \
-  mixednoreadme 'wiredone' '-' 'mixedone' 'wiredone mixedone' '' 'mixedone'
+  mixednoreadme 'wiredone' '-' 'mixedone' 'wiredone mixedone' ''
 
-# --- THE DERIVED CROSS-CHECK: the census must match the MANIFESTS, both ways.
-# roborev job 78: the MIXED label used to be verified by grepping for the generic
-# word "WIRED", which this README satisfies while saying the OPPOSITE. The
-# requirement is now to name the crate's ACTUAL, DERIVED dependent.
-expect_red "MIXED README carries the word WIRED but never names its dependent (roborev job 78)" \
-  "never mentions 'scratch-consumer'" \
-  job78 'wiredone' '-' 'mixedone' 'wiredone mixedone' 'mixedone:genericwired' 'mixedone'
-
-expect_red "MIXED recorded but NOTHING in the workspace depends on it" \
-  "has NO live half from either source" \
-  mixednodep 'wiredone' '-' 'mixedone' 'wiredone mixedone' 'mixedone:namesdep' '' 'mixedone|none'
-
-expect_red "UNWIRED recorded but a workspace package DOES depend on it" \
-  "that is a FALSE census" \
-  unwireddep 'wiredone' 'orphanone' '-' 'wiredone orphanone' 'orphanone:labeled' 'orphanone'
-
-# --- roborev job 79: a dependency behind an OPTIONAL FEATURE or a NON-HOST TARGET
-# --- is invisible to a default `cargo tree` resolve, so an UNWIRED record would
-# --- look correct while something really depends on the crate. These two cases
-# --- fail unless the query carries BOTH --all-features and --target all.
-expect_red "UNWIRED but an OPTIONAL-FEATURE dependency exists (roborev job 79)" \
-  "that is a FALSE census" \
-  optdep 'wiredone' 'orphanone' '-' 'wiredone orphanone' 'orphanone:labeled' 'orphanone:optional'
-
-expect_red "UNWIRED but a NON-HOST TARGET dependency exists (roborev job 79)" \
-  "that is a FALSE census" \
-  targetdep 'wiredone' 'orphanone' '-' 'wiredone orphanone' 'orphanone:labeled' 'orphanone:target'
-
-# ...and the same two shapes must SATISFY a MIXED record, so the widened query is
-# shown to find real dependents rather than merely to reject more.
-expect_green "GREEN 4 (MIXED via an OPTIONAL-FEATURE dependent) PASSes" \
-  optmixed 'wiredone' '-' 'mixedone' 'wiredone mixedone' 'mixedone:namesdep' 'mixedone:optional'
-
-expect_green "GREEN 5 (MIXED via a NON-HOST TARGET dependent) PASSes" \
-  targetmixed 'wiredone' '-' 'mixedone' 'wiredone mixedone' 'mixedone:namesdep' 'mixedone:target'
-
-# --- roborev job 80: an UNMEASURABLE dependency graph must FAIL, never be read as
-# --- "zero dependents". Forced by substituting a `cargo` ARTIFACT in the scratch
-# --- tree's PATH that fails — not by any env seam in the guard, which has none.
-ws=$(make_ws unmeasurable 'wiredone' 'orphanone' '-' 'wiredone orphanone' 'orphanone:labeled')
-mkdir -p "$ws/stubbin"
-printf '#!/usr/bin/env bash\nexit 1\n' > "$ws/stubbin/cargo"
-chmod +x "$ws/stubbin/cargo"
-out=$(PATH="$ws/stubbin:$PATH" run_guard "$ws"); rc=$?
-if [ $rc -eq 0 ]; then
-  fail_case "unmeasurable dependency graph: guard PASSED when cargo could not answer — an unmeasurable graph was read as 'zero dependents' (the fail-closed contract inverted)"
-  printf '%s\n' "$out" | sed 's/^/    /' >&2
-elif ! grep -qF "unmeasurable is not a pass" <<<"$out"; then
-  fail_case "unmeasurable dependency graph: guard failed but not via the fail-closed measurement path:"
-  printf '%s\n' "$out" | sed 's/^/    /' >&2
-else
-  pass_case "unmeasurable dependency graph: guard FAILs closed rather than inferring zero dependents"
-fi
-
-# ...and the SAME stub must not be able to fake a PASS the other way: a cargo that
-# prints nothing is equally unmeasurable (cargo always echoes the subject as the
-# tree root, so empty output means it answered nothing).
-ws=$(make_ws emptycargo 'wiredone' 'orphanone' '-' 'wiredone orphanone' 'orphanone:labeled')
-mkdir -p "$ws/stubbin"
-printf '#!/usr/bin/env bash\nexit 0\n' > "$ws/stubbin/cargo"
-chmod +x "$ws/stubbin/cargo"
-out=$(PATH="$ws/stubbin:$PATH" run_guard "$ws"); rc=$?
-if [ $rc -eq 0 ]; then
-  fail_case "silent cargo: guard PASSED on empty cargo output (measured nothing, reported no dependents)"
-  printf '%s\n' "$out" | sed 's/^/    /' >&2
-elif ! grep -qF "unmeasurable is not a pass" <<<"$out"; then
-  fail_case "silent cargo: guard failed but not via the fail-closed measurement path:"
-  printf '%s\n' "$out" | sed 's/^/    /' >&2
-else
-  pass_case "silent cargo (exit 0, no output): guard FAILs closed rather than reporting zero dependents"
-fi
-
-# --- and the FILTERING stage itself must fail closed (the specific ask of roborev
-# --- job 80). `awk` is used ONLY inside workspace_dependents, so substituting a
-# --- failing `awk` artifact isolates the parse stage exactly: cargo still answers
-# --- correctly, and only the filtering breaks. The construct this replaces —
-# --- `sed | grep -v || true | sort` followed by an unconditional `return 0` —
-# --- discarded the pipeline status entirely, so a broken filter yielded EMPTY
-# --- output that read as "zero dependents": a false PASS for an UNWIRED record.
-ws=$(make_ws filterfail 'wiredone' 'orphanone' '-' 'wiredone orphanone' 'orphanone:labeled')
-mkdir -p "$ws/stubbin"
-printf '#!/usr/bin/env bash\nexit 2\n' > "$ws/stubbin/awk"
-chmod +x "$ws/stubbin/awk"
-out=$(PATH="$ws/stubbin:$PATH" run_guard "$ws"); rc=$?
-if [ $rc -eq 0 ]; then
-  fail_case "filtering-stage failure: guard PASSED though the parse stage failed — a broken filter was read as 'zero dependents'"
-  printf '%s\n' "$out" | sed 's/^/    /' >&2
-elif ! grep -qF "unmeasurable is not a pass" <<<"$out"; then
-  fail_case "filtering-stage failure: guard failed but not via the fail-closed measurement path:"
-  printf '%s\n' "$out" | sed 's/^/    /' >&2
-else
-  pass_case "filtering-stage failure: guard FAILs closed rather than reading a broken filter as zero dependents"
-fi
-
-# --- roborev job 82: cargo output that is NON-EMPTY but UNPARSEABLE. A successful
-# --- awk run matching nothing used to be read as "zero dependents", so a change in
-# --- cargo's tree format would let an UNWIRED crate with REAL dependents pass. The
-# --- parser must now prove it recognised the SUBJECT (cargo always prints it as the
-# --- tree root) before an empty dependent set is allowed to mean anything.
-ws=$(make_ws unparseable 'wiredone' 'orphanone' '-' 'wiredone orphanone' 'orphanone:labeled')
-mkdir -p "$ws/stubbin"
-# exits 0, prints plausible-looking output that contains NO "<name> v<digit>" record
-printf '#!/usr/bin/env bash\nprintf "some future cargo format\\nwith no version records\\n"\nexit 0\n' \
-  > "$ws/stubbin/cargo"
-chmod +x "$ws/stubbin/cargo"
-out=$(PATH="$ws/stubbin:$PATH" run_guard "$ws"); rc=$?
-if [ $rc -eq 0 ]; then
-  fail_case "unparseable cargo output: guard PASSED — a successful parse matching NOTHING was read as 'zero dependents', so an UNWIRED crate with real dependents would pass"
-  printf '%s\n' "$out" | sed 's/^/    /' >&2
-elif ! grep -qF "unmeasurable is not a pass" <<<"$out"; then
-  fail_case "unparseable cargo output: guard failed but not via the fail-closed measurement path:"
-  printf '%s\n' "$out" | sed 's/^/    /' >&2
-else
-  pass_case "unparseable cargo output (exit 0, no version records): guard FAILs closed"
-fi
-
-# --- and the complement: output whose ONLY record is the subject must still be a
-# --- legitimate "zero dependents" PASS, so the new subject check cannot be
-# --- satisfied by simply rejecting every empty result.
-ws=$(make_ws subjectonly 'wiredone' 'orphanone' '-' 'wiredone orphanone' 'orphanone:labeled')
-mkdir -p "$ws/stubbin"
-cat > "$ws/stubbin/cargo" <<'STUB'
-#!/usr/bin/env bash
-# Echo ONLY the subject, as real cargo does for a crate with no dependents.
-# The subject is the argument immediately after `--invert`. Scanning for "the
-# first non-flag argument" does NOT work: `--target all` contributes a bare
-# `all`, which is how the first version of this stub picked the wrong subject
-# and made this green control fail.
-subj=""
-prev=""
-for a in "$@"; do
-  if [ "$prev" = "--invert" ]; then subj="$a"; break; fi
-  prev="$a"
-done
-[ -n "$subj" ] || { echo "stub: no --invert argument found" >&2; exit 64; }
-printf "%s v0.1.0 (/scratch/%s)\n" "$subj" "$subj"
-exit 0
-STUB
-chmod +x "$ws/stubbin/cargo"
-out=$(PATH="$ws/stubbin:$PATH" run_guard "$ws"); rc=$?
-if [ $rc -eq 0 ] && grep -q '^PASS:' <<<"$out"; then
-  pass_case "GREEN 6: cargo output containing ONLY the subject is a legitimate zero-dependents PASS"
-else
-  fail_case "GREEN 6 — subject-only cargo output did NOT pass (rc=$rc); the subject check must not reject every empty result:"
-  printf '%s\n' "$out" | sed 's/^/    /' >&2
-fi
-
-# --- roborev job 83: a MIXED crate whose live half is an INVOKED BINARY, not a
-# --- library dependency. A multi-binary tool with one bin wired into CI and
-# --- another orphaned has NO reverse cargo dependency at all, so requiring a
-# --- workspace dependent for every MIXED crate REJECTED a correct classification
-# --- and told its author to record it UNWIRED — which is false.
-expect_green "GREEN 7 (MIXED via an INVOKED BINARY, no workspace dependent at all) PASSes" \
-  invokedmixed 'wiredone' '-' 'mixedone' 'wiredone mixedone' 'mixedone:namesbins' '' 'mixedone|live-bin'
-
-# ...and the recorded form is still CROSS-CHECKED, so "invoked:" is not a way to
-# assert anything you like: the target must be a DECLARED [[bin]], and the README
-# must name it.
-expect_red "MIXED invoked target that is not a declared [[bin]]" \
-  "declares no [[bin]] by that name" \
-  invokedghost 'wiredone' '-' 'mixedone' 'wiredone mixedone' 'mixedone:namesbins' '' 'mixedone|no-such-bin'
-
-expect_red "MIXED invoked target never named in the README" \
-  "never mentions 'dead-bin'" \
-  invokedunnamed 'wiredone' '-' 'mixedone' 'wiredone mixedone' 'mixedone:namesnobins' '' 'mixedone|dead-bin'
-
-expect_red "MIXED crate with no MIXED_INVOKED entry at all" \
-  "has no entry in MIXED_INVOKED" \
-  nolive 'wiredone' '-' 'mixedone' 'wiredone mixedone' 'mixedone:namesbins' '' 'NONE'
-
-expect_red "MIXED_INVOKED with a blank target list (neither a bin nor 'none')" \
-  "write 'mixedone|none' to say so explicitly" \
-  blanklist 'wiredone' '-' 'mixedone' 'wiredone mixedone' 'mixedone:namesbins' '' 'mixedone|'
-
-
-expect_red "stale MIXED_INVOKED entry for a crate that is not MIXED" \
-  "which is not in MIXED_TOOLS" \
-  stalelive 'wiredone' 'orphanone' '-' 'wiredone orphanone' 'orphanone:labeled' '' 'ghostcrate|none'
-
-# --- roborev job 85: the COMBINED shape. A crate can have BOTH a workspace
-# --- dependent AND a CI-invoked binary. Treating the two as mutually exclusive let
-# --- a recorded invoked list SKIP dependency discovery entirely, so the README
-# --- could omit a real dependent and still pass. Both must now be documented.
-expect_green "GREEN 8 (MIXED with BOTH a dependent and an invoked bin) PASSes when the README names both" \
-  bothsources 'wiredone' '-' 'mixedone' 'wiredone mixedone' 'mixedone:namesboth' 'mixedone' 'mixedone|live-bin'
-
-expect_red "MIXED with BOTH sources whose README names the invoked bin but OMITS the real dependent (roborev job 85)" \
-  "never mentions 'scratch-consumer'" \
-  bothomitdep 'wiredone' '-' 'mixedone' 'wiredone mixedone' 'mixedone:namesbins' 'mixedone' 'mixedone|live-bin'
+expect_red "MIXED crate README missing the label marker" \
+  "does not contain 'NOT CI-wired'" \
+  mixedunlabeled 'wiredone' '-' 'mixedone' 'wiredone mixedone' 'mixedone:unlabeled'
 
 # --- fail-closed on an absent subject
 ws=$(make_ws notools 'wiredone' 'orphanone' '-' 'wiredone orphanone' 'orphanone:labeled')
@@ -444,9 +178,26 @@ else
   pass_case "absent tools/ directory: guard FAILs closed rather than passing vacuously"
 fi
 
+# --- an UNREADABLE README is unmeasurable, not unlabeled
+ws=$(make_ws unreadable 'wiredone' 'orphanone' '-' 'wiredone orphanone' 'orphanone:labeled')
+chmod 000 "$ws/tools/orphanone/README.md"
+out=$(run_guard "$ws"); rc=$?
+chmod 644 "$ws/tools/orphanone/README.md" 2>/dev/null || true
+if [ "$(id -u)" = 0 ]; then
+  pass_case "unreadable README: SKIPPED (running as root, which can read anything)"
+elif [ $rc -eq 0 ]; then
+  fail_case "unreadable README: guard PASSED though it could not verify the label"
+  printf '%s\n' "$out" | sed 's/^/    /' >&2
+elif ! grep -qF "unmeasurable is not a pass" <<<"$out"; then
+  fail_case "unreadable README: guard failed but not via the fail-closed path:"
+  printf '%s\n' "$out" | sed 's/^/    /' >&2
+else
+  pass_case "unreadable README: guard FAILs closed rather than treating it as unlabeled"
+fi
+
 echo
 if [ "$fails" -ne 0 ]; then
   echo "FAIL: $fails tools/ disposition self-test case(s) failed" >&2
   exit 1
 fi
-echo "PASS: tools/ crate disposition self-test (#1716) — 8 green controls + 25 negative controls"
+echo "PASS: tools/ crate disposition self-test (#1716) — 2 green controls + 12 negative controls, no cargo"

@@ -213,31 +213,21 @@
 #                      scripts/tests/test_tools_crate_disposition.sh (+ its
 #                      selftest) — #1716/AK5: every crate under tools/ must be
 #                      EXPLICITLY classified WIRED / UNWIRED / MIXED, and every
-#                      crate carrying orphaned targets must carry a README saying
-#                      so. TWO HALVES: "something DEPENDS on it" is DERIVED from
-#                      cargo tree --workspace --invert and CROSS-CHECKED (UNWIRED
-#                      must have ZERO workspace dependents, MIXED at least one, and
-#                      a MIXED README must NAME its live half). A MIXED crate
-#                      records WHICH half is live — `dependency` (derived from
-#                      cargo) or `invoked:<bin>` (recorded, but cross-checked
-#                      against the declared [[bin]]s), because a multi-binary tool
-#                      with one bin wired and one orphaned has NO reverse cargo
-#                      dependency at all; so no category can be asserted falsely;
-#                      "something RUNS it" is not mechanically checkable, so it
-#                      stays recorded + diff-reviewed, never grep-inferred.
-#                      Needs cargo (always present in a gate); no python3/Docker.
-#                      Stays inside this component's fast/no-network contract:
-#                      the cargo query carries --locked --offline, so it cannot
-#                      reach the registry and cannot rewrite Cargo.lock (i.e. it
-#                      cannot mutate the tree its own gate is certifying, #2926).
-#                      A COLD cargo cache therefore FAILs it rather than silently
-#                      going to the network; remedy `cargo fetch --locked` is named
-#                      in the failure. Fails CLOSED on an absent or unmeasurable
-#                      subject — including cargo output that is non-empty but no
-#                      longer parseable — and never SKIPs. SCOPE: CRATE-level, not
-#                      per-target — adding an orphaned bin to an already-WIRED crate
-#                      passes unchanged (a known, recorded limitation; a per-target
-#                      inventory would be its own issue under epic #1688).
+#                      crate carrying orphaned targets must carry a README that
+#                      STATES it is not CI-wired. Needs NO cargo, python3, Docker
+#                      or network — filesystem and lists only, so it always runs
+#                      and cannot be environment-dependent. Fails CLOSED on an
+#                      absent or unmeasurable subject; never SKIPs.
+#                      SCOPE, deliberately small: it verifies a disposition was
+#                      RECORDED and LABELED, not that the record is TRUE, and it is
+#                      per-CRATE, so an orphaned bin added to a WIRED crate passes
+#                      unchanged. A cargo-derived cross-check that DID verify truth
+#                      was built and removed (#1716): 11 review findings landed in
+#                      it and none in the list/README part, and its self-tests built
+#                      scratch workspaces outside the repo that do not inherit
+#                      rust-toolchain.toml — making a MANDATORY component depend on
+#                      the host toolchain. Verifying truth properly is its own issue
+#                      under epic #1688.
 #                      scripts/tests/test_agent_gate_summary.sh — proves the
 #                      SUMMARY block survives non-foreground capture (#1175). It
 #                      only drives `agent-gate.sh --emit-summary-selftest`, which
