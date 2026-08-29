@@ -1450,15 +1450,26 @@ git_push_probe_stderr_is_auth() {
 # points at the scope report the board-access section already prints.
 push_probe_fix_advice() {
   info "impact: scripts/flow/claim.sh + claim-heartbeat.sh push on 10+ call sites — a lane cannot even START"
+  # KEYED ON THE AFFIRMATIVE VALUE, never on `!= ssh` (#3369 review). The first cut said
+  # "not SSH ⇒ give https credential advice", so `file://`, a bare local path and any
+  # custom protocol were handed `gh auth setup-git` — guidance that cannot apply to them.
+  # That is this change's own central rule broken by the change: a permissive branch must
+  # test for the value it means, and GIT_ORIGIN_KIND already computes an explicit
+  # `other`. Three affirmative arms, one per protocol class; nothing falls through into
+  # advice written for a different transport.
   if [ "$GIT_ORIGIN_KIND" = ssh ]; then
     info "fix:    this is an SSH remote ($GIT_ORIGIN_URL) — git authenticates with your SSH KEY, not a credential helper"
     info "        check the key:  ssh -T git@<host>   and that it is loaded:  ssh-add -l"
     info "        'gh auth setup-git' does NOT apply here — it configures https credentials only"
-  else
+  elif [ "$GIT_ORIGIN_KIND" = https ]; then
     info "fix:    gh auth setup-git    (preferred; wires gh as git's credential helper)"
     info "        then re-run:  bash scripts/bootstrap-agent-machine.sh --fix-credentials"
     info "        if a helper is ALREADY wired, the token may authenticate yet lack WRITE access —"
     info "        check the scopes reported in the 'gh auth + board access' section above (contents:write / repo)"
+  else
+    info "fix:    the remote is a '$GIT_ORIGIN_KIND' remote ($GIT_ORIGIN_URL) — neither https nor SSH, so a git"
+    info "        credential helper may not apply at all; check that transport's own access path"
+    info "        ('gh auth setup-git' configures https credentials only, and would not affect this remote)"
   fi
   info "verify by hand:  bash scripts/flow/claim.sh smoke"
 }

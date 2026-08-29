@@ -969,13 +969,18 @@ else
   bad "push: credential-shaped rejection not reported as FAILED (rc=$rc7pb, green=$(push_green "$out7pb" && echo yes || echo no))"
   push_verdict "$out7pb"
 fi
-if printf '%s' "$out7pb" | grep -q 'gh auth setup-git' \
-   && printf '%s' "$out7pb" | grep -q -- '--fix-credentials' \
-   && printf '%s' "$out7pb" | grep -q 'contents:write'; then
-  ok "push: an HTTPS auth failure prints the credential remediation AND the write-scope possibility"
+# THIS CASE'S REMOTE IS `file://`, so its subject is the NON-https advice. The assertion
+# used to claim "HTTPS auth failure" while driving exactly this file:// remote — it
+# passed only because the advice branched on `!= ssh` and swept `other` into the https
+# arm, i.e. the test asserted a property it never exercised (#3369 review). The genuine
+# https path is 7p-q below.
+if printf '%s' "$out7pb" | grep -q "remote is a 'other' remote" \
+   && printf '%s' "$out7pb" | grep -q 'credential helper may not apply' \
+   && ! push_plain "$out7pb" | grep -E '^ *fix:' | grep -q 'gh auth setup-git'; then
+  ok "push: a file:// remote's auth-shaped failure gets protocol-neutral advice, NOT https credential advice"
 else
-  bad "push: https FAILED verdict printed no remediation / omitted the scope line"
-  push_plain "$out7pb" | grep -E 'fix:|scopes' | head -4
+  bad "push: a non-https remote was given https credential advice"
+  push_plain "$out7pb" | grep -E 'fix:|remote is a' | head -4
 fi
 
 # 7p-b2. PUSH FAILS, namespace-shaped: a rejection git's stderr does NOT identify as a
@@ -1373,6 +1378,38 @@ if printf '%s' "$out7pp" | grep -q '\[warn\].*git-push: UNMEASURED.*2 push URLs'
 else
   bad "push: multi-destination remote was probed anyway (refs created=$refs7pp rc=$rc7pp)"
   push_verdict "$out7pp"
+fi
+
+# 7p-q. THE GENUINE HTTPS PATH (#3369 review) — the case 7p-b only claimed to be. The
+#   origin really is `https://…` at classification time, so GIT_ORIGIN_KIND is `https`;
+#   the `gh auth setup-git` stub then installs the url.<local>.insteadOf rewrite (as in
+#   7p-e/7p-j), so the push lands on a local bare repo whose pre-receive speaks the
+#   credential signature claim.sh classifies as auth. Offline, no server, no real host —
+#   and the advice under test is the one an https box would actually see.
+bare7pq="$tmp/bare7pq.git"; mk_push_bare "$bare7pq" 'echo "Authentication failed" >&2; exit 1'
+repo7pq="$tmp/repo7pq"; mk_push_repo "$repo7pq" "https://push-probe.invalid/cqlite.git"
+bin7pq="$tmp/bin7pq"
+mk_push_bin "$bin7pq" "git config --global --add 'credential.https://push-probe.invalid.helper' '!f(){ test \"\$1\" = get || exit 0; echo username=gh-stub; echo password=wired; };f'
+      git config --global \"url.file://$bare7pq/.insteadOf\" 'https://push-probe.invalid/cqlite.git'"
+gc7pq="$tmp/gc7pq"; : >"$gc7pq"
+run_push "$repo7pq" "$bin7pq" "$gc7pq" --fix-credentials --strict; out7pq=$push_out; rc7pq=$push_rc
+# Guard the guard: if the classification were not https, this case would be testing the
+# same `other` path as 7p-b and its assertion would be vacuous again.
+if printf '%s' "$out7pq" | grep -q 'push-probe.invalid' \
+   && ! printf '%s' "$out7pq" | grep -q "remote is a 'other' remote"; then
+  ok "push: (precondition) 7p-q's remote really is classified https"
+else
+  bad "push: 7p-q precondition FAILED — not an https classification, the advice assertion below is vacuous"
+fi
+if printf '%s' "$out7pq" | grep -q '\[warn\].*git-push: FAILED.*AUTHENTICATE' \
+   && printf '%s' "$out7pq" | grep -q 'gh auth setup-git' \
+   && printf '%s' "$out7pq" | grep -q -- '--fix-credentials' \
+   && printf '%s' "$out7pq" | grep -q 'contents:write' \
+   && [ "$rc7pq" -ne 0 ]; then
+  ok "push: a real HTTPS auth failure prints the credential remediation AND the write-scope possibility"
+else
+  bad "push: https auth failure printed no remediation / omitted the scope line (rc=$rc7pq)"
+  push_plain "$out7pq" | grep -E 'git-push|fix:|scopes' | head -5
 fi
 
 # 7p-g. `--strict` AND "All checks green." MUST NOT DIVERGE — asserted in BOTH
