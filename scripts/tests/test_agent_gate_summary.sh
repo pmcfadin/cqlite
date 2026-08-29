@@ -4128,7 +4128,7 @@ else
 fi
 
 # Low: the report must not CLAIM verbatim text it does not capture.
-if awk '/^_crate_gated_test_targets\(\) \{/,/^\}/' "$GATE" | grep -qi 'verbatim'; then
+if [ "$(awk '/^_crate_gated_test_targets\(\) \{/,/^\}/' "$GATE" | sed 's/^[[:space:]]*#.*$//' | grep -ci 'verbatim')" -gt 0 ]; then
   bad "1699-cfgsite-noverbatim: the occurrence report still claims 'verbatim' while capturing only an attribute opening line — the claim is falsifiable by any multiline #![cfg(all("
 else
   ok "1699-cfgsite-noverbatim: the occurrence report no longer claims verbatim capture"
@@ -4285,7 +4285,27 @@ else
   ok "1699-find-tristate: no find result is collapsed onto a two-valued emptiness test"
 fi
 
-ASSERT_FLOOR=374
+# --- 48. #1699: the closure-report split must observe grep status (self-review after job 115) ---
+# `|| true` on the two splitting greps masked exit >=2, so an unreadable stream yielded two EMPTY
+# halves and the code found neither a fatal report nor a gap — a clean pass derived from a failed
+# scan. Entry is gated on `[ -s "$_mt_unres" ]`, so "both halves empty" is only reachable via a read
+# failure or an unrecognised report: exactly the case the comment above it CLAIMED to fail on and
+# had no branch for. Sixth claim-vs-code instance on this branch, and the first found by self-review
+# rather than by a reviewer — which matters here because prompt-content absence means nothing proves
+# the reviewer received this file.
+lh_fn48=$(awk '/^run_legacy_heuristics\(\) \{/,/^\}/' "$GATE")
+if [ "$(printf '%s' "$lh_fn48" | grep -cE "grep +(-v )?'\^CFG-GATED-MOD ' \"\\\$_mt_unres\" > \"\\\$_mt_(fatal|gaps)\" +\|\| true")" -gt 0 ]; then
+  bad "1699-split-status: a closure-report split grep ends in '|| true', so exit >=2 reads as 'no reports' — a non-empty stream would pass as silence"
+else
+  ok "1699-split-status: neither splitting grep discards its exit status"
+fi
+if [ "$(printf '%s' "$lh_fn48" | grep -cF 'into two empty halves means a read failed')" -gt 0 ]; then
+  ok "1699-split-grammar: the closed grammar is IMPLEMENTED — a non-empty stream that classifies to nothing FAILs"
+else
+  bad "1699-split-grammar: no branch fires when a non-empty report stream splits into two empty halves — the comment claims a closed grammar the code does not implement"
+fi
+
+ASSERT_FLOOR=376
 if [ "$PASS" -lt "$ASSERT_FLOOR" ]; then
   echo "FAIL - assert-floor: only $PASS assertions ran, floor is $ASSERT_FLOOR. Sections are being SKIPPED or dying silently (an extraction that broke, a subshell aborting under set -u), and 'failed: 0' over a shrunken subject set is exactly the vacuous pass this suite tests for."
   FAIL=$((FAIL + 1))

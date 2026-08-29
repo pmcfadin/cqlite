@@ -58,11 +58,28 @@ Properties that make the observation mean something:
 
 ## Observed results
 
-Run at **`37385a734`** — the head this PR ships — on the worker box, `CQLITE_DATASETS_ROOT=/data/datasets`.
-Harness elapsed **432 s** (8 runs: one clean and one planted per lane). **All four lanes fired**, and the
-harness verified its own invariant: `observed-commit: 37385a734e42e6aa111ff695bdad6bb0f0259f5d (captured
-at start; the throwaway copy was made from THIS sha)` and `live-tree: UNCHANGED (verified: git status
---porcelain AND HEAD identical to start)`.
+Run at **`2bc66a103923ae5d31ce5a37785d21b2a11b25c1`** — on the worker box,
+`CQLITE_DATASETS_ROOT=/data/datasets`. Harness elapsed **504 s** (8 runs: one clean and one planted
+per lane). **All four lanes fired**, each red NAMING its planted symbol, and the harness verified its
+own invariant: `observed-commit: 2bc66a103923ae5d31ce5a37785d21b2a11b25c1 (captured at start; the
+throwaway copy was made from THIS sha)` and `live-tree: UNCHANGED`.
+
+> **RE-TAKEN, and why it had to be.** The previous record said *"Run at `37385a734` — the head this
+> PR ships"*. That sentence became **false** as the branch advanced: by the time it was noticed there
+> had been **64 commits to `scripts/agent-gate.sh`** since that observation, including changes to the
+> census wording, the closure-report split and the `required-features` scope — i.e. to the very lanes
+> the record describes. **A measurement is only about the tree it was taken on**, so a record that
+> names a stale sha *and* asserts it is the shipped head is worse than one that names no sha at all:
+> the first invites reliance, the second invites a question. Found by self-review of this file rather
+> than by a reviewer.
+>
+> The re-take also answers the question the staleness raised: after those 64 commits **all four lanes
+> still detect their incident class**, and each red still names its plant, so the change did not erode
+> the property the harness exists to demonstrate. The isolation pairings confirm the mutual property
+> directly — `feature-iso-parquet` is broken by planting a **delta-scan** reference
+> (`ah6_planted_delta_scan_marker`) and `feature-iso-delta-scan` by planting a **parquet** one
+> (`ah6_planted_parquet_marker`); `legacy-heuristics` by `ah6_planted_legacy_heuristics_break` and
+> `flight-tests` by `ah6_planted_flight_break`.
 
 | lane | planted break | clean tree | planted tree | attributed to |
 |------|---------------|-----------|--------------|---------------|

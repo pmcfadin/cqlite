@@ -7294,8 +7294,31 @@ run_legacy_heuristics() {
     if [ -s "$_mt_unres" ]; then
       local _mt_fatal="$LOG_DIR/legacy-fatal-$_mt_name.txt"
       local _mt_gaps="$LOG_DIR/legacy-cfggaps-$_mt_name.txt"
-      grep -v '^CFG-GATED-MOD ' "$_mt_unres" > "$_mt_fatal" || true
-      grep    '^CFG-GATED-MOD ' "$_mt_unres" > "$_mt_gaps"  || true
+      # STATUS OBSERVED, and the CLOSED GRAMMAR ACTUALLY IMPLEMENTED (self-review after job 115).
+      # `|| true` masked grep exit >=2, so an unreadable stream produced two EMPTY halves and the
+      # code below then found neither a fatal report nor a gap — a clean pass derived from a scan
+      # that failed. We only reach here because `[ -s "$_mt_unres" ]` was TRUE, so "both halves
+      # empty" is impossible unless a read failed: that is the unrecognised-report case the comment
+      # above claims to fail on, and it had no branch. grep 1 = no match (fine), >=2 = error.
+      local _sp_rc1=0 _sp_rc2=0
+      grep -v '^CFG-GATED-MOD ' "$_mt_unres" > "$_mt_fatal" || _sp_rc1=$?
+      grep    '^CFG-GATED-MOD ' "$_mt_unres" > "$_mt_gaps"  || _sp_rc2=$?
+      if [ "$_sp_rc1" -ge 2 ] || [ "$_sp_rc2" -ge 2 ] \
+         || { [ ! -s "$_mt_fatal" ] && [ ! -s "$_mt_gaps" ]; }; then
+        status=FAIL
+        {
+          echo "[$name] FAIL-CLOSED: could not classify the module-closure reports for test"
+          echo "        target '$_mt_name' (grep exits $_sp_rc1/$_sp_rc2; non-empty stream split"
+          echo "        into two empty halves means a read failed, or a report matched neither"
+          echo "        recognised form). A stream we know is non-empty must produce a report;"
+          echo "        treating it as silence would be a pass derived from a scan that failed."
+          sed 's/^/          /' "$_mt_unres"
+        } | tee "$log"
+        end=$(date +%s)
+        record_result "$name" "$status" "$((end - start))"
+        echo ">>> [$name] $status ($((end - start))s)"
+        return 0
+      fi
       if [ -s "$_mt_fatal" ]; then
         status=FAIL
         {
