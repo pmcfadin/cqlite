@@ -234,25 +234,96 @@ the pre-change state. So:
 `cqlite-ffi-common/src/vectors.rs` exports canonical, committed `(input, expected-rendering)` vectors:
 
 ```rust
+/// Digit runs longer than this collapse to `{<length>}` in a `digest`.
+pub const DIGEST_RUN_THRESHOLD: usize = 64;
+
+/// How an entry's input bytes are obtained. `Repeated` exists because the
+/// boundary magnitudes are kilobytes long and unreadable as source literals.
+pub enum Input { Literal(&'static [u8]), Repeated { byte: u8, len: usize } }
+impl Input { pub fn bytes(&self) -> Vec<u8>; }
+
+/// The single expected outcome of rendering an entry.
+pub enum Expect {
+    /// Short enough to commit verbatim; the check is character-for-character equality.
+    Value(&'static str),
+    /// Multi-kilobyte; the committed oracle is the SHA-256 of the FULL rendering
+    /// and `digest` is the readable diagnostic beside it.
+    Digested { digest: &'static str, sha256: &'static str },
+    /// A refusal, carrying the one message both bindings must surface.
+    Error(&'static str),
+}
+
 pub struct DecimalVector { pub name: &'static str, pub scale: i32,
-                           pub unscaled: &'static [u8], pub expected: Result<&'static str, &'static str> }
+                           pub unscaled: Input, pub expect: Expect }
+pub struct VarintVector  { pub name: &'static str, pub bytes: Input, pub expect: Expect }
+pub struct InetVector    { pub name: &'static str, pub bytes: Input, pub expect: Expect }
+
 pub const DECIMAL_VECTORS: &[DecimalVector];
-pub const VARINT_VECTORS: &[VarintVector];   // bytes -> canonical decimal string
-pub const INET_VECTORS:   &[InetVector];     // bytes -> Ok(text) | Err(message)
+pub const VARINT_VECTORS:  &[VarintVector];   // bytes -> canonical decimal string
+pub const INET_VECTORS:    &[InetVector];     // bytes -> address text | refusal message
+
+/// One entry's expectation paired with what a binding's production path produced
+/// — the record both bindings' test-support surfaces return.
+pub struct VectorOutcome {
+    pub name: &'static str,
+    pub kind: &'static str,                        // "value" | "error"
+    pub expected: String,                          // rendering, its digest, or the refusal message
+    pub expected_sha256: Option<&'static str>,     // Some(..) exactly when `expected` is a digest
+    pub outcome: &'static str,                     // "ok" | "err"
+    pub actual: String,                            // READABLE half: digest, or the binding's error text
+    pub rendered: Option<String>,                  // EXACT half: the full rendering, None on a refusal
+}
+
+pub fn vector_outcome(name: &'static str, expect: Expect,
+                      produced: Result<&str, &str>) -> VectorOutcome;
 ```
+
+Only what a binding actually calls is `pub`: the tables, `Input::bytes`, `vector_outcome` and
+`VectorOutcome`. The comparison rules, the `digest` reduction and the `Expect` accessors are
+crate-internal (D3's "no export without a caller").
 
 Each binding exposes one internal, underscore-prefixed test-support surface that renders **every**
 vector through its **production** conversion path (the same pattern already established by
 `_decimal_from_parts`, `_inet_from_bytes`, `_raise_mapped_core_error`, `_errorContractProbe`), and each
-suite asserts rendered == expected for the whole table. Because both suites read the *same committed
-table*, a divergence — or a re-introduced local implementation in either binding — fails **both**
-suites. This is the mechanised form of the issue's *"add one assertion per binding that a
+suite asserts the whole table under the two comparison rules (a rendering must match its expectation
+EXACTLY — see D7a for the two ways an expectation is committed; a refusal must contain the one
+canonical message verbatim). Because both suites read the *same committed table*, a divergence — or a
+re-introduced local implementation in either binding — fails **both** suites. This is the mechanised form of the issue's *"add one assertion per binding that a
 decimal/varint/inet value matches the other binding's known output"*, strengthened from one spot-check
 to the full table.
 
 The vectors are ordinary `pub const` data (no feature gate): they are inert, tiny, and gating them
 behind a `cfg(test)`/feature would make them unreachable from the bindings' own test builds, which is
 the entire point.
+
+### D7a. Why the exact oracle is a SHA-256, computed three times
+
+A `digest` is **not** an oracle. Three DECIMAL entries sit on the positional-threshold and
+refusal-ceiling boundaries by design, so their exact renderings run to thousands of digits; committing
+those literally would be unreadable, and `digest` collapses any digit run longer than
+`DIGEST_RUN_THRESHOLD` to `{<length>}`. That form pins the digit COUNT and the surrounding shape and
+nothing else — **two bindings emitting different digits of the same length would both satisfy it**,
+which is precisely the cross-binding divergence this table exists to catch. The first version of the
+table compared only digests and was therefore vacuous on its three most interesting entries.
+
+So `Expect::Digested` carries the **lower-case SHA-256 hex of the UTF-8 bytes of the FULL rendering**
+beside the digest, and every suite hashes the full text a binding actually produced
+(`VectorOutcome::rendered`) rather than the digest. It is a separate enum variant rather than an
+optional field so that committing a collapsed digest with no exact oracle beside it is structurally
+impossible; `actual`/`expected` remain the readable halves used in failure messages only.
+
+Encoding is stated once, for all three sides: SHA-256 over the **UTF-8 bytes**, lower-case hex. Every
+rendering in the table is ASCII, so no implementation has an encoding choice to make, and each side
+computes the hash with its **own standard library** — this crate's test with `sha2`, Python with
+`hashlib.sha256(...).hexdigest()`, Node with `crypto.createHash('sha256').update(..., 'utf8')
+.digest('hex')`. Three independent hash implementations agreeing on one committed hex string; nothing
+shared but the data. The hash is deliberately NOT exported as a shared helper — a shared hash function
+would make all three sides agree by construction, which is the opposite of the property wanted.
+
+Each committed hash was derived in CPython from the entry's INPUT BYTES, never read off this crate's
+output (the derivation is recorded in `vectors/tables.rs`). The digest and the hash then check
+different things: a rendering-FORM disagreement (positional vs exponent, wrong exponent, wrong digit
+count) surfaces as a digest failure, a digit disagreement as a hash failure.
 
 ## D8. The three `ErrorCategory` enums (#1705) — recommended, but the owner's call
 

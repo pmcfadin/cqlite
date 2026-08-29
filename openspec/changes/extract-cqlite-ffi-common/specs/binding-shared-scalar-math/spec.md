@@ -272,6 +272,34 @@ re-introduced local implementation in either — SHALL fail both suites.
 The tables SHALL cover, at minimum, every edge case enumerated in the DECIMAL, VARINT and INET
 requirements above, including at least one entry whose expected outcome is a typed error.
 
+Every entry's check SHALL be EXACT. An entry whose rendering is short enough to commit verbatim SHALL
+be compared character for character. An entry whose rendering is too long to commit verbatim (the
+multi-kilobyte boundary magnitudes) SHALL carry, beside its readable collapsed form, the lower-case
+SHA-256 hex of the UTF-8 bytes of the **full** expected rendering, and each suite SHALL compare that
+hash against the hash of the **full** rendering its own production path produced — never against the
+collapsed form alone, which pins only the digit COUNT and so would pass two bindings emitting
+different digits of the same length.
+
+The pairing SHALL be structural: it SHALL be impossible to commit a collapsed expectation with no
+exact oracle beside it, and a suite SHALL be able to assert that every value entry carries one.
+
+The hash SHALL NOT be exported as a shared routine. Each of the three sides — this crate's own test,
+the Python suite, the Node suite — SHALL compute it with its own standard library, so agreement is
+evidence of three independent implementations meeting one committed constant rather than of one
+shared function agreeing with itself. Because the encoding is fixed (UTF-8 bytes, lower-case hex) and
+every rendering is ASCII, no side has an encoding choice to make.
+
+#### Scenario: A multi-kilobyte rendering is checked digit-for-digit, not by digit count
+- **GIVEN** a committed DECIMAL entry whose expected rendering is thousands of digits long, committed as a collapsed form plus a SHA-256 of the full rendering
+- **WHEN** the Python and Node suites render it through their production paths
+- **THEN** each hashes the FULL rendering it produced with its own standard library and asserts the committed hex
+- **AND** the collapsed form is compared only as the readable half of a failure message, so a rendering with the right digit count but different digits cannot pass
+
+#### Scenario: No value entry can be checked by digit count alone
+- **GIVEN** the exported vector tables
+- **WHEN** a suite enumerates every entry whose expected outcome is a rendering
+- **THEN** each such entry is either committed verbatim or carries a SHA-256 of its full rendering, and the two cases are distinguishable without inspecting the text
+
 #### Scenario: Both suites assert the whole table, not a spot check
 - **GIVEN** the exported vector tables
 - **WHEN** the Python and Node suites run
