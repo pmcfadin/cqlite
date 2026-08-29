@@ -769,8 +769,21 @@ clear_claim() {
     # which is worse than the stale ref this fixes. A pending PR with no recorded issue is
     # untransferable, so it keeps the placeholder — a stale ref beats an unprotected endgame.
     if [[ "$issue" == p* ]]; then
-      local pr_e iss_e rest_e transferred=0 untransferable=0
-      while IFS=$'\t' read -r pr_e iss_e rest_e; do
+      # FIELDS ARE CUT, NOT `read`-SPLIT, AND THAT IS NOT STYLE. TAB IS AN IFS *WHITESPACE*
+      # CHARACTER, so `IFS=$'\t' read -r pr iss rest` COLLAPSES an empty field: an entry whose
+      # issue is empty — exactly the untransferable case this branch exists to refuse — parsed as
+      # pr=3467 iss=1 (the COUNT), so it would have stamped a BOGUS lane 1 and cleared the
+      # placeholder. That is worse than the stale ref being fixed, and my own "untransferable" case
+      # is what caught it. Parameter expansion does not collapse, so an empty field stays empty.
+      local pr_e iss_e rest_e entry transferred=0 untransferable=0
+      while IFS= read -r entry; do
+        [[ -n "$entry" ]] || continue
+        pr_e="${entry%%$'\t'*}"
+        rest_e="${entry#*$'\t'}"
+        iss_e="${rest_e%%$'\t'*}"
+        # A line with no tab at all yields pr_e == entry and iss_e == entry; neither is a usable
+        # pairing, so it must not be read as an issue.
+        [[ "$entry" == *$'\t'* ]] || { untransferable=$((untransferable + 1)); continue; }
         [[ -n "$pr_e" ]] || continue
         case "$iss_e" in
           '' | *[!0-9]* | 0) untransferable=$((untransferable + 1)); continue ;;

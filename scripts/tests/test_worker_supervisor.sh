@@ -3280,11 +3280,20 @@ test_pending_pr_keeps_the_claim() {
   # Unit-tested deliberately: reaching this state end to end needs a pending-automerge finalize followed
   # by a concluding iteration AND a budget exit, which no existing stub sequences. The invariant is one
   # condition in one function, so it is exercised directly — the approach the parser tests take.
+  #
+  # THE STAMPED LANE IS AN ISSUE NUMBER, AND THAT NOW MATTERS (roborev round 36). This case originally
+  # staged a `p999-abc` PLACEHOLDER, which was incidental to what it asserts — its stated invariant is
+  # "a pending auto-merge PR keeps the lane ref", and that is what an ISSUE-numbered lane still does.
+  # The PLACEHOLDER path deliberately behaves differently now: keeping a placeholder was a trap, because
+  # `should-reap` permanently refuses placeholders, so after the supervisor exited NOTHING could ever
+  # clear it. Its protection is transferred to an issue-numbered ref instead, and that path is pinned by
+  # `test_placeholder_endgame_protection_transfers` below rather than by weakening this case.
+  # Changed the PREMISE to keep the invariant honest — not the assertion to match new behaviour.
   out="$(
     CLAIM_CMD="bash $d/bin/claim.sh" HEARTBEAT_MACHINE=testbox CLAIM_LOG="$CLAIM_LOG" \
     bash -c '
       source "$1"
-      CLAIM_STAMPED_ISSUE="p999-abc"
+      CLAIM_STAMPED_ISSUE="88"
       CLAIM_STAMPED_SHA="feed0002"
       PENDING_PR_LIST="4242'$'\t''88'$'\t''1'$'\t''0"
       clear_claim 1          # CONCLUDED=1, but a PR is pending
