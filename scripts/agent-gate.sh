@@ -234,7 +234,10 @@
 #                      going to the network; remedy `cargo fetch --locked` is named
 #                      in the failure. Fails CLOSED on an absent or unmeasurable
 #                      subject — including cargo output that is non-empty but no
-#                      longer parseable — and never SKIPs.
+#                      longer parseable — and never SKIPs. SCOPE: CRATE-level, not
+#                      per-target — adding an orphaned bin to an already-WIRED crate
+#                      passes unchanged (a known, recorded limitation; a per-target
+#                      inventory would be its own issue under epic #1688).
 #                      scripts/tests/test_agent_gate_summary.sh — proves the
 #                      SUMMARY block survives non-foreground capture (#1175). It
 #                      only drives `agent-gate.sh --emit-summary-selftest`, which

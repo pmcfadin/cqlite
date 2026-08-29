@@ -222,14 +222,16 @@ tools/           # 7 crates, each with a RECORDED disposition in one of THREE
                  #             name BOTH halves, and the crate must stay a
                  #             workspace member — never `exclude` it.
                  #   A NEW tools/ crate must be classified there or the gate FAILs.
-                 #   A MIXED crate records WHICH half is live, in one of two
-                 #   kinds: `dependency` (a library some workspace package needs
-                 #   — DERIVED from `cargo tree --workspace --invert`, so it
-                 #   cannot be claimed falsely) or `invoked:<bin>` (binaries CI
-                 #   runs — recorded, since invocation is not mechanically
-                 #   checkable, but each target is still cross-checked against
-                 #   the crate's declared [[bin]]s). Both require the README to
-                 #   NAME the live half.
+                 #   A MIXED crate's live half is the UNION of two INDEPENDENT
+                 #   sources, at least one non-empty, both always checked:
+                 #   workspace dependents (DERIVED from `cargo tree --workspace
+                 #   --invert`, so unclaimable falsely) and invoked binaries
+                 #   (RECORDED in MIXED_INVOKED, since invocation is not
+                 #   mechanically checkable, but each is cross-checked against
+                 #   the crate's declared [[bin]]s). The README must NAME every
+                 #   item from both. Granularity is per-CRATE, not per-target:
+                 #   adding an orphaned bin to a WIRED crate passes unchanged —
+                 #   a recorded limitation, not an oversight.
 fuzz/            # cargo-fuzz crate — own workspace, EXCLUDED from the main one
 ```
 
