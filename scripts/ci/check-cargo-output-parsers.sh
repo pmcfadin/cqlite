@@ -40,11 +40,27 @@
 #      files away from the parse is a WORSE coupling than the one being removed.
 #
 # ── WHAT COUNTS AS A PARSE SITE ───────────────────────────────────────────────────────
-# A non-comment line that mentions cargo/libtest output text (`test result:`,
-# `Running tests/`, `Running unittests`, `Doc-tests`, `running N tests`, `Compiling`,
-# `Finished`, `warning:`, `error:` in a matching context) AND performs a MATCH
-# (`==`, `=~`, `case`, `grep`, `sed`, `awk`, `rg`). A bare `echo "… test result: …"`
-# message performs no match and is not a parse site.
+# A non-comment line that mentions cargo/libtest/nextest output text AND performs a MATCH
+# (`==`, `=~`, `case`, `grep`, `sed`, `awk`, `rg`). A bare `echo "… test result: …"` message
+# performs no match and is not a parse site.
+#
+# The token set is EXHAUSTIVE and is the same list in prose and in code — see
+# CARGO_OUTPUT_TOKENS below, which this paragraph must never drift from (roborev B2: the
+# header once claimed `error:` and a general `running N tests` while the code carried neither,
+# so a raw parser keyed on those was invisible to the lint AND the affirmative `N/N` line still
+# printed, because other sites kept the count nonzero — a hole that looked like coverage):
+#   cargo status words   `Running `, `Running tests/`, `Running unittests`, `Doc-tests`,
+#                        `Compiling `, `Finished ` — ALL COLOURED, all fragile.
+#   cargo diagnostics    `warning:`, `warning[`, `error:`, `error[` — coloured with the reset
+#                        BEFORE the colon (`warning<ESC>[0m<ESC>[1m: …`). Highest-consequence
+#                        shape: a warnings-denial that silently stops denying.
+#   libtest              `test result:`, `running <N> tests` (any N, as a regex — the literal
+#                        `running 0 tests` alone missed every nonzero form).
+#   nextest              `Summary [`, `Starting `, `PASS [`, `FAIL [`.
+# Each token carries its own delimiter (a trailing space, `[`, `:` or `/`) so it identifies
+# TOOL OUTPUT rather than the English word. MEASURED on the shipped scripts/agent-gate.sh:
+# this full set yields the SAME 5 parse sites as the original narrow set — the widening costs
+# zero false positives here, so nothing had to be excluded and the header claims the whole list.
 #
 # ── WHAT COUNTS AS AN ANSI-STRIPPED SOURCE ────────────────────────────────────────────
 # Exactly three RECOGNISED shapes; anything else is a named FAIL rather than a guess
@@ -134,19 +150,31 @@ import os, re, sys
 
 paths = sys.argv[1:]
 
-# Cargo/libtest output text a parser can key on. Deliberately a CURATED list of strings
-# that only appear in cargo's own output — not a general "looks like a status word" test.
-CARGO_TOKENS = [
-    'test result:',
-    'Running tests/',
-    'Running unittests',
-    'Doc-tests',
-    'running 0 tests',
-    'Compiling ',
-    'Finished ',
-    'warning:',
-    'error[',
-]
+# Cargo/libtest/nextest output text a parser can key on. A CURATED, EXHAUSTIVE list — not a
+# general "looks like a status word" test — and it is the SAME list the header paragraph
+# states (roborev B2: they disagreed, which left `error:` and every nonzero `running N tests`
+# invisible to the lint while the affirmative N/N line kept printing off other sites). Every
+# entry carries its own delimiter so it identifies TOOL OUTPUT, not the English word: that is
+# why `FAIL \[` and not `FAIL`, `Finished ` and not `Finished`. Regex, not substrings, so
+# `running <N> tests` covers every count instead of only the literal zero.
+CARGO_OUTPUT_TOKENS = re.compile(
+    r'test result:'
+    r'|Running tests/'
+    r'|Running unittests'
+    r'|Running '
+    r'|Doc-tests'
+    r'|running [0-9]+ tests'
+    r'|Compiling '
+    r'|Finished '
+    r'|warning:'
+    r'|warning\['
+    r'|error:'
+    r'|error\['
+    r'|Summary \['
+    r'|Starting '
+    r'|PASS \['
+    r'|FAIL \['
+)
 # A MATCH, as opposed to a mention. `echo "… test result: …"` has no match operator.
 MATCH_OP = re.compile(r'==|=~|\bcase\b|\bgrep\b|\bsed\b|\bawk\b|\brg\b')
 # V=$(_ansi_stripped_log …)  — the affirmative evidence that V holds a stripped path.
@@ -280,7 +308,7 @@ for path in paths:
     for n, line in enumerate(lines):
         if is_comment(line):
             continue
-        if not any(tok in line for tok in CARGO_TOKENS):
+        if not CARGO_OUTPUT_TOKENS.search(line):
             continue
         if not MATCH_OP.search(line):
             continue

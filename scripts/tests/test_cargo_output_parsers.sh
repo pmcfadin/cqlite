@@ -532,6 +532,12 @@ else
 fi
 
 # B10 — the SHIPPED scripts/agent-gate.sh must green, with a non-zero measured count.
+#       A FLOOR, deliberately not an equality: the count is measured, not declared, and it
+#       legitimately RISES when a parser is added (PR #3403 adds several) or when the token
+#       set widens. What must never happen is it reaching zero, and the lint's own
+#       empty-subject FAIL covers that. The floor is the 4 sites hand-enumerated on main
+#       (the lint measures 5 — the extra is the `sed -E` that extracts the target name from
+#       the `Running tests/` line, a distinct parse expression the hand count folded in).
 run_lint
 if [ "$lint_rc" -eq 0 ]; then
   count=$(printf '%s' "$lint_out" | sed -n 's/^cargo-output-parsers: \([0-9][0-9]*\)\/.*/\1/p' | tail -1)
@@ -649,6 +655,82 @@ if printf '%s' "$lint_out" | grep -qi 'WITHOUT READING IT'; then
 else
   bad "B12: the here-string rejection does not explain that the path was named but not read: $lint_out"
 fi
+
+# ─────────────────────────────────────────────────────────────────────────────────────
+# (B13) TOKEN COVERAGE: the detector's pattern list and its documented claim must be the
+#       same set (roborev B2). The header once claimed `error:` and a general
+#       `running N tests` while the code carried neither, so a raw parser keyed on those
+#       was invisible to the lint — and the affirmative `N/N` line still printed, because
+#       other sites kept the count nonzero. That is a hole shaped exactly like coverage.
+#
+#       Each token gets BOTH directions, and both are load-bearing:
+#         * STRIPPED read  -> must PASS with 1/1, which is the only proof the token was
+#           DETECTED as a parse site at all;
+#         * RAW read       -> must FAIL, which proves it is ENFORCED.
+#       The raw direction alone would not discriminate: an undetected token yields ZERO
+#       sites, and zero sites is also a FAIL (for a different reason).
+# ─────────────────────────────────────────────────────────────────────────────────────
+# token_case <name> <literal cargo text to plant>
+token_case() {
+  local name="$1" text="$2"
+  local sf="$tmp/tok_${name}_stripped.sh" rf="$tmp/tok_${name}_raw.sh"
+  {
+    echo 'myguard() {'
+    echo '  local src'
+    echo '  src=$(_ansi_stripped_log "$1") || return 1'
+    echo "  grep -Fc \"$text\" \"\$src\""
+    echo '}'
+  } >"$sf"
+  {
+    echo 'myguard() {'
+    echo "  grep -Fc \"$text\" \"\$1\""
+    echo '}'
+  } >"$rf"
+  run_lint "$sf"
+  local det_rc=$lint_rc det_out=$lint_out
+  run_lint "$rf"
+  if [ "$det_rc" -eq 0 ] && printf '%s' "$det_out" | grep -q '^cargo-output-parsers: 1/1 ' \
+     && [ "$lint_rc" -ne 0 ]; then
+    ok "B13 token '$name' ($text): DETECTED as a parse site (1/1 when stripped) and ENFORCED (reds when raw)"
+  else
+    bad "B13 token '$name' ($text): stripped rc=$det_rc out='$det_out'; raw rc=$lint_rc — the token is either not in the detector's set or not enforced"
+  fi
+}
+
+token_case test_result        'test result:'
+token_case running_tests      'Running tests/'
+token_case running_unittests  'Running unittests src/lib.rs'
+token_case running_generic    'Running target/debug/deps/x'
+token_case doc_tests          'Doc-tests'
+token_case running_n_tests    'running 7 tests'
+token_case compiling          'Compiling cqlite-core'
+token_case finished           'Finished test profile'
+token_case warning_colon      'warning:'
+token_case warning_bracket    'warning['
+token_case error_colon        'error:'
+token_case error_bracket      'error[E0308]'
+token_case nextest_summary    'Summary ['
+token_case nextest_starting   'Starting 42 tests'
+token_case nextest_pass       'PASS ['
+token_case nextest_fail       'FAIL ['
+
+# The English word WITHOUT its tool delimiter must NOT be a parse site — that is what keeps
+# the widened set from firing on the gate's own prose (measured: the full set yields the same
+# 5 sites on the shipped agent-gate.sh as the original narrow one). Zero sites -> FAIL, which
+# is how a non-site is observed here.
+for word in FAIL PASS Finished Compiling Starting Summary; do
+  cat >"$tmp/tok_word_$word.sh" <<F
+myguard() {
+  grep -Fc "$word" "\$1"
+}
+F
+  run_lint "$tmp/tok_word_$word.sh"
+  if [ "$lint_rc" -ne 0 ] && printf '%s' "$lint_out" | grep -q 'ZERO cargo-output parse sites'; then
+    ok "B13 non-token '$word': the bare English word is NOT a parse site (delimiter-less, so it cannot fire on the gate's own prose)"
+  else
+    bad "B13 non-token '$word': expected ZERO parse sites, got rc=$lint_rc / '$lint_out' — the token set is matching prose"
+  fi
+done
 
 echo
 printf 'passed=%d failed=%d\n' "$PASSES" "$FAILS"
