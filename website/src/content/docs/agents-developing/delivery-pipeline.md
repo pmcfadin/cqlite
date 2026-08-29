@@ -367,13 +367,15 @@ ambiguous when machine names contain dashes. The legacy namespace is still *read
 `dead-lanes` and the CI reaper so a pre-ruling ref is drained rather than pinning its board item at In
 Progress forever.
 
-Exit codes are what a cron reads, so they are worth knowing: **3** = a dead lane was reported, **0** = at
-least one local lane was measured and none is dead, **1** = incomplete, which includes zero claim refs and a
-run where every claim belongs to another machine. Exit 0 became trustworthy only with per-lane refs; under
-the old layout it was a false clean about the very scenario the command exists to catch, and it was
-deliberately unavailable in the interim. It claims nothing about lanes that never stamped (a lane run with
-`CLAIM_CMD=""` is invisible) and nothing about other machines — a PID is only checkable where it runs, so
-**run it ON the suspect box**.
+Exit codes are what a cron reads, so they are worth knowing: **3** = a dead lane was reported, **1** =
+none was reported, which also covers zero claim refs and a run where every claim belongs to another
+machine. **This slice never exits 0** (#3393 split ruling) — act on 3, and never read 1 as a clean
+bill of health. Per-lane refs do make a sound clean verdict possible, since a surviving sibling now
+stamps a different ref and can no longer mask a dead lane; it was split out rather than shipped
+because the fail-open defect family clustered in that exit-0 path, and being wrong there is silent.
+It claims nothing about lanes that never stamped (a lane run with `CLAIM_CMD=""` is invisible) and
+nothing about other machines — a PID is only checkable where it runs, so **run it ON the suspect
+box**.
 
 A suspected dead lane still has a diagnostic **order, and it matters** — full procedure in
 `docs/development/fleet-runbook.md`. The one line worth memorising: when a box accepts TCP but sends no SSH

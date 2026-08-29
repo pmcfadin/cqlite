@@ -102,16 +102,15 @@ ref_msg_field() {
 #   claim-heartbeat.sh dead-lanes            # REPORT every claim whose owning
 #                                            # process is verifiably gone, with NO
 #                                            # age threshold and regardless of an
-#                                            # open PR. exit 3 = a dead lane was
-#                                            # reported; exit 0 = at least one LOCAL
-#                                            # lane was measured and none is dead;
-#                                            # exit 1 = the measurement was incomplete
-#                                            # (which includes zero claim refs, an
-#                                            # all-foreign run, and a failed legacy
-#                                            # listing). Exit 0 became trustworthy only
-#                                            # with per-lane refs (#3393 ruling A) — see
-#                                            # the scope limits below for what it does
-#                                            # NOT claim.
+#                                            # open PR. POSITIVE DETECTION ONLY in this
+#                                            # slice — it NEVER exits 0 (#3393 split).
+#                                            # exit 3 = a dead lane was reported;
+#                                            # exit 1 = none was reported, which also
+#                                            # covers zero claim refs, an all-foreign
+#                                            # run and a failed listing. Act on 3;
+#                                            # never read 1 as a clean bill of health.
+#                                            # A sound clean verdict is possible on
+#                                            # per-lane refs and is tracked separately.
 #
 # WHY `dead-lanes` IS NOT `should-reap` (issue #3393 AC3)
 #   `should-reap` is a REAP GATE, and it consults the pid ONLY AFTER age >
@@ -1286,26 +1285,24 @@ cmd_dead_lanes() {
   if [ "$unreadable" -gt 0 ]; then
     return 1
   fi
-  # THE CLEAN VERDICT IS SOUND AGAIN, because the layout changed under it (#3393, owner ruling A).
+  # NO CLEAN VERDICT IN THIS SLICE — POSITIVE DETECTION ONLY (#3393 split ruling, 2026-08-29).
   #
-  # It was removed at interim C for a specific reason: claims were keyed per MACHINE and
-  # force-updated every supervisor iteration, so after one lane died a surviving sibling's next
-  # stamp overwrote the dead lane's pid and this command saw a live, identity-verified pid. Exit 0
-  # there was a false clean about the exact scenario the command exists to catch, and documenting
-  # that was not a fix — the exit code is what a cron reads.
+  # Per-lane refs DO make a clean verdict sound: a surviving sibling now stamps a DIFFERENT ref, so a
+  # dead lane's ref survives with its dead pid and the masking that made exit 0 a lie is gone. That
+  # restoration was implemented, reviewed over four rounds, and is deliberately NOT shipped here.
   #
-  # Per-lane refs remove the mechanism rather than mitigate it: a sibling now stamps a DIFFERENT
-  # ref, so a dead lane's ref survives with its dead pid and is reported. The masking is gone, so
-  # the clean verdict is honest and is restored.
+  # Why: the four review rounds on this change produced 5, 3, 4 and 4 findings, every one real, and
+  # the FAIL-OPEN family — a failed probe read as a negative answer — clustered in this exit-0 path,
+  # five instances in total. The split follows that defect grain. Positive detection is the part that
+  # is sound and independently valuable, so it ships; the clean verdict lands separately with the
+  # review it needs, because it is the value a cron reads and being wrong there is silent.
   #
-  # WHAT EXIT 0 CLAIMS, EXACTLY — no more than this: at least one LOCAL lane was measured, and none
-  # of the local lanes that could be seen is dead. It does NOT claim anything about lanes that never
-  # stamped (a lane run with `CLAIM_CMD=""` is still invisible, which is why zero claim refs remains
-  # exit 1), nor about other machines (a foreign pid is unknowable, which is why an all-foreign run
-  # remains exit 1). Those two guards are what keep this from becoming the old false clean by a
-  # different route.
-  note "measured ${local_seen} local lane(s); none is dead. Exit 0 means: at least one local lane was measured and none of them is dead — NOT that lanes which never stamped are healthy (they are invisible), and NOT anything about other machines. Run dead-lanes ON each box."
-  return 0
+  # So this command returns 3 (a dead lane was reported) or 1 (no dead lane was reported), and never
+  # 0. Act on 3; never read 1 as a clean bill of health. Restoring exit 0 is tracked in the split
+  # issue, which carries the family census and the four-round history rather than restarting from
+  # zero.
+  note "no dead lane was reported among the $(printf '%s' "$local_seen") local lane(s) measured. This slice is POSITIVE-DETECTION ONLY and never exits 0: a clean verdict needs the exit-0 restoration tracked separately (#3393 split). Exit 1 = nothing found, NOT a clean bill of health."
+  return 1
 }
 
 SUBCOMMAND="${1:-}"

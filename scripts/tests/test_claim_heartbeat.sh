@@ -1219,11 +1219,15 @@ fi
 # and would have failed a correct help. A drift guard is only as good as the contract it is pointed
 # at, and a stale contract makes it worse than nothing — it defends the error. Flagged by roborev
 # round 1 (Low) on exactly that basis.
-if printf '%s\n' "$help_text" | grep -qi 'exit 0 = at least one LOCAL' \
-  && ! printf '%s\n' "$help_text" | grep -qi 'NEVER exits 0'; then
-  ok "the help documents the RESTORED exit-0 contract and no longer claims dead-lanes never exits 0"
+# The help must match THIS slice: positive detection only, no exit 0 (#3393 split ruling). This
+# assertion has now been pointed at three different contracts in one day — never-0, then 0-restored,
+# now never-0-for-a-different-reason — which is exactly why it exists: each time the contract moved,
+# this is what caught the documentation lagging behind the code.
+if printf '%s\n' "$help_text" | grep -qi 'never exits 0' \
+  && ! printf '%s\n' "$help_text" | grep -qi 'exit 0 = at least one LOCAL'; then
+  ok "the help documents this slice's contract: positive detection only, never exit 0"
 else
-  bad "the help's exit-0 contract must match the implementation: exit 0 = at least one local lane measured and none dead"
+  bad "the help must match the implementation: this slice never exits 0"
 fi
 # ...and the retired per-machine limitation must not still be presented as current.
 if ! printf '%s\n' "$help_text" | grep -qi 'ONE CLAIM REF PER MACHINE'; then
@@ -1559,34 +1563,29 @@ else
 fi
 
 # ===========================================================================
-echo "TEST 52: the clean verdict is BACK, because per-lane refs removed the masking (#3393 ruling A)"
+echo "TEST 52: this slice is POSITIVE-DETECTION ONLY — dead-lanes never exits 0 (#3393 split ruling)"
 # ===========================================================================
-# INVERTED. Interim C removed exit 0 for a specific mechanism: claims were keyed per MACHINE and
-# force-updated every iteration, so a surviving sibling's stamp overwrote a dead lane's pid and
-# dead-lanes reported a live, identity-verified pid. Exit 0 there was a false clean about the exact
-# scenario the command exists to catch. Per-lane refs remove that mechanism — a sibling stamps a
-# DIFFERENT ref — so the clean verdict is sound again and this case pins that it returns.
-craft_lane_claim "$WORK" "cleanVerdict" 3413 "$$" 0
-cv_out=$(cd "$WORK" && PATH="$ALIVE_SHIM:$PATH" HEARTBEAT_MACHINE=cleanVerdict \
+# The reason changed even though the assertion is back to where it started, and the distinction
+# matters. Interim C withheld exit 0 because a per-MACHINE ref let a surviving sibling MASK a dead
+# lane, so a clean verdict was a lie. Per-lane refs remove that mechanism, and the restoration was
+# implemented and reviewed over four rounds — then split out, because the FAIL-OPEN family (five
+# instances) clustered in this exit-0 path and it is the value a cron reads.
+#
+# So: not "exit 0 is unsound" any more, but "exit 0 is not in THIS slice". Restoring it is tracked
+# separately with the family census carried forward.
+craft_lane_claim "$WORK" "noClean" 3413 "$$" 0
+nc_out=$(cd "$WORK" && PATH="$ALIVE_SHIM:$PATH" HEARTBEAT_MACHINE=noClean \
   CLAIM_OPEN_PR_CMD="$NO_OPEN_PR" bash "$HB" dead-lanes 2>&1)
-cv_rc=$?
-if [ "$cv_rc" -eq 0 ] \
-  && printf '%s\n' "$cv_out" | grep -E '^cleanVerdict ' | grep -q 'ALIVE'; then
-  ok "a measured-healthy local lane now exits 0 — the clean verdict is restored (#3393)"
+nc_rc=$?
+if [ "$nc_rc" -ne 0 ] \
+  && printf '%s\n' "$nc_out" | grep -E '^noClean ' | grep -q 'ALIVE' \
+  && printf '%s\n' "$nc_out" | grep -qi 'POSITIVE-DETECTION ONLY'; then
+  ok "a measured-healthy local lane does NOT exit 0 (rc=$nc_rc) and the output says why — the clean verdict is out of this slice"
 else
-  bad "a healthy local lane must exit 0 under per-lane refs: rc=$cv_rc out:
-$cv_out"
+  bad "this slice must never exit 0: rc=$nc_rc out:
+$nc_out"
 fi
-# ...and exit 0 must STATE its scope, or it becomes the old false clean by a different route: it
-# claims nothing about lanes that never stamped, and nothing about other machines.
-if printf '%s\n' "$cv_out" | grep -qi 'NOT that lanes which never stamped' \
-  && printf '%s\n' "$cv_out" | grep -qi 'NOT anything about other machines'; then
-  ok "the clean verdict states what it does NOT claim (unstamped lanes, other machines)"
-else
-  bad "exit 0 must state its scope: out:
-$cv_out"
-fi
-(cd "$WORK" && g push -q origin ":refs/lane-claims/cleanVerdict/3413" 2>/dev/null || true)
+(cd "$WORK" && g push -q origin ":refs/lane-claims/noClean/3413" 2>/dev/null || true)
 
 # ===========================================================================
 echo "TEST 52b: TWO lanes on ONE machine — a dead lane is seen beside a live sibling (#3393 AC3)"

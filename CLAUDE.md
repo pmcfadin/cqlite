@@ -956,23 +956,14 @@ end-to-end test. Green helper-only unit tests are not sufficient.
   already). In outline: verdicts are MULTI-valued because a PID is only checkable on the machine that
   owns the claim — two `DEAD-*` verdicts (`DEAD-NO-PROCESS`, which covers a zombie, and
   `DEAD-PID-REUSED`) and a family of `UNKNOWN-*` ones (`FOREIGN`, `NO-PID`, `STATE`, `IDENTITY`,
-  `PROBE`, `UNREADABLE`). Exit `3` = a dead lane was reported (both `DEAD-*` verdicts); exit `1` = the
-  measurement was incomplete or nothing local was measured; exit `0` = **at least one local lane was
-  measured and none is dead**.
-  **That clean verdict was removed and is now restored, and the difference is the ref layout (#3393
-  ruling A).** Under per-MACHINE claims the ref was force-updated every supervisor iteration, so on a
-  multi-lane box a surviving sibling's stamp overwrote a dead lane's PID and the command saw a live,
-  identity-verified PID — a false clean about the exact scenario it exists to catch. Per-lane refs
-  (`refs/lane-claims/<machine>/<issue>`) remove that mechanism rather than mitigate it: a sibling
-  stamps a DIFFERENT ref, so a dead lane's ref survives with its dead PID. Exit 0 claims nothing more
-  than its wording — **not** that lanes which never stamped are healthy (a lane run with
-  `CLAIM_CMD=""` is invisible, so zero claim refs stays exit 1), and **nothing** about other machines
-  (a foreign PID is unknowable, so an all-foreign run stays exit 1). Those two guards are what stop
-  the clean verdict becoming the old false clean by another route. An UNKNOWN is never folded onto
-  the permissive answer, and `UNKNOWN-FOREIGN` alone never manufactures a finding. **It is
-  LOCAL-ONLY**: run it ON the suspect box. It also refuses outright on git < 2.29, which cannot fetch
-  without writing `FETCH_HEAD` — a monitor may decline to answer, but it may not corrupt the
-  `FETCH_HEAD` that `should-reap`/`reap` read.
+  `PROBE`, `UNREADABLE`). Exit `3` = a dead lane was reported (both `DEAD-*` verdicts); exit `1` = none was
+  reported — which also covers zero claim refs, an all-foreign run and a failed listing.
+  **This slice is POSITIVE-DETECTION ONLY and never exits 0** (#3393 split ruling, 2026-08-29): act
+  on `3`, and never read `1` as a clean bill of health. A sound clean verdict IS possible on per-lane
+  refs — the masking that made exit 0 a lie is gone, since a surviving sibling now stamps a different
+  ref — but it was split out rather than shipped, because the fail-open defect family (five
+  instances: a failed probe read as a negative answer) clustered in that exit-0 path and it is the
+  value a cron reads. Restoring it is tracked separately, carrying the family census forward.
   **Not covered, by construction**: #3393 AC3's "worktree present, tmux session absent" test is
   unimplementable in committed tooling because the lane-directory layout and tmux session naming
   exist NOWHERE in this repo — a tool guessing at them would report nothing on any differently-named
