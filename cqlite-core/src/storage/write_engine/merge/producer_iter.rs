@@ -382,10 +382,20 @@ impl SSTableRowIteratorAdapter {
 
                 rt.block_on(async move {
                     let platform = Arc::new(Platform::new(&config).await?);
-                    let mut reader = crate::storage::sstable::reader::SSTableReader::open(
-                        &path_buf, &config, platform,
-                    )
-                    .await?;
+                    // `open_unrecorded`, NOT `open` (issue #1704): this reopen is an
+                    // INNER STEP. A failure here surfaces mid-stream at `step()` and
+                    // is counted ONCE by the enclosing operation's seam — the measured
+                    // `JoinedStream` on the cross-generation streaming read path, or
+                    // `record_result("compaction", ..)` in `maintenance_step` on the
+                    // write path. `open`, which records its own failure, made one
+                    // failed reopen report TWO increments, under two different
+                    // categories (measured: `io` from the raw EACCES plus `storage`
+                    // from the merge's rewrap).
+                    let mut reader =
+                        crate::storage::sstable::reader::SSTableReader::open_unrecorded(
+                            &path_buf, &config, platform,
+                        )
+                        .await?;
 
                     // Issue #1234: wire the authoritative UDT registry onto the reader
                     // so the compaction read path decodes a top-level `frozen<UDT>`
