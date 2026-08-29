@@ -699,6 +699,15 @@ fi
 #     would skip it on the one platform whose hang scenarios (locked osxkeychain, a GCM
 #     browser flow) motivated the bound, leaving it uncovered exactly where it matters.
 TIMEOUT_BIN_TEST="$(command -v timeout 2>/dev/null || command -v gtimeout 2>/dev/null || true)"
+# A watchdog for a fixture that IGNORES SIGTERM must be able to escalate to SIGKILL, so
+# it is resolved by the SAME behavioural probe the bootstrap uses (`--kill-after=1 1
+# true`) rather than assumed — a plain `timeout` aimed at a TERM-ignoring child waits
+# FOREVER, and `tooling-tests` is a full-gate component, where a hang is worse than a
+# failure because nothing reports it (#3369 review).
+TIMEOUT_KILL_TEST=""
+if [ -n "$TIMEOUT_BIN_TEST" ] && "$TIMEOUT_BIN_TEST" --kill-after=1 1 true >/dev/null 2>&1; then
+  TIMEOUT_KILL_TEST="$TIMEOUT_BIN_TEST"
+fi
 if [ -n "$TIMEOUT_BIN_TEST" ]; then
   sb7h=$(mktemp -d "$tmp/cred7h.XXXXXX"); stub7h="$tmp/stub7h"
   mk_hermetic_bin "$stub7h"
@@ -1256,7 +1265,7 @@ fi
 #   the bound is production behaviour and must not be shrunk to suit a test. Its own
 #   outer ceiling is the negative control: WITHOUT --kill-after the bootstrap never
 #   returns, the ceiling fires, and rc is 124.
-if [ -n "$TIMEOUT_BIN_TEST" ]; then
+if [ -n "$TIMEOUT_KILL_TEST" ]; then
   bare7pm="$tmp/bare7pm.git"; mk_push_bare "$bare7pm"
   repo7pm="$tmp/repo7pm"; mk_push_repo "$repo7pm" "file://$bare7pm"
   printf '#!/usr/bin/env bash\ntrap "" TERM\nsleep 300\n' >"$repo7pm/scripts/flow/claim.sh"
@@ -1265,13 +1274,15 @@ if [ -n "$TIMEOUT_BIN_TEST" ]; then
   gc7pm="$tmp/gc7pm"; : >"$gc7pm"
   hang_start=$(date +%s)
   hang_rc=0
-  hang_out=$("$TIMEOUT_BIN_TEST" 150 env PATH="$bin7pm:$PATH" HOME="$repo7pm/.home" \
+  hang_out=$("$TIMEOUT_KILL_TEST" --kill-after=5 150 env PATH="$bin7pm:$PATH" HOME="$repo7pm/.home" \
     CARGO_HOME="$repo7pm/.home/.cargo" GIT_CONFIG_GLOBAL="$gc7pm" GIT_CONFIG_NOSYSTEM=1 \
     CLAIM_MACHINE=push-probe-test CODEX_NOTIFY_WEBHOOK='https://ntfy.example.com/t' \
     CQLITE_PROJECT_OWNER=pmcfadin CQLITE_PROJECT_NUMBER=1 \
     bash "$repo7pm/scripts/bootstrap-agent-machine.sh" --skip-smoke 2>&1) || hang_rc=$?
   hang_elapsed=$(( $(date +%s) - hang_start ))
-  if [ "$hang_rc" -ne 124 ] && printf '%s' "$hang_out" | grep -q '\[warn\].*git-push: UNMEASURED.*exceeded its 60s bound and was killed' \
+  # rc 124 OR 137 both mean the OUTER ceiling fired (137 = the watchdog had to SIGKILL
+  # bootstrap itself), i.e. the inner bound failed to bound. Either is a failure here.
+  if [ "$hang_rc" -ne 124 ] && [ "$hang_rc" -ne 137 ] && printf '%s' "$hang_out" | grep -q '\[warn\].*git-push: UNMEASURED.*exceeded its 60s bound and was killed' \
      && [ "$hang_elapsed" -lt 120 ]; then
     ok "push: a SIGTERM-ignoring probe child is KILLED at the bound + grace — bootstrap still completes (${hang_elapsed}s) and reports UNMEASURED"
   else
@@ -1279,7 +1290,10 @@ if [ -n "$TIMEOUT_BIN_TEST" ]; then
     push_verdict "$hang_out"
   fi
 else
-  echo "skip - push: bound-escalation guard needs timeout/gtimeout (neither on this host)"
+  # Deliberately SKIP rather than run unbounded: this fixture ignores SIGTERM, so without
+  # a hard-kill-capable watchdog the case could hang the gate forever. A skip that says
+  # so is honest; a case that can hang is not.
+  echo "skip - push: bound-escalation guard needs a timeout/gtimeout accepting --kill-after (its fixture ignores SIGTERM)"
 fi
 
 # 7p-n. SSH REMOTES GET SSH ADVICE (#3369 review). `gh auth setup-git` configures an
