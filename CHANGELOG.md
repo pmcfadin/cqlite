@@ -7,6 +7,38 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Removed
+
+- **BREAKING (pre-1.0): the schema JSON exporter and the never-compiled CQL
+  generator are deleted (#1715, epic #1688 / audit finding AK4; ~2.0k LOC).**
+  Owner-DECIDED delete (capstone ledger #9, 2026-07-01) — the surface had zero
+  callers anywhere in the workspace and no Cassandra-side parity coverage.
+  - Removed `cqlite_core::schema::json_exporter` and the 13 types it re-exported
+    through `cqlite_core::schema` under the `experimental` feature
+    (`JsonExporter`, `JsonExportConfig`, `JsonFormat`, `JsonSchema`, `JsonTable`,
+    `JsonColumn`, `JsonPrimaryKey`, `JsonClusteringKey`, `JsonIndex`, `JsonUDT`,
+    `JsonMetadata`, `JsonTableOptions`, `JsonPerformanceMetrics`,
+    `JsonValidationResults`).
+  - Removed `SchemaRegistry::export_schema_json{,_with_config,_compact,_openapi,_pipeline}`
+    and `SchemaDiscoveryEngine::export_json{,_with_config}`. **Note these five
+    registry methods existed in DEFAULT builds too**, as
+    `#[cfg(not(feature = "experimental"))]` stubs that unconditionally returned
+    `Error::UnsupportedFormat`, so the removal narrows the default public API and
+    not only the `experimental`-gated one. No caller could ever have depended on a
+    successful result from them.
+  - Removed `cqlite-core/src/schema/cql_generator.rs`, which had **no `mod`
+    declaration anywhere in the repository** and was therefore never in any build
+    graph; the file's only repo-wide mention was a doc comment. Any past change to
+    it was a no-op.
+  - **Migration:** there is no replacement, by design. A `schema export --json`
+    surface is a future product decision that would restore this code from version
+    control alongside a real design; it is deliberately not preserved as deprecated
+    shims. Callers needing schema JSON today should serialize the public
+    `TableSchema` / `SchemaInfo` types themselves.
+  - The `experimental` feature flag itself is unchanged — it still gates
+    `Database::flush()`/`compact()`, the INSERT executor path, bloom-filter tests
+    and the `Storage::put`/`delete` stubs.
+
 ### Fixed
 
 - **A dead producer no longer completes a query SUCCESSFULLY with a silently

@@ -1,7 +1,7 @@
 //! Schema exporter for discovery output formats.
 //!
-//! Generates CQL `CREATE TABLE` statements, optional JSON exports (experimental
-//! feature), and schema comparison reports from discovered [`SchemaInfo`].
+//! Generates CQL `CREATE TABLE` statements and schema comparison reports from
+//! discovered [`SchemaInfo`].
 
 use crate::Result;
 
