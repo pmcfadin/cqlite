@@ -834,3 +834,9 @@ mod read_shadow_tests;
 pub(super) mod multi_gen_fixture;
 #[cfg(all(test, not(feature = "tombstones")))]
 mod setup_fail_closed_tests;
+
+// Issue #1704: a SETUP failure returns before any `JoinedStream` exists, so the
+// streaming error-counting seam cannot see it. Same fixture and same injected
+// construction faults as the suite above, asserting the metric instead of the rows.
+#[cfg(all(test, not(feature = "tombstones"), feature = "observability-testing"))]
+mod setup_error_metric_tests;
