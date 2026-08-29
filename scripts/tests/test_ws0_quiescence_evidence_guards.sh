@@ -59,19 +59,69 @@ fi
 # --------------------------------------------------------------------------------------------
 TMP="$(mktemp -d)"
 trap 'rm -rf "$TMP"' EXIT
-python3 "$PERF/ws0_quiescence.py" sample --out "$TMP/b.json" >/dev/null 2>&1
-python3 "$PERF/ws0_quiescence.py" sample --out "$TMP/a.json" >/dev/null 2>&1
-WS="$(python3 -c "import datetime;print((datetime.datetime.now(datetime.timezone.utc)-datetime.timedelta(seconds=240)).strftime('%Y-%m-%dT%H:%M:%SZ'))")"
+
+# --------------------------------------------------------------------------------------------
+# THE BASELINE IS HERMETIC. IT USED TO DEPEND ON A QUIET BOX, AND THAT WAS THREE DEFECTS AT ONCE.
+#
+# The first version judged against the LIVE /data/ws0-3248/sampler/box-load.jsonl. Running this
+# suite makes the box busy, so `judge` correctly REFUSED with
+# QUIESCENCE_WINDOW_CONTAMINATED (10 of 14 in-window samples competing, load1 11.46) -- and then:
+#
+#   1. the SKIP branch exited 0 having run ONE check, BYPASSING the MIN_CHECKS floor that exists
+#      to catch exactly that. A vacuous pass, in the suite written to prevent vacuous passes.
+#   2. its message said "no live box-load timeseries on this host", which was FALSE -- the file
+#      existed and was fresh. A misdiagnosis printed as fact.
+#   3. a test suite should never need a quiet box in the first place.
+#
+# So the timeseries is now SYNTHETIC and written here: clean records at the sampler's own cadence,
+# covering the judged window. The shipped writer path is still what produces the verdict -- that is
+# the property worth keeping, since it is what stops the fixture drifting from the real record
+# shape -- but it now runs deterministically. THERE IS NO SKIP PATH LEFT: a suite that cannot build
+# its baseline FAILS, because a green with one check is worse than a red.
+# --------------------------------------------------------------------------------------------
+SYN_TS="$TMP/box-load.jsonl"
+python3 - "$SYN_TS" <<'PY'
+import datetime, json, sys
+now = datetime.datetime.now(datetime.timezone.utc).replace(microsecond=0)
+# 10 s cadence over 5 minutes, every record CLEAN and carrying the full census (so the verdict
+# composes census_breadth = FULL and the derivation assert has a definite expectation).
+with open(sys.argv[1], "w") as fh:
+    for i in range(30, -1, -1):
+        ts = now - datetime.timedelta(seconds=10 * i)
+        fh.write(json.dumps({
+            "ts": ts.strftime("%Y-%m-%dT%H:%M:%SZ"),
+            "load1": 0.20, "load5": 0.18, "load15": 0.15, "runnable": "1/700",
+            "competing_count": 0,
+            "rustc": 0, "cargo": 0, "perf": 0, "gate": 0, "flight": 0, "loadgen": 0,
+        }) + "\n")
+PY
+
+# Boundary samples must ALSO be clean, and the live box may not be -- so they are composed here
+# too, in the shape `ws0_quiescence sample` writes.
+mk_boundary() { # mk_boundary <path> <load1>
+  python3 - "$1" "$2" <<'PY'
+import json, sys
+json.dump({"competing": [], "competing_count": 0,
+           "load": {"load1": float(sys.argv[2]), "load5": 0.18, "load15": 0.15,
+                    "runnable": "1/700"}},
+          open(sys.argv[1], "w"))
+PY
+}
+mk_boundary "$TMP/b.json" 0.11
+mk_boundary "$TMP/a.json" 0.19
+
+WS="$(python3 -c "import datetime;print((datetime.datetime.now(datetime.timezone.utc)-datetime.timedelta(seconds=200)).strftime('%Y-%m-%dT%H:%M:%SZ'))")"
 WE="$(python3 -c "import datetime;print(datetime.datetime.now(datetime.timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ'))")"
-if ! python3 "$PERF/ws0_quiescence.py" judge --before "$TMP/b.json" --after "$TMP/a.json" \
-       --out "$TMP/v.json" --timeseries "$(ls -d /data/ws0-3248/sampler/box-load.jsonl 2>/dev/null || echo /nonexistent)" \
-       --window-start "$WS" --window-end "$WE" >/dev/null 2>&1; then
-  echo "SKIP - no live box-load timeseries on this host, so the shipped writer cannot produce a"
-  echo "       baseline verdict. The matrix below needs one; the threshold-drift check above ran."
+if ! judge_out=$(python3 "$PERF/ws0_quiescence.py" judge --before "$TMP/b.json" --after "$TMP/a.json" \
+       --out "$TMP/v.json" --timeseries "$SYN_TS" \
+       --window-start "$WS" --window-end "$WE" 2>&1); then
+  fail "the shipped writer could not compose a baseline verdict from the SYNTHETIC timeseries"
+  echo "       This is not a skip condition: the fixture is hermetic, so a refusal here is a real"
+  echo "       defect in either the writer or this fixture. Writer said:"
+  printf '%s\n' "$judge_out" | sed 's/^/       /' | head -6
   echo
-  echo "ws0-quiescence-evidence guards: $checks check(s) ran, $fails failed (matrix SKIPPED)"
-  [ "$fails" -eq 0 ] || exit 1
-  exit 0
+  echo "ws0-quiescence-evidence guards: $fails of $checks check(s) FAILED"
+  exit 1
 fi
 
 run_matrix() {
