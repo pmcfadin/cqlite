@@ -1231,8 +1231,8 @@ class TestCollectionIdentityContract:
             ["a", 1], is_row_level=False
         )
 
-    def test_values_equal_accepts_a_reordered_scalar_list(self):
-        """LIMITATION b-4 (host-shape collision at COMPARISON time): list order is not verified.
+    def test_values_equal_accepts_a_reordered_scalar_list_or_tuple(self):
+        """LIMITATION b-4 (host-shape collision at COMPARISON time): list AND tuple order is not verified.
 
         `values_equal` tries an ordered comparison and then falls back to an
         UNORDERED (sorted) one for arrays of non-dict primitives, so a reordered
@@ -1249,12 +1249,30 @@ class TestCollectionIdentityContract:
         cannot tell them apart either; separating them needs the declared CQL
         type (#3497).
 
-        Consequence for #1455: a genuine `list<T>` ORDERING regression would not
-        be caught by this comparison. A harness that must verify list order has
-        to compare those columns ordered-only, which requires schema information.
+        This applies to `tuple<...>` too, and that is easy to miss: a tuple
+        canonicalizes to the SAME array as a list (the deliberate benign merge,
+        since Node cannot tell them apart), so the unordered fallback swallows a
+        reordered tuple exactly as it does a reordered list. §5.3 calls BOTH rows
+        positional, so scoping this limitation to lists alone would leave the
+        contract self-contradicting for tuples.
+
+        Consequence for #1455: a genuine `list<T>` OR `tuple<...>` ORDERING
+        regression would not be caught by this comparison. A harness that must
+        verify order has to compare those columns ordered-only, which requires
+        schema information.
         """
         # A reordered scalar list compares EQUAL — the documented gap.
         assert values_equal([1, 2, 3], [3, 1, 2]) is True
+
+        # A reordered TUPLE does too: it normalizes to the same array as a list,
+        # so it reaches the same unordered fallback. Same gap, second CQL type.
+        py_tuple = normalize_python_value((1, 2, 3), is_row_level=False)
+        assert py_tuple == [1, 2, 3]
+        assert values_equal(py_tuple, [3, 1, 2]) is True
+
+        # ...and the normalized tuple is indistinguishable from the normalized
+        # list, which is WHY one fallback covers both.
+        assert py_tuple == normalize_python_value([1, 2, 3], is_row_level=False)
 
         # The accommodation this exists for: a set, normalized/sorted differently
         # by the two sides, still compares equal.
