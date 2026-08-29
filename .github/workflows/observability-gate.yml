@@ -80,7 +80,7 @@ jobs:
           echo "Changed files:"
           sed 's/^/  - /' changed-files.txt
 
-          relevant_regex='^(cqlite-core/src/observability/|cqlite-core/src/query/|cqlite-core/src/storage/|bindings/|cqlite-flight/|cqlite-core/benches/observability_overhead\.rs|cqlite-core/tests/observability_correctness\.rs|cqlite-core/tests/observability_read_metrics\.rs|cqlite-core/tests/observability_no_otel_default\.rs|cqlite-core/Cargo\.toml|Cargo\.toml|Cargo\.lock|scripts/ci/observability_overhead\.sh|scripts/ci/observability_no_otel_default\.sh|\.github/workflows/observability-gate\.yml)'
+          relevant_regex='^(cqlite-core/src/observability/|cqlite-core/src/query/|cqlite-core/src/storage/|bindings/|cqlite-flight/|cqlite-core/benches/observability_overhead\.rs|cqlite-core/tests/observability_correctness\.rs|cqlite-core/tests/observability_read_metrics\.rs|cqlite-core/tests/observability_no_otel_default\.rs|cqlite-core/tests/issue_1704_scan_path_error_counts\.rs|cqlite-core/Cargo\.toml|Cargo\.toml|Cargo\.lock|scripts/ci/observability_overhead\.sh|scripts/ci/observability_no_otel_default\.sh|\.github/workflows/observability-gate\.yml)'
 
           run_correctness=false
           if grep -Eq "$relevant_regex" changed-files.txt; then
@@ -143,6 +143,44 @@ jobs:
           cargo test -p cqlite-core \
             --features observability-testing,cli-helpers \
             --lib read_metric_tests
+
+      # Scan-error counting at the same stream boundary (issue #1704): the
+      # exactly-once latch for a sticky dead-producer verdict, and the
+      # nested-stream delegation that stops one failed fan-out query counting two
+      # or three times. Library tests for the same reason as the #1701 step above —
+      # they hand-build a channel and a DYING producer task, which no integration
+      # test can construct (`JoinedStream`'s constructors are crate-internal) — and
+      # so they execute ONLY here.
+      - name: Scan-error counting boundary tests (library)
+        run: |
+          cargo test -p cqlite-core \
+            --features observability-testing,cli-helpers \
+            --lib error_metric_tests
+
+      # Scan-path error counting end to end (issue #1704): the three disjoint scan
+      # exit seams (`JoinedStream::recv`, `scan_delta`'s terminal send, the
+      # materializing `SSTableReader::scan`) each count ONE
+      # `cqlite.errors.total{subsystem="reader"}` per failed scan.
+      #
+      # Its OWN step, not appended to the correctness step above, because its Cargo
+      # `required-features` are `observability-testing` + `delta-scan` — the
+      # `scan_delta` seam does not exist without the latter. Appending the target to
+      # a step whose feature set omits `delta-scan` would leave the required features
+      # unmet, and cargo SKIPS such a target: the coverage would appear wired and
+      # never run. Widening the correctness step's features instead would change what
+      # those three tests exercise, so the feature sets stay separate.
+      #
+      # `CQLITE_REQUIRE_FIXTURES=1` turns an absent corruption fixture into a hard
+      # failure rather than the tests' skip-clean path, so a corpus regression can
+      # never read as a green no-op (the hermetic no-Data.db case runs regardless).
+      - name: Scan-path error counting tests (issue #1704)
+        env:
+          CQLITE_DATASETS_ROOT: ${{ github.workspace }}/test-data/datasets
+          CQLITE_REQUIRE_FIXTURES: '1'
+        run: |
+          cargo test -p cqlite-core \
+            --features observability-testing,delta-scan \
+            --test issue_1704_scan_path_error_counts
 
       # 3. Zero-overhead-when-disabled: two-build bench comparison on one runner.
       - name: Observability overhead gate
