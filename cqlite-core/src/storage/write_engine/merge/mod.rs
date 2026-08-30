@@ -432,7 +432,12 @@ pub(crate) use async_bridge::block_on_async;
 /// stays in [`from_readers`].
 #[cfg(feature = "write-support")]
 mod constructors;
-#[cfg(not(feature = "tombstones"))]
+// Matches `mod constructors` above: the item cannot exist without `write-support`,
+// so the re-export must not claim otherwise. Not currently reachable as a break —
+// `write_engine` is itself `#[cfg(feature = "write-support")]`, so this file only
+// compiles when `constructors` does — but the two cfgs disagreeing is a latent trap
+// if that outer gate ever moves (#1704, roborev r6).
+#[cfg(all(feature = "write-support", not(feature = "tombstones")))]
 pub(crate) use constructors::merger_deferring_opens;
 mod producer_iter;
 #[cfg(feature = "write-support")]
