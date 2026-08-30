@@ -1,36 +1,9 @@
-# binding-shared-scalar-math — delta for extract-cqlite-ffi-common (issue #1452)
+# binding-shared-scalar-math Specification
 
-**Architecture note (read this first).** The byte-level math that renders a CQL scalar — DECIMAL,
-VARINT, INET — and the mapping from a core `Error` variant to a binding-visible error identity are
-each written twice, once in `bindings/python/src` and once in `bindings/node/src`. Two copies drift
-because nothing forces them to agree; that mechanism produced #1450, #1451 and #1453, and it is
-**still live**: #1741 (Python) and #1754 (Node) hardened DECIMAL independently and the two
-implementations now disagree on observable output for inputs both accept.
+## Purpose
+TBD - created by archiving change extract-cqlite-ffi-common. Update Purpose after archive.
 
-This delta introduces `cqlite-ffi-common`, a pure-Rust workspace member with **no FFI framework
-dependency at any depth**, holding exactly one implementation of each shared routine, and requires
-that both bindings reach their rendered output *through* it. The single-implementation property is
-required to be **asserted**, not asserted-about: a committed vector table exported by the shared crate
-is rendered through each binding's production path and compared in both suites, so a re-introduced
-local copy fails both.
-
-Requirements are stated so that each is verifiable from a **public or test-support surface** of a
-binding, or from a mechanical measurement — never from the presence of a helper unit test alone
-(wiring evidence, #949/#963).
-
-**Issue-step → requirement map** (issue #1452's numbered steps and its Definition of Done):
-
-| Issue step / DoD item | Requirement(s) |
-|---|---|
-| 1 — create `cqlite-ffi-common` as a workspace member, no pyo3/napi | ADDED *A pure shared FFI crate exists as a workspace member*; ADDED *The shared crate depends on no FFI framework at any depth* |
-| 2 — move the pure byte-math (decimal, varint, inet; duration/date only if duplicated) | ADDED *DECIMAL rendering has exactly one implementation and one policy*; ADDED *VARINT decoding has exactly one implementation*; ADDED *INET length dispatch and its error have exactly one implementation*; ADDED *Routines that are not duplicated are not extracted* |
-| 3 — error table, coordinated with #1451 | ADDED *The FFI error contract has exactly one home and `cqlite-core` no longer exports it* |
-| 4 — OTel known-key list only, mechanism not unified | ADDED *The OTel known-key list is shared and has an enforcing consumer in each binding* |
-| 5 — wire both bindings, thin adapters | ADDED *Both bindings render shared scalars through the shared crate*; ADDED *Non-goals remain untouched* |
-| Tests — unit tests in the crate + cross-binding "same shared fn" invariant | ADDED *A committed vector table makes the cross-binding invariant an assertion* |
-| DoD — gate PASS, `-D warnings`, no `unwrap()`/`expect()`, file-size ratchet | ADDED *The change is certified by the agent gate under the repository's code-quality rules* |
-
-## ADDED Requirements
+## Requirements
 
 ### Requirement: A pure shared FFI crate exists as a workspace member
 
