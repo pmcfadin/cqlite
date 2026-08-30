@@ -311,6 +311,29 @@ cat /tmp/gate-summary.txt   # the SUMMARY block is the ONLY gate text an agent r
     shows the check RAN. **There is deliberately NO opt-out env var, and none may be added**:
     committed source in a checkout is never legitimately absent, so an escape hatch could only buy a
     vacuous green.
+- **A gate script BEHIND `origin/main` cannot certify (#3544).** `agent-gate.sh` is read from
+  the tree under test, so a branch cut before a component-set expansion runs the OLD script and
+  reports a true `N/N nonpass=0` while being **silent about every component added since**
+  (measured: PR #3467's gate would have certified 31 of 35). Merge-cleanliness cannot see it
+  (`git merge-tree` returns CLEAN — the skew is semantic), and `required` cannot backstop it:
+  `.github/ci-gating-tiers.yml` exempts the CI feature-matrix lane *because the local gate owns
+  it*, so each side's coverage is justified by the other's and the component is exercised by
+  neither. At the mode dispatch — before the #1825 slot and any component — every mode compares
+  its component **SET** (from `--list` on both sides; never a line count or blob hash) against a
+  baseline **fetched in that same invocation** (a remote-tracking ref is a *cached observable*;
+  a stale one returns "no skew" against a superseded `main`), and stamps `component-set:` into
+  every SUMMARY: `PASS (35/35 vs origin/main <sha40>)` — affirmative, **naming its baseline
+  sha**; `FAIL-CLOSED (#3544) — this tree is BEHIND …; MISSING: <names>` (remedy: `git fetch
+  origin && git rebase origin/main`); `DECLARED (#3544) — this branch REMOVES <names>` when
+  `origin/main` IS an ancestor of `HEAD`, i.e. the removal is the branch's own diff — **loud,
+  not fatal**, because the author has nothing to rebase and a guard that reds on correct input
+  is the guard agents learn to waive; or `FAIL-CLOSED … baseline NOT measured (<kind>)` for a
+  failed fetch/absent `origin`/erroring-empty-garbage baseline `--list` — **never a SKIP and
+  never a fallback to an empty baseline**, which would excuse every branch. A branch-only
+  component is NOT skew. Fail-closed in the **certifying** modes (full, `--delta`); `--lite`
+  and `--only` stamp the same line `ADVISORY-*` and cannot fail on it. **No opt-out env var,
+  and none may be added** — rebasing is always available, so an escape hatch could only buy a
+  vacuous green.
 - **A run whose worktree mutates MID-RUN cannot certify (#2926).** Every mode captures a tree
   identity at start, re-verifies it at each component boundary + the terminal emit, and FAILs closed
   with `tree-integrity: FAIL (tree-mutated-midrun; head <a>→<b>; changed: …)`. Every SUMMARY carries

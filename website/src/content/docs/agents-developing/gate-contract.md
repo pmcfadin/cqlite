@@ -388,6 +388,46 @@ a stale override, so an escape hatch could only buy a vacuous green.
 The schemas root itself is resolved **checkout-relative**, never as a `..` sibling of
 `$CQLITE_DATASETS_ROOT` — see [Test data](/cqlite/agents-developing/test-data/).
 
+**Component-set skew fail-closed (issue #3544).** `scripts/agent-gate.sh` is read **from the
+tree under test**, so a branch whose copy predates a component-set expansion on `main` runs the
+OLD script, reports a true `N/N nonpass=0`, and is **silent about every component added since**.
+Merge-cleanliness cannot see it (`git merge-tree` returns CLEAN — the skew is semantic), and
+`required` cannot backstop it: `.github/ci-gating-tiers.yml` exempts the CI feature-matrix lane
+*because the local gate owns it*, so each side's coverage is justified by the other's and the
+component is exercised by neither. Measured: PR #3467's gate would have certified **31 of 35**
+components.
+
+At the mode dispatch — before the #1825 slot and before any component — every mode now compares
+its component **set** against `origin/main`'s, both derived at run time from `--list` (never a
+line count, never a blob hash: a 2,000-line refactor that leaves the set alone is not a coverage
+problem). The baseline is **fetched in the same invocation as the comparison**, because a
+remote-tracking ref is a *cached observable* and a stale one returns "no skew" against a
+superseded `main`. Every SUMMARY block carries a `component-set:` line:
+
+- `component-set: PASS (35/35 vs origin/main <sha40>)` — affirmative, and it **names the
+  baseline sha**: a verdict that does not name its baseline cannot be audited;
+- `component-set: FAIL-CLOSED (#3544) — this tree is BEHIND origin/main <sha40>; N …
+  MISSING … : <names>` — the branch is behind (`origin/main` is **not** an ancestor of `HEAD`).
+  Remedy: `git fetch origin && git rebase origin/main`;
+- `component-set: DECLARED (#3544) — this branch REMOVES … <names>` — components are missing
+  **and** `origin/main` IS an ancestor of `HEAD`, so the removal is in this branch's own diff.
+  Loud, **not fatal**: the author has nothing to rebase, only the information is actionable, and
+  a guard that reds on correct input is the guard agents learn to waive. (Behind **and**
+  removing fails as BEHIND first, and reaches DECLARED only after a rebase.)
+- `component-set: FAIL-CLOSED (#3544) — baseline NOT measured (<kind>: <detail>)` — the fetch
+  failed, `origin` is missing, or the baseline's own `--list` errored, printed nothing, or
+  printed a non-component line. **Never a SKIP and never a fallback to an empty baseline**: an
+  empty baseline excuses every branch, which is the vacuous pass inverted.
+
+A component present on the branch but absent from `main` is **not** skew (this branch may be the
+one adding it) and is recorded as `[branch-only, NOT skew: …]` inside a PASS.
+
+Fail-closed in the **certifying** modes only — the full gate and `--delta`, the two whose blocks
+are recorded in a PR. `--lite` and `--only` stamp the same line with an `ADVISORY-*` token and
+cannot fail on it: `--lite` runs every fix round and must not require the network to function.
+**There is deliberately no opt-out**, for the same reason as `missing-schemas:` — a branch behind
+`main` can always rebase, so an escape hatch could only buy a vacuous green.
+
 ## Running the gate
 
 ```bash
