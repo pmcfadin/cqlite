@@ -83,6 +83,29 @@ pub fn presence(path: &Path) -> Result<Presence, String> {
     }
 }
 
+/// The RESOLVED form of `path` — symlinks followed, `.`/`..` removed — or
+/// `Ok(None)` when the filesystem ANSWERED that there is nothing there.
+///
+/// For asking whether two paths are the SAME object, which lexical `Path` equality
+/// cannot answer: `<root>/../<root>`, a relative spelling and a symlink into the
+/// tree are all the same directory written differently, and comparing the spellings
+/// says they are three different roots (issue #1491 review finding BB2). Three-
+/// valued like the rest of this module, because a path that could not be resolved
+/// has not been established to be a DIFFERENT object either — the permissive
+/// collapse here would be a provenance line stating the wrong oracle, which this
+/// lane treats as worse than none.
+pub fn canonical(path: &Path) -> Result<Option<std::path::PathBuf>, String> {
+    match std::fs::canonicalize(path) {
+        Ok(resolved) => Ok(Some(resolved)),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(e) => Err(format!(
+            "{}: cannot be resolved ({e}) — a path the filesystem could not resolve is \
+             not a path that verifiably names something else",
+            path.display()
+        )),
+    }
+}
+
 /// Is `path` a directory? `false` only for a VERIFIED answer of absent, or of
 /// something that is not a directory; `Err` when the filesystem could not answer.
 pub fn is_dir(path: &Path) -> Result<bool, String> {
@@ -214,6 +237,31 @@ mod tests {
                 .expect("ENOENT is an answer")
                 .is_none(),
             "a verified absence is `Ok(None)`, which is a legal skip"
+        );
+    }
+
+    /// BB2: two spellings of ONE directory resolve to the same path, where lexical
+    /// equality reports two different roots — and an absence is still an ANSWER.
+    #[test]
+    fn canonical_resolves_two_spellings_of_one_directory_onto_one_path() {
+        let tmp = tmp();
+        let root = tmp.path().join("datasets");
+        std::fs::create_dir_all(&root).expect("mkdir");
+        let detoured = root.join("..").join("datasets");
+        assert_ne!(
+            root, detoured,
+            "the two spellings are not lexically equal — that is the defect"
+        );
+        assert_eq!(
+            canonical(&root).expect("resolvable"),
+            canonical(&detoured).expect("resolvable"),
+            "and they name one directory"
+        );
+        assert!(
+            canonical(&tmp.path().join("gone"))
+                .expect("ENOENT is an answer")
+                .is_none(),
+            "a verified absence is `Ok(None)`, not an error"
         );
     }
 

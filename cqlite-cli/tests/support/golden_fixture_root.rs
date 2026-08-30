@@ -579,7 +579,7 @@ pub fn corpus_fixture_in(
     let of_dirs = dirs.len();
     Ok(Fixture {
         dir: dirs.remove(0),
-        source: if root == checkout {
+        source: if is_checkout_root(root, checkout)? {
             // The checkout's own dataset root — but this walk asked only whether a
             // root HOLDS the table, so nothing here establishes that the file is
             // git-tracked, and for every case that reaches this walk git tracks no
@@ -590,6 +590,40 @@ pub fn corpus_fixture_in(
         },
         of_dirs,
     })
+}
+
+/// Is the root that won the walk the checkout's own `sstables/` root?
+///
+/// Asked of RESOLVED paths, because the question is about the OBJECT and not about
+/// the spelling (issue #1491 review finding BB2). Lexical `Path` equality answered
+/// `false` for a root that IS the checkout written differently — a relative
+/// `CQLITE_DATASETS_ROOT`, one with a `..` component, a symlink into the checkout —
+/// so the census reported `fetched corpus` for bytes that came from the checkout.
+/// The provenance line is the only record of which bytes were the oracle, so a line
+/// that can be wrong is worse than none, which is why an unresolvable path is a
+/// named FAILURE here and not a guess.
+fn is_checkout_root(root: &Path, checkout: &Path) -> Result<bool, CorpusMiss> {
+    let unusable = |why: String| {
+        CorpusMiss::Unusable(format!(
+            "{why}. The provenance of a fixture cannot be established without              resolving both paths, and a census that misnames the oracle is worse              than one that says nothing"
+        ))
+    };
+    let Some(resolved_root) = fs_probe::canonical(root).map_err(unusable)? else {
+        // `root` answered a moment ago that it HOLDS this table, so a verified
+        // absence now is a race — reported, never resolved by assuming which root
+        // this is.
+        return Err(unusable(format!(
+            "{} held the table and then verifiably did not exist",
+            root.display()
+        )));
+    };
+    // The checkout's own `sstables/` root need not exist on every machine (a
+    // corpus-only keyspace, a checkout with no committed fixtures at all); a
+    // VERIFIED absence is an answer, and a root that does exist is not it.
+    match fs_probe::canonical(checkout).map_err(unusable)? {
+        Some(resolved_checkout) => Ok(resolved_root == resolved_checkout),
+        None => Ok(false),
+    }
 }
 
 /// Every `<table>-<uuid>` directory under `root/keyspace` holding a `*-Data.db`,
@@ -719,6 +753,55 @@ mod tests {
             RootSource::CheckoutUntracked,
             "the walk established only that this root HOLDS the table"
         );
+    }
+
+    /// BB2: the checkout root reached by ANOTHER SPELLING is still the checkout.
+    ///
+    /// Provenance was decided by lexical `Path` equality, so a root that IS the
+    /// checkout written differently — a relative `CQLITE_DATASETS_ROOT`, a `..`
+    /// component, a symlink into the checkout — was reported as a `fetched corpus`.
+    /// The `..` spelling below is that class without needing a symlink (and so
+    /// without `std::os::unix`, which this lane deliberately does not use).
+    #[test]
+    fn the_checkout_root_reached_by_another_spelling_is_not_reported_as_a_corpus() {
+        let tmp = tempfile::TempDir::new().expect("tempdir");
+        let checkout = tmp.path().join("checkout");
+        write(&checkout.join("ks/t-abc/nb-1-big-Data.db"), b"x");
+        let detoured = checkout.join("..").join("checkout");
+        assert_ne!(
+            detoured, checkout,
+            "the two spellings are not lexically equal — that is the defect"
+        );
+
+        let fixture = corpus_fixture_in(&detoured, "ks", "t", &checkout).unwrap_or_else(|e| {
+            panic!(
+                "the root holds the table, so the walk resolves: {}",
+                match e {
+                    CorpusMiss::Absent(why) | CorpusMiss::Unusable(why) => why,
+                }
+            )
+        });
+        assert_eq!(
+            fixture.source,
+            RootSource::CheckoutUntracked,
+            "a root that RESOLVES to the checkout is the checkout, however it is spelled"
+        );
+    }
+
+    /// And a genuinely different root is still reported as the fetched corpus, so the
+    /// resolved comparison did not simply collapse every root onto the checkout.
+    #[test]
+    fn a_root_that_resolves_elsewhere_is_still_the_fetched_corpus() {
+        let tmp = tempfile::TempDir::new().expect("tempdir");
+        let checkout = tmp.path().join("checkout");
+        let corpus = tmp.path().join("corpus");
+        write(&checkout.join("ks/t-abc/nb-1-big-Data.db"), b"x");
+        write(&corpus.join("ks/t-def/nb-1-big-Data.db"), b"x");
+
+        let fixture =
+            corpus_fixture_in(&corpus, "ks", "t", &checkout).expect("the corpus holds it");
+        assert_eq!(fixture.dir, corpus.join("ks").join("t-def"));
+        assert_eq!(fixture.source, RootSource::Corpus);
     }
 
     /// And the three provenances must be tellable apart in a census line, since that
