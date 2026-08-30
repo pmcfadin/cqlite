@@ -705,7 +705,6 @@ fn column_kinding(column: &Column) -> Kinding {
 /// own root node; an imbalance is one way that node's derived question fails. So
 /// the decoder is never asked to split a text a CORRECT CLI would render
 /// unbalanced: such a node is refused first, and the split is not attempted.
-#[allow(clippy::too_many_arguments)]
 fn csv_decoded(
     gv: &Value,
     cv: &Value,

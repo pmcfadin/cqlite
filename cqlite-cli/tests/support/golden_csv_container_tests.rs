@@ -311,6 +311,56 @@ fn an_empty_member_with_siblings_is_not_refused_and_is_compared() {
 /// member count comes from the DDL (so the comparison's arity check sees a
 /// dropped member). The bound is `member_can_render_empty`, established per
 /// type from the formatter itself by
+/// `an_empty_rendering_is_possible_only_for_text` below.
+#[test]
+fn an_empty_container_is_refused_only_where_its_element_can_render_empty() {
+    for decl in ["set<text>", "list<ascii>", "set<varchar>"] {
+        let ty = ty_of(decl);
+        let why = node_refusal(&json!([]), Some(&ty))
+            .unwrap_or_else(|| panic!("{decl}: an empty container must be refused"));
+        assert!(
+            why.contains("empty container is indistinguishable"),
+            "{decl}: unexpected reason: {why}"
+        );
+    }
+    for decl in [
+        "set<int>",
+        "list<double>",
+        "set<boolean>",
+        "list<frozen<set<int>>>",
+        // Finding Y2: these THREE used to be refused, by a deny-list that answered
+        // "this element can render empty" for every type nobody had established. An
+        // empty `blob` renders `0x`, a `timestamp` a fixed-width pattern and a
+        // `uuid` 36 characters, so `[]`/`{}` there can only mean zero members —
+        // refusing them dropped decidable cells from the coverage counts.
+        "set<blob>",
+        "list<timestamp>",
+        "set<uuid>",
+        "list<inet>",
+        "set<duration>",
+    ] {
+        assert_eq!(
+            node_refusal(&json!([]), Some(&ty_of(decl))),
+            None,
+            "{decl}: no member of this element type can render empty, so `[]` can \
+             only mean zero members and must stay compared"
+        );
+    }
+    // A tuple's arity is the DDL's, so `()` cannot hide a member.
+    assert_eq!(
+        node_refusal(&json!([]), Some(&ty_of("tuple<text, text>"))),
+        None
+    );
+    // An empty map/UDT body is unambiguous too: every entry carries a `: `, so
+    // a one-entry rendering can never be `{}`.
+    assert_eq!(
+        node_refusal(&json!({}), Some(&ty_of("map<text, text>"))),
+        None
+    );
+    // And an UNDECLARED type refuses nothing: the comparison reports the shape.
+    assert_eq!(node_refusal(&json!([]), None), None);
+}
+
 // --- the SEAM: a stringified spelling is not a CSV spelling ---------------
 //
 // `golden_rendering` synthesizes the text the golden WOULD render as, so the
@@ -436,56 +486,6 @@ fn a_sole_empty_blob_member_is_recovered_and_not_refused() {
     let why = super::node_refusal(&json!([""]), Some(&set), Kinding::Natural)
         .expect("an empty verbatim member must be refused");
     assert!(why.contains("splits into 0 member"), "unexpected: {why}");
-}
-
-/// `an_empty_rendering_is_possible_only_for_text` below.
-#[test]
-fn an_empty_container_is_refused_only_where_its_element_can_render_empty() {
-    for decl in ["set<text>", "list<ascii>", "set<varchar>"] {
-        let ty = ty_of(decl);
-        let why = node_refusal(&json!([]), Some(&ty))
-            .unwrap_or_else(|| panic!("{decl}: an empty container must be refused"));
-        assert!(
-            why.contains("empty container is indistinguishable"),
-            "{decl}: unexpected reason: {why}"
-        );
-    }
-    for decl in [
-        "set<int>",
-        "list<double>",
-        "set<boolean>",
-        "list<frozen<set<int>>>",
-        // Finding Y2: these THREE used to be refused, by a deny-list that answered
-        // "this element can render empty" for every type nobody had established. An
-        // empty `blob` renders `0x`, a `timestamp` a fixed-width pattern and a
-        // `uuid` 36 characters, so `[]`/`{}` there can only mean zero members —
-        // refusing them dropped decidable cells from the coverage counts.
-        "set<blob>",
-        "list<timestamp>",
-        "set<uuid>",
-        "list<inet>",
-        "set<duration>",
-    ] {
-        assert_eq!(
-            node_refusal(&json!([]), Some(&ty_of(decl))),
-            None,
-            "{decl}: no member of this element type can render empty, so `[]` can \
-             only mean zero members and must stay compared"
-        );
-    }
-    // A tuple's arity is the DDL's, so `()` cannot hide a member.
-    assert_eq!(
-        node_refusal(&json!([]), Some(&ty_of("tuple<text, text>"))),
-        None
-    );
-    // An empty map/UDT body is unambiguous too: every entry carries a `: `, so
-    // a one-entry rendering can never be `{}`.
-    assert_eq!(
-        node_refusal(&json!({}), Some(&ty_of("map<text, text>"))),
-        None
-    );
-    // And an UNDECLARED type refuses nothing: the comparison reports the shape.
-    assert_eq!(node_refusal(&json!([]), None), None);
 }
 
 /// The EMPTY-CONTAINER bound, taken from the FORMATTER instead of asserted in

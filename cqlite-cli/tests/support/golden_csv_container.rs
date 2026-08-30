@@ -571,11 +571,11 @@ fn golden_rendering(golden: &Value, ty: Option<&CqlType>, kinding: Kinding) -> O
             Some(seq @ (CqlType::List(_) | CqlType::Set(_) | CqlType::Tuple(_))),
         ) => {
             let (open, close) = brackets(seq)?;
-            let member_kinding = member_kinding(seq, kinding);
+            let element_kinding = member_kinding(seq, kinding);
             let body = items
                 .iter()
                 .enumerate()
-                .map(|(i, item)| golden_rendering(item, member_type(ty, i), member_kinding))
+                .map(|(i, item)| golden_rendering(item, member_type(ty, i), element_kinding))
                 .collect::<Option<Vec<String>>>()?
                 .join(", ");
             Some(format!("{open}{body}{close}"))
@@ -1086,7 +1086,6 @@ fn decode_shape(
 /// `element_ty` answers `None` only for a member BEYOND a tuple's declared arity,
 /// which has no declared type; such a member is kept as raw text so the
 /// comparator reports the arity divergence rather than the decoder swallowing it.
-#[allow(clippy::too_many_arguments)]
 fn decode_sequence<'t>(
     golden: &Value,
     text: &str,
