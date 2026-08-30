@@ -565,7 +565,17 @@ What it guarantees:
   `claude -p … --agent flow-lead` spawn shape, #2670/#2841)
   linger, or disk is low — it waits, it never spins. A **per-LANE** lock makes a second supervisor in the same
   **lane** refuse to start, while leaving other lanes on the box free (per-machine until #3393 retracted
-  one-worker-per-machine; the default lock path is scoped to the lane's checkout root). (The Claude probe keys on the supervisor's own `-p … --agent flow-lead`
+  one-worker-per-machine; the default lock path is scoped to the lane's checkout root). **While the
+  fleet's checkouts are mid-upgrade, a lane whose lock path is DERIVED (no explicit `SUPERVISOR_LOCK`)
+  also consults the PRE-#3467 machine-global lock `${TMPDIR:-/tmp}/cqlite-worker-supervisor.lock`
+  (#3549)**, because the two paths are invisible to each other and a supervisor from an older checkout
+  would otherwise co-run in the same worktree. A LIVE holder there refuses the start with a
+  `LEGACY GLOBAL supervisor lock` message (textually distinct from the per-lane "another instance is
+  already running") — remedy: stop that supervisor or upgrade its checkout past #3467. A holder whose
+  recorded pid is CONFIRMED dead is reclaimed; anything undeterminable (not a directory, no/garbled
+  `pid` file, unreadable) REFUSES rather than proceeding. An explicit `SUPERVISOR_LOCK` skips the check.
+  The guard is deletable once every checkout on the box is at or past #3467 — the condition is recorded
+  at the guard in `scripts/local/worker-supervisor.sh`. (The Claude probe keys on the supervisor's own `-p … --agent flow-lead`
   spawn shape, so a legitimate interactive `claude` REPL or an interactive `claude --agent flow-lead`
   lead session — neither carries `-p` — is not matched.) A
   hold cannot latch it silently: every hold pass re-checks the stop-file and the wall-clock budget,
