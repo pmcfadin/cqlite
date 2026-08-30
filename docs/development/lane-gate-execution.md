@@ -642,6 +642,39 @@ gate is protected when it is not is the exact false assurance this script exists
 in `bootstrap-agent-machine.sh` alongside the other worker-environment guarantees. Until it is there,
 a freshly-provisioned box will refuse (loudly, with the remedy) rather than run an unprotected gate.
 
+### One shape, three times: a value I controlled on one path arrived by another
+
+Worth stating as a family rather than three anecdotes, because each fix looked complete on its own
+and the next instance appeared somewhere the previous fix could not see.
+
+| what was controlled | what supplied it anyway |
+|---|---|
+| the gate's `_tree_excluded` carve-out, narrowed twice | `.gitignore`, via `--exclude-standard` |
+| four guarded summary-refusal sites | a fifth refusal added in an earlier round of this same change |
+| the launcher's caller-side environment deny-list | the **user manager's** environment block, which every `--user` unit inherits |
+
+None of the controls was wrong. Each was simply not the only door, and in every case the second door
+was invisible from the first one's code. The fixes that held were the ones that moved up a level: a
+property test over the enumeration rather than the predicate; one funnel every refusal must pass
+through; an empty environment the wrapper then fills, rather than a list of names to exclude.
+**`env -i` is the environment-shaped version of the same move** — instead of enumerating what must not
+get through, start from nothing and add only what is intended.
+
+Measured both directions, since the mechanism is not obvious: with a variable in the manager's
+environment the gate read it (63 vars in its `/proc/<pid>/environ`); started under `env -i`, absent
+(53 vars). The concrete danger is an opt-out arriving unasked — a manager-set
+`AGENT_GATE_ALLOW_MISSING_FIXTURES` or `CQLITE_ALLOW_FILE_GROWTH` silently relaxes the gate's own
+validation, which is the one thing a certification run must not do quietly.
+
+**Two of this change's own verification attempts failed in ways that looked like passes**, and the
+lesson generalises past this file. Checking the unit's `Environment=` property returned `0` — but we
+never set that property, so it reads empty with or without the fix: a clean number that discriminates
+nothing. And the first `/proc/environ` probe used `AGENT_GATE_WRAPPED`, which **the gate sets itself**
+when it re-execs under `nice`, so it was present in both arms; a short `--only fmt` unit also finished
+and was `--collect`ed before it could be sampled, yielding a `0` that meant *never measured*. Hence
+the regression case treats an unsamplable probe as a **FAILURE, not a skip**: "could not look" must
+never read as "absent" — the same rule this reader applies to its own verdicts, turned on the test.
+
 ### Two channels hid the same subtree, and only a PROPERTY test found the third set of paths
 
 `_tree_excluded` was narrowed twice — jobs 203 and 204 — so the gate's carve-out excuses exact

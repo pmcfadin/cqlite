@@ -1319,6 +1319,60 @@ else
   skip=$((skip+4)); echo "SKIP 4b.115-4b.118 (no user systemd manager on this host)"
 fi
 
+# --- roborev job 211 (High): the USER MANAGER's environment is a third channel ------------------
+# A `--user` transient unit inherits the user manager's environment block, so anything
+# `systemctl --user set-environment` holds reaches the gate. The caller-side deny-list cannot see
+# that door: it stops us FORWARDING AGENT_GATE_* / summary-path variables while the manager can
+# supply the same names. The concrete danger is an opt-out reaching a gate that never asked for it —
+# a manager-set AGENT_GATE_ALLOW_MISSING_FIXTURES or CQLITE_ALLOW_FILE_GROWTH silently relaxes the
+# gate's own validation.
+if grep -qF '/usr/bin/env -i /bin/bash "$ENV_SCRIPT"' "$LAUNCHER"; then
+  ok "4b.121 the unit starts from an EMPTY environment (manager leakage cannot reach the gate)"
+else
+  bad "4b.121 the unit starts from an empty environment" "no env -i; manager variables reach the gate"
+fi
+# Absolute paths, because env -i leaves no PATH to find them with.
+if grep -qF '/usr/bin/env -i /bin/bash' "$LAUNCHER"; then
+  ok "4b.122 env and bash are absolute paths (there is no PATH after env -i)"
+else
+  bad "4b.122 env and bash are absolute paths" "a bare name cannot resolve with an empty PATH"
+fi
+# BEHAVIOURAL, because the structural greps above cannot show the leak is actually closed. Reads the
+# gate process's OWN /proc/<pid>/environ — the unit's `Environment=` property is NOT a discriminator
+# (we never set it, so it reads empty with or without the fix, and would look like a pass).
+# A component long enough to sample is required: `--only fmt` finishes and is --collect'ed before it
+# can be read, and that produced a "0" that meant "never measured" rather than "absent".
+if [ "$HAVE_SYSTEMD" = yes ]; then
+  systemctl --user set-environment GATE_ENV_LEAK_PROBE=iamhere >/dev/null 2>&1
+  _lt="$TMP/envleak.txt"
+  _lo=$(bash "$LAUNCHER" --summary "$_lt" --log "$TMP/envleak.log" -- --only roborev-lints 2>&1)
+  _lu=$(printf '%s' "$_lo" | sed -n 's/^unit:  *//p'); [ -n "$_lu" ] && echo "$_lu" >> "$UNITS_FILE"
+  _cg="/sys/fs/cgroup/user.slice/user-$(id -u).slice/user@$(id -u).service/app.slice/$_lu.service/cgroup.procs"
+  _gp=""
+  for _i in $(seq 1 60); do
+    _gp=$(head -1 "$_cg" 2>/dev/null)
+    [ -n "$_gp" ] && [ -r "/proc/$_gp/environ" ] && break
+    _gp=""
+  done
+  if [ -n "$_gp" ]; then
+    _n=$(tr '\0' '\n' < "/proc/$_gp/environ" 2>/dev/null | grep -c '^GATE_ENV_LEAK_PROBE=' || true)
+    if [ "$_n" = 0 ]; then
+      ok "4b.123 a manager-only variable is ABSENT from the gate's own environ (pid $_gp)"
+    else
+      bad "4b.123 a manager-only variable is absent from the gate's environ" \
+          "GATE_ENV_LEAK_PROBE reached the gate $_n time(s) — the leak is open"
+    fi
+  else
+    # An unsamplable probe is a FAILURE, not a skip: "could not look" must never read as "absent".
+    bad "4b.123 a manager-only variable is absent from the gate's environ" \
+        "MEASUREMENT DID NOT HAPPEN — no readable /proc/<pid>/environ for unit '$_lu'"
+  fi
+  [ -n "$_lu" ] && systemctl --user stop "$_lu" >/dev/null 2>&1
+  systemctl --user unset-environment GATE_ENV_LEAK_PROBE >/dev/null 2>&1
+else
+  skip=$((skip+1)); echo "SKIP 4b.123 (no user systemd manager on this host)"
+fi
+
 # --- roborev job 209: .gitignore is a SECOND channel for subtree blindness ----------------------
 # `_tree_excluded` was narrowed twice (jobs 203, 204) so the gate's carve-out excuses exact artifacts
 # rather than whole subtrees. But tree-integrity enumerates untracked files with

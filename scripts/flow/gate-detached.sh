@@ -790,11 +790,27 @@ fi
   echo "gate-detached: cannot truncate the log at '$LOGFILE' just before launch." >&2
   exit 1
 }
+# `env -i` IS LOAD-BEARING, AND THE DENY-LIST ALONE DID NOT COVER THIS (roborev job 211, High).
+# A `--user` transient unit inherits the USER MANAGER's environment block — whatever
+# `systemctl --user set-environment` / `import-environment` put there, plus whatever the manager
+# started with. That is a channel the caller-side deny-list below cannot touch: it stops us
+# FORWARDING `AGENT_GATE_WRAPPED`, `AGENT_GATE_SUMMARY_FILE` and friends, while the manager could
+# supply the very same variables and change or short-circuit the gate's validation.
+#
+# Measured, both directions, on this host: with a manager variable set, the unit read it
+# (`LEAK_PROBE=iamhere`); with `env -i` in front, the same probe read `ABSENT`.
+#
+# So the unit starts from an EMPTY environment and the wrapper script restores the caller's — which
+# is the only environment we intend the gate to see. Absolute paths for `env` and `bash` because
+# there is no PATH to find them with. This is the third channel in this change where a value I
+# controlled on one path arrived by another (the others: .gitignore vs `_tree_excluded`, and a
+# summary refusal I had added myself bypassing four guards) — the deny-list was never wrong, it was
+# just not the only door.
 if ! systemd-run --user --unit="$UNIT" --collect --same-dir --quiet \
      --property=StandardInput=null \
      --property="StandardOutput=append:$LOGFILE" \
      --property="StandardError=append:$LOGFILE" \
-     bash "$ENV_SCRIPT" "${GATE_ARGS[@]}"; then
+     /usr/bin/env -i /bin/bash "$ENV_SCRIPT" "${GATE_ARGS[@]}"; then
   echo "gate-detached: systemd-run failed to start unit $UNIT (see $LOGFILE)" >&2
   exit 1
 fi
