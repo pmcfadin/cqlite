@@ -113,6 +113,11 @@ pub mod csv_container;
 #[path = "golden_schema.rs"]
 pub mod schema;
 
+/// The dump SHAPES that make a golden non-comparable, and the scan that finds
+/// them (split out of the test target under the campsite rule).
+#[path = "golden_dump_shapes.rs"]
+pub mod dump_shapes;
+
 /// A JSON parse that refuses a duplicate object key, used for BOTH the CLI's own
 /// JSON egress and each golden JSONL line (issue #1491 review finding K2).
 #[path = "golden_strict_json.rs"]
