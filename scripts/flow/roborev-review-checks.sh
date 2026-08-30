@@ -255,83 +255,31 @@ roborev_check_findings() {
   # prose contained the word, under-counting the findings. (Under-counting is the
   # fail-closed direction for the tier-1 gate — fewer markers make a vacuity claim MORE
   # likely to fail — but the count is reported to a human, so it should be right.)
-  # WAS THE BLOCK ACTUALLY MEASURED? Tracked because ONE consumer derives NONE-vs-PRESENT from the
-  # COUNT ALONE (the recheck fallback below), and there a failed measurement's 0 would read as an
-  # AFFIRMATIVE "no findings" — the exact shape #3229 removed elsewhere and #3564 must not
-  # reintroduce. `grep` exit 1 is "no match", a legitimate measurement; only >=1 from awk or >=2
-  # from grep is a FAILURE to measure. Every OTHER consumer has an independent affirmative signal
-  # (the record's structured verdict, or a 0 exit from the reviewer) and uses the count only to
-  # detect a CONTRADICTION, so none of them needs this flag.
-  block_measured=1
-  if ! { awk 'BEGIN { inblock = 0 }
+  { awk 'BEGIN { inblock = 0 }
          tolower($0) ~ /^[[:space:]]*#{1,4}[[:space:]]*(review[[:space:]]+)?findings?/ { inblock = 1; next }
          tolower($0) ~ /^[[:space:]]*findings?[[:space:]]*:/ { inblock = 1; next }
          tolower($0) ~ /^[[:space:]]*#{1,4}[[:space:]]*summary/ { inblock = 0 }
          tolower($0) ~ /^[[:space:]]*summary[[:space:]]*:/ { inblock = 0 }
-         inblock { print }' "$LOG" 2>/dev/null; } >"$FINDINGS_BLOCK_FILE"; then
-    block_measured=0
-  fi
-  # NOT `grep | wc -l` IN ONE COMMAND SUBSTITUTION: the pipeline would run in a SUBSHELL, so its
-  # `PIPESTATUS` is unreadable here and grep's failure would be indistinguishable from "no match".
-  # grep runs on its own, its status is captured explicitly, and the count is taken from its output.
-  SEVERITY_MARKER_RE='\*\*severity\*\*[[:space:]]*:[[:space:]]*(critical|high|medium|low)|\[(critical|high|medium|low)\]|(^|[^[:alnum:]])(critical|high|medium|low): '
-  grep_rc=0
-  block_markers_raw=$(grep -oiE "$SEVERITY_MARKER_RE" "$FINDINGS_BLOCK_FILE" 2>/dev/null) || grep_rc=$?
-  if [ "$grep_rc" -ge 2 ]; then
-    block_measured=0
-  fi
-  if [ -z "$block_markers_raw" ]; then
-    block_marker_count=0
-  else
-    block_marker_count=$(printf '%s\n' "$block_markers_raw" | wc -l | tr -d '[:space:]')
-  fi
-  # ===== AND THE SAME SCAN OVER THE WHOLE TRANSCRIPT — FOR THE RECHECK FALLBACK ONLY =====
-  # (roborev round 1, High.) A HEADERLESS findings review has no `Findings` heading, so the block
-  # extraction above yields NOTHING for it — and `review-completed`'s allow-list deliberately ACCEPTS
-  # that shape (a bare `**Severity**:` line, `[High]`, `Medium:`), because it was widened to stop
-  # false-FAILing genuine reviews from agents that emit it. So "0 markers in the block" does NOT mean
-  # "no findings": for a headerless review it means "no block was found", and the recheck fallback
-  # would have read that as an AFFIRMATIVE `NONE` and PASSED a findings-bearing recheck. That is
-  # THIS ISSUE'S OWN DEFECT one layer down — a permissive branch reached by an unmeasured state.
+         inblock { print }' "$LOG" 2>/dev/null || true; } >"$FINDINGS_BLOCK_FILE"
+  block_marker_count=$({ grep -oiE '\*\*severity\*\*[[:space:]]*:[[:space:]]*(critical|high|medium|low)|\[(critical|high|medium|low)\]|(^|[^[:alnum:]])(critical|high|medium|low): ' "$FINDINGS_BLOCK_FILE" 2>/dev/null || true; } | wc -l | tr -d '[:space:]')
+  # THE `:-0` DEFAULT IS THE FAIL-CLOSED DIRECTION, verified rather than assumed (#3229
+  # round-10 sweep audit of every `${VAR:-default}` in these three files). A fail-open default
+  # masking a failed measurement is exactly how the `${_census_end:-$_census_start}` bound
+  # degraded a broken `awk` into a 1-line scan, so each such default has to be shown to fall the
+  # STRICT way. Here it does: a failed `awk`/`grep` yields 0 markers, 0 markers makes
+  # `findings:` read NONE rather than PRESENT, and NONE is what makes `vacuity-tier1` treat the
+  # "no code changes" phrase as a VACUITY CLAIM and HARD FAIL. PRESENT is the permissive value
+  # (it downgrades tier 1 to an advisory NOTICE), and an unmeasurable block can never produce it.
   #
-  # This count is used ONLY to decide whether `NONE` is SAYABLE, never to report PRESENT: a marker
-  # outside a findings block is ambiguous by construction — a headerless finding and a clean review
-  # QUOTING a severity token look identical, which is precisely why the block scan exists (a
-  # whole-transcript scan was rejected on #2964 round 5 for producing false PRESENT). So the
-  # ambiguity resolves to UNKNOWN, which FAILS, rather than to either verdict.
-  #
-  # SCOPED TO THE RECHECK BRANCH DELIBERATELY. Every other branch has an INDEPENDENT affirmative
-  # signal for cleanliness (the record's structured `verdict`, or a 0 exit from a reviewer that ran)
-  # and uses the block count only to detect a CONTRADICTION; widening those to the whole transcript
-  # would make a quoted severity word INCONSISTENT and false-FAIL ordinary clean reviews. The recheck
-  # fallback is the one branch with NO independent signal, so it is the one that must not guess.
-  transcript_measured=1
-  transcript_grep_rc=0
-  transcript_markers_raw=$(grep -oiE "$SEVERITY_MARKER_RE" "$LOG" 2>/dev/null) || transcript_grep_rc=$?
-  if [ "$transcript_grep_rc" -ge 2 ]; then
-    transcript_measured=0
-  fi
-  if [ -z "$transcript_markers_raw" ]; then
-    transcript_marker_count=0
-  else
-    transcript_marker_count=$(printf '%s\n' "$transcript_markers_raw" | wc -l | tr -d '[:space:]')
-  fi
-  # THE `:-0` DEFAULT, AND WHY IT IS NO LONGER SELF-JUSTIFYING (#3229 round 10, revised #3564).
-  # The original argument was that the strict direction is guaranteed BY THE DEFAULT ITSELF: a
-  # failed `awk`/`grep` yields 0 markers, 0 markers makes `findings:` read NONE, and NONE is what
-  # makes `vacuity-tier1` treat a "no code changes" phrase as a VACUITY CLAIM and HARD FAIL —
-  # PRESENT being the permissive value there (it downgrades tier 1 to an advisory NOTICE).
-  #
-  # THAT ARGUMENT IS NOW ONLY HALF THE PICTURE, and recording why matters more than the default.
-  # Since #3564 `findings:` gates the terminal verdict on its own, and there **NONE is the
-  # PERMISSIVE value** — so for that consumer a failed measurement's 0 falls the WRONG way, and no
-  # choice of default fixes it: 0 and "unmeasurable" are the same value. The direction cannot be
-  # bought from a default, so it is bought from a SEPARATE SIGNAL — `block_measured` above, which
-  # the recheck fallback (the only consumer deciding NONE-vs-PRESENT from the count alone) requires
-  # before it will report NONE. THE LESSON, since this justification has now been wrong once: a
-  # fail-closed argument for a default is only valid for the CONSUMERS THAT EXISTED WHEN IT WAS
-  # WRITTEN — adding a consumer with the opposite polarity silently invalidates it. Re-derive it
-  # when you add one.
+  # RE-DERIVED FOR #3564, because that issue made `findings:` gate the terminal verdict — where
+  # `NONE` is the PERMISSIVE value, the opposite polarity to tier 1. The argument SURVIVES, but
+  # only because of how the fallback below is built: `NONE` is reachable ONLY from an affirmative
+  # STRUCTURED verdict, never from a marker count, so no consumer derives `NONE` from this `0`.
+  # An intermediate version of #3564 DID derive `NONE` from the count on the recheck path, which
+  # invalidated this paragraph outright (a failed measurement would have read as "no findings" for
+  # a merge-gating key) — recorded because the invalidation was silent and the argument still LOOKED
+  # sound. THE STANDING RULE: a fail-closed argument for a default is valid only for the consumers
+  # that existed when it was written. Re-derive it whenever you add one.
   block_marker_count=${block_marker_count:-0}
 
   verdict_findings="unknown"
@@ -399,31 +347,39 @@ roborev_check_findings() {
       # NONE from a COUNT OF ZERO, so an UNMEASURABLE block must be UNKNOWN (which now fails) and
       # never NONE. A positive verdict requires an affirmative measurement.
       if [ -n "${RECHECK_JOB:-}" ]; then
-        # AN EMPTY TRANSCRIPT MEASURED NOTHING, so it cannot report NONE. On a recheck the transcript
-        # IS the record's review text, and a record carrying none leaves it empty — for which "no
-        # severity markers found" is TRUE and MEANINGLESS. `review-completed` already FAILs this run
-        # (an empty transcript carries no terminal verdict marker), so this is defence in depth
-        # rather than the only guard; it is here because the permissive value must not be reachable
-        # from an absent measurement AT ALL. A guard that is correct only because a neighbouring
-        # check happens to fail first is the exact coupling #3564 removed one key over.
-        if [ ! -s "$LOG" ]; then
-          FINDINGS="UNKNOWN"
-        elif [ "$block_measured" -eq 0 ] || [ "$transcript_measured" -eq 0 ]; then
-          FINDINGS="UNKNOWN"
-          DETAILS+=("ERROR: findings: this is a --recheck-job of a record with no structured 'verdict' field, so the findings state must be re-asserted from the record's own review text — and that text COULD NOT BE MEASURED (an extraction or marker scan itself failed, which is distinct from finding no markers). UNKNOWN, which cannot certify a PASS: a pass may not rest on a measurement that did not happen. Transcript: $LOG")
-        elif [ "$block_marker_count" -gt 0 ]; then
+        # ===== PROSE CAN EVIDENCE FINDINGS. IT CANNOT EVIDENCE CLEANLINESS. =====
+        # (#3564, after two review rounds each finding a review SHAPE the previous recogniser
+        # missed.) A recheck has no reviewer, so `roborev-exit` is `SKIP` and the arms below —
+        # which are keyed on the reviewer's EXIT CODE — cannot answer. The record's review text is
+        # the only other evidence, and the asymmetry between the two directions is total:
+        #
+        #   a severity marker INSIDE a findings block  =>  POSITIVE evidence of findings. Sayable.
+        #   NO marker found                            =>  NOT evidence of cleanliness. Never NONE.
+        #
+        # WHY THE SECOND DIRECTION IS UNPROVABLE FROM PROSE, which is why this is not a third
+        # recogniser: `review-completed` accepts a `## Summary` heading ALONE as a completed
+        # review. So a findings review whose findings are prose, under no `Findings` heading and
+        # with no severity marker, is INDISTINGUISHABLE from a clean one — measured, not supposed:
+        # a real clean review's text is `No issues found.\n\nSummary: ...` (job 154), carrying no
+        # `Findings` heading either. Every candidate recogniser (a heading, a marker anywhere, a
+        # non-empty block) admits some findings-bearing shape, so the list never closes. That is
+        # this repository's #3312 lesson applied here: REMOVE THE CHANNEL, do not pick a rarer
+        # delimiter. The wrapper's own facts tool says the same thing — the structured field
+        # "must win wherever it exists", and a transcript regex is "a prose heuristic".
+        #
+        # SO `NONE` IS REACHABLE ONLY FROM THE STRUCTURED `verdict` (the branches above), AND THAT
+        # COSTS NOTHING, measured: `roborev show --json` SYNTHESISES a verdict letter from the
+        # `reviews.verdict_bool` column for EVERY record — `P` for a clean review (job 154,
+        # verdict_bool=1) and `F` for a findings-bearing one (job 162, verdict_bool=0); the
+        # `review_jobs` table has no verdict column at all. So a real recheck of a clean job takes
+        # the structured path and still PASSes (the #3312 break-glass is intact), and THIS branch
+        # is a DEFENSIVE path for a payload shape no observed record produces. Making a defensive
+        # path fail closed is free; making it guess is how a merge gate passes over live findings.
+        if [ "$block_marker_count" -gt 0 ]; then
           FINDINGS="PRESENT ($block_marker_count)"
-        elif [ "$transcript_marker_count" -gt 0 ]; then
-          # A SEVERITY MARKER OUTSIDE ANY FINDINGS BLOCK: either a HEADERLESS findings review (which
-          # `review-completed` accepts as a valid shape) or a clean review QUOTING a severity token.
-          # Indistinguishable here, so neither verdict is sayable — and `NONE` above all, which would
-          # PASS a findings-bearing recheck. UNKNOWN is also stricter than PRESENT for the
-          # `vacuity-tier1` gate, which treats UNKNOWN as claiming cleanliness and PRESENT as an
-          # exemption, so this choice is fail-closed in both consumers.
-          FINDINGS="UNKNOWN"
-          DETAILS+=("ERROR: findings: this is a --recheck-job of a record with no structured 'verdict' field, so the findings state rests entirely on the record's review text — and that text carries $transcript_marker_count severity marker(s) that are OUTSIDE any findings block. A HEADERLESS findings review (a bare '**Severity**:' line, '[High]', 'Medium:' — shapes review-completed accepts) and a CLEAN review that merely QUOTES a severity token are indistinguishable from here, so the findings state is UNKNOWN and cannot certify a PASS. Do NOT read this as 'no findings'. Remedy: read the review text yourself ($LOG) — if it is genuinely clean, re-review rather than recheck, so the run rests on a reviewer's own exit status instead of a reconstruction.")
         else
-          FINDINGS="NONE"
+          FINDINGS="UNKNOWN"
+          DETAILS+=("ERROR: findings: this is a --recheck-job of a record carrying NO structured 'verdict' field, and no severity marker was found in a findings block of its review text. That is UNKNOWN, NOT 'no findings': review-completed accepts a bare '## Summary' heading as a completed review, so a findings review whose findings are prose is indistinguishable from a clean one, and prose can therefore never establish CLEANLINESS. It cannot certify a PASS. This is also an UNEXPECTED payload shape — 'roborev show --json' synthesises a verdict letter ('P'/'F') from reviews.verdict_bool for every observed record — so suspect a roborev version or payload change first. Remedy: re-review rather than recheck, so the verdict rests on a reviewer's own exit status. Transcript: $LOG")
         fi
       elif [ "$ROBOREV_EXIT" = "PASS" ]; then
         if [ "$block_marker_count" -gt 0 ]; then

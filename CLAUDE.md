@@ -829,15 +829,21 @@ implement (TDD) → --lite each fix round (summary-file redirect)
   keeps the break-glass alive: a recheck of a record with no structured `verdict` field used to read
   `UNKNOWN` (its branch was keyed on the reviewer's exit code, and there is no reviewer), which would
   have false-FAILed EVERY clean recheck — so a recheck now re-asserts findings from the record's own
-  review text, scoped to the findings block, and says `UNKNOWN` — never `NONE` — whenever that
-  reconstruction cannot support a positive claim: an empty/unmeasurable transcript, **or a severity
-  marker sitting OUTSIDE any findings block**. That last case is the fix's own defect class one layer
-  down, caught in review: `review-completed` deliberately ACCEPTS a HEADERLESS findings review (a bare
-  `**Severity**:` line, `[High]`, `Medium:`), for which the block extraction finds nothing — so "0
-  markers in the block" meant "no block", not "no findings", and read as an affirmative `NONE`. `NONE`
-  is now sayable only when the count is zero across the WHOLE transcript; a marker outside a block is
-  ambiguous (headerless finding vs a clean review QUOTING a severity token) and ambiguity resolves to
-  the failing value, never to either verdict. **The generalisation to carry elsewhere: DELEGATING A KEY'S FAILURE TO ITS NEIGHBOUR IS A
+  review text — but ONLY in the direction prose can actually evidence. **PROSE CAN EVIDENCE FINDINGS;
+  IT CANNOT EVIDENCE CLEANLINESS**, so a marker in a findings block yields `PRESENT` while its ABSENCE
+  yields `UNKNOWN`, never `NONE`. `NONE` is reachable only from the record's STRUCTURED `verdict`
+  letter. **Two review rounds each found a review SHAPE the previous recogniser missed** — a HEADERLESS
+  findings review (no `Findings` heading, which `review-completed` deliberately accepts), then a
+  findings BLOCK with no recognised severity marker — and the class provably does not close, because
+  `review-completed` accepts a bare `## Summary` heading as a completed review: a findings review whose
+  findings are prose is then INDISTINGUISHABLE from a clean one, whose real text is
+  `No issues found.\n\nSummary: …` with no `Findings` heading either. That is #3312's lesson applied
+  one directory over: **REMOVE THE CHANNEL, do not pick a rarer delimiter** — a recogniser over
+  author-controlled prose never closes. **And it costs nothing, measured rather than assumed**:
+  `roborev show --json` SYNTHESISES the verdict letter from the `reviews.verdict_bool` column for every
+  observed record (`P` clean / `F` findings; `review_jobs` has no verdict column), so a real clean
+  recheck takes the structured path and the break-glass is intact, and the verdict-less branch is
+  defensive for a payload shape nothing observed emits. **The generalisation to carry elsewhere: DELEGATING A KEY'S FAILURE TO ITS NEIGHBOUR IS A
   LATENT FALSE PASS** — the coupling is invisible while one event populates both keys and evaporates in
   the first mode where it does not, so ask of every key *what fails the run if THIS key alone goes bad*.
   **And a fail-closed argument for a `${VAR:-default}` is only valid for the consumers that existed when

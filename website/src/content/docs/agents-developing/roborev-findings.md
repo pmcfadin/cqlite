@@ -623,19 +623,33 @@ terminal `RESULT` — `NOTHING-TO-REVIEW` included — is a failed review round 
    the record's own review text (the transcript in that mode), scoped to the findings block, and reports
    `UNKNOWN` — never `NONE` — whenever that reconstruction cannot support a positive claim.
 
-   **And that reconstruction had the same defect one layer down, caught in review.** `review-completed`
-   deliberately ACCEPTS a **headerless** findings review — a bare `**Severity**:` line, `[High]`,
-   `Medium:` — because its allow-list was widened to stop false-FAILing genuine reviews from agents that
-   emit that shape. The findings-block extraction needs a heading, so for such a transcript the block is
-   EMPTY: "0 markers in the block" meant *"no block was found"*, not *"no findings"*, and the fallback
-   read it as an affirmative `NONE` and passed a findings-bearing recheck. `NONE` is now sayable only
-   when the marker count is zero across the **whole transcript** as well. A marker sitting OUTSIDE any
-   findings block stays `UNKNOWN`, because a headerless finding and a clean review *quoting* a severity
-   token are indistinguishable — and a whole-transcript scan was rejected on #2964 round 5 for exactly
-   the false-`PRESENT` this refuses to guess at. **Ambiguity resolves to the failing value, never to
-   either verdict**, and the widened scan is scoped to this one branch: every other branch has an
-   independent affirmative signal (a structured verdict, or a reviewer's 0 exit) and uses the block
-   count only to detect a contradiction, so widening those would false-FAIL ordinary clean reviews.
+   **And that reconstruction was itself unsound — two review rounds proved it, and the fix was to
+   DELETE it rather than patch it a third time.** Round 1: `review-completed` deliberately ACCEPTS a
+   **headerless** findings review (a bare `**Severity**:` line, `[High]`, `Medium:`), for which the
+   findings-block extraction finds nothing — so "0 markers in the block" meant *"no block was found"*,
+   not *"no findings"*, and read as an affirmative `NONE`. Round 2: a `## Findings` block whose findings
+   carry **no recognised severity marker** leaves the block non-empty and the count at zero, defeating
+   the round-1 fix too.
+
+   **The class provably does not close.** `review-completed` accepts a bare `## Summary` heading as a
+   completed review, so a findings review whose findings are prose — no `Findings` heading, no severity
+   marker — is a *valid* completed review reporting findings, and it is textually indistinguishable from
+   a clean one, whose real text is `No issues found.\n\nSummary: …` with no `Findings` heading either.
+   Any recogniser over that prose admits some findings-bearing shape. This is **#3312's umbrella lesson
+   applied one directory over: remove the channel, do not pick a rarer delimiter** — and the wrapper's
+   own facts tool already said it, that the structured field "must win wherever it exists" and a
+   transcript regex is "a prose heuristic".
+
+   So the direction is **asymmetric and permanent**: a severity marker inside a findings block is
+   positive evidence **of findings** (`PRESENT`); its absence is **not** evidence of cleanliness
+   (`UNKNOWN`). **`NONE` is reachable only from the structured `verdict` letter.** And that costs
+   nothing, **measured rather than assumed**: `roborev show --json` synthesises that letter from the
+   `reviews.verdict_bool` column for **every** observed record — `P` for a clean review (job 154,
+   `verdict_bool=1`), `F` for a findings-bearing one (job 162, `verdict_bool=0`) — while the
+   `review_jobs` table has no verdict column at all. A real recheck of a clean job therefore takes the
+   structured path and still PASSes, so the #3312 break-glass is intact, and the verdict-less branch is
+   **defensive**, for a payload shape no observed record produces. Making a defensive path fail closed
+   is free; making it guess is how a merge gate passes over live findings.
 
    **Two transferable lessons.** (1) *Delegating a key's failure to its neighbour is a latent false PASS* —
    the coupling is invisible while both keys are populated by the same event and evaporates in the first mode
