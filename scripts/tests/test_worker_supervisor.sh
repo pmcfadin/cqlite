@@ -4959,6 +4959,48 @@ sv_mutant_override() {
   return 0
 }
 
+# sv_mutant_override_pairs <out> <fn> <from> <to> [<from> <to> ...] — the same ONE-FUNCTION override as
+# `sv_mutant_override`, with N single-line substitutions instead of one (#3549, roborev job 206 F1).
+# Some fixes are TWO statements — a pin, and the verification that the pin took — and the HARM
+# direction only returns when BOTH are gone. That contrast needs both mutations in ONE body: two
+# separate overrides of the same function would leave only the last definition standing, silently
+# discarding the first mutation and measuring the wrong thing. Every pair carries the same premise
+# discipline as the single form: each `from` must occur EXACTLY ONCE in the shipped body, the body must
+# have been extractable, and the result must parse.
+sv_mutant_override_pairs() {
+  local out="$1" fn="$2"; shift 2
+  local body mutated hits from to
+  body="$(sed -n "/^$fn()/,/^}/p" "$SUPERVISOR")"
+  if [[ -z "$body" || "$body" != *"$fn() {"* ]]; then
+    fail "mutant-premise ($fn): the shipped function text could not be extracted from $SUPERVISOR; the contrast would measure nothing"
+    return 1
+  fi
+  mutated="$body"
+  while (( $# >= 2 )); do
+    from="$1"; to="$2"; shift 2
+    hits="$(printf '%s\n' "$body" | grep -cF -- "$from" || true)"
+    if [[ ! "$hits" =~ ^[0-9]+$ ]] || [[ "$hits" != 1 ]]; then
+      fail "mutant-premise ($fn): [$from] occurs [$hits] time(s) in the shipped function, expected 1 — the source moved and this mutant would not be the pre-fix form"
+      return 1
+    fi
+    mutated="${mutated//"$from"/"$to"}"
+  done
+  if (( $# != 0 )); then
+    fail "mutant-premise ($fn): an odd number of substitution arguments — a from/to pair is incomplete"
+    return 1
+  fi
+  if [[ "$mutated" == "$body" ]]; then
+    fail "mutant-premise ($fn): the substitutions changed nothing"
+    return 1
+  fi
+  printf '%s\n' "$mutated" >>"$out"
+  if ! bash -n "$out" 2>/dev/null; then
+    fail "mutant-premise ($fn): the mutant override does not parse"
+    return 1
+  fi
+  return 0
+}
+
 # THE ERREXIT DRIVES (#3549, roborev job 201 F3). `inherit_errexit` is what makes a caller's `set -e`
 # reach INSIDE the `$( )` the guard wraps the classifier in — without it bash does not propagate errexit
 # into a command substitution, which is the only reason a `shopt -p` on a disabled option (non-zero in
@@ -7033,6 +7075,261 @@ test_legacy_lock_neutralises_inherited_glob_state() {
 }
 
 t test_legacy_lock_neutralises_inherited_glob_state
+
+# ---------------------------------------------------------------------------
+# Test 47h (#3549, roborev job 206 F1): THE NEUTRALISATION IS VERIFIED, NOT ASSUMED.
+#
+# THE DEFECT. Test 47f pins the inherited glob/match state the shape check depends on — but it pinned
+# it and never MEASURED that the pin took. `unset GLOBIGNORE` FAILS when the caller made the variable
+# `readonly` (measured: rc=1, value intact, shell alive), and the unchecked spelling then walked on into
+# the enumeration with the filter STILL ACTIVE: an extra entry hidden, a FOREIGN directory classified as
+# the canonical `{pid}` shape, and `rm -f … && rmdir …` printed for it. A verdict from an unverified
+# premise, and the verdict at risk is the destructive one — this issue's own rule (a positive verdict
+# requires an affirmative measurement) one level further in.
+#
+# THE ORDER IS PART OF THE FIX: the check precedes every other pin, so the bail-out path has changed
+# neither an option nor a variable and there is no restore to get right on the way out.
+#
+# THE STATE IS SET IN THE DRIVER, never in the shipped script — a `readonly` assignment in the LAUNCHING
+# shell, which is what a wrapper sourcing the supervisor really looks like.
+# ---------------------------------------------------------------------------
+test_legacy_lock_verifies_its_own_neutralisation() {
+  local d tmp lane legacy dead out rc body ovr mout prelude gi_probe un_probe before after needle pre
+  d="$(new_case_dir)"
+  common_env "$d"
+  tmp="$d/tmp"; lane="lane3549ronly$$"
+  mkdir -p "$tmp"
+  legacy="$tmp/cqlite-worker-supervisor.lock"
+
+  fixture_bg sleep 0.1
+  dead=$FIXTURE_LAST_PID
+  fixture_wait "$dead"
+  mkdir -p "$legacy"
+  printf '%s\n' "$dead" >"$legacy/pid"
+  : >"$legacy/other"
+  prelude="readonly GLOBIGNORE=$(printf '%q' "$legacy/other")"
+
+  # ---- PREMISE 1: in this shell the neutralisation really is REFUSED. Without this the case could pass
+  # against the unfixed code for the most boring reason available — an `unset` that quietly worked.
+  un_probe="$(bash -c 'eval "$1"; if unset GLOBIGNORE 2>/dev/null; then printf "unset-took"; else printf "unset-refused"; fi; printf ":%s" "${GLOBIGNORE-UNSET}"' _ "$prelude")"
+  if [[ "$un_probe" == "unset-refused:$legacy/other" ]]; then
+    pass "neutralisation-verified PREMISE: with a \`readonly GLOBIGNORE\` the unset is REFUSED and the value survives ([$un_probe]) — the filter the classifier believes it removed is still there"
+  else
+    fail "neutralisation-verified-premise-unset: probe=[$un_probe], expected unset-refused:$legacy/other — this host does not reproduce the state under test and the case below measures nothing"
+  fi
+  # ---- PREMISE 2: and that surviving filter really does hide the extra entry, ON THIS DIRECTORY.
+  gi_probe="$(bash -c 'eval "$1"; shopt -s dotglob nullglob; e=("$2"/*); printf "%s\n" "${#e[@]}"' _ "$prelude" "$legacy")"
+  if [[ "$gi_probe" == 1 ]]; then
+    pass "neutralisation-verified PREMISE: the surviving GLOBIGNORE hides the extra entry — a bare glob of this directory yields $gi_probe of 2 entries, so the harm below is reachable"
+  else
+    fail "neutralisation-verified-premise-hide: a bare glob under the readonly GLOBIGNORE yielded [$gi_probe] entries, expected 1"
+  fi
+
+  # ---- (1) THE CLASSIFIER REFUSES WITH ITS OWN CAUSE TOKEN, and the guard prints no deletion at all.
+  out="$(legacy_lock_drive_prelude "$prelude" "$tmp" "$lane")"; rc=$?
+  if [[ "$rc" -ne 0 ]] && legacy_refusal_ok "$out" \
+     && [[ "$out" == *"globignore-not-neutralisable"* ]] && [[ "$out" != *"LEFT BEHIND"* ]]; then
+    pass "neutralisation-verified: a caller whose GLOBIGNORE cannot be unset gets a named refusal (globignore-not-neutralisable), NOT a shape verdict computed under a filter that is still active"
+  else
+    fail "neutralisation-verified: rc=$rc out=[$out] — an unneutralisable GLOBIGNORE must refuse with its own cause"
+  fi
+  remedy_lines_structural "globignore-not-neutralisable" "$out" 0
+  if [[ -e "$legacy/other" && -e "$legacy/pid" ]]; then
+    pass "neutralisation-verified: the guard mutated nothing on disk"
+  else
+    fail "neutralisation-verified-mutated: the guard removed something from a lock it does not own"
+  fi
+
+  # ---- (2) THE BAIL-OUT LEAVES THE CALLER'S SHELL EXACTLY AS IT FOUND IT. This is the half a
+  # save/restore gets wrong: a refusal that has already mutated the caller is worse than no pinning at
+  # all, which is why the check sits above every `shopt`/`set` in the block.
+  before="$(bash -c '
+    source "$1"
+    shopt -s extglob nocasematch; shopt -u nullglob
+    readonly GLOBIGNORE="$3"; set -f
+    printf "%s|%s|%s|%s|" "$(shopt -p dotglob || true)" "$(shopt -p extglob || true)" "$(shopt -p nocasematch || true)" "$(shopt -p nullglob || true)"
+    printf "%s|%s\n" "${GLOBIGNORE-UNSET}" "$(case $- in *f*) echo noglob-on ;; *) echo noglob-off ;; esac)"
+  ' _ "$SUPERVISOR" "$legacy" "$legacy/other" 2>&1 | tail -1)"
+  after="$(bash -c '
+    source "$1"
+    shopt -s extglob nocasematch; shopt -u nullglob
+    readonly GLOBIGNORE="$3"; set -f
+    supervisor_legacy_lock_state "$2" >/dev/null
+    printf "%s|%s|%s|%s|" "$(shopt -p dotglob || true)" "$(shopt -p extglob || true)" "$(shopt -p nocasematch || true)" "$(shopt -p nullglob || true)"
+    printf "%s|%s\n" "${GLOBIGNORE-UNSET}" "$(case $- in *f*) echo noglob-on ;; *) echo noglob-off ;; esac)"
+  ' _ "$SUPERVISOR" "$legacy" "$legacy/other" 2>&1 | tail -1)"
+  if [[ -n "$before" && "$before" == "$after" ]]; then
+    pass "neutralisation-verified (restore): the refusal path leaves the caller's options, GLOBIGNORE and noglob exactly as found ([$after]) — it bails out before it has changed anything"
+  else
+    fail "neutralisation-verified-restore: before=[$before] after=[$after] — the bail-out changed the caller's shell state"
+  fi
+
+  # ---- (3) MUTANT CONTRAST: the shipped classifier with the verification defeated, everything else
+  # shipped. The SAME drive must then hand the operator a deletion for the foreign directory.
+  ovr="$d/m-verify.sh"; : >"$ovr"
+  if sv_mutant_override "$ovr" supervisor_legacy_lock_state '  if [[ -n "${GLOBIGNORE:-}" ]]; then' '  if false; then'; then
+    mout="$(legacy_lock_drive_prelude_override "$prelude" "$ovr" "$tmp" "$lane")" || true
+    if [[ "$mout" == *"LEFT BEHIND"* ]] && [[ "$mout" == *"rm -f -- "* ]] \
+       && [[ "$mout" != *"globignore-not-neutralisable"* ]]; then
+      pass "neutralisation-verified MUTANT CONTRAST: with the verification removed, the identical drive believes the unset took, enumerates under the live filter, calls the FOREIGN directory stale and prints a deletion — the harm the check prevents, measured"
+    else
+      fail "neutralisation-verified-mutant: out=[$mout] — the unverified form must be shown to break, or the assert above measures nothing"
+    fi
+  fi
+
+  # ---- (4) STRUCTURAL: the check is ABOVE every other pin. The order is a correctness property (a
+  # bail-out must not have mutated the caller), and it is invisible to a behavioural assert once the
+  # bail-out works, so it is pinned here.
+  body="$(sed -n '/^supervisor_legacy_lock_state()/,/^}/p' "$SUPERVISOR")"
+  needle='if [[ -n "${GLOBIGNORE:-}" ]]; then'
+  pre="${body%%"$needle"*}"
+  if [[ "$pre" != "$body" ]] && [[ "$pre" != *'  set +f'* ]] && [[ "$pre" != *'  shopt -s dotglob nullglob'* ]] \
+     && [[ "$pre" != *'  shopt -u failglob'* ]]; then
+    pass "neutralisation-verified STRUCTURAL: the verification precedes every option pin, so the refusal path cannot have mutated the caller's shell before it returns"
+  else
+    fail "neutralisation-verified-structural-order: an option pin precedes the GLOBIGNORE verification (or the verification is gone) — a bail-out below a mutation leaves the caller changed"
+  fi
+
+  # ---- (5) EVERY OTHER PIN IS VERIFIED TOO, and by its resulting STATE rather than by `shopt`'s exit
+  # status. Driven with a HIDDEN extra entry, which is precisely what an unpinned `dotglob` loses:
+  #   shipped        -> both entries seen, unrecognised shape, no deletion;
+  #   pin removed    -> the pin verification NOTICES and refuses (glob-state-pins-not-verified);
+  #   pin AND its verification removed -> the hidden entry vanishes and the deletion comes back.
+  rm -f "$legacy/other"
+  : >"$legacy/.other"
+  printf '%s\n' "$dead" >"$legacy/pid"
+  out="$(legacy_lock_drive "$tmp" "$lane")"; rc=$?
+  if [[ "$rc" -ne 0 ]] && legacy_refusal_ok "$out" \
+     && [[ "$out" == *"lock-directory-not-exactly-one-pid-file"* ]] && [[ "$out" == *"entries=2"* ]] \
+     && [[ "$out" != *"LEFT BEHIND"* ]]; then
+    pass "pins-verified: with the pins in place a HIDDEN extra entry still counts — entries=2, an unrecognised shape, no deletion"
+  else
+    fail "pins-verified-shipped: rc=$rc out=[$out] — a dotfile beside \`pid\` must be an unexpected entry"
+  fi
+  ovr="$d/m-pin.sh"; : >"$ovr"
+  if sv_mutant_override "$ovr" supervisor_legacy_lock_state '  shopt -s dotglob nullglob' '  :'; then
+    printf '%s\n' "$dead" >"$legacy/pid"
+    mout="$(legacy_lock_drive_override "$ovr" "$tmp" "$lane")" || true
+    if [[ "$mout" == *"glob-state-pins-not-verified"* ]] && [[ "$mout" == *"dotglob!=on"* ]] \
+       && [[ "$mout" != *"LEFT BEHIND"* ]]; then
+      pass "pins-verified MUTANT CONTRAST (pin removed): the verification NOTICES that the pin did not take and refuses (glob-state-pins-not-verified, dotglob!=on) rather than trusting an enumeration made under unconfirmed state"
+    else
+      fail "pins-verified-mutant-pin: out=[$mout] — a pin that did not take must be reported, not assumed"
+    fi
+  fi
+  ovr="$d/m-pin-and-check.sh"; : >"$ovr"
+  if sv_mutant_override_pairs "$ovr" supervisor_legacy_lock_state \
+       '  shopt -s dotglob nullglob' '  :' \
+       '  if [[ -n "$_pins_bad" ]]; then' '  if false; then'; then
+    printf '%s\n' "$dead" >"$legacy/pid"
+    mout="$(legacy_lock_drive_override "$ovr" "$tmp" "$lane")" || true
+    if [[ "$mout" == *"LEFT BEHIND"* ]] && [[ "$mout" == *"rm -f -- "* ]] \
+       && [[ "$mout" != *"glob-state-pins-not-verified"* ]]; then
+      pass "pins-verified MUTANT CONTRAST (pin AND verification removed): the hidden entry disappears from the enumeration, the directory reads as the canonical shape and the operator is handed a deletion — the harm both halves prevent, measured"
+    else
+      fail "pins-verified-mutant-both: out=[$mout] — with the pin and its verification gone the harm must return, or the contrast above measures nothing"
+    fi
+  fi
+
+  rm -rf "$tmp"
+}
+
+t test_legacy_lock_verifies_its_own_neutralisation
+
+# ---------------------------------------------------------------------------
+# Test 47i (#3549, roborev job 206 F2): A NUL BYTE IS AN UNRECOGNISED SHAPE, AND `read` CANNOT SEE IT.
+#
+# THE DEFECT. A bash variable cannot hold a NUL, so `IFS= read -r pid` DISCARDS one silently: the bytes
+# `123<NUL>\n` were accepted as the canonical pid `123`. The pre-#3467 supervisor writes
+# `echo $$ >"$LOCK/pid"` — digits and ONE newline — so a file containing a NUL is not a file it could
+# have written, and the "exact shape" validation that LICENSES PRINTING A DELETION was not exact.
+#
+# THE PROBE IS A BUILTIN ON PURPOSE (`read -r -d ''` terminates on NUL, so a successful read means one
+# is present): `od`/`wc`/`cmp`/`tr` would answer the same question and would reintroduce PATH exposure
+# into a classifier that currently executes NO external command — a property asserted below, because
+# the inherited-state sweep relies on it.
+# ---------------------------------------------------------------------------
+test_legacy_lock_pid_file_with_nul_is_unrecognised() {
+  local d tmp lane legacy dead out rc ovr mout shape probe code body
+  d="$(new_case_dir)"
+  common_env "$d"
+  tmp="$d/tmp"; lane="lane3549nul$$"
+  mkdir -p "$tmp"
+  legacy="$tmp/cqlite-worker-supervisor.lock"
+
+  fixture_bg sleep 0.1
+  dead=$FIXTURE_LAST_PID
+  fixture_wait "$dead"
+  mkdir -p "$legacy"
+
+  # ---- PREMISE: `read` really is lossy here — the staged bytes read back IDENTICAL to a canonical pid
+  # file, which is the whole reason a byte-level probe is needed. Without this the cases below could
+  # pass for the wrong reason (a NUL that never reached the file).
+  printf '%s' "$dead" >"$legacy/pid"; printf '\000' >>"$legacy/pid"; printf '\n' >>"$legacy/pid"
+  probe="$(bash -c 'IFS= read -r p <"$1" || true; printf "%s" "$p"' _ "$legacy/pid")"
+  if [[ "$probe" == "$dead" ]]; then
+    pass "pid-nul PREMISE: \`read\` on the staged \`123<NUL>\\n\` yields exactly [$probe] — indistinguishable from the canonical file, so the loss is real and a builtin byte probe is the only thing that can see it"
+  else
+    fail "pid-nul-premise: read yielded [$probe], expected [$dead] — the fixture is not the lossy shape and the cases below measure nothing"
+  fi
+
+  # ---- (1) ALL FOUR LOSSY SHAPES REFUSE, WITH THE NUL'S OWN CAUSE. A NUL-only file already refused
+  # before this fix, but as `pid-not-well-formed` — one unrecognised shape reported as another.
+  for shape in after-digits before-digits only-nul after-newline; do
+    case "$shape" in
+      after-digits)  printf '%s' "$dead" >"$legacy/pid"; printf '\000' >>"$legacy/pid"; printf '\n' >>"$legacy/pid" ;;
+      before-digits) printf '\000' >"$legacy/pid"; printf '%s\n' "$dead" >>"$legacy/pid" ;;
+      only-nul)      printf '\000' >"$legacy/pid" ;;
+      after-newline) printf '%s\n' "$dead" >"$legacy/pid"; printf '\000' >>"$legacy/pid" ;;
+    esac
+    out="$(legacy_lock_drive "$tmp" "$lane")"; rc=$?
+    if [[ "$rc" -ne 0 ]] && legacy_refusal_ok "$out" \
+       && [[ "$out" == *"pid-file-contains-nul"* ]] && [[ "$out" != *"LEFT BEHIND"* ]]; then
+      pass "pid-nul ($shape): a NUL anywhere in the file is an unrecognised shape (pid-file-contains-nul) and carries no deletion instruction"
+    else
+      fail "pid-nul-$shape: rc=$rc out=[$out] — a pid file containing a NUL is not a file any supervisor wrote"
+    fi
+    remedy_lines_structural "pid-nul-$shape" "$out" 0
+  done
+
+  # ---- (2) MUTANT CONTRAST: with the NUL verdict removed, the two shapes that survive `read` intact
+  # are classified STALE and earn the deletion command.
+  ovr="$d/m-nul.sh"; : >"$ovr"
+  if sv_mutant_override "$ovr" supervisor_legacy_lock_state '  if [[ "$has_nul" == yes ]]; then' '  if false; then'; then
+    printf '%s' "$dead" >"$legacy/pid"; printf '\000' >>"$legacy/pid"; printf '\n' >>"$legacy/pid"
+    mout="$(legacy_lock_drive_override "$ovr" "$tmp" "$lane")" || true
+    if [[ "$mout" == *"state stale $dead"* ]] && [[ "$mout" == *"rm -f -- "* ]] \
+       && [[ "$mout" != *"pid-file-contains-nul"* ]]; then
+      pass "pid-nul MUTANT CONTRAST (after-digits): with the NUL check removed, \`123<NUL>\\n\` classifies as stale $dead and the operator is handed a deletion for a file no supervisor could have written"
+    else
+      fail "pid-nul-mutant-after-digits: out=[$mout] — the pre-fix form must be shown to break"
+    fi
+    printf '%s\n' "$dead" >"$legacy/pid"; printf '\000' >>"$legacy/pid"
+    mout="$(legacy_lock_drive_override "$ovr" "$tmp" "$lane")" || true
+    if [[ "$mout" == *"state stale $dead"* ]] && [[ "$mout" == *"rm -f -- "* ]]; then
+      pass "pid-nul MUTANT CONTRAST (after-newline): a NUL as the whole second line is discarded by the second \`read\` too, so the file passes the single-line test and earns the same deletion"
+    else
+      fail "pid-nul-mutant-after-newline: out=[$mout] — the pre-fix form must be shown to break"
+    fi
+  fi
+
+  # ---- (3) THE PROPERTY THE BUILTIN CHOICE PRESERVES: the classifier executes NO external command, so
+  # none of its verdicts depends on `PATH`. Comment lines are stripped first (the prose legitimately
+  # NAMES the tools that were NOT used, and a check that reds on correct text is the check people learn
+  # to waive); what remains is code, and a bare mention of one of these names in code is a command.
+  body="$(sed -n '/^supervisor_legacy_lock_state()/,/^}/p' "$SUPERVISOR")"
+  code="$(printf '%s\n' "$body" | grep -vE '^[[:space:]]*#' || true)"
+  probe="$(printf '%s\n' "$code" | grep -nEw 'od|wc|cmp|tr|dd|cat|sed|awk|grep|expr|stat|ls|find|ps|env|xargs|head|tail|cut|python3|perl' || true)"
+  if [[ -n "$code" && -z "$probe" ]]; then
+    pass "pid-nul (no external command): the classifier's code names no external tool — the NUL probe is the builtin \`read -r -d ''\`, so the guard's verdicts still cannot be changed by the caller's PATH"
+  else
+    fail "pid-nul-external-command: [$probe] — an external command in the classifier puts its verdicts at the mercy of PATH; use a builtin"
+  fi
+
+  rm -rf "$tmp"
+}
+
+t test_legacy_lock_pid_file_with_nul_is_unrecognised
 
 # ---------------------------------------------------------------------------
 # Test 47g (#3549, roborev job 205 F2): THE EMITTER MUST NOT UNDO THE RENDERERS.
