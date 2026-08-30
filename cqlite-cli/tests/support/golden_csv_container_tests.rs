@@ -311,6 +311,133 @@ fn an_empty_member_with_siblings_is_not_refused_and_is_compared() {
 /// member count comes from the DDL (so the comparison's arity check sees a
 /// dropped member). The bound is `member_can_render_empty`, established per
 /// type from the formatter itself by
+// --- the SEAM: a stringified spelling is not a CSV spelling ---------------
+//
+// `golden_rendering` synthesizes the text the golden WOULD render as, so the
+// decoder can be asked whether that text round-trips. Its scalars come from the
+// golden — and at a `Kinding::Stringified` position `sstabledump` wrote the
+// golden with `writeString(type.getString(v))`, whose blob spelling is the BARE
+// hex. Left untranslated, the empty blob's `""` synthesized an EMPTY body, the
+// node was refused as unrecoverable, and a refused ONE-member node accepts ANY
+// framed body — so the member went uncompared.
+
+/// The synthetic rendering AT A STRINGIFIED POSITION carries the CSV spelling,
+/// not the golden's cell-path spelling.
+///
+/// Expectations: the golden side is the pin (`cassandra-5.0.8`
+/// `BytesSerializer.toString` = `ByteBufferUtil.bytesToHex`, so the empty blob is
+/// `""`); the CSV side is `ValueFormatter`'s `format!("0x{hex}")`, measured
+/// directly below rather than asserted in prose.
+#[test]
+fn a_stringified_blob_renders_as_the_0x_form_the_csv_egress_emits() {
+    use cqlite_core::types::Value as CoreValue;
+    use cqlite_core::util::value_fmt::ValueFormatter;
+
+    // The CSV half of the claim, from the egress itself.
+    assert_eq!(
+        ValueFormatter::format_value(&CoreValue::blob(Vec::new())),
+        "0x"
+    );
+    assert_eq!(
+        ValueFormatter::format_value(&CoreValue::blob(vec![0xde, 0xad])),
+        "0xdead"
+    );
+
+    let set = ty_of("set<blob>");
+    assert_eq!(
+        golden_rendering(&json!([""]), Some(&set), Kinding::Stringified).as_deref(),
+        Some("{0x}"),
+        "the empty blob's cell path is `\"\"`, and the CSV egress renders it `0x`"
+    );
+    assert_eq!(
+        golden_rendering(&json!(["dead", ""]), Some(&set), Kinding::Stringified).as_deref(),
+        Some("{0xdead, 0x}")
+    );
+    // A map KEY is a value the golden always spells stringified (a JSON object key
+    // can only be a string), which is how `compare::compare_map` reads it.
+    assert_eq!(
+        golden_rendering(
+            &json!({"": 7}),
+            Some(&ty_of("map<blob, int>")),
+            Kinding::Natural
+        )
+        .as_deref(),
+        Some("{0x: 7}")
+    );
+    // A UDT entry's key is a FIELD NAME, not a value: never translated.
+    assert_eq!(
+        golden_rendering(
+            &json!({"street": "s", "city": "c", "zip": "z"}),
+            Some(&ty_of("frozen<address>")),
+            Kinding::Natural,
+        )
+        .as_deref(),
+        Some("{street: s, city: c, zip: z}")
+    );
+}
+
+/// The translation is keyed on the POSITION's kinding, not applied blindly —
+/// the same asymmetry `canon_typed` applies (finding M1's rule): only the golden,
+/// and only where `sstabledump` stringified.
+///
+/// At a NATURAL position the golden already carries `BytesType.toJSONString`'s
+/// `0x` form, so translating there would either double the prefix or invent a
+/// spelling; a bare-hex golden there is not a spelling Cassandra emits and stays
+/// verbatim, which is what keeps this from becoming a second, looser notion of
+/// what a blob is spelled as.
+#[test]
+fn the_blob_translation_applies_only_at_a_stringified_position() {
+    let set = ty_of("set<blob>");
+    assert_eq!(
+        golden_rendering(&json!(["0xdead"]), Some(&set), Kinding::Natural).as_deref(),
+        Some("{0xdead}"),
+        "an already-prefixed golden must not gain a second prefix"
+    );
+    assert_eq!(
+        golden_rendering(&json!(["0xdead"]), Some(&set), Kinding::Stringified).as_deref(),
+        Some("{0xdead}"),
+        "`0xdead` is not a spelling `BytesSerializer.toString` can produce"
+    );
+    assert_eq!(
+        golden_rendering(&json!([""]), Some(&set), Kinding::Natural).as_deref(),
+        Some("{}"),
+        "a NATURAL position is left verbatim, so this stays the ambiguous body"
+    );
+    // And a FROZEN map's key comes from `toJSONString`, so it is already prefixed
+    // and is left alone by the same shape guard.
+    assert_eq!(
+        golden_rendering(
+            &json!({"0x61": 7}),
+            Some(&ty_of("frozen<map<blob, int>>")),
+            Kinding::Natural,
+        )
+        .as_deref(),
+        Some("{0x61: 7}")
+    );
+}
+
+/// The consequence at the refusal valve, both ways: with the CSV spelling the sole
+/// empty-blob member is RECOVERABLE and therefore COMPARED, and the decoder reads
+/// the egress's own `{0x}` back into the golden's one member.
+#[test]
+fn a_sole_empty_blob_member_is_recovered_and_not_refused() {
+    let set = ty_of("set<blob>");
+    assert_eq!(
+        super::node_refusal(&json!([""]), Some(&set), Kinding::Stringified),
+        None,
+        "`{{0x}}` splits back into exactly the golden's one member"
+    );
+    assert_eq!(
+        super::decode(&json!([""]), "{0x}", &set, Kinding::Stringified),
+        Ok(json!(["0x"]))
+    );
+    // The same node at a NATURAL position IS refused — the empty body it
+    // synthesizes there splits into zero members.
+    let why = super::node_refusal(&json!([""]), Some(&set), Kinding::Natural)
+        .expect("an empty verbatim member must be refused");
+    assert!(why.contains("splits into 0 member"), "unexpected: {why}");
+}
+
 /// `an_empty_rendering_is_possible_only_for_text` below.
 #[test]
 fn an_empty_container_is_refused_only_where_its_element_can_render_empty() {

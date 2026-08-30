@@ -697,3 +697,95 @@ fn opposing_brackets_in_nested_siblings_refuse_only_the_inner_node() {
         report.diffs
     );
 }
+
+// =======================================================================
+// The SEAM: a stringified spelling reaching the refusal valve
+// =======================================================================
+//
+// `csv_container::golden_rendering` synthesizes the text the golden WOULD render
+// as, so the decoder can be asked whether it round-trips. At a
+// `Kinding::Stringified` position `sstabledump` wrote the golden with
+// `writeString(type.getString(v))`, and the blob spelling there is the BARE hex
+// (`cassandra-5.0.8` `BytesSerializer.toString`), so the EMPTY blob is `""` where
+// the CSV egress renders `0x`. Untranslated, a sole empty-blob member synthesized
+// an empty body, the node was refused — and a refused ONE-member node accepts ANY
+// framed body, so the member went uncompared entirely.
+//
+// No corpus fixture declares a blob at a stringified position today (the census
+// there is `int`/`uuid` partition keys, `bigint`/`decimal`/`double`/`int`/
+// `smallint`/`text`/`tinyint` multicell-set elements and `int`/`text` map keys),
+// so these cases are the only place the seam is exercised — and the only thing
+// standing between it and a silent blind spot the day such a column is added.
+
+/// A NON-FROZEN `set<blob>` (multicell, so its elements are cell paths) whose sole
+/// member is the EMPTY blob: compared, not refused, and a wrong body fails.
+#[test]
+fn a_sole_empty_blob_set_member_is_compared_and_not_refused() {
+    let schema = schema_of("CREATE TABLE t (id int PRIMARY KEY, s set<blob>);", "t");
+    // The `sstabledump` shape: `serializePartitionKey` and the multicell set's
+    // cell `path` are both `writeString(getString(v))`, so `id` is `"1"` and the
+    // empty blob element is `""`.
+    let golden = vec![row(&[("id", json!("1")), ("s", json!([""]))])];
+
+    let report = csv_report(&schema, &golden, "{0x}");
+    assert!(report.diffs.is_empty(), "{:?}", report.diffs);
+    assert_eq!(
+        report.ambiguous_container_cells, 0,
+        "`{{0x}}` splits back into the golden's one member, so nothing is refused"
+    );
+    assert_eq!(
+        report.container_cells, 1,
+        "the cell must be counted as compared container coverage"
+    );
+
+    // The half a refusal used to hide: at a refused ONE-member node ANY framed
+    // body passes, so these two are exactly what the fix buys.
+    for wrong in ["{0xbeef}", "{wrong}"] {
+        let report = csv_report(&schema, &golden, wrong);
+        assert_eq!(
+            report.diffs.len(),
+            1,
+            "{wrong} must diverge from the golden's empty blob: {:?}",
+            report.diffs
+        );
+        assert!(
+            report.diffs[0].contains("0x"),
+            "the divergence must name the golden's `0x`: {:?}",
+            report.diffs
+        );
+    }
+}
+
+/// The other stringified position inside a container: a MAP KEY. The golden always
+/// spells one stringified (a JSON object key can only be a string), which is how
+/// `compare_map` reads it, so the synthetic rendering carries the CSV spelling
+/// there too.
+///
+/// Stated exactly, because it is NOT evidence for the translation: this case
+/// passes with or without it. An empty KEY is recovered either way — `{: 7}` and
+/// `{0x: 7}` both cut at their first top-level `: ` and give the key back — and
+/// `compare_map` translates the golden key itself. What it pins is that the map
+/// path still compares its key end to end after the seam changed; the translation
+/// itself is pinned on the rendering, by
+/// `csv_container::tests::a_stringified_blob_renders_as_the_0x_form_the_csv_egress_emits`.
+#[test]
+fn an_empty_blob_map_key_is_compared_against_the_csv_spelling() {
+    let schema = schema_of(
+        "CREATE TABLE t (id int PRIMARY KEY, m map<blob, int>);",
+        "t",
+    );
+    let golden = vec![row(&[("id", json!("1")), ("m", json!({"": 7}))])];
+
+    let report = csv_report(&schema, &golden, "{0x: 7}");
+    assert!(report.diffs.is_empty(), "{:?}", report.diffs);
+    assert_eq!(report.ambiguous_container_cells, 0);
+    assert_eq!(report.container_cells, 1);
+
+    let report = csv_report(&schema, &golden, "{0xbe: 7}");
+    assert_eq!(
+        report.diffs.len(),
+        1,
+        "a different key must diverge: {:?}",
+        report.diffs
+    );
+}
