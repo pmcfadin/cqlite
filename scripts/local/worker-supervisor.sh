@@ -1499,83 +1499,48 @@ supervisor_pid_liveness() {
   printf 'unknown\n'
 }
 
-# supervisor_identity_names_script <arg>... — 0 if this ARGUMENT VECTOR's executable-or-script argument
-# is `worker-supervisor.sh`. A SUBSTRING MATCH IS NOT AN IDENTITY (#3549, roborev job 192 F1).
+# supervisor_identity_names_script <arg>... — 0 if this ARGUMENT VECTOR names `worker-supervisor.sh` as
+# the program it is RUNNING. ONE rule, used by BOTH the procfs and the `ps` probe.
 #
-# The probe used to corroborate on `worker-supervisor` appearing ANYWHERE in the command line, which is
-# a cheap observable substituted for the property: `vim /x/worker-supervisor.sh`, `grep
-# worker-supervisor …`, a `tail` of its log, or this guard's own diagnostic quoted in a shell all MENTION
-# the path without being the supervisor. The consequence is not cosmetic — the `supervisor` answer is
-# what prints "stop pid N first", so a false corroboration tells an operator to KILL THE WRONG PROCESS.
+# A SUBSTRING MATCH IS NOT AN IDENTITY (#3549, roborev job 192 F1). The probe used to corroborate on
+# `worker-supervisor` appearing ANYWHERE in the command line, which is a cheap observable substituted
+# for the property: `vim /x/worker-supervisor.sh`, `grep worker-supervisor …`, a `tail` of its log, or
+# this guard's own diagnostic quoted in a shell all MENTION the path without being the supervisor. The
+# consequence is not cosmetic — `supervisor` is the answer that prints "stop pid N first", so a false
+# corroboration tells an operator to KILL THE WRONG PROCESS.
 #
-# So the vector is WALKED and the argument that names the RUNNING PROGRAM must be ours:
-#   - an option (`-x`) is skipped, but only AFTER an interpreter has been seen: a leading `-foo` is not
-#     an executable at all (a login shell renders as `-bash`), so it is refused rather than skipped;
-#   - `-c` ENDS the walk with a refusal: what follows is a COMMAND STRING, not a script path, so
-#     `sh -c 'sleep 300' /x/worker-supervisor.sh` — the path as plain data — cannot corroborate;
-#   - a `NAME=VALUE` assignment is skipped after an interpreter (the `env FOO=1 bash …` shape);
-#   - the first remaining operand IS the program. Its basename must be EXACTLY `worker-supervisor.sh`,
-#     else the walk continues ONLY when that basename is a known interpreter (the `bash
-#     /path/worker-supervisor.sh` form: argv[0] is the interpreter, since a `#!/usr/bin/env bash`
-#     shebang leaves `bash <script>` in the final exec's argv). Anything else is somebody else's
-#     program, holding our path as an argument at most, and returns 1.
-# The error direction is deliberate: every case this cannot resolve returns 1, i.e. MORE `unconfirmed`
-# (verify before acting — harmless) and never more `supervisor` (kill it — not harmless).
+# EXACTLY TWO SHAPES CORROBORATE, AND NOTHING IS SKIPPED (#3549, roborev job 194 Medium):
+#   1. argv[0]'s basename is `worker-supervisor.sh`                        — the direct exec;
+#   2. argv[0]'s basename is a known interpreter AND argv[1]'s basename is `worker-supervisor.sh`,
+#      with NOTHING between them — the `bash <script>` form, which is what a `#!/usr/bin/env bash`
+#      shebang leaves in the final exec's argv.
+# Anything else refuses: an option ANYWHERE before the script, a `NAME=VALUE` operand, `-c`, a match in
+# third position or later, an empty vector.
+#
+# WHY THE OPTION-SKIPPING WALK WAS DELETED RATHER THAN TAUGHT OPTION ARITY (#3549, roborev job 194).
+# The previous form skipped options once an interpreter had been seen. That is wrong because SOME
+# OPTIONS CONSUME THE FOLLOWING ARGUMENT: `bash --rcfile /x/worker-supervisor.sh -i` is an INTERACTIVE
+# SHELL whose rcfile happens to be our path, and the walk called it the supervisor — the finding's exact
+# case. The obvious repair is an arity table, and it is the wrong repair: `--rcfile`, `--init-file`,
+# `-O`, `--debugger`, `-c`, `--` and a DIFFERENT set per interpreter, tracked against upstream forever,
+# is a VARIANT LIST THAT DOES NOT CLOSE — the shape CLAUDE.md's standing ruling says to descope rather
+# than keep patching, and this issue has already paid rounds for one. So the rule already written for
+# the `ps` path (two canonical shapes, no skipping) is applied to BOTH paths and the walk is gone.
+#
+# ACCEPTED COST, the same one already accepted for `ps`: `bash -x /x/worker-supervisor.sh` and
+# `env FOO=1 bash /x/worker-supervisor.sh` — genuine supervisors — answer `unconfirmed`. The error
+# direction is the whole point: `unconfirmed` tells an operator to VERIFY (harmless), `supervisor` tells
+# them to STOP A PROCESS (not harmless when it is somebody else's).
+#
+# ONE HELPER FOR BOTH PROBES, DELIBERATELY — two spellings of one rule is the drift hazard, and under
+# this rule there is nothing left to spell differently. `/proc/<pid>/cmdline` is NUL-separated and
+# splits faithfully. `ps -o args=` is a SPACE-JOINED rendering with no escaping, so its split is a
+# REFINEMENT of the true vector (one true argument containing a space appears as several fields), never
+# the vector itself — but a refinement cannot manufacture a match here: extra fields only push the
+# script out of position 1/2, and basename ignores everything before the last `/`. The residual
+# false-positive shape is a SINGLE argument that itself contains a space and ends in
+# `/worker-supervisor.sh`, i.e. a script path that cannot exist as rendered.
 supervisor_identity_names_script() {
-  local arg base interp=no
-  while [[ "$#" -gt 0 ]]; do
-    arg="$1"
-    shift
-    case "$arg" in
-      -c)
-        return 1
-        ;;
-      -*)
-        if [[ "$interp" == yes ]]; then continue; fi
-        return 1
-        ;;
-      *=*)
-        if [[ "$interp" == yes ]]; then continue; fi
-        return 1
-        ;;
-    esac
-    base="${arg##*/}"
-    if [[ "$base" == "worker-supervisor.sh" ]]; then
-      return 0
-    fi
-    case "$base" in
-      bash | sh | dash | zsh | ksh | ksh93 | mksh | env)
-        interp=yes
-        continue
-        ;;
-    esac
-    return 1
-  done
-  return 1
-}
-
-# supervisor_identity_ps_names_script <field>... — the same question asked of `ps -o args=` output, and
-# a STRICTER one, because THAT OUTPUT IS INHERENTLY AMBIGUOUS (#3549, roborev job 192 F1).
-#
-# `ps -o args=` is a SPACE-JOINED RENDERING of the vector with no escaping, so argument boundaries are
-# unrecoverable: a path containing a space is indistinguishable from two arguments. Splitting on
-# whitespace therefore yields a REFINEMENT of the true vector (one true argument may appear as several
-# fields), never the vector itself. `/proc/<pid>/cmdline` is NUL-separated and is the reliable split;
-# this is the fallback for a host without a readable procfs entry (macOS, a hidepid container).
-#
-# DECISION, RECORDED BECAUSE EITHER CHOICE IS DEFENSIBLE: an UNAMBIGUOUS `ps` match IS accepted, and
-# "unambiguous" is narrowed to the two canonical shapes with NO skipping at all —
-#   field 1 = `…/worker-supervisor.sh`, or field 1 = a known interpreter and field 2 =
-#   `…/worker-supervisor.sh`.
-# Nothing else corroborates: an option, an assignment or any other field before the match means the
-# boundaries would have to be GUESSED to reach a verdict, and a guess in the corroborating direction is
-# the finding. So `ps` can FAIL to corroborate a genuine supervisor (`bash -x …/worker-supervisor.sh`
-# answers `unconfirmed` here) and that is the accepted cost — it is a false STOP on wording, not a
-# false instruction to kill. The residual false-positive shape is a SINGLE argument that itself contains
-# a space and ends in `/worker-supervisor.sh`, i.e. a script path that cannot exist as rendered;
-# splitting can only ADD fields, and basename ignores everything before the last `/`, so no other
-# refinement of a true vector turns a non-match into a match here.
-supervisor_identity_ps_names_script() {
   local base
   if [[ "$#" -lt 1 ]]; then
     return 1
@@ -1606,8 +1571,8 @@ supervisor_identity_ps_names_script() {
 # wrong thing, so the advice is only given when the identity was actually corroborated.
 #
 # Corroboration = the process's own command line, PARSED INTO ARGUMENTS, naming `worker-supervisor.sh`
-# as the program it is running — see `supervisor_identity_names_script` for the walk and
-# `supervisor_identity_ps_names_script` for the stricter rule the ambiguous `ps` rendering gets.
+# as the program it is running — see `supervisor_identity_names_script`, the single rule both probes
+# ask (two canonical argv shapes, no option skipping).
 # NEVER CLAIM CORROBORATION THAT WAS NOT OBTAINED, so the three answers are kept distinct:
 # `unconfirmed` means we READ a command line and it did not identify the program as ours (an
 # affirmative non-identification), `unprobeable` means we could not look at all — no readable procfs
@@ -1676,10 +1641,12 @@ supervisor_pid_identity() {
     if [[ -n "$psargs" ]]; then
       # `read -r -a` splits on IFS and performs NO pathname expansion, so an argument containing `*`
       # cannot glob against the cwd here (the reason this is not `set -- $psargs`). The split is a
-      # REFINEMENT of the true vector, never the vector — hence the stricter canonical-shape rule.
+      # REFINEMENT of the true vector, never the vector — which the canonical-shape rule tolerates:
+      # extra fields can only push the script out of position 1/2, so a refinement cannot manufacture a
+      # match. That is why ONE helper serves both probes; see its header for the residual shape.
       local -a fields=()
       read -r -a fields <<<"$psargs"
-      if [[ "${#fields[@]}" -gt 0 ]] && supervisor_identity_ps_names_script "${fields[@]}"; then
+      if [[ "${#fields[@]}" -gt 0 ]] && supervisor_identity_names_script "${fields[@]}"; then
         printf 'supervisor\n'
       else
         printf 'unconfirmed\n'
