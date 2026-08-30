@@ -210,3 +210,64 @@ holds the instrument plus the unit tests that constrain it;
 tests. Deliberately NOT `tests/common/`: that module is included by ~10 other
 test targets, each of which would compile an unused harness and trip `dead_code`
 under `-D warnings`. Lite re-run: PASS (all five components).
+
+## Round 4 — roborev job 219 (3 findings, all fixed)
+
+**Finding 1 (BLOCKER) — the sibling's per-operation caps were tighter than what they replaced.**
+`T2_ACK_LATER: spec(10, 12)` capped each of writes id=1..4 at 12s against four INDEPENDENT 60s
+waits. The "DECLARED EXCEPTION" that justified it (7x60s = 420s nominal vs a 240s kill) is true in
+aggregate and **irrelevant per operation**: under the old code any single contended write could use
+the full 60s provided its siblings were fast, so a 12s cap failed it with ~200s of envelope unused —
+the round-3 blocker relocated. Fixed by separating the two properties:
+
+| stage | before | after | old bound | per-op floor |
+|---|---|---|---|---|
+| (b1..4) per-write ack | `spec(10, 12)` | `spec(60, 60)` + shared `GroupBudget` 60s | 60s each | ✓ 60s |
+| (c) mid-session flush | `spec(35, 40)` | `spec(60, 70)` | 60s | ✓ 60s |
+| (d) EOF exit | `spec(35, 40)` | `spec(60, 70)` | 60s | ✓ 60s |
+
+`GroupBudget` gives each repeated operation `min(per-op ceiling, remaining group)`, so a reduction
+fires ONLY after earlier operations have genuinely consumed the headroom, and `Budget::describe`
+then reports `CLIPPED ... by the SHARED GROUP BUDGET ... contingent on real consumption`. The group
+total is exactly ONE `OLD_BOUND`: the repeats collectively get what any one of them was individually
+allowed, and any one may draw all of it. `SIBLING_STAGE_FLOOR` and the DECLARED EXCEPTION are
+**deleted**, not reworded — the sibling now satisfies the floor directly.
+Post-boot envelope: 60+60+60+20 = 200s <= 230s.
+
+**Finding 2 (BLOCKER) — a new uncalibrated 5s bound.** The read-side pipe collection's hardcoded
+`recv_timeout(5s)` is now bounded by stage (e)'s CALIBRATED budget, itself bounded by
+`clock.remaining()` (wall-clock derived, so it has already absorbed the `wait_timeout`). No fixed
+constant survives. A genuine channel disconnect is distinguished from a timeout.
+
+**Finding 3 (roborev Low; BLOCKER under AC2) — `TotalBudgetExhausted` asserted an unestablishable
+cause.** It claimed "progress was still arriving" on a branch that only establishes the envelope
+expired before the stall window elapsed, and which can fire having observed ZERO lines and ZERO
+artifacts (`last_progress` is initialised at poll entry). It now reports only that ordering, says
+explicitly that it does not require any progress to have been observed, and prints
+`progress observed while polling: NONE` when nothing was seen.
+
+**Baseline anchors re-based on the spec's BINDING rule** (smallest relevant quiet value, because the
+anchor forms an UPPER bound and "slowest" is the permissive direction): `MEASURED_QUIET_T_BOOT`
+29ms -> 11ms, `MEASURED_QUIET_T_ACK` 43ms -> 3ms, `BOOT_QUIET_BASELINE` 100ms -> 75ms (6.8x),
+`ACK_QUIET_BASELINE` 50ms -> 25ms (8.3x). Trade recorded in code: the sibling's quiet t_ack (~42ms)
+now sits above the baseline, so it scales ~1.7 on an unloaded host — harmless (calibration only
+loosens) and preferable to licensing an inert baseline.
+
+### Round-4 verification
+
+* 10/10 green quiet, 0.28s. `RUSTFLAGS="-D warnings" cargo clippy -p cqlite-cli --tests` clean.
+* **New asserts RED-verified** (each plant applied to a COMMITTED tree, run, reverted):
+  per-op ack ceiling back to `spec(10,12)` -> RED (`sibling stage (b1..4) per-write ack is 10s,
+  tighter than the 60s it replaced`); group clip made unconditional -> RED (`nothing has been
+  consumed, so nothing may be clipped`); ack baseline 25->50ms -> RED (`more than 10x the measured
+  quiet t_ack 3ms: the calibration would be inert`); boot baseline ->500ms -> RED; ack baseline 1ms
+  (below the anchor) -> RED. The cap-sum assert also caught a real 235s>230s over-allocation in the
+  first draft of the group fix.
+* **A probe method defect worth recording:** the first baseline-plant round reported two plants
+  "passing" because the probe's `git checkout --` reverted UNCOMMITTED work, so the plants ran
+  against the committed constants. Plants must be applied to a committed tree, and the probe now
+  prints whether the plant actually applied — a `sed` that matches nothing is otherwise
+  indistinguishable from an assert that does not fire.
+* **Product plants re-run at HEAD:** plant A (handler removed) -> stage (c), 0.02s. Plant B (flush
+  hangs) -> stage (d) after **60.08s**, `progress observed while polling: NONE`, still reporting the
+  handler-entry marker was observed 300.427us after SIGINT. The sibling passed in the same run.
