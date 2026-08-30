@@ -122,6 +122,15 @@ and it would make the verdict depend on how long a directory scan took. The lag 
 `SLICE.min(remaining)` (<= 100ms) plus one `count_data_db` walk, which on a loaded host is not
 necessarily quick; the same lag applies to the failure path, which is declared at the next loop top.
 
+**That bound was documented before it was true, twice** (round 9 rescoped the claim; round 11, roborev
+job 236 finding 2, found the rescoped claim still false). Four post-deadline scans were reachable: the
+iteration's progress scan, the artifact `step`'s own scan, `step(ZERO)`'s scan at expiry, and the
+failure path's fold-in — with a fifth in the call sites' panic messages. The claim is not weakened a
+third time; the code now meets it. The poll takes ONE sample of each signal at the top of each
+iteration and hands the artifact count to `step`, so a step reads the sample instead of scanning, the
+expiry check reuses it, and `PollFail` carries it to the call site — which is why the stage-(d) failure
+messages no longer scan for their artifact line either.
+
 **The failure path is the same rule read the other way, and round 9 applied it in only one direction.**
 Evidence can ARRIVE inside the deadline and be CONSUMED after it: the test thread is descheduled
 between a reader thread's `send` and the next `recv`, or between the slice in which the child exited
@@ -129,11 +138,28 @@ and the loop's next look. Declaring a timeout without looking is therefore a fal
 working product AND a message contradicted by its own transcript — the failure quotes the transcript,
 which contains the very marker it says was never observed. So each of the three expiry sites now takes
 a FINAL NON-BLOCKING look before declaring expiry: `wait_for` drains the queued lines through the
-predicate, `poll_with_progress` re-invokes `step(ZERO)` (a `try_wait`, or a directory count — it waits
-for nothing) and folds any unobserved progress into the message, and the read-side collection drains
-delivered buffers. None of them waits, so none can extend the deadline; a timeout is declared only if
-the evidence is still absent afterwards. Asserted per site by three unit tests that queue the evidence,
-let the deadline lapse, and require the stage to succeed.
+predicate, `poll_with_progress` re-invokes `step(ZERO)` (a `try_wait`, or a read of the iteration's
+artifact sample — it waits for nothing), and the read-side collection drains delivered buffers. None of
+them waits, so none can extend the deadline; a timeout is declared only if the evidence is still absent
+afterwards. Asserted per site by three unit tests that queue the evidence, let the deadline lapse, and
+require the stage to succeed.
+
+**DRAINING THE QUEUE WAS NOT ENOUGH, AND THE REASON IS THE DURABLE PART OF THIS DESIGN (round 11,
+roborev job 236 finding 1): DECIDE FROM THE STORE YOU REPORT FROM.** A reader RECORDS each line into
+the shared transcript and only then PUBLISHES it to the queue, so a reader preempted between those two
+operations leaves the queue behind the transcript — and the failure message renders the TRANSCRIPT. A
+queue-only final check therefore narrowed the self-contradiction window rather than closing it: the
+message could still print the very marker the decision had just called absent. The review proposed
+making recording and publication atomic; that attacks the divergence. Deciding absence from the
+transcript makes the divergence IRRELEVANT — the message cannot show evidence the decision did not see,
+because they read the same bytes — and it costs no atomicity, no timestamps and no lock ordering. The
+queue is still drained (it carries the progress counts and the ordering the blocking path depends on)
+and a queued match still counts, since every queued line is in the transcript too. Two consequences
+worth stating: the check is per-wait windowed, because the transcript is cumulative and one earlier
+`OK` would otherwise satisfy all five of test 2's ack waits (a false PASS is worse than a confusing
+diagnostic); and the predicate is applied to a COPY of the window, because running caller code under
+the transcript lock deadlocks any predicate that touches the transcript — which the first version of
+the RED plant did, wedging the test binary for nine minutes.
 
 This is what AC1's "unbounded-but-progress-checked loop" reduces to once the liveness question is
 answered where it actually can be — by stage (c)'s handler-entry marker, not by a bound that progress

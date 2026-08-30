@@ -180,6 +180,14 @@ returned verdict SHALL be bounded — at most one poll slice plus one artifact s
 the fact that an artifact scan is a recursive directory walk that is not necessarily quick on a loaded
 host, SHALL be stated where the claim is made.
 
+**AND THE HARNESS SHALL BE STRUCTURED SO THAT BOUND IS TRUE, NOT MERELY DOCUMENTED** (round 11, roborev
+job 236 finding 2 — the second time this claim was found false). The poll SHALL sample each observed
+signal EXACTLY ONCE PER ITERATION and SHALL make that sample available to everything downstream of it:
+the progress accounting, the poll step, the final status check at expiry, and the failure message. A
+poll step SHALL NOT take its own artifact scan, and no scan SHALL be taken after the verdict has been
+decided. Where the guarantee and the code disagree, the CODE SHALL be corrected; the claim SHALL NOT be
+weakened a third time.
+
 *(Round-9 ruling, roborev job 232 finding 1: the review proposed rechecking the deadline before
 returning success. It was OVERRULED — the behaviour is correct and the CLAIM was overstated. See
 `tasks.md` round 9.)*
@@ -196,10 +204,41 @@ deadline. A timeout reported while the awaited marker sits in the transcript the
 is a diagnostic contradicted by its own evidence — the most damaging failure available to a change
 whose purpose is that no message asserts what its measurement cannot establish.
 
+**AND THE VERDICT SHALL BE DECIDED FROM THE STORE THE FAILURE REPORTS FROM** (round 11, roborev job 236
+finding 1). Draining the queue is not sufficient, because the harness RECORDS each line into the shared
+transcript before it PUBLISHES it to the queue: a reader preempted between those two operations leaves
+the queue without a line the transcript already holds, so a queue-only check narrows that window
+instead of closing it. The verdict of ABSENCE SHALL therefore be taken from the transcript the failure
+message renders, considering the lines recorded since that wait began, and the failure SHALL report how
+many lines it examined. The requirement is deliberately NOT that the two stores be synchronised: making
+their divergence IRRELEVANT needs no atomicity, no timestamps and no lock ordering, and it makes the
+self-contradicting diagnostic unrepresentable rather than unlikely. The window SHALL be per wait,
+because the transcript is cumulative and a line already consumed by an earlier stage SHALL NOT satisfy
+a later one — a false PASS is worse than a confusing diagnostic.
+
+**A cause SHALL NOT be named that the final check contradicts.** Where the final drain establishes that
+every reader has ended, the failure SHALL report closed pipes and SHALL NOT report that the deadline
+passed "with the pipes still open".
+
 #### Scenario: the awaited evidence arrived before the deadline but was consumed after it
 - **WHEN** the marker, the process exit, or a read-side buffer is delivered before the deadline and
   the harness is next scheduled only after the deadline has lapsed
 - **THEN** the stage SHALL succeed, and a unit test per site SHALL assert it does
+
+#### Scenario: the awaited line was RECORDED but not yet PUBLISHED when the deadline lapsed
+- **WHEN** a reader has pushed the awaited line into the shared transcript and has not yet sent it to
+  the queue
+- **THEN** the wait SHALL match it, and a unit test SHALL force that interleaving deterministically
+  rather than arranging it with a sleep
+
+#### Scenario: a line recorded before the wait began
+- **WHEN** the transcript holds a matching line recorded before this wait started
+- **THEN** the wait SHALL NOT be satisfied by it, and a unit test SHALL assert that
+
+#### Scenario: the deadline lapses as both pipes reach EOF
+- **WHEN** the final drain finds the queue empty and every sender gone
+- **THEN** the failure SHALL report closed pipes rather than a deadline with the pipes still open, and
+  a unit test SHALL assert that
 
 *(Round-8 withdrawal, recorded rather than deleted: progress previously RESET a calibrated stall window
 and extended the stage past its nominal budget. That is precisely what made a declared cap not the
