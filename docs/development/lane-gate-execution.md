@@ -300,9 +300,19 @@ also publishes a signal that does. `scripts/lib/gate-heartbeat.sh` rewrites
 | observation | verdict | exit |
 |---|---|---|
 | terminal `RESULT:` in a complete, run-id-matching block | `COMPLETE` | 0 |
+| terminal `RESULT:`, unbound read, superseded by a **fresh** foreign beat | `UNKNOWN` | 4 |
+| terminal `RESULT:`, unbound read, foreign beat **provably stale** | `COMPLETE` | 0 |
 | beat present, run-id matches, **fresh** | `RUNNING` | 2 |
 | beat present, run-id matches, **stale** | `STALLED` | 3 |
 | anything unmeasurable, with a named cause | `UNKNOWN` | 4 |
+
+The two middle rows are the job-206 correction and they are easy to misread as redundant. A
+heartbeat OUTLIVES the run that wrote it, so an unbound reader finding a foreign `run-id` beside a
+terminal verdict cannot assume the beat is NEWER: a run that terminated before its first beat leaves
+its own summary next to the previous run's leftover. Only a beat that is **affirmatively fresh**
+supersedes; one that is **provably stale** is a leftover and says nothing; and one whose freshness
+cannot be established stays `UNKNOWN`, because a false `COMPLETE` certifies a gate that never
+finished while a false `UNKNOWN` merely withholds a verdict.
 
 **`STALLED` is not "the gate is dead".** It says exactly what two local files can establish:
 *this run has published no liveness for N seconds.*
