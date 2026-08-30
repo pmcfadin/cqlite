@@ -48,7 +48,7 @@
 //! | `list<E>` / `set<E>`      | `List<expected(E)>`                   | Arrow has no Set type |
 //! | `map<K,V>`                | `Map<expected(K), expected(V)>`       | Arrow Map |
 //! | `tuple<A,B,…>`            | `Struct` of arity n, positional       | Arrow Struct |
-//! | UDT                       | `Struct` (field types not declared)   | Arrow Struct |
+//! | UDT                       | `Struct`, field types UNMEASURABLE    | Arrow Struct; see below |
 //!
 //! Three mappings are genuinely ambiguous, so the expectation is anchored
 //! explicitly rather than left to taste:
@@ -73,16 +73,30 @@
 //!     writes and therefore what the oracle can be compared against; a switch to
 //!     `Binary(4|16)` is a deliberate decision that SHOULD red this harness.
 //!
+//! # UDT field types are REFUSED, not waved through (issue #1490 round 4)
+//!
+//! A case declares a UDT by NAME only, so there is no independently declared
+//! field schema to check the Arrow `Struct`'s children against. The expectation
+//! used to be "an Arrow `Struct`, fields unconstrained" — which ACCEPTS a Struct
+//! whose CQL `int` field was exported as `Int64`, i.e. exactly the mis-width
+//! family this whole module exists for, and one the value comparison cannot see
+//! either. That was a PASS the harness never measured.
+//!
+//! So the type verdict is THREE-valued ([`ShapeVerdict`]):
+//!
+//!   * a UDT exported as something that is NOT a `Struct` (#3556's `Utf8`
+//!     flattening) is a normal MISMATCH — an affirmative negative measurement,
+//!     unchanged;
+//!   * a UDT exported AS a `Struct` is [`ShapeVerdict::Unmeasurable`] — the
+//!     harness refuses to claim it validated, and that refusal FAILS the case by
+//!     name (see `unsupported.rs`).
+//!
 //! # What is deliberately NOT asserted
 //!
 //! * **Nullability and field names.** Arrow's nested-child names (`item`,
 //!   `entries`/`key`/`value`, `field_0`) are conventions a Parquet round-trip may
 //!   respell, and CQL makes every non-key column nullable, so neither carries
 //!   information about the CQL→Arrow mapping's correctness.
-//! * **UDT field types.** A case declares a UDT by NAME only (the harness never
-//!   needs its field types — sstabledump types the field values for it), so the
-//!   expectation is "an Arrow `Struct`" and its fields are unconstrained. That is
-//!   still enough to catch #3556's `Utf8` flattening.
 //!
 //! # This accept-list MUST NOT be broader than `arrow_rows`'s decoder
 //!
@@ -97,6 +111,7 @@
 use arrow::datatypes::{DataType, Field, IntervalUnit, TimeUnit};
 
 use super::cql_type::{ColumnType, CqlTypeSpec};
+use super::unsupported::{Unsupported, UDT_STRUCT_FIELD_TYPES};
 
 /// An accepted Arrow type for one declared CQL type.
 #[derive(Debug, Clone)]
@@ -110,7 +125,7 @@ pub enum ArrowShape {
     /// An Arrow `List` whose element type matches.
     ///
     /// Deliberately `List` ONLY — not `LargeList`/`FixedSizeList`. See
-    /// [`ArrowShape::accepts`].
+    /// [`ArrowShape::check`].
     List(Box<ArrowShape>),
     /// An Arrow `Map` whose key and value types match.
     Map(Box<ArrowShape>, Box<ArrowShape>),
@@ -178,13 +193,66 @@ fn scalar_shape(name: &str) -> Result<ArrowShape, String> {
     })
 }
 
+/// The THREE-valued answer to "does this Arrow type satisfy this expectation?".
+///
+/// A boolean cannot express the third state, and collapsing it onto either
+/// answer is a lie in one direction or the other: onto `true` it is a pass the
+/// harness never measured (the round-4 defect — any `Struct` accepted for a
+/// UDT), onto `false` it is a divergence report about an export that may be
+/// perfectly correct. So the state is NAMED (issue #1490).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ShapeVerdict {
+    /// The Arrow type IS the expected one — an affirmative measurement.
+    Valid,
+    /// The Arrow type is NOT the expected one — also an affirmative measurement,
+    /// in the negative direction.
+    Wrong,
+    /// The harness cannot decide, and says so rather than guessing.
+    Unmeasurable(Unsupported),
+}
+
+impl ShapeVerdict {
+    /// Combine nested members' verdicts.
+    ///
+    /// `Wrong` DOMINATES `Unmeasurable` on purpose: if any member's type is
+    /// affirmatively wrong, the column has a real, reportable type defect and
+    /// reporting it is strictly more useful than reporting that a sibling member
+    /// was unmeasurable. `#3556`'s `list<utf8>` for `list<struct(udt)>` is
+    /// exactly this case, and it must stay a MISMATCH.
+    fn combine(members: impl IntoIterator<Item = ShapeVerdict>) -> ShapeVerdict {
+        let mut unmeasurable = None;
+        for v in members {
+            match v {
+                ShapeVerdict::Wrong => return ShapeVerdict::Wrong,
+                ShapeVerdict::Unmeasurable(u) => unmeasurable = unmeasurable.or(Some(u)),
+                ShapeVerdict::Valid => {}
+            }
+        }
+        match unmeasurable {
+            Some(u) => ShapeVerdict::Unmeasurable(u),
+            None => ShapeVerdict::Valid,
+        }
+    }
+}
+
 impl ArrowShape {
     /// Does `actual` satisfy this expectation? (Nullability and nested field
     /// NAMES are deliberately not part of the answer — see the module header.)
-    pub fn accepts(&self, actual: &DataType) -> bool {
+    ///
+    /// THREE-valued: see [`ShapeVerdict`]. There is deliberately no boolean
+    /// `accepts`, because every caller of one would have to collapse the third
+    /// state onto a pass or a failure, which is the defect this replaced.
+    pub fn check(&self, actual: &DataType) -> ShapeVerdict {
+        let yes_no = |ok: bool| {
+            if ok {
+                ShapeVerdict::Valid
+            } else {
+                ShapeVerdict::Wrong
+            }
+        };
         match self {
-            ArrowShape::OneOf(types) => types.iter().any(|t| t == actual),
-            ArrowShape::Decimal128 { scale } => match actual {
+            ArrowShape::OneOf(types) => yes_no(types.iter().any(|t| t == actual)),
+            ArrowShape::Decimal128 { scale } => yes_no(match actual {
                 DataType::Decimal128(precision, s) => {
                     let scale_ok = match scale {
                         Some(want) => *s == *want,
@@ -193,8 +261,8 @@ impl ArrowShape {
                     *precision <= 38 && scale_ok
                 }
                 _ => false,
-            },
-            ArrowShape::UtcMillisTimestamp => match actual {
+            }),
+            ArrowShape::UtcMillisTimestamp => yes_no(match actual {
                 DataType::Timestamp(TimeUnit::Millisecond, Some(tz)) => {
                     let tz = tz.as_ref();
                     tz.eq_ignore_ascii_case("UTC")
@@ -203,7 +271,7 @@ impl ArrowShape {
                         || tz == "Z"
                 }
                 _ => false,
-            },
+            }),
             // `List` only. `LargeList`/`FixedSizeList` used to be accepted here
             // and `arrow_rows` has no decoder for either, so a schema the type
             // check declared VALID then died during value projection — an
@@ -215,26 +283,37 @@ impl ArrowShape {
             // switching to one is a deliberate decision that SHOULD red here.
             // KEEP IN SYNC with the type table in `arrow_rows.rs`.
             ArrowShape::List(elem) => match actual {
-                DataType::List(f) => elem.accepts(f.data_type()),
-                _ => false,
+                DataType::List(f) => elem.check(f.data_type()),
+                _ => ShapeVerdict::Wrong,
             },
             ArrowShape::Map(key, value) => match actual {
                 DataType::Map(entries, _) => match entries.data_type() {
-                    DataType::Struct(fields) if fields.len() == 2 => {
-                        key.accepts(fields[0].data_type()) && value.accepts(fields[1].data_type())
-                    }
-                    _ => false,
+                    DataType::Struct(fields) if fields.len() == 2 => ShapeVerdict::combine([
+                        key.check(fields[0].data_type()),
+                        value.check(fields[1].data_type()),
+                    ]),
+                    _ => ShapeVerdict::Wrong,
                 },
-                _ => false,
+                _ => ShapeVerdict::Wrong,
             },
             ArrowShape::Tuple(specs) => match actual {
-                DataType::Struct(fields) if fields.len() == specs.len() => specs
-                    .iter()
-                    .zip(fields.iter())
-                    .all(|(s, f)| s.accepts(f.data_type())),
-                _ => false,
+                DataType::Struct(fields) if fields.len() == specs.len() => ShapeVerdict::combine(
+                    specs
+                        .iter()
+                        .zip(fields.iter())
+                        .map(|(s, f)| s.check(f.data_type())),
+                ),
+                _ => ShapeVerdict::Wrong,
             },
-            ArrowShape::UdtStruct(_) => matches!(actual, DataType::Struct(_)),
+            // The round-4 refusal: a `Struct` is the right FAMILY, and the field
+            // WIDTHS inside it are exactly what a case cannot declare — so the
+            // harness reports "unmeasurable" instead of "valid". Anything that is
+            // not a Struct is still an affirmative mismatch, which is what keeps
+            // #3556's `Utf8` flattening detected.
+            ArrowShape::UdtStruct(_) => match actual {
+                DataType::Struct(_) => ShapeVerdict::Unmeasurable(UDT_STRUCT_FIELD_TYPES),
+                _ => ShapeVerdict::Wrong,
+            },
         }
     }
 
@@ -368,27 +447,40 @@ impl std::fmt::Display for TypeMismatch {
     }
 }
 
-/// Validate ONE Parquet field's Arrow type against its declared CQL type.
+/// The verdict on ONE Parquet field's Arrow type.
 ///
-/// `Err(Ok(mismatch))` is a type mismatch. `Err(Err(reason))` is the harness
-/// REFUSING to answer — no expectation is declared for that CQL type — which is
-/// never a pass and cannot be recorded as a known gap either.
-#[allow(clippy::result_large_err)]
-pub fn validate_field(
-    col: &ColumnType,
-    actual: &DataType,
-) -> Result<(), Result<TypeMismatch, String>> {
+/// Four states, because the previous signature
+/// (`Result<(), Result<TypeMismatch, String>>`) could express only three and the
+/// fourth — "the harness cannot measure this" — was being folded into `Ok(())`,
+/// i.e. into a pass (issue #1490 round 4).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum FieldVerdict {
+    /// The field's Arrow type IS its declared CQL type's.
+    Valid,
+    /// It is NOT, and here is the mismatch.
+    Mismatch(TypeMismatch),
+    /// The harness declines to claim either way — see `unsupported.rs`. Never a
+    /// pass, and never recordable as a known gap.
+    Unmeasurable(Unsupported),
+    /// The harness REFUSES to answer at all: no expectation is declared for that
+    /// CQL type. A bookkeeping refusal, not a representation gap.
+    Refusal(String),
+}
+
+/// Validate ONE Parquet field's Arrow type against its declared CQL type.
+pub fn validate_field(col: &ColumnType, actual: &DataType) -> FieldVerdict {
     let shape = match expected_shape(&col.spec) {
         Ok(shape) => shape,
-        Err(e) => return Err(Err(format!("column '{}': {e}", col.name))),
+        Err(e) => return FieldVerdict::Refusal(format!("column '{}': {e}", col.name)),
     };
-    if shape.accepts(actual) {
-        return Ok(());
+    match shape.check(actual) {
+        ShapeVerdict::Valid => FieldVerdict::Valid,
+        ShapeVerdict::Unmeasurable(u) => FieldVerdict::Unmeasurable(u),
+        ShapeVerdict::Wrong => FieldVerdict::Mismatch(TypeMismatch {
+            column: col.name.clone(),
+            declared: col.declared.clone(),
+            expected: shape.describe(),
+            actual: render_arrow(actual),
+        }),
     }
-    Err(Ok(TypeMismatch {
-        column: col.name.clone(),
-        declared: col.declared.clone(),
-        expected: shape.describe(),
-        actual: render_arrow(actual),
-    }))
 }

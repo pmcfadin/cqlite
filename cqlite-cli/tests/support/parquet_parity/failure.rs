@@ -18,6 +18,15 @@
 //!      regression on a different column (an `ma` mismatch appearing after the
 //!      recorded `lp` one) rode along inside the same string and was excused.
 //!
+//! # A refusal is not a failure to record
+//!
+//! [`Failure::UnsupportedRepresentation`] is the harness declining to compare a
+//! representation it cannot represent (see `unsupported.rs`). It has NO
+//! [`ExpectedFailure`] counterpart, on purpose: a gap records a product defect
+//! that still reproduces, and absorbing a harness refusal into one would turn
+//! "unmeasured" into "known and fine" — the exact conversion this module exists
+//! to prevent.
+//!
 //! Containment cannot express the property actually wanted, which is EXACTNESS:
 //! the observed failure set must EQUAL the recorded one. So the harness reports
 //! a typed [`Failure`] per thing that went wrong, both the assert path and the
@@ -29,6 +38,7 @@
 #![allow(dead_code)]
 
 use super::arrow_expect::TypeMismatch;
+use super::unsupported::Unsupported;
 
 /// The stages one case runs, each with an INDEPENDENTLY determined outcome.
 ///
@@ -121,6 +131,35 @@ pub enum Failure {
         /// The stage whose failure blocked it.
         blocked_by: Stage,
     },
+    /// A REPRESENTATION the harness declines to compare or to validate: the
+    /// THIRD outcome beside `equal` and `unequal` (see `unsupported.rs`).
+    ///
+    /// Distinct from every other variant on purpose:
+    ///
+    /// * not `ArrowType`/`Value` — nothing DIVERGED; the harness declined to
+    ///   answer, and a decline must never be counted as a difference either;
+    /// * not `Unrunnable` — that stage was blocked by ANOTHER stage's failure,
+    ///   whereas this stage ran and refused this one column;
+    /// * not `Refusal` — that is harness BOOKKEEPING (an unparsable declaration,
+    ///   a mis-recorded gap), while this is a named, enumerated representation
+    ///   with a retirement path.
+    ///
+    /// And, like `Value`, deliberately NOT expressible as an
+    /// [`ExpectedFailure`]: a [`KnownGap`] records a PRODUCT defect that still
+    /// reproduces, so letting it absorb a HARNESS refusal would silently convert
+    /// "we cannot measure this" into "we know about this and it is fine". An
+    /// observed refusal is therefore always an unrecorded extra, and it always
+    /// fails the case.
+    UnsupportedRepresentation {
+        /// The stage that refused — the ARROW-TYPE stage for an unverifiable
+        /// type claim, the VALUE-COMPARISON stage for an uncomparable value
+        /// representation.
+        stage: Stage,
+        /// The declared column it refused for. Always per column: a refusal is a
+        /// property of one declared type, never of the whole case.
+        column: String,
+        refused: Unsupported,
+    },
     /// The harness REFUSES to answer: an unparsable declaration, a fixture that
     /// is not eligible for physical-dump parity, an unreadable file, a
     /// mis-recorded gap. Never recordable as a known gap either.
@@ -147,6 +186,17 @@ impl Failure {
                 column,
                 blocked_by,
             } => unrunnable_signature(*stage, column.as_deref(), *blocked_by),
+            // The `why` is NOT in the signature: the identity of a refusal is
+            // WHICH representation was refused on WHICH column, by WHICH stage.
+            Failure::UnsupportedRepresentation {
+                stage,
+                column,
+                refused,
+            } => format!(
+                "unsupported-representation[{}:column '{column}'] representation={}",
+                stage.name(),
+                refused.representation
+            ),
             Failure::Refusal(reason) => format!("refusal[{reason}]"),
         }
     }
@@ -179,6 +229,20 @@ impl Failure {
                     blocked_by.name()
                 )
             }
+            Failure::UnsupportedRepresentation {
+                stage,
+                column,
+                refused,
+            } => format!(
+                "UNSUPPORTED REPRESENTATION: the {} stage REFUSES column '{column}' \
+                 (representation '{}') — {}. A representation the harness cannot compare is \
+                 NOT a pass: this case DECLARES the column, so it claims coverage the harness \
+                 cannot deliver. Teach the harness the representation or drop the column; it \
+                 cannot be recorded as a known gap (issue #1490).",
+                stage.name(),
+                refused.representation,
+                refused.why
+            ),
             Failure::Refusal(reason) => reason.clone(),
         }
     }

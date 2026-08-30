@@ -30,13 +30,19 @@
 //! | `Map`                       | `Map`                                | assembled from `path`+`value` cells |
 //! | `Struct`                    | `Tuple`                              | JSON object |
 //!
+//! DECODING a `Struct` is not the same as being able to COMPARE it: a declared
+//! CQL `tuple` lands here as a named `Tuple` while its golden lands as a
+//! positional `List`, so the harness REFUSES that column's values rather than
+//! comparing two representations (`unsupported.rs`). A UDT's Struct decodes and
+//! compares; only its Arrow FIELD TYPES are unmeasurable.
+//!
 //! An Arrow type NOT in that table is an ERROR. A permissive fallback (render it
 //! with `Debug`, say) would let an unexpected mapping compare equal to something
 //! and is exactly how a parity harness silently stops testing.
 //!
-//! # This table and `arrow_expect::ArrowShape::accepts` MUST stay in sync
+//! # This table and `arrow_expect::ArrowShape::check` MUST stay in sync
 //!
-//! `accepts` decides which Arrow types the harness declares VALID for a declared
+//! `check` decides which Arrow types the harness declares VALID for a declared
 //! CQL type; this module decides which it can actually DECODE. An accept-list
 //! broader than the decoder is a promise the harness cannot keep: the schema
 //! check passes and the run then dies during value projection, which is a

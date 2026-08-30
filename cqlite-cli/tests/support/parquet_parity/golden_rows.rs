@@ -435,15 +435,16 @@ pub fn coerce_declared_shape(v: CanonicalValue, spec: &CqlTypeSpec) -> Canonical
                 .map(|x| coerce_declared_shape(x, elem))
                 .collect(),
         ),
-        // A CQL tuple arrives as a JSON ARRAY, so its members are positional.
-        (CanonicalValue::List(xs), CqlTypeSpec::Tuple(specs)) if xs.len() == specs.len() => {
-            CanonicalValue::List(
-                xs.into_iter()
-                    .zip(specs.iter())
-                    .map(|(x, s)| coerce_declared_shape(x, s))
-                    .collect(),
-            )
-        }
+        // A CQL tuple deliberately has NO arm here. It arrives as a positional
+        // JSON ARRAY (canonical `List`) while the exported Arrow `Struct`
+        // decodes to a canonical `Tuple` of NAMED fields, so the two sides are
+        // in different representations. Coercing one into the other would have
+        // to invent the field names the comparison would then check — so the
+        // harness REFUSES the column's values by name instead
+        // (`unsupported::CQL_TUPLE_VALUES`), and this recursion never runs for a
+        // tuple. Removed rather than left in place: an arm that recursed into
+        // the members while leaving the OUTER shapes mismatched was the silent
+        // half of the round-4 finding.
         (other, _) => other,
     }
 }

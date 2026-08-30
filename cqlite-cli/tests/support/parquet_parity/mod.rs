@@ -26,6 +26,23 @@
 //! indistinguishable, or an earlier failure silently shrinks the "exact failure
 //! set" a [`KnownGap`] is compared against.
 //!
+//! # The comparison outcome is THREE-valued
+//!
+//! `equal` / `unequal` / **unsupported-representation** (issue #1490 round 4,
+//! `unsupported.rs`). A positive verdict requires an AFFIRMATIVE MEASUREMENT, so
+//! a stage that could not measure something must be distinguishable from one
+//! that passed: a harness that compares a CQL tuple it cannot represent, or
+//! accepts any Arrow `Struct` for a UDT without checking the field widths, is
+//! emitting a pass it never measured — the vacuous-pass shape, inside the thing
+//! whose whole job is to detect wrongness.
+//!
+//! A refusal is recorded as [`Failure::UnsupportedRepresentation`], names the
+//! column and the representation, removes that column from the compared cells
+//! (so the census number shrinks, truthfully), and FAILS the case: every
+//! declared column is declared COVERAGE. It is NOT a [`KnownGap`] — a gap means
+//! "a recorded product defect still reproduces", a refusal means "this harness
+//! cannot represent this shape" — and it cannot be recorded into one.
+//!
 //! The pre-existing Parquet tests check row counts, `PAR1` magic, a few spot
 //! values and DuckDB aggregates; `parquet_golden_tests.rs` freezes a byte
 //! snapshot of CQLite's OWN output, which cannot detect a wrong value because it
@@ -48,6 +65,8 @@
 //! * A recorded divergence is EXCLUSIVE across the whole AGGREGATE: an expected
 //!   export abort cannot suppress the golden's validation, and a deferred column
 //!   TYPE cannot suppress any other column's VALUES.
+//! * A representation the harness cannot compare is REFUSED by name, never
+//!   compared anyway and never counted as equal (`unsupported.rs`).
 //! * A recorded divergence is always PRECISE and SELF-RETIRING, never a skip:
 //!   [`KnownGap`] (whole case) and [`KnownTypeGap`] (one column's Arrow type)
 //!   both fail when the divergence stops reproducing, and both refuse to absorb
@@ -69,6 +88,7 @@ pub mod decimal;
 pub mod failure;
 pub mod golden_rows;
 pub mod spelling;
+pub mod unsupported;
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -444,7 +464,7 @@ fn validate_arrow_types(
             .iter()
             .find(|g| g.column == col.name.as_str());
         match arrow_expect::validate_field(col, field.data_type()) {
-            Ok(()) => {
+            arrow_expect::FieldVerdict::Valid => {
                 if let Some(gap) = gap {
                     check.failures.push(Failure::Refusal(format!(
                         "column '{}' records the KNOWN type gap {} ({}) but its exported Arrow \
@@ -454,7 +474,26 @@ fn validate_arrow_types(
                     )));
                 }
             }
-            Err(Ok(mismatch)) => match gap {
+            // The THIRD outcome (issue #1490 round 4): the harness cannot verify
+            // this column's Arrow type, so it says so instead of passing it.
+            //
+            // A recorded `KnownTypeGap` on such a column is deliberately NEITHER
+            // excused NOR retired here: a gap records the type the export
+            // currently produces, and nothing measured that. The refusal fails
+            // the case on its own, which is the fail-closed answer.
+            //
+            // It does NOT block the column's VALUES: they are still projected on
+            // both sides and compared per cell. Only the TYPE claim is
+            // unmeasurable, and a refusal must be exactly as wide as what it
+            // refuses.
+            arrow_expect::FieldVerdict::Unmeasurable(refused) => {
+                check.failures.push(Failure::UnsupportedRepresentation {
+                    stage: Stage::ArrowTypes,
+                    column: col.name.clone(),
+                    refused,
+                });
+            }
+            arrow_expect::FieldVerdict::Mismatch(mismatch) => match gap {
                 // Equality, not a substring: a DIFFERENT wrong type on this
                 // column is a different defect and must not be absorbed.
                 Some(gap) if gap.actual == mismatch.actual => excused.push(gap.issue),
@@ -475,7 +514,7 @@ fn validate_arrow_types(
                     note: None,
                 }),
             },
-            Err(Err(refusal)) => {
+            arrow_expect::FieldVerdict::Refusal(refusal) => {
                 check.failures.push(Failure::Refusal(refusal));
                 check.blocks_all_values = true;
             }
@@ -764,15 +803,51 @@ impl Stages {
         });
     }
 
-    /// The columns the value comparison can still cover, and the `Unrunnable`
-    /// records for the ones it cannot.
+    /// The columns the value comparison can still cover, plus the record for
+    /// every column it cannot cover and WHY — `Unrunnable` when another stage
+    /// blocked it, `UnsupportedRepresentation` when the harness itself refuses
+    /// the declared representation.
+    ///
+    /// The two are kept apart because they mean different things: an
+    /// `Unrunnable` column is comparable in principle and was prevented, a
+    /// REFUSED column is one the harness cannot compare at all (issue #1490
+    /// round 4). Both remove the column from the compared set, so its cells are
+    /// NOT counted in the census — the smaller number is the true one.
     fn comparable_columns(&mut self) -> Vec<ColumnType> {
+        // Refusals FIRST, and unconditionally: a refusal is a property of the
+        // DECLARED type, so it holds whether or not the export produced
+        // anything. Recording it even when a later stage was also blocked is
+        // deliberate — the case declares a column the harness cannot compare,
+        // and that stays true.
+        let refused: Vec<(String, unsupported::Unsupported)> = self
+            .columns
+            .iter()
+            .filter_map(|c| {
+                unsupported::refused_value_representation(&c.spec).map(|u| (c.name.clone(), u))
+            })
+            .collect();
+        for (column, refused) in &refused {
+            self.failures.push(Failure::UnsupportedRepresentation {
+                stage: Stage::ValueComparison,
+                column: column.clone(),
+                refused: *refused,
+            });
+        }
+        let is_refused = |name: &String| refused.iter().any(|(c, _)| c == name);
+
         if self.type_blocks_all_values {
             self.unrunnable(Stage::ValueComparison, Stage::ArrowTypes);
             return Vec::new();
         }
         let blocked = std::mem::take(&mut self.type_blocked_columns);
         for column in &blocked {
+            // A refused column already carries the stronger record. Emitting
+            // both would report one column's values as twice-uncovered, which
+            // would break the multiset equality a KnownGap is compared against
+            // for no gain.
+            if is_refused(column) {
+                continue;
+            }
             self.failures.push(Failure::Unrunnable {
                 stage: Stage::ValueComparison,
                 column: Some(column.clone()),
@@ -781,7 +856,7 @@ impl Stages {
         }
         self.columns
             .iter()
-            .filter(|c| !blocked.contains(&c.name))
+            .filter(|c| !blocked.contains(&c.name) && !is_refused(&c.name))
             .cloned()
             .collect()
     }

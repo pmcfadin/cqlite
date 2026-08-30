@@ -122,14 +122,18 @@ fn declared_type_parser_refuses_unknown_types() {
 #[test]
 fn expected_arrow_type_pins_each_scalar() {
     use arrow::datatypes::{DataType, IntervalUnit, TimeUnit};
-    use parquet_parity::arrow_expect::expected_shape;
+    use parquet_parity::arrow_expect::{expected_shape, ShapeVerdict};
     use parquet_parity::cql_type::parse_column;
 
-    let accepts = |declared: &str, actual: &DataType| -> bool {
+    // The verdict is THREE-valued (issue #1490): these cases assert the two
+    // AFFIRMATIVE ones by name, never `!= Valid` — "not valid" would also be
+    // satisfied by `Unmeasurable`, i.e. by the harness admitting it did not
+    // measure, which is exactly the state that must not pass for a scalar.
+    let verdict = |declared: &str, actual: &DataType| -> ShapeVerdict {
         let col = parse_column("c", declared, &[]).expect("declared type must parse");
         expected_shape(&col.spec)
             .expect("every corpus scalar has a declared expectation")
-            .accepts(actual)
+            .check(actual)
     };
 
     for (declared, expected) in [
@@ -159,8 +163,9 @@ fn expected_arrow_type_pins_each_scalar() {
             DataType::Timestamp(TimeUnit::Millisecond, Some("UTC".into())),
         ),
     ] {
-        assert!(
-            accepts(declared, &expected),
+        assert_eq!(
+            verdict(declared, &expected),
+            ShapeVerdict::Valid,
             "'{declared}' must accept {expected:?}"
         );
     }
@@ -193,8 +198,9 @@ fn expected_arrow_type_pins_each_scalar() {
             DataType::Timestamp(TimeUnit::Microsecond, Some("UTC".into())),
         ),
     ] {
-        assert!(
-            !accepts(declared, &wrong),
+        assert_eq!(
+            verdict(declared, &wrong),
+            ShapeVerdict::Wrong,
             "'{declared}' must REJECT {wrong:?} — a wrong width round-trips its values \
              unchanged, so nothing else in this harness can catch it"
         );
@@ -206,7 +212,9 @@ fn expected_arrow_type_pins_each_scalar() {
 #[test]
 fn expected_arrow_type_recurses_into_nested_types() {
     use arrow::datatypes::{DataType, Field, Fields};
-    use parquet_parity::arrow_expect::{expected_shape, validate_field};
+    use parquet_parity::arrow_expect::{
+        expected_shape, validate_field, FieldVerdict, ShapeVerdict,
+    };
     use parquet_parity::cql_type::parse_column;
     use std::sync::Arc;
 
@@ -229,25 +237,51 @@ fn expected_arrow_type_recurses_into_nested_types() {
         expected_shape(&col.spec).expect("expectation must be derivable")
     };
 
-    assert!(shape("set<int>", &[]).accepts(&list_of(DataType::Int32)));
-    assert!(shape("list<int>", &[]).accepts(&list_of(DataType::Int32)));
+    let valid = |declared: &str, udts: &[&str], actual: &DataType| {
+        assert_eq!(
+            shape(declared, udts).check(actual),
+            ShapeVerdict::Valid,
+            "'{declared}' must accept {actual:?}"
+        );
+    };
+    let wrong = |declared: &str, udts: &[&str], actual: &DataType| {
+        assert_eq!(
+            shape(declared, udts).check(actual),
+            ShapeVerdict::Wrong,
+            "'{declared}' must REJECT {actual:?}"
+        );
+    };
+
+    valid("set<int>", &[], &list_of(DataType::Int32));
+    valid("list<int>", &[], &list_of(DataType::Int32));
     // …but not a list of the wrong element width.
-    assert!(!shape("set<int>", &[]).accepts(&list_of(DataType::Int64)));
-    assert!(shape("map<int, text>", &[]).accepts(&map_of(DataType::Int32, DataType::Utf8)));
-    assert!(!shape("map<int, text>", &[]).accepts(&map_of(DataType::Utf8, DataType::Utf8)));
-    // A UDT is a Struct with fields the case does not declare…
-    let person = DataType::Struct(Fields::from(vec![Field::new("nm", DataType::Utf8, true)]));
-    assert!(shape("frozen<person>", &["person"]).accepts(&person));
-    // …and a Utf8 rendering of one is NOT.
-    assert!(!shape("frozen<person>", &["person"]).accepts(&DataType::Utf8));
-    assert!(!shape("frozen<list<frozen<person>>>", &["person"]).accepts(&list_of(DataType::Utf8)));
+    wrong("set<int>", &[], &list_of(DataType::Int64));
+    valid(
+        "map<int, text>",
+        &[],
+        &map_of(DataType::Int32, DataType::Utf8),
+    );
+    wrong(
+        "map<int, text>",
+        &[],
+        &map_of(DataType::Utf8, DataType::Utf8),
+    );
+    // A Utf8 rendering of a UDT is affirmatively WRONG — #3556's flattening, at
+    // the top level and nested inside a frozen collection.
+    wrong("frozen<person>", &["person"], &DataType::Utf8);
+    wrong(
+        "frozen<list<frozen<person>>>",
+        &["person"],
+        &list_of(DataType::Utf8),
+    );
 
     // The mismatch message must name the column, the declared CQL type and both
     // Arrow types — it is what the #3556 known-gap signature pins.
     let col = parse_column("lp", "frozen<list<frozen<person>>>", &["person"]).expect("parses");
-    let mismatch = validate_field(&col, &list_of(DataType::Utf8))
-        .expect_err("a Utf8-flattened UDT must be rejected")
-        .expect("it is a type mismatch, not a refusal to answer");
+    let mismatch = match validate_field(&col, &list_of(DataType::Utf8)) {
+        FieldVerdict::Mismatch(m) => m,
+        other => panic!("a Utf8-flattened UDT must be a MISMATCH, got {other:?}"),
+    };
     // The rendered ACTUAL type is a FIELD, so the known-type-gap record can
     // compare it by equality rather than by substring.
     assert_eq!(mismatch.actual, "list<utf8>");
@@ -283,7 +317,7 @@ fn every_accepted_arrow_type_is_decodable() {
     };
     use arrow::datatypes::DataType;
     use arrow::datatypes::IntervalMonthDayNano;
-    use parquet_parity::arrow_expect::expected_shape;
+    use parquet_parity::arrow_expect::{expected_shape, ShapeVerdict};
     use parquet_parity::arrow_rows::canonical_from_arrow;
     use parquet_parity::cql_type::parse_column;
     use std::sync::Arc;
@@ -359,8 +393,9 @@ fn every_accepted_arrow_type_is_decodable() {
         let col = parse_column("c", declared, &[]).expect("declared type must parse");
         let shape = expected_shape(&col.spec).expect("expectation must be derivable");
         let dt: DataType = array.data_type().clone();
-        assert!(
-            shape.accepts(&dt),
+        assert_eq!(
+            shape.check(&dt),
+            ShapeVerdict::Valid,
             "'{declared}' must accept {dt:?} for this test to be about the decoder"
         );
         canonical_from_arrow(array.as_ref(), 0, "test").unwrap_or_else(|e| {
@@ -378,7 +413,7 @@ fn every_accepted_arrow_type_is_decodable() {
 #[test]
 fn list_accept_list_is_narrowed_to_what_the_decoder_handles() {
     use arrow::datatypes::{DataType, Field};
-    use parquet_parity::arrow_expect::expected_shape;
+    use parquet_parity::arrow_expect::{expected_shape, ShapeVerdict};
     use parquet_parity::cql_type::parse_column;
     use std::sync::Arc;
 
@@ -388,17 +423,25 @@ fn list_accept_list_is_narrowed_to_what_the_decoder_handles() {
     };
     let item = || Arc::new(Field::new("item", DataType::Int32, true));
 
-    assert!(shape("list<int>").accepts(&DataType::List(item())));
+    assert_eq!(
+        shape("list<int>").check(&DataType::List(item())),
+        ShapeVerdict::Valid
+    );
     for wrong in [
         DataType::LargeList(item()),
         DataType::FixedSizeList(item(), 3),
     ] {
-        assert!(
-            !shape("list<int>").accepts(&wrong),
+        assert_eq!(
+            shape("list<int>").check(&wrong),
+            ShapeVerdict::Wrong,
             "{wrong:?} must be REJECTED: arrow_rows has no decoder for it, so accepting it \
              would pass the schema check and then die during value projection"
         );
-        assert!(!shape("set<int>").accepts(&wrong), "{wrong:?}");
+        assert_eq!(
+            shape("set<int>").check(&wrong),
+            ShapeVerdict::Wrong,
+            "{wrong:?}"
+        );
     }
 }
 
