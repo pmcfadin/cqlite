@@ -133,7 +133,10 @@ fn the_resident_rows_bound_is_channel_plus_two_batches() {
     // The GAUGE's ceiling is the channel-resident half only — strictly below the
     // in-flight bound by the consumer-held + producer-parked batches. Documenting
     // the gauge with the wrong one of the two overstates it 2x.
-    assert_eq!(rows_resident_in_channel(DEFAULT), msg_cap * BATCH_EMIT_ROWS_MERGE);
+    assert_eq!(
+        rows_resident_in_channel(DEFAULT),
+        msg_cap * BATCH_EMIT_ROWS_MERGE
+    );
     assert_eq!(rows_resident_in_channel(DEFAULT), 2 * DEFAULT);
     assert!(rows_resident_in_channel(DEFAULT) < max_inflight_rows(DEFAULT));
 }
@@ -237,7 +240,10 @@ fn the_ramp_doubles_from_one_row_and_saturates() {
     for _ in 0..12 {
         low = next_batch_limit(low, batch_limit_ceiling(8));
     }
-    assert_eq!(low, 8, "a rows_cap=8 run must never assemble a 256-row batch");
+    assert_eq!(
+        low, 8,
+        "a rows_cap=8 run must never assemble a 256-row batch"
+    );
 
     // Cold-start CHANNEL fill (the default channel is 2 messages, so 1 + 2).
     assert_eq!(rows_in_full_channel(DEFAULT), 3, "ramp 1 + 2 over 2 slots");
@@ -277,7 +283,8 @@ fn expected_messages_matches_the_real_batcher() {
         // batcher on ONE thread, so a full channel would deadlock).
         let (tx, rx) = std::sync::mpsc::sync_channel(rows + 4);
         let local_sent = AtomicI64::new(0);
-        let mut batcher = EgressBatcher::new(&tx, &local_sent, super::super::STREAMING_CHANNEL_CAPACITY);
+        let mut batcher =
+            EgressBatcher::new(&tx, &local_sent, super::super::STREAMING_CHANNEL_CAPACITY);
         for n in 0..rows {
             assert!(
                 matches!(batcher.push(entry(n as i64)), ControlFlow::Continue(())),
@@ -338,7 +345,8 @@ fn expected_messages_matches_the_real_batcher() {
 fn a_sub_batch_result_set_emits_its_first_row_immediately_and_loses_none() {
     let (tx, rx) = std::sync::mpsc::sync_channel(8);
     let local_sent = AtomicI64::new(0);
-    let mut batcher = EgressBatcher::new(&tx, &local_sent, super::super::STREAMING_CHANNEL_CAPACITY);
+    let mut batcher =
+        EgressBatcher::new(&tx, &local_sent, super::super::STREAMING_CHANNEL_CAPACITY);
 
     // ONE row pushed, and it is already on the channel: first-row latency is not
     // gated on a full batch.
@@ -375,7 +383,8 @@ fn a_sub_batch_result_set_emits_its_first_row_immediately_and_loses_none() {
 fn a_dropped_consumer_breaks_the_walk() {
     let (tx, rx) = std::sync::mpsc::sync_channel(1);
     let local_sent = AtomicI64::new(0);
-    let mut batcher = EgressBatcher::new(&tx, &local_sent, super::super::STREAMING_CHANNEL_CAPACITY);
+    let mut batcher =
+        EgressBatcher::new(&tx, &local_sent, super::super::STREAMING_CHANNEL_CAPACITY);
     drop(rx);
     assert!(
         matches!(batcher.push(entry(0)), ControlFlow::Break(())),
@@ -397,7 +406,8 @@ fn the_probe_counts_messages_entries_and_the_peak_batch() {
     const ROWS: usize = 600;
     let (tx, rx) = std::sync::mpsc::sync_channel(ROWS);
     let local_sent = AtomicI64::new(0);
-    let mut batcher = EgressBatcher::new(&tx, &local_sent, super::super::STREAMING_CHANNEL_CAPACITY);
+    let mut batcher =
+        EgressBatcher::new(&tx, &local_sent, super::super::STREAMING_CHANNEL_CAPACITY);
     for n in 0..ROWS {
         let _ = batcher.push(entry(n as i64));
     }
@@ -456,12 +466,14 @@ fn the_byte_budget_flushes_large_rows_long_before_the_row_ceiling() {
     assert_eq!(probe.batch_emit_bytes, BATCH_EMIT_BYTES_MERGE);
 
     // The row bound ALONE would allow this many 48 KiB rows per batch.
-    let rows_per_batch_if_row_bounded = batch_limit_ceiling(super::super::STREAMING_CHANNEL_CAPACITY);
+    let rows_per_batch_if_row_bounded =
+        batch_limit_ceiling(super::super::STREAMING_CHANNEL_CAPACITY);
     assert_eq!(rows_per_batch_if_row_bounded, 256);
 
     let (tx, rx) = std::sync::mpsc::sync_channel(ROWS + 4);
     let local_sent = AtomicI64::new(0);
-    let mut batcher = EgressBatcher::new(&tx, &local_sent, super::super::STREAMING_CHANNEL_CAPACITY);
+    let mut batcher =
+        EgressBatcher::new(&tx, &local_sent, super::super::STREAMING_CHANNEL_CAPACITY);
     for n in 0..ROWS {
         assert!(matches!(
             batcher.push(fat_entry(n as i64, PAYLOAD)),
@@ -479,7 +491,10 @@ fn the_byte_budget_flushes_large_rows_long_before_the_row_ceiling() {
         let MergeMsg::Batch(batch) = msg else {
             panic!("the batcher sends only DATA batches");
         };
-        let bytes: usize = batch.iter().map(super::super::RunReader::estimate_entry_size).sum();
+        let bytes: usize = batch
+            .iter()
+            .map(super::super::RunReader::estimate_entry_size)
+            .sum();
         biggest_rows = biggest_rows.max(batch.len());
         biggest_bytes = biggest_bytes.max(bytes);
         total_rows += batch.len();

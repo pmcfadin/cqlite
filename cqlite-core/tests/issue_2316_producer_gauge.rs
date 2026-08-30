@@ -26,24 +26,13 @@ use cqlite_core::storage::write_engine::{
 use cqlite_core::types::Value;
 use tempfile::TempDir;
 
-/// Rows per input SSTable, DERIVED from the shipped batching constants (issue
-/// #2820) rather than a literal: everything a full egress channel holds from a
-/// cold start (`rows_in_full_channel` — the ramp means the first batches are not
-/// full ones), plus the full batch the producer then blocks trying to hand over,
-/// plus one row it cannot even accumulate. That is the smallest fixture for which
-/// every producer is GUARANTEED to be parked in `send` with nothing received.
-///
-/// A literal would silently rot: pre-#2820 "> 256" meant "past a 256-ENTRY
-/// channel", and the channel is now bounded in MESSAGES. The historical 400-row
-/// floor is kept so the fixture also stays a genuinely multi-partition scan.
-fn rows_per_input() -> i32 {
-    let probe = cqlite_core::storage::write_engine::merge::merge_egress_batch_probe();
-    let rows_cap = cqlite_core::storage::write_engine::merge::egress_channel_capacity_for(
-        cqlite_core::storage::write_engine::merge::active_merge_count() + 1,
-    );
-    let needed = probe.rows_in_full_channel(rows_cap) + probe.batch_emit_rows + 1;
-    needed.max(400) as i32
-}
+/// Rows per input SSTable so every producer parks in `send` — the shared
+/// derivation in `support/egress_backpressure.rs` (issue #2820 review round 2;
+/// six verbatim copies of this sum reintroduced, one level up, exactly the
+/// drift the probe exists to prevent).
+#[path = "support/egress_backpressure.rs"]
+mod egress_backpressure;
+use egress_backpressure::rows_that_park_the_producer as rows_per_input;
 const NUM_INPUTS: usize = 4;
 
 fn make_schema() -> TableSchema {

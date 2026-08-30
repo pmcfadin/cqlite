@@ -315,10 +315,15 @@ fn the_merge_fan_in_sends_one_message_per_batch_and_loses_no_row() {
         "the average batch must carry more than one row (entries={entries}, \
          messages={messages})"
     );
+    // `peak_batch_rows` is a PROCESS-LIFETIME max (the probe exposes no per-run
+    // peak), so this is sound only as a lower-bound-style non-vacuity check: it
+    // says SOME run in this binary saturated the ramp, and this fixture is the
+    // only one large enough to. Stated so nobody later reads it as per-run.
     assert_eq!(
         after.peak_batch_rows, after.batch_emit_rows,
         "a {rows}-row run saturates the ramp, so some batch must be FULL — a peak \
-         below the cap would mean the reduction came from a short fixture"
+         below the cap would mean the reduction came from a short fixture. NOTE: \
+         peak_batch_rows is a process-LIFETIME max, not this run's peak"
     );
 }
 

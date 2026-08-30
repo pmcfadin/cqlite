@@ -105,18 +105,20 @@ fn write_fixture(n: i32) -> (TempDir, std::path::PathBuf) {
     (temp, data_path)
 }
 
-/// Rows a fixture must hold for its single producer to genuinely PARK in `send`,
-/// derived from the shipped constants (issue #2820): everything a full channel
-/// holds from a cold start, plus the full batch the producer then blocks trying to
-/// hand over, plus one row it cannot even accumulate. A hard-coded literal would
-/// re-rot the moment `BATCH_EMIT_ROWS_MERGE`, the ramp or the row budget moves.
+/// Rows a fixture must hold for its single producer to genuinely PARK in `send`
+/// (issue #2820), from the ONE place that sum lives —
+/// `EgressBatchProbe::rows_that_park_the_producer`: the cold-start channel fill,
+/// plus the batch the producer then blocks trying to hand over, plus one row it
+/// cannot even accumulate. Spelling it out here (as five sibling integration
+/// fixtures also did) re-rotted the moment the batch ceiling stopped being the
+/// flat `batch_emit_rows` — review round 2's defect, one level up.
 fn rows_that_park_the_producer() -> i32 {
     let probe = super::merge_egress_batch_probe();
-    let rows_cap = super::STREAMING_CHANNEL_CAPACITY;
-    let needed = probe.rows_in_full_channel(rows_cap) + probe.batch_emit_rows + 1;
     // Keep the historical 400-partition floor so the fixture also stays a
     // multi-partition scan (the "doesn't run to completion" half of the proof).
-    needed.max(400) as i32
+    probe
+        .rows_that_park_the_producer(super::STREAMING_CHANNEL_CAPACITY)
+        .max(400) as i32
 }
 
 /// Dropping a merger whose producer is BLOCKED on a full channel must not
@@ -225,7 +227,7 @@ fn a_cancel_wins_over_a_partially_drained_held_batch() {
         }
     }
     assert!(
-        adapter.held.len() > 0,
+        !adapter.held.as_slice().is_empty(),
         "test precondition: the adapter must be HOLDING undelivered entries of a \
          partially-drained batch, or 'cancel wins over a held batch' is vacuous"
     );
