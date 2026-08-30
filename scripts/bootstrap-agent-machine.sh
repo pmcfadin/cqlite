@@ -58,6 +58,12 @@
 #      machine's configured agent (commonly codex via .roborev.toml); we warn
 #      only if the local config is broken, never prescribe an agent.
 #   5. Datasets present + CQLITE_DATASETS_ROOT guidance.
+#   5b. Single-gate pin (issues #2640/#3414). Persists CQLITE_GATE_MAX_CONCURRENCY=1
+#      into /etc/environment — which PAM reads at SESSION CREATION, with no
+#      interactivity guard — and takes its VERDICT from an AFFIRMATIVE PROBE of a
+#      fresh, profile-free session, never from a grep of the file it just wrote.
+#      Three-valued on one greppable `gate-pin:` line: VERIFIED / FAILED /
+#      UNMEASURED, with UNMEASURED a [warn] (same posture as `git-push:`).
 #   6. Health check: run the gate's fmt component and print its authoritative
 #      `accelerators:` line.
 #
@@ -79,6 +85,16 @@
 #                                                      #   withholds "All checks green." and can
 #                                                      #   never buy a vacuous green. For offline
 #                                                      #   boxes and hermetic self-tests.
+#   bash scripts/bootstrap-agent-machine.sh --skip-gate-pin    # skip ONLY section 5b (the
+#                                                      #   single-gate pin: the /etc/environment
+#                                                      #   write AND the PAM-session visibility
+#                                                      #   probe). Same posture as
+#                                                      #   --skip-push-probe: it emits
+#                                                      #   `gate-pin: OPT-OUT` as a [warn], so it
+#                                                      #   can never buy a vacuous green.
+#                                                      #   CQLITE_BOOTSTRAP_SKIP_GATE_PIN=1 is the
+#                                                      #   env spelling, for harnesses that drive
+#                                                      #   bootstrap on a fixed command line.
 #   bash scripts/bootstrap-agent-machine.sh --skip-smoke   # skip the final GATE run (section 6).
 #                                                      #   DISTINCT from --skip-push-probe: this
 #                                                      #   one is about the gate fmt smoke, that
@@ -95,6 +111,20 @@ SKIP_SMOKE=0
 # --skip-smoke: --skip-smoke skips the GATE fmt run in section 6 and has nothing to do
 # with git. Two different subjects, two different flags (issue #3369).
 SKIP_PUSH_PROBE=0
+# --skip-gate-pin / CQLITE_BOOTSTRAP_SKIP_GATE_PIN=1 (issue #3414): skip section 5b
+# entirely — no /etc/environment write and no PAM session probe. A THIRD subject, so a
+# third switch, exactly as --skip-push-probe is separate from --skip-smoke. It is LOUD
+# and NON-PASSING (a `gate-pin: OPT-OUT` [warn]), so it withholds "All checks green."
+# and --strict still exits 1: an opt-out that returned `ok` would be a switch for buying
+# a vacuous green, which is the failure mode this whole section exists to remove. The
+# env spelling exists because the sibling self-suites drive bootstrap on fixed command
+# lines they cannot easily grow an argument on; both spellings take the same code path
+# and print the same non-passing verdict, and the message names which one was used.
+SKIP_GATE_PIN=0
+SKIP_GATE_PIN_HOW=""
+if [ "${CQLITE_BOOTSTRAP_SKIP_GATE_PIN:-0}" = 1 ]; then
+  SKIP_GATE_PIN=1; SKIP_GATE_PIN_HOW="CQLITE_BOOTSTRAP_SKIP_GATE_PIN=1"
+fi
 FIX_CREDENTIALS=0
 STRICT=0
 for arg in "$@"; do
@@ -102,6 +132,7 @@ for arg in "$@"; do
     --yes|-y) AUTO_YES=1 ;;
     --skip-smoke) SKIP_SMOKE=1 ;;
     --skip-push-probe) SKIP_PUSH_PROBE=1 ;;
+    --skip-gate-pin) SKIP_GATE_PIN=1; SKIP_GATE_PIN_HOW="--skip-gate-pin" ;;
     --fix-credentials) FIX_CREDENTIALS=1 ;;
     --strict) STRICT=1 ;;
     -h|--help)
@@ -1734,33 +1765,251 @@ info "  export CQLITE_DATASETS_ROOT=$MAIN_DATASETS"
 info "  Worktrees lack the gitignored Data.db binaries — always aim CQLITE_DATASETS_ROOT"
 info "  at the main checkout (above), NOT a worktree's own test-data/datasets."
 
-# ---- 5b. Single-gate default: one full gate per box (issue #2640) ----
-# One worker per machine (#1930) runs its full gates serially, so the DEFAULT
-# posture is a SINGLE full gate at a time. Pin CQLITE_GATE_MAX_CONCURRENCY=1 in the
-# shell profile so (a) the #1825 machine-wide cap admits exactly one full gate and
-# (b) the #2640 per-gate core budget hands that sole gate the FULL core count —
-# no CPU oversubscription, no manual pgrep-serialization. A machine that
-# deliberately wants >1 concurrent gate overrides the export.
-hdr "Single-gate default (CQLITE_GATE_MAX_CONCURRENCY=1, issue #2640)"
-PROFILE=""
-case "${SHELL:-}" in
-  */zsh) PROFILE="$HOME/.zshrc" ;;
-  */bash) PROFILE="$HOME/.bashrc" ;;
-  *) PROFILE="${ENV:-$HOME/.profile}" ;;
-esac
+# ---- 5b. Single-gate pin: one full gate per box (issues #2640 / #3414) ----
+# The #1825 machine-wide cap admits N concurrent full gates, and the #2640 per-gate
+# core budget derives each gate's core share from the SAME N — so pinning
+# CQLITE_GATE_MAX_CONCURRENCY=1 admits exactly one full gate and hands it the FULL core
+# count: no CPU oversubscription, no manual pgrep-serialization. A machine that
+# deliberately wants >1 concurrent gate overrides the pin, and bootstrap NEVER rewrites
+# an existing value.
+#
+# WHY THIS SECTION WAS REBUILT (issue #3414). It used to append the export to the shell
+# PROFILE and then report `ok` from a GREP OF THAT PROFILE — or, worse, from the value
+# it had INHERITED from its own caller. Both are PROXIES, and both were wrong on every
+# box in the fleet at once: Ubuntu's stock ~/.bashrc opens with
+# `case $- in *i*) ;; *) return;; esac`, so a line appended to it is never reached by
+# the non-interactive shells that actually launch gates (a script, a `bash -c`, a
+# detached `setsid`, a subagent). Measured: `ssh <box> 'echo $CQLITE_GATE_MAX_CONCURRENCY'`
+# printed UNSET on all three boxes whose profiles held the export; every gate therefore
+# resolved N=3 from the #1825 formula, and the live slot daemon's own argv said
+# `--slots 3` while an isolation guarantee had been given to a measurement lane on the
+# strength of the cap. PRESENCE IN A CONFIG FILE AND VISIBILITY TO THE PROCESS THAT
+# READS IT ARE DIFFERENT FACTS, and only the second one matters.
+#
+# So this section does two separable things, and only the second one can produce a
+# success verdict:
+#   (1) PERSIST where a non-interactive shell provably reads it — /etc/environment,
+#       read by PAM's pam_env at SESSION CREATION (`/etc/pam.d/sudo`, `/etc/pam.d/sshd`
+#       and `/etc/pam.d/login` all carry `pam_env.so readenv=1`), with no interactivity
+#       guard anywhere in the path. bash itself NEVER reads that file — measured,
+#       `env -i bash -c` AND `env -i bash -lc` both report UNSET — which is exactly why
+#       no shell-file check can answer this question, login shell or not.
+#   (2) PROBE a fresh, profile-free session and report what it actually saw.
+hdr "Single-gate pin (CQLITE_GATE_MAX_CONCURRENCY, issues #2640/#3414)"
+
+# The PRODUCTION persistence target, written as a LITERAL here. The privileged write
+# below can never name anything else (see the seam guard and the invariant assert).
+PIN_ENV_FILE=/etc/environment
+PIN_ENV_FILE_IS_SEAM=0
+PIN_SECTION_OK=1
+PIN_PERSIST_NOTE=""
+# NO INLINE COMMENT ON THE VALUE LINE: pam_env parses `KEY=VALUE` literally, so a
+# trailing `# ...` would become part of the value. Whole-line comments are skipped, so
+# the rationale goes on its own line above it.
+PIN_ENV_COMMENT='# cqlite: one full gate per box, full cores (issues #2640/#3414)'
+PIN_ENV_LINE='CQLITE_GATE_MAX_CONCURRENCY=1'
 EXPORT_LINE='export CQLITE_GATE_MAX_CONCURRENCY=1  # cqlite: one full gate per box, full cores (issue #2640)'
-if [ -n "${CQLITE_GATE_MAX_CONCURRENCY:-}" ]; then
-  ok "CQLITE_GATE_MAX_CONCURRENCY already set to '${CQLITE_GATE_MAX_CONCURRENCY}' in this environment"
-elif [ -n "$PROFILE" ] && [ -f "$PROFILE" ] && grep -q 'CQLITE_GATE_MAX_CONCURRENCY' "$PROFILE" 2>/dev/null; then
-  ok "CQLITE_GATE_MAX_CONCURRENCY already pinned in $PROFILE"
-elif [ "$AUTO_YES" = 1 ] && [ -n "$PROFILE" ]; then
-  printf '%s\n' "$EXPORT_LINE" >>"$PROFILE" \
-    && ok "pinned CQLITE_GATE_MAX_CONCURRENCY=1 in $PROFILE (re-source or open a new shell)" \
-    || warn "could not append to $PROFILE — add manually: $EXPORT_LINE"
-else
-  warn "CQLITE_GATE_MAX_CONCURRENCY not pinned — one full gate per box is the default posture (#2640)"
-  info "add to ${PROFILE:-your shell profile}:  $EXPORT_LINE"
-  info "(re-run with --yes to auto-append)"
+
+if [ "$SKIP_GATE_PIN" = 1 ]; then
+  warn "gate-pin: OPT-OUT ($SKIP_GATE_PIN_HOW) — the pin was NOT persisted and its visibility was NOT measured"
+  info "this run cannot certify that a non-interactive shell sees CQLITE_GATE_MAX_CONCURRENCY; drop the opt-out to measure it"
+  PIN_SECTION_OK=0
+fi
+
+if [ "$PIN_SECTION_OK" = 1 ] && [ -n "${CQLITE_BOOTSTRAP_ENV_FILE:-}" ]; then
+  # TEST-ONLY SEAM — fail-closed, with NO production fallback (the #3249 lesson: a test
+  # seam that degrades to the real path certifies the real path by accident). It exists
+  # so the self-tests can drive this section's DECISIONS without a privileged write to
+  # the real /etc/environment, including when a suite happens to run as root. Two
+  # properties keep it from being a hole of its own:
+  #   * it is inert unless CQLITE_BOOTSTRAP_TEST_MODE=1, and a seam set WITHOUT the
+  #     marker SKIPS the section rather than falling back, and
+  #   * under the marker the write is UNPRIVILEGED (PIN_ROOT is forced empty below), so
+  #     no environment variable can ever steer a PRIVILEGED write at a path of its
+  #     choosing — the privileged branch only ever names the literal /etc/environment.
+  if [ "${CQLITE_BOOTSTRAP_TEST_MODE:-0}" != 1 ]; then
+    warn "gate-pin: SKIPPED (CQLITE_BOOTSTRAP_ENV_FILE is set without CQLITE_BOOTSTRAP_TEST_MODE=1) — refusing to persist the pin at an env-chosen path"
+    PIN_SECTION_OK=0
+  else
+    case "$CQLITE_BOOTSTRAP_ENV_FILE" in
+      /etc/environment)
+        warn "gate-pin: SKIPPED (the test seam may not name the production /etc/environment)"
+        PIN_SECTION_OK=0 ;;
+      /*)
+        if [ -L "$CQLITE_BOOTSTRAP_ENV_FILE" ]; then
+          warn "gate-pin: SKIPPED (the test seam path is a SYMLINK — a write would follow it)"
+          PIN_SECTION_OK=0
+        elif [ ! -d "$(dirname "$CQLITE_BOOTSTRAP_ENV_FILE")" ]; then
+          warn "gate-pin: SKIPPED (the test seam's parent directory does not exist)"
+          PIN_SECTION_OK=0
+        else
+          PIN_ENV_FILE="$CQLITE_BOOTSTRAP_ENV_FILE"; PIN_ENV_FILE_IS_SEAM=1
+        fi ;;
+      *)
+        warn "gate-pin: SKIPPED (CQLITE_BOOTSTRAP_ENV_FILE must be an ABSOLUTE path)"
+        PIN_SECTION_OK=0 ;;
+    esac
+  fi
+fi
+
+if [ "$PIN_SECTION_OK" = 1 ]; then
+  # Privilege, resolved the same way section 2c resolves it: NON-INTERACTIVELY, so no
+  # code path here can ever sit on a password prompt on an unattended worker. The
+  # runas target of the AVAILABILITY probe is the same as the runas target of the real
+  # probe, so a box whose sudoers permits root-but-not-self cannot look available and
+  # then fail in the measurement.
+  PIN_ROOT=()
+  PIN_PRIV_STATE=unknown
+  PIN_SELF_USER=$(id -un 2>/dev/null || true)
+  PIN_SELF_UID=$(id -u 2>/dev/null || true)
+  if [ -z "$PIN_SELF_USER" ]; then
+    PIN_PRIV_STATE=no-identity
+  elif ! have sudo; then
+    PIN_PRIV_STATE=no-sudo-binary
+  elif ! bounded 10 sudo -n true >/dev/null 2>&1; then
+    PIN_PRIV_STATE=sudo-needs-password
+  elif ! bounded 10 sudo -n -u "$PIN_SELF_USER" true >/dev/null 2>&1; then
+    PIN_PRIV_STATE=sudo-runas-denied
+  else
+    PIN_PRIV_STATE=sudo-nopasswd
+  fi
+  # WRITE privilege and PROBE capability are separate facts: a root shell with no sudo
+  # binary can persist the pin but cannot open a probe session, and saying so is more
+  # useful than collapsing both into one state.
+  PIN_WRITE_PRIV=0
+  if [ "$PIN_SELF_UID" = 0 ]; then
+    PIN_WRITE_PRIV=1; PIN_ROOT=()
+  elif [ "$PIN_PRIV_STATE" = sudo-nopasswd ]; then
+    PIN_WRITE_PRIV=1; PIN_ROOT=(sudo -n)
+  fi
+  # Test mode never runs a PRIVILEGED write; the sandbox file belongs to the invoking
+  # user. Forcing PIN_ROOT empty is what makes "no env var can steer a privileged
+  # write" true IN CODE rather than merely by construction.
+  if [ "$PIN_ENV_FILE_IS_SEAM" = 1 ]; then PIN_ROOT=(); PIN_WRITE_PRIV=1; fi
+
+  # ---- (1) persist. Reported with info/warn ONLY — a write is never the verdict ----
+  if [ ! -e "$PIN_ENV_FILE" ]; then
+    PIN_PERSIST_NOTE="no $PIN_ENV_FILE on this host"
+    info "no $PIN_ENV_FILE on this $PLATFORM host — there is no PAM-read system-wide env file to persist the pin into"
+  elif [ -L "$PIN_ENV_FILE" ]; then
+    PIN_PERSIST_NOTE="$PIN_ENV_FILE is a SYMLINK"
+    warn "gate-pin: $PIN_ENV_FILE is a SYMLINK — refusing a privileged write that would follow it; nothing was persisted"
+  elif [ ! -r "$PIN_ENV_FILE" ]; then
+    PIN_PERSIST_NOTE="$PIN_ENV_FILE is unreadable"
+    warn "gate-pin: cannot read $PIN_ENV_FILE — cannot tell whether the pin is already there, so nothing was written (a blind append could duplicate or contradict an existing line)"
+  elif grep -Eq '^[[:space:]]*CQLITE_GATE_MAX_CONCURRENCY[[:space:]]*=' "$PIN_ENV_FILE" 2>/dev/null; then
+    info "$PIN_ENV_FILE already carries a CQLITE_GATE_MAX_CONCURRENCY line — left EXACTLY as it is (a box deliberately running >1 concurrent gate overrides the pin; bootstrap never rewrites an existing value)"
+  elif [ "$AUTO_YES" != 1 ]; then
+    PIN_PERSIST_NOTE="not persisted (no --yes)"
+    info "persist the pin:  bash scripts/bootstrap-agent-machine.sh --yes   (appends '$PIN_ENV_LINE' to $PIN_ENV_FILE)"
+  elif [ "$PIN_WRITE_PRIV" != 1 ]; then
+    PIN_PERSIST_NOTE="no privilege to write $PIN_ENV_FILE ($PIN_PRIV_STATE)"
+    warn "gate-pin: cannot write $PIN_ENV_FILE ($PIN_PRIV_STATE) — the pin was NOT persisted"
+    info "add these two lines as root:  $PIN_ENV_COMMENT / $PIN_ENV_LINE"
+  elif [ "${#PIN_ROOT[@]}" -gt 0 ] && [ "$PIN_ENV_FILE" != /etc/environment ]; then
+    # INVARIANT, enforced rather than argued. The seam forces PIN_ROOT empty above, so
+    # this can only fire if that coupling is ever broken by a later edit.
+    PIN_PERSIST_NOTE="internal invariant refused the write"
+    warn "gate-pin: INTERNAL — refusing a PRIVILEGED write to a non-production path ($PIN_ENV_FILE)"
+  else
+    # A file whose last byte is not a newline would otherwise have our KEY=VALUE welded
+    # onto its final line, and pam_env would read the result as one malformed entry.
+    # Prepend a newline in that case only; the append happens at most once per box, so
+    # this can never accumulate blank lines.
+    pin_prefix=""
+    if [ -s "$PIN_ENV_FILE" ] && [ -n "$(tail -c 1 "$PIN_ENV_FILE" 2>/dev/null)" ]; then
+      pin_prefix=$'\n'
+    fi
+    # Appended at the END, after any managed marker block the image owner put in the
+    # file (this fleet's images carry a `# >>> agent-ami worker auth >>>` block), so
+    # nothing already there is disturbed.
+    if printf '%s%s\n%s\n' "$pin_prefix" "$PIN_ENV_COMMENT" "$PIN_ENV_LINE" \
+         | ${PIN_ROOT[@]+"${PIN_ROOT[@]}"} tee -a "$PIN_ENV_FILE" >/dev/null 2>&1; then
+      info "appended '$PIN_ENV_LINE' to $PIN_ENV_FILE — PAM reads it at session creation, so NEW sessions pick it up with no reboot and no re-login"
+    else
+      PIN_PERSIST_NOTE="the append to $PIN_ENV_FILE failed"
+      warn "gate-pin: the append to $PIN_ENV_FILE FAILED — the pin was NOT persisted"
+      info "add these two lines as root:  $PIN_ENV_COMMENT / $PIN_ENV_LINE"
+    fi
+  fi
+
+  # The shell-profile export is kept for INTERACTIVE convenience only — a human who
+  # opens a terminal and runs the gate by hand. It is reported with `info`, NEVER `ok`:
+  # a profile line is precisely the artifact whose presence certified nothing for
+  # months, and letting it produce a success verdict anywhere would reintroduce #3414.
+  PROFILE=""
+  case "${SHELL:-}" in
+    */zsh) PROFILE="$HOME/.zshrc" ;;
+    */bash) PROFILE="$HOME/.bashrc" ;;
+    *) PROFILE="${ENV:-$HOME/.profile}" ;;
+  esac
+  if [ -n "$PROFILE" ] && [ -f "$PROFILE" ] && grep -q 'CQLITE_GATE_MAX_CONCURRENCY' "$PROFILE" 2>/dev/null; then
+    info "$PROFILE already carries the export — INTERACTIVE shells only (stock ~/.bashrc returns early for non-interactive ones), so it says nothing about the shell a gate runs in"
+  elif [ "$AUTO_YES" = 1 ] && [ -n "$PROFILE" ]; then
+    if printf '%s\n' "$EXPORT_LINE" >>"$PROFILE" 2>/dev/null; then
+      info "appended the export to $PROFILE for INTERACTIVE shells (convenience only — the verdict below comes from the session probe, not from this file)"
+    else
+      info "could not append to $PROFILE (interactive convenience only) — add by hand: $EXPORT_LINE"
+    fi
+  fi
+
+  # ---- (2) THE VERDICT: an affirmative probe of a fresh, profile-free session ----
+  #
+  # THE SCRUB IS THE LOAD-BEARING PART. Bootstrap normally runs inside a session that
+  # already inherited the value, so an UNSCRUBBED probe returns it on a box where
+  # nothing is persisted at all — the same false positive as the old profile grep, one
+  # level up, and it would certify the very failure this section exists to catch.
+  # `env -u` removes it from the process handed to sudo; sudoers' `Defaults env_reset`
+  # is belt, not braces, since a box without env_reset would pass an inherited value
+  # straight through.
+  #
+  # NO `-i`. With no profile file read, a value that comes back can only have come from
+  # PAM, so the probe ATTRIBUTES as well as detects. Negative control, run by hand on
+  # the box this was written on: a variable exported in the parent shell but absent
+  # from /etc/environment reads UNSET through this probe, while the persisted pin
+  # reads 1.
+  #
+  # The bound may degrade to SIGTERM-only (a `timeout` without --kill-after) — tolerated
+  # HERE, unlike the §3b push probe, because this probe is LOCAL, NON-MUTATING and
+  # `sudo -n` never prompts, so there is nothing for a wedged child to hold open. What
+  # is NOT tolerated is running it UNBOUNDED: hanging the fleet's provisioning entry
+  # point is worse than an unmeasured verdict.
+  PIN_PROBE_BOUND=20
+  if [ -z "$TIMEOUT_BIN" ]; then
+    warn "gate-pin: UNMEASURED (no timeout/gtimeout on PATH — refusing to run an UNBOUNDED session probe during bootstrap)"
+    info "install GNU coreutils so the probe can be bounded (macOS: brew install coreutils), then re-run"
+  elif [ "$PIN_PRIV_STATE" = no-identity ]; then
+    warn "gate-pin: UNMEASURED ('id -un' reported no identity, so there is no user to open a probe session as — pin visibility is UNKNOWN, not ok)"
+  elif [ "$PIN_PRIV_STATE" = no-sudo-binary ]; then
+    warn "gate-pin: UNMEASURED (no 'sudo' on this box, so no fresh PAM session can be created — pin visibility is UNKNOWN, not ok)"
+    info "check by hand from a session that reads no profile:  sudo -u <you> bash -c 'echo \${CQLITE_GATE_MAX_CONCURRENCY:-UNSET}'"
+  elif [ "$PIN_PRIV_STATE" = sudo-needs-password ]; then
+    warn "gate-pin: UNMEASURED (sudo needs a password here and bootstrap probes with 'sudo -n', which never prompts — pin visibility is UNKNOWN, not ok)"
+    info "authenticate first, then re-run:  sudo -v && bash scripts/bootstrap-agent-machine.sh --yes"
+  elif [ "$PIN_PRIV_STATE" = sudo-runas-denied ]; then
+    warn "gate-pin: UNMEASURED (sudo works but will not run a command as '$PIN_SELF_USER', so no probe session could be opened — pin visibility is UNKNOWN, not ok)"
+  else
+    pin_probe_rc=0
+    pin_probe_out=$(bounded "$PIN_PROBE_BOUND" env -u CQLITE_GATE_MAX_CONCURRENCY \
+      sudo -n -u "$PIN_SELF_USER" \
+      bash -c 'printf "cqlite-gate-pin-probe=%s\n" "${CQLITE_GATE_MAX_CONCURRENCY-}"' 2>/dev/null) || pin_probe_rc=$?
+    # Anchored on our own marker at line start, and the value is read from the FIRST
+    # matching line: the probe's stdout can also carry a shell's own noise, and a
+    # verdict decided by an unanchored match would be decided by whatever else printed.
+    pin_probe_seen=$(printf '%s\n' "$pin_probe_out" | sed -n 's/^cqlite-gate-pin-probe=//p' | head -1)
+    if [ "$pin_probe_rc" = 124 ] || [ "$pin_probe_rc" = 137 ]; then
+      warn "gate-pin: UNMEASURED (the probe exceeded its ${PIN_PROBE_BOUND}s bound and was killed — pin visibility is UNKNOWN, not ok)"
+    elif ! printf '%s\n' "$pin_probe_out" | grep -q '^cqlite-gate-pin-probe='; then
+      warn "gate-pin: UNMEASURED (the probe session produced no cqlite-gate-pin-probe= line, rc=$pin_probe_rc — pin visibility is UNKNOWN, not ok)"
+    elif [ -n "$pin_probe_seen" ]; then
+      ok "gate-pin: VERIFIED (a fresh profile-free session sees CQLITE_GATE_MAX_CONCURRENCY=$pin_probe_seen; this run's own value was scrubbed first, so it came from the system env file via PAM, not from inheritance)"
+    else
+      warn "gate-pin: FAILED (a fresh profile-free session does NOT see CQLITE_GATE_MAX_CONCURRENCY — every non-interactive gate on this box will resolve the #1825 cap from the default formula and admit co-tenants, #3414)"
+      [ -n "$PIN_PERSIST_NOTE" ] && info "nothing was persisted this run: $PIN_PERSIST_NOTE"
+      info "fix:  bash scripts/bootstrap-agent-machine.sh --yes   (appends '$PIN_ENV_LINE' to /etc/environment)"
+      info "the gate reports the same fact on its cpu-budget line as max-concurrency=N(default) instead of N(pinned)"
+    fi
+  fi
 fi
 
 # ---- 5c. Notification channel (ntfy) — issue #3119 ----

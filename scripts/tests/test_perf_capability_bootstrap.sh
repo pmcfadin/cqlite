@@ -32,6 +32,18 @@ set -uo pipefail
 # shellcheck source=scripts/tests/lib/perf-capability-test-lib.sh
 . "$(cd "$(dirname "$0")" && pwd)/lib/perf-capability-test-lib.sh"
 
+# --- KEEP BOOTSTRAP'S SINGLE-GATE PIN SECTION OUT OF THIS SUITE (issue #3414) ------
+# Section 5b probes PAM visibility with `sudo -n -u <self> …` and, under --yes,
+# persists to /etc/environment. Neither is this suite's subject, and both would land
+# in the perf TRIPWIRES below — whose asserts read EVERY `^sudo ` line and would
+# report the pin probe as a perf-section mutation — and, on a root-run box, in the
+# real /etc/environment. The pin section's own loud, non-passing opt-out keeps it
+# entirely out of the way; exported ONCE here so a case added later inherits it
+# without having to remember (same posture as the GIT_CONFIG_GLOBAL isolation in the
+# sibling bootstrap suite). Section 5b's own coverage lives in
+# scripts/tests/test_bootstrap_agent_machine.sh.
+export CQLITE_BOOTSTRAP_SKIP_GATE_PIN=1
+
 # --- WHOLE-SUITE CAPABILITY GATE (issue #3261, roborev round 6, Medium) ----------------------
 # EVERY case below drives bootstrap's perf section, and that section stages the drop-in through
 # GNU `stat -c` and `mv --no-target-directory`. The sibling suite grew a per-case skip; this one
