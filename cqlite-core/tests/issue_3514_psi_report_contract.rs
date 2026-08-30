@@ -301,20 +301,35 @@ fn holding_within_budget_yields_drained() {
 /// never demonstrably HELD there for `min_span` must yield `Unconfirmed`, never
 /// `Drained`.
 ///
-/// Constructed with `min_span > timeout`, which makes the property hold with ZERO
-/// timing assumptions: no hold of that length can fit inside the budget however the
-/// host schedules this thread, while the count is trivially within the (very high)
-/// threshold at every poll. So the ONLY thing that can produce `Drained` here is an
-/// implementation that accepts on the instantaneous reading instead of a held one —
-/// which is precisely the defect.
+/// Constructed with `min_span = Duration::MAX`, so "never held" is UNCONDITIONAL:
+/// `unchanged_since.elapsed()` is bounded by this process's uptime and therefore
+/// can never reach it, whatever the host does. The count meanwhile sits trivially
+/// within the (very high) threshold at every poll, so the ONLY thing that can
+/// produce `Drained` here is an implementation that accepts on the instantaneous
+/// reading instead of a held one — which is precisely the defect.
+///
+/// `Duration::MAX` is safe as a `min_span`: it flows into exactly one expression, the
+/// `unchanged_since.elapsed() >= min_span` comparison, and into no arithmetic — so
+/// there is nothing to overflow. (The `Instant::now() + timeout` addition uses
+/// `timeout`, which is 300 ms here.)
+///
+/// An earlier version used `min_span = 30s > timeout = 300ms` and claimed it "cannot
+/// flake in either direction". That claim was too strong, and roborev r6 was right
+/// to push on it: the deadline is evaluated only at the top of the loop, so a
+/// ~30-second deschedule INSIDE one iteration — after the loop-condition check,
+/// before the `elapsed()` evaluation — could satisfy the span and return `Drained`,
+/// failing this test. Implausible, but "implausible" is not the standard for a test
+/// whose entire purpose is determinism, and `Duration::MAX` removes the scheduling
+/// dependency instead of making it rarer. (The permissive deadline behaviour itself
+/// is CORRECT and deliberate — see "the deadline bounds CONDEMNATION only" on
+/// `poll_until_reaped`; it is this test that was leaning on it.)
 ///
 /// This deliberately generalizes the "dip arriving as the deadline expires" case
 /// rather than staging that dip literally with real threads. A literal dip has to be
 /// timed against the poll's own deadline, and a main-thread deschedule between the
 /// two clocks moves the answer to `Drained` — i.e. it would be a FALSE FAILURE under
 /// exactly the load this issue is about. The generalized form ("an acceptable value
-/// that never held is never accepted") covers the dip as a special case and cannot
-/// flake in either direction.
+/// that never held is never accepted") covers the dip as a special case.
 #[test]
 fn within_budget_but_never_held_yields_unconfirmed() {
     if !thread_count_observable() {
@@ -323,8 +338,8 @@ fn within_budget_but_never_held_yields_unconfirmed() {
     let observed = os_thread_count().expect("just checked");
     match poll_until_reaped(
         observed + 50,              // within budget at every poll
-        Duration::from_secs(30),    // a span that CANNOT fit in the budget
-        Duration::from_millis(300), // ...which expires first, by construction
+        Duration::MAX,              // a span NO elapsed() can ever satisfy
+        Duration::from_millis(300), // ...so the budget always expires first
     ) {
         ReapOutcome::Unconfirmed { peak, last } => {
             assert!(
@@ -340,8 +355,9 @@ fn within_budget_but_never_held_yields_unconfirmed() {
         ReapOutcome::Drained { peak, settled } => panic!(
             "ACCEPTANCE WAS NOT AFFIRMATIVE (roborev job 61 regression): a count \
              within budget that never HELD for min_span was accepted as Drained \
-             (peak={peak}, settled={settled}). min_span was longer than the whole \
-             timeout, so no hold could have been observed — this can only be an \
+             (peak={peak}, settled={settled}). min_span was `Duration::MAX`, which \
+             no elapsed() can ever reach, so no hold could have been observed under \
+             any scheduling whatsoever — this can only be an \
              implementation accepting the instantaneous reading, which is what let a \
              deadline-time dip pass the pin before ReapOutcome existed"
         ),

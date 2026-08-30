@@ -464,7 +464,9 @@ pub enum ReapOutcome {
 }
 
 /// Poll until the blocking pool has demonstrably drained to `accept_at_or_below`
-/// and held there for `min_span`, or until `timeout` expires.
+/// and held there for `min_span`, or until `timeout` expires WITHOUT such a
+/// reading. Note the asymmetry in that sentence, and see "the deadline bounds
+/// CONDEMNATION only" below — it is deliberate, and it is load-bearing.
 ///
 /// The discriminator is mechanical, not statistical:
 ///
@@ -496,6 +498,42 @@ pub enum ReapOutcome {
 /// Timing out yields [`ReapOutcome::Unconfirmed`], which FAILS the pin. Failing
 /// closed is the right direction: an unconfirmable measurement is not evidence of
 /// good behaviour.
+///
+/// ## The deadline bounds CONDEMNATION only — not acceptance (#3514 r5)
+///
+/// `timeout` is checked ONCE per iteration, at the top of the loop, and is
+/// deliberately NOT re-checked before the accept branch. So if this thread is
+/// descheduled after entering an iteration, it can resume past the deadline and
+/// still return [`ReapOutcome::Drained`]. **That is intended behaviour, not an
+/// oversight**, and the contract is therefore:
+///
+/// * a reading that is in-budget AND has held for `min_span` is ACCEPTED, even if
+///   the sample that observed it landed after the deadline;
+/// * only CONDEMNATION (`Unconfirmed`) is bounded by `timeout`.
+///
+/// Re-checking the deadline before the accept branch — the obvious "fix", proposed
+/// on roborev r6 — would report `Unconfirmed`, i.e. a FAIL, for a run that
+/// genuinely observed the pool drain and hold for the full span, purely because
+/// the final sample landed late. And a sample lands late precisely when the host
+/// is starved, so that is a **starvation-induced false failure**: exactly the
+/// defect class this module exists to remove, and the opposite of the job-60
+/// asymmetry above (patient before failing; accept fast, take the full budget
+/// before condemning). A late `Drained` is a TRUE statement — the threads did
+/// drain and did hold. An `Unconfirmed` written over the top of it is a false one.
+///
+/// The extra patience cannot mask an amplification, for the same reason the
+/// paragraph above gives: `Drained` still requires an in-budget count HELD for
+/// `min_span`, and an amplification's runtime workers are not reapable while
+/// their runtime lives — which it does, until the caller drains the merge,
+/// strictly after this call. Nor does the overshoot matter to any caller: both
+/// pins use only the returned variant, and an overshoot of one sample interval is
+/// immaterial against the ~115 s of nextest headroom quantified on
+/// [`reap_confirm_timeout`] (and a stall large enough to matter would be caught by
+/// nextest's hung-test kill regardless of what this function returned).
+///
+/// So: do NOT "fix" the missing deadline re-check. If you are here because a
+/// reviewer flagged it, the drift they found was in this documentation, and it is
+/// fixed by these paragraphs.
 pub fn poll_until_reaped(
     accept_at_or_below: usize,
     min_span: Duration,
@@ -516,6 +554,15 @@ pub fn poll_until_reaped(
         if last == Some(n) {
             // Accept ONLY a reading that is both within budget AND has HELD there
             // for the full span. Either half alone is not a confirmation.
+            //
+            // The deadline is deliberately NOT re-checked here (#3514 r5): if this
+            // thread was descheduled after the loop-condition check, a reading
+            // that genuinely drained and held is still accepted. Condemnation is
+            // bounded by `timeout`; acceptance is not. Adding a deadline check on
+            // this branch would turn a true "it drained and held" into a FAIL
+            // whenever the final sample lands late — i.e. under starvation, which
+            // is the false-failure class this module removes. See the "deadline
+            // bounds CONDEMNATION only" section on this function.
             if n <= accept_at_or_below && unchanged_since.elapsed() >= min_span {
                 return ReapOutcome::Drained { peak, settled: n };
             }
