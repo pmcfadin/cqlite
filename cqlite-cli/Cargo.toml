@@ -101,6 +101,15 @@ duckdb = { version = "1.1", features = ["bundled", "parquet"], optional = true }
 # lives in cqlite-core behind its `parquet` feature, Epic #682)
 arrow = { workspace = true }
 parquet = { workspace = true }
+# Issue #1490: the Parquet-vs-sstabledump-JSONL value-parity harness parses the
+# goldens' float literals with serde_json, and serde_json's DEFAULT float parser
+# is approximate — measured: `1014.5449131979983` (a real `test_timeseries.sensor_data`
+# `double`) parses ONE ULP high, while `str::parse::<f64>` is exact. That made the
+# ORACLE wrong, reporting a divergence in correct export output. `float_roundtrip`
+# makes the parse exact. Enabled here (dev only) so the parity oracle is sound;
+# `tests/issue_1490_parquet_jsonl_parity.rs::golden_float_literals_parse_exactly`
+# fails if it is ever dropped.
+serde_json = { workspace = true, features = ["float_roundtrip"] }
 num-bigint = "0.4"
 bytes = { workspace = true }
 tempfile = { workspace = true }
