@@ -56,6 +56,19 @@ export GIT_CONFIG_GLOBAL="$tmp/global-gitconfig"
 export GIT_CONFIG_NOSYSTEM=1
 : >"$GIT_CONFIG_GLOBAL"
 
+# --- /etc/environment isolation for the single-gate pin (issue #3414) -------
+# Section 5b persists CQLITE_GATE_MAX_CONCURRENCY into /etc/environment under --yes,
+# and several cases below run bootstrap with --yes. Without this the suite's verdict
+# would depend on the host's real system env file — and, on a root-run box, would
+# MUTATE it. The section's test seam redirects the write into this sandbox and, under
+# the required CQLITE_BOOTSTRAP_TEST_MODE marker, makes that write UNPRIVILEGED, so no
+# case here can reach a privileged write at all. Exported ONCE, like GIT_CONFIG_GLOBAL
+# above, so a case added later inherits the isolation without remembering to opt in;
+# the pin cases below override the FILE per case and leave the marker alone.
+export CQLITE_BOOTSTRAP_TEST_MODE=1
+export CQLITE_BOOTSTRAP_ENV_FILE="$tmp/etc-environment"
+: >"$CQLITE_BOOTSTRAP_ENV_FILE"
+
 # --- REAL-ORIGIN isolation for the push probe (issue #3369) ----------------
 # Section 3b now MEASURES push capability by actually pushing a throwaway
 # refs/claims/smoke-<commit-sha> ref (scripts/flow/claim.sh smoke). Every case that runs
@@ -2318,6 +2331,249 @@ if mknotifyroot "$tmp/notify-notarget" good; then
   fi
 else
   bad "notify no-target: could not stage the tree"
+fi
+
+# --- 11. Single-gate pin: the VERDICT is a session PROBE, not a file read (#3414) ---
+# The defect this closes, in the section's own words: it reported `ok` from a GREP of
+# the shell profile it had just written, or from the value it had INHERITED from its
+# own caller. Both were true on every fleet box at once while NO gate could see the
+# pin — Ubuntu's stock ~/.bashrc returns early for non-interactive shells — so every
+# gate resolved the #1825 cap from the default formula and admitted co-tenants.
+#
+# These cases assert the VERDICT, in the shape case 10 above established: a NEGATIVE
+# that the old code would have passed, its POSITIVE twin, and the degraded states that
+# must warn rather than pass. The probe's fresh PAM session is stood in for by a `sudo`
+# PATH shim, so nothing here needs sudo, root, or the host's real /etc/environment.
+
+# mkpinshims <dir> <persisted-value|-> : a hermetic PATH whose `sudo` stands in for a
+# fresh, profile-free session. `-` = a box where NOTHING is persisted system-wide, so
+# the session starts from exactly the environment it was handed and injects nothing —
+# which is what makes it able to catch a bootstrap that forgot to scrub its own
+# inherited value. A value = a box where the pin IS persisted: the session injects it,
+# as pam_env would from /etc/environment.
+mkpinshims() {
+  local dir="$1" val="$2" t bin
+  mk_hermetic_bin "$dir"
+  # mk_hermetic_bin links the coreutils the mold/cred cases need; the pin section also
+  # needs `id` (to name the probe's runas user), `tee` (the append) and `true` (the
+  # `sudo -n true` availability probe — the shim EXECs it, and on a hermetic PATH a
+  # missing /usr/bin/true makes that probe look like a sudo that needs a password).
+  for t in id tee true; do
+    bin=$(type -P "$t" 2>/dev/null) || continue
+    [ -n "$bin" ] && ln -sf "$bin" "$dir/$t" 2>/dev/null || true
+  done
+  if [ "$val" = "-" ]; then
+    mk_stub "$dir" sudo 'while [ "${1:-}" = "-n" ]; do shift; done
+if [ "${1:-}" = "-u" ]; then shift 2; fi
+exec "$@"'
+  else
+    mk_stub "$dir" sudo "while [ \"\${1:-}\" = \"-n\" ]; do shift; done
+if [ \"\${1:-}\" = \"-u\" ]; then shift 2; fi
+exec env CQLITE_GATE_MAX_CONCURRENCY=$val \"\$@\""
+  fi
+}
+
+# runpin <root-dir> <shim-dir> <env-file> [NAME=VALUE...] [--flag...] — one bootstrap
+# run. NAME=VALUE arguments become environment; anything starting with `-` becomes a
+# bootstrap flag. HOME is per-call so a case can control what the shell profile says.
+#
+# CQLITE_GATE_MAX_CONCURRENCY IS SCRUBBED FROM EVERY CALL, and a case that wants it set
+# passes it explicitly: this suite runs on fleet boxes that export the pin, so an
+# inherited value would otherwise decide 11b's verdict instead of the case's own input.
+# `env` applies its `-u` options before the NAME=VALUE assignments, so passing it still
+# works.
+runpin() {
+  local root="$1" shims="$2" envfile="$3"; shift 3
+  local -a pin_env=() pin_flags=()
+  local a
+  for a in "$@"; do
+    case "$a" in
+      -*) pin_flags+=("$a") ;;
+      *) pin_env+=("$a") ;;
+    esac
+  done
+  env -u CQLITE_GATE_MAX_CONCURRENCY \
+    PATH="$shims" CARGO_HOME="$tmp/pin-cargo" \
+    CQLITE_BOOTSTRAP_TEST_MODE=1 CQLITE_BOOTSTRAP_ENV_FILE="$envfile" \
+    ${pin_env[@]+"${pin_env[@]}"} \
+    timeout -s KILL 300 bash "$root/scripts/bootstrap-agent-machine.sh" \
+      --skip-smoke ${pin_flags[@]+"${pin_flags[@]}"} 2>&1
+}
+
+pinroot="$tmp/pin-root"
+if ! mknotifyroot "$pinroot" good; then
+  bad "gate-pin: could not stage the bootstrap tree"
+else
+  mkdir -p "$tmp/pin-cargo"
+  pin_home_plain="$tmp/pin-home-plain"; mkdir -p "$pin_home_plain/.cargo"
+
+  # 11a. THE CASE. Nothing is persisted, but bootstrap's OWN environment carries the
+  #      value — which is the normal state of a re-run on a fleet box. An unscrubbed
+  #      probe returns the inherited value and reports the box healthy, i.e. it
+  #      certifies exactly the failure this section exists to catch. Must be FAILED.
+  shims_none="$tmp/pin-shims-none"; mkpinshims "$shims_none" -
+  envf_a="$tmp/pin-env-a"; : >"$envf_a"
+  out_a=$(runpin "$pinroot" "$shims_none" "$envf_a" HOME="$pin_home_plain" \
+    CQLITE_GATE_MAX_CONCURRENCY=7)
+  if printf '%s' "$out_a" | grep -q 'gate-pin: FAILED' \
+     && ! printf '%s' "$out_a" | grep -q 'gate-pin: VERIFIED'; then
+    ok "gate-pin: an INHERITED-but-not-persisted value is FAILED, never VERIFIED (the scrub is honoured)"
+  else
+    bad "gate-pin: an inherited value was accepted as evidence the box is pinned"
+    printf '%s\n' "$out_a" | grep -i 'gate-pin' | head -3
+  fi
+
+  # 11b. POSITIVE twin: the pin IS visible to a fresh session (and this run's own
+  #      environment does NOT carry it), so VERIFIED must be reachable. Without this,
+  #      11a would also pass against a section that can only ever say FAILED.
+  shims_one="$tmp/pin-shims-one"; mkpinshims "$shims_one" 1
+  envf_b="$tmp/pin-env-b"; printf 'CQLITE_GATE_MAX_CONCURRENCY=1\n' >"$envf_b"
+  out_b=$(runpin "$pinroot" "$shims_one" "$envf_b" HOME="$pin_home_plain")
+  if printf '%s' "$out_b" | grep -q 'gate-pin: VERIFIED' \
+     && ! printf '%s' "$out_b" | grep -q 'gate-pin: FAILED'; then
+    ok "gate-pin: a pin a fresh profile-free session CAN see is reported VERIFIED"
+  else
+    bad "gate-pin: a genuinely visible pin was not reported VERIFIED"
+    printf '%s\n' "$out_b" | grep -i 'gate-pin' | head -3
+  fi
+
+  # 11c. NO SUDO BINARY: no session can be created, so nothing was measured. It must
+  #      warn — an unmeasured capability may never inherit the permissive branch.
+  shims_nosudo="$tmp/pin-shims-nosudo"; mkpinshims "$shims_nosudo" -; rm -f "$shims_nosudo/sudo"
+  envf_c="$tmp/pin-env-c"; : >"$envf_c"
+  out_c=$(runpin "$pinroot" "$shims_nosudo" "$envf_c" HOME="$pin_home_plain" \
+    CQLITE_GATE_MAX_CONCURRENCY=7)
+  if printf '%s' "$out_c" | grep -qE '\[warn\].*gate-pin: UNMEASURED' \
+     && printf '%s' "$out_c" | grep -q "no 'sudo' on this box" \
+     && ! printf '%s' "$out_c" | grep -qE '\[ok\].*gate-pin'; then
+    ok "gate-pin: no sudo binary => UNMEASURED as a [warn], never an [ok]"
+  else
+    bad "gate-pin: a box with no sudo did not report UNMEASURED-as-a-warn"
+    printf '%s\n' "$out_c" | grep -i 'gate-pin' | head -3
+  fi
+
+  # 11d. SUDO NEEDS A PASSWORD: `sudo -n` never prompts, so the probe cannot run.
+  #      Same posture, different cause text — a remedy that names the wrong cause
+  #      costs the operator a cycle before they learn it does not apply.
+  shims_pw="$tmp/pin-shims-pw"; mkpinshims "$shims_pw" -; mk_stub "$shims_pw" sudo 'exit 1'
+  envf_d="$tmp/pin-env-d"; : >"$envf_d"
+  out_d=$(runpin "$pinroot" "$shims_pw" "$envf_d" HOME="$pin_home_plain" \
+    CQLITE_GATE_MAX_CONCURRENCY=7)
+  if printf '%s' "$out_d" | grep -qE '\[warn\].*gate-pin: UNMEASURED' \
+     && printf '%s' "$out_d" | grep -q 'sudo needs a password' \
+     && ! printf '%s' "$out_d" | grep -qE '\[ok\].*gate-pin'; then
+    ok "gate-pin: passwordless sudo unavailable => UNMEASURED as a [warn], with its own cause"
+  else
+    bad "gate-pin: a password-requiring sudo did not report UNMEASURED-as-a-warn"
+    printf '%s\n' "$out_d" | grep -i 'gate-pin' | head -3
+  fi
+
+  # 11e. --yes PERSISTS into the system env file, and does so IDEMPOTENTLY. Two runs
+  #      must leave exactly one CQLITE_GATE_MAX_CONCURRENCY line: /etc/environment is
+  #      a hot, hand-edited file and a bootstrap that appends on every re-run would
+  #      grow it without bound.
+  envf_e="$tmp/pin-env-e"; : >"$envf_e"
+  runpin "$pinroot" "$shims_none" "$envf_e" HOME="$pin_home_plain" --yes >/dev/null 2>&1
+  runpin "$pinroot" "$shims_none" "$envf_e" HOME="$pin_home_plain" --yes >/dev/null 2>&1
+  pin_e_n=$(grep -c '^CQLITE_GATE_MAX_CONCURRENCY=1$' "$envf_e" 2>/dev/null || true)
+  if [ "${pin_e_n:-0}" = 1 ]; then
+    ok "gate-pin: --yes persists the pin into the system env file, idempotently across re-runs"
+  else
+    bad "gate-pin: expected exactly one persisted pin line, got ${pin_e_n:-0}"
+    cat "$envf_e"
+  fi
+
+  # 11f. AN EXISTING VALUE IS NEVER REWRITTEN. A box deliberately running >1
+  #      concurrent gate overrides the pin, and clobbering that back to 1 on the next
+  #      bootstrap would be a silent regression of a deliberate operator decision.
+  envf_f="$tmp/pin-env-f"; printf 'CQLITE_GATE_MAX_CONCURRENCY=4\n' >"$envf_f"
+  runpin "$pinroot" "$shims_none" "$envf_f" HOME="$pin_home_plain" --yes >/dev/null 2>&1
+  if [ "$(cat "$envf_f")" = "CQLITE_GATE_MAX_CONCURRENCY=4" ]; then
+    ok "gate-pin: an existing CQLITE_GATE_MAX_CONCURRENCY value is left EXACTLY as it is"
+  else
+    bad "gate-pin: --yes rewrote a deliberate override"
+    cat "$envf_f"
+  fi
+
+  # 11g. A file whose last byte is not a newline must not have the pin welded onto its
+  #      final line — pam_env would read the join as one malformed entry, i.e. the
+  #      write would silently un-persist whatever was already there.
+  envf_g="$tmp/pin-env-g"; printf 'FOO=bar' >"$envf_g"
+  runpin "$pinroot" "$shims_none" "$envf_g" HOME="$pin_home_plain" --yes >/dev/null 2>&1
+  if grep -q '^FOO=bar$' "$envf_g" && grep -q '^CQLITE_GATE_MAX_CONCURRENCY=1$' "$envf_g"; then
+    ok "gate-pin: appending to a file with no trailing newline keeps both lines intact"
+  else
+    bad "gate-pin: the append welded onto the previous line"
+    cat -A "$envf_g" | head -3
+  fi
+
+  # 11h. PRESENCE IN A PROFILE CAN NO LONGER REPORT SUCCESS. The profile carries the
+  #      export AND this run inherits the value — the exact pair of proxies the old
+  #      code passed on — while nothing is persisted where a session reads it.
+  pin_home_prof="$tmp/pin-home-prof"; mkdir -p "$pin_home_prof/.cargo"
+  printf 'export CQLITE_GATE_MAX_CONCURRENCY=1\n' >"$pin_home_prof/.bashrc"
+  envf_h="$tmp/pin-env-h"; : >"$envf_h"
+  out_h=$(runpin "$pinroot" "$shims_none" "$envf_h" HOME="$pin_home_prof" \
+    SHELL=/bin/bash CQLITE_GATE_MAX_CONCURRENCY=7)
+  if printf '%s' "$out_h" | grep -q 'gate-pin: FAILED' \
+     && ! printf '%s' "$out_h" | grep -qE '\[ok\].*(gate-pin|CQLITE_GATE_MAX_CONCURRENCY)'; then
+    ok "gate-pin: a profile that carries the export produces NO success verdict"
+  else
+    bad "gate-pin: a profile grep (or the inherited value) still bought a success verdict"
+    printf '%s\n' "$out_h" | grep -iE 'gate-pin|CQLITE_GATE_MAX_CONCURRENCY' | head -4
+  fi
+
+  # 11i. STRUCTURAL, because the behavioural cases above can only cover the branches
+  #      someone thought of: section 5b must contain EXACTLY ONE `ok` call, and it
+  #      must be the probe's VERIFIED verdict. Any future `ok` added for a file write,
+  #      a profile grep or an inherited value reds this immediately.
+  pin_section=$(awk '/^# ---- 5b\./,/^# ---- 5c\./' "$BOOTSTRAP")
+  pin_ok_total=$(printf '%s\n' "$pin_section" | grep -cE '^[[:space:]]*ok "' || true)
+  pin_ok_verified=$(printf '%s\n' "$pin_section" | grep -cE '^[[:space:]]*ok "gate-pin: VERIFIED' || true)
+  if [ -n "$pin_section" ] && [ "${pin_ok_total:-0}" = 1 ] && [ "${pin_ok_verified:-0}" = 1 ]; then
+    ok "gate-pin: section 5b's ONLY success verdict is the probe's VERIFIED line"
+  else
+    bad "gate-pin: section 5b has ${pin_ok_total:-0} ok() call(s), ${pin_ok_verified:-0} of them the probe verdict"
+  fi
+
+  # 11j. The OPT-OUT is loud and NON-PASSING: a switch that returned `ok` would be a
+  #      way to buy a vacuous green, which is the failure mode this section removes.
+  envf_j="$tmp/pin-env-j"; : >"$envf_j"
+  out_j=$(env PATH="$shims_one" HOME="$pin_home_plain" CARGO_HOME="$tmp/pin-cargo" \
+    CQLITE_BOOTSTRAP_TEST_MODE=1 CQLITE_BOOTSTRAP_ENV_FILE="$envf_j" \
+    timeout -s KILL 300 bash "$pinroot/scripts/bootstrap-agent-machine.sh" \
+      --skip-smoke --skip-gate-pin 2>&1)
+  if printf '%s' "$out_j" | grep -qE '\[warn\].*gate-pin: OPT-OUT' \
+     && ! printf '%s' "$out_j" | grep -qE '\[ok\].*gate-pin'; then
+    ok "gate-pin: --skip-gate-pin is a [warn] OPT-OUT that can never buy a green"
+  else
+    bad "gate-pin: the opt-out did not report as a non-passing OPT-OUT"
+    printf '%s\n' "$out_j" | grep -i 'gate-pin' | head -3
+  fi
+
+  # 11k. The test seam is FAIL-CLOSED and has NO production fallback: set without its
+  #      marker, or relative, it SKIPS the section rather than silently persisting to
+  #      the real /etc/environment (the #3249 lesson — a seam that degrades to the
+  #      production path certifies the production path by accident).
+  envf_k="$tmp/pin-env-k"; : >"$envf_k"
+  # `-u CQLITE_BOOTSTRAP_TEST_MODE` is the point of this half: the marker is exported
+  # suite-wide for host safety, and the case is about a seam set WITHOUT it.
+  out_k=$(env -u CQLITE_BOOTSTRAP_TEST_MODE \
+    PATH="$shims_one" HOME="$pin_home_plain" CARGO_HOME="$tmp/pin-cargo" \
+    CQLITE_BOOTSTRAP_ENV_FILE="$envf_k" \
+    timeout -s KILL 300 bash "$pinroot/scripts/bootstrap-agent-machine.sh" --skip-smoke 2>&1)
+  out_k2=$(env PATH="$shims_one" HOME="$pin_home_plain" CARGO_HOME="$tmp/pin-cargo" \
+    CQLITE_BOOTSTRAP_TEST_MODE=1 CQLITE_BOOTSTRAP_ENV_FILE="relative/env" \
+    timeout -s KILL 300 bash "$pinroot/scripts/bootstrap-agent-machine.sh" --skip-smoke 2>&1)
+  if printf '%s' "$out_k" | grep -q 'gate-pin: SKIPPED' \
+     && printf '%s' "$out_k2" | grep -q 'gate-pin: SKIPPED' \
+     && ! printf '%s' "$out_k" | grep -qE '\[ok\].*gate-pin'; then
+    ok "gate-pin: the test seam is fail-closed (no marker / relative path => SKIPPED, no fallback)"
+  else
+    bad "gate-pin: the test seam was honoured without its marker, or accepted a relative path"
+    printf '%s\n' "$out_k" | grep -i 'gate-pin' | head -2
+    printf '%s\n' "$out_k2" | grep -i 'gate-pin' | head -2
+  fi
 fi
 
 echo
