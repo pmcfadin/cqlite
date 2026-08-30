@@ -1415,10 +1415,9 @@ fn a_missing_golden_or_a_second_generation_is_refused() {
 }
 
 // ---------------------------------------------------------------------------
-// `golden_text.rs`: the golden TEXT preparation, and its REFUSALS
-//
-// WHAT is quoted, at which POSITIONS, and end to end through the real load path
-// lives in section 5 of `issue_1490_parquet_declaration_and_keys.rs`, beside the
+// `golden_text.rs`: the golden TEXT preparation, and its REFUSALS. WHAT is
+// quoted, at which POSITIONS, and end to end through the real load path lives in
+// section 5 of `issue_1490_parquet_declaration_and_keys.rs`, beside the
 // declared-type door that decides it. HERE is the module's own unit contract:
 // the sstabledump STRUCTURE it relies on, and what it does when that structure
 // does not hold.
@@ -1446,20 +1445,25 @@ fn the_rewrite_fails_closed() {
     // STRUCTURE the harness relies on. Each of these is well-formed JSON, so
     // only the structural expectation can refuse it — and each refusal must NAME
     // what it could not read.
+    // The DUPLICATE-key case is here for a reason worth naming: this reader
+    // keeps the FIRST occurrence and the shared `serde_json::Value` parse
+    // downstream keeps the LAST, so choosing either would rewrite one value and
+    // compare the other.
     const ROWS: &str = "`rows` must be an array of JSON objects";
     const CELLS: &str = "`cells` must be an array of JSON objects";
-    for (bad, needle) in [
+    const NAME: &str = "`name` must be a JSON string";
+    #[rustfmt::skip]
+    let structural = [
         (r#"[1,2]"#, "one JSON object"),
         (r#"{"rows":7}"#, ROWS),
         (r#"{"rows":[7]}"#, ROWS),
         (r#"{"rows":[{"cells":7}]}"#, CELLS),
         (r#"{"rows":[{"cells":[7]}]}"#, CELLS),
         (r#"{"rows":[{"cells":[{"value":1}]}]}"#, "has no `name`"),
-        (
-            r#"{"rows":[{"cells":[{"name":7,"value":1}]}]}"#,
-            "`name` must be a JSON string",
-        ),
-    ] {
+        (r#"{"rows":[{"cells":[{"name":"a","value":1,"value":2}]}]}"#, "duplicate key"),
+        (r#"{"rows":[{"cells":[{"name":7,"value":1}]}]}"#, NAME),
+    ];
+    for (bad, needle) in structural {
         let err = preserve_exact_lexemes(&format!("{bad}\n"), &[])
             .expect_err("a line whose sstabledump structure does not hold must be refused");
         assert!(

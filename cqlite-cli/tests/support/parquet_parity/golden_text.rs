@@ -93,7 +93,7 @@
 
 use std::fmt;
 
-use serde::de::{MapAccess, Visitor};
+use serde::de::{self, MapAccess, Visitor};
 use serde::ser::SerializeMap;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use serde_json::value::RawValue;
@@ -112,7 +112,7 @@ use super::declared;
 /// `serde_json`'s `preserve_order` feature happens to select.
 /// (`serde_json::Map` cannot be used at all: it is hard-coded to `Value`
 /// values, which is exactly the parse that destroys the lexemes.)
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct RawObject(Vec<(String, Box<RawValue>)>);
 
 impl RawObject {
@@ -144,8 +144,22 @@ impl<'de> Deserialize<'de> for RawObject {
                 f.write_str("a JSON object")
             }
             fn visit_map<A: MapAccess<'de>>(self, mut map: A) -> Result<RawObject, A::Error> {
-                let mut out = Vec::with_capacity(map.size_hint().unwrap_or(0));
+                let mut out: Vec<(String, Box<RawValue>)> =
+                    Vec::with_capacity(map.size_hint().unwrap_or(0));
                 while let Some((k, v)) = map.next_entry::<String, Box<RawValue>>()? {
+                    // A DUPLICATE key is REFUSED, never resolved. JSON permits
+                    // one, and the two readers of this document would then
+                    // disagree about which value it has: this type keeps the
+                    // FIRST occurrence, while the shared `serde_json::Value`
+                    // parse downstream keeps the LAST. Silently picking either
+                    // would mean the harness rewrote one value and compared the
+                    // other — the oracle disagreeing with itself.
+                    if out.iter().any(|(seen, _)| *seen == k) {
+                        return Err(de::Error::custom(format!(
+                            "the JSON object carries the duplicate key {k:?}; the harness \
+                             refuses to choose which occurrence is the value"
+                        )));
+                    }
                     out.push((k, v));
                 }
                 Ok(RawObject(out))
