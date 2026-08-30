@@ -47,10 +47,12 @@
 //! decided at the granularity the comparison walks — per member, per depth — so an
 //! indistinguishable nested member suppresses only itself while its siblings, its
 //! container's member count and every enclosing frame stay compared (review
-//! finding P2); the one exception is an UNBALANCED bracket, which breaks the
-//! bracket depth every level is split on and therefore refuses the whole cell.
-//! Refusals are counted and named, by path, in the census too. Neither kind of gap
-//! is ever silent.
+//! finding P2). There is no coarser tier: an UNBALANCED bracket breaks the bracket
+//! depth a split relies on and can therefore reach levels ABOVE the member holding
+//! it, but it too is asked per node, so it refuses exactly the levels whose split
+//! it actually breaks (review finding S1 — balance is a property of the
+//! CONCATENATED rendering, not of each scalar in isolation). Refusals are counted
+//! and named, by path, in the census too. Neither kind of gap is ever silent.
 //!
 //! Both egress readers and the golden reader parse JSON STRICTLY — a duplicate
 //! object key is malformed output on the CLI side and a discarded oracle on the
@@ -1064,8 +1066,8 @@ fn run_lane(egress: Egress) {
                 // A refusal is a DECLARED GAP in the same style as `Skip`: named
                 // at run time, never left as a bare counter. Each reason names the
                 // refused POSITION, which is the granularity the refusal is decided
-                // at — a whole cell (`fs (…)`) or one member of one (`nl[0] (…)`,
-                // review finding P2).
+                // at — a cell's own root node (`fs (…)`) or one member of one
+                // (`nl[0] (…)`, review finding P2).
                 if report.ambiguous_container_cells > 0 {
                     format!(
                         ", DECLARED GAP: {} container cell(s) holding a REFUSED \

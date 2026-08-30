@@ -56,7 +56,7 @@ pub struct Report {
     pub container_cells: usize,
     /// Container cells holding at least one REFUSED position, because the
     /// golden's own content cannot survive the unquoted CSV rendering there (see
-    /// `csv_container::cell_refusal` and `csv_container::node_refusal`). Counted,
+    /// `csv_container::node_refusal`). Counted,
     /// and named in [`Self::ambiguity_reasons`], so the narrowing is declared at
     /// run time rather than inferred from a silent gap.
     ///
@@ -71,7 +71,7 @@ pub struct Report {
     /// part of its value was decided.
     pub ambiguous_container_cells: usize,
     /// One deduplicated `path (reason)` entry per refused POSITION — `s (…)` for a
-    /// whole cell, `sl[0] (…)` for one indistinguishable member of it.
+    /// cell's own root node, `sl[0] (…)` for one indistinguishable member of it.
     pub ambiguity_reasons: Vec<String>,
     /// Declared skip paths that did NOT suppress a divergence in this table's
     /// walk, each with the cause (they agreed, they were never reached, or the
@@ -421,42 +421,7 @@ pub fn compare_rows(
             // has to be decoded back into the golden's shape before comparison.
             let decoded = match csv_decoded(gv, cv, egress, &column.ty, name, &skips) {
                 Ok(decoded) => decoded,
-                Err(Refusal::Cell(why)) => {
-                    refusals.record(name, &why);
-                    // The refusal suppresses the INDISTINGUISHABLE readings, not
-                    // everything about the cell: its frame and the two decidable
-                    // member counts are still compared (finding N3). This is the
-                    // one cause whose reach IS the whole cell — an UNBALANCED
-                    // bracket breaks the depth counter every level is split on —
-                    // so there is no narrower node to descend to, and the walk
-                    // below is not entered.
-                    match csv_container::decidable_despite_cell_refusal(gv, cv, &column.ty) {
-                        Ok(()) => {
-                            if excluded_column {
-                                skips.observe(
-                                    name,
-                                    Observed::Unresolved(format!(
-                                        "the CSV cell was refused: {why}"
-                                    )),
-                                );
-                            }
-                        }
-                        Err(divergence) => {
-                            if excluded_column {
-                                // The exclusion is what keeps this out of `diffs`,
-                                // so it suppressed a real divergence.
-                                skips.observe(name, Observed::Suppressed);
-                            } else {
-                                report
-                                    .diffs
-                                    .push(format!("row[{key}].{name}: {divergence}"));
-                            }
-                        }
-                    }
-                    count_cell(&mut report, &refusals, cell_mark, gv, excluded_column);
-                    continue;
-                }
-                Err(Refusal::Unparseable(why)) => {
+                Err(why) => {
                     if excluded_column {
                         // The exclusion is what stops this from being a diff, so
                         // it did suppress a divergence: the CLI's text does not
@@ -628,38 +593,24 @@ fn column_kinding(column: &Column) -> Kinding {
     }
 }
 
-/// Why a CSV container cell could not be decoded.
-enum Refusal {
-    /// The GOLDEN's own content cannot survive the unquoted rendering AT ANY
-    /// LEVEL — an UNBALANCED bracket breaks the bracket depth the whole rendering
-    /// is split on (a BALANCED pair is recoverable and is not refused, review
-    /// round 11 finding R1) — so no part of the cell can be read back into
-    /// members. Decided from the golden alone, so it can never be caused by the
-    /// defect under test, and the caller still applies what survives —
-    /// `csv_container::decidable_despite_cell_refusal`, i.e. the frame and the
-    /// body's emptiness and nothing more (finding N3, residual stated under
-    /// finding Q1).
-    ///
-    /// Every NARROWER cause is refused per NODE inside the walk instead
-    /// (`csv_container::node_refusal`, finding P2) and never reaches here. Since
-    /// round 11 those are one DERIVED question — the decoder does not give that
-    /// node's members back — plus EMPTY-CONTAINER.
-    Cell(String),
-    /// The CLI's text is not the grammar at all (wrong bracket, unbalanced
-    /// brackets, a map entry with no `: `). That IS a divergence, so it is
-    /// reported as one rather than refused.
-    Unparseable(String),
-}
-
 /// Decode a CSV cell whose golden counterpart is a container. `Ok(None)` means
 /// no decoding applies — the JSON lane, a scalar column, or a CSV cell that is
 /// not text (an empty field decodes to `null`, and [`compare_value_at`] is what
 /// then names that shape mismatch).
 ///
-/// Only the WHOLE-CELL refusal is decided here, because it is the one cause that
-/// makes the rendering unsplittable at every level, so the decode must not be
-/// attempted at all. Every narrower cause is refused per NODE, by the decoder and
-/// the comparator together as they walk (review finding P2).
+/// The single `Err` is UNPARSEABLE: the CLI's text is not the grammar at all
+/// (wrong bracket, unbalanced brackets, a map entry with no `: `). That IS a
+/// divergence, so it is reported as one rather than refused.
+///
+/// NO refusal is decided here, which is the whole of review round 12's finding
+/// S1: there used to be a whole-CELL tier for an UNBALANCED bracket, scanned per
+/// scalar, and it refused cells whose outer levels were perfectly decidable —
+/// balance is a property of the CONCATENATED rendering, not of each scalar. Every
+/// refusal is now taken per NODE, by the decoder and the comparator together as
+/// they walk (`csv_container::node_refusal`, finding P2), including at the cell's
+/// own root node; an imbalance is one way that node's derived question fails. So
+/// the decoder is never asked to split a text a CORRECT CLI would render
+/// unbalanced: such a node is refused first, and the split is not attempted.
 fn csv_decoded(
     gv: &Value,
     cv: &Value,
@@ -667,12 +618,9 @@ fn csv_decoded(
     ty: &CqlType,
     path: &str,
     skips: &SkipPaths<'_>,
-) -> Result<Option<Value>, Refusal> {
+) -> Result<Option<Value>, String> {
     if egress != Egress::Csv || !matches!(gv, Value::Array(_) | Value::Object(_)) {
         return Ok(None);
-    }
-    if let Some(why) = csv_container::cell_refusal(gv) {
-        return Err(Refusal::Cell(why));
     }
     let Value::String(text) = cv else {
         return Ok(None);
@@ -681,9 +629,7 @@ fn csv_decoded(
     // text instead of being required to invert the grammar. Without it a single
     // excluded inner field fails the whole cell, which is what forced
     // `udt_nested`'s exclusion to be whole-column (review finding F5).
-    csv_container::decode_at(gv, text, ty, path, &|p: &str| skips.excludes(p))
-        .map(Some)
-        .map_err(Refusal::Unparseable)
+    csv_container::decode_at(gv, text, ty, path, &|p: &str| skips.excludes(p)).map(Some)
 }
 
 /// A total, side-independent ordering key: the canonical primary key, then the

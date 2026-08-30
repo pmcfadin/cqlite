@@ -39,13 +39,14 @@ fn ty_of(decl: &str) -> CqlType {
     }
 }
 
-// --- the refusal valve, per NODE and per CELL --------------------------
+// --- the refusal valve, per NODE ---------------------------------------
 //
-// Each case pins BOTH which function refuses and which does NOT, because the
-// whole content of finding P2 is the BLAST RADIUS: a node-local cause that
-// reported a whole-cell refusal would suppress positions that are decidable,
-// and a whole-cell cause reported per node would let an unbalanced rendering
-// be split anyway.
+// There is ONE refusal predicate, asked per NODE, because the whole content of
+// findings P2 and S1 is the BLAST RADIUS: a cause reported one level up
+// suppresses positions that are perfectly decidable, and a refused node keeps
+// only its frame and its body's emptiness — so over-refusal is a blind spot,
+// not conservatism. Each case therefore pins BOTH the node that IS refused and
+// the enclosing (or sibling) node that is NOT.
 
 /// The element type's own bracket pair, for a node-local refusal query on a
 /// nested position (`node_refusal` takes the declared type OF THAT NODE).
@@ -68,31 +69,97 @@ fn member_containing_the_element_separator_is_refused_at_its_container() {
         why.contains("splits into 2 member(s), not the golden's 1"),
         "the reason must state what the decoder gave back: {why}"
     );
-    // …and the rendering is still splittable at every OTHER depth, so the cell
-    // is not refused: a `, ` inside a member sits at bracket depth ≥ 1 for
-    // every enclosing level.
+    // …and the rendering is still splittable at every OTHER depth, so no
+    // enclosing level is refused: a `, ` inside a member sits at bracket
+    // depth ≥ 1 for every level above the one holding it.
+    let outer = ty_of("list<frozen<set<text>>>");
     assert_eq!(
-        cell_refusal(&json!(["a, b"])),
+        node_refusal(&json!([["a, b"]]), Some(&outer)),
         None,
-        "a `, ` corrupts one body's split, not the whole cell's"
+        "a `, ` corrupts one body's split, not its enclosing levels'"
     );
 }
 
+/// An UNBALANCED bracket defeats the depth counter, so the node whose body it
+/// sits in cannot be split at all — and unlike a stray `, ` it can reach levels
+/// ABOVE that one. It is asked at EVERY node, on that node's own complete
+/// rendering, so it refuses exactly the levels whose split it breaks.
 #[test]
-fn member_containing_an_unbalanced_bracket_refuses_the_whole_cell() {
-    // A stray bracket unbalances the depth counter every level is split on, so
-    // no level can be split reliably.
-    let why = cell_refusal(&json!(["x}y"])).expect("an unbalanced member must refuse the cell");
+fn an_unbalanced_bracket_is_refused_at_each_node_whose_split_it_breaks() {
+    let list = ty_of("list<text>");
+    // `[x}y]`: the `}` closes a bracket that never opened, so the splitter
+    // cannot read the golden's own rendering at all.
+    let why = node_refusal(&json!(["x}y"]), Some(&list))
+        .expect("an unbalanced member must refuse its container");
     assert!(
-        why.contains("not bracket-balanced"),
+        why.contains("cannot split the golden's own rendering"),
         "unexpected reason: {why}"
     );
-    // Both directions of unbalance, and at depth too: the cause is a property
-    // of the whole rendering.
-    assert!(cell_refusal(&json!(["x[y"])).is_some());
-    assert!(cell_refusal(&json!([["x}y"]])).is_some());
-    assert!(cell_refusal(&json!({"k": "x}y"})).is_some());
-    assert!(cell_refusal(&json!({"x}y": 1})).is_some());
+    // Both directions of the imbalance, and in a map/UDT key as well as in a
+    // member or a value.
+    assert!(node_refusal(&json!(["x[y"]), Some(&list)).is_some());
+    assert!(node_refusal(&json!({"k": "x}y"}), Some(&ty_of("map<text, text>"))).is_some());
+    assert!(node_refusal(&json!({"x}y": 1}), Some(&ty_of("map<text, int>"))).is_some());
+
+    // It reaches an ENCLOSING level when the enclosing body really is
+    // unsplittable: `[[x}y]]` closes one bracket too many at depth 1, so the
+    // outer body cannot be scanned either and BOTH nodes are refused.
+    let outer = ty_of("list<frozen<list<text>>>");
+    assert!(node_refusal(&json!([["x}y"]]), Some(&outer)).is_some());
+    assert!(node_refusal(
+        &json!(["x}y"]),
+        Some(&element_of("list<frozen<list<text>>>"))
+    )
+    .is_some());
+}
+
+/// Review round 12, finding S1: BALANCE IS A PROPERTY OF THE CONCATENATED
+/// RENDERING, not of each scalar in isolation.
+///
+/// An inner `list<text>` holding `"["` and `"]"` renders `[[, ]]`: the two
+/// members' brackets balance EACH OTHER before the enclosing boundary, so every
+/// enclosing level's depth-zero split is intact and only the inner node is
+/// undecodable. The earlier rule scanned each scalar on its own and promoted any
+/// individually-unbalanced one to a WHOLE-CELL refusal, which left the outer
+/// member count and every unambiguous outer sibling with nothing but the
+/// emptiness bound.
+#[test]
+fn opposing_brackets_in_nested_siblings_refuse_only_the_inner_node() {
+    let outer = ty_of("list<frozen<list<text>>>");
+    let inner = element_of("list<frozen<list<text>>>");
+    let golden = json!([["[", "]"], ["ok"]]);
+
+    // The inner node's own body `[, ]` scans (the brackets balance) but gives
+    // ONE member back where the golden has two, so it is refused…
+    let why = node_refusal(&json!(["[", "]"]), Some(&inner))
+        .expect("the inner node's members are not recovered");
+    assert!(
+        why.contains("splits into 1 member(s), not the golden's 2"),
+        "unexpected reason: {why}"
+    );
+    // …and the OUTER node is not: its body `[[, ]], [ok]` scans to depth zero
+    // between the two members, so both come back exactly.
+    assert_eq!(
+        node_refusal(&golden, Some(&outer)),
+        None,
+        "the outer split is intact, so the outer node is decidable"
+    );
+    // Which the decode shows: the outer level IS split, the refused inner node
+    // keeps its un-split body, and the unambiguous sibling is decoded.
+    assert_eq!(
+        decode(&golden, "[[[, ]], [ok]]", &outer).expect("decodes"),
+        json!(["[, ]", ["ok"]])
+    );
+    // So a dropped outer member is a length divergence, and a wrong sibling a
+    // value one — neither of which a whole-cell refusal could see.
+    assert_eq!(
+        decode(&golden, "[[[, ]]]", &outer).expect("decodes"),
+        json!(["[, ]"])
+    );
+    assert_eq!(
+        decode(&golden, "[[[, ]], [wrong]]", &outer).expect("decodes"),
+        json!(["[, ]", ["wrong"]])
+    );
 }
 
 /// Review round 11, finding R1: a BALANCED bracket pair inside a scalar member
@@ -109,11 +176,10 @@ fn a_balanced_bracket_inside_a_member_is_not_refused_and_is_compared() {
     let ty = ty_of("list<text>");
     let golden = json!(["[ok]"]);
     assert_eq!(
-        cell_refusal(&golden),
+        node_refusal(&golden, Some(&ty)),
         None,
         "a balanced bracket does not disturb any level's split"
     );
-    assert_eq!(node_refusal(&golden, Some(&ty)), None);
     // …and the member is recovered exactly, so a WRONG member is a divergence
     // rather than a position nothing checks.
     assert_eq!(decode(&golden, "[[ok]]", &ty).expect("decodes"), golden);
@@ -121,7 +187,6 @@ fn a_balanced_bracket_inside_a_member_is_not_refused_and_is_compared() {
     // A balanced pair carrying the separator INSIDE it is recovered too: the
     // `, ` sits at depth 1, so it is not a cut.
     let inner = json!(["[a, b]"]);
-    assert_eq!(cell_refusal(&inner), None);
     assert_eq!(node_refusal(&inner, Some(&ty)), None);
     assert_eq!(decode(&inner, "[[a, b]]", &ty).expect("decodes"), inner);
 }
@@ -144,7 +209,15 @@ fn map_key_containing_a_separator_is_refused_at_its_object() {
         why.contains("splits into 2 entry(s), not the golden's 1"),
         "the reason must state what the decoder gave back: {why}"
     );
-    assert_eq!(cell_refusal(&json!({"a: b": 1})), None);
+    // And no ENCLOSING level is refused for it: the entry's own brackets
+    // balance, so the level above splits normally.
+    assert_eq!(
+        node_refusal(
+            &json!([{"a: b": 1}]),
+            Some(&ty_of("list<frozen<map<text, int>>>"))
+        ),
+        None
+    );
 }
 
 #[test]
@@ -154,7 +227,6 @@ fn map_value_containing_the_pair_separator_is_not_refused() {
     // Refusing it would narrow the lane for no reason.
     let ty = ty_of("map<text, text>");
     assert_eq!(node_refusal(&json!({"k": "a: b"}), Some(&ty)), None);
-    assert_eq!(cell_refusal(&json!({"k": "a: b"})), None);
     let decoded = decode(&json!({"k": "a: b"}), "{k: a: b}", &ty).expect("decodes");
     assert_eq!(decoded, json!([{"key": "k", "value": "a: b"}]));
 }
@@ -279,7 +351,6 @@ fn an_ambiguous_nested_member_is_refused_at_itself_and_not_at_its_container() {
         None,
         "the outer container's own body is splittable, so it is not refused"
     );
-    assert_eq!(cell_refusal(&json!([[]])), None);
     // The decode reflects that: the outer level is SPLIT (one member), and only
     // the refused member's body is left un-split for the count bounds.
     assert_eq!(
@@ -300,58 +371,44 @@ fn an_ambiguous_nested_member_is_refused_at_itself_and_not_at_its_container() {
     );
 }
 
-/// Finding N3: a refusal suppresses the INDISTINGUISHABLE readings only.
+/// Finding N3 at a CELL's OWN ROOT NODE: a refusal there suppresses the
+/// INDISTINGUISHABLE readings only, and the FRAME is required by the decoder at
+/// that node's depth exactly as at any deeper one.
 ///
 /// The subject is the ambiguity the corpus actually reaches — an empty
 /// `frozen<set<text>>`, which renders `{}` whether it holds nothing or one
-/// empty member. Everything else about the cell is still decided, so a
-/// `null`, an unrelated word, the wrong bracket or a non-empty body is a
-/// divergence. Before this the whole cell was discarded before the CLI value
-/// was looked at, so all four passed.
+/// empty member. Everything else about the cell is still decided, so `null`, an
+/// unrelated word or the wrong bracket is a divergence. Before finding N3 the
+/// whole cell was discarded before the CLI value was looked at, so all three
+/// passed; since round 12 there is no cell-level entry point at all (finding
+/// S1) and this is the ROOT node of the same one rule.
 #[test]
-fn a_refused_cell_still_has_its_frame_and_body_emptiness_compared() {
+fn a_refused_root_node_still_has_its_frame_required_by_the_decoder() {
     let ty = ty_of("frozen<set<text>>");
     let empty = json!([]);
-    // The one reading pair the format genuinely cannot tell apart.
+    assert!(
+        node_refusal(&empty, Some(&ty)).is_some(),
+        "an empty set<text> is the corpus's own refusal"
+    );
+    // The one reading pair the format genuinely cannot tell apart: the frame is
+    // satisfied and the un-split body is handed on for the emptiness bound.
     assert_eq!(
-        decidable_despite_cell_refusal(&empty, &json!("{}"), &ty),
-        Ok(()),
+        decode(&empty, "{}", &ty).expect("the frame is satisfied"),
+        json!(""),
         "the empty bracket pair is exactly the indistinguishable case"
     );
-    for (cli, expect) in [
-        (Value::Null, "empty or non-text field"),
-        (json!("null"), "opening"),
-        (json!("unrelated text"), "opening"),
-        (json!("[]"), "opening"),
-        (json!("{a}"), "carries a body"),
-    ] {
-        let why = decidable_despite_cell_refusal(&empty, &cli, &ty)
-            .expect_err(&format!("{cli} must diverge from an empty golden set"));
-        assert!(why.contains(expect), "unexpected reason for {cli}: {why}");
+    // Property 2, at the ROOT node's own depth: the bracket pair the DECLARED
+    // type requires. A `set` rendered `[…]` is a failure, not a list.
+    for cli in ["null", "unrelated text", "[]"] {
+        let why = decode(&empty, cli, &ty)
+            .expect_err(&format!("`{cli}` is not a `set` rendering at all"));
+        assert!(
+            why.contains("opening"),
+            "unexpected reason for `{cli}`: {why}"
+        );
     }
-
-    // The other decidable count: two or more members cannot render empty,
-    // whatever the refusal cause — here a `, `-bearing member.
-    let two = json!(["a, b", "c"]);
-    assert!(
-        node_refusal(&two, Some(&ty)).is_some(),
-        "the `, ` in a member is what refuses this node"
-    );
-    let why = decidable_despite_cell_refusal(&two, &json!("{}"), &ty)
-        .expect_err("two members cannot render as an empty body");
-    assert!(why.contains("cannot render as an empty body"), "{why}");
-    // …and WHICH members the body holds stays suppressed, because that is
-    // what the ambiguity destroys.
-    assert_eq!(
-        decidable_despite_cell_refusal(&two, &json!("{something, else}"), &ty),
-        Ok(())
-    );
-    // At exactly ONE member the empty body is a legal rendering (of one empty
-    // member), so nothing is asserted about the count there.
-    assert_eq!(
-        decidable_despite_cell_refusal(&json!([""]), &json!("{}"), &ty),
-        Ok(())
-    );
+    let why = decode(&empty, "{a", &ty).expect_err("an unclosed frame is a divergence");
+    assert!(why.contains("does not close"), "{why}");
 }
 
 /// The per-NODE half of the same rule, on the BODY the decoder leaves: the
@@ -383,9 +440,13 @@ fn a_refused_node_still_has_its_body_emptiness_compared() {
             }
         }
     }
-    // A refused node whose CLI side is not text at all: the decoder always
-    // leaves a body, so this is a divergence rather than an ambiguity.
-    assert!(decidable_despite_node_refusal(&json!([]), &Value::Null).is_err());
+    // A refused node whose CLI side is not text at all — the shape an EMPTY
+    // CSV field takes, which the decode is never even attempted for. The
+    // decoder otherwise always leaves a body, so this is a divergence rather
+    // than an ambiguity (property 1).
+    let why = decidable_despite_node_refusal(&json!([]), &Value::Null)
+        .expect_err("an absent cell against a golden container is a divergence");
+    assert!(why.contains("empty or non-text field"), "{why}");
 }
 
 #[test]
@@ -395,7 +456,6 @@ fn ordinary_corpus_content_is_not_refused() {
     // content from test_compactionparityudt.udt_collections.)
     let map_ty = ty_of("map<text, frozen<address>>");
     let nested = json!({"home": {"street": "1 Navy Way", "zip": "22201"}});
-    assert_eq!(cell_refusal(&nested), None);
     assert_eq!(node_refusal(&nested, Some(&map_ty)), None);
     // The nested UDT node too, under its own declared type.
     let address = match &map_ty {
@@ -411,7 +471,6 @@ fn ordinary_corpus_content_is_not_refused() {
     );
     let list_ty = ty_of("list<text>");
     let scalars = json!(["0xdeadbeef", "-1.5", "neg-five", null]);
-    assert_eq!(cell_refusal(&scalars), None);
     assert_eq!(node_refusal(&scalars, Some(&list_ty)), None);
 }
 

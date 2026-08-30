@@ -621,3 +621,79 @@ fn an_empty_member_with_siblings_is_compared_and_a_dropped_member_fails() {
     assert!(report.diffs.is_empty(), "{:?}", report.diffs);
     assert_eq!(report.ambiguous_container_cells, 1);
 }
+
+// =======================================================================
+// Round 12: an IMBALANCE is a property of the CONCATENATED rendering
+// =======================================================================
+
+/// Finding S1: bracket balance belongs to the whole rendering, not to each
+/// scalar in isolation. An inner `list<text>` holding `"["` and `"]"` renders
+/// `[[, ]]`: the two members' brackets balance EACH OTHER before the enclosing
+/// boundary, so the outer list's depth-zero split is intact and only the inner
+/// node is undecodable.
+///
+/// The earlier rule scanned each scalar member on its own and promoted any
+/// individually-unbalanced one to a WHOLE-CELL refusal, so the outer member
+/// COUNT and every unambiguous outer SIBLING kept nothing but the emptiness
+/// bound — a dropped outer member and a wrong outer sibling both passed.
+#[test]
+fn opposing_brackets_in_nested_siblings_refuse_only_the_inner_node() {
+    let schema = schema_of(NESTED_LIST_DDL, "t");
+    let golden = vec![row(&[
+        ("id", json!(1)),
+        ("nl", json!([["[", "]"], ["ok"]])),
+    ])];
+
+    // The correct rendering: the outer split gives both members back, so only
+    // the inner node — whose own body splits into 1 member, not 2 — is refused.
+    let report = csv_report(&schema, &golden, "[[[, ]], [ok]]");
+    assert!(
+        report.diffs.is_empty(),
+        "the correct rendering must compare clean: {:?}",
+        report.diffs
+    );
+    assert_eq!(
+        report.ambiguous_container_cells, 1,
+        "the cell holds a refused position: {:?}",
+        report.ambiguity_reasons
+    );
+    assert_eq!(
+        report.ambiguity_reasons.len(),
+        1,
+        "ONLY the inner node is undecodable: {:?}",
+        report.ambiguity_reasons
+    );
+    assert!(
+        report.ambiguity_reasons[0].starts_with("nl[0] ("),
+        "the refusal must be named at the INNER path: {:?}",
+        report.ambiguity_reasons
+    );
+
+    // THE REGRESSION S1 IS ABOUT, both halves: the outer member count…
+    let report = csv_report(&schema, &golden, "[[[, ]]]");
+    assert_eq!(
+        report.diffs.len(),
+        1,
+        "a dropped outer member must fail: {:?}",
+        report.diffs
+    );
+    assert!(
+        report.diffs[0].contains("collection length"),
+        "{:?}",
+        report.diffs
+    );
+
+    // …and the unambiguous outer SIBLING, which is compared member by member.
+    let report = csv_report(&schema, &golden, "[[[, ]], [wrong]]");
+    assert_eq!(
+        report.diffs.len(),
+        1,
+        "a wrong outer sibling must fail: {:?}",
+        report.diffs
+    );
+    assert!(
+        report.diffs[0].contains(".nl:") && report.diffs[0].contains("[1]"),
+        "the divergence must name the outer sibling's position: {:?}",
+        report.diffs
+    );
+}

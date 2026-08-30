@@ -113,8 +113,11 @@
 //! [`scan`] splits a body only at DEPTH ZERO, so a `, ` (or a `: `) inside a
 //! member can corrupt the split of the container that DIRECTLY holds it and of no
 //! other level — every enclosing level sees that member's own brackets and never
-//! looks inside them. Exactly one cause breaks that argument, and it is therefore
-//! the one whole-CELL refusal.
+//! looks inside them. An UNBALANCED bracket is the one cause that can reach
+//! FURTHER than the container directly holding it, and it is not exempted from the
+//! rule: it is asked, and answered, at EVERY node independently, so it refuses
+//! exactly the levels whose split it actually breaks and no others (the section on
+//! it below).
 //!
 //! ## The refusal question is the DECODE, not a look at the golden
 //!
@@ -186,16 +189,38 @@
 //! without it the golden side of an empty container looked recoverable while the
 //! CLI could perfectly well have held one empty member.
 //!
-//! ## The whole-cell cause ([`cell_refusal`]) — an UNBALANCED bracket
+//! ## An UNBALANCED bracket is NOT a whole-cell cause (review round 12)
 //!
-//! A bracket that does not BALANCE inside a member's text unbalances the depth
-//! counter for every enclosing level at once, so no level of the rendering can be
-//! split reliably and the CELL is refused before the decode is attempted. Scanned
-//! recursively for that reason: an imbalance at any depth is a whole-cell
-//! property. Asked of [`scan`] itself ([`unbalanced`]), whose only failure mode IS
-//! an imbalance — so this too is the decoder's own answer rather than a character
-//! test, and the character test it replaces refused a BALANCED pair as well, which
-//! is finding R1.
+//! A bracket that does not balance inside a member's text defeats the depth
+//! counter, so a level whose body it sits in cannot be split at all — and unlike a
+//! stray `, `, it can reach levels ABOVE that one too. That used to be stated as a
+//! whole-CELL refusal, scanned per SCALAR (a `cell_refusal` predicate, since
+//! deleted): any
+//! individually-unbalanced scalar refused the entire cell.
+//!
+//! It was over-refusal, i.e. a blind spot (finding S1), because BALANCE IS A
+//! PROPERTY OF THE CONCATENATED RENDERING AND NOT OF EACH SCALAR IN ISOLATION. An
+//! inner `list<text>` holding `"["` and `"]"` renders `[[, ]]`: the two members'
+//! brackets balance each other BEFORE the enclosing boundary, so every enclosing
+//! level's depth-zero split is intact and only the inner node is undecodable. With
+//! the whole cell refused, the outer member COUNT and every unambiguous outer
+//! SIBLING kept nothing but the emptiness bound.
+//!
+//! So there is no whole-cell tier left. An imbalance is simply one way the ONE
+//! derived question fails — [`members`] cannot split the golden's own rendering at
+//! that node — and it is asked at every node on that node's own complete
+//! rendering, which is why it now refuses the levels it really does break (each
+//! independently) instead of all of them. Two consequences worth stating, both of
+//! which the unit cases pin:
+//!
+//! * a node whose OWN rendering is unbalanced is refused, at every enclosing level
+//!   whose body the imbalance also reaches, and at no other;
+//! * the decoder never has to split a text a CORRECT CLI would render
+//!   unbalanced, because such a node was refused before the split: at a
+//!   NON-refused node the golden's rendering both scanned and gave the node's
+//!   members back, and a correct CLI renders exactly that text. That is what makes
+//!   an imbalance a REFUSAL (a declared gap) rather than an "unbalanced bracket"
+//!   DIVERGENCE blamed on a CLI that did nothing wrong.
 //!
 //! ## Not a refusal: NULL-TOKEN, `null` vs the text `"null"`
 //!
@@ -221,9 +246,8 @@
 //!      EMPTY golden container must render as an empty body, and a golden of TWO
 //!      OR MORE members must render as a non-empty one.
 //!
-//! See [`decidable_despite_node_refusal`] and [`decidable_despite_cell_refusal`]
-//! (finding N3), which apply the two together, and [`body_emptiness_bound`] for
-//! the second.
+//! See [`decidable_despite_node_refusal`] (finding N3), which applies the two
+//! together, and [`body_emptiness_bound`] for the second.
 //!
 //! THE RESIDUAL, which is real and is therefore declared rather than implied
 //! away: WHICH members the body holds is NOT compared at a refused node. So a
@@ -256,41 +280,6 @@ fn brackets(ty: &CqlType) -> Option<(char, char)> {
         CqlType::Tuple(_) => Some(('(', ')')),
         CqlType::Map(..) | CqlType::Udt(_) => Some(('{', '}')),
         _ => None,
-    }
-}
-
-/// Does the golden's own content make the WHOLE cell's rendering unsplittable?
-/// `Some(reason)` means it does, and the cell is refused before the decode is
-/// attempted.
-///
-/// The one cause with that blast radius is a bracket that does not BALANCE inside
-/// a member's (or a key's) text: [`scan`] tracks bracket depth, so an unclosed
-/// `[` or a stray `]` anywhere in the rendering corrupts every enclosing level's
-/// split at once — and would otherwise surface as an "unbalanced bracket"
-/// DIVERGENCE caused by the golden rather than by the CLI. Scanned recursively
-/// for exactly that reason.
-///
-/// A BALANCED bracket pair inside a member is NOT refused (review round 11,
-/// finding R1). It leaves the depth counter exactly where it found it, so no
-/// level's split is disturbed and the member decodes back byte for byte: a
-/// `list<text>` holding `[ok]` renders `[[ok]]`, splits into the one member
-/// `[ok]`, and IS compared. Refusing it cost coverage for nothing — the earlier
-/// character test refused any member containing a bracket, and a refused node
-/// keeps only the emptiness bound, so an incorrect non-empty body passed there.
-///
-/// Decided from the GOLDEN — never from the CLI's output — so a refusal can never
-/// be produced by the defect the lane is looking for. The declared type is
-/// deliberately NOT a parameter: an unbalanced bracket defeats the depth counter
-/// whatever the DDL says, so there is no type-dependent narrowing to state here.
-pub fn cell_refusal(golden: &Value) -> Option<String> {
-    match golden {
-        Value::Array(items) => items.iter().find_map(cell_refusal),
-        Value::Object(fields) => fields.iter().find_map(|(key, value)| {
-            unbalanced(key)
-                .map(|why| format!("map/UDT key: {why}"))
-                .or_else(|| cell_refusal(value))
-        }),
-        scalar => unbalanced(&scalar_text(scalar)),
     }
 }
 
@@ -390,13 +379,14 @@ fn decode_does_not_recover(golden: &Value, ty: Option<&CqlType>) -> Option<Strin
     let parts = match members(&rendering, ty) {
         Ok(parts) => parts,
         // The splitter cannot read the golden's own rendering at all. `members`
-        // fails ONLY on an unbalanced bracket (`scan`'s single failure mode; the
-        // frame here was built from the DDL, so `strip` cannot fail), and that is
-        // a whole-CELL refusal taken before the walk starts — so the comparator's
-        // path never reaches this. It is kept, and kept as a REFUSAL, because
-        // `node_refusal` is a public predicate anyone may ask directly: answering
-        // "nothing to refuse" for a rendering the splitter cannot even read would
-        // be the permissive-unknown shape CLAUDE.md forbids.
+        // fails ONLY on an UNBALANCED bracket (`scan`'s single failure mode; the
+        // frame here was built from the DDL, so `strip` cannot fail), which is
+        // this node's share of the cause the module doc's round-12 section
+        // describes: the imbalance is reported at every node whose body it
+        // reaches, each asked independently on that node's OWN complete
+        // rendering, and at no other. Before round 12 it was hoisted to a
+        // whole-CELL refusal scanned per scalar, so one inner member's bracket
+        // suppressed every outer sibling and every member count in the cell.
         Err(why) => {
             return Some(format!(
                 "the decoder cannot split the golden's own rendering {}: {why}",
@@ -552,21 +542,7 @@ fn golden_rendering(golden: &Value, ty: Option<&CqlType>) -> Option<String> {
     }
 }
 
-/// Can the DECODER'S OWN scanner count bracket depth through this text?
-/// `Some(reason)` means it cannot, which is the one whole-cell refusal.
-///
-/// Asked of [`scan`] itself rather than by a character test, so "unbalanced" means
-/// exactly what the splitter fails on and the two cannot drift — `scan`'s only
-/// failure mode IS an unbalanced bracket, in either direction (a close that never
-/// opened, or an open that never closed). The separator it is given is irrelevant
-/// to that answer; `, ` is passed because it is the one the split uses.
-fn unbalanced(text: &str) -> Option<String> {
-    scan(text, ", ")
-        .err()
-        .map(|why| format!("member is not bracket-balanced: {why}"))
-}
-
-/// The text `ValueFormatter` renders a scalar as, for the ambiguity scan only.
+/// The text a scalar carries inside the golden's own rendering ([`golden_rendering`]).
 /// `Value::Null` renders as the `null` token (NULL-TOKEN in the module doc), which
 /// is a text a `text` member can also produce — resolved by [`decode_shape`] from
 /// the golden's own type, and deliberately not a refusal.
@@ -678,33 +654,22 @@ fn field_type<'t>(ty: Option<&'t CqlType>, key: &str) -> Option<&'t CqlType> {
 /// What stays suppressed is exactly the indistinguishable set: WHICH members the
 /// body holds, and how many when the count is 1.
 ///
-/// # Two entry points, one rule
+/// # ONE entry point, at every depth (review round 12)
 ///
-/// [`decidable_despite_cell_refusal`] is the CELL-level one: the cell was refused
-/// before any decode, so it holds the raw rendering and strips the frame itself.
-/// [`decidable_despite_node_refusal`] is the per-NODE one used inside the walk,
-/// where the decoder has already required and stripped this node's frame (that IS
-/// property 2, applied at every depth) and left the un-split BODY. Both then apply
-/// the identical emptiness bound, stated once in [`body_emptiness_bound`].
-pub fn decidable_despite_cell_refusal(
-    golden: &Value,
-    cli: &Value,
-    ty: &CqlType,
-) -> Result<(), String> {
-    let Some(members) = member_count(golden) else {
-        // Not a container, so nothing was refused for it; `cell_refusal` only
-        // refuses a cell whose golden is one.
-        return Ok(());
-    };
-    let text = cli_text(cli)?;
-    body_emptiness_bound(members, strip(text, ty)?, text)
-}
-
-/// [`decidable_despite_cell_refusal`] for a node the DECODER refused: `cli` is the
-/// body it left after requiring and stripping this node's declared bracket pair,
-/// so only the count bounds remain to be applied.
+/// There used to be a second, cell-level entry point (`decidable_despite_cell_refusal`),
+/// which stripped the frame itself because the whole-cell refusal was taken before
+/// any decode. With the whole-cell tier gone (finding S1) every refusal is a NODE
+/// refusal, including one at the cell's own root node, and property 2 is applied
+/// by the decoder's [`strip`] at that node's depth — for the root exactly as for
+/// any other, so a frame divergence there is reported as an unparseable rendering
+/// instead of being folded in here. `cli` is therefore always the un-split BODY
+/// the decoder left, and the only thing left to apply is the emptiness bound.
+///
+/// `cli` may still be a non-text value: when the CSV cell is empty the decode is
+/// never attempted, and property 1 is what reports that.
 pub fn decidable_despite_node_refusal(golden: &Value, cli: &Value) -> Result<(), String> {
     let Some(members) = member_count(golden) else {
+        // Not a container, so no node refusal can have been taken for it.
         return Ok(());
     };
     let body = cli_text(cli)?;
