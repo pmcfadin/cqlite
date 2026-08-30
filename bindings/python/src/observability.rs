@@ -190,10 +190,11 @@ pub fn ensure_initialized(cfg: ObservabilityConfig) {
 
 /// Force-flush any buffered telemetry through the process-global guard.
 ///
-/// Called from `Database.close()` so a short-lived script that closes its and from the
-/// `Database` drop path (`crate::drop_safety`, issue #1461).
-/// database sees its spans exported even before interpreter shutdown. Safe to
-/// call when uninitialised (no-op) and idempotent.
+/// Called from two places: `Database.close()`, so a short-lived script that
+/// closes its database sees its spans exported even before interpreter
+/// shutdown; and the `Database` drop path (`crate::drop_safety`, issue #1461),
+/// so a handle that is garbage-collected without `close()` still exports them.
+/// Safe to call when uninitialised (no-op) and idempotent.
 pub fn flush() {
     if let Some(guard) = GUARD.get() {
         guard.force_flush();
