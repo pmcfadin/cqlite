@@ -409,13 +409,25 @@ superseded `main`. Every SUMMARY block carries a `component-set:` line:
 - `component-set: FAIL-CLOSED (#3544) — this tree is BEHIND origin/main <sha40>; N …
   MISSING … : <names>` — the branch is behind (`origin/main` is **not** an ancestor of `HEAD`).
   Remedy: `git fetch origin && git rebase origin/main`;
-- `component-set: DECLARED (#3544) — this branch REMOVES … <names>` — components are missing
-  **and** `origin/main` IS an ancestor of `HEAD`, so the removal is in this branch's own diff.
-  Loud, **not fatal**: the author has nothing to rebase, only the information is actionable, and
-  a guard that reds on correct input is the guard agents learn to waive. (Behind **and**
-  removing fails as BEHIND first, and reaches DECLARED only after a rebase.)
+- `component-set: DECLARED (#3544) — this branch REMOVES … <names>` — components are missing,
+  `origin/main` IS an ancestor of `HEAD`, **and the components are absent at `HEAD` too**, so the
+  removal is in this branch's own **committed** diff. Loud, **not fatal**: the author has nothing
+  to rebase, only the information is actionable, and a guard that reds on correct input is the
+  guard agents learn to waive. (Behind **and** removing fails as BEHIND first, and reaches
+  DECLARED only after a rebase.)
+- `component-set: FAIL-CLOSED (#3544) — … PRESENT in the gate script AT HEAD …` — the
+  `UNCOMMITTED` verdict. **Ancestry alone is not provenance**: "is `origin/main` reachable from
+  `HEAD`?" is not "did this branch's committed diff remove the component?", and answering the
+  first while asserting the second was a reproduced false PASS — deleting one component from the
+  **working copy** alone produced a non-fatal `DECLARED` in a certifying mode, so a full gate
+  would have certified 35 of 36 components under a factually false line. The provenance is
+  therefore measured against **`HEAD`'s own component set**, not the proxy "is the tree dirty"
+  (which would red every mid-edit branch and still prove nothing on a clean-but-stale one). An
+  uncommitted **addition** still PASSes — extra components are never skew. Remedy: commit the
+  removal, or restore the component; never rebase.
 - `component-set: FAIL-CLOSED (#3544) — baseline NOT measured (<kind>: <detail>)` — the fetch
-  failed, `origin` is missing, `git` is absent, the probe could not be BOUNDED, or the
+  failed, `origin` is missing, **`origin` does not NAME the canonical upstream**, `git` is
+  absent, `HEAD`'s copy of the gate script is unreadable, the probe could not be BOUNDED, or the
   baseline's own `--list` errored, printed nothing, or printed a non-component line. **Never a
   SKIP and never a fallback to an empty baseline**: an empty baseline excuses every branch,
   which is the vacuous pass inverted. The bound is itself a named capability
@@ -425,6 +437,18 @@ superseded `main`. Every SUMMARY block carries a `component-set:` line:
 
 A component present on the branch but absent from `main` is **not** skew (this branch may be the
 one adding it) and is recorded as `[branch-only, NOT skew: …]` inside a PASS.
+
+**The baseline's identity is validated before the fetch.** Trusting a remote merely *named*
+`origin` made `git remote set-url origin <anything>` a git-config-shaped opt-out — and it fires
+**by accident** in the fork workflow, where `origin` legitimately names a contributor's fork whose
+`main` may be months stale, so the guard compares against the wrong baseline and stamps a `PASS`.
+`origin` must therefore name the canonical upstream (`pmcfadin/cqlite`), compared on **owner/repo**
+and deliberately **host-agnostic**: an ssh config alias, an explicit port and a local mirror path
+are accepted, because their host cannot be resolved without the network and over-rejecting reds a
+correct tree. A fork, a different repo, or an `origin` with no URL at all is a **named non-PASS**
+(`remote-not-canonical` / `remote-unreadable`) carrying its own remedy — never a silent pass and
+never a SKIP. The expected identity is a hard-coded literal: a configurable one would be the same
+hole one level out.
 
 Fail-closed in the **certifying** modes only — the full gate and `--delta`, the two whose blocks
 are recorded in a PR. `--lite` and `--only` stamp the same line with an `ADVISORY-*` token and
