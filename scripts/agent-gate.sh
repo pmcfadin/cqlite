@@ -154,9 +154,12 @@
 #                      --only/--lite stay lenient and the #2078 opt-out is honoured,
 #                      with the mode PRINTED. check_jest_suites_ran is
 #                      the affirmative guard: the reported suite total must equal the
-#                      set DERIVED FROM JEST ITSELF (`./node_modules/.bin/jest
-#                      --listTests`, never a
-#                      find over testMatch), no suite may be failed or skipped, and the
+#                      RECONCILED set of TWO INDEPENDENT oracles — a recursive `find` over
+#                      __test__/ and `./node_modules/.bin/jest --listTests` — whose
+#                      symmetric difference must be EMPTY, FAILing with the specific paths
+#                      and two distinct remedies otherwise (#3522 D1: jest's list alone was
+#                      SELF-REFERENTIAL, since a config exclusion shrinks the expectation and
+#                      the run together). No suite may be failed or skipped, and the
 #                      passed-test count must be non-zero (a suite whose every TEST is
 #                      `test.skip`ped is reported as a PASSED suite — the suite-level
 #                      `skipped` count only catches a whole file being skipped, which is
@@ -5867,13 +5870,18 @@ EOF
 # AFFIRMATIVE MEASUREMENT, not a green exit code (the same rule as the Rust lanes).
 # jest reports a suite whose every describe was skipped as PASSED, so `npm test`
 # exiting 0 does not establish that anything ran. check_jest_suites_ran requires the
-# reported total to equal the suite set DERIVED FROM JEST ITSELF
-# (`./node_modules/.bin/jest --listTests`), requires no suite to have failed or been skipped, and requires a
-# non-zero count of PASSED tests. The oracle is jest and not a `find`, for the same
-# reason `_package_test_targets` uses cargo metadata rather than parsing `[[test]]`
-# stanzas: a find would re-implement this package's RECURSIVE `testMatch` plus jest's
-# default ignore patterns, and it would agree at 27 today while silently undercounting
-# the day someone adds a subdirectory — a false red on healthy code.
+# reported total to equal the RECONCILED suite set of TWO INDEPENDENT oracles — a recursive
+# `find` over `__test__/` and `./node_modules/.bin/jest --listTests` — requires no suite to
+# have failed or been skipped, and requires a non-zero count of PASSED tests.
+#
+# TWO oracles, because either alone is blind in a different way (#3522 D1). jest's list is
+# the only thing that knows what will ACTUALLY run (its `testMatch` is recursive and it
+# applies ignore patterns a `find` cannot reproduce), but using it as the EXPECTATION too is
+# self-referential: a config narrowing shrinks the expectation and the run TOGETHER and the
+# guard passes while "every committed suite ran" is false. The independent inventory supplies
+# the expectation; jest supplies what runs; a non-empty symmetric difference is a FAIL naming
+# the paths, in two distinct directions with two distinct remedies (a silent config
+# exclusion, vs jest running something outside `__test__/`).
 #
 # RUN_SLOW_TESTS is forwarded exactly as python-bindings forwards it (default 0). Two
 # tests opt into it (publish.test.js's `npm pack --dry-run`, streaming.test.js's
@@ -5992,17 +6000,36 @@ run_node_bindings() {
     echo "==== end census ===="
   } > "$log"
 
-  # STEP 1 — install, build, and DERIVE the suite set FROM JEST ITSELF.
+  # STEP 1 — install, build, and DERIVE the suite set FROM TWO INDEPENDENT ORACLES.
   #
-  # `./node_modules/.bin/jest --listTests` (0.9s) is the oracle, deliberately NOT a `find` over
-  # `__test__/*.test.js`. A find would be a SECOND IMPLEMENTATION of this package's
-  # `testMatch` (`**/__test__/**/*.test.js` — RECURSIVE) plus jest's default
-  # `testPathIgnorePatterns`, and its correctness would only be knowable by
-  # differential testing against the original. Measured: a `-maxdepth 1` find agrees at
-  # 27 TODAY and would silently UNDERCOUNT the day someone adds a subdirectory — turning
-  # the affirmative guard below into a false red on healthy code, which is the verdict
-  # agents learn to waive. Same rule as `_package_test_targets` preferring cargo
-  # metadata over parsing `[[test]]` stanzas.
+  # WHY TWO, AND WHY ONE WAS NOT ENOUGH (roborev round 3, D1). `jest --listTests` is the
+  # right oracle for the ACTUAL set — it applies this package's `testMatch`
+  # (`**/__test__/**/*.test.js`, RECURSIVE) and jest's ignore patterns, which a
+  # `find -maxdepth 1` cannot reproduce (it agrees at 27 today and would silently
+  # UNDERCOUNT the day a subdirectory appears, false-redding healthy code). That argument
+  # stands and is why the find below is RECURSIVE and is NOT used to select what runs.
+  #
+  # But using it as the EXPECTED count too made the guard SELF-REFERENTIAL: the expectation
+  # and the run both flow from jest's configuration, so a `testMatch` narrowing or an added
+  # ignore pattern shrinks BOTH TOGETHER and the guard passes while its stated contract
+  # ("every committed suite ran") is violated. That is #3522's own defect class one level
+  # up — the same shape as a CQLite-written/CQLite-read round-trip being invariant to a
+  # uniform framing error, and the same shape as `clippy --all-targets` "covering" a crate
+  # it only compiles. A measurement whose subject and whose oracle share a source cannot
+  # detect a change that moves both.
+  #
+  # So: an INDEPENDENT recursive filesystem inventory is taken, RECONCILED against jest's
+  # list, and any disagreement FAILs naming the specific paths — in two DISTINCT
+  # directions, because they have different remedies:
+  #   * on disk but NOT listed by jest  -> a silent CONFIG EXCLUSION (the defect found);
+  #   * listed by jest but NOT on disk  -> jest is running something outside __test__, or
+  #                                        this inventory is wrong.
+  # Only the RECONCILED set becomes the expectation the run summary is checked against.
+  #
+  # `find`, NOT `git ls-files`, deliberately: jest enumerates the DISK, so a
+  # committed-files inventory would red on a new-but-uncommitted test file — a false red on
+  # correct work, which is the verdict agents learn to waive. Both oracles must answer the
+  # same question ("what is on disk"); only one of them may consult jest's config.
   local list_file="$LOG_DIR/$name.listtests.txt" suite_n=""
   # Both strict-mode variables are unset here UNCONDITIONALLY, in every mode: listing
   # tests needs no corpus, so an inherited strict flag could only turn a healthy
@@ -6035,24 +6062,126 @@ run_node_bindings() {
     echo ">>> [$name] $status ($((end - start))s)"
     return 0
   fi
-  suite_n=$(grep -c '\.test\.js$' "$list_file" || true)
-  case "$suite_n" in
-    ''|*[!0-9]*) suite_n=0 ;;
-  esac
-  if [ "$suite_n" -eq 0 ]; then
+  # ORACLE A — jest's own list, normalised. Both sides are reduced to their path RELATIVE
+  # TO `__test__/`, so the comparison cannot be broken by a symlinked or differently-spelled
+  # absolute prefix (jest resolves rootDir from its config; this script uses $REPO_ROOT).
+  local jest_set="$LOG_DIR/$name.suites-jest.txt"
+  local disk_set="$LOG_DIR/$name.suites-disk.txt"
+  local only_disk only_jest
+  sed -n 's#.*/__test__/##p' "$list_file" | grep '\.test\.js$' | sort -u > "$jest_set"
+
+  # ORACLE B — an INDEPENDENT recursive filesystem inventory. `find`, not a glob: a glob's
+  # meaning depends on ambient shell options this script never sets and cannot control
+  # (`nullglob` empties an unmatched pattern, `failglob` makes it an error), both reachable
+  # through BASHOPTS — the round-34 lesson. `node_modules` is pruned to match jest's default
+  # ignore, which is the ONE piece of jest behaviour this inventory deliberately mirrors:
+  # without it the two oracles would disagree on vendored fixtures forever and the
+  # reconciliation would be a permanent red.
+  local _nb_test_dir="$REPO_ROOT/bindings/node/__test__"
+  if [ ! -d "$_nb_test_dir" ] || [ ! -r "$_nb_test_dir" ]; then
     status=FAIL
     {
-      echo "[$name] FAIL-CLOSED: './node_modules/.bin/jest --listTests' named ZERO *.test.js suites."
-      echo "        The DERIVATION failed (or the suite vanished), and a guard expecting zero"
-      echo "        suites would report OK having measured nothing (issue #3522)."
+      echo "[$name] FAIL-CLOSED: $_nb_test_dir is missing or unreadable, so the INDEPENDENT"
+      echo "        inventory half of the suite reconciliation cannot be taken. With only jest's"
+      echo "        own list the guard would be self-referential (issue #3522, roborev D1)."
     } | tee -a "$log"
     end=$(date +%s)
     record_result "$name" "$status" "$((end - start))"
     echo ">>> [$name] $status ($((end - start))s)"
     return 0
   fi
-  echo ">>> [$name] derived suite set: $suite_n *.test.js file(s) (oracle: ./node_modules/.bin/jest --listTests, not a find over testMatch)"
-  echo "derived suite set: $suite_n *.test.js file(s) (oracle: ./node_modules/.bin/jest --listTests)" >> "$log"
+  # `-print0` and a NUL-vs-line count assert: a filename containing a newline would be
+  # silently split into two entries by the line-based sort/comm below, inflating the
+  # inventory and producing a nonsense reconciliation. Refuse rather than mis-measure.
+  local _nb_nuls _nb_lines
+  find -H "$_nb_test_dir" -type d -name node_modules -prune -o -type f -name '*.test.js' -print0 2>/dev/null \
+    | tr '\0' '\n' | sed -n 's#.*/__test__/##p' | sort -u > "$disk_set"
+  _nb_nuls=$(find -H "$_nb_test_dir" -type d -name node_modules -prune -o -type f -name '*.test.js' -print0 2>/dev/null | tr -dc '\0' | wc -c | tr -d ' ')
+  _nb_lines=$(grep -c . "$disk_set" || true)
+  case "$_nb_nuls$_nb_lines" in
+    ''|*[!0-9]*) _nb_nuls=-1 ;;
+  esac
+  if [ "$_nb_nuls" != "$_nb_lines" ]; then
+    status=FAIL
+    {
+      echo "[$name] FAIL-CLOSED: the independent suite inventory counted $_nb_nuls NUL-delimited"
+      echo "        entries but $_nb_lines line(s) after conversion — a test filename contains a"
+      echo "        newline (or the count itself failed), so the line-based reconciliation below"
+      echo "        would mis-measure. Refusing rather than comparing garbage (issue #3522)."
+    } | tee -a "$log"
+    end=$(date +%s)
+    record_result "$name" "$status" "$((end - start))"
+    echo ">>> [$name] $status ($((end - start))s)"
+    return 0
+  fi
+
+  # RECONCILE. `comm`'s exit status is CHECKED: an unchecked `$(comm …)` yields the EMPTY
+  # STRING when comm FAILS, and "empty symmetric difference" is exactly this check's PASS
+  # condition — so a comm failure would silently certify the two oracles as agreeing. Never
+  # let a permissive verdict rest on the absence of output that a failure also produces.
+  only_disk=$(comm -23 "$disk_set" "$jest_set"); [ $? -eq 0 ] || only_disk="__COMM_FAILED__"
+  only_jest=$(comm -13 "$disk_set" "$jest_set"); [ $? -eq 0 ] || only_jest="__COMM_FAILED__"
+  if [ "$only_disk" = "__COMM_FAILED__" ] || [ "$only_jest" = "__COMM_FAILED__" ]; then
+    status=FAIL
+    {
+      echo "[$name] FAIL-CLOSED: could not compare the two suite oracles (comm failed). An"
+      echo "        unmeasurable reconciliation is not a pass (issue #3522, roborev D1)."
+    } | tee -a "$log"
+    end=$(date +%s)
+    record_result "$name" "$status" "$((end - start))"
+    echo ">>> [$name] $status ($((end - start))s)"
+    return 0
+  fi
+  if [ -n "$only_disk" ] || [ -n "$only_jest" ]; then
+    status=FAIL
+    {
+      echo "[$name] FAIL-CLOSED: the two suite oracles DISAGREE (issue #3522, roborev D1)."
+      if [ -n "$only_disk" ]; then
+        echo "        ON DISK but NOT LISTED BY JEST — a SILENT CONFIG EXCLUSION. These committed"
+        echo "        suites would never run, and using jest's own list as the expectation would"
+        echo "        have hidden it (expectation and run shrink together):"
+        printf '%s\n' "$only_disk" | sed 's#^#          __test__/#'
+        echo "        REMEDY: check jest.config.js's testMatch / testPathIgnorePatterns, or any"
+        echo "        filter on the jest command line. If the exclusion is INTENDED, it must be"
+        echo "        declared here deliberately, not inferred from a shrinking count."
+      fi
+      if [ -n "$only_jest" ]; then
+        echo "        LISTED BY JEST but NOT FOUND ON DISK under __test__/ — jest is running"
+        echo "        something this inventory does not see (a testMatch reaching outside"
+        echo "        __test__/, a roots/rootDir change), or this inventory is wrong:"
+        printf '%s\n' "$only_jest" | sed 's#^#          #'
+        echo "        REMEDY: a DIFFERENT one from the case above — widen the inventory to match"
+        echo "        what the suite actually is, or narrow testMatch back."
+      fi
+    } | tee -a "$log"
+    end=$(date +%s)
+    record_result "$name" "$status" "$((end - start))"
+    echo ">>> [$name] $status ($((end - start))s)"
+    return 0
+  fi
+
+  # Only the RECONCILED set becomes the expectation. Counted from the INVENTORY, not from
+  # jest's list — they are now proven identical, and taking it from the independent side
+  # keeps the guard's subject anchored to the filesystem rather than to jest's config.
+  suite_n=$(grep -c . "$disk_set" || true)
+  case "$suite_n" in
+    ''|*[!0-9]*) suite_n=0 ;;
+  esac
+  if [ "$suite_n" -eq 0 ]; then
+    status=FAIL
+    {
+      echo "[$name] FAIL-CLOSED: the reconciled suite set is EMPTY — no *.test.js found on disk"
+      echo "        under bindings/node/__test__ AND none listed by jest. The DERIVATION failed"
+      echo "        (or the suite vanished), and a guard expecting zero suites would report OK"
+      echo "        having measured nothing (issue #3522)."
+    } | tee -a "$log"
+    end=$(date +%s)
+    record_result "$name" "$status" "$((end - start))"
+    echo ">>> [$name] $status ($((end - start))s)"
+    return 0
+  fi
+  echo ">>> [$name] suite set RECONCILED: $suite_n *.test.js file(s) — two INDEPENDENT oracles agree (recursive find over __test__/ vs ./node_modules/.bin/jest --listTests); neither alone could detect a config exclusion (#3522 D1)"
+  echo "suite set RECONCILED: $suite_n *.test.js file(s) — independent recursive find over __test__/ AGREES with ./node_modules/.bin/jest --listTests (symmetric difference empty)" >> "$log"
 
   # STEP 2 — run them.
   # `env "${fixture_env[@]}"` FIRST, because `env`'s -u options must precede any
