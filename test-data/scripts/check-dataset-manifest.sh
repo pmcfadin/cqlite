@@ -116,7 +116,7 @@ fi
 # absence is git-not-a-work-tree, which is a legitimate environment (Jest's own fallback)
 # and is now tested for EXPLICITLY rather than inferred from an empty result -- an empty
 # result is exactly what a failure also produces.
-for _tool in find grep sort awk sed basename; do
+for _tool in find grep sort awk sed basename cmp git; do
   command -v "$_tool" >/dev/null 2>&1 || {
     echo "❌ dataset manifest check: required tool '$_tool' not found; cannot judge the corpus" >&2
     exit 2
@@ -474,28 +474,59 @@ _toc_companions_usable() {
   # runs against — all 144 generations there have a twin — but a corpus assembled elsewhere
   # gets the weaker guarantee, and nothing in the output would otherwise say so.
   _TOC_FAIL_REASON=untrusted-toc
-  _t_committed=$(_committed_toc_path "$_t_toc") || return 1
-  if [ -n "$_t_committed" ]; then
-    cmp -s "$_t_toc" "$_t_committed" || return 1
+  _t_relpath=$(_committed_toc_relpath "$_t_toc") || return 1
+  if [ -n "$_t_relpath" ]; then
+    _toc_matches_head "$_t_toc" "$_t_relpath" || return 1
   fi
   _TOC_FAIL_REASON=
   return 0
 }
 
-# _committed_toc_path <corpus-toc-path> -- echo the git-tracked twin of this TOC, or nothing.
-#
-# Maps <root>/sstables/<ks>/<tabledir>/<file> onto the checkout's
-# test-data/datasets/sstables/<ks>/<tabledir>/<file>, then requires git to TRACK it -- an
-# untracked file at that path is not a trusted inventory, it is just another file on disk.
-_committed_toc_path() {
+# _committed_toc_relpath <corpus-toc-path> -- echo the REPO-RELATIVE path of this TOC's
+# git-tracked twin, or nothing when there is none.
+_committed_toc_relpath() {
   _c_tail=${1#*/sstables/}
   [ "$_c_tail" = "$1" ] && { printf ''; return 0; }
   [ -n "$_SCRIPT_REPO" ] || { printf ''; return 0; }
-  _c_path="$_SCRIPT_REPO/test-data/datasets/sstables/$_c_tail"
-  [ -f "$_c_path" ] || { printf ''; return 0; }
-  git -C "$_SCRIPT_REPO" ls-files --error-unmatch \
-      "test-data/datasets/sstables/$_c_tail" >/dev/null 2>&1 || { printf ''; return 0; }
-  printf '%s' "$_c_path"
+  _c_rel="test-data/datasets/sstables/$_c_tail"
+  git -C "$_SCRIPT_REPO" ls-files --error-unmatch "$_c_rel" >/dev/null 2>&1 || { printf ''; return 0; }
+  printf '%s' "$_c_rel"
+}
+
+# _toc_matches_head <corpus-toc-path> <repo-relative-path> -- rc 0 iff the corpus TOC matches
+# the content COMMITTED AT HEAD.
+#
+# READ FROM `git show HEAD:<path>`, NOT FROM THE WORKING TREE (roborev, post-rebase round 3).
+# The first version compared against the working-tree file, and under the DEFAULT dataset
+# root -- the checkout's own `test-data/datasets` -- those are THE SAME FILE. `cmp` compared
+# a file to itself, always succeeded, and the trusted-inventory check was VACUOUS in exactly
+# the configuration CI uses. Verified: both paths resolve to the identical absolute path.
+#
+# HEAD rather than the index (`git show :<path>`): a staged-but-uncommitted truncation would
+# otherwise be its own authority, and the inventory has to come from somewhere the corpus
+# under judgement cannot reach.
+#
+# STATUS DISCIPLINE, as everywhere in this script: `cmp` exits 0 same, 1 different, >1
+# TROUBLE (unreadable, or absent from PATH). Collapsing >1 onto "different" would walk a
+# tooling failure out to the reserved exit 9, which the #2078 opt-out suppresses as a judged
+# corpus. `cmp` is in the up-front tool check for the same reason.
+_toc_matches_head() {
+  _tm_tmp="${TMPDIR:-/tmp}/cqlite-toc-head.$$"
+  if ! git -C "$_SCRIPT_REPO" show "HEAD:$2" >"$_tm_tmp" 2>/dev/null; then
+    rm -f "$_tm_tmp"
+    # Tracked but not resolvable at HEAD (added-but-uncommitted). Not a corpus verdict: the
+    # inventory is unavailable, so fall back to the derived checks rather than invent one.
+    return 0
+  fi
+  _tm_rc=0
+  cmp -s "$1" "$_tm_tmp" || _tm_rc=$?
+  rm -f "$_tm_tmp"
+  case "$_tm_rc" in
+    0) return 0 ;;
+    1) return 1 ;;
+    *) echo "❌ dataset manifest check: cmp failed (status $_tm_rc) comparing $1 with its committed twin; cannot judge the corpus" >&2
+       exit 2 ;;
+  esac
 }
 
 # _dir_has_oa_golden <table-dir> -- rc 0 when the directory holds ANY

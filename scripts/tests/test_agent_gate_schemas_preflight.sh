@@ -92,7 +92,15 @@ fi
 # (#3522) and its OA parity and write cases resolve those schemas; if they leave
 # CANONICAL_SCHEMA_FILES, the #3148 preflight stops guarding them and their absence surfaces
 # as a suite failure instead of a named preflight FAIL.
-for _req in basic-types.cql oa-test.cql write-test.cql; do
+# THE COMPLETE SET, not a sample (roborev, post-rebase round 3). Naming only three left the
+# other five derivable-away: removing `time-series.cql`, `wide-table-bti.cql` or
+# `collections.cql` from production would have deleted them from the expectation too and
+# this test would have stayed green — the same tautology, just smaller.
+#
+# Every entry here is a schema the corpus or the node suite resolves, so dropping ANY of them
+# stops the #3148 preflight guarding a file something reads.
+for _req in basic-types.cql da-test.cql oa-test.cql write-test.cql \
+            time-series.cql wide-table-bti.cql collections.cql wide-rows.cql; do
   case " ${CANONICAL[*]} " in
     *" $_req "*) : ;;
     *) echo "FAIL - $_req is no longer in the gate's CANONICAL_SCHEMA_FILES; the #3148 preflight" >&2
@@ -101,6 +109,14 @@ for _req in basic-types.cql oa-test.cql write-test.cql; do
        exit 1 ;;
   esac
 done
+
+# And the reverse direction: an ADDITION to production must be acknowledged here too, or this
+# list silently stops being the complete set it claims to be.
+if [ "${#CANONICAL[@]}" -ne 8 ]; then
+  echo "FAIL - the gate's CANONICAL_SCHEMA_FILES has ${#CANONICAL[@]} entries, this test expects 8." >&2
+  echo "       If a schema was added, add it to the required list above — deliberately." >&2
+  exit 1
+fi
 
 # A dataset root whose canonical corpus IS present, so the #2078 corpus guard is
 # satisfied and the run reaches the #3148 schemas guard.

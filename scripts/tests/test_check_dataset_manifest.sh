@@ -1659,6 +1659,79 @@ else
   echo "info - no passing real corpus available; skipping the grep-malfunction case"
 fi
 
+# ---------------------------------------------------------------------------
+# Case 81 (post-rebase round 3, High): the trusted inventory must come from HEAD, not from
+# the working tree.
+#
+# The first version compared the corpus TOC against the working-tree file at the mapped
+# path. Under the DEFAULT dataset root — the checkout's own `test-data/datasets`, which is
+# the documented fetch target — those are THE SAME FILE, so `cmp` compared a file to itself,
+# always succeeded, and the whole trusted-inventory check was VACUOUS in exactly the
+# configuration most likely to be used.
+#
+# Asserted on the function directly, because that isolates the property: modify the WORKING
+# TREE copy of a tracked TOC and require a mismatch. A whole-corpus case cannot reach it
+# without populating the checkout with gitignored binaries.
+#
+# The working-tree file is restored, and the case FAILS LOUDLY rather than leaving the
+# checkout dirty if it cannot be.
+# ---------------------------------------------------------------------------
+tw_repo=$(cd "$(dirname "$GATE")/.." && pwd)
+tw_toc=$(git -C "$tw_repo" ls-files test-data/datasets/sstables 2>/dev/null | grep 'TOC\.txt$' | head -1)
+if [ -n "$tw_toc" ] && [ -f "$tw_repo/$tw_toc" ] && git -C "$tw_repo" diff --quiet -- "$tw_toc" 2>/dev/null; then
+  tw_probe() {   # -> "match" | "mismatch"
+    _SCRIPT_REPO="$tw_repo" bash -c '
+      _SCRIPT_REPO=$1
+      eval "$(sed -n "/^_toc_matches_head() {/,/^}/p" "$2")"
+      _toc_matches_head "$3" "$4" && printf match || printf mismatch' \
+      _ "$tw_repo" "$MANIFEST_SRC" "$tw_repo/$tw_toc" "$tw_toc"
+  }
+  tw_save="$WORK/tw-save"; cp "$tw_repo/$tw_toc" "$tw_save"
+  # Control first: unmodified, it must MATCH — otherwise the mismatch below proves nothing.
+  tw_before=$(tw_probe)
+  printf 'Data.db\nTOC.txt\n' > "$tw_repo/$tw_toc"
+  tw_after=$(tw_probe)
+  cp "$tw_save" "$tw_repo/$tw_toc"
+  if ! git -C "$tw_repo" diff --quiet -- "$tw_toc" 2>/dev/null; then
+    bad "case 81 could not restore $tw_toc; the checkout is DIRTY and must be fixed by hand"
+  elif [ "$tw_before" = match ] && [ "$tw_after" = mismatch ]; then
+    ok "the trusted inventory is read from HEAD, so a working-tree truncation is detected"
+  elif [ "$tw_before" != match ]; then
+    bad "case 81's control failed: an unmodified tracked TOC did not match HEAD ($tw_before)"
+  else
+    bad "a working-tree TOC truncation was NOT detected — the twin comparison is vacuous when the corpus root IS the checkout"
+  fi
+else
+  echo "info - no clean tracked TOC.txt available; skipping the HEAD-inventory case"
+fi
+
+# ---------------------------------------------------------------------------
+# Case 82 (post-rebase round 3, Medium): a broken `cmp` is a MALFUNCTION, not a TOC mismatch.
+#
+# `cmp -s ... || return 1` collapsed status >1 (unreadable file, cmp absent) onto "the TOCs
+# differ", which walks out to the reserved exit 9 — a judged corpus verdict the #2078 opt-out
+# suppresses. Exactly the class case 80 covers for `grep`; this one was added because the
+# first RED for it did not fire, which is how the gap showed.
+# ---------------------------------------------------------------------------
+if [ -n "${CQLITE_DATASETS_ROOT:-}" ] && [ -d "${CQLITE_DATASETS_ROOT:-}/sstables" ] \
+   && bash "$MANIFEST_SRC" "$CQLITE_DATASETS_ROOT" >/dev/null 2>&1; then
+  cb_bin="$WORK/cmpfail-bin"; mkdir -p "$cb_bin"
+  # `cmp` is used ONLY by the twin comparison here, so a blanket shadow is precise enough --
+  # unlike grep, which the script's own tool check also calls.
+  printf '#!/bin/sh\nexit 2\n' > "$cb_bin/cmp"; chmod +x "$cb_bin/cmp"
+  cb_rc=0
+  PATH="$cb_bin:$PATH" bash "$MANIFEST_SRC" "$CQLITE_DATASETS_ROOT" >/dev/null 2>&1 || cb_rc=$?
+  if [ "$cb_rc" = 2 ]; then
+    ok "a cmp malfunction exits 2, not the reserved corpus verdict"
+  elif [ "$cb_rc" = 9 ]; then
+    bad "a cmp malfunction surfaced AS exit 9; the opt-out would suppress a broken checker"
+  else
+    bad "a cmp malfunction gave exit $cb_rc; expected 2 (malfunction)"
+  fi
+else
+  echo "info - no passing real corpus available; skipping the cmp-malfunction case"
+fi
+
 echo "----"
 echo "passed: $PASS  failed: $FAIL"
 [ "$FAIL" -eq 0 ]
