@@ -204,6 +204,24 @@ _NON_LITERAL_IN_WORD = frozenset("$`\"'*?[]{}" + chr(92))
 # command's environment, not to its name.
 _ASSIGNMENT_WORD = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
 
+# BASH'S RESERVED WORDS AND DECORATORS, STEPPED OVER rather than treated as command names
+# (#3451 post-rebase round 4, F1). `if $PY -c 'bad'`, `time $PY -c 'bad'` and `! $PY -c 'bad'`
+# all resolved their command word to the control word — a plain literal containing no `python` —
+# and were SKIPPED as "another program". Three silent absences.
+#
+# SKIPPED, NOT REFUSED, and the difference was measured before choosing: refusing a leading
+# reserved word would make `if grep -c 'foo' file; then :; fi` a FINDING, which is ordinary shell
+# and clean today. A false red on legitimate code is the failure that has already cost this
+# checker its `grep -c` anchor and its nested-quote oracle, so the conservative-reject instinct
+# is the wrong one here.
+#
+# IMPORTED, not re-typed. `ws0_hermeticity_lint.RESERVED_WORDS` is the same closed set and it has
+# an ORACLE — `test_ws0_hermeticity.sh` asserts SET EQUALITY against `bash -c 'compgen -k'`, in
+# both directions. A second hand-written list here would be the exact tell this repository keeps
+# recording: an enumeration nobody can check. Stepping over the words needs no understanding of
+# the constructs they open.
+from ws0_hermeticity_lint import RESERVED_WORDS as _RESERVED_WORDS
+
 # The separators that END a command. A closed set in bash's grammar, so finding the start of the
 # CURRENT command is a lookup rather than a parse.
 _COMMAND_SEPARATORS = ";&|"
@@ -218,8 +236,9 @@ def _command_word_before(segment: str) -> str | None:
     neither a block nor a finding, which is the worst answer this census can give.
 
     Decidable, and it reuses the shape the export-prefix check already relies on: cut back to the
-    last command separator, drop leading ASSIGNMENT words (they are environment, not a name), and
-    the first word that remains is the command. Everything after it is options. So
+    last command separator, step over leading ASSIGNMENT words (environment, not a name) and
+    RESERVED WORDS (`if`, `time`, `!`, … — control, not a name), and the first word that remains
+    is the command. Everything after it is options. So
     `A=1 $PYTHON -I -c` resolves to `$PYTHON`, while `grep -c` and `sort -c` still resolve to
     `grep` and `sort` and are still skipped. Returns None when the command word is unknowable.
     """
@@ -259,8 +278,9 @@ def _command_word_before(segment: str) -> str | None:
         if tail.count(quote) % 2:
             return None
     for word in tail.split():
-        if not _ASSIGNMENT_WORD.match(word):
-            return word
+        if _ASSIGNMENT_WORD.match(word) or word in _RESERVED_WORDS:
+            continue
+        return word
     return ""
 
 

@@ -724,6 +724,45 @@ else
   fail "census CONTROL did not fire: an absent driver must exit nonzero, got rc=$missing_rc"
 fi
 
+# --- CONTROL 1j: a leading CONTROL WORD is stepped over, not read as the command ---------------
+# `if $PY -c 'bad'`, `time $PY -c 'bad'` and `! $PY -c 'bad'` each resolved their command word to
+# the control word — a plain literal containing no `python` — and were skipped as "another
+# program": three silent absences.
+#
+# BOTH DIRECTIONS, and the accept half is why the words are STEPPED OVER rather than refused.
+# Refusing a leading reserved word would turn `if grep -c 'foo' file; then :; fi` into a finding,
+# which is ordinary shell — the false-red failure that already cost this checker two earlier
+# designs. The words come from `ws0_hermeticity_lint.RESERVED_WORDS`, which is asserted for SET
+# EQUALITY against `bash -c 'compgen -k'`, so this is a lookup against an oracle rather than a
+# second hand-written list.
+python3 - "$TMP" <<'INJECT'
+import pathlib, sys
+q = chr(39)
+tmp = pathlib.Path(sys.argv[1])
+bad = q + "import os," + q
+(tmp / "ctlword-if.sh").write_text("if $PY -c " + bad + "; then :; fi\n")
+(tmp / "ctlword-time.sh").write_text("time $PY -c " + bad + "\n")
+(tmp / "ctlword-bang.sh").write_text("! $PY -c " + bad + "\n")
+(tmp / "ctlword-if-grep.sh").write_text("if grep -c " + q + "foo" + q + " file; then :; fi\n")
+(tmp / "ctlword-time-grep.sh").write_text("time grep -c " + q + "foo" + q + " file\n")
+INJECT
+ctlword_rc=$?
+ctlword_ok=1
+ctlword_detail=""
+for ctlword_case in if time bang; do
+  [ -n "$(findings_of "$(census "$TMP/ctlword-$ctlword_case.sh")")" ] \
+    || { ctlword_ok=0; ctlword_detail="$ctlword_detail $ctlword_case(missed)"; }
+done
+for ctlword_case in if-grep time-grep; do
+  [ -z "$(findings_of "$(census "$TMP/ctlword-$ctlword_case.sh")")" ] \
+    || { ctlword_ok=0; ctlword_detail="$ctlword_detail $ctlword_case(false-red)"; }
+done
+if [ "$ctlword_rc" -eq 0 ] && [ "$ctlword_ok" -eq 1 ]; then
+  pass "census CONTROL fired (control words): a leading if/time/! is STEPPED OVER so the real command word is judged — the indirect forms are findings while `if grep -c` and `time grep -c` stay clean, which is why the words are skipped and not refused"
+else
+  fail "census CONTROL did not fire (control words): fixture-rc=$ctlword_rc problems:$ctlword_detail"
+fi
+
 # ============================================================================
 # PART 2 — THE TOTAL PROPERTY: EVERY EMBEDDED BLOCK COMPILES
 # ============================================================================
@@ -1422,9 +1461,18 @@ fi
 # A MINIMUM CHECK COUNT
 # ============================================================================
 # `set -uo pipefail` (no `-e`) means a block that silently never executes lowers the count and
-# registers NO failure, while the gate reads only the exit code. Deliberately below the current
-# count (so adding a case does not red it) and far above zero.
-MIN_CHECKS=26
+# registers NO failure, while the gate reads only the exit code.
+#
+# A RATCHET AT THE ACTUAL COUNT, not a comfortable floor below it (#3451 post-rebase round 4,
+# F2). This sat at 26 while the suite ran 44, so an entire section — the CPU execution coverage,
+# say — could vanish and the floor would not notice. That is precisely the failure this guard
+# exists to catch, so a floor 18 below actual was a guard against nothing.
+#
+# BUMP IT WHEN YOU ADD COVERAGE. It is a ratchet: a lower count means a case stopped running and
+# is a real failure, a higher one means you added a case and this constant is the one line to
+# update. Deliberate, and cheap, and it is the only thing standing between a deleted section and
+# a green suite.
+MIN_CHECKS=45
 echo
 if [ "$checks" -lt "$MIN_CHECKS" ]; then
   echo "FAIL - only $checks check(s) ran; this suite has at least $MIN_CHECKS."
