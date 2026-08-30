@@ -98,9 +98,11 @@
 //! `closed` records that cleanup *started*, not that it *completed*:
 //! `close()` swaps the flag before its fallible steps and returns early on the
 //! first error. So a `close()` whose write-engine flush fails leaves the flag
-//! set with the read-engine shutdown never done, and this `Drop` then skips the
-//! engine teardown. The telemetry flush still runs (it is unconditional, see
-//! step 7), but the read-side shutdown is lost.
+//! set with the write-engine close never completed, and this `Drop` then skips
+//! the engine teardown. Note precisely what is and is not lost: the read-side
+//! `shutdown()` call is skipped but is today a documented no-op, so nothing is
+//! lost there; the unflushed memtable stays in the WAL, which is replayable;
+//! the telemetry flush is skipped.
 //!
 //! This is NOT a regression — before this module a dropped handle ran nothing at
 //! all — and it is deliberately not fixed here, because both available fixes are
@@ -139,6 +141,14 @@
 //! stated rather than left implicit, because an untested branch whose absence
 //! is unmentioned reads as a covered one — and these two are precisely the
 //! branches whose failure mode is a process abort.
+//!
+//! Completing that census by the same standard: the `try_lock()` `Err` arm and
+//! both `Err(err)` log arms are likewise unexercised and, as far as can be
+//! determined, UNREACHABLE today — pyo3 holds a strong reference to the
+//! `Database` for the duration of any `&self` pymethod, so no other caller can
+//! be inside `close()`/`with_write_engine` on this object while its `Drop` runs,
+//! and the engine `Arc` is never handed to another Python object. They stay as
+//! defence in depth, not as covered code.
 
 use std::sync::atomic::Ordering;
 
@@ -149,29 +159,37 @@ use crate::runtime::existing_runtime;
 
 impl Drop for Database {
     fn drop(&mut self) {
-        // (1) Claim the cleanup FIRST. The `AtomicBool` is the single source of
-        // "already cleaned up" shared with `close()`, so an explicit `close()`
-        // makes the ENGINE teardown below a no-op and vice versa — never a
-        // double shutdown.
-        if !self.closed.swap(true, Ordering::SeqCst) {
-            self.drop_teardown();
-        }
-
-        // (7) Telemetry flush on EVERY path, including the ones that skip the
-        // engine teardown (roborev job 161 finding 2). It belongs outside the
-        // guards because it shares NONE of their hazards: it is synchronous, it
-        // needs no tokio runtime and no GIL, it is process-global and
-        // idempotent, and in a default build it is a literal no-op (the OTel
-        // stack is behind the `observability` feature, and `force_flush` on the
-        // inert guard has an empty body). `close()` already calls it in exactly
-        // these process states, so this adds no new call-site class.
+        // (1) There are TWO cases here, and collapsing them was a real defect
+        // (rust-reviewer B1). The `closed` flag is not private to cleanup: it is
+        // the SAME `Arc<AtomicBool>` every `StreamingIterator` this handle
+        // handed out observes (issue #1462), so flipping it makes those
+        // iterators raise `RuntimeError` from `__next__`. That is right when
+        // real teardown happened, and pure loss when none did.
         //
-        // It also recovers the telemetry half of the `closed`-flag limitation
-        // documented above: after a FAILED `close()` the flag reads
-        // "cleaned up" while the flush never ran, and this call runs it anyway.
-        // A telemetry flush is not a shutdown, so doing it on the already-closed
-        // path cannot double-tear-down anything.
-        crate::observability::flush();
+        // For a READ-ONLY handle none does: `write_engine` is `None`, and
+        // `StorageEngine::shutdown()` is a documented no-op ("Nothing to
+        // shutdown - read-only storage layer",
+        // `cqlite-core/src/storage/mod.rs`). Claiming the flag there would buy
+        // nothing and would silently break a pattern that works today —
+        // `return db.execute_streaming(...)` from a function, letting `db` drop
+        // at return, then iterating. An explicit `close()` invalidating an
+        // iterator is a user stating intent; a GC pass is not.
+        //
+        // So: claim the flag only where there is teardown to guard, and
+        // otherwise READ it without claiming. If `StorageEngine::shutdown` ever
+        // becomes real teardown, this condition MUST change with it — the
+        // coupling is deliberate and stated rather than silent.
+        if self.write_engine.is_some() {
+            if !self.closed.swap(true, Ordering::SeqCst) {
+                self.drop_teardown();
+            }
+        } else if !self.closed.load(Ordering::SeqCst) {
+            // Read-only, not already closed: nothing to tear down, but the
+            // telemetry this handle's queries buffered should still be
+            // exported. `load` rather than `swap` is the whole point —
+            // outstanding iterators stay usable, exactly as before this module.
+            crate::observability::flush();
+        }
     }
 }
 
@@ -179,9 +197,9 @@ impl Database {
     /// The engine half of the drop cleanup: everything that must happen at most
     /// once, and only when this drop won the `closed` race.
     ///
-    /// Split out so `drop` has a single exit point and the unconditional
-    /// telemetry flush cannot be bypassed by an early `return` in here.
-    fn drop_teardown(&mut self) {
+    /// Takes `&self` — nothing here mutates through the reference (`swap`,
+    /// `try_lock` and `block_on` all take `&`).
+    fn drop_teardown(&self) {
         // (2) Re-entrancy guard. `Runtime::block_on` PANICS when the calling
         // thread is already inside a runtime context, and a panic in `drop`
         // aborts the process under `panic = "abort"`. If we are inside a
@@ -254,8 +272,24 @@ impl Database {
             tracing::debug!("cqlite: storage shutdown failed during Database drop: {err}");
         }
 
-        // (6) Telemetry flush is deliberately NOT here — it now runs on every
-        // path from `drop` itself, so an early `return` above can no longer
-        // skip it.
+        // (6) Telemetry flush, independent of (4) and (5), and LAST.
+        //
+        // Round 2 of review moved this OUT to run on every drop path including
+        // the two skip branches. That was wrong and is reverted (rust-reviewer
+        // B2), on measured grounds: with the `observability` feature on it
+        // reaches `BatchSpanProcessor::force_flush`, a `sync_channel` +
+        // `recv_timeout` against a HARD-CODED 5-second `forceflush_timeout`
+        // (`opentelemetry_sdk-0.30.0/src/trace/span_processor.rs`). So it can
+        // block ~5s per call WITH THE GIL HELD, and running it unconditionally
+        // made the RECOMMENDED `with cqlite.open(...)` pattern pay that twice —
+        // once in `close()`, again when the GC freed the same handle. Trading a
+        // multi-second stall on the recommended path for telemetry on the
+        // failed-`close()` path is a bad trade; that gap is a follow-up.
+        //
+        // Keeping it inside the guards is positively right, not just
+        // conservative: in the re-entrancy branch that 5s `recv_timeout` would
+        // park a tokio WORKER thread, and at interpreter finalization there is
+        // no reason to stall teardown on an unreachable collector.
+        crate::observability::flush();
     }
 }
