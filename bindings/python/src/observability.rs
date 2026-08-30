@@ -82,15 +82,12 @@ pub fn config_from_py(
         PyValueError::new_err("otel_config must be a dict mapping option names to values")
     })?;
 
-    const KNOWN_KEYS: &[&str] = &[
-        "enabled",
-        "endpoint",
-        "protocol",
-        "service_name",
-        "service_version",
-        "sampling_ratio",
-        "timeout_ms",
-    ];
+    // The allowlist is the ONE shared list (issue #1452): the Node binding's
+    // `OtelOptions` fields are asserted to be the same set, so a key added on one
+    // side and not the other fails a test instead of shipping an asymmetry. The
+    // *mechanism* stays deliberately per-binding — Python rejects unknown keys,
+    // napi drops them.
+    const KNOWN_KEYS: &[&str] = cqlite_ffi_common::KNOWN_OTEL_KEYS;
 
     // Reject unknown keys up front so a typo never silently disables telemetry.
     for key in dict.keys() {

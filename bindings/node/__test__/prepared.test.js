@@ -40,10 +40,28 @@ describe('PreparedStatement', () => {
       expect(mod.wrapPreparedStatement).toBeUndefined();
     });
 
-    test('only Database, PreparedStatement, and version are exported', () => {
+    // Both surfaces are pinned by NAME, and each list is an independent
+    // expectation the module can actually violate.
+    //
+    // The PUBLIC surface is exactly three names. The internal test-support
+    // exports are underscore-prefixed by convention — `_errorContractProbe` and
+    // `_errorContractNodeCodes` (issue #1451) and `_ffiCommonRenderVectors`
+    // (issue #1452) — and are deliberately not part of the public surface. They
+    // are enumerated rather than merely counted so that adding a fourth internal
+    // export is a deliberate edit here, not a silent widening.
+    test('only Database, PreparedStatement, and version are exported publicly', () => {
       const mod = require('../lib/index.js');
-      const exportedKeys = Object.keys(mod).sort();
-      expect(exportedKeys).toEqual(['Database', 'PreparedStatement', 'version']);
+      const allKeys = Object.keys(mod).sort();
+      expect(allKeys.filter((key) => !key.startsWith('_'))).toEqual([
+        'Database',
+        'PreparedStatement',
+        'version',
+      ]);
+      expect(allKeys.filter((key) => key.startsWith('_'))).toEqual([
+        '_errorContractNodeCodes',
+        '_errorContractProbe',
+        '_ffiCommonRenderVectors',
+      ]);
     });
   });
 

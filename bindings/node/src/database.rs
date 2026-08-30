@@ -860,20 +860,19 @@ impl Database {
                 to_napi_error(e)
             })?;
 
-            // Convert rows to JSON values
-            let rows: Vec<serde_json::Value> = core_result
-                .rows
-                .iter()
-                .map(|row| {
+            // Convert rows to JSON values. A refusal (e.g. a malformed inet
+            // length) propagates out of `execute()` instead of being embedded in
+            // the row as a null — see `value_to_json` (issue #1452).
+            let mut rows: Vec<serde_json::Value> = Vec::with_capacity(core_result.rows.len());
+            for row in &core_result.rows {
+                let mut obj = serde_json::Map::with_capacity(row.values.len());
+                for (k, v) in &row.values {
                     #[allow(deprecated)]
-                    let obj: serde_json::Map<String, serde_json::Value> = row
-                        .values
-                        .iter()
-                        .map(|(k, v)| (k.to_string(), value_to_json(v)))
-                        .collect();
-                    serde_json::Value::Object(obj)
-                })
-                .collect();
+                    let json = value_to_json(v)?;
+                    obj.insert(k.to_string(), json);
+                }
+                rows.push(serde_json::Value::Object(obj));
+            }
 
             // Convert column metadata
             let columns: Vec<ColumnInfo> = core_result
@@ -1530,6 +1529,12 @@ impl ExecuteNativeTask {
 /// (BigInt/Counter serde numbers are converted by napi to an exact JS `BigInt`
 /// on this build, so they are not presently rounded.)
 ///
+/// Fallible on purpose (issue #1452): the `inet` arm used to carry a private
+/// 4/16 length dispatch whose malformed-length branch produced a JSON `null`,
+/// indistinguishable from a genuine NULL — silent data loss on the `execute()`
+/// path while `executeNative()` raised on the same cell. The dispatch now comes
+/// from `cqlite_ffi_common::inet` and a refusal propagates to the caller.
+///
 /// TODO(next-major): remove `execute()` + `value_to_json` (breaking change;
 /// deprecated since 0.4.0, callers must migrate to `executeNative()`). See
 /// issue #1457. Do NOT remove before the next major bump.
@@ -1538,10 +1543,10 @@ impl ExecuteNativeTask {
     note = "Use executeNative() for native JavaScript types"
 )]
 #[allow(deprecated)]
-fn value_to_json(value: &cqlite_core::types::Value) -> serde_json::Value {
+fn value_to_json(value: &cqlite_core::types::Value) -> napi::Result<serde_json::Value> {
     use cqlite_core::types::Value;
 
-    match value {
+    let json = match value {
         Value::Null => serde_json::Value::Null,
         Value::Boolean(b) => serde_json::Value::Bool(*b),
         Value::Integer(i) => serde_json::Value::Number((*i as i64).into()),
@@ -1604,78 +1609,73 @@ fn value_to_json(value: &cqlite_core::types::Value) -> serde_json::Value {
                 "nanos": nanos
             })
         }
-        Value::Inet(bytes) => {
-            // Format as IP address string
-            match bytes.len() {
-                4 => {
-                    let ip = std::net::Ipv4Addr::new(bytes[0], bytes[1], bytes[2], bytes[3]);
-                    serde_json::Value::String(ip.to_string())
-                }
-                16 => {
-                    let mut arr = [0u8; 16];
-                    arr.copy_from_slice(bytes);
-                    let ip = std::net::Ipv6Addr::from(arr);
-                    serde_json::Value::String(ip.to_string())
-                }
-                _ => serde_json::Value::Null,
-            }
-        }
-        Value::List(items) => serde_json::Value::Array(items.iter().map(value_to_json).collect()),
-        Value::Set(items) => serde_json::Value::Array(items.iter().map(value_to_json).collect()),
+        // The 4/16 dispatch and the malformed-length message are decided ONCE,
+        // in the shared crate, so this legacy JSON shaping cannot drift from
+        // `value_to_napi`'s native shaping (issue #1452). There is no
+        // passthrough arm and no silent null: a malformed length is a typed
+        // refusal carrying the one FFI error contract's identity.
+        Value::Inet(bytes) => serde_json::Value::String(
+            cqlite_ffi_common::inet::inet_bytes_to_string(bytes)
+                .map_err(|err| to_napi_error(cqlite_core::Error::corruption(err.to_string())))?,
+        ),
+        Value::List(items) => serde_json::Value::Array(json_array(items)?),
+        Value::Set(items) => serde_json::Value::Array(json_array(items)?),
         Value::Map(pairs) => {
             // Convert map to object if keys are strings, otherwise array of pairs
             let all_string_keys = pairs.iter().all(|(k, _)| matches!(k, Value::Text(_)));
 
             if all_string_keys {
-                let obj: serde_json::Map<String, serde_json::Value> = pairs
-                    .iter()
-                    .filter_map(|(k, v)| {
-                        if let Value::Text(s) = k {
-                            Some((String::from_utf8_lossy(s).into_owned(), value_to_json(v)))
-                        } else {
-                            None
-                        }
-                    })
-                    .collect();
+                let mut obj = serde_json::Map::with_capacity(pairs.len());
+                for (k, v) in pairs {
+                    if let Value::Text(s) = k {
+                        obj.insert(String::from_utf8_lossy(s).into_owned(), value_to_json(v)?);
+                    }
+                }
                 serde_json::Value::Object(obj)
             } else {
-                serde_json::Value::Array(
-                    pairs
-                        .iter()
-                        .map(|(k, v)| {
-                            serde_json::json!({
-                                "key": value_to_json(k),
-                                "value": value_to_json(v)
-                            })
-                        })
-                        .collect(),
-                )
+                let mut entries = Vec::with_capacity(pairs.len());
+                for (k, v) in pairs {
+                    entries.push(serde_json::json!({
+                        "key": value_to_json(k)?,
+                        "value": value_to_json(v)?
+                    }));
+                }
+                serde_json::Value::Array(entries)
             }
         }
-        Value::Tuple(items) => serde_json::Value::Array(items.iter().map(value_to_json).collect()),
+        Value::Tuple(items) => serde_json::Value::Array(json_array(items)?),
         Value::Udt(udt) => {
-            let obj: serde_json::Map<String, serde_json::Value> = udt
-                .fields
-                .iter()
-                .map(|field| {
-                    let value = field
-                        .value
-                        .as_ref()
-                        .map(value_to_json)
-                        .unwrap_or(serde_json::Value::Null);
-                    (field.name.clone(), value)
-                })
-                .collect();
+            let mut obj = serde_json::Map::with_capacity(udt.fields.len());
+            for field in &udt.fields {
+                let value = match field.value.as_ref() {
+                    Some(inner) => value_to_json(inner)?,
+                    None => serde_json::Value::Null,
+                };
+                obj.insert(field.name.clone(), value);
+            }
             serde_json::Value::Object(obj)
         }
-        Value::Frozen(inner) => value_to_json(inner),
+        Value::Frozen(inner) => value_to_json(inner)?,
         Value::Json(json_value) => {
             // Value::Json contains a boxed serde_json::Value, return it directly
             (**json_value).clone()
         }
         Value::Tombstone(_) => serde_json::Value::Null,
         Value::Counter(c) => serde_json::Value::Number((*c).into()),
-    }
+    };
+
+    Ok(json)
+}
+
+/// Convert each element of a `list`/`set`/`tuple`, short-circuiting on the first
+/// refusal so a nested malformed cell cannot be flattened into a null.
+#[deprecated(
+    since = "0.4.0",
+    note = "Use executeNative() for native JavaScript types"
+)]
+#[allow(deprecated)]
+fn json_array(items: &[cqlite_core::types::Value]) -> napi::Result<Vec<serde_json::Value>> {
+    items.iter().map(value_to_json).collect()
 }
 
 #[cfg(test)]
@@ -1696,59 +1696,6 @@ mod tests {
         // Second swap should return true (was already closed)
         let was_closed = closed.swap(true, Ordering::SeqCst);
         assert!(was_closed);
-    }
-
-    #[test]
-    #[allow(deprecated)]
-    fn test_value_to_json_primitives() {
-        use cqlite_core::types::Value;
-
-        assert_eq!(value_to_json(&Value::Null), serde_json::Value::Null);
-        assert_eq!(
-            value_to_json(&Value::Boolean(true)),
-            serde_json::Value::Bool(true)
-        );
-        assert_eq!(value_to_json(&Value::Integer(42)), serde_json::json!(42));
-        assert_eq!(
-            value_to_json(&Value::text("hello".to_string())),
-            serde_json::json!("hello")
-        );
-    }
-
-    #[test]
-    #[allow(deprecated)]
-    fn test_value_to_json_uuid() {
-        use cqlite_core::types::Value;
-
-        let uuid_bytes = [
-            0x55, 0x0e, 0x84, 0x00, 0xe2, 0x9b, 0x41, 0xd4, 0xa7, 0x16, 0x44, 0x66, 0x55, 0x44,
-            0x00, 0x00,
-        ];
-        let result = value_to_json(&Value::Uuid(uuid_bytes));
-
-        if let serde_json::Value::String(s) = result {
-            assert!(s.contains('-')); // UUID format with hyphens
-        } else {
-            panic!("Expected string for UUID");
-        }
-    }
-
-    #[test]
-    #[allow(deprecated)]
-    fn test_value_to_json_collections() {
-        use cqlite_core::types::Value;
-
-        // List
-        let list = Value::List(vec![Value::Integer(1), Value::Integer(2)]);
-        assert_eq!(value_to_json(&list), serde_json::json!([1, 2]));
-
-        // Map with string keys
-        let map = Value::Map(vec![
-            (Value::text("a".to_string()), Value::Integer(1)),
-            (Value::text("b".to_string()), Value::Integer(2)),
-        ]);
-        let result = value_to_json(&map);
-        assert!(result.is_object());
     }
 
     // StreamingConfig tests (Issue #304)
@@ -1811,3 +1758,10 @@ mod tests {
         assert_eq!(core.chunk_size, 10_000);
     }
 }
+
+// The legacy `value_to_json` unit tests live in a sibling file: `database.rs` is
+// over the campsite threshold, so coverage added for issue #1452 goes beside it
+// rather than into it (#1116).
+#[cfg(test)]
+#[path = "database_legacy_json_tests.rs"]
+mod legacy_json_tests;

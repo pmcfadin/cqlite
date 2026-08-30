@@ -55,7 +55,7 @@ describe('Error Mapping Tests (Issue #297)', () => {
     // Issue #1451: this assertion used to hedge (`['PARSE','QUERY']`) because
     // Node derived its code from `category()`, and `CqlParse` is Query-category
     // — so it reported 'QUERY' while Python raised ParseError for the same core
-    // error. The shared contract table (cqlite_core::ffi_error_contract) now
+    // error. The shared contract table (cqlite_ffi_common::error_contract) now
     // decides BY VARIANT, so exactly one code is correct here.
     //
     // The statement must actually REACH the CQL parser: a statement whose very
@@ -180,7 +180,7 @@ describe('Error Mapping Tests (Issue #297)', () => {
 /**
  * The shared FFI error contract (issue #1451).
  *
- * `cqlite_core::ffi_error_contract` is the ONE authoritative
+ * `cqlite_ffi_common::error_contract` is the ONE authoritative
  * variant -> (python class, node code, category, recoverable, prefix) table.
  * Before it, this binding derived `code` from the core `category()` while the
  * Python binding matched the `Error` VARIANT, so the same core error had a

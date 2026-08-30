@@ -1435,6 +1435,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "cqlite-ffi-common"
+version = "0.16.1"
+dependencies = [
+ "cqlite-core",
+ "num-bigint",
+ "serde_json",
+ "sha2",
+]
+
+[[package]]
 name = "cqlite-flight"
 version = "0.16.1"
 dependencies = [
@@ -1506,11 +1516,11 @@ dependencies = [
  "base64 0.22.1",
  "chrono",
  "cqlite-core",
+ "cqlite-ffi-common",
  "hex",
  "napi",
  "napi-build",
  "napi-derive",
- "num-bigint",
  "serde_json",
  "thiserror 1.0.69",
  "tokio",
@@ -1524,7 +1534,7 @@ name = "cqlite-py"
 version = "0.16.1"
 dependencies = [
  "cqlite-core",
- "hex",
+ "cqlite-ffi-common",
  "opentelemetry",
  "opentelemetry_sdk",
  "pyo3",
@@ -4730,6 +4740,7 @@ dependencies = [
  "inventory",
  "libc",
  "memoffset",
+ "num-bigint",
  "once_cell",
  "portable-atomic",
  "pyo3-build-config",

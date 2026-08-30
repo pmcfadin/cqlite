@@ -283,154 +283,62 @@ fn uuid_to_string(uuid: &[u8; 16]) -> String {
     )
 }
 
-/// Convert variable-length integer bytes to Python int.
-fn varint_to_pyint(py: Python<'_>, bytes: &[u8]) -> PyResult<PyObject> {
-    if bytes.is_empty() {
-        return Ok(0i64.into_pyobject(py)?.into_any().unbind());
-    }
-
-    // Varint is big-endian two's complement
-    // Use kwargs for signed parameter as required by Python 3.11+
-    let int_class = py.get_type::<pyo3::types::PyInt>();
-    let kwargs = PyDict::new(py);
-    kwargs.set_item("signed", true)?;
-    let py_bytes = PyBytes::new(py, bytes);
-    let result = int_class.call_method("from_bytes", (py_bytes, "big"), Some(&kwargs))?;
-    Ok(result.into_any().unbind())
+/// Convert variable-length integer bytes to a Python `int`.
+///
+/// A thin adapter: the CQL `varint` semantic (big-endian two's complement, empty
+/// payload meaning zero, sign extension at any width) is decided ONCE in
+/// [`cqlite_ffi_common::varint::varint_to_bigint`], and pyo3's `num-bigint`
+/// conversion hands that value straight to Python. No sign handling, no byte
+/// round trip and no length dispatch remain here (issue #1452).
+///
+/// `pub(crate)` so the internal `_varint_from_bytes` test-support helper
+/// (lib.rs) can drive this exact production path.
+pub(crate) fn varint_to_pyint(py: Python<'_>, bytes: &[u8]) -> PyResult<PyObject> {
+    Ok(cqlite_ffi_common::varint::varint_to_bigint(bytes)
+        .into_pyobject(py)?
+        .into_any()
+        .unbind())
 }
 
-/// Convert decimal to Python decimal.Decimal.
+/// Render a CQL DECIMAL to its exact text through the ONE shared implementation.
+///
+/// The single Python-specific step is mapping the shared
+/// [`cqlite_ffi_common::decimal::DecimalError`] onto
+/// [`cqlite_core::Error::corruption`] and thence through this binding's existing
+/// production [`to_py_err`] path, so a refused cell's exception CLASS still
+/// comes from the one FFI error contract and its MESSAGE has one spelling in the
+/// repository (issue #1452).
+///
+/// `pub(crate)` so the vector test-support surface can report the exact rendered
+/// text: `decimal.Decimal.__str__` re-normalises exponent form (`Decimal("123e2")`
+/// prints as `1.23E+4`), so the text — not the object's `str()` — is what the
+/// cross-binding vectors compare.
+pub(crate) fn decimal_render_text(scale: i32, unscaled: &[u8]) -> PyResult<String> {
+    cqlite_ffi_common::decimal::decimal_to_string(scale, unscaled)
+        .map_err(|err| to_py_err(cqlite_core::Error::corruption(err.to_string())))
+}
+
+/// Convert decimal to Python `decimal.Decimal`.
+///
+/// A thin adapter over [`decimal_render_text`]: the digit split, the sign, the
+/// scale arithmetic and the refusal policy all live in the shared crate. The
+/// previous body's `int.from_bytes` + Python `str()` round trip — and the
+/// `sys.get_int_max_str_digits()` probe that made a well-formed value raise here
+/// while the Node binding rendered it — are gone (issue #1452; see
+/// `CHANGELOG.md`).
 ///
 /// `pub(crate)` so the internal `_decimal_from_parts` test helper (lib.rs) can
-/// drive this exact conversion path directly, exercising the fail-closed
-/// corrupt-DECIMAL guard (issue #1741) without a multi-kilobyte on-disk fixture.
+/// drive this exact production path, exercising the fail-closed
+/// corrupt-DECIMAL guard without a multi-kilobyte on-disk fixture.
 pub(crate) fn decimal_to_pydecimal(
     py: Python<'_>,
     scale: i32,
     unscaled: &[u8],
 ) -> PyResult<PyObject> {
+    let text = decimal_render_text(scale, unscaled)?;
     let decimal_mod = py.import("decimal")?;
     let decimal_class = decimal_mod.getattr("Decimal")?;
-
-    if unscaled.is_empty() {
-        return Ok(decimal_class
-            .call1(("0",))?
-            .into_pyobject(py)?
-            .into_any()
-            .unbind());
-    }
-
-    // Convert unscaled bytes to integer using kwargs for signed parameter
-    let int_class = py.get_type::<pyo3::types::PyInt>();
-    let kwargs = PyDict::new(py);
-    kwargs.set_item("signed", true)?;
-    let py_bytes = PyBytes::new(py, unscaled);
-    let unscaled_int = int_class.call_method("from_bytes", (py_bytes, "big"), Some(&kwargs))?;
-
-    // Apply scale: result = unscaled * 10^(-scale)
-    if scale == 0 {
-        Ok(decimal_class
-            .call1((unscaled_int,))?
-            .into_pyobject(py)?
-            .into_any()
-            .unbind())
-    } else {
-        // Fail-closed guard (issue #1741, abort-safety regression). Real Cassandra
-        // DECIMAL values are tiny; a multi-thousand-digit unscaled value or an
-        // absurd scale only arises from a CORRUPT SSTable. The rendering below
-        // would otherwise (a) call Python `str()` on the unscaled int — which
-        // raises a bare `ValueError` once the digit count exceeds
-        // `sys.get_int_max_str_digits()` (py3.11+, default 4300) — or (b) use
-        // `scale` as a `format!` width, which panics with "Formatting argument
-        // out of range". Neither is a catchable driver error (the former escapes
-        // as an uncaught `ValueError`, aborting the caller), so we refuse to
-        // stringify an unbounded integer and instead surface a typed corruption
-        // error. This preserves the abort-safety guarantee (issue #1437/#1440):
-        // a corrupt SSTable raises `CqliteError`, it never crashes the driver.
-        //
-        // The read-side tombstone/TTL shadowing added for #1741 changed which
-        // corrupt row surfaces first on the truncated/bitflipped fixtures,
-        // exposing this pre-existing binding fragility (the unscaled-`str()`
-        // path) that the previous emit order happened to avoid.
-        const DECIMAL_HARD_DIGIT_CAP: usize = 1_000_000;
-        // Python's own configured int->str safety threshold (py3.11+, 0 ==
-        // unlimited). Absent on older interpreters, where there is no such limit;
-        // fall back to the hard cap so the `format!`-width panic is still avoided.
-        let py_int_limit: usize = py
-            .import("sys")
-            .and_then(|sys| sys.getattr("get_int_max_str_digits"))
-            .and_then(|f| f.call0())
-            .and_then(|v| v.extract::<i64>())
-            .map(|n| if n <= 0 { 0 } else { n as usize })
-            .unwrap_or(0);
-        let cap = match py_int_limit {
-            0 => DECIMAL_HARD_DIGIT_CAP,
-            n => n.min(DECIMAL_HARD_DIGIT_CAP),
-        };
-        // TIGHT upper bound on the decimal digit count of |unscaled|. For an
-        // N-byte SIGNED two's-complement integer one bit is the sign, so the
-        // MAGNITUDE is at most 2^(8N-1) — hence at most ceil((8N-1) * log10(2))
-        // decimal digits. That product is never an integer (log10(2) is
-        // irrational × an integer), so `ceil` equals `floor + 1`, which is the
-        // EXACT digit-count upper bound: no extra rounding margin is needed. The
-        // previous `ceil(N * log10(256)) + 1` added a spurious +1 and over-rejected
-        // a minimal value whose magnitude sits exactly at the cap (e.g. a 1785-byte
-        // integer fits in 4300 digits but the old formula computed 4301). Rejecting
-        // only when this tight bound STILL exceeds `cap` lets every representable
-        // value render while a truly unbounded/corrupt byte length is still refused
-        // (fail-closed) — the abort-safety guarantee is preserved. Compute the bit
-        // count in f64 so `8*len - 1` cannot underflow `usize` (len == 0 yields a
-        // negative product → 0 digits after the clamp); the float->int `as`
-        // saturates in Rust, so the guard never wraps or under-counts an oversized
-        // value.
-        let magnitude_bits = 8.0 * (unscaled.len() as f64) - 1.0;
-        let max_digits = (magnitude_bits * std::f64::consts::LOG10_2).ceil().max(0.0) as usize;
-        if max_digits > cap || (scale.unsigned_abs() as usize) > cap {
-            return Err(to_py_err(cqlite_core::Error::corruption(format!(
-                "DECIMAL cell not representable (scale={scale}, unscaled_len={} bytes, \
-                 cap={cap} digits): corrupt SSTable — refusing to stringify an unbounded \
-                 integer (issue #1741)",
-                unscaled.len()
-            ))));
-        }
-
-        // Create string representation for exact decimal
-        // Convert Python int to string by calling str()
-        let builtins = py.import("builtins")?;
-        let str_func = builtins.getattr("str")?;
-        let unscaled_str_obj = str_func.call1((&unscaled_int,))?;
-        let unscaled_str: String = unscaled_str_obj.extract()?;
-        let decimal_str = if scale > 0 {
-            // Positive scale means divide by 10^scale
-            let len = unscaled_str.len();
-            let scale_usize = scale as usize;
-            if let Some(digits) = unscaled_str.strip_prefix('-') {
-                if digits.len() <= scale_usize {
-                    format!("-0.{:0>width$}", digits, width = scale_usize)
-                } else {
-                    let split_point = digits.len() - scale_usize;
-                    format!("-{}.{}", &digits[..split_point], &digits[split_point..])
-                }
-            } else if len <= scale_usize {
-                format!("0.{:0>width$}", unscaled_str, width = scale_usize)
-            } else {
-                let split_point = len - scale_usize;
-                format!(
-                    "{}.{}",
-                    &unscaled_str[..split_point],
-                    &unscaled_str[split_point..]
-                )
-            }
-        } else {
-            // Negative scale means multiply by 10^(-scale)
-            format!("{}e{}", unscaled_str, -scale)
-        };
-        Ok(decimal_class
-            .call1((decimal_str,))?
-            .into_pyobject(py)?
-            .into_any()
-            .unbind())
-    }
+    Ok(decimal_class.call1((text,))?.into_any().unbind())
 }
 
 /// Convert serde_json::Value to Python object.
@@ -556,68 +464,31 @@ fn udt_to_py(py: Python<'_>, udt: &cqlite_core::UdtValue) -> PyResult<PyObject> 
     Ok(dict.into_any().unbind())
 }
 
-/// Convert inet bytes to Python ipaddress.IPv4Address or IPv6Address.
+/// Convert inet bytes to Python `ipaddress.IPv4Address` or `IPv6Address`.
 ///
-/// A CQL `inet` value is authoritatively 4 (IPv4) or 16 (IPv6) bytes. Any other
-/// length is malformed/corrupt data. Per the no-heuristics mandate (issue #28) we
-/// do NOT invent a passthrough (the old behavior silently returned the raw
-/// `bytes`, hiding bad data and diverging from the Node binding, which raises).
-/// Both bindings now surface a typed error naming the bad length (issue #1453).
+/// A thin adapter: the 4/16 length dispatch and the malformed-length message are
+/// decided ONCE in [`cqlite_ffi_common::inet`], so this module holds no literal
+/// copy of that message (issue #1453 had aligned the two bindings by
+/// hand-copying the string into both files; issue #1452 removed the copy). Per
+/// the no-heuristics mandate (issue #28) there is no passthrough or hex-fallback
+/// branch: the only outcomes are IPv4, IPv6 and a typed error.
 ///
-/// The error class is `ParseError` (a malformed-scalar decode). NOTE: reconcile
-/// with #1451's authoritative error table if/when it lands — that issue may
-/// assign a different class to the malformed-scalar variant.
+/// The error class stays `ParseError` (a malformed-scalar decode), unchanged by
+/// the extraction.
 pub(crate) fn inet_to_py(py: Python<'_>, bytes: &[u8]) -> PyResult<PyObject> {
-    let ipaddress = py.import("ipaddress")?;
-    match bytes.len() {
-        4 => {
-            // IPv4: Use ipaddress.IPv4Address(packed_bytes)
-            let ipv4_class = ipaddress.getattr("IPv4Address")?;
-            let py_bytes = PyBytes::new(py, bytes);
-            let addr = ipv4_class.call1((py_bytes,))?;
-            Ok(addr.into_any().unbind())
-        }
-        16 => {
-            // IPv6: Use ipaddress.IPv6Address(packed_bytes)
-            let ipv6_class = ipaddress.getattr("IPv6Address")?;
-            let py_bytes = PyBytes::new(py, bytes);
-            let addr = ipv6_class.call1((py_bytes,))?;
-            Ok(addr.into_any().unbind())
-        }
-        n => {
-            // Malformed length -> typed error (matches the Node binding), never a
-            // silent raw-bytes passthrough. Message mirrors Node's verbatim.
-            Err(crate::error::ParseError::new_err(format!(
-                "Invalid inet address length: {n} (expected 4 or 16)"
-            )))
-        }
-    }
-}
+    use cqlite_ffi_common::inet::InetKind;
 
-/// Convert inet bytes to IP address string (for tests/debug).
-#[cfg(test)]
-fn inet_to_string(bytes: &[u8]) -> String {
-    match bytes.len() {
-        4 => {
-            // IPv4
-            format!("{}.{}.{}.{}", bytes[0], bytes[1], bytes[2], bytes[3])
-        }
-        16 => {
-            // IPv6
-            let segments: Vec<String> = (0..8)
-                .map(|i| {
-                    let high = bytes[i * 2] as u16;
-                    let low = bytes[i * 2 + 1] as u16;
-                    format!("{:x}", (high << 8) | low)
-                })
-                .collect();
-            segments.join(":")
-        }
-        _ => {
-            // Fallback: hex representation
-            format!("0x{}", hex::encode(bytes))
-        }
-    }
+    let kind = cqlite_ffi_common::inet::inet_kind(bytes)
+        .map_err(|err| crate::error::ParseError::new_err(err.to_string()))?;
+    let ipaddress = py.import("ipaddress")?;
+    // `ipaddress` builds both families from PACKED BYTES, so this binding never
+    // formats an address itself — the shared part is the dispatch, not the text.
+    let class = match kind {
+        InetKind::V4 => ipaddress.getattr("IPv4Address")?,
+        InetKind::V6 => ipaddress.getattr("IPv6Address")?,
+    };
+    let addr = class.call1((PyBytes::new(py, bytes),))?;
+    Ok(addr.into_any().unbind())
 }
 
 /// Helper to create a KeyError for missing columns.
@@ -639,20 +510,9 @@ mod tests {
         assert_eq!(formatted, "12345678-9abc-def0-1234-56789abcdef0");
     }
 
-    #[test]
-    fn test_inet_ipv4_formatting() {
-        let ipv4 = vec![192, 168, 1, 1];
-        let formatted = inet_to_string(&ipv4);
-        assert_eq!(formatted, "192.168.1.1");
-    }
-
-    #[test]
-    fn test_inet_ipv6_formatting() {
-        let ipv6 = vec![
-            0x20, 0x01, 0x0d, 0xb8, 0x85, 0xa3, 0x00, 0x00, 0x00, 0x00, 0x8a, 0x2e, 0x03, 0x70,
-            0x73, 0x34,
-        ];
-        let formatted = inet_to_string(&ipv6);
-        assert_eq!(formatted, "2001:db8:85a3:0:0:8a2e:370:7334");
-    }
+    // The two inet formatting tests that lived here exercised a `#[cfg(test)]`-only
+    // THIRD inet formatter whose hex fallback contradicted production behaviour.
+    // Both the formatter and the tests moved to
+    // `cqlite-ffi-common/src/inet.rs`, where they exercise the production path
+    // (issue #1452). Cross-binding coverage is in `tests/test_shared_vectors.py`.
 }

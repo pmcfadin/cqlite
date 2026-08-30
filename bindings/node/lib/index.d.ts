@@ -1011,6 +1011,10 @@ export declare class Database {
    *   (scale=2, unscaled=123) -> `"decimal:2:0x7b"`.
    * - **`date` → `number`** (days since epoch); **`time` → `number`**
    *   (nanoseconds since midnight).
+   * - **A malformed `inet` length THROWS** (`code: "PARSE"`, `category: "Data"`),
+   *   on this path as well as on `executeNative()`. It does not come back as
+   *   `null`: a JSON `null` would be indistinguishable from a genuine NULL, so
+   *   the cell would be lost silently (issue #1452).
    *
    * It is also **slower** than `executeNative()`: it converts each value to JSON
    * off the JS main thread, then converts that JSON to JS values on-loop — a

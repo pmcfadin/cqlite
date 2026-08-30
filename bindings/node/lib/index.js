@@ -138,10 +138,43 @@ function _errorContractNodeCodes() {
   return nativeBinding.errorContractNodeCodes();
 }
 
+/**
+ * Test-support: every committed cross-binding vector (issue #1452), rendered
+ * through this binding's PRODUCTION conversion path.
+ *
+ * The tables live in `cqlite_ffi_common::vectors` and the Python binding's twin
+ * surface (`cqlite._ffi_common_render_vectors`) reads the same ones, so a
+ * divergence between the bindings — or a re-introduced private implementation in
+ * either — fails BOTH suites. See `__test__/shared-vectors.test.js`.
+ *
+ * Not part of the stable public API — the leading underscore marks it internal
+ * test support.
+ *
+ * @private
+ * @returns {Array<{cqlType: string, name: string, kind: string, expected: string,
+ *                  expectedSha256: (string|null), outcome: string, actual: string,
+ *                  rendered: (string|null), scale: number, bytes: Buffer}>}
+ *   One entry per committed vector. `expected` is the committed expectation —
+ *   collapsed to a digest for a multi-kilobyte rendering, in which case
+ *   `expectedSha256` carries the lower-case SHA-256 hex of the UTF-8 bytes of the
+ *   FULL expected rendering (`null` when `expected` is itself exact).
+ *   `rendered` is the full, un-digested string this binding produced (`null` on a
+ *   refusal); `actual` is the readable half — the digest, or the native error's
+ *   `reason` — and is never the oracle for a long rendering.
+ */
+function _ffiCommonRenderVectors() {
+  try {
+    return nativeBinding.ffiCommonRenderVectors();
+  } catch (error) {
+    throw enhanceError(error);
+  }
+}
+
 module.exports = {
   Database,
   PreparedStatement,
   version,
   _errorContractProbe,
   _errorContractNodeCodes,
+  _ffiCommonRenderVectors,
 };

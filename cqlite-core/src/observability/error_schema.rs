@@ -48,7 +48,7 @@
 //! (catch-all)" claim survived here).
 //!
 //! **Scope: telemetry only.** The language bindings do NOT derive from
-//! [`classify`]: `crate::ffi_error_contract` (issue #1451) mirrors the distinct
+//! [`classify`]: `cqlite_ffi_common::error_contract` (issue #1451) mirrors the distinct
 //! [`Error::category`](crate::error::Error::category) enum, and nothing pins the
 //! two together — `QueryTimeout` is `Timeout` here and `Query` there.
 //!
@@ -70,7 +70,7 @@ use crate::error::Error;
 /// Bounded, telemetry-safe error categories. The total count is small and
 /// fixed, making `as_str()` values safe as metric/span attribute values.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum ErrorCategory {
+pub enum ObsErrorCategory {
     /// Filesystem / OS I/O, paths, timeouts.
     Io,
     /// (De)serialization and type-conversion failures.
@@ -107,78 +107,78 @@ pub enum ErrorCategory {
     Other,
 }
 
-impl ErrorCategory {
+impl ObsErrorCategory {
     /// Stable, low-cardinality label. Safe to use as a metric/span attribute
     /// value — these strings never change for a given variant.
     pub fn as_str(self) -> &'static str {
         match self {
-            ErrorCategory::Io => "io",
-            ErrorCategory::Serialization => "serialization",
-            ErrorCategory::Corruption => "corruption",
-            ErrorCategory::Schema => "schema",
-            ErrorCategory::Parsing => "parsing",
-            ErrorCategory::Storage => "storage",
-            ErrorCategory::Concurrency => "concurrency",
-            ErrorCategory::Constraints => "constraints",
-            ErrorCategory::Query => "query",
-            ErrorCategory::Cancelled => "cancelled",
-            ErrorCategory::Timeout => "timeout",
-            ErrorCategory::Other => "other",
+            ObsErrorCategory::Io => "io",
+            ObsErrorCategory::Serialization => "serialization",
+            ObsErrorCategory::Corruption => "corruption",
+            ObsErrorCategory::Schema => "schema",
+            ObsErrorCategory::Parsing => "parsing",
+            ObsErrorCategory::Storage => "storage",
+            ObsErrorCategory::Concurrency => "concurrency",
+            ObsErrorCategory::Constraints => "constraints",
+            ObsErrorCategory::Query => "query",
+            ObsErrorCategory::Cancelled => "cancelled",
+            ObsErrorCategory::Timeout => "timeout",
+            ObsErrorCategory::Other => "other",
         }
     }
 
     /// All variants, for tests and exhaustiveness checks.
-    pub const ALL: &'static [ErrorCategory] = &[
-        ErrorCategory::Io,
-        ErrorCategory::Serialization,
-        ErrorCategory::Corruption,
-        ErrorCategory::Schema,
-        ErrorCategory::Parsing,
-        ErrorCategory::Storage,
-        ErrorCategory::Concurrency,
-        ErrorCategory::Constraints,
-        ErrorCategory::Query,
-        ErrorCategory::Cancelled,
-        ErrorCategory::Timeout,
-        ErrorCategory::Other,
+    pub const ALL: &'static [ObsErrorCategory] = &[
+        ObsErrorCategory::Io,
+        ObsErrorCategory::Serialization,
+        ObsErrorCategory::Corruption,
+        ObsErrorCategory::Schema,
+        ObsErrorCategory::Parsing,
+        ObsErrorCategory::Storage,
+        ObsErrorCategory::Concurrency,
+        ObsErrorCategory::Constraints,
+        ObsErrorCategory::Query,
+        ObsErrorCategory::Cancelled,
+        ObsErrorCategory::Timeout,
+        ObsErrorCategory::Other,
     ];
 }
 
-impl std::fmt::Display for ErrorCategory {
+impl std::fmt::Display for ObsErrorCategory {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(self.as_str())
     }
 }
 
 /// Map a [`cqlite_core::Error`](crate::error::Error) to its telemetry
-/// [`ErrorCategory`]. This is the single classification point; both
+/// [`ObsErrorCategory`]. This is the single classification point; both
 /// `Error::obs_category` and `record_error` route through it.
-pub(crate) fn classify(err: &Error) -> ErrorCategory {
+pub(crate) fn classify(err: &Error) -> ObsErrorCategory {
     match err {
-        Error::Io(_) | Error::InvalidPath(_) | Error::Timeout(_) => ErrorCategory::Io,
+        Error::Io(_) | Error::InvalidPath(_) | Error::Timeout(_) => ObsErrorCategory::Io,
 
-        Error::Serialization { .. } | Error::TypeConversion(_) => ErrorCategory::Serialization,
+        Error::Serialization { .. } | Error::TypeConversion(_) => ObsErrorCategory::Serialization,
 
-        Error::Corruption(_) | Error::CorruptCommitLogFrame(_) => ErrorCategory::Corruption,
+        Error::Corruption(_) | Error::CorruptCommitLogFrame(_) => ObsErrorCategory::Corruption,
 
-        Error::Schema(_) | Error::Table(_) => ErrorCategory::Schema,
+        Error::Schema(_) | Error::Table(_) => ObsErrorCategory::Schema,
 
         Error::Parse(_)
         | Error::CqlParse(_)
         | Error::InvalidFormat(_)
         | Error::UnsupportedFormat(_)
         | Error::UnsupportedVersion { .. }
-        | Error::UnsupportedCommitLogVersion { .. } => ErrorCategory::Parsing,
+        | Error::UnsupportedCommitLogVersion { .. } => ObsErrorCategory::Parsing,
 
         Error::Storage(_)
         | Error::Memory(_)
         | Error::Index(_)
         | Error::Compaction(_)
-        | Error::WriteDirLocked { .. } => ErrorCategory::Storage,
+        | Error::WriteDirLocked { .. } => ObsErrorCategory::Storage,
 
-        Error::Concurrency(_) | Error::Transaction(_) => ErrorCategory::Concurrency,
+        Error::Concurrency(_) | Error::Transaction(_) => ObsErrorCategory::Concurrency,
 
-        Error::ConstraintViolation(_) | Error::AlreadyExists(_) => ErrorCategory::Constraints,
+        Error::ConstraintViolation(_) | Error::AlreadyExists(_) => ObsErrorCategory::Constraints,
 
         Error::QueryExecution(_)
         | Error::ResultTooLarge { .. }
@@ -187,16 +187,16 @@ pub(crate) fn classify(err: &Error) -> ErrorCategory {
         // outcome (`point` unavailable / invalid knob value).
         | Error::ForcedReadPathUnavailable { .. }
         | Error::InvalidReadPath { .. }
-        | Error::InvalidInput(_) => ErrorCategory::Query,
+        | Error::InvalidInput(_) => ObsErrorCategory::Query,
 
         // Issue #2264: a cooperative cancellation is an expected outcome, not a
         // fault — kept out of both `Io` and the generic `Other` bucket.
-        Error::Cancelled => ErrorCategory::Cancelled,
+        Error::Cancelled => ObsErrorCategory::Cancelled,
 
         // Issue #1695: an elapsed `query.max_execution_time` budget. Its own
         // bucket so it is never indistinguishable from `Corruption` on a
         // dashboard, and never buried in `Other`.
-        Error::QueryTimeout { .. } => ErrorCategory::Timeout,
+        Error::QueryTimeout { .. } => ObsErrorCategory::Timeout,
 
         // The remaining variants, each named EXPLICITLY. This is not a catch-all
         // and there is no wildcard arm anywhere in this match, so a newly-added
@@ -206,10 +206,10 @@ pub(crate) fn classify(err: &Error) -> ErrorCategory {
         | Error::InvalidState(_)
         | Error::InvalidOperation(_)
         | Error::NotFound(_)
-        | Error::Internal(_) => ErrorCategory::Other,
+        | Error::Internal(_) => ObsErrorCategory::Other,
 
         #[cfg(target_arch = "wasm32")]
-        Error::Wasm(_) => ErrorCategory::Other,
+        Error::Wasm(_) => ObsErrorCategory::Other,
     }
 }
 
@@ -219,8 +219,8 @@ impl Error {
     /// Distinct from [`Error::category`](crate::error::Error::category), which
     /// returns the developer-facing [`crate::error::ErrorCategory`]. This one
     /// returns the bounded, monitoring-oriented
-    /// [`crate::observability::ErrorCategory`].
-    pub fn obs_category(&self) -> ErrorCategory {
+    /// [`crate::observability::ObsErrorCategory`].
+    pub fn obs_category(&self) -> ObsErrorCategory {
         classify(self)
     }
 }

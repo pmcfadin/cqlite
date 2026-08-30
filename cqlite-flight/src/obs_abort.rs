@@ -58,7 +58,7 @@ impl AbortReason {
         }
     }
 
-    /// The valid, closed [`cqlite_core::observability::ErrorCategory`] label this
+    /// The valid, closed [`cqlite_core::observability::ObsErrorCategory`] label this
     /// reason maps onto for the canonical `cqlite.error.category` dimension of
     /// `cqlite.errors.total`, so existing category rollups keep working while the
     /// new `cqlite.flight.abort_reason` attribute carries the fine detail.
@@ -74,18 +74,18 @@ impl AbortReason {
     /// `"cancelled"` — `cqlite.errors.total` still increments exactly once per
     /// abort, and the new `cqlite.flight.abort_reason` attribute carries the
     /// authoritative fine-grained reason.
-    fn error_category(self) -> obs::ErrorCategory {
-        use obs::ErrorCategory;
+    fn error_category(self) -> obs::ObsErrorCategory {
+        use obs::ObsErrorCategory;
         match self {
             // Benign terminal states: expected under load, not a fault.
             AbortReason::SupersededSplit
             | AbortReason::ClientCancel
             | AbortReason::AdmissionShed
-            | AbortReason::SnapshotRetired => ErrorCategory::Cancelled,
+            | AbortReason::SnapshotRetired => ObsErrorCategory::Cancelled,
             // A malformed/rejected ticket is a client (query) fault.
-            AbortReason::TicketInvalid => ErrorCategory::Query,
+            AbortReason::TicketInvalid => ObsErrorCategory::Query,
             // A genuine server fault stays in the catch-all category.
-            AbortReason::Internal => ErrorCategory::Other,
+            AbortReason::Internal => ObsErrorCategory::Other,
         }
     }
 
@@ -205,14 +205,14 @@ pub fn record_do_get_abort(status: &tonic::Status, reason: AbortReason, cx: Abor
 /// the intended bounded category. Only the category is used (the message is a
 /// fixed placeholder — never recorded on the metric), mirroring
 /// [`crate::obs::record_status_error`]'s code→error mapping.
-fn category_placeholder_error(category: obs::ErrorCategory) -> cqlite_core::Error {
+fn category_placeholder_error(category: obs::ObsErrorCategory) -> cqlite_core::Error {
     use cqlite_core::Error;
-    use obs::ErrorCategory;
+    use obs::ObsErrorCategory;
     match category {
         // `Error::Cancelled.obs_category() == Cancelled`.
-        ErrorCategory::Cancelled => Error::Cancelled,
+        ObsErrorCategory::Cancelled => Error::Cancelled,
         // `Error::invalid_input(..).obs_category() == Query`.
-        ErrorCategory::Query => Error::invalid_input("flight"),
+        ObsErrorCategory::Query => Error::invalid_input("flight"),
         // `Error::internal(..).obs_category() == Other`.
         _ => Error::internal("flight"),
     }
@@ -236,17 +236,17 @@ mod tests {
 
     #[test]
     fn abort_reason_maps_to_valid_closed_error_category() {
-        use cqlite_core::observability::ErrorCategory;
+        use cqlite_core::observability::ObsErrorCategory;
         // Benign aborts reuse the existing `cancelled` category; a ticket fault
         // keeps `query`; a genuine fault stays `other` — every mapping is a valid
-        // closed `ErrorCategory` so existing category rollups never break.
+        // closed `ObsErrorCategory` so existing category rollups never break.
         for (reason, cat) in [
-            (AbortReason::SupersededSplit, ErrorCategory::Cancelled),
-            (AbortReason::ClientCancel, ErrorCategory::Cancelled),
-            (AbortReason::AdmissionShed, ErrorCategory::Cancelled),
-            (AbortReason::SnapshotRetired, ErrorCategory::Cancelled),
-            (AbortReason::TicketInvalid, ErrorCategory::Query),
-            (AbortReason::Internal, ErrorCategory::Other),
+            (AbortReason::SupersededSplit, ObsErrorCategory::Cancelled),
+            (AbortReason::ClientCancel, ObsErrorCategory::Cancelled),
+            (AbortReason::AdmissionShed, ObsErrorCategory::Cancelled),
+            (AbortReason::SnapshotRetired, ObsErrorCategory::Cancelled),
+            (AbortReason::TicketInvalid, ObsErrorCategory::Query),
+            (AbortReason::Internal, ObsErrorCategory::Other),
         ] {
             assert_eq!(reason.error_category(), cat, "{reason:?}");
             // The placeholder error's obs_category must equal the intended
