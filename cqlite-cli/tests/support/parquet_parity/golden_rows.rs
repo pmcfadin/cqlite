@@ -26,7 +26,7 @@
 //! query-semantics oracle (`test-data/query-semantics-oracle.json`), not to a
 //! physical-dump lane.
 //!
-//! # Three normalizations, all of them equalities rather than tolerances
+//! # Four normalizations, all of them equalities rather than tolerances
 //!
 //! * **`Null` folds into `Absent`, recursively.** Arrow/Parquet has ONE null;
 //!   sstabledump renders an absent cell by omitting it and a null UDT field as
@@ -42,6 +42,10 @@
 //! * **Numbers are canonicalized by DECLARED type** — a `float` re-narrowed to
 //!   32 bits, a whole-valued `decimal` read as the exact double it denotes. Both
 //!   are exact conversions; see [`normalize_declared_numbers`].
+//! * **A FROZEN map's JSON object becomes a canonical map** — sstabledump writes
+//!   a frozen map as a JSON OBJECT, which `from_json` necessarily reads as a
+//!   `Tuple`; the Arrow side reads the same column back as a `Map`. See
+//!   [`coerce_declared_shape`].
 
 #![allow(dead_code)]
 
@@ -133,6 +137,10 @@ pub fn project_golden(
                     continue;
                 }
                 let value = project_column(&where_, row, col)?;
+                // Shape first (a frozen map's JSON object becomes a canonical
+                // map), then numbers — `normalize_declared_numbers` recurses
+                // into a `Map` but not into a `Tuple` standing in for one.
+                let value = coerce_declared_shape(value, &col.spec);
                 cells.insert(
                     col.name.clone(),
                     normalize_declared_numbers(value, &col.spec),
@@ -356,6 +364,103 @@ fn coerce_path(raw: &CanonicalValue, elem: Option<&CqlTypeSpec>) -> CanonicalVal
         },
         other => fold_null(other.clone()),
     }
+}
+
+/// Reshape a golden value into the shape its DECLARED CQL type implies.
+///
+/// # The one shape JSON cannot carry: a frozen map
+///
+/// sstabledump writes a FROZEN map as a JSON OBJECT — `{"a": 1, "b": 2}` — and a
+/// JSON object carries nothing that distinguishes "a map" from "a struct", so
+/// `canonical_jsonl::from_json` necessarily reads it as a `Tuple`. The Arrow side
+/// reads the same column back as a `Map`. Without this reshape the two would
+/// report a FALSE VALUE DIFFERENCE for a value both sides agree on, on every
+/// frozen-map column. (Latent today: the corpus's only frozen maps, `fm` and
+/// `ma` on `test_compactionparityudt.udt_collections`, sit behind the #3556
+/// whole-case gap and never reach the value comparison — they would start
+/// diverging the day #3556 is fixed.)
+///
+/// The DECLARED type is what settles it, exactly as it settles the number
+/// canonicalization above: a `Tuple` stays a `Tuple` for every declared type
+/// that is NOT a map.
+///
+/// # What is and is not weakened
+///
+/// Nothing: the entry COUNT is preserved, every key and value is still compared
+/// exactly, and no ordering is relaxed. Two details make that true.
+///
+/// * **Keys.** A JSON object's keys are always STRINGS, so a
+///   `frozen<map<int,text>>` arrives with `"1"` where the Arrow side holds
+///   `Int(1)`. The key is coerced back through the DECLARED key type by the same
+///   rule collection PATH components and partition-key components use
+///   ([`coerce_path`] / `CanonicalValue::from_json_key`), never blindly — a
+///   `map<text,int>` key `"5"` stays `Text` and can therefore never compare
+///   equal to an integer key `5`.
+/// * **Order.** `CanonicalValue::Map` compares as an ordered sequence, so the
+///   two sides' entry order has to agree. It does: the workspace pins
+///   `serde_json`'s `preserve_order` feature, so the golden's object order IS
+///   the order sstabledump wrote (Cassandra's key-comparator order), which is
+///   the order the Arrow map carries. That dependency is load-bearing and is
+///   asserted directly by `golden_json_object_order_is_preserved` in
+///   `issue_1490_parquet_jsonl_parity.rs`, so dropping the feature reds with a
+///   named explanation instead of silently mis-ordering a frozen map.
+pub fn coerce_declared_shape(v: CanonicalValue, spec: &CqlTypeSpec) -> CanonicalValue {
+    match (v, spec) {
+        (CanonicalValue::Tuple(fields), CqlTypeSpec::Map { key, value }) => CanonicalValue::Map(
+            fields
+                .into_iter()
+                .map(|(k, v)| (coerce_object_key(&k, key), coerce_declared_shape(v, value)))
+                .collect(),
+        ),
+        // Already a map (the non-frozen, per-element path): recurse only.
+        (CanonicalValue::Map(kvs), CqlTypeSpec::Map { key, value }) => CanonicalValue::Map(
+            kvs.into_iter()
+                .map(|(k, v)| {
+                    (
+                        coerce_declared_shape(k, key),
+                        coerce_declared_shape(v, value),
+                    )
+                })
+                .collect(),
+        ),
+        (CanonicalValue::List(xs), CqlTypeSpec::Seq { elem, .. }) => CanonicalValue::List(
+            xs.into_iter()
+                .map(|x| coerce_declared_shape(x, elem))
+                .collect(),
+        ),
+        (CanonicalValue::Set(xs), CqlTypeSpec::Seq { elem, .. }) => CanonicalValue::Set(
+            xs.into_iter()
+                .map(|x| coerce_declared_shape(x, elem))
+                .collect(),
+        ),
+        // A CQL tuple arrives as a JSON ARRAY, so its members are positional.
+        (CanonicalValue::List(xs), CqlTypeSpec::Tuple(specs)) if xs.len() == specs.len() => {
+            CanonicalValue::List(
+                xs.into_iter()
+                    .zip(specs.iter())
+                    .map(|(x, s)| coerce_declared_shape(x, s))
+                    .collect(),
+            )
+        }
+        (other, _) => other,
+    }
+}
+
+/// A JSON OBJECT key is always a string; decode it against the declared map-key
+/// type, using the same machinery sstabledump's string-rendered KEY components
+/// go through (so an integral key is coerced and a text key is not).
+fn coerce_object_key(raw: &str, key_spec: &CqlTypeSpec) -> CanonicalValue {
+    let kind = match key_spec {
+        CqlTypeSpec::Scalar(name) => KeyKind::from_cql_type(name),
+        // A non-scalar map key (a frozen collection/UDT/tuple key) is not a
+        // numeric string, so no coercion applies; `from_json_key` falls through
+        // to `from_json`, which still recognizes a timestamp spelling.
+        _ => KeyKind::Other,
+    };
+    fold_null(CanonicalValue::from_json_key(
+        &serde_json::Value::String(raw.to_string()),
+        kind,
+    ))
 }
 
 /// Recursively fold an explicit JSON `null` into `Absent` — Arrow has only one

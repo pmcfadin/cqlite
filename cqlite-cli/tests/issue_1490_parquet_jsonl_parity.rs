@@ -1210,6 +1210,144 @@ fn whole_valued_decimal_canonicalizes_on_both_sides() {
     assert!(decimal_to_canonical(huge, 9, "test").is_err());
 }
 
+// ---------------------------------------------------------------------------
+// A FROZEN map: sstabledump writes a JSON object, Arrow reads back a Map
+//
+// The corpus's only frozen maps (`fm`, `ma` on
+// `test_compactionparityudt.udt_collections`) sit behind the #3556 whole-case
+// gap and never reach the value comparison, so the conversion is covered by unit
+// tests over the normalizer rather than by inventing a fixture. Without it those
+// two columns would report a FALSE value difference the day #3556 is fixed.
+// ---------------------------------------------------------------------------
+
+/// A frozen map's golden JSON object must canonicalize to the SAME canonical
+/// value the Arrow `Map` side produces — including the KEY coercion, which is
+/// driven by the declared key type and never applied blindly.
+#[test]
+fn frozen_map_golden_object_canonicalizes_to_a_map() {
+    use parquet_parity::canonical_jsonl::CanonicalValue;
+    use parquet_parity::cql_type::parse_column;
+    use parquet_parity::golden_rows::coerce_declared_shape;
+
+    let text = |s: &str| CanonicalValue::Text(s.to_string());
+
+    // `frozen<map<text,int>>` — the shape of `udt_collections.fm`.
+    let fm = parse_column("fm", "frozen<map<text,int>>", &[]).expect("parses");
+    let golden = CanonicalValue::Tuple(vec![
+        ("a".to_string(), CanonicalValue::Int(1)),
+        ("b".to_string(), CanonicalValue::Int(2)),
+    ]);
+    // What `arrow_rows::canonical_from_arrow` builds from an Arrow Map.
+    let exported = CanonicalValue::Map(vec![
+        (text("a"), CanonicalValue::Int(1)),
+        (text("b"), CanonicalValue::Int(2)),
+    ]);
+    assert_eq!(coerce_declared_shape(golden, &fm.spec), exported);
+
+    // `frozen<map<text, frozen<address>>>` — the shape of `udt_collections.ma`:
+    // the VALUE stays a Tuple (a UDT really is a struct), the OUTER object
+    // becomes a Map, and a null inner field folds to Absent as everywhere else.
+    let ma =
+        parse_column("ma", "frozen<map<text, frozen<address>>>", &["address"]).expect("parses");
+    let golden = CanonicalValue::Tuple(vec![(
+        "home".to_string(),
+        CanonicalValue::Tuple(vec![
+            ("city".to_string(), text("Austin")),
+            ("zip".to_string(), CanonicalValue::Null),
+        ]),
+    )]);
+    assert_eq!(
+        parquet_parity::golden_rows::fold_null(coerce_declared_shape(golden, &ma.spec)),
+        CanonicalValue::Map(vec![(
+            text("home"),
+            CanonicalValue::Tuple(vec![
+                ("city".to_string(), text("Austin")),
+                ("zip".to_string(), CanonicalValue::Absent),
+            ]),
+        )])
+    );
+
+    // An INTEGRAL key arrives as the JSON object key STRING `"1"`; the declared
+    // key type is what coerces it back, matching the Arrow Int32 key.
+    let mi = parse_column("mi", "frozen<map<int,text>>", &[]).expect("parses");
+    assert_eq!(
+        coerce_declared_shape(
+            CanonicalValue::Tuple(vec![("-2".to_string(), text("x"))]),
+            &mi.spec
+        ),
+        CanonicalValue::Map(vec![(CanonicalValue::Int(-2), text("x"))])
+    );
+
+    // …and a TEXT key that merely LOOKS numeric must stay Text, or a
+    // `map<text,int>` holding "5" would false-match a `map<int,int>` holding 5.
+    assert_eq!(
+        coerce_declared_shape(
+            CanonicalValue::Tuple(vec![("5".to_string(), CanonicalValue::Int(9))]),
+            &fm.spec
+        ),
+        CanonicalValue::Map(vec![(text("5"), CanonicalValue::Int(9))])
+    );
+
+    // A Tuple stays a Tuple for every declared type that is NOT a map: a UDT
+    // and a frozen list of UDTs must be untouched by the reshape.
+    let person = parse_column("p", "frozen<person>", &["person"]).expect("parses");
+    let as_tuple = CanonicalValue::Tuple(vec![("nm".to_string(), text("A"))]);
+    assert_eq!(
+        coerce_declared_shape(as_tuple.clone(), &person.spec),
+        as_tuple
+    );
+    let lp = parse_column("lp", "frozen<list<frozen<person>>>", &["person"]).expect("parses");
+    assert_eq!(
+        coerce_declared_shape(CanonicalValue::List(vec![as_tuple.clone()]), &lp.spec),
+        CanonicalValue::List(vec![as_tuple])
+    );
+
+    // A frozen map NESTED inside a frozen list is reached too.
+    let lm = parse_column("lm", "frozen<list<frozen<map<text,int>>>>", &[]).expect("parses");
+    assert_eq!(
+        coerce_declared_shape(
+            CanonicalValue::List(vec![CanonicalValue::Tuple(vec![(
+                "k".to_string(),
+                CanonicalValue::Int(3)
+            )])]),
+            &lm.spec
+        ),
+        CanonicalValue::List(vec![CanonicalValue::Map(vec![(
+            text("k"),
+            CanonicalValue::Int(3)
+        )])])
+    );
+}
+
+/// `CanonicalValue::Map` compares as an ORDERED sequence, so the golden's JSON
+/// object order has to be sstabledump's (i.e. Cassandra's key-comparator order),
+/// which is the order the Arrow map carries.
+///
+/// That holds only because the workspace pins `serde_json`'s `preserve_order`
+/// feature. Asserted directly: if the feature is ever dropped, `serde_json`
+/// falls back to a `BTreeMap` and object keys come out in STRING order, which
+/// diverges from Cassandra's for every non-text key type — and a frozen map
+/// would start comparing in the wrong order with no explanation.
+#[test]
+fn golden_json_object_order_is_preserved() {
+    let parsed: serde_json::Value =
+        serde_json::from_str(r#"{"b": 1, "a": 2, "10": 3, "2": 4}"#).expect("valid JSON");
+    let keys: Vec<&str> = parsed
+        .as_object()
+        .expect("an object")
+        .keys()
+        .map(String::as_str)
+        .collect();
+    assert_eq!(
+        keys,
+        vec!["b", "a", "10", "2"],
+        "serde_json must preserve JSON object order (workspace feature \
+         `preserve_order`); without it a frozen map's golden entries would be \
+         re-sorted into STRING order and stop matching the Arrow map's \
+         Cassandra-comparator order"
+    );
+}
+
 /// A non-frozen collection is multicell (one sstabledump cell per element); a
 /// frozen one is not. That distinction drives the whole golden projection, so it
 /// is asserted directly rather than only through a corpus case.
