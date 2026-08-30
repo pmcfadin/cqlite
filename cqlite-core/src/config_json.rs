@@ -59,11 +59,15 @@ impl Config {
     ///
     /// # ORDER
     ///
-    /// The deserialize runs FIRST and the scan only on success, because the
-    /// warning's own text asserts that the configuration still loads — a promise
-    /// it must not make before it is true (#1696 roborev F3). Nothing is lost:
-    /// serde drops the removed keys from `Config`, but nothing drops them from the
-    /// text they were read out of.
+    /// The deserialize runs FIRST and the scan only on success, so this
+    /// constructor never returns a removed-key report for a document that did
+    /// not become a `Config`. Nothing is lost: serde drops the removed keys from
+    /// `Config`, but nothing drops them from the text they were read out of.
+    ///
+    /// This ordering is a property of the RETURN SHAPE, not a precondition of the
+    /// text: since #1696 roborev r5 F1 the warning asserts nothing about whether
+    /// the load succeeds, precisely so that no placement of it can be wrong (see
+    /// [`crate::config_removed_keys::deprecation_warning`]).
     ///
     /// # Errors
     ///

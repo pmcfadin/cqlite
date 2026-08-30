@@ -5,13 +5,29 @@ use std::time::Duration;
 
 /// Main configuration structure for CQLite database.
 ///
-/// # Every field here is read by something (issue #1696)
+/// # Every knob in #1696's CENSUS is read or deleted — and the exception (#1696 roborev r5 F3)
 ///
-/// Epic #1685 ("config honesty") removed the knobs that were not: `storage`'s
-/// `max_sstable_size` / `block_size` / `enable_bloom_filters` /
-/// `bloom_filter_fp_rate` / `io_threads` / `sync_mode`, `query`'s
-/// `plan_cache_size` / `enable_optimization` / `parallel`, and the entire
-/// `performance` tree. Setting any of them changed nothing, silently.
+/// Scoped to the census deliberately, because the unqualified version ("every
+/// field here is read by something") is contradicted by our own standing guard,
+/// `cqlite-core/tests/config_knob_behavior_guard.rs`, which records every
+/// [`CompressionConfig`] field as DECORATIVE with zero production readers.
+///
+/// What #1696 (epic #1685, "config honesty") examined, it either kept because
+/// something reads it, or DELETED: `storage`'s `max_sstable_size` /
+/// `block_size` / `enable_bloom_filters` / `bloom_filter_fp_rate` /
+/// `io_threads` / `sync_mode`, `query`'s `plan_cache_size` /
+/// `enable_optimization` / `parallel`, and the entire `performance` tree are
+/// gone — setting any of them changed nothing, silently.
+///
+/// The KNOWN exception is [`CompressionConfig`] (`enabled` / `algorithm` /
+/// `level` / `min_block_size`). Those four were NOT in #1696's census and are
+/// deliberately left in place: the read path takes its algorithm from
+/// `CompressionInfo.db` as the no-heuristics mandate requires, and the write
+/// surface is uncompressed-only (**#1406** owns that boundary and the
+/// compressed-write wiring), so there is nothing for them to steer today. No dedicated
+/// removal issue exists; they belong to the open epic **#1685**. The guard is the
+/// authority on which fields are decorative — read it, do not read a claim of
+/// universal coverage into this heading.
 ///
 /// Deleting a field is deliberately a COMPILE error for an embedder writing
 /// Rust: that is the loudest signal available, and it is preferred over a field

@@ -148,8 +148,13 @@ fn the_warning_names_every_dead_key_and_the_file() {
         "must name the file: {warning}"
     );
     assert!(
-        warning.contains("IGNORED"),
+        warning.contains("NO EFFECT"),
         "must say the keys do nothing: {warning}"
+    );
+    assert!(
+        !warning.contains("still loads"),
+        "the warning must make NO claim about the fate of the load — it runs \
+         before stages that can still fail (#1696 roborev r5 F1): {warning}"
     );
     for removed in REMOVED_KEYS {
         assert!(

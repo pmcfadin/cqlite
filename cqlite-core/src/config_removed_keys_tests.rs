@@ -139,8 +139,14 @@ fn a_null_valued_removed_key_is_still_reported() {
     assert!(json_has_path(&document, "storage.sync_mode"));
 }
 
-/// A failed load yields no warning at all — the text promises the configuration
-/// still loads, so it must not be produced before that is true (#1696 F3).
+/// A failed load yields no warning at all.
+///
+/// Not because the text makes any promise about the load — since #1696 roborev r5
+/// F1 it deliberately makes none — but because this API returns the warning
+/// INSIDE its `Ok`, so a caller of the reporting constructor cannot be handed a
+/// removed-key report for a document that never became a `Config`. That is the
+/// shape the test pins; the warning's own text is independently safe wherever it
+/// is emitted (see `deprecation_warning`).
 #[test]
 fn a_failed_load_produces_no_warning() {
     // Names a removed key AND is missing the required `memory` section, so it
@@ -160,7 +166,7 @@ fn a_failed_load_produces_no_warning() {
             .map(|(_, warning)| warning)
             .unwrap_or(None)
             .is_none(),
-        "a failed load must not claim the configuration still loads"
+        "the reporting constructor must not return a warning alongside an Err"
     );
 }
 

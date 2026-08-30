@@ -108,14 +108,16 @@ pub const REMOVED_KEYS: &[Removed] = &[
     },
     Removed {
         path: "storage.enable_bloom_filters",
-        note: "removed in #1696: the read path never consulted it. The bloom-filter \
-               code exists but is UNWIRED, so this knob could not switch anything \
-               on or off",
+        note: "removed in #1696: this KNOB had zero production readers. Bloom \
+               behaviour comes from the SSTable's own `Filter.db`/schema metadata \
+               (which the point-read paths DO consult), never from a config knob, \
+               so setting this switched nothing on or off; #2632 would introduce a \
+               bloom knob WITH a consumer",
     },
     Removed {
         path: "storage.bloom_filter_fp_rate",
-        note: "removed in #1696: no filter was ever built from it (see \
-               `storage.enable_bloom_filters`)",
+        note: "removed in #1696: this KNOB had zero production readers — no filter \
+               was ever built from it (see `storage.enable_bloom_filters`)",
     },
     Removed {
         path: "storage.io_threads",
@@ -163,17 +165,31 @@ pub fn removed_keys_present(table: &[Removed], has_path: impl Fn(&str) -> bool) 
 /// CLI prints to stderr, the bindings raise a Python `UserWarning`) and a test can
 /// assert the exact text.
 ///
-/// The text asserts "the configuration still loads", which is only true once the load
-/// HAS succeeded — so every caller must produce this AFTER a successful
-/// deserialize, never before (#1696 roborev F3).
+/// # THE TEXT REPORTS ONLY WHICH KEYS ARE DEAD — never the fate of the load
+///
+/// Stated as a rule at the seam, because the alternative was found broken THREE
+/// times (#1696 roborev F3, r2 F3, r5 F1). The text used to add an assurance —
+/// "they are IGNORED, the configuration still loads" — which is a claim about a
+/// LATER stage's outcome. Every fix moved the emission one stage later
+/// (after deserialization; then after the bindings' validation) and the defect
+/// reappeared at the next stage, because there is ALWAYS a next stage: the CLI
+/// deserializes, then maps into `cqlite_core::Config`, then validates
+/// semantically (`memory_limit_mb = 1` with `cache_size_mb = 64` fails there),
+/// then the caller does whatever it does. No placement can make such a promise
+/// safe.
+///
+/// So this warning says nothing about whether the load succeeds. It names the
+/// keys and states that they have no effect — two facts fully known at the point
+/// of the scan. A warning that only reports what it knows cannot be wrong about
+/// anything else, and callers are consequently free to emit it wherever the raw
+/// document is still in hand. DO NOT reintroduce an outcome claim here.
 pub fn deprecation_warning(source: &str, present: &[&'static Removed]) -> Option<String> {
     if present.is_empty() {
         return None;
     }
     let mut out = format!(
         "warning: {source} names {} configuration key{} that CQLite has REMOVED. \
-         They are IGNORED — the configuration still loads, but these settings have no \
-         effect:\n",
+         Each has NO EFFECT:\n",
         present.len(),
         if present.len() == 1 { "" } else { "s" }
     );

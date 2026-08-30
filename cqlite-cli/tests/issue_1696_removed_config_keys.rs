@@ -173,18 +173,21 @@ fn the_shipped_example_config_names_no_removed_keys() {
     );
 }
 
-/// The warning must not PROMISE a load that then fails (#1696 roborev F3).
+/// A failed DESERIALIZE produces no removed-key report at all (#1696 roborev F3).
 ///
-/// Its text says the keys "are IGNORED — the configuration still loads". A
-/// valid document that names a removed key AND carries an invalid surviving value
-/// used to print exactly that assurance and then fail to load: a false promise
-/// inside a change whose whole subject is config honesty.
+/// Originally this test was about a false promise: the text said the keys "are
+/// IGNORED — the configuration still loads", and a document naming a removed key
+/// AND carrying an invalid surviving value printed that assurance and then failed
+/// to load. The promise is GONE from the text (r5 F1), so the premise of the
+/// original assertion is gone with it — but the coverage is not: the reporting
+/// seam must still not hand a caller a warning for a document that never became a
+/// `Config`, which is what this now pins.
 ///
 /// Asserted over `parse_with_removed_key_report` — the seam `load_from_file`
 /// itself runs, so the ordering under test is the real one, not a copy: on the
 /// failure path there is no warning to print, and on the success path there is.
 #[test]
-fn a_failed_load_produces_no_still_loads_assurance() {
+fn a_failed_deserialize_produces_no_removed_key_report() {
     let temp = TempDir::new().expect("temp dir");
 
     // Names a removed key (`[connection]`) AND gives a SURVIVING key
@@ -223,11 +226,11 @@ colors = true
             .map(|(_, warning)| warning)
             .unwrap_or(None)
             .is_none(),
-        "a failed load must not emit the \"still loads\" assurance"
+        "a failed deserialize must not yield a removed-key report"
     );
 
     // Control: the SAME removed key with every surviving value valid loads AND
-    // warns — so the fix removed the false promise, not the warning.
+    // warns — so what was removed is the false promise, not the warning.
     let good = r#"
 default_keyspace = "ks"
 
@@ -245,7 +248,92 @@ colors = true
     assert_eq!(config.output.max_rows, Some(500));
     let warning = warning.expect("a successful load naming a removed key MUST warn");
     assert!(
-        warning.contains("connection") && warning.contains("still loads"),
-        "the warning must name the dead key and assert the load succeeded: {warning}"
+        warning.contains("connection") && warning.contains("NO EFFECT"),
+        "the warning must name the dead key and say it does nothing: {warning}"
+    );
+    assert!(
+        !warning.contains("still loads"),
+        "the warning must make NO claim about the fate of the load: {warning}"
+    );
+}
+
+/// The class the previous test only covered ONE stage of (#1696 roborev r5 F1).
+///
+/// # Why the warning text, not its placement, had to change
+///
+/// Three rounds of review found the same defect at three DIFFERENT stages, each
+/// fix moving the emission one stage later:
+///
+/// 1. F3 — emitted before deserialization succeeded (CLI).
+/// 2. r2 F3 — same defect on the Python path, before validation there.
+/// 3. r5 F1 — after deserialization but before the CLI's SEMANTIC validation.
+///
+/// This test is stage 3, and it is the one that shows why placement can never be
+/// the fix. The document below deserializes PERFECTLY: `memory_limit_mb = 1` and
+/// `cache_size_mb = 64` are both correctly-typed, in-range `[performance]`
+/// values, so the removed-key scan runs on a fully successful load. It is
+/// `to_core_config` — a LATER stage, mapping into `cqlite_core::Config` and
+/// validating it — that rejects the file, because a 64 MiB block cache cannot fit
+/// inside a 1 MiB memory limit. Any assurance about "the configuration" printed
+/// at scan time is therefore false however late the scan is placed, because there
+/// is always another stage after it.
+///
+/// So the assertion is not about ordering: it is that the warning the operator
+/// sees names the dead keys and claims NOTHING about the outcome, while the load
+/// as a whole still FAILS.
+#[test]
+fn a_removed_key_beside_a_semantically_invalid_value_warns_without_any_success_claim() {
+    let temp = TempDir::new().expect("temp dir");
+
+    let content = r#"
+default_keyspace = "ks"
+
+[connection]
+timeout_ms = 5000
+
+[performance]
+query_timeout_ms = 30000
+memory_limit_mb = 1
+cache_size_mb = 64
+"#;
+    let path = temp.path().join("cqlite.toml");
+    fs::write(&path, content).expect("write config");
+
+    // Stage A: the deserialize SUCCEEDS, so the removed-key report is produced.
+    // (If this ever starts failing, the fixture has stopped exercising the stage
+    // this test exists for and the case below proves nothing.)
+    let (config, warning) = Config::parse_with_removed_key_report(&path, content)
+        .expect("the document must deserialize — the defect is at a LATER stage");
+    let warning = warning.expect("a document naming `[connection]` MUST warn");
+    assert!(
+        warning.contains("connection"),
+        "the warning must name the dead key: {warning}"
+    );
+
+    assert!(
+        warning.contains("NO EFFECT"),
+        "the warning must say the dead keys do nothing: {warning}"
+    );
+    // The whole point: no claim about the load, in either spelling we shipped.
+    for forbidden in ["still loads", "IGNORED"] {
+        assert!(
+            !warning.contains(forbidden),
+            "the warning must not claim anything about the fate of the load \
+             (found {forbidden:?}), because a LATER stage still rejects this \
+             document: {warning}"
+        );
+    }
+
+    // Stage B: that later stage. `to_core_config` maps `[performance]` onto
+    // `cqlite_core::Config` and validates it, and a 64 MiB block cache does not
+    // fit in a 1 MiB memory limit — so the configuration does NOT, in fact, load.
+    let outcome = cqlite_cli::core_config::to_core_config(&config);
+    let error = outcome
+        .err()
+        .expect("a 64 MiB cache inside a 1 MiB memory limit must be REJECTED");
+    let error = error.to_string();
+    assert!(
+        error.contains("configuration") || error.contains("cache") || error.contains("memory"),
+        "the rejection must name the real problem, not something incidental: {error}"
     );
 }

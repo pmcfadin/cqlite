@@ -100,18 +100,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - `cqlite_core::config::StorageConfig`: `max_sstable_size`, `block_size`,
     `enable_bloom_filters`, `bloom_filter_fp_rate`, `io_threads`, `sync_mode`
     (and with it the now-unreferenced `SyncMode` enum).
-  - **On the two bloom knobs specifically, stated precisely because the loose
-    version is wrong:** the bloom-filter PATH EXISTS and is tested —
+  - **On the two bloom knobs specifically, stated precisely because both loose
+    versions are wrong:** the bloom-filter path EXISTS, is tested AND is WIRED —
     `cqlite-core/src/storage/sstable/bloom.rs` is a real Cassandra-parity
     `BloomFilter` whose double-hashing operand order and `Filter.db` binary
     layout are both verified against `BloomFilterSerializer.java` /
-    `OffHeapBitSet.java`. What was missing is the WIRING: no read path consulted
-    `Filter.db`, so the two config knobs steered nothing. They are deleted rather
-    than wired speculatively, because wiring is not a small change (it needs
-    read-path `Filter.db` consultation) and a knob should arrive WITH its
-    consumer, not before it. **#2632** ("wire folded murmur3 h2 into
-    bloom-filter (`Filter.db`) plumbing") is the open issue that will reintroduce
-    a bloom knob once there is something for it to control.
+    `OffHeapBitSet.java`, and the production point-read paths DO consult a loaded
+    `Filter.db` (`reader/component_loading.rs` loads it;
+    `reader/partition_lookup.rs` / `reader/partition_successor.rs` prune an
+    SSTable on `might_contain == false`). So this removal does NOT say the bloom
+    path is unwired. What had zero production readers is the two CONFIG KNOBS:
+    bloom behaviour follows from the SSTable's own `Filter.db`/schema metadata,
+    never from a knob, so `enable_bloom_filters` could not switch anything on or
+    off and `bloom_filter_fp_rate` sized no filter. They are deleted rather than
+    given a consumer speculatively, because a knob should arrive WITH its
+    consumer. **#2632** ("wire folded murmur3 h2 into bloom-filter (`Filter.db`)
+    plumbing") is the open issue that would introduce a bloom knob WITH one.
   - `cqlite_core::config::QueryConfig`: `plan_cache_size`, `enable_optimization`,
     `parallel` (and with it the `ParallelQueryConfig` struct).
   - `cqlite_core::config::Config::performance` entirely, with the

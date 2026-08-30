@@ -901,17 +901,23 @@ fn reserved_evidence_carries_a_substantive_reason() {
 /// not declare them again. (An embedder that still sets one gets a COMPILE
 /// error, which is the loudest signal available and the documented posture.)
 ///
-/// # "Nothing read them" is about WIRING, not about missing implementations
+/// # "Nothing read them" is about the KNOBS, not about the bloom path
 ///
-/// Worth stating for the two bloom knobs, because the loose version of the claim
-/// is false: `storage/sstable/bloom.rs` is a real, Cassandra-parity
+/// Worth stating for the two bloom knobs, because both loose versions of the
+/// claim are false. `storage/sstable/bloom.rs` is a real, Cassandra-parity
 /// `BloomFilter` — its double-hashing operand order and `Filter.db` binary
 /// layout are verified against `BloomFilterSerializer.java` /
-/// `OffHeapBitSet.java` in `storage/sstable/s4_verification_test.rs`. The path
-/// EXISTS and is tested; what did not exist was any read path consulting
-/// `Filter.db`, so the knobs steered nothing. They are deleted rather than wired
-/// speculatively, since a knob should arrive WITH its consumer; #2632 is the open
-/// issue that will reintroduce one when there is something to control.
+/// `OffHeapBitSet.java` in `storage/sstable/s4_verification_test.rs` — AND it is
+/// WIRED: the production point-read paths consult a loaded `Filter.db`
+/// (`reader/component_loading.rs` loads it; `reader/partition_lookup.rs` and
+/// `reader/partition_successor.rs` prune an SSTable on `might_contain == false`).
+/// So do NOT say the bloom path is unwired.
+///
+/// What had zero production readers is these two CONFIG FIELDS: bloom behaviour
+/// follows from the SSTable's own metadata, never from a knob, so neither could
+/// switch anything on or off or size any filter. They are deleted rather than
+/// wired speculatively, since a knob should arrive WITH its consumer; #2632 is
+/// the open issue that will introduce a bloom knob WITH one.
 #[test]
 fn deleted_decorative_knobs_are_not_reintroduced() {
     let source = read(&crate_dir().join("src").join("config.rs"));

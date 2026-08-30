@@ -342,10 +342,12 @@ impl Config {
     /// Deserialize `content` as `path`'s format, returning the loaded config and
     /// the deprecation warning naming every REMOVED key it still sets (#1696).
     ///
-    /// The deserialize runs FIRST and the scan only on success: the warning
-    /// asserts "the configuration still loads" — a promise it must not make
-    /// before it is true (#1696 F3; see `removed_keys`). `pub` so a test can
-    /// assert both halves of that ordering on the real load path.
+    /// The deserialize runs FIRST and the scan only on success, so the warning
+    /// is only ever returned beside a `Config` that exists. The warning itself
+    /// asserts NOTHING about whether the load succeeds — deliberately, because
+    /// later stages (`to_core_config`'s semantic validation) can still reject the
+    /// file (#1696 roborev r5 F1; see `removed_keys`). `pub` so a test can assert
+    /// both halves on the real load path.
     pub fn parse_with_removed_key_report(
         path: &Path,
         content: &str,

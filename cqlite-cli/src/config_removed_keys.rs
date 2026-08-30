@@ -31,7 +31,8 @@
 //! > never silence.
 //!
 //! For the file surface that means **parse-and-ignore PLUS a named warning**:
-//! the config still loads, and the user is told exactly which keys are dead.
+//! the dead keys are discarded rather than rejected, and the user is told exactly
+//! which ones they are.
 //!
 //! # One mechanism, one table per DOCUMENT SCHEMA
 //!
@@ -54,14 +55,24 @@
 //! removed keys are gone and unrecoverable. One `Removed` table drives all three
 //! formats, so a format cannot drift out of coverage.
 //!
-//! # ORDER: the scan runs AFTER a SUCCESSFUL deserialize (#1696 roborev F3)
+//! # THE WARNING MAKES NO CLAIM ABOUT THE FATE OF THE LOAD (#1696 roborev r5 F1)
 //!
-//! The warning text asserts the configuration still loads, so it may only be
-//! produced once the load succeeded. Scanning first meant a document naming a
-//! removed key AND carried an invalid surviving value printed that assurance and
-//! then failed to load. Scanning afterwards costs nothing: the caller retains the
-//! raw text, and nothing removes the dead keys from it. See
-//! [`super::Config::parse_with_removed_key_report`].
+//! It used to: "they are IGNORED — the configuration still loads". That is a
+//! promise about a LATER stage, and it was found false three times running, each
+//! time one stage further along (before deserialization; then before the Python
+//! bindings' validation; then before the CLI's own semantic validation in
+//! `to_core_config`, where `memory_limit_mb = 1` with `cache_size_mb = 64`
+//! rejects the file after the assurance has already been printed). There is
+//! always a next stage, so no placement can make the promise safe — the fix is
+//! that the text no longer makes it. It names the dead keys and says they have no
+//! effect, and nothing else.
+//!
+//! The scan still runs AFTER a successful deserialize
+//! ([`super::Config::parse_with_removed_key_report`]), because the warning is
+//! returned beside the loaded `Config` and there is no `Config` before then. That
+//! is a return-shape property now, not a correctness precondition of the text.
+//! Scanning late costs nothing: the caller retains the raw text, and nothing
+//! removes the dead keys from it.
 
 /// The shared removal record and warning text (`cqlite_core`, #1696 roborev F1):
 /// one definition for the CLI's file surface and the core/bindings
