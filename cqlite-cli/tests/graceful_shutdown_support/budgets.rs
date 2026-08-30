@@ -78,11 +78,29 @@ const T1_OLD_WAITS: u32 = 2;
 /// artifact wait, the EOF exit wait), plus one unbounded read.
 const T2_OLD_WAITS: u32 = 7;
 
+/// THE STAGE THE OLD CODE DID NOT BOUND SEPARATELY: readiness, `a.session-up`
+/// (spawn -> readiness banner).
+///
+/// The old code never awaited the banner at all — boot was folded INSIDE the first
+/// 60s `OK` wait — so it contributes no entry to `T1_OLD_WAITS`/`T2_OLD_WAITS`. But
+/// both tests now open a readiness stage that draws on the SAME single deadline,
+/// and a stage may consume the whole of it. So the aggregate floor must reserve an
+/// `OLD_BOUND` for readiness on top of the old waits, or the arithmetic permits a
+/// base under which readiness eats 60s and every original wait is left below its
+/// former 60s allowance (roborev job 232, finding 2: the previous form of the
+/// assert summed only the old waits, so 120s/420s bases would have passed it).
+///
+/// Deliberately a NAMED constant rather than a `+ 1` inline: it is a claim about
+/// which stages exist, and it has to be revisited when a stage is added.
+const NEW_READINESS_WAITS: u32 = 1;
+
 /// Base deadline for `sigint_in_writable_session_flushes_before_exit`.
 ///
-/// Generous by construction: above the old code's whole nominal aggregate
-/// (`T1_OLD_WAITS x OLD_BOUND` = 120s), so no wait in this test — and not the
-/// test as a whole either — is tighter than what it replaced.
+/// Generous by construction: at least the old code's whole nominal aggregate PLUS
+/// an `OLD_BOUND` for the readiness stage the old code did not bound separately
+/// (`(T1_OLD_WAITS + NEW_READINESS_WAITS) x OLD_BOUND` = 180s), so no wait in this
+/// test — and not the test as a whole either — is tighter than what it replaced,
+/// even if readiness consumes a full 60s first.
 pub const T1_DEADLINE_BASE: Duration = Duration::from_secs(180);
 
 /// Calibration ceiling for that test. No measured contention may push the
@@ -92,7 +110,8 @@ pub const T1_DEADLINE_CAP: Duration = Duration::from_secs(360);
 /// Base deadline for `writable_session_auto_flushes_mid_session_across_threshold`.
 ///
 /// Larger because that test replaced SEVEN independent 60s waits (420s nominal),
-/// and this base sits above their sum.
+/// and this base covers their sum plus an `OLD_BOUND` for the readiness stage
+/// (`(T2_OLD_WAITS + NEW_READINESS_WAITS) x OLD_BOUND` = 480s).
 pub const T2_DEADLINE_BASE: Duration = Duration::from_secs(480);
 
 /// Calibration ceiling for the sibling test.
@@ -371,10 +390,14 @@ impl Stage<'_> {
 
 /// THE FLOOR INVARIANT: no bound here may be tighter than the bound it replaced.
 ///
-/// Under one deadline this is arithmetic on two constants rather than an argument
-/// about which group of stages replaced which old wait — and the per-stage form
-/// of that argument was wrong twice (round 3, and roborev job 229's finding that
-/// summing caps does not preserve a SHARED old deadline).
+/// Under one deadline this is arithmetic on a handful of constants rather than an
+/// argument about which group of stages replaced which old wait — and the
+/// per-stage form of that argument was wrong twice (round 3, and roborev job 229's
+/// finding that summing caps does not preserve a SHARED old deadline).
+///
+/// The aggregate term counts EVERY stage that draws on the one deadline, not only
+/// the old waits: a stage the old code did not bound separately still consumes
+/// from the shared budget, and omitting it was roborev job 232's finding 2.
 #[test]
 fn the_deadline_is_never_tighter_than_the_bounds_it_replaced() {
     for (test, base, cap, old_waits) in [
@@ -401,14 +424,25 @@ fn the_deadline_is_never_tighter_than_the_bounds_it_replaced() {
              {OLD_BOUND:?} bound it replaced"
         );
 
-        // IN AGGREGATE: the whole test's nominal old total. The old code had no
-        // total bound at all, so any total is a new ceiling; it must at least
-        // exceed the sum of the nominal bounds it replaced.
-        let old_total = OLD_BOUND * old_waits;
+        // IN AGGREGATE: the whole test's nominal old total, PLUS the readiness
+        // stage the old code did not bound separately. The old code had no total
+        // bound at all, so any total is a new ceiling; it must at least cover the
+        // sum of the nominal bounds it replaced AND every stage that now draws on
+        // the same deadline.
+        //
+        // The readiness term is what roborev job 232 finding 2 reported missing:
+        // summing only the old waits admits a 120s/420s base under which
+        // `a.session-up` consumes 60s and leaves every ORIGINAL wait below its
+        // former 60s allowance — the floor invariant violated by a stage the sum
+        // did not mention.
+        let stages_sharing = old_waits + NEW_READINESS_WAITS;
+        let old_total = OLD_BOUND * stages_sharing;
         assert!(
             base >= old_total,
-            "{test}: a base of {base:?} is below the {old_total:?} nominal aggregate of the \
-             {old_waits} independent {OLD_BOUND:?} waits it replaced"
+            "{test}: a base of {base:?} is below the {old_total:?} aggregate of the {old_waits} \
+             independent {OLD_BOUND:?} waits it replaced plus {NEW_READINESS_WAITS} readiness \
+             stage ({stages_sharing} stages share this one deadline, and any one of them may \
+             consume it)"
         );
 
         assert!(base <= cap, "{test}: base {base:?} exceeds cap {cap:?}");
