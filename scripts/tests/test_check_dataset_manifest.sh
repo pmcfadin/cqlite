@@ -1943,6 +1943,42 @@ case "$sig_file" in
       || ok "the registered temp file is cleaned up before the signal is re-raised" ;;
 esac
 
+# ---------------------------------------------------------------------------
+# Case 87 (post-rebase round 9, Medium): the documented git-unavailable fallback must be
+# REACHABLE.
+#
+# This script documents a no-git path — no committed-table set, so every discovered directory
+# counts, mirroring the node helper's own behaviour — and I then added `git` to the
+# unconditional tool check, which made that path UNREACHABLE: the script exited 2 before it
+# could take the branch its own comment describes. `cmp` went the same way, being reached only
+# through the committed-twin comparison, which needs git.
+#
+# Driven with a PATH containing every tool the script needs EXCEPT git. `type -P` builds the
+# farm, not `command -v`: the latter returns a BARE NAME for some tools here, which produced a
+# self-referential symlink and a spurious "required tool 'find' not found" — a farm that tested
+# nothing.
+# ---------------------------------------------------------------------------
+gf_farm="$WORK/nogit-farm/bin"; mkdir -p "$gf_farm"
+gf_missing=""
+for gf_t in bash sh find grep sort awk sed basename tr iconv cmp mktemp rm cat ls printf head tail wc cut uniq comm dirname; do
+  gf_p=$(type -P "$gf_t" 2>/dev/null)
+  if [ -n "$gf_p" ]; then ln -sf "$gf_p" "$gf_farm/$gf_t"; else gf_missing="$gf_missing $gf_t"; fi
+done
+if [ -n "${CQLITE_DATASETS_ROOT:-}" ] && [ -d "${CQLITE_DATASETS_ROOT:-}/sstables" ] \
+   && [ -z "$gf_missing" ] && ! PATH="$gf_farm" type -P git >/dev/null 2>&1; then
+  gf_rc=0
+  PATH="$gf_farm" bash "$MANIFEST_SRC" "$CQLITE_DATASETS_ROOT" >"$WORK/nogit-out" 2>&1 || gf_rc=$?
+  if [ "$gf_rc" -eq 0 ]; then
+    ok "the documented git-unavailable fallback is reachable (manifest passes with git absent)"
+  elif grep -q "required tool 'git'" "$WORK/nogit-out" 2>/dev/null; then
+    bad "git is in the mandatory tool list, so the documented no-git fallback can never run"
+  else
+    bad "with git absent the manifest exited $gf_rc: $(head -1 "$WORK/nogit-out")"
+  fi
+else
+  echo "info - no real corpus, a tool is missing ($gf_missing), or git leaked into the farm; skipping the no-git case"
+fi
+
 echo "----"
 echo "passed: $PASS  failed: $FAIL"
 [ "$FAIL" -eq 0 ]

@@ -148,7 +148,14 @@ fi
 # absence is git-not-a-work-tree, which is a legitimate environment (Jest's own fallback)
 # and is now tested for EXPLICITLY rather than inferred from an empty result -- an empty
 # result is exactly what a failure also produces.
-for _tool in find grep sort awk sed basename cmp git tr iconv; do
+# MANDATORY tools only: those used on EVERY path. `git` and `cmp` are deliberately NOT here
+# (roborev, post-rebase round 9). This script documents a git-unavailable fallback — no
+# committed-table set, so every discovered directory counts, mirroring the node helper's own
+# behaviour — and requiring git up front made that fallback UNREACHABLE: the script would exit
+# 2 before it could take the path its own comment describes. `cmp` is reached only through the
+# committed-twin comparison, which requires git, so it is conditional for the same reason.
+# `tr` and `iconv` stay: TOC normalisation and the UTF-8 descriptor check run on every path.
+for _tool in find grep sort awk sed basename tr iconv; do
   command -v "$_tool" >/dev/null 2>&1 || {
     echo "❌ dataset manifest check: required tool '$_tool' not found; cannot judge the corpus" >&2
     exit 2
