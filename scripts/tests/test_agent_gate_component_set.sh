@@ -691,6 +691,53 @@ else
   bad "3544-baseline-objects: expected fetched+reused as a pair on the same tip $obj_tip (fetch: objects=$(field BASELINE_OBJECTS "$obj_fetch_out") sha=$(field SHA "$obj_fetch_out") kind=$(field KIND "$obj_fetch_out"); reuse: objects=$(field BASELINE_OBJECTS "$obj_reuse_out") sha=$(field SHA "$obj_reuse_out") kind=$(field KIND "$obj_reuse_out"))"
 fi
 
+# ---------------------------------------------------------------------------
+# 3a-vii. A REPLACEMENT REF MUST NOT SUBSTITUTE THE COMMIT UNDER US (roborev job 264, High).
+#     `refs/replace/<sha>` transparently swaps another commit in for that sha EVERYWHERE git
+#     reads objects. Unfixed, this pre-flight would report the CANONICAL baseline sha while
+#     reading a FORGED, smaller manifest — and stamp PASS. That is the worst available pairing:
+#     the sha in the audit trail is correct and the bytes it stands for are not, so nothing in
+#     the block looks wrong. The config sources had been closed and "untrusted repository STATE"
+#     treated as closed with them; replace refs are the rest of that space.
+#
+#     THE FIXTURE IS THE ATTACK. The baseline carries the sentinel component, so the HONEST
+#     verdict is BEHIND naming it. The replacement points the baseline sha at the LANE's OWN
+#     commit, whose manifest does NOT carry the sentinel — so a run that honours the replacement
+#     reads a set with nothing missing and reports PASS. BEHIND vs PASS is the starkest pair
+#     available here.
+#
+#     TWO CONTROLS, in both directions, because "unaffected" is meaningless unless the
+#     replacement demonstrably applies in this repository right now: a plain `git show` of the
+#     baseline sha must return the FORGED manifest, and the same read with
+#     `--no-replace-objects` must return the TRUE one.
+# ---------------------------------------------------------------------------
+base_rep=$(mkbaseline base-replace "$ADD_SENTINEL")
+rep_fx=$(mkbranch replaced "$base_rep" - )
+rep_tip=$(git -C "$base_rep" rev-parse refs/heads/main)
+# Bring the baseline commit into this repository the way a peer's fetch would — `git replace`
+# needs both objects present — without making origin/main an ancestor of HEAD.
+( fx "$rep_fx" && git fetch -q origin refs/heads/main:refs/heads/peer-fetched ) >/dev/null 2>&1
+rep_decoy=$(git -C "$rep_fx" rev-parse HEAD 2>/dev/null)
+( fx "$rep_fx" && git replace -f "$rep_tip" "$rep_decoy" ) >/dev/null 2>&1
+rep_forged=$( fx "$rep_fx" && git show "$rep_tip:scripts/agent-gate.components" 2>/dev/null | grep -cx -- "$SENTINEL" )
+rep_true=$( fx "$rep_fx" && git --no-replace-objects show "$rep_tip:scripts/agent-gate.components" 2>/dev/null | grep -cx -- "$SENTINEL" )
+rep_out=$(hook "$rep_fx")
+rep_line=$(field COMPONENT_SET_LINE "$rep_out")
+if [ "$rep_decoy" = "$rep_tip" ]; then
+  bad "3544-no-replace-objects: the decoy commit EQUALS the baseline sha, so the replacement could substitute nothing — the fixture would test nothing"
+elif [ "$rep_forged" -ne 0 ] || [ "$rep_true" -eq 0 ]; then
+  bad "3544-no-replace-objects: the CONTROLS do not discriminate (plain read saw the sentinel $rep_forged times, expected 0; --no-replace-objects read saw it $rep_true times, expected >=1) — the replacement ref is not in effect here, so the gate being unaffected proves nothing"
+elif [ "$(field VERDICT "$rep_out")" = BEHIND ] \
+   && [ "$(field KIND "$rep_out")" = ok ] \
+   && [ "$(field SHA "$rep_out")" = "$rep_tip" ] \
+   && grep -qw -- "$SENTINEL" <<<"$(field MISSING "$rep_out")" \
+   && grep -q 'FAIL-CLOSED (#3544)' <<<"$rep_line"; then
+  ok "3544-no-replace-objects: a refs/replace entry forges the baseline manifest for a plain git read (control) yet the pre-flight reads the TRUE one and still reports the skew"
+else
+  bad "3544-no-replace-objects: expected BEHIND naming $SENTINEL at $rep_tip — a replacement ref changed what the pre-flight read"
+  printf '%s\n' "$rep_out"
+fi
+
 # 3b. the baseline's manifest lists NOTHING (an empty baseline must never be accepted). A
 #     comment-only file is the shape a truncation or a bad merge produces.
 base_empty=$(mkbaseline base-empty - --manifest-lines '# every line here is a comment')

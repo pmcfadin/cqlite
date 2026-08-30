@@ -3303,7 +3303,7 @@ _CS_PRESENCE_ERR=""
 _component_set_manifest_presence() {
   local rev="$1" tmpd="$2" rc line ltype lpath
   _CS_PRESENCE=""; _CS_PRESENCE_ERR=""
-  _component_set_bounded "$_CS_BOUND_SECS" git -C "$REPO_ROOT" ls-tree "$rev" -- "$_CS_MANIFEST_REL" >"$tmpd/ls" 2>"$tmpd/ls.err"
+  _component_set_bounded "$_CS_BOUND_SECS" git --no-replace-objects -C "$REPO_ROOT" ls-tree "$rev" -- "$_CS_MANIFEST_REL" >"$tmpd/ls" 2>"$tmpd/ls.err"
   rc=$?
   if [ "$rc" -ne 0 ]; then
     if [ "$rc" -eq 124 ] || [ "$rc" -eq 137 ]; then
@@ -3395,7 +3395,7 @@ _component_set_set_at_rev() {
     # PATH 1 — THE COMMITTED MANIFEST, AND NOTHING ELSE. Bounded for the same reason as every
     # read here (job 210, finding 1): `git show <rev>:<path>` reads a BLOB, and in a PARTIAL
     # clone (`--filter=blob:none`) the blob is fetched LAZILY.
-    _component_set_bounded "$_CS_BOUND_SECS" git -C "$REPO_ROOT" show "$rev:$_CS_MANIFEST_REL" >"$tmpd/manifest" 2>"$tmpd/m.err"
+    _component_set_bounded "$_CS_BOUND_SECS" git --no-replace-objects -C "$REPO_ROOT" show "$rev:$_CS_MANIFEST_REL" >"$tmpd/manifest" 2>"$tmpd/m.err"
     rc=$?
     if [ "$rc" -ne 0 ]; then
       # PRESENT BUT UNREADABLE IS AN ERROR, NEVER A FALLBACK: the data is there, so a run that
@@ -3425,7 +3425,7 @@ _component_set_set_at_rev() {
   fi
 
   # PATH 2 — THE TRANSITIONAL TEXT EXTRACTION, reachable ONLY from `verified-absent` above.
-  _component_set_bounded "$_CS_BOUND_SECS" git -C "$REPO_ROOT" show "$rev:$gate_rel" >"$tmpd/gate" 2>"$tmpd/g.err"
+  _component_set_bounded "$_CS_BOUND_SECS" git --no-replace-objects -C "$REPO_ROOT" show "$rev:$gate_rel" >"$tmpd/gate" 2>"$tmpd/g.err"
   rc=$?
   if [ "$rc" -ne 0 ]; then
     _CS_REV_ERRKIND=unreadable
@@ -3559,7 +3559,16 @@ _component_set_build_git_env() {
   # THE NEUTRALISERS, set LAST so they cannot be shadowed by anything above: global/system
   # config off (HOME above still points at the former), and no interactive prompt — an auth
   # prompt on a stalled credential path is one of the ways this probe could hang.
-  _CS_GIT_ENV+=("GIT_CONFIG_GLOBAL=/dev/null" "GIT_CONFIG_SYSTEM=/dev/null" "GIT_TERMINAL_PROMPT=0")
+  # AND REPLACEMENT REFS OFF (roborev job 264, High). `refs/replace/<sha>` transparently
+  # substitutes ANOTHER commit for that sha, everywhere git reads objects — so the pre-flight
+  # would report the CANONICAL sha while reading a FORGED, smaller manifest, and PASS. That
+  # pairing is the worst one available: the audit trail looks right and the bytes are wrong.
+  # Config sources were closed and "untrusted repository STATE" was treated as closed with them;
+  # replace refs, grafts and alternates are the rest of that space. This is the config-agnostic
+  # half — `--no-replace-objects` is passed explicitly on the lane-local reads that are
+  # deliberately NOT env-wrapped, so no object read anywhere in this pre-flight honours a
+  # replacement.
+  _CS_GIT_ENV+=("GIT_CONFIG_GLOBAL=/dev/null" "GIT_CONFIG_SYSTEM=/dev/null" "GIT_TERMINAL_PROMPT=0" "GIT_NO_REPLACE_OBJECTS=1")
   return 0
 }
 
@@ -3943,7 +3952,7 @@ _component_set_probe_inner() {
   fi
   # local-only: resolves THIS run's private ref plus the COMMIT object hop 2 just wrote.
   # Commit objects are never filtered out of a partial clone, so no lazy fetch is possible.
-  _CS_SHA=$(git -C "$REPO_ROOT" rev-parse --verify --quiet "$csref^{commit}" 2>/dev/null || true)
+  _CS_SHA=$(git --no-replace-objects -C "$REPO_ROOT" rev-parse --verify --quiet "$csref^{commit}" 2>/dev/null || true)
   # THE AFFIRMATIVE CHECK that makes hop 2 untrusted-but-safe: a rewrite of the scratch path
   # would deliver a DIFFERENT commit, so requiring equality with the sha the isolated hop
   # observed detects it. Never derive a pass from the absence of a bad signal — this compares
@@ -4022,7 +4031,7 @@ _component_set_probe_inner() {
   # local-only: walks COMMIT parents only. This is the distinction that makes `git show`
   # above different in kind: no partial-clone filter omits commits, whereas `blob:none`
   # omits exactly what `show <sha>:<path>` must read — so this one cannot reach the network.
-  git -C "$REPO_ROOT" merge-base --is-ancestor "$_CS_SHA" HEAD >/dev/null 2>&1; rc=$?
+  git --no-replace-objects -C "$REPO_ROOT" merge-base --is-ancestor "$_CS_SHA" HEAD >/dev/null 2>&1; rc=$?
   local shallow
   case "$rc" in
     0) _CS_ANCESTOR=yes ;;
