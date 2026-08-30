@@ -99,6 +99,7 @@ fail() { echo "[nuk][ERROR] $*" >&2; exit 1; }
 #   * > "$jsonl_file" / > "$stats_base"  -> both are `find` results from WITHIN
 #     the already-validated $SSTABLES_DIR subtree, so they inherit its guarantee
 #   * $ENGINE rm -f "$CONTAINER_NAME"    -> a container, fixed literal name
+#     (2 call sites: `cleanup`, and `ensure_container`'s stopped-container replace)
 #   * tar -C "$TMPDIR_EXPORT" -xf -      -> extraction into a validated dir
 # There is no `mv` in this script.
 # ----------------------------------------------------------------------------
@@ -428,11 +429,46 @@ log "Output directory: $OUT_DIR"
 
 SSTABLES_DIR="$OUT_DIR/sstables"
 
-# Reuse an already-running container if one is present (the premise-validation
-# workflow starts one by hand); otherwise start a fresh one.
-if [[ "$DRY_RUN" -eq 0 ]] && $ENGINE inspect "$CONTAINER_NAME" >/dev/null 2>&1; then
-  log "Reusing existing container '$CONTAINER_NAME'."
-else
+ensure_container() {
+  # In dry-run nothing exists to inspect, so skip the probe entirely and print
+  # the start command (what the old inline preflight did for this case).
+  if [[ "$DRY_RUN" -eq 1 ]]; then
+    start_container
+    return 0
+  fi
+
+  # `inspect` SUCCEEDS for a container that merely EXISTS, including an EXITED
+  # or CREATED one (roborev job 244, F1) — so its exit status alone cannot
+  # decide reuse. Keying on it treated a stopped container as usable and then
+  # burned the full readiness budget (60x5s) before failing, with a log line
+  # claiming reuse. Ask for the STATE instead, and distinguish all three cases.
+  local state="" rc=0
+  state="$($ENGINE inspect -f '{{.State.Running}}' "$CONTAINER_NAME" 2>/dev/null)" || rc=$?
+
+  if [[ "$rc" -ne 0 ]]; then
+    log "No container named '$CONTAINER_NAME' (engine inspect rc=$rc); starting a fresh one."
+    start_container
+    return 0
+  fi
+
+  if [[ "$state" == "true" ]]; then
+    log "Reusing RUNNING container '$CONTAINER_NAME'."
+    return 0
+  fi
+
+  # Exists but not running: `.State.Running` is false, or a value this script
+  # cannot interpret. Both are handled the same way and for the same reason —
+  # "not verified running" must never take the reuse path, because that is the
+  # branch that hangs to timeout. Replace rather than `start`: this is a FIXTURE
+  # generator, and a container stopped part-way through a previous run may carry
+  # a half-applied schema or partial rows, which would silently change the
+  # goldens. A clean slate is the only state whose output is reproducible.
+  log "Container '$CONTAINER_NAME' exists but is NOT running (.State.Running='$state'); removing and recreating it."
+  $ENGINE rm -f "$CONTAINER_NAME" >/dev/null 2>&1 || true
+  start_container
+}
+
+start_container() {
   log "Starting $CASSANDRA_IMAGE container ($CONTAINER_NAME)..."
   run $ENGINE run -d \
     --name "$CONTAINER_NAME" \
@@ -441,7 +477,9 @@ else
     -e CASSANDRA_CLUSTER_NAME=cqlite-nestedudtkeys \
     "$CASSANDRA_IMAGE"
   STARTED_CONTAINER=1
-fi
+}
+
+ensure_container
 
 if [[ "$DRY_RUN" -eq 0 ]]; then
   wait_cassandra
