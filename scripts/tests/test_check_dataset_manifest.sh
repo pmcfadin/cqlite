@@ -1868,6 +1868,7 @@ fi
 # into a temp copy that both directions read.
 # ---------------------------------------------------------------------------
 if [ -n "$MANIFEST_NOGIT" ]; then
+  crlf_tmp="$WORK/crlf-tmp"; mkdir -p "$crlf_tmp"
   crlf_case() {   # <eol> -> accept | reject
     local eol=$1 root t
     root="$WORK/manifest-crlf-$eol"; rm -rf "$root"
@@ -1879,7 +1880,12 @@ if [ -n "$MANIFEST_NOGIT" ]; then
       lf)   printf 'Data.db\nFilter.db\nTOC.txt\n'       > "$t/nb-1-big-TOC.txt" ;;
       crlf) printf 'Data.db\r\nFilter.db\r\nTOC.txt\r\n' > "$t/nb-1-big-TOC.txt" ;;
     esac
-    local _o; _o=$(NO_AUTO_TOC=1 mrun "$root" 2>&1 || true)
+    # PRIVATE TMPDIR (roborev, post-rebase round 10). The leak assertion below must inspect
+    # only files THIS invocation created: `node-bindings` runs the same manifest in the
+    # parallel side lane, and gate components are expected to run concurrently, so scanning
+    # the shared /tmp for `cqlite-toc-norm.*` would fail `tooling-tests` whenever a peer had
+    # one in flight — a nondeterministic red caused by a healthy neighbour.
+    local _o; _o=$(NO_AUTO_TOC=1 TMPDIR="$crlf_tmp" mrun "$root" 2>&1 || true)
     if printf '%s' "$_o" | grep -q 'test_basic/counters'; then echo reject; else echo accept; fi
   }
   # LF is the control: if it were rejected too, the CRLF result would say nothing about CRLF.
@@ -1890,10 +1896,31 @@ if [ -n "$MANIFEST_NOGIT" ]; then
     && ok "a CRLF TOC with all components present is accepted, end to end" \
     || bad "a CRLF TOC was rejected as incomplete; a path is still comparing against the raw file"
 
-  # And no temp file is left behind by any of it.
-  [ "$(ls "${TMPDIR:-/tmp}"/cqlite-toc-norm.* 2>/dev/null | wc -l)" -eq 0 ] \
-    && ok "the normalised-TOC temp file is not leaked" \
-    || bad "normalised-TOC temp files were left in ${TMPDIR:-/tmp}"
+  # LEAK CHECK ON AN `exit 2` PATH, in a PRIVATE TMPDIR.
+  #
+  # Both halves are load-bearing and the first version had only one of them. Scanning the
+  # shared /tmp made this red whenever a concurrent peer had a temp file in flight —
+  # `node-bindings` runs the same manifest in the parallel side lane. But moving to a private
+  # dir while still exercising only the CRLF happy paths made it VACUOUS: those clean up via
+  # the in-line `rm -f`, so removing the EXIT trap entirely did not red it. Verified — that is
+  # how the hollowness showed.
+  #
+  # The leak only ever existed on paths that `exit 2` AFTER registering a temp file, because
+  # an exit skips the caller's in-line cleanup. So this drives one: `cmp` shadowed to fail,
+  # which reaches the trusted-inventory comparison and exits 2.
+  leak_tmp="$WORK/leak-tmp"; rm -rf "$leak_tmp"; mkdir -p "$leak_tmp"
+  leak_bin="$WORK/leak-bin"; mkdir -p "$leak_bin"
+  printf '#!/bin/sh\nexit 2\n' > "$leak_bin/cmp"; chmod +x "$leak_bin/cmp"
+  if [ -n "${CQLITE_DATASETS_ROOT:-}" ] && [ -d "${CQLITE_DATASETS_ROOT:-}/sstables" ]; then
+    TMPDIR="$leak_tmp" PATH="$leak_bin:$PATH" bash "$MANIFEST_SRC" "$CQLITE_DATASETS_ROOT" \
+      >/dev/null 2>&1 || true
+    leak_left=$(find "$leak_tmp" -maxdepth 1 -name 'cqlite-toc-*' 2>/dev/null | wc -l)
+    [ "$leak_left" -eq 0 ] \
+      && ok "temp files are cleaned up even when the script exits on a tooling malfunction" \
+      || bad "$leak_left temp file(s) survived an exit-2 path; the EXIT trap is not covering them"
+  else
+    echo "info - no real corpus; skipping the exit-path leak check"
+  fi
 fi
 
 # ---------------------------------------------------------------------------
