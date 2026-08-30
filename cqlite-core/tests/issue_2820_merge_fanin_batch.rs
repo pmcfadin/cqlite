@@ -177,18 +177,13 @@ fn merged_rows(path: &std::path::Path, schema: &TableSchema) -> Vec<Row> {
     let mut merger =
         KWayMerger::new(vec![path.to_path_buf()], schema).expect("KWayMerger::new");
     let mut out = Vec::new();
-    loop {
-        match merger.step().expect("merge step") {
-            MergeStep::Partition { key, rows } => {
-                for entry in rows {
-                    let text = match &entry.row_data {
-                        RowData::Live { cells } => cell_text(cells),
-                        other => Some(format!("{other:?}")),
-                    };
-                    out.push((key.key.clone(), text));
-                }
-            }
-            MergeStep::Complete => break,
+    while let MergeStep::Partition { key, rows } = merger.step().expect("merge step") {
+        for entry in rows {
+            let text = match &entry.row_data {
+                RowData::Live { cells } => cell_text(cells),
+                other => Some(format!("{other:?}")),
+            };
+            out.push((key.key.clone(), text));
         }
     }
     out
