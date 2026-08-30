@@ -6612,5 +6612,51 @@ t test_legacy_lock_identity_unreadable_cmdline_is_not_unconfirmed
 t test_legacy_lock_pid_file_unreadable_at_open_is_named
 t test_legacy_lock_ps_liveness_fallback_is_three_valued
 
+# ---------------------------------------------------------------------------
+# Test 48 (#3549, roborev job 196 F2): THE SUITE LEAVES NO FIXTURE PROCESS BEHIND.
+#
+# This is the assert the leak had no equivalent of: the fixtures were reaped per case, by pid, and
+# nothing ever CHECKED, so five-minute orphans accumulated invisibly behind a green summary on a
+# four-lane box. Cleanup that is not asserted is a comment.
+#
+# WHAT IT MEASURES. Every `fixture_bg` registers its pgid; this runs the same reap the EXIT trap runs and
+# then asks each registered GROUP whether any member is still alive (`kill -0` on a negative pid). A
+# group is the right unit: it sees an ORPHANED CHILD whose parent shell is already gone, which is exactly
+# the leak — a `sleep 300` inside `bash <script>`, and the `bash -i` fixture that IGNORES SIGTERM.
+#
+# IT MUST BE THE LAST `t`: a case running after it would register groups nobody checks.
+#
+# NON-VACUITY IS ASSERTED, NOT ASSUMED, IN BOTH HALVES. (1) An empty registry FAILS: a green "nothing
+# leaked" over zero subjects is the vacuous pass this whole file is written against, and the floor is
+# well below the count this suite stages so it does not become a maintenance tripwire. (2) The check is
+# demonstrably CAPABLE of failing — with the group kill removed from `fixture_reap`, a scratch copy of
+# this suite reports `fixture-leak:` and names the surviving groups (recorded here because a
+# self-referential in-suite mutant would have to break the very reap it is testing).
+#
+# SCOPE, STATED: it covers the groups THIS SUITE REGISTERED. The `bash "$SUPERVISOR" &` launches are the
+# SUBJECT UNDER TEST rather than fixtures (their lifecycle is what several cases assert) and are not
+# registered; nor are the pre-existing `exec`-only fixtures, which replace their shell and so have no
+# child to orphan. A whole-machine sweep is not available to it: this box runs sibling lanes staging the
+# same names, and `pgrep -f` also self-matches, so a recorded pid is the only identity that is ours.
+# ---------------------------------------------------------------------------
+test_no_fixture_processes_leak() {
+  local n leaked
+  n=${#FIXTURE_PGIDS[@]}
+  if [[ "$n" -lt 10 ]]; then
+    fail "fixture-leak-check-vacuous: only $n fixture process group(s) were registered this run — the check has no subject, so a green here would measure nothing"
+    return 0
+  fi
+  fixture_reap
+  leaked="$(fixture_live_groups | tr '\n' ' ')"
+  leaked="${leaked% }"
+  if [[ -z "$leaked" ]]; then
+    pass "fixtures: every one of the $n background fixture process GROUPS staged by this run is gone — nothing orphaned, children included (the reap is by group, so it covers a child whose parent shell already exited)"
+  else
+    fail "fixture-leak: registered process group(s) [$leaked] still have live members after the reap — a fixture child (a non-exec \`sleep\`, or a SIGTERM-ignoring \`bash -i\`) has been orphaned; see fixture_bg"
+  fi
+}
+
+t test_no_fixture_processes_leak
+
 echo "=== $PASS_COUNT passed, $FAIL_COUNT failed, $SKIP_COUNT skipped ==="
 [[ "$FAIL_COUNT" -eq 0 ]]
