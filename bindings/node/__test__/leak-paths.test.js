@@ -340,7 +340,16 @@ const RSS_BUDGET_BYTES = 96 * 1024 * 1024 * CI_BUDGET_MULTIPLIER;
 // which trips a jest 29 config-validation warning.
 const BUDGET_TEST_TIMEOUT_MS = 120_000;
 
-/** Loose, native-visible backstop: RSS growth over the whole measured window. */
+/**
+ * Loose, native-visible backstop: RSS growth over the whole measured window.
+ *
+ * No affirmative-measurement refusal here, deliberately (see budgetStatistics for
+ * where there IS one): a non-positive RSS delta is a legitimate clean reading on
+ * this metric -- measured clean values span -385,024 .. +21,164,032 bytes -- so
+ * refusing <= 0 would red correct runs. The tracked-allocation statistic refuses
+ * because its clean values never sit at or below zero. Same rule, different
+ * measured baseline.
+ */
 function assertRssUnderBudget(label, rssGrowth) {
   const total = MEASURE_PASSES * ITERATIONS;
   if (rssGrowth >= RSS_BUDGET_BYTES) {

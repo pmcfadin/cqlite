@@ -215,6 +215,12 @@ STREAM_BUFFER_SIZE = 2
 # is the REFUSAL: a non-positive tracked delta is not a measurement and gets no
 # verdict -- see _assert_tracked_under_budget.
 #
+# NOTHING TO ENROL, unlike the Node lane: the gate affirms the Node budgets by TEST
+# NAME from a jest JSON report, so a new Node budget test must be enrolled in the
+# gate or it goes unaffirmed. This lane is run as a whole pytest directory by both
+# gate tiers, so a new budget test here executes the moment it is committed and
+# there is no list to keep in sync. Absence by construction, not by omission.
+#
 # NO THREE-STATE INSTRUMENT GUARD ON THE NODE SIDE, symmetrically: this file's RSS
 # reader can be absent (Windows) or degrade (no /proc), which is why it is
 # three-valued and why a mid-window failure raises a NAMED error; Node's
@@ -462,6 +468,13 @@ def _assert_tracked_under_budget(label: str, growth: int, budget: int) -> None:
 
 def _assert_rss_under_budget(label: str, rss_growth, rss_kind: str) -> None:
     """Loose, native-visible backstop: RSS growth over the measured loop.
+
+    NOTE, so the N5 refusal is not "swept" onto this assertion by mistake: a
+    non-positive delta here is a LEGITIMATE clean reading, not a non-measurement.
+    RSS is page-granular and the measured clean value on the error path is exactly
+    0 bytes in every run, so refusing <= 0 would red every correct run. The
+    tracked-allocation delta is different -- measured 16.6-67.8 KB clean, never <= 0
+    -- which is why only that one refuses. Same rule, different measured baseline.
 
     When no RSS instrument exists (Windows) this STATES that the native half was
     not measured, via a ``warnings.warn`` that pytest surfaces in its default
