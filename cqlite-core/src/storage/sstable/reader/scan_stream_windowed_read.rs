@@ -159,19 +159,19 @@ impl SSTableReader {
         scratch: &mut Vec<u8>,
         direct_scratch: &mut DirectScratch,
     ) -> Result<Option<Vec<u8>>> {
-        // io PHASE (issue #1707): this whole function IS the windowed scan's
-        // `Data.db` read — chunk geometry, the one positional read, and the trailing
-        // CRC verify — so the RAII timer spans it and charges every exit path,
-        // including the error ones (a slow failing read is still io time). Zero
-        // `Instant::now()` when the scan is unmetered.
-        let _io_phase = crate::observability::read_phase::scoped(ReadPhase::Io);
-        crate::observability::read_phase::io_delay::sleep_if_armed();
+        // NO-READ EXITS COME FIRST, BEFORE THE io TIMER EXISTS (issue #1707,
+        // roborev job 133). Every exit below — no `CompressionInfo`, past the last
+        // chunk (EOF), the degenerate empty trailing chunk (#2225) — performs NO
+        // read at all. Timing them would charge function-call and EOF-check time to
+        // `read.phase.io` and emit an io SAMPLE for a scan that read nothing, which
+        // is a FABRICATED measurement: the same defect this phase design legislates
+        // against (a phase that never ran emits no sample, because a 0.0 asserts a
+        // measurement that was never taken) pointing the other way.
         let comp_info = match self.compression_info.as_ref() {
             Some(ci) => ci,
             // Callers gate on `compression_info.is_some()`; a None here is a bug.
             None => return Ok(None),
         };
-        let file_size = self.scan_positional_source.len();
 
         if chunk_index >= comp_info.chunk_offsets.len() {
             return Ok(None); // EOF
@@ -190,6 +190,20 @@ impl SSTableReader {
             }
         }
 
+        // io PHASE (issue #1707): from HERE a real `Data.db` read WILL be attempted
+        // — chunk geometry, the one positional read, and the trailing CRC verify —
+        // so the RAII timer spans the rest of the function and charges every exit
+        // path, including the error ones (a slow failing read is still io time).
+        // Zero `Instant::now()` when the scan is unmetered.
+        //
+        // The injected test delay is armed HERE and nowhere earlier, and must MOVE
+        // WITH this timer if it is ever relocated: it stands in for real read
+        // latency, so a call that performs no read must not sleep it, and it must
+        // stay inside the timed region so an armed delay is charged to io exactly as
+        // real latency is.
+        let _io_phase = crate::observability::read_phase::scoped(ReadPhase::Io);
+        crate::observability::read_phase::io_delay::sleep_if_armed();
+        let file_size = self.scan_positional_source.len();
         let chunk_offset = comp_info
             .compressed_chunk_offset(chunk_index)
             .ok_or_else(|| Error::InvalidFormat(format!("No offset for chunk {chunk_index}")))?;
@@ -306,16 +320,20 @@ impl SSTableReader {
         pos: u64,
         direct_scratch: &mut DirectScratch,
     ) -> Result<Option<(Vec<u8>, u64)>> {
-        // io PHASE (issue #1707): the UNCOMPRESSED feed's read — the positional piece
-        // read plus every covering-chunk CRC verify. Same region rule as the
-        // compressed sibling above.
-        let _io_phase = crate::observability::read_phase::scoped(ReadPhase::Io);
-        crate::observability::read_phase::io_delay::sleep_if_armed();
+        // The EOF exit comes FIRST, before the io timer exists (issue #1707, roborev
+        // job 133) — same rule as the compressed sibling above: a call that reads
+        // nothing must construct no timer, sleep no injected delay, and contribute
+        // no io sample.
         let file_size = self.scan_positional_source.len();
         let remaining = file_size.saturating_sub(pos);
         if remaining == 0 {
             return Ok(None); // EOF
         }
+        // io PHASE (issue #1707): the UNCOMPRESSED feed's read — the positional piece
+        // read plus every covering-chunk CRC verify. Same region rule as the
+        // compressed sibling above, injected delay included.
+        let _io_phase = crate::observability::read_phase::scoped(ReadPhase::Io);
+        crate::observability::read_phase::io_delay::sleep_if_armed();
         let to_read = remaining.min(UNCOMPRESSED_READ_PIECE_BYTES as u64) as usize;
         let mut buf = vec![0u8; to_read];
         // Same one-shot transient-retry + kind-preserving wrap as the compressed
