@@ -641,7 +641,7 @@ fn compare_udt(
 /// `"0"` compared equal to an incorrectly emitted JSON numeric key `0` — defeating
 /// the typed comparison in the one place a map most needs it (issue #1491 review
 /// finding F2).
-fn pair<'v>(entry: &'v Value, egress: Egress) -> Result<(&'v Value, &'v Value), String> {
+fn pair(entry: &Value, egress: Egress) -> Result<(&Value, &Value), String> {
     let object = entry.as_object().ok_or_else(|| {
         format!(
             "cli map entry is not an object: {}",
