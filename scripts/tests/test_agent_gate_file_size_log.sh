@@ -71,7 +71,15 @@ if [ ! -r "$GATE" ]; then
   exit 1
 fi
 
-tmp=$(mktemp -d "${TMPDIR:-/tmp}/agent-gate-file-size.XXXXXX")
+tmp=$(mktemp -d "${TMPDIR:-/tmp}/agent-gate-file-size.XXXXXX") || tmp=""
+# An unchecked mktemp is not a small risk here: an empty $tmp makes `export TMPDIR=""`
+# fall back to /tmp, the EXIT trap `rm -rf ""` clean nothing, and every fixture path
+# absolute-from-root — which a normal user survives as a loud failure but ROOT (containers)
+# survives as six uncleaned fixture repos littered into `/`.
+if [ -z "$tmp" ] || [ ! -d "$tmp" ]; then
+  printf 'FAIL - could not create a scratch dir under %s — refusing to run\n' "${TMPDIR:-/tmp}"
+  exit 1
+fi
 trap 'rm -rf "$tmp"' EXIT INT TERM
 # Contain each gate run's LOG_DIR (mktemp -d "${TMPDIR:-/tmp}/agent-gate.XXXXXX") inside
 # this run's namespace so the trap above reclaims them too.
@@ -328,14 +336,30 @@ has "case4: opt-out log carries the terminal PASS verdict" \
 # the log must say so EXPLICITLY, while the advisory list still works off `git diff HEAD`.
 # ---------------------------------------------------------------------------
 mkrepo nobase cqlite-core/src/big.rs 900 950 work; r5="$REPO"
-# Affirmative precondition: the fixture must really have no ref the gate can resolve.
-# Without this the case could pass on a repo that DOES have a base, having proved nothing.
-if [ -n "$r5" ] && ! ( cd "$r5" && for ref in origin/main main origin/master master; do
-       git rev-parse --verify -q "$ref" >/dev/null 2>&1 && exit 0; done; exit 1 ); then
-  ok "case5: fixture genuinely resolves none of origin/main|main|origin/master|master"
+# Affirmative precondition WITH A POSITIVE CONTROL (#3401 review blocker A). As a PURE
+# NEGATIVE (`! ( cd … && for … )`) this printed `ok` for ANY reason the subshell exited
+# non-zero: a missing or unreadable $r5 makes `cd` short-circuit the `&&`, ZERO rev-parse
+# calls run, and "I could not even look" reads as "I looked and found none" — the same
+# fail-open shape the round-1 sweep removed elsewhere. The probe now reports three
+# distinct states, and only the one that PROVES it looked can pass.
+if [ -z "$r5" ]; then
+  case5_probe=2
 else
-  bad "case5: fixture DOES resolve a base ref (or is missing) — the no-base path is not being exercised"
+  ( cd "$r5" 2>/dev/null || exit 2
+    # positive control: we are in a usable git repo, so a "no ref resolved" answer below
+    # is a measurement rather than an inability to measure.
+    git rev-parse --verify -q HEAD >/dev/null 2>&1 || exit 2
+    for ref in origin/main main origin/master master; do
+      git rev-parse --verify -q "$ref" >/dev/null 2>&1 && exit 0
+    done
+    exit 1 )
+  case5_probe=$?
 fi
+case "$case5_probe" in
+  1) ok "case5: probe RAN and resolved none of origin/main|main|origin/master|master" ;;
+  0) bad "case5: fixture DOES resolve a base ref — the no-base path is not being exercised" ;;
+  *) bad "case5: could not probe the fixture's refs at all (unusable repo at '$r5') — precondition UNMEASURED" ;;
+esac
 out5="$tmp/nobase.out"
 run_only_file_size "$r5" "$out5"
 d5=$(logdir_of "$out5") || bad "case5: the run published no usable 'logs:' dir"
@@ -351,10 +375,80 @@ has "case5: no-base log carries the terminal verdict" \
     "$log5" ">>> [file-size] PASS"
 
 # ---------------------------------------------------------------------------
+# Case 7 — LOG PERSISTENCE (#3401 review blocker B). The component now PROMISES a log, so
+# an unverified promise is the original defect one level up: an agent follows the SUMMARY's
+# `logs:` pointer, finds nothing, and is back to hand-computing line counts. If the log
+# cannot be persisted the component must FAIL, must name the PERSISTENCE cause, and must
+# NOT read as a campsite-rule violation (a bare FAIL meaning "my log dir is unwritable"
+# would send the reader hunting for a grown source file that does not exist).
+#
+# The sabotage is surgical and uid-independent: a PATH-shim `mktemp` lets the gate create
+# its LOG_DIR normally and then pre-creates `file-size.log` as a DIRECTORY inside it, so
+# `: >"$log"` cannot succeed while every other LOG_DIR write (tree-identity capture,
+# .result, summary) still works. `chmod 500 $LOG_DIR` was rejected: it is a NO-OP FOR ROOT
+# (the case would silently self-skip in containers — the very "invisible skip" this suite
+# is meant not to have) and it would also break the gate's own tree-identity capture, i.e.
+# fail the run for a reason other than the property under test. `: > <dir>` fails for
+# every uid, so this case needs no skip path at all.
+#
+# The fixture is a CLEAN tree, so the ratchet's own verdict is PASS and the component's
+# FAIL can only have come from persistence.
+# ---------------------------------------------------------------------------
+STUBBIN="$tmp/stubbin"
+mkdir -p "$STUBBIN"
+REAL_MKTEMP=$(command -v mktemp 2>/dev/null)
+if [ -z "$REAL_MKTEMP" ]; then
+  bad "case7: no mktemp on PATH — the persistence path CANNOT be exercised (not a skip: this suite needs it)"
+else
+  cat >"$STUBBIN/mktemp" <<STUB
+#!/usr/bin/env bash
+d=\$("$REAL_MKTEMP" "\$@") || exit 1
+case "\$d" in
+  */agent-gate.*) [ -d "\$d" ] && mkdir -p "\$d/file-size.log" ;;
+esac
+printf '%s\n' "\$d"
+STUB
+  chmod +x "$STUBBIN/mktemp"
+
+  mkrepo persist cqlite-core/src/small.rs 20 0 main; r7="$REPO"
+  out7="$tmp/persist.out"
+  run_only_file_size "$r7" "$out7" PATH="$STUBBIN:$PATH"
+  d7=$(logdir_of "$out7") || bad "case7: the run published no usable 'logs:' dir"
+
+  # POSITIVE CONTROL — without this, a FAIL below could have come from anywhere.
+  if [ -d "$d7/file-size.log" ]; then
+    ok "case7: sabotage in place (file-size.log is a directory, so the component cannot write it)"
+  else
+    bad "case7: sabotage did NOT take effect at '$d7/file-size.log' — the persistence path was never exercised"
+  fi
+  assert_verdict "case7: an unpersistable log makes the component FAIL (never a silent PASS)" "$d7" FAIL
+  has "case7: stdout names the failure as PERSISTENCE, not a ratchet violation" \
+      "$out7" "LOG PERSISTENCE FAILURE"
+  has "case7: stdout names the path that could not be written" \
+      "$out7" "$d7/file-size.log"
+  has "case7: stdout states the ratchet's OWN verdict in the same breath" \
+      "$out7" "The size ratchet itself computed: PASS"
+  if [ ! -s "$out7" ]; then
+    bad "case7: no gate stdout captured — the wording check could not run"
+  elif grep -Fq -- "change makes over-threshold file(s) larger" "$out7"; then
+    bad "case7: a persistence failure was reported with campsite-rule/ratchet wording"
+  else
+    ok "case7: the persistence FAIL carries no campsite-rule/ratchet wording"
+  fi
+fi
+
+# ---------------------------------------------------------------------------
 printf '\n%s\n' "----------------------------------------"
 printf 'file-size component log guard (#3401): %d passed, %d failed\n' "$PASS" "$FAIL"
+# Census, not a floor (#3401 review N4): the assertion count is control-flow-invariant
+# here — every case runs unconditionally — so `PASS + FAIL` must equal it EXACTLY. A floor
+# with slack tolerates silently deleted assertions, which is the vacuous-green shape this
+# suite exists to refuse.
+EXPECTED_CHECKS=42
+if [ "$((PASS + FAIL))" -ne "$EXPECTED_CHECKS" ]; then
+  printf 'FAIL - assertion census mismatch: %d checks ran, expected exactly %d (one was added, deleted or skipped)\n' \
+    "$((PASS + FAIL))" "$EXPECTED_CHECKS"
+  exit 1
+fi
 [ "$FAIL" -eq 0 ] || exit 1
-# Floor against a vacuous green: a harness that silently skipped its cases would otherwise
-# report `0 passed, 0 failed` and exit 0.
-[ "$PASS" -ge 34 ] || { printf 'FAIL - vacuous run: only %d checks executed\n' "$PASS"; exit 1; }
 exit 0
