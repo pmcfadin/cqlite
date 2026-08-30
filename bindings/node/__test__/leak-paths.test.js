@@ -27,7 +27,7 @@
  *   RSS budget's ~37 KiB/iteration resolution) is invisible to BOTH instruments
  *   here. The proper oracle for that class -- an isolated process, RSS measured
  *   against a calibrated NATIVE retention control, or native live-resource
- *   counters -- is issue #3593 and is deliberately not built here.
+ *   counters -- is issue #3585 and is deliberately not built here.
  *
  * WHY THE GUARD IS A MEASURED BUDGET, NOT jest `--detectLeaks` (issue #1465
  * step 3 authorises this fallback and requires the reason to be documented here):
@@ -162,7 +162,7 @@ const MEASURE_PASSES = 9;
 // (`Buffer`, plain objects), so it proves the instrument is sensitive to
 // JS-VISIBLE retention on these paths. It establishes NOTHING about sensitivity
 // to a native (Rust-allocator) leak, which `heapUsed + external` cannot see at
-// all -- that is the RSS backstop's job below, and properly, issue #3593's.
+// all -- that is the RSS backstop's job below, and properly, issue #3585's.
 // ---------------------------------------------------------------------------
 // On a CI runner (GitHub sets `CI`) both budgets are doubled. Reason, and its
 // limit: the leg that runs this file in CI is a 3-core `macos-14` job whose
@@ -184,7 +184,7 @@ const BUDGET_BYTES = 32 * 1024 * CI_BUDGET_MULTIPLIER;
 //       roughly >= 37 KiB/iteration held on the native heap (e.g. an un-dropped
 //       per-stream row buffer over a ~101-column table).
 //   WHAT IT DOES NOT CATCH: anything smaller. It is a backstop for the gross
-//       case, not an oracle (issue #3593).
+//       case, not an oracle (issue #3585).
 const RSS_BUDGET_BYTES = 96 * 1024 * 1024 * CI_BUDGET_MULTIPLIER;
 
 // Per-test timeout for the two multi-pass budgets (measured ~0.5s and ~4.5s on

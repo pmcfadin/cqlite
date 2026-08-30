@@ -26,7 +26,7 @@ because the earlier version of this docstring overclaimed):
   ru_maxrss budget's ~22 KiB/iteration resolution) is invisible to BOTH
   instruments here. The proper oracle for that class -- an isolated process, RSS
   measured against a calibrated NATIVE retention control, or native live-resource
-  counters -- is issue #3593 and is deliberately not built here.
+  counters -- is issue #3585 and is deliberately not built here.
 
 WHAT IS ASSERTED (and what is deliberately NOT): tracked-allocation growth across
 N iterations must stay under a documented budget, and peak-RSS growth under a
@@ -129,7 +129,7 @@ STREAM_ROWS = 5
 # (``bytearray``), so it proves the instrument is sensitive to PYTHON-VISIBLE
 # retention on these code paths. It establishes NOTHING about sensitivity to a
 # native (Rust-allocator) leak, which tracemalloc cannot see at all -- see the
-# module docstring and issue #3593.
+# module docstring and issue #3585.
 #   ERROR_BUDGET_BYTES  =  64 KiB (43 bytes/iteration at 1500) -- 15x the observed
 #       cold max. Planting a retained 256-byte bytearray per iteration measured
 #       164,872 bytes (329.7/iteration) and TRIPS it by 2.5x. Retaining the
