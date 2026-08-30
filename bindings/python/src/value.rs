@@ -136,8 +136,9 @@ pub fn value_to_hashable_key(py: Python<'_>, value: &Value) -> PyResult<PyObject
     match value {
         // Both project to a Python `tuple`: a list needs one for hashability, a
         // CQL tuple maps to one anyway. The element projection is what matters —
-        // it must recurse HERE so a nested UDT becomes a frozenset rather than a
-        // dict.
+        // it must recurse HERE so a nested UDT's FIELD VALUES are projected
+        // hashably too, which `value_to_py`'s route through `udt_to_py` does not
+        // do.
         Value::List(items) | Value::Tuple(items) => {
             let converted: Vec<PyObject> = items
                 .iter()
@@ -277,12 +278,16 @@ pub fn value_to_hashable_key(py: Python<'_>, value: &Value) -> PyResult<PyObject
         // `+0.0` in a `set<double>` (Cassandra orders by
         // `Double.compare`/`Float.compare`, where `-0.0 < +0.0`, so both zeros in
         // one set is ordinary legal data, while Python has
-        // `hash(-0.0) == hash(0.0)`); a UDT field literally named
-        // `_type`/`_keyspace` shadowing the metadata pair injected by the `Udt`
-        // arm; and `Null` vs `Tombstone` both projecting to `None` (listed for
-        // completeness — probably desired). All PRE-DATE #3500, which neither
-        // introduced nor widened any; fixing them needs a type-preserving
-        // projection, a behaviour change out of scope here.
+        // `hash(-0.0) == hash(0.0)`); and `Null` vs `Tombstone` both projecting
+        // to `None` (listed for completeness — probably desired). Both PRE-DATE
+        // #3500, which neither introduced nor widened either; fixing them needs a
+        // type-preserving projection, a behaviour change out of scope here.
+        //
+        // A THIRD member — a UDT field literally named `_type`/`_keyspace`
+        // shadowing the metadata pair this arm used to inject — is GONE, fixed by
+        // issue #3504: the identity now rides on the [`Udt`] instance and the
+        // field namespace holds declared fields only, so there is no metadata
+        // pair left to shadow.
         Value::Json(json) => json_to_hashable_key(py, json),
         // Every remaining variant's ordinary projection is ALREADY hashable, so
         // it delegates to `value_to_py`. Named exhaustively — never `_ =>` — so
@@ -822,18 +827,22 @@ fn set_to_py(py: Python<'_>, items: &[Value]) -> PyResult<PyObject> {
 
 /// Return `true` if `value` is or CONTAINS a UDT value, at any nesting depth.
 ///
-<<<<<<< HEAD
 /// Used by [`set_to_py`] to decide whether a `SET` is returned as a `frozenset`
-/// (no UDT anywhere inside, so every element projects to something hashable) or
-/// as a `list` (a UDT is in there, and its `dict` projection is unhashable).
+/// (no UDT anywhere inside) or as a `list` (a UDT is in there, so #804's
+/// CLI-parity shape applies). Since issue #3504 that is a SHAPE decision and not
+/// a hashability one — see the note at the exhaustive arm below.
 ///
 /// # Why this has to be a full traversal (issue #3500)
 ///
 /// It used to look only through `Frozen`, so a UDT reached through a `Tuple`, a
-/// nested `Set`, a `Map` or a `List` was invisible: `set_to_py` took the
-/// `frozenset` branch and Python raised `TypeError: unhashable type: 'dict'` (or
-/// `'list'`) on legal CQL such as `set<frozen<tuple<frozen<udt>, int>>>`. The
-/// answer must therefore be about the whole subtree, not the outermost wrapper.
+/// nested `Set`, a `Map` or a `List` was invisible and `set_to_py` took the
+/// `frozenset` branch for it. On legal CQL such as
+/// `set<frozen<tuple<frozen<udt>, int>>>` that branch then projected the element
+/// through the NON-total [`value_to_hashable_key`] of the time, which fell
+/// through to [`value_to_py`], and Python raised
+/// `TypeError: unhashable type: 'list'` (or `'dict'`). #804's rule is about a
+/// UDT being ANYWHERE in the set, so the answer must be about the whole subtree,
+/// not the outermost wrapper.
 ///
 /// A `Map` is searched on BOTH sides — a UDT can sit in a map key as legally as
 /// in a map value. `Frozen` is followed because it is present at some nesting
@@ -852,14 +861,6 @@ fn set_to_py(py: Python<'_>, items: &[Value]) -> PyResult<PyObject> {
 /// UDT's field cannot change that answer, so there is no recursion into UDT
 /// fields here — it would be code with no reachable effect.
 #[deny(clippy::wildcard_enum_match_arm)]
-=======
-/// Used by `set_to_py` to decide whether a `SET` should be returned as a
-/// `frozenset` (scalars) or a `list` (UDT elements, rendered as a list for CLI
-/// parity — issue #804).
-///
-/// Not total over `Value`: a UDT nested inside a `Tuple` or a `Set` element is not
-/// detected, which is issue #3500 and is neither fixed nor worsened by #3504.
->>>>>>> origin/main
 fn contains_udt(value: &Value) -> bool {
     match value {
         Value::Udt(_) => true,
