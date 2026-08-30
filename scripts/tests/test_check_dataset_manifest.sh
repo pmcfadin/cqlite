@@ -1775,6 +1775,44 @@ else
   echo "info - no passing real corpus available; skipping the cmp-malfunction case"
 fi
 
+# ---------------------------------------------------------------------------
+# Case 83 (post-rebase round 4 self-audit): the trusted-inventory check must actually be
+# REACHED on the real corpus.
+#
+# A no-twin generation legitimately falls back to the derived checks — which is the right
+# behaviour, and also a perfect hiding place. If a future change broke the corpus-path ->
+# repo-path mapping, EVERY generation would fall back, the High-severity coherent-truncation
+# gap would reopen, and nothing would say so: the manifest would still print a green 39/39.
+#
+# So the positive fact is asserted rather than assumed (a positive verdict needs an
+# AFFIRMATIVE measurement, not the absence of a complaint). Measured today: 144 of 144
+# generations resolve a committed twin, 0 fall back.
+# ---------------------------------------------------------------------------
+if [ -n "${CQLITE_DATASETS_ROOT:-}" ] && [ -d "${CQLITE_DATASETS_ROOT:-}/sstables" ] \
+   && command -v git >/dev/null 2>&1; then
+  tr_repo=$(cd "$(dirname "$GATE")/.." && pwd)
+  tr_counts=$(_SCRIPT_REPO="$tr_repo" bash -c '
+    _SCRIPT_REPO=$1; _SCRIPT_REPO_IS_GIT=1
+    eval "$(sed -n "/^_committed_toc_relpath() {/,/^}/p" "$2")"
+    have=0; none=0
+    while IFS= read -r f; do
+      toc="${f%Data.db}TOC.txt"; [ -f "$toc" ] || continue
+      _committed_toc_relpath "$toc"
+      if [ -n "$_C_TOC_REL" ]; then have=$((have+1)); else none=$((none+1)); fi
+    done < <(find "$3/sstables" -mindepth 3 -maxdepth 3 -name "*-Data.db" 2>/dev/null)
+    printf "%s %s" "$have" "$none"' _ "$tr_repo" "$MANIFEST_SRC" "$CQLITE_DATASETS_ROOT")
+  tr_have=${tr_counts%% *}; tr_none=${tr_counts##* }
+  if [ "${tr_have:-0}" -gt 0 ] && [ "${tr_none:-1}" -eq 0 ]; then
+    ok "every generation on the real corpus resolves a committed twin ($tr_have/$tr_have; 0 fall back)"
+  elif [ "${tr_have:-0}" -eq 0 ]; then
+    bad "NO generation resolved a committed twin — the corpus-path to repo-path mapping is broken, and every generation silently falls back to the derived checks"
+  else
+    bad "$tr_none of $((tr_have + tr_none)) generations fall back to the derived checks; the trusted-inventory check is partly unreached"
+  fi
+else
+  echo "info - no real corpus or no git; skipping the twin-reachability census"
+fi
+
 echo "----"
 echo "passed: $PASS  failed: $FAIL"
 [ "$FAIL" -eq 0 ]
