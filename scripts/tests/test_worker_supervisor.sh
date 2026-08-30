@@ -4491,6 +4491,18 @@ legacy_lock_drive() {
   fi
 }
 
+# THE SUPERVISOR HAS TWO OUTPUT CHANNELS AND BOTH LABEL THEMSELVES: `log()` writes
+# `[worker-supervisor] ...` and this guard's diagnostics write `worker-supervisor: ...`. A runnable
+# command line carries NEITHER, which is what makes it identifiable without parsing prose. `SV_DIAG_RE`
+# is that pair, in one place, so a case cannot accidentally test only one of them.
+SV_DIAG_RE='^(\[worker-supervisor\]|worker-supervisor:) '
+# A COMMAND SIGNATURE IS A VERB PLUS AN OPERAND, not a bare mention. The prose legitimately NAMES the
+# tools ("the rmdir is non-recursive"), and flagging that would make the sweep red on correct text — a
+# check that reds on correct input is the check people learn to waive. So the patterns require the
+# argument shape a paste would actually mangle.
+SV_CMD_RE="rm -f |rm -rf |rmdir ['\"/]|ps -p |kill -"
+
+
 # The refusal must be the LEGACY one, not the per-lane "another instance is already running" — an
 # operator and a test both have to be able to tell the two locks apart.
 legacy_refusal_ok() {
@@ -4680,7 +4692,9 @@ test_legacy_global_lock_refuses_stale_holder() {
   local printed bare_count
   bare_count="$(printf '%s\n' "$out" | grep -cvE "$SV_DIAG_RE" || true)"
   printed="$(printf '%s\n' "$out" | grep -vE "$SV_DIAG_RE" | head -1)"
-  if [[ "$bare_count" == "1" ]]; then
+  if [[ ! "$bare_count" =~ ^[0-9]+$ ]]; then
+    fail "legacy-lock-stale-remedy-count-unmeasurable: the bare-line count came back [$bare_count]; the measurement did not happen"
+  elif [[ "$bare_count" == "1" ]]; then
     pass "legacy-lock AC2 (F2): the stale refusal prints EXACTLY ONE bare line — the command — so it is identifiable without parsing prose"
   else
     fail "legacy-lock-stale-remedy-bare-count: $bare_count unprefixed lines in [$out]; expected exactly 1 (the command)"
@@ -5459,21 +5473,18 @@ test_legacy_lock_eperm_errno_branch_is_load_bearing() {
 # bare line — asserted too, so "zero bare lines" cannot be confused with "the command went missing".
 # ---------------------------------------------------------------------------
 
-# THE SUPERVISOR HAS TWO OUTPUT CHANNELS AND BOTH LABEL THEMSELVES: `log()` writes
-# `[worker-supervisor] ...` and this guard's diagnostics write `worker-supervisor: ...`. A runnable
-# command line carries NEITHER, which is what makes it identifiable without parsing prose. `SV_DIAG_RE`
-# is that pair, in one place, so a case cannot accidentally test only one of them.
-SV_DIAG_RE='^(\[worker-supervisor\]|worker-supervisor:) '
-# A COMMAND SIGNATURE IS A VERB PLUS AN OPERAND, not a bare mention. The prose legitimately NAMES the
-# tools ("the rmdir is non-recursive"), and flagging that would make the sweep red on correct text — a
-# check that reds on correct input is the check people learn to waive. So the patterns require the
-# argument shape a paste would actually mangle.
-SV_CMD_RE="rm -f |rm -rf |rmdir ['\"/]|ps -p |kill -"
-
 # remedy_lines_structural <label> <out> <expected-bare-lines> — the (a) half plus the bare-line count.
 remedy_lines_structural() {
   local label="$1" out="$2" want="$3" bare_count inlined
   bare_count="$(printf '%s\n' "$out" | grep -cvE "$SV_DIAG_RE" || true)"
+  # A COUNT THAT IS NOT A NUMBER IS NOT A ZERO. An unset `SV_DIAG_RE` (these are top-level assignments,
+  # and a `t` invocation placed above them would run first) makes the substitution come back EMPTY, and
+  # `[[ "" == "0" ]]` is false — so the failure is at least visible — but the message would report a
+  # count nobody measured. Named explicitly instead; this is the same rule the code under test follows.
+  if [[ ! "$bare_count" =~ ^[0-9]+$ ]]; then
+    fail "remedy-lines-count-unmeasurable ($label): the bare-line count came back [$bare_count]; the measurement did not happen"
+    return 0
+  fi
   if [[ "$bare_count" == "$want" ]]; then
     pass "remedy-lines ($label): exactly $want bare (unprefixed) line(s) — the runnable command, if any, is a line of its own"
   else
