@@ -912,6 +912,32 @@ fn run_lane(egress: Egress) {
 
     for case in CASES {
         let qualified = format!("{}.{}", case.keyspace, case.table);
+        // The committed CREATE TABLE is the authority for the row's column set and
+        // each value's CQL type (issue #1491 review findings). Loaded per case, and
+        // an unreadable/unparseable schema is a hard failure — a case with no
+        // declared column set could only compare permissively.
+        //
+        // FIRST, before the fixture is resolved (review finding U2). The schemas are
+        // committed source, resolved checkout-relative and therefore present on every
+        // machine (#3148), whereas a fetched-corpus fixture may legitimately be
+        // absent — and the absent-fixture branch below `continue`s. Loading the schema
+        // after it meant a stale `pk`, `ck`, `multicell` or skip-path declaration for
+        // an optional case was checked ONLY on a machine that happened to hold the
+        // corpus: a machine-dependent silent gap. Checked here, a stale declaration
+        // fails everywhere.
+        let table = match golden::schema::load(&schema_file(case.schema), case.table) {
+            Ok(table) => table,
+            Err(why) => {
+                failures.push(format!("{qualified}: committed schema unusable: {why}"));
+                continue;
+            }
+        };
+        // The case table transcribes the key columns and the multicell kinds by
+        // hand; cross-check both against the DDL so a wrong transcription is a
+        // failure here rather than a weaker comparison later.
+        for why in schema_agrees_with_case(case, &table) {
+            failures.push(format!("{qualified}: {why}"));
+        }
         // must_run: a committed fixture is never allowed to skip.
         let resolved = match resolve_fixture(case, &committed, &checkout) {
             Ok(resolved) => resolved,
@@ -994,24 +1020,6 @@ fn run_lane(egress: Egress) {
                 golden_file.display()
             ));
             continue;
-        }
-
-        // The committed CREATE TABLE is the authority for the row's column set and
-        // each value's CQL type (issue #1491 review findings). Loaded per case, and
-        // an unreadable/unparseable schema is a hard failure — a case with no
-        // declared column set could only compare permissively.
-        let table = match golden::schema::load(&schema_file(case.schema), case.table) {
-            Ok(table) => table,
-            Err(why) => {
-                failures.push(format!("{qualified}: committed schema unusable: {why}"));
-                continue;
-            }
-        };
-        // The case table transcribes the key columns and the multicell kinds by
-        // hand; cross-check both against the DDL so a wrong transcription is a
-        // failure here rather than a weaker comparison later.
-        for why in schema_agrees_with_case(case, &table) {
-            failures.push(format!("{qualified}: {why}"));
         }
 
         let staging = match tempfile::TempDir::new() {
