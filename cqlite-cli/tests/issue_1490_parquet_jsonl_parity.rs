@@ -1151,14 +1151,19 @@ fn a_missing_committed_fixture_reds_the_suite() {
         known_type_gaps: &[],
     };
 
-    // The panic is the expected outcome, so the default hook's backtrace noise
-    // is suppressed for the duration and restored immediately after.
-    let hook = std::panic::take_hook();
-    std::panic::set_hook(Box::new(|_| {}));
+    // The panic is the expected outcome. An earlier revision swapped the
+    // process-global panic hook for a no-op to hide the expected backtrace, and
+    // that is a bug in a test harness: `set_hook` is PROCESS-global while
+    // libtest runs tests on many threads, so the swap suppressed the
+    // diagnostics of whatever unrelated test happened to fail inside the
+    // window, and an early return between the two calls would have left the
+    // no-op hook installed for the rest of the run. No suppression is needed
+    // either: libtest already captures each test's stderr and prints it only
+    // when that test fails, so the expected panic message is invisible on a
+    // green run and attributed to THIS test on a red one.
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         parquet_parity::assert_case(&ABSENT)
     }));
-    std::panic::set_hook(hook);
 
     let payload = result.expect_err(
         "a must_run case whose fixture is ABSENT must PANIC — a silent skip would shrink the \
