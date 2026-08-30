@@ -228,45 +228,72 @@ fn build_inputs() -> (TempDir, Vec<PathBuf>, TableSchema) {
 
 #[test]
 fn concurrent_merges_bound_aggregate_threads_to_o_c_m() {
-    // Guard 1: DERIVED from this file's own constants, never a literal (#3438 AC2).
-    // The pre-#2316 cost is `C·M·(1 + num_cpus)` = `producers·(1 + num_cpus)`, and
-    // the regression is observable only where that STRICTLY EXCEEDS the bound. With
-    // C=2, M=3 (producers=6) and bound = 3·3·2 + 6 = 24 that threshold is
-    // `24 / 6 = 4`: at num_cpus=3 the pre-change cost is `6·4 = 24`, which EQUALS
-    // the bound and so does not exceed it. The previous hardcoded `num_cpus < 2`
-    // guard therefore let this pin pass VACUOUSLY against the very defect it exists
-    // to catch on any 2- or 3-core host.
-    let cpus = num_cpus::get();
-    let c = NUM_MERGERS;
-    let declared_bound = thread_bound(NUM_INPUTS, c);
-    let producers = NUM_INPUTS * c;
-    let min_cpus = min_cpus_for_amplification(producers, declared_bound);
-    if cpus < min_cpus {
-        eprintln!(
-            "[skip] num_cpus={cpus} < {min_cpus} — with C={c}, M={NUM_INPUTS} \
-             (producers={producers}), PER_INPUT={PER_INPUT}, THREAD_SLACK={THREAD_SLACK} the \
-             pre-#2316 cost C·M·(1+num_cpus)={} does not exceed the O(C·M) bound \
-             {declared_bound}, so the amplification is not observable here; holding trivially \
-             rather than asserting a bound that holds either way",
-            producers * (1 + cpus),
-        );
-        return;
-    }
-    // Guard 2: no direct thread-count API on this platform.
+    // Guard A (cheap, platform): no direct thread-count API here → cannot observe.
+    // Ordered FIRST because it needs no inputs; the vacuity guard deliberately does
+    // not run until the scenario size is KNOWN (see Guard B).
     if os_thread_count().is_none() {
         eprintln!("[skip] no direct OS thread-count API on this platform; holding trivially");
         return;
     }
 
-    // The reap-confirm budget SCALES with the producer count — C·M = 6 here, vs
-    // #2316's M = 4 — because each late finish-and-reap resets the quiescence
-    // span, so the number of resets is bounded by the producers that can still
-    // hold in-flight blocking work. See `os_thread_budget::reap_confirm_timeout`
-    // for the full derivation (and its harness-budget note).
-    let confirm_timeout = reap_confirm_timeout(producers);
+    let cpus = num_cpus::get();
+    let c = NUM_MERGERS;
 
     let (_temp, inputs, schema) = build_inputs();
+
+    // ── THE SINGLE SOURCE OF SCENARIO SIZE (#3514 blocker 2) ────────────────────
+    // `m` is the DISCOVERED input count, and EVERY size-dependent quantity below —
+    // the producer count, the asserted bound, the reap-confirm budget and the
+    // vacuity threshold — is derived from THIS ONE binding. Nothing downstream may
+    // re-derive any of them from the `NUM_INPUTS` constant.
+    //
+    // Why this is structural and not merely tidier: `build_inputs` asserts only
+    // `inputs.len() >= NUM_INPUTS`, so `m` CAN exceed the constant if a flush ever
+    // publishes an extra `nb-` SSTable. Previously the guard used `NUM_INPUTS` while
+    // the bound used `m`, and the two then disagree about which host can observe the
+    // defect: at `m=4, c=2` the real producer count is 8 and the real bound 30, whose
+    // true threshold is `floor(30/8) = 3` — but a constant-derived guard computes
+    // `floor(24/6) = 4` and SKIPS on a 3-core host where the amplification (`8·4 = 32
+    // > 30`) is plainly observable. That is a second path to exactly the vacuity AC2
+    // exists to remove, which is how #3385 fixing an instance left #3514's class open.
+    //
+    // An `assert!(inputs.len() == NUM_INPUTS)` would also close it, but only by
+    // FORBIDDING the divergence — one more thing to be true, and a false FAIL if the
+    // write engine ever legitimately publishes an extra generation. Deriving both
+    // from one binding makes divergence UNREPRESENTABLE instead, which is the
+    // stronger property, so that is what is done here.
     let m = inputs.len();
+    let producers = m * c;
+    let bound = thread_bound(m, c);
+
+    // Guard B (vacuity, DERIVED — never a literal; #3438 AC2). The pre-#2316 cost is
+    // `producers·(1 + num_cpus)`, and the regression is observable only where that
+    // STRICTLY EXCEEDS `bound`, i.e. at `num_cpus >= bound / producers`. At the
+    // nominal C=2, M=3 (producers=6, bound=24) that is `24 / 6 = 4`: at num_cpus=3
+    // the pre-change cost is `6·4 = 24`, which EQUALS the bound and so does not
+    // exceed it. The previous hardcoded `num_cpus < 2` let this pin pass VACUOUSLY
+    // against the very defect it exists to catch on any 2- or 3-core host — measured:
+    // with the amplification restored and the old guard in place, a 3-core run
+    // reported `confirmed_delta=24 bound=24` and PASSED.
+    let min_cpus = min_cpus_for_amplification(producers, bound);
+    if cpus < min_cpus {
+        eprintln!(
+            "[skip] num_cpus={cpus} < {min_cpus} — with C={c}, M={m} (producers={producers}), \
+             PER_INPUT={PER_INPUT}, THREAD_SLACK={THREAD_SLACK} the pre-#2316 cost \
+             C·M·(1+num_cpus)={} does not exceed the O(C·M) bound {bound}, so the \
+             amplification is not observable here; holding trivially rather than asserting a \
+             bound that holds either way",
+            producers * (1 + cpus),
+        );
+        return;
+    }
+
+    // The reap-confirm budget SCALES with the producer count — C·M = 6 nominally, vs
+    // #2316's M = 4 — because each late finish-and-reap resets the quiescence span,
+    // so the number of resets is bounded by the producers that can still hold
+    // in-flight blocking work. See `os_thread_budget::reap_confirm_timeout` for the
+    // full derivation (and its quantified harness-budget note).
+    let confirm_timeout = reap_confirm_timeout(producers);
 
     // Baseline via LIFECYCLE synchronization (the input-build runtime is dropped
     // but its teardown may still be in flight): poll until quiesced.
@@ -294,7 +321,8 @@ fn concurrent_merges_bound_aggregate_threads_to_o_c_m() {
     // transient spike (the pre-fix per-producer runtime-worker burst).
     let (peak, settled) = poll_until_stable(Duration::from_secs(20));
     let delta = peak.saturating_sub(baseline);
-    let bound = thread_bound(m, c);
+    // `bound` and `producers` are the single-source values derived above from `m` —
+    // never re-derived here, so they cannot drift from the vacuity guard.
     let pressure_at_peak = pressure.report();
 
     eprintln!(

@@ -248,39 +248,57 @@ fn build_inputs() -> (TempDir, Vec<PathBuf>, TableSchema) {
 
 #[test]
 fn merge_bounds_producer_threads_to_o_m() {
-    // Guard 1: the pre-change amplification is `M·(1 + num_cpus)`, which only
-    // EXCEEDS this test's O(M) bound above a threshold DERIVED from the bound's
-    // own constants (issue #3385 — the old `num_cpus < 2` guard was provably
-    // wrong: at M=4, num_cpus=2 the pre-change delta is 12, under the bound of
-    // 15, so the pin could not have detected the regression there either).
-    // Below the threshold the bound cannot distinguish pre- from post-change
-    // code, so hold trivially and say why rather than assert a vacuous pass.
-    let cpus = num_cpus::get();
-    let bound = thread_bound(NUM_INPUTS);
-    let min_cpus = min_cpus_for_amplification(NUM_INPUTS, bound);
-    if cpus < min_cpus {
-        eprintln!(
-            "[skip] num_cpus={cpus} < {min_cpus} — with M={NUM_INPUTS}, PER_INPUT={PER_INPUT}, \
-             THREAD_SLACK={THREAD_SLACK} the pre-change cost M·(1+num_cpus)={} does not exceed \
-             the O(M) bound {bound}, so the #2316 amplification is not observable here; \
-             holding trivially",
-            NUM_INPUTS * (1 + cpus),
-        );
-        return;
-    }
-    // Guard 2: no direct thread-count API on this platform → cannot observe.
+    // Guard A (cheap, platform): no direct thread-count API here → cannot observe.
+    // Ordered FIRST because it needs no inputs; the vacuity guard deliberately does
+    // not run until the scenario size is KNOWN (see Guard B).
     if os_thread_count().is_none() {
         eprintln!("[skip] no direct OS thread-count API on this platform; holding trivially");
         return;
     }
 
-    // The reap-confirm budget SCALES with the producer count (`M` here) — see
-    // `os_thread_budget::reap_confirm_timeout` for the derivation.
-    let confirm_timeout = reap_confirm_timeout(NUM_INPUTS);
+    let cpus = num_cpus::get();
 
     let (_temp, inputs, schema) = build_inputs();
-    let m = inputs.len();
     let out = TempDir::new().expect("out tempdir");
+
+    // ── THE SINGLE SOURCE OF SCENARIO SIZE (#3514 blocker 2) ────────────────────
+    // `m` is the DISCOVERED input count, and here `m` == the producer count. EVERY
+    // size-dependent quantity below — the bound, the reap-confirm budget and the
+    // vacuity threshold — is derived from THIS ONE binding; nothing downstream may
+    // re-derive any of them from the `NUM_INPUTS` constant. `build_inputs` asserts
+    // only `>= NUM_INPUTS`, so a constant-derived guard beside an `m`-derived bound
+    // can disagree about which host can observe the defect, which SKIPS the pin on a
+    // host where the amplification is plainly detectable. Deriving both from one
+    // binding makes that divergence UNREPRESENTABLE rather than merely forbidden (an
+    // `assert!(len() == NUM_INPUTS)` would also close it, but by adding one more
+    // thing that must be true — and a false FAIL if an extra generation is ever
+    // legitimately published). Same fix, same reasoning, as the #2370 sibling.
+    let m = inputs.len();
+    let bound = thread_bound(m);
+
+    // Guard B (vacuity, DERIVED — never a literal): the pre-change amplification is
+    // `m·(1 + num_cpus)`, which EXCEEDS this test's O(M) bound only at
+    // `num_cpus >= bound / m` (issue #3385 — the old `num_cpus < 2` guard was
+    // provably wrong: at M=4, num_cpus=2 the pre-change delta is 12, under the bound
+    // of 15, so the pin could not have detected the regression there either). Below
+    // the threshold the bound cannot distinguish pre- from post-change code, so hold
+    // trivially and say why rather than assert a vacuous pass.
+    let min_cpus = min_cpus_for_amplification(m, bound);
+    if cpus < min_cpus {
+        eprintln!(
+            "[skip] num_cpus={cpus} < {min_cpus} — with M={m}, PER_INPUT={PER_INPUT}, \
+             THREAD_SLACK={THREAD_SLACK} the pre-change cost M·(1+num_cpus)={} does not exceed \
+             the O(M) bound {bound}, so the #2316 amplification is not observable here; \
+             holding trivially",
+            m * (1 + cpus),
+        );
+        return;
+    }
+
+    // The reap-confirm budget SCALES with the producer count (`m` here) — see
+    // `os_thread_budget::reap_confirm_timeout` for the derivation and its quantified
+    // harness-budget note.
+    let confirm_timeout = reap_confirm_timeout(m);
 
     // Settle the baseline via LIFECYCLE synchronization (issue #2316, roborev job
     // 1604 finding 1): the input-build runtime has been dropped, but its
@@ -315,7 +333,8 @@ fn merge_bounds_producer_threads_to_o_m() {
     // worker threads), even if the count later settles slightly lower.
     let (peak, settled) = poll_until_stable(Duration::from_secs(15));
     let delta = peak.saturating_sub(baseline);
-    let bound = thread_bound(m);
+    // `bound` is the single-source value derived above from `m` — never re-derived
+    // here, so it cannot drift from the vacuity guard.
     let pressure_at_peak = pressure.report();
 
     eprintln!(
