@@ -89,6 +89,17 @@
 //! untransformed text, because that would silently restore the `f64` path this
 //! module removes.
 //!
+//! And a declared-`decimal`/`varint` POSITION must hold a JSON NUMBER: every
+//! other token there is an `Err` too (`declared::preserve_lexemes`). That is not
+//! strictness for its own sake — it is what makes the preserved lexeme
+//! UNFORGEABLE. The preserved form is a JSON string, so a value the GOLDEN wrote
+//! as a string at that position would be indistinguishable from one this pass
+//! wrote (`"1.2"` for a `decimal`, `"123"` for a `varint`, `"decimal(1.2)"` for
+//! the canonical tag), and would canonicalize exactly like the number it
+//! imitates. A tag cannot separate them — it would live in the same text the
+//! golden controls — so the input space is narrowed instead: afterwards such a
+//! position can hold no string this pass did not itself write.
+//!
 //! A DUPLICATE object key is refused too, at EVERY depth, before anything reads
 //! a value from the line — see [`reject_duplicate_keys`]. JSON permits one and
 //! the two readers of this document disagree about which occurrence the object

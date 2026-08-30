@@ -865,3 +865,229 @@ fn a_legitimate_nested_null_is_still_accepted_and_an_absent_cell_is_still_null()
         );
     }
 }
+
+// ---------------------------------------------------------------------------
+// A PRESERVED NUMBER LEXEME MUST BE UNFORGEABLE (#1490 round 15)
+//
+// `sstabledump` writes a `decimal`/`varint` cell as a bare JSON number, and
+// `serde_json` would parse it into an `f64` — which cannot identify the value it
+// came from. So the rewrite replaces such a number with the JSON STRING of its
+// own literal, and `declared::type_scalar_golden` reads a `Text` at a declared
+// `decimal`/`varint` position as that exact literal.
+//
+// That made a string the GOLDEN wrote indistinguishable from a lexeme the
+// rewrite wrote: `"value":"1.2"` for a declared `decimal`, `"value":"123"` for a
+// `varint`, even `"value":"decimal(1.2)"` (the canonical tag) canonicalized
+// EXACTLY like the numbers they imitate, so a malformed golden compared EQUAL.
+//
+// A tag or prefix cannot fix it — it would be written into the same JSON text
+// the golden controls, i.e. forgeable by exactly the input the defect is about.
+// What fixes it is DISJOINTNESS established in the one traversal that does the
+// rewriting: every NON-NUMBER token at a lexeme-preserving position is REFUSED,
+// so afterwards such a position holds no string the rewrite did not itself
+// write, and `NumberLexeme` (whose only constructor takes a verified JSON number
+// token, and whose only output is the quoted lexeme) is the sole producer.
+// ---------------------------------------------------------------------------
+
+/// The declared columns for the lexeme cases: one `decimal` cell, one `varint`
+/// cell, and the two NESTED lexeme positions (a frozen collection ELEMENT and a
+/// frozen map VALUE), plus a `text` and a `double` column that must stay
+/// untouched.
+fn lexeme_columns() -> Vec<parquet_parity::cql_type::ColumnType> {
+    [
+        ("balance", "decimal"),
+        ("big", "varint"),
+        ("tags", "frozen<set<decimal>>"),
+        ("rates", "frozen<map<text,decimal>>"),
+        ("note", "text"),
+        ("rate", "double"),
+    ]
+    .iter()
+    .map(|(n, t)| parquet_parity::cql_type::parse_column(n, t, &[]).expect("declared type parses"))
+    .collect()
+}
+
+/// One synthetic line carrying `cells`, through the REAL rewrite.
+fn rewrite_cells(cells: &str) -> Result<String, String> {
+    preserve_exact_lexemes(
+        &format!(
+            r#"{{"partition":{{"key":["k"]}},"rows":[{{"type":"row","clustering":[],"cells":[{cells}]}}]}}{}"#,
+            "\n"
+        ),
+        &lexeme_columns(),
+    )
+}
+
+/// THE finding: a value that was ALREADY a string at a declared
+/// `decimal`/`varint` position is REFUSED, so it can never be read as a
+/// preserved numeric lexeme.
+#[test]
+fn an_original_string_at_a_declared_decimal_or_varint_position_is_refused() {
+    #[rustfmt::skip]
+    let forged: &[(&str, &str)] = &[
+        // The finding's three examples, verbatim.
+        (r#"{"name":"balance","value":"1.2"}"#, "a JSON string"),
+        (r#"{"name":"big","value":"123"}"#, "a JSON string"),
+        // The canonical TAG itself: `is_canonical_text` would have waved this
+        // straight through as an already-canonical exact decimal.
+        (r#"{"name":"balance","value":"decimal(1.2)"}"#, "a JSON string"),
+        // A NESTED lexeme position: a frozen collection's element…
+        (r#"{"name":"tags","value":["1.5",2.25]}"#, "a JSON string"),
+        // …and a frozen map's value.
+        (r#"{"name":"rates","value":{"a":"1.5"}}"#, "a JSON string"),
+        // Every other non-number token is refused too — the rule is "the token
+        // must BE a number", not "the token must not be a string".
+        (r#"{"name":"balance","value":true}"#, "a JSON boolean"),
+        (r#"{"name":"balance","value":[1]}"#, "a JSON array"),
+        (r#"{"name":"balance","value":{"x":1}}"#, "a JSON object"),
+    ];
+    for (cells, kind) in forged {
+        let err = rewrite_cells(cells).expect_err(
+            "a non-number token at a declared decimal/varint position must be REFUSED, never \
+             read as a preserved lexeme",
+        );
+        assert!(
+            err.contains(kind),
+            "the refusal must name the token it found ({kind}), got: {err}"
+        );
+        assert!(
+            err.contains("bare JSON NUMBER"),
+            "the refusal must say what Cassandra writes there, got: {err}"
+        );
+        assert!(
+            err.contains("unforgeable"),
+            "the refusal must say why every non-number token is refused, got: {err}"
+        );
+    }
+
+    // A `text` column may of course hold a decimal-looking string, and a
+    // `double`'s literal must still reach serde_json untouched: the refusal is
+    // keyed on the DECLARED type of the position, never on the value's spelling.
+    let ok = rewrite_cells(
+        r#"{"name":"note","value":"decimal(1.2)"},{"name":"rate","value":1014.5449131979983}"#,
+    )
+    .expect("a `text` column holding a decimal-looking string is not a lexeme position");
+    assert!(
+        ok.contains(r#"{"name":"note","value":"decimal(1.2)"}"#)
+            && ok.contains(r#"{"name":"rate","value":1014.5449131979983}"#),
+        "neither column may be rewritten: {ok}"
+    );
+}
+
+/// THE NEGATIVE this fix exists for, measured: at the READER a forged string and
+/// a preserved lexeme are the SAME value — and the forged one can no longer get
+/// there.
+///
+/// HALF 1 measures the indistinguishability (without it the fix is unverified):
+/// the canonicalization of `Text("1.2")` at a declared `decimal` cell EQUALS the
+/// canonicalization of the lexeme the rewrite produces for the NUMBER `1.2`, and
+/// `Text("decimal(1.2)")` lands on the same value again. HALF 2 shows the golden
+/// TEXT carrying either string can no longer reach the reader at all.
+#[test]
+fn a_forged_decimal_string_can_no_longer_reach_the_reader_that_cannot_tell_it_apart() {
+    use parquet_parity::canonical_jsonl::CanonicalValue;
+    use parquet_parity::cql_type::parse_column;
+    use parquet_parity::declared::{canonicalize_golden, Declared};
+
+    let decimal = parse_column("balance", "decimal", &[]).expect("declared type parses");
+    let at = || Declared::cell(&decimal.spec, "forged-vs-preserved decimal cell");
+    let canon = |text: &str| {
+        canonicalize_golden(CanonicalValue::Text(text.to_string()), &at())
+            .expect("a Text at a declared decimal cell is read as its literal")
+    };
+
+    // HALF 1 — the reader CANNOT tell them apart, MEASURED against what the real
+    // rewrite emits for a genuine number: the rewrite turns the NUMBER token
+    // `1.2` into the JSON string `"1.2"`, which is byte-identical to what a
+    // golden spelling `"value":"1.2"` would have handed the reader. So the
+    // reader has nothing left to decide with, and both spellings canonicalize to
+    // one value — including the canonical TAG, which `is_canonical_text` waves
+    // through as already-canonical.
+    let rewritten = rewrite_cells(r#"{"name":"balance","value":1.2}"#)
+        .expect("a genuine number token is preserved");
+    assert!(
+        rewritten.contains(r#"{"name":"balance","value":"1.2"}"#),
+        "premise: the rewrite hands the reader the JSON STRING \"1.2\", which is exactly what \
+         a forged golden string would hand it: {rewritten}"
+    );
+    let preserved = canon("1.2");
+    assert_eq!(
+        canon("decimal(1.2)"),
+        preserved,
+        "premise: the canonical TAG is read as already-canonical, so it lands on the same value"
+    );
+
+    // HALF 2 — neither string can reach that reader: the ONE traversal that
+    // rewrites lexemes refuses every non-number token at the position first.
+    for forged in ["1.2", "decimal(1.2)"] {
+        let err = rewrite_cells(&format!(r#"{{"name":"balance","value":"{forged}"}}"#))
+            .expect_err("the forged string must be refused before anything reads a value");
+        assert!(
+            err.contains("a JSON string"),
+            "the refusal must name the token it found, got: {err}"
+        );
+    }
+}
+
+/// The CONTROL: GENUINE numeric literals still survive verbatim and still
+/// compare EXACTLY — including the round-10 `f64` collision the exact-decimal
+/// path exists for. Without this the refusal above could be "refuse the whole
+/// lexeme mechanism".
+#[test]
+fn genuine_numeric_literals_still_survive_verbatim_and_compare_exactly() {
+    use parquet_parity::canonical_jsonl::CanonicalValue;
+    use parquet_parity::cql_type::parse_column;
+    use parquet_parity::declared::{canonicalize_golden, Declared};
+
+    // Premise, asserted so this control cannot stop being about a collision:
+    // these literals are ONE double, so only the preserved TEXT distinguishes
+    // them.
+    for (a, b) in [
+        ("0.100000000000000001", "0.1"),
+        ("9007199.254740001", "9007199.254740002"),
+    ] {
+        assert_eq!(
+            a.parse::<f64>().expect("f64").to_bits(),
+            b.parse::<f64>().expect("f64").to_bits(),
+            "premise: {a} and {b} collide under f64"
+        );
+    }
+
+    let rewritten = rewrite_cells(concat!(
+        r#"{"name":"balance","value":9007199.254740001},"#,
+        r#"{"name":"big","value":123456789012345678901234567890},"#,
+        r#"{"name":"tags","value":[1.5,2.25]},"#,
+        r#"{"name":"rates","value":{"a":0.100000000000000001}},"#,
+        r#"{"name":"rate","value":1014.5449131979983}"#
+    ))
+    .expect("genuine number tokens must still be preserved");
+    for expected in [
+        r#"{"name":"balance","value":"9007199.254740001"}"#,
+        r#"{"name":"big","value":"123456789012345678901234567890"}"#,
+        r#"{"name":"tags","value":["1.5","2.25"]}"#,
+        r#"{"name":"rates","value":{"a":"0.100000000000000001"}}"#,
+        // Untouched: a `double` must reach serde_json's exact parser as written.
+        r#"{"name":"rate","value":1014.5449131979983}"#,
+    ] {
+        assert!(
+            rewritten.contains(expected),
+            "the preserved lexemes must be verbatim; missing {expected}: {rewritten}"
+        );
+    }
+
+    // And the two colliding scale-9 literals the export CAN carry stay DISTINCT
+    // through the reader — the property the preserved text buys.
+    let decimal = parse_column("balance", "decimal", &[]).expect("declared type parses");
+    let read = |text: &str| {
+        canonicalize_golden(
+            CanonicalValue::Text(text.to_string()),
+            &Declared::cell(&decimal.spec, "collision control"),
+        )
+        .expect("a scale-9 literal is representable")
+    };
+    assert_ne!(
+        read("9007199.254740001"),
+        read("9007199.254740002"),
+        "two distinct decimals sharing one double must stay distinct"
+    );
+}

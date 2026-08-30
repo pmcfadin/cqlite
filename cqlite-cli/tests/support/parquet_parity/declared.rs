@@ -659,6 +659,16 @@ fn type_scalar_golden(v: CanonicalValue, at: &Declared<'_>) -> Result<CanonicalV
         }
         // The PRESERVED LITERAL (or, at a stringified position, the text
         // Cassandra's `BigDecimal.toString` wrote) — read exactly.
+        //
+        // WHY a `Text` here is AUTHORITATIVE, and not merely plausible: at a
+        // NON-stringified position the only string that can exist is the one
+        // `preserve_lexemes` wrote from a verified JSON number token
+        // (`NumberLexeme`) — every other token there is REFUSED before anything
+        // reads a value — and at a STRINGIFIED position Cassandra itself writes
+        // the string. So the two producers are the only producers, and a golden
+        // spelling `"1.2"` or `"decimal(1.2)"` at a declared `decimal` cell can
+        // no longer arrive here disguised as either.
+        //
         // `is_canonical_text` keeps the descent idempotent: a stringified
         // position is converted where it is assembled and passes through here
         // again already canonical.
@@ -670,7 +680,10 @@ fn type_scalar_golden(v: CanonicalValue, at: &Declared<'_>) -> Result<CanonicalV
             }
         }
         (CanonicalValue::Int(i), "decimal") => ExactDecimal::from_i128(i).canonical(),
-        // A `varint`'s PRESERVED LITERAL. The exported side reads a
+        // A `varint`'s PRESERVED LITERAL, authoritative for the same reason as
+        // the `decimal` arm above: at a non-stringified position only
+        // `preserve_lexemes` can have written a string here, and only from a
+        // verified JSON number token. The exported side reads a
         // `Decimal128(38, 0)` back as an `Int`, so the golden lands on the same
         // exact `i128` — no `f64` in either path. A literal too large for an
         // `i128` is REFUSED: `Decimal128` could not have carried it either, so
@@ -723,24 +736,129 @@ fn type_scalar_golden(v: CanonicalValue, at: &Declared<'_>) -> Result<CanonicalV
 // coarse-instead-of-positional canonicalization. One declared-type recursion,
 // one set of positions, one answer.
 
-/// Which JSON CONTAINER a retained value is, so the descent knows what to open.
+/// WHICH JSON TOKEN a retained value is — the one classification this pass makes,
+/// used both to decide which bracket the descent must open and to decide whether
+/// a lexeme-preserving position holds the NUMBER it must hold.
 ///
 /// This is JSON SYNTAX, not a CQL type: the declared type decides what the
-/// positions inside are, and this only says which bracket the descent must go
-/// through to reach them. A form that disagrees with the declared type is left
-/// verbatim — a shape difference is for the value comparison to report, never
-/// something to guess past here.
-enum JsonForm {
+/// positions inside are, and this only says what shape of token is written
+/// there. A token that disagrees with the declared type is left verbatim (a
+/// shape difference is for the value comparison to report) EXCEPT at a
+/// lexeme-preserving position, where a non-number is a refusal — see
+/// [`preserve_lexemes`].
+///
+/// The classification is EXACT and needs no parse: JSON decides a value's form
+/// from its first non-space byte, and the grammar leaves no overlap — `"` opens
+/// a string, `-` or a digit opens a number (JSON allows neither a leading `+`
+/// nor a bare `.`), and `[`, `{`, `t`, `f`, `n` each open exactly one form.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum JsonToken {
+    Number,
+    String,
+    Null,
+    Bool,
     Array,
     Object,
-    Scalar,
+    /// A first byte JSON's grammar does not start any value with. Reachable only
+    /// from a malformed retained value, and named rather than folded into one of
+    /// the above so a refusal can say so.
+    Unrecognized,
 }
 
-fn json_form(value: &RawValue) -> JsonForm {
+impl JsonToken {
+    /// How a refusal names this token.
+    fn describe(self) -> &'static str {
+        match self {
+            JsonToken::Number => "a JSON number",
+            JsonToken::String => "a JSON string",
+            JsonToken::Null => "a JSON null",
+            JsonToken::Bool => "a JSON boolean",
+            JsonToken::Array => "a JSON array",
+            JsonToken::Object => "a JSON object",
+            JsonToken::Unrecognized => "a token JSON's grammar does not recognize",
+        }
+    }
+}
+
+fn json_token(value: &RawValue) -> JsonToken {
     match value.get().trim_start().as_bytes().first() {
-        Some(b'[') => JsonForm::Array,
-        Some(b'{') => JsonForm::Object,
-        _ => JsonForm::Scalar,
+        Some(b'[') => JsonToken::Array,
+        Some(b'{') => JsonToken::Object,
+        Some(b'"') => JsonToken::String,
+        Some(b'n') => JsonToken::Null,
+        Some(b't') | Some(b'f') => JsonToken::Bool,
+        Some(b'-') | Some(b'0'..=b'9') => JsonToken::Number,
+        _ => JsonToken::Unrecognized,
+    }
+}
+
+/// The preserved LITERAL of a JSON NUMBER token — the only thing that may take
+/// a number's place at a lexeme-preserving position.
+///
+/// # Why a TYPE and not a string convention (#1490 round 15)
+///
+/// This pass replaces a bare JSON number with the JSON STRING of its own
+/// lexeme, because `serde_json` would otherwise parse a `decimal`/`varint` into
+/// an `f64` and lose the digits. Downstream, `type_scalar_golden` reads a `Text`
+/// at a declared `decimal`/`varint` position as that exact literal — so a golden
+/// that ORIGINALLY carried a string there (`"value":"1.2"`, `"value":"123"`,
+/// even `"value":"decimal(1.2)"`) used to be INDISTINGUISHABLE from a preserved
+/// number and canonicalized exactly like one: a malformed golden comparing
+/// EQUAL, which is the false PASS this harness exists not to produce.
+///
+/// A tag or prefix cannot fix that: it is written into the same JSON text the
+/// golden controls, so the golden can spell it too — the forgery is by exactly
+/// the input the defect is about. What fixes it is DISJOINTNESS, established in
+/// the SAME single traversal that does the rewriting: [`preserve_lexemes`]
+/// REFUSES every non-number token at a lexeme-preserving position, so after this
+/// pass such a position can hold no string this pass did not itself write, and a
+/// `Text` arriving there is authoritative BY CONSTRUCTION rather than by
+/// convention.
+///
+/// This type is the producer half of that invariant, and it is a type so the
+/// invariant cannot be re-broken by a new call site: the ONLY constructor
+/// ([`NumberLexeme::from_number_token`]) takes the position's raw JSON token and
+/// refuses anything that is not a number, and the ONLY way to obtain the emitted
+/// text is [`NumberLexeme::into_json_string`]. There is no way to emit a
+/// preserved lexeme without having held a verified number token.
+struct NumberLexeme(String);
+
+impl NumberLexeme {
+    /// THE constructor: a lexeme exists only for a token that IS a JSON number.
+    ///
+    /// It re-asks the token question rather than trusting its caller, so the
+    /// type's guarantee holds for every future call site and not only for the
+    /// one match arm below.
+    fn from_number_token(value: &RawValue, at: &Declared<'_>) -> Result<Self, String> {
+        let text = value.get().trim();
+        if json_token(value) != JsonToken::Number {
+            return Err(at.refuse(&format!(
+                "a preserved number lexeme was requested for {}, which is not a JSON number; \
+                 the harness refuses to present a value it did not obtain from a number token \
+                 as one it did",
+                json_token(value).describe()
+            )));
+        }
+        // A JSON number lexeme contains only `-+.eE0123456789`, none of which
+        // JSON escapes, so quoting it is exact. Asserted rather than assumed: a
+        // lexeme carrying anything else would make the quoted form a DIFFERENT
+        // value, and this harness refuses rather than emit one.
+        if let Some(bad) = text
+            .chars()
+            .find(|c| !matches!(c, '-' | '+' | '.' | 'e' | 'E' | '0'..='9'))
+        {
+            return Err(at.refuse(&format!(
+                "the literal {text:?} starts like a JSON number but carries {bad:?}, which \
+                 JSON's number grammar does not allow; the harness refuses to quote it rather \
+                 than emit a different value"
+            )));
+        }
+        Ok(NumberLexeme(text.to_string()))
+    }
+
+    /// THE way out: the lexeme as a JSON string, digit for digit.
+    fn into_json_string(self) -> String {
+        format!("\"{}\"", self.0)
     }
 }
 
@@ -757,13 +875,37 @@ fn json_form(value: &RawValue) -> JsonForm {
 /// carries which declared type. A UDT is the identity — see the last arm.
 pub(super) fn preserve_lexemes(value: &RawValue, at: &Declared<'_>) -> Result<String, String> {
     if at.preserves_exact_lexeme() {
-        // A declared SCALAR: this position IS the value, and a scalar has no
-        // children to descend into.
-        return quote_number_lexeme(value, at);
+        // A declared `decimal`/`varint` SCALAR: this position IS the value, a
+        // scalar has no children to descend into, and Cassandra writes it as a
+        // bare JSON NUMBER. So the token is REQUIRED to be a number — see
+        // [`NumberLexeme`] for why refusing every other token is what makes the
+        // preserved lexeme unforgeable, rather than tagging it.
+        return match json_token(value) {
+            JsonToken::Number => Ok(NumberLexeme::from_number_token(value, at)?.into_json_string()),
+            // An ABSENCE is a question about the POSITION, not about the number
+            // grammar, and it already has exactly one owner:
+            // `require_authoritative_value` REFUSES it where CQL requires a
+            // value and folds it where Cassandra legitimately writes one (a UDT
+            // field, a tuple member). So it is re-emitted verbatim here rather
+            // than judged twice, in two vocabularies.
+            JsonToken::Null => Ok(value.get().to_string()),
+            other => Err(at.refuse(&format!(
+                "the golden writes {} here, but `sstabledump` writes a declared \
+                 `decimal`/`varint` value at this position as a bare JSON NUMBER. The harness \
+                 REFUSES it instead of reading it as one: this pass replaces a real number \
+                 with the JSON STRING of its own literal (an `f64` cannot carry either type), \
+                 so a string the GOLDEN wrote is indistinguishable from a lexeme this pass \
+                 wrote — `\"1.2\"` for a `decimal`, `\"123\"` for a `varint` or even \
+                 `\"decimal(1.2)\"` would canonicalize exactly like the number and compare \
+                 EQUAL. Refusing every non-number token is what makes the preserved lexeme \
+                 unforgeable: a tag would be written into the same text the golden controls",
+                other.describe()
+            ))),
+        };
     }
-    match (json_form(value), at.spec()) {
+    match (json_token(value), at.spec()) {
         // A frozen list/set arrives as a JSON ARRAY of typed values.
-        (JsonForm::Array, Some(CqlTypeSpec::Seq { elem, .. })) => {
+        (JsonToken::Array, Some(CqlTypeSpec::Seq { elem, .. })) => {
             let items = raw_array(value, at)?;
             let mut out = Vec::with_capacity(items.len());
             for (i, item) in items.iter().enumerate() {
@@ -775,7 +917,7 @@ pub(super) fn preserve_lexemes(value: &RawValue, at: &Declared<'_>) -> Result<St
         // A CQL tuple arrives as a POSITIONAL JSON array; a length disagreement
         // is a difference for the value comparison to report, never something to
         // guess past here.
-        (JsonForm::Array, Some(CqlTypeSpec::Tuple(specs))) => {
+        (JsonToken::Array, Some(CqlTypeSpec::Tuple(specs))) => {
             let items = raw_array(value, at)?;
             if items.len() != specs.len() {
                 return Ok(value.get().to_string());
@@ -796,7 +938,7 @@ pub(super) fn preserve_lexemes(value: &RawValue, at: &Declared<'_>) -> Result<St
         // preserved, and read exactly at the `FrozenMapObjectKey` position — so
         // only the VALUES can be bare numbers here. A non-frozen map's key is
         // preserved the same way, as Cassandra's stringified `path` component.
-        (JsonForm::Object, Some(CqlTypeSpec::Map { value: vspec, .. })) => {
+        (JsonToken::Object, Some(CqlTypeSpec::Map { value: vspec, .. })) => {
             let mut fields = raw_object(value, at)?;
             for (key, field) in fields.iter_mut() {
                 let child = at.child(Some(vspec), Position::MapValue, format!("{}.{key}", at.ctx));
@@ -821,37 +963,6 @@ pub(super) fn preserve_lexemes(value: &RawValue, at: &Declared<'_>) -> Result<St
         //    the value comparison to REPORT, never something to guess past here.
         _ => Ok(value.get().to_string()),
     }
-}
-
-/// Turn a NUMBER's retained text into the JSON STRING of its own lexeme;
-/// anything else is returned exactly as it arrived.
-///
-/// Called once `preserve_lexemes` has decided, FROM THE DECLARED TYPE AT THIS
-/// POSITION, that the literal must survive. Deliberately not recursive and not
-/// type-aware: recursion belongs to the one declared-type descent.
-fn quote_number_lexeme(value: &RawValue, at: &Declared<'_>) -> Result<String, String> {
-    let text = value.get().trim();
-    if !matches!(text.as_bytes().first(), Some(b'-') | Some(b'0'..=b'9')) {
-        // Not a JSON number, so there is no lexeme the parse could destroy: a
-        // `null` (folded to `Absent` downstream), or a value sstabledump already
-        // wrote as a JSON string. Returned unchanged.
-        return Ok(value.get().to_string());
-    }
-    // A JSON number lexeme contains only `-+.eE0123456789`, none of which JSON
-    // escapes, so quoting it is exact. Asserted rather than assumed: a lexeme
-    // carrying anything else would make the quoted form a DIFFERENT value, and
-    // this harness refuses rather than emit one.
-    if let Some(bad) = text
-        .chars()
-        .find(|c| !matches!(c, '-' | '+' | '.' | 'e' | 'E' | '0'..='9'))
-    {
-        return Err(at.refuse(&format!(
-            "the literal {text:?} starts like a JSON number but carries {bad:?}, which JSON's \
-             number grammar does not allow; the harness refuses to quote it rather than emit a \
-             different value"
-        )));
-    }
-    Ok(format!("\"{text}\""))
 }
 
 fn raw_array(value: &RawValue, at: &Declared<'_>) -> Result<Vec<Box<RawValue>>, String> {
