@@ -220,7 +220,11 @@ ok "$n_gap of $n_members member(s) are recorded as PARTIAL or NOT-EXECUTED — t
 # ---    checks what was RECORDED.
 n_doctrine=$(grep -cE '^[^#[:space:]]+	[A-Z-]+	contradicts-doctrine	' "$CENSUS" || true)
 n_silent=$(grep -cE '^[^#[:space:]]+	[A-Z-]+	silent	' "$CENSUS" || true)
-case "$n_doctrine$n_silent" in ''|*[!0-9]*) fail "could not count the recorded gap classes — unmeasurable is not a pass" ;; esac
+# Checked SEPARATELY, never as a concatenation: `"$a$b"` is still numeric when one of
+# the two is EMPTY, so a failed count would slip through as measured — the fail-open
+# shape this file's own header warns about, one level down.
+case "$n_doctrine" in ''|*[!0-9]*) fail "could not count the contradicts-doctrine records — unmeasurable is not a pass" ;; esac
+case "$n_silent"   in ''|*[!0-9]*) fail "could not count the silent records — unmeasurable is not a pass" ;; esac
 ok "gap classes: $n_doctrine RECOGNISED as contradicts-doctrine, $n_silent RECOGNISED as silent (RECORDED classifications, not verified ones — see this script's header)"
 
 echo "PASS: workspace test-execution disposition census is complete and labeled ($n_members members, $n_records records)"
