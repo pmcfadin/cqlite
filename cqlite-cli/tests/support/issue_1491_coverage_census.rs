@@ -457,7 +457,7 @@ mod pairing {
 
         let key = ("ks".to_string(), "t".to_string());
         assert!(
-            tracked.goldens.get(&key).is_none(),
+            !tracked.goldens.contains_key(&key),
             "a same-named golden in another directory does not describe this SSTable"
         );
         assert_eq!(
