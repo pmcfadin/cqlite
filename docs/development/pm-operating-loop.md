@@ -163,12 +163,21 @@ The pipeline measures itself so improvement is data-driven, not anecdotal:
   `mergedAt` — the authoritative terminal timestamp of a slice — and `retro` reports those records as
   their own SLICE class, never as completed issues. `--slice` states what was true at DELIVERY time,
   which the issue's CURRENT state cannot decide (GitHub records an auto-close AFTER the merge, so an
-  ordinary completed delivery and a late-stamped slice look alike), so it is refused fail-closed for a
-  currently-CLOSED issue, for one open only because it was REOPENED, and inside GitHub's post-merge
-  auto-close propagation window — there a completed delivery presents identically to a never-closed issue
-  (closed_at null AND stateReason empty) and only the PR's own `closingIssuesReferences` tells them apart,
-  since a slice PR closes NOTHING. Stamp a slice before its issue is ever closed, until #3559 lands
-  timeline-based classification. Closing the issue to satisfy the tool (a tool's data
+  ordinary completed delivery and a late-stamped slice look alike). Since issue #3559 the tool decides it
+  by replaying the issue's own TIMELINE to the PR's `mergedAt`, and the rule is a CONJUNCTION:
+  **slice ⟺ the issue was OPEN at `mergedAt` AND this PR closes NOTHING.** Both halves are permanent —
+  every auto-closing PR's issue was also open at `mergedAt`, because the close is recorded afterwards, so
+  only the PR's own `closingIssuesReferences` separates "open because it is never closing" from "open
+  because the close lands five seconds later" (a slice PR closes NOTHING). A slice is therefore stampable
+  after its issue has been closed or reopened (this is what unblocked the three owed #3393 records
+  #3407/#3429/#3467), and is REFUSED when the timeline places a `closed` event at or before `mergedAt` —
+  that delivery COMPLETED the issue, and a later reopen does not change it. `--slice` is an operator
+  ASSERTION: the tool refuses it wherever it can be DISPROVED, and where it cannot be, the assertion
+  stands. One residual is UNDECIDABLE and is not claimed: a completed delivery whose PR omits `Closes #N`
+  and whose issue is closed BY HAND later is observationally identical to a genuine slice whose issue is
+  completed later by another PR — both are open-at-`mergedAt`, close-nothing, closed-later — so the
+  difference is intent, and doctrine (not mechanism) bounds it, since `flow-implement` mandates
+  `Closes #<N>` in every PR body. Closing the issue to satisfy the tool (a tool's data
   model must never decide whether a problem is recorded as solved) and hand-appending a line past the
   validator are both FORBIDDEN. Records
   hold authoritative data only — GitHub-derived timestamps (cycle time + coarse phase durations) plus

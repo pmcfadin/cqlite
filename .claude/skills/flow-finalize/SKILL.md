@@ -69,11 +69,13 @@ You are the CQLite delivery lead. The PR for issue `#N` is **merged**. Close the
      # `--gate not-run --gate-runs 0` (#3448) is the ONLY honest record when NO full gate of
      # record ran; the two are coupled both ways (not-run <=> 0) and neither flag is optional.
      # Add --slice (#3550) when the ISSUE deliberately stays OPEN and this PR shipped a SLICE of it:
-     # it records closed_at: null and bounds cycle_time_s on the PR's mergedAt. Coupled both ways —
-     # --slice on a CLOSED or REOPENED issue is refused (fail-closed: current state cannot tell a
-     # late-stamped slice from an ordinary completed delivery — #3559), as is stamping inside the
-     # post-merge auto-close window (retry once GitHub records the close), and an OPEN issue without
-     # --slice too. NEVER
+     # it records closed_at: null and bounds cycle_time_s on the PR's mergedAt. The kind is decided by
+     # replaying the issue TIMELINE to the PR's mergedAt (#3559): slice <=> the issue was OPEN at
+     # mergedAt AND this PR closes NOTHING. So a slice STAYS stampable after its issue is closed or
+     # reopened, and --slice is refused when the timeline places a `closed` event at or before mergedAt
+     # (that delivery COMPLETED the issue) or when this PR declares it closes the issue (an ordinary
+     # completed delivery whose auto-close lands after the merge — retry WITHOUT --slice once GitHub
+     # records the close). An issue open at mergedAt stamped WITHOUT --slice is refused too. NEVER
      # close the issue to satisfy the tool, and NEVER hand-append to the JSONL: both are FORBIDDEN.
      --claim-collisions <rejected claim pushes> --rebase-events <rebases/conflict resolutions> \
      --roborev-findings <roborev findings raised> --rework <re-open / re-review rounds>

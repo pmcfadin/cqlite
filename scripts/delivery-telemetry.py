@@ -725,11 +725,13 @@ def _github_fields(issue: int, pr: int) -> dict:
         "pr_opened_at": pr_json["createdAt"],
         "merged_at": pr_json["mergedAt"],
         # The issues THIS PR declares it closes ("Closes #N"). A SLICE pr by definition
-        # closes nothing — the issue deliberately stays open — so this discriminates a real
-        # slice from an ordinary completed delivery whose auto-close has not yet PROPAGATED
-        # (issue #3550). Measured, not timed: during that window closed_at is null AND
-        # stateReason is empty, so both of the other signals look exactly like a never-closed
-        # issue and only this one tells the truth.
+        # closes nothing — the issue deliberately stays open — so this is the SECOND operand
+        # of the slice conjunction, and it does NOT become redundant now that the timeline is
+        # replayed (issues #3550/#3559): GitHub records an auto-close AFTER the merge, so an
+        # ordinary COMPLETED delivery was TRULY open at mergedAt and the replay says so
+        # correctly. Only this field separates "open at mergedAt because the issue is never
+        # closing" from "open at mergedAt because the close lands five seconds later".
+        # Measured, not timed: no clock, no threshold.
         # ONE BOOLEAN, not two operands. Both sides are derived here from the SAME two
         # authoritative queries, so they cannot disagree. Passing the URLs through the
         # --from-json seam instead put two values that MUST AGREE in an operator's hands,
