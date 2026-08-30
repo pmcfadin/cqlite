@@ -4675,5 +4675,84 @@ t test_legacy_global_lock_unknown_shapes_refuse
 t test_legacy_global_lock_override_skips_check
 t test_legacy_global_lock_removal_condition_recorded
 
+# ---------------------------------------------------------------------------
+# Test 43-lock (#3549): LIVENESS IS THREE-VALUED, and a failed `kill -0` DOES NOT MEAN DEAD.
+#
+# `kill -0` fails with ESRCH (dead) AND with EPERM (alive, owned by another user). A supervisor
+# started by a different user during a rolling update is exactly the case the legacy guard exists for,
+# so collapsing EPERM onto "dead" would RECLAIM A LIVE HOLDER'S LOCK — the worst outcome available.
+#
+# A REAL EPERM subject is available on any box where this suite runs unprivileged: pid 1. It is
+# unambiguously alive and `kill -0 1` fails for a non-root user, so no stub is needed anywhere in this
+# case. Under root there is no EPERM and the sub-assertion is SKIPped, never silently passed.
+# ---------------------------------------------------------------------------
+test_legacy_lock_liveness_is_three_valued() {
+  local body live dead ans naive
+  body="$T_LOCKFN/liveness.sh"
+  mkdir -p "$T_LOCKFN"
+  # The shipped function, read out of the supervisor at run time — never re-implemented here.
+  {
+    printf '%s\n' '#!/usr/bin/env bash'
+    sed -n '/^supervisor_pid_liveness()/,/^}/p' "$SUPERVISOR"
+    printf '%s\n' 'supervisor_pid_liveness "$1"'
+  } >"$body"
+
+  sleep 300 &
+  live=$!
+  ans=$(bash "$body" "$live")
+  if [[ "$ans" == live ]]; then
+    pass "liveness: a REAL running pid answers 'live'"
+  else
+    fail "liveness-live: pid $live answered [$ans]"
+  fi
+  kill "$live" 2>/dev/null || true
+  wait "$live" 2>/dev/null || true
+
+  sleep 0.1 &
+  dead=$!
+  wait "$dead" 2>/dev/null || true
+  ans=$(bash "$body" "$dead")
+  if [[ "$ans" == dead ]]; then
+    pass "liveness: a REAL reaped pid answers 'dead' (affirmatively corroborated, not inferred from a failed kill -0)"
+  else
+    fail "liveness-dead: reaped pid $dead answered [$ans]"
+  fi
+
+  # THE EPERM CASE, with a real subject.
+  if kill -0 1 2>/dev/null; then
+    skip "liveness EPERM: this run can signal pid 1 (root), so no EPERM subject exists on this box"
+  else
+    ans=$(bash "$body" 1)
+    if [[ "$ans" == live ]]; then
+      pass "liveness AC-EPERM: pid 1 — alive but UNSIGNALLABLE by this user — answers 'live', so an EPERM holder's lock can never be reclaimed as stale"
+    else
+      fail "liveness-eperm: pid 1 answered [$ans]; a failed kill -0 was read as absence, which would reclaim a LIVE holder's lock"
+    fi
+    # NON-VACUITY: the naive one-oracle implementation DOES get pid 1 wrong, so the corroboration
+    # above is doing real work rather than agreeing with the simpler thing.
+    naive=$(kill -0 1 2>/dev/null && printf live || printf dead)
+    if [[ "$naive" == dead ]]; then
+      pass "liveness NON-VACUITY: a bare kill -0 calls pid 1 'dead' — the defect the corroboration removes, measured rather than asserted"
+    else
+      fail "liveness-nonvacuity: the bare kill -0 control answered [$naive] for pid 1; the comparison that motivates corroboration is not established"
+    fi
+  fi
+
+  # Malformed / dangerous inputs are 'unknown', never a verdict: pid 0 signals the whole PROCESS
+  # GROUP, and a leading-zero pid is a bash arithmetic error waiting to happen.
+  local bad ok=yes
+  for bad in "" 0 007 abc "12 34" -1; do
+    ans=$(bash "$body" "$bad")
+    [[ "$ans" == unknown ]] || { ok="no ([$bad] -> $ans)"; break; }
+  done
+  if [[ "$ok" == yes ]]; then
+    pass "liveness: empty, 0, leading-zero, non-numeric, multi-token and negative pids all answer 'unknown' — never live, never dead"
+  else
+    fail "liveness-malformed: $ok"
+  fi
+}
+
+t test_legacy_lock_liveness_is_three_valued
+
 echo "=== $PASS_COUNT passed, $FAIL_COUNT failed, $SKIP_COUNT skipped ==="
 [[ "$FAIL_COUNT" -eq 0 ]]
