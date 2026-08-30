@@ -2123,6 +2123,52 @@ else
   echo "info - agent-gate.sh unreadable; skipping the control-char probe case"
 fi
 
+# ---------------------------------------------------------------------------
+# Case 91 (post-rebase round 13, Medium): a broken git is not "not a work tree".
+#
+# `rev-parse --is-inside-work-tree || fallback` collapsed "genuinely outside a work tree" with
+# "git is broken / the repo is corrupt / permission denied" — and the fallback disables BOTH
+# the committed-directory filter and the trusted HEAD comparison, so a coherently truncated
+# corpus would pass on the weaker derived checks alone.
+#
+# git cannot separate them by STATUS (128 both for a plain directory and for one holding a
+# broken `.git`), so the discriminator is STRUCTURAL: metadata present means this is MEANT to
+# be a checkout, and rev-parse failing there is a malfunction.
+#
+# BOTH directions are asserted. The fallback is a documented, supported mode — a vendored copy
+# of this script outside any repo — so a case that only checked the malfunction could be
+# satisfied by breaking the fallback entirely.
+# ---------------------------------------------------------------------------
+if [ -n "${CQLITE_DATASETS_ROOT:-}" ] && [ -d "${CQLITE_DATASETS_ROOT:-}/sstables" ] \
+   && [ -n "$MANIFEST_NOGIT" ]; then
+  rp_bin="$WORK/gitbroken-bin"; mkdir -p "$rp_bin"
+  printf '#!/bin/sh\nexit 128\n' > "$rp_bin/git"; chmod +x "$rp_bin/git"
+
+  # (a) IN a checkout, with git broken -> malfunction, named.
+  rp_rc=0
+  PATH="$rp_bin:$PATH" bash "$MANIFEST_SRC" "$CQLITE_DATASETS_ROOT" >"$WORK/rp-out" 2>&1 || rp_rc=$?
+  if [ "$rp_rc" = 2 ]; then
+    ok "a broken git inside a checkout is a malfunction (exit 2), not 'not a work tree'"
+  elif [ "$rp_rc" = 9 ]; then
+    bad "a broken git surfaced AS exit 9; the opt-out would suppress it as an incomplete corpus"
+  else
+    bad "a broken git gave exit $rp_rc; expected 2"
+  fi
+  grep -q 'git metadata' "$WORK/rp-out" 2>/dev/null \
+    && ok "the broken-git diagnostic says the metadata is present but git failed" \
+    || bad "the broken-git diagnostic does not explain itself: $(head -1 "$WORK/rp-out")"
+
+  # (b) OUTSIDE any repo -> the documented fallback, still working. MANIFEST_NOGIT is a copy
+  #     in $WORK, which is not a work tree.
+  rp_rc2=0
+  bash "$MANIFEST_NOGIT" "$CQLITE_DATASETS_ROOT" >/dev/null 2>&1 || rp_rc2=$?
+  [ "$rp_rc2" = 0 ] \
+    && ok "a vendored copy outside any repo still takes the documented no-git fallback" \
+    || bad "the vendored-copy fallback broke (exit $rp_rc2); the malfunction check is over-reaching"
+else
+  echo "info - no real corpus or no nogit copy; skipping the git-detection case"
+fi
+
 echo "----"
 echo "passed: $PASS  failed: $FAIL"
 [ "$FAIL" -eq 0 ]

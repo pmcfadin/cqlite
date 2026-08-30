@@ -190,16 +190,38 @@ _SCRIPT_REPO=$(cd "$_SCRIPT_DIR/../.." 2>/dev/null && pwd) || _SCRIPT_REPO=""
 # `git ls-files` exits 128 -- which is a real malfunction status everywhere else, so without
 # this flag the trusted-inventory lookup would abort every such run. "Not a work tree" is a
 # DECLARED absence of an inventory, not a broken tool.
+# THREE-VALUED, and probed ONCE (roborev, post-rebase round 13).
+#
+# A bare `rev-parse ... || fallback` collapses "genuinely outside a work tree" with "git is
+# broken / the repository is corrupt / permission denied" — and the fallback disables BOTH the
+# committed-directory filter and the trusted HEAD comparison, so a coherently truncated corpus
+# passes on the weaker derived checks alone. Every other tool in this script distinguishes its
+# failure from its answer; this one did not.
+#
+# git cannot separate them by STATUS (measured: 128 both for a plain directory and for one
+# holding a broken `.git`), so the discriminator is STRUCTURAL: git metadata present at
+# _SCRIPT_REPO means this IS meant to be a checkout, and rev-parse failing there is a
+# malfunction. `.git` is a DIRECTORY in a normal clone and a FILE in a linked worktree — which
+# is what this lane is — so `-e` covers both.
+#
+# Probed once and reused: two independent probes could disagree, and the second one silently
+# governed the committed-directory filter.
 _SCRIPT_REPO_IS_GIT=0
-if [ -n "$_SCRIPT_REPO" ] && command -v git >/dev/null 2>&1 \
-   && git -C "$_SCRIPT_REPO" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
-  _SCRIPT_REPO_IS_GIT=1
+if [ -n "$_SCRIPT_REPO" ] && command -v git >/dev/null 2>&1; then
+  _rp_rc=0
+  git -C "$_SCRIPT_REPO" rev-parse --is-inside-work-tree >/dev/null 2>&1 || _rp_rc=$?
+  if [ "$_rp_rc" -eq 0 ]; then
+    _SCRIPT_REPO_IS_GIT=1
+  elif [ -e "$_SCRIPT_REPO/.git" ]; then
+    echo "❌ dataset manifest check: '$_SCRIPT_REPO' has git metadata but 'git rev-parse' failed (status $_rp_rc); the committed-directory filter and the trusted TOC comparison would both be silently disabled; cannot judge the corpus" >&2
+    exit 2
+  fi
+  # else: no metadata and rev-parse says no -- genuinely outside a work tree, which is the
+  # documented fallback (a vendored copy, the self-test fixture). Not a malfunction.
 fi
 
 COMMITTED_TABLE_DIRS=""
-if [ -n "$_SCRIPT_REPO" ] \
-   && command -v git >/dev/null 2>&1 \
-   && git -C "$_SCRIPT_REPO" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+if [ "$_SCRIPT_REPO_IS_GIT" = 1 ]; then
   # `-z`, matching the node twin (`git -C ... ls-files -z` in parity-utils.js) and this
   # repo's standing rule that a path-reading git invocation is NUL-delimited (#3229's
   # structural assert says so for `git diff`, and the reason is identical here).
