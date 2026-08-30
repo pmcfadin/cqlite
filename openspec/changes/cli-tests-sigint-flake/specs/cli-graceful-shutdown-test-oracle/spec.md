@@ -106,7 +106,14 @@ Because any single stage may consume the whole deadline, this reduces to two pro
 deadline's `base`, both of which SHALL be asserted by a unit test:
 
 * `base` ≥ the old per-wait bound (60s), so no single wait is tighter; and
-* `base` ≥ the sum of the nominal bounds the test replaced, so the test as a whole is not tighter.
+* `base` ≥ the sum of the nominal bounds the test replaced **plus one old per-wait bound for every
+  stage that now draws on the deadline but was not separately bounded before** (the readiness stage:
+  the old code folded boot inside its first 60s `OK` wait), so the test as a whole is not tighter even
+  when that stage consumes a full old bound first.
+
+*(Round-9 correction, roborev job 232 finding 2: the aggregate term previously summed only the OLD
+waits, which admitted a base under which readiness consumes 60s and leaves every original wait below
+its former allowance — the invariant violated by a stage the sum did not mention.)*
 
 *(Round-8 withdrawal, recorded rather than deleted: this requirement previously stated the invariant
 **by composition** — a mapping from each old bound to the GROUP of new stages that replaced it, whose
@@ -151,7 +158,22 @@ Observed progress SHALL be reported as EVIDENCE in any failure message — inclu
 otherwise alter any bound.
 
 The deadline SHALL be checked BEFORE each poll step is invoked, and each step SHALL be given no more
-than the time remaining, so that no wait can succeed past the deadline.
+than the time remaining, so that no wait is ever STARTED past the deadline and none is granted more
+than what it leaves.
+
+**The deadline bounds WAITING FOR EVIDENCE, not the acceptance of evidence already observed.** A poll
+step that observes its success — the child exited, or a durable artifact appeared — SHALL return that
+success even if the deadline lapsed while it was looking, and the harness SHALL NOT recheck the
+deadline on the success path. Rejecting an observed success because it was noticed late would be a
+false failure on a working product, which is the flake class this change exists to remove, and it would
+make the verdict depend on how long a directory scan took. The lag between the deadline and the
+returned verdict SHALL be bounded — at most one poll slice plus one artifact scan — and that bound, and
+the fact that an artifact scan is a recursive directory walk that is not necessarily quick on a loaded
+host, SHALL be stated where the claim is made.
+
+*(Round-9 ruling, roborev job 232 finding 1: the review proposed rechecking the deadline before
+returning success. It was OVERRULED — the behaviour is correct and the CLAIM was overstated. See
+`tasks.md` round 9.)*
 
 *(Round-8 withdrawal, recorded rather than deleted: progress previously RESET a calibrated stall window
 and extended the stage past its nominal budget. That is precisely what made a declared cap not the
@@ -221,7 +243,7 @@ those three clauses were trying to buy, obtained by construction instead of by a
 
 #### Scenario: two waits in one stage
 - **WHEN** a stage performs more than one bounded wait, with work between them
-- **THEN** that work SHALL be charged to the deadline, and the combined time SHALL NOT exceed it
+- **THEN** that work SHALL be charged to the deadline, and the second wait SHALL NOT be GRANTED more than the deadline less what is already spent
 
 #### Scenario: a slow but working host
 - **WHEN** several stages legitimately run slowly while the product behaves correctly
