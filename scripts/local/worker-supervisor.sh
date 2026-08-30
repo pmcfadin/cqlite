@@ -1409,6 +1409,12 @@ supervisor_lock_path() {
 SUPERVISOR_LF='
 '
 SUPERVISOR_CR=$'\r'
+# ESC joins them (#3549, roborev job 201 F1 class sweep): `ESC[G` moves the cursor to column 1 and
+# `ESC[2K` erases the line, so an escape sequence forges an apparently-unprefixed line WITHOUT a
+# newline or a carriage return anywhere in the bytes — the same defeat of the one-bare-line contract by
+# a third mechanism. Modern bash's `%q` already escapes it; bash 3.2's may not, which is why it joins
+# the verified-and-repaired set below rather than being assumed away.
+SUPERVISOR_ESC=$'\033'
 
 # supervisor_shell_quote <string> — render a string so a PRINTED command is PASTE-SAFE and stays on ONE
 # PHYSICAL LINE.
@@ -1453,7 +1459,7 @@ supervisor_shell_quote() {
   local q=""
   printf -v q '%q' "$1"
   case "$q" in
-    *"$SUPERVISOR_LF"* | *"$SUPERVISOR_CR"*) ;;
+    *"$SUPERVISOR_LF"* | *"$SUPERVISOR_CR"* | *"$SUPERVISOR_ESC"*) ;;
     *) printf '%s' "$q"; return 0 ;;
   esac
   # This bash rendered a control character literally. Rebuild from the ORIGINAL string (the partially
@@ -1461,7 +1467,38 @@ supervisor_shell_quote() {
   q="'${1//\'/\'\\\'\'}'"
   q="${q//"$SUPERVISOR_LF"/\'\$\'\\n\'\'}"
   q="${q//"$SUPERVISOR_CR"/\'\$\'\\r\'\'}"
+  q="${q//"$SUPERVISOR_ESC"/\'\$\'\\033\'\'}"
   printf '%s' "$q"
+}
+
+# supervisor_one_line <string> — render PROSE onto ONE PHYSICAL LINE, without quoting it.
+#
+# THE THIRD INSTANCE OF ONE CLASS, SO IT IS A CHOKE POINT AND NOT A THIRD SPOT FIX (#3549, roborev job
+# 201 F1). The class is "a dynamic value reaches emitted text unrendered". Instance 1 was an em dash on
+# the runnable command line (job 185 F2); instance 2 a newline in the diagnostic PATHS (job 198 F4);
+# instance 3 a newline inside a STATE DESCRIPTION, which reaches the emitter as part of `$detail`. Each
+# fix was correct and each left the next call site raw — the signal that per-call-site correctness is
+# the wrong shape. So `supervisor_legacy_lock_refuse` renders EVERY prose argument it is handed, and no
+# caller can emit a raw multi-line value whatever it interpolates.
+#
+# WHY NOT `supervisor_shell_quote` FOR PROSE. That renders a VALUE for PASTING: `%q` backslash-escapes
+# every space, so a sentence comes back as `recorded\ pid\ 12\ is\ ACTIVE` — unreadable, and the prose
+# channel is never pasted. This renderer therefore leaves printable bytes alone and rewrites only the
+# three that break the contract; each has its own mechanism, so covering one is not covering the class:
+#   LF  — splits the line, and the second half carries no `worker-supervisor:` prefix, which is exactly
+#         the marker that identifies the ONE bare line as the runnable command;
+#   CR  — returns the cursor to column 0, so following text OVERWRITES the prefix and the same forged
+#         bare line appears with no newline in the bytes at all;
+#   ESC — repositions the cursor or erases the line, producing that effect a third way.
+# It is a DISPLAY rendering, NOT a reversible encoding: a literal two-character `\n` in the input comes
+# out indistinguishable from a rendered newline. That is fine here (an operator reads this text, nothing
+# parses it back) and is why the VALUE channel keeps the quoting renderer instead.
+supervisor_one_line() {
+  local s="$1"
+  s="${s//"$SUPERVISOR_LF"/\\n}"
+  s="${s//"$SUPERVISOR_CR"/\\r}"
+  s="${s//"$SUPERVISOR_ESC"/\\e}"
+  printf '%s' "$s"
 }
 # supervisor_pid_liveness <pid> — echo `live`, `dead` or `unknown`. THREE-VALUED, and `dead` requires
 # an AFFIRMATIVE measurement.
@@ -1554,8 +1591,20 @@ supervisor_legacy_lock_state() {
   dir="${legacy%/*}"
   # No slash at all => the current directory; a single LEADING slash (a TMPDIR of `/`) strips to the
   # empty string, which is not a path and would misreport an undeterminable container.
-  [[ "$dir" == "$legacy" ]] && dir="."
-  [[ -z "$dir" ]] && dir="/"
+  # `if`, NOT `[[ … ]] && x` — AND THIS ONE WAS **NOT** AN ABORT SITE, WHICH WAS MEASURED RATHER THAN
+  # ARGUED (#3549, roborev job 201 F3 class sweep). Both tests are FALSE in the ordinary case (an
+  # absolute `TMPDIR` contains a slash and is non-empty), so each statement's own value is 1 — and the
+  # sweep for "non-zero is NORMAL here, under a caller that may propagate errexit" listed them as
+  # suspects. They are EXEMPT: errexit ignores a failing command that is part of an `&&`/`||` list
+  # other than its LAST element, and the exemption is inherited into the `$( )` a caller wraps this
+  # function in. Verified under `set -e; shopt -s inherit_errexit`: the following statement still ran.
+  # The `if` form is kept anyway because the exemption is POSITIONAL — the same line as a function's
+  # LAST statement returns 1 and would abort an errexit caller — so writing it as an `if` removes a
+  # correctness property that depends on where in the function the line happens to sit. The genuine
+  # abort site in this function is the `shopt -p` capture below (a simple assignment, not part of any
+  # list), and that is where the behaviour actually changed.
+  if [[ "$dir" == "$legacy" ]]; then dir="."; fi
+  if [[ -z "$dir" ]]; then dir="/"; fi
   # PERMISSION SCOPE, AND THE TWO DIRECTORIES NEED DIFFERENT THINGS — keep them distinct (#3549,
   # roborev job 182 Low). Existence of a KNOWN CHILD NAME is decided by `stat(2)` on that name, which
   # needs SEARCH (`-x`) on the container and nothing else; we never enumerate the container, so
@@ -1568,7 +1617,7 @@ supervisor_legacy_lock_state() {
   # (the exactly-`{pid}` shape check). Do not "tidy" the two gates back together: the container is
   # statted, the lock directory is read.
   if [[ ! -d "$dir" || ! -x "$dir" ]]; then
-    printf 'unknown container-not-searchable:%s\n' "$dir"
+    printf 'unknown container-not-searchable:%s\n' "$(supervisor_shell_quote "$dir")"
     return 0
   fi
   if [[ ! -e "$legacy" && ! -L "$legacy" ]]; then
@@ -1612,18 +1661,31 @@ supervisor_legacy_lock_state() {
   # The array form counts exactly even for names containing whitespace or newlines.
   local _sv_dotglob _sv_nullglob
   local -a _entries=()
-  _sv_dotglob="$(shopt -p dotglob)"
-  _sv_nullglob="$(shopt -p nullglob)"
+  # `|| true` ON EVERY CAPTURE AND EVERY RESTORE — `shopt -p` EXITS NON-ZERO FOR A DISABLED OPTION
+  # (#3549, roborev job 201 F3). Both options are normally OFF, so `shopt -p dotglob` prints
+  # `shopt -u dotglob` and returns 1 IN THE COMMON PATH: the failure is not an edge case, it is every
+  # run. It was invisible only because bash does not propagate errexit into `$( )` by default — with a
+  # caller that sets `inherit_errexit` (or POSIX mode) the assignment's non-zero status killed the
+  # classifier HERE, between `shopt -s` and the restore, so the caller's shell was left with
+  # `dotglob`/`nullglob` CHANGED and no refusal was ever printed. The restore is guarded the same way:
+  # a restore that can abort is not a restore, and it runs on the way out of a function whose whole job
+  # is to leave the caller's shell as it found it.
+  _sv_dotglob="$(shopt -p dotglob || true)"
+  _sv_nullglob="$(shopt -p nullglob || true)"
   shopt -s dotglob nullglob
   _entries=("$legacy"/*)
-  eval "$_sv_dotglob"
-  eval "$_sv_nullglob"
+  eval "$_sv_dotglob" || true
+  eval "$_sv_nullglob" || true
   if (( ${#_entries[@]} != 1 )) || [[ "${_entries[0]}" != "$legacy/pid" ]]; then
-    # `%q` on each name: a control character or newline in an entry name must not break the one-line
-    # state string this function's callers parse.
+    # RENDERED THROUGH `supervisor_shell_quote`, not a bare `printf '%q'` (#3549, roborev job 201 F1).
+    # A newline or control character in an entry name must break neither the one-line state string this
+    # function's callers parse nor the prose line it is later printed on — and `%q` ALONE does not
+    # guarantee that: this file supports the bash 3.2 macOS ships, whose `%q` may render a control
+    # character LITERALLY, which is the entire reason `supervisor_shell_quote` verifies its own output
+    # and repairs it. A bare `%q` here was that same assumption, one function over.
     local _names="" _e
     for _e in ${_entries[@]+"${_entries[@]}"}; do
-      _names+="$(printf '%q' "${_e##*/}") "
+      _names+="$(supervisor_shell_quote "${_e##*/}") "
     done
     printf 'unknown lock-directory-not-exactly-one-pid-file:entries=%s:[%s]\n' "${#_entries[@]}" "${_names% }"
     return 0
@@ -1634,6 +1696,16 @@ supervisor_legacy_lock_state() {
   # trusted beyond what was actually parsed, and that pid then drives an operator-facing instruction
   # about a process. The documented shape is ONE line; a single trailing newline is normal and stays
   # acceptable, a second line of any kind (including a blank or whitespace-only one) does not.
+  #
+  # `IFS=` ON **BOTH** READS (#3549, roborev job 201 F2). The second read had it and the first did not,
+  # so the first read TRIMMED leading and trailing whitespace: a `pid` file containing ` 123 ` was
+  # accepted as the well-formed value `123` and, if that pid was dead, received the DELETION remedy —
+  # for a file that is not the shape any supervisor writes. The pre-#3467 supervisor writes
+  # `echo $$ >"$LOCK/pid"`, i.e. digits and ONE newline; anything else is an unrecognised shape and must
+  # refuse, exactly as a non-digit byte does. With `IFS=` the surrounding spaces survive into `$pid`,
+  # the `*[!0-9]*` test rejects them, and the run refuses with `pid-not-well-formed` and NO deletion
+  # instruction. The trimming was silently generous in the other direction too: it made a space- or
+  # tab-only line 1 read as an EMPTY pid, i.e. one unrecognised shape reported as another.
   #
   # ONE redirection for BOTH reads so they share the file descriptor: the first takes line 1, the
   # second must hit EOF. A `read` that returns non-zero at EOF still ASSIGNS, so a final line with no
@@ -1656,7 +1728,7 @@ supervisor_legacy_lock_state() {
   # while still ASSIGNING, so a single-line file with no trailing newline is a normal, well-formed lock
   # whose read "fails". Open failure is what is now distinguished, not read status.
   local extra="" more=no open_ok=no
-  if { read -r pid || true; if IFS= read -r extra; then more=yes; fi; } 2>/dev/null <"$legacy/pid"; then
+  if { IFS= read -r pid || true; if IFS= read -r extra; then more=yes; fi; } 2>/dev/null <"$legacy/pid"; then
     open_ok=yes
   fi
   if [[ "$open_ok" != yes ]]; then
@@ -1668,12 +1740,12 @@ supervisor_legacy_lock_state() {
     return 0
   fi
   case "$pid" in
-    '' | *[!0-9]* | 0*) printf 'unknown pid-not-well-formed:[%s]\n' "$pid"; return 0 ;;
+    '' | *[!0-9]* | 0*) printf 'unknown pid-not-well-formed:[%s]\n' "$(supervisor_shell_quote "$pid")"; return 0 ;;
   esac
   case "$(supervisor_pid_liveness "$pid")" in
     live) printf 'live %s\n' "$pid" ;;
     dead) printf 'stale %s\n' "$pid" ;;
-    *) printf 'unknown liveness-unmeasurable-for-pid:%s\n' "$pid" ;;
+    *) printf 'unknown liveness-unmeasurable-for-pid:%s\n' "$(supervisor_shell_quote "$pid")" ;;
   esac
 }
 
@@ -1700,6 +1772,34 @@ supervisor_legacy_lock_state() {
 # printed BARE (no `worker-supervisor:` prefix) so that selecting the line is enough to paste it.
 supervisor_legacy_lock_refuse() {
   local legacy="$1" detail="$2" remedy="${3:-}" remedy_cmd="${4:-}"
+  # EVERY PROSE ARGUMENT IS RENDERED HERE, ONCE — A CHOKE POINT, NOT N CORRECT CALL SITES (#3549,
+  # roborev job 201 F1). `$detail` and `$remedy` carry values the callers interpolate from the
+  # environment and from disk (a `TMPDIR`-derived container path inside a state description, a pid
+  # file's bytes), and a raw newline in any of them splits a prose line so the second half has no
+  # `worker-supervisor:` prefix — indistinguishable from the ONE bare line an operator is told to select
+  # and paste. Rendering at the EMITTER makes that unreachable for every caller, present and future,
+  # rather than relying on each interpolation site being remembered: this class had already been fixed
+  # twice at call sites (jobs 185 F2, 198 F4) and re-appeared at a third.
+  # `|| true` ON THE RENDERER CAPTURES: this function's ONE job is to print a refusal, and an
+  # assignment-from-substitution is a genuine errexit abort site (#3549, roborev job 201 F3 class
+  # sweep — the `shopt -p` shape). The renderers return 0 on every path they take, so this is
+  # unreachable; if it ever fires, a rendering that could not be made costs THAT FIELD and never the
+  # refusal, and the one-physical-line contract still holds because an empty field cannot break it.
+  detail="$(supervisor_one_line "$detail")" || true
+  remedy="$(supervisor_one_line "$remedy")" || true
+  # THE COMMAND CHANNEL CANNOT BE RENDERED — a rendered command is not executable — SO IT IS VERIFIED,
+  # and a command that is not one physical line is DEMOTED TO PROSE rather than printed bare. The
+  # shipped callers build their commands through `supervisor_shell_quote`, which guarantees the
+  # property, so this branch is unreachable today; it exists so the emitted-output contract holds by the
+  # EMITTER's rules and not by a caller's discipline. Printing such a command is the worst outcome
+  # available here: several bare lines, each a fragment, where the contract promises exactly one.
+  local cmd_broken=""
+  case "$remedy_cmd" in
+    *"$SUPERVISOR_LF"* | *"$SUPERVISOR_CR"* | *"$SUPERVISOR_ESC"*)
+      cmd_broken="$(supervisor_one_line "$remedy_cmd")" || true
+      remedy_cmd=""
+      ;;
+  esac
   # THE DIAGNOSTIC PATHS ARE RENDERED, NOT INTERPOLATED RAW (#3549, roborev job 198 F4). Both paths come
   # from the environment, and a newline in `TMPDIR` interpolated raw SPLITS a prose line in two — the
   # second half carrying no `worker-supervisor:` prefix, which is precisely the marker that identifies
@@ -1707,8 +1807,8 @@ supervisor_legacy_lock_refuse() {
   # manufactures text that an operator (and this file's own structural test) cannot tell from a command.
   # One physical line per emitted line is the contract; `supervisor_shell_quote` is what holds it.
   local legacy_shown="" own_shown=""
-  legacy_shown="$(supervisor_shell_quote "$legacy")"
-  own_shown="$(supervisor_shell_quote "$SUPERVISOR_LOCK")"
+  legacy_shown="$(supervisor_shell_quote "$legacy")" || true
+  own_shown="$(supervisor_shell_quote "$SUPERVISOR_LOCK")" || true
   echo "worker-supervisor: refusing to start — LEGACY GLOBAL supervisor lock $legacy_shown: $detail" >&2
   echo "worker-supervisor: that path is the PRE-#3467 machine-global single-instance lock; this supervisor's own lock is PER LANE ($own_shown), so the two are invisible to each other and both supervisors would run in one worktree (#3549)." >&2
   # A CASE-SPECIFIC remedy, when there is one. The states differ in what an operator should DO — a LIVE
@@ -1716,6 +1816,7 @@ supervisor_legacy_lock_refuse() {
   # delete it" — so the generic line below is not sufficient on its own, and a run that told an operator
   # to stop a process that is already dead would be actively misleading.
   [[ -z "$remedy" ]] || echo "worker-supervisor: remedy for THIS state — $remedy" >&2
+  [[ -z "$cmd_broken" ]] || echo "worker-supervisor: a remedy command for this state was built with an embedded control character, so it is NOT printed as a runnable line (it could not be one); rendered for reading only: $cmd_broken" >&2
   [[ -z "$remedy_cmd" ]] || printf '%s\n' "$remedy_cmd" >&2
   echo "worker-supervisor: remedy — stop the pre-#3467 supervisor (or upgrade that checkout to #3467+), or set SUPERVISOR_LOCK explicitly to opt out of this compatibility check." >&2
   exit 1
@@ -1785,7 +1886,14 @@ supervisor_legacy_lock_guard() {
   # explicitly; the compatibility check is about OUR default colliding with the OLD default.
   [[ "$SUPERVISOR_LOCK_DERIVED" == yes ]] || return 0
   local legacy="${TMPDIR:-/tmp}/cqlite-worker-supervisor.lock" state pid
-  state="$(supervisor_legacy_lock_state "$legacy")"
+  # A CLASSIFIER THAT COULD NOT ANSWER IS A REFUSAL, NEVER A SILENT EXIT (#3549, roborev job 201 F3).
+  # The classifier returns 0 on every path it takes, but under a caller with `inherit_errexit` any
+  # unforeseen non-zero inside the `$( )` makes THIS ASSIGNMENT non-zero, and with the script's own
+  # `set -e` that ends the whole supervisor with no message at all — a start neither permitted nor
+  # explained. The individual commands whose non-zero exit is NORMAL are fixed at their sites; this is
+  # the fail-closed backstop for the ones nobody has thought of, and it lands in the `unknown` branch,
+  # which refuses.
+  state="$(supervisor_legacy_lock_state "$legacy")" || state="unknown state-classifier-exited-nonzero"
   case "$state" in
     absent)
       return 0
