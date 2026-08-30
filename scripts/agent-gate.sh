@@ -149,8 +149,9 @@
 #                      describe.skip; --only/--lite stay lenient and the #2078 opt-out
 #                      is honoured, with the mode PRINTED. check_jest_suites_ran is
 #                      the affirmative guard: the reported suite total must equal the
-#                      count of __test__/*.test.js DERIVED FROM DISK, no suite may be
-#                      failed or skipped, and the passed-test count must be non-zero
+#                      set DERIVED FROM JEST ITSELF (`npx jest --listTests`, never a
+#                      find over testMatch), no suite may be failed or skipped, and the
+#                      passed-test count must be non-zero
 #                      (jest reports an all-skipped suite as PASSED). cqlite-node's
 #                      RUST unit tests are binding-rust-tests' subject, deliberately
 #                      NOT behind this component's SKIP.
@@ -5812,9 +5813,13 @@ run_python_bindings() {
 # AFFIRMATIVE MEASUREMENT, not a green exit code (the same rule as the Rust lanes).
 # jest reports a suite whose every describe was skipped as PASSED, so `npm test`
 # exiting 0 does not establish that anything ran. check_jest_suites_ran requires the
-# reported total to equal the count of `__test__/*.test.js` files DERIVED FROM DISK,
-# requires no suite to have failed or been skipped, and requires a non-zero count of
-# PASSED tests.
+# reported total to equal the suite set DERIVED FROM JEST ITSELF (`npx jest
+# --listTests`), requires no suite to have failed or been skipped, and requires a
+# non-zero count of PASSED tests. The oracle is jest and not a `find`, for the same
+# reason `_package_test_targets` uses cargo metadata rather than parsing `[[test]]`
+# stanzas: a find would re-implement this package's RECURSIVE `testMatch` plus jest's
+# default ignore patterns, and it would agree at 27 today while silently undercounting
+# the day someone adds a subdirectory — a false red on healthy code.
 #
 # RUN_SLOW_TESTS is forwarded exactly as python-bindings forwards it (default 0). Two
 # tests opt into it (publish.test.js's `npm pack --dry-run`, streaming.test.js's
@@ -5838,42 +5843,6 @@ run_node_bindings() {
     record_result "$name" "$status" 0
     return 0
   fi
-  # The expected suite count, DERIVED FROM DISK at run time so a new
-  # `__test__/*.test.js` is covered with no gate edit — the property the old
-  # single-file filter could never have. A failed derivation is a FAIL naming the
-  # derivation, never a guard with no subject.
-  local test_dir="$REPO_ROOT/bindings/node/__test__" suite_n=""
-  if [ ! -d "$test_dir" ] || [ ! -r "$test_dir" ]; then
-    status=FAIL
-    {
-      echo "[$name] FAIL-CLOSED: bindings/node/__test__ is missing or unreadable, so the"
-      echo "        expected jest suite count cannot be DERIVED and the affirmative guard"
-      echo "        would have no subject (issue #3522)."
-    } | tee "$log"
-    end=$(date +%s)
-    record_result "$name" "$status" "$((end - start))"
-    echo ">>> [$name] $status ($((end - start))s)"
-    return 0
-  fi
-  # `find`, not a glob: a glob's meaning depends on ambient shell options this script
-  # never sets (nullglob/failglob), both reachable through BASHOPTS.
-  suite_n=$(find -H "$test_dir" -maxdepth 1 -type f -name '*.test.js' 2>/dev/null | grep -c . || true)
-  case "$suite_n" in
-    ''|*[!0-9]*) suite_n=0 ;;
-  esac
-  if [ "$suite_n" -eq 0 ]; then
-    status=FAIL
-    {
-      echo "[$name] FAIL-CLOSED: found 0 '*.test.js' files under bindings/node/__test__."
-      echo "        The COUNT failed (or the suite vanished), and a guard expecting zero"
-      echo "        suites would report OK having measured nothing (issue #3522)."
-    } | tee "$log"
-    end=$(date +%s)
-    record_result "$name" "$status" "$((end - start))"
-    echo ">>> [$name] $status ($((end - start))s)"
-    return 0
-  fi
-
   # Strict-fixture mode on the FULL gate only, honouring the documented #2078 opt-out.
   # See the scope note above for why enrollment in DATASET_COMPONENTS is not enough.
   local require_fixtures=0 fixture_note
@@ -5887,7 +5856,7 @@ run_node_bindings() {
   fi
 
   local -a census=()
-  census+=("npm ci + npm run build + npm test — the WHOLE jest suite ($suite_n files, derived from disk), #3522")
+  census+=("npm ci + npm run build + npm test — the WHOLE jest suite, #3522")
   census+=("  supersedes the #1255 narrowing to 1 of 27 files; node-ci.yml is required-EXEMPT on the")
   census+=("  grounds that THIS component is the merge-gating half, which was true of 1 file in 27.")
   census+=("  fixtures: $fixture_note")
@@ -5905,13 +5874,70 @@ run_node_bindings() {
     echo "==== end census ===="
   } > "$log"
 
+  # STEP 1 — install, build, and DERIVE the suite set FROM JEST ITSELF.
+  #
+  # `npx jest --listTests` (0.9s) is the oracle, deliberately NOT a `find` over
+  # `__test__/*.test.js`. A find would be a SECOND IMPLEMENTATION of this package's
+  # `testMatch` (`**/__test__/**/*.test.js` — RECURSIVE) plus jest's default
+  # `testPathIgnorePatterns`, and its correctness would only be knowable by
+  # differential testing against the original. Measured: a `-maxdepth 1` find agrees at
+  # 27 TODAY and would silently UNDERCOUNT the day someone adds a subdirectory — turning
+  # the affirmative guard below into a false red on healthy code, which is the verdict
+  # agents learn to waive. Same rule as `_package_test_targets` preferring cargo
+  # metadata over parsing `[[test]]` stanzas.
+  local list_file="$LOG_DIR/$name.listtests.txt" suite_n=""
+  if ! CQLITE_LIST_FILE="$list_file" bash -c '
+      set -euo pipefail
+      cd "'"$REPO_ROOT"'/bindings/node"
+      if [ -f package-lock.json ]; then npm ci; else npm install; fi
+      npm run build
+      npx jest --listTests > "$CQLITE_LIST_FILE"' >>"$log" 2>&1; then
+    status=FAIL
+    echo "--- [$name] FAILED (npm ci / npm run build / jest --listTests); last 40 lines of $log ---"
+    tail -40 "$log"
+    echo "--- end of $name output ---"
+    end=$(date +%s)
+    record_result "$name" "$status" "$((end - start))"
+    echo ">>> [$name] $status ($((end - start))s)"
+    return 0
+  fi
+  if [ ! -r "$list_file" ]; then
+    status=FAIL
+    {
+      echo "[$name] FAIL-CLOSED: 'npx jest --listTests' left no readable list at $list_file,"
+      echo "        so the expected suite count could not be DERIVED and the affirmative guard"
+      echo "        would have no subject (issue #3522)."
+    } | tee -a "$log"
+    end=$(date +%s)
+    record_result "$name" "$status" "$((end - start))"
+    echo ">>> [$name] $status ($((end - start))s)"
+    return 0
+  fi
+  suite_n=$(grep -c '\.test\.js$' "$list_file" || true)
+  case "$suite_n" in
+    ''|*[!0-9]*) suite_n=0 ;;
+  esac
+  if [ "$suite_n" -eq 0 ]; then
+    status=FAIL
+    {
+      echo "[$name] FAIL-CLOSED: 'npx jest --listTests' named ZERO *.test.js suites."
+      echo "        The DERIVATION failed (or the suite vanished), and a guard expecting zero"
+      echo "        suites would report OK having measured nothing (issue #3522)."
+    } | tee -a "$log"
+    end=$(date +%s)
+    record_result "$name" "$status" "$((end - start))"
+    echo ">>> [$name] $status ($((end - start))s)"
+    return 0
+  fi
+  echo ">>> [$name] derived suite set: $suite_n *.test.js file(s) (oracle: npx jest --listTests, not a find over testMatch)"
+  echo "derived suite set: $suite_n *.test.js file(s) (oracle: npx jest --listTests)" >> "$log"
+
+  # STEP 2 — run them.
   if CQLITE_DATASETS_ROOT="$CQLITE_DATASETS_ROOT" \
      RUN_SLOW_TESTS="${RUN_SLOW_TESTS:-0}" \
      CQLITE_REQUIRE_FIXTURES_ARG="$require_fixtures" bash -c '
       set -euo pipefail
       cd "'"$REPO_ROOT"'/bindings/node"
-      if [ -f package-lock.json ]; then npm ci; else npm install; fi
-      npm run build
       if [ "$CQLITE_REQUIRE_FIXTURES_ARG" = 1 ]; then export CQLITE_REQUIRE_FIXTURES=1; fi
       npm test' >>"$log" 2>&1; then
     # A green `npm test` is NOT sufficient: jest reports a suite whose every describe
