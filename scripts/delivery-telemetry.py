@@ -462,8 +462,9 @@ def _decode_json_stream(text: str, what: str) -> list:
             value, idx = decoder.raw_decode(text, idx)
         except ValueError as exc:
             raise SystemExit(
-                f"error: {what} returned a reply this tool could not fully parse at byte "
-                f"{idx} ({exc}) — an incompletely-read timeline is UNMEASURED, never a short "
+                f"error: {what} returned a reply this tool could not fully parse, "
+                f"starting at byte {idx} ({exc}) — an incompletely-read timeline is "
+                f"UNMEASURED, never a short "
                 f"answer: the event that decides the classification could be in the part "
                 f"that did not parse (issue #3559)")
         values.append(value)
@@ -486,8 +487,9 @@ def _issue_state_at(issue_url, issue: int, merged_at):
     and let the LAST one decide — `closed` => closed, `reopened` => open, none => open,
     because an issue that has no state event before the merge was never closed before it.
     Ordering is established from the PARSED timestamps here rather than assumed of the API's
-    delivery order (the API documents ascending order; a same-second tie keeps the order the
-    API gave, which is the only further information available).
+    delivery order (it returns ascending in practice, but nothing here depends on that; a
+    same-second tie keeps the order the API gave, which is the only further information
+    available).
 
     Every non-affirmative state is its own named refusal — a failed `gh` call, an
     unparseable/truncated reply, a page that is not an array, an entry that is not an object,
