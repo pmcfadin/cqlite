@@ -587,8 +587,11 @@ The pipeline measures itself so improvement is data-driven, not anecdotal — **
   `closingIssuesReferences` separates "open because the issue is never closing" from "open because the
   close lands five seconds later" (a slice PR closes NOTHING). A slice is therefore stampable after its
   issue has been closed or reopened — which is what unblocked the three owed #3393 records
-  (#3407/#3429/#3467) — and is refused when the timeline places a `closed` event at or before
-  `mergedAt`, because that delivery COMPLETED the issue and a later reopen does not change it.
+  (#3407/#3429/#3467) — and is refused when the timeline places a `closed` event STRICTLY BEFORE
+  `mergedAt`, because that delivery COMPLETED the issue and a later reopen does not change it. An
+  event in the SAME SECOND as `mergedAt` is a third answer, neither before nor after: both GitHub
+  timestamps are one-second resolution, so the tie is **unmeasurable** and is refused as such rather
+  than resolved permissively.
   `--slice` is an operator **assertion**: the tool refuses it wherever it can be **disproved**, and
   where it cannot be, the assertion stands. One residual is genuinely **undecidable** and is not
   claimed: a completed delivery whose PR omits `Closes #N` and whose issue is closed by hand later is
