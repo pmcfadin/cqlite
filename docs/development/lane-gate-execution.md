@@ -281,6 +281,11 @@ also publishes a signal that does. `scripts/lib/gate-heartbeat.sh` rewrites
   interval (bounded, capped at 65 s) and checks whether `beat-seq` advanced — only the reader's
   clock times the wait, only the writer's counter shows progress, and the two are never
   compared. The same progression check settles a stale-looking beat in the shared-clock case.
+  **A changed `beater-pid` counts as progress too:** every replacement beater restarts its counter
+  at 1, and the gate respawns the beater at component boundaries — so a restart inside the window
+  produces a *lower* second sequence, and requiring "strictly greater" alone would report a live
+  gate as `STALLED`. A new incarnation under the *same* run-id is itself affirmative evidence,
+  because the only thing that starts a new beater for a run is that run's own live gate.
   *Residual:* two boxes sharing a hostname and a filesystem would be treated as one clock
   domain; the consequence is a possibly-wrong `RUNNING`/`STALLED`, never a claim that a process
   is dead.
@@ -467,7 +472,7 @@ default-path launch keeps the summary and log the caller still needs.
 Every SUMMARY block now carries a `heartbeat:` line, so a pasted block shows the
 mechanism ran (same reason #3148 stamps a positive `schemas:` line).
 
-Self-tests: `scripts/tests/test_gate_liveness.sh` (157 cases) and
+Self-tests: `scripts/tests/test_gate_liveness.sh` (163 cases) and
 `scripts/tests/test_gate_detached.sh` (100 cases), both in the full gate's
 `tooling-tests` component.
 
