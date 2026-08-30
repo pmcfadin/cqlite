@@ -5194,7 +5194,6 @@ test_legacy_lock_pid_identity_is_three_valued() {
     printf '%s\n' '#!/usr/bin/env bash'
     printf '%s\n' 'set -uo pipefail'
     sed -n '/^supervisor_identity_names_script()/,/^}/p' "$SUPERVISOR"
-    sed -n '/^supervisor_identity_ps_names_script()/,/^}/p' "$SUPERVISOR"
     sed -n '/^supervisor_pid_identity()/,/^}/p' "$SUPERVISOR" | sed "s#/proc#$blind#g"
     printf '%s\n' 'supervisor_pid_identity "$1"'
   } >"$body"
@@ -5273,57 +5272,108 @@ t test_legacy_global_lock_removal_condition_recorded
 t test_legacy_global_lock_residual_recorded
 t test_legacy_lock_container_needs_search_not_read
 # ---------------------------------------------------------------------------
-# Test 43b-lock (#3549, roborev job 192 F1): CORROBORATION IS THE PROGRAM THE PROCESS IS RUNNING, NOT A
-# SUBSTRING OF ITS COMMAND LINE.
+# Test 43b-lock (#3549, roborev jobs 192 F1 + 194 Medium): CORROBORATION IS THE PROGRAM THE PROCESS IS
+# RUNNING — not a substring of its command line, and not "whatever survives an option skip".
 #
-# The defect: `case "$args" in *worker-supervisor*)` accepted the name ANYWHERE in the joined command
-# line. `tail -f …/worker-supervisor.sh`, `sh -c 'sleep …' …/worker-supervisor.sh`, any script invoked
-# WITH that path as an argument — all of them corroborated. And `supervisor` is the one answer that
-# prints "stop pid N first", so the consequence of a false corroboration is an instruction to KILL AN
-# UNRELATED PROCESS that merely inherited a reused pid number.
+# Defect 1 (job 192 F1): `case "$args" in *worker-supervisor*)` accepted the name ANYWHERE in the joined
+# command line. `tail -f …/worker-supervisor.sh`, `sh -c 'sleep …' …/worker-supervisor.sh`, any script
+# invoked WITH that path as an argument — all corroborated.
 #
-# The property under test is therefore ARGUMENT-POSITION, measured against REAL PROCESSES (this suite's
-# standing technique — a staged string would test the walk and not the probe), plus the walk itself over
-# vectors a real process cannot conveniently produce. The mutant contrast is the pre-fix substring rule
-# restored by REDEFINING the two walks after the shipped ones in a scratch copy: everything else in the
-# file is the shipped probe, so a difference in verdict is attributable to the rule and nothing else.
+# Defect 2 (job 194 Medium): the replacement WALKED the vector, skipping options once an interpreter had
+# been seen — but some options CONSUME THE FOLLOWING ARGUMENT, so `bash --rcfile <path> -i` is an
+# interactive shell whose RCFILE is our path, and the walk called it the supervisor. The remedy taken is
+# the finding's second one: the walk is DELETED, not taught option arity (an arity table is a variant
+# list that does not close), and the strict two-shape rule already written for the ambiguous `ps`
+# rendering is now the ONE rule both probes ask.
+#
+# And `supervisor` is the one answer that prints "stop pid N first", so either defect is an instruction
+# to KILL AN UNRELATED PROCESS that merely inherited a reused pid number.
+#
+# The property under test is ARGUMENT-POSITION, measured against REAL PROCESSES (this suite's standing
+# technique — a staged string would test the rule and not the probe), plus the rule itself over vectors
+# a real process cannot conveniently produce. TWO mutant contrasts, each the shipped probe plus a
+# redefinition of the single helper (a later definition wins), asserted byte-identical otherwise:
+#   - the job-192 substring rule, and
+#   - the job-194 option-skipping walk, restored verbatim, which must classify `--rcfile` as supervisor.
 #
 # The safety DIRECTION is asserted as its own property: the fixed rule may only ever REMOVE positives.
 # `unconfirmed` tells an operator to verify (harmless); `supervisor` tells them to stop a process.
 # ---------------------------------------------------------------------------
 test_legacy_lock_identity_requires_script_argument() {
-  local d body mutant walkdrv fake other ans mans pid_tail pid_shc pid_other pid_real
+  local d body mutant walkmutant psbody blind walkdrv fake other ans mans
+  local pid_tail pid_shc pid_other pid_real pid_rcfile pid_lateral
   d="$(new_case_dir)"
   body="$T_LOCKFN/identity-argv.sh"
   mutant="$T_LOCKFN/identity-argv-mutant.sh"
+  walkmutant="$T_LOCKFN/identity-argv-walkmutant.sh"
+  psbody="$T_LOCKFN/identity-argv-psonly.sh"
   walkdrv="$T_LOCKFN/identity-walk.sh"
+  blind="/nonexistent-procfs-for-3549"
   mkdir -p "$T_LOCKFN"
 
   {
     printf '%s\n' '#!/usr/bin/env bash'
     printf '%s\n' 'set -uo pipefail'
     sed -n '/^supervisor_identity_names_script()/,/^}/p' "$SUPERVISOR"
-    sed -n '/^supervisor_identity_ps_names_script()/,/^}/p' "$SUPERVISOR"
     sed -n '/^supervisor_pid_identity()/,/^}/p' "$SUPERVISOR"
     printf '%s\n' 'supervisor_pid_identity "$1"'
   } >"$body"
-  # THE MUTANT IS THE SAME FILE PLUS EXACTLY TWO LINES: the pre-fix substring rule, redefining both
-  # walks after the shipped definitions (a later definition wins). Asserted by construction — strip the
-  # two overrides and the mutant must be byte-identical to the copy under test, or the contrast below
-  # is attributing a verdict to something else.
+  # MUTANT A — THE SAME FILE PLUS EXACTLY ONE LINE: the job-192 substring rule, redefining the single
+  # helper after the shipped definition. Asserted by construction — strip the override and the mutant
+  # must be byte-identical to the copy under test, or the contrast attributes a verdict to something
+  # else.
   {
     sed '$d' "$body"
     printf '%s\n' 'supervisor_identity_names_script() { case "$*" in *worker-supervisor*) return 0 ;; esac; return 1; }'
-    printf '%s\n' 'supervisor_identity_ps_names_script() { case "$*" in *worker-supervisor*) return 0 ;; esac; return 1; }'
     printf '%s\n' 'supervisor_pid_identity "$1"'
   } >"$mutant"
   if diff -q <(grep -vF 'case "$*" in *worker-supervisor*' "$mutant") "$body" >/dev/null; then
-    pass "identity F1: the mutant is the shipped probe plus EXACTLY the two pre-fix substring overrides (nothing else differs)"
+    pass "identity F1: mutant A is the shipped probe plus EXACTLY the one pre-fix substring override (nothing else differs)"
   else
-    fail "identity-f1-mutant-drift: the mutant differs from the shipped probe by more than the two overrides"
+    fail "identity-f1-mutant-drift: mutant A differs from the shipped probe by more than the substring override"
+  fi
+  # MUTANT B — the DELETED job-194 walk, restored verbatim between two markers so the same
+  # strip-and-compare assert applies. This is the code the finding names; it exists here and nowhere
+  # else, which is the point of deleting it from the shipped script.
+  {
+    sed '$d' "$body"
+    cat <<'WALKMUT'
+supervisor_identity_names_script() { # MUTANT194
+  local arg base interp=no # MUTANT194
+  while [[ "$#" -gt 0 ]]; do # MUTANT194
+    arg="$1"; shift # MUTANT194
+    case "$arg" in # MUTANT194
+      -c) return 1 ;; # MUTANT194
+      -*) if [[ "$interp" == yes ]]; then continue; fi; return 1 ;; # MUTANT194
+      *=*) if [[ "$interp" == yes ]]; then continue; fi; return 1 ;; # MUTANT194
+    esac # MUTANT194
+    base="${arg##*/}" # MUTANT194
+    if [[ "$base" == "worker-supervisor.sh" ]]; then return 0; fi # MUTANT194
+    case "$base" in # MUTANT194
+      bash | sh | dash | zsh | ksh | ksh93 | mksh | env) interp=yes; continue ;; # MUTANT194
+    esac # MUTANT194
+    return 1 # MUTANT194
+  done # MUTANT194
+  return 1 # MUTANT194
+} # MUTANT194
+WALKMUT
+    printf '%s\n' 'supervisor_pid_identity "$1"'
+  } >"$walkmutant"
+  if diff -q <(grep -vF '# MUTANT194' "$walkmutant") "$body" >/dev/null; then
+    pass "identity 194: mutant B is the shipped probe plus EXACTLY the restored option-skipping walk (nothing else differs)"
+  else
+    fail "identity-194-mutant-drift: mutant B differs from the shipped probe by more than the restored walk"
+  fi
+  # A PROCFS-BLIND COPY, to prove the `ps` CALL SITE routes through the same helper rather than a second
+  # spelling of the rule. Only the procfs literal is substituted; the inverse must restore it exactly.
+  sed "s#/proc#$blind#g" "$body" >"$psbody"
+  if diff -q <(sed "s#$blind#/proc#g" "$psbody") "$body" >/dev/null; then
+    pass "identity 194: the procfs-blind copy differs from the probe under test ONLY in the procfs literal"
+  else
+    fail "identity-194-psbody-drift: the procfs-blind copy is not the probe with only the procfs substitution applied"
   fi
 
-  # ---- REAL PROCESSES. One genuine supervisor and three that only MENTION the path.
+  # ---- REAL PROCESSES. One genuine supervisor and five that only MENTION the path.
   fake="$d/worker-supervisor.sh"
   printf '%s\n' '#!/usr/bin/env bash' 'sleep 300' >"$fake"
   chmod +x "$fake"
@@ -5343,7 +5393,15 @@ test_legacy_lock_identity_requires_script_argument() {
   # A DIFFERENT script, invoked with our path as an argument — the shape closest to a real accident.
   bash "$other" "$fake" &
   pid_other=$!
-  sleep 0.4
+  # THE JOB-194 CASE, AS A REAL PROCESS: an OPTION THAT CONSUMES ITS ARGUMENT. This is an interactive
+  # shell whose rcfile is our path — bash sources it, the `sleep 300` inside keeps the shell alive, and
+  # its argv is exactly `bash --rcfile <path>/worker-supervisor.sh -i`. Nothing here is the supervisor.
+  bash --rcfile "$fake" -i </dev/null >/dev/null 2>&1 &
+  pid_rcfile=$!
+  # A DIFFERENT script whose LATER arguments name our path — the walk's other over-reach.
+  bash "$other" --config "$fake" &
+  pid_lateral=$!
+  sleep 0.6
 
   ans="$(bash "$body" "$pid_real")"
   if [[ "$ans" == supervisor ]]; then
@@ -5352,7 +5410,7 @@ test_legacy_lock_identity_requires_script_argument() {
     fail "identity-f1-true-positive: answered [$ans] for a real bash <path>/worker-supervisor.sh; the corroborated wording would never be reachable"
   fi
 
-  local subj name ok=yes
+  local subj name
   for subj in "tail:$pid_tail" "sh-c:$pid_shc" "other-script:$pid_other"; do
     name="${subj%%:*}"
     ans="$(bash "$body" "${subj##*:}")"
@@ -5360,7 +5418,6 @@ test_legacy_lock_identity_requires_script_argument() {
     if [[ "$ans" == unconfirmed ]]; then
       pass "identity F1: '$name' merely MENTIONS worker-supervisor.sh and is 'unconfirmed' — no 'stop pid N' advice for a process that is not ours"
     else
-      ok="no"
       fail "identity-f1-mention-$name: answered [$ans]; a process that only holds the path as an argument must not corroborate"
     fi
     # MUTANT CONTRAST, the other direction: the pre-fix substring rule calls the SAME REAL PROCESS the
@@ -5372,19 +5429,52 @@ test_legacy_lock_identity_requires_script_argument() {
       fail "identity-f1-mutant-$name: the pre-fix form answered [$mans]; expected the false 'supervisor', or the contrast proves nothing"
     fi
   done
-  [[ "$ok" == yes ]] || true
 
-  kill "$pid_real" "$pid_tail" "$pid_shc" "$pid_other" 2>/dev/null || true
-  wait "$pid_real" "$pid_tail" "$pid_shc" "$pid_other" 2>/dev/null || true
+  # ---- THE JOB-194 CASES, against the option-skipping walk as the contrast.
+  for subj in "rcfile:$pid_rcfile" "later-arg:$pid_lateral"; do
+    name="${subj%%:*}"
+    ans="$(bash "$body" "${subj##*:}")"
+    if [[ "$ans" == unconfirmed ]]; then
+      pass "identity 194: '$name' is 'unconfirmed' — an option that CONSUMES its argument, or a match past position 2, is not an identity"
+    else
+      fail "identity-194-$name: answered [$ans] for a live process that is not the supervisor"
+    fi
+    # ...and the SAME live process through the `ps` fallback, with procfs blinded: one rule, both paths.
+    ans="$(bash "$psbody" "${subj##*:}")"
+    if [[ "$ans" == unconfirmed ]]; then
+      pass "identity 194 (ps path): '$name' is 'unconfirmed' via the ps fallback too — the call site asks the same helper, not a second spelling"
+    else
+      fail "identity-194-ps-$name: the ps fallback answered [$ans]; the two probes disagree, which is the drift this consolidation removes"
+    fi
+  done
+  # MUTANT CONTRAST for the deleted walk: the `--rcfile` process the finding named classifies as
+  # 'supervisor' under the restored walk, and the true positive still does (so the contrast is
+  # attributable to the rcfile shape, not to a mutant that says 'supervisor' for nothing).
+  mans="$(bash "$walkmutant" "$pid_rcfile")"
+  if [[ "$mans" == supervisor ]]; then
+    pass "identity 194 MUTANT CONTRAST: the restored option-skipping walk answers 'supervisor' for the live 'bash --rcfile <path> -i' — the finding reproduced"
+  else
+    fail "identity-194-mutant-rcfile: the restored walk answered [$mans]; expected the false 'supervisor', or the contrast proves nothing"
+  fi
+  mans="$(bash "$walkmutant" "$pid_real")"
+  if [[ "$mans" == supervisor ]]; then
+    pass "identity 194 MUTANT CONTRAST (non-vacuity): the restored walk still answers 'supervisor' for the REAL supervisor, so its rcfile verdict is the over-reach and not a constant"
+  else
+    fail "identity-194-mutant-truepos: the restored walk answered [$mans] for a real supervisor; the contrast above is unattributable"
+  fi
 
-  # ---- THE WALK ITSELF, over vectors a real process cannot conveniently stage (a path containing a
-  # space; an interpreter with options; an `env` assignment prefix). Two properties per row: the fixed
-  # verdict, and that the fixed rule never ACCEPTS what the substring rule rejected.
+  kill "$pid_real" "$pid_tail" "$pid_shc" "$pid_other" "$pid_rcfile" "$pid_lateral" 2>/dev/null || true
+  wait "$pid_real" "$pid_tail" "$pid_shc" "$pid_other" "$pid_rcfile" "$pid_lateral" 2>/dev/null || true
+
+  # ---- THE RULE ITSELF, over vectors a real process cannot conveniently stage: a path containing a
+  # space, and a `NAME=VALUE` operand in argv (an `env FOO=1 …` command line EXECS AWAY, so the running
+  # process's argv no longer holds the assignment — the shape is only reachable here). Two properties
+  # per row: the fixed verdict, and that the fixed rule never ACCEPTS what the substring rule rejected.
+  # There is ONE table because there is now ONE rule: both probes call this helper.
   {
     printf '%s\n' '#!/usr/bin/env bash'
     printf '%s\n' 'set -uo pipefail'
     sed -n '/^supervisor_identity_names_script()/,/^}/p' "$SUPERVISOR"
-    sed -n '/^supervisor_identity_ps_names_script()/,/^}/p' "$SUPERVISOR"
     printf '%s\n' 'fn="$1"; shift; "$fn" "$@"'
   } >"$walkdrv"
 
@@ -5397,56 +5487,39 @@ test_legacy_lock_identity_requires_script_argument() {
     eval "argv=(${row#* })"
     got=0; bash "$walkdrv" supervisor_identity_names_script "${argv[@]}" || got=$?
     if [[ "$got" == "$want" ]]; then
-      pass "identity F1 walk: [${argv[*]}] -> $([[ "$want" == 0 ]] && echo names-our-script || echo does-not)"
+      pass "identity F1 rule: [${argv[*]}] -> $([[ "$want" == 0 ]] && echo names-our-script || echo does-not)"
     else
-      fail "identity-f1-walk: [${argv[*]}] answered $got, expected $want"
+      fail "identity-f1-rule: [${argv[*]}] answered $got, expected $want"
     fi
-    # DIRECTION OF ERROR: anything the fixed walk ACCEPTS, the old substring rule accepted too. The fix
+    # DIRECTION OF ERROR: anything the fixed rule ACCEPTS, the old substring rule accepted too. The fix
     # may only ever remove positives, never add one.
     if [[ "$got" == 0 ]]; then
       sub=0; printf '%s' "${argv[*]}" | grep -qF worker-supervisor || sub=1
       if [[ "$sub" == 0 ]]; then
         pass "identity F1 direction: [${argv[*]}] is accepted by BOTH rules — the fix removes positives, it never adds one"
       else
-        fail "identity-f1-direction: [${argv[*]}] is accepted by the fixed walk but was REJECTED by the substring rule; the fix must never widen corroboration"
+        fail "identity-f1-direction: [${argv[*]}] is accepted by the fixed rule but was REJECTED by the substring rule; the fix must never widen corroboration"
       fi
     fi
   done <<'ROWS'
 0 bash /x/worker-supervisor.sh
 0 /x/worker-supervisor.sh --once
-0 bash -x /x/worker-supervisor.sh
-0 env FOO=1 bash /x/worker-supervisor.sh
 0 "/a b/worker-supervisor.sh"
+1 bash -x /x/worker-supervisor.sh
+1 bash --rcfile /x/worker-supervisor.sh -i
+1 bash --init-file /x/worker-supervisor.sh -i
+1 bash -- /x/worker-supervisor.sh
+1 env FOO=1 bash /x/worker-supervisor.sh
+1 FOO=1 /x/worker-supervisor.sh
 1 vim /x/worker-supervisor.sh
 1 sh -c "sleep 300" /x/worker-supervisor.sh
 1 grep worker-supervisor.sh /x/y
 1 /x/worker-supervisor.sh.bak
 1 bash /x/notworker-supervisor.sh
+1 bash /x/other.sh /x/worker-supervisor.sh
+1 bash /x/other.sh --config /x/worker-supervisor.sh
 1 -bash
 ROWS
-
-  # ---- `ps` IS THE AMBIGUOUS RENDERING, AND ITS RULE IS STRICTER BY DESIGN. Its fields are a
-  # REFINEMENT of the true vector (a space inside one argument becomes two fields), so only the two
-  # canonical shapes corroborate; `bash -x <path>` — accepted from procfs, where the NUL split is
-  # faithful — is 'does not' here. That asymmetry is the decision, so it is pinned rather than left to
-  # be re-argued.
-  while IFS= read -r row; do
-    [[ -n "$row" ]] || continue
-    want="${row%% *}"
-    eval "argv=(${row#* })"
-    got=0; bash "$walkdrv" supervisor_identity_ps_names_script "${argv[@]}" || got=$?
-    if [[ "$got" == "$want" ]]; then
-      pass "identity F1 ps-walk: [${argv[*]}] -> $([[ "$want" == 0 ]] && echo names-our-script || echo does-not)"
-    else
-      fail "identity-f1-ps-walk: [${argv[*]}] answered $got, expected $want"
-    fi
-  done <<'PSROWS'
-0 /x/worker-supervisor.sh
-0 bash /x/worker-supervisor.sh
-1 bash -x /x/worker-supervisor.sh
-1 vim /x/worker-supervisor.sh
-1 bash /x/other.sh /x/worker-supervisor.sh
-PSROWS
 }
 
 t test_legacy_lock_pid_identity_is_three_valued
@@ -5913,7 +5986,6 @@ test_legacy_lock_identity_unreadable_cmdline_is_not_unconfirmed() {
     printf '%s\n' '#!/usr/bin/env bash'
     printf '%s\n' 'set -uo pipefail'
     sed -n '/^supervisor_identity_names_script()/,/^}/p' "$SUPERVISOR"
-    sed -n '/^supervisor_identity_ps_names_script()/,/^}/p' "$SUPERVISOR"
     sed -n '/^supervisor_pid_identity()/,/^}/p' "$SUPERVISOR" | sed "s#/proc#$fakeproc#g"
     printf '%s\n' 'supervisor_pid_identity "$1"'
   } >"$body"
