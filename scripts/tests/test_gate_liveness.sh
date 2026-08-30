@@ -429,6 +429,11 @@ echo "=== section 14: the heartbeat must not make the gate fail ITSELF (#2926 x 
 # Run inside a DETACHED THROWAWAY WORKTREE: the control case deliberately creates a path
 # that must NOT be excluded, and creating that in the live checkout would trip the
 # enclosing gate's own tree guard when this test runs inside tooling-tests.
+#
+# NOTE, so a FAIL here is read correctly: the worktree is checked out at HEAD, so this
+# section asserts the COMMITTED gate, not your working tree. An uncommitted fix reads as a
+# FAIL (observed while developing #3473). That is the right subject — the gate certifies
+# commits — but commit before believing a red here.
 if ! command -v git >/dev/null 2>&1; then
   echo "skip section 14 (no git)"
 else
