@@ -7308,13 +7308,28 @@ run_file_size() {
         msg+=("      $_g")
       done
     fi
-    if [ "${#grew[@]}" -eq 0 ]; then
+    if [ -z "$base" ]; then
+      # `grown: none` would assert a COMPLETED comparison that never ran — it contradicts
+      # the "ratchet skipped" line above and could conceal real growth (#3401 review
+      # item 2, the fourth instance of this class). `none` is reserved for a comparison
+      # that finished and found nothing.
+      msg+=("    grown: not computed (base unavailable)")
+    elif [ "${#grew[@]}" -eq 0 ]; then
       msg+=("    grown: none")
     else
       msg+=("    grown:")
       for _g in ${grew[@]+"${grew[@]}"}; do
         msg+=("      $_g")
       done
+      # ITEM 1 / roborev F3: record WHY a populated grown list did not fail the ratchet.
+      # Without it the sibling shows grown files beside a non-FAIL verdict with no
+      # provenance — and, from the test side, the allowed-growth state emits bytes
+      # identical to the FAIL state, so nothing can tell the two apart.
+      if [ "${CQLITE_ALLOW_FILE_GROWTH:-0}" = 1 ]; then
+        msg+=("    growth allowance: ALLOWED via CQLITE_ALLOW_FILE_GROWTH=1")
+      else
+        msg+=("    growth allowance: none (CQLITE_ALLOW_FILE_GROWTH unset) — this IS a ratchet violation")
+      fi
     fi
 
     # Write the sibling FIRST and VERIFY WHAT LANDED, then make the claim (#3401 review
@@ -7328,6 +7343,10 @@ run_file_size() {
       done
     fi
     if [ "$sib_ok" = 1 ]; then
+      # MUST stay AFTER the write loop: reading a sibling that is a character device such
+      # as /dev/full returns zeros forever, so a `wc -l` moved above the loop would HANG.
+      # It is safe only because a device like that fails the writes first and leaves
+      # sib_ok=0, short-circuiting this read. Do not "optimise" the order.
       _sib_lines=$(wc -l <"$sib" 2>/dev/null | tr -d ' ')
       [ "${_sib_lines:-0}" = "${#msg[@]}" ] || sib_ok=0
     fi
@@ -7335,7 +7354,10 @@ run_file_size() {
       msg+=("    This block is also written to: $sib")
       printf '%s\n' "    This block is also written to: $sib" 2>/dev/null >>"$sib"
     else
-      msg+=("    (It could NOT be written to $sib — this stdout copy is the only one.)")
+      # Covers all three sub-cases truthfully — truncate failed (no sibling), the append
+      # loop broke mid-block (a PARTIAL sibling exists), or the landed line count differs.
+      # "the only copy" was false for the middle one (#3401 review item 4).
+      msg+=("    (It could NOT be written IN FULL to $sib — stdout carries the complete copy.)")
     fi
     for _m in ${msg[@]+"${msg[@]}"}; do
       printf '%s\n' "$_m"
@@ -7355,8 +7377,11 @@ run_file_size() {
   # review round (#3401 review A2, re-raised as job 138 F1):
   #   * CIRCULARITY: this line's CONTENT IS THE VERDICT, and the verdict depends on the
   #     persistence decision. It cannot be written before the decision it reports.
-  #   * A POST-WRITE RE-CHECK BUYS NOTHING: verifying a write requires a later write, whose
-  #     own success is then unverified — the same one-write window, moved along.
+  #   * A POST-WRITE RE-CHECK BUYS NOTHING: verifying a write requires a later write TO THE
+  #     SAME SINK, whose own success is then unverified — the same one-write window, moved
+  #     along. Checking this append and reporting the failure on STDOUT *is* implementable
+  #     (a different sink needs no further log write), but it would only restate what
+  #     stdout already prints, which is why the bullet below is the load-bearing one.
   #   * THE LOSS IS BOUNDED: everything #3401 exists for (thresholds, base ref, over/grown
   #     entries) is written AND checked above; a failure here costs only the terminal
   #     verdict LINE, which the SUMMARY carries independently.

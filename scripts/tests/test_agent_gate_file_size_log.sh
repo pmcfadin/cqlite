@@ -580,6 +580,12 @@ STUB
   assert_verdict "case10: unpersistable log on a no-base run is a FAIL" "$d10" FAIL
   has "case10: the diagnostic says the ratchet was SKIPPED, not that it computed a verdict" \
       "$out10" "The size ratchet was SKIPPED (base ref unavailable)"
+  # `grown: none` on a run that never compared anything asserts a COMPLETED comparison and
+  # can conceal real growth (#3401 review item 2). This fixture DID grow its file 900->950,
+  # so a "none" here would be an actively false statement; only the not-computed wording
+  # can be true, and it is emitted from the no-base branch alone.
+  has "case10: the sibling reports growth as NOT COMPUTED, never as 'none'" \
+      "$d10/file-size.persistence-error.log" "grown: not computed (base unavailable)"
   if [ ! -s "$out10" ]; then
     bad "case10: no gate stdout captured — the false-computation check could not run"
   elif grep -Fq -- "The size ratchet itself computed:" "$out10"; then
@@ -614,6 +620,16 @@ STUB
       "$sib11" "thresholds: src=800 test=1500"
   has "case11: the sibling preserves the resolved base sha" "$sib11" "$base11"
   has "case11: the sibling preserves the over-threshold advisory entry" "$sib11" "950/800"
+  # THE MISSING POSITIVE CONTROL (#3401 review item 1). F3 made the sibling's content
+  # unconditional, which made every needle above BYTE-IDENTICAL to what the FAIL branch
+  # emits on this same fixture (case 9 asserts the first one) — so if
+  # CQLITE_ALLOW_FILE_GROWTH=1 ever stopped reaching the run, this case would silently
+  # degrade into a second copy of case 9 and pass without ever entering the allowed-growth
+  # state it exists to cover. This needle is emitted ONLY when the allowance is what let a
+  # populated grown list pass, and the FAIL branch emits the "none (… unset)" variant
+  # instead, so it cannot be satisfied from any other state.
+  has "case11: CONTROL — the sibling records the allowance as the reason the ratchet passed" \
+      "$sib11" "growth allowance: ALLOWED via CQLITE_ALLOW_FILE_GROWTH=1"
 
   # -------------------------------------------------------------------------
   # Case 12 — the "also written to" claim must be VERIFIED, not assumed (#3401 review
@@ -642,8 +658,8 @@ STUB
       bad "case12: sabotage did NOT take effect — the unverifiable-sibling path was never exercised"
     fi
     assert_verdict "case12: an unwritable log with an unwritable sibling is still a FAIL" "$d12" FAIL
-    has "case12: stdout says the block could NOT be written to the sibling" \
-        "$out12" "It could NOT be written to $sib12"
+    has "case12: stdout says the block could NOT be written IN FULL to the sibling" \
+        "$out12" "It could NOT be written IN FULL to $sib12"
     if [ ! -s "$out12" ]; then
       bad "case12: no gate stdout captured — the false-claim check could not run"
     elif grep -Fq -- "also written to: $sib12" "$out12"; then
@@ -664,7 +680,7 @@ printf 'file-size component log guard (#3401): %d passed, %d failed, %d skipped\
 # precondition failure (an unusable repo, a missing mktemp) short-circuits its case's
 # remaining asserts and lands here too, so the message names both causes rather than
 # misattributing one as the other.
-EXPECTED_CHECKS=70
+EXPECTED_CHECKS=72
 if [ "$((PASS + FAIL + SKIP))" -ne "$EXPECTED_CHECKS" ]; then
   printf 'FAIL - assertion census mismatch: %d checks ran (%d ok / %d fail / %d skip), expected exactly %d.\n' \
     "$((PASS + FAIL + SKIP))" "$PASS" "$FAIL" "$SKIP" "$EXPECTED_CHECKS"
