@@ -432,7 +432,30 @@ def census(path: pathlib.Path) -> tuple[list[dict], list[dict]]:
             m, anchored_on_flag = mc, True
         else:
             break
-        # Hand the match back to ORIGINAL offsets before anything is read or reported.
+        # ---------------------------------------------------------------------------------
+        # ONE PLACE DECIDES JOINED-VS-PHYSICAL, AND EVERY CONSUMER ASKS IT (#3451, post-rebase
+        # round 1). Three findings were the same inconsistency at different consumers — round 8
+        # joined for DISCOVERY but classified on the physical line; the flag anchor then rebuilt
+        # its command word from the physical line, so `grep \` + `-c 'foo'` produced an empty
+        # word and a FALSE finding on legitimate code, with a diagnostic that contradicted itself.
+        # This is the repository's own path-normalisation lesson: normalise ONCE, at the boundary,
+        # or every consumer becomes its own defect.
+        #
+        # THE RULE: the JOINED text is the representation for classification, comparison and
+        # command-word extraction. The ORIGINAL is used for exactly three things — the body of a
+        # block (inside single quotes a backslash is literal, so joining must never touch a body),
+        # the reported line numbers, and the comment test.
+        #
+        # The comment test is the ONE deliberate exception and it is not an oversight: a `#`
+        # comment ends at the PHYSICAL newline, and a trailing backslash does not continue it. So
+        # `# note \` + `python3 -c '…'` really is a live command, and testing the joined line
+        # would hide it. MEASURED both ways — bash runs that python, and this census reports it.
+        # ---------------------------------------------------------------------------------
+        scan_line_start = scan.rfind("\n", 0, m.start()) + 1
+        scan_line_end = scan.find("\n", m.start())
+        if scan_line_end < 0:
+            scan_line_end = len(scan)
+        # ORIGINAL offsets, for line numbers, the body read and diagnostics ONLY.
         match_start = omap[m.start()]
         match_end = omap[m.end() - 1] + 1
         pos = m.end()
@@ -441,12 +464,10 @@ def census(path: pathlib.Path) -> tuple[list[dict], list[dict]]:
         line_start = starts[idx]
         if anchored_on_flag:
             if line.lstrip().startswith("#"):
-                continue  # a whole-line shell comment carries no code
-            # The nearest preceding word, NAMED rather than judged. The old text asserted the word
-            # was "not the literal `python3`" — something this branch never checked — and on a
-            # continuation it printed `is 'python3', not the literal python3`, a diagnostic that
-            # contradicted itself and told its reader nothing actionable.
-            before = text[line_start:match_start].rstrip()
+                continue  # see the comment-test note above: a comment ends at the newline
+            # The command word, from the JOINED line. Rebuilt from the physical line this used to
+            # yield '(none)' whenever a continuation sat between the word and the flag.
+            before = scan[scan_line_start : m.start()].rstrip()
             cmd_word = before[max((before.rfind(c) for c in _WORD_BREAK), default=-1) + 1 :]
             if _is_plain_literal(cmd_word) and "python" not in cmd_word.rsplit("/", 1)[-1]:
                 # A LITERAL non-python command: `grep -c '_RN'`, `sort -c`, `tar -c`. Its text is
@@ -465,36 +486,26 @@ def census(path: pathlib.Path) -> tuple[list[dict], list[dict]]:
                           " (`grep -c`, `sort -c`) is skipped, not reported.",
             })
             continue
-        # Walk left to the start of the shell WORD, so a path prefix travels with the candidate.
-        word_start = match_start
-        while word_start > line_start and text[word_start - 1] not in _WORD_BREAK:
+        # Walk left to the start of the shell WORD — in JOINED space, so a path prefix or a
+        # continuation between the word and its flag travels with the candidate.
+        word_start = m.start()
+        while word_start > scan_line_start and scan[word_start - 1] not in _WORD_BREAK:
             word_start -= 1
-        word = text[word_start:match_end]
+        word = scan[word_start : m.end()]
         if line.lstrip().startswith("#"):
-            continue  # a whole-line shell comment carries no code
-        if word.rsplit("/", 1)[-1] != text[match_start:match_end]:
+            continue  # see the comment-test note above
+        if word.rsplit("/", 1)[-1] != scan[m.start() : m.end()]:
             # The word's BASENAME is not the matched token, i.e. the token is a SUFFIX of a longer
             # program name (`mypython3`, `jython3`). That is a different program, not a
             # path-qualified python — the path case (`/usr/bin/python3`) has the token AS its
             # basename and is examined. This is the one lexical exclusion, and it is a statement
             # about names rather than about shell.
             continue
-        # CLASSIFICATION READS THE JOINED LOGICAL LINE, not the physical one (#3451 round 8
-        # follow-up). Round 8 joined continuations for DISCOVERY and left classification reading
-        # unjoined text, so `python3 -c \\` + `'prog'` was found and then classified against the
-        # physical remainder `-c \\` — which matches no shape. It landed as a refusal, and a
-        # second one from the flag anchor. After joining it IS an ordinary inline invocation
-        # (bash sees `python3 -c 'prog'`), so that is what it must classify as; a driver block
-        # reformatted across a continuation keeps working instead of becoming a refusal, which is
-        # what makes the joining worth having.
-        scan_line_end = scan.find("\n", m.end())
-        if scan_line_end < 0:
-            scan_line_end = len(scan)
         line_end = line_start + len(line)
         raw_rest = scan[m.end() : scan_line_end]
         rest = _strip_comment(raw_rest).strip()
         try:
-            preceding = text[word_start - 1 : word_start] if word_start > line_start else ""
+            preceding = scan[word_start - 1 : word_start] if word_start > scan_line_start else ""
             if preceding and preceding in _CONCATENATION_BEFORE_WORD:
                 raise Unclassifiable(
                     idx + 1,

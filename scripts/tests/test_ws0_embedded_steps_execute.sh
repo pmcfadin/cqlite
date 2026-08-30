@@ -324,7 +324,34 @@ if logical is None:
     raise SystemExit(2)
 
 names = sorted(set(re.findall(prefix + r"[A-Z_]+(?==)", text)))
-present = [n for n in names if n + "=" in logical]
+
+# THE PROPERTY IS THE CONTIGUOUS ENVIRONMENT-ASSIGNMENT PREFIX, NOT MERE MEMBERSHIP OF THE
+# LOGICAL LINE (#3451 post-rebase round 1, F1). `n + "=" in logical` passed for
+#
+#     WS0_CFG_BASELINE_MODE="$BASELINE_MODE"; python3 -c '...'
+#
+# which keeps the assignment on the SAME logical line while bash makes it a standalone shell
+# variable python never receives. MEASURED, both directions:
+#
+#     WS0_CFG_REPS="1"; python3 -c ...   -> os.environ.get(...) is None
+#     WS0_CFG_REPS="1"  python3 -c ...   -> "1"
+#
+# So the text BEFORE the command word must be a run of assignment words and nothing else. A
+# command separator anywhere in it, or any word that is not NAME=, means the run is broken and
+# the membership answer is worthless — reported as zero present, which FAILS closed rather than
+# guessing which side of the break each name fell on.
+cmd = logical.find("python3")
+prefix_text = logical[:cmd] if cmd >= 0 else ""
+words = prefix_text.split()
+contiguous = (
+    cmd >= 0
+    and not any(ch in prefix_text for ch in ";&|")
+    and all(re.match(r"[A-Za-z_][A-Za-z0-9_]*=", w) for w in words)
+)
+if contiguous:
+    present = [n for n in names if any(w.startswith(n + "=") for w in words)]
+else:
+    present = []
 print(f"{len(present)} {len(names)}")
 PY
 }
@@ -908,9 +935,9 @@ for export_pair in "WS0_CFG_:write_session_corpus_pin" "WS0_PIN_:pinning_record_
     continue
   fi
   if [ -n "${in_line:-}" ] && [ "${total_in_file:-0}" -gt 0 ] && [ "$in_line" -eq "$total_in_file" ]; then
-    pass "export-prefix ($export_prefix): all $total_in_file assignment(s) share a JOINED LOGICAL LINE with THE BLOCK THAT READS THEM (located by $export_needle) — genuinely exported to that step, not merely present in the file or exported to a different one"
+    pass "export-prefix ($export_prefix): all $total_in_file assignment(s) are in the CONTIGUOUS ENVIRONMENT-ASSIGNMENT PREFIX of the block that reads them (located by $export_needle) — genuinely exported to that step, not merely present in the file, nor on its logical line behind a separator, nor exported to a different step"
   else
-    fail "export-prefix ($export_prefix): only ${in_line:-?} of ${total_in_file:-?} assignment(s) are in the logical line of the block calling $export_needle. One outside that step's contiguous prefix is never exported TO IT: the step refuses at run time on the missing variable and its caller exits 2"
+    fail "export-prefix ($export_prefix): only ${in_line:-?} of ${total_in_file:-?} assignment(s) are in the contiguous assignment prefix of the block calling $export_needle. One outside that prefix is never exported TO IT: the step refuses at run time on the missing variable and its caller exits 2"
   fi
 done
 
@@ -932,6 +959,16 @@ if text.count(needle) != 1:
 (tmp / "export-relocated.sh").write_text(
     text.replace(needle, "").replace(
         "#!/usr/bin/env bash", '#!/usr/bin/env bash\nWS0_CFG_TEMPS="$TEMPS"', 1))
+# (c-pre) BREAK THE PREFIX WITH A `;`, leaving the assignment on the SAME logical line. This is
+# the case a membership test structurally cannot see: the name is still present, still on the
+# invocation's own logical line, and python no longer receives it.
+semi = 'WS0_CFG_BASELINE_MODE="$BASELINE_MODE" ' + bs + "\n"
+if text.count(semi) != 1:
+    print(f"INJECTION IMPOSSIBLE: semicolon needle occurs {text.count(semi)} time(s)",
+          file=sys.stderr)
+    raise SystemExit(1)
+(tmp / "export-semicolon.sh").write_text(
+    text.replace(semi, 'WS0_CFG_BASELINE_MODE="$BASELINE_MODE"; ' + bs + "\n"))
 # (c) MOVE it into the OTHER step's prefix. This is the round-11 case: the name is still in the
 # file AND still in a `python3 -c` logical line, so a check that unioned across invocations saw
 # nothing wrong while the session-pin step died on the absent variable.
@@ -949,7 +986,7 @@ if [ "$export_inject_rc" -ne 0 ]; then
 else
   export_ctl_ok=1
   export_ctl_detail=""
-  for export_case in nobackslash relocated otherblock; do
+  for export_case in nobackslash relocated otherblock semicolon; do
     read -r c_in c_total \
       <<<"$(export_prefix_membership "$TMP/export-$export_case.sh" WS0_CFG_ write_session_corpus_pin)"
     if [ "$c_in" -eq "$c_total" ]; then
@@ -958,7 +995,7 @@ else
     fi
   done
   if [ "$export_ctl_ok" -eq 1 ]; then
-    pass "export-prefix CONTROL fired: a removed continuation backslash, an assignment relocated out of every prefix, AND one relocated into the OTHER step's prefix all drop it from the consuming block's logical line — including the case a union across invocations could not see"
+    pass "export-prefix CONTROL fired on all FOUR ways an export stops being one: a removed continuation, a relocation out of every prefix, a relocation into the OTHER step's prefix, and a semicolon that leaves the assignment on the SAME logical line while python stops receiving it"
   else
     fail "export-prefix CONTROL did not fire:$export_ctl_detail — the membership check cannot see an assignment leaving the prefix"
   fi
