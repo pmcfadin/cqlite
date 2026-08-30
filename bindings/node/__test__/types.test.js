@@ -744,7 +744,7 @@ describe('Type Conversion Tests (Issue #308)', () => {
   // - emergency_contacts(MAP<TEXT,FROZEN<contact_info>>)
   // ============================================================================
   describe('Complex Types', () => {
-    test('list<frozen<udt>> converts to object[] with _type and _keyspace metadata', async () => {
+    test('list<frozen<udt>> converts to object[] with out-of-band typeName/keyspace', async () => {
       const result = await dbCollections.executeNative(
         'SELECT addresses FROM test_collections.collections_with_udts LIMIT 10'
       );
@@ -757,17 +757,20 @@ describe('Type Conversion Tests (Issue #308)', () => {
           expect(Array.isArray(row.addresses)).toBe(true);
           for (const addr of row.addresses) {
             expect(typeof addr).toBe('object');
-            // UDT should have metadata fields
-            expect(addr).toHaveProperty('_type');
-            expect(addr).toHaveProperty('_keyspace');
-            expect(addr._type).toBe('address_type');
-            expect(addr._keyspace).toBe('test_collections');
-            // UDT should have actual fields
-            expect(addr).toHaveProperty('street');
-            expect(addr).toHaveProperty('city');
-            expect(addr).toHaveProperty('state');
-            expect(addr).toHaveProperty('zip_code');
-            expect(addr).toHaveProperty('country');
+            // Type identity is carried OUT OF BAND (#3504)
+            expect(addr.typeName).toBe('address_type');
+            expect(addr.keyspace).toBe('test_collections');
+            // ...and the removed markers are no longer readable at all
+            expect(addr._type).toBeUndefined();
+            expect(addr._keyspace).toBeUndefined();
+            // Declared fields live in their own namespace, and NOWHERE else:
+            // `Object.keys(addr)` is exactly the out-of-band surface.
+            expect(Object.keys(addr).sort()).toEqual(['fields', 'keyspace', 'typeName']);
+            expect(addr.fields).toHaveProperty('street');
+            expect(addr.fields).toHaveProperty('city');
+            expect(addr.fields).toHaveProperty('state');
+            expect(addr.fields).toHaveProperty('zip_code');
+            expect(addr.fields).toHaveProperty('country');
             foundUdt = true;
           }
         }
@@ -789,7 +792,7 @@ describe('Type Conversion Tests (Issue #308)', () => {
           // If set has items, verify type
           for (const contact of row.contacts) {
             expect(typeof contact).toBe('object');
-            expect(contact._type).toBe('contact_info');
+            expect(contact.typeName).toBe('contact_info');
           }
         }
       }
@@ -809,7 +812,7 @@ describe('Type Conversion Tests (Issue #308)', () => {
           for (const [key, addr] of row.locations_visited) {
             expect(isDate(key)).toBe(true);
             expect(typeof addr).toBe('object');
-            expect(addr._type).toBe('address_type');
+            expect(addr.typeName).toBe('address_type');
           }
           foundMap = true;
         }
@@ -831,11 +834,11 @@ describe('Type Conversion Tests (Issue #308)', () => {
           for (const [key, contact] of row.emergency_contacts) {
             expect(typeof key).toBe('string');
             expect(typeof contact).toBe('object');
-            expect(contact._type).toBe('contact_info');
-            // Check nested address UDT
-            if (contact.address !== null) {
-              expect(contact.address._type).toBe('address_type');
-              expect(contact.address).toHaveProperty('street');
+            expect(contact.typeName).toBe('contact_info');
+            // Check nested address UDT — nested UDTs nest through `fields` too
+            if (contact.fields.address !== null) {
+              expect(contact.fields.address.typeName).toBe('address_type');
+              expect(contact.fields.address.fields).toHaveProperty('street');
             }
             foundNestedUdt = true;
           }
