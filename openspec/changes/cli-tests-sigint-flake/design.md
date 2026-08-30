@@ -294,6 +294,62 @@ failing fast against a tight per-stage cap: the hung-flush plant will red at the
 family that four review rounds could not close. The calibration's only benefit was a tighter bound on a
 quiet host; it was not what made the oracle honest.
 
+## D6b. SECOND DESCOPE (round 13): the mpsc channel is removed; ONE sequenced transcript is the only store
+
+**Decided by a rule written down BEFORE the round that triggered it**, so it is a criterion and not
+fatigue: *if roborev returns the evidence-identity or channel-variant class again at new sites,
+descope the channel rather than patch a fifth time.* roborev job 247 did exactly that.
+
+**The census.** Across jobs 236, 243 and 247 the same two shapes kept reappearing at new sites:
+
+* **evidence identity** — transcript and channel diverge, and every fix closed one site: decide from
+  the same store (round 11) → decide from the same *snapshot* (round 12) → and now the channel side
+  has no window at all, so a stale `OK` matched from the transcript can be **re-delivered later and
+  accepted as the NEXT acknowledgement** (job 247). That is a vacuous pass, not a diagnostic wart.
+* **channel variant handling** — `Empty` vs `Disconnected` collapsed, fixed at one site (round 11),
+  then found at another (round 12).
+
+Both exist **only because there are two stores**. `Mark` can window the transcript and cannot window a
+queue that carries no sequence; a queue can hold a copy of a line the transcript has already served.
+
+**What replaces it.** Reader threads append `(seq, Instant, Stream, String)` to **one**
+mutex-guarded log. `Mark` is a sequence position. Every wait, every progress count and every
+rendering reads **that one store from the Mark onward**. There is no channel, no drain, no
+`TryRecvError`, no stale re-delivery, and no second sample for a count to disagree with.
+
+This is the round-8 descope's reasoning applied a second time: a mechanism whose defect count does not
+fall gets deleted, not patched. It also dissolves job 247's third finding (a line appended between two
+samples counted in `new_lines` without updating `last_progress`) — with one store and one snapshot per
+iteration there is no second sample.
+
+**Accepted cost:** waits poll the log rather than blocking on a channel, so a wait wakes on a short
+interval instead of on delivery. Measured latency cost is bounded by the poll interval and is
+irrelevant at this test's timescales (stage timings are microseconds to tens of milliseconds against a
+180s deadline). What is bought is the removal of two defect families by construction.
+
+## D6c. The floor claim, corrected: one deadline CANNOT guarantee a fresh allowance per wait
+
+roborev job 247 finding 1 is correct and it falsifies a claim this document has carried since the
+round-8 descope. The pre-#3515 code gave each wait an **independent** 60s: a later wait got a fresh 60s
+no matter what earlier waits consumed. **One absolute deadline cannot reproduce that.** An early stage
+may consume nearly all of it and leave a later stage seconds. "Unrestricted stages" and "a guaranteed
+fresh lower bound per stage" are not jointly satisfiable by a single fixed deadline.
+
+**This is NOT fixed by restoring per-stage limits** — that is the layer descoped in D6a for producing
+twelve findings across four rounds. It is fixed by stating the trade truthfully:
+
+* what holds: **any single stage may consume the WHOLE deadline**, and the deadline's base is at or
+  above the aggregate of the bounds it replaced — so no stage is tighter *in isolation*;
+* what does NOT hold: a fresh per-wait allowance after earlier consumption;
+* what was bought: a **bounded total**. The old design had *no* total bound at all — `cli-tests` runs
+  plain `cargo test` with no harness timeout, so the sibling's seven independent 60s waits could
+  genuinely consume 420s+. A bounded total necessarily gives up per-wait freshness; that is the trade,
+  deliberately taken.
+
+The floor assertion and its name must say the property that holds, not the stronger one. Practically
+the starvation path requires an early stage to consume ~180s while the product works, at which point
+the run is failing regardless — but that is a mitigation, not the claim, and it is recorded as such.
+
 ## D7. Drain stderr
 
 `stderr` is piped and never read today. Beyond discarding the evidence this change needs, an
