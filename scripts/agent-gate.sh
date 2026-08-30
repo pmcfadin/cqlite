@@ -2619,12 +2619,21 @@ _component_lane() {
     # no-default-features+one-of parquet/delta-scan), which is class (a) of the SIDE
     # rationale below: sharing MAIN's target dir would thrash it (#2657).
     flight-tests|legacy-heuristics|feature-iso-parquet|feature-iso-delta-scan) printf side ;;
-    # all-features-check (#3453) is class (a) as well, and the most extreme case in the
-    # set: `--all-features` is the WIDEST feature set any component builds cqlite-core at
-    # (43 features, including the OTLP stack MAIN never enables), so interleaving it with
-    # MAIN's `--features cli-helpers` units in ONE target dir is feature-unification thrash
-    # by construction. Lane placement was MEASURED both ways, not reasoned (see the #3453
-    # report); SIDE won.
+    # all-features-check (#3453) is class (a): `--all-features` is the WIDEST feature set
+    # any component builds cqlite-core at (42 features, including the OTLP stack MAIN never
+    # enables), so it shares almost no unit with MAIN's `--features cli-helpers` build.
+    #
+    # MEASURED BOTH WAYS RATHER THAN REASONED, because the obvious argument ("interleaving
+    # two feature sets in one target dir thrashes it") turned out to be the SMALL effect.
+    # In one shared target dir: cli-helpers cold 98s -> all-features 104s -> cli-helpers
+    # re-run 7s, against an uninterleaved control whose re-run was 3s. So the thrash tax is
+    # +4s, not a rebuild — cargo fingerprints per feature set and the two sets coexist.
+    # What actually decided it is that sharing buys NOTHING: all-features after a warm
+    # cli-helpers build (104s) was no faster than the same build in a virgin target dir
+    # (99s), because the feature sets share almost no unit. MAIN would therefore serialize
+    # ~100s onto the critical path for no reuse; SIDE runs it concurrently for ~2.1G of
+    # disk. Warm, in the real gate, the whole component measured 50s (18s check + 23s
+    # clippy) with sccache on.
     all-features-check) printf side ;;
     *) printf main ;;
   esac
