@@ -11,7 +11,7 @@
 mod parquet_parity;
 
 use parquet_parity::canonical_jsonl::CanonicalValue;
-use parquet_parity::{assert_case, KnownGap, KnownTypeGap, ParityCase};
+use parquet_parity::{assert_case, ExpectedFailure, KnownGap, KnownTypeGap, ParityCase};
 
 // ---------------------------------------------------------------------------
 // test_da — BTI (`da`) fixtures, binaries COMMITTED to git
@@ -129,15 +129,14 @@ const UDT_FROZEN_PERSON: ParityCase = ParityCase {
     covers: "frozen UDT with a NULL inner field",
     known_gap: Some(KnownGap {
         issue: "#3556",
-        // The gap is an ABORT of the export itself, so the signature pins all
-        // three facts: which case's export ran, that it failed, and the
-        // converter error that ended it. A parity difference, an unreadable
-        // Parquet file or an Arrow type mismatch for this same table all fail to
-        // carry the conjunction.
-        expect: &[
-            "cqlite export failed for test_compactionparityudt.udt_frozen_person",
-            "expected Blob value, got Udt",
-        ],
+        // The gap is an ABORT of the export itself, and it is the ONLY failure
+        // the case exhibits. Recorded as structured data and compared by SET
+        // EQUALITY, so a parity difference, an unreadable Parquet file or an
+        // Arrow type mismatch appearing ALONGSIDE it is an unrecorded extra and
+        // fails the case.
+        expect: &[ExpectedFailure::ExportAborted {
+            detail: "expected Blob value, got Udt",
+        }],
         what: "a frozen UDT column reaches the Arrow converter with no CqlType, so the \
                export aborts instead of writing a Struct",
     }),
@@ -167,17 +166,31 @@ const UDT_COLLECTIONS: ParityCase = ParityCase {
     covers: "frozen collections of frozen UDTs (single-cell nested values)",
     known_gap: Some(KnownGap {
         issue: "#3556",
-        // The gap is a TYPE defect, so the signature is the type-mismatch
-        // sentence with BOTH rendered types — not the bare column name, which
-        // any unrelated failure mentioning 'lp' (a value difference, a
-        // projection error, a new regression) would also carry.
+        // TWO columns carry the SAME #3556 defect, and recording the failure
+        // SET is what surfaced the second one: while the gap was matched by a
+        // conjunction of substrings pinning `lp`, `ma`'s mismatch was
+        // aggregated into the same message and rode along completely unnoticed.
+        // Set EQUALITY forced it to be recorded (or fixed) — which is the whole
+        // argument for structured failure data.
+        //
+        // Both are compared by equality on (column, expected, actual), so a
+        // THIRD column joining them, or either of these two changing its wrong
+        // type, still FAILS.
         expect: &[
-            "Arrow type mismatch for column 'lp' declared 'frozen<list<frozen<person>>>'",
-            "expected list<struct(udt 'person')>",
-            "got list<utf8>",
+            ExpectedFailure::ArrowType {
+                column: "lp",
+                expected: "list<struct(udt 'person')>",
+                actual: "list<utf8>",
+            },
+            ExpectedFailure::ArrowType {
+                column: "ma",
+                expected: "map<utf8 | large_utf8,struct(udt 'address')>",
+                actual: "map<utf8,utf8>",
+            },
         ],
-        what: "a UDT nested inside a frozen collection is exported as a Utf8 \
-               ValueFormatter rendering instead of an Arrow Struct",
+        what: "a UDT nested inside a frozen collection (list element 'lp', map value \
+               'ma') is exported as a Utf8 ValueFormatter rendering instead of an Arrow \
+               Struct",
     }),
     known_type_gaps: &[],
 };
@@ -394,6 +407,7 @@ fn harness_detects_a_single_changed_cell() {
 
     let err = parquet_parity::compare(&DA_SIMPLE, &prepared.columns, prepared.golden, rows)
         .err()
+        .map(|f| f.to_string())
         .expect("a perturbed cell MUST be reported as a parity difference");
     assert!(
         err.contains("column 'name'") && err.contains("perturbed"),
@@ -411,6 +425,7 @@ fn harness_detects_a_nulled_cell() {
 
     let err = parquet_parity::compare(&DA_SIMPLE, &prepared.columns, prepared.golden, rows)
         .err()
+        .map(|f| f.to_string())
         .expect("a NULLed cell MUST be reported as a parity difference");
     assert!(
         err.contains("column 'age'") && err.contains("<absent>"),
@@ -427,6 +442,7 @@ fn harness_detects_a_dropped_row() {
 
     let err = parquet_parity::compare(&DA_SIMPLE, &prepared.columns, prepared.golden, rows)
         .err()
+        .map(|f| f.to_string())
         .expect("a dropped row MUST be reported");
     assert!(err.contains("row count differs"), "{err}");
 }
@@ -443,6 +459,7 @@ fn harness_detects_a_rewritten_primary_key() {
 
     let err = parquet_parity::compare(&DA_SIMPLE, &prepared.columns, prepared.golden, rows)
         .err()
+        .map(|f| f.to_string())
         .expect("a rewritten primary key MUST be reported");
     assert!(
         err.contains("primary key differs") || err.contains("column 'id'"),
@@ -457,6 +474,7 @@ fn harness_refuses_an_empty_oracle() {
     let prepared = prepared_or_panic(&DA_SIMPLE);
     let err = parquet_parity::compare(&DA_SIMPLE, &prepared.columns, Vec::new(), prepared.parquet)
         .err()
+        .map(|f| f.to_string())
         .expect("an empty golden MUST fail");
     assert!(err.contains("ZERO rows"), "{err}");
 }
@@ -497,6 +515,7 @@ fn harness_refuses_a_fixture_with_a_row_deletion() {
     };
     let err = parquet_parity::run_case(&SHADOW_ROW_DELETE)
         .err()
+        .map(|f| f.to_string())
         .expect("a row-tombstone fixture must be refused, not compared");
     assert!(
         err.contains("row-level deletion") && err.contains("#1742"),
@@ -523,6 +542,7 @@ fn harness_refuses_a_fixture_with_a_ttl() {
     };
     let err = parquet_parity::run_case(&TTL_TABLE)
         .err()
+        .map(|f| f.to_string())
         .expect("a TTL-bearing fixture must be refused, not compared");
     assert!(err.contains("TTL"), "the refusal must name the TTL: {err}");
 }
@@ -817,6 +837,7 @@ fn type_check_reds_on_a_wrong_arrow_type() {
     const CASE: ParityCase = da_simple_variant(AGE_AS_BIGINT, &[]);
     let err = parquet_parity::prepare(&CASE)
         .err()
+        .map(|f| f.to_string())
         .expect("an int32 column declared bigint MUST be reported");
     assert!(
         err.contains("Arrow type mismatch for column 'age' declared 'bigint'")
@@ -863,6 +884,7 @@ fn a_known_type_gap_cannot_absorb_a_different_type_defect() {
     );
     let err = parquet_parity::prepare(&CASE)
         .err()
+        .map(|f| f.to_string())
         .expect("a gap for utf8 must not excuse an int32 mismatch");
     assert!(
         err.contains("DIFFERENT type defect") && err.contains("got int32"),
@@ -885,6 +907,7 @@ fn a_known_type_gap_that_no_longer_reproduces_fails() {
     );
     let err = parquet_parity::prepare(&CASE)
         .err()
+        .map(|f| f.to_string())
         .expect("a gap that no longer reproduces MUST fail");
     assert!(
         err.contains("now CORRECT") && err.contains("delete the KnownTypeGap"),
@@ -907,6 +930,7 @@ fn a_known_type_gap_must_name_a_declared_column() {
     );
     let err = parquet_parity::prepare(&CASE)
         .err()
+        .map(|f| f.to_string())
         .expect("a gap naming an undeclared column MUST be refused");
     assert!(
         err.contains("KnownTypeGap is recorded for column 'no_such_column'")

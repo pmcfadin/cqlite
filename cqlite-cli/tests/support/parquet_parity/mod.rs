@@ -39,7 +39,9 @@
 //! * A recorded divergence is always PRECISE and SELF-RETIRING, never a skip:
 //!   [`KnownGap`] (whole case) and [`KnownTypeGap`] (one column's Arrow type)
 //!   both fail when the divergence stops reproducing, and both refuse to absorb
-//!   a different failure.
+//!   a different failure. Both compare STRUCTURED failure data by EQUALITY, not
+//!   a rendered message by containment — see `failure.rs` for the two weaker
+//!   designs that leaked.
 
 #![allow(dead_code)]
 
@@ -51,6 +53,7 @@ pub mod datasets_root;
 pub mod arrow_expect;
 pub mod arrow_rows;
 pub mod cql_type;
+pub mod failure;
 pub mod golden_rows;
 pub mod spelling;
 
@@ -64,7 +67,10 @@ use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
 
 use canonical_jsonl::{CanonicalValue, KeySpec};
 use cql_type::ColumnType;
+use failure::{Failure, Failures};
 use golden_rows::GoldenRow;
+
+pub use failure::{ExpectedFailure, KnownGap, KnownTypeGap};
 
 /// One corpus table under value parity.
 pub struct ParityCase {
@@ -93,7 +99,7 @@ pub struct ParityCase {
     /// bug is fixed this test FAILS and demands the case be promoted to a full
     /// parity case. A known gap can never quietly become an unnoticed pass, and
     /// it cannot be used to silence a NEW divergence either — the recorded
-    /// signature has to be the one that shows up.
+    /// failure set has to be EXACTLY the one that shows up, extras included.
     pub known_gap: Option<KnownGap>,
     /// DOCUMENTED, ISSUE-TRACKED Arrow TYPE gaps, one per column.
     ///
@@ -103,65 +109,6 @@ pub struct ParityCase {
     /// (a wrong type often renders the right value). So a type gap is recorded
     /// per COLUMN, and everything else about the case keeps running.
     pub known_type_gaps: &'static [KnownTypeGap],
-}
-
-/// A recorded, issue-tracked Arrow TYPE gap for ONE column.
-///
-/// Same discipline as [`KnownGap`], applied to the type check:
-///
-/// * **Precise.** `actual` is compared to the exported type by EQUALITY (in the
-///   compact `arrow_expect::render_arrow` vocabulary), so a DIFFERENT wrong type
-///   on the same column is still a failure. Nothing is matched by substring.
-/// * **Self-retiring.** If the column's type becomes correct, the case FAILS and
-///   demands the record be deleted — a fixed gap can never go unnoticed.
-/// * **Narrow.** It excuses this ONE column's type and nothing else: the column's
-///   values are still compared per cell, and every other column's type is still
-///   asserted.
-pub struct KnownTypeGap {
-    /// The column whose exported Arrow type is currently wrong.
-    pub column: &'static str,
-    /// The GitHub issue tracking the fix, e.g. `"#3563"`.
-    pub issue: &'static str,
-    /// The type the export currently produces, as `render_arrow` renders it
-    /// (e.g. `"utf8"`). Compared by equality.
-    pub actual: &'static str,
-    /// Why the gap exists, in one line.
-    pub what: &'static str,
-}
-
-/// A recorded, issue-tracked export gap.
-///
-/// # The signature is a CONJUNCTION, and it has to be a precise one
-///
-/// A `known_gap` is only defensible over a plain skip because it is a PRECISE,
-/// SELF-RETIRING record: it names one divergence, fails when that divergence
-/// stops reproducing, and refuses to absorb anything else. A signature broad
-/// enough to match a different failure in the same place — a column name alone,
-/// say — turns it into exactly the permanent excuse the mechanism exists to
-/// avoid.
-///
-/// So `expect` is a LIST of substrings, EVERY one of which must appear in the
-/// failure. Each entry should pin a distinct fact about the expected divergence
-/// (which check failed, which column, the expected value/type, the actual one),
-/// so an unrelated error touching the same column cannot satisfy all of them.
-pub struct KnownGap {
-    /// The GitHub issue tracking the fix, e.g. `"#3551"`.
-    pub issue: &'static str,
-    /// Substrings the failure message must ALL contain.
-    pub expect: &'static [&'static str],
-    /// Why the gap exists, in one line.
-    pub what: &'static str,
-}
-
-impl KnownGap {
-    /// The substrings this gap's signature does NOT find in `error`.
-    fn unmatched(&self, error: &str) -> Vec<&'static str> {
-        self.expect
-            .iter()
-            .copied()
-            .filter(|needle| !error.contains(needle))
-            .collect()
-    }
 }
 
 /// What one case did, for the per-case assertion and the run census.
@@ -322,38 +269,52 @@ fn isolated_data_dir(case: &ParityCase, fixture: &Fixture, tmp: &Path) -> Result
 }
 
 /// Run the real CLI export and return the Parquet file path.
-fn export_parquet(case: &ParityCase, data_dir: &Path, tmp: &Path) -> Result<PathBuf, String> {
-    let schema = datasets_root::schema_path(case.schema)
-        .ok_or_else(|| format!("committed schema fixture '{}' is unreadable", case.schema))?;
+fn export_parquet(case: &ParityCase, data_dir: &Path, tmp: &Path) -> Result<PathBuf, Failures> {
+    let schema = datasets_root::schema_path(case.schema).ok_or_else(|| {
+        Failures::refusal(format!(
+            "committed schema fixture '{}' is unreadable",
+            case.schema
+        ))
+    })?;
     let out = tmp.join(format!("{}.{}.parquet", case.keyspace, case.table));
     let table = case.id();
+    let utf8 = |p: Option<&str>, what: &str| -> Result<String, Failures> {
+        p.map(str::to_string)
+            .ok_or_else(|| Failures::refusal(format!("non-UTF-8 {what}")))
+    };
     let output = Command::new(env!("CARGO_BIN_EXE_cqlite"))
         .args([
             "--schema",
-            schema.to_str().ok_or("non-UTF-8 schema path")?,
+            &utf8(schema.to_str(), "schema path")?,
             "--data-dir",
-            data_dir.to_str().ok_or("non-UTF-8 data dir")?,
+            &utf8(data_dir.to_str(), "data dir")?,
             "export",
-            out.to_str().ok_or("non-UTF-8 output path")?,
+            &utf8(out.to_str(), "output path")?,
             "--format",
             "parquet",
             "--table",
             &table,
         ])
         .output()
-        .map_err(|e| format!("spawning the cqlite binary failed: {e}"))?;
+        .map_err(|e| Failures::refusal(format!("spawning the cqlite binary failed: {e}")))?;
     if !output.status.success() {
-        return Err(format!(
-            "cqlite export failed for {table} ({}): {}",
-            output.status,
-            String::from_utf8_lossy(&output.stderr)
-        ));
+        // A STRUCTURED failure, not prose: this is the one thing a whole-case
+        // `known_gap` can record about an aborting export, and the record is
+        // compared against the exact observed failure set (see `failure.rs`).
+        return Err(Failures::one(Failure::ExportAborted {
+            table: table.clone(),
+            stderr: format!(
+                "({}): {}",
+                output.status,
+                String::from_utf8_lossy(&output.stderr)
+            ),
+        }));
     }
     if !out.is_file() {
-        return Err(format!(
+        return Err(Failures::refusal(format!(
             "cqlite export produced no file at {}",
             out.display()
-        ));
+        )));
     }
     Ok(out)
 }
@@ -405,28 +366,26 @@ fn validate_arrow_types(
     case: &ParityCase,
     columns: &[ColumnType],
     schema: &arrow::datatypes::Schema,
-) -> Result<(), String> {
+) -> Result<(), Failures> {
     for gap in case.known_type_gaps {
         if !columns.iter().any(|c| c.name == gap.column) {
-            return Err(format!(
-                "{}: a KnownTypeGap is recorded for column '{}', which the case does not \
+            return Err(Failures::refusal(format!(
+                "a KnownTypeGap is recorded for column '{}', which the case does not \
                  declare — a gap must name a real column or it can never retire",
-                case.id(),
                 gap.column
-            ));
+            )));
         }
     }
 
-    let mut errors: Vec<String> = Vec::new();
+    let mut errors: Vec<Failure> = Vec::new();
     let mut excused: Vec<&'static str> = Vec::new();
     for field in schema.fields() {
         let Some(col) = columns.iter().find(|c| c.name == *field.name()) else {
             // Unreachable: the column-set equality above already ran.
-            return Err(format!(
-                "{}: Parquet column '{}' has no declared CQL type",
-                case.id(),
+            return Err(Failures::refusal(format!(
+                "Parquet column '{}' has no declared CQL type",
                 field.name()
-            ));
+            )));
         };
         let gap = case
             .known_type_gaps
@@ -435,36 +394,41 @@ fn validate_arrow_types(
         match arrow_expect::validate_field(col, field.data_type()) {
             Ok(()) => {
                 if let Some(gap) = gap {
-                    errors.push(format!(
+                    errors.push(Failure::Refusal(format!(
                         "column '{}' records the KNOWN type gap {} ({}) but its exported Arrow \
                          type is now CORRECT — delete the KnownTypeGap so the column is covered \
                          for real, and close {}",
                         gap.column, gap.issue, gap.what, gap.issue
-                    ));
+                    )));
                 }
             }
             Err(Ok(mismatch)) => match gap {
                 // Equality, not a substring: a DIFFERENT wrong type on this
                 // column is a different defect and must not be absorbed.
                 Some(gap) if gap.actual == mismatch.actual => excused.push(gap.issue),
-                Some(gap) => errors.push(format!(
-                    "{mismatch} — the recorded type gap {} expected the export to produce \
-                     {:?}, so this is a DIFFERENT type defect, which the gap must never hide",
-                    gap.issue, gap.actual
-                )),
-                None => errors.push(mismatch.to_string()),
+                // The `note` is diagnostic decoration and is deliberately NOT
+                // part of the failure's signature: the DEFECT is the mismatch,
+                // and a whole-case `known_gap` must be able to record it whether
+                // or not a per-column gap also names the column.
+                Some(gap) => errors.push(Failure::ArrowType {
+                    note: Some(format!(
+                        "the recorded type gap {} expected the export to produce {:?}, so this \
+                         is a DIFFERENT type defect, which the gap must never hide",
+                        gap.issue, gap.actual
+                    )),
+                    mismatch,
+                }),
+                None => errors.push(Failure::ArrowType {
+                    mismatch,
+                    note: None,
+                }),
             },
-            Err(Err(refusal)) => errors.push(refusal),
+            Err(Err(refusal)) => errors.push(Failure::Refusal(refusal)),
         }
     }
 
     if !errors.is_empty() {
-        return Err(format!(
-            "{}: {} Arrow type problem(s) vs the case's declared CQL types:\n  {}",
-            case.id(),
-            errors.len(),
-            errors.join("\n  ")
-        ));
+        return Err(Failures::many(errors));
     }
     for issue in excused {
         eprintln!(
@@ -482,19 +446,24 @@ fn project_parquet(
     case: &ParityCase,
     columns: &[ColumnType],
     path: &Path,
-) -> Result<Vec<Row>, String> {
-    let bytes = std::fs::read(path).map_err(|e| format!("read {}: {e}", path.display()))?;
+) -> Result<Vec<Row>, Failures> {
+    let bytes = std::fs::read(path)
+        .map_err(|e| Failures::refusal(format!("read {}: {e}", path.display())))?;
     let reader = ParquetRecordBatchReaderBuilder::try_new(Bytes::from(bytes))
-        .map_err(|e| format!("{} is not a readable Parquet file: {e}", path.display()))?
+        .map_err(|e| {
+            Failures::refusal(format!(
+                "{} is not a readable Parquet file: {e}",
+                path.display()
+            ))
+        })?
         .build()
-        .map_err(|e| format!("building the Parquet reader failed: {e}"))?;
+        .map_err(|e| Failures::refusal(format!("building the Parquet reader failed: {e}")))?;
     let batches: Vec<RecordBatch> = reader
         .collect::<Result<Vec<_>, _>>()
-        .map_err(|e| format!("decoding the Parquet file failed: {e}"))?;
+        .map_err(|e| Failures::refusal(format!("decoding the Parquet file failed: {e}")))?;
     let Some(first) = batches.first() else {
-        return Err(format!(
-            "{}: the export produced no record batch at all",
-            case.id()
+        return Err(Failures::refusal(
+            "the export produced no record batch at all",
         ));
     };
 
@@ -508,11 +477,10 @@ fn project_parquet(
         .collect();
     actual.sort_unstable();
     if declared != actual {
-        return Err(format!(
-            "{}: the Parquet schema's columns {actual:?} do not match the case's declared \
-             columns {declared:?} — reconcile the case with the fixture's CQL schema",
-            case.id()
-        ));
+        return Err(Failures::refusal(format!(
+            "the Parquet schema's columns {actual:?} do not match the case's declared \
+             columns {declared:?} — reconcile the case with the fixture's CQL schema"
+        )));
     }
 
     validate_arrow_types(case, columns, &first_schema)?;
@@ -531,17 +499,18 @@ fn project_parquet(
             let mut cells = BTreeMap::new();
             for (ci, field) in schema.fields().iter().enumerate() {
                 let ctx = format!("{}.{}[row {r}]", case.id(), field.name());
-                let value = arrow_rows::canonical_from_arrow(batch.column(ci).as_ref(), r, &ctx)?;
+                let value = arrow_rows::canonical_from_arrow(batch.column(ci).as_ref(), r, &ctx)
+                    .map_err(Failures::refusal)?;
                 cells.insert(field.name().clone(), value);
             }
             let keys = key_columns
                 .iter()
                 .map(|k| {
                     cells.get(*k).cloned().ok_or_else(|| {
-                        format!("{}: key column '{k}' missing from the export", case.id())
+                        Failures::refusal(format!("key column '{k}' missing from the export"))
                     })
                 })
-                .collect::<Result<Vec<_>, String>>()?;
+                .collect::<Result<Vec<_>, Failures>>()?;
             rows.push(Row { keys, cells });
         }
     }
@@ -598,22 +567,28 @@ pub struct Prepared {
 
 /// Export, read back and project both sides. `Ok(None)` only when no candidate
 /// root carries the table.
-pub fn prepare(case: &ParityCase) -> Result<Option<Prepared>, String> {
-    let columns = case.column_types()?;
-    let Some(fixture) = resolve_fixture(case)? else {
+pub fn prepare(case: &ParityCase) -> Result<Option<Prepared>, Failures> {
+    prepare_inner(case).map_err(|f| f.for_case(&case.id()))
+}
+
+fn prepare_inner(case: &ParityCase) -> Result<Option<Prepared>, Failures> {
+    let columns = case.column_types().map_err(Failures::refusal)?;
+    let Some(fixture) = resolve_fixture(case).map_err(Failures::refusal)? else {
         return Ok(None);
     };
 
-    let tmp = tempfile::TempDir::new().map_err(|e| format!("tempdir: {e}"))?;
-    let data_dir = isolated_data_dir(case, &fixture, tmp.path())?;
+    let tmp = tempfile::TempDir::new().map_err(|e| Failures::refusal(format!("tempdir: {e}")))?;
+    let data_dir = isolated_data_dir(case, &fixture, tmp.path()).map_err(Failures::refusal)?;
     let parquet_path = export_parquet(case, &data_dir, tmp.path())?;
 
     let golden_doc =
         canonical_jsonl::load_golden_document_with_keys(&fixture.golden, true, &case.key_spec())
-            .map_err(|e| format!("{}: loading the sstabledump golden failed: {e}", case.id()))?;
+            .map_err(|e| {
+                Failures::refusal(format!("loading the sstabledump golden failed: {e}"))
+            })?;
     let golden =
         golden_rows::project_golden(&golden_doc, &columns, case.partition_key, case.clustering)
-            .map_err(|e| format!("{}: {e}", case.id()))?;
+            .map_err(Failures::refusal)?;
 
     let parquet = project_parquet(case, &columns, &parquet_path)?;
     Ok(Some(Prepared {
@@ -625,7 +600,7 @@ pub fn prepare(case: &ParityCase) -> Result<Option<Prepared>, String> {
 
 /// Run one case end-to-end. `Err` is a parity failure or a fail-closed refusal;
 /// `Ok(Skipped)` only when no candidate root carries the table.
-pub fn run_case(case: &ParityCase) -> Result<CaseOutcome, String> {
+pub fn run_case(case: &ParityCase) -> Result<CaseOutcome, Failures> {
     let Some(prepared) = prepare(case)? else {
         return Ok(CaseOutcome::Skipped(datasets_root::describe_search(
             case.keyspace,
@@ -641,7 +616,16 @@ pub fn compare(
     columns: &[ColumnType],
     golden: Vec<GoldenRow>,
     parquet: Vec<Row>,
-) -> Result<CaseOutcome, String> {
+) -> Result<CaseOutcome, Failures> {
+    compare_inner(case, columns, golden, parquet).map_err(|f| f.for_case(&case.id()))
+}
+
+fn compare_inner(
+    case: &ParityCase,
+    columns: &[ColumnType],
+    golden: Vec<GoldenRow>,
+    parquet: Vec<Row>,
+) -> Result<CaseOutcome, Failures> {
     let mut expected: Vec<Row> = golden
         .into_iter()
         .map(|g| Row {
@@ -652,33 +636,31 @@ pub fn compare(
     let mut actual = parquet;
 
     if expected.is_empty() {
-        return Err(format!(
-            "{}: the sstabledump golden projected to ZERO rows — a dataset-dependent \
+        return Err(Failures::refusal(
+            "the sstabledump golden projected to ZERO rows — a dataset-dependent \
              comparison must never pass on an empty oracle",
-            case.id()
         ));
     }
     expected.sort_by_key(|r| r.sort_key());
     actual.sort_by_key(|r| r.sort_key());
 
     if expected.len() != actual.len() {
-        return Err(format!(
-            "{}: row count differs — golden {} vs Parquet {}",
-            case.id(),
+        return Err(Failures::one(Failure::Value(format!(
+            "row count differs — golden {} vs Parquet {}",
             expected.len(),
             actual.len()
-        ));
+        ))));
     }
 
-    let mut diffs: Vec<String> = Vec::new();
+    let mut diffs: Vec<Failure> = Vec::new();
     let mut compared_cells = 0usize;
     for (i, (e, a)) in expected.iter().zip(actual.iter()).enumerate() {
         if e.sort_key() != a.sort_key() {
-            diffs.push(format!(
+            diffs.push(Failure::Value(format!(
                 "row {i}: primary key differs — golden {} vs Parquet {}",
                 e.sort_key(),
                 a.sort_key()
-            ));
+            )));
             if diffs.len() >= 10 {
                 break;
             }
@@ -703,7 +685,8 @@ pub fn compare(
                     .unwrap_or(CanonicalValue::Absent),
                 &col.spec,
                 &ctx,
-            )?;
+            )
+            .map_err(Failures::refusal)?;
             let av = spelling::normalize_spelling(
                 a.cells
                     .get(&col.name)
@@ -711,17 +694,18 @@ pub fn compare(
                     .unwrap_or(CanonicalValue::Absent),
                 &col.spec,
                 &ctx,
-            )?;
+            )
+            .map_err(Failures::refusal)?;
             compared_cells += 1;
             if ev != av {
-                diffs.push(format!(
+                diffs.push(Failure::Value(format!(
                     "row {i} (pk {}) column '{}' ({}): golden {} vs Parquet {}",
                     e.sort_key(),
                     col.name,
                     col.declared,
                     render_value(&ev),
                     render_value(&av)
-                ));
+                )));
                 if diffs.len() >= 10 {
                     break;
                 }
@@ -733,13 +717,7 @@ pub fn compare(
     }
 
     if !diffs.is_empty() {
-        return Err(format!(
-            "{}: {} per-cell parity difference(s) vs the sstabledump golden (first {}):\n  {}",
-            case.id(),
-            diffs.len(),
-            diffs.len().min(10),
-            diffs.join("\n  ")
-        ));
+        return Err(Failures::many(diffs));
     }
 
     Ok(CaseOutcome::Ran {
@@ -753,19 +731,22 @@ pub fn assert_case(case: &ParityCase) {
     let outcome = run_case(case);
     if let Some(gap) = &case.known_gap {
         match outcome {
-            Err(e) => {
-                let unmatched = gap.unmatched(&e);
-                assert!(
-                    unmatched.is_empty(),
-                    "{}: this case records a KNOWN export gap ({} — {}) whose signature is \
-                     {:?}, but the failure does not carry {:?}, so it is a DIFFERENT failure \
-                     — which the recorded gap must never hide:\n{e}",
-                    case.id(),
-                    gap.issue,
-                    gap.what,
-                    gap.expect,
-                    unmatched
-                );
+            Err(failures) => {
+                // SET EQUALITY on structured failure data, never substring
+                // containment of a rendered message: containment proves the
+                // recorded failure is PRESENT but says nothing about whether
+                // anything ELSE is, so an unrecorded regression aggregated into
+                // the same message rode along excused (see `failure.rs`).
+                if let Some(problem) = gap.mismatch(&case.id(), failures.items()) {
+                    panic!(
+                        "{}: this case records a KNOWN export gap ({} — {}) whose recorded \
+                         failure set is {:?}, but {problem}\n\nOBSERVED: {failures}",
+                        case.id(),
+                        gap.issue,
+                        gap.what,
+                        gap.expect,
+                    );
+                }
                 eprintln!(
                     "[{}] KNOWN GAP {} still present ({}) — parity comparison deferred",
                     case.id(),
