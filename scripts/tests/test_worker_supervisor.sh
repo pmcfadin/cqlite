@@ -4554,8 +4554,13 @@ test_legacy_global_lock_refuses_live_holder() {
   rm -rf "$legacy"
 }
 
-test_legacy_global_lock_reclaims_confirmed_stale() {
-  local d tmp lane legacy dead out rc derived
+# THE STALE CASE REFUSES AND MUTATES NOTHING (#3549, lead ruling: the reclaim capability is DELETED).
+# The guard used to rename the lock aside and delete it; every abort path after that rename then had to
+# put it back, and `mkdir`+`mv` leaves the lock observable WITHOUT its pid — a window in which a peer
+# reclaims it and our restore corrupts ITS lock. So the property under test is now the opposite of the
+# old one: the start STOPS, and the foreign lock is still there, byte for byte.
+test_legacy_global_lock_refuses_stale_holder() {
+  local d tmp lane legacy dead out rc derived before_inode before_pid residue
   d="$(new_case_dir)"
   common_env "$d"
   tmp="$d/tmp"; lane="lane3549stale$$"
@@ -4570,17 +4575,67 @@ test_legacy_global_lock_reclaims_confirmed_stale() {
   wait "$dead" 2>/dev/null || true
   mkdir -p "$legacy"
   printf '%s\n' "$dead" >"$legacy/pid"
+  before_pid="$(cat "$legacy/pid")"
+  before_inode="$(ls -di "$legacy" | awk '{print $1}')"
 
   out="$(legacy_lock_drive "$tmp" "$lane")"; rc=$?
-  if [[ "$rc" -eq 0 && "$out" == *"LOCKDIR=yes"* && "$out" == *"reclaiming STALE legacy global supervisor lock"* ]]; then
-    pass "legacy-lock AC2: a legacy lock whose recorded pid is CONFIRMED dead (real reaped pid $dead) is reclaimed and the start proceeds"
+  # AC2 per the lead's ruling: satisfied by a LOUD refusal naming the remedy, not by reclaiming. The
+  # diagnostic must carry the path, the recorded pid, the classified state and the exact `rm` remedy —
+  # an operator clears it in one command, so this is not "blocking forever".
+  if [[ "$rc" -ne 0 ]] && legacy_refusal_ok "$out" \
+     && [[ "$out" == *"$legacy"* && "$out" == *"$dead"* && "$out" == *"stale $dead"* ]] \
+     && [[ "$out" == *"rm -rf '$legacy'"* ]] \
+     && [[ "$out" != *"reclaim"* ]] \
+     && [[ ! -e "$derived" ]]; then
+    pass "legacy-lock AC2 (ruling): a legacy lock whose recorded pid is CONFIRMED dead (real reaped pid $dead) REFUSES the start, naming the path, the pid, the classified state and the exact rm -rf remedy — and never mentions reclaiming"
   else
-    fail "legacy-lock-stale: rc=$rc out=[$out] — expected a reclaim and a successful acquisition"
+    fail "legacy-lock-stale-refusal: rc=$rc derived-exists=$([[ -e "$derived" ]] && echo yes || echo no) out=[$out] — expected a refusal naming 'stale $dead' and \"rm -rf '$legacy'\""
   fi
-  if [[ ! -e "$legacy" ]]; then
-    pass "legacy-lock AC2: the stale legacy lock directory is GONE after the reclaim (rename-aside, then removed)"
+  # The live refusal's remedy must NOT be the one printed here: telling an operator to stop a process
+  # that is already dead is actively misleading, which is why the remedy is per-state.
+  if [[ "$out" != *"STILL RUNNING"* && "$out" == *"remove the leftover lock by hand"* ]]; then
+    pass "legacy-lock AC2 (ruling): the stale remedy is state-specific — 'remove the leftover lock', never the live holder's 'stop pid N first'"
   else
-    fail "legacy-lock-stale-residue: $legacy still exists after the reclaim"
+    fail "legacy-lock-stale-remedy: out=[$out] — the stale refusal printed the LIVE remedy"
+  fi
+  # NOTHING WAS MUTATED. Asserted directly rather than inferred: same inode, same pid bytes, and no
+  # renamed-aside/stale scratch path ANYWHERE under the case TMPDIR — that absence IS the property
+  # "this guard never touches an object it does not own".
+  residue="$(find "$tmp" \( -name '*.aside.*' -o -name '*.stale.*' \) 2>/dev/null | wc -l | tr -d ' ')"
+  if [[ -d "$legacy" && -f "$legacy/pid" ]] \
+     && [[ "$(cat "$legacy/pid")" == "$before_pid" ]] \
+     && [[ "$(ls -di "$legacy" | awk '{print $1}')" == "$before_inode" ]] \
+     && [[ "$residue" == "0" ]]; then
+    pass "legacy-lock AC2 (ruling): the stale legacy lock is STILL PRESENT and byte-identical after the refusal (same inode $before_inode, same pid $before_pid) and no aside/stale scratch path exists anywhere under the case TMPDIR"
+  else
+    fail "legacy-lock-stale-mutated: dir=$([[ -d "$legacy" ]] && echo yes || echo GONE) pid=[$(cat "$legacy/pid" 2>/dev/null || echo GONE)] (was [$before_pid]) inode=$(ls -di "$legacy" 2>/dev/null | awk '{print $1}') (was $before_inode) residue=$residue"
+  fi
+  # REGRESSION, in the same case so the contrast is visible: with the legacy lock REMOVED the very same
+  # harness ACQUIRES. Without this, "refuses" could be an unconditional refusal that measures nothing.
+  rm -rf "$legacy" "$derived"
+  out="$(legacy_lock_drive "$tmp" "$lane")"; rc=$?
+  if [[ "$rc" -eq 0 && "$out" == *"LOCKDIR=yes"* ]]; then
+    pass "legacy-lock AC2 (ruling): an ABSENT legacy lock still proceeds — the refusal above is attributable to the lock, not to the guard refusing everything"
+  else
+    fail "legacy-lock-stale-absent-control: rc=$rc out=[$out] — an absent legacy lock must still acquire"
+  fi
+
+  # The DELETED capability must not creep back: no reclaim/restore/aside machinery anywhere in the
+  # supervisor. Pinned structurally because a behavioural case cannot see a reintroduced code path that
+  # nothing currently reaches.
+  if ! grep -qE 'supervisor_legacy_lock_(reclaim_stale|restore_and_refuse)|SUPERVISOR_LEGACY_ASIDE_CHILD' "$SUPERVISOR"; then
+    pass "legacy-lock AC2 (ruling): the reclaim/restore/aside machinery is GONE from the supervisor (not merely unreached)"
+  else
+    fail "legacy-lock-reclaim-resurrected: the supervisor still defines reclaim/restore/aside machinery the ruling deleted"
+  fi
+  # ...and the guard RECORDS why, including the atomic formulation that was available and declined.
+  local record
+  record="$(sed -n '/^# THIS GUARD DETECTS AND REFUSES/,/^# RESIDUAL (#3549/p' "$SUPERVISOR")"
+  if [[ -n "$record" ]] && [[ "$record" == *"NEVER MUTATES"* ]] && [[ "$record" == *"RENAME_NOREPLACE"* ]] \
+     && [[ "$record" == *"macOS"* ]] && [[ "$record" == *"AC2"* ]]; then
+    pass "legacy-lock AC2 (ruling): the code records that it never mutates the foreign lock, why the reclaim was removed, the atomic staging+single-rename form that WOULD work, and why it was declined (GNU-only no-replace rename vs macOS support)"
+  else
+    fail "legacy-lock-ruling-unrecorded: the no-mutation rationale block is missing or does not name the declined atomic formulation"
   fi
   rm -rf "$derived"
 }
@@ -4618,11 +4673,14 @@ test_legacy_global_lock_unknown_shapes_refuse() {
 # THE SYMLINK SHAPES (#3549, roborev job 180 Medium). `-d`, `-f`, `-r`, `-x` and `-e` all FOLLOW
 # symlinks, so a link is not merely another malformed shape — it is the one shape whose predicates
 # answer as a VALID lock would. The classifier must therefore reject `-L` BEFORE any of them, and the
-# case that matters is the destructive direction: a link to a real, well-formed lock directory whose
-# recorded pid is CONFIRMED DEAD classifies as `stale` without the `-L` test, and the reclaim then
-# MOVES AND DELETES the object at that name. Every case below asserts BOTH halves — the refusal, and
-# that NOTHING was moved or deleted (the link, its target, the target's `pid`, and no renamed-aside
-# residue).
+# case that matters is the one a link to a real, well-formed lock directory produces: without the `-L`
+# test it classifies as a LOCK (`stale`/`live`) and the guard then reports, and tells an operator to
+# `rm -rf`, an object that is not a legacy lock at all — its target may be any directory that happens
+# to hold a `pid` file. When this guard still reclaimed, the same misclassification MOVED AND DELETED
+# that object itself; the reclaim is gone (lead ruling) but the misdiagnosis is not, and it now points
+# a destructive manual remedy at the wrong path. Every case below asserts BOTH halves — the refusal
+# carries the SYMLINK cause, and NOTHING was moved or deleted (the link, its target, the target's
+# `pid`, and no renamed-aside residue anywhere).
 test_legacy_global_lock_symlink_shapes_refuse() {
   local d tmp lane legacy derived out rc dead target link_before aside_count
   d="$(new_case_dir)"
@@ -4640,8 +4698,9 @@ test_legacy_global_lock_symlink_shapes_refuse() {
 
   # ---- (a) THE DANGEROUS ONE: a symlink to a VALID lock directory with a CONFIRMED-DEAD pid. -------
   # This is the case that is NOT caught by any other predicate: follow the link and it is a textbook
-  # reclaimable lock. `$target` is deliberately NOT a lock — it is any directory that happens to hold
-  # a well-formed `pid`, which is exactly the object the guard must not destroy.
+  # lock with a dead holder. `$target` is deliberately NOT a lock — it is any directory that happens to
+  # hold a well-formed `pid`, which is exactly the object the guard must neither destroy nor name in a
+  # `rm -rf` remedy.
   rm -rf "$legacy" "$derived"
   target="$tmp/not-a-lock-at-all"
   mkdir -p "$target"
@@ -4683,7 +4742,8 @@ test_legacy_global_lock_symlink_shapes_refuse() {
 
   # ---- (c) a symlink AT `$legacy/pid` pointing to a VALID dead pid file -------------------------
   # The lock directory is genuine; only the `pid` path is a link. `-f`/`-r` follow it, so the pid reads
-  # as a well-formed dead pid and the reclaim would move the real directory aside and delete it.
+  # as a well-formed dead pid and the directory is reported as a stale lock on the strength of a pid
+  # file that lives somewhere else entirely.
   rm -rf "$legacy" "$derived"
   mkdir -p "$legacy" "$tmp/pidsource"
   printf '%s\n' "$dead" >"$tmp/pidsource/pid"
@@ -4773,6 +4833,20 @@ test_legacy_global_lock_override_skips_check() {
   rm -rf "$legacy"
 }
 
+test_legacy_global_lock_residual_recorded() {
+  local block
+  # The guard REDUCES, and does not eliminate, the collision window (roborev job 178, Half B: a
+  # pre-#3467 supervisor STARTING AFTER our check cannot be stopped without machine-global exclusion,
+  # which #3393's owner ruling forbids). That is a documented risk only if it is actually written down
+  # where the guard is read. Pins the RECORD, not its prose.
+  block="$(sed -n '/^# RESIDUAL (#3549/,/^supervisor_legacy_lock_guard()/p' "$SUPERVISOR")"
+  if [[ -n "$block" && "$block" == *"#3393"* && "$block" == *"REDUCES"* ]]; then
+    pass "legacy-lock RESIDUAL: the guard records the unclosed later-start window, why #3393 forbids closing it, and that the guard reduces rather than eliminates the collision window"
+  else
+    fail "legacy-lock-residual: no RESIDUAL block naming #3393 and the reduction is recorded at the guard"
+  fi
+}
+
 test_legacy_global_lock_removal_condition_recorded() {
   local block
   # AC6: the check is REMOVABLE, and the condition under which it may be dropped is RECORDED IN THE
@@ -4797,581 +4871,13 @@ test_legacy_global_lock_removal_condition_recorded() {
 }
 
 t test_legacy_global_lock_refuses_live_holder
-t test_legacy_global_lock_reclaims_confirmed_stale
+t test_legacy_global_lock_refuses_stale_holder
 t test_legacy_global_lock_unknown_shapes_refuse
 t test_legacy_global_lock_symlink_shapes_refuse
 t test_legacy_global_lock_override_skips_check
 t test_legacy_global_lock_removal_condition_recorded
-
-# ---------------------------------------------------------------------------
-# Tests 44..48-lock (#3549, roborev job 178 High): THE STALE-RECLAIM REPLACEMENT RACE.
-#
-# `mv` is atomic with respect to the NAME, not the OBJECT. Between classifying the legacy lock
-# `stale <pidX>` and renaming it aside, a fresh pre-#3467 supervisor can reclaim it itself and `mkdir`
-# a NEW lock recording its own LIVE pidY at the same name. The pre-fix guard then renamed THAT live
-# directory aside and `rm -rf`d it — destroying a live holder's lock and co-running with it.
-#
-# DRIVEN DETERMINISTICALLY, NEVER RACED. These cases do not start a competitor and hope for an
-# interleaving (a sleep-race test is flaky by construction). They interpose at the seam: a shell
-# function named `mv`, defined in the driving shell BEFORE the supervisor is sourced, so the SHIPPED
-# guard's own `mv` call is the one that runs the racer's actions and then performs the real rename.
-# The revalidation under test is therefore the shipped code, and every pid involved is a REAL process.
-# ---------------------------------------------------------------------------
-
-# legacy_lock_mv_shim <file> — write the interposing `mv`. Fires ONCE (the guard's reclaim rename) and
-# is a pass-through afterwards. Behaviour selected by SHIM_MODE:
-#   replace          racer replaces the object at the legacy name BEFORE our rename (pid: SHIM_PID)
-#   repid            the object keeps its name but records a DIFFERENT pid (SHIM_PID) than we judged
-#   repid-occupy     repid, and the freed name is re-occupied (SHIM_PID2) while we hold the aside
-#   repid-restorefail repid, and the RESTORE `mv` is failed DETERMINISTICALLY at this seam
-#   retake           our rename is honoured, then the freed name is retaken by a LIVE holder (SHIM_PID)
-#   decoy-file|decoy-dir|decoy-link
-#                    a preserved aside from an EARLIER run already occupies the PID-DERIVED destination
-#                    `$SHIM_LEGACY.stale.$$` (as a file / a directory / a symlink to a directory)
-#   competitor       a REAL SECOND PROCESS performs the whole pre-#3467 reclaim-and-acquire during a
-#                    FORCED PAUSE between the guard's classify and its act; the shim BLOCKS until that
-#                    process holds the lock and is alive, then lets the real rename proceed
-#   competitor-restore
-#                    as `competitor`, and a SECOND real process takes the freed legacy name at the
-#                    guard's RESTORE seam — whichever primitive that code reaches (the exclusive
-#                    `mkdir`, or the `mv` a check-then-act restore would use)
-#
-# NOTHING IN THESE MODES DEPENDS ON FILESYSTEM PERMISSIONS, uid or umask (roborev job 179, Low):
-# `chmod` is not a control on a root run and this suite supports root, so a case that needs an
-# operation to fail makes it fail AT THE SEAM instead.
-legacy_lock_mv_shim() {
-  cat >"$1" <<'SHIM'
-# _shim_race_in <ready-file> — run the REAL competitor process and BLOCK until it holds the lock. This
-# is the controllable pause: the interleaving is FORCED, never raced against a sleep.
-_shim_race_in() {
-  local ready="$1" n=0
-  command bash "$SHIM_COMPETITOR" "$SHIM_LEGACY" "$ready" >/dev/null 2>&1 &
-  while [[ ! -s "$ready" ]] && (( n < 400 )); do command sleep 0.05; n=$((n + 1)); done
-}
-
-# The guard's RESTORE reaches an exclusive `mkdir` (the arbitrated form) — interpose there too, so the
-# same forced interleaving is delivered to whichever primitive the code under test uses.
-mkdir() {
-  if [[ "${SHIM_MODE:-}" == competitor-restore && "${_SHIM_FIRED:-no}" == yes && "${_SHIM_RESTORE_RACED:-no}" == no ]]; then
-    _SHIM_RESTORE_RACED=yes
-    : >"$SHIM_MARK.restore"
-    _shim_race_in "$SHIM_READY2"
-  fi
-  command mkdir "$@"
-}
-
-mv() {
-  if [[ "${_SHIM_FIRED:-no}" == yes ]]; then
-    # Every `mv` after the reclaim rename — on the paths that reach here, the guard's RESTORE.
-    if [[ "${SHIM_MODE:-}" == repid-restorefail ]]; then
-      : >"$SHIM_MARK.restore"
-      printf 'mv: shimmed deterministic restore failure\n' >&2
-      return 1
-    fi
-    if [[ "${SHIM_MODE:-}" == competitor-restore && "${_SHIM_RESTORE_RACED:-no}" == no ]]; then
-      _SHIM_RESTORE_RACED=yes
-      : >"$SHIM_MARK.restore"
-      _shim_race_in "$SHIM_READY2"
-    fi
-    command mv "$@"; return $?
-  fi
-  _SHIM_FIRED=yes
-  : >"$SHIM_MARK"
-  case "${SHIM_MODE:-}" in
-    replace)
-      command rm -rf "$SHIM_LEGACY"
-      command mkdir -p "$SHIM_LEGACY"
-      printf '%s\n' "$SHIM_PID" >"$SHIM_LEGACY/pid"
-      command mv "$@"
-      ;;
-    repid | repid-occupy | repid-restorefail)
-      printf '%s\n' "$SHIM_PID" >"$SHIM_LEGACY/pid"
-      command mv "$@" || return $?
-      case "$SHIM_MODE" in
-        repid-occupy)
-          command mkdir -p "$SHIM_LEGACY"
-          printf '%s\n' "$SHIM_PID2" >"$SHIM_LEGACY/pid"
-          ;;
-      esac
-      ;;
-    retake)
-      command mv "$@" || return $?
-      command mkdir -p "$SHIM_LEGACY"
-      printf '%s\n' "$SHIM_PID" >"$SHIM_LEGACY/pid"
-      ;;
-    decoy-file | decoy-dir | decoy-link)
-      # THIS SHELL IS THE GUARD'S OWN SHELL, so `$$` here is exactly the `$$` a pid-derived aside name
-      # would interpolate. Plant a previously-preserved aside at that name and record where, so the
-      # case can assert the guard neither read it nor touched it.
-      _decoy="$SHIM_LEGACY.stale.$$"
-      case "$SHIM_MODE" in
-        decoy-file) printf 'preserved-by-an-earlier-run\n' >"$_decoy" ;;
-        decoy-dir)
-          command mkdir -p "$_decoy"
-          printf '%s\n' "$SHIM_PID" >"$_decoy/pid"
-          ;;
-        decoy-link)
-          command mkdir -p "$_decoy.target"
-          command ln -s "$_decoy.target" "$_decoy"
-          ;;
-      esac
-      printf '%s\n' "$_decoy" >"$SHIM_MARK.decoy"
-      command mv "$@"
-      ;;
-    competitor | competitor-restore)
-      _shim_race_in "$SHIM_READY"
-      command mv "$@"
-      ;;
-    *) command mv "$@" ;;
-  esac
-}
-SHIM
-}
-
-# legacy_lock_competitor_script <file> — a REAL SECOND PROCESS that runs the PRE-#3467 supervisor's own
-# reclaim-and-acquire (`mkdir` fails -> read pid -> if dead `mv` aside -> `rm -rf` -> `mkdir` -> write
-# its own pid) and then STAYS ALIVE holding the lock, so the pid recorded in the lock is genuinely live.
-# Argv: <legacy-lock-path> <ready-file>. The ready file is written LAST and carries the live pid, which
-# is what makes the interleaving observable rather than timed.
-legacy_lock_competitor_script() {
-  cat >"$1" <<'COMP'
-#!/usr/bin/env bash
-set -uo pipefail
-L="$1"; READY="$2"
-if ! mkdir "$L" 2>/dev/null; then
-  p=""
-  [[ -f "$L/pid" ]] && p="$(cat "$L/pid" 2>/dev/null || true)"
-  if [[ -n "$p" ]] && kill -0 "$p" 2>/dev/null; then printf 'BLOCKED\n' >"$READY"; exit 2; fi
-  if mv "$L" "$L.compaside.$$" 2>/dev/null; then rm -rf "$L.compaside.$$"; fi
-  mkdir "$L" 2>/dev/null || { printf 'LOST\n' >"$READY"; exit 3; }
-fi
-printf '%s\n' "$$" >"$L/pid"
-printf '%s\n' "$$" >"$READY"
-# `exec` keeps the SAME pid alive, so the pid recorded in the lock stays live for the whole case.
-exec sleep 300
-COMP
-}
-
-# legacy_lock_drive_shimmed <tmp> <lane> <shim> <mode> <pid> [pid2] — as `legacy_lock_drive`, with the
-# shim sourced FIRST so it is in scope for the guard's own `mv`.
-legacy_lock_drive_shimmed() {
-  local tmp="$1" lane="$2" shim="$3" mode="$4" pid="$5" pid2="${6:-}"
-  local body='source "$2"; source "$1"; acquire_lock; printf "ACQUIRED=%s\n" "$SUPERVISOR_LOCK"; [[ -d "$SUPERVISOR_LOCK" ]] && printf "LOCKDIR=yes\n"; exit 0'
-  env -u SUPERVISOR_LOCK TMPDIR="$tmp" LANE_ID="$lane" LOCK_CMD="" CLAIM_CMD="" \
-    SHIM_MODE="$mode" SHIM_PID="$pid" SHIM_PID2="$pid2" \
-    SHIM_LEGACY="$tmp/cqlite-worker-supervisor.lock" SHIM_MARK="$tmp/.shim-fired" \
-    SHIM_COMPETITOR="${LEGACY_LOCK_COMPETITOR:-}" \
-    SHIM_READY="$tmp/.competitor-ready" SHIM_READY2="$tmp/.competitor2-ready" \
-    bash -c "$body" _ "$SUPERVISOR" "$shim" 2>&1
-}
-
-# A REAL reaped pid — started and waited, so the kernel has genuinely released it.
-legacy_lock_reaped_pid() {
-  local p
-  sleep 0.1 &
-  p=$!
-  wait "$p" 2>/dev/null || true
-  printf '%s\n' "$p"
-}
-
-test_legacy_global_lock_replacement_race_preserves_live_lock() {
-  local d tmp lane legacy dead racer out rc derived aside
-  d="$(new_case_dir)"
-  common_env "$d"
-  tmp="$d/tmp"; lane="lane3549repl$$"
-  mkdir -p "$tmp"
-  legacy="$tmp/cqlite-worker-supervisor.lock"
-  derived="$tmp/cqlite-worker-supervisor-$lane.lock"
-  legacy_lock_mv_shim "$d/mvshim.sh"
-
-  dead="$(legacy_lock_reaped_pid)"
-  mkdir -p "$legacy"
-  printf '%s\n' "$dead" >"$legacy/pid"
-  sleep 300 &
-  racer=$!
-
-  # THE RACER WINS between classification and rename: the object at the legacy name is a DIFFERENT
-  # lock recording a LIVE pid by the time our `mv` runs.
-  out="$(legacy_lock_drive_shimmed "$tmp" "$lane" "$d/mvshim.sh" replace "$racer")"; rc=$?
-
-  if [[ -e "$tmp/.shim-fired" ]]; then
-    pass "legacy-lock replacement NON-VACUITY: the interposed rename FIRED, so the guard really executed its reclaim path with the racer's lock in place"
-  else
-    fail "legacy-lock-replacement-vacuous: the shim never fired; the guard did not reach its reclaim rename and this case measured nothing"
-  fi
-  if [[ "$rc" -ne 0 ]] && legacy_refusal_ok "$out" && [[ "$out" == *"$racer"* ]]; then
-    pass "legacy-lock replacement: a lock REPLACED between the check and the rename REFUSES the start, naming the foreign pid $racer it refused to delete"
-  else
-    fail "legacy-lock-replacement: rc=$rc out=[$out] — expected the LEGACY refusal naming the racer pid $racer"
-  fi
-  # THE PROPERTY: the live holder's lock is STILL THERE, unchanged. This is the byte the pre-fix code
-  # deleted.
-  if [[ -d "$legacy" && -f "$legacy/pid" && "$(cat "$legacy/pid")" == "$racer" ]]; then
-    pass "legacy-lock replacement: the LIVE holder's lock survives at $legacy with its own pid $racer — the guard restored what it renamed aside instead of destroying it"
-  else
-    fail "legacy-lock-replacement-destroyed: the live lock at $legacy is gone or rewritten (pid now [$([[ -f "$legacy/pid" ]] && cat "$legacy/pid" || echo ABSENT)]); a live holder's lock was destroyed"
-  fi
-  if [[ "$out" != *"ACQUIRED="* && ! -e "$derived" ]]; then
-    pass "legacy-lock replacement: the refusal acquired NOTHING (no ACQUIRED line, no per-lane lock)"
-  else
-    fail "legacy-lock-replacement-sideeffect: out=[$out] derived-exists=$([[ -e "$derived" ]] && echo yes || echo no)"
-  fi
-  aside="$(printf '%s\n' "$tmp"/*.aside.* 2>/dev/null)"
-  if ! compgen -G "$tmp/*.aside.*" >/dev/null; then
-    pass "legacy-lock replacement: no renamed-aside residue is left behind (the object went back to its own name)"
-  else
-    fail "legacy-lock-replacement-residue: a renamed-aside directory survives at [$aside]"
-  fi
-
-  kill "$racer" 2>/dev/null || true
-  wait "$racer" 2>/dev/null || true
-  rm -rf "$legacy" "$derived"
-}
-
-test_legacy_global_lock_identity_mismatch_restores() {
-  local d tmp lane legacy dead other out rc derived
-  d="$(new_case_dir)"
-  common_env "$d"
-  tmp="$d/tmp"; lane="lane3549ident$$"
-  mkdir -p "$tmp"
-  legacy="$tmp/cqlite-worker-supervisor.lock"
-  derived="$tmp/cqlite-worker-supervisor-$lane.lock"
-  legacy_lock_mv_shim "$d/mvshim.sh"
-
-  dead="$(legacy_lock_reaped_pid)"
-  other="$(legacy_lock_reaped_pid)"
-  mkdir -p "$legacy"
-  printf '%s\n' "$dead" >"$legacy/pid"
-
-  # IDENTITY ALONE: the pid the renamed-aside object records is ALSO dead, so only the identity check
-  # can refuse here. A guard that merely re-tested liveness would delete someone else's lock.
-  out="$(legacy_lock_drive_shimmed "$tmp" "$lane" "$d/mvshim.sh" repid "$other")"; rc=$?
-
-  if [[ "$rc" -ne 0 ]] && legacy_refusal_ok "$out" && [[ "$out" == *"$other"* && "$out" == *"RESTORED"* ]]; then
-    pass "legacy-lock identity: a renamed-aside lock recording pid $other, NOT the pid $dead judged dead, REFUSES and is RESTORED — identity, not just liveness, is required before a delete"
-  else
-    fail "legacy-lock-identity: rc=$rc out=[$out] — expected a refusal naming pid $other and a RESTORED lock"
-  fi
-  if [[ -d "$legacy" && "$(cat "$legacy/pid" 2>/dev/null)" == "$other" ]]; then
-    pass "legacy-lock identity: the unidentified lock is back at $legacy untouched (pid $other), and nothing was deleted"
-  else
-    fail "legacy-lock-identity-lost: $legacy holds [$(cat "$legacy/pid" 2>/dev/null || echo ABSENT)] (expected $other)"
-  fi
-  if [[ "$out" != *"ACQUIRED="* && ! -e "$derived" ]]; then
-    pass "legacy-lock identity: the refusal acquired nothing"
-  else
-    fail "legacy-lock-identity-sideeffect: out=[$out]"
-  fi
-  rm -rf "$legacy" "$derived"
-}
-
-test_legacy_global_lock_restore_blocked_and_failed_refuse() {
-  local d tmp lane legacy dead other racer out rc
-  d="$(new_case_dir)"
-  common_env "$d"
-  tmp="$d/tmp"; lane="lane3549rest$$"
-  legacy_lock_mv_shim "$d/mvshim.sh"
-
-  # (a) THE NAME IS RE-OCCUPIED while we hold the aside. `mv <dir> <existing dir>` would move ours
-  # INSIDE the racer's lock, so the restore must REFUSE and PRESERVE, never clobber.
-  tmp="$d/tmp-a"; mkdir -p "$tmp"
-  legacy="$tmp/cqlite-worker-supervisor.lock"
-  dead="$(legacy_lock_reaped_pid)"
-  other="$(legacy_lock_reaped_pid)"
-  mkdir -p "$legacy"; printf '%s\n' "$dead" >"$legacy/pid"
-  sleep 300 &
-  racer=$!
-  out="$(legacy_lock_drive_shimmed "$tmp" "$lane" "$d/mvshim.sh" repid-occupy "$other" "$racer")"; rc=$?
-  if [[ "$rc" -ne 0 ]] && legacy_refusal_ok "$out" && [[ "$out" == *"PRESERVED at"* && "$out" == *".aside."* ]]; then
-    pass "legacy-lock restore-blocked: when the freed name is re-occupied, the guard REFUSES and PRESERVES the renamed-aside lock, naming the path an operator must restore"
-  else
-    fail "legacy-lock-restore-blocked: rc=$rc out=[$out] — expected a refusal naming a PRESERVED aside path"
-  fi
-  if [[ "$(cat "$legacy/pid" 2>/dev/null)" == "$racer" ]] && compgen -G "$tmp/*.aside.*/lock/pid" >/dev/null; then
-    pass "legacy-lock restore-blocked: the re-occupying LIVE lock (pid $racer) is NOT clobbered and the aside object still exists — nothing was deleted either way"
-  else
-    fail "legacy-lock-restore-blocked-clobber: legacy pid=[$(cat "$legacy/pid" 2>/dev/null || echo ABSENT)] aside-present=$(compgen -G "$tmp/*.aside.*/lock/pid" >/dev/null && echo yes || echo no)"
-  fi
-  kill "$racer" 2>/dev/null || true
-  wait "$racer" 2>/dev/null || true
-
-  # (b) THE RESTORE ITSELF FAILS. Refuse with a diagnostic that says the lock could not be put back
-  # and names the aside path — never proceed, never delete.
-  #
-  # THE FAILURE IS INJECTED AT THE SEAM, NOT VIA `chmod` (roborev job 179, Low). Removing write
-  # permission from the container is not a control on a PRIVILEGED run — root renames inside an
-  # unwritable directory regardless — so under root the restore would SUCCEED and this case would
-  # false-FAIL, on a suite that explicitly supports root elsewhere. The interposed `mv` already exists
-  # for the replacement cases, so the restore call is failed there instead: deterministic, and
-  # identical for every uid.
-  tmp="$d/tmp-b"; mkdir -p "$tmp"
-  legacy="$tmp/cqlite-worker-supervisor.lock"
-  dead="$(legacy_lock_reaped_pid)"
-  other="$(legacy_lock_reaped_pid)"
-  mkdir -p "$legacy"; printf '%s\n' "$dead" >"$legacy/pid"
-  out="$(legacy_lock_drive_shimmed "$tmp" "$lane" "$d/mvshim.sh" repid-restorefail "$other")"; rc=$?
-  if [[ -e "$tmp/.shim-fired.restore" ]]; then
-    pass "legacy-lock restore-failed NON-VACUITY: the guard really ATTEMPTED the restore rename (the shim failed that specific call), so this case measured the failed-restore branch"
-  else
-    fail "legacy-lock-restore-failed-vacuous: the restore mv was never attempted; this case measured nothing"
-  fi
-  if [[ "$rc" -ne 0 ]] && legacy_refusal_ok "$out" && [[ "$out" == *"RESTORE FAILED"* && "$out" == *".aside."* ]]; then
-    pass "legacy-lock restore-failed: a restore that cannot be performed REFUSES, says so, and names the preserved aside path"
-  else
-    fail "legacy-lock-restore-failed: rc=$rc out=[$out] — expected a RESTORE FAILED refusal naming the aside path"
-  fi
-  if compgen -G "$tmp/*.aside.*/lock/pid" >/dev/null; then
-    pass "legacy-lock restore-failed: the aside object still exists, so an operator can put it back by hand"
-  else
-    fail "legacy-lock-restore-failed-deleted: the aside object was deleted after a failed restore"
-  fi
-  rm -rf "$d/tmp-a" "$d/tmp-b"
-}
-
-test_legacy_global_lock_recheck_after_reclaim() {
-  local d tmp lane legacy dead racer out rc derived
-  d="$(new_case_dir)"
-  common_env "$d"
-  tmp="$d/tmp"; lane="lane3549retk$$"
-  mkdir -p "$tmp"
-  legacy="$tmp/cqlite-worker-supervisor.lock"
-  derived="$tmp/cqlite-worker-supervisor-$lane.lock"
-  legacy_lock_mv_shim "$d/mvshim.sh"
-
-  dead="$(legacy_lock_reaped_pid)"
-  mkdir -p "$legacy"; printf '%s\n' "$dead" >"$legacy/pid"
-  sleep 300 &
-  racer=$!
-
-  # The reclaim itself is legitimate (the aside IS the dead lock we judged), but the freed name is
-  # taken by a LIVE pre-#3467 supervisor immediately afterwards. The post-reclaim recheck must catch
-  # it rather than co-run. This NARROWS the later-start window; see the RESIDUAL block in the guard.
-  out="$(legacy_lock_drive_shimmed "$tmp" "$lane" "$d/mvshim.sh" retake "$racer")"; rc=$?
-
-  if [[ "$rc" -ne 0 ]] && legacy_refusal_ok "$out" && [[ "$out" == *"RETAKEN"* && "$out" == *"$racer"* ]]; then
-    pass "legacy-lock recheck: a legacy name RETAKEN by a LIVE holder immediately after a legitimate reclaim refuses the start (recorded pid $racer)"
-  else
-    fail "legacy-lock-recheck: rc=$rc out=[$out] — expected a RETAKEN refusal naming pid $racer"
-  fi
-  if [[ "$(cat "$legacy/pid" 2>/dev/null)" == "$racer" && "$out" != *"ACQUIRED="* && ! -e "$derived" ]]; then
-    pass "legacy-lock recheck: the retaking holder's lock is untouched and the refusal acquired nothing"
-  else
-    fail "legacy-lock-recheck-sideeffect: legacy pid=[$(cat "$legacy/pid" 2>/dev/null || echo ABSENT)] out=[$out]"
-  fi
-  kill "$racer" 2>/dev/null || true
-  wait "$racer" 2>/dev/null || true
-  rm -rf "$legacy" "$derived"
-}
-
-test_legacy_global_lock_residual_recorded() {
-  local block
-  # The guard REDUCES, and does not eliminate, the collision window (roborev job 178, Half B: a
-  # pre-#3467 supervisor STARTING AFTER our check cannot be stopped without machine-global exclusion,
-  # which #3393's owner ruling forbids). That is a documented risk only if it is actually written down
-  # where the guard is read. Pins the RECORD, not its prose.
-  block="$(sed -n '/^# RESIDUAL (#3549/,/^supervisor_legacy_lock_guard()/p' "$SUPERVISOR")"
-  if [[ -n "$block" && "$block" == *"#3393"* && "$block" == *"REDUCES"* ]]; then
-    pass "legacy-lock RESIDUAL: the guard records the unclosed later-start window, why #3393 forbids closing it, and that the guard reduces rather than eliminates the collision window"
-  else
-    fail "legacy-lock-residual: no RESIDUAL block naming #3393 and the reduction is recorded at the guard"
-  fi
-}
-
-# The three COLLISION SHAPES at the aside destination (#3549, roborev job 179 Medium).
-#
-# THE DEFECT: the aside destination used to be `$legacy.stale.$$`, a PID-DERIVED name. The
-# refuse-and-preserve paths deliberately LEAVE an aside behind, so after ordinary OS pid reuse a later
-# run's destination ALREADY EXISTS — and `mv` does not fail on an existing directory, it MOVES THE
-# SOURCE INSIDE IT. The pid re-identification then reads the PREVIOUS preserved lock's pid, and every
-# decision after it is about the wrong object (including a restore that moves the whole nested thing
-# back onto the legacy name).
-#
-# THE PROPERTY: the destination is a child of a FRESHLY CREATED private directory, so it is provably
-# absent and a planted object at the pid-derived name is IRRELEVANT — the reclaim completes and the
-# planted object is neither read nor touched. Each shape breaks the pid-derived scheme differently:
-#   file     `mv <dir> <existing file>` FAILS outright ("cannot overwrite non-directory")
-#   dir      NESTS silently — the re-identification reads the decoy's pid
-#   symlink  follows the link and nests inside its TARGET, corrupting a third directory too
-# The decoy pid is itself DEAD, so a pid-derived run reaches the identity branch rather than the
-# liveness one: identity, not liveness, is what the shapes are about.
-test_legacy_global_lock_aside_destination_collisions() {
-  local d shape tmp lane legacy derived dead other out rc decoy
-  d="$(new_case_dir)"
-  common_env "$d"
-  legacy_lock_mv_shim "$d/mvshim.sh"
-
-  for shape in file dir link; do
-    tmp="$d/tmp-$shape"; mkdir -p "$tmp"
-    lane="lane3549col${shape}$$"
-    legacy="$tmp/cqlite-worker-supervisor.lock"
-    derived="$tmp/cqlite-worker-supervisor-$lane.lock"
-    dead="$(legacy_lock_reaped_pid)"
-    other="$(legacy_lock_reaped_pid)"
-    mkdir -p "$legacy"; printf '%s\n' "$dead" >"$legacy/pid"
-
-    out="$(legacy_lock_drive_shimmed "$tmp" "$lane" "$d/mvshim.sh" "decoy-$shape" "$other")"; rc=$?
-    decoy="$(cat "$tmp/.shim-fired.decoy" 2>/dev/null || true)"
-
-    if [[ -e "$tmp/.shim-fired" && -n "$decoy" ]]; then
-      pass "legacy-lock collision ($shape) NON-VACUITY: the interposed rename FIRED and planted a preserved aside at the pid-derived destination [$decoy]"
-    else
-      fail "legacy-lock-collision-vacuous-$shape: the shim never fired or planted nothing (decoy=[$decoy]); this case measured nothing"
-    fi
-
-    # THE RECLAIM COMPLETES. Under a pid-derived destination this is where each shape breaks: the
-    # `file` shape refuses ("stale reclaim FAILED"), and `dir`/`link` nest and then refuse on the
-    # decoy's pid instead of ours.
-    # LOCKDIR=yes is printed by the driver WHILE the lock is held: the supervisor's own EXIT trap
-    # removes the per-lane lock, so a post-exit `-d` test could never see it.
-    if [[ "$rc" -eq 0 ]] && [[ "$out" == *"ACQUIRED=$derived"* && "$out" == *"LOCKDIR=yes"* ]]; then
-      pass "legacy-lock collision ($shape): a pre-existing object at the pid-derived aside name does NOT affect the reclaim — the guard's own destination was freshly created, so the start SUCCEEDS"
-    else
-      fail "legacy-lock-collision-$shape: rc=$rc out=[$out] — expected a completed reclaim and an ACQUIRED per-lane lock"
-    fi
-
-    # THE STALE LEGACY LOCK IS GONE and no aside residue survives a completed reclaim.
-    if [[ ! -e "$legacy" ]] && ! compgen -G "$tmp/*.aside.*" >/dev/null; then
-      pass "legacy-lock collision ($shape): the stale legacy lock is gone and the private aside directory was cleaned up"
-    else
-      fail "legacy-lock-collision-residue-$shape: legacy-exists=$([[ -e "$legacy" ]] && echo yes || echo no) aside-residue=$(compgen -G "$tmp/*.aside.*" >/dev/null && echo yes || echo no)"
-    fi
-
-    # THE PLANTED OBJECT IS UNTOUCHED — shape-exact, because "still exists" would pass on a directory
-    # that had our lock nested inside it.
-    case "$shape" in
-      file)
-        if [[ -f "$decoy" && ! -L "$decoy" && "$(cat "$decoy" 2>/dev/null)" == "preserved-by-an-earlier-run" ]]; then
-          pass "legacy-lock collision (file): the planted FILE at the pid-derived name is still a regular file with its original content"
-        else
-          fail "legacy-lock-collision-file-touched: [$decoy] is no longer the planted regular file (content=[$(cat "$decoy" 2>/dev/null || echo ABSENT)])"
-        fi
-        ;;
-      dir)
-        if [[ -d "$decoy" && ! -L "$decoy" && "$(cat "$decoy/pid" 2>/dev/null)" == "$other" && ! -e "$decoy/cqlite-worker-supervisor.lock" && ! -e "$decoy/lock" ]]; then
-          pass "legacy-lock collision (dir): the planted DIRECTORY still records its own pid $other and nothing was NESTED inside it"
-        else
-          fail "legacy-lock-collision-dir-nested: [$decoy] pid=[$(cat "$decoy/pid" 2>/dev/null || echo ABSENT)] contents=[$(ls -A "$decoy" 2>/dev/null | tr '\n' ' ')]"
-        fi
-        ;;
-      link)
-        if [[ -L "$decoy" && "$(readlink "$decoy")" == "$decoy.target" ]] && [[ -z "$(ls -A "$decoy.target" 2>/dev/null)" ]]; then
-          pass "legacy-lock collision (link): the planted SYMLINK still points at its own target and nothing was nested THROUGH it into that target"
-        else
-          fail "legacy-lock-collision-link-followed: [$decoy] link=[$(readlink "$decoy" 2>/dev/null || echo NOT-A-LINK)] target-contents=[$(ls -A "$decoy.target" 2>/dev/null | tr '\n' ' ')]"
-        fi
-        ;;
-    esac
-    rm -rf "$tmp"
-  done
-}
-
-# THE RACE ITSELF, with a REAL SECOND PROCESS and a FORCED ORDERING (#3549, lead ruling: "test the
-# race, not just the outcome — a test that reclaims a stale lock and passes proves nothing about the
-# interleaving").
-#
-# HOW THE ORDERING IS FORCED, AND WHY THERE IS NO SEAM IN THE SHIPPED SCRIPT. The pause is the
-# interposed primitive itself: the guard's OWN `mv` (and, on the restore path, its own `mkdir`) runs the
-# competitor and BLOCKS until that process has taken the lock and is alive. So the pause sits exactly
-# between the guard's classify and its act, is observable (a ready file carrying the live pid) rather
-# than timed, and the shipped `worker-supervisor.sh` gains NO test-only hook — a seam in the shipped
-# script is one more thing a real invoker can set, and none is needed here.
-#
-# THE COMPETITOR IS A REAL PROCESS running the pre-#3467 reclaim-and-acquire and then `exec sleep`, so
-# the pid recorded in the lock is genuinely live for the whole case — nothing is stubbed or simulated.
-test_legacy_global_lock_real_competing_reclaim() {
-  local d tmp lane legacy derived dead out rc comp comp2 aside
-  d="$(new_case_dir)"
-  common_env "$d"
-  legacy_lock_mv_shim "$d/mvshim.sh"
-  legacy_lock_competitor_script "$d/competitor.sh"
-  LEGACY_LOCK_COMPETITOR="$d/competitor.sh"
-
-  # (a) THE COMPETITOR ACTS FIRST. It reclaims the dead lock itself and installs its OWN live pid, so
-  # our rename detaches a LIVE HOLDER'S LOCK. The property is not merely "we refuse": it is that the
-  # live holder STILL HAS ITS LOCK afterwards — detaching it and failing to put it back would leave it
-  # running lockless, which is the harm a later pre-#3467 supervisor would then co-run with.
-  tmp="$d/tmp-a"; mkdir -p "$tmp"
-  lane="lane3549raceA$$"
-  legacy="$tmp/cqlite-worker-supervisor.lock"
-  derived="$tmp/cqlite-worker-supervisor-$lane.lock"
-  dead="$(legacy_lock_reaped_pid)"
-  mkdir -p "$legacy"; printf '%s\n' "$dead" >"$legacy/pid"
-
-  out="$(legacy_lock_drive_shimmed "$tmp" "$lane" "$d/mvshim.sh" competitor "")"; rc=$?
-  comp="$(cat "$tmp/.competitor-ready" 2>/dev/null || true)"
-
-  if [[ -e "$tmp/.shim-fired" ]] && [[ "$comp" =~ ^[0-9]+$ ]] && kill -0 "$comp" 2>/dev/null; then
-    pass "legacy-lock RACE (a) NON-VACUITY: the forced pause fired and a REAL second process (pid $comp) completed the competing pre-#3467 reclaim and is ALIVE holding the lock"
-  else
-    fail "legacy-lock-race-a-vacuous: shim-fired=$([[ -e "$tmp/.shim-fired" ]] && echo yes || echo no) competitor=[$comp] alive=$(kill -0 "$comp" 2>/dev/null && echo yes || echo no) — the interleaving was not forced and this case measured nothing"
-  fi
-  if [[ "$rc" -ne 0 ]] && legacy_refusal_ok "$out" && [[ "$out" == *"$comp"* ]]; then
-    pass "legacy-lock RACE (a): a competing reclaim that wins the classify->act window REFUSES the start, naming the live pid $comp it would not delete"
-  else
-    fail "legacy-lock-race-a: rc=$rc out=[$out] — expected the LEGACY refusal naming the competitor pid $comp"
-  fi
-  # THE PROPERTY the lead named: the live holder is NOT left lockless.
-  if [[ -d "$legacy" && "$(cat "$legacy/pid" 2>/dev/null)" == "$comp" ]] && kill -0 "$comp" 2>/dev/null; then
-    pass "legacy-lock RACE (a): the live competitor (pid $comp) still holds its lock at $legacy — it was put back, not destroyed and not left detached"
-  else
-    fail "legacy-lock-race-a-lockless: legacy pid=[$(cat "$legacy/pid" 2>/dev/null || echo ABSENT)] competitor-alive=$(kill -0 "$comp" 2>/dev/null && echo yes || echo no) — a live holder was left without its lock"
-  fi
-  if [[ "$out" != *"ACQUIRED="* && ! -e "$derived" ]] && ! compgen -G "$tmp/*.aside.*" >/dev/null; then
-    pass "legacy-lock RACE (a): the refusal acquired nothing and left no aside residue"
-  else
-    fail "legacy-lock-race-a-sideeffect: out=[$out] derived=$([[ -e "$derived" ]] && echo yes || echo no) residue=$(compgen -G "$tmp/*.aside.*" >/dev/null && echo yes || echo no)"
-  fi
-  kill "$comp" 2>/dev/null || true
-
-  # (b) A SECOND REAL PROCESS TAKES THE FREED NAME AT THE RESTORE SEAM. The restore must be arbitrated
-  # by an exclusive create, not by a pre-check: a check-then-act restore whose `mv` runs after the name
-  # is retaken NESTS our aside INSIDE the new holder's lock.
-  tmp="$d/tmp-b"; mkdir -p "$tmp"
-  lane="lane3549raceB$$"
-  legacy="$tmp/cqlite-worker-supervisor.lock"
-  derived="$tmp/cqlite-worker-supervisor-$lane.lock"
-  dead="$(legacy_lock_reaped_pid)"
-  mkdir -p "$legacy"; printf '%s\n' "$dead" >"$legacy/pid"
-
-  out="$(legacy_lock_drive_shimmed "$tmp" "$lane" "$d/mvshim.sh" competitor-restore "")"; rc=$?
-  comp="$(cat "$tmp/.competitor-ready" 2>/dev/null || true)"
-  comp2="$(cat "$tmp/.competitor2-ready" 2>/dev/null || true)"
-
-  if [[ -e "$tmp/.shim-fired.restore" ]] && [[ "$comp2" =~ ^[0-9]+$ ]] && kill -0 "$comp2" 2>/dev/null; then
-    pass "legacy-lock RACE (b) NON-VACUITY: the guard reached its RESTORE primitive and a REAL second process (pid $comp2) took the freed legacy name first and is ALIVE"
-  else
-    fail "legacy-lock-race-b-vacuous: restore-seam=$([[ -e "$tmp/.shim-fired.restore" ]] && echo yes || echo no) competitor2=[$comp2] alive=$(kill -0 "$comp2" 2>/dev/null && echo yes || echo no) — the restore interleaving was not forced"
-  fi
-  if [[ "$rc" -ne 0 ]] && legacy_refusal_ok "$out" && [[ "$out" == *"PRESERVED at"* && "$out" == *".aside."* ]]; then
-    pass "legacy-lock RACE (b): losing the freed name to a real process makes the RESTORE observe a primitive failure — the guard PRESERVES its aside and names it, rather than acting on the wrong object"
-  else
-    fail "legacy-lock-race-b: rc=$rc out=[$out] — expected a refusal naming a PRESERVED aside path"
-  fi
-  # THE PROPERTY: nothing was nested into, or written over, the new holder's lock.
-  if [[ "$(cat "$legacy/pid" 2>/dev/null)" == "$comp2" ]] && [[ ! -e "$legacy/lock" ]] && [[ -z "$(command ls -A "$legacy" 2>/dev/null | command grep -v '^pid$' || true)" ]]; then
-    pass "legacy-lock RACE (b): the new holder's lock still records ONLY its own pid $comp2 — our aside was not nested inside it and not clobbered over it"
-  else
-    fail "legacy-lock-race-b-nested: legacy pid=[$(cat "$legacy/pid" 2>/dev/null || echo ABSENT)] contents=[$(command ls -A "$legacy" 2>/dev/null | tr '\n' ' ')] — the restore acted on the wrong object"
-  fi
-  aside="$(compgen -G "$tmp/*.aside.*/lock/pid" || true)"
-  if [[ -n "$aside" && "$(cat "$aside" 2>/dev/null)" == "$comp" ]]; then
-    pass "legacy-lock RACE (b): the first competitor's lock (pid $comp) is PRESERVED intact in the aside — nothing was deleted on either side of the race"
-  else
-    fail "legacy-lock-race-b-preserved: aside pid file=[$aside] holds [$(cat "$aside" 2>/dev/null || echo ABSENT)] (expected $comp)"
-  fi
-  kill "$comp" "$comp2" 2>/dev/null || true
-
-  unset LEGACY_LOCK_COMPETITOR
-  rm -rf "$d/tmp-a" "$d/tmp-b"
-}
-
-t test_legacy_global_lock_replacement_race_preserves_live_lock
-t test_legacy_global_lock_real_competing_reclaim
-t test_legacy_global_lock_aside_destination_collisions
-t test_legacy_global_lock_identity_mismatch_restores
-t test_legacy_global_lock_restore_blocked_and_failed_refuse
-t test_legacy_global_lock_recheck_after_reclaim
 t test_legacy_global_lock_residual_recorded
+
 
 # ---------------------------------------------------------------------------
 # Test 43-lock (#3549): LIVENESS IS THREE-VALUED, and a failed `kill -0` DOES NOT MEAN DEAD.
