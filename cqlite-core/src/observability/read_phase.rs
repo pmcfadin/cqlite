@@ -242,6 +242,33 @@ impl ReadPhaseTimings {
     /// (practically unreachable) `u64` nanosecond overflow: a wrap would turn a huge
     /// total into a tiny one, which reads as "this phase was fast".
     pub fn add_nanos(&self, phase: ReadPhase, nanos: u64) {
+        // ORDER IS LOAD-BEARING, and it is the reverse of the obvious one: the
+        // DURATION is published first, the ENTRY bit second (issue #1707, roborev
+        // job 149). Emission runs CONCURRENTLY with this — `ReadOpMeter::finish()`
+        // fires when the stream drops, while the detached feed/parse/merge threads
+        // still hold their own `Arc<ReadPhaseTimings>` and keep calling this
+        // function (the documented partial-snapshot asymmetry in
+        // `read_metrics::finish`). With the bit published FIRST, a reader could
+        // observe `entered == true` beside the counter's OLD value and emit a
+        // `0.0` for work that really took time — re-manufacturing, as a
+        // memory-ordering bug, exactly the fabrication that tracking entry
+        // separately from duration exists to eliminate.
+        //
+        // THE PAIRING, named explicitly because "ordering matters" helps nobody:
+        //
+        // * the RELEASE is carried by `self.entered` (the `fetch_or` below), and
+        // * the matching ACQUIRE is the load of `self.entered` in
+        //   [`ReadPhaseTimings::snapshot`] — the SAME atomic, which is what makes
+        //   this a synchronizes-with pair rather than two unrelated fences.
+        //
+        // The counter is the PAYLOAD, not a party to the pairing: the release
+        // store orders this thread's preceding counter update BEFORE it, so a
+        // reader whose acquire load observes the bit is guaranteed to see that
+        // counter update (or a later one) on its subsequent relaxed counter load.
+        // `Relaxed` on the counter itself stays correct — per-phase totals have no
+        // ordering dependency on one another, and `entered` is the one thing that
+        // must be seen last.
+        //
         // Entry is marked HERE, in the one funnel every timing site already passes
         // through — `timed`, `timed_merge_excluding_recv_wait` and
         // `ReadPhaseTimer::drop` all end in this call, unconditionally, whatever
@@ -249,24 +276,54 @@ impl ReadPhaseTimings {
         // remember and a second thing to drift; reaching this function IS the
         // evidence that a timed region for `phase` completed, including one that
         // completed in zero measurable time.
-        self.entered.fetch_or(phase.bit(), Ordering::Relaxed);
         let _ = self
             .counter(phase)
             .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |v| {
                 Some(v.saturating_add(nanos))
             });
+        self.entered.fetch_or(phase.bit(), Ordering::Release);
     }
 
-    /// Whether `phase` RAN during this scan — true even if it accumulated zero
-    /// nanoseconds (issue #1707). This, not `nanos(phase) > 0`, is what emission
-    /// gates on: see [`ReadPhaseTimings::entered`] for why the two are different
-    /// questions.
-    pub fn entered(&self, phase: ReadPhase) -> bool {
-        self.entered.load(Ordering::Relaxed) & phase.bit() != 0
+    /// The ONE synchronized read of a phase: `Some(nanos)` if `phase` RAN (even
+    /// having accumulated zero nanoseconds), `None` if it did not run.
+    ///
+    /// This, not `nanos(phase) > 0`, is what emission gates on: see
+    /// [`ReadPhaseTimings::entered`] for why "ran" and "accumulated time" are
+    /// different questions.
+    ///
+    /// It is a SINGLE operation rather than a public `entered()` + `nanos()` pair
+    /// because the two loads must happen in this order with these orderings, and a
+    /// caller that reversed them (or used a relaxed load for the bit) would read a
+    /// stale counter beside a fresh entry bit and publish a fabricated `0.0`
+    /// (issue #1707, roborev job 149). Making the ordered pair unsplittable puts
+    /// that correctness in one place instead of in every call site's discipline.
+    ///
+    /// THE PAIRING: the `Acquire` load below is on `self.entered`, matching the
+    /// `Release` `fetch_or` on `self.entered` in [`ReadPhaseTimings::add_nanos`] —
+    /// the same atomic on both sides. Because the producer updates the COUNTER
+    /// before that release store, an acquire load that observes the bit
+    /// synchronizes-with the store and therefore sees the counter update that
+    /// preceded it; the counter's own load can stay `Relaxed`. (Later `fetch_or`s
+    /// from other threads are read-modify-writes, so they extend the release
+    /// sequence rather than break the pairing.)
+    pub fn snapshot(&self, phase: ReadPhase) -> Option<u64> {
+        // Acquire FIRST — this load is the synchronization point; everything the
+        // producer did before its Release store is visible after it.
+        if self.entered.load(Ordering::Acquire) & phase.bit() == 0 {
+            return None;
+        }
+        // Relaxed is sufficient HERE and only here: the acquire above already
+        // established happens-before with the producer's counter update.
+        Some(self.nanos(phase))
     }
 
-    /// Read `phase`'s accumulated nanoseconds (a snapshot).
-    pub fn nanos(&self, phase: ReadPhase) -> u64 {
+    /// Read `phase`'s accumulated nanoseconds, WITHOUT the entry bit.
+    ///
+    /// Private on purpose: a caller outside this type wants
+    /// [`ReadPhaseTimings::snapshot`], which pairs this load with the acquire that
+    /// makes it meaningful. `pub(crate)` only for the in-crate tests that assert on
+    /// a quiesced, single-threaded accumulator.
+    pub(crate) fn nanos(&self, phase: ReadPhase) -> u64 {
         self.counter(phase).load(Ordering::Relaxed)
     }
 }

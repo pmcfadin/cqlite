@@ -422,8 +422,15 @@ impl ReadOpMeter {
             (ReadPhase::Decode, catalog::READ_PHASE_DECODE),
             (ReadPhase::Merge, catalog::READ_PHASE_MERGE),
         ] {
-            if acc.phases.entered(phase) {
-                let nanos = acc.phases.nanos(phase);
+            // ONE synchronized read of the (entry bit, counter) pair — never an
+            // `entered()` then a separate `nanos()`. This runs CONCURRENTLY with
+            // the still-accumulating detached threads described just above, and
+            // reading the bit before the counter without the acquire/release
+            // pairing inside `snapshot` would let a fresh entry bit be paired with
+            // a stale zero counter, publishing a fabricated `0.0` (roborev job
+            // 149). See `ReadPhaseTimings::snapshot` for which atomic carries
+            // which ordering.
+            if let Some(nanos) = acc.phases.snapshot(phase) {
                 obs::record_histogram(name, Duration::from_nanos(nanos).as_secs_f64(), phase_attrs);
             }
         }

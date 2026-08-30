@@ -28,12 +28,16 @@ fn timed_accumulates_into_the_installed_bucket_only() {
     for other in [ReadPhase::Io, ReadPhase::Decode, ReadPhase::Merge] {
         assert_eq!(sink.nanos(other), 0, "only the timed phase accumulates");
         assert!(
-            !sink.entered(other),
+            sink.snapshot(other).is_none(),
             "a phase no timed region ever covered must report NOT ENTERED, which is \
              what lets emission report it as ABSENT"
         );
     }
-    assert!(sink.entered(ReadPhase::Decompress));
+    assert_eq!(
+        sink.snapshot(ReadPhase::Decompress),
+        Some(sink.nanos(ReadPhase::Decompress)),
+        "the timed phase reports as ENTERED, carrying its accumulated duration"
+    );
 }
 
 #[test]
@@ -48,11 +52,11 @@ fn a_phase_that_ran_and_measured_zero_is_not_a_phase_that_never_ran() {
 
     assert_eq!(sink.nanos(ReadPhase::Merge), 0);
     assert!(
-        sink.entered(ReadPhase::Merge),
+        sink.snapshot(ReadPhase::Merge) == Some(0),
         "completing a timed region IS the evidence the phase ran, whatever it measured"
     );
     assert!(
-        !sink.entered(ReadPhase::Io),
+        sink.snapshot(ReadPhase::Io).is_none(),
         "a phase nothing timed stays unentered — the two zeros are distinguishable"
     );
 }
@@ -193,7 +197,7 @@ fn merge_timing_never_underflows_when_the_wait_exceeds_the_wall_time() {
     // producers starved recorded 0 nanos, was skipped by the `nanos > 0` emit gate,
     // and told the operator "single generation" (issue #1707, roborev job 145).
     assert!(
-        sink.entered(ReadPhase::Merge),
+        sink.snapshot(ReadPhase::Merge) == Some(0),
         "a merge step whose recv-wait consumed its whole wall time still RAN; \
          reporting it as absent states there was nothing to merge, which is false"
     );
@@ -215,6 +219,164 @@ fn an_unmetered_seam_never_builds_a_timer() {
         runs += 1; // the merge helper is configured out with its only call site
     }
     assert_eq!(runs, 2, "the closure runs on the unmetered fast path too");
+}
+
+/// A snapshot taken WHILE a producer is still accumulating must never pair a fresh
+/// entry bit with a stale zero counter (issue #1707, roborev job 149).
+///
+/// # What this can and cannot demonstrate — stated plainly
+///
+/// The defect is a MEMORY-ORDERING bug: publishing `entered` before the counter let
+/// a concurrent reader see `entered == true` beside the counter's old value and emit
+/// a fabricated `0.0`. That reordering is architecture-dependent. On x86-64 (TSO)
+/// stores are not reordered with stores and loads are not reordered with loads, so
+/// this test does NOT go red against the pre-fix code on an x86 host — it was run
+/// against the pre-fix ordering and passed. It is red-capable on a weakly-ordered
+/// target (aarch64/ppc64), and it is what pins the *observable* invariant: every
+/// accumulation here is NON-ZERO, so `Some(0)` from `snapshot` can only mean the
+/// reader saw an entry bit whose counter update was not yet visible.
+///
+/// The ordering itself — which atomic carries the release, which carries the
+/// acquire, and in what order each side touches them — is pinned STRUCTURALLY by
+/// `the_entry_bit_is_published_after_the_counter_with_release_acquire` below, which
+/// IS red against the pre-fix code on every architecture.
+#[test]
+fn a_concurrent_snapshot_never_sees_an_entry_bit_without_its_duration() {
+    use std::sync::atomic::AtomicBool;
+
+    const PRODUCERS: usize = 4;
+    const ROUNDS: usize = 2_000;
+
+    for _ in 0..64 {
+        let sink = Arc::new(ReadPhaseTimings::default());
+        let stop = Arc::new(AtomicBool::new(false));
+
+        let producers: Vec<_> = (0..PRODUCERS)
+            .map(|_| {
+                let sink = sink.clone();
+                std::thread::spawn(move || {
+                    for _ in 0..ROUNDS {
+                        // Every add is strictly positive, so a `Some(0)` observed by
+                        // the reader below is necessarily a torn read, never a real
+                        // "ran and measured zero".
+                        sink.add_nanos(ReadPhase::Decode, 1);
+                    }
+                })
+            })
+            .collect();
+
+        // The reader models `ReadOpMeter::finish()` running on the dropping stream's
+        // thread while the detached feed/parse threads keep accumulating — the
+        // documented asymmetry in `read_metrics::finish`.
+        let reader = {
+            let sink = sink.clone();
+            let stop = stop.clone();
+            std::thread::spawn(move || {
+                // Loops until it has BOTH seen the phase entered and been told to
+                // stop: the producers are fast enough to finish before a freshly
+                // spawned reader's first iteration, and a reader that exited having
+                // observed nothing would assert nothing at all. Termination is
+                // guaranteed — `stop` is only set after every producer joined, so
+                // the entry bit is set by then and cannot be unset.
+                let mut seen_entered = false;
+                loop {
+                    if let Some(nanos) = sink.snapshot(ReadPhase::Decode) {
+                        assert!(
+                            nanos > 0,
+                            "snapshot observed the entry bit for a phase whose \
+                             accumulated duration was not yet visible: emission \
+                             would publish a fabricated 0.0 for work that took \
+                             time (issue #1707, roborev job 149)"
+                        );
+                        seen_entered = true;
+                    }
+                    if seen_entered && stop.load(Ordering::Relaxed) {
+                        break;
+                    }
+                }
+                seen_entered
+            })
+        };
+
+        for t in producers {
+            t.join().expect("producer");
+        }
+        stop.store(true, Ordering::Relaxed);
+        let seen_entered = reader.join().expect("reader");
+
+        assert!(
+            seen_entered,
+            "the reader must actually have observed the phase as entered, or this \
+             case asserted nothing"
+        );
+        assert_eq!(
+            sink.snapshot(ReadPhase::Decode),
+            Some((PRODUCERS * ROUNDS) as u64),
+            "and once quiesced the total is exact"
+        );
+    }
+}
+
+/// The ordering contract itself, pinned structurally because no single-threaded (and
+/// on x86 no multi-threaded) execution can observe it (issue #1707, roborev job 149).
+///
+/// Two halves of ONE synchronizes-with pair, both on `self.entered`:
+///
+/// * producer — update the COUNTER, then `entered.fetch_or(.., Release)`;
+/// * reader — `entered.load(Acquire)`, then read the counter.
+///
+/// Swap either order, or weaken either ordering, and a concurrent `finish()` can
+/// publish a `0.0` for a phase that really took time. That is exactly the
+/// fabrication tracking entry separately from duration exists to remove, so the
+/// property is asserted against the source rather than left to a reviewer's memory.
+#[test]
+fn the_entry_bit_is_published_after_the_counter_with_release_acquire() {
+    const SRC: &str = include_str!("read_phase.rs");
+
+    let body = |name: &str| -> &'static str {
+        let start = SRC
+            .find(name)
+            .unwrap_or_else(|| panic!("{name} not found in read_phase.rs"));
+        let rest = &SRC[start..];
+        let end = rest
+            .find("\n    }\n")
+            .unwrap_or_else(|| panic!("no end of body for {name}"));
+        &rest[..end]
+    };
+
+    // Producer half.
+    let add = body("pub fn add_nanos(");
+    let counter_at = add
+        .find(".fetch_update(")
+        .expect("add_nanos must update the counter");
+    let publish_at = add
+        .find("self.entered.fetch_or(phase.bit(), Ordering::Release)")
+        .expect(
+            "add_nanos must publish the entry bit with RELEASE ordering — a Relaxed \
+             fetch_or orders nothing, so a reader can see the bit without the \
+             counter update that preceded it",
+        );
+    assert!(
+        counter_at < publish_at,
+        "the COUNTER must be updated BEFORE the entry bit is published: with the \
+         bit first, a concurrent snapshot pairs a fresh entry bit with the old \
+         counter and emits a fabricated 0.0"
+    );
+
+    // Reader half.
+    let snap = body("pub fn snapshot(");
+    let acquire_at = snap.find("self.entered.load(Ordering::Acquire)").expect(
+        "snapshot must load the entry bit with ACQUIRE ordering — it is the \
+             matching half of add_nanos's Release store on the SAME atomic",
+    );
+    let read_at = snap
+        .find("self.nanos(phase)")
+        .expect("snapshot must read the counter");
+    assert!(
+        acquire_at < read_at,
+        "the entry bit must be ACQUIRE-loaded BEFORE the counter is read, or the \
+         acquire establishes nothing about the counter load that preceded it"
+    );
 }
 
 /// Emission-level coverage: what the meter actually PUBLISHES for a phase that ran
