@@ -2864,13 +2864,25 @@ else
 fi
 
 _tree_excluded() {
+  # A `case` glob matches `/` — VERIFIED, both `*` and `?` (roborev job 204). So every arm below that
+  # ends in a wildcard would otherwise exclude a whole SUBTREE, not one sibling artifact, and a
+  # source file placed under such a path would be invisible to tree-integrity: a false clean result
+  # from the gate of record. Job 203 narrowed `.launch-lock/*` for exactly this reason and left the
+  # two sibling arms untouched — fixing the named instance instead of the class it belonged to. Both
+  # are now required to be a SINGLE PATH COMPONENT, which is the property that was actually meant.
+  local _tsfx
   case "$1" in
     "") return 1 ;;
   esac
   if [ -n "$TREE_EXCLUDE_REL" ]; then
     case "$1" in
       "$TREE_EXCLUDE_REL") return 0 ;;
-      "$TREE_EXCLUDE_REL".integrity-fail.*) return 0 ;;
+      "$TREE_EXCLUDE_REL".integrity-fail.*)
+        _tsfx=${1#"$TREE_EXCLUDE_REL".integrity-fail.}
+        case "$_tsfx" in
+          */*|'') ;;              # nested path (or nothing): NOT the sibling artifact
+          *) return 0 ;;
+        esac ;;
       # #3473: the liveness heartbeat, a THIRD file this run writes beside its summary by
       # contract — and the one it rewrites most often (every 20s for the whole run).
       # Without this arm a default-path (or any in-repo-pinned) gate creates a
@@ -2882,7 +2894,14 @@ _tree_excluded() {
       "$TREE_EXCLUDE_REL".heartbeat) return 0 ;;
       # The beater writes atomically via a sibling temp then renames, so the temp can be
       # observed mid-write by a concurrent capture. Same artifact, same carve-out.
-      "$TREE_EXCLUDE_REL".heartbeat.tmp.*) return 0 ;;
+      "$TREE_EXCLUDE_REL".heartbeat.tmp.*)
+        # `mktemp` produces exactly six alphanumeric characters. Pinning that shape excludes a
+        # nested path twice over: the non-alnum guard rejects `/` before the length test runs.
+        _tsfx=${1#"$TREE_EXCLUDE_REL".heartbeat.tmp.}
+        case "$_tsfx" in
+          *[!A-Za-z0-9]*|'') ;;   # contains a slash or anything mktemp would not emit
+          ??????) return 0 ;;     # exactly six, and provably slash-free by the arm above
+        esac ;;
       # #3473: gate-detached.sh's summary-path reservation, a fourth artifact written beside the
       # summary by contract. Self-healing rather than released (the gate outlives its launcher), so
       # it can legitimately be present for the whole run.

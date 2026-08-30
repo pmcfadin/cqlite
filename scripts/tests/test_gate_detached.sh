@@ -31,6 +31,48 @@ TMP=$(mktemp -d "${TMPDIR:-/tmp}/gate-detached-test.XXXXXX")
 UNITS_FILE="$TMP/units"
 : > "$UNITS_FILE"
 
+# A PID IS NOT AN IDENTITY (roborev job 204). These suites deliberately kill processes long before
+# cleanup runs, and the kernel reuses pids — so an unverified `kill` at cleanup can signal an
+# unrelated same-user process, including a CONCURRENT GATE on this box. Same failure as killing by
+# pattern: the selector describes what a process is, not whose it is.
+#
+# So every recorded pid carries the start identity it had when we started it, and cleanup signals
+# only on a MATCH. An identity that cannot be read means DO NOT SIGNAL: a leaked helper under $TMP
+# is harmless (removed with the directory; a beater self-terminates with its gate), whereas killing
+# a stranger is not. The conservative branch is chosen by consequence, not by convenience.
+_pid_identity() {  # <pid> -> "proc:<starttime>" | "ps:<lstart>" | "" if unreadable
+  local raw rest ls
+  raw=$(cat "/proc/$1/stat" 2>/dev/null)
+  if [ -n "$raw" ]; then
+    rest="${raw##*) }"
+    # shellcheck disable=SC2086  # deliberate word-split into positional params
+    set -- $rest
+    if [ $# -ge 20 ]; then printf 'proc:%s' "${20}"; return 0; fi
+  fi
+  ls=$(ps -o lstart= -p "$1" 2>/dev/null | tr -s ' ')
+  [ -n "$ls" ] && { printf 'ps:%s' "$ls"; return 0; }
+  return 1
+}
+# remember_pid <pid> — record it WITH its identity, in ONE file that cleanup actually reads.
+remember_pid() {
+  local id
+  id=$(_pid_identity "$1" 2>/dev/null || true)
+  printf '%s\t%s\n' "$1" "$id" >> "$TMP/tracked-pids"
+}
+# kill_tracked <signal> — signal only pids whose identity still matches what we recorded.
+kill_tracked() {
+  local sig="$1" pid want now
+  [ -f "$TMP/tracked-pids" ] || return 0
+  while IFS=$'\t' read -r pid want; do
+    case "$pid" in ''|*[!0-9]*) continue ;; esac
+    [ -n "$want" ] || continue          # never recorded => cannot verify => do not signal
+    now=$(_pid_identity "$pid" 2>/dev/null || true)
+    [ -n "$now" ] || continue           # gone, or unreadable => nothing to signal safely
+    [ "$now" = "$want" ] || continue    # pid reused: this is SOMEONE ELSE
+    kill "$sig" "$pid" 2>/dev/null || true
+  done < "$TMP/tracked-pids"
+}
+
 # shellcheck disable=SC2317
 cleanup() {
   local u p
@@ -38,7 +80,7 @@ cleanup() {
     systemctl --user stop "$u" >/dev/null 2>&1
     systemctl --user reset-failed "$u" >/dev/null 2>&1
   done
-  for p in $(cat "$TMP/pids" 2>/dev/null); do kill -9 "$p" 2>/dev/null || true; done
+  kill_tracked -9
   rm -rf "$TMP"
 }
 trap cleanup EXIT
@@ -136,8 +178,8 @@ CAGE
     out_cg=$(sed -n 's/^cgroup=//p' "$TMP/out.log" | head -1)
     in_pid=$(sed -n 's/^start pid=\([0-9]*\).*/\1/p' "$TMP/in.log" | head -1)
     out_pid=$(sed -n 's/^start pid=\([0-9]*\).*/\1/p' "$TMP/out.log" | head -1)
-    [ -n "$in_pid" ] && echo "$in_pid" >> "$TMP/pids"
-    [ -n "$out_pid" ] && echo "$out_pid" >> "$TMP/pids"
+    [ -n "$in_pid" ] && remember_pid "$in_pid"
+    [ -n "$out_pid" ] && remember_pid "$out_pid"
 
     if [ -z "$in_pid" ] || [ -z "$out_pid" ]; then
       bad "3.1 both tickers start" "in_pid='$in_pid' out_pid='$out_pid' (in.log/out.log did not populate)"
@@ -763,10 +805,10 @@ else
 fi
 # BEHAVIOURAL: a beater whose gate dies must stop beating and exit, on this host's tier.
 bash -c 'while :; do sleep 1; done' >/dev/null 2>&1 &
-_g=$!; echo "$_g" >> "$TMP/pids"
+_g=$!; remember_pid "$_g"
 _hbf="$TMP/tier.hb"
 bash "$BEATER_SH" --file "$_hbf" --run-id tier --gate-pid "$_g" --interval 1 </dev/null >/dev/null 2>&1 &
-_b=$!; echo "$_b" >> "$TMP/beater-pids"
+_b=$!; remember_pid "$_b"
 for ((_i_=0; _i_<40; _i_++)); do [ -s "$_hbf" ] && break; sleep 0.5; done
 _s1=$(sed -n 's/^beat-seq: //p' "$_hbf" 2>/dev/null)
 kill -9 "$_g" 2>/dev/null; wait "$_g" 2>/dev/null || true
@@ -1152,6 +1194,72 @@ else
     rm -rf "$ddir" 2>/dev/null || true
   fi
 fi
+
+# --- roborev job 204: the carve-out must exclude ARTIFACTS, never SUBTREES -----------------------
+# A `case` glob matches `/` — both `*` and `?` — so an arm ending in a wildcard excludes everything
+# beneath a directory of that name, and a source file placed there is invisible to tree-integrity:
+# a false clean result from the gate of record. Job 203 narrowed one arm and left two. Exercised
+# through the REAL predicate, lifted out of agent-gate.sh, so this cannot drift from the shipped code.
+_tx="$TMP/tree-excluded.sh"
+{
+  echo 'TREE_EXCLUDE_REL=".agent-gate-summary.txt"; TREE_STDOUT_REL=""; TREE_STDERR_REL=""'
+  sed -n '/^_tree_excluded()/,/^}/p' "$REPO_ROOT/scripts/agent-gate.sh"
+} > "$_tx"
+_texcl() { ( . "$_tx"; _tree_excluded "$1" ); }
+_tx_fails=0
+# The real artifacts must still be excused...
+for _a in ".agent-gate-summary.txt.heartbeat" \
+          ".agent-gate-summary.txt.heartbeat.tmp.aB3xyZ" \
+          ".agent-gate-summary.txt.integrity-fail.run-1" \
+          ".agent-gate-summary.txt.launch-lock" \
+          ".agent-gate-summary.txt.launch-lock.mutex"; do
+  _texcl "$_a" || { _tx_fails=$((_tx_fails+1)); echo "     not excluded: $_a"; }
+done
+[ "$_tx_fails" = 0 ] && ok "4b.100 every real sibling artifact is still excused" \
+                     || bad "4b.100 every real sibling artifact is still excused" "$_tx_fails missing"
+# ...and NOTHING nested may be, on ANY arm.
+_tx_leaks=0
+for _n in ".agent-gate-summary.txt.heartbeat.tmp.foo/src/lib.rs" \
+          ".agent-gate-summary.txt.heartbeat.tmp.a/b/cd" \
+          ".agent-gate-summary.txt.integrity-fail.x/src/main.rs" \
+          ".agent-gate-summary.txt.launch-lock/src/evil.rs"; do
+  if _texcl "$_n"; then _tx_leaks=$((_tx_leaks+1)); echo "     EXCLUDED a nested path: $_n"; fi
+done
+[ "$_tx_leaks" = 0 ] && ok "4b.101 no arm excludes a nested path (subtree blindness closed)" \
+                     || bad "4b.101 no arm excludes a nested path" "$_tx_leaks arm(s) still excuse a subtree"
+
+# --- roborev job 204: cleanup must not signal a pid it cannot prove is ours ----------------------
+# A pid is not an identity. These suites kill processes long before cleanup, and pids are reused, so
+# an unverified `kill` can hit an unrelated same-user process — including a concurrent gate.
+if grep -q 'kill_tracked' "$0" && grep -q '\[ "$now" = "$want" \] || continue' "$0"; then
+  ok "4b.102 cleanup signals only pids whose start identity still matches"
+else
+  bad "4b.102 cleanup signals only pids whose start identity still matches" "unverified kill remains"
+fi
+# Behavioural: a RECYCLED pid record must not be signalled. Simulated by recording a pid with a
+# deliberately wrong identity — the shape a reused pid presents — against a process we then check
+# survived. Uses the suite's own helpers, so it tests the shipped mechanism.
+sleep 20 & _victim=$!
+printf '%s\t%s\n' "$_victim" "proc:0-not-the-real-identity" >> "$TMP/tracked-pids"
+kill_tracked -TERM
+if kill -0 "$_victim" 2>/dev/null; then
+  ok "4b.103 a pid whose identity does NOT match is left alone (pid reuse is survivable)"
+else
+  bad "4b.103 a pid whose identity does not match is left alone" "the victim was signalled"
+fi
+kill -9 "$_victim" 2>/dev/null || true; wait "$_victim" 2>/dev/null || true
+# Control: a CORRECTLY recorded pid IS signalled — or the case above would pass by doing nothing.
+sleep 20 & _target=$!
+remember_pid "$_target"
+kill_tracked -TERM
+sleep 0.3
+if kill -0 "$_target" 2>/dev/null; then
+  bad "4b.104 control: a correctly-identified pid IS signalled" "not signalled — 4b.103 proves nothing"
+  kill -9 "$_target" 2>/dev/null || true
+else
+  ok "4b.104 control: a correctly-identified pid IS signalled"
+fi
+wait "$_target" 2>/dev/null || true
 
 echo
 echo "==== test_gate_detached.sh: passed=$pass failed=$fail skipped=$skip ===="

@@ -32,10 +32,55 @@ GATE="$REPO_ROOT/scripts/agent-gate.sh"
 TMP=$(mktemp -d "${TMPDIR:-/tmp}/gate-liveness-test.XXXXXX")
 # Reap any beater this suite started, whatever the exit path: a leaked beater would
 # outlive the test and keep rewriting a file under $TMP.
+# A PID IS NOT AN IDENTITY (roborev job 204). These suites deliberately kill processes long before
+# cleanup runs, and the kernel reuses pids — so an unverified `kill` at cleanup can signal an
+# unrelated same-user process, including a CONCURRENT GATE on this box. Same failure as killing by
+# pattern: the selector describes what a process is, not whose it is.
+#
+# So every recorded pid carries the start identity it had when we started it, and cleanup signals
+# only on a MATCH. An identity that cannot be read means DO NOT SIGNAL: a leaked helper under $TMP
+# is harmless (removed with the directory; a beater self-terminates with its gate), whereas killing
+# a stranger is not. The conservative branch is chosen by consequence, not by convenience.
+_pid_identity() {  # <pid> -> "proc:<starttime>" | "ps:<lstart>" | "" if unreadable
+  local raw rest ls
+  raw=$(cat "/proc/$1/stat" 2>/dev/null)
+  if [ -n "$raw" ]; then
+    rest="${raw##*) }"
+    # shellcheck disable=SC2086  # deliberate word-split into positional params
+    set -- $rest
+    if [ $# -ge 20 ]; then printf 'proc:%s' "${20}"; return 0; fi
+  fi
+  ls=$(ps -o lstart= -p "$1" 2>/dev/null | tr -s ' ')
+  [ -n "$ls" ] && { printf 'ps:%s' "$ls"; return 0; }
+  return 1
+}
+# remember_pid <pid> — record it WITH its identity, in ONE file that cleanup actually reads.
+remember_pid() {
+  local id
+  id=$(_pid_identity "$1" 2>/dev/null || true)
+  printf '%s\t%s\n' "$1" "$id" >> "$TMP/tracked-pids"
+}
+# kill_tracked <signal> — signal only pids whose identity still matches what we recorded.
+kill_tracked() {
+  local sig="$1" pid want now
+  [ -f "$TMP/tracked-pids" ] || return 0
+  while IFS=$'\t' read -r pid want; do
+    case "$pid" in ''|*[!0-9]*) continue ;; esac
+    [ -n "$want" ] || continue          # never recorded => cannot verify => do not signal
+    now=$(_pid_identity "$pid" 2>/dev/null || true)
+    [ -n "$now" ] || continue           # gone, or unreadable => nothing to signal safely
+    [ "$now" = "$want" ] || continue    # pid reused: this is SOMEONE ELSE
+    kill "$sig" "$pid" 2>/dev/null || true
+  done < "$TMP/tracked-pids"
+}
+
 # shellcheck disable=SC2317
 cleanup() {
   local p
-  for p in $(cat "$TMP/beater-pids" 2>/dev/null); do kill "$p" 2>/dev/null || true; done
+  # Was: kill every pid in beater-pids, unverified — AND $TMP/pids was written by a dozen sites
+  # and read by NOBODY, so those entries were never cleaned while appearing to be. One tracked
+  # file, one reader, identity verified.
+  kill_tracked -TERM
   chmod -R u+rwX "$TMP" 2>/dev/null || true
   rm -rf "$TMP"
 }
@@ -137,7 +182,7 @@ bump_beats() {
       mv -f "$f.bump" "$f" 2>/dev/null
       sleep 0.5
     done ) &
-  echo $! >> "$TMP/pids"
+  remember_pid "$!"
   BUMP_PID=$!
 }
 
@@ -310,7 +355,7 @@ hbf="$TMP/live.hb"
 bash "$BEATER" --file "$hbf" --run-id live-run --gate-pid "$sleep_pid" --mode full --interval 1 \
   </dev/null >/dev/null 2>&1 &
 beater_pid=$!
-echo "$beater_pid" >> "$TMP/beater-pids"
+remember_pid "$beater_pid"
 # Wait for the first beat rather than assuming a timing (bounded, so a broken beater
 # fails the case instead of hanging the suite).
 # 60 x 0.5s = 30s ceiling; breaks the moment the beater publishes. A 3s ceiling
@@ -864,7 +909,7 @@ bump_beats_future() {
       mv -f "$TMP/fut.txt.heartbeat.b" "$TMP/fut.txt.heartbeat" 2>/dev/null
       sleep 0.5
     done ) &
-  BUMP_PID=$!; echo "$BUMP_PID" >> "$TMP/pids"
+  BUMP_PID=$!; remember_pid "$BUMP_PID"
 }
 bump_beats_future
 expect_reader "11g.11 FOREIGN host + FUTURE epoch + advancing counter => RUNNING (not UNKNOWN)" \
@@ -999,7 +1044,7 @@ _mkbeat_r() { # _mkbeat_r <beat-seq> <beater-pid>
 _mkbeat_r 57 1111
 # During the reader's wait, a NEW beater incarnation appears with a LOWER counter.
 ( sleep 1; _mkbeat_r 1 2222; sleep 1; _mkbeat_r 2 2222 ) &
-_rp=$!; echo "$_rp" >> "$TMP/pids"
+_rp=$!; remember_pid "$_rp"
 expect_reader "11j.3 a beater RESTART mid-window => RUNNING, not a false STALLED" \
   RUNNING 2 "RELAUNCHED" -- "$TMP/restart.txt"
 wait "$_rp" 2>/dev/null || true
@@ -1007,7 +1052,7 @@ wait "$_rp" 2>/dev/null || true
 # corrupt write, not a restart).
 _mkbeat_r 57 1111
 ( sleep 1; _mkbeat_r 3 1111 ) &
-_rp2=$!; echo "$_rp2" >> "$TMP/pids"
+_rp2=$!; remember_pid "$_rp2"
 expect_reader "11j.4 control: a LOWER counter under the same beater-pid is not progress" \
   STALLED 3 "did NOT advance" -- "$TMP/restart.txt"
 wait "$_rp2" 2>/dev/null || true
@@ -1019,7 +1064,7 @@ _mkbeat_r 57 1111
     echo "parent-check: starttime"; echo "interval: 1"; echo "beat-seq: 1"
     echo "beat-epoch: $(date +%s)"; echo "==== END AGENT-GATE HEARTBEAT ===="
   } > "$TMP/restart.txt.heartbeat" ) &
-_rp3=$!; echo "$_rp3" >> "$TMP/pids"
+_rp3=$!; remember_pid "$_rp3"
 # The INTENT is unchanged — a foreign beat must never be credited as our gate's progress — but the
 # correct verdict became UNKNOWN in job 198: a second sample belonging to another run means we could
 # not measure OUR run, and STALLED (a positive claim) must not be derived from that. This case
@@ -1161,15 +1206,15 @@ _mkcm() { # _mkcm <run-id>
     echo "beat-epoch: $(( $(date +%s) - 99999 ))"; echo "==== END AGENT-GATE HEARTBEAT ===="
   } > "$TMP/cm.txt.heartbeat"
 }
-_mkcm run-C2; ( sleep 1; rm -f "$TMP/cm.txt.heartbeat" ) & _c1=$!; echo "$_c1" >> "$TMP/pids"
+_mkcm run-C2; ( sleep 1; rm -f "$TMP/cm.txt.heartbeat" ) & _c1=$!; remember_pid "$_c1"
 expect_reader "11m.1 the beat VANISHES mid-confirmation => UNKNOWN, not STALLED" \
   UNKNOWN 4 "confirmation-unmeasurable" -- "$TMP/cm.txt"
 wait "$_c1" 2>/dev/null || true
-_mkcm run-C2; ( sleep 1; _mkcm SOMEONE-ELSE ) & _c2=$!; echo "$_c2" >> "$TMP/pids"
+_mkcm run-C2; ( sleep 1; _mkcm SOMEONE-ELSE ) & _c2=$!; remember_pid "$_c2"
 expect_reader "11m.2 the beat is REPLACED by another run => UNKNOWN, not STALLED" \
   UNKNOWN 4 "confirmation-unmeasurable" -- "$TMP/cm.txt"
 wait "$_c2" 2>/dev/null || true
-_mkcm run-C2; ( sleep 1; printf 'not a beat at all\n' > "$TMP/cm.txt.heartbeat" ) & _c3=$!; echo "$_c3" >> "$TMP/pids"
+_mkcm run-C2; ( sleep 1; printf 'not a beat at all\n' > "$TMP/cm.txt.heartbeat" ) & _c3=$!; remember_pid "$_c3"
 expect_reader "11m.3 the confirmation sample is MALFORMED => UNKNOWN, not STALLED" \
   UNKNOWN 4 "confirmation-unmeasurable" -- "$TMP/cm.txt"
 wait "$_c3" 2>/dev/null || true
@@ -1178,7 +1223,7 @@ _mkcm run-C2
 expect_reader "11m.4 control: two valid samples, no progress => STALLED" \
   STALLED 3 "did NOT advance" -- "$TMP/cm.txt"
 # The verdict text must say it is not a stall, so nobody re-runs a gate on an unmeasurable read.
-_mkcm run-C2; ( sleep 1; rm -f "$TMP/cm.txt.heartbeat" ) & _c4=$!; echo "$_c4" >> "$TMP/pids"
+_mkcm run-C2; ( sleep 1; rm -f "$TMP/cm.txt.heartbeat" ) & _c4=$!; remember_pid "$_c4"
 run_reader "$TMP/cm.txt"
 printf '%s' "$OUT" | grep -q 'This is NOT a stall' \
   && ok "11m.5 the unmeasurable verdict says explicitly that it is not a stall" \
