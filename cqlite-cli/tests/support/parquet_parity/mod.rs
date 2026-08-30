@@ -207,7 +207,7 @@ impl ParityCase {
             .collect()
     }
 
-    fn key_spec(&self) -> KeySpec {
+    pub fn key_spec(&self) -> KeySpec {
         KeySpec::from_cql_types(
             &self.cql_types_of(self.partition_key),
             &self.cql_types_of(self.clustering),
@@ -223,7 +223,7 @@ impl ParityCase {
     /// of naming the case-definition error. "I could not find the declaration"
     /// and "the declaration is not integral" are DIFFERENT states, and this is
     /// the harness's own case table, so the first one is always a bug here.
-    fn cql_types_of(&self, names: &[&str]) -> Vec<&'static str> {
+    pub fn cql_types_of(&self, names: &[&str]) -> Vec<&'static str> {
         names
             .iter()
             .map(|n| {
@@ -267,7 +267,17 @@ impl ParityCase {
 /// naming the value, because a knob whose meaning the harness cannot determine
 /// must not silently pick the weaker mode.
 fn require_fixtures() -> bool {
-    match std::env::var("CQLITE_REQUIRE_FIXTURES") {
+    interpret_require_fixtures(std::env::var("CQLITE_REQUIRE_FIXTURES"))
+}
+
+/// [`require_fixtures`] as a PURE function of the env read.
+///
+/// Separated so the strictness is provable without mutating
+/// `CQLITE_REQUIRE_FIXTURES`, which is process-global while libtest runs tests
+/// on many threads — a test that set it would change the fail-closed mode of
+/// every case running concurrently.
+pub fn interpret_require_fixtures(read: Result<String, std::env::VarError>) -> bool {
+    match read {
         Ok(raw) => {
             let v = raw.trim();
             if v.is_empty()
