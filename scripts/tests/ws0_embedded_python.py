@@ -210,10 +210,16 @@ _WORD_BOUNDARY_AFTER_CLOSE = frozenset(" \t\n)&;|<>")
 # The token is a word in a LIST, not a command.
 _FOR_WORD_LIST = re.compile(r"^\s*for\s+[A-Za-z_][A-Za-z0-9_]*\s+in\s")
 
-# A script-file argument, quoted or not, possibly carrying a shell expansion in its directory
-# part: `"$HERE/ws0_report.py"` (driver line 981). Recorded, never extracted — an ordinary python
-# file is something every other tool already reads.
-_SCRIPT = re.compile(r"^[\"']?[^\s\"']*\.py[\"']?(\s|$)")
+# A script-file argument: ONE SHELL WORD, quoted or not, possibly carrying a shell expansion in
+# its directory part — `"$HERE/ws0_report.py"` (driver line 981). Recorded, never extracted, since
+# an ordinary python file is something every other tool already reads.
+#
+# BOUNDED TO A SINGLE WORD (#3451 review round 9). The previous pattern tested only that the
+# remainder BEGAN with something ending `.py`, and the record then stored the whole remainder: for
+# `python3 helper.py ) $PY -c 'import os,'` it recorded `helper.py ) $PY -c 'import os,'` as a
+# "script path". A script argument is one word, and where a word ends is decidable with the same
+# closed metacharacter set used after a closing quote — no shell interpretation required.
+_SCRIPT_WORD = re.compile(r"""^(?:"[^"]*"|'[^']*'|[^\s;&|<>()`"']+)""")
 
 
 class Unclassifiable(Exception):
@@ -357,12 +363,21 @@ def census(path: pathlib.Path) -> tuple[list[dict], list[dict]]:
     records: list[dict] = []
     findings: list[dict] = []
     pos = 0
-    # ONE INVOCATION, AT MOST ONE FINDING. When the WORD anchor has already claimed a candidate,
-    # a `-c` flag belonging to the SAME command must not be reported again — `python3 -m foo -c
-    # 'x'` is one invocation and produced two findings, after which a finding count means nothing.
-    # The extent is the command's segment: from the word up to the next SEPARATOR, and bash's
-    # separators are a closed set, so this is a lookup rather than a parse.
-    suppress_flag_until = -1
+    # NO SUPPRESSION BETWEEN THE ANCHORS, AND THAT IS DELIBERATE (#3451 review round 9).
+    #
+    # One invocation may produce a finding from BOTH anchors. That is NOISE, and it is the right
+    # side to err on. The alternative was tried: a `suppress_flag_until` extent, from a word
+    # anchor to the next `;`/`&`/`|`, so a `-c` flag inside "the same command" deferred. Deciding
+    # WHICH INVOCATION a match belongs to is a SEMANTIC question — it needs shell nesting and
+    # quoting — and the syntactic approximation had a hole immediately:
+    #
+    #     v=$(python3 helper.py ) $PY -c 'import os,'
+    #
+    # the inner `python3 helper.py` classified as a harmless SCRIPT and the suppression then
+    # swallowed the OUTER `-c` anchor, so invalid code escaped and the census reported clean.
+    # Suppression was BLINDNESS; duplicate findings are noise. Do not reintroduce it as a
+    # tidiness improvement: "at most one finding per invocation" is a COSMETIC invariant that can
+    # only be satisfied by machinery this file must not contain.
     while True:
         # TWO anchors, earliest wins. A `python3 -c '…'` matches the WORD first (lower offset) and
         # its branch consumes through the closing quote, so the `-c` inside it is never reached —
@@ -386,8 +401,6 @@ def census(path: pathlib.Path) -> tuple[list[dict], list[dict]]:
         if anchored_on_flag:
             if line.lstrip().startswith("#"):
                 continue  # a whole-line shell comment carries no code
-            if m.start() < suppress_flag_until:
-                continue  # the word anchor already claimed this invocation
             # The nearest preceding word, NAMED rather than judged. The old text asserted the word
             # was "not the literal `python3`" — something this branch never checked — and on a
             # continuation it printed `is 'python3', not the literal python3`, a diagnostic that
@@ -432,13 +445,6 @@ def census(path: pathlib.Path) -> tuple[list[dict], list[dict]]:
         line_end = line_start + len(line)
         raw_rest = scan[m.end() : scan_line_end]
         rest = _strip_comment(raw_rest).strip()
-        # This candidate's command segment, in SCAN space: a `-c` flag inside it belongs to THIS
-        # invocation and must not be reported a second time.
-        suppress_flag_until = scan_line_end
-        for _sep in ";&|":
-            _at = scan.find(_sep, m.end(), scan_line_end)
-            if _at >= 0:
-                suppress_flag_until = min(suppress_flag_until, _at)
         try:
             if word != "python3":
                 raise Unclassifiable(
@@ -484,9 +490,12 @@ def census(path: pathlib.Path) -> tuple[list[dict], list[dict]]:
                      "body": body if body.endswith("\n") else body + "\n"}
                 )
                 continue
-            if _SCRIPT.match(rest):
-                # ALLOWLIST 2.
-                records.append({"kind": "SCRIPT", "line": idx + 1, "text": rest})
+            script = _SCRIPT_WORD.match(rest)
+            if script and script.group(0).strip("\"'").endswith(".py"):
+                # ALLOWLIST 2. The WORD is recorded, not the rest of the line.
+                records.append(
+                    {"kind": "SCRIPT", "line": idx + 1, "text": script.group(0)}
+                )
                 continue
             raise Unclassifiable(
                 idx + 1,

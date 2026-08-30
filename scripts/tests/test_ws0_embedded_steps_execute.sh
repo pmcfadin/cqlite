@@ -569,26 +569,51 @@ else
   fail "census CONTROL did not fire: A-blocks=$(grep -c '^BLOCK	' <<<"$a_census") A-findings='$(findings_of "$a_census" | head -1)' A-compile='$(findings_of "$a_compile" | head -1)' B-findings=$b_findings C-findings=$c_findings"
 fi
 
-# --- CONTROL 1h-bis: ONE INVOCATION YIELDS AT MOST ONE FINDING ---------------------------------
-# Both anchors can see the same command — `python3 -m foo -c 'x'` has a python word AND a `-c`
-# flag — and each used to report it, after which a finding COUNT means nothing. The word anchor
-# claims its command's segment (up to the next separator, a closed set in bash's grammar), so the
-# flag inside it defers. The other direction is asserted too: two genuinely separate invocations
-# on one line must still produce two findings, or the suppression would be hiding real ones.
+# --- CONTROL 1h-bis: NO `-c` INVOCATION IS SILENTLY ABSENT --------------------------------------
+# THE PROPERTY THAT MATTERS, replacing an earlier "at most one finding per invocation" assert that
+# was the wrong shape (#3451 review round 9). That earlier invariant was COSMETIC and could only
+# be satisfied by SEMANTIC machinery — deciding which invocation a match belongs to needs shell
+# nesting and quoting — and the syntactic approximation built for it had a hole immediately:
+#
+#     v=$(python3 helper.py ) $PY -c 'import os,'
+#
+# the inner `python3 helper.py` classified as a harmless SCRIPT and the suppression swallowed the
+# OUTER `-c` anchor, so invalid code escaped with the census reporting clean. Suppression was
+# BLINDNESS; duplicate findings are only NOISE. So the suppression is gone and the assertion is
+# the one that cannot be satisfied by hiding: a file containing a `-c '…'` invocation must yield a
+# BLOCK or at least one FINDING — never neither.
+#
+# Swept across every negative fixture this suite builds, so a future change that makes ANY of them
+# vanish fails here rather than in a review round.
+absent_ok=1
+absent_detail=""
 python3 - "$TMP" <<'INJECT'
 import pathlib, sys
-q = chr(39)
+q, dq, bs = chr(39), chr(34), chr(92)
 tmp = pathlib.Path(sys.argv[1])
-(tmp / "one-invocation.sh").write_text("python3 -m foo -c " + q + "x" + q + "\n")
-(tmp / "two-invocations.sh").write_text(
-    "python3 --version; $PY -c " + q + "x" + q + "\n")
+prog = q + "import os," + q
+# The round-9 escape: a command substitution whose inner invocation looks harmless.
+(tmp / "absent-nested.sh").write_text("v=$(python3 helper.py ) $PY -c " + prog + "\n")
+# ...and the shapes the earlier rounds closed, re-swept together.
+(tmp / "absent-indirect.sh").write_text("$PYTHON -c " + prog + "\n")
+(tmp / "absent-continuation.sh").write_text("$PYTHON -c " + bs + "\n" + prog + "\n")
+(tmp / "absent-pathq.sh").write_text("/usr/bin/python3 -c " + prog + "\n")
+(tmp / "absent-fragment.sh").write_text("python3 -c " + q + "pass" + q + dq + " +" + dq + "\n")
 INJECT
-one_n="$(findings_of "$(census "$TMP/one-invocation.sh")" | wc -l | tr -d ' ')"
-two_n="$(findings_of "$(census "$TMP/two-invocations.sh")" | wc -l | tr -d ' ')"
-if [ "$one_n" -eq 1 ] && [ "$two_n" -eq 2 ]; then
-  pass "census CONTROL fired (one finding per invocation): a single command seen by BOTH anchors yields 1 finding, while two separate invocations on one line still yield 2 — the suppression is scoped to a command segment, not to a line"
+absent_rc=$?
+for absent_case in nested indirect continuation pathq fragment; do
+  absent_out="$(census "$TMP/absent-$absent_case.sh")"
+  absent_blocks="$(grep -c '^BLOCK	' <<<"$absent_out")"
+  absent_finds="$(findings_of "$absent_out" | wc -l | tr -d ' ')"
+  if [ "$absent_blocks" -eq 0 ] && [ "$absent_finds" -eq 0 ]; then
+    absent_ok=0
+    absent_detail="$absent_detail $absent_case(silent)"
+  fi
+done
+if [ "$absent_rc" -eq 0 ] && [ "$absent_ok" -eq 1 ]; then
+  pass "census CONTROL fired (no silent absence): every -c invocation across 5 negative fixtures — including the command-substitution nesting that defeated the old suppression — yields a BLOCK or a FINDING, never neither"
 else
-  fail "census CONTROL did not fire: one-invocation gave $one_n finding(s) (expected 1), two-invocations gave $two_n (expected 2)"
+  fail "census CONTROL did not fire: fixture-rc=$absent_rc silently-absent:$absent_detail — an invocation the census neither blocks nor reports is the false pass this whole file exists to refuse"
 fi
 
 # --- CONTROL 1i: A MISSING SUBJECT EXITS NONZERO ------------------------------------------------
