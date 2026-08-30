@@ -349,8 +349,13 @@ target can reach a child module through a cfg on the <code dir="auto">mod</code>
 closure followed such a child while <strong>discarding the attribute gating it</strong>, so a legacy-gated test inside the
 subtree counted as <em>executable</em> at this lane’s feature set, an ungated sibling kept the target non-zero, and
 the co-required census reported <strong>no gap</strong> — the one thing that census exists to find. Such a subtree is now
-emitted as a <code dir="auto">DECLARED GAP</code> naming the target, the module and the cfg text, with a <code dir="auto">cfg-gated-subtree gaps: N</code>
-census line that is affirmative at <code dir="auto">0</code> (so a pasted census shows the scan ran).</p>
+emitted as a <code dir="auto">DECLARED GAP</code> naming the target, the module and the cfg text, with a
+<code dir="auto">cfg-gated-subtree gaps: N RECOGNISED</code> census line that is affirmative at <code dir="auto">0</code> (so a pasted census shows the
+scan ran) <strong>and that states its own non-exhaustiveness in the emitted text</strong>. The <code dir="auto">RECOGNISED</code> qualifier is
+load-bearing rather than decorative: a bare <code dir="auto">0</code> reads as a verified all-clear, and this scan is documented as
+incomplete, so the census must say that a clean result means <em>nothing was recognised</em> — never that nothing is
+there. The same applies to the co-required census, whose populated branch also carries the qualifier: the
+disclaimer belongs on the surface a reader acts on, not only in the source comments.</p>
 <p>It is <strong>declared, not fatal</strong>, and the distinction is load-bearing: failing the lane on it was implemented,
 measured against the real tree, and reverted — those helpers are correct code, and <strong>a lane that reds on
 correct input is the lane agents learn to waive</strong>. The <code dir="auto">UNRESOLVED</code> half stays fail-closed, because the two
