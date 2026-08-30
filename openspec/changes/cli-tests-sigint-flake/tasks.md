@@ -2212,3 +2212,50 @@ correction (`f21a333b8`), applied here rather than rediscovered.
 * Every `.rs` in the change under the 1500-line test threshold: `budgets.rs` 1391,
   `harness_tests.rs` 1268, `mod.rs` 981, `transcript.rs` 953, `budgets/census_tests.rs` 248,
   `graceful_shutdown_tests.rs` 469.
+
+## Round 17 — one fix: the leaked process-global panic hook (roborev job 262)
+
+### The finding, and why it alone was fixed
+
+`transcript.rs`'s `poison()` helper reached `PipeStatus::Unavailable` through the real mechanism (a
+panic while holding the store's lock) and silenced that panic by installing an empty
+`std::panic::set_hook`, restoring the previous hook afterwards. The hook is **process-global**. The
+two tests that call the helper run **concurrently in one test binary**, so their swaps could
+interleave — and a panic between `set_hook` and the restore skips the restore outright — leaving the
+**silent** hook installed for every test that ran afterwards. A later failure in this binary would
+then print nothing.
+
+Job 262 raised three findings. This is the only one that makes the test binary **worse than `main`**:
+`main`'s version of this file never touches the panic hook, so this change *introduced* the hazard,
+and the hazard is a **self-inflicted loss of diagnosability inside a change whose entire subject is
+diagnosability** — the change undermining its own thesis. The other two findings were **batched to a
+follow-up issue by lead ruling** and are deliberately not addressed here.
+
+### The fix — option 1: delete the mutation, do not serialise it
+
+The suppression bought **quiet and nothing else**: no assertion in either test reads the panic
+message; what they examine is the poisoned lock's observable consequence, `PipeStatus::Unavailable`.
+So the global mutation is **deleted**, not wrapped in a shared `Mutex` — serialising it would have
+left a process-global mutation in place and merely ordered it, whereas removing it makes the leak
+**unrepresentable**, the same move as `WaitEnd::ReaderFailed` and the sequenced store. No `set_hook`
+or `take_hook` call remains anywhere under `cqlite-cli/tests/`.
+
+The price is paid where it is harmless: the panic prints through whatever hook is installed, and its
+payload says so (`DELIBERATE TEST FIXTURE, NOT A FAILURE: …`). Under a normal `cargo test` run
+libtest captures a passing test's output, so **there is no added noise at all**.
+
+### Evidence, and what is *not* claimed
+
+* **The leak cannot be demonstrated by a test, and no such coverage is claimed.** There is no stable
+  way to read the installed panic hook, and `take_hook()` would itself mutate it — so "the hook is
+  unchanged" is not assertable in-process, and a panicking-test-then-observing-test pair would depend
+  on libtest's own per-test capture and ordering. What *is* observable, and was measured: run under
+  `--nocapture`, both `poison()` calls emit the `DELIBERATE TEST FIXTURE` line (grep count 2), so the
+  live hook is doing its normal job at both call sites. The real assurance is structural — the
+  mutation is gone from the source, which `grep -rn 'set_hook\|take_hook' cqlite-cli/tests/` shows
+  (the one remaining hit is this rationale in a doc comment).
+* **37 tests** in `graceful_shutdown_tests`, unchanged: this round removed a hazard rather than
+  adding a state, and no test was added or removed.
+* `RUSTFLAGS="-D warnings" cargo clippy -p cqlite-cli --features write-support --tests`: clean.
+* `transcript.rs` 973 lines, still under the 1500-line test threshold; no other file touched, no
+  constant changed, no product code touched.
