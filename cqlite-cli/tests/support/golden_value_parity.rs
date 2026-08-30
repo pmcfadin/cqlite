@@ -989,6 +989,62 @@ mod tests {
         }
     }
 
+    /// Review finding K1, pinned on the reason text of the one format-scoped gap
+    /// in the lane.
+    ///
+    /// The `set<double>` gap is a property of JSON's VALUE VOCABULARY, not of the
+    /// value: JSON has no literal for `Infinity`/`-Infinity`/`NaN`, so the JSON
+    /// egress renders them `null` (measured on
+    /// `test_signed_coll.signed_special_collections`) and the value is lost. CSV
+    /// renders every cell as text and carries the same three tokens the golden
+    /// names, so nothing is lost there and the column must stay compared.
+    ///
+    /// Expectations are the GOLDEN's own tokens (`sstabledump` writes a
+    /// non-frozen `set<double>`'s elements as the cell `path`, i.e.
+    /// `writeString(DoubleType.getString(v))` → `"Infinity"`, `"NaN"`, `"-0.0"`)
+    /// and the CSV egress's measured field text; nothing here is derived from
+    /// CQLite's JSON output being correct.
+    #[test]
+    fn the_float_special_value_gap_is_a_json_vocabulary_gap_not_a_value_gap() {
+        let double = CqlType::Numeric("double".to_string());
+        let canon_in = |v: &Value, egress: Egress| {
+            canon_typed(v, egress, &double, Depth::Inside, Kinding::Stringified)
+                .expect("a set<double> element canonicalizes")
+        };
+        for token in ["Infinity", "-Infinity", "NaN"] {
+            // `null` is a DIFFERENT value from the token the golden names, in
+            // EITHER format — which is why the JSON gap is a real gap and why a
+            // CSV egress that ever regressed to `null` would be caught.
+            for egress in [Egress::Json, Egress::Csv] {
+                assert_ne!(
+                    canon_in(&json!(token), egress),
+                    canon_in(&Value::Null, egress),
+                    "{egress:?}: `null` must never satisfy the golden's `{token}`"
+                );
+            }
+            // The token itself survives the CSV text projection unchanged, so the
+            // CSV lane can compare it: it is not read as a number and not coerced.
+            assert_eq!(
+                canon_in(&json!(token), Egress::Csv),
+                Canon::Text(token.to_string()),
+                "CSV must carry `{token}` as the opaque token it is"
+            );
+        }
+        // The measured CSV spellings of the signed zeros beside them: `-0e0`/`0e0`
+        // against the golden's `-0.0`/`0.0`. Same value, and the sign is NOT
+        // collapsed.
+        assert_eq!(
+            canon_in(&json!("-0.0"), Egress::Csv),
+            canon_in(&json!("-0e0"), Egress::Csv),
+            "`-0e0` is the same double as the golden's `-0.0`"
+        );
+        assert_ne!(
+            canon_in(&json!("0.0"), Egress::Csv),
+            canon_in(&json!("-0e0"), Egress::Csv),
+            "Cassandra distinguishes -0.0 from 0.0, so the canonicalization must too"
+        );
+    }
+
     #[test]
     fn zero_padding_survives_in_text_and_not_in_a_number() {
         assert_ne!(canon(&json!("00000"), &text()), canon(&json!("0"), &text()));

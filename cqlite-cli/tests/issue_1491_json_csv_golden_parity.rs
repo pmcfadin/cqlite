@@ -96,9 +96,62 @@ struct Case {
     /// multi-cell column the golden carries and this list omits is a hard error —
     /// the kind is never inferred from the bytes (#28).
     multicell: &'static [(&'static str, Multicell)],
-    /// Columns excluded from the value comparison, each with the defect it is
-    /// waiting on. Reported in the run census so an exclusion is never silent.
-    skip_columns: &'static [(&'static str, &'static str)],
+    /// Value paths excluded from the comparison, each naming the egress format(s)
+    /// the divergence is observed in and the defect it is waiting on. Reported in
+    /// the run census so an exclusion is never silent.
+    skips: &'static [Skip],
+}
+
+/// One declared value-comparison gap.
+///
+/// # Why the scope is per FORMAT
+///
+/// A divergence is frequently a property of ONE format's value vocabulary rather
+/// than of the value: JSON has no literal for `Infinity`/`-Infinity`/`NaN`, so
+/// the JSON egress renders them `null` and the value is lost, while CSV renders
+/// every cell as text and carries the same three tokens verbatim — measured on
+/// `test_signed_coll.signed_special_collections`, whose CSV `sf` field is
+/// `{-Infinity, -1.5, -0e0, 0e0, 2.5, Infinity, NaN}` against the golden's
+/// `["-Infinity","-1.5","-0.0","0.0","2.5","Infinity","NaN"]`.
+///
+/// A gap declared for BOTH formats when only one diverges is therefore pure
+/// coverage loss: it drops the column from the format that renders it correctly
+/// (issue #1491 review finding K1). The scope is checked, not just declared — a
+/// path listed for a format where nothing diverges is reported by
+/// `Report::skips_never_applied` as a stale exclusion and FAILS that lane.
+struct Skip {
+    /// The fully-qualified path from the row: `sf` for a whole column, `e.home`
+    /// for one field of a UDT column.
+    path: &'static str,
+    /// The egress format(s) this gap applies to. Never empty — a gap that
+    /// applies to no format states nothing, and is rejected when the case is
+    /// validated against the DDL.
+    formats: &'static [Egress],
+    /// The measured divergence, stated for the formats named above and only
+    /// those.
+    why: &'static str,
+}
+
+/// Both egress formats, for a divergence measured in each of them.
+const BOTH: &[Egress] = &[Egress::Json, Egress::Csv];
+
+impl Skip {
+    fn applies_to(&self, egress: Egress) -> bool {
+        self.formats.contains(&egress)
+    }
+
+    /// How this gap is named in the run census.
+    fn describe(&self) -> String {
+        let formats: Vec<&str> = self
+            .formats
+            .iter()
+            .map(|f| match f {
+                Egress::Json => "json",
+                Egress::Csv => "csv",
+            })
+            .collect();
+        format!("{} [{}] ({})", self.path, formats.join(","), self.why)
+    }
 }
 
 /// Committed fixture tables whose golden is a pure set of live rows, so the
@@ -120,7 +173,7 @@ const CASES: &[Case] = &[
         pk: &["pk"],
         ck: &["ck"],
         multicell: &[],
-        skip_columns: &[],
+        skips: &[],
     },
     Case {
         presence: Presence::Committed,
@@ -130,7 +183,7 @@ const CASES: &[Case] = &[
         pk: &["pk"],
         ck: &["ck"],
         multicell: &[],
-        skip_columns: &[],
+        skips: &[],
     },
     Case {
         presence: Presence::Committed,
@@ -140,7 +193,7 @@ const CASES: &[Case] = &[
         pk: &["pk"],
         ck: &["ck"],
         multicell: &[],
-        skip_columns: &[],
+        skips: &[],
     },
     Case {
         presence: Presence::Committed,
@@ -150,7 +203,7 @@ const CASES: &[Case] = &[
         pk: &["pk"],
         ck: &["ck"],
         multicell: &[],
-        skip_columns: &[],
+        skips: &[],
     },
     Case {
         presence: Presence::Committed,
@@ -160,7 +213,7 @@ const CASES: &[Case] = &[
         pk: &["pk"],
         ck: &["ck"],
         multicell: &[],
-        skip_columns: &[],
+        skips: &[],
     },
     Case {
         presence: Presence::Committed,
@@ -170,7 +223,7 @@ const CASES: &[Case] = &[
         pk: &["pk"],
         ck: &["ck"],
         multicell: &[],
-        skip_columns: &[],
+        skips: &[],
     },
     // `payload BLOB` — the blob `0x…` hex rendering, compared byte-exactly.
     Case {
@@ -181,7 +234,7 @@ const CASES: &[Case] = &[
         pk: &["pk"],
         ck: &["ck"],
         multicell: &[],
-        skip_columns: &[],
+        skips: &[],
     },
     // test-data/schemas/compaction-parity.cql
     Case {
@@ -192,7 +245,7 @@ const CASES: &[Case] = &[
         pk: &["id"],
         ck: &[],
         multicell: &[],
-        skip_columns: &[],
+        skips: &[],
     },
     Case {
         presence: Presence::Committed,
@@ -202,7 +255,7 @@ const CASES: &[Case] = &[
         pk: &["id"],
         ck: &["ck"],
         multicell: &[],
-        skip_columns: &[],
+        skips: &[],
     },
     // test-data/schemas/compaction-parity-udt.cql — frozen UDTs and frozen
     // collections OF UDTs, i.e. the `_type`-discriminator and map-spelling rules.
@@ -214,7 +267,7 @@ const CASES: &[Case] = &[
         pk: &["id"],
         ck: &[],
         multicell: &[],
-        skip_columns: &[],
+        skips: &[],
     },
     Case {
         presence: Presence::Committed,
@@ -224,7 +277,7 @@ const CASES: &[Case] = &[
         pk: &["id"],
         ck: &[],
         multicell: &[],
-        skip_columns: &[],
+        skips: &[],
     },
     Case {
         presence: Presence::Committed,
@@ -234,7 +287,7 @@ const CASES: &[Case] = &[
         pk: &["id"],
         ck: &[],
         multicell: &[],
-        skip_columns: &[],
+        skips: &[],
     },
     Case {
         presence: Presence::Committed,
@@ -254,10 +307,11 @@ const CASES: &[Case] = &[
         // `e.name` and `e.level` are still value-compared. Excluding the whole
         // column left this case comparing nothing but its primary key while the
         // comment claimed otherwise (review finding F5).
-        skip_columns: &[(
-            "e.home",
-            "nested frozen UDT renders as blob hex, not a decoded object",
-        )],
+        skips: &[Skip {
+            path: "e.home",
+            formats: BOTH,
+            why: "nested frozen UDT renders as blob hex, not a decoded object",
+        }],
     },
     // test-data/schemas/signed-collection-parity.cql — NON-frozen and frozen
     // collections of signed numerics: the "path is a JSON string, CLI element is a
@@ -270,7 +324,7 @@ const CASES: &[Case] = &[
         pk: &["id"],
         ck: &[],
         multicell: &[("s", Multicell::Set), ("m", Multicell::Map)],
-        skip_columns: &[],
+        skips: &[],
     },
     Case {
         presence: Presence::Committed,
@@ -280,7 +334,7 @@ const CASES: &[Case] = &[
         pk: &["id"],
         ck: &[],
         multicell: &[],
-        skip_columns: &[],
+        skips: &[],
     },
     Case {
         presence: Presence::Committed,
@@ -294,7 +348,7 @@ const CASES: &[Case] = &[
             ("ss", Multicell::Set),
             ("st", Multicell::Set),
         ],
-        skip_columns: &[],
+        skips: &[],
     },
     Case {
         presence: Presence::Committed,
@@ -304,11 +358,22 @@ const CASES: &[Case] = &[
         pk: &["id"],
         ck: &[],
         multicell: &[("sd", Multicell::Set), ("sf", Multicell::Set)],
-        // MEASURED DIVERGENCE: `sf` is a `set<double>` containing `Infinity`,
-        // `-Infinity` and `NaN`. The golden carries them by name; JSON has no
-        // literal for them and the CLI emits `null`, losing the value. `sd`
-        // (`set<decimal>`, exact 30-digit text) IS compared in this same case.
-        skip_columns: &[("sf", "float Infinity/-Infinity/NaN render as JSON null")],
+        // MEASURED DIVERGENCE, and a JSON-ONLY one: `sf` is a `set<double>`
+        // containing `Infinity`, `-Infinity` and `NaN`. The golden carries all
+        // three by name (`["-Infinity",…,"Infinity","NaN"]`); JSON has no literal
+        // for them, so the JSON egress emits `null` and the value is lost. The CSV
+        // egress renders every cell as text and carries the same three tokens
+        // verbatim (`{-Infinity, -1.5, -0e0, 0e0, 2.5, Infinity, NaN}`, which the
+        // decimal canonicalization reads as the golden's `-0.0`/`0.0`), so CSV IS
+        // compared here — a `BOTH` scope dropped the whole column from a format
+        // that renders it correctly (review finding K1). `sd` (`set<decimal>`,
+        // exact 30-digit text) is compared in both formats.
+        skips: &[Skip {
+            path: "sf",
+            formats: &[Egress::Json],
+            why: "set<double> Infinity/-Infinity/NaN render as JSON null — JSON has \
+                  no literal for them",
+        }],
     },
     // test-data/schemas/da-test.cql — BTI (`da`) format, timestamp/uuid/boolean
     // scalars plus non-frozen set/list/map.
@@ -320,7 +385,7 @@ const CASES: &[Case] = &[
         pk: &["id"],
         ck: &[],
         multicell: &[],
-        skip_columns: &[],
+        skips: &[],
     },
     Case {
         presence: Presence::Committed,
@@ -334,7 +399,7 @@ const CASES: &[Case] = &[
             ("scores", Multicell::List),
             ("properties", Multicell::Map),
         ],
-        skip_columns: &[],
+        skips: &[],
     },
     // BTI wide/multi-clustering shapes: many rows per partition, so row pairing
     // and clustering-column rendering are exercised at scale.
@@ -346,7 +411,7 @@ const CASES: &[Case] = &[
         pk: &["pk"],
         ck: &["ck"],
         multicell: &[],
-        skip_columns: &[],
+        skips: &[],
     },
     Case {
         presence: Presence::Committed,
@@ -356,7 +421,7 @@ const CASES: &[Case] = &[
         pk: &["pk"],
         ck: &["bucket", "seq"],
         multicell: &[],
-        skip_columns: &[],
+        skips: &[],
     },
     Case {
         presence: Presence::Committed,
@@ -366,7 +431,7 @@ const CASES: &[Case] = &[
         pk: &["pk"],
         ck: &["bucket", "seq"],
         multicell: &[],
-        skip_columns: &[],
+        skips: &[],
     },
     // test-data/schemas/write-load-parity.cql
     Case {
@@ -377,7 +442,7 @@ const CASES: &[Case] = &[
         pk: &["id"],
         ck: &[],
         multicell: &[],
-        skip_columns: &[],
+        skips: &[],
     },
     Case {
         presence: Presence::Committed,
@@ -387,7 +452,7 @@ const CASES: &[Case] = &[
         pk: &["id"],
         ck: &["ck"],
         multicell: &[],
-        skip_columns: &[],
+        skips: &[],
     },
     // ---------------------------------------------------------------------
     // FETCHED-corpus tier (test-data/schemas/cql-type-parity.cql). These four
@@ -408,7 +473,7 @@ const CASES: &[Case] = &[
         pk: &["pk"],
         ck: &["ck"],
         multicell: &[],
-        skip_columns: &[],
+        skips: &[],
     },
     // `target_text`/`target_blob` cycle through absent / NULL / '' / 0x with live
     // neighbours either side, so a shifted or swallowed value is visible.
@@ -420,7 +485,7 @@ const CASES: &[Case] = &[
         pk: &["pk"],
         ck: &["ck"],
         multicell: &[],
-        skip_columns: &[],
+        skips: &[],
     },
     // text/blob at length 0, 1, 127, 128, 255, 256, 16383, 16384 — the
     // length-prefix edges, where a truncating formatter shows up.
@@ -432,7 +497,7 @@ const CASES: &[Case] = &[
         pk: &["pk"],
         ck: &["ck"],
         multicell: &[],
-        skip_columns: &[],
+        skips: &[],
     },
     // An EMPTY multicell collection is stored ABSENT by Cassandra (the dump holds
     // only a complex deletion) while an empty FROZEN one persists as a present
@@ -458,19 +523,22 @@ const CASES: &[Case] = &[
         // render a PRESENT empty container (`[]`, `{}`), which is a different
         // value. Non-empty multicell rendering stays covered by four other cases
         // (test_da.collection_table and the three test_signed_coll tables).
-        skip_columns: &[
-            (
-                "ml",
-                "empty multicell list renders as [] where Cassandra reads null",
-            ),
-            (
-                "ms",
-                "empty multicell set renders as {} where Cassandra reads null",
-            ),
-            (
-                "mm",
-                "empty multicell map renders as {} where Cassandra reads null",
-            ),
+        skips: &[
+            Skip {
+                path: "ml",
+                formats: BOTH,
+                why: "empty multicell list renders as [] where Cassandra reads null",
+            },
+            Skip {
+                path: "ms",
+                formats: BOTH,
+                why: "empty multicell set renders as {} where Cassandra reads null",
+            },
+            Skip {
+                path: "mm",
+                formats: BOTH,
+                why: "empty multicell map renders as {} where Cassandra reads null",
+            },
         ],
     },
 ];
@@ -784,14 +852,40 @@ fn schema_agrees_with_case(case: &Case, table: &TableSchema) -> Vec<String> {
             ));
         }
     }
-    for (path, _) in case.skip_columns {
+    for (i, skip) in case.skips.iter().enumerate() {
+        let path = skip.path;
+        // A gap that names no format states nothing and suppresses nothing, so it
+        // could only ever read as coverage that exists.
+        if skip.formats.is_empty() {
+            out.push(format!(
+                "the case declares a skip for `{path}` with no egress format — a gap that \
+                 applies to no format states nothing"
+            ));
+        }
+        // Two entries for the same (path, format) would each be handed to
+        // `SkipPaths`, so a stale one could be masked by its twin's hit.
+        for earlier in &case.skips[..i] {
+            if earlier.path == path {
+                let overlap: Vec<&Egress> = skip
+                    .formats
+                    .iter()
+                    .filter(|f| earlier.formats.contains(f))
+                    .collect();
+                if !overlap.is_empty() {
+                    out.push(format!(
+                        "the case declares `{path}` twice for the same egress format(s) \
+                         {overlap:?} — one entry would mask the other's staleness"
+                    ));
+                }
+            }
+        }
         let (column, rest) = match path.split_once('.') {
             Some((column, rest)) => (column, Some(rest)),
-            None => (*path, None),
+            None => (path, None),
         };
         let Some(declared) = table.column(column) else {
             out.push(format!(
-                "the case declares skip_columns entry `{path}`, whose column `{column}` the \
+                "the case declares a skip for `{path}`, whose column `{column}` the \
                  committed CREATE TABLE does not declare — the declared gap is stale"
             ));
             continue;
@@ -799,7 +893,7 @@ fn schema_agrees_with_case(case: &Case, table: &TableSchema) -> Vec<String> {
         if let Some(rest) = rest {
             if let Err(why) = resolve_field_path(&declared.ty, rest) {
                 out.push(format!(
-                    "the case declares skip_columns entry `{path}`, which the committed DDL \
+                    "the case declares a skip for `{path}`, which the committed DDL \
                      does not resolve: {why} — the declared gap is stale"
                 ));
             }
@@ -1068,7 +1162,11 @@ fn run_lane(egress: Egress) {
             continue;
         }
 
-        let skip: Vec<&str> = case.skip_columns.iter().map(|(c, _)| *c).collect();
+        // FORMAT-SCOPED: only the gaps declared for THIS egress format suppress
+        // anything, so a column that diverges in one format keeps being compared
+        // in the other (review finding K1).
+        let applicable: Vec<&Skip> = case.skips.iter().filter(|s| s.applies_to(egress)).collect();
+        let skip: Vec<&str> = applicable.iter().map(|s| s.path).collect();
         let report = compare_rows(&expected, &actual, &table, case.pk, case.ck, &skip, egress);
         if report.diffs.is_empty() && report.compared_cells == 0 {
             failures.push(format!(
@@ -1083,9 +1181,9 @@ fn run_lane(egress: Egress) {
         // the fact that the gap has closed (or was mis-stated).
         for stale in &report.skips_never_applied {
             failures.push(format!(
-                "{qualified}: skip_columns entry `{stale}` matched no value in the \
-                 {format} comparison — a declared gap that no longer applies must be \
-                 removed, not left standing"
+                "{qualified}: the declared gap `{stale}` matched no value in the \
+                 {format} comparison — a declared gap that no longer applies to this \
+                 egress format must be removed or re-scoped, not left standing"
             ));
         }
         if report.diffs.is_empty() {
@@ -1096,8 +1194,8 @@ fn run_lane(egress: Egress) {
                 expected.len(),
                 report.compared_cells,
                 report.container_cells,
-                // A refusal is a DECLARED GAP in the same style as `skip_columns`:
-                // named at run time, never left as a bare counter.
+                // A refusal is a DECLARED GAP in the same style as `Skip`: named
+                // at run time, never left as a bare counter.
                 if report.ambiguous_container_cells > 0 {
                     format!(
                         ", DECLARED GAP: {} container cell(s) REFUSED as \
@@ -1108,14 +1206,14 @@ fn run_lane(egress: Egress) {
                 } else {
                     String::new()
                 },
-                if case.skip_columns.is_empty() {
+                if applicable.is_empty() {
                     String::new()
                 } else {
                     format!(
                         ", DECLARED GAP: {}",
-                        case.skip_columns
+                        applicable
                             .iter()
-                            .map(|(c, why)| format!("{c} ({why})"))
+                            .map(|s| s.describe())
                             .collect::<Vec<_>>()
                             .join("; ")
                     )
@@ -1307,6 +1405,40 @@ fn committed_fixture_coverage_census() {
          carries — issue #1491:\n  {}",
         stale.join("\n  ")
     );
+}
+
+/// Every declared value-comparison gap names at least one egress format.
+///
+/// Checked here as well as in `schema_agrees_with_case` because that check runs
+/// only for a case whose fixture resolved, so a `Presence::Corpus` case's
+/// declaration would otherwise go unchecked wherever the fetched corpus is
+/// absent. A gap that applies to no format suppresses nothing and states nothing,
+/// so it could only ever read as coverage that exists.
+#[test]
+fn every_declared_gap_names_at_least_one_egress_format() {
+    let mut bad: Vec<String> = Vec::new();
+    for case in CASES {
+        for skip in case.skips {
+            let qualified = format!("{}.{}", case.keyspace, case.table);
+            if skip.formats.is_empty() {
+                bad.push(format!(
+                    "{qualified}: the gap for `{}` names no egress format",
+                    skip.path
+                ));
+            }
+            // The census line is what makes a gap non-silent, so it must name the
+            // path AND the scope.
+            let described = skip.describe();
+            if !described.contains(skip.path) || !described.contains('[') {
+                bad.push(format!(
+                    "{qualified}: the census description of `{}` does not name its \
+                     path and scope: {described}",
+                    skip.path
+                ));
+            }
+        }
+    }
+    assert!(bad.is_empty(), "issue #1491 (K1):\n  {}", bad.join("\n  "));
 }
 
 /// The other half of the exclusion contract: every shape an entry may declare is

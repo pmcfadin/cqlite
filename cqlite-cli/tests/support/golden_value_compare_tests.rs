@@ -299,7 +299,7 @@ fn a_column_shape_divergence_is_reported_once_per_column() {
     );
 }
 
-/// A declared `skip_columns` entry still suppresses its column, so the
+/// A declared skip path still suppresses its column, so the
 /// measured-divergence gaps keep working.
 #[test]
 fn a_declared_skip_column_is_not_required_to_be_rendered() {
