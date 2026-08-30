@@ -1087,6 +1087,52 @@ class SliceDeliveryTests(unittest.TestCase):
             self.assertNotIn("Pass --slice", msg)
             self.assertFalse(ledger.exists() and ledger.read_text().strip())
 
+    def test_strict_rfc3339_is_shared_by_the_cli_check_and_the_ledger_validator(self):
+        """`fromisoformat` is far more permissive than RFC-3339: it accepts basic format,
+        week dates and sub-minute offsets, all of which this ledger's published schema
+        forbids. That leniency was PRE-EXISTING (identical on origin/main's _validate), but a
+        lenient writer plus a strict published contract is the same fail-open shape as the
+        rest of this issue, so ONE recogniser now serves both — and they must agree."""
+        good = ("2026-06-10T00:00:00Z", "2026-06-10T00:00:00+00:00",
+                "2026-06-10T00:00:00.123456Z", "2026-06-10T00:00:00-07:00")
+        bad = ("2026-06-10T00:00:00+00:00:30",   # sub-minute offset
+               "20260610T000000Z",               # basic format
+               "2026-W24-1T00:00:00Z",           # week date
+               "2026-06-10T00:00:00",            # tz-naive
+               "2026-06-10",                     # date only
+               "2026-13-10T00:00:00Z",           # impossible month (regex alone misses this)
+               "2026-02-31T00:00:00Z",           # impossible day
+               "2026-06-10t00:00:00z",           # lowercase; deliberately not accepted
+               "2026-06-10T00:00:00Z\n",         # trailing newline (\Z, not $)
+               "", "not-a-timestamp")
+        for v in good:
+            with self.subTest(good=v):
+                dt._require_full_timestamp(v, "x")      # must not raise
+                errs = []
+                dt._validate(v, {"type": "string", "format": "date-time"}, "x", errs)
+                self.assertEqual(errs, [], f"{v!r} rejected by the ledger validator")
+        for v in bad:
+            with self.subTest(bad=v):
+                with self.assertRaises(SystemExit):
+                    dt._require_full_timestamp(v, "x")
+                errs = []
+                dt._validate(v, {"type": "string", "format": "date-time"}, "x", errs)
+                self.assertNotEqual(errs, [], f"{v!r} accepted by the ledger validator")
+
+    def test_every_committed_timestamp_is_strict_rfc3339(self):
+        """The tightening must not red the committed ledger — asserted, not assumed."""
+        checked = 0
+        for line in dt.DEFAULT_LEDGER.read_text().splitlines():
+            if not line.strip():
+                continue
+            rec = json.loads(line)
+            for key in ("created_at", "pr_opened_at", "merged_at", "closed_at", "stamped_at"):
+                v = rec.get(key)
+                if isinstance(v, str):
+                    checked += 1
+                    self.assertTrue(dt._is_rfc3339(v), f"{key}={v!r} in {rec.get('issue')}")
+        self.assertGreater(checked, 0, "committed ledger is empty - this would be vacuous")
+
     def test_record_refuses_a_date_only_or_tz_naive_timestamp(self):
         """_parse_ts accepts both, and both then raise TypeError out of the cycle-time
         subtraction — so parseability is not the property worth asserting; being a full
@@ -1177,14 +1223,14 @@ class SliceDeliveryTests(unittest.TestCase):
             with self.assertRaises(SystemExit) as cm:
                 dt.main(self._rec_argv(ledger, self._ghfields(tmp, "not-a-timestamp"),
                                        "--slice"))
-            self.assertIn("not a parseable RFC-3339", str(cm.exception))
+            self.assertIn("not a strict RFC-3339", str(cm.exception))
             self.assertFalse(ledger.exists() and ledger.read_text().strip())
         with tempfile.TemporaryDirectory() as d:
             tmp = Path(d)
             ledger = tmp / "ledger.jsonl"
             with self.assertRaises(SystemExit) as cm:
                 dt.main(self._rec_argv(ledger, self._ghfields(tmp, "not-a-timestamp")))
-            self.assertIn("not a parseable RFC-3339", str(cm.exception))
+            self.assertIn("not a strict RFC-3339", str(cm.exception))
             self.assertFalse(ledger.exists() and ledger.read_text().strip())
 
     def test_record_without_slice_refused_when_the_issue_is_open(self):

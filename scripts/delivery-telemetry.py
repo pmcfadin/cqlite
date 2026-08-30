@@ -142,15 +142,11 @@ def _validate(value, schema: dict, path: str, errors: list) -> None:
         if not re.fullmatch(schema["pattern"], value):
             errors.append(f"{path}: {value!r} does not match /{schema['pattern']}/")
     if schema.get("format") == "date-time" and isinstance(value, str):
-        try:
-            parsed = _parse_ts(value)
-        except ValueError:
-            errors.append(f"{path}: {value!r} is not a valid RFC-3339 date-time")
-        else:
-            # fromisoformat accepts date-only / tz-naive strings on 3.11+; require a full
-            # date + time + offset so a value like "2026-06-01" is rejected.
-            if "T" not in value or parsed.tzinfo is None:
-                errors.append(f"{path}: {value!r} is not a full date-time with offset")
+        # ONE recogniser, shared with the CLI's _require_full_timestamp, so the tool cannot
+        # accept at input what its own schema forbids at output (issue #3550).
+        if not _is_rfc3339(value):
+            errors.append(f"{path}: {value!r} is not a strict RFC-3339 UTC date-time "
+                          f"(YYYY-MM-DDThh:mm:ss[.frac](Z|+hh:mm))")
     if _has_type(schema, "array") and isinstance(value, list):
         item_schema = schema.get("items")
         if item_schema:
@@ -291,6 +287,37 @@ def load_schema(schema_path: Path) -> dict:
 
 # ============================================================ timestamp helpers
 
+# STRICT RFC-3339, in the uppercase canonical form `gh` emits (issue #3550). Anchored with
+# \Z, never $, because Python's $ also matches before a trailing newline.
+#
+# `datetime.fromisoformat` is far MORE permissive than RFC-3339 — it accepts basic format
+# ("20260610T000000Z"), week dates ("2026-W24-1T00:00:00Z") and sub-minute offsets
+# ("+00:00:30") — so a "does it parse, does it have T and a tzinfo" check let values through
+# that this repo's own published schema (`format: date-time`) forbids. That leniency is
+# PRE-EXISTING (identical on origin/main's `_validate`) and no committed record uses such a
+# form, but a lenient writer plus a strict published contract is the same fail-open shape
+# this issue kept re-finding, so both the CLI check and the ledger validator now share ONE
+# recogniser rather than each approximating the format.
+_RFC3339_RE = re.compile(
+    r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})\Z")
+
+
+def _is_rfc3339(value) -> bool:
+    """True when `value` is a strict RFC-3339 UTC-canonical date-time.
+
+    Syntax via `_RFC3339_RE`, then `_parse_ts` for CALENDAR validity (the regex cannot reject
+    month 13 or 31 February). Both are required: syntax alone accepts impossible dates,
+    parsing alone accepts non-RFC-3339 spellings.
+    """
+    if not isinstance(value, str) or not _RFC3339_RE.match(value):
+        return False
+    try:
+        _parse_ts(value)
+    except (ValueError, TypeError):
+        return False
+    return True
+
+
 def _parse_ts(value: str) -> datetime:
     """Parse an RFC-3339 / ISO-8601 UTC timestamp (accepts a trailing 'Z').
 
@@ -328,15 +355,13 @@ def _require_full_timestamp(value: str, field: str) -> None:
     if not isinstance(value, str):
         raise SystemExit(f"error: authoritative field '{field}' must be an RFC-3339 timestamp "
                          f"string, got {value!r} ({type(value).__name__})")
-    try:
-        parsed = _parse_ts(value)
-    except (ValueError, TypeError) as exc:
-        raise SystemExit(f"error: authoritative field '{field}' is not a parseable RFC-3339 "
-                         f"timestamp: {value!r} ({exc})")
-    if "T" not in value or parsed.tzinfo is None:
-        raise SystemExit(f"error: authoritative field '{field}' is not a full date-time with "
-                         f"a UTC offset: {value!r} (a date-only or timezone-naive value "
-                         f"parses but cannot be differenced against one that has an offset)")
+    if not _is_rfc3339(value):
+        raise SystemExit(
+            f"error: authoritative field '{field}' is not a strict RFC-3339 UTC date-time: "
+            f"{value!r} — required form YYYY-MM-DDThh:mm:ss[.frac](Z|+hh:mm). A date-only, "
+            f"timezone-naive, basic-format or sub-minute-offset value may parse but is not "
+            f"what this ledger's schema accepts, and a naive value cannot be differenced "
+            f"against one carrying an offset")
 
 
 # \Z, not $: Python's `$` also matches immediately BEFORE a trailing newline, so a value
