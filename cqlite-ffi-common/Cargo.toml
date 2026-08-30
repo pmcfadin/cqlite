@@ -27,13 +27,19 @@ cqlite-core = { path = "../cqlite-core", default-features = false }
 # Declared locally at "0.4" to match cqlite-core, cqlite-cli and bindings/node.
 # There is deliberately no `[workspace.dependencies]` entry (issue #1452 non-goal).
 num-bigint = "0.4"
-# `serde_json` (issue #3505): a REAL dependency, not dev-only, because
-# `json_number` classifies a `serde_json::Number` — the type both bindings
-# already hold when they convert a `Value::Json` cell. It enters no new external
-# code into either binding: both `bindings/python` and `bindings/node` already
-# declare this exact workspace line themselves, and `cqlite-core` pulls it in
-# regardless. `tests/dependency_boundary.rs` measures that it drags in no FFI
-# framework (`serde_json` is already in that test's expected-allowed list).
+# `serde_json` (issue #3505): PROMOTED from a dev-dependency to a real one —
+# not a new dependency. It was already in this crate's resolved closure as a
+# NORMAL dependency of `cqlite-core` (`cqlite-core/Cargo.toml` declares
+# `serde_json = { workspace = true }`), and both `bindings/python` and
+# `bindings/node` declare the same workspace line themselves, so nothing new
+# enters either binding's tree. `src/json_number.rs` needs it at BUILD time
+# because it classifies a `serde_json::Number` — the type both bindings already
+# hold when they convert a `Value::Json` cell.
+#
+# `{ workspace = true }` so the pin (and its `preserve_order` feature set) is
+# INHERITED rather than a second version declared here.
+# `tests/dependency_boundary.rs` measures that it drags in no FFI framework
+# (`serde_json` is already in that test's expected-allowed list).
 #
 # Deliberately NOT `features = ["arbitrary_precision"]` — see the AC6 section of
 # `src/json_number.rs` for the full decision. Cargo unifies features across the

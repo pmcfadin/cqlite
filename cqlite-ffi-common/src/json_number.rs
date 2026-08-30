@@ -95,10 +95,14 @@
 //! Issue #3505 asks for a decision rather than a fallthrough. The decision is
 //! **no**, for three reasons:
 //!
-//! 1. **It cannot be scoped to the bindings.** Cargo unifies features across a
-//!    build graph, so enabling it anywhere enables it for every crate in this
-//!    workspace that touches `serde_json` — the CLI, the Flight server, the
-//!    Parquet/Arrow writers.
+//! 1. **It cannot be scoped to the bindings**, and this workspace already
+//!    DEMONSTRATES the mechanism rather than merely being subject to it: the
+//!    root `Cargo.toml`'s `[workspace.dependencies]` declares
+//!    `serde_json = { version = "1.0", features = ["preserve_order"] }`, and
+//!    every member — `cqlite-core`, `cqlite-cli`, both bindings, and this crate
+//!    — takes it as `{ workspace = true }`. `arbitrary_precision` would be the
+//!    same lever `preserve_order` is already pulled with, applying to all 14
+//!    members at once. There is no per-crate seam to hide it behind.
 //! 2. **It changes `Number`'s `Serialize` impl** to emit a private
 //!    `$serde_json::private::Number` marker token. Serializing a
 //!    `serde_json::Value` through any serializer that is not `serde_json`'s own

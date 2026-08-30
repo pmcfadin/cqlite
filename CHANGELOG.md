@@ -7,6 +7,50 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **Both bindings (observable): a JSON number above `i64::MAX` no longer loses
+  precision, and neither binding fabricates a substitute value (#3505).** A
+  `Value::Json` cell's number was classified inline in each binding as
+  `as_i64()` → `as_f64()` → *fallback*. For a legal JSON integer above
+  `i64::MAX`, `as_i64()` returns `None` and **`as_f64()` succeeds lossily**
+  (`u64 → f64` has 53 mantissa bits), so `18446744073709551615` was delivered as
+  `1.8446744073709552e19`. The `fallback` arm was unreachable in both bindings.
+  - The classification now lives ONCE, in `cqlite-ffi-common::json_number`, as
+    `i64` → `u64` → `f64` → refusal. Adding the `u64` arm is the whole fix: it
+    makes the `f64` arm reachable only for the `Float` variant, where the
+    conversion is exact.
+  - **Python**: a `u64`-range integer is an exact `int` (Python integers are
+    arbitrary precision). The old `n.to_string()` fallback — which shifted the
+    host type from a number to a `str` — is gone.
+  - **Node**: a `u64`-range integer is a `BigInt`, the type this binding already
+    used for an `i64` outside `i32` range. The old fallback returned
+    `env.get_null()`, delivering a **fabricated `null`** for an unrepresentable
+    number, indistinguishable from a genuine JSON `null`; it is now a typed
+    `PARSE`/`Data` error.
+  - `serde_json`'s `arbitrary_precision` is deliberately **not** enabled; the
+    decision and its three reasons are recorded in
+    `cqlite-ffi-common/src/json_number.rs`.
+  - Reachability, stated honestly: `Value::Json` requires a `"json"` comparator
+    and no fixture in `test-data/` has one, so this path is unreachable from
+    today's corpus. Coverage is therefore direct unit tests on the shared
+    classifier.
+
+- **Python parity harnesses: `values_equal` no longer masks int/float precision
+  loss (#3505).** Both copies coerced a mixed `int`/`float` pair through
+  `float()`, which rounded the EXACT side down to the LOSSY side — so the bug
+  above was invisible to the harness that should have caught it. The coercion is
+  now bounded at `2**53`: below it every integer is exactly representable in an
+  IEEE-754 double so the tolerant compare genuine `FLOAT`/`DOUBLE` columns need
+  is provably lossless and is retained; at or above it the comparison is exact.
+  `bool` is excluded in both directions (`isinstance(True, int)` is `True`, so
+  `True` and `1.0` compared equal). The rule was duplicated in
+  `test_cli_parity.py` and `test_parity.py` and now lives once in
+  `bindings/python/tests/numeric_compare.py`.
+  Node's `parity-utils.js` did NOT have this mask — its `bigint`↔`number` arms
+  were already exact — but `BigInt(x)` threw `RangeError` on a non-integer
+  `number`, crashing the harness instead of reporting a mismatch; hardened.
+
 ### Changed
 
 - **Node binding (observable): a malformed `inet` cell is a typed `PARSE` error
