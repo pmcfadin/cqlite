@@ -154,7 +154,8 @@
 #                      --only/--lite stay lenient and the #2078 opt-out is honoured,
 #                      with the mode PRINTED. check_jest_suites_ran is
 #                      the affirmative guard: the reported suite total must equal the
-#                      set DERIVED FROM JEST ITSELF (`npx jest --listTests`, never a
+#                      set DERIVED FROM JEST ITSELF (`./node_modules/.bin/jest
+#                      --listTests`, never a
 #                      find over testMatch), no suite may be failed or skipped, and the
 #                      passed-test count must be non-zero (a suite whose every TEST is
 #                      `test.skip`ped is reported as a PASSED suite — the suite-level
@@ -5837,8 +5838,8 @@ run_python_bindings() {
 # AFFIRMATIVE MEASUREMENT, not a green exit code (the same rule as the Rust lanes).
 # jest reports a suite whose every describe was skipped as PASSED, so `npm test`
 # exiting 0 does not establish that anything ran. check_jest_suites_ran requires the
-# reported total to equal the suite set DERIVED FROM JEST ITSELF (`npx jest
-# --listTests`), requires no suite to have failed or been skipped, and requires a
+# reported total to equal the suite set DERIVED FROM JEST ITSELF
+# (`./node_modules/.bin/jest --listTests`), requires no suite to have failed or been skipped, and requires a
 # non-zero count of PASSED tests. The oracle is jest and not a `find`, for the same
 # reason `_package_test_targets` uses cargo metadata rather than parsing `[[test]]`
 # stanzas: a find would re-implement this package's RECURSIVE `testMatch` plus jest's
@@ -5867,6 +5868,14 @@ run_node_bindings() {
     record_result "$name" "$status" 0
     return 0
   fi
+  # `npx` is DELIBERATELY NOT in that predicate, and the suite-derivation below
+  # deliberately does not use it (roborev round 1, B7). An earlier cut ran
+  # `npx jest --listTests`, so on a host with node+npm but no `npx` shim a MISSING
+  # TOOLCHAIN became a hard FAIL — contradicting this component's own "SKIPs, never
+  # silently PASSes" contract. The fix is not to widen the predicate but to stop needing
+  # the shim: `./node_modules/.bin/jest` is what `npm ci` has just installed, it is the
+  # same binary, and it removes a network-capable `npx` package resolution from the gate
+  # path entirely.
   # Strict-fixture mode on the FULL gate only, honouring the documented #2078 opt-out.
   # See the scope note above for why enrollment in DATASET_COMPONENTS is not enough.
   # ENFORCED WITH `env -u`, NOT MERELY BY OMITTING THE ASSIGNMENT (roborev round 1, B2;
@@ -5921,7 +5930,7 @@ run_node_bindings() {
 
   # STEP 1 — install, build, and DERIVE the suite set FROM JEST ITSELF.
   #
-  # `npx jest --listTests` (0.9s) is the oracle, deliberately NOT a `find` over
+  # `./node_modules/.bin/jest --listTests` (0.9s) is the oracle, deliberately NOT a `find` over
   # `__test__/*.test.js`. A find would be a SECOND IMPLEMENTATION of this package's
   # `testMatch` (`**/__test__/**/*.test.js` — RECURSIVE) plus jest's default
   # `testPathIgnorePatterns`, and its correctness would only be knowable by
@@ -5940,7 +5949,7 @@ run_node_bindings() {
       cd "'"$REPO_ROOT"'/bindings/node"
       if [ -f package-lock.json ]; then npm ci; else npm install; fi
       npm run build
-      npx jest --listTests > "$CQLITE_LIST_FILE"' >>"$log" 2>&1; then
+      ./node_modules/.bin/jest --listTests > "$CQLITE_LIST_FILE"' >>"$log" 2>&1; then
     status=FAIL
     echo "--- [$name] FAILED (npm ci / npm run build / jest --listTests); last 40 lines of $log ---"
     tail -40 "$log"
@@ -5953,7 +5962,7 @@ run_node_bindings() {
   if [ ! -r "$list_file" ]; then
     status=FAIL
     {
-      echo "[$name] FAIL-CLOSED: 'npx jest --listTests' left no readable list at $list_file,"
+      echo "[$name] FAIL-CLOSED: './node_modules/.bin/jest --listTests' left no readable list at $list_file,"
       echo "        so the expected suite count could not be DERIVED and the affirmative guard"
       echo "        would have no subject (issue #3522)."
     } | tee -a "$log"
@@ -5969,7 +5978,7 @@ run_node_bindings() {
   if [ "$suite_n" -eq 0 ]; then
     status=FAIL
     {
-      echo "[$name] FAIL-CLOSED: 'npx jest --listTests' named ZERO *.test.js suites."
+      echo "[$name] FAIL-CLOSED: './node_modules/.bin/jest --listTests' named ZERO *.test.js suites."
       echo "        The DERIVATION failed (or the suite vanished), and a guard expecting zero"
       echo "        suites would report OK having measured nothing (issue #3522)."
     } | tee -a "$log"
@@ -5978,8 +5987,8 @@ run_node_bindings() {
     echo ">>> [$name] $status ($((end - start))s)"
     return 0
   fi
-  echo ">>> [$name] derived suite set: $suite_n *.test.js file(s) (oracle: npx jest --listTests, not a find over testMatch)"
-  echo "derived suite set: $suite_n *.test.js file(s) (oracle: npx jest --listTests)" >> "$log"
+  echo ">>> [$name] derived suite set: $suite_n *.test.js file(s) (oracle: ./node_modules/.bin/jest --listTests, not a find over testMatch)"
+  echo "derived suite set: $suite_n *.test.js file(s) (oracle: ./node_modules/.bin/jest --listTests)" >> "$log"
 
   # STEP 2 — run them.
   # `env "${fixture_env[@]}"` FIRST, because `env`'s -u options must precede any
@@ -6335,11 +6344,25 @@ EOF
   census+=("     half IS fully covered, by the python-bindings component.")
   census+=("  2. cqlite-node's JavaScript suite. Owned by the node-bindings component, which builds")
   census+=("     the napi artifact and runs jest against it. This lane never builds that artifact.")
-  census+=("  3. NOTHING, on the cqlite-node integration half — it is EXECUTED, not omitted. The")
-  census+=("     count is DERIVED from cargo metadata ($node_targets_n declared, $node_expect_n runnable here) and")
-  census+=("     every runnable one is passed to cargo as an explicit --test, so a target added")
-  census+=("     tomorrow is RUN, not merely counted (roborev B1: counting-without-running would be")
-  census+=("     #3522's own defect reproduced inside the fix for #3522).")
+  # BRANCHED ON THE DERIVED NUMBER (roborev round 1, B5). This clause used to be emitted
+  # unconditionally and read "it declares $node_targets_n — at $node_targets_n there is nothing to
+  # omit; if that number ever rises without this lane running them, this line is the
+  # alarm". At a non-zero value that is a SELF-CONTRADICTING sentence in the one output
+  # whose entire job is to declare omissions, with the alarm sounding the all-clear. A
+  # census sentence must be true at EVERY value of the number it quotes.
+  if [ "$node_targets_n" -eq 0 ]; then
+    census+=("  3. cqlite-node declares 0 integration (test) targets — DERIVED from cargo metadata,")
+    census+=("     not assumed. Nothing to run and nothing to omit. Should it ever declare one, the")
+    census+=("     derived --test list below EXECUTES it with no gate edit.")
+  elif [ "$node_expect_n" -eq "$node_targets_n" ]; then
+    census+=("  3. NOTHING on the cqlite-node integration half: all $node_targets_n declared target(s) are")
+    census+=("     EXECUTED, each passed to cargo as an explicit --test (DERIVED, never listed).")
+  else
+    census+=("  3. NOT RUN: $((node_targets_n - node_expect_n)) of cqlite-node's $node_targets_n declared integration target(s) —")
+    census+=("     cargo cannot enable their required-features at this lane's feature set, so it would")
+    census+=("     skip them SILENTLY (no banner at all). Each is named under 6. below. The other")
+    census+=("     $node_expect_n are EXECUTED as explicit --test targets.")
+  fi
   census+=("  4. Feature-gated bodies at features this lane leaves OFF (declared-minus-enabled,")
   census+=("     derived): cqlite-ffi-common ->${ffi_off:- <none: this crate declares no features>};")
   census+=("     cqlite-node ->${node_off:- <none>}. 'observability' is off ON PURPOSE — building the")
