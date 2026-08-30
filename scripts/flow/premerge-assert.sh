@@ -224,7 +224,7 @@ done <<GATE_PARSE
 $gate_parse
 GATE_PARSE
 
-gp_k=""; gp_v=""; gp_v_name=""; gp_label=""
+gp_k=""; gp_v=""
 # Every field is keyed on its AFFIRMATIVE value: an unparseable/absent count is
 # refused, never treated as "no problem found".
 for gp_k in blocks lite delta unterminated n_mode n_result n_ti n_commit n_ts; do
@@ -265,18 +265,23 @@ if [ "$n_mode" -ne 0 ]; then
     "This block was produced by (or doctored from) a lite/delta run."
 fi
 
-for gp_k in n_result:RESULT n_ti:tree-integrity n_commit:commit n_ts:tree-start; do
-  gp_v_name="${gp_k%%:*}"
-  gp_label="${gp_k#*:}"
-  eval "gp_v=\${$gp_v_name}"
-  if [ "$gp_v" -eq 0 ]; then
-    refuse_no_gate "The full-gate block has no '$gp_label:' line — it cannot certify anything."
+# assert_single_key <count> <label>: the key must appear EXACTLY once. Zero
+# certifies nothing; more than one is ambiguous and a "last one wins" rule would
+# let a doctored line override the real verdict. Asserted per key, immediately
+# before that key is USED, so the diagnostic names the first thing that is wrong
+# — e.g. the #3041 launch sentinel (a FULL-header block carrying `tree-start:` and
+# `RESULT: INCOMPLETE`, with no `tree-integrity:`/`commit:` yet) is reported as
+# the INCOMPLETE verdict it is, not as a missing tree-integrity line.
+assert_single_key() {
+  if [ "$1" -eq 0 ]; then
+    refuse_no_gate "The full-gate block has no '$2:' line — it cannot certify anything."
   fi
-  if [ "$gp_v" -gt 1 ]; then
-    refuse_no_gate "The full-gate block has $gp_v '$gp_label:' lines — AMBIGUOUS, refusing."
+  if [ "$1" -gt 1 ]; then
+    refuse_no_gate "The full-gate block has $1 '$2:' lines — AMBIGUOUS, refusing."
   fi
-done
+}
 
+assert_single_key "$n_result" RESULT
 # Verdict TOKENS are compared EXACTLY, never by prefix (#3229): a `PASS*` glob
 # accepts `PASSthisNeverRan` and `PASS-MEASUREMENT-DID-NOT-HAPPEN`, i.e. it would
 # check a SPELLING rather than a STATE. awk already gave us the first
@@ -289,6 +294,7 @@ if [ "$v_result" != PASS ]; then
     "only at the terminal emit. Such a summary means still running, queued, or died."
 fi
 
+assert_single_key "$n_ti" tree-integrity
 if [ "$v_ti" != PASS ]; then
   refuse_no_gate \
     "tree-integrity verdict token is '$v_ti', not PASS." \
@@ -328,7 +334,9 @@ assert_sha_prefix() {
   fi
 }
 
+assert_single_key "$n_commit" commit
 assert_sha_prefix commit "$v_commit"
+assert_single_key "$n_ts" tree-start
 assert_sha_prefix tree-start "$v_ts"
 
 # `dirty:` is REPORTED, not enforced — DELIBERATELY. Failing on `dirty: yes` is

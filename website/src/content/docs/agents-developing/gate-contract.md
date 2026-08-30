@@ -82,7 +82,13 @@ carry).
   and never poll a PR's own CI.
 - **Residual — re-run order.** A tier re-run *after* `required` has already gone green cannot be
   retracted by a finished job: **re-run the tier, then re-run `required`**, in that order.
-  `scripts/flow/premerge-assert.sh` remains the closer's last look.
+  `scripts/flow/premerge-assert.sh <pr> <certified-sha> <gate-summary-file>` remains the closer's last
+  look — and since #3465 it is where the gate of record stops being a convention: the third argument
+  is REQUIRED, and the script refuses the merge unless that file holds one full
+  `==== AGENT-GATE SUMMARY ====` block with `RESULT: PASS`, `tree-integrity: PASS`, and
+  `commit:`/`tree-start:` matching the certified sha. A `--lite` or `--delta` summary is refused by
+  name (their headers are distinct by construction), which is exactly the PR #3408 escape: 22 lite
+  PASSes and no full gate.
 - **Break-glass is per-tier, and it actually works.** `ci:waive:<tier-id>` (an owner action) excuses a
   tier that is **absent** or **pending at the deadline**; it can **never** excuse a failed or cancelled
   one, and there is no blanket waiver. The label takes effect without a re-run: `required` re-reads the

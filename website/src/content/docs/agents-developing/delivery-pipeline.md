@@ -124,11 +124,29 @@ ever regress (contexts emptied, `enforce_admins` disabled), this doctrine govern
 The `flow-closer` certifies a **specific SHA** — the tree the full gate of record and the final
 roborev pass actually ran on. Three mechanical rules keep the merge honest:
 
-- **Pre-merge SHA assertion (#2456/#2668, scripted hard precondition).** Immediately before
-  arming `gh pr merge --auto`, the closer does `git push`, then runs
-  `scripts/flow/premerge-assert.sh <pr> <certified-sha>` — which asserts the PR is OPEN and its
-  `headRefOid` **equals the locally-certified tip**, exiting non-zero (and printing a loud refusal)
-  on a moved head, a closed/merged PR, or a gh failure. The closer **refuses to merge on any
+- **Pre-merge SHA + gate-of-record assertion (#2456/#2668/#3465, scripted hard precondition).**
+  Immediately before arming `gh pr merge --auto`, the closer does `git push`, then runs
+  `scripts/flow/premerge-assert.sh <pr> <certified-sha> <gate-summary-file>` — which asserts the PR is
+  OPEN and its `headRefOid` **equals the locally-certified tip**, exiting non-zero (and printing a
+  loud refusal) on a moved head, a closed/merged PR, or a gh failure.
+  **The third argument is REQUIRED (#3465).** Verifying the head against a *claimed* certified sha
+  never verified that a certified sha EXISTS — PR #3408 merged on 22 `--lite` PASSes and no full
+  `scripts/agent-gate.sh` run at all, because nothing in the merge path ever asked for the gate of
+  record. It is now asked for here, at the one point every merge passes through: the summary file must
+  hold exactly ONE whole-line-anchored `==== AGENT-GATE SUMMARY ====` block (`--lite`/`--delta` emit
+  distinct headers and are refused by name; a second or unterminated block is ambiguous and also
+  refused) with `RESULT: PASS` and `tree-integrity: PASS` compared **token-exactly** — `INCOMPLETE` is
+  the launch-time liveness sentinel and not a verdict (#3041), and a mutated-mid-run tree is not a
+  certification (#2926) — and with BOTH `commit:` (7 hex) and `tree-start:` (12 hex) prefix-matching
+  the certified sha **at each value's own width**; a non-hex placeholder (`(not captured)`,
+  `unverified`, `selftest`) REFUSES rather than being skipped. An OPTIONAL argument would have left the
+  convention honour-system, so the pre-#3465 two-argument call is a loud usage failure.
+  **What it does NOT do, stated rather than implied:** it cannot verify `run-id:` (the #2874 reader
+  contract requires the party that LAUNCHED the run, which this script is not), and it cannot prove
+  the summary came from a genuine gate rather than a hand-written file — a hostile invoker is out of
+  the threat model, since whoever runs the script controls the process. What it closes is **accident
+  and drift**, which is the observed failure mode. `dirty:` is reported in the success line, not
+  enforced. The closer **refuses to merge on any
   non-zero exit** (fail closed). It also re-reads issue/PR comments for a fresh `HOLD:` order in the
   same pre-merge pass. Motivated by the 2026-07-14 stale-merge escape on
   #2299/PR #2421: the closer certified a rebased-and-fixed tip locally but never pushed it, so

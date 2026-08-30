@@ -981,9 +981,23 @@ implement (TDD) → --lite each fix round (summary-file redirect)
   stops, emits a `NEEDS-SPAWN {role: spec-auditor, …}` packet, and the lead spawns `spec-auditor`
   then re-invokes with the verdict; a src-design fix respawns `sstable-developer` the same way).
   Before arming `gh pr merge --auto` the closer runs the scripted pre-merge assert
-  `scripts/flow/premerge-assert.sh <pr> <certified-sha>` (#2456) — refusing to merge unless the PR
-  head still equals the certified SHA — and re-reads comments for a fresh `HOLD:` order. With `--auto`
-  armed, GitHub lands the PR on the `required` check going green (#2667); no CI busy-wait.
+  `scripts/flow/premerge-assert.sh <pr> <certified-sha> <gate-summary-file>` (#2456/#3465) — refusing
+  to merge unless the PR head still equals the certified SHA **AND** a gate of record exists for it —
+  and re-reads comments for a fresh `HOLD:` order. **The third argument is REQUIRED, and that is the
+  #3465 mechanism**: verifying the head against a *claimed* certified sha never verified that a
+  certified sha EXISTS, so PR #3408 merged on 22 `--lite` PASSes and not one full
+  `scripts/agent-gate.sh` run. The script now requires the summary file to hold exactly ONE
+  `==== AGENT-GATE SUMMARY ====` block (whole-line-anchored; `--lite`/`--delta` headers are distinct
+  and refused by name, as is a second or unterminated block) with `RESULT: PASS` and
+  `tree-integrity: PASS` compared **token-exactly** (`INCOMPLETE` is the launch sentinel, not a
+  verdict — #3041; a mutated-mid-run tree is not a certification — #2926), and with BOTH `commit:`
+  (7 hex) and `tree-start:` (12 hex) prefix-matching the certified sha **at each value's own width**
+  — a non-hex placeholder REFUSES rather than being skipped. It cannot verify `run-id:` (it did not
+  launch the gate — #2874's reader contract needs the launcher) and it cannot prove the summary came
+  from a real run rather than a hand-written file: a **hostile invoker is out of the threat model**;
+  what this closes is **accident and drift** — a diligent worker with no step in its path telling it
+  the gate of record was never run. `dirty:` is REPORTED in the success line, not enforced. With
+  `--auto` armed, GitHub lands the PR on the `required` check going green (#2667); no CI busy-wait.
 - **Severity triage (#2088, rubric `docs/development/roborev-severity.md`)**: roborev **blockers**
   are fixed pre-merge — each re-triggers `fix → --lite (+ any diff-relevant parity/integration
   target) → re-review` (#2087). **Nits** never trigger

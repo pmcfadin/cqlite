@@ -168,17 +168,26 @@ This keeps a genuinely-alive multi-hour close from being reaped by `flow-board`'
    `git push` the certified tip, open the nits follow-up issue if any, then — **before** arming
    `gh pr merge --auto` — run the two mechanical pre-merge guards:
 
-   **(a) Scripted pre-merge SHA assert (#2456/#2668).** Never merge a head the gate of
-   record did not cover. Run the script with the SHA whose gate SUMMARY you hold
-   (`git rev-parse HEAD` on the certified worktree tip):
+   **(a) Scripted pre-merge SHA + gate-of-record assert (#2456/#2668/#3465).** Never merge a
+   head the gate of record did not cover — and never merge without a gate of record at all.
+   Run the script with the SHA whose gate SUMMARY you hold (`git rev-parse HEAD` on the
+   certified worktree tip) **and the summary file of the FULL gate from step 1**:
    ```bash
-   bash scripts/flow/premerge-assert.sh <pr> <certified-sha>
+   bash scripts/flow/premerge-assert.sh <pr> <certified-sha> <gate-summary-file>
    ```
-   It exits `0` (prints `PREMERGE: OK <sha>`) only when the PR is OPEN **and** its
-   `headRefOid` equals `<certified-sha>`. On exit `2` (stale head or closed/merged PR) →
-   **do NOT merge**, return terminal packet `verdict: stale-head` with the script output.
-   On exit `3` (gh/network failure) → **do NOT merge**, return `verdict: gh-failure` with
-   the script output. Fail closed — never "assume ok".
+   The third argument is **REQUIRED** (an optional one would leave the convention
+   honour-system): it is the `AGENT_GATE_SUMMARY_FILE` you already hold from step 1's full
+   gate — e.g. `/tmp/cqlite-gates/<issue>/full-gate.txt`. A `--lite` or `--delta` summary is
+   NOT acceptable there and the script refuses it by name.
+   It exits `0` (prints `PREMERGE: OK <sha>` **and** `PREMERGE: GATE-OF-RECORD …`) only when
+   the summary holds exactly one `==== AGENT-GATE SUMMARY ====` block with `RESULT: PASS`,
+   `tree-integrity: PASS`, and `commit:`/`tree-start:` matching `<certified-sha>`, **and** the
+   PR is OPEN **and** its `headRefOid` equals `<certified-sha>`. On exit `2` → **do NOT
+   merge**: `PREMERGE: NO-GATE-OF-RECORD` → return terminal packet `verdict: no-gate-of-record`
+   (the remedy is to RUN the full gate, never to hand-edit a summary); stale head or
+   closed/merged PR → `verdict: stale-head`; either with the script output. On exit `3`
+   (gh/network/usage failure) → **do NOT merge**, return `verdict: gh-failure` with the script
+   output. Fail closed — never "assume ok".
 
    **(b) Re-read for a fresh `HOLD:` order.** Immediately before merge, one pass over the
    issue + PR comments for a manager hold:
