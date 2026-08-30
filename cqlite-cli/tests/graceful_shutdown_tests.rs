@@ -263,10 +263,9 @@ fn writable_session_auto_flushes_mid_session_across_threshold() {
     // `t_boot`; each later one from the slowest ack seen so far, so a session
     // that is merely slow keeps loosening its own budget.
     let mut t_ack = Duration::ZERO;
-    // Writes id=1..4 replaced four INDEPENDENT 60s waits, so each may draw the
-    // full old bound while the SHARED group budget has headroom; the group bounds
-    // only their SUM (roborev job 219, finding 1).
-    let mut ack_group = GroupBudget::new("t2 later acks", T2_ACK_GROUP_TOTAL);
+    // Writes id=1..4 replaced four INDEPENDENT 60s waits, so each carries the full
+    // old bound as its base; `clock.clip` IS the group deadline and bounds their
+    // aggregate (roborev job 219, finding 1).
     for id in 0..WRITES {
         writeln!(
             stdin,
@@ -288,14 +287,7 @@ fn writable_session_auto_flushes_mid_session_across_threshold() {
                 ACK_QUIET_BASELINE,
             )
         };
-        let calibrated_budget = calibrated(stage_spec, observed, name, baseline);
-        // The first write is not part of the group (its old bound also covered
-        // boot, and it is floored jointly with stage (a) instead).
-        let budget = clock.clip(if id == 0 {
-            calibrated_budget
-        } else {
-            ack_group.bound(calibrated_budget)
-        });
+        let budget = clock.clip(calibrated(stage_spec, observed, name, baseline));
         let took = await_write_ack(
             &io,
             "stage (b) write-ack",
@@ -303,9 +295,6 @@ fn writable_session_auto_flushes_mid_session_across_threshold() {
             &budget,
             &clock,
         );
-        if id > 0 {
-            ack_group.charge(took);
-        }
         t_ack = t_ack.max(took);
     }
     clock.record("b.write-acks", t_ack);
@@ -433,6 +422,5 @@ fn writable_session_auto_flushes_mid_session_across_threshold() {
     );
     eprintln!("[#3515]   d.eof-exit          {}", exit_budget.describe());
     eprintln!("[#3515]   e.durability-read   {}", read_budget.describe());
-    eprintln!("[#3515]   b.write-acks        {}", ack_group.report());
     eprintln!("[#3515]   stall window        {}", stall_window.describe());
 }
