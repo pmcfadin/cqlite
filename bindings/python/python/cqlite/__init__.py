@@ -9,8 +9,12 @@ from cqlite._cqlite import (
     _decimal_from_parts,
     # Test-support: direct INET rendering path (issue #1453)
     _inet_from_bytes,
+    # Test-support: direct VARINT decoding path (issue #1452)
+    _varint_from_bytes,
     # Test-support: shared FFI error-contract conformance probe (issue #1451)
     _raise_mapped_core_error,
+    # Test-support: committed cross-binding vector table (issue #1452)
+    _ffi_common_render_vectors,
     # Exception types
     CqliteError,
     SchemaError,
@@ -52,8 +56,12 @@ __all__ = [
     "_decimal_from_parts",
     # Test-support: direct INET rendering path (issue #1453)
     "_inet_from_bytes",
+    # Test-support: direct VARINT decoding path (issue #1452)
+    "_varint_from_bytes",
     # Test-support: shared FFI error-contract conformance probe (issue #1451)
     "_raise_mapped_core_error",
+    # Test-support: committed cross-binding vector table (issue #1452)
+    "_ffi_common_render_vectors",
     # Exception types
     "CqliteError",
     "SchemaError",

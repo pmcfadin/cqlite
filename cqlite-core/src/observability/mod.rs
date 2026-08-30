@@ -2,7 +2,7 @@
 //!
 //! This module is the single shared foundation every other observability issue
 //! builds on. It owns OpenTelemetry initialisation, the `CQLITE_OTEL_*` config,
-//! the metric-naming [`catalog`], the error-rate schema ([`ErrorCategory`] +
+//! the metric-naming [`catalog`], the error-rate schema ([`ObsErrorCategory`] +
 //! [`record_error`]), and graceful shutdown — and it is designed so that
 //! **instrumentation call sites are identical whether or not the
 //! `observability` feature is enabled.** When the feature is off, every helper
@@ -48,7 +48,7 @@
 //!
 //! # Always-compiled vs feature-gated
 //!
-//! [`catalog`], [`config`], the [`ErrorCategory`] taxonomy, and the helper
+//! [`catalog`], [`config`], the [`ObsErrorCategory`] taxonomy, and the helper
 //! signatures here are ALWAYS compiled (they pull in no OTel types), so call
 //! sites and tests build in any configuration. Only the exporter/runtime wiring
 //! ([`otel`]) is gated behind `observability`.
@@ -66,7 +66,7 @@ pub(crate) mod read_metrics;
 pub mod stream_subphase;
 
 pub use config::{ObservabilityConfig, ObservabilityConfigBuilder, OtelProtocol};
-pub use error_schema::ErrorCategory;
+pub use error_schema::ObsErrorCategory;
 pub use stream_subphase::{StreamSubPhase, StreamSubPhaseGuard, StreamSubPhaseTimings};
 
 use crate::error::{Error, Result};
@@ -305,6 +305,34 @@ pub fn record_error_with_attrs(err: &Error, subsystem: &'static str, extra: &[At
     }
 }
 
+/// Mark the active span as errored WITHOUT counting the failure (issue #1704).
+///
+/// [`record_error`] does TWO things: it increments [`catalog::ERRORS_TOTAL`] and it
+/// marks the active span errored. Those have different owners. The COUNT belongs to
+/// the operation — exactly one per user-visible failure, which is why an inner step
+/// whose caller records must not increment. The SPAN belongs to the call that opened
+/// it, and an inner step that returns `Err` under an unmarked span reports a
+/// successful-looking span for a failed operation.
+///
+/// Suppressing the whole of `record_error` therefore over-suppresses. This is the
+/// span-only half, for a call site that defers only the counter. Gated identically to
+/// [`record_error`] so the marked/unmarked decision cannot diverge between the two.
+#[inline]
+pub fn mark_span_error(err: &Error) {
+    #[cfg(feature = "observability")]
+    {
+        if otel::metrics_active() {
+            otel::mark_span_error(err.obs_category());
+        } else {
+            let _ = err;
+        }
+    }
+    #[cfg(not(feature = "observability"))]
+    {
+        let _ = err;
+    }
+}
+
 /// Convenience: run a `Result`-returning closure and [`record_error`] on the
 /// `Err` path, returning the result unchanged. Lets call sites instrument an
 /// operation without restructuring their error handling.
@@ -369,12 +397,79 @@ impl ObservabilityGuard {
 /// stack is linked, so a config-only build without the `observability` feature
 /// can still enable the confirmation-scan correctness check (its counter emit is
 /// simply a no-op in that build, per the module's zero-cost-when-off contract).
+///
+/// # Observability honesty (issue #1702, epic #1686)
+///
+/// When `cfg.enabled` is `true` this build CANNOT export anything, so it emits
+/// ONE `WARN` naming the knob, the missing cargo feature and the consequence.
+/// Without it, `CQLITE_OTEL_ENABLED=1` is a completely silent no-op and an
+/// operator cannot tell "collector down / endpoint misconfigured" from "this
+/// binary was built without the feature". It stays a warning, never an error:
+/// degraded-but-running is the correct behavior — the defect was VISIBILITY.
 #[cfg(not(feature = "observability"))]
 #[inline]
 pub fn init(cfg: ObservabilityConfig) -> Result<ObservabilityGuard> {
     crate::storage::sstable::reader::presence_verification::apply_config(
         cfg.verify_presence_oracle,
     );
+
+    // Issue #1702. Emitted with `tracing::warn!`, not the `log` crate's `warn!`
+    // as the issue text spells it (that literal spelling is deliberately avoided
+    // here: the `logging_facade_tracing` guard scans this directory textually and
+    // is not comment-aware, so writing it out trips the residual-macro check):
+    // `cqlite-core` has no `log` dependency at all — its facade
+    // is `tracing` (the #1706 log->tracing migration) — and `tracing` satisfies
+    // the same constraint, since every host composes the fmt layer onto STDERR
+    // so stdout stays clean for `--out json/csv` (issue #129).
+    //
+    // Fired unconditionally on each `init` call rather than behind a `Once`.
+    // Every in-repo caller invokes `init` exactly once per process (CLI
+    // `run_main`, the Flight server, `init_once` in both bindings), so "once at
+    // init" is "once per process" for them — but that is a CONVENTION of those
+    // callers, NOT something this function enforces. `cqlite-core` is a library:
+    // an out-of-tree embedder that calls `init` per connection or per request
+    // with `enabled = true` on a default build gets one WARN per call. A `Once`
+    // would bound that, at the cost of making the warning unobservable to the
+    // second of two tests in one binary; if per-call spam ever shows up in the
+    // field, that is the tradeoff to revisit.
+    //
+    // `cfg.enabled` is the ONLY field a feature-off build silently discards, so
+    // it is the only one that warns. `verify_presence_oracle` is genuinely
+    // honored above. The remaining `CQLITE_OTEL_*` vars (endpoint, protocol,
+    // service name/version, sampling ratio, timeout) are all subordinate to
+    // `enabled`: with `enabled == false` they change nothing even in a
+    // feature-ON build, so a separate warning for them would be noise, not
+    // honesty. This omission is deliberate, not an oversight.
+    //
+    // Wording note: `init` receives an already-RESOLVED config and cannot know
+    // which source enabled it (the CLI accepts `CQLITE_OTEL_ENABLED`, the
+    // `--otel-enabled` flag, and a config file, all feeding this one field), so
+    // the message must not assert that the env var is set. It names the env var
+    // as the common spelling — operators grep for it — without claiming
+    // provenance.
+    //
+    // The warning carries NO fields, deliberately (roborev r2, blocker). An
+    // earlier version attached `requested_endpoint = %cfg.endpoint`, i.e. a
+    // user-controlled URL rendered verbatim by the fmt layer. That is two defect
+    // classes in one field: an endpoint of the form
+    // `http://user:pass@collector:4317` writes credentials into the log, and an
+    // endpoint containing newlines/control characters can FORGE additional log
+    // lines. Neither is sanitized here — the field is simply gone, which removes
+    // the class instead of filtering it. Nothing diagnostic is lost: this build
+    // never contacts the endpoint, and the message says so.
+    if cfg.enabled {
+        tracing::warn!(
+            "OpenTelemetry export is ENABLED in configuration (CQLITE_OTEL_ENABLED / \
+             --otel-enabled / config file) but this binary was built WITHOUT the \
+             `observability` cargo feature: OpenTelemetry is compiled out, so NO \
+             metrics and NO traces will be emitted and the OTLP endpoint is never \
+             contacted — this is NOT a collector or endpoint problem. Rebuild with \
+             `--features observability` to export telemetry, or disable \
+             OpenTelemetry (e.g. CQLITE_OTEL_ENABLED=0, or drop --otel-enabled) \
+             to silence this warning."
+        );
+    }
+
     Ok(ObservabilityGuard { _private: () })
 }
 

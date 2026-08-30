@@ -2,8 +2,8 @@
 //!
 //! Wired from `value.rs` via `#[cfg(test)] #[path = "value_tests.rs"] mod tests;`,
 //! so `super::*` here resolves to the `value` module and every helper under test
-//! (`decimal_to_string`, `inet_bytes_to_string`, `cache_get_or_try_init`,
-//! `testing::*`) is in scope exactly as it was inline.
+//! (`decimal_to_string`, `cache_get_or_try_init`, `testing::*`) is in scope
+//! exactly as it was inline.
 
 use super::*;
 
@@ -14,170 +14,44 @@ use super::*;
 /// default parallel runner would race. Both counter tests take this guard.
 static CTOR_COUNTER_GUARD: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
-#[test]
-fn test_decimal_to_string_positive() {
-    // 123 with scale 2 = 1.23
-    let unscaled = vec![123];
-    assert_eq!(decimal_to_string(2, &unscaled).unwrap(), "1.23");
-}
+// DECIMAL and INET semantics — every scale/sign/boundary/ceiling case — are
+// tested where the ONE implementation lives, in `cqlite-ffi-common`
+// (`src/decimal_tests.rs`, `src/inet.rs`), and asserted end-to-end through this
+// binding's production path by `__test__/shared-vectors.test.js` against the
+// committed cross-binding vector table (issue #1452). What remains here is the
+// part that is genuinely local: the ADAPTER, i.e. that the shared refusal
+// becomes a napi error carrying the canonical message, and that the shared
+// rendering is returned unaltered.
 
+/// The adapter returns the shared rendering verbatim — it must not re-format.
 #[test]
-fn test_decimal_to_string_no_scale() {
-    // 123 with scale 0 = 123
-    let unscaled = vec![123];
-    assert_eq!(decimal_to_string(0, &unscaled).unwrap(), "123");
-}
-
-#[test]
-fn test_decimal_to_string_negative_scale() {
-    // 123 with scale -2 = 12300 (123e2)
-    let unscaled = vec![123];
-    assert_eq!(decimal_to_string(-2, &unscaled).unwrap(), "123e2");
-}
-
-#[test]
-fn test_decimal_to_string_large_scale() {
-    // 123 with scale 5 = 0.00123
-    let unscaled = vec![123];
-    assert_eq!(decimal_to_string(5, &unscaled).unwrap(), "0.00123");
-}
-
-#[test]
-fn test_decimal_to_string_empty() {
-    assert_eq!(decimal_to_string(0, &[]).unwrap(), "0");
-}
-
-#[test]
-fn test_decimal_to_string_negative() {
-    // -123 in two's complement (single byte) = 0x85 = 133, but need proper encoding
-    // For -123: 256 - 123 = 133 = 0x85
-    let unscaled = vec![0x85]; // -123 as two's complement byte
-    assert_eq!(decimal_to_string(2, &unscaled).unwrap(), "-1.23");
-}
-
-/// Issue #1754: a huge positive `scale` used to drive an unbounded `format!`
-/// padding width (PANIC "Formatting argument out of range" → napi worker abort).
-/// It is NOT corrupt — scale is just the decimal exponent — so it now renders
-/// faithfully in precision-preserving exponent form, never panicking. A tiny
-/// unscaled value (1) with scale `i32::MAX` → `1e-2147483647`.
-#[test]
-fn test_decimal_to_string_pathological_positive_scale_renders_exponent_form() {
-    let unscaled = vec![0x01];
-    let s = decimal_to_string(i32::MAX, &unscaled)
-        .expect("a huge scale must render faithfully, not panic/abort");
-    assert_eq!(s, format!("1e{}", -(i32::MAX as i64)));
-}
-
-/// Issue #1754: `scale == i32::MIN` exercises the `-(scale as i64)` widening (a
-/// plain `-scale` would overflow-panic under `overflow-checks`). Renders exact
-/// exponent form, never a panic.
-#[test]
-fn test_decimal_to_string_i32_min_scale_renders_exponent_form() {
-    let unscaled = vec![0x01];
-    let s = decimal_to_string(i32::MIN, &unscaled)
-        .expect("i32::MIN scale must render without overflow panic");
-    assert_eq!(s, format!("1e{}", -(i32::MIN as i64)));
-}
-
-/// Issue #1754: a genuinely pathological unscaled magnitude beyond the sanity
-/// ceiling still fails closed rather than stalling the event loop. ~1 MB of
-/// unscaled bytes is far above the 32 KB ceiling.
-#[test]
-fn test_decimal_to_string_beyond_ceiling_errors() {
-    let unscaled = vec![0x7f; 1_000_000];
-    let err = decimal_to_string(0, &unscaled)
-        .expect_err("a magnitude beyond the ceiling must fail closed");
-    assert!(err.reason.to_string().contains("issue #1754"));
-}
-
-/// Issue #1754 (follow-up correctness fix): a large-but-WELL-FORMED unscaled
-/// magnitude (thousands of digits — over the 1024-byte positional threshold but
-/// within the sanity ceiling) must render FAITHFULLY (precision-preserving
-/// exponent form) and FAST via the single `BigInt` base conversion — NOT be
-/// misclassified as corruption. A 2 KB magnitude (~4933 digits) exercises this.
-#[test]
-fn test_decimal_to_string_large_valid_renders_faithfully_fast() {
-    // 0x7f keeps the high bit clear (large POSITIVE value; all-0xff = -1).
-    let unscaled = vec![0x7f; 2048];
-    let start = std::time::Instant::now();
-    let s = decimal_to_string(2, &unscaled)
-        .expect("a well-formed large decimal must render, not error");
-    let elapsed = start.elapsed();
-    // Exponent form: all significant digits + "e-2". Every digit preserved.
-    let digits = s.strip_suffix("e-2").expect("expected exponent form");
-    assert!(
-        digits.len() >= 4900 && digits.chars().all(|c| c.is_ascii_digit()),
-        "expected full precision-preserving digit string, got {} chars",
-        digits.len()
-    );
-    assert!(
-        elapsed < std::time::Duration::from_millis(500),
-        "expected fast single-conversion render, took {elapsed:?}"
-    );
-}
-
-/// Issue #1754: a ~415 KB magnitude (~1M digits) is beyond any realistic value
-/// and beyond the sanity ceiling; it fails closed FAST via the O(1) length
-/// check, before the superlinear base conversion.
-#[test]
-fn test_decimal_to_string_beyond_ceiling_rejected_fast() {
-    let unscaled = vec![0xff; 415_000];
-    let start = std::time::Instant::now();
-    let err = decimal_to_string(0, &unscaled)
-        .expect_err("a magnitude beyond the ceiling must fail closed");
-    let elapsed = start.elapsed();
-    assert!(err.reason.to_string().contains("issue #1754"));
-    assert!(
-        elapsed < std::time::Duration::from_millis(500),
-        "expected fast O(1) rejection, took {elapsed:?} — the base conversion ran"
-    );
-}
-
-/// Regression guard: a large-but-representable scale at the boundary still
-/// renders (the guard must not over-reject a legitimate value).
-#[test]
-fn test_decimal_to_string_large_representable_scale_ok() {
-    let unscaled = vec![0x01]; // = 1
-                               // scale 100 → "0." followed by 99 zeros then "1".
-    let s = decimal_to_string(100, &unscaled).unwrap();
-    assert!(s.starts_with("0.0") && s.ends_with('1') && s.len() == 102);
-}
-
-#[test]
-fn test_inet_bytes_to_string_ipv4() {
-    assert_eq!(
-        inet_bytes_to_string(&[192, 168, 1, 1]),
-        Ok("192.168.1.1".to_string())
-    );
-}
-
-#[test]
-fn test_inet_bytes_to_string_ipv6() {
-    let raw = [
-        0x20, 0x01, 0x0d, 0xb8, 0x85, 0xa3, 0x00, 0x00, 0x00, 0x00, 0x8a, 0x2e, 0x03, 0x70, 0x73,
-        0x34,
-    ];
-    assert_eq!(
-        inet_bytes_to_string(&raw),
-        Ok("2001:db8:85a3::8a2e:370:7334".to_string())
-    );
-}
-
-/// Issue #1453: a malformed inet (length != 4/16) yields a typed error naming
-/// the bad length — never a silent passthrough. This is the reference outcome
-/// the Python binding was aligned to (both bindings now fail the same way).
-#[test]
-fn test_inet_bytes_to_string_malformed_lengths_error() {
-    for bad_len in [0usize, 1, 3, 5, 6, 8, 15, 17, 32] {
-        let raw = vec![0u8; bad_len];
+fn decimal_adapter_returns_the_shared_rendering_unaltered() {
+    for (scale, unscaled) in [(2i32, &[123u8][..]), (0, &[123][..]), (-2, &[123][..])] {
         assert_eq!(
-            inet_bytes_to_string(&raw),
-            Err(format!(
-                "Invalid inet address length: {bad_len} (expected 4 or 16)"
-            )),
-            "length {bad_len} must be a typed error"
+            decimal_to_string(scale, unscaled).expect("a well-formed value must render"),
+            cqlite_ffi_common::decimal::decimal_to_string(scale, unscaled)
+                .expect("the shared implementation must render it"),
         );
     }
+}
+
+/// A refusal from the shared implementation becomes a napi error whose reason
+/// carries the ONE canonical message — not a second spelling invented here.
+#[test]
+fn decimal_adapter_maps_a_refusal_onto_the_canonical_napi_error() {
+    let unscaled = vec![0x7f; cqlite_ffi_common::decimal::DECIMAL_MAX_UNSCALED_BYTES + 1];
+    let err = decimal_to_string(3, &unscaled).expect_err("beyond the ceiling must fail closed");
+    let canonical = cqlite_ffi_common::decimal::DecimalError::UnscaledTooLarge {
+        scale: 3,
+        unscaled_len: unscaled.len(),
+        max_unscaled_bytes: cqlite_ffi_common::decimal::DECIMAL_MAX_UNSCALED_BYTES,
+    }
+    .to_string();
+    assert!(
+        err.reason.contains(&canonical),
+        "napi error reason must carry the canonical message; got {}",
+        err.reason
+    );
 }
 
 // Issue #1448: prove the constructor-caching invariant without a live JS

@@ -116,6 +116,57 @@ gitignored — so a gate that "passed" against your dirty working tree proves no
 **Fix:** force-add the tiny reference binaries (`git add -f`) and verify the test against a
 fresh `git worktree add --detach HEAD`, never the dirty tree.
 
+### A permitted shape found ANYWHERE, standing in for the line BEING that shape (issue #3367)
+
+**The single most repeated finding class measured to date: seven of 29 findings in one PR, then
+three more of the same family.** Every instance is a guard that asks *"does a permitted construct
+appear somewhere on this line?"* when the question is *"IS this line that construct?"*
+
+Measured instances, all from one guard, each found after the previous was fixed:
+
+| the check | what slipped through |
+|---|---|
+| `case $line in *"bash $ref"*)` | `grep bash "$WRAPPER"` — a scan that merely mentions the word |
+| one occurrence per line assumed | `bash "$W"; grep -c x "$W"` — the invocation carried a scan in with it |
+| `${seg%%=*}` for the assigned name | `_saved=x; subject="$W"` — the FIRST `=` named an allowlisted variable |
+| a substring of the declaration text | `grep -E "a|b" "$_saved"` — the line quoted the declaration and exempted itself |
+| marker matched anywhere on the line | `# see 'marker' above` — prose naming the escape hatch became it |
+| marker matched as a prefix | `marker-allowance` — a longer word starting with the marker granted |
+| exclusion by substring | `_saved=/decoy # _wr_fixture` — naming an excluded token exempted a real mutation |
+
+**Fix:** decide the property of the WHOLE line, not the presence of a token in it. Anchor at column
+zero, match the trimmed line EXACTLY, count occurrences rather than assuming one, and reduce a value
+to its token before comparing. Where a fixture or diagnostic must mention the guarded name,
+**compose it at runtime** (`"$_alias"`, `'wrap''per'`) so the file never contains the literal —
+that removes the need for the exclusion that keeps becoming the hole.
+
+### A claim about a SET, where the set does not close (issue #3367)
+
+The sibling class. A guard enumerates the constructs it knows about; review finds the one it missed;
+the fix adds it; repeat. Measured: `$(...)` but not backticks; `-n` but not `-ng`/`-g -n`;
+`${VAR:=}` but not `${VAR:+}`/`${VAR:-}`; braced but not unbraced expansions; `NAME=` but not
+`export`/`declare`/`+=`/`printf -v`/`read` — **that last one three separate times, on three
+different variables.**
+
+**The terminating move is to remove the decision, not to complete the list.** What actually worked,
+in the order it was found:
+
+- **Hand the property to the shell.** `readonly` refuses every assignment syntax, including the ones
+  you did not think of. `readonly` on an *unset* name forbids the variable existing at all — but
+  **`unset` first**, because `readonly` on an inherited exported value freezes that value instead.
+- **Use a `local`, not a global.** A function-local cannot be assigned from outside, so the whole
+  "who may write this?" question is unexpressible rather than policed.
+- **Delete the mutable thing.** If a global exists only so two cases can repoint it, pass a parameter
+  instead and the guard has no subject.
+- **Choose needles that cannot occur in what you must exempt.** Scanning for prose-shaped strings
+  forced a help-text exemption, and six rounds went into deciding which heredoc lines execute. Keying
+  only on code identifiers — impossible in English — deleted the exemption, the filter, and the family.
+
+**And the general limit, worth knowing before you start:** a lexical scanner cannot decide whether a
+shell line reads a variable, because the name need not appear in the line —
+`export WRAP''PER; sh -c 'grep "$WRAP''PER"'` reads it, and banning `eval` does not close it
+(`bash -c`, `source`, `.`, `xargs sh -c`). If your guard needs that decision, redesign so it does not.
+
 ## How to use this
 
 1. Before handing an issue off, diff your branch against `origin/main` and walk this list.

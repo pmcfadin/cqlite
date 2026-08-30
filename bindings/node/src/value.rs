@@ -261,173 +261,35 @@ pub fn value_to_napi(ctx: &ConvCtx, value: &Value) -> Result<JsUnknown> {
     }
 }
 
-/// Convert variable-length integer bytes to JavaScript BigInt.
+/// Convert variable-length integer bytes to a JavaScript `BigInt`.
 ///
-/// Varint is stored as big-endian two's complement bytes.
+/// A thin adapter: the CQL `varint` semantic (big-endian two's complement, empty
+/// payload meaning zero, sign extension at any width) and its projection into
+/// napi's sign-magnitude little-endian `u64` word form are decided ONCE in
+/// [`cqlite_ffi_common::varint`] (issue #1452). The hand-rolled `<= 8` byte
+/// special case, the padding, the word assembly and the carry-propagating
+/// two's-complement negate loop that used to live here are all gone — the word
+/// form is now derived from the shared `BigInt`, so the two can never disagree.
 fn varint_to_bigint(env: &Env, bytes: &[u8]) -> Result<JsUnknown> {
-    if bytes.is_empty() {
-        return env.create_bigint_from_i64(0)?.into_unknown();
-    }
-
-    // Determine sign from high bit
-    let is_negative = (bytes[0] & 0x80) != 0;
-
-    // For small varints that fit in i64, use the direct method
-    if bytes.len() <= 8 {
-        let mut value: i64 = 0;
-        for &byte in bytes {
-            value = (value << 8) | (byte as i64);
-        }
-        // Sign extend if negative
-        if is_negative && bytes.len() < 8 {
-            let sign_bits = !0i64 << (bytes.len() * 8);
-            value |= sign_bits;
-        }
-        return env.create_bigint_from_i64(value)?.into_unknown();
-    }
-
-    // For larger varints, convert to u64 words for BigInt creation
-    // napi's create_bigint_from_words expects little-endian u64 words
-    let mut words: Vec<u64> = Vec::new();
-
-    // Pad bytes to multiple of 8 for processing
-    let padded_len = bytes.len().div_ceil(8) * 8;
-    let mut padded = vec![if is_negative { 0xFF } else { 0x00 }; padded_len];
-    padded[padded_len - bytes.len()..].copy_from_slice(bytes);
-
-    // Convert to little-endian u64 words
-    for chunk in padded.chunks(8).rev() {
-        let word = u64::from_be_bytes(
-            chunk
-                .try_into()
-                .map_err(|_| napi::Error::from_reason("Invalid varint chunk size"))?,
-        );
-        words.push(word);
-    }
-
-    // For negative numbers in two's complement, napi expects the magnitude
-    // with a sign flag, not raw two's complement
-    if is_negative {
-        // Negate: invert all bits and add 1
-        let mut carry = 1u64;
-        for word in &mut words {
-            *word = !*word;
-            let (new_val, new_carry) = word.overflowing_add(carry);
-            *word = new_val;
-            carry = if new_carry { 1 } else { 0 };
-        }
-    }
-
+    let (is_negative, words) = cqlite_ffi_common::varint::varint_to_sign_and_le_words(bytes);
     env.create_bigint_from_words(is_negative, words)?
         .into_unknown()
 }
 
-/// Sanity ceiling on the unscaled-magnitude byte length this converter will
-/// render (issue #1754). A Cassandra `decimal` unscaled value is a Java
-/// `BigInteger` — legitimately arbitrary-precision — so a merely-large value is
-/// NOT corrupt and must render faithfully. The only hard cost is the single
-/// `BigInt` → decimal-string base conversion (superlinear in digit count); a
-/// 32 KB magnitude (~79k digits) still converts in tens of milliseconds even in
-/// a debug build. Only a genuinely pathological magnitude beyond that could
-/// stall the JS event-loop resolve() thread (`row_to_object`, database.rs, NOT
-/// inside the catch_unwind-firewalled worker), so we fail closed with a typed
-/// corruption error ONLY above this ceiling.
-const DECIMAL_MAX_UNSCALED_BYTES: usize = 32 * 1024;
-
-/// Byte-length threshold above which a well-formed magnitude is rendered in
-/// precision-preserving exponent form rather than an O(digits)-wide positional
-/// expansion (issue #1754). At/under 1024 bytes (~2466 digits) the positional
-/// render is cheap and byte-identical to the historical output; beyond it we
-/// emit `<digits>e<-scale>` (exact, bounded) to avoid superlinear padding work.
-const DECIMAL_POSITIONAL_MAX_BYTES: usize = 1024;
-
-/// Threshold on `scale.abs()` above which the value is rendered in exponent form
-/// instead of positional (issue #1754). `scale` would otherwise drive a
-/// `format!` padding width / leading-zero `repeat`; a huge scale (e.g.
-/// `i32::MAX`) would panic ("Formatting argument out of range") or allocate an
-/// unbounded string. Exponent form is exact and bounded, so no scale value is
-/// rejected — a well-formed decimal always renders.
-const DECIMAL_MAX_SCALE_DIGITS: usize = 1_000_000;
-
-/// Convert decimal to string representation for arbitrary precision.
+/// Render a CQL DECIMAL to its exact string through the ONE shared
+/// implementation.
 ///
-/// Format: Represents the decimal as an exact string.
-/// For example: scale=2, unscaled=[1, 23] (123) -> "1.23"
-///
-/// # Errors
-///
-/// Returns a typed corruption error (never panics/aborts) ONLY when the unscaled
-/// magnitude exceeds the sanity ceiling — a size that could not come from a
-/// legitimate value and whose single base-10 conversion would stall the event
-/// loop (issue #1754). A merely-large-but-well-formed decimal is NOT corrupt: it
-/// renders faithfully in precision-preserving exponent form.
+/// The single Node-specific step is mapping the shared
+/// [`cqlite_ffi_common::decimal::DecimalError`] onto
+/// [`cqlite_core::Error::corruption`] and thence through this binding's existing
+/// production [`to_napi_error`] path, so a refused cell's `error.code` still
+/// comes from the one FFI error contract and its message has one spelling in the
+/// repository (issue #1452). The rendering policy — the refusal ceiling and the
+/// exponent-form thresholds — is now stated once, in the shared crate, and is
+/// identical in both bindings.
 fn decimal_to_string(scale: i32, unscaled: &[u8]) -> Result<String> {
-    if unscaled.is_empty() {
-        return Ok("0".to_string());
-    }
-
-    // Sanity ceiling (issue #1754): O(1) length check BEFORE the one superlinear
-    // base conversion. Only a genuinely pathological magnitude is rejected; a
-    // well-formed arbitrary-precision value renders below.
-    if unscaled.len() > DECIMAL_MAX_UNSCALED_BYTES {
-        return Err(to_napi_error(cqlite_core::Error::corruption(format!(
-            "DECIMAL cell not representable (scale={scale}, unscaled_len={} bytes, \
-             max_unscaled={DECIMAL_MAX_UNSCALED_BYTES} bytes): corrupt SSTable — \
-             refusing to enter a superlinear render on a pathological magnitude \
-             (issue #1754)",
-            unscaled.len()
-        ))));
-    }
-
-    // Cassandra encodes the unscaled value as a two's-complement big-endian Java
-    // BigInteger. ONE base-10 conversion (the sole superlinear step) yields the
-    // digit string; every branch below is a single O(digits) pass over it — no
-    // repeated division, no scale-width padding blowup.
-    let bigint = num_bigint::BigInt::from_signed_bytes_be(unscaled);
-    let full = bigint.to_string();
-    let (is_negative, digits) = match full.strip_prefix('-') {
-        Some(rest) => (true, rest.to_string()),
-        None => (false, full),
-    };
-
-    // Precision-preserving exponent form for over-bound cases (issue #1754): a
-    // large magnitude (thousands+ of digits) or a pathological scale (which as a
-    // padding width would panic / allocate unbounded, and at `i32::MIN` would
-    // overflow `-scale`). `<digits>e<-scale>` preserves every digit exactly.
-    let result = if unscaled.len() > DECIMAL_POSITIONAL_MAX_BYTES
-        || (scale.unsigned_abs() as usize) > DECIMAL_MAX_SCALE_DIGITS
-    {
-        if scale == 0 {
-            digits
-        } else {
-            // `i64` avoids the `(-scale)` overflow at `scale == i32::MIN`.
-            format!("{digits}e{}", -(scale as i64))
-        }
-    } else if scale == 0 {
-        digits
-    } else if scale > 0 {
-        // Positive scale means decimal point moves left.
-        let scale_usize = scale as usize;
-        if digits.len() <= scale_usize {
-            // Need leading zeros: 123 with scale 5 -> 0.00123
-            format!("0.{digits:0>scale_usize$}")
-        } else {
-            // Insert decimal point.
-            let split_point = digits.len() - scale_usize;
-            let int_part = &digits[..split_point];
-            let frac_part = &digits[split_point..];
-            format!("{int_part}.{frac_part}")
-        }
-    } else {
-        // Negative scale means multiply by power of 10.
-        format!("{digits}e{}", -scale)
-    };
-
-    if is_negative {
-        Ok(format!("-{result}"))
-    } else {
-        Ok(result)
-    }
+    cqlite_ffi_common::decimal::decimal_to_string(scale, unscaled)
+        .map_err(|err| to_napi_error(cqlite_core::Error::corruption(err.to_string())))
 }
 
 /// Convert duration to JavaScript object { months, days, nanos }.
@@ -440,32 +302,25 @@ fn duration_to_object(env: &Env, months: i32, days: i32, nanos: i64) -> Result<J
     Ok(obj.into_unknown())
 }
 
-/// Format inet bytes into an IP-address string, or return a typed error message
-/// for a malformed length.
+/// Convert inet bytes to an IP-address string.
 ///
-/// A CQL `inet` value is authoritatively 4 (IPv4) or 16 (IPv6) bytes; any other
-/// length is corrupt data. Per the no-heuristics mandate (issue #28) we surface a
-/// typed error naming the bad length rather than inventing a passthrough — this
-/// is the reference behavior the Python binding was aligned to (issue #1453).
+/// A thin adapter over [`cqlite_ffi_common::inet::inet_bytes_to_string`]: the
+/// 4/16 length dispatch and the malformed-length message are decided ONCE in the
+/// shared crate, so this module holds no literal copy of that message (issue
+/// #1453 had aligned the two bindings by hand-copying the string into both
+/// files; issue #1452 removed the copy). Per the no-heuristics mandate (issue
+/// #28) there is no passthrough branch: the only outcomes are IPv4, IPv6 and a
+/// typed error.
 ///
-/// Pure (no napi `Env`) so it is unit-testable; `inet_to_string_js` wraps it.
-fn inet_bytes_to_string(bytes: &[u8]) -> std::result::Result<String, String> {
-    match bytes.len() {
-        4 => Ok(std::net::Ipv4Addr::new(bytes[0], bytes[1], bytes[2], bytes[3]).to_string()),
-        16 => {
-            let mut arr = [0u8; 16];
-            arr.copy_from_slice(bytes);
-            Ok(std::net::Ipv6Addr::from(arr).to_string())
-        }
-        n => Err(format!(
-            "Invalid inet address length: {n} (expected 4 or 16)"
-        )),
-    }
-}
-
-/// Convert inet bytes to IP address string.
+/// The refusal is mapped through [`to_napi_error`] — exactly as the sibling
+/// DECIMAL adapter does — so it carries the ONE FFI error contract's identity
+/// for a data fault (`code: 'PARSE'`, `category: 'Data'`, issue #1451). A bare
+/// `napi::Error::from_reason` carries no `\0code=` metadata, so
+/// `lib/error-wrapper.js` fell back to its INTERNAL/Internal defaults and a
+/// corrupt SSTable cell claimed an internal-bug identity.
 fn inet_to_string_js(env: &Env, bytes: &[u8]) -> Result<JsUnknown> {
-    let ip_str = inet_bytes_to_string(bytes).map_err(napi::Error::from_reason)?;
+    let ip_str = cqlite_ffi_common::inet::inet_bytes_to_string(bytes)
+        .map_err(|err| to_napi_error(cqlite_core::Error::corruption(err.to_string())))?;
     env.create_string(&ip_str).map(|s| s.into_unknown())
 }
 

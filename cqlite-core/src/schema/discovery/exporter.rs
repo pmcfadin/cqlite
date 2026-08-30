@@ -1,7 +1,7 @@
 //! Schema exporter for discovery output formats.
 //!
-//! Generates CQL `CREATE TABLE` statements, optional JSON exports (experimental
-//! feature), and schema comparison reports from discovered [`SchemaInfo`].
+//! Generates CQL `CREATE TABLE` statements and schema comparison reports from
+//! discovered [`SchemaInfo`].
 
 use crate::Result;
 
@@ -206,90 +206,6 @@ impl SchemaExporter {
             }
             _ => type_info.type_id.clone(),
         }
-    }
-
-    /// Export schema as JSON
-    #[cfg(feature = "experimental")]
-    pub(super) async fn export_json(&self, schema: &SchemaInfo) -> Result<String> {
-        self.export_json_with_config(
-            schema,
-            &crate::schema::json_exporter::JsonExportConfig::default(),
-        )
-        .await
-    }
-
-    /// Export schema as JSON with custom configuration
-    #[cfg(feature = "experimental")]
-    pub(super) async fn export_json_with_config(
-        &self,
-        schema: &SchemaInfo,
-        config: &crate::schema::json_exporter::JsonExportConfig,
-    ) -> Result<String> {
-        let exporter = crate::schema::json_exporter::JsonExporter::with_config(config.clone());
-        exporter.export_schema_info(schema)
-    }
-
-    #[cfg(not(feature = "experimental"))]
-    #[allow(dead_code)]
-    pub(super) async fn export_json(&self, _schema: &SchemaInfo) -> Result<String> {
-        Err(crate::error::Error::unsupported_format(
-            "JSON export requires experimental feature",
-        ))
-    }
-
-    #[cfg(not(feature = "experimental"))]
-    #[allow(dead_code)]
-    pub(super) async fn export_json_with_config<T>(
-        &self,
-        _schema: &SchemaInfo,
-        _config: &T, // Generic placeholder for when experimental feature is disabled
-    ) -> Result<String> {
-        Err(crate::error::Error::unsupported_format(
-            "JSON export requires experimental feature",
-        ))
-    }
-
-    /// Export schema as compact JSON (minimal format)
-    #[allow(dead_code)]
-    #[cfg(feature = "experimental")]
-    async fn export_json_compact(&self, schema: &SchemaInfo) -> Result<String> {
-        let config = crate::schema::json_exporter::JsonExportConfig {
-            format_variant: crate::schema::json_exporter::JsonFormat::Compact,
-            include_metadata: false,
-            include_performance_metrics: false,
-            include_type_details: false,
-            pretty_format: false,
-            ..Default::default()
-        };
-        self.export_json_with_config(schema, &config).await
-    }
-
-    /// Export schema for API documentation (OpenAPI-compatible format)
-    #[allow(dead_code)]
-    #[cfg(feature = "experimental")]
-    async fn export_json_openapi(&self, schema: &SchemaInfo) -> Result<String> {
-        let config = crate::schema::json_exporter::JsonExportConfig {
-            format_variant: crate::schema::json_exporter::JsonFormat::OpenApi,
-            include_documentation: true,
-            include_type_details: true,
-            include_metadata: false,
-            ..Default::default()
-        };
-        self.export_json_with_config(schema, &config).await
-    }
-
-    /// Export schema for data pipeline tools
-    #[allow(dead_code)]
-    #[cfg(feature = "experimental")]
-    async fn export_json_pipeline(&self, schema: &SchemaInfo) -> Result<String> {
-        let config = crate::schema::json_exporter::JsonExportConfig {
-            format_variant: crate::schema::json_exporter::JsonFormat::DataPipeline,
-            include_type_details: true,
-            include_table_options: false,
-            include_performance_metrics: true,
-            ..Default::default()
-        };
-        self.export_json_with_config(schema, &config).await
     }
 
     /// Generate schema comparison report

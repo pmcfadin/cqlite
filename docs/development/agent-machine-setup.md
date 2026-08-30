@@ -9,7 +9,13 @@ place, and `gh`/roborev configured so a local gate run predicts CI.
 ```bash
 bash scripts/bootstrap-agent-machine.sh          # check everything; print any install commands
 bash scripts/bootstrap-agent-machine.sh --yes    # also auto-run brew/cargo installs + dataset fetch
+bash scripts/bootstrap-agent-machine.sh --fix-credentials --strict   # image/launcher preflight (#3369):
+                                                 # wire git push credentials ONLY, and exit 1 on any [warn]
 ```
+
+`--strict` is what the agent-ami profile's `verify.run` uses. Without it the script always
+exits 0 (so it composes into setup scripts) and the ONLY failure signal is the literal
+string `All checks green.` in its stdout — a signal a caller can forget to check.
 
 Idempotent and safe to re-run. macOS + Linux. It **never installs without `--yes`** —
 without it, it prints the exact command for each gap. It verifies, in order:
@@ -28,8 +34,51 @@ without it, it prints the exact command for each gap. It verifies, in order:
    changed. The output names the account it measured. Point it elsewhere with
    `CQLITE_PROJECT_OWNER` / `CQLITE_PROJECT_NUMBER` / `CQLITE_PROJECT_ACCOUNT`.
    It also checks **git push credentials** (#2942) — a *separate* credential path from
-   `gh`. Under `--yes` it configures one, **scoped to the origin host**, and the token
-   value is never written to disk.
+   `gh`. Under `--yes` (or `--fix-credentials`) it configures one, **scoped to the origin
+   host**, and the token value is never written to disk. That check is a *configuration*
+   probe (`git credential fill`, which never contacts the network): it proves a helper
+   ANSWERS, never that a push would succeed. The push claim belongs to 3b below.
+   The **fallback** repair — the `$GH_TOKEN`-dereferencing helper, used only when
+   `gh auth setup-git` yields no usable credential — is additionally gated on **token
+   authority for that host**: `gh auth token --hostname <push host>` must return a token
+   **equal to** the `$GH_TOKEN`/`$GITHUB_TOKEN` this run would install. **A successful
+   login for the host is deliberately NOT sufficient** — on a box authenticated to both
+   `github.com` and a GitHub Enterprise host, a login check passes for both and the
+   github.com token would be handed to the enterprise host. The host itself is read from
+   local git config (`git remote get-url --push`), so a typo, a leftover fork/mirror
+   `pushurl` or a stale `insteadOf` would otherwise configure git to hand a real
+   credential to a host nobody intended, during a preflight the launcher runs
+   automatically. Anything other than an exact match — no token for that host, a different
+   token, an unanswerable `gh`, an empty answer — ⇒ the repair is **refused**, one `[warn]`
+   names the host (never a token value), and `--strict` exits 1. `gh auth setup-git` itself
+   stays unconditional: it makes `gh` the helper, and `gh` decides, per host, what it will
+   answer for.
+3b. **git PUSH capability** (#3369) — the section above validates *configuration*
+   (`git credential fill` never contacts the network); this one performs **the
+   operation**, delegating to `scripts/flow/claim.sh smoke` to create, read back and
+   delete a throwaway `refs/claims/smoke-<commit-sha>` ref. It runs **after** the credential
+   fix, so it measures the machine as the fix left it. The verdict is **three-valued**
+   and prints one greppable line:
+
+   | Line | Meaning |
+   |---|---|
+   | `[ok]   git-push: VERIFIED (refs/claims/* create+ls-remote+delete on 'origin')` | affirmatively measured — the claim protocol works here |
+   | `[warn] git-push: FAILED (...)` | the operation did not complete. For a credential fault the line names it and gives the #2942 remedy; for anything else bootstrap **quotes `claim.sh`'s own verdict verbatim** rather than guessing a cause — including `reason=cleanup-unverified`, where the cleanup delete exited nonzero so delete capability is unproven (`release` deletes `refs/claims/issue-<N>`) and the ref may survive; the quoted line carries the `ls-remote` check |
+   | `[warn] git-push: UNMEASURED (...)` | no remote / unreachable / no `timeout` to bound it / no verdict — capability is **UNKNOWN, not ok** |
+   | `[warn] git-push: OPT-OUT (--skip-push-probe)` | deliberately not measured; still a warning, so it can never buy a green |
+
+   UNMEASURED is a warning on purpose: an unmeasured capability must never inherit the
+   permissive branch. `--skip-push-probe` is for offline boxes and hermetic tests, and is
+   **not** `--skip-smoke` (which skips the final *gate* run).
+
+   **Cost:** measuring the operation means performing it — two extra network round trips
+   and a transient `refs/claims/smoke-<commit-sha>` ref created and deleted on the shared
+   origin, on **every** run of this script. An **observed** cleanup failure FAILS the
+   probe (`reason=cleanup-unverified` — the delete exited nonzero, so whether the ref
+   survives is unknown), so it can never pass quietly. A run **interrupted before
+   cleanup** is the residual: it leaves no verdict at all and can still strand a ref.
+   List them with `git ls-remote origin 'refs/claims/smoke-*'` and delete with
+   `git push origin --delete refs/claims/smoke-<commit-sha>` — always safe.
 4. **roborev** — installed, and this machine's *configured* agent resolves.
 5. **Datasets** + `CQLITE_DATASETS_ROOT` guidance.
 6. **Health check** — runs the gate's fmt smoke and prints the authoritative
@@ -44,6 +93,8 @@ The bootstrap now checks the first two and fails loudly; the third is a hand-typ
 | You see | Real cause | Working form |
 |---|---|---|
 | `fatal: could not read Username for 'https://github.com'` | `gh` is authenticated but **git is not** — they are separate credential paths. `scripts/flow/claim.sh` + `claim-heartbeat.sh` push with plain git on 10+ call sites, so the claim protocol itself does not work. | `gh auth setup-git`, or `bash scripts/bootstrap-agent-machine.sh --yes` (configures an origin-host-scoped helper that dereferences `$GH_TOKEN` at call time). |
+| `git push` fails on a box where `gh auth status` is green **and** `git ls-remote origin HEAD` succeeds | Same shape, one subsystem over: a read is evidence about reachability, not about the write. `claim.sh claim <N>` — the first thing a lane does — is a `git push`, so the box looks healthy and no lane can start (#3369). | `bash scripts/bootstrap-agent-machine.sh --fix-credentials`, then read its `git-push:` line. That check is the direct application of the doctrine sentence below: it PERFORMS the push instead of inferring it. |
+| `git push has NO credentials for <host> and this run REFUSED to configure any` under `--fix-credentials` | The push host was resolved from local git config, and `gh auth token --hostname <host>` did not return the token this environment holds — gh has none for that host, or a **different** one (the reachable case: a github.com token on a box that also has a GitHub Enterprise host). A login for the host is not enough; the run would otherwise have configured git to hand `$GH_TOKEN` to a host that token does not belong to. Fail-closed by design (#3369). | If the host is right: `gh auth login --hostname <host>`, then re-run `--fix-credentials` — preferably **without** `$GH_TOKEN` set, so `gh auth setup-git` supplies that host's own token. If it is wrong: `git remote set-url --push origin <the intended url>` — check for a leftover fork/mirror `pushurl` or a stale `insteadOf`. |
 | `gh project …` fails for a missing **`read:org`** scope on a token whose scopes DO include `project` | A scope match is evidence about a token, not about the operation. `gh project item-edit` needs `read:org`; the equivalent GraphQL mutation does not. | Widen the token (`gh auth refresh -s read:org`), **or** do board writes through the `updateProjectV2ItemFieldValue` GraphQL mutation — it succeeds with the same token. |
 | `stale info` from a **bare** `git push --force-with-lease`, even when local and remote refs demonstrably match | The bare form leases against a remote-tracking ref your checkout may never have fetched. | Always the explicit CAS form: `git push --force-with-lease=<ref>:<sha>` (what the flow scripts already use). |
 

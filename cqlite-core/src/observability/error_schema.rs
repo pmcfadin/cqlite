@@ -13,17 +13,44 @@
 //! |----------------|------------------|-------------------------------------------------------------------|
 //! | `Io`           | `io`             | `Io`, `InvalidPath`, `Timeout`                                     |
 //! | `Serialization`| `serialization`  | `Serialization`, `TypeConversion`                                 |
-//! | `Corruption`   | `corruption`     | `Corruption`                                                       |
+//! | `Corruption`   | `corruption`     | `Corruption`, `CorruptCommitLogFrame`                              |
 //! | `Schema`       | `schema`         | `Schema`, `Table`                                                  |
-//! | `Parsing`      | `parsing`        | `Parse`, `CqlParse`, `InvalidFormat`, `UnsupportedFormat`         |
+//! | `Parsing`      | `parsing`        | `Parse`, `CqlParse`, `InvalidFormat`, `UnsupportedFormat`,        |
+//! |                |                  | `UnsupportedVersion`, `UnsupportedCommitLogVersion`               |
 //! | `Storage`      | `storage`        | `Storage`, `Memory`, `Index`, `Compaction`, `WriteDirLocked`     |
 //! | `Concurrency`  | `concurrency`    | `Concurrency`, `Transaction`                                       |
 //! | `Constraints`  | `constraints`    | `ConstraintViolation`, `AlreadyExists`                            |
-//! | `Query`        | `query`          | `QueryExecution`, `UnsupportedQuery`, `InvalidInput`             |
+//! | `Query`        | `query`          | `QueryExecution`, `UnsupportedQuery`, `InvalidInput`,             |
+//! |                |                  | `ResultTooLarge`, `ForcedReadPathUnavailable`, `InvalidReadPath`  |
 //! | `Cancelled`    | `cancelled`      | `Cancelled` (issue #2264 — a cooperative abort, never `Io`)       |
 //! | `Timeout`      | `timeout`        | `QueryTimeout` (issue #1695 — an operator budget, never data)     |
 //! | `Other`        | `other`          | `Configuration`, `InvalidState`, `InvalidOperation`, `NotFound`,  |
-//! |                |                  | `Internal`, `Wasm`, and any future variant (catch-all)            |
+//! |                |                  | `Internal`, `Wasm` (`wasm32` builds only)                         |
+//!
+//! The table is EXACT, not illustrative: every row's `Maps from` column lists the
+//! COMPLETE set of `Error` variants [`classify`] routes to that category, `Other`
+//! included. There is **no catch-all**. [`classify`] matches on `&Error` with every
+//! arm an explicit `Error::<Variant>` pattern (pinned by
+//! `error_schema_tests::classify_has_no_catch_all_arm`), so a newly-added `Error`
+//! variant is a COMPILE ERROR until it is categorised by hand — it is never
+//! silently absorbed into `Other`. `Wasm` is `#[cfg(target_arch = "wasm32")]`-gated
+//! and therefore exists only in `wasm32` builds; it is listed because the table
+//! describes the enum, not one target.
+//!
+//! `error_schema_tests::every_error_variant_classify_routes_is_documented_in_the_taxonomy_table`
+//! enforces variant→category set equality against [`classify`]'s match arms in
+//! both directions (issue #1705, AI5 of epic #1686): a variant routed but
+//! undocumented, a documented variant that is never routed, and a variant listed
+//! under the wrong category all fail. The `Maps from` column is parsed
+//! fail-closed — a non-parenthetical item that is not a backticked variant name,
+//! or a parenthetical that claims catch-all behaviour, reds the guard rather than
+//! being silently dropped as prose (which is how the stale "any future variant
+//! (catch-all)" claim survived here).
+//!
+//! **Scope: telemetry only.** The language bindings do NOT derive from
+//! [`classify`]: `cqlite_ffi_common::error_contract` (issue #1451) mirrors the distinct
+//! [`Error::category`](crate::error::Error::category) enum, and nothing pins the
+//! two together — `QueryTimeout` is `Timeout` here and `Query` there.
 //!
 //! # Relation to spans and CLI exit codes
 //!
@@ -43,7 +70,7 @@ use crate::error::Error;
 /// Bounded, telemetry-safe error categories. The total count is small and
 /// fixed, making `as_str()` values safe as metric/span attribute values.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum ErrorCategory {
+pub enum ObsErrorCategory {
     /// Filesystem / OS I/O, paths, timeouts.
     Io,
     /// (De)serialization and type-conversion failures.
@@ -70,85 +97,88 @@ pub enum ErrorCategory {
     /// A query exceeded its configured execution budget
     /// (`query.max_execution_time`, issue #1695). Its OWN bucket, never
     /// `Corruption` (an operator-imposed deadline is not damaged data) and never
-    /// the `Other` catch-all (a rising timeout rate is the signal that the budget
+    /// the generic `Other` bucket (a rising timeout rate is the signal that the budget
     /// is too tight or a scan has regressed — the one thing dashboards must see).
     Timeout,
-    /// Everything else (configuration, internal, platform, catch-all).
+    /// Everything else: configuration, invalid state/operation, not-found,
+    /// internal, platform. NOT a catch-all — [`classify`] names every `Error`
+    /// variant explicitly, so a new variant lands here only when a human puts it
+    /// here (see the module-doc taxonomy table).
     Other,
 }
 
-impl ErrorCategory {
+impl ObsErrorCategory {
     /// Stable, low-cardinality label. Safe to use as a metric/span attribute
     /// value — these strings never change for a given variant.
     pub fn as_str(self) -> &'static str {
         match self {
-            ErrorCategory::Io => "io",
-            ErrorCategory::Serialization => "serialization",
-            ErrorCategory::Corruption => "corruption",
-            ErrorCategory::Schema => "schema",
-            ErrorCategory::Parsing => "parsing",
-            ErrorCategory::Storage => "storage",
-            ErrorCategory::Concurrency => "concurrency",
-            ErrorCategory::Constraints => "constraints",
-            ErrorCategory::Query => "query",
-            ErrorCategory::Cancelled => "cancelled",
-            ErrorCategory::Timeout => "timeout",
-            ErrorCategory::Other => "other",
+            ObsErrorCategory::Io => "io",
+            ObsErrorCategory::Serialization => "serialization",
+            ObsErrorCategory::Corruption => "corruption",
+            ObsErrorCategory::Schema => "schema",
+            ObsErrorCategory::Parsing => "parsing",
+            ObsErrorCategory::Storage => "storage",
+            ObsErrorCategory::Concurrency => "concurrency",
+            ObsErrorCategory::Constraints => "constraints",
+            ObsErrorCategory::Query => "query",
+            ObsErrorCategory::Cancelled => "cancelled",
+            ObsErrorCategory::Timeout => "timeout",
+            ObsErrorCategory::Other => "other",
         }
     }
 
     /// All variants, for tests and exhaustiveness checks.
-    pub const ALL: &'static [ErrorCategory] = &[
-        ErrorCategory::Io,
-        ErrorCategory::Serialization,
-        ErrorCategory::Corruption,
-        ErrorCategory::Schema,
-        ErrorCategory::Parsing,
-        ErrorCategory::Storage,
-        ErrorCategory::Concurrency,
-        ErrorCategory::Constraints,
-        ErrorCategory::Query,
-        ErrorCategory::Cancelled,
-        ErrorCategory::Timeout,
-        ErrorCategory::Other,
+    pub const ALL: &'static [ObsErrorCategory] = &[
+        ObsErrorCategory::Io,
+        ObsErrorCategory::Serialization,
+        ObsErrorCategory::Corruption,
+        ObsErrorCategory::Schema,
+        ObsErrorCategory::Parsing,
+        ObsErrorCategory::Storage,
+        ObsErrorCategory::Concurrency,
+        ObsErrorCategory::Constraints,
+        ObsErrorCategory::Query,
+        ObsErrorCategory::Cancelled,
+        ObsErrorCategory::Timeout,
+        ObsErrorCategory::Other,
     ];
 }
 
-impl std::fmt::Display for ErrorCategory {
+impl std::fmt::Display for ObsErrorCategory {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(self.as_str())
     }
 }
 
 /// Map a [`cqlite_core::Error`](crate::error::Error) to its telemetry
-/// [`ErrorCategory`]. This is the single classification point; both
+/// [`ObsErrorCategory`]. This is the single classification point; both
 /// `Error::obs_category` and `record_error` route through it.
-pub(crate) fn classify(err: &Error) -> ErrorCategory {
+pub(crate) fn classify(err: &Error) -> ObsErrorCategory {
     match err {
-        Error::Io(_) | Error::InvalidPath(_) | Error::Timeout(_) => ErrorCategory::Io,
+        Error::Io(_) | Error::InvalidPath(_) | Error::Timeout(_) => ObsErrorCategory::Io,
 
-        Error::Serialization { .. } | Error::TypeConversion(_) => ErrorCategory::Serialization,
+        Error::Serialization { .. } | Error::TypeConversion(_) => ObsErrorCategory::Serialization,
 
-        Error::Corruption(_) | Error::CorruptCommitLogFrame(_) => ErrorCategory::Corruption,
+        Error::Corruption(_) | Error::CorruptCommitLogFrame(_) => ObsErrorCategory::Corruption,
 
-        Error::Schema(_) | Error::Table(_) => ErrorCategory::Schema,
+        Error::Schema(_) | Error::Table(_) => ObsErrorCategory::Schema,
 
         Error::Parse(_)
         | Error::CqlParse(_)
         | Error::InvalidFormat(_)
         | Error::UnsupportedFormat(_)
         | Error::UnsupportedVersion { .. }
-        | Error::UnsupportedCommitLogVersion { .. } => ErrorCategory::Parsing,
+        | Error::UnsupportedCommitLogVersion { .. } => ObsErrorCategory::Parsing,
 
         Error::Storage(_)
         | Error::Memory(_)
         | Error::Index(_)
         | Error::Compaction(_)
-        | Error::WriteDirLocked { .. } => ErrorCategory::Storage,
+        | Error::WriteDirLocked { .. } => ObsErrorCategory::Storage,
 
-        Error::Concurrency(_) | Error::Transaction(_) => ErrorCategory::Concurrency,
+        Error::Concurrency(_) | Error::Transaction(_) => ObsErrorCategory::Concurrency,
 
-        Error::ConstraintViolation(_) | Error::AlreadyExists(_) => ErrorCategory::Constraints,
+        Error::ConstraintViolation(_) | Error::AlreadyExists(_) => ObsErrorCategory::Constraints,
 
         Error::QueryExecution(_)
         | Error::ResultTooLarge { .. }
@@ -157,28 +187,29 @@ pub(crate) fn classify(err: &Error) -> ErrorCategory {
         // outcome (`point` unavailable / invalid knob value).
         | Error::ForcedReadPathUnavailable { .. }
         | Error::InvalidReadPath { .. }
-        | Error::InvalidInput(_) => ErrorCategory::Query,
+        | Error::InvalidInput(_) => ObsErrorCategory::Query,
 
         // Issue #2264: a cooperative cancellation is an expected outcome, not a
-        // fault — kept out of both `Io` and the `Other` catch-all.
-        Error::Cancelled => ErrorCategory::Cancelled,
+        // fault — kept out of both `Io` and the generic `Other` bucket.
+        Error::Cancelled => ObsErrorCategory::Cancelled,
 
         // Issue #1695: an elapsed `query.max_execution_time` budget. Its own
         // bucket so it is never indistinguishable from `Corruption` on a
         // dashboard, and never buried in `Other`.
-        Error::QueryTimeout { .. } => ErrorCategory::Timeout,
+        Error::QueryTimeout { .. } => ObsErrorCategory::Timeout,
 
-        // Catch-all for the remaining variants and any future additions. Listed
-        // explicitly (no wildcard arm besides wasm) so that adding a new Error
-        // variant forces a compile decision here.
+        // The remaining variants, each named EXPLICITLY. This is not a catch-all
+        // and there is no wildcard arm anywhere in this match, so a newly-added
+        // `Error` variant fails to compile until it is categorised here by hand
+        // (pinned by `error_schema_tests::classify_has_no_catch_all_arm`).
         Error::Configuration(_)
         | Error::InvalidState(_)
         | Error::InvalidOperation(_)
         | Error::NotFound(_)
-        | Error::Internal(_) => ErrorCategory::Other,
+        | Error::Internal(_) => ObsErrorCategory::Other,
 
         #[cfg(target_arch = "wasm32")]
-        Error::Wasm(_) => ErrorCategory::Other,
+        Error::Wasm(_) => ObsErrorCategory::Other,
     }
 }
 
@@ -188,94 +219,15 @@ impl Error {
     /// Distinct from [`Error::category`](crate::error::Error::category), which
     /// returns the developer-facing [`crate::error::ErrorCategory`]. This one
     /// returns the bounded, monitoring-oriented
-    /// [`crate::observability::ErrorCategory`].
-    pub fn obs_category(&self) -> ErrorCategory {
+    /// [`crate::observability::ObsErrorCategory`].
+    pub fn obs_category(&self) -> ObsErrorCategory {
         classify(self)
     }
 }
 
+/// Invariant + code↔doc completeness tests live in a sibling file so this file
+/// stays pure source inside the campsite-rule target (#1116); they are logically
+/// the `tests` submodule of this module.
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::error::Error;
-
-    #[test]
-    fn as_str_is_lowercase_and_unique() {
-        let mut seen = std::collections::HashSet::new();
-        for c in ErrorCategory::ALL {
-            let s = c.as_str();
-            assert_eq!(s, s.to_ascii_lowercase());
-            assert!(seen.insert(s), "duplicate category label {s}");
-        }
-        assert_eq!(seen.len(), ErrorCategory::ALL.len());
-    }
-
-    #[test]
-    fn display_matches_as_str() {
-        for c in ErrorCategory::ALL {
-            assert_eq!(c.to_string(), c.as_str());
-        }
-    }
-
-    // Exhaustively cover every Error constructor / variant -> expected category.
-    #[test]
-    fn classify_every_error_variant() {
-        use ErrorCategory::*;
-
-        let io = std::io::Error::other("x");
-        assert_eq!(Error::from(io).obs_category(), Io);
-        assert_eq!(Error::invalid_path("p").obs_category(), Io);
-        assert_eq!(Error::Timeout("t".into()).obs_category(), Io);
-
-        assert_eq!(Error::serialization("s").obs_category(), Serialization);
-        assert_eq!(Error::type_conversion("t").obs_category(), Serialization);
-
-        assert_eq!(Error::corruption("c").obs_category(), Corruption);
-
-        assert_eq!(Error::schema("s").obs_category(), Schema);
-        assert_eq!(Error::Table("t".into()).obs_category(), Schema);
-
-        assert_eq!(Error::parse("p").obs_category(), Parsing);
-        assert_eq!(Error::cql_parse("p").obs_category(), Parsing);
-        assert_eq!(Error::invalid_format("f").obs_category(), Parsing);
-        assert_eq!(Error::unsupported_format("f").obs_category(), Parsing);
-
-        assert_eq!(Error::storage("s").obs_category(), Storage);
-        assert_eq!(Error::memory("m").obs_category(), Storage);
-        assert_eq!(Error::index("i").obs_category(), Storage);
-        assert_eq!(Error::compaction("c").obs_category(), Storage);
-        assert_eq!(Error::write_dir_locked("/d").obs_category(), Storage);
-
-        assert_eq!(Error::concurrency("c").obs_category(), Concurrency);
-        assert_eq!(Error::transaction("t").obs_category(), Concurrency);
-
-        assert_eq!(Error::constraint_violation("c").obs_category(), Constraints);
-        assert_eq!(Error::already_exists("a").obs_category(), Constraints);
-
-        assert_eq!(Error::query_execution("q").obs_category(), Query);
-        assert_eq!(Error::unsupported_query("q").obs_category(), Query);
-        assert_eq!(Error::invalid_input("i").obs_category(), Query);
-
-        assert_eq!(Error::configuration("c").obs_category(), Other);
-        assert_eq!(Error::invalid_state("s").obs_category(), Other);
-        assert_eq!(Error::invalid_operation("o").obs_category(), Other);
-        assert_eq!(Error::not_found("n").obs_category(), Other);
-        assert_eq!(Error::internal("i").obs_category(), Other);
-
-        // Issue #2264: a cooperative cancellation must be its OWN bucket, not
-        // `Io` (misleading — it is not a transport failure) and not lumped into
-        // the generic `Other` catch-all (would hide cancellation rate).
-        assert_eq!(Error::Cancelled.obs_category(), Cancelled);
-
-        // Issue #1695: an elapsed query budget is its OWN telemetry bucket —
-        // never `Corruption` (it is not damaged data), never `Io` (it is not a
-        // transport fault) and never the `Other` catch-all.
-        let timeout = Error::QueryTimeout {
-            operation: "query.execute".into(),
-            elapsed: std::time::Duration::from_millis(1),
-            limit: std::time::Duration::from_millis(1),
-        };
-        assert_eq!(timeout.obs_category(), Timeout);
-        assert_ne!(timeout.obs_category(), Corruption);
-    }
-}
+#[path = "error_schema_tests.rs"]
+mod tests;

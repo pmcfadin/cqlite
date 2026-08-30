@@ -33,7 +33,38 @@ bash scripts/bootstrap-agent-machine.sh        # or manually: sccache, cargo-nex
 bash test-data/scripts/fetch-datasets.sh       # real SSTable binaries — REQUIRED; export the line it prints
 gh auth setup-git                              # git push credentials — SEPARATE from gh auth (#2942)
 gh auth status                                  # must include the 'project' scope (board access)
-bash scripts/flow/claim.sh smoke               # preflight: prove origin accepts refs/claims/* (see below)
+```
+
+**On a LAUNCHER-ONBOARDED box the credential step is already done (#3369)** — the agent-ami
+profile's `verify.run` is `bootstrap-agent-machine.sh --fix-credentials --strict`, which runs
+`gh auth setup-git` itself after the token is injected. It is **wired at onboard, not baked into
+the image**, so a hand-built box still needs the line above; the two paths do not conflict, and
+re-running it is idempotent.
+
+**The `refs/claims/*` preflight is no longer a separate manual step either.** Every bootstrap run
+MEASURES push capability by performing the operation — it invokes `claim.sh smoke` and reports one
+of `git-push: VERIFIED` / `FAILED` / `UNMEASURED`. Run the probe by hand only when diagnosing:
+
+```bash
+bash scripts/flow/claim.sh smoke               # same probe the bootstrap runs (see below)
+```
+
+**Cost and residual of the automatic probe.** Every bootstrap run — laptop runs included — makes two
+extra network round trips and CREATES AND DELETES a transient `refs/claims/smoke-<commit-sha>` ref on the
+shared origin. A cleanup delete that exits nonzero now FAILS the probe
+(`SMOKE-FAIL … reason=cleanup-unverified` → `git-push: FAILED`, #3369) rather than reporting success
+with a stderr warning: delete capability is required by the claim protocol, since `claim.sh release`
+deletes `refs/claims/issue-<N>`. That verdict deliberately attributes **no cause** — one nonzero exit
+cannot tell a remote's deletion policy from a network drop — so it reports the observation and tells
+you how to check. A ref can still be stranded two ways: by that case (the delete did not succeed, so
+the ref's fate is unknown), and by a run KILLED between the create and the delete, which leaves no
+verdict at all. **Deleting a stray `refs/claims/smoke-*` is always
+safe** — it is a throwaway root commit that nothing reads, and it is NOT a claim lock (those are
+`refs/claims/issue-<N>`, never `smoke-`). List and clean them:
+
+```bash
+git ls-remote origin 'refs/claims/smoke-*'
+git push origin --delete refs/claims/smoke-<commit-sha>
 ```
 
 ### Notification channel (ntfy) — one env var, no per-machine binary (#3119)
@@ -113,9 +144,10 @@ again.
 
 **Claim-ref preflight (#2665):** the cross-machine lock is a push to the `refs/claims/*` ref
 namespace on origin — `claim.sh smoke` creates, `ls-remote`s, and deletes a throwaway
-`refs/claims/smoke-<nonce>` ref to confirm the remote permits it (`SMOKE-OK` = good). This is
-**verified working on github.com/pmcfadin/cqlite** (2026-07-17). Run it **once when adopting a new
-remote or host** — a managed Git host that restricts custom ref namespaces would make the whole
+`refs/claims/smoke-<commit-sha>` ref to confirm the remote permits it (`SMOKE-OK` = good). This is
+**verified working on github.com/pmcfadin/cqlite** (2026-07-17). Since #3369
+`bootstrap-agent-machine.sh` runs this probe on every invocation (that is its `git-push:` line), so
+you rarely need it by hand; run it directly **when adopting a new remote or host** — a managed Git host that restricts custom ref namespaces would make the whole
 claim mechanism unusable, and that must be caught before the fleet relies on it. **Non-unique
 hostnames:** the claim holder identity is `hostname -s`; on a fleet of cloud images/containers/cloned
 VMs that report the *same* short hostname, export a UNIQUE `CLAIM_MACHINE` per box (else two machines
@@ -665,7 +697,7 @@ machine + heartbeat age (issue #2089). Interpretation:
 | Laptop lid closed mid-issue | Nothing. Commits are on the origin branch. Reopen and say `implement <N>` — it resumes from the worktree. |
 | Session feels degraded / bloated | Kill it, start fresh. Board + disk are the state; the new session rehydrates in one board read. |
 | Board unreachable (auth/scope error) | The session STOPS by design (labels are decorative, never a dispatch source). Fix `gh auth refresh -s project` and restart. If the scope is already present and `gh project` still fails for `read:org`, that is the #2942 delta — use the `updateProjectV2ItemFieldValue` GraphQL mutation for board writes, or widen the token with `-s read:org`. |
-| `fatal: could not read Username` on any push | git has no credentials even though `gh` does (#2942). The claim protocol pushes with plain git, so it is fully broken until fixed: `gh auth setup-git`, or `bash scripts/bootstrap-agent-machine.sh --yes`. A claim attempt on such a box reports `reason=auth`, not a retryable transient. |
+| `fatal: could not read Username` on any push | git has no credentials even though `gh` does (#2942). The claim protocol pushes with plain git, so it is fully broken until fixed: `gh auth setup-git`, or `bash scripts/bootstrap-agent-machine.sh --fix-credentials`. A claim attempt on such a box reports `reason=auth`, not a retryable transient. **Since #3369 the bootstrap catches this one step earlier**, by performing the push rather than probing the credential helper: the same fault shows there as `git-push: FAILED`. Never wait for a lane to hit it. |
 | Gate seems hung | It's probably queued: look for `waiting for gate slot (N in use)…`. Queued ≠ hung. |
 | Green SUMMARY but parity lines say SKIP | Datasets missing on that machine — `fetch-datasets.sh`, export the root it prints, re-run. Probe an existing root with `fetch-datasets.sh --verify-only` (mutates nothing). The FULL gate FAILs CLOSED here (`missing-fixtures: FAIL-CLOSED (#2078)`) so it can't slip through; `--lite`/`--only` stay lenient. |
 | `missing-schemas: FAIL-CLOSED (#3148)` | Either a committed `test-data/schemas/*.cql` is unreadable (broken checkout — `git restore --source=HEAD -- test-data/schemas`) or `CQLITE_SCHEMAS_ROOT` is set to a **relative** path (export an absolute one, or unset it). Never a corpus-layout problem: the schemas root is checkout-relative. No opt-out exists — do not look for one. |

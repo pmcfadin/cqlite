@@ -205,6 +205,9 @@ impl SSTableRowIteratorAdapter {
         udt_registry: Option<crate::schema::UdtRegistry>,
         scan_cancel: crate::storage::scan_cancel::ScanCancel,
         channel_capacity: usize,
+        // Issue #1704: WHO counts a failed reopen. Stated by the caller because only
+        // it knows whether its own seam records — see `merge::constructors`.
+        reporting: crate::storage::sstable::reader::OpenErrorReporting,
     ) -> Result<Self> {
         let path_buf = path.to_path_buf();
         let schema = schema.clone();
@@ -267,6 +270,7 @@ impl SSTableRowIteratorAdapter {
                 sender,
                 producer_sent_count,
                 fault,
+                reporting,
             );
         }) {
             Ok(handle) => handle,
@@ -321,6 +325,7 @@ impl SSTableRowIteratorAdapter {
         sender: std::sync::mpsc::SyncSender<MergeMsg>,
         sent_count: std::sync::Arc<std::sync::atomic::AtomicI64>,
         mut fault: MergeProducerFault,
+        reporting: crate::storage::sstable::reader::OpenErrorReporting,
     ) {
         // Issue #2316: decrement the live producer-thread gauge when this thread
         // exits (even on panic). Created FIRST so the spawn-time increment in
@@ -382,10 +387,20 @@ impl SSTableRowIteratorAdapter {
 
                 rt.block_on(async move {
                     let platform = Arc::new(Platform::new(&config).await?);
-                    let mut reader = crate::storage::sstable::reader::SSTableReader::open(
-                        &path_buf, &config, platform,
-                    )
-                    .await?;
+                    // `open_with_reporting`, NOT the self-reporting default (issue #1704): this reopen is an
+                    // INNER STEP. A failure here surfaces mid-stream at `step()` and
+                    // is counted ONCE by the enclosing operation's seam — the measured
+                    // `JoinedStream` on the cross-generation streaming read path, or
+                    // `record_result("compaction", ..)` in `maintenance_step` on the
+                    // write path. `open`, which records its own failure, made one
+                    // failed reopen report TWO increments, under two different
+                    // categories (measured: `io` from the raw EACCES plus `storage`
+                    // from the merge's rewrap).
+                    let mut reader =
+                        crate::storage::sstable::reader::SSTableReader::open_with_reporting(
+                            &path_buf, &config, platform, reporting,
+                        )
+                        .await?;
 
                     // Issue #1234: wire the authoritative UDT registry onto the reader
                     // so the compaction read path decodes a top-level `frozen<UDT>`

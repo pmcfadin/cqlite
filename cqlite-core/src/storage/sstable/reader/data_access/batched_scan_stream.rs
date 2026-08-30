@@ -90,6 +90,7 @@ impl SSTableReader {
             buffer_size,
             ScanAdmission::Acquire,
             None,
+            crate::storage::sstable::reader::ScanErrorReporting::TopLevel,
         )
     }
 
@@ -110,6 +111,9 @@ impl SSTableReader {
         buffer_size: usize,
         admission: ScanAdmission,
         now_secs: Option<i64>,
+        // Issue #1704: whether anything ENCLOSES this stream. NOT derivable from
+        // `admission` — `query_rows` consumes an `Exempt` stream directly.
+        reporting: crate::storage::sstable::reader::ScanErrorReporting,
     ) -> BatchedScanStream {
         // The public channel carries BATCHES (see `batched_channel_capacity`,
         // which is the SINGLE definition of this sizing — the query-row stream's
@@ -165,7 +169,7 @@ impl SSTableReader {
         });
         match meter {
             Some(meter) => BatchedScanStream::new_measured_batches(rx, task, meter),
-            None => BatchedScanStream::new(rx, task),
+            None => BatchedScanStream::unmetered_as(rx, task, reporting),
         }
     }
 

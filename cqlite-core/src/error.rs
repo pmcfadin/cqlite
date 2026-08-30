@@ -85,7 +85,7 @@ pub enum Error {
     /// [`Error::Timeout`] (an I/O-level timeout) and from every corruption
     /// variant — so an operator-imposed budget can never be mistaken for damaged
     /// data: it classifies as its own bounded telemetry category
-    /// (`crate::observability::ErrorCategory::Timeout`).
+    /// (`crate::observability::ObsErrorCategory::Timeout`).
     #[error(
         "query exceeded the configured query.max_execution_time budget of {limit:?} \
          (elapsed {elapsed:?}) at {operation}; raise query.max_execution_time \
@@ -550,7 +550,7 @@ impl Error {
             // a `Data` (corruption/serialization) fault. The developer-facing
             // taxonomy is deliberately left at 14 variants (adding one breaks the
             // bindings' public code mapping); the DISTINCT bucket lives in the
-            // telemetry taxonomy — see `observability::ErrorCategory::Timeout`.
+            // telemetry taxonomy — see `observability::ObsErrorCategory::Timeout`.
             Error::QueryTimeout { .. } => ErrorCategory::Query,
             Error::UnsupportedQuery(_) => ErrorCategory::Query,
             Error::Cancelled => ErrorCategory::Cancelled,

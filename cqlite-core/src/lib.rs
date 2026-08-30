@@ -13,8 +13,7 @@
 pub mod config;
 pub mod cql;
 pub mod error;
-// The shared FFI error contract both bindings consume (issue #1451; see the module docs).
-pub mod ffi_error_contract;
+// FFI error contract moved to `cqlite_ffi_common::error_contract` (#1452; no re-export, see CHANGELOG).
 pub(crate) mod float_cmp;
 pub mod parser;
 pub mod types;

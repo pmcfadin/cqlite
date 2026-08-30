@@ -431,6 +431,14 @@ pub(crate) use async_bridge::block_on_async;
 /// #1116 campsite rule (behaviour unchanged); the shared-reader producer shape
 /// stays in [`from_readers`].
 #[cfg(feature = "write-support")]
+mod constructors;
+// Matches `mod constructors` above: the item cannot exist without `write-support`,
+// so the re-export must not claim otherwise. Not currently reachable as a break —
+// `write_engine` is itself `#[cfg(feature = "write-support")]`, so this file only
+// compiles when `constructors` does — but the two cfgs disagreeing is a latent trap
+// if that outer gate ever moves (#1704, roborev r6).
+#[cfg(all(feature = "write-support", not(feature = "tombstones")))]
+pub(crate) use constructors::merger_deferring_opens;
 mod producer_iter;
 #[cfg(feature = "write-support")]
 use producer_iter::SSTableRowIteratorAdapter;
@@ -1245,8 +1253,8 @@ pub fn effective_compaction_schema(schema: &TableSchema, input_paths: &[PathBuf]
 /// Cassandra purges a tombstone during compaction when its on-disk
 /// `localDeletionTime` is strictly less than `gcBefore = now - gc_grace_seconds`
 /// (parity `8d47ebb2`). CQLite reads `gc_grace_seconds` from the table schema
-/// (the `comments` option map — the same surface `cql_parser` / `cql_generator`
-/// use), since it is a table parameter not recorded inside SSTable files.
+/// (the `comments` option map — the same surface `cql_parser` uses), since it
+/// is a table parameter not recorded inside SSTable files.
 ///
 /// When the table declares NO `gc_grace_seconds` (#921 finding 3), CQLite falls
 /// back to Cassandra's table DEFAULT of `864000` seconds (10 days) — CQL tables
@@ -1695,88 +1703,6 @@ impl KWayMerger {
             udt_registry,
             crate::storage::scan_cancel::ScanCancel::default(),
         )
-    }
-
-    /// K-way merge constructor that opens the input SSTables under a cooperative
-    /// [`ScanCancel`](crate::storage::scan_cancel::ScanCancel) (issue #2264).
-    ///
-    /// The token is wired onto every per-run reader so the compaction scan each
-    /// run's producer thread drives — which, for an index-less (Summary.db
-    /// absent) SSTable, otherwise fully materialises the whole Data.db in one
-    /// uninterruptible pass — polls it at a bounded interval and abandons the walk
-    /// promptly when a driving Flight `do_get` is cancelled. `new`/`new_with_gc*`
-    /// delegate here with a never-cancelled default token, so non-Flight callers
-    /// are unaffected.
-    pub fn new_with_gc_and_registry_cancellable(
-        input_paths: Vec<PathBuf>,
-        schema: &TableSchema,
-        gc_before_secs: Option<i64>,
-        now_secs: Option<i64>,
-        udt_registry: Option<crate::schema::UdtRegistry>,
-        scan_cancel: crate::storage::scan_cancel::ScanCancel,
-    ) -> Result<Self> {
-        if input_paths.is_empty() {
-            return Err(Error::InvalidInput(
-                "K-way merge requires at least one input file".to_string(),
-            ));
-        }
-
-        // Enforce the dropped-column decode contract (#904/#847): every column
-        // named in `dropped_columns` must still be declared in `columns` so its
-        // cells decode and can be purged. Guard here (the authoritative compaction
-        // entry) for programmatically-built schemas that bypass `validate()`.
-        schema.validate_dropped_columns()?;
-
-        // Create run readers for each input SSTable (ordered newest to oldest).
-        // The registry (when supplied) is cloned onto each reader so a frozen UDT
-        // value decodes structurally instead of erroring out and dropping the row
-        // (issue #1234). No producer-side `LIMIT` push-down (issue #2361, roborev
-        // round 2): every producer scans until genuinely cancelled — `LIMIT` is
-        // enforced purely downstream (consumer post-reconciliation break +
-        // cancel-aware Drop teardown). See
-        // [`SSTableReader::stream_all_partitions_cancellable`](crate::storage::sstable::reader::SSTableReader::stream_all_partitions_cancellable)'s
-        // doc for why a partition-granular producer budget cannot be correct.
-        // Issue #2765: register this k-way merge ONCE and snapshot the adaptive
-        // per-channel egress capacity; ALL source channels below share it, so a
-        // solo compaction gets 256 per source regardless of input count.
-        let (channel_capacity, egress_slot) = egress_budget::begin_merge();
-
-        let mut runs = Vec::with_capacity(input_paths.len());
-        for (run_index, path) in input_paths.iter().enumerate() {
-            let adapter = SSTableRowIteratorAdapter::open(
-                path,
-                run_index,
-                schema,
-                udt_registry.clone(),
-                scan_cancel.clone(),
-                channel_capacity,
-            )?;
-            runs.push(RunReader::new(Box::new(adapter)));
-        }
-
-        // Initialize heap (will be populated on first step)
-        let heap = BinaryHeap::new();
-
-        Ok(Self {
-            runs,
-            heap,
-            current_partition: None,
-            schema: schema.clone(),
-            // Issue #1668, stage 5c-i: `Arc`-wrapped clone of `schema`, used
-            // only by the heap's schema-aware comparator (see the field doc).
-            schema_arc: std::sync::Arc::new(schema.clone()),
-            gc_before_secs,
-            now_secs,
-            // Conservatively unsafe by default (#921 finding 1): purging is
-            // dormant until a caller proves the compaction spans all of the
-            // table's SSTables via `with_purge_safe`.
-            purge_safe: false,
-            // No overlap bound by default (#935): a partial compaction stays
-            // conservative (no purging) until a caller supplies the min outside
-            // timestamp via `with_max_purgeable_timestamp`.
-            max_purgeable_timestamp: None,
-            _egress_slot: Some(egress_slot),
-        })
     }
 
     /// Mark this merge as overlap-safe for tombstone purging (#921 finding 1).

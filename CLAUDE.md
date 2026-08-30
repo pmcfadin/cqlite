@@ -91,9 +91,44 @@ ad-hoc cargo runs never count. `scripts/agent-gate.sh --list` shows the componen
 
 | Mode | Command | Use |
 |------|---------|-----|
-| **Full** — the gate of record | `scripts/agent-gate.sh` | ONCE per issue, immediately pre-merge, inside `flow-closer`. fmt, clippy `-D warnings`, core/integration/write/CLI tests, `oom-audit` (SKIP-aware structural no-unbounded-materialization audit, #2012), `pub-surface` (cqlite-core crate-root declaration-consistency guard, #1712), minimal-features build, smoke. Emits `AGENT-GATE SUMMARY`. |
+| **Full** — the gate of record | `scripts/agent-gate.sh` | ONCE per issue, immediately pre-merge, inside `flow-closer`. fmt, clippy `-D warnings`, core/integration/write/CLI tests, `oom-audit` (SKIP-aware structural no-unbounded-materialization audit, #2012), `pub-surface` (cqlite-core crate-root declaration-consistency guard, #1712), minimal-features build, the **feature-matrix lanes** (#1699: `flight-tests` EXECUTES cqlite-flight's UNIT suite (`--lib --bins`) and prints a run-time census naming the 42 integration targets it does NOT run, why, and who does (#3384); `legacy-heuristics` builds AND RUNS the feature's gated tests at its own feature set; `feature-iso-parquet`/`feature-iso-delta-scan` compile `parquet` and `delta-scan` in MUTUAL isolation, each without the other, never `--all-features`), smoke. Emits `AGENT-GATE SUMMARY`. |
 | **Lite** (#1821, ~1–5 min) | `scripts/agent-gate.sh --lite` | EVERY fix round. file-size + fmt + scoped clippy + blast-radius tests (touched package `--lib` + diff's new `--test` targets, mapped from `git diff origin/main...HEAD`; defaults to `cqlite-core --lib` when no rust package is in the diff). Emits a DISTINCT `AGENT-GATE LITE SUMMARY` (MODE: lite) — can NEVER be pasted as the full SUMMARY. |
 | **Delta** (#1892) | `scripts/agent-gate.sh --delta <anchor-sha> --anchor-run-id <id>` (or `--anchor-summary-file <path>`) | Re-certify a post-full-PASS polish round whose diff is ONLY executable tests/docs (rust test code, python/node binding tests against an already-built module, `scripts/tests/*.sh`, `*.md`; #2081). FAILs CLOSED on anything else (src, scripts, workflows, `Cargo.*`, config, test-data, unbuilt node module) — never builds, never passes vacuously. Emits a DISTINCT `AGENT-GATE DELTA SUMMARY` naming the anchor + a `delta-executors:` line; record BOTH it AND the anchor's full SUMMARY in the PR. NOT the gate of record. |
+
+**Compiling a feature is not covering it (#1699).** The scoped clippy matrix enables ~30 cqlite-core features
+at once under `--all-targets`, so a feature can be *test-compiled* on every full gate and have **executed
+nothing** — and a combined feature set is exactly what MASKS cross-feature coupling (an item gated on feature
+A referencing feature B's items compiles fine while both are on). Measured, not argued: turning EXECUTION on
+for `legacy-heuristics` surfaced 4 tests that had never run once, two of which assert behaviour CQLite
+deliberately does not support (#3372 five `not yet implemented` stubs behind the flag; #3374 filler-byte mock
+`Statistics.db` plus pre-`na` `mc-` names); and `flight-tests` surfaced **14 cqlite-flight targets that
+execute NOWHERE** — not locally, not in CI — because their module-level
+`#![cfg(feature = "observability-testing")]` is off in every lane that runs them (#3375), a gap #2910's tier
+aggregation cannot see because the tier *runs* and silently executes 0 tests. So when you add a feature flag,
+ask which lane **executes** it, not which lane compiles it; if the answer is none, the feature is uncovered
+however green the gate looks. `experimental` is the remaining known instance (#3373).
+Two corollaries the lanes are built on. **Derive, never curate**: both executing lanes compute their subject
+set from committed source at run time — `legacy-heuristics` its `--test` targets (from cargo metadata plus a
+module closure, so a manifest-gated or directory-style target is not missed) and its allowed-zero set, and
+`flight-tests` its unit-target set from cargo metadata — so a new gated file is picked up and a feature joining
+`default` shrinks the excusal set with no gate edit. A failed derivation is a FAIL naming the derivation, never
+a fallback to "nothing enabled", which would silently excuse every gated target. **And a narrowed lane
+DECLARES the narrowing at run time**: `flight-tests` prints what it does not execute on every run, because a
+lane that omits coverage silently is indistinguishable from one that covers it — the same reason this whole
+component set exists. `legacy-heuristics` declares a second, subtler narrowing the same way: a test target can
+reach a child module through a cfg the derivation does not evaluate (`#[cfg(all(feature = …))] #[path = …] mod
+support;` on a shared helper — 3 such targets in `cqlite-core` today), and the closure used to follow that child
+while DISCARDING the attribute gating it, so a gated test inside counted as executable while an ungated sibling
+kept the target non-zero and the co-required census reported **no gap**. Such a subtree is now reported as a
+`DECLARED GAP` with a `cfg-gated-subtree gaps: N` census line (affirmative at `0`). Deliberately **declared, not
+fatal**: failing the lane on it was tried and reverted, because those helpers are correct code and **a lane that
+reds on correct input is the lane agents learn to waive**. The `UNRESOLVED` half stays fail-closed — an
+incomplete source set is permissive everywhere, an unevaluated one is merely unattributable. And
+**a lane in `--list` is not a lane that works**: `feature-iso-parquet` reports `PASS (0s)` warm, so presence
+proves nothing. `scripts/tests/test_agent_gate_feature_matrix_lanes.sh` (opt-in) plants each lane's
+incident-class break in a throwaway `git worktree` and requires the lane to red **and** to NAME the planted
+symbol — a bare red is not evidence either, since an unrelated breakage produces an identical exit code and
+SUMMARY line.
 
 **Required invocation — summary-file redirect, never raw stdout (issues #1175/#2079), full AND lite:**
 
@@ -208,9 +243,52 @@ cqlite-cli/      # Command-line interface
 bindings/python/ # Python bindings (PyO3) — M4 complete
 bindings/node/   # Node.js bindings (napi-rs) — Phase 3 complete
 test-data/       # Real Cassandra 5.0 SSTables for testing
-tools/           # sstabledump-validator, format-validator
+tools/           # 7 crates, each with a RECORDED disposition in one of THREE
+                 #   categories, pinned by the gate guard
+                 #   scripts/tests/test_tools_crate_disposition.sh (#1716):
+                 #   WIRED   — cassandra-parity, flight-loadgen,
+                 #             sstabledump-validator, ws0-corpus-gen.
+                 #   UNWIRED — nothing runs them AND nothing depends on them:
+                 #             cqlite-validator, memory-safety-runner. Each needs
+                 #             a README saying it is NOT CI-wired.
+                 #   MIXED   — format-validator: its 4 BINS are orphaned but its
+                 #             LIB is WIRED (tests/format-compatibility = the
+                 #             gate's `format-compat` component). Its README must
+                 #             name BOTH halves, and the crate must stay a
+                 #             workspace member — never `exclude` it.
+                 #   A NEW tools/ crate must be classified there or the gate FAILs.
+                 #   That guard is deliberately SMALL: it checks a disposition
+                 #   was RECORDED and LABELED, not that the record is TRUE, and it
+                 #   is per-CRATE (an orphaned bin added to a WIRED crate passes
+                 #   unchanged). It needs no cargo/python3/network. A
+                 #   cargo-derived cross-check that verified truth was built and
+                 #   REMOVED (#1716) — 11 review findings landed in it and none in
+                 #   the list/README part, and its scratch workspaces sat outside
+                 #   the repo so they did not inherit rust-toolchain.toml, making a
+                 #   MANDATORY gate component host-toolchain-dependent. Doing it
+                 #   properly is its own issue under epic #1688.
 fuzz/            # cargo-fuzz crate — own workspace, EXCLUDED from the main one
 ```
+
+**A bare `cargo build` here already builds only the ROOT package — do not "optimize" it with
+`default-members` (#1716).** This workspace has a root package (`cqlite`), and cargo's default for
+`default-members` in that case is **that package alone** ("all members" is the default only for a
+VIRTUAL workspace). Verified: `cargo tree --depth 0` at the root resolves to `cqlite` and nothing
+else. So adding an explicit `default-members` list would **expand** the bare build from 1 package to
+14 — the opposite of the intent, and the trap #1716 was originally written around ("these crates are
+compiled by every workspace build" was false). The `tools/` crates are compiled only by an explicit
+`--workspace`/`--all-targets` (the gate's clippy) or `-p`. So those crates stay fully linted under
+`-D warnings` no matter their disposition.
+
+**Their unit tests, though, run ONLY when your diff touches their package (#1716).** No CI job and
+no gate component runs workspace-wide tests, so an untouched `tools/` crate's tests never execute —
+but `--lite`'s blast-radius maps a touched path to its package and runs that package's `--lib`
+tests. Consequence, found the hard way on #1716: editing only `tools/format-validator/README.md`
+made `--lite` run that crate's tests **for the first time**, and one failed —
+`test_hex_dump_formatting` asserted an unseparated `"48656c6c6f"` against a `hexdump -C`-style
+formatter that emits `48 65 6c 6c 6f`, an expectation that could never hold for any input. **Expect
+latent failures the first time you touch a long-unwired crate**; they are pre-existing, not yours,
+but they are yours to fix because your diff is what runs them.
 
 **Planned (M6)**: `bindings/wasm/`. Full source map (parsers, writers, query engine, bindings
 layout, binding structure trees):
@@ -358,9 +436,9 @@ Without Data.db files, query tests pass but return 0 rows. Dataset pins:
 Default (cqlite-core): `all-compression` (LZ4, Snappy, Deflate, Zstd), `state_machine`,
 `write-support` (#558). Non-default: `cli-helpers` (#249), `parquet` (#682), `delta-scan` /
 `delta-export` (#696/#705), `legacy-heuristics` (opt-in pre-5.0 heuristic fallbacks, #28), `metrics`,
-`experimental` (gates `Database::flush()`/`compact()`, the INSERT executor path, the schema JSON
-exporter, bloom-filter tests (#65), and the unimplemented `Storage::put`/`delete` stubs (#175)). Build
-recipes: `docs/development/dev-cookbook.md`.
+`experimental` (gates `Database::flush()`/`compact()`, the INSERT executor path, bloom-filter tests
+(#65), and the unimplemented `Storage::put`/`delete` stubs (#175)). Build recipes:
+`docs/development/dev-cookbook.md`.
 
 ## Troubleshooting
 
@@ -924,7 +1002,13 @@ end-to-end test. Green helper-only unit tests are not sufficient.
   `fatal: could not read Username`, and `claim.sh` now calls that `ERROR reason=auth (NOT
   retryable)` instead of the old misleading `reason=infra (transient — retry)` — do not retry it,
   fix the box (`gh auth setup-git`, or `bash scripts/bootstrap-agent-machine.sh --yes`, which also
-  probes board access functionally rather than trusting the `project` scope string). The three
+  probes board access functionally rather than trusting the `project` scope string). Since #3369 the
+  same script MEASURES git push capability by **performing the push** — a throwaway
+  `refs/claims/smoke-<commit-sha>` create/read-back/delete via `claim.sh smoke` — rather than trusting a
+  credential-helper answer or a green `git ls-remote`, and reports it three-valued
+  (`git-push: VERIFIED` / `FAILED` / `UNMEASURED`); an unmeasurable result is UNKNOWN, never `ok`.
+  `--fix-credentials` wires the credential path only (no toolchain installs) and `--strict` turns any
+  warning into exit 1, which is what `.agent-ami/profile.yaml`'s `verify.run` uses. The three
   worker-environment deltas and the messages that identify them: `docs/development/fleet-runbook.md`.
 - **Supervisor-authored machine claim + CI reaper (#2655/#2499)**: liveness is now MECHANISM-driven,
   not prose. `worker-supervisor.sh` stamps `refs/lane-claims/<machine>/<issue>` (issue+supervisor-PID+ts)

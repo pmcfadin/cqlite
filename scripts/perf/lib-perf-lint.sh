@@ -117,6 +117,24 @@ _PT_LONG='--tid'
 # not be reachable by an unanticipated spelling.
 PERF_ALLOWED_OPTS='-x -e -C -o --'
 
+# The ONLY options a `perf record` line may carry (#3248), kept SEPARATE from the `stat`
+# allowlist above rather than merged into it.
+#
+# WHY SEPARATE, AND WHY THIS IS THE WHOLE POINT. A sampling profile needs `-F` (sample
+# frequency) and `-g` (call graph); a counting run needs neither. Widening
+# `PERF_ALLOWED_OPTS` to admit them would legalise `-F`/`-g` on EVERY `perf stat` line in
+# the rig too, which is a real loss: the allowlist's job is to keep the counting path
+# minimal, and an option that is correct for one subcommand is unaudited noise on the
+# other. So layer 2 is keyed by SUBCOMMAND, and each subcommand gets the smallest set it
+# can actually work with.
+#
+# `-C` is in the set AND separately REQUIRED by the END assertions below, for exactly the
+# reason `perf stat` is: a sampling profile pinned to nothing samples the wrong CPUs, and
+# a per-process/per-thread sampling run has the same >2x observer cost the counting path
+# refuses. `--` separates the command; `-o` names the output; `-e` selects the sampled
+# event.
+PERF_RECORD_ALLOWED_OPTS='-x -e -C -o -F -g --call-graph --'
+
 # The counting-DOMAIN option families, for LAYER 3's post-command-word check.
 #
 # It lives HERE, beside the option names it is built from, because `perf_stat_c` is the
@@ -167,8 +185,14 @@ perf_invocation_lint() {
   # inside a single-quoted shell string) never has to contain one — see `is_var_command`.
   { awk -v pp_short="$_PP_SHORT" -v pp_long="$_PP_LONG" \
       -v pt_short="$_PT_SHORT" -v pt_long="$_PT_LONG" \
-      -v allowed="$PERF_ALLOWED_OPTS" -v mode="$mode" -v SQ="'" '
-    BEGIN { n = split(allowed, a, /[[:space:]]+/); for (i = 1; i <= n; i++) ok[a[i]] = 1 }
+      -v allowed="$PERF_ALLOWED_OPTS" -v recallowed="$PERF_RECORD_ALLOWED_OPTS" \
+      -v mode="$mode" -v SQ="'" '
+    BEGIN {
+      n = split(allowed, a, /[[:space:]]+/); for (i = 1; i <= n; i++) ok[a[i]] = 1
+      # The `record` allowlist is a SEPARATE set, not a superset: an option legal for a
+      # sampling profile must not become legal on a counting line (#3248).
+      m = split(recallowed, b, /[[:space:]]+/); for (i = 1; i <= m; i++) recok[b[i]] = 1
+    }
     # A token as the SHELL would see it after word-splitting and quote removal:
     # leading/trailing quotes, parens and `;` stripped. That is what makes the
     # spelling of an invocation irrelevant — `"perf"`, `perf`, `(perf` and `perf;`
@@ -306,11 +330,24 @@ perf_invocation_lint() {
       next
     }
     inwrap && /^\}/    { inwrap = 0; wrapseen = 1; next }
+    # THE SECOND SANCTIONED WRAPPER (#3248): `perf_record_c`, for sampling profiles. It lives
+    # in the SAME file as perf_stat_c deliberately — `perf_invocation_lint_tree` discovers the
+    # owner by grepping for `^perf_stat_c()`, and treats two owners as a finding, so a second
+    # wrapper in a second file would read as a rig with two owners. One file, two wrappers,
+    # one owner.
+    /^perf_record_c\(\)/ {
+      inrec = 1
+      if (mode == "library") print NR ": defines perf_record_c, but this file was not discovered as the record owner"
+      next
+    }
+    inrec && /^\}/     { inrec = 0; recseen = 1; next }
     {
       mentions = invokes($0)
       marked   = index($0, "perf-lint-allow") > 0
       if (inwrap) {
         if (mentions) { wrapinvoke++; if (index($0, "-C")) wrapcpuwide++ }
+      } else if (inrec) {
+        if (mentions) { recinvoke++; if (index($0, "-C")) reccpuwide++ }
       } else if (mentions && !marked) {
         print NR ": perf/stat invocation outside the single perf_stat_c wrapper, unmarked"
       }
@@ -322,17 +359,56 @@ perf_invocation_lint() {
       # allowlist of PERF options says nothing about it.
       if (!mentions) next
       n = split($0, tok, /[[:space:]]+/)
+      # WHICH ALLOWLIST APPLIES IS DECIDED BY THE SUBCOMMAND ON THE LINE (#3248), not by
+      # which wrapper we happen to be inside: a `record` line outside the wrapper must be
+      # option-checked as a `record` line, or the narrower `stat` set would report it with a
+      # misleading reason. Default is the STAT set, so a line whose subcommand cannot be
+      # identified gets the STRICTER treatment — an unknown must not inherit the looser rule.
+      # THE SUBCOMMAND IS THE TOKEN IMMEDIATELY AFTER `perf`, AND NOTHING ELSE.
+      #
+      # The first version scanned EVERY token for `record`, which is a fail-open: a
+      # `perf stat` line whose WORKLOAD argument happens to be `record` -- e.g.
+      # `perf stat -x, -e cycles -C 0 -F 999 -o /dev/null -- ./mytool record` -- was judged by
+      # the LOOSER record allowlist, so `-F` on a COUNTING line passed silently. VERIFIED
+      # against the pre-fix code: that exact line produced no option finding. A guard that can
+      # be relaxed by the name of an unrelated argument is not a guard.
+      #
+      # Scanning stops at `--` (everything after that belongs to the workload rather than to
+      # perf) and at a comment, for the same reason.
+      #
+      # NO APOSTROPHE ANYWHERE IN THIS COMMENT. The awk program is inside SHELL SINGLE QUOTES,
+      # so one apostrophe terminates the string and truncates the library -- this file already
+      # records that trap elsewhere, and the first version of THIS comment hit it (bash
+      # reported a syntax error on an unrelated awk line, which is how it presents).
+      isrec = 0
+      for (i = 1; i <= n; i++) {
+        t = bare(tok[i])
+        if (tok[i] ~ /^#/) break
+        if (t == "--") break
+        if (t == "perf" || t ~ /[/]perf$/) {
+          for (j = i + 1; j <= n; j++) {
+            u = bare(tok[j])
+            if (u == "") continue
+            if (u == "record") isrec = 1
+            break
+          }
+          break
+        }
+        if (t == "record" && i == 1) { isrec = 1; break }
+        if (t == "stat" && i == 1) { isrec = 0; break }
+      }
       for (i = 1; i <= n; i++) {
         if (tok[i] ~ /^#/) break    # trailing comment: prose, not argv
         o = optname(bare(tok[i]))
         if (o == "") continue
-        if (o in ok) continue
+        if (isrec) { if (o in recok) continue }
+        else if (o in ok) continue
         if (o == pp_short || o == pp_long)
           print NR ": per-process option token `" tok[i] "` on a perf/stat line"
         else if (o == pt_short || o == pt_long)
           print NR ": per-thread option token `" tok[i] "` on a perf/stat line (per-thread counting is per-process counting)"
         else
-          print NR ": option token `" tok[i] "` is not in the perf option allowlist (" allowed ") — an option this rig does not need may change the counting DOMAIN"
+          print NR ": option token `" tok[i] "` is not in the perf " (isrec ? "record" : "stat") " option allowlist (" (isrec ? recallowed : allowed) ") — an option this rig does not need may change the counting DOMAIN"
       }
     }
     # An AFFIRMATIVE per-file subject check, in BOTH modes (#3272 review round 3 nit).
@@ -347,10 +423,21 @@ perf_invocation_lint() {
     # by the reader: a diagnostic a human has to remember to ignore is one they will read as
     # a finding.
     END {
-      if (mode != "library") {
+      if (mode == "owner") {
         if (!wrapseen)     print "0: perf_stat_c() is absent — there is no single wrapper to allow"
         if (!wrapinvoke)   print "0: perf_stat_c() invokes nothing — the allowlist would be vacuous"
         if (!wrapcpuwide)  print "0: perf_stat_c() does not pass -C — the wrapper counts nothing CPU-wide"
+      }
+      if (mode == "record-owner") {
+        # A record-only owner asserts the RECORD contract and says nothing about the stat one.
+        if (!recseen)      print "0: perf_record_c() is absent — this file was linted as the record owner"
+      }
+      if (mode != "library") {
+        # perf_record_c is OPTIONAL — a rig with no sampling profile is legitimate — but if it
+        # is DEFINED it must be non-vacuous and CPU-wide, on the same terms as perf_stat_c. A
+        # defined-but-empty wrapper would otherwise be an allowlist entry protecting nothing.
+        if (recseen && !recinvoke)  print "0: perf_record_c() invokes nothing — the allowlist would be vacuous"
+        if (recseen && !reccpuwide) print "0: perf_record_c() does not pass -C — a sampling profile pinned to nothing samples the wrong CPUs"
       }
       printf "#LINT-COMPLETE lines=%d mode=%s\n", NR, mode
     }
@@ -412,7 +499,7 @@ _perf_lint_verify_complete() {
 #   * MORE THAN ONE wrapper definition is a finding ("perf is invoked in ONE place" is
 #     what layer 1 rests on, so two wrappers dissolve the allowlist).
 perf_invocation_lint_tree() {
-  local dir="$1" f owner="" count=0 owners=0 out
+  local dir="$1" f owner="" count=0 owners=0 out rec_owner="" rec_owners=0
   local -a files=() unreadable=()
   for f in "$dir"/*.sh; do
     # A glob that matched NOTHING yields the pattern itself; that is the empty-subject case
@@ -434,6 +521,15 @@ perf_invocation_lint_tree() {
       owner="$f"
       owners=$((owners + 1))
     fi
+    # THE RECORD WRAPPER IS A SECOND, INDEPENDENT OWNER ROLE (#3248) — optional, because a
+    # rig with no sampling profile is legitimate, but unique when present for the same reason
+    # the stat owner is unique: layer 1 rests on "perf is invoked in ONE place per role", so
+    # two record wrappers dissolve the record allowlist exactly as two stat wrappers would
+    # dissolve the stat one. Discovered, never enumerated.
+    if grep -q '^perf_record_c()' "$f"; then
+      rec_owner="$f"
+      rec_owners=$((rec_owners + 1))
+    fi
   done
   if [[ "${#unreadable[@]}" -gt 0 ]]; then
     echo "$dir:0: ${#unreadable[@]} rig file(s) are UNREADABLE and were therefore NOT SCANNED:"
@@ -454,9 +550,29 @@ perf_invocation_lint_tree() {
     echo "$dir:0: $owners files define perf_stat_c — layer 1 allows ONE wrapper, so two dissolve the allowlist"
     return 0
   fi
+  # The RECORD owner is optional but unique when present (#3248): two record wrappers dissolve
+  # the record allowlist exactly as two stat wrappers dissolve the stat one. ZERO is NOT a
+  # finding here — a rig that takes no sampling profile is legitimate, and demanding one would
+  # make every checkout without a profiler fail a guard about a capability it does not use.
+  if [[ "$rec_owners" -gt 1 ]]; then
+    echo "$dir:0: $rec_owners files define perf_record_c — the record allowlist rests on ONE wrapper too"
+    return 0
+  fi
   for f in "${files[@]}"; do
+    # A file may own EITHER role, or both. `owner` mode is what carries the END assertions, so
+    # a record-owning file must be linted in owner mode too or its wrapper's non-vacuity and
+    # its mandatory -C would never be asserted — the guard would exist and never run, which is
+    # this issue's whole subject.
     if [[ "$f" == "$owner" ]]; then
+      # The STAT owner (which may also define perf_record_c) gets the full owner assertions.
       out="$(perf_invocation_lint "$f" owner)"
+    elif [[ -n "$rec_owner" && "$f" == "$rec_owner" ]]; then
+      # A RECORD-ONLY owner file (#3248, roborev job 66 finding 4). The tree lint permitted
+      # this configuration while `owner` mode unconditionally asserted `perf_stat_c` is
+      # present, so a valid record-only owner was reported as missing the stat wrapper -- the
+      # checker permitted a shape it then failed. `record-owner` mode asserts the RECORD
+      # wrapper contract and nothing about the stat one.
+      out="$(perf_invocation_lint "$f" record-owner)"
     else
       out="$(perf_invocation_lint "$f" library)"
     fi

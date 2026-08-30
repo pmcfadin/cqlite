@@ -42,8 +42,31 @@ env:
   SCCACHE_CACHE_SIZE: "30G"
   CQLITE_DATASETS_ROOT: "{data_mount}/datasets"
 verify:
-  run: "bash scripts/bootstrap-agent-machine.sh"
+  # --fix-credentials --strict (issue #3369). Two independent gaps, both real on a box
+  # launched from the pinned image:
+  #  1. WIRING. The image has a working `gh` but no git credential helper, so the first
+  #     thing a lane does — `scripts/flow/claim.sh claim <N>`, a plain `git push` of a
+  #     claim ref — fails `CLAIM: ERROR reason=auth`. Bare (no flag) the bootstrap can
+  #     only ever WARN about that; it cannot wire it. --fix-credentials runs section
+  #     3b's auto-fix (preferring `gh auth setup-git`) and NOTHING else, so verify stays
+  #     a verification step rather than becoming a toolchain installer — which is what
+  #     --yes would have made it.
+  #  2. FAIL-CLOSED. The script always exits 0 by design (it composes into setup
+  #     scripts), so the expect string below was the ONLY failure signal. --strict makes
+  #     the exit code fail closed too. It adds no NEW strictness: "All checks green." is
+  #     printed only when there are zero warnings, which is exactly --strict's condition
+  #     — belt and braces on the same fact, from two independent channels.
+  # Section 3b now measures git PUSH capability by performing the operation (create +
+  # read back + delete a throwaway refs/claims/smoke-<commit-sha> ref), not by probing the
+  # credential helper: the affected box passed `gh auth status` AND
+  # `git ls-remote origin HEAD` and still could not push.
+  run: "bash scripts/bootstrap-agent-machine.sh --fix-credentials --strict"
   expect: "All checks green."
 hooks:
+  # Deliberately EMPTY (issue #3369). The credential wiring belongs in verify.run above,
+  # not here: the hook schema is defined by the EXTERNAL agent-ami launcher and nothing
+  # in this repo documents or consumes it, so a command placed here would be a guess at
+  # an external contract — and a wrong guess breaks onboarding fleet-wide. verify.run's
+  # shape is known and already exercised on every launch.
   post_toolchain: []
   pre_verify: []

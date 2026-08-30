@@ -15,11 +15,14 @@ crate-type = ["cdylib"]
 
 [dependencies]
 cqlite-core = { path = "../../cqlite-core", features = ["state_machine", "all-compression", "cli-helpers", "write-support", "parquet"] }
-pyo3 = { workspace = true, features = ["extension-module", "abi3-py39", "multiple-pymethods"] }
+cqlite-ffi-common = { path = "../../cqlite-ffi-common" }
+# `num-bigint`: lets the VARINT adapter hand `cqlite_ffi_common`'s `BigInt`
+# straight to Python instead of re-deriving the integer from bytes here (the
+# feature belongs to THIS binding, never to the shared crate — issue #1452 D2).
+pyo3 = { workspace = true, features = ["extension-module", "abi3-py39", "multiple-pymethods", "num-bigint"] }
 tokio = { workspace = true, features = ["rt-multi-thread", "sync"] }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
-hex = "0.4"
 
 # Tracing — always available so per-call spans (`python.execute*`) are emitted
 # unconditionally. They are zero-cost unless a subscriber + OTel layer is wired

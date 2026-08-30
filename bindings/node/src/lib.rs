@@ -28,6 +28,16 @@ mod refresh;
 mod runtime;
 mod streaming;
 mod value;
+// Test-support: the committed cross-binding vector table, rendered through this
+// binding's production paths (issue #1452).
+//
+// `pub` because napi_derive cfg's its `#[napi]` registration out under
+// `cfg(test)` (`#[cfg(all(not(test), ...))]` on the generated ctor), so in a
+// `cargo test` build of this cdylib nothing inside the module has a Rust caller
+// and `dead_code` — denied via `RUSTFLAGS=-D warnings` — would fail the build.
+// Public reachability is the honest fix: the surface really is reachable, just
+// from JavaScript rather than from Rust.
+pub mod vectors;
 
 pub use database::ColumnInfo;
 pub use database::Database;
@@ -62,7 +72,7 @@ pub fn version() -> String {
 
 /// The distinct JS error codes the shared FFI error contract can emit
 /// (issue #1451) — i.e. the authoritative `node_code` column of
-/// `cqlite_core::ffi_error_contract`, sorted and deduplicated.
+/// `cqlite_ffi_common::error_contract`, sorted and deduplicated.
 ///
 /// Exists so the `ErrorCode` union in `lib/index.d.ts` can be asserted against
 /// the TABLE rather than against a hand-written list in the test. Without it,
@@ -80,7 +90,7 @@ pub fn version() -> String {
 /// @returns Sorted, deduplicated list of JS error codes.
 #[napi]
 pub fn error_contract_node_codes() -> Vec<String> {
-    let mut codes: Vec<String> = cqlite_core::ffi_error_contract::FfiErrorVariant::ALL
+    let mut codes: Vec<String> = cqlite_ffi_common::error_contract::FfiErrorVariant::ALL
         .iter()
         .map(|variant| variant.row().node_code.to_string())
         .collect();
@@ -112,7 +122,7 @@ pub fn error_contract_node_codes() -> Vec<String> {
 ///         if the name is unknown.
 #[napi]
 pub fn error_contract_probe(variant: String) -> napi::Result<()> {
-    match cqlite_core::ffi_error_contract::FfiErrorVariant::from_name(&variant)
+    match cqlite_ffi_common::error_contract::FfiErrorVariant::from_name(&variant)
         .and_then(|v| v.sample_error())
     {
         Some(err) => Err(error::to_napi_error(err)),

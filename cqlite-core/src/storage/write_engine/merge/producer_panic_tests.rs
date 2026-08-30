@@ -258,6 +258,7 @@ fn a_dead_producer_run_reports_an_error_that_never_decays_to_end_of_input() {
         None,
         ScanCancel::default(),
         super::STREAMING_CHANNEL_CAPACITY,
+        crate::storage::sstable::reader::OpenErrorReporting::SelfReported,
     )
     .expect("adapter opens");
     let mut healthy_rows = 0;
@@ -290,6 +291,7 @@ fn a_dead_producer_run_reports_an_error_that_never_decays_to_end_of_input() {
             None,
             ScanCancel::default(),
             super::STREAMING_CHANNEL_CAPACITY,
+            crate::storage::sstable::reader::OpenErrorReporting::SelfReported,
         )
         .expect("adapter opens");
         let mut rows = 0;

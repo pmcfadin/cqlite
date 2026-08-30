@@ -1,6 +1,6 @@
 //! Tests for the shared FFI error contract table (issue #1451).
 //!
-//! The table in `cqlite_core::ffi_error_contract` is the single source of truth
+//! The table in `cqlite_ffi_common::error_contract` is the single source of truth
 //! for how a core `Error` variant surfaces in `bindings/python` and
 //! `bindings/node`. These tests pin:
 //!
@@ -17,7 +17,7 @@
 //! `variant_of` is an exhaustive match over `Error`.
 
 use cqlite_core::error::{Error, ErrorCategory};
-use cqlite_core::ffi_error_contract::{
+use cqlite_ffi_common::error_contract::{
     contract_for, variant_of, FfiErrorRow, FfiErrorVariant, PyExceptionClass,
 };
 

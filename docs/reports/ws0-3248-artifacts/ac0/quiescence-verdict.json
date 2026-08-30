@@ -1,0 +1,45 @@
+{
+  "after": {
+    "competing": [],
+    "competing_count": 0,
+    "load": {
+      "load1": 3.05,
+      "load15": 3.12,
+      "load5": 2.66,
+      "runnable": "1/765"
+    }
+  },
+  "before": {
+    "competing": [],
+    "competing_count": 0,
+    "load": {
+      "load1": 0.78,
+      "load15": 3.25,
+      "load5": 1.07,
+      "runnable": "2/796"
+    }
+  },
+  "competing_after": 0,
+  "competing_before": 0,
+  "load1_after": 3.05,
+  "load1_after_is_bounded": false,
+  "load1_after_note": "RECORDED, NOT BOUNDED: load1 is a 1-minute decaying average, so a sample taken immediately after a CPU-bound window reads the window's own residue. The binding in-window check is the timeseries census.",
+  "load1_before": 0.78,
+  "load1_movement": 2.2699999999999996,
+  "thresholds": {
+    "max_load1": 2.0,
+    "max_load1_movement": 0.5
+  },
+  "verdict": "QUIESCENT",
+  "window_census": {
+    "competing_samples": 0,
+    "load1_max": 3.37,
+    "load1_mean": 2.5245833333333336,
+    "load1_min": 0.77,
+    "samples": 48,
+    "window": {
+      "end": "2026-08-28T16:25:00Z",
+      "start": "2026-08-28T16:15:00Z"
+    }
+  }
+}

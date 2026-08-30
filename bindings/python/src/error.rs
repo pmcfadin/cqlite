@@ -1,7 +1,7 @@
 //! Error mapping layer for Python bindings.
 //!
 //! Maps `cqlite_core::Error` variants to Python exceptions **by reading the
-//! shared FFI error contract** (`cqlite_core::ffi_error_contract`) — the ONE
+//! shared FFI error contract** (`cqlite_ffi_common::error_contract`) — the ONE
 //! authoritative variant -> (python class, node code, category, recoverable,
 //! prefix) table that `bindings/node` reads too, so a core error has the same
 //! identity in every binding (issue #1451). This module owns only the
@@ -22,7 +22,7 @@
 //! └── MemoryError (builtin) - Memory errors
 //! ```
 
-use cqlite_core::ffi_error_contract::{contract_for, PyExceptionClass};
+use cqlite_ffi_common::error_contract::{contract_for, PyExceptionClass};
 use pyo3::exceptions::{PyIOError, PyMemoryError, PyRuntimeError, PyTimeoutError, PyValueError};
 use pyo3::prelude::*;
 use pyo3::{create_exception, PyErr};
@@ -65,7 +65,7 @@ pub fn register_exceptions(m: &Bound<'_, PyModule>) -> PyResult<()> {
 /// due to Rust's orphan rules (both types are from external crates).
 ///
 /// The class is chosen **by variant** from the shared FFI error contract
-/// (`cqlite_core::ffi_error_contract`), never re-derived here — that table is
+/// (`cqlite_ffi_common::error_contract`), never re-derived here — that table is
 /// also what `bindings/node` reads, so the two bindings cannot drift apart
 /// (issue #1451). To change how a variant surfaces, edit the table.
 ///
@@ -117,8 +117,8 @@ pub fn runtime_init_to_py_err(err: std::io::Error) -> PyErr {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use cqlite_core::ffi_error_contract::FfiErrorVariant;
     use cqlite_core::Error;
+    use cqlite_ffi_common::error_contract::FfiErrorVariant;
 
     /// Helper to extract error message from PyErr
     fn get_error_message(py: Python<'_>, err: PyErr) -> String {

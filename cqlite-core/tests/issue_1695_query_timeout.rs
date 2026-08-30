@@ -576,12 +576,12 @@ fn timeout_error_is_not_a_corruption() {
     };
     assert_eq!(
         err.obs_category(),
-        cqlite_core::observability::ErrorCategory::Timeout,
+        cqlite_core::observability::ObsErrorCategory::Timeout,
         "the telemetry taxonomy must give the budget elapse its own bucket"
     );
     assert_ne!(
         err.obs_category(),
-        cqlite_core::observability::ErrorCategory::Corruption
+        cqlite_core::observability::ObsErrorCategory::Corruption
     );
     assert_ne!(
         err.category(),

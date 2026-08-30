@@ -8,8 +8,10 @@ use super::*;
 
 /// The otel source the instrument guards scan, as ONE string.
 ///
-/// `otel.rs` holds the record-routing arms and `otel_instruments.rs` the
-/// construction, so a guard reading either alone is blind to half the wiring.
+/// `otel_instruments.rs` holds the `Registry` registrations and `otel.rs` the emit
+/// path + resolvers, so a guard reading either alone is blind to half the wiring
+/// (the F4 builder-call audit needs both: the Registry helpers live in one file, the
+/// ad-hoc fallbacks in the other).
 fn otel_sources() -> String {
     concat!(include_str!("otel.rs"), include_str!("otel_instruments.rs")).to_string()
 }
@@ -85,6 +87,47 @@ fn parse_str_consts(src: &str) -> std::collections::HashMap<&str, &str> {
         out.insert(ident.trim(), &after[..close]);
     }
     out
+}
+
+/// The otel sources with Rust comments removed, so no guard can be satisfied by
+/// PROSE (issue #1705, roborev B2).
+///
+/// Line comments run to end-of-line and block comments to their terminator. A `//`
+/// inside a string literal would truncate that line — the failure direction is a
+/// guard that stops seeing a real registration (a RED test), never one that accepts
+/// a fake one. Neither otel source contains such a literal today.
+fn strip_rust_comments(src: &str) -> String {
+    let mut out = String::with_capacity(src.len());
+    let mut rest = src;
+    loop {
+        let line = rest.find("//");
+        let block = rest.find("/*");
+        if line.is_none() && block.is_none() {
+            out.push_str(rest);
+            return out;
+        }
+        // Whichever opener comes first wins; `usize::MAX` stands in for "absent".
+        let at_line = line.unwrap_or(usize::MAX) < block.unwrap_or(usize::MAX);
+        if at_line {
+            let l = line.unwrap_or(usize::MAX);
+            out.push_str(&rest[..l]);
+            let nl = rest[l..].find('\n').map(|n| l + n).unwrap_or(rest.len());
+            rest = &rest[nl..];
+        } else {
+            let b = block.unwrap_or(usize::MAX);
+            out.push_str(&rest[..b]);
+            let close = rest[b..]
+                .find("*/")
+                .map(|c| b + c + 2)
+                .unwrap_or(rest.len());
+            rest = &rest[close..];
+        }
+    }
+}
+
+/// [`otel_sources`], comment-free.
+fn otel_sources_uncommented() -> String {
+    strip_rust_comments(&otel_sources())
 }
 
 #[test]
@@ -287,115 +330,197 @@ fn the_shared_catalog_const_parser_reads_wrapped_and_semicolon_bearing_declarati
     }
 }
 
-#[test]
-fn partition_access_probe_metrics_have_dedicated_otel_arms_not_the_adhoc_fallback() {
-    // Issue #2827: without a dedicated arm these fall through `add_counter`'s
-    // ad-hoc `_ =>` branch, which builds a fresh instrument per emit and exports
-    // the series with NO unit (`By`, `{partition}`) and no description — and, by
-    // construction, `every_instrument_registered_in_otel_is_catalogued` cannot see
-    // them either. Assert the arms exist at the source level, like the #2419
-    // saturation-gauge guard above.
-    assert_every_otel_source_is_scanned();
-    let otel_src = otel_sources();
-    for (metric, arm) in [
-        (
-            READ_PARTITION_ACCESS_DISTINCT_PARTITIONS,
-            "catalog::READ_PARTITION_ACCESS_DISTINCT_PARTITIONS => &i.read_partition_access_distinct",
-        ),
-        (
-            READ_PARTITION_ACCESS_ACCESSES,
-            "catalog::READ_PARTITION_ACCESS_ACCESSES => &i.read_partition_access_accesses",
-        ),
-        (
-            READ_PARTITION_ACCESS_BYTES,
-            "catalog::READ_PARTITION_ACCESS_BYTES => &i.read_partition_access_bytes",
-        ),
-        (
-            READ_PARTITION_ACCESS_SAMPLE_DENOMINATOR,
-            "catalog::READ_PARTITION_ACCESS_SAMPLE_DENOMINATOR",
-        ),
-    ] {
-        assert!(
-            otel_src.contains(arm),
-            "{metric} must have a DEDICATED otel.rs dispatch arm so its series carries \
-             its catalogued unit and description, never the ad-hoc fallback"
-        );
-    }
-    // And the instruments must be constructed with their catalogued units.
-    assert!(otel_src.contains(".u64_counter(catalog::READ_PARTITION_ACCESS_BYTES)"));
-    assert!(otel_src.contains(".i64_gauge(catalog::READ_PARTITION_ACCESS_SAMPLE_DENOMINATOR)"));
-}
+/// The disclosure every [`STATS_ONLY_METRICS`] entry's operator-doc annotation
+/// must carry, so the generated operator reference cannot advertise a scrapeable
+/// instrument that does not exist (issue #1705).
+const STATS_ONLY_DOC_DISCLOSURE: &str = "NOT emitted as a live OTel instrument";
 
-#[test]
-fn every_instrument_registered_in_otel_is_catalogued() {
-    // Issue #2426 (roborev MEDIUM, F1): guard the "emitted instrument absent
-    // from ALL_METRICS" bug class. `otel.rs` is the canonical instrument
-    // construction + record-routing site (every cross-crate emission — incl.
-    // cqlite-flight's warm-cache/admission metrics — routes through its
-    // `add_counter`/`record_histogram`/`record_gauge` dedicated arms). Any
-    // `catalog::SCREAMING_CONST` referenced there is a metric name bound to a
-    // real instrument, so it MUST appear in `ALL_METRICS`. This is a
-    // fully-automatic source-level check (no `observability` feature needed):
-    // add an instrument in `otel.rs` and forget to catalogue it → this fails.
-    //
-    // Automation note (#2426): this scans the core `otel.rs` registration site.
-    // Because every catalogued instrument that cqlite-flight emits now has a
-    // dedicated arm here (never the ad-hoc `_ =>` fallback), the check
-    // transitively covers the flight emission sites too. A future metric emitted
-    // ONLY via the ad-hoc fallback (no dedicated arm, no catalog entry) would not
-    // be caught here — that path is reserved for genuinely non-catalog names.
-    // BOTH halves of the otel wiring: `otel.rs` keeps the record-routing arms and
-    // `otel_instruments.rs` the construction. Scanning only one would let an
-    // instrument built in the other escape the guard entirely (#1116 split).
-    assert_every_otel_source_is_scanned();
-    let otel_src = otel_sources();
-    let otel_src = otel_src.as_str();
-    let catalogued: std::collections::HashSet<&str> = ALL_METRICS.iter().copied().collect();
-
-    // Collect the const IDENTIFIERS present in the ALL_METRICS array so we can
-    // map an `otel.rs` `catalog::IDENT` reference to a catalogued name. The
-    // constants are `pub const IDENT: &str = "cqlite. …";`.
-    //
-    // Parsed over the WHOLE declaration, not line-by-line. rustfmt wraps a long
-    // declaration onto two lines:
-    //
-    // ```ignore
-    // pub const READ_PARTITION_ACCESS_DISTINCT_PARTITIONS: &str =
-    //     "cqlite.read.partition_access.distinct_partitions";
-    // ```
-    //
-    // A line-scoped parser finds no string literal on the `pub const` line and
-    // drops the constant from the map — so the very metrics most likely to be new
-    // (long names) would slip past this guard, which is the bug class it exists to
-    // catch. Scan from each `pub const ` to its terminating `;` instead.
-    let this_src = include_str!("catalog.rs");
-    let ident_to_value = parse_str_consts(this_src);
-
-    // Extract every `catalog::SCREAMING_CONST` reference in otel.rs. `unit`/
-    // `attr` submodule refs (`catalog::unit::…`, `catalog::attr::…`) start with
-    // a lowercase char after `catalog::`, so they are excluded by construction.
-    let mut missing = Vec::new();
-    for (i, _) in otel_src.match_indices("catalog::") {
-        let rest = &otel_src[i + "catalog::".len()..];
-        let ident: String = rest
+/// `catalog::IDENT` -> the annotation block text that names it, from
+/// `operator_docs_annotations.rs`.
+///
+/// Segmented on the `name: catalog::` field rather than by brace matching: each
+/// segment runs from one entry's `name:` to the next, which is exactly the text
+/// belonging to that entry.
+fn annotation_blocks() -> std::collections::HashMap<String, String> {
+    const NAME: &str = "name: catalog::";
+    let src = include_str!("operator_docs_annotations.rs");
+    let starts: Vec<usize> = src.match_indices(NAME).map(|(i, _)| i).collect();
+    let mut out = std::collections::HashMap::new();
+    for (n, &start) in starts.iter().enumerate() {
+        let end = starts.get(n + 1).copied().unwrap_or(src.len());
+        let seg = &src[start + NAME.len()..end];
+        let ident: String = seg
             .chars()
             .take_while(|c| c.is_ascii_uppercase() || c.is_ascii_digit() || *c == '_')
             .collect();
-        // Skip lowercase submodule paths (unit/attr) — `ident` is empty then.
         if ident.is_empty() {
             continue;
         }
-        let value = ident_to_value.get(ident.as_str()).copied().unwrap_or_else(|| {
-            panic!("otel.rs references catalog::{ident}, which is not a metric-name constant in catalog.rs")
-        });
-        if !catalogued.contains(value) {
-            missing.push(format!("catalog::{ident} (\"{value}\")"));
+        out.insert(ident, seg.to_string());
+    }
+    out
+}
+
+/// `metric name value` -> `catalog::IDENT`, recovered from `catalog.rs`.
+///
+/// Fail-closed on a collision rather than letting the later declaration silently
+/// win: this map is how the registration guards turn an `ALL_METRICS` *value* back
+/// into the identifier they look for in the otel sources, so a shadowed entry would
+/// make a guard check the WRONG constant — a false PASS. Two `&str` constants in
+/// `catalog.rs` sharing a value (a metric name colliding with an `attr`/`unit`
+/// value, or a duplicated name) is a catalog bug in its own right.
+fn value_to_ident() -> std::collections::HashMap<&'static str, &'static str> {
+    let ident_to_value = parse_str_consts(include_str!("catalog.rs"));
+    let mut out: std::collections::HashMap<&str, &str> = std::collections::HashMap::new();
+    for (ident, value) in ident_to_value {
+        if let Some(prior) = out.insert(value, ident) {
+            panic!(
+                "catalog.rs declares two &str constants with the value {value:?} \
+                 (catalog::{prior} and catalog::{ident}) — the registration guards \
+                 resolve a metric name back to its identifier through this map, so a \
+                 collision would silently point a guard at the wrong constant"
+            );
         }
     }
+    out
+}
+
+#[test]
+fn stats_only_declaration_matches_the_operator_docs() {
+    // Issue #1705: ONE source of truth. `STATS_ONLY_METRICS` is the machine-
+    // checkable declaration; the operator reference generated from
+    // `operator_docs_annotations.rs` is what a human reads. Assert set equality
+    // between the declaration and the annotations carrying the "not scrapeable"
+    // disclosure, so the two cannot drift — a metric quietly demoted to
+    // stats-only without updating its operator prose (or vice versa) fails here.
+    let blocks = annotation_blocks();
+    let value_to_ident = value_to_ident();
+
+    let declared: std::collections::BTreeSet<String> = STATS_ONLY_METRICS
+        .iter()
+        .map(|m| m.name)
+        .map(|name| {
+            value_to_ident
+                .get(name)
+                .copied()
+                .unwrap_or_else(|| panic!("no `pub const` for {name:?}"))
+                .to_string()
+        })
+        .collect();
+    let disclosed: std::collections::BTreeSet<String> = blocks
+        .iter()
+        .filter(|(_, seg)| seg.contains(STATS_ONLY_DOC_DISCLOSURE))
+        .map(|(ident, _)| ident.clone())
+        .collect();
+
+    assert_eq!(
+        declared, disclosed,
+        "catalog::STATS_ONLY_METRICS and the operator-doc annotations disclosing \
+         \"{STATS_ONLY_DOC_DISCLOSURE}\" must name the SAME metrics"
+    );
     assert!(
-        missing.is_empty(),
-        "otel.rs registers instruments for metrics ABSENT from ALL_METRICS \
-         (add them to catalog::ALL_METRICS): {missing:?}"
+        !declared.is_empty(),
+        "the disclosure marker must still be findable — an annotation reword that \
+         breaks this parse would make the comparison vacuously true"
+    );
+}
+
+#[test]
+fn read_partition_lookup_documents_the_attribute_keys_it_actually_emits() {
+    // Issue #1705 (AI5 instance 2): the doc for this counter must name the
+    // attribute keys the emission sites actually attach. It names
+    // `attr::LOOKUP_ROUTE` (the storage-layer lookup route, #1034) and must NOT
+    // name `attr::ACCESS_PATH`, which is the query-engine SELECT access path
+    // (#1035) and is never attached to this metric. Pinned so the two
+    // similarly-named bounded keys cannot be swapped back in the prose.
+    let src = include_str!("catalog.rs");
+    let start = src
+        .find("/// `cqlite.read.partition_lookup.total`")
+        .expect("the READ_PARTITION_LOOKUP doc block must exist");
+    let end = src[start..]
+        .find("pub const READ_PARTITION_LOOKUP")
+        .expect("the doc block must precede its constant");
+    let doc = &src[start..start + end];
+    assert!(
+        doc.contains("[`attr::LOOKUP_ROUTE`]"),
+        "the READ_PARTITION_LOOKUP doc must name the emitted attr::LOOKUP_ROUTE key"
+    );
+    assert!(
+        !doc.contains("ACCESS_PATH"),
+        "the READ_PARTITION_LOOKUP doc must NOT name attr::ACCESS_PATH — that is \
+         the query-engine SELECT access path (#1035), never attached here"
+    );
+    // And the emission sites must agree: the storage-layer lookup counter is
+    // labelled with LOOKUP_ROUTE, not ACCESS_PATH.
+    let lookup_src = concat!(
+        include_str!("../storage/sstable/reader/partition_lookup.rs"),
+        include_str!("../storage/sstable/reader/bti_lookup_memo.rs"),
+    );
+    assert!(lookup_src.contains("attr::LOOKUP_ROUTE"));
+    assert!(
+        !lookup_src.contains("attr::ACCESS_PATH"),
+        "the partition-lookup emission sites must not attach attr::ACCESS_PATH"
+    );
+}
+
+#[test]
+fn compression_ratio_is_documented_write_side_only_and_emitted_only_there() {
+    // Issue #1705 (AI5 instance 4): the doc used to describe a bare "per-chunk
+    // compression ratio", which reads as a read-path signal an operator could use
+    // to reason about the SSTables being READ. There is no such emission. Pin the
+    // honesty claim to the code: the only emission site is the compressed-data
+    // WRITER, and no reader/decompression path records this histogram.
+    let src = include_str!("catalog.rs");
+    let start = src
+        .find("/// `cqlite.compression.ratio`")
+        .expect("the COMPRESSION_RATIO doc block must exist");
+    let end = src[start..]
+        .find("pub const COMPRESSION_RATIO")
+        .expect("the doc block must precede its constant");
+    let doc = &src[start..start + end];
+    assert!(
+        doc.contains("WRITE-SIDE ONLY"),
+        "the COMPRESSION_RATIO doc must state that it is write-side only"
+    );
+
+    // The claim, measured: every emission site of this metric across the crate
+    // (outside the catalog + operator-doc declaration sites, which name it without
+    // emitting) must be a writer.
+    let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+    let mut emitters = Vec::new();
+    let mut stack = vec![dir.clone()];
+    while let Some(d) = stack.pop() {
+        let entries = std::fs::read_dir(&d).expect("crate src must be readable");
+        for e in entries.filter_map(|e| e.ok()) {
+            let path = e.path();
+            if path.is_dir() {
+                stack.push(path);
+                continue;
+            }
+            if path.extension().and_then(|x| x.to_str()) != Some("rs") {
+                continue;
+            }
+            let rel = path
+                .strip_prefix(&dir)
+                .unwrap_or(&path)
+                .to_string_lossy()
+                .replace('\\', "/");
+            if rel.starts_with("observability/") {
+                continue; // declaration + annotation sites, not emitters
+            }
+            let text = std::fs::read_to_string(&path).expect("source must be readable");
+            if text.contains("COMPRESSION_RATIO") {
+                emitters.push(rel);
+            }
+        }
+    }
+    emitters.sort();
+    assert_eq!(
+        emitters,
+        vec!["storage/sstable/writer/compressed_data_writer.rs".to_string()],
+        "COMPRESSION_RATIO must be emitted ONLY from the compressed-data writer — a \
+         new site (especially a read/decompression path) invalidates the \
+         write-side-only wording in its catalog doc and operator annotation"
     );
 }
 
@@ -432,36 +557,6 @@ fn saturation_gauges_are_registered_namespaced_and_unique() {
     assert_eq!(unit::ENTRIES, "{entry}");
     assert_eq!(unit::THREADS, "{thread}");
     assert_eq!(unit::BYTES, "By");
-}
-
-#[test]
-fn saturation_gauges_have_dedicated_otel_arms_not_the_adhoc_fallback() {
-    // Issue #2419 (WS2), spec Requirement / #2412 lesson: each saturation
-    // gauge must resolve in `otel::record_gauge` to a pre-built `Instruments`
-    // field, NOT the ad-hoc `_ =>` fallback (which rebuilds the instrument on
-    // every sample). Source-scan otel.rs for a dedicated `catalog::IDENT =>`
-    // match arm per gauge — a fully-automatic check needing no `observability`
-    // feature. Delete an arm → this fails. Scans BOTH otel sources (#1116 split):
-    // reading `otel.rs` alone would miss an arm that moved with the construction.
-    assert_every_otel_source_is_scanned();
-    let otel_src = otel_sources();
-    for ident in [
-        "MERGE_EGRESS_CHANNEL_DEPTH",
-        "MERGE_ACTIVE_MERGES",
-        "PROC_THREADS",
-        "PROC_FDS",
-        "PROC_RSS_BYTES",
-        "FLIGHT_BLOCKING_TASKS_IN_USE",
-        "FLIGHT_TABLES_DISCOVERED",
-        "FLIGHT_WARM_TABLES",
-    ] {
-        let arm = format!("catalog::{ident} =>");
-        assert!(
-            otel_src.contains(&arm),
-            "otel::record_gauge lacks a dedicated arm `{arm}` — the gauge would \
-             fall through to the ad-hoc per-call-rebuilt fallback (#2412)"
-        );
-    }
 }
 
 #[test]
@@ -515,3 +610,162 @@ fn merge_producer_threads_gauge_is_registered_and_documented() {
     assert!(MERGE_PRODUCER_THREADS.starts_with("cqlite."));
     assert_eq!(unit::THREADS, "{thread}");
 }
+
+/// A deterministic sentinel for a `MemoryStats` field, derived from the field NAME.
+///
+/// Both sides of the probe assertion below compute it from the same string, so the
+/// seeded snapshot and the expected value CANNOT drift apart — no second
+/// hand-maintained table of expectations to go stale (issue #1705, roborev F8).
+/// Values stay small so they fit every field's own type (`u64` and `usize` alike).
+fn stats_sentinel(field: &str) -> u64 {
+    let mut h: u64 = 0x1234_5678;
+    for b in field.bytes() {
+        h = h.wrapping_mul(31).wrapping_add(u64::from(b));
+    }
+    1_000 + h % 100_000
+}
+
+#[test]
+fn stats_only_probes_read_the_exact_field_they_declare() {
+    // Issue #1705: the stats-only list must not be an unguarded waiver list. A bare
+    // name list could silence the registration guard for a metric whose instrument
+    // was simply forgotten — appending the name would be the whole cost. So each
+    // entry carries a probe that READS its value out of a real
+    // `Database::stats().memory_stats` snapshot, and this asserts each probe reads
+    // the field its OWN `stats_field` names.
+    //
+    // EXACT equality per probe, not "nonzero and pairwise distinct" (roborev F8).
+    // Distinctness only says the probes differ from each other: two probes SWAPPED
+    // satisfy it, and so does a probe reading an unrelated field (a block-cache
+    // counter instead of the key-cache one it advertises). Both are the
+    // "no bad signal found" shape — a positive verdict with no affirmative
+    // measurement behind it. Deriving the expectation from the declared
+    // `stats_field` makes the declaration the oracle: the probe must return the
+    // sentinel of THAT field and no other.
+    //
+    // What it rules out: a probe that ignores the snapshot (constant / `0`), a probe
+    // copied from a sibling entry, a probe reading a neighbouring field, and — the
+    // point of the exercise — a metric with no stats field at all, which cannot be
+    // given a compiling probe in the first place.
+    let seeded = [
+        "key_cache_hits",
+        "key_cache_misses",
+        "key_cache_evictions",
+        "key_cache_invalidations",
+        "key_cache_resident_bytes",
+        "key_cache_capacity_bytes",
+        "block_cache_hits",
+        "block_cache_misses",
+        "block_cache_evictions",
+        "block_cache_capacity_bytes",
+    ];
+    // Equality is only a meaningful oracle if no two seeded fields share a value.
+    for (n, a) in seeded.iter().enumerate() {
+        for b in &seeded[n + 1..] {
+            assert_ne!(
+                stats_sentinel(a),
+                stats_sentinel(b),
+                "sentinels for {a} and {b} collide — a swapped probe would pass"
+            );
+        }
+    }
+
+    let stats = crate::memory::MemoryStats {
+        key_cache_hits: stats_sentinel("key_cache_hits"),
+        key_cache_misses: stats_sentinel("key_cache_misses"),
+        key_cache_evictions: stats_sentinel("key_cache_evictions"),
+        key_cache_invalidations: stats_sentinel("key_cache_invalidations"),
+        key_cache_resident_bytes: stats_sentinel("key_cache_resident_bytes") as usize,
+        key_cache_capacity_bytes: stats_sentinel("key_cache_capacity_bytes") as usize,
+        // Neighbouring fields a sloppy probe might read instead are seeded too, so
+        // reading one of them is a WRONG value rather than a `0` that could be
+        // mistaken for an unpopulated snapshot.
+        block_cache_hits: stats_sentinel("block_cache_hits"),
+        block_cache_misses: stats_sentinel("block_cache_misses"),
+        block_cache_evictions: stats_sentinel("block_cache_evictions"),
+        block_cache_capacity_bytes: stats_sentinel("block_cache_capacity_bytes") as usize,
+        ..Default::default()
+    };
+
+    assert!(
+        !STATS_ONLY_METRICS.is_empty(),
+        "the probe guard must have a subject — an empty declaration passes vacuously"
+    );
+    for m in STATS_ONLY_METRICS {
+        // `stats_field` is the operator-facing path (`memory_stats.<field>`); the
+        // field name after the prefix is what the probe must read. A declaration
+        // this test cannot resolve to a seeded field fails CLOSED — a new
+        // stats-only entry has to seed its field here, which is the point.
+        let field = m
+            .stats_field
+            .strip_prefix("memory_stats.")
+            .unwrap_or_else(|| {
+                panic!(
+                    "{}'s stats_field {:?} must name a `memory_stats.<field>` path",
+                    m.name, m.stats_field
+                )
+            });
+        assert!(
+            seeded.contains(&field),
+            "{} declares stats_field {:?}, which this guard does not seed — add the \
+             field to `seeded` (and to the snapshot below) so its probe is measured \
+             rather than assumed",
+            m.name,
+            m.stats_field
+        );
+        assert_eq!(
+            (m.stats_probe)(&stats),
+            stats_sentinel(field),
+            "{}'s probe does not read {} — it returned another field's value (a \
+             swapped or copied probe), so the stats-only exemption is unjustified",
+            m.name,
+            m.stats_field
+        );
+    }
+
+    // And the probes must run against the REAL public snapshot type, not only a
+    // hand-built one: a default snapshot is readable through every probe.
+    let live = crate::memory::MemoryStats::default();
+    for m in STATS_ONLY_METRICS {
+        // Reading must not panic; the value itself is legitimately 0 before use.
+        let _ = (m.stats_probe)(&live);
+    }
+}
+
+#[test]
+fn the_stats_probe_guard_catches_a_swapped_probe() {
+    // The RED half (roborev F8): prove the assertion above can FAIL. A probe that
+    // reads a sibling field returns that field's sentinel, not its own, so the
+    // expectation derived from its declaration rejects it. Without this, the guard
+    // is only known to pass on correct input.
+    let stats = crate::memory::MemoryStats {
+        key_cache_hits: stats_sentinel("key_cache_hits"),
+        key_cache_misses: stats_sentinel("key_cache_misses"),
+        ..Default::default()
+    };
+    // Correct probe: reads what it declares.
+    let honest: fn(&crate::memory::MemoryStats) -> u64 = |s| s.key_cache_hits;
+    assert_eq!(honest(&stats), stats_sentinel("key_cache_hits"));
+    // Swapped probe: declares `key_cache_hits`, reads `key_cache_misses`.
+    let swapped: fn(&crate::memory::MemoryStats) -> u64 = |s| s.key_cache_misses;
+    assert_ne!(
+        swapped(&stats),
+        stats_sentinel("key_cache_hits"),
+        "a swapped probe must NOT satisfy the expectation derived from its \
+         declaration — nonzero-and-distinct did satisfy it, which is why that rule \
+         was replaced"
+    );
+    // A constant probe fails the same way, and so does one reading an unseeded
+    // field (`0`).
+    let constant: fn(&crate::memory::MemoryStats) -> u64 = |_| 7;
+    assert_ne!(constant(&stats), stats_sentinel("key_cache_hits"));
+    let unseeded: fn(&crate::memory::MemoryStats) -> u64 = |s| s.key_cache_evictions;
+    assert_eq!(unseeded(&stats), 0);
+    assert_ne!(unseeded(&stats), stats_sentinel("key_cache_evictions"));
+}
+
+/// The instrument-registration guards live in a sibling file so both stay inside
+/// the campsite-rule test target (#1135); they are a nested module of this one so
+/// they can call the helpers above rather than copy them.
+#[path = "catalog_registration_tests.rs"]
+mod registration;

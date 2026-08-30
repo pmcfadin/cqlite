@@ -13,6 +13,71 @@ The runtime observability foundation must be compiled in: build with the
 all telemetry calls are inert no-ops, and configuration still parses but exports
 nothing.
 
+**On the CLI, that state is no longer silent (issue #1702).** If OpenTelemetry is
+enabled in configuration on a binary built WITHOUT the `observability` feature —
+the default build — `observability::init` emits ONE `WARN` at startup, on
+**stderr** (never stdout, so `--out json`/`csv` stays clean):
+
+```text
+WARN cqlite_core::observability: OpenTelemetry export is ENABLED in configuration
+(CQLITE_OTEL_ENABLED / --otel-enabled / config file) but this binary was built
+WITHOUT the `observability` cargo feature: OpenTelemetry is compiled out, so NO
+metrics and NO traces will be emitted and the OTLP endpoint is never contacted —
+this is NOT a collector or endpoint problem. Rebuild with
+`--features observability` to export telemetry, or disable OpenTelemetry
+(e.g. CQLITE_OTEL_ENABLED=0, or drop --otel-enabled) to silence this warning.
+```
+
+It is a warning, never an error — the process runs normally, just without
+telemetry.
+
+### Where this warning is actually visible
+
+`observability::init` emits it through `tracing`, so it reaches a human only if a
+`tracing` subscriber is already installed when `init` runs. That is a per-surface
+property, not a global guarantee:
+
+| Surface | Visible? | Why |
+|---------|----------|-----|
+| CLI (`cqlite`) | **Yes** | With the feature off, `cqlite-cli/src/telemetry.rs` installs the fmt→stderr subscriber BEFORE calling `init`, precisely so this warning has a sink (issue #1702). With the feature ON the order is reversed, because `init` must first install the provider that the OTel layer composes. |
+| Arrow Flight server | **Yes, but its own line** | `cqlite-flight` calls `init` before installing its subscriber, so the core warning above is discarded — but it then emits an equivalent startup `WARN` of its own (issue #2128) after the subscriber exists. Expect that wording, not the one quoted here. |
+| Python binding | **Only if the host set up `tracing` first** | Feature-off, `install_subscriber()` is a no-op and runs after `init`, so nothing in the binding provides a sink. |
+| Node.js binding | **Only if the host set up `tracing` first** | Feature-off, the binding deliberately installs NO subscriber (a bare `Registry` would enable span callsites on hot paths), and `init` runs before that install anyway. |
+
+### Presence is conclusive; absence is not
+
+On the CLI at its default log level, the **presence** of this warning is
+conclusive: the export stack is compiled out, and no collector-side change can
+help. Its **absence proves nothing** — read it as neither a diagnosis nor an
+all-clear. Absence has two causes, and they are indistinguishable from the log:
+
+1. the `observability` feature IS compiled in (so a missing-telemetry problem
+   really is elsewhere: collector down, endpoint, protocol, sampling), **or**
+2. the configuration never resolved `enabled = true` in the first place, so
+   nothing asked for OpenTelemetry and there was nothing to warn about.
+
+Cause 2 is easy to hit and just as silent: `CQLITE_OTEL_ENABLED=ture` (typo) or
+`CQLITE_OTEL_ENABLE=1` (wrong variable name) both leave the master switch at its
+`false` default. An unrecognized value is deliberately failed safe to off rather
+than treated as an error, and today that rejection is not itself reported — a
+follow-up under epic #1686 covers warning about a rejected value, which is what
+would make absence genuinely diagnostic. So before concluding your collector is
+at fault, confirm what was actually RESOLVED (check the spelling of the variable
+and its value, or pass `--otel-enabled=true` explicitly).
+
+On the **bindings** absence is weaker still: an embedder with no `tracing`
+subscriber gets no signal either way, whatever the feature state. Closing that
+gap needs a host-native report rather than a library installing a global
+subscriber over the embedder's own logging; also tracked under epic #1686.
+
+### It respects your log level
+
+This is an ordinary `WARN` event, so an operator's explicit filtering choice wins:
+`--quiet` (which maps to `error`) or `RUST_LOG=error` suppresses it, exactly as it
+suppresses any other warning. That is deliberate — library code writing to stderr
+behind the subscriber's back would be worse. When diagnosing missing telemetry,
+run at the default level (or `RUST_LOG=warn` and above) rather than with `-q`.
+
 ---
 
 ## Shared environment variables (`CQLITE_OTEL_*`)

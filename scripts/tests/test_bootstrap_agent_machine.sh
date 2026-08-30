@@ -56,6 +56,17 @@ export GIT_CONFIG_GLOBAL="$tmp/global-gitconfig"
 export GIT_CONFIG_NOSYSTEM=1
 : >"$GIT_CONFIG_GLOBAL"
 
+# --- REAL-ORIGIN isolation for the push probe (issue #3369) ----------------
+# Section 3b now MEASURES push capability by actually pushing a throwaway
+# refs/claims/smoke-<commit-sha> ref (scripts/flow/claim.sh smoke). Every case that runs
+# "$BOOTSTRAP" IN PLACE therefore has the real checkout as REPO_ROOT and the real
+# github.com origin as its remote — with this box's real credentials. Those runs pass
+# --skip-push-probe so this suite can NEVER mutate the real origin; the probe's own
+# behaviour is covered hermetically in block 7p below, against sandbox remotes only.
+# Cases that run a COPY of bootstrap in a fake repo are safe without the flag: the
+# probe short-circuits to UNMEASURED when the copy's tree has no scripts/flow/claim.sh
+# (mk_fake_repo only installs it on explicit request), so no network call is made.
+
 # --- BOARD env isolation (issue #2942) -------------------------------------
 # The board section reads CQLITE_PROJECT_{OWNER,NUMBER,ACCOUNT} and PROJECT_TITLE from
 # the environment, and a worker shell commonly EXPORTS them (the fleet exports
@@ -65,19 +76,22 @@ export GIT_CONFIG_NOSYSTEM=1
 unset CQLITE_PROJECT_NUMBER CQLITE_PROJECT_OWNER CQLITE_PROJECT_ACCOUNT PROJECT_TITLE
 
 mkshim() {
-  # mkshim <name>: a fake tool that records "install"/"add" invocations and is
-  # otherwise a harmless no-op (version/status queries succeed emptily).
-  local name="$1"
-  cat >"$tmp/$name" <<EOF
+  # mkshim <name> [dir] [log]: a fake tool that records "install"/"add" invocations
+  # and is otherwise a harmless no-op (version/status queries succeed emptily).
+  # dir/log default to the shared sandbox + tripwire; a case that needs its OWN
+  # install tripwire (7p-f, issue #3369) passes its own and leaves the shared shims
+  # every later case depends on untouched.
+  local name="$1" dir="${2:-$tmp}" log="${3:-$tripwire}"
+  cat >"$dir/$name" <<EOF
 #!/usr/bin/env bash
 for a in "\$@"; do
   case "\$a" in
-    install|add) echo "$name \$*" >>"$tripwire" ;;
+    install|add) echo "$name \$*" >>"$log" ;;
   esac
 done
 exit 0
 EOF
-  chmod +x "$tmp/$name"
+  chmod +x "$dir/$name"
 }
 mkshim brew
 mkshim cargo
@@ -91,7 +105,7 @@ host_home="$tmp/host-home"; mkdir -p "$host_home/.cargo"
 
 # Run with the shims FIRST on PATH, default mode (no --yes), skipping the smoke.
 run_out=$(PATH="$tmp:$PATH" HOME="$host_home" CARGO_HOME="$host_home/.cargo" \
-  bash "$BOOTSTRAP" --skip-smoke 2>&1); run_rc=$?
+  bash "$BOOTSTRAP" --skip-smoke --skip-push-probe 2>&1); run_rc=$?
 
 if [ "$run_rc" -eq 0 ]; then
   ok "default (no --yes) run exits 0"
@@ -122,7 +136,7 @@ done
 # Reset the tripwire so the no-install assertion below reflects ONLY this run.
 : >"$tripwire"
 guard_out=$(PATH="$tmp:/usr/bin:/bin" HOME="$host_home" CARGO_HOME="$host_home/.cargo" \
-  bash "$BOOTSTRAP" --skip-smoke 2>&1)
+  bash "$BOOTSTRAP" --skip-smoke --skip-push-probe 2>&1)
 if printf '%s' "$guard_out" | grep -Eq "install sccache:|sccache MISSING"; then
   ok "missing accelerator prints install guidance (does not auto-install)"
 else
@@ -160,8 +174,25 @@ count_begin() {
 # fast and offline during these mold cases, which run bootstrap under the full PATH
 # with CARGO_HOME pointed at a throwaway dir (a real `cargo --version` there would
 # trigger a multi-minute rustup toolchain provision into the empty CARGO_HOME).
+# GH_STUB_TOKEN_BODY — every `gh` stub must answer `gh auth token --hostname github.com`
+# with the ENVIRONMENT token, because that is what real gh does: GH_TOKEN/GITHUB_TOKEN take
+# precedence for github.com, and gh reports per-host tokens for anything else. §3b's
+# fallback repair is gated on that answer MATCHING the token it would install (#3369 FIX L),
+# so a stub that stays silent makes every --yes fallback case REFUSE — a test artifact
+# rather than behaviour. Any other host correctly gets gh's "no token" failure.
+GH_STUB_TOKEN_BODY='if [ "$1" = auth ] && [ "$2" = token ]; then
+  want=""; shift 2
+  while [ $# -gt 0 ]; do [ "$1" = --hostname ] && { want="$2"; shift; }; shift; done
+  case "${want:-github.com}" in
+    github.com) echo "${GH_TOKEN:-${GITHUB_TOKEN:-}}" ;;
+    *) echo "no oauth token found for $want" >&2; exit 1 ;;
+  esac
+  exit 0
+fi'
+
 stub_net() {
-  mk_stub "$1" gh 'exit 0'
+  mk_stub "$1" gh "$GH_STUB_TOKEN_BODY
+exit 0"
   mk_stub "$1" roborev 'exit 0'
   mk_stub "$1" cargo '[ "$1" = --version ] && echo "cargo 1.88.0"; exit 0'
 }
@@ -193,7 +224,7 @@ stub_net "$stubA"
 mk_stub "$stubA" mold '[ "$1" = --version ] && echo "mold 2.4.0"; exit 0'
 mk_stub "$stubA" cc 'exit 0'
 outA=$(PATH="$stubA:$PATH" HOME="$sbA" CARGO_HOME="$sbA/.cargo" \
-  bash "$BOOTSTRAP" --skip-smoke 2>&1)
+  bash "$BOOTSTRAP" --skip-smoke --skip-push-probe 2>&1)
 cfgA="$sbA/.cargo/config.toml"
 if printf '%s' "$outA" | grep -q "Link accelerator: mold"; then
   ok "mold: Linux run emits the mold section"
@@ -221,7 +252,7 @@ fi
 #     identical to the first run.
 firstA=$(cat "$cfgA")
 PATH="$stubA:$PATH" HOME="$sbA" CARGO_HOME="$sbA/.cargo" \
-  bash "$BOOTSTRAP" --skip-smoke >/dev/null 2>&1
+  bash "$BOOTSTRAP" --skip-smoke --skip-push-probe >/dev/null 2>&1
 secondA=$(cat "$cfgA")
 if [ "$(count_begin "$cfgA")" = 1 ] && [ "$firstA" = "$secondA" ]; then
   ok "mold: re-run idempotent (exactly one block, file byte-identical)"
@@ -234,7 +265,7 @@ sbC=$(mktemp -d "$tmp/moldC.XXXXXX"); mkdir -p "$sbC/.cargo"
 cfgC="$sbC/.cargo/config.toml"
 printf '[build]\njobs = 7\n\n[net]\nretry = 9\n' >"$cfgC"
 PATH="$stubA:$PATH" HOME="$sbC" CARGO_HOME="$sbC/.cargo" \
-  bash "$BOOTSTRAP" --skip-smoke >/dev/null 2>&1
+  bash "$BOOTSTRAP" --skip-smoke --skip-push-probe >/dev/null 2>&1
 if grep -qx 'jobs = 7' "$cfgC" && grep -qx 'retry = 9' "$cfgC" \
    && grep -qx '\[build\]' "$cfgC" && grep -qx '\[net\]' "$cfgC" \
    && grep -q '^# BEGIN cqlite-mold' "$cfgC"; then
@@ -246,7 +277,7 @@ fi
 # Idempotent even with user content present.
 firstC=$(cat "$cfgC")
 PATH="$stubA:$PATH" HOME="$sbC" CARGO_HOME="$sbC/.cargo" \
-  bash "$BOOTSTRAP" --skip-smoke >/dev/null 2>&1
+  bash "$BOOTSTRAP" --skip-smoke --skip-push-probe >/dev/null 2>&1
 if [ "$firstC" = "$(cat "$cfgC")" ] && [ "$(count_begin "$cfgC")" = 1 ]; then
   ok "mold: re-run with user content stays byte-identical (one block)"
 else
@@ -261,7 +292,7 @@ mk_stub "$stubD" mold 'exit 0'
 mk_stub "$stubD" cc 'exit 1'
 mk_stub "$stubD" clang 'exit 1'
 outD=$(PATH="$stubD:$PATH" HOME="$sbD" CARGO_HOME="$sbD/.cargo" \
-  bash "$BOOTSTRAP" --skip-smoke 2>&1)
+  bash "$BOOTSTRAP" --skip-smoke --skip-push-probe 2>&1)
 if printf '%s' "$outD" | grep -q "link probe FAILED" \
    && [ ! -f "$sbD/.cargo/config.toml" ]; then
   ok "mold: failed link probe warns and writes no linker config"
@@ -278,7 +309,7 @@ mk_stub "$stubE" mold 'exit 0'
 mk_stub "$stubE" cc 'exit 1'
 mk_stub "$stubE" clang 'exit 0'
 PATH="$stubE:$PATH" HOME="$sbE" CARGO_HOME="$sbE/.cargo" \
-  bash "$BOOTSTRAP" --skip-smoke >/dev/null 2>&1
+  bash "$BOOTSTRAP" --skip-smoke --skip-push-probe >/dev/null 2>&1
 cfgE="$sbE/.cargo/config.toml"
 if [ -f "$cfgE" ] && [ "$(grep -c '^linker = "clang"' "$cfgE")" = 2 ]; then
   ok "mold: clang-only probe writes linker = \"clang\" for both triples"
@@ -294,7 +325,7 @@ stub_net "$stubF"
 mk_stub "$stubF" mold '[ "$1" = --version ] && echo "mold 2.4.0"; exit 0'
 mk_stub "$stubF" cc 'exit 0'
 outF=$(PATH="$stubF:$PATH" HOME="$sbF" CARGO_HOME="$sbF/.cargo" \
-  bash "$BOOTSTRAP" --skip-smoke 2>&1)
+  bash "$BOOTSTRAP" --skip-smoke --skip-push-probe 2>&1)
 if ! printf '%s' "$outF" | grep -q "Link accelerator: mold" \
    && [ ! -f "$sbF/.cargo/config.toml" ]; then
   ok "mold: Darwin performs no mold detection/config (no-op)"
@@ -311,7 +342,7 @@ mk_hermetic_bin "$stubG"
 tripG="$stubG/tripwire.log"; : >"$tripG"
 mk_stub "$stubG" apt-get "echo \"apt-get \$*\" >>\"$tripG\"; exit 0"
 outG=$(PATH="$stubG" HOME="$sbG" CARGO_HOME="$sbG/.cargo" \
-  bash "$BOOTSTRAP" --skip-smoke 2>&1)
+  bash "$BOOTSTRAP" --skip-smoke --skip-push-probe 2>&1)
 if printf '%s' "$outG" | grep -q "mold MISSING" \
    && printf '%s' "$outG" | grep -q "install mold:.*apt-get install -y mold" \
    && [ ! -s "$tripG" ] \
@@ -327,7 +358,7 @@ fi
 sbH=$(mktemp -d "$tmp/moldH.XXXXXX"); stubH="$tmp/stubH"
 mk_hermetic_bin "$stubH"
 outH=$(PATH="$stubH" HOME="$sbH" CARGO_HOME="$sbH/.cargo" \
-  bash "$BOOTSTRAP" --skip-smoke 2>&1)
+  bash "$BOOTSTRAP" --skip-smoke --skip-push-probe 2>&1)
 if printf '%s' "$outH" | grep -q "no supported package manager" \
    && [ ! -f "$sbH/.cargo/config.toml" ]; then
   ok "mold: missing + no package manager warns and writes no config"
@@ -342,7 +373,7 @@ fi
 sbJ=$(mktemp -d "$tmp/moldJ.XXXXXX"); mkdir -p "$sbJ/.cargo"
 printf '[net]\nretry = 4\n' >"$sbJ/.cargo/config"
 PATH="$stubA:$PATH" HOME="$sbJ" CARGO_HOME="$sbJ/.cargo" \
-  bash "$BOOTSTRAP" --skip-smoke >/dev/null 2>&1
+  bash "$BOOTSTRAP" --skip-smoke --skip-push-probe >/dev/null 2>&1
 if grep -q '^# BEGIN cqlite-mold' "$sbJ/.cargo/config" \
    && grep -qx 'retry = 4' "$sbJ/.cargo/config" \
    && [ ! -f "$sbJ/.cargo/config.toml" ]; then
@@ -361,7 +392,7 @@ cfgK="$sbK/.cargo/config.toml"
 printf '[target.x86_64-unknown-linux-gnu]\nrustflags = ["-C", "target-cpu=native"]\n' >"$cfgK"
 beforeK=$(cat "$cfgK")
 outK=$(PATH="$stubA:$PATH" HOME="$sbK" CARGO_HOME="$sbK/.cargo" \
-  bash "$BOOTSTRAP" --skip-smoke 2>&1)
+  bash "$BOOTSTRAP" --skip-smoke --skip-push-probe 2>&1)
 if printf '%s' "$outK" | grep -q "existing \[target" \
    && [ "$beforeK" = "$(cat "$cfgK")" ] \
    && ! grep -q '^# BEGIN cqlite-mold' "$cfgK"; then
@@ -378,7 +409,7 @@ printf '[net]\nretry = 1\n' >"$sbL/.cargo/config"
 printf '[net]\nretry = 2\n' >"$sbL/.cargo/config.toml"
 tomlL_before=$(cat "$sbL/.cargo/config.toml")
 PATH="$stubA:$PATH" HOME="$sbL" CARGO_HOME="$sbL/.cargo" \
-  bash "$BOOTSTRAP" --skip-smoke >/dev/null 2>&1
+  bash "$BOOTSTRAP" --skip-smoke --skip-push-probe >/dev/null 2>&1
 if grep -q '^# BEGIN cqlite-mold' "$sbL/.cargo/config" \
    && ! grep -q '^# BEGIN cqlite-mold' "$sbL/.cargo/config.toml" \
    && [ "$tomlL_before" = "$(cat "$sbL/.cargo/config.toml")" ]; then
@@ -395,7 +426,7 @@ cfgM="$sbM/.cargo/config.toml"
 printf '[build]\nrustflags = ["-C", "target-cpu=native"]\n' >"$cfgM"
 beforeM=$(cat "$cfgM")
 outM=$(PATH="$stubA:$PATH" HOME="$sbM" CARGO_HOME="$sbM/.cargo" \
-  bash "$BOOTSTRAP" --skip-smoke 2>&1)
+  bash "$BOOTSTRAP" --skip-smoke --skip-push-probe 2>&1)
 if printf '%s' "$outM" | grep -q "existing \[build\] rustflags" \
    && [ "$beforeM" = "$(cat "$cfgM")" ] \
    && ! grep -q '^# BEGIN cqlite-mold' "$cfgM"; then
@@ -461,12 +492,22 @@ fi
 # helper. The copy makes BASH_SOURCE-derived REPO_ROOT resolve to <dir>, so the
 # credential probe reads THIS remote/config, never the real checkout's — and the
 # --yes dataset fetch is a fast no-op (no test-data/scripts/fetch-datasets.sh here).
+# A THIRD argument, `with-claim`, additionally installs scripts/flow/claim.sh — the
+# push-capability probe (issue #3369) delegates to it, and short-circuits to UNMEASURED
+# without ever touching the network when it is absent. That default is what keeps every
+# pre-existing case above from pushing to the real origin: they are unchanged, and their
+# copies have no claim.sh, so no case acquires a network call by inheritance.
 mk_fake_repo() {
-  local dir="$1" url="$2"
+  local dir="$1" url="$2" claim="${3:-}"
   mkdir -p "$dir/scripts"
   cp "$BOOTSTRAP" "$dir/scripts/bootstrap-agent-machine.sh"
+  if [ "$claim" = with-claim ]; then
+    mkdir -p "$dir/scripts/flow"
+    cp "$SCRIPT_DIR/../flow/claim.sh" "$dir/scripts/flow/claim.sh"
+  fi
   git -c init.defaultBranch=main init -q "$dir" >/dev/null 2>&1
-  git -C "$dir" remote add origin "$url" >/dev/null 2>&1
+  [ -n "$url" ] && git -C "$dir" remote add origin "$url" >/dev/null 2>&1
+  return 0
 }
 
 FAKE_TOKEN='ghp_FAKEtoken2942FAKEtoken2942FAKEtoken'
@@ -510,7 +551,9 @@ fi
 sb7b=$(mktemp -d "$tmp/cred7b.XXXXXX"); stub7b="$tmp/stub7b"
 mk_hermetic_bin "$stub7b"
 gh7b_log="$tmp/gh7b.log"; : >"$gh7b_log"
-mk_stub "$stub7b" gh "echo \"\$*\" >>\"$gh7b_log\"; exit 0"   # setup-git succeeds but wires nothing
+mk_stub "$stub7b" gh "echo \"\$*\" >>\"$gh7b_log\"
+$GH_STUB_TOKEN_BODY
+exit 0"   # setup-git succeeds but wires nothing; `auth token` answers as real gh does
 repo7b="$tmp/repo7b"; mk_fake_repo "$repo7b" "https://github.com/pmcfadin/cqlite.git"
 gc7b="$sb7b/gitconfig"
 out7b=$(PATH="$stub7b" HOME="$sb7b" CARGO_HOME="$sb7b/.cargo" GIT_CONFIG_GLOBAL="$gc7b" \
@@ -674,7 +717,43 @@ fi
 #     where GNU coreutils installs `gtimeout` — keying this case off `timeout` alone
 #     would skip it on the one platform whose hang scenarios (locked osxkeychain, a GCM
 #     browser flow) motivated the bound, leaving it uncovered exactly where it matters.
-TIMEOUT_BIN_TEST="$(command -v timeout 2>/dev/null || command -v gtimeout 2>/dev/null || true)"
+# MIRRORS PRODUCTION'S CANDIDATE LOOP (#3369 review). Two values, two meanings:
+#   TIMEOUT_BIN_TEST  — the FIRST present candidate (what 7h/7hm need: "is there one?")
+#   TIMEOUT_KILL_TEST — the first present candidate that ACCEPTS --kill-after, which may
+#                       be the SECOND one. A watchdog for a fixture that IGNORES SIGTERM
+#                       must be able to escalate to SIGKILL: a plain `timeout` aimed at
+#                       such a child waits FOREVER, and `tooling-tests` is a full-gate
+#                       component where a hang is worse than a failure (nothing reports
+#                       it). Resolved by the SAME behavioural probe the bootstrap uses.
+# Checking only the FIRST candidate is how the 7p-o portability defect hid: the harness
+# and the code under test disagreed about which binary was in play.
+TIMEOUT_BIN_TEST=""
+TIMEOUT_KILL_TEST=""
+for _tbt_name in timeout gtimeout; do
+  _tbt_path="$(command -v "$_tbt_name" 2>/dev/null || true)"
+  [ -n "$_tbt_path" ] || continue
+  [ -n "$TIMEOUT_BIN_TEST" ] || TIMEOUT_BIN_TEST="$_tbt_path"
+  if [ -z "$TIMEOUT_KILL_TEST" ] && "$_tbt_path" --kill-after=1 1 true >/dev/null 2>&1; then
+    TIMEOUT_KILL_TEST="$_tbt_path"
+  fi
+done
+unset _tbt_name _tbt_path
+
+# mk_no_killafter_timeouts <dir> — stub EVERY timeout candidate the production loop tries
+# (`timeout` THEN `gtimeout`) so it cannot escape past the stub to a real binary further
+# along PATH. Stubbing only `timeout` made 7p-o pass on this Linux box (no gtimeout) and
+# FAIL on stock macOS, where GNU coreutils installs `gtimeout` — a supported fleet
+# platform, per bounded()'s own comment. Each stub rejects --kill-after and otherwise
+# delegates to the real binary, so what is measured is the SELECTION logic.
+mk_no_killafter_timeouts() {
+  local dir="$1" real="$2" name
+  for name in timeout gtimeout; do
+    mk_stub "$dir" "$name" 'for a in "$@"; do case "$a" in --kill-after*)
+      echo "'"$name"': unrecognized option '"'"'$a'"'"'" >&2; exit 125 ;;
+    esac; done
+exec '"$real"' "$@"'
+  done
+}
 if [ -n "$TIMEOUT_BIN_TEST" ]; then
   sb7h=$(mktemp -d "$tmp/cred7h.XXXXXX"); stub7h="$tmp/stub7h"
   mk_hermetic_bin "$stub7h"
@@ -718,7 +797,8 @@ fi
 #     is a real footgun (git consults each entry in order).
 sb7e=$(mktemp -d "$tmp/cred7e.XXXXXX"); stub7e="$tmp/stub7e"
 mk_hermetic_bin "$stub7e"
-mk_stub "$stub7e" gh 'exit 0'   # setup-git is a no-op -> the fallback helper is used
+mk_stub "$stub7e" gh "$GH_STUB_TOKEN_BODY
+exit 0"   # setup-git is a no-op -> the fallback helper is used
 repo7e="$tmp/repo7e"; mk_fake_repo "$repo7e" "https://github.com/pmcfadin/cqlite.git"
 gc7e="$sb7e/gitconfig"
 for _ in 1 2; do
@@ -759,6 +839,957 @@ if printf '%s' "$out7i" | grep -q 'REPO-LOCAL scope only'; then
 else
   bad "cred: repo-local-scope note missed a host-scoped local helper"
   printf '%s\n' "$out7i" | grep -i -A3 "git push credentials"
+fi
+
+# --- 7p. git PUSH capability is MEASURED, not inferred (issue #3369) --------
+# Block 7 covers the CONFIGURATION probe (`git credential fill`). That probe, plus
+# `gh auth status` and `git ls-remote origin HEAD`, are all READS — and the box that
+# motivated #3369 passed every one of them while every `git push` failed, so the
+# launcher's preflight certified a machine on which no lane could start. These cases
+# pin the probe that performs THE OPERATION (create + read back + delete a throwaway
+# refs/claims/smoke-<commit-sha> ref, via scripts/flow/claim.sh smoke) and — just as
+# importantly — pin that an UNKNOWN answer is never reported green.
+#
+# Hermetic in three layers, because a push probe that escaped the sandbox would mutate
+# the REAL origin:
+#   1. every case runs a COPY of bootstrap in a throwaway repo, so REPO_ROOT is never
+#      this checkout;
+#   2. every origin is either a local `file://` bare repo or `push-probe.invalid` — the
+#      RFC 2606 guaranteed-unresolvable TLD — never a reachable public remote;
+#   3. every whole-checkout run elsewhere in this suite passes --skip-push-probe.
+
+# mk_push_repo <dir> <origin-url|""> — a throwaway checkout that reports ZERO warnings
+# except the ones a case deliberately provokes. Getting to zero matters: "All checks
+# green." is printed only when WARNINGS is 0, so it is the oracle for BOTH "the probe
+# verified" and "the probe withheld green"; a sandbox warning for unrelated reasons
+# would make every green assertion here vacuous. (The precondition below MEASURES that
+# rather than assuming it.)
+mk_push_repo() {
+  local dir="$1" url="$2"
+  mk_fake_repo "$dir" "$url" with-claim
+  mkdir -p "$dir/scripts/lib" "$dir/test-data/datasets/sstables/ks/tbl" "$dir/.home/.cargo"
+  cp "$SCRIPT_DIR/../lib/gate-notify.sh" "$dir/scripts/lib/gate-notify.sh"
+  cp "$SCRIPT_DIR/../perf-capability.sh" "$dir/scripts/perf-capability.sh"
+  : >"$dir/test-data/datasets/sstables/ks/tbl/nb-1-big-Data.db"
+}
+
+# mk_push_bare <dir> [pre-receive-body] — a local bare repo that accepts pushes. With a
+# body, its pre-receive hook decides the push's fate OFFLINE, which is how the FAILED
+# verdicts below are produced deterministically and without a network.
+mk_push_bare() {
+  local dir="$1" hook="${2:-}"
+  git -c init.defaultBranch=main init -q --bare "$dir" >/dev/null 2>&1
+  if [ -n "$hook" ]; then
+    mkdir -p "$dir/hooks"
+    printf '#!/usr/bin/env bash\n%s\n' "$hook" >"$dir/hooks/pre-receive"
+    chmod +x "$dir/hooks/pre-receive"
+  fi
+}
+
+# mk_push_gh <dir> [setup-git-body] — a gh stub that satisfies the auth + board
+# sections (so neither contributes a warning) and runs <setup-git-body> on
+# `gh auth setup-git`.
+mk_push_gh() {
+  local dir="$1" setup="${2:-:}"
+  cat >"$dir/gh" <<EOF
+#!/usr/bin/env bash
+case "\$1" in
+  auth)
+    if [ "\$2" = status ]; then
+      echo "github.com"
+      echo "  ✓ Logged in to github.com account tester (GH_TOKEN)"
+      echo "  - Token scopes: 'gist', 'project', 'read:org', 'repo', 'workflow'"
+    elif [ "\$2" = token ]; then
+      # As real gh: the environment token IS github.com's token, and any other host has
+      # none here (#3369 FIX L gates the fallback repair on this answer).
+      want=""; shift 2
+      while [ \$# -gt 0 ]; do [ "\$1" = --hostname ] && { want="\$2"; shift; }; shift; done
+      case "\${want:-github.com}" in
+        github.com) echo "\${GH_TOKEN:-\${GITHUB_TOKEN:-}}" ;;
+        *) echo "no oauth token found for \$want" >&2; exit 1 ;;
+      esac
+      exit 0
+    elif [ "\$2" = setup-git ]; then
+      $setup
+    fi
+    exit 0 ;;
+  project) echo '{"id":"PVT_stub"}'; exit 0 ;;
+  api)     echo '{"data":{"node":{"id":"PVT_stub"}}}'; exit 0 ;;
+esac
+exit 0
+EOF
+  chmod +x "$dir/gh"
+}
+
+# mk_push_bin <dir> [setup-git-body] — PATH stubs that keep every OTHER section quiet.
+# `uname` reports Darwin so the Linux-only mold + perf sections (whose verdicts depend
+# on the HOST's kernel settings) cannot leak host state into these cases.
+mk_push_bin() {
+  local dir="$1" setup="${2:-:}"
+  mkdir -p "$dir"
+  mk_stub "$dir" uname 'echo Darwin'
+  mk_stub "$dir" sccache 'exit 0'
+  mk_stub "$dir" cargo-nextest 'exit 0'
+  mk_stub "$dir" cargo 'exit 0'
+  mk_stub "$dir" roborev 'exit 0'
+  mk_push_gh "$dir" "$setup"
+}
+
+# run_push <repo> <bin> <gitconfig> [bootstrap args...] — sets push_out and push_rc in
+# the CALLER's shell. Deliberately NOT `out=$(run_push …)`: a command substitution runs
+# the function in a subshell, so push_rc would be discarded — and the EXIT CODE is half
+# of what these cases assert (--strict). Never --yes: nothing here may install. Always
+# --skip-smoke: the gate fmt run is a different subject (and minutes long).
+push_rc=0
+push_out=""
+run_push() {
+  local repo="$1" bin="$2" gc="$3"; shift 3
+  push_rc=0
+  push_out=$(PATH="$bin:$PATH" HOME="$repo/.home" CARGO_HOME="$repo/.home/.cargo" \
+    GIT_CONFIG_GLOBAL="$gc" GIT_CONFIG_NOSYSTEM=1 CLAIM_MACHINE=push-probe-test \
+    CODEX_NOTIFY_WEBHOOK='https://ntfy.example.com/t' \
+    CQLITE_PROJECT_OWNER=pmcfadin CQLITE_PROJECT_NUMBER=1 \
+    bash "$repo/scripts/bootstrap-agent-machine.sh" --skip-smoke "$@" 2>&1) || push_rc=$?
+}
+# ANSI colour is stripped with a printf-built ESC, not a `\x1b` escape: BSD sed (the
+# fleet's macOS hosts) does not understand \x1b and would silently match nothing.
+PUSH_ESC=$(printf '\033')
+push_plain()  { printf '%s' "$1" | sed "s/${PUSH_ESC}\[[0-9;]*m//g"; }
+# Count only real warn LINES. `grep -cF '[warn]'` also matched the summary's
+# "Address the [warn] lines above", making every count one too high — and the counts
+# below are the whole basis of the delta assertion.
+push_warns()  { push_plain "$1" | grep -cE '^[[:space:]]+\[warn\] '; }
+push_green()  { printf '%s' "$1" | grep -qF 'All checks green.'; }
+push_verdict(){ push_plain "$1" | grep -F 'git-push:'; }
+
+# 7p-a/d. THE POSITIVE CONTROL and the OPT-OUT, measured as a pair against ONE sandbox
+#   whose only variable is the flag. Run the opt-out FIRST so its warning count
+#   establishes what the sandbox costs before the probe is even considered.
+bare7pa="$tmp/bare7pa.git"; mk_push_bare "$bare7pa"
+repo7pa="$tmp/repo7pa"; mk_push_repo "$repo7pa" "file://$bare7pa"
+bin7pa="$tmp/bin7pa"; mk_push_bin "$bin7pa"
+gc7pa="$tmp/gc7pa"; : >"$gc7pa"
+run_push "$repo7pa" "$bin7pa" "$gc7pa" --skip-push-probe --strict; out7pd=$push_out; rc7pd=$push_rc
+run_push "$repo7pa" "$bin7pa" "$gc7pa" --strict; out7pa=$push_out; rc7pa=$push_rc
+base_warns=$(push_warns "$out7pd"); probe_warns=$(push_warns "$out7pa")
+
+if printf '%s' "$out7pa" | grep -q '\[ok\].*git-push: VERIFIED' \
+   && printf '%s' "$out7pa" | grep -q 'refs/claims/\*'; then
+  ok "push: a REAL push (create+ls-remote+delete on a local bare repo) is reported VERIFIED as [ok]"
+else
+  bad "push: the probe could not report VERIFIED even against a bare repo that accepts pushes"
+  push_verdict "$out7pa"
+fi
+# The delta is host-independent: the ONLY difference between the two runs is the flag.
+if [ "$probe_warns" -eq $((base_warns - 1)) ]; then
+  ok "push: a VERIFIED probe adds no warning, and --skip-push-probe adds exactly one"
+else
+  bad "push: warning delta wrong (opt-out=$base_warns verified=$probe_warns)"
+fi
+if printf '%s' "$out7pd" | grep -q '\[warn\].*git-push: OPT-OUT (--skip-push-probe)'; then
+  ok "push: --skip-push-probe emits a LOUD [warn] OPT-OUT line (it cannot buy a silent pass)"
+else
+  bad "push: --skip-push-probe was silent or reported ok"
+  push_verdict "$out7pd"
+fi
+if [ "$rc7pd" -ne 0 ] && ! push_green "$out7pd"; then
+  ok "push: --skip-push-probe WITHHOLDS 'All checks green.' and fails --strict (rc=$rc7pd)"
+else
+  bad "push: the opt-out bought a green/zero-exit run (rc=$rc7pd)"
+fi
+# Absolute-green assertions need the sandbox to be otherwise-warning-free. MEASURE that
+# (baseline = exactly the one OPT-OUT warning) instead of assuming it: an exotic host
+# that warns for its own reasons must not produce a mystery red here.
+if [ "$base_warns" -eq 1 ]; then
+  if push_green "$out7pa" && [ "$rc7pa" -eq 0 ]; then
+    ok "push: VERIFIED yields 'All checks green.' and --strict exits 0 (zero warnings)"
+  else
+    bad "push: a verified machine did not go green / --strict did not exit 0 (rc=$rc7pa)"
+    push_verdict "$out7pa"
+  fi
+else
+  echo "skip - push: absolute-green assertions need an otherwise-clean sandbox (baseline=$base_warns warnings)"
+  printf '%s' "$out7pd" | grep -F '[warn]' | sed 's/\x1b\[[0-9;]*m//g' | head -5
+fi
+
+# 7p-b. PUSH FAILS, credential-shaped. The bare repo's pre-receive hook speaks the
+#   signature claim.sh classifies as auth, so this needs no network and no real token.
+bare7pb="$tmp/bare7pb.git"; mk_push_bare "$bare7pb" 'echo "Authentication failed" >&2; exit 1'
+repo7pb="$tmp/repo7pb"; mk_push_repo "$repo7pb" "file://$bare7pb"
+bin7pb="$tmp/bin7pb"; mk_push_bin "$bin7pb"
+gc7pb="$tmp/gc7pb"; : >"$gc7pb"
+run_push "$repo7pb" "$bin7pb" "$gc7pb" --strict; out7pb=$push_out; rc7pb=$push_rc
+if printf '%s' "$out7pb" | grep -q '\[warn\].*git-push: FAILED.*AUTHENTICATE' \
+   && ! push_green "$out7pb" && [ "$rc7pb" -ne 0 ]; then
+  ok "push: a rejected push is a [warn] FAILED naming authentication, green withheld, --strict exits $rc7pb"
+else
+  bad "push: credential-shaped rejection not reported as FAILED (rc=$rc7pb, green=$(push_green "$out7pb" && echo yes || echo no))"
+  push_verdict "$out7pb"
+fi
+# THIS CASE'S REMOTE IS `file://`, so its subject is the NON-https advice. The assertion
+# used to claim "HTTPS auth failure" while driving exactly this file:// remote — it
+# passed only because the advice branched on `!= ssh` and swept `other` into the https
+# arm, i.e. the test asserted a property it never exercised (#3369 review). The genuine
+# https path is 7p-q below.
+if printf '%s' "$out7pb" | grep -q "remote 'origin' is a 'other' remote" \
+   && printf '%s' "$out7pb" | grep -q 'credential helper may not apply' \
+   && ! push_plain "$out7pb" | grep -E '^ *fix:' | grep -q 'gh auth setup-git'; then
+  ok "push: a file:// remote's auth-shaped failure gets protocol-neutral advice, NOT https credential advice"
+else
+  bad "push: a non-https remote was given https credential advice"
+  push_plain "$out7pb" | grep -E 'fix:|remote is a' | head -4
+fi
+
+# 7p-b2. PUSH FAILS, namespace-shaped: a rejection git's stderr does NOT identify as a
+#   credential fault must not be mislabelled as one — and the DEFAULT (no --strict) run
+#   must still exit 0, which is the composability contract this script has always had.
+bare7pb2="$tmp/bare7pb2.git"; mk_push_bare "$bare7pb2" 'echo "denied by ref policy" >&2; exit 1'
+repo7pb2="$tmp/repo7pb2"; mk_push_repo "$repo7pb2" "file://$bare7pb2"
+bin7pb2="$tmp/bin7pb2"; mk_push_bin "$bin7pb2"
+gc7pb2="$tmp/gc7pb2"; : >"$gc7pb2"
+run_push "$repo7pb2" "$bin7pb2" "$gc7pb2"; out7pb2=$push_out; rc7pb2=$push_rc
+# The catch-all QUOTES claim.sh's verdict rather than re-wording it (#3369 review): a
+# re-worded catch-all mis-attributed every unrecognised reason code and discarded detail
+# claim.sh had just been fixed to report. So the assertion is that the ORIGINAL verdict
+# line survives into bootstrap's output, and that bootstrap adds no cause of its own.
+if printf '%s' "$out7pb2" | grep -q '\[warn\].*git-push: FAILED' \
+   && push_plain "$out7pb2" | grep -q '^ *CLAIM: SMOKE-FAIL.*reason=push-rejected' \
+   && ! printf '%s' "$out7pb2" | grep -q 'git-push: FAILED.*AUTHENTICATE'; then
+  ok "push: an unrecognised SMOKE-FAIL is QUOTED verbatim (reason survives; no auth mis-attribution)"
+else
+  bad "push: catch-all re-classified instead of quoting"
+  push_verdict "$out7pb2"
+fi
+if [ "$rc7pb2" -eq 0 ] && ! push_green "$out7pb2"; then
+  ok "push: WITHOUT --strict the script still exits 0 despite warnings (contract preserved)"
+else
+  bad "push: default exit contract broken (rc=$rc7pb2)"
+fi
+
+# 7p-c. THE MOST IMPORTANT CASE: an UNKNOWN answer must not inherit the permissive
+#   branch. The remote does not exist, so NOTHING was learned about push capability —
+#   the verdict must be UNMEASURED, a [warn], and must never be an [ok].
+repo7pc="$tmp/repo7pc"; mk_push_repo "$repo7pc" "file://$tmp/no-such-bare.git"
+bin7pc="$tmp/bin7pc"; mk_push_bin "$bin7pc"
+gc7pc="$tmp/gc7pc"; : >"$gc7pc"
+run_push "$repo7pc" "$bin7pc" "$gc7pc"; out7pc=$push_out; rc7pc=$push_rc
+if printf '%s' "$out7pc" | grep -q '\[warn\].*git-push: UNMEASURED' \
+   && printf '%s' "$out7pc" | grep -q 'git-push: UNMEASURED.*UNKNOWN, not ok'; then
+  ok "push: an unreachable remote is UNMEASURED, and the text names it as UNKNOWN"
+else
+  bad "push: unreachable remote did not produce the UNMEASURED verdict"
+  push_verdict "$out7pc"
+fi
+if ! printf '%s' "$out7pc" | grep -q '\[ok\].*git-push' && ! push_green "$out7pc"; then
+  ok "push: an UNMEASURED probe is NEVER [ok] and NEVER green (affirmative-measurement rule)"
+else
+  bad "push: an unmeasured push capability took the permissive branch"
+  push_verdict "$out7pc"
+fi
+
+# 7p-c2. The other unmeasurable shape: no origin remote at all.
+repo7pc2="$tmp/repo7pc2"; mk_push_repo "$repo7pc2" ""
+bin7pc2="$tmp/bin7pc2"; mk_push_bin "$bin7pc2"
+gc7pc2="$tmp/gc7pc2"; : >"$gc7pc2"
+run_push "$repo7pc2" "$bin7pc2" "$gc7pc2"; out7pc2=$push_out
+if printf '%s' "$out7pc2" | grep -q "\[warn\].*git-push: UNMEASURED.*no 'origin' remote" \
+   && ! printf '%s' "$out7pc2" | grep -q '\[ok\].*git-push'; then
+  ok "push: no origin remote -> UNMEASURED [warn], never [ok]"
+else
+  bad "push: missing origin was not reported as UNMEASURED"
+  push_verdict "$out7pc2"
+fi
+
+# 7p-c3. THE MUTATION THIS BLOCK EXISTS FOR. The probe delegates to claim.sh, so the
+#   permissive branch must be keyed on the AFFIRMATIVE `SMOKE-OK`, never on the ABSENCE
+#   of `SMOKE-FAIL`: a probe that produced NO verdict at all (killed, or a claim.sh
+#   whose output contract moved) would otherwise be read as success. Verified as a real
+#   mutation: rewriting the branch to `! grep SMOKE-FAIL` leaves every OTHER case in
+#   this block green, and only this one reds. The remote here is a bare repo that
+#   ACCEPTS pushes, so reachability is not what is being measured — the verdict is.
+repo7pc3="$tmp/repo7pc3"; bare7pc3="$tmp/bare7pc3.git"
+mk_push_bare "$bare7pc3"
+mk_push_repo "$repo7pc3" "file://$bare7pc3"
+printf '#!/usr/bin/env bash\nexit 0\n' >"$repo7pc3/scripts/flow/claim.sh"   # mute: no verdict
+chmod +x "$repo7pc3/scripts/flow/claim.sh"
+bin7pc3="$tmp/bin7pc3"; mk_push_bin "$bin7pc3"
+gc7pc3="$tmp/gc7pc3"; : >"$gc7pc3"
+run_push "$repo7pc3" "$bin7pc3" "$gc7pc3"; out7pc3=$push_out
+if printf '%s' "$out7pc3" | grep -q '\[warn\].*git-push: UNMEASURED.*no SMOKE-OK/SMOKE-FAIL verdict' \
+   && ! printf '%s' "$out7pc3" | grep -q '\[ok\].*git-push'; then
+  ok "push: a probe that returns NO verdict is UNMEASURED — success is keyed on SMOKE-OK, not on the absence of failure"
+else
+  bad "push: a verdict-less probe was not reported UNMEASURED (the permissive branch is keyed on '!= failed')"
+  push_verdict "$out7pc3"
+fi
+
+# 7p-e. ORDERING: the probe must run AFTER section 3b's credential fix, so what it
+#   measures is the machine as the fix LEFT it. Asserted as a SEQUENCE, not as
+#   co-presence: the `gh auth setup-git` stub is what makes the push reachable at all
+#   (it installs the url.<local>.insteadOf rewrite), so a probe running BEFORE the fix
+#   cannot possibly report VERIFIED — and the negative twin below proves it does not.
+#   The origin is `push-probe.invalid` (RFC 2606: guaranteed not to resolve), so the
+#   unwired run fails offline instead of reaching a real host.
+bare7pe="$tmp/bare7pe.git"; order7pe="$tmp/order7pe.log"; : >"$order7pe"
+mk_push_bare "$bare7pe" "echo PUSH >>\"$order7pe\"; exit 0"
+repo7pe="$tmp/repo7pe"; mk_push_repo "$repo7pe" "https://push-probe.invalid/cqlite.git"
+bin7pe="$tmp/bin7pe"
+mk_push_bin "$bin7pe" "echo SETUP-GIT >>\"$order7pe\"
+      git config --global --add 'credential.https://push-probe.invalid.helper' '!f(){ test \"\$1\" = get || exit 0; echo username=gh-stub; echo password=wired-by-setup-git; };f'
+      git config --global \"url.file://$bare7pe/.insteadOf\" 'https://push-probe.invalid/cqlite.git'"
+# Negative twin FIRST: without --fix-credentials nothing wires the machine, so the
+# probe must NOT report VERIFIED. Without this, "VERIFIED after the fix" would not
+# distinguish a probe that ran after the fix from one that always passes.
+gc7pe1="$tmp/gc7pe1"; : >"$gc7pe1"
+run_push "$repo7pe" "$bin7pe" "$gc7pe1"; out7pe1=$push_out
+twin_log=$(tr '\n' ' ' <"$order7pe")
+if ! printf '%s' "$out7pe1" | grep -q 'git-push: VERIFIED' && [ -z "${twin_log// /}" ]; then
+  ok "push: (negative twin) with no credential fix the probe never reaches the remote and never VERIFIES"
+else
+  bad "push: the unwired machine reported VERIFIED (log=[$twin_log])"
+  push_verdict "$out7pe1"
+fi
+: >"$order7pe"; gc7pe2="$tmp/gc7pe2"; : >"$gc7pe2"
+run_push "$repo7pe" "$bin7pe" "$gc7pe2" --fix-credentials; out7pe2=$push_out
+order_seq=$(sed 's/[^A-Z-]//g' "$order7pe" | tr '\n' ' ' | tr -s ' ')
+if printf '%s' "$out7pe2" | grep -q '\[ok\].*git-push: VERIFIED' \
+   && printf '%s\n' "$order_seq" | grep -q '^SETUP-GIT PUSH'; then
+  ok "push: the probe runs AFTER the credential fix — observed order [$order_seq], verdict VERIFIED"
+else
+  bad "push: fix/probe ordering not established (order=[$order_seq])"
+  push_verdict "$out7pe2"
+fi
+
+# 7p-f. --fix-credentials is NARROW: it wires credentials and installs NOTHING. Turning
+#   the launcher's VERIFY step into a full toolchain installer (which reusing --yes
+#   would have done) is a far larger change to an external contract than #3369 needs,
+#   so the install tripwire must stay empty.
+trip7pf="$tmp/tripwire7pf.log"; : >"$trip7pf"
+bin7pf="$tmp/bin7pf"
+mk_push_bin "$bin7pf" "git config --global --add 'credential.https://push-probe.invalid.helper' '!f(){ test \"\$1\" = get || exit 0; echo username=gh-stub; echo password=wired-by-setup-git; };f'"
+for shim in brew cargo roborev; do mkshim "$shim" "$bin7pf" "$trip7pf"; done
+repo7pf="$tmp/repo7pf"; mk_push_repo "$repo7pf" "https://push-probe.invalid/cqlite.git"
+gc7pf="$tmp/gc7pf"; : >"$gc7pf"
+run_push "$repo7pf" "$bin7pf" "$gc7pf" --fix-credentials; out7pf=$push_out
+if grep -qF 'push-probe.invalid' "$gc7pf" 2>/dev/null && [ ! -s "$trip7pf" ]; then
+  ok "push: --fix-credentials wires the credential helper and installs NOTHING (tripwire empty)"
+else
+  bad "push: --fix-credentials was not narrow (helper=$(grep -c . "$gc7pf" 2>/dev/null) tripwire=$(wc -l <"$trip7pf" 2>/dev/null))"
+  [ -s "$trip7pf" ] && cat "$trip7pf"
+fi
+
+# 7p-j. THE AC1+AC3 END-TO-END CASE — the one whose absence let a defect through with
+#   102 tests green. A fresh UNWIRED box (no credential helper, exactly the pinned-AMI
+#   state) + `--fix-credentials --strict` must end at exit 0 AND print
+#   "All checks green.". The first implementation warned about the missing helper BEFORE
+#   repairing it and could not retract that warning, so verify.run FAILED on a box it had
+#   just successfully repaired — AC1 and AC3 both defeated, invisibly. The §3b verdict is
+#   now emitted once, after the repair, on the FINAL state.
+bare7pj="$tmp/bare7pj.git"; mk_push_bare "$bare7pj"
+repo7pj="$tmp/repo7pj"; mk_push_repo "$repo7pj" "https://push-probe.invalid/cqlite.git"
+bin7pj="$tmp/bin7pj"
+mk_push_bin "$bin7pj" "git config --global --add 'credential.https://push-probe.invalid.helper' '!f(){ test \"\$1\" = get || exit 0; echo username=gh-stub; echo password=wired-by-setup-git; };f'
+      git config --global \"url.file://$bare7pj/.insteadOf\" 'https://push-probe.invalid/cqlite.git'"
+gc7pj="$tmp/gc7pj"; : >"$gc7pj"   # UNWIRED: no helper, no rewrite, as the image ships
+run_push "$repo7pj" "$bin7pj" "$gc7pj" --fix-credentials --strict; out7pj=$push_out; rc7pj=$push_rc
+if printf '%s' "$out7pj" | grep -q '\[ok\].*git credentials WIRED BY THIS RUN' \
+   && ! printf '%s' "$out7pj" | grep -q '\[warn\].*git push has NO credentials' \
+   && printf '%s' "$out7pj" | grep -q '\[ok\].*git-push: VERIFIED'; then
+  ok "push: an unwired box repaired by --fix-credentials reports ONE [ok] verdict — no pre-repair warning survives the repair"
+else
+  bad "push: the repaired box still carries a credential WARNING (verify.run would fail on a box it just fixed)"
+  push_plain "$out7pj" | grep -E 'credential|git-push' | head -6
+fi
+if [ "$base_warns" -eq 1 ]; then
+  if [ "$rc7pj" -eq 0 ] && push_green "$out7pj" && [ "$(push_warns "$out7pj")" -eq 0 ]; then
+    ok "push: AC1+AC3 end to end — unwired box + --fix-credentials --strict => exit 0 AND 'All checks green.'"
+  else
+    bad "push: repaired box did not certify (rc=$rc7pj warns=$(push_warns "$out7pj") green=$(push_green "$out7pj" && echo yes || echo no))"
+    push_plain "$out7pj" | grep -E '\[warn\]' | head -5
+  fi
+else
+  echo "skip - push: AC1+AC3 exit-0 assertion needs an otherwise-clean sandbox (baseline=$base_warns warnings)"
+fi
+
+# 7p-k. AN UNSUCCESSFUL CLEANUP DELETE (#3369 blocker 2). `cmd_smoke` used to emit SMOKE-OK — text and
+#   all: "(create + ls-remote + delete verified)" — after only a stderr `note` when the
+#   cleanup delete failed. Bootstrap then reported VERIFIED and passed --strict on a
+#   machine that had just stranded a ref on the shared origin: a verdict claiming more
+#   than it measured, the same shape as the §3b wording defect one layer down.
+bare7pk="$tmp/bare7pk.git"
+mk_push_bare "$bare7pk" 'zero=0000000000000000000000000000000000000000
+while read -r old new ref; do
+  if [ "$new" = "$zero" ]; then echo "deletion of $ref denied by policy" >&2; exit 1; fi
+done
+exit 0'
+repo7pk="$tmp/repo7pk"; mk_push_repo "$repo7pk" "file://$bare7pk"
+bin7pk="$tmp/bin7pk"; mk_push_bin "$bin7pk"
+gc7pk="$tmp/gc7pk"; : >"$gc7pk"
+run_push "$repo7pk" "$bin7pk" "$gc7pk" --strict; out7pk=$push_out; rc7pk=$push_rc
+if printf '%s' "$out7pk" | grep -q '\[warn\].*git-push: FAILED' \
+   && push_plain "$out7pk" | grep -q 'reason=cleanup-unverified' \
+   && ! printf '%s' "$out7pk" | grep -q 'git-push: VERIFIED' \
+   && ! push_green "$out7pk" && [ "$rc7pk" -ne 0 ]; then
+  ok "push: an unsuccessful cleanup delete is FAILED, never VERIFIED (green withheld, --strict exits $rc7pk)"
+else
+  bad "push: delete failure was reported as success (rc=$rc7pk)"
+  push_verdict "$out7pk"
+fi
+if push_plain "$out7pk" | grep -q "git ls-remote .* refs/claims/smoke-"; then
+  ok "push: the quoted verdict reaches the operator with the ls-remote check for the possibly-stranded ref"
+else
+  bad "push: cleanup-unverified verdict lost its stray-ref guidance in transit"
+  push_plain "$out7pk" | grep -E 'CLAIM:|git-push' | head -3
+fi
+# NO CAUSE MAY BE ATTRIBUTED (#3369 review). One nonzero exit cannot tell a deletion
+# policy from a network drop from a post-readback auth failure, so neither claim.sh nor
+# bootstrap may name one — and in particular bootstrap must not fall back to credential
+# advice, which was the wrong-remedy defect one round earlier.
+if ! printf '%s' "$out7pk" | grep -q 'gh auth setup-git' \
+   && ! printf '%s' "$out7pk" | grep -q -- '--fix-credentials' \
+   && ! printf '%s' "$out7pk" | grep -qi 'ref-deletion policy' \
+   && push_plain "$out7pk" | grep -q 'no cause is attributed'; then
+  ok "push: a failed cleanup attributes NO cause and gives no credential advice — it reports the observation"
+else
+  bad "push: an unsupportable cause (or credential advice) was attached to a failed cleanup"
+  push_plain "$out7pk" | grep -E 'CLAIM:|cause|setup-git' | head -4
+fi
+# The verdict must come from claim.sh's ANCHORED verdict line AND its exit status, not
+# from a substring anywhere in the captured stream. A claim.sh that prints the token in
+# prose (or on stderr) and then FAILS must not pass.
+printf '#!/usr/bin/env bash\necho "hint: a healthy run prints CLAIM: SMOKE-OK here" >&2\nexit 1\n' \
+  >"$repo7pk/scripts/flow/claim.sh"
+chmod +x "$repo7pk/scripts/flow/claim.sh"
+run_push "$repo7pk" "$bin7pk" "$gc7pk"; out7pk2=$push_out
+if printf '%s' "$out7pk2" | grep -q '\[warn\].*git-push: UNMEASURED' \
+   && ! printf '%s' "$out7pk2" | grep -q '\[ok\].*git-push'; then
+  ok "push: the SMOKE-OK token in unanchored prose (plus a nonzero exit) does NOT satisfy the probe"
+else
+  bad "push: a prose mention of SMOKE-OK was accepted as the verdict"
+  push_verdict "$out7pk2"
+fi
+
+# 7p-l. ONE REMOTE, RESOLVED ONCE (#3369 review). The credential half used to read
+#   `origin`'s FETCH url while the push probe pushed to `${CLAIM_REMOTE:-origin}` and
+#   honoured any `pushurl` — so the run could wire and bless host A while pushing to host
+#   B. Both divergences are covered: a non-origin CLAIM_REMOTE, and an origin whose
+#   pushurl differs from its fetch url.
+#
+#   (i) CLAIM_REMOTE names a different remote. `origin` here is a local bare repo that
+#   needs no credential at all; if the credential half still read `origin`, it would emit
+#   the "'other' remote — no credential helper applies" line and never repair anything,
+#   and the push to `upstream` would then be unwired.
+bare7pl="$tmp/bare7pl.git"; mk_push_bare "$bare7pl"
+repo7pl="$tmp/repo7pl"; mk_push_repo "$repo7pl" "file://$tmp/decoy7pl.git"
+git -C "$repo7pl" remote add upstream "https://push-probe.invalid/cqlite.git" >/dev/null 2>&1
+bin7pl="$tmp/bin7pl"
+mk_push_bin "$bin7pl" "git config --global --add 'credential.https://push-probe.invalid.helper' '!f(){ test \"\$1\" = get || exit 0; echo username=gh-stub; echo password=wired; };f'
+      git config --global \"url.file://$bare7pl/.insteadOf\" 'https://push-probe.invalid/cqlite.git'"
+gc7pl="$tmp/gc7pl"; : >"$gc7pl"
+export CLAIM_REMOTE=upstream      # unset immediately after: it must not leak into later cases
+run_push "$repo7pl" "$bin7pl" "$gc7pl" --fix-credentials --strict; out7pl=$push_out; rc7pl=$push_rc
+unset CLAIM_REMOTE
+if printf '%s' "$out7pl" | grep -q '\[ok\].*git credentials WIRED BY THIS RUN.*push-probe.invalid' \
+   && printf '%s' "$out7pl" | grep -q "\[ok\].*git-push: VERIFIED.*'upstream'" \
+   && ! printf '%s' "$out7pl" | grep -q "no credential helper applies"; then
+  ok "push: with CLAIM_REMOTE set, the credential half and the push probe address the SAME remote"
+else
+  bad "push: credential half and push probe addressed different remotes (rc=$rc7pl)"
+  push_plain "$out7pl" | grep -E 'credential|git-push|remote' | head -6
+fi
+
+#   (ii) `origin` with a pushurl that differs from its fetch url. `git push` honours the
+#   pushurl, so the credential subject is the PUSH host — reading the fetch url would
+#   classify this as a local 'other' remote needing no helper at all.
+repo7pl2="$tmp/repo7pl2"; mk_push_repo "$repo7pl2" "file://$tmp/decoy7pl2.git"
+git -C "$repo7pl2" remote set-url --push origin "https://push-probe.invalid/cqlite.git" >/dev/null 2>&1
+bin7pl2="$tmp/bin7pl2"; mk_push_bin "$bin7pl2"
+gc7pl2="$tmp/gc7pl2"; : >"$gc7pl2"
+run_push "$repo7pl2" "$bin7pl2" "$gc7pl2"; out7pl2=$push_out
+if printf '%s' "$out7pl2" | grep -q '\[warn\].*git push has NO credentials for push-probe.invalid' \
+   && ! printf '%s' "$out7pl2" | grep -q "no credential helper applies"; then
+  ok "push: an origin with a differing pushurl is judged on its PUSH host, not its fetch host"
+else
+  bad "push: pushurl was ignored — the credential verdict is about the wrong host"
+  push_plain "$out7pl2" | grep -E 'credential|remote' | head -5
+fi
+
+# 7p-m. THE BOUND MUST ACTUALLY BOUND (#3369 review). `timeout <secs>` sends SIGTERM and
+#   then waits, so a child that traps or ignores it runs on forever and the advertised
+#   60s bound bounds nothing — in BOOT-PATH code, where a hang is the worst outcome.
+#   `bounded` now passes --kill-after, which also makes the probe's rc=137 branch
+#   reachable for the first time (it previously anticipated an outcome the wrapper could
+#   not produce). The stand-in for a TERM-ignoring git/ssh/credential-manager is a
+#   claim.sh that traps TERM: it is `bounded`'s DIRECT child (env execs it), which is the
+#   process timeout signals.
+#
+#   COST: this case necessarily waits out the real 60s bound plus the 5s grace (~65s) —
+#   the bound is production behaviour and must not be shrunk to suit a test. Its own
+#   outer ceiling is the negative control: WITHOUT --kill-after the bootstrap never
+#   returns, the ceiling fires, and rc is 124.
+if [ -n "$TIMEOUT_KILL_TEST" ]; then
+  bare7pm="$tmp/bare7pm.git"; mk_push_bare "$bare7pm"
+  repo7pm="$tmp/repo7pm"; mk_push_repo "$repo7pm" "file://$bare7pm"
+  printf '#!/usr/bin/env bash\ntrap "" TERM\nsleep 300\n' >"$repo7pm/scripts/flow/claim.sh"
+  chmod +x "$repo7pm/scripts/flow/claim.sh"
+  bin7pm="$tmp/bin7pm"; mk_push_bin "$bin7pm"
+  gc7pm="$tmp/gc7pm"; : >"$gc7pm"
+  hang_start=$(date +%s)
+  hang_rc=0
+  hang_out=$("$TIMEOUT_KILL_TEST" --kill-after=5 150 env PATH="$bin7pm:$PATH" HOME="$repo7pm/.home" \
+    CARGO_HOME="$repo7pm/.home/.cargo" GIT_CONFIG_GLOBAL="$gc7pm" GIT_CONFIG_NOSYSTEM=1 \
+    CLAIM_MACHINE=push-probe-test CODEX_NOTIFY_WEBHOOK='https://ntfy.example.com/t' \
+    CQLITE_PROJECT_OWNER=pmcfadin CQLITE_PROJECT_NUMBER=1 \
+    bash "$repo7pm/scripts/bootstrap-agent-machine.sh" --skip-smoke 2>&1) || hang_rc=$?
+  hang_elapsed=$(( $(date +%s) - hang_start ))
+  # rc 124 OR 137 both mean the OUTER ceiling fired (137 = the watchdog had to SIGKILL
+  # bootstrap itself), i.e. the inner bound failed to bound. Either is a failure here.
+  if [ "$hang_rc" -ne 124 ] && [ "$hang_rc" -ne 137 ] && printf '%s' "$hang_out" | grep -q '\[warn\].*git-push: UNMEASURED.*exceeded its 60s bound and was killed' \
+     && [ "$hang_elapsed" -lt 120 ]; then
+    ok "push: a SIGTERM-ignoring probe child is KILLED at the bound + grace — bootstrap still completes (${hang_elapsed}s) and reports UNMEASURED"
+  else
+    bad "push: the bound did not bound a TERM-ignoring child (rc=$hang_rc elapsed=${hang_elapsed}s)"
+    push_verdict "$hang_out"
+  fi
+else
+  # Deliberately SKIP rather than run unbounded: this fixture ignores SIGTERM, so without
+  # a hard-kill-capable watchdog the case could hang the gate forever. A skip that says
+  # so is honest; a case that can hang is not.
+  echo "skip - push: bound-escalation guard needs a timeout/gtimeout accepting --kill-after (its fixture ignores SIGTERM)"
+fi
+
+# 7p-n. SSH REMOTES GET SSH ADVICE (#3369 review). `gh auth setup-git` configures an
+#   HTTPS credential helper and cannot affect key-based auth, so printing it for an SSH
+#   remote sends the operator to fix something that is not in the path — the same
+#   wrong-remedy class as the delete-path advice two rounds ago. It is newly reachable
+#   because this change routes SSH origins into the push probe instead of exempting them.
+#   The branch is keyed on GIT_ORIGIN_KIND (derived from the remote URL, authoritative by
+#   construction), NOT on git's error text: no cause is being classified here.
+#   An `ssh` stub supplies the auth-shaped failure, so nothing contacts a real host.
+repo7pn="$tmp/repo7pn"; mk_push_repo "$repo7pn" "git@push-probe.invalid:owner/repo.git"
+bin7pn="$tmp/bin7pn"; mk_push_bin "$bin7pn"
+mk_stub "$bin7pn" ssh 'echo "git@push-probe.invalid: Permission denied (publickey)." >&2; exit 255'
+gc7pn="$tmp/gc7pn"; : >"$gc7pn"
+run_push "$repo7pn" "$bin7pn" "$gc7pn"; out7pn=$push_out
+if printf '%s' "$out7pn" | grep -q '\[warn\].*git-push: FAILED' \
+   && printf '%s' "$out7pn" | grep -q 'authenticates with your SSH KEY' \
+   && printf '%s' "$out7pn" | grep -q 'ssh-add -l' \
+   && ! push_plain "$out7pn" | grep -E '^ *fix:|^ *  *then re-run' | grep -q 'gh auth setup-git'; then
+  ok "push: an SSH remote's push failure advises SSH keys, NOT 'gh auth setup-git' (which cannot affect key auth)"
+else
+  bad "push: SSH push failure got https credential advice"
+  push_plain "$out7pn" | grep -E 'git-push|fix:|ssh' | head -5
+fi
+
+# 7p-s. NOTHING PRINTED MAY CARRY A CREDENTIAL FROM THE REMOTE URL (#3369 review). A
+#   remote URL can be `https://user:token@host/…` or `ssh://user:token@host/…`, and this
+#   script's output is persisted in ONBOARDING LOGS — so the two advice lines that printed
+#   $GIT_ORIGIN_URL verbatim wrote a live credential into a log file. Both sub-cases below
+#   put a distinctive secret in the URL and assert it never appears in the output, which is
+#   the property; the structural guard in 7p-i covers the sites nobody has written yet.
+URL_SECRET='ghp_URLembeddedSECRET3369URLembeddedSEC'
+
+#   (i) An SSH remote whose URL embeds a secret. The `ssh` stub supplies an auth-shaped
+#   failure (as in 7p-n) so the advice branch — the code under test — is really reached.
+repo7ps="$tmp/repo7ps"; mk_push_repo "$repo7ps" "ssh://cq:$URL_SECRET@push-probe.invalid/owner/repo.git"
+bin7ps="$tmp/bin7ps"; mk_push_bin "$bin7ps"
+mk_stub "$bin7ps" ssh 'echo "git@push-probe.invalid: Permission denied (publickey)." >&2; exit 255'
+gc7ps="$tmp/gc7ps"; : >"$gc7ps"
+run_push "$repo7ps" "$bin7ps" "$gc7ps"; out7ps=$push_out
+# Guard the guard: without the FAILED verdict + SSH advice the run never reached the lines
+# under test, and "the secret is absent" would be true for the wrong reason.
+if printf '%s' "$out7ps" | grep -q '\[warn\].*git-push: FAILED' \
+   && printf '%s' "$out7ps" | grep -q 'authenticates with your SSH KEY'; then
+  ok "push: (precondition) 7p-s(i) reaches the FAILED verdict and the SSH advice branch"
+else
+  bad "push: 7p-s(i) precondition FAILED — the advice branch was not reached, the secret assert would be vacuous"
+  push_plain "$out7ps" | grep -E 'git-push|fix:' | head -4
+fi
+if ! printf '%s' "$out7ps" | grep -qF "$URL_SECRET" \
+   && printf '%s' "$out7ps" | grep -q "remote 'origin' is an SSH remote" \
+   && printf '%s' "$out7ps" | grep -q 'remote get-url --push origin'; then
+  ok "push: a credential embedded in an SSH remote URL is NEVER printed — the advice names the remote and where to read the URL locally"
+else
+  bad "push: the remote URL (and its embedded secret) reached the output"
+  push_plain "$out7ps" | grep -E 'fix:|URL' | head -4
+fi
+
+#   (ii) An https remote whose PASSWORD contains an '@'. The host is printed on many lines,
+#   so parsing the userinfo at the FIRST '@' left the tail of the password inside the
+#   "host" and logged a credential fragment. git splits an authority at the LAST '@'.
+repo7ps2="$tmp/repo7ps2"; mk_push_repo "$repo7ps2" "https://cq:p@${URL_SECRET}@push-probe.invalid/cqlite.git"
+bin7ps2="$tmp/bin7ps2"; mk_push_bin "$bin7ps2"
+gc7ps2="$tmp/gc7ps2"; : >"$gc7ps2"
+run_push "$repo7ps2" "$bin7ps2" "$gc7ps2"; out7ps2=$push_out
+if printf '%s' "$out7ps2" | grep -q 'git push has NO credentials for push-probe.invalid' \
+   && ! printf '%s' "$out7ps2" | grep -qF "$URL_SECRET" \
+   && ! printf '%s' "$out7ps2" | grep -q '@push-probe.invalid'; then
+  ok "push: a password containing '@' does not leak into the printed host (userinfo is split at the LAST '@')"
+else
+  bad "push: the parsed host carried a credential fragment"
+  push_plain "$out7ps2" | grep -E 'push-probe' | head -4
+fi
+
+# 7p-o. A `timeout` THAT REJECTS --kill-after MUST NOT BREAK EVERY BOUND (#3369 review).
+#   --kill-after is GNU coreutils; BusyBox and older implementations reject it, and a
+#   non-GNU `timeout` earlier on PATH than a GNU `gtimeout` would win a first-match-wins
+#   lookup. If the selected binary rejects the flag, EVERY bounded call fails — board
+#   probe, credential probe, push probe — and --strict then rejects a healthy machine.
+#   The stubs reject the flag and otherwise delegate to the real binary, so this measures
+#   the SELECTION logic, not a crippled timeout. BOTH candidates are stubbed: stubbing
+#   only `timeout` left the loop free to select a real `gtimeout` further along PATH, so
+#   the probe ran, no UNMEASURED appeared, and the case FAILED on stock macOS — green
+#   here (Linux, no gtimeout) and red on a supported platform (#3369 review).
+if [ -n "$TIMEOUT_BIN_TEST" ]; then
+  bare7po="$tmp/bare7po.git"; mk_push_bare "$bare7po"
+  repo7po="$tmp/repo7po"; mk_push_repo "$repo7po" "file://$bare7po"
+  bin7po="$tmp/bin7po"; mk_push_bin "$bin7po"
+  mk_no_killafter_timeouts "$bin7po" "$TIMEOUT_BIN_TEST"
+  gc7po="$tmp/gc7po"; : >"$gc7po"
+  run_push "$repo7po" "$bin7po" "$gc7po" --strict; out7po=$push_out; rc7po=$push_rc
+  # TWO properties, and the second is the one that matters most. (1) The flag-rejecting
+  # binary is still SELECTED and USED, so the non-mutating probes keep working and the
+  # degradation is STATED — without that, every bounded call would fail and --strict would
+  # reject a healthy machine. (2) The MUTATING push is REFUSED, because a SIGTERM-only
+  # bound provably does not bound a child that ignores SIGTERM and hanging the launcher is
+  # worse than a red verdict. Nothing is pushed, green is withheld, --strict exits nonzero.
+  refs7po=$(git ls-remote "$bare7po" 'refs/claims/*' 2>/dev/null | wc -l | tr -d ' ')
+  if printf '%s' "$out7po" | grep -q 'does not accept --kill-after' \
+     && printf '%s' "$out7po" | grep -q '\[warn\].*git-push: UNMEASURED.*cannot hard-kill' \
+     && ! printf '%s' "$out7po" | grep -q '\[ok\].*git-push' \
+     && [ "${refs7po:-0}" -eq 0 ] && ! push_green "$out7po" && [ "$rc7po" -ne 0 ]; then
+    ok "push: a timeout that cannot hard-kill is still used for other probes, but the MUTATING push is REFUSED — nothing pushed, green withheld, --strict exits $rc7po"
+  else
+    bad "push: a mutating push ran under a bound that cannot hard-kill (rc=$rc7po refs=${refs7po:-0})"
+    push_plain "$out7po" | grep -E 'git-push|kill-after' | head -4
+  fi
+else
+  echo "skip - push: --kill-after fallback case needs a real timeout/gtimeout to delegate to"
+fi
+
+# 7p-p. A REMOTE WITH SEVERAL PUSH URLs (#3369 review). `git push <remote>` writes to
+#   EVERY configured pushurl while `get-url --push` names only the first, so the probe
+#   would mutate N destinations and could create the ref on A, fail on B and clean
+#   neither. It refuses instead: UNMEASURED, nothing pushed anywhere, green withheld.
+bare7pp1="$tmp/bare7pp1.git"; mk_push_bare "$bare7pp1"
+bare7pp2="$tmp/bare7pp2.git"; mk_push_bare "$bare7pp2"
+repo7pp="$tmp/repo7pp"; mk_push_repo "$repo7pp" "file://$bare7pp1"
+git -C "$repo7pp" remote set-url --add --push origin "file://$bare7pp1" >/dev/null 2>&1
+git -C "$repo7pp" remote set-url --add --push origin "file://$bare7pp2" >/dev/null 2>&1
+bin7pp="$tmp/bin7pp"; mk_push_bin "$bin7pp"
+gc7pp="$tmp/gc7pp"; : >"$gc7pp"
+run_push "$repo7pp" "$bin7pp" "$gc7pp" --strict; out7pp=$push_out; rc7pp=$push_rc
+refs7pp=$(( $(git ls-remote "$bare7pp1" 'refs/claims/*' 2>/dev/null | wc -l) + $(git ls-remote "$bare7pp2" 'refs/claims/*' 2>/dev/null | wc -l) ))
+if printf '%s' "$out7pp" | grep -q '\[warn\].*git-push: UNMEASURED.*2 push URLs' \
+   && ! printf '%s' "$out7pp" | grep -q '\[ok\].*git-push' \
+   && [ "$refs7pp" -eq 0 ] && ! push_green "$out7pp" && [ "$rc7pp" -ne 0 ]; then
+  ok "push: a multi-push-URL remote is UNMEASURED and NOTHING is pushed to either destination (green withheld)"
+else
+  bad "push: multi-destination remote was probed anyway (refs created=$refs7pp rc=$rc7pp)"
+  push_verdict "$out7pp"
+fi
+
+# 7p-q. THE GENUINE HTTPS PATH (#3369 review) — the case 7p-b only claimed to be. The
+#   origin really is `https://…` at classification time, so GIT_ORIGIN_KIND is `https`;
+#   the `gh auth setup-git` stub then installs the url.<local>.insteadOf rewrite (as in
+#   7p-e/7p-j), so the push lands on a local bare repo whose pre-receive speaks the
+#   credential signature claim.sh classifies as auth. Offline, no server, no real host —
+#   and the advice under test is the one an https box would actually see.
+bare7pq="$tmp/bare7pq.git"; mk_push_bare "$bare7pq" 'echo "Authentication failed" >&2; exit 1'
+repo7pq="$tmp/repo7pq"; mk_push_repo "$repo7pq" "https://push-probe.invalid/cqlite.git"
+bin7pq="$tmp/bin7pq"
+mk_push_bin "$bin7pq" "git config --global --add 'credential.https://push-probe.invalid.helper' '!f(){ test \"\$1\" = get || exit 0; echo username=gh-stub; echo password=wired; };f'
+      git config --global \"url.file://$bare7pq/.insteadOf\" 'https://push-probe.invalid/cqlite.git'"
+gc7pq="$tmp/gc7pq"; : >"$gc7pq"
+run_push "$repo7pq" "$bin7pq" "$gc7pq" --fix-credentials --strict; out7pq=$push_out; rc7pq=$push_rc
+# Guard the guard: if the classification were not https, this case would be testing the
+# same `other` path as 7p-b and its assertion would be vacuous again.
+if printf '%s' "$out7pq" | grep -q 'push-probe.invalid' \
+   && ! printf '%s' "$out7pq" | grep -q "is a 'other' remote"; then
+  ok "push: (precondition) 7p-q's remote really is classified https"
+else
+  bad "push: 7p-q precondition FAILED — not an https classification, the advice assertion below is vacuous"
+fi
+if printf '%s' "$out7pq" | grep -q '\[warn\].*git-push: FAILED.*AUTHENTICATE' \
+   && printf '%s' "$out7pq" | grep -q 'gh auth setup-git' \
+   && printf '%s' "$out7pq" | grep -q -- '--fix-credentials' \
+   && printf '%s' "$out7pq" | grep -q 'contents:write' \
+   && [ "$rc7pq" -ne 0 ]; then
+  ok "push: a real HTTPS auth failure prints the credential remediation AND the write-scope possibility"
+else
+  bad "push: https auth failure printed no remediation / omitted the scope line (rc=$rc7pq)"
+  push_plain "$out7pq" | grep -E 'git-push|fix:|scopes' | head -5
+fi
+
+# 7p-r. THE FALLBACK REPAIR IS GATED ON THE ENVIRONMENT TOKEN BEING AUTHORITATIVE FOR THE
+#   PUSH HOST (#3369 review, twice). §3b resolves the host from LOCAL GIT CONFIG (`git
+#   remote get-url --push`), then under --fix-credentials installs a helper that
+#   dereferences $GH_TOKEN FOR THAT HOST, and §3b-push immediately performs a real push to
+#   it — all during a preflight .agent-ami/profile.yaml runs AUTOMATICALLY at every onboard.
+#   A typo, a leftover fork/mirror pushurl or a stale `insteadOf` therefore handed a real
+#   credential to an unintended host. An invoker who controls the box is out of the threat
+#   model; a MISCONFIGURED REMOTE is reachable BY ACCIDENT, which this repo's triage rule
+#   makes a defect.
+#
+#   THE PREDICATE IS TOKEN AUTHORITY, NOT A LOGIN — and this case is built to falsify the
+#   weaker one. The first fix asked `gh auth status --hostname <host>`, which answers "does
+#   gh hold SOME credential for that host?". The sandbox below is the box where those two
+#   facts diverge: gh is authenticated to BOTH github.com and the push host (so the
+#   status check PASSES for both) while the push host's own token is a DIFFERENT value from
+#   $GH_TOKEN — exactly a github.com token on a machine that also has a GitHub Enterprise
+#   host. The preconditions assert that divergence rather than assuming it.
+#
+#   MEASURED AS A PAIR against one sandbox shape whose ONLY variable is which token gh
+#   reports for the push host — without the positive control, "no helper was written"
+#   would also be satisfied by a repair that stopped working altogether.
+#   Both stubs' `gh auth setup-git` installs ONLY the url.<local>.insteadOf rewrite and NO
+#   credential helper, which is what routes the run into the FALLBACK (the branch under
+#   test) while keeping the push itself offline on a local bare repo.
+
+# mk_push_gh_tokenhost <dir> <host> <token-gh-holds-for-that-host> <setup-git-body> — like
+# mk_push_gh, but modelling a TWO-HOST box:
+#   `gh auth status`              succeeds, listing github.com AND <host>
+#   `gh auth status --hostname H` succeeds for BOTH of them (the insufficient predicate)
+#   `gh auth token --hostname H`  prints $GH_TOKEN for github.com, <token…> for <host>,
+#                                 and fails the way real gh does for anything else
+mk_push_gh_tokenhost() {
+  local dir="$1" host="$2" tok="$3" setup="${4:-:}"
+  cat >"$dir/gh" <<EOF
+#!/usr/bin/env bash
+host_arg() {   # the value of --hostname in "\$@", or ""
+  while [ \$# -gt 0 ]; do
+    [ "\$1" = --hostname ] && { printf '%s' "\$2"; return 0; }
+    shift
+  done
+}
+case "\$1" in
+  auth)
+    if [ "\$2" = status ]; then
+      shift 2; want="\$(host_arg "\$@")"
+      case "\$want" in
+        ""|github.com|$host) : ;;
+        *) echo "You are not logged into any accounts on \$want" >&2; exit 1 ;;
+      esac
+      echo "github.com"
+      echo "  ✓ Logged in to github.com account tester (GH_TOKEN)"
+      echo "  - Token scopes: 'gist', 'project', 'read:org', 'repo', 'workflow'"
+      echo "$host"
+      echo "  ✓ Logged in to $host account tester (keyring)"
+      echo "  - Token scopes: 'repo', 'workflow'"
+      exit 0
+    elif [ "\$2" = token ]; then
+      shift 2; want="\$(host_arg "\$@")"
+      case "\$want" in
+        ""|github.com) printf '%s\\n' "\${GH_TOKEN:-}" ;;
+        $host)         printf '%s\\n' '$tok' ;;
+        *) echo "no oauth token found for \$want" >&2; exit 1 ;;
+      esac
+      exit 0
+    elif [ "\$2" = setup-git ]; then
+      $setup
+    fi
+    exit 0 ;;
+  project) echo '{"id":"PVT_stub"}'; exit 0 ;;
+  api)     echo '{"data":{"node":{"id":"PVT_stub"}}}'; exit 0 ;;
+esac
+exit 0
+EOF
+  chmod +x "$dir/gh"
+}
+
+# The fallback needs a token in the environment or it never reaches the gated branch.
+# Saved and restored so no later case inherits it.
+gh_tok_was_set=${GH_TOKEN+1}; gh_tok_saved="${GH_TOKEN-}"
+export GH_TOKEN="$FAKE_TOKEN"
+ENTERPRISE_TOKEN='ghp_ENTERPRISEtoken3369ENTERPRISEtoken33'
+
+# (i) NEGATIVE: gh is logged in to the push host, but that host's token is NOT $GH_TOKEN.
+bare7pr="$tmp/bare7pr.git"; mk_push_bare "$bare7pr"
+repo7pr="$tmp/repo7pr"; mk_push_repo "$repo7pr" "https://push-probe.invalid/cqlite.git"
+bin7pr="$tmp/bin7pr"; mk_push_bin "$bin7pr"
+mk_push_gh_tokenhost "$bin7pr" push-probe.invalid "$ENTERPRISE_TOKEN" \
+  "git config --global \"url.file://$bare7pr/.insteadOf\" 'https://push-probe.invalid/cqlite.git'"
+gc7pr="$tmp/gc7pr"; : >"$gc7pr"
+# Guard the guard, and it is the whole point of the case: the WEAKER predicate must PASS
+# here (gh really is logged in to the push host) while the token for that host DIFFERS
+# from $GH_TOKEN. Without this, the assertions below could be satisfied by a stub that
+# simply refuses everything.
+pr_status_ok=0; PATH="$bin7pr:$PATH" gh auth status --hostname push-probe.invalid >/dev/null 2>&1 && pr_status_ok=1
+pr_tok_host=$(PATH="$bin7pr:$PATH" gh auth token --hostname push-probe.invalid 2>/dev/null)
+pr_tok_gh=$(PATH="$bin7pr:$PATH" gh auth token --hostname github.com 2>/dev/null)
+if [ "$pr_status_ok" -eq 1 ] && [ "$pr_tok_host" = "$ENTERPRISE_TOKEN" ] && [ "$pr_tok_gh" = "$FAKE_TOKEN" ]; then
+  ok "push: (precondition) the two-host gh stub CONFIRMS a login for the push host while holding a DIFFERENT token for it"
+else
+  bad "push: 7p-r precondition FAILED — stub does not model the two-host box (status=$pr_status_ok host-token-differs=$([ "$pr_tok_host" != "$FAKE_TOKEN" ] && echo yes || echo no))"
+fi
+run_push "$repo7pr" "$bin7pr" "$gc7pr" --fix-credentials --strict; out7pr=$push_out; rc7pr=$push_rc
+helper7pr=$(git config --file "$gc7pr" --get-all 'credential.https://push-probe.invalid.helper' 2>/dev/null | wc -l | tr -d ' ')
+tokleak7pr=$(grep -cF "$FAKE_TOKEN" "$gc7pr" 2>/dev/null || true)
+if [ "${helper7pr:-0}" -eq 0 ] && [ "${tokleak7pr:-0}" -eq 0 ] \
+   && printf '%s' "$out7pr" | grep -q '\[warn\].*push-probe.invalid.*REFUSED to configure any' \
+   && ! push_green "$out7pr" && [ "$rc7pr" -ne 0 ]; then
+  ok "push: a token that is NOT authoritative for the push host is NOT configured for it — the refusal warns, green is withheld, --strict exits $rc7pr"
+else
+  bad "push: a foreign token was configured for the push host (helpers=${helper7pr:-0} rc=$rc7pr)"
+  push_plain "$out7pr" | grep -E 'credential|REFUS|git-push' | head -6
+fi
+# Neither token may appear anywhere in the output: the comparison is in-process, and the
+# diagnosis names the HOST, never a secret.
+if ! printf '%s' "$out7pr" | grep -qF "$FAKE_TOKEN" && ! printf '%s' "$out7pr" | grep -qF "$ENTERPRISE_TOKEN"; then
+  ok "push: the authority check prints NEITHER token — the refusal names only the host"
+else
+  bad "push: a token value leaked into the bootstrap output"
+fi
+# ONE verdict, as everywhere else in §3b: the refusal must not also emit the generic
+# "could not configure any" warning, or a single fault would be counted twice.
+if [ "$base_warns" -eq 1 ]; then
+  if [ "$(push_warns "$out7pr")" -eq 1 ] \
+     && ! printf '%s' "$out7pr" | grep -q 'could NOT configure any'; then
+    ok "push: the refusal is exactly ONE warning and names the host, not a generic second verdict"
+  else
+    bad "push: refusal emitted $(push_warns "$out7pr") warnings (expected 1)"
+    push_plain "$out7pr" | grep -E '^[[:space:]]+\[warn\] ' | head -4
+  fi
+else
+  echo "skip - push: one-warning assertion needs an otherwise-clean sandbox (baseline=$base_warns warnings)"
+fi
+
+# (ii) POSITIVE CONTROL: the SAME sandbox and the SAME fallback path, the ONLY change being
+#      that gh reports $GH_TOKEN as the push host's own token — the repair must still happen.
+bare7pr2="$tmp/bare7pr2.git"; mk_push_bare "$bare7pr2"
+repo7pr2="$tmp/repo7pr2"; mk_push_repo "$repo7pr2" "https://push-probe.invalid/cqlite.git"
+bin7pr2="$tmp/bin7pr2"; mk_push_bin "$bin7pr2"
+mk_push_gh_tokenhost "$bin7pr2" push-probe.invalid "$FAKE_TOKEN" \
+  "git config --global \"url.file://$bare7pr2/.insteadOf\" 'https://push-probe.invalid/cqlite.git'"
+gc7pr2="$tmp/gc7pr2"; : >"$gc7pr2"
+run_push "$repo7pr2" "$bin7pr2" "$gc7pr2" --fix-credentials --strict; out7pr2=$push_out; rc7pr2=$push_rc
+helper7pr2=$(git config --file "$gc7pr2" --get-all 'credential.https://push-probe.invalid.helper' 2>/dev/null | grep -cF 'x-access-token' || true)
+if [ "${helper7pr2:-0}" -ge 1 ] \
+   && printf '%s' "$out7pr2" | grep -q '\[ok\].*git credentials WIRED BY THIS RUN.*push-probe.invalid' \
+   && printf '%s' "$out7pr2" | grep -q '\[ok\].*git-push: VERIFIED' \
+   && ! printf '%s' "$out7pr2" | grep -q 'REFUSED to configure any'; then
+  ok "push: (positive control) the AUTHORITATIVE token is repaired exactly as before — helper written, credentials WIRED, push VERIFIED"
+else
+  bad "push: the authority gate broke the repair on its own host (helpers=${helper7pr2:-0} rc=$rc7pr2)"
+  push_plain "$out7pr2" | grep -E 'credential|git-push' | head -6
+fi
+
+if [ -n "${gh_tok_was_set:-}" ]; then export GH_TOKEN="$gh_tok_saved"; else unset GH_TOKEN; fi
+
+# 7p-g. `--strict` AND "All checks green." MUST NOT DIVERGE — asserted in BOTH
+#   directions. They are two channels for ONE fact: the green string is printed iff
+#   WARNINGS is 0, and --strict exits 0 iff WARNINGS is 0. A reviewer proposed keying
+#   --strict on a narrower "blocking faults only" counter; that would have made a box
+#   with an ADVISORY warning exit 0 from --strict while the unchanged `expect` string
+#   still failed the same run — two channels disagreeing, which is worse than either
+#   alone. This case exists so the next person to have that idea trips a test.
+#
+#   The advisory run below is what gives the case teeth: a machine whose push probe
+#   VERIFIES but which carries an unrelated advisory warning (no Data.db fixtures).
+#   Under a blocking-only --strict it would exit 0 while withholding green.
+repo7pg="$tmp/repo7pg"; mk_push_repo "$repo7pg" "file://$bare7pa"
+rm -f "$repo7pg/test-data/datasets/sstables/ks/tbl/nb-1-big-Data.db"   # one ADVISORY warn
+bin7pg="$tmp/bin7pg"; mk_push_bin "$bin7pg"
+gc7pg="$tmp/gc7pg"; : >"$gc7pg"
+run_push "$repo7pg" "$bin7pg" "$gc7pg" --strict; out7pg=$push_out; rc7pg=$push_rc
+if printf '%s' "$out7pg" | grep -q '\[ok\].*git-push: VERIFIED' \
+   && printf '%s' "$out7pg" | grep -q 'no \*-Data.db files found' \
+   && ! push_green "$out7pg" && [ "$rc7pg" -ne 0 ]; then
+  ok "push: an ADVISORY warning withholds green AND fails --strict, even with push VERIFIED (--strict is not blocking-only)"
+else
+  bad "push: advisory-warning run diverged (rc=$rc7pg, green=$(push_green "$out7pg" && echo yes || echo no))"
+  push_verdict "$out7pg"
+fi
+
+divergence=0; green_runs=0; nongreen_runs=0
+check_divergence() {   # <label> <output> <rc-of-a---strict-run>
+  if push_green "$2"; then
+    green_runs=$((green_runs + 1))
+    [ "$3" -eq 0 ] || { divergence=1; echo "   divergence: $1 printed 'All checks green.' but --strict exited $3"; }
+  else
+    nongreen_runs=$((nongreen_runs + 1))
+    [ "$3" -ne 0 ] || { divergence=1; echo "   divergence: $1 withheld 'All checks green.' but --strict exited 0"; }
+  fi
+}
+check_divergence 7p-a "$out7pa" "$rc7pa"    # verified, clean   -> expect green + 0
+check_divergence 7p-d "$out7pd" "$rc7pd"    # opt-out           -> expect no green + nonzero
+check_divergence 7p-b "$out7pb" "$rc7pb"    # push FAILED       -> expect no green + nonzero
+check_divergence 7p-g "$out7pg" "$rc7pg"    # advisory warning  -> expect no green + nonzero
+if [ "$divergence" -eq 0 ] && [ "$green_runs" -ge 1 ] && [ "$nongreen_runs" -ge 1 ]; then
+  ok "push: --strict's exit code and 'All checks green.' agree in BOTH directions ($green_runs green, $nongreen_runs non-green runs)"
+elif [ "$divergence" -ne 0 ]; then
+  bad "push: --strict and the 'All checks green.' string DIVERGED (see the divergence lines above)"
+else
+  echo "skip - push: divergence check needs both directions (green=$green_runs nongreen=$nongreen_runs on this host)"
+fi
+
+# 7p-h. FLAG HYGIENE. --skip-push-probe and --skip-smoke are different subjects (the
+#   git push probe vs the gate fmt run) and the name similarity is a live hazard, so
+#   both must be documented and each must skip only its own thing. 7p-a ran with
+#   --skip-smoke ALONE and still probed; 7p-d ran with BOTH and skipped only the probe.
+push_help=$(bash "$BOOTSTRAP" --help 2>&1)
+if printf '%s' "$push_help" | grep -q -- '--skip-push-probe' \
+   && printf '%s' "$push_help" | grep -q -- '--skip-smoke' \
+   && printf '%s' "$push_help" | grep -q -- '--fix-credentials' \
+   && printf '%s' "$push_help" | grep -q -- '--strict'; then
+  ok "push: --help documents --skip-push-probe, --skip-smoke, --fix-credentials and --strict"
+else
+  bad "push: --help does not document the new flags"
+fi
+if printf '%s' "$out7pa" | grep -q 'git-push: VERIFIED' \
+   && printf '%s' "$out7pa" | grep -q 'skipped (--skip-smoke)' \
+   && printf '%s' "$out7pd" | grep -q 'git-push: OPT-OUT' \
+   && printf '%s' "$out7pd" | grep -q 'skipped (--skip-smoke)'; then
+  ok "push: --skip-smoke skips only the gate run; --skip-push-probe skips only the push probe"
+else
+  bad "push: the two skip flags are not independent"
+fi
+
+# 7p-i. STRUCTURAL GUARD: no case in this suite may point the push probe at a REAL
+#   remote. Behavioural cases only cover the shapes someone already thought of; this
+#   one covers the case NOBODY HAS WRITTEN YET. The probe pushes for real, so a case
+#   that gave a claim.sh-bearing sandbox a github.com origin — or a whole-checkout run
+#   that forgot --skip-push-probe — would mutate the shared origin from a unit test.
+TEST_SELF="$SCRIPT_DIR/$(basename "$0")"
+bad_remote=$(grep -n 'mk_push_repo "\$repo' "$TEST_SELF" \
+  | grep -vE 'file://|push-probe\.invalid|mk_push_repo "\$repo[a-z0-9]*" ""' || true)
+if [ -z "$bad_remote" ]; then
+  ok "push: every claim.sh-bearing sandbox points at a local file:// repo, an empty remote, or push-probe.invalid"
+else
+  bad "push: a sandbox that can PUSH is pointed at a non-local remote:"
+  printf '%s\n' "$bad_remote"
+fi
+# Same shape, third instance: a case that stubs ONE timeout candidate leaves the
+# production loop free to select a real one further along PATH. That is what made 7p-o
+# pass here and fail on stock macOS, and it is invisible on any host lacking the OTHER
+# candidate — so it is asserted structurally, not behaviourally. The needle is built by
+# concatenation so this guard cannot match its own source line.
+tstub_needle='mk_stub'' "[^"]*" timeout'
+lone_tstub=$(grep -nE "$tstub_needle" "$TEST_SELF" || true)
+if [ -z "$lone_tstub" ]; then
+  ok "push: no case stubs a single timeout candidate — use mk_no_killafter_timeouts (stubs timeout AND gtimeout)"
+else
+  bad "push: a case stubs one timeout candidate; the production loop can escape to the other:"
+  printf '%s\n' "$lone_tstub"
+fi
+# Same shape, fourth instance, and this one guards the SCRIPT rather than the suite: no
+# line the bootstrap EMITS may pass the raw remote URL, which can embed a credential while
+# this output is persisted in onboarding logs (#3369 review). Behavioural cases (7p-s)
+# cover the two sites that did; this covers the next one somebody adds. The classification
+# uses of $GIT_ORIGIN_URL in section 3b are untouched — it is only PRINTING that is banned.
+urlprint=$(grep -nE '^[[:space:]]*(info|warn|ok|note|hdr)[[:space:]].*\$GIT_ORIGIN_URL' "$BOOTSTRAP" || true)
+if [ -z "$urlprint" ]; then
+  ok "push: no emitted line prints the raw remote URL (it can embed a credential, and this output is logged)"
+else
+  bad "push: an emitted line prints \$GIT_ORIGIN_URL — print the remote NAME + protocol + parsed host instead:"
+  printf '%s\n' "$urlprint"
+fi
+unguarded=$(grep -n 'bash "\$BOOTSTRAP" --skip-smoke' "$TEST_SELF" | grep -v -- '--skip-push-probe' || true)
+if [ -z "$unguarded" ]; then
+  ok "push: every run against the REAL checkout passes --skip-push-probe (the suite cannot reach the real origin)"
+else
+  bad "push: a real-checkout run would probe the REAL origin:"
+  printf '%s\n' "$unguarded"
 fi
 
 # --- 8. Board check is a FUNCTIONAL, READ-ONLY probe (issue #2942) ----------
@@ -1184,7 +2215,7 @@ fi
 # reported value must name the HOST only.
 redact_out=$(PATH="$tmp:$PATH" HOME="$host_home" CARGO_HOME="$host_home/.cargo" \
   CODEX_NOTIFY_WEBHOOK='https://alice:s3cr3t-token@ntfy.example.com/private-topic' \
-  bash "$BOOTSTRAP" --skip-smoke 2>&1)
+  bash "$BOOTSTRAP" --skip-smoke --skip-push-probe 2>&1)
 if printf '%s' "$redact_out" | grep -q 'notify target configured' \
    && ! printf '%s' "$redact_out" | grep -qE 's3cr3t-token|alice:'; then
   ok "notify: URL userinfo is redacted from the reported target"

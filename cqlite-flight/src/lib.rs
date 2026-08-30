@@ -26,6 +26,17 @@ pub mod cancel;
 // asserted through the REAL parser from an integration test — a binary target's
 // `Args` is unreachable from `tests/`.
 pub mod cli;
+
+// THROWAWAY SPIKE (issue #2605), non-default `datafusion-spike` feature ONLY: a
+// DataFusion `TableProvider`/`ExecutionPlan` over the EXISTING merge-producer
+// scan path, plus the bench harness that separates the decode-to-column delta
+// from the vectorized-exec delta for the #941 promotion decision. It MUST live
+// in this crate because the seam it drives (`MergeProducer::produce_streaming`
+// and the `BatchSink` trait) is `pub(crate)`. NOTHING in production reaches it —
+// no service route, no ticket field, no CLI flag — and with the feature off not
+// a line of it (nor of DataFusion) is compiled.
+#[cfg(feature = "datafusion-spike")]
+pub mod df_spike;
 // Per-stream in-flight egress capacity-byte credit governor (issue #2821): the
 // reserve-before-materialize credit pool, its RAII permit, the `CreditedBatch`
 // channel element, and the `--max-inflight-egress-bytes` constants.
