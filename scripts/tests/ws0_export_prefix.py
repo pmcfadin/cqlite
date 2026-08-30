@@ -87,9 +87,22 @@ for w in all_words:
         break
     prefix_words.append(w)
 head = " ".join(prefix_words)
-# A separator ANYWHERE in the run breaks it, and it hides INSIDE an assignment word
-# (`NAME="v";`), which is why this is a separate test rather than a property of the split.
-contiguous = len(prefix_words) < len(all_words) and not any(ch in head for ch in ";&|")
+# THE FIRST NON-ASSIGNMENT TOKEN MUST **BE** THE CONSUMING COMMAND (#3451 post-rebase round 5,
+# F1). Requiring merely that SOME non-assignment token exists let a STANDALONE `;` satisfy it:
+#
+#     WS0_CFG_X=... ; python3 -c '...'
+#
+# the `;` is its own word, so it breaks the loop before reaching `head`, the separator scan never
+# sees it, and `len(prefix_words) < len(all_words)` is satisfied by `;` and `python3` between
+# them. Reported contiguous, every name present — while production leaves the assignments
+# unexported, and the suite stayed green because it evaluates them directly before `env`.
+#
+# Round 1's F1 caught the ATTACHED form (`NAME="v";`, still an assignment word, so the separator
+# scan below finds it). This is the DETACHED one, and naming the expected next token subsumes
+# both: anything between the assignments and the command — an operator, a redirect, another
+# command — means these assignments are not that command's environment.
+following = all_words[len(prefix_words)] if len(prefix_words) < len(all_words) else ""
+contiguous = following == "python3" and not any(ch in head for ch in ";&|")
 if contiguous:
     present = [n for n in names if any(w.startswith(n + "=") for w in prefix_words)]
 else:
@@ -99,7 +112,8 @@ if "--emit-prefix" in sys.argv[4:]:
     # it (see `driver_step_env`), and this conditionality is the whole safety argument: the text
     # handed over has already been proved to be assignment words with no command separator.
     if not contiguous:
-        print("NOT-A-PREFIX", file=sys.stderr)
+        print(f"NOT-A-PREFIX: the first non-assignment token is {following!r}, not the consuming"
+          " `python3` command", file=sys.stderr)
         raise SystemExit(4)
     print(head)
     raise SystemExit(0)

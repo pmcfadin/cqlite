@@ -228,7 +228,12 @@ driver_step_env() {
   prefix="$(python3 "$REPO_ROOT/scripts/tests/ws0_export_prefix.py" "$1" WS0_ "$2" --emit-prefix)" \
     || return 1
   (
-    REPS=1; TEMPS=warm; ARMS=bypass; SCAN_PASSES=1
+    # EVERY CONTROLLED VALUE IS DISTINCT (#3451 post-rebase round 5, F2). `REPS` and
+    # `SCAN_PASSES` were BOTH 1, so swapping their right-hand sides in the driver produced an
+    # identical environment and was undetectable — a VALUE COLLISION defeating the
+    # "execute on the driver's own values" mechanism while the mechanism itself was correct.
+    # 2 and 3 are both valid counts and cannot be confused for one another.
+    REPS=2; TEMPS=warm; ARMS=bypass; SCAN_PASSES=3
     SERVER_CPUS=2,10; CLIENT_CPUS=4,12
     STEP_DURATION=45s; COLD_STEP_DURATION=1s
     FLIGHT_ENDPOINT="$WS0_FIXTURE_ENDPOINT"; BASELINE_MODE=non-baseline
@@ -238,6 +243,27 @@ driver_step_env() {
     eval "$prefix env"
   ) | grep -E '^WS0_(CFG|PIN)_'
 }
+
+# WHAT EACH RECORDED FIELD MUST BE, given the controlled inputs above (#3451 post-rebase round 5,
+# F2). Distinct values are only half the fix: they make a swap PRODUCE a different artifact, and
+# these assertions are what NOTICE it. Without them a swap between two fields the same validator
+# accepts — `server_siblings_expanded` and `topology_root` are both just non-empty strings —
+# still passes every shipped check.
+#
+# This is not a restatement of the driver's mapping. It is the definition of the controlled
+# experiment: "the manifest's `temps` must be the value I put in the variable the driver reads
+# for `temps`". A swapped right-hand side breaks exactly that.
+WS0_EXPECTED_CFG=(
+  "reps=2" "temps=warm" "arms=bypass" "scan_passes=3"
+  "server_cpus=2,10" "client_cpus=4,12" "step_duration=45s/1s"
+  "flight_endpoint=$WS0_FIXTURE_ENDPOINT" "baseline_mode=non-baseline"
+  "events=cycles,instructions" "bin_dir=target/release" "profile=off"
+  "quiescence=NOT VERIFIED (no timeseries supplied)"
+)
+WS0_EXPECTED_PIN=(
+  "server_cpus=2,10" "client_cpus=4,12"
+  "server_siblings_expanded=server cpu 2 siblings 2,10"
+)
 
 # local_binding_of <driver> <block-needle> — the first `NAME = MAPPING["KEY"]` line in the block
 # that calls <block-needle>, printed as `NAME MAPPING KEY`.
@@ -1128,7 +1154,7 @@ done
 # ...and the SHIPPED READER accepts what the SHIPPED STEP wrote. A writer/reader round trip is the
 # one thing no fixture-fed reject case can establish, and it is where a disagreement surfaces as a
 # refusal blaming the operator.
-if python3 - "$PERF_DIR" "$OUT" "$CORPUS" <<'PY'
+if python3 - "$PERF_DIR" "$OUT" "$CORPUS" "${WS0_EXPECTED_CFG[@]}" <<'PY'
 import pathlib, sys
 sys.path.insert(0, sys.argv[1])
 from ws0_report import ARMS_ALLOWED, TEMPS_ALLOWED
@@ -1142,8 +1168,24 @@ report = verify_session_corpus_pin(session, corpus, load_corpus_identity(corpus)
 # checks corpus identity and says nothing about the configuration, so a manifest the real reporter
 # would refuse passed here. `session_manifest_config` is what `ws0_report.py:250` calls.
 cfg = session_manifest_config(session, TEMPS_ALLOWED, ARMS_ALLOWED)
-assert cfg.get("flight_endpoint", "").startswith("http://"), cfg
-assert cfg.get("reps") == 1 and cfg.get("scan_passes") == 1, cfg
+# EVERY field against its expected value, independently. A swap between two fields the same
+# validator accepts is invisible to the validator and visible only here.
+# argv: 1=perf dir, 2=session, 3=corpus, 4.. = the expected `field=value` pairs.
+expected = dict(pair.split("=", 1) for pair in sys.argv[4:])
+assert expected, "no expected fields were passed; this check would assert nothing"
+# The reader NORMALISES the selection fields into lists (`temps` -> ['warm'], `events` ->
+# ['cycles','instructions']), so the comparison joins a list back to the comma form the driver
+# was handed. That is a comparison SHAPE, not a weakening: a swapped right-hand side still
+# yields a different joined string.
+def _norm(value):
+    if isinstance(value, (list, tuple)):
+        return ",".join(str(item) for item in value)
+    return str(value)
+
+mismatched = {
+    k: (cfg.get(k), v) for k, v in expected.items() if _norm(cfg.get(k)) != v
+}
+assert not mismatched, f"manifest fields differ from the controlled inputs: {mismatched}"
 # The reader's own report, asserted field by field so this case cannot pass on a verifier that
 # returned an empty dict: the pin was taken BEFORE measurement, and it carries the digests of the
 # corpus, the schema and the Flight ticket the step measured from disk.
@@ -1362,10 +1404,10 @@ fi
 # instead, a swap in ONE prefix was invisible; and because the manifest and the record were
 # validated INDEPENDENTLY, a MATCHING swap in both was invisible too. Reading one side from the
 # other is what makes a consistent swap detectable.
-if python3 - "$PERF_DIR" "$OUT" <<'PY'
-import pathlib, sys
+if python3 - "$PERF_DIR" "$OUT" "${WS0_EXPECTED_PIN[@]}" <<'PY'
+import json, pathlib, sys
 sys.path.insert(0, sys.argv[1])
-from ws0_pinning import PINNING_RECORD_FIELDS, verify_pinning_record
+from ws0_pinning import PINNING_RECORD_FIELDS, pinning_record_path, verify_pinning_record
 from ws0_report import ARMS_ALLOWED, TEMPS_ALLOWED
 from ws0_session import session_manifest_config
 session = pathlib.Path(sys.argv[2])
@@ -1374,9 +1416,20 @@ config = session_manifest_config(session, TEMPS_ALLOWED, ARMS_ALLOWED)
 rec = verify_pinning_record(session, config["server_cpus"], config["client_cpus"])
 missing = [f for f in PINNING_RECORD_FIELDS if not rec.get(f)]
 assert not missing, missing
+# ...AND EACH RECORDED FIELD AGAINST ITS CONTROLLED INPUT (#3451 post-rebase round 5, F2).
+# `server_siblings_expanded` and `topology_root` are both just non-empty strings to the shipped
+# validator, so swapping their right-hand sides in the driver passes every check above. Only
+# comparing each field to the value it was GIVEN can tell them apart.
+written = json.loads(pinning_record_path(session).read_text())
+expected = dict(pair.split("=", 1) for pair in sys.argv[3:])
+assert expected, "no expected pin fields were passed; this check would assert nothing"
+mismatched = {
+    k: (written.get(k), v) for k, v in expected.items() if str(written.get(k)) != v
+}
+assert not mismatched, f"pinning-record fields differ from the controlled inputs: {mismatched}"
 PY
 then
-  pass "EXECUTE cpu-pin-verification: the SHIPPED READER accepts the record the shipped STEP wrote, and its pins are checked against the CPU lists THE SESSION MANIFEST records — the two steps are cross-checked against each other rather than each against the same fixture constants"
+  pass "EXECUTE cpu-pin-verification: the SHIPPED READER accepts the record the shipped STEP wrote; its pins are checked against the CPU lists THE SESSION MANIFEST records (the two steps cross-checked against each other, not each against the same constants), and every recorded field against the distinct value it was given"
 else
   fail "EXECUTE cpu-pin-verification: the shipped reader refused the record the shipped step wrote, or its pins disagree with the manifest the session-pin step produced"
 fi
