@@ -59,6 +59,23 @@
 //! coverage, and a second cleanup entry point is one more thing that has to
 //! stay consistent with the `AtomicBool`.
 //!
+//! ## LIMITATION — a FAILED `close()` disables this safety net
+//!
+//! `closed` records that cleanup *started*, not that it *completed*:
+//! `close()` swaps the flag before its fallible steps and returns early on the
+//! first error. So a `close()` whose write-engine flush fails leaves the flag
+//! set with the read-engine shutdown never done, and this `Drop` then skips the
+//! engine teardown. The telemetry flush still runs (it is unconditional, see
+//! step 7), but the read-side shutdown is lost.
+//!
+//! This is NOT a regression — before this module a dropped handle ran nothing at
+//! all — and it is deliberately not fixed here, because both available fixes are
+//! forbidden by issue #1461's own "Do NOT" list: resetting the flag on failure
+//! would *change `close()`'s semantics*, and a separate completion flag would
+//! stop the `AtomicBool` being *the single source of "already cleaned up"*. The
+//! flag lying after a failed `close()` is really a `close()` defect that
+//! predates this issue; it belongs in its own change.
+//!
 //! ## Flush POLICY is out of scope
 //!
 //! Whether a dropped *writable* handle should silently flush unwritten data or
@@ -100,11 +117,37 @@ impl Drop for Database {
     fn drop(&mut self) {
         // (1) Claim the cleanup FIRST. The `AtomicBool` is the single source of
         // "already cleaned up" shared with `close()`, so an explicit `close()`
-        // makes this drop a no-op and vice versa — never a double shutdown.
-        if self.closed.swap(true, Ordering::SeqCst) {
-            return;
+        // makes the ENGINE teardown below a no-op and vice versa — never a
+        // double shutdown.
+        if !self.closed.swap(true, Ordering::SeqCst) {
+            self.drop_teardown();
         }
 
+        // (7) Telemetry flush on EVERY path, including the ones that skip the
+        // engine teardown (roborev job 161 finding 2). It belongs outside the
+        // guards because it shares NONE of their hazards: it is synchronous, it
+        // needs no tokio runtime and no GIL, it is process-global and
+        // idempotent, and in a default build it is a literal no-op (the OTel
+        // stack is behind the `observability` feature, and `force_flush` on the
+        // inert guard has an empty body). `close()` already calls it in exactly
+        // these process states, so this adds no new call-site class.
+        //
+        // It also recovers the telemetry half of the `closed`-flag limitation
+        // documented above: after a FAILED `close()` the flag reads
+        // "cleaned up" while the flush never ran, and this call runs it anyway.
+        // A telemetry flush is not a shutdown, so doing it on the already-closed
+        // path cannot double-tear-down anything.
+        crate::observability::flush();
+    }
+}
+
+impl Database {
+    /// The engine half of the drop cleanup: everything that must happen at most
+    /// once, and only when this drop won the `closed` race.
+    ///
+    /// Split out so `drop` has a single exit point and the unconditional
+    /// telemetry flush cannot be bypassed by an early `return` in here.
+    fn drop_teardown(&mut self) {
         // (2) Re-entrancy guard. `Runtime::block_on` PANICS when the calling
         // thread is already inside a runtime context, and a panic in `drop`
         // aborts the process under `panic = "abort"`. If we are inside a
@@ -177,8 +220,8 @@ impl Drop for Database {
             tracing::debug!("cqlite: storage shutdown failed during Database drop: {err}");
         }
 
-        // (6) Telemetry flush, independent of (4) and (5). Process-global,
-        // idempotent, and a no-op when observability was never initialised.
-        crate::observability::flush();
+        // (6) Telemetry flush is deliberately NOT here — it now runs on every
+        // path from `drop` itself, so an early `return` above can no longer
+        // skip it.
     }
 }
