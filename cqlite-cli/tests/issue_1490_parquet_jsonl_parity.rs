@@ -11,7 +11,7 @@
 mod parquet_parity;
 
 use parquet_parity::canonical_jsonl::CanonicalValue;
-use parquet_parity::{assert_case, KnownGap, ParityCase};
+use parquet_parity::{assert_case, KnownGap, KnownTypeGap, ParityCase};
 
 // ---------------------------------------------------------------------------
 // test_da — BTI (`da`) fixtures, binaries COMMITTED to git
@@ -35,6 +35,7 @@ const DA_SIMPLE: ParityCase = ParityCase {
     must_run: true,
     covers: "BTI da: uuid/text/int/bigint/boolean/timestamp scalars",
     known_gap: None,
+    known_type_gaps: &[],
 };
 
 #[test]
@@ -58,6 +59,7 @@ const DA_COLLECTIONS: ParityCase = ParityCase {
     must_run: true,
     covers: "BTI da: non-frozen set/list/map assembled from per-element cells",
     known_gap: None,
+    known_type_gaps: &[],
 };
 
 #[test]
@@ -80,6 +82,7 @@ const SIGNED_INT_COLLECTIONS: ParityCase = ParityCase {
     must_run: true,
     covers: "negative integers as set elements and map keys (stringified paths)",
     known_gap: None,
+    known_type_gaps: &[],
 };
 
 #[test]
@@ -102,6 +105,7 @@ const COMP_LZ4: ParityCase = ParityCase {
     must_run: true,
     covers: "LZ4-compressed BIG nb, 600 clustering rows in one partition",
     known_gap: None,
+    known_type_gaps: &[],
 };
 
 #[test]
@@ -137,6 +141,7 @@ const UDT_FROZEN_PERSON: ParityCase = ParityCase {
         what: "a frozen UDT column reaches the Arrow converter with no CqlType, so the \
                export aborts instead of writing a Struct",
     }),
+    known_type_gaps: &[],
 };
 
 #[test]
@@ -174,6 +179,7 @@ const UDT_COLLECTIONS: ParityCase = ParityCase {
         what: "a UDT nested inside a frozen collection is exported as a Utf8 \
                ValueFormatter rendering instead of an Arrow Struct",
     }),
+    known_type_gaps: &[],
 };
 
 #[test]
@@ -218,6 +224,21 @@ const BASIC_SIMPLE: ParityCase = ParityCase {
     must_run: false,
     covers: "the full scalar zoo: float/double/decimal/date/time/blob/inet/duration/timeuuid",
     known_gap: None,
+    // FOUND BY THIS CHECK on its first run: `session_id timeuuid` is exported as
+    // `Utf8` while `id uuid` — the identical 128-bit domain — is exported as
+    // `FixedSizeBinary(16)`. The VALUES compare equal (both sides render the
+    // UUID text), which is precisely why only a type assertion can see it.
+    //
+    // Recorded per COLUMN rather than as a whole-case `known_gap`: this table's
+    // other 18 columns and all 19,000 cell comparisons — session_id's included —
+    // still run.
+    known_type_gaps: &[KnownTypeGap {
+        column: "session_id",
+        issue: "#3563",
+        actual: "utf8",
+        what: "'timeuuid' never parses (the scalar `alt` matches `time` first), so the \
+               column's declared type is dropped and it degrades to Text",
+    }],
 };
 
 #[test]
@@ -242,6 +263,7 @@ const BASIC_COMPOSITE_KEY: ParityCase = ParityCase {
     must_run: false,
     covers: "two-component clustering key (timestamp DESC, text ASC)",
     known_gap: None,
+    known_type_gaps: &[],
 };
 
 #[test]
@@ -268,6 +290,7 @@ const COLLECTIONS_TABLE: ParityCase = ParityCase {
     must_run: false,
     covers: "six non-frozen collections incl. list<timestamp> and map<text,bigint>",
     known_gap: None,
+    known_type_gaps: &[],
 };
 
 #[test]
@@ -295,6 +318,7 @@ const TIMESERIES_SENSOR_DATA: ParityCase = ParityCase {
     must_run: false,
     covers: "2000 clustering rows across 10 partitions, float/double/tinyint",
     known_gap: None,
+    known_type_gaps: &[],
 };
 
 #[test]
@@ -469,6 +493,7 @@ fn harness_refuses_a_fixture_with_a_row_deletion() {
         must_run: true,
         covers: "NEGATIVE control: a committed fixture with a row tombstone",
         known_gap: None,
+        known_type_gaps: &[],
     };
     let err = parquet_parity::run_case(&SHADOW_ROW_DELETE)
         .err()
@@ -494,6 +519,7 @@ fn harness_refuses_a_fixture_with_a_ttl() {
         must_run: true,
         covers: "NEGATIVE control: a committed fixture carrying a TTL",
         known_gap: None,
+        known_type_gaps: &[],
     };
     let err = parquet_parity::run_case(&TTL_TABLE)
         .err()
@@ -727,12 +753,164 @@ fn expected_arrow_type_recurses_into_nested_types() {
     // The mismatch message must name the column, the declared CQL type and both
     // Arrow types — it is what the #3556 known-gap signature pins.
     let col = parse_column("lp", "frozen<list<frozen<person>>>", &["person"]).expect("parses");
-    let err = validate_field("ks.t", &col, &list_of(DataType::Utf8))
-        .expect_err("a Utf8-flattened UDT must be rejected");
+    let mismatch = validate_field(&col, &list_of(DataType::Utf8))
+        .expect_err("a Utf8-flattened UDT must be rejected")
+        .expect("it is a type mismatch, not a refusal to answer");
+    // The rendered ACTUAL type is a FIELD, so the known-type-gap record can
+    // compare it by equality rather than by substring.
+    assert_eq!(mismatch.actual, "list<utf8>");
+    assert_eq!(mismatch.expected, "list<struct(udt 'person')>");
+    let err = mismatch.to_string();
     assert!(
         err.contains("Arrow type mismatch for column 'lp' declared 'frozen<list<frozen<person>>>'")
             && err.contains("expected list<struct(udt 'person')>")
             && err.contains("got list<utf8>"),
+        "{err}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// The Arrow TYPE check, and the per-column KnownTypeGap record, on REAL export
+// output
+//
+// These are NEGATIVE CONTROLS built on `test_da.simple_table` (committed
+// binaries, so they always run): the case deliberately MIS-DECLARES `age` as
+// `bigint` where the fixture's CQL schema says `int`, which is the same
+// observable situation as an export that widened the column. The values still
+// compare (both sides canonicalize to `Int`), so ONLY the type check can red —
+// which is the property under test.
+// ---------------------------------------------------------------------------
+
+/// `test_da.simple_table`'s real columns, with `age` mis-declared as `bigint`.
+const AGE_AS_BIGINT: &[(&str, &str)] = &[
+    ("id", "uuid"),
+    ("name", "text"),
+    ("age", "bigint"),
+    ("salary", "bigint"),
+    ("active", "boolean"),
+    ("created", "timestamp"),
+];
+
+const fn da_simple_variant(
+    columns: &'static [(&'static str, &'static str)],
+    known_type_gaps: &'static [KnownTypeGap],
+) -> ParityCase {
+    ParityCase {
+        keyspace: "test_da",
+        table: "simple_table",
+        schema: "da-test.cql",
+        udts: &[],
+        columns,
+        partition_key: &["id"],
+        clustering: &[],
+        must_run: true,
+        covers: "NEGATIVE CONTROL for the Arrow type check",
+        known_gap: None,
+        known_type_gaps,
+    }
+}
+
+/// A wrong Arrow type must be REPORTED, naming the column, the declared CQL
+/// type, the expected Arrow type and the actual one.
+#[test]
+fn type_check_reds_on_a_wrong_arrow_type() {
+    const CASE: ParityCase = da_simple_variant(AGE_AS_BIGINT, &[]);
+    let err = parquet_parity::prepare(&CASE)
+        .err()
+        .expect("an int32 column declared bigint MUST be reported");
+    assert!(
+        err.contains("Arrow type mismatch for column 'age' declared 'bigint'")
+            && err.contains("expected int64")
+            && err.contains("got int32"),
+        "{err}"
+    );
+}
+
+/// A recorded per-column gap whose `actual` matches excuses THAT column's type —
+/// and nothing else: the case still prepares, so its values are still compared.
+#[test]
+fn a_matching_known_type_gap_excuses_only_that_column() {
+    const CASE: ParityCase = da_simple_variant(
+        AGE_AS_BIGINT,
+        &[KnownTypeGap {
+            column: "age",
+            issue: "#0000",
+            actual: "int32",
+            what: "NEGATIVE CONTROL: the mis-declaration above",
+        }],
+    );
+    let prepared = parquet_parity::prepare(&CASE)
+        .expect("a matching type gap must not block the value comparison")
+        .expect("test_da.simple_table's binaries are committed");
+    assert!(
+        !prepared.parquet.is_empty() && !prepared.golden.is_empty(),
+        "the excused case must still project both sides"
+    );
+}
+
+/// A gap recorded for a DIFFERENT actual type must not absorb this one — the
+/// comparison is an equality, never a substring.
+#[test]
+fn a_known_type_gap_cannot_absorb_a_different_type_defect() {
+    const CASE: ParityCase = da_simple_variant(
+        AGE_AS_BIGINT,
+        &[KnownTypeGap {
+            column: "age",
+            issue: "#0000",
+            actual: "utf8",
+            what: "NEGATIVE CONTROL: a gap recorded for another type",
+        }],
+    );
+    let err = parquet_parity::prepare(&CASE)
+        .err()
+        .expect("a gap for utf8 must not excuse an int32 mismatch");
+    assert!(
+        err.contains("DIFFERENT type defect") && err.contains("got int32"),
+        "{err}"
+    );
+}
+
+/// A gap whose column's type is CORRECT must fail, demanding the record be
+/// deleted — the same self-retiring rule the whole-case `known_gap` follows.
+#[test]
+fn a_known_type_gap_that_no_longer_reproduces_fails() {
+    const CASE: ParityCase = da_simple_variant(
+        DA_SIMPLE.columns,
+        &[KnownTypeGap {
+            column: "name",
+            issue: "#0000",
+            actual: "int32",
+            what: "NEGATIVE CONTROL: a gap on a column whose type is correct",
+        }],
+    );
+    let err = parquet_parity::prepare(&CASE)
+        .err()
+        .expect("a gap that no longer reproduces MUST fail");
+    assert!(
+        err.contains("now CORRECT") && err.contains("delete the KnownTypeGap"),
+        "{err}"
+    );
+}
+
+/// A gap naming a column the case does not declare could never retire, so it is
+/// refused outright.
+#[test]
+fn a_known_type_gap_must_name_a_declared_column() {
+    const CASE: ParityCase = da_simple_variant(
+        DA_SIMPLE.columns,
+        &[KnownTypeGap {
+            column: "no_such_column",
+            issue: "#0000",
+            actual: "utf8",
+            what: "NEGATIVE CONTROL: a gap on a column that does not exist",
+        }],
+    );
+    let err = parquet_parity::prepare(&CASE)
+        .err()
+        .expect("a gap naming an undeclared column MUST be refused");
+    assert!(
+        err.contains("KnownTypeGap is recorded for column 'no_such_column'")
+            && err.contains("which the case does not declare"),
         "{err}"
     );
 }

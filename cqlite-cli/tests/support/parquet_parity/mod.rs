@@ -36,6 +36,10 @@
 //! * There is deliberately NO suite-wide `assert!(ran > 0)`: it cannot see one
 //!   case skipping behind its siblings. Each case asserts for itself.
 //! * `CQLITE_REQUIRE_FIXTURES=1` promotes EVERY case to `must_run`.
+//! * A recorded divergence is always PRECISE and SELF-RETIRING, never a skip:
+//!   [`KnownGap`] (whole case) and [`KnownTypeGap`] (one column's Arrow type)
+//!   both fail when the divergence stops reproducing, and both refuse to absorb
+//!   a different failure.
 
 #![allow(dead_code)]
 
@@ -91,6 +95,38 @@ pub struct ParityCase {
     /// it cannot be used to silence a NEW divergence either — the recorded
     /// signature has to be the one that shows up.
     pub known_gap: Option<KnownGap>,
+    /// DOCUMENTED, ISSUE-TRACKED Arrow TYPE gaps, one per column.
+    ///
+    /// A whole-case [`KnownGap`] defers the table's entire value comparison,
+    /// which is far too blunt for a single column's wrong Arrow type: the other
+    /// columns' values are still worth comparing, and so is this column's VALUE
+    /// (a wrong type often renders the right value). So a type gap is recorded
+    /// per COLUMN, and everything else about the case keeps running.
+    pub known_type_gaps: &'static [KnownTypeGap],
+}
+
+/// A recorded, issue-tracked Arrow TYPE gap for ONE column.
+///
+/// Same discipline as [`KnownGap`], applied to the type check:
+///
+/// * **Precise.** `actual` is compared to the exported type by EQUALITY (in the
+///   compact `arrow_expect::render_arrow` vocabulary), so a DIFFERENT wrong type
+///   on the same column is still a failure. Nothing is matched by substring.
+/// * **Self-retiring.** If the column's type becomes correct, the case FAILS and
+///   demands the record be deleted — a fixed gap can never go unnoticed.
+/// * **Narrow.** It excuses this ONE column's type and nothing else: the column's
+///   values are still compared per cell, and every other column's type is still
+///   asserted.
+pub struct KnownTypeGap {
+    /// The column whose exported Arrow type is currently wrong.
+    pub column: &'static str,
+    /// The GitHub issue tracking the fix, e.g. `"#3563"`.
+    pub issue: &'static str,
+    /// The type the export currently produces, as `render_arrow` renders it
+    /// (e.g. `"utf8"`). Compared by equality.
+    pub actual: &'static str,
+    /// Why the gap exists, in one line.
+    pub what: &'static str,
 }
 
 /// A recorded, issue-tracked export gap.
@@ -355,6 +391,91 @@ impl Row {
     }
 }
 
+/// The TYPE half of the schema check: every field's Arrow type against the
+/// case's independently declared CQL type.
+///
+/// Deliberately reports EVERY mismatching column rather than the first — a wrong
+/// mapping usually affects a family of columns, and one message naming all of
+/// them is what makes the diagnosis possible.
+///
+/// A column carrying a recorded [`KnownTypeGap`] whose `actual` EQUALS the
+/// exported type is excused (loudly, on stderr); any other mismatch on that
+/// column still fails, and a gap that no longer reproduces fails too.
+fn validate_arrow_types(
+    case: &ParityCase,
+    columns: &[ColumnType],
+    schema: &arrow::datatypes::Schema,
+) -> Result<(), String> {
+    for gap in case.known_type_gaps {
+        if !columns.iter().any(|c| c.name == gap.column) {
+            return Err(format!(
+                "{}: a KnownTypeGap is recorded for column '{}', which the case does not \
+                 declare — a gap must name a real column or it can never retire",
+                case.id(),
+                gap.column
+            ));
+        }
+    }
+
+    let mut errors: Vec<String> = Vec::new();
+    let mut excused: Vec<&'static str> = Vec::new();
+    for field in schema.fields() {
+        let Some(col) = columns.iter().find(|c| c.name == *field.name()) else {
+            // Unreachable: the column-set equality above already ran.
+            return Err(format!(
+                "{}: Parquet column '{}' has no declared CQL type",
+                case.id(),
+                field.name()
+            ));
+        };
+        let gap = case
+            .known_type_gaps
+            .iter()
+            .find(|g| g.column == col.name.as_str());
+        match arrow_expect::validate_field(col, field.data_type()) {
+            Ok(()) => {
+                if let Some(gap) = gap {
+                    errors.push(format!(
+                        "column '{}' records the KNOWN type gap {} ({}) but its exported Arrow \
+                         type is now CORRECT — delete the KnownTypeGap so the column is covered \
+                         for real, and close {}",
+                        gap.column, gap.issue, gap.what, gap.issue
+                    ));
+                }
+            }
+            Err(Ok(mismatch)) => match gap {
+                // Equality, not a substring: a DIFFERENT wrong type on this
+                // column is a different defect and must not be absorbed.
+                Some(gap) if gap.actual == mismatch.actual => excused.push(gap.issue),
+                Some(gap) => errors.push(format!(
+                    "{mismatch} — the recorded type gap {} expected the export to produce \
+                     {:?}, so this is a DIFFERENT type defect, which the gap must never hide",
+                    gap.issue, gap.actual
+                )),
+                None => errors.push(mismatch.to_string()),
+            },
+            Err(Err(refusal)) => errors.push(refusal),
+        }
+    }
+
+    if !errors.is_empty() {
+        return Err(format!(
+            "{}: {} Arrow type problem(s) vs the case's declared CQL types:\n  {}",
+            case.id(),
+            errors.len(),
+            errors.join("\n  ")
+        ));
+    }
+    for issue in excused {
+        eprintln!(
+            "[{}] KNOWN TYPE GAP {issue} still present — that column's TYPE is deferred, its \
+             values are still compared",
+            case.id()
+        );
+    }
+    Ok(())
+}
+
 /// Project the exported Parquet file into canonical rows, asserting its column
 /// set is exactly the declared one.
 fn project_parquet(
@@ -394,32 +515,7 @@ fn project_parquet(
         ));
     }
 
-    // The TYPE half of the schema check. Deliberately reports EVERY mismatching
-    // column rather than the first: a wrong mapping usually affects a family of
-    // columns, and one message naming all of them is what makes the diagnosis
-    // possible.
-    let mut type_errors: Vec<String> = Vec::new();
-    for field in first_schema.fields() {
-        let Some(col) = columns.iter().find(|c| c.name == *field.name()) else {
-            // Unreachable: the column-set equality above already ran.
-            return Err(format!(
-                "{}: Parquet column '{}' has no declared CQL type",
-                case.id(),
-                field.name()
-            ));
-        };
-        if let Err(e) = arrow_expect::validate_field(&case.id(), col, field.data_type()) {
-            type_errors.push(e);
-        }
-    }
-    if !type_errors.is_empty() {
-        return Err(format!(
-            "{}: {} Arrow type mismatch(es) vs the case's declared CQL types:\n  {}",
-            case.id(),
-            type_errors.len(),
-            type_errors.join("\n  ")
-        ));
-    }
+    validate_arrow_types(case, columns, &first_schema)?;
 
     let key_columns: Vec<&str> = case
         .partition_key

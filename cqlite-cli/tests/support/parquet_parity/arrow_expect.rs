@@ -320,22 +320,54 @@ fn render_time_unit(u: &TimeUnit) -> &'static str {
     }
 }
 
+/// One column whose exported Arrow type is not the expected one.
+///
+/// Carries the four facts needed to decide whether the export or the expectation
+/// is wrong as SEPARATE FIELDS rather than as one prose string: a recorded
+/// per-column type gap compares against [`TypeMismatch::actual`] by EQUALITY, so
+/// it can never absorb a different actual type (see `KnownTypeGap` in `mod.rs`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TypeMismatch {
+    pub column: String,
+    /// The declared CQL type text, verbatim from the case.
+    pub declared: String,
+    /// The expectation, as [`ArrowShape::describe`] renders it.
+    pub expected: String,
+    /// The exported Arrow type, as [`render_arrow`] renders it.
+    pub actual: String,
+}
+
+impl std::fmt::Display for TypeMismatch {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "Arrow type mismatch for column '{}' declared '{}': expected {}, got {}",
+            self.column, self.declared, self.expected, self.actual
+        )
+    }
+}
+
 /// Validate ONE Parquet field's Arrow type against its declared CQL type.
 ///
-/// The message names the column, the declared CQL type, the expected Arrow type
-/// and the actual one — the four facts needed to decide whether the export or
-/// the expectation is wrong.
-pub fn validate_field(case_id: &str, col: &ColumnType, actual: &DataType) -> Result<(), String> {
-    let shape =
-        expected_shape(&col.spec).map_err(|e| format!("{case_id}: column '{}': {e}", col.name))?;
+/// `Err(Ok(mismatch))` is a type mismatch. `Err(Err(reason))` is the harness
+/// REFUSING to answer — no expectation is declared for that CQL type — which is
+/// never a pass and cannot be recorded as a known gap either.
+#[allow(clippy::result_large_err)]
+pub fn validate_field(
+    col: &ColumnType,
+    actual: &DataType,
+) -> Result<(), Result<TypeMismatch, String>> {
+    let shape = match expected_shape(&col.spec) {
+        Ok(shape) => shape,
+        Err(e) => return Err(Err(format!("column '{}': {e}", col.name))),
+    };
     if shape.accepts(actual) {
         return Ok(());
     }
-    Err(format!(
-        "Arrow type mismatch for column '{}' declared '{}': expected {}, got {}",
-        col.name,
-        col.declared,
-        shape.describe(),
-        render_arrow(actual)
-    ))
+    Err(Ok(TypeMismatch {
+        column: col.name.clone(),
+        declared: col.declared.clone(),
+        expected: shape.describe(),
+        actual: render_arrow(actual),
+    }))
 }
