@@ -252,15 +252,46 @@ const SESSION_UP_DEADLINE: Duration = Duration::from_secs(40);
 // "quiet host yields exactly `base`" property holds for the SIGINT test and not
 // for the sibling; the property that matters — never TIGHTER than `base` — holds
 // for both unconditionally.
-const MEASURED_QUIET_T_BOOT: Duration = Duration::from_millis(11);
+const MEASURED_QUIET_T_BOOT: Duration = Duration::from_micros(11_400);
 
-const MEASURED_QUIET_T_ACK: Duration = Duration::from_millis(3);
+const MEASURED_QUIET_T_ACK: Duration = Duration::from_micros(1_400);
 
-/// Quiet-host reference for `t_boot`: ~6.8x the BINDING measured quiet value.
-pub const BOOT_QUIET_BASELINE: Duration = Duration::from_millis(75);
+// THE BASELINES ARE DERIVED FROM THE ANCHORS, NOT WRITTEN ALONGSIDE THEM.
+//
+// This closes a class rather than an instance (roborev job 222, finding 2). Both
+// baselines used to be independent literals whose doc comments HAND-STATED their
+// multiple ("~6.8x", "~8.3x") — and a hand-written claim about arithmetic decays
+// exactly like a stale comment. It did: `MEASURED_QUIET_T_ACK` was set to 3ms
+// (the SIGINT test's typical quiet ack) while the recorded BINDING value four
+// lines above it was 1.4ms, so `ACK_QUIET_BASELINE = 25ms` was ~18x the binding
+// value while its comment claimed ~8.3x, and the `<= 10x` guard permitted 30ms
+// where 10x the binding value is 14ms. The guard permitted what it claimed to
+// forbid, and the prose was the reason nobody noticed.
+//
+// Expressing each baseline as `anchor * multiple` makes that disagreement
+// UNREPRESENTABLE: there is no second number to drift. The multiples are the only
+// tunable, they are bounded by `MAX_BASELINE_MULTIPLE`, and the guard's message
+// prints the COMPUTED multiple so a reader never has to trust prose arithmetic.
+//
+// The anchors themselves are rounded DOWN (11.4ms -> 11_400us, 1.4ms -> 1_400us),
+// the STRICT direction: they form an upper bound on the baselines, so rounding up
+// would loosen the guard. That asymmetry is the one this issue got wrong twice.
 
-/// Quiet-host reference for `t_ack`: ~8.3x the BINDING measured quiet value.
-pub const ACK_QUIET_BASELINE: Duration = Duration::from_millis(25);
+/// How far above the binding measurement each baseline sits. Single-digit by
+/// policy — see `MAX_BASELINE_MULTIPLE`.
+const BOOT_BASELINE_MULTIPLE: u32 = 7;
+const ACK_BASELINE_MULTIPLE: u32 = 8;
+
+/// The most a baseline may exceed its binding measurement before the calibration
+/// is effectively inert.
+const MAX_BASELINE_MULTIPLE: u32 = 10;
+
+/// Quiet-host reference for `t_boot`, DERIVED from the binding anchor.
+pub const BOOT_QUIET_BASELINE: Duration =
+    MEASURED_QUIET_T_BOOT.saturating_mul(BOOT_BASELINE_MULTIPLE);
+
+/// Quiet-host reference for `t_ack`, DERIVED from the binding anchor.
+pub const ACK_QUIET_BASELINE: Duration = MEASURED_QUIET_T_ACK.saturating_mul(ACK_BASELINE_MULTIPLE);
 
 /// The `cqlite` binary this test crate built with `--features write-support`.
 fn cqlite_bin() -> &'static str {
@@ -871,7 +902,11 @@ pub fn select_rows(
             );
         }
     };
-    let took = started.elapsed();
+    // Named so the collection's failure message can say how much of stage (e)'s
+    // budget the child wait had already spent. NOT the value returned: the stage's
+    // recorded duration must INCLUDE the collection (finding 1), so it is measured
+    // after the loop below.
+    let child_wait = started.elapsed();
 
     // The child has exited, so both pipes are at EOF and the reader threads
     // finish promptly — but "promptly" is a claim about SCHEDULING, and a reader
@@ -882,10 +917,22 @@ pub fn select_rows(
     // it is bounded by stage (e)'s remaining allowance and, beyond that, by the
     // test's own remaining TOTAL budget — no fixed constant, and still incapable
     // of reaching nextest's hard kill.
-    // `clock.remaining()` is wall-clock derived, so it has already absorbed
-    // `took`; the collection therefore gets stage (e)'s calibrated budget bounded
-    // by whatever of the test's total budget is genuinely left.
-    let collect_allowance = budget.derived.min(clock.remaining());
+    // STAGE (e) MAY NOT SPEND ITS BUDGET TWICE (roborev job 222, finding 1). This
+    // used to hand the collection a FRESH `budget.derived` after the child wait
+    // had already spent part of that same stage budget, so stage (e) could consume
+    // up to 2x its cap. The envelope survived (`clock.remaining()` is real-time,
+    // so `clip` still bounded later stages), but the CAP-SUM INVARIANT did not:
+    // `the_nominal_cap_sums_stay_under_the_total_budget` computed a worst case the
+    // code could exceed, making the assert not a bound on the thing it names — a
+    // guard measuring a proxy, in a change whose whole value is that its guards
+    // mean what they say.
+    //
+    // The collection therefore gets what is LEFT of stage (e)'s budget, further
+    // clipped to the test's remaining total.
+    let collect_allowance = budget
+        .derived
+        .saturating_sub(started.elapsed())
+        .min(clock.remaining());
     let collect_deadline = Instant::now() + collect_allowance;
     let mut stdout_buf = Vec::new();
     let mut stderr_buf = Vec::new();
@@ -895,8 +942,9 @@ pub fn select_rows(
         if left.is_zero() {
             panic!(
                 "stage (e) durability-read: the read-side child exited ({status:?}) but only \
-                 {collected}/2 of its output streams could be collected within stage (e)'s \
-                 remaining allowance ({collect_allowance:.2?}).\n\
+                 {collected}/2 of its output streams could be collected within what remained of \
+                 stage (e)'s budget ({collect_allowance:.2?}; the child wait had already spent \
+                 {child_wait:.2?} of it).\n\
                  {}\n\
                  WHAT THIS ESTABLISHES: only that a reader thread had not delivered its buffer \
                  in time. It says nothing about durability, and nothing about the child, which \
@@ -925,6 +973,10 @@ pub fn select_rows(
             Err(RecvTimeoutError::Timeout) => {}
         }
     }
+
+    // Stage (e)'s elapsed time INCLUDES the collection, so the reported timing and
+    // the cap-sum invariant describe the same quantity.
+    let took = started.elapsed();
 
     let stdout = String::from_utf8_lossy(&stdout_buf);
     let stderr = String::from_utf8_lossy(&stderr_buf);
@@ -1242,40 +1294,69 @@ fn the_nominal_cap_sums_stay_under_the_total_budget() {
 /// detect a wrong value for that constant.
 #[test]
 fn the_baselines_sit_just_above_the_measured_quiet_noise_floor() {
-    // At or above the BINDING (smallest) measurement, so the fastest observed
-    // quiet host still yields `scale == 1`.
-    assert!(
-        BOOT_QUIET_BASELINE >= MEASURED_QUIET_T_BOOT,
-        "BOOT_QUIET_BASELINE {BOOT_QUIET_BASELINE:?} is below the BINDING measured quiet \
-         t_boot {MEASURED_QUIET_T_BOOT:?} (the smallest observed), so even the fastest \
-         observed quiet host would scale"
-    );
-    assert!(
-        ACK_QUIET_BASELINE >= MEASURED_QUIET_T_ACK,
-        "ACK_QUIET_BASELINE {ACK_QUIET_BASELINE:?} is below the BINDING measured quiet \
-         t_ack {MEASURED_QUIET_T_ACK:?} (the smallest observed), so even the fastest \
-         observed quiet host would scale"
-    );
-    // ...and not far above it, or the mechanism is INERT: `scale` is
-    // `observed / quiet_baseline`, so a baseline 20-65x the noise floor never
-    // moves under real contention (measured: scale stayed at exactly 1.000 at
-    // load average 116). Calibration can only LOOSEN, so there is no quiet-side
-    // risk to trade against this.
-    const MAX_MULTIPLE: u32 = 10;
-    assert!(
-        BOOT_QUIET_BASELINE <= MEASURED_QUIET_T_BOOT * MAX_MULTIPLE,
-        "BOOT_QUIET_BASELINE {BOOT_QUIET_BASELINE:?} is more than {MAX_MULTIPLE}x the \
-         measured quiet t_boot {MEASURED_QUIET_T_BOOT:?}: the calibration would be inert"
-    );
-    assert!(
-        ACK_QUIET_BASELINE <= MEASURED_QUIET_T_ACK * MAX_MULTIPLE,
-        "ACK_QUIET_BASELINE {ACK_QUIET_BASELINE:?} is more than {MAX_MULTIPLE}x the \
-         measured quiet t_ack {MEASURED_QUIET_T_ACK:?}: the calibration would be inert"
-    );
+    // The multiple a reader sees is COMPUTED here, never hand-written in a doc
+    // comment: a prose claim about arithmetic decays exactly like a stale comment,
+    // and in this file it did (roborev job 222, finding 2 — a comment claiming
+    // "~8.3x" over a constant that was really ~18x the binding value).
+    fn multiple_of(baseline: Duration, anchor: Duration) -> f64 {
+        baseline.as_secs_f64() / anchor.as_secs_f64()
+    }
 
-    // The consequence, asserted directly from the MEASUREMENT: a host 10x slower
-    // than the quiet floor must actually move the budget. This is the assertion
-    // the self-referential version could not make.
+    for (name, baseline, anchor, anchor_name, declared) in [
+        (
+            "BOOT_QUIET_BASELINE",
+            BOOT_QUIET_BASELINE,
+            MEASURED_QUIET_T_BOOT,
+            "MEASURED_QUIET_T_BOOT",
+            BOOT_BASELINE_MULTIPLE,
+        ),
+        (
+            "ACK_QUIET_BASELINE",
+            ACK_QUIET_BASELINE,
+            MEASURED_QUIET_T_ACK,
+            "MEASURED_QUIET_T_ACK",
+            ACK_BASELINE_MULTIPLE,
+        ),
+    ] {
+        let computed = multiple_of(baseline, anchor);
+
+        // At or above the BINDING (smallest) measurement, so the fastest observed
+        // quiet host still yields `scale == 1`.
+        assert!(
+            baseline >= anchor,
+            "{name} {baseline:?} is below the BINDING measured quiet value \
+             {anchor_name} {anchor:?} (computed multiple {computed:.2}x), so even the fastest \
+             observed quiet host would scale"
+        );
+
+        // ...and not far above it, or the mechanism is INERT: `scale` is
+        // `observed / quiet_baseline`, so a baseline many times the noise floor
+        // never moves under real contention (measured: `scale` stayed at exactly
+        // 1.000 at load average 116). Calibration can only LOOSEN, so there is no
+        // quiet-side risk to trade against this.
+        assert!(
+            computed <= f64::from(MAX_BASELINE_MULTIPLE),
+            "{name} {baseline:?} is {computed:.2}x its binding anchor {anchor_name} {anchor:?}, \
+             over the {MAX_BASELINE_MULTIPLE}x limit: the calibration would be inert"
+        );
+
+        // The baseline is DERIVED as `anchor * declared`, so the computed multiple
+        // must equal the declared one. If this ever fails, someone reintroduced an
+        // independent literal — which is exactly the drift this factoring removes.
+        assert!(
+            (computed - f64::from(declared)).abs() < 1e-9,
+            "{name} computes to {computed:.4}x its anchor but declares {declared}x — the baseline \
+             is no longer derived from {anchor_name}"
+        );
+        assert!(
+            declared <= MAX_BASELINE_MULTIPLE,
+            "{name}'s declared multiple {declared}x exceeds the {MAX_BASELINE_MULTIPLE}x limit"
+        );
+    }
+
+    // The consequence, asserted from the MEASUREMENT rather than the baseline: a
+    // host 10x slower than the binding quiet floor must actually move the budget.
+    // This is the assertion a baseline-relative test cannot make.
     let realistic = calibrated(
         T1_EXIT,
         MEASURED_QUIET_T_ACK * 10,
@@ -1284,7 +1365,7 @@ fn the_baselines_sit_just_above_the_measured_quiet_noise_floor() {
     );
     assert!(
         realistic.scale > 1.0 && realistic.derived > T1_EXIT.base,
-        "a host 10x slower than the measured quiet floor must loosen stage (d): {realistic:?}"
+        "a host 10x slower than the binding measured quiet floor must loosen stage (d): {realistic:?}"
     );
 }
 
@@ -1343,9 +1424,14 @@ fn calibration_is_the_identity_on_a_quiet_observation() {
     // A quiet host measures below `quiet_baseline`, so `scale == 1` and the
     // derived budget is EXACTLY `base`: calibration can never tighten a budget
     // and can never itself flake on an unloaded box.
+    // Baseline-RELATIVE, deliberately: this is a formula test, so it must not
+    // break when the baseline moves (an absolute 12ms here started failing the
+    // moment `ACK_QUIET_BASELINE` was correctly derived down to 11.2ms). The
+    // baseline's VALUE is guarded by
+    // `the_baselines_sit_just_above_the_measured_quiet_noise_floor`.
     let b = calibrated(
         spec(15, 30),
-        Duration::from_millis(12),
+        ACK_QUIET_BASELINE / 2,
         "t_ack",
         ACK_QUIET_BASELINE,
     );

@@ -48,7 +48,7 @@ use graceful_shutdown_support::*;
 use std::io::Write;
 use std::process::ExitStatus;
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use tempfile::TempDir;
 use wait_timeout::ChildExt;
 
@@ -262,7 +262,14 @@ fn writable_session_auto_flushes_mid_session_across_threshold() {
     // Stage (b): every write is acknowledged. The first ack is calibrated from
     // `t_boot`; each later one from the slowest ack seen so far, so a session
     // that is merely slow keeps loosening its own budget.
+    // `t_ack` is the SLOWEST SINGLE ack, which is the right CALIBRATION input (a
+    // later stage's budget should scale with how slow one round-trip is, not with
+    // how many were done). It is NOT the stage's duration: recording it as such
+    // under-reported a five-write stage by up to 5x, and the per-stage timing table
+    // is a deliverable of this change (roborev job 222, finding 3). So the stage's
+    // elapsed time is measured separately, over the whole loop.
     let mut t_ack = Duration::ZERO;
+    let acks_started = Instant::now();
     // Writes id=1..4 replaced four INDEPENDENT 60s waits, so each carries the full
     // old bound as its base; `clock.clip` IS the group deadline and bounds their
     // aggregate (roborev job 219, finding 1).
@@ -297,7 +304,8 @@ fn writable_session_auto_flushes_mid_session_across_threshold() {
         );
         t_ack = t_ack.max(took);
     }
-    clock.record("b.write-acks", t_ack);
+    let t_acks_total = acks_started.elapsed();
+    clock.record("b.write-acks", t_acks_total);
 
     let stall_window = calibrated(STALL_WINDOW, t_ack, "t_ack", ACK_QUIET_BASELINE);
 
@@ -415,6 +423,10 @@ fn writable_session_auto_flushes_mid_session_across_threshold() {
     eprintln!(
         "[#3515] writable_session_auto_flushes_mid_session_across_threshold\n{}",
         clock.report()
+    );
+    eprintln!(
+        "[#3515]   b.write-acks        {WRITES} writes in {t_acks_total:.3?} (slowest single ack \
+         {t_ack:.3?}, which is the calibration input)"
     );
     eprintln!(
         "[#3515]   c.mid-session-flush {}",
