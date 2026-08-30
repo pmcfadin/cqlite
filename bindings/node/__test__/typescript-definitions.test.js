@@ -497,6 +497,31 @@ describe('TypeScript Definitions (Issue #312)', () => {
  * regex: `ts.createSourceFile` gives the real class-member list, so a member
  * inside a JSDoc block, a string literal or a commented-out line cannot be
  * mistaken for a declaration (and vice versa).
+ *
+ * SCOPE -- compared, and deliberately NOT compared. Each omission is written down
+ * because a recorded omission is reviewable while an absent one is a trap.
+ *
+ * Compared: string-keyed member NAMES on the prototype and the constructor (both
+ * directions), each member's coarse SHAPE (callable vs attribute, read from the
+ * property descriptor so no getter is invoked), module-level exported value
+ * declarations and their KIND (class vs function vs enum/namespace vs const), and
+ * every public runtime export being declared.
+ *
+ * NOT compared:
+ *   - TYPES. A declared `(): string` returning a number passes. That is `tsc`'s
+ *     job against real call sites, a different tool with a different failure mode.
+ *   - CONSTRUCTORS. Both classes advertise an implicit public zero-argument
+ *     constructor, yet `Database` must come from `open()` and `PreparedStatement`
+ *     needs an internal native statement, so `new Database()` type-checks and
+ *     yields an unusable object. Real defect, but the fix is to declare private
+ *     constructors in `index.d.ts` -- hand-written PRODUCTION surface, and a
+ *     TS-breaking public-API change. Raised as REQ-1456-03 on issue #1456 for the
+ *     owner; deliberately not decided by a test-only change.
+ *   - SYMBOL-KEYED members. A `[Symbol.iterator]`/`[Symbol.asyncDispose]` added at
+ *     runtime without a declaration would pass. Measured when this was written:
+ *     `Object.getOwnPropertySymbols` is EMPTY for both prototypes, both
+ *     constructors and the module object, so this closes no live gap today.
+ *     Batched as a nit under REQ-1456-03.
  */
 
 const ts = require('typescript');
