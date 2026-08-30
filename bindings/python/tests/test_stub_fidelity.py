@@ -313,7 +313,40 @@ def test_pyi_matches_runtime():
     #
     # Underscore-prefixed names are the internal test-support hooks
     # (issues #1437/#1451/#1452) and are excluded by rule, not by enumeration.
-    runtime_public = {name for name in vars(cqlite) if not name.startswith("_")}
+    # PUBLIC = not single-underscore-prefixed. A DUNDER is public by convention and
+    # must be compared: `cqlite.__version__` is documented API, is in `__all__`, and
+    # a blanket `startswith("_")` filter silently excluded it -- so dropping
+    # `__version__` from the stub left this green while `cqlite.__version__` became a
+    # type error for every typed caller. (The opposite direction was covered: the
+    # phantom check reads `stub.module_names`, which collects dunders.)
+    #
+    # The two categories are cleanly separable here, measured rather than assumed:
+    # every internal test-support hook in `__all__` is SINGLE underscore
+    # (`_decimal_from_parts`, `_inet_from_bytes`, `_varint_from_bytes`,
+    # `_raise_mapped_core_error`, `_ffi_common_render_vectors`,
+    # `_built_with_panic_abort` -- issues #1437/#1451/#1452), and `__version__` is the
+    # only dunder. So the rule is PEP 8's: `_name` is internal, `__name__` is not.
+    # A dunder counts as public only if the module or the stub DECLARES it so --
+    # derived from those two sources, never a hardcoded list. "Every dunder is
+    # public" was tried and is too broad: it drags in Python's own module machinery
+    # (`__doc__`, `__name__`, `__spec__`, `__loader__`, `__path__`, ...), which no
+    # stub declares, so the check would red on a FAITHFUL stub -- and a test that
+    # reds on correct input is one people delete. Deriving instead means:
+    #   * `__version__` (in `__all__` AND in the stub) is compared;
+    #   * machinery dunders (in neither) are ignored, including any a future Python
+    #     adds -- so a new interpreter cannot red this on correct code;
+    #   * a future API dunder added to `__all__` but forgotten in the stub is
+    #     compared, and REDS -- which is precisely the gap being closed here.
+    declared_dunders_at_module_level = {
+        name
+        for name in (set(cqlite.__all__) | stub.module_names)
+        if name.startswith("__") and name.endswith("__")
+    }
+    runtime_public = {
+        name
+        for name in vars(cqlite)
+        if not name.startswith("_") or name in declared_dunders_at_module_level
+    }
     assert runtime_public, "parsed no public names from the cqlite module"
     undeclared = sorted(runtime_public - stub.module_names)
     assert not undeclared, (
