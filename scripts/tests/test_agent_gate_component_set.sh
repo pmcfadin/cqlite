@@ -285,7 +285,11 @@ mkbin() {
 }
 
 # mk_ticker <script> <tickfile> <pidfile> <ignore-term> <nested> : write a fixture that
-# ticks once a second until killed. Every property here is a defect I caused and found:
+# ticks once a second until killed. <nested>: 0 = the script itself ticks; 1 = a GRANDCHILD
+# ticks and the parent `wait`s for it; 2 = a grandchild ticks and the parent EXITS 0 AT ONCE —
+# the SUCCESS-path shape (job 246), where the bound is not exceeded at all and the danger is a
+# stray holding the caller's capture open forever.
+# Every property here is a defect I caused and found:
 #
 #  * BOUNDED ITERATIONS. A leaked fixture whose PATH lacked `sleep` span at full speed and
 #    wrote 179 MB into $TMPDIR before I noticed (37M ticks). The loop now stops after
@@ -307,11 +311,14 @@ mk_ticker() {
   {
     printf '#!/bin/sh\n'
     printf 'command -v sleep >/dev/null 2>&1 || exit 3   # never busy-spin\n'
-    if [ "$nested" = 1 ]; then
+    if [ "$nested" = 1 ] || [ "$nested" = 2 ]; then
       # the PARENT takes TERM's default disposition and dies; the GRANDCHILD is the ticker
       printf 'sh -c '"'"'%s; echo $$ > "%s"; n=0; while [ "$n" -lt 600 ]; do echo tick >> "%s"; n=$((n+1)); sleep 1; done'"'"' &\n' \
              "$body_ignore" "$pidfile" "$tickfile"
-      printf 'wait\n'
+      # nested=2 does NOT `wait`: the direct child exits 0 while the stray lives on. `exit 0`
+      # is EXPLICIT rather than relying on the background job's status, because the property
+      # under test is a SUCCESSFUL exit and an implicit one is a fact about `&`, not a claim.
+      if [ "$nested" = 2 ]; then printf 'exit 0\n'; else printf 'wait\n'; fi
     else
       printf '%s\n' "$body_ignore"
       printf 'echo $$ > "%s"\n' "$pidfile"
@@ -790,6 +797,8 @@ wd_timeout_bin=$(command -v timeout 2>/dev/null || true)
 if [ -z "$wd_outer" ]; then
   echo "skip - 3544-bound-enforced: no host 'timeout' to bound this case from the OUTSIDE; letting the mechanism under test bound its own test would be circular"
   echo "skip - 3544-bound-grandchild: same precondition (no outer host bound available)"
+  echo "skip - 3544-bound-success-stray: same precondition (no outer host bound available)"
+  echo "skip - 3544-bound-success-stray-control: same precondition (no outer host bound available)"
 else
 wd_rc_line=$( fx "$behind" && PATH="$bin_no_timeout" $wd_outer bash "$behind/scripts/agent-gate.sh" \
                 --component-set-bounded-run 1 "$ticker" 2>/dev/null | sed -n 's/^RC: //p' )
@@ -860,11 +869,39 @@ for _mech_path in "$PATH" "$bin_no_timeout"; do
 done
 
 # THE SHAPE THE CONDITIONAL KILL MISSED: the DIRECT CHILD dies on TERM while a GRANDCHILD
-# ignores it and keeps the capture pipe open. The previous escalation was guarded by
-# `if kill -0 "$pid"` — the child's liveness — so it skipped the KILL exactly here and the
-# "bounded" call hung forever. A fixture whose direct child ignores TERM (above) CANNOT
-# discriminate this: `kill -0` is true there, so the conditional fires and the case passes
-# with the defect present (measured — reverting the fix left that case green).
+# ignores it. The previous escalation in the bash arm was guarded by `if kill -0 "$pid"` — the
+# child's liveness — so it skipped the KILL exactly here and the "bounded" call hung forever. A
+# fixture whose direct child ignores TERM (above) CANNOT discriminate this: `kill -0` is true
+# there, so the conditional fires and the case passes with the defect present (measured —
+# reverting the fix left that case green).
+#
+# THE ASSERTION IS ARM-SPECIFIC, AND IT IS SPLIT BECAUSE A MEASUREMENT SAID SO (job 246). This
+# case used to require the descendant to STOP on BOTH arms, and it passed on both — but on the
+# external arm it passed for the WRONG REASON: the suite's own harness bound was doing the
+# killing, because a stray holding the capture pipe kept the substitution open until `timeout
+# 30` fired and killed the whole group, and the two tick counts were then both taken AFTER that.
+# Once the runner stopped handing the caller's pipe to the child (job 246), the substitution
+# returns immediately and the truth is visible. MEASURED directly, not inferred:
+#
+#     timeout --kill-after=1 1 <parent that dies on TERM, TERM-ignoring grandchild>
+#       -> rc 124 in ~1s, grandchild ticks 3 -> 6 (ALIVE)
+#
+# GNU `timeout` stops escalating the moment ITS OWN child exits, so it never reaches the KILL
+# rung and never signals the group again. We cannot change that from here (the group id belongs
+# to a process we did not fork), and forcing it — e.g. by running every bounded command under a
+# `trap "" TERM` wrapper so timeout always has to escalate — would make every bounded `git`
+# TERM-immune, which is a worse trade than a documented residual.
+#
+# So, per arm:
+#   bash-watchdog — the descendant MUST STOP. That arm kills the process GROUP unconditionally
+#                   after the grace period, which is precisely the fix job 214 landed.
+#   timeout/gtimeout — the BOUND must hold (rc 124|137 and the call returns). A TERM-ignoring
+#                   descendant MAY survive it; it inherits FILE descriptors, not the caller's
+#                   pipe, so it can no longer break the bound — which is the property
+#                   `3544-bound-success-stray` asserts directly. The stray is reaped by pid here.
+#
+# An odd but true consequence, recorded so nobody "fixes" it the wrong way: a host with NO
+# `timeout` is STRICTER about descendant cleanup than one with it.
 gtterm="$tmp/grandchild-term-ignoring.sh"
 gttick="$tmp/grandchild-term-tick.txt"
 gtpid="$tmp/grandchild-term.pid"
@@ -881,10 +918,18 @@ for _mech_path in "$PATH" "$bin_no_timeout"; do
     124|137) _gt_rc_ok=1 ;;
     *)       _gt_rc_ok=0 ;;
   esac
-  if [ "$_gt_rc_ok" -eq 1 ] && [ "$_gt_later" = "$_gt_at" ]; then
-    ok "3544-bound-term-ignoring-grandchild[$_mech]: child dies on TERM, TERM-IGNORING grandchild still KILLed (rc $_gt_rc)"
+  if [ "$_mech" = bash-watchdog ]; then
+    if [ "$_gt_rc_ok" -eq 1 ] && [ "$_gt_later" = "$_gt_at" ]; then
+      ok "3544-bound-term-ignoring-grandchild[$_mech]: child dies on TERM, TERM-IGNORING grandchild still KILLed by the group signal (rc $_gt_rc, ticks frozen at $_gt_at)"
+    else
+      bad "3544-bound-term-ignoring-grandchild[$_mech]: expected rc 124|137 and a dead grandchild (rc='$_gt_rc' ticks $_gt_at -> $_gt_later)"
+    fi
   else
-    bad "3544-bound-term-ignoring-grandchild[$_mech]: expected rc 124|137 and a dead grandchild (rc='$_gt_rc' ticks $_gt_at -> $_gt_later)"
+    if [ "$_gt_rc_ok" -eq 1 ]; then
+      ok "3544-bound-term-ignoring-grandchild[$_mech]: the BOUND holds and the call returns (rc $_gt_rc) — on this arm GNU timeout stops escalating when its own child exits, so the TERM-ignoring grandchild may survive (ticks $_gt_at -> $_gt_later); it holds no caller pipe, which 3544-bound-success-stray asserts"
+    else
+      bad "3544-bound-term-ignoring-grandchild[$_mech]: expected rc 124|137 (got '$_gt_rc') — the bound itself did not hold"
+    fi
   fi
   reap_ticker "$gtpid"
 done
@@ -904,6 +949,64 @@ if [ "$gh_rc_line" = 124 ]; then
 else
   bad "3544-bound-hanging-git: expected rc 124 (got '$gh_rc_line')"
 fi
+
+# ---------------------------------------------------------------------------
+# THE SUCCESS PATH IS BOUNDED TOO (roborev job 246). Rounds 3 and 6 covered a TERM-ignoring
+# descendant on the TIMEOUT path. This is the same family where the direct child SUCCEEDS: it
+# exits 0 immediately, a background descendant lives on, and — before the fix — that descendant
+# held the CALLER's command-substitution pipe open indefinitely, so a call that had already
+# finished never returned and the 15/120s bound did not apply at all. Several call sites in the
+# pre-flight are command substitutions, so this was reachable in the shipped code.
+#
+# HOW IT IS ASSERTED WITHOUT A WALL CLOCK (a wall-clock threshold in a correctness test is
+# itself a defect class here, #2642): the discriminator is the OUTER harness bound's own EXIT
+# STATUS. If the call returns on its own the outer `timeout` exits 0; if a stray holds the pipe
+# the outer bound fires and exits 124. Both runs read the same `RC:` line, so nothing here
+# compares elapsed time.
+#
+# AND THE CONTROL IS THE HALF THAT MAKES IT MEAN ANYTHING: the same fixture invoked DIRECTLY
+# through a command substitution MUST time out. Without that, a green result is
+# indistinguishable from a fixture whose stray died on its own — and this file has been bitten
+# by exactly that shape more than once.
+succ_outer="$wd_timeout_bin 8"
+succ="$tmp/success-stray.sh"
+succtick="$tmp/success-stray-tick.txt"
+succpid="$tmp/success-stray.pid"
+mk_ticker "$succ" "$succtick" "$succpid" 0 2
+
+# succ_probe <outfile> <cmd...>: run <cmd> inside a bounded shell that captures it through a
+# COMMAND SUBSTITUTION — the shape a real call site has — writing that shell's stdout to
+# <outfile>, and return the OUTER BOUND's status (0 = the capture closed on its own, 124 = the
+# harness had to kill it).
+#
+# THE BOUND MUST WRAP THE CAPTURING SHELL, NOT THE COMMAND, and getting that wrong hung the
+# suite on the first cut: `timeout 8 <cmd>` returns the moment <cmd> exits, so a stray
+# descendant then holds the substitution open with nothing left to kill it — the outer bound has
+# already exited. Wrapping the shell that does the capturing means the deadline fires while the
+# whole group (stray included) is still under the bound.
+succ_probe() {
+  local of="$1"; shift
+  $succ_outer bash -c 'o=$("$@" 2>/dev/null); printf '"'"'%s\n'"'"' "$o"' _ "$@" >"$of" 2>/dev/null
+}
+
+: >"$succtick"
+succ_probe "$tmp/succ-ctl.out" "$succ"; succ_ctl_rc=$?
+reap_ticker "$succpid"
+if [ "$succ_ctl_rc" = 124 ]; then
+  ok "3544-bound-success-stray-control: the fixture really holds a capture open past its own exit (a direct substitution had to be killed by the harness bound)"
+else
+  bad "3544-bound-success-stray-control: the fixture does not model a pipe-holding stray (outer rc='$succ_ctl_rc', expected 124) — the case below cannot discriminate"
+fi
+
+: >"$succtick"
+succ_probe "$tmp/succ.out" bash "$behind/scripts/agent-gate.sh" --component-set-bounded-run 5 "$succ"; succ_rc=$?
+succ_line=$(sed -n 's/^RC: //p' "$tmp/succ.out" 2>/dev/null)
+if [ "$succ_ctl_rc" = 124 ] && [ "$succ_rc" = 0 ] && [ "$succ_line" = 0 ]; then
+  ok "3544-bound-success-stray: a bounded call whose child exits 0 RETURNS with a stray descendant still alive (rc 0, harness bound never fired) — the child's streams go to FILES, so nothing it leaves behind can hold the caller open"
+else
+  bad "3544-bound-success-stray: expected the capture to close on its own (outer rc='$succ_rc' want 0, reported RC='$succ_line' want 0, control rc='$succ_ctl_rc' want 124)"
+fi
+reap_ticker "$succpid"
 fi
 
 # …and with NO mechanism at all the command must NOT RUN. This is the load-bearing half:
@@ -1470,6 +1573,73 @@ else
   bad "3544-no-tag-writes: expected an unchanged tag ref set (upstream_tag=$upstream_tag kind=$(field KIND "$tg_out"))"
   echo "   before: [$tags_before]"
   echo "   after:  [$tags_after]"
+fi
+
+# ---------------------------------------------------------------------------
+# 5f. THE TRANSFER HOP IS VERIFIED, NOT TRUSTED (roborev jobs 242 + 246). The baseline is
+#     fetched in an ISOLATED repository (global/system config neutralised, the validated URL in
+#     a 0600 config) and then TRANSFERRED into this repository so the ancestry check and the
+#     set read can proceed. That second hop reads THIS repo's config and so could itself be
+#     redirected — which is why the sha the isolated hop observed is RE-ASSERTED against what
+#     arrived, and a mismatch is its own fail-closed kind rather than a silently different
+#     baseline.
+#
+#     `baseline-transfer-mismatch` had its census count bumped for it and NO behavioural case,
+#     while this file's own header claims every non-`ok` kind is exercised — the claim exceeding
+#     the check, which is the exact class this whole issue keeps fixing. So it is driven here.
+#
+#     HOW THE REDIRECT IS PLANTED, and why it is a `git` SHIM rather than a real
+#     `url.*.insteadOf`: an insteadOf rewrite matches a URL PREFIX, and the scratch repository's
+#     path carries a random `mktemp` suffix, so no rewrite can name it and still resolve to a
+#     real repository. Writing one into shared git config is forbidden outright (a worktree
+#     shares .git/config — this lane took `origin` out for four live lanes that way, #3617). The
+#     shim therefore stands in for the redirect at the tool boundary: it performs hop 2 FOR REAL
+#     and then repoints the destination ref at a DIFFERENT commit, which is precisely the
+#     observable a redirected transfer produces. The assertion is about the gate's affirmative
+#     comparison, which cannot tell the two apart — and must not.
+# ---------------------------------------------------------------------------
+base_mm=$(mkbaseline base-mismatch - )
+mm=$(mkbranch mismatch "$base_mm" - )
+# POSITIVE CONTROL FIRST: without the shim this fixture must reach a real verdict, or a
+# `baseline-transfer-mismatch` below could be any other breakage wearing that name.
+mm_ctl=$(hook "$mm")
+mm_decoy=$(git -C "$mm" rev-parse HEAD 2>/dev/null)
+mm_bin="$tmp/mismatch-bin"
+mkdir -p "$mm_bin"
+mm_real_git=$(command -v git)
+{ printf '#!/bin/sh\n'
+  printf 'REAL=%s\n' "$mm_real_git"
+  # HOP 2 IS IDENTIFIED BY ITS REFSPEC, not by the scratch path (random) and not by the remote
+  # (hop 2 has none): only hop 2 fetches FROM refs/csbaseline INTO the private per-run ref.
+  printf 'dest=""\n'
+  printf 'for a in "$@"; do case "$a" in refs/csbaseline:refs/worktree/*) dest=${a#refs/csbaseline:} ;; esac; done\n'
+  printf 'if [ -n "$dest" ]; then\n'
+  printf '  "$REAL" "$@" || exit $?\n'
+  printf '  "$REAL" -C %s update-ref "$dest" %s || exit $?\n' "$mm" "$mm_decoy"
+  printf '  exit 0\n'
+  printf 'fi\n'
+  printf 'exec "$REAL" "$@"\n'
+} >"$mm_bin/git"
+chmod +x "$mm_bin/git"
+mm_out=$( fx "$mm" && PATH="$mm_bin:$PATH" bash "$mm/scripts/agent-gate.sh" \
+            --component-set-line full 2>/dev/null )
+mm_line=$(field COMPONENT_SET_LINE "$mm_out")
+mm_base_sha=$(git -C "$base_mm" rev-parse refs/heads/main)
+if [ "$(field KIND "$mm_ctl")" != ok ]; then
+  bad "3544-transfer-mismatch: the POSITIVE CONTROL (same fixture, no shim) did not reach KIND ok (got '$(field KIND "$mm_ctl")') — the case cannot discriminate"
+  printf '%s\n' "$mm_ctl"
+elif [ "$mm_decoy" = "$mm_base_sha" ]; then
+  bad "3544-transfer-mismatch: the decoy commit EQUALS the baseline sha, so the shim could not make the two hops disagree — the fixture would test nothing"
+elif [ "$(field VERDICT "$mm_out")" = UNMEASURED ] \
+   && [ "$(field KIND "$mm_out")" = baseline-transfer-mismatch ] \
+   && [ "$(field SHA "$mm_out")" = "-" ] \
+   && grep -q 'FAIL-CLOSED (#3544)' <<<"$mm_line" \
+   && grep -qF "$mm_base_sha" <<<"$mm_line" \
+   && grep -qF "$mm_decoy" <<<"$mm_line"; then
+  ok "3544-transfer-mismatch: a transfer that delivers a DIFFERENT commit than the isolated hop observed is UNMEASURED/baseline-transfer-mismatch, naming BOTH shas (control reached KIND ok)"
+else
+  bad "3544-transfer-mismatch: expected KIND baseline-transfer-mismatch naming $mm_base_sha and $mm_decoy"
+  printf '%s\n' "$mm_out"
 fi
 
 # ---------------------------------------------------------------------------
