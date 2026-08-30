@@ -363,7 +363,7 @@ jobs:
   # Scheduled path: CI-side claim reaper (issue #2655 / #2499 design).
   #
   # Enforces the deterministic reap rule IN CODE (it was previously only prose):
-  # a supervisor-authored refs/machine-claims/<machine> liveness ref is reaped when its
+  # a supervisor-authored refs/lane-claims/<machine>/<issue> liveness ref is reaped when its
   # age exceeds the threshold AND its issue has NO open PR. The PID-dead clause
   # is a LOCAL-only refinement (a foreign machine's PID is unknowable from CI), so
   # from CI the age + no-open-PR gate governs — exactly what `should-reap`
@@ -377,7 +377,7 @@ jobs:
     if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
     timeout-minutes: 10
-    # Needs write to delete stale refs/machine-claims/* refs (the top-level
+    # Needs write to delete stale refs/lane-claims/* and legacy refs/machine-claims/* refs (the top-level
     # default is contents: read); the sweep/pr-closed jobs stay read-only.
     permissions:
       contents: write
@@ -399,21 +399,48 @@ jobs:
           set -euo pipefail
           HB="scripts/flow/claim-heartbeat.sh"
 
-          # Map a machine name -> its claim's issue number (parsed from the ref
-          # message, same field grammar claim-heartbeat.sh writes).
-          raw=$(git ls-remote origin 'refs/machine-claims/*' 2>/dev/null || true)
+          # PER-LANE claims (#3393, owner ruling A): refs/lane-claims/<machine>/<issue>, where the
+          # LAST component is the issue. The legacy per-machine namespace is still listed so a
+          # pre-ruling ref is drained rather than pinning its board item at In Progress forever.
+          # NEITHER LISTING MAY FAIL SILENTLY (roborev round 2, Medium). Both were `|| true`, so an
+          # origin or auth outage produced an EMPTY result, which this job then reported as "No claim
+          # refs" and exited 0 — a green scheduled run that reaped nothing while stale claims pinned
+          # their board items. Same shape as the legacy-listing hole fixed in dead-lanes one round
+          # earlier; fixed there and not here, which is the lesson worth carrying.
+          lane_rc=0
+          raw=$(git ls-remote origin 'refs/lane-claims/*' 2>/dev/null) || lane_rc=$?
+          legacy_rc=0
+          legacy=$(git ls-remote origin 'refs/machine-claims/*' 2>/dev/null) || legacy_rc=$?
+          if [ "$lane_rc" -ne 0 ] || [ "$legacy_rc" -ne 0 ]; then
+            echo "::error::could not list claim refs on origin (lane-claims rc=$lane_rc, machine-claims rc=$legacy_rc) — refusing to report 'nothing to reap' about a namespace that was never read. Stale claims may be pinning board items."
+            exit 1
+          fi
+          [ -z "$legacy" ] || raw=$(printf '%s\n%s' "$raw" "$legacy")
+          raw=$(printf '%s' "$raw" | sed '/^$/d')
           if [ -z "$raw" ]; then
-            echo "No claim refs on origin — nothing to reap."
+            echo "No claim refs on origin — nothing to reap. (Both namespaces listed successfully.)"
             exit 0
           fi
 
           reaped=0
           kept=0
-          # Iterate machine names from the ref list (field 2 = refname).
+          # Iterate lanes from the ref list (field 2 = refname).
           while IFS= read -r line; do
             [ -n "$line" ] || continue
             refname=$(printf '%s' "$line" | awk '{print $2}')
-            machine="${refname#refs/machine-claims/}"
+            # The sha AS EVALUATED, carried into the delete as a lease (#3393, roborev round 3):
+            # should-reap judges this value, so the delete must refuse if a supervisor refreshed the
+            # ref in between. Without it the reap was described as atomic and was not.
+            refsha=$(printf '%s' "$line" | awk '{print $1}')
+            lane_issue=""
+            case "$refname" in
+              refs/lane-claims/*)
+                machine="${refname#refs/lane-claims/}"
+                lane_issue="${machine##*/}"
+                machine="${machine%/*}"
+                ;;
+              *) machine="${refname#refs/machine-claims/}" ;;
+            esac
             [ -n "$machine" ] || continue
 
             # should-reap is the single source of truth for the predicate. Exit 0
@@ -421,27 +448,72 @@ jobs:
             # fresh/open-PR/unknown-age claim. Note: from CI `machine` is never
             # THIS runner, so the PID clause is skipped and age + no-open-PR gate.
             rc=0
-            bash "$HB" should-reap "$machine" "$REAP_THRESHOLD_SECS" || rc=$?
+            if [ -n "$lane_issue" ]; then
+              bash "$HB" should-reap "$machine" "$lane_issue" "$REAP_THRESHOLD_SECS" || rc=$?
+            else
+              bash "$HB" should-reap "$machine" "$REAP_THRESHOLD_SECS" || rc=$?
+            fi
             if [ "$rc" -ne 0 ]; then
-              echo "keep claim machine=$machine (should-reap rc=$rc)"
+              echo "keep claim machine=$machine issue=${lane_issue:-legacy} (should-reap rc=$rc)"
               kept=$((kept+1))
               continue
             fi
 
-            # Recover the issue number from the ref message for the board flip +
-            # comment. Best-effort: reaping the ref is the primary action.
-            git fetch origin "$refname" >/dev/null 2>&1 || true
-            msg=$(git log -1 --format=%B FETCH_HEAD 2>/dev/null || true)
-            issue=$(printf '%s' "$msg" | sed -n 's/.*issue=\([0-9][0-9]*\).*/\1/p' | head -1)
+            # For a per-lane ref the issue is IN THE REF PATH, so the board flip no longer depends
+            # on parsing a commit message — it is authoritative rather than best-effort. Only the
+            # legacy shape still needs the message, and only for the flip; reaping the ref is the
+            # primary action either way.
+            if [ -n "$lane_issue" ]; then
+              issue="$lane_issue"
+            else
+              # A PRIVATE REF, NOT FETCH_HEAD (#3393 self-sweep). FETCH_HEAD is shared, so a
+              # concurrent fetch could make this row's issue come from ANOTHER ref — and the issue
+              # is what the board flip and the traceability comment act on.
+              tmpref="refs/tmp/reap-claims/$$-$RANDOM"
+              git fetch --no-write-fetch-head --no-tags origin "+${refname}:${tmpref}" >/dev/null 2>&1 || true
+              msg=$(git log -1 --format=%B "$tmpref" 2>/dev/null || true)
+              git update-ref -d "$tmpref" 2>/dev/null || true
+              # EXACT KEY, WHOLE TOKEN — mirrors claim-heartbeat.sh's msg_numeric_field (roborev round
+              # 29, Low; round 26 fixed the script's parsers and left this copy behind, which is the
+              # guard-width shape one carrier over). The greedy form matched `issue=` as a SUBSTRING and
+              # the value as a PREFIX, so `issue=42 notissue=99` could make this workflow flip the board
+              # and comment on issue 99 while the script correctly reaped 42 — a wrong action on an
+              # unrelated issue. Splitting on whitespace and anchoring `^issue=<digits>$` makes the key
+              # exact and the value whole, with no regex alternation.
+              issue=$(printf '%s' "$msg" | tr ' \t\n' '\n\n\n' | sed -n 's/^issue=\([0-9][0-9]*\)$/\1/p' | head -1)
+            fi
 
-            # `reap` re-checks the open-PR guard atomically before deleting, so a
-            # PR opened between should-reap and here still refuses the delete.
-            if bash "$HB" reap "$machine"; then
+            # A LEGACY REF WHOSE ISSUE CANNOT BE READ IS NOT REAPED (roborev round 32, Medium — and I
+            # examined this exact site at round 17 and wrongly cleared it). The fetch/parse above is
+            # best-effort, and my round-17 note said a failure "loses only the board flip while the reap
+            # stays atomic". That evaluated the two consequences SEPARATELY. Jointly they are worse than
+            # either: the ref is DELETED and the issue is UNKNOWN, so nothing will ever flip that board
+            # item back to Ready and it is STRANDED at In Progress with no claim left to collect.
+            #
+            # A per-LANE ref carries its issue in the ref path, so it is unaffected. Only the LEGACY
+            # per-machine shape depends on the message, and for it an unreadable issue now means KEEP:
+            # a retained ref is collectable on the next sweep, a stranded board item is not self-healing.
+            if [ -z "$lane_issue" ] && [ -z "${issue:-}" ]; then
+              echo "::notice::skipping legacy claim ${refname}: its issue could not be read, so reaping it would strand the board item (kept for the next sweep)"
+              # COUNTED AS KEPT (roborev round 34, Low). This branch retains the ref, which is the
+              # right call, and then did not increment `kept` — so the run summary UNDERCOUNTED
+              # retained claims and the two numbers no longer accounted for every ref examined. A
+              # summary that silently omits a category is the reporting half of the same
+              # fail-quiet shape this branch was added to fix.
+              kept=$((kept+1))
+            elif bash "$HB" reap "$machine" "${lane_issue:-}" "$refsha"; then
               echo "reaped claim machine=$machine issue=${issue:-?}"
               reaped=$((reaped+1))
               # Flip the freed item back to Ready + leave a trace (skip issue "0"
               # / unknown — a claim with no real issue has no board item to flip).
-              if [ -n "${issue:-}" ] && [ "$issue" != "0" ]; then
+              # NUMERIC ONLY (#3393). A lane id may be `p<pid>` — a supervisor whose issue was not
+              # yet known — and there is no board item for that, so it must not reach the flip or
+              # the comment. Previously only "0" was excluded, which was the whole placeholder space.
+              case "${issue:-}" in
+                '' | *[!0-9]*) issue="" ;;
+                0) issue="" ;;
+              esac
+              if [ -n "${issue:-}" ]; then
                 item_id=$(gh api graphql -f query='
                   query($p: ID!) { node(id: $p) { ... on ProjectV2 {
                     items(first: 100) { nodes { id content {
@@ -459,7 +531,7 @@ jobs:
                   echo "flipped issue #$issue -> Ready"
                 fi
                 gh issue comment "$issue" --body \
-                  "Automated claim reap (issue #2655 CI reaper): machine \`${machine}\`'s claim ref was stale (age > $((REAP_THRESHOLD_SECS/3600))h) with no open PR. Work is preserved on the \`issue-${issue}-*\` branch (never deleted); Status returned to Ready for re-pickup." >/dev/null 2>&1 || true
+                  "Automated claim reap (issue #2655 CI reaper, per-lane since #3393): the claim ref for lane \`${machine}/${issue}\` was stale (age > $((REAP_THRESHOLD_SECS/3600))h) with no open PR. Work is preserved on the \`issue-${issue}-*\` branch (never deleted); Status returned to Ready for re-pickup." >/dev/null 2>&1 || true
               fi
             else
               echo "reap declined machine=$machine (open PR appeared, or push error) — kept"

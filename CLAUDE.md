@@ -1011,11 +1011,20 @@ end-to-end test. Green helper-only unit tests are not sufficient.
   warning into exit 1, which is what `.agent-ami/profile.yaml`'s `verify.run` uses. The three
   worker-environment deltas and the messages that identify them: `docs/development/fleet-runbook.md`.
 - **Supervisor-authored machine claim + CI reaper (#2655/#2499)**: liveness is now MECHANISM-driven,
-  not prose. `worker-supervisor.sh` stamps `refs/machine-claims/<machine>` (issue+supervisor-PID+ts)
+  not prose. `worker-supervisor.sh` stamps `refs/lane-claims/<machine>/<issue>` (issue+supervisor-PID+ts)
   via `claim-heartbeat.sh stamp` at every spawn, refreshes it each iteration, and clears it on a
   clean exit (`reap`, which REFUSES when the issue still has an open PR — an unfinished endgame stays
-  owned for adoption, never orphaned). This namespace is distinct from `claim.sh`'s per-issue lock
-  `refs/claims/issue-<N>`. `claim-heartbeat.sh should-reap <machine> [secs]` is the single, fail-safe
+  owned for adoption, never orphaned). **The ref is PER LANE — `refs/lane-claims/<machine>/<issue>`
+  — since #3393's ruling**; the old per-machine `refs/machine-claims/<machine>` is legacy and is
+  still *read* by `list-claims`, `dead-lanes` and the CI reaper purely so a pre-ruling ref gets
+  drained (an un-enumerated claim ref pins its board item at In Progress indefinitely). `reap` takes
+  `<machine> [lane-id] [expected_sha]`. **`should-reap` has TWO forms and a two-argument call is
+  ALWAYS the legacy one** — `should-reap <machine> [threshold_secs]` acts on the legacy ref, and a
+  lane needs all three, `should-reap <machine> <issue> <threshold_secs>`. The grammar is deliberately
+  unambiguous rather than positional-guessing, so `should-reap <box> <issue>` reads the issue number
+  as a THRESHOLD and answers about the legacy ref (#3393 round 21: this doc previously advertised
+  `<machine> [issue]`, which is that trap written down). This namespace is distinct from `claim.sh`'s per-issue lock
+  `refs/claims/issue-<N>`. `claim-heartbeat.sh should-reap` (both forms above) is the single, fail-safe
   reap predicate (exit 0 = reap, 1 = keep, 2 = no ref): reap ONLY on age > threshold (4h) AND no open
   PR AND (pid-dead, when the claim is local — a foreign machine's PID is unknowable). It KEEPS on a
   fresh ref, an open PR, a live local PID, or an unparseable age; a `gh`/network hiccup in the
@@ -1023,13 +1032,32 @@ end-to-end test. Green helper-only unit tests are not sufficient.
   **`should-reap` is a REAP GATE, not a liveness monitor, and the difference cost three lanes
   (#3393)**: it consults the PID only AFTER age > 4h, so a worker the kernel OOM-killed a minute ago
   is indistinguishable from a healthy one for four hours — and even then the answer is an exit code
-  nobody watches. Nothing reported three silent lane deaths, each of which left a clean worktree, a
-  held claim and an open PR. **There is no committed tool for this yet** (#3393 AC3 is open, blocked
-  on a claim-ref layout decision: `refs/machine-claims/<machine>` is per-MACHINE, so on a multi-lane
-  box a surviving lane's stamp overwrites a dead sibling's PID and the dead lane becomes
-  unobservable). Until it lands, a suspected dead lane is diagnosed BY HAND, and the order matters —
-  `docs/development/fleet-runbook.md` records it, starting with `dmesg` for an OOM kill *before*
-  concluding a box is broken, because reading that symptom as a broken instance already cost one
+  nobody watches, and nothing reported three silent lane deaths — each leaving a clean worktree, a
+  held claim and an open PR. `claim-heartbeat.sh dead-lanes` answers the other question, "is anything
+  dead RIGHT NOW", and inverts BOTH of the reaper's conservative guards on purpose: **no age gate** (a
+  fresh claim with a dead PID *is* the shape of an OOM kill) and **an open PR does not suppress the
+  report** (for the reaper an open PR means KEEP; for a report it is the most urgent row on the page
+  — a dead process holding an in-flight endgame, annotated `open-pr=yes`, still never reaped).
+  It is a REPORT: it deletes no ref and moves no board item. **`claim-heartbeat.sh dead-lanes --help`
+  is the authoritative contract** — it is in the same file as the code and cannot drift from it, so
+  read it rather than this summary when the exact verdict set matters (this paragraph drifted once
+  already). In outline: verdicts are MULTI-valued because a PID is only checkable on the machine that
+  owns the claim — two `DEAD-*` verdicts (`DEAD-NO-PROCESS`, which covers a zombie, and
+  `DEAD-PID-REUSED`) and a family of `UNKNOWN-*` ones (`FOREIGN`, `NO-PID`, `STATE`, `IDENTITY`,
+  `PROBE`, `UNREADABLE`). Exit `3` = a dead lane was reported (both `DEAD-*` verdicts); exit `1` = none was
+  reported — which also covers zero claim refs, an all-foreign run and a failed listing.
+  **This slice is POSITIVE-DETECTION ONLY and never exits 0** (#3393 split ruling, 2026-08-29): act
+  on `3`, and never read `1` as a clean bill of health. A sound clean verdict IS possible on per-lane
+  refs — the masking that made exit 0 a lie is gone, since a surviving sibling now stamps a different
+  ref — but it was split out rather than shipped, because the fail-open defect family (five
+  instances: a failed probe read as a negative answer) clustered in that exit-0 path and it is the
+  value a cron reads. Restoring it is tracked separately, carrying the family census forward.
+  **Not covered, by construction**: #3393 AC3's "worktree present, tmux session absent" test is
+  unimplementable in committed tooling because the lane-directory layout and tmux session naming
+  exist NOWHERE in this repo — a tool guessing at them would report nothing on any differently-named
+  machine, a vacuous green in a watchdog's clothes. **Diagnostic order for a box that stops answering
+  is in `docs/development/fleet-runbook.md`** and starts with `dmesg` for an OOM kill *before*
+  concluding the instance is broken, because reading that symptom as a broken box already cost one
   healthy machine.
   The `project-board-sync` 30-min cron runs a `reap-claims`
   job that applies this predicate server-side and flips a freed board item back to Ready with a
@@ -1037,14 +1065,27 @@ end-to-end test. Green helper-only unit tests are not sufficient.
   persistent red run is the alert, replacing the old silent green `::notice::` no-op. The scheduled
   board sweep only backlogs a null-status issue once it is past a 10-min auto-add grace window, so it
   no longer races the built-in Auto-add's default-status write.
-- **One worker per machine (#1930)**: one lead/worker session owns a box; it fans out subagents but
-  keeps to **one full gate at a time** — enforced mechanically (#2640): `bootstrap-agent-machine.sh`
+- **~~One worker per machine (#1930)~~ RETRACTED — MULTIPLE LANES PER MACHINE IS THE STANDING MODEL
+  (#3393, owner ruling 2026-08-28).** The invariant was false in practice all day (the fleet runs up
+  to 4 lanes per box on standing instruction) and leaving it written is what caused the defect it
+  was supposed to prevent: `refs/machine-claims/<machine>` was designed one-ref-per-machine *because*
+  of this text, so several lanes on one box overwrote each other's claim and `dead-lanes` could report
+  at most one — which is why two of #3393's three silent lane deaths, both on one host, were
+  structurally invisible. Claims are now **per LANE**:
+  `refs/lane-claims/<machine>/<issue>` (a new namespace, because git forbids a ref being both a file
+  and a directory, and `<machine>-<issue>` is ambiguous when machine names contain dashes). Read
+  "one worker per machine" nowhere as a design constraint; design for N lanes per box.
+  **What DOES still hold — one full gate at a time per machine**, which is a resource
+  bound and not a worker-count invariant — enforced mechanically (#2640): `bootstrap-agent-machine.sh`
   pins `CQLITE_GATE_MAX_CONCURRENCY=1` (the #1825 cap admits one gate; the per-gate core budget then
   gives it full cores), and every gate derives `CARGO_BUILD_JOBS` + nextest `--test-threads` from its
   slot count and runs under `taskpolicy -c utility`/`nice`, so no manual `pgrep`-serialization is
   needed. It pre-claims by checking the `refs/claims/issue-<N>` ref (`claim.sh status <N>`) AND any legacy
-  `issue-<N>-*` branch. Multiple independent sessions → separate
-  machines, each claim-protocol-gated; NEVER N bare leads without the protocol. Unattended runs:
+  `issue-<N>-*` branch. Multiple sessions on ONE machine are now expected, each
+  claim-protocol-gated; NEVER N bare sessions without the protocol — and note the claim ref is a
+  hard control only *cross-machine* (git arbitrates the push). Locally it is advisory: a session
+  that never consults it can still walk into an occupied lane directory, which happened
+  (#3436). Unattended runs:
   `scripts/local/worker-supervisor.sh` (#2090) recycles ONE worker process per issue (hard context
   bound = process exit; the worker writes `.worker-last-iteration.json` then EXITs — never a second
   issue per session), with flock single-instance + preflight + crash-loop breaker + budgets + ntfy

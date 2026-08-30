@@ -20,6 +20,30 @@ fail() {
   FAIL_COUNT=$((FAIL_COUNT + 1))
   echo "FAIL: $1"
 }
+
+# t <test-fn> — run a top-level test. IT MUST EXIST, AND IT MUST RETURN ZERO.
+#
+# THE SUITE REPORTED GREEN THROUGH A TEST THAT DID NOT EXIST (roborev round 27, Medium).
+# `test_claim_transition_survives_failed_replacement` was invoked at the bottom of this file and never
+# defined. The harness runs under `set -uo pipefail` with NO errexit, so bash printed
+# "command not found" to stderr, the status was discarded, and the summary still said
+# "80 passed, 0 failed" — through ELEVEN gates. A suite that can report success while a named case never
+# runs is the vacuity failure one level up from the individual asserts: every non-vacuity probe in here
+# was guarding its own case while the HARNESS had no guard at all.
+#
+# Both halves are closed: an undefined name is a FAILURE rather than a silent no-op, and a test that
+# returns non-zero without having called `fail` is also a failure — otherwise an early `return 1` inside a
+# case would vanish the same way.
+t() {
+  local name="$1" rc=0
+  if ! declare -F "$name" >/dev/null 2>&1; then
+    fail "harness: test function '$name' is INVOKED but UNDEFINED — it has never run"
+    return 0
+  fi
+  "$name" || rc=$?
+  [[ "$rc" -eq 0 ]] || fail "harness: test function '$name' returned non-zero ($rc) without reporting a failure"
+}
+
 # skip: an ENVIRONMENTAL non-result (e.g. a live control process that never
 # scheduled within the wait cap) — explicitly reported, never counted as failure.
 skip() {
@@ -28,6 +52,7 @@ skip() {
 }
 
 TMP_ROOT="$(mktemp -d "${TMPDIR:-/tmp}/cqlite-supervisor-test.XXXXXX")"
+T_LOCKFN="$TMP_ROOT/lockfn"
 cleanup() { rm -rf "$TMP_ROOT" 2>/dev/null || true; }
 trap cleanup EXIT
 
@@ -161,6 +186,21 @@ write_blocked_same_issue_stub() {
 set -euo pipefail
 cat >"\$MARKER_FILE" <<JSON
 {"outcome":"blocked","issue":$issue,"pr":null,"duration_s":1,"reason":"needs owner decision"}
+JSON
+EOF
+  chmod +x "$path"
+}
+
+# Parks on the EXACT reason token the supervisor keys on (#3393 round 20). Note the sibling stub above
+# uses free text ("needs owner decision"), which is deliberately NOT a park token — that is why it
+# retains its issue and this one releases it.
+write_park_stub() {
+  local path="$1" issue="$2" reason="$3"
+  cat >"$path" <<EOF
+#!/usr/bin/env bash
+set -euo pipefail
+cat >"\$MARKER_FILE" <<JSON
+{"outcome":"blocked","issue":$issue,"pr":null,"duration_s":1,"reason":"$reason"}
 JSON
 EOF
   chmod +x "$path"
@@ -605,6 +645,10 @@ common_env() {
   : >"$NOTIFY_LOG"
   write_notify_stub "$d/bin/notify.sh"
   export NOTIFY_CMD="$d/bin/notify.sh"
+  # The per-issue LOCK seam off by default: `REPO_ROOT` is the REAL lane checkout in these cases, so its
+  # branch genuinely names an issue and the legacy-claim migration would fire a network `claim.sh status`
+  # in every one of them. Dedicated cases below supply a stub instead.
+  export LOCK_CMD=""
   export LOAD_PROBE_CMD="echo 0"
   export DISK_PROBE_CMD="echo 999999"
   # roborev 1839: preflight bounds the two leftover families separately, so it reads
@@ -651,6 +695,33 @@ write_claim_stub() {
   cat >"$path" <<'EOF'
 #!/usr/bin/env bash
 printf '%s\n' "$*" >>"${CLAIM_LOG:?CLAIM_LOG not set}"
+# `stamp` prints the sha it wrote on STDOUT (roborev round 19), which the supervisor captures and
+# passes back as a `reap` LEASE. A stub that printed nothing would exercise the NO-lease path instead,
+# and every lease assertion below would pass vacuously while proving the opposite of the property.
+# Fixed and hex so assertions can name it exactly.
+[ "${1:-}" = stamp ] && printf 'deadbeefdeadbeefdeadbeefdeadbeefdeadbeef\n'
+exit 0
+EOF
+  chmod +x "$path"
+}
+
+# write_claim_stub_failing_issue_stamp <path> — logs every call like the normal stub but FAILS any
+# `stamp <numeric-issue> ...`, i.e. the replacement stamp of a lane transition (#3393, roborev round
+# 2). Used to prove the transition cannot open a liveness gap: the OLD ref must survive a failed
+# replacement, because a lane with no claim ref at all is invisible to dead-lanes and the reaper.
+write_claim_stub_failing_issue_stamp() {
+  local path="$1"
+  cat >"$path" <<'EOF'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >>"${CLAIM_LOG:?CLAIM_LOG not set}"
+if [ "${1:-}" = "stamp" ]; then
+  case "${2:-}" in
+    p*) exit 0 ;;          # the placeholder stamp still succeeds
+    *[!0-9]*) exit 0 ;;
+    '') exit 0 ;;
+    *) exit 1 ;;           # an ISSUE-named stamp fails: the replacement cannot land
+  esac
+fi
 exit 0
 EOF
   chmod +x "$path"
@@ -1348,7 +1419,7 @@ test_finalized_verified_merged_counts() {
 }
 
 # ---------------------------------------------------------------------------
-# Test 23-claim (#2655): the supervisor STAMPS refs/machine-claims/<machine> before each
+# Test 23-claim (#2655): the supervisor STAMPS refs/lane-claims/<machine>/<issue> before each
 # spawn and CLEARS (reap) it on a clean exit — via CLAIM_CMD, mechanically, without the
 # worker LLM. A hermetic CLAIM_CMD stub logs every invocation; we assert one
 # `stamp <issue> <pid>` per iteration and exactly one `reap <machine>` at stop.
@@ -1373,14 +1444,24 @@ test_claim_stamp_each_iter_and_clear_on_exit() {
   # 2 finalized iterations => 2 stamps; a clean budget stop => exactly 1 reap.
   stamps=$(grep -c '^stamp ' "$CLAIM_LOG" 2>/dev/null || true)
   reaps=$(grep -c '^reap testbox' "$CLAIM_LOG" 2>/dev/null || true)
-  # Every stamp carries the SUPERVISOR pid as the 3rd token (numeric).
+  # Every stamp carries a LANE ID then the SUPERVISOR pid (#3393). The lane id is the issue number
+  # when known, or `p<pid>` when it is not — which is the case here, because `CLAIM_ISSUE` is
+  # cleared on `finalized`, so a supervisor finalising issue after issue never knows its issue at
+  # spawn time. The placeholder MUST be unique per supervisor: the old shared "0" made every
+  # unknown-issue supervisor on a machine write the same per-lane ref, re-creating the masking that
+  # per-lane refs exist to remove.
   local well_formed="yes"
   while IFS= read -r line; do
     [[ -n "$line" ]] || continue
-    [[ "$line" =~ ^stamp\ [0-9]+\ [0-9]+$ ]] || well_formed="no"
+    [[ "$line" =~ ^stamp\ ([0-9]+|p[0-9]+-[0-9a-f]+)\ [0-9]+$ ]] || well_formed="no"
+    [[ "$line" =~ ^stamp\ 0\  ]] && well_formed="no"   # the shared placeholder must be gone
   done < <(grep '^stamp ' "$CLAIM_LOG" 2>/dev/null)
+  # ...and both stamps must name the SAME placeholder, since it is this supervisor's identity.
+  local uniq_ids
+  uniq_ids=$(grep '^stamp ' "$CLAIM_LOG" 2>/dev/null | awk '{print $2}' | sort -u | wc -l | tr -d ' ')
+  [[ "$uniq_ids" == "1" ]] || well_formed="no"
   if [[ "$rc" -eq 0 && "$stamps" -eq 2 && "$reaps" -eq 1 && "$well_formed" == "yes" ]]; then
-    pass "claim: stamp per iteration (with pid) + one reap on clean exit"
+    pass "claim: stamp per iteration (unique p<pid> lane id + supervisor pid, never the shared 0) + one reap on clean exit"
   else
     fail "claim: rc=$rc stamps=$stamps reaps=$reaps well_formed=$well_formed (see $CLAIM_LOG)"
   fi
@@ -2434,6 +2515,42 @@ test_numeric_knob_validation() {
   else
     fail "knob-validation(float): rc=$rc spawned=$([[ -f "$counter2" ]] && echo yes || echo no) (see $d2)"
   fi
+  # (c) ZERO is not a lax bound for CLAIM_MIGRATION_RETRIES, it is a SILENT SKIP (roborev round 35).
+  # A 0 makes the retry loop body never execute, so the legacy claim is never read and the lane runs
+  # foreign to its own lock with no error anywhere. It therefore belongs to a strictly-POSITIVE group,
+  # unlike the count knobs where 0 is a meaningful value. Found because a harness left it unset — the
+  # same failure a plist typo would produce in production, where nothing would be watching.
+  local d3 counter3 rc3
+  d3="$(new_case_dir)"; counter3="$d3/counter"
+  common_env "$d3"
+  write_finalize_stub "$d3/bin/worker.sh" "$counter3"
+  export WORKER_CMD="$d3/bin/worker.sh"
+  export CLAIM_MIGRATION_RETRIES=0
+  bash "$SUPERVISOR" >"$d3/stdout.log" 2>&1
+  rc3=$?
+  if [[ "$rc3" -eq 2 && ! -f "$counter3" ]] &&
+     grep -q "CLAIM_MIGRATION_RETRIES" "$d3/stdout.log"; then
+    pass "knob validation: CLAIM_MIGRATION_RETRIES=0 fails closed and names the knob (0 would silently skip the migration)"
+  else
+    fail "knob-validation(zero-retries): rc=$rc3 (want 2) spawned=$([[ -f "$counter3" ]] && echo yes || echo no)"
+  fi
+  # NON-VACUITY: a positive value is accepted, so (c) is about ZERO and not about the knob being
+  # rejected outright.
+  local d4 counter4 rc4
+  d4="$(new_case_dir)"; counter4="$d4/counter"
+  common_env "$d4"
+  write_finalize_stub "$d4/bin/worker.sh" "$counter4"
+  export WORKER_CMD="$d4/bin/worker.sh"
+  export MAX_ISSUES=1
+  export CLAIM_MIGRATION_RETRIES=2
+  bash "$SUPERVISOR" >"$d4/stdout.log" 2>&1
+  rc4=$?
+  unset CLAIM_MIGRATION_RETRIES
+  if [[ "$rc4" -eq 0 && -f "$counter4" ]]; then
+    pass "NON-VACUITY: CLAIM_MIGRATION_RETRIES=2 is accepted and the run proceeds"
+  else
+    fail "knob-validation(positive-retries): rc=$rc4 spawned=$([[ -f "$counter4" ]] && echo yes || echo no)"
+  fi
 }
 
 # ---------------------------------------------------------------------------
@@ -2543,13 +2660,797 @@ test_claim_issue_learned_from_marker() {
 
   bash "$SUPERVISOR" >"$d/stdout.log" 2>&1
   rc=$?
-  # Iter1 stamp = "stamp 0 <pid>" (issue unknown); iter2 stamp = "stamp 88 <pid>"
-  # (learned from iter1's blocked marker). Grab the 2nd stamp line.
-  second_stamp=$(grep '^stamp ' "$CLAIM_LOG" 2>/dev/null | sed -n '2p')
-  if [[ "$rc" -eq 0 ]] && printf '%s' "$second_stamp" | grep -qE '^stamp 88 [0-9]+$'; then
-    pass "claim: issue learned from a blocked marker names the next stamp (issue 88)"
+  # Iter1 stamps the `p<pid>` placeholder (issue unknown — it is no longer the shared "0", #3393);
+  # iter2 stamps issue 88, learned from iter1's blocked marker. Assert on the ISSUE-NAMED stamp
+  # rather than on line position, which is what the property is actually about.
+  second_stamp=$(grep -E '^stamp 88 [0-9]+$' "$CLAIM_LOG" 2>/dev/null | head -1)
+  # ...and the placeholder it replaced must have been cleared, or the transition leaks a ref that
+  # holds a dead pid and dead-lanes reports it as a dead lane forever.
+  local placeholder_id placeholder_reaped
+  placeholder_id=$(grep -E '^stamp p[0-9]+-[0-9a-f]+ [0-9]+$' "$CLAIM_LOG" 2>/dev/null | head -1 | awk '{print $2}')
+  placeholder_reaped=no
+  # WITH THE LEASE the stamp reported (roborev round 19): a reap of a lane ref must never run
+  # unleased, or a retry landing after another supervisor took the lane id deletes ITS live claim.
+  [[ -n "$placeholder_id" ]] && grep -qE "^reap testbox ${placeholder_id} deadbeefdeadbeefdeadbeefdeadbeefdeadbeef\$" "$CLAIM_LOG" 2>/dev/null && placeholder_reaped=yes
+  if [[ "$rc" -eq 0 ]] && printf '%s' "$second_stamp" | grep -qE '^stamp 88 [0-9]+$' \
+    && [[ "$placeholder_reaped" == "yes" ]]; then
+    pass "claim: issue learned from a blocked marker names the next stamp (issue 88), and the p<pid> placeholder ref it replaced was cleared (no leaked ref)"
   else
-    fail "claim-learn: rc=$rc second_stamp='$second_stamp' (see $CLAIM_LOG)"
+    fail "claim-learn: rc=$rc second_stamp='$second_stamp' placeholder='$placeholder_id' reaped=$placeholder_reaped (see $CLAIM_LOG)"
+  fi
+}
+
+# ---------------------------------------------------------------------------
+# Test 25-claim (#3393, roborev round 2): a lane TRANSITION whose replacement stamp FAILS must not
+# leave the lane with no claim ref. Deleting the old ref first would open exactly that gap — the
+# worker still starts, but dead-lanes and the reaper cannot see it for the whole iteration. So the
+# old ref must SURVIVE a failed replacement.
+# ---------------------------------------------------------------------------
+# ---------------------------------------------------------------------------
+# Test 26-claim (#3393, roborev round 6): the pending-cleanup queue must NEVER delete the lane ref
+# just stamped. If cleaning placeholder P fails during P -> issue, P stays queued; a later
+# issue -> P transition REFRESHES P and then drains, which without protection deletes that fresh
+# CURRENT ref and leaves the running lane unobservable — the failure this change exists to prevent,
+# produced by the retry logic that was added to fix a leak.
+# ---------------------------------------------------------------------------
+# ---------------------------------------------------------------------------
+# Test 27-claim (#3393, roborev round 18): clear_claim must NOT delete a PLACEHOLDER lane ref on an
+# ABNORMAL exit. finalize_exit runs on every exit path (breaker, leftover-*, automerge-stuck,
+# verify-unavailable), and a `p<pid>` id names no issue, so `reap` cannot consult the open-PR
+# safeguard and deletes unconditionally — destroying the only liveness signal of a lane whose worker
+# may have claimed an issue and opened a PR before the supervisor ever saw the marker (#2499 reached
+# from the other side). A NUMERIC lane id is unaffected: there the guard runs inside reap.
+# ---------------------------------------------------------------------------
+test_clear_claim_keeps_placeholder_on_abnormal_exit() {
+  local d out
+  d="$(new_case_dir)"
+  common_env "$d"
+  export CLAIM_LOG="$d/claim.log"
+  cat >"$d/bin/claim.sh" <<'STUBEOF'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >>"${CLAIM_LOG:?CLAIM_LOG not set}"
+[ "${1:-}" = stamp ] && printf 'deadbeefdeadbeefdeadbeefdeadbeefdeadbeef\n'
+exit 0
+STUBEOF
+  chmod +x "$d/bin/claim.sh"
+  # FOUR cases. The two NUMERIC ones are the round-23 correction: a numeric lane id used to be cleared
+  # on any exit, on the reasoning that reap's open-PR guard makes it safe. It does not — PRE-PR work has
+  # no open PR, so the guard passes and the ref is deleted, erasing the only signal that an unfinished
+  # lane held that issue. "No open PR" is a correct answer to the wrong question.
+  : >"$CLAIM_LOG"
+  out="$(
+    CLAIM_CMD="bash $d/bin/claim.sh" HEARTBEAT_MACHINE=testbox CLAIM_LOG="$CLAIM_LOG" \
+    bash -c '
+      source "$1"
+      # A real supervisor always holds a lease unless the stamp reported no sha; round 32 makes an
+      # empty lease refuse outright, so these legs supply one and the empty case is asserted below.
+      CLAIM_STAMPED_SHA="feed0001"
+      CLAIM_STAMPED_ISSUE="p777-dead1"; clear_claim 0
+      CLAIM_STAMPED_ISSUE="p888-dead2"; clear_claim 1
+      CLAIM_STAMPED_ISSUE="4242";       clear_claim 0
+      CLAIM_STAMPED_ISSUE="5353";       clear_claim 1
+      # ROUND 32: no lease => no automated delete, even when concluded.
+      CLAIM_STAMPED_SHA=""
+      CLAIM_STAMPED_ISSUE="6464";       clear_claim 1
+    ' _ "$SUPERVISOR" 2>&1
+  )"
+  if printf '%s' "$out" | grep -q 'the work on lane p777-dead1 has not concluded' \
+    && printf '%s' "$out" | grep -q 'the work on lane 4242 has not concluded' \
+    && ! grep -qE '^reap testbox p777-dead1( |$)' "$CLAIM_LOG" \
+    && ! grep -qE '^reap testbox 4242( |$)' "$CLAIM_LOG" \
+    && grep -qE '^reap testbox p888-dead2( |$)' "$CLAIM_LOG" \
+    && grep -qE '^reap testbox 5353( |$)' "$CLAIM_LOG" \
+    && ! grep -qE '^reap testbox 6464' "$CLAIM_LOG" \
+    && printf '%s' "$out" | grep -q 'DECLINED for lane 6464: no lease was recorded'; then
+    pass "claim: an UNCONCLUDED lane survives regardless of its id shape (placeholder AND numeric), and a concluded one is cleared either way"
+  else
+    fail "clear-claim-concluded: out=[$out] log=[$(tr '\n' ';' <"$CLAIM_LOG")]"
+  fi
+  # WIRING: finalize_exit must pass the WORK-CONCLUDED state, not a code-derived clean flag. The exit
+  # code was the previous discriminator and it is exactly what this round falsified — a clean stop
+  # mid-issue must keep the ref just as a breaker must.
+  if grep -qE 'clear_claim "\$CLAIM_WORK_CONCLUDED"' "$SUPERVISOR" \
+    && ! grep -qE 'clear_claim "\$clean_exit"' "$SUPERVISOR"; then
+    pass "claim: finalize_exit passes CLAIM_WORK_CONCLUDED and no longer derives a clean flag from the exit code"
+  else
+    fail "clear-claim-wiring: finalize_exit must pass \$CLAIM_WORK_CONCLUDED, not an exit-code flag"
+  fi
+  # ...and the LIFECYCLE must hold, which the round-23 version of this case did not check. It asserted
+  # that the shipped file contained particular `case` arms — i.e. it tested a MODEL of the code, and
+  # when round 24 moved the assignment to the accept points the model went stale while the property it
+  # was standing in for was never being measured at all. Replaced with behaviour.
+  #
+  # (a) UNCONCLUDED AT SPAWN. The flag must be reset where the ref is stamped, so every path that
+  #     returns early — a crash, the stuck watchdog, an early finalize_exit — inherits the SAFE value.
+  #     Round 24: it kept its initial 1, so a breaker after abnormal iterations deleted the live ref.
+  local spawn_block
+  spawn_block="$(sed -n '/^run_iteration()/,/^}/p' "$SUPERVISOR" | sed -n '1,/CLAIM_WORK_CONCLUDED=0/p')"
+  if printf '%s' "$spawn_block" | grep -q 'stamp_claim' \
+    && printf '%s' "$spawn_block" | grep -q 'CLAIM_WORK_CONCLUDED=0'; then
+    pass "claim: run_iteration resets work-concluded to 0 at the stamp, so every early exit inherits the safe value"
+  else
+    fail "clear-claim-spawn-reset: run_iteration must set CLAIM_WORK_CONCLUDED=0 at/after stamp_claim"
+  fi
+  # (b) A MALFORMED `finalized` MARKER MUST NOT CONCLUDE THE WORK. Behavioural: the marker claims
+  #     success with no pr, the supervisor judges it abnormal, and the lane's ref must SURVIVE.
+  #     Round 24: the flag was set from the outcome STRING before that validation ran.
+  local d2
+  d2="$(new_case_dir)"
+  common_env "$d2"
+  export CLAIM_LOG="$d2/claim.log"
+  : >"$CLAIM_LOG"
+  write_finalize_missing_pr_stub "$d2/bin/worker.sh"
+  export WORKER_CMD="$d2/bin/worker.sh"
+  export MAX_ISSUES=1
+  export BREAKER_N=1
+  write_claim_stub "$d2/bin/claim.sh"
+  export CLAIM_CMD="bash $d2/bin/claim.sh"
+  export HEARTBEAT_MACHINE="testbox"
+  bash "$SUPERVISOR" >"$d2/stdout.log" 2>&1 || true
+  local stamped reaped_it
+  stamped=$(grep -oE '^stamp [^ ]+' "$CLAIM_LOG" 2>/dev/null | head -1 | awk '{print $2}')
+  reaped_it=no
+  [[ -n "$stamped" ]] && grep -qE "^reap testbox ${stamped}( |$)" "$CLAIM_LOG" 2>/dev/null && reaped_it=yes
+  if [[ -n "$stamped" && "$reaped_it" == no ]] \
+    && grep -q 'has not concluded' "$d2/stdout.log"; then
+    pass "claim: a malformed 'finalized' marker does NOT conclude the work — lane $stamped keeps its ref"
+  else
+    fail "clear-claim-untrusted-finalize: stamped='$stamped' reaped=$reaped_it log=[$(tr '\n' ';' <"$CLAIM_LOG")]"
+  fi
+  # NON-VACUITY: the run really did stamp a lane and really did reach its exit path, so "no reap" is a
+  # DECISION rather than an absence of activity.
+  #
+  # KEYED ON A SIGNAL THAT EXISTS IN BOTH DIRECTIONS. The first cut looked for the DECLINE message —
+  # which only appears when the fix works, so under RED (fix removed) this probe failed too. A
+  # non-vacuity check that can only pass when the assertion passes measures nothing; it has to be true
+  # of the broken code as well. The journal's `summary` record is written by `finalize_exit` on every
+  # exit path, whatever the claim decision was.
+  local jf_summary=no
+  grep -rqs '"outcome":"summary"' "$d2/logs" 2>/dev/null && jf_summary=yes
+  if grep -qE '^stamp ' "$CLAIM_LOG" && [[ "$jf_summary" == yes ]]; then
+    pass "NON-VACUITY: the run stamped a lane and journalled an exit summary, so the surviving ref is a decision"
+  else
+    fail "clear-claim-untrusted-finalize-nonvacuity: stamp=$(grep -cE '^stamp ' "$CLAIM_LOG") summary=$jf_summary"
+  fi
+}
+
+# ---------------------------------------------------------------------------
+# Test 28-claim (#3393, roborev round 19): the single-instance lock must be PER LANE. A
+# machine-global default made a second lane exit during lock acquisition, so the per-lane claim refs
+# this change adds were unreachable with the documented default invocation — the retracted #1930
+# invariant surviving in a second mechanism.
+# ---------------------------------------------------------------------------
+test_supervisor_lock_is_per_lane() {
+  local body a b same
+  body="$T_LOCKFN/lockfn.sh"
+  mkdir -p "$T_LOCKFN"
+  # The functions alone, so the case does not depend on sourcing the whole supervisor. BOTH are needed:
+  # `supervisor_lock_path` now BUILDS ON `supervisor_lane_id` (roborev round 34) rather than carrying a
+  # second copy of its body, so extracting the lock function alone yields an undefined call and an EMPTY
+  # path — which is how this case caught the change, loudly and in the right place.
+  # DRIVEN BY `LANE_ID`, THE GIVEN IDENTITY (lead ruling B, 2026-08-30). This case used to drive the
+  # lock by REPO_ROOT, because the lock inferred its own identity from the script's location — which is
+  # exactly the coincidence the ruling rejected. The PROPERTY is unchanged (distinct lanes get distinct
+  # locks; one lane is stable); only the SOURCE of the identity moved, from an inference to a value.
+  {
+    printf '%s\n' '#!/usr/bin/env bash'
+    sed -n '/^supervisor_lane_id()/,/^}/p' "$SUPERVISOR"
+    sed -n '/^supervisor_lock_path()/,/^}/p' "$SUPERVISOR"
+    printf '%s\n' 'supervisor_lock_path; printf "%s\n" "$SUPERVISOR_LOCK"'
+  } >"$body"
+  a=$(SUPERVISOR_LOCK="" LANE_ID=lane-1111 REPO_ROOT=/data/lanes/lane-1111 TMPDIR=/tmp bash "$body")
+  b=$(SUPERVISOR_LOCK="" LANE_ID=lane-2222 REPO_ROOT=/data/lanes/lane-2222 TMPDIR=/tmp bash "$body")
+  same=$(SUPERVISOR_LOCK="" LANE_ID=lane-1111 REPO_ROOT=/data/lanes/lane-1111 TMPDIR=/tmp bash "$body")
+  if [[ -n "$a" && -n "$b" && "$a" != "$b" && "$a" == "$same" ]]; then
+    pass "claim: two lanes get DIFFERENT default locks and one lane is stable across runs ($a vs $b)"
+  else
+    fail "lock-per-lane: a=[$a] b=[$b] same=[$same] — two lanes must differ and one lane must be stable"
+  fi
+  # Two lanes whose directories share a BASENAME must still differ, or the readable half would alias
+  # them onto one lock and reintroduce the machine-global failure for the common fleet layout.
+  local c e
+  c=$(SUPERVISOR_LOCK="" LANE_ID=boxA-lane REPO_ROOT=/data/boxA/lane TMPDIR=/tmp bash "$body")
+  e=$(SUPERVISOR_LOCK="" LANE_ID=boxB-lane REPO_ROOT=/data/boxB/lane TMPDIR=/tmp bash "$body")
+  if [[ "$c" != "$e" ]]; then
+    pass "claim: two distinct LANE_IDs get different locks (the basename coincidence is no longer load-bearing)"
+  else
+    fail "lock-per-lane-basename: both resolved to [$c]"
+  fi
+  # An explicit SUPERVISOR_LOCK still wins — the fix must not take the override away.
+  local ov
+  ov=$(SUPERVISOR_LOCK=/tmp/explicit.lock LANE_ID=lane-1111 REPO_ROOT=/data/lanes/lane-1111 bash "$body")
+  if [[ "$ov" == "/tmp/explicit.lock" ]]; then
+    pass "claim: an explicit SUPERVISOR_LOCK is still honoured"
+  else
+    fail "lock-per-lane-override: got [$ov]"
+  fi
+  # ONE CONSTRUCTION (roborev round 34, Medium): the lock path must be built FROM `supervisor_lane_id`,
+  # not from a second copy of its body — two spellings of one identity drift, and the bound added to one
+  # would silently not apply to the other.
+  # ONE IDENTITY, TWO CONSUMERS (lead ruling B): the lock and the claim actor must BOTH derive from
+  # `LANE_ID`. Two independent derivations of "which lane am I" is two things to keep in step, and the
+  # one that drifts is found in production. The earlier form of this assert required the lock to call
+  # `supervisor_lane_id`; that was the same property when identity was inferred, and is the wrong
+  # spelling of it now that identity is given.
+  local lock_uses actor_uses
+  lock_uses=$(sed -n '/^supervisor_lock_path()/,/^}/p' "$SUPERVISOR" | grep -c 'LANE_ID')
+  actor_uses=$(sed -n '/^supervisor_claim_actor()/,/^}/p' "$SUPERVISOR" | grep -c 'LANE_ID')
+  if [[ "$lock_uses" -ge 1 && "$actor_uses" -ge 1 ]]; then
+    pass "identity: the lock AND the claim actor both derive from the given LANE_ID (one identity, two consumers)"
+  else
+    fail "identity-drift: lock refs LANE_ID $lock_uses time(s), actor $actor_uses — a consumer re-inferring its own lane identity will drift from the other"
+  fi
+  # BUILTINS ONLY (#3464 family 2, reintroduced in the first cut of this very fix). Several cases
+  # SOURCE the supervisor under a stripped PATH to prove the no-jq/no-python3 paths, so an external
+  # tool anywhere in this resolution breaks them. Driven by an EMPTY PATH.
+  local stripped
+  # `$BASH` is the ABSOLUTE path of the running shell. `PATH="" bash …` cannot find bash itself, so
+  # the first cut of this case failed with "bash: No such file or directory" — and its NON-VACUITY
+  # control PASSED for that same wrong reason, which is the shape this whole change keeps meeting.
+  stripped=$(SUPERVISOR_LOCK="" LANE_ID=lane-1111 REPO_ROOT=/data/lanes/lane-1111 TMPDIR=/tmp PATH="" "$BASH" "$body" 2>&1)
+  if [[ "$stripped" == "$a" ]]; then
+    pass "claim: the lock path resolves with an EMPTY PATH — builtins only, no tr/cksum/awk"
+  else
+    fail "lock-per-lane-builtins: with PATH='' got [$stripped], expected [$a] — an external tool crept into the resolution"
+  fi
+  # NON-VACUITY: the same harness with a deliberately external-tool implementation DOES fail under
+  # the stripped PATH, so the case above is a measurement rather than a tautology.
+  local ext_body ext_out
+  ext_body="$T_LOCKFN/ext.sh"
+  {
+    printf '%s\n' '#!/usr/bin/env bash'
+    printf '%s\n' 'h="$(printf %s "$REPO_ROOT" | cksum | awk "{print \$1}")"'
+    printf '%s\n' 'printf "%s\n" "/tmp/x-$h.lock"'
+  } >"$ext_body"
+  local ext_expected
+  ext_expected="/tmp/x-$(printf %s /data/lanes/lane-1111 | cksum | awk '{print $1}').lock"
+  # Sanity: WITH a normal PATH the control must produce that value, or the comparison below is
+  # meaningless regardless of what the stripped run does.
+  local ext_ok
+  ext_ok=$(REPO_ROOT=/data/lanes/lane-1111 "$BASH" "$ext_body" 2>/dev/null)
+  ext_out=$(REPO_ROOT=/data/lanes/lane-1111 PATH="" "$BASH" "$ext_body" 2>/dev/null)
+  if [[ "$ext_ok" == "$ext_expected" && "$ext_out" != "$ext_expected" ]]; then
+    pass "NON-VACUITY: an external-tool implementation of the same resolution DOES break under PATH='' (so the builtin case above measures something)"
+  else
+    fail "NON-VACUITY broken: control with PATH gave [$ext_ok] (expected [$ext_expected]) and with PATH='' gave [$ext_out] — the external-tool control must WORK normally and BREAK stripped, or the builtins assertion proves nothing"
+  fi
+}
+
+# ---------------------------------------------------------------------------
+# Test 29-claim (#3393, roborev round 19): a lane-ref reap must carry the LEASE this supervisor
+# stamped, and a lease-not-held result (rc=4) means ownership TRANSFERRED — drop the entry rather
+# than retry, because retrying can only delete the new owner's live claim.
+# ---------------------------------------------------------------------------
+test_claim_cleanup_uses_lease_and_drops_on_transfer() {
+  local d out
+  d="$(new_case_dir)"
+  common_env "$d"
+  export CLAIM_LOG="$d/claim.log"
+  : >"$CLAIM_LOG"
+  # A reap stub that reports rc=4 (lease not held) for lane 77, and success otherwise.
+  cat >"$d/bin/claim.sh" <<'STUBEOF'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >>"${CLAIM_LOG:?CLAIM_LOG not set}"
+if [ "${1:-}" = reap ] && [ "${3:-}" = 77 ]; then exit 4; fi
+[ "${1:-}" = stamp ] && printf 'deadbeefdeadbeefdeadbeefdeadbeefdeadbeef\n'
+exit 0
+STUBEOF
+  chmod +x "$d/bin/claim.sh"
+  out="$(
+    CLAIM_CMD="bash $d/bin/claim.sh" HEARTBEAT_MACHINE=testbox CLAIM_LOG="$CLAIM_LOG" \
+    bash -c '
+      source "$1"
+      CLAIM_PENDING_CLEANUP=" 77:cafe1234 88:beef5678 "
+      claim_drain_pending_cleanup
+      printf "PENDING_AFTER=[%s]\n" "$CLAIM_PENDING_CLEANUP"
+    ' _ "$SUPERVISOR" 2>&1
+  )"
+  if grep -qE '^reap testbox 77 cafe1234$' "$CLAIM_LOG" \
+    && grep -qE '^reap testbox 88 beef5678$' "$CLAIM_LOG" \
+    && printf '%s' "$out" | grep -q 'pending cleanup of 77 dropped: the lease at cafe1234 is no longer held' \
+    && printf '%s' "$out" | grep -q 'PENDING_AFTER=\[\]'; then
+    pass "claim: the drain passes each entry's LEASE and DROPS the one whose lease transferred (never retries it)"
+  else
+    fail "claim-lease-drain: out=[$out] log=[$(tr '\n' ';' <"$CLAIM_LOG")]"
+  fi
+  # CONTROL: an entry whose reap SUCCEEDS is also removed, so the drop above is attributable to the
+  # rc=4 branch rather than to "the drain empties the queue regardless".
+  : >"$CLAIM_LOG"
+  out="$(
+    CLAIM_CMD="bash $d/bin/claim.sh" HEARTBEAT_MACHINE=testbox CLAIM_LOG="$CLAIM_LOG" \
+    bash -c '
+      source "$1"
+      CLAIM_PENDING_CLEANUP=" 99:aaa111 "
+      claim_drain_pending_cleanup
+      printf "PENDING_AFTER=[%s]\n" "$CLAIM_PENDING_CLEANUP"
+    ' _ "$SUPERVISOR" 2>&1
+  )"
+  if grep -qE '^reap testbox 99 aaa111$' "$CLAIM_LOG" \
+    && printf '%s' "$out" | grep -q 'stale lane ref 99 cleared (lease held at aaa111)' \
+    && printf '%s' "$out" | grep -q 'PENDING_AFTER=\[\]'; then
+    pass "claim: a successful leased reap clears the entry and names the lease it held"
+  else
+    fail "claim-lease-success: out=[$out] log=[$(tr '\n' ';' <"$CLAIM_LOG")]"
+  fi
+  # A NON-TRANSFER FAILURE MUST STILL BE RETAINED — dropping every non-zero rc would turn the lease
+  # fix into a ref leak, the mirror mistake (#3464 family 4, fail-shut).
+  : >"$CLAIM_LOG"
+  cat >"$d/bin/claim-fail.sh" <<'STUBEOF'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >>"${CLAIM_LOG:?CLAIM_LOG not set}"
+[ "${1:-}" = reap ] && exit 3
+exit 0
+STUBEOF
+  chmod +x "$d/bin/claim-fail.sh"
+  out="$(
+    CLAIM_CMD="bash $d/bin/claim-fail.sh" HEARTBEAT_MACHINE=testbox CLAIM_LOG="$CLAIM_LOG" \
+    bash -c '
+      source "$1"
+      CLAIM_PENDING_CLEANUP=" 55:bbb222 "
+      claim_drain_pending_cleanup
+      printf "PENDING_AFTER=[%s]\n" "$CLAIM_PENDING_CLEANUP"
+    ' _ "$SUPERVISOR" 2>&1
+  )"
+  if printf '%s' "$out" | grep -q 'PENDING_AFTER=\[ 55:bbb222\]' \
+    && printf '%s' "$out" | grep -q 'retained for retry'; then
+    pass "claim: an open-PR refusal (rc=3) is RETAINED with its lease, not dropped — only a transfer drops"
+  else
+    fail "claim-lease-retain: a non-transfer failure must be retained: out=[$out]"
+  fi
+}
+
+# ---------------------------------------------------------------------------
+# Test 30-claim (#3393, roborev round 20, High): a park on `seam1-approval`/`needs-decision` RELEASES
+# the issue — it is excluded from the next pickup until the owner answers — so the next spawn must NOT
+# be stamped under that issue's ref. It was, which let another lane legitimately resuming the issue
+# overwrite the ref and hide a dead supervisor behind it: the collision per-lane refs exist to remove.
+# ---------------------------------------------------------------------------
+test_park_releases_issue_so_next_lane_is_a_placeholder() {
+  local d rc stamps placeholders named
+  for reason in needs-decision seam1-approval; do
+    d="$(new_case_dir)"
+    common_env "$d"
+    write_park_stub "$d/bin/worker.sh" 88 "$reason"
+    export WORKER_CMD="$d/bin/worker.sh"
+    export MAX_ISSUES=100
+    export BREAKER_N=100
+    export CLAIM_LOG="$d/claim.log"
+    : >"$CLAIM_LOG"
+    write_claim_stub "$d/bin/claim.sh"
+    export CLAIM_CMD="bash $d/bin/claim.sh"
+    export HEARTBEAT_MACHINE="testbox"
+    bash "$SUPERVISOR" >"$d/stdout.log" 2>&1
+    rc=$?
+    stamps=$(grep -cE '^stamp ' "$CLAIM_LOG" 2>/dev/null || true)
+    placeholders=$(grep -cE '^stamp p[0-9]+-[0-9a-f]+ [0-9]+$' "$CLAIM_LOG" 2>/dev/null || true)
+    named=$(grep -cE '^stamp 88 [0-9]+$' "$CLAIM_LOG" 2>/dev/null || true)
+    # NON-VACUITY is built in: the run must actually have stamped more than once, or "no stamp names
+    # 88" would hold trivially for a supervisor that never reached a second iteration.
+    if [[ "$stamps" -ge 2 && "$named" -eq 0 && "$placeholders" -eq "$stamps" ]]; then
+      pass "claim: a '$reason' park releases issue 88, so all $stamps stamps are unique placeholders and none names the released issue"
+    else
+      fail "park-releases-issue ($reason): stamps=$stamps placeholders=$placeholders named=$named rc=$rc log=[$(tr '\n' ';' <"$CLAIM_LOG")]"
+    fi
+  done
+  # CONTROL: a TECHNICAL block (free-text reason, not a park token) must still CARRY the issue forward,
+  # or the fix would have thrown away the liveness accuracy it exists to protect. This is the existing
+  # claim-learn behaviour, asserted here so the two directions sit side by side.
+  d="$(new_case_dir)"
+  common_env "$d"
+  write_blocked_same_issue_stub "$d/bin/worker.sh" 88
+  export WORKER_CMD="$d/bin/worker.sh"
+  export MAX_ISSUES=100
+  export BREAKER_N=100
+  export CLAIM_LOG="$d/claim.log"
+  : >"$CLAIM_LOG"
+  write_claim_stub "$d/bin/claim.sh"
+  export CLAIM_CMD="bash $d/bin/claim.sh"
+  export HEARTBEAT_MACHINE="testbox"
+  bash "$SUPERVISOR" >"$d/stdout.log" 2>&1 || true
+  if grep -qE '^stamp 88 [0-9]+$' "$CLAIM_LOG"; then
+    pass "claim: CONTROL — a technical block still carries the issue forward (stamp names 88), so only the park path releases"
+  else
+    fail "park-releases-issue control: a technical block must still name the issue: log=[$(tr '\n' ';' <"$CLAIM_LOG")]"
+  fi
+}
+
+# ---------------------------------------------------------------------------
+# Test 31-claim (#3393, roborev round 25, Medium — a REGRESSION from round 24): an idle shutdown must
+# CLEAR the placeholder it stamped. Round 24 reset work-concluded to 0 at the stamp (correct, so early
+# exits inherit the safe value) which left `no-work` permanently unconcluded — and placeholders are never
+# automatically reaped, so every NORMAL idle shutdown leaked a stale ref that dead-lanes then reported as
+# a dead lane. A monitor that fires falsely on every idle stop is one an operator learns to ignore.
+# ---------------------------------------------------------------------------
+test_no_work_shutdown_clears_its_placeholder() {
+  local d out stamped
+  d="$(new_case_dir)"
+  common_env "$d"
+  export CLAIM_LOG="$d/claim.log"
+  : >"$CLAIM_LOG"
+  # A worker that reports no-work AND asks the loop to stop, so the run is exactly one idle iteration
+  # followed by the normal stop-file exit — the commonest shutdown shape on an empty Ready queue.
+  cat >"$d/bin/worker.sh" <<'WEOF'
+#!/usr/bin/env bash
+set -euo pipefail
+cat >"$MARKER_FILE" <<JSON
+{"outcome":"no-work","issue":null,"pr":null,"duration_s":1}
+JSON
+: >"${STOP_FILE:?STOP_FILE not set}"
+WEOF
+  chmod +x "$d/bin/worker.sh"
+  export WORKER_CMD="$d/bin/worker.sh"
+  export BACKOFF_NOWORK_SECS=0
+  export MAX_ISSUES=5
+  export BREAKER_N=5
+  write_claim_stub "$d/bin/claim.sh"
+  export CLAIM_CMD="bash $d/bin/claim.sh"
+  export HEARTBEAT_MACHINE="testbox"
+  bash "$SUPERVISOR" >"$d/stdout.log" 2>&1 || true
+  stamped=$(grep -oE '^stamp p[0-9]+-[0-9a-f]+' "$CLAIM_LOG" 2>/dev/null | head -1 | awk '{print $2}')
+  if [[ -n "$stamped" ]] && grep -qE "^reap testbox ${stamped}( |$)" "$CLAIM_LOG"; then
+    pass "claim: a no-work idle shutdown CLEARS the placeholder it stamped ($stamped) — no leaked ref for dead-lanes to misreport"
+  else
+    fail "no-work-clears-placeholder: stamped='$stamped' log=[$(tr '\n' ';' <"$CLAIM_LOG")] out=[$(tail -5 "$d/stdout.log")]"
+  fi
+  # NON-VACUITY, true of the BROKEN code too: the run must have stamped a placeholder and journalled an
+  # exit summary. Both hold whether or not the clear happens, so this establishes the run did the work
+  # rather than that the fix fired.
+  local jf_summary=no
+  grep -rqs '"outcome":"summary"' "$d/logs" 2>/dev/null && jf_summary=yes
+  if [[ -n "$stamped" && "$jf_summary" == yes ]] && grep -rqs '"outcome":"no-work"' "$d/logs"; then
+    pass "NON-VACUITY: the run stamped a placeholder, journalled a no-work iteration and reached its exit summary"
+  else
+    fail "no-work-clears-placeholder-nonvacuity: stamped='$stamped' summary=$jf_summary"
+  fi
+  # ...and a no-work marker that DOES name an issue must NOT conclude it — a no-work carrying an issue is
+  # not evidence that issue finished, so the ref stays.
+  local d2 stamped2
+  d2="$(new_case_dir)"
+  common_env "$d2"
+  export CLAIM_LOG="$d2/claim.log"
+  : >"$CLAIM_LOG"
+  cat >"$d2/bin/worker.sh" <<'WEOF'
+#!/usr/bin/env bash
+set -euo pipefail
+cat >"$MARKER_FILE" <<JSON
+{"outcome":"no-work","issue":777,"pr":null,"duration_s":1}
+JSON
+: >"${STOP_FILE:?STOP_FILE not set}"
+WEOF
+  chmod +x "$d2/bin/worker.sh"
+  export WORKER_CMD="$d2/bin/worker.sh"
+  export BACKOFF_NOWORK_SECS=0
+  write_claim_stub "$d2/bin/claim.sh"
+  export CLAIM_CMD="bash $d2/bin/claim.sh"
+  export HEARTBEAT_MACHINE="testbox"
+  bash "$SUPERVISOR" >"$d2/stdout.log" 2>&1 || true
+  stamped2=$(grep -oE '^stamp [^ ]+' "$CLAIM_LOG" 2>/dev/null | head -1 | awk '{print $2}')
+  if [[ -n "$stamped2" ]] && ! grep -qE "^reap testbox ${stamped2}( |$)" "$CLAIM_LOG"; then
+    pass "claim: a no-work marker that NAMES an issue does not conclude it — lane $stamped2 keeps its ref"
+  else
+    fail "no-work-with-issue: lane '$stamped2' must not be cleared: log=[$(tr '\n' ';' <"$CLAIM_LOG")]"
+  fi
+}
+
+# ---------------------------------------------------------------------------
+# Test 33-claim (#3393, roborev round 29, Medium — a REGRESSION from round 25's guard): a `no-work`
+# iteration must conclude only a PLACEHOLDER lane. Round 25 keyed on the MARKER's issue field, which is
+# empty for every no-work — but the STAMPED ref can be a NUMERIC issue carried forward from a prior
+# technical block, and concluding that cleared the only liveness signal for a still-unresolved issue.
+# ---------------------------------------------------------------------------
+test_no_work_does_not_conclude_a_numeric_lane() {
+  local d stamped_issue reaped
+  d="$(new_case_dir)"
+  common_env "$d"
+  export CLAIM_LOG="$d/claim.log"
+  : >"$CLAIM_LOG"
+  # BEHAVIOURAL, not a model of the code. The first cut of this case COPIED the supervisor's `case` arms
+  # into the test and classified with the copy — which is exactly the defect round 24 found and fixed
+  # here: a test that validates a MODEL stays green when the shipped logic moves. Driven instead through
+  # the real loop with a two-phase worker: iteration 1 blocks on issue 88 for a TECHNICAL reason (so the
+  # issue is carried forward), iteration 2 reports no-work and asks the loop to stop.
+  cat >"$d/bin/worker.sh" <<'WEOF'
+#!/usr/bin/env bash
+set -euo pipefail
+n_file="${LOG_DIR:?LOG_DIR not set}/.phase"
+n=0; [[ -f "$n_file" ]] && n=$(cat "$n_file")
+n=$((n + 1)); printf '%s' "$n" >"$n_file"
+if [[ "$n" -eq 1 ]]; then
+  cat >"$MARKER_FILE" <<JSON
+{"outcome":"blocked","issue":88,"pr":null,"duration_s":1,"reason":"a technical block, not an owner park"}
+JSON
+else
+  cat >"$MARKER_FILE" <<JSON
+{"outcome":"no-work","issue":null,"pr":null,"duration_s":1}
+JSON
+  : >"${STOP_FILE:?STOP_FILE not set}"
+fi
+WEOF
+  chmod +x "$d/bin/worker.sh"
+  export WORKER_CMD="$d/bin/worker.sh"
+  export BACKOFF_NOWORK_SECS=0
+  export MAX_ISSUES=10
+  export BREAKER_N=10
+  write_claim_stub "$d/bin/claim.sh"
+  export CLAIM_CMD="bash $d/bin/claim.sh"
+  export HEARTBEAT_MACHINE="testbox"
+  bash "$SUPERVISOR" >"$d/stdout.log" 2>&1 || true
+  stamped_issue=$(grep -cE '^stamp 88 [0-9]+$' "$CLAIM_LOG" 2>/dev/null || true)
+  reaped=no
+  grep -qE '^reap testbox 88( |$)' "$CLAIM_LOG" 2>/dev/null && reaped=yes
+  # The numeric lane must have been stamped (iteration 2 carried issue 88 forward) and must NOT be reaped:
+  # a no-work says nothing about an issue this lane is still holding.
+  if [[ "$stamped_issue" -ge 1 && "$reaped" == no ]] \
+    && grep -q 'has not concluded' "$d/stdout.log"; then
+    pass "claim: a no-work after a technical block does NOT conclude the numeric lane (88) it still holds"
+  else
+    fail "no-work-numeric-lane: stamp88=$stamped_issue reaped=$reaped log=[$(tr '\n' ';' <"$CLAIM_LOG")]"
+  fi
+  # NON-VACUITY, true of the BROKEN code too: the run really did reach a second iteration and a shutdown.
+  # Both hold whether or not the fix is present — under the old guard the same run reaps 88 instead.
+  local phases jf_summary=no
+  phases=$(cat "$d/logs/.phase" 2>/dev/null || echo 0)
+  grep -rqs '"outcome":"summary"' "$d/logs" 2>/dev/null && jf_summary=yes
+  if [[ "$phases" -ge 2 && "$jf_summary" == yes ]]; then
+    pass "NON-VACUITY: the run reached iteration $phases and journalled an exit summary, so the surviving ref is a decision"
+  else
+    fail "no-work-numeric-lane-nonvacuity: phases=$phases summary=$jf_summary"
+  fi
+}
+
+# ---------------------------------------------------------------------------
+# Test 34-claim (#3393, roborev round 31, Medium): a lane TRANSITION must not queue an unconcluded
+# NUMERIC predecessor for reaping. Round 29 protected the shutdown path and left this one — the same
+# guard, a second route. Technical block on 88 -> no-work (unconcluded, but CLAIM_ISSUE released) -> the
+# next stamp is a placeholder and the transition reaped 88, deleting an unresolved issue's only signal.
+#
+# THREE iterations are required, which is why this case did not exist before: the defect needs a
+# transition AFTER the numeric lane, so a two-iteration run cannot reach it.
+# ---------------------------------------------------------------------------
+test_transition_keeps_an_unconcluded_numeric_lane() {
+  local d reaped88 stamped88 placeholders
+  d="$(new_case_dir)"
+  common_env "$d"
+  export CLAIM_LOG="$d/claim.log"
+  : >"$CLAIM_LOG"
+  cat >"$d/bin/worker.sh" <<'WEOF'
+#!/usr/bin/env bash
+set -euo pipefail
+n_file="${LOG_DIR:?LOG_DIR not set}/.phase"
+n=0; [[ -f "$n_file" ]] && n=$(cat "$n_file")
+n=$((n + 1)); printf '%s' "$n" >"$n_file"
+case "$n" in
+  1)  # technical block: carries issue 88 forward
+      cat >"$MARKER_FILE" <<JSON
+{"outcome":"blocked","issue":88,"pr":null,"duration_s":1,"reason":"a technical block, not an owner park"}
+JSON
+      ;;
+  2)  # no-work: leaves 88 UNCONCLUDED but releases CLAIM_ISSUE
+      cat >"$MARKER_FILE" <<JSON
+{"outcome":"no-work","issue":null,"pr":null,"duration_s":1}
+JSON
+      ;;
+  *)  # a third iteration happens, stamping a placeholder — this is the transition under test
+      cat >"$MARKER_FILE" <<JSON
+{"outcome":"no-work","issue":null,"pr":null,"duration_s":1}
+JSON
+      : >"${STOP_FILE:?STOP_FILE not set}"
+      ;;
+esac
+WEOF
+  chmod +x "$d/bin/worker.sh"
+  export WORKER_CMD="$d/bin/worker.sh"
+  export BACKOFF_NOWORK_SECS=0
+  export MAX_ISSUES=10
+  export BREAKER_N=10
+  write_claim_stub "$d/bin/claim.sh"
+  export CLAIM_CMD="bash $d/bin/claim.sh"
+  export HEARTBEAT_MACHINE="testbox"
+  bash "$SUPERVISOR" >"$d/stdout.log" 2>&1 || true
+  stamped88=$(grep -cE '^stamp 88 [0-9]+$' "$CLAIM_LOG" 2>/dev/null || true)
+  reaped88=no
+  grep -qE '^reap testbox 88( |$)' "$CLAIM_LOG" 2>/dev/null && reaped88=yes
+  if [[ "$stamped88" -ge 1 && "$reaped88" == no ]] \
+    && grep -q 'SKIPPED: its work has not concluded' "$d/stdout.log"; then
+    pass "claim: a transition past an UNCONCLUDED numeric lane (88) does not queue it for reaping"
+  else
+    fail "transition-keeps-numeric: stamp88=$stamped88 reaped88=$reaped88 log=[$(tr '\n' ';' <"$CLAIM_LOG")]"
+  fi
+  # A PLACEHOLDER predecessor must still be collected — the exception exists so the round-5 leak stays
+  # fixed, and getting it wrong in the other direction trades one leak for another.
+  placeholders=$(grep -cE '^reap testbox p[0-9]+-[0-9a-f]+' "$CLAIM_LOG" 2>/dev/null || true)
+  if [[ "$placeholders" -ge 1 ]]; then
+    pass "claim: a PLACEHOLDER predecessor is still queued and reaped ($placeholders), so the round-5 leak stays fixed"
+  else
+    fail "transition-placeholder-still-reaped: no placeholder was reaped: log=[$(tr '\n' ';' <"$CLAIM_LOG")]"
+  fi
+  # NON-VACUITY, true of the BROKEN code too: the run reached a THIRD iteration, which is what makes the
+  # transition-after-numeric reachable at all. Under the old code the same run reaps 88 instead.
+  local phases
+  phases=$(cat "$d/logs/.phase" 2>/dev/null || echo 0)
+  if [[ "$phases" -ge 3 ]]; then
+    pass "NON-VACUITY: the run reached iteration $phases, so the transition after the numeric lane really occurred"
+  else
+    fail "transition-keeps-numeric-nonvacuity: only $phases iteration(s) — the transition under test never happened"
+  fi
+}
+
+# ---------------------------------------------------------------------------
+# Test 32-claim (#3393, roborev round 28, Medium): an ENDGAME IN FLIGHT keeps its ref. Owner ruling (b)
+# on #2499 semantics — a pending auto-merge PR IS an open PR, and `delete_ref_guarded` already refuses to
+# delete an issue-named ref in that state. But `CLAIM_WORK_CONCLUDED` reflects only the LATEST iteration,
+# so after a pending-automerge finalize a later no-work/finalize/park set it to 1 and the shutdown cleared
+# the lane's ref anyway. "Concluded" is necessary and NOT sufficient: nothing may be pending either.
+# ---------------------------------------------------------------------------
+test_pending_pr_keeps_the_claim() {
+  local d out
+  d="$(new_case_dir)"
+  common_env "$d"
+  export CLAIM_LOG="$d/claim.log"
+  : >"$CLAIM_LOG"
+  write_claim_stub "$d/bin/claim.sh"
+  # Unit-tested deliberately: reaching this state end to end needs a pending-automerge finalize followed
+  # by a concluding iteration AND a budget exit, which no existing stub sequences. The invariant is one
+  # condition in one function, so it is exercised directly — the approach the parser tests take.
+  #
+  # THE STAMPED LANE IS AN ISSUE NUMBER, AND THAT NOW MATTERS (roborev round 36). This case originally
+  # staged a `p999-abc` PLACEHOLDER, which was incidental to what it asserts — its stated invariant is
+  # "a pending auto-merge PR keeps the lane ref", and that is what an ISSUE-numbered lane still does.
+  # The PLACEHOLDER path deliberately behaves differently now: keeping a placeholder was a trap, because
+  # `should-reap` permanently refuses placeholders, so after the supervisor exited NOTHING could ever
+  # clear it. Its protection is transferred to an issue-numbered ref instead, and that path is pinned by
+  # `test_placeholder_endgame_protection_transfers` below rather than by weakening this case.
+  # Changed the PREMISE to keep the invariant honest — not the assertion to match new behaviour.
+  out="$(
+    CLAIM_CMD="bash $d/bin/claim.sh" HEARTBEAT_MACHINE=testbox CLAIM_LOG="$CLAIM_LOG" \
+    bash -c '
+      source "$1"
+      CLAIM_STAMPED_ISSUE="88"
+      CLAIM_STAMPED_SHA="feed0002"
+      PENDING_PR_LIST="4242'$'\t''88'$'\t''1'$'\t''0"
+      clear_claim 1          # CONCLUDED=1, but a PR is pending
+      printf "AFTER_PENDING=%s\n" "$(grep -c "^reap" "$CLAIM_LOG" 2>/dev/null || echo 0)"
+      PENDING_PR_LIST=""
+      clear_claim 1          # concluded AND nothing pending => clears
+      printf "AFTER_EMPTY=%s\n" "$(grep -c "^reap" "$CLAIM_LOG" 2>/dev/null || echo 0)"
+    ' _ "$SUPERVISOR" 2>&1
+  )"
+  if printf '%s' "$out" | grep -q 'auto-merge PR is still pending' \
+    && printf '%s' "$out" | grep -q 'AFTER_PENDING=0' \
+    && printf '%s' "$out" | grep -q 'AFTER_EMPTY=1'; then
+    pass "claim: a pending auto-merge PR KEEPS the lane ref even when concluded=1, and the same call clears once nothing is pending"
+  else
+    fail "pending-pr-keeps-claim: out=[$out] log=[$(tr '\n' ';' <"$CLAIM_LOG")]"
+  fi
+  # NON-VACUITY, AND IT MUST HOLD ON THE BROKEN CODE TOO — which the first cut did not. It required
+  # `AFTER_EMPTY=1` exactly, but with the fix removed BOTH calls reap, so the count becomes 2 and the
+  # probe failed alongside the assertion it was meant to qualify. That is the round-24 rule violated by
+  # the very case that cites it. Keyed on "at least one reap happened" instead, which is true whether or
+  # not the pending-PR hold is present, so it establishes reachability rather than the fix.
+  local reaps_seen
+  reaps_seen=$(printf '%s' "$out" | sed -n 's/.*AFTER_EMPTY=\([0-9][0-9]*\).*/\1/p' | head -1)
+  if [[ -n "$reaps_seen" && "$reaps_seen" -ge 1 ]]; then
+    pass "NON-VACUITY: the reap path IS reachable in this harness (${reaps_seen} reap(s) seen), so AFTER_PENDING=0 is a refusal"
+  else
+    fail "pending-pr-nonvacuity: the reap path never fires here, so the refusal proves nothing: out=[$out]"
+  fi
+}
+
+# ---------------------------------------------------------------------------
+# Test 25-claim (#3393, roborev round 2, Medium): a lane TRANSITION must not open a liveness GAP. The
+# replacement is stamped BEFORE the old ref is deleted, so if the replacement FAILS the OLD ref must
+# SURVIVE — a lane with no claim ref at all is invisible to dead-lanes and to the reaper for the whole
+# iteration, which is a gap introduced by the leak fix rather than by the leak.
+#
+# THIS FUNCTION WAS INVOKED AND NEVER DEFINED until roborev round 27 (Medium). The suite reported
+# "80 passed, 0 failed" through eleven gates while this case never ran; the `t` wrapper above now makes an
+# undefined invocation a failure. The regression it was meant to pin is finally pinned here.
+# ---------------------------------------------------------------------------
+test_claim_transition_survives_failed_replacement() {
+  local d placeholder stamped_issue reaped
+  d="$(new_case_dir)"
+  common_env "$d"
+  export CLAIM_LOG="$d/claim.log"
+  : >"$CLAIM_LOG"
+  # A technical block (free-text reason, NOT a park token) retains the issue, so iteration 2 attempts the
+  # ISSUE-named replacement stamp — which this stub fails, while letting the placeholder stamp succeed.
+  write_blocked_same_issue_stub "$d/bin/worker.sh" 88
+  export WORKER_CMD="$d/bin/worker.sh"
+  export MAX_ISSUES=100
+  export BREAKER_N=100
+  write_claim_stub_failing_issue_stamp "$d/bin/claim.sh"
+  export CLAIM_CMD="bash $d/bin/claim.sh"
+  export HEARTBEAT_MACHINE="testbox"
+  bash "$SUPERVISOR" >"$d/stdout.log" 2>&1 || true
+  placeholder=$(grep -oE '^stamp p[0-9]+-[0-9a-f]+' "$CLAIM_LOG" 2>/dev/null | head -1 | awk '{print $2}')
+  stamped_issue=$(grep -cE '^stamp 88 [0-9]+$' "$CLAIM_LOG" 2>/dev/null || true)
+  reaped=no
+  [[ -n "$placeholder" ]] && grep -qE "^reap testbox ${placeholder}( |$)" "$CLAIM_LOG" 2>/dev/null && reaped=yes
+  # The failed replacement must have been ATTEMPTED (or the case proves nothing), and the old ref must
+  # still be there.
+  if [[ -n "$placeholder" && "$stamped_issue" -ge 1 && "$reaped" == no ]]; then
+    pass "claim: a FAILED replacement stamp leaves the old ref ($placeholder) in place — no liveness gap"
+  else
+    fail "claim-transition-gap: placeholder='$placeholder' issue_stamp_attempts=$stamped_issue reaped=$reaped log=[$(tr '\n' ';' <"$CLAIM_LOG")]"
+  fi
+  # NON-VACUITY / CONTROL: with a stub whose replacement SUCCEEDS, the old placeholder IS cleared. So the
+  # survival above is caused by the failure, not by the transition never happening or by a reap that never
+  # runs in this shape.
+  local d2 ph2 reaped2
+  d2="$(new_case_dir)"
+  common_env "$d2"
+  export CLAIM_LOG="$d2/claim.log"
+  : >"$CLAIM_LOG"
+  write_blocked_same_issue_stub "$d2/bin/worker.sh" 88
+  export WORKER_CMD="$d2/bin/worker.sh"
+  export MAX_ISSUES=100
+  export BREAKER_N=100
+  write_claim_stub "$d2/bin/claim.sh"
+  export CLAIM_CMD="bash $d2/bin/claim.sh"
+  export HEARTBEAT_MACHINE="testbox"
+  bash "$SUPERVISOR" >"$d2/stdout.log" 2>&1 || true
+  ph2=$(grep -oE '^stamp p[0-9]+-[0-9a-f]+' "$CLAIM_LOG" 2>/dev/null | head -1 | awk '{print $2}')
+  reaped2=no
+  [[ -n "$ph2" ]] && grep -qE "^reap testbox ${ph2}( |$)" "$CLAIM_LOG" 2>/dev/null && reaped2=yes
+  if [[ -n "$ph2" && "$reaped2" == yes ]]; then
+    pass "NON-VACUITY: when the replacement SUCCEEDS the old placeholder IS cleared, so the survival above is attributable to the failure"
+  else
+    fail "claim-transition-gap-control: ph2='$ph2' reaped2=$reaped2 — the control must clear the old ref"
+  fi
+}
+
+test_claim_drain_never_deletes_current_lane() {
+  local d out
+  d="$(new_case_dir)"
+  common_env "$d"
+  export CLAIM_LOG="$d/claim.log"
+  : >"$CLAIM_LOG"
+  # A reap stub that always FAILS, so a queued cleanup stays queued and the drain keeps retrying it.
+  cat >"$d/bin/claim.sh" <<'STUBEOF'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >>"${CLAIM_LOG:?CLAIM_LOG not set}"
+[ "${1:-}" = "reap" ] && exit 1
+exit 0
+STUBEOF
+  chmod +x "$d/bin/claim.sh"
+
+  # UNIT-TESTED, deliberately. Reaching the protected state end to end needs three stamps in the
+  # order placeholder -> issue -> placeholder, which requires a worker that blocks on one iteration
+  # and finalizes on the next; no existing stub alternates that way, and building one would test the
+  # stub more than the invariant. The invariant itself is one function, so it is exercised directly —
+  # the same approach the parser tests take with verify_finalized_pr.
+  out="$(
+    # HEARTBEAT_MACHINE, not CLAIM_MACHINE: sourcing the supervisor DERIVES CLAIM_MACHINE from it,
+    # so presetting CLAIM_MACHINE is overwritten at source time and the reap lands on the real hostname.
+    CLAIM_CMD="bash $d/bin/claim.sh" HEARTBEAT_MACHINE=testbox \
+    CLAIM_LOG="$CLAIM_LOG" \
+    bash -c '
+      source "$1"
+      CLAIM_PENDING_CLEANUP=" p123-abc:aaa111 88:bbb222 "
+      # Draining while lane p123-abc is the CURRENT one must skip it and retry only 88.
+      claim_drain_pending_cleanup "p123-abc"
+      printf "PENDING_AFTER=[%s]\n" "$CLAIM_PENDING_CLEANUP"
+      # ROUND 32: a BARE entry (no lease recorded) must be DROPPED, not drained. Round 19 deliberately
+      # kept draining those "so an entry queued by an older process is still cleaned" — and that was
+      # itself the defect: draining without a lease IS the unleased delete that can remove a
+      # successor'"'"'s live claim.
+      CLAIM_PENDING_CLEANUP=" 77 "
+      claim_drain_pending_cleanup
+      printf "BARE_AFTER=[%s]\n" "$CLAIM_PENDING_CLEANUP"
+    ' _ "$SUPERVISOR" 2>&1
+  )"
+  # Three things must hold: the current lane is announced as skipped, it is NOT reaped, and the other
+  # id IS retried and retained (its reap failed).
+  if printf '%s' "$out" | grep -q 'pending cleanup of p123-abc dropped: it is the lane currently stamped' \
+    && ! grep -qE '^reap testbox p123-abc( |$)' "$CLAIM_LOG" \
+    && grep -qE '^reap testbox 88 bbb222$' "$CLAIM_LOG" \
+    && ! grep -qE '^reap testbox 77' "$CLAIM_LOG" \
+    && printf '%s' "$out" | grep -q 'DROPPED: no lease was recorded' \
+    && printf '%s' "$out" | grep -q 'BARE_AFTER=\[\]' \
+    && printf '%s' "$out" | grep -q 'PENDING_AFTER=\[ 88:bbb222\]'; then
+    pass "claim: the drain SKIPS the current lane, retries the other and RETAINS it with its lease on failure, and DROPS a bare leaseless entry"
+  else
+    fail "claim-drain-current: protection did not hold. out=[$out] log=[$(tr '\n' ';' <"$CLAIM_LOG")]"
   fi
 }
 
@@ -2711,8 +3612,14 @@ test_real_pgrep_usages_are_pid_scoped() {
   local bad="" line
   # Strip comment lines (first non-blank char `#`), then flag any real pgrep scan
   # whose line does not PID-scope via `grep -qw`.
+  # TWO acceptable scopings, and `pgrep-lint-allow` is not a blanket exemption — it asserts the SECOND:
+  #   * `grep -qw $pid`      — pid-scoped: the scan can only match a pid this test owns.
+  #   * a RUN-UNIQUE MARKER  — the pattern contains a token minted for this run ($$ + $RANDOM), so no
+  #                            host process can carry it. Used by the probe two-direction control, which
+  #                            must exercise the REAL pgrep pipeline and therefore cannot pid-scope it.
+  # Both bound the scan to this test's own processes, which is the property #2849 is about.
   while IFS= read -r line; do
-    [[ "$line" == *'grep -qw'* ]] || bad="${bad}${line}\n"
+    [[ "$line" == *'grep -qw'* || "$line" == *'pgrep-lint-allow'* ]] || bad="${bad}${line}\n"
   done < <(grep -vE '^[[:space:]]*#' "${BASH_SOURCE[0]}" | grep -E 'pgrep[[:space:]]+-[a-zA-Z]*f')
   if [[ -z "$bad" ]]; then
     pass "#2849: every real pgrep process scan is PID-scoped (grep -qw \$pid) — hermetic vs host processes"
@@ -2725,65 +3632,827 @@ test_real_pgrep_usages_are_pid_scoped() {
 # Main
 # ---------------------------------------------------------------------------
 echo "=== worker-supervisor test suite ==="
-test_happy_path_budget_stop
-test_breaker_stops_on_abnormal
-test_stop_file_honored
-test_preflight_load_hold
-test_nowork_not_counted
-test_single_instance_lock
-test_stale_marker_removed
-test_repeated_blocked_head_of_queue_stops
-test_finalized_missing_pr_is_abnormal
-test_journal_escapes_nasty_reason
-test_park_seam1_parked_on_owner
-test_park_needs_decision_question_in_title
-test_unknown_outcome_is_abnormal
-test_stuck_on_question_detected
-test_prompt_signature_grep
-test_stuck_breaks_abnormal_chain
-test_repeated_park_same_issue_stops
-test_different_issue_parks_do_not_head_block
-test_stray_signature_scrollback_is_abnormal
-test_genuine_wedge_frozen_is_stuck
-test_busy_writing_signature_not_stuck
-test_fast_exit_latency
-test_claim_stamp_each_iter_and_clear_on_exit
-test_claim_issue_learned_from_marker
-test_finalized_verified_merged_counts
-test_finalized_mismatch_open_is_abnormal
-test_finalized_unverified_not_counted_no_breaker
-test_proc_probe_discriminates_worker_claude
-test_leftover_hold_bounded_stops
-test_persistent_unverified_stops
-test_forged_pr_is_unresolved_mismatch
-test_stop_file_honored_mid_hold
-test_probe_no_self_match
-test_parser_absent_is_unverified
-test_pending_automerge_verdict
-test_mismatch_grace_absorbs_lag
-test_foreign_url_is_unresolved
-test_alternating_holds_still_bounded
-test_maxhours_only_hold_no_abort
-test_transport_notfound_is_unverified
-test_python_only_parser_automerge
-test_stop_file_honored_mid_grace
-test_persistent_pending_automerge_stops
-test_healthy_multi_pr_no_false_stop
-test_pending_time_floor_blocks_fast_stuck
-test_pending_pr_closed_pages_high
-test_unverified_streak_survives_intervening_abnormal
-test_deferred_stuck_stop_clean_exit
-test_pending_time_floor_crossed_trips
-test_numeric_knob_validation
-test_build_hold_uses_loose_bound
-test_build_hold_clears_then_proceeds
-test_probe_list_derives_from_count_set
-test_grace_cap_disabled_semantics
-test_mid_grace_stop_is_aborted
-test_default_worker_cmd_is_headless
-test_healthy_worker_iterlog_nonempty
-test_claim_cmd_empty_truly_disables_no_network
-test_real_pgrep_usages_are_pid_scoped
-test_default_notify_path_publishes
+t test_happy_path_budget_stop
+t test_breaker_stops_on_abnormal
+t test_stop_file_honored
+t test_preflight_load_hold
+t test_nowork_not_counted
+t test_single_instance_lock
+t test_stale_marker_removed
+t test_repeated_blocked_head_of_queue_stops
+t test_finalized_missing_pr_is_abnormal
+t test_journal_escapes_nasty_reason
+t test_park_seam1_parked_on_owner
+t test_park_needs_decision_question_in_title
+t test_unknown_outcome_is_abnormal
+t test_stuck_on_question_detected
+t test_prompt_signature_grep
+t test_stuck_breaks_abnormal_chain
+t test_repeated_park_same_issue_stops
+t test_different_issue_parks_do_not_head_block
+t test_stray_signature_scrollback_is_abnormal
+t test_genuine_wedge_frozen_is_stuck
+t test_busy_writing_signature_not_stuck
+t test_fast_exit_latency
+t test_claim_stamp_each_iter_and_clear_on_exit
+t test_claim_issue_learned_from_marker
+t test_claim_transition_survives_failed_replacement
+t test_claim_drain_never_deletes_current_lane
+t test_clear_claim_keeps_placeholder_on_abnormal_exit
+t test_supervisor_lock_is_per_lane
+t test_claim_cleanup_uses_lease_and_drops_on_transfer
+t test_park_releases_issue_so_next_lane_is_a_placeholder
+t test_no_work_shutdown_clears_its_placeholder
+t test_no_work_does_not_conclude_a_numeric_lane
+t test_transition_keeps_an_unconcluded_numeric_lane
+t test_pending_pr_keeps_the_claim
+t test_finalized_verified_merged_counts
+t test_finalized_mismatch_open_is_abnormal
+t test_finalized_unverified_not_counted_no_breaker
+t test_proc_probe_discriminates_worker_claude
+t test_leftover_hold_bounded_stops
+t test_persistent_unverified_stops
+t test_forged_pr_is_unresolved_mismatch
+t test_stop_file_honored_mid_hold
+t test_probe_no_self_match
+t test_parser_absent_is_unverified
+t test_pending_automerge_verdict
+t test_mismatch_grace_absorbs_lag
+t test_foreign_url_is_unresolved
+t test_alternating_holds_still_bounded
+t test_maxhours_only_hold_no_abort
+t test_transport_notfound_is_unverified
+t test_python_only_parser_automerge
+t test_stop_file_honored_mid_grace
+t test_persistent_pending_automerge_stops
+t test_healthy_multi_pr_no_false_stop
+t test_pending_time_floor_blocks_fast_stuck
+t test_pending_pr_closed_pages_high
+t test_unverified_streak_survives_intervening_abnormal
+t test_deferred_stuck_stop_clean_exit
+t test_pending_time_floor_crossed_trips
+t test_numeric_knob_validation
+t test_build_hold_uses_loose_bound
+t test_build_hold_clears_then_proceeds
+t test_probe_list_derives_from_count_set
+t test_grace_cap_disabled_semantics
+t test_mid_grace_stop_is_aborted
+t test_default_worker_cmd_is_headless
+t test_healthy_worker_iterlog_nonempty
+t test_claim_cmd_empty_truly_disables_no_network
+t test_real_pgrep_usages_are_pid_scoped
+t test_default_notify_path_publishes
+
+# ---------------------------------------------------------------------------
+# Test 29-claim (#3393, roborev round 33 High): the claim lock's holder identity is machine+ACTOR, and
+# every lane defaulted to the shared actor `flow`. Harmless while a machine-global lock made a second
+# lane impossible; THIS change made the lock per-lane, so two default lanes can now run and each would
+# read the other's claim as its own (`verify` false-positive / `release` cross-delete). Removing the
+# coarse guard exposed the finer defect it was masking.
+# ---------------------------------------------------------------------------
+test_claim_actor_is_lane_unique() {
+  local body a b same c e
+  body="$T_LOCKFN/actorfn.sh"
+  mkdir -p "$T_LOCKFN"
+  {
+    printf '%s\n' '#!/usr/bin/env bash'
+    printf '%s\n' 'log() { :; }'
+    sed -n '/^supervisor_lane_id()/,/^}/p' "$SUPERVISOR"
+    sed -n '/^supervisor_claim_actor()/,/^}/p' "$SUPERVISOR"
+    # Read it back out of the ENVIRONMENT, not the shell variable: the worker that calls claim.sh is a
+    # CHILD process, so a merely-set value would leave it on the shared default. `env` is the assertion.
+    # THE PREMISE HAS TO BE **UNSET**, NOT EMPTY. `CLAIM_ACTOR="" cmd` marks the name EXPORTED in the
+    # child's environment, so a later plain assignment propagates to grandchildren with no `export` at
+    # all — the first cut of this case staged it that way and its own RED did not fire, because the
+    # assert was true of the un-exported code too. `unset` is a builtin, so it survives PATH="".
+    printf '%s\n' '[[ "${T_UNSET_ACTOR:-}" == 1 ]] && unset CLAIM_ACTOR'
+    printf '%s\n' 'supervisor_claim_actor; "$BASH" -c '"'"'printf "%s\n" "${CLAIM_ACTOR:-UNSET-IN-CHILD}"'"'"''
+  } >"$body"
+  # FROM `LANE_ID` (lead ruling B): the actor no longer re-infers the lane from REPO_ROOT.
+  a=$(T_UNSET_ACTOR=1 LANE_ID=lane-1111 "$BASH" "$body")
+  b=$(T_UNSET_ACTOR=1 LANE_ID=lane-2222 "$BASH" "$body")
+  same=$(T_UNSET_ACTOR=1 LANE_ID=lane-1111 "$BASH" "$body")
+  if [[ "$a" != "UNSET-IN-CHILD" && "$a" != "$b" && "$a" == "$same" ]]; then
+    pass "claim-actor: EXPORTED to the child, derived from the GIVEN LANE_ID, and stable ($a vs $b)"
+  else
+    fail "claim-actor: a=[$a] b=[$b] same=[$same] — must reach the child, differ per lane, and be stable"
+  fi
+  c=$(T_UNSET_ACTOR=1 LANE_ID=boxA-lane "$BASH" "$body")
+  e=$(T_UNSET_ACTOR=1 LANE_ID=boxB-lane "$BASH" "$body")
+  if [[ "$c" != "$e" ]]; then
+    pass "claim-actor: two distinct LANE_IDs get different actors"
+  else
+    fail "claim-actor-basename: both resolved to [$c]"
+  fi
+  # claim.sh REFUSES an actor with fewer than 3 recordable characters, so a degenerate value would be a
+  # fail-closed claim rather than an alias. Assert the shape the lock will actually accept.
+  if [[ "${#a}" -ge 3 && "$a" == flow-* && "$a" != *[!A-Za-z0-9._-]* ]]; then
+    pass "claim-actor: recordable single token >=3 chars, claim.sh-acceptable ($a)"
+  else
+    fail "claim-actor-shape: [$a] is not a recordable single token of >=3 chars"
+  fi
+  # THE BOUND AND THE ORDER ARE PROPERTIES OF THE FALLBACK DERIVATION, so they are tested THERE.
+  # They used to be reached through the actor, because the actor inferred its own lane; after the
+  # ruling the actor takes a GIVEN identity, and it is `supervisor_lane_id` — the fallback used when
+  # `LANE_ID` is unset — that must stay bounded and hash-first. `claim.sh`'s `sanitize_field` caps a
+  # field at 120 chars, so a hash placed LAST is truncatable and two lanes could collapse onto one.
+  local lidbody long_a long_b
+  lidbody="$T_LOCKFN/lidonly.sh"
+  {
+    printf '%s\n' '#!/usr/bin/env bash'
+    sed -n '/^supervisor_lane_id()/,/^}/p' "$SUPERVISOR"
+    printf '%s\n' 'supervisor_lane_id'
+  } >"$lidbody"
+  long_a=$(REPO_ROOT="/data/lanes/$(printf 'l%.0s' $(seq 1 200))" "$BASH" "$lidbody")
+  long_b=$(REPO_ROOT="/data/other/$(printf 'l%.0s' $(seq 1 200))" "$BASH" "$lidbody")
+  if [[ "${#long_a}" -le 60 && "$long_a" =~ ^[0-9]+- ]]; then
+    pass "fallback-derivation: a 200-char basename yields a bounded, hash-FIRST id (${#long_a} chars) — truncation costs readability, never uniqueness"
+  else
+    fail "fallback-derivation-bound: [$long_a] is ${#long_a} chars and/or not hash-first"
+  fi
+  if [[ "$long_a" != "$long_b" ]]; then
+    pass "fallback-derivation: two 200-char-basename lanes still derive DIFFERENT ids"
+  else
+    fail "fallback-derivation-alias: both long lanes derived [$long_a]"
+  fi
+
+  # An operator-set actor still wins — the fix must not seize the override.
+  local ov
+  ov=$(CLAIM_ACTOR=owner-run LANE_ID=lane-1111 "$BASH" "$body")
+  if [[ "$ov" == "owner-run" ]]; then
+    pass "claim-actor: an explicit CLAIM_ACTOR is still honoured"
+  else
+    fail "claim-actor-override: got [$ov]"
+  fi
+  # Builtins only, same reason as the lock path (#3464 family 2): cases source this file under a
+  # stripped PATH. `$BASH` absolute, since PATH='' cannot find bash itself.
+  local stripped
+  stripped=$(T_UNSET_ACTOR=1 LANE_ID=lane-1111 PATH="" "$BASH" "$body" 2>&1)
+  if [[ "$stripped" == "$a" ]]; then
+    pass "claim-actor: resolves with an EMPTY PATH — builtins only"
+  else
+    fail "claim-actor-builtins: with PATH='' got [$stripped], expected [$a]"
+  fi
+  # WIRED, not merely defined: the resolution must run on the documented path before any worker spawn.
+  # A helper nothing calls is #3464's check-whose-subject-never-ran family.
+  if grep -qE '^[[:space:]]*supervisor_claim_actor$' "$SUPERVISOR"; then
+    pass "claim-actor: supervisor_claim_actor is CALLED (not just defined)"
+  else
+    fail "claim-actor-unwired: supervisor_claim_actor is defined but never invoked"
+  fi
+}
+
+# ---------------------------------------------------------------------------
+# Test 30-claim (#3393, roborev round 33 High): A CONCLUSION IS ABOUT AN ISSUE, AND THE FLAG IS ABOUT A
+# LANE. A marker concluding issue 99 set the global flag while the stamped lane was issue 88, so
+# `clear_claim` could delete issue 88's liveness ref with its work unresolved.
+# ---------------------------------------------------------------------------
+test_conclusion_must_match_the_stamped_lane() {
+  local body out
+  body="$T_LOCKFN/conclfn.sh"
+  mkdir -p "$T_LOCKFN"
+  {
+    printf '%s\n' '#!/usr/bin/env bash'
+    sed -n '/^conclusion_matches_stamped_lane()/,/^}/p' "$SUPERVISOR"
+    printf '%s\n' 'CLAIM_STAMPED_ISSUE="$1"; if conclusion_matches_stamped_lane "$2"; then echo MATCH; else echo MISMATCH; fi'
+  } >"$body"
+  # The defect's exact shape: stamped 88, marker concludes 99.
+  out=$("$BASH" "$body" 88 99)
+  if [[ "$out" == "MISMATCH" ]]; then
+    pass "conclusion-lane: stamped 88 + marker concluding 99 is a MISMATCH (ref preserved)"
+  else
+    fail "conclusion-lane: stamped 88 / marker 99 reported [$out] — the round-33 defect"
+  fi
+  out=$("$BASH" "$body" 88 88)
+  if [[ "$out" == "MATCH" ]]; then
+    pass "conclusion-lane: the matching issue still concludes (the fix does not strand the normal path)"
+  else
+    fail "conclusion-lane: stamped 88 / marker 88 reported [$out] — over-tightened"
+  fi
+  # A PLACEHOLDER lane has no issue to match, and an EMPTY stamped value means no lease was recorded.
+  # Both must stay permissive, or a placeholder iteration could never conclude and its ref would be
+  # refused by automated reaping forever (the round-28/31 failure mode, in reverse).
+  out=$("$BASH" "$body" p1234 77)
+  if [[ "$out" == "MATCH" ]]; then
+    pass "conclusion-lane: a PLACEHOLDER stamped lane still concludes (no issue to match)"
+  else
+    fail "conclusion-lane-placeholder: reported [$out]"
+  fi
+  out=$("$BASH" "$body" "" 77)
+  if [[ "$out" == "MATCH" ]]; then
+    pass "conclusion-lane: an EMPTY stamped lane still concludes"
+  else
+    fail "conclusion-lane-empty: reported [$out]"
+  fi
+  # WIRED at BOTH accept points. The predicate exists to guard them; guarding one is half a fix.
+  local guarded
+  guarded=$(grep -cE 'conclusion_matches_stamped_lane' "$SUPERVISOR")
+  if [[ "$guarded" -ge 3 ]]; then
+    pass "conclusion-lane: the predicate guards both accept points ($guarded references incl. definition)"
+  else
+    fail "conclusion-lane-unwired: only $guarded reference(s) — definition plus BOTH accept points expected"
+  fi
+}
+
+# ---------------------------------------------------------------------------
+# Test 31-claim (#3393, roborev round 33 High, second half): the RETRACTED #1930 invariant in the
+# OPERATIVE worker contract. `.claude/commands/worker.md` is what a `/worker` session actually obeys, so
+# leaving "Exactly ONE flow-lead worker runs per machine" there means the second lane STOPS in preflight
+# and every mechanism this change adds is unreachable by the documented invocation. Third instance of
+# #3464's retracted-invariant-in-a-second-carrier family.
+# ---------------------------------------------------------------------------
+test_worker_contract_does_not_assert_one_worker_per_machine() {
+  local doc="$REPO_ROOT/.claude/commands/worker.md" bad=""
+  if [[ ! -r "$doc" ]]; then
+    fail "worker-contract: $doc is not readable — the carrier this case exists for is missing"
+    return 0
+  fi
+  # The retracted claim, in the spellings the file used. Comment lines are not a concern: this is
+  # markdown, all of it operative.
+  while IFS= read -r line; do bad="${bad}${line}\n"; done < <(
+    grep -nE 'Exactly ONE flow-lead worker|One worker per machine — you are the sole' "$doc" |
+      grep -v 'RETRACTED'
+  )
+  if [[ -z "$bad" ]]; then
+    pass "worker-contract: worker.md no longer asserts the retracted one-worker-per-machine invariant"
+  else
+    fail "worker-contract: retracted #1930 invariant still live in worker.md:\n$(printf '%b' "$bad")"
+  fi
+  # The retraction must be POSITIVE, not just an absence — a silent deletion leaves a reader with no
+  # statement either way, and #1930 is cited across the fleet docs.
+  if grep -q 'RETRACTED by #3393' "$doc"; then
+    pass "worker-contract: the retraction is stated explicitly, citing #3393"
+  else
+    fail "worker-contract: nothing in worker.md records that #1930 was retracted"
+  fi
+  # AND THE TRUE PARTS MUST SURVIVE. The retraction is scoped to the worker-COUNT invariant; the
+  # full-gate concurrency bound is a RESOURCE bound and still holds, and dropping it with the
+  # retraction would trade one wrong doc for another.
+  if grep -qE 'full-gate concurrency = \*\*1\*\*|full-gate concurrency = 1' "$doc"; then
+    pass "worker-contract: the surviving resource bound (full-gate concurrency = 1) is retained"
+  else
+    fail "worker-contract: the full-gate concurrency bound was dropped along with the retraction"
+  fi
+  # The actor requirement is the thing that makes multi-lane SAFE, so the contract must name it.
+  if grep -q 'CLAIM_ACTOR' "$doc"; then
+    pass "worker-contract: worker.md names the per-lane CLAIM_ACTOR requirement"
+  else
+    fail "worker-contract: multi-lane is now permitted but CLAIM_ACTOR is unmentioned"
+  fi
+}
+
+t test_claim_actor_is_lane_unique
+t test_conclusion_must_match_the_stamped_lane
+t test_worker_contract_does_not_assert_one_worker_per_machine
+
+# ---------------------------------------------------------------------------
+# Test 32-claim (#3393, roborev round 34 finding 1): the legacy-claim migration. Every claim stamped
+# before the lane-actor change carries `actor=flow`, so a lane that resolves a lane-unique actor reads
+# its OWN claim as foreign and can neither verify nor non-forcibly release its lock. The migration
+# CAS-adopts it — but ONLY on an affirmative reading, and ONLY for the issue this lane's own branch
+# names, because on a four-lane box all four legacy claims are textually identical.
+# ---------------------------------------------------------------------------
+mig_case() {
+  # mig_case <status-line-or-FAIL> <actor> <branch-issue> -> echoes the stub's recorded call log
+  local status_line="$1" actor="$2" branch_issue="$3" d body repo
+  d="$(new_case_dir)"
+  repo="$d/lane"
+  mkdir -p "$repo" "$d/bin"
+  git -C "$repo" init -q 2>/dev/null
+  git -C "$repo" checkout -q -b "$branch_issue" 2>/dev/null
+  # A REAL COMMIT, because a real lane always has one. The first cut left the repo unborn, and with the
+  # old `rev-parse --abbrev-ref HEAD` probe that made the happy path resolve NO branch — so it made no
+  # call, and all NINE refusal cases below passed VACUOUSLY (they assert the absence of an adopt, and
+  # nothing was called at all). The positive control is the only reason that was visible.
+  git -C "$repo" -c user.email=t@t -c user.name=t commit -q --allow-empty -m init 2>/dev/null
+  # The stub records every invocation and answers `status` with the staged line.
+  cat >"$d/bin/claim.sh" <<STUB
+#!/usr/bin/env bash
+printf '%s\n' "\$*" >>"$d/calls.log"
+if [ "\$1" = status ]; then
+  [ "$status_line" = FAIL ] && exit 1
+  printf '%s\n' "$status_line"
+fi
+exit 0
+STUB
+  chmod +x "$d/bin/claim.sh"
+  : >"$d/calls.log"
+  {
+    printf '%s\n' '#!/usr/bin/env bash'
+    printf '%s\n' 'log() { :; }'
+    # The KNOBS the function depends on, extracted too (roborev round 35). Leaving them out silently
+    # unset CLAIM_MIGRATION_RETRIES, the retry loop body never ran, and the happy path made no call —
+    # a green-looking harness hiding a disabled subject. It also revealed the production hazard:
+    # the knob is now validated as strictly positive.
+    sed -n '/^CLAIM_MIGRATION_SETTLED=/p' "$SUPERVISOR"
+    sed -n '/^CLAIM_MIGRATION_RETRIES=/p' "$SUPERVISOR"
+    sed -n '/^supervisor_msg_token()/,/^}/p' "$SUPERVISOR"
+    sed -n '/^supervisor_migrate_legacy_claim()/,/^}/p' "$SUPERVISOR"
+    printf '%s\n' 'supervisor_migrate_legacy_claim'
+  } >"$d/mig.sh"
+  LOCK_CMD="bash $d/bin/claim.sh" CLAIM_ACTOR="$actor" CLAIM_MACHINE=boxA \
+    LEGACY_CLAIM_ACTOR=flow REPO_ROOT="$repo" bash "$d/mig.sh" >/dev/null 2>&1
+  cat "$d/calls.log"
+}
+
+test_legacy_claim_migration() {
+  local sha40 out
+  sha40="1111111111111111111111111111111111111111"
+  # (a) HAPPY PATH: this machine, legacy actor => CAS-adopt on the exact sha.
+  out=$(mig_case "CLAIM: STATUS issue=88 sha=$sha40 machine=boxA actor=flow" flow-9-lane issue-88-x)
+  if printf '%s\n' "$out" | grep -q "^adopt 88 --expect $sha40"; then
+    pass "legacy-migration: a pre-upgrade claim on THIS machine is CAS-adopted on its exact sha"
+  else
+    fail "legacy-migration: expected 'adopt 88 --expect $sha40', got:
+$out"
+  fi
+  # (b) A DIFFERENT MACHINE is not ours to take.
+  out=$(mig_case "CLAIM: STATUS issue=88 sha=$sha40 machine=boxZ actor=flow" flow-9-lane issue-88-x)
+  if ! printf '%s\n' "$out" | grep -q '^adopt'; then
+    pass "legacy-migration: a claim held by ANOTHER machine is never adopted"
+  else
+    fail "legacy-migration-foreign-machine: adopted anyway:
+$out"
+  fi
+  # (c) An actor that is ALREADY lane-scoped needs no migration.
+  out=$(mig_case "CLAIM: STATUS issue=88 sha=$sha40 machine=boxA actor=flow-7-other" flow-9-lane issue-88-x)
+  if ! printf '%s\n' "$out" | grep -q '^adopt'; then
+    pass "legacy-migration: a claim already under a lane actor is left alone (no cross-lane grab)"
+  else
+    fail "legacy-migration-other-lane: adopted a sibling lane's claim:
+$out"
+  fi
+  # (d) AN UNREADABLE STATUS IS NOT A LICENCE (#3229's affirmative-measurement rule). A failed probe
+  # must not reach the adopt; doing nothing costs a diagnosed refusal, guessing costs someone's lock.
+  out=$(mig_case FAIL flow-9-lane issue-88-x)
+  if ! printf '%s\n' "$out" | grep -q '^adopt'; then
+    pass "legacy-migration: an UNREADABLE status does not reach the adopt (affirmative measurement)"
+  else
+    fail "legacy-migration-unreadable: adopted on a failed probe:
+$out"
+  fi
+  # (e) A branch that names no issue must not even ASK — there is no candidate to migrate.
+  out=$(mig_case "CLAIM: STATUS issue=88 sha=$sha40 machine=boxA actor=flow" flow-9-lane main)
+  if [[ -z "$out" ]]; then
+    pass "legacy-migration: a branch naming no issue makes no claim.sh call at all"
+  else
+    fail "legacy-migration-no-issue-branch: called claim.sh anyway:
+$out"
+  fi
+  # (f) An OPERATOR-PINNED legacy actor is not ours to migrate away from.
+  out=$(mig_case "CLAIM: STATUS issue=88 sha=$sha40 machine=boxA actor=flow" flow issue-88-x)
+  if [[ -z "$out" ]]; then
+    pass "legacy-migration: an operator-pinned actor=flow is left exactly as the operator set it"
+  else
+    fail "legacy-migration-pinned: touched a pinned actor:
+$out"
+  fi
+  # (g) A MALFORMED sha cannot be a CAS lease. Adopting on a short sha would either fail or, worse,
+  # be interpreted; neither belongs in a lock path.
+  out=$(mig_case "CLAIM: STATUS issue=88 sha=1111 machine=boxA actor=flow" flow-9-lane issue-88-x)
+  if ! printf '%s\n' "$out" | grep -q '^adopt'; then
+    pass "legacy-migration: a malformed sha is not used as a CAS lease"
+  else
+    fail "legacy-migration-badsha: adopted on a non-40-hex sha:
+$out"
+  fi
+  # (h) A SUBSTRING KEY IS NOT A KEY (#3464 family 6): `notmachine=boxA` must not satisfy `machine`.
+  # Staged so the ONLY `machine=` token is a foreign one, with a decoy that ends in our machine name.
+  out=$(mig_case "CLAIM: STATUS issue=88 sha=$sha40 notmachine=boxA machine=boxZ actor=flow" flow-9-lane issue-88-x)
+  if ! printf '%s\n' "$out" | grep -q '^adopt'; then
+    pass "legacy-migration: a decoy 'notmachine=' token does not satisfy the machine match"
+  else
+    fail "legacy-migration-substring: a decoy key satisfied the machine match:
+$out"
+  fi
+  # (i) THE SEAM GENUINELY DISABLES. `LOCK_CMD=""` must make no call — the colonless default exists
+  # precisely so an empty value is not silently replaced by the real network path.
+  local d2 repo2
+  d2="$(new_case_dir)"; repo2="$d2/lane"; mkdir -p "$repo2"
+  git -C "$repo2" init -q 2>/dev/null; git -C "$repo2" checkout -q -b issue-88-x 2>/dev/null
+  {
+    printf '%s\n' '#!/usr/bin/env bash'
+    printf '%s\n' 'log() { :; }'
+    sed -n '/^supervisor_msg_token()/,/^}/p' "$SUPERVISOR"
+    sed -n '/^supervisor_migrate_legacy_claim()/,/^}/p' "$SUPERVISOR"
+    printf '%s\n' 'supervisor_migrate_legacy_claim; echo RETURNED'
+  } >"$d2/mig.sh"
+  local dis
+  dis=$(LOCK_CMD="" CLAIM_ACTOR=flow-9-lane CLAIM_MACHINE=boxA LEGACY_CLAIM_ACTOR=flow \
+    REPO_ROOT="$repo2" bash "$d2/mig.sh" 2>&1)
+  if [[ "$dis" == "RETURNED" ]]; then
+    pass "legacy-migration: LOCK_CMD='' disables the migration and returns cleanly"
+  else
+    fail "legacy-migration-seam: LOCK_CMD='' produced [$dis]"
+  fi
+  # WIRED: a migration nothing calls is #3464's check-whose-subject-never-ran.
+  if grep -qE '^[[:space:]]*supervisor_migrate_legacy_claim$' "$SUPERVISOR"; then
+    pass "legacy-migration: supervisor_migrate_legacy_claim is CALLED (not just defined)"
+  else
+    fail "legacy-migration-unwired: defined but never invoked"
+  fi
+}
+
+t test_legacy_claim_migration
+
+# ---------------------------------------------------------------------------
+# Test 33-claim (#3393, roborev round 35 High): the worker orphan probe must be attributed to THIS
+# LANE. Counting every matching worker on the box made each supervisor read its SIBLINGS' healthy
+# workers as leftover debris and stop after LEFTOVER_HOLD_MAX polls — so per-lane claim refs would
+# have shipped while multi-lane operation stayed serialized by a different machine-global mechanism.
+# ---------------------------------------------------------------------------
+test_worker_probe_is_lane_attributed() {
+  local d filt lane sib a b c out
+  d="$(new_case_dir)"
+  lane="$d/lane"; sib="$d/sibling"
+  mkdir -p "$lane/sub" "$sib"
+  filt="$d/filt.sh"
+  {
+    printf '%s\n' '#!/usr/bin/env bash'
+    printf '%s\n' 'REPO_ROOT="$1"'
+    # The SHIPPED filter definition, evaluated with this REPO_ROOT — not a reimplementation of it.
+    printf '%s\n' 'eval "$(sed -n "/^LANE_PID_FILTER=/p" "$2")"'
+    printf '%s\n' 'eval "$LANE_PID_FILTER"'
+  } >"$filt"
+  # Ordinary processes, distinguished ONLY by their working directory. No fake `claude` argv is needed:
+  # the property under test is the ATTRIBUTION half, and driving it with real cwds keeps the case
+  # hermetic and free of any dependence on the machine's actual process table.
+  ( cd "$lane" && exec sleep 30 ) & a=$!
+  ( cd "$sib" && exec sleep 30 ) & b=$!
+  ( cd "$lane/sub" && exec sleep 30 ) & c=$!
+  sleep 1
+  out=$(printf '%s\n%s\n%s\n' "$a" "$b" "$c" | bash "$filt" "$lane" "$SUPERVISOR")
+  if printf '%s\n' "$out" | grep -qxF "$a" && printf '%s\n' "$out" | grep -qxF "$c" \
+    && ! printf '%s\n' "$out" | grep -qxF "$b"; then
+    pass "worker-probe: lane root and lane SUBDIR are attributed to the lane; a SIBLING lane's process is not"
+  else
+    fail "worker-probe-attribution: lane=[$a] sub=[$c] sibling=[$b] but filter returned:
+$out"
+  fi
+  # NON-VACUITY, and it must be true of the broken code too: the SAME three pids, filtered for the
+  # SIBLING's root, must return the sibling and neither lane pid. Without this, an always-empty filter
+  # would satisfy the case above.
+  out=$(printf '%s\n%s\n%s\n' "$a" "$b" "$c" | bash "$filt" "$sib" "$SUPERVISOR")
+  if printf '%s\n' "$out" | grep -qxF "$b" && ! printf '%s\n' "$out" | grep -qxF "$a"; then
+    pass "NON-VACUITY: the same pids filtered for the SIBLING root return the sibling — the filter discriminates rather than returning nothing"
+  else
+    fail "worker-probe-nonvacuity: filtering for the sibling root returned:
+$out"
+  fi
+  # A pid whose cwd cannot be read is attributed to NOBODY (affirmative attribution). Driven with a
+  # pid that does not exist, which is the same unreadable condition as a process exiting mid-probe.
+  out=$(printf '%s\n' 999999 | bash "$filt" "$lane" "$SUPERVISOR")
+  if [[ -z "$out" ]]; then
+    pass "worker-probe: an unreadable cwd is attributed to nobody — a positive verdict needs a positive measurement"
+  else
+    fail "worker-probe-unreadable: a nonexistent pid was attributed: [$out]"
+  fi
+  kill "$a" "$b" "$c" 2>/dev/null
+  wait "$a" "$b" "$c" 2>/dev/null
+  # The BUILD family must stay machine-wide: one gate at a time per MACHINE is a resource bound that
+  # survived #1930's retraction, so a sibling's cargo IS this lane's business. Asserted structurally,
+  # because the distinction is the whole point of scoping only one family.
+  if sed -n '/^if \[\[ -z "${PROC_PROBE_BUILD_CMD:-}"/,/^fi/p' "$SUPERVISOR" | grep -q 'LANE_PID_FILTER'; then
+    fail "worker-probe-build-scoped: the BUILD probe was lane-scoped too — a sibling's gate is still this lane's business"
+  else
+    pass "worker-probe: the BUILD family is deliberately NOT lane-scoped (machine-wide gate serialization survives)"
+  fi
+  # LIST-FROM-COUNT-SET (roborev 1839/1821) must survive the change: both probes must apply the filter.
+  local cnt lst
+  cnt=$(sed -n '/^if \[\[ -z "${PROC_PROBE_WORKER_CMD:-}"/,/^fi/p' "$SUPERVISOR" | grep -c 'LANE_PID_FILTER')
+  lst=$(sed -n '/^if \[\[ -z "${PROC_LIST_WORKER_CMD:-}"/,/^fi/p' "$SUPERVISOR" | grep -c 'LANE_PID_FILTER')
+  if [[ "$cnt" -ge 1 && "$lst" -ge 1 ]]; then
+    pass "worker-probe: COUNT and LIST both derive from the same lane filter — the named set cannot drift from the triggering set"
+  else
+    fail "worker-probe-drift: count=$cnt list=$lst references to LANE_PID_FILTER — the two sets can diverge"
+  fi
+}
+
+# ---------------------------------------------------------------------------
+# Test 34-claim (#3393, roborev round 35 Medium/Low): the migration must never leave the lane
+# permanently foreign to its own lock, and must accept a SHA-256 lease.
+# ---------------------------------------------------------------------------
+mig2_case() {
+  # mig2_case <fail-first-N> <sha> ; echoes the recorded claim.sh calls
+  local failn="$1" sha="$2" d repo
+  d="$(new_case_dir)"; repo="$d/lane"; mkdir -p "$repo" "$d/bin"
+  git -C "$repo" init -q 2>/dev/null
+  git -C "$repo" checkout -q -b issue-88-x 2>/dev/null
+  git -C "$repo" -c user.email=t@t -c user.name=t commit -q --allow-empty -m init 2>/dev/null
+  cat >"$d/bin/claim.sh" <<STUB
+#!/usr/bin/env bash
+printf '%s\n' "\$*" >>"$d/calls.log"
+if [ "\$1" = status ]; then
+  n=\$(grep -c '^status' "$d/calls.log")
+  if [ "\$n" -le "$failn" ]; then exit 1; fi
+  printf '%s\n' "CLAIM: STATUS issue=88 sha=$sha machine=boxA actor=flow"
+fi
+exit 0
+STUB
+  chmod +x "$d/bin/claim.sh"; : >"$d/calls.log"
+  {
+    printf '%s\n' '#!/usr/bin/env bash' 'log() { :; }'
+    sed -n '/^CLAIM_MIGRATION_SETTLED=/p' "$SUPERVISOR"
+    sed -n '/^CLAIM_MIGRATION_RETRIES=/p' "$SUPERVISOR"
+    sed -n '/^supervisor_msg_token()/,/^}/p' "$SUPERVISOR"
+    sed -n '/^supervisor_migrate_legacy_claim()/,/^}/p' "$SUPERVISOR"
+    printf '%s\n' 'supervisor_migrate_legacy_claim'
+  } >"$d/mig.sh"
+  LOCK_CMD="bash $d/bin/claim.sh" CLAIM_ACTOR=flow-9-lane CLAIM_MACHINE=boxA \
+    LEGACY_CLAIM_ACTOR=flow CLAIM_MIGRATION_RETRIES=3 REPO_ROOT="$repo" \
+    bash "$d/mig.sh" >/dev/null 2>&1
+  cat "$d/calls.log"
+}
+
+test_migration_retries_and_sha256() {
+  local sha40 sha64 out
+  sha40="1111111111111111111111111111111111111111"
+  sha64="$(printf '2%.0s' $(seq 1 64))"
+  # A BLIP: the first two status reads fail, the third succeeds -> the adopt still happens.
+  out=$(mig2_case 2 "$sha40")
+  if printf '%s\n' "$out" | grep -q "^adopt 88 --expect $sha40"; then
+    pass "migration-retry: two failed status reads are retried and the adopt still happens (a blip does not strand the lane)"
+  else
+    fail "migration-retry: expected an adopt after retries, got:
+$out"
+  fi
+  # ALL attempts fail -> NO adopt (never guess), and the bounded burst really did retry rather than
+  # giving up after one read. The count is the evidence the retry loop ran.
+  out=$(mig2_case 99 "$sha40")
+  local tries
+  tries=$(printf '%s\n' "$out" | grep -c '^status')
+  if [[ "$tries" -eq 3 ]] && ! printf '%s\n' "$out" | grep -q '^adopt'; then
+    pass "migration-retry: a total outage is retried CLAIM_MIGRATION_RETRIES=3 times and never adopts on a guess"
+  else
+    fail "migration-retry-exhausted: status attempts=$tries (expected 3), calls:
+$out"
+  fi
+  # A 64-hex SHA-256 object id is a valid CAS lease.
+  out=$(mig2_case 0 "$sha64")
+  if printf '%s\n' "$out" | grep -q "^adopt 88 --expect $sha64"; then
+    pass "migration-sha256: a 64-hex object id is accepted as a CAS lease (claim.sh imposes no length check of its own)"
+  else
+    fail "migration-sha256: a 64-hex sha was skipped, calls:
+$out"
+  fi
+  # A 41-hex value is neither, and must still be refused — widening to 64 must not become "any length".
+  out=$(mig2_case 0 "${sha40}1")
+  if ! printf '%s\n' "$out" | grep -q '^adopt'; then
+    pass "migration-sha256: 41 hex is still refused — the widening is 40-OR-64, not 'any length'"
+  else
+    fail "migration-sha256-any: a 41-char sha was accepted:
+$out"
+  fi
+  # THE RE-ENTRY IS WIRED: an unsettled migration must be re-attempted from the main loop, or a
+  # transient outage is still permanent for the run.
+  if grep -cE '^[[:space:]]*supervisor_migrate_legacy_claim$' "$SUPERVISOR" | grep -qE '^[2-9]'; then
+    pass "migration-retry: the migration is invoked from BOTH lock acquisition and the iteration loop"
+  else
+    fail "migration-retry-unwired: only one call site — an unsettled migration would never be retried"
+  fi
+}
+
+t test_worker_probe_is_lane_attributed
+t test_migration_retries_and_sha256
+
+# ---------------------------------------------------------------------------
+# Test 35-claim (#3393, roborev round 36 Medium): a p<pid> PLACEHOLDER cannot carry endgame
+# protection past our own exit. `should-reap` permanently refuses placeholders (round 3), so keeping
+# one for a pending auto-merge PR meant NOTHING could ever clear it — not the CI reaper, not a later
+# merge of the very PR it protected. The protection must move to issue-numbered refs.
+# ---------------------------------------------------------------------------
+clearclaim_case() {
+  # clearclaim_case <stamped-lane> <pending-list> <stamp-rc> -> echoes the recorded claim-cmd calls
+  local stamped="$1" pending="$2" stamp_rc="$3" d
+  d="$(new_case_dir)"; mkdir -p "$d/bin"
+  cat >"$d/bin/hb.sh" <<STUB
+#!/usr/bin/env bash
+printf '%s\n' "\$*" >>"$d/calls.log"
+[ "\$1" = stamp ] && exit $stamp_rc
+exit 0
+STUB
+  chmod +x "$d/bin/hb.sh"; : >"$d/calls.log"
+  {
+    printf '%s\n' '#!/usr/bin/env bash' 'log() { :; }' 'claim_drain_pending_cleanup() { :; }'
+    sed -n '/^clear_claim()/,/^}/p' "$SUPERVISOR"
+    printf '%s\n' 'clear_claim 1'
+  } >"$d/cc.sh"
+  CLAIM_CMD="bash $d/bin/hb.sh" CLAIM_MACHINE=boxA CLAIM_STAMPED_ISSUE="$stamped" \
+    CLAIM_STAMPED_SHA=deadbeef PENDING_PR_LIST="$pending" bash "$d/cc.sh" >/dev/null 2>&1
+  cat "$d/calls.log"
+}
+
+test_placeholder_endgame_protection_transfers() {
+  local out nl
+  nl=$'\n'
+  # (a) A PLACEHOLDER with a pending PR naming issue 88: stamp lane 88, THEN clear the placeholder.
+  out=$(clearclaim_case "p1234-abc" "3467${nl:0:0}"$'\t'"88"$'\t'"1"$'\t'"1000$nl" 0)
+  if printf '%s\n' "$out" | grep -q '^stamp 88' && printf '%s\n' "$out" | grep -q '^reap boxA p1234-abc'; then
+    pass "placeholder-transfer: the pending endgame is re-stamped as lane 88 and the placeholder is then cleared"
+  else
+    fail "placeholder-transfer: expected 'stamp 88' then 'reap boxA p1234-abc', got:
+$out"
+  fi
+  # (b) IF THE TRANSFER FAILS the placeholder must be KEPT — a stale ref beats an unprotected
+  # endgame. Driven by a stamp that exits non-zero.
+  out=$(clearclaim_case "p1234-abc" "3467"$'\t'"88"$'\t'"1"$'\t'"1000$nl" 1)
+  if printf '%s\n' "$out" | grep -q '^stamp 88' && ! printf '%s\n' "$out" | grep -q '^reap'; then
+    pass "placeholder-transfer: a FAILED stamp keeps the placeholder (all-or-nothing — a stale ref beats an unprotected endgame)"
+  else
+    fail "placeholder-transfer-failed-stamp: the placeholder was cleared anyway:
+$out"
+  fi
+  # (c) A pending PR with NO recorded issue is UNTRANSFERABLE, so the placeholder is kept. This is the
+  # case that must not silently clear: there is nothing for the reaper to evaluate.
+  out=$(clearclaim_case "p1234-abc" "3467"$'\t'""$'\t'"1"$'\t'"1000$nl" 0)
+  if ! printf '%s\n' "$out" | grep -q '^reap'; then
+    pass "placeholder-transfer: a pending PR with no issue is untransferable and keeps the placeholder"
+  else
+    fail "placeholder-transfer-no-issue: cleared the placeholder with an untransferable endgame:
+$out"
+  fi
+  # (d) AN ISSUE-NUMBERED lane with a pending PR is unchanged — it keeps, as #2499 ruling (b) requires,
+  # and must NOT be re-stamped. Without this the fix could have widened into the case that was correct.
+  out=$(clearclaim_case "88" "3467"$'\t'"88"$'\t'"1"$'\t'"1000$nl" 0)
+  if ! printf '%s\n' "$out" | grep -qE '^(reap|stamp)'; then
+    pass "placeholder-transfer: an ISSUE-numbered lane with a pending PR still just KEEPS (#2499 ruling (b) untouched)"
+  else
+    fail "placeholder-transfer-issue-lane: an issue lane was altered:
+$out"
+  fi
+  # (e) NON-VACUITY: with NO pending PR at all, a placeholder is cleared with no stamping — so the
+  # transfer above is attributable to the pending endgame rather than to placeholders always clearing.
+  out=$(clearclaim_case "p1234-abc" "" 0)
+  if printf '%s\n' "$out" | grep -q '^reap boxA p1234-abc' && ! printf '%s\n' "$out" | grep -q '^stamp'; then
+    pass "NON-VACUITY: with no pending PR the placeholder clears WITHOUT any stamp — the transfer is caused by the endgame"
+  else
+    fail "placeholder-transfer-nonvacuity: got:
+$out"
+  fi
+}
+
+t test_placeholder_endgame_protection_transfers
+
+# ---------------------------------------------------------------------------
+# Test 36-claim (#3393, roborev round 36; lead ruling B + C, 2026-08-30): lane identity is GIVEN, and a
+# fallback that cannot prove it landed in a lane REFUSES rather than degrades. The earlier cut of this
+# case asserted a WARN; the ruling replaced warning with refusal, because a warning still starts four
+# silently-degraded mechanisms.
+#
+# TWO REFUSALS AND THEY ARE INDEPENDENT — the case that proves it is MAIN-worktree + LANE_ID given:
+# identity is then fine and attribution is still impossible, because an identity token is not a
+# directory.
+# ---------------------------------------------------------------------------
+lane_identity_case() {
+  # lane_identity_case <linked|main> [env...] -> echoes the FATAL token, or the accepted-identity line
+  local kind="$1"; shift
+  local d root
+  d="$(new_case_dir)"
+  if [[ "$kind" == linked ]]; then
+    root="$d/lanewt"
+    mkdir -p "$d/main"; git -C "$d/main" init -q
+    git -C "$d/main" -c user.email=t@t -c user.name=t commit -q --allow-empty -m init 2>/dev/null
+    git -C "$d/main" worktree add -q -b issue-88-x "$root" 2>/dev/null
+    [[ -e "$root/.git" ]] || { skip "lane-identity: host would not create a linked worktree — premise unstageable"; return 1; }
+  else
+    root="$d/mainwt"
+    mkdir -p "$root"; git -C "$root" init -q
+    git -C "$root" -c user.email=t@t -c user.name=t commit -q --allow-empty -m init 2>/dev/null
+  fi
+  mkdir -p "$root/scripts/local" "$root/scripts/lib"
+  cp "$SUPERVISOR" "$root/scripts/local/worker-supervisor.sh"
+  # scripts/lib is needed by the default notify path (learned the hard way — an incomplete scratch tree
+  # produced an unattributable failure).
+  cp "$REPO_ROOT/scripts/lib/gate-notify.sh" "$root/scripts/lib/" 2>/dev/null || true
+  # A FATAL WINS OVER THE IDENTITY LINE, because identity is resolved and LOGGED first and the
+  # attribution refusal fires after it. Taking `head -1` across both alternatives returned the
+  # identity line and hid the refusal — the case reported "started fine" for a run that refused.
+  local raw
+  # `PROC_PROBE_WORKER_CMD=` FIRST, and this is the whole case. `common_env` EXPORTS that variable to
+  # stub the probe, so it leaks into every later case — and the attribution refusal deliberately yields
+  # to an operator who set it. The refusal was therefore ALWAYS yielding to a phantom override, and the
+  # two cases below both passed for the same wrong reason. Cleared here; "$@" comes after, so a case
+  # that genuinely wants the override still gets it (later `env` assignments win).
+  raw=$(env PROC_PROBE_WORKER_CMD= "$@" NOTIFY_CMD=true STOP_FILE=/nonexistent LOCK_CMD="" CLAIM_CMD="" MAX_ISSUES=1 \
+    timeout 30 bash "$root/scripts/local/worker-supervisor.sh" 2>&1)
+  if printf '%s\n' "$raw" | grep -oE 'FATAL: lane-[a-z-]+' | head -1 | grep .; then
+    return 0
+  fi
+  printf '%s\n' "$raw" | grep -oE 'lane identity given explicitly|LANE_ID unset; derived' | head -1
+  return 0
+}
+
+test_lane_identity_is_given_or_refused() {
+  local out
+  # (a) a LANE worktree with LANE_ID unset: the fallback may derive, because it can PROVE it is a lane.
+  out=$(lane_identity_case linked X=1) || return 0
+  if [[ "$out" == "LANE_ID unset; derived" ]]; then
+    pass "lane-identity: in a LANE worktree the fallback derives an identity (it can prove where it is)"
+  else
+    fail "lane-identity(linked-fallback): got [$out]"
+  fi
+  # (b) MAIN worktree, LANE_ID unset -> lane-identity-unprovable. Nothing to derive FROM.
+  out=$(lane_identity_case main X=1) || return 0
+  if [[ "$out" == "FATAL: lane-identity-unprovable" ]]; then
+    pass "lane-identity: MAIN worktree + LANE_ID unset REFUSES (lane-identity-unprovable), rather than sharing one identity across lanes"
+  else
+    fail "lane-identity(main-unprovable): got [$out]"
+  fi
+  # (c) THE CASE THAT PROVES THE TWO REFUSALS ARE INDEPENDENT: MAIN worktree + LANE_ID GIVEN. Identity
+  # is satisfied; attribution is still impossible, because an identity token is not a directory.
+  out=$(lane_identity_case main LANE_ID=explicit-lane-x) || return 0
+  if [[ "$out" == "FATAL: lane-attribution-impossible" ]]; then
+    pass "lane-identity: LANE_ID satisfies IDENTITY but not ATTRIBUTION — the second refusal is independent (an identity token is not a directory)"
+  else
+    fail "lane-identity(main-attribution): got [$out] — expected the attribution refusal, since LANE_ID cannot supply a directory"
+  fi
+  # (d) an operator who overrode the probe has taken responsibility, so it starts.
+  out=$(lane_identity_case main LANE_ID=explicit-lane-x PROC_PROBE_WORKER_CMD="echo 0") || return 0
+  if [[ "$out" == "lane identity given explicitly" ]]; then
+    pass "lane-identity: an explicit PROC_PROBE_WORKER_CMD yields the attribution refusal to the operator"
+  else
+    fail "lane-identity(probe-override): got [$out]"
+  fi
+  # (e) a LANE_ID that claim.sh would refuse is refused HERE, loudly, rather than failing every claim.
+  out=$(lane_identity_case linked LANE_ID=ab) || return 0
+  if [[ "$out" == "FATAL: lane-identity-unusable" ]]; then
+    pass "lane-identity: a LANE_ID under 3 recordable chars is refused at startup (claim.sh would reject the actor on every call)"
+  else
+    fail "lane-identity(short): got [$out]"
+  fi
+  # NO LAYOUT HEURISTIC: the worktrees above are named `lanewt`/`mainwt`, matching no fleet convention,
+  # and the implementation must contain no such pattern — that assumption is what made AC3 unimplementable.
+  if sed -n '/^lane_worktree_ok()/,/^}/p' "$SUPERVISOR" | grep -qiE '/data/lanes|lane-\[0-9\]'; then
+    fail "lane-identity-heuristic: lane_worktree_ok references a lane-directory naming convention"
+  else
+    pass "lane-identity: the proof is structural (git worktree), assuming NO directory naming convention"
+  fi
+}
+
+t test_lane_identity_is_given_or_refused
+
+# ---------------------------------------------------------------------------
+# Test 37-claim (#3393, roborev round 36 row 4; lead condition 1): the worker-orphan probe needs a
+# TWO-DIRECTION control, not a passing test. A probe whose subject set can be EMPTY passes vacuously
+# when it is — the same shape as `--delta-classify`'s ALLOW on an empty subject set (#3480). So:
+#   POSITIVE: a leftover IS in this lane  -> counted  (would STOP)
+#   NEGATIVE: no leftover in this lane    -> zero     (would NOT stop)
+# and the OLD machine-wide probe counted the sibling too, which is the false STOP being fixed.
+#
+# The marker must be IN THE ARGV, which took three wrong attempts worth recording: a `# comment` is
+# stripped by bash before exec so it never reaches /proc/<pid>/cmdline; a pattern containing regex
+# metacharacters MATCHES ITS OWN TEXT in the probe subshell (the bracket trick only defeats a LITERAL
+# self-match, and the real probe's $$/$PPID exclusion is load-bearing); and `exec sleep` replaces the
+# process image, discarding the marker. Hence: a marker-named SCRIPT that does not exec.
+# ---------------------------------------------------------------------------
+test_worker_probe_two_direction_control() {
+  local d lane sib marker script match probe neg pos machine_wide
+  d="$(new_case_dir)"
+  lane="$d/lane"; sib="$d/sibling"
+  mkdir -p "$lane" "$sib"
+  marker="probe$$x$RANDOM"
+  script="$d/${marker}-worker.sh"
+  printf '%s\n%s\n' '#!/usr/bin/env bash' 'sleep 120' >"$script"
+  chmod +x "$script"
+  # LITERAL match only, plus the real probe's self-exclusion — both for the reasons in the header.
+  match="[p]${marker#p}-worker"
+  # REPO_ROOT MUST BE SET BEFORE THE EVAL. `LANE_PID_FILTER`'s literal contains `'$REPO_ROOT'`, which
+  # expands AT EVAL TIME — so eval'ing it first and passing REPO_ROOT to the probe later bakes in the
+  # TEST's own lane and the case measures the wrong directory. That is how the first cut of this case
+  # reported POSITIVE=0 while the machine-wide count was 2: the marker matched, the attribution did not.
+  # REPO_ROOT MUST BE SET IN *THIS* SHELL BEFORE THE EVAL. `LANE_PID_FILTER`'s literal contains
+  # `'$REPO_ROOT'`, and `eval` expands it in the shell that RUNS the eval — so wrapping the command
+  # substitution in a subshell that sets REPO_ROOT does nothing at all (my first fix was a no-op, and
+  # the case still measured the test's own lane). A function-local shadow is what actually applies.
+  local LANE_PID_FILTER REPO_ROOT="$lane"
+  eval "$(sed -n '/^LANE_PID_FILTER=/p' "$SUPERVISOR")"
+  probe="pgrep -f '$match' 2>/dev/null | grep -vxF -e \$\$ -e \$PPID | $LANE_PID_FILTER | wc -l | tr -d ' '" # pgrep-lint-allow: run-unique marker scoping
+  # NEGATIVE first, before anything is spawned: if this is not 0, the harness is matching itself and
+  # every later number is meaningless.
+  neg=$(bash -c "$probe")
+  ( cd "$lane" && exec bash "$script" ) >/dev/null 2>&1 &
+  ( cd "$sib"  && exec bash "$script" ) >/dev/null 2>&1 &
+  sleep 1
+  pos=$(bash -c "$probe")
+  machine_wide=$(bash -c "pgrep -f '$match' 2>/dev/null | grep -vxF -e \$\$ -e \$PPID | wc -l | tr -d ' '") # pgrep-lint-allow: run-unique marker scoping
+  pkill -f "${marker}-worker.sh" >/dev/null 2>&1
+  if [[ "$neg" == "0" ]]; then
+    pass "probe-two-direction NEGATIVE: no leftover in this lane counts 0 (so the probe does not fire unconditionally)"
+  else
+    fail "probe-two-direction: NEGATIVE control counted $neg before anything was spawned — the harness is matching itself, so no later number means anything"
+  fi
+  if [[ "$pos" == "1" ]]; then
+    pass "probe-two-direction POSITIVE: a leftover IN this lane counts 1 (so the probe DOES fire, and the negative above is a measurement)"
+  else
+    fail "probe-two-direction: POSITIVE control counted $pos (expected 1) — a probe that cannot count its subject passes vacuously"
+  fi
+  if [[ "$machine_wide" == "2" ]]; then
+    pass "probe-two-direction: the OLD machine-wide probe counts 2 (lane + sibling) — the false STOP this fixes, measured rather than asserted"
+  else
+    fail "probe-two-direction: machine-wide counted $machine_wide (expected 2); the comparison that motivates lane scoping is not established"
+  fi
+}
+
+t test_worker_probe_two_direction_control
 echo "=== $PASS_COUNT passed, $FAIL_COUNT failed, $SKIP_COUNT skipped ==="
 [[ "$FAIL_COUNT" -eq 0 ]]

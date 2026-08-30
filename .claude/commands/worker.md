@@ -53,12 +53,17 @@ onto its own branch). Rules, non-negotiable:
    needs its own worktree`.
    **Single-worker-per-machine preflight (#1930, owner decision 2026-07-04):** there is **exactly ONE
    flow-lead worker per machine** — it is the SOLE machine-load authority. Before starting, detect a peer
-   worker on this box: an existing `~/projects/cqlite-wt/issue-*` worktree you did not create, and/or a
-   recent "🔧/🔒 Claimed by flow-lead worker" issue comment from another session. If a second live worker
-   is running here, **STOP** — do NOT start a second one (two same-machine workers share worktree paths,
-   `target/`/sccache, and the gate semaphore → clobbered edits, cargo-lock contention, duplicate PRs, and
-   tail-latency gate flakes). One worker fans out to subagents for throughput; a second worker adds none.
-   Cross-*machine* concurrency is fine — it's coordinated by the origin `refs/claims/issue-<N>` ref lock (#2665).
+   worker on this box **in YOUR lane**: an existing `issue-*` worktree you did not create, and/or a recent
+   "🔧/🔒 Claimed by flow-lead worker" issue comment from another session for the SAME issue.
+   **Several lanes per box is the standing model (#3393 retracted #1930's one-worker-per-machine).** A peer
+   lane on this machine is not a reason to stop — it has its own worktree and its own `target/`. What you
+   must not do is start a second worker **in the same lane**, which the per-lane `SUPERVISOR_LOCK` refuses
+   anyway. STOP only if a live worker is running in **this** lane directory.
+   Cross-*machine* concurrency is coordinated by the origin `refs/claims/issue-<N>` ref lock (#2665), and
+   **same-machine lanes are distinguished by `CLAIM_ACTOR`** — the lock's holder identity is
+   machine+actor, so two lanes sharing the default actor would each read the other's claim as its own
+   (false re-entrancy / cross-release). `worker-supervisor.sh` exports a lane-unique actor; if you invoke
+   `claim.sh` outside a supervisor on a multi-lane box, pass `--actor` or set `CLAIM_ACTOR` yourself.
 2. **Resume THIS machine's own claim FIRST (crash recovery, #2090), else pick up a new one.** Before
    touching the Ready column, rehydrate from the board and check whether this machine already holds a live
    claim from a prior (possibly crashed) session — a `refs/claims/issue-<N>` claim ref this machine
@@ -97,6 +102,18 @@ onto its own branch). Rules, non-negotiable:
    The claim ref — not the branch — arbitrates the race (git server-side, per-issue, slug-independent):
    a UNIQUE root-commit push means a different-slug or identical-base competitor can no longer
    double-claim (#2665). `worktree add` leaves the root checkout untouched — that is the entire point.
+
+   **Where the SUPERVISOR runs is a separate question from where the WORKER works, and the two used to
+   contradict each other (#3393 round 36).** The lines above describe the WORKER: it acts from a root
+   checkout and creates a per-issue worktree. `worker-supervisor.sh` is not covered by them — it needs
+   to know **which lane it is**, and it used to answer that from its own script location, which is
+   "where is my script" standing in for "which lane am I". That worked only because a lane worktree
+   carries a full `scripts/` tree, i.e. by coincidence. So:
+   **the supervisor's lane identity is now GIVEN, via `LANE_ID`.** Set it per lane. With it unset the
+   supervisor falls back to deriving one from its worktree, and that fallback **refuses to start**
+   rather than degrade silently — `lane-identity-unprovable` when there is no lane to derive from, and
+   `lane-attribution-impossible` when the worker-orphan probe could only ever count zero. An identity
+   token is not a directory, so `LANE_ID` fixes the first and not the second.
    If `claim.sh claim` reports `CLAIM LOST`, do NOT create the worktree; go back to step 2. If you are
    adopting a reaped claim (flow-board marked it), acquire it with `bash scripts/flow/claim.sh adopt
    <N> --expect <old-sha>` instead. Run the gate with
@@ -227,11 +244,15 @@ diff and breaks 1:1:1:1. Instead:
   then resume the original. Do not fold an unrelated fix into your current branch.
 
 ## Hard rules
-- **One worker per machine — you are the sole machine-load authority (#1930).** Exactly ONE flow-lead
-  worker runs per machine. Never start a second one alongside a live peer (they share worktree paths,
-  `target/`/sccache, and the gate semaphore). Throughput comes from fanning out to subagents, NOT from a
-  second worker. Full-gate concurrency = **1** (serial), always — the #1825 cap stops SIGKILL, not timing
-  flakes. Before claiming, check the `refs/claims/issue-<N>` ref (`claim.sh status <N>`) AND any legacy
+- **~~One worker per machine (#1930)~~ — RETRACTED by #3393. Several lanes per box is the standing model.**
+  What survives is a RESOURCE bound, not a worker-count invariant: **full-gate concurrency = 1** (serial),
+  always, enforced mechanically by `CQLITE_GATE_MAX_CONCURRENCY=1` — the #1825 cap stops SIGKILL, not
+  timing flakes. One worker per **LANE**, refused by the per-lane `SUPERVISOR_LOCK`; N lanes per box is
+  expected, each with its own worktree and `target/`.
+  Two same-machine lanes MUST have distinct `CLAIM_ACTOR` values: the claim lock's holder identity is
+  machine+actor, so a shared default lets each lane read the other's claim as its own and `release` delete
+  it. `worker-supervisor.sh` exports a lane-unique actor by default.
+  Before claiming, check the `refs/claims/issue-<N>` ref (`claim.sh status <N>`) AND any legacy
   `issue-<N>-*` branch (any slug), not just your exact slug.
   Cross-*machine* concurrency stays coordinated by the origin `refs/claims/issue-<N>` ref lock (#2665).
 - **Worktrees only — never touch the root checkout's branch.** All git ops via `git -C <worktree>` / after
