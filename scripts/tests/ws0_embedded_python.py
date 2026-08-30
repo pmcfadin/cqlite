@@ -200,6 +200,52 @@ _CONCATENATION_BEFORE_WORD = frozenset("\"'`)}" + chr(92))
 _NON_LITERAL_IN_WORD = frozenset("$`\"'*?[]{}" + chr(92))
 
 
+# A shell environment-assignment word: `NAME=` anything. Leading assignments belong to the
+# command's environment, not to its name.
+_ASSIGNMENT_WORD = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
+
+# The separators that END a command. A closed set in bash's grammar, so finding the start of the
+# CURRENT command is a lookup rather than a parse.
+_COMMAND_SEPARATORS = ";&|"
+
+
+def _command_word_before(segment: str) -> str | None:
+    """The command word of the last command in `segment` — the text left of a `-c` flag.
+
+    THE IMMEDIATELY PRECEDING WORD IS NOT THE COMMAND WORD (#3451 post-rebase round 2, F1).
+    `$PYTHON -I -c 'bad'` has `-I` before the flag, which is a plain literal containing no
+    `python`, so the literal-skip rule discarded it and the invalid program was INVISIBLE —
+    neither a block nor a finding, which is the worst answer this census can give.
+
+    Decidable, and it reuses the shape the export-prefix check already relies on: cut back to the
+    last command separator, drop leading ASSIGNMENT words (they are environment, not a name), and
+    the first word that remains is the command. Everything after it is options. So
+    `A=1 $PYTHON -I -c` resolves to `$PYTHON`, while `grep -c` and `sort -c` still resolve to
+    `grep` and `sort` and are still skipped. Returns None when the command word is unknowable.
+    """
+    cut = max((segment.rfind(ch) for ch in _COMMAND_SEPARATORS), default=-1)
+    tail = segment[cut + 1 :]
+    # A SUBSTITUTION IN THE CURRENT COMMAND MAKES THE WORD BOUNDARIES UNKNOWABLE, so the answer is
+    # "cannot tell" rather than a guess. `v=$(python3 helper.py ) $PY -c 'bad'` is ONE assignment
+    # word followed by `$PY`, but splitting on whitespace sees `v=$(python3`, `helper.py`, `)`,
+    # `$PY` — and picks `helper.py`, a literal without `python`, which would SKIP the invocation
+    # and restore exactly the silent absence round 9 removed. MEASURED: that case went from a
+    # finding to `findings=0` when the segment rule was first written without this.
+    #
+    # Resolving it properly needs `$( … )` nesting, i.e. parsing shell, which this file does not
+    # do. So it fails closed: unknowable command word => the caller reports it.
+    #
+    # Scoped to the CURRENT command (after the last separator), not the whole segment — the
+    # driver's own `_syms=$(nm … | grep -c '_RN')` has its substitution BEFORE the last `|`, and
+    # testing the whole segment would false-red on it.
+    if any(marker in tail for marker in ("$(", "${", "`")):
+        return None
+    for word in tail.split():
+        if not _ASSIGNMENT_WORD.match(word):
+            return word
+    return ""
+
+
 def _is_plain_literal(word: str) -> bool:
     """True when `word` is a shell word whose text IS its value — no expansion, no quoting."""
     return bool(word) and not any(ch in _NON_LITERAL_IN_WORD for ch in word)
@@ -217,7 +263,10 @@ def _is_plain_literal(word: str) -> bool:
 # three python3 blocks (599, 697, 941), each consumed by the python-word branch before this
 # anchor is reached; the sole other `-c` is `taskset -c 1` inside a whole-line COMMENT, excluded
 # twice over (comment, and no quote follows). No bash/sh/zsh/perl/ruby/node/env `-c` exists here.
-_DASH_C_ANCHOR = re.compile(r"(?<![\w-])-c\s+['\"]")
+# `\s*`, not `\s+`: python accepts the ATTACHED spelling `-c'prog'` and runs it, so requiring
+# whitespace left that form UNDISCOVERED — neither a block nor a finding (#3451 post-rebase
+# round 2, F2).
+_DASH_C_ANCHOR = re.compile(r"(?<![\w-])-c\s*['\"]")
 
 # Characters that cannot appear inside one shell word, used to find where a candidate's word
 # STARTS so a path prefix is captured with it.
@@ -229,7 +278,7 @@ _WORD_BREAK = frozenset(" \t\n;&|<>()'\"`")
 # `-c` followed by a single quote. ONE branch covers both the multi-line form (the quote ends the
 # line, driver blocks 1-2) and the inline form (driver block 3), because where the string CLOSES is
 # found by scanning bash's quoting rules rather than by a line pattern.
-_OPEN_DASH_C = re.compile(r"^\s*-c\s+'")
+_OPEN_DASH_C = re.compile(r"^\s*-c\s*'")
 
 # The `'"'"'` idiom: close, emit a literal apostrophe from a double-quoted segment, reopen. The one
 # exception to "a single-quoted string runs to the next quote".
@@ -465,11 +514,14 @@ def census(path: pathlib.Path) -> tuple[list[dict], list[dict]]:
         if anchored_on_flag:
             if line.lstrip().startswith("#"):
                 continue  # see the comment-test note above: a comment ends at the newline
-            # The command word, from the JOINED line. Rebuilt from the physical line this used to
-            # yield '(none)' whenever a continuation sat between the word and the flag.
-            before = scan[scan_line_start : m.start()].rstrip()
-            cmd_word = before[max((before.rfind(c) for c in _WORD_BREAK), default=-1) + 1 :]
-            if _is_plain_literal(cmd_word) and "python" not in cmd_word.rsplit("/", 1)[-1]:
+            # The command word, from the JOINED line and from the whole COMMAND SEGMENT rather
+            # than the word that happens to sit next to the flag — see `_command_word_before`.
+            cmd_word = _command_word_before(scan[scan_line_start : m.start()])
+            if (
+                cmd_word is not None
+                and _is_plain_literal(cmd_word)
+                and "python" not in cmd_word.rsplit("/", 1)[-1]
+            ):
                 # A LITERAL non-python command: `grep -c '_RN'`, `sort -c`, `tar -c`. Its text is
                 # its value, so this is decidably not a python invocation and there is no program
                 # to compile. Skipped rather than reported — reporting it is the false-red
@@ -478,7 +530,8 @@ def census(path: pathlib.Path) -> tuple[list[dict], list[dict]]:
             findings.append({
                 "line": idx + 1,
                 "reason": "a `-c '<program>'` invocation whose command word"
-                          f" ({cmd_word or '(none)'!r}) is NOT A PLAIN LITERAL, so what it runs"
+                          f" ({cmd_word if cmd_word else '(unresolvable)'!r}) is NOT A"
+                          " PLAIN LITERAL, so what it runs"
                           " cannot be decided without executing the shell — it may be python"
                           " carrying a program this check would never see. Anchored on the FLAG"
                           " rather than the command word, because an indirectly-spelled word was"
