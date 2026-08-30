@@ -17,7 +17,7 @@
 //! | `Int8/16/32/64`             | `Int`                                | JSON number |
 //! | `Float32`                   | `Float` (f32 widened)                | JSON number, narrowed to f32 by the golden side |
 //! | `Float64`                   | `Float`                              | JSON number |
-//! | `Decimal128(38, s>0)`       | `Float` (unscaled / 10^s)            | JSON number, incl. an integer-shaped whole decimal (`golden_rows::normalize_declared_numbers`) |
+//! | `Decimal128(38, s>0)`       | EXACT decimal text (`decimal.rs`)    | JSON number, recovered to the same exact decimal (`golden_rows::normalize_declared_numbers`) |
 //! | `Decimal128(38, 0)`         | `Int` (varint)                       | JSON number |
 //! | `Utf8`                      | `Text`                               | JSON string |
 //! | `Binary`                    | `Text("0x" + lower hex)`             | `"0x…"` string |
@@ -54,13 +54,7 @@ use arrow::array::{
 use arrow::datatypes::{DataType, IntervalUnit, TimeUnit};
 
 use super::canonical_jsonl::{CanonicalValue, NormalizedFloat};
-
-/// The largest `Decimal128` unscaled magnitude the harness will convert to `f64`
-/// exactly: `2^53`. Beyond it the conversion is lossy, so a mismatch could be an
-/// artifact of the comparison rather than of the export — the harness ERRORS
-/// instead of comparing (the golden side would need arbitrary-precision decimal
-/// parsing, which sstabledump's JSON number rendering does not preserve anyway).
-const MAX_EXACT_F64_INT: i128 = 1i128 << 53;
+use super::decimal::exact_from_decimal128;
 
 /// Project cell `(array, row)` into the canonical space.
 pub fn canonical_from_arrow(
@@ -218,12 +212,18 @@ fn type_name<T>() -> &'static str {
     std::any::type_name::<T>()
 }
 
-/// `decimal` → `Float`; `varint` (scale 0) → `Int`.
+/// `decimal` (scale > 0) → an EXACT decimal; `varint` (scale 0) → `Int`.
 ///
-/// The division is exact-by-construction for every magnitude the harness
-/// accepts: `unscaled` and `10^scale` are both exactly representable, so IEEE
-/// division returns the correctly-rounded true quotient — bit-identical to the
-/// double `serde_json` produces from the golden's decimal literal.
+/// NO `f64` anywhere: the unscaled value and scale go straight into
+/// [`super::decimal::ExactDecimal`], which the golden side lands on too. The
+/// previous rendering divided `unscaled as f64` by `10^scale` under a
+/// `|unscaled| < 2^53` guard; that guard bounded only the INTEGER conversion —
+/// the division still mapped one-unit-apart decimals onto ONE double, so a
+/// corrupted `Decimal128` cell compared EQUAL (see `decimal.rs`).
+///
+/// Scale 0 stays an `Int`: that is the `varint` mapping (an integer domain on
+/// both sides), and turning it into a decimal would be the type confusion the
+/// canonical space exists to prevent.
 pub fn decimal_to_canonical(
     unscaled: i128,
     scale: i8,
@@ -232,19 +232,7 @@ pub fn decimal_to_canonical(
     if scale == 0 {
         return Ok(CanonicalValue::Int(unscaled));
     }
-    if scale < 0 {
-        return Err(format!("{ctx}: negative Decimal128 scale {scale}"));
-    }
-    if unscaled.saturating_abs() >= MAX_EXACT_F64_INT {
-        return Err(format!(
-            "{ctx}: decimal unscaled value {unscaled} exceeds the exactly-f64-representable \
-             range (2^53); the harness refuses a lossy comparison"
-        ));
-    }
-    let divisor = 10f64.powi(scale as i32);
-    Ok(CanonicalValue::Float(NormalizedFloat(
-        unscaled as f64 / divisor,
-    )))
+    Ok(exact_from_decimal128(unscaled, scale, ctx)?.canonical())
 }
 
 /// sstabledump renders a blob as `0x` + lowercase hex.

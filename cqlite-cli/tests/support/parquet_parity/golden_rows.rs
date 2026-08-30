@@ -40,8 +40,9 @@
 //!   collections: a `frozen<set<int>>` really can hold an empty set, which stays
 //!   an empty container and so still differs from NULL.
 //! * **Numbers are canonicalized by DECLARED type** — a `float` re-narrowed to
-//!   32 bits, a whole-valued `decimal` read as the exact double it denotes. Both
-//!   are exact conversions; see [`normalize_declared_numbers`].
+//!   32 bits, a `decimal` recovered to the EXACT unscaled-value/scale pair its
+//!   literal denotes (never an `f64`). Both are exact, and both REFUSE rather
+//!   than round; see [`normalize_declared_numbers`].
 //! * **A FROZEN map's JSON object becomes a canonical map** — sstabledump writes
 //!   a frozen map as a JSON OBJECT, which `from_json` necessarily reads as a
 //!   `Tuple`; the Arrow side reads the same column back as a `Map`. See
@@ -55,6 +56,7 @@ use super::canonical_jsonl::{
     CanonicalDocument, CanonicalRow, CanonicalValue, KeyKind, NormalizedFloat,
 };
 use super::cql_type::{ColumnType, CqlTypeSpec, SeqKind};
+use super::decimal::{exact_from_golden_double, ExactDecimal, EXPORT_DECIMAL_SCALE};
 
 /// One row projected out of the golden: the primary-key components in declared
 /// order, plus every declared column's canonical value.
@@ -141,10 +143,9 @@ pub fn project_golden(
                 // map), then numbers — `normalize_declared_numbers` recurses
                 // into a `Map` but not into a `Tuple` standing in for one.
                 let value = coerce_declared_shape(value, &col.spec);
-                cells.insert(
-                    col.name.clone(),
-                    normalize_declared_numbers(value, &col.spec),
-                );
+                let value = normalize_declared_numbers(value, &col.spec)
+                    .map_err(|e| format!("{where_}: column '{}': {e}", col.name))?;
+                cells.insert(col.name.clone(), value);
             }
 
             // Every declared key column must have been filled by the key arrays.
@@ -153,7 +154,8 @@ pub fn project_golden(
                     format!("{where_}: declared key column '{name}' is not in the golden row")
                 })?;
                 if let Some(col) = columns.iter().find(|c| c.name == *name) {
-                    let narrowed = normalize_declared_numbers(v.clone(), &col.spec);
+                    let narrowed = normalize_declared_numbers(v.clone(), &col.spec)
+                        .map_err(|e| format!("{where_}: key column '{name}': {e}"))?;
                     cells.insert((*name).to_string(), narrowed);
                 }
             }
@@ -484,7 +486,8 @@ pub fn fold_null(v: CanonicalValue) -> CanonicalValue {
 
 /// Canonicalize a golden NUMBER according to its DECLARED CQL type.
 ///
-/// Two rules, both of them equalities rather than tolerances:
+/// Two rules, both of them equalities rather than tolerances, and both able to
+/// REFUSE (`Err`) rather than compare something they cannot compare exactly:
 ///
 /// * **`float` re-narrows to 32 bits.** sstabledump prints a `float` with Java's
 ///   `Float.toString`, which round-trips through 32 bits; parsed as JSON it
@@ -493,62 +496,69 @@ pub fn fold_null(v: CanonicalValue) -> CanonicalValue {
 ///   value to `f32` and widening it back makes both sides hold the same double,
 ///   WITHOUT introducing a tolerance: any genuinely different float still
 ///   differs, and the comparison stays exact-bit.
-/// * **A whole-valued `decimal` becomes a `Float`.** JSON has one number type
-///   and sstabledump renders a scale-0 (or trailing-zero) decimal WITHOUT a
-///   fractional part — `1`, not `1.0` — which `canonical_jsonl` classifies as
-///   `Int`. The exported `Decimal128(38, s>0)` side canonicalizes to
-///   `Float(1.0)` (see `arrow_rows::decimal_to_canonical`), so the two would
-///   compare unequal for a value both sides agree on. The DECLARED type is what
-///   settles it: `decimal` is a real-number domain, so the golden's
-///   integer-shaped literal is the exact double `i as f64` — no rounding, hence
-///   no weakening of the exact-bit float comparison.
+/// * **A `decimal` becomes an EXACT decimal, never an `f64`.** The exported
+///   `Decimal128(38, s)` cell carries an exact unscaled value and scale
+///   (`arrow_rows::decimal_to_canonical`), and the golden literal is recovered
+///   to the same exact form:
+///   - an integer-shaped literal (`1`, which sstabledump writes for a
+///     whole-valued decimal, and which `canonical_jsonl` reads as `Int`) is
+///     already exact — [`ExactDecimal::from_i128`], with no magnitude ceiling;
+///   - a fractional literal reached this harness as an `f64`, so
+///     [`exact_from_golden_double`] recovers it and VERIFIES the recovery,
+///     refusing when the double cannot identify one decimal.
 ///
-///   Applied only while `i` is exactly f64-representable (`|i| < 2^53`); beyond
-///   that the value is LEFT as `Int` so the comparison fails loudly rather than
-///   comparing two rounded doubles. (`arrow_rows` refuses the same range on its
-///   side.) A `varint` is deliberately NOT converted: it is an integer domain on
-///   both sides (`Decimal128(_, 0)` → `Int`), so converting it would be the
-///   type confusion this rule exists to avoid.
-pub fn normalize_declared_numbers(v: CanonicalValue, spec: &CqlTypeSpec) -> CanonicalValue {
-    match (v, spec) {
+///   This replaces the previous `Int → Float(i as f64)` rule and its `|i| < 2^53`
+///   ceiling: the whole point of the exact representation is that neither side
+///   goes through a double, so neither side needs a magnitude bound. A `varint`
+///   is deliberately NOT converted: it is an integer domain on both sides
+///   (`Decimal128(_, 0)` → `Int`), so converting it would be the type confusion
+///   this rule exists to avoid.
+pub fn normalize_declared_numbers(
+    v: CanonicalValue,
+    spec: &CqlTypeSpec,
+) -> Result<CanonicalValue, String> {
+    Ok(match (v, spec) {
         (CanonicalValue::Float(NormalizedFloat(f)), CqlTypeSpec::Scalar(name))
             if name == "float" =>
         {
             CanonicalValue::Float(NormalizedFloat(f as f32 as f64))
         }
-        (CanonicalValue::Int(i), CqlTypeSpec::Scalar(name))
-            if name == "decimal" && i.unsigned_abs() < (1u128 << 53) =>
+        (CanonicalValue::Float(NormalizedFloat(f)), CqlTypeSpec::Scalar(name))
+            if name == "decimal" =>
         {
-            CanonicalValue::Float(NormalizedFloat(i as f64))
+            exact_from_golden_double(f, EXPORT_DECIMAL_SCALE, "golden decimal")?.canonical()
+        }
+        (CanonicalValue::Int(i), CqlTypeSpec::Scalar(name)) if name == "decimal" => {
+            ExactDecimal::from_i128(i).canonical()
         }
         (CanonicalValue::List(xs), CqlTypeSpec::Seq { elem, .. }) => CanonicalValue::List(
             xs.into_iter()
                 .map(|x| normalize_declared_numbers(x, elem))
-                .collect(),
+                .collect::<Result<Vec<_>, _>>()?,
         ),
         (CanonicalValue::Set(xs), CqlTypeSpec::Seq { elem, .. }) => CanonicalValue::Set(
             xs.into_iter()
                 .map(|x| normalize_declared_numbers(x, elem))
-                .collect(),
+                .collect::<Result<Vec<_>, _>>()?,
         ),
         (CanonicalValue::Map(kvs), CqlTypeSpec::Map { key, value }) => CanonicalValue::Map(
             kvs.into_iter()
                 .map(|(k, v)| {
-                    (
-                        normalize_declared_numbers(k, key),
-                        normalize_declared_numbers(v, value),
-                    )
+                    Ok((
+                        normalize_declared_numbers(k, key)?,
+                        normalize_declared_numbers(v, value)?,
+                    ))
                 })
-                .collect(),
+                .collect::<Result<Vec<_>, String>>()?,
         ),
         (CanonicalValue::List(xs), CqlTypeSpec::Tuple(specs)) if xs.len() == specs.len() => {
             CanonicalValue::List(
                 xs.into_iter()
                     .zip(specs.iter())
                     .map(|(x, s)| normalize_declared_numbers(x, s))
-                    .collect(),
+                    .collect::<Result<Vec<_>, _>>()?,
             )
         }
         (other, _) => other,
-    }
+    })
 }

@@ -444,10 +444,19 @@ fn interval_duration_canonicalizes_to_the_golden_spelling() {
 }
 
 // ---------------------------------------------------------------------------
-// Whole-valued decimals: the golden renders `1`, the export `Decimal128(38,9)`
+// EXACT decimals: no `f64` on either side (roborev round 4, #1490)
+//
+// The decimal comparison used to reduce both sides to a double
+// (`unscaled as f64 / 10^scale`) under a `|unscaled| < 2^53` guard. That guard
+// made the INTEGER conversion exact and so LOOKED like a bound on the error,
+// while the scaling division re-introduced it: one-unit-apart decimals well
+// inside the guard divide to the SAME double, so a corrupted `Decimal128` cell
+// compared EQUAL. Both sides now carry the exact unscaled/scale pair
+// (`parquet_parity::decimal`), and these tests are the permanent controls for
+// that: the perturbation control below FAILS if the `f64` path ever returns.
 //
 // No corpus table currently carries a scale-0 decimal (measured: 2650 decimal
-// cells across every golden, none integer-shaped), so this path is covered by a
+// cells across every golden, none integer-shaped), so that path is covered by a
 // unit test over the two normalizers rather than by inventing a fixture.
 // ---------------------------------------------------------------------------
 
@@ -456,7 +465,7 @@ fn interval_duration_canonicalizes_to_the_golden_spelling() {
 #[test]
 fn whole_valued_decimal_canonicalizes_on_both_sides() {
     use parquet_parity::arrow_rows::decimal_to_canonical;
-    use parquet_parity::canonical_jsonl::{CanonicalValue, NormalizedFloat};
+    use parquet_parity::canonical_jsonl::CanonicalValue;
     use parquet_parity::cql_type::parse_column;
     use parquet_parity::golden_rows::normalize_declared_numbers;
 
@@ -465,7 +474,8 @@ fn whole_valued_decimal_canonicalizes_on_both_sides() {
 
     for whole in [0i128, 1, -1, 42, -31_595] {
         // Golden side: sstabledump writes a whole decimal as a JSON integer.
-        let golden = normalize_declared_numbers(CanonicalValue::Int(whole), &decimal.spec);
+        let golden = normalize_declared_numbers(CanonicalValue::Int(whole), &decimal.spec)
+            .expect("a whole golden decimal is exact");
         // Export side: Decimal128(38, 9) holds whole * 10^9.
         let exported = decimal_to_canonical(whole * 1_000_000_000, 9, "test")
             .expect("scale-9 decimal must canonicalize");
@@ -475,24 +485,22 @@ fn whole_valued_decimal_canonicalizes_on_both_sides() {
         );
         assert_eq!(
             golden,
-            CanonicalValue::Float(NormalizedFloat(whole as f64)),
-            "the canonical form of a whole decimal is the exact double it denotes"
+            CanonicalValue::Text(format!("decimal({whole})")),
+            "the canonical form of a decimal is its EXACT normalized decimal text"
         );
     }
 
     // A fractional decimal is untouched by the rule, and still compares exactly.
     assert_eq!(
-        normalize_declared_numbers(
-            CanonicalValue::Float(NormalizedFloat(31_595.67)),
-            &decimal.spec
-        ),
+        normalize_declared_numbers(golden_decimal(31_595.67), &decimal.spec)
+            .expect("a recoverable golden decimal"),
         decimal_to_canonical(31_595_670_000_000, 9, "test").expect("fractional decimal")
     );
 
     // varint is an integer domain on BOTH sides: it must stay an `Int`, or the
     // rule would turn a type confusion into a silent pass.
     assert_eq!(
-        normalize_declared_numbers(CanonicalValue::Int(7), &varint.spec),
+        normalize_declared_numbers(CanonicalValue::Int(7), &varint.spec).expect("varint is exact"),
         CanonicalValue::Int(7)
     );
     assert_eq!(
@@ -500,15 +508,186 @@ fn whole_valued_decimal_canonicalizes_on_both_sides() {
         CanonicalValue::Int(7)
     );
 
-    // Beyond 2^53 the conversion would be lossy, so the golden value is LEFT as
-    // an Int (and the export side refuses outright) — a loud failure, never a
-    // rounded comparison.
+    // The exact representation has NO `2^53` ceiling — that bound existed only
+    // because the comparison went through a double. A decimal far beyond it now
+    // compares exactly on both sides.
     let huge = 1i128 << 60;
     assert_eq!(
-        normalize_declared_numbers(CanonicalValue::Int(huge), &decimal.spec),
-        CanonicalValue::Int(huge)
+        normalize_declared_numbers(CanonicalValue::Int(huge), &decimal.spec)
+            .expect("a whole golden decimal of any magnitude is exact"),
+        decimal_to_canonical(huge * 1_000_000_000, 9, "test").expect("scale-9 decimal"),
+        "a whole decimal beyond 2^53 must still compare equal to its exported form"
     );
-    assert!(decimal_to_canonical(huge, 9, "test").is_err());
+}
+
+/// The golden literals of `test_basic.simple_table.account_balance` must recover
+/// to EXACTLY the decimal they spell, and to the exported cell for that value.
+#[test]
+fn golden_decimal_literals_recover_exactly() {
+    use parquet_parity::arrow_rows::decimal_to_canonical;
+    use parquet_parity::cql_type::parse_column;
+    use parquet_parity::golden_rows::normalize_declared_numbers;
+
+    let decimal = parse_column("d", "decimal", &[]).expect("decimal parses");
+    // Literals copied verbatim from the committed sstabledump golden, with the
+    // unscaled value the export's fixed scale-9 `Decimal128` holds for each.
+    // `10576.6` is scale 1 and `10375.04` scale 2 in ONE column — which is why
+    // the comparison is scale-NORMALIZED (see `decimal.rs`).
+    for (literal, unscaled_at_scale_9) in [
+        ("10375.04", 10_375_040_000_000i128),
+        ("10576.6", 10_576_600_000_000),
+        ("31595.67", 31_595_670_000_000),
+        ("-10375.04", -10_375_040_000_000),
+    ] {
+        let via_serde: f64 = serde_json::from_str::<serde_json::Value>(literal)
+            .expect("literal must be valid JSON")
+            .as_f64()
+            .expect("literal must be a JSON number");
+        let golden = normalize_declared_numbers(golden_decimal(via_serde), &decimal.spec)
+            .expect("a corpus decimal literal must recover exactly");
+        assert_eq!(
+            golden,
+            parquet_parity::decimal::ExactDecimal::new(unscaled_at_scale_9, 9).canonical(),
+            "the golden literal {literal} must recover to the decimal it spells"
+        );
+        assert_eq!(
+            golden,
+            decimal_to_canonical(unscaled_at_scale_9, 9, "test").expect("scale-9 decimal"),
+            "the recovered literal {literal} must equal the exported cell"
+        );
+    }
+
+    // A signed zero is not a decimal attribute: `BigDecimal` has no negative
+    // zero, so `-0.0` and `0.0` both recover to the decimal 0.
+    for zero in [0.0f64, -0.0] {
+        assert_eq!(
+            normalize_declared_numbers(golden_decimal(zero), &decimal.spec)
+                .expect("zero must recover"),
+            decimal_to_canonical(0, 9, "test").expect("scale-9 zero")
+        );
+    }
+}
+
+/// A ONE-UNIT `Decimal128` perturbation the old `f64` path could not see must
+/// now be reported — the sensitivity control for this whole representation.
+///
+/// The pair is chosen to be invisible to the OLD comparison and inside its
+/// `2^53` guard, so it also demonstrates why that guard was never a bound:
+/// `9_007_199_254_740_001` and `…002` at scale 9 are one unit apart, both below
+/// `2^53`, and `unscaled as f64 / 10^9` maps them onto the SAME double.
+#[test]
+fn a_one_unit_decimal_perturbation_the_old_f64_path_collapsed_is_detected() {
+    use parquet_parity::arrow_rows::decimal_to_canonical;
+    use parquet_parity::canonical_jsonl::CanonicalValue;
+
+    let unscaled = 9_007_199_254_740_001i128;
+    let perturbed = unscaled + 1;
+
+    // The premise: the old rendering collapsed the two, INSIDE its own guard.
+    assert!(
+        perturbed.unsigned_abs() < (1u128 << 53),
+        "inside the 2^53 guard"
+    );
+    assert_eq!(
+        (unscaled as f64 / 1e9).to_bits(),
+        (perturbed as f64 / 1e9).to_bits(),
+        "premise of this control: the f64 path could not distinguish the two"
+    );
+
+    // The exact representation distinguishes them, and names both values.
+    let exported = decimal_to_canonical(unscaled, 9, "test").expect("scale-9 decimal");
+    let corrupted = decimal_to_canonical(perturbed, 9, "test").expect("scale-9 decimal");
+    assert_ne!(
+        exported, corrupted,
+        "a one-unit Decimal128 corruption must be reported, not absorbed"
+    );
+    assert_eq!(
+        exported,
+        CanonicalValue::Text("decimal(9007199.254740001)".to_string())
+    );
+    assert_eq!(
+        corrupted,
+        CanonicalValue::Text("decimal(9007199.254740002)".to_string())
+    );
+
+    // And the golden side REFUSES that double rather than compare it: two
+    // distinct scale-9 decimals share it, so no recovery is exact. A refusal is
+    // a loud non-answer; comparing would be the false PASS this control exists
+    // to prevent.
+    use parquet_parity::cql_type::parse_column;
+    use parquet_parity::golden_rows::normalize_declared_numbers;
+    let decimal = parse_column("d", "decimal", &[]).expect("decimal parses");
+    let err = normalize_declared_numbers(golden_decimal(unscaled as f64 / 1e9), &decimal.spec)
+        .expect_err("an ambiguous golden double must be refused");
+    assert!(
+        err.contains("9007199.254740001") && err.contains("9007199.254740002"),
+        "the refusal must name both candidate decimals, got: {err}"
+    );
+}
+
+/// Scale NORMALIZATION is exact: `1.10` and `1.1` denote one rational and
+/// compare equal, while distinct rationals stay distinct.
+#[test]
+fn decimal_scale_normalization_is_exact() {
+    use parquet_parity::decimal::ExactDecimal;
+
+    assert_eq!(ExactDecimal::new(110, 2), ExactDecimal::new(11, 1));
+    assert_eq!(ExactDecimal::new(110, 2).text(), "1.1");
+    assert_eq!(ExactDecimal::new(0, 9).text(), "0");
+    assert_eq!(ExactDecimal::new(-1, 9).text(), "-0.000000001");
+    assert_eq!(ExactDecimal::new(1, 9).text(), "0.000000001");
+    assert_eq!(ExactDecimal::from_i128(-42).text(), "-42");
+    // One digit apart at the same scale is NOT equal, at any magnitude.
+    assert_ne!(ExactDecimal::new(111, 2), ExactDecimal::new(11, 1));
+    assert_ne!(
+        ExactDecimal::new(i128::MAX, 9),
+        ExactDecimal::new(i128::MAX - 1, 9)
+    );
+
+    // The canonical form is TAGGED, so a `decimal` can never compare equal to a
+    // `text` column holding the same digits — the type stays load-bearing.
+    use parquet_parity::canonical_jsonl::CanonicalValue;
+    assert_ne!(
+        ExactDecimal::new(11, 1).canonical(),
+        CanonicalValue::Text("1.1".to_string())
+    );
+}
+
+/// The harness must REFUSE, never round, when a decimal cannot be compared
+/// exactly: a scale beyond the recovery bound, and a literal with more
+/// fractional digits than the export can carry.
+#[test]
+fn decimal_comparison_refuses_what_it_cannot_compare_exactly() {
+    use parquet_parity::arrow_rows::decimal_to_canonical;
+    use parquet_parity::decimal::{exact_from_golden_double, EXPORT_DECIMAL_SCALE};
+
+    // A scale beyond the one the golden side can recover a literal at: the
+    // harness refuses rather than let two distinct decimals recover to one.
+    let err = decimal_to_canonical(1, 12, "test").expect_err("scale 12 must be refused");
+    assert!(err.contains("exceeds"), "got: {err}");
+    assert!(
+        decimal_to_canonical(1, -1, "test").is_err(),
+        "negative scale"
+    );
+
+    // A literal with more fractional digits than the export's fixed scale: the
+    // export refuses to truncate it, and the golden side refuses to round it.
+    let too_precise: f64 = "0.0000000001".parse().expect("f64");
+    let err = exact_from_golden_double(too_precise, EXPORT_DECIMAL_SCALE, "golden")
+        .expect_err("a literal beyond the export scale must be refused");
+    assert!(err.contains("fractional digits"), "got: {err}");
+
+    // Non-finite doubles are not decimals at all.
+    for bad in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+        assert!(exact_from_golden_double(bad, EXPORT_DECIMAL_SCALE, "golden").is_err());
+    }
+}
+
+/// A golden `decimal` cell as `canonical_jsonl` hands it to the harness: the
+/// literal has already been parsed into an `f64` by the shared comparator.
+fn golden_decimal(f: f64) -> parquet_parity::canonical_jsonl::CanonicalValue {
+    use parquet_parity::canonical_jsonl::{CanonicalValue, NormalizedFloat};
+    CanonicalValue::Float(NormalizedFloat(f))
 }
 
 // ---------------------------------------------------------------------------

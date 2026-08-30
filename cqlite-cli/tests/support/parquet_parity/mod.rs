@@ -65,6 +65,7 @@ pub mod datasets_root;
 pub mod arrow_expect;
 pub mod arrow_rows;
 pub mod cql_type;
+pub mod decimal;
 pub mod failure;
 pub mod golden_rows;
 pub mod spelling;
