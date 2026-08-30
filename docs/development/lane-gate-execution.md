@@ -352,9 +352,12 @@ command. So when `--run-id` names a run and a valid matching beat exists, the re
 `RUNNING` even if the summary is **absent** or still belongs to the **previous** run. Without that,
 the launcher's own advertised command reported `UNKNOWN` for a healthy, accepted, actively-beating
 gate for the whole duration of the capture — the two halves disagreeing about what "accepted" means,
-which is worse than either being wrong alone. The rescue applies only to a *named* run with a *valid*
-matching beat: unnamed callers have nothing to match against, so for them the summary remains the
-only anchor.
+which is worse than either being wrong alone. The rescue applies only to a *named* run with a beat that is valid, matching **and fresh in a proven
+shared clock domain**. Freshness is not optional there: without it, a gate that died after its first
+beat but before writing its summary would report `RUNNING` forever from that one stale beat — a false
+`RUNNING` makes the caller wait indefinitely on a gate that is gone. A stale startup beat simply does
+not take the shortcut, and the normal summary handling answers `UNKNOWN`. Unnamed callers have nothing
+to match against, so for them the summary remains the only anchor.
 
 A **terminal** verdict is reconciled with the beat before it is believed. During startup a new run
 publishes its beat *before* replacing the previous run's summary — a window the early beater start
@@ -477,7 +480,14 @@ short-lived pid can be reused and would otherwise make a finished gate's reserva
 forever. And because `mkdir` and writing the owner record are two operations, a lock whose owner
 record is **missing or incomplete** reads as *acquisition in progress* — refuse — rather than stale;
 an unwritable owner record fails closed and releases the directory, since a lock nobody can
-interpret would block the path for everyone. (#2874 already forbids two gates on one path; the launcher now
+interpret would block the path for everyone.
+
+That in-progress state has a **deadline**, because refusing it unconditionally traded one failure for
+another: a launcher killed between `mkdir` and finishing the owner record would leave a lock that
+could never self-heal, permanently refusing every later launch on that path. A real acquisition takes
+milliseconds, so an incomplete record older than the grace period is *abandoned* and is reclaimed
+through the same atomic-rename compare-and-swap. An age that cannot be measured counts as **fresh**
+(refuse), never as abandoned — `stat`'s flags differ between GNU and BSD and both are tried. (#2874 already forbids two gates on one path; the launcher now
 detects it rather than walking into it.)
 
 Every probe is **non-destructive**, because under #2874 these paths may hold a live peer's
@@ -527,8 +537,8 @@ default-path launch keeps the summary and log the caller still needs.
 Every SUMMARY block now carries a `heartbeat:` line, so a pasted block shows the
 mechanism ran (same reason #3148 stamps a positive `schemas:` line).
 
-Self-tests: `scripts/tests/test_gate_liveness.sh` (180 cases) and
-`scripts/tests/test_gate_detached.sh` (122 cases), both in the full gate's
+Self-tests: `scripts/tests/test_gate_liveness.sh` (184 cases) and
+`scripts/tests/test_gate_detached.sh` (127 cases), both in the full gate's
 `tooling-tests` component.
 
 ## Doctrine

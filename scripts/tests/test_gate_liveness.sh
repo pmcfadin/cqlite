@@ -1103,6 +1103,32 @@ expect_reader "11l.4 control: the previous run answered by its own id => COMPLET
 rm -f "$TMP/su.txt.heartbeat"
 expect_reader "11l.5 control: named run with NO beat is not rescued => UNKNOWN" \
   UNKNOWN 4 "summary-run-id-mismatch" -- "$TMP/su.txt" --run-id myrun
+# FRESHNESS is part of the startup test (job 197): the first version accepted any valid matching
+# beat, so a gate that died after its FIRST beat but before writing its summary reported RUNNING
+# forever. A false RUNNING makes the caller wait indefinitely on a gate that is gone.
+_mk_stale_startup_beat() { # <path> <run-id> <age>
+  { echo "==== AGENT-GATE HEARTBEAT ===="; echo "run-id: $2"; echo "gate-pid: 42"
+    echo "beater-pid: 43"; echo "host: $(uname -n 2>/dev/null || echo unknown)"
+    echo "parent-check: starttime"; echo "interval: 20"; echo "beat-seq: 1"
+    echo "beat-epoch: $(( $(date +%s) - $3 ))"; echo "==== END AGENT-GATE HEARTBEAT ===="; } > "$1"
+}
+rm -f "$TMP/st2.txt"
+_mk_stale_startup_beat "$TMP/st2.txt.heartbeat" myrun 5000
+expect_reader "11l.7 STALE startup beat + no summary => UNKNOWN, never a false RUNNING" \
+  UNKNOWN 4 "no-summary-artifact" -- "$TMP/st2.txt" --run-id myrun
+mk_summary "$TMP/st2.txt" oldrun "PASS"
+expect_reader "11l.8 STALE startup beat + previous summary => UNKNOWN, never a false RUNNING" \
+  UNKNOWN 4 "summary-run-id-mismatch" -- "$TMP/st2.txt" --run-id myrun
+# CONTROL: the same beat, fresh, still takes the shortcut.
+_mk_stale_startup_beat "$TMP/st2.txt.heartbeat" myrun 5
+expect_reader "11l.9 control: a FRESH startup beat still shortcuts => RUNNING" \
+  RUNNING 2 "window" -- "$TMP/st2.txt" --run-id myrun
+# CONTROL: a fresh beat from ANOTHER host cannot shortcut (no proven shared clock).
+_mk_stale_startup_beat "$TMP/st2.txt.heartbeat" myrun 5
+sed 's/^host: .*/host: someotherbox/' "$TMP/st2.txt.heartbeat" > "$TMP/st2.tmp" && mv "$TMP/st2.tmp" "$TMP/st2.txt.heartbeat"
+expect_reader "11l.10 control: a foreign-host startup beat does not shortcut" \
+  UNKNOWN 4 "summary-run-id-mismatch" -- "$TMP/st2.txt" --run-id myrun
+
 # A beat that is INVALID must not rescue anything either.
 _mk_startup_beat "$TMP/su.txt.heartbeat" myrun
 grep -v '^parent-check: ' "$TMP/su.txt.heartbeat" > "$TMP/su.tmp" && mv "$TMP/su.tmp" "$TMP/su.txt.heartbeat"

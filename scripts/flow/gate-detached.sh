@@ -503,6 +503,17 @@ _reserve="$SUMMARY.launch-lock"
 # _proc_identity <pid> -> a tiered process-identity token, or empty. Same tiering as the gate and
 # the beater use: /proc start ticks where available, else `ps -o lstart=` (portable, second
 # granularity, empty for a dead pid).
+# _path_age_secs <path> -> age in whole seconds, or empty when it cannot be determined. `stat`'s
+# flags differ between GNU and BSD, and this repo supports both, so both spellings are tried and an
+# unmeasurable age yields EMPTY — which the caller treats as "cannot tell", never as "old".
+_path_age_secs() {
+  local mt now
+  mt=$(stat -c %Y "$1" 2>/dev/null) || mt=$(stat -f %m "$1" 2>/dev/null) || return 0
+  case "$mt" in ''|*[!0-9]*) return 0 ;; esac
+  now=$(date +%s)
+  printf '%s' "$(( now - mt ))"
+}
+
 _proc_identity() {
   local raw rest ls
   raw=$(cat "/proc/$1/stat" 2>/dev/null)
@@ -528,12 +539,28 @@ if ! mkdir "$_reserve" 2>/dev/null; then
   # two gates on one summary path. The safe reading of a half-built lock is that its owner is still
   # arriving, so we refuse; the loser can retry, whereas a wrong reclamation is unrecoverable.
   if [ -z "$_own_unit" ] || [ -z "$_own_pid" ]; then
-    echo "gate-detached: the reservation at '$_reserve' is being acquired right now (its owner" >&2
-    echo "               record is not complete yet). Refusing rather than reclaiming a lock" >&2
-    echo "               another launcher has just taken (#3473). Retry, or use a distinct path." >&2
-    exit 1
+    # An incomplete record means an acquisition is in progress — BUT THAT STATE NEEDS A DEADLINE
+    # (roborev job 197, Medium). Refusing unconditionally traded one failure for another: a launcher
+    # killed between `mkdir` and finishing the owner record would leave a lock that can never
+    # self-heal, permanently refusing every later launch on that summary path.
+    #
+    # A real acquisition takes milliseconds. So an incomplete record older than the grace period is
+    # ABANDONED, and is reclaimed through the same atomic-rename compare-and-swap as any other stale
+    # lock — which is what keeps concurrent reclaimers safe.
+    _res_age=$(_path_age_secs "$_reserve")
+    if [ -z "$_res_age" ] || [ "$_res_age" -lt 30 ]; then
+      echo "gate-detached: the reservation at '$_reserve' is being acquired right now (its owner" >&2
+      echo "               record is not complete yet${_res_age:+, age ${_res_age}s}). Refusing rather than" >&2
+      echo "               reclaiming a lock another launcher has just taken (#3473). Retry shortly." >&2
+      exit 1
+    fi
+    echo "gate-detached: reclaiming an ABANDONED reservation at '$_reserve' (incomplete owner" >&2
+    echo "               record, ${_res_age}s old — an acquisition takes milliseconds) (#3473)." >&2
+    _own_unit=""; _own_pid=""; _own_start=""   # fall through to the stale-reclamation path below
   fi
   _live=no
+  # (an abandoned incomplete record arrives here with the owner fields cleared, so it is not live
+  #  and proceeds straight to reclamation)
   # The launcher pid is SHORT-LIVED, so a bare `kill -0` on it can be satisfied by an unrelated
   # process after pid reuse — making a finished gate's reservation look live forever and blocking
   # the path (roborev job 196, Low). The recorded start identity is what distinguishes them; a

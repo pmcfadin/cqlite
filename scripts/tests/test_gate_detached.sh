@@ -977,6 +977,43 @@ else
   skipc "4b.91-4b.93 acquisition window" "no working systemd-run --user"
 fi
 
+# roborev job 197: "acquisition in progress" needed a DEADLINE. Refusing an incomplete reservation
+# unconditionally traded one failure for another — a launcher killed between `mkdir` and finishing
+# the owner record left a lock that could never self-heal, permanently refusing every later launch
+# on that summary path.
+if grep -q '_path_age_secs' "$LAUNCHER" && grep -q 'reclaiming an ABANDONED reservation' "$LAUNCHER"; then
+  ok "4b.94 an ABANDONED incomplete reservation is reclaimed (the in-progress state has a deadline)"
+else
+  bad "4b.94 an abandoned incomplete reservation is reclaimed" "no deadline on the in-progress state"
+fi
+# The age probe must be portable and must treat "cannot tell" as NOT old.
+if grep -q 'stat -c %Y' "$LAUNCHER" && grep -q 'stat -f %m' "$LAUNCHER"; then
+  ok "4b.95 the age probe tries both GNU and BSD stat spellings"
+else
+  bad "4b.95 the age probe tries both stat spellings" "one is missing"
+fi
+if grep -q '\[ -z "$_res_age" \] || \[ "$_res_age" -lt 30 \]' "$LAUNCHER"; then
+  ok "4b.96 an UNMEASURABLE age counts as fresh (refuse), never as abandoned"
+else
+  bad "4b.96 an unmeasurable age counts as fresh" "cannot-tell may be read as old"
+fi
+# BEHAVIOURAL: aged incomplete => reclaimed; fresh incomplete => refused.
+ab="$TMP/abandoned.txt"
+mkdir -p "$ab.launch-lock"
+touch -d '2 hours ago' "$ab.launch-lock" 2>/dev/null || touch -A -020000 "$ab.launch-lock" 2>/dev/null
+if [ "$HAVE_SYSTEMD" = yes ]; then
+  o=$(bash "$LAUNCHER" --summary "$ab" --log "$TMP/ab.log" -- --only file-size 2>&1); r=$?
+  au=$(printf '%s' "$o" | sed -n 's/^unit:  *//p'); [ -n "$au" ] && echo "$au" >> "$UNITS_FILE"
+  [ "$r" = 0 ] && ok "4b.97 an AGED incomplete lock does not block the path forever (exit $r)" \
+               || bad "4b.97 an aged incomplete lock does not block the path" "exit $r: $o"
+  ab2="$TMP/inflight.txt"; mkdir -p "$ab2.launch-lock"
+  o2=$(bash "$LAUNCHER" --summary "$ab2" --log "$TMP/ab2.log" -- --only file-size 2>&1); r2=$?
+  [ "$r2" != 0 ] && ok "4b.98 a FRESH incomplete lock is still refused (exit $r2)" \
+                 || bad "4b.98 a fresh incomplete lock is still refused" "exit 0 — it reclaimed a live acquisition"
+else
+  skipc "4b.97-4b.98 abandoned-lock reclamation" "no working systemd-run --user"
+fi
+
 # Control: a writable existing summary is FINE — the check must not reject the normal case.
 okF="$TMP/ok-summary.txt"; printf 'previous content\n' > "$okF"
 before=$(cat "$okF")

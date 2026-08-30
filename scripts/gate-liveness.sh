@@ -323,14 +323,34 @@ if [ -n "$WANT_RUN_ID" ] && [ -f "$HB" ] && [ -r "$HB" ] && _ensure_snap_dir; th
   _sb_snap=$(_snap_of "$HB" startupbeat 2>/dev/null) || _sb_snap=""
   if [ -n "$_sb_snap" ] && ! _has_nul "$_sb_snap"; then
     _sb_text=$(_slurp "$_sb_snap")
+    # FRESHNESS IS PART OF THE TEST (roborev job 197, Medium). The first version accepted any
+    # structurally valid, run-id-matching beat — so a gate that died after its FIRST beat but before
+    # writing its summary would report RUNNING forever from that one stale beat. A false RUNNING is
+    # the worst verdict this script can give: the caller waits indefinitely on a gate that is gone.
+    #
+    # Only a beat that is BOTH matching AND fresh in a proven shared clock domain takes the startup
+    # shortcut. A stale one simply does NOT take it, and the normal summary handling below then
+    # answers (UNKNOWN, naming the missing or superseded summary) — the pre-shortcut behaviour, which
+    # was safe. That keeps the whole progression apparatus in one place instead of duplicating it.
     if _beat_valid "$_sb_text" && [ "$(_field "$_sb_text" run-id)" = "$WANT_RUN_ID" ]; then
-      _startup_beat=yes
+      _sb_host=$(_field "$_sb_text" host)
+      _sb_myhost=$(uname -n 2>/dev/null || echo unknown)
+      if [ -n "$_sb_host" ] && [ "$_sb_host" = "$_sb_myhost" ]; then
+        _sb_iv=$(_field "$_sb_text" interval); _sb_iv=$((10#${_sb_iv:-0}))
+        _sb_ep=$(_field "$_sb_text" beat-epoch); _sb_ep=$((10#${_sb_ep:-0}))
+        _sb_win=$(( _sb_iv * 3 )); [ "$_sb_win" -ge 90 ] || _sb_win=90
+        _sb_age=$(( $(date +%s) - _sb_ep ))
+        if [ "$_sb_age" -ge 0 ] && [ "$_sb_age" -le "$_sb_win" ]; then
+          _startup_beat=yes
+          _sb_note="beat ${_sb_age}s old, window ${_sb_win}s"
+        fi
+      fi
     fi
   fi
 fi
 if [ ! -f "$SUMMARY" ]; then
   if [ "$_startup_beat" = yes ]; then
-    verdict RUNNING 2 "run '$WANT_RUN_ID' is beating but has not written its summary yet — this is normal during startup, because the gate publishes liveness BEFORE its tree-identity capture and sentinel. summary: not yet at $SUMMARY"
+    verdict RUNNING 2 "run '$WANT_RUN_ID' is beating ($_sb_note) but has not written its summary yet — normal during startup, because the gate publishes liveness BEFORE its tree-identity capture and sentinel. summary: not yet at $SUMMARY"
   fi
   verdict UNKNOWN 4 "no-summary-artifact; $SUMMARY is not readable as a regular file (never written, or its location is not reachable from here)"
 fi
@@ -456,7 +476,7 @@ if [ -n "$WANT_RUN_ID" ] && [ "$_startup_beat" = yes ] && [ -n "$SUM_RUN_ID" ] \
   # The summary at this path still belongs to a PREVIOUS run while ours is starting up — the same
   # startup window as above, one step later (job 196). The caller named a run and its beat is
   # valid and matching, so answer about THAT run instead of refusing.
-  verdict RUNNING 2 "run '$WANT_RUN_ID' is beating; the summary at this path still belongs to run '$SUM_RUN_ID' and has not been replaced yet — normal during startup, because liveness is published before the sentinel"
+  verdict RUNNING 2 "run '$WANT_RUN_ID' is beating ($_sb_note); the summary at this path still belongs to run '$SUM_RUN_ID' and has not been replaced yet — normal during startup, because liveness is published before the sentinel"
 fi
 if [ -n "$WANT_RUN_ID" ]; then
   if [ -z "$SUM_RUN_ID" ]; then
