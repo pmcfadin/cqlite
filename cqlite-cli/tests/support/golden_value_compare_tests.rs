@@ -591,6 +591,12 @@ fn the_csv_lane_uses_the_declared_types_too() {
 const PERSON_DDL: &str = "CREATE TYPE person (first_name text, last_name text, age int); \
      CREATE TABLE t (id int PRIMARY KEY, p frozen<person>);";
 
+/// The `udt_nested` shape: a frozen UDT with a frozen UDT field, which is the
+/// subject of this lane's `e.home` exclusion.
+const NESTED_UDT_DDL: &str = "CREATE TYPE address (street text, city text); \
+     CREATE TYPE employee (name text, home frozen<address>); \
+     CREATE TABLE t (id int PRIMARY KEY, e frozen<employee>);";
+
 /// F2: the key of a `map<text,…>` must be compared BY JSON KIND as well as by
 /// text. The CLI's key used to be stringified before the declared key type
 /// could be applied, so an emitted numeric key `0` satisfied the golden's
@@ -997,7 +1003,11 @@ fn a_field_scoped_skip_still_compares_the_sibling_fields() {
         Egress::Json,
     );
     assert!(report.diffs.is_empty(), "{:?}", report.diffs);
-    assert!(report.skips_never_applied.is_empty(), "the skip must fire");
+    assert!(
+        report.stale_skips.is_empty(),
+        "the skip must suppress the divergence: {:?}",
+        report.stale_skips
+    );
 
     // …and its SIBLINGS must still be compared, which a whole-column skip
     // could never do.
@@ -1050,8 +1060,207 @@ fn a_skip_that_matches_nothing_is_reported() {
         Egress::Json,
     );
     assert_eq!(
-        report.skips_never_applied,
-        vec!["p.middle_name".to_string()],
-        "a skip path nothing matched must be reported"
+        report.stale_skips,
+        vec!["`p.middle_name` (matched no value in the walk at all)".to_string()],
+        "a skip path nothing matched must be reported, with the cause"
+    );
+}
+
+// =======================================================================
+// L1: a declared gap retires itself once the divergence is gone
+// =======================================================================
+
+/// The property the whole `SkipPaths` mechanism exists for, in the direction
+/// nothing used to test: once CQLite renders the excluded path CORRECTLY, the
+/// exclusion is STALE and must FAIL, naming the path — otherwise the column stays
+/// excluded forever and the recovered coverage never comes back.
+///
+/// A visit-keyed tally could never see this: the path is visited in both worlds,
+/// so it registered a hit either way (issue #1491 review finding L1).
+#[test]
+fn a_skip_whose_divergence_is_gone_is_reported_as_stale() {
+    let schema = schema_of(PERSON_DDL, "t");
+    let golden = vec![row(&[
+        ("id", json!(1)),
+        (
+            "p",
+            json!({"first_name": "Ada", "last_name": "Lovelace", "age": 36}),
+        ),
+    ])];
+    let skip = ["p.last_name"];
+
+    // STILL DIVERGING: the exclusion suppressed a real divergence, so it stands.
+    let diverged = vec![row(&[
+        ("id", json!(1)),
+        (
+            "p",
+            json!({"_type": "person", "first_name": "Ada",
+                     "last_name": "0xdeadbeef", "age": 36}),
+        ),
+    ])];
+    let report = compare_rows(
+        &golden,
+        &diverged,
+        &schema,
+        &["id"],
+        &[],
+        &skip,
+        Egress::Json,
+    );
+    assert!(report.diffs.is_empty(), "{:?}", report.diffs);
+    assert!(
+        report.stale_skips.is_empty(),
+        "an exclusion suppressing a real divergence is not stale: {:?}",
+        report.stale_skips
+    );
+
+    // FIXED: the same excluded path now agrees. The comparison must not fail (the
+    // gap is declared, so the value is not compared), but the GAP must.
+    let fixed = vec![row(&[
+        ("id", json!(1)),
+        (
+            "p",
+            json!({"_type": "person", "first_name": "Ada",
+                     "last_name": "Lovelace", "age": 36}),
+        ),
+    ])];
+    let report = compare_rows(&golden, &fixed, &schema, &["id"], &[], &skip, Egress::Json);
+    assert!(report.diffs.is_empty(), "{:?}", report.diffs);
+    assert_eq!(
+        report.stale_skips.len(),
+        1,
+        "a fixed divergence must retire its gap: {:?}",
+        report.stale_skips
+    );
+    assert!(
+        report.stale_skips[0].contains("p.last_name") && report.stale_skips[0].contains("AGREE"),
+        "the failure must name the path and why it is stale: {:?}",
+        report.stale_skips
+    );
+}
+
+/// One divergent row keeps the gap alive even when another row agrees: a gap is a
+/// property of the output, and suppressing anywhere is suppressing. The opposite
+/// rule (last row wins) would make staleness depend on row order.
+#[test]
+fn one_diverging_row_keeps_a_skip_applied() {
+    let schema = schema_of(PERSON_DDL, "t");
+    let person = |last: &str| json!({"first_name": "Ada", "last_name": last, "age": 36});
+    let cli_person =
+        |last: &str| json!({"_type": "person", "first_name": "Ada", "last_name": last, "age": 36});
+    let golden = vec![
+        row(&[("id", json!(1)), ("p", person("Lovelace"))]),
+        row(&[("id", json!(2)), ("p", person("Byron"))]),
+    ];
+    let cli = vec![
+        row(&[("id", json!(1)), ("p", cli_person("Lovelace"))]),
+        row(&[("id", json!(2)), ("p", cli_person("0xdeadbeef"))]),
+    ];
+    let report = compare_rows(
+        &golden,
+        &cli,
+        &schema,
+        &["id"],
+        &[],
+        &["p.last_name"],
+        Egress::Json,
+    );
+    assert!(report.diffs.is_empty(), "{:?}", report.diffs);
+    assert!(
+        report.stale_skips.is_empty(),
+        "one diverging row is enough to keep the gap: {:?}",
+        report.stale_skips
+    );
+}
+
+/// The CSV half of the same property, on a CONTAINER member — the shape where
+/// the decode actually matters (a scalar member is raw text either way). An
+/// excluded member's text is decoded when it CAN be: an un-invertible rendering
+/// falls back to raw text, so one member cannot fail a whole cell nobody
+/// compares, and still counts as suppressed; a member that now decodes and agrees
+/// retires the gap. Returning raw text unconditionally made the excluded position
+/// diverge forever — the finding's own shape, one level down.
+///
+/// The DDL is the real `udt_nested` shape (`test-data/schemas/*.cql`), whose
+/// `e.home` gap is one of this lane's declared CSV exclusions.
+#[test]
+fn a_csv_skip_on_a_nested_container_retires_when_it_decodes_and_agrees() {
+    let schema = schema_of(NESTED_UDT_DDL, "t");
+    let golden = vec![row(&[
+        ("id", json!(1)),
+        (
+            "e",
+            json!({"name": "Ada", "home": {"street": "1 Navy Way", "city": "Arlington"}}),
+        ),
+    ])];
+    let skip = ["e.home"];
+
+    // Diverging exactly as CQLite does today: the inner frozen UDT arrives as
+    // blob hex, which the `{…}` grammar cannot invert.
+    let diverged = vec![row(&[
+        ("id", json!("1")),
+        ("e", json!("{name: Ada, home: 0x0000000a31204e617679}")),
+    ])];
+    let report = compare_rows(
+        &golden,
+        &diverged,
+        &schema,
+        &["id"],
+        &[],
+        &skip,
+        Egress::Csv,
+    );
+    assert!(report.diffs.is_empty(), "{:?}", report.diffs);
+    assert!(
+        report.stale_skips.is_empty(),
+        "a member whose rendering does not invert keeps its gap: {:?}",
+        report.stale_skips
+    );
+
+    let fixed = vec![row(&[
+        ("id", json!("1")),
+        (
+            "e",
+            json!("{name: Ada, home: {street: 1 Navy Way, city: Arlington}}"),
+        ),
+    ])];
+    let report = compare_rows(&golden, &fixed, &schema, &["id"], &[], &skip, Egress::Csv);
+    assert!(report.diffs.is_empty(), "{:?}", report.diffs);
+    assert_eq!(
+        report.stale_skips.len(),
+        1,
+        "a nested member that now decodes and agrees must retire its gap: {:?}",
+        report.stale_skips
+    );
+    assert!(
+        report.stale_skips[0].contains("e.home") && report.stale_skips[0].contains("AGREE"),
+        "{:?}",
+        report.stale_skips
+    );
+}
+
+/// The third cause, kept distinct from the other two: when the cell the exclusion
+/// names was REFUSED as CSV-unrepresentable there is no comparison to read an
+/// answer from. "I could not tell" is not "the gap is still real", so it is
+/// reported — with its own cause — rather than counted as applied.
+#[test]
+fn a_skip_whose_cell_was_refused_is_reported_as_unevaluable() {
+    let schema = set_schema();
+    // `, ` inside a member: `csv_container::ambiguity` refuses the cell from the
+    // GOLDEN alone, so the refusal is independent of what the CLI rendered.
+    let golden = vec![row(&[("id", json!(1)), ("s", json!(["a, b"]))])];
+    let cli = vec![row(&[("id", json!("1")), ("s", json!("{a, b}"))])];
+    let report = compare_rows(&golden, &cli, &schema, &["id"], &[], &["s"], Egress::Csv);
+    assert_eq!(report.ambiguous_container_cells, 1);
+    assert_eq!(
+        report.stale_skips.len(),
+        1,
+        "an unevaluable exclusion must be reported: {:?}",
+        report.stale_skips
+    );
+    assert!(
+        report.stale_skips[0].contains("could not be evaluated"),
+        "the cause must be the unevaluable one, not `AGREE` or `matched no value`: {:?}",
+        report.stale_skips
     );
 }

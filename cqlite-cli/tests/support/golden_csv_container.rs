@@ -290,11 +290,17 @@ pub fn decode(golden: &Value, text: &str, ty: &CqlType) -> Result<Value, String>
 ///
 /// `path` is the fully-qualified position of `text` in the row, spelled the same
 /// way the comparator spells it (`col.field` for a named field, `col[i]` for a
-/// positional member). A member at an EXCLUDED path is returned as its raw,
-/// UNDECODED text: the comparison will not look at it, and requiring the grammar
-/// to invert there would fail the whole cell for a member nobody compares — which
-/// is what forced the `udt_nested` exclusion to be whole-column (issue #1491
-/// review finding F5).
+/// positional member). At an EXCLUDED path the decode is ATTEMPTED and its result
+/// used when it succeeds, falling back to the raw, UNDECODED text only when the
+/// grammar does not invert there. That fallback is what keeps one un-invertible
+/// member from failing a whole cell nobody compares — which is what forced the
+/// `udt_nested` exclusion to be whole-column (issue #1491 review finding F5).
+///
+/// Attempting it rather than short-circuiting matters for the STALENESS side
+/// (finding L1): an exclusion is applied only while it suppresses a real
+/// divergence, and an unconditional raw-text answer here would keep the excluded
+/// position diverging (an object against a string) even after CQLite renders it
+/// correctly — so the gap could never retire itself.
 ///
 /// The ambiguity scan is deliberately NOT exclusion-aware: it is decided from the
 /// golden alone and refusing a whole cell is a conservative, counted, NAMED
@@ -307,8 +313,22 @@ pub fn decode_at(
     excluded: &Excluded<'_>,
 ) -> Result<Value, String> {
     if excluded(path) {
-        return Ok(Value::String(text.to_string()));
+        return Ok(decode_shape(golden, text, ty, path, excluded)
+            .unwrap_or_else(|_| Value::String(text.to_string())));
     }
+    decode_shape(golden, text, ty, path, excluded)
+}
+
+/// The decode itself, with no exclusion check of its own at this level — that
+/// belongs to [`decode_at`], so this can be run for an excluded path too. Nested
+/// members still go through [`decode_at`], so a deeper exclusion applies normally.
+fn decode_shape(
+    golden: &Value,
+    text: &str,
+    ty: &CqlType,
+    path: &str,
+    excluded: &Excluded<'_>,
+) -> Result<Value, String> {
     // The declared TYPE decides the structure — including which bracket is
     // required — and the golden decides the member shapes underneath it. When the
     // two disagree the child is decoded against `null`, and the comparison is what

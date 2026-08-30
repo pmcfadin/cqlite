@@ -136,7 +136,8 @@ struct Case {
 /// coverage loss: it drops the column from the format that renders it correctly
 /// (issue #1491 review finding K1). The scope is checked, not just declared — a
 /// path listed for a format where nothing diverges is reported by
-/// `Report::skips_never_applied` as a stale exclusion and FAILS that lane.
+/// `Report::stale_skips` as a stale exclusion and FAILS that lane — and so is one
+/// whose divergence has since been FIXED, which is how a gap here retires itself.
 struct Skip {
     /// The fully-qualified path from the row: `sf` for a whole column, `e.home`
     /// for one field of a UDT column.
@@ -1056,12 +1057,14 @@ fn run_lane(egress: Egress) {
         }
         containers_compared += report.container_cells;
         containers_refused += report.ambiguous_container_cells;
-        // A declared gap that matched NOTHING is a stale exclusion: it no longer
-        // describes the output, so leaving it silently narrows nothing and hides
-        // the fact that the gap has closed (or was mis-stated).
-        for stale in &report.skips_never_applied {
+        // A declared gap that did not SUPPRESS A DIVERGENCE is stale: it no
+        // longer describes the output, so leaving it standing hides the fact that
+        // the gap has closed (or was mis-stated) and keeps the coverage it costs
+        // switched off. The cause travels with the entry — agreed, never reached,
+        // or unevaluable — so the failure says which of the three happened.
+        for stale in &report.stale_skips {
             failures.push(format!(
-                "{qualified}: the declared gap `{stale}` matched no value in the \
+                "{qualified}: the declared gap {stale} suppressed no divergence in the \
                  {format} comparison — a declared gap that no longer applies to this \
                  egress format must be removed or re-scoped, not left standing"
             ));

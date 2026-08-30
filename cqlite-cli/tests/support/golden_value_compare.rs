@@ -40,7 +40,7 @@ use super::schema::{Column, ColumnKind, CqlType, TableSchema, UdtType};
 use super::{canon_scalar, canon_typed, csv_container, Depth, Egress, Kinding, Row};
 use serde_json::{Map, Value};
 use std::cell::RefCell;
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
 /// The outcome of one table × one egress format.
@@ -62,13 +62,33 @@ pub struct Report {
     pub ambiguous_container_cells: usize,
     /// One deduplicated `column (reason)` entry per refusal cause.
     pub ambiguity_reasons: Vec<String>,
-    /// Declared skip paths that matched NOTHING in this table's walk. An
-    /// exclusion that no longer applies is a silent widening of coverage, so the
-    /// caller must treat a non-empty list as a failure.
-    pub skips_never_applied: Vec<String>,
+    /// Declared skip paths that did NOT suppress a divergence in this table's
+    /// walk, each with the cause (they agreed, they were never reached, or the
+    /// comparison there could not be evaluated). An exclusion that suppresses
+    /// nothing holds back coverage that has come back, so the caller must treat a
+    /// non-empty list as a failure. See [`SkipPaths`].
+    pub stale_skips: Vec<String>,
 }
 
-/// Value paths excluded from the comparison, with a hit tally.
+/// What a declared exclusion was OBSERVED to do, over a whole table's walk.
+///
+/// Ordered by strength: an exclusion that suppressed a real divergence anywhere is
+/// applied, whatever happened on the other rows.
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+enum Observed {
+    /// The path was reached and the comparison there COULD NOT BE DECIDED (the
+    /// column was absent from the egress row, or the CSV cell was refused). "I
+    /// could not tell" is not "the gap is still real", so it is reported.
+    Unresolved(String),
+    /// The path was reached and the two sides AGREE — the divergence the exclusion
+    /// was declared for is gone, so the exclusion is stale.
+    Agreed,
+    /// The path was reached and the two sides DIVERGED: the exclusion suppressed a
+    /// real divergence, which is the only thing that makes it applied.
+    Suppressed,
+}
+
+/// Value paths excluded from the comparison, with what each was observed to do.
 ///
 /// A path is fully qualified from the row: `sf` excludes a whole column, `e.home`
 /// excludes ONE field of the `frozen<employee>` in column `e` while `e.name` and
@@ -77,36 +97,66 @@ pub struct Report {
 /// `udt_nested` comparing nothing but its primary key (issue #1491 review finding
 /// F5).
 ///
-/// Every match is recorded, so [`Self::never_applied`] turns a stale exclusion
-/// into a failure instead of a quiet gap.
+/// # An exclusion is applied only when it SUPPRESSES a divergence
+///
+/// Being VISITED is not enough, and treating it as enough is a guard weaker than
+/// the property it guards (issue #1491 review finding L1): once CQLite renders the
+/// path correctly, a visit-keyed tally still registers a hit, so the column stays
+/// excluded forever and the stale-gap check reports the dead exclusion as live —
+/// silently preventing the coverage from coming back. So the comparison at an
+/// excluded path is still RUN; its result is recorded here and only then
+/// discarded. [`Self::stale`] then fails on an exclusion that agreed, was never
+/// reached, or could not be evaluated — three distinct causes, each named, and no
+/// two of them can be reported for the same path.
 pub struct SkipPaths<'a> {
     paths: &'a [&'a str],
-    hit: RefCell<BTreeSet<String>>,
+    observed: RefCell<BTreeMap<String, Observed>>,
 }
 
 impl<'a> SkipPaths<'a> {
     pub fn new(paths: &'a [&'a str]) -> Self {
         Self {
             paths,
-            hit: RefCell::new(BTreeSet::new()),
+            observed: RefCell::new(BTreeMap::new()),
         }
     }
 
-    /// Is this exact path excluded? Records the hit.
+    /// Is this exact path excluded? Records NOTHING — what the exclusion did is
+    /// recorded by [`Self::observe`], from the comparison's own outcome.
     fn excludes(&self, path: &str) -> bool {
-        if self.paths.contains(&path) {
-            self.hit.borrow_mut().insert(path.to_string());
-            return true;
-        }
-        false
+        self.paths.contains(&path)
     }
 
-    fn never_applied(&self) -> Vec<String> {
-        let hit = self.hit.borrow();
+    /// Record what the exclusion at `path` was observed to do. The strongest
+    /// observation over the table's rows wins, so one divergent row is enough to
+    /// keep the exclusion applied and no later agreeing row can retire it.
+    fn observe(&self, path: &str, what: Observed) {
+        let mut observed = self.observed.borrow_mut();
+        match observed.get(path) {
+            Some(prev) if *prev >= what => {}
+            _ => {
+                observed.insert(path.to_string(), what);
+            }
+        }
+    }
+
+    /// Every declared exclusion that did not suppress a divergence, with the cause.
+    fn stale(&self) -> Vec<String> {
+        let observed = self.observed.borrow();
         self.paths
             .iter()
-            .filter(|p| !hit.contains(**p))
-            .map(|p| (*p).to_string())
+            .filter_map(|p| match observed.get(*p) {
+                Some(Observed::Suppressed) => None,
+                Some(Observed::Agreed) => Some(format!(
+                    "`{p}` (the two sides AGREE at that path now, so the exclusion \
+                     suppresses nothing and is holding back recovered coverage)"
+                )),
+                Some(Observed::Unresolved(why)) => Some(format!(
+                    "`{p}` (the comparison there could not be evaluated: {why} — an \
+                     exclusion whose subject cannot be measured is not a measured gap)"
+                )),
+                None => Some(format!("`{p}` (matched no value in the walk at all)")),
+            })
             .collect()
     }
 }
@@ -217,16 +267,29 @@ pub fn compare_rows(
 
         for column in &schema.columns {
             let name = column.name.as_str();
-            // A WHOLE-column exclusion. A dotted `col.field` entry does not match
-            // here; it is applied inside the walk, so the column's other fields
-            // keep being compared.
-            if skips.excludes(name) {
-                continue;
-            }
+            // A WHOLE-column exclusion is NOT short-circuited here: the
+            // comparison still runs so the exclusion can be observed to suppress
+            // a divergence (or not) — see [`SkipPaths`]. What it does suppress is
+            // the DIFF and the compared-cell COUNTERS, since a cell whose
+            // divergence is discarded was not compared and must not be counted as
+            // coverage. A dotted `col.field` entry does not match here; it is
+            // observed inside the walk, so the column's other fields keep being
+            // compared and counted.
+            let excluded_column = skips.excludes(name);
             // The CLI must render EVERY declared column. An omitted one is a
             // divergence, NOT an implicit null: reading it as null is what made
             // the absent-cell property untestable.
             let Some(cv) = c.get(name) else {
+                if excluded_column {
+                    // An omitted column IS a divergence — the golden carries a
+                    // value where the egress row carries nothing — and the
+                    // exclusion is what keeps it out of `diffs`, so it suppressed
+                    // one. When the column starts being rendered the value
+                    // comparison below runs instead, and agreement there is what
+                    // retires the exclusion.
+                    skips.observe(name, Observed::Suppressed);
+                    continue;
+                }
                 if shape_seen.insert(format!("missing:{name}")) {
                     report.diffs.push(format!(
                         "row[{key}].{name}: absent from the {egress:?} egress row — the \
@@ -251,9 +314,22 @@ pub fn compare_rows(
                     if !report.ambiguity_reasons.contains(&entry) {
                         report.ambiguity_reasons.push(entry);
                     }
+                    if excluded_column {
+                        skips.observe(
+                            name,
+                            Observed::Unresolved(format!("the CSV cell was refused: {why}")),
+                        );
+                    }
                     continue;
                 }
                 Err(Refusal::Unparseable(why)) => {
+                    if excluded_column {
+                        // The exclusion is what stops this from being a diff, so
+                        // it did suppress a divergence: the CLI's text does not
+                        // invert the grammar the declared type states.
+                        skips.observe(name, Observed::Suppressed);
+                        continue;
+                    }
                     report.compared_cells += 1;
                     report.container_cells += 1;
                     report.diffs.push(format!(
@@ -263,17 +339,21 @@ pub fn compare_rows(
                 }
             };
             let cv = decoded.as_ref().unwrap_or(cv);
-            report.compared_cells += 1;
-            if matches!(gv, Value::Array(_) | Value::Object(_)) {
-                report.container_cells += 1;
+            if !excluded_column {
+                report.compared_cells += 1;
+                if matches!(gv, Value::Array(_) | Value::Object(_)) {
+                    report.container_cells += 1;
+                }
             }
             let at = At::column(name, column_kinding(column), &skips);
+            // `compare_value_at` swallows (and RECORDS) the outcome at an excluded
+            // path itself, so an excluded column can never reach `diffs` here.
             if let Err(why) = compare_value_at(gv, cv, egress, &column.ty, &at) {
                 report.diffs.push(format!("row[{key}].{name}: {why}"));
             }
         }
     }
-    report.skips_never_applied = skips.never_applied();
+    report.stale_skips = skips.stale();
     report
 }
 
@@ -472,8 +552,33 @@ fn compare_value_at(
     at: &At<'_, '_>,
 ) -> Result<(), String> {
     if at.skips.excludes(&at.path) {
+        // The comparison at an excluded path is RUN and then discarded, because
+        // its outcome is the only evidence of whether the declared gap still
+        // exists: a divergence means the exclusion suppressed something, agreement
+        // means it is stale and must be retired (finding L1). Visiting the path
+        // used to be the whole test, which no fix to CQLite could ever falsify.
+        let outcome = if compare_value_body(golden, cli, egress, ty, at).is_err() {
+            Observed::Suppressed
+        } else {
+            Observed::Agreed
+        };
+        at.skips.observe(&at.path, outcome);
         return Ok(());
     }
+    compare_value_body(golden, cli, egress, ty, at)
+}
+
+/// The comparison itself, with no exclusion check of its own at this level —
+/// [`compare_value_at`] owns that, so the body can be run for an excluded path to
+/// learn what the exclusion is suppressing. Nested positions still go through
+/// [`compare_value_at`], so a deeper exclusion applies normally.
+fn compare_value_body(
+    golden: &Value,
+    cli: &Value,
+    egress: Egress,
+    ty: &CqlType,
+    at: &At<'_, '_>,
+) -> Result<(), String> {
     // A column that is absent/null on BOTH sides, whatever its declared shape.
     if matches!(golden, Value::Null) && matches!(cli, Value::Null) {
         return Ok(());
