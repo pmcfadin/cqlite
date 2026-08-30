@@ -652,9 +652,11 @@ pub fn golden_rows(
 /// reconstruction has to know before it can use the cell: is it a tombstone?
 ///
 /// Kept as a struct rather than filtering on the fly because the answer is needed
-/// TWICE — once to drop the element from the reconciled container, and once to
-/// refuse a golden that would need arbitration between a tombstone and a live cell
-/// at the same path.
+/// THREE times — to drop the element from the reconciled container, to refuse a
+/// golden that would need arbitration between a tombstone and a live cell at the
+/// same path, and to decide which cells a complex-column deletion marker has to be
+/// checked against (a tombstone contributes nothing either way, so the marker
+/// cannot change the expectation for it).
 struct MultiCell<'a> {
     cell: &'a Value,
     /// `deletion_info` and no `value`, i.e. `Cell.isTombstone()` in
@@ -699,6 +701,16 @@ fn golden_row(
     let row_tstamp = liveness
         .and_then(|li| li.get("tstamp"))
         .and_then(Value::as_str);
+    // Parsed ONCE, and a present-but-unparseable stamp is an ERROR: folding it into
+    // `None` would report "no row liveness" for a row that has one, and the
+    // shadowing check below would then refuse for the wrong reason.
+    let row_us = match row_tstamp {
+        Some(text) => Some(
+            parse_iso_micros(text)
+                .ok_or_else(|| format!("{}: unparseable row liveness tstamp `{text}`", at()))?,
+        ),
+        None => None,
+    };
 
     let clustering = array_field(row, "clustering", at)?;
     if clustering.len() != ck.len() {
@@ -722,6 +734,8 @@ fn golden_row(
         multicell.iter().find(|(n, _)| *n == name).map(|(_, k)| *k)
     };
     let mut multi: BTreeMap<String, Vec<MultiCell<'_>>> = BTreeMap::new();
+    // Complex-column deletion markers: `(column, marked_deleted text, micros)`.
+    let mut complex_deletions: Vec<(String, String, i64)> = Vec::new();
     for cell in array_field(row, "cells", at)? {
         let name = cell
             .get("name")
@@ -789,6 +803,21 @@ fn golden_row(
             // older than itself, so it is ignorable ONLY when every cell of this
             // row is strictly newer — asserted, never assumed.
             if kind_of(name).is_none() {
+                // `serializeDeletion` (the complex-column path) writes
+                // `marked_deleted` alongside `local_delete_time`; `serializeCell`'s
+                // tombstone branch writes `local_delete_time` ALONE
+                // (cassandra-5.0.8 `JsonTransformer`). So a `marked_deleted` here
+                // is the dump saying this column is COMPLEX while the case declares
+                // it simple — reconciling it as a scalar cell tombstone would set
+                // the whole column to null on a guess.
+                if del.get("marked_deleted").is_some() {
+                    return Err(format!(
+                        "{}: `{name}` carries a complex deletion (`marked_deleted`), so \
+                         the dump says the column is a non-frozen collection, but the \
+                         case declares no collection kind for it",
+                        at()
+                    ));
+                }
                 // A CELL tombstone on a scalar column: the column reconciles to
                 // NULL — exactly the "tombstone → null" egress property this lane
                 // exists to pin. `sstabledump` keeps the marker; a `SELECT` sees a
@@ -810,17 +839,11 @@ fn golden_row(
                 .ok_or_else(|| format!("{}: `{name}` deletion with no marked_deleted", at()))?;
             let marked_us = parse_iso_micros(marked)
                 .ok_or_else(|| format!("{}: unparseable marked_deleted `{marked}`", at()))?;
-            let row_us = row_tstamp
-                .and_then(parse_iso_micros)
-                .ok_or_else(|| format!("{}: `{name}` deletion but no row liveness tstamp", at()))?;
-            if marked_us >= row_us {
-                return Err(format!(
-                    "{}: complex deletion on `{name}` at {marked} is not older than the \
-                     row liveness — it may shadow live cells, so this table is not \
-                     comparable against a reconciled result set",
-                    at()
-                ));
-            }
+            // Collected, not decided: whether this marker shadows anything is a
+            // question about the column's CELLS, and they are only all known once
+            // the cell loop has finished. Deciding it here against the row liveness
+            // alone was review finding M2.
+            complex_deletions.push((name.to_string(), marked.to_string(), marked_us));
             continue;
         }
         let value = cell
@@ -831,6 +854,69 @@ fn golden_row(
                 "{}: cell `{name}` collides with a declared key column",
                 at()
             ));
+        }
+    }
+
+    // A complex-column tombstone is IGNORABLE only when it shadows nothing this
+    // reader is about to reconstruct — asserted per CELL, never assumed.
+    //
+    // Cassandra's shadowing rule is one line and exact: `DeletionTime.deletes(cell)`
+    // is `cell.timestamp() <= markedForDeleteAt()` (cassandra-5.0.8
+    // `DeletionTime.java`). It is used here ONLY to REFUSE. Applying it to DROP the
+    // shadowed cell would be a second implementation of Cassandra's read-time
+    // reconciliation living in test code, which the physical-dump oracle cannot
+    // express and cannot check (CLAUDE.md, "Two parity oracles"); refusing states
+    // the same fact without inventing an expectation.
+    //
+    // Comparing the marker with the ROW LIVENESS alone was wrong in both directions
+    // (review finding M2): a cell carrying its own `tstamp` older than the marker
+    // was shadowed even when the row liveness was newer, and a row with a marker but
+    // no liveness at all was refused even when every cell of the column states its
+    // own timestamp.
+    //
+    // Only LIVE cells are checked. A cell that is itself a tombstone contributes
+    // nothing to the reconstructed collection whether or not the marker also covers
+    // it, so the marker cannot change the expectation for it.
+    for (name, marked, marked_us) in &complex_deletions {
+        for cell in multi.get(name).map(Vec::as_slice).unwrap_or_default() {
+            if cell.deleted {
+                continue;
+            }
+            // The cell's timestamp: its own `tstamp` when the dump wrote one, else
+            // the row's liveness timestamp. `serializeCell` writes `tstamp` when
+            // `liveInfo.isEmpty() || cell.timestamp() != liveInfo.timestamp()`, so a
+            // cell WITHOUT one has exactly the row's liveness timestamp — and a row
+            // with no liveness stamp cannot produce such a cell at all.
+            let cell_us = match cell.cell.get("tstamp") {
+                Some(Value::String(text)) => parse_iso_micros(text).ok_or_else(|| {
+                    format!("{}: unparseable cell tstamp `{text}` on `{name}`", at())
+                })?,
+                Some(other) => {
+                    return Err(format!(
+                        "{}: cell `tstamp` on `{name}` is {other}, not a string — \
+                         sstabledump writes every timestamp as an ISO-8601 string",
+                        at()
+                    ))
+                }
+                None => row_us.ok_or_else(|| {
+                    format!(
+                        "{}: a cell of `{name}` carries no `tstamp` and the row carries no \
+                         liveness tstamp — serializeCell omits a cell's `tstamp` only when \
+                         the row liveness is non-empty and equal to it, so this golden is \
+                         not one this reader can time against the complex deletion",
+                        at()
+                    )
+                })?,
+            };
+            if cell_us <= *marked_us {
+                return Err(format!(
+                    "{}: the complex deletion on `{name}` at {marked} shadows a live cell \
+                     of that column (cell timestamp {cell_us}µs <= marker), so the CLI's \
+                     reconciled result set drops a value this dump still carries — \
+                     deciding it is timestamp arbitration, which this reader does not do",
+                    at()
+                ));
+            }
         }
     }
 

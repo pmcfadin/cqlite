@@ -260,6 +260,221 @@ fn a_tombstone_and_another_cell_at_the_same_path_are_refused() {
     );
 }
 
+/// One row with an explicit liveness spelling: `Some(tstamp)` writes a
+/// `liveness_info`, `None` writes none at all — the shape a row created purely by
+/// a collection UPDATE has, where `primaryKeyLivenessInfo` is empty and
+/// `serializeCell` therefore stamps EVERY cell.
+fn one_row_liveness(liveness: Option<&str>, cells: &str) -> String {
+    let live = match liveness {
+        Some(tstamp) => format!(r#""liveness_info":{{"tstamp":"{tstamp}"}},"#),
+        None => String::new(),
+    };
+    format!(
+        r#"{{"partition":{{"key":["1"],"position":0}},"rows":[{{"type":"row","position":1,{live}"cells":[{cells}]}}]}}"#
+    )
+}
+
+/// A complex-column deletion marker for `tags`, as `serializeDeletion` writes one.
+fn complex_marker(marked: &str) -> String {
+    format!(
+        r#"{{"name":"tags","deletion_info":{{"marked_deleted":"{marked}","local_delete_time":"2026-06-20T10:33:54Z"}}}}"#
+    )
+}
+
+/// M2, the shape the committed corpus actually carries: Cassandra writes a complex
+/// deletion one microsecond ahead of a full-collection INSERT, so the marker is
+/// older than every cell and shadows nothing. Measured over the whole corpus: all
+/// 11,072 complex markers in the fetched + committed goldens have this shape.
+#[test]
+fn a_complex_deletion_older_than_every_cell_is_ignorable() {
+    let cells = format!(
+        "{},{},{}",
+        complex_marker("2026-06-20T10:33:54.968561Z"),
+        r#"{"name":"tags","path":["a"],"value":""}"#,
+        r#"{"name":"tags","path":["b"],"value":""}"#
+    );
+    let rows = golden_rows(
+        &one_row_liveness(Some("2026-06-20T10:33:54.968562Z"), &cells),
+        &["id"],
+        &[],
+        &[("tags", Multicell::Set)],
+    )
+    .expect("a marker older than every cell is comparable");
+    assert_eq!(
+        rows.first().and_then(|r| r.get("tags")),
+        Some(&json!(["a", "b"])),
+        "both live elements must survive the ignorable marker"
+    );
+}
+
+/// M2's first half: a cell carries its OWN `tstamp`, so the row liveness does not
+/// state its timestamp. `serializeCell` writes `tstamp` whenever
+/// `cell.timestamp() != liveInfo.timestamp()` (cassandra-5.0.8 `JsonTransformer`),
+/// and `DeletionTime.deletes(cell)` is `cell.timestamp() <= markedForDeleteAt()`
+/// (`DeletionTime.java`) — so this marker DOES shadow `old` even though the row
+/// liveness is newer than the marker. Comparing the marker with the row liveness
+/// alone reconstructed `old` as a live element the CLI's result set drops.
+#[test]
+fn a_complex_deletion_shadowing_a_cell_by_its_own_tstamp_is_refused() {
+    let shadowed = format!(
+        "{},{},{}",
+        complex_marker("2026-06-20T10:33:54.968561Z"),
+        r#"{"name":"tags","path":["keep"],"value":""}"#,
+        r#"{"name":"tags","path":["old"],"value":"","tstamp":"2026-06-20T10:33:50.000000Z"}"#
+    );
+    let why = golden_rows(
+        &one_row_liveness(Some("2026-06-20T10:33:54.968562Z"), &shadowed),
+        &["id"],
+        &[],
+        &[("tags", Multicell::Set)],
+    )
+    .expect_err("a shadowed live cell is not this reader's to reconcile");
+    assert!(
+        why.contains("shadows a live cell")
+            && why.contains("`tags`")
+            && why.contains("timestamp arbitration"),
+        "the refusal must name the column and what it declines to do: {why}"
+    );
+
+    // The BOUNDARY: `deletes()` is `<=`, so a cell stamped EXACTLY at the marker is
+    // shadowed too. One microsecond later it is not.
+    for (cell_tstamp, shadows) in [
+        ("2026-06-20T10:33:54.968561Z", true),
+        ("2026-06-20T10:33:54.968562Z", false),
+    ] {
+        let cells = format!(
+            r#"{},{{"name":"tags","path":["x"],"value":"","tstamp":"{cell_tstamp}"}}"#,
+            complex_marker("2026-06-20T10:33:54.968561Z")
+        );
+        let read = golden_rows(
+            &one_row_liveness(Some("2026-06-20T10:33:54.968562Z"), &cells),
+            &["id"],
+            &[],
+            &[("tags", Multicell::Set)],
+        );
+        assert_eq!(
+            read.is_err(),
+            shadows,
+            "a cell stamped {cell_tstamp} against a marker at .968561Z: \
+             expected shadowed={shadows}, got {read:?}"
+        );
+    }
+}
+
+/// M2's second half: a row with a marker and NO liveness at all is the ordinary
+/// shape of a full-collection `UPDATE` — `primaryKeyLivenessInfo` is empty, so
+/// `serializeCell` stamps every cell and each one states its own timestamp. Such a
+/// row is DECIDABLE and was refused unnecessarily.
+#[test]
+fn a_marker_only_row_with_no_liveness_is_decidable_from_the_cell_tstamps() {
+    let cells = format!(
+        "{},{}",
+        complex_marker("2026-06-20T10:33:54.968561Z"),
+        r#"{"name":"tags","path":["a"],"value":"","tstamp":"2026-06-20T10:33:54.968562Z"}"#
+    );
+    let rows = golden_rows(
+        &one_row_liveness(None, &cells),
+        &["id"],
+        &[],
+        &[("tags", Multicell::Set)],
+    )
+    .expect("a row whose cells state their own timestamps is comparable");
+    assert_eq!(
+        rows.first().and_then(|r| r.get("tags")),
+        Some(&json!(["a"])),
+        "the live element must survive"
+    );
+
+    // But a cell with NEITHER its own `tstamp` NOR a row liveness to inherit one
+    // from cannot be timed at all, so it is REPORTED rather than assumed newer.
+    let untimed = format!(
+        "{},{}",
+        complex_marker("2026-06-20T10:33:54.968561Z"),
+        r#"{"name":"tags","path":["a"],"value":""}"#
+    );
+    let why = golden_rows(
+        &one_row_liveness(None, &untimed),
+        &["id"],
+        &[],
+        &[("tags", Multicell::Set)],
+    )
+    .expect_err("an untimeable cell must not be assumed to survive the marker");
+    assert!(
+        why.contains("no `tstamp`") && why.contains("liveness"),
+        "the refusal must say which fact is missing: {why}"
+    );
+}
+
+/// The precision that keeps the refusal from costing coverage: a cell the marker
+/// shadows which is ITSELF a tombstone contributes nothing to the reconstructed
+/// collection either way, so the marker cannot change the expectation for it and
+/// the row stays comparable.
+#[test]
+fn a_shadowed_cell_that_is_itself_a_tombstone_does_not_refuse_the_row() {
+    let cells = format!(
+        "{},{},{}",
+        complex_marker("2026-06-20T10:33:54.968561Z"),
+        r#"{"name":"tags","path":["keep"],"value":""}"#,
+        concat!(
+            r#"{"name":"tags","path":["gone"],"#,
+            r#""deletion_info":{"local_delete_time":"2026-06-20T10:33:54Z"},"#,
+            r#""tstamp":"2026-06-20T10:33:50.000000Z"}"#
+        )
+    );
+    let rows = golden_rows(
+        &one_row_liveness(Some("2026-06-20T10:33:54.968562Z"), &cells),
+        &["id"],
+        &[],
+        &[("tags", Multicell::Set)],
+    )
+    .expect("a shadowed tombstone changes no expectation");
+    assert_eq!(
+        rows.first().and_then(|r| r.get("tags")),
+        Some(&json!(["keep"])),
+        "the live element must survive and the deleted one must not"
+    );
+}
+
+/// `marked_deleted` is what tells the two deletion spellings apart:
+/// `serializeDeletion` writes it for a COMPLEX column, `serializeCell`'s tombstone
+/// branch writes `local_delete_time` alone. So a `marked_deleted` on a column the
+/// case declares scalar cannot be reconciled as a cell tombstone (which would set
+/// the whole column to null on a guess).
+#[test]
+fn a_complex_marker_on_a_column_declared_scalar_is_refused() {
+    let why = golden_rows(
+        &one_row_liveness(
+            Some("2026-06-20T10:33:54.968562Z"),
+            &complex_marker("2026-06-20T10:33:54.968561Z"),
+        ),
+        &["id"],
+        &[],
+        &[],
+    )
+    .expect_err("the dump says the column is complex; the case says it is not");
+    assert!(
+        why.contains("complex deletion") && why.contains("`tags`"),
+        "the refusal must name the column and the disagreement: {why}"
+    );
+
+    // A CELL tombstone — `local_delete_time` alone — is the shape that legitimately
+    // reconciles to null on a scalar column, and it still does.
+    let cell_tombstone =
+        r#"{"name":"tags","deletion_info":{"local_delete_time":"2026-06-20T10:33:54Z"}}"#;
+    let rows = golden_rows(
+        &one_row_liveness(Some("2026-06-20T10:33:54.968562Z"), cell_tombstone),
+        &["id"],
+        &[],
+        &[],
+    )
+    .expect("a scalar cell tombstone reconciles to null");
+    assert_eq!(
+        rows.first().and_then(|r| r.get("tags")),
+        Some(&Value::Null),
+        "a scalar cell tombstone expects null"
+    );
+}
+
 /// L2, the two shapes `serializeCell` can never emit: it writes EXACTLY one of
 /// `value` and `deletion_info` per cell. Either a cell with both or a cell with
 /// neither means the golden is not the document this reader understands — and a
