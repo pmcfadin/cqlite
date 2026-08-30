@@ -184,19 +184,21 @@ impl ChildIo {
         Self { rx, transcript }
     }
 
-    /// Block until a line on `want` satisfies `pred`, or `budget` elapses.
-    /// Returns the matching line and how long the wait took (so a successful
-    /// wait can calibrate a later stage).
+    /// Block until a line on `want` satisfies `pred`, or the STAGE's deadline
+    /// passes. Returns the matching line and how much of the stage it took (so a
+    /// successful wait can calibrate a later stage).
+    ///
+    /// Takes the `Budget` itself, never a `Duration`: the timeout comes from
+    /// `Budget::remaining()`, the one place a per-wait timeout is computed, so a
+    /// second wait inside the same stage cannot be handed the full span again.
     pub fn wait_for(
         &self,
         want: Stream,
         pred: impl Fn(&str) -> bool,
-        budget: Duration,
+        budget: &Budget,
     ) -> Result<(String, Duration), WaitEnd> {
-        let started = Instant::now();
-        let deadline = started + budget;
         loop {
-            let remaining = deadline.saturating_duration_since(Instant::now());
+            let remaining = budget.remaining();
             if remaining.is_zero() {
                 return Err(WaitEnd::BudgetExpired);
             }
@@ -206,14 +208,14 @@ impl ChildIo {
             {
                 Ok((stream, line)) => {
                     if stream == want && pred(&line) {
-                        return Ok((line, started.elapsed()));
+                        return Ok((line, budget.spent()));
                     }
                 }
                 Err(RecvTimeoutError::Timeout) => {}
                 // Both readers ended: the child's pipes are closed and the
                 // buffer is drained, so no further line can ever arrive.
                 Err(RecvTimeoutError::Disconnected) => {
-                    return Err(WaitEnd::PipesClosed(started.elapsed()))
+                    return Err(WaitEnd::PipesClosed(budget.spent()))
                 }
             }
         }
@@ -252,9 +254,21 @@ impl ChildIo {
 /// Why a progress-checked poll gave up.
 #[derive(Debug)]
 pub enum PollGaveUp {
-    /// The budget expired AND nothing had happened for the whole stall window.
+    /// The NOMINAL budget expired AND nothing had happened for the whole stall
+    /// window. The genuine-stall verdict, and the one a silent (progress-free)
+    /// hang produces — at exactly the nominal budget, which is why the floor
+    /// invariant is stated against `nominal` and not against the declared maximum.
     Stalled,
-    /// Progress kept arriving, but the test's own total budget ran out.
+    /// The stage's DECLARED MAXIMUM (nominal budget + one declared stall window of
+    /// progress extension) was reached while progress was still arriving inside
+    /// the stall window. The extension is bounded because it is part of the
+    /// declared maximum the total-budget arithmetic sums (roborev job 224,
+    /// finding 3): an unbounded extension would let this stage consume a later
+    /// stage's allowance.
+    DeclaredMaximumReached,
+    /// The stage's deadline had been CLIPPED to the test's total budget, and that
+    /// clipped deadline was reached — so the binding constraint was the total, not
+    /// this stage. A backstop: the totals are sized to fit every declared maximum.
     TotalBudgetExhausted,
 }
 
@@ -262,6 +276,8 @@ pub enum PollGaveUp {
 pub struct PollFail {
     why: PollGaveUp,
     elapsed: Duration,
+    nominal: Duration,
+    declared_max: Duration,
     stall: Duration,
     stall_window: Duration,
     new_lines: usize,
@@ -284,15 +300,27 @@ impl PollFail {
         let progress_seen = self.new_lines + self.new_artifacts;
         let why = match self.why {
             PollGaveUp::Stalled => format!(
-                "the budget expired and NOTHING was observed for the whole stall window \
-                 ({:.2?}, itself calibrated)",
-                self.stall_window
+                "the nominal budget ({:.2?}) expired and NOTHING was observed for the whole \
+                 stall window ({:.2?}, itself calibrated)",
+                self.nominal, self.stall_window
+            ),
+            PollGaveUp::DeclaredMaximumReached => format!(
+                "this stage reached its DECLARED MAXIMUM ({:.2?} = nominal budget {:.2?} + one \
+                 declared stall window {:.2?}) without the stall window ever elapsing, so this \
+                 is NOT a stall verdict — it establishes only that ordering. The progress-checked \
+                 wait deliberately continues past the nominal budget while the child is still \
+                 making progress; that extension is bounded at one stall window because it is \
+                 part of this stage's declared maximum, and a later stage is entitled to its own. \
+                 Whether the child was making progress is reported by the counts below and by \
+                 nothing else (this branch does not require any progress to have been observed)",
+                self.declared_max, self.nominal, self.stall_window
             ),
             PollGaveUp::TotalBudgetExhausted => format!(
-                "the test's own TOTAL budget ran out BEFORE the stall window ({:.2?}) elapsed, so \
-                 this is NOT a stall verdict — it establishes only that ordering. Whether the \
-                 child was making progress is reported by the counts below and by nothing else \
-                 (this branch does not require any progress to have been observed)",
+                "this stage's deadline had been CLIPPED to the test's remaining TOTAL budget, and \
+                 that clipped deadline ran out BEFORE the stall window ({:.2?}) elapsed, so this \
+                 is NOT a stall verdict — it establishes only that ordering. Whether the child \
+                 was making progress is reported by the counts below and by nothing else (this \
+                 branch does not require any progress to have been observed)",
                 self.stall_window
             ),
         };
@@ -317,22 +345,31 @@ impl PollFail {
 /// durable `-Data.db` artifact as progress that resets the stall window.
 ///
 /// This is the AC1 "unbounded-but-progress-checked loop" inside a bounded
-/// envelope (design.md D6): a literally unbounded loop under nextest produces a
-/// harness KILL, which is a strictly worse message than the one #3515 removed.
-/// So the loop gives up only when
-///   * `budget.derived` has expired AND nothing has happened for `stall_window`
-///     (a genuine stall), or
-///   * `envelope` — what remains of the test's own total budget — is exhausted.
+/// envelope (design.md D6). It takes a [`PollBudget`], not a `Budget`: the
+/// progress extension has to be DECLARED to get one, so it cannot be omitted from
+/// the declared maximum the total-budget arithmetic sums (roborev job 224, finding
+/// 3 — the extension used to be an unaccounted addition on top of a cap that
+/// claimed to be a maximum, letting this stage eat a later stage's allowance).
+///
+/// The stall window comes from the `PollBudget` too, so the extension the deadline
+/// grants and the window a stall is judged against are ONE value and cannot
+/// disagree.
+///
+/// The loop gives up only when
+///   * the NOMINAL budget has expired AND nothing has happened for the stall
+///     window (a genuine stall — and the verdict a silent hang gets, at exactly
+///     the nominal budget), or
+///   * the stage's DEADLINE is reached: its declared maximum, or the test's total
+///     budget if `StageClock::clip` pulled the deadline in.
 pub fn poll_with_progress<T>(
     io: &ChildIo,
     data_dir: &Path,
-    budget: &Budget,
-    stall_window: Duration,
-    envelope: Duration,
+    poll: &PollBudget,
     mut step: impl FnMut(Duration) -> Option<T>,
 ) -> Result<(T, Duration), PollFail> {
     const SLICE: Duration = Duration::from_millis(100);
-    let started = Instant::now();
+    let budget = poll.budget();
+    let stall_window = poll.stall_window();
     let mut last_progress = Instant::now();
     let mut artifacts = count_data_db(data_dir);
     let mut new_lines = 0usize;
@@ -340,7 +377,7 @@ pub fn poll_with_progress<T>(
 
     loop {
         if let Some(done) = step(SLICE) {
-            return Ok((done, started.elapsed()));
+            return Ok((done, budget.spent()));
         }
         let lines = io.drain_new();
         if lines > 0 {
@@ -354,12 +391,19 @@ pub fn poll_with_progress<T>(
             last_progress = Instant::now();
         }
 
-        let elapsed = started.elapsed();
+        let elapsed = budget.spent();
         let stall = last_progress.elapsed();
-        let why = if elapsed >= budget.derived && stall >= stall_window {
+        let why = if elapsed >= budget.nominal() && stall >= stall_window {
             Some(PollGaveUp::Stalled)
-        } else if elapsed >= envelope {
-            Some(PollGaveUp::TotalBudgetExhausted)
+        } else if budget.remaining().is_zero() {
+            // The deadline is the ONE bound here. Which of the two things pulled
+            // it in is a property of the budget, not a second piece of
+            // arithmetic at this call site.
+            Some(if budget.clipped_to_total() {
+                PollGaveUp::TotalBudgetExhausted
+            } else {
+                PollGaveUp::DeclaredMaximumReached
+            })
         } else {
             None
         };
@@ -367,6 +411,8 @@ pub fn poll_with_progress<T>(
             return Err(PollFail {
                 why,
                 elapsed,
+                nominal: budget.nominal(),
+                declared_max: budget.span(),
                 stall,
                 stall_window,
                 new_lines,
@@ -422,9 +468,17 @@ fn collect_to_end<R: std::io::Read + Send + 'static>(
 /// rows as JSON and how long the read took.
 ///
 /// BOUNDED and ATTRIBUTED, for the reason in the TOTAL-BUDGET ARITHMETIC comment
-/// above: `Command::output()` has no timeout, so the previous version of this
-/// helper was an unbounded wait on a child process, outside the test's budget,
+/// in `budgets.rs`: `Command::output()` has no timeout, so the original version of
+/// this helper was an unbounded wait on a child process, outside the test's budget,
 /// on the one host class this issue is about.
+///
+/// THIS STAGE PERFORMS THREE WAITS (spawn, `wait_timeout`, two pipe collections)
+/// AND WAS THE SITE OF THREE SEPARATE FINDINGS, all the same defect: each wait
+/// separately received the stage's full `derived` duration, so the stage could
+/// consume a multiple of its own cap and the cap-sum arithmetic bounded nothing.
+/// Every wait below now takes `budget.remaining()`, so the spawn is charged, the
+/// collection gets only what the child wait left, and there is no per-call-site
+/// subtraction left to forget.
 pub fn select_rows(
     data_dir: &Path,
     schema: &Path,
@@ -432,7 +486,10 @@ pub fn select_rows(
     budget: &Budget,
     clock: &StageClock,
 ) -> (Vec<Json>, Duration) {
-    let started = Instant::now();
+    // The budget is LIVE from the moment the caller derived it, so the spawn below
+    // is already charged to stage (e) — the fix for roborev job 224, finding 2,
+    // which timed the stage from before the spawn but then handed the wait the
+    // stage's FULL budget.
     let mut child = Command::new(cqlite_bin())
         .args([
             "--data-dir",
@@ -461,7 +518,7 @@ pub fn select_rows(
     );
 
     let status = match child
-        .wait_timeout(budget.derived)
+        .wait_timeout(budget.remaining())
         .expect("wait_timeout on read-side cqlite")
     {
         Some(status) => status,
@@ -483,49 +540,34 @@ pub fn select_rows(
             );
         }
     };
-    // Named so the collection's failure message can say how much of stage (e)'s
-    // budget the child wait had already spent. NOT the value returned: the stage's
-    // recorded duration must INCLUDE the collection (finding 1), so it is measured
-    // after the loop below.
-    let child_wait = started.elapsed();
+    // How much of stage (e) the child wait consumed, so the collection's failure
+    // message can say so. Diagnostic only: the bound below comes from the stage's
+    // deadline, not from this value.
+    let child_wait = budget.spent();
 
     // The child has exited, so both pipes are at EOF and the reader threads
     // finish promptly — but "promptly" is a claim about SCHEDULING, and a reader
-    // thread on a saturated host can stay descheduled for seconds. This used to
-    // be a hardcoded `recv_timeout(5s)`: a NEW, uncalibrated wall-clock bound
-    // that could false-fail the harness under exactly the contention #3515 is
-    // about (roborev job 219, finding 2). The collection is part of stage (e), so
-    // it is bounded by stage (e)'s remaining allowance and, beyond that, by the
-    // test's own remaining TOTAL budget — no fixed constant, and still incapable
-    // of reaching nextest's hard kill.
-    // STAGE (e) MAY NOT SPEND ITS BUDGET TWICE (roborev job 222, finding 1). This
-    // used to hand the collection a FRESH `budget.derived` after the child wait
-    // had already spent part of that same stage budget, so stage (e) could consume
-    // up to 2x its cap. The envelope survived (`clock.remaining()` is real-time,
-    // so `clip` still bounded later stages), but the CAP-SUM INVARIANT did not:
-    // `the_nominal_cap_sums_stay_under_the_total_budget` computed a worst case the
-    // code could exceed, making the assert not a bound on the thing it names — a
-    // guard measuring a proxy, in a change whose whole value is that its guards
-    // mean what they say.
+    // thread on a saturated host can stay descheduled for seconds. This was once a
+    // hardcoded `recv_timeout(5s)`: a NEW, uncalibrated wall-clock bound that could
+    // false-fail under exactly the contention #3515 is about (roborev job 219,
+    // finding 2). It then became a hand-computed `budget.derived - elapsed`, which
+    // is the arithmetic that produced job 222 finding 1 (a fresh full budget, so
+    // stage (e) could spend up to 2x its cap) and job 224 finding 2.
     //
-    // The collection therefore gets what is LEFT of stage (e)'s budget, further
-    // clipped to the test's remaining total.
-    let collect_allowance = budget
-        .derived
-        .saturating_sub(started.elapsed())
-        .min(clock.remaining());
-    let collect_deadline = Instant::now() + collect_allowance;
+    // It is now `budget.remaining()`: the stage's own deadline, already bounded by
+    // the total budget through `StageClock::clip`. No constant, no subtraction, and
+    // nothing for a future edit here to get wrong.
     let mut stdout_buf = Vec::new();
     let mut stderr_buf = Vec::new();
     let mut collected = 0;
     while collected < 2 {
-        let left = collect_deadline.saturating_duration_since(Instant::now());
+        let left = budget.remaining();
         if left.is_zero() {
             panic!(
                 "stage (e) durability-read: the read-side child exited ({status:?}) but only \
-                 {collected}/2 of its output streams could be collected within what remained of \
-                 stage (e)'s budget ({collect_allowance:.2?}; the child wait had already spent \
-                 {child_wait:.2?} of it).\n\
+                 {collected}/2 of its output streams could be collected before stage (e)'s \
+                 deadline (the spawn and the child wait had already spent {child_wait:.2?} of \
+                 the stage).\n\
                  {}\n\
                  WHAT THIS ESTABLISHES: only that a reader thread had not delivered its buffer \
                  in time. It says nothing about durability, and nothing about the child, which \
@@ -555,9 +597,9 @@ pub fn select_rows(
         }
     }
 
-    // Stage (e)'s elapsed time INCLUDES the collection, so the reported timing and
-    // the cap-sum invariant describe the same quantity.
-    let took = started.elapsed();
+    // Stage (e)'s duration INCLUDES the spawn and the collection, so the reported
+    // timing and the declared-maximum arithmetic describe the same quantity.
+    let took = budget.spent();
 
     let stdout = String::from_utf8_lossy(&stdout_buf);
     let stderr = String::from_utf8_lossy(&stderr_buf);
@@ -596,7 +638,15 @@ pub fn start_writable_session(
     for (k, v) in env {
         cmd.env(k, v);
     }
-    let spawned = Instant::now();
+
+    // Stage (a) — THE IRREDUCIBLE BOUND. See `SESSION_UP_DEADLINE`.
+    //
+    // Derived BEFORE the spawn, deliberately: `t_boot` spans the whole
+    // spawn -> banner path (fork/exec + dynamic link + engine init), and the stage
+    // that is bounded must be the stage that is measured. Deriving it after the
+    // spawn would leave the spawn uncharged — the same defect as roborev job 224
+    // finding 2, one stage over.
+    let budget = clock.clip(bare(SESSION_UP_DEADLINE));
     let mut child = cmd
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -605,12 +655,10 @@ pub fn start_writable_session(
         .expect("spawn cqlite interactive writable session");
     let io = ChildIo::attach(&mut child);
 
-    // Stage (a) — THE IRREDUCIBLE BOUND. See `SESSION_UP_DEADLINE`.
-    let budget = clock.clip(bare(SESSION_UP_DEADLINE));
     let ready = io.wait_for(
         Stream::Stderr,
         |l| l.contains(MARKER_SESSION_READY),
-        budget.derived,
+        &budget,
     );
     if let Err(end) = &ready {
         let _ = child.kill();
@@ -630,9 +678,8 @@ pub fn start_writable_session(
             clock.report()
         );
     }
-    // `t_boot` spans the whole spawn -> banner path (fork/exec + dynamic link +
-    // engine init), not just the wait, so it is measured from the spawn call.
-    let t_boot = spawned.elapsed();
+    // `t_boot` is the stage's own spend, which starts before the spawn (above).
+    let t_boot = budget.spent();
     clock.record("a.session-up", t_boot);
     (child, io, t_boot)
 }
@@ -651,7 +698,7 @@ pub fn await_write_ack(
     budget: &Budget,
     clock: &StageClock,
 ) -> Duration {
-    match io.wait_for(Stream::Stdout, |l| l.trim() == "OK", budget.derived) {
+    match io.wait_for(Stream::Stdout, |l| l.trim() == "OK", budget) {
         Ok((_, took)) => took,
         Err(end) => panic!(
             "{stage}: {what} was not acknowledged with `OK` on the child's stdout.\n\

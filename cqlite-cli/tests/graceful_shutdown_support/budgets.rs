@@ -11,6 +11,7 @@
 //! The unit tests live HERE, with the constants they constrain, so a future edit
 //! to a constant cannot be reviewed without seeing its guard.
 
+use std::thread;
 use std::time::{Duration, Instant};
 
 // ---------------------------------------------------------------------------
@@ -51,53 +52,139 @@ use std::time::{Duration, Instant};
 //
 // THE PER-OPERATION vs AGGREGATE DISTINCTION (roborev job 219, finding 1). An
 // earlier version of this file argued a "DECLARED EXCEPTION": the sibling's old
-// bounds were SEVEN independent 60s deadlines = 420s nominal against a 240s HARD
-// KILL, so they were never simultaneously realizable, and three of its stages
-// were therefore floored well under 60s (writes id=1..4 at 10s, the sstable and
-// EOF waits at 35s).
+// bounds were SEVEN independent 60s deadlines = 420s nominal against a claimed
+// 240s HARD KILL, so they were never simultaneously realizable, and three of its
+// stages were therefore floored well under 60s (writes id=1..4 at 10s, the sstable
+// and EOF waits at 35s). **THAT HARD KILL DOES NOT EXIST** — see the TOTAL-BUDGET
+// ARITHMETIC section below, which verifies it. The exception was doubly wrong: its
+// reasoning did not hold per operation, and its premise was false.
 //
-// That aggregate argument is TRUE AND IRRELEVANT PER OPERATION. Under the old
-// code any SINGLE contended write could use the full 60s provided its siblings
-// were fast; a 12s cap failed it with ~200s of the envelope unused. That is the
-// round-3 blocker — a bound tighter than the one it replaced — relocated into the
-// sibling, and the aggregate reasoning papered over it.
+// The per-operation half, which is why the exception failed even on its own terms:
+// under the old code any SINGLE contended write could use the full 60s provided its
+// siblings were fast; a 12s cap failed it with ~200s of the envelope unused. That is
+// the round-3 blocker — a bound tighter than the one it replaced — relocated into
+// the sibling, and the aggregate reasoning papered over it.
 //
 // THE SIBLING'S STAGES ARE THEREFORE NO LONGER NOMINALLY REDUCED. Each carries the
-// full old bound as its base, and the ONLY reduction is the one
-// `StageClock::clip` imposes on genuine aggregate exhaustion — the clock IS the
-// group deadline, and it subtracts what has actually been consumed rather than
-// what might be. A run that hits it fails with an attributed message naming the
-// exhaustion (see `Budget::starved`), not with a 240s harness kill. That is a
-// STRICTLY STRONGER claim than the exception it replaces, and unlike that wording
-// it is true per operation and not merely in aggregate.
+// full old bound as its base. `StageClock::clip` remains as a BACKSTOP on genuine
+// aggregate exhaustion — the clock is the group deadline, and it subtracts what has
+// actually been consumed rather than what might be — but it is no longer load
+// bearing, because the totals below now FIT every stage's declared maximum (see
+// the TOTAL-BUDGET ARITHMETIC section). A run that somehow still hits it fails with
+// an attributed message naming the exhaustion (see `Budget::starved`).
 //
-// The cost, stated because it is real: the sibling's nominal ceilings no longer
-// sum under the total, so its guarantee is genuinely WEAKER than the SIGINT
-// test's. The SIGINT test can promise "every stage can have its nominal budget";
-// the sibling can promise only "every stage can have its nominal budget unless
-// earlier stages actually consumed it, in which case the failure says so". See
-// `the_nominal_cap_sums_stay_under_the_total_budget`, which asserts the first for
-// test 1 and the second for the sibling rather than picking whichever passes.
+// THE SIBLING'S GUARANTEE IS NO LONGER WEAKER THAN THE SIGINT TEST'S. Rounds 3-6 of
+// this change said it was, and asserted the weaker property; that was a CONSEQUENCE
+// OF A FALSE PREMISE (the imaginary 240s hard kill — see below), not of the
+// sibling's stages. With the premise removed both tests promise the same thing:
+// EVERY stage can have its full declared maximum. `declared_max`'s sums are
+// asserted against each test's own total by
+// `every_stages_declared_maximum_fits_its_test_total_budget`, identically for both.
 //
-// TOTAL-BUDGET ARITHMETIC (spec: "The test owns a total budget below the harness
-// hard-kill"). `.config/nextest.toml` sets
-// `slow-timeout = { period = "60s", terminate-after = 4 }` => a **240s hard
-// kill**. Each test owns `TEST_TOTAL_BUDGET` and clips every stage budget to what
-// REMAINS of it (`StageClock::clip`), so the stages can never sum past it however
-// slow the host is. The nominal per-stage CAPS are additionally chosen so their
-// worst-case sum is already under the total.
+// TOTAL-BUDGET ARITHMETIC (spec: "The test owns a total budget").
+//
+// THERE IS NO HARNESS TIMEOUT ON THIS TEST, AND ROUNDS 1-6 OF THIS CHANGE WERE
+// DESIGNED AROUND A PREMISE THAT SAID THERE WAS. The false premise is what forced
+// the arithmetic roborev job 224 finding 1 reported, so it is recorded here rather
+// than quietly dropped: it shaped every constant in this file.
+//
+//   THE PREMISE: ".config/nextest.toml sets slow-timeout = { period = 60s,
+//   terminate-after = 4 }, so this test is hard-killed at 240s, and the total
+//   budget must stay under it."
+//
+//   VERIFIED FALSE. `.config/nextest.toml` applies only to invocations that go
+//   through cargo-nextest, and NOTHING runs cqlite-cli's tests under nextest.
+//   `scripts/agent-gate.sh`'s `cli-tests` component runs plain
+//   `cargo test --package cqlite-cli` (twice: default features, then
+//   `--features write-support`); the gate's only `cargo nextest run` is
+//   `--package cqlite-core`; `ci.yml`'s nextest lanes are the "Core integration"
+//   partitions and never name this target (its CLI steps are plain `cargo test`
+//   and do not run this target at all); and no gate component wraps a test run in
+//   `timeout(1)`. libtest itself has no per-test timeout. The 240s ceiling never
+//   applied here.
+//
+// THE CONSEQUENCE RUNS IN BOTH DIRECTIONS.
+//
+//   * The squeeze was IMAGINARY. The total was held at 230s to stay under a limit
+//     that does not exist, which is precisely why the sibling's stages could not
+//     all fit their nominal allowance — so a slow-but-valid early stage could
+//     consume the envelope and starve a later stage into a FALSE failure while the
+//     product worked. That is the flake class #3515 exists to remove, reproduced
+//     inside its own fix. The totals below are now sized to FIT every stage's
+//     declared maximum, and BOTH tests make the SAME guarantee (asserted by
+//     `every_stages_declared_maximum_fits_its_test_total_budget`). The
+//     "declared exception" and the weaker sibling guarantee that the squeeze
+//     forced are DELETED, not reworded.
+//   * The total budget is now the ONLY timeout this test has. So it may not be
+//     removed or made unbounded: a wedged product must still be self-terminated
+//     with this file's own attributed message rather than hang the `cli-tests`
+//     component until the CI job's own limit. Hence `MAX_TEST_TOTAL_BUDGET`.
+//
+// A STAGE'S DECLARED MAXIMUM IS ITS ACTUAL MAXIMUM, BY CONSTRUCTION. Each stage
+// owns a DEADLINE (`Budget`, below), fixed when its budget is derived; every wait
+// inside that stage takes its timeout from `Budget::remaining()`, which is the ONE
+// place a per-wait timeout is computed. A stage therefore cannot double-spend its
+// allowance however many waits it performs, and `declared_max` below is a real
+// bound on wall-clock time rather than a figure the code can exceed.
+//
+// That is a STRUCTURAL fix for a FAMILY. Four roborev findings across rounds 2, 4
+// and 6 (stage (e)'s child wait, the read-side pipe collection, the poll's
+// envelope, the collection's re-spend) were ONE defect at four sites: each call
+// site separately remembered to subtract elapsed time, and one of them always
+// forgot. The deadline removes the subtraction from every call site, so there is
+// no fifth site to forget it.
+//
+// A PROGRESS-CHECKED STAGE'S EXTENSION IS PART OF ITS DECLARED MAXIMUM. The
+// progress-checked poll (AC1) deliberately continues past its nominal budget while
+// the child is still making progress — that behaviour is CORRECT and is kept. What
+// was wrong is that the arithmetic did not account for it, so stage (d) could eat
+// stage (e)'s allowance (roborev job 224, finding 3). The extension is now
+// DECLARED (`Budget::progress_checked`: exactly one stall window) and included in
+// `declared_max`, so it is accounted rather than added on top of a cap that claims
+// to be a maximum.
 //
 // NONE OF THIS ARITHMETIC IS LEFT TO A COMMENT. Every claim above — each group
-// floor, each declared exception, and both cap sums — is asserted by the unit
-// tests at the bottom of this file (`no_wait_is_tighter_than_the_bound_it_
-// replaced`, `the_nominal_cap_sums_stay_under_the_total_budget`), so a future
-// edit that tightens a stage reds the suite instead of silently reintroducing
-// the round-3 blocker. A comment cannot fail; a test can.
+// floor and both declared-maximum sums — is asserted by the unit tests at the
+// bottom of this file, so an edit that tightens a stage, forgets an extension or
+// outgrows a total reds the suite instead of silently reintroducing the defect. A
+// comment cannot fail; a test can.
 //
-// What the remaining ~10s of the 240s covers is only what CANNOT be a stage:
-// `TempDir` teardown, and the bounded (5s) collection of the read-side child's
-// already-at-EOF pipes after it has exited.
-pub const TEST_TOTAL_BUDGET: Duration = Duration::from_secs(230);
+// THE TOTALS ARE DECLARED, NOT DERIVED FROM THE STAGE SUMS. A total computed as
+// `sum + headroom` would make the fit assert tautological — the
+// artifact-as-its-own-oracle shape this issue has already hit three times.
+
+/// Total budget for `sigint_in_writable_session_flushes_before_exit`.
+///
+/// Its stages' declared maxima sum to 240s (`t1_stages`), so this leaves 30s —
+/// above `NON_STAGE_HEADROOM`. The fit is ASSERTED, not claimed here.
+pub const T1_TOTAL_BUDGET: Duration = Duration::from_secs(270);
+
+/// Total budget for `writable_session_auto_flushes_mid_session_across_threshold`.
+///
+/// Larger because that test's stages replaced SEVEN independent 60s waits, so
+/// their declared maxima sum to 553s (`t2_stages`). This is not a new ceiling on
+/// that test's runtime: the old code's seven bounds were 420s nominal with NO
+/// harness kill to cut them short, so 600s is the first total bound the test has
+/// ever had. It is reachable only on a host that both calibrates every stage to
+/// its cap and then actually consumes it; measured runtime is 0.3s quiet and 1.3s
+/// at load average 116, and a genuinely hung flush still fails at stage (d)'s
+/// nominal 60s because a silent flush produces no progress to extend it.
+pub const T2_TOTAL_BUDGET: Duration = Duration::from_secs(600);
+
+/// Time a test may spend OUTSIDE any stage: `TempDir` creation and recursive
+/// teardown, the schema write, `libc::kill`, the JSON parse, the row assertions.
+/// All of it is sub-millisecond on a quiet host, so this is generous by more than
+/// three orders of magnitude.
+const NON_STAGE_HEADROOM: Duration = Duration::from_secs(20);
+
+/// The upper bound on a total budget, because the total budget is now the ONLY
+/// timeout this test has and a self-termination that outlasts the run it protects
+/// protects nothing.
+///
+/// Anchored on the full agent gate's own wall clock (15-20 minutes, CLAUDE.md):
+/// one test able to run longer than the entire gate would dominate the `cli-tests`
+/// component it lives in.
+const MAX_TEST_TOTAL_BUDGET: Duration = Duration::from_secs(900);
 
 /// The single wall-clock bound every wait in the pre-#3515 version of this file
 /// used: `Duration::from_secs(60)`, seven times over. The floor invariant above
@@ -297,14 +384,51 @@ pub fn quiet_anchors() -> (Duration, Duration) {
 }
 
 // ---------------------------------------------------------------------------
-// Calibrated budgets
+// Calibrated budgets: A STAGE OWNS A DEADLINE
 // ---------------------------------------------------------------------------
+//
+// THE INVARIANT THIS TYPE EXISTS TO MAKE TRUE BY CONSTRUCTION: a stage cannot
+// exceed its declared maximum, however many waits it performs inside itself.
+//
+// Rounds 2, 4 and 6 of #3515 each fixed a site where it was NOT true, and roborev
+// job 224 findings 2 and 3 found two more. All five were ONE defect: the budget
+// exposed a `derived: Duration`, every wait site received that same `Duration`
+// fresh, and each site was separately responsible for remembering to subtract
+// what the stage had already spent. Sites that forgot: stage (e)'s child wait
+// (spawn not charged), the read-side pipe collection (child wait not charged,
+// twice), the poll's `envelope` parameter (recomputed at the call site), and the
+// poll's progress extension (unaccounted). Patching the fifth site would not have
+// stopped a sixth.
+//
+// So `derived` is GONE. A `Budget` carries a `deadline: Instant`, fixed when the
+// budget is derived, and `remaining()` is THE ONE PLACE a per-wait timeout is
+// computed. Every wait — `ChildIo::wait_for`, `Child::wait_timeout`,
+// `Receiver::recv_timeout`, the progress-checked poll — takes its timeout from
+// that one method. No call site subtracts anything, so no call site can forget to.
+// Work done between deriving the budget and the wait (a process spawn, for
+// instance) is charged to the stage automatically, which is exactly what finding 2
+// asked for.
+//
+// A consequence worth stating: THE BUDGET IS LIVE FROM THE MOMENT IT IS DERIVED.
+// Derive it immediately before the work it bounds — never early "for tidiness" —
+// or the stage pays for the gap.
 
-/// A wait budget, carrying its own derivation so a failure can report it.
+/// A stage's wait budget: a DEADLINE plus the derivation that produced it, so any
+/// failure inside the stage can report how its bound was arrived at.
 #[derive(Clone, Debug)]
 pub struct Budget {
-    /// What the wait is actually bounded by.
-    pub derived: Duration,
+    /// When this stage was derived, i.e. when its clock started.
+    started: Instant,
+    /// The instant this stage may not outlive. `started + nominal + extension`,
+    /// clipped by [`StageClock::clip`] to the test's total-budget deadline.
+    deadline: Instant,
+    /// The calibrated (and clipped) span a STALL is judged against — the budget
+    /// proper, without the progress extension.
+    nominal: Duration,
+    /// The progress extension included in this stage's declared maximum: one
+    /// stall window for a progress-checked poll, `ZERO` for every other stage.
+    /// Declared rather than added on top of the cap (job 224, finding 3).
+    extension: Duration,
     base: Duration,
     cap: Duration,
     scale: f64,
@@ -313,25 +437,30 @@ pub struct Budget {
     /// Name of that measurement, e.g. `t_ack`, or `None` for a bare deadline.
     observed_name: Option<&'static str>,
     quiet_baseline: Duration,
-    /// Set when `StageClock::clip` shortened `derived` to the test's remaining
-    /// total budget — i.e. the total budget, not this stage, is the binding
-    /// constraint.
+    /// Set when `StageClock::clip` pulled the deadline in to the test's total
+    /// budget — i.e. the total budget, not this stage, is the binding constraint.
     clipped_to_total: bool,
-    /// Set by `StageClock::clip` when the remaining total budget is less than
-    /// this stage's own `base` — i.e. earlier stages have eaten the headroom and
-    /// this stage cannot even get its nominal budget. Reported prominently,
-    /// because a stage clipped to near zero fails on its first poll, and that is
-    /// otherwise indistinguishable from the property genuinely not holding.
+    /// Set by `StageClock::clip` when the clipped span is less than this stage's
+    /// own `base` — i.e. earlier stages have eaten the headroom and this stage
+    /// cannot even get its nominal budget. Reported prominently, because a stage
+    /// clipped to near zero fails on its first poll, and that is otherwise
+    /// indistinguishable from the property genuinely not holding.
+    ///
+    /// With the totals sized to fit every declared maximum this is a BACKSTOP
+    /// rather than an expected state; it remains because non-stage work
+    /// (`TempDir` teardown on a saturated host) is bounded only by
+    /// `NON_STAGE_HEADROOM`, and a backstop that never fires is still the thing
+    /// that names the cause when it does.
     starved: bool,
 }
 
 /// `clamp(base * scale, base, cap)` with `scale = max(1, observed /
-/// quiet_baseline)`.
+/// quiet_baseline)`, as a live deadline starting now.
 ///
-/// `scale` is floored at 1 and `derived` is clamped at `base`, so calibration
-/// can only ever LOOSEN a budget. A quiet host measures far below
-/// `quiet_baseline`, yields `scale == 1`, and gets exactly `base` — calibration
-/// can therefore never itself become a source of flakes on an unloaded box.
+/// `scale` is floored at 1 and the span is clamped at `base`, so calibration can
+/// only ever LOOSEN a budget. A quiet host measures far below `quiet_baseline`,
+/// yields `scale == 1`, and gets exactly `base` — calibration can therefore never
+/// itself become a source of flakes on an unloaded box.
 pub fn calibrated(
     stage: StageSpec,
     observed: Duration,
@@ -343,8 +472,13 @@ pub fn calibrated(
     debug_assert!(!quiet_baseline.is_zero(), "quiet_baseline must be non-zero");
     let scale = (observed.as_secs_f64() / quiet_baseline.as_secs_f64()).max(1.0);
     let scaled = Duration::from_secs_f64(base.as_secs_f64() * scale);
+    let nominal = scaled.clamp(base, cap);
+    let started = Instant::now();
     Budget {
-        derived: scaled.clamp(base, cap),
+        started,
+        deadline: started + nominal,
+        nominal,
+        extension: Duration::ZERO,
         base,
         cap,
         scale,
@@ -359,8 +493,12 @@ pub fn calibrated(
 /// An uncalibrated deadline — used ONLY for stage (a); see
 /// [`SESSION_UP_DEADLINE`].
 pub fn bare(deadline: Duration) -> Budget {
+    let started = Instant::now();
     Budget {
-        derived: deadline,
+        started,
+        deadline: started + deadline,
+        nominal: deadline,
+        extension: Duration::ZERO,
         base: deadline,
         cap: deadline,
         scale: 1.0,
@@ -373,33 +511,96 @@ pub fn bare(deadline: Duration) -> Budget {
 }
 
 impl Budget {
+    /// **THE ONE PLACE A PER-WAIT TIMEOUT IS COMPUTED.** Every wait inside a
+    /// stage — however many there are — passes this to its timeout parameter, so
+    /// the stage's waits share one deadline and cannot double-spend it.
+    pub fn remaining(&self) -> Duration {
+        self.deadline.saturating_duration_since(Instant::now())
+    }
+
+    /// How much of the stage has been consumed so far. Deliberately NOT named
+    /// `elapsed`: the #2642 wall-clock-assert guard keys on that identifier, and
+    /// this value is legitimately compared in the unit tests below.
+    pub fn spent(&self) -> Duration {
+        self.started.elapsed()
+    }
+
+    /// This stage's DECLARED MAXIMUM: nominal budget plus any progress extension,
+    /// after clipping. The quantity `declared_max` sums, and the quantity the
+    /// stage provably cannot exceed.
+    pub fn span(&self) -> Duration {
+        self.deadline.saturating_duration_since(self.started)
+    }
+
+    /// The span a STALL is judged against — the budget proper, without the
+    /// progress extension.
+    pub fn nominal(&self) -> Duration {
+        self.nominal
+    }
+
+    pub fn clipped_to_total(&self) -> bool {
+        self.clipped_to_total
+    }
+
+    pub fn starved(&self) -> bool {
+        self.starved
+    }
+
+    /// Declare this stage's PROGRESS EXTENSION and hand back the only type
+    /// [`crate::graceful_shutdown_support::poll_with_progress`] accepts.
+    ///
+    /// The extension is part of the declared maximum, not an addition on top of
+    /// it (job 224, finding 3), and the `PollBudget` type is what makes forgetting
+    /// it a COMPILE error rather than an arithmetic discrepancy nobody notices.
+    /// Only the stall window's `nominal()` is used: a stall window is calibrated
+    /// like a stage but is not one, and its own deadline is meaningless.
+    pub fn progress_checked(mut self, stall_window: &Budget) -> PollBudget {
+        let extension = stall_window.nominal();
+        self.extension = extension;
+        self.deadline += extension;
+        PollBudget {
+            budget: self,
+            stall_window: extension,
+        }
+    }
+
     /// How this budget was arrived at — reported by every wait failure.
     pub fn describe(&self) -> String {
-        let core = match self.observed_name {
+        let mut core = match self.observed_name {
             Some(name) => format!(
                 "budget {:.2?} = clamp(base {:.2?} x scale {:.3}, base, cap {:.2?}), \
                  scale = max(1, {name} {:.3?} / quiet_baseline {:.2?})",
-                self.derived, self.base, self.scale, self.cap, self.observed, self.quiet_baseline
+                self.nominal, self.base, self.scale, self.cap, self.observed, self.quiet_baseline
             ),
             None => format!(
                 "budget {:.2?} (BARE wall-clock deadline: no prior measurement exists to \
                  calibrate it — the irreducible bound, see design.md \"The residual\")",
-                self.derived
+                self.nominal
             ),
         };
+        if !self.extension.is_zero() {
+            core = format!(
+                "{core} + declared progress extension {:.2?} (one stall window) => \
+                 declared maximum {:.2?}, of which {:.2?} is already spent",
+                self.extension,
+                self.span(),
+                self.spent()
+            );
+        }
         if self.starved {
             return format!(
                 "{core} [TOTAL BUDGET ALREADY EXHAUSTED BY EARLIER STAGES: this stage received \
                  {:.2?} of its {:.2?} base, so it cannot make its own guarantee. A failure here \
                  is about the budget, NOT about the property under test]",
-                self.derived, self.base
+                self.span(),
+                self.base
             );
         }
         if self.clipped_to_total {
             format!(
                 "{core} [CLIPPED to {:.2?} by the test's REMAINING TOTAL BUDGET — the total \
                  budget, not this stage, is the binding constraint]",
-                self.derived
+                self.span()
             )
         } else {
             core
@@ -407,9 +608,32 @@ impl Budget {
     }
 }
 
-/// Tracks a test's elapsed time across stages against its own total budget, so
-/// the test always emits its own attributed failure rather than being killed by
-/// nextest's 240s hard kill. See the TOTAL-BUDGET ARITHMETIC comment above.
+/// A [`Budget`] whose PROGRESS EXTENSION has been declared. Constructing one is
+/// the only way to reach the progress-checked poll, so a poll's extension can
+/// never be omitted from the declared maximum the arithmetic sums.
+#[derive(Clone, Debug)]
+pub struct PollBudget {
+    budget: Budget,
+    stall_window: Duration,
+}
+
+impl PollBudget {
+    pub fn budget(&self) -> &Budget {
+        &self.budget
+    }
+
+    pub fn stall_window(&self) -> Duration {
+        self.stall_window
+    }
+
+    pub fn describe(&self) -> String {
+        self.budget.describe()
+    }
+}
+
+/// Tracks a test's elapsed time across stages against its own total budget, and
+/// bounds every stage deadline by the total's — so the test always emits its own
+/// attributed failure instead of running until something outside it gives up.
 pub struct StageClock {
     started: Instant,
     total: Duration,
@@ -425,29 +649,47 @@ impl StageClock {
         }
     }
 
-    pub fn remaining(&self) -> Duration {
-        self.total.saturating_sub(self.started.elapsed())
+    /// The instant no stage of this test may outlive.
+    fn deadline(&self) -> Instant {
+        self.started + self.total
     }
 
-    /// Shorten a stage budget to what remains of the total budget.
+    pub fn remaining(&self) -> Duration {
+        self.deadline().saturating_duration_since(Instant::now())
+    }
+
+    /// Pull a stage's deadline in to the test's total-budget deadline.
     ///
-    /// THIS IS THE GROUP DEADLINE. Stages that replaced several INDEPENDENT old
-    /// bounds each carry the FULL old bound as their base, and the aggregate is
-    /// bounded here — by subtracting what has actually been consumed. So a single
-    /// contended operation can still reach the full old ceiling when its siblings
-    /// ran fast, and a reduction applies only on genuine aggregate exhaustion,
-    /// never unconditionally through a small per-operation cap. (An earlier
-    /// version of this change added a separate `GroupBudget` type for this; it was
-    /// a second mechanism for a job this clock already does.)
+    /// A BACKSTOP, not the primary bound: the totals are sized so every stage's
+    /// declared maximum fits (see the TOTAL-BUDGET ARITHMETIC section), so nothing
+    /// should reach this. It stays because non-stage work is bounded only by
+    /// `NON_STAGE_HEADROOM`, and because a stage that does lose out must NAME the
+    /// exhaustion (`Budget::starved`) rather than fail as though the property under
+    /// test did not hold.
+    ///
+    /// It also remains the group deadline for the sibling's repeated waits: it
+    /// subtracts what has ACTUALLY been consumed, so one contended operation can
+    /// still reach the full old ceiling when its siblings ran fast.
     pub fn clip(&self, mut budget: Budget) -> Budget {
-        let remaining = self.remaining();
-        if budget.derived > remaining {
-            budget.derived = remaining;
+        let total_deadline = self.deadline();
+        if budget.deadline > total_deadline {
+            budget.deadline = total_deadline;
+            let span = total_deadline.saturating_duration_since(budget.started);
+            budget.nominal = budget.nominal.min(span);
             budget.clipped_to_total = true;
             // Weaker than "clipped": this stage cannot even reach its own base.
-            budget.starved = remaining < budget.base;
+            budget.starved = span < budget.base;
         }
         budget
+    }
+
+    /// [`Self::clip`] for a progress-checked stage, so the declared extension is
+    /// bounded by the total budget too.
+    pub fn clip_poll(&self, poll: PollBudget) -> PollBudget {
+        PollBudget {
+            budget: self.clip(poll.budget),
+            stall_window: poll.stall_window,
+        }
     }
 
     pub fn record(&mut self, stage: &'static str, took: Duration) {
@@ -479,6 +721,56 @@ impl StageClock {
             self.remaining()
         )
     }
+}
+
+// ---------------------------------------------------------------------------
+// The declared maximum: ONE definition, summed by ONE assert
+// ---------------------------------------------------------------------------
+
+/// The most wall-clock time a stage can consume: its nominal cap, plus one stall
+/// window for the stages that poll with a progress check.
+///
+/// This is the ONLY definition of a stage's maximum, and it mirrors what `Budget`
+/// does at run time (`deadline = started + nominal + extension`, worst case
+/// `nominal == cap`). One definition is the point: the round-6 and job-224
+/// findings were both an assert that summed a quantity the code could exceed.
+pub fn declared_max(spec: StageSpec, progress_checked: bool) -> Duration {
+    if progress_checked {
+        spec.cap + STALL_WINDOW.cap
+    } else {
+        spec.cap
+    }
+}
+
+/// Every stage of `sigint_in_writable_session_flushes_before_exit`, with its
+/// declared maximum. Summed by
+/// `every_stages_declared_maximum_fits_its_test_total_budget`.
+fn t1_stages() -> Vec<(&'static str, Duration)> {
+    vec![
+        ("(a) session-up", SESSION_UP_DEADLINE),
+        ("(b) write-ack", declared_max(T1_ACK, false)),
+        ("(c) handler-entry", declared_max(T1_HANDLER, false)),
+        // The ONE progress-checked stage of this test.
+        ("(d) clean-exit", declared_max(T1_EXIT, true)),
+        ("(e) durability-read", declared_max(T1_READ, false)),
+    ]
+}
+
+/// Every stage of `writable_session_auto_flushes_mid_session_across_threshold`,
+/// with its declared maximum. The four later acks are listed INDIVIDUALLY because
+/// each replaced an independent 60s wait and each can consume its own maximum.
+fn t2_stages() -> Vec<(&'static str, Duration)> {
+    let mut stages = vec![
+        ("(a) session-up", SESSION_UP_DEADLINE),
+        ("(b0) write-ack id=0", declared_max(T2_ACK_FIRST, false)),
+    ];
+    for _ in 1..5 {
+        stages.push(("(b1..4) write-ack", declared_max(T2_ACK_LATER, false)));
+    }
+    stages.push(("(c) mid-session flush", declared_max(T2_SSTABLE, true)));
+    stages.push(("(d) eof-exit", declared_max(T2_EOF_EXIT, true)));
+    stages.push(("(e) durability-read", declared_max(T2_READ, false)));
+    stages
 }
 
 // ---------------------------------------------------------------------------
@@ -542,7 +834,7 @@ fn no_wait_is_tighter_than_the_bound_it_replaced() {
     // a group deadline: WITH A FRESH CLOCK, each of these stages' DERIVED ceiling
     // reaches the old bound. Asserting the spec constants alone would miss a clip
     // that silently reduced them.
-    let fresh = StageClock::new(TEST_TOTAL_BUDGET);
+    let fresh = StageClock::new(T2_TOTAL_BUDGET);
     for (name, stage) in [
         ("(b1..4) per-write ack", T2_ACK_LATER),
         ("(c) mid-session flush", T2_SSTABLE),
@@ -554,14 +846,14 @@ fn no_wait_is_tighter_than_the_bound_it_replaced() {
             "t_ack",
             ACK_QUIET_BASELINE,
         ));
+        let nominal = budget.nominal();
         assert!(
-            budget.derived >= OLD_BOUND,
-            "sibling stage {name} derives {:?} from a FRESH clock, tighter than the \
-             {OLD_BOUND:?} it replaced",
-            budget.derived
+            nominal >= OLD_BOUND,
+            "sibling stage {name} derives {nominal:?} from a FRESH clock, tighter than the \
+             {OLD_BOUND:?} it replaced"
         );
         assert!(
-            !budget.starved && !budget.clipped_to_total,
+            !budget.starved() && !budget.clipped_to_total(),
             "nothing has been consumed yet, so {name} may not be reduced at all: {budget:?}"
         );
     }
@@ -579,78 +871,82 @@ fn no_wait_is_tighter_than_the_bound_it_replaced() {
     }
 }
 
-/// THE TOTAL-BUDGET ARITHMETIC: per-stage caps may not sum past the total, or a
-/// late stage gets squeezed by `StageClock::clip` and fails for a reason that is
-/// about the budget rather than the product.
+/// THE TOTAL-BUDGET ARITHMETIC: EVERY stage's DECLARED MAXIMUM must fit its test's
+/// total budget, for BOTH tests, identically.
+///
+/// This replaces `the_nominal_cap_sums_stay_under_the_total_budget`, which asserted
+/// the plain sum for the SIGINT test and, for the sibling, the INVERSE
+/// (`sibling_nominal > TEST_TOTAL_BUDGET`) plus a weaker fallback property. That
+/// asymmetry existed only because the total was squeezed under an imaginary 240s
+/// harness kill; with the premise gone (see the TOTAL-BUDGET ARITHMETIC section)
+/// the sibling makes the same guarantee, and the inverted assert — which told a
+/// future editor to promote the sibling if the arithmetic ever fit — has been
+/// obeyed rather than reworded.
+///
+/// Why it matters, i.e. what roborev job 224 finding 1 reported: while the sum
+/// EXCEEDED the total, slow-but-valid early operations could consume the whole
+/// envelope and starve a later ack/exit/durability stage into a FALSE failure while
+/// the product worked correctly. That is precisely the flake class #3515 exists to
+/// remove, reproduced inside its own fix.
 #[test]
-fn the_nominal_cap_sums_stay_under_the_total_budget() {
-    // nextest: slow-timeout period 60s x terminate-after 4.
-    const NEXTEST_HARD_KILL: Duration = Duration::from_secs(240);
-    assert!(
-        TEST_TOTAL_BUDGET < NEXTEST_HARD_KILL,
-        "the test's own budget {TEST_TOTAL_BUDGET:?} must leave room to emit its own \
-         failure before nextest's {NEXTEST_HARD_KILL:?} hard kill"
-    );
-
-    let t1 = SESSION_UP_DEADLINE + T1_ACK.cap + T1_HANDLER.cap + T1_EXIT.cap + T1_READ.cap;
-    assert!(
-        t1 <= TEST_TOTAL_BUDGET,
-        "sigint test caps sum to {t1:?}, over the {TEST_TOTAL_BUDGET:?} total"
-    );
-
-    // THE SIBLING'S GUARANTEE IS GENUINELY WEAKER, AND THIS ASSERTS THE WEAKER ONE
-    // RATHER THAN WHICHEVER PASSES. Its stages now each carry the full old 60s
-    // bound (see the floor invariant), so their nominal sum CANNOT fit the total —
-    // that is a consequence of the old test having had seven 60s bounds against a
-    // 240s kill, not a defect. What holds instead is that the clock enforces the
-    // total regardless of nominal caps, and that a stage which loses out says so.
-    let sibling_nominal = SESSION_UP_DEADLINE
-        + T2_ACK_FIRST.cap
-        + T2_ACK_LATER.cap * 4
-        + T2_SSTABLE.cap
-        + T2_EOF_EXIT.cap
-        + T2_READ.cap;
-    assert!(
-        sibling_nominal > TEST_TOTAL_BUDGET,
-        "the sibling's nominal ceilings now FIT the {TEST_TOTAL_BUDGET:?} envelope \
-         ({sibling_nominal:?}) — it can therefore make the SAME guarantee as the SIGINT test, so \
-         promote it to the plain nominal-sum assert above instead of the weaker property below"
-    );
-
-    // The weaker property, in three parts. (1) `clip` never returns more than the
-    // remaining total, for any spec — this is what bounds the aggregate.
-    let nearly_spent = StageClock::new(Duration::from_millis(500));
-    for (name, stage) in [
-        ("T2_ACK_LATER", T2_ACK_LATER),
-        ("T2_SSTABLE", T2_SSTABLE),
-        ("T2_EOF_EXIT", T2_EOF_EXIT),
-        ("T2_READ", T2_READ),
+fn every_stages_declared_maximum_fits_its_test_total_budget() {
+    for (test, total, stages) in [
+        (
+            "sigint_in_writable_session_flushes_before_exit",
+            T1_TOTAL_BUDGET,
+            t1_stages(),
+        ),
+        (
+            "writable_session_auto_flushes_mid_session_across_threshold",
+            T2_TOTAL_BUDGET,
+            t2_stages(),
+        ),
     ] {
-        let budget = nearly_spent.clip(calibrated(
-            stage,
-            Duration::ZERO,
-            "t_ack",
-            ACK_QUIET_BASELINE,
-        ));
+        let sum: Duration = stages.iter().map(|(_, max)| *max).sum();
+        let breakdown = stages
+            .iter()
+            .map(|(name, max)| format!("{name} {max:?}"))
+            .collect::<Vec<_>>()
+            .join(" + ");
+
+        // THE GUARANTEE, for both tests: every stage can have its full declared
+        // maximum. No stage can be starved by an earlier one that merely ran slowly
+        // but validly, so a failure inside a stage is about that stage's property.
         assert!(
-            budget.derived <= Duration::from_millis(500),
-            "{name} drew {:?} from a clock with 500ms left",
-            budget.derived
+            sum <= total,
+            "{test}: its stages' DECLARED MAXIMA sum to {sum:?}, over its {total:?} total \
+             budget — so a slow-but-valid early stage can consume the envelope and starve a \
+             later stage into a FALSE failure (roborev job 224, finding 1). Raise the total; \
+             there is no harness kill to squeeze it under.\n  {breakdown}"
         );
-        // (2) A stage that cannot even reach its own base is marked STARVED...
+
+        // ...and the total must still leave room for the work that CANNOT be a
+        // stage, or the same starvation arrives via `TempDir` teardown instead.
         assert!(
-            budget.starved,
-            "{name} could not reach its {:?} base and must be marked starved: {budget:?}",
-            stage.base
+            sum + NON_STAGE_HEADROOM <= total,
+            "{test}: declared maxima {sum:?} + non-stage headroom {NON_STAGE_HEADROOM:?} \
+             exceed the {total:?} total budget"
         );
-        // (3) ...and says so, so a first-poll failure is distinguishable from the
-        // property under test genuinely not holding.
-        let described = budget.describe();
+
+        // The total budget is now the ONLY timeout this test has, so it must still
+        // self-terminate inside the run it is protecting.
         assert!(
-            described.contains("TOTAL BUDGET ALREADY EXHAUSTED BY EARLIER STAGES"),
-            "{name} must name the exhaustion: {described}"
+            total <= MAX_TEST_TOTAL_BUDGET,
+            "{test}: a {total:?} total budget exceeds the {MAX_TEST_TOTAL_BUDGET:?} limit — \
+             it is the only timeout this test has, and one that outlasts the gate it runs in \
+             protects nothing"
         );
     }
+
+    // The progress extension is IN the declared maximum, not on top of it. Asserted
+    // so that a stage marked progress-checked in the code but not in `declared_max`
+    // (or the reverse) reds here rather than silently reintroducing job 224's
+    // finding 3.
+    assert!(
+        declared_max(T1_EXIT, true) == T1_EXIT.cap + STALL_WINDOW.cap
+            && declared_max(T1_EXIT, false) == T1_EXIT.cap,
+        "declared_max must ADD exactly one stall window for a progress-checked stage"
+    );
 
     // Every spec must be internally coherent.
     for (name, spec) in [
@@ -756,7 +1052,7 @@ fn the_baselines_sit_just_above_the_measured_quiet_noise_floor() {
         ACK_QUIET_BASELINE,
     );
     assert!(
-        realistic.scale > 1.0 && realistic.derived > T1_EXIT.base,
+        realistic.scale > 1.0 && realistic.nominal() > T1_EXIT.base,
         "a host 10x slower than the binding measured quiet floor must loosen stage (d): {realistic:?}"
     );
 }
@@ -777,13 +1073,14 @@ fn calibration_engages_on_a_contended_observation() {
         "scale must track the observation: {contended:?}"
     );
     assert!(
-        contended.derived > T1_EXIT.base,
+        contended.nominal() > T1_EXIT.base,
         "a contended observation must LOOSEN the budget: derived {:?} vs base {:?}",
-        contended.derived,
+        contended.nominal(),
         T1_EXIT.base
     );
     assert_eq!(
-        contended.derived, T1_EXIT.cap,
+        contended.nominal(),
+        T1_EXIT.cap,
         "8x on this spec saturates the cap"
     );
 
@@ -795,7 +1092,7 @@ fn calibration_engages_on_a_contended_observation() {
         ACK_QUIET_BASELINE,
     );
     assert!(
-        mild.derived > T1_EXIT.base && mild.derived < T1_EXIT.cap,
+        mild.nominal() > T1_EXIT.base && mild.nominal() < T1_EXIT.cap,
         "1.25x must land strictly between base and cap: {mild:?}"
     );
 
@@ -807,7 +1104,7 @@ fn calibration_engages_on_a_contended_observation() {
         "t_ack",
         ACK_QUIET_BASELINE,
     );
-    assert_eq!(quiet.derived, T1_EXIT.base);
+    assert_eq!(quiet.nominal(), T1_EXIT.base);
     assert_eq!(quiet.scale, 1.0);
 }
 
@@ -828,7 +1125,7 @@ fn calibration_is_the_identity_on_a_quiet_observation() {
         ACK_QUIET_BASELINE,
     );
     assert_eq!(b.scale, 1.0, "quiet observation must not scale: {b:?}");
-    assert_eq!(b.derived, b.base, "quiet host must get exactly `base`");
+    assert_eq!(b.nominal(), b.base, "quiet host must get exactly `base`");
 }
 
 #[test]
@@ -840,7 +1137,7 @@ fn calibration_only_ever_loosens_and_never_exceeds_the_cap() {
         "t_ack",
         ACK_QUIET_BASELINE,
     );
-    assert_eq!(at_baseline.derived, Duration::from_secs(10));
+    assert_eq!(at_baseline.nominal(), Duration::from_secs(10));
 
     // 3x the baseline loosens proportionally.
     let contended = calibrated(
@@ -850,7 +1147,7 @@ fn calibration_only_ever_loosens_and_never_exceeds_the_cap() {
         ACK_QUIET_BASELINE,
     );
     assert!((contended.scale - 3.0).abs() < 1e-9, "{contended:?}");
-    assert_eq!(contended.derived, Duration::from_secs(30));
+    assert_eq!(contended.nominal(), Duration::from_secs(30));
 
     // A pathological observation is clamped at the cap, never beyond it.
     let saturated = calibrated(
@@ -859,7 +1156,7 @@ fn calibration_only_ever_loosens_and_never_exceeds_the_cap() {
         "t_ack",
         ACK_QUIET_BASELINE,
     );
-    assert_eq!(saturated.derived, saturated.cap);
+    assert_eq!(saturated.nominal(), saturated.cap);
 
     // And the derivation is reported, so a failure can be audited.
     let described = contended.describe();
@@ -892,13 +1189,13 @@ fn the_stage_clock_clips_a_budget_to_the_remaining_total() {
         "t_ack",
         ACK_QUIET_BASELINE,
     ));
-    assert!(clipped.clipped_to_total, "{clipped:?}");
+    assert!(clipped.clipped_to_total(), "{clipped:?}");
     assert!(
-        !clipped.starved,
+        !clipped.starved(),
         "20s remaining exceeds the 10s base, so this stage is not starved: {clipped:?}"
     );
     assert!(
-        clipped.derived <= Duration::from_secs(20),
+        clipped.span() <= Duration::from_secs(20),
         "a stage may never outlive the test's total budget: {clipped:?}"
     );
     assert!(
@@ -918,7 +1215,10 @@ fn the_stage_clock_clips_a_budget_to_the_remaining_total() {
         "t_ack",
         ACK_QUIET_BASELINE,
     ));
-    assert!(starved.clipped_to_total && starved.starved, "{starved:?}");
+    assert!(
+        starved.clipped_to_total() && starved.starved(),
+        "{starved:?}"
+    );
     let described = starved.describe();
     assert!(
         described.contains("TOTAL BUDGET ALREADY EXHAUSTED BY EARLIER STAGES"),
@@ -927,5 +1227,129 @@ fn the_stage_clock_clips_a_budget_to_the_remaining_total() {
     assert!(
         described.contains("NOT about the property under test"),
         "a starved stage must disclaim the property: {described}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// THE DEADLINE INVARIANT (roborev job 224, findings 2 and 3 — the STRUCTURAL fix)
+// ---------------------------------------------------------------------------
+
+/// A stage's waits share ONE deadline, so none of them can double-spend the stage.
+///
+/// This is the property the deadline refactor exists to make true. Under the old
+/// `derived: Duration` it was false at four sites (rounds 2, 4, 6 and job 224
+/// finding 2): each wait received the stage's full span fresh and each call site
+/// was separately responsible for subtracting what the stage had already spent.
+///
+/// NOTE ON THE SLEEP: a `sleep` can only OVERSHOOT, and every assertion here is in
+/// the direction overshoot makes MORE true (time was charged; the declared maximum
+/// did not grow). This is the opposite of the #2642 flake class, which asserts that
+/// something completed FAST.
+#[test]
+fn a_stages_waits_share_one_deadline_so_none_can_double_spend() {
+    let b = calibrated(spec(2, 2), Duration::ZERO, "t_ack", ACK_QUIET_BASELINE);
+    let span = b.span();
+    let first = b.remaining();
+
+    // Work inside the stage between two waits — a process spawn, in the real
+    // `select_rows`, which is exactly what job 224 finding 2 reported going
+    // uncharged.
+    thread::sleep(Duration::from_millis(200));
+
+    let second = b.remaining();
+    let charged = first.saturating_sub(second);
+    assert!(
+        charged >= Duration::from_millis(150),
+        "work done inside a stage must be charged to that stage: only {charged:?} of          {span:?} was charged across a 200ms gap"
+    );
+    assert!(
+        second + charged <= span,
+        "a second wait plus what the stage already spent may never exceed the declared          maximum: {second:?} + {charged:?} against {span:?}"
+    );
+
+    // The deadline is fixed at derivation, so the declared maximum cannot move
+    // under the stage's feet.
+    let span_again = b.span();
+    assert!(
+        span_again == span,
+        "a stage's declared maximum may not change: {span_again:?} vs {span:?}"
+    );
+}
+
+/// A progress-checked stage's extension is INSIDE its declared maximum.
+///
+/// Job 224 finding 3: the progress-checked poll legitimately continues past its
+/// nominal budget while the child makes progress — correct behaviour, kept — but
+/// the arithmetic did not account for it, so stage (d) could eat stage (e)'s
+/// allowance and `T1_EXIT.cap` was not an actual maximum.
+#[test]
+fn a_progress_checked_stages_extension_is_inside_its_declared_maximum() {
+    let stall = calibrated(STALL_WINDOW, Duration::ZERO, "t_ack", ACK_QUIET_BASELINE);
+    let poll =
+        calibrated(T1_EXIT, Duration::ZERO, "t_ack", ACK_QUIET_BASELINE).progress_checked(&stall);
+    let b = poll.budget();
+
+    assert_eq!(
+        poll.stall_window(),
+        STALL_WINDOW.base,
+        "the poll's stall window is the stall budget's own nominal span"
+    );
+    assert_eq!(
+        b.nominal(),
+        T1_EXIT.base,
+        "the nominal span a STALL is judged against must be unchanged by the extension:          a silent flush must still fail at the old 60s bound, not at 60s + a stall window"
+    );
+
+    // The declared maximum INCLUDES the extension...
+    let span = b.span();
+    let expected = T1_EXIT.base + STALL_WINDOW.base;
+    assert!(
+        span == expected,
+        "the declared maximum must be nominal + one stall window: {span:?} vs {expected:?}"
+    );
+    // ...and `declared_max` sums that same quantity at the cap.
+    assert_eq!(declared_max(T1_EXIT, true), T1_EXIT.cap + STALL_WINDOW.cap);
+
+    // And it is REPORTED, so a failure names the extension it was granted.
+    let described = poll.describe();
+    for needle in ["declared progress extension", "declared maximum"] {
+        assert!(
+            described.contains(needle),
+            "a progress-checked budget must report {needle:?}: {described}"
+        );
+    }
+}
+
+/// The clock clips a progress-checked stage's EXTENSION as well as its nominal
+/// span — an extension outside the total budget would be a stage outliving the
+/// test's only timeout.
+#[test]
+fn the_clock_clips_a_progress_checked_stages_extension_too() {
+    let clock = StageClock::new(Duration::from_secs(1));
+    let stall = calibrated(STALL_WINDOW, Duration::ZERO, "t_ack", ACK_QUIET_BASELINE);
+    let poll = clock.clip_poll(
+        calibrated(T1_EXIT, Duration::ZERO, "t_ack", ACK_QUIET_BASELINE).progress_checked(&stall),
+    );
+    let b = poll.budget();
+
+    assert!(b.clipped_to_total(), "{b:?}");
+    assert!(
+        b.starved(),
+        "1s remaining is below T1_EXIT's {:?} base, so this REAL spec must be marked          starved: {b:?}",
+        T1_EXIT.base
+    );
+    let span = b.span();
+    assert!(
+        span <= Duration::from_secs(1),
+        "a progress extension may not outlive the total budget: {span:?}"
+    );
+    let described = b.describe();
+    assert!(
+        described.contains("TOTAL BUDGET ALREADY EXHAUSTED BY EARLIER STAGES"),
+        "a starved real spec must name the exhaustion: {described}"
+    );
+    assert!(
+        described.contains("NOT about the property under test"),
+        "a starved real spec must disclaim the property: {described}"
     );
 }

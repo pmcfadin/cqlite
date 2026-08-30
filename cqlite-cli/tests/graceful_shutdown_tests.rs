@@ -62,7 +62,7 @@ fn sigint_in_writable_session_flushes_before_exit() {
     let schema = write_schema(tmp.path());
     let wd = tmp.path().join("wd");
     let data_dir = wd.join("data");
-    let mut clock = StageClock::new(TEST_TOTAL_BUDGET);
+    let mut clock = StageClock::new(T1_TOTAL_BUDGET);
 
     // Stage (a): session up (bare deadline — the irreducible bound).
     let (mut child, io, t_boot) = start_writable_session(&wd, &schema, &[], &mut clock);
@@ -113,7 +113,7 @@ fn sigint_in_writable_session_flushes_before_exit() {
     let entered = io.wait_for(
         Stream::Stderr,
         |l| l.contains(MARKER_HANDLER_ENTERED),
-        handler_budget.derived,
+        &handler_budget,
     );
     let t_handler = match entered {
         Ok((_, took)) => took,
@@ -143,16 +143,16 @@ fn sigint_in_writable_session_flushes_before_exit() {
     // Stage (d): clean exit, PROGRESS-CHECKED. A new child output line or a new
     // durable `-Data.db` artifact resets the stall window, so a flush that is
     // landing slowly is never mistaken for a stall.
-    let exit_budget = clock.clip(calibrated(T1_EXIT, t_ack, "t_ack", ACK_QUIET_BASELINE));
-    let envelope = clock.remaining();
-    let exited = poll_with_progress(
-        &io,
-        &data_dir,
-        &exit_budget,
-        stall_window.derived,
-        envelope,
-        |slice| child.wait_timeout(slice).expect("wait_timeout on child"),
+    // `progress_checked` DECLARES the extension the poll may take beyond its
+    // nominal budget, so it is part of stage (d)'s declared maximum rather than an
+    // unaccounted addition on top of `T1_EXIT.cap` (roborev job 224, finding 3),
+    // and `clip_poll` bounds the extension by the total budget too.
+    let exit_budget = clock.clip_poll(
+        calibrated(T1_EXIT, t_ack, "t_ack", ACK_QUIET_BASELINE).progress_checked(&stall_window),
     );
+    let exited = poll_with_progress(&io, &data_dir, &exit_budget, |slice| {
+        child.wait_timeout(slice).expect("wait_timeout on child")
+    });
     let (status, t_exit): (ExitStatus, Duration) = match exited {
         Ok(v) => v,
         Err(fail) => {
@@ -252,7 +252,7 @@ fn writable_session_auto_flushes_mid_session_across_threshold() {
     let schema = write_schema(tmp.path());
     let wd = tmp.path().join("wd");
     let data_dir = wd.join("data");
-    let mut clock = StageClock::new(TEST_TOTAL_BUDGET);
+    let mut clock = StageClock::new(T2_TOTAL_BUDGET);
 
     // Stage (a): session up (bare deadline — the irreducible bound). The tiny
     // threshold makes a handful of small rows cross it, forcing a mid-session
@@ -321,23 +321,17 @@ fn writable_session_auto_flushes_mid_session_across_threshold() {
 
     // Stage (c): a durable SSTable must exist BEFORE we close the session.
     // Progress-checked, and calibrated from `t_ack`.
-    let sstable_budget = clock.clip(calibrated(T2_SSTABLE, t_ack, "t_ack", ACK_QUIET_BASELINE));
-    let envelope = clock.remaining();
-    let flushed = poll_with_progress(
-        &io,
-        &data_dir,
-        &sstable_budget,
-        stall_window.derived,
-        envelope,
-        |slice| {
-            if count_data_db(&data_dir) >= 1 {
-                Some(())
-            } else {
-                thread::sleep(slice);
-                None
-            }
-        },
+    let sstable_budget = clock.clip_poll(
+        calibrated(T2_SSTABLE, t_ack, "t_ack", ACK_QUIET_BASELINE).progress_checked(&stall_window),
     );
+    let flushed = poll_with_progress(&io, &data_dir, &sstable_budget, |slice| {
+        if count_data_db(&data_dir) >= 1 {
+            Some(())
+        } else {
+            thread::sleep(slice);
+            None
+        }
+    });
     let t_sstable = match flushed {
         Ok((_, took)) => took,
         Err(fail) => {
@@ -368,16 +362,12 @@ fn writable_session_auto_flushes_mid_session_across_threshold() {
 
     // Stage (d): cleanly end via EOF; progress-checked exit wait.
     drop(stdin);
-    let exit_budget = clock.clip(calibrated(T2_EOF_EXIT, t_ack, "t_ack", ACK_QUIET_BASELINE));
-    let envelope = clock.remaining();
-    let exited = poll_with_progress(
-        &io,
-        &data_dir,
-        &exit_budget,
-        stall_window.derived,
-        envelope,
-        |slice| child.wait_timeout(slice).expect("wait_timeout on child"),
+    let exit_budget = clock.clip_poll(
+        calibrated(T2_EOF_EXIT, t_ack, "t_ack", ACK_QUIET_BASELINE).progress_checked(&stall_window),
     );
+    let exited = poll_with_progress(&io, &data_dir, &exit_budget, |slice| {
+        child.wait_timeout(slice).expect("wait_timeout on child")
+    });
     let (status, t_exit): (ExitStatus, Duration) = match exited {
         Ok(v) => v,
         Err(fail) => {
