@@ -1489,10 +1489,12 @@ supervisor_pid_liveness() {
 # Corroboration = `worker-supervisor` appearing in the process's own command line. NEVER CLAIM
 # CORROBORATION THAT WAS NOT OBTAINED, so the three answers are kept distinct: `unconfirmed` means we
 # READ a command line and it did not match (an affirmative non-match), `unprobeable` means we could not
-# look at all (no readable procfs entry, no usable `ps` — a hidepid container, or a macOS box with a
-# stripped PATH). Both get cautious wording; only `supervisor` gets the "stop it" advice.
+# look at all — no readable procfs entry, a procfs read that FAILED, and no usable `ps` (a hidepid
+# container, a process that exited mid-probe, or a macOS box with a stripped PATH). An unmeasured read
+# is NEVER reported as `unconfirmed`: that would claim a non-match nobody observed.
+# Both get cautious wording; only `supervisor` gets the "stop it" advice.
 supervisor_pid_identity() {
-  local pid="${1:-}" args="" part=""
+  local pid="${1:-}" args="" part="" read_ok=no
   case "$pid" in
     '' | *[!0-9]* | 0*) printf 'unprobeable\n'; return 0 ;;
   esac
@@ -1501,18 +1503,37 @@ supervisor_pid_identity() {
   # in a loop rather than `tr`/`mapfile -d`: no external command is assumed present, and the loop form
   # works on the bash 3.2 this script still supports. The `|| [[ -n "$part" ]]` tail keeps a final
   # field that is not NUL-terminated.
+  #
+  # THE READ'S SUCCESS IS TRACKED, BECAUSE `unconfirmed` IS AN AFFIRMATIVE CLAIM (#3549, roborev job
+  # 185 F3). `-r` was true a moment ago; the process can exit between that test and the open, and a
+  # suppressed open failure previously left `$args` empty and fell into `unconfirmed` — which asserts
+  # "we READ a command line and it did not match" about a read that never happened. That is the
+  # unmeasured state wearing the affirmative one's clothes, and it is exactly what the third value
+  # exists to prevent. So an open/read failure is NOT a verdict here: it falls through to the `ps`
+  # probe below, and if that cannot answer either the function returns `unprobeable`.
+  #
+  # `2>/dev/null` PRECEDES the input redirection deliberately: redirections are applied left to right,
+  # so with the input first bash prints its own "No such file or directory" to a stderr that is not yet
+  # discarded. Order-dependent and silent if reversed.
   if [[ -r "/proc/$pid/cmdline" ]]; then
-    while IFS= read -r -d '' part || [[ -n "$part" ]]; do
-      args+="$part "
-      part=""
-    done <"/proc/$pid/cmdline" 2>/dev/null || true
-    case "$args" in
-      *worker-supervisor*) printf 'supervisor\n'; return 0 ;;
-    esac
-    # We LOOKED and it did not match. An EMPTY cmdline (kernel thread, or a process that rewrote its
-    # own argv) lands here too, and for the same reason: nothing corroborating was found.
-    printf 'unconfirmed\n'
-    return 0
+    if { while IFS= read -r -d '' part || [[ -n "$part" ]]; do
+           args+="$part "
+           part=""
+         done; } 2>/dev/null <"/proc/$pid/cmdline"; then
+      read_ok=yes
+    fi
+    if [[ "$read_ok" == yes ]]; then
+      case "$args" in
+        *worker-supervisor*) printf 'supervisor\n'; return 0 ;;
+      esac
+      # We LOOKED and it did not match. An EMPTY cmdline (kernel thread, or a process that rewrote its
+      # own argv) lands here too, and for the same reason: nothing corroborating was found.
+      printf 'unconfirmed\n'
+      return 0
+    fi
+    # Read FAILED. Discard whatever partial bytes arrived — a partial command line is not evidence
+    # either way — and let `ps` answer.
+    args=""
   fi
   if command -v ps >/dev/null 2>&1; then
     args="$(ps -p "$pid" -o args= 2>/dev/null || true)"
@@ -1585,9 +1606,11 @@ supervisor_legacy_lock_state() {
   # (#3549, roborev job 182 Medium). The pre-#3467 lock is a directory holding ONLY `pid`. A directory
   # that also holds something else is NOT that shape, and calling it a lock would point an operator's
   # `rm` at contents no supervisor ever created. So it is ENUMERATED and required to contain exactly
-  # one entry, named `pid`. That verification is also what licenses the NON-RECURSIVE remedy the guard
-  # prints: `rm -f <dir>/pid && rmdir <dir>` clears exactly this shape and FAILS LOUDLY if anything
-  # unexpected is present, where `rm -rf` would silently delete it.
+  # one entry, named `pid`. That verification is what licenses PRINTING a deletion at all — but it is an
+  # observation made HERE AND NOW, and the operator acts later, so it is NOT a safety claim about the
+  # state at deletion time (#3549, roborev job 185 F1; the honest wording is at the `stale` branch).
+  # What makes the printed command non-destructive whenever it runs is `rmdir` itself, which refuses a
+  # non-empty directory, where `rm -rf` would silently delete contents this run does not own.
   #
   # `dotglob` so a hidden entry still counts as an unexpected entry; `nullglob` so an empty directory
   # yields 0 entries rather than the literal pattern. BOTH ARE SAVED AND RESTORED via `shopt -p`,
@@ -1622,8 +1645,26 @@ supervisor_legacy_lock_state() {
   # second must hit EOF. A `read` that returns non-zero at EOF still ASSIGNS, so a final line with no
   # trailing newline is caught by the VALUE of `$extra`, never by the status alone; `IFS=` on the second
   # read keeps a whitespace-only second line from being trimmed into an empty one.
-  local extra="" more=no
-  { read -r pid || true; if IFS= read -r extra; then more=yes; fi; } <"$legacy/pid" 2>/dev/null || true
+  #
+  # THE OPEN'S SUCCESS IS TRACKED, so an UNMEASURED read is not reported as an affirmative measurement
+  # (#3549, roborev job 185 F3, class sweep). The file passed `-f -r` a moment ago and can still vanish
+  # or lose its permissions before the open. Both the verdict and the CAUSE TOKEN would then have been
+  # wrong in the same direction: an empty `$pid` fell into `pid-not-well-formed:[]`, which states we
+  # PARSED the file and its contents were bad. The verdict stays a refusal either way (`unknown` refuses
+  # in every spelling), so this is the diagnostic being made true, not a behaviour change. `2>/dev/null`
+  # precedes the input redirection for the reason recorded at `supervisor_pid_identity`.
+  #
+  # The `|| true` on the FIRST read is correctly permissive and stays: `read` returns non-zero at EOF
+  # while still ASSIGNING, so a single-line file with no trailing newline is a normal, well-formed lock
+  # whose read "fails". Open failure is what is now distinguished, not read status.
+  local extra="" more=no open_ok=no
+  if { read -r pid || true; if IFS= read -r extra; then more=yes; fi; } 2>/dev/null <"$legacy/pid"; then
+    open_ok=yes
+  fi
+  if [[ "$open_ok" != yes ]]; then
+    printf 'unknown pid-file-unreadable-at-open\n'
+    return 0
+  fi
   if [[ "$more" == yes || -n "$extra" ]]; then
     printf 'unknown pid-file-not-a-single-line\n'
     return 0
@@ -1638,11 +1679,20 @@ supervisor_legacy_lock_state() {
   esac
 }
 
-# supervisor_legacy_lock_refuse <path> <detail> — LOUD, DIAGNOSTIC, and TEXTUALLY DISTINCT from the
-# per-lane "another instance is already running" refusal, so an operator (and a test) can tell which
-# of the two locks stopped the start.
+# supervisor_legacy_lock_refuse <path> <detail> [remedy-prose] [remedy-command] — LOUD, DIAGNOSTIC, and
+# TEXTUALLY DISTINCT from the per-lane "another instance is already running" refusal, so an operator
+# (and a test) can tell which of the two locks stopped the start.
+#
+# A RUNNABLE COMMAND IS A SEPARATE ARGUMENT AND GETS A LINE OF ITS OWN — NEVER INLINED IN PROSE (#3549,
+# roborev job 185 F2). It was inlined once, with a trailing em dash and an explanatory clause after it,
+# and the consequence is worse than the untidiness: pasted verbatim, the prose became extra arguments,
+# `rm -f <dir>/pid` SUCCEEDED and `rmdir <dir> — the shape was ...` FAILED, leaving a PID-LESS lock
+# directory. That is precisely the shape a pre-#3467 supervisor reads as stale and reclaims — so the
+# remedy would have manufactured the hazard this guard exists to prevent. Do not re-inline it, and do
+# not append punctuation: the command line must be the WHOLE line, and it is printed BARE (no
+# `worker-supervisor:` prefix) so that selecting the line is enough to paste it.
 supervisor_legacy_lock_refuse() {
-  local legacy="$1" detail="$2" remedy="${3:-}"
+  local legacy="$1" detail="$2" remedy="${3:-}" remedy_cmd="${4:-}"
   echo "worker-supervisor: refusing to start — LEGACY GLOBAL supervisor lock $legacy: $detail" >&2
   echo "worker-supervisor: that path is the PRE-#3467 machine-global single-instance lock; this supervisor's own lock is PER LANE ($SUPERVISOR_LOCK), so the two are invisible to each other and both supervisors would run in one worktree (#3549)." >&2
   # A CASE-SPECIFIC remedy, when there is one. The states differ in what an operator should DO — a LIVE
@@ -1650,6 +1700,7 @@ supervisor_legacy_lock_refuse() {
   # delete it" — so the generic line below is not sufficient on its own, and a run that told an operator
   # to stop a process that is already dead would be actively misleading.
   [[ -z "$remedy" ]] || echo "worker-supervisor: remedy for THIS state — $remedy" >&2
+  [[ -z "$remedy_cmd" ]] || printf '%s\n' "$remedy_cmd" >&2
   echo "worker-supervisor: remedy — stop the pre-#3467 supervisor (or upgrade that checkout to #3467+), or set SUPERVISOR_LOCK explicitly to opt out of this compatibility check." >&2
   exit 1
 }
@@ -1682,10 +1733,11 @@ supervisor_legacy_lock_refuse() {
 # is why this guard refuses instead.
 #
 # AC2 OF #3549 ("reclaimed rather than blocking forever") IS SATISFIED BY THE REFUSAL, per the lead's
-# ruling: a LOUD refusal that names the legacy path, the recorded pid, the classified state and an exact
-# NON-RECURSIVE remedy (`rm -f <dir>/pid && rmdir <dir>`, printable only because the `{pid}` shape is
-# verified) is not "blocking forever" — an operator (or an upgrade past #3467) clears it in one command,
-# and the alternative is a supervisor that silently mutates another supervisor's lock.
+# ruling: a LOUD refusal that names the legacy path, the recorded pid, the classified state, the
+# precondition (stop or upgrade the legacy launcher FIRST) and an exact NON-RECURSIVE remedy on a line
+# of its own (`rm -f <dir>/pid && rmdir <dir>`) is not "blocking forever" — an operator (or an upgrade
+# past #3467) clears it in one command, and the alternative is a supervisor that silently mutates
+# another supervisor's lock.
 
 # RESIDUAL (#3549, roborev job 178) — THIS GUARD REDUCES THE COLLISION WINDOW; IT DOES NOT ELIMINATE
 # IT. Read plainly: it is a STARTUP CHECK, not machine-wide mutual exclusion.
@@ -1736,8 +1788,14 @@ supervisor_legacy_lock_guard() {
             "that supervisor is STILL RUNNING — do NOT delete its lock; stop pid $pid first"
           ;;
         unconfirmed)
+          # The `ps` invocation is the FOURTH argument, not a parenthetical inside the prose (#3549,
+          # roborev job 185 F2): a command wrapped in prose is not pasteable, and the class of defect
+          # is recorded at `supervisor_legacy_lock_refuse`. This one is read-only, so a mis-paste
+          # could only ever be uninformative — but the rule is about the shape, not this command's
+          # blast radius.
           supervisor_legacy_lock_refuse "$legacy" "recorded pid $pid is ACTIVE, but its command line does NOT identify it as a worker-supervisor (identity NOT corroborated)" \
-            "pid $pid is running; PID NUMBERS ARE REUSED, so it may be an unrelated process that inherited the number. VERIFY what pid $pid actually is (ps -p $pid -o args=) BEFORE stopping anything, and do NOT delete this lock while it may still be held"
+            "pid $pid is running; PID NUMBERS ARE REUSED, so it may be an unrelated process that inherited the number. VERIFY what pid $pid actually is with the next line BEFORE stopping anything, and do NOT delete this lock while it may still be held" \
+            "ps -p $pid -o args="
           ;;
         *)
           supervisor_legacy_lock_refuse "$legacy" "recorded pid $pid is ACTIVE, and its identity could NOT be checked at all on this host (no readable procfs entry and no usable ps)" \
@@ -1750,14 +1808,31 @@ supervisor_legacy_lock_guard() {
       # NOTHING: see "THIS GUARD DETECTS AND REFUSES" above for why the reclaim was deleted. The
       # diagnostic is deliberately distinct from the `live` one — both refuse, but the remedies differ.
       pid="${state#stale }"
-      # A NON-RECURSIVE remedy, and it is only printable because the shape was VERIFIED (#3549, roborev
-      # job 182 Medium): the classifier proved this directory holds exactly one entry, `pid`, so
-      # `rm -f <dir>/pid && rmdir <dir>` clears precisely that and FAILS LOUDLY on anything unexpected.
-      # `rm -rf` would silently delete whatever else was there, which is not something to recommend
-      # about a directory this run does not own. Paths are shell-quoted so the printed command is
-      # paste-safe for a `TMPDIR` containing a space or a quote.
+      # THE PRECONDITION COMES FIRST, AND THE COMMAND IS NOT CALLED SAFE (#3549, roborev job 185 F1).
+      # Two separate things are true and were previously conflated.
+      #
+      # (a) ORDERING. Deleting this lock FREES THE LEGACY NAME, and a pre-#3467 supervisor can take it
+      #     immediately — the very concurrency this guard refuses. So the instruction is: stop or
+      #     upgrade the legacy launcher FIRST, delete SECOND. Reversed, the remedy opens the window.
+      #
+      # (b) NO SAFETY CLAIM ABOUT CURRENT CONTENTS. The old text said the verified shape made the
+      #     command fail loudly on anything unexpected. That was a statement about the shape AT
+      #     CLASSIFICATION TIME, printed for an operator who acts at an ARBITRARY LATER TIME — a TOCTOU
+      #     on the operator's own timeline, and an unbounded one. NO revalidating one-liner closes it
+      #     (whatever it checks, it checks before it acts), and building a clever inode/pid-rechecking
+      #     pipeline here would be a fourth repetition of exactly the check-then-act mistake this issue
+      #     has already made three times in code. So the honest wording ships instead: the shape was
+      #     verified WHEN THIS RAN.
+      #
+      # What DOES survive is `rmdir`'s own guarantee — it refuses a non-empty directory — which is a
+      # property of the command, not of an observation, and therefore still true whenever it is run.
+      # That is why the remedy stays non-recursive; `rm -rf` would silently delete contents this run
+      # does not own. Paths are shell-quoted so the printed line is paste-safe for a `TMPDIR`
+      # containing a space or a quote, and the command occupies its own line (see F2 at
+      # `supervisor_legacy_lock_refuse`).
       supervisor_legacy_lock_refuse "$legacy" "state $state — LEFT BEHIND by a pre-#3467 supervisor that is GONE (recorded pid $pid is affirmatively dead). This guard never mutates a lock it does not own, so it is NOT removed automatically" \
-        "remove the leftover lock by hand, non-recursively: rm -f $(supervisor_shell_quote "$legacy/pid") && rmdir $(supervisor_shell_quote "$legacy") — the shape was verified to be exactly that one file, so this fails loudly if anything unexpected is present"
+        "PRECONDITION FIRST — stop the legacy launcher(s) on this box, or upgrade that checkout past #3467; a lock deleted before that is a free name a pre-#3467 supervisor can take at once. ONLY THEN run the next line, on its own, exactly as printed. Its shape was verified WHEN THIS RAN, not when you run it, so if a legacy supervisor has started since it may no longer be the lock described above; the rmdir is non-recursive and refuses a non-empty directory, which is the guarantee that still holds later" \
+        "rm -f $(supervisor_shell_quote "$legacy/pid") && rmdir $(supervisor_shell_quote "$legacy")"
       ;;
     *)
       supervisor_legacy_lock_refuse "$legacy" "state could not be determined (${state#unknown }) — 'cannot tell' is a refusal here, never a green light"

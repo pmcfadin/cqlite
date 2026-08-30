@@ -582,10 +582,17 @@ What it guarantees:
   diagnostic names the legacy path, the recorded pid, the classified state and an exact **non-recursive**
   one-liner to clear it (`rm -f <legacy path>/pid && rmdir <legacy path>`, shell-quoted so it is
   paste-safe), and the remedy is state-specific so a run never tells you to stop a
-  process that is already dead. That remedy is only printed for a shape the guard **VERIFIED**: the
-  directory must hold exactly one entry, `pid`, and that file exactly one line — so the command clears
-  precisely what was diagnosed and fails loudly if anything else is present, where an `rm -rf` would
-  silently delete contents no supervisor created. Anything undeterminable (not a directory, a SYMLINK at
+  process that is already dead. **Two things about that one-liner (#3549).** It is printed **on a line
+  of its own, bare and complete** — no prefix, no trailing prose — because a command with an
+  explanation appended to it is not pasteable: the prose becomes extra arguments, `rm -f` succeeds and
+  `rmdir` fails, leaving a **pid-less lock directory**, which is exactly the shape a pre-#3467
+  supervisor misreads as stale. And **the ORDER is part of the remedy**: stop or upgrade the legacy
+  launcher **first**, delete **second** — deleting first frees the legacy name for a pre-#3467
+  supervisor to take at once, which is the collision the guard refuses. The `{pid}` shape (exactly one
+  entry, `pid`, holding exactly one line) was verified **when the guard ran**, which is what licenses
+  printing a deletion at all, but it says nothing about the state when you act; the guarantee that
+  still holds then is `rmdir`'s own refusal of a non-empty directory, where an `rm -rf` would silently
+  delete contents no supervisor created. Anything undeterminable (not a directory, a SYMLINK at
   either the lock path or its `pid`, no/garbled `pid` file, an extra entry beside `pid`, more than one
   line in `pid`, unreadable) refuses the same way — **and carries no deletion instruction at all**, since
   the shape was never established. **This guard DETECTS AND
