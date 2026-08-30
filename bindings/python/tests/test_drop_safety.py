@@ -31,11 +31,17 @@ import os
 import signal
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 import pytest
 
 import cqlite
+
+# Deadline for reaping the forked child. Deliberately generous: it is a LIVENESS
+# bound (did the child exit at all?), never a latency assertion — the child's own
+# work is a memtable flush that takes milliseconds.
+_FORK_REAP_TIMEOUT_S = 60.0
 
 SCHEMA_TEXT = """\
 CREATE KEYSPACE IF NOT EXISTS drop_test
@@ -444,7 +450,31 @@ def test_fork_child_drop_does_not_touch_parent_state(tmp_path, schema_file):
         except BaseException:
             os._exit(70)
 
-    _waited_pid, status = os.waitpid(pid, 0)
+    # Reap with a DEADLINE, not a blocking waitpid. This is a liveness guard, not
+    # a performance assertion: the regression this test exists for makes the
+    # child HANG FOREVER (its drop drives an inherited worker-less runtime), and a
+    # blocking `waitpid` would turn that into a stalled suite instead of a
+    # readable failure. Observed for real while developing this test — a broken
+    # guard hung two pytest runs for 17 minutes.
+    deadline = time.monotonic() + _FORK_REAP_TIMEOUT_S
+    status = None
+    while time.monotonic() < deadline:
+        waited_pid, wait_status = os.waitpid(pid, os.WNOHANG)
+        if waited_pid == pid:
+            status = wait_status
+            break
+        time.sleep(0.05)
+
+    if status is None:
+        # Kill and reap so we never leak the child, THEN fail with the diagnosis.
+        os.kill(pid, signal.SIGKILL)
+        os.waitpid(pid, 0)
+        pytest.fail(
+            "the forked child never exited: its drop is hanging, which is what "
+            "happens when the fork guard does not fire (the inherited runtime has "
+            "no worker threads, so block_on never returns)"
+        )
+
     assert os.WIFEXITED(status), f"forked child did not exit normally: {status!r}"
     assert os.WEXITSTATUS(status) == 0, (
         f"forked child exited {os.WEXITSTATUS(status)} (70 = it raised)"
