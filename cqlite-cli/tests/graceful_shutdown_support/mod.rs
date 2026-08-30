@@ -214,10 +214,10 @@ const SESSION_UP_DEADLINE: Duration = Duration::from_secs(40);
 // MEASURED quiet values for this test (warm build, unloaded 16-core box,
 // `--test-threads=1`), and under self-generated CPU contention:
 //
-//                                    quiet      load avg 30    load avg 116
-//   t_boot (spawn -> banner)         22-29ms    45-66ms        81-132ms
-//   t_ack  (write -> `OK`), test 1   3ms        13ms           76ms
-//   t_ack  (slowest of 5), test 2    38-43ms    97ms           133ms
+//                                    quiet        load avg 30    load avg 116
+//   t_boot (spawn -> banner)         11.4-29ms    45-66ms        81-132ms
+//   t_ack  (write -> `OK`), test 1   1.4-3ms      13ms           76ms
+//   t_ack  (slowest of 5), test 2    38-43ms      97ms           133ms
 //
 // THE BASELINES SIT JUST ABOVE THE QUIET NOISE FLOOR, and that is deliberate:
 // `scale = max(1, observed / quiet_baseline)`, so a baseline set far above the
@@ -238,23 +238,39 @@ const SESSION_UP_DEADLINE: Duration = Duration::from_secs(40);
 // taken literally it makes the calibration inert on the very host #3515
 // measured. Reported with the change.)
 
-/// The SLOWEST quiet `t_boot` observed while developing this change (29ms; the
-/// range was 22-29ms). The baselines are asserted against these measurements —
-/// see `the_baselines_sit_just_above_the_measured_quiet_noise_floor`. If a
-/// future host is genuinely slower, UPDATE THESE with the new measurement
-/// rather than inflating the baselines away from them.
-const MEASURED_QUIET_T_BOOT: Duration = Duration::from_millis(29);
+// THE ANCHORS ARE THE MEASUREMENTS THAT BIND: the SMALLEST relevant quiet value,
+// not the largest. The anchor's job is to form an UPPER bound on the baseline (a
+// baseline far above the noise floor makes the calibration inert), and in THAT
+// direction the slowest observed value is the PERMISSIVE choice — anchoring
+// `t_ack` to the sibling's 43ms would license a baseline up to 430ms, within a
+// factor of two of the 500ms that was MEASURED to be inert.
+//
+// Observed quiet values across every run recorded for this change:
+//   t_boot   11.4ms (smallest, BINDING) .. 29ms
+//   t_ack     1.4ms (smallest, BINDING) ..  3ms (SIGINT test)
+//                                       .. 43ms (sibling, slowest of 5 writes)
+//
+// If a future host is genuinely slower at the LOW end, update these with the new
+// measurement rather than inflating the baselines away from them.
+//
+// CONSEQUENCE, stated because it is a real trade: anchoring `t_ack` low puts the
+// SIBLING's quiet `t_ack` (~42ms) ABOVE the baseline, so that test scales by ~1.7
+// even on an unloaded host — loosened when it did not need to be. Harmless by the
+// asymmetry the whole mechanism rests on (calibration can only loosen, so an
+// over-eager `scale` delays a failure but never causes one), and strictly
+// preferable to an anchor that licenses an inert baseline. It does mean the
+// "quiet host yields exactly `base`" property holds for the SIGINT test and not
+// for the sibling; the property that matters — never TIGHTER than `base` — holds
+// for both unconditionally.
+const MEASURED_QUIET_T_BOOT: Duration = Duration::from_millis(11);
 
-/// The SLOWEST quiet `t_ack` observed (43ms — the sibling's slowest of 5 writes;
-/// the SIGINT test's was 3ms).
-const MEASURED_QUIET_T_ACK: Duration = Duration::from_millis(43);
+const MEASURED_QUIET_T_ACK: Duration = Duration::from_millis(3);
 
-/// Quiet-host reference for `t_boot`: ~3.4x the measured quiet value.
-pub const BOOT_QUIET_BASELINE: Duration = Duration::from_millis(100);
+/// Quiet-host reference for `t_boot`: ~6.8x the BINDING measured quiet value.
+pub const BOOT_QUIET_BASELINE: Duration = Duration::from_millis(75);
 
-/// Quiet-host reference for `t_ack`: just above the slowest measured quiet value
-/// (the sibling's 43ms), ~17x the SIGINT test's 3ms.
-pub const ACK_QUIET_BASELINE: Duration = Duration::from_millis(50);
+/// Quiet-host reference for `t_ack`: ~8.3x the BINDING measured quiet value.
+pub const ACK_QUIET_BASELINE: Duration = Duration::from_millis(25);
 
 /// The `cqlite` binary this test crate built with `--features write-support`.
 fn cqlite_bin() -> &'static str {
@@ -1278,17 +1294,19 @@ fn the_nominal_cap_sums_stay_under_the_total_budget() {
 /// detect a wrong value for that constant.
 #[test]
 fn the_baselines_sit_just_above_the_measured_quiet_noise_floor() {
-    // At or above the measurement, so a quiet host still yields `scale == 1`
-    // (the spec's quiet-host scenario).
+    // At or above the BINDING (smallest) measurement, so the fastest observed
+    // quiet host still yields `scale == 1`.
     assert!(
         BOOT_QUIET_BASELINE >= MEASURED_QUIET_T_BOOT,
         "BOOT_QUIET_BASELINE {BOOT_QUIET_BASELINE:?} is below the slowest measured quiet \
-         t_boot {MEASURED_QUIET_T_BOOT:?}, so a quiet host would scale"
+         t_boot {MEASURED_QUIET_T_BOOT:?} (the BINDING anchor), so even the fastest \
+         observed quiet host would scale"
     );
     assert!(
         ACK_QUIET_BASELINE >= MEASURED_QUIET_T_ACK,
         "ACK_QUIET_BASELINE {ACK_QUIET_BASELINE:?} is below the slowest measured quiet \
-         t_ack {MEASURED_QUIET_T_ACK:?}, so a quiet host would scale"
+         t_ack {MEASURED_QUIET_T_ACK:?} (the BINDING anchor), so even the fastest \
+         observed quiet host would scale"
     );
     // ...and not far above it, or the mechanism is INERT: `scale` is
     // `observed / quiet_baseline`, so a baseline 20-65x the noise floor never
