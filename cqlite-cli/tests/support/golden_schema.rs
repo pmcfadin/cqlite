@@ -182,6 +182,18 @@ pub fn from_ddl(ddl: &str, table: &str) -> Result<TableSchema, String> {
         if lower.starts_with("create type") {
             let (name, body) = named_body(&statement, "create type")?;
             let fields = parse_fields(&body, &udts)?;
+            // A second `CREATE TYPE` of the same name used to OVERWRITE the first,
+            // silently: every table declared before it kept the old field list and
+            // every table after it got the new one, so one file could yield two
+            // different answers for the same type name and neither would be
+            // reported. Refused for the same reason a repeated `CREATE TABLE` is —
+            // there is no way to say which declaration is authoritative.
+            if udts.contains_key(&name) {
+                return Err(format!(
+                    "type `{name}` is declared more than once — the lane cannot say which \
+                     declaration is authoritative for its field types"
+                ));
+            }
             udts.insert(
                 name.clone(),
                 UdtType {
@@ -382,7 +394,18 @@ fn parse_fields(
             .split_once(char::is_whitespace)
             .ok_or_else(|| format!("UDT field with no type: `{item}`"))?;
         let (ty, _frozen) = parse_type(ty_text.trim(), udts)?;
-        fields.push((name.trim().to_ascii_lowercase(), ty));
+        let name = name.trim().to_ascii_lowercase();
+        // A repeated field name is refused rather than kept twice: the comparison
+        // resolves a field's type with `.find()`, i.e. FIRST wins, while the egress
+        // and the golden could each mean the other one — so a duplicate would
+        // silently decide the compared type by declaration order.
+        if fields.iter().any(|(earlier, _)| *earlier == name) {
+            return Err(format!(
+                "UDT field `{name}` is declared more than once in `{body}` — the field's \
+                 compared type would be decided by declaration order"
+            ));
+        }
+        fields.push((name, ty));
     }
     if fields.is_empty() {
         return Err(format!("UDT with no fields: `{body}`"));
@@ -450,6 +473,18 @@ fn parse_table(
         if is_static {
             statics.push(name.clone());
         }
+        // A repeated column name is refused rather than kept twice: the comparison
+        // iterates `schema.columns` (so the column would be compared — and
+        // counted — twice) while `TableSchema::column` resolves a name with
+        // `.find()` (so the type used would be the FIRST declaration's). Either
+        // half alone makes the compared column set a function of declaration
+        // order rather than of the DDL.
+        if columns.iter().any(|c| c.name == name) {
+            return Err(format!(
+                "`{table}` declares the column `{name}` more than once — the compared \
+                 column set and its types would depend on declaration order"
+            ));
+        }
         columns.push(Column {
             name,
             ty,
@@ -510,12 +545,25 @@ fn parse_key_spec(spec: &str) -> Result<(Vec<String>, Vec<String>), String> {
     } else {
         partition.push(first.trim().to_ascii_lowercase());
     }
-    let clustering = items[1..]
+    let clustering: Vec<String> = items[1..]
         .iter()
         .map(|n| n.trim().to_ascii_lowercase())
         .collect();
     if partition.is_empty() {
         return Err(format!("PRIMARY KEY with no partition column: `{spec}`"));
+    }
+    // A repeated key component would be transcribed into the case's `pk`/`ck` and
+    // then read TWICE per row when the row key is built, so the same value would
+    // appear twice in the pairing key and once in the golden's key array — a key
+    // arity mismatch attributed to the golden rather than to the DDL.
+    let mut seen: Vec<&String> = Vec::new();
+    for name in partition.iter().chain(clustering.iter()) {
+        if seen.contains(&name) {
+            return Err(format!(
+                "PRIMARY KEY names `{name}` more than once: `{spec}`"
+            ));
+        }
+        seen.push(name);
     }
     Ok((partition, clustering))
 }
@@ -764,6 +812,63 @@ CREATE TABLE IF NOT EXISTS inline (
         let ddl = "CREATE TABLE t (id int PRIMARY KEY, v mystery_type);";
         let why = from_ddl(ddl, "t").expect_err("an undeclared type must not parse");
         assert!(why.contains("mystery_type"), "{why}");
+    }
+
+    /// A REPEATED declaration is refused rather than silently resolved by
+    /// declaration order (issue #1491, the silent-overwrite sweep).
+    ///
+    /// Each of these four used to be accepted, and each made the compared column
+    /// set or a compared TYPE a function of where a name appeared in the file:
+    /// a second `CREATE TYPE` overwrote the first (so tables declared before and
+    /// after it saw different field lists); a repeated column was kept twice and
+    /// compared twice while `TableSchema::column` resolved its type from the FIRST
+    /// declaration; a repeated UDT field's type was likewise resolved first-wins;
+    /// and a repeated PRIMARY KEY component would be read twice per row while the
+    /// golden's key array carried it once.
+    #[test]
+    fn a_repeated_declaration_is_refused_not_resolved_by_order() {
+        let cases: &[(&str, &str, &str)] = &[
+            (
+                "duplicate CREATE TYPE",
+                "CREATE TYPE a (f text); CREATE TYPE a (f int); \
+                 CREATE TABLE t (id int PRIMARY KEY, v frozen<a>);",
+                "declared more than once",
+            ),
+            (
+                "duplicate column",
+                "CREATE TABLE t (id int PRIMARY KEY, v text, v int);",
+                "column `v` more than once",
+            ),
+            (
+                "duplicate UDT field",
+                "CREATE TYPE a (f text, f int); \
+                 CREATE TABLE t (id int PRIMARY KEY, v frozen<a>);",
+                "field `f` is declared more than once",
+            ),
+            (
+                "duplicate PRIMARY KEY component",
+                "CREATE TABLE t (pk int, ck int, PRIMARY KEY (pk, ck, pk));",
+                "names `pk` more than once",
+            ),
+        ];
+        for (what, ddl, expected) in cases {
+            let why = from_ddl(ddl, "t")
+                .map(|s| s.column_names().join(","))
+                .expect_err(&format!("{what} must be refused"));
+            assert!(
+                why.contains(expected),
+                "{what}: the refusal must name what repeated: {why}"
+            );
+        }
+        // The distinct forms of all four are the ordinary shape, so each rule is
+        // about the REPETITION and not about the reader.
+        let ok = "CREATE TYPE a (f text, g int); CREATE TYPE b (h text); \
+                  CREATE TABLE t (pk int, ck int, v frozen<a>, w frozen<b>, \
+                  PRIMARY KEY (pk, ck));";
+        let schema = from_ddl(ok, "t").expect("distinct declarations parse");
+        assert_eq!(schema.column_names(), vec!["pk", "ck", "v", "w"]);
+        assert_eq!(schema.partition_key, vec!["pk"]);
+        assert_eq!(schema.clustering, vec!["ck"]);
     }
 
     #[test]
