@@ -28,12 +28,42 @@ STAGE_LINE="fmt:" # representative stage line from the selftest block
 
 PASS=0
 FAIL=0
+# Assertions that could not run because the HOST lacks a tool (not because anything is
+# wrong). Counted, because ASSERT_FLOOR is a hand-maintained lower bound on how many
+# assertions ran: a declared tooling skip shrinks the runnable set, so comparing the
+# floor against PASS ALONE reds a legitimately-configured box for taking the skip path
+# the check itself offers (issue #1465 round 11, roborev U1 — the gate deliberately
+# supports a node-less host, where node-bindings SKIPs loudly). The floor is therefore
+# compared against PASS + SKIPPED_TOOLING, which keeps it a real floor on hosts that
+# have everything while never punishing one that does not.
+#
+# ACCOUNTING MUST BE 1:1, AND FOUR PRE-EXISTING SITES WERE NOT (rounds 13-14, X2/Y1/Y2).
+# This paragraph has now been wrong twice — it once claimed the sites were "covered", and
+# then that there were two of them — so the numbers below are the MEASURED ones and every
+# claim is checkable from a single run:
+#   * 1699-r18-diff-*                  2 verdicts (one per PARSER_DIFF_SPEC_ROWS row), 1 skip
+#   * 1699-r32-preflight-behaviour[*]  9 verdicts (one per R32_WANT_CASES entry),       1 skip
+#   * perf-host                        2 verdicts (token + accelerators line),          1 skip
+#   * 1699-featoracle-{behaviour,       2 verdicts inside the cargo-guarded branch,  0 — a
+#     complement}                      bare `echo "SKIP …"` that incremented nothing at
+#                                      all. (The `1699-featoracle-*` PREFIX covers six
+#                                      verdicts; the other four — dev, extract, nometa,
+#                                      scoped — are outside that branch and unaffected.)
+# All four now loop the SAME declared list their run branch iterates (r18/r32 are 1:1 BY
+# CONSTRUCTION for that reason), so displacement is 1:1 rather than hand-kept.
+#
+# MEASURED, EIGHT HOST SHAPES, each forced SEPARATELY (conflating two capabilities in one
+# run is what hid the featoracle site):
+#   everything present 401+0 | jq-less 399+2 | cargo-less 397+4 | python3-less 390+11
+#   node-less 400+1 | Darwin 399+2 | masked /proc 399+2 | offline registry 399+2
+# accounted == 401 in every one of the eight.
+SKIPPED_TOOLING=0
 ok()   { printf 'ok   - %s\n' "$1"; PASS=$((PASS + 1)); }
 bad()  { printf 'FAIL - %s\n' "$1"; FAIL=$((FAIL + 1)); }
 # A case whose PROPERTY IS UNOBSERVABLE on this box (a Linux-only kernel control on
 # Darwin, an unreadable /proc entry) is reported as a SKIP — counted in neither total,
 # so it can never be mistaken for a passing assertion (issue #3249 AC3).
-skipped() { printf 'skip - %s\n' "$1"; }
+skipped() { printf 'skip - %s\n' "$1"; SKIPPED_TOOLING=$((SKIPPED_TOOLING + 1)); }
 
 # assert_complete <label> <file>: file must contain start marker, end marker,
 # RESULT line, and a representative stage line.
@@ -1109,10 +1139,17 @@ done
 perf_host_par_f=/proc/sys/kernel/perf_event_paranoid
 perf_host_kptr_f=/proc/sys/kernel/kptr_restrict
 perf_host_os=$(uname -s 2>/dev/null || echo unknown)
+# TWO skips per skip branch, because the run branch below emits TWO verdicts (the
+# perf-token assert and the accelerators-line assert). A single skip for a two-verdict
+# section under-accounts by one, which at an exact ASSERT_FLOOR is a FALSE RED on Darwin
+# or on a hardened box where /proc/sys/kernel/{perf_event_paranoid,kptr_restrict} is
+# masked (issue #1465 round 14, Y1). Same 1:1 rule as the r18/r32/featoracle sites.
 if [ "$perf_host_os" != Linux ]; then
-  skipped "perf-host: host is $perf_host_os, not Linux — perf_event_paranoid/kptr_restrict are Linux controls (9f-darwin covers the no-token contract)"
+  skipped "perf-host[token]: host is $perf_host_os, not Linux — perf_event_paranoid/kptr_restrict are Linux controls (9f-darwin covers the no-token contract)"
+  skipped "perf-host[accelerators-line]: host is $perf_host_os, not Linux — the derived-token accelerators line was NOT verified here"
 elif [ ! -r "$perf_host_par_f" ] || [ ! -r "$perf_host_kptr_f" ]; then
-  skipped "perf-host: $perf_host_par_f / $perf_host_kptr_f unreadable on this box — no real state to derive an expectation from"
+  skipped "perf-host[token]: $perf_host_par_f / $perf_host_kptr_f unreadable on this box — no real state to derive an expectation from"
+  skipped "perf-host[accelerators-line]: $perf_host_par_f / $perf_host_kptr_f unreadable — the derived-token accelerators line was NOT verified here"
 else
   perf_host_par=$(tr -d '[:space:]' <"$perf_host_par_f")
   perf_host_kptr=$(tr -d '[:space:]' <"$perf_host_kptr_f")
@@ -2040,7 +2077,11 @@ else
     . "$rpf_body"
     rpf_out=$(_resolved_package_features cqlite-core --features legacy-heuristics 2>/dev/null || true)
     if [ -z "$rpf_out" ]; then
-      echo "SKIP - 1699-featoracle-behaviour: cargo present but the resolve returned nothing (offline registry?) — NOT verified here"
+      # Routed through skipped(), ONCE PER DISPLACED VERDICT (Y2): this branch skips both
+      # the behaviour and the complement assert, and a bare `echo` incremented nothing at
+      # all — invisible to the accounting rather than merely miscounted.
+      skipped "1699-featoracle-behaviour: cargo present but the resolve returned nothing (offline registry?) — NOT verified here"
+      skipped "1699-featoracle-complement: cargo present but the resolve returned nothing (offline registry?) — NOT verified here"
     else
       _leaked=""
       for _f in parquet cli-helpers arrow arrow-shape-corpus producer-fault-injection; do
@@ -2064,7 +2105,8 @@ else
       fi
     fi
   else
-    echo "SKIP - 1699-featoracle-behaviour: cargo not available — the dependent-only-feature regression was NOT verified here"
+    skipped "1699-featoracle-behaviour: cargo not available — the dependent-only-feature regression was NOT verified here"
+    skipped "1699-featoracle-complement: cargo not available — the enabled-feature complement was NOT verified here"
   fi
 fi
 
@@ -3003,6 +3045,12 @@ done
 # whoever wrote it already thought of, and the round-7/10/13 findings were all about
 # target shapes nobody had thought of (manifest-gated, directory-style, `test = false`,
 # required-features-excluded, explicitly path-mapped).
+# The spec rows live in ONE variable consumed by BOTH branches (round 13, X2): the skip
+# path must emit one `skipped` per verdict it DISPLACES, or ASSERT_FLOOR — a count of
+# accounted assertions — reds a host that merely lacks jq/cargo. Deriving the skip from the
+# same list keeps the accounting 1:1 by construction rather than by a hand-kept number.
+PARSER_DIFF_SPEC_ROWS='_package_unittest_srcs|cqlite-flight|lib,bin
+_package_test_targets_gated|cqlite-core|legacy-heuristics'
 if command -v jq >/dev/null 2>&1 && command -v python3 >/dev/null 2>&1 && command -v cargo >/dev/null 2>&1; then
   repo_root_=$(cd "$SCRIPT_DIR/../.." && pwd)
   while IFS='|' read -r fn_ a1_ a2_; do
@@ -3034,12 +3082,18 @@ if command -v jq >/dev/null 2>&1 && command -v python3 >/dev/null 2>&1 && comman
     else
       bad "1699-r18-diff-$fn_: the jq PORT and the python ORIGINAL DISAGREE — one of the two lanes derives a different subject set depending on which parser the host has: $(diff "$py_out_" "$jq_out_" 2>/dev/null | head -4 | tr '\n' ' ')"
     fi
-  done <<'PARSER_DIFF_SPECS'
-_package_unittest_srcs|cqlite-flight|lib,bin
-_package_test_targets_gated|cqlite-core|legacy-heuristics
-PARSER_DIFF_SPECS
+  done <<EOF_PARSER_DIFF_SPECS
+$PARSER_DIFF_SPEC_ROWS
+EOF_PARSER_DIFF_SPECS
 else
-  skipped "1699-r18-diff: needs jq + python3 + cargo on this host — the two metadata parsers were NOT differentially compared here"
+  # ONE skip per DISPLACED verdict, over the same rows the branch above would have
+  # iterated (X2): a single skip for a two-verdict section under-accounts by one.
+  while IFS='|' read -r fn_ _a1_ _a2_; do
+    [ -n "$fn_" ] || continue
+    skipped "1699-r18-diff-$fn_: needs jq + python3 + cargo on this host — this parser pair was NOT differentially compared here"
+  done <<EOF_PARSER_DIFF_SKIP
+$PARSER_DIFF_SPEC_ROWS
+EOF_PARSER_DIFF_SKIP
 fi
 
 # roborev round-18 (Low): the cli-tests component cleaned its two logs but not the
@@ -3535,8 +3589,25 @@ fi
 #
 # The preflight block is extracted from the gate and run against doctored corpus roots, with the few
 # variables it touches stubbed. No cargo, no gate slot, sub-second.
+# Same 1:1 accounting rule as the r18 differential above (round 13, X2): this section
+# emits NINE verdicts, so its skip path must emit nine. The case list is declared once and
+# consumed by both branches.
+R32_WANT_CASES='CASE good: PASS
+CASE second_incomplete: FAIL-CLOSED
+CASE prefix_file: FAIL-CLOSED
+CASE dangling_symlink: FAIL-CLOSED
+CASE nullglob: FAIL-CLOSED
+CASE nullglob_good: PASS
+CASE valid_dir_symlink: PASS
+CASE base_is_symlink: PASS
+CASE no_match: FAIL-CLOSED'
 if ! command -v python3 >/dev/null 2>&1; then
-  skipped "1699-r32-preflight-behaviour: needs python3 — NOT verified here"
+  while IFS= read -r _r32skip_; do
+    [ -n "$_r32skip_" ] || continue
+    skipped "1699-r32-preflight-behaviour[${_r32skip_%%:*}]: needs python3 — NOT verified here"
+  done <<EOF_R32_SKIP
+$R32_WANT_CASES
+EOF_R32_SKIP
 else
   pf_report_="$tmp/1699-r32-pf.txt"
   python3 - "$GATE" "$tmp" > "$pf_report_" 2>&1 <<'PF_PY'
@@ -3624,13 +3695,16 @@ none = os.path.join(tmp, "pf-none"); os.makedirs(os.path.join(none, "sstables/te
 out = run(none)
 print("CASE no_match:", "FAIL-CLOSED" if ("FAIL-CLOSED" in out and "NOTHING matches" in out) else "MISSED")
 PF_PY
-  for want_ in "CASE good: PASS" "CASE second_incomplete: FAIL-CLOSED" "CASE prefix_file: FAIL-CLOSED" "CASE dangling_symlink: FAIL-CLOSED" "CASE nullglob: FAIL-CLOSED" "CASE nullglob_good: PASS" "CASE valid_dir_symlink: PASS" "CASE base_is_symlink: PASS" "CASE no_match: FAIL-CLOSED"; do
+  while IFS= read -r want_; do
+    [ -n "$want_" ] || continue
     if grep -qF "$want_" "$pf_report_"; then
       ok "1699-r32-preflight-behaviour[${want_%%:*}]: ${want_#*: }"
     else
       bad "1699-r32-preflight-behaviour[${want_%%:*}]: expected '${want_#*: }' — got: $(grep -F "${want_%%:*}" "$pf_report_" | head -1)"
     fi
-  done
+  done <<EOF_R32_CASES
+$R32_WANT_CASES
+EOF_R32_CASES
 fi
 
 # The harness must not compile into a predictable shared directory (round-30, Medium): concurrent
@@ -4400,11 +4474,391 @@ else
   ok "1699-pol-census: the census states how many targets are excusable, out of how many, and the one shape that earns it"
 fi
 
-ASSERT_FLOOR=382
-if [ "$PASS" -lt "$ASSERT_FLOOR" ]; then
-  echo "FAIL - assert-floor: only $PASS assertions ran, floor is $ASSERT_FLOOR. Sections are being SKIPPED or dying silently (an extraction that broke, a subshell aborting under set -u), and 'failed: 0' over a shrunken subject set is exactly the vacuous pass this suite tests for."
+# ============================================================================
+# ISSUE #1465 (recomposed onto #3522): node-bindings runs the WHOLE jest suite, and the
+# leak budgets are AFFIRMED BY NAME from that run's own --json report. There is no
+# lane-level dataset decision any more — #3522's component-level opt-out SKIP is the
+# sole gate — so what needs covering here is the NOTE VOCABULARY (the SUMMARY's only
+# statement about whether the budgets ran) and the gate's expected-budget-test list.
+#
+# Why the note TEXT and not an exit code: every state exits 0 or 1 for reasons that do
+# not distinguish them, so a pass/fail assertion cannot tell them apart — the same "a
+# bare red is not evidence" rule the rest of this suite is built on.
+# ============================================================================
+
+# 1465a. The affirmation helper must be WIRED to the component, and it must read the
+#        report #3522 already writes rather than running jest a second time. Both are
+#        source facts, asserted structurally: a second executor is exactly what the
+#        recomposition removed, and a future edit that reintroduces one should red here.
+nll_fn=$(sed -n '/^_node_leak_lane_affirm() {/,/^}$/p' "$GATE")
+nll_component=$(sed -n '/^run_node_bindings() {/,/^}$/p' "$GATE")
+if [ -n "$nll_fn" ] \
+   && ! printf '%s' "$nll_fn" | grep -qE 'npm (run )?test' \
+   && printf '%s' "$nll_component" | grep -q '_node_leak_lane_affirm "$(_node_leak_lane_note_file)" "$suite_json"' \
+   && [ "$(printf '%s' "$nll_component" | grep -cE '^[[:space:]]*npm (run )?test( |$)')" -eq 1 ]; then
+  ok "1465-one-executor: the affirmation is wired to the component, runs no jest itself, and node-bindings invokes npm test exactly once"
+else
+  bad "1465-one-executor: affirmation missing/unwired, or it runs its own jest, or npm test is invoked more than once"
+  printf '%s' "$nll_component" | grep -n 'npm test\|_node_leak_lane_affirm' | sed 's/^/    /'
+fi
+
+# 1465b. Every early return between the pessimistic pre-write and the affirmation must
+#        leave a note that does NOT claim the budgets ran. Asserted on the component's
+#        source: the pre-write precedes STEP 1, and the only state that says RAN is
+#        written by the affirmation.
+nll_prewrite=$(printf '%s\n' "$nll_component" | grep -n '_node_leak_lane_note NOT-REACHED' | cut -d: -f1 | head -1)
+nll_step1=$(printf '%s\n' "$nll_component" | grep -n 'STEP 1 — install' | cut -d: -f1 | head -1)
+nll_ran_writers=$(printf '%s\n' "$nll_component" | grep -c '_node_leak_lane_note RUN' || true)
+if [ -n "$nll_prewrite" ] && [ -n "$nll_step1" ] && [ "$nll_prewrite" -lt "$nll_step1" ] \
+   && [ "$nll_ran_writers" -eq 0 ]; then
+  ok "1465-pessimistic-first: NOT-REACHED is written before STEP 1 and nothing in the component writes RAN except the affirmation"
+else
+  bad "1465-pessimistic-first: prewrite=$nll_prewrite step1=$nll_step1 in-component RAN writers=$nll_ran_writers"
+fi
+
+# 1465c. The component-level dataset SKIP must declare the leak-lane state, or a skipped
+#        component leaves NO `node-bindings-leak-lane:` line and "no line" becomes
+#        ambiguous between "it ran" and "this gate predates the line".
+if printf '%s' "$nll_component" | grep -q '_node_leak_lane_note SKIP-OPTOUT'; then
+  ok "1465-skip-declares: the #3522 opt-out SKIP branch writes the SKIP-OPTOUT note"
+else
+  bad "1465-skip-declares: the opt-out SKIP branch does not declare the leak-lane state"
+fi
+
+# 1465g. THE AFFIRMATION ITSELF, driven with SYNTHETIC jest reports (round 10, roborev
+#        R2). The recomposition pointed the affirmation at the WHOLE-SUITE report, which
+#        widened the title namespace from one file to 28 — so a same-titled `passed` test
+#        in another suite could satisfy it for a leak test that was skipped, and a
+#        duplicate title inside the leak suite collapsed to one Map key and could not be
+#        seen as an extra either. Both were verified to PASS against the pre-fix code.
+#
+#        Synthetic reports are the right oracle: the adversarial shapes can be written
+#        directly instead of hoping a real run produces them. The SHIPPED function is
+#        extracted and driven — no re-implementation.
+if ! command -v node >/dev/null 2>&1; then
+  skipped "1465-affirm-synthetic: needs node — NOT verified here"
+else
+  nll_syn_dir="$tmp/1465-affirm"
+  mkdir -p "$nll_syn_dir"
+  nll_b1="repeated query rejections stay under the leak budget"
+  nll_b2="abandoned streaming iterators stay under the leak budget"
+  # Repo-relative paths, because the affirmation anchors on
+  # `/bindings/node/__test__/leak-paths.test.js` (round 11, T1).
+  nll_leak='/x/repo/bindings/node/__test__/leak-paths.test.js'
+  nll_other='/x/repo/bindings/node/__test__/impostor.test.js'
+  nll_otherpkg='/x/other/pkg/bindings/node/__test__/leak-paths.test.js'
+  nll_unanchored='/x/repo/zzbindings/node/__test__/leak-paths.test.js'
+  # <case> <json>
+  nll_mk() { printf '%s' "$2" > "$nll_syn_dir/$1.json"; }
+  nll_mk happy "{\"testResults\":[{\"name\":\"$nll_leak\",\"assertionResults\":[{\"title\":\"$nll_b1\",\"status\":\"passed\"},{\"title\":\"$nll_b2\",\"status\":\"passed\"}]}]}"
+  nll_mk other_suite "{\"testResults\":[{\"name\":\"$nll_leak\",\"assertionResults\":[{\"title\":\"$nll_b1\",\"status\":\"pending\"},{\"title\":\"$nll_b2\",\"status\":\"passed\"}]},{\"name\":\"$nll_other\",\"assertionResults\":[{\"title\":\"$nll_b1\",\"status\":\"passed\"}]}]}"
+  nll_mk duplicate "{\"testResults\":[{\"name\":\"$nll_leak\",\"assertionResults\":[{\"title\":\"$nll_b1\",\"status\":\"pending\"},{\"title\":\"$nll_b1\",\"status\":\"passed\"},{\"title\":\"$nll_b2\",\"status\":\"passed\"}]}]}"
+  nll_mk suite_absent "{\"testResults\":[{\"name\":\"$nll_other\",\"assertionResults\":[{\"title\":\"$nll_b1\",\"status\":\"passed\"},{\"title\":\"$nll_b2\",\"status\":\"passed\"}]}]}"
+  nll_mk extra "{\"testResults\":[{\"name\":\"$nll_leak\",\"assertionResults\":[{\"title\":\"$nll_b1\",\"status\":\"passed\"},{\"title\":\"$nll_b2\",\"status\":\"passed\"},{\"title\":\"a third thing stay under the leak budget\",\"status\":\"skipped\"}]}]}"
+  # T1 shapes: a SECOND suite at the anchored path supplying passes for a real leak
+  # suite that ran nothing (J_split); a SOLE copy in another package; and an
+  # unanchored tail. All three were AFFIRMED before the fix.
+  nll_mk split "{\"testResults\":[{\"name\":\"$nll_leak\",\"assertionResults\":[]},{\"name\":\"$nll_otherpkg\",\"assertionResults\":[{\"title\":\"$nll_b1\",\"status\":\"passed\"},{\"title\":\"$nll_b2\",\"status\":\"passed\"}]}]}"
+  nll_mk impostor_pkg "{\"testResults\":[{\"name\":\"/x/other/pkg/__test__/leak-paths.test.js\",\"assertionResults\":[{\"title\":\"$nll_b1\",\"status\":\"passed\"},{\"title\":\"$nll_b2\",\"status\":\"passed\"}]}]}"
+  nll_mk unanchored "{\"testResults\":[{\"name\":\"$nll_unanchored\",\"assertionResults\":[{\"title\":\"$nll_b1\",\"status\":\"passed\"},{\"title\":\"$nll_b2\",\"status\":\"passed\"}]}]}"
+  nll_mk dup_suite "{\"testResults\":[{\"name\":\"$nll_leak\",\"assertionResults\":[{\"title\":\"$nll_b1\",\"status\":\"pending\"},{\"title\":\"$nll_b2\",\"status\":\"passed\"}]},{\"name\":\"$nll_leak\",\"assertionResults\":[{\"title\":\"$nll_b1\",\"status\":\"passed\"}]}]}"
+  : > "$nll_syn_dir/broken.json"
+  printf '%s' 'not json {{{' > "$nll_syn_dir/broken.json"
+
+  # <case> -> rc, via the SHIPPED function with only its declarations sourced.
+  nll_affirm_rc() {
+    local jsonf="$1" note rc
+    note=$(mktemp "$nll_syn_dir/note.XXXXXX")
+    (
+      eval "$(sed -n '/^_NODE_LEAK_BUDGET_TESTS="/,/"$/p' "$GATE")"
+      eval "$(sed -n '/^_NODE_LEAK_BUDGET_TITLE_SUFFIX=/p' "$GATE")"
+      eval "$(sed -n '/^_NODE_LEAK_SUITE_FILE=/p' "$GATE")"
+      eval "$(sed -n '/^_node_leak_lane_note() {/,/^}/p' "$GATE")"
+      eval "$(sed -n '/^_node_leak_lane_affirm() {/,/^}$/p' "$GATE")"
+      _node_leak_lane_affirm "$note" "$jsonf" >/dev/null 2>&1
+    )
+    rc=$?
+    printf '%s' "$rc"
+    rm -f "$note"
+  }
+  nll_syn_ok=1
+  # The happy path must be the ONLY one that affirms.
+  [ "$(nll_affirm_rc "$nll_syn_dir/happy.json")" = 0 ] || { nll_syn_ok=0; echo "  happy report did NOT affirm"; }
+  for _c in other_suite duplicate suite_absent extra broken missing split impostor_pkg unanchored dup_suite; do
+    _f="$nll_syn_dir/$_c.json"
+    [ "$_c" = missing ] && _f="$nll_syn_dir/does-not-exist.json"
+    if [ "$(nll_affirm_rc "$_f")" = 0 ]; then
+      nll_syn_ok=0; echo "  adversarial report '$_c' was AFFIRMED (must fail closed)"
+    fi
+  done
+  if [ "$nll_syn_ok" -eq 1 ]; then
+    ok "1465-affirm-synthetic: the affirmation accepts ONLY the happy report — a same-titled test in another suite, a duplicate title, an absent leak suite, an unexpected extra, malformed JSON, a missing file, a SPLIT report (real suite empty + another package supplying passes), a sole same-named suite in another package, an unanchored path tail and a duplicated leak suite all FAIL closed"
+  else
+    bad "1465-affirm-synthetic: the affirmation is not fail-closed on every adversarial synthetic report (see above)"
+  fi
+fi
+
+# 1465h. THE GATE OF RECORD CANNOT BE RELAXED (round 12, roborev V1). The leak budgets
+#        double when CQLITE_LEAK_BUDGET_RELAX holds its opt-in token; the predecessor
+#        keyed on `CI`, which GitHub Actions sets unconditionally, so gate.yml's nightly
+#        FULL-gate backstop ran every ceiling at 2x while presenting itself as strict.
+#        Two source properties are pinned:
+#          * node-bindings UNSETS the variable for its node invocations, so an inherited
+#            export cannot weaken it (a convention would not survive a re-used runner);
+#          * the lane's multiplier is not keyed on any ambient marker.
+#        WHAT THIS CANNOT COVER, named rather than implied: it is a source-shape check.
+#        It cannot prove the RUNTIME environment of some future invocation, and it does
+#        not evaluate the JS — the multiplier's value mapping is pinned by the lane's own
+#        pure tests ("budget relaxation is OPT-IN ...", 16 falsy spellings + the token).
+nll_comp_v1=$(sed -n '/^run_node_bindings() {/,/^}$/p' "$GATE")
+nll_leakfile_v1="$SCRIPT_DIR/../../bindings/node/__test__/leak-paths.test.js"
+nll_v1_ok=1
+printf '%s' "$nll_comp_v1" | grep -q 'leak_strict_env=(-u CQLITE_LEAK_BUDGET_RELAX)' \
+  || { nll_v1_ok=0; echo "  node-bindings does not declare the strict leak-budget env"; }
+# every `env` that launches node in this component must carry the unset array
+nll_env_launches=$(printf '%s\n' "$nll_comp_v1" | grep -cE '^[[:space:]]*if (! )?env ')
+nll_env_stripped=$(printf '%s\n' "$nll_comp_v1" | grep -c 'leak_strict_env\[@\]')
+[ "$nll_env_launches" -ge 2 ] && [ "$nll_env_stripped" -eq "$nll_env_launches" ] \
+  || { nll_v1_ok=0; echo "  $nll_env_stripped of $nll_env_launches env launches strip CQLITE_LEAK_BUDGET_RELAX"; }
+# ...AND IN THE RIGHT ORDER, which is the property presence cannot see (round 13, X1,
+# roborev High). `env` stops parsing options at the first operand, so a `-u` placed after a
+# NAME=VALUE is treated as the COMMAND: in full-gate mode `fixture_env` is
+# `CQLITE_REQUIRE_FIXTURES=1`, and `env "${fixture_env[@]}" "${leak_strict_env[@]}" …`
+# died with `env: '-u': No such file or directory` (127) on every host with node+npm —
+# while `--only`/`--lite`, where `fixture_env` is itself the `-u` pair, passed. Only an
+# order assertion distinguishes those two compositions, so this counts POSITIONS.
+nll_order_ok=1
+nll_order_seen=0
+while IFS= read -r _envline; do
+  nll_order_seen=$((nll_order_seen + 1))
+  # position of the first NAME=VALUE (or the fixture_env array, which IS an assignment in
+  # full-gate mode) vs the position of the option-bearing unset array
+  _first_assign=$(printf '%s\n' "$_envline" | tr ' ' '\n' | grep -nE '^[A-Za-z_][A-Za-z0-9_]*=|fixture_env\[@\]' | head -1 | cut -d: -f1)
+  _opt_pos=$(printf '%s\n' "$_envline" | tr ' ' '\n' | grep -nE '^-u$|^-i$|leak_strict_env\[@\]' | head -1 | cut -d: -f1)
+  if [ -n "$_first_assign" ] && [ -n "$_opt_pos" ] && [ "$_opt_pos" -gt "$_first_assign" ]; then
+    nll_order_ok=0
+    echo "  operand-order hazard: an option/unset-array at position $_opt_pos follows an assignment at $_first_assign in: $_envline"
+  fi
+done <<EOF_ORDER
+$(printf '%s\n' "$nll_comp_v1" | tr '\n' '\001' | sed 's/\\\001[[:space:]]*/ /g' | tr '\001' '\n' | grep -E '^[[:space:]]*if (! )?env ')
+EOF_ORDER
+[ "$nll_order_seen" -ge 2 ] || { nll_order_ok=0; echo "  only $nll_order_seen env launch(es) found to order-check (expected >= 2)"; }
+[ "$nll_order_ok" -eq 1 ] || nll_v1_ok=0
+if [ ! -r "$nll_leakfile_v1" ]; then
+  nll_v1_ok=0; echo "  leak lane not readable at $nll_leakfile_v1"
+else
+  # No ambient marker may DECIDE the multiplier. Mentions inside comments are fine (the
+  # file documents the defect), so only non-comment lines are inspected.
+  nll_ambient=$(grep -nE '^[[:space:]]*[^/*[:space:]].*process\.env\.(CI|GITHUB_ACTIONS|BUILDKITE|JENKINS[A-Z_]*)\b' "$nll_leakfile_v1" || true)
+  [ -z "$nll_ambient" ] || { nll_v1_ok=0; echo "  the lane keys on an ambient CI marker: $nll_ambient"; }
+  grep -q "resolveBudgetRelaxation" "$nll_leakfile_v1" \
+    || { nll_v1_ok=0; echo "  the lane has no named opt-in resolver"; }
+  # Y4: the in-lane strictness control keys on CQLITE_JEST_JSON as its "this is the gate"
+  # marker. NOTHING otherwise pins the pairing, so a rename on either side would silently
+  # turn the control into a no-op instead of reddening. Both halves asserted here.
+  printf '%s' "$nll_comp_v1" | grep -q 'CQLITE_JEST_JSON=' \
+    || { nll_v1_ok=0; echo "  node-bindings no longer EXPORTS CQLITE_JEST_JSON — the lane-side strictness control has no marker to read"; }
+  grep -q 'process\.env\.CQLITE_JEST_JSON' "$nll_leakfile_v1" \
+    || { nll_v1_ok=0; echo "  the lane no longer READS CQLITE_JEST_JSON — its gate-of-record strictness assertion cannot fire"; }
+fi
+if [ "$nll_v1_ok" -eq 1 ]; then
+  ok "1465-gate-strict: node-bindings unsets CQLITE_LEAK_BUDGET_RELAX for all $nll_env_launches node launches, every -u PRECEDES every assignment in all $nll_order_seen of them (the X1 full-gate hazard), the CQLITE_JEST_JSON marker is exported by the component AND read by the lane (so the in-lane strictness control cannot be renamed into a no-op), and the lane decides relaxation by a named opt-in rather than an ambient CI marker"
+else
+  bad "1465-gate-strict: the gate path could be relaxed by an inherited environment (see above)"
+fi
+
+# 1465d. The note vocabulary is CLOSED, single-sourced, and DISTINCT. Every state the
+#        component or the hook can write must render its own line: prefix-and-no-UNKNOWN
+#        was not enough (roborev J4) — two states rendering the SAME text would have
+#        passed, which is the uniform-output blind spot this diff has hit before. So the
+#        rendered lines are collected and counted for UNIQUENESS.
+#        All six are execution outcomes of the component, so none is reachable from a
+#        pure decision (the hook that used to offer one was deleted with the lane-level
+#        dataset gate); they are asserted here at the TEXT level, which is what stops a
+#        future state from silently falling through the UNKNOWN arm (one already did).
+nll_states="RUN SKIP-OPTOUT NO-NODE NOT-REACHED ENTERED-FAILED NO-BUDGET-AFFIRMATION"
+nll_vocab_ok=1
+nll_rendered="$tmp/1465-notes.txt"
+: >"$nll_rendered"
+nll_count=0
+for _st in $nll_states; do
+  _line=$(bash -c '. /dev/stdin <<<"$(sed -n "/^_node_leak_lane_note() {/,/^}/p" "$1")"; _node_leak_lane_note "$2"' _ "$GATE" "$_st" 2>/dev/null)
+  nll_count=$((nll_count + 1))
+  printf '%s\n' "$_line" >>"$nll_rendered"
+  case "$_line" in
+    "node-bindings-leak-lane: "*) : ;;
+    *) nll_vocab_ok=0; echo "  state '$_st' rendered: '$_line'" ;;
+  esac
+  # The FALLBACK's own signature, not the bare word: a legitimate note may say
+  # "UNKNOWN" about something it does not know (ENTERED-FAILED says execution is
+  # UNKNOWN, round 10 S3), and matching the word alone turned that into a false
+  # failure of this case.
+  case "$_line" in
+    *"UNKNOWN state '"*) nll_vocab_ok=0; echo "  state '$_st' fell through to the UNKNOWN arm" ;;
+  esac
+done
+# DISTINCTNESS (roborev J4): as many unique lines as states.
+nll_unique=$(sort -u "$nll_rendered" | wc -l | tr -d ' ')
+if [ "$nll_unique" -ne "$nll_count" ]; then
+  nll_vocab_ok=0
+  echo "  only $nll_unique unique note line(s) for $nll_count states — two states render the SAME text:"
+  sort "$nll_rendered" | uniq -d | sed 's/^/    /'
+fi
+_unknown_line=$(bash -c '. /dev/stdin <<<"$(sed -n "/^_node_leak_lane_note() {/,/^}/p" "$1")"; _node_leak_lane_note "$2"' _ "$GATE" "SOMETHING-NEW" 2>/dev/null)
+case "$_unknown_line" in
+  *"UNKNOWN state 'SOMETHING-NEW'"*) : ;;
+  *) nll_vocab_ok=0; echo "  an unrecognised state did NOT report itself: '$_unknown_line'" ;;
+esac
+if [ "$nll_vocab_ok" -eq 1 ]; then
+  ok "1465-note-vocab: all $nll_count states render a DISTINCT note ($nll_unique unique), and an unrecognised state reports itself"
+else
+  bad "1465-note-vocab: the note vocabulary is not closed/distinct (see above)"
+fi
+
+# 1465e. The two failure states must SAY what they mean and CLAIM NO MORE than they
+#        know. ENTERED-FAILED replaced a NOT-REACHED that blamed npm ci for a real
+#        budget failure, so it must distinguish itself from an earlier step — but it is
+#        inferred from an EXIT CODE, so it must NOT claim the budget tests executed:
+#        a jest harness/config/setup/loader error that ran nothing lands in the same arm
+#        (round 10, S3). NO-BUDGET-AFFIRMATION must name the affirmation rather than a
+#        test count.
+#
+#        Asserted POSITIVELY (it must state the uncertainty) and NEGATIVELY (no phrase
+#        that asserts execution), because grepping for the absence of one exact phrase
+#        would pass for any rewording that overclaims differently.
+nll_entered=$(bash -c '. /dev/stdin <<<"$(sed -n "/^_node_leak_lane_note() {/,/^}/p" "$1")"; _node_leak_lane_note ENTERED-FAILED' _ "$GATE" 2>/dev/null)
+nll_noaffirm=$(bash -c '. /dev/stdin <<<"$(sed -n "/^_node_leak_lane_note() {/,/^}/p" "$1")"; _node_leak_lane_note NO-BUDGET-AFFIRMATION' _ "$GATE" 2>/dev/null)
+nll_e_ok=1
+printf '%s' "$nll_entered" | grep -q "REACHED" || { nll_e_ok=0; echo "  ENTERED-FAILED does not say the invocation was reached"; }
+printf '%s' "$nll_entered" | grep -q "NOT an earlier" || { nll_e_ok=0; echo "  ENTERED-FAILED does not distinguish itself from an earlier step"; }
+printf '%s' "$nll_entered" | grep -qE "UNKNOWN|unknown" || { nll_e_ok=0; echo "  ENTERED-FAILED does not state that execution is UNKNOWN"; }
+# No phrase may assert that the budgets ran. Each of these would be an overclaim.
+for _bad in "DID execute" "so the leak budgets ran" "the budgets ran" "budgets executed"; do
+  if printf '%s' "$nll_entered" | grep -qF "$_bad"; then
+    nll_e_ok=0; echo "  ENTERED-FAILED overclaims execution via: '$_bad'"
+  fi
+done
+printf '%s' "$nll_noaffirm" | grep -qE "named (#1465 )?budget test" || { nll_e_ok=0; echo "  NO-BUDGET-AFFIRMATION does not name the budget tests"; }
+if [ "$nll_e_ok" -eq 1 ]; then
+  ok "1465-failure-states: ENTERED-FAILED says REACHED + execution UNKNOWN + not-an-earlier-step and asserts no execution; NO-BUDGET-AFFIRMATION names the budget tests"
+else
+  bad "1465-failure-states: the failure notes do not state their own meaning (or overclaim)"
+  echo "  ENTERED-FAILED: $nll_entered"
+  echo "  NO-BUDGET-AFFIRMATION: $nll_noaffirm"
+fi
+
+# 1465f. The expected BUDGET-TEST list the gate affirms against must be non-empty, and
+#        every name in it must appear in the lane — an expectation that drifts from the
+#        test file is how a budget test goes silently uncovered (roborev J1).
+#
+#        SCOPE, stated because the name used to promise more (round 7, N-c): the COUNT
+#        comparison enumerates the lane by the jest-title SUFFIX, so it sees a declared
+#        budget test only if it carries that suffix. A new budget test titled WITHOUT the
+#        suffix escapes this case — the runtime affirmation arm is what catches that,
+#        because a title it cannot see is a name it cannot report as passed. The
+#        enumeration is deliberately suffix-based rather than syntax-based: matching
+#        `test('`/`it('`/backticks/indentation is spelling-sensitive, and a grep that
+#        misses a legal spelling would FALSE-PASS this case.
+nll_expected=$(sed -n '/^_NODE_LEAK_BUDGET_TESTS="/,/"$/p' "$GATE" | sed '1s/^_NODE_LEAK_BUDGET_TESTS="//; $s/"$//')
+nll_expected_n=$(printf '%s\n' "$nll_expected" | grep -c . || true)
+nll_suffix=$(sed -n 's/^_NODE_LEAK_BUDGET_TITLE_SUFFIX="\(.*\)"$/\1/p' "$GATE")
+nll_leakfile="$SCRIPT_DIR/../../bindings/node/__test__/leak-paths.test.js"
+if [ ! -r "$nll_leakfile" ] || [ -z "$nll_suffix" ]; then
+  # N-d: a missing file or an unreadable suffix is a NAMED failure, not an arithmetic
+  # error from a `grep -c || echo 0` that emitted two lines.
+  bad "1465-budget-list: cannot measure — leak file readable=$([ -r "$nll_leakfile" ] && echo yes || echo no), suffix='${nll_suffix:-<empty>}'"
+else
+  # Count TITLE LINES declaring a budget test: any line that both looks like a jest
+  # test declaration (a quoted title followed by a comma) and ends its title with the
+  # suffix. Quote-agnostic ('", `) and indentation-agnostic.
+  nll_actual_n=$(grep -cE "^[[:space:]]*(test|it)\(([\"'\`])[^\"'\`]*${nll_suffix}\2" "$nll_leakfile" || true)
+  nll_missing=0
+  while IFS= read -r _name; do
+    [ -n "$_name" ] || continue
+    grep -qF "$_name" "$nll_leakfile" || { nll_missing=1; echo "  expected budget test not found in the lane: '$_name'"; }
+  done <<<"$nll_expected"
+  if [ "$nll_expected_n" -ge 2 ] && [ "$nll_missing" -eq 0 ] && [ "$nll_expected_n" -eq "$nll_actual_n" ]; then
+    ok "1465-budget-list: the gate expects $nll_expected_n named budget test(s), all present in the lane, and the lane declares exactly that many SUFFIX-BEARING budget tests"
+  else
+    bad "1465-budget-list: expected=$nll_expected_n suffix-bearing-in-lane=$nll_actual_n missing=$nll_missing"
+  fi
+fi
+
+# Y3 (round 14): a skip announced with a bare `echo` is INVISIBLE to SKIPPED_TOOLING, and
+# that is how the featoracle sites (Y2) went unaccounted — two displaced verdicts that
+# incremented nothing. This guard scans THIS FILE for any SKIP announcement that does not
+# go through `skipped()`.
+#
+# WHAT IT CANNOT COVER, stated so nobody reads it as covering both halves: it checks the
+# ROUTE, never the COUNT. A site that calls `skipped()` ONCE while its run branch emits
+# nine verdicts (the r32 shape) is invisible here — that is the Y1/Y2 class, and no static
+# check can see it, because the displaced count is a property of the branch not taken.
+# Comment lines are excluded (this paragraph names the pattern it forbids).
+self_src_="$SCRIPT_DIR/$(basename "$0")"
+if [ ! -r "$self_src_" ]; then
+  bad "skip-routing: cannot read $self_src_ to verify that no SKIP announcement bypasses skipped()"
+else
+  bypass_=$(grep -nE '^[^#]*(echo|printf)[^|]*"[[:space:]]*(SKIP|skip)[[:space:]-]' "$self_src_" \
+            | grep -v 'skipped()' || true)
+  if [ -z "$bypass_" ]; then
+    ok "skip-routing: every SKIP announcement in this suite goes through skipped() (route only — it cannot check that a site's skip COUNT matches its run-branch verdict count)"
+  else
+    bad "skip-routing: SKIP announced without skipped(), so SKIPPED_TOOLING misses it and ASSERT_FLOOR reds a legitimate host: $bypass_"
+  fi
+fi
+
+# TOLERANT BY DELIBERATE CHOICE, not by neglect (issue #1465 round 14 — the FALLBACK the
+# coordination lead authorised, taken on the evidence below).
+#
+# The measured `accounted` on a fully-equipped host is 401, and the accounting is 1:1
+# across EIGHT separately-forced host shapes (everything-present, jq-less, cargo-less,
+# python3-less, node-less, Darwin, masked /proc, offline cargo registry — each measured
+# individually at 401; the per-shape numbers are in the invariant header above). An EXACT
+# floor of 401 would nonetheless be a hair-trigger: it reds on any skip site that displaces
+# more than one verdict, and three rounds of enumeration found FOUR such sites
+# (1699-r18-diff, 1699-r32-preflight-behaviour, perf-host,
+# 1699-featoracle-{behaviour,complement}) — two of them
+# only after two prior enumerations had declared the set complete. The scans that back a
+# completeness claim are heuristics (bounded lookahead, regex shapes), the skip-routing
+# guard above checks the ROUTE and explicitly not the COUNT, and no static check can see a
+# count that lives in the branch not taken.
+#
+# So the floor is `measured - largest single displacement` = 401 - 9 (the r32 section's
+# nine want_ cases).
+#
+# WHAT 392 ACTUALLY DETECTS — the BOUND, measured, not the aspiration (round 15, F2; an
+# earlier version of this paragraph claimed it "still catches a whole section dying
+# silently", and that was FALSE): a real run emits 401 verdicts across 269 distinct
+# labelled sections, and the LARGEST section is exactly 9 (1699-r32-preflight-behaviour;
+# next are py-route 8, then several at 6). The slack IS 9, so **no single section is
+# covered — not even the largest**. 392 detects only a loss of >= 10 verdicts, i.e. a
+# MULTI-SECTION disappearance. Single-section detection is deferred to issue #3611.
+#
+# WHY THE TRADE IS STILL RIGHT, given that bound:
+#   * a mid-file abort (the `set -u`/extraction-failure shape this floor was written for)
+#     exits NON-ZERO and reds through the exit status, before the floor block is reached —
+#     the floor was never the only guard against it;
+#   * nearly every section carries its OWN fail-closed guard for the same failure
+#     (`bad "…-scope: could not extract …"`), which reds with a named cause rather than as
+#     an arithmetic shortfall;
+#   * the base rate of undiscovered non-1:1 sites is demonstrably non-zero (four found,
+#     two of them post-"complete"), so an exact floor buys <=9-verdict detection at the
+#     price of a FALSE RED on a legitimately-configured host — which this repo's doctrine
+#     calls the worse failure ("a lane that reds on correct input is the lane people learn
+#     to waive").
+# The durable contribution here is the SKIPPED_TOOLING accounting and the four 1:1 fixes,
+# not the number. #3611 carries the enumeration, the four defects, the eight host shapes,
+# and a better derivation than an exact count (a floor on the number of distinct verdict
+# LABELS observed, which is structurally immune to the displacement problem).
+ASSERT_FLOOR=392
+# PASS + SKIPPED_TOOLING, not PASS alone: a DECLARED tooling skip is accounted for
+# rather than counted against the floor (see SKIPPED_TOOLING). A section that dies
+# silently still reds, because a dead section increments neither counter.
+ASSERT_ACCOUNTED=$((PASS + SKIPPED_TOOLING))
+if [ "$ASSERT_ACCOUNTED" -lt "$ASSERT_FLOOR" ]; then
+  echo "FAIL - assert-floor: only $ASSERT_ACCOUNTED accounted assertions ($PASS passed + $SKIPPED_TOOLING declared tooling skips), floor is $ASSERT_FLOOR. Sections are being SKIPPED or dying silently (an extraction that broke, a subshell aborting under set -u), and 'failed: 0' over a shrunken subject set is exactly the vacuous pass this suite tests for."
   FAIL=$((FAIL + 1))
 fi
 echo "----"
-echo "passed: $PASS  failed: $FAIL"
+echo "passed: $PASS  failed: $FAIL  skipped(tooling): $SKIPPED_TOOLING  accounted: $ASSERT_ACCOUNTED (floor $ASSERT_FLOOR)"
 [ "$FAIL" -eq 0 ]
