@@ -886,6 +886,21 @@ impl WriteEngine {
         // 1. Append to WAL (durability) — skipped when Durability::Disabled
         if self.config.durability == Durability::SyncEachWrite {
             self.wal.append(&mutation)?;
+            // The append ALREADY GREW the WAL (`append` advances the tracked size
+            // before returning), so the gauge is published HERE, immediately, and
+            // not only at the end of a fully successful mutation (issue #1707,
+            // roborev job 149). Everything after this line can fail — the `sync`
+            // below, the decorated-key computation, the memtable insert — and every
+            // one of those returns EARLY, leaving the bytes on disk and, before
+            // this call, the gauge frozen at its pre-append value for as long as
+            // the failure persisted. That is precisely the moment an operator is
+            // looking at it: a full disk or a failing fsync makes the WAL grow
+            // while `cqlite.wal.size` reports it flat. This emission does NOT
+            // replace the post-mutation `record_size_gauges()` below (which pairs
+            // WAL and memtable readings at one instant), the post-flush truncate
+            // emission, or the open-time one — all four sites are needed; see
+            // [`wal_gauges`].
+            self.record_wal_gauges();
             self.wal.sync()?;
         }
 
@@ -1000,6 +1015,21 @@ impl WriteEngine {
         // 1. Append to WAL (durability) — skipped when Durability::Disabled
         if self.config.durability == Durability::SyncEachWrite {
             self.wal.append(&mutation)?;
+            // The append ALREADY GREW the WAL (`append` advances the tracked size
+            // before returning), so the gauge is published HERE, immediately, and
+            // not only at the end of a fully successful mutation (issue #1707,
+            // roborev job 149). Everything after this line can fail — the `sync`
+            // below, the decorated-key computation, the memtable insert — and every
+            // one of those returns EARLY, leaving the bytes on disk and, before
+            // this call, the gauge frozen at its pre-append value for as long as
+            // the failure persisted. That is precisely the moment an operator is
+            // looking at it: a full disk or a failing fsync makes the WAL grow
+            // while `cqlite.wal.size` reports it flat. This emission does NOT
+            // replace the post-mutation `record_size_gauges()` below (which pairs
+            // WAL and memtable readings at one instant), the post-flush truncate
+            // emission, or the open-time one — all four sites are needed; see
+            // [`wal_gauges`].
+            self.record_wal_gauges();
             self.wal.sync()?;
         }
 
@@ -1032,8 +1062,11 @@ impl WriteEngine {
     }
 
     /// Emit BOTH engine size gauges — memtable (issue #1036) and WAL (issue #1707) —
-    /// at one instant. Called at all THREE write/flush seams; see [`wal_gauges`] for
-    /// why the pairing is what keeps either from going missing on a path.
+    /// at one instant. Called at all THREE post-mutation write/flush seams; see
+    /// [`wal_gauges`] for why the pairing is what keeps either from going missing on
+    /// a path. The WAL half is ALSO emitted on its own immediately after each
+    /// successful `wal.append()`, because a mutation that fails AFTER the append
+    /// never reaches this pairing and would otherwise freeze the gauge.
     fn record_size_gauges(&self) {
         self.record_memtable_gauges();
         self.record_wal_gauges();

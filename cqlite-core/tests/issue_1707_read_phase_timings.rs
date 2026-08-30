@@ -797,6 +797,102 @@ mod wal_gauges {
 
         drop(engine);
     }
+
+    /// A mutation that fails AFTER its WAL append still grew the WAL, so the gauge
+    /// must report the GROWN size — not the pre-append value (issue #1707, roborev
+    /// job 149).
+    ///
+    /// # Why this is the case that matters
+    ///
+    /// `cqlite.wal.size` used to be recorded only once the WHOLE mutation succeeded.
+    /// But `wal.append()` is the FIRST step and it advances the tracked size before
+    /// returning; the fsync, the decorated-key computation and the memtable insert
+    /// all come after it and all return EARLY on failure. So every post-append
+    /// failure left bytes on disk and the gauge frozen at its previous value — for
+    /// as long as the failure persisted. That is exactly when an operator is looking
+    /// at it: a filling disk or a failing fsync made the WAL grow while the metric
+    /// reported it flat. The gauge was at its most wrong during the incident it
+    /// exists for.
+    ///
+    /// # How the post-append failure is forced, with NO contrived seam
+    ///
+    /// The engine already fails after the append on any mutation whose partition key
+    /// cannot be serialized against the schema. A key with a component count the
+    /// schema does not have is rejected by `PartitionKey::to_bytes` — reached from
+    /// step 2, `mutation.decorated_key(...)`, which runs AFTER step 1's append+sync.
+    /// Nothing test-only is injected: this is a real error path a real caller can
+    /// hit with a mis-built mutation. (A sync/IO failure would exercise the same
+    /// property one step earlier and needs a filesystem fault injector the crate
+    /// does not have.)
+    #[test]
+    #[serial_test::serial(read_metrics)]
+    fn a_write_that_fails_after_the_wal_append_reports_the_grown_wal_size() {
+        let mc = testing::metrics_capture();
+        let tmp = tempfile::TempDir::new().expect("tmp");
+        let cfg = WriteEngineConfig::new(tmp.path().join("data"), tmp.path().join("wal"), schema());
+        let mut engine = WriteEngine::new(cfg).expect("engine");
+
+        // A successful write first, so the "before" level is non-zero and the
+        // assertion below cannot be satisfied by an empty-WAL coincidence.
+        engine.write(mutation(1, "one")).expect("first write");
+        let before = engine.wal_size();
+        assert!(before > 0, "the fixture must leave a non-empty WAL");
+
+        // A mutation whose partition key has TWO components against a ONE-component
+        // schema: serializes into the WAL fine, then fails at the decorated-key step.
+        mc.reset();
+        let bad = Mutation::new(
+            WriteTableId::new("obs1707", "rows"),
+            PartitionKey::new(vec![
+                ("id".to_string(), Value::Integer(2)),
+                ("ghost".to_string(), Value::Integer(3)),
+            ]),
+            None,
+            vec![CellOperation::Write {
+                column: "name".to_string(),
+                value: Value::text("two".to_string()),
+            }],
+            T0,
+            None,
+        );
+        let err = engine
+            .write(bad)
+            .expect_err("a partition key the schema cannot serialize must be rejected");
+        let after = engine.wal_size();
+        let metrics = mc.flush_and_collect();
+
+        // The premise: the failure really did happen AFTER the append.
+        assert!(
+            after > before,
+            "this case is only meaningful if the failed write GREW the WAL \
+             (before={before}, after={after}); the rejection was {err}"
+        );
+
+        let reported = last_gauge_value(&metrics, catalog::WAL_SIZE).unwrap_or_else(|| {
+            panic!(
+                "a write that appended to the WAL and then failed must still report \
+                 cqlite.wal.size — the bytes are on disk and the operator is looking \
+                 at this gauge precisely while writes are failing; collected \
+                 metrics: {:?}",
+                metric_names(&metrics)
+            )
+        });
+        assert_eq!(
+            reported,
+            after as f64,
+            "the reported level must be the GROWN size the engine now tracks, not the \
+             pre-append value it would have been frozen at; points: {:?}",
+            metrics.find(catalog::WAL_SIZE).map(|m| &m.points)
+        );
+        assert!(
+            reported > before as f64,
+            "and it must be strictly above the pre-append level ({before}) — reporting \
+             the old value during a failing write is the defect this pins; points: {:?}",
+            metrics.find(catalog::WAL_SIZE).map(|m| &m.points)
+        );
+
+        drop(engine);
+    }
 }
 
 /// The MERGE phase, which is recorded only on the CROSS-GENERATION read route — so

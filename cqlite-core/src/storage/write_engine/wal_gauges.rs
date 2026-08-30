@@ -5,8 +5,8 @@
 //!
 //! * [`record_wal_size`] — the size the [`super::wal::WriteAheadLog`] TRACKS, emitted
 //!   at the same post-write seam as the memtable gauges so "memtable growing / WAL
-//!   growing" are two readings taken at one instant, AND once at engine open (see
-//!   below);
+//!   growing" are two readings taken at one instant, AND immediately after every
+//!   successful WAL append (see below), AND once at engine open (see below);
 //! * [`record_wal_recovery_duration`] — how long WAL recovery at engine open took.
 //!
 //! A sibling file, not more lines in `mod.rs`, per the campsite rule (#1116): that
@@ -28,6 +28,21 @@
 //! as "flushes are not keeping up", so a flush that worked perfectly manufactured an
 //! alarm. The healthy shape the doc promises is a saw-tooth, and the post-truncate
 //! emission is the falling edge of it.
+//!
+//! # Why the size is ALSO emitted immediately after every successful append
+//!
+//! The paired seam runs only after the WHOLE mutation succeeds, and the append is
+//! the FIRST of its steps: `wal.append()` advances the tracked size and returns, and
+//! then the fsync, the decorated-key computation and the memtable insert can each
+//! fail and return early. The WAL grew; the gauge did not move — and it stayed
+//! unmoved for as long as the failure persisted, which is exactly when an operator
+//! is watching it (issue #1707, roborev job 149). A disk filling up or an fsync
+//! erroring made `cqlite.wal.size` report FLAT while the file grew: the metric was
+//! at its most wrong precisely during the incident it exists for. So the size is
+//! published the instant the append succeeds, independent of everything downstream.
+//! It is an ADDITIONAL site, not a replacement: the paired post-mutation emission
+//! still gives the WAL/memtable pair at one instant, and the truncate and open sites
+//! still cover the falling edge and the write-less recovery.
 //!
 //! # Why the size is ALSO emitted once at engine open
 //!
