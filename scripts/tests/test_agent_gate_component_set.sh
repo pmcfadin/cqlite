@@ -1149,6 +1149,11 @@ mkdir -p "$ind/scripts"
 cp "$GATE" "$ind/scripts/agent-gate.sh"
 agent_gate_pin_canonical_remote "$ind/scripts/agent-gate.sh" "$base_ind" \
   || { echo "FATAL: could not pin the canonical identity in the indeterminate fixture" >&2; exit 1; }
+# The manifest is WORKING-TREE state here (this fixture deliberately has no commit at all), and
+# it is what the pre-flight verifies before it fetches: without it the run stops at
+# `manifest-missing` and never reaches the ancestry branch this case is about.
+mkmanifest "$ind" derive \
+  || { echo "FATAL: could not install the component manifest in the indeterminate fixture" >&2; exit 1; }
 ( fx "$ind" && git init -q . && git remote add origin "$base_ind" ) >/dev/null 2>&1
 ind_out=$(hook "$ind")
 ind_line=$(field COMPONENT_SET_LINE "$ind_out")
@@ -1233,6 +1238,7 @@ git init -q --bare "$sh_bare" >/dev/null 2>&1
 git -C "$sh_bare" symbolic-ref HEAD refs/heads/main >/dev/null 2>&1
 (
   fx "$sh_work" && git init -q . \
+    && mkmanifest "$sh_work" derive \
     && git add -A && git "${GIT_ID[@]}" commit -qm c1 \
     && printf 'c2\n' >>README.md && git "${GIT_ID[@]}" commit -qam c2 \
     && printf 'c3\n' >>README.md && git "${GIT_ID[@]}" commit -qam c3
@@ -1240,6 +1246,7 @@ git -C "$sh_bare" symbolic-ref HEAD refs/heads/main >/dev/null 2>&1
 sh_c3=$(git -C "$sh_work" rev-parse HEAD)
 (
   fx "$sh_work" && cp "$GATE" scripts/agent-gate.sh \
+    && mkmanifest "$sh_work" derive \
     && git "${GIT_ID[@]}" commit -qam "c4: remove the component" \
     && printf 'c5\n' >>README.md && git "${GIT_ID[@]}" commit -qam c5 \
     && git push -q "$sh_bare" HEAD:refs/heads/main
@@ -1555,7 +1562,7 @@ sum2="$tmp/delta-insync-summary.txt"
 fout2="$tmp/delta-insync.log"
 ( fx "$same" && AGENT_GATE_SUMMARY_FILE="$sum2" CQLITE_DATASETS_ROOT="$tmp/no-datasets" \
     bash scripts/agent-gate.sh --delta HEAD~1 --anchor-run-id selftest >"$fout2" 2>&1 ) >/dev/null 2>&1
-if grep -q "^component-set: PASS ($n_components/$n_components vs origin/main $s_sha)$" "$sum2" 2>/dev/null \
+if grep -q "^component-set: PASS ($n_components/$n_components vs origin/main $s_sha via the committed manifest)$" "$sum2" 2>/dev/null \
    && grep -q '^==== AGENT-GATE DELTA SUMMARY ====' "$sum2" 2>/dev/null \
    && ! grep -q 'component-set: FAIL-CLOSED' "$sum2" 2>/dev/null; then
   ok "3544-strict-inSync: an in-sync tree passes the strict pre-flight; its block carries the PASS line"
@@ -2413,6 +2420,8 @@ fk_work="$tmp/fork-src"
 fk_bare="$tmp/fork-origin/contributor/cqlite.git"
 mkdir -p "$fk_work/scripts" "$tmp/fork-origin/contributor"
 cp "$GATE" "$fk_work/scripts/agent-gate.sh"
+mkmanifest "$fk_work" derive \
+  || { echo "FATAL: could not install the component manifest in the fork fixture" >&2; exit 1; }
 printf 'fork fixture\n' >"$fk_work/README.md"
 git init -q --bare "$fk_bare" >/dev/null 2>&1
 git -C "$fk_bare" symbolic-ref HEAD refs/heads/main >/dev/null 2>&1
