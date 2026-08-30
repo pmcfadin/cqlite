@@ -193,6 +193,33 @@ Two things about it that are easy to get wrong:
 It does **not** bypass the #1825 slot cap — a detached gate still queues, and a queued
 gate correctly reads `RUNNING`.
 
+## The launcher's threat model, declared
+
+`gate-detached.sh` hardens against **accident and drift** and against exposure that needs no
+write access anywhere. It does **not** try to defend a caller-supplied path against a hostile
+local user, and that boundary is deliberate.
+
+CLAUDE.md's existing triage rule for the roborev wrapper applies unchanged: *"the INVOKER can
+bypass this ⇒ out of model — record it, do not patch it; a NON-INVOKER can bypass this, or it can
+be bypassed BY ACCIDENT ⇒ defect. Same-host actors able to write these scripts are
+invoker-class."* On this fleet lanes run as one user on dedicated boxes, so anyone who can plant
+a symlink in a lane's directory can equally edit this script, shadow `systemd-run` on `PATH`, or
+run their own gate.
+
+| class | verdict | why |
+|---|---|---|
+| an attacker who can **write** the directory of a caller-supplied path | **out of model** | invoker-class on this fleet; the default paths live in a 0700 `mktemp -d` and are unguessable |
+| exposure needing **no** write access — `/proc/<pid>/cmdline` is world-readable | **defect, fixed** | forwarding the environment via `--setenv` handed every token to any user on the box |
+| **accident and drift** — stale artifacts, leftover beats, colliding temp names, two gates on one path | **defect, fixed** | the larger category in practice, and the source of most real findings here |
+
+The cheap hardening already in place (`mktemp` everywhere, symlink and non-regular-file refusal,
+non-destructive probes) **stays** — the same ruling says cheap hardening is worth keeping even
+where an invoker could reach the same end another way. What this section licenses is declining to
+*add* more: a further "a local user could plant X" finding should be recorded against this model
+rather than fixed. Written down because the review rounds showed that list does not close by
+itself — 25 findings over seven rounds, launcher-side rising 2 → 2 → 3 while the reader settled
+at one per round.
+
 ## Telling reaped from running (AC4)
 
 `RESULT: INCOMPLETE (gate did not finish)` is written into the summary file **once**, at

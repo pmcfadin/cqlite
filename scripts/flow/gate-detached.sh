@@ -37,6 +37,43 @@
 # reading the verdict: use scripts/gate-liveness.sh, which distinguishes RUNNING from
 # REAPED (this script prints the exact command).
 #
+# THREAT MODEL — STATED, so findings in this area get TRIAGED rather than patched (#3473)
+# ---------------------------------------------------------------------------------------
+# Seven review rounds landed 25 findings in this change, and from round 5 on the launcher was
+# the dominant source (2, 2, 3) while the reader settled at one per round. Every one of those
+# launcher findings was a HOSTILE LOCAL USER scenario: a planted symlink, a sticky directory
+# owned by someone else, values readable in another process's argv. That list does not close on
+# its own, so the boundary is written down here rather than rediscovered each round.
+#
+# CLAUDE.md already rules on this exact class, for roborev's wrapper:
+#     "the INVOKER can bypass this" => out of model - record it, do not patch it;
+#     "a NON-INVOKER can bypass this" or "this can be bypassed BY ACCIDENT" => defect.
+#     Same-host actors able to write these scripts are INVOKER-CLASS, not third parties.
+#
+# Applied here:
+#
+#   OUT OF MODEL — an attacker who can WRITE the directory holding a caller-supplied summary or
+#   log path. On this fleet lanes run as ONE user on dedicated boxes, so such an actor can also
+#   edit this script, shadow `systemd-run` on PATH, or simply run their own gate. Defending the
+#   probe while leaving those open is the false-assurance shape #3312 exists to remove. The
+#   DEFAULT paths are not exposed to this at all: they live in a 0700 `mktemp -d` with an
+#   unguessable name.
+#
+#   IN MODEL, and fixed — exposure that needs NO write access anywhere: `/proc/<pid>/cmdline` is
+#   WORLD-READABLE, so forwarding the environment through `systemd-run --setenv` handed every
+#   token to any user on the box. That is a non-invoker read, so it is a defect, and it is why
+#   the environment now travels in a mode-0600 file instead.
+#
+#   IN MODEL, and fixed — ACCIDENT AND DRIFT, which is the larger category in practice: a stale
+#   heartbeat standing in for a real one, a leftover summary from an earlier run, a predictable
+#   temp name colliding with a concurrent gate, a caller pointing two gates at one path.
+#
+# The cheap hardening already here (mktemp everywhere, symlink refusal, non-regular-file
+# refusal, non-destructive probes) is KEPT: CLAUDE.md's ruling explicitly says cheap hardening
+# stays even where an invoker could reach the same end another way. What this section licenses is
+# not removing it, but declining to ADD more of it — a further "a local user could plant X"
+# finding here should be recorded against the threat model, not fixed by a ninth round.
+#
 # Usage:
 #   bash scripts/flow/gate-detached.sh [--summary <path>] [--log <path>] [--] [gate args...]
 #
