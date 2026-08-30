@@ -331,8 +331,16 @@ case "$cmd" in
     if [ "${STUB_SHOW_JSON:-object}" = nested ]; then
       # The MEASURED `roborev show <id> --json` shape: a REVIEW row carrying its own
       # `id` (equal to the job id) that NESTS the job row under a "job" key.
-      printf '{"id":%s,"job_id":%s,"agent":"codex","verdict_bool":0,"%s":"%s","prompt":"%s","job":' \
-        "${STUB_JOB:-4600}" "${STUB_JOB:-4600}" "${STUB_RECORD_OUTPUT_FIELD:-output}" "${STUB_RECORD_OUTPUT:-}" "$(json_prompt)"
+      # `verdict_bool` is the SOURCE COLUMN the `verdict` letter is synthesised FROM, so the two
+      # must AGREE or the fixture is a record roborev cannot emit: `P` <=> 1, `F` <=> 0 (measured —
+      # job 154 clean/verdict_bool=1, job 162 findings-bearing/verdict_bool=0). Hard-coding 0 while
+      # a case set STUB_VERDICT_FIELD=P made the CLEAN-recheck positive control an impossible
+      # payload, i.e. weakened the one control that proves a clean recheck still PASSes. Derived,
+      # never hard-coded, so a case cannot silently desynchronise the pair again.
+      stub_verdict_bool=0
+      [ "${STUB_VERDICT_FIELD:-}" != P ] || stub_verdict_bool=1
+      printf '{"id":%s,"job_id":%s,"agent":"codex","verdict_bool":%s,"%s":"%s","prompt":"%s","job":' \
+        "${STUB_JOB:-4600}" "${STUB_JOB:-4600}" "$stub_verdict_bool" "${STUB_RECORD_OUTPUT_FIELD:-output}" "${STUB_RECORD_OUTPUT:-}" "$(json_prompt)"
       emit_job_object
       printf '}\n'
       exit 0
