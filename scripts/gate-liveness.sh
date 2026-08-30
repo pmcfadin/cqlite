@@ -51,9 +51,19 @@
 set -uo pipefail
 
 SUMMARY=""; WANT_RUN_ID=""; HB=""
+# Captured BEFORE parsing so the post-wait re-decision can re-exec this script with the caller's exact
+# request (roborev job 231). Parsing shifts "$@" away, and a re-exec is what lets the re-decision reuse
+# the ENTIRE summary grammar instead of a second, narrower copy of it.
+GL_ORIG_ARGS=("$@")
+NO_WAIT=""
 while [ $# -gt 0 ]; do
   case "$1" in
     --run-id)    WANT_RUN_ID="${2:?--run-id needs a value}"; shift 2 ;;
+    # Skip the stall-confirmation sleep. A caller that cannot afford to block (the launcher's bounded
+    # verification phase) or one that has already sampled (the post-wait re-decision) uses this. It can
+    # only ever WEAKEN a verdict: without a second sample STALLED is unprovable, so the answer becomes
+    # UNKNOWN, never a stronger claim.
+    --no-wait)   NO_WAIT=1; shift ;;
     --heartbeat) HB="${2:?--heartbeat needs a path}"; shift 2 ;;
     -h|--help)   sed -n '2,50p' "$0"; exit 0 ;;
     -*)          echo "gate-liveness: unknown option '$1'" >&2; exit 64 ;;
@@ -874,32 +884,29 @@ fi
 # declared interval and hard-capped, so a misconfigured or hostile artifact cannot stretch it.
 _confirm_wait=$(( HB_INTERVAL + 5 ))
 [ "$_confirm_wait" -le 65 ] || _confirm_wait=65
+if [ -n "$NO_WAIT" ]; then
+  verdict UNKNOWN 4 "confirmation-skipped; this beat is not fresh and --no-wait forbids the second sample that would distinguish a stalled run from a slow one, so no STALLED claim is supportable. run-id ${HB_RUN_ID:-?}, beat ${HB_SEQ:-?}, age ${AGE}s, window ${STALE_AFTER}s"
+fi
 sleep "$_confirm_wait"
-# THE GATE MAY HAVE FINISHED DURING THE WAIT (roborev job 228). If it completed and stopped its beater
-# before publishing another beat, the counter cannot advance — and this code would report STALLED while
-# a TERMINAL SUMMARY now exists beside it. A false STALLED for a finished gate invites relaunching it,
-# which is the same harm job 220 fixed in the artifact dimension; this is the same defect in the TIME
-# dimension, because the summary can become terminal WHILE we sleep.
+# THE GATE MAY HAVE FINISHED DURING THE WAIT (roborev job 228), AND THE RE-DECISION MUST USE THE REAL
+# GRAMMAR (roborev job 231). If the gate completed and stopped its beater before another beat, the
+# counter cannot advance and this code would report STALLED while a TERMINAL SUMMARY now exists.
 #
-# The re-check is deliberately NARROWER than the main summary path and may only PROMOTE to COMPLETE —
-# it can never produce a refusal. That is what makes the small overlap with the main grammar safe: a
-# second implementation that could REFUSE would be the divergence risk jobs 172 and 198 removed, while
-# one that can only recognise an unambiguous completion either fires or leaves the existing verdict
-# untouched. Every condition below must hold, or we fall through unchanged.
-_post_snap=$(_snap_of "$SUMMARY" postwait 2>/dev/null) || _post_snap=""
-if [ -n "$_post_snap" ] && ! _has_nul "$_post_snap"; then
-  _post_text=$(_slurp "$_post_snap")
-  _post_open=$(printf '%s\n' "$_post_text" | grep -cE '^==== AGENT-GATE( LITE| DELTA)? SUMMARY ====$')
-  _post_close=$(printf '%s\n' "$_post_text" | grep -cE '^==== END AGENT-GATE( LITE| DELTA)? SUMMARY ====$')
-  _post_rid=$(_field "$_post_text" run-id)
-  _post_res=$(printf '%s\n' "$_post_text" | grep -m1 '^RESULT: ' || true)
-  _post_tok=${_post_res#RESULT: }; _post_tok=${_post_tok%% *}
-  if [ "$_post_open" = 1 ] && [ "$_post_close" = 1 ] \
-     && [ -n "$_post_rid" ] && [ "$_post_rid" = "$HB_RUN_ID" ]; then
-    case "$_post_tok" in
-      PASS|FAIL|PARTIAL|ERROR|REFUSED)
-        verdict COMPLETE 0 "the gate reached a terminal verdict DURING the confirmation wait — ${_post_res#RESULT: } (run-id $_post_rid). Its beater stopped with it, so the heartbeat could not advance; that is completion, not a stall" ;;
-    esac
+# Job 228's fix parsed the fresh summary HERE, with a deliberately narrow check, and I argued that being
+# "promote-only" made the small overlap with the main grammar safe. **That argument was wrong.** It
+# counted openers and closers but never checked dialect match, field ordering, or duplicate
+# `RESULT`/`run-id`, so a SPLICED summary could be promoted to COMPLETE — and promoting on a malformed
+# artifact IS a false certification, the worst verdict this script can give. It also sent a valid block
+# carrying an unrecognised token to STALLED instead of UNKNOWN, contradicting job 220.
+#
+# So there is no second parser. If the summary CHANGED during the wait, re-exec this script with the
+# caller's original request plus `--no-wait`: the whole framing grammar, the run-id binding, the
+# terminal dispatch and `_summary_terminal_unknown` all apply exactly as they do on a first read, and
+# `--no-wait` guarantees termination by forbidding a second sleep.
+if [ -z "$NO_WAIT" ]; then
+  _post_snap=$(_snap_of "$SUMMARY" postwait 2>/dev/null) || _post_snap=""
+  if [ -n "$_post_snap" ] && [ -n "$_SUM_SNAP" ] && ! cmp -s "$_post_snap" "$_SUM_SNAP" 2>/dev/null; then
+    exec bash "$0" "${GL_ORIG_ARGS[@]}" --no-wait
   fi
 fi
 _hb2_snap=$(_snap_of "$HB" heartbeat2) || _hb2_snap=""

@@ -900,7 +900,14 @@ while [ "$_i" -lt 40 ]; do
   # the verdict are the reader's business. Exit 0 (COMPLETE) or 2 (RUNNING) both mean monitorable.
   if [ -n "$_new_rid" ] && [ -s "$_hbdest" ] \
      && grep -qxF "launch-nonce: $LAUNCH_NONCE" "$_hbdest" 2>/dev/null; then
-    bash "$REPO_ROOT/scripts/gate-liveness.sh" "$SUMMARY" --run-id "$_new_rid" >/dev/null 2>&1
+    # --no-wait BOUNDS THIS CALL (roborev job 231). The deadline above is checked before invoking the
+    # reader, which bounds nothing: the reader itself sleeps `interval + 5` (capped 65s) to confirm
+    # whether a non-advancing beat is stalled, so a single call could overshoot the advertised 20s by
+    # more than three times. A deadline that does not bound the blocking call inside the loop is not a
+    # deadline. The launcher does not need that confirmation either — it asks only whether the reader
+    # can answer about this run AT ALL, and --no-wait can only weaken a verdict to UNKNOWN, which this
+    # loop already treats as "keep waiting".
+    bash "$REPO_ROOT/scripts/gate-liveness.sh" "$SUMMARY" --run-id "$_new_rid" --no-wait >/dev/null 2>&1
     case "$?" in
       0|2) _hb_seen=1; break ;;   # COMPLETE or RUNNING — the reader can answer about this run
     esac
@@ -933,7 +940,8 @@ done
 # defect round 1 found in the reader, reproduced here as a SECOND implementation of the same
 # grammar. One implementation, one grammar; the `--run-id` binding comes along for free.
 if [ "$_hb_seen" -ne 1 ] && [ -n "$_new_rid" ]; then
-  if bash "$REPO_ROOT/scripts/gate-liveness.sh" "$SUMMARY" --run-id "$_new_rid" >/dev/null 2>&1; then
+  # --no-wait here too: this asks only whether a TERMINAL verdict exists, which needs no second sample.
+  if bash "$REPO_ROOT/scripts/gate-liveness.sh" "$SUMMARY" --run-id "$_new_rid" --no-wait >/dev/null 2>&1; then
     _hb_seen=1   # exit 0 == COMPLETE, and only for THIS run
   fi
 fi

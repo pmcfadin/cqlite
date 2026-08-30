@@ -1626,6 +1626,122 @@ expect_reader "11t.4 control: two DIFFERENT VALID beater-pids still count as a r
   RUNNING 2 "" -- "$_bp" --run-id run-P
 wait "$_bpw" 2>/dev/null || true
 
+echo "=== section 11w: a case must PASS the flags its NAME claims (job 231) ==="
+# 11v.1 was named for `--no-wait` and never passed it, so the reader blocked and answered STALLED. It
+# failed loudly, which is the only reason it was caught. Auditing the group immediately then found
+# 11v.3 with the IDENTICAL defect and GREEN — a fresh beat answers RUNNING with or without the flag, so
+# it tested nothing about `--no-wait` while passing. The dangerous half of "an assertion that does not
+# test what its name claims" is the half that passes, and no amount of running the suite finds it.
+#
+# So the check is mechanical and covers cases added later. Negative mentions are EXCLUDED: several cases
+# are legitimately named for a flag's ABSENCE ("no --run-id", "unbound"), and a guard that reds on
+# correct input is the guard people learn to waive.
+_flagmismatch=$(python3 - "$0" <<'PYEOF_INNER'
+import re, sys
+src = open(sys.argv[1]).read()
+calls = re.findall(r'expect_reader "([^"]+)"\s*\\\n\s*([^\n]+)\n', src)
+bad = []
+for label, args in calls:
+    low = label.lower()
+    for flag in ('--no-wait', '--run-id', '--heartbeat'):
+        if flag not in label:
+            continue
+        # the flag's ABSENCE may be the subject of the case
+        if any(neg in low for neg in ('no ' + flag, 'without ' + flag, 'unbound', 'omit')):
+            continue
+        if flag not in args:
+            bad.append(label.split()[0] + '->' + flag)
+print(','.join(bad))
+PYEOF_INNER
+) || _flagmismatch="PROBE-FAILED"
+if [ "$_flagmismatch" = "PROBE-FAILED" ]; then
+  bad "11w.1 every case passes the flags its name claims" "the probe could not run — this proves nothing"
+elif [ -z "$_flagmismatch" ]; then
+  ok "11w.1 every case passes the flags its name claims"
+else
+  bad "11w.1 every case passes the flags its name claims" "mismatch(es): $_flagmismatch"
+fi
+
+echo "=== section 11u: ONE grammar for the post-wait re-decision (job 231) ==="
+# Job 228 re-parsed the fresh summary after the confirmation wait with a deliberately narrow check, and I
+# argued that being "promote-only" made the overlap with the main grammar safe. THAT ARGUMENT WAS WRONG:
+# it counted openers and closers but never checked dialect match, ordering, or duplicate RESULT/run-id,
+# so a SPLICED summary could be promoted to COMPLETE — and promoting on a malformed artifact IS a false
+# certification, the worst verdict here. It also sent a valid block with an unrecognised token to STALLED,
+# contradicting job 220.
+#
+# There is no second parser now: if the summary changed during the wait, the script re-execs itself with
+# the caller's original request plus --no-wait, so the whole framing grammar, run-id binding and terminal
+# dispatch apply exactly as on a first read, and --no-wait guarantees termination.
+if grep -q 'exec bash "$0" "${GL_ORIG_ARGS\[@\]}" --no-wait' "$READER"; then
+  ok "11u.1 the post-wait re-decision re-execs the real grammar (no second parser)"
+else
+  bad "11u.1 the post-wait re-decision re-execs the real grammar" "a second parser may have returned"
+fi
+_uw="$TMP/upost.txt"
+_mk_post() {  # <what the summary becomes after 3s>
+  mk_summary "$_uw" run-U "INCOMPLETE (gate did not finish)"
+  mk_beat "$_uw.heartbeat" run-U 200 20
+  ( sleep 3; printf '%s' "$1" > "$_uw" ) &
+  _post_w=$!
+  remember_pid "$_post_w"
+}
+# A genuine completion during the wait is still recognised.
+_mk_post '==== AGENT-GATE SUMMARY ====
+run-id: run-U
+RESULT: PASS
+==== END AGENT-GATE SUMMARY ====
+'
+expect_reader "11u.2 a real completion during the wait => COMPLETE" \
+  COMPLETE 0 "terminal verdict" -- "$_uw" --run-id run-U
+wait "$_post_w" 2>/dev/null || true
+# A DIALECT-MISMATCHED block appearing during the wait must NOT be promoted — this was a false COMPLETE.
+_mk_post '==== AGENT-GATE SUMMARY ====
+run-id: run-U
+RESULT: PASS
+==== END AGENT-GATE LITE SUMMARY ====
+'
+run_reader "$_uw" --run-id run-U
+[ "$RC" != 0 ] && ok "11u.3 a spliced/dialect-mismatched summary is NOT promoted (rc=$RC)" \
+               || bad "11u.3 a spliced summary is not promoted" "promoted to COMPLETE — a false certification"
+wait "$_post_w" 2>/dev/null || true
+# A valid block with an UNRECOGNISED token => UNKNOWN naming it, not STALLED.
+_mk_post '==== AGENT-GATE SUMMARY ====
+run-id: run-U
+RESULT: FUTURETOKEN
+==== END AGENT-GATE SUMMARY ====
+'
+expect_reader "11u.4 an unrecognised token during the wait => UNKNOWN, not STALLED" \
+  UNKNOWN 4 "unrecognised-result" -- "$_uw" --run-id run-U
+wait "$_post_w" 2>/dev/null || true
+
+echo "=== section 11v: --no-wait can only WEAKEN a verdict (job 231) ==="
+# The launcher needs a bounded call. --no-wait skips the stall confirmation, so STALLED becomes
+# unprovable and the answer weakens to UNKNOWN. It must never produce a STRONGER claim than the blocking
+# form, or a bounded caller would be trading correctness for latency.
+_nw="$TMP/nowait.txt"
+mk_summary "$_nw" run-N "INCOMPLETE (gate did not finish)"
+mk_beat "$_nw.heartbeat" run-N 4000 20
+# The flag this case is NAMED for must actually be PASSED. The first version omitted it, so the reader
+# blocked and answered STALLED — and the case failed for the right reason, which is the only thing that
+# saved it: an assertion whose name describes a flag it never passes tests something else entirely.
+# Second instance in this change (11r.3 was the first), and my manual check missed it because I verified
+# only the EXIT CODE — 4 arrives from several different paths here.
+expect_reader "11v.1 stale beat + --no-wait => UNKNOWN (a stall is unprovable without a 2nd sample)" \
+  UNKNOWN 4 "confirmation-skipped" -- "$_nw" --run-id run-N --no-wait
+# CONTROL: the BLOCKING form still reaches STALLED, or --no-wait has not weakened anything — it has
+# simply become the only behaviour.
+expect_reader "11v.2 control: the BLOCKING form still confirms and answers STALLED" \
+  STALLED 3 "" -- "$_nw" --run-id run-N
+# A FRESH beat needs no confirmation, so --no-wait must not weaken it.
+mk_beat "$_nw.heartbeat" run-N 5 20
+# SAME DEFECT, found by auditing the group immediately after fixing 11v.1 — and this one the suite could
+# NEVER have caught: a fresh beat answers RUNNING with or without the flag, so it was GREEN while testing
+# nothing about --no-wait. The dangerous half of "an assertion that does not test what its name claims"
+# is the half that passes.
+expect_reader "11v.3 a FRESH beat + --no-wait is still RUNNING (no confirmation needed)" \
+  RUNNING 2 "" -- "$_nw" --run-id run-N --no-wait
+
 echo "=== section 11r: a FAILED lookup never proves a shared clock domain (job 221) ==="
 # Both the reader and the beater used `uname -n 2>/dev/null || echo unknown`. When BOTH lookups fail
 # the two literal `unknown`s compare EQUAL and were accepted as proof of a SHARED CLOCK DOMAIN — which

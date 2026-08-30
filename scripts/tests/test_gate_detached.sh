@@ -1319,6 +1319,35 @@ else
   skip=$((skip+4)); echo "SKIP 4b.115-4b.118 (no user systemd manager on this host)"
 fi
 
+# --- roborev job 231: a deadline must bound the BLOCKING CALL, not just the loop top ---------------
+# Job 228 added a wall-clock deadline checked before each iteration. That bounds nothing on its own: the
+# reader itself sleeps `interval + 5` (capped 65s) to confirm whether a non-advancing beat is stalled, so
+# ONE call could overshoot the advertised 20s by more than three times. The launcher's own calls now pass
+# `--no-wait`, which can only WEAKEN a verdict to UNKNOWN — and this loop already treats UNKNOWN as
+# "keep waiting", so nothing is lost.
+# COUNT INVOCATIONS, NOT MENTIONS. The first version matched `gate-liveness.sh" "$SUMMARY"`, which also
+# matches the `printf` that BUILDS the advertised poll command — so this case demanded `--no-wait` on a
+# string construction while 4b.138 demanded its absence there. Two of my own tests contradicting each
+# other, caught by this one failing "2 of 3 bounded". An invocation is preceded by `bash `; in the
+# printf the script path is an ARGUMENT to printf, so the distinction is exact.
+_lc=$(grep -vE '^[[:space:]]*#' "$LAUNCHER" | grep -c 'bash "\$REPO_ROOT/scripts/gate-liveness\.sh"' || true)
+_lcnw=$(grep -vE '^[[:space:]]*#' "$LAUNCHER" | grep -c 'bash "\$REPO_ROOT/scripts/gate-liveness\.sh" "\$SUMMARY" --run-id "\$_new_rid" --no-wait' || true)
+if [ "$_lc" -ge 1 ] && [ "$_lc" = "$_lcnw" ]; then
+  ok "4b.137 every reader call the launcher MAKES is non-blocking ($_lcnw/$_lc)"
+else
+  bad "4b.137 every reader call the launcher makes is non-blocking" "$_lcnw of $_lc bounded — an unbounded call defeats the deadline"
+fi
+# ...and the OPPOSITE requirement on the command it ADVERTISES: a human polling wants the stall
+# confirmation, so the printed command must NOT carry --no-wait. Two requirements, one script; asserting
+# only the first would let a well-meaning sweep bound the advertised command too and silently remove
+# STALLED from every human poll.
+if grep -q "POLL_CMD=\$(printf 'bash %q %q --run-id %q'" "$LAUNCHER" \
+   && ! grep -q "POLL_CMD=.*--no-wait" "$LAUNCHER"; then
+  ok "4b.138 the ADVERTISED poll command keeps the confirmation (no --no-wait)"
+else
+  bad "4b.138 the advertised poll command keeps the confirmation" "a human poll would lose STALLED"
+fi
+
 # --- roborev job 228: the verification phase needs a WALL-CLOCK bound, not an iteration count ------
 # The loop advertises "within 20s" and runs up to 40 iterations, but each iteration may call
 # `gate-liveness.sh`, which BLOCKS for `interval + 5` (capped at 65s) to confirm whether a

@@ -642,6 +642,46 @@ gate is protected when it is not is the exact false assurance this script exists
 in `bootstrap-agent-machine.sh` alongside the other worker-environment guarantees. Until it is there,
 a freshly-provisioned box will refuse (loudly, with the remedy) rather than run an unprotected gate.
 
+### A justification for a shortcut is the signal to stop and apply the discipline
+
+Two consecutive rounds (228, 231) found defects in the PREVIOUS round's fixes, and both times the cause
+was the same: I wrote a reasoned argument for why a shortcut was acceptable instead of applying a
+discipline this codebase already had.
+
+- *"Being promote-only makes a second summary parser safe."* **False.** It counted openers and closers
+  but never checked dialect match, ordering or duplicate fields — and **promoting on a malformed
+  artifact IS a false certification**, the worst verdict here. The direction of the error (promote, not
+  refuse) is not what bounds the harm. Fixed by the refactor I had declined: re-exec through the real
+  grammar, so there is exactly one implementation.
+- *"A wall-clock deadline checked per iteration bounds the loop."* **False.** The reader called inside
+  the loop sleeps up to 65s, so 40 iterations is ~17 minutes against an advertised 20s. **A count
+  bounds work only when each unit of work is bounded.**
+
+Both were plausible, both were written down as justifications, and each took a review round to falsify.
+**The justification is the tell**: when the argument being constructed is "a duplicate / a partial bound
+is acceptable *in this case*", that is the moment to do the refactor instead.
+
+The same shape then appeared twice more within the hour, outside the product, which is why it is
+recorded as a rule rather than an anecdote:
+
+- **In tooling.** I asserted in writing that editing a script would not affect an in-flight run because
+  the interpreter "keeps its own copy". Bash reads scripts INCREMENTALLY; the edit injected a syntax
+  error into a live run. Four edit-during-run incidents in one session, the last one corrupting the
+  very script written to prevent them.
+- **In advice to a peer.** I offered "only a push exercises the credential path, so a green `ls-remote`
+  proves nothing", it was credited as load-bearing in a filed issue, and my own isolated repro
+  falsified it: `push`, `ls-remote` and `fetch` all exit 128 with `credential url cannot be parsed`,
+  with a clean-URL control failing differently (`Could not resolve host`). Corrected within the hour.
+
+**Every instance was reasoned, plausible, and UNEXERCISED at the moment of assertion.** None was a
+knowledge gap. Which is why the fixes that stuck are mechanisms, not intentions: `flock` (no process
+names to match), copy-then-run (the template is never the executing file), truncate-both (a marker's
+presence means *this* run). And note the tooling lesson in its own right — **every `pgrep -f` gate I
+wrote deadlocked**, because the Bash-tool wrapper shell carries the whole command text in its argv and
+is the runner's ancestor: a check whose subject includes the checker cannot work, however the pattern is
+spelled. Narrowing the pattern three times never addressed that. The redundant guard was also the only
+failure source: `flock` alone had always been sufficient.
+
 ### Audit the TIME axis too: where does this code sleep, and what can change underneath it?
 
 The sibling audits above enumerate **space** — which files, which paths, which fields. Job 228 found two
