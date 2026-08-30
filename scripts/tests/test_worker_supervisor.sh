@@ -4615,6 +4615,130 @@ test_legacy_global_lock_unknown_shapes_refuse() {
   rm -rf "$legacy" "$derived"
 }
 
+# THE SYMLINK SHAPES (#3549, roborev job 180 Medium). `-d`, `-f`, `-r`, `-x` and `-e` all FOLLOW
+# symlinks, so a link is not merely another malformed shape — it is the one shape whose predicates
+# answer as a VALID lock would. The classifier must therefore reject `-L` BEFORE any of them, and the
+# case that matters is the destructive direction: a link to a real, well-formed lock directory whose
+# recorded pid is CONFIRMED DEAD classifies as `stale` without the `-L` test, and the reclaim then
+# MOVES AND DELETES the object at that name. Every case below asserts BOTH halves — the refusal, and
+# that NOTHING was moved or deleted (the link, its target, the target's `pid`, and no renamed-aside
+# residue).
+test_legacy_global_lock_symlink_shapes_refuse() {
+  local d tmp lane legacy derived out rc dead target link_before aside_count
+  d="$(new_case_dir)"
+  common_env "$d"
+  tmp="$d/tmp"; lane="lane3549sym$$"
+  mkdir -p "$tmp"
+  legacy="$tmp/cqlite-worker-supervisor.lock"
+  derived="$tmp/cqlite-worker-supervisor-$lane.lock"
+
+  # A REAL dead pid: started and REAPED, so the kernel has genuinely released it — the same standard
+  # as the reclaim case (AC5). A made-up large number would only ever exercise "not found".
+  sleep 0.1 &
+  dead=$!
+  wait "$dead" 2>/dev/null || true
+
+  # ---- (a) THE DANGEROUS ONE: a symlink to a VALID lock directory with a CONFIRMED-DEAD pid. -------
+  # This is the case that is NOT caught by any other predicate: follow the link and it is a textbook
+  # reclaimable lock. `$target` is deliberately NOT a lock — it is any directory that happens to hold
+  # a well-formed `pid`, which is exactly the object the guard must not destroy.
+  rm -rf "$legacy" "$derived"
+  target="$tmp/not-a-lock-at-all"
+  mkdir -p "$target"
+  printf '%s\n' "$dead" >"$target/pid"
+  ln -s "$target" "$legacy"
+  link_before="$(readlink "$legacy")"
+  out="$(legacy_lock_drive "$tmp" "$lane")"; rc=$?
+  if [[ "$rc" -ne 0 ]] && legacy_refusal_ok "$out" && [[ "$out" == *"path-is-a-symlink"* ]] && [[ ! -e "$derived" ]]; then
+    pass "legacy-lock symlink(a): a symlink to a VALID dead-pid lock directory REFUSES with the symlink cause (not 'not-a-directory') and creates no per-lane lock"
+  else
+    fail "legacy-lock-symlink-a: rc=$rc derived-exists=$([[ -e "$derived" ]] && echo yes || echo no) out=[$out] — expected a refusal naming path-is-a-symlink"
+  fi
+  # NOTHING MOVED, NOTHING DELETED — the whole harm of the finding.
+  aside_count="$(find "$tmp" -maxdepth 1 -name '*.aside.*' 2>/dev/null | wc -l | tr -d ' ')"
+  if [[ -L "$legacy" && "$(readlink "$legacy")" == "$link_before" ]] \
+     && [[ -d "$target" && -f "$target/pid" && "$(cat "$target/pid")" == "$dead" ]] \
+     && [[ "$aside_count" == "0" ]]; then
+    pass "legacy-lock symlink(a): the link, its TARGET directory and the target's pid file are all untouched, and no renamed-aside residue was created"
+  else
+    fail "legacy-lock-symlink-a-destroyed: link=$([[ -L "$legacy" ]] && readlink "$legacy" || echo GONE) target-dir=$([[ -d "$target" ]] && echo yes || echo GONE) target-pid=[$(cat "$target/pid" 2>/dev/null || echo GONE)] aside-residue=$aside_count"
+  fi
+
+  # ---- (b) a DANGLING symlink at the legacy path -------------------------------------------------
+  # `-e` is false and `-L` is true, so this must NOT be read as verified absence (which would let the
+  # start proceed as if no legacy supervisor existed) and must NOT be read as `not-a-directory` either.
+  rm -rf "$legacy" "$derived"
+  ln -s "$tmp/nothing-is-here" "$legacy"
+  out="$(legacy_lock_drive "$tmp" "$lane")"; rc=$?
+  if [[ "$rc" -ne 0 ]] && legacy_refusal_ok "$out" && [[ "$out" == *"path-is-a-symlink"* ]] && [[ ! -e "$derived" ]]; then
+    pass "legacy-lock symlink(b): a DANGLING symlink is neither verified absence nor a malformed lock — it refuses with the symlink cause"
+  else
+    fail "legacy-lock-symlink-b: rc=$rc derived-exists=$([[ -e "$derived" ]] && echo yes || echo no) out=[$out]"
+  fi
+  if [[ -L "$legacy" ]]; then
+    pass "legacy-lock symlink(b): the dangling link itself was not removed"
+  else
+    fail "legacy-lock-symlink-b-destroyed: the dangling link at $legacy is gone"
+  fi
+
+  # ---- (c) a symlink AT `$legacy/pid` pointing to a VALID dead pid file -------------------------
+  # The lock directory is genuine; only the `pid` path is a link. `-f`/`-r` follow it, so the pid reads
+  # as a well-formed dead pid and the reclaim would move the real directory aside and delete it.
+  rm -rf "$legacy" "$derived"
+  mkdir -p "$legacy" "$tmp/pidsource"
+  printf '%s\n' "$dead" >"$tmp/pidsource/pid"
+  ln -s "$tmp/pidsource/pid" "$legacy/pid"
+  out="$(legacy_lock_drive "$tmp" "$lane")"; rc=$?
+  if [[ "$rc" -ne 0 ]] && legacy_refusal_ok "$out" && [[ "$out" == *"pid-path-is-a-symlink"* ]] && [[ ! -e "$derived" ]]; then
+    pass "legacy-lock symlink(c): a symlink AT the pid path with a valid dead pid behind it REFUSES with its OWN cause token (distinct from pid-file-not-a-readable-file)"
+  else
+    fail "legacy-lock-symlink-c: rc=$rc derived-exists=$([[ -e "$derived" ]] && echo yes || echo no) out=[$out] — expected a refusal naming pid-path-is-a-symlink"
+  fi
+  aside_count="$(find "$tmp" -maxdepth 1 -name '*.aside.*' 2>/dev/null | wc -l | tr -d ' ')"
+  if [[ -d "$legacy" && -L "$legacy/pid" ]] \
+     && [[ -f "$tmp/pidsource/pid" && "$(cat "$tmp/pidsource/pid")" == "$dead" ]] \
+     && [[ "$aside_count" == "0" ]]; then
+    pass "legacy-lock symlink(c): the lock directory, the pid LINK and the linked-to pid file all survive, with no renamed-aside residue"
+  else
+    fail "legacy-lock-symlink-c-destroyed: dir=$([[ -d "$legacy" ]] && echo yes || echo GONE) pid-link=$([[ -L "$legacy/pid" ]] && echo yes || echo GONE) source-pid=[$(cat "$tmp/pidsource/pid" 2>/dev/null || echo GONE)] aside-residue=$aside_count"
+  fi
+
+  # ---- (d) a DANGLING symlink at `$legacy/pid` --------------------------------------------------
+  # `-e "$legacy/pid"` is false here, so the pid check must be reached BEFORE it: otherwise this is
+  # reported as `pid-file-missing`, a wrong cause for a shape we refuse to follow.
+  rm -rf "$legacy" "$derived"
+  mkdir -p "$legacy"
+  ln -s "$tmp/no-such-pid" "$legacy/pid"
+  out="$(legacy_lock_drive "$tmp" "$lane")"; rc=$?
+  if [[ "$rc" -ne 0 ]] && legacy_refusal_ok "$out" && [[ "$out" == *"pid-path-is-a-symlink"* ]] && [[ "$out" != *"pid-file-missing"* ]] && [[ ! -e "$derived" ]]; then
+    pass "legacy-lock symlink(d): a DANGLING pid symlink is reported as the symlink shape, not as pid-file-missing"
+  else
+    fail "legacy-lock-symlink-d: rc=$rc out=[$out] — expected pid-path-is-a-symlink and not pid-file-missing"
+  fi
+  if [[ -L "$legacy/pid" && -d "$legacy" ]]; then
+    pass "legacy-lock symlink(d): the dangling pid link and its directory were not removed"
+  else
+    fail "legacy-lock-symlink-d-destroyed: dir=$([[ -d "$legacy" ]] && echo yes || echo GONE) pid-link=$([[ -L "$legacy/pid" ]] && echo yes || echo GONE)"
+  fi
+
+  # ORDERING PROOF, structural: both `-L` tests must appear BEFORE the predicates that follow the link,
+  # because a passing behavioural case cannot distinguish "tested first" from "tested at all" once the
+  # branch exists. A future reorder that moves either below its `-d`/`-f` would still pass every case
+  # above only if the reorder were harmless — it is not, so pin the order in source.
+  local body
+  body="$(sed -n '/^supervisor_legacy_lock_state()/,/^}/p' "$SUPERVISOR")"
+  if [[ "$(printf '%s\n' "$body" | grep -n '\-L "\$legacy"' | tail -1 | cut -d: -f1)" \
+        -lt "$(printf '%s\n' "$body" | grep -n '\-d "\$legacy"' | head -1 | cut -d: -f1)" ]] \
+     && [[ "$(printf '%s\n' "$body" | grep -n '\-L "\$legacy/pid"' | head -1 | cut -d: -f1)" \
+        -lt "$(printf '%s\n' "$body" | grep -n '\-e "\$legacy/pid"' | head -1 | cut -d: -f1)" ]]; then
+    pass "legacy-lock symlink: both -L rejections precede the link-following predicates in source (-d for the lock, -e/-f for the pid)"
+  else
+    fail "legacy-lock-symlink-order: a -L test does not precede the predicate that follows the link in supervisor_legacy_lock_state"
+  fi
+
+  rm -rf "$legacy" "$derived"
+}
+
 test_legacy_global_lock_override_skips_check() {
   local d tmp lane legacy explicit live out rc
   d="$(new_case_dir)"
@@ -4675,6 +4799,7 @@ test_legacy_global_lock_removal_condition_recorded() {
 t test_legacy_global_lock_refuses_live_holder
 t test_legacy_global_lock_reclaims_confirmed_stale
 t test_legacy_global_lock_unknown_shapes_refuse
+t test_legacy_global_lock_symlink_shapes_refuse
 t test_legacy_global_lock_override_skips_check
 t test_legacy_global_lock_removal_condition_recorded
 
