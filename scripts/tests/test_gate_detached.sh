@@ -718,6 +718,57 @@ done
 [ "$n" -eq 0 ] && ok "4b.59 a multi-boundary gate leaves ZERO beaters (no per-boundary accumulation)" \
               || bad "4b.59 a multi-boundary gate leaves ZERO beaters" "$n still running"
 
+# roborev job 188: --help must print the USAGE. It used to be `sed -n '2,45p'` over the header,
+# and as the header grew that range ended mid-sentence inside the threat-model commentary and
+# omitted the invocation syntax entirely. A range that must be re-tuned whenever a comment is
+# edited is a latent defect.
+h=$(bash "$LAUNCHER" --help 2>&1)
+printf '%s' "$h" | grep -q 'bash scripts/flow/gate-detached.sh \[--summary' \
+  && ok "4b.60 --help prints the invocation syntax" || bad "4b.60 --help prints the invocation syntax" "absent"
+printf '%s' "$h" | grep -q -- '--summary <path>' && printf '%s' "$h" | grep -q -- '--log <path>' \
+  && ok "4b.61 --help documents both options" || bad "4b.61 --help documents both options" "absent"
+printf '%s' "$h" | grep -q '69 ' \
+  && ok "4b.62 --help documents the exit codes (incl. 69)" || bad "4b.62 --help documents the exit codes" "absent"
+# It must not be a fixed line range any more, or it will drift again.
+if grep -qE "sed -n '[0-9]+,[0-9]+p' \"\\$0\"" "$LAUNCHER"; then
+  bad "4b.63 --help is not a fixed line range over the header" "a sed range remains"
+else
+  ok "4b.63 --help is not a fixed line range over the header"
+fi
+
+# roborev job 188: the beater's identity COMPARISON must cover every tier that HAS an identity.
+# The lstart tier was labelled in the beat but never compared — it fell through to a bare
+# `kill -0`, which a recycled pid satisfies, while the beat still advertised `parent-check:
+# lstart` so a reader would trust it. Adding a tier without wiring its comparison buys only the
+# appearance of a guarantee.
+BEATER_SH="$REPO_ROOT/scripts/lib/gate-heartbeat.sh"
+aliveblk=$(sed -n '/^_gate_alive() {$/,/^}$/p' "$BEATER_SH")
+if printf '%s\n' "$aliveblk" | grep -q 'starttime|lstart'; then
+  ok "4b.64 _gate_alive compares the identity for BOTH proc and lstart tiers"
+else
+  bad "4b.64 _gate_alive compares the identity for both tiers" "lstart still falls through to kill -0"
+fi
+if printf '%s\n' "$aliveblk" | grep -q 'kill -0'; then
+  ok "4b.65 ...and bare existence remains only as the kill0-tier fallback"
+else
+  bad "4b.65 bare existence remains as the kill0 fallback" "fallback missing entirely"
+fi
+# BEHAVIOURAL: a beater whose gate dies must stop beating and exit, on this host's tier.
+bash -c 'while :; do sleep 1; done' >/dev/null 2>&1 &
+_g=$!; echo "$_g" >> "$TMP/pids"
+_hbf="$TMP/tier.hb"
+bash "$BEATER_SH" --file "$_hbf" --run-id tier --gate-pid "$_g" --interval 1 </dev/null >/dev/null 2>&1 &
+_b=$!; echo "$_b" >> "$TMP/beater-pids"
+for _ in $(seq 1 40); do [ -s "$_hbf" ] && break; sleep 0.5; done
+_s1=$(sed -n 's/^beat-seq: //p' "$_hbf" 2>/dev/null)
+kill -9 "$_g" 2>/dev/null; wait "$_g" 2>/dev/null || true
+sleep 3
+_s2=$(sed -n 's/^beat-seq: //p' "$_hbf" 2>/dev/null)
+[ -n "$_s1" ] && [ "$_s1" = "$_s2" ] \
+  && ok "4b.66 the beater stops advancing once its gate dies (tier: $(sed -n 's/^parent-check: //p' "$_hbf"))" \
+  || bad "4b.66 the beater stops advancing once its gate dies" "beat-seq $_s1 -> $_s2"
+kill -9 "$_b" 2>/dev/null || true
+
 # Control: a writable existing summary is FINE — the check must not reject the normal case.
 okF="$TMP/ok-summary.txt"; printf 'previous content\n' > "$okF"
 before=$(cat "$okF")

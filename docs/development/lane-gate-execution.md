@@ -246,7 +246,11 @@ also publishes a signal that does. `scripts/lib/gate-heartbeat.sh` rewrites
   else `ps -o lstart=` — which exists on macOS, is stable, and is empty for a dead pid; its
   one-second granularity is immaterial for detecting pid *reuse*, which requires cycling the whole
   pid space. The beat declares which tier it used (`starttime` / `lstart` / `kill0`), and a
-  `kill0`-only beat — no identity at all — cannot earn an epoch-based `RUNNING`.
+  `kill0`-only beat — no identity at all — cannot earn an epoch-based `RUNNING`. The *comparison*
+  covers every tier that has an identity: an earlier revision added the `lstart` tier, labelled it
+  in the beat, and then never compared it — it fell through to a bare `kill -0`, so a recycled pid
+  satisfied it while the beat still advertised `parent-check: lstart` and a reader trusted it.
+  Adding a tier without wiring its comparison buys only the appearance of a guarantee.
 
   The gate's check is **three-valued** (`ours` / `gone` / `unverifiable`) because its two callers
   want *opposite* defaults for "cannot tell": respawning on it duplicates the beater at every
@@ -440,7 +444,7 @@ Every SUMMARY block now carries a `heartbeat:` line, so a pasted block shows the
 mechanism ran (same reason #3148 stamps a positive `schemas:` line).
 
 Self-tests: `scripts/tests/test_gate_liveness.sh` (147 cases) and
-`scripts/tests/test_gate_detached.sh` (88 cases), both in the full gate's
+`scripts/tests/test_gate_detached.sh` (95 cases), both in the full gate's
 `tooling-tests` component.
 
 ## Doctrine

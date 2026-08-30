@@ -3469,7 +3469,7 @@ if {
   # it BEGAN on. Its terminal line stays exactly `RESULT: INCOMPLETE (gate did not
   # finish)` — the #2908 liveness placeholder is unchanged.
   echo "$TREE_START_LINE"
-  echo "heartbeat: $HEARTBEAT_FILE (interval ${HEARTBEAT_INTERVAL}s) — read it with: bash scripts/gate-liveness.sh $SUMMARY_FILE --run-id $RUN_ID (#3473)"
+  echo "heartbeat: $HEARTBEAT_FILE (interval ${HEARTBEAT_INTERVAL}s) — read it with: $(printf 'bash %q %q --run-id %q' "$REPO_ROOT/scripts/gate-liveness.sh" "$SUMMARY_FILE" "$RUN_ID") (#3473)"
   echo "RESULT: INCOMPLETE (gate did not finish)"
   echo "$SUMMARY_END_MARKER"
 } > "$SUMMARY_FILE" 2>/dev/null; then

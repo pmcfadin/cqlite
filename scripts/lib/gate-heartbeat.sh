@@ -105,13 +105,24 @@ esac
 HOST_NAME=$(uname -n 2>/dev/null || echo unknown)
 
 # _gate_alive: AFFIRMATIVE liveness. Returns 0 only on a positive answer.
+# The identity COMPARISON must cover every tier that HAS an identity (roborev job 188). The
+# previous version branched on `starttime` alone, so the `lstart` tier added for macOS was
+# LABELLED in the beat and then never actually compared — it fell through to a bare `kill -0`,
+# which a recycled pid satisfies. The beat would still advertise `parent-check: lstart`, so a
+# reader would trust it and report a dead gate as RUNNING. Adding a tier without wiring its
+# comparison is worse than not adding it: it buys the appearance of a guarantee.
+#
+# Only `kill0` — no identity available at all — may fall back to bare existence, and the reader
+# already refuses to grant an epoch-based RUNNING from such a beat.
 _gate_alive() {
-  if [ "$PARENT_CHECK" = starttime ]; then
-    local now
-    now=$(_starttime "$GATE_PID") || return 1
-    [ "$now" = "$GATE_STARTTIME" ] || return 1   # pid recycled => the gate is gone
-    return 0
-  fi
+  case "$PARENT_CHECK" in
+    starttime|lstart)
+      local now
+      now=$(_starttime "$GATE_PID") || return 1
+      [ -n "$now" ] || return 1
+      [ "$now" = "$GATE_STARTTIME" ] || return 1   # pid recycled => the gate is gone
+      return 0 ;;
+  esac
   kill -0 "$GATE_PID" 2>/dev/null
 }
 

@@ -82,13 +82,50 @@
 set -uo pipefail
 
 REPO_ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)
+
+# A DEDICATED usage function, not a `sed -n '2,45p'` over the header (roborev job 188, Low). The
+# line range drifted as the header grew: by the time the threat-model section was added, --help
+# ended mid-sentence inside it and omitted the invocation syntax entirely. A range that must be
+# re-tuned whenever a comment is edited is a latent defect; this cannot drift.
+_usage() {
+  # delimiter deliberately NOT 'USAGE': that word is a section heading at column zero inside
+  # this text, and it terminated the heredoc early.
+  cat <<'HELPTEXT'
+gate-detached.sh — run scripts/agent-gate.sh in its OWN cgroup, so a lane session's teardown
+cannot kill it (issue #3473).
+
+USAGE
+  bash scripts/flow/gate-detached.sh [--summary <path>] [--log <path>] [--] [gate args...]
+
+OPTIONS
+  --summary <path>   where the gate writes its AGENT-GATE SUMMARY block. Default: a file inside
+                     a private 0700 mktemp directory (printed on launch).
+  --log <path>       where the gate's stdout/stderr go. Default: alongside the summary.
+                     Must not be the summary or the heartbeat path.
+  --                 end of options; everything after it is passed to agent-gate.sh.
+  -h, --help         this text.
+
+ON SUCCESS it prints the unit name, cgroup, summary, heartbeat, log, and the exact
+gate-liveness.sh command to poll with (shell-escaped, bound to this run's run-id), then exits 0
+immediately — the gate keeps running.
+
+EXIT CODES
+  0   the gate was launched and proved monitorable
+  1   refused (unusable summary/log path, or the gate published no heartbeat)
+  69  this host cannot run a cgroup-detached gate (no working `systemd-run --user`)
+
+WHY, and the threat model it does and does not cover: see the comment header of this file and
+docs/development/lane-gate-execution.md.
+HELPTEXT
+}
+
 SUMMARY=""; LOGFILE=""
 GATE_ARGS=()
 while [ $# -gt 0 ]; do
   case "$1" in
     --summary) SUMMARY="${2:?--summary needs a path}"; shift 2 ;;
     --log)     LOGFILE="${2:?--log needs a path}"; shift 2 ;;
-    -h|--help) sed -n '2,45p' "$0"; exit 0 ;;
+    -h|--help) _usage; exit 0 ;;
     --)        shift; GATE_ARGS+=("$@"); break ;;
     *)         GATE_ARGS+=("$1"); shift ;;
   esac
