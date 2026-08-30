@@ -189,6 +189,20 @@ pub fn committed_fixtures(listing: &[String]) -> Result<CommittedFixtures, Strin
     Ok(out)
 }
 
+/// WHICH of a table's git-committed `*-Data.db` files a committed case compares.
+///
+/// The lexicographically first `(directory, file)`, which is the same DIRECTORY the
+/// evidence-based lookup's sorted directory scan would choose. Exposed because the
+/// coverage census has to name the SAME generation this resolver stages: two copies
+/// of the rule could drift, and a census that reported one generation as compared
+/// while the lane compared another would be a claim about bytes nothing read (issue
+/// #1491 review round 21).
+pub fn selected_committed_sstable(
+    sstables: &BTreeSet<CommittedSstable>,
+) -> Option<&CommittedSstable> {
+    sstables.iter().next()
+}
+
 /// WHICH fixture directory a case is compared from, and how many there were.
 ///
 /// `of_dirs` is the number of SSTable DIRECTORIES that were candidates for this
@@ -220,7 +234,7 @@ pub fn committed_fixture_dir(
     table: &str,
     checkout: &Path,
 ) -> Result<Fixture, String> {
-    let Some((dir, file)) = sstables.and_then(|s| s.iter().next()) else {
+    let Some((dir, file)) = sstables.and_then(selected_committed_sstable) else {
         return Err(format!(
             "{keyspace}.{table} is declared a git-committed case but `git ls-files` \
              tracks no *-Data.db for it"
