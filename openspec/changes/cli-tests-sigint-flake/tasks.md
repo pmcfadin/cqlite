@@ -716,17 +716,20 @@ deadline.
   `calibration_takes_the_largest_scale_and_only_ever_loosens`.
 * `T1_DEADLINE_BASE` **180s** / cap 360s; `T2_DEADLINE_BASE` **480s** / cap 720s; both caps under
   `MAX_TEST_DEADLINE` 900s (the full gate's own 15-20 min wall clock).
-* **ONE** baseline constant, `QUIET_OBSERVATION_BASELINE = 60ms`, for both observations
-  *(ROUND 10 CORRECTION: 60ms, and the "81ms fastest loaded observation" bracket below it, were
-  wrong — the same table records loaded observations of 13ms, 45ms and 76ms, so the SIGINT test
-  could stay unscaled at load average 30. The baseline is now **44ms** and both ends are DERIVED
-  from the table rather than labelled. See round 10.)* — they measure
-  the same shape of work. It is **bracketed by two recorded measurements**: above the slowest recorded
+* **ONE** baseline constant, `QUIET_OBSERVATION_BASELINE`, for both observations — they measure the
+  same shape of work. It is **bracketed by the recorded measurements**: above the slowest recorded
   QUIET value (43ms, the sibling's slowest ack) so an unloaded host yields `scale == 1` exactly, and
-  below the fastest value recorded under real contention (81ms, `t_boot` at load average 116) so
-  contention demonstrably engages it. Both directions are asserted from those literals by
+  below the least-scaled recorded CONTENTION CASE (45ms, the SIGINT run at load average 30) so
+  contention demonstrably engages it. Both directions are asserted from the recorded table by
   `the_baseline_is_quiet_inert_and_contention_active` — which is what "not inert" actually means, and
   needs no anchor, no derived multiple and no NOTICE.
+  *(ROUND 10 CORRECTION, roborev job 233 finding 2 — this bullet originally read
+  `QUIET_OBSERVATION_BASELINE = 60ms` bracketed below "the fastest value recorded under real
+  contention (81ms, `t_boot` at load average 116)". That label was false against the very table it
+  cited, which records loaded observations of 13ms, 45ms and 76ms, and at 60ms the SIGINT test could
+  stay entirely UNSCALED at the recorded load-average-30 timings. The value is now **44ms** and both
+  ends are DERIVED from the table encoded as data in `budgets.rs`, per contention case. See round
+  10.)*
 
 `Stage` — attribution and nothing else: a name, a start instant, and a borrow of the deadline.
 `Stage::remaining()` returns the **test's** remaining time, so there is no allowance to hand out, none
