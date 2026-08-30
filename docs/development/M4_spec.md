@@ -668,18 +668,19 @@ the instance list further down is a floor, not a ceiling:
 
   | Projected type | Python projection | Canonical form | Node/CLI canonical form | Verdict |
   |---|---|---|---|---|
-  | `list<T>` | `List` arm → `tuple` | array | array | **benign iff every descendant is benign** — divergent when `T` holds a `map`/`udt` (a-3) |
+  | `list<T>` | `List` arm → `tuple` | array | array | **benign iff every descendant is benign** — divergent when `T` holds a `map` (a-2 at depth). A nested `udt` used to make this row divergent (a-3) and no longer does: the `Udt` arm is type-preserving since #3504 |
   | `set<T>` | no `Set` arm — falls through to `value_to_py` → `set_to_py` → `frozenset` | sorted array | sorted array | **benign iff every descendant is benign** — and see #3500 when a UDT is nested |
   | `tuple<...>` | no `Tuple` arm — falls through to `value_to_py` → `tuple` | array | array | **benign iff every descendant is benign** — and see #3500 when a UDT is nested |
   | `map<k,v>` | `Map` arm → tuple of pairs | array of arrays | array of `{"key": …, "value": …}` | **DIVERGES** (a-2) |
-  | `udt` | `Udt` arm → `frozenset` of `(name, value)` pairs | array of `[name, value]` | **object** | **DIVERGES** (a-1; a-3 when nested) |
+  | `udt` | `Udt` arm → **`cqlite.Udt`** (identity out of band, field values recursively projected — #3504) | **object** | **object** | **benign** — the projection is type-PRESERVING, so a-1/a-3 are **CLOSED**. It used to project to a `frozenset` of `(name, value)` pairs, canonicalizing to an array of `[name, value]` where Node/the CLI produce an object |
 
-  So family (a) generates instances **only for `map` and `udt`** in a projection position, plus
-  anything that nests them. **Benign projections, named explicitly so #1455 does not special-case
+  So family (a) now generates instances **only for `map`** in a projection position, plus anything
+  that nests it. (Before #3504 `udt` was the second generator — instances a-1 and a-3, both now
+  closed; the criterion is unchanged, `udt` simply stopped satisfying it.) **Benign projections, named explicitly so #1455 does not special-case
   them:** a `list`, `set` or `tuple` in a projection position loses its Python **host-type
   identity** (a `list` key arrives as a `tuple`) but its **canonical form is unchanged**, so it
   compares equal across bindings and needs no handling — **provided its elements are themselves
-  benign.** `set<frozen<list<int>>>` is benign; `set<frozen<list<frozen<udt>>>>` is a-3. The defect is a *changed canonical form*,
+  benign.** `set<frozen<list<int>>>` is benign; `set<frozen<list<frozen<map<k,v>>>>` is a-2 at depth (`set<frozen<list<frozen<udt>>>>` was a-3, now closed). The defect is a *changed canonical form*,
   never a *lost host type*. (The two fall-through rows are also where #3500's `TypeError` cases
   live — see below — but that is a totality bug in the binding, not a canonicalization divergence.)
 - **(b) Host-shape collision.** Two different CQL types arrive as the same Python host type, so
@@ -704,7 +705,9 @@ schema-aware normalization. That is a behavior change, out of scope for #1454, a
 - `map<k,v>` → a **sorted array of `{"key": k, "value": v}` objects**, keyed on the
   canonicalized key. This is also the CLI's JSON rendering of a map. It holds only where the host
   shape identifies the key type — a scalar key always, a non-scalar key only if no instance of
-  family (a) or (b) applies to it (see **a-1**, **a-3** and **b-2** for known cases).
+  family (a) or (b) applies to it (live cases: **a-2**, a `map` in key position, and **b-2**'s
+  cell-level map site. **a-1** and **a-3**, both UDT-key cases, are CLOSED by #3504 — a UDT key is
+  now a `cqlite.Udt` and identifies itself).
 - `udt` → an object keyed by field name with `_type` retained, i.e. the CLI's UDT JSON shape.
   Since #3504 there is no `_keyspace` entry to drop: the binding no longer injects one, so any
   `_keyspace` key present is a genuine FIELD and survives — as it does in the CLI's output.
@@ -715,7 +718,7 @@ Python host shape — **can be closed, and this table closes it.** The set of ho
 and derivable: it is exactly the set of return shapes of `value_to_py`'s match arms (plus
 `json_to_py`'s and `value_to_hashable_key`'s). Every row below was derived from those arms in
 `bindings/python/src/value.rs`, not sampled, so the table is **COMPLETE for the host shapes it
-lists** — 16 shapes. Contrast with family (a), whose *instance* list ranges over an unbounded
+lists** — 17 shapes. Contrast with family (a), whose *instance* list ranges over an unbounded
 nesting space and therefore cannot be closed. `Value::Frozen` adds no row: it recurses.
 
 | Python host shape | CQL / value sources that produce it | Collision? | Canonical-form verdict |
@@ -733,19 +736,20 @@ nesting space and therefore cannot be closed. `Value::Frozen` adds no row: it re
 | `cqlite.Duration` | `Value::Duration` | no | — |
 | `IPv4Address` / `IPv6Address` | `Value::Inet` | no | — |
 | `list` | `list<T>`, `set<frozen<udt>>` (the `contains_udt` fallback), **JSON array**. (A *projected* `set<frozen<udt>>` would also produce a `list`, but a `list` is unhashable, so that path raises rather than canonicalizing — #3500.) | yes (3) | **MIXED** — `set` vs `list` order-sensitivity is **b-1**; a **JSON array is BENIGN**, it stays an array and matches the CLI's array, so it is *not* a canonicalization divergence (its element ORDER is unverified, but that is **b-4**, which already covers every array, not a JSON-specific defect) |
-| `frozenset` | `set<T>` (non-UDT elements), a **projected `udt`** (`value_to_hashable_key`'s `Udt` arm), a **projected `set`** (fall-through → `set_to_py`) | yes (3) | **MIXED** — the projected UDT **DIVERGES** (**a-1**, and **a-3** when nested); `set<T>` vs a projected `set` is benign |
+| `frozenset` | `set<T>` (non-UDT elements), a **projected `set`** (fall-through → `set_to_py`) | yes (2) | **benign** — `set<T>` vs a projected `set` canonicalize identically. A **projected `udt`** was this row's third source and its only divergent one (**a-1**/**a-3**); since #3504 the `Udt` arm returns a `cqlite.Udt`, so it has left this row entirely |
 | `tuple` | `tuple<...>`, a **projected `list<T>`** (`List` arm), a **projected `tuple<...>`** (fall-through), a **projected `map<k,v>`** (`Map` arm → a tuple of pairs) | yes (4) | **MIXED** — benign for `tuple<...>`, a projected `list<T>` and a projected `tuple<...>` (all canonicalize to an array); **DIVERGENT for a projected `map`**, whose array-of-arrays is not the CLI/Node array of `{"key": …, "value": …}` — instance **a-2** |
-| `dict` | `map<k,v>` (cell level), `udt`, **JSON object**, and a **ROW** at row level | yes (4) | **DIVERGES** — map vs UDT is **b-2**; the JSON object is **b-5**; the ROW source is disambiguated by the explicit `is_row_level` signal and is therefore **FIXED**, not a divergence |
+| `dict` | `map<k,v>` (cell level), **JSON object**, and a **ROW** at row level. `udt` was a fourth source and is **no longer one** (#3504: `value_to_py`'s `Udt` arm returns a `cqlite.Udt`) | yes (3) | **DIVERGES** — a cell-level `map` carrying a literal `"_type"` key is still canonicalized as a UDT, which is **b-2**'s surviving cell-level-map site (the ambiguity is no longer *with a UDT*: it is an untyped `dict` misread by the `"_type"` sniff); the JSON object is **b-5**; the ROW source is disambiguated by the explicit `is_row_level` signal and is therefore **FIXED**, not a divergence |
+| `cqlite.Udt` | `udt` (`value_to_py`'s `Udt` arm), a **projected `udt`** (`value_to_hashable_key`'s `Udt` arm) | yes (2) | **benign** — the two are identical BY CONSTRUCTION (one `build_udt`, differing only in the per-field converter), so both canonicalize to the CLI's UDT object. Added by #3504; no other CQL type produces this shape, which is what makes `isinstance(v, cqlite.Udt)` authoritative |
 
 Reading rule: a shape with no collision needs no thought; a **benign** collision needs none either
-(that is what benign means); the **four** rows carrying a divergent source — `list`, `frozenset`,
-`tuple` (for a projected `map` only) and `dict` — are the ones requiring #1455 to act, and their
+(that is what benign means); the **three** rows carrying a divergent source — `list`, `tuple` (for
+a projected `map` only) and `dict` — are the ones requiring #1455 to act, and their
 instances are named in the next table. A projection position that would need an unhashable shape
 (`dict`, `list`) does not reach the normalizer at all: it raises inside the binding (#3500).
 
 **How each row was derived, and the verification trap to avoid.** A row answers "**which producers
 can emit this host shape**", counted over BOTH `value_to_py`'s arms AND `value_to_hashable_key`'s
-projections (`List`→`tuple`, `Map`→tuple of pairs, `Udt`→`frozenset`, `Frozen`→recurse, everything
+projections (`List`→`tuple`, `Map`→tuple of pairs, `Udt`→`cqlite.Udt`, `Frozen`→recurse, everything
 else falling through to `value_to_py`) AND `json_to_py`'s arms. **Confirming that all 26 `Value::`
 variants appear somewhere in this section is NOT the same check** — that is *variant coverage*, and
 it is strictly weaker: it passed while the `tuple` row was missing its projected-`map` source
@@ -799,7 +803,7 @@ site is not "harder to hit" — it is **unexpressible**. Subject:
 |---|---|---|
 | **Row dict** | column names | **FIXED.** A row with a column named `_type` used to be sniffed as a UDT, dropping a `_keyspace` column. `normalize_python_value` now checks the caller's explicit `is_row_level` signal **before** the `"_type"` content sniff. The signal is authoritative (every `is_row_level=True` call site normalizes a `row.to_dict()`, and a UDT is always a CELL, so it can only arrive with `is_row_level=False`) — which is also why the reorder cannot affect the UDT branch. **An unambiguous signal existed, so it was used instead of guessing.** #1455 needs no row-level handling. |
 | **JSON object** | JSON keys | **OPEN — #3497.** A JSON object cell reaching Python as a `dict` (`json_to_py`) can carry a literal `"_type"` key of its own and is then canonicalized as if it were a UDT. Since #3504 that is no longer an ambiguity *with a UDT* — a UDT is a distinct `cqlite.Udt` — it is the normalizer's untyped-`dict` branch misreading a JSON object, the same residual as the cell-level map row. Instance **b-5**; unreachable from today's corpus (no fixture uses a `"json"` comparator). |
-| **Cell-level map** | map keys | **OPEN — #3497**, and now for a *narrower* reason. A `map<text, X>` holding a literal `"_type"` key is still canonicalized as if it were a UDT: an **object** instead of the documented `{"key": …, "value": …}` array, with a `"_keyspace"` entry dropped. What changed: the claim "no signal distinguishes a map from a UDT at cell level — both are a `dict`" is **no longer true**. Since #3504 a UDT is a distinct type, so `isinstance(v, cqlite.Udt)` (Python) / the `{typeName, keyspace, fields}` shape (Node) is an authoritative structural signal, and the normalizer's UDT branch is keyed on it — no real UDT reaches the `"_type" in value` sniff any more. The surviving defect is therefore entirely on the MAP side: a `dict` whose CQL type is unknown to the normalizer. Closing it still needs the declared type threaded in (#3497); #3504 supplied the signal, not the dispatch. Until then treat such a map as **UNSUPPORTED**. |
+| **Cell-level map** | map keys | **OPEN — #3497**, and now for a *narrower* reason. A `map<text, X>` holding a literal `"_type"` key is still canonicalized as if it were a UDT: an **object** instead of the documented `{"key": …, "value": …}` array, with a `"_keyspace"` entry dropped. What changed: the claim "no signal distinguishes a map from a UDT at cell level — both are a `dict`" is **no longer true**. Since #3504 a UDT is a distinct type, so `isinstance(v, cqlite.Udt)` (Python) is an **authoritative** structural signal — a distinct host type no other CQL value produces — and the normalizer's UDT branch is keyed on it. **Node's half is weaker and must not be described the same way:** `{typeName, keyspace, fields}` is a SHAPE, not a type, and a `Value::Json` object cell can carry those three keys (instance **b-5**), so on the Node side it remains a narrower structural SNIFF — better than `"_type"` (three co-occurring keys a UDT always has, rather than one marker) but not authoritative — no real UDT reaches the `"_type" in value` sniff any more. The surviving defect is therefore entirely on the MAP side: a `dict` whose CQL type is unknown to the normalizer. Closing it still needs the declared type threaded in (#3497); #3504 supplied the signal, not the dispatch. Until then treat such a map as **UNSUPPORTED**. |
 | **UDT fields** | field names | **FIXED (#3504) — the channel is gone, not narrowed.** `_type`/`_keyspace` are legal quoted UDT field names, and because both bindings injected the markers *before* setting fields, the field used to OVERWRITE the metadata — symmetrically, in Python and Node — and the canonical rule then dropped `_keyspace` (the CLI omits it for UDTs) so such a field was **lost**. **Mechanism of the fix:** the field namespace is now a namespace of its own (`cqlite.Udt.fields` / `UdtValue.fields`) and identity rides outside it (`type_name`/`keyspace`, `typeName`/`keyspace`), so no field name can address the marker's slot — there is no slot. `udt["_type"]` now reaches the FIELD (Python) and `result._type` is `undefined` (Node); Node's `interface UdtValue` also lost the `[field: string]: Value` index signature that permitted the collision. A **NULL** `_type` field was a second, distinct failure mode (it nulled the injected type name) and is pinned too. The normalizer test that pinned the defect (`test_udt_field_named_keyspace_is_dropped`) now pins the FIX as `test_udt_field_named_keyspace_survives`. **Residual, CLI-side and deliberately out of scope:** the CLI's own JSON writer still injects `_type`, so the CANONICAL form (which mirrors the CLI) still collides for a field of that name — both sides agree, so parity holds; raised as a follow-up on #3504, excluded because the CLI is the parity suite's comparison ORACLE and moving an oracle with its subject blinds the guard. |
 | **UDT-as-map-key projection** | field names | **FIXED (#3504).** `value_to_hashable_key`'s `Udt` arm used to push a pair for `_type`, then `_keyspace`, then one per field, so a field named `_type` yielded a **duplicate** `_type` pair inside the projected `frozenset` (the two pairs differ in value, so nothing dedupes them). Measured on the fixture before the fix: the projected key's pair names were `['_keyspace', '_keyspace', '_type', '_type', 'real_field']`. The arm now emits a **`cqlite.Udt`** — exactly one entry per declared field, none for the metadata. The property the injected pairs were incidentally supplying is preserved deliberately: `Udt.__eq__`/`__hash__` are over `(keyspace, type_name, fields)`, so two UDTs of different declared types with identical fields stay distinct map keys (`fcm` vs `ftm` in the fixture). This also CLOSES instances **a-1** and **a-3**, which it compounded. Python-only: Node keys a real JS `Map` by the object and needs no projection. |
 
