@@ -295,10 +295,12 @@ fn an_empty_member_with_siblings_is_not_refused_and_is_compared() {
 /// measurement and not blanket strictness: a `set<text>` member can BE the
 /// empty string, a `list<int>` member always carries a digit, and a `tuple`'s
 /// member count comes from the DDL (so the comparison's arity check sees a
-/// dropped member).
+/// dropped member). The bound is `member_can_render_empty`, established per
+/// type from the formatter itself by
+/// `an_empty_rendering_is_possible_only_for_text` below.
 #[test]
 fn an_empty_container_is_refused_only_where_its_element_can_render_empty() {
-    for decl in ["set<text>", "list<ascii>", "set<blob>", "list<timestamp>"] {
+    for decl in ["set<text>", "list<ascii>", "set<varchar>"] {
         let ty = ty_of(decl);
         let why = node_refusal(&json!([]), Some(&ty))
             .unwrap_or_else(|| panic!("{decl}: an empty container must be refused"));
@@ -312,6 +314,16 @@ fn an_empty_container_is_refused_only_where_its_element_can_render_empty() {
         "list<double>",
         "set<boolean>",
         "list<frozen<set<int>>>",
+        // Finding Y2: these THREE used to be refused, by a deny-list that answered
+        // "this element can render empty" for every type nobody had established. An
+        // empty `blob` renders `0x`, a `timestamp` a fixed-width pattern and a
+        // `uuid` 36 characters, so `[]`/`{}` there can only mean zero members —
+        // refusing them dropped decidable cells from the coverage counts.
+        "set<blob>",
+        "list<timestamp>",
+        "set<uuid>",
+        "list<inet>",
+        "set<duration>",
     ] {
         assert_eq!(
             node_refusal(&json!([]), Some(&ty_of(decl))),
@@ -333,6 +345,145 @@ fn an_empty_container_is_refused_only_where_its_element_can_render_empty() {
     );
     // And an UNDECLARED type refuses nothing: the comparison reports the shape.
     assert_eq!(node_refusal(&json!([]), None), None);
+}
+
+/// The EMPTY-CONTAINER bound, taken from the FORMATTER instead of asserted in
+/// prose: render the EMPTIEST value each declared type has through
+/// `cqlite_core::util::value_fmt::ValueFormatter` — the very formatter the CSV
+/// egress uses — and require [`member_can_render_empty`] to agree with what came
+/// out.
+///
+/// # Why consulting CQLite here is not circular
+///
+/// This is the ONE question in this lane answered from CQLite's own code, and it is
+/// a different question from the ones the golden answers. It does not ask what a
+/// value of this type SHOULD render as — that is the `sstabledump` golden's, and
+/// answering it from CQLite would be circular (CLAUDE.md, #3042). It asks whether
+/// this egress's rendering of SOME value of the type can be ZERO-LENGTH, i.e. what
+/// shape the output can take, which nothing outside the formatter can answer. The
+/// answer only ever decides whether an empty container is REFUSED; every value the
+/// comparison then makes is still the golden's.
+///
+/// # What the sample is, and what it is not
+///
+/// Each case is the type's emptiest or most degenerate value — a zero-length
+/// blob/varint/inet, an all-zero duration, the epoch instant, the empty string —
+/// i.e. the branch an empty rendering could plausibly come from. It is a SAMPLE and
+/// not a proof over every value; the proof is the per-branch enumeration
+/// [`member_can_render_empty`] records, and this case is what stops that record
+/// drifting from the formatter it describes (round 19, finding Y2: the record said
+/// `blob` could render empty, and `0x` is what the formatter has always produced).
+#[test]
+fn an_empty_rendering_is_possible_only_for_text() {
+    use cqlite_core::types::{UdtField, UdtValue, Value};
+    use cqlite_core::util::value_fmt::ValueFormatter;
+    use std::collections::BTreeSet;
+
+    /// The `CqlType` variant a declared type parses to. TOTAL, with no `_` arm, so
+    /// a new variant is a compile error here exactly as it is in
+    /// `member_can_render_empty` — which is what keeps the census below honest.
+    fn tag(ty: &CqlType) -> &'static str {
+        match ty {
+            CqlType::Numeric(_) => "numeric",
+            CqlType::Text(_) => "text",
+            CqlType::Boolean => "boolean",
+            CqlType::Blob => "blob",
+            CqlType::Timestamp => "timestamp",
+            CqlType::Opaque(_) => "opaque",
+            CqlType::List(_) => "list",
+            CqlType::Set(_) => "set",
+            CqlType::Map(..) => "map",
+            CqlType::Tuple(_) => "tuple",
+            CqlType::Udt(_) => "udt",
+        }
+    }
+    const VARIANTS: &[&str] = &[
+        "numeric",
+        "text",
+        "boolean",
+        "blob",
+        "timestamp",
+        "opaque",
+        "list",
+        "set",
+        "map",
+        "tuple",
+        "udt",
+    ];
+
+    let cases: Vec<(&str, Value)> = vec![
+        // The one type whose rendering CAN be empty: `Value::Text` is the single
+        // formatter branch that passes its payload through unchanged.
+        ("text", Value::text("")),
+        ("varchar", Value::text("")),
+        ("ascii", Value::text("")),
+        ("int", Value::Integer(0)),
+        ("varint", Value::varint(Vec::new())),
+        (
+            "decimal",
+            Value::Decimal {
+                scale: 0,
+                unscaled: Vec::new(),
+            },
+        ),
+        ("double", Value::Float(0.0)),
+        ("boolean", Value::Boolean(false)),
+        // `0x` — the finding's own case.
+        ("blob", Value::blob(Vec::new())),
+        ("timestamp", Value::Timestamp(0)),
+        ("date", Value::Date(0)),
+        ("time", Value::Time(0)),
+        ("uuid", Value::Uuid([0u8; 16])),
+        ("timeuuid", Value::Uuid([0u8; 16])),
+        // A length no address has, i.e. the formatter's degenerate branch.
+        ("inet", Value::inet(Vec::new())),
+        (
+            "duration",
+            Value::Duration {
+                months: 0,
+                days: 0,
+                nanos: 0,
+            },
+        ),
+        ("set<int>", Value::Set(Vec::new())),
+        ("list<text>", Value::List(Vec::new())),
+        ("map<text, text>", Value::Map(Vec::new())),
+        ("tuple<int, text>", Value::Tuple(Vec::new())),
+        (
+            "frozen<address>",
+            Value::Udt(Box::new(UdtValue {
+                type_name: "address".to_string(),
+                keyspace: "ks".to_string(),
+                fields: vec![UdtField {
+                    name: "street".to_string(),
+                    value: None,
+                }],
+            })),
+        ),
+    ];
+
+    let mut seen: BTreeSet<&'static str> = BTreeSet::new();
+    for (decl, value) in &cases {
+        let rendered = ValueFormatter::format_value(value);
+        let ty = ty_of(decl);
+        seen.insert(tag(&ty));
+        assert_eq!(
+            member_can_render_empty(&ty),
+            rendered.is_empty(),
+            "{decl}: the formatter rendered {rendered:?}, which the EMPTY-CONTAINER \
+             bound contradicts"
+        );
+    }
+    for variant in VARIANTS {
+        assert!(
+            seen.contains(variant),
+            "no case establishes the {variant} variant's emptiness answer from the \
+             formatter"
+        );
+    }
+    // A NULL member widens no type's answer: it renders as the `null` TOKEN (the
+    // module doc's NULL-TOKEN), which is four characters.
+    assert_eq!(ValueFormatter::format_value(&Value::Null), "null");
 }
 
 /// Finding P2: an ambiguous NESTED member is refused AT ITSELF, so the outer

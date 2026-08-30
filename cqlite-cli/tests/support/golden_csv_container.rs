@@ -183,6 +183,15 @@
 //! REFUSED, bounded by the DECLARED element type: a `list<int>` member always
 //! carries a digit, so `[]` there can only mean zero members and IS compared.
 //!
+//! That bound is `text`/`varchar`/`ascii` and NOTHING else, established from
+//! `ValueFormatter`'s own branch per type by [`member_can_render_empty`] — an empty
+//! `blob` renders `0x`, an `inet` or a `uuid` always carries characters, and a
+//! zeroed `duration` renders `0ns`. It used to be a deny-list that answered "can
+//! render empty" for every type nobody had checked, which refused empty collections
+//! of all of those and dropped them from the coverage counts (review round 19,
+//! finding Y2). Over-refusal costs coverage: a refused node keeps only the
+//! emptiness bound below.
+//!
 //! It is an instance of the inherent collision above, kept as its own rule because
 //! it is the instance that attacks the member COUNT — the one property the bound
 //! below then re-establishes. It is also the mirror of the SOLE empty member:
@@ -593,25 +602,75 @@ fn empty_container_is_ambiguous(ty: Option<&CqlType>) -> bool {
 
 /// Can a value of this declared type render as the EMPTY string?
 ///
-/// Deliberately CONSERVATIVE — it answers `false` only for the types whose every
-/// rendering provably carries at least one character: a number always carries a
-/// digit, a boolean is `true`/`false`, and a container carries its brackets (an
-/// empty one renders as the bracket pair, not as nothing). Everything else —
-/// `text`/`varchar`/`ascii`, which hold the empty string, and every type whose
-/// empty-value spelling this lane has not established — answers `true`, because
-/// the cost of over-refusing is a counted, NAMED gap in the census while the cost
-/// of under-refusing is a false pass.
+/// # Why asking CQLite's own formatter is legitimate here
+///
+/// This is the one question in this lane whose answer comes from
+/// `cqlite_core::util::value_fmt::ValueFormatter` rather than from an external
+/// oracle, and the distinction is worth stating: it does not ask what a value of
+/// this type SHOULD render as — that is the `sstabledump` golden's answer, and
+/// taking it from CQLite would be circular (CLAUDE.md, #3042) — it asks what
+/// SHAPE this egress's own output can take, i.e. whether the CSV rendering of SOME
+/// value of this type can be zero-length. Nothing outside the formatter can answer
+/// that, and the answer only ever decides whether an EMPTY container is refused;
+/// every value the comparison then makes is still the golden's.
+///
+/// # The answer, per type, from that formatter's branches
+///
+/// `ValueFormatter::format_value` has exactly one branch that passes its payload
+/// straight through — `Value::Text(s)` renders `String::from_utf8_lossy(s)` — so
+/// `text`/`varchar`/`ascii` are the ONLY types with an empty rendering. Every other
+/// branch emits at least one character on every path it can take, including its
+/// emptiest and its invalid inputs:
+///
+///   * integers/floats render through `to_string()`, a `{:e}`/`{}` format, or the
+///     tokens `NaN`/`Infinity`/`-Infinity`; a zero-length `varint` renders `0`, and
+///     a zero-length or over-ceiling `decimal` renders `0` or
+///     `<corrupt-decimal:…>`;
+///   * `boolean` is `true`/`false`;
+///   * `blob` is `format!("0x{hex}")`, so an EMPTY blob is `0x` — 2 characters, not
+///     none. This is the type the earlier deny-list got wrong;
+///   * `timestamp`/`date`/`time` render a fixed-width `chrono` pattern, or an
+///     `<invalid-…:{value}>` marker;
+///   * `uuid`/`timeuuid` render 36 characters; `inet` renders an
+///     `Ipv4Addr`/`Ipv6Addr` display or `<invalid-inet:N-bytes>`; a `duration`
+///     whose every component is zero renders `0ns`;
+///   * a container renders its bracket pair, so an empty one is `[]`/`{}`/`()`.
+///
+/// A NULL member does not widen any of these: `Value::Null` renders as the `null`
+/// token (the module doc's NULL-TOKEN), which is 4 characters.
+///
+/// `tests::an_empty_rendering_is_possible_only_for_text` runs that formatter over
+/// each type's emptiest value and requires this function to agree with it, so the
+/// claim above is measured rather than asserted in prose.
+///
+/// # Exhaustive on purpose, and why the DEFAULT matters
+///
+/// Written as a total match with no `_` arm. The earlier form was a deny-list —
+/// "answer `false` for these variants, `true` for everything else" — which
+/// answered `true` for `blob`, `timestamp` and every opaque scalar, so an empty
+/// collection of any of them was refused and dropped from the coverage counts
+/// (review round 19, finding Y2). Over-refusal is a BLIND SPOT and not
+/// conservatism: a refused node keeps only [`body_emptiness_bound`], so refusing a
+/// recoverable position makes it unchecked. A wildcard would also decide a FUTURE
+/// `CqlType` variant's answer silently, in whichever direction the wildcard
+/// happens to sit; with the match total, a new variant is a compile error whose
+/// fix is to establish that type's answer from the formatter, here.
 fn member_can_render_empty(ty: &CqlType) -> bool {
-    !matches!(
-        ty,
+    match ty {
+        // The one pass-the-payload-through branch: an empty string renders as
+        // nothing at all, which is what makes `{}` ambiguous for a `set<text>`.
+        CqlType::Text(_) => true,
         CqlType::Numeric(_)
-            | CqlType::Boolean
-            | CqlType::List(_)
-            | CqlType::Set(_)
-            | CqlType::Map(..)
-            | CqlType::Tuple(_)
-            | CqlType::Udt(_)
-    )
+        | CqlType::Boolean
+        | CqlType::Blob
+        | CqlType::Timestamp
+        | CqlType::Opaque(_)
+        | CqlType::List(_)
+        | CqlType::Set(_)
+        | CqlType::Map(..)
+        | CqlType::Tuple(_)
+        | CqlType::Udt(_) => false,
+    }
 }
 
 /// The declared type of member `i` of an array position, or `None` when the
