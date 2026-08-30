@@ -72,11 +72,15 @@ You are the CQLite delivery lead. The PR for issue `#N` is **merged**. Close the
      # it records closed_at: null and bounds cycle_time_s on the PR's mergedAt. The kind is decided by
      # replaying the issue TIMELINE to the PR's mergedAt (#3559): slice <=> the issue was OPEN at
      # mergedAt AND this PR closes NOTHING. So a slice STAYS stampable after its issue is closed or
-     # reopened, and --slice is refused when the timeline places a `closed` event at or before mergedAt
-     # (that delivery COMPLETED the issue) or when this PR declares it closes the issue (an ordinary
-     # completed delivery whose auto-close lands after the merge — retry WITHOUT --slice once GitHub
-     # records the close). An issue open at mergedAt stamped WITHOUT --slice is refused too. NEVER
-     # close the issue to satisfy the tool, and NEVER hand-append to the JSONL: both are FORBIDDEN.
+     # reopened, and --slice is refused when the timeline places a `closed` event STRICTLY BEFORE
+     # mergedAt (that delivery COMPLETED the issue), when a state event falls in the SAME SECOND as
+     # mergedAt (one-second resolution, so the tie is unmeasurable and is refused as that), or when
+     # this PR declares it closes the issue (an ordinary completed delivery whose auto-close lands
+     # after the merge — retry WITHOUT --slice once GitHub records the close). An issue open at
+     # mergedAt stamped WITHOUT --slice is refused too. Where the tool CANNOT disprove your flag it
+     # accepts it and says on stderr that the kind rests on YOUR assertion, not a measurement — read
+     # that note, it is not noise. NEVER close the issue to satisfy the tool, and NEVER hand-append
+     # to the JSONL: both are FORBIDDEN.
      --claim-collisions <rejected claim pushes> --rebase-events <rebases/conflict resolutions> \
      --roborev-findings <roborev findings raised> --rework <re-open / re-review rounds>
    # This skill NEVER invokes roborev (the closer owns the final pass, via the only sanctioned invocation
@@ -174,7 +178,7 @@ three are wrong for a slice, in the direction that destroys the thing the issue 
 | step | completed delivery | **slice** |
 |---|---|---|
 | 3 — archive the OpenSpec change | archive it | **DO NOT.** The change is not finished; archiving it strands the remaining slices with no spec. |
-| 4 — stamp telemetry | as written | add **`--slice`**. It records `closed_at: null` and bounds `cycle_time_s` on the PR's `mergedAt`. The tool REFUSES `--slice` on a closed/reopened issue and inside the post-merge auto-close window, so a refusal here means you classified wrong — re-read the gate above, and **never** close the issue to make the stamp succeed. |
+| 4 — stamp telemetry | as written | add **`--slice`**. It records `closed_at: null` and bounds `cycle_time_s` on the PR's `mergedAt`. Since **#3559** the tool decides this by replaying the issue's **timeline** to the PR's `mergedAt`, so it now **ACCEPTS** `--slice` for an issue that is closed or reopened NOW but was open when your PR merged — the case that used to be unstampable. It REFUSES when the timeline places a `closed` event **strictly before** `mergedAt` (that delivery COMPLETED the issue; a later reopen does not change it), when a state event falls in the **same second** as `mergedAt` (one-second resolution, so the tie is unmeasurable), and when **this PR declares it closes the issue** (`Closes #N` ⇒ completed delivery, whatever the issue's current state). A refusal therefore still means you classified wrong — but re-read *which* of those it names, and **never** close the issue to make the stamp succeed. |
 | 5 — board `Status=Done` | set Done | **DO NOT.** Set `Status=Ready` (more slices to claim) or leave `In Progress` if you are continuing. Done on an unfinished issue hides it from dispatch. |
 | 7 — **close the issue** | close it | **DO NOT CLOSE.** Comment instead, naming the slice shipped and what remains: `gh issue comment <N> --body "Slice shipped: #<pr> (<commit>) — <what landed>. Remaining: <what does not>. Issue stays OPEN by design (#3393 ruling)."` |
 
