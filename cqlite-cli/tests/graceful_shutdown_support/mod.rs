@@ -105,6 +105,18 @@ impl Stream {
             Stream::Stderr => "stderr",
         }
     }
+
+    /// The exact prefix `spawn_reader` writes into the transcript for this
+    /// stream. It exists so the TRANSCRIPT SCAN and the transcript RENDER agree
+    /// on attribution by construction: both derive it from here, so a line the
+    /// failure message shows tagged `[stderr]` is a line the decision considered
+    /// as stderr. Note the tag is the HARNESS's own framing, not the child's.
+    fn transcript_prefix(self) -> &'static str {
+        match self {
+            Stream::Stdout => "[stdout] ",
+            Stream::Stderr => "[stderr] ",
+        }
+    }
 }
 
 /// How a [`ChildIo::wait_for`] ended when it did NOT observe the line it awaited.
@@ -117,8 +129,10 @@ impl Stream {
 #[derive(Debug)]
 pub enum WaitEnd {
     /// The test's one deadline passed; the child's pipes were still open, so more
-    /// output was still possible.
-    DeadlineReached,
+    /// output was still possible. `examined` is how many transcript lines the
+    /// final check re-read — the SAME store the failure message renders, so the
+    /// count says how much evidence the decision actually looked at.
+    DeadlineReached { examined: usize },
     /// Both reader threads ended and the queue drained: the child's stdout AND
     /// stderr reached EOF after this long, so no further line could ever arrive.
     /// The child had exited, crashed, or closed its pipes -- this does not say
@@ -129,9 +143,13 @@ pub enum WaitEnd {
 impl WaitEnd {
     pub fn describe(&self) -> String {
         match self {
-            WaitEnd::DeadlineReached => "how the wait ended: the test's one deadline passed with \
-                 the child's pipes still open (more output was still possible)"
-                .to_string(),
+            WaitEnd::DeadlineReached { examined } => format!(
+                "how the wait ended: the test's one deadline passed with the child's pipes still \
+                 open (more output was still possible). The final check then re-read the \
+                 {examined} transcript line(s) recorded since this wait began — the same store \
+                 the transcript below is printed from — and none of them matched, so this \
+                 message cannot be contradicted by the transcript it prints"
+            ),
             WaitEnd::PipesClosed(after) => format!(
                 "how the wait ended: the child's stdout AND stderr both reached EOF after \
                  {after:.3?}, so no further line could arrive: the child had exited, crashed, or \
@@ -171,6 +189,18 @@ fn spawn_reader<R: std::io::Read + Send + 'static>(
     });
 }
 
+/// What a final non-blocking drain of the channel found. Two facts, kept
+/// separate because collapsing them is exactly what reported the wrong cause
+/// (roborev job 236, finding 3).
+struct FinalDrain {
+    /// The first queued line that matched, if any.
+    matched: Option<String>,
+    /// The queue was drained to the end and every sender was gone, so no further
+    /// line can ever arrive. Never set when `matched` is `Some` (the drain stops
+    /// there and learns nothing about the senders).
+    disconnected: bool,
+}
+
 impl ChildIo {
     /// Attach readers to a spawned child's stdout + stderr.
     fn attach(child: &mut std::process::Child) -> Self {
@@ -196,28 +226,72 @@ impl ChildIo {
         pred: impl Fn(&str) -> bool,
         stage: &Stage,
     ) -> Result<(String, Duration), WaitEnd> {
+        // The transcript is CUMULATIVE across the whole test, so the expiry check
+        // below must look only at what was recorded from HERE ON. Without this
+        // mark, an earlier stage's already-consumed line would satisfy a later
+        // wait — `await_write_ack` awaits five separate `OK`s in one test, so the
+        // first one would silently satisfy all five. A false PASS is strictly
+        // worse than a confusing diagnostic, which is why the window exists and
+        // why the failure message reports how many lines it covered.
+        let mark = self.transcript_len();
         loop {
             let remaining = stage.remaining();
             if remaining.is_zero() {
-                // FINAL NON-BLOCKING DRAIN BEFORE DECLARING A TIMEOUT (roborev job
-                // 233, finding 1). The awaited line may have ARRIVED before the
-                // deadline and simply not have been consumed yet: this thread can
-                // be descheduled between the reader thread's `send` and this
-                // loop's next `recv_timeout`. Declaring expiry without looking
-                // would be a false timeout on a working product AND a
-                // self-contradicting diagnostic — the transcript printed by the
-                // failure would contain the very line the message says was never
-                // observed.
+                // DECIDE FROM THE STORE YOU REPORT FROM (roborev job 236,
+                // finding 1 — the durable principle of this whole change).
                 //
-                // This does NOT extend the deadline and does not wait: it consumes
-                // what is already queued. That is the round-9 ruling applied where
-                // it was previously only half-applied — the deadline bounds how
+                // The awaited line may have ARRIVED before the deadline and not
+                // have been consumed yet: this thread can be descheduled between
+                // the reader thread's transcript `push` and its `send`, and again
+                // between that `send` and this loop's next `recv_timeout`.
+                // Declaring expiry without looking would be a false timeout on a
+                // working product (the round-9 ruling: the deadline bounds how
                 // long we WAIT FOR evidence, never whether we accept evidence we
-                // already hold.
-                return match self.try_match(want, &pred) {
-                    Some(line) => Ok((line, stage.spent())),
-                    None => Err(WaitEnd::DeadlineReached),
-                };
+                // already hold).
+                //
+                // Job 233's fix looked only at the CHANNEL, which narrowed the
+                // window instead of closing it: `spawn_reader` records into the
+                // transcript FIRST and publishes to the channel SECOND, so a
+                // reader preempted between those two operations left the channel
+                // without a line the transcript already had — and the failure
+                // message renders the TRANSCRIPT. The message could therefore
+                // print the very marker the decision had just called absent.
+                //
+                // The fix is not to synchronise the two stores; it is to make
+                // their divergence IRRELEVANT by deciding from the one we report
+                // from. The channel is still drained (it maintains the progress
+                // counts and the ordering the blocking path depends on) and a
+                // queued match still counts — every channel line is in the
+                // transcript too, so that direction can never contradict the
+                // message. The verdict of ABSENCE, though, is taken from the
+                // transcript itself, so "the message prints evidence the decision
+                // did not see" is impossible by construction: they read the same
+                // bytes.
+                //
+                // Nothing here waits: the drain is `try_recv` and the scan is a
+                // read of an in-memory `Vec`, so the deadline cannot be extended.
+                let drained = self.final_drain(want, &pred);
+                if let Some(line) = drained.matched {
+                    return Ok((line, stage.spent()));
+                }
+                // The transcript lines carry the harness's own `[stream] ` tag, so
+                // the scan strips it and applies the predicate to the child's own
+                // text — `await_write_ack` matches on the WHOLE trimmed line.
+                if let Some(line) = self.transcript_match(want, &pred, mark) {
+                    return Ok((line, stage.spent()));
+                }
+                // Only now can a cause be named, and the drain above is what
+                // distinguishes them (roborev job 236, finding 3): a drain that
+                // ran out of QUEUE reports a deadline, while one that ran out of
+                // SENDERS reports closed pipes. Collapsing the two reported
+                // "pipes still open" about a child whose readers had both ended.
+                return Err(if drained.disconnected {
+                    WaitEnd::PipesClosed(stage.spent())
+                } else {
+                    WaitEnd::DeadlineReached {
+                        examined: self.transcript_len().saturating_sub(mark),
+                    }
+                });
             }
             match self
                 .rx
@@ -244,13 +318,79 @@ impl ChildIo {
     ///
     /// Non-matching lines are discarded exactly as the blocking loop discards
     /// them — the transcript keeps every line, so nothing is lost to diagnostics.
-    fn try_match(&self, want: Stream, pred: &impl Fn(&str) -> bool) -> Option<String> {
-        while let Ok((stream, line)) = self.rx.try_recv() {
-            if stream == want && pred(&line) {
-                return Some(line);
+    ///
+    /// `disconnected` is reported ONLY when the queue was drained to the end
+    /// without a match, because `try_recv` yields `Disconnected` exactly when the
+    /// queue is empty AND every sender is gone. On a match the drain stops, so
+    /// the remaining lines stay queued for the next stage (the blocking path
+    /// behaves the same way) and nothing is claimed about the senders.
+    fn final_drain(&self, want: Stream, pred: &impl Fn(&str) -> bool) -> FinalDrain {
+        loop {
+            match self.rx.try_recv() {
+                Ok((stream, line)) => {
+                    if stream == want && pred(&line) {
+                        return FinalDrain {
+                            matched: Some(line),
+                            disconnected: false,
+                        };
+                    }
+                }
+                Err(mpsc::TryRecvError::Empty) => {
+                    return FinalDrain {
+                        matched: None,
+                        disconnected: false,
+                    }
+                }
+                Err(mpsc::TryRecvError::Disconnected) => {
+                    return FinalDrain {
+                        matched: None,
+                        disconnected: true,
+                    }
+                }
             }
         }
-        None
+    }
+
+    /// How many lines the transcript holds, for a wait's own window mark.
+    ///
+    /// A poisoned transcript lock is reported as a length of 0, which makes the
+    /// window cover everything a later scan can read: the scan itself would then
+    /// find nothing, so this can only widen what is examined, never narrow it.
+    fn transcript_len(&self) -> usize {
+        self.transcript.lock().map(|t| t.len()).unwrap_or(0)
+    }
+
+    /// Search the TRANSCRIPT — the store [`ChildIo::transcript_text`] renders —
+    /// for a line on `want` satisfying `pred`, considering only lines recorded at
+    /// or after `mark`. Returns the child's own text with the harness's
+    /// `[stream] ` tag stripped, so the caller receives the same shape the
+    /// channel path returns.
+    ///
+    /// Reads nothing but memory: it cannot extend the deadline.
+    ///
+    /// THE WINDOW IS COPIED OUT OF THE LOCK BEFORE THE PREDICATE RUNS. `pred` is
+    /// caller code, and applying it while holding the transcript lock deadlocks
+    /// any predicate that touches the transcript — a std `Mutex` is not
+    /// reentrant. Found the hard way: the first version of the plant below did
+    /// exactly that and wedged the test binary for nine minutes. Copying also
+    /// keeps the hold time proportional to the window rather than to whatever the
+    /// predicate does, so a reader thread is never blocked from RECORDING while a
+    /// decision is being made.
+    fn transcript_match(
+        &self,
+        want: Stream,
+        pred: &impl Fn(&str) -> bool,
+        mark: usize,
+    ) -> Option<String> {
+        let window: Vec<String> = {
+            let t = self.transcript.lock().ok()?;
+            t.get(mark..)?
+                .iter()
+                .filter_map(|l| l.strip_prefix(want.transcript_prefix()))
+                .map(str::to_string)
+                .collect()
+        };
+        window.into_iter().find(|l| pred(l))
     }
 
     /// Non-blocking: consume whatever the readers have queued. Returns how many
@@ -802,13 +942,23 @@ impl ChildIo {
     /// A `ChildIo` with no child behind it: the returned `Sender` stands in for a
     /// reader thread, so a unit test can make progress arrive on demand.
     fn synthetic() -> (Self, Sender<(Stream, String)>) {
+        let (io, tx, _transcript) = Self::synthetic_with_transcript();
+        (io, tx)
+    }
+
+    /// As [`ChildIo::synthetic`], plus a handle to the shared transcript, so a
+    /// test can reproduce a reader thread that has RECORDED a line but not yet
+    /// PUBLISHED it.
+    fn synthetic_with_transcript() -> (Self, Sender<(Stream, String)>, Arc<Mutex<Vec<String>>>) {
         let (tx, rx) = mpsc::channel();
+        let transcript: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
         (
             Self {
                 rx,
-                transcript: Arc::new(Mutex::new(Vec::new())),
+                transcript: Arc::clone(&transcript),
             },
             tx,
+            transcript,
         )
     }
 }
@@ -998,5 +1148,158 @@ fn read_side_buffers_queued_before_the_deadline_are_collected_after_it_lapses() 
         CollectEnd::Disconnected { collected } => panic!(
             "unexpected disconnect with {collected}/2 collected: the senders are still alive"
         ),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// THE EXPIRY DECISION READS THE STORE THE FAILURE PRINTS FROM
+// (roborev job 236, finding 1)
+// ---------------------------------------------------------------------------
+
+/// `spawn_reader` RECORDS into the transcript before it PUBLISHES to the
+/// channel, so a reader preempted between those two operations leaves the
+/// channel behind the transcript. Job 233's expiry drain consulted only the
+/// channel, so in that window a timeout could be declared while the transcript
+/// the message prints already held the awaited marker — the self-contradicting
+/// diagnostic this change exists to prevent.
+///
+/// THE INTERLEAVING IS FORCED, NOT RACED. The plant does not sleep to arrange
+/// the ordering (which would make the precondition timing-dependent in the
+/// direction that produces flakes): the predicate itself is the synchronisation
+/// point. A decoy line — the empty line the product really does print
+/// immediately before the handler marker — is queued on the channel, and when
+/// `wait_for` receives it the predicate records BOTH lines into the transcript
+/// and returns false. So at expiry the transcript provably holds the marker and
+/// the channel provably does not, on every host and at every load.
+///
+/// The channel is left CONNECTED (this test still owns the `Sender`), so a
+/// failure here is `DeadlineReached`, not `PipesClosed`.
+#[test]
+fn a_line_recorded_but_not_yet_published_is_matched_at_expiry() {
+    let (io, lines, transcript) = ChildIo::synthetic_with_transcript();
+    let marker = format!("cqlite: {MARKER_HANDLER_ENTERED} — flushing memtable before exit...");
+
+    // The decoy the real reader publishes just before it is preempted.
+    lines
+        .send((Stream::Stderr, String::new()))
+        .expect("queue the decoy line");
+
+    let recorded = Arc::clone(&transcript);
+    let marker_for_pred = marker.clone();
+    // The reader records ONCE, as a real one does; the predicate is also applied
+    // to the transcript window at expiry, and re-recording there would say the
+    // child printed the marker twice.
+    let recorded_once = std::sync::atomic::AtomicBool::new(false);
+    let deadline = TestDeadline::start(Duration::from_millis(300), Duration::from_millis(300));
+    let stage = deadline.stage("recorded-not-published");
+
+    let matched = io.wait_for(
+        Stream::Stderr,
+        |line| {
+            if line.is_empty() && !recorded_once.swap(true, std::sync::atomic::Ordering::SeqCst) {
+                // The reader's transcript push for both lines has happened...
+                let mut t = recorded.lock().expect("transcript lock");
+                t.push("[stderr] ".to_string());
+                t.push(format!("[stderr] {marker_for_pred}"));
+                // ...and the marker's `tx.send` has NOT. The channel is now
+                // provably behind the transcript for the rest of this wait.
+            }
+            line.contains(MARKER_HANDLER_ENTERED)
+        },
+        &stage,
+    );
+
+    match matched {
+        Ok((line, _)) => assert_eq!(
+            line, marker,
+            "the matched line must be the child's own text, with the transcript's `[stderr] ` tag \
+             stripped — `await_write_ack` matches on the WHOLE trimmed line, so a tagged line \
+             would silently never match there"
+        ),
+        Err(end) => panic!(
+            "the awaited marker was IN THE TRANSCRIPT when the deadline lapsed and the wait \
+             reported {end:?} anyway. The decision read a different store from the one the \
+             failure message renders, so this failure would print the very marker it claims was \
+             never observed:\n{}\ntranscript the message would print:\n{}",
+            end.describe(),
+            io.transcript_text()
+        ),
+    }
+    drop(lines);
+}
+
+/// The window is what keeps the transcript scan from turning a CUMULATIVE store
+/// into a false pass: a line recorded BEFORE a wait began belongs to an earlier
+/// stage, which already consumed or discarded it. `await_write_ack` awaits five
+/// separate `OK`s in one test, so without the window the first would satisfy all
+/// five and a wedged session would read as green.
+#[test]
+fn a_line_recorded_before_the_wait_began_does_not_satisfy_it() {
+    let (io, lines, transcript) = ChildIo::synthetic_with_transcript();
+    transcript
+        .lock()
+        .expect("transcript lock")
+        .push("[stdout] OK".to_string());
+
+    let deadline = TestDeadline::start(Duration::from_millis(1), Duration::from_millis(1));
+    thread::sleep(Duration::from_millis(25));
+    let stage = deadline.stage("stale-transcript-line");
+    assert!(
+        stage.remaining().is_zero(),
+        "the precondition of this test is an already-lapsed deadline"
+    );
+
+    match io.wait_for(Stream::Stdout, |l| l.trim() == "OK", &stage) {
+        Ok((line, _)) => panic!(
+            "a transcript line recorded BEFORE this wait began satisfied it ({line:?}): the \
+             cumulative transcript is being read as if every line were new, so one earlier \
+             acknowledgement would satisfy every later wait for one"
+        ),
+        Err(WaitEnd::DeadlineReached { examined }) => assert_eq!(
+            examined, 0,
+            "the wait must report the size of the window it examined, and the stale line is \
+             outside it"
+        ),
+        Err(other) => panic!("expected a deadline, got {other:?}"),
+    }
+    drop(lines);
+}
+
+/// An expiry racing pipe closure must name the cause the measurement supports
+/// (roborev job 236, finding 3). Both readers have ended, so no further line can
+/// arrive: reporting `DeadlineReached` would tell the reader the pipes were
+/// "still open (more output was still possible)" about a child whose output is
+/// over — a message contradicted by the same drain that produced it.
+#[test]
+fn an_expiry_racing_pipe_closure_reports_closed_pipes() {
+    let (io, lines) = ChildIo::synthetic();
+    // A queued non-matching line, so the drain must CHECK the queue before it can
+    // observe the disconnect: `try_recv` reports `Disconnected` only once the
+    // queue is empty.
+    lines
+        .send((Stream::Stderr, "some other output".to_string()))
+        .expect("queue a non-matching line");
+    drop(lines);
+
+    let deadline = TestDeadline::start(Duration::from_millis(1), Duration::from_millis(1));
+    thread::sleep(Duration::from_millis(25));
+    let stage = deadline.stage("expiry-races-eof");
+    assert!(
+        stage.remaining().is_zero(),
+        "the precondition of this test is an already-lapsed deadline"
+    );
+
+    match io.wait_for(
+        Stream::Stderr,
+        |l| l.contains(MARKER_HANDLER_ENTERED),
+        &stage,
+    ) {
+        Err(WaitEnd::PipesClosed(_)) => {}
+        Err(WaitEnd::DeadlineReached { .. }) => panic!(
+            "both readers had ended when the deadline lapsed, and the wait reported a deadline \
+             with the pipes \"still open\" — the message names a cause its own final drain \
+             contradicts (AC2)"
+        ),
+        Ok((line, _)) => panic!("nothing matching was ever queued, yet {line:?} matched"),
     }
 }
