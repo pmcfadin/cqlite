@@ -1730,30 +1730,6 @@ else
 fi
 
 # ---------------------------------------------------------------------------
-# 7f. THE `.git` SUFFIX IS STRIPPED AT MOST ONCE (job 239). Looping made
-#     `pmcfadin/cqlite.git.git` normalise to the canonical repo, so a DIFFERENT path was
-#     accepted as upstream — and the pre-flight EXECUTES the baseline. A normaliser must not
-#     be more permissive than the grammar it implements.
-# ---------------------------------------------------------------------------
-sfx_bad=""
-for _u in "https://github.com/pmcfadin/cqlite.git.git" \
-          "git@github.com:pmcfadin/cqlite.git.git" \
-          "https://github.com/pmcfadin/cqlite.git.git/"; do
-  [ "$(identity "$_u")" = not-canonical ] || sfx_bad="${sfx_bad:+$sfx_bad }ACCEPTED:$_u"
-done
-# POSITIVE CONTROL: exactly one suffix, and none, must still be accepted — otherwise this
-# case would pass just as well against a normaliser that rejects everything.
-for _u in "https://github.com/pmcfadin/cqlite.git" \
-          "https://github.com/pmcfadin/cqlite"; do
-  [ "$(identity "$_u")" = canonical ] || sfx_bad="${sfx_bad:+$sfx_bad }REJECTED:$_u"
-done
-if [ -z "$sfx_bad" ]; then
-  ok "3544-suffix-once: a repeated '.git.git' is NOT canonical, while one suffix and none still are"
-else
-  bad "3544-suffix-once: misclassified: $sfx_bad"
-fi
-
-# ---------------------------------------------------------------------------
 # 7g. THE FETCH USES THE VALIDATED URL, NOT THE SYMBOLIC REMOTE (job 239). Re-resolving
 #     `origin` after validating its value is a time-of-check/time-of-use gap, and on this
 #     fleet it is not theoretical: lanes are worktrees of ONE shared `.git`, so a peer's
@@ -1949,7 +1925,11 @@ else
   # pre-flight block. `timeout`/`gtimeout` are the bounding mechanisms themselves (local,
   # no network); the rest are local utilities. A program not in this list FAILs the case
   # until someone classifies it — which is the property that closes the family.
-  declared_externals="basename bash cat cut git gtimeout kill mkdir mktemp rm sleep timeout tr true"
+  # `sed` joined this set with _component_set_redact_text (job 239): a LOCAL text transform
+  # with no network reach and no spawn, used to redact userinfo out of free text before it
+  # reaches _CS_DETAIL. Classified rather than merely added — that classification is the whole
+  # point of the list.
+  declared_externals="basename bash cat cut git gtimeout kill mkdir mktemp rm sed sleep timeout tr true"
   externals=$(printf '%s\n' "$audit_out" | sed -n 's/^EXT\t//p' | sort -u)
   undeclared=""
   for _w in $externals; do
@@ -2079,6 +2059,37 @@ if [ -z "$id_bad" ]; then
 else
   bad "3544-remote-identity: misclassified: $id_bad"
 fi
+
+# RELOCATED (job 242 verification): this block calls `identity()`, which is defined at the
+# top of section 8. Placed earlier it read as a shell FUNCTION NOT YET DEFINED, so every
+# call returned EMPTY and all five cases 'failed' in BOTH directions at once. That uniform
+# both-ways failure is the tell of a broken instrument, not a broken subject — and the
+# POSITIVE CONTROL below is what surfaced it: without it the three rejection cases would
+# have looked like a real defect in the normaliser.
+# ---------------------------------------------------------------------------
+# 7f. THE `.git` SUFFIX IS STRIPPED AT MOST ONCE (job 239). Looping made
+#     `pmcfadin/cqlite.git.git` normalise to the canonical repo, so a DIFFERENT path was
+#     accepted as upstream — and the pre-flight EXECUTES the baseline. A normaliser must not
+#     be more permissive than the grammar it implements.
+# ---------------------------------------------------------------------------
+sfx_bad=""
+for _u in "https://github.com/pmcfadin/cqlite.git.git" \
+          "git@github.com:pmcfadin/cqlite.git.git" \
+          "https://github.com/pmcfadin/cqlite.git.git/"; do
+  [ "$(identity "$_u")" = not-canonical ] || sfx_bad="${sfx_bad:+$sfx_bad }ACCEPTED:$_u"
+done
+# POSITIVE CONTROL: exactly one suffix, and none, must still be accepted — otherwise this
+# case would pass just as well against a normaliser that rejects everything.
+for _u in "https://github.com/pmcfadin/cqlite.git" \
+          "https://github.com/pmcfadin/cqlite"; do
+  [ "$(identity "$_u")" = canonical ] || sfx_bad="${sfx_bad:+$sfx_bad }REJECTED:$_u"
+done
+if [ -z "$sfx_bad" ]; then
+  ok "3544-suffix-once: a repeated '.git.git' is NOT canonical, while one suffix and none still are"
+else
+  bad "3544-suffix-once: misclassified: $sfx_bad"
+fi
+
 
 # THE TRANSPORT AXIS, as its own case because its reason is different in KIND from the
 # others: `http://` and `git://` authenticate nothing, and this pre-flight EXTRACTS AND RUNS
