@@ -5202,6 +5202,7 @@ _assert_summary_integrity() {
   emit_summary FAIL \
     "summary-integrity: FAIL ($reason)" \
     "detected-after-component: $comp" \
+    "$(_component_set_meta)" \
     "${TREE_META_LINES[@]}"
   exit 1
 }
@@ -5256,6 +5257,7 @@ _emit_terminal_summary() {
     _publish_integrity_fail "$reason" "$comp" ${@+"$@"}   # ${@+"$@"}: empty-safe under set -u on bash 3.2
     return 1
   fi
+  # component-set-exempt: forwarder — this is the shared no-clobber publish path; it stamps nothing of its own and every CALLER is checked by this same census
   emit_summary "$result" "$@"
 }
 
@@ -5975,6 +5977,7 @@ if [ "$SELFTEST" -eq 1 ]; then
   if [ "${AGENT_GATE_ALLOW_MISSING_FIXTURES:-0}" = 1 ] && [ "$(_fixture_status)" = OPTOUT ]; then
     meta+=("$(_missing_fixtures_marker)")
   fi
+  # component-set-exempt: --emit-summary-selftest exits at the arg dispatch, BEFORE the #3544 pre-flight runs, so there is no verdict to stamp (a synthetic block, never a certification)
   emit_summary PASS "${meta[@]}"
   # Even the selftest must not exit 0 if it could not write its summary file —
   # the whole point of the selftest is to prove the recovery artifact is produced.
@@ -6054,6 +6057,7 @@ case "${AGENT_GATE_INTEGRITY_SELFTEST:-0}" in
     # the very "emit sites nobody enumerated" shape this change set out to close (review
     # H3). _tree_meta_array finalizes in the CURRENT shell (never a subshell, B2).
     _tree_meta_array
+    # component-set-exempt: #2874 summary-integrity self-test hook — pre-dispatch, synthetic block
     _emit_terminal_summary "$OVERALL" "commit: selftest branch: selftest dirty: no" \
       ${SUMMARY_INTEGRITY_LINE:+"$SUMMARY_INTEGRITY_LINE"} \
       "${TREE_META_LINES[@]}" || true
@@ -6076,6 +6080,7 @@ case "${AGENT_GATE_INTEGRITY_SELFTEST:-0}" in
     _term_rc=0
     # Threaded for the same reason as the `marker` hook above (#2926 review H3).
     _tree_meta_array
+    # component-set-exempt: #2874 summary-integrity self-test hook — pre-dispatch, synthetic block
     _emit_terminal_summary "$OVERALL" "commit: selftest branch: selftest dirty: no" \
       "${TREE_META_LINES[@]}" || _term_rc=$?
     printf 'terminal-nomarker-selftest: contended-untouched=%s sibling=%s overall=%s rc=%s\n' \
@@ -6222,6 +6227,7 @@ if [ "${AGENT_GATE_TREE_SELFTEST:-0}" != 0 ]; then
       # capture-derived `commit:` line the full/lite/delta emits publish.
       _tree_commit_meta
       _tree_meta_array
+      # component-set-exempt: #2926 tree-integrity self-test hook — pre-dispatch, synthetic block
       _emit_terminal_summary "$(_tree_result "$OVERALL")" \
         "$TREE_COMMIT_LINE" "${TREE_META_LINES[@]}" || true
       printf 'tree-selftest: mode=%s overall=%s mutated=%s\n' \
@@ -6237,6 +6243,7 @@ if [ "${AGENT_GATE_TREE_SELFTEST:-0}" != 0 ]; then
       _tree_selftest_mutate
       _tree_commit_meta
       _tree_meta_array
+      # component-set-exempt: #2926 tree-integrity self-test hook — pre-dispatch, synthetic block
       _emit_terminal_summary "$(_tree_result "$OVERALL")" \
         "$TREE_COMMIT_LINE" "${TREE_META_LINES[@]}" || true
       printf 'tree-selftest: mode=postfinalize overall=%s mutated=%s commit-line=%s\n' \
@@ -6255,6 +6262,7 @@ if [ "${AGENT_GATE_TREE_SELFTEST:-0}" != 0 ]; then
       _tree_finalize || true
       _tree_commit_meta
       _tree_meta_array
+      # component-set-exempt: #2926 tree-integrity self-test hook — pre-dispatch, synthetic block
       _emit_terminal_summary "$(_tree_result "$OVERALL")" \
         "$TREE_COMMIT_LINE" "${TREE_META_LINES[@]}" || true
       printf 'tree-selftest: mode=side overall=%s mutated=%s\n' "$OVERALL" "$TREE_MUTATED"
@@ -14234,6 +14242,7 @@ run_delta() {
     emit_summary ERROR \
       "delta-anchor: $anchor (UNRESOLVED)" \
       "$(accelerators_line)" \
+      "$(_component_set_meta)" \
       "${TREE_META_LINES[@]}" \
       "error: anchor does not resolve to a commit — cannot re-certify"
     exit 2
@@ -14251,6 +14260,7 @@ run_delta() {
       emit_summary ERROR \
         "delta-anchor: $anchor_sha" \
         "$(accelerators_line)" \
+        "$(_component_set_meta)" \
         "${TREE_META_LINES[@]}" \
         "error: --anchor-summary-file not found: $DELTA_ANCHOR_SUMMARY_FILE"
       exit 2
@@ -14264,6 +14274,7 @@ run_delta() {
       emit_summary ERROR \
         "delta-anchor: $anchor_sha" \
         "$(accelerators_line)" \
+        "$(_component_set_meta)" \
         "${TREE_META_LINES[@]}" \
         "error: anchor summary is not a full-gate SUMMARY block (lite/delta cannot anchor a delta)"
       exit 2
@@ -14275,6 +14286,7 @@ run_delta() {
       emit_summary ERROR \
         "delta-anchor: $anchor_sha" \
         "$(accelerators_line)" \
+        "$(_component_set_meta)" \
         "${TREE_META_LINES[@]}" \
         "error: anchor summary RESULT is not PASS — cannot anchor a delta re-cert"
       exit 2
@@ -14686,6 +14698,7 @@ if [ "$LITE_AGG_SELFTEST" -eq 1 ]; then
   # job-2108 MED: --lite/--delta terminals obey the SAME no-clobber contract as the full gate
   # (falls through to emit_summary when no live peer owns the path; forces FAIL + non-zero exit
   # via SUMMARY_WRITE_FAILED when one does).
+  # component-set-exempt: --lite-aggregate-selftest drives aggregation hermetically and exits before the #3544 pre-flight — nothing measured, nothing to stamp
   _emit_terminal_summary "$OVERALL" "${SUMMARY_META[@]}" || true
   [ "$SUMMARY_WRITE_FAILED" -eq 0 ] || exit 1
   case "$OVERALL" in PASS) exit 0 ;; *) exit 1 ;; esac

@@ -721,37 +721,119 @@ else
 fi
 
 # ---------------------------------------------------------------------------
-# 7c. EVERY summary emitter reachable AFTER the pre-flight must stamp the line —
-#     asserted STRUCTURALLY, and deliberately so: reaching the --delta TERMINAL block or
-#     the full gate's terminal block requires a real re-cert (cargo fmt + scoped tests +
-#     a corpus + an #1825 slot), which no hermetic fixture can supply, so a behavioural
-#     case for those two would either not exist or would queue behind a real gate (it
-#     did, for 13 minutes, before this file was restructured). The check is per-ANCHOR
-#     rather than a stamp COUNT: a count reds when someone ADDS a correctly-stamped
-#     emitter, and a guard that reds on correct input is the guard agents learn to waive.
+# 7c. EVERY summary emitter accounts for the line — the emitter set DERIVED from the gate
+#     at run time, never a list maintained here. The first cut was a hardcoded heredoc of
+#     8 anchors under a message saying "every", and roborev found what a curated list
+#     always eventually hides: the four early `--delta` anchor-validation emitters and the
+#     summary-integrity failure emitter were in neither the stamping nor the list. A guard
+#     whose CLAIM exceeds its CHECK is a false assurance — the same shape as this file's
+#     own six-vs-nine count, and as #3544 itself, three instances in one change.
+#
+#     The derivation classifies every `emit_summary` / `_emit_terminal_summary` CALL SITE
+#     (definitions and comments excluded) as one of:
+#       STAMPED-DIRECT           the line is in the call's own argument list;
+#       STAMPED-VIA-<ARRAY>      the call passes "${ARRAY[@]}" and the array's OWN
+#                                construction region pushes the line;
+#       STAMPED-VIA-RENDERER-<f> the array is filled from a function whose body emits the
+#                                line (one level of resolution — `_tree_boundary_meta_lines`
+#                                stamps it itself, so a site fed from it IS stamped);
+#       EXEMPT                   the site carries `component-set-exempt: <reason>` (the
+#                                pre-dispatch self-test hooks and the shared forwarder,
+#                                which have no verdict to stamp because the pre-flight has
+#                                not run yet);
+#       GAP                      none of the above ⇒ FAIL, naming the site.
+#     So a NEW emitter is picked up with NO edit to this file: it lands in GAP until its
+#     author stamps it or exempts it with a stated reason.
+#
+#     WHAT IT CLAIMS: every emit site is ACCOUNTED FOR in source. It does NOT claim the
+#     stamp reaches the emitted block — that is proved BEHAVIOURALLY, and only for the
+#     blocks a hermetic fixture can produce: the pre-flight FAIL block (case 7), the
+#     --delta REFUSED block (7 + 4c) and the real --lite block (7b). The two TERMINAL
+#     blocks (full and --delta) are structural-only here for a reason that has not changed:
+#     reaching them needs a real re-cert (cargo fmt + scoped tests + a corpus + an #1825
+#     slot), which no hermetic fixture can supply. And per-SITE beats a stamp COUNT because
+#     a count reds when someone adds a correctly-stamped emitter — a guard that reds on
+#     correct input is the guard agents learn to waive.
+#
+#     The derivation is itself FAIL-CLOSED and carries a POSITIVE CONTROL below: if it
+#     finds no call sites at all, or if removing a known stamp does not produce a GAP, it
+#     FAILs rather than reporting a clean census of nothing.
 # ---------------------------------------------------------------------------
-stamped_within() { # stamped_within <anchor-substring> <lines-after>
-  grep -F -A "$2" -- "$1" "$GATE" 2>/dev/null | grep -q 'COMPONENT_SET_LINE\|_component_set_meta'
+CENSUS_AWK="$tmp/emit-census.awk"
+cat >"$CENSUS_AWK" <<'CENSUS_PROG'
+{ line[NR]=$0 }
+function _stamping_fn(fn,   k, inside) {
+  inside=0
+  for (k=1; k<=NR; k++) {
+    if (line[k] ~ ("^" fn "\\(\\) \\{")) { inside=1; continue }
+    if (inside && line[k] ~ /^\}/) return 0
+    if (inside && line[k] ~ /COMPONENT_SET_LINE|_component_set_meta/) return 1
+  }
+  return 0
 }
-emitters_ok=1
-while IFS='|' read -r span emitter_anchor; do
-  [ -n "$emitter_anchor" ] || continue
-  stamped_within "$emitter_anchor" "$span" \
-    || { emitters_ok=0; echo "   (emitter does not stamp component-set: $emitter_anchor)"; }
-done <<'EMITTERS'
-8|lite-scope: file-size fmt clippy roborev-lints scoped-tests (full gate NOT run
-8|delta-scope: file-size fmt scoped-tests (test/docs-only re-cert
-6|delta-scope: file-size fmt scoped-tests (python tier REQUIRED
-6|delta-scope: file-size fmt scoped-tests node-tests shell-selftests (NOT RUN
-8|SUMMARY_META+=("$SCHEMAS_LINE")
-6|missing-fixtures: FAIL-CLOSED (#2078) — dataset-dependent components would SKIP
-6|missing-schemas: FAIL-CLOSED (#3148) — dataset-backed components would panic
-6|preflight: FAIL (no Data.db files under
-EMITTERS
-if [ "$emitters_ok" -eq 1 ]; then
-  ok "3544-every-emitter: every post-pre-flight summary emitter stamps the component-set line"
+END {
+  for (i=1; i<=NR; i++) {
+    l=line[i]
+    if (l ~ /^[ \t]*#/) continue
+    if (l ~ /^(emit_summary|_emit_terminal_summary)\(\)/) continue
+    if (l !~ /(^|[^_a-zA-Z])(emit_summary|_emit_terminal_summary)[ \t]/) continue
+    args=l; j=i
+    while (args ~ /\\[ \t]*$/) { j++; args = args "\n" line[j] }
+    verdict="GAP"
+    if (args ~ /COMPONENT_SET_LINE|_component_set_meta/) verdict="STAMPED-DIRECT"
+    else if (args ~ /component-set-exempt:[ \t]*[^ \t]/ || line[i-1] ~ /component-set-exempt:[ \t]*[^ \t]/) verdict="EXEMPT"
+    else if (match(args, /\$\{[A-Za-z_]+\[@\]\}/)) {
+      nm=substr(args, RSTART+2, RLENGTH-6)
+      for (k=i; k>0; k--) {
+        # Creation point / enclosing-function boundary. BOTH bounds matter: keyed on
+        # `nm=()` alone, a multi-line `nm=(` literal never matched, the scan ran to the top
+        # of the file and "found" an unrelated renderer 700 lines away — a FALSE STAMPED on
+        # a block that stamps nothing. A stamp outside the array's own construction cannot
+        # feed it.
+        if (line[k] ~ ("(declare -a |local -a )?" nm "=\\(")) break
+        if (k < i && line[k] ~ /^[A-Za-z_][A-Za-z0-9_]*\(\) \{|^\}/) break
+        if (line[k] ~ ("" nm "\\+=\\(\"\\$COMPONENT_SET_LINE\"\\)") || line[k] ~ ("" nm "\\+=\\(\"\\$\\(_component_set_meta\\)\"\\)")) { verdict="STAMPED-VIA-" nm; break }
+        if (match(line[k], /< <\(([A-Za-z_][A-Za-z0-9_]*)\)/)) {
+          fn=substr(line[k], RSTART+4, RLENGTH-5)
+          if (_stamping_fn(fn)) { verdict="STAMPED-VIA-RENDERER-" fn; break }
+        }
+      }
+    }
+    printf "%s\t%d\t%s\n", verdict, i, substr(l,1,70)
+  }
+}
+CENSUS_PROG
+
+emit_census() { awk -f "$CENSUS_AWK" "${1:-$GATE}"; }
+census_out=$(emit_census)
+census_sites=$(printf '%s\n' "$census_out" | grep -c '	')
+census_gaps=$(printf '%s\n' "$census_out" | grep -c '^GAP	')
+if [ "$census_sites" -eq 0 ]; then
+  bad "3544-every-emitter: the emit-site derivation found NO call sites in $GATE — the call shape changed or the scan broke (fail-closed: this is not a clean census)"
+elif [ "$census_gaps" -eq 0 ]; then
+  ok "3544-every-emitter: all $census_sites emit sites account for the component-set line (stamped, or exempt with a reason) — source census; the lite/delta/pre-flight blocks are proved behaviourally above"
 else
-  bad "3544-every-emitter: a summary emitter would publish a block with no component-set line"
+  bad "3544-every-emitter: $census_gaps of $census_sites emit site(s) neither stamp the component-set line nor carry 'component-set-exempt: <reason>':"
+  printf '%s\n' "$census_out" | grep '^GAP	' | while IFS='	' read -r _v _ln _src; do
+    echo "   line $_ln: $_src"
+  done
+fi
+
+# POSITIVE CONTROL for the derivation itself: strip the stamp from ONE known-stamped site
+# in a THROWAWAY copy and require the census to report exactly that site as a GAP. Without
+# this, a scan that silently stopped matching would report "all sites accounted for" — a
+# clean census of nothing, which is the vacuous pass this whole issue is about.
+ctl_gate="$tmp/census-control-gate.sh"
+sed '0,/^      "\$(_component_set_meta)" \\$/{/^      "\$(_component_set_meta)" \\$/d;}' "$GATE" >"$ctl_gate"
+if ! cmp -s "$GATE" "$ctl_gate"; then
+  ctl_gaps=$(emit_census "$ctl_gate" | grep -c '^GAP	')
+  if [ "$ctl_gaps" -ge 1 ]; then
+    ok "3544-every-emitter-control: removing one stamp makes the census report a GAP ($ctl_gaps) — the scan is live, not inert"
+  else
+    bad "3544-every-emitter-control: a gate with a stamp REMOVED still censused clean — the derivation is inert"
+  fi
+else
+  bad "3544-every-emitter-control: could not build the control (no stamped site matched) — the census cannot be shown to discriminate"
 fi
 
 # ---------------------------------------------------------------------------
