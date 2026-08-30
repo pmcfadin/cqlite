@@ -2638,8 +2638,20 @@ _component_set_safe_detail() {
 # (`https://x-access-token:<TOKEN>@github.com/pmcfadin/cqlite.git` is on the accept list), so
 # stderr from a failed fetch can carry a live credential into a SUMMARY block that this repo's
 # workflow tells agents to paste into PR comments.
+# TWO RULES, because the URL grammar this pre-flight ACCEPTS has two shapes (job 264, Medium —
+# the third instance of this leak family). The first covers `scheme://user:pass@host`; the second
+# covers the SCP FORM `user@host:path`, which has no scheme and which the earlier one could not
+# see. An ssh transport failure quotes the URL it was given, so a credential-bearing scp remote
+# reached `_CS_DETAIL` — and `_CS_DETAIL` is rendered into the SUMMARY block agents paste into PR
+# comments.
+#
+# The scp rule is deliberately BROADER than git's grammar (it also redacts an ordinary
+# `name@example.com:` in prose): over-redaction costs a slightly less readable diagnostic, while
+# under-redaction costs a leaked token, and this function's whole job is to be conservative.
 _component_set_redact_text() {
-  printf '%s' "$1" | sed -E 's#([a-zA-Z][a-zA-Z0-9+.-]*://)[^/@[:space:]]*@#\1<redacted>@#g'
+  printf '%s' "$1" \
+    | sed -E 's#([a-zA-Z][a-zA-Z0-9+.-]*://)[^/@[:space:]]*@#\1<redacted>@#g' \
+    | sed -E 's#[^[:space:]/@]+@([a-zA-Z0-9._-]+:)#<redacted>@\1#g'
 }
 
 _component_set_flatten() {
@@ -2996,9 +3008,11 @@ _component_set_normalise_remote() {
   esac
   # USERINFO, dropped only when the `@` is in the AUTHORITY (before the first `/`) — an `@`
   # inside a path is path data, not credentials. It carries no identity; it is redacted, never
-  # rendered, by _component_set_redact_url.
+  # rendered, by _component_set_redact_url. It is CAPTURED rather than discarded because the
+  # scp-form arm below has to judge it (job 264).
+  local uinfo=""
   case "${u%%/*}" in
-    *@*) u="${u#*@}" ;;
+    *@*) uinfo="${u%%@*}"; u="${u#*@}" ;;
   esac
   if [ -n "$scheme" ]; then
     host="${u%%/*}"
@@ -3014,7 +3028,33 @@ _component_set_normalise_remote() {
     # NO SCHEME: git reads `host:path` as scp-like (an AUTHENTICATED ssh transport), and
     # everything else as a LOCAL PATH.
     case "${u%%/*}" in
-      *:*) host="${u%%:*}"; path="${u#*:}" ;;
+      *:*) host="${u%%:*}"; path="${u#*:}"
+           # SCP-FORM USERINFO IS RESTRICTED TO `git` (roborev job 264, Medium). The canonical
+           # upstream has no business being reached as an arbitrary user, and every OTHER
+           # spelling of userinfo here is a CREDENTIAL — `TOKEN@github.com:pmcfadin/cqlite` was
+           # accepted as canonical, and an ssh transport error then echoed it verbatim into
+           # `_CS_DETAIL` and so into a SUMMARY block this repository tells agents to paste into
+           # PR comments. This is the THIRD instance of that leak family (rendered raw, then
+           # flattened-but-not-redacted, then redacted for `scheme://user@` only), and the two
+           # earlier fixes were both "extend the redactor". NARROWING WHAT IS ACCEPTED is
+           # tighter than widening what is scrubbed: a shape that cannot be canonical never
+           # reaches the renderer at all. (The redactor is extended as well — belt — because
+           # a REJECTED value is still rendered, and the marker below is what keeps this one's
+           # bytes out of it.)
+           #
+           # The schemed arm above deliberately still ACCEPTS userinfo: GitHub Actions rewrites
+           # `origin` to `https://x-access-token:<TOKEN>@github.com/…`, so rejecting it would red
+           # a legitimate CI checkout.
+           #
+           # THE MARKER CARRIES NO PART OF THE VALUE, for the same reason as `whitespace-bearing`.
+           # An `if`, not a `case`, and deliberately: a `case` label of `''|git)` is not a shape
+           # the structural externals audit's label-stripper recognises, so it split the line and
+           # reported `git` as an unbounded external invocation — a FAIL on correct code
+           # (measured). Fail-closed, but the fix belongs here rather than in a broadened
+           # stripper, which would weaken an audit that has caught four real defects.
+           if [ -n "$uinfo" ] && [ "$uinfo" != git ]; then
+             printf 'scp-userinfo'; return 0
+           fi ;;
       *)   printf 'local:%s' "$(_component_set_strip_repo_suffix "$u")"; return 0 ;;
     esac
   fi

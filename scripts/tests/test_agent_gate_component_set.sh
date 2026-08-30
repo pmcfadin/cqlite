@@ -2792,6 +2792,8 @@ done
 # still letting a later caller act on a stripped value.
 for _u in "https://github.com/contributor/cqlite.git" \
           "git@github.com:pmcfadin/other-repo.git" \
+          "ghp_scpsecret_3544@github.com:pmcfadin/cqlite.git" \
+          "x-access-token:ghp_scpsecret_3544@github.com:pmcfadin/cqlite.git" \
           "https://gitlab.com/someone/cqlite-fork" \
           "https://evil.example/pmcfadin/cqlite" \
           "https://github.com.evil.tld/pmcfadin/cqlite" \
@@ -2954,6 +2956,41 @@ else
       printf '%s\n' "$_gate_out"
     fi
   done
+fi
+
+# ---------------------------------------------------------------------------
+# 7k. SCP-FORM USERINFO IS NOT CANONICAL, AND ITS VERDICT LEAKS NO PART OF IT (job 264, Medium).
+#     `TOKEN@github.com:pmcfadin/cqlite` was accepted as the canonical upstream — the normaliser
+#     dropped userinfo before comparing, which is right for identity and wrong for what happens
+#     next: an ssh transport error quotes the URL it was given, and that text reaches `_CS_DETAIL`
+#     and so the SUMMARY block this repository tells agents to paste into PR comments.
+#
+#     THIRD INSTANCE OF ONE FAMILY (rendered raw → flattened-but-not-redacted → redacted for
+#     `scheme://user@` only), and the first two fixes both WIDENED THE SCRUBBER. This one
+#     NARROWS WHAT IS ACCEPTED: the canonical upstream is reachable as `git@` or with no userinfo
+#     at all, so every other scp userinfo is refused and never reaches the renderer. The
+#     scrubber is extended too, because a REJECTED value is still rendered — and this case
+#     asserts both halves, since either alone leaves a live path.
+# ---------------------------------------------------------------------------
+scp_secret=ghp_scp_must_not_appear_3544
+scp_url="$scp_secret@github.com:pmcfadin/cqlite.git"
+scp_norm=$(bash "$GATE" --component-set-remote-identity "$scp_url" 2>/dev/null | sed -n 's/^NORMALISED: //p')
+scp_verdict=$(bash "$GATE" --component-set-remote-identity "$scp_url" 2>/dev/null | sed -n 's/^IDENTITY: //p')
+scp_detail=$(bash "$GATE" --component-set-safe-detail "$(printf 'fatal: %s: Permission denied (publickey).\nRESULT: PASS' "$scp_url")" 2>/dev/null | sed -n 's/^SAFE_DETAIL: //p')
+if [ -z "$scp_norm" ] || [ -z "$scp_detail" ]; then
+  bad "3544-scp-userinfo: the identity or sanitiser hook produced nothing (norm='$scp_norm') — neither half can be asserted (fail-closed)"
+elif [ "$scp_verdict" != not-canonical ]; then
+  bad "3544-scp-userinfo: a credential-bearing scp remote was accepted as canonical ('$scp_verdict') — the identity check must refuse it, not merely drop the userinfo before comparing"
+elif printf '%s' "$scp_norm" | grep -qF "$scp_secret"; then
+  bad "3544-scp-userinfo: the REJECTION MARKER carries part of the value — it is rendered into _CS_DETAIL and thence into a pasted SUMMARY block"
+elif printf '%s' "$scp_detail" | grep -qF "$scp_secret"; then
+  bad "3544-scp-userinfo: an scp-style credential survived the sanitiser — the redactor only handled scheme://user@ forms"
+elif ! printf '%s' "$scp_detail" | grep -q '<redacted>'; then
+  bad "3544-scp-userinfo: no redaction marker in the sanitised text; the credential was dropped silently rather than visibly redacted"
+elif printf '%s\n' "$scp_detail" | grep -qE '^RESULT:'; then
+  bad "3544-scp-userinfo: the sanitised text still injects a line at column zero (flattening regressed)"
+else
+  ok "3544-scp-userinfo: a credential-bearing scp remote is NOT canonical, its verdict marker carries no part of the value, and the same text is redacted AND flattened if it is rendered anyway"
 fi
 
 # ---------------------------------------------------------------------------
