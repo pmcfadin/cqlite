@@ -298,60 +298,102 @@ function assertRssUnderBudget(label, rssGrowth) {
   expect(rssGrowth).toBeLessThan(RSS_BUDGET_BYTES);
 }
 
+// A verdict needs a MAJORITY of the passes behind it (issue #1465 round 7,
+// roborev): refusing only the all-negative sample set was the affirmative-
+// measurement rule applied one level too shallow. Worked example that used to
+// PASS both ceilings: seven negative passes plus growth samples of 0 and
+// 100,000 bytes -- the minimum reads 0 and the classic median of the two
+// survivors reads 50,000, so ONE quiet pass excused the only leaking pass and no
+// majority of the nine passes supported the verdict at all. Below quorum is now a
+// hard error, in the same voice as the all-negative one.
+const SAMPLE_QUORUM = Math.floor(MEASURE_PASSES / 2) + 1;
+
 /**
- * Assert the measured growth is under the budget, with every per-pass sample in
- * the failure message (jest's own `toBeLessThan` output would show only the
- * single asserted number, and the spread is what tells a real leak from a GC
- * artefact).
+ * PURE. Reduce per-pass samples to the statistics the budgets are asserted on,
+ * or THROW a named error when the sample set cannot support a verdict at all.
  *
- * TWO statistics are asserted (see MEASURE_PASSES): the MINIMUM non-negative pass
- * against BUDGET_BYTES (sensitivity) and the MEDIAN non-negative pass against the
- * looser MEDIAN_BUDGET_BYTES (so one quiet pass cannot excuse the rest).
- * An all-negative sample set is a hard error: nothing was measured, so there is
- * no verdict to give.
+ * Two refusals, both "no verdict to give" rather than a pass:
+ *   * every pass negative -- nothing was measured;
+ *   * fewer than SAMPLE_QUORUM non-negative passes -- too little was measured.
+ *
+ * The reported statistic is the UPPER median, `sorted[floor(n / 2)]`, which is
+ * the middle element for odd `n` and the HIGHER of the two middles for even `n`
+ * (n=5 -> index 2; n=4 -> index 2, i.e. the third of four). The classic even-`n`
+ * median averages the two middles, which lets the favourable half pull the
+ * verdict down -- exactly how the worked example above slipped through. With the
+ * upper median, at least half of the valid passes are at or below the number
+ * being asserted, so the verdict is majority-supported by construction.
+ *
+ * Exported for direct unit tests (see the "leak-budget statistic" describe): the
+ * statistic had NO committed coverage of its own until round 7, only end-to-end
+ * budget runs, which cannot construct a sample set like the worked example.
  */
-function assertUnderBudget(label, samples) {
+function budgetStatistics(label, samples) {
   const nonNegative = samples.filter((sample) => sample >= 0);
   if (nonNegative.length === 0) {
     throw new Error(
-      `${label}: all ${MEASURE_PASSES} passes measured NEGATIVE growth ` +
+      `${label}: all ${samples.length} passes measured NEGATIVE growth ` +
         `(samples=[${samples.join(', ')}]) — every pass freed more than it ` +
         'allocated, so this run measured nothing about the loop under test and ' +
         'has no verdict to give. Re-run; if it persists the instrument or the ' +
         'gc settling in settle() is broken (issue #1465)'
     );
   }
-  // H1: the MEDIAN of the non-negative passes must also clear its (looser)
-  // ceiling, so a single quiet pass can no longer excuse the rest.
-  const sorted = [...nonNegative].sort((a, b) => a - b);
-  const mid = Math.floor(sorted.length / 2);
-  const medianGrowth =
-    sorted.length % 2 ? sorted[mid] : (sorted[mid - 1] + sorted[mid]) / 2;
-  if (medianGrowth >= MEDIAN_BUDGET_BYTES) {
+  if (nonNegative.length < SAMPLE_QUORUM) {
     throw new Error(
-      `${label}: the MEDIAN non-negative pass grew ${medianGrowth} bytes over ` +
-        `${ITERATIONS} iterations (${(medianGrowth / ITERATIONS).toFixed(1)} ` +
-        `bytes/iteration), exceeding the ${MEDIAN_BUDGET_BYTES}-byte median ` +
-        'ceiling — a majority of passes are retaining memory, which the minimum ' +
-        `alone would not catch. Per-pass samples=[${samples.join(', ')}] ` +
-        '(issue #1465)'
+      `${label}: only ${nonNegative.length} of ${samples.length} passes measured ` +
+        `non-negative growth, below the quorum of ${SAMPLE_QUORUM} — a verdict ` +
+        'from a handful of surviving samples is not a measurement of this loop, ' +
+        'so there is no verdict to give (a quiet pass could otherwise excuse a ' +
+        `leaking one). Per-pass samples=[${samples.join(', ')}] (issue #1465)`
     );
   }
-  expect(medianGrowth).toBeLessThan(MEDIAN_BUDGET_BYTES);
+  const sorted = [...nonNegative].sort((a, b) => a - b);
+  return {
+    count: nonNegative.length,
+    total: samples.length,
+    min: sorted[0],
+    // UPPER median for BOTH parities -- see the doc comment.
+    upperMedian: sorted[Math.floor(sorted.length / 2)],
+  };
+}
 
-  const growth = Math.min(...nonNegative);
-  if (growth >= BUDGET_BYTES) {
+/**
+ * Assert the measured growth is under the budgets, with every per-pass sample in
+ * the failure message (jest's own `toBeLessThan` output would show only the
+ * single asserted number, and the spread is what tells a real leak from a GC
+ * artefact).
+ *
+ * TWO statistics are asserted (see MEASURE_PASSES): the MINIMUM non-negative pass
+ * against BUDGET_BYTES (sensitivity) and the UPPER MEDIAN against the looser
+ * MEDIAN_BUDGET_BYTES (so the favourable half cannot carry the verdict). An
+ * unmeasurable sample set is a hard error, never a pass -- see budgetStatistics.
+ */
+function assertUnderBudget(label, samples) {
+  const { count, min, upperMedian } = budgetStatistics(label, samples);
+  if (upperMedian >= MEDIAN_BUDGET_BYTES) {
     throw new Error(
-      `${label}: tracked memory (heapUsed+external) grew by at least ${growth} ` +
-        `bytes in EVERY non-negative pass (${nonNegative.length} of ` +
-        `${MEASURE_PASSES}) of ${ITERATIONS} iterations ` +
-        `(${(growth / ITERATIONS).toFixed(1)} bytes/iteration), exceeding the ` +
-        `${BUDGET_BYTES}-byte budget. ` +
+      `${label}: the UPPER MEDIAN non-negative pass grew ${upperMedian} bytes ` +
+        `over ${ITERATIONS} iterations ` +
+        `(${(upperMedian / ITERATIONS).toFixed(1)} bytes/iteration), exceeding ` +
+        `the ${MEDIAN_BUDGET_BYTES}-byte median ceiling — at least half of the ` +
+        `${count} valid passes are retaining that much, which the minimum alone ` +
+        `would not catch. Per-pass samples=[${samples.join(', ')}] (issue #1465)`
+    );
+  }
+  expect(upperMedian).toBeLessThan(MEDIAN_BUDGET_BYTES);
+
+  if (min >= BUDGET_BYTES) {
+    throw new Error(
+      `${label}: tracked memory (heapUsed+external) grew by at least ${min} ` +
+        `bytes in EVERY non-negative pass (${count} of ${samples.length}) of ` +
+        `${ITERATIONS} iterations (${(min / ITERATIONS).toFixed(1)} ` +
+        `bytes/iteration), exceeding the ${BUDGET_BYTES}-byte budget. ` +
         `Per-pass samples=[${samples.join(', ')}] (issue #1465)`
     );
   }
-  expect(growth).toBeLessThan(BUDGET_BYTES);
-  return growth;
+  expect(min).toBeLessThan(BUDGET_BYTES);
+  return min;
 }
 
 /**
@@ -403,6 +445,87 @@ async function measureGrowth(body, counters) {
   }
   return { samples, rssGrowth: process.memoryUsage().rss - rssBefore };
 }
+
+// ---------------------------------------------------------------------------
+// DIRECT tests of the statistic (issue #1465 round 7). These are PURE -- no
+// database, no gc, no datasets -- and they exist because an end-to-end budget run
+// cannot construct the sample sets that matter: a real run cannot be made to
+// produce "seven negative passes plus 0 and 100,000", which is precisely the shape
+// that used to pass both ceilings. They live in this file, and therefore inside the
+// merge-gating `leaks` project, rather than in a sibling the gate does not run.
+// ---------------------------------------------------------------------------
+describe('leak-budget statistic (pure, issue #1465)', () => {
+  const neg = (n) => Array.from({ length: n }, (_, i) => -(i + 1) * 1000);
+
+  test('the quorum is a majority of MEASURE_PASSES', () => {
+    expect(SAMPLE_QUORUM).toBe(Math.floor(MEASURE_PASSES / 2) + 1);
+    expect(SAMPLE_QUORUM * 2).toBeGreaterThan(MEASURE_PASSES);
+  });
+
+  test('all-negative sample set has NO verdict (hard error, never a pass)', () => {
+    expect(() => budgetStatistics('t', neg(MEASURE_PASSES))).toThrow(
+      /all 9 passes measured NEGATIVE growth/
+    );
+  });
+
+  test('below quorum has NO verdict — INCLUDING the worked example that used to pass', () => {
+    // 7 negative + 0 + 100,000: min reads 0 and the classic median of the two
+    // survivors reads 50,000, so BOTH old ceilings passed on one quiet pass.
+    const workedExample = [...neg(7), 0, 100_000];
+    expect(workedExample).toHaveLength(MEASURE_PASSES);
+    expect(() => budgetStatistics('t', workedExample)).toThrow(
+      /only 2 of 9 passes measured non-negative growth, below the quorum of 5/
+    );
+    // ...and the assertion the budget tests actually call must refuse it too.
+    expect(() => assertUnderBudget('t', workedExample)).toThrow(/below the quorum/);
+  });
+
+  test('exactly at quorum DOES yield a verdict, from the surviving passes', () => {
+    const atQuorum = [...neg(4), 10, 20, 30, 40, 50];
+    expect(atQuorum).toHaveLength(MEASURE_PASSES);
+    const stats = budgetStatistics('t', atQuorum);
+    expect(stats.count).toBe(SAMPLE_QUORUM);
+    expect(stats.min).toBe(10);
+    expect(stats.upperMedian).toBe(30); // sorted[floor(5/2)] = middle of five
+  });
+
+  test('the statistic is the UPPER median for an EVEN count, not the average', () => {
+    // SIX non-negative passes: even, and at/above quorum so a verdict IS issued.
+    // (An even count of 4 would be below quorum for MEASURE_PASSES=9 and is
+    // refused instead — the case above covers that.)
+    const evenSet = [...neg(3), 10, 20, 30, 40, 50, 60];
+    expect(evenSet).toHaveLength(MEASURE_PASSES);
+    const stats = budgetStatistics('t', evenSet);
+    expect(stats.count).toBe(6);
+    // The classic median would be (30 + 40) / 2 = 35; the upper median is 40, so
+    // the favourable half cannot pull the verdict down.
+    expect(stats.upperMedian).toBe(40);
+    expect(stats.min).toBe(10);
+  });
+
+  test('min <= upperMedian always, so the two ceilings cannot contradict', () => {
+    for (const set of [
+      [0, 0, 0, 0, 0],
+      [1, 2, 3, 4, 5],
+      [5, 4, 3, 2, 1],
+      [7, 7, 7, 7, 7, 7],
+      [...neg(3), 100, 1, 50, 2, 3, 4],
+    ]) {
+      const stats = budgetStatistics('t', set);
+      expect(stats.min).toBeLessThanOrEqual(stats.upperMedian);
+    }
+    expect(MEDIAN_BUDGET_BYTES).toBeGreaterThan(BUDGET_BYTES);
+  });
+
+  test('a leak in a MAJORITY of passes trips the median ceiling', () => {
+    const leaking = Array.from({ length: MEASURE_PASSES }, () => MEDIAN_BUDGET_BYTES + 1);
+    expect(() => assertUnderBudget('t', leaking)).toThrow(/UPPER MEDIAN/);
+  });
+
+  test('a clean sample set at quorum passes both ceilings', () => {
+    expect(() => assertUnderBudget('t', [...neg(4), 8, 16, 24, 32, 40])).not.toThrow();
+  });
+});
 
 describe('exception-path / abandoned-iterator leak budgets (issue #1465)', () => {
   let db;
