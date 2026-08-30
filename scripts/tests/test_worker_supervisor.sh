@@ -5696,15 +5696,19 @@ test_legacy_lock_liveness_is_three_valued() {
 # The case above drives a real EPERM subject (pid 1) but passes on an ordinary host through the
 # FALLBACKS: /proc/1 exists, so `live` is returned whether or not the errno branch is there at all.
 # The branch it is named after was therefore unprotected — the harness-never-reached-the-code class.
-# The branch exists for exactly one environment (a `hidepid` procfs where /proc/<pid> AND `ps` are both
-# blind to another user's live process), so isolating it means making BOTH fallbacks blind:
+# The branch exists for exactly one environment (a `hidepid` procfs, blind to another user's live
+# process), so isolating it means making the corroborating oracle blind:
 #
 #   * procfs literal substituted in a SCRATCH COPY of the shipped function, so the /proc probe is blind;
-#   * `ps` removed from PATH, so the ps fallback cannot answer;
+#   * `ps` removed from PATH. BELT ONLY SINCE JOB 203 F1: there is no `ps` fallback any more (its
+#     `dead` verdict could not be made affirmative — see `test_legacy_lock_has_no_ps_liveness_fallback`),
+#     so this now guards against a reintroduced one rather than isolating a live branch. It is kept, and
+#     the NON-VACUITY assert below still measures it, because an unmeasured premise is how a case starts
+#     passing for the wrong reason;
 #   * a REAL EPERM subject (pid 1, unsignallable by a non-root user).
 #
-# With both fallbacks blind, the ONLY branch that can answer `live` is the errno one — and the mutant
-# below, the same scratch copy with that one line deleted, must answer something else.
+# With procfs blind, the ONLY branch that can answer `live` is the errno one — and the mutant below, the
+# same scratch copy with that one line deleted, must answer something else.
 #
 # NO TEST-ONLY SEAM IS ADDED TO THE SHIPPED SCRIPT (CLAUDE.md): a seam is one more thing a real invoker
 # can set, so the artifact is substituted in a scratch copy instead. Because that copy is MODIFIED, the
@@ -5767,7 +5771,8 @@ test_legacy_lock_eperm_errno_branch_is_load_bearing() {
     return 0
   fi
 
-  # NON-VACUITY: both fallbacks really are blind under this invocation, measured rather than assumed.
+  # NON-VACUITY: procfs is blind and no `ps` is even resolvable under this invocation, measured rather
+  # than assumed.
   if [[ ! -d "$blind/self" ]] && ! env PATH="$stubdir" "$BASH" -c 'command -v ps >/dev/null 2>&1'; then
     pass "liveness F4 NON-VACUITY: the substituted procfs root does not exist AND ps is unresolvable under the stubbed PATH — so only the errno branch can answer"
   else
@@ -5777,7 +5782,7 @@ test_legacy_lock_eperm_errno_branch_is_load_bearing() {
 
   ans="$(env PATH="$stubdir" "$BASH" "$body" 1)"
   if [[ "$ans" == live ]]; then
-    pass "liveness F4: with BOTH fallbacks blind, a real EPERM subject (pid 1) still answers 'live' — the errno branch alone carries it, which is the hidepid case the branch exists for"
+    pass "liveness F4: with procfs blind and no ps resolvable, a real EPERM subject (pid 1) still answers 'live' — the errno branch alone carries it, which is the hidepid case the branch exists for"
   else
     fail "liveness-eperm-isolated: answered [$ans] for live pid 1 with procfs and ps both blind; the errno branch does not carry the hidepid case"
   fi
@@ -6230,10 +6235,23 @@ test_legacy_lock_has_no_ps_liveness_fallback() {
     return 0
   fi
 
-  # (a) STRUCTURAL PIN. Matched on the INVOCATION shape — a `ps` opening a command — with comment lines
-  # stripped first: the function's own comment block discusses `ps` at length, and flagging that would
-  # red on correct text, which is the check people learn to waive.
-  if printf '%s\n' "$shipped_fn" | grep -v '^[[:space:]]*#' | grep -qE '(^|[;|&(]|\$\()[[:space:]]*ps[[:space:]]'; then
+  # (a) STRUCTURAL PIN. FULL-LINE comments are stripped first — the function's own comment block
+  # discusses `ps` at length, and flagging that would red on correct text, which is the check people
+  # learn to waive — and what remains is searched for `ps` as a WHOLE WORD.
+  #
+  # A WORD, NOT AN INVOCATION SHAPE. The first version of this assert required `ps` to open a command
+  # (line start, `;`, `|`, `&`, `(` or `$(`) and MISSED the pre-deletion form outright, because that
+  # form is `if ps -p "$pid" …` — `ps` preceded by `if `. RED-verified before and after: shipped is
+  # silent, and each of the three reintroduction spellings (`if ps -p`, `$(ps -p`, `command -v ps`)
+  # fires. `-w` is what makes it safe: `psout`/`psrc` do not match, and no non-comment line of the
+  # shipped function contains `ps` as a word — nor any trailing `#` comment that could smuggle one in,
+  # which is checked here rather than assumed, because stripping only FULL-LINE comments is the one
+  # false-positive route this pattern has.
+  if printf '%s\n' "$shipped_fn" | grep -v '^[[:space:]]*#' | grep -q '#'; then
+    fail "liveness-nops (a) PREMISE: a non-comment line of the shipped function carries a trailing # comment, which the strip below cannot remove — the word check would be unattributable"
+    return 0
+  fi
+  if printf '%s\n' "$shipped_fn" | grep -v '^[[:space:]]*#' | grep -qw 'ps'; then
     fail "liveness-nops (a): the shipped supervisor_pid_liveness INVOKES ps again — the fallback deleted in job 203 F1 is back, and with it the false 'dead' below"
     return 0
   fi
@@ -6287,12 +6305,16 @@ test_legacy_lock_has_no_ps_liveness_fallback() {
 
   # The two stubs. `printf` not `echo` for the stderr text, and the BusyBox stub reproduces the
   # MEASURED streams exactly: exit 1, nothing on stdout, the option error plus usage on stderr.
+  # THE SHEBANG IS AN ABSOLUTE INTERPRETER, NOT `#!/usr/bin/env bash`: these stubs run under a PATH
+  # scoped to the stub directory alone, and `env` resolves its program THROUGH THAT PATH — so an
+  # `env bash` shebang fails with 127 before the stub body runs. A stub that never executes still
+  # produces a non-1 exit and would satisfy an `unknown` assertion for entirely the wrong reason.
   {
-    printf '%s\n' '#!/usr/bin/env bash'
+    printf '%s\n' "#!$BASH"
     printf '%s\n' "printf '%s\\n' \"ps: invalid option -- 'p'\" 'BusyBox v1.36.1 multi-call binary.' 'Usage: ps [-o COL1,COL2=HEADER] [-T]' >&2"
     printf '%s\n' 'exit 1'
   } >"$bb/ps"
-  printf '%s\n' '#!/usr/bin/env bash' 'exit 1' >"$sil/ps"
+  printf '%s\n' "#!$BASH" 'exit 1' >"$sil/ps"
   chmod +x "$bb/ps" "$sil/ps"
   for stubdir in "$bb" "$sil"; do
     if [[ "$(env PATH="$stubdir" "$BASH" -c 'command -v ps')" == "$stubdir/ps" ]]; then
@@ -6987,7 +7009,170 @@ test_fixture_reap_never_signals_a_disowned_group() {
   fi
 }
 
+# ---------------------------------------------------------------------------
+# (#3549, roborev job 203 F2): A `wait`ED FIXTURE IS SURRENDERED AT THE REAP — NO LATER PASS MAY SIGNAL
+# ITS PGID.
+#
+# THE SAME DESTRUCTIVE-SIGNAL CLASS AS JOB 198 F2, ONE STEP FURTHER IN. That fix stopped the reap
+# iterating a HISTORICAL list; what it left is that a fixture which has been `wait`ed is DEAD YET STILL
+# REGISTERED. Nine cases waited a short-lived `sleep 0.1` DIRECTLY, and its pgid then sat in
+# `FIXTURE_OWNED` for the rest of the run. `fixture_release_unowned` cannot see the problem, because its
+# only evidence is `kill -0` on that NUMBER: once the kernel hands the number to an unrelated same-user
+# process GROUP the probe answers `live` — truthfully, about somebody ELSE — and the reap delivers TERM
+# and then KILL to it. On this four-lane box that is plausibly a sibling lane's supervisor, gate or
+# worker being SIGKILLed by this test suite.
+#
+# THE FIX IS A CHOKE POINT (`fixture_wait`), so the property is pinned TWO ways:
+#   (a) STRUCTURALLY — no call site `wait`s a fixture-registered pid directly. The variable set is
+#       DERIVED from this file (every name assigned `$FIXTURE_LAST_PID`), so a NEW fixture variable is
+#       covered without editing this case, which is the whole reason per-call-site correctness failed
+#       twice;
+#   (b) BEHAVIOURALLY — with `kill` overridden by a logging function, a fixture that has exited and been
+#       waited receives NO signal, and a LATER reap in which its number READS LIVE (the recycle) sends
+#       nothing to it either. The MUTANT is the pre-fix call site — a bare `wait` with no registry
+#       interaction — and it must be SHOWN delivering TERM and KILL to that recycled number.
+#
+# NOTHING IS SIGNALLED FOR REAL AND THERE IS NO PROCFS DEPENDENCY: the pgids are synthetic, the state
+# each reports is supplied by the stub, and `fixture_leader_ident` returns EMPTY for them on every host
+# — so this exercises the REGISTRY path (the one the finding is about) identically on macOS.
+# ---------------------------------------------------------------------------
+test_fixture_wait_surrenders_ownership() {
+  local d drv mut log out win later vars v offenders="" g1=2999911 g2=2999912
+  d="$(new_case_dir)"
+  drv="$d/waitdrv.sh"
+  mut="$d/waitdrv-mutant.sh"
+  log="$d/kill.log"
+
+  # ---- (a) STRUCTURAL. The subject set is derived, not listed.
+  vars="$(grep -oE '^[[:space:]]*(local +)?[A-Za-z_][A-Za-z0-9_]*=\$FIXTURE_LAST_PID' "$SELF_FILE" \
+          | sed -E 's/^[[:space:]]*(local +)?//; s/=\$FIXTURE_LAST_PID$//' | sort -u | tr '\n' ' ')"
+  if [[ -n "${vars// /}" ]]; then
+    pass "fixture-wait (a) PREMISE: the fixture-pid variable set was DERIVED from this file: [${vars% }]"
+  else
+    fail "fixture-wait-premise: no variable is assigned from FIXTURE_LAST_PID, so the structural check below has no subject and would pass vacuously"
+    return 0
+  fi
+  for v in $vars FIXTURE_LAST_PID; do
+    if grep -nE "^[[:space:]]*wait[[:space:]]+\"\\\$$v\"" "$SELF_FILE" >/dev/null; then
+      offenders="$offenders $v"
+    fi
+  done
+  if [[ -z "$offenders" ]]; then
+    pass "fixture-wait (a): no call site waits a fixture-registered pid directly — every reap goes through fixture_wait, which unregisters"
+  else
+    fail "fixture-wait-structural: these fixture pids are \`wait\`ed directly, leaving them registered for a later reap to signal:$offenders — use fixture_wait"
+  fi
+
+  # ---- (b) BEHAVIOURAL, against the SHIPPED harness extracted from this file.
+  {
+    printf '%s\n' '#!/usr/bin/env bash'
+    printf '%s\n' 'set -uo pipefail'
+    printf '%s\n' 'KILL_LOG="$1"; DEAD_GROUPS="${2:-}"'
+    printf '%s\n' 'kill() {'
+    printf '%s\n' '  printf "%s\n" "$*" >>"$KILL_LOG"'
+    printf '%s\n' '  if [[ "${1:-}" == "-0" ]]; then'
+    printf '%s\n' '    case " $DEAD_GROUPS " in *" ${2#-} "*) printf "%s\n" "bash: kill: (${2}) - No such process" >&2; return 1 ;; esac'
+    printf '%s\n' '  fi'
+    printf '%s\n' '  return 0'
+    printf '%s\n' '}'
+    printf '%s\n' 'sleep() { :; }'
+    printf '%s\n' 'wait() { :; }'
+    sed -n '/^fixture_leader_ident()/,/^}/p' "$SELF_FILE"
+    sed -n '/^fixture_group_state()/,/^}/p' "$SELF_FILE"
+    sed -n '/^fixture_release_unowned()/,/^}/p' "$SELF_FILE"
+    sed -n '/^fixture_signal_owned()/,/^}/p' "$SELF_FILE"
+    sed -n '/^fixture_unregister()/,/^}/p' "$SELF_FILE"
+    sed -n '/^fixture_wait()/,/^}/p' "$SELF_FILE"
+    sed -n '/^fixture_reap()/,/^}/p' "$SELF_FILE"
+    # g1 is the short-lived fixture: it has EXITED, which is the honest state at the moment a case
+    # waits it. g2 is a live owned group and is the non-vacuity control.
+    printf '%s\n' "FIXTURE_OWNED=(\"$g1|\" \"$g2|\")"
+    printf '%s\n' 'FIXTURE_FOREIGN=()'
+    printf '%s\n' 'echo "--- WAIT ---" >>"$KILL_LOG"'
+    printf '%s\n' "fixture_wait $g1"
+    # THE RECYCLE: the number is handed to an unrelated process group, so it now READS LIVE. This is the
+    # window the finding is about, and it is minutes wide in a real run.
+    # `DEAD_GROUPS=""`, not a substring removal: g1 is the ONLY dead group here, and a `${var// x/}`
+    # form silently matched nothing (the driver's argument carries no leading space), leaving the
+    # recycle unstaged and the contrast measuring the un-recycled case.
+    printf '%s\n' 'DEAD_GROUPS=""'
+    printf '%s\n' 'echo "--- LATER REAP ---" >>"$KILL_LOG"'
+    printf '%s\n' 'fixture_reap'
+  } >"$drv"
+  local fns
+  fns="$(grep -c '^fixture_\(leader_ident\|group_state\|release_unowned\|signal_owned\|unregister\|wait\|reap\)() {$' "$drv" || true)"
+  if [[ "$fns" == "7" ]] && bash -n "$drv" 2>/dev/null; then
+    pass "fixture-wait PREMISE: all 7 harness functions were extracted from this file into the driver, which parses (the subject is the shipped harness, not a re-implementation)"
+  else
+    fail "fixture-wait-premise-extract: extracted $fns/7 harness functions, or the driver does not parse; nothing below would be attributable"
+    return 0
+  fi
+
+  : >"$log"
+  bash "$drv" "$log" "$g1" >/dev/null 2>&1 || true
+  out="$(tr '\n' ';' <"$log")"
+  win="${out##*--- WAIT ---;}"; win="${win%%--- LATER REAP ---*}"
+  later="${out##*--- LATER REAP ---;}"
+  if [[ "$win" != *"-TERM -$g1"* && "$win" != *"-KILL -$g1"* ]]; then
+    pass "fixture-wait (b): waiting a fixture that has already exited delivers NO signal — the group is proven gone and released (window=[$win])"
+  else
+    fail "fixture-wait-signalled-at-wait: the wait window signalled pgid $g1, which it had proven dead; window=[$win]"
+  fi
+  if [[ "$later" != *"-TERM -$g1"* && "$later" != *"-KILL -$g1"* ]]; then
+    pass "fixture-wait (b) THE FINDING'S CASE: a LATER reap, with pgid $g1 now READING LIVE because the number was recycled, sends it NOTHING — ownership was surrendered at the reap (later=[$later])"
+  else
+    fail "fixture-wait-recycled-signalled: a later reap signalled recycled pgid $g1 — it is still registered after being waited; later=[$later]"
+  fi
+  if [[ "$later" == *"-TERM -$g2"* && "$later" == *"-KILL -$g2"* ]]; then
+    pass "fixture-wait NON-VACUITY: the same later reap DOES TERM and KILL the still-owned live group $g2, so the silence above is a decision and not a broken reap"
+  else
+    fail "fixture-wait-nonvacuity: the later reap did not signal still-owned live pgid $g2; later=[$later]"
+  fi
+
+  # ---- THE MUTANT: the pre-fix call site. `fixture_wait` replaced by the bare
+  # `wait "$pid" 2>/dev/null || true` those nine cases used, which touches the registry not at all.
+  # Appended AFTER the extracted definitions so it redefines the function, and the driver body is the
+  # SAME text, so the contrast is attributable to this one substitution.
+  python3 - "$drv" "$mut" <<'PYEOF'
+import sys
+src, dst = sys.argv[1], sys.argv[2]
+s = open(src).read()
+# Anchored on the DRIVER BODY's first marker, not on a `FIXTURE_OWNED=(` assignment: that spelling also
+# occurs inside `fixture_release_unowned`, so the insertion would land mid-function.
+anchor = '\necho "--- WAIT ---"'
+if s.count(anchor) != 1:
+    sys.exit("the driver's WAIT marker is not unique; the insertion point moved")
+i = s.index(anchor) + 1
+pre = '''fixture_wait() {
+  local pid
+  for pid in "$@"; do
+    wait "$pid" 2>/dev/null || true
+  done
+  return 0
+}
+'''
+open(dst, 'w').write(s[:i] + pre + s[i:])
+PYEOF
+  if [[ -s "$mut" ]] && bash -n "$mut" 2>/dev/null \
+     && [[ "$(grep -c '^fixture_wait() {$' "$mut")" == "2" ]]; then
+    pass "fixture-wait MUTANT PREMISE: the pre-fix bare-wait form was appended over the shipped fixture_wait, and the mutant parses"
+  else
+    fail "fixture-wait-mutant-build: the mutant could not be built (definitions=[$(grep -c '^fixture_wait() {$' "$mut" 2>/dev/null || echo 0)])"
+    return 0
+  fi
+  : >"$log"
+  bash "$mut" "$log" "$g1" >/dev/null 2>&1 || true
+  out="$(tr '\n' ';' <"$log")"
+  later="${out##*--- LATER REAP ---;}"
+  if [[ "$later" == *"-TERM -$g1"* && "$later" == *"-KILL -$g1"* ]]; then
+    pass "fixture-wait MUTANT CONTRAST: with the pre-fix bare wait, the later reap delivers TERM AND KILL to recycled pgid $g1 — an unrelated process group, plausibly a sibling lane's, killed by this suite (later=[$later])"
+  else
+    fail "fixture-wait-mutant: the pre-fix form sent [$later] to recycled pgid $g1; expected TERM and KILL, or the contrast proves nothing"
+  fi
+}
+
 t test_fixture_reap_never_signals_a_disowned_group
+t test_fixture_wait_surrenders_ownership
 
 # ---------------------------------------------------------------------------
 # Test 48 (#3549, roborev job 196 F2): THE SUITE LEAVES NO FIXTURE PROCESS BEHIND.
