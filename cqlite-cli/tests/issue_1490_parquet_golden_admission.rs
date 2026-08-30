@@ -331,7 +331,7 @@ fn a_duplicate_key_is_refused_at_every_depth_including_inside_a_udt_value() {
 fn a_present_but_invalid_eligibility_field_is_refused_not_read_as_absent() {
     use parquet_parity::canonical_jsonl::{parse_document_str_with_keys, KeySpec};
     use parquet_parity::cql_type::parse_column;
-    use parquet_parity::golden_rows::{project_golden, reject_ineligible_or_malformed_text};
+    use parquet_parity::golden_rows::{project_golden, validate_golden_text};
     use std::path::Path;
 
     let columns = [("id", "int"), ("v", "text")]
@@ -401,7 +401,7 @@ fn a_present_but_invalid_eligibility_field_is_refused_not_read_as_absent() {
         (r#"{"partition":{"key":["1"]},"rows":[{"type":"row","cells":[{"name":7}]}]}"#, "PRESENT but is not a JSON string"),
     ];
     for (line, needle) in malformed {
-        let err = reject_ineligible_or_malformed_text(&format!("{line}\n"))
+        let err = validate_golden_text(&format!("{line}\n"))
             .expect_err("a present-but-invalid eligibility field must be REFUSED");
         assert!(
             err.contains(needle),
@@ -448,7 +448,7 @@ fn a_present_but_invalid_eligibility_field_is_refused_not_read_as_absent() {
         // Blank lines are skipped, as the loader skips them.
         "",
     ] {
-        reject_ineligible_or_malformed_text(&format!("{good}\n"))
+        validate_golden_text(&format!("{good}\n"))
             .unwrap_or_else(|e| panic!("an eligible well-formed line must be accepted: {e}"));
     }
 }

@@ -101,6 +101,7 @@ pub mod decimal;
 pub mod declared;
 pub mod failure;
 pub mod golden_rows;
+pub mod golden_schema;
 pub mod golden_text;
 pub mod schema_fixture;
 pub mod spelling;
@@ -234,6 +235,36 @@ pub struct Fixture {
     pub golden: PathBuf,
 }
 
+/// Every entry of `dir`, with an entry the OS could not deliver propagated as a
+/// REFUSAL rather than dropped.
+///
+/// `read_dir` yields one `io::Result<DirEntry>` PER ENTRY, so an individual entry
+/// can fail on its own — and the `filter_map(|e| e.ok())` this replaces collapsed
+/// that three-valued signal ("here", "not here", "cannot tell") onto the
+/// PERMISSIVE answer, exactly the shape CLAUDE.md names for two-valued file
+/// predicates. The consequence is specific, not theoretical: every caller below
+/// takes a CENSUS of the directory — how many `*-Data.db` generations, how many
+/// goldens, how many table directories — and concludes the fixture is UNIQUE. A
+/// census taken over an incomplete listing can only ever conclude "fewer", so an
+/// entry that was silently dropped is precisely how a SECOND generation, or a
+/// golden belonging to another one, passes as a unique fixture.
+fn read_dir_completely(dir: &Path) -> Result<Vec<std::fs::DirEntry>, String> {
+    let listing =
+        std::fs::read_dir(dir).map_err(|e| format!("cannot read {}: {e}", dir.display()))?;
+    let mut entries = Vec::new();
+    for (i, entry) in listing.enumerate() {
+        entries.push(entry.map_err(|e| {
+            format!(
+                "cannot read entry {i} of {}: {e}; the harness REFUSES a fixture directory it \
+                 could not inspect COMPLETELY, because an entry it cannot read is UNKNOWN, not \
+                 ABSENT — dropped, it leaves the generation census one entry short",
+                dir.display()
+            )
+        })?);
+    }
+    Ok(entries)
+}
+
 /// Resolve `<root>/<keyspace>/<table>-*/` per TABLE across every candidate root.
 ///
 /// Returns `Ok(None)` only when no candidate root carries the table at all; a
@@ -246,17 +277,20 @@ fn resolve_fixture(case: &ParityCase) -> Result<Option<Fixture>, String> {
     };
     let ks_dir = root.join(case.keyspace);
     let prefix = format!("{}-", case.table);
-    let mut dirs: Vec<PathBuf> = std::fs::read_dir(&ks_dir)
-        .map_err(|e| format!("cannot read {}: {e}", ks_dir.display()))?
-        .filter_map(|e| e.ok())
-        .map(|e| e.path())
-        .filter(|p| {
-            p.is_dir()
-                && p.file_name()
-                    .and_then(|n| n.to_str())
-                    .map(|n| n.starts_with(&prefix))
-                    .unwrap_or(false)
+    // The prefix is matched on the entry name's BYTES, not on a `to_str()` that
+    // drops a non-UTF-8 name: a `<table>-<non-UTF-8>` generation directory must
+    // COUNT toward the uniqueness census below (and be refused as a second
+    // generation), never vanish from it. `OsStr` is an ASCII-compatible
+    // superset, so an ASCII prefix match on its bytes is exact.
+    let mut dirs: Vec<PathBuf> = read_dir_completely(&ks_dir)?
+        .into_iter()
+        .filter(|e| {
+            e.file_name()
+                .as_encoded_bytes()
+                .starts_with(prefix.as_bytes())
         })
+        .map(|e| e.path())
+        .filter(|p| p.is_dir())
         .collect();
     dirs.sort();
     if dirs.len() != 1 {
@@ -292,11 +326,23 @@ fn resolve_fixture(case: &ParityCase) -> Result<Option<Fixture>, String> {
 /// Public so the refusal can be proven against a scratch directory holding a
 /// deliberately mismatched pair, without touching the committed corpus.
 pub fn fixture_in_table_dir(case_id: &str, table_dir: PathBuf) -> Result<Fixture, String> {
-    let entries: Vec<String> = std::fs::read_dir(&table_dir)
-        .map_err(|e| format!("cannot read {}: {e}", table_dir.display()))?
-        .filter_map(|e| e.ok())
-        .filter_map(|e| e.file_name().to_str().map(str::to_string))
-        .collect();
+    let mut entries: Vec<String> = Vec::new();
+    for entry in read_dir_completely(&table_dir)? {
+        let name = entry.file_name();
+        // A name this harness cannot read is UNKNOWN, not ABSENT. Dropped, it
+        // would leave the generation census one entry short — and the census is
+        // the whole basis for calling this fixture unique.
+        let name = name.to_str().ok_or_else(|| {
+            format!(
+                "{case_id}: {} holds an entry whose name is not UTF-8 ({name:?}); the harness \
+                 REFUSES a fixture directory it could not inspect COMPLETELY rather than DROP \
+                 the entry from the generation census, which would let a second `*-Data.db` (or \
+                 a mismatched golden) pass as a unique fixture",
+                table_dir.display()
+            )
+        })?;
+        entries.push(name.to_string());
+    }
     let datas: Vec<&String> = entries.iter().filter(|n| n.ends_with("-Data.db")).collect();
     let goldens: Vec<&String> = entries
         .iter()
