@@ -349,17 +349,21 @@ CQL types are automatically converted to JavaScript types:
 | `map<K,V>` | `Map<K,V>` | via `executeNative()` |
 | `tuple<...>` | `[...]` | Array |
 | `frozen<T>` | Inner type | Unwrapped |
-| UDT | `object` | `{ typeName, keyspace, fields }` (see below) |
+| UDT | `object` | `{ typeName, keyspace, fields }` via `executeNative()` (see below) |
 
 \* **Note:** With `execute()`, `varint` returns `"0x{hex}"` and `decimal` returns `"decimal:{scale}:0x{hex}"`.
 Use `executeNative()` for human-readable formats.
 
 ### UDT type identity is carried out of band
 
-A CQL user-defined type is returned as `{ typeName, keyspace, fields }`:
+A CQL user-defined type is returned as `{ typeName, keyspace, fields }` **by
+`executeNative()`**. `execute()` shapes rows through the JSON writer, which emits a UDT as a bare
+object of its declared fields — mirroring the CLI's JSON — with no `typeName`/`keyspace`/`fields`
+wrapper, so the identity is not available on that path at all:
 
 ```javascript
-const udt = row.address;
+const { rows } = await db.executeNative('SELECT address FROM ks.t LIMIT 1');
+const udt = rows[0].address;
 udt.typeName;          // 'address_type'  — the declared UDT type
 udt.keyspace;          // 'test_collections'
 udt.fields.street;     // '1 Main St'  — declared fields live here, and ONLY here
