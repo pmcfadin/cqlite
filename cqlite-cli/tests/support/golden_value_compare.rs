@@ -919,15 +919,33 @@ fn is_scalar_type(ty: &CqlType) -> bool {
     )
 }
 
-/// Compare a map: golden object vs the CLI's `{key,value}` pair list, paired by a
-/// key canonicalized UNDER THE DECLARED KEY TYPE — so a `map<int,…>` pairs the
-/// golden's `"-5"` with the CLI's `-5`, while a `map<text,…>` compares its keys
-/// exactly AND by JSON kind, so a numeric key `0` does not satisfy the golden's
-/// `"0"`.
+/// Compare a map: golden object vs the CLI's `{key,value}` pair list, IN EMITTED
+/// ORDER, each key canonicalized UNDER THE DECLARED KEY TYPE — so a `map<int,…>`
+/// matches the golden's `"-5"` with the CLI's `-5`, while a `map<text,…>` compares
+/// its keys exactly AND by JSON kind, so a numeric key `0` does not satisfy the
+/// golden's `"0"`.
+///
+/// # Emitted order, because a map's order is not free
+///
+/// Cassandra stores a map's entries sorted by the key's comparator — a multicell
+/// map's cells are keyed by `CellPath`, and a frozen map is serialized in that
+/// same order — and `sstabledump` emits them in that on-disk order, which the
+/// golden reader preserves (`serde_json`'s `preserve_order` is on workspace-wide,
+/// and a multicell map is rebuilt cell by cell in dump order). A reader walking
+/// the same SSTable therefore has no licence to emit a different order, so a
+/// reordering is a DIVERGENCE.
+///
+/// Sorting both sides by canonicalized key before comparing (the previous rule)
+/// discarded exactly that: reversing the CLI's entries compared equal, while the
+/// CSV decoder's own documentation claimed member order was compared against the
+/// golden (issue #1491 review finding N2). The sibling [`compare_sequence`] has
+/// always compared list/set members positionally for the same reason, so nothing
+/// in this walk is order-insensitive now.
 ///
 /// The golden's keys are JSON object keys, hence always strings; the CLI's keep
-/// whatever kind the egress gave them. Both go through the same
-/// `canon_typed(…, key_ty, …)`, which is what makes the kind comparison possible.
+/// whatever kind the egress gave them. Both go through `canon_typed(…, key_ty, …)`
+/// — the golden's under [`Kinding::Stringified`], the CLI's under
+/// [`Kinding::Natural`] — which is what makes the kind comparison possible.
 fn compare_map(
     golden: &Map<String, Value>,
     cli: &[Value],
@@ -977,11 +995,16 @@ fn compare_map(
     if g.len() != c.len() {
         return Err(format!("map size golden {} vs cli {}", g.len(), c.len()));
     }
-    g.sort_by(|a, b| a.0.cmp(&b.0));
-    c.sort_by(|a, b| a.0.cmp(&b.0));
-    for ((gk, gv), (ck, cv)) in g.iter().zip(c.iter()) {
+    for (i, ((gk, gv), (ck, cv))) in g.iter().zip(c.iter()).enumerate() {
         if gk != ck {
-            return Err(format!("map key golden {gk} vs cli {ck}"));
+            return Err(format!(
+                "map key at emitted position {i}: golden {gk} vs cli {ck} — a map's \
+                 entries are compared in EMITTED order, which is the key-comparator \
+                 order both the dump and a reader of the same SSTable see (golden \
+                 keys [{}], cli keys [{}])",
+                keys_of(&g),
+                keys_of(&c)
+            ));
         }
         // A map VALUE is the cell value (`writeRawValue`), so it keeps its natural
         // JSON kind even when the key beside it was stringified.
@@ -990,6 +1013,17 @@ fn compare_map(
             .map_err(|why| format!("[{gk}] {why}"))?;
     }
     Ok(())
+}
+
+/// The canonical keys of one side of a map, in emitted order, for the ordering
+/// diagnostic above — a bare "golden X vs cli Y" at position 3 does not say
+/// whether the entry is missing, extra or merely moved.
+fn keys_of(entries: &[(String, &Value)]) -> String {
+    entries
+        .iter()
+        .map(|(k, _)| k.as_str())
+        .collect::<Vec<_>>()
+        .join(", ")
 }
 
 // ===========================================================================
