@@ -247,7 +247,9 @@ harness to the punch, but to be the only bound there is — which is also why it
 *(This paragraph originally continued "…sized so that every stage's promised allowance fits inside
 it". D6a withdrew that: there are no stage allowances to fit. The bound's SIZE is now argued directly
 against the aggregate of the bounds it replaced, and asserted by
-`the_deadline_is_never_tighter_than_the_bounds_it_replaced`.)*
+`no_stage_in_isolation_is_tighter_than_the_bound_it_replaced` — renamed in round 13 from
+`the_deadline_is_never_tighter_than_the_bounds_it_replaced`, which named a property one absolute
+deadline cannot deliver. See D6c.)*
 
 Raising nextest's slow-timeout was considered and rejected in the original draft as a way to buy
 headroom. That rejection is now moot rather than right: there was no ceiling to raise.
@@ -349,6 +351,14 @@ twelve findings across four rounds. It is fixed by stating the trade truthfully:
 The floor assertion and its name must say the property that holds, not the stronger one. Practically
 the starvation path requires an early stage to consume ~180s while the product works, at which point
 the run is failing regardless — but that is a mitigation, not the claim, and it is recorded as such.
+
+**Landed in round 13.** `the_deadline_is_never_tighter_than_the_bounds_it_replaced` is renamed
+`no_stage_in_isolation_is_tighter_than_the_bound_it_replaced`, and both of its assertion messages now
+state the qualifier: the per-wait one says "even one running with the deadline untouched", and the
+aggregate one says in as many words that it does NOT give a later stage a fresh 60s once earlier
+stages have consumed the deadline. The property that does NOT hold is pinned by its own test,
+`an_exhausted_deadline_leaves_a_later_stage_nothing` — arithmetic on a zero-base deadline, no sleep
+and no threshold — so the stronger claim cannot quietly return as a comment.
 
 ## D7. Drain stderr
 

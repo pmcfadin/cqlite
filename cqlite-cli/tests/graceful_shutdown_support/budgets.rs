@@ -62,14 +62,39 @@ use std::time::{Duration, Instant};
 // The deadline constants
 // ---------------------------------------------------------------------------
 //
-// THE FLOOR INVARIANT (#3515, round-3 blocker) HOLDS UNCONDITIONALLY HERE, and
-// that is the point of the descope. This change replaces bare wall-clock
-// deadlines and MAY NEVER BE TIGHTER THAN THE BOUND IT REPLACED — otherwise it
-// makes the reported flake fire SOONER, which is a regression wearing a fix's
-// clothes. Under per-stage budgets that had to be argued by composition (which
-// group of new stages replaced which old bound), and the argument was wrong
-// twice. With one deadline that ANY SINGLE STAGE MAY CONSUME ENTIRELY, the
-// invariant reduces to arithmetic on two constants, asserted below.
+// WHAT THE FLOOR CLAIM IS, EXACTLY — CORRECTED IN ROUND 13 (design.md D6c,
+// roborev job 247 finding 1). This change replaces bare wall-clock deadlines and
+// must not make the reported flake fire SOONER, which would be a regression
+// wearing a fix's clothes. Round 8 stated that as "no bound here is tighter than
+// the bound it replaced", full stop, and THAT CLAIM IS FALSE: the pre-#3515 code
+// gave each wait an INDEPENDENT 60s, so a later wait got a fresh 60s no matter
+// what earlier waits had consumed, and ONE ABSOLUTE DEADLINE CANNOT REPRODUCE
+// THAT. An early stage may consume nearly all of it and leave a later stage
+// seconds. "Any stage may consume the whole deadline" and "every stage is
+// guaranteed a fresh 60s" are not jointly satisfiable by a single fixed bound.
+//
+// It is NOT fixed by restoring per-stage limits: that is the layer D6a descoped
+// for producing twelve findings across four rounds. It is fixed by stating the
+// trade truthfully, and by naming the assert for the property it actually tests.
+//
+//  * WHAT HOLDS — any single stage MAY CONSUME THE WHOLE deadline, and the base
+//    is at or above the aggregate of the bounds it replaced. So no stage is
+//    tighter *in isolation* than its old 60s, and the whole test is not tighter
+//    than the old nominal total. That is what
+//    `no_stage_in_isolation_is_tighter_than_the_bound_it_replaced` asserts.
+//  * WHAT DOES NOT HOLD — a fresh per-wait allowance after earlier consumption.
+//    An exhausted deadline leaves a later stage nothing, which
+//    `an_exhausted_deadline_leaves_a_later_stage_nothing` pins so the stronger
+//    claim cannot quietly come back.
+//  * WHAT WAS BOUGHT — a BOUNDED TOTAL. The old design had no total bound at all
+//    (`agent-gate.sh`'s `cli-tests` runs plain `cargo test`, with no harness
+//    timeout), so the sibling test's seven independent 60s waits could genuinely
+//    consume 420s+ before anything cut them off. A bounded total necessarily
+//    gives up per-wait freshness; that is the trade, deliberately taken.
+//
+// The starvation path requires an early stage to burn ~180s while the product
+// works, at which point the run is failing regardless — but that is a MITIGATION,
+// recorded as one, and not the claim.
 
 /// The single wall-clock bound every wait in the pre-#3515 version of this file
 /// used: `Duration::from_secs(60)`, seven times over. The floor invariant is
@@ -214,9 +239,10 @@ pub const QUIET_OBSERVATION_BASELINE: Duration = Duration::from_millis(44);
 /// how late an accepted success can be. The failure path is the same rule read
 /// the other way (job 233 finding 1): no expiry is declared until a final
 /// non-blocking check confirms the evidence really is absent — taken from the ONE
-/// transcript snapshot the failure message renders, not merely from the queue
-/// (job 236 finding 1) and not from a second read of the same store (job 243
-/// finding 1).
+/// snapshot of the ONE sequenced store the failure message renders. There is no
+/// second store left for that verdict to disagree with: the queue whose divergence
+/// produced job 236 finding 1, job 243 finding 1 and job 247 findings 2 and 3 is
+/// deleted (design.md D6b).
 ///
 /// It is LIVE from construction: build it as the first statement of the test, so
 /// every stage including the first is charged.
@@ -429,10 +455,30 @@ impl Stage<'_> {
 // that a test can hold is asserted here.
 // ---------------------------------------------------------------------------
 
-/// THE FLOOR INVARIANT: no bound here may be tighter than the bound it replaced.
+/// NO STAGE, IN ISOLATION, IS TIGHTER THAN THE BOUND IT REPLACED — and the base
+/// covers the aggregate of those bounds.
 ///
-/// Under one deadline this is arithmetic on a handful of constants rather than an
-/// argument about which group of stages replaced which old wait — and the
+/// **THE NAME IS THE CORRECTION (design.md D6c, roborev job 247 finding 1).** This
+/// test used to be called `the_deadline_is_never_tighter_than_the_bounds_it_replaced`,
+/// which names a STRONGER property than it tests and than one deadline can
+/// deliver: the old code gave every wait an independent 60s, and no single
+/// absolute deadline can guarantee a later wait a fresh allowance after earlier
+/// consumption. An assert named for a stronger property than it tests is the
+/// defect class this change has hit repeatedly, so the name and the messages now
+/// say exactly what is asserted:
+///
+/// * IN ISOLATION — a stage may consume the WHOLE deadline (asserted separately by
+///   `any_single_stage_may_consume_the_whole_deadline`), so a stage that runs with
+///   the deadline untouched has at least the 60s it replaced iff `base >= 60s`.
+/// * IN AGGREGATE — the base is at or above the old NOMINAL total, so the test as
+///   a whole is not tighter than the sum of the bounds it replaced.
+///
+/// What is NOT asserted here, because it is not true: that a later stage still has
+/// 60s after earlier stages have consumed the deadline. See
+/// `an_exhausted_deadline_leaves_a_later_stage_nothing`.
+///
+/// Under one deadline both halves are arithmetic on a handful of constants rather
+/// than an argument about which group of stages replaced which old wait — and the
 /// per-stage form of that argument was wrong twice (round 3, and roborev job 229's
 /// finding that summing caps does not preserve a SHARED old deadline).
 ///
@@ -440,7 +486,7 @@ impl Stage<'_> {
 /// the old waits: a stage the old code did not bound separately still consumes
 /// from the shared budget, and omitting it was roborev job 232's finding 2.
 #[test]
-fn the_deadline_is_never_tighter_than_the_bounds_it_replaced() {
+fn no_stage_in_isolation_is_tighter_than_the_bound_it_replaced() {
     for (test, base, cap, old_waits) in [
         (
             "sigint_in_writable_session_flushes_before_exit",
@@ -455,21 +501,24 @@ fn the_deadline_is_never_tighter_than_the_bounds_it_replaced() {
             T2_OLD_WAITS,
         ),
     ] {
-        // PER WAIT: any single stage may consume the whole deadline (there are no
-        // per-stage budgets — see `any_single_stage_may_consume_the_whole_deadline`),
-        // so a single wait is never tighter than the 60s it replaced iff the base
-        // is at least 60s.
+        // PER WAIT, IN ISOLATION: any single stage may consume the whole deadline
+        // (there are no per-stage budgets — see
+        // `any_single_stage_may_consume_the_whole_deadline`), so a wait that runs
+        // with the deadline untouched is not tighter than the 60s it replaced iff
+        // the base is at least 60s. It is NOT a claim about a wait that starts
+        // after earlier stages have consumed the deadline (D6c).
         assert!(
             base >= OLD_BOUND,
-            "{test}: a base of {base:?} would let a single wait fire SOONER than the \
-             {OLD_BOUND:?} bound it replaced"
+            "{test}: a base of {base:?} would let a single wait — even one running with the \
+             deadline untouched — fire SOONER than the {OLD_BOUND:?} bound it replaced"
         );
 
         // IN AGGREGATE: the whole test's nominal old total, PLUS the readiness
         // stage the old code did not bound separately. The old code had no total
         // bound at all, so any total is a new ceiling; it must at least cover the
         // sum of the nominal bounds it replaced AND every stage that now draws on
-        // the same deadline.
+        // the same deadline. This is the bound that was BOUGHT (D6c): it is what
+        // the loss of per-wait freshness paid for.
         //
         // The readiness term is what roborev job 232 finding 2 reported missing:
         // summing only the old waits admits a 120s/420s base under which
@@ -483,7 +532,10 @@ fn the_deadline_is_never_tighter_than_the_bounds_it_replaced() {
             "{test}: a base of {base:?} is below the {old_total:?} aggregate of the {old_waits} \
              independent {OLD_BOUND:?} waits it replaced plus {NEW_READINESS_WAITS} readiness \
              stage ({stages_sharing} stages share this one deadline, and any one of them may \
-             consume it)"
+             consume it). NOTE what this does and does not say (D6c): the base covering the \
+             aggregate is what keeps the test as a whole from being tighter than the bounds it \
+             replaced; it does NOT give a later stage a fresh {OLD_BOUND:?} once earlier stages \
+             have consumed the deadline, and no single absolute deadline can"
         );
 
         assert!(base <= cap, "{test}: base {base:?} exceeds cap {cap:?}");
@@ -526,6 +578,29 @@ fn any_single_stage_may_consume_the_whole_deadline() {
     assert!(
         first_remaining > Duration::from_secs(3000),
         "the first stage must be able to consume the whole deadline, but got {first_remaining:?}"
+    );
+}
+
+/// **THE PROPERTY THAT DOES NOT HOLD, pinned so it cannot quietly come back
+/// (design.md D6c).** One absolute deadline gives no stage a fresh allowance: once
+/// it is exhausted, a later stage gets ZERO, where the pre-#3515 code would have
+/// given that wait a full independent 60s.
+///
+/// This is the honest counterpart to `any_single_stage_may_consume_the_whole_deadline`
+/// — the same absence of per-stage budgets read from the other side — and it is
+/// asserted from an ALREADY-EXHAUSTED deadline (base and cap of zero), so it is
+/// arithmetic and not a wall-clock race: no sleep, no threshold, nothing that a
+/// loaded host can change.
+#[test]
+fn an_exhausted_deadline_leaves_a_later_stage_nothing() {
+    let deadline = TestDeadline::start(Duration::ZERO, Duration::ZERO);
+    let stage = deadline.stage("later");
+    assert!(
+        stage.remaining().is_zero(),
+        "an exhausted deadline must leave a later stage NOTHING — that is the per-wait freshness \
+         a single bounded total gives up (D6c). {:?} of allowance here would mean a per-stage \
+         budget had come back",
+        stage.remaining()
     );
 }
 

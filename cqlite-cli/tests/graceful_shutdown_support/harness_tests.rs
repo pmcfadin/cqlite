@@ -505,7 +505,9 @@ fn read_side_collectors_that_end_without_delivering_report_collectors_ended() {
              the collection reported a deadline — blaming the test's bound for a harness defect \
              the `CollectorsEnded` variant already exists to name"
         ),
-        CollectEnd::Both(..) => panic!("only one buffer was ever delivered, yet both were returned"),
+        CollectEnd::Both(..) => {
+            panic!("only one buffer was ever delivered, yet both were returned")
+        }
         CollectEnd::Unavailable => panic!("the store's lock was poisoned unexpectedly"),
     }
 }
