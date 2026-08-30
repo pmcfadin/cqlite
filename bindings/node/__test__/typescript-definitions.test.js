@@ -616,6 +616,50 @@ function memberDrift(className, declared, runtime) {
   return drift;
 }
 
+/**
+ * Every top-level NAME `index.d.ts` declares, whatever the declaration kind.
+ *
+ * A caller can write `import { X } from '@cqlite/node'` for a class, function,
+ * interface, type alias, enum or exported const alike, so the runtime->declared
+ * check must consider all of them -- not just classes and functions.
+ *
+ * @param {string} dtsSource - Full `.d.ts` source text
+ * @returns {Set<string>} Declared top-level names
+ */
+function declaredTopLevelNames(dtsSource) {
+  const sourceFile = ts.createSourceFile(
+    'index.d.ts',
+    dtsSource,
+    ts.ScriptTarget.Latest,
+    true
+  );
+  const names = new Set();
+  const visit = (node) => {
+    if (
+      (ts.isClassDeclaration(node) ||
+        ts.isFunctionDeclaration(node) ||
+        ts.isInterfaceDeclaration(node) ||
+        ts.isTypeAliasDeclaration(node) ||
+        ts.isEnumDeclaration(node) ||
+        ts.isModuleDeclaration(node)) &&
+      node.name &&
+      ts.isIdentifier(node.name)
+    ) {
+      names.add(node.name.text);
+    }
+    if (ts.isVariableStatement(node)) {
+      for (const declaration of node.declarationList.declarations) {
+        if (ts.isIdentifier(declaration.name)) {
+          names.add(declaration.name.text);
+        }
+      }
+    }
+    ts.forEachChild(node, visit);
+  };
+  visit(sourceFile);
+  return names;
+}
+
 describe('Runtime surface vs index.d.ts', () => {
   let dtsContent;
   let runtimeExports;
@@ -703,5 +747,32 @@ describe('Runtime surface vs index.d.ts', () => {
       (name) => typeof runtimeExports[name] !== 'function'
     );
     expect(phantoms).toEqual([]);
+  });
+
+  test('every public runtime export is declared in index.d.ts', () => {
+    // The declared->runtime direction is covered above. This is the OTHER
+    // direction, and it is the scenario issue #1456 exists for: a new PUBLIC
+    // export added to `lib/index.js` and forgotten in `index.d.ts` is invisible
+    // to every TypeScript caller, and nothing else in this suite notices.
+    //
+    // Underscore-prefixed exports are excluded because they are internal test
+    // hooks, not API: `_errorContractProbe` and `_errorContractNodeCodes`
+    // (issue #1451) and `_ffiCommonRenderVectors` (issue #1452) are reached only
+    // by this test suite, and each is documented `@private` in `lib/index.js`.
+    // This mirrors the Python side, which scopes its `__all__`-vs-stub direction
+    // to non-underscore names for the same reason.
+    const publicExports = Object.keys(runtimeExports)
+      .filter((name) => !name.startsWith('_'))
+      .sort();
+    // Non-vacuity: an empty public-export set would satisfy the assert below
+    // trivially, so an entry point that failed to load could green.
+    expect(publicExports.length).toBeGreaterThan(0);
+    expect(publicExports).toContain('Database');
+
+    const declared = declaredTopLevelNames(dtsContent);
+    expect(declared.size).toBeGreaterThan(0);
+
+    const undeclared = publicExports.filter((name) => !declared.has(name));
+    expect(undeclared).toEqual([]);
   });
 });
