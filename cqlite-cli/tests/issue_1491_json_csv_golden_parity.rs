@@ -890,6 +890,11 @@ enum FixtureError {
 /// The `Presence` declaration is CHECKED against `git ls-files`, never trusted: a
 /// case declared committed whose table git does not track, and a case declared
 /// fetched-corpus that git DOES track, are both mis-declarations that fail here.
+///
+/// A COMMITTED case can never reach the skip path: this function's only
+/// [`FixtureError::CorpusAbsent`] arm is the fetched-corpus one, so every way a
+/// committed fixture can fail to resolve is a [`FixtureError::Failure`]. Pinned by
+/// `a_committed_case_can_never_resolve_to_a_skip`.
 fn resolve_fixture(
     case: &Case,
     committed: &fixture_root::CommittedFixtures,
@@ -907,10 +912,28 @@ fn resolve_fixture(
              from the checkout copy, and fails closed when absent"
                 .to_string(),
         )),
+        // The two corpus misses are DIFFERENT verdicts: genuinely absent is the
+        // legal skip, while a selected-but-unusable root is a failure. Flattening
+        // both onto `CorpusAbsent` made an unreadable or self-contradictory corpus
+        // produce a green run labelled "NOT PRESENT" (review finding M3).
         (Presence::Corpus, None) => {
             fixture_root::corpus_fixture_dir(case.keyspace, case.table, checkout)
-                .map_err(FixtureError::CorpusAbsent)
+                .map_err(corpus_miss)
         }
+    }
+}
+
+/// A fetched-corpus miss as a case verdict. Genuinely absent is the legal skip; a
+/// root that was selected and then could not be used is a FAILURE.
+///
+/// A named function rather than an inline `match` so the mapping is pinned by
+/// `an_unusable_corpus_is_a_failure_and_only_a_true_absence_skips` — flattening the
+/// two produced a green run labelled "NOT PRESENT" for an unreadable or malformed
+/// corpus (review finding M3), and nothing else in the lane can observe that.
+fn corpus_miss(miss: fixture_root::CorpusMiss) -> FixtureError {
+    match miss {
+        fixture_root::CorpusMiss::Absent(why) => FixtureError::CorpusAbsent(why),
+        fixture_root::CorpusMiss::Unusable(why) => FixtureError::Failure(why),
     }
 }
 
@@ -1376,6 +1399,56 @@ fn every_declared_gap_names_at_least_one_egress_format() {
         }
     }
     assert!(bad.is_empty(), "issue #1491 (K1):\n  {}", bad.join("\n  "));
+}
+
+/// M3: the corpus-miss mapping itself. An `Unusable` corpus must fail the case and
+/// only a true `Absent` may skip it.
+#[test]
+fn an_unusable_corpus_is_a_failure_and_only_a_true_absence_skips() {
+    match corpus_miss(fixture_root::CorpusMiss::Unusable("broken".to_string())) {
+        FixtureError::Failure(why) => assert_eq!(why, "broken"),
+        FixtureError::CorpusAbsent(why) => {
+            panic!("an unusable corpus must not skip the case: {why}")
+        }
+    }
+    match corpus_miss(fixture_root::CorpusMiss::Absent("not fetched".to_string())) {
+        FixtureError::CorpusAbsent(why) => assert_eq!(why, "not fetched"),
+        FixtureError::Failure(why) => {
+            panic!("a genuinely absent fetched fixture is a legal skip: {why}")
+        }
+    }
+}
+
+/// M3's structural half: a COMMITTED case can never take the skip path, whatever
+/// goes wrong. A committed fixture is present in every checkout, so an
+/// unresolvable one is a real failure — and the census's "NOT PRESENT (fetched
+/// corpus)" line must be reachable only from a fetched-corpus case.
+#[test]
+fn a_committed_case_can_never_resolve_to_a_skip() {
+    let tmp = tempfile::TempDir::new().expect("tempdir");
+    // An EMPTY committed set and an empty checkout: every resolution path a
+    // committed case has is broken at once.
+    let committed = fixture_root::CommittedFixtures::new();
+    let case = Case {
+        presence: Presence::Committed,
+        keyspace: "no_such_ks",
+        table: "no_such_table",
+        schema: "basic-types",
+        pk: &["id"],
+        ck: &[],
+        multicell: &[],
+        skips: &[],
+    };
+    match resolve_fixture(&case, &committed, tmp.path()) {
+        Err(FixtureError::Failure(why)) => assert!(
+            why.contains("tracks no *-Data.db"),
+            "the failure must name what is missing: {why}"
+        ),
+        Err(FixtureError::CorpusAbsent(why)) => {
+            panic!("a committed case must never take the skip path: {why}")
+        }
+        Ok(_) => panic!("nothing can resolve from an empty checkout"),
+    }
 }
 
 /// The other half of the exclusion contract: every shape an entry may declare is
