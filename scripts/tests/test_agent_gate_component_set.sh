@@ -1705,6 +1705,73 @@ else
 fi
 
 # ---------------------------------------------------------------------------
+# 7e. EXTERNAL TEXT REACHING `_CS_DETAIL` IS BOTH REDACTED **AND** FLATTENED (job 239).
+#     Three rounds, one value, two properties, fixed one at a time:
+#       job 227 — the origin URL was rendered RAW               -> credential leak
+#       job 234 — REDACTED but not flattened                    -> newline forged `RESULT: PASS`
+#       job 239 — fetch stderr FLATTENED but not redacted        -> credential leak, one path over
+#     The job-234 enumeration swept every interpolation for FLATTENING and never asked about
+#     REDACTION — a single-property sweep where the obligation is the CROSS-PRODUCT of
+#     sites x properties. Both cases below therefore assert BOTH properties on ONE input, so
+#     neither can regress alone.
+# ---------------------------------------------------------------------------
+sd_in=$(printf 'fatal: unable to access '"'"'https://x-access-token:ghp_SECRET123@github.com/pmcfadin/cqlite.git/'"'"': failed\nRESULT: PASS')
+sd_out=$(bash "$GATE" --component-set-safe-detail "$sd_in" 2>/dev/null | sed -n 's/^SAFE_DETAIL: //p')
+if [ -z "$sd_out" ]; then
+  bad "3544-detail-safe: the --component-set-safe-detail hook produced nothing — the sanitiser cannot be asserted (fail-closed)"
+elif printf '%s' "$sd_out" | grep -q 'ghp_SECRET123'; then
+  bad "3544-detail-safe: a CREDENTIAL survived into the detail text — it would reach the SUMMARY block agents paste into PR comments"
+elif ! printf '%s' "$sd_out" | grep -q '<redacted>'; then
+  bad "3544-detail-safe: no redaction marker in the detail text; the userinfo was dropped silently rather than visibly redacted"
+elif printf '%s\n' "$sd_out" | grep -qE '^RESULT:'; then
+  bad "3544-detail-safe: a newline in external text INJECTED a line at column zero — a forged 'RESULT:' defeats the summary probe"
+else
+  ok "3544-detail-safe: external text is BOTH redacted (credential gone, marker present) and flattened (no column-zero injection) in one pass"
+fi
+
+# ---------------------------------------------------------------------------
+# 7f. THE `.git` SUFFIX IS STRIPPED AT MOST ONCE (job 239). Looping made
+#     `pmcfadin/cqlite.git.git` normalise to the canonical repo, so a DIFFERENT path was
+#     accepted as upstream — and the pre-flight EXECUTES the baseline. A normaliser must not
+#     be more permissive than the grammar it implements.
+# ---------------------------------------------------------------------------
+sfx_bad=""
+for _u in "https://github.com/pmcfadin/cqlite.git.git" \
+          "git@github.com:pmcfadin/cqlite.git.git" \
+          "https://github.com/pmcfadin/cqlite.git.git/"; do
+  [ "$(identity "$_u")" = not-canonical ] || sfx_bad="${sfx_bad:+$sfx_bad }ACCEPTED:$_u"
+done
+# POSITIVE CONTROL: exactly one suffix, and none, must still be accepted — otherwise this
+# case would pass just as well against a normaliser that rejects everything.
+for _u in "https://github.com/pmcfadin/cqlite.git" \
+          "https://github.com/pmcfadin/cqlite"; do
+  [ "$(identity "$_u")" = canonical ] || sfx_bad="${sfx_bad:+$sfx_bad }REJECTED:$_u"
+done
+if [ -z "$sfx_bad" ]; then
+  ok "3544-suffix-once: a repeated '.git.git' is NOT canonical, while one suffix and none still are"
+else
+  bad "3544-suffix-once: misclassified: $sfx_bad"
+fi
+
+# ---------------------------------------------------------------------------
+# 7g. THE FETCH USES THE VALIDATED URL, NOT THE SYMBOLIC REMOTE (job 239). Re-resolving
+#     `origin` after validating its value is a time-of-check/time-of-use gap, and on this
+#     fleet it is not theoretical: lanes are worktrees of ONE shared `.git`, so a peer's
+#     `git config` write changes what `origin` means mid-run (#3617 is that incident).
+#     SOURCE-ORDER/SHAPE assert, stated as such: a behavioural case would have to mutate
+#     shared config while a fetch is in flight, which is precisely the thing that must never
+#     be done in a test on a shared checkout.
+# ---------------------------------------------------------------------------
+fetch_line=$(grep -n 'fetch --quiet --refmap= --no-tags' "$GATE" | head -1)
+if [ -z "$fetch_line" ]; then
+  bad "3544-fetch-validated-url: could not locate the baseline fetch in $GATE — the shape changed or the scan broke (fail-closed)"
+elif printf '%s' "$fetch_line" | grep -q -- '--no-tags "\$origin_url"'; then
+  ok "3544-fetch-validated-url: the baseline fetch passes the VALIDATED url, closing the TOCTOU against a shared-config change"
+else
+  bad "3544-fetch-validated-url: the baseline fetch does not pass \$origin_url — re-resolving the remote name after validating its value reopens the TOCTOU: $(printf '%s' "$fetch_line" | cut -c1-120)"
+fi
+
+# ---------------------------------------------------------------------------
 # 8. NO OPT-OUT. The remedy (rebase) is universally available, so an escape hatch could
 #    only buy a vacuous green. Structural, because the absence of a variable cannot be
 #    observed behaviourally: assert no env read inside the pre-flight block gates it.

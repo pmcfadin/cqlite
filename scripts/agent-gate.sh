@@ -2593,6 +2593,32 @@ _CS_DETAIL=""      # one-line cause text for the non-`ok` kinds
 # _component_set_flatten: collapse arbitrary command stderr into ONE bounded line, so a
 # multi-line git error cannot smuggle extra lines into a SUMMARY block (a reader — and
 # every `grep`-based consumer — treats one line as one fact).
+# _component_set_safe_detail: the ONE way external text may enter `_CS_DETAIL`. Applies BOTH
+# properties, because applying one and not the other is this pre-flight's most-repeated defect:
+#
+#   job 227 — the origin URL was rendered RAW            -> credential leak, fixed by redacting
+#   job 234 — the origin URL was REDACTED but not flattened -> newline injection forging `RESULT: PASS`
+#   job 239 — fetch stderr was FLATTENED but not redacted   -> credential leak again, one path over
+#
+# Three rounds, one value, two properties, fixed one at a time. The enumeration that found 234
+# swept every interpolation for FLATTENING and never asked about REDACTION — a single-property
+# sweep where the obligation is the CROSS-PRODUCT of sites x properties. This helper removes the
+# choice: there is nothing to remember at a call site, and adding a third property later means
+# editing one function rather than re-running a sweep nobody will think to re-run.
+_component_set_safe_detail() {
+  _component_set_flatten "$(_component_set_redact_text "$1")"
+}
+
+# _component_set_redact_text: redact userinfo inside ANY url-like substring of FREE TEXT.
+# Distinct from _component_set_redact_url, which takes a single URL: git transport errors quote
+# the resolved URL, and a CANONICAL url may legitimately carry a token
+# (`https://x-access-token:<TOKEN>@github.com/pmcfadin/cqlite.git` is on the accept list), so
+# stderr from a failed fetch can carry a live credential into a SUMMARY block that this repo's
+# workflow tells agents to paste into PR comments.
+_component_set_redact_text() {
+  printf '%s' "$1" | sed -E 's#([a-zA-Z][a-zA-Z0-9+.-]*://)[^/@[:space:]]*@#\1<redacted>@#g'
+}
+
 _component_set_flatten() {
   printf '%s' "$1" | tr '\n\r\t' '   ' | cut -c1-200
 }
@@ -2894,14 +2920,20 @@ _component_set_normalise_remote() {
 # path — leading/trailing `/` and a trailing `.git` — in a loop, so `…/cqlite.git/` folds too.
 _component_set_strip_repo_suffix() {
   local p="$1"
+  # Slashes: any number, both ends. A leading `/` after `host:` and a trailing `/` are both
+  # legitimate spellings on the accept list.
   while :; do
     case "$p" in
-      /*)    p="${p#/}" ;;
-      */)    p="${p%/}" ;;
-      *.git) p="${p%.git}" ;;
-      *)     break ;;
+      /*) p="${p#/}" ;;
+      */) p="${p%/}" ;;
+      *)  break ;;
     esac
   done
+  # `.git`: AT MOST ONE (roborev job 239). Looping here made `pmcfadin/cqlite.git.git`
+  # normalise to the canonical repo, so a DIFFERENT path was accepted as upstream — and the
+  # documented grammar permits exactly one optional suffix. A normaliser must not be more
+  # permissive than the grammar it implements.
+  case "$p" in *.git) p="${p%.git}" ;; esac
   printf '%s' "$p"
 }
 
@@ -2975,7 +3007,7 @@ _component_set_head_set() {
     if [ "$rc" -eq 124 ] || [ "$rc" -eq 137 ]; then
       _CS_HEAD_ERR="git show HEAD:$rel EXCEEDED its ${_CS_BOUND_HINT}s bound (rc $rc; a partial clone fetching the blob lazily is the usual cause)"
     else
-      _CS_HEAD_ERR="git show HEAD:$rel failed (rc $rc): $(_component_set_flatten "$(cat "$tmpd/show.err" 2>/dev/null)")"
+      _CS_HEAD_ERR="git show HEAD:$rel failed (rc $rc): $(_component_set_safe_detail "$(cat "$tmpd/show.err" 2>/dev/null)")"
     fi
     rm -rf "$tmpd"; return 1
   fi
@@ -2987,7 +3019,7 @@ _component_set_head_set() {
     _component_set_bounded "$_CS_BOUND_SECS" bash "$tmpd/scripts/$base" --list 2>"$tmpd/list.err"
   ); rc=$?
   if [ "$rc" -ne 0 ]; then
-    _CS_HEAD_ERR="'bash <HEAD:$rel> --list' exited $rc: $(_component_set_flatten "$(cat "$tmpd/list.err" 2>/dev/null)")"
+    _CS_HEAD_ERR="'bash <HEAD:$rel> --list' exited $rc: $(_component_set_safe_detail "$(cat "$tmpd/list.err" 2>/dev/null)")"
     rm -rf "$tmpd"; return 1
   fi
   rm -rf "$tmpd"
@@ -3208,13 +3240,24 @@ _component_set_probe_inner() {
   # The leak is not merely untidy on this fleet: lanes are worktrees of ONE shared `.git`, so a
   # leaked ref per failed fetch accumulates in state every lane on the box shares.
   _CS_FETCH_REF="$csref"
-  err=$(_component_set_bounded "$_CS_BOUND_SECS" git -C "$REPO_ROOT" fetch --quiet --refmap= --no-tags origin "refs/heads/main:$csref" 2>&1); rc=$?
+  # FETCH THE VALIDATED URL, NOT THE SYMBOLIC NAME (roborev job 239). The check above validates
+  # the value captured from `git remote get-url origin`; re-resolving `origin` here would be a
+  # TIME-OF-CHECK / TIME-OF-USE gap, and on this fleet that gap is not theoretical: lanes are
+  # worktrees of ONE shared `.git`, so any peer's `git config` write changes what `origin` means
+  # mid-run. This lane proved it the hard way — a `git remote set-url` from a throwaway worktree
+  # re-pointed `origin` for four live lanes (#3617). Passing the exact bytes that passed
+  # validation closes the window: what was approved is what is fetched, and therefore what is
+  # EXECUTED as the baseline.
+  #
+  # The diagnostics below deliberately say "the validated origin URL" rather than interpolating
+  # it: an accepted canonical URL may carry a token, and `_CS_DETAIL` reaches the SUMMARY block.
+  err=$(_component_set_bounded "$_CS_BOUND_SECS" git -C "$REPO_ROOT" fetch --quiet --refmap= --no-tags "$origin_url" "refs/heads/main:$csref" 2>&1); rc=$?
   if [ "$rc" -ne 0 ]; then
     _CS_KIND=fetch-failed
     if [ "$rc" -eq 124 ] || [ "$rc" -eq 137 ]; then
-      _CS_DETAIL="git fetch origin main EXCEEDED its ${_CS_BOUND_HINT}s bound (rc $rc — the bound fired; a stalled network or an auth prompt is the usual cause)"
+      _CS_DETAIL="the fetch of the validated origin URL EXCEEDED its ${_CS_BOUND_HINT}s bound (rc $rc — the bound fired; a stalled network or an auth prompt is the usual cause)"
     else
-      _CS_DETAIL="git fetch origin main exited $rc: $(_component_set_flatten "$err")"
+      _CS_DETAIL="the fetch of the validated origin URL exited $rc: $(_component_set_safe_detail "$err")"
     fi
     return 0
   fi
@@ -3260,7 +3303,7 @@ _component_set_probe_inner() {
     if [ "$rc" -eq 124 ] || [ "$rc" -eq 137 ]; then
       _CS_DETAIL="git show ${_CS_SHA}:$rel EXCEEDED its ${_CS_BOUND_HINT}s bound (rc $rc; a partial clone fetching the blob lazily is the usual cause)"
     else
-      _CS_DETAIL="git show ${_CS_SHA}:$rel failed (rc $rc): $(_component_set_flatten "$(cat "$tmpd/show.err" 2>/dev/null)")"
+      _CS_DETAIL="git show ${_CS_SHA}:$rel failed (rc $rc): $(_component_set_safe_detail "$(cat "$tmpd/show.err" 2>/dev/null)")"
     fi
     rm -rf "$tmpd"; return 0
   fi
@@ -3280,7 +3323,7 @@ _component_set_probe_inner() {
   ); rc=$?
   if [ "$rc" -ne 0 ]; then
     _CS_KIND=baseline-list-failed
-    _CS_DETAIL="'bash <origin/main:$rel> --list' exited $rc: $(_component_set_flatten "$(cat "$tmpd/list.err" 2>/dev/null)")"
+    _CS_DETAIL="'bash <origin/main:$rel> --list' exited $rc: $(_component_set_safe_detail "$(cat "$tmpd/list.err" 2>/dev/null)")"
     rm -rf "$tmpd"; return 0
   fi
   rm -rf "$tmpd"
@@ -4013,6 +4056,10 @@ case "${1:-}" in
   # exists so the URL-shape variants (ssh, scp-like, https, ports, case, `.git`, a fork) are
   # covered WITHOUT a network fetch and WITHOUT a settable expected-identity — per CLAUDE.md,
   # the constrained party must not choose its own enforcer.
+  # Hook for the DETAIL sanitiser (roborev job 239), so scripts/tests asserts the SAME
+  # redact+flatten path `_CS_DETAIL` uses rather than a reimplementation of it.
+  --component-set-safe-detail)
+    printf 'SAFE_DETAIL: %s\n' "$(_component_set_safe_detail "${2:-}")"; exit 0 ;;
   --component-set-remote-identity)
     _csri="${2:?--component-set-remote-identity needs <url>}"
     printf 'NORMALISED: %s\n' "$(_component_set_normalise_remote "$_csri")"
