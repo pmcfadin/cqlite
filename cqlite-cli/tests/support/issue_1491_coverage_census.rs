@@ -43,6 +43,15 @@ struct Excluded {
 /// containment — a golden that grows a shape the entry does not name is a
 /// declaration that has stopped describing its subject, which is the same defect
 /// as one that names a shape the golden never had (issue #1491 review finding F4).
+///
+/// And the goldens it is checked against are only those PAIRED with a tracked
+/// `*-Data.db`, by the same `<gen>-Data.db` + `.jsonl` rule `compare::golden_path`
+/// resolves a case's oracle with. The repository tracks ORPHAN goldens describing
+/// generations whose SSTable is not committed (`test_deltas.static_with_rows` has
+/// two), so unioning every tracked JSONL let an orphan supply the declared
+/// unsupported shape while the actual committed SSTable's own golden was
+/// comparable — an exclusion resting on evidence that does not describe its
+/// subject (issue #1491 review finding T2).
 const NOT_COMPARABLE: &[Excluded] = &[
     Excluded {
         keyspace: "test_big",
@@ -102,6 +111,96 @@ const NOT_COMPARABLE: &[Excluded] = &[
     },
 ];
 
+/// The git-tracked fixture set, split into what may and may not verify a claim.
+#[derive(Debug)]
+struct Tracked {
+    /// Every `(keyspace, table)` git tracks a `*-Data.db` for, sorted and deduped.
+    committed: Vec<(String, String)>,
+    /// Per table, the tracked goldens PAIRED with a tracked `*-Data.db`.
+    goldens: BTreeMap<(String, String), Vec<String>>,
+    /// Orphan goldens beside a table git DOES track an SSTable for — the near
+    /// misses, named in the census.
+    orphans_of_tracked_tables: Vec<String>,
+    /// Orphan goldens for a table with no tracked SSTable at all: counted, not
+    /// named.
+    orphans_of_untracked_tables: usize,
+}
+
+/// Split a `git ls-files` listing into the tracked SSTable tables and the goldens
+/// that may verify a claim about them.
+///
+/// The PAIRING is `compare::golden_path`'s rule and no other: a golden verifies a
+/// claim about a fixture only when it is `<that SSTable's name>.jsonl` in the SAME
+/// tracked directory. The repository tracks ORPHAN goldens describing generations
+/// whose SSTable is not committed, so a union over every tracked JSONL let an orphan
+/// supply an exclusion's declared unsupported shape while the committed SSTable's own
+/// golden was comparable — the census and the resolver disagreeing about which bytes
+/// are the oracle (issue #1491 review finding T2).
+///
+/// Pure and separated from the census so both halves of the rule are testable
+/// against a synthetic listing; the census reads the real repository, where the
+/// orphan shape exists but the near-miss it would license does not.
+fn tracked_fixtures(listing: &[String]) -> Result<Tracked, String> {
+    let mut committed: Vec<(String, String)> = Vec::new();
+    let mut sstables: BTreeSet<(String, String, String, String)> = BTreeSet::new();
+    let mut all_goldens: Vec<(String, String, String, String, String)> = Vec::new();
+    for line in listing {
+        // The same path parser the fixture-root selection uses, so "committed" means
+        // one thing in this lane: an unrecognised shape is refused, not guessed at.
+        let Some(path) = fixture_root::classify(line)? else {
+            continue;
+        };
+        if path.is_golden {
+            all_goldens.push((
+                path.keyspace,
+                path.table,
+                path.dir,
+                path.file,
+                line.to_string(),
+            ));
+        } else {
+            sstables.insert((
+                path.keyspace.clone(),
+                path.table.clone(),
+                path.dir,
+                path.file,
+            ));
+            committed.push((path.keyspace, path.table));
+        }
+    }
+    committed.sort();
+    committed.dedup();
+
+    let mut goldens: BTreeMap<(String, String), Vec<String>> = BTreeMap::new();
+    let mut orphans_of_tracked_tables: Vec<String> = Vec::new();
+    let mut orphans_of_untracked_tables = 0usize;
+    for (keyspace, table, dir, file, line) in all_goldens {
+        let Some(sstable) = file.strip_suffix(".jsonl") else {
+            // `classify` only reports `is_golden` for a `-Data.db.jsonl` path, so
+            // this cannot happen; reported rather than skipped so a change to that
+            // rule cannot silently drop a golden from the verification set.
+            return Err(format!("a golden path without a `.jsonl` suffix: {line}"));
+        };
+        let key = (keyspace, table);
+        if sstables.contains(&(key.0.clone(), key.1.clone(), dir, sstable.to_string())) {
+            goldens.entry(key).or_default().push(line);
+        } else if committed.binary_search(&key).is_ok() {
+            // A golden BESIDE a tracked table but describing another generation —
+            // the only orphan that could ever have justified an exclusion, so it is
+            // named rather than counted.
+            orphans_of_tracked_tables.push(format!("{}.{}: {line}", key.0, key.1));
+        } else {
+            orphans_of_untracked_tables += 1;
+        }
+    }
+    Ok(Tracked {
+        committed,
+        goldens,
+        orphans_of_tracked_tables,
+        orphans_of_untracked_tables,
+    })
+}
+
 /// Every git-committed `*-Data.db` fixture is either a comparable case or a NAMED,
 /// reasoned exclusion. Derived from committed source at run time, so a newly
 /// committed fixture must be classified instead of being silently uncovered.
@@ -111,25 +210,24 @@ fn committed_fixture_coverage_census() {
     let listing = fixture_root::committed_listing()
         .unwrap_or_else(|why| panic!("cannot read the committed fixture set: {why}"));
 
-    let mut committed: Vec<(String, String)> = Vec::new();
-    // Every committed golden, per table: a table may have several SSTables and the
-    // exclusion is a property of the SET, so the shape scan unions all of them.
-    let mut goldens: BTreeMap<(String, String), Vec<String>> = BTreeMap::new();
-    for line in &listing {
-        // The same path parser the fixture-root selection uses, so "committed" means
-        // one thing in this lane: an unrecognised shape is refused, not guessed at.
-        let Some(path) = fixture_root::classify(line).unwrap_or_else(|why| panic!("{why}")) else {
-            continue;
-        };
-        let key = (path.keyspace, path.table);
-        if path.is_golden {
-            goldens.entry(key).or_default().push(line.to_string());
-        } else {
-            committed.push(key);
-        }
+    let Tracked {
+        committed,
+        goldens,
+        orphans_of_tracked_tables,
+        orphans_of_untracked_tables,
+    } = tracked_fixtures(&listing).unwrap_or_else(|why| panic!("{why}"));
+
+    eprintln!(
+        "AD2 census: {} tracked golden(s) PAIRED with a tracked *-Data.db; {} orphan(s) \
+         beside a tracked table and {orphans_of_untracked_tables} for tables with no \
+         tracked SSTable at all — an orphan describes a generation this checkout does \
+         not carry, so it verifies nothing",
+        goldens.values().map(Vec::len).sum::<usize>(),
+        orphans_of_tracked_tables.len()
+    );
+    for orphan in &orphans_of_tracked_tables {
+        eprintln!("AD2 census:   ORPHAN golden (not the paired oracle) {orphan}");
     }
-    committed.sort();
-    committed.dedup();
     assert!(
         !committed.is_empty(),
         "no committed *-Data.db fixtures found under {} — the census has no subject",
@@ -198,12 +296,14 @@ fn committed_fixture_coverage_census() {
             .get(&(entry.keyspace.to_string(), entry.table.to_string()))
             .map(Vec::as_slice)
             .unwrap_or_default();
-        // No golden at all is a FAILURE, not a pass: an exclusion no golden can
-        // corroborate is exactly the unverifiable claim this check exists for.
+        // No PAIRED golden at all is a FAILURE, not a pass: an exclusion no golden
+        // can corroborate is exactly the unverifiable claim this check exists for —
+        // and an orphan golden beside the fixture does not make it verifiable
+        // (finding T2), so the message says which set was empty.
         if files.is_empty() {
             stale.push(format!(
-                "{qualified}: no committed *-Data.db.jsonl golden, so the declared shapes \
-                 {declared:?} cannot be verified"
+                "{qualified}: no committed *-Data.db.jsonl golden PAIRED with a tracked \
+                 *-Data.db, so the declared shapes {declared:?} cannot be verified"
             ));
             continue;
         }
@@ -234,7 +334,7 @@ fn committed_fixture_coverage_census() {
             continue;
         }
         eprintln!(
-            "AD2 census: {qualified} EXCLUDED, verified in {} golden file(s): {} ({})",
+            "AD2 census: {qualified} EXCLUDED, verified in {} PAIRED golden file(s): {} ({})",
             files.len(),
             declared
                 .iter()
@@ -294,5 +394,107 @@ fn every_declarable_shape_is_one_the_golden_reader_refuses() {
             shape.label()
         ));
         assert!(!why.is_empty(), "a refusal must state a reason");
+    }
+}
+
+/// The T2 pairing rule, pinned against a synthetic listing.
+///
+/// The real repository has the orphan SHAPE (`test_deltas.static_with_rows` tracks
+/// two goldens whose SSTable is not committed) but not the near miss it would
+/// license — all three of that table's goldens carry the same static block — so the
+/// property has to be pinned here or nothing pins it at all. Reported as measured on
+/// the committed tree: restricting the verification set to paired goldens changed
+/// ZERO exclusion verdicts, which is the answer, not the reason for the change.
+#[cfg(test)]
+mod pairing {
+    use super::*;
+
+    fn listing(lines: &[&str]) -> Vec<String> {
+        lines.iter().map(|l| (*l).to_string()).collect()
+    }
+
+    const DIR: &str = "test-data/datasets/sstables/ks/t-abc";
+
+    /// Only the golden named `<the tracked SSTable>.jsonl` verifies a claim about
+    /// that fixture. The orphan beside it is NAMED, because a table git does track an
+    /// SSTable for is exactly where an orphan could have supplied an exclusion's
+    /// evidence.
+    #[test]
+    fn only_the_golden_paired_with_a_tracked_sstable_verifies_anything() {
+        let tracked = tracked_fixtures(&listing(&[
+            &format!("{DIR}/nb-2-big-Data.db"),
+            &format!("{DIR}/nb-2-big-Data.db.jsonl"),
+            // The orphan: no `nb-1-big-Data.db` is tracked.
+            &format!("{DIR}/nb-1-big-Data.db.jsonl"),
+        ]))
+        .expect("classifies");
+
+        let key = ("ks".to_string(), "t".to_string());
+        assert_eq!(
+            tracked.goldens.get(&key).map(Vec::as_slice),
+            Some([format!("{DIR}/nb-2-big-Data.db.jsonl")].as_slice()),
+            "the paired golden, and only it, may verify a claim about nb-2"
+        );
+        assert_eq!(
+            tracked.orphans_of_tracked_tables,
+            vec![format!("ks.t: {DIR}/nb-1-big-Data.db.jsonl")],
+            "the orphan beside a tracked table is named"
+        );
+        assert_eq!(tracked.orphans_of_untracked_tables, 0);
+        assert_eq!(tracked.committed, vec![key]);
+    }
+
+    /// A golden in a DIFFERENT fixture directory of the same table is an orphan too:
+    /// the pairing is per directory, exactly as `compare::golden_path` resolves it
+    /// (it reads one fixture directory and requires the golden beside the SSTable).
+    #[test]
+    fn the_pairing_is_per_directory_not_per_table() {
+        let tracked = tracked_fixtures(&listing(&[
+            &format!("{DIR}/nb-1-big-Data.db"),
+            "test-data/datasets/sstables/ks/t-def/nb-1-big-Data.db.jsonl",
+        ]))
+        .expect("classifies");
+
+        let key = ("ks".to_string(), "t".to_string());
+        assert!(
+            tracked.goldens.get(&key).is_none(),
+            "a same-named golden in another directory does not describe this SSTable"
+        );
+        assert_eq!(
+            tracked.orphans_of_tracked_tables,
+            vec!["ks.t: test-data/datasets/sstables/ks/t-def/nb-1-big-Data.db.jsonl".to_string()],
+        );
+    }
+
+    /// A golden for a table git tracks no SSTable for is not a near miss — it is
+    /// counted, not named, so the census line stays readable. Both counters are
+    /// asserted, so neither can absorb the other.
+    #[test]
+    fn a_golden_for_an_untracked_table_is_counted_and_not_named() {
+        let tracked = tracked_fixtures(&listing(&[
+            &format!("{DIR}/nb-1-big-Data.db"),
+            &format!("{DIR}/nb-1-big-Data.db.jsonl"),
+            "test-data/datasets/sstables/system/local-abc/nb-1-big-Data.db.jsonl",
+        ]))
+        .expect("classifies");
+
+        assert!(tracked.orphans_of_tracked_tables.is_empty());
+        assert_eq!(tracked.orphans_of_untracked_tables, 1);
+        assert_eq!(
+            tracked.committed,
+            vec![("ks".to_string(), "t".to_string())],
+            "a table with only a golden is not a committed fixture"
+        );
+    }
+
+    /// And a path shape the classifier refuses is an ERROR here, not a skip — the
+    /// census cannot report on a listing it only partly understood.
+    #[test]
+    fn an_unrecognised_fixture_path_is_refused() {
+        let why = tracked_fixtures(&listing(&[
+            "test-data/datasets/sstables/ks/nb-1-big-Data.db",
+        ]))
+        .expect_err("an unrecognised path shape must be refused");
+        assert!(!why.is_empty(), "the refusal must state a reason");
     }
 }
