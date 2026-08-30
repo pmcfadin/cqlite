@@ -575,7 +575,18 @@ What it guarantees:
   recorded pid is CONFIRMED dead is reclaimed; anything undeterminable (not a directory, no/garbled
   `pid` file, unreadable) REFUSES rather than proceeding — and a reclaim never destroys a lock it cannot
   re-identify as the dead one it judged: the renamed-aside directory is re-read and, on any mismatch,
-  put back (or preserved and named) while the start refuses. An explicit `SUPERVISOR_LOCK` skips the check.
+  put back (or preserved and named) while the start refuses. **Two steps of the reclaim are arbitrated
+  by a PRIMITIVE, so a loser observes an error rather than success against the wrong object**: which
+  reclaimer wins is `rename(2)` on the legacy name (after ours succeeds the object is unreachable by
+  name to anyone else, hence frozen — which is what makes the re-identification a proof rather than a
+  second check-then-act), and whether a restore may proceed is an exclusive `mkdir` on the target. What
+  is NOT arbitrable in POSIX shell is *which object* sits at the name when the rename fires (no
+  rename-if-unchanged, no directory descriptor, and holding the legacy lock for our lifetime is the
+  machine-global exclusion #3393 forbids); that residual is detected, never destructive, and every
+  failing restore leaves the legacy name exactly as it was found — free — with the object preserved and
+  named. The rename destination is a freshly-created `mktemp -d` private directory, never a
+  `$$`-derived name: preserved asides outlive their run, so a pid-derived destination can already exist
+  and `mv` would silently NEST the lock inside it. An explicit `SUPERVISOR_LOCK` skips the check.
   **It is a STARTUP check, not machine-global exclusion: it REDUCES the collision window, it does not
   eliminate it** — a pre-#3467 supervisor that starts *after* the check cannot be stopped without
   reimposing machine-global exclusion, which #3393 forbids (N lanes per box). The RESIDUAL block at the
