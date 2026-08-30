@@ -1055,10 +1055,18 @@ fn panic_text(payload: &(dyn std::any::Any + Send)) -> String {
         .unwrap_or_else(|| "(a panic payload that is not a string)".to_string())
 }
 
-/// ANY SINGLE STAGE MAY CONSUME THE WHOLE DEADLINE — the property that makes the
-/// floor invariant above unconditional, and the one that kills the
+/// ANY SINGLE STAGE MAY CONSUME THE WHOLE DEADLINE — the property the floor
+/// invariant above rests on IN ISOLATION, and the one that kills the
 /// "declared cap is not the actual maximum" family: a stage has no allowance to
-/// exceed, and an earlier stage cannot starve a later one.
+/// exceed, and an earlier stage cannot starve a later one *by holding an
+/// allowance*.
+///
+/// NOT "unconditional", which is what this comment used to say (roborev job 255,
+/// finding 3, propagating design.md D6c): a stage whose predecessors have consumed
+/// the deadline gets what is left, and can get nothing —
+/// `an_exhausted_deadline_leaves_a_later_stage_nothing`. What holds unconditionally
+/// is the ARITHMETIC asserted below: nothing is ever deducted from a stage for
+/// another stage's sake.
 ///
 /// A long deadline is used deliberately so the assert has a ~10-minute margin
 /// against scheduling delay between two statements: this is an assert about

@@ -738,6 +738,12 @@ duration for the report.
 
 ### The properties that survive, and how
 
+*(Round-9 snapshot, superseded twice: the first two rows below carry the UN-QUALIFIED floor claim that
+D6c corrected in round 13 — it holds only for a stage running against a deadline earlier stages have
+not consumed — and the aggregate row's hand-written `+1` was replaced in round 14 by a base DERIVED
+from a wait census. The bases quoted here, 180s/480s, are two rounds out of date. Left as the record of
+what round 9 claimed; the current statement is in `budgets.rs` and the delta spec.)*
+
 | property | how it holds now |
 |---|---|
 | no wait tighter than the 60s it replaced | `base >= OLD_BOUND`, asserted; any single stage may consume the whole deadline |

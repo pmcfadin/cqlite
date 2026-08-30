@@ -38,9 +38,21 @@
 //! by a SINGLE deadline, calibrated once from the largest scale of its in-band
 //! measurements (`t_boot`, `t_ack`) as `clamp(base x scale, base, cap)` with
 //! `scale = max(1, observed / quiet_baseline)`. Any single stage may consume the
-//! whole deadline, so no wait here can fire sooner than the 60s bound it
-//! replaced; and observed progress is reported as evidence but never extends
-//! anything, so no wait is granted or started past the declared bound.
+//! whole deadline; and observed progress is reported as evidence but never
+//! extends anything, so no wait is granted or started past the declared bound.
+//!
+//! **WHAT THE FLOOR CLAIM IS, QUALIFIED (design.md D6c).** A stage running IN
+//! ISOLATION — against a deadline earlier stages have not consumed — cannot fire
+//! sooner than the 60s bound it replaced, because the base is at least 60s and no
+//! stage has an allowance of its own; and the base equals an `OLD_BOUND` for every
+//! wait sharing the deadline, so the test as a whole is not tighter in aggregate.
+//! What does NOT hold, and cannot: a fresh 60s for a later wait once earlier
+//! stages have consumed the deadline. The pre-#3515 code gave every wait an
+//! INDEPENDENT 60s; one absolute deadline cannot reproduce that, and what it buys
+//! instead is a bounded TOTAL, which the old design had none of. This module doc
+//! carried the un-qualified version for two rounds after D6c corrected it
+//! (roborev job 255, finding 3) — the property that does not hold is pinned by
+//! `an_exhausted_deadline_leaves_a_later_stage_nothing` in `budgets.rs`.
 //!
 //! That bound is on WAITING FOR EVIDENCE, not on accepting evidence already in
 //! hand: a stage that observes its signal as the deadline lapses still passes,

@@ -106,23 +106,41 @@ had decayed against its own table for the third time in this change.)*
 - **WHEN** any wait fails
 - **THEN** the failure SHALL report the deadline, the `base`, the `scale`, the `cap`, and every measured duration the `scale` was taken over
 
-### Requirement: No wait is tighter than the bound it replaced
+### Requirement: No wait, IN ISOLATION, is tighter than the bound it replaced
 
-No wait in the file SHALL be able to fire sooner than the wall-clock bound it replaced, and the whole
-test SHALL NOT be bounded more tightly than the nominal aggregate of the bounds it replaced.
+No wait in the file, **running against a deadline earlier stages have not consumed**, SHALL be able to
+fire sooner than the wall-clock bound it replaced; and the whole test SHALL NOT be bounded more tightly
+than the nominal aggregate of the bounds it replaced.
 
-Because any single stage may consume the whole deadline, this reduces to two properties of the
-deadline's `base`, both of which SHALL be asserted by a unit test:
+**The qualifier is load-bearing (design.md D6c).** The pre-#3515 code gave each wait an INDEPENDENT
+60s, so a later wait got a fresh 60s however much earlier waits had consumed. One absolute deadline
+cannot reproduce that: an early stage may consume nearly all of it and leave a later stage nothing.
+"Unrestricted stages" and "a guaranteed fresh allowance per stage" are not jointly satisfiable by a
+single fixed deadline. What is bought instead is a bounded TOTAL, which the old design had none of.
+The property that does NOT hold SHALL itself be pinned by a unit test, so the stronger claim cannot
+return as a comment.
 
-* `base` ≥ the old per-wait bound (60s), so no single wait is tighter; and
-* `base` ≥ the sum of the nominal bounds the test replaced **plus one old per-wait bound for every
-  stage that now draws on the deadline but was not separately bounded before** (the readiness stage:
-  the old code folded boot inside its first 60s `OK` wait), so the test as a whole is not tighter even
-  when that stage consumes a full old bound first.
+Because any single stage may consume the whole deadline, the claim that DOES hold reduces to two
+properties of the deadline's `base`, both of which SHALL be asserted by a unit test:
+
+* `base` ≥ the old per-wait bound (60s), so no single wait running against an untouched deadline is
+  tighter; and
+* `base` = an old per-wait bound for **every wait that draws on the one deadline**, derived from a
+  per-stage wait census rather than hand-labelled, so the test as a whole is not tighter even when
+  every one of those waits takes a full old bound. Equality, not `≥`: a derived base would make the
+  assert a tautology, and a base above the derived floor carries margin the census does not explain.
 
 *(Round-9 correction, roborev job 232 finding 2: the aggregate term previously summed only the OLD
 waits, which admitted a base under which readiness consumes 60s and leaves every original wait below
 its former allowance — the invariant violated by a stage the sum did not mention.)*
+
+*(Round-13 correction, design.md D6c, roborev job 247 finding 1: this requirement's title and first
+sentence previously claimed the property WITHOUT the isolation qualifier, which no single absolute
+deadline can deliver. Round-14 correction, roborev job 253 finding 3: the aggregate term was a
+hand-written "+1 for readiness" while two further stages had joined the deadline, so the floor could be
+asserted against an undercounted base — it is now DERIVED from a wait census that is itself verified
+against the stages the run opens. Round-15 correction, roborev job 255 finding 3: D6c's qualifier had
+not been propagated here, nor to the integration test's module doc.)*
 
 *(Round-8 withdrawal, recorded rather than deleted: this requirement previously stated the invariant
 **by composition** — a mapping from each old bound to the GROUP of new stages that replaced it, whose
@@ -131,8 +149,12 @@ and a scenario requiring a clipped stage to name its own starvation. The composi
 twice: it was set below the old bound in round 3, and roborev job 229 found that summing per-stage caps
 does not preserve a SHARED old deadline, so a handler entering at 31s and exiting at 32s — which the
 old flat 60s allowed — failed a 30s per-stage cap. With one deadline there is nothing to compose, no
-group to deadline and no stage to starve, so the invariant holds unconditionally and trivially, which
-is strictly stronger than the formulation it replaces.)*
+group to deadline and no stage to starve.)*
+
+*(That withdrawal originally ended "so the invariant holds unconditionally and trivially, which is
+strictly stronger than the formulation it replaces". **That sentence was false and is withdrawn in
+turn** — see the D6c correction above: it holds IN ISOLATION, and one absolute deadline gives no wait a
+fresh allowance after earlier consumption.)*
 
 This invariant SHALL be asserted by a unit test, not merely documented — a comment cannot fail.
 

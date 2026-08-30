@@ -276,8 +276,11 @@ per-stage caps does not preserve a SHARED old deadline, so a handler entering at
 
 * **ONE deadline per test**, calibrated ONCE from the larger of the `t_boot`/`t_ack` scales, with a
   generous base and a cap. Any single stage may consume the whole of it, so the floor invariant
-  ("never tighter than the bound it replaced") holds **unconditionally and trivially**, which is
-  stronger than the group-deadline formulation it replaces.
+  ("never tighter than the bound it replaced") holds **~~unconditionally and trivially~~ IN
+  ISOLATION** — *this bullet's original claim is FALSIFIED by D6c below: one absolute deadline gives
+  no wait a fresh allowance once earlier stages have consumed it. What it buys instead is a bounded
+  TOTAL. Corrected in round 13 (job 247 finding 1); the qualifier was still missing from the spec
+  requirement and the integration test's module doc in round 15 (job 255 finding 3).*
 * **Stages remain, purely for ATTRIBUTION.** Which stage was pending when the deadline passed is what
   names the failure — the property AC2 needs — and it no longer depends on any budget arithmetic.
 * **Progress observation remains, as EVIDENCE IN THE MESSAGE, not as an input to the bound.** It
