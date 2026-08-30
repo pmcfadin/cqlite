@@ -11,10 +11,20 @@
 //!
 //! ## Why this lives in its own file
 //!
-//! `database.rs` is already over the campsite file-size threshold, so the hook
-//! goes here and reads `Database`'s `pub(crate)` fields. `impl Drop` for a type
-//! declared in a sibling module of the same crate is legal Rust; the coherence
-//! rule is per-crate, not per-module.
+//! By RESPONSIBILITY, not by line count. This is a teardown path with its own
+//! hazard model — fork safety, panic containment, runtime ownership — and none
+//! of that belongs inside the module that defines the handle's API surface.
+//! `impl Drop` for a type declared in a sibling module of the same crate is
+//! legal Rust; the coherence rule is per-crate, not per-module, so the hook
+//! reads `Database`'s `pub(crate)` fields from here.
+//!
+//! The original reason was narrower and is now obsolete: `database.rs` was a
+//! single 994-line file, over the campsite threshold, so the ratchet forbade
+//! growing it. Issue #1464's campsite split (PR #3576) has since replaced it
+//! with `database/{mod,open,write_methods}.rs`, and `database/mod.rs` is
+//! comfortably under the threshold — so "it was too big" would no longer be a
+//! true justification. The placement is unchanged because the responsibility
+//! argument was always the better one.
 //!
 //! ## Panic-freedom is STRUCTURAL — and a panic here is SILENT, not fatal
 //!
@@ -162,11 +172,19 @@
 //!
 //! The executing lane for this file is the pytest tier
 //! (`bindings/python/tests/test_drop_safety.py`, run by the gate's
-//! `python-bindings` component and by `--lite`'s python tier). There are no
-//! Rust unit tests in this crate's `--lib` target on purpose: `cqlite-py` is a
-//! pyo3 `cdylib` built with `extension-module`, so `cargo test -p cqlite-py`
-//! cannot link libpython and never runs (the gate documents this exclusion).
-//! A Rust test added here would execute nowhere.
+//! `python-bindings` component and by `--lite`'s python tier). No Rust unit test
+//! in this crate EXECUTES: `cqlite-py` is a pyo3 `cdylib` built with
+//! `extension-module`, so `cargo test -p cqlite-py` cannot link libpython, and
+//! the gate documents that exclusion (`--exclude cqlite-py`). So a Rust test
+//! added here would execute nowhere.
+//!
+//! Stated that way deliberately, because the shorter version of this sentence —
+//! "there are no Rust unit tests in this crate" — was FALSE and shipped for
+//! several review rounds before an audit caught it: six modules DO carry
+//! `#[cfg(test)] mod tests`, including `runtime.rs`, which this very change
+//! edits. They are written, they are compiled by the gate's clippy matrix, and
+//! they never run. "None exist" and "none execute" are different claims, and in
+//! a file whose whole method is verified claims, only the true one belongs.
 //!
 //! **DECLARED GAP — the re-entrancy branch (step 2) is covered NOWHERE.** It is
 //! unreachable from the only lane that executes this file: a pytest thread is
