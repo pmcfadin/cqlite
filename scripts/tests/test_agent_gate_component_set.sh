@@ -12,6 +12,7 @@
 # makes the fetch real (`git fetch` against a path remote) while needing no network.
 #
 # The classes covered, each in both directions where a direction exists:
+#   0b. `origin` does not NAME the canonical upstream (a fork/re-pointed)-> FAIL naming it
 #   1. baseline has a component the branch lacks, main NOT an ancestor  -> FAIL naming it
 #   2. `git fetch` fails (unreachable origin)                           -> non-PASS naming the fetch
 #   3. baseline `--list` broken / empty / non-component output          -> FAIL naming the derivation
@@ -26,12 +27,13 @@
 # probe kinds, and EVERY one is exercised below:
 #   verdicts (6) — PASS (case 5), DECLARED (4), UNCOMMITTED (4b), BEHIND (1),
 #                  INDETERMINATE (4c), UNMEASURED (2, 3a–3g, 4b-ii).
-#   kinds   (11) — fetch-failed, no-remote (case 2); baseline-list-failed,
+#   kinds   (13) — fetch-failed, no-remote (case 2); baseline-list-failed,
 #                  baseline-list-empty, baseline-list-garbage, baseline-missing (3a–3d);
 #                  no-git, baseline-workspace, no-tool (3f); unboundable (3g);
-#                  head-set-unmeasured (4b-ii).
-# ELEVEN is the count of DISTINCT non-`ok` values assigned to `_CS_KIND` (`fetch-failed` is
-# set from two places, and `ok` is the twelfth value). It was
+#                  head-set-unmeasured (4b-ii); remote-not-canonical,
+#                  remote-unreadable (10).
+# THIRTEEN is the count of DISTINCT non-`ok` values assigned to `_CS_KIND` (`fetch-failed` is
+# set from two places, and `ok` is the fourteenth value). It was
 # written as "six" for two rounds while the enumeration beneath it listed nine — a census
 # that miscounts its own list is worse than none, because a reader who trusts the number
 # and counts the entries concludes three kinds are uncovered extras. The count is now
@@ -95,7 +97,15 @@ GIT_ID=(-c user.email=gate@example.invalid -c user.name=gate-selftest)
 # namespace.
 # ---------------------------------------------------------------------------
 mkbaseline() {
-  local name="$1" prog="$2" work="$tmp/$1-src" bare="$tmp/$1.git"
+  # THE BARE REPO'S PATH ENDS IN `pmcfadin/cqlite.git` ON PURPOSE (job 215, blocker 3). The
+  # pre-flight now validates that `origin` NAMES the canonical upstream before fetching, and
+  # the sanctioned way to satisfy that from a hermetic fixture is to make the local file
+  # remote genuinely canonical — NOT an env override or a settable expected identity, which
+  # would be the very hole blocker 3 closes (the constrained party must not choose its own
+  # enforcer). The owner/repo suffix is what the check compares, so a local mirror-shaped
+  # path is accepted by the SHIPPED predicate, unmodified, in every case in this file.
+  local name="$1" prog="$2" work="$tmp/$1-src" bare="$tmp/$1-origin/pmcfadin/cqlite.git"
+  mkdir -p "$tmp/$1-origin/pmcfadin"
   mkdir -p "$work/scripts"
   if [ "$prog" = - ]; then
     cp "$GATE" "$work/scripts/agent-gate.sh"
@@ -255,7 +265,7 @@ fi
 # `--list` must exit at the arg-parse case, BEFORE the pre-flight — otherwise the
 # baseline derivation would recurse (and, with an unreachable origin, could not answer at
 # all). Proven where it is observable: a repo with a DEAD origin still lists fine.
-dead_list_repo=$(mkbranch dead-list "$tmp/nonexistent-origin.git" - )
+dead_list_repo=$(mkbranch dead-list "$tmp/nonexistent/pmcfadin/cqlite.git" - )
 dl_out=$( cd "$dead_list_repo" && bash scripts/agent-gate.sh --list 2>/dev/null ); dl_rc=$?
 if [ "$dl_rc" -eq 0 ] && [ "$(printf '%s\n' "$dl_out" | wc -l)" -gt 30 ] \
    && ! grep -q 'component-set' <<<"$dl_out"; then
@@ -296,7 +306,7 @@ fi
 #    Both are an explicit non-PASS NAMING the fetch/baseline — never a SKIP, never a pass.
 #    A stale remote-tracking ref is exactly why the fetch is asserted (#3544 amendment).
 # ---------------------------------------------------------------------------
-dead=$(mkbranch dead "$tmp/nonexistent-origin.git" - )
+dead=$(mkbranch dead "$tmp/nonexistent/pmcfadin/cqlite.git" - )
 d_out=$(hook "$dead")
 d_line=$(field COMPONENT_SET_LINE "$d_out")
 if [ "$(field VERDICT "$d_out")" = UNMEASURED ] \
@@ -1491,7 +1501,7 @@ fi
 # ---------------------------------------------------------------------------
 # The ONE declared constant. Bump it in the SAME change that adds/removes a `_CS_KIND`
 # value, and extend the census above and a case below at the same time.
-DECLARED_KIND_COUNT=11
+DECLARED_KIND_COUNT=13
 # Scan the WHOLE gate, not just `_component_set_probe`: every assignment lives inside that
 # function today, but a scan scoped to it would MISS a kind set elsewhere later and the
 # count would silently keep agreeing with this constant. A superset scan cannot miss.
@@ -1649,6 +1659,149 @@ else
   else
     bad "3544-no-unbounded-control: audit not discriminating (unbounded=$ctl_gaps expected 1, annotated=$ctl_ann_gaps expected 0, curl seen=$ctl_curl_seen expected >=1)"
   fi
+fi
+
+# ---------------------------------------------------------------------------
+# 10. THE BASELINE'S IDENTITY (roborev job 215, blocker 3). Before this the baseline was
+#     trusted because a remote NAMED `origin` merely EXISTED — so `git remote set-url origin
+#     <anything>` re-pointed the comparison: the env-var opt-out requirement 9 forbids,
+#     reachable through git config instead. And it fires BY ACCIDENT in the documented fork
+#     workflow, where `origin` legitimately names a contributor's fork whose `main` may be
+#     months stale: the guard then compares against the WRONG baseline and stamps a PASS.
+#
+#     Covered in three layers:
+#      (a) the PURE predicate over the URL shapes git accepts, through a REPORT-ONLY hook
+#          that reads no config and cannot influence a real run's decision (the identity a
+#          real run judges is always `git remote get-url origin`). No settable expected
+#          identity exists — per CLAUDE.md the constrained party must not choose its own
+#          enforcer, and every other fixture in this file satisfies the SHIPPED predicate by
+#          making its local file remote genuinely canonical (see mkbaseline).
+#      (b) END TO END against a real, fetchable, otherwise-IDENTICAL fork-shaped origin,
+#          with a POSITIVE CONTROL: the same fixture whose origin URL is canonical must
+#          PASS, so the non-PASS can only be the identity.
+#      (c) an `origin` with no URL at all — a non-PASS of its OWN kind, never a silent pass.
+# ---------------------------------------------------------------------------
+identity() { # identity <url> -> canonical | not-canonical
+  bash "$GATE" --component-set-remote-identity "$1" 2>/dev/null | sed -n 's/^IDENTITY: //p'
+}
+id_bad=""
+# ERR TOWARD ACCEPTING an ambiguous HOST: an ssh alias, a port and a local mirror path all
+# carry a host part unresolvable without network, and over-rejecting reds a correct tree.
+for _u in "https://github.com/pmcfadin/cqlite.git" \
+          "https://github.com/pmcfadin/cqlite" \
+          "http://github.com/pmcfadin/cqlite.git" \
+          "git@github.com:pmcfadin/cqlite.git" \
+          "ssh://git@github.com/pmcfadin/cqlite.git" \
+          "ssh://git@github.com:22/pmcfadin/cqlite" \
+          "git://github.com/pmcfadin/cqlite.git" \
+          "HTTPS://GitHub.com/PMcFadin/CQLite.git/" \
+          "mygithub:pmcfadin/cqlite" \
+          "/data/mirrors/pmcfadin/cqlite.git"; do
+  [ "$(identity "$_u")" = canonical ] || id_bad="${id_bad:+$id_bad }REJECTED:$_u"
+done
+# …and REJECT what the accident class actually looks like: a fork, a same-owner different
+# repo, and an unrelated path. Under-rejecting one of these is the defect.
+for _u in "https://github.com/contributor/cqlite.git" \
+          "git@github.com:contributor/cqlite.git" \
+          "git@github.com:pmcfadin/other-repo.git" \
+          "https://gitlab.com/someone/cqlite-fork" \
+          "/tmp/scratch/my-clone.git"; do
+  [ "$(identity "$_u")" = not-canonical ] || id_bad="${id_bad:+$id_bad }ACCEPTED:$_u"
+done
+if [ -z "$id_bad" ]; then
+  ok "3544-remote-identity: every canonical spelling (ssh/scp/https/port/case/.git/alias/mirror) is accepted and every fork-shaped URL rejected"
+else
+  bad "3544-remote-identity: misclassified: $id_bad"
+fi
+
+# (b) END TO END. A fork-shaped origin holding the SAME history as the branch: fetchable,
+# component sets identical, so nothing but the identity distinguishes it.
+fk_work="$tmp/fork-src"
+fk_bare="$tmp/fork-origin/contributor/cqlite.git"
+mkdir -p "$fk_work/scripts" "$tmp/fork-origin/contributor"
+cp "$GATE" "$fk_work/scripts/agent-gate.sh"
+printf 'fork fixture\n' >"$fk_work/README.md"
+git init -q --bare "$fk_bare" >/dev/null 2>&1
+git -C "$fk_bare" symbolic-ref HEAD refs/heads/main >/dev/null 2>&1
+( cd "$fk_work" && git init -q . && git add -A && git "${GIT_ID[@]}" commit -qm fork \
+  && git push -q "$fk_bare" HEAD:refs/heads/main ) >/dev/null 2>&1 \
+  || { echo "FATAL: could not build the fork fixture" >&2; exit 1; }
+git clone -q "$fk_bare" "$tmp/fork-branch" >/dev/null 2>&1
+git clone -q "$fk_bare" "$tmp/fork-control" >/dev/null 2>&1
+# The POSITIVE CONTROL's origin is a byte copy of the SAME bare repo at a CANONICAL path, so
+# the two runs differ in the remote's PATH and nothing else. Without it a broken fixture
+# (unfetchable origin, mismatched sets) would make the case pass for the wrong reason.
+mkdir -p "$tmp/fork-canon/pmcfadin"
+cp -R "$fk_bare" "$tmp/fork-canon/pmcfadin/cqlite.git"
+( cd "$tmp/fork-control" && git remote set-url origin "$tmp/fork-canon/pmcfadin/cqlite.git" ) >/dev/null 2>&1
+fk_ctl=$(hook "$tmp/fork-control")
+fk_out=$(hook "$tmp/fork-branch")
+fk_line=$(field COMPONENT_SET_LINE "$fk_out")
+if [ "$(field VERDICT "$fk_ctl")" != PASS ]; then
+  bad "3544-remote-not-canonical: the POSITIVE CONTROL (same bare repo at a canonical path) did not PASS (got '$(field VERDICT "$fk_ctl")' kind '$(field KIND "$fk_ctl")') — the fixture cannot discriminate"
+  printf '%s\n' "$fk_ctl"
+elif [ "$(field VERDICT "$fk_out")" = UNMEASURED ] \
+   && [ "$(field KIND "$fk_out")" = remote-not-canonical ] \
+   && [ "$(field SHA "$fk_out")" = "-" ] \
+   && grep -q 'FAIL-CLOSED (#3544)' <<<"$fk_line" \
+   && grep -q 'remote-not-canonical' <<<"$fk_line" \
+   && grep -q 'contributor/cqlite' <<<"$fk_line" \
+   && grep -q 'pmcfadin/cqlite' <<<"$fk_line"; then
+  ok "3544-remote-not-canonical: a re-pointed/fork origin is a NAMED non-PASS (control on the same repo at a canonical path PASSes)"
+else
+  bad "3544-remote-not-canonical: expected KIND remote-not-canonical FAIL-CLOSED naming both the actual and the expected identity"
+  printf '%s\n' "$fk_out"
+fi
+
+# …ADVISORY under --lite (the fast loop must not require a canonically-pointed remote to
+# function), and in the FULL gate the emitted block must carry the IDENTITY remedy — telling
+# this reader to "restore access to origin/main" would send them to fix the wrong thing.
+fk_lite=$(hook "$tmp/fork-branch" lite)
+fk_sum="$tmp/fork-summary.txt"
+( cd "$tmp/fork-branch" && AGENT_GATE_SUMMARY_FILE="$fk_sum" CQLITE_DATASETS_ROOT="$tmp/no-datasets" \
+    bash scripts/agent-gate.sh >"$tmp/fork.log" 2>&1 ); fk_rc=$?
+if [ "$(field STRICT "$fk_lite")" = no ] \
+   && grep -q '^component-set: ADVISORY-UNMEASURED (#3544)' <<<"$(field COMPONENT_SET_LINE "$fk_lite")" \
+   && grep -q 'remote-not-canonical' <<<"$(field COMPONENT_SET_LINE "$fk_lite")" \
+   && [ "$fk_rc" -ne 0 ] \
+   && grep -q '^RESULT: FAIL' "$fk_sum" 2>/dev/null \
+   && grep -q '^hint: point origin at the canonical upstream' "$fk_sum" 2>/dev/null \
+   && ! grep -q '^hint: restore access to origin/main' "$fk_sum" 2>/dev/null; then
+  ok "3544-remote-not-canonical-modes: ADVISORY under --lite; the FULL gate FAILs with the identity-specific remedy"
+else
+  bad "3544-remote-not-canonical-modes: expected ADVISORY-UNMEASURED (lite) and an identity remedy in the full block (rc=$fk_rc)"
+  printf '%s\n' "$fk_lite"; sed -n '1,20p' "$fk_sum" 2>/dev/null
+fi
+
+# (c) An `origin` that resolves to NO URL. Its own kind: the identity cannot be established,
+# which is an unmeasurable baseline — never a pass, and never folded into "no origin at all",
+# whose remedy is different.
+git clone -q "$tmp/fork-canon/pmcfadin/cqlite.git" "$tmp/nourl-branch" >/dev/null 2>&1
+( cd "$tmp/nourl-branch" && git config --unset-all remote.origin.url \
+   && git config --add remote.origin.url "" ) >/dev/null 2>&1
+nu_out=$(hook "$tmp/nourl-branch")
+nu_line=$(field COMPONENT_SET_LINE "$nu_out")
+if [ "$(field VERDICT "$nu_out")" = UNMEASURED ] \
+   && [ "$(field KIND "$nu_out")" = remote-unreadable ] \
+   && grep -q 'FAIL-CLOSED (#3544)' <<<"$nu_line" \
+   && grep -q 'returned no URL' <<<"$nu_line"; then
+  ok "3544-remote-unreadable: an origin with no URL is its own named non-PASS, not a pass and not 'no remote'"
+else
+  bad "3544-remote-unreadable: expected KIND remote-unreadable FAIL-CLOSED naming the empty URL"
+  printf '%s\n' "$nu_out"
+fi
+
+# STRUCTURAL: the expected identity must be a LITERAL. An env-derived (or config-derived)
+# expected identity would be the same hole one level out — the constrained party choosing its
+# own enforcer — and requirement 9's "no opt-out" would be satisfied only in spelling.
+canon_assign=$(grep -n '^_CS_CANONICAL_REPO=' "$GATE")
+if [ -n "$canon_assign" ] \
+   && [ "$(printf '%s\n' "$canon_assign" | grep -c .)" -eq 1 ] \
+   && grep -q '^_CS_CANONICAL_REPO="[A-Za-z0-9._/-]*"$' "$GATE" \
+   && ! grep -qE '_CS_CANONICAL_REPO=.*(\$\{|\$\(|git config)' "$GATE"; then
+  ok "3544-canonical-literal: the expected upstream identity is a single hard-coded literal (no env/config/subshell source)"
+else
+  bad "3544-canonical-literal: expected exactly one literal _CS_CANONICAL_REPO= assignment, got: $canon_assign"
 fi
 
 printf '\n%s\n' "----------------------------------------"

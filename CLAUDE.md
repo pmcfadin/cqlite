@@ -325,11 +325,25 @@ cat /tmp/gate-summary.txt   # the SUMMARY block is the ONLY gate text an agent r
   every SUMMARY: `PASS (35/35 vs origin/main <sha40>)` — affirmative, **naming its baseline
   sha**; `FAIL-CLOSED (#3544) — this tree is BEHIND …; MISSING: <names>` (remedy: `git fetch
   origin && git rebase origin/main`); `DECLARED (#3544) — this branch REMOVES <names>` when
-  `origin/main` IS an ancestor of `HEAD`, i.e. the removal is the branch's own diff — **loud,
+  `origin/main` IS an ancestor of `HEAD` **AND the components are absent at `HEAD` too** — **loud,
   not fatal**, because the author has nothing to rebase and a guard that reds on correct input
-  is the guard agents learn to waive; or `FAIL-CLOSED … baseline NOT measured (<kind>)` for a
-  failed fetch/absent `origin`/erroring-empty-garbage baseline `--list`/**a host on which the
-  probe cannot be BOUNDED** (in which case the fetch is not run at all — an unbounded fetch
+  is the guard agents learn to waive. **ANCESTRY ALONE IS NOT PROVENANCE, and trusting it was a
+  reproduced false PASS**: `is origin/main reachable from HEAD?` is not `did this branch's
+  committed diff remove the component?`, so deleting one component from the WORKING COPY alone
+  yielded a non-fatal `DECLARED` in a certifying mode (a full gate would have certified 35 of 36)
+  under a line that asserted committed provenance for an uncommitted edit. A removal still
+  PRESENT at `HEAD` is therefore its own fail-closed `UNCOMMITTED` verdict (remedy: commit or
+  restore — never rebase), measured against `HEAD`'s OWN component set rather than the proxy "is
+  the tree dirty" (which would red every mid-edit branch and still prove nothing on a clean-but-
+  stale one); an **uncommitted ADDITION still PASSes**, because extra components are never skew.
+  And `origin` must **NAME the canonical upstream** (`pmcfadin/cqlite`, compared on OWNER/REPO and
+  deliberately host-agnostic so an ssh alias, a port or a local mirror is accepted, since
+  over-rejecting reds a correct tree): `origin` merely EXISTING made `git remote set-url origin
+  <anything>` a git-config-shaped opt-out, and it fires BY ACCIDENT in the fork workflow, where a
+  contributor's fork `main` is a stale baseline stamped `PASS`. A fork/re-pointed/URL-less
+  `origin` is a NAMED non-PASS. Or `FAIL-CLOSED … baseline NOT measured (<kind>)` for a
+  failed fetch/absent `origin`/erroring-empty-garbage baseline `--list`/an unreadable `HEAD` gate
+  script/**a host on which the probe cannot be BOUNDED** (in which case the fetch is not run at all — an unbounded fetch
   could hang `--lite` on a stall or an auth prompt, and a missing capability must not inherit
   the permissive branch) — **never a SKIP and never a fallback to an empty baseline**, which
   would excuse every branch. A branch-only

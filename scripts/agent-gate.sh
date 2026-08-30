@@ -2557,7 +2557,9 @@ apply_schemas_preflight() {
 #   LOCAL-ONLY (annotated `# local-only: <why>` at each site, so the claim is checkable
 #   where it is made rather than only here):
 #     git rev-parse --git-dir            .git read, no object access.
-#     git remote get-url origin          config read; names a remote, contacts none.
+#     git remote get-url origin          config read; names a remote, contacts none. Its
+#                                        value is judged against the canonical upstream
+#                                        identity IN-PROCESS (no resolution, no network).
 #     git rev-parse FETCH_HEAD^{commit}  ref + COMMIT object; commits are never filtered.
 #     git merge-base --is-ancestor       walks commit parents only.
 #
@@ -2713,6 +2715,58 @@ _component_set_bounded() {
   esac
 }
 
+# THE CANONICAL UPSTREAM IDENTITY (roborev job 215, blocker 3). Before this, the baseline
+# was trusted because a remote NAMED `origin` merely EXISTED — so `git remote set-url origin
+# <anything>` re-pointed the comparison, which is precisely the env-var opt-out requirement 9
+# forbids, reachable through git config instead of the environment. And it fires BY ACCIDENT
+# in the documented fork workflow: there `origin` legitimately names a contributor's FORK
+# whose `main` may be months stale, so the guard silently compares against the wrong baseline
+# and stamps a PASS — the vacuous green this whole pre-flight exists to close.
+#
+# HARD-CODED, and hard-coded is the point: a configurable expected identity would be the
+# same hole one level out. There is no env var and none may be added.
+_CS_CANONICAL_REPO="pmcfadin/cqlite"
+
+# _component_set_normalise_remote <url>: the comparable form of a remote URL. Folds the
+# spellings git accepts for one repository: case, a trailing `/`, a trailing `.git`, and
+# `:` -> `/` (which folds BOTH the scp-like `git@host:owner/repo` form and a `host:port`
+# into path separators) with `//` squeezed (which folds a scheme's `://`). What survives is
+# a `/`-separated path whose LAST TWO segments are the owner/repo identity.
+_component_set_normalise_remote() {
+  local u
+  # `tr -d '[:space:]'`: a git URL has no legitimate whitespace, and stripping it can only
+  # make a pathological value fail the fetch later — never turn a fork into the upstream.
+  u=$(printf '%s' "$1" | tr 'A-Z' 'a-z' | tr -d '[:space:]')
+  while :; do
+    case "$u" in
+      */)    u="${u%/}" ;;
+      *.git) u="${u%.git}" ;;
+      *)     break ;;
+    esac
+  done
+  printf '%s' "$u" | tr ':' '/' | tr -s '/'
+}
+
+# _component_set_remote_is_canonical <url>: rc 0 iff <url> names the canonical upstream.
+#
+# THE COMPARISON IS ON OWNER/REPO, NOT ON THE HOST, AND THAT ASYMMETRY IS DELIBERATE: WHERE
+# A URL SHAPE IS AMBIGUOUS, ERR TOWARD ACCEPTING IT. An ssh config alias
+# (`mygithub:pmcfadin/cqlite`), an explicit port, a local mirror or a bundle path each carry
+# a host part that cannot be resolved to `github.com` without the network — so demanding the
+# host would RED A CORRECT TREE, and a guard that reds on correct input is the guard agents
+# learn to waive. Over-accepting costs coverage of a rare case (a mirror path ending in the
+# same owner/repo but holding other history, whose skew would then go unreported). Under-
+# rejecting a FORK (`github.com/contributor/cqlite`) is what this must never do, because that
+# is the MEASURED accident class — and the owner/repo suffix catches exactly it.
+_component_set_remote_is_canonical() {
+  local n
+  n=$(_component_set_normalise_remote "$1")
+  case "$n" in
+    "$_CS_CANONICAL_REPO"|*"/$_CS_CANONICAL_REPO") return 0 ;;
+  esac
+  return 1
+}
+
 # _component_set_head_set: derive the component set from the gate script AS COMMITTED AT
 # HEAD. Sets _CS_HEAD_SET (rc 0) or _CS_HEAD_ERR (rc 1); never emits, never exits.
 #
@@ -2805,10 +2859,26 @@ _component_set_probe() {
   if ! git -C "$REPO_ROOT" rev-parse --git-dir >/dev/null 2>&1; then
     _CS_KIND=no-git; _CS_DETAIL="$REPO_ROOT is not a git worktree"; return 0
   fi
+  local origin_url origin_rc
   # local-only: a config read. It NAMES a remote; it does not contact one.
-  if ! git -C "$REPO_ROOT" remote get-url origin >/dev/null 2>&1; then
+  origin_url=$(git -C "$REPO_ROOT" remote get-url origin 2>/dev/null); origin_rc=$?
+  if [ "$origin_rc" -ne 0 ]; then
     _CS_KIND=no-remote
     _CS_DETAIL="no 'origin' remote is configured in $REPO_ROOT, so the baseline is unobtainable"
+    return 0
+  fi
+  # IDENTITY BEFORE FETCH (job 215, blocker 3). `origin` EXISTING is not evidence that it
+  # points at the upstream whose component set is the coverage claim. Each answer is its own
+  # NAMED non-PASS — never a silent pass and never a SKIP, because a baseline of unknown
+  # provenance is an UNMEASURED baseline, and no PASS may be derived from one.
+  if [ -z "$(printf '%s' "$origin_url" | tr -d '[:space:]')" ]; then
+    _CS_KIND=remote-unreadable
+    _CS_DETAIL="'git remote get-url origin' returned no URL, so the baseline's identity cannot be established"
+    return 0
+  fi
+  if ! _component_set_remote_is_canonical "$origin_url"; then
+    _CS_KIND=remote-not-canonical
+    _CS_DETAIL="origin is '$origin_url' (normalised '$(_component_set_normalise_remote "$origin_url")'), which does not name the canonical upstream $_CS_CANONICAL_REPO; a fork or a re-pointed remote is a DIFFERENT baseline, and comparing against it would stamp a PASS about the wrong component set"
     return 0
   fi
 
@@ -3186,11 +3256,24 @@ apply_component_set_preflight() {
       echo "            usual cause), then re-run the gate." >&2 ;;
     *)
       why_summary="preflight: FAIL (component-set baseline NOT measured — $_CS_KIND)"
-      hint="hint: restore access to origin/main (git fetch origin main), then re-run scripts/agent-gate.sh"
-      echo "agent-gate: the baseline component set could NOT be measured, so this run cannot" >&2
-      echo "            certify its own coverage; a pass derived from an unmeasured baseline is" >&2
-      echo "            exactly the vacuous green #3544 exists to close." >&2
-      echo "agent-gate: remedy: restore access to origin/main (git fetch origin main) and re-run." >&2 ;;
+      # ONE arm, but the REMEDY is per-kind: "restore access to origin/main" would send the
+      # reader of a re-pointed/fork `origin` to fix the wrong thing, and a wrong remedy in a
+      # fail-closed diagnostic is what makes an agent suspect its own diff (the #3148 lesson).
+      case "$_CS_KIND" in
+        remote-not-canonical|remote-unreadable)
+          hint="hint: point origin at the canonical upstream (git remote set-url origin https://github.com/$_CS_CANONICAL_REPO.git) — or add it as a second remote and run the gate in a checkout whose origin is upstream — then re-run scripts/agent-gate.sh"
+          echo "agent-gate: 'origin' does not name the canonical upstream $_CS_CANONICAL_REPO, so the" >&2
+          echo "            baseline component set would come from a DIFFERENT repository (a fork's" >&2
+          echo "            main can be months stale). That is a baseline of unknown provenance, not" >&2
+          echo "            a measurement, so no PASS may be derived from it (#3544 job 215)." >&2
+          echo "agent-gate: remedy: git remote set-url origin https://github.com/$_CS_CANONICAL_REPO.git" >&2 ;;
+        *)
+          hint="hint: restore access to origin/main (git fetch origin main), then re-run scripts/agent-gate.sh"
+          echo "agent-gate: the baseline component set could NOT be measured, so this run cannot" >&2
+          echo "            certify its own coverage; a pass derived from an unmeasured baseline is" >&2
+          echo "            exactly the vacuous green #3544 exists to close." >&2
+          echo "agent-gate: remedy: restore access to origin/main (git fetch origin main) and re-run." >&2 ;;
+      esac ;;
   esac
   # REPORT-ONLY (the --component-set-line hook): return with the line stamped instead of
   # emitting. The hook cannot emit — emit_summary/_tree_meta_array are defined AFTER the
@@ -3616,6 +3699,22 @@ case "${1:-}" in
   # PATH — invisible on any box that HAS `timeout`, which is every box we develop on, so the
   # only way to test it is to force the absence and ask the code what it decided.
   --component-set-bound) echo "MECHANISM: $(_component_set_bound_mechanism)"; exit 0 ;;
+  # --component-set-remote-identity <url>: REPORT-ONLY evaluation of the canonical-upstream
+  # predicate on a URL passed as an ARGUMENT (issue #3544 / job 215). It reads no config,
+  # performs no I/O and cannot influence a real run: the identity a real run judges is always
+  # `git remote get-url origin`, which neither this hook nor any env var can redirect. It
+  # exists so the URL-shape variants (ssh, scp-like, https, ports, case, `.git`, a fork) are
+  # covered WITHOUT a network fetch and WITHOUT a settable expected-identity — per CLAUDE.md,
+  # the constrained party must not choose its own enforcer.
+  --component-set-remote-identity)
+    _csri="${2:?--component-set-remote-identity needs <url>}"
+    printf 'NORMALISED: %s\n' "$(_component_set_normalise_remote "$_csri")"
+    if _component_set_remote_is_canonical "$_csri"; then
+      echo "IDENTITY: canonical"
+    else
+      echo "IDENTITY: not-canonical"
+    fi
+    exit 0 ;;
   # --component-set-bounded-run <secs> <cmd...>: run <cmd> through the real bounded runner
   # and print its status. `RC: 124` = bound exceeded, `RC: 199` = NO mechanism, in which
   # case the command must NOT have run at all (the property that makes an unboundable probe
