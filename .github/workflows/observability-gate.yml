@@ -80,7 +80,7 @@ jobs:
           echo "Changed files:"
           sed 's/^/  - /' changed-files.txt
 
-          relevant_regex='^(cqlite-core/src/observability/|cqlite-core/src/query/|cqlite-core/src/storage/|bindings/|cqlite-flight/|cqlite-core/benches/observability_overhead\.rs|cqlite-core/tests/observability_correctness\.rs|cqlite-core/tests/observability_read_metrics\.rs|cqlite-core/tests/observability_no_otel_default\.rs|cqlite-core/tests/issue_1704_scan_path_error_counts\.rs|cqlite-core/Cargo\.toml|Cargo\.toml|Cargo\.lock|scripts/ci/observability_overhead\.sh|scripts/ci/observability_no_otel_default\.sh|\.github/workflows/observability-gate\.yml)'
+          relevant_regex='^(cqlite-core/src/observability/|cqlite-core/src/query/|cqlite-core/src/storage/|bindings/|cqlite-flight/|cqlite-core/benches/observability_overhead\.rs|cqlite-core/tests/observability_correctness\.rs|cqlite-core/tests/observability_read_metrics\.rs|cqlite-core/tests/observability_no_otel_default\.rs|cqlite-core/tests/issue_1704_scan_path_error_counts\.rs|cqlite-core/tests/issue_1707_read_phase_timings\.rs|cqlite-core/Cargo\.toml|Cargo\.toml|Cargo\.lock|scripts/ci/observability_overhead\.sh|scripts/ci/observability_no_otel_default\.sh|\.github/workflows/observability-gate\.yml)'
 
           run_correctness=false
           if grep -Eq "$relevant_regex" changed-files.txt; then
@@ -124,13 +124,27 @@ jobs:
         run: bash scripts/ci/observability_no_otel_default.sh
 
       # 2. Correctness + sampling: in-memory OTLP span/metric tests.
+      #
+      # issue_1707_read_phase_timings is the AC evidence for issue #1707 (read-phase
+      # histograms + resource gauges) and is `#![cfg(feature =
+      # "observability-testing")]`. The agent gate's core-tests component runs
+      # cqlite-core with `--features cli-helpers` only, so that file compiled to
+      # NOTHING everywhere and the AC 1 / AC 2 tests never executed. Listing it here
+      # makes them RUN (this step's feature set does enable the file: verified
+      # locally, 8 passed / 1 ignored, not a silently empty target).
+      #
+      # It does NOT make them GATE. observability-gate.yml is listed under `exempt:`
+      # in .github/ci-gating-tiers.yml, so the `required` aggregator never polls this
+      # workflow and a failure here cannot block a merge. Enrolling this workflow as
+      # a gating tier is a separate, owner-level decision (#2910).
       - name: Observability correctness + sampling tests
         run: |
           cargo test -p cqlite-core \
             --features observability-testing,cli-helpers \
             --test observability_correctness \
             --test observability_read_metrics \
-            --test observability_no_otel_default
+            --test observability_no_otel_default \
+            --test issue_1707_read_phase_timings
 
       # Read-metric honesty at the stream boundary (issue #1701): these live in the
       # library's own test build because they hand-build a channel to make "the
