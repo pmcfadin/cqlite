@@ -63,9 +63,52 @@ the pair set. Requirements this must satisfy:
   `Udt.__hash__` therefore succeeds here. Outside the projection a `Udt` may hold unhashable field
   values (a `dict` from a nested map) and hashing raises `TypeError` — the same behaviour as a tuple
   containing a list, and a strict improvement on today's plain `dict`, which is never hashable.
-- **Totality is NOT in scope.** `contains_udt`/`value_to_hashable_key` lack `Tuple` and `Set` arms
-  and raise `TypeError` on some legal nested UDTs; that is **#3500**. This change fixes the
-  duplicate-pair defect in the existing `Udt` arm and adds no arms.
+- **No `Tuple`/`Set` ARM is added — but totality DID widen, and an earlier draft of this section
+  claiming "totality is NOT in scope" was simply wrong.** Adding no arm is not the same as changing
+  no behaviour: what made the arm-less `Tuple` fallthrough unprojectable was the UDT rendering as an
+  unhashable `dict`, and making it a hashable `cqlite.Udt` removes that obstacle wherever the
+  fallthrough lands in a HASHED position. Measured (roborev R1-2), on the fixture table
+  `udt_hashable_shapes`, with `origin/main`'s binding built into the same venv:
+
+  | shape | before | after |
+  |---|---|---|
+  | `set<frozen<tuple<frozen<udt>, int>>>` | `TypeError: unhashable type: 'dict'` | `frozenset({(Udt, 10)})` |
+  | `map<frozen<tuple<frozen<udt>, int>>, int>` | `TypeError: unhashable type: 'dict'` | `{(Udt, 20): 5}` |
+  | `set<frozen<tuple<frozen<udt-with-map-field>, int>>>` | `TypeError: unhashable type: 'dict'` | `frozenset({(Udt, 30)})` |
+  | `set<frozen<set<frozen<udt>>>>` | `TypeError: unhashable type: 'list'` | **identical** |
+
+  The third row falsified the obvious prediction and is worth stating: a UDT declaring a
+  `frozen<map<text,int>>` field projects fine, because CQLite decodes a collection field inside a
+  frozen UDT as `Value::Blob`, so the field arrives as hashable `bytes` rather than a `dict`. That is
+  a decode gap orthogonal to this change (the correct value is `{"a": 1}`), pinned as
+  characterization so a future fix to it reds with an explanation attached rather than looking like a
+  regression here. `Udt.__hash__` does still propagate `TypeError` for a genuinely unhashable field
+  value; nothing in the decode path produces one today, so that residual is asserted on a constructed
+  value.
+
+  The fourth row is the boundary's other side and its cause is NOT this change: `set_to_py` renders a
+  UDT-bearing set as a Python `list` for CLI parity (#804), and a `list` is unhashable in the outer
+  hashed position — the error text says `'list'`, not `'dict'`.
+
+### Note for #3500
+
+**What this change did to #3500, so its owner is not misled.** #3500 is "make
+`contains_udt`/`value_to_hashable_key` total by adding the missing `Tuple`/`Set` arms". Those arms are
+still missing — nothing here adds one, and `contains_udt` still does not look inside a tuple or a
+nested set. What DID change is that the *sub-family* of #3500's failures whose only cause was the UDT
+being an unhashable `dict` now succeeds: a UDT reached through the `Tuple` fallthrough in a hashed
+position. This is **not** "#3500 is fixed":
+
+- The `Set` half is untouched. A UDT-bearing set in a hashed position still raises, because
+  `set_to_py` returns a `list` for #804 CLI parity — an intentional shape choice that #3500 will have
+  to decide about explicitly, and which is now the *dominant* remaining cause rather than one of two.
+- Nothing became *structurally* total: the projection still depends on the fallthrough rendering
+  happening to be hashable, which is a property of `value_to_py`'s output rather than of an arm that
+  states the projection rule for tuples and sets. #3500's own deliverable is unchanged.
+- The measured boundary and its subject columns are committed
+  (`test_udt_collision.udt_hashable_shapes`, asserted in
+  `bindings/python/tests/test_issue_3504_udt_field_namespace.py`), so #3500 starts from measurement
+  rather than from this paragraph.
 
 ## What this hands to #3497, without doing #3497
 

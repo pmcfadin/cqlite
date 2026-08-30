@@ -62,7 +62,9 @@ change is cheapest to make.
   #3497 lacks, but it does not rewrite the normalizer's type dispatch.
 - **Making `contains_udt` / `value_to_hashable_key` total** (missing `Tuple`/`Set` arms → `TypeError`
   on nested UDTs) — #3500. Site 4 here fixes the *duplicate-pair* defect in the existing `Udt` arm
-  only; it does not add the missing arms.
+  only; it does not add the missing arms. It does, however, INCIDENTALLY resolve the sub-family of
+  #3500's failures whose only cause was a UDT rendering as an unhashable `dict` — measured, with the
+  half that still fails and why, in `design.md` ("Note for #3500").
 - **The 3-way Python/Node/CLI golden parity harness** — #1455.
 - **Any change to CQL→host conversion for non-UDT types**, to the decode path, or to `Value::Udt`
   itself in `cqlite-core`.

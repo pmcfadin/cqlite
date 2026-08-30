@@ -18,6 +18,13 @@ Public surface exercised by each task is named, per `openspec/config.yaml`.
 - [x] 2.1 Rewrite `udt_to_object` in `bindings/node/src/value.rs` to emit
   `{ typeName, keyspace, fields }` with fields in their own nested object.
   **Surface**: every Node query result containing a UDT.
+- [x] 2.1a Build `fields` with a NULL PROTOTYPE (`Object.create(null)`, the handle cached on
+  `ConvCtx` beside the `Set`/`Map` constructors) — roborev R1-1. A nested object is not enough while
+  it inherits accessors: a field named `__proto__` reached `Object.prototype`'s inherited setter, so
+  a string value VANISHED and a null value REPLACED the prototype (both measured on the fixture,
+  which now declares such a field). Deliberately NOT a special case on the literal name.
+  **Surface**: `udt.fields` on every Node query result; asserted by three cases in
+  `bindings/node/__test__/issue-3504-udt-field-namespace.test.js`.
 - [x] 2.2 Update `interface UdtValue` in `bindings/node/lib/index.d.ts` — remove the
   `[field: string]: Value` index signature, add `typeName`/`keyspace`/`fields`; update the JSDoc
   example and the type-mapping table row. **Surface**: `index.d.ts`; asserted by
@@ -27,19 +34,32 @@ Public surface exercised by each task is named, per `openspec/config.yaml`.
 - [x] 3.1 Rewrite the `Udt` arm of `value_to_hashable_key` to emit a `Udt` instance: metadata on the
   instance, exactly one pair per declared field, no metadata pairs.
   **Surface**: `dict` keys from `map<frozen<udt>,X>` (`map_to_py`) and set members (`set_to_py`).
-- [x] 3.2 Do NOT add `Tuple`/`Set` arms (#3500). Confirm no behaviour change for shapes that
-  currently succeed.
+- [x] 3.2 Do NOT add `Tuple`/`Set` arms (#3500) — and MEASURE what making `Udt` hashable does to
+  totality rather than assuming it does nothing. Measured (roborev R1-2, fixture table
+  `udt_hashable_shapes`, `origin/main` built into the same venv for the "before" column): a UDT
+  reached through the arm-less `Tuple` fallthrough in a hashed position now PROJECTS
+  (`set<frozen<tuple<frozen<udt>,int>>>` and `map<frozen<tuple<frozen<udt>,int>>,int>`, both
+  previously `TypeError: unhashable type: 'dict'`), while a UDT-bearing `set` in a hashed position
+  still raises `TypeError: unhashable type: 'list'` — unchanged, and for the #804 list-rendering
+  reason, not this one. The earlier claim "#3500 neither fixed nor worsened" was FALSE and is
+  corrected in the spec scenario and in `design.md`.
 
 ## 4. The test subject — a Cassandra-written colliding UDT fixture
 
-No corpus fixture declares a `_type`/`_keyspace` field, and the issue names generating one as part of
-the fix. **Cassandra-written, not CQLite-written**, and committed **checkout-relative**.
+No corpus fixture declares a `_type`/`_keyspace`/`__proto__` field, and the issue names generating one
+as part of the fix. **Cassandra-written, not CQLite-written**, and committed **checkout-relative**.
 
 - [x] 4.1 `test-data/scripts/generate-issue-3504-udt-collision.sh` on the
   `generate-compaction-parity-udt.sh` pattern: Cassandra 5.0 container,
-  `CREATE TYPE collide ("_type" text, "_keyspace" text, real_field int)` (quoted identifiers —
-  `parse_create_type` already accepts them), one table with a `frozen<collide>` column AND a
-  `map<frozen<collide>, int>` column (the latter is site 4's subject), insert, `nodetool flush`, export.
+  `CREATE TYPE collide ("_type" text, "_keyspace" text, "__proto__" text, real_field int)` (quoted
+  identifiers — `parse_create_type` already accepts them, and Cassandra 5.0.2 accepts all three
+  names; `"__proto__"` was added for roborev R1-1 and `collide_twin` carries it too, because the
+  same-fields/different-type distinctness test asserts equal field mappings as its precondition),
+  one table with a `frozen<collide>` column AND a `map<frozen<collide>, int>` column (the latter is
+  site 4's subject), insert, `nodetool flush`, export.
+- [x] 4.1a A SECOND table `udt_hashable_shapes` carrying one column per side of the
+  hashable-projection totality boundary (roborev R1-2), each in its own row because the `TypeError`
+  is raised while converting a row. See task 3.2 for the measurement it produced.
 - [x] 4.2 Commit the SSTable components with `git add -f` (`*.db` is gitignored; force-adding tiny
   parity references is mandated doctrine) under a **checkout-relative per-issue** directory on the
   `cqlite-core/tests/fixtures/issue_2225/` precedent — NOT under `test-data/datasets/sstables/`.
@@ -59,12 +79,25 @@ cannot be fabricated off-thread, so `udt_to_object`'s produced object cannot be 
 `bindings/node/src/value_tests.rs`. Therefore the collision assertions live at script level.
 
 - [x] 5.1 Python, `bindings/python/tests/test_issue_3504_udt_field_namespace.py`: read the 4.2 fixture
-  through the public query API; assert `.type_name`/`.keyspace` plus all three field values, `len == 3`,
-  `udt["_type"]` returns the FIELD, and `udt["_type"]` on a non-colliding UDT raises `KeyError`.
+  through the public query API; assert `.type_name`/`.keyspace` plus every field value, the exact
+  field-NAME SET (a count cannot see a lost field — R1-1), `udt["_type"]` returns the FIELD, and
+  `udt["_type"]` on a non-colliding UDT raises `KeyError`.
   **Executed by**: `python-bindings` (`maturin develop` + `pytest bindings/python/tests`).
+- [x] 5.1a Python, same file: the R1-2 boundary — the two shapes that now project (asserted by
+  RETRIEVING each projected key with an independently constructed equal value, not merely by the
+  absence of an exception), the one that still raises (matched on `unhashable type: 'list'`, the text
+  that identifies the #804 list rendering as the cause), the whole-table scan that the failing row
+  aborts, and the `stn` decode-gap characterization plus the `Udt.__hash__` residual.
+  **Executed by**: `python-bindings`.
 - [x] 5.2 Node, `bindings/node/__test__/issue-3504-udt-field-namespace.test.js`: same input, asserting
   `{typeName, keyspace, fields}` and that `Object.keys(result)` holds no field name.
   **Executed by**: `node-bindings` (whole jest suite).
+- [x] 5.2a Node, same file: the R1-1 `__proto__` cases — own enumerable DATA property with the
+  declared value (descriptor asserted, since only the descriptor distinguishes "defined the field"
+  from "wrote through a setter"), the null-valued field, and a null prototype across seven field bags
+  including key and element position. Expectations are built with `Object.fromEntries`, because an
+  object LITERAL cannot express `__proto__` as a property at all. Verified non-vacuous: 8 of the 13
+  cases fail against the pre-fix binary. **Executed by**: `node-bindings`.
 - [x] 5.3 Site 4 (Python only): the `map<frozen<collide>, int>` column → exactly one `_type` entry in
   the projected key, identity recoverable; plus two-different-types-same-fields distinctness.
   **Executed by**: `python-bindings`.
