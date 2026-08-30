@@ -13,18 +13,18 @@
 //! parent's `#![cfg(all(feature = "write-support", unix))]` gates it too.
 
 use serde_json::Value as Json;
-use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
-use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 use wait_timeout::ChildExt;
 
 mod budgets;
+mod transcript;
 
 pub use budgets::*;
+pub use transcript::*;
 
 // ---------------------------------------------------------------------------
 // Product progress markers (see `cqlite-cli/src/main.rs`)
@@ -90,514 +90,13 @@ CREATE TABLE IF NOT EXISTS users (
 }
 
 // ---------------------------------------------------------------------------
-// Child I/O: both pipes drained, every line kept in a shared transcript
+// Child I/O
 // ---------------------------------------------------------------------------
-
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub enum Stream {
-    Stdout,
-    Stderr,
-}
-
-impl Stream {
-    fn tag(self) -> &'static str {
-        match self {
-            Stream::Stdout => "stdout",
-            Stream::Stderr => "stderr",
-        }
-    }
-
-    /// The exact prefix `spawn_reader` writes into the transcript for this
-    /// stream. It exists so the TRANSCRIPT SCAN and the transcript RENDER agree
-    /// on attribution by construction: both derive it from here, so a line the
-    /// failure message shows tagged `[stderr]` is a line the decision considered
-    /// as stderr. Note the tag is the HARNESS's own framing, not the child's.
-    fn transcript_prefix(self) -> &'static str {
-        match self {
-            Stream::Stdout => "[stdout] ",
-            Stream::Stderr => "[stderr] ",
-        }
-    }
-}
-
-/// A position in the cumulative transcript, taken BEFORE the operation whose
-/// response is awaited.
-///
-/// WHY THE CALLER OWNS IT (roborev job 243, finding 1). The mark bounds the window
-/// a wait's expiry check may consider, so it must be taken before the operation
-/// that can PRODUCE the awaited line — the spawn, the `writeln!`, the `kill`. Taken
-/// inside the wait instead, a reader that RECORDED a fast response and was then
-/// descheduled before publishing it left that line BEFORE the mark and OUTSIDE the
-/// channel, so it was excluded from both halves of the expiry check: a false
-/// timeout against evidence the harness already held.
-///
-/// It is a newtype, not a bare `usize`, so a call site cannot pass a length, an
-/// index or a count where a mark belongs.
-#[derive(Clone, Copy, Debug)]
-pub struct Mark(usize);
-
-/// ONE read of the transcript, used for BOTH the decision and the message.
-///
-/// DECIDE AND RENDER FROM THE SAME SNAPSHOT, NOT MERELY THE SAME STORE (roborev
-/// job 243, finding 1). Round 11 made the expiry decision read the transcript
-/// rather than the channel, but then RE-READ the transcript to render the failure
-/// — two acquisitions of the same lock, so a line appended in between could still
-/// appear in a message that had just called it absent. The two reads are now one:
-/// the snapshot is copied out under a single lock, the verdict is taken from it,
-/// and it is carried into [`WaitEnd`] so the rendered transcript is literally the
-/// bytes the decision examined.
-#[derive(Debug)]
-pub struct TranscriptSnapshot {
-    /// Every transcript line as of the decision, tags included.
-    lines: Vec<String>,
-    /// Where the awaiting wait began; `lines[mark..]` is its window.
-    mark: usize,
-    /// The lock was readable. `false` means a reader thread panicked, which is
-    /// reported rather than rendered as an empty transcript.
-    available: bool,
-}
-
-impl TranscriptSnapshot {
-    /// How many lines the decision's window covered — how much evidence it
-    /// actually looked at.
-    fn examined(&self) -> usize {
-        self.lines.len().saturating_sub(self.mark)
-    }
-
-    /// The lines in the window, on `want`, with the harness's `[stream] ` tag
-    /// stripped so the caller receives the child's own text.
-    ///
-    /// The predicate is applied OUTSIDE any lock, by construction: this reads an
-    /// owned copy. `pred` is caller code, and applying it while holding the
-    /// transcript lock deadlocks any predicate that touches the transcript — a std
-    /// `Mutex` is not reentrant. Found the hard way: the first version of a plant
-    /// for this did exactly that and wedged the test binary for nine minutes.
-    fn window_on(&self, want: Stream) -> impl Iterator<Item = &str> {
-        self.lines
-            .get(self.mark..)
-            .unwrap_or(&[])
-            .iter()
-            .filter_map(move |l| l.strip_prefix(want.transcript_prefix()))
-    }
-
-    /// The snapshot, indented for a panic message. THE SAME BYTES the verdict was
-    /// taken from — no fresh read, so no append can contradict the message.
-    pub fn render(&self) -> String {
-        if !self.available {
-            return "  (transcript unavailable: a reader thread panicked)".to_string();
-        }
-        if self.lines.is_empty() {
-            return "  (the child emitted nothing at all on stdout or stderr)".to_string();
-        }
-        self.lines
-            .iter()
-            .map(|l| format!("  {l}"))
-            .collect::<Vec<_>>()
-            .join("\n")
-    }
-}
-
-/// How a [`ChildIo::wait_for`] ended when it did NOT observe the line it awaited.
-///
-/// Reported by every such failure because it is an OBSERVATION, not a cause: a
-/// deadline that passed with the pipes still open and a child whose pipes reached
-/// EOF are different measurements, and the second is the signature a RED run
-/// produces when the child dies instead of handling the signal. Neither variant
-/// names WHY.
-///
-/// BOTH variants carry the snapshot the verdict was taken from, and the call site
-/// renders THAT rather than re-reading the transcript, so the message and the
-/// decision are the same bytes (job 243, finding 1).
-#[derive(Debug)]
-pub enum WaitEnd {
-    /// The test's one deadline passed; the child's pipes were still open, so more
-    /// output was still possible.
-    DeadlineReached { snapshot: TranscriptSnapshot },
-    /// Both reader threads ended and the queue drained: the child's stdout AND
-    /// stderr reached EOF after this long, so no further line could ever arrive.
-    /// The child had exited, crashed, or closed its pipes -- this does not say
-    /// which.
-    PipesClosed {
-        after: Duration,
-        snapshot: TranscriptSnapshot,
-    },
-}
-
-impl WaitEnd {
-    pub fn describe(&self) -> String {
-        match self {
-            WaitEnd::DeadlineReached { snapshot } => format!(
-                "how the wait ended: the test's one deadline passed with the child's pipes still \
-                 open (more output was still possible). The verdict was taken from ONE snapshot \
-                 of the transcript covering the {} line(s) recorded since this wait began, and \
-                 none of them matched. The transcript printed below IS that snapshot — not a \
-                 fresh read of a store that may since have grown — so this message cannot be \
-                 contradicted by the evidence it prints",
-                snapshot.examined()
-            ),
-            WaitEnd::PipesClosed { after, snapshot } => format!(
-                "how the wait ended: the child's stdout AND stderr both reached EOF after \
-                 {after:.3?}, so no further line could arrive: the child had exited, crashed, or \
-                 closed its pipes (this measurement does not say which). The {} transcript \
-                 line(s) recorded since this wait began, printed below, are the snapshot the \
-                 verdict was taken from",
-                snapshot.examined()
-            ),
-        }
-    }
-
-    /// The transcript the DECISION examined, ready for a panic message.
-    pub fn transcript(&self) -> String {
-        match self {
-            WaitEnd::DeadlineReached { snapshot } => snapshot.render(),
-            WaitEnd::PipesClosed { snapshot, .. } => snapshot.render(),
-        }
-    }
-}
-
-/// Drains BOTH of the child's pipes (design.md D7: `stderr` was piped and never
-/// read — discarding the evidence this oracle needs, and a latent wedge for any
-/// chattier session) and accumulates every line into a shared transcript, so a
-/// failure can print what the child actually said. The previous `wait_for_line`
-/// discarded every non-matching line, so a failure could report nothing.
-pub struct ChildIo {
-    rx: Receiver<(Stream, String)>,
-    transcript: Arc<Mutex<Vec<String>>>,
-}
-
-fn spawn_reader<R: std::io::Read + Send + 'static>(
-    stream: Stream,
-    reader: R,
-    tx: Sender<(Stream, String)>,
-    transcript: Arc<Mutex<Vec<String>>>,
-) {
-    thread::spawn(move || {
-        let buf = BufReader::new(reader);
-        for line in buf.lines() {
-            let Ok(line) = line else { break };
-            if let Ok(mut t) = transcript.lock() {
-                t.push(format!("[{}] {}", stream.tag(), line));
-            }
-            if tx.send((stream, line)).is_err() {
-                break;
-            }
-        }
-    });
-}
-
-/// What a final non-blocking drain of the channel found. Two facts, kept
-/// separate because collapsing them is exactly what reported the wrong cause
-/// (roborev job 236, finding 3).
-struct FinalDrain {
-    /// The first queued line that matched, if any.
-    matched: Option<String>,
-    /// The queue was drained to the end and every sender was gone, so no further
-    /// line can ever arrive. Never set when `matched` is `Some` (the drain stops
-    /// there and learns nothing about the senders).
-    disconnected: bool,
-}
-
-/// How a non-blocking [`ChildIo::drain_new`] ended. Kept as two values for the
-/// same reason [`FinalDrain`] keeps its two facts separate: "nothing more is
-/// queued right now" and "nothing more can ever arrive" are different
-/// measurements, and collapsing them reports the first about a child in the
-/// second state.
-///
-/// It deliberately does NOT report how many lines it consumed. The "new output
-/// lines" a poll reports are counted from the TRANSCRIPT — the store its failure
-/// message renders — so a channel-derived count here would be a second store for
-/// the message to disagree with (job 243, finding 1).
-#[derive(PartialEq, Eq, Debug)]
-enum DrainEnd {
-    /// The queue was emptied and the senders are alive: more output is possible.
-    Empty,
-    /// The queue was emptied AND every sender was gone: both reader threads have
-    /// ended, so the child's pipes are at EOF.
-    Disconnected,
-}
-
-impl ChildIo {
-    /// Attach readers to a spawned child's stdout + stderr, returning the harness
-    /// AND the [`Mark`] for the first wait.
-    ///
-    /// THE MARK IS TAKEN BEFORE EITHER READER EXISTS, which is the earliest point
-    /// at which a mark can be taken at all: until a reader is spawned, nothing can
-    /// record into the transcript. So the first wait's window provably covers every
-    /// line the child has ever emitted, and the "recorded a fast response, then got
-    /// descheduled before the mark" race (job 243, finding 1) is not expressible
-    /// for stage (a). Returning it — rather than letting the call site take one
-    /// after `attach` — is what makes that structural instead of a convention.
-    fn attach(child: &mut std::process::Child) -> (Self, Mark) {
-        let transcript: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
-        let (tx, rx) = mpsc::channel();
-        let io = Self {
-            rx,
-            transcript: Arc::clone(&transcript),
-        };
-        let mark = io.mark();
-        let out = child.stdout.take().expect("child stdout");
-        let err = child.stderr.take().expect("child stderr");
-        spawn_reader(Stream::Stdout, out, tx.clone(), Arc::clone(&transcript));
-        spawn_reader(Stream::Stderr, err, tx, transcript);
-        (io, mark)
-    }
-
-    /// Take a transcript [`Mark`] for a wait that has NOT YET been started.
-    ///
-    /// CALL THIS BEFORE THE OPERATION WHOSE RESPONSE YOU WILL AWAIT — before the
-    /// `writeln!`, before the `kill`. See [`Mark`] for what taking it later costs.
-    pub fn mark(&self) -> Mark {
-        Mark(self.transcript_len())
-    }
-
-    /// Block until a line on `want` satisfies `pred`, or the TEST's one deadline
-    /// passes. Returns the matching line and how much of the stage it took (so a
-    /// successful wait can calibrate the deadline).
-    ///
-    /// Takes the `Stage` itself, never a `Duration`: the timeout comes from
-    /// `Stage::remaining()`, the one place a per-wait timeout is computed, so no
-    /// call site can be handed a fresh allowance and none can double-spend.
-    ///
-    /// `mark` bounds the window the expiry check may consider. The transcript is
-    /// CUMULATIVE across the whole test, so without a window an earlier stage's
-    /// already-consumed line would satisfy a later wait — `await_write_ack` awaits
-    /// five separate `OK`s in one test, so the first would silently satisfy all
-    /// five, and a wedged session would read as green. A false PASS is strictly
-    /// worse than a confusing diagnostic.
-    ///
-    /// THE MARK COMES FROM THE CALLER, TAKEN BEFORE THE OPERATION (job 243,
-    /// finding 1). Taking it here made the window start AFTER the `writeln!` /
-    /// `kill` that produces the awaited line, so a reader that recorded a fast
-    /// response and was then descheduled before publishing it fell outside the
-    /// window AND outside the channel — excluded from both halves of the expiry
-    /// check.
-    pub fn wait_for(
-        &self,
-        mark: Mark,
-        want: Stream,
-        pred: impl Fn(&str) -> bool,
-        stage: &Stage,
-    ) -> Result<(String, Duration), WaitEnd> {
-        loop {
-            let remaining = stage.remaining();
-            if remaining.is_zero() {
-                // DECIDE FROM THE STORE YOU REPORT FROM (roborev job 236,
-                // finding 1 — the durable principle of this whole change).
-                //
-                // The awaited line may have ARRIVED before the deadline and not
-                // have been consumed yet: this thread can be descheduled between
-                // the reader thread's transcript `push` and its `send`, and again
-                // between that `send` and this loop's next `recv_timeout`.
-                // Declaring expiry without looking would be a false timeout on a
-                // working product (the round-9 ruling: the deadline bounds how
-                // long we WAIT FOR evidence, never whether we accept evidence we
-                // already hold).
-                //
-                // Job 233's fix looked only at the CHANNEL, which narrowed the
-                // window instead of closing it: `spawn_reader` records into the
-                // transcript FIRST and publishes to the channel SECOND, so a
-                // reader preempted between those two operations left the channel
-                // without a line the transcript already had — and the failure
-                // message renders the TRANSCRIPT. The message could therefore
-                // print the very marker the decision had just called absent.
-                //
-                // The fix is not to synchronise the two stores; it is to make
-                // their divergence IRRELEVANT by deciding from the one we report
-                // from. The channel is still drained (it maintains the progress
-                // counts and the ordering the blocking path depends on) and a
-                // queued match still counts — every channel line is in the
-                // transcript too, so that direction can never contradict the
-                // message. The verdict of ABSENCE, though, is taken from the
-                // transcript itself, so "the message prints evidence the decision
-                // did not see" is impossible by construction: they read the same
-                // bytes.
-                //
-                // Nothing here waits: the drain is `try_recv` and the scan is a
-                // read of an in-memory `Vec`, so the deadline cannot be extended.
-                let drained = self.final_drain(want, &pred);
-                if let Some(line) = drained.matched {
-                    return Ok((line, stage.spent()));
-                }
-                // ONE SNAPSHOT, used for the verdict AND for the message (job 243,
-                // finding 1). Round 11 scanned the transcript and then re-read it
-                // to render, which is two acquisitions of one lock: a line
-                // appended in between appeared in a message that had just called
-                // it absent. The snapshot below is the only read from here on.
-                //
-                // The transcript lines carry the harness's own `[stream] ` tag, so
-                // the window strips it and the predicate sees the child's own text
-                // — `await_write_ack` matches on the WHOLE trimmed line.
-                let snapshot = self.snapshot(mark);
-                if let Some(line) = snapshot.window_on(want).find(|l| pred(l)) {
-                    return Ok((line.to_string(), stage.spent()));
-                }
-                // Only now can a cause be named, and the drain above is what
-                // distinguishes them (roborev job 236, finding 3): a drain that
-                // ran out of QUEUE reports a deadline, while one that ran out of
-                // SENDERS reports closed pipes. Collapsing the two reported
-                // "pipes still open" about a child whose readers had both ended.
-                return Err(if drained.disconnected {
-                    WaitEnd::PipesClosed {
-                        after: stage.spent(),
-                        snapshot,
-                    }
-                } else {
-                    WaitEnd::DeadlineReached { snapshot }
-                });
-            }
-            match self
-                .rx
-                .recv_timeout(remaining.min(Duration::from_millis(100)))
-            {
-                Ok((stream, line)) => {
-                    if stream == want && pred(&line) {
-                        return Ok((line, stage.spent()));
-                    }
-                }
-                Err(RecvTimeoutError::Timeout) => {}
-                // Both readers ended: the child's pipes are closed and the
-                // buffer is drained, so no further line can ever arrive.
-                Err(RecvTimeoutError::Disconnected) => {
-                    // THE FINAL LOOK IS TAKEN HERE TOO, so the two failure paths
-                    // are symmetric. `Disconnected` means the queue was empty AND
-                    // every sender was gone, so every recorded line should already
-                    // have been published and tested above — but that is an
-                    // ARGUMENT, and the expiry path exists because arguments about
-                    // this interleaving have been wrong repeatedly in this change.
-                    // One snapshot is taken, checked, and then rendered by the
-                    // failure, which costs one memory read on a path about to panic.
-                    let snapshot = self.snapshot(mark);
-                    if let Some(line) = snapshot.window_on(want).find(|l| pred(l)) {
-                        return Ok((line.to_string(), stage.spent()));
-                    }
-                    return Err(WaitEnd::PipesClosed {
-                        after: stage.spent(),
-                        snapshot,
-                    });
-                }
-            }
-        }
-    }
-
-    /// Non-blocking: consume every line the readers have already queued and
-    /// return the first that matches, if any. Never waits, so it cannot extend
-    /// the deadline; it only inspects evidence that has already arrived.
-    ///
-    /// Non-matching lines are discarded exactly as the blocking loop discards
-    /// them — the transcript keeps every line, so nothing is lost to diagnostics.
-    ///
-    /// `disconnected` is reported ONLY when the queue was drained to the end
-    /// without a match, because `try_recv` yields `Disconnected` exactly when the
-    /// queue is empty AND every sender is gone. On a match the drain stops, so
-    /// the remaining lines stay queued for the next stage (the blocking path
-    /// behaves the same way) and nothing is claimed about the senders.
-    fn final_drain(&self, want: Stream, pred: &impl Fn(&str) -> bool) -> FinalDrain {
-        loop {
-            match self.rx.try_recv() {
-                Ok((stream, line)) => {
-                    if stream == want && pred(&line) {
-                        return FinalDrain {
-                            matched: Some(line),
-                            disconnected: false,
-                        };
-                    }
-                }
-                Err(mpsc::TryRecvError::Empty) => {
-                    return FinalDrain {
-                        matched: None,
-                        disconnected: false,
-                    }
-                }
-                Err(mpsc::TryRecvError::Disconnected) => {
-                    return FinalDrain {
-                        matched: None,
-                        disconnected: true,
-                    }
-                }
-            }
-        }
-    }
-
-    /// How many lines the transcript holds, for a wait's own window mark.
-    ///
-    /// A poisoned transcript lock is reported as a length of 0, which makes the
-    /// window cover everything a later scan can read: the scan itself would then
-    /// find nothing, so this can only widen what is examined, never narrow it.
-    fn transcript_len(&self) -> usize {
-        self.transcript.lock().map(|t| t.len()).unwrap_or(0)
-    }
-
-    /// ONE read of the transcript, under ONE lock acquisition: the store the
-    /// failure message renders, windowed at `mark`.
-    ///
-    /// Every expiry verdict and every message it produces comes from a value of
-    /// this type, so "the message prints evidence the decision did not see" is not
-    /// expressible (job 243, finding 1). Reads nothing but memory, so it cannot
-    /// extend the deadline; and the whole transcript is COPIED, so the lock is
-    /// released before any caller predicate runs (a std `Mutex` is not reentrant —
-    /// applying a predicate that touches the transcript while holding it wedged the
-    /// test binary for nine minutes once).
-    fn snapshot(&self, mark: Mark) -> TranscriptSnapshot {
-        match self.transcript.lock() {
-            Ok(t) => TranscriptSnapshot {
-                lines: t.clone(),
-                mark: mark.0,
-                available: true,
-            },
-            // A poisoned lock is REPORTED, never rendered as an empty transcript:
-            // "the child said nothing" and "a reader thread panicked" are different
-            // facts, and only one of them is about the child.
-            Err(_) => TranscriptSnapshot {
-                lines: Vec::new(),
-                mark: 0,
-                available: false,
-            },
-        }
-    }
-
-    /// Non-blocking: consume whatever the readers have queued.
-    ///
-    /// `EMPTY AND DISCONNECTED ARE NEVER COLLAPSED` (roborev job 236 finding 3
-    /// and job 243 finding 3, the same class at two more sites). The old
-    /// `while try_recv().is_ok()` stopped identically on either, so a poll could
-    /// report "0 new output lines" about a child whose pipes had BOTH reached EOF
-    /// — a materially different diagnosis, silently discarded. The queue is
-    /// checked to the end before the disconnect is reported, which `try_recv`
-    /// guarantees: it yields `Disconnected` only once the queue is empty AND every
-    /// sender is gone.
-    fn drain_new(&self) -> DrainEnd {
-        loop {
-            match self.rx.try_recv() {
-                Ok(_) => {}
-                Err(mpsc::TryRecvError::Empty) => return DrainEnd::Empty,
-                Err(mpsc::TryRecvError::Disconnected) => return DrainEnd::Disconnected,
-            }
-        }
-    }
-
-    /// Everything the child has said so far, indented for a panic message.
-    ///
-    /// FOR CLAIMS THAT ARE NOT ABOUT THE TRANSCRIPT (job 243, finding 1). A wait
-    /// or poll failure asserts that an awaited line is ABSENT, so its message must
-    /// render the snapshot its verdict was taken from — `WaitEnd::transcript` /
-    /// `PollFail::transcript` — or a later append could contradict it. An exit
-    /// status or a missing row is a different claim, whose evidence is the status
-    /// or the rows; the transcript is CONTEXT there, and a fresh read of it can
-    /// contradict nothing.
-    pub fn transcript_text(&self) -> String {
-        match self.transcript.lock() {
-            Ok(t) if t.is_empty() => {
-                "  (the child emitted nothing at all on stdout or stderr)".to_string()
-            }
-            Ok(t) => t
-                .iter()
-                .map(|l| format!("  {l}"))
-                .collect::<Vec<_>>()
-                .join("\n"),
-            Err(_) => "  (transcript unavailable: a reader thread panicked)".to_string(),
-        }
-    }
-}
+//
+// `ChildIo`, `Mark`, `TranscriptSnapshot`, `WaitEnd` and the reader threads live
+// in `transcript.rs`: THE ONE STORE and the waits that read it (design.md D6b).
+// The channel that used to sit beside that store — and the `Empty`/`Disconnected`
+// and stale-re-delivery families it made expressible — is deleted, not patched.
 
 // ---------------------------------------------------------------------------
 // Progress OBSERVATION — evidence in the message, never an input to the bound
@@ -634,11 +133,19 @@ pub struct PollFail {
     /// The one deadline's derivation, captured at the moment of failure.
     deadline: String,
     /// How long since anything at all was observed.
+    ///
+    /// DERIVED FROM THE SAME SNAPSHOT as `new_lines` below: the later of the newest
+    /// record's own instant and the last artifact increase (design.md D6b). Under
+    /// two stores this was a running `last_progress` updated from a DIFFERENT sample
+    /// than the count, so a line appended between the two was counted as new output
+    /// while "last progress" still pointed at an older moment (roborev job 247,
+    /// finding 3). With one store and one snapshot per iteration there is no second
+    /// sample for it to disagree with.
     since_progress: Duration,
-    /// New transcript lines since the poll began, COUNTED FROM THE SNAPSHOT below
-    /// — the same bytes the message renders (job 243, finding 1). Counting the
-    /// channel drains instead let the message report "0 new output lines" beside a
-    /// printed transcript that showed some.
+    /// New records since the poll began, COUNTED FROM THE SNAPSHOT below — the same
+    /// records the message renders (job 243, finding 1). Counting channel drains
+    /// instead let the message report "0 new output lines" beside a printed
+    /// transcript that showed some.
     new_lines: usize,
     new_artifacts: usize,
     /// The artifact count from the iteration that declared the timeout — THE SAME
@@ -649,12 +156,16 @@ pub struct PollFail {
     /// Both reader threads had ended when the verdict was taken, so the child's
     /// stdout AND stderr were at EOF. A separate FACT from the progress counts
     /// (roborev job 243, finding 3): a poll that gave up with the pipes closed is
-    /// a different diagnosis from one that gave up with output still possible, and
-    /// the old drain discarded the distinction.
+    /// a different diagnosis from one that gave up with output still possible.
+    ///
+    /// Read from the SAME snapshot as the records, under one lock, so it can never
+    /// be claimed about a state whose lines the verdict did not examine — which is
+    /// what retired the `Empty`-vs-`Disconnected` family rather than fixing it at a
+    /// fourth site (design.md D6b).
     pipes_closed: bool,
     data_dir: PathBuf,
-    /// The ONE transcript read taken at the verdict: both `new_lines` above and
-    /// the rendered transcript come from it.
+    /// The ONE store read taken at the verdict: `new_lines`, `since_progress`,
+    /// `pipes_closed` and the rendered transcript all come from it.
     snapshot: TranscriptSnapshot,
 }
 
@@ -806,12 +317,12 @@ fn poll_with_progress_sampled<T>(
     mut step: impl FnMut(Duration, usize) -> Option<T>,
 ) -> PollOutcome<T> {
     const SLICE: Duration = Duration::from_millis(100);
-    let mut last_progress = Instant::now();
-    // The poll's own transcript window, taken BEFORE its first sample or step, so
-    // "new output lines" means lines recorded during THIS poll (job 243, finding 1
-    // — the mark precedes the operation, and here the poll IS the operation).
+    let started = Instant::now();
+    // The poll's own window into the ONE store, taken BEFORE its first sample or
+    // step, so "new records" means records sequenced during THIS poll (job 243,
+    // finding 1 — the mark precedes the operation, and here the poll IS the
+    // operation).
     let mark = io.mark();
-    let mut prev_lines = io.transcript_len();
     // The baseline, taken before any step runs: `new_artifacts` counts what
     // appeared DURING the poll, so iteration 0 must have something to differ
     // from. It is ALSO iteration 0's sample — taking a second scan at the first
@@ -819,6 +330,11 @@ fn poll_with_progress_sampled<T>(
     let mut prev_artifacts = sample();
     let mut artifacts = prev_artifacts;
     let mut new_artifacts = 0usize;
+    // When the artifact count last increased. The OTHER half of "last progress"
+    // — new output — is derived from the snapshot below rather than tracked here,
+    // which is what makes the two halves of the progress report come from one
+    // read (design.md D6b; job 247, finding 3).
+    let mut last_artifact_at: Option<Instant> = None;
 
     loop {
         // THE ITERATION'S ONE SAMPLE OF EACH SIGNAL, reused by everything below
@@ -828,23 +344,14 @@ fn poll_with_progress_sampled<T>(
         if artifacts > prev_artifacts {
             new_artifacts += artifacts - prev_artifacts;
             prev_artifacts = artifacts;
-            last_progress = Instant::now();
+            last_artifact_at = Some(Instant::now());
         }
-        // The channel MUST still be drained — it is what keeps a chatty child from
-        // filling the pipe buffer — but the progress COUNT is read from the
-        // transcript, the store this poll's failure message renders.
-        let drained = io.drain_new();
-        let lines_now = io.transcript_len();
-        if lines_now > prev_lines {
-            prev_lines = lines_now;
-            last_progress = Instant::now();
-        }
-        // EOF on both pipes is a FACT the failure reports, never a reason to stop
-        // polling: the child may still be exiting, and `step` is what observes
-        // that (roborev job 243, finding 3). It is read from THIS iteration's
-        // drain — the one whose counts the verdict reports — so it is scoped to
-        // the iteration rather than carried across them.
-
+        // NOTHING NEEDS DRAINING ANY MORE. The reader threads append straight into
+        // the one store, so a chatty child cannot fill a pipe buffer waiting for
+        // this loop to consume a queue — which is the only reason the deleted
+        // channel had to be drained here at all. EOF on both pipes is still a FACT
+        // the failure reports and never a reason to stop polling: the child may be
+        // exiting, and `step` is what observes that (job 243, finding 3).
         let remaining = stage.remaining();
         if remaining.is_zero() {
             // FINAL NON-BLOCKING STATUS CHECK BEFORE DECLARING A TIMEOUT (roborev
@@ -856,18 +363,20 @@ fn poll_with_progress_sampled<T>(
             // predicate reads the sample above rather than scanning — so this
             // cannot extend the deadline; it only consumes evidence that already
             // arrived within it.
-            //
-            // The sample and the drain above were taken AFTER the deadline lapsed
-            // and before this decision, so the progress counts describe the moment
-            // the verdict is taken rather than one slice earlier — no separate
-            // fold-in is needed, and none is taken.
             if let Some(done) = step(Duration::ZERO, artifacts) {
                 return Ok((done, stage.spent()));
             }
-            // ONE transcript read for the verdict: it supplies BOTH the reported
-            // line count and the rendered transcript, so the two cannot disagree
-            // and no later append can contradict the message (job 243, finding 1).
+            // ONE read of the one store for the verdict: it supplies the reported
+            // record count, the last-progress instant, the end-of-stream fact and
+            // the rendered transcript, so none of the four can disagree with
+            // another and no later append can contradict the message (job 243
+            // finding 1; job 247 finding 3).
             let snapshot = io.snapshot(mark);
+            let last_progress = [snapshot.newest_at(), last_artifact_at]
+                .into_iter()
+                .flatten()
+                .max()
+                .unwrap_or(started);
             return Err(Box::new(PollFail {
                 stage_spent: stage.spent(),
                 deadline: stage.describe(),
@@ -875,7 +384,7 @@ fn poll_with_progress_sampled<T>(
                 new_lines: snapshot.examined(),
                 new_artifacts,
                 artifacts_now: artifacts,
-                pipes_closed: drained == DrainEnd::Disconnected,
+                pipes_closed: snapshot.pipes_closed(),
                 data_dir: data_dir.to_path_buf(),
                 snapshot,
             }));
@@ -919,17 +428,71 @@ pub fn count_data_db(data_dir: &Path) -> usize {
     n
 }
 
+/// THE READ SIDE'S ONE STORE: stage (e)'s two output buffers plus how many
+/// collector threads are still attached.
+///
+/// The same shape as the transcript log, for the same reason (design.md D6b). This
+/// site carried its OWN `mpsc` channel and its own copy of the
+/// `Empty`-vs-`Disconnected` defect (roborev job 243, finding 3, found here after
+/// round 11 fixed it in `ChildIo`) — the class stops recurring when there is no
+/// queue to mis-classify: "both buffers are here" and "every collector has ended"
+/// are two fields of one store, read under one lock.
+#[derive(Debug, Default)]
+struct StreamBufs {
+    stdout: Option<Vec<u8>>,
+    stderr: Option<Vec<u8>>,
+    /// Collector threads still attached; `0` means every one has ended, whether by
+    /// delivering or by unwinding.
+    collectors_open: usize,
+}
+
+impl StreamBufs {
+    fn collected(&self) -> usize {
+        usize::from(self.stdout.is_some()) + usize::from(self.stderr.is_some())
+    }
+}
+
+/// A collector's handle on that store: the only way a buffer is delivered.
+///
+/// End-of-collection is signalled by DROP — normal return AND unwind — which is
+/// the `Sender`-drop semantics the deleted channel had, kept deliberately: a
+/// collector that panics must not leave the wait believing a buffer is still
+/// coming.
+struct BufHandle {
+    bufs: Arc<Mutex<StreamBufs>>,
+}
+
+impl BufHandle {
+    fn deliver(&self, stream: Stream, buf: Vec<u8>) {
+        if let Ok(mut b) = self.bufs.lock() {
+            match stream {
+                Stream::Stdout => b.stdout = Some(buf),
+                Stream::Stderr => b.stderr = Some(buf),
+            }
+        }
+    }
+}
+
+impl Drop for BufHandle {
+    fn drop(&mut self) {
+        if let Ok(mut b) = self.bufs.lock() {
+            b.collectors_open = b.collectors_open.saturating_sub(1);
+        }
+    }
+}
+
 /// Read a piped handle to EOF on its own thread, so a bounded wait on the child
 /// can never deadlock against a full pipe buffer.
 fn collect_to_end<R: std::io::Read + Send + 'static>(
     stream: Stream,
     mut reader: R,
-    tx: Sender<(Stream, Vec<u8>)>,
+    handle: BufHandle,
 ) {
     thread::spawn(move || {
+        let handle = handle;
         let mut buf = Vec::new();
         let _ = reader.read_to_end(&mut buf);
-        let _ = tx.send((stream, buf));
+        handle.deliver(stream, buf);
     });
 }
 
@@ -941,92 +504,82 @@ enum CollectEnd {
     Both(Vec<u8>, Vec<u8>),
     /// The deadline passed with `collected` of 2 delivered.
     DeadlineReached { collected: usize },
-    /// A reader thread ended without sending, with `collected` of 2 delivered.
-    Disconnected { collected: usize },
+    /// Every collector thread ended with `collected` of 2 delivered, so no further
+    /// buffer can arrive. A collector that reached EOF always delivers, so this can
+    /// only be a panic inside the harness.
+    CollectorsEnded { collected: usize },
+    /// The store's lock was poisoned — a collector panicked while holding it. A
+    /// harness defect, and a DIFFERENT one from `CollectorsEnded`, so it is not
+    /// folded into it.
+    Unavailable,
+}
+
+/// ONE read of the read-side store: it decides AND extracts, under a single lock,
+/// so "both buffers are here" and "every collector has ended" can never come from
+/// different moments.
+enum Look {
+    Both(Vec<u8>, Vec<u8>),
+    Partial {
+        collected: usize,
+        collectors_open: usize,
+    },
+    Unavailable,
+}
+
+fn look(bufs: &Mutex<StreamBufs>) -> Look {
+    match bufs.lock() {
+        Ok(mut b) => {
+            if b.collected() == 2 {
+                let out = b.stdout.take().unwrap_or_default();
+                let err = b.stderr.take().unwrap_or_default();
+                Look::Both(out, err)
+            } else {
+                Look::Partial {
+                    collected: b.collected(),
+                    collectors_open: b.collectors_open,
+                }
+            }
+        }
+        Err(_) => Look::Unavailable,
+    }
 }
 
 /// Collect both of the read-side child's output buffers under the TEST's one
 /// deadline (`stage.remaining()`: no constant, no per-call-site subtraction).
 ///
-/// FINAL NON-BLOCKING DRAIN BEFORE DECLARING A TIMEOUT (roborev job 233,
-/// finding 1). A reader thread can deliver its buffer before the deadline and
-/// this thread can be descheduled before consuming it. Declaring a timeout
-/// without one last `try_recv` would be a false failure on a working product,
-/// reported against a child that had already exited successfully.
-fn collect_both_streams(rx: &Receiver<(Stream, Vec<u8>)>, stage: &Stage) -> CollectEnd {
-    fn store(
-        stream: Stream,
-        buf: Vec<u8>,
-        stdout_buf: &mut Vec<u8>,
-        stderr_buf: &mut Vec<u8>,
-        collected: &mut usize,
-    ) {
-        match stream {
-            Stream::Stdout => *stdout_buf = buf,
-            Stream::Stderr => *stderr_buf = buf,
-        }
-        *collected += 1;
-    }
-
-    let mut stdout_buf = Vec::new();
-    let mut stderr_buf = Vec::new();
-    let mut collected = 0usize;
+/// EXACTLY ONE READ OF THE STORE PER ITERATION, and the expiry verdict comes from a
+/// read taken AFTER the deadline lapsed (roborev job 233, finding 1). A collector
+/// can deliver its buffer before the deadline and this thread be descheduled before
+/// looking; declaring a timeout without one last look would be a false failure
+/// reported against a child that had already exited successfully. That look waits
+/// for nothing, so it cannot extend the deadline.
+fn collect_both_streams(bufs: &Arc<Mutex<StreamBufs>>, stage: &Stage) -> CollectEnd {
     loop {
-        if collected >= 2 {
-            return CollectEnd::Both(stdout_buf, stderr_buf);
-        }
         let left = stage.remaining();
         if left.is_zero() {
-            // Consume what already arrived; this waits for nothing, so it cannot
-            // extend the deadline.
-            //
-            // EMPTY AND DISCONNECTED ARE NEVER COLLAPSED (roborev job 243,
-            // finding 3 — the same class job 236 finding 3 fixed in
-            // `ChildIo::final_drain`, still live here). The old `let Ok(..) else
-            // break` stopped identically on either, so reader threads that had
-            // ENDED without delivering both buffers were reported as
-            // `DeadlineReached` — a timeout blamed on the deadline, about a
-            // harness defect the `Disconnected` variant already exists to name.
-            // The disconnect is recorded and the loop still terminates through
-            // the same exit, so ALL QUEUED ITEMS have been checked before any
-            // verdict is returned (`try_recv` yields `Disconnected` only once the
-            // queue is empty AND every sender is gone).
-            let mut disconnected = false;
-            while collected < 2 {
-                match rx.try_recv() {
-                    Ok((stream, buf)) => store(
-                        stream,
-                        buf,
-                        &mut stdout_buf,
-                        &mut stderr_buf,
-                        &mut collected,
-                    ),
-                    Err(mpsc::TryRecvError::Empty) => break,
-                    Err(mpsc::TryRecvError::Disconnected) => {
-                        disconnected = true;
-                        break;
-                    }
-                }
-            }
-            return if collected >= 2 {
-                CollectEnd::Both(stdout_buf, stderr_buf)
-            } else if disconnected {
-                CollectEnd::Disconnected { collected }
-            } else {
-                CollectEnd::DeadlineReached { collected }
+            return match look(bufs) {
+                Look::Both(out, err) => CollectEnd::Both(out, err),
+                Look::Unavailable => CollectEnd::Unavailable,
+                // The cause comes from the SAME read as the count, so a collection
+                // that ran out of COLLECTORS is never reported as one that ran out
+                // of TIME (job 243, finding 3 — the class this store retires).
+                Look::Partial {
+                    collected,
+                    collectors_open: 0,
+                } => CollectEnd::CollectorsEnded { collected },
+                Look::Partial { collected, .. } => CollectEnd::DeadlineReached { collected },
             };
         }
-        match rx.recv_timeout(left.min(Duration::from_millis(250))) {
-            Ok((stream, buf)) => store(
-                stream,
-                buf,
-                &mut stdout_buf,
-                &mut stderr_buf,
-                &mut collected,
-            ),
-            Err(RecvTimeoutError::Disconnected) => return CollectEnd::Disconnected { collected },
-            Err(RecvTimeoutError::Timeout) => {}
+        match look(bufs) {
+            Look::Both(out, err) => return CollectEnd::Both(out, err),
+            Look::Unavailable => return CollectEnd::Unavailable,
+            Look::Partial {
+                collected,
+                collectors_open: 0,
+            } => return CollectEnd::CollectorsEnded { collected },
+            Look::Partial { .. } => {}
         }
+        thread::sleep(Duration::from_millis(2).min(left));
     }
 }
 
@@ -1071,16 +624,23 @@ pub fn select_rows(
         .stderr(Stdio::piped())
         .spawn()
         .expect("spawn read-side cqlite");
-    let (tx, rx) = mpsc::channel();
+    let bufs = Arc::new(Mutex::new(StreamBufs {
+        collectors_open: 2,
+        ..StreamBufs::default()
+    }));
     collect_to_end(
         Stream::Stdout,
         child.stdout.take().expect("read-side stdout"),
-        tx.clone(),
+        BufHandle {
+            bufs: Arc::clone(&bufs),
+        },
     );
     collect_to_end(
         Stream::Stderr,
         child.stderr.take().expect("read-side stderr"),
-        tx,
+        BufHandle {
+            bufs: Arc::clone(&bufs),
+        },
     );
 
     let status = match child
@@ -1111,8 +671,8 @@ pub fn select_rows(
     // message can say so. Diagnostic only: the bound below is the test's deadline.
     let child_wait = stage.spent();
 
-    // The child has exited, so both pipes are at EOF and the reader threads
-    // finish promptly — but "promptly" is a claim about SCHEDULING, and a reader
+    // The child has exited, so both pipes are at EOF and the collector threads
+    // finish promptly — but "promptly" is a claim about SCHEDULING, and a collector
     // thread on a saturated host can stay descheduled for seconds. This was once a
     // hardcoded `recv_timeout(5s)`: a NEW, uncalibrated wall-clock bound that could
     // false-fail under exactly the contention #3515 is about (roborev job 219,
@@ -1121,7 +681,7 @@ pub fn select_rows(
     //
     // It is now `stage.remaining()`: the test's one deadline. No constant, no
     // subtraction, and nothing for a future edit here to get wrong.
-    let (stdout_buf, stderr_buf) = match collect_both_streams(&rx, stage) {
+    let (stdout_buf, stderr_buf) = match collect_both_streams(&bufs, stage) {
         CollectEnd::Both(out, err) => (out, err),
         CollectEnd::DeadlineReached { collected } => panic!(
             "stage (e) durability-read: the read-side child exited ({status:?}) but only \
@@ -1129,18 +689,25 @@ pub fn select_rows(
              deadline (the spawn and the child wait had already taken {child_wait:.2?} of \
              this stage).\n\
              {}\n\
-             WHAT THIS ESTABLISHES: only that a reader thread had not delivered its buffer \
+             WHAT THIS ESTABLISHES: only that a collector thread had not delivered its buffer \
              in time. It says nothing about durability, and nothing about the child, which \
              exited successfully.\n{}",
             stage.describe(),
             stage.report()
         ),
-        // Not a timeout: both reader threads dropped their senders without
-        // sending, which can only be a panic inside the harness.
-        CollectEnd::Disconnected { collected } => panic!(
-            "stage (e) durability-read: the read-side output channel disconnected with only \
-             {collected}/2 streams collected — a reader thread ended without sending. This \
-             is a defect in this test harness, not a statement about durability.\n{}",
+        // Not a timeout: every collector thread ended without delivering both
+        // buffers, which can only be a panic inside the harness.
+        CollectEnd::CollectorsEnded { collected } => panic!(
+            "stage (e) durability-read: every read-side collector thread ended with only \
+             {collected}/2 streams delivered — a collector ended without delivering its \
+             buffer. This is a defect in this test harness, not a statement about \
+             durability.\n{}",
+            stage.report()
+        ),
+        CollectEnd::Unavailable => panic!(
+            "stage (e) durability-read: the read-side buffer store's lock was poisoned — a \
+             collector thread panicked while holding it. This is a defect in this test \
+             harness, not a statement about durability.\n{}",
             stage.report()
         ),
     };

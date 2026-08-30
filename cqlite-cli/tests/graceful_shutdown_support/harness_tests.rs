@@ -1,65 +1,78 @@
-//! Unit coverage for the CHILD HARNESS in `mod.rs` (issues #1693, #3515).
+//! Unit coverage for the CHILD HARNESS in `mod.rs` + `transcript.rs`
+//! (issues #1693, #3515).
 //!
-//! Split out of `mod.rs` under the campsite rule (#1135): round 12's
-//! class-by-census fixes pushed that file toward the 1500-line test threshold.
-//! The division of responsibility is by SUBJECT, not by size — `budgets.rs` pins
-//! the ONE deadline's invariants, `mod.rs` holds the instrument, and this file
-//! holds the instrument's own tests.
+//! Split out of `mod.rs` under the campsite rule (#1135). The division of
+//! responsibility is by SUBJECT, not by size — `budgets.rs` pins the ONE
+//! deadline's invariants, `transcript.rs` holds THE ONE STORE and the waits that
+//! read it, `mod.rs` holds the poll and the read side, and this file holds their
+//! tests.
+//!
+//! **What round 13 deleted from this file, and why that is the point (design.md
+//! D6b).** Several tests here existed to pin the boundary between TWO stores — a
+//! transcript a `Mark` could window, and an `mpsc` queue it could not. With one
+//! sequenced store those properties are not testable because they are not
+//! EXPRESSIBLE: there is no publish step to be preempted before, no queue to hold
+//! a copy of a served line, and no `Empty`-vs-`Disconnected` pair to collapse. A
+//! test whose defect can no longer be written is removed rather than kept as
+//! reassurance; what replaces it is the structure, plus
+//! `a_matched_acknowledgement_cannot_satisfy_the_next_wait` below, which pins the
+//! FALSE PASS the two-store design allowed (roborev job 247).
 //!
 //! A child module can see its parent's private items, so these tests exercise
-//! `ChildIo::final_drain`, `collect_both_streams`, `poll_with_progress_sampled`
-//! and the `CollectEnd`/`WaitEnd` internals directly — the harness's public
-//! surface is deliberately small and these are the seams the defects lived in.
+//! `collect_both_streams`, `poll_with_progress_sampled` and the
+//! `CollectEnd`/`WaitEnd` internals directly — the harness's public surface is
+//! deliberately small and these are the seams the defects lived in.
 
 use super::*;
 use std::cell::Cell;
-use std::sync::mpsc;
 use std::sync::{Arc, Mutex};
 use std::thread;
-use std::time::Duration;
-
-/// The shape [`ChildIo::synthetic_with_transcript`] hands back: the harness, the
-/// stand-in reader's `Sender`, and the shared transcript that reader records
-/// into. Named because the tuple is genuinely three coupled handles to ONE
-/// instrument and clippy's `type_complexity` is right that the bare tuple is
-/// unreadable — an `#[allow]` would just hide the same unreadable signature.
-type SyntheticChildIo = (ChildIo, Sender<(Stream, String)>, Arc<Mutex<Vec<String>>>);
+use std::time::{Duration, Instant};
 
 impl ChildIo {
-    /// A `ChildIo` with no child behind it: the returned `Sender` stands in for a
-    /// reader thread, so a unit test can make progress arrive on demand.
-    fn synthetic() -> (Self, Sender<(Stream, String)>) {
-        let (io, tx, _transcript) = Self::synthetic_with_transcript();
-        (io, tx)
+    /// A `ChildIo` with no child behind it, plus the two [`ReaderHandle`]s that
+    /// stand in for its reader threads.
+    ///
+    /// The handles are the REAL recording path — the same type and the same
+    /// methods `spawn_reader` uses — so these tests drive the instrument rather
+    /// than a mock of it, and dropping a handle marks that pipe closed exactly as
+    /// a reader thread ending does.
+    fn synthetic() -> (Self, ReaderHandle, ReaderHandle) {
+        let (io, handles) = Self::with_readers(2);
+        let mut handles = handles.into_iter();
+        let out = handles.next().expect("stdout reader handle");
+        let err = handles.next().expect("stderr reader handle");
+        (io, out, err)
     }
 
-    /// A mark of ZERO — the whole transcript. Only sound for a `ChildIo` that has
-    /// recorded nothing yet, which is why it is spelled out at each use rather
-    /// than hidden in the constructor.
+    /// A mark taken while the store is provably EMPTY — the whole sequence.
+    ///
+    /// The emptiness is CHECKED rather than assumed, through the harness's own
+    /// rendering of the store, so a helper that silently stopped covering
+    /// everything would fail here instead of narrowing a window unnoticed.
     fn mark_from_the_start(&self) -> Mark {
-        assert_eq!(
-            self.transcript_len(),
-            0,
-            "this helper is only sound before anything has been recorded"
+        assert!(
+            self.transcript_text().contains("emitted nothing at all"),
+            "this helper is only sound before anything has been recorded, and the store is not \
+             empty:\n{}",
+            self.transcript_text()
         );
         self.mark()
     }
+}
 
-    /// As [`ChildIo::synthetic`], plus a handle to the shared transcript, so a
-    /// test can reproduce a reader thread that has RECORDED a line but not yet
-    /// PUBLISHED it.
-    fn synthetic_with_transcript() -> SyntheticChildIo {
-        let (tx, rx) = mpsc::channel();
-        let transcript: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
-        (
-            Self {
-                rx,
-                transcript: Arc::clone(&transcript),
-            },
-            tx,
-            transcript,
-        )
-    }
+/// The read side's ONE store, with `collectors` collector handles outstanding.
+fn synthetic_bufs(collectors: usize) -> (Arc<Mutex<StreamBufs>>, Vec<BufHandle>) {
+    let bufs = Arc::new(Mutex::new(StreamBufs {
+        collectors_open: collectors,
+        ..StreamBufs::default()
+    }));
+    let handles = (0..collectors)
+        .map(|_| BufHandle {
+            bufs: Arc::clone(&bufs),
+        })
+        .collect();
+    (bufs, handles)
 }
 
 /// OBSERVED PROGRESS MAY NOT EXTEND THE DEADLINE — the property the round-8
@@ -72,29 +85,33 @@ impl ChildIo {
 /// saw, because the evidence is the part worth keeping.
 ///
 /// There is no timing threshold asserted: the property is that the poll
-/// TERMINATES at all under continuous progress. It is run on a worker thread with
-/// a 30s collection bound (100x the 300ms deadline under test) so a regression
-/// reports a diagnosis instead of hanging the suite.
+/// TERMINATES at all under continuous progress. It runs on a worker thread under a
+/// 30s watchdog (100x the 300ms deadline under test) so a regression reports a
+/// diagnosis instead of hanging the suite.
+///
+/// THE WORKER REPORTS THROUGH ONE MUTEX-GUARDED SLOT, not a channel: "the worker
+/// has not reported yet" and "the worker is gone" are then two reads of one store
+/// rather than two variants of a queue error — the same reason the harness itself
+/// no longer has a channel (design.md D6b). A vanished worker is re-raised by
+/// `join`, never reported as a hang, which is the opposite diagnosis.
 #[test]
 fn observed_progress_never_extends_the_deadline() {
+    const WATCHDOG: Duration = Duration::from_secs(30);
     let dir = tempfile::TempDir::new().expect("tempdir");
     let data_dir = dir.path().to_path_buf();
-    let (done_tx, done_rx) = mpsc::channel();
+    let slot: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
+    let worker_slot = Arc::clone(&slot);
 
     let worker = thread::spawn(move || {
-        let (io, lines, io_transcript) = ChildIo::synthetic_with_transcript();
+        let (io, out, err) = ChildIo::synthetic();
         let deadline = TestDeadline::start(Duration::from_millis(300), Duration::from_millis(300));
         let stage = deadline.stage("synthetic");
         let outcome = poll_with_progress(&io, &data_dir, &stage, |slice, _artifacts| {
-            // Progress on every single slice, in the order a REAL reader thread
-            // produces it: recorded into the transcript first, published to the
-            // channel second. The poll counts new lines from the transcript,
-            // because that is the store its failure message renders (job 243,
-            // finding 1).
-            if let Ok(mut t) = io_transcript.lock() {
-                t.push("[stderr] still working".to_string());
-            }
-            let _ = lines.send((Stream::Stderr, "still working".to_string()));
+            // Progress on every single slice, through the same handle a real
+            // reader thread uses. There is only one store to record into, so the
+            // count the failure reports and the transcript it renders come from
+            // the same read by construction.
+            err.record(Stream::Stderr, "still working");
             thread::sleep(slice);
             None::<()>
         });
@@ -102,31 +119,32 @@ fn observed_progress_never_extends_the_deadline() {
             Ok(_) => unreachable!("the step never completes"),
             Err(fail) => fail.observed(),
         };
-        let _ = done_tx.send(report);
+        *worker_slot.lock().expect("report slot") = Some(report);
+        drop(out);
     });
 
-    // TIMEOUT AND DISCONNECTED ARE NEVER COLLAPSED (roborev job 243, finding 3 —
-    // the class, applied to this test's own plumbing). A bare `.expect` here would
-    // report "the poll did not terminate" for a worker that PANICKED, which is the
-    // opposite diagnosis: the worker is gone, so nothing is still running. On a
-    // disconnect the join re-raises the worker's panic, which is the real cause.
-    let observed = match done_rx.recv_timeout(Duration::from_secs(30)) {
-        Ok(observed) => observed,
-        Err(mpsc::RecvTimeoutError::Timeout) => panic!(
-            "the progress-observing poll did not terminate within 30s despite a 300ms deadline: \
-             observed progress is extending the bound, which is exactly what the round-8 descope \
-             removed"
-        ),
-        Err(mpsc::RecvTimeoutError::Disconnected) => {
-            // Re-raise the worker's own panic rather than reporting a non-existent
-            // hang; `join` on a panicked thread resumes that panic.
+    let started = Instant::now();
+    let observed = loop {
+        if let Some(report) = slot.lock().expect("report slot").take() {
+            break report;
+        }
+        if worker.is_finished() {
+            // Re-raise the worker's own panic rather than reporting a
+            // non-existent hang; `join` on a panicked thread resumes that panic.
             let _ = worker.join();
             panic!(
-                "the poll worker ended without reporting: its sender was dropped, so the poll \
-                 PANICKED rather than failing to terminate (the join above should have re-raised \
-                 it)"
+                "the poll worker ended without reporting: it PANICKED rather than failing to \
+                 terminate (the join above should have re-raised it)"
             );
         }
+        if started.elapsed() > WATCHDOG {
+            panic!(
+                "the progress-observing poll did not terminate within {WATCHDOG:?} despite a \
+                 300ms deadline: observed progress is extending the bound, which is exactly what \
+                 the round-8 descope removed"
+            );
+        }
+        thread::sleep(Duration::from_millis(5));
     };
     worker.join().expect("poll worker thread");
 
@@ -153,13 +171,13 @@ fn observed_progress_never_extends_the_deadline() {
 // Round 9 ruled that the deadline bounds how long the test WAITS FOR EVIDENCE
 // and not whether it accepts evidence already in hand, and applied that to the
 // SUCCESS path only. The three expiry sites got it wrong in the other direction:
-// each declared a timeout without a last look at what was already queued. Under
-// contention the awaited marker, the process exit or a reader's buffer can
-// arrive well before the deadline and be consumed only after it, because this
+// each declared a timeout without a last look at what had already been recorded.
+// Under contention the awaited marker, the process exit or a collector's buffer
+// can arrive well before the deadline and be observed only after it, because this
 // thread is descheduled in between. The result was a false timeout on a working
 // product — and, worst of all, a message CONTRADICTED BY ITS OWN TRANSCRIPT.
 //
-// The three tests below each queue the evidence FIRST, then let the deadline
+// The three tests below each record the evidence FIRST, then let the deadline
 // lapse, then let the harness look: each must SUCCEED.
 //
 // ON THE SLEEPS: a `sleep` can only OVERSHOOT, and overshoot makes the
@@ -167,21 +185,19 @@ fn observed_progress_never_extends_the_deadline() {
 // test here asserts that anything completed FAST, so this is the opposite of the
 // #2642 wall-clock flake class.
 
-/// `wait_for`: a line that arrived before the deadline must still match.
+/// `wait_for`: a line recorded before the deadline must still match.
 #[test]
-fn a_line_queued_before_the_deadline_is_matched_after_it_lapses() {
-    let (io, lines) = ChildIo::synthetic();
+fn a_line_recorded_before_the_deadline_is_matched_after_it_lapses() {
+    let (io, out, err) = ChildIo::synthetic();
     let mark = io.mark_from_the_start();
-    lines
-        .send((
-            Stream::Stderr,
-            format!("cqlite: {MARKER_HANDLER_ENTERED} before exit..."),
-        ))
-        .expect("queue the marker before the deadline lapses");
+    err.record(
+        Stream::Stderr,
+        format!("cqlite: {MARKER_HANDLER_ENTERED} before exit..."),
+    );
 
     let deadline = TestDeadline::start(Duration::from_millis(1), Duration::from_millis(1));
     thread::sleep(Duration::from_millis(25));
-    let stage = deadline.stage("queued-before-expiry");
+    let stage = deadline.stage("recorded-before-expiry");
     assert!(
         stage.remaining().is_zero(),
         "the precondition of this test is an already-lapsed deadline"
@@ -195,14 +211,16 @@ fn a_line_queued_before_the_deadline_is_matched_after_it_lapses() {
     ) {
         Ok((line, _)) => assert!(line.contains(MARKER_HANDLER_ENTERED), "{line}"),
         Err(end) => panic!(
-            "the marker had ALREADY ARRIVED when the deadline lapsed, and the wait reported \
-             {end:?} instead of matching it. That is a false timeout on a working product; on \
-             the real path it is also a self-contradicting diagnostic, because the transcript \
-             the failure prints contains the very marker the message says was never observed. \
-             (This synthetic `ChildIo` has no reader thread, so its transcript is empty by \
-             construction and is deliberately not quoted here.)"
+            "the marker had ALREADY been recorded when the deadline lapsed, and the wait reported \
+             {end:?} instead of matching it. That is a false timeout on a working product; it is \
+             also a self-contradicting diagnostic, because the transcript the failure prints \
+             contains the very marker the message says was never observed:\n{}",
+            end.transcript()
         ),
     }
+    // The readers are kept alive to the end of the test on purpose: a dropped
+    // handle means EOF, and this test is about the deadline, not about closure.
+    drop((out, err));
 }
 
 /// `poll_with_progress`: a step whose evidence landed before the deadline must
@@ -214,11 +232,11 @@ fn a_step_completed_before_the_deadline_is_observed_after_it_lapses() {
     // The durable artifact APPEARS before the deadline...
     std::fs::write(data_dir.join("nb-1-big-Data.db"), b"x").expect("plant an artifact");
 
-    let (io, _lines) = ChildIo::synthetic();
+    let (io, out, err) = ChildIo::synthetic();
     let deadline = TestDeadline::start(Duration::from_millis(1), Duration::from_millis(1));
     // ...and only then does the deadline lapse, before the poll ever looks.
     thread::sleep(Duration::from_millis(25));
-    let stage = deadline.stage("queued-before-expiry");
+    let stage = deadline.stage("recorded-before-expiry");
     assert!(
         stage.remaining().is_zero(),
         "the precondition of this test is an already-lapsed deadline"
@@ -241,144 +259,72 @@ fn a_step_completed_before_the_deadline_is_observed_after_it_lapses() {
             fail.observed()
         );
     }
+    drop((out, err));
 }
 
 /// `collect_both_streams`: buffers delivered before the deadline must still be
 /// collected, not reported as a partial collection.
 #[test]
-fn read_side_buffers_queued_before_the_deadline_are_collected_after_it_lapses() {
-    let (tx, rx) = mpsc::channel();
-    tx.send((Stream::Stdout, b"[]".to_vec()))
-        .expect("queue stdout");
-    tx.send((Stream::Stderr, Vec::new())).expect("queue stderr");
+fn read_side_buffers_delivered_before_the_deadline_are_collected_after_it_lapses() {
+    let (bufs, handles) = synthetic_bufs(2);
+    handles[0].deliver(Stream::Stdout, b"[]".to_vec());
+    handles[1].deliver(Stream::Stderr, Vec::new());
 
     let deadline = TestDeadline::start(Duration::from_millis(1), Duration::from_millis(1));
     thread::sleep(Duration::from_millis(25));
-    let stage = deadline.stage("queued-before-expiry");
+    let stage = deadline.stage("delivered-before-expiry");
     assert!(
         stage.remaining().is_zero(),
         "the precondition of this test is an already-lapsed deadline"
     );
 
-    match collect_both_streams(&rx, &stage) {
+    match collect_both_streams(&bufs, &stage) {
         CollectEnd::Both(out, err) => {
             assert_eq!(
                 out, b"[]",
-                "the queued stdout buffer must be the one returned"
+                "the delivered stdout buffer must be the one returned"
             );
-            assert!(err.is_empty(), "the queued stderr buffer must be returned");
+            assert!(
+                err.is_empty(),
+                "the delivered stderr buffer must be returned"
+            );
         }
         CollectEnd::DeadlineReached { collected } => panic!(
-            "both reader buffers were delivered BEFORE the deadline lapsed, and the collection \
+            "both collector buffers were delivered BEFORE the deadline lapsed, and the collection \
              reported a timeout with {collected}/2 collected — a false failure against a child \
              that had already exited successfully"
         ),
-        CollectEnd::Disconnected { collected } => panic!(
-            "unexpected disconnect with {collected}/2 collected: the senders are still alive"
+        CollectEnd::CollectorsEnded { collected } => panic!(
+            "unexpected end-of-collectors with {collected}/2 collected: both handles are alive"
         ),
+        CollectEnd::Unavailable => panic!("the store's lock was poisoned unexpectedly"),
     }
+    drop(handles);
 }
 
 // ---------------------------------------------------------------------------
-// THE EXPIRY DECISION READS THE STORE THE FAILURE PRINTS FROM
-// (roborev job 236, finding 1)
+// THE WINDOW IS A SEQUENCE POSITION, SO A SERVED RECORD CANNOT BE RE-SERVED
+// (roborev job 247, finding 2 — the class that ended the two-store design)
 // ---------------------------------------------------------------------------
 
-/// `spawn_reader` RECORDS into the transcript before it PUBLISHES to the
-/// channel, so a reader preempted between those two operations leaves the
-/// channel behind the transcript. Job 233's expiry drain consulted only the
-/// channel, so in that window a timeout could be declared while the transcript
-/// the message prints already held the awaited marker — the self-contradicting
-/// diagnostic this change exists to prevent.
-///
-/// THE INTERLEAVING IS FORCED, NOT RACED. The plant does not sleep to arrange
-/// the ordering (which would make the precondition timing-dependent in the
-/// direction that produces flakes): the predicate itself is the synchronisation
-/// point. A decoy line — the empty line the product really does print
-/// immediately before the handler marker — is queued on the channel, and when
-/// `wait_for` receives it the predicate records BOTH lines into the transcript
-/// and returns false. So at expiry the transcript provably holds the marker and
-/// the channel provably does not, on every host and at every load.
-///
-/// The channel is left CONNECTED (this test still owns the `Sender`), so a
-/// failure here is `DeadlineReached`, not `PipesClosed`.
-#[test]
-fn a_line_recorded_but_not_yet_published_is_matched_at_expiry() {
-    let (io, lines, transcript) = ChildIo::synthetic_with_transcript();
-    let mark = io.mark_from_the_start();
-    let marker = format!("cqlite: {MARKER_HANDLER_ENTERED} — flushing memtable before exit...");
-
-    // The decoy the real reader publishes just before it is preempted.
-    lines
-        .send((Stream::Stderr, String::new()))
-        .expect("queue the decoy line");
-
-    let recorded = Arc::clone(&transcript);
-    let marker_for_pred = marker.clone();
-    // The reader records ONCE, as a real one does; the predicate is also applied
-    // to the transcript window at expiry, and re-recording there would say the
-    // child printed the marker twice.
-    let recorded_once = std::sync::atomic::AtomicBool::new(false);
-    let deadline = TestDeadline::start(Duration::from_millis(300), Duration::from_millis(300));
-    let stage = deadline.stage("recorded-not-published");
-
-    let matched = io.wait_for(
-        mark,
-        Stream::Stderr,
-        |line| {
-            if line.is_empty() && !recorded_once.swap(true, std::sync::atomic::Ordering::SeqCst) {
-                // The reader's transcript push for both lines has happened...
-                let mut t = recorded.lock().expect("transcript lock");
-                t.push("[stderr] ".to_string());
-                t.push(format!("[stderr] {marker_for_pred}"));
-                // ...and the marker's `tx.send` has NOT. The channel is now
-                // provably behind the transcript for the rest of this wait.
-            }
-            line.contains(MARKER_HANDLER_ENTERED)
-        },
-        &stage,
-    );
-
-    match matched {
-        Ok((line, _)) => assert_eq!(
-            line, marker,
-            "the matched line must be the child's own text, with the transcript's `[stderr] ` tag \
-             stripped — `await_write_ack` matches on the WHOLE trimmed line, so a tagged line \
-             would silently never match there"
-        ),
-        Err(end) => panic!(
-            "the awaited marker was IN THE TRANSCRIPT when the deadline lapsed and the wait \
-             reported {end:?} anyway. The decision read a different store from the one the \
-             failure message renders, so this failure would print the very marker it claims was \
-             never observed:\n{}\ntranscript the message would print:\n{}",
-            end.describe(),
-            end.transcript()
-        ),
-    }
-    drop(lines);
-}
-
-/// The window is what keeps the transcript scan from turning a CUMULATIVE store
-/// into a false pass: a line recorded BEFORE a wait began belongs to an earlier
-/// stage, which already consumed or discarded it. `await_write_ack` awaits five
-/// separate `OK`s in one test, so without the window the first would satisfy all
-/// five and a wedged session would read as green.
+/// The window is what keeps a CUMULATIVE store from turning into a false pass: a
+/// record sequenced BEFORE a wait began belongs to an earlier stage, which already
+/// consumed or discarded it. `await_write_ack` awaits five separate `OK`s in one
+/// test, so without the window the first would satisfy all five and a wedged
+/// session would read as green.
 #[test]
 fn a_line_recorded_before_the_wait_began_does_not_satisfy_it() {
-    let (io, lines, transcript) = ChildIo::synthetic_with_transcript();
-    transcript
-        .lock()
-        .expect("transcript lock")
-        .push("[stdout] OK".to_string());
+    let (io, out, err) = ChildIo::synthetic();
+    out.record(Stream::Stdout, "OK");
     // The mark is taken AFTER the earlier stage's line, exactly as a call site
     // takes it after the previous ack returned and before the next statement is
     // written. Moving the mark EARLIER (job 243, finding 1) closes a race at the
-    // start of a wait; it must not widen the window backwards over a consumed line.
+    // start of a wait; it must not widen the window backwards over a served record.
     let mark = io.mark();
 
     let deadline = TestDeadline::start(Duration::from_millis(1), Duration::from_millis(1));
     thread::sleep(Duration::from_millis(25));
-    let stage = deadline.stage("stale-transcript-line");
+    let stage = deadline.stage("stale-record");
     assert!(
         stage.remaining().is_zero(),
         "the precondition of this test is an already-lapsed deadline"
@@ -386,37 +332,117 @@ fn a_line_recorded_before_the_wait_began_does_not_satisfy_it() {
 
     match io.wait_for(mark, Stream::Stdout, |l| l.trim() == "OK", &stage) {
         Ok((line, _)) => panic!(
-            "a transcript line recorded BEFORE this wait began satisfied it ({line:?}): the \
-             cumulative transcript is being read as if every line were new, so one earlier \
-             acknowledgement would satisfy every later wait for one"
+            "a record sequenced BEFORE this wait began satisfied it ({line:?}): the cumulative \
+             store is being read as if every record were new, so one earlier acknowledgement \
+             would satisfy every later wait for one"
         ),
         Err(WaitEnd::DeadlineReached { snapshot }) => assert_eq!(
             snapshot.examined(),
             0,
-            "the wait must report the size of the window it examined, and the stale line is \
+            "the wait must report the size of the window it examined, and the stale record is \
              outside it"
         ),
         Err(other) => panic!("expected a deadline, got {other:?}"),
     }
-    drop(lines);
+    drop((out, err));
 }
 
+/// **THE FALSE PASS THE TWO-STORE DESIGN ALLOWED (roborev job 247): an `OK` a
+/// completed wait has already accepted must not satisfy the NEXT wait.**
+///
+/// The shape, on the pre-descope harness. A reader RECORDED the ack into the
+/// transcript and was descheduled before PUBLISHING it to the channel. Write N's
+/// wait expired, took its final look at the transcript, found the ack there and
+/// returned `Ok` — correctly. The reader then published, and that queued COPY
+/// outlived the wait that had already consumed it: `Mark` could window the
+/// transcript and could not window a queue, so write N+1's wait received the
+/// stale `OK` from `recv_timeout` and accepted it as its own acknowledgement. In
+/// the sibling test's five-write loop, one ack could therefore satisfy several
+/// waits — a wedged session reading as green, which is a vacuous pass and not a
+/// diagnostic wart.
+///
+/// **What this test asserts now, and why the race is no longer expressible.**
+/// There is ONE store and a [`Mark`] is a position in its SEQUENCE, so serving a
+/// record cannot duplicate it: the second wait's window starts after the record
+/// the first wait matched, and no "late publication" step exists to reintroduce
+/// it. The assertion is exactly that — a completed wait's evidence is invisible
+/// to the next wait's window — and it FAILS against the pre-descope behaviour,
+/// where the queued copy satisfied the second wait (RED-verified against the
+/// two-store harness in a throwaway worktree; recorded in tasks.md round 13).
+///
+/// A later record with the SAME TEXT is deliberately NOT excluded: it is a new
+/// event at a new sequence position, which is precisely what write N+1's genuine
+/// acknowledgement is.
+#[test]
+fn a_matched_acknowledgement_cannot_satisfy_the_next_wait() {
+    let (io, out, err) = ChildIo::synthetic();
+    let first_mark = io.mark_from_the_start();
+
+    // Write N's acknowledgement, recorded by the reader.
+    out.record(Stream::Stdout, "OK");
+
+    let deadline = TestDeadline::start(Duration::from_secs(30), Duration::from_secs(30));
+    let first = deadline.stage("ack-N");
+    let (line, _) = io
+        .wait_for(first_mark, Stream::Stdout, |l| l.trim() == "OK", &first)
+        .expect("write N's acknowledgement was recorded, so its wait must match it");
+    assert_eq!(line.trim(), "OK");
+    let _ = first.finish();
+
+    // Write N+1: the mark is taken before the statement is written, as every call
+    // site does. The child then says NOTHING — the session is wedged.
+    let next_mark = io.mark();
+
+    let short = TestDeadline::start(Duration::from_millis(1), Duration::from_millis(1));
+    thread::sleep(Duration::from_millis(25));
+    let second = short.stage("ack-N+1");
+    assert!(
+        second.remaining().is_zero(),
+        "the precondition of this test is an already-lapsed deadline"
+    );
+
+    match io.wait_for(next_mark, Stream::Stdout, |l| l.trim() == "OK", &second) {
+        Ok((line, _)) => panic!(
+            "write N+1's wait accepted {line:?} — the acknowledgement write N's wait had ALREADY \
+             matched. One ack satisfied two waits, so a wedged session reads as green: this is \
+             the vacuous pass the two-store design allowed (roborev job 247), and with one \
+             sequenced store it must not be expressible"
+        ),
+        Err(WaitEnd::DeadlineReached { snapshot }) => assert_eq!(
+            snapshot.examined(),
+            0,
+            "write N+1's window must be empty: the only record in the store was served to write \
+             N's wait, and nothing has been recorded since"
+        ),
+        Err(other) => panic!(
+            "expected a deadline with the pipes still open, got {other:?} — the readers are alive"
+        ),
+    }
+    drop((out, err));
+}
+
+// ---------------------------------------------------------------------------
+// END OF STREAM IS A FIELD OF THE ONE STORE, READ UNDER THE SAME LOCK AS THE
+// RECORDS (design.md D6b — the `Empty`-vs-`Disconnected` family, retired rather
+// than fixed at a fourth site)
+// ---------------------------------------------------------------------------
+
 /// An expiry racing pipe closure must name the cause the measurement supports
-/// (roborev job 236, finding 3). Both readers have ended, so no further line can
+/// (roborev job 236, finding 3). Every reader has ended, so no further line can
 /// arrive: reporting `DeadlineReached` would tell the reader the pipes were
 /// "still open (more output was still possible)" about a child whose output is
-/// over — a message contradicted by the same drain that produced it.
+/// over — a message contradicted by the same read that produced it.
+///
+/// A non-matching line is recorded FIRST, so the verdict must be taken from a read
+/// that saw that record as well as the closure: the records and the end-of-stream
+/// fact come from one lock acquisition, which is what makes "checked everything
+/// before reporting closure" structural rather than a claim about `try_recv`.
 #[test]
 fn an_expiry_racing_pipe_closure_reports_closed_pipes() {
-    let (io, lines) = ChildIo::synthetic();
+    let (io, out, err) = ChildIo::synthetic();
     let mark = io.mark_from_the_start();
-    // A queued non-matching line, so the drain must CHECK the queue before it can
-    // observe the disconnect: `try_recv` reports `Disconnected` only once the
-    // queue is empty.
-    lines
-        .send((Stream::Stderr, "some other output".to_string()))
-        .expect("queue a non-matching line");
-    drop(lines);
+    err.record(Stream::Stderr, "some other output");
+    drop((out, err));
 
     let deadline = TestDeadline::start(Duration::from_millis(1), Duration::from_millis(1));
     thread::sleep(Duration::from_millis(25));
@@ -434,77 +460,69 @@ fn an_expiry_racing_pipe_closure_reports_closed_pipes() {
     ) {
         Err(WaitEnd::PipesClosed { .. }) => {}
         Err(WaitEnd::DeadlineReached { .. }) => panic!(
-            "both readers had ended when the deadline lapsed, and the wait reported a deadline \
-             with the pipes \"still open\" — the message names a cause its own final drain \
+            "every reader had ended when the deadline lapsed, and the wait reported a deadline \
+             with the pipes \"still open\" — the message names a cause its own final read \
              contradicts (AC2)"
         ),
-        Ok((line, _)) => panic!("nothing matching was ever queued, yet {line:?} matched"),
+        Ok((line, _)) => panic!("nothing matching was ever recorded, yet {line:?} matched"),
     }
 }
 
-// ---------------------------------------------------------------------------
-// CLASS C: `Empty` AND `Disconnected` ARE NEVER COLLAPSED — AT EVERY SITE
-// (roborev job 243, finding 3: job 236 finding 3's defect, at two more sites)
-// ---------------------------------------------------------------------------
-
-/// `collect_both_streams`: reader threads that END without delivering both
-/// buffers must be reported as `Disconnected`, not as a deadline.
+/// `collect_both_streams`: collector threads that END without delivering both
+/// buffers must be reported as `CollectorsEnded`, not as a deadline.
 ///
-/// The expiry drain used `let Ok(..) = rx.try_recv() else { break }`, which stops
-/// identically on an empty queue and on a dead sender — so a harness defect the
-/// `Disconnected` variant exists to name was reported as a timeout against the
-/// deadline instead. The variant carries `collected`, so the message can still
-/// say how far the collection got.
+/// The old expiry drain used `let Ok(..) = rx.try_recv() else { break }`, which
+/// stopped identically on an empty queue and on a dead sender — so a harness
+/// defect the variant exists to name was reported as a timeout against the
+/// deadline instead. With one store the two facts are separate fields, so the
+/// collapse is not expressible; the variant still carries `collected`, so the
+/// message says how far the collection got.
 #[test]
-fn read_side_readers_that_end_without_delivering_report_a_disconnect() {
-    let (tx, rx) = mpsc::channel();
-    // ONE buffer delivered, then both senders gone: `try_recv` must therefore
-    // yield the queued buffer FIRST and only then report the disconnect, which is
-    // what "return the right variant AFTER all queued items have been checked"
-    // means here.
-    tx.send((Stream::Stdout, b"[]".to_vec()))
-        .expect("queue stdout");
-    drop(tx);
+fn read_side_collectors_that_end_without_delivering_report_collectors_ended() {
+    let (bufs, handles) = synthetic_bufs(2);
+    // ONE buffer delivered, then every collector gone. The delivered buffer is
+    // recorded in the SAME store as the collector count, so the count in the
+    // verdict provably includes it.
+    handles[0].deliver(Stream::Stdout, b"[]".to_vec());
+    drop(handles);
 
     let deadline = TestDeadline::start(Duration::from_millis(1), Duration::from_millis(1));
     thread::sleep(Duration::from_millis(25));
-    let stage = deadline.stage("expiry-races-reader-death");
+    let stage = deadline.stage("expiry-races-collector-death");
     assert!(
         stage.remaining().is_zero(),
         "the precondition of this test is an already-lapsed deadline"
     );
 
-    match collect_both_streams(&rx, &stage) {
-        CollectEnd::Disconnected { collected } => assert_eq!(
+    match collect_both_streams(&bufs, &stage) {
+        CollectEnd::CollectorsEnded { collected } => assert_eq!(
             collected, 1,
-            "the drain must consume the queued buffer before reporting the disconnect, so the \
-             count in the message is how far the collection actually got"
+            "the verdict must count the delivered buffer, so the number in the message is how far \
+             the collection actually got"
         ),
         CollectEnd::DeadlineReached { collected } => panic!(
-            "both reader threads had ENDED without delivering ({collected}/2 collected) and the \
-             collection reported a deadline — blaming the test's bound for a harness defect the \
-             `Disconnected` variant already exists to name"
+            "every collector thread had ENDED without delivering ({collected}/2 collected) and \
+             the collection reported a deadline — blaming the test's bound for a harness defect \
+             the `CollectorsEnded` variant already exists to name"
         ),
-        CollectEnd::Both(..) => panic!("only one buffer was ever sent, yet both were collected"),
+        CollectEnd::Both(..) => panic!("only one buffer was ever delivered, yet both were returned"),
+        CollectEnd::Unavailable => panic!("the store's lock was poisoned unexpectedly"),
     }
 }
 
 /// `poll_with_progress`: a poll that gives up with BOTH pipes at EOF must say so.
 ///
-/// `drain_new` was `while try_recv().is_ok()`, so it stopped identically on an
-/// empty queue and on a dead sender and the poll could report "0 new output
+/// The old `drain_new` was `while try_recv().is_ok()`, so it stopped identically on
+/// an empty queue and on a dead sender and the poll could report "0 new output
 /// lines" — implying more output was still possible — about a child whose stdout
-/// and stderr had both closed.
+/// and stderr had both closed. The fact now comes from the same snapshot the
+/// counts do.
 #[test]
 fn a_poll_that_gives_up_with_closed_pipes_reports_closed_pipes() {
     let dir = tempfile::TempDir::new().expect("tempdir");
-    let (io, lines) = ChildIo::synthetic();
-    // A queued line, so the drain must CHECK the queue before it can observe the
-    // disconnect — and the reported count must still include that line.
-    lines
-        .send((Stream::Stderr, "some output".to_string()))
-        .expect("queue a line");
-    drop(lines);
+    let (io, out, err) = ChildIo::synthetic();
+    err.record(Stream::Stderr, "some output");
+    drop((out, err));
 
     let deadline = TestDeadline::start(Duration::from_millis(1), Duration::from_millis(1));
     thread::sleep(Duration::from_millis(25));
@@ -521,8 +539,8 @@ fn a_poll_that_gives_up_with_closed_pipes_reports_closed_pipes() {
     };
     assert!(
         observed.contains("BOTH reached EOF"),
-        "the poll gave up with both reader threads gone and did not report it, so the message \
-         implies more output was still possible: {observed}"
+        "the poll gave up with every reader gone and did not report it, so the message implies \
+         more output was still possible: {observed}"
     );
 }
 
@@ -553,7 +571,7 @@ fn a_poll_that_gives_up_with_closed_pipes_reports_closed_pipes() {
 #[test]
 fn an_already_expired_poll_takes_exactly_one_artifact_scan() {
     let dir = tempfile::TempDir::new().expect("tempdir");
-    let (io, _lines) = ChildIo::synthetic();
+    let (io, out, err) = ChildIo::synthetic();
 
     let deadline = TestDeadline::start(Duration::from_millis(1), Duration::from_millis(1));
     thread::sleep(Duration::from_millis(25));
@@ -585,6 +603,7 @@ fn an_already_expired_poll_takes_exactly_one_artifact_scan() {
          overrun bound is ONE, and this bound gets FIXED rather than weakened",
         samples.get()
     );
+    drop((out, err));
 }
 
 /// Every iteration takes exactly one artifact scan — no redundant walk.
@@ -598,7 +617,7 @@ fn an_already_expired_poll_takes_exactly_one_artifact_scan() {
 fn every_poll_iteration_takes_exactly_one_artifact_scan() {
     const ITERATIONS: usize = 4;
     let dir = tempfile::TempDir::new().expect("tempdir");
-    let (io, _lines) = ChildIo::synthetic();
+    let (io, out, err) = ChildIo::synthetic();
 
     // Generous, and deliberately never reached: the step below ends the poll.
     let deadline = TestDeadline::start(Duration::from_secs(30), Duration::from_secs(30));
@@ -641,6 +660,7 @@ fn every_poll_iteration_takes_exactly_one_artifact_scan() {
         samples.get(),
         steps.get()
     );
+    drop((out, err));
 }
 
 // ---------------------------------------------------------------------------
@@ -653,33 +673,35 @@ fn every_poll_iteration_takes_exactly_one_artifact_scan() {
 // under separate locks is not one snapshot, and the mark still opened the window
 // AFTER the operation that produces the awaited line. So the same class had two
 // live boundary races, one at each end of the wait, and these two tests pin them.
+//
+// Both survive the round-13 descope unchanged in INTENT, and both got simpler in
+// EVIDENCE: with one store there is no "recorded but not published" state to
+// arrange, so the first test now records exactly what a reader records and the
+// property under test — a line recorded between the mark and the wait is inside
+// the window — is asserted against the real recording path.
 
 /// A line RECORDED BEFORE THE WAIT WAS STARTED — but after the mark — must be
 /// matched at expiry.
 ///
 /// This is the race at the START of a wait. The call site sends a statement (or a
 /// signal) and only then calls `wait_for`; a reader thread can record the response
-/// into the transcript in that gap and be descheduled before publishing it. With
-/// the mark taken INSIDE `wait_for`, that line was BEFORE the mark (outside the
-/// window) and NOT YET in the channel — excluded from both halves of the expiry
-/// check, so the harness declared a timeout against evidence it already held and
-/// printed the marker in the very message denying it.
+/// in that gap and be descheduled before the wait ever runs. With the mark taken
+/// INSIDE `wait_for`, that record was BEFORE the mark and outside the window — so
+/// the harness declared a timeout against evidence it already held and printed the
+/// marker in the very message denying it.
 ///
-/// The interleaving is FORCED, not raced: the line is written straight into the
-/// transcript and never published, so the channel provably lacks it on every host.
+/// The interleaving is FORCED, not raced: the record is made before `wait_for` is
+/// called, so the ordering holds on every host and at every load.
 #[test]
 fn a_line_recorded_before_the_wait_started_is_matched_at_expiry() {
-    let (io, lines, transcript) = ChildIo::synthetic_with_transcript();
+    let (io, out, err) = ChildIo::synthetic();
     // Taken BEFORE the operation, as every call site now does.
     let mark = io.mark_from_the_start();
 
     let marker = format!("cqlite: {MARKER_HANDLER_ENTERED} — flushing memtable before exit...");
-    // ...the "operation" happens here, and its response is RECORDED but never
-    // PUBLISHED — the reader was descheduled between the two.
-    transcript
-        .lock()
-        .expect("transcript lock")
-        .push(format!("[stderr] {marker}"));
+    // ...the "operation" happens here, and its response is recorded before the
+    // wait is entered.
+    err.record(Stream::Stderr, marker.clone());
 
     let deadline = TestDeadline::start(Duration::from_millis(1), Duration::from_millis(1));
     thread::sleep(Duration::from_millis(25));
@@ -697,18 +719,19 @@ fn a_line_recorded_before_the_wait_started_is_matched_at_expiry() {
     ) {
         Ok((line, _)) => assert_eq!(
             line, marker,
-            "the matched line must be the child's own text, with the `[stderr] ` tag stripped"
+            "the matched line must be the child's own text: stream attribution is a FIELD of the \
+             record, not a prefix on its text, so nothing has to be stripped back off"
         ),
         Err(end) => panic!(
             "the awaited marker was recorded BEFORE the wait was started and the wait reported \
              {end:?} anyway: the window opens after the operation, so a response recorded in the \
-             gap between the operation and the wait is outside the window AND outside the \
-             channel.\n{}\ntranscript the message would print:\n{}",
+             gap between the operation and the wait is outside it.\n{}\ntranscript the message \
+             would print:\n{}",
             end.describe(),
             end.transcript()
         ),
     }
-    drop(lines);
+    drop((out, err));
 }
 
 /// A line appended AFTER the expiry decision must not appear in the failure.
@@ -717,10 +740,10 @@ fn a_line_recorded_before_the_wait_started_is_matched_at_expiry() {
 /// then re-read it to render, so a reader recording between those two reads put
 /// the awaited marker into a message that had just called it absent — the
 /// self-contradicting diagnostic, one lock acquisition later. One snapshot serves
-/// both, so the message is literally the bytes the verdict was taken from.
+/// both, so the message is literally the records the verdict was taken from.
 #[test]
 fn a_line_appended_after_the_decision_cannot_contradict_the_failure() {
-    let (io, lines, transcript) = ChildIo::synthetic_with_transcript();
+    let (io, out, err) = ChildIo::synthetic();
     let mark = io.mark_from_the_start();
 
     let deadline = TestDeadline::start(Duration::from_millis(1), Duration::from_millis(1));
@@ -738,13 +761,14 @@ fn a_line_appended_after_the_decision_cannot_contradict_the_failure() {
             |l| l.contains(MARKER_HANDLER_ENTERED),
             &stage,
         )
-        .expect_err("nothing was ever recorded or queued, so the wait must give up");
+        .expect_err("nothing was ever recorded, so the wait must give up");
 
     // The reader thread lands the awaited marker AFTER the verdict was taken —
     // which on the real path is the window between the decision and the panic.
-    transcript.lock().expect("transcript lock").push(format!(
-        "[stderr] cqlite: {MARKER_HANDLER_ENTERED} — flushing..."
-    ));
+    err.record(
+        Stream::Stderr,
+        format!("cqlite: {MARKER_HANDLER_ENTERED} — flushing..."),
+    );
 
     let rendered = end.transcript();
     assert!(
@@ -755,8 +779,8 @@ fn a_line_appended_after_the_decision_cannot_contradict_the_failure() {
     );
     let described = end.describe();
     assert!(
-        described.contains("0 line(s)"),
+        described.contains("0 record(s)"),
         "the count in the message must come from the same snapshot it renders: {described}"
     );
-    drop(lines);
+    drop((out, err));
 }
