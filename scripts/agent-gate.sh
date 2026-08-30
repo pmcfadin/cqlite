@@ -1755,6 +1755,53 @@ _fixture_status() {
   echo FAIL
 }
 
+# _node_leak_lane_status: PURE decision for the #1465 leak lane inside node-bindings.
+# Echoes exactly one token: RUN, or SKIP-OPTOUT.
+#
+# It defers to _fixture_status (the SAME decision #2078's preflight consumes) instead of
+# testing AGENT_GATE_ALLOW_MISSING_FIXTURES directly, and that difference IS the point:
+# the env var alone is not evidence that the corpus is absent (a stale export, an
+# inherited environment or a shell profile sets it just as easily), so keying on it
+# dropped this issue's only merge-gating lane on runs whose corpus was fully present —
+# a vacuous green whose SUMMARY said nothing. Only OPTOUT means "the corpus is genuinely
+# absent AND the operator asked the gate to continue anyway".
+#
+# Every other status answers RUN, deliberately: OK is the normal case, and FAIL means
+# apply_fixture_preflight has already failed the run closed before any component started,
+# so the strict answer is never wrong and can never silently drop the lane.
+#
+# Under --only/--lite, _fixture_status is lenient (echoes OK), so the lane always RUNs
+# there — consistent with those modes being probes rather than verdicts. If you have no
+# corpus, do not --only a dataset-dependent lane.
+_node_leak_lane_status() {
+  [ "$(_fixture_status)" = OPTOUT ] && { echo SKIP-OPTOUT; return 0; }
+  echo RUN
+}
+
+# _node_leak_lane_note_file / _node_leak_lane_note: the lane's execution fact, carried to
+# the SUMMARY. node-bindings runs in a SIDE-lane SUBSHELL that cannot write the parent's
+# SUMMARY_META array (the same constraint that makes every component record its verdict to
+# a file), so the note travels through $LOG_DIR like .result does and the terminal emit
+# reads it back. It is written in EVERY state, including the ordinary one: a line that
+# appears only on skip would make "no line" mean both "it ran" and "this gate predates the
+# line", which is the ambiguity that let the skip hide in the first place.
+_node_leak_lane_note_file() { printf '%s' "$LOG_DIR/node-bindings.leak-lane"; }
+
+# The note TEXT for a given state, single-sourced so the component, the SUMMARY and the
+# hidden self-test hook can never quote three different sentences. Any unrecognised state
+# is itself reported rather than silently omitted.
+_node_leak_lane_note() { # <RUN|SKIP-OPTOUT|NO-NODE> — the SAME tokens
+                         # _node_leak_lane_status echoes, plus NO-NODE for the
+                         # toolchain SKIP. One vocabulary, so a state can never
+                         # fall through to the UNKNOWN arm by spelling.
+  case "$1" in
+    RUN) printf '%s' "node-bindings-leak-lane: RAN (#1465 exception-path/abandoned-iterator leak budgets executed via npm run test:leaks)" ;;
+    SKIP-OPTOUT) printf '%s' "node-bindings-leak-lane: SKIPPED (canonical corpus absent + AGENT_GATE_ALLOW_MISSING_FIXTURES=1) — the #1465 exception-path/abandoned-iterator leak budgets did NOT run; this block does NOT validate them (#1465/#2078)" ;;
+    NO-NODE) printf '%s' "node-bindings-leak-lane: NOT-RUN (no node/npm on PATH — the whole node-bindings component SKIPped, #1465)" ;;
+    *) printf '%s' "node-bindings-leak-lane: UNKNOWN state '$1' (#1465) — treat this block as NOT validating the leak budgets" ;;
+  esac
+}
+
 # apply_fixture_preflight: EFFECTFUL FULL-gate canonical-corpus guard (issue #2078).
 # Consumes _fixture_status. OK → no-op (byte-identical to pre-#2078). OPTOUT → set
 # MISSING_FIXTURES_MARKER + a loud WARN, then return (lenient SKIP restored). FAIL →
@@ -2488,6 +2535,15 @@ case "${1:-}" in
   --preflight-fixtures)
     _pf_st=$(_fixture_status); echo "STATUS: $_pf_st"
     [ "$_pf_st" = OPTOUT ] && echo "$(_missing_fixtures_marker)"
+    exit 0 ;;
+  # Hidden self-test hook (issue #1465): print the leak-lane decision (RUN|SKIP-OPTOUT)
+  # from _node_leak_lane_status, plus the SUMMARY note that decision produces. This is the
+  # SAME pure decision run_node_bindings consumes, so a self-test can assert that a set
+  # AGENT_GATE_ALLOW_MISSING_FIXTURES with the corpus PRESENT still RUNs the lane, without
+  # spending 15 minutes in a real full gate.
+  --node-leak-lane)
+    _nll_st=$(_node_leak_lane_status); echo "STATUS: $_nll_st"
+    echo "NOTE: $(_node_leak_lane_note "$_nll_st")"
     exit 0 ;;
   # Hidden self-test hook (issue #3148): print the FULL-gate COMMITTED-SCHEMAS decision
   # (OK|FAIL) from _schemas_status, plus the resolved ROOT, its SOURCE and (on FAIL) the
@@ -6177,6 +6233,7 @@ run_node_bindings() {
   if ! command -v node >/dev/null 2>&1 || ! command -v npm >/dev/null 2>&1; then
     status=SKIP
     echo ">>> [$name] SKIP (no node/npm on PATH)"
+    _node_leak_lane_note NO-NODE > "$(_node_leak_lane_note_file)"
     record_result "$name" "$status" 0
     return 0
   fi
@@ -13516,6 +13573,12 @@ fi
 for i in "${!NAMES[@]}"; do
   SUMMARY_META+=("$(printf '%-18s %s (%s)' "${NAMES[$i]}:" "${STATUSES[$i]}" "${TIMES[$i]}")")
 done
+# #1465: node-bindings' leak lane is skippable under the #2078 opt-out, so the block states
+# which of RAN / SKIPPED / NOT-RUN happened. Absent file = the component was not selected,
+# which the component table above already shows.
+if [ -f "$(_node_leak_lane_note_file)" ]; then
+  SUMMARY_META+=("$(cat "$(_node_leak_lane_note_file)")")
+fi
 # #2874 (ratified job-2106): route the terminal emit through the shared MAIN/SIDE contract, so a
 # SIDE-lane foreign-live-peer clobber publishes FAIL to the private log + sibling instead of
 # rewriting the peer's contended path. OVERALL is already FAIL in that case → exit 1 below.
