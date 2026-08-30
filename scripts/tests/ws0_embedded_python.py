@@ -240,6 +240,24 @@ def _command_word_before(segment: str) -> str | None:
     # testing the whole segment would false-red on it.
     if any(marker in tail for marker in ("$(", "${", "`")):
         return None
+    # ...AND AN UNMATCHED CLOSER MEANS THE SEPARATOR WAS INSIDE A CONSTRUCT (#3451 post-rebase
+    # round 3, F2). `v=$(echo x | sed s/x/y/) $PY -c 'bad'` has its `|` INSIDE the substitution,
+    # so cutting at the last separator lands mid-construct: the tail is ` sed s/x/y/) $PY `, which
+    # contains no `$(` and resolved to the literal `sed` — skipped, and the invocation went
+    # SILENT. Measured at findings=0 before this.
+    #
+    # Decided by COUNTING CLOSERS, not by tracking nesting: if the tail closes a bracket it never
+    # opened, or holds an odd number of quotes, the cut was not a real command boundary and the
+    # command word is unknowable. That is one comparison, not a shell model — and it is why the
+    # OPENING markers above are tested on the tail too rather than on the whole segment: the
+    # driver's own `_syms=$(nm … | grep -c '_RN')` has its `$(` BEFORE the last `|`, is perfectly
+    # resolvable as `grep`, and a whole-segment test would red it.
+    for opener, closer in (("(", ")"), ("{", "}")):
+        if tail.count(closer) > tail.count(opener):
+            return None
+    for quote in ("'", '"'):
+        if tail.count(quote) % 2:
+            return None
     for word in tail.split():
         if not _ASSIGNMENT_WORD.match(word):
             return word
@@ -263,10 +281,19 @@ def _is_plain_literal(word: str) -> bool:
 # three python3 blocks (599, 697, 941), each consumed by the python-word branch before this
 # anchor is reached; the sole other `-c` is `taskset -c 1` inside a whole-line COMMENT, excluded
 # twice over (comment, and no quote follows). No bash/sh/zsh/perl/ruby/node/env `-c` exists here.
-# `\s*`, not `\s+`: python accepts the ATTACHED spelling `-c'prog'` and runs it, so requiring
-# whitespace left that form UNDISCOVERED — neither a block nor a finding (#3451 post-rebase
-# round 2, F2).
-_DASH_C_ANCHOR = re.compile(r"(?<![\w-])-c\s*['\"]")
+# `-c` FOLLOWED BY ANY NON-BLANK, which is the flag's natural boundary (#3451 post-rebase
+# round 3, F1). Requiring a QUOTE after it left three spellings python accepts UNDISCOVERED —
+# neither a block nor a finding: `-c'prog'` attached, `-cimport,os` unquoted, and `-c$CODE`
+# variable-valued. One widening covers all of them instead of an entry per spelling, and the
+# command-word resolution below then decides, which is where the decision belongs.
+#
+# `[ \t]*`, never `\s*`: the joined text still has newlines between LOGICAL lines, and `\s`
+# would let a trailing `-c` on one line bind to the next line's first word.
+#
+# The false-red direction was checked BEFORE widening, not assumed: `tar -cf out.tar` and
+# `sort -cu file` now match this anchor and must resolve to the literal commands `tar`/`sort`
+# and be SKIPPED. They are controls.
+_DASH_C_ANCHOR = re.compile(r"(?<![\w-])-c[ \t]*\S")
 
 # Characters that cannot appear inside one shell word, used to find where a candidate's word
 # STARTS so a path prefix is captured with it.
