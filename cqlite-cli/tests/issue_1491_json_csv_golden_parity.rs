@@ -569,8 +569,23 @@ enum Unsupported {
 }
 
 impl Unsupported {
-    /// Every variant, so the shape scan and its cross-check are both exhaustive
-    /// by construction rather than by a hand-kept list.
+    /// Every variant.
+    ///
+    /// A HAND-KEPT list whose INTEGRITY is checked, not a derived one: Rust
+    /// cannot enumerate an enum's variants without a derive macro, so no
+    /// construction here can prove this list is complete. (It previously claimed
+    /// to be "exhaustive by construction", which was false.) What holds instead:
+    ///
+    ///   * [`Self::label`] and [`Self::minimal_golden`] are EXHAUSTIVE matches, so
+    ///     a new variant cannot compile without an author editing this impl — the
+    ///     list is three lines above the arm they must add;
+    ///   * [`every_declarable_shape_is_one_the_golden_reader_refuses`] checks the
+    ///     list is sorted and duplicate-free, and requires each entry's minimal
+    ///     golden to carry EXACTLY that shape, so an entry cannot be a copy of its
+    ///     neighbour.
+    ///
+    /// The residual, stated because it is real: a variant added to the enum and
+    /// NOT added here is silently unchecked by that cross-check.
     const ALL: &'static [Unsupported] = &[
         Unsupported::PartitionDeletion,
         Unsupported::RangeTombstone,
@@ -1448,6 +1463,18 @@ fn every_declared_gap_names_at_least_one_egress_format() {
 /// single-column row.
 #[test]
 fn every_declarable_shape_is_one_the_golden_reader_refuses() {
+    // The list's own integrity: sorted and duplicate-free, so an entry cannot be
+    // a silent copy of its neighbour (see the note on `Unsupported::ALL` for what
+    // this can and cannot establish).
+    let mut sorted: Vec<Unsupported> = Unsupported::ALL.to_vec();
+    sorted.sort();
+    sorted.dedup();
+    assert_eq!(
+        sorted.as_slice(),
+        Unsupported::ALL,
+        "Unsupported::ALL must be sorted and duplicate-free"
+    );
+
     // A baseline the reader ACCEPTS, so a refusal below is attributable to the
     // shape under test rather than to the scaffolding.
     let live = r#"{"partition":{"key":["1"],"position":0},"rows":[{"type":"row","position":1,"liveness_info":{"tstamp":"1970-01-01T00:00:00.001Z"},"cells":[{"name":"v","value":"x"}]}]}"#;

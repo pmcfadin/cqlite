@@ -695,7 +695,17 @@ fn compare_udt(
                     udt.name
                 )
             })?;
-        let cv = c.get(field).unwrap_or(&Value::Null);
+        // The missing/extra field sets above already agree, so this cannot be
+        // absent. Stated as an error rather than defaulted to `Null`: a default
+        // here would silently compare an absent field as a null one if that
+        // agreement check ever moved.
+        let cv = c.get(field).ok_or_else(|| {
+            format!(
+                "udt `{}`: field `{field}` vanished between the field-set check and the \
+                 comparison",
+                udt.name
+            )
+        })?;
         // A UDT field is a cell VALUE (a frozen UDT's fields live inside one value
         // cell; a non-frozen UDT's field IS the cell value), so the golden keeps
         // its natural JSON kind.
@@ -767,9 +777,16 @@ fn pair(entry: &Value, egress: Egress) -> Result<(&Value, &Value), String> {
             brief(&describe(entry, egress))
         ));
     }
-    let key = object.get("key").unwrap_or(&Value::Null);
-    let value = object.get("value").unwrap_or(&Value::Null);
-    Ok((key, value))
+    // Both are present — the shape check above requires exactly these two keys —
+    // so this is an invariant, stated rather than defaulted: `unwrap_or(&Null)`
+    // would compare a structurally broken entry as a null-keyed null-valued one.
+    match (object.get("key"), object.get("value")) {
+        (Some(key), Some(value)) => Ok((key, value)),
+        _ => Err(format!(
+            "cli map entry lost its `key`/`value` between the shape check and the read: {}",
+            brief(&describe(entry, egress))
+        )),
+    }
 }
 
 /// Is this a type whose values are single scalars? Map keys are paired by their
