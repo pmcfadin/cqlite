@@ -396,6 +396,10 @@ has "case5: no-base log carries the terminal verdict" \
 #   devfull  — a SYMLINK TO /dev/full: the truncate SUCCEEDS and every append is rejected
 #              with ENOSPC, so the APPEND-FAILURE COUNTER fires and names its own count.
 #              Also uid-independent.
+#   sibfull  — `dir` PLUS a /dev/full symlink at the SIBLING path: the persistence
+#              diagnostic's own destination accepts the open and rejects every write, which
+#              is the only shape that can make the "also written to" claim FALSE while the
+#              sibling is openable. Also uid-independent.
 #
 # NOT reproducible here, stated rather than quietly omitted: the pure mid-sequence partial
 # write (first append accepted, later ones rejected, leaving a NON-EMPTY but truncated
@@ -425,6 +429,8 @@ case "\$d" in
       case "\${FS_SABOTAGE:-}" in
         dir)     mkdir -p "\$d/file-size.log" ;;
         devfull) ln -s /dev/full "\$d/file-size.log" ;;
+        sibfull) mkdir -p "\$d/file-size.log"
+                 ln -s /dev/full "\$d/file-size.persistence-error.log" ;;
       esac
     fi
     ;;
@@ -581,6 +587,71 @@ STUB
   else
     ok "case10: claims no ratchet verdict for a run that never computed one"
   fi
+
+  # -------------------------------------------------------------------------
+  # Case 11 — the sibling must carry the SAME arithmetic in EVERY ratchet state (#3401
+  # review FIX 1). Concrete regression: CQLITE_ALLOW_FILE_GROWTH=1 (ratchet ALLOWS the
+  # growth, verdict is not FAIL) plus an unwritable log — the file names and counts used to
+  # be omitted from the sibling, i.e. lost from every reachable artifact, because stdout
+  # only reaches gate.log. Every needle below is a REAL computed value (the fixture's own
+  # 900 -> 950, its src limit, its resolved base sha, its current/limit advisory), none of
+  # which any wording or shell message can produce.
+  # -------------------------------------------------------------------------
+  mkrepo optoutpersist cqlite-core/src/big.rs 900 950 main; r11="$REPO"
+  out11="$tmp/optoutpersist.out"
+  run_only_file_size "$r11" "$out11" PATH="$STUBBIN:$PATH" FS_SABOTAGE=dir \
+      CQLITE_ALLOW_FILE_GROWTH=1
+  d11=$(logdir_of "$out11") || bad "case11: the run published no usable 'logs:' dir"
+  sib11="$d11/file-size.persistence-error.log"
+  base11=$( cd "$r11" 2>/dev/null && git rev-parse HEAD 2>/dev/null )
+  [ -n "$base11" ] ||
+    bad "case11: could not capture the fixture's base sha — the base-ref assert cannot measure anything"
+
+  assert_verdict "case11: unpersistable log on the ALLOWED-growth path is still a FAIL" "$d11" FAIL
+  has "case11: the sibling preserves the exact grown-file entry on a NON-FAIL ratchet state" \
+      "$sib11" "cqlite-core/src/big.rs: 900 -> 950 (limit 800)"
+  has "case11: the sibling preserves the thresholds" \
+      "$sib11" "thresholds: src=800 test=1500"
+  has "case11: the sibling preserves the resolved base sha" "$sib11" "$base11"
+  has "case11: the sibling preserves the over-threshold advisory entry" "$sib11" "950/800"
+
+  # -------------------------------------------------------------------------
+  # Case 12 — the "also written to" claim must be VERIFIED, not assumed (#3401 review
+  # FIX 2). With the sibling itself pointed at /dev/full the open succeeds and every write
+  # is rejected, so a claim based on the truncate alone would send the reader to an EMPTY
+  # file for the block. The two needles are complementary and each is reachable from
+  # exactly one branch: the negative wording exists only when the verification failed, and
+  # the positive wording is asserted ABSENT, so a code path that always claimed success
+  # could not satisfy both.
+  # -------------------------------------------------------------------------
+  if [ ! -c /dev/full ]; then
+    skip "case12: no /dev/full (macOS/BSD) — sibling-sabotage control not run"
+    skip "case12: no /dev/full (macOS/BSD) — FAIL verdict not asserted"
+    skip "case12: no /dev/full (macOS/BSD) — honest negative claim not asserted"
+    skip "case12: no /dev/full (macOS/BSD) — absence of the false claim not asserted"
+  else
+    mkrepo sibfail cqlite-core/src/small.rs 20 0 main; r12="$REPO"
+    out12="$tmp/sibfail.out"
+    run_only_file_size "$r12" "$out12" PATH="$STUBBIN:$PATH" FS_SABOTAGE=sibfull
+    d12=$(logdir_of "$out12") || bad "case12: the run published no usable 'logs:' dir"
+    sib12="$d12/file-size.persistence-error.log"
+
+    if [ -L "$sib12" ] && [ "$(readlink "$sib12")" = /dev/full ] && [ -d "$d12/file-size.log" ]; then
+      ok "case12: sabotage in place (log is a directory AND the sibling is -> /dev/full)"
+    else
+      bad "case12: sabotage did NOT take effect — the unverifiable-sibling path was never exercised"
+    fi
+    assert_verdict "case12: an unwritable log with an unwritable sibling is still a FAIL" "$d12" FAIL
+    has "case12: stdout says the block could NOT be written to the sibling" \
+        "$out12" "It could NOT be written to $sib12"
+    if [ ! -s "$out12" ]; then
+      bad "case12: no gate stdout captured — the false-claim check could not run"
+    elif grep -Fq -- "also written to: $sib12" "$out12"; then
+      bad "case12: stdout claims the block was written to a sibling that rejected every write"
+    else
+      ok "case12: stdout makes no false 'also written to' claim"
+    fi
+  fi
 fi
 
 # ---------------------------------------------------------------------------
@@ -593,7 +664,7 @@ printf 'file-size component log guard (#3401): %d passed, %d failed, %d skipped\
 # precondition failure (an unusable repo, a missing mktemp) short-circuits its case's
 # remaining asserts and lands here too, so the message names both causes rather than
 # misattributing one as the other.
-EXPECTED_CHECKS=61
+EXPECTED_CHECKS=70
 if [ "$((PASS + FAIL + SKIP))" -ne "$EXPECTED_CHECKS" ]; then
   printf 'FAIL - assertion census mismatch: %d checks ran (%d ok / %d fail / %d skip), expected exactly %d.\n' \
     "$((PASS + FAIL + SKIP))" "$PASS" "$FAIL" "$SKIP" "$EXPECTED_CHECKS"
