@@ -1091,3 +1091,389 @@ fn genuine_numeric_literals_still_survive_verbatim_and_compare_exactly() {
         "two distinct decimals sharing one double must stay distinct"
     );
 }
+
+// ---------------------------------------------------------------------------
+// The golden's structure is validated TOTALLY, not field by named field
+// (#1490 round 17)
+//
+// Three review rounds each found another field the harness CONSUMED before
+// anything validated it, and each was the same defect: the field's SHAPE was
+// checked and its CONTENT was not. `partition.key` was confirmed to be an array
+// without confirming its components are the JSON strings sstabledump writes; a
+// `tstamp` was confirmed to be a string without confirming it PARSES. Patching
+// the named fields would have produced three more next round, because the
+// enumeration WAS the generator.
+//
+// So `golden_schema.rs` describes the WHOLE structure — JSON type, content
+// grammar, requiredness, and, for the two positions it deliberately leaves to
+// the declared-type descent, WHO validates them — and walks the golden against
+// that description, refusing any field the description does not cover. The
+// controls below are the three findings as INSTANCES, each with the FALSE PASS
+// it closes MEASURED against the lenient path rather than argued.
+// ---------------------------------------------------------------------------
+
+/// One column list, parsed.
+fn declared_columns(columns: &[(&str, &str)]) -> Vec<parquet_parity::cql_type::ColumnType> {
+    columns
+        .iter()
+        .map(|(n, d)| {
+            parquet_parity::cql_type::parse_column(n, d, &[]).expect("declared type must parse")
+        })
+        .collect()
+}
+
+/// Project ONE synthetic golden line through the LENIENT path — the path the
+/// total validation runs in front of — with a single `int` partition key.
+fn project_leniently(
+    line: &str,
+    columns: &[parquet_parity::cql_type::ColumnType],
+    key_type: &'static str,
+) -> Result<parquet_parity::golden_rows::GoldenRow, String> {
+    use parquet_parity::canonical_jsonl::{parse_document_str_with_keys, KeySpec};
+    use parquet_parity::golden_rows::project_golden;
+    let doc = parse_document_str_with_keys(
+        &format!("{line}\n"),
+        std::path::Path::new("<synthetic>"),
+        true,
+        &KeySpec::from_cql_types(&[key_type], &[]),
+    )
+    .map_err(|e| e.to_string())?;
+    let mut rows = project_golden(&doc, columns, &["id"], &[])?;
+    assert_eq!(rows.len(), 1, "each control line carries exactly one row");
+    Ok(rows.remove(0))
+}
+
+/// A `partition.key` or collection `path` component that is a BARE NUMBER or
+/// BOOLEAN is a MALFORMED oracle, and is REFUSED — never canonicalized.
+///
+/// sstabledump writes every one of those components with `json.writeString` over
+/// Cassandra's `AbstractType.getString` (`JsonTransformer.serializePartitionKey`
+/// and `serializeCell`, cassandra-5.0.8), so a bare numeric or boolean component
+/// cannot come from a real dump. The measured consequence of letting one through
+/// is below: it canonicalizes to EXACTLY the value the correct stringified
+/// spelling produces, so it compares equal to a correct export and the harness
+/// reports parity for a golden that is not a dump.
+#[test]
+fn a_bare_numeric_or_boolean_key_or_path_component_is_refused_not_canonicalized() {
+    use parquet_parity::golden_rows::validate_golden_text;
+
+    #[rustfmt::skip]
+    let malformed: &[&str] = &[
+        // A bare numeric partition-key component.
+        r#"{"partition":{"key":[1]},"rows":[{"type":"row","cells":[{"name":"v","value":"x"}]}]}"#,
+        // …and a bare boolean one.
+        r#"{"partition":{"key":[true]},"rows":[{"type":"row","cells":[{"name":"v","value":"x"}]}]}"#,
+        // A bare numeric SET-element path (a set element's value IS its path).
+        r#"{"partition":{"key":["1"]},"rows":[{"type":"row","cells":[{"name":"s","path":[7],"value":""}]}]}"#,
+        // …and a bare boolean MAP-key path.
+        r#"{"partition":{"key":["1"]},"rows":[{"type":"row","cells":[{"name":"m","path":[true],"value":3}]}]}"#,
+        // A component of the RIGHT kind beside one of the wrong kind: the check
+        // is per COMPONENT, not "the array holds at least one string".
+        r#"{"partition":{"key":["1",2]},"rows":[{"type":"row","cells":[{"name":"v","value":"x"}]}]}"#,
+        // A null component is not a string either.
+        r#"{"partition":{"key":[null]},"rows":[{"type":"row","cells":[{"name":"v","value":"x"}]}]}"#,
+    ];
+    for line in malformed {
+        let err = validate_golden_text(&format!("{line}\n"))
+            .expect_err("a non-string key/path component must be REFUSED");
+        assert!(
+            err.contains("is not a JSON string"),
+            "the refusal must name what it found: {err}"
+        );
+        assert!(
+            err.contains("writeString") && err.contains("cassandra-5.0.8"),
+            "…and cite the authority for the requirement, not CQLite's own code: {err}"
+        );
+    }
+
+    // MEASURED, not argued: each malformed spelling canonicalizes to EXACTLY the
+    // value the CORRECT spelling produces, so downstream nothing can tell them
+    // apart — which is why the refusal has to happen here, on the text.
+    let scalar = declared_columns(&[("id", "int"), ("v", "text")]);
+    let boolkey = declared_columns(&[("id", "boolean"), ("v", "text")]);
+    let set = declared_columns(&[("id", "int"), ("s", "set<int>")]);
+    let map = declared_columns(&[("id", "int"), ("m", "map<boolean,int>")]);
+    #[rustfmt::skip]
+    let indistinguishable: &[(&str, &str, &[parquet_parity::cql_type::ColumnType], &str)] = &[
+        (
+            r#"{"partition":{"key":["1"]},"rows":[{"type":"row","cells":[{"name":"v","value":"x"}]}]}"#,
+            r#"{"partition":{"key":[1]},"rows":[{"type":"row","cells":[{"name":"v","value":"x"}]}]}"#,
+            &scalar, "int",
+        ),
+        (
+            r#"{"partition":{"key":["true"]},"rows":[{"type":"row","cells":[{"name":"v","value":"x"}]}]}"#,
+            r#"{"partition":{"key":[true]},"rows":[{"type":"row","cells":[{"name":"v","value":"x"}]}]}"#,
+            &boolkey, "boolean",
+        ),
+        (
+            r#"{"partition":{"key":["1"]},"rows":[{"type":"row","cells":[{"name":"s","path":["7"],"value":""}]}]}"#,
+            r#"{"partition":{"key":["1"]},"rows":[{"type":"row","cells":[{"name":"s","path":[7],"value":""}]}]}"#,
+            &set, "int",
+        ),
+        (
+            r#"{"partition":{"key":["1"]},"rows":[{"type":"row","cells":[{"name":"m","path":["true"],"value":3}]}]}"#,
+            r#"{"partition":{"key":["1"]},"rows":[{"type":"row","cells":[{"name":"m","path":[true],"value":3}]}]}"#,
+            &map, "boolean",
+        ),
+    ];
+    // The tuple is (correct spelling, malformed spelling, declared columns, the
+    // `id` column's declared type — what the key spec is built from).
+    for (correct, malformed, columns, key_type) in indistinguishable {
+        let good = project_leniently(correct, columns, key_type)
+            .expect("the correct stringified spelling projects");
+        let bad = project_leniently(malformed, columns, key_type)
+            .expect("this control's premise is that the LENIENT path accepts the malformed one");
+        assert_eq!(
+            format!("{:?}", (good.keys, good.cells)),
+            format!("{:?}", (bad.keys, bad.cells)),
+            "this control's premise is that the malformed component canonicalizes to the SAME \
+             value as the correct one — if it no longer does, re-derive what the refusal is \
+             still protecting"
+        );
+    }
+
+    // POSITIVE controls: every legitimate STRINGIFIED spelling is still
+    // accepted, so the refusal reds on the defect and not on the shape. A
+    // CLUSTERING component is deliberately NOT constrained — sstabledump writes
+    // those with `writeRawValue(type.toJSONString(..))`, so a typed JSON number,
+    // a nested array and the unset marker `"*"` are all correct there.
+    for good in [
+        r#"{"partition":{"key":["1","2"]},"rows":[{"type":"row","cells":[{"name":"v","value":"x"}]}]}"#,
+        r#"{"partition":{"key":["1"]},"rows":[{"type":"row","cells":[{"name":"s","path":["7"],"value":""}]}]}"#,
+        r#"{"partition":{"key":["1"]},"rows":[{"type":"row","clustering":[7,"t",["a","b"],"*"],"cells":[{"name":"v","value":"x"}]}]}"#,
+    ] {
+        validate_golden_text(&format!("{good}\n"))
+            .unwrap_or_else(|e| panic!("a legitimate golden line must be accepted: {e}"));
+    }
+}
+
+/// Every timestamp a shadowing decision reads must PARSE, under the SAME grammar
+/// the canonical parser uses — and an unparseable one is REFUSED rather than
+/// read as an absent timestamp.
+///
+/// The fallback is the danger: `parse_cell` turns an unparseable cell `tstamp`
+/// into `None`, and `project_column` then falls back to the ROW liveness
+/// timestamp to decide whether a collection-shell deletion shadows the element.
+/// The measurement below shows that fallback silently DROPPING a live element and
+/// turning the whole column into a NULL — the AC1 (#1485) coercion this oracle
+/// exists to catch, produced by the oracle itself.
+#[test]
+fn an_unparseable_timestamp_is_refused_and_never_falls_back_to_the_row_liveness_timestamp() {
+    use parquet_parity::canonical_jsonl::{parse_timestamp_micros, CanonicalValue};
+    use parquet_parity::golden_rows::validate_golden_text;
+
+    #[rustfmt::skip]
+    let malformed: &[&str] = &[
+        // A cell writetime.
+        r#"{"partition":{"key":["1"]},"rows":[{"type":"row","cells":[{"name":"v","value":"x","tstamp":"not-a-timestamp"}]}]}"#,
+        // The ROW writetime the shadowing decision falls back TO.
+        r#"{"partition":{"key":["1"]},"rows":[{"type":"row","liveness_info":{"tstamp":"2025-01-01"},"cells":[{"name":"v","value":"x"}]}]}"#,
+        // A collection shell's markedForDeleteAt…
+        r#"{"partition":{"key":["1"]},"rows":[{"type":"row","cells":[{"name":"m","deletion_info":{"marked_deleted":"whenever","local_delete_time":"2025-01-02T00:00:00Z"}}]}]}"#,
+        // …and its local delete time.
+        r#"{"partition":{"key":["1"]},"rows":[{"type":"row","cells":[{"name":"m","deletion_info":{"local_delete_time":"2025-01-02"}}]}]}"#,
+        // Shapes that are ALMOST the grammar: no `Z`, a 13th month, a
+        // non-numeric fraction. Each parses to `None` in the canonical parser.
+        r#"{"partition":{"key":["1"]},"rows":[{"type":"row","cells":[{"name":"v","value":"x","tstamp":"2025-01-01T00:00:00"}]}]}"#,
+        r#"{"partition":{"key":["1"]},"rows":[{"type":"row","cells":[{"name":"v","value":"x","tstamp":"2025-13-01T00:00:00Z"}]}]}"#,
+        r#"{"partition":{"key":["1"]},"rows":[{"type":"row","cells":[{"name":"v","value":"x","tstamp":"2025-01-01T00:00:00.abcZ"}]}]}"#,
+    ];
+    for line in malformed {
+        let err = validate_golden_text(&format!("{line}\n"))
+            .expect_err("a timestamp that does not parse must be REFUSED");
+        assert!(
+            err.contains("timestamp"),
+            "the refusal must name what it found: {err}"
+        );
+        assert!(
+            err.contains("parse_timestamp_micros"),
+            "…and name the ONE grammar it shares with the canonical parser, so the two can \
+             never disagree about what a timestamp is: {err}"
+        );
+    }
+
+    // An ABSENT timestamp is the same misclassification by the other route — the
+    // parser reads it as `None` too — so a required one that is missing is
+    // refused with the same consequence spelled out. Cassandra writes both
+    // unconditionally (`serializeRow`, `serializeCell`), so neither can be
+    // legitimately absent.
+    #[rustfmt::skip]
+    let absent: &[&str] = &[
+        r#"{"partition":{"key":["1"]},"rows":[{"type":"row","liveness_info":{},"cells":[{"name":"v","value":"x"}]}]}"#,
+        r#"{"partition":{"key":["1"]},"rows":[{"type":"row","cells":[{"name":"m","deletion_info":{"marked_deleted":"2025-01-02T00:00:00Z"}}]}]}"#,
+    ];
+    for line in absent {
+        let err = validate_golden_text(&format!("{line}\n"))
+            .expect_err("a required timestamp that is absent must be REFUSED");
+        assert!(
+            err.contains("has no") && err.contains("absent timestamp"),
+            "the refusal must say the absence is not read as one: {err}"
+        );
+    }
+
+    // The validator's grammar IS the canonical parser's function, asserted
+    // directly: every string the tables above refuse is a string
+    // `parse_timestamp_micros` returns `None` for, and every string they accept
+    // is one it parses.
+    for refused in [
+        "not-a-timestamp",
+        "2025-01-01",
+        "2025-01-01T00:00:00",
+        "2025-13-01T00:00:00Z",
+        "2025-01-01T00:00:00.abcZ",
+    ] {
+        assert!(
+            parse_timestamp_micros(refused).is_none(),
+            "{refused:?} must be unparseable for this control to mean anything"
+        );
+    }
+    for accepted in [
+        "2025-01-01T00:00:00Z",
+        // The SPACE separator real sstabledump emits, and a sub-second fraction.
+        "2025-10-06 01:12:07.265Z",
+    ] {
+        assert!(
+            parse_timestamp_micros(accepted).is_some(),
+            "{accepted:?} is a real sstabledump timestamp and must parse"
+        );
+    }
+
+    // MEASURED, not argued: with the cell writetime unparseable, the lenient path
+    // falls back to the ROW liveness timestamp — which here predates the
+    // collection-shell deletion — and the live element is silently DROPPED,
+    // turning the column into a NULL. Same golden, one broken timestamp.
+    let columns = declared_columns(&[("id", "int"), ("m", "map<text,int>")]);
+    let shell = r#"{"name":"m","deletion_info":{"marked_deleted":"2025-01-02T00:00:00Z","local_delete_time":"2025-01-02T00:00:00Z"}}"#;
+    let live = format!(
+        r#"{{"partition":{{"key":["1"]}},"rows":[{{"type":"row","liveness_info":{{"tstamp":"2025-01-01T00:00:00Z"}},"cells":[{shell},{{"name":"m","path":["k"],"value":7,"tstamp":"2025-01-03T00:00:00Z"}}]}}]}}"#
+    );
+    let broken = live.replace("2025-01-03T00:00:00Z", "not-a-timestamp");
+
+    let good = project_leniently(&live, &columns, "int").expect("the well-formed golden projects");
+    assert!(
+        matches!(good.cells.get("m"), Some(CanonicalValue::Map(entries)) if entries.len() == 1),
+        "the element's writetime is AFTER the shell deletion, so it is live: {:?}",
+        good.cells.get("m")
+    );
+    let misclassified = project_leniently(&broken, &columns, "int")
+        .expect("this control's premise is that the LENIENT path accepts the broken timestamp");
+    assert_eq!(
+        misclassified.cells.get("m"),
+        Some(&CanonicalValue::Absent),
+        "this control's premise is that an unparseable cell writetime falls back to the ROW \
+         liveness timestamp and misclassifies the live element as shadowed, turning the column \
+         into a NULL; if it no longer does, re-derive what the refusal is still protecting"
+    );
+    // …and the refusal is what stops that golden ever reaching the projection.
+    validate_golden_text(&format!("{broken}\n"))
+        .expect_err("the broken-timestamp golden must be refused before it is projected");
+    validate_golden_text(&format!("{live}\n"))
+        .expect("the well-formed golden must still be accepted");
+}
+
+/// A field the structure description does not cover is REFUSED — the property
+/// that makes the pass TOTAL rather than a list.
+///
+/// Without it, a field nobody described is a field nobody validated, and the
+/// three findings above could be re-created simply by a dump growing a fourth
+/// one. The positive control is the full legitimate shape: every field a real
+/// sstabledump writes for an eligible row, all at once.
+#[test]
+fn a_field_the_structure_description_does_not_cover_is_refused() {
+    use parquet_parity::golden_rows::validate_golden_text;
+
+    #[rustfmt::skip]
+    let undescribed: &[(&str, &str)] = &[
+        (r#"{"partition":{"key":["1"]},"rows":[],"surprise":1}"#, "surprise"),
+        (r#"{"partition":{"key":["1"],"surprise":1},"rows":[]}"#, "surprise"),
+        (r#"{"partition":{"key":["1"]},"rows":[{"type":"row","cells":[],"surprise":1}]}"#, "surprise"),
+        (r#"{"partition":{"key":["1"]},"rows":[{"type":"row","liveness_info":{"tstamp":"2025-01-01T00:00:00Z","surprise":1},"cells":[]}]}"#, "surprise"),
+        (r#"{"partition":{"key":["1"]},"rows":[{"type":"row","cells":[{"name":"v","value":"x","surprise":1}]}]}"#, "surprise"),
+        (r#"{"partition":{"key":["1"]},"rows":[{"type":"row","cells":[{"name":"m","deletion_info":{"local_delete_time":"2025-01-02T00:00:00Z","surprise":1}}]}]}"#, "surprise"),
+    ];
+    for (line, needle) in undescribed {
+        let err = validate_golden_text(&format!("{line}\n"))
+            .expect_err("a field the description does not cover must be REFUSED");
+        assert!(
+            err.contains("unrecognized field") && err.contains(needle),
+            "the refusal must name the field it does not know: {err}"
+        );
+    }
+
+    // POSITIVE control: the FULL legitimate shape — every field cassandra-5.0.8's
+    // `JsonTransformer` writes for an eligible partition — is accepted.
+    let full = r#"{"table kind":"REGULAR","partition":{"key":["1","2"],"position":0},"rows":[{"type":"row","position":42,"clustering":[7,"*"],"liveness_info":{"tstamp":"2025-10-06 01:12:07.265Z"},"cells":[{"name":"v","value":"x","tstamp":"2025-10-06 01:12:07.265Z"},{"name":"m","path":["k"],"value":3},{"name":"m","deletion_info":{"marked_deleted":"2025-10-06 01:12:07.265Z","local_delete_time":"2025-10-06 01:12:07.265Z"}}]}]}"#;
+    validate_golden_text(&format!("{full}\n"))
+        .unwrap_or_else(|e| panic!("the full legitimate sstabledump shape must be accepted: {e}"));
+}
+
+/// A directory entry the harness cannot READ refuses the fixture — it is never
+/// omitted from the census.
+///
+/// Discovery counts entries to decide the fixture is UNIQUE (one `*-Data.db`
+/// generation, one golden, and the golden derived from THAT generation). A census
+/// taken over an incomplete listing can only conclude "fewer", so an entry
+/// silently dropped is exactly how a SECOND generation, or a golden belonging to
+/// another one, passes as unique. An entry that cannot be read is UNKNOWN, not
+/// ABSENT.
+#[test]
+fn a_directory_entry_the_harness_cannot_read_refuses_the_fixture() {
+    // A non-UTF-8 entry name: the deterministic instance of "cannot read this
+    // entry". It used to be dropped by a `filter_map(|e| e.file_name().to_str())`.
+    #[cfg(unix)]
+    {
+        use std::os::unix::ffi::OsStrExt;
+
+        let tmp = tempfile::TempDir::new().expect("tempdir");
+        std::fs::write(tmp.path().join("nb-1-big-Data.db"), b"").expect("write");
+        std::fs::write(tmp.path().join("nb-1-big-Data.db.jsonl"), b"").expect("write");
+        // A name that is not valid UTF-8 — and, deliberately, one that WOULD be a
+        // second Data generation if it could be read.
+        let mut raw = b"nb-2-\xff-big-Data.db".to_vec();
+        let unreadable = tmp.path().join(std::ffi::OsStr::from_bytes(
+            std::mem::take(&mut raw).as_slice(),
+        ));
+        std::fs::write(&unreadable, b"").expect("write non-UTF-8 named entry");
+
+        let err = parquet_parity::fixture_in_table_dir("ks.t", tmp.path().to_path_buf())
+            .expect_err("an entry the harness cannot read must REFUSE the fixture");
+        assert!(
+            err.contains("not UTF-8"),
+            "the refusal must name what it could not read: {err}"
+        );
+        assert!(
+            err.contains("census"),
+            "…and why an unreadable entry is not an absent one: {err}"
+        );
+
+        // CONTROL: with that entry removed the SAME directory resolves, so the
+        // refusal reds on the unreadable entry and not on the directory.
+        std::fs::remove_file(&unreadable).expect("remove");
+        let fixture = parquet_parity::fixture_in_table_dir("ks.t", tmp.path().to_path_buf())
+            .expect("the same directory without the unreadable entry must resolve");
+        assert_eq!(fixture.golden, tmp.path().join("nb-1-big-Data.db.jsonl"));
+    }
+
+    // A directory that cannot be LISTED at all is the other half of the same
+    // refusal. Skipped rather than asserted when the probe shows this process can
+    // read it anyway (running as root, or a filesystem that ignores the mode) —
+    // asserting there would be asserting the environment, not the harness.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+
+        let tmp = tempfile::TempDir::new().expect("tempdir");
+        let dir = tmp.path().join("locked");
+        std::fs::create_dir(&dir).expect("mkdir");
+        std::fs::write(dir.join("nb-1-big-Data.db"), b"").expect("write");
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o000)).expect("chmod");
+        let listable = std::fs::read_dir(&dir).is_ok();
+        if !listable {
+            let err = parquet_parity::fixture_in_table_dir("ks.t", dir.clone())
+                .expect_err("an unlistable fixture directory must be REFUSED");
+            assert!(err.contains("cannot read"), "{err}");
+        }
+        // Restore so the TempDir can clean up.
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o755)).expect("chmod");
+    }
+}
