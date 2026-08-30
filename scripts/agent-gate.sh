@@ -2576,8 +2576,12 @@ apply_schemas_preflight() {
 #     git update-ref -d <private ref>    deletes a ref in this worktree's own namespace.
 #
 #   LOCAL UTILITIES (no network, no spawn, bounded work): mktemp, rm, cat, tr, cut, sed,
-#     basename, kill, sleep, true, chmod — plus `timeout`/`gtimeout` themselves, which ARE the
-#     bounding mechanism (local, and bounded by construction: they take the bound).
+#     basename, kill, sleep, true, chmod, env — plus `timeout`/`gtimeout` themselves, which ARE
+#     the bounding mechanism (local, and bounded by construction: they take the bound).
+#     `env` is the ALLOWLISTED-ENVIRONMENT wrapper for every isolated git call (`env -i` plus
+#     _component_set_build_git_env's entries — job 258). It execs the command it is given and
+#     adds no network or shell of its own; the self-test's audit looks THROUGH it so the `git`
+#     behind it is still checked for its bound.
 #     `chmod` is the 0600 on the isolated fetch config BEFORE the URL (which may carry a
 #     credential) is written into it: a mode change on a path we just created, no network, no
 #     spawn. `sed` is the userinfo redaction in _component_set_redact_text — a local text
@@ -3480,6 +3484,83 @@ _component_set_is_shallow() {
   printf unknown
 }
 
+# ---- THE ISOLATED-GIT ENVIRONMENT IS AN ALLOWLIST (roborev job 258, High) ----------------
+#
+# THE DEFECT. The "isolated" scratch fetch neutralised `GIT_CONFIG_GLOBAL` and
+# `GIT_CONFIG_SYSTEM` and stopped there — so it still inherited `GIT_CONFIG_COUNT` /
+# `GIT_CONFIG_KEY_*` / `GIT_CONFIG_VALUE_*`, `GIT_CONFIG_PARAMETERS`, `GIT_TEMPLATE_DIR`,
+# `GIT_ALTERNATE_OBJECT_DIRECTORIES` and the rest of that family, ANY of which can define or
+# override `remote.csbaseline.url` AFTER `origin` passed canonical validation and redirect the
+# isolated hop itself.
+#
+# WHY THAT WAS WORSE THAN A REDIRECT OF HOP 2, AND WHY THE EQUALITY ASSERT DID NOT SAVE IT: if
+# HOP 1 is redirected, the sha the isolated hop observes AND the commit transferred into this
+# repository both come from the attacker's repository — so the two values AGREE and the assert
+# emits a **PASS**. A false PASS on skew detection is the exact outcome this whole guard exists
+# to prevent. That assert only ever defended hop 2.
+#
+# THE FIX IS AN ALLOWLIST, AND THE REASON IS THE SAME ONE THAT PRODUCED THIS FINDING: the
+# previous comment argued that git's config sources are "a closed set — system, global/XDG,
+# local, worktree, `-c`, GIT_CONFIG_* env", then neutralised TWO variables of that env family
+# and called the space closed. Enumerating one axis and declaring the space enumerated. A
+# denylist of git environment variables RECEDES exactly the way the fetch-resolution surface
+# did (symbolic remote -> validated URL -> URL in argv), so this repository's rule applies:
+# allowlist the safe shape, never blocklist the dangerous one.
+#
+# THE LINE THE ALLOWLIST DRAWS, stated so a future addition can be judged rather than argued:
+#   ADMIT  what git needs to REACH the remote and AUTHENTICATE to it.
+#   CLEAR  everything that can change WHAT it fetches (config, templates, object stores,
+#          alternates, refs, index) or WHAT IT RUNS (ssh/askpass commands, proxies-as-commands).
+# Anything not listed below is cleared by `env -i`, which is what makes this closed: new git
+# environment variables are cleared BY DEFAULT rather than needing to be discovered.
+#
+# WHAT IS DELIBERATELY NOT ADMITTED, and the cost accepted with it:
+#   GIT_SSH_COMMAND / GIT_SSH / GIT_ASKPASS / SSH_ASKPASS  — they NAME A COMMAND TO RUN. A
+#     developer who requires one to reach github.com gets a NAMED `fetch-failed`, which is a
+#     diagnosable stop rather than an execution vector.
+#   SSL_CERT_FILE / SSL_CERT_DIR / GIT_SSL_CAINFO — the system trust store is the default; an
+#     override is a trust decision this pre-flight must not inherit.
+#   LANG / LC_* — not needed, and the C locale is the better one for parsing git's output.
+#
+# WHY THE LANE-LOCAL READS ARE NOT WRAPPED (and this is not an oversight): the ONLY value whose
+# provenance this isolation establishes is the baseline SHA. Everything else the pre-flight
+# reads is addressed BY that sha — `<sha>:scripts/agent-gate.components`, `<sha>:…agent-gate.sh`,
+# the ancestry walk — and a git object is CONTENT-ADDRESSED, so no environment variable, alternate
+# object store or config can make a given sha resolve to different bytes. Wrapping only some of
+# the gate's lane reads in `env -i` would also mean this pre-flight silently read a DIFFERENT
+# repository than the rest of the gate whenever a caller legitimately set `GIT_DIR`.
+_CS_GIT_ENV=()
+_component_set_build_git_env() {
+  _CS_GIT_ENV=()
+  # REACHABILITY / AUTHENTICATION — each with its reason, because an allowlist entry with no
+  # stated reason is how an allowlist decays into the environment it was meant to replace.
+  # PATH: find `git` itself (and `ssh`, and the bounding `timeout`).
+  _CS_GIT_ENV+=("PATH=${PATH:-/usr/bin:/bin}")
+  # HOME: ssh key + known_hosts discovery for an ssh-form `origin`. It also names the global
+  # config, which is why GIT_CONFIG_GLOBAL=/dev/null below still has to be set.
+  [ -n "${HOME:-}" ] && _CS_GIT_ENV+=("HOME=$HOME")
+  # TMPDIR: git's own temporary files (pack indexing).
+  [ -n "${TMPDIR:-}" ] && _CS_GIT_ENV+=("TMPDIR=$TMPDIR")
+  # SSH_AUTH_SOCK: agent-based ssh authentication; without it an ssh-form origin fails.
+  [ -n "${SSH_AUTH_SOCK:-}" ] && _CS_GIT_ENV+=("SSH_AUTH_SOCK=$SSH_AUTH_SOCK")
+  # USER / LOGNAME: some ssh and credential paths derive a default username from them.
+  [ -n "${USER:-}" ]    && _CS_GIT_ENV+=("USER=$USER")
+  [ -n "${LOGNAME:-}" ] && _CS_GIT_ENV+=("LOGNAME=$LOGNAME")
+  # PROXY vars: REACHABILITY on a proxied box. They cannot change WHICH repository is fetched —
+  # TLS still authenticates github.com — and clearing them would red a correct tree behind a
+  # corporate proxy, which is the guard-that-reds-on-correct-input failure mode.
+  local _pv
+  for _pv in http_proxy https_proxy HTTP_PROXY HTTPS_PROXY all_proxy ALL_PROXY no_proxy NO_PROXY; do
+    # `${!_pv:-}` is an indirect read of the named variable; safe under `set -u`.
+    [ -n "${!_pv:-}" ] && _CS_GIT_ENV+=("$_pv=${!_pv}")
+  done
+  # THE NEUTRALISERS, set LAST so they cannot be shadowed by anything above: global/system
+  # config off (HOME above still points at the former), and no interactive prompt — an auth
+  # prompt on a stalled credential path is one of the ways this probe could hang.
+  _CS_GIT_ENV+=("GIT_CONFIG_GLOBAL=/dev/null" "GIT_CONFIG_SYSTEM=/dev/null" "GIT_TERMINAL_PROMPT=0")
+  return 0
+}
+
 # THE BASELINE MUST NOT BE READ FROM A SHARED MUTABLE REF — AND `FETCH_HEAD` IS ONE (roborev
 # job 227). `--refmap=` was chosen precisely so the fetch writes NO shared tracking ref, which
 # left `FETCH_HEAD` as the carrier; but `FETCH_HEAD` is a single per-repository file, so a
@@ -3552,6 +3633,10 @@ _component_set_probe_inner() {
   _CS_KIND=""; _CS_SHA="-"; _CS_MISSING=""; _CS_EXTRA=""; _CS_UNCOMMITTED=""
   _CS_ANCESTOR=unknown; _CS_BASE_N=0; _CS_DETAIL=""
   _CS_HEAD_SET=""; _CS_HEAD_ERR=""; _CS_BASE_SRC=""; _CS_HEAD_SRC=""
+  # Build the ALLOWLISTED environment before ANY isolated git call (job 258). Not memoized: it
+  # is cheap, and a stale copy would be a second source of truth for the one thing this
+  # function exists to control.
+  _component_set_build_git_env
 
   local err rc
   if ! command -v git >/dev/null 2>&1; then
@@ -3571,7 +3656,7 @@ _component_set_probe_inner() {
   # fetched. A contributor who legitimately uses `insteadOf` for convenience is unaffected —
   # the raw canonical URL is fetched directly, which is what their rewrite was aiming at.
   # local-only: a config read. It NAMES a remote; it does not contact one.
-  origin_url=$(GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_SYSTEM=/dev/null git -C "$REPO_ROOT" remote get-url origin 2>/dev/null); origin_rc=$?
+  origin_url=$(env -i "${_CS_GIT_ENV[@]}" git -C "$REPO_ROOT" remote get-url origin 2>/dev/null); origin_rc=$?
   if [ "$origin_rc" -ne 0 ]; then
     _CS_KIND=no-remote
     _CS_DETAIL="no 'origin' remote is configured in $REPO_ROOT, so the baseline is unobtainable"
@@ -3735,7 +3820,7 @@ _component_set_probe_inner() {
   # prefix closes it; cheap hardening beats a hole whose only defence is that it is obscure.
   # local-only: creates an empty repository in a directory we just made. No remote is named,
   # no object is read, and with global/system config neutralised no template can be pulled in.
-  if ! GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_SYSTEM=/dev/null git init -q "$csdir/repo" >/dev/null 2>&1; then
+  if ! env -i "${_CS_GIT_ENV[@]}" git init -q "$csdir/repo" >/dev/null 2>&1; then
     _CS_KIND=baseline-workspace
     _CS_DETAIL="could not initialise the isolated scratch repository for the baseline fetch"
     return 0
@@ -3744,7 +3829,7 @@ _component_set_probe_inner() {
   # 0600 BEFORE the URL is written, because the URL may carry a credential.
   chmod 600 "$csconf" 2>/dev/null || true
   printf '[remote "csbaseline"]\n\turl = %s\n' "$origin_url" >>"$csconf" 2>/dev/null || true
-  err=$(GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_SYSTEM=/dev/null GIT_TERMINAL_PROMPT=0 _component_set_bounded "$_CS_BOUND_SECS" git -C "$csdir/repo" fetch --quiet --refmap= --no-tags csbaseline "refs/heads/main:refs/csbaseline" 2>&1); rc=$?
+  err=$(_component_set_bounded "$_CS_BOUND_SECS" env -i "${_CS_GIT_ENV[@]}" git -C "$csdir/repo" fetch --quiet --refmap= --no-tags csbaseline "refs/heads/main:refs/csbaseline" 2>&1); rc=$?
   if [ "$rc" -ne 0 ]; then
     _CS_KIND=fetch-failed
     if [ "$rc" -eq 124 ] || [ "$rc" -eq 137 ]; then
@@ -3762,13 +3847,13 @@ _component_set_probe_inner() {
   # local-only: resolves a ref file plus the COMMIT object the fetch above just wrote.
   # Commit objects are never filtered out of a partial clone, so no lazy fetch is possible.
   # The baseline sha AS THE ISOLATED HOP SAW IT — the value hop 2 must reproduce.
-  cssha=$(GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_SYSTEM=/dev/null git -C "$csdir/repo" rev-parse --verify --quiet "refs/csbaseline^{commit}" 2>/dev/null || true)
+  cssha=$(env -i "${_CS_GIT_ENV[@]}" git -C "$csdir/repo" rev-parse --verify --quiet "refs/csbaseline^{commit}" 2>/dev/null || true)
   if [ -z "$cssha" ]; then
     _CS_KIND=fetch-failed; _CS_SHA="-"
     _CS_DETAIL="the isolated baseline fetch reported success but its ref does not resolve to a commit"
     return 0
   fi
-  err2=$(_component_set_bounded "$_CS_BOUND_SECS" git -C "$REPO_ROOT" fetch --quiet --refmap= --no-tags "$csdir/repo" "refs/csbaseline:$csref" 2>&1); rc2=$?
+  err2=$(_component_set_bounded "$_CS_BOUND_SECS" env -i "${_CS_GIT_ENV[@]}" git -C "$REPO_ROOT" fetch --quiet --refmap= --no-tags "$csdir/repo" "refs/csbaseline:$csref" 2>&1); rc2=$?
   if [ "$rc2" -ne 0 ]; then
     _CS_KIND=fetch-failed; _CS_SHA="-"
     _CS_DETAIL="transferring the isolated baseline into this repository exited $rc2: $(_component_set_safe_detail "$err2")"

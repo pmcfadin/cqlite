@@ -2481,6 +2481,19 @@ END {
       cmd = w[1]
       if (cmd == "" || cmd !~ /^[a-z_:][a-z0-9_.:-]*$/) continue
       printf "EXT\t%s\n", cmd
+      # `env -i VAR=… git …` (job 258): the ENVIRONMENT WRAPPER is not the command. `env` is
+      # recorded above as the real external it is, and then this looks THROUGH it — otherwise
+      # wrapping a call in `env` would silently EXEMPT the git behind it from the bound check,
+      # which is the audit reporting a clean bill of health on a region it stopped parsing.
+      if (cmd == "env") {
+        sub(/^env[ \t]+/, "", t)
+        while (t ~ /^-[iu][ \t]+/ || t ~ /^[A-Za-z_][A-Za-z0-9_]*=[^ \t]*[ \t]+/)
+          sub(/^(-[iu]|[A-Za-z_][A-Za-z0-9_]*=[^ \t]*)[ \t]+/, "", t)
+        split(t, w2, /[ \t]/)
+        cmd = w2[1]
+        if (cmd == "" || cmd !~ /^[a-z_:][a-z0-9_.:-]*$/) continue
+        printf "EXT\t%s\n", cmd
+      }
       if (cmd == "git" && !bounded && !probe && !annotated(i))
         printf "GAP\t%d\t%s\n", i, substr(line[i], 1, 60)
     }
@@ -2511,7 +2524,11 @@ else
   # --list` spawns are gone (the component set is read as DATA now) and with them the scripts/
   # directory those extractions needed. Removed rather than left in place, because a stale entry
   # here would silently pre-authorise a re-introduced spawn.
-  declared_externals="basename cat chmod cut git gtimeout kill mktemp rm sed sleep timeout tr true"
+  # `env` (job 258): the ALLOWLISTED-ENVIRONMENT wrapper for every isolated git call — `env -i`
+  # plus the entries _component_set_build_git_env admits. It is a LOCAL UTILITY that execs the
+  # command it is given (no network of its own, no shell), and the audit program above looks
+  # THROUGH it so the git behind it is still checked for its bound.
+  declared_externals="basename cat chmod cut env git gtimeout kill mktemp rm sed sleep timeout tr true"
   externals=$(printf '%s\n' "$audit_out" | sed -n 's/^EXT\t//p' | sort -u)
   undeclared=""
   for _w in $externals; do
@@ -2543,13 +2560,19 @@ else
       printf 'run_probe() { git -C "$REPO_ROOT" rev-parse --git-dir >/dev/null 2>&1; }\n'; } >"$ctl_annotated"
   ctl_curl="$tmp/region-curl.sh"
   {   cat "$region"; printf 'run_probe() { curl -sS https://example.invalid/x >/dev/null; }\n'; } >"$ctl_curl"
+  # …and the same defect WRAPPED IN `env`, which is the shape job 258 introduced: if the audit
+  # stopped at the wrapper, every isolated call would become unauditable at once.
+  ctl_envwrap="$tmp/region-envwrap.sh"
+  {   cat "$region"; printf 'run_probe() { env -i PATH="$PATH" git -C "$REPO_ROOT" fetch origin main >/dev/null 2>&1; }\n'; } >"$ctl_envwrap"
   ctl_gaps=$(awk -f "$GIT_AUDIT_AWK" "$ctl_unbounded" | grep -c '^GAP	')
   ctl_ann_gaps=$(awk -f "$GIT_AUDIT_AWK" "$ctl_annotated" | grep -c '^GAP	')
   ctl_curl_seen=$(awk -f "$GIT_AUDIT_AWK" "$ctl_curl" | sed -n 's/^EXT\t//p' | grep -cx curl)
-  if [ "$ctl_gaps" -eq 1 ] && [ "$ctl_ann_gaps" -eq 0 ] && [ "$ctl_curl_seen" -ge 1 ]; then
-    ok "3544-no-unbounded-control: the audit reports a planted UNBOUNDED git (1), stays silent on an ANNOTATED one (0), and the census sees a planted network program — live in both directions"
+  ctl_envwrap_gaps=$(awk -f "$GIT_AUDIT_AWK" "$ctl_envwrap" | grep -c '^GAP	')
+  if [ "$ctl_gaps" -eq 1 ] && [ "$ctl_ann_gaps" -eq 0 ] && [ "$ctl_curl_seen" -ge 1 ] \
+     && [ "$ctl_envwrap_gaps" -eq 1 ]; then
+    ok "3544-no-unbounded-control: the audit reports a planted UNBOUNDED git (1), the same defect WRAPPED IN env (1), stays silent on an ANNOTATED one (0), and the census sees a planted network program — live in both directions"
   else
-    bad "3544-no-unbounded-control: audit not discriminating (unbounded=$ctl_gaps expected 1, annotated=$ctl_ann_gaps expected 0, curl seen=$ctl_curl_seen expected >=1)"
+    bad "3544-no-unbounded-control: audit not discriminating (unbounded=$ctl_gaps expected 1, env-wrapped=$ctl_envwrap_gaps expected 1, annotated=$ctl_ann_gaps expected 0, curl seen=$ctl_curl_seen expected >=1)"
   fi
 fi
 
@@ -2697,6 +2720,87 @@ else
   else
     bad "3544-rewrite-immune: a global insteadOf changed the pre-flight outcome (kind '$(field KIND "$rw_out")') — the baseline path is not rewrite-independent"
   fi
+fi
+
+# ---------------------------------------------------------------------------
+# 7j. THE ISOLATED HOP RUNS IN AN ALLOWLISTED ENVIRONMENT (roborev job 258, High). Neutralising
+#     `GIT_CONFIG_GLOBAL`/`GIT_CONFIG_SYSTEM` and stopping there left the "isolated" fetch
+#     inheriting the REST of git's environment-config family — and a redirect of HOP 1 is worse
+#     than a redirect of hop 2, because then the sha the isolated hop observes AND the commit
+#     transferred here both come from the attacker: the equality assert compares two values that
+#     AGREE and emits a **PASS**. A false PASS on skew detection is what this guard exists to
+#     prevent.
+#
+#     THREE VECTORS, EACH WITH ITS OWN POSITIVE CONTROL, and the controls are the point of this
+#     case: it asserts the gate is UNAFFECTED, and "unaffected" is indistinguishable from "the
+#     override never applied" without proving the override works right here, right now, against
+#     a plain `git fetch` in the same shape the gate uses (remote named `csbaseline`, URL in the
+#     repository's own config).
+#
+#     ONE MEASURED TRAP, recorded because it nearly produced the opposite conclusion: injecting
+#     `remote.csbaseline.url` does NOT redirect anything. Environment config is appended AFTER
+#     the local file, `remote.<name>.url` is MULTI-VALUED, and `git fetch` uses the FIRST value —
+#     so that control comes back "not redirected" and would have read as "the environment is
+#     harmless". The vector that works is `url.<attacker>.insteadOf`, which REWRITES whatever URL
+#     is resolved. A control that fails to reproduce the attack is not evidence of safety.
+# ---------------------------------------------------------------------------
+base_env=$(mkbaseline base-envfx - )
+env_decoy=$(mkbaseline base-envdecoy 's|^# CQLite agent gate|# CQLite agent gate (decoy)|' )
+env_fx=$(mkbranch envfx "$base_env" - )
+env_real_tip=$(git -C "$base_env" rev-parse refs/heads/main)
+env_decoy_tip=$(git -C "$env_decoy" rev-parse refs/heads/main)
+env_tpl="$tmp/envfx-template"
+mkdir -p "$env_tpl"
+printf '[url "%s"]\n\tinsteadOf = %s\n' "$env_decoy" "$base_env" >"$env_tpl/config"
+
+# env_ctl <label> <var=value>... : does this hostile environment redirect a PLAIN `git fetch`
+# in the gate's own shape (a fresh repo, a remote named `csbaseline`, the URL in that repo's own
+# config)? Echoes the sha the fetch landed on.
+#
+# BOTH the `init` and the `fetch` run under the hostile environment, uniformly for every vector:
+# one of the three (`GIT_TEMPLATE_DIR`) lands its redirect at INIT time by seeding the new
+# repository's local config, so a control that only wrapped the fetch would report "not
+# reproducible" for it and silently downgrade that vector to untested.
+env_ctl() {
+  local label="$1"; shift
+  local dir="$tmp/envctl-$label"
+  rm -rf "$dir"
+  env "$@" git init -q "$dir" >/dev/null 2>&1
+  printf '[remote "csbaseline"]\n\turl = %s\n' "$base_env" >>"$dir/.git/config"
+  env "$@" git -C "$dir" fetch -q --refmap= --no-tags csbaseline \
+      "refs/heads/main:refs/csbaseline" >/dev/null 2>&1
+  git -C "$dir" rev-parse refs/csbaseline 2>/dev/null || true
+}
+
+if [ "$env_real_tip" = "$env_decoy_tip" ]; then
+  bad "3544-env-isolated: the decoy baseline has the SAME tip as the real one, so no vector below could be observed — the fixture would test nothing"
+else
+  for _vec in config-count config-parameters template-dir; do
+    case "$_vec" in
+      config-count)
+        _ev=(GIT_CONFIG_COUNT=1 "GIT_CONFIG_KEY_0=url.$env_decoy.insteadOf" "GIT_CONFIG_VALUE_0=$base_env") ;;
+      config-parameters)
+        _ev=("GIT_CONFIG_PARAMETERS='url.$env_decoy.insteadOf'='$base_env'") ;;
+      template-dir)
+        # A TEMPLATE's `config` file IS copied into the new $GIT_DIR, so `git init` can be made
+        # to seed the scratch repository's own LOCAL config — which global/system neutralisation
+        # cannot touch. Measured: 1 insteadOf line landed in the fresh repo's config.
+        _ev=("GIT_TEMPLATE_DIR=$env_tpl") ;;
+    esac
+    _ctl_sha=$(env_ctl "$_vec" "${_ev[@]}")
+    _gate_out=$( fx "$env_fx" && env "${_ev[@]}" bash "$env_fx/scripts/agent-gate.sh" \
+                   --component-set-line full 2>/dev/null )
+    _gate_sha=$(field SHA "$_gate_out")
+    _gate_kind=$(field KIND "$_gate_out")
+    if [ "$_ctl_sha" != "$env_decoy_tip" ]; then
+      bad "3544-env-isolated[$_vec]: the POSITIVE CONTROL did NOT redirect a plain git fetch (landed on '$_ctl_sha', decoy is '$env_decoy_tip') — this environment vector is not reproducible here, so the gate being unaffected proves nothing"
+    elif [ "$_gate_kind" = ok ] && [ "$_gate_sha" = "$env_real_tip" ]; then
+      ok "3544-env-isolated[$_vec]: the vector redirects a plain git fetch to the decoy (control) yet the pre-flight still measures the REAL baseline — the isolated hop's environment is built from an allowlist, not inherited"
+    else
+      bad "3544-env-isolated[$_vec]: the pre-flight was affected (kind '$_gate_kind', sha '$_gate_sha'; expected ok + $env_real_tip, decoy is $env_decoy_tip)"
+      printf '%s\n' "$_gate_out"
+    fi
+  done
 fi
 
 # ---------------------------------------------------------------------------
