@@ -389,10 +389,14 @@ fn decode_does_not_recover(golden: &Value, ty: Option<&CqlType>) -> Option<Strin
     let rendering = golden_rendering(golden, Some(ty))?;
     let parts = match members(&rendering, ty) {
         Ok(parts) => parts,
-        // The splitter cannot read the golden's own rendering at all. Reachable
-        // only through a `, ` that moves an entry boundary in a map/UDT (the
-        // second entry then carries no `: `); an unbalanced bracket is refused for
-        // the whole cell before this is asked.
+        // The splitter cannot read the golden's own rendering at all. `members`
+        // fails ONLY on an unbalanced bracket (`scan`'s single failure mode; the
+        // frame here was built from the DDL, so `strip` cannot fail), and that is
+        // a whole-CELL refusal taken before the walk starts — so the comparator's
+        // path never reaches this. It is kept, and kept as a REFUSAL, because
+        // `node_refusal` is a public predicate anyone may ask directly: answering
+        // "nothing to refuse" for a rendering the splitter cannot even read would
+        // be the permissive-unknown shape CLAUDE.md forbids.
         Err(why) => {
             return Some(format!(
                 "the decoder cannot split the golden's own rendering {}: {why}",
@@ -425,6 +429,11 @@ fn decode_does_not_recover(golden: &Value, ty: Option<&CqlType>) -> Option<Strin
             // in a KEY moves. The value needs no separate check: an entry is
             // `key: value` by construction, so a recovered key leaves the golden's
             // value text as the remainder.
+            //
+            // `entry_cut`'s OWN error is unreachable from here for the same reason
+            // as the split's above — a key whose brackets balance leaves the `: `
+            // that follows it at depth zero — and is reported rather than dropped
+            // on the same grounds.
             fields
                 .iter()
                 .zip(parts.iter())
