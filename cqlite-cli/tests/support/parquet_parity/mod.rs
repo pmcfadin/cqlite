@@ -2,20 +2,29 @@
 //!
 //! # What this harness asserts
 //!
-//! For each declared corpus table:
+//! For each declared corpus table, five STAGES (see [`Stages`]), each
+//! determined as INDEPENDENTLY as it really is and aggregated — never a
+//! `?`-chain that stops at the first failure:
 //!
-//!   1. export it to Parquet through the WIRED writer — the real `cqlite export
-//!      --format parquet` binary, not a library shortcut;
-//!   2. read the Parquet back with the `arrow`/`parquet` crates;
-//!   3. validate the Parquet schema — column SET and every field's Arrow TYPE —
-//!      against the case's independently declared CQL types (`arrow_expect`),
-//!      BEFORE any value is compared: canonicalization is width-blind, so a
-//!      wrong CQL→Arrow mapping would otherwise round-trip its values unchanged
-//!      and pass;
-//!   4. project both the Parquet rows and the table's committed
-//!      `*-Data.db.jsonl` sstabledump golden into ONE canonical value space;
+//!   1. project the table's committed `*-Data.db.jsonl` sstabledump golden into
+//!      the canonical value space, including its physical-dump ELIGIBILITY
+//!      (#1742). Depends on NOTHING the export does, so it runs FIRST and
+//!      unconditionally;
+//!   2. export the table to Parquet through the WIRED writer — the real `cqlite
+//!      export --format parquet` binary, not a library shortcut;
+//!   3. read the Parquet back with the `arrow`/`parquet` crates and check its
+//!      column SET;
+//!   4. validate every field's Arrow TYPE against the case's independently
+//!      declared CQL types (`arrow_expect`): canonicalization is width-blind, so
+//!      a wrong CQL→Arrow mapping would otherwise round-trip its values
+//!      unchanged and pass. A mismatch defers the VALUES of ITS column only;
 //!   5. sort both sides by primary key (Parquet row order is not guaranteed) and
-//!      assert FULL PER-CELL equality.
+//!      assert FULL PER-CELL equality over every column stage 4 did not defer.
+//!
+//! A stage that genuinely cannot run is recorded as [`Failure::Unrunnable`],
+//! never omitted — a stage that passed and a stage that never ran must not be
+//! indistinguishable, or an earlier failure silently shrinks the "exact failure
+//! set" a [`KnownGap`] is compared against.
 //!
 //! The pre-existing Parquet tests check row counts, `PAR1` magic, a few spot
 //! values and DuckDB aggregates; `parquet_golden_tests.rs` freezes a byte
@@ -36,6 +45,9 @@
 //! * There is deliberately NO suite-wide `assert!(ran > 0)`: it cannot see one
 //!   case skipping behind its siblings. Each case asserts for itself.
 //! * `CQLITE_REQUIRE_FIXTURES=1` promotes EVERY case to `must_run`.
+//! * A recorded divergence is EXCLUSIVE across the whole AGGREGATE: an expected
+//!   export abort cannot suppress the golden's validation, and a deferred column
+//!   TYPE cannot suppress any other column's VALUES.
 //! * A recorded divergence is always PRECISE and SELF-RETIRING, never a skip:
 //!   [`KnownGap`] (whole case) and [`KnownTypeGap`] (one column's Arrow type)
 //!   both fail when the divergence stops reproducing, and both refuse to absorb
