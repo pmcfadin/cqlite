@@ -119,9 +119,12 @@ never-SKIPping lane must not be folded into a SKIP-aware one**: `node-bindings` 
 without node/npm, and putting cqlite-node's *Rust* tests behind that SKIP would be a coverage hole
 wearing a SKIP's clothes — so the Rust lane depends on nothing beyond cargo and never SKIPs. **And
 enrolling a lane in `DATASET_COMPONENTS` is not enough to stop a corpus-dependent suite skipping**:
-the widened `node-bindings` also exports `CQLITE_REQUIRE_FIXTURES=1` on the full gate, because
-without it 7 of the 27 jest suites `describe.skip` SILENTLY and jest reports an all-skipped suite as
-PASSED. The durable question is the same one shape up: for each workspace member, **which component
+the widened `node-bindings` also exports `CQLITE_REQUIRE_FIXTURES=1` on the full gate, which buys ONE
+named setup failure instead of 14 separate `beforeAll` throws and closes `parity.test.js`'s `test.skip`
+placeholder — the one corpus-conditional path in that suite that would pass silently. (An earlier draft
+of this paragraph said those suites `describe.skip`; **measured, none does** — the repo's Node
+convention THROWS. A false rationale in a gate log is worse than none, because it is what stops the
+next person looking.) The durable question is the same one shape up: for each workspace member, **which component
 EXECUTES it** — recorded, member by member, in `scripts/tests/workspace-test-disposition.txt`
 (`EXECUTED`/`PARTIAL`/`NOT-EXECUTED`, a closed label set enforced under `tooling-tests`), so a new
 crate cannot join the unexecuted set unannounced. That census records completeness and labeling, **not

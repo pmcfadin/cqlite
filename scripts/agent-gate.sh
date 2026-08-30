@@ -143,16 +143,23 @@
 #                      before widening: the slow half (npm ci + the release-unwind
 #                      napi build) is already paid here, and the full suite adds
 #                      ~15-35s — 504 tests / 27 suites, green on two consecutive runs.
-#                      Now IN DATASET_COMPONENTS (7 suites read CQLITE_DATASETS_ROOT)
-#                      and the FULL gate exports CQLITE_REQUIRE_FIXTURES=1, so an
-#                      absent corpus THROWS instead of letting those suites silently
-#                      describe.skip; --only/--lite stay lenient and the #2078 opt-out
-#                      is honoured, with the mode PRINTED. check_jest_suites_ran is
+#                      Now IN DATASET_COMPONENTS: 14 of the suite files gate on dataset
+#                      availability (measured), and the FULL gate exports
+#                      CQLITE_REQUIRE_FIXTURES=1 — which buys ONE clean, named setup
+#                      failure in setup.js instead of 14 separate beforeAll THROWS, and
+#                      closes parity.test.js's `test.skip` placeholder, the one
+#                      corpus-conditional path that WOULD pass silently. It is NOT
+#                      protection against `describe.skip`: no *.test.js uses it (the
+#                      repo's Node convention is skipIfNoDatasets(), which THROWS).
+#                      --only/--lite stay lenient and the #2078 opt-out is honoured,
+#                      with the mode PRINTED. check_jest_suites_ran is
 #                      the affirmative guard: the reported suite total must equal the
 #                      set DERIVED FROM JEST ITSELF (`npx jest --listTests`, never a
 #                      find over testMatch), no suite may be failed or skipped, and the
-#                      passed-test count must be non-zero
-#                      (jest reports an all-skipped suite as PASSED). cqlite-node's
+#                      passed-test count must be non-zero (a suite whose every TEST is
+#                      `test.skip`ped is reported as a PASSED suite — the suite-level
+#                      `skipped` count only catches a whole file being skipped, which is
+#                      why the two are separate directions). cqlite-node's
 #                      RUST unit tests are binding-rust-tests' subject, deliberately
 #                      NOT behind this component's SKIP.
 #   binding-rust-tests EXECUTES the RUST test suites of the two binding-side crates no
@@ -5327,12 +5334,13 @@ export -f check_unittest_targets_ran
 
 # check_jest_suites_ran <label> <logfile> <expected-suite-count>
 #
-# The jest ANALOGUE of check_unittest_targets_ran (issue #3522). A green `npm test`
-# exit is not evidence that anything ran: jest reports a suite whose every `describe`
-# was skipped as PASSED, so a corpus-less box (or a `describe.skip` someone left in)
-# produces `Test Suites: 27 passed, 27 total` over zero real assertions — the vacuous
-# green this whole issue exists to remove, arriving through the widened lane's own
-# plumbing.
+# The jest ANALOGUE of check_unittest_targets_ran (issue #3522). A green `npm test` exit
+# is not evidence that anything ran: a suite whose every TEST is `test.skip`ped is
+# reported as a PASSED suite, so `Test Suites: 27 passed, 27 total` is reachable over
+# zero real assertions — the vacuous green this whole issue exists to remove, arriving
+# through the widened lane's own plumbing. (Jest's suite-level `skipped` count is a
+# DIFFERENT and weaker signal: it catches a whole FILE being skipped, not a file whose
+# every test was. That is why the two are separate directions below rather than one.)
 #
 # AFFIRMATIVE, in three directions, all parsed from jest's OWN summary:
 #   * the reported TOTAL suite count must equal <expected-suite-count>, which the
@@ -5390,7 +5398,7 @@ check_jest_suites_ran() {
   [ "$s_total" -eq "$expected" ] || bad="$bad jest ran $s_total suite(s) but $expected '*.test.js' file(s) exist on disk — a suite file was not picked up (a filter, a rename, or testPathIgnorePatterns);"
   [ "$s_failed" -eq 0 ] || bad="$bad $s_failed suite(s) FAILED;"
   [ "$s_skipped" -eq 0 ] || bad="$bad $s_skipped suite(s) were SKIPPED — a skipped suite is reported by jest as neither passed nor failed and would otherwise pass unnoticed;"
-  [ "$t_passed" -gt 0 ] || bad="$bad ZERO tests PASSED — jest reports an all-skipped suite as passing, so a green exit over no assertions is exactly the vacuous result this guard exists to catch;"
+  [ "$t_passed" -gt 0 ] || bad="$bad ZERO tests PASSED — a suite whose every test is test.skip'd is still reported as a PASSED suite, so a green exit over no assertions is exactly the vacuous result this guard exists to catch (and the suite-level skipped count above cannot see it);"
   if [ -n "$bad" ]; then
     echo "$label: FAIL-CLOSED —$bad (issue #3522; jest summary was: '$suites' / '$tests')" >&2
     return 1
@@ -5798,17 +5806,33 @@ run_python_bindings() {
 # full suite adds ~15–35s on top of it — 504 passing tests across 27/27 suites, green
 # on two consecutive runs. That is not a cost worth 26 suites of blindness.
 #
-# THE CORPUS HALF IS NOW HONOURED, NOT AVOIDED. 7 of the suite's files read
-# CQLITE_DATASETS_ROOT, so node-bindings IS now in DATASET_COMPONENTS (it was NOT
-# before, and that comment was correct then and would be a stale rationale now).
-# Enrollment alone is not enough: without CQLITE_REQUIRE_FIXTURES=1 the suite's
-# setup.js leaves DATASETS_AVAILABLE=false and the corpus-dependent describes
-# `describe.skip` SILENTLY — a green run over zero real assertions, which is #3220's
-# rule and this issue's own thesis in one. So the FULL gate exports
-# CQLITE_REQUIRE_FIXTURES=1, making an absent corpus throw. `--only`/`--lite` stay
-# lenient (they are probes; `--only` cannot be a verdict — it exits 3 on success),
-# and the documented #2078 opt-out AGENT_GATE_ALLOW_MISSING_FIXTURES=1 is honoured,
-# the same split flight-tests uses. Which mode was taken is PRINTED, never implicit.
+# THE CORPUS HALF IS NOW HONOURED, NOT AVOIDED — AND THE REASON IS NOT THE ONE THIS
+# COMMENT FIRST GAVE (roborev/rust-reviewer round 1, B4). 14 of the suite's files gate on
+# dataset availability, so node-bindings IS now in DATASET_COMPONENTS (it was NOT before,
+# and that comment was correct then and would be a stale rationale now).
+#
+# The FULL gate additionally exports CQLITE_REQUIRE_FIXTURES=1. What that buys, MEASURED:
+#   * ONE clean, named setup failure (setup.js's `No SSTable fixtures found: …` throw)
+#     instead of 14 separate `beforeAll` THROWS from `skipIfNoDatasets()`; and
+#   * it closes `parity.test.js:70`'s `test.skip` placeholder — the ONE
+#     corpus-conditional path in the whole suite that would otherwise pass SILENTLY.
+#
+# WHAT IT IS **NOT**, stated because the first version of this comment claimed it and the
+# claim was false in three ways. There is no `describe.skip` anywhere in
+# `bindings/node/__test__/*.test.js` — the only occurrence of that string is inside a
+# COMMENT in dataset-guard.test.js. The repo's Node convention is the OPPOSITE of
+# skipping: `helpers.js`'s `skipIfNoDatasets()` THROWS, and `result.test.js` says so
+# outright ("per the repo's Node test convention it THROWS (never skips) … so a
+# misconfigured CI run fails loudly rather than passing silently"). The earlier text also
+# said "7 suites"; the measured number is 14.
+#
+# Why the correction matters more than the wording: a maintainer reading the old
+# rationale would conclude that CQLITE_REQUIRE_FIXTURES=1 is the only thing standing
+# between this gate and a silent all-skip, and could then delete the
+# AGENT_GATE_ALLOW_MISSING_FIXTURES split — or check_jest_suites_ran's `s_skipped`
+# branch — as redundant, reasoning from a mechanism the suite never had. A FALSE
+# rationale in a gate log is worse than none, because it is what stops the next person
+# looking. Same class as the stale #1255 comment this change already fixed.
 #
 # AFFIRMATIVE MEASUREMENT, not a green exit code (the same rule as the Rust lanes).
 # jest reports a suite whose every describe was skipped as PASSED, so `npm test`
@@ -5848,11 +5872,11 @@ run_node_bindings() {
   local require_fixtures=0 fixture_note
   if [ -z "$ONLY" ] && [ "$LITE" -eq 0 ] && [ "${AGENT_GATE_ALLOW_MISSING_FIXTURES:-0}" != 1 ]; then
     require_fixtures=1
-    fixture_note="CQLITE_REQUIRE_FIXTURES=1 (an absent corpus THROWS; the corpus-dependent suites cannot silently describe.skip)"
+    fixture_note="CQLITE_REQUIRE_FIXTURES=1 — an absent corpus fails ONCE, by name, in setup.js instead of as 14 separate beforeAll throws, and parity.test.js's test.skip placeholder (the one corpus-conditional path that would pass silently) cannot fire"
   elif [ "${AGENT_GATE_ALLOW_MISSING_FIXTURES:-0}" = 1 ]; then
-    fixture_note="CQLITE_REQUIRE_FIXTURES unset (AGENT_GATE_ALLOW_MISSING_FIXTURES=1) — corpus-dependent suites MAY silently skip, so this run does NOT validate them"
+    fixture_note="CQLITE_REQUIRE_FIXTURES unset (AGENT_GATE_ALLOW_MISSING_FIXTURES=1) — with a corpus absent the 14 dataset-gated suites would THROW individually and parity.test.js would test.skip, so this run does NOT validate that half"
   else
-    fixture_note="CQLITE_REQUIRE_FIXTURES unset (--only/--lite probe run) — corpus-dependent suites MAY silently skip"
+    fixture_note="CQLITE_REQUIRE_FIXTURES unset (--only/--lite probe run) — with a corpus absent the 14 dataset-gated suites would THROW individually and parity.test.js would test.skip"
   fi
 
   local -a census=()
