@@ -228,37 +228,74 @@ pathlib.Path(dest).write_text(text.replace(needle, bad))
 PY
 }
 
-# export_prefix_membership <driver> <VAR-PREFIX> — "<in-same-logical-line> <total-in-file>".
+# export_prefix_membership <driver> <VAR-PREFIX> <BLOCK-NEEDLE>
+#   -> "<in-this-block's-logical-line> <total-in-file>".
 #
 # An exported variable only reaches the step if its assignment is part of the CONTIGUOUS
-# environment-assignment prefix of the `python3 -c` command — a run of `NAME=value \` lines
-# immediately above it. Remove ONE continuation backslash and the assignment becomes a standalone
-# shell assignment that is never exported, the driver dies on the missing variable, and every
-# check in this suite still passes: the name-set comparisons see it (it is still in the file) and
-# the extracted-block executions see it (this suite builds their environment itself). Same
-# symptom as #3451 itself.
+# environment-assignment prefix of the `python3 -c` command THAT READS IT. Remove one continuation
+# backslash and it becomes a standalone shell assignment python never sees — the driver dies on
+# the missing variable while every other check here passes, because the name-set comparisons see
+# it (still in the file) and the block executions see it (this suite builds their environment
+# itself). Same symptom as #3451 itself.
 #
-# Decidable, and it reuses the joiner rather than parsing a command prefix: after logical-line
-# joining, the assignments and the invocation ARE ONE LINE. Membership in that line is the whole
-# assertion. The joiner is IMPORTED from the shipped module — a second copy here would drift, and
-# then this check would certify the copy.
+# BOUND TO ONE BLOCK, NOT UNIONED ACROSS ALL OF THEM (#3451 review round 11). An earlier version
+# fed one set from EVERY `python3 -c` logical line, so moving a `WS0_CFG_*` assignment out of the
+# session-pin prefix and into the CPU-pin invocation's prefix left the total unchanged and the
+# check green — while the session-pin step died at runtime on the absent variable. The consuming
+# block is identified BY THE SHIPPED WRITER IT CALLS, the way this suite locates blocks
+# everywhere, so reordering the driver cannot silently swap the two.
+#
+# Decidable, and it reuses the shipped joiner and census rather than parsing a command prefix:
+# after logical-line joining, a step's assignments and its invocation ARE ONE LINE. Both are
+# IMPORTED — a second copy here would drift, and then this check would certify the copy.
 export_prefix_membership() {
-  python3 - "$REPO_ROOT/scripts/tests" "$1" "$2" <<'PY'
-import pathlib, re, sys
+  python3 - "$REPO_ROOT/scripts/tests" "$1" "$2" "$3" <<'PY'
+import bisect, pathlib, re, sys
 sys.path.insert(0, sys.argv[1])
-from ws0_embedded_python import _join_continuations
-text = pathlib.Path(sys.argv[2]).read_text()
-prefix = sys.argv[3]
-joined, _unused = _join_continuations(text)
-names = sorted(set(re.findall(prefix + r"[A-Z_]+(?==)", text)))
-inline = set()
-for logical in joined.split("\n"):
-    if "python3 -c " + chr(39) not in logical:
+from ws0_embedded_python import _join_continuations, census
+
+path = pathlib.Path(sys.argv[2])
+prefix, needle = sys.argv[3], sys.argv[4]
+text = path.read_text()
+
+# WHICH block consumes this prefix, by the shipped writer its body calls.
+records, _findings = census(path)
+owners = [r for r in records if r["kind"] == "BLOCK" and needle in r["body"]]
+if len(owners) != 1:
+    print(f"AMBIGUOUS: {len(owners)} block(s) call {needle!r}", file=sys.stderr)
+    raise SystemExit(2)
+invocation_line = owners[0]["line"]
+
+joined, omap = _join_continuations(text)
+# The ORIGINAL offset where that invocation's physical line begins.
+line_starts = [0] + [i + 1 for i, ch in enumerate(text) if ch == "\n"]
+if invocation_line > len(line_starts):
+    print(f"UNRESOLVABLE: line {invocation_line} is past end of file", file=sys.stderr)
+    raise SystemExit(2)
+invocation_offset = line_starts[invocation_line - 1]
+
+# The JOINED logical line covering it. Spans are in scan space; their bounds are mapped back
+# through `omap`, so the comparison is against original offsets throughout.
+spans, start = [], 0
+for i, ch in enumerate(joined):
+    if ch == "\n":
+        spans.append((start, i))
+        start = i + 1
+spans.append((start, len(joined)))
+logical = None
+for a, b in spans:
+    if b <= a or a >= len(omap):
         continue
-    for name in names:
-        if name + "=" in logical:
-            inline.add(name)
-print(f"{len(inline)} {len(names)}")
+    if omap[a] <= invocation_offset <= omap[b - 1]:
+        logical = joined[a:b]
+        break
+if logical is None:
+    print(f"UNRESOLVABLE: no logical line covers offset {invocation_offset}", file=sys.stderr)
+    raise SystemExit(2)
+
+names = sorted(set(re.findall(prefix + r"[A-Z_]+(?==)", text)))
+present = [n for n in names if n + "=" in logical]
+print(f"{len(present)} {len(names)}")
 PY
 }
 
@@ -823,12 +860,19 @@ fi
 # present somewhere in the file (#3451 review round 10, finding 1). The set comparisons above
 # collect names GLOBALLY, so a single removed continuation backslash turns an export into a
 # standalone assignment python never sees — the driver dies, and every check here still passes.
-for export_prefix in WS0_CFG_ WS0_PIN_; do
-  read -r in_line total_in_file <<<"$(export_prefix_membership "$DRIVER" "$export_prefix")"
-  if [ "$total_in_file" -gt 0 ] && [ "$in_line" -eq "$total_in_file" ]; then
-    pass "export-prefix ($export_prefix): all $total_in_file assignment(s) share a JOINED LOGICAL LINE with the python3 -c invocation that reads them — so each is genuinely exported, not merely present in the file"
+# Each prefix against ITS OWN consuming block, named by the shipped writer that block calls.
+for export_pair in "WS0_CFG_:write_session_corpus_pin" "WS0_PIN_:pinning_record_path"; do
+  export_prefix="${export_pair%%:*}"
+  export_needle="${export_pair#*:}"
+  if ! read -r in_line total_in_file \
+       <<<"$(export_prefix_membership "$DRIVER" "$export_prefix" "$export_needle")"; then
+    fail "export-prefix ($export_prefix): the membership could not be computed, so the check did not run"
+    continue
+  fi
+  if [ -n "${in_line:-}" ] && [ "${total_in_file:-0}" -gt 0 ] && [ "$in_line" -eq "$total_in_file" ]; then
+    pass "export-prefix ($export_prefix): all $total_in_file assignment(s) share a JOINED LOGICAL LINE with THE BLOCK THAT READS THEM (located by $export_needle) — genuinely exported to that step, not merely present in the file or exported to a different one"
   else
-    fail "export-prefix ($export_prefix): only $in_line of $total_in_file assignment(s) are in the same logical line as the invocation. One outside the contiguous prefix is never exported: the step refuses at run time on the missing variable and its caller exits 2"
+    fail "export-prefix ($export_prefix): only ${in_line:-?} of ${total_in_file:-?} assignment(s) are in the logical line of the block calling $export_needle. One outside that step's contiguous prefix is never exported TO IT: the step refuses at run time on the missing variable and its caller exits 2"
   fi
 done
 
@@ -850,6 +894,16 @@ if text.count(needle) != 1:
 (tmp / "export-relocated.sh").write_text(
     text.replace(needle, "").replace(
         "#!/usr/bin/env bash", '#!/usr/bin/env bash\nWS0_CFG_TEMPS="$TEMPS"', 1))
+# (c) MOVE it into the OTHER step's prefix. This is the round-11 case: the name is still in the
+# file AND still in a `python3 -c` logical line, so a check that unioned across invocations saw
+# nothing wrong while the session-pin step died on the absent variable.
+pin_prefix = 'WS0_PIN_SERVER_CPUS="$SERVER_CPUS" ' + bs + "\n"
+if text.count(pin_prefix) != 1:
+    print(f"INJECTION IMPOSSIBLE: pin-prefix needle occurs {text.count(pin_prefix)} time(s)",
+          file=sys.stderr)
+    raise SystemExit(1)
+(tmp / "export-otherblock.sh").write_text(
+    text.replace(needle, "").replace(pin_prefix, needle + pin_prefix))
 INJECT
 export_inject_rc=$?
 if [ "$export_inject_rc" -ne 0 ]; then
@@ -857,15 +911,16 @@ if [ "$export_inject_rc" -ne 0 ]; then
 else
   export_ctl_ok=1
   export_ctl_detail=""
-  for export_case in nobackslash relocated; do
-    read -r c_in c_total <<<"$(export_prefix_membership "$TMP/export-$export_case.sh" WS0_CFG_)"
+  for export_case in nobackslash relocated otherblock; do
+    read -r c_in c_total \
+      <<<"$(export_prefix_membership "$TMP/export-$export_case.sh" WS0_CFG_ write_session_corpus_pin)"
     if [ "$c_in" -eq "$c_total" ]; then
       export_ctl_ok=0
       export_ctl_detail="$export_ctl_detail $export_case($c_in/$c_total)"
     fi
   done
   if [ "$export_ctl_ok" -eq 1 ]; then
-    pass "export-prefix CONTROL fired: BOTH a removed continuation backslash and an assignment relocated out of the prefix drop it from the invocation's logical line — the two ways an export silently stops being one"
+    pass "export-prefix CONTROL fired: a removed continuation backslash, an assignment relocated out of every prefix, AND one relocated into the OTHER step's prefix all drop it from the consuming block's logical line — including the case a union across invocations could not see"
   else
     fail "export-prefix CONTROL did not fire:$export_ctl_detail — the membership check cannot see an assignment leaving the prefix"
   fi
