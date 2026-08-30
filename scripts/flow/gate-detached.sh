@@ -450,16 +450,31 @@ fi
 # so it is now also enforced as a RULE by a structural assert in the test suite rather than
 # fixed one site at a time.
 #
-# Both names keep the `.heartbeat.tmp.` prefix so they fall inside the gate's existing
-# tree-integrity carve-out, in case a concurrent gate captures the tree mid-probe.
-_hbprobe=$(mktemp "$SUMMARY.heartbeat.tmp.probeXXXXXX" 2>/dev/null) || {
+# Both names must match the gate's tree-integrity carve-out EXACTLY — `.heartbeat.tmp.` followed by
+# six alphanumerics — not merely share its prefix, because a concurrent gate can capture the tree
+# mid-probe and would otherwise call these files a mutation and FAIL ITSELF (roborev job 205).
+#
+# This dependency was already written down here, and it still broke: job 204 narrowed that carve-out
+# from `.heartbeat.tmp.*` to the six-character mktemp shape, and the `probe` prefix put both names
+# outside it. The comment named the consumer; the change was made without reading it. A stated
+# dependency is not a protected one — `scripts/tests/test_gate_detached.sh` now DERIVES every
+# template this file creates beside the summary and asserts the gate's own predicate excuses it, so
+# the two files are checked against each other rather than by whoever remembers.
+_hbprobe=$(mktemp "$SUMMARY.heartbeat.tmp.XXXXXX" 2>/dev/null) || {
   echo "gate-detached: cannot create a file in '$_sumdir', so neither the gate's summary nor" >&2
   echo "               the liveness heartbeat could be published there — every poll of this" >&2
   echo "               gate would answer UNKNOWN. Refusing to launch an unmonitorable gate," >&2
   echo "               rather than burn 30-50 minutes certifying nothing (#3473)." >&2
   exit 1
 }
-_hbprobe2="$_hbprobe.renamed"
+# A SECOND six-character name, not `$_hbprobe.renamed`: the destination has to satisfy the same
+# carve-out. Renaming ONTO an existing file is also closer to what the beater actually does.
+_hbprobe2=$(mktemp "$SUMMARY.heartbeat.tmp.XXXXXX" 2>/dev/null) || {
+  rm -f "$_hbprobe" 2>/dev/null || true
+  echo "gate-detached: cannot create a second file in '$_sumdir' to prove renames work there." >&2
+  echo "               Refusing to launch an unmonitorable gate (#3473)." >&2
+  exit 1
+}
 if ! mv -f "$_hbprobe" "$_hbprobe2" 2>/dev/null; then
   rm -f "$_hbprobe" "$_hbprobe2" 2>/dev/null || true
   echo "gate-detached: cannot RENAME within '$_sumdir', which the heartbeat's atomic publish" >&2
@@ -532,6 +547,25 @@ _reserve="$SUMMARY.launch-lock"
 #
 # Returns 0 only on an AFFIRMATIVE zombie reading. Unmeasurable => 1 (not a zombie), which keeps the
 # caller refusing: "I could not tell" must never license reclaiming a lock that may be live.
+# Is <unit> LIVE? `systemctl is-active --quiet` answers 0 only for exactly "active", so every other
+# outcome — `activating` (a unit still STARTING), `deactivating`, a dbus/query failure — fell into
+# the "dead, reclaim it" branch and let a second gate launch against a running one (roborev job 205).
+# That is this repository's recurring shape: a permissive branch keyed on `!= good` rather than on an
+# affirmative bad state, so every unmeasured state inherits the permissive answer.
+#
+# Reclamation therefore requires an AFFIRMATIVE terminal reading. Transitional states are LIVE, and
+# an unmeasurable one is LIVE too — refusing to launch costs a retry, reclaiming a live unit's path
+# costs two gates writing one summary.
+_unit_is_live() {  # <unit> -> 0 = live or unmeasurable (refuse), 1 = affirmatively not running
+  local st rc
+  st=$(systemctl --user show -p ActiveState --value "$1" 2>/dev/null); rc=$?
+  if [ "$rc" != 0 ] || [ -z "$st" ]; then return 0; fi   # could not measure => treat as LIVE
+  case "$st" in
+    active|activating|reloading|refreshing|deactivating) return 0 ;;
+    *) return 1 ;;                                        # inactive / failed => affirmatively gone
+  esac
+}
+
 _proc_is_zombie() {  # <pid> -> 0 = provably a zombie, 1 = not, or unmeasurable
   local pid=$1 _st _state
   if _st=$(cat "/proc/$pid/stat" 2>/dev/null) && [ -n "$_st" ]; then
@@ -638,8 +672,7 @@ if ! ln -s "$_res_target" "$_reserve" 2>/dev/null; then
          fi ;;
     esac
     # ...then the unit, which is what keeps the lock meaningful after the launcher exits.
-    if [ "$_live" = no ] && [ -n "$_own_unit" ] \
-       && systemctl --user is-active --quiet "$_own_unit" 2>/dev/null; then
+    if [ "$_live" = no ] && [ -n "$_own_unit" ] && _unit_is_live "$_own_unit"; then
       _live=yes
     fi
     # An UNREADABLE or unparseable link is not proof of death either — refuse rather than guess.

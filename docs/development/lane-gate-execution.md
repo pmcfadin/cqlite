@@ -572,6 +572,41 @@ for stating the *shape* and not just fixing instances. Zombie state is read affi
 **premise** too — that `kill -0` really does report a live-looking zombie — so it cannot pass for the
 wrong reason once the platform changes.
 
+### The reservation lock: five consecutive rounds, and why it was kept anyway
+
+Recorded because the next person to touch this should start with the history rather than rediscover
+it. The summary-path reservation produced a defect in **five consecutive review rounds**: an
+incomplete-owner window whose unconditional refusal blocked the path permanently (196); the age
+deadline that fixed it, which could steal a merely **paused** launcher's live lock (199); "atomic
+rename is a compare-and-swap", which was simply **false** (203); a zombie launcher reading as live,
+so its reservation could never self-heal (204); and `is-active --quiet` treating `activating` and
+query failures as death (205). Every fix was correct; the concentration is the point.
+
+Two properties make this more than an ordinary buggy component. **Its failure mode IS the harm it
+prevents** — three of the five (the deadline, the false CAS, the unit-state read) put *two gates on
+one summary path*, exactly what the lock exists to stop, so a defect here actively produces the
+damage rather than merely failing to prevent it. And **it enforces no new invariant**: #2874 already
+forbids two gates on one summary path and the gate de-exports its summary path so no child inherits
+it, so this lock DETECTS a violation of an existing rule. Its value is a better diagnostic than
+silent mutual corruption, not a new guarantee.
+
+It was kept, deliberately, on one distinction: the last round's fixes close **classes**, where the
+earlier ones closed **instances**. An affirmative `ActiveState` reading covers every state
+systemd can report including the unmeasurable one, and the launcher/carve-out contract is now
+composed by a derived test rather than asserted in prose. If a further defect of the
+"next unnamed variant" kind appears here, the correct response is to remove the lock and let #2874
+carry the invariant — not to write patch six.
+
+**The transferable lesson is about CONTRACTS BETWEEN FILES.** Round 205's two findings were both of
+that shape — the launcher's probe names against the gate's carve-out shape, and the reclaim decision
+against systemd's state vocabulary. In each, both files were internally correct and their AGREEMENT
+was wrong; in each, the dependency had been written down in a comment at the very site that broke.
+**A stated dependency is not a protected one**, because prose is read by whoever happens to look. The
+carve-out contract is now DERIVED at run time — every `$SUMMARY.`-anchored artifact shape is
+extracted from the launcher's source and put through the gate's real predicate — which immediately
+found **five** such shapes where the fix had considered two. A hand-written list would have encoded
+the same incomplete mental model that caused the break.
+
 ### The launcher owns no second copy of the verdict grammar
 
 The launcher needs to know whether a gate already reached a terminal verdict (a preflight

@@ -892,7 +892,10 @@ if grep -q '_reserve="$SUMMARY.launch-lock"' "$LAUNCHER"; then
 else
   bad "4b.73 the summary path is reserved before launch" "not found"
 fi
-if grep -q 'is-active --quiet "$_own_unit"' "$LAUNCHER"; then
+# Re-pointed (job 205): this asserted the bare `is-active --quiet` form, which 4b.106 now requires to
+# be ABSENT — the two would have contradicted each other. Liveness is two readings, either of which
+# holds the reservation: the launcher pid (alive throughout its own acquisition) and the unit.
+if grep -q '_unit_is_live "$_own_unit"' "$LAUNCHER" && grep -qF 'kill -0 "$_own_pid"' "$LAUNCHER"; then
   ok "4b.74 a reservation is only honoured while its owner is LIVE (self-healing)"
 else
   bad "4b.74 a reservation is only honoured while its owner is live" "no staleness test"
@@ -1227,6 +1230,62 @@ for _n in ".agent-gate-summary.txt.heartbeat.tmp.foo/src/lib.rs" \
 done
 [ "$_tx_leaks" = 0 ] && ok "4b.101 no arm excludes a nested path (subtree blindness closed)" \
                      || bad "4b.101 no arm excludes a nested path" "$_tx_leaks arm(s) still excuse a subtree"
+
+# --- roborev job 205: the launcher's artifacts and the gate's carve-out must AGREE -------------
+# gate-detached.sh writes artifacts beside the summary; agent-gate.sh's tree-integrity carve-out
+# decides which sibling names are excused. Those are two files with one contract, and job 204 broke
+# it: narrowing the carve-out to the six-character mktemp shape put the launcher's
+# `.heartbeat.tmp.probeXXXXXX` outside it, so a concurrent gate would call the probe a tree mutation
+# and FAIL ITSELF. The dependency was stated in a comment at the probe and still broke, because a
+# comment is read by whoever happens to look.
+#
+# DERIVED, not curated (CLAUDE.md): every `$SUMMARY.`-anchored name in the launcher is extracted from
+# source at run time and put through the gate's REAL predicate, so a newly-added artifact shape is
+# covered without editing this test.
+_shapes=$(grep -oE '\$SUMMARY\.[A-Za-z0-9._-]+' "$LAUNCHER" | sed 's/^\$SUMMARY//' | sort -u)
+# `$_reserve` is `$SUMMARY.launch-lock`, so names built on IT are siblings too.
+_shapes="$_shapes
+.launch-lock.mutex"
+_shape_n=0; _shape_bad=0
+for _sh in $_shapes; do
+  [ -n "$_sh" ] || continue
+  _concrete=${_sh//XXXXXX/aB3xyZ}
+  case "$_concrete" in *X*) continue ;; esac   # an unresolved template we cannot instantiate
+  _shape_n=$((_shape_n+1))
+  if ! _texcl ".agent-gate-summary.txt$_concrete"; then
+    _shape_bad=$((_shape_bad+1)); echo "     NOT excused by the gate: .agent-gate-summary.txt$_concrete"
+  fi
+done
+if [ "$_shape_n" -lt 3 ]; then
+  bad "4b.105 every launcher artifact shape is excused by the gate's carve-out" \
+      "only $_shape_n shapes derived — the derivation failed, so this proves nothing"
+elif [ "$_shape_bad" = 0 ]; then
+  ok "4b.105 all $_shape_n derived launcher artifact shapes are excused by the gate's carve-out"
+else
+  bad "4b.105 every launcher artifact shape is excused by the gate's carve-out" \
+      "$_shape_bad of $_shape_n would be read as a tree mutation"
+fi
+
+# Unit liveness must be an AFFIRMATIVE terminal reading. `is-active --quiet` answers 0 only for
+# exactly "active", so `activating` (a unit still STARTING) and any query failure fell into the
+# "dead, reclaim it" branch — two gates on one summary path.
+if grep -q '_unit_is_live' "$LAUNCHER" && ! grep -q 'is-active --quiet "$_own_unit"' "$LAUNCHER"; then
+  ok "4b.106 reservation liveness reads ActiveState, not a bare is-active exit code"
+else
+  bad "4b.106 reservation liveness reads ActiveState" "a bare is-active still decides reclamation"
+fi
+_lifecode=$(sed -n '/^_unit_is_live()/,/^}/p' "$LAUNCHER")
+_missing=""
+for _st in activating deactivating reloading; do
+  printf '%s' "$_lifecode" | grep -q "$_st" || _missing="$_missing $_st"
+done
+[ -z "$_missing" ] && ok "4b.107 transitional unit states count as LIVE" \
+                   || bad "4b.107 transitional unit states count as live" "missing:$_missing"
+if printf '%s' "$_lifecode" | grep -q 'could not measure => treat as LIVE'; then
+  ok "4b.108 an unmeasurable unit state counts as LIVE (refuse), never as dead"
+else
+  bad "4b.108 an unmeasurable unit state counts as live" "unmeasurable may reach the reclaim branch"
+fi
 
 # --- roborev job 204: cleanup must not signal a pid it cannot prove is ours ----------------------
 # A pid is not an identity. These suites kill processes long before cleanup, and pids are reused, so
