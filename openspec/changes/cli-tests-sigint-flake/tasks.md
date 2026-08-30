@@ -106,3 +106,96 @@ surface, no workflow, no gate component and no doctrine-visible behaviour, so CL
   round-1 evidence was not automatically valid): plant A -> stage (c) in 0.03s;
   plant B -> stage (d) after 25.09s, still reporting the handler-entry marker was
   observed 191us after SIGINT. Worktrees removed; lane tree never mutated.
+
+### Round 3 — the floor invariant (lead blocker: the change was TIGHTER than what it replaced)
+
+The round-1/2 stage (d) was `base 25s` where the old code had a flat 60s, and the hung-flush RED
+run failed at exactly **25.0s** — proving the regression, because a silent flush produces no
+progress events, so the stall window is already satisfied and the effective bound IS `derived`.
+
+**Old bound -> new stages mapping (the floor invariant, BY COMPOSITION).** Each group's BASES must
+sum to at least the old bound. Asserted by
+`no_wait_is_tighter_than_the_bound_it_replaced`, not by this table.
+
+| old bound (pre-#3515) | what it covered | new stages | new base sum | verdict |
+|---|---|---|---|---|
+| test 1 `wait_for_line(OK, 60s)` | spawn + boot + read + execute + print | (a) 40s + (b) 25s | **65s** | >= 60s OK |
+| test 1 `wait_timeout(60s)` after SIGINT | handler entry + flush + exit | (c) 20s + (d) 60s | **80s** | >= 60s OK |
+| — (none: `select_rows` was unbounded) | read-side durability SELECT | (e) 25s | — | NEW ceiling |
+| test 2 per-write ack, id=0, 60s | boot + write round-trip | (a) 40s + (b0) 25s | **65s** | >= 60s OK |
+| test 2 per-write ack, id=1..4, 60s each | write round-trip | (b1..4) 10s each | 10s | **DECLARED EXCEPTION** |
+| test 2 `wait_for_sstable(60s)` | mid-session flush | (c) 35s | 35s | **DECLARED EXCEPTION** |
+| test 2 `wait_timeout(60s)` on EOF | flush + finalize + exit | (d) 35s | 35s | **DECLARED EXCEPTION** |
+| — (none: unbounded) | read-side durability SELECT | (e) 20s | — | NEW ceiling |
+
+**Why the exception is unavoidable, stated rather than hidden:** the sibling's old bounds were
+SEVEN independent 60s deadlines = **420s nominal** against nextest's **240s hard kill**, so they
+were never simultaneously realizable — a run that used them would have been KILLED with no message,
+the outcome this change exists to prevent. For the sibling, "60s per stage" is a nominal figure and
+the realizable old bound on any late stage was "whatever remains of 240s", which is exactly what
+`StageClock::clip` now computes, with an attributed message instead of a kill. Those three groups
+are floored at `SIBLING_STAGE_FLOOR` (10s) and the sibling's total base sum is held at >= 3x the old
+bound (195s >= 180s). This IS a reduction in two nominal ceilings (60s -> 35s).
+
+`TEST_TOTAL_BUDGET` 180s -> **230s**; nominal cap sums 220s (test 1) and 221s (test 2), both under
+it and under the 240s kill.
+
+**Baselines cut to the measured noise floor.** 500ms -> **100ms** (t_boot) and 200ms -> **50ms**
+(t_ack). Rationale: `scale = observed / quiet_baseline`, so a baseline far above the quiet
+measurement makes the mechanism INERT — measured, `scale` stayed at EXACTLY 1.000 in every run
+including load average 116. The asymmetry that makes small baselines safe: calibration can only
+LOOSEN, so over-eager engagement cannot fail a test, while under-eager engagement is the real hazard.
+
+**FIRST OBSERVED FIRING of the calibration** (220 spinners, load avg 91 -> 151, 10/10 pass in 1.14s):
+
+| | measured | derived budget |
+|---|---|---|
+| test 1 (b) write-ack | t_boot 206.2ms | **30.00s = clamp(base 25s x scale 2.062, .., cap 30s)** |
+| test 1 (e) durability-read | t_boot 206.2ms | **35.00s = base 25s x 2.062, capped** |
+| test 1 (d) clean-exit | t_ack 3.0ms | 60.00s (scale 1.000) |
+| test 2 (c) mid-session-flush | t_ack 103.7ms | **40.00s = base 35s x scale 2.074, capped** |
+| test 2 (d) eof-exit | t_ack 103.7ms | **40.00s = base 35s x 2.074, capped** |
+| test 2 stall window | t_ack 103.7ms | **10.37s = base 5s x 2.074** |
+
+**Calibration unit tests (new, all green):** `no_wait_is_tighter_than_the_bound_it_replaced`,
+`the_nominal_cap_sums_stay_under_the_total_budget`,
+`the_baselines_sit_just_above_the_measured_quiet_noise_floor`,
+`calibration_engages_on_a_contended_observation`. 10/10 pass in 0.18s quiet.
+
+**The asserts were themselves RED-verified** (each plant applied in the lane, run, reverted; tree
+clean after):
+
+| plant | result |
+|---|---|
+| stage (d) base back to 25s | RED: `no_wait_is_tighter_than_the_bound_it_replaced` |
+| sibling sstable base under the declared floor | RED: same test, the floor loop |
+| a cap sum pushed over the total | RED: `the_nominal_cap_sums_stay_under_the_total_budget` |
+| `ACK_QUIET_BASELINE` inflated 1000x | **GREEN — a defect in the assert**, fixed; see below |
+
+The fourth plant exposed a real defect in my own test:
+`calibration_engages_on_a_contended_observation` derived its observation FROM the baseline
+(`ACK_QUIET_BASELINE * 8`), making it invariant to the baseline's value — so the exact defect that
+left the calibration inert through every real run left it green. **A test whose input is scaled by
+the constant under examination cannot detect a wrong value for that constant.** Split: the formula
+test keeps baseline-relative inputs and says so; a new test asserts the baselines against the
+recorded MEASURED quiet values (`MEASURED_QUIET_T_BOOT`/`MEASURED_QUIET_T_ACK`) — at or above them,
+and no more than 10x above them — plus that an observation 10x the measured floor actually moves
+stage (d)'s budget. Re-planted: RED, with
+`ACK_QUIET_BASELINE 50s is more than 10x the measured quiet t_ack 43ms: the calibration would be inert`.
+
+**Product RED plants re-run at the new floors:** plant A (handler removed) -> **stage (c)**, 0.02s;
+plant B (flush hangs) -> **stage (d)** after **60.08s** (was 25.0s), i.e. exactly the old bound, no
+longer sooner than it.
+
+### What the loaded runs do NOT establish (AC1, honest scope)
+
+The three loaded runs (40 spinners/load 30; 220 spinners/load 116; 220 spinners/load 151) show the
+tests are fast and pass under synthetic CPU oversubscription, and — after the baseline fix — that
+the calibration engages. They **do NOT reproduce #3515's condition.** The reported failure came
+from six concurrent `agent-gate.sh` processes, which contend for page cache, memory bandwidth, disk
+I/O and process/thread slots as well as CPU; N spin loops contend for CPU alone. The observed
+inflation here was ~7x on `t_boot`/`t_ack`, against the ~175x the issue implies on the shutdown
+stage. So: **#3515's condition is NOT reproduced.** What is established is (i) the stage that flaked
+is no longer bounded below what it was, (ii) it is progress-checked, (iii) the calibration
+demonstrably fires under real contention, and (iv) no failure message asserts an unestablishable
+cause. Whether the class is closed on the real gate host is not shown by these runs.
