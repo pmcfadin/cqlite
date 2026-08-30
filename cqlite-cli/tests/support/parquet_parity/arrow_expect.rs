@@ -41,8 +41,8 @@
 //! | `timestamp`               | `Timestamp(Millisecond, UTC)`         | Cassandra timestamps are epoch MILLIS, UTC |
 //! | `date`                    | `Date32`                              | days since epoch |
 //! | `time`                    | `Time64(Nanosecond)`                  | nanos since midnight |
-//! | `decimal`                 | `Decimal128(p ≤ 38, s ≥ 0)`           | see below |
-//! | `varint`                  | `Decimal128(p ≤ 38, 0)`               | integer domain, arbitrary precision |
+//! | `decimal`                 | `Decimal128(38, s ≥ 0)`               | see below |
+//! | `varint`                  | `Decimal128(38, 0)`                   | integer domain, arbitrary precision |
 //! | `inet`                    | `Utf8`                                | see below |
 //! | `duration`                | `Interval(MonthDayNano)` or `Utf8`    | see below |
 //! | `list<E>` / `set<E>`      | `List<expected(E)>`                   | Arrow has no Set type |
@@ -55,10 +55,12 @@
 //!
 //!   * **`decimal`.** CQL `decimal` is arbitrary precision AND arbitrary scale;
 //!     Arrow has no such type, so any `Decimal128(p, s)` is a lossy encoding
-//!     CHOICE, not a wrong type. The expectation therefore fixes the type FAMILY
-//!     (128-bit decimal, `p ≤ 38`, `s ≥ 0`) and leaves the scale free — a scale
-//!     too small to hold a value is a VALUE defect, which the per-cell
-//!     comparison catches on its own.
+//!     CHOICE, not a wrong type. The expectation therefore fixes the type
+//!     (128-bit decimal at the export's own precision 38, `s ≥ 0`) and leaves
+//!     only the SCALE free — a scale too small to hold a value is a VALUE
+//!     defect, which the per-cell comparison catches on its own, whereas a
+//!     narrower PRECISION shrinks the representable domain while every current
+//!     fixture value still fits, so only the type check can see it.
 //!   * **`varint`.** Arbitrary-precision INTEGER, so `Decimal128(_, 0)` is
 //!     faithful while `Int64` would silently truncate; scale is pinned to 0.
 //!   * **`duration`.** The faithful Arrow type is
@@ -113,12 +115,25 @@ use arrow::datatypes::{DataType, Field, IntervalUnit, TimeUnit};
 use super::cql_type::{ColumnType, CqlTypeSpec};
 use super::unsupported::{Unsupported, UDT_STRUCT_FIELD_TYPES};
 
+/// The ONE `Decimal128` precision the Parquet export writes a `decimal` or a
+/// `varint` at, and therefore the only one this harness accepts.
+///
+/// Mirrors `cqlite-core`'s `export::arrow_schema::DECIMAL_MAX_PRECISION` (which
+/// is crate-private): both `decimal` → `Decimal128(38, DECIMAL_FIXED_SCALE)` and
+/// `varint` → `Decimal128(38, 0)` are written at it. It is an EQUALITY, never a
+/// bound — a narrower precision is a shrunken domain, not a valid alternative
+/// spelling.
+pub const DECIMAL128_EXPORT_PRECISION: u8 = 38;
+
 /// An accepted Arrow type for one declared CQL type.
 #[derive(Debug, Clone)]
 pub enum ArrowShape {
     /// Exactly one of these Arrow types, compared by equality.
     OneOf(Vec<DataType>),
-    /// `Decimal128(p ≤ 38, s)`; `scale = Some(0)` pins `varint`'s integer domain.
+    /// `Decimal128(38, s)`; `scale = Some(0)` pins `varint`'s integer domain.
+    ///
+    /// The PRECISION is pinned at [`DECIMAL128_EXPORT_PRECISION`], not bounded
+    /// by it: see [`ArrowShape::check`].
     Decimal128 { scale: Option<i8> },
     /// `Timestamp(Millisecond, <a UTC zone>)`.
     UtcMillisTimestamp,
@@ -252,13 +267,22 @@ impl ArrowShape {
         };
         match self {
             ArrowShape::OneOf(types) => yes_no(types.iter().any(|t| t == actual)),
+            // The PRECISION is required to BE `DECIMAL128_EXPORT_PRECISION`,
+            // never merely to fit within it. `p <= 38` accepted every narrower
+            // precision, and a narrower precision is exactly what an export
+            // regression looks like: `Decimal128(9, 0)` for a `varint` still
+            // holds every value in the CURRENT fixture, so the values compare
+            // EQUAL and the type check was the only thing that could have seen
+            // that the exported schema can no longer represent the declared
+            // domain. "The fixture's values fit" is not "the schema is right"
+            // (issue #1490).
             ArrowShape::Decimal128 { scale } => yes_no(match actual {
                 DataType::Decimal128(precision, s) => {
                     let scale_ok = match scale {
                         Some(want) => *s == *want,
                         None => *s >= 0,
                     };
-                    *precision <= 38 && scale_ok
+                    *precision == DECIMAL128_EXPORT_PRECISION && scale_ok
                 }
                 _ => false,
             }),
@@ -325,8 +349,12 @@ impl ArrowShape {
                 .map(render_arrow)
                 .collect::<Vec<_>>()
                 .join(" | "),
-            ArrowShape::Decimal128 { scale: None } => "decimal128(p<=38,s>=0)".to_string(),
-            ArrowShape::Decimal128 { scale: Some(s) } => format!("decimal128(p<=38,{s})"),
+            ArrowShape::Decimal128 { scale: None } => {
+                format!("decimal128({DECIMAL128_EXPORT_PRECISION},s>=0)")
+            }
+            ArrowShape::Decimal128 { scale: Some(s) } => {
+                format!("decimal128({DECIMAL128_EXPORT_PRECISION},{s})")
+            }
             ArrowShape::UtcMillisTimestamp => "timestamp(ms,UTC)".to_string(),
             ArrowShape::List(elem) => format!("list<{}>", elem.describe()),
             ArrowShape::Map(k, v) => format!("map<{},{}>", k.describe(), v.describe()),

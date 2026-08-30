@@ -250,6 +250,94 @@ fn expected_arrow_type_pins_each_scalar() {
     }
 }
 
+/// A `Decimal128` NARROWER than the export's own precision 38 must be REJECTED
+/// for `decimal` and `varint`, at the top level and nested.
+///
+/// The state this control exists for: the accept-list used to be `p <= 38`, so an
+/// export regression narrowing `varint` from `Decimal128(38, 0)` to
+/// `Decimal128(9, 0)` stayed `Valid` for as long as every value in the CURRENT
+/// fixture fitted — and the values then compared EQUAL, because they do fit. The
+/// exported schema can no longer represent the declared domain, and the type
+/// check is the only stage that can say so: "the fixture's values fit" is not
+/// "the schema is right" (issue #1490).
+#[test]
+fn decimal128_narrower_precision_than_38_is_rejected() {
+    use arrow::datatypes::{DataType, Field};
+    use parquet_parity::arrow_expect::{expected_shape, ShapeVerdict, DECIMAL128_EXPORT_PRECISION};
+    use parquet_parity::cql_type::parse_column;
+    use std::sync::Arc;
+
+    assert_eq!(
+        DECIMAL128_EXPORT_PRECISION, 38,
+        "the export writes decimal/varint at Decimal128(38, _); this control is about that pin"
+    );
+
+    let verdict = |declared: &str, actual: &DataType| -> ShapeVerdict {
+        let col = parse_column("c", declared, &[]).expect("declared type must parse");
+        expected_shape(&col.spec)
+            .expect("decimal/varint have a declared expectation")
+            .check(actual)
+    };
+    let list_of = |t: DataType| DataType::List(Arc::new(Field::new("item", t, true)));
+
+    // The pinned precision is accepted…
+    for (declared, ok) in [
+        ("decimal", DataType::Decimal128(38, 9)),
+        ("varint", DataType::Decimal128(38, 0)),
+    ] {
+        assert_eq!(
+            verdict(declared, &ok),
+            ShapeVerdict::Valid,
+            "'{declared}' must accept the export's own {ok:?}"
+        );
+    }
+
+    // …and EVERY narrower one is Wrong, whatever the scale. Each of these holds
+    // every value in today's fixtures, so no value comparison could red on it.
+    for (declared, narrow) in [
+        ("decimal", DataType::Decimal128(18, 9)),
+        ("decimal", DataType::Decimal128(9, 9)),
+        ("decimal", DataType::Decimal128(37, 9)),
+        ("varint", DataType::Decimal128(9, 0)),
+        ("varint", DataType::Decimal128(18, 0)),
+        ("varint", DataType::Decimal128(37, 0)),
+    ] {
+        assert_eq!(
+            verdict(declared, &narrow),
+            ShapeVerdict::Wrong,
+            "'{declared}' must REJECT the narrowed {narrow:?} — the current values still fit \
+             it, so the type check is the only stage that can see the shrunken domain"
+        );
+    }
+
+    // A wider-than-Decimal128 precision is not a valid alternative either: it is
+    // not what the export writes, and `arrow_rows` decodes only `Decimal128`.
+    assert_eq!(
+        verdict("decimal", &DataType::Decimal128(39, 9)),
+        ShapeVerdict::Wrong,
+        "a precision above the type's own 38 must be REJECTED, not tolerated"
+    );
+
+    // The narrowing must be caught NESTED too — the recursion carries the same
+    // expectation into a collection element.
+    let nested = |declared: &str, actual: &DataType| -> ShapeVerdict {
+        let col = parse_column("c", declared, &[]).expect("declared type must parse");
+        expected_shape(&col.spec)
+            .expect("collections of decimal/varint have a declared expectation")
+            .check(actual)
+    };
+    assert_eq!(
+        nested("list<varint>", &list_of(DataType::Decimal128(38, 0))),
+        ShapeVerdict::Valid,
+        "list<varint> must accept the export's own Decimal128(38, 0) element"
+    );
+    assert_eq!(
+        nested("list<varint>", &list_of(DataType::Decimal128(9, 0))),
+        ShapeVerdict::Wrong,
+        "list<varint> must REJECT a narrowed element precision"
+    );
+}
+
 /// Nested types are matched structurally: element/key/value types recurse, and a
 /// UDT must be a `Struct` (#3556's `Utf8` flattening is exactly this check).
 #[test]
