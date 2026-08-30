@@ -134,7 +134,8 @@ were never simultaneously realizable — a run that used them would have been KI
 the outcome this change exists to prevent. For the sibling, "60s per stage" is a nominal figure and
 the realizable old bound on any late stage was "whatever remains of 240s", which is exactly what
 `StageClock::clip` now computes, with an attributed message instead of a kill. Those three groups
-are floored at `SIBLING_STAGE_FLOOR` (10s) and the sibling's total base sum is held at >= 3x the old
+are floored at `SIBLING_STAGE_FLOOR` (10s — a constant deleted in round 4; this paragraph is the
+round-3 position, retained as history) and the sibling's total base sum is held at >= 3x the old
 bound (195s >= 180s). This IS a reduction in two nominal ceilings (60s -> 35s).
 
 `TEST_TOTAL_BUDGET` 180s -> **230s**; nominal cap sums 220s (test 1) and 221s (test 2), both under
@@ -222,17 +223,28 @@ the round-3 blocker relocated. Fixed by separating the two properties:
 
 | stage | before | after | old bound | per-op floor |
 |---|---|---|---|---|
-| (b1..4) per-write ack | `spec(10, 12)` | `spec(60, 60)` + shared `GroupBudget` 60s | 60s each | ✓ 60s |
+| (b1..4) per-write ack | `spec(10, 12)` | `spec(60, 70)`, aggregate bounded by `StageClock::clip` | 60s each | ✓ 60s |
 | (c) mid-session flush | `spec(35, 40)` | `spec(60, 70)` | 60s | ✓ 60s |
 | (d) EOF exit | `spec(35, 40)` | `spec(60, 70)` | 60s | ✓ 60s |
 
-`GroupBudget` gives each repeated operation `min(per-op ceiling, remaining group)`, so a reduction
-fires ONLY after earlier operations have genuinely consumed the headroom, and `Budget::describe`
-then reports `CLIPPED ... by the SHARED GROUP BUDGET ... contingent on real consumption`. The group
-total is exactly ONE `OLD_BOUND`: the repeats collectively get what any one of them was individually
-allowed, and any one may draw all of it. `SIBLING_STAGE_FLOOR` and the DECLARED EXCEPTION are
-**deleted**, not reworded — the sibling now satisfies the floor directly.
-Post-boot envelope: 60+60+60+20 = 200s <= 230s.
+**`StageClock` IS the group deadline** (settled in round 5; an intermediate version of this fix added
+a separate `GroupBudget` type, which was a second mechanism for a job the clock already did — see
+round 5). Each sibling stage carries the FULL old 60s bound as its base, and `clip` enforces the
+aggregate against what has ACTUALLY been consumed of `TEST_TOTAL_BUDGET`. So a single contended
+operation still reaches the full old ceiling when its siblings ran fast, any reduction is contingent
+on genuine exhaustion, and a stage that cannot even reach its own base is marked `starved` and says
+so. `SIBLING_STAGE_FLOOR` and the DECLARED EXCEPTION are **deleted**, not reworded — the sibling now
+satisfies the floor directly.
+
+**The position, stated honestly, because it IS a reduction relative to the `GroupBudget` design:**
+with the clock alone, several slow early acks CAN consume envelope that later stages then do not get.
+The `GroupBudget` capped the four acks' SUM and so protected the tail. The difference is not that the
+loss cannot happen — it is that a stage which loses now NAMES the exhaustion
+(`TOTAL BUDGET ALREADY EXHAUSTED BY EARLIER STAGES ... A failure here is about the budget, NOT about
+the property under test`) instead of failing as though the property did not hold. On a host slow
+enough for four acks to eat ~200s the test cannot pass inside the 240s kill under either design, so
+what is actually lost is the ability to attribute the loss to the acks rather than to the tail — and
+that is bought back by the `starved` marker naming which stages had already consumed the budget.
 
 **Finding 2 (BLOCKER) — a new uncalibrated 5s bound.** The read-side pipe collection's hardcoded
 `recv_timeout(5s)` is now bounded by stage (e)'s CALIBRATED budget, itself bounded by
