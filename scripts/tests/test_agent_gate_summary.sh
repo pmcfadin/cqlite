@@ -1129,10 +1129,17 @@ done
 perf_host_par_f=/proc/sys/kernel/perf_event_paranoid
 perf_host_kptr_f=/proc/sys/kernel/kptr_restrict
 perf_host_os=$(uname -s 2>/dev/null || echo unknown)
+# TWO skips per skip branch, because the run branch below emits TWO verdicts (the
+# perf-token assert and the accelerators-line assert). A single skip for a two-verdict
+# section under-accounts by one, which at an exact ASSERT_FLOOR is a FALSE RED on Darwin
+# or on a hardened box where /proc/sys/kernel/{perf_event_paranoid,kptr_restrict} is
+# masked (issue #1465 round 14, Y1). Same 1:1 rule as the r18/r32/featoracle sites.
 if [ "$perf_host_os" != Linux ]; then
-  skipped "perf-host: host is $perf_host_os, not Linux — perf_event_paranoid/kptr_restrict are Linux controls (9f-darwin covers the no-token contract)"
+  skipped "perf-host[token]: host is $perf_host_os, not Linux — perf_event_paranoid/kptr_restrict are Linux controls (9f-darwin covers the no-token contract)"
+  skipped "perf-host[accelerators-line]: host is $perf_host_os, not Linux — the derived-token accelerators line was NOT verified here"
 elif [ ! -r "$perf_host_par_f" ] || [ ! -r "$perf_host_kptr_f" ]; then
-  skipped "perf-host: $perf_host_par_f / $perf_host_kptr_f unreadable on this box — no real state to derive an expectation from"
+  skipped "perf-host[token]: $perf_host_par_f / $perf_host_kptr_f unreadable on this box — no real state to derive an expectation from"
+  skipped "perf-host[accelerators-line]: $perf_host_par_f / $perf_host_kptr_f unreadable — the derived-token accelerators line was NOT verified here"
 else
   perf_host_par=$(tr -d '[:space:]' <"$perf_host_par_f")
   perf_host_kptr=$(tr -d '[:space:]' <"$perf_host_kptr_f")
@@ -2060,7 +2067,11 @@ else
     . "$rpf_body"
     rpf_out=$(_resolved_package_features cqlite-core --features legacy-heuristics 2>/dev/null || true)
     if [ -z "$rpf_out" ]; then
-      echo "SKIP - 1699-featoracle-behaviour: cargo present but the resolve returned nothing (offline registry?) — NOT verified here"
+      # Routed through skipped(), ONCE PER DISPLACED VERDICT (Y2): this branch skips both
+      # the behaviour and the complement assert, and a bare `echo` incremented nothing at
+      # all — invisible to the accounting rather than merely miscounted.
+      skipped "1699-featoracle-behaviour: cargo present but the resolve returned nothing (offline registry?) — NOT verified here"
+      skipped "1699-featoracle-complement: cargo present but the resolve returned nothing (offline registry?) — NOT verified here"
     else
       _leaked=""
       for _f in parquet cli-helpers arrow arrow-shape-corpus producer-fault-injection; do
@@ -2084,7 +2095,8 @@ else
       fi
     fi
   else
-    echo "SKIP - 1699-featoracle-behaviour: cargo not available — the dependent-only-feature regression was NOT verified here"
+    skipped "1699-featoracle-behaviour: cargo not available — the dependent-only-feature regression was NOT verified here"
+    skipped "1699-featoracle-complement: cargo not available — the enabled-feature complement was NOT verified here"
   fi
 fi
 
@@ -4631,6 +4643,13 @@ else
   [ -z "$nll_ambient" ] || { nll_v1_ok=0; echo "  the lane keys on an ambient CI marker: $nll_ambient"; }
   grep -q "resolveBudgetRelaxation" "$nll_leakfile_v1" \
     || { nll_v1_ok=0; echo "  the lane has no named opt-in resolver"; }
+  # Y4: the in-lane strictness control keys on CQLITE_JEST_JSON as its "this is the gate"
+  # marker. NOTHING otherwise pins the pairing, so a rename on either side would silently
+  # turn the control into a no-op instead of reddening. Both halves asserted here.
+  printf '%s' "$nll_comp_v1" | grep -q 'CQLITE_JEST_JSON=' \
+    || { nll_v1_ok=0; echo "  node-bindings no longer EXPORTS CQLITE_JEST_JSON — the lane-side strictness control has no marker to read"; }
+  grep -q 'process\.env\.CQLITE_JEST_JSON' "$nll_leakfile_v1" \
+    || { nll_v1_ok=0; echo "  the lane no longer READS CQLITE_JEST_JSON — its gate-of-record strictness assertion cannot fire"; }
 fi
 if [ "$nll_v1_ok" -eq 1 ]; then
   ok "1465-gate-strict: node-bindings unsets CQLITE_LEAK_BUDGET_RELAX for all $nll_env_launches node launches, every -u PRECEDES every assignment in all $nll_order_seen of them (the X1 full-gate hazard), and the lane decides relaxation by a named opt-in rather than an ambient CI marker"
@@ -4752,6 +4771,29 @@ else
     ok "1465-budget-list: the gate expects $nll_expected_n named budget test(s), all present in the lane, and the lane declares exactly that many SUFFIX-BEARING budget tests"
   else
     bad "1465-budget-list: expected=$nll_expected_n suffix-bearing-in-lane=$nll_actual_n missing=$nll_missing"
+  fi
+fi
+
+# Y3 (round 14): a skip announced with a bare `echo` is INVISIBLE to SKIPPED_TOOLING, and
+# that is how the featoracle sites (Y2) went unaccounted — two displaced verdicts that
+# incremented nothing. This guard scans THIS FILE for any SKIP announcement that does not
+# go through `skipped()`.
+#
+# WHAT IT CANNOT COVER, stated so nobody reads it as covering both halves: it checks the
+# ROUTE, never the COUNT. A site that calls `skipped()` ONCE while its run branch emits
+# nine verdicts (the r32 shape) is invisible here — that is the Y1/Y2 class, and no static
+# check can see it, because the displaced count is a property of the branch not taken.
+# Comment lines are excluded (this paragraph names the pattern it forbids).
+self_src_="$SCRIPT_DIR/$(basename "$0")"
+if [ ! -r "$self_src_" ]; then
+  bad "skip-routing: cannot read $self_src_ to verify that no SKIP announcement bypasses skipped()"
+else
+  bypass_=$(grep -nE '^[^#]*(echo|printf)[^|]*"[[:space:]]*(SKIP|skip)[[:space:]-]' "$self_src_" \
+            | grep -v 'skipped()' || true)
+  if [ -z "$bypass_" ]; then
+    ok "skip-routing: every SKIP announcement in this suite goes through skipped() (route only — it cannot check that a site's skip COUNT matches its run-branch verdict count)"
+  else
+    bad "skip-routing: SKIP announced without skipped(), so SKIPPED_TOOLING misses it and ASSERT_FLOOR reds a legitimate host: $bypass_"
   fi
 fi
 

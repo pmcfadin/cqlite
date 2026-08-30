@@ -417,7 +417,14 @@ def _measure_growth_bytes(body, iterations=ITERATIONS, warmup=WARMUP_ITERATIONS)
     gc.collect()
     rss_reader, rss_kind = _rss_instrument()
     rss_before = rss_reader() if rss_reader is not None else None
-    tracemalloc.start()
+    # LEAVE THE INSTRUMENT AS WE FOUND IT (issue #1465 round 14, Y5): tracing may already
+    # be on — PYTHONTRACEMALLOC in the environment, a runner plugin, or an earlier test —
+    # and an unconditional stop() in the finally below would DISABLE it for everything
+    # that follows, turning this helper into a side effect on the rest of the session.
+    # start() only if needed; stop() only if we started it.
+    started_tracing = not tracemalloc.is_tracing()
+    if started_tracing:
+        tracemalloc.start()
     try:
         # AFFIRM THE INSTRUMENT, not the sign of its output (round 10; see
         # _assert_tracked_under_budget). `is_tracing()` is checked at BOTH snapshots:
@@ -442,7 +449,8 @@ def _measure_growth_bytes(body, iterations=ITERATIONS, warmup=WARMUP_ITERATIONS)
             )
         second = tracemalloc.take_snapshot().filter_traces(_NOISE_FILTERS)
     finally:
-        tracemalloc.stop()
+        if started_tracing:
+            tracemalloc.stop()
     # G6 (issue #1465 round 4): the instrument was readable at probe time, but a
     # mid-window failure is still possible (a /proc read denied by a sandbox, a
     # container remount). A bare `rss_reader() - rss_before` would then raise
