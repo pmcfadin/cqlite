@@ -18,7 +18,16 @@ opened, no fixture is read), so a skip could only ever mean the extension failed
 to import -- which is precisely the signal worth failing on. This module
 deliberately does NOT use ``conftest``'s dataset-guard fixtures, and a failed
 ``import cqlite`` is a collection ERROR, never a silent skip.
+
+``from __future__ import annotations`` is REQUIRED here, not stylistic:
+``pyproject.toml`` declares ``requires-python = ">=3.9"`` and this module
+annotates with PEP 604 unions (``ast.FunctionDef | ast.AsyncFunctionDef``), which
+Python 3.9 cannot evaluate. Without the future import the module would raise
+``TypeError`` at import on the declared floor -- a hard collection error in the
+one test file documented as unable to skip.
 """
+
+from __future__ import annotations
 
 import ast
 import inspect
@@ -31,19 +40,20 @@ import cqlite
 #   bindings/python/python/cqlite/__init__.pyi   -> the subject
 PYI_PATH = Path(__file__).resolve().parent.parent / "python" / "cqlite" / "__init__.pyi"
 
-# Dunders are filtered from every comparison EXCEPT these, which are part of the
-# advertised protocol surface (context manager / iterator) and therefore ARE
-# drift-relevant: a stub promising ``with cqlite.open(...) as db`` while the
-# runtime class lost ``__exit__`` is a real break. The rest (``__repr__``,
-# ``__eq__``, ``__hash__``, ``__len__``, ...) are either inherited from
-# ``object`` on every class or implementation detail, so comparing them would
-# red on correct code.
-COMPARED_DUNDERS = frozenset({"__enter__", "__exit__", "__iter__", "__next__"})
-
-
-def _is_compared(name: str) -> bool:
-    """Whether ``name`` participates in a stub-vs-runtime member comparison."""
-    return not name.startswith("_") or name in COMPARED_DUNDERS
+# Module-level stub declarations that intentionally have NO runtime counterpart,
+# each named INDIVIDUALLY with its reason. Deliberately NOT "type aliases are
+# exempt as a category": that would blind the phantom check to the whole class of
+# drift where a real export is deleted and only the alias-shaped declaration
+# survives. Every entry is re-verified below (still declared in the stub, still
+# absent at runtime), so a stale entry cannot silently excuse a future phantom.
+TYPE_ONLY_STUB_NAMES = {
+    "Config": (
+        "`Config = dict[str, Any] | str` is a type alias naming the accepted "
+        "shape of the `config=` parameter of `open()`/`validate_config()`. It is "
+        "not re-exported by `cqlite/__init__.py` and is not in `__all__`, so "
+        "`from cqlite import Config` is a type-checking-only import."
+    ),
+}
 
 
 def _class_members(node: ast.ClassDef) -> set[str]:
@@ -84,9 +94,11 @@ class _Stub:
         # both are ``FunctionDef`` in a class body, and both are attributes at
         # runtime, so no decorator inspection is needed here).
         self.classes: dict[str, set[str]] = {}
-        self.functions: dict[str, ast.FunctionDef | ast.AsyncFunctionDef] = {}
-        # Every module-level NAME the stub declares: classes, functions, and
-        # annotated module attributes such as ``__version__: str``.
+        self.functions: dict[str, ast.AST] = {}
+        # Every module-level NAME the stub declares: classes, functions,
+        # annotated module attributes (``__version__: str``) and assignments
+        # (``Config = ...``). This is the set a caller can write
+        # ``from cqlite import <name>`` for and have a type checker accept.
         self.module_names: set[str] = set()
 
         for node in tree.body:
@@ -97,12 +109,8 @@ class _Stub:
                 self.functions[node.name] = node
                 self.module_names.add(node.name)
             elif isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name):
-                # ``__version__: str`` -- a declared module attribute.
                 self.module_names.add(node.target.id)
             elif isinstance(node, ast.Assign):
-                # ``Config = dict[str, Any] | str`` -- a type alias. Recorded as a
-                # declared name (it IS importable) but never phantom-checked as a
-                # class/function.
                 for target in node.targets:
                     if isinstance(target, ast.Name):
                         self.module_names.add(target.id)
@@ -113,38 +121,83 @@ def _stub() -> _Stub:
     return _Stub(PYI_PATH)
 
 
-def _runtime_members(cls: type) -> set[str]:
-    """The members ``cls`` itself defines, as the stub would declare them.
+def _runtime_own_public(cls: type) -> set[str]:
+    """The PUBLIC members ``cls`` itself defines.
 
     Uses the type's own ``__dict__`` rather than :func:`dir`, so inherited
     machinery is excluded: ``dir(cqlite.SchemaError)`` drags in ``args``,
     ``with_traceback`` and ``add_note`` from ``BaseException``, none of which a
     stub re-declares, and comparing them would red on a faithful stub.
     """
-    return {name for name in vars(cls) if _is_compared(name)}
+    return {name for name in vars(cls) if not name.startswith("_")}
 
 
-def _param_names(node: ast.FunctionDef | ast.AsyncFunctionDef) -> tuple[list[str], set[str]]:
-    """(positional-or-keyword names in order, keyword-only names) from a stub def."""
+def _stub_param_spec(node: ast.AST) -> list[tuple[str, str, bool]]:
+    """``(name, kind, has_default)`` per parameter, in declaration order.
+
+    ``kind`` uses :class:`inspect.Parameter` kind names so the two sides are
+    directly comparable, and POSITIONAL_ONLY stays DISTINCT from
+    POSITIONAL_OR_KEYWORD: making ``path`` positional-only breaks every caller
+    writing ``cqlite.open(path=...)``, so collapsing the two kinds (as an earlier
+    version did) hid a real breaking change.
+
+    Only default PRESENCE is recorded, never the default VALUE: a stub writes
+    placeholder defaults (``...``, or a literal that need not be the same object
+    the extension exposes), so comparing values would red on a faithful stub.
+    Consequence, stated so nobody reads this check as stronger than it is: a
+    CHANGED default value is NOT detected -- only a default appearing or
+    disappearing is.
+    """
+    assert isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
     args = node.args
-    positional = [a.arg for a in (*args.posonlyargs, *args.args)]
-    keyword_only = {a.arg for a in args.kwonlyargs}
-    return positional, keyword_only
+    spec: list[tuple[str, str, bool]] = []
+
+    # `defaults` is tail-aligned over posonlyargs + args together.
+    positional = [*args.posonlyargs, *args.args]
+    first_defaulted = len(positional) - len(args.defaults)
+    for index, arg in enumerate(positional):
+        kind = (
+            "POSITIONAL_ONLY"
+            if index < len(args.posonlyargs)
+            else "POSITIONAL_OR_KEYWORD"
+        )
+        spec.append((arg.arg, kind, index >= first_defaulted))
+
+    if args.vararg is not None:
+        spec.append((args.vararg.arg, "VAR_POSITIONAL", False))
+    # `kw_defaults` is parallel to `kwonlyargs`; None means "no default".
+    for arg, default in zip(args.kwonlyargs, args.kw_defaults):
+        spec.append((arg.arg, "KEYWORD_ONLY", default is not None))
+    if args.kwarg is not None:
+        spec.append((args.kwarg.arg, "VAR_KEYWORD", False))
+    return spec
+
+
+def _runtime_param_spec(func: object) -> list[tuple[str, str, bool]]:
+    """``(name, kind, has_default)`` per parameter of a runtime callable."""
+    signature = inspect.signature(func)  # type: ignore[arg-type]
+    return [
+        (name, param.kind.name, param.default is not inspect.Parameter.empty)
+        for name, param in signature.parameters.items()
+    ]
 
 
 def test_pyi_matches_runtime():
     """The ``.pyi`` and the imported module declare the same surface.
 
-    Four properties, each a distinct drift class:
+    Five properties, each a distinct drift class:
 
     1. every name re-exported in ``cqlite.__all__`` exists on the module;
     2. every PUBLIC name in ``__all__`` is declared in the stub (runtime -> stub:
        a new export nobody added to the stub is invisible to type checkers);
-    3. every class/function the stub declares resolves to a real runtime
-       attribute (stub -> runtime: the phantom-declaration direction);
-    4. for every stub class, the declared member set EQUALS the runtime member
-       set, so a method missing from the stub and a phantom method in the stub
-       both fail.
+    3. every module-level name the stub declares resolves at runtime, except the
+       individually-allowlisted type-only declarations (stub -> runtime: the
+       phantom-declaration direction, which covers classes, functions AND
+       assignments such as a type alias);
+    4. for every stub class, the declared PUBLIC member set EQUALS the runtime
+       one, so a method missing from the stub and a phantom method in the stub
+       both fail;
+    5. every DUNDER the stub explicitly declares exists at runtime.
     """
     stub = _stub()
 
@@ -157,7 +210,7 @@ def test_pyi_matches_runtime():
     )
 
     # (2) runtime -> stub, for the PUBLIC surface. Underscore-prefixed
-    # test-support hooks in __all__ are internal (issue #1437/#1451/#1452) and
+    # test-support hooks in __all__ are internal (issues #1437/#1451/#1452) and
     # are covered by the phantom direction only when the stub declares them.
     undeclared = sorted(
         name
@@ -169,16 +222,33 @@ def test_pyi_matches_runtime():
         f"(type checkers cannot see these): {undeclared}"
     )
 
-    # (3) stub -> runtime phantom check.
-    declared = sorted(set(stub.classes) | set(stub.functions))
-    assert declared, f"parsed no classes or functions from {stub.path}"
-    phantoms = [name for name in declared if not hasattr(cqlite, name)]
+    # (3) stub -> runtime phantom check, over EVERY module-level declaration.
+    #     The allowlist is validated first so a stale entry cannot excuse a real
+    #     phantom: each entry must still be declared in the stub, must still be
+    #     absent at runtime, and must carry a reason.
+    assert TYPE_ONLY_STUB_NAMES, "the type-only allowlist must name its entries"
+    for name, reason in sorted(TYPE_ONLY_STUB_NAMES.items()):
+        assert reason.strip(), f"allowlisted stub name {name!r} carries no reason"
+        assert name in stub.module_names, (
+            f"{name!r} is allowlisted as type-only but is no longer declared in "
+            f"{stub.path.name} -- drop the stale allowlist entry"
+        )
+        assert not hasattr(cqlite, name), (
+            f"{name!r} is allowlisted as type-only but now EXISTS at runtime -- "
+            "drop the allowlist entry so the phantom check covers it"
+        )
+    assert stub.module_names, f"parsed no module-level declarations from {stub.path}"
+    phantoms = sorted(
+        name
+        for name in stub.module_names
+        if name not in TYPE_ONLY_STUB_NAMES and not hasattr(cqlite, name)
+    )
     assert not phantoms, (
         f"declared in {stub.path.name} but absent from the runtime module "
         f"(phantom declarations): {phantoms}"
     )
 
-    # (4) per-class member equality, both directions.
+    # (4)/(5) per-class comparison.
     drift: list[str] = []
     for class_name, declared_members in sorted(stub.classes.items()):
         runtime_cls = getattr(cqlite, class_name)
@@ -186,10 +256,12 @@ def test_pyi_matches_runtime():
             f"{stub.path.name} declares `class {class_name}` but "
             f"cqlite.{class_name} is {type(runtime_cls).__name__}, not a class"
         )
-        expected = {name for name in declared_members if _is_compared(name)}
-        actual = _runtime_members(runtime_cls)
-        only_in_stub = sorted(expected - actual)
-        only_at_runtime = sorted(actual - expected)
+
+        # (4) PUBLIC members are compared as SETS, both directions.
+        expected_public = {n for n in declared_members if not n.startswith("_")}
+        actual_public = _runtime_own_public(runtime_cls)
+        only_in_stub = sorted(expected_public - actual_public)
+        only_at_runtime = sorted(actual_public - expected_public)
         if only_in_stub:
             drift.append(
                 f"{class_name}: declared in the stub but absent at runtime "
@@ -200,6 +272,37 @@ def test_pyi_matches_runtime():
                 f"{class_name}: present at runtime but NOT declared in the stub "
                 f"(invisible to type checkers): {only_at_runtime}"
             )
+
+        # (5) DUNDERS are compared ASYMMETRICALLY, and the set is DERIVED from
+        # the stub rather than hardcoded: whatever dunder the stub chose to
+        # declare (`__getitem__`, `__len__`, `__contains__`, `__enter__`,
+        # `__exit__`, `__iter__`, `__next__`, ...) must exist at runtime, because
+        # the stub is promising that protocol to typed callers. A hardcoded
+        # allowlist silently exempted `Row.__getitem__` -- deleting it at runtime
+        # left the alarm GREEN while `row["k"]` broke.
+        #
+        # The reverse direction is deliberately NOT checked: PyO3 synthesises
+        # dunders no stub declares (`__new__`, `__getstate__`, ...), so a
+        # symmetric comparison would red on correct code, and a test that reds on
+        # correct input is one people delete.
+        #
+        # Limitation, stated so this reads as no stronger than it is: resolution
+        # is by `hasattr`, so for the handful of dunders `object` itself supplies
+        # (`__init__`, `__repr__`, `__eq__`, `__hash__`) this can only confirm
+        # they RESOLVE, not that this class overrides them. Every protocol dunder
+        # that matters is absent from `object`, so for those it is a real check.
+        declared_dunders = sorted(
+            n
+            for n in declared_members
+            if n.startswith("__") and n.endswith("__")
+        )
+        missing_dunders = [n for n in declared_dunders if not hasattr(runtime_cls, n)]
+        if missing_dunders:
+            drift.append(
+                f"{class_name}: dunder declared in the stub but absent at runtime "
+                f"(broken protocol promise): {missing_dunders}"
+            )
+
     assert not drift, "stub/runtime member drift:\n  " + "\n  ".join(drift)
 
 
@@ -209,40 +312,31 @@ def test_open_signature_matches_stub():
     The expectation is DERIVED from the stub AST, never hard-coded: the property
     under test is stub-vs-runtime agreement, so pinning a literal parameter list
     here would just add a third copy to keep in sync.
+
+    Compared per parameter, in order: name, kind (so POSITIONAL_ONLY vs
+    POSITIONAL_OR_KEYWORD vs KEYWORD_ONLY drift fails), and whether a default is
+    present. Variadics participate as ordinary entries via their VAR_POSITIONAL /
+    VAR_KEYWORD kinds, so adding or dropping ``*args``/``**kwargs`` fails too.
+    Ordering keyword-only parameters differently in the stub than in the
+    extension also fails; that is a deliberate false-positive-free strictness
+    choice (the fix is a one-line stub reorder) rather than a semantic claim that
+    keyword-only order is binding on callers.
     """
     stub = _stub()
     assert "open" in stub.functions, f"{stub.path.name} declares no module-level `open`"
-    stub_positional, stub_keyword_only = _param_names(stub.functions["open"])
-    # Non-vacuity: two empty parameter sets would "agree" trivially, so a
+    stub_spec = _stub_param_spec(stub.functions["open"])
+    # Non-vacuity: two empty parameter lists would "agree" trivially, so a
     # silently under-reading AST walk would green instead of reporting drift.
-    assert stub_positional, f"{stub.path.name} declares `open` with no positional parameter"
-    assert stub_keyword_only, f"{stub.path.name} declares `open` with no keyword-only parameters"
+    assert stub_spec, f"{stub.path.name} declares `open` with no parameters"
 
     # Raises ValueError when the extension exposes no signature at all -- which
     # is itself drift worth failing on, not something to tolerate.
-    signature = inspect.signature(cqlite.open)
-    runtime_positional = [
-        name
-        for name, param in signature.parameters.items()
-        if param.kind
-        in (inspect.Parameter.POSITIONAL_ONLY, inspect.Parameter.POSITIONAL_OR_KEYWORD)
-    ]
-    runtime_keyword_only = {
-        name
-        for name, param in signature.parameters.items()
-        if param.kind is inspect.Parameter.KEYWORD_ONLY
-    }
+    runtime_spec = _runtime_param_spec(cqlite.open)
+    assert runtime_spec, "cqlite.open exposes no parameters at runtime"
 
-    # Positional parameters are compared IN ORDER -- reordering them is a
-    # breaking change for every positional caller.
-    assert runtime_positional == stub_positional, (
-        "cqlite.open positional parameters disagree with "
-        f"{stub.path.name}: stub {stub_positional} vs runtime {runtime_positional}"
-    )
-    # Keyword-only parameters are compared as a SET: their order is not part of
-    # the contract, so asserting it would red on a harmless stub reshuffle.
-    assert runtime_keyword_only == stub_keyword_only, (
-        "cqlite.open keyword-only parameters disagree with "
-        f"{stub.path.name}: only in stub {sorted(stub_keyword_only - runtime_keyword_only)}, "
-        f"only at runtime {sorted(runtime_keyword_only - stub_keyword_only)}"
+    assert runtime_spec == stub_spec, (
+        "cqlite.open signature disagrees with "
+        f"{stub.path.name} -- (name, kind, has_default) per parameter:\n"
+        f"  stub:    {stub_spec}\n"
+        f"  runtime: {runtime_spec}"
     )
