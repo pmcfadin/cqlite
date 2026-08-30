@@ -88,12 +88,17 @@
 //! string `name` is an `Err` that aborts the case. It never falls back to the
 //! untransformed text, because that would silently restore the `f64` path this
 //! module removes.
+//!
+//! A DUPLICATE object key is refused too, at EVERY depth, before anything reads
+//! a value from the line — see [`reject_duplicate_keys`]. JSON permits one and
+//! the two readers of this document disagree about which occurrence the object
+//! has, so a golden carrying one has no single value to compare.
 
 #![allow(dead_code)]
 
 use std::fmt;
 
-use serde::de::{self, MapAccess, Visitor};
+use serde::de::{self, DeserializeSeed, MapAccess, SeqAccess, Visitor};
 use serde::ser::SerializeMap;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use serde_json::value::RawValue;
@@ -154,6 +159,14 @@ impl<'de> Deserialize<'de> for RawObject {
                     // parse downstream keeps the LAST. Silently picking either
                     // would mean the harness rewrote one value and compared the
                     // other — the oracle disagreeing with itself.
+                    //
+                    // This refusal is LOCAL: it fires only for an object this
+                    // type actually deserializes, which is not every object in
+                    // the line (a UDT value is returned as the identity and
+                    // never opened). The TOTAL check is
+                    // `reject_duplicate_keys`, run over the whole line first;
+                    // this one is kept because it holds for every future caller
+                    // of `RawObject` whether or not it went through that door.
                     if out.iter().any(|(seen, _)| *seen == k) {
                         return Err(de::Error::custom(format!(
                             "the JSON object carries the duplicate key {k:?}; the harness \
@@ -203,6 +216,128 @@ pub fn placeholder_marker(content: &str) -> Option<&'static str> {
         .find(|m| content.contains(m))
 }
 
+// ---------------------------------------------------------------------------
+// DUPLICATE OBJECT KEYS — refused at EVERY depth, before anything reads a value
+// ---------------------------------------------------------------------------
+//
+// JSON permits a duplicate key, and the two readers of this document DISAGREE
+// about which occurrence the object has: `RawObject` above keeps the FIRST, the
+// shared `serde_json::Value` parse downstream keeps the LAST. So a golden
+// carrying one is a document whose value depends on who is reading it, and the
+// harness refuses it rather than choose.
+//
+// `RawObject`'s own refusal is LOCAL: it fires only for an object the lexeme
+// descent actually DESERIALIZES. Whole regions of a line are never opened —
+// most sharply a UDT value, which `declared::preserve_lexemes` returns as the
+// IDENTITY (its field types are not declared to the harness, so no position
+// inside one can be known to be a `decimal`/`varint`). A duplicate key inside
+// such a value was therefore invisible: the later `serde_json::Value` parse
+// silently selected one occurrence and the golden passed this stage. That is
+// most dangerous for exactly the cases whose known export gap defers the value
+// comparison (#3556), because then the golden stage is the ONLY thing that
+// would have noticed a malformed golden at all.
+//
+// The check below is therefore TOTAL: it visits every object in the line, at
+// every depth, whether or not any descent reaches it and whether or not any
+// lexeme there needs rewriting. It is NOT a second position-deciding traversal —
+// it decides nothing about types, positions or roles, asks only the pure JSON
+// SYNTAX question "does this object repeat a key?", and produces no value. In
+// particular the numbers it walks past are DISCARDED, never read for a value,
+// so the `f64` this module exists to avoid is not reachable through it.
+
+/// A JSON value checked, at every depth, for DUPLICATE OBJECT KEYS — and for
+/// nothing else.
+///
+/// Carries the JSON PATH of the value it is about to visit, so the refusal names
+/// WHERE the duplicate is (`rows[0].cells[2].value.field`) rather than only which
+/// key repeated. Values are consumed and thrown away.
+struct NoDuplicateKeys<'p>(&'p str);
+
+impl<'de> DeserializeSeed<'de> for NoDuplicateKeys<'_> {
+    type Value = ();
+    fn deserialize<D: Deserializer<'de>>(self, deserializer: D) -> Result<(), D::Error> {
+        deserializer.deserialize_any(self)
+    }
+}
+
+impl<'de> Visitor<'de> for NoDuplicateKeys<'_> {
+    type Value = ();
+
+    fn expecting(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("any JSON value")
+    }
+
+    fn visit_map<A: MapAccess<'de>>(self, mut map: A) -> Result<(), A::Error> {
+        let mut seen: Vec<String> = Vec::new();
+        while let Some(key) = map.next_key::<String>()? {
+            if seen.contains(&key) {
+                return Err(de::Error::custom(format!(
+                    "the JSON object at {} carries the duplicate key {key:?}; the harness \
+                     refuses to choose which occurrence is the value",
+                    self.0
+                )));
+            }
+            let child = format!("{}.{key}", self.0);
+            map.next_value_seed(NoDuplicateKeys(&child))?;
+            seen.push(key);
+        }
+        Ok(())
+    }
+
+    fn visit_seq<A: SeqAccess<'de>>(self, mut seq: A) -> Result<(), A::Error> {
+        let mut i = 0usize;
+        loop {
+            let child = format!("{}[{i}]", self.0);
+            if seq.next_element_seed(NoDuplicateKeys(&child))?.is_none() {
+                return Ok(());
+            }
+            i += 1;
+        }
+    }
+
+    // Every SCALAR is accepted and discarded. These arms exist because
+    // `Visitor`'s defaults REJECT the type they are given, so a missing arm
+    // would turn an ordinary golden number or string into a parse error. None of
+    // them reads a value: the argument is dropped.
+    fn visit_bool<E: de::Error>(self, _: bool) -> Result<(), E> {
+        Ok(())
+    }
+    fn visit_i64<E: de::Error>(self, _: i64) -> Result<(), E> {
+        Ok(())
+    }
+    fn visit_u64<E: de::Error>(self, _: u64) -> Result<(), E> {
+        Ok(())
+    }
+    fn visit_f64<E: de::Error>(self, _: f64) -> Result<(), E> {
+        Ok(())
+    }
+    fn visit_str<E: de::Error>(self, _: &str) -> Result<(), E> {
+        Ok(())
+    }
+    fn visit_unit<E: de::Error>(self) -> Result<(), E> {
+        Ok(())
+    }
+    fn visit_none<E: de::Error>(self) -> Result<(), E> {
+        Ok(())
+    }
+    fn visit_some<D: Deserializer<'de>>(self, deserializer: D) -> Result<(), D::Error> {
+        deserializer.deserialize_any(self)
+    }
+}
+
+/// REFUSE `line` if any JSON object in it, at any depth, repeats a key.
+///
+/// Run over the WHOLE line before anything reads a value from it, so a region no
+/// descent opens (a UDT value, a `path` component, a field the harness does not
+/// declare) is covered exactly like one it does.
+pub fn reject_duplicate_keys(line: &str) -> Result<(), String> {
+    let mut de = serde_json::Deserializer::from_str(line);
+    NoDuplicateKeys("<line>")
+        .deserialize(&mut de)
+        .map_err(|e| e.to_string())?;
+    de.end().map_err(|e| e.to_string())
+}
+
 /// Rewrite a whole JSONL document, quoting the number lexemes that sit at a
 /// declared-`decimal`/`varint` POSITION — and no others.
 ///
@@ -228,6 +363,9 @@ pub fn preserve_exact_lexemes(content: &str, columns: &[ColumnType]) -> Result<S
 /// One sstabledump line: its `rows` are rewritten, every other field is
 /// re-emitted from the text it arrived as.
 fn rewrite_line(line: &str, columns: &[ColumnType]) -> Result<String, String> {
+    // TOTAL, and first: every object in the line, at every depth, including the
+    // regions the lexeme descent never opens. See the section above.
+    reject_duplicate_keys(line)?;
     let mut top: RawObject = serde_json::from_str(line)
         .map_err(|e| format!("an sstabledump line must be one JSON object: {e}"))?;
     if let Some(rows_text) = top.get("rows").map(|r| r.get().to_string()) {

@@ -1583,3 +1583,115 @@ fn the_rewrite_fails_closed() {
     );
     assert_eq!(placeholder_marker(r#"{"cells":[{"value":0.1}]}"#), None);
 }
+
+/// A DUPLICATE key is refused at EVERY depth — including inside a value no
+/// descent opens, which is where the check used to have a hole.
+///
+/// The state this control exists for: duplicate-key detection used to live only
+/// in the `RawObject` deserializer, which sees an object only when the lexeme
+/// descent actually DESERIALIZES it. A UDT value is returned as the IDENTITY (its
+/// field types are not declared to the harness), so its interior was never
+/// opened and a duplicate key inside it was invisible — the later shared
+/// `serde_json::Value` parse then silently selected ONE occurrence and the
+/// golden passed this stage. That is worst for the #3556 known-gap cases, whose
+/// value comparison is deferred: there the golden stage is the ONLY thing that
+/// would notice a malformed golden at all.
+#[test]
+fn a_duplicate_key_is_refused_at_every_depth_including_inside_a_udt_value() {
+    use parquet_parity::cql_type::parse_column;
+    use parquet_parity::golden_text::preserve_exact_lexemes;
+
+    // The declared columns of the line below, so the descent runs for real: a
+    // UDT (returned as the identity — the arm with the hole) and a `decimal`
+    // (rewritten, the arm that already had a local check).
+    let columns = ["p decimal", "u profile"]
+        .iter()
+        .map(|d| {
+            let (name, declared) = d.split_once(' ').expect("name and declared type");
+            parse_column(name, declared, &["profile"]).expect("declared type must parse")
+        })
+        .collect::<Vec<_>>();
+
+    let line = |cells: &str| format!(r#"{{"partition":{{"key":["1"]}},"rows":[{{"type":"row","cells":{cells}}}]}}"#);
+
+    // Every one of these is well-formed JSON, so ONLY the duplicate-key refusal
+    // can red on it. Each names a position the old local check did not reach.
+    #[rustfmt::skip]
+    let duplicated = [
+        // Inside a UDT value — the identity arm, the hole itself.
+        (r#"[{"name":"u","value":{"amount":1,"amount":2}}]"#, "amount"),
+        // Deeper inside a UDT value: a nested object and an array element.
+        (r#"[{"name":"u","value":{"inner":{"k":1,"k":2}}}]"#, "k"),
+        (r#"[{"name":"u","value":{"xs":[{"k":1,"k":2}]}}]"#, "k"),
+        // A cell of a column the case does NOT declare, which `rewrite_cell`
+        // leaves untouched, so nothing there was ever deserialized either.
+        (r#"[{"name":"undeclared","value":{"k":1,"k":2}}]"#, "k"),
+        // Inside a DECLARED decimal's own cell object, and in the row and the
+        // top-level object, which the descent does open — these must stay
+        // refused too.
+        (r#"[{"name":"p","value":1,"tstamp":"a","tstamp":"b"}]"#, "tstamp"),
+    ];
+    for (cells, key) in duplicated {
+        let err = preserve_exact_lexemes(&format!("{}\n", line(cells)), &columns)
+            .expect_err("a duplicate key must be REFUSED, never resolved to one occurrence");
+        assert!(
+            err.contains("duplicate key") && err.contains(key),
+            "the refusal must name the duplicated key {key:?}, got: {err}"
+        );
+        assert!(
+            err.starts_with("line 1:"),
+            "the refusal must name the line, got: {err}"
+        );
+    }
+
+    // A duplicate in the ROW object and in the TOP-LEVEL object.
+    for (bad, key) in [
+        (
+            r#"{"partition":{"key":["1"]},"rows":[{"type":"row","type":"row","cells":[]}]}"#,
+            "type",
+        ),
+        (
+            r#"{"partition":{"key":["1"]},"partition":{"key":["2"]},"rows":[]}"#,
+            "partition",
+        ),
+        // …and inside the partition KEY array's own container.
+        (
+            r#"{"partition":{"key":["1"],"key":["2"]},"rows":[]}"#,
+            "key",
+        ),
+    ] {
+        let err = preserve_exact_lexemes(&format!("{bad}\n"), &columns)
+            .expect_err("a duplicate key must be REFUSED wherever it is");
+        assert!(
+            err.contains("duplicate key") && err.contains(key),
+            "the refusal must name the duplicated key {key:?}, got: {err}"
+        );
+    }
+
+    // The refusal names WHERE the duplicate is, not just which key repeated: a
+    // key name alone does not locate one inside a nested UDT value.
+    let err = preserve_exact_lexemes(
+        &format!(
+            "{}\n",
+            line(r#"[{"name":"u","value":{"inner":{"k":1,"k":2}}}]"#)
+        ),
+        &columns,
+    )
+    .expect_err("refused");
+    assert!(
+        err.contains("rows[0].cells[0].value.inner"),
+        "the refusal must name the JSON path of the offending object, got: {err}"
+    );
+
+    // CONTROL: the same lines WITHOUT the duplicate are accepted, so the check
+    // reds on the duplicate and not on the shape.
+    for good in [
+        r#"[{"name":"u","value":{"amount":1,"other":2}}]"#,
+        r#"[{"name":"u","value":{"inner":{"k":1,"j":2}}}]"#,
+        r#"[{"name":"u","value":{"xs":[{"k":1},{"k":2}]}}]"#,
+        r#"[{"name":"p","value":1.25,"tstamp":"a"}]"#,
+    ] {
+        preserve_exact_lexemes(&format!("{}\n", line(good)), &columns)
+            .unwrap_or_else(|e| panic!("{good} carries no duplicate key and must be accepted: {e}"));
+    }
+}
