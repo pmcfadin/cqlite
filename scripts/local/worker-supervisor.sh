@@ -1402,24 +1402,67 @@ supervisor_lock_path() {
 # pid-liveness, never flock) — read out of the pre-#3467 file, not assumed.
 # ---------------------------------------------------------------------------
 
-# supervisor_shell_quote <string> — single-quote a string so a PRINTED command is PASTE-SAFE.
+# The two bytes that break the one-physical-line contract, held as VALUES rather than spelled as `$'…'`
+# literals at the use sites: a `case` pattern and a `${var//…}` pattern both need them expanded, and
+# inline they make the substitutions unreadable. Assigned BEFORE the function that reads them, so no
+# call can see them unset under `set -u`.
+SUPERVISOR_LF='
+'
+SUPERVISOR_CR=$'\r'
+
+# supervisor_shell_quote <string> — render a string so a PRINTED command is PASTE-SAFE and stays on ONE
+# PHYSICAL LINE.
 #
 # The refusal below prints a command an operator is expected to RUN, and the path in it is derived from
 # `TMPDIR` — i.e. from the environment, not from a literal. A path containing a space, a quote or a
 # newline naively interpolated into `rm -f '<path>/pid'` produces a command that either fails or acts
 # on a DIFFERENT path than the one we diagnosed, which is the worst kind of operator-facing text: it
-# looks precise and is wrong. `'` is closed, escaped and reopened (`'\''`), which is exact for every
-# byte a filename can hold.
+# looks precise and is wrong.
+#
+# ONE PHYSICAL LINE IS PART OF THE CONTRACT, NOT A NICETY (#3549, roborev job 198 F4). The refusal's
+# contract is "select one bare line and paste it": diagnostics carry a `worker-supervisor:` prefix and
+# the runnable command is the one BARE line, which is what makes it identifiable without parsing prose.
+# A newline in `TMPDIR` survives SINGLE QUOTING LITERALLY — `'a<LF>b'` is one shell word spanning two
+# physical lines — so the previous single-quote-only form split the command across lines and left
+# fragments that are indistinguishable from command lines. The same is true of the DIAGNOSTIC paths, which
+# is why they are rendered through here too: an unquoted path with a newline turns one prose line into
+# two, and the second has no prefix.
+#
+# `%q` IS THE RENDERING, AND ITS RESULT IS CHECKED RATHER THAN ASSUMED. Bash's `printf '%q'` renders a
+# control character as an ANSI-C `$'\n'` escape, which keeps the word on one line. But %q's treatment of
+# non-printing characters has CHANGED ACROSS BASH VERSIONS, and this file deliberately supports the
+# bash 3.2 macOS ships (see the `read -d ''` loop note elsewhere), where a newline may instead come back
+# as a literal backslash-newline — still two physical lines. So the one-line property is VERIFIED here
+# and repaired if the builtin did not deliver it: an affirmative check, not a version assumption.
+# `printf -v` is used rather than `$(…)`, because command substitution STRIPS trailing newlines and would
+# silently truncate the rendering of a path that ends in one.
+#
+# THE REPAIR IS VERSION-INDEPENDENT: the single-quote form, with each newline/carriage return
+# re-expressed as `'$'\n''` — closing the quote, an ANSI-C quoted escape, reopening — which every bash
+# concatenates back into the original bytes on ONE line.
+#
+# THE OUTPUT IS BASH-SPECIFIC, and the remedy is documented as bash-pasteable: `$'…'` is a bash (and
+# ksh/zsh) construct, not POSIX `sh`. That is the same assumption the script itself makes — it runs under
+# `#!/usr/bin/env bash` and its operators paste into a bash shell.
 #
 # IT IS NOT OPTION-SAFETY, AND THE CALLER MUST NOT READ IT AS SUCH (#3549, roborev job 192 F2). Quoting
 # controls how the SHELL splits a word; option parsing happens inside the COMMAND, on bytes the shell
 # has already finished with. `rm -f '-scratch/pid'` is one quoted operand and still an "invalid option".
 # A printed command whose operands are derived from the environment therefore needs `--` as well.
 supervisor_shell_quote() {
-  local s="${1//\'/\'\\\'\'}"
-  printf "'%s'" "$s"
+  local q=""
+  printf -v q '%q' "$1"
+  case "$q" in
+    *"$SUPERVISOR_LF"* | *"$SUPERVISOR_CR"*) ;;
+    *) printf '%s' "$q"; return 0 ;;
+  esac
+  # This bash rendered a control character literally. Rebuild from the ORIGINAL string (the partially
+  # escaped `$q` is not a safe base — it may end in a dangling backslash).
+  q="'${1//\'/\'\\\'\'}'"
+  q="${q//"$SUPERVISOR_LF"/\'\$\'\\n\'\'}"
+  q="${q//"$SUPERVISOR_CR"/\'\$\'\\r\'\'}"
+  printf '%s' "$q"
 }
-
 # supervisor_pid_liveness <pid> — echo `live`, `dead` or `unknown`. THREE-VALUED, and `dead` requires
 # an AFFIRMATIVE measurement.
 #
@@ -1657,8 +1700,17 @@ supervisor_legacy_lock_state() {
 # printed BARE (no `worker-supervisor:` prefix) so that selecting the line is enough to paste it.
 supervisor_legacy_lock_refuse() {
   local legacy="$1" detail="$2" remedy="${3:-}" remedy_cmd="${4:-}"
-  echo "worker-supervisor: refusing to start — LEGACY GLOBAL supervisor lock $legacy: $detail" >&2
-  echo "worker-supervisor: that path is the PRE-#3467 machine-global single-instance lock; this supervisor's own lock is PER LANE ($SUPERVISOR_LOCK), so the two are invisible to each other and both supervisors would run in one worktree (#3549)." >&2
+  # THE DIAGNOSTIC PATHS ARE RENDERED, NOT INTERPOLATED RAW (#3549, roborev job 198 F4). Both paths come
+  # from the environment, and a newline in `TMPDIR` interpolated raw SPLITS a prose line in two — the
+  # second half carrying no `worker-supervisor:` prefix, which is precisely the marker that identifies
+  # the one BARE line as the runnable command. So an unrendered diagnostic path does not merely wrap: it
+  # manufactures text that an operator (and this file's own structural test) cannot tell from a command.
+  # One physical line per emitted line is the contract; `supervisor_shell_quote` is what holds it.
+  local legacy_shown="" own_shown=""
+  legacy_shown="$(supervisor_shell_quote "$legacy")"
+  own_shown="$(supervisor_shell_quote "$SUPERVISOR_LOCK")"
+  echo "worker-supervisor: refusing to start — LEGACY GLOBAL supervisor lock $legacy_shown: $detail" >&2
+  echo "worker-supervisor: that path is the PRE-#3467 machine-global single-instance lock; this supervisor's own lock is PER LANE ($own_shown), so the two are invisible to each other and both supervisors would run in one worktree (#3549)." >&2
   # A CASE-SPECIFIC remedy, when there is one. The states differ in what an operator should DO — a LIVE
   # holder means "something is running, stop it"; a STALE one means "an old supervisor left this behind,
   # delete it" — so the generic line below is not sufficient on its own, and a run that told an operator

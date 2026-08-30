@@ -4717,6 +4717,19 @@ legacy_lock_drive() {
   fi
 }
 
+# ONE FUNCTION REPLACED, THE REST SHIPPED: `SV_DRIVE_BODY_OVERRIDE` is DERIVED from `SV_DRIVE_BODY` by
+# inserting a second `source`, so a mutant case cannot drift into a different startup path than the
+# ordinary case exercises. The override file holds exactly the pre-fix spelling of one function.
+SV_DRIVE_BODY_OVERRIDE="${SV_DRIVE_BODY/'source "$1"; '/'source "$1"; source "$2"; '}"
+
+# legacy_lock_drive_override <override-file> <tmp> <lane> — the ordinary drive with one shipped function
+# replaced by the file's redefinition (sourced AFTER the supervisor).
+legacy_lock_drive_override() {
+  local override="$1" tmp="$2" lane="$3"
+  env -u SUPERVISOR_LOCK TMPDIR="$tmp" LANE_ID="$lane" LOCK_CMD="" CLAIM_CMD="" \
+    bash -c "$SV_DRIVE_BODY_OVERRIDE" _ "$SUPERVISOR" "$override" 2>&1
+}
+
 # legacy_lock_drive_in <cwd> <tmp> <lane> — the same drive from a chosen working directory, which is
 # what makes a RELATIVE (and therefore possibly OPTION-SHAPED) `TMPDIR` testable at all.
 legacy_lock_drive_in() {
@@ -4730,6 +4743,9 @@ legacy_lock_drive_in() {
 # command line carries NEITHER, which is what makes it identifiable without parsing prose. `SV_DIAG_RE`
 # is that pair, in one place, so a case cannot accidentally test only one of them.
 SV_DIAG_RE='^(\[worker-supervisor\]|worker-supervisor:) '
+# A literal newline as a VALUE, for the cases that stage a `TMPDIR` containing one.
+SV_LF='
+'
 # A COMMAND SIGNATURE IS A VERB PLUS AN OPERAND, not a bare mention. The prose legitimately NAMES the
 # tools ("the rmdir is non-recursive"), and flagging that would make the sweep red on correct text — a
 # check that reds on correct input is the check people learn to waive. So the patterns require the
@@ -4888,8 +4904,16 @@ test_legacy_global_lock_refuses_stale_holder() {
   # remedy is OPERATOR-FACING text, so its accuracy is the property under test — not its presence.
   # `--` IS PART OF THE EXPECTED TEXT (#3549, roborev job 192 F2): quoting stops word-splitting, not
   # OPTION PARSING, so without it the printed line is not executable for an option-shaped `TMPDIR`.
-  local remedy
-  remedy="rm -f -- '$legacy/pid' && rmdir -- '$legacy'"
+  # THE EXPECTED TEXT IS RENDERED THE SAME WAY THE OPERATOR-FACING LINE IS (#3549, roborev job 198 F4).
+  # The paths in the printed command go through a one-line escaping form, so the expectation is built
+  # with bash's OWN `printf %q` — the documented builtin, not a copy of the supervisor's function — and
+  # for an ordinary path with no metacharacters that rendering is the path itself. The load-bearing
+  # asserts for this line are the behavioural ones below (it is ONE bare line, and it runs VERBATIM);
+  # this one pins the shape.
+  local remedy qpid qdir
+  printf -v qpid '%q' "$legacy/pid"
+  printf -v qdir '%q' "$legacy"
+  remedy="rm -f -- $qpid && rmdir -- $qdir"
   if [[ "$rc" -ne 0 ]] && legacy_refusal_ok "$out" \
      && [[ "$out" == *"$legacy"* && "$out" == *"$dead"* && "$out" == *"stale $dead"* ]] \
      && [[ "$out" == *"$remedy"* ]] \
@@ -5829,6 +5853,68 @@ test_legacy_lock_remedy_lines_are_executable_as_printed() {
     fail "remedy-lines-optshaped-nodashdash: rc=$optnodash_rc err=[$optnodash_err] pid=$([[ -e "$optlegacy/pid" ]] && echo yes || echo no) — the pre-F2 form must be shown to break here, or the assert above measures nothing"
   fi
   rm -rf "$optdir"
+
+  # ---- (4b) NEWLINE-CONTAINING `TMPDIR` (#3549, roborev job 198 F4). A newline survives SINGLE QUOTING
+  # LITERALLY, so the pre-fix rendering split the printed command across two physical lines — and split
+  # the DIAGNOSTIC lines too, leaving prose fragments with no `worker-supervisor:` prefix that are
+  # indistinguishable from the one bare line an operator is told to select and paste. The property is
+  # therefore structural AND behavioural: exactly ONE bare line, and that line runs verbatim.
+  local nltmp="$d/nl${SV_LF}dir" nllegacy
+  mkdir -p "$nltmp"
+  nllegacy="$nltmp/cqlite-worker-supervisor.lock"
+  mkdir -p "$nllegacy"
+  printf '%s\n' "$dead" >"$nllegacy/pid"
+  if [[ -d "$nltmp" && "$nltmp" == *"$SV_LF"* ]]; then
+    pass "remedy-lines PREMISE (newline TMPDIR): a directory whose name contains a newline was staged, so the case below measures the real shape"
+  else
+    fail "remedy-lines-newline-premise: could not stage a newline-containing TMPDIR on this host; the case below would measure nothing"
+    rm -rf "$nltmp"
+    return 0
+  fi
+  out="$(legacy_lock_drive "$nltmp" "$lane")"; rc=$?
+  remedy_lines_structural "stale-newline-tmpdir" "$out" 1
+  bare="$(printf '%s\n' "$out" | grep -vE "$SV_DIAG_RE" | head -1)"
+  if [[ "$rc" -ne 0 ]] && legacy_refusal_ok "$out"; then
+    pass "remedy-lines (newline TMPDIR): the guard still classifies and REFUSES with a newline in TMPDIR"
+  else
+    fail "remedy-lines-newline-no-refusal: rc=$rc out=[$out]"
+  fi
+  local nl_rc=0
+  eval "$bare" >/dev/null 2>&1 || nl_rc=$?
+  if [[ "$nl_rc" -eq 0 && ! -e "$nllegacy" ]]; then
+    pass "remedy-lines (newline TMPDIR): the ONE bare line runs VERBATIM and leaves the lock GONE (line=[$bare])"
+  else
+    fail "remedy-lines-newline-not-runnable: rc=$nl_rc leftover=$([[ -e "$nllegacy" ]] && echo yes || echo no) line=[$bare]"
+  fi
+  # MUTANT CONTRAST: the SAME drive with `supervisor_shell_quote` restored to the pre-fix
+  # single-quote-only form — one function replaced, everything else shipped. The newline then survives
+  # literally in the command AND in the diagnostics, so the output carries MORE than one bare line and
+  # the line an operator would select does not do the job.
+  local ovr="$d/quote-override.sh" mout mbare mbare_count mrc=0
+  cat >"$ovr" <<'OVERRIDE'
+# The pre-#3549-job-198-F4 rendering: single quotes only. A newline is preserved LITERALLY.
+supervisor_shell_quote() {
+  local s="${1//\'/\'\\\'\'}"
+  printf "'%s'" "$s"
+}
+OVERRIDE
+  if [[ "$SV_DRIVE_BODY_OVERRIDE" != "$SV_DRIVE_BODY" && "$SV_DRIVE_BODY_OVERRIDE" == *'source "$2"'* ]]; then
+    pass "remedy-lines PREMISE (mutant drive): the override drive body is the shipped body plus exactly one extra source, so the mutant differs from the ordinary drive in ONE function"
+  else
+    fail "remedy-lines-newline-mutant-drive: the override drive body was not derived from the shipped one ([$SV_DRIVE_BODY_OVERRIDE])"
+  fi
+  mkdir -p "$nllegacy"
+  printf '%s\n' "$dead" >"$nllegacy/pid"
+  mout="$(legacy_lock_drive_override "$ovr" "$nltmp" "$lane")" || true
+  mbare_count="$(printf '%s\n' "$mout" | grep -cvE "$SV_DIAG_RE" || true)"
+  mbare="$(printf '%s\n' "$mout" | grep -vE "$SV_DIAG_RE" | head -1)"
+  eval "$mbare" >/dev/null 2>&1 || mrc=$?
+  if [[ "$mbare_count" =~ ^[0-9]+$ ]] && [[ "$mbare_count" -gt 1 ]] && [[ "$mrc" -ne 0 || -e "$nllegacy" ]]; then
+    pass "remedy-lines MUTANT CONTRAST (newline TMPDIR): the single-quote-only rendering emits $mbare_count bare lines instead of 1 — the newline split the command AND the diagnostic paths — and the line an operator would select fails or leaves the lock behind (line=[$mbare])"
+  else
+    fail "remedy-lines-newline-mutant: bare=$mbare_count rc=$mrc leftover=$([[ -e "$nllegacy" ]] && echo yes || echo no) line=[$mbare] out=[$mout] — the pre-fix form must be shown to break, or the assert above measures nothing"
+  fi
+  rm -rf "$nltmp"
 
   # ---- (5) UNDETERMINABLE shape: no deletion instruction at all, so no bare line either.
   printf 'not a lock\n' >"$legacy"
