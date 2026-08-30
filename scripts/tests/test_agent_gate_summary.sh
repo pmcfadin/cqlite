@@ -4498,38 +4498,61 @@ else
   bad "1465-note-vocab: the note vocabulary is not closed/distinct (see above)"
 fi
 
-# 1465e. The two states that carry the round-6 corrections must SAY what they mean, so a
-#        pasted block cannot be misread: ENTERED-FAILED must assert the lane DID execute
-#        (it replaced a NOT-REACHED that blamed npm ci for a real budget failure), and
-#        NO-BUDGET-AFFIRMATION must name the affirmation, not a test count.
+# 1465e. The two failure states must SAY what they mean and CLAIM NO MORE than they
+#        know, so a pasted block cannot be misread. ENTERED-FAILED replaced a
+#        NOT-REACHED that blamed npm ci for a real budget failure, so it must
+#        distinguish itself from an earlier step — but it is inferred from an EXIT CODE,
+#        so it must NOT claim the budget tests executed (round 7, N-f): a missing or
+#        renamed test:leaks script lands in the same arm. NO-BUDGET-AFFIRMATION must
+#        name the affirmation rather than a test count.
 nll_entered=$(bash -c '. /dev/stdin <<<"$(sed -n "/^_node_leak_lane_note() {/,/^}/p" "$1")"; _node_leak_lane_note ENTERED-FAILED' _ "$GATE" 2>/dev/null)
 nll_noaffirm=$(bash -c '. /dev/stdin <<<"$(sed -n "/^_node_leak_lane_note() {/,/^}/p" "$1")"; _node_leak_lane_note NO-BUDGET-AFFIRMATION' _ "$GATE" 2>/dev/null)
-if printf '%s' "$nll_entered" | grep -q "DID execute" \
-   && printf '%s' "$nll_entered" | grep -q "NOT an earlier step" \
+if printf '%s' "$nll_entered" | grep -q "REACHED" \
+   && printf '%s' "$nll_entered" | grep -q "NOT an earlier" \
+   && ! printf '%s' "$nll_entered" | grep -q "DID execute" \
    && printf '%s' "$nll_noaffirm" | grep -q "named budget test"; then
-  ok "1465-failure-states: ENTERED-FAILED says the lane DID execute; NO-BUDGET-AFFIRMATION names the budget tests"
+  ok "1465-failure-states: ENTERED-FAILED distinguishes itself from an earlier step WITHOUT claiming the budgets executed; NO-BUDGET-AFFIRMATION names the budget tests"
 else
-  bad "1465-failure-states: the failure notes do not state their own meaning"
+  bad "1465-failure-states: the failure notes do not state their own meaning (or overclaim)"
   echo "  ENTERED-FAILED: $nll_entered"
   echo "  NO-BUDGET-AFFIRMATION: $nll_noaffirm"
 fi
 
-# 1465f. The expected BUDGET-TEST list the gate affirms against must be non-empty and must
-#        match the budget tests the lane actually declares — an expectation that drifts from
-#        the test file is how a budget test goes silently uncovered (roborev J1).
+# 1465f. The expected BUDGET-TEST list the gate affirms against must be non-empty, and
+#        every name in it must appear in the lane — an expectation that drifts from the
+#        test file is how a budget test goes silently uncovered (roborev J1).
+#
+#        SCOPE, stated because the name used to promise more (round 7, N-c): the COUNT
+#        comparison enumerates the lane by the jest-title SUFFIX, so it sees a declared
+#        budget test only if it carries that suffix. A new budget test titled WITHOUT the
+#        suffix escapes this case — the runtime affirmation arm is what catches that,
+#        because a title it cannot see is a name it cannot report as passed. The
+#        enumeration is deliberately suffix-based rather than syntax-based: matching
+#        `test('`/`it('`/backticks/indentation is spelling-sensitive, and a grep that
+#        misses a legal spelling would FALSE-PASS this case.
 nll_expected=$(sed -n '/^_NODE_LEAK_BUDGET_TESTS="/,/"$/p' "$GATE" | sed '1s/^_NODE_LEAK_BUDGET_TESTS="//; $s/"$//')
 nll_expected_n=$(printf '%s\n' "$nll_expected" | grep -c . || true)
+nll_suffix=$(sed -n 's/^_NODE_LEAK_BUDGET_TITLE_SUFFIX="\(.*\)"$/\1/p' "$GATE")
 nll_leakfile="$SCRIPT_DIR/../../bindings/node/__test__/leak-paths.test.js"
-nll_actual_n=$(grep -cE "^  test\('.*stay under the leak budget'" "$nll_leakfile" 2>/dev/null || echo 0)
-nll_missing=0
-while IFS= read -r _name; do
-  [ -n "$_name" ] || continue
-  grep -qF "$_name" "$nll_leakfile" 2>/dev/null || { nll_missing=1; echo "  expected budget test not found in the lane: '$_name'"; }
-done <<<"$nll_expected"
-if [ "$nll_expected_n" -ge 2 ] && [ "$nll_missing" -eq 0 ] && [ "$nll_expected_n" -eq "$nll_actual_n" ]; then
-  ok "1465-budget-list: the gate expects $nll_expected_n named budget test(s), all present in the lane, and the lane declares exactly that many"
+if [ ! -r "$nll_leakfile" ] || [ -z "$nll_suffix" ]; then
+  # N-d: a missing file or an unreadable suffix is a NAMED failure, not an arithmetic
+  # error from a `grep -c || echo 0` that emitted two lines.
+  bad "1465-budget-list: cannot measure — leak file readable=$([ -r "$nll_leakfile" ] && echo yes || echo no), suffix='${nll_suffix:-<empty>}'"
 else
-  bad "1465-budget-list: expected=$nll_expected_n declared-in-lane=$nll_actual_n missing=$nll_missing"
+  # Count TITLE LINES declaring a budget test: any line that both looks like a jest
+  # test declaration (a quoted title followed by a comma) and ends its title with the
+  # suffix. Quote-agnostic ('", `) and indentation-agnostic.
+  nll_actual_n=$(grep -cE "^[[:space:]]*(test|it)\(([\"'\`])[^\"'\`]*${nll_suffix}\2" "$nll_leakfile" || true)
+  nll_missing=0
+  while IFS= read -r _name; do
+    [ -n "$_name" ] || continue
+    grep -qF "$_name" "$nll_leakfile" || { nll_missing=1; echo "  expected budget test not found in the lane: '$_name'"; }
+  done <<<"$nll_expected"
+  if [ "$nll_expected_n" -ge 2 ] && [ "$nll_missing" -eq 0 ] && [ "$nll_expected_n" -eq "$nll_actual_n" ]; then
+    ok "1465-budget-list: the gate expects $nll_expected_n named budget test(s), all present in the lane, and the lane declares exactly that many SUFFIX-BEARING budget tests"
+  else
+    bad "1465-budget-list: expected=$nll_expected_n suffix-bearing-in-lane=$nll_actual_n missing=$nll_missing"
+  fi
 fi
 
 ASSERT_FLOOR=388

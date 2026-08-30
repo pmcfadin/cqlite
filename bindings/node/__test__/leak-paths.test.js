@@ -98,6 +98,19 @@
  * A bare `npx jest leak-paths` has no `--expose-gc` and FAILS LOUDLY in
  * `beforeAll` rather than silently measuring GC-deferred garbage.
  *
+ * ADDING A BUDGET TEST? TWO THINGS ARE REQUIRED, and neither is optional (issue
+ * #1465 round 7). The gate's `node-bindings` component affirms this lane by NAME
+ * from jest's JSON report, so a budget test must:
+ *   1. carry the title suffix `stay under the leak budget` — that suffix is how the
+ *      gate ENUMERATES budget tests, so a differently-titled one is invisible to
+ *      both the runtime unexpected-extra arm and the self-test's count check; and
+ *   2. be enrolled in `_NODE_LEAK_BUDGET_TESTS` in scripts/agent-gate.sh.
+ * Do (1) without (2) and the gate FAILs loudly ("UNEXPECTED budget test … must be
+ * enrolled"), which is the intended outcome. Do (2) without (1) and it FAILs too
+ * (the name will never be found as passed). Do NEITHER and the new budget test is
+ * silently unaffirmed — the one outcome nothing catches, and the reason this
+ * paragraph exists.
+ *
  * There is deliberately NO wall-clock/elapsed-time assertion in this file: these
  * are MEMORY budgets. A timing threshold in a correctness test is a known flake
  * class (#2642).

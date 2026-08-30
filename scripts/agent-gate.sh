@@ -1787,9 +1787,6 @@ _node_leak_lane_status() {
 # line", which is the ambiguity that let the skip hide in the first place.
 _node_leak_lane_note_file() { printf '%s' "$LOG_DIR/node-bindings.leak-lane"; }
 
-# The note TEXT for a given state, single-sourced so the component, the SUMMARY and the
-# hidden self-test hook can never quote three different sentences. Any unrecognised state
-# is itself reported rather than silently omitted.
 # The BUDGET TESTS this lane exists to run, by jest test title. Declared here (not
 # inside the subshell) so the gate's expectation is one visible list, and asserted
 # EXACTLY: a missing name, a non-passed status, or an UNEXPECTED EXTRA budget test all
@@ -1831,7 +1828,7 @@ _node_leak_lane_note() { # <RUN|SKIP-OPTOUT|NO-NODE|NOT-REACHED|ENTERED-FAILED|
   case "$1" in
     RUN) printf '%s' "node-bindings-leak-lane: RAN (#1465 exception-path/abandoned-iterator leak budgets executed via npm run test:leaks; AFFIRMED from jest's JSON report — every named budget test present and passed)" ;;
     NOT-REACHED) printf '%s' "node-bindings-leak-lane: NOT-REACHED — an earlier step of node-bindings (npm ci / npm run build / write-readback-content) failed, so the #1465 leak budgets never executed; this block does NOT validate them" ;;
-    ENTERED-FAILED) printf '%s' "node-bindings-leak-lane: ENTERED-FAILED — npm run test:leaks WAS entered and DID execute, and it failed (a budget assertion, a contract assertion, or a harness error inside the lane). This is a leak-lane failure, NOT an earlier step; the component FAILs closed and this block does NOT validate the budgets" ;;
+    ENTERED-FAILED) printf '%s' "node-bindings-leak-lane: ENTERED-FAILED — the leak lane was REACHED and npm run test:leaks exited non-zero. The exit code alone does not say how far it got: a failing budget assertion, a failing contract assertion, a jest harness error, and a missing or renamed test:leaks script all land here — read the node-bindings component log for which. It is NOT an earlier node-bindings step (that reads NOT-REACHED); the component FAILs closed and this block does NOT validate the budgets" ;;
     NO-BUDGET-AFFIRMATION) printf '%s' "node-bindings-leak-lane: NO-BUDGET-AFFIRMATION — npm run test:leaks exited 0 but jest's JSON report did not show every named budget test passing (skipped, renamed, missing, or an unexpected extra budget test); the #1465 budgets are NOT validated and the component FAILs closed" ;;
     SKIP-OPTOUT) printf '%s' "node-bindings-leak-lane: SKIPPED (canonical corpus absent + AGENT_GATE_ALLOW_MISSING_FIXTURES=1) — the #1465 exception-path/abandoned-iterator leak budgets did NOT run; this block does NOT validate them (#1465/#2078)" ;;
     NO-NODE) printf '%s' "node-bindings-leak-lane: NOT-RUN (no node/npm on PATH — the whole node-bindings component SKIPped, #1465)" ;;
