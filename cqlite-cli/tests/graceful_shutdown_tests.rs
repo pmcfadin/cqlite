@@ -144,7 +144,7 @@ fn sigint_in_writable_session_flushes_before_exit() {
     // new durable `-Data.db` artifact is reported as evidence in any failure
     // message — it does not, and may not, extend the deadline (design.md D6a).
     let stage = deadline.stage("d.clean-exit");
-    let exited = poll_with_progress(&io, &data_dir, &stage, |slice| {
+    let exited = poll_with_progress(&io, &data_dir, &stage, |slice, _artifacts| {
         child.wait_timeout(slice).expect("wait_timeout on child")
     });
     let (status, _t_exit): (ExitStatus, Duration) = match exited {
@@ -158,12 +158,9 @@ fn sigint_in_writable_session_flushes_before_exit() {
                  observed {:.3?} after SIGINT, so the shutdown handler exists, was entered, and \
                  the child was scheduled. This failure therefore establishes ONLY that the flush \
                  did not complete in time; it says nothing about whether a handler is present.\n\
-                 durable -Data.db artifacts under {}: {}\n\
                  child transcript:\n{}\n{}",
                 fail.observed(),
                 t_handler,
-                data_dir.display(),
-                count_data_db(&data_dir),
                 io.transcript_text(),
                 stage.report()
             );
@@ -274,8 +271,12 @@ fn writable_session_auto_flushes_mid_session_across_threshold() {
 
     // Stage (c): a durable SSTable must exist BEFORE we close the session.
     let stage = deadline.stage("c.mid-session-flush");
-    let flushed = poll_with_progress(&io, &data_dir, &stage, |slice| {
-        if count_data_db(&data_dir) >= 1 {
+    let flushed = poll_with_progress(&io, &data_dir, &stage, |slice, artifacts| {
+        // The count the poll sampled for THIS iteration. Scanning again here would
+        // be a second post-deadline directory walk on the expiry path, and that
+        // overrun is what roborev job 236 finding 2 found the documented bound to
+        // be silently permitting.
+        if artifacts >= 1 {
             Some(())
         } else {
             thread::sleep(slice);
@@ -306,7 +307,7 @@ fn writable_session_auto_flushes_mid_session_across_threshold() {
     // Stage (d): cleanly end via EOF; progress-observed exit wait.
     drop(stdin);
     let stage = deadline.stage("d.eof-exit");
-    let exited = poll_with_progress(&io, &data_dir, &stage, |slice| {
+    let exited = poll_with_progress(&io, &data_dir, &stage, |slice, _artifacts| {
         child.wait_timeout(slice).expect("wait_timeout on child")
     });
     let (status, _t_exit): (ExitStatus, Duration) = match exited {
@@ -320,11 +321,8 @@ fn writable_session_auto_flushes_mid_session_across_threshold() {
                  EOF path flushes and finalizes the engine before returning, so a slow flush and \
                  a wedged one read the same here; the progress observation above reports whether \
                  anything was still happening.\n\
-                 durable -Data.db artifacts under {}: {}\n\
                  child transcript:\n{}\n{}",
                 fail.observed(),
-                data_dir.display(),
-                count_data_db(&data_dir),
                 io.transcript_text(),
                 stage.report()
             );

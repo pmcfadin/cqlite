@@ -449,6 +449,12 @@ pub struct PollFail {
     since_progress: Duration,
     new_lines: usize,
     new_artifacts: usize,
+    /// The artifact count from the iteration that declared the timeout — THE SAME
+    /// SAMPLE the final status check was given. Carried here so a call site can
+    /// report it without taking another directory scan after the verdict
+    /// (roborev job 236, finding 2).
+    artifacts_now: usize,
+    data_dir: PathBuf,
 }
 
 impl PollFail {
@@ -480,8 +486,14 @@ impl PollFail {
         format!(
             "gave up after {:.2?}, when the test's ONE deadline passed while this stage was \
              pending — which is what attributes the failure to this stage and to nothing else.\n\
-             {}\n{counts}",
-            self.stage_spent, self.deadline
+             {}\n{counts}\n\
+             durable `-Data.db` artifacts under {} when the verdict was taken: {} (the ONE sample \
+             this iteration took, which is also the sample the final status check was given — \
+             this path takes no further scan)",
+            self.stage_spent,
+            self.deadline,
+            self.data_dir.display(),
+            self.artifacts_now
         )
     }
 }
@@ -517,13 +529,25 @@ impl PollFail {
 /// test's verdict depend on how long a directory scan happened to take, which is
 /// the scheduling sensitivity this change exists to eliminate.
 ///
-/// THE OVERRUN IS BOUNDED BUT NOT TINY. The instant this loop decides can lag the
-/// deadline by at most one `SLICE.min(remaining)` (<= 100ms) plus one
+/// THE OVERRUN IS BOUNDED BUT NOT TINY, AND THE BOUND IS ENFORCED BY STRUCTURE
+/// (roborev job 236, finding 2). The instant this loop decides can lag the
+/// deadline by at most one `SLICE.min(remaining)` (<= 100ms) plus ONE
 /// `count_data_db` scan — and that scan is a recursive `read_dir` walk of the
 /// data directory, which on a loaded host is not necessarily quick. The same lag
 /// applies to the FAILURE path, which is declared at the next loop top rather
 /// than the instant the deadline passes; `PollFail` reports the stage's real
 /// spend, so the message never understates it.
+///
+/// THAT CLAIM WAS FALSE TWICE BEFORE IT WAS MADE TRUE. It was rescoped in round 9
+/// and was still wrong: the iteration scanned, the artifact `step` scanned again
+/// on its own, `step(ZERO)` scanned a third time at expiry, and the failure path
+/// a fourth — so a post-deadline overrun of FOUR directory walks was possible
+/// while the comment promised one. The claim is not weakened again; the code now
+/// meets it. THE SAMPLE IS TAKEN HERE, EXACTLY ONCE PER ITERATION, and is handed
+/// to `step` as its second argument — so a `step` that decides on durable
+/// artifacts MUST use the count it is given rather than scanning for itself, the
+/// expiry check reuses that same sample, and `PollFail` carries it to the call
+/// site so even the failure message takes no further scan.
 ///
 /// So read every "nothing may exceed the deadline" claim in this harness as a
 /// statement about the timeout ARITHMETIC — no wait is granted, or started, past
@@ -533,54 +557,65 @@ pub fn poll_with_progress<T>(
     io: &ChildIo,
     data_dir: &Path,
     stage: &Stage,
-    mut step: impl FnMut(Duration) -> Option<T>,
+    mut step: impl FnMut(Duration, usize) -> Option<T>,
 ) -> Result<(T, Duration), PollFail> {
     const SLICE: Duration = Duration::from_millis(100);
     let mut last_progress = Instant::now();
-    let mut artifacts = count_data_db(data_dir);
+    // The baseline, taken before any step runs: `new_artifacts` counts what
+    // appeared DURING the poll, so iteration 0 must have something to differ from.
+    let mut prev_artifacts = count_data_db(data_dir);
     let mut new_lines = 0usize;
     let mut new_artifacts = 0usize;
 
     loop {
-        let remaining = stage.remaining();
-        if remaining.is_zero() {
-            // FINAL NON-BLOCKING STATUS CHECK BEFORE DECLARING A TIMEOUT (roborev
-            // job 233, finding 1). The child may have EXITED, or the artifact may
-            // have APPEARED, before the deadline and simply not have been observed
-            // yet: this thread sleeps a slice at a time and can be descheduled
-            // arbitrarily long past the end of one. `step(ZERO)` waits for nothing
-            // — `wait_timeout(ZERO)` is a `try_wait`, and the artifact predicate
-            // is a directory count — so this cannot extend the deadline; it only
-            // consumes evidence that already arrived within it.
-            if let Some(done) = step(Duration::ZERO) {
-                return Ok((done, stage.spent()));
-            }
-            // Still absent, so this IS a timeout. Fold in any progress that
-            // arrived unobserved, so the message describes the moment it is
-            // declared rather than one slice earlier.
-            new_lines += io.drain_new();
-            new_artifacts += count_data_db(data_dir).saturating_sub(artifacts);
-            return Err(PollFail {
-                stage_spent: stage.spent(),
-                deadline: stage.describe(),
-                since_progress: last_progress.elapsed(),
-                new_lines,
-                new_artifacts,
-            });
-        }
-        if let Some(done) = step(SLICE.min(remaining)) {
-            return Ok((done, stage.spent()));
+        // THE ITERATION'S ONE SAMPLE OF EACH SIGNAL, taken at the top and reused
+        // by everything below it: the progress accounting, `step`, the expiry
+        // status check and the failure message. Nothing downstream re-scans, which
+        // is what makes the documented overrun bound above true rather than
+        // aspirational.
+        let artifacts = count_data_db(data_dir);
+        if artifacts > prev_artifacts {
+            new_artifacts += artifacts - prev_artifacts;
+            prev_artifacts = artifacts;
+            last_progress = Instant::now();
         }
         let lines = io.drain_new();
         if lines > 0 {
             new_lines += lines;
             last_progress = Instant::now();
         }
-        let now_artifacts = count_data_db(data_dir);
-        if now_artifacts > artifacts {
-            new_artifacts += now_artifacts - artifacts;
-            artifacts = now_artifacts;
-            last_progress = Instant::now();
+
+        let remaining = stage.remaining();
+        if remaining.is_zero() {
+            // FINAL NON-BLOCKING STATUS CHECK BEFORE DECLARING A TIMEOUT (roborev
+            // job 233, finding 1). The child may have EXITED, or the artifact may
+            // have APPEARED, before the deadline and simply not have been observed
+            // yet: this thread sleeps a slice at a time and can be descheduled
+            // arbitrarily long past the end of one. `step(ZERO, ..)` waits for
+            // nothing — `wait_timeout(ZERO)` is a `try_wait`, and an artifact
+            // predicate reads the sample above rather than scanning — so this
+            // cannot extend the deadline; it only consumes evidence that already
+            // arrived within it.
+            //
+            // The sample and the drain above were taken AFTER the deadline lapsed
+            // and before this decision, so the progress counts describe the moment
+            // the verdict is taken rather than one slice earlier — no separate
+            // fold-in is needed, and none is taken.
+            if let Some(done) = step(Duration::ZERO, artifacts) {
+                return Ok((done, stage.spent()));
+            }
+            return Err(PollFail {
+                stage_spent: stage.spent(),
+                deadline: stage.describe(),
+                since_progress: last_progress.elapsed(),
+                new_lines,
+                new_artifacts,
+                artifacts_now: artifacts,
+                data_dir: data_dir.to_path_buf(),
+            });
+        }
+        if let Some(done) = step(SLICE.min(remaining), artifacts) {
+            return Ok((done, stage.spent()));
         }
     }
 }
@@ -986,7 +1021,7 @@ fn observed_progress_never_extends_the_deadline() {
         let (io, lines) = ChildIo::synthetic();
         let deadline = TestDeadline::start(Duration::from_millis(300), Duration::from_millis(300));
         let stage = deadline.stage("synthetic");
-        let outcome = poll_with_progress(&io, &data_dir, &stage, |slice| {
+        let outcome = poll_with_progress(&io, &data_dir, &stage, |slice, _artifacts| {
             // Progress on every single slice.
             let _ = lines.send((Stream::Stderr, "still working".to_string()));
             thread::sleep(slice);
@@ -1098,8 +1133,10 @@ fn a_step_completed_before_the_deadline_is_observed_after_it_lapses() {
         "the precondition of this test is an already-lapsed deadline"
     );
 
-    let outcome = poll_with_progress(&io, &data_dir, &stage, |slice| {
-        if count_data_db(&data_dir) >= 1 {
+    let outcome = poll_with_progress(&io, &data_dir, &stage, |slice, artifacts| {
+        // The poll's OWN sample, not a scan of our own: one scan per iteration is
+        // what the documented overrun bound rests on (job 236, finding 2).
+        if artifacts >= 1 {
             Some(())
         } else {
             thread::sleep(slice);
