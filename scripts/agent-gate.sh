@@ -6086,6 +6086,36 @@ run_node_bindings() {
   echo ">>> [$name] $status ($((end - start))s)"
 }
 
+# Partition a package's DERIVED integration targets into the ones cargo can actually
+# run at this lane's feature set and the ones it will SILENTLY skip for an unmet
+# `required-features` (cargo prints no banner at all for those, so demanding an
+# observation would red a healthy lane — they are excluded and DECLARED, never dropped
+# quietly). Prints ONE tab-separated line: <runner-ids> TAB <target-names> TAB
+# <skip-reasons>.
+#
+# SHARED by both packages deliberately. The cqlite-ffi-common half and the cqlite-node
+# half are the SAME logic, and a near-copy is how one of them silently stops matching
+# cargo's behaviour — the drift this whole component exists to prevent.
+_brt_partition_targets() { # <target-meta> <enabled-set>
+  local meta="$1" enabled="$2"
+  local ids="" names="" skip="" tn tid trf troff trfl
+  while IFS=$'\t' read -r tn tid trf; do
+    [ -n "$tn" ] || continue
+    troff=""
+    for trfl in ${trf//,/ }; do
+      case "$enabled" in *" $trfl "*) ;; *) troff="$trfl"; break ;; esac
+    done
+    if [ -n "$troff" ]; then
+      skip="$skip $tid(required-features[$trf]:off[$troff])"
+    else
+      ids="$ids $tid"; names="$names $tn"
+    fi
+  done <<< "$meta"
+  # \037 = ASCII US. See this function's header: TAB here silently dropped an empty
+  # LEADING field, which is the C3 defect.
+  printf '%s\037%s\037%s\n' "${ids# }" "${names# }" "${skip# }"
+}
+
 # _package_declared_features <package>: print every feature NAME the package's own
 # manifest declares, one per line (possibly none), from cargo metadata. Exit 1 = the
 # derivation failed (no jq/python3, a metadata failure, or no such package) — never a
@@ -6335,40 +6365,14 @@ EOF
   # of the component log — because a lane that omits coverage silently is
   # indistinguishable from one that covers it, and "the log a reviewer actually reads"
   # is both of those. Not a comment: a comment is not read on a run.
-  # Partition a package's DERIVED integration targets into the ones cargo can actually
-  # run at this lane's feature set and the ones it will SILENTLY skip for an unmet
-  # `required-features` (cargo prints no banner at all for those, so demanding an
-  # observation would red a healthy lane — they are excluded and DECLARED, never dropped
-  # quietly). Prints ONE tab-separated line: <runner-ids> TAB <target-names> TAB
-  # <skip-reasons>.
-  #
-  # SHARED by both packages deliberately. The cqlite-ffi-common half and the cqlite-node
-  # half are the SAME logic, and a near-copy is how one of them silently stops matching
-  # cargo's behaviour — the drift this whole component exists to prevent.
-  _brt_partition_targets() { # <target-meta> <enabled-set>
-    local meta="$1" enabled="$2"
-    local ids="" names="" skip="" tn tid trf troff trfl
-    while IFS=$'\t' read -r tn tid trf; do
-      [ -n "$tn" ] || continue
-      troff=""
-      for trfl in ${trf//,/ }; do
-        case "$enabled" in *" $trfl "*) ;; *) troff="$trfl"; break ;; esac
-      done
-      if [ -n "$troff" ]; then
-        skip="$skip $tid(required-features[$trf]:off[$troff])"
-      else
-        ids="$ids $tid"; names="$names $tn"
-      fi
-    done <<< "$meta"
-    printf '%s\t%s\t%s\n' "${ids# }" "${names# }" "${skip# }"
-  }
-
   local ffi_ids="" ffi_names="" ffi_skip="" ffi_expect_n=0
   local node_ids="" node_names="" node_skip="" node_expect_n=0
   local -a ffi_expect=() node_expect=() node_test_args=()
   local _t
-  IFS=$'\t' read -r ffi_ids ffi_names ffi_skip <<< "$(_brt_partition_targets "$ffi_targets" "$ffi_enabled")"
-  IFS=$'\t' read -r node_ids node_names node_skip <<< "$(_brt_partition_targets "$node_targets" "$node_enabled")"
+  # IFS=US, matching the helper's delimiter. NOT tab — see the helper's own header for the
+  # leading-empty-field collapse that cost this a round.
+  IFS=$'\037' read -r ffi_ids ffi_names ffi_skip <<< "$(_brt_partition_targets "$ffi_targets" "$ffi_enabled")"
+  IFS=$'\037' read -r node_ids node_names node_skip <<< "$(_brt_partition_targets "$node_targets" "$node_enabled")"
   for _t in $ffi_ids; do ffi_expect+=("$_t"); done
   ffi_expect_n=${#ffi_expect[@]}
   for _t in $node_ids; do node_expect+=("$_t"); done
@@ -10676,6 +10680,27 @@ run_tooling_tests() {
      ! bash "$REPO_ROOT/scripts/tests/test_tools_crate_disposition_selftest.sh" >>"$log" 2>&1; then
     status=FAIL
     echo "--- [$name] FAILED (tools/ crate disposition census #1716); last 40 lines of $log ---"
+    tail -40 "$log"
+    echo "--- end of $name output ---"
+    end=$(date +%s)
+    record_result "$name" "$status" "$((end - start))"
+    echo ">>> [$name] $status ($((end - start))s)"
+    return 0
+  fi
+
+  # binding-rust-tests target-partition self-test (#3522, roborev C3): hermetic, no cargo /
+  # network / datasets. Drives _brt_partition_targets — sourced OUT OF THE REAL GATE SCRIPT,
+  # never a copy — over synthetic metadata, including the case that cost a review round: when
+  # EVERY declared integration target requires a disabled feature, the runnable fields are
+  # empty and the empty LEADING field must survive the caller's `read`. A TAB delimiter
+  # silently dropped it, so the skip text was misread as the runnable ids and the census would
+  # have announced unrunnable targets as EXECUTED. That case is unreachable by running the
+  # lane (cqlite-node declares zero integration targets today), which is precisely why it
+  # needs a test. A failure FAILs the component.
+  echo ">>> [$name] bash scripts/tests/test_agent_gate_binding_partition.sh"
+  if ! bash "$REPO_ROOT/scripts/tests/test_agent_gate_binding_partition.sh" >>"$log" 2>&1; then
+    status=FAIL
+    echo "--- [$name] FAILED (binding-rust-tests target-partition self-test #3522); last 40 lines of $log ---"
     tail -40 "$log"
     echo "--- end of $name output ---"
     end=$(date +%s)
