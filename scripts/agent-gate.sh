@@ -2833,10 +2833,6 @@ _component_set_normalise_remote() {
     # which is the false-FAIL class — worth fixing at Low precisely because that is the class
     # agents learn to waive a lane over.
     git+ssh://*) scheme=ssh;   u="${u#git+ssh://}" ;;
-    # Both historical spellings of the same authenticated transport. Accepting one and
-    # rejecting the other reds a valid canonical checkout (roborev job 230), which is the
-    # guard agents learn to waive.
-    ssh+git://*) scheme=ssh;   u="${u#ssh+git://}" ;;
     ssh+git://*) scheme=ssh;   u="${u#ssh+git://}" ;;
     # UNAUTHENTICATED TRANSPORTS, named individually so nobody "restores" one as a spelling:
     # with no server authentication, an on-path attacker IS the baseline, and the baseline is

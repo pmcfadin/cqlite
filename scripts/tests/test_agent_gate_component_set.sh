@@ -1881,7 +1881,6 @@ for _u in "https://github.com/pmcfadin/cqlite.git" \
           "ssh://git@github.com:22/pmcfadin/cqlite" \
           "git+ssh://git@github.com/pmcfadin/cqlite.git" \
           "ssh+git://git@github.com/pmcfadin/cqlite.git" \
-          "ssh+git://git@github.com/pmcfadin/cqlite.git" \
           "https://x-access-token:ghp_example@github.com/pmcfadin/cqlite.git" \
           "HTTPS://WWW.GitHub.com/PMcFadin/CQLite.git/"; do
   [ "$(identity "$_u")" = canonical ] || id_bad="${id_bad:+$id_bad }REJECTED:$_u"
