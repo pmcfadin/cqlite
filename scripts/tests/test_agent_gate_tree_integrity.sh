@@ -50,6 +50,9 @@ trap 'rm -rf "$tmp"' EXIT INT TERM
 
 GIT_ID=(-c user.email=gate@example.invalid -c user.name=gate-selftest)
 
+# shellcheck source=scripts/tests/lib/agent-gate-canonical-pin.sh
+. "$SCRIPT_DIR/lib/agent-gate-canonical-pin.sh"
+
 # ---------------------------------------------------------------------------
 # Fixture: a FAKE checkout. Copying ONLY the gate into <root>/scripts/ makes the gate's
 # `cd "$(dirname "$0")/.."` resolve REPO_ROOT to <root>, so every capture, default
@@ -59,6 +62,17 @@ mkrepo() { # mkrepo <name> [extra `git init` args…] -> echoes the repo path
   local root="$tmp/$1"; shift
   mkdir -p "$root/scripts"
   cp "$GATE" "$root/scripts/agent-gate.sh"
+  # PIN THE CANONICAL IDENTITY in this fixture's own copy, BEFORE the commit below (#3544 /
+  # roborev job 225). The pre-flight validates that `origin` NAMES the canonical upstream
+  # before fetching, and the LOCAL bare origin created further down is deliberately NOT
+  # canonical — so without the pin every fixture would stop at the pre-flight as
+  # `remote-not-canonical` instead of exercising the tree-integrity guard under test.
+  # Substituting the ARTIFACT in the scratch copy is the sanctioned pattern (CLAUDE.md); a
+  # settable seam would reopen the hole the check closes. Pinning BEFORE the commit keeps the
+  # fixture CLEAN — a post-commit pin would leave it dirty, which is itself an input these
+  # cases assert on. FATAL rather than silent: an unpinned fixture measures nothing.
+  agent_gate_pin_canonical_remote "$root/scripts/agent-gate.sh" "$root.origin.git" \
+    || { echo "FATAL: could not pin the canonical identity in fixture '$root'" >&2; exit 1; }
   # The DISPOSABLE-CHECKOUT MARKER (#2926 review B5): the gate's mutating self-test hooks
   # refuse to write into any checkout that does not carry it, so they can never append to
   # — or commit into — a live repo. Committed, so it is inside the digest yet clean.

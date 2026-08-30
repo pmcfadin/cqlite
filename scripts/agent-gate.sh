@@ -2715,56 +2715,113 @@ _component_set_bounded() {
   esac
 }
 
-# THE CANONICAL UPSTREAM IDENTITY (roborev job 215, blocker 3). Before this, the baseline
-# was trusted because a remote NAMED `origin` merely EXISTED — so `git remote set-url origin
-# <anything>` re-pointed the comparison, which is precisely the env-var opt-out requirement 9
-# forbids, reachable through git config instead of the environment. And it fires BY ACCIDENT
-# in the documented fork workflow: there `origin` legitimately names a contributor's FORK
-# whose `main` may be months stale, so the guard silently compares against the wrong baseline
-# and stamps a PASS — the vacuous green this whole pre-flight exists to close.
+# THE CANONICAL UPSTREAM IDENTITY (roborev job 215 blocker 3, TIGHTENED by job 225). Before
+# this, the baseline was trusted because a remote NAMED `origin` merely EXISTED — so `git
+# remote set-url origin <anything>` re-pointed the comparison, which is precisely the env-var
+# opt-out requirement 9 forbids, reachable through git config instead of the environment. And
+# it fires BY ACCIDENT in the documented fork workflow: there `origin` legitimately names a
+# contributor's FORK whose `main` may be months stale, so the guard silently compares against
+# the wrong baseline and stamps a PASS — the vacuous green this pre-flight exists to close.
 #
-# HARD-CODED, and hard-coded is the point: a configurable expected identity would be the
-# same hole one level out. There is no env var and none may be added.
-_CS_CANONICAL_REPO="pmcfadin/cqlite"
+# THE HOST IS PART OF THE IDENTITY, AND THE FIRST CUT'S "ERR TOWARD ACCEPTING AN AMBIGUOUS
+# HOST" WAS WRONG (job 225). Matching on OWNER/REPO alone accepted `https://evil.example/
+# pmcfadin/cqlite` — and, needing no hostile host at all, ANY LOCAL PATH ending in
+# `pmcfadin/cqlite`. Two reasons that is not a tolerable boundary:
+#   1. IT COMPOUNDS WITH THE EXECUTION SURFACE. This pre-flight EXTRACTS AND RUNS the
+#      baseline's copy of this script (`bash <origin/main:scripts/agent-gate.sh> --list`), so
+#      a loose identity does not merely admit a wrong baseline — it admits arbitrary code
+#      from any repository whose path ends in the right two segments. Identity and execution
+#      were triaged as separate concerns; they MULTIPLY.
+#   2. THE TEST HOOK AND THE VULNERABILITY WERE THE SAME FACT. The self-test's local file
+#      remotes were "genuinely canonical" only because the check was weak enough to accept a
+#      local path — i.e. the property that made the fixtures work WAS the hole. The fixtures
+#      now substitute this constant in their own SCRATCH COPY of this script (the pattern
+#      CLAUDE.md prescribes), which needs no weakening of the shipped check and no seam a
+#      real invoker can set.
+# What is still accepted is only what is VERIFIABLE from the string: the legitimate spellings
+# of ONE host — `https://`, `http://`, `git://`, `ssh://`, scp-like `git@host:owner/repo`,
+# optional userinfo, an explicit `ssh://` port, an optional `www.` and a trailing `.git`,
+# case-insensitively. An unverifiable alias (`mygithub:pmcfadin/cqlite`), a mirror, a local
+# path and an unknown scheme (`file://`) FAIL CLOSED as `remote-not-canonical` — a named
+# non-PASS with a remedy, which the author can always act on by pointing `origin` at upstream.
+#
+# ONE HARD-CODED LITERAL, and that is the point: a configurable expected identity would be
+# the same hole one level out. There is no env var and none may be added.
+_CS_CANONICAL_REMOTE="github.com/pmcfadin/cqlite"
 
-# _component_set_normalise_remote <url>: the comparable form of a remote URL. Folds the
-# spellings git accepts for one repository: case, a trailing `/`, a trailing `.git`, and
-# `:` -> `/` (which folds BOTH the scp-like `git@host:owner/repo` form and a `host:port`
-# into path separators) with `//` squeezed (which folds a scheme's `://`). What survives is
-# a `/`-separated path whose LAST TWO segments are the owner/repo identity.
+# _component_set_normalise_remote <url>: the comparable `<host>/<owner>/<repo>` form of a
+# remote URL, or a NON-HOST form (`local:<path>` / `unsupported-scheme:<url>`) which can
+# never equal a `<host>/…` constant and therefore always fails closed. Deliberately total:
+# it never errors, so the caller has exactly one comparison to make.
+#
+# Lowercased whole: scheme and host are case-insensitive by RFC, and GitHub treats
+# owner/repo case-insensitively too, so this direction only ever ACCEPTS a legitimate
+# spelling. `tr -d '[:space:]'`: a git URL has no legitimate whitespace, and removing it can
+# only make a pathological value fail a later comparison — never turn a fork into upstream.
 _component_set_normalise_remote() {
-  local u
-  # `tr -d '[:space:]'`: a git URL has no legitimate whitespace, and stripping it can only
-  # make a pathological value fail the fetch later — never turn a fork into the upstream.
+  local u scheme=0 host path hport
   u=$(printf '%s' "$1" | tr 'A-Z' 'a-z' | tr -d '[:space:]')
+  case "$u" in
+    https://*)   scheme=1; u="${u#https://}" ;;
+    http://*)    scheme=1; u="${u#http://}" ;;
+    ssh://*)     scheme=1; u="${u#ssh://}" ;;
+    git+ssh://*) scheme=1; u="${u#git+ssh://}" ;;
+    git://*)     scheme=1; u="${u#git://}" ;;
+    # ANY OTHER SCHEME IS UNVERIFIABLE, INCLUDING `file://`: naming it explicitly here is
+    # what stops a future reader "fixing" the local-path branch by adding a scheme.
+    *://*)       printf 'unsupported-scheme:%s' "$u"; return 0 ;;
+  esac
+  # USERINFO, stripped only when the `@` is in the AUTHORITY (before the first `/`) — an
+  # `@` inside a path is path data, not credentials.
+  case "${u%%/*}" in
+    *@*) u="${u#*@}" ;;
+  esac
+  if [ "$scheme" -eq 1 ]; then
+    host="${u%%/*}"
+    case "$u" in */*) path="${u#*/}" ;; *) path="" ;; esac
+    # An explicit port is legal ONLY in the scheme form. Stripped only when it is ALL
+    # DIGITS; anything else stays in `host` and fails the comparison rather than being
+    # guessed at.
+    case "$host" in
+      *:*) hport="${host##*:}"
+           case "$hport" in
+             ''|*[!0-9]*) : ;;
+             *) host="${host%:*}" ;;
+           esac ;;
+    esac
+  else
+    # NO SCHEME: git reads `host:path` as scp-like, and everything else as a LOCAL PATH.
+    # scp-like syntax has NO port, so there is no ambiguity to resolve here — which is why
+    # the port branch above lives only in the scheme arm.
+    case "${u%%/*}" in
+      *:*) host="${u%%:*}"; path="${u#*:}" ;;
+      *)   printf 'local:%s' "$(_component_set_strip_repo_suffix "$u")"; return 0 ;;
+    esac
+  fi
+  case "$host" in www.*) host="${host#www.}" ;; esac
+  printf '%s/%s' "$host" "$(_component_set_strip_repo_suffix "$path")"
+}
+
+# _component_set_strip_repo_suffix <path>: drop the decorations git allows on a repository
+# path — leading/trailing `/` and a trailing `.git` — in a loop, so `…/cqlite.git/` folds too.
+_component_set_strip_repo_suffix() {
+  local p="$1"
   while :; do
-    case "$u" in
-      */)    u="${u%/}" ;;
-      *.git) u="${u%.git}" ;;
+    case "$p" in
+      /*)    p="${p#/}" ;;
+      */)    p="${p%/}" ;;
+      *.git) p="${p%.git}" ;;
       *)     break ;;
     esac
   done
-  printf '%s' "$u" | tr ':' '/' | tr -s '/'
+  printf '%s' "$p"
 }
 
 # _component_set_remote_is_canonical <url>: rc 0 iff <url> names the canonical upstream.
-#
-# THE COMPARISON IS ON OWNER/REPO, NOT ON THE HOST, AND THAT ASYMMETRY IS DELIBERATE: WHERE
-# A URL SHAPE IS AMBIGUOUS, ERR TOWARD ACCEPTING IT. An ssh config alias
-# (`mygithub:pmcfadin/cqlite`), an explicit port, a local mirror or a bundle path each carry
-# a host part that cannot be resolved to `github.com` without the network — so demanding the
-# host would RED A CORRECT TREE, and a guard that reds on correct input is the guard agents
-# learn to waive. Over-accepting costs coverage of a rare case (a mirror path ending in the
-# same owner/repo but holding other history, whose skew would then go unreported). Under-
-# rejecting a FORK (`github.com/contributor/cqlite`) is what this must never do, because that
-# is the MEASURED accident class — and the owner/repo suffix catches exactly it.
+# EXACT equality against the one literal — never a suffix or prefix test, which is what
+# admitted `evil.example/pmcfadin/cqlite` and every local path (job 225).
 _component_set_remote_is_canonical() {
-  local n
-  n=$(_component_set_normalise_remote "$1")
-  case "$n" in
-    "$_CS_CANONICAL_REPO"|*"/$_CS_CANONICAL_REPO") return 0 ;;
-  esac
-  return 1
+  [ "$(_component_set_normalise_remote "$1")" = "$_CS_CANONICAL_REMOTE" ]
 }
 
 # _component_set_head_set: derive the component set from the gate script AS COMMITTED AT
@@ -2878,7 +2935,7 @@ _component_set_probe() {
   fi
   if ! _component_set_remote_is_canonical "$origin_url"; then
     _CS_KIND=remote-not-canonical
-    _CS_DETAIL="origin is '$origin_url' (normalised '$(_component_set_normalise_remote "$origin_url")'), which does not name the canonical upstream $_CS_CANONICAL_REPO; a fork or a re-pointed remote is a DIFFERENT baseline, and comparing against it would stamp a PASS about the wrong component set"
+    _CS_DETAIL="origin is '$origin_url' (normalised '$(_component_set_normalise_remote "$origin_url")'), which does not name the canonical upstream $_CS_CANONICAL_REMOTE; a fork or a re-pointed remote is a DIFFERENT baseline, and comparing against it would stamp a PASS about the wrong component set"
     return 0
   fi
 
@@ -3261,12 +3318,12 @@ apply_component_set_preflight() {
       # fail-closed diagnostic is what makes an agent suspect its own diff (the #3148 lesson).
       case "$_CS_KIND" in
         remote-not-canonical|remote-unreadable)
-          hint="hint: point origin at the canonical upstream (git remote set-url origin https://github.com/$_CS_CANONICAL_REPO.git) — or add it as a second remote and run the gate in a checkout whose origin is upstream — then re-run scripts/agent-gate.sh"
-          echo "agent-gate: 'origin' does not name the canonical upstream $_CS_CANONICAL_REPO, so the" >&2
+          hint="hint: point origin at the canonical upstream (git remote set-url origin https://$_CS_CANONICAL_REMOTE.git) — or add it as a second remote and run the gate in a checkout whose origin is upstream — then re-run scripts/agent-gate.sh"
+          echo "agent-gate: 'origin' does not name the canonical upstream $_CS_CANONICAL_REMOTE, so the" >&2
           echo "            baseline component set would come from a DIFFERENT repository (a fork's" >&2
           echo "            main can be months stale). That is a baseline of unknown provenance, not" >&2
           echo "            a measurement, so no PASS may be derived from it (#3544 job 215)." >&2
-          echo "agent-gate: remedy: git remote set-url origin https://github.com/$_CS_CANONICAL_REPO.git" >&2 ;;
+          echo "agent-gate: remedy: git remote set-url origin https://$_CS_CANONICAL_REMOTE.git" >&2 ;;
         *)
           hint="hint: restore access to origin/main (git fetch origin main), then re-run scripts/agent-gate.sh"
           echo "agent-gate: the baseline component set could NOT be measured, so this run cannot" >&2

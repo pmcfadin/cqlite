@@ -78,6 +78,9 @@ fi
 tmp=$(mktemp -d "${TMPDIR:-/tmp}/agent-gate-delta-test.XXXXXX")
 trap 'rm -rf "$tmp"' EXIT
 
+# shellcheck source=scripts/tests/lib/agent-gate-canonical-pin.sh
+. "$SCRIPT_DIR/lib/agent-gate-canonical-pin.sh"
+
 # add_local_origin <repo> (#3544): give a scratch fixture a LOCAL bare `origin` whose
 # `main` is the fixture's own current commit. The gate's component-set pre-flight fetches
 # origin/main and FAILS CLOSED in the certifying modes (--delta is one) when the baseline
@@ -93,6 +96,32 @@ add_local_origin() {
   ( cd "$repo" \
       && git remote add origin "$repo.origin.git" \
       && git push -q origin HEAD:refs/heads/main ) >/dev/null 2>&1
+}
+
+# copy_gate_with_pin <repo> (#3544 / roborev job 225): copy the gate into a fixture AND pin
+# its canonical-identity literal to the LOCAL origin add_local_origin will create.
+#
+# The pre-flight validates that `origin` NAMES the canonical upstream
+# (`github.com/pmcfadin/cqlite`) before fetching a baseline — `origin` merely EXISTING made
+# `git remote set-url origin <anything>` a git-config-shaped opt-out, and the pre-flight
+# EXTRACTS AND RUNS the baseline's copy of the gate, so a loose identity admits code and not
+# just a wrong baseline. A LOCAL PATH is therefore deliberately not canonical, and without
+# this pin both --delta fixtures below stop at the pre-flight as `remote-not-canonical`
+# instead of reaching the REFUSED paths they exist to test. That was the job-225 regression:
+# it would have surfaced as a full-gate FAIL under `tooling-tests`, which neither `--lite` nor
+# the component-set suite executes. Substituting the ARTIFACT in the fixture's own scratch
+# copy is the sanctioned pattern (CLAUDE.md); a settable seam would reopen the hole.
+#
+# BEFORE THE FIXTURE'S FIRST COMMIT, deliberately: pinning afterwards leaves the gate copy as
+# a DIRTY working-tree change, which the node fixture's later `git commit -am` swept into the
+# anchor..HEAD diff — so that case REFUSED naming `scripts/agent-gate.sh` instead of the
+# unbuilt module, i.e. passed/failed for a reason unrelated to what it tests (measured).
+copy_gate_with_pin() {
+  local repo="$1"
+  mkdir -p "$repo/scripts"
+  cp "$GATE" "$repo/scripts/agent-gate.sh"
+  agent_gate_pin_canonical_remote "$repo/scripts/agent-gate.sh" "$repo.origin.git" \
+    || { echo "FATAL: could not pin the canonical identity in fixture '$repo'" >&2; exit 1; }
 }
 
 # assert_verdict <label> <expected> <paths...>: pipe the paths through the hidden
@@ -476,7 +505,7 @@ fi
 #     real working tree is never touched.
 rn_repo="$tmp/rename-repo"
 mkdir -p "$rn_repo/scripts"
-cp "$GATE" "$rn_repo/scripts/agent-gate.sh"
+copy_gate_with_pin "$rn_repo"
 (
   cd "$rn_repo" \
     && git init -q \
@@ -568,7 +597,7 @@ esac
 #      green. Mirrors the rename-refuses harness (copies agent-gate.sh into a temp repo).
 nd_repo="$tmp/node-refuse-repo"
 mkdir -p "$nd_repo/scripts" "$nd_repo/bindings/node/__test__"
-cp "$GATE" "$nd_repo/scripts/agent-gate.sh"
+copy_gate_with_pin "$nd_repo"
 (
   cd "$nd_repo" \
     && git init -q \
