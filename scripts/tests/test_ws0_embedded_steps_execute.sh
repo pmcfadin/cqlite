@@ -1471,11 +1471,31 @@ sys.path.insert(0, sys.argv[1])
 from ws0_ticket_input import write_ticket_template
 write_ticket_template(pathlib.Path(sys.argv[2]), pathlib.Path(sys.argv[3]) / "ws0-events.cql")
 PY
+  # BOTH STEPS MUST HAVE SUCCEEDED AND BOTH ARTIFACTS MUST EXIST BEFORE THE VERDICT MEANS
+  # ANYTHING (#3451 post-rebase round 5, F3). This control used to treat ANY refusal as success
+  # without checking either status, either artifact, or the REASON — so a setup failure or a
+  # step that never ran satisfied it, and it passed without ever demonstrating that the
+  # mismatch was detected. A control that cannot fail, inside the suite whose subject is
+  # refusing exactly that.
   run_pin_rc=0; run_cpu_rc=0
   run_pin_step "$SWAPDRV" "$SWAPDIR" >/dev/null 2>&1
   run_cpu_step "$SWAPDRV" "$SWAPDIR" >/dev/null 2>&1
-  swap_verdict=refused
-  python3 - "$PERF_DIR" "$SWAPDIR" >/dev/null 2>&1 <<'PY' && swap_verdict=accepted
+  if [ "$run_pin_rc" -ne 0 ] || [ "$run_cpu_rc" -ne 0 ]; then
+    fail "cpu-mapping CONTROL ($cpu_swap): a step did not run (pin rc=$run_pin_rc, cpu rc=$run_cpu_rc), so nothing about detection was demonstrated"
+    continue
+  fi
+  if [ ! -s "$SWAPDIR/session-corpus-pin.json" ] || [ ! -s "$SWAPDIR/pinning-verification.json" ]; then
+    fail "cpu-mapping CONTROL ($cpu_swap): an artifact is missing, so the verifier below would refuse for the wrong reason"
+    continue
+  fi
+  # ...and the refusal must be FOR THE SERVER-CPU MISMATCH, matched on the reason rather than on
+  # the mere fact of a refusal. `refused-other` is a distinct verdict so a refusal for any other
+  # cause fails the control instead of satisfying it.
+  # The heredoc belongs to the COMMAND SUBSTITUTION, not to a trailing assignment. Attached to
+  # the latter, `python3 -` reads no program: under a terminal it BLOCKS (the suite hung), and
+  # with stdin closed it exits 0 having done nothing — which reads as "the verifier accepted",
+  # i.e. the control silently inverts. Both observed while writing this.
+  swap_reason="$(python3 - "$PERF_DIR" "$SWAPDIR" 2>&1 >/dev/null <<'PY'
 import pathlib, sys
 sys.path.insert(0, sys.argv[1])
 from ws0_pinning import verify_pinning_record
@@ -1485,12 +1505,21 @@ session = pathlib.Path(sys.argv[2])
 config = session_manifest_config(session, TEMPS_ALLOWED, ARMS_ALLOWED)
 verify_pinning_record(session, config["server_cpus"], config["client_cpus"])
 PY
+)"
+  swap_status=$?
+  if [ "$swap_status" -eq 0 ]; then
+    swap_verdict=accepted
+  elif grep -qi 'server' <<<"$swap_reason" && grep -q "$(cfg_value client_cpus)" <<<"$swap_reason"; then
+    swap_verdict=refused
+  else
+    swap_verdict=refused-other
+  fi
   if [ "$cpu_swap" = "pin-only" ] && [ "$swap_verdict" = refused ]; then
     pass "cpu-mapping CONTROL fired (pin-only): WS0_PIN_SERVER_CPUS taking \$CLIENT_CPUS makes the record disagree with the manifest, and the cross-check REFUSES it — invisible while the record was verified against fixture constants"
   elif [ "$cpu_swap" = "consistent" ] && [ "$swap_verdict" = accepted ]; then
     pass "cpu-mapping STATED LIMIT (consistent): swapping BOTH prefixes together is ACCEPTED, and that is honest rather than a gap this suite can close — the manifest and the record then agree, so no cross-check between them can tell; catching it needs an oracle for what the CPU lists OUGHT to be, which only the host topology has (test_ws0_cpu_pinning_guards.sh's subject)"
   else
-    fail "cpu-mapping CONTROL ($cpu_swap): expected the cross-check to $([ "$cpu_swap" = pin-only ] && echo refuse || echo accept), got $swap_verdict"
+    fail "cpu-mapping CONTROL ($cpu_swap): expected the cross-check to $([ "$cpu_swap" = pin-only ] && echo 'refuse NAMING the server-CPU mismatch' || echo accept), got $swap_verdict — reason was: $(head -c 200 <<<"$swap_reason")"
   fi
 done
 
