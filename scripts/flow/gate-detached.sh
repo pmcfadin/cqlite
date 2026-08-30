@@ -726,7 +726,22 @@ _foreign_reservation() {  # <path> -> live | free | unknown   (is <path> another
 #
 # `flock` rather than a lock file we would have to reclaim: the kernel releases it when the fd closes, so
 # a launcher dying mid-check leaves nothing stale — the same reason the reclamation mutex uses it.
-_dirlock="${_sumdir}/.cqlite-gate-dirlock"
+# ONE LOCK FOR ALL LAUNCHES, not one per directory (roborev job 256 follow-up, found by applying the
+# new concurrency audit to my own fix). Keying on the SUMMARY's directory left the same check-then-lock
+# hole one level out, because `--log` is INDEPENDENT of `--summary`: with
+#   A: --summary /d1/a --log /d2/b        (dirlock /d1)
+#   B: --summary /d2/b --log /d1/c        (dirlock /d2)
+# the two take DIFFERENT locks while A's LOG is B's SUMMARY, so A's gate output destroys B's verdict.
+# Measured: both launches accepted.
+#
+# Taking one lock per directory in sorted order would also work, but a single lock is simpler and cannot
+# deadlock, and the critical section is a few file reads plus one symlink create — microseconds, so
+# serialising unrelated launches costs nothing measurable against a 30-50 minute gate.
+#
+# Per-USER location, not shared /tmp: a lock every launch must take is a denial-of-service surface if any
+# local user can hold it, and XDG_RUNTIME_DIR is mode 0700. The 30s timeout means a held lock refuses
+# loudly rather than hanging.
+_dirlock="${XDG_RUNTIME_DIR:-${TMPDIR:-/tmp}}/cqlite-gate-launch.lock"
 if ! ( : >> "$_dirlock" ) 2>/dev/null; then
   echo "gate-detached: cannot create the directory lock '$_dirlock', so the artifact-set check and the" >&2
   echo "               reservation cannot be made atomic together. Refusing rather than racing another" >&2
@@ -735,15 +750,40 @@ if ! ( : >> "$_dirlock" ) 2>/dev/null; then
 fi
 exec 8>>"$_dirlock"
 if ! flock -w 30 8; then
-  echo "gate-detached: another launch holds the directory lock for '$_sumdir'." >&2
+  echo "gate-detached: another launch holds the global launch lock ('$_dirlock')." >&2
   echo "               Refusing rather than racing it (#3473). Retry, or use a distinct directory." >&2
   exit 1
 fi
 
+# THE CHECK WAS ASYMMETRIC (roborev job 261). A launch verified whether ITS artifacts were another run's
+# reserved SUMMARY — but only the summary was ever RESERVED, so nothing could detect the reverse. With
+#   A: --summary /t/a --log /t/b     (reserves only /t/a.launch-lock)
+#   B: --summary /t/b --log /t/c     (checks /t/b.heartbeat and /t/c — neither is /t/b)
+# both were accepted while A wrote its LOG into B's SUMMARY. Measured: A exit 0, one lock created, B exit 0.
+# The global lock from the previous fix serialises check-and-acquire; it cannot help when the thing being
+# looked for was never recorded.
+#
+# So every write destination is reserved, and the check therefore becomes symmetric for free: a later
+# launch asking "is any path I will write already reserved?" now finds logs and heartbeats too.
+_ARTIFACTS="$SUMMARY
+$SUMMARY.heartbeat
+$LOGFILE"
+# THE SUMMARY IS CHECKED FIRST, AND SAYS SO SPECIFICALLY (roborev job 261 follow-up). Once every write
+# destination is reserved, a second launch on the SAME summary path trips the artifact-set check first —
+# on the FIRST launch's heartbeat lock — and the generic message then claimed that path was "reserved as
+# ITS summary", which is false: it is reserved as its HEARTBEAT. The reservation target records the owner,
+# not the role, so the generic wording cannot know which. Checking the summary explicitly first restores
+# the accurate diagnosis for the commonest case and leaves the generic one for genuine aliasing.
+if [ "$(_foreign_reservation "$SUMMARY")" = live ]; then
+  echo "gate-detached: the summary path '$SUMMARY' is already owned by a LIVE run." >&2
+  echo "               Two gates on one path overwrite each other's summary and heartbeat, so neither" >&2
+  echo "               could be polled reliably (#2874/#3473). Give this run a path of its own." >&2
+  exit 1
+fi
 _collide=""
 for _cand in "$SUMMARY.heartbeat" "$LOGFILE"; do
   case "$(_foreign_reservation "$_cand")" in
-    live)    _collide="$_cand is reserved by a LIVE run as ITS summary" ;;
+    live)    _collide="$_cand is already reserved by a LIVE run" ;;
     unknown) _collide="$_cand may be reserved by another run, and its owner could not be established" ;;
   esac
   [ -n "$_collide" ] && break
@@ -870,6 +910,32 @@ if ! ln -s "$_res_target" "$_reserve" 2>/dev/null; then
   flock -u 9 2>/dev/null || true
   exec 9>&-
 fi
+# RESERVE THE REMAINING WRITE DESTINATIONS (job 261). The summary lock carries the full reclaim
+# semantics above; these are markers with the SAME owner target, so each self-heals by exactly the same
+# rules when its owner dies. Created only after the summary lock is held, and rolled back together if any
+# fails, so a partial set never outlives a refused launch.
+_extra_locks=""
+_extra_ok=1
+for _art in "$SUMMARY.heartbeat" "$LOGFILE"; do
+  [ "$_art" = "$SUMMARY" ] && continue
+  if ln -s "$_res_target" "$_art.launch-lock" 2>/dev/null; then
+    _extra_locks="$_extra_locks $_art.launch-lock"
+  else
+    case "$(_foreign_reservation "$_art")" in
+      free) ;;                       # a stale marker of our own shape; harmless
+      *) _extra_ok=0; break ;;
+    esac
+  fi
+done
+if [ "$_extra_ok" != 1 ]; then
+  for _l in $_extra_locks; do rm -f "$_l" 2>/dev/null || true; done
+  rm -f "$_reserve" 2>/dev/null || true
+  echo "gate-detached: could not reserve every write destination for this launch." >&2
+  echo "               One of '$SUMMARY.heartbeat' or '$LOGFILE' is claimed by another run, so a gate" >&2
+  echo "               here would overwrite its files. Refusing (#3473); use paths of your own." >&2
+  exit 1
+fi
+
 # The reservation now exists, so a concurrent launch checking the artifact set will SEE it. Releasing the
 # directory lock here — and not before — is what makes the check-and-acquire atomic.
 flock -u 8 2>/dev/null || true

@@ -2912,9 +2912,19 @@ _tree_excluded() {
       # rename-based reclamation it covered; the mutex is a plain file `flock` needs.
       "$TREE_EXCLUDE_REL".launch-lock) return 0 ;;
       "$TREE_EXCLUDE_REL".launch-lock.mutex) return 0 ;;
+      # job 261: every write destination is now reserved, so the heartbeat and log carry their own
+      # `.launch-lock` markers. Exact names only — the subtree lesson from jobs 203/204 stands.
+      "$TREE_EXCLUDE_REL".heartbeat.launch-lock) return 0 ;;
     esac
   fi
+  # job 261: the launcher now RESERVES every write destination, so an in-repo `--log` carries its own
+  # `<log>.launch-lock` beside it. Without this a caller pinning the log inside the checkout would make
+  # the gate fail ITSELF with tree-mutated-midrun, naming a lock the launcher created on its behalf.
+  # Found by OBSERVING a real launch's artifacts (4b.105b), not by reading the launcher — the name is
+  # composed at runtime and appears nowhere as a literal.
   if [ -n "$TREE_STDOUT_REL" ] && [ "$1" = "$TREE_STDOUT_REL" ]; then return 0; fi
+  if [ -n "$TREE_STDOUT_REL" ] && [ "$1" = "$TREE_STDOUT_REL.launch-lock" ]; then return 0; fi
+  if [ -n "$TREE_STDERR_REL" ] && [ "$1" = "$TREE_STDERR_REL.launch-lock" ]; then return 0; fi
   if [ -n "$TREE_STDERR_REL" ] && [ "$1" = "$TREE_STDERR_REL" ]; then return 0; fi
   return 1
 }

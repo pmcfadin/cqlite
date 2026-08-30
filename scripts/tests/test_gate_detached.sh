@@ -1477,11 +1477,30 @@ if [ "$HAVE_SYSTEMD" = yes ]; then
   _au=$(printf '%s' "$_ao" | sed -n 's/^unit:  *//p'); [ -n "$_au" ] && echo "$_au" >> "$UNITS_FILE"
   _bo=$(bash "$LAUNCHER" --summary "$_ax.heartbeat" --log "$TMP/alias-b.log" -- --only fmt 2>&1); _br=$?
   _bu=$(printf '%s' "$_bo" | sed -n 's/^unit:  *//p'); [ -n "$_bu" ] && echo "$_bu" >> "$UNITS_FILE"
-  if [ "$_ar" = 0 ] && [ "$_br" != 0 ] && printf '%s' "$_bo" | grep -q 'artifact-set collision'; then
+  # Once every write destination is reserved (job 261), this case trips the SUMMARY-first check: B's
+  # summary path IS reserved — by A, as A's heartbeat. The accurate statement is "already owned by a LIVE
+  # run", and the reservation target records the owner rather than the role, so the launcher cannot
+  # honestly say which. The generic "artifact-set collision" wording remains reachable for the LOG
+  # collision, covered by 4b.144b.
+  if [ "$_ar" = 0 ] && [ "$_br" != 0 ] && printf '%s' "$_bo" | grep -q 'already owned by a LIVE run'; then
     ok "4b.144 a launch whose SUMMARY is a live run's beat destination is refused (A=$_ar B=$_br)"
   else
     bad "4b.144 an aliasing launch is refused" "A=$_ar B=$_br: $_bo"
   fi
+  # THE LOG COLLISION — the case job 261 was filed for, and the one the generic message serves. A holds
+  # `--log x`; B then asks for `--summary x`. Before every destination was reserved, A held no claim on
+  # its log at all and B was accepted while A wrote into B's summary.
+  _lg="$TMP/logcoll"
+  _la=$(bash "$LAUNCHER" --summary "$_lg-a" --log "$_lg-shared" -- --only roborev-lints 2>&1); _lar=$?
+  _lau=$(printf '%s' "$_la" | sed -n 's/^unit:  *//p'); [ -n "$_lau" ] && echo "$_lau" >> "$UNITS_FILE"
+  _lb=$(bash "$LAUNCHER" --summary "$_lg-shared" --log "$_lg-c" -- --only fmt 2>&1); _lbr=$?
+  _lbu=$(printf '%s' "$_lb" | sed -n 's/^unit:  *//p'); [ -n "$_lbu" ] && echo "$_lbu" >> "$UNITS_FILE"
+  if [ "$_lar" = 0 ] && [ "$_lbr" != 0 ]; then
+    ok "4b.144b a launch whose SUMMARY is a live run's LOG is refused (A=$_lar B=$_lbr)"
+  else
+    bad "4b.144b a launch whose summary is a live run's log is refused" "A=$_lar B=$_lbr: $_lb"
+  fi
+  for _u in $_lau $_lbu; do systemctl --user stop "$_u" >/dev/null 2>&1; done
   # CONTROL: disjoint launches must still both work, or "refuse everything" would pass 4b.144.
   _co=$(bash "$LAUNCHER" --summary "$TMP/alias-disjoint" --log "$TMP/alias-c.log" -- --only fmt 2>&1); _cr=$?
   _cu=$(printf '%s' "$_co" | sed -n 's/^unit:  *//p'); [ -n "$_cu" ] && echo "$_cu" >> "$UNITS_FILE"
@@ -1908,6 +1927,56 @@ for _sh in $_shapes; do
     _shape_bad=$((_shape_bad+1)); echo "     NOT excused by the gate: .agent-gate-summary.txt$_concrete"
   fi
 done
+# RUNTIME-OBSERVED ARTIFACTS, because the source-derived list above is INCOMPLETE BY CONSTRUCTION
+# (found by auditing this very test, job 261). It greps literal `$SUMMARY.x` occurrences — but the
+# launcher now COMPOSES paths (`"$_art.launch-lock"` where `_art="$SUMMARY.heartbeat"`), so
+# `$SUMMARY.heartbeat.launch-lock` never appears as a literal and the derivation cannot see it. The gate
+# excuses that name only because a carve-out was added by hand; this case would have passed regardless,
+# which is a false negative in the guard that exists to prevent exactly that.
+#
+# So a real launch is performed and EVERY file that appears beside the summary is checked against the
+# gate's predicate. Observation covers composed names, and anything added later, without curation.
+if [ "$HAVE_SYSTEMD" = yes ]; then
+  _obsdir=$(mktemp -d "$TMP/observed.XXXXXX")
+  _oo=$(bash "$LAUNCHER" --summary "$_obsdir/s.txt" --log "$_obsdir/s.log" -- --only fmt 2>&1)
+  _ou=$(printf '%s' "$_oo" | sed -n 's/^unit:  *//p'); [ -n "$_ou" ] && echo "$_ou" >> "$UNITS_FILE"
+  _obs_n=0; _obs_bad=0
+  for _f in "$_obsdir"/*; do
+    [ -e "$_f" ] || [ -L "$_f" ] || continue
+    _base=$(basename "$_f")
+    # The LOG's own lock is a gate artifact too, and skipping `s.log.*` is how the first version of this
+    # case would have missed it. The log is excused by the gate's STDOUT carve-out, so it is checked
+    # against that name rather than the summary prefix.
+    case "$_base" in
+      s.log) continue ;;                                  # the log itself, excused as TREE_STDOUT_REL
+      s.log.launch-lock)
+        _obs_n=$((_obs_n+1))
+        # SET THE VARIABLES AFTER SOURCING. `$_tx` begins with a line that resets TREE_STDOUT_REL to
+        # "", so assignments made before the source were silently clobbered and the log's lock read as
+        # unexcused — a defect in this harness, not in the gate.
+        ( . "$_tx"; TREE_EXCLUDE_REL=".agent-gate-summary.txt"; TREE_STDOUT_REL="gate.log"; TREE_STDERR_REL=""
+          _tree_excluded "gate.log.launch-lock" ) \
+          || { _obs_bad=$((_obs_bad+1)); echo "     observed but NOT excused: <log>.launch-lock"; }
+        continue ;;
+    esac
+    case "$_base" in s.txt) continue ;; esac           # the summary itself is the carve-out anchor
+    _obs_n=$((_obs_n+1))
+    _texcl ".agent-gate-summary.txt${_base#s.txt}" || {
+      _obs_bad=$((_obs_bad+1)); echo "     observed but NOT excused: ${_base#s.txt}"
+    }
+  done
+  [ -n "$_ou" ] && systemctl --user stop "$_ou" >/dev/null 2>&1
+  if [ "$_obs_n" -lt 1 ]; then
+    bad "4b.105b every OBSERVED artifact is excused by the gate's carve-out" \
+        "a real launch produced no observable artifacts — the observation failed, so this proves nothing"
+  elif [ "$_obs_bad" = 0 ]; then
+    ok "4b.105b all $_obs_n artifacts a REAL launch creates are excused by the gate's carve-out"
+  else
+    bad "4b.105b every observed artifact is excused" "$_obs_bad of $_obs_n would be read as a tree mutation"
+  fi
+else
+  skip=$((skip+1)); echo "SKIP 4b.105b (no user systemd manager on this host)"
+fi
 if [ "$_shape_n" -lt 3 ]; then
   bad "4b.105 every launcher artifact shape is excused by the gate's carve-out" \
       "only $_shape_n shapes derived — the derivation failed, so this proves nothing"

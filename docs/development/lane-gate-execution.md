@@ -642,6 +642,37 @@ gate is protected when it is not is the exact false assurance this script exists
 in `bootstrap-agent-machine.sh` alongside the other worker-environment guarantees. Until it is there,
 a freshly-provisioned box will refuse (loudly, with the remedy) rather than run an unprotected gate.
 
+### The sixth audit question: WHAT DOES THIS FIX CREATE, AND WHICH GUARD IS NOW BLIND TO IT?
+
+Job 261 was one finding and produced SIX fixes, five of them consequences of the first. That ratio is the
+lesson: **a fix that adds artifacts, states or orderings silently moves the target of every guard written
+against the old shape.**
+
+The finding: the artifact check was **asymmetric**. A launch asked *is any path I will write already
+another run's reserved SUMMARY?* — while only summaries were ever RESERVED. So the question was
+unanswerable by construction, and the global lock added earlier the same round, which correctly
+serialises check-and-acquire, was powerless. **Serialisation cannot help when the thing you are looking
+for was never recorded.** Measured: A with `--summary /t/a --log /t/b` reserved one lock; B with
+`--summary /t/b` was accepted while A wrote its log into B's summary.
+
+Reserving every write destination makes the check symmetric for free — no reverse lookups, just record
+what was missing. And then:
+
+| consequence | which guard was blind, and why |
+|---|---|
+| `$SUMMARY.heartbeat.launch-lock` exists | the gate's carve-out excused exact names that did not include it |
+| the same name is **composed at runtime** (`"$_art.launch-lock"`) | `4b.105` derives shapes by grepping literal `$SUMMARY.x`, so it cannot see composed names — **it would have passed with the carve-out missing** |
+| `<log>.launch-lock` exists, outside the summary prefix | nothing summary-anchored could see it; an in-repo `--log` would make the gate fail ITSELF |
+| the summary-first ordering changed | the generic message claimed a path was "reserved as ITS summary" when it was reserved as another run's HEARTBEAT — the target records the owner, not the role |
+| a test harness sourced the extracted predicate AFTER setting its variables | the sourced file's first line reset `TREE_STDOUT_REL=""`, silently clobbering them |
+
+**The fix for the blind derivation is a different KIND of derivation: OBSERVE, do not parse.** `4b.105b`
+performs a real launch and checks every file that appears beside the summary. Observation cannot miss a
+composed name, a runtime-generated name, or one added later — and it found the `<log>.launch-lock` gap
+within seconds of being written. That is the third time in this change that moving from parsing to
+observing closed a class, after `4b.140` (stub `systemctl` rather than grep the case statement) and
+`4b.142` (measure elapsed time rather than trust an exit code).
+
 ### The fifth audit question: DOES THIS FIX ASSUME SEQUENTIAL EXECUTION?
 
 Job 256 returned a High that none of the four existing audit questions could have found. The job-251
