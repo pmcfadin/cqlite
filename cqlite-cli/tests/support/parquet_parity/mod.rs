@@ -455,6 +455,13 @@ impl Row {
         self.cells.get(column)
     }
 
+    /// Was this column deliberately NOT decoded (its Arrow type was already
+    /// blocked by the TYPE stage)? Reported so the isolation guarantee is
+    /// assertable rather than merely claimed.
+    pub fn is_undecoded(&self, column: &str) -> bool {
+        self.undecoded.contains(column)
+    }
+
     fn sort_key(&self) -> String {
         self.keys
             .iter()
@@ -749,6 +756,34 @@ fn project_rows(
         }
     }
     Ok(rows)
+}
+
+/// TEST-SUPPORT ONLY: drive the row projection over SYNTHETIC record batches
+/// with an explicit blocked-column set.
+///
+/// The per-column isolation guarantee (finding 1, issue #1490 round 7) is about
+/// what happens when a blocked column's exported Arrow type is one the decoder
+/// does not handle (`UInt32`, `LargeList`, …). A real export cannot be made to
+/// produce such a type — that is the point of the type check — so the only way
+/// to demonstrate the property is to hand the projection a batch that carries
+/// one. It cannot weaken a real run: `run_stages` builds its own `ValueBlocks`
+/// from the TYPE stage's answer, and nothing in the harness calls this.
+pub fn project_rows_for_test(
+    case: &ParityCase,
+    batches: &[RecordBatch],
+    columns: &[ColumnType],
+    blocked_columns: &[String],
+    blocks_all_values: bool,
+) -> Result<Vec<Row>, Failures> {
+    project_rows(
+        case,
+        batches,
+        columns,
+        &ValueBlocks {
+            columns: blocked_columns,
+            all: blocks_all_values,
+        },
+    )
 }
 
 /// Compact, comparison-stable rendering — used for sort keys and for diffs.
