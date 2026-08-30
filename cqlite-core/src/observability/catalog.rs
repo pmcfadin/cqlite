@@ -813,19 +813,26 @@ pub const MERGE_ACTIVE_MERGES: &str = "cqlite.merge.active_merges";
 
 /// `cqlite.merge.egress_channel_depth` — gauge `{entry}` (issue #2419, WS2).
 ///
-/// Live occupancy of the bounded producer→consumer `sync_channel` (capacity up
-/// to `STREAMING_CHANNEL_CAPACITY` = 256, adaptively reduced under concurrent
-/// merges — see [`MERGE_ACTIVE_MERGES`] / issue #2765, `merge/mod.rs`) that carries merged
-/// entries from each per-input producer thread toward the consumer (the k-way
-/// merge that feeds the Flight `do_get` egress or the write-engine compaction
-/// output). `std::sync::mpsc::sync_channel` exposes no `len()`, so occupancy is
-/// tracked by a process-wide atomic incremented on a successful data-entry send
-/// and decremented on the matching receive (mirroring the #2316
-/// `producer_threads` gauge pattern), floored at 0.
+/// Live occupancy, in ENTRIES (rows), of the bounded producer→consumer
+/// `sync_channel` that carries merged entries from each per-input producer thread
+/// toward the consumer (the k-way merge that feeds the Flight `do_get` egress or
+/// the write-engine compaction output). `std::sync::mpsc::sync_channel` exposes no
+/// `len()`, so occupancy is tracked by a process-wide atomic incremented on a
+/// successful data send and decremented on the matching receive (mirroring the
+/// #2316 `producer_threads` gauge pattern), floored at 0.
+///
+/// The channel's ROW budget is `STREAMING_CHANNEL_CAPACITY` = 256, adaptively
+/// reduced under concurrent merges (see [`MERGE_ACTIVE_MERGES`] / issue #2765,
+/// `merge/mod.rs`). Since issue #2820 each channel MESSAGE carries a BATCH of up
+/// to 256 rows — one cross-thread wake per batch instead of per row — so the
+/// ceiling this gauge can reach per source is
+/// `merge::egress_batch::max_inflight_rows` of the converted message capacity
+/// (1024 rows at the default budget), not the 256-row budget itself. The UNIT is
+/// unchanged: a batch of `n` rows moves the level by `n`, never by 1.
 ///
 /// **Healthy vs alarming**: a depth near zero means the consumer is keeping up
 /// (or a producer is stalled, e.g. disk-bound — cross-check `cqlite.rpc.rows`);
-/// a depth riding near the channel capacity means the producer is outrunning a
+/// a depth riding near that per-source ceiling means the producer is outrunning a
 /// slower consumer (the egress is back-pressured, distinguishing a "stuck in
 /// `do_get`" stall from a disk-bound one). OS-independent (always emits, on
 /// every platform), unlike the `cqlite.proc.*` gauges. No high-cardinality
