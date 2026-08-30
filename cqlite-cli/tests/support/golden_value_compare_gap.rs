@@ -329,8 +329,9 @@ pub enum Observed {
 /// silently preventing the coverage from coming back. So the comparison at an
 /// excluded path is still RUN; its result is recorded here and only then
 /// discarded. [`Self::stale`] then fails on an exclusion that agreed, was never
-/// reached, or could not be evaluated — three distinct causes, each named, and no
-/// two of them can be reported for the same path.
+/// reached, could not be evaluated, or met a divergence it does not declare — four
+/// distinct causes, each named, and no two of them can be reported for the same
+/// path.
 pub struct SkipPaths<'a> {
     gaps: &'a [Gap<'a>],
     observed: RefCell<BTreeMap<String, Observed>>,

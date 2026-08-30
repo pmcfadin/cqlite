@@ -49,8 +49,10 @@ use std::collections::BTreeSet;
 pub struct Report {
     /// Human-readable divergences, each naming the row key and the column.
     pub diffs: Vec<String>,
-    /// Cells actually value-compared. Zero on a non-empty table is a failure the
-    /// caller must treat as such (a comparison that compared nothing is vacuous).
+    /// Cells actually value-compared IN FULL. Zero on a non-empty table is a
+    /// failure the caller must treat as such (a comparison that compared nothing
+    /// is vacuous). A cell in which a REFUSAL or a declared gap discarded part of
+    /// the value is not counted — see [`count_cell`].
     pub compared_cells: usize,
     /// How many of [`Self::compared_cells`] were collection/UDT cells. Reported
     /// affirmatively in the census so "containers are covered" is a measurement
@@ -75,11 +77,13 @@ pub struct Report {
     /// One deduplicated `path (reason)` entry per refused POSITION — `s (…)` for a
     /// cell's own root node, `sl[0] (…)` for one indistinguishable member of it.
     pub ambiguity_reasons: Vec<String>,
-    /// Declared skip paths that did NOT suppress a divergence in this table's
-    /// walk, each with the cause (they agreed, they were never reached, or the
-    /// comparison there could not be evaluated). An exclusion that suppresses
-    /// nothing holds back coverage that has come back, so the caller must treat a
-    /// non-empty list as a failure. See [`SkipPaths`].
+    /// Declared skip paths that did NOT suppress THEIR DECLARED divergence in this
+    /// table's walk, each with the cause: they agreed, they were never reached, the
+    /// comparison there could not be evaluated, or what diverged there was not the
+    /// divergence the gap declares. An exclusion that suppresses nothing either
+    /// holds back coverage that has come back or describes the output wrongly, so
+    /// the caller must treat a non-empty list as a failure. See [`SkipPaths`] and
+    /// [`gap::Divergence`].
     pub stale_skips: Vec<String>,
 }
 

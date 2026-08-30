@@ -1112,16 +1112,19 @@ fn run_lane(egress: Egress) {
         }
         containers_compared += report.container_cells;
         containers_refused += report.ambiguous_container_cells;
-        // A declared gap that did not SUPPRESS A DIVERGENCE is stale: it no
-        // longer describes the output, so leaving it standing hides the fact that
-        // the gap has closed (or was mis-stated) and keeps the coverage it costs
+        // A declared gap that did not suppress ITS DECLARED DIVERGENCE is a gap
+        // that no longer describes the output: leaving it standing hides the fact
+        // that it has closed (or was mis-stated) and keeps the coverage it costs
         // switched off. The cause travels with the entry — agreed, never reached,
-        // or unevaluable — so the failure says which of the three happened.
+        // unevaluable, or a divergence the gap does not declare — so the failure
+        // says which of the four happened, and the remedy differs: the first three
+        // mean the DECLARATION must go or be re-scoped, the fourth means the
+        // divergence beside it must be explained (it is reported as a diff too).
         for stale in &report.stale_skips {
             failures.push(format!(
-                "{qualified}: the declared gap {stale} suppressed no divergence in the \
-                 {format} comparison — a declared gap that no longer applies to this \
-                 egress format must be removed or re-scoped, not left standing"
+                "{qualified}: the declared gap {stale} suppressed no declared divergence \
+                 in the {format} comparison — such a gap must be removed, re-scoped or \
+                 (where something else diverged) explained, not left standing"
             ));
         }
         if report.diffs.is_empty() {
@@ -1239,12 +1242,18 @@ fn every_declared_gap_names_at_least_one_egress_format() {
                 ));
             }
             // The census line is what makes a gap non-silent, so it must name the
-            // path AND the scope.
+            // path, the scope AND the divergence the run actually CHECKED — a gap
+            // described only in prose could not be told from one whose checked rule
+            // says something else (review round 17).
             let described = skip.describe();
-            if !described.contains(skip.path) || !described.contains('[') {
+            let checked = format!("{:?}", skip.divergence);
+            if !described.contains(skip.path)
+                || !described.contains('[')
+                || !described.contains(&checked)
+            {
                 bad.push(format!(
                     "{qualified}: the census description of `{}` does not name its \
-                     path and scope: {described}",
+                     path, scope and checked divergence ({checked}): {described}",
                     skip.path
                 ));
             }
