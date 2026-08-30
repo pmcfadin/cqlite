@@ -45,7 +45,7 @@
 use serde_json::Value as Json;
 use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
-use std::process::{Command, ExitStatus, Output, Stdio};
+use std::process::{Command, ExitStatus, Stdio};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
 use std::sync::{Arc, Mutex};
 use std::thread;
@@ -69,6 +69,21 @@ const MARKER_SESSION_READY: &str = "cqlite writable session: enter CQL DML";
 /// contains an em-dash ("Received Ctrl-C — flushing memtable before exit...");
 /// the substring below deliberately stops short of it so the assertion does not
 /// depend on that character surviving a copy/paste.
+///
+/// The product `eprintln!` has a LEADING newline, so `BufRead::lines()` yields
+/// TWO lines: an empty one, then one CONTAINING this substring. Measured, not
+/// assumed — from a RED run's own transcript (`cat -A`):
+///
+/// ```text
+///   [stderr] $
+///   [stderr] Received Ctrl-C M-bM-^@M-^T flushing memtable before exit...$
+/// ```
+///
+/// So the marker is never split across lines, and the empty line is harmless:
+/// `wait_for` skips it (the predicate does not match) while the transcript keeps
+/// it. The marker also cannot be consumed by an EARLIER stage's wait and
+/// discarded, because `SIGINT` is only sent after stage (b) has already
+/// returned — no other wait is in flight when the handler prints.
 const MARKER_HANDLER_ENTERED: &str = "Received Ctrl-C";
 
 // ---------------------------------------------------------------------------
@@ -81,18 +96,30 @@ const MARKER_HANDLER_ENTERED: &str = "Received Ctrl-C";
 // kill**. Each test owns `TEST_TOTAL_BUDGET = 180s` and clips every stage
 // budget to what REMAINS of it (`StageClock::clip`), so the stages can never
 // sum past 180s however slow the host is — the test always emits its own
-// attributed failure instead of being killed by the harness. The remaining 60s
-// of the 240s covers the read-side `select_rows` child process and teardown,
-// which run after the last budgeted stage.
+// attributed failure instead of being killed by the harness.
 //
-// Independently of that clipping, the nominal per-stage CAPS are chosen so
-// their worst-case sum is already under the total:
+// EVERY wait ON A CHILD PROCESS is a stage, INCLUDING the read-side durability
+// SELECT. That was not true in the first version of this change: `select_rows`
+// used `Command::output()`, which has no timeout at all, so on the saturated
+// host this issue is about it was an unbounded wait sitting OUTSIDE the budget —
+// and an overrun there lands on nextest's hard kill, producing exactly the
+// uninformative failure this change exists to remove. It is now stage (e), with
+// its own calibrated budget and its own attributed message.
+//
+// Independently of the clipping, the nominal per-stage CAPS are chosen so their
+// worst-case sum is already under the total:
 //
 //   sigint_in_writable_session_flushes_before_exit
-//     (a) session up 40 + (b) ack 30 + (c) handler 30 + (d) exit 60 = 160s <= 180s
+//     (a) session up 40 + (b) ack 25 + (c) handler 25 + (d) exit 50
+//       + (e) durability read 35                                    = 175s <= 180s
 //
 //   writable_session_auto_flushes_mid_session_across_threshold
-//     (a) 40 + (b) 5 writes x 14 = 70 + (c) sstable 30 + (d) EOF exit 30 = 170s <= 180s
+//     (a) 40 + (b) 5 writes x 10 = 50 + (c) sstable 25 + (d) EOF exit 25
+//       + (e) durability read 35                                    = 175s <= 180s
+//
+// What the remaining 60s of the 240s now covers is only what CANNOT be a stage:
+// `TempDir` teardown, and the bounded (5s) collection of the read-side child's
+// already-at-EOF pipes after it has exited.
 const TEST_TOTAL_BUDGET: Duration = Duration::from_secs(180);
 
 /// Stage (a). **The irreducible bound** (design.md, "The residual").
@@ -619,9 +646,36 @@ fn count_data_db(data_dir: &Path) -> usize {
     n
 }
 
-/// Reopen an SSTable directory read-only and SELECT, returning rows as JSON.
-fn select_rows(data_dir: &Path, schema: &Path, query: &str) -> Vec<Json> {
-    let out: Output = Command::new(cqlite_bin())
+/// Read a piped handle to EOF on its own thread, so a bounded wait on the child
+/// can never deadlock against a full pipe buffer.
+fn collect_to_end<R: std::io::Read + Send + 'static>(
+    stream: Stream,
+    mut reader: R,
+    tx: Sender<(Stream, Vec<u8>)>,
+) {
+    thread::spawn(move || {
+        let mut buf = Vec::new();
+        let _ = reader.read_to_end(&mut buf);
+        let _ = tx.send((stream, buf));
+    });
+}
+
+/// Stage (e): reopen an SSTable directory read-only and SELECT, returning the
+/// rows as JSON and how long the read took.
+///
+/// BOUNDED and ATTRIBUTED, for the reason in the TOTAL-BUDGET ARITHMETIC comment
+/// above: `Command::output()` has no timeout, so the previous version of this
+/// helper was an unbounded wait on a child process, outside the test's budget,
+/// on the one host class this issue is about.
+fn select_rows(
+    data_dir: &Path,
+    schema: &Path,
+    query: &str,
+    budget: &Budget,
+    clock: &StageClock,
+) -> (Vec<Json>, Duration) {
+    let started = Instant::now();
+    let mut child = Command::new(cqlite_bin())
         .args([
             "--data-dir",
             data_dir.to_str().unwrap(),
@@ -632,20 +686,79 @@ fn select_rows(data_dir: &Path, schema: &Path, query: &str) -> Vec<Json> {
             "--out",
             "json",
         ])
-        .output()
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
         .expect("spawn read-side cqlite");
-    let stdout = String::from_utf8_lossy(&out.stdout);
-    let stderr = String::from_utf8_lossy(&out.stderr);
+    let (tx, rx) = mpsc::channel();
+    collect_to_end(
+        Stream::Stdout,
+        child.stdout.take().expect("read-side stdout"),
+        tx.clone(),
+    );
+    collect_to_end(
+        Stream::Stderr,
+        child.stderr.take().expect("read-side stderr"),
+        tx,
+    );
+
+    let status = match child
+        .wait_timeout(budget.derived)
+        .expect("wait_timeout on read-side cqlite")
+    {
+        Some(status) => status,
+        None => {
+            let _ = child.kill();
+            panic!(
+                "stage (e) durability-read: the read-side `cqlite --execute` child did not exit.\n\
+                 query: `{query}`\n\
+                 data dir: {}\n\
+                 {}\n\
+                 WHAT THIS ESTABLISHES: only that the independent read-only reopen did not finish \
+                 within the budget. It says NOTHING about whether the row is durable, and nothing \
+                 about the write side, which had already exited cleanly. This wait is inside the \
+                 test\'s own total budget precisely so that THIS message appears instead of the \
+                 harness\'s 240s hard kill.\n{}",
+                data_dir.display(),
+                budget.describe(),
+                clock.report()
+            );
+        }
+    };
+    let took = started.elapsed();
+
+    // The child has exited, so both pipes are at EOF and the reader threads
+    // finish promptly; bound the collection anyway rather than block forever.
+    let mut stdout_buf = Vec::new();
+    let mut stderr_buf = Vec::new();
+    let mut collected = 0;
+    while collected < 2 {
+        match rx.recv_timeout(Duration::from_secs(5)) {
+            Ok((Stream::Stdout, buf)) => stdout_buf = buf,
+            Ok((Stream::Stderr, buf)) => stderr_buf = buf,
+            Err(_) => panic!(
+                "stage (e) durability-read: the read-side child exited ({status:?}) but its \
+                 output could not be collected within 5s (collected {collected}/2 streams). \
+                 This is a defect in this test harness, not a statement about durability.\n{}",
+                clock.report()
+            ),
+        }
+        collected += 1;
+    }
+
+    let stdout = String::from_utf8_lossy(&stdout_buf);
+    let stderr = String::from_utf8_lossy(&stderr_buf);
     assert!(
-        out.status.success(),
+        status.success(),
         "SELECT failed: `{query}`\nstdout: {stdout}\nstderr: {stderr}"
     );
-    match serde_json::from_str(stdout.trim())
+    let rows = match serde_json::from_str(stdout.trim())
         .unwrap_or_else(|e| panic!("SELECT did not emit JSON: {e}\nstdout: {stdout}"))
     {
         Json::Array(rows) => rows,
         other => panic!("expected a JSON array of rows, got: {other}"),
-    }
+    };
+    (rows, took)
 }
 
 /// Spawn the CLI in interactive `--writable` mode with both pipes drained, and
@@ -774,7 +887,7 @@ fn sigint_in_writable_session_flushes_before_exit() {
 
     let ack_budget = clock.clip(calibrated(
         Duration::from_secs(15),
-        Duration::from_secs(30),
+        Duration::from_secs(25),
         t_boot,
         "t_boot",
         BOOT_QUIET_BASELINE,
@@ -810,7 +923,7 @@ fn sigint_in_writable_session_flushes_before_exit() {
     // claim anything about a handler's existence.
     let handler_budget = clock.clip(calibrated(
         Duration::from_secs(15),
-        Duration::from_secs(30),
+        Duration::from_secs(25),
         t_ack,
         "t_ack",
         ACK_QUIET_BASELINE,
@@ -850,7 +963,7 @@ fn sigint_in_writable_session_flushes_before_exit() {
     // landing slowly is never mistaken for a stall.
     let exit_budget = clock.clip(calibrated(
         Duration::from_secs(25),
-        Duration::from_secs(60),
+        Duration::from_secs(50),
         t_ack,
         "t_ack",
         ACK_QUIET_BASELINE,
@@ -899,9 +1012,25 @@ fn sigint_in_writable_session_flushes_before_exit() {
         io.transcript_text()
     );
 
-    // Durability: the SIGINT handler must have flushed the memtable to a real
-    // SSTable — the row is present on an independent read-only reopen.
-    let rows = select_rows(&data_dir, &schema, "SELECT * FROM test_write.users");
+    // Stage (e): durability. The SIGINT handler must have flushed the memtable to
+    // a real SSTable — the row is present on an independent read-only reopen.
+    // A fresh CLI process doing a read is the same shape of work as the session
+    // boot, so this budget is calibrated from `t_boot`.
+    let read_budget = clock.clip(calibrated(
+        Duration::from_secs(20),
+        Duration::from_secs(35),
+        t_boot,
+        "t_boot",
+        BOOT_QUIET_BASELINE,
+    ));
+    let (rows, t_read) = select_rows(
+        &data_dir,
+        &schema,
+        "SELECT * FROM test_write.users",
+        &read_budget,
+        &clock,
+    );
+    clock.record("e.durability-read", t_read);
     let grace = rows
         .iter()
         .find(|r| r.get("id").and_then(|v| v.as_i64()) == Some(7))
@@ -923,10 +1052,11 @@ fn sigint_in_writable_session_flushes_before_exit() {
         "[#3515] sigint_in_writable_session_flushes_before_exit\n{}",
         clock.report()
     );
-    eprintln!("[#3515]   b.write-ack     {}", ack_budget.describe());
-    eprintln!("[#3515]   c.handler-entry {}", handler_budget.describe());
-    eprintln!("[#3515]   d.clean-exit    {}", exit_budget.describe());
-    eprintln!("[#3515]   stall window    {}", stall_window.describe());
+    eprintln!("[#3515]   b.write-ack       {}", ack_budget.describe());
+    eprintln!("[#3515]   c.handler-entry   {}", handler_budget.describe());
+    eprintln!("[#3515]   d.clean-exit      {}", exit_budget.describe());
+    eprintln!("[#3515]   e.durability-read {}", read_budget.describe());
+    eprintln!("[#3515]   stall window      {}", stall_window.describe());
 }
 
 /// Issue #1693 (roborev): the interactive writable loop must use the async,
@@ -983,8 +1113,8 @@ fn writable_session_auto_flushes_mid_session_across_threshold() {
             (t_ack, "t_ack(slowest so far)", ACK_QUIET_BASELINE)
         };
         let budget = clock.clip(calibrated(
-            Duration::from_secs(8),
-            Duration::from_secs(14),
+            Duration::from_secs(6),
+            Duration::from_secs(10),
             observed,
             name,
             baseline,
@@ -1012,7 +1142,7 @@ fn writable_session_auto_flushes_mid_session_across_threshold() {
     // Progress-checked, and calibrated from `t_ack`.
     let sstable_budget = clock.clip(calibrated(
         Duration::from_secs(20),
-        Duration::from_secs(30),
+        Duration::from_secs(25),
         t_ack,
         "t_ack",
         ACK_QUIET_BASELINE,
@@ -1065,7 +1195,7 @@ fn writable_session_auto_flushes_mid_session_across_threshold() {
     drop(stdin);
     let exit_budget = clock.clip(calibrated(
         Duration::from_secs(20),
-        Duration::from_secs(30),
+        Duration::from_secs(25),
         t_ack,
         "t_ack",
         ACK_QUIET_BASELINE,
@@ -1111,8 +1241,22 @@ fn writable_session_auto_flushes_mid_session_across_threshold() {
         io.transcript_text()
     );
 
-    // All rows are durable on an independent read-only reopen.
-    let rows = select_rows(&data_dir, &schema, "SELECT * FROM test_write.users");
+    // Stage (e): all rows are durable on an independent read-only reopen.
+    let read_budget = clock.clip(calibrated(
+        Duration::from_secs(20),
+        Duration::from_secs(35),
+        t_boot,
+        "t_boot",
+        BOOT_QUIET_BASELINE,
+    ));
+    let (rows, t_read) = select_rows(
+        &data_dir,
+        &schema,
+        "SELECT * FROM test_write.users",
+        &read_budget,
+        &clock,
+    );
+    clock.record("e.durability-read", t_read);
     for id in 0..WRITES {
         assert!(
             rows.iter()
@@ -1132,6 +1276,7 @@ fn writable_session_auto_flushes_mid_session_across_threshold() {
         sstable_budget.describe()
     );
     eprintln!("[#3515]   d.eof-exit          {}", exit_budget.describe());
+    eprintln!("[#3515]   e.durability-read   {}", read_budget.describe());
     eprintln!("[#3515]   stall window        {}", stall_window.describe());
 }
 
