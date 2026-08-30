@@ -231,62 +231,111 @@ pub fn committed_fixture_dir(
 /// shape this lane exists to prevent (CLAUDE.md: never let a dataset-dependent test
 /// pass on an empty dataset).
 pub enum CorpusMiss {
-    /// No candidate root carries this table's `*-Data.db` at all. For a
-    /// fetched-corpus case that is a LEGAL skip, declared in the census.
+    /// Every candidate root ANSWERED, and none carries this table's `*-Data.db`.
+    /// For a fetched-corpus case that is a LEGAL skip, declared in the census.
     Absent(String),
-    /// A root WAS selected for this table and then could not be used — its keyspace
-    /// directory is unreadable, or it holds no `<table>-*` directory with a
-    /// `*-Data.db` after the root walk said it carries one. Either way the corpus is
-    /// broken rather than absent, so it is a FAILURE.
+    /// A candidate root could NOT answer: its keyspace directory, or a fixture
+    /// directory inside it, exists and cannot be read. "I could not tell" is not
+    /// "there is nothing there", so it is a FAILURE naming the root and the cause
+    /// (finding N4).
     Unusable(String),
 }
 
 /// The fixture directory for a FETCHED-CORPUS case, plus which root supplied it.
 ///
-/// Keeps the shared #3220 rule: walk every candidate root and take the first that
-/// actually carries this table's `*-Data.db`. The source is reported as
-/// [`RootSource::Checkout`] when the root that won is the checkout's own `sstables/`
-/// root and as [`RootSource::Corpus`] otherwise, so the census states what was
-/// actually read rather than what the tier implies.
+/// Keeps the shared #3220 rule — walk every candidate root and take the first that
+/// actually carries this table's `*-Data.db` — but walks it THREE-VALUED (issue
+/// #1491 review finding N4). The source is reported as [`RootSource::Checkout`]
+/// when the root that won is the checkout's own `sstables/` root and as
+/// [`RootSource::Corpus`] otherwise, so the census states what was actually read
+/// rather than what the tier implies.
 ///
-/// The residual, stated because it is real: the root WALK itself
-/// (`datasets_root::sstables_root_for_table`, shared by every lane) answers
-/// `Option`, so a candidate root it could not read is indistinguishable from one
-/// that does not hold the table and lands in [`CorpusMiss::Absent`]. Everything
-/// after a root has been SELECTED is classified here.
+/// # Why this lane cannot use the shared `Option`-returning resolver
+///
+/// `datasets_root::sstables_root_for_table` answers `Option`, and every filesystem
+/// predicate under it collapses a read FAILURE onto `false` (CLAUDE.md records the
+/// rule: a two-valued predicate must collapse "cannot tell" onto one of its
+/// answers, and it always picks the permissive one). So an inaccessible corpus —
+/// a keyspace directory that exists and cannot be read, a fixture directory whose
+/// contents cannot be listed — was indistinguishable from one that simply does not
+/// carry the table, and EVERY optional corpus case then reported `NOT PRESENT` and
+/// passed. That is a failure wearing a skip's clothes, which is the exact shape
+/// finding M3 removed one level down and this removes at the root walk itself.
+///
+/// The three answers, and where the line is drawn:
+///
+///   * **present** — the root holds a `<table>-*` directory with a `*-Data.db`;
+///   * **verified absent** — the filesystem ANSWERED that there is nothing there
+///     (the keyspace directory does not exist, or it does and holds no such
+///     directory). A legal skip;
+///   * **unreadable** — the filesystem could not answer (permissions, a non-
+///     directory in the path, an I/O error). A FAILURE naming the root and the
+///     cause, and it ABORTS the walk rather than falling through to the next
+///     candidate: a later root's answer cannot stand in for an unknown earlier
+///     one, since the earlier root is the one the shared rule would have picked.
+///
+/// The boundary is deliberate: `ENOENT` is an answer, not an absence of one. A
+/// `CQLITE_DATASETS_ROOT` pointing at a path that does not exist therefore still
+/// skips (nothing here can tell it from an unset one) — that whole-corpus
+/// preflight is the gate's `missing-fixtures` component (#2078) and #3104's
+/// territory, not this lane's.
 pub fn corpus_fixture_dir(
     keyspace: &str,
     table: &str,
     checkout: &Path,
 ) -> Result<Fixture, CorpusMiss> {
-    let root = super::datasets_root::sstables_root_for_table(keyspace, table).ok_or_else(|| {
-        CorpusMiss::Absent(super::datasets_root::describe_search(keyspace, table))
-    })?;
-    corpus_fixture_in(&root, keyspace, table, checkout)
+    corpus_fixture_from(
+        &super::datasets_root::sstables_root_candidates(),
+        keyspace,
+        table,
+        checkout,
+    )
 }
 
-/// PURE form of [`corpus_fixture_dir`]: the classification of an ALREADY SELECTED
-/// root, factored out so both failure classes are testable against synthetic roots
-/// (the real candidate list is half environment and half a compile-time checkout
-/// path, so a test reading it can only observe this machine's layout).
+/// PURE form of [`corpus_fixture_dir`], parameterized on the candidate list — the
+/// same seam the shared `datasets_root::first_root_with_table` keeps, and for the
+/// same reason: the real list is half environment and half a COMPILE-TIME checkout
+/// path, so a test reading it can only observe this machine's layout.
+pub fn corpus_fixture_from(
+    roots: &[PathBuf],
+    keyspace: &str,
+    table: &str,
+    checkout: &Path,
+) -> Result<Fixture, CorpusMiss> {
+    for root in roots {
+        match corpus_fixture_in(root, keyspace, table, checkout) {
+            Ok(fixture) => return Ok(fixture),
+            // This root VERIFIABLY does not carry the table: keep walking, which
+            // is the shared evidence-based rule (#3220).
+            Err(CorpusMiss::Absent(_)) => continue,
+            // This root could not answer. Reported, never walked PAST: the
+            // unreadable root is the one the shared rule would have picked, so a
+            // later root's answer would silently stand in for an unknown one.
+            Err(unusable) => return Err(unusable),
+        }
+    }
+    Err(CorpusMiss::Absent(super::datasets_root::describe_search(
+        keyspace, table,
+    )))
+}
+
+/// PURE form of [`corpus_fixture_dir`] for ONE candidate root: present, verifiably
+/// absent, or unreadable.
+///
+/// Factored out so all three answers are testable against synthetic roots — the
+/// real candidate list is half environment and half a compile-time checkout path,
+/// so a test reading it can only observe this machine's layout.
 pub fn corpus_fixture_in(
     root: &Path,
     keyspace: &str,
     table: &str,
     checkout: &Path,
 ) -> Result<Fixture, CorpusMiss> {
-    // A directory-read failure is NOT an absence: the root walk answered on this
-    // table, so the corpus is there and unreadable.
-    let mut dirs = super::compare::fixture_dirs_in(root, keyspace, table)
-        .map_err(|why| CorpusMiss::Unusable(format!("{keyspace}.{table}: {why}")))?;
+    let mut dirs = table_dirs_in(root, keyspace, table)?;
     if dirs.is_empty() {
-        // The root walk answered on this table's `*-Data.db`, so an empty directory
-        // set here means the walk and the directory scan disagree — reported, never
-        // resolved by falling through to another root.
-        return Err(CorpusMiss::Unusable(format!(
-            "{} was selected for {keyspace}.{table} but holds no {table}-* directory \
-             with a *-Data.db — the root walk and the directory scan disagree, so the \
-             corpus is malformed rather than absent",
+        return Err(CorpusMiss::Absent(format!(
+            "{} is readable and holds no {table}-* directory with a *-Data.db for \
+             {keyspace}.{table}",
             root.display()
         )));
     }
@@ -300,6 +349,89 @@ pub fn corpus_fixture_in(
         },
         of_dirs,
     })
+}
+
+/// Every `<table>-<uuid>` directory under `root/keyspace` holding a `*-Data.db`,
+/// in sorted order — or [`CorpusMiss::Unusable`] when the filesystem could not
+/// answer.
+///
+/// The lane's own scan rather than `compare::fixture_dirs_in`, because that one
+/// answers "no `*-Data.db`" for a fixture directory it could not READ
+/// (`has_data_db` ends in `.unwrap_or(false)`), which is this finding's shape one
+/// level in: an unreadable directory would make the root verifiably absent and the
+/// case skip.
+fn table_dirs_in(root: &Path, keyspace: &str, table: &str) -> Result<Vec<PathBuf>, CorpusMiss> {
+    let ks_dir = root.join(keyspace);
+    let entries = match std::fs::read_dir(&ks_dir) {
+        Ok(entries) => entries,
+        // The filesystem ANSWERED: there is no such keyspace under this root.
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(e) => {
+            return Err(CorpusMiss::Unusable(format!(
+                "{keyspace}.{table}: cannot read {} ({e}) — a candidate corpus root \
+                 that cannot be READ is not a root that verifiably lacks the table, \
+                 so this is a failure and not a NOT PRESENT skip",
+                ks_dir.display()
+            )))
+        }
+    };
+    let prefix = format!("{table}-");
+    let mut matches: Vec<PathBuf> = Vec::new();
+    for entry in entries {
+        let entry = entry.map_err(|e| {
+            CorpusMiss::Unusable(format!(
+                "{keyspace}.{table}: cannot enumerate {} ({e})",
+                ks_dir.display()
+            ))
+        })?;
+        let path = entry.path();
+        let is_candidate = path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .map(|n| n.starts_with(&prefix))
+            .unwrap_or(false);
+        if !is_candidate || !path.is_dir() {
+            continue;
+        }
+        if holds_data_db(&path, keyspace, table)? {
+            matches.push(path);
+        }
+    }
+    matches.sort();
+    Ok(matches)
+}
+
+/// Does this fixture directory hold a `*-Data.db`? Three-valued like its caller: a
+/// directory that cannot be listed is `Unusable`, never "holds none".
+fn holds_data_db(dir: &Path, keyspace: &str, table: &str) -> Result<bool, CorpusMiss> {
+    let entries = match std::fs::read_dir(dir) {
+        Ok(entries) => entries,
+        // Gone between the listing and the read: verifiably not there now.
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(e) => {
+            return Err(CorpusMiss::Unusable(format!(
+                "{keyspace}.{table}: cannot read the fixture directory {} ({e})",
+                dir.display()
+            )))
+        }
+    };
+    for entry in entries {
+        let entry = entry.map_err(|e| {
+            CorpusMiss::Unusable(format!(
+                "{keyspace}.{table}: cannot enumerate {} ({e})",
+                dir.display()
+            ))
+        })?;
+        if entry
+            .file_name()
+            .to_str()
+            .map(|n| n.ends_with("-Data.db"))
+            .unwrap_or(false)
+        {
+            return Ok(true);
+        }
+    }
+    Ok(false)
 }
 
 #[cfg(test)]
@@ -379,9 +511,9 @@ mod tests {
         assert_eq!(fixture.dir, checkout.join("ks").join("t-abc"));
     }
 
-    /// M3: a corpus root that WAS selected for this table and then cannot be read is
-    /// a FAILURE, not an absence. Flattened onto the absence verdict, an unreadable
-    /// corpus produced a green run labelled "NOT PRESENT".
+    /// M3/N4: a corpus root whose keyspace directory cannot be READ is a FAILURE,
+    /// not an absence. Flattened onto the absence verdict, an unreadable corpus
+    /// produced a green run labelled "NOT PRESENT".
     #[test]
     fn a_selected_root_whose_keyspace_cannot_be_read_is_unusable_not_absent() {
         let tmp = tempfile::TempDir::new().expect("tempdir");
@@ -404,27 +536,128 @@ mod tests {
         }
     }
 
-    /// M3, the other half: the root walk answered for this table but the directory
-    /// scan finds no `<table>-*` directory with a `*-Data.db`. The two disagree, so
-    /// the corpus is malformed — again a failure and not a skip.
+    /// The other side of the same line: a root that IS readable and holds no
+    /// `<table>-*` directory with a `*-Data.db` is VERIFIABLY absent, so the walk
+    /// keeps going and the case may legally skip.
+    ///
+    /// This is not a softening — it is what the corpus really looks like. This
+    /// repository commits the `test_types` goldens WITHOUT their gitignored
+    /// binaries, so every checkout carries
+    /// `test-data/datasets/sstables/test_types/nb_*-<uuid>/` directories holding a
+    /// `*-Data.db.jsonl` and no `*-Data.db`. Calling that malformed would fail
+    /// every checkout-only run of the fetched-corpus tier, which is the tier's
+    /// legal skip. (The old "the root walk and the directory scan disagree"
+    /// verdict is gone with the second opinion that produced it: there is now ONE
+    /// scan, and it is three-valued — see [`corpus_fixture_from`].)
     #[test]
-    fn a_selected_root_holding_no_data_db_directory_is_unusable_not_absent() {
+    fn a_readable_root_with_no_data_db_is_absent_and_the_walk_continues() {
         let tmp = tempfile::TempDir::new().expect("tempdir");
-        let root = tmp.path().join("root");
-        // The directory exists and is named correctly, but carries no `*-Data.db`.
-        write(&root.join("ks/t-abc/nb-1-big-Index.db"), b"x");
-        let miss = match corpus_fixture_in(&root, "ks", "t", tmp.path()) {
-            Err(miss) => miss,
-            Ok(_) => panic!("a directory with no *-Data.db cannot resolve"),
-        };
-        match miss {
-            CorpusMiss::Unusable(why) => assert!(
-                why.contains("malformed rather than absent") && why.contains("ks.t"),
-                "the failure must say the corpus is malformed: {why}"
+        let jsonl_only = tmp.path().join("jsonl-only");
+        write(&jsonl_only.join("ks/t-abc/nb-1-big-Data.db.jsonl"), b"{}");
+        let corpus = tmp.path().join("corpus");
+        write(&corpus.join("ks/t-abc/nb-1-big-Data.db"), b"x");
+
+        match corpus_fixture_in(&jsonl_only, "ks", "t", tmp.path()) {
+            Err(CorpusMiss::Absent(why)) => assert!(
+                why.contains("ks.t") && why.contains(&jsonl_only.display().to_string()),
+                "the absence must name the root it was verified against: {why}"
             ),
-            CorpusMiss::Absent(why) => {
-                panic!("a malformed corpus must not read as absent: {why}")
+            Err(CorpusMiss::Unusable(why)) => {
+                panic!("a readable root without the table is absent, not unusable: {why}")
             }
+            Ok(_) => panic!("a directory with no *-Data.db cannot resolve"),
+        }
+
+        // …and the walk goes on to the root that does carry it.
+        let fixture = corpus_fixture_from(&[jsonl_only, corpus.clone()], "ks", "t", tmp.path())
+            .unwrap_or_else(|e| match e {
+                CorpusMiss::Absent(why) | CorpusMiss::Unusable(why) => {
+                    panic!("the second root carries the table: {why}")
+                }
+            });
+        assert_eq!(fixture.dir, corpus.join("ks").join("t-abc"));
+    }
+
+    /// N4: an UNREADABLE candidate root FAILS the case and is never walked past —
+    /// not even when a later root carries the table.
+    ///
+    /// "I could not tell" is not "there is nothing there". The shared
+    /// `sstables_root_for_table` answers `Option` and every predicate beneath it
+    /// ends in `.unwrap_or(false)`, so an inaccessible corpus read as absent and
+    /// EVERY optional corpus case reported `NOT PRESENT` and passed. And falling
+    /// through would be the same defect wearing a different hat: the unreadable
+    /// root is the one the walk would have picked, so a later root's answer cannot
+    /// stand in for it.
+    #[test]
+    fn an_unreadable_candidate_root_fails_and_is_not_walked_past() {
+        let tmp = tempfile::TempDir::new().expect("tempdir");
+        let broken = tmp.path().join("broken");
+        // A FILE where the keyspace directory belongs: `read_dir` fails with a
+        // non-NotFound error, which is the same branch a permission failure takes
+        // and needs no chmod (a chmod-based case passes vacuously as root).
+        write(&broken.join("ks"), b"not a directory");
+        let good = tmp.path().join("good");
+        write(&good.join("ks/t-abc/nb-1-big-Data.db"), b"x");
+
+        match corpus_fixture_from(&[broken.clone(), good], "ks", "t", tmp.path()) {
+            Err(CorpusMiss::Unusable(why)) => {
+                assert!(
+                    why.contains("ks.t") && why.contains(&broken.display().to_string()),
+                    "the failure must name the table and the root: {why}"
+                );
+                assert!(
+                    why.contains("NOT PRESENT"),
+                    "the failure must say why it is not a skip: {why}"
+                );
+            }
+            Err(CorpusMiss::Absent(why)) => {
+                panic!("an unreadable root must not read as absent: {why}")
+            }
+            Ok(_) => panic!("the walk must not resolve past a root it could not read"),
+        }
+    }
+
+    /// The same three-valued rule ONE LEVEL IN: a fixture directory that cannot be
+    /// listed is unusable, never "holds no `*-Data.db`".
+    ///
+    /// `compare::fixture_dirs_in`'s `has_data_db` ends in `.unwrap_or(false)`, so
+    /// reusing it would have made an unreadable fixture directory a verified
+    /// absence and skipped the case — the finding's own shape, one level down.
+    /// Classification is by `ErrorKind::NotFound` alone, so a permission failure
+    /// takes exactly this branch.
+    #[test]
+    fn an_unlistable_fixture_directory_is_unusable_not_empty() {
+        let tmp = tempfile::TempDir::new().expect("tempdir");
+        let not_a_dir = tmp.path().join("t-abc");
+        write(&not_a_dir, b"x");
+        match holds_data_db(&not_a_dir, "ks", "t") {
+            Err(CorpusMiss::Unusable(why)) => assert!(
+                why.contains("cannot read the fixture directory") && why.contains("ks.t"),
+                "{why}"
+            ),
+            Err(CorpusMiss::Absent(why)) => panic!("not an absence: {why}"),
+            Ok(answer) => panic!("an unreadable directory cannot answer {answer}"),
+        }
+        // A directory that has VANISHED did answer, so it is absent, not unusable.
+        assert_eq!(
+            holds_data_db(&tmp.path().join("gone"), "ks", "t").ok(),
+            Some(false)
+        );
+    }
+
+    /// When no candidate root carries the table at all, the verdict is the legal
+    /// skip and its message names the search.
+    #[test]
+    fn no_candidate_root_carrying_the_table_is_the_legal_skip() {
+        let tmp = tempfile::TempDir::new().expect("tempdir");
+        let empty = tmp.path().join("empty");
+        std::fs::create_dir_all(&empty).expect("mkdir");
+        match corpus_fixture_from(&[empty], "ks", "t", tmp.path()) {
+            Err(CorpusMiss::Absent(why)) => {
+                assert!(why.contains("ks.t"), "the skip must name the table: {why}")
+            }
+            Err(CorpusMiss::Unusable(why)) => panic!("a verified absence is not a failure: {why}"),
+            Ok(_) => panic!("nothing to resolve"),
         }
     }
 
