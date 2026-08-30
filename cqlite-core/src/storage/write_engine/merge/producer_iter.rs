@@ -320,6 +320,7 @@ impl SSTableRowIteratorAdapter {
                 scan_cancel,
                 sender,
                 producer_sent_count,
+                channel_capacity,
                 fault,
                 reporting,
             );
@@ -378,6 +379,10 @@ impl SSTableRowIteratorAdapter {
         scan_cancel: crate::storage::scan_cancel::ScanCancel,
         sender: std::sync::mpsc::SyncSender<MergeMsg>,
         sent_count: std::sync::Arc<std::sync::atomic::AtomicI64>,
+        // Issue #2820: the merge-scoped adaptive ROW capacity, which bounds this
+        // run's BATCH size as well as its channel's message capacity — see
+        // `egress_batch::batch_limit_ceiling`.
+        channel_capacity: usize,
         mut fault: MergeProducerFault,
         reporting: crate::storage::sstable::reader::OpenErrorReporting,
     ) {
@@ -492,6 +497,7 @@ impl SSTableRowIteratorAdapter {
                         &scan_cancel,
                         &sender,
                         sent_count.as_ref(),
+                        channel_capacity,
                         fault,
                     )
                     .await

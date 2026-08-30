@@ -17,10 +17,22 @@
 //! `egress_batch::BATCH_EMIT_ROWS_MERGE` rows, so its `sync_channel` capacity is
 //! in MESSAGES — `egress_budget`'s row budget converted by
 //! `egress_batch::message_capacity_for_rows`), but this gauge stays in ENTRIES on
-//! BOTH sides: a batch of `n` rows moves the level by `n`, never by 1. The
-//! resulting ceiling is `egress_batch::max_inflight_rows(msg_cap)` rows per
-//! source rather than the pre-#2820 flat 256. Counting messages on one side and
-//! entries on the other is precisely the invisible asymmetry documented below.
+//! BOTH sides: a batch of `n` rows moves the level by `n`, never by 1. Counting
+//! messages on one side and entries on the other is precisely the invisible
+//! asymmetry documented below.
+//!
+//! # THIS gauge's ceiling is CHANNEL-RESIDENT rows, not the in-flight bound
+//!
+//! Because [`sent_n`] fires on a successful `send` and [`received_n`] on the
+//! consumer's `recv`, the level counts ONLY entries currently sitting in the
+//! channel — never the batch the consumer is handing out (already received) nor
+//! the batch a producer is PARKED holding (never sent). So the ceiling is
+//! `egress_batch::rows_resident_in_channel(rows_cap)` = `msg_cap × batch_ceiling`
+//! (512 rows at the shipped default), NOT
+//! `egress_batch::max_inflight_rows(rows_cap)` = `(msg_cap + 2) × batch_ceiling`
+//! (1024), which is the MEMORY bound and overstates what this gauge can reach by
+//! exactly two batches. Both scale with the #2765 adaptive row capacity since
+//! #2820 (`2 × rows_cap` and `4 × rows_cap`), so neither is a constant.
 //! * [`reconcile_residual`] (issue #2419 roborev job 1733) subtracts, in ONE
 //!   atomic op, any entries a producer sent but its consumer never received — a
 //!   cancelled/disconnected merge whose channel was torn down while entries were
@@ -203,18 +215,21 @@ mod tests {
     #[test]
     fn depth_rises_while_backed_up_and_returns_to_baseline() {
         let local = AtomicI64::new(0);
-        // The notional per-source ROW ceiling: issue #2820 made the channel carry
-        // BATCHES, so the bound is `max_inflight_rows(msg_cap)` rows, derived from
-        // the shipped constants rather than the pre-batching flat 256.
-        let cap = super::super::egress_batch::max_inflight_rows(
-            super::super::egress_batch::message_capacity_for_rows(
-                super::super::STREAMING_CHANNEL_CAPACITY,
-            ),
+        // The notional per-source CHANNEL-RESIDENT ROW ceiling: issue #2820 made
+        // the channel carry BATCHES, so the bound this gauge can reach is
+        // `rows_resident_in_channel(rows_cap)` — NOT `max_inflight_rows`, which
+        // adds the consumer-held and producer-parked batches this gauge counts on
+        // neither side. Derived from the shipped constants rather than the
+        // pre-batching flat 256.
+        let cap = super::super::egress_batch::rows_resident_in_channel(
+            super::super::STREAMING_CHANNEL_CAPACITY,
         ) as i64;
 
-        // Producer races ahead in BATCHES (the ramp saturates at
-        // `BATCH_EMIT_ROWS_MERGE`), filling toward the bounded capacity.
-        let batch = super::super::egress_batch::BATCH_EMIT_ROWS_MERGE as i64;
+        // Producer races ahead in BATCHES (the ramp saturates at this run's
+        // ceiling), filling toward the bounded capacity.
+        let batch = super::super::egress_batch::batch_limit_ceiling(
+            super::super::STREAMING_CHANNEL_CAPACITY,
+        ) as i64;
         let mut filled = 0;
         while filled < cap {
             let rows = batch.min(cap - filled);

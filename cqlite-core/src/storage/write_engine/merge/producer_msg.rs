@@ -27,7 +27,7 @@
 //! `Result`): that makes normal completion an *error* every match site has to
 //! special-case, still permits a non-terminal `Err` to ride in the DATA slot,
 //! and would make the terminator untracked on the egress-depth gauge by
-//! ACCIDENT (right answer, wrong reason — see [`MergeMsg::is_tracked_data`]).
+//! ACCIDENT (right answer, wrong reason — see [`MergeMsg::tracked_entries`]).
 //!
 //! # Both halves are needed, and they cover different builds
 //!

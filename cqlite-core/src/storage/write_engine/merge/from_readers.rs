@@ -114,6 +114,7 @@ use super::{
 /// #2346) — never a field mutated onto `reader`, so two concurrent calls over
 /// the SAME shared reader (two different producer threads, each with its own
 /// token) cancel independently.
+#[allow(clippy::too_many_arguments)]
 pub(super) async fn drive_compaction_stream(
     reader: &SSTableReader,
     run_index: usize,
@@ -121,9 +122,14 @@ pub(super) async fn drive_compaction_stream(
     scan_cancel: &ScanCancel,
     sender: &SyncSender<MergeMsg>,
     local_sent: &AtomicI64,
+    // Issue #2820: the merge-scoped adaptive ROW capacity this run's channel was
+    // budgeted (`egress_budget`'s snapshot). It bounds the BATCH size too — a
+    // batch ceiling independent of it would make the #2765 throttle inert on
+    // resident memory. See `egress_batch::batch_limit_ceiling`.
+    rows_cap: usize,
     fault: &mut MergeProducerFault,
 ) -> Result<()> {
-    let mut batcher = EgressBatcher::new(sender, local_sent);
+    let mut batcher = EgressBatcher::new(sender, local_sent, rows_cap);
     let walk = reader
         .stream_all_partitions_for_compaction(Some(schema), scan_cancel, |compaction_row| {
             forward_row(run_index, compaction_row, schema, &mut batcher, fault)
@@ -165,6 +171,7 @@ fn finish_batched_walk(walk: Result<()>, batcher: &mut EgressBatcher<'_>) -> Res
 /// The row conversion + batched backpressure (`forward_row` into one
 /// `EgressBatcher`, then [`finish_batched_walk`]) is still shared, so the emit
 /// contract — including the pre-terminator tail flush — cannot diverge.
+#[allow(clippy::too_many_arguments)]
 pub(super) async fn drive_query_stream(
     reader: &SSTableReader,
     run_index: usize,
@@ -173,9 +180,11 @@ pub(super) async fn drive_query_stream(
     token_bound: Option<crate::storage::sstable::reader::ScanTokenBound>,
     sender: &SyncSender<MergeMsg>,
     local_sent: &AtomicI64,
+    // Issue #2820: see `drive_compaction_stream`'s `rows_cap`.
+    rows_cap: usize,
     fault: &mut MergeProducerFault,
 ) -> Result<()> {
-    let mut batcher = EgressBatcher::new(sender, local_sent);
+    let mut batcher = EgressBatcher::new(sender, local_sent, rows_cap);
     let walk = reader
         .stream_all_partitions_for_query(Some(schema), scan_cancel, token_bound, |compaction_row| {
             forward_row(run_index, compaction_row, schema, &mut batcher, fault)
@@ -300,6 +309,7 @@ impl SSTableRowIteratorAdapter {
                 token_bound,
                 sender,
                 producer_sent_count,
+                channel_capacity,
                 fault,
             );
         }) {
@@ -354,6 +364,8 @@ impl SSTableRowIteratorAdapter {
         token_bound: Option<crate::storage::sstable::reader::ScanTokenBound>,
         sender: SyncSender<MergeMsg>,
         sent_count: Arc<AtomicI64>,
+        // Issue #2820: the ROW capacity that bounds this run's batch size.
+        rows_cap: usize,
         mut fault: MergeProducerFault,
     ) {
         let _thread_guard = producer_gauge::ProducerThreadGuard;
@@ -387,6 +399,7 @@ impl SSTableRowIteratorAdapter {
                 token_bound,
                 &sender,
                 sent_count.as_ref(),
+                rows_cap,
                 &mut fault,
             ))
         }));

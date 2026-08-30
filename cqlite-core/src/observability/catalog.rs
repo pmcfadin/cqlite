@@ -805,10 +805,9 @@ pub const MERGE_PRODUCER_THREADS: &str = "cqlite.merge.producer_threads";
 /// per-channel `sync_channel` capacity every new merge receives is
 /// `clamp(EGRESS_ROW_BUDGET / active_merges, MIN_CAP, 256)`, so this gauge makes
 /// the otherwise-invisible backpressure throttle legible — a level well above
-/// `EGRESS_ROW_BUDGET / 256` means concurrent merges are being squeezed toward
-/// `MIN_CAP`. Deliberately DISTINCT from [`MERGE_PRODUCER_THREADS`], which
-/// counts per-SOURCE producer threads (`O(K × active_merges)`): this counts
-/// MERGES, the unit the budget is keyed on. No high-cardinality attributes.
+/// `EGRESS_ROW_BUDGET / 256` means merges are being squeezed toward `MIN_CAP`.
+/// DISTINCT from [`MERGE_PRODUCER_THREADS`] (per-SOURCE producer threads,
+/// `O(K × active_merges)`): this counts MERGES, the budget's unit.
 pub const MERGE_ACTIVE_MERGES: &str = "cqlite.merge.active_merges";
 
 /// `cqlite.merge.egress_channel_depth` — gauge `{entry}` (issue #2419, WS2).
@@ -820,17 +819,18 @@ pub const MERGE_ACTIVE_MERGES: &str = "cqlite.merge.active_merges";
 /// successful data send and decremented on the matching receive (the #2316
 /// pattern), floored at 0. The ROW budget is `STREAMING_CHANNEL_CAPACITY` = 256,
 /// adaptively reduced under concurrent merges ([`MERGE_ACTIVE_MERGES`] / #2765);
-/// since #2820 each MESSAGE carries a BATCH of up to 256 rows, so the per-source
-/// ceiling is `merge::egress_batch::max_inflight_rows` (1024 rows at the default
-/// budget) and a batch of `n` rows still moves the level by `n`, never by 1.
+/// since #2820 a MESSAGE carries a BATCH of up to
+/// `merge::egress_batch::batch_limit_ceiling(rows_cap)` rows, moving the level by
+/// `n` not 1. THIS gauge's per-source ceiling is therefore
+/// `merge::egress_batch::rows_resident_in_channel(rows_cap)` = `2 × rows_cap` —
+/// **512 at the shipped default**. Do NOT threshold on `max_inflight_rows`
+/// (`4 × rows_cap`, 1024): that is the MEMORY bound, which also counts the
+/// consumer-HELD batch (already decremented here) and the one a PARKED producer
+/// owns — 2× a level this gauge cannot reach.
 ///
-/// **Healthy vs alarming**: a depth near zero means the consumer is keeping up (or
-/// a producer is stalled, e.g. disk-bound — cross-check `cqlite.rpc.rows`); a depth
-/// riding near that per-source ceiling means the producer is outrunning a slower
-/// consumer (back-pressured egress, distinguishing a "stuck in `do_get`" stall from
-/// a disk-bound one). OS-independent (always emits, on every platform), unlike the
-/// `cqlite.proc.*` gauges. No high-cardinality attributes. Lives in `cqlite.merge.*`
-/// alongside [`MERGE_PRODUCER_THREADS`] (both merge-scoped, compaction + Flight).
+/// **Healthy vs alarming**: near zero = the consumer keeps up (or a producer is
+/// stalled, e.g. disk-bound — cross-check `cqlite.rpc.rows`); riding near that
+/// ceiling = back-pressured egress. OS-independent; no high-cardinality attrs.
 pub const MERGE_EGRESS_CHANNEL_DEPTH: &str = "cqlite.merge.egress_channel_depth";
 
 // ---------------------------------------------------------------------------
