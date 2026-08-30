@@ -234,8 +234,10 @@ const MEASURE_PASSES = 9;
 //                garbage, and such passes are EXCLUDED before the statistic)
 //   stream path:  +16 .. +56 bytes over 10 runs
 // Budget = 32 KiB (109 bytes/iteration at 300 iterations) -- UNCHANGED by the
-// re-measure, so this is not a loosening: it is ~13x the largest clean minimum on
-// the error path and ~585x on the stream path, and GC/platform drift cannot red it.
+// re-measure, so this is not a loosening: against the POST-REBASE clean minima it is
+// ~60x the largest on the error path (544 bytes) and ~585x on the stream path (56
+// bytes), and GC/platform drift cannot red it. (Round 7 quoted ~13x for the error path
+// against a 2,496-byte maximum that the re-measure did not reproduce.)
 // Measured discrimination, with synthetic leaks injected into these same loop bodies
 // at `bufferSize: 2` (again as the minimum non-negative pass):
 //   * retain a 256-byte Buffer per iteration: minimum 50,312 B (167.7/iter) TRIPS the
@@ -254,7 +256,8 @@ const MEASURE_PASSES = 9;
 // bite the code it ships with, not just a lookalike in a scratch harness. The
 // smallest shape this file CLAIMS to catch was re-verified at the same time: a
 // retained 64-byte Buffer per iteration reds the stream path at an upper median of
-// 83,616 bytes (278.7/iteration, 1.3x over). Neither number transferred from an
+// 84,784 bytes (282.6/iteration, 1.3x over; round 7 measured 83,616 / 278.7 on the
+// same plant). Neither number transferred from an
 // earlier round; both were re-measured after the statistic changed.
 // WHAT THAT CONTROL ESTABLISHES, precisely: the planted objects are JS-visible
 // (`Buffer`, plain objects), so it proves the instrument is sensitive to
@@ -271,6 +274,14 @@ const MEASURE_PASSES = 9;
 // local agent-gate's `node-bindings` component, where `CI` is unset and the
 // unscaled budgets apply -- so the doubling cannot weaken the gate.
 const CI_BUDGET_MULTIPLIER = process.env.CI ? 2 : 1;
+// SCOPE OF THAT MULTIPLIER, stated because it is asymmetric (round 11, T4): it doubles
+// the CEILINGS only. SAMPLE_QUORUM and MAX_MEASURE_ATTEMPTS are NOT scaled, so a CI leg
+// faces the same statistic-formability requirements on possibly noisier hardware — i.e. a
+// below-quorum hard error is somewhat likelier there. Deliberate and low-stakes:
+// node-ci.yml is a REGISTERED EXEMPTION in .github/ci-gating-tiers.yml (its merge-gating
+// half is the local gate's node-bindings component), so a red on that leg is triage noise,
+// not a blocked merge. If it ever becomes gating, scale the quorum machinery too rather
+// than widening the ceilings.
 const BUDGET_BYTES = 32 * 1024 * CI_BUDGET_MULTIPLIER;
 
 // SECONDARY, LOOSE, NATIVE-VISIBLE BUDGET (issue #1465 review): total RSS growth
@@ -305,18 +316,24 @@ const BUDGET_BYTES = 32 * 1024 * CI_BUDGET_MULTIPLIER;
 // which is why measureGrowth re-collects a below-quorum set up to
 // MAX_MEASURE_ATTEMPTS times instead of erroring on the first attempt.
 //
-// STREAM: 64 KiB -- 293x the largest clean upper median, and it still TRIPS the
-// planted RED control (median 134,736 bytes, 2.1x over). Discriminating AND
+// STREAM: 64 KiB -- 56x the largest clean upper median measured post-rebase (1,168
+// bytes; 293x against round 7's 224-byte maximum), and it still TRIPS the
+// planted RED control (upper median 134,032 bytes post-rebase, 2.0x over; round 7
+// measured 134,736 / 2.1x on the same plant). Discriminating AND
 // flake-free, so this path gets a real majority constraint.
 //
-// ERROR: 512 KiB -- 3.8x the largest clean upper median. This one is HONESTLY
+// ERROR: 512 KiB -- 3.8x round 7's largest clean upper median (137,416 bytes) and 29x
+// the post-rebase one (17,784); the round-7 figure is the one the ceiling was SIZED
+// against, and it is kept as the sizing rationale rather than replaced by the friendlier
+// number. This one is HONESTLY
 // WEAK and the number says why: the error path's clean upper median REACHES
-// 137,416 bytes while the planted 256-byte-per-iteration control sits at 133,656
+// 137,416 bytes (round 7; the post-rebase re-measure saw <= 17,784) while the planted
+// 256-byte-per-iteration control sits at 133,728
 // -- noise and signal OVERLAP at this quantile, so no ceiling here can be both
 // flake-free and sensitive to that plant. 512 KiB is therefore a GROSS-majority
 // constraint only: it bites a leak retaining >= ~1.7 KB/iteration in a majority of
 // passes, and nothing smaller. Sensitivity on this path comes from the MINIMUM
-// ceiling (BUDGET_BYTES, stable at 16 bytes clean vs 110,912 planted -- see the RED
+// ceiling (BUDGET_BYTES, clean 16..544 bytes vs 50,312 planted post-rebase -- see the RED
 // control above), which is why both ceilings exist. Widening the median ceiling to
 // catch the plant would have meant 256 KiB+, which catches nothing the minimum does
 // not already catch, and accepting the 1-in-8 flake was not an option: a lane that
@@ -407,9 +424,14 @@ const MAX_MEASURE_ATTEMPTS = 3;
  * passes NEGATIVE and 1 run in 10 below the quorum of 5 (the stream path: 0 in 10, 8-9
  * valid). Erroring on the first attempt would therefore red correct code one run in ten,
  * and a lane that reds on correct input is the lane people learn to waive. Three attempts
- * put that at ~1 in 1000 while an instrument that is genuinely broken still ends in the
- * named hard error rather than a pass. Cost is bounded and paid only when needed (~0.5s
- * per extra attempt on the path that needs it).
+ * put that at an ESTIMATED ~1 in 1000 — and that estimate ASSUMES the three attempts are
+ * INDEPENDENT, which was NOT measured, least of all under machine load, where GC deferral
+ * is exactly the kind of thing that correlates across attempts. Treat it as an
+ * order-of-magnitude expectation, never a bound; the MEASURED input is the single-attempt
+ * rate above (1 run in 10 error path, 0 in 10 stream path). What holds regardless: an
+ * instrument that is genuinely broken still ends in the named hard error rather than a
+ * pass. Cost is bounded and paid only when needed (~0.5s per extra attempt on the path
+ * that needs it).
  *
  * Extracted and directly tested (round 10): it was the one piece of new load-bearing
  * logic with no assertion of its own, and in this issue every such piece has turned out

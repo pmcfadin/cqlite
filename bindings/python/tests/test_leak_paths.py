@@ -31,7 +31,7 @@ because the earlier version of this docstring overclaimed):
     budget on it is deliberately LOOSE: it catches GROSS native retention only.
 
   Consequence, recorded honestly: a SMALL per-iteration native leak (below the
-  RSS budget's measured 16-24 KiB/iteration floor) is invisible to BOTH
+  RSS budget's measured 8-16 KiB/iteration floor) is invisible to BOTH
   instruments here -- and on a platform with NEITHER RSS instrument (Windows),
   the native half is not measured at all, which the test SAYS rather than
   silently passing over. The proper oracle for that class -- an isolated process, RSS
@@ -248,9 +248,11 @@ STREAM_BUFFER_SIZE = 2
 # code paths. Sensitivity to a NATIVE leak is established separately, by the
 # ``libc.malloc`` control on the RSS backstop below.
 #   ERROR_BUDGET_BYTES  =  64 KiB (43 bytes/iteration at 1500) -- 136x the observed
-#       cold max (was 15x before the round-9 re-measure). A retained 256-byte bytearray per iteration measured 486,320
-#       bytes (324.2/iteration) and TRIPS it by 7.4x. Retaining the abandoned
-#       iterator itself (5,132 bytes/iteration) measured 2.57 MB.
+#       cold max (was 15x before the round-9 re-measure). A retained 256-byte
+#       bytearray per iteration measured 482,684 bytes (321.8/iteration) in round 9
+#       and TRIPS it by 7.4x (round 8 measured 486,320 / 324.2 on the same plant --
+#       the control is stable across #1461). Retaining the abandoned iterator itself
+#       measured 2.57 MB (round 3, not re-run since: 5,132 bytes/iteration).
 #   STREAM_BUDGET_BYTES = 256 KiB (175 bytes/iteration at 1500) -- 4.1x the observed
 #       cold max. UNCHANGED across every re-measure; the margin moved 4.7x -> 3.9x ->
 #       4.1x purely as the measurement moved, never the budget.
@@ -266,9 +268,11 @@ STREAM_BUFFER_SIZE = 2
 # across the same loop, read LIVE from /proc/self/statm (peak ``ru_maxrss`` only as
 # a named fallback -- see ``_rss_instrument()``). Measured growth of the LIVE
 # instrument inside the measured window, 1500 iterations:
-#   file alone:            0 bytes (error path), 4,096 .. 970,752 bytes (stream
-#                          path, 6 consecutive samples at `buffer_size=2`; the
-#                          maximum is the first, cold sample)
+#   file alone:            0 .. 16,384 bytes (error path), 0 .. 966,656 bytes
+#                          (stream path) -- 6 consecutive samples per path at
+#                          `buffer_size=2` in round 9; each maximum is that path's
+#                          first, cold sample. Round 8 measured 970,752 on the
+#                          stream path, i.e. unmoved by #1461.
 #   inside the whole 570-test suite (this file's real position in a gate run):
 #                          0 bytes (error path),  28,672 bytes (stream path)
 # Budget = 32 MiB, i.e. ~34x the largest observed value, so allocator/page
@@ -280,7 +284,9 @@ STREAM_BUFFER_SIZE = 2
 #       docstring's blind-spot claim predicts:
 #         * 64 KiB/iteration -> live RSS grew 98,750,464 B (error path) /
 #           99,332,096 B (stream path): TRIPS, ~3x over budget, while BOTH
-#           tracemalloc budgets stayed green.
+#           tracemalloc budgets stayed green. (Round 8; NOT re-run in round 9, which
+#           re-bracketed the floor instead at 8-16 KiB. Kept because it is the
+#           measurement that establishes tracemalloc's blindness to a native leak.)
 #         * 16 KiB/iteration -> 37,322,752 B: TRIPS (the round-9 floor; 24 KiB
 #           tripped at 37,261,312 B in the same run).
 #         * 8 KiB/iteration -> PASSES; so do 4 KiB and 2 KiB.
@@ -289,8 +295,9 @@ STREAM_BUFFER_SIZE = 2
 #       the budget untouched. Note the measured per-iteration RSS cost exceeds the
 #       planted size (a 16 KiB malloc moved RSS ~24.9 KiB): glibc arena/page
 #       granularity, which is exactly why this budget is documented as gross-only.
-#       So the detection floor is between 16 and 24 KiB/iteration at 1500
-#       iterations, bracketing the ~22 KiB the budget arithmetic predicts.
+#       (The 16-24 KiB bracket this block reported before round 9 is superseded by
+#       the 8-16 KiB one measured above; the budget arithmetic predicts ~22 KiB, which
+#       the observed page/arena overhead beats.)
 #   WHAT IT DOES NOT CATCH: any native retention below that floor -- e.g.
 #       512 B/iteration, which is 2.8 MB per 5,000 error responses in a real
 #       service. It is a backstop for the gross case, not an oracle; the oracle is
@@ -497,12 +504,15 @@ def _assert_tracked_under_budget(label: str, growth: int, budget: int) -> None:
 def _assert_rss_under_budget(label: str, rss_growth, rss_kind: str) -> None:
     """Loose, native-visible backstop: RSS growth over the measured loop.
 
-    NOTE, so the N5 refusal is not "swept" onto this assertion by mistake: a
-    non-positive delta here is a LEGITIMATE clean reading, not a non-measurement.
-    RSS is page-granular and the measured clean value on the error path is exactly
-    0 bytes in every run, so refusing <= 0 would red every correct run. The
-    tracked-allocation delta is different -- measured 16.6-67.8 KB clean, never <= 0
-    -- which is why only that one refuses. Same rule, different measured baseline.
+    NO SIGN CHECK HERE, and none on the tracked budget either (round 10 corrected
+    round 8 on that): a non-positive delta on EITHER instrument is a legitimate clean
+    reading, not a non-measurement. RSS is page-granular and its measured clean value
+    on the error path is exactly 0 bytes in every run; the tracked delta has been
+    observed as low as 480 bytes and nothing guarantees it stays positive. What IS
+    affirmed, and where, is the INSTRUMENT: ``_measure_growth_bytes`` asserts
+    ``tracemalloc.is_tracing()`` at both snapshots, this helper reports a
+    three-valued instrument state (live/peak/unavailable) and raises a NAMED error if
+    its reader fails mid-window, and the callers assert exact iteration counts.
 
     When no RSS instrument exists (Windows) this STATES that the native half was
     not measured, via a ``warnings.warn`` that pytest surfaces in its default
