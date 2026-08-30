@@ -39,6 +39,20 @@
 //! and by nothing in `cqlite-core` or the output writers), and that no readable
 //! Parquet file is left behind.
 //!
+//! ### The fixture, and why it is a COMMITTED one
+//!
+//! The command-surface cases drive `test_da.simple_table`, whose SSTable
+//! components are GIT-TRACKED (`test-data/datasets/sstables/test_da/`, the same
+//! `must_run` fixture class the parity cases in this lane classify as committed).
+//! They resolve it CHECKOUT-relative — anchored on the workspace-root
+//! `Cargo.toml`, never from `CQLITE_DATASETS_ROOT` — and COPY it into a
+//! `TempDir` data root, so they always run on a clean checkout with no dataset
+//! fetch, and cannot be perturbed by whatever corpus a machine happens to hold.
+//! An earlier revision hard-required the FETCHED `test_basic.simple_table` and
+//! therefore PANICKED on a clean checkout (roborev, round 9), contradicting both
+//! this issue's "skip cleanly / prefer a committed fixture" criterion and the
+//! optional-vs-`must_run` classification the parity cases already apply.
+//!
 //! ### Why only AC3 is driven end-to-end
 //!
 //! AC1's precondition is not reachable from the CLI's INPUT surface. The read
@@ -406,14 +420,23 @@ mod datasets_root;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-/// The committed CQL type declaration these cases rewrite, and the rewrite.
+/// The GIT-TRACKED fixture the command-surface cases drive, and its committed
+/// schema. Both are checkout resident, so these cases never need a fetch.
+const FIXTURE_KEYSPACE: &str = "test_da";
+const FIXTURE_TABLE: &str = "simple_table";
+const FIXTURE_QUALIFIED: &str = "test_da.simple_table";
+const FIXTURE_SCHEMA_FILE: &str = "da-test.cql";
+
+/// The committed CQL type declaration these cases rewrite, the rewrite, and the
+/// column it renames the type of.
 ///
 /// Bound to the committed schema on purpose: the substitution count is asserted,
-/// so if `basic-types.cql` ever stops declaring this column exactly this way the
+/// so if `da-test.cql` ever stops declaring this column exactly this way the
 /// case REDS instead of silently exporting an unmodified schema and passing for
 /// the wrong reason.
-const DECLARED_LINE: &str = "    varchar_field VARCHAR,";
-const REDECLARED_LINE: &str = "    varchar_field DECIMAL,";
+const DECLARED_LINE: &str = "    name TEXT,";
+const REDECLARED_LINE: &str = "    name DECIMAL,";
+const REWRITTEN_COLUMN: &str = "name";
 
 /// The `cqlite` binary under test.
 ///
@@ -434,24 +457,106 @@ fn cqlite_binary() -> PathBuf {
     path
 }
 
-/// The corpus root carrying `test_basic.simple_table`.
+/// The committed SSTable directory for the fixture, resolved CHECKOUT-relative.
 ///
-/// Fail-closed (#3220): the fixture is committed, so an absent one is a red, not
-/// a skip. `describe_search` names every root that was searched.
-fn simple_table_data_dir() -> PathBuf {
-    datasets_root::sstables_root_for_table("test_basic", "simple_table").unwrap_or_else(|| {
+/// Deliberately NOT `datasets_root::sstables_root_for_table`: that walks
+/// `CQLITE_DATASETS_ROOT` first, which would let an ambient corpus decide which
+/// bytes these cases export. The fixture is git-tracked, so the checkout is the
+/// only root that can serve it, and `checkout_test_data_dir` anchors on the
+/// workspace-root `Cargo.toml` exactly as the committed schemas do (#3148).
+///
+/// Fail-closed: an absent or ambiguous fixture is a NAMED red, never a skip —
+/// its binaries are committed, so absence is a checkout problem.
+fn committed_fixture_dir() -> PathBuf {
+    let keyspace_dir = datasets_root::fixture_roots::checkout_test_data_dir()
+        .join("datasets")
+        .join("sstables")
+        .join(FIXTURE_KEYSPACE);
+    let prefix = format!("{FIXTURE_TABLE}-");
+    let entries = std::fs::read_dir(&keyspace_dir).unwrap_or_else(|e| {
         panic!(
-            "test_basic.simple_table is a committed fixture and MUST be present for the \
-             command-surface cases: {}",
-            datasets_root::describe_search("test_basic", "simple_table")
+            "{FIXTURE_QUALIFIED} is a git-tracked fixture; its keyspace directory {} must be \
+             readable: {e}",
+            keyspace_dir.display()
         )
-    })
+    });
+    let mut dirs: Vec<PathBuf> = entries
+        .filter_map(|e| e.ok().map(|e| e.path()))
+        .filter(|p| {
+            p.is_dir()
+                && p.file_name()
+                    .and_then(|n| n.to_str())
+                    .map(|n| n.starts_with(&prefix))
+                    .unwrap_or(false)
+                && dir_holds_data_db(p)
+        })
+        .collect();
+    dirs.sort();
+    assert_eq!(
+        dirs.len(),
+        1,
+        "expected exactly one committed {FIXTURE_QUALIFIED} generation carrying a *-Data.db \
+         under {}, found {dirs:?} — these cases pin ONE fixture, so an added generation must \
+         RED here rather than silently export a different one",
+        keyspace_dir.display()
+    );
+    dirs.pop().expect("length asserted to be 1")
 }
 
-/// The committed `test-data/schemas/basic-types.cql`, read as a string.
-fn committed_basic_types_schema() -> String {
-    let path = datasets_root::schema_path("basic-types.cql")
-        .unwrap_or_else(|| panic!("committed schema test-data/schemas/basic-types.cql not found"));
+/// True when `dir` holds at least one `*-Data.db` component.
+///
+/// Presence is judged by the actual binary, never by directory existence: the
+/// repo commits JSONL sidecars for fixtures whose binaries are gitignored, so a
+/// `<table>-<uuid>/` can exist with no readable SSTable in it.
+fn dir_holds_data_db(dir: &Path) -> bool {
+    std::fs::read_dir(dir)
+        .map(|rd| {
+            rd.filter_map(|e| e.ok()).any(|e| {
+                e.file_name()
+                    .to_str()
+                    .map(|n| n.ends_with("-Data.db"))
+                    .unwrap_or(false)
+            })
+        })
+        .unwrap_or(false)
+}
+
+/// Copy the committed fixture into an ISOLATED data root under `tmp` and return
+/// that root, for `--data-dir`.
+///
+/// Isolation is the point: the exported bytes then come from the checkout alone,
+/// so neither an unset nor a differently-populated `CQLITE_DATASETS_ROOT` can
+/// change what these cases assert, and the export cannot see sibling keyspaces.
+fn isolated_data_root(tmp: &Path) -> PathBuf {
+    let src = committed_fixture_dir();
+    let generation = src
+        .file_name()
+        .expect("the fixture directory has a final component");
+    let root = tmp.join("data");
+    let dst = root.join(FIXTURE_KEYSPACE).join(generation);
+    std::fs::create_dir_all(&dst).unwrap_or_else(|e| panic!("create {}: {e}", dst.display()));
+    for entry in std::fs::read_dir(&src).unwrap_or_else(|e| panic!("read {}: {e}", src.display())) {
+        let entry = entry.expect("read a fixture component entry");
+        if !entry.file_type().map(|t| t.is_file()).unwrap_or(false) {
+            continue;
+        }
+        let to = dst.join(entry.file_name());
+        std::fs::copy(entry.path(), &to)
+            .unwrap_or_else(|e| panic!("copy {} -> {}: {e}", entry.path().display(), to.display()));
+    }
+    assert!(
+        dir_holds_data_db(&dst),
+        "the isolated data root must carry the fixture's *-Data.db: {}",
+        dst.display()
+    );
+    root
+}
+
+/// The committed `test-data/schemas/da-test.cql`, read as a string.
+fn committed_fixture_schema() -> String {
+    let path = datasets_root::schema_path(FIXTURE_SCHEMA_FILE).unwrap_or_else(|| {
+        panic!("committed schema test-data/schemas/{FIXTURE_SCHEMA_FILE} not found")
+    });
     std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {}: {e}", path.display()))
 }
 
@@ -469,7 +574,7 @@ fn run_export_command(schema: &Path, data_dir: &Path, out: &Path) -> (bool, Stri
             "--format",
             "parquet",
             "--table",
-            "test_basic.simple_table",
+            FIXTURE_QUALIFIED,
         ])
         .output()
         .expect("the cqlite binary must be spawnable");
@@ -515,9 +620,10 @@ fn assert_no_valid_parquet_left(path: &Path) {
 /// CQL `decimal` is arbitrary-scale, so a scale above the fixed export scale is
 /// ordinary Cassandra data — but no committed fixture carries one (the corpus
 /// decimals top out at scale 3) and CQLite's own writer cannot mint one, so the
-/// value has to come from the schema side. This case exports the committed
-/// `test_basic.simple_table` corpus under the committed `basic-types.cql` with
-/// ONE type declaration rewritten to `decimal`. The cell bytes then decode to a
+/// value has to come from the schema side. This case exports the GIT-TRACKED
+/// `test_da.simple_table` corpus — copied into an isolated `TempDir` data root —
+/// under the committed `da-test.cql` with ONE type declaration rewritten to
+/// `decimal`. The cell bytes then decode to a
 /// genuine `Value::Decimal` whose scale exceeds `DECIMAL_FIXED_SCALE` — at the
 /// converter boundary indistinguishable from one decoded out of a
 /// Cassandra-written high-scale decimal, which is the condition AC3 governs.
@@ -533,17 +639,18 @@ fn assert_no_valid_parquet_left(path: &Path) {
 /// possibly swallowed) below it.
 #[test]
 fn command_surface_ac3_export_fails_and_leaves_no_valid_parquet() {
-    let data_dir = simple_table_data_dir();
     let tmp = tempfile::TempDir::new().expect("temp dir");
+    let data_dir = isolated_data_root(tmp.path());
 
-    let committed = committed_basic_types_schema();
+    let committed = committed_fixture_schema();
     assert_eq!(
         committed.matches(DECLARED_LINE).count(),
         1,
-        "basic-types.cql must declare `{DECLARED_LINE}` exactly once — this case rewrites that \
-         declaration, so a schema change must RED here rather than export an unmodified schema"
+        "{FIXTURE_SCHEMA_FILE} must declare `{DECLARED_LINE}` exactly once — this case rewrites \
+         that declaration, so a schema change must RED here rather than export an unmodified \
+         schema"
     );
-    let schema_path = tmp.path().join("basic-types-decimal.cql");
+    let schema_path = tmp.path().join("fixture-schema-decimal.cql");
     std::fs::write(
         &schema_path,
         committed.replace(DECLARED_LINE, REDECLARED_LINE),
@@ -564,7 +671,7 @@ fn command_surface_ac3_export_fails_and_leaves_no_valid_parquet() {
          the refusal propagated through commands/export.rs: {stderr}"
     );
     assert!(
-        stderr.contains("varchar_field")
+        stderr.contains(&format!("Column '{REWRITTEN_COLUMN}'"))
             && stderr.contains("exceeds the fixed export scale 9")
             && stderr.contains("refusing to truncate"),
         "the diagnostic must name the column and the AC3 refusal: {stderr}"
@@ -580,11 +687,11 @@ fn command_surface_ac3_export_fails_and_leaves_no_valid_parquet() {
 /// schema, a binary that fails on every invocation — would satisfy the negative.
 #[test]
 fn command_surface_control_export_succeeds_under_the_committed_schema() {
-    let data_dir = simple_table_data_dir();
     let tmp = tempfile::TempDir::new().expect("temp dir");
+    let data_dir = isolated_data_root(tmp.path());
 
-    let schema_path = tmp.path().join("basic-types.cql");
-    std::fs::write(&schema_path, committed_basic_types_schema()).expect("write the schema");
+    let schema_path = tmp.path().join(FIXTURE_SCHEMA_FILE);
+    std::fs::write(&schema_path, committed_fixture_schema()).expect("write the schema");
 
     let out = tmp.path().join("control.parquet");
     let (ok, stderr) = run_export_command(&schema_path, &data_dir, &out);
@@ -612,12 +719,12 @@ fn command_surface_control_export_succeeds_under_the_committed_schema() {
     let live = batches
         .iter()
         .filter_map(|b| {
-            b.column_by_name("varchar_field")
+            b.column_by_name(REWRITTEN_COLUMN)
                 .map(|c| c.len() - c.null_count())
         })
         .sum::<usize>();
     assert!(
         live > 0,
-        "`varchar_field` must export live values under its committed VARCHAR declaration"
+        "`{REWRITTEN_COLUMN}` must export live values under its committed TEXT declaration"
     );
 }
