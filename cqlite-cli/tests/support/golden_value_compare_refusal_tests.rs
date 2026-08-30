@@ -310,3 +310,81 @@ fn the_json_lane_refuses_nothing() {
     let report = compare_rows(&golden, &dropped, &schema, &["id"], &[], &[], Egress::Json);
     assert_eq!(report.diffs.len(), 1, "{:?}", report.diffs);
 }
+
+/// The CLASS-level property, exercised for EVERY node-local refusal cause rather
+/// than for the one shape that surfaced finding P2.
+///
+/// A refusal is right about `[[]]` and wrong about the next shape exactly when it
+/// is decided per CAUSE-SITE instead of per NODE. So each cause is planted ONE
+/// LEVEL DOWN, inside an outer container that is itself unambiguous, and both
+/// halves are required: the refusal is named at the NESTED path, and the outer
+/// container's own member count is still compared (a dropped outer member FAILS).
+///
+/// `list<frozen<…>>` is the vehicle because a nested collection must be frozen in
+/// CQL; the outer list's members are separated at bracket depth 0, which is why
+/// the inner ambiguity cannot reach it.
+#[test]
+fn every_refusal_cause_suppresses_only_its_own_node() {
+    // (cause, declared column type, golden member, the CORRECT rendering of it)
+    let causes = [
+        (
+            "EMPTY-CONTAINER",
+            "list<frozen<list<text>>>",
+            json!([]),
+            "[[]]",
+        ),
+        (
+            "EMPTY-MEMBER",
+            "list<frozen<list<text>>>",
+            json!([""]),
+            "[[]]",
+        ),
+        (
+            "SEPARATOR",
+            "list<frozen<list<text>>>",
+            json!(["a, b"]),
+            "[[a, b]]",
+        ),
+        (
+            "KEY-SEPARATOR",
+            "list<frozen<map<text, text>>>",
+            json!({"a: b": "v"}),
+            "[{a: b: v}]",
+        ),
+    ];
+    for (cause, decl, member, rendering) in causes {
+        let schema = schema_of(
+            &format!("CREATE TABLE t (id int PRIMARY KEY, nl {decl});"),
+            "t",
+        );
+        let golden = vec![row(&[("id", json!(1)), ("nl", json!([member]))])];
+
+        let report = csv_report(&schema, &golden, rendering);
+        assert!(report.diffs.is_empty(), "{cause}: {:?}", report.diffs);
+        assert_eq!(
+            report.ambiguous_container_cells, 1,
+            "{cause}: the nested position must be refused"
+        );
+        assert!(
+            report.ambiguity_reasons[0].starts_with("nl[0] ("),
+            "{cause}: the refusal must be named at the NESTED path: {:?}",
+            report.ambiguity_reasons
+        );
+
+        // The outer container is unambiguous whatever the member turns out to
+        // mean, so dropping that member is a divergence — the P2 property, per
+        // cause.
+        let report = csv_report(&schema, &golden, "[]");
+        assert_eq!(
+            report.diffs.len(),
+            1,
+            "{cause}: a dropped outer member must fail: {:?}",
+            report.diffs
+        );
+        assert!(
+            report.diffs[0].contains("collection length"),
+            "{cause}: {:?}",
+            report.diffs
+        );
+    }
+}
