@@ -216,8 +216,11 @@ pub fn config_from_py(
         .validate()
         .map_err(|e| PyValueError::new_err(e.to_string()))?;
 
-    // ONLY now — the warning asserts the configuration still loads, and this
-    // operation has only just finished deciding that (#1696 roborev r2 F2).
+    // Raised on the SUCCESS path only (#1696 roborev r2 F2): a caller whose
+    // config was rejected gets the rejection alone, not a deprecation warning
+    // about a document that never took effect. The warning's TEXT is safe
+    // wherever it is raised — since r5 F1 it claims nothing about the outcome —
+    // so this is a clarity choice, not a correctness precondition.
     raise_removed_key_warning(py, removed_key_warning)?;
 
     Ok(core_config)
@@ -239,12 +242,17 @@ pub fn config_from_py(
 ///
 /// # The warning is RETURNED, not raised (#1696 roborev r2 F2)
 ///
-/// This function used to raise it here, which reintroduced on the Python surface
-/// the exact defect fixed for the CLI in F3: a document naming a removed key AND
-/// carrying an invalid surviving value warned "the configuration still loads" and
-/// then the public operation REJECTED it. So the warning travels with the config
-/// and the caller raises it only once its own validation has SUCCEEDED — which is
-/// the moment "still loads" becomes true.
+/// This function used to raise it here, so a document naming a removed key AND
+/// carrying an invalid surviving value warned before the public operation
+/// REJECTED it. The warning therefore travels with the config and the caller
+/// raises it only once its own validation has succeeded, so a rejected caller
+/// gets the rejection alone.
+///
+/// Note what this ordering is and is not. It is not what makes the TEXT true:
+/// chasing that was the r5 F1 defect, since the text used to promise "the
+/// configuration still loads" and there is always a later stage that can falsify
+/// such a promise. The text now claims nothing about the outcome, and the
+/// ordering survives purely so a failed operation reports one thing, not two.
 pub fn parse_config_from_py(
     py: Python<'_>,
     config: Option<&Bound<'_, PyAny>>,
@@ -319,8 +327,8 @@ pub fn config_for_open(
 
     // Raised LAST, after the override fold and the merged validation both
     // succeeded: every earlier `return Err` above leaves the caller with the
-    // rejection and no "the configuration still loads" assurance beside it
-    // (#1696 roborev r2 F2).
+    // rejection alone, not a deprecation warning about a document that never
+    // took effect (#1696 roborev r2 F2).
     raise_removed_key_warning(py, removed_key_warning)?;
 
     Ok(core_config)
@@ -404,9 +412,11 @@ fn config_from_dict(
 /// which runs a subprocess under Python's own default filters — `pytest.warns`
 /// enables ALL warnings, so it would pass for a hidden category too.
 ///
-/// Called only once the operation has SUCCEEDED: the warning asserts the
-/// configuration still loads, so it must not be raised before that is true
-/// (#1696 roborev F3, and again on this surface at roborev r2 F2).
+/// Called only once the operation has SUCCEEDED, so a rejected caller gets the
+/// rejection alone rather than a deprecation warning about a document that never
+/// took effect (#1696 roborev r2 F2). The warning's own text asserts NOTHING
+/// about whether the load succeeds (r5 F1), so this placement is about signal
+/// clarity, not about making the text true.
 fn raise_removed_key_warning(py: Python<'_>, warning: Option<String>) -> PyResult<()> {
     if let Some(warning) = warning {
         let warnings = py.import("warnings")?;

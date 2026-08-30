@@ -377,14 +377,18 @@ class TestRemovedConfigKeysWarn:
             f"the visible warning must NAME the removed key: {result.stderr!r}"
         )
 
-    def test_removed_key_plus_invalid_value_fails_without_the_still_loads_claim(self):
+    def test_removed_key_plus_invalid_value_is_rejected_with_no_warning_beside_it(self):
         """A removed key beside an invalid SURVIVING value: reject, and say nothing.
 
         Issue #1696 roborev r2 F2 — the same defect fixed for the CLI in F3,
         reintroduced on this surface. The warning was raised during PARSING, so a
-        document naming a removed key AND carrying an invalid value told the user
-        "the configuration still loads" and then the public operation REJECTED it:
-        two contradictory answers to one call.
+        document naming a removed key AND carrying an invalid value warned and then
+        the public operation REJECTED it: two answers to one call.
+
+        The warning text no longer claims the configuration loads (r5 F1), so what
+        is pinned here is the SIGNAL, not the wording: a rejected call reports the
+        rejection alone. The "still loads" assertion below is kept as a regression
+        guard on that retired wording, so reintroducing it anywhere reds here too.
         """
         import warnings
 
@@ -400,8 +404,8 @@ class TestRemovedConfigKeysWarn:
 
         messages = [str(w.message) for w in caught]
         assert not any("still loads" in m for m in messages), (
-            "a REJECTED configuration must not be told it still loads: "
-            f"{messages}"
+            "the retired 'the configuration still loads' assurance must not come "
+            f"back — no warning may claim an outcome (r5 F1): {messages}"
         )
         assert not any("REMOVED" in m for m in messages), (
             f"the removed-key warning must not precede the rejection: {messages}"

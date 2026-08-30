@@ -137,8 +137,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - **Migration (embedders writing Rust):** drop the field assignment. None of
     these knobs had an effect, so there is no behavior to preserve and no
     replacement to adopt.
-  - **Migration (Python / any JSON or dict config surface): the old shape STILL
-    LOADS, and now WARNS.** A Rust embedder gets a compile error, but the Python
+  - **Migration (Python / any JSON or dict config surface): the old shape still
+    DESERIALIZES, and now WARNS.** A Rust embedder gets a compile error, but the Python
     bindings' dict/JSON bridge is a `serde_json::from_str`, and serde DISCARDS
     unknown fields — so a saved pre-change config naming `performance`,
     `storage.block_size`, `query.parallel` and the rest deserialized
@@ -146,8 +146,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     (and the bindings on top of it) now report every removed key the document
     still sets: a Python `UserWarning` naming each dead path, raised only once
     the operation has SUCCEEDED — validation included, so a document that names a
-    removed key AND carries an invalid surviving value is rejected without being
-    told "the configuration still loads". `UserWarning` and not
+    removed key AND carries an invalid surviving value gets the rejection alone
+    and no deprecation warning about a config that never took effect.
+    **The warning text itself makes no claim about whether the load succeeds**,
+    and that is deliberate: it names the dead keys and says they have NO EFFECT,
+    nothing more. It had said "they are IGNORED — the configuration still loads",
+    which is a promise about a LATER stage, and review found it false three times
+    running — each fix moved the emission one stage later and the next stage
+    falsified it again (the CLI's `to_core_config` rejects
+    `memory_limit_mb = 1` beside `cache_size_mb = 64` after the assurance has
+    already printed). There is always a later stage, so no placement can make
+    such a promise safe; a warning that reports only what it knows cannot be
+    wrong about anything else. `UserWarning` and not
     `DeprecationWarning` because Python HIDES the latter under its default
     filters (shown only from `__main__` or under `-W`), which would have left the
     signal silent for an ordinary caller. Same posture as the CLI file surface,
