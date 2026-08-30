@@ -5417,7 +5417,30 @@ check_declared_test_targets_observed() {
     return 1
   fi
   local observed declared=0 seen=0
-  observed=" $(grep -oE 'Running tests/[^[:space:]]+\.rs' "$logfile" \
+  # Parse an ANSI-STRIPPED copy, never the raw log (issue #3400). This site was the one
+  # `Running tests/` parse in this file that #1699 left reading the raw log, and it is the
+  # FALSE-RED direction of the same defect: under `CARGO_TERM_COLOR=always` — set by 18
+  # workflows including the nightly FULL `gate.yml`, and by scripts/local/pre-merge.sh —
+  # cargo emits the reset BETWEEN the status word and the payload (`Running<ESC>[0m
+  # tests/foo.rs`), the literal `Running tests/` never appears, `observed` comes back EMPTY,
+  # and every declared target is then reported unobserved-and-unexplained. That reds a
+  # perfectly healthy run. Colour survives redirection to a file, so a component log is
+  # coloured too; this is not a tty-only artifact.
+  #
+  # Currently UNCALLED (the widened lane that calls it returns with #3384), which is exactly
+  # why it is fixed now rather than when it is revived: a defect in dormant code is invisible
+  # until the day someone re-enables it and reads the red as their own.
+  local _parse_src
+  _parse_src=$(_ansi_stripped_log "$logfile" 2>/dev/null) || _parse_src=""
+  if [ -z "$_parse_src" ] || [ ! -r "$_parse_src" ]; then
+    echo "$label: FAIL-CLOSED — could not prepare '$logfile' for parsing (resolved to '${_parse_src:-<empty>}'), so NO target could be observed and every declared target would be reported unobserved. A reconciliation that read nothing has measured nothing (issue #3400)." >&2
+    return 1
+  fi
+  if [ -s "$logfile" ] && [ ! -s "$_parse_src" ]; then
+    echo "$label: FAIL-CLOSED — '$logfile' is non-empty but its prepared copy '$_parse_src' is empty, so this reconciliation would observe nothing (issue #3400)." >&2
+    return 1
+  fi
+  observed=" $(grep -oE 'Running tests/[^[:space:]]+\.rs' "$_parse_src" \
     | sed -E 's#^Running tests/(.*)\.rs$#\1#' | sort -u | tr '\n' ' ') "
   local bad="" excused="" flaky="" tname rf rfl off sk skissue
   while IFS=$'\t' read -r tname rf; do
@@ -8389,6 +8412,25 @@ run_pub_surface() {
 # descope — no cargo doc, no cargo at all, seconds not minutes; never invokes the gate
 # except in case 26 (`--only pub-surface`, which self-exempts from the #1825 slot), so
 # it cannot recurse.
+# Also runs scripts/tests/test_cargo_output_parsers.sh (#3400), the ONLY behavioural
+# coverage of the ANSI-stripping mechanism this file relies on. #1699 shipped
+# `_ansi_stripped_log` and routed three guards through it with no test of its own, so
+# nothing pinned the property against real code: a RED-first case runs the PRE-#1699 shape of
+# the cli-tests zero-tests guard against one zero-test cargo log twice — coloured and plain —
+# and characterises the defect (exit 0 on the coloured one, 1 on the same log plain), then the
+# CURRENT guards EXTRACTED FROM this shipped file must exit the same way on both. Positive
+# controls prove they recovered the target NAME from coloured text rather than merely erroring,
+# and fail-closed controls cover an unreadable log and one holding no recognisable output at
+# all. Also pins the redirection-not-pipe property BOTH ways (structurally, and behaviourally:
+# over the same log a pipe-fed while-read loop silently exits 0 while the redirect-fed one exits
+# 1) and drives run_arrow_parity_guard_cmd against a stub `cargo` emitting coloured output.
+# Fixtures carry REAL ESC bytes injected via printf, transcribed from a `cat -v` capture of
+# cargo under CARGO_TERM_COLOR=always REDIRECTED TO A FILE — colour survives redirection, which
+# is why the gate's own `> gate.log` capture is affected. A structural LINT over these parse
+# sites was built and DESCOPED (#3400: its own false-PASS count rose across review rounds and
+# two defects landed inside the two prior fix rounds — the #3229 `census-exclusion:` precedent),
+# so this file measures BEHAVIOUR against real code and nothing here depends on it; mechanization
+# is #3499. Hermetic: temp dir only, no cargo, no datasets, no network, never invokes the gate.
 run_tooling_tests() {
   local name=tooling-tests
   if [ -n "$ONLY" ] && ! grep -qw "$name" <<<"${ONLY//,/ }"; then
@@ -9772,7 +9814,7 @@ run_tooling_tests() {
     record_result "$name" "$status" 0
     return 0
   fi
-  echo ">>> [$name] bash scripts/tests/test_agent_gate_summary.sh; bash scripts/tests/test_agent_gate_notify.sh; bash scripts/tests/test_gate_notify_contract.sh; bash scripts/tests/test_agent_gate_smoke_target_dir.sh; bash scripts/tests/test_gate_concurrency_cap.sh; bash scripts/tests/test_bootstrap_agent_machine.sh; bash scripts/tests/test_perf_capability.sh; bash scripts/tests/test_perf_capability_bootstrap.sh; bash scripts/tests/test_claim_lock.sh; bash scripts/tests/test_claim_heartbeat.sh; bash scripts/flow/tests/claim-resume.test.sh; bash scripts/tests/test_premerge_assert.sh; bash scripts/tests/test_board_label_mirror.sh; bash scripts/tests/test_worker_supervisor.sh; bash scripts/tests/test_gate_failure_mode.sh"
+  echo ">>> [$name] bash scripts/tests/test_agent_gate_summary.sh; bash scripts/tests/test_agent_gate_notify.sh; bash scripts/tests/test_gate_notify_contract.sh; bash scripts/tests/test_agent_gate_smoke_target_dir.sh; bash scripts/tests/test_gate_concurrency_cap.sh; bash scripts/tests/test_bootstrap_agent_machine.sh; bash scripts/tests/test_perf_capability.sh; bash scripts/tests/test_perf_capability_bootstrap.sh; bash scripts/tests/test_claim_lock.sh; bash scripts/tests/test_claim_heartbeat.sh; bash scripts/flow/tests/claim-resume.test.sh; bash scripts/tests/test_premerge_assert.sh; bash scripts/tests/test_board_label_mirror.sh; bash scripts/tests/test_worker_supervisor.sh; bash scripts/tests/test_gate_failure_mode.sh; bash scripts/tests/test_cargo_output_parsers.sh"
   if bash "$REPO_ROOT/scripts/tests/test_agent_gate_summary.sh" >>"$log" 2>&1 &&
      bash "$REPO_ROOT/scripts/tests/test_agent_gate_notify.sh" >>"$log" 2>&1 &&
      bash "$REPO_ROOT/scripts/tests/test_gate_notify_contract.sh" >>"$log" 2>&1 &&
@@ -9787,7 +9829,8 @@ run_tooling_tests() {
      bash "$REPO_ROOT/scripts/tests/test_premerge_assert.sh" >>"$log" 2>&1 &&
      bash "$REPO_ROOT/scripts/tests/test_board_label_mirror.sh" >>"$log" 2>&1 &&
      bash "$REPO_ROOT/scripts/tests/test_worker_supervisor.sh" >>"$log" 2>&1 &&
-     bash "$REPO_ROOT/scripts/tests/test_gate_failure_mode.sh" >>"$log" 2>&1; then
+     bash "$REPO_ROOT/scripts/tests/test_gate_failure_mode.sh" >>"$log" 2>&1 &&
+     bash "$REPO_ROOT/scripts/tests/test_cargo_output_parsers.sh" >>"$log" 2>&1; then
     status=PASS
   else
     status=FAIL
@@ -11294,13 +11337,46 @@ run_scan_offload_guard_cmd() {
 # QueryRows, so it needs no datasets.
 run_arrow_parity_guard_cmd() {
   local out
-  out=$(cargo test --package cqlite-core --features arrow \
+  # CARGO_TERM_COLOR=never is BELT, not the fix (issue #3400). The parse below is
+  # colour-immune on its own via _ansi_stripped_log, and it stays that way if this prefix is
+  # ever dropped or overridden by an outer env. Applied to the invocation THIS component owns.
+  #
+  # A BARE assignment prefix, deliberately NOT `env CARGO_TERM_COLOR=never …`: the #3400
+  # self-test drives this function with `cargo` replaced by a shell FUNCTION emitting a
+  # coloured fixture log, which is how it proves the STRIP (not the belt) carries the
+  # correctness. `env` execs an external binary, so it would bypass that stub and run the
+  # real cargo. Do not "tidy" this into `env` without rewriting that test.
+  out=$(CARGO_TERM_COLOR=never cargo test --package cqlite-core --features arrow \
     --test issue_1495_arrow_accessor_parity 2>&1) || { echo "$out"; return 1; }
   echo "$out"
   # Require at least one test to have actually run (guard against a vacuous
   # required-features skip that cargo reports as success with 0 tests).
-  local passed
-  passed=$(echo "$out" | sed -n 's/^test result: ok\. \([0-9][0-9]*\) passed.*/\1/p' | tail -1)
+  #
+  # Parse through _ansi_stripped_log, never the raw capture (issue #3400). `test result:` is
+  # libtest text and carries NO escapes today — cargo does not pass --color through to the
+  # test harness, MEASURED byte-identical under CARGO_TERM_COLOR=always and =never — so this
+  # site is colour-safe for a reason that is invisible at the parse. Normalising anyway makes
+  # the property LOCAL to the parse instead of inherited from cargo's plumbing, which is the
+  # exact coupling that left the cli-tests zero-tests guard inert for months. The failure
+  # direction here is a FALSE RED (empty `passed` -> explicit FAIL), so this is belt, not a
+  # bug fix — and it is the last cargo-output parse in this file reading an unnormalised
+  # source.
+  #
+  # A PRIVATE dir, not a bare mktemp file: _ansi_stripped_log writes a PREDICTABLE
+  # `<file>.ansi-stripped` sibling, which another local user could pre-create as a symlink for
+  # the sed to follow. Same reasoning the cli-tests caller already applies to its two logs.
+  local passed tmpd raw stripped
+  tmpd=$(mktemp -d) || { echo "arrow-parity-guard: FAIL-CLOSED — could not create a private temp dir to normalise cargo output (#3400)" >&2; return 1; }
+  raw="$tmpd/cargo.log"
+  printf '%s\n' "$out" > "$raw" || { rm -rf "$tmpd"; echo "arrow-parity-guard: FAIL-CLOSED — could not write cargo output for parsing (#3400)" >&2; return 1; }
+  stripped=$(_ansi_stripped_log "$raw" 2>/dev/null) || stripped=""
+  if [ -z "$stripped" ] || [ ! -r "$stripped" ]; then
+    rm -rf "$tmpd"
+    echo "arrow-parity-guard: FAIL-CLOSED — could not prepare cargo output for parsing, so this guard parsed NOTHING (#3400)" >&2
+    return 1
+  fi
+  passed=$(sed -n 's/^test result: ok\. \([0-9][0-9]*\) passed.*/\1/p' "$stripped" | tail -1)
+  rm -rf "$tmpd"
   if [ -z "$passed" ] || [ "$passed" -lt 1 ]; then
     echo "arrow-parity-guard: FAIL — 0 tests ran (target skipped/absent, not a real PASS)" >&2
     return 1

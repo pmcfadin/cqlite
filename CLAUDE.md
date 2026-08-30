@@ -186,6 +186,33 @@ cat /tmp/gate-summary.txt   # the SUMMARY block is the ONLY gate text an agent r
   the process EXIT CODE as primary and MUST verify the `run-id:` line matches the run it launched
   before trusting a pinned-path block — a mismatched/foreign `run-id` block (even `RESULT: PASS`) is a
   peer's, not yours; on a mismatch, read the `.integrity-fail.<run-id>` sibling / `logs:` bundle instead.
+- **A gate parser must be colour-immune AT THE PARSE SITE (#3400).** 18 workflows set
+  `CARGO_TERM_COLOR: always` (incl. the nightly `gate.yml`) plus `scripts/local/pre-merge.sh`, and
+  **colour SURVIVES redirection to a file** (measured: 25 ESC bytes vs 0) — the gate's own mandated
+  `> gate.log 2>&1` capture is coloured too, so this is not a tty-only artifact. Cargo colours the
+  STATUS WORD and emits the reset immediately after it (`Running<ESC>[0m tests/foo.rs`), so a
+  pattern anchored on the status word alone survives while one spanning `<status> <payload>` — the
+  literal `Running tests/`, or `warning:` — matches NOTHING. **It breaks BOTH ways, and neither is
+  safe**: the cli-tests zero-tests guard reported OK having judged no target at all (a vacuous PASS,
+  live on `main` for months, fixed by #1699); the declared-vs-observed reconciliation reported EVERY
+  declared target unobserved on a healthy run (a false RED, fixed by #3400). Conversely
+  `test result:` / `running N tests` are libtest's, and cargo does not pass `--color` through to the
+  harness, so they carry no escapes — safe for a reason that is NOT in the code, which is why this
+  is a lint and not a comment. Route every cargo-output parse
+  through `_ansi_stripped_log` and read by **redirection, never a pipe** (a piped `while read` runs
+  in a subshell and its verdict is discarded — a second, independent silent pass). **This rule is
+  DOCTRINE and is NOT mechanically enforced.** A structural lint over the parse sites was built on
+  #3400 and **descoped**: its own false-PASS count rose across review rounds (2, 2, 3) and two of
+  the last round's three defects were inside the two preceding fix rounds — the same shape, and the
+  same ruling, as #3229's removed `census-exclusion:` key, because a guard with known documented
+  false-PASSes is worse than no guard, since it invites reliance it cannot support. Mechanization is
+  deferred to **#3499**; until it lands, this is a review-time rule, and the standing coverage is
+  behavioural (`scripts/tests/test_cargo_output_parsers.sh`, in `tooling-tests`), which pins the
+  defect against real code rather than predicting it from source shape — it EXTRACTS each guard from
+  the shipped `agent-gate.sh` and runs it, so unrouting one reds the suite instead of greening it.
+  `CARGO_TERM_COLOR=never` at the invocation is belt, not the fix; `gate.yml` KEEPS
+  `always` — colour is a presentation property of a log for humans, and moving correctness into a
+  workflow file 18 files from the parse is a worse coupling than the one being removed.
 - clippy is scoped per-package (#1844): whole workspace `-D warnings` but skips the source-built
   DuckDB amalgamation (cqlite-cli `duckdb-tests`) + OTel stack (`observability`/
   `observability-testing`); parquet/arrow stay linted. `CQLITE_CLIPPY_FULL=1` (nightly `gate.yml`)
@@ -901,6 +928,10 @@ loop, not a review round. The rest stay hand-checked (no low-false-positive stat
 - **Wall-clock races in tests** — capture the time window to cover ALL sampled operations.
   MECHANIZED (`roborev-lints`/`tooling-tests`, #2642): a wall-clock threshold assert in the
   correctness test path FAILs; mark a deliberate `#[ignore]`d perf assert `perf-gate-allow`.
+- **Cargo-output parses keyed on literal status text** — route through `_ansi_stripped_log`,
+  read by redirection not a pipe (#3400). NOT mechanized: the lint written for this was
+  descoped for an increasing false-PASS count (see the gate section above); mechanization is
+  deferred to #3499, so this one is hand-checked.
 - **No-heuristics violations** — never infer type/behavior from byte patterns.
 - **Gitignored reference binaries** — `git add -f` tiny parity references; verify against a fresh
   `git worktree add --detach HEAD`, not the dirty tree.
