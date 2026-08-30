@@ -94,8 +94,18 @@ enum Observed {
     /// The path was reached and the two sides AGREE — the divergence the exclusion
     /// was declared for is gone, so the exclusion is stale.
     Agreed,
-    /// The path was reached and the two sides DIVERGED: the exclusion suppressed a
-    /// real divergence, which is the only thing that makes it applied.
+    /// The path was reached and the two sides DIVERGED, but NOT in the way the
+    /// exclusion declares. The exclusion did not suppress that divergence — it is
+    /// reported as an ordinary diff — so the exclusion suppressed nothing, and the
+    /// unexplained divergence is named here too.
+    ///
+    /// Stronger than [`Self::Agreed`] because it is the more actionable answer: a
+    /// table where one row agrees and another diverges in an undeclared way should
+    /// say so rather than report the gap as merely retired.
+    Undeclared(String),
+    /// The path was reached and the two sides diverged EXACTLY as the exclusion
+    /// declares (see [`gap::Divergence`]): the exclusion suppressed the divergence
+    /// it names, which is the only thing that makes it applied.
     Suppressed,
 }
 
@@ -132,22 +142,41 @@ enum Observed {
 /// reached, or could not be evaluated — three distinct causes, each named, and no
 /// two of them can be reported for the same path.
 pub struct SkipPaths<'a> {
-    paths: &'a [&'a str],
+    gaps: &'a [Gap<'a>],
     observed: RefCell<BTreeMap<String, Observed>>,
 }
 
+/// One declared gap as the comparator receives it: the path, and the divergence
+/// the caller declares is there.
+///
+/// A path alone was the whole declaration until review round 17, and that is what
+/// made every gap a permanent blind spot for its column: with nothing to check the
+/// mismatch AGAINST, any mismatch at the path counted as the declared one. See
+/// [`gap::Divergence`].
+pub type Gap<'a> = (&'a str, gap::Divergence);
+
 impl<'a> SkipPaths<'a> {
-    pub fn new(paths: &'a [&'a str]) -> Self {
+    pub fn new(gaps: &'a [Gap<'a>]) -> Self {
         Self {
-            paths,
+            gaps,
             observed: RefCell::new(BTreeMap::new()),
         }
     }
 
-    /// Is this exact path excluded? Records NOTHING — what the exclusion did is
-    /// recorded by [`Self::observe`], from the comparison's own outcome.
+    /// The divergence declared at this EXACT path, or `None`. Records NOTHING —
+    /// what the exclusion did is recorded by [`Self::observe`], from the
+    /// comparison's own outcome.
+    fn declared(&self, path: &str) -> Option<gap::Divergence> {
+        self.gaps
+            .iter()
+            .find(|(p, _)| *p == path)
+            .map(|(_, divergence)| *divergence)
+    }
+
+    /// Is this exact path excluded? A thin reading of [`Self::declared`], kept
+    /// because the CSV decoder is handed a path predicate (see [`csv_decoded`]).
     fn excludes(&self, path: &str) -> bool {
-        self.paths.contains(&path)
+        self.declared(path).is_some()
     }
 
     /// Record what the exclusion at `path` was observed to do. The strongest
@@ -166,13 +195,19 @@ impl<'a> SkipPaths<'a> {
     /// Every declared exclusion that did not suppress a divergence, with the cause.
     fn stale(&self) -> Vec<String> {
         let observed = self.observed.borrow();
-        self.paths
+        self.gaps
             .iter()
+            .map(|(p, _)| p)
             .filter_map(|p| match observed.get(*p) {
                 Some(Observed::Suppressed) => None,
                 Some(Observed::Agreed) => Some(format!(
                     "`{p}` (the two sides AGREE at that path now, so the exclusion \
                      suppresses nothing and is holding back recovered coverage)"
+                )),
+                Some(Observed::Undeclared(what)) => Some(format!(
+                    "`{p}` (a divergence was seen there, but NOT the one this gap declares, \
+                     so the gap suppressed nothing and the divergence is reported as an \
+                     ordinary diff: {what})"
                 )),
                 Some(Observed::Unresolved(why)) => Some(format!(
                     "`{p}` (the comparison there could not be evaluated: {why} — an \
@@ -227,6 +262,53 @@ impl Refusals {
     }
 }
 
+/// Every position where a DECLARED GAP actually suppressed its declared
+/// divergence, recorded as the gap ROOT it belongs to.
+///
+/// Two readers, and both need the root rather than a bare count:
+///
+///   * a gap's root asks whether the divergence was found DEEPER in its own
+///     subtree, because then the suppression is already recorded and this node has
+///     nothing to add (a `set<double>`'s three non-finite members are suppressed
+///     at `sf[i]`, not at `sf`);
+///   * [`count_cell`] asks whether a gap fired anywhere inside THIS cell, because
+///     a cell part of whose value was discarded is not compared coverage — the
+///     same rule a [`Refusals`] entry already imposes.
+///
+/// A separate channel from the value tree for the same reason [`Refusals`] is one:
+/// it is CONTROL information about a position, and a sentinel inside the decoded
+/// `Value` would be indistinguishable from data the egress could produce.
+#[derive(Default)]
+struct Suppressions {
+    recorded: RefCell<Vec<String>>,
+}
+
+impl Suppressions {
+    /// How many suppressions have been recorded so far, taken as a MARK before a
+    /// subtree and compared after it (see [`Refusals::mark`]).
+    fn mark(&self) -> usize {
+        self.recorded.borrow().len()
+    }
+
+    fn record(&self, root: &str) {
+        self.recorded.borrow_mut().push(root.to_string());
+    }
+
+    /// Did any gap suppress a divergence since `mark`?
+    fn any_since(&self, mark: usize) -> bool {
+        self.recorded.borrow().len() > mark
+    }
+
+    /// Did the gap rooted at `root` suppress a divergence since `mark`?
+    fn root_since(&self, mark: usize, root: &str) -> bool {
+        self.recorded
+            .borrow()
+            .iter()
+            .skip(mark)
+            .any(|recorded| recorded == root)
+    }
+}
+
 /// Everything the walk knows about ONE position in a row's value tree.
 ///
 /// Kept as one value rather than four parallel parameters because all four are
@@ -246,6 +328,27 @@ struct At<'s, 'p> {
     skips: &'s SkipPaths<'p>,
     /// Where a refusal at THIS position is recorded (see [`Refusals`]).
     refusals: &'s Refusals,
+    /// Where a suppression by a declared gap is recorded (see [`Suppressions`]).
+    suppressions: &'s Suppressions,
+    /// The declared gap this position is INSIDE, if any (see [`ActiveGap`]).
+    gap: Option<ActiveGap>,
+}
+
+/// The declared gap whose subtree the walk is currently inside.
+///
+/// A gap becomes active at its own path and stays active for every position BELOW
+/// it, because that is where its divergence lives: the `set<double>` gap is
+/// declared on the column `sf` and its divergence is at `sf[0]`, `sf[5]`, `sf[6]`.
+/// A gap declared deeper REPLACES it, so the innermost declaration governs its own
+/// subtree.
+///
+/// The root path travels with it because the root is the only node that records
+/// what the gap did — [`Observed`] is keyed by the DECLARED path, and a message
+/// naming `sf[6]` would name a path no gap declares.
+#[derive(Clone)]
+struct ActiveGap {
+    root: String,
+    divergence: gap::Divergence,
 }
 
 impl<'s, 'p> At<'s, 'p> {
@@ -255,6 +358,7 @@ impl<'s, 'p> At<'s, 'p> {
         kinding: Kinding,
         skips: &'s SkipPaths<'p>,
         refusals: &'s Refusals,
+        suppressions: &'s Suppressions,
     ) -> Self {
         At {
             depth: Depth::TopLevel,
@@ -262,6 +366,8 @@ impl<'s, 'p> At<'s, 'p> {
             path: name.to_string(),
             skips,
             refusals,
+            suppressions,
+            gap: None,
         }
     }
 
@@ -278,6 +384,8 @@ impl<'s, 'p> At<'s, 'p> {
             path,
             skips: self.skips,
             refusals: self.refusals,
+            suppressions: self.suppressions,
+            gap: self.gap.clone(),
         }
     }
 
@@ -290,7 +398,27 @@ impl<'s, 'p> At<'s, 'p> {
             path: format!("{}[{index}]", self.path),
             skips: self.skips,
             refusals: self.refusals,
+            suppressions: self.suppressions,
+            gap: self.gap.clone(),
         }
+    }
+
+    /// This same position, with the gap DECLARED here made active for its subtree.
+    fn under_gap(&self, divergence: gap::Divergence) -> Self {
+        At {
+            gap: Some(ActiveGap {
+                root: self.path.clone(),
+                divergence,
+            }),
+            ..self.clone()
+        }
+    }
+
+    /// Is this position the ROOT of the active gap — the path the caller declared?
+    fn is_gap_root(&self) -> bool {
+        self.gap
+            .as_ref()
+            .is_some_and(|active| active.root == self.path)
     }
 }
 
@@ -304,12 +432,13 @@ pub fn compare_rows(
     schema: &TableSchema,
     pk: &[&str],
     ck: &[&str],
-    skip_columns: &[&str],
+    skip_columns: &[Gap<'_>],
     egress: Egress,
 ) -> Report {
     let mut report = Report::default();
     let skips = SkipPaths::new(skip_columns);
     let refusals = Refusals::default();
+    let suppressions = Suppressions::default();
     if golden.len() != cli.len() {
         report.diffs.push(format!(
             "row count: golden {} vs {egress:?} egress {}",
@@ -396,15 +525,18 @@ pub fn compare_rows(
             let name = column.name.as_str();
             // A WHOLE-column exclusion is NOT short-circuited here: the
             // comparison still runs so the exclusion can be observed to suppress
-            // a divergence (or not) — see [`SkipPaths`]. What it does suppress is
-            // the DIFF and the compared-cell COUNTERS, since a cell whose
-            // divergence is discarded was not compared and must not be counted as
-            // coverage. A dotted `col.field` entry does not match here; it is
-            // observed inside the walk, so the column's other fields keep being
-            // compared and counted.
-            let excluded_column = skips.excludes(name);
-            // Where this cell's own refusals start (see [`Refusals::mark`]).
+            // its DECLARED divergence (or not) — see [`SkipPaths`] and
+            // [`gap::Divergence`]. What it suppresses is that one divergence, and
+            // with it this cell's compared-cell COUNTERS: a cell part of whose
+            // value was discarded is not compared coverage.
+            // The gap declared for this WHOLE column, if any. A dotted
+            // `col.field` entry does not match here; it is observed inside the
+            // walk, so the column's other fields keep being compared and counted.
+            let column_gap = skips.declared(name);
+            // Where this cell's own refusals and gap suppressions start (see
+            // [`Refusals::mark`] and [`Suppressions::mark`]).
             let cell_mark = refusals.mark();
+            let cell_suppression_mark = suppressions.mark();
             // The CLI must render EVERY declared column. An omitted one is a
             // divergence, NOT an implicit null: reading it as null is what made
             // the absent-cell property untestable.
@@ -427,7 +559,7 @@ pub fn compare_rows(
                          rendered (a null cell as `null`, an empty CSV field){}",
                         schema.table,
                         column.ty.describe(),
-                        if excluded_column {
+                        if column_gap.is_some() {
                             " — the declared gap for this path excludes its VALUE, not \
                              the column's PRESENCE"
                         } else {
@@ -435,7 +567,7 @@ pub fn compare_rows(
                         }
                     ));
                 }
-                if excluded_column {
+                if column_gap.is_some() {
                     // There is no value at that path to compare, so what the
                     // exclusion suppresses cannot be read off this row: the gap is
                     // UNRESOLVED, never applied. Reported as its own cause by
@@ -459,11 +591,42 @@ pub fn compare_rows(
             let decoded = match csv_decoded(gv, cv, egress, &column.ty, name, &skips) {
                 Ok(decoded) => decoded,
                 Err(why) => {
-                    if excluded_column {
-                        // The exclusion is what stops this from being a diff, so
-                        // it did suppress a divergence: the CLI's text does not
-                        // invert the grammar the declared type states.
-                        skips.observe(name, Observed::Suppressed);
+                    // The CLI's text does not invert the grammar the declared type
+                    // states. That IS a divergence, so under a whole-column gap it
+                    // is judged against the DECLARED divergence exactly as any
+                    // other is — the raw text is the value the egress rendered, and
+                    // the gap may only suppress it if that is the shape it names.
+                    // Suppressing it unconditionally is the same defect one level
+                    // out: it let a gap absorb any unparseable rendering at all.
+                    if let Some(divergence) = column_gap {
+                        let kinding = column_kinding(column);
+                        if divergence.matched(
+                            gv,
+                            cv,
+                            &column.ty,
+                            egress,
+                            Depth::TopLevel,
+                            kinding,
+                        ) {
+                            skips.observe(name, Observed::Suppressed);
+                            continue;
+                        }
+                        skips.observe(
+                            name,
+                            Observed::Undeclared(format!(
+                                "the CSV text does not invert the declared grammar \
+                                 ({}) — where the gap declares: {}",
+                                brief(&why),
+                                divergence.declared()
+                            )),
+                        );
+                        report.diffs.push(format!(
+                            "row[{key}].{name}: unparseable CSV container: {why} — and that \
+                             is NOT the divergence the declared gap for `{name}` stands for, \
+                             which is: {}. A declared gap suppresses only the divergence it \
+                             names",
+                            divergence.declared()
+                        ));
                         continue;
                     }
                     report.compared_cells += 1;
@@ -475,16 +638,30 @@ pub fn compare_rows(
                 }
             };
             let cv = decoded.as_ref().unwrap_or(cv);
-            let at = At::column(name, column_kinding(column), &skips, &refusals);
-            // `compare_value_at` swallows (and RECORDS) the outcome at an excluded
-            // path itself, so an excluded column can never reach `diffs` here.
+            let at = At::column(
+                name,
+                column_kinding(column),
+                &skips,
+                &refusals,
+                &suppressions,
+            );
+            // `compare_value_at` suppresses (and RECORDS) the DECLARED divergence
+            // at an excluded path; a divergence the gap does not declare reaches
+            // `diffs` here like any other.
             let outcome = compare_value_at(gv, cv, egress, &column.ty, &at);
             // The counters are read AFTER the walk, because whether this cell was
             // fully decided is only known once its members have been visited: a
-            // refusal anywhere inside it means a proper PART of the value was
-            // compared, which is not container coverage (finding N3, now at member
-            // granularity — finding P2).
-            count_cell(&mut report, &refusals, cell_mark, gv, excluded_column);
+            // refusal — or a declared gap firing — anywhere inside it means a
+            // proper PART of the value was compared, which is not container
+            // coverage (finding N3, now at member granularity — finding P2).
+            count_cell(
+                &mut report,
+                &refusals,
+                cell_mark,
+                &suppressions,
+                cell_suppression_mark,
+                gv,
+            );
             if let Err(why) = outcome {
                 report.diffs.push(format!("row[{key}].{name}: {why}"));
             }
@@ -502,15 +679,21 @@ pub fn compare_rows(
 /// refused position is named (`path (why)`), deduplicated, so the census states
 /// the gap at the granularity the walk found it.
 ///
-/// An EXCLUDED column contributes no compared/container coverage either way — its
-/// divergence is discarded — but its refusals are still counted and named, because
-/// a refusal is a property of the golden and the format, not of the exclusion.
+/// A cell in which a DECLARED GAP suppressed its divergence is not counted either,
+/// for the same reason and by the same test — did it fire INSIDE THIS CELL, rather
+/// than "is this column named in a gap". That distinction is the census half of
+/// review round 17's finding: the `nb_empty_collections` rows whose multi-cell
+/// collections are NON-EMPTY are compared in full and now count as coverage, while
+/// a whole-cell exclusion is keyed on what actually happened rather than on the
+/// declaration. A refusal is still counted and named even under a gap, because a
+/// refusal is a property of the golden and the format, not of the exclusion.
 fn count_cell(
     report: &mut Report,
     refusals: &Refusals,
     mark: usize,
+    suppressions: &Suppressions,
+    suppression_mark: usize,
     gv: &Value,
-    excluded_column: bool,
 ) {
     let refused = refusals.since(mark);
     if !refused.is_empty() {
@@ -522,7 +705,7 @@ fn count_cell(
         }
         return;
     }
-    if excluded_column {
+    if suppressions.any_since(suppression_mark) {
         return;
     }
     report.compared_cells += 1;
@@ -828,6 +1011,20 @@ fn describe(value: &Value, egress: Egress) -> String {
 ///
 /// `at` carries the position: its depth, its [`super::Kinding`] and its
 /// fully-qualified path, plus the exclusion set (see [`At`]).
+///
+/// # A DECLARED GAP suppresses the divergence it NAMES, and nothing else
+///
+/// Inside a declared gap's subtree every node is asked whether the pair there is
+/// EXACTLY the divergence the gap declares ([`gap::Divergence`]). If it is, the
+/// divergence is suppressed and the gap is recorded as applied. If it is not, the
+/// comparison stands and the divergence is reported as an ordinary diff naming the
+/// path, the declared divergence and what was seen.
+///
+/// Until review round 17 the gap swallowed ANY divergence at its path, and
+/// `Observed::Suppressed` then dominated table-wide — so each declared gap was a
+/// permanent blind spot for its whole column: the empty-collection gaps also
+/// suppressed the NON-EMPTY rows of those columns, and `e.home` changing from blob
+/// hex to arbitrary text would have passed as the documented gap.
 fn compare_value_at(
     golden: &Value,
     cli: &Value,
@@ -835,32 +1032,98 @@ fn compare_value_at(
     ty: &CqlType,
     at: &At<'_, '_>,
 ) -> Result<(), String> {
-    if at.skips.excludes(&at.path) {
-        // The comparison at an excluded path is RUN and then discarded, because
-        // its outcome is the only evidence of whether the declared gap still
-        // exists: a divergence means the exclusion suppressed something, agreement
-        // means it is stale and must be retired (finding L1). Visiting the path
-        // used to be the whole test, which no fix to CQLite could ever falsify.
-        let mark = at.refusals.mark();
-        let outcome = match compare_value_body(golden, cli, egress, ty, at) {
-            Err(_) => Observed::Suppressed,
-            // A REFUSED position inside the excluded subtree means the comparison
-            // there could not be decided — "I could not tell" is not "the two
-            // sides agree", and reporting agreement would retire a gap on the
-            // strength of a measurement nobody took. Reached at ANY depth, so a
-            // field-scoped exclusion over a refused member is reported the same
-            // way a whole-column one over a refused cell is.
-            Ok(()) => match at.refusals.since(mark).first() {
+    // A gap DECLARED at this exact path becomes active for its whole subtree; an
+    // inherited one stays active (see [`ActiveGap`]).
+    let entered;
+    let at = match at.skips.declared(&at.path) {
+        Some(divergence) => {
+            entered = at.under_gap(divergence);
+            &entered
+        }
+        None => at,
+    };
+    let Some(gap) = at.gap.clone() else {
+        return compare_value_body(golden, cli, egress, ty, at);
+    };
+    // A CSV node whose GOLDEN content the flat rendering cannot express is not
+    // decided at all — only its bracket frame and its body's EMPTINESS are (see
+    // `csv_container::node_refusal`) — so no verdict taken there is a measurement,
+    // INCLUDING "this is the declared divergence". The refusal therefore wins over
+    // the match, the body records it, and the gap is reported unevaluable: a gap
+    // whose subject could not be measured is not a measured gap. That composition
+    // is deliberate and conservative — it FAILS the lane rather than minting a
+    // suppression out of a partially-decided node — and it is what keeps the
+    // earlier rule ("a refusal at ANY depth makes the gap `Unresolved`") true.
+    let refused_here =
+        egress == Egress::Csv && csv_container::node_refusal(golden, Some(ty)).is_some();
+    // IS THIS NODE THE DECLARED DIVERGENCE? Asked at every node of the gap's
+    // subtree, because that is where the divergence lives: the `set<double>` gap
+    // is declared on the column and diverges at three of its seven members.
+    if !refused_here
+        && gap
+            .divergence
+            .matched(golden, cli, ty, egress, at.depth, at.kinding)
+    {
+        at.skips.observe(&gap.root, Observed::Suppressed);
+        at.suppressions.record(&gap.root);
+        return Ok(());
+    }
+    // Not the declared divergence, so COMPARE AS NORMAL. The recursion re-enters
+    // here for every child with the gap still active, so a divergence deeper down
+    // gets the same question asked of it, and anything the gap does not declare
+    // travels back up as an ordinary error.
+    let refusal_mark = at.refusals.mark();
+    let suppression_mark = at.suppressions.mark();
+    let outcome = compare_value_body(golden, cli, egress, ty, at);
+    if !at.is_gap_root() {
+        // Only the gap's ROOT records what the gap did and annotates a surviving
+        // divergence: [`Observed`] is keyed by the declared path, and annotating at
+        // every enclosing level would repeat the same sentence up the tree.
+        return outcome;
+    }
+    match outcome {
+        Ok(()) => {
+            if at.suppressions.root_since(suppression_mark, &gap.root) {
+                // The declared divergence was found DEEPER in this subtree and
+                // recorded there; this node has nothing to add.
+                return Ok(());
+            }
+            // Nothing in the subtree diverged. Two causes, kept apart: a refusal
+            // means the comparison could not be decided ("I could not tell" is not
+            // "the two sides agree"), and otherwise the two sides really do agree,
+            // so the gap is stale and must be retired (finding L1). Visiting the
+            // path used to be the whole test, which no fix to CQLite could falsify.
+            let observed = match at.refusals.since(refusal_mark).first() {
                 Some(refused) => {
                     Observed::Unresolved(format!("the CSV comparison there was refused: {refused}"))
                 }
                 None => Observed::Agreed,
-            },
-        };
-        at.skips.observe(&at.path, outcome);
-        return Ok(());
+            };
+            at.skips.observe(&gap.root, observed);
+            Ok(())
+        }
+        Err(why) => {
+            // A REAL divergence that the declared gap does not describe. Reported
+            // as an ordinary diff naming the path, the declared divergence and what
+            // was actually seen — which is the whole of review round 17's finding:
+            // a gap that suppresses any divergence at its path is a permanent blind
+            // spot for its column, and the honesty of the declaration is nominal.
+            at.skips.observe(
+                &gap.root,
+                Observed::Undeclared(format!(
+                    "{} — where the gap declares: {}",
+                    brief(&why),
+                    gap.divergence.declared()
+                )),
+            );
+            Err(format!(
+                "{why} — and that is NOT the divergence the declared gap for `{}` stands \
+                 for, which is: {}. A declared gap suppresses only the divergence it names",
+                gap.root,
+                gap.divergence.declared()
+            ))
+        }
     }
-    compare_value_body(golden, cli, egress, ty, at)
 }
 
 /// The comparison itself, with no exclusion check of its own at this level —
@@ -1279,6 +1542,18 @@ pub fn cli_csv_rows(text: &str) -> Result<Vec<Row>, String> {
 
 #[path = "golden_value_compare_udt.rs"]
 mod udt;
+
+// ===========================================================================
+// Declared-gap divergences
+// ===========================================================================
+//
+// Split into its own file under the campsite rule and reached as `gap::…`. WHAT a
+// declared gap says the divergence IS is a different question from the structural
+// walk here — it is stated from the golden and the committed DDL, and the walk only
+// asks it.
+
+#[path = "golden_value_compare_gap.rs"]
+pub mod gap;
 
 // ===========================================================================
 // Fixture staging

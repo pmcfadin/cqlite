@@ -20,6 +20,7 @@
 // Reached through the parent comparison module, which is where `compare_rows` and
 // the row/schema types live; the DDL parser is one level up again.
 use super::super::super::schema::{from_ddl, TableSchema};
+use super::super::gap::Divergence;
 use super::super::{compare_rows, Egress, Row};
 use serde_json::{json, Value};
 
@@ -178,43 +179,51 @@ fn the_csv_lane_requires_every_declared_field_too() {
     assert!(report.diffs[0].contains("age"), "{:?}", report.diffs);
 }
 
+/// The `udt_nested` shape from the committed
+/// `test-data/schemas/compaction-parity-udt.cql`, which is where this lane's one
+/// FIELD-scoped gap (`e.home`) lives.
+const NESTED_EMPLOYEE_DDL: &str = "CREATE TYPE address (street text, city text, zip text); \
+     CREATE TYPE employee (name text, home frozen<address>, level int); \
+     CREATE TABLE t (id int PRIMARY KEY, e frozen<employee>);";
+
 /// A declared exclusion excludes a VALUE, never a field's PRESENCE — the rule
 /// `SkipPaths` already states for a row's columns, checked one level down.
 ///
-/// `p.last_name` is excluded, so the two sides may disagree about its VALUE; they
-/// may not agree by both DROPPING it. Both-sides-absent is the discriminating shape
-/// here: side-vs-side agreement cannot see it, and the exclusion must not suppress
-/// it either, or an egress that stopped rendering the field entirely would pass
-/// while the declared gap reported itself as live.
+/// `e.home` is excluded, so the two sides may disagree about its VALUE in the way
+/// the gap declares; they may not agree by both DROPPING it. Both-sides-absent is
+/// the discriminating shape here: side-vs-side agreement cannot see it, and the
+/// exclusion must not suppress it either, or an egress that stopped rendering the
+/// field entirely would pass while the declared gap reported itself as live.
+///
+/// The presence check runs at the `e` node, one level ABOVE the gap's root, so no
+/// gap is even active where the absence is decided — which is why an absent field
+/// cannot be absorbed however the gap's divergence is stated (review round 17).
 #[test]
 fn an_exclusion_cannot_excuse_an_absent_field() {
-    let schema = person_schema();
+    let schema = match from_ddl(NESTED_EMPLOYEE_DDL, "t") {
+        Ok(schema) => schema,
+        Err(why) => panic!("t: {why}"),
+    };
+    let home = json!({"street": "1 Navy Way", "city": "Arlington", "zip": "22201"});
     let golden = vec![row_of(&[
         ("id", json!(1)),
-        (
-            "p",
-            json!({"first_name": "Ada", "last_name": "L", "age": 36}),
-        ),
+        ("e", json!({"name": "Grace", "home": home, "level": 9})),
     ])];
+    let skip = [("e.home", Divergence::NestedFrozenUdtRendersAsBlobHex)];
 
-    // The exclusion doing its job: the field is PRESENT on both sides and its value
-    // diverges, so the exclusion is applied and is not stale.
+    // The exclusion doing its job: the field is PRESENT on both sides and diverges
+    // exactly as the gap declares (blob hex where the golden decoded an object), so
+    // the exclusion is applied and is not stale.
     let diverging = vec![row_of(&[
         ("id", json!(1)),
         (
-            "p",
-            json!({"_type": "person", "first_name": "Ada", "last_name": "OTHER", "age": 36}),
+            "e",
+            json!({"_type": "employee", "name": "Grace",
+                     "home": "0x0000000a31204e617679205761790000000941726c696e67746f6e",
+                     "level": 9}),
         ),
     ])];
-    let report = compare_rows(
-        &golden,
-        &diverging,
-        &schema,
-        &["id"],
-        &[],
-        &["p.last_name"],
-        Egress::Json,
-    );
+    let report = compare_rows(&golden, &diverging, &schema, &["id"], &[], &skip, Egress::Json);
     assert!(
         report.diffs.is_empty() && report.stale_skips.is_empty(),
         "an excluded VALUE divergence is suppressed: {:?} / {:?}",
@@ -224,16 +233,16 @@ fn an_exclusion_cannot_excuse_an_absent_field() {
 
     // The same exclusion where BOTH sides drop the field. Side-vs-side agreement
     // cannot see this, and the exclusion does not excuse it: the DDL declares
-    // `last_name`, so its absence is a failure naming it.
+    // `home`, so its absence is a failure naming it.
     let dropped_golden = vec![row_of(&[
         ("id", json!(1)),
-        ("p", json!({"first_name": "Ada", "age": 36})),
+        ("e", json!({"name": "Grace", "level": 9})),
     ])];
     let dropped_cli = vec![row_of(&[
         ("id", json!(1)),
         (
-            "p",
-            json!({"_type": "person", "first_name": "Ada", "age": 36}),
+            "e",
+            json!({"_type": "employee", "name": "Grace", "level": 9}),
         ),
     ])];
     let report = compare_rows(
@@ -242,7 +251,7 @@ fn an_exclusion_cannot_excuse_an_absent_field() {
         &schema,
         &["id"],
         &[],
-        &["p.last_name"],
+        &skip,
         Egress::Json,
     );
     assert_eq!(
@@ -252,7 +261,7 @@ fn an_exclusion_cannot_excuse_an_absent_field() {
         report.diffs
     );
     assert!(
-        report.diffs[0].contains("last_name"),
+        report.diffs[0].contains("home"),
         "the failure must name the absent declared field: {:?}",
         report.diffs
     );
@@ -265,7 +274,7 @@ fn an_exclusion_cannot_excuse_an_absent_field() {
         &schema,
         &["id"],
         &[],
-        &["p.last_name"],
+        &skip,
         Egress::Json,
     );
     assert_eq!(report.diffs.len(), 1, "{:?}", report.diffs);

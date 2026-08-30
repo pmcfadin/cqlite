@@ -285,6 +285,18 @@ fn brackets(ty: &CqlType) -> Option<(char, char)> {
     }
 }
 
+/// The ONE spelling a container of this declared type has when it is EMPTY: its
+/// own bracket pair with nothing between them (the grammar in the module doc).
+/// `None` for a scalar type, which has no bracket frame.
+///
+/// Derived from the DDL through [`brackets`], so an empty `list` is `[]` and an
+/// empty `set`/`map` is `{}` — never "whichever frame the egress happened to
+/// use". A declared gap about an empty container asks for exactly this text (see
+/// `super::compare::gap::Divergence::AbsentMulticellRendersEmpty`).
+pub fn empty_rendering(ty: &CqlType) -> Option<String> {
+    brackets(ty).map(|(open, close)| format!("{open}{close}"))
+}
+
 /// Is the golden AT THIS NODE unrecoverable from the flat rendering, for a reason
 /// whose blast radius is THIS node's member split? `Some(reason)` means the node's
 /// contents and count are refused — and nothing else is (review finding P2).

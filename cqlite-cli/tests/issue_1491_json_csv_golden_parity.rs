@@ -92,6 +92,7 @@ mod golden;
 #[path = "support/issue_1491_coverage_census.rs"]
 mod coverage_census;
 
+use golden::compare::gap::Divergence;
 use golden::compare::{cli_csv_rows, cli_json_rows, compare_rows, golden_path, stage_single_table};
 use golden::fixture_root;
 use golden::schema::{ColumnKind, CqlType, TableSchema};
@@ -160,8 +161,18 @@ struct Skip {
     /// applies to no format states nothing, and is rejected when the case is
     /// validated against the DDL.
     formats: &'static [Egress],
-    /// The measured divergence, stated for the formats named above and only
-    /// those.
+    /// WHICH divergence this gap stands for, in a form the comparator CHECKS at
+    /// the path (see `golden::compare::gap::Divergence`).
+    ///
+    /// Without it a gap suppressed whatever happened at its path, so each one was
+    /// a permanent blind spot for its whole column: the empty-collection gaps
+    /// below also suppressed those columns' NON-EMPTY rows, and `e.home` changing
+    /// from blob hex to arbitrary text would have passed as the documented gap
+    /// (issue #1491 review round 17). A mismatch that is NOT the declared
+    /// divergence is now an ordinary diff.
+    divergence: Divergence,
+    /// The measured divergence in prose, for the census. States the same thing
+    /// [`Self::divergence`] states, for a reader rather than for the comparator.
     why: &'static str,
 }
 
@@ -173,7 +184,9 @@ impl Skip {
         self.formats.contains(&egress)
     }
 
-    /// How this gap is named in the run census.
+    /// How this gap is named in the run census. Names the CHECKED divergence
+    /// alongside the prose, so the census states which rule the run applied and
+    /// not only how the gap was described.
     fn describe(&self) -> String {
         let formats: Vec<&str> = self
             .formats
@@ -183,7 +196,13 @@ impl Skip {
                 Egress::Csv => "csv",
             })
             .collect();
-        format!("{} [{}] ({})", self.path, formats.join(","), self.why)
+        format!(
+            "{} [{}] ({} — checked as {:?})",
+            self.path,
+            formats.join(","),
+            self.why,
+            self.divergence
+        )
     }
 }
 
@@ -343,6 +362,7 @@ const CASES: &[Case] = &[
         skips: &[Skip {
             path: "e.home",
             formats: BOTH,
+            divergence: Divergence::NestedFrozenUdtRendersAsBlobHex,
             why: "nested frozen UDT renders as blob hex, not a decoded object",
         }],
     },
@@ -417,14 +437,17 @@ const CASES: &[Case] = &[
             Skip {
                 path: "sf",
                 formats: &[Egress::Json],
+                divergence: Divergence::NonFiniteFloatRendersAsJsonNull,
                 why: "set<double> Infinity/-Infinity/NaN render as JSON null — JSON has \
-                      no literal for them",
+                      no literal for them; the set's FINITE members are compared",
             },
             Skip {
                 path: "sd",
                 formats: &[Egress::Json],
+                divergence: Divergence::DecimalRendersAsJsonString,
                 why: "decimal renders as a JSON string where cassandra-5.0.8 \
-                      DecimalType.toJSONString emits an unquoted number",
+                      DecimalType.toJSONString emits an unquoted number; the quoted \
+                      NUMBER must still equal the golden's",
             },
         ],
     },
@@ -580,16 +603,19 @@ const CASES: &[Case] = &[
             Skip {
                 path: "ml",
                 formats: BOTH,
+                divergence: Divergence::AbsentMulticellRendersEmpty,
                 why: "empty multicell list renders as [] where Cassandra reads null",
             },
             Skip {
                 path: "ms",
                 formats: BOTH,
+                divergence: Divergence::AbsentMulticellRendersEmpty,
                 why: "empty multicell set renders as {} where Cassandra reads null",
             },
             Skip {
                 path: "mm",
                 formats: BOTH,
+                divergence: Divergence::AbsentMulticellRendersEmpty,
                 why: "empty multicell map renders as {} where Cassandra reads null",
             },
         ],
@@ -1072,7 +1098,13 @@ fn run_lane(egress: Egress) {
         // anything, so a column that diverges in one format keeps being compared
         // in the other (review finding K1).
         let applicable: Vec<&Skip> = case.skips.iter().filter(|s| s.applies_to(egress)).collect();
-        let skip: Vec<&str> = applicable.iter().map(|s| s.path).collect();
+        // The comparator is handed the DIVERGENCE alongside the path: a gap
+        // suppresses the divergence it names and nothing else, so the declaration
+        // has to travel with the exclusion (review round 17).
+        let skip: Vec<(&str, Divergence)> = applicable
+            .iter()
+            .map(|s| (s.path, s.divergence))
+            .collect();
         let report = compare_rows(&expected, &actual, &table, case.pk, case.ck, &skip, egress);
         if report.diffs.is_empty() && report.compared_cells == 0 {
             failures.push(format!(

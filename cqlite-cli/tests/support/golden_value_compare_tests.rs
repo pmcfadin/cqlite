@@ -9,6 +9,7 @@
 //! shape that must pass and the shape that must fail), so narrowing a rule back
 //! re-reds a case rather than quietly widening coverage.
 
+use super::gap::Divergence;
 use super::*;
 use serde_json::json;
 
@@ -223,6 +224,13 @@ fn a_column_shape_divergence_is_reported_once_per_column() {
     );
 }
 
+/// The `nb_empty_collections` shape, which is where this lane's empty-collection
+/// gaps live: a NON-FROZEN `list<int>` whose golden row has no cell at all,
+/// because Cassandra stores an empty multi-cell collection as a complex deletion
+/// with no cells.
+const ABSENT_MULTICELL_DDL: &str =
+    "CREATE TABLE t (pk int, ck int, anchor text, ml list<int>, PRIMARY KEY (pk, ck));";
+
 /// A declared skip path suppresses the VALUE at its path, so the
 /// measured-divergence gaps keep working — and NOT the column's PRESENCE, which
 /// no gap may excuse (issue #1491 review finding P1; the omission half is pinned
@@ -232,17 +240,26 @@ fn a_column_shape_divergence_is_reported_once_per_column() {
 /// must stay declared", no diff), which is what made the five declared skips able
 /// to hide a dropped column. The property it was really protecting is the one
 /// asserted here: the column is RENDERED and DIVERGES, and the gap absorbs that.
+///
+/// The divergence is the one the gap DECLARES — golden absent, egress a present
+/// empty container — because a gap now suppresses that divergence and no other
+/// (review round 17).
 #[test]
 fn a_declared_skip_suppresses_its_columns_value_and_not_its_presence() {
-    let schema = absent_schema();
-    let golden = absent_golden();
+    let schema = schema_of(ABSENT_MULTICELL_DDL, "t");
+    let golden = vec![row(&[
+        ("pk", json!(1)),
+        ("ck", json!(1)),
+        ("anchor", json!("anchor_absent")),
+    ])];
     let diverging = vec![row(&[
         ("pk", json!(1)),
         ("ck", json!(1)),
         ("anchor", json!("anchor_absent")),
-        // The golden has no `reg` cell, so the expected rendering is `null`; this
-        // egress renders a value instead, which is a real divergence.
-        ("reg", json!("rendered-anyway")),
+        // The golden has no `ml` cell, so the expected rendering is `null`; this
+        // egress renders a present empty container instead, which is a different
+        // value — and is exactly what the declared gap stands for.
+        ("ml", json!([])),
     ])];
     let report = compare_rows(
         &golden,
@@ -250,7 +267,7 @@ fn a_declared_skip_suppresses_its_columns_value_and_not_its_presence() {
         &schema,
         &["pk"],
         &["ck"],
-        &["reg"],
+        &[("ml", Divergence::AbsentMulticellRendersEmpty)],
         Egress::Json,
     );
     assert!(
@@ -725,10 +742,12 @@ fn the_csv_lane_uses_the_declared_types_too() {
 const PERSON_DDL: &str = "CREATE TYPE person (first_name text, last_name text, age int); \
      CREATE TABLE t (id int PRIMARY KEY, p frozen<person>);";
 
-/// The `udt_nested` shape: a frozen UDT with a frozen UDT field, which is the
-/// subject of this lane's `e.home` exclusion.
-const NESTED_UDT_DDL: &str = "CREATE TYPE address (street text, city text); \
-     CREATE TYPE employee (name text, home frozen<address>); \
+/// The `udt_nested` shape, transcribed from the committed
+/// `test-data/schemas/compaction-parity-udt.cql`: a frozen UDT with a frozen UDT
+/// field, which is the subject of this lane's `e.home` gap — the one declared gap
+/// whose divergence is a UDT FIELD's rather than a whole column's.
+const NESTED_UDT_DDL: &str = "CREATE TYPE address (street text, city text, zip text); \
+     CREATE TYPE employee (name text, home frozen<address>, level int); \
      CREATE TABLE t (id int PRIMARY KEY, e frozen<employee>);";
 
 /// F2: the key of a `map<text,…>` must be compared BY JSON KIND as well as by
@@ -1103,28 +1122,41 @@ fn an_empty_csv_member_does_not_satisfy_a_null_udt_field() {
     assert!(report.diffs.is_empty(), "{:?}", report.diffs);
 }
 
+/// The `udt_nested` golden's `e` value, with `home` decoded as `sstabledump`
+/// decodes it. The CLI's spelling of the same value carries the `_type`
+/// discriminator and, until the `e.home` gap closes, blob hex for `home`.
+fn nested_udt_golden() -> Vec<Row> {
+    vec![row(&[
+        ("id", json!(1)),
+        (
+            "e",
+            json!({"name": "Grace",
+                     "home": {"street": "1 Navy Way", "city": "Arlington", "zip": "22201"},
+                     "level": 9}),
+        ),
+    ])]
+}
+
 /// F5: an exclusion can name ONE UDT field, so the sibling fields stay
 /// compared. Excluding the whole column instead left `udt_nested` comparing
 /// nothing but its primary key while its comment claimed otherwise.
+///
+/// The real `e.home` configuration, divergence included: the excluded field
+/// arrives as blob hex, which is what that gap declares.
 #[test]
 fn a_field_scoped_skip_still_compares_the_sibling_fields() {
-    let schema = schema_of(PERSON_DDL, "t");
-    let golden = vec![row(&[
-        ("id", json!(1)),
-        (
-            "p",
-            json!({"first_name": "Ada", "last_name": "Lovelace", "age": 36}),
-        ),
-    ])];
-    let skip = ["p.last_name"];
+    let schema = schema_of(NESTED_UDT_DDL, "t");
+    let golden = nested_udt_golden();
+    let skip = [("e.home", Divergence::NestedFrozenUdtRendersAsBlobHex)];
 
     // The excluded field may diverge…
     let diverged_field = vec![row(&[
         ("id", json!(1)),
         (
-            "p",
-            json!({"_type": "person", "first_name": "Ada",
-                     "last_name": "0xdeadbeef", "age": 36}),
+            "e",
+            json!({"_type": "employee", "name": "Grace",
+                     "home": "0x0000000a31204e617679205761790000000941726c696e67746f6e",
+                     "level": 9}),
         ),
     ])];
     let report = compare_rows(
@@ -1145,19 +1177,22 @@ fn a_field_scoped_skip_still_compares_the_sibling_fields() {
 
     // …and its SIBLINGS must still be compared, which a whole-column skip
     // could never do.
-    for wrong in ["first_name", "age"] {
+    for wrong in ["name", "level"] {
         let mut fields = serde_json::Map::new();
-        fields.insert("_type".into(), json!("person"));
-        fields.insert("first_name".into(), json!("Ada"));
-        fields.insert("last_name".into(), json!("0xdeadbeef"));
-        fields.insert("age".into(), json!(36));
+        fields.insert("_type".into(), json!("employee"));
+        fields.insert("name".into(), json!("Grace"));
+        fields.insert(
+            "home".into(),
+            json!("0x0000000a31204e617679205761790000000941726c696e67746f6e"),
+        );
+        fields.insert("level".into(), json!(9));
         fields.insert(wrong.to_string(), json!("WRONG"));
-        let cli = vec![row(&[("id", json!(1)), ("p", Value::Object(fields))])];
+        let cli = vec![row(&[("id", json!(1)), ("e", Value::Object(fields))])];
         let report = compare_rows(&golden, &cli, &schema, &["id"], &[], &skip, Egress::Json);
         assert_eq!(
             report.diffs.len(),
             1,
-            "a wrong `{wrong}` must still fail under a `p.last_name` skip: {:?}",
+            "a wrong `{wrong}` must still fail under an `e.home` skip: {:?}",
             report.diffs
         );
         assert!(report.diffs[0].contains(wrong), "{:?}", report.diffs);
@@ -1190,7 +1225,10 @@ fn a_skip_that_matches_nothing_is_reported() {
         &schema,
         &["id"],
         &[],
-        &["p.middle_name"],
+        &[(
+            "p.middle_name",
+            Divergence::NestedFrozenUdtRendersAsBlobHex,
+        )],
         Egress::Json,
     );
     assert_eq!(
