@@ -678,6 +678,25 @@
 #                      report PASS on a guard that exited 0 having measured nothing.
 #   minimal-build      cargo build + `cargo test --lib --no-run` (compile-only)
 #                      -p cqlite-core --no-default-features --features all-compression
+#   all-features-check cargo check + cargo clippy (-D warnings), BOTH at
+#                      -p cqlite-core --all-features --all-targets (issue #3453).
+#                      THE ONE COMPONENT THAT ENABLES THE OTLP STACK. `clippy` above
+#                      EXCLUDES observability/observability-testing/metrics by #1844
+#                      design, core-tests runs --features cli-helpers, and
+#                      minimal-build runs --no-default-features — so before this
+#                      component NO cargo invocation in this script ever passed
+#                      `observability`, and a defect reachable only with it on could
+#                      not fail the gate of record while failing pr-gate.yml's
+#                      `cargo test -p cqlite-core --lib --all-features` (measured on
+#                      PR #3382: a 31/31 gate PASS that never executed the test
+#                      pinning that PR's own fix). Package-scoped, NOT --workspace:
+#                      --all-features only enables the SELECTED packages' features, and
+#                      the duckdb bundled-source amalgamation belongs to cqlite-cli
+#                      alone, so this stays minutes rather than the #916 cost. It
+#                      compiles and lints ONLY — it executes no test, so the
+#                      runtime/order-dependent half of the class (a process-global
+#                      OnceLock poisoned by test ordering) is still pr-gate-core's.
+#                      NEVER SKIPs (needs only cargo; absent from DATASET_COMPONENTS).
 #   smoke              bash test-data/scripts/smoke-test-all-tables.sh
 #   file-size          campsite-rule ratchet (epic #1116 / #1135): lists changed
 #                      .rs files over threshold (800 src / 1500 test, total lines)
@@ -689,6 +708,27 @@
 # compile break in a non-enumerated test target, a fmt/compile break in the
 # (previously workspace-excluded) format-compatibility crate, and Python-only
 # regressions (LIMIT 0, SET<TEXT> validation) that shipped "gate PASS".
+
+# THIS GATE DOES NOT SUBSUME `pr-gate-core`, AND NEVER HAS (issue #3453).
+# The relationship is an ASYMMETRY IN BOTH DIRECTIONS, and it is a standing property
+# of the component set rather than a fact about any one lane:
+#   * This gate runs things pr-gate does not. `arrow-parity-guard` names a
+#     `#![cfg(feature = "arrow")]` integration target that pr-gate's `--lib
+#     --all-features` cannot reach (it compiles no tests/ target at all), and the
+#     feature-matrix / binding / parity lanes above are local-only in the same way.
+#   * pr-gate runs things this gate does not. Its `cargo test -p cqlite-core --lib
+#     --all-features` EXECUTES the crate's unit suite at a feature set no component
+#     here executes — including the OTel stack. `all-features-check` closes the
+#     COMPILE/LINT half of that gap (a type error or a -D warnings lint under
+#     `#[cfg(feature = "observability")]` now reds the gate of record) and DELIBERATELY
+#     NOT the RUNTIME half: it executes nothing, so an order-dependent defect in
+#     cqlite-core/tests/otel_tests.rs — the #3382 instance, a process-wide
+#     OnceLock<Instruments> poisoned by whichever test binds the global meter first,
+#     which `#[serial_test::serial]` grouping does not make visible — still fails only
+#     in CI. (Note also that some of those tests are gated on `observability-testing`,
+#     not `observability`.)
+# So a green SUMMARY here is not a prediction that pr-gate-core will pass. It never
+# was; before #3453 nothing said so out loud, which is how #3382 was surprising.
 #
 # All components run even after a failure so one run reports everything.
 # Exit code 0 iff every component passes. Machine-checkable output: the
