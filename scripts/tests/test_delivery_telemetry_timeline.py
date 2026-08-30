@@ -14,6 +14,8 @@ Or via the gate:  scripts/agent-gate.sh --only delivery-telemetry
 """
 
 import importlib.util
+import contextlib
+import io
 import json
 import tempfile
 import unittest
@@ -382,6 +384,50 @@ class SliceFromTimelineTests(unittest.TestCase):
             rec = json.loads(ledger.read_text().strip())
             self.assertIsNone(rec["closed_at"])
             self.assertEqual(rec["cycle_time_s"], 3 * 3600)   # created -> mergedAt
+
+    def test_an_asserted_classification_says_so_on_stderr(self):
+        """A record whose kind rests on the OPERATOR must not look like one the tool proved.
+
+        Both surviving classifications can rest partly on the operator (issue #3559,
+        REQ-3559-02 option C), because `open_at_merge=True` + `closes=False` + a non-null
+        `closed_at` is observationally identical for a genuine late slice and a completed
+        delivery whose PR omitted `Closes #N`. The tool refuses only what it can DISPROVE, so
+        it must SAY when the affirmation was a human's. Asserted here because an unasserted
+        note is one nobody notices going missing.
+        """
+        for label, extra, expect_kind in (
+            ("late-stamped slice", ("--slice",), "SLICE delivery"),
+            ("completed on the omission of --slice", (), "COMPLETED delivery"),
+        ):
+            with self.subTest(label):
+                with tempfile.TemporaryDirectory() as d:
+                    tmp = Path(d)
+                    ledger = tmp / "ledger.jsonl"
+                    gh = self._ghfields(tmp, closed_at="2026-07-01T00:00:00Z",
+                                        open_at_merge=True, closes=False)
+                    err = io.StringIO()
+                    with contextlib.redirect_stderr(err):
+                        self.assertEqual(0, dt.main(self._argv(ledger, gh, *extra)))
+                    msg = err.getvalue()
+                    self.assertIn("YOUR ASSERTION", msg)
+                    self.assertIn(expect_kind, msg)
+                    self.assertIn("#3559", msg)
+
+    def test_a_proven_classification_emits_no_assertion_note(self):
+        """The note must be SCOPED to the undecidable case, or it means nothing.
+
+        A slice of an issue that is still open, and a completed delivery inside the
+        propagation window, are decided by evidence — claiming those rest on an assertion
+        would make the note noise that readers learn to skip.
+        """
+        with tempfile.TemporaryDirectory() as d:
+            tmp = Path(d)
+            ledger = tmp / "ledger.jsonl"
+            gh = self._ghfields(tmp, closed_at=None, open_at_merge=True, closes=False)
+            err = io.StringIO()
+            with contextlib.redirect_stderr(err):
+                self.assertEqual(0, dt.main(self._argv(ledger, gh, "--slice")))
+            self.assertNotIn("YOUR ASSERTION", err.getvalue())
 
     def test_slice_accepted_for_an_issue_reopened_BEFORE_the_merge(self):
         """The false refusal #3550 knowingly accepted: a real slice of a genuinely-open

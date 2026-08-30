@@ -28,6 +28,19 @@ records an auto-close AFTER the merge: an ordinary COMPLETED delivery whose PR d
 `Closes #N` was ALSO literally open at mergedAt, so dropping the second operand would file a
 false slice record for essentially every ordinary delivery.
 
+THE TOOL REFUSES WHAT IT CAN DISPROVE, AND TREATS THE FLAG AS AN ASSERTION WHERE IT CANNOT
+(issue #3559). One case stays undecidable: `open at mergedAt` + `PR closes nothing` +
+a non-null `closed_at` is observationally identical for a genuine late-stamped slice and for
+a COMPLETED delivery whose PR omitted `Closes #N` and was closed by hand afterwards. The
+difference is INTENT, which GitHub does not record. Requiring `--slice` there would file a
+false slice record for the second case, and refusing the combination outright would be a dead
+letter (a merged PR's `closingIssuesReferences` cannot be re-linked). So such a record is
+written, and the tool SAYS on stderr that its kind rests on the operator's assertion rather
+than a measurement — because a record whose basis was asserted must not look identical to one
+that was proven. Carrying that basis IN the record is `classification_basis`, a follow-up:
+#3550's design is no new REQUIRED field, since adding one fails `lint` on every already
+committed record.
+
 `--slice` IS AN OPERATOR ASSERTION, and this tool's job is to REFUSE it wherever it can be
 DISPROVED — provably closed at mergedAt, or the PR declares the close. Where it cannot be
 disproved, the assertion stands. That boundary is real and is stated rather than papered
@@ -599,6 +612,39 @@ def _issue_state_at(issue_url, issue: int, merged_at):
     return (kind == "reopened"), (None if kind == "reopened" else at)
 
 
+def _note_classification_basis(kind: str, detail: str) -> None:
+    """Say on stderr when a record's kind rests on the OPERATOR'S ASSERTION, not a measurement.
+
+    THE UNDECIDABLE CASE, stated where it is decided (issue #3559, lead ruling on
+    `REQ-3559-02`, option C). `issue_open_at_merge=True` + `pr_closes_this_issue=False` +
+    a non-null `closed_at` is OBSERVATIONALLY IDENTICAL for two different truths:
+
+        a genuine slice, whose issue was later completed by some other PR
+        a COMPLETED delivery whose PR omitted `Closes #N`, closed by hand afterwards
+
+    The difference is INTENT — was this PR the completion — and GitHub carries no signal for
+    it. So the tool refuses where it can DISPROVE (provably closed at mergedAt, or the PR
+    declares the close) and treats the flag as an ASSERTION where it cannot. Refusing what
+    you can disprove is measurement; refusing what you merely cannot confirm is a dead
+    letter — you cannot retroactively re-link `closingIssuesReferences` on a merged PR, so no
+    action would clear it.
+
+    This exists because a record whose basis was an unverified assertion otherwise looks
+    IDENTICAL to one the tool proved, and "a positive verdict requires an affirmative
+    measurement" is the repository's rule: where the affirmation is a human's, say so. It is
+    a NOTE, never a refusal — the ruling accepted this residual as bounded (measured: the 5
+    most recent stamped completed deliveries all declare `Closes`, so in-flow work never
+    reaches the ambiguous branch; `flow-implement` mandates it).
+
+    Recording the basis IN the record is `classification_basis`, deliberately deferred to a
+    follow-up: #3550's design is NO new required field, since adding one fails `lint` on every
+    already-committed record and backfilling an append-only ledger is the wrong move.
+    """
+    print(f"note: recorded as a {kind} on YOUR ASSERTION, not a measurement — {detail} "
+          f"This tool refuses only what it can DISPROVE; it cannot tell this apart from the "
+          f"other reading, so the classification is yours (issue #3559).", file=sys.stderr)
+
+
 def _measured_bool(gh_fields: dict, field: str, issue: int, why: str) -> bool:
     """Read a boolean seam field AFFIRMATIVELY, or refuse naming what was unmeasured.
 
@@ -999,6 +1045,30 @@ def build_record(args, gh_fields: dict) -> dict:
                 f"--slice (it would permanently mislabel a completed delivery), do NOT close "
                 f"the issue to satisfy this tool, and do NOT hand-append the record past the "
                 f"validator (issues #3550/#3559).")
+
+    # THE BASIS NOTE (issue #3559, REQ-3559-02 option C). Both surviving classifications
+    # can rest partly on the operator rather than on evidence, and only one of them was
+    # ever visible. Emitted AFTER every refusal above, so a note is never printed for an
+    # invocation that then fails — the note describes a record that IS being written.
+    if slice_delivery and closed_at is not None:
+        # Disprove-impossible: the timeline proved the issue was open at mergedAt and this
+        # PR closes nothing, which is everything measurable — but an undeclared completion
+        # presents identically, so the SLICE reading is the operator's.
+        _note_classification_basis(
+            "SLICE delivery",
+            f"the timeline proves issue #{args.issue} was open when PR #{args.pr} merged and "
+            f"that the PR closes nothing, but it CANNOT prove the PR was not an undeclared "
+            f"completion of it (its closed_at is {closed_at}).")
+    elif not slice_delivery and closed_at is not None:
+        # The path roborev's finding 1 names. No timeline is replayed here (an ordinary
+        # completed delivery reads its terminal timestamp from closed_at), so the completed
+        # reading rests on the OMISSION of --slice and is stated as such rather than
+        # silently taken as proven.
+        _note_classification_basis(
+            "COMPLETED delivery",
+            f"you omitted --slice, and this path does not replay issue #{args.issue}'s "
+            f"timeline — so a late-stamped SLICE of a since-closed issue would present "
+            f"identically here.")
 
     created = gh_fields["created_at"]
     pr_opened = gh_fields["pr_opened_at"]
