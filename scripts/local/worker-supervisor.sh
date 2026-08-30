@@ -1532,14 +1532,12 @@ supervisor_pid_liveness() {
 # direction is the whole point: `unconfirmed` tells an operator to VERIFY (harmless), `supervisor` tells
 # them to STOP A PROCESS (not harmless when it is somebody else's).
 #
-# ONE HELPER FOR BOTH PROBES, DELIBERATELY — two spellings of one rule is the drift hazard, and under
-# this rule there is nothing left to spell differently. `/proc/<pid>/cmdline` is NUL-separated and
-# splits faithfully. `ps -o args=` is a SPACE-JOINED rendering with no escaping, so its split is a
-# REFINEMENT of the true vector (one true argument containing a space appears as several fields), never
-# the vector itself — but a refinement cannot manufacture a match here: extra fields only push the
-# script out of position 1/2, and basename ignores everything before the last `/`. The residual
-# false-positive shape is a SINGLE argument that itself contains a space and ends in
-# `/worker-supervisor.sh`, i.e. a script path that cannot exist as rendered.
+# THIS RULE IS ASKED OF ONE PROBE ONLY, AND THE INPUT MUST BE A TRUE ARGUMENT VECTOR (#3549, roborev
+# job 196 F1). `/proc/<pid>/cmdline` is NUL-separated and therefore splits faithfully; that is the only
+# source this helper may be fed. A `ps -o args=` rendering is space-joined with no escaping, so
+# splitting it can FABRICATE argv positions as well as lose them — the reason `supervisor_pid_identity`
+# no longer has a `ps` fallback at all. The counter-example and the wrong argument it replaces are
+# recorded at that removal site; do not feed a split `ps` string in here.
 supervisor_identity_names_script() {
   local base
   if [[ "$#" -lt 1 ]]; then
@@ -1576,9 +1574,10 @@ supervisor_identity_names_script() {
 # NEVER CLAIM CORROBORATION THAT WAS NOT OBTAINED, so the three answers are kept distinct:
 # `unconfirmed` means we READ a command line and it did not identify the program as ours (an
 # affirmative non-identification), `unprobeable` means we could not look at all — no readable procfs
-# entry, a procfs read that FAILED OR CAME BACK EMPTY, and no usable `ps` (a hidepid container, a
-# process that exited mid-probe, or a macOS box with a stripped PATH). An unmeasured read is NEVER
-# reported as `unconfirmed`: that would claim a non-match nobody observed.
+# entry, or a procfs read that FAILED OR CAME BACK EMPTY (a hidepid container, a process that exited
+# mid-probe, a kernel thread, or a host with no procfs at all, e.g. macOS). An unmeasured read is NEVER
+# reported as `unconfirmed`: that would claim a non-match nobody observed. IDENTITY IS PROCFS-ONLY —
+# there is no `ps` fallback, for the reason recorded at the fall-through at the end of this function.
 # Both get cautious wording; only `supervisor` gets the "stop it" advice.
 supervisor_pid_identity() {
   local pid="${1:-}" part="" read_ok=no
@@ -1629,31 +1628,49 @@ supervisor_pid_identity() {
     # An EMPTY result is AMBIGUOUS — a kernel thread and a process that rewrote its own argv both have
     # an empty `cmdline`, and so does a read that errored mid-stream, which the `read` builtin cannot
     # distinguish from EOF. Under the affirmative-measurement rule an ambiguous state must not take the
-    # affirmative branch, so an empty command line is NOT reported as a non-match either: `ps` gets to
-    # answer (it prints `[kthreadd]`-style names for exactly these processes, i.e. a real non-match),
-    # and if `ps` cannot answer the verdict is `unprobeable`. Discard any partial fields on the way — a
-    # truncated command line is not evidence in either direction.
+    # affirmative branch, so an empty command line is NOT reported as a non-match: the verdict is
+    # `unprobeable`. (It used to fall through to a `ps` probe, whose `[kthreadd]`-style output looked
+    # like a real non-match; that probe is gone — see the fall-through at the end of this function.)
+    # Discard any partial fields on the way — a truncated command line is not evidence in either
+    # direction.
     argv=()
   fi
-  if command -v ps >/dev/null 2>&1; then
-    local psargs=""
-    psargs="$(ps -p "$pid" -o args= 2>/dev/null || true)"
-    if [[ -n "$psargs" ]]; then
-      # `read -r -a` splits on IFS and performs NO pathname expansion, so an argument containing `*`
-      # cannot glob against the cwd here (the reason this is not `set -- $psargs`). The split is a
-      # REFINEMENT of the true vector, never the vector — which the canonical-shape rule tolerates:
-      # extra fields can only push the script out of position 1/2, so a refinement cannot manufacture a
-      # match. That is why ONE helper serves both probes; see its header for the residual shape.
-      local -a fields=()
-      read -r -a fields <<<"$psargs"
-      if [[ "${#fields[@]}" -gt 0 ]] && supervisor_identity_names_script "${fields[@]}"; then
-        printf 'supervisor\n'
-      else
-        printf 'unconfirmed\n'
-      fi
-      return 0
-    fi
-  fi
+  # THERE IS DELIBERATELY NO `ps` PROBE FOR IDENTITY, AND ONE MUST NOT BE ADDED BACK — IN EITHER
+  # DIRECTION (#3549, roborev job 196 F1). This is where the `ps -p <pid> -o args=` fallback used to be.
+  # That rendering JOINS the argument vector with spaces and escapes NOTHING, so splitting it back apart
+  # is BOUNDARY-DESTROYING BOTH WAYS:
+  #
+  #   FABRICATION (a false POSITIVE, the finding's example). One true argv element
+  #   `/tmp/worker-supervisor.sh extra` renders EXACTLY like the two-element vector
+  #   `/tmp/worker-supervisor.sh` + `extra`. Split, it puts in position 0 a token that was never argv[0]
+  #   and carves out a basename — `worker-supervisor.sh` — that NO argument ever had. The verdict is
+  #   `supervisor`, the one answer that prints "stop pid N first": an instruction to KILL AN UNRELATED
+  #   PROCESS.
+  #
+  #   ERASURE (a false NEGATIVE). A GENUINE supervisor under a path containing a space
+  #   (`/lanes/my lane/worker-supervisor.sh`) renders as `bash /lanes/my lane/worker-supervisor.sh`,
+  #   whose split holds `/lanes/my` in position 1 and `lane/worker-supervisor.sh` in position 2 —
+  #   neither canonical shape matches. The rendering also destroys a match that WAS there.
+  #
+  # THE ARGUMENT THIS REPLACES WAS WRONG, and it is recorded so nobody restores the probe on it. The
+  # deleted code claimed the split was "a REFINEMENT of the true vector — extra fields can only push the
+  # script out of position 1/2, so a refinement cannot manufacture a match". Splitting does not merely
+  # LOSE structure; it FABRICATES it, and the FABRICATION case above is the counter-example.
+  #
+  # SO `ps` CANNOT SUPPORT A NEGATIVE EITHER, which is why there is no `ps`-negative-only matcher here:
+  # by the ERASURE case a `ps`-derived non-match is exactly as unreliable as a `ps`-derived match, so the
+  # only verdict such a probe could honestly return is `unprobeable` — i.e. it would be a second rule to
+  # maintain that can never say anything this fall-through does not already say. `unconfirmed` would be
+  # the wrong answer: it ASSERTS a non-identification, and nothing here observed one.
+  #
+  # The cost is nil in behaviour: `unprobeable` and `unconfirmed` already produce the SAME cautious
+  # operator advice (verify before stopping anything, do not delete the lock) and differ only in
+  # wording. On a host with no usable procfs, identity is simply not determinable.
+  #
+  # `ps` REMAINS in use for two questions that do NOT depend on argument boundaries: LIVENESS
+  # (`supervisor_pid_liveness` — whether the pid exists at all), and the operator-facing verification
+  # line `ps -p N -o args=` printed by the uncorroborated refusal, where a HUMAN reads the rendering and
+  # can see for themselves where the boundaries fall. Machine parsing is the part that cannot.
   printf 'unprobeable\n'
 }
 
@@ -1916,7 +1933,7 @@ supervisor_legacy_lock_guard() {
             "ps -p $pid -o args="
           ;;
         *)
-          supervisor_legacy_lock_refuse "$legacy" "recorded pid $pid is ACTIVE, and its identity could NOT be checked at all on this host (no readable procfs entry and no usable ps)" \
+          supervisor_legacy_lock_refuse "$legacy" "recorded pid $pid is ACTIVE, and its identity could NOT be determined on this host (identity is read from /proc/<pid>/cmdline ONLY, and here it is absent, unreadable or empty; a ps rendering cannot be parsed for identity — #3549)" \
             "pid $pid is running; PID NUMBERS ARE REUSED and nothing here could confirm what it is. VERIFY what pid $pid actually is BEFORE stopping anything, and do NOT delete this lock while it may still be held"
           ;;
       esac
