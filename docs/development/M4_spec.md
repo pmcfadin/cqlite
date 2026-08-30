@@ -597,9 +597,12 @@ Notes on identity that the table compresses:
    `frozenset` iteration is hash-ordered (and unstable across values/interpreters), JS `Set`
    and `Map` iteration is insertion-ordered, and Cassandra stores sets/map keys in clustering
    order. Canonicalization must sort; it must never assert an iteration order.
-3. **`set<frozen<list<T>>>` etc. stay hashable on the Python side** via
-   `value_to_hashable_key` (`list`→`tuple`), so such a set is still a `frozenset` — the `list`
-   fallback in `set_to_py` triggers on UDTs only (`contains_udt`). Hashable does not mean
+3. **`set<frozen<list<T>>>` stays hashable on the Python side** via
+   `value_to_hashable_key` (`list`→`tuple`), so such a set is still a `frozenset` — **provided no
+   UDT sits anywhere inside it**. The `list` fallback in `set_to_py` triggers on UDTs only, but
+   since #3500 `contains_udt` traverses the WHOLE subtree, so a UDT at **any nesting depth** takes
+   that fallback: `set<frozen<list<int>>>` is a `frozenset`, `set<frozen<list<frozen<udt>>>>` is a
+   `list`. Hashable does not mean
    canonical: a `set<frozen<map<k,v>>>` element is projected to a *tuple of pairs*, a shape
    Node/the CLI never produce (instance **a-2** below).
 4. **A UDT used as a MAP KEY does not have the UDT value shape on the Python side.** Because
@@ -656,13 +659,20 @@ the instance list further down is a floor, not a ceiling:
   > first node that does not.
 
   Worked through for every projected type. The three benign verdicts are **conditional on the
-  descendants**, per the recursion above:
+  descendants**, per the recursion above.
+
+  > **This table SUMMARISES the projection; it does not DEFINE it.** The authoritative, exhaustive
+  > arm list is `value_to_hashable_key` in `bindings/python/src/value.rs`, whose totality is
+  > compiler-enforced (no `_ =>` arm, pinned by `#[deny(clippy::wildcard_enum_match_arm)]`). Never
+  > assert *here* that an arm is missing or that a projection falls through — read the function.
+  > This section has been corrected three times for restating that arm list from memory; one site
+  > owns the fact.
 
   | Projected type | Python projection | Canonical form | Node/CLI canonical form | Verdict |
   |---|---|---|---|---|
   | `list<T>` | `List` arm → `tuple` | array | array | **benign iff every descendant is benign** — divergent when `T` holds a `map`/`udt` (a-3) |
-  | `set<T>` | no `Set` arm — falls through to `value_to_py` → `set_to_py` → `frozenset` | sorted array | sorted array | **benign iff every descendant is benign** — and see #3500 when a UDT is nested |
-  | `tuple<...>` | no `Tuple` arm — falls through to `value_to_py` → `tuple` | array | array | **benign iff every descendant is benign** — and see #3500 when a UDT is nested |
+  | `set<T>` | `Set` arm → `frozenset` (recursing through `value_to_hashable_key`, deliberately never re-entering `set_to_py`) | sorted array | sorted array | **benign iff every descendant is benign** — divergent when the element type holds a `map` (a-2) or a `udt` (a-3) |
+  | `tuple<...>` | the shared `List`/`Tuple` arm → `tuple` (one arm, same as `list<T>`) | array | array | **benign iff every descendant is benign** — divergent when an element holds a `map` (a-2) or a `udt` (a-3) |
   | `map<k,v>` | `Map` arm → tuple of pairs | array of arrays | array of `{"key": …, "value": …}` | **DIVERGES** (a-2) |
   | `udt` | `Udt` arm → `frozenset` of `(name, value)` pairs | array of `[name, value]` | **object** | **DIVERGES** (a-1; a-3 when nested) |
 
@@ -671,9 +681,13 @@ the instance list further down is a floor, not a ceiling:
   them:** a `list`, `set` or `tuple` in a projection position loses its Python **host-type
   identity** (a `list` key arrives as a `tuple`) but its **canonical form is unchanged**, so it
   compares equal across bindings and needs no handling — **provided its elements are themselves
-  benign.** `set<frozen<list<int>>>` is benign; `set<frozen<list<frozen<udt>>>>` is a-3. The defect is a *changed canonical form*,
-  never a *lost host type*. (The two fall-through rows are also where #3500's `TypeError` cases
-  live — see below — but that is a totality bug in the binding, not a canonicalization divergence.)
+  benign.** A `map<frozen<list<int>>, v>` key is benign; a `map<frozen<list<frozen<udt>>>, v>` key
+  is a-3. (Both examples are **map keys** on purpose: since #3500 a *set* whose subtree holds a UDT
+  never reaches this projection at all — `contains_udt` sends the column to `set_to_py`'s `list`
+  branch — so a map key is where a nested-UDT projection is still observable.) The defect is a
+  *changed canonical form*, never a *lost host type*. (#3500's `TypeError` cases lived in these
+  rows while the projection was partial; they are **FIXED** — see "Nested UDT shapes no longer
+  RAISE" below — and were a totality bug in the binding, never a canonicalization divergence.)
 - **(b) Host-shape collision.** Two different CQL types arrive as the same Python host type, so
   the normalizer cannot tell them apart: `set<frozen<udt>>` vs `list<T>` (both `list`); a `map`
   containing a literal `"_type"` key vs a `udt` (both `dict`); `tuple<...>` vs `list<T>` (both
@@ -721,21 +735,25 @@ nesting space and therefore cannot be closed. `Value::Frozen` adds no row: it re
 | `decimal.Decimal` | `Value::Decimal` | no | — |
 | `cqlite.Duration` | `Value::Duration` | no | — |
 | `IPv4Address` / `IPv6Address` | `Value::Inet` | no | — |
-| `list` | `list<T>`, `set<frozen<udt>>` (the `contains_udt` fallback), **JSON array**. (A *projected* `set<frozen<udt>>` would also produce a `list`, but a `list` is unhashable, so that path raises rather than canonicalizing — #3500.) | yes (3) | **MIXED** — `set` vs `list` order-sensitivity is **b-1**; a **JSON array is BENIGN**, it stays an array and matches the CLI's array, so it is *not* a canonicalization divergence (its element ORDER is unverified, but that is **b-4**, which already covers every array, not a JSON-specific defect) |
-| `frozenset` | `set<T>` (non-UDT elements), a **projected `udt`** (`value_to_hashable_key`'s `Udt` arm), a **projected `set`** (fall-through → `set_to_py`) | yes (3) | **MIXED** — the projected UDT **DIVERGES** (**a-1**, and **a-3** when nested); `set<T>` vs a projected `set` is benign |
-| `tuple` | `tuple<...>`, a **projected `list<T>`** (`List` arm), a **projected `tuple<...>`** (fall-through), a **projected `map<k,v>`** (`Map` arm → a tuple of pairs) | yes (4) | **MIXED** — benign for `tuple<...>`, a projected `list<T>` and a projected `tuple<...>` (all canonicalize to an array); **DIVERGENT for a projected `map`**, whose array-of-arrays is not the CLI/Node array of `{"key": …, "value": …}` — instance **a-2** |
+| `list` | `list<T>`, a **UDT-bearing `set<…>`** (the `contains_udt` fallback, which since #3500 fires for a UDT at any nesting depth), **JSON array**. (A *projected* set adds no fourth source: `value_to_hashable_key`'s `Set` arm yields a `frozenset`, so it lands on the `frozenset` row below. Since #3500 it no longer raises.) | yes (3) | **MIXED** — `set` vs `list` order-sensitivity is **b-1**; a **JSON array is BENIGN**, it stays an array and matches the CLI's array, so it is *not* a canonicalization divergence (its element ORDER is unverified, but that is **b-4**, which already covers every array, not a JSON-specific defect) |
+| `frozenset` | `set<T>` (non-UDT elements), a **projected `udt`** (`value_to_hashable_key`'s `Udt` arm), a **projected `set`** (`value_to_hashable_key`'s own recursive `Set` arm — not a fall-through, and it never re-enters `set_to_py`) | yes (3) | **MIXED** — the projected UDT **DIVERGES** (**a-1**, and **a-3** when nested); `set<T>` vs a projected `set` is benign |
+| `tuple` | `tuple<...>`, a **projected `list<T>`** and a **projected `tuple<...>`** (both the shared `List`/`Tuple` arm), a **projected `map<k,v>`** (`Map` arm → a tuple of pairs) | yes (4) | **MIXED** — benign for `tuple<...>`, a projected `list<T>` and a projected `tuple<...>` (all canonicalize to an array); **DIVERGENT for a projected `map`**, whose array-of-arrays is not the CLI/Node array of `{"key": …, "value": …}` — instance **a-2** |
 | `dict` | `map<k,v>` (cell level), `udt`, **JSON object**, and a **ROW** at row level | yes (4) | **DIVERGES** — map vs UDT is **b-2**; the JSON object is **b-5**; the ROW source is disambiguated by the explicit `is_row_level` signal and is therefore **FIXED**, not a divergence |
 
 Reading rule: a shape with no collision needs no thought; a **benign** collision needs none either
 (that is what benign means); the **four** rows carrying a divergent source — `list`, `frozenset`,
 `tuple` (for a projected `map` only) and `dict` — are the ones requiring #1455 to act, and their
-instances are named in the next table. A projection position that would need an unhashable shape
-(`dict`, `list`) does not reach the normalizer at all: it raises inside the binding (#3500).
+instances are named in the next table. Since #3500 **no projection position raises**:
+`value_to_hashable_key` is total, so a `udt` in a projection position projects to a `frozenset` and
+a `list`/`tuple` to a `tuple`, and every value reaches the normalizer. (A UDT-bearing *set* COLUMN
+is a separate matter — `contains_udt` routes it to `set_to_py`'s `list` branch, which is row
+**`list`** above, not a projection.)
 
 **How each row was derived, and the verification trap to avoid.** A row answers "**which producers
 can emit this host shape**", counted over BOTH `value_to_py`'s arms AND `value_to_hashable_key`'s
-projections (`List`→`tuple`, `Map`→tuple of pairs, `Udt`→`frozenset`, `Frozen`→recurse, everything
-else falling through to `value_to_py`) AND `json_to_py`'s arms. **Confirming that all 26 `Value::`
+projections (`List`/`Tuple`→`tuple`, `Set`→`frozenset`, `Map`→tuple of pairs, `Udt`→`frozenset`,
+`Json`→`json_to_hashable_key`, `Frozen`→recurse, every remaining SCALAR delegating to
+`value_to_py` — read the function, per the note at the projection table) AND `json_to_py`'s arms. **Confirming that all 26 `Value::`
 variants appear somewhere in this section is NOT the same check** — that is *variant coverage*, and
 it is strictly weaker: it passed while the `tuple` row was missing its projected-`map` source
 (`Value::Map` appeared in the `dict` row, so the variant was "covered" while a row was incomplete).
@@ -749,7 +767,8 @@ above, and add it here when found. Each listed instance is pinned by a test in
 `TestCollectionIdentityContract` (`bindings/python/tests/test_cli_parity.py`) that records the
 divergent shape as a **gap**, never as a desirable canonical form, and each is tracked by
 **#3497** — except where the divergence happens *before* the normalizer runs (the **b-3**
-collapse, and the #3500 `TypeError` cases below), which no normalizer-level test can observe; for
+collapse; #3500's `TypeError` cases were of the same pre-normalizer kind and are now **FIXED**,
+see below), which no normalizer-level test can observe; for
 b-3 the test pins what is observable, that the Python `dict` holds one entry where a Node `Map`
 would hold two.
 
@@ -757,8 +776,8 @@ would hold two.
 |---|---|---|---|---|
 | **a-1** | lossy projection | **UDT as a map KEY** (`map<frozen<udt>, v>`) | `value_to_hashable_key` projects the key to a `frozenset` of `(field_name, value)` pairs (incl. `_type`/`_keyspace`), which canonicalizes to a sorted array of `[name, value]` pairs; Node and the CLI render the same key as a UDT **object**. Different in kind — nothing in the normalizer reconciles them. Reconstructing a UDT object from an anonymous `frozenset` of 2-tuples would be a shape guess, and no fixture table currently has a UDT map key. | Treat a UDT map key as **UNSUPPORTED**. Do not assume the projected frozenset shape is canonical. |
 | **a-2** | lossy projection | **`map` inside a `set` element** (`set<frozen<map<k,v>>>`) | The element is projected to a **tuple of pairs**, so it canonicalizes to `[["a", 1]]`, while Node and the CLI render that nested map as `[{"key": "a", "value": 1}]`. The same nested map in *value* position goes through `value_to_py` → `dict` and canonicalizes correctly, so the divergence is specific to hashable-projection positions (set elements and map keys). | Treat a `map` nested in a set element (or map key) as **UNSUPPORTED**. The enclosing set still sorts; the element shape is what diverges. |
-| **a-3** | lossy projection | **a UDT nested deeper inside a projected value** — e.g. `set<frozen<list<frozen<udt>>>>` | `value_to_hashable_key`'s `List` arm recurses, so the inner UDT is projected to a `frozenset` of `(field_name, value)` pairs: the element canonicalizes to `[[["_keyspace", …], ["_type", …], ["street", …]]]` — an array of `[name, value]` pairs — while Node and the CLI produce `[[{"_type": …, "street": …}]]`, i.e. an array holding a UDT **object**. This is not a new carve-out: it is a-1's projection reached one level deeper, and it is the concrete demonstration that **nesting generates instances**. Any further nesting of a projected non-scalar should be assumed to do the same until checked. | Treat a UDT nested anywhere inside a projection position as **UNSUPPORTED**. |
-| **b-1** | host-shape collision — lattice row **`list`** | **`set<frozen<udt>>` vs `list<T>`** | Both are a plain Python `list` (`set_to_py`'s `contains_udt` fallback), so the set cannot be sorted without also reordering genuine `list<T>` values, whose order is semantically meaningful. Consequence: this row's canonical form is **order-SENSITIVE** — two structurally-equal UDT sets whose elements are in different orders canonicalize to **different** arrays and compare **unequal**. | Handle the row explicitly: compare it order-insensitively itself, or declare it unsupported. Do **not** assume the canonical form has erased set ordering here. |
+| **a-3** | lossy projection | **a UDT nested deeper inside a projected value** — e.g. the KEY of a `map<frozen<list<frozen<udt>>>, v>` | `map_to_py` routes every key through `value_to_hashable_key` **unconditionally** (it has no `contains_udt` gate — a `dict` key must be hashable whatever it holds), and the `List` arm recurses, so the inner UDT is projected to a `frozenset` of `(field_name, value)` pairs: the key canonicalizes to `[[["_keyspace", …], ["_type", …], ["street", …]]]` — an array of `[name, value]` pairs — while Node and the CLI produce `[[{"_type": …, "street": …}]]`, i.e. an array holding a UDT **object**. This is not a new carve-out: it is a-1's projection reached one level deeper, and it is the concrete demonstration that **nesting generates instances**. Any further nesting of a projected non-scalar should be assumed to do the same until checked. **Scope correction (#3500):** the example used to be a SET ELEMENT (`set<frozen<list<frozen<udt>>>>`), and the instance is **no longer live there** — `contains_udt` now traverses the whole subtree, so `set_to_py` takes its `list` branch and the inner UDT arrives as an ordinary `dict` matching Node/the CLI (taken deliberately, AC1 over AC5). The instance SURVIVES wherever a hashable projection is unavoidable, i.e. map keys — the same re-anchoring, for the same reason, as `test_udt_nested_deeper_in_a_projection_position_is_unsupported` in `bindings/python/tests/test_cli_parity.py`; keep the two consistent. | Treat a UDT nested anywhere inside a projection position (map key, or a set element with no UDT-bearing ancestor set) as **UNSUPPORTED**. |
+| **b-1** | host-shape collision — lattice row **`list`** | **any UDT-bearing `set<…>` vs `list<T>`** — `set<frozen<udt>>`, and since #3500 equally `set<frozen<list<frozen<udt>>>>`, `set<frozen<tuple<frozen<udt>, int>>>`, `set<frozen<set<frozen<udt>>>>`, … | Both are a plain Python `list` (`set_to_py`'s `contains_udt` fallback — which since #3500 fires for a UDT at **any nesting depth**, so this row is WIDER than a directly-frozen UDT; the verdict is unchanged), so the set cannot be sorted without also reordering genuine `list<T>` values, whose order is semantically meaningful. Consequence: this row's canonical form is **order-SENSITIVE** — two structurally-equal UDT sets whose elements are in different orders canonicalize to **different** arrays and compare **unequal**. | Handle the row explicitly: compare it order-insensitively itself, or declare it unsupported. Do **not** assume the canonical form has erased set ordering here. |
 | **b-2** | host-shape collision (**injected control markers**) — lattice row **`dict`** | **`_type`/`_keyspace` injected into a namespace whose other keys are USER-CONTROLLED** — one class with **four known sites** (row columns, cell-level map keys, UDT field names, and the UDT-as-map-key projection) | Not one defect but a class: wherever the bindings inject those two markers, a user-chosen name can collide with them. Enumerated site by site, with status and reasoning, in **"The `_type`/`_keyspace` marker class"** directly below. | Per site — see the class entry. One site (row dicts) is **FIXED**; the rest are open and tracked by **#3504** (binding side) / **#3497** (canonicalization side). |
 | **b-3** | host-shape collision (key identity) | **duplicate structurally-equal NON-SCALAR map keys** | A Python `dict` cannot hold two such keys at all: they collapse by hash/`__eq__`, last value wins, one entry — while a Node `Map` compares object keys by **reference** and keeps **both**. The canonical forms then differ in **length**, which no sorting reconciles. Well-formed Cassandra data never produces duplicate map keys, so this is out of contract rather than a live read-path bug; the collapse happens in `map_to_py`, before any normalizer runs. Deduplicating the Node side (or rejecting the input) would be a behavior change. | Treat duplicate non-scalar map keys as **UNSUPPORTED**; do not compare lengths across bindings for such input. |
 | **b-4** | host-shape collision (at COMPARISON time) | **`list<T>` *and* `tuple<...>` vs `set<T>` in `values_equal`** — so **element ORDER of BOTH a `list<T>` and a `tuple<...>` is NOT verified by the #319 parity comparison** | The canonical form merges sets and lists into arrays (by design), so the comparison layer cannot tell them apart either: `values_equal` tries an ordered comparison first and then falls back to an **unordered** (sorted) comparison. **Scope, stated from the guard's actual semantics rather than by example:** the guard is `not any(isinstance(v, dict) for v in py_val)`, which inspects only that level's **IMMEDIATE** elements, and the ordered path **recurses** — so the unordered fallback is applied **independently at EVERY array level whose immediate elements contain no `dict`, at any nesting depth.** A level that does hold `dict`s (a map-repr array, an array of UDT objects) is ordered-only *at that level*, but its nested arrays are still swallowed. Concretely `values_equal([[1, 2]], [[2, 1]])` is **True**, via the inner level. A reordered `list<int>` therefore compares **EQUAL** — and so does a reordered `tuple<...>`, because a tuple canonicalizes to the very same array (the benign `tuple`/`list` merge above). This contradicts BOTH the `list<T>` row ("positional; order preserved") and the `tuple<...>` row ("positional on both sides"): the canonical form deliberately merges the two, and the comparison layer then treats the merged shape as possibly-a-set. The fallback is a **deliberate accommodation with its reason recorded at the branch**: CQL `SET` columns are sorted by `_sort_key` on the Python side and emitted in Cassandra's internal byte-order by the CLI, so without it genuine set comparisons in the existing #319 suite would red. Removing it naively trades a false pass for a false failure; telling the two apart needs the declared type (#3497). | Do not rely on the #319 comparison to catch a `list<T>` or `tuple<...>` ordering regression **at any depth** — not the top level, and not nested inside another collection. A harness that must verify order has to compare those columns **ordered-only, recursively**, which means knowing which columns are lists/tuples, i.e. schema information. |
