@@ -915,6 +915,209 @@ fn a_known_type_gap_that_no_longer_reproduces_fails() {
     );
 }
 
+// ---------------------------------------------------------------------------
+// The whole-case `known_gap` is EXCLUSIVE, on real export output
+//
+// Round-2 roborev finding: a gap matched by a conjunction of precise substrings
+// proves the recorded failure is PRESENT but says nothing about whether anything
+// ELSE is. The harness aggregates EVERY Arrow type mismatch into one report, so
+// a second, unrecorded mismatch rode along inside the same string and was
+// excused. These controls pin the property that replaced containment: the
+// observed failure set must EQUAL the recorded one.
+//
+// They are built on `test_da.simple_table` (committed binaries, so they always
+// run) by MIS-DECLARING columns, which is the same observable situation as an
+// export that produced the wrong Arrow type.
+// ---------------------------------------------------------------------------
+
+/// `test_da.simple_table` with TWO columns mis-declared: `age` as `bigint`
+/// (really `int32`) and `name` as `int` (really `utf8`).
+const TWO_WRONG_TYPES: &[(&str, &str)] = &[
+    ("id", "uuid"),
+    ("name", "int"),
+    ("age", "bigint"),
+    ("salary", "bigint"),
+    ("active", "boolean"),
+    ("created", "timestamp"),
+];
+
+const fn da_simple_gap_variant(
+    columns: &'static [(&'static str, &'static str)],
+    known_gap: Option<KnownGap>,
+) -> ParityCase {
+    ParityCase {
+        keyspace: "test_da",
+        table: "simple_table",
+        schema: "da-test.cql",
+        udts: &[],
+        columns,
+        partition_key: &["id"],
+        clustering: &[],
+        must_run: true,
+        covers: "NEGATIVE CONTROL for known_gap exclusivity",
+        known_gap,
+        known_type_gaps: &[],
+    }
+}
+
+/// The recorded `age` mismatch, as `arrow_expect` renders it.
+const AGE_GAP: ExpectedFailure = ExpectedFailure::ArrowType {
+    column: "age",
+    expected: "int64",
+    actual: "int32",
+};
+
+/// The `name` mismatch that accompanies it — deliberately NOT recorded below.
+const NAME_GAP: ExpectedFailure = ExpectedFailure::ArrowType {
+    column: "name",
+    expected: "int32",
+    actual: "utf8",
+};
+
+/// A SECOND, UNRECORDED failure occurring alongside a recorded gap must FAIL the
+/// case — the exact shape of the round-2 defect.
+///
+/// The assertion is deliberately two-part: it first shows the recorded failure
+/// IS present and precisely rendered (so a containment match, however many
+/// precise substrings it conjoined, would have PASSED here), then shows set
+/// equality refuses it anyway and NAMES the intruder.
+#[test]
+fn a_known_gap_cannot_hide_a_second_unrecorded_failure() {
+    const GAP: KnownGap = KnownGap {
+        issue: "#0000",
+        expect: &[AGE_GAP],
+        what: "NEGATIVE CONTROL: records only ONE of the two mismatches present",
+    };
+    const CASE: ParityCase = da_simple_gap_variant(TWO_WRONG_TYPES, Some(GAP));
+
+    let failures = parquet_parity::run_case(&CASE)
+        .err()
+        .expect("two wrong Arrow types must fail");
+    let rendered = failures.to_string();
+    // Every substring a conjunction-style signature would have pinned about the
+    // RECORDED failure is present — containment would have excused this case.
+    assert!(
+        rendered.contains("Arrow type mismatch for column 'age' declared 'bigint'")
+            && rendered.contains("expected int64")
+            && rendered.contains("got int32"),
+        "{rendered}"
+    );
+    let problem = GAP
+        .mismatch(&CASE.id(), failures.items())
+        .expect("an UNRECORDED second failure must NOT be excused by a matching gap");
+    assert!(
+        problem.contains("OBSERVED BUT NOT RECORDED")
+            && problem.contains("arrow-type[name] expected=int32 actual=utf8"),
+        "the refusal must NAME the failure the gap would have hidden: {problem}"
+    );
+}
+
+/// …and recording BOTH failures excuses the case, so the mechanism is an
+/// equality and not simply "more than one failure always fails".
+#[test]
+fn a_known_gap_recording_the_exact_failure_set_is_excused() {
+    const GAP: KnownGap = KnownGap {
+        issue: "#0000",
+        expect: &[AGE_GAP, NAME_GAP],
+        what: "NEGATIVE CONTROL: records BOTH mismatches present",
+    };
+    const CASE: ParityCase = da_simple_gap_variant(TWO_WRONG_TYPES, Some(GAP));
+
+    let failures = parquet_parity::run_case(&CASE)
+        .err()
+        .expect("two wrong Arrow types must fail");
+    assert_eq!(
+        GAP.mismatch(&CASE.id(), failures.items()),
+        None,
+        "the EXACT recorded set must be excused: {failures}"
+    );
+}
+
+/// A recorded failure that stopped happening must FAIL — the self-retiring half,
+/// asserted on the same real export output rather than only through the
+/// "no longer reproduces" path (which only fires when NOTHING fails).
+#[test]
+fn a_known_gap_recording_a_failure_that_no_longer_happens_fails() {
+    const GAP: KnownGap = KnownGap {
+        issue: "#0000",
+        expect: &[
+            AGE_GAP,
+            NAME_GAP,
+            ExpectedFailure::ArrowType {
+                column: "salary",
+                expected: "int64",
+                actual: "utf8",
+            },
+        ],
+        what: "NEGATIVE CONTROL: records a third failure that does not happen",
+    };
+    const CASE: ParityCase = da_simple_gap_variant(TWO_WRONG_TYPES, Some(GAP));
+
+    let failures = parquet_parity::run_case(&CASE)
+        .err()
+        .expect("two wrong Arrow types must fail");
+    let problem = GAP
+        .mismatch(&CASE.id(), failures.items())
+        .expect("a recorded failure that stopped happening MUST fail");
+    assert!(
+        problem.contains("RECORDED BUT NOT OBSERVED")
+            && problem.contains("arrow-type[salary] expected=int64 actual=utf8"),
+        "{problem}"
+    );
+}
+
+/// A gap recording a DIFFERENT wrong type for the right column must not absorb
+/// this one: the (column, expected, actual) triple is compared by EQUALITY.
+#[test]
+fn a_known_gap_cannot_absorb_a_different_wrong_type_on_the_same_column() {
+    const GAP: KnownGap = KnownGap {
+        issue: "#0000",
+        expect: &[
+            ExpectedFailure::ArrowType {
+                column: "age",
+                expected: "int64",
+                actual: "utf8",
+            },
+            NAME_GAP,
+        ],
+        what: "NEGATIVE CONTROL: records the wrong ACTUAL type for 'age'",
+    };
+    const CASE: ParityCase = da_simple_gap_variant(TWO_WRONG_TYPES, Some(GAP));
+
+    let failures = parquet_parity::run_case(&CASE)
+        .err()
+        .expect("two wrong Arrow types must fail");
+    let problem = GAP
+        .mismatch(&CASE.id(), failures.items())
+        .expect("a gap recording actual=utf8 must not excuse actual=int32");
+    assert!(
+        problem.contains("arrow-type[age] expected=int64 actual=int32")
+            && problem.contains("arrow-type[age] expected=int64 actual=utf8"),
+        "both the observed and the recorded triple must be named: {problem}"
+    );
+}
+
+/// A gap recording NOTHING would match nothing-in-particular, so it is refused
+/// rather than treated as "no expectations, therefore satisfied" — the permissive
+/// branch a two-valued containment test would have taken.
+#[test]
+fn a_known_gap_recording_no_failures_is_refused() {
+    const GAP: KnownGap = KnownGap {
+        issue: "#0000",
+        expect: &[],
+        what: "NEGATIVE CONTROL: an empty recorded set",
+    };
+    const CASE: ParityCase = da_simple_gap_variant(TWO_WRONG_TYPES, Some(GAP));
+
+    let failures = parquet_parity::run_case(&CASE)
+        .err()
+        .expect("two wrong Arrow types must fail");
+    let problem = GAP
+        .mismatch(&CASE.id(), failures.items())
+        .expect("an empty recorded set MUST be refused");
+    assert!(problem.contains("NO expected failures"), "{problem}");
+}
+
 /// A gap naming a column the case does not declare could never retire, so it is
 /// refused outright.
 #[test]
