@@ -12768,6 +12768,10 @@ run_file_size
 #     report PASS. python-bindings is therefore in this set (#1175 finding 2): the
 #     preflight must FAIL loudly rather than let a skipped suite pass green — the
 #     same #646 failure mode that motivated guarding the Rust dataset suites.
+#     Added by #1465: node-bindings. Its #1231 content proof self-generates its
+#     SSTables (dataset-free), but the leak-budget lane it now also runs streams
+#     test_wide_rows.many_columns_table, so the component as a whole reads real
+#     Data.db.
 #     Added by #1699: flight-tests (its --lib unit suite reads real Data.db — e.g.
 #     stats.rs's real-fixture test, which SKIPS with a printed notice when
 #     CQLITE_DATASETS_ROOT is unset, exactly the silent-skip shape this set guards;
