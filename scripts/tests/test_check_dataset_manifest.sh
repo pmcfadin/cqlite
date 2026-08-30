@@ -1851,6 +1851,51 @@ else
   echo "info - node unavailable, sources missing, or running as root; skipping the lstat-error case"
 fi
 
+# ---------------------------------------------------------------------------
+# Case 85 (post-rebase round 7, Medium): CRLF END TO END, through the whole manifest.
+#
+# CR was stripped in the forward component loop and again in the trusted-inventory
+# comparison — but the REVERSE reconciliation grepped the RAW TOC with `grep -qxF`, and `-x`
+# matches WHOLE LINES, so every line's trailing `\r` made every component read as "not
+# listed" and a perfectly valid CRLF TOC was rejected as incomplete.
+#
+# THE EXISTING CRLF CASE DID NOT CATCH IT: case 81 exercises `_toc_matches_head` in
+# isolation, which was one of the two places that DID strip CR. A unit case on the function
+# that was already correct cannot see a sibling path that is not — hence this one drives the
+# whole script, which is what the finding asked for.
+#
+# Three places stripping the same thing is what let one be missed; the fix normalises ONCE
+# into a temp copy that both directions read.
+# ---------------------------------------------------------------------------
+if [ -n "$MANIFEST_NOGIT" ]; then
+  crlf_case() {   # <eol> -> accept | reject
+    local eol=$1 root t
+    root="$WORK/manifest-crlf-$eol"; rm -rf "$root"
+    t="$root/sstables/test_basic/counters-$UUID"; mkdir -p "$t"
+    printf 'x\n'   > "$t/nb-1-big-Data.db"
+    printf 'row\n' > "$t/nb-1-big-Data.db.jsonl"
+    printf 'x\n'   > "$t/nb-1-big-Filter.db"
+    case "$eol" in
+      lf)   printf 'Data.db\nFilter.db\nTOC.txt\n'       > "$t/nb-1-big-TOC.txt" ;;
+      crlf) printf 'Data.db\r\nFilter.db\r\nTOC.txt\r\n' > "$t/nb-1-big-TOC.txt" ;;
+    esac
+    local _o; _o=$(NO_AUTO_TOC=1 mrun "$root" 2>&1 || true)
+    if printf '%s' "$_o" | grep -q 'test_basic/counters'; then echo reject; else echo accept; fi
+  }
+  # LF is the control: if it were rejected too, the CRLF result would say nothing about CRLF.
+  [ "$(crlf_case lf)" = accept ] \
+    && ok "an LF TOC with all components present is accepted (the control)" \
+    || bad "the LF control was REJECTED; the CRLF case below proves nothing"
+  [ "$(crlf_case crlf)" = accept ] \
+    && ok "a CRLF TOC with all components present is accepted, end to end" \
+    || bad "a CRLF TOC was rejected as incomplete; a path is still comparing against the raw file"
+
+  # And no temp file is left behind by any of it.
+  [ "$(ls "${TMPDIR:-/tmp}"/cqlite-toc-norm.* 2>/dev/null | wc -l)" -eq 0 ] \
+    && ok "the normalised-TOC temp file is not leaked" \
+    || bad "normalised-TOC temp files were left in ${TMPDIR:-/tmp}"
+fi
+
 echo "----"
 echo "passed: $PASS  failed: $FAIL"
 [ "$FAIL" -eq 0 ]

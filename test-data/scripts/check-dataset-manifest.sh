@@ -18,6 +18,21 @@ set -euo pipefail
 ROOT="${1:-test-data/datasets}"
 SSTABLES="${ROOT}/sstables"
 
+# TEMP-FILE REGISTRY + EXIT TRAP (roborev, post-rebase round 7 self-audit).
+#
+# Several paths in this script `exit 2` on a tooling malfunction, and an `exit` skips every
+# in-line `rm -f` the caller would have reached. Removing each file at each return site is
+# what I tried first: it handles the RETURN paths and silently misses the EXIT ones, which is
+# exactly the set the self-test exercises — so a leak assertion caught files in /tmp that a
+# happy-path check had reported clean.
+#
+# A trap is the only cleanup that survives an exit, so registration is the single rule:
+# anything mktemp'd here gets registered on the line it is created.
+_TMP_FILES=""
+_register_tmp() { _TMP_FILES="$_TMP_FILES $1"; }
+_cleanup_tmp() { [ -n "$_TMP_FILES" ] && rm -f $_TMP_FILES; return 0; }
+trap _cleanup_tmp EXIT INT TERM
+
 # Expected user-keyspace tables (39 total: 33 nb + 6 test_oa).
 #
 # SINGLE SOURCE OF TRUTH (intent): this list is hand-duplicated from the corpus
@@ -160,7 +175,7 @@ if [ -n "$_SCRIPT_REPO" ] \
   # the script's own output, which still prints a green 39/39, because the fallback is a
   # legitimate state -- exactly the vacuous-pass shape this whole change is about. Caught
   # only by counting the derived entries.
-  _ls_tmp=$(mktemp) || {
+  _ls_tmp=$(mktemp) && _register_tmp "$_ls_tmp" || {
     echo "❌ dataset manifest check: mktemp failed; cannot derive the committed table set" >&2
     exit 2
   }
@@ -424,19 +439,38 @@ _toc_companions_usable() {
   _t_prefix=${1%Data.db}
   _t_toc="${_t_prefix}TOC.txt"
   _usable_file "$_t_toc" || return 1
+  # NORMALISE ONCE, then use the normalised copy for BOTH directions (roborev, post-rebase
+  # round 7). CRLF was stripped in the forward loop and again in the twin comparison, but the
+  # REVERSE reconciliation grepped the RAW file with `grep -qxF` -- and `-x` matches whole
+  # lines, so every line's trailing `\r` made every component read as "not listed" and a
+  # perfectly valid CRLF TOC was rejected as incomplete. Verified before fixing.
+  #
+  # Three places stripping the same thing is what allowed one to be missed; one normalised
+  # copy is why it cannot happen again.
+  # mktemp, for the same reason `_toc_matches_head` uses it: a predictable path in a shared
+  # /tmp is a symlink target, and a stale one would be read as this generation's TOC.
+  _TOC_NORM=$(mktemp "${TMPDIR:-/tmp}/cqlite-toc-norm.XXXXXX") || {
+    echo "❌ dataset manifest check: mktemp failed; cannot normalise the TOC" >&2
+    exit 2
+  }
+  _register_tmp "$_TOC_NORM"
+  if ! tr -d '\r' <"$_t_toc" >"$_TOC_NORM"; then
+    rm -f "$_TOC_NORM"
+    echo "❌ dataset manifest check: could not normalise $_t_toc; cannot judge the corpus" >&2
+    exit 2
+  fi
   while IFS= read -r _t_c || [ -n "$_t_c" ]; do
-    _t_c=${_t_c%$'\r'}                       # tolerate CRLF
     [ -n "$_t_c" ] || continue               # blank lines are not components
     # A component NAME, never a path: a TOC entry that escapes its own directory is
     # malformed, and resolving it would validate a file in a different generation.
-    case "$_t_c" in */*|.|..) return 1 ;; esac
+    case "$_t_c" in */*|.|..) rm -f "$_TOC_NORM"; return 1 ;; esac
     _t_p="${_t_prefix}${_t_c}"
-    [ -f "$_t_p" ] && [ -r "$_t_p" ] || return 1
+    [ -f "$_t_p" ] && [ -r "$_t_p" ] || { rm -f "$_TOC_NORM"; return 1; }
     case " $_TOC_MAY_BE_EMPTY " in
       *" $_t_c "*) : ;;                      # allowlisted: empty is a legitimate state
-      *) [ -s "$_t_p" ] || return 1 ;;
+      *) [ -s "$_t_p" ] || { rm -f "$_TOC_NORM"; return 1; } ;;
     esac
-  done < "$_t_toc"
+  done < "$_TOC_NORM"
   # BIDIRECTIONAL (roborev #3493, post-rebase round). The loop above proves every LISTED
   # component exists; on its own that trusts the TOC as a COMPLETE inventory, so a
   # TRUNCATED-but-nonempty TOC listing only `Data.db` shrinks the required set to nothing
@@ -463,11 +497,12 @@ _toc_companions_usable() {
     # reserved exit 9 -- a judged corpus verdict the #2078 opt-out suppresses. A broken
     # grep must never be readable as a judged corpus.
     _t_g=0
-    grep -qxF "$_t_c" "$_t_toc" || _t_g=$?
+    grep -qxF "$_t_c" "$_TOC_NORM" || _t_g=$?
     case "$_t_g" in
       0) : ;;
-      1) return 1 ;;
-      *) echo "❌ dataset manifest check: grep failed (status $_t_g) reconciling $_t_toc; cannot judge the corpus" >&2
+      1) rm -f "$_TOC_NORM"; return 1 ;;
+      *) rm -f "$_TOC_NORM"
+         echo "❌ dataset manifest check: grep failed (status $_t_g) reconciling $_t_toc; cannot judge the corpus" >&2
          exit 2 ;;
     esac
   done
@@ -496,8 +531,12 @@ _toc_companions_usable() {
   # Plain call, NOT `$(...)`: see the function header -- a subshell would swallow its exit 2.
   _committed_toc_relpath "$_t_toc"
   if [ -n "$_C_TOC_REL" ]; then
-    _toc_matches_head "$_t_toc" "$_C_TOC_REL" || return 1
+    if ! _toc_matches_head "$_t_toc" "$_C_TOC_REL"; then
+      rm -f "$_TOC_NORM"
+      return 1
+    fi
   fi
+  rm -f "$_TOC_NORM"
   _TOC_FAIL_REASON=
   return 0
 }
@@ -560,6 +599,7 @@ _toc_matches_head() {
     echo "❌ dataset manifest check: mktemp failed; cannot materialise the committed twin" >&2
     exit 2
   }
+  _register_tmp "$_tm_tmp"; _register_tmp "$_tm_tmp.a"; _register_tmp "$_tm_tmp.b"
   # A CONFIRMED absence from HEAD is not an operational failure, and collapsing the two
   # (roborev, post-rebase round 4) would let git corruption or a permission error read as
   # "no inventory" and silently disable this check. `cat-file -e` answers EXISTENCE on its
