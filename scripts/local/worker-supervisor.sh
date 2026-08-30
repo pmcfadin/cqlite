@@ -231,6 +231,12 @@ PENDING_AUTOMERGE_MIN_SECS="${PENDING_AUTOMERGE_MIN_SECS:-1200}"
 # an empty value. Two suite cases went red on it immediately. So: empty by default, filled in by
 # `supervisor_lock_path` at acquisition, using only bash substitution and arithmetic.
 SUPERVISOR_LOCK="${SUPERVISOR_LOCK:-}"
+# Did WE derive the lock path, or did the caller give one? RECORDED at derivation time, never
+# re-detected afterwards (#3549). By the time anything downstream looks, `SUPERVISOR_LOCK` is
+# non-empty either way, so a later `[[ -n "$SUPERVISOR_LOCK" ]]` reads as "explicit" unconditionally
+# — the exact re-detection shape this repo keeps finding. `supervisor_lock_path` sets this in BOTH
+# of its branches; the legacy-global-lock guard below is the only consumer.
+SUPERVISOR_LOCK_DERIVED=no
 STOP_FILE="${STOP_FILE:-$REPO_ROOT/.worker-stop}"
 MARKER_FILE="${MARKER_FILE:-$REPO_ROOT/.worker-last-iteration.json}"
 LOG_DIR="${LOG_DIR:-$REPO_ROOT/logs/worker-supervisor}"
@@ -1362,9 +1368,159 @@ supervisor_msg_token() {
 }
 
 supervisor_lock_path() {
-  [[ -n "$SUPERVISOR_LOCK" ]] && return 0
+  # RECORD the derivation, do not re-detect it later (#3549). "Explicit" is only knowable HERE,
+  # because after this function `SUPERVISOR_LOCK` is non-empty on both paths.
+  if [[ -n "$SUPERVISOR_LOCK" ]]; then
+    SUPERVISOR_LOCK_DERIVED=no
+    return 0
+  fi
+  SUPERVISOR_LOCK_DERIVED=yes
   # FROM THE GIVEN IDENTITY (lead ruling B). `LANE_ID` is resolved before this is called.
   SUPERVISOR_LOCK="${TMPDIR:-/tmp}/cqlite-worker-supervisor-${LANE_ID}.lock"
+}
+
+# ---------------------------------------------------------------------------
+# LEGACY GLOBAL LOCK COMPATIBILITY (#3549; the defect #3467 introduced).
+#
+# Before #3467 the single-instance lock was ONE MACHINE-GLOBAL path,
+# `${TMPDIR:-/tmp}/cqlite-worker-supervisor.lock`. After #3467 the derived default is per LANE, which
+# is the correct end state (#3393: N lanes per box). But the two paths are invisible to each other, so
+# a supervisor launched from a PRE-#3467 checkout holds a lock this one never looks at — and both then
+# run, in the same worktree, sharing markers, branch, logs and `.worker-last-iteration.json`. The
+# window opens during any rolling update of the fleet's checkouts.
+#
+# REMOVAL CONDITION (AC6). Delete `supervisor_legacy_lock_state`, `supervisor_legacy_lock_refuse`,
+# `supervisor_legacy_lock_guard`, their call site in `acquire_lock`, and their suite cases once EVERY
+# checkout that can launch a supervisor on this fleet is at or past #3467 — i.e. once no pre-#3467
+# `worker-supervisor.sh` can run again. How to check it: on each box,
+#   git -C <checkout> merge-base --is-ancestor f33f726c4 HEAD   # f33f726c4 = the #3467 commit
+# for every checkout that a launcher can reach, and confirm no legacy lock is present
+# (`ls -d "${TMPDIR:-/tmp}"/cqlite-worker-supervisor.lock`). Both halves are required: an old checkout
+# that is merely idle can still be launched. Until then this guard is load-bearing.
+#
+# The legacy lock's ON-DISK SHAPE is a DIRECTORY containing a single file `pid` (atomic `mkdir` +
+# pid-liveness, never flock) — read out of the pre-#3467 file, not assumed.
+# ---------------------------------------------------------------------------
+
+# supervisor_pid_liveness <pid> — echo `live`, `dead` or `unknown`. THREE-VALUED, and `dead` requires
+# an AFFIRMATIVE measurement.
+#
+# `kill -0` FAILING DOES NOT MEAN DEAD: it fails with ESRCH (dead) *and* with EPERM (alive, owned by
+# another user). A supervisor started by a different user during a rolling update is exactly the case
+# this guard exists for, so collapsing EPERM onto "dead" would RECLAIM A LIVE HOLDER'S LOCK — the worst
+# outcome available here. So a failed `kill -0` is corroborated before it is believed, and when no
+# corroborating oracle exists the answer is `unknown`, never `dead` (a verdict derived from the absence
+# of a bad signal is the defect class; require an affirmative measurement).
+#
+# SCOPED TO THE LEGACY GUARD, deliberately. `acquire_lock`'s own per-lane liveness test below is still
+# the plain two-valued `kill -0`; that is a DIFFERENT lock with its own tests, and widening the change
+# to it is out of scope for #3549. The asymmetry is known, not an oversight.
+supervisor_pid_liveness() {
+  local pid="${1:-}"
+  # Well-formed = non-empty, all digits, > 0. A leading zero is rejected as malformed rather than
+  # parsed: `[[ 008 -gt 0 ]]` is a bash arithmetic ERROR (invalid octal), and `kill -0 0` signals the
+  # whole PROCESS GROUP.
+  case "$pid" in
+    '' | *[!0-9]* | 0*) printf 'unknown\n'; return 0 ;;
+  esac
+  if kill -0 "$pid" 2>/dev/null; then
+    printf 'live\n'
+    return 0
+  fi
+  # Corroborate the absence. procfs first (it distinguishes EPERM: the entry exists for a live process
+  # owned by anyone), else `ps`. `command -v` is a builtin, so an absent `ps` yields `unknown`, not a
+  # crash under the stripped PATH some suite cases source this file with.
+  if [[ -d /proc/1 ]]; then
+    if [[ -d "/proc/$pid" ]]; then printf 'live\n'; else printf 'dead\n'; fi
+    return 0
+  fi
+  if command -v ps >/dev/null 2>&1; then
+    if ps -p "$pid" >/dev/null 2>&1; then printf 'live\n'; else printf 'dead\n'; fi
+    return 0
+  fi
+  printf 'unknown\n'
+}
+
+# supervisor_legacy_lock_state <path> — classify the legacy lock into EXACTLY one of
+#   absent | live <pid> | stale <pid> | unknown <reason>
+# THREE-VALUED, AND "CANNOT TELL" NEVER COLLAPSES ONTO THE PERMISSIVE ANSWER. Every `test`/`[` file
+# predicate is two-valued, so it must fold "cannot tell" onto one of its answers and always picks the
+# permissive one — named doctrine in CLAUDE.md. So `absent` is a VERIFIED absence (the containing
+# directory is itself readable AND searchable, and the path is not there); everything else that is not
+# affirmatively live or affirmatively stale is `unknown`, and `unknown` refuses.
+supervisor_legacy_lock_state() {
+  local legacy="$1" dir pid=""
+  dir="${legacy%/*}"
+  [[ "$dir" == "$legacy" ]] && dir="."
+  # Existence is only DECIDABLE when the container can be read and searched. An unsearchable TMPDIR
+  # makes `[[ -e ]]` answer "absent" for a lock that is really there.
+  if [[ ! -d "$dir" || ! -r "$dir" || ! -x "$dir" ]]; then
+    printf 'unknown container-not-readable-or-searchable:%s\n' "$dir"
+    return 0
+  fi
+  if [[ ! -e "$legacy" && ! -L "$legacy" ]]; then
+    printf 'absent\n'
+    return 0
+  fi
+  [[ -d "$legacy" ]] || { printf 'unknown not-a-directory\n'; return 0; }
+  [[ -r "$legacy" && -x "$legacy" ]] || { printf 'unknown lock-directory-not-readable\n'; return 0; }
+  [[ -e "$legacy/pid" ]] || { printf 'unknown pid-file-missing\n'; return 0; }
+  [[ -f "$legacy/pid" && -r "$legacy/pid" ]] || { printf 'unknown pid-file-not-a-readable-file\n'; return 0; }
+  # `read`, not `cat`: a builtin, and default-IFS trimming handles the trailing newline. A read that
+  # returns non-zero at EOF still assigns, so the VALUE is what is judged, never the status.
+  read -r pid <"$legacy/pid" 2>/dev/null || true
+  case "$pid" in
+    '' | *[!0-9]* | 0*) printf 'unknown pid-not-well-formed:[%s]\n' "$pid"; return 0 ;;
+  esac
+  case "$(supervisor_pid_liveness "$pid")" in
+    live) printf 'live %s\n' "$pid" ;;
+    dead) printf 'stale %s\n' "$pid" ;;
+    *) printf 'unknown liveness-unmeasurable-for-pid:%s\n' "$pid" ;;
+  esac
+}
+
+# supervisor_legacy_lock_refuse <path> <detail> — LOUD, DIAGNOSTIC, and TEXTUALLY DISTINCT from the
+# per-lane "another instance is already running" refusal, so an operator (and a test) can tell which
+# of the two locks stopped the start.
+supervisor_legacy_lock_refuse() {
+  local legacy="$1" detail="$2"
+  echo "worker-supervisor: refusing to start — LEGACY GLOBAL supervisor lock $legacy: $detail" >&2
+  echo "worker-supervisor: that path is the PRE-#3467 machine-global single-instance lock; this supervisor's own lock is PER LANE ($SUPERVISOR_LOCK), so the two are invisible to each other and both supervisors would run in one worktree (#3549)." >&2
+  echo "worker-supervisor: remedy — stop the pre-#3467 supervisor (or upgrade that checkout to #3467+), or set SUPERVISOR_LOCK explicitly to opt out of this compatibility check." >&2
+  exit 1
+}
+
+supervisor_legacy_lock_guard() {
+  # DERIVED-DEFAULT ONLY (AC4). An operator who names the lock has taken the placement decision
+  # explicitly; the compatibility check is about OUR default colliding with the OLD default.
+  [[ "$SUPERVISOR_LOCK_DERIVED" == yes ]] || return 0
+  local legacy="${TMPDIR:-/tmp}/cqlite-worker-supervisor.lock" state pid
+  state="$(supervisor_legacy_lock_state "$legacy")"
+  case "$state" in
+    absent)
+      return 0
+      ;;
+    'live '*)
+      pid="${state#live }"
+      supervisor_legacy_lock_refuse "$legacy" "held by a LIVE pre-#3467 supervisor (recorded pid $pid)"
+      ;;
+    'stale '*)
+      pid="${state#stale }"
+      log "reclaiming STALE legacy global supervisor lock $legacy (recorded pid $pid confirmed dead) — pre-#3467 compatibility (#3549)"
+      # Atomic reclaim (rename-then-remove), the same shape as the per-lane reclaim below and for the
+      # same reason: two racers taking an rm-then-mkdir path could both believe they won, whereas only
+      # ONE racer's `mv` can succeed against a given name. A FAILED `mv` means someone else moved it
+      # and we can no longer say what state it is in — that is `unknown`, so refuse rather than proceed.
+      if mv "$legacy" "$legacy.stale.$$" 2>/dev/null; then
+        rm -rf "$legacy.stale.$$" 2>/dev/null || true
+        return 0
+      fi
+      supervisor_legacy_lock_refuse "$legacy" "stale reclaim FAILED (recorded pid $pid was dead, but the lock could not be renamed aside — a racer may hold it now, so its state is no longer knowable)"
+      ;;
+    *)
+      supervisor_legacy_lock_refuse "$legacy" "state could not be determined (${state#unknown }) — 'cannot tell' is a refusal here, never a green light"
+      ;;
+  esac
 }
 
 acquire_lock() {
@@ -1372,6 +1528,12 @@ acquire_lock() {
   # them would leave them on a stale inference.
   supervisor_resolve_lane_id
   supervisor_lock_path
+  # BEFORE any side effect, and after the derivation flag is set (#3549). A refusal must leave nothing
+  # behind it: `supervisor_claim_actor` EXPORTS an actor into the environment and
+  # `supervisor_migrate_legacy_claim` performs a CAS ADOPT that pushes a ref to origin — neither is
+  # something a supervisor that is about to refuse to start should have done. It must also run after
+  # `supervisor_lock_path`, which is what records whether the path is ours to compare.
+  supervisor_legacy_lock_guard
   supervisor_claim_actor
   supervisor_migrate_legacy_claim
   if mkdir "$SUPERVISOR_LOCK" 2>/dev/null; then
