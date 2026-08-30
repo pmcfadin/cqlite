@@ -371,3 +371,77 @@ The rule, in three parts:
 
 Two review rounds in this issue were spent on constants whose guards looked fine. This is the reason a
 guard can look fine.
+
+## Round 6 — roborev job 222 (3 findings, all fixed)
+
+**Finding 1 (BLOCKER) — stage (e) could consume 2x its cap.** The pipe collection got a FRESH
+`budget.derived` after the child wait had already spent part of the same stage budget, and the
+returned timing excluded the collection. The envelope survived (`clip` reads the real clock), but
+`the_nominal_cap_sums_stay_under_the_total_budget` computed a worst case the code could exceed — the
+assert was no longer a bound on the thing it names, i.e. a guard measuring a proxy. Fixed exactly as
+proposed: the collection gets `budget.derived - started.elapsed()`, clipped to `clock.remaining()`,
+and the stage's reported duration now INCLUDES the collection so the timing and the invariant
+describe the same quantity. The failure message names how much of the budget the child wait spent.
+
+**Finding 2 (BLOCKER) — the anchor contradicted the measurement recorded above it.**
+`MEASURED_QUIET_T_ACK` was 3ms against a recorded BINDING value of 1.4ms, so the `<= 10x` guard
+permitted 30ms where 10x the binding value is 14ms, and `ACK_QUIET_BASELINE = 25ms` was ~18x while
+its own comment claimed "~8.3x". Third instance of the same asymmetry error, so the CLASS is closed
+rather than the instance:
+
+* anchors are `from_micros`, rounded DOWN (the strict direction): `8_700us` / `1_400us`;
+* **both baselines are DERIVED** as `anchor * multiple`, so a constant cannot disagree with the data
+  above it — there is no second number to drift. `BOOT_QUIET_BASELINE = 8.7ms x 7 = 60.9ms`,
+  `ACK_QUIET_BASELINE = 1.4ms x 8 = 11.2ms`;
+* the guard PRINTS the computed multiple, asserts it equals the DECLARED one (so a reintroduced
+  literal reds) and bounds it by `MAX_BASELINE_MULTIPLE`;
+* hand-written multiples are gone from the doc comments. That prose was the reason nobody noticed:
+  hand-written arithmetic decays exactly like a stale comment, and this finding WAS that decay.
+
+**Finding 3 (roborev Low; must fix) — the ack stage recorded the wrong quantity.**
+`clock.record("b.write-acks", t_ack)` recorded the slowest SINGLE ack as the stage duration.
+Measured under-report: **44.171ms recorded for a 209.128ms stage**, ~4.7x. Budget accounting is
+untouched (`record` is diagnostic-only, `remaining()` reads the real clock); `t_ack` remains the
+calibration input, because a later stage should scale with how slow ONE round-trip is rather than with
+how many were done, and the stage's elapsed time is now measured over the whole loop. The report names
+both: `5 writes in 209.128ms (slowest single ack 44.171ms, which is the calibration input)`.
+
+### A NEW residual, found by RED-verifying the finding-2 fix
+
+Deriving each baseline from its anchor makes the MULTIPLE undriftable and the ANCHOR unverifiable:
+planting a permissive anchor (1.4ms -> 3ms) scales the baseline with it, the ratio stays 8x, and every
+assert passes. That is finding 2 one level down, and no unit test can settle it — the anchor is a
+MEASUREMENT with nothing to compare against. The integration tests, however, measure `t_boot` and
+`t_ack` on every run, so `notice_if_anchor_is_permissive` prints a NOTICE when an observed quiet value
+falls BELOW its anchor. Deliberately a NOTICE and not a failure: a host faster than the recorded floor
+is not the author's doing, and a lane that reds on correct input is the lane people learn to waive —
+FAIL where the author can act, NOTICE where only the information is actionable.
+
+**It fired on its first run** (observed t_boot 9.670ms against an 11.400ms anchor), so the anchor was
+in fact permissive; it is now the smallest value actually recorded, 8.7ms. A future NOTICE on a faster
+host is expected and is not a treadmill to chase: lowering the anchor only ever tightens the bound.
+
+### Round-6 file-size split
+
+Round 6 pushed `graceful_shutdown_support/mod.rs` to 1584 lines, over the 1500 test threshold, so
+`file-size` would have FAILed the next lite. Split by responsibility:
+`budgets.rs` (931) holds the clock and the budgets — stage specs, the floor-invariant mapping,
+anchors/baselines, `Budget`/`calibrated`/`bare`, `StageClock`, the NOTICE, and every unit test that
+pins their invariants (with the constants they constrain, so a constant cannot be edited without its
+guard in view); `mod.rs` (672) holds the child harness; `graceful_shutdown_tests.rs` (448) is
+unchanged. Constraints re-verified: the test target name is untouched and is still the only
+maxdepth-1 `*.rs` matching `graceful`, both files are inside the existing subdirectory so neither
+becomes a cargo target, and the test count is unchanged at 10.
+
+### Round-6 RED verification
+
+| plant | result |
+|---|---|
+| reintroduce an independent literal baseline (25ms) | RED: `25ms is 17.86x its binding anchor ... over the 10x limit` |
+| derive the baseline with a multiple disagreeing with the declared one | RED: `computes to 9.0000x its anchor but declares 8x — the baseline is no longer derived` |
+| declared multiple raised to 18x | RED: `over the 10x limit: the calibration would be inert` |
+| anchor back to the permissive 3ms | **GREEN — the residual above**, now covered by the NOTICE instead |
+
+One plant reported `!! PLANT DID NOT APPLY` (a `sed` whose pattern no longer matched after `cargo fmt`
+reflowed the constant onto one line) and was retried. That is rule (b) of the probe method working as
+intended: without it, the run would have read as an assert that did not fire.
