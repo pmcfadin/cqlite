@@ -2,12 +2,32 @@
  * Exception-path and abandoned-iterator LEAK BUDGET tests (issue #1465, parent #1436).
  *
  * Error paths are where leaks hide. When a query rejects, or a streaming
- * iterator is abandoned partway through, the native (Rust) side may have
- * allocated buffers, channel state, or JS objects that never get freed -- and no
- * test noticed steady growth across repeated failures. A long-running Node
- * server hitting errors in a loop would slowly bloat. This file puts a BUDGET on
- * exactly those paths, mirroring the Python tracemalloc budgets in
+ * iterator is abandoned partway through, buffers / channel state / JS objects may
+ * never get freed -- and no test noticed steady growth across repeated failures.
+ * A long-running Node server hitting errors in a loop would slowly bloat. This
+ * file puts budgets on exactly those paths, mirroring the Python budgets in
  * bindings/python/tests/test_leak_paths.py.
+ *
+ * WHAT EACH INSTRUMENT CAN AND CANNOT SEE (issue #1465 review, stated up front
+ * because the earlier version of this header overclaimed):
+ *   * `heapUsed + external` covers V8-managed memory plus off-heap allocations
+ *     V8 has been TOLD about (`Buffer`s, ArrayBuffers, napi external memory
+ *     adjustments). That is every JS object the binding hands back -- rows, cells,
+ *     error objects, iterator state -- but it is BLIND to an ordinary Rust-side
+ *     allocation. A leaked `Vec<u8>`, a retained streaming channel or an
+ *     un-dropped reader buffer stays completely FLAT in both numbers while
+ *     process memory climbs. So the primary budget bounds the JS-VISIBLE half of
+ *     these paths: a real, previously unguarded half, not the whole leak surface.
+ *   * `process.memoryUsage().rss` DOES see native allocations, because it is the
+ *     OS's resident-set figure for the whole process. It is coarse and jittery
+ *     (V8 heap growth, allocator arenas, the addon's Tokio threads), so the
+ *     secondary budget on it is deliberately LOOSE: gross native retention only.
+ *
+ *   Consequence, recorded honestly: a SMALL per-iteration native leak (below the
+ *   RSS budget's ~37 KiB/iteration resolution) is invisible to BOTH instruments
+ *   here. The proper oracle for that class -- an isolated process, RSS measured
+ *   against a calibrated NATIVE retention control, or native live-resource
+ *   counters -- is issue #3593 and is deliberately not built here.
  *
  * WHY THE GUARD IS A MEASURED BUDGET, NOT jest `--detectLeaks` (issue #1465
  * step 3 authorises this fallback and requires the reason to be documented here):
@@ -26,8 +46,13 @@
  * It is worth having on the dedicated invocation because an abandoned iterator
  * whose `return()`/`close()` never ran can leave a libuv handle behind. Note what
  * it is: a REPORT printed after the run ("Jest has detected the following N open
- * handles"), not an assertion — it does not fail the lane, so it is a diagnostic
- * for a human, and the budgets below are what actually gate.
+ * handles"), not an assertion — it does not fail the lane (exit code 0), so it is
+ * a diagnostic for a human, and the budgets below are what actually gate.
+ * BASELINE, so the next reader is not misled: this lane always reports exactly
+ * ONE handle, `CustomGC`, attributed to `require`-ing the napi addon. It is
+ * napi-rs's process-global GC integration, appears for ANY file that loads the
+ * module, and is NOT produced by the paths under test. The actionable signal is a
+ * SECOND handle, or a handle attributed to a stream/iterator frame.
  *
  * WHAT IS ASSERTED (and what is deliberately NOT): the growth of
  * `heapUsed + external` across N iterations must stay under a documented budget.
@@ -64,6 +89,9 @@ const SCHEMA = global.testPaths.SCHEMA_WIDE_ROWS;
 // nonexistent-table SELECT, which resolves with 0 rows WITHOUT rejecting
 // (measured 2026-08-30) and would make the error-path loop a silent no-op.
 const BAD_CQL = 'THIS IS NOT VALID CQL';
+// The binding's authoritative identity for that rejection (error-wrapper maps the
+// core error category to `code`; see __test__/error.test.js): Query -> 'QUERY'.
+const EXPECTED_ERROR_CODE = 'QUERY';
 
 // Widest fixture in the corpus (~101 declared columns, 50 rows), the same table
 // the conversion-budget ratchet uses. A wide row means an abandoned stream has
@@ -82,19 +110,30 @@ const STREAM_ROWS = 5;
 // `heapUsed`/`external` deltas are far jitterier than Python's tracemalloc:
 // individual passes over the SAME clean loop swung from -133 KB to +349 KB (V8
 // growing its heap, or collecting an earlier pass's garbage inside a later one).
-// So each budget is measured over several passes and asserted on the MINIMUM
-// pass -- not the median, and not a single sample.
+// So each budget is measured over several passes and asserted on the MINIMUM of
+// the NON-NEGATIVE passes -- not the median, not a single sample, and never a
+// negative one.
 //
 // WHY THE MINIMUM (measured, not aesthetic): a genuine per-iteration leak raises
 // EVERY pass -- for all three synthetic leak shapes below, all 9 passes were
-// elevated and the MINIMUM pass still sat 1.5x-5.5x above the budget -- whereas
-// GC jitter perturbs individual passes in both directions. The minimum therefore
+// elevated and the minimum non-negative pass still sat 1.5x-5.5x above the budget
+// -- whereas GC jitter perturbs individual passes in both directions. The minimum
 // needs only ONE quiet pass out of MEASURE_PASSES to read fairly, while a median
-// needs a majority: a median-based budget was tried first and flaked (1 red in
-// 10 runs; medians 616..3200 bytes, with occasional 150-296 KB passes).
-// The cost, stated honestly: a leak smaller than the single-pass GC-deferral
-// amplitude (~130 KB on the error path) could in principle hide in the minimum.
-// Measured, none of the three realistic shapes below does.
+// needs a majority: a median-based budget was tried first and flaked (1 red in 10
+// runs; medians 616..3200 bytes, with occasional 150-296 KB passes).
+//
+// WHY NEGATIVE PASSES ARE EXCLUDED, quantified: a negative delta means the pass
+// FREED more than it allocated -- deferred garbage from an earlier pass being
+// collected inside this one -- so it is unaccounted bookkeeping, not a
+// measurement of this pass. Including them was a real loss of sensitivity, not a
+// theoretical one: clean minima reached -133,504 bytes, and a run containing such
+// a pass moved effective sensitivity from ~109 to ~550 bytes/iteration, enough
+// that the smallest shape this test claims to catch (a 64-byte Buffer per
+// iteration) would read at or below zero and PASS.
+//
+// ALL passes negative is a HARD ERROR, never a pass: that state means the
+// instrument measured nothing about this loop, and a positive verdict requires an
+// affirmative measurement (CLAUDE.md).
 const MEASURE_PASSES = 9;
 
 // ---------------------------------------------------------------------------
@@ -119,31 +158,89 @@ const MEASURE_PASSES = 9;
 // min 119,792 bytes (399.3/iteration), stream path min 133,272 bytes
 // (444.2/iteration), i.e. 3.7x and 4.1x over budget -- so the guard is known to
 // bite the code it ships with, not just a lookalike in a scratch harness.
+// WHAT THAT CONTROL ESTABLISHES, precisely: the planted objects are JS-visible
+// (`Buffer`, plain objects), so it proves the instrument is sensitive to
+// JS-VISIBLE retention on these paths. It establishes NOTHING about sensitivity
+// to a native (Rust-allocator) leak, which `heapUsed + external` cannot see at
+// all -- that is the RSS backstop's job below, and properly, issue #3593's.
 // ---------------------------------------------------------------------------
-const BUDGET_BYTES = 32 * 1024;
+// On a CI runner (GitHub sets `CI`) both budgets are doubled. Reason, and its
+// limit: the leg that runs this file in CI is a 3-core `macos-14` job whose
+// GC/allocator jitter has never been measured, and a lane that reds on correct
+// input is the lane people learn to waive. The MERGE-GATING execution is the
+// local agent-gate's `node-bindings` component, where `CI` is unset and the
+// unscaled budgets apply -- so the doubling cannot weaken the gate.
+const CI_BUDGET_MULTIPLIER = process.env.CI ? 2 : 1;
+const BUDGET_BYTES = 32 * 1024 * CI_BUDGET_MULTIPLIER;
+
+// SECONDARY, LOOSE, NATIVE-VISIBLE BUDGET (issue #1465 review): total RSS growth
+// across the whole measured window (all MEASURE_PASSES x ITERATIONS iterations).
+// MEASURED on this machine, 2,700 iterations, 3 consecutive repetitions per path:
+//   error path:  -8,192 .. +6,311,936 bytes
+//   stream path: +430,080 .. +11,763,712 bytes
+// Budget = 96 MiB, i.e. ~8.5x the largest observed value, because RSS jitter is
+// dominated by V8 heap growth and allocator arenas rather than by the loop.
+//   WHAT IT CATCHES: gross native retention -- at 2,700 iterations it trips on
+//       roughly >= 37 KiB/iteration held on the native heap (e.g. an un-dropped
+//       per-stream row buffer over a ~101-column table).
+//   WHAT IT DOES NOT CATCH: anything smaller. It is a backstop for the gross
+//       case, not an oracle (issue #3593).
+const RSS_BUDGET_BYTES = 96 * 1024 * 1024 * CI_BUDGET_MULTIPLIER;
 
 // Per-test timeout for the two multi-pass budgets (measured ~0.5s and ~4.5s on
 // this machine). Declared here rather than as a project-level `testTimeout`,
 // which trips a jest 29 config-validation warning.
 const BUDGET_TEST_TIMEOUT_MS = 120_000;
 
+/** Loose, native-visible backstop: RSS growth over the whole measured window. */
+function assertRssUnderBudget(label, rssGrowth) {
+  const total = MEASURE_PASSES * ITERATIONS;
+  if (rssGrowth >= RSS_BUDGET_BYTES) {
+    throw new Error(
+      `${label}: RSS grew ${rssGrowth} bytes over ${total} iterations ` +
+        `(${(rssGrowth / total).toFixed(1)} bytes/iteration), exceeding the ` +
+        `loose ${RSS_BUDGET_BYTES}-byte native-visible budget. Unlike the ` +
+        'heapUsed+external budget this one SEES Rust-side allocations, so a trip ' +
+        'here points at gross native retention on this path (issue #1465)'
+    );
+  }
+  expect(rssGrowth).toBeLessThan(RSS_BUDGET_BYTES);
+}
+
 /**
  * Assert the measured growth is under the budget, with every per-pass sample in
  * the failure message (jest's own `toBeLessThan` output would show only the
  * single asserted number, and the spread is what tells a real leak from a GC
  * artefact).
+ *
+ * The asserted statistic is the MINIMUM NON-NEGATIVE pass (see MEASURE_PASSES).
+ * An all-negative sample set is a hard error: nothing was measured, so there is
+ * no verdict to give.
  */
-function assertUnderBudget(label, growth, samples) {
+function assertUnderBudget(label, samples) {
+  const nonNegative = samples.filter((sample) => sample >= 0);
+  if (nonNegative.length === 0) {
+    throw new Error(
+      `${label}: all ${MEASURE_PASSES} passes measured NEGATIVE growth ` +
+        `(samples=[${samples.join(', ')}]) — every pass freed more than it ` +
+        'allocated, so this run measured nothing about the loop under test and ' +
+        'has no verdict to give. Re-run; if it persists the instrument or the ' +
+        'gc settling in settle() is broken (issue #1465)'
+    );
+  }
+  const growth = Math.min(...nonNegative);
   if (growth >= BUDGET_BYTES) {
     throw new Error(
       `${label}: tracked memory (heapUsed+external) grew by at least ${growth} ` +
-        `bytes in EVERY one of ${MEASURE_PASSES} passes of ${ITERATIONS} ` +
-        `iterations (${(growth / ITERATIONS).toFixed(1)} bytes/iteration), ` +
-        `exceeding the ${BUDGET_BYTES}-byte budget. ` +
+        `bytes in EVERY non-negative pass (${nonNegative.length} of ` +
+        `${MEASURE_PASSES}) of ${ITERATIONS} iterations ` +
+        `(${(growth / ITERATIONS).toFixed(1)} bytes/iteration), exceeding the ` +
+        `${BUDGET_BYTES}-byte budget. ` +
         `Per-pass samples=[${samples.join(', ')}] (issue #1465)`
     );
   }
   expect(growth).toBeLessThan(BUDGET_BYTES);
+  return growth;
 }
 
 /** Total tracked bytes: V8 heap PLUS off-heap (Buffer/native) allocations. */
@@ -166,13 +263,17 @@ async function settle() {
  * Run `body` WARMUP times, then measure MEASURE_PASSES x ITERATIONS of it.
  *
  * `body(counters)` is responsible for its own non-vacuity counting; this helper
- * only measures. Returns the MINIMUM per-pass growth in tracked bytes (the
- * statistic the budget is asserted on) plus every per-pass sample.
+ * only measures. Returns every per-pass growth sample in tracked bytes (the
+ * statistic to assert on is chosen by assertUnderBudget()) plus total RSS growth
+ * across the whole window, which is the loose native-visible backstop.
  */
 async function measureGrowth(body, counters) {
   for (let i = 0; i < WARMUP; i += 1) {
     await body(counters);
   }
+
+  await settle();
+  const rssBefore = process.memoryUsage().rss;
 
   const samples = [];
   for (let pass = 0; pass < MEASURE_PASSES; pass += 1) {
@@ -184,8 +285,7 @@ async function measureGrowth(body, counters) {
     await settle();
     samples.push(trackedBytes() - before);
   }
-  // The MINIMUM pass is the asserted statistic -- see MEASURE_PASSES above.
-  return { growth: Math.min(...samples), samples };
+  return { samples, rssGrowth: process.memoryUsage().rss - rssBefore };
 }
 
 describe('exception-path / abandoned-iterator leak budgets (issue #1465)', () => {
@@ -226,6 +326,10 @@ describe('exception-path / abandoned-iterator leak budgets (issue #1465)', () =>
     for (let i = 0; i < 3; i += 1) {
       await expect(db.executeNative(BAD_CQL)).rejects.toThrow();
     }
+    // ...and it is the typed error the measured loop below counts on.
+    await expect(db.executeNative(BAD_CQL)).rejects.toMatchObject({
+      code: EXPECTED_ERROR_CODE,
+    });
   });
 
   test('breaking out of a stream abandons it mid-stream and runs return() -> close()', async () => {
@@ -262,13 +366,25 @@ describe('exception-path / abandoned-iterator leak budgets (issue #1465)', () =>
   // -------------------------------------------------------------------------
 
   test('repeated query rejections stay under the leak budget', async () => {
-    const counters = { rejected: 0, resolved: 0 };
-    const { growth, samples } = await measureGrowth(async (c) => {
+    // `wrongType` closes the hole where a synchronous TypeError (a renamed
+    // `executeNative`, a closed database) would satisfy non-vacuity: the loop
+    // demands the AUTHORITATIVE error identity, matching python's typed
+    // `except cqlite.QueryError`. `code` is the binding's authoritative error
+    // identity (see __test__/error.test.js): an unsupported statement type is
+    // category Query -> code 'QUERY'.
+    const counters = { rejected: 0, resolved: 0, wrongType: [] };
+    const { samples, rssGrowth } = await measureGrowth(async (c) => {
       try {
         await db.executeNative(BAD_CQL);
         c.resolved += 1;
       } catch (err) {
-        c.rejected += 1;
+        if (err && err.code === EXPECTED_ERROR_CODE) {
+          c.rejected += 1;
+        } else {
+          // Record, do not throw: throwing inside the measured loop would
+          // abandon the measurement mid-pass. Asserted right after it.
+          c.wrongType.push(`${err && err.name}:${err && err.code}`);
+        }
       }
     }, counters);
 
@@ -277,15 +393,18 @@ describe('exception-path / abandoned-iterator leak budgets (issue #1465)', () =>
     // while measuring nothing.
     const expected = WARMUP + MEASURE_PASSES * ITERATIONS;
     expect(counters.resolved).toBe(0);
+    // Every rejection must be the EXPECTED error, not just any throw.
+    expect(counters.wrongType.slice(0, 5)).toEqual([]);
     expect(counters.rejected).toBe(expected);
 
     // BOUNDED, not zero (see file header).
-    assertUnderBudget('error path (repeated rejections)', growth, samples);
+    assertUnderBudget('error path (repeated rejections)', samples);
+    assertRssUnderBudget('error path (repeated rejections)', rssGrowth);
   }, BUDGET_TEST_TIMEOUT_MS);
 
   test('abandoned streaming iterators stay under the leak budget', async () => {
     const counters = { rows: 0, iterators: 0 };
-    const { growth, samples } = await measureGrowth(async (c) => {
+    const { samples, rssGrowth } = await measureGrowth(async (c) => {
       let pulled = 0;
       for await (const row of db.executeStreaming(STREAM_QUERY)) {
         pulled += 1;
@@ -303,6 +422,7 @@ describe('exception-path / abandoned-iterator leak budgets (issue #1465)', () =>
     expect(counters.rows).toBe(STREAM_ROWS * expectedIterators);
 
     // BOUNDED, not zero (see file header).
-    assertUnderBudget('abandoned streaming iterators', growth, samples);
+    assertUnderBudget('abandoned streaming iterators', samples);
+    assertRssUnderBudget('abandoned streaming iterators', rssGrowth);
   }, BUDGET_TEST_TIMEOUT_MS);
 });
