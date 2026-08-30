@@ -573,7 +573,13 @@ What it guarantees:
   `LEGACY GLOBAL supervisor lock` message (textually distinct from the per-lane "another instance is
   already running") — remedy: stop that supervisor or upgrade its checkout past #3467. A holder whose
   recorded pid is CONFIRMED dead is reclaimed; anything undeterminable (not a directory, no/garbled
-  `pid` file, unreadable) REFUSES rather than proceeding. An explicit `SUPERVISOR_LOCK` skips the check.
+  `pid` file, unreadable) REFUSES rather than proceeding — and a reclaim never destroys a lock it cannot
+  re-identify as the dead one it judged: the renamed-aside directory is re-read and, on any mismatch,
+  put back (or preserved and named) while the start refuses. An explicit `SUPERVISOR_LOCK` skips the check.
+  **It is a STARTUP check, not machine-global exclusion: it REDUCES the collision window, it does not
+  eliminate it** — a pre-#3467 supervisor that starts *after* the check cannot be stopped without
+  reimposing machine-global exclusion, which #3393 forbids (N lanes per box). The RESIDUAL block at the
+  guard records that window and why it is tolerated.
   The guard is deletable once every checkout on the box is at or past #3467 — the condition is recorded
   at the guard in `scripts/local/worker-supervisor.sh`. (The Claude probe keys on the supervisor's own `-p … --agent flow-lead`
   spawn shape, so a legitimate interactive `claude` REPL or an interactive `claude --agent flow-lead`
