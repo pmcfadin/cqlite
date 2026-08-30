@@ -204,12 +204,16 @@ STREAM_BUFFER_SIZE = 2
 # ~800x, and a 9-pass statistic would cost ~50s in a lane that currently costs 6s.
 # If this file ever needs passes, the runtime is why it does not have them today.
 #
-# NO MIN/MEDIAN PAIR either, and for a structural reason rather than an oversight
-# (issue #1465 round 5 class sweep): the Node lane asserts BOTH the minimum and the
-# median of 9 passes because a single most-favourable sample could otherwise carry
-# the verdict. This lane takes ONE sample and it is the PESSIMISTIC one (the cold
-# first window of a fresh process), so there is no favourable sample to hide behind
-# and nothing for a median to add.
+# NO MIN/MEDIAN PAIR AND NO QUORUM either, for a structural reason rather than an
+# oversight (issue #1465 rounds 5-8 class sweep): the Node lane asserts the MINIMUM
+# and the UPPER MEDIAN of its 9 passes, and refuses a verdict below a QUORUM of 5
+# valid passes, because a single most-favourable sample could otherwise carry the
+# verdict there. This lane takes ONE sample and it is the PESSIMISTIC one (the cold
+# first window of a fresh process): there is no favourable sample to hide behind, no
+# distribution for a median to summarise, and no pass count to reach a quorum with.
+# What this lane DOES share, because it is the same rule and not the same mechanism,
+# is the REFUSAL: a non-positive tracked delta is not a measurement and gets no
+# verdict -- see _assert_tracked_under_budget.
 #
 # NO THREE-STATE INSTRUMENT GUARD ON THE NODE SIDE, symmetrically: this file's RSS
 # reader can be absent (Windows) or degrade (no /proc), which is why it is
@@ -421,6 +425,41 @@ def _measure_growth_bytes(body, iterations=ITERATIONS, warmup=WARMUP_ITERATIONS)
     return tracked, rss_growth, rss_kind
 
 
+def _assert_tracked_under_budget(label: str, growth: int, budget: int) -> None:
+    """Assert Python-allocator growth is under ``budget`` -- with a refusal first.
+
+    N5 (issue #1465 round 8), the same affirmative-measurement rule the Node lane
+    got in round 7, swept to this lane: ``growth < budget`` alone PASSES on a
+    non-measurement. A net delta of zero or below means the window freed at least as
+    much as it allocated, which is not evidence that the loop is clean -- it is the
+    absence of a reading, and the difference matters here because this lane takes
+    ONE sample (there is no quorum of passes to fall back on). So a non-positive
+    delta is a hard error naming the value, in the same voice as the Node errors,
+    never a pass.
+
+    Why non-positive rather than "== 0": tracemalloc's net diff can go negative when
+    the loop released tracked blocks that pre-existed the first snapshot, and neither
+    zero nor negative supports the claim "this loop retained less than N bytes".
+    The non-vacuity counters in the caller prove the WORK happened; this proves the
+    MEASUREMENT happened.
+    """
+    if growth <= 0:
+        raise AssertionError(
+            f"{label}: tracked-allocation growth measured {growth} bytes over "
+            f"{ITERATIONS} iterations — a non-positive net delta is not a "
+            "measurement of this loop (the window freed at least as much as it "
+            "allocated), so there is no verdict to give and the budget below would "
+            "pass vacuously. Re-run; if it persists the tracemalloc window or the "
+            "gc.collect() around it is broken (issue #1465)"
+        )
+    assert growth < budget, (
+        f"{label}: tracked allocation grew {growth} bytes over {ITERATIONS} "
+        f"iterations ({growth / ITERATIONS:.1f} bytes/iteration), exceeding the "
+        f"{budget}-byte budget — this path is likely retaining allocations per "
+        "iteration (issue #1465)"
+    )
+
+
 def _assert_rss_under_budget(label: str, rss_growth, rss_kind: str) -> None:
     """Loose, native-visible backstop: RSS growth over the measured loop.
 
@@ -501,12 +540,10 @@ def test_error_path_no_leak(leak_db):
         "leak budget below would be vacuous (issue #1465)"
     )
 
-    # BOUNDED, not zero (see module docstring).
-    assert growth < ERROR_BUDGET_BYTES, (
-        f"error-path allocation grew {growth} bytes over {ITERATIONS} raising "
-        f"queries ({growth / ITERATIONS:.1f} bytes/iteration), exceeding the "
-        f"{ERROR_BUDGET_BYTES}-byte budget — the exception path is likely retaining "
-        "allocations per failure (issue #1465)"
+    # BOUNDED, not zero (see module docstring) -- and only after the measurement
+    # itself is affirmed (N5).
+    _assert_tracked_under_budget(
+        "error path (repeated QueryError)", growth, ERROR_BUDGET_BYTES
     )
     _assert_rss_under_budget("error path", rss_growth, rss_kind)
 
@@ -589,11 +626,9 @@ def test_abandoned_stream_no_leak(leak_db):
         "would be vacuous (issues #1230, #1465)"
     )
 
-    # BOUNDED, not zero (see module docstring).
-    assert growth < STREAM_BUDGET_BYTES, (
-        f"abandoned-stream allocation grew {growth} bytes over {ITERATIONS} "
-        f"abandoned iterators ({growth / ITERATIONS:.1f} bytes/iteration), "
-        f"exceeding the {STREAM_BUDGET_BYTES}-byte budget — an abandoned stream "
-        "is likely retaining its buffer/channel state (issue #1465)"
+    # BOUNDED, not zero (see module docstring) -- and only after the measurement
+    # itself is affirmed (N5).
+    _assert_tracked_under_budget(
+        "abandoned stream (mid-stream break)", growth, STREAM_BUDGET_BYTES
     )
     _assert_rss_under_budget("abandoned stream", rss_growth, rss_kind)

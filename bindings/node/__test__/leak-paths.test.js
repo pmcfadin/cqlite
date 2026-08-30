@@ -192,28 +192,30 @@ const STREAM_ROWS = 5;
 //
 // AND THE MINIMUM ALONE IS NOT ENOUGH (issue #1465 round 5, roborev H1): the
 // minimum is the most FAVOURABLE sample, so one slightly-positive pass would
-// excuse eight that blew the budget. That hole is now closed by a SECOND
-// assertion on the MEDIAN (see MEDIAN_BUDGET_BYTES), which a majority of passes
-// must satisfy. Both numbers come from re-measuring the CURRENT configuration
-// (`bufferSize: 2`) over 10 runs of 9 passes x 300 iterations -- the old
-// justification was measured under the noisier default-buffer config and was
-// stale:
-//   error path   min-of-nonneg    16 (x9), 9,328 (x1)      -> max 9,328
-//                median-of-nonneg 5,312 .. 22,196          -> max 22,196
-//                MAX-of-nonneg    11,088 .. 428,064        -> max 428,064
-//   stream path  min-of-nonneg    56 (x10)                 -> max 56
-//                median-of-nonneg 56 (x9), 852 (x1)        -> max 852
-//                MAX-of-nonneg    56 .. 6,136              -> max 6,136
-// WHY NOT THE STRICTEST (max-of-nonneg), which would close the hole completely:
-// on the error path a CLEAN run reaches 428,064 bytes in some pass -- 13x the
-// budget -- so a max-based assertion would red 6 of those 10 clean runs, and
-// raising the budget past that noise would put it ABOVE the RED-control signal
-// (110,912), i.e. it would destroy discrimination to buy strictness. Measured,
-// not assumed.
+// excuse eight that blew the budget. That hole is closed by a SECOND assertion on
+// the UPPER MEDIAN, against a PER-PATH ceiling (STREAM_MEDIAN_CEILING_BYTES /
+// ERROR_MEDIAN_GROSS_CEILING_BYTES), which a majority of passes must satisfy.
+//
+// WHY NOT THE STRICTEST STATISTIC (max-of-nonneg), which would close the hole
+// completely: on the error path a CLEAN run reaches ~428 KB in some pass -- 13x the
+// minimum budget -- so a max-based assertion reddened 6 of 10 clean runs, and
+// raising the ceiling past that noise would put it ABOVE the RED-control signal,
+// destroying discrimination to buy strictness. Measured, not assumed.
+//
 // RESIDUAL, stated so nobody has to rediscover it: with a median ceiling, up to
 // 4 of 9 passes can still exceed the budget while the test passes. That is a
 // strictly smaller hole than "8 of 9", and the min assertion still fires on the
 // quiet-pass end.
+//
+// SUPERSEDED MEASUREMENTS (round 5, kept only to show the direction of travel --
+// do NOT read these as the current justification; the live numbers are the round-7
+// table beside the ceilings, which uses the UPPER median and reports valid-pass
+// counts):
+//   error path   min 16 (x9), 9,328 (x1) | median 5,312..22,196 | MAX 11,088..428,064
+//   stream path  min 56 (x10)            | median 56 (x9), 852  | MAX 56..6,136
+// Those medians are the CLASSIC (averaging) median over a statistic that no longer
+// exists here; round 7 re-measured the upper median and found the error path
+// reaching 137,416, which is why its ceiling is now separate and declared weak.
 const MEASURE_PASSES = 9;
 
 // ---------------------------------------------------------------------------
@@ -309,8 +311,27 @@ const BUDGET_BYTES = 32 * 1024 * CI_BUDGET_MULTIPLIER;
 // catch the plant would have meant 256 KiB+, which catches nothing the minimum does
 // not already catch, and accepting the 1-in-8 flake was not an option: a lane that
 // reds on correct input is the lane people learn to waive.
-const MEDIAN_BUDGET_BYTES = 64 * 1024 * CI_BUDGET_MULTIPLIER;
-const ERROR_MEDIAN_BUDGET_BYTES = 512 * 1024 * CI_BUDGET_MULTIPLIER;
+const STREAM_MEDIAN_CEILING_BYTES = 64 * 1024 * CI_BUDGET_MULTIPLIER;
+// Named GROSS on purpose (round 8): a call site sees only the identifier, so the
+// weakness has to travel with the symbol rather than living in the comment above it.
+const ERROR_MEDIAN_GROSS_CEILING_BYTES = 512 * 1024 * CI_BUDGET_MULTIPLIER;
+
+// N1 (round 8): label and ceiling are bound in ONE table and passed as ONE argument,
+// so transposing them is UNREPRESENTABLE at the call site. Swapping two positional
+// arguments used to loosen the stream median ceiling 8x with every committed test
+// still passing (the stream RED control at 134,032 sits under the error ceiling, so
+// only the minimum would have bitten). A table cannot be transposed; a pair of
+// arguments can.
+const BUDGET_SUBJECTS = Object.freeze({
+  errorPath: Object.freeze({
+    label: 'error path (repeated rejections)',
+    medianCeiling: ERROR_MEDIAN_GROSS_CEILING_BYTES,
+  }),
+  abandonedStream: Object.freeze({
+    label: 'abandoned streaming iterators',
+    medianCeiling: STREAM_MEDIAN_CEILING_BYTES,
+  }),
+});
 
 const RSS_BUDGET_BYTES = 96 * 1024 * 1024 * CI_BUDGET_MULTIPLIER;
 
@@ -342,6 +363,12 @@ function assertRssUnderBudget(label, rssGrowth) {
 // survivors reads 50,000, so ONE quiet pass excused the only leaking pass and no
 // majority of the nine passes supported the verdict at all. Below quorum is now a
 // hard error, in the same voice as the all-negative one.
+// MEASURED HEADROOM (round 7, 8 runs of 9 passes at `bufferSize: 2`): the stream
+// path produced 8-9 valid non-negative passes per run and the error path 6-7, so
+// the quorum of 5 sits 1-4 passes below the worst observed count -- i.e. 2-3 of 9
+// passes come back negative on the error path and the quorum still clears by 2.
+// If that margin ever tightens, the below-quorum error names the count so the
+// reader can see it rather than infer it.
 const SAMPLE_QUORUM = Math.floor(MEASURE_PASSES / 2) + 1;
 
 /**
@@ -381,7 +408,8 @@ function budgetStatistics(label, samples) {
         `non-negative growth, below the quorum of ${SAMPLE_QUORUM} — a verdict ` +
         'from a handful of surviving samples is not a measurement of this loop, ' +
         'so there is no verdict to give (a quiet pass could otherwise excuse a ' +
-        `leaking one). Per-pass samples=[${samples.join(', ')}] (issue #1465)`
+        'leaking one). Re-run; if it persists the instrument or the gc settling in ' +
+        `settle() is broken. Per-pass samples=[${samples.join(', ')}] (issue #1465)`
     );
   }
   const sorted = [...nonNegative].sort((a, b) => a - b);
@@ -401,13 +429,15 @@ function budgetStatistics(label, samples) {
  * artefact).
  *
  * TWO statistics are asserted (see MEASURE_PASSES): the MINIMUM non-negative pass
- * against BUDGET_BYTES (sensitivity) and the UPPER MEDIAN against `medianCeiling`
- * (so the favourable half cannot carry the verdict). The ceiling is per-path and
- * passed in by the caller -- see MEDIAN_BUDGET_BYTES / ERROR_MEDIAN_BUDGET_BYTES for
- * why one number cannot serve both. An unmeasurable sample set is a hard error,
- * never a pass -- see budgetStatistics.
+ * against BUDGET_BYTES (sensitivity) and the UPPER MEDIAN against the subject's own
+ * `medianCeiling` (so the favourable half cannot carry the verdict). `subject` is an
+ * entry of BUDGET_SUBJECTS -- ONE argument carrying both the label and its ceiling,
+ * so the two cannot be transposed. See STREAM_MEDIAN_CEILING_BYTES /
+ * ERROR_MEDIAN_GROSS_CEILING_BYTES for why one number cannot serve both paths. An
+ * unmeasurable sample set is a hard error, never a pass -- see budgetStatistics.
  */
-function assertUnderBudget(label, samples, medianCeiling) {
+function assertUnderBudget(subject, samples) {
+  const { label, medianCeiling } = subject;
   const { count, min, upperMedian } = budgetStatistics(label, samples);
   if (upperMedian >= medianCeiling) {
     throw new Error(
@@ -515,9 +545,9 @@ describe('leak-budget statistic (pure, issue #1465)', () => {
       /only 2 of 9 passes measured non-negative growth, below the quorum of 5/
     );
     // ...and the assertion the budget tests actually call must refuse it too.
-    expect(() => assertUnderBudget('t', workedExample, MEDIAN_BUDGET_BYTES)).toThrow(
-      /below the quorum/
-    );
+    expect(() =>
+      assertUnderBudget(BUDGET_SUBJECTS.abandonedStream, workedExample)
+    ).toThrow(/below the quorum/);
   });
 
   test('exactly at quorum DOES yield a verdict, from the surviving passes', () => {
@@ -529,10 +559,23 @@ describe('leak-budget statistic (pure, issue #1465)', () => {
     expect(stats.upperMedian).toBe(30); // sorted[floor(5/2)] = middle of five
   });
 
+  test('ONE BELOW quorum is refused — the boundary, not just a far-below count', () => {
+    // N3 (round 8): the case above uses 2 valid passes, so it also passes against
+    // an off-by-one predicate (`< SAMPLE_QUORUM - 1`). This pins the boundary: 4
+    // valid of 9 is the largest refused count, and 5 (asserted below) is the
+    // smallest accepted one.
+    const oneBelow = [...neg(MEASURE_PASSES - (SAMPLE_QUORUM - 1)), 1, 2, 3, 4];
+    expect(oneBelow).toHaveLength(MEASURE_PASSES);
+    expect(oneBelow.filter((x) => x >= 0)).toHaveLength(SAMPLE_QUORUM - 1);
+    expect(() => budgetStatistics('t', oneBelow)).toThrow(
+      /only 4 of 9 passes measured non-negative growth, below the quorum of 5/
+    );
+  });
+
   test('the statistic is the UPPER median for an EVEN count, not the average', () => {
     // SIX non-negative passes: even, and at/above quorum so a verdict IS issued.
-    // (An even count of 4 would be below quorum for MEASURE_PASSES=9 and is
-    // refused instead — the case above covers that.)
+    // (An even count of 4 is below quorum for MEASURE_PASSES=9 and is refused
+    // instead — the boundary case directly above covers exactly that count.)
     const evenSet = [...neg(3), 10, 20, 30, 40, 50, 60];
     expect(evenSet).toHaveLength(MEASURE_PASSES);
     const stats = budgetStatistics('t', evenSet);
@@ -554,20 +597,59 @@ describe('leak-budget statistic (pure, issue #1465)', () => {
       const stats = budgetStatistics('t', set);
       expect(stats.min).toBeLessThanOrEqual(stats.upperMedian);
     }
-    expect(MEDIAN_BUDGET_BYTES).toBeGreaterThan(BUDGET_BYTES);
-    expect(ERROR_MEDIAN_BUDGET_BYTES).toBeGreaterThan(BUDGET_BYTES);
+    expect(STREAM_MEDIAN_CEILING_BYTES).toBeGreaterThan(BUDGET_BYTES);
+    expect(ERROR_MEDIAN_GROSS_CEILING_BYTES).toBeGreaterThan(BUDGET_BYTES);
+  });
+
+  test('each budget subject carries its OWN ceiling, stream STRICTER than error', () => {
+    // N1: the table is what makes a transposition unrepresentable; this pins the
+    // values in it, so a future edit that swaps the two ceilings INSIDE the table
+    // still reds. The stream path must be the stricter of the two — that is the
+    // whole reason there are two.
+    expect(BUDGET_SUBJECTS.abandonedStream.medianCeiling).toBe(
+      STREAM_MEDIAN_CEILING_BYTES
+    );
+    expect(BUDGET_SUBJECTS.errorPath.medianCeiling).toBe(
+      ERROR_MEDIAN_GROSS_CEILING_BYTES
+    );
+    expect(BUDGET_SUBJECTS.abandonedStream.medianCeiling).toBeLessThan(
+      BUDGET_SUBJECTS.errorPath.medianCeiling
+    );
+    // ...and the labels are distinct, so a failure message names the right path.
+    expect(BUDGET_SUBJECTS.abandonedStream.label).not.toBe(
+      BUDGET_SUBJECTS.errorPath.label
+    );
+  });
+
+  test('the STREAM ceiling bites a leak the ERROR ceiling would let through', () => {
+    // The measured gap this pair exists for: the stream RED control (134,032 B)
+    // is over the stream ceiling but UNDER the error one, so a swap would have
+    // silently loosened the stream guard 8x with every other test still green.
+    const streamRedControl = 134_032;
+    const samples = Array.from({ length: MEASURE_PASSES }, () => streamRedControl);
+    expect(() =>
+      assertUnderBudget(BUDGET_SUBJECTS.abandonedStream, samples)
+    ).toThrow(/UPPER MEDIAN/);
+    // Same samples, error subject: the median ceiling does NOT bite (declared
+    // weakness), and the MINIMUM ceiling is what catches it there.
+    expect(() => assertUnderBudget(BUDGET_SUBJECTS.errorPath, samples)).toThrow(
+      /grew by at least/
+    );
   });
 
   test('a leak in a MAJORITY of passes trips the median ceiling', () => {
-    const leaking = Array.from({ length: MEASURE_PASSES }, () => MEDIAN_BUDGET_BYTES + 1);
-    expect(() => assertUnderBudget('t', leaking, MEDIAN_BUDGET_BYTES)).toThrow(
+    const leaking = Array.from(
+      { length: MEASURE_PASSES },
+      () => STREAM_MEDIAN_CEILING_BYTES + 1
+    );
+    expect(() => assertUnderBudget(BUDGET_SUBJECTS.abandonedStream, leaking)).toThrow(
       /UPPER MEDIAN/
     );
   });
 
   test('a clean sample set at quorum passes both ceilings', () => {
     expect(() =>
-      assertUnderBudget('t', [...neg(4), 8, 16, 24, 32, 40], MEDIAN_BUDGET_BYTES)
+      assertUnderBudget(BUDGET_SUBJECTS.abandonedStream, [...neg(4), 8, 16, 24, 32, 40])
     ).not.toThrow();
   });
 });
@@ -702,12 +784,8 @@ describe('exception-path / abandoned-iterator leak budgets (issue #1465)', () =>
     expect(counters.rejected).toBe(expected);
 
     // BOUNDED, not zero (see file header).
-    assertUnderBudget(
-      'error path (repeated rejections)',
-      samples,
-      ERROR_MEDIAN_BUDGET_BYTES
-    );
-    assertRssUnderBudget('error path (repeated rejections)', rssGrowth);
+    assertUnderBudget(BUDGET_SUBJECTS.errorPath, samples);
+    assertRssUnderBudget(BUDGET_SUBJECTS.errorPath.label, rssGrowth);
   }, BUDGET_TEST_TIMEOUT_MS);
 
   test('abandoned streaming iterators stay under the leak budget', async () => {
@@ -732,7 +810,7 @@ describe('exception-path / abandoned-iterator leak budgets (issue #1465)', () =>
     expect(counters.rows).toBe(STREAM_ROWS * expectedIterators);
 
     // BOUNDED, not zero (see file header).
-    assertUnderBudget('abandoned streaming iterators', samples, MEDIAN_BUDGET_BYTES);
-    assertRssUnderBudget('abandoned streaming iterators', rssGrowth);
+    assertUnderBudget(BUDGET_SUBJECTS.abandonedStream, samples);
+    assertRssUnderBudget(BUDGET_SUBJECTS.abandonedStream.label, rssGrowth);
   }, BUDGET_TEST_TIMEOUT_MS);
 });
