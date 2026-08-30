@@ -100,7 +100,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 /// Whether a case's fixture is guaranteed present.
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum Presence {
     /// Git-committed under `test-data/datasets/sstables/`: present in EVERY
     /// checkout, so the case is `must_run` and fails closed unconditionally.
@@ -933,6 +933,23 @@ fn run_lane(egress: Egress) {
         };
         let fixture = resolved.dir;
         let root_source = resolved.source;
+        // The census line below states this case's PROVENANCE, so the claim is
+        // CHECKED against the tier rather than trusted (issue #1491 review finding
+        // T3): only a case whose table `git ls-files` tracks may be reported as the
+        // git-tracked oracle, and the walk a fetched-corpus case takes establishes
+        // only that some root HOLDS the table — even when the root it lands on is the
+        // checkout's own. A mismatch is a FAILURE, because a census that misnames the
+        // oracle is worse than one that says nothing.
+        let tracked_provenance = root_source == fixture_root::RootSource::GitTracked;
+        if tracked_provenance != (case.presence == Presence::Committed) {
+            failures.push(format!(
+                "{qualified}: declared {:?} but its fixture resolved with provenance \
+                 `{}` — the census would state the wrong oracle",
+                case.presence,
+                root_source.as_str()
+            ));
+            continue;
+        }
         // The narrowing, COUNTED: a table with several SSTable directories is
         // compared from the first, so the others are untested — declared here (and
         // tallied for the lane's own summary line) rather than left silent.

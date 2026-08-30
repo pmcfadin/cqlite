@@ -44,21 +44,42 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-/// Which candidate root supplied a case's fixture.
+/// WHERE a case's fixture came from — reported from what was ESTABLISHED about it,
+/// never from what its tier implies (issue #1491 review finding T3).
+///
+/// The three are distinct facts, and the first two used to share one spelling. A
+/// COMMITTED case's fixture is git-tracked, established by `git ls-files` in
+/// [`committed_fixture_dir`]. A FETCHED-CORPUS case's fixture is found by the
+/// evidence walk, and that walk can land on the CHECKOUT's own dataset root — at
+/// which point nothing has established that the file is tracked, and
+/// `resolve_fixture` has in fact already established the OPPOSITE (a case declared
+/// `Presence::Corpus` whose table git tracks is a mis-declaration that fails). So
+/// reporting it as "checkout (git-committed)" told a reader the oracle was the
+/// committed copy when it was not — and this lane's whole value rests on knowing
+/// which bytes were the oracle, so a provenance line that can be wrong is worse
+/// than none.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum RootSource {
-    /// The checkout's own `test-data/datasets/sstables` — the git-committed copy.
-    Checkout,
+    /// `git ls-files` tracks this exact `*-Data.db`, and it was read from the
+    /// checkout — the only provenance that may claim the committed copy.
+    GitTracked,
+    /// The evidence walk landed on the checkout's own `test-data/datasets/sstables`,
+    /// but nothing established that the file is git-tracked. Reached only by a
+    /// fetched-corpus case, i.e. one whose table git tracks no `*-Data.db` for.
+    CheckoutUntracked,
     /// A root other than the checkout's — in an ordinary run, the
     /// `CQLITE_DATASETS_ROOT` corpus.
     Corpus,
 }
 
 impl RootSource {
-    /// The census token for this root.
+    /// The census token for this provenance. The three are deliberately
+    /// distinguishable at a glance: a reader scanning a census must be able to tell
+    /// the git-tracked oracle from a same-path file nothing tracks.
     pub fn as_str(self) -> &'static str {
         match self {
-            RootSource::Checkout => "checkout (git-committed)",
+            RootSource::GitTracked => "checkout, git-tracked",
+            RootSource::CheckoutUntracked => "checkout root, NOT git-tracked",
             RootSource::Corpus => "fetched corpus",
         }
     }
@@ -219,7 +240,10 @@ pub fn committed_fixture_dir(
         .unwrap_or_default();
     Ok(Fixture {
         dir: fixture,
-        source: RootSource::Checkout,
+        // Established, not assumed: `sstables` is this table's entry from
+        // `git ls-files` and `dir`/`file` are the tracked names, so the path
+        // returned IS the git-tracked one.
+        source: RootSource::GitTracked,
         of_dirs: dirs.len(),
     })
 }
@@ -245,10 +269,13 @@ pub enum CorpusMiss {
 ///
 /// Keeps the shared #3220 rule — walk every candidate root and take the first that
 /// actually carries this table's `*-Data.db` — but walks it THREE-VALUED (issue
-/// #1491 review finding N4). The source is reported as [`RootSource::Checkout`]
-/// when the root that won is the checkout's own `sstables/` root and as
-/// [`RootSource::Corpus`] otherwise, so the census states what was actually read
-/// rather than what the tier implies.
+/// #1491 review finding N4). The source is reported as
+/// [`RootSource::CheckoutUntracked`] when the root that won is the checkout's own
+/// `sstables/` root and as [`RootSource::Corpus`] otherwise, so the census states
+/// what was actually read rather than what the tier implies. Never
+/// [`RootSource::GitTracked`]: this walk establishes only that a root HOLDS the
+/// table, and every case that reaches it is one `git ls-files` tracks no
+/// `*-Data.db` for (finding T3).
 ///
 /// # Why this lane cannot use the shared `Option`-returning resolver
 ///
@@ -343,7 +370,11 @@ pub fn corpus_fixture_in(
     Ok(Fixture {
         dir: dirs.remove(0),
         source: if root == checkout {
-            RootSource::Checkout
+            // The checkout's own dataset root — but this walk asked only whether a
+            // root HOLDS the table, so nothing here establishes that the file is
+            // git-tracked, and for every case that reaches this walk git tracks no
+            // `*-Data.db` for the table at all (finding T3).
+            RootSource::CheckoutUntracked
         } else {
             RootSource::Corpus
         },
@@ -463,6 +494,69 @@ mod tests {
             .expect("resolves");
         assert_eq!(fixture.dir, checkout.join("ks").join("t-abc"));
         assert_eq!(fixture.of_dirs, 1, "one tracked directory");
+        assert_eq!(
+            fixture.source,
+            RootSource::GitTracked,
+            "`git ls-files` established the tracking, so this provenance may claim it"
+        );
+    }
+
+    /// T3: the SAME path, found by the evidence walk instead, is NOT reported as the
+    /// git-committed copy.
+    ///
+    /// Only a fetched-corpus case reaches that walk, and `resolve_fixture` has
+    /// already established that git tracks no `*-Data.db` for its table — so calling
+    /// this "checkout (git-committed)" told a reader the oracle was the committed copy
+    /// when nothing had established that, and something had established the opposite.
+    #[test]
+    fn a_fixture_found_under_the_checkout_root_is_not_reported_as_git_tracked() {
+        let tmp = tempfile::TempDir::new().expect("tempdir");
+        let checkout = tmp.path().join("checkout");
+        write(&checkout.join("ks/t-abc/nb-1-big-Data.db"), b"x");
+
+        let fixture = corpus_fixture_in(&checkout, "ks", "t", &checkout).unwrap_or_else(|e| {
+            panic!(
+                "the checkout root holds the table, so the walk resolves: {}",
+                match e {
+                    CorpusMiss::Absent(why) | CorpusMiss::Unusable(why) => why,
+                }
+            )
+        });
+        assert_eq!(fixture.dir, checkout.join("ks").join("t-abc"));
+        assert_eq!(
+            fixture.source,
+            RootSource::CheckoutUntracked,
+            "the walk established only that this root HOLDS the table"
+        );
+    }
+
+    /// And the three provenances must be tellable apart in a census line, since that
+    /// line is the only record of which bytes were the oracle. Pinned as a property of
+    /// the tokens rather than by transcribing them: exactly one may claim git
+    /// tracking, and no two may read the same.
+    #[test]
+    fn every_provenance_has_its_own_census_token_and_only_one_claims_git_tracking() {
+        let all = [
+            RootSource::GitTracked,
+            RootSource::CheckoutUntracked,
+            RootSource::Corpus,
+        ];
+        let tokens: BTreeSet<&str> = all.iter().map(|s| s.as_str()).collect();
+        assert_eq!(
+            tokens.len(),
+            all.len(),
+            "two provenances sharing a token is the T3 defect itself: {tokens:?}"
+        );
+        let claim_tracking: Vec<&str> = all
+            .iter()
+            .map(|s| s.as_str())
+            .filter(|t| t.contains("git-tracked") && !t.contains("NOT git-tracked"))
+            .collect();
+        assert_eq!(
+            claim_tracking,
+            vec![RootSource::GitTracked.as_str()],
+            "only the `git ls-files`-established provenance may claim git tracking"
+        );
     }
 
     /// The J1 property: an external copy of a committed table is NOT consulted, so a
