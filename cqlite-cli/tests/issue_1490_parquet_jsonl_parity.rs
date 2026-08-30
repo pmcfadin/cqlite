@@ -10,6 +10,7 @@
 #[path = "support/parquet_parity/mod.rs"]
 mod parquet_parity;
 
+use parquet_parity::canonical_jsonl::CanonicalValue;
 use parquet_parity::{assert_case, KnownGap, ParityCase};
 
 // ---------------------------------------------------------------------------
@@ -323,4 +324,162 @@ fn golden_float_literals_parse_exactly() {
              cqlite-cli's dev-dependencies (issue #1490)"
         );
     }
+}
+
+// ---------------------------------------------------------------------------
+// Harness sensitivity — a comparison that has never been shown to FAIL is not
+// evidence of anything
+// ---------------------------------------------------------------------------
+
+/// Perturb ONE cell of the exported Parquet rows and require the comparison to
+/// report it, naming the row, the column and both values.
+///
+/// Uses `test_da.simple_table` (committed binaries, so this always runs) and the
+/// real export output — not a synthetic table — so it exercises exactly the code
+/// path the parity cases use.
+#[test]
+fn harness_detects_a_single_changed_cell() {
+    let prepared = prepared_or_panic(&DA_SIMPLE);
+    let mut rows = prepared.parquet;
+    let original = rows[0]
+        .cell("name")
+        .cloned()
+        .expect("simple_table has a 'name' column");
+    let mutated = match &original {
+        CanonicalValue::Text(s) => CanonicalValue::Text(format!("{s} (perturbed)")),
+        other => panic!("expected 'name' to be Text, got {other:?}"),
+    };
+    rows[0].overwrite_cell("name", mutated);
+
+    let err = parquet_parity::compare(&DA_SIMPLE, &prepared.columns, prepared.golden, rows)
+        .err()
+        .expect("a perturbed cell MUST be reported as a parity difference");
+    assert!(
+        err.contains("column 'name'") && err.contains("perturbed"),
+        "the diff must name the column and show both values: {err}"
+    );
+}
+
+/// A cell that is NULLed out — the exact shape of the silent-NULL bug #1485
+/// closed — must be reported, not treated as "no value to compare".
+#[test]
+fn harness_detects_a_nulled_cell() {
+    let prepared = prepared_or_panic(&DA_SIMPLE);
+    let mut rows = prepared.parquet;
+    rows[0].overwrite_cell("age", CanonicalValue::Absent);
+
+    let err = parquet_parity::compare(&DA_SIMPLE, &prepared.columns, prepared.golden, rows)
+        .err()
+        .expect("a NULLed cell MUST be reported as a parity difference");
+    assert!(
+        err.contains("column 'age'") && err.contains("<absent>"),
+        "the diff must name the column and show the absence: {err}"
+    );
+}
+
+/// A dropped row must be reported as a row-count difference, never absorbed.
+#[test]
+fn harness_detects_a_dropped_row() {
+    let prepared = prepared_or_panic(&DA_SIMPLE);
+    let mut rows = prepared.parquet;
+    rows.pop();
+
+    let err = parquet_parity::compare(&DA_SIMPLE, &prepared.columns, prepared.golden, rows)
+        .err()
+        .expect("a dropped row MUST be reported");
+    assert!(err.contains("row count differs"), "{err}");
+}
+
+/// A rewritten primary key must be reported: the harness sorts both sides by
+/// primary key, so a key that no longer matches would otherwise pair two
+/// unrelated rows and could compare equal by luck.
+#[test]
+fn harness_detects_a_rewritten_primary_key() {
+    let prepared = prepared_or_panic(&DA_SIMPLE);
+    let mut rows = prepared.parquet;
+    rows[0].overwrite_key(0, CanonicalValue::Text("not-a-real-uuid".to_string()));
+    rows[0].overwrite_cell("id", CanonicalValue::Text("not-a-real-uuid".to_string()));
+
+    let err = parquet_parity::compare(&DA_SIMPLE, &prepared.columns, prepared.golden, rows)
+        .err()
+        .expect("a rewritten primary key MUST be reported");
+    assert!(
+        err.contains("primary key differs") || err.contains("column 'id'"),
+        "{err}"
+    );
+}
+
+/// A wholly EMPTY oracle must fail rather than pass vacuously — the
+/// 0-rows-when-present failure mode.
+#[test]
+fn harness_refuses_an_empty_oracle() {
+    let prepared = prepared_or_panic(&DA_SIMPLE);
+    let err = parquet_parity::compare(&DA_SIMPLE, &prepared.columns, Vec::new(), prepared.parquet)
+        .err()
+        .expect("an empty golden MUST fail");
+    assert!(err.contains("ZERO rows"), "{err}");
+}
+
+fn prepared_or_panic(case: &ParityCase) -> parquet_parity::Prepared {
+    match parquet_parity::prepare(case) {
+        Ok(Some(p)) => p,
+        Ok(None) => panic!(
+            "{}: its SSTable binaries are committed to git, so it must always resolve",
+            case.id()
+        ),
+        Err(e) => panic!("{e}"),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Fail-closed scope refusals — a physical dump is not a reconciled result set
+// ---------------------------------------------------------------------------
+
+/// A fixture carrying a ROW DELETION must be REFUSED, not silently compared: the
+/// dump keeps the shadowed row while the export (correctly) drops it, so a
+/// comparison would report a difference that is a property of the two oracles,
+/// not of the code (#1742).
+#[test]
+fn harness_refuses_a_fixture_with_a_row_deletion() {
+    const SHADOW_ROW_DELETE: ParityCase = ParityCase {
+        keyspace: "test_compaction_tombstone_ttl",
+        table: "shadow_row_delete",
+        schema: "compaction-tombstone-ttl-parity.cql",
+        udts: &[],
+        columns: &[("id", "int"), ("ck", "int"), ("v", "text")],
+        partition_key: &["id"],
+        clustering: &["ck"],
+        must_run: true,
+        covers: "NEGATIVE control: a committed fixture with a row tombstone",
+        known_gap: None,
+    };
+    let err = parquet_parity::run_case(&SHADOW_ROW_DELETE)
+        .err()
+        .expect("a row-tombstone fixture must be refused, not compared");
+    assert!(
+        err.contains("row-level deletion") && err.contains("#1742"),
+        "the refusal must name the construct and the reason: {err}"
+    );
+}
+
+/// Same for a TTL: it can expire between fixture generation and test time, so a
+/// dump-vs-export comparison is not stable.
+#[test]
+fn harness_refuses_a_fixture_with_a_ttl() {
+    const TTL_TABLE: ParityCase = ParityCase {
+        keyspace: "test_da",
+        table: "ttl_table",
+        schema: "da-test.cql",
+        udts: &[],
+        columns: &[("id", "uuid"), ("data", "text"), ("expiring_value", "int")],
+        partition_key: &["id"],
+        clustering: &[],
+        must_run: true,
+        covers: "NEGATIVE control: a committed fixture carrying a TTL",
+        known_gap: None,
+    };
+    let err = parquet_parity::run_case(&TTL_TABLE)
+        .err()
+        .expect("a TTL-bearing fixture must be refused, not compared");
+    assert!(err.contains("TTL"), "the refusal must name the TTL: {err}");
 }
