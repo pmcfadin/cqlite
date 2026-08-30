@@ -106,11 +106,12 @@ execute NOWHERE** — not locally, not in CI — because their module-level
 `#![cfg(feature = "observability-testing")]` is off in every lane that runs them (#3375), a gap #2910's tier
 aggregation cannot see because the tier *runs* and silently executes 0 tests. So when you add a feature flag,
 ask which lane **executes** it, not which lane compiles it; if the answer is none, the feature is uncovered
-however green the gate looks. `experimental` is **one** remaining instance (#3373) and NOT the only one: in `cqlite-core` the
-crate-level-gated integration targets for `delta-scan` (13) and `observability-testing` (14) are named
-by no `--test` in the gate and execute ZERO tests at `core-tests`' feature set, as do 3 of the 5
-`dhat-heap` ones; the `delta_scan` module's own 39 lib tests run in no gate component either
-(`feature-iso-delta-scan` is `--lib --no-run`), only in the `required`-exempt `ci.yml` (#3522 audit).
+however green the gate looks. `experimental` is **one** remaining instance (#3373) and NOT the only
+one: in `cqlite-core` the crate-level-gated integration targets for `delta-scan` (13) and
+`observability-testing` (14) are named by no `--test` in the gate and execute ZERO tests at
+`core-tests`' feature set, as do 3 of the 5 `dhat-heap` ones; the `delta_scan` module's own 39 lib
+tests run in no gate component either (`feature-iso-delta-scan` is `--lib --no-run`), only in the
+`required`-exempt `ci.yml` (#3522 audit).
 **AND THE SAME REASONING RUNS AT PACKAGE GRANULARITY, WHICH IS WHERE IT WAS COSTLIEST (#3522).**
 `cargo clippy --workspace --all-targets` compiles EVERY workspace member on every full gate, so a
 whole CRATE can be built by every run and execute nothing — and it reads as covered precisely
@@ -325,8 +326,9 @@ no gate component runs workspace-wide tests, so an untouched `tools/` crate's te
 where something names its package explicitly — `ws0-corpus-gen` under the gate's `tooling-tests`, and
 `cassandra-parity` in the path-filtered, `required`-exempt `cassandra-parity.yml`; for every other
 `tools/` crate they never execute (#3522). But `--lite`'s blast-radius maps a touched path to its
-package and runs that package's `--lib` tests. Consequence, found the hard way on #1716: editing only `tools/format-validator/README.md`
-made `--lite` run that crate's tests **for the first time**, and one failed —
+package and runs that package's `--lib` tests. Consequence, found the hard way on #1716: editing
+only `tools/format-validator/README.md` made `--lite` run that crate's tests **for the first time**,
+and one failed —
 `test_hex_dump_formatting` asserted an unseparated `"48656c6c6f"` against a `hexdump -C`-style
 formatter that emits `48 65 6c 6c 6f`, an expectation that could never hold for any input. **Expect
 latent failures the first time you touch a long-unwired crate**; they are pre-existing, not yours,
