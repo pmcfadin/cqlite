@@ -175,11 +175,19 @@ where it exercises the production path.
 - **WHEN** each vector is converted through the Python binding's production path and through the Node binding's production path
 - **THEN** the Python `ipaddress` object's string form and the Node string are equal to the vector's expected text
 
-#### Scenario: A malformed length errors identically in both bindings
+#### Scenario: A malformed length is refused in both bindings, quoting the one canonical spelling
 - **GIVEN** an `inet` byte string of length 5
 - **WHEN** it is converted through either binding
-- **THEN** each raises its typed parse error and both messages are character-identical
+- **THEN** each raises its typed parse error, and the one canonical `InetError` spelling — single-sourced from the shared crate — appears **verbatim inside** the raised message
+- **AND** each binding's suite asserts that spelling by **containment**, not character-identity, which is the rule design D7 already states for a refusal
 - **AND** neither returns the raw bytes, a hex string, or any other passthrough
+
+The two messages are deliberately **not** byte-equal. Review fix F1 routes Node's refusal through
+`to_napi_error(cqlite_core::Error::corruption(...))` so it carries the #1451 error-contract identity,
+and that `Display` prefixes `Data corruption: ` and appends the contract metadata (`\0code=PARSE\0category=Data\0isRecoverable=…`),
+while Python raises the bare canonical text. What this requirement protects is the single *source* of
+the spelling, not its envelope; giving Python the same typed envelope is the class-level question
+deferred to #3512. (This scenario originally said "character-identical"; it predates F1.)
 
 ### Requirement: The FFI error contract has exactly one home and `cqlite-core` no longer exports it
 
@@ -333,14 +341,26 @@ replace the shared-routine call sites; SHALL NOT modify either binding's `runtim
 `Error::is_recoverable()` semantics; and SHALL NOT change the CLI, Flight, Trino, the read path, or any
 on-disk format.
 
-Any user-visible behaviour change (the DECIMAL policy convergence) SHALL be recorded in `CHANGELOG.md`
-and in the affected binding README, and SHALL be the only such change in the diff.
+Every user-visible behaviour change SHALL be recorded in `CHANGELOG.md` and, where it affects a
+binding's documented surface, in that binding's README or type declarations. The diff carries
+**three**, not one — the paragraph here originally named only the first, and the other two are later
+decisions recorded rather than left contradicting the spec:
+
+1. the DECIMAL policy convergence;
+2. **F1** — the Node malformed-inet refusal's contract identity moves from `INTERNAL`/`Internal` to
+   `PARSE`/`Data`, entailed by requirement 5 (one shared refusal, routed through the #1451 contract);
+3. **F2** — the deprecated Node `execute()` path now throws where it previously returned JSON `null`;
+   also listed in `bindings/node/lib/index.d.ts`'s `execute()` hazard list.
+
+No user-visible change beyond these three SHALL ship in the diff.
 
 #### Scenario: The diff's blast radius is the stated one
 - **GIVEN** the change's diff against `origin/main`
 - **WHEN** the touched paths are enumerated
-- **THEN** they are limited to the new crate, the two bindings' value/error/observability/lib modules and manifests, `cqlite-core`'s error-contract module and crate root, the moved test, the OpenSpec change, and documentation
-- **AND** no streaming, runtime, CLI, Flight or storage source file is modified
+- **THEN** they are limited to the new crate, the two bindings' value/error/observability/database/lib modules and manifests, their JS/Python wrapper surface (`bindings/node/lib/*`, `bindings/node/scripts/generate-loader.mjs`, `bindings/python/python/cqlite/__init__.py`), `cqlite-core`'s error-contract module and crate root, the moved test, the OpenSpec change, and documentation
+- **AND** the enumeration includes `bindings/node/src/database.rs` and its extracted `database_legacy_json_tests.rs`, which held the **second** INET dispatch — entailed by requirement 5, not scope creep, and omitted from this list when it was first written
+- **AND** the only Flight, query-engine or core-observability source touched is the mechanical call-site rename entailed by **owner ruling Q1** (`observability::error_schema::ErrorCategory` → `ObsErrorCategory`, so the shared FFI `ErrorCategory` has one unambiguous name): `cqlite-flight/src/obs_abort.rs`, `cqlite-core/src/query/engine/deadline.rs`, `cqlite-core/src/observability/*` and two `cqlite-core/tests/*` — a rename with no behaviour change, decided after this scenario's original "no Flight or storage source file is modified" wording
+- **AND** no streaming, runtime, CLI or storage source file is modified
 
 ### Requirement: The change is certified by the agent gate under the repository's code-quality rules
 
