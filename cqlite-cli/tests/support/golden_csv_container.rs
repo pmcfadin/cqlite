@@ -499,6 +499,19 @@ fn split_mismatch(rendering: &str, unit: &str, got: &[&str], want: &[String]) ->
 /// one — `text`/`varchar`/`ascii`, which hold arbitrary bytes — the golden's text
 /// IS the rendering, byte for byte.
 ///
+/// The RESIDUAL of using the golden's spellings, in both directions, because it is
+/// the one assumption this function rests on:
+///
+/// * if CQLite were to spell some scalar WITH a `, ` where the golden does not,
+///   this says "recovered" and the node is compared — and the CLI's extra
+///   separator then shows up as a member-count divergence rather than as a value
+///   one. A noisier diagnostic on output that is diverging anyway; never a missed
+///   divergence;
+/// * if the GOLDEN spelling carried a `, ` where CQLite's does not, the node would
+///   be refused and that spelling difference would go uncompared. It takes a
+///   non-`text` type whose `sstabledump` spelling embeds a `, `, and no CQL scalar
+///   has one; `text` — the type that can — is byte-identical on both sides.
+///
 /// `None` means the declared type does not describe the golden's shape here. That
 /// is deliberately NOT a refusal: the disagreement is a divergence the comparison
 /// reports, and refusing would suppress it.
