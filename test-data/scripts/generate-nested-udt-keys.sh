@@ -800,11 +800,17 @@ while i < len(src) and depth:
 if depth:
     die("unbalanced parentheses in the CREATE TABLE for '%s' in %s" % (table, schema))
 
+# Split the column list on TOP-LEVEL commas only. Depth counts BOTH `(...)` and
+# the CQL type parameter brackets `<...>`: every column in this table is a nested
+# generic (`map<frozen<tuple<frozen<key_part>, int>>, int>`), so a paren-only
+# depth splits inside a type and yields fragments like `int>>` as column names —
+# measured, and it made the check demand five columns that do not exist while
+# never asserting the nine that do.
 entries, buf, depth = [], "", 0
 for ch in src[m.end():i - 1]:
-    if ch == "(":
+    if ch in "(<":
         depth += 1
-    elif ch == ")":
+    elif ch in ")>":
         depth -= 1
     if ch == "," and depth == 0:
         entries.append(buf)
