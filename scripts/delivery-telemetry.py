@@ -14,13 +14,32 @@ treat such multi-cycle issues as multiple deliveries (they are), not fold them i
 The same holds for a SLICE delivery (issue #3550): an issue that ships one or more PRs while
 DELIBERATELY remaining OPEN (the shape the lead ruled correct on #3393). Such a record is
 stamped with `--slice`, carries `closed_at: null` (the marker), and bounds its cycle time on
-the PR's mergedAt. `--slice` asserts a fact about DELIVERY time, which the issue's CURRENT
-state cannot decide, so it is refused in THREE states: the issue is closed now; it is open
-only because it was REOPENED; or GitHub has not yet recorded this PR's auto-close (the PR
-declares it closes the issue, so it is a completed delivery, not a slice). The first two need
-the issue timeline replayed to mergedAt (issue #3559); the third clears itself in seconds. Closing the issue to satisfy this tool, or hand-appending a line past the
-validator, are both FORBIDDEN — a tool's data model must never decide whether a problem is
-recorded as solved, and `retro` reports slice records as their own class.
+the PR's mergedAt.
+
+`--slice` asserts a fact about DELIVERY time — "when this PR merged, the issue was
+deliberately open" — which the issue's CURRENT state cannot decide. Since issue #3559 it is
+decided by replaying the issue's own TIMELINE to the PR's `mergedAt` (`_issue_state_at`), and
+the rule is a CONJUNCTION:
+
+    slice  <=>  (the issue was OPEN at mergedAt)  AND  (this PR closes NOTHING)
+
+Both halves are permanent. Open-at-mergedAt alone never becomes sufficient, because GitHub
+records an auto-close AFTER the merge: an ordinary COMPLETED delivery whose PR declares
+`Closes #N` was ALSO literally open at mergedAt, so dropping the second operand would file a
+false slice record for essentially every ordinary delivery.
+
+`--slice` IS AN OPERATOR ASSERTION, and this tool's job is to REFUSE it wherever it can be
+DISPROVED — provably closed at mergedAt, or the PR declares the close. Where it cannot be
+disproved, the assertion stands. That boundary is real and is stated rather than papered
+over: a completed delivery whose PR omits `Closes #N` and whose issue is closed BY HAND days
+later is observationally IDENTICAL to a genuine slice whose issue is later completed by
+another PR — both are open-at-mergedAt, close-nothing, closed-later. No GitHub signal
+separates them; the difference is intent. (Doctrine bounds it: `flow-implement` mandates
+`Closes #<N>` in every PR body, so inside the sanctioned flow the discriminator is present.)
+
+Closing the issue to satisfy this tool, or hand-appending a line past the validator, are both
+FORBIDDEN — a tool's data model must never decide whether a problem is recorded as solved —
+and `retro` reports slice records as their own class.
 
 Authoritative-data-only mandate (CLAUDE.md / issue #28): every field is an observed
 event — a GitHub timestamp/label or a run counter supplied by the stamping step — or
@@ -1343,10 +1362,12 @@ def build_parser() -> argparse.ArgumentParser:
                           "(issue #2667); OPTIONAL — omit when unobserved, never default to 0")
     rec.add_argument("--slice", dest="slice_delivery", action="store_true",
                      help="record a delivery of an issue that intentionally stays OPEN "
-                          "(issue #3550): writes closed_at: null and bounds cycle_time_s on "
-                          "the PR's mergedAt. Refused if the issue is closed now, if it is "
-                          "open only because it was REOPENED, or if this PR declares it "
-                          "closes the issue (a slice PR closes nothing)")
+                          "(issues #3550/#3559): writes closed_at: null and bounds "
+                          "cycle_time_s on the PR's mergedAt. Decided by replaying the "
+                          "issue TIMELINE to the PR's mergedAt, and refused unless the "
+                          "issue was OPEN at that instant AND this PR closes nothing (a "
+                          "slice PR closes nothing; every auto-closing PR's issue was also "
+                          "open at mergedAt, because the close is recorded afterwards)")
     rec.add_argument("--from-json", dest="from_json", default=None,
                      help="inject GitHub-derived fields from a JSON file (else pull via gh). "
                           "The file must name the delivery it was built for with integer "
