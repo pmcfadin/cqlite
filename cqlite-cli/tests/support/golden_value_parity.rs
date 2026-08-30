@@ -760,10 +760,11 @@ fn golden_row(
                         .get("value")
                         .cloned()
                         .ok_or_else(|| format!("{}: map cell `{name}` has no value", at()))?;
-                    // Two cells with the same path are not something a well-formed
-                    // per-SSTable dump of one row can carry, and inserting over the
-                    // earlier one would silently DROP a golden cell — shrinking the
-                    // oracle instead of reporting it (issue #1491 finding J2's class,
+                    // Two cells for the same key cannot both be compared: inserting
+                    // the later over the earlier silently DISCARDS a golden cell,
+                    // shrinking the oracle. Whatever produced such a golden, one the
+                    // reader must drop part of is not a usable oracle, so it is
+                    // refused rather than collapsed (issue #1491 finding J2's class,
                     // golden side).
                     if obj.insert(key.clone(), value).is_some() {
                         return Err(format!(
@@ -882,10 +883,10 @@ mod tests {
         canon_at(v, ty, Kinding::Natural)
     }
 
-    /// Two cells for the SAME map key is not a shape a per-SSTable dump of one row
-    /// can carry, and collapsing them would silently DROP a golden cell — shrinking
-    /// the oracle rather than reporting it (issue #1491 finding J2's class, golden
-    /// side).
+    /// Collapsing two cells for the SAME map key would silently DROP a golden cell,
+    /// shrinking the oracle rather than reporting it — so the reader refuses such a
+    /// golden instead of comparing the part of it that survives (issue #1491 finding
+    /// J2's class, golden side).
     #[test]
     fn two_map_cells_with_the_same_key_are_refused_rather_than_collapsed() {
         let dup = concat!(

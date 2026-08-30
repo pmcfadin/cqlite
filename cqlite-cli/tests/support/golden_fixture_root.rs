@@ -46,7 +46,8 @@ use std::process::Command;
 pub enum RootSource {
     /// The checkout's own `test-data/datasets/sstables` — the git-committed copy.
     Checkout,
-    /// A fetched corpus root named by `CQLITE_DATASETS_ROOT`.
+    /// A root other than the checkout's — in an ordinary run, the
+    /// `CQLITE_DATASETS_ROOT` corpus.
     Corpus,
 }
 
@@ -128,7 +129,7 @@ pub fn classify(line: &str) -> Result<Option<CommittedPath>, String> {
         return Ok(None);
     }
     let parts: Vec<&str> = line.split('/').collect();
-    if parts.len() != 6 {
+    if parts.len() != 6 || parts[..3] != ["test-data", "datasets", "sstables"] {
         return Err(format!("unexpected committed fixture path shape: {line}"));
     }
     let (keyspace, dir, file) = (parts[3], parts[4], parts[5]);
@@ -168,8 +169,9 @@ pub fn committed_fixtures(listing: &[String]) -> Result<CommittedFixtures, Strin
 /// `sstables` is that table's entry from [`committed_fixtures`]; an empty set means
 /// git tracks no `*-Data.db` for it, which for a case declared committed is a
 /// failure, not a fallback. When git tracks several SSTables for one table the
-/// lexicographically first is taken, matching the deterministic choice the
-/// evidence-based lookup makes among sibling generations.
+/// lexicographically first `(directory, file)` is taken, so the DIRECTORY chosen is
+/// the same one the evidence-based lookup's sorted directory scan would choose, and
+/// the golden inside it is then picked exactly as before by `compare::golden_path`.
 pub fn committed_fixture_dir(
     sstables: Option<&BTreeSet<CommittedSstable>>,
     keyspace: &str,
@@ -198,7 +200,10 @@ pub fn committed_fixture_dir(
 /// The fixture directory for a FETCHED-CORPUS case, plus which root supplied it.
 ///
 /// Keeps the shared #3220 rule: walk every candidate root and take the first that
-/// actually carries this table's `*-Data.db`.
+/// actually carries this table's `*-Data.db`. The source is reported as
+/// [`RootSource::Checkout`] when the root that won is the checkout's own `sstables/`
+/// root and as [`RootSource::Corpus`] otherwise, so the census states what was
+/// actually read rather than what the tier implies.
 pub fn corpus_fixture_dir(
     keyspace: &str,
     table: &str,
@@ -328,6 +333,7 @@ mod tests {
             "test-data/datasets/sstables/ks/nb-1-big-Data.db",
             "test-data/datasets/sstables/ks/t-abc/deeper/nb-1-big-Data.db",
             "test-data/datasets/sstables/ks/tabc/nb-1-big-Data.db",
+            "elsewhere/datasets/sstables/ks/t-abc/nb-1-big-Data.db",
         ] {
             assert!(
                 classify(line).is_err(),

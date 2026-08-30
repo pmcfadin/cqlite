@@ -23,10 +23,15 @@
 //! that case. A small [`Presence::Corpus`] tier covers null/empty/absent-cell
 //! properties no committed fixture has; those report `NOT PRESENT` in the census
 //! when the fetched corpus is absent, and are compared with identical strictness
-//! when it is there. The datasets root is resolved per TABLE by evidence (does this
-//! table's `*-Data.db` exist under that root), never by an env-first/
-//! checkout-first preference. There is no suite-wide `assert!(ran > 0)`, which
-//! cannot see one case skipping behind its siblings.
+//! when it is there. Which tier a case is in is CHECKED against `git ls-files`, not
+//! trusted, and that listing also decides where its golden comes from: a committed
+//! case is compared against the CHECKOUT copy and only that copy, so an external
+//! `CQLITE_DATASETS_ROOT` corpus carrying its own copy of the same table cannot
+//! stand in for the committed values (finding J1); a fetched-corpus case is resolved
+//! per TABLE by evidence (does this table's `*-Data.db` exist under that root),
+//! never by an env-first/checkout-first preference. The census names the root that
+//! supplied each golden. There is no suite-wide `assert!(ran > 0)`, which cannot see
+//! one case skipping behind its siblings.
 //!
 //! # Coverage census
 //!
@@ -944,7 +949,7 @@ fn run_lane(egress: Egress) {
     let mut containers_compared = 0usize;
     let mut containers_refused = 0usize;
 
-    // The git-committed fixture set, read once from `git ls-files`: it decides which
+    // The git-committed fixture set, read from `git ls-files` once per lane: it decides which
     // root each case's golden comes from (finding J1) and CHECKS every `Presence`
     // declaration. An unusable listing fails the lane rather than being worked
     // around, since without it no case's tier is known.
