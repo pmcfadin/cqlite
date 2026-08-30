@@ -74,11 +74,35 @@
 //!
 //! So the residual — a value outside `[i64::MIN, u64::MAX]` — is already an
 //! `f64` when it reaches us, and **no binding-side change can recover it**. The
-//! arm is kept because it is the honest shape of the classification and it
-//! becomes reachable the moment `arbitrary_precision` is enabled; keeping it
-//! also means neither binding has an `_ => lossy fallback` branch to regress
-//! into. `json_number_tests.rs` asserts the unreachability rather
+//! arm is kept because it is the honest shape of the classification, and
+//! because keeping it means neither binding has an `_ => lossy fallback` branch
+//! to regress into. `json_number_tests.rs` asserts the unreachability rather
 //! than faking a `Beyond` case.
+//!
+//! **`arbitrary_precision` does NOT make this arm carry integers**, and an
+//! earlier draft of these docs claimed it did. Verified against
+//! `serde_json` 1.0.151 `src/number.rs`: with the feature on, `N = String` and
+//! every accessor re-parses that string —
+//!
+//! ```text
+//! pub fn as_f64(&self) -> Option<f64> {
+//!     #[cfg(feature = "arbitrary_precision")]
+//!     self.n.parse::<f64>().ok().filter(|float| float.is_finite())
+//! }
+//! ```
+//!
+//! — so `"123456789012345678901234567890"` still answers
+//! `Some(1.2345678901234568e29)` from the `as_f64()` arm and still classifies
+//! `F64`, **lossily**, through exactly the arm the fix above was about.
+//! `Beyond` becomes reachable only for text OUTSIDE `f64` range (`"1e400"`,
+//! which the arbitrary-precision parser no longer rejects up front) — and for
+//! that input [`beyond_text_to_bigint`] returns `None`, i.e. a refusal, not an
+//! exact integer.
+//!
+//! Recovering exact digits would therefore need MORE than a feature flag: an
+//! exact-integer parse of `Number::as_str()` attempted **before** `as_f64()`.
+//! That is the same arm-order lesson as above, one level up — the ordering, not
+//! the feature, is what decides whether precision survives.
 //!
 //! # Why this lives in `cqlite-ffi-common` and not in either binding
 //!
@@ -121,9 +145,14 @@
 //!    `f64` (measured above). The reachable defect — the `u64` range — is fixed
 //!    here without it.
 //!
-//! If that trade is ever revisited, the code is already shaped for it: turn the
-//! feature on and `Beyond` starts carrying the exact digits, which
-//! [`beyond_text_to_bigint`] turns into an exact integer.
+//! Reason 3 is the load-bearing one, and it is worth stating what it rules out:
+//! **turning the feature on would not even make `Beyond` carry the digits.** As
+//! measured in the section above, `as_f64()` under `arbitrary_precision`
+//! re-parses the stored text and still answers `Some(_)` for any value inside
+//! `f64` range, so an over-`u64` integer literal still classifies `F64` lossily.
+//! If that trade is ever revisited, the work is an exact-integer parse of
+//! `Number::as_str()` placed BEFORE the `as_f64()` arm — the feature flag alone
+//! buys nothing here.
 
 use num_bigint::{BigInt, Sign};
 

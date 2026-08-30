@@ -184,9 +184,14 @@ fn beyond_is_unreachable_because_the_parser_collapses_overflow_to_f64() {
         match class(text) {
             JsonNumberClass::F64(_) => {}
             other => panic!(
-                "`{text}` classified as {other:?}; if this is now `Beyond`, \
-                 `arbitrary_precision` has been enabled and the AC6 decision \
-                 in json_number.rs needs revisiting"
+                "`{text}` classified as {other:?}, not F64. NOTE: enabling \
+                 `arbitrary_precision` would NOT produce this — under that \
+                 feature `as_f64()` re-parses the stored text and still answers \
+                 `Some(_)` for anything inside f64 range, so these inputs stay \
+                 F64 (see json_number.rs). A `Beyond` here means an \
+                 exact-integer parse was added AHEAD of the `as_f64()` arm, or \
+                 serde_json's parser changed; either way the module docs and \
+                 the AC6 decision need revisiting"
             ),
         }
     }
