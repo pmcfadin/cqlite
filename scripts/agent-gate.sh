@@ -1790,29 +1790,129 @@ _node_leak_lane_note_file() { printf '%s' "$LOG_DIR/node-bindings.leak-lane"; }
 # The note TEXT for a given state, single-sourced so the component, the SUMMARY and the
 # hidden self-test hook can never quote three different sentences. Any unrecognised state
 # is itself reported rather than silently omitted.
-_node_leak_lane_note() { # <RUN|SKIP-OPTOUT|NO-NODE|NOT-REACHED|NO-PASSING-TESTS>
-                         # RUN/SKIP-OPTOUT are the SAME tokens
-                         # _node_leak_lane_status echoes; the other three are
-                         # execution outcomes only the component can know. One
-                         # vocabulary, so a state can never fall through to the
-                         # UNKNOWN arm by spelling.
+# The BUDGET TESTS this lane exists to run, by jest test title. Declared here (not
+# inside the subshell) so the gate's expectation is one visible list, and asserted
+# EXACTLY: a missing name, a non-passed status, or an UNEXPECTED EXTRA budget test all
+# FAIL. The extra-test arm matters as much as the others — a newly added budget test
+# that nobody wired here would otherwise be silently uncovered, which is this issue's
+# own recurring defect (issue #1465 round 6, roborev J1).
+_NODE_LEAK_BUDGET_TESTS="repeated query rejections stay under the leak budget
+abandoned streaming iterators stay under the leak budget"
+
+# The suffix that identifies a BUDGET test title (as opposed to the lane's contract
+# tests). Used to enumerate what jest actually ran, so an extra budget test is
+# detectable rather than merely absent from the expected list.
+_NODE_LEAK_BUDGET_TITLE_SUFFIX="stay under the leak budget"
+
+# The note TEXT for a given state, single-sourced so the component, the SUMMARY and the
+# hidden self-test hook can never quote three different sentences. Any unrecognised state
+# is itself reported rather than silently omitted.
+_node_leak_lane_note() { # <RUN|SKIP-OPTOUT|NO-NODE|NOT-REACHED|ENTERED-FAILED|
+                         #  NO-BUDGET-AFFIRMATION|DECISION-RUN>
+                         # SKIP-OPTOUT is a token _node_leak_lane_status echoes; the
+                         # rest are execution outcomes only the component can know
+                         # (DECISION-RUN is the pure hook's "would run", which is not
+                         # a verification of anything). One vocabulary, so a state can
+                         # never fall through to the UNKNOWN arm by spelling — one
+                         # already did.
                          #
-                         # RUN is a MEASUREMENT, not a plan (issue #1465 round 5):
-                         # the component writes NOT-REACHED before it starts and
-                         # only upgrades to RUN after jest's own output reports at
-                         # least one PASSING test in the leaks project. Writing RUN
-                         # up front made the block claim the budgets had run when
-                         # an earlier step had failed (set -e never reached them),
-                         # and would have claimed it for an all-skipped run too
-                         # (jest exits 0 on `Tests: 4 skipped, 4 total`).
+                         # RUN IS A MEASUREMENT, NOT A PLAN (issue #1465 rounds 5-6),
+                         # and the states below are the four ways it can fail to be
+                         # one. The component writes the pessimistic state FIRST and
+                         # only upgrades to RUN after jest's own JSON report shows
+                         # every NAMED budget test with status `passed`:
+                         #   * an earlier step failed          -> NOT-REACHED
+                         #   * the lane ran and failed         -> ENTERED-FAILED
+                         #   * it exited 0 without affirming   -> NO-BUDGET-AFFIRMATION
+                         # A count of passing tests is NOT sufficient (roborev J1): the
+                         # leaks project also holds 2 contract tests, so ">=1 passed"
+                         # would report full budget coverage for a run whose budget
+                         # tests were skipped.
   case "$1" in
-    RUN) printf '%s' "node-bindings-leak-lane: RAN (#1465 exception-path/abandoned-iterator leak budgets executed via npm run test:leaks; verified by jest reporting >=1 passing test)" ;;
+    RUN) printf '%s' "node-bindings-leak-lane: RAN (#1465 exception-path/abandoned-iterator leak budgets executed via npm run test:leaks; AFFIRMED from jest's JSON report — every named budget test present and passed)" ;;
     NOT-REACHED) printf '%s' "node-bindings-leak-lane: NOT-REACHED — an earlier step of node-bindings (npm ci / npm run build / write-readback-content) failed, so the #1465 leak budgets never executed; this block does NOT validate them" ;;
-    NO-PASSING-TESTS) printf '%s' "node-bindings-leak-lane: NO-PASSING-TESTS — npm run test:leaks exited 0 but jest reported no passing test (an all-skipped or empty run); the #1465 leak budgets did NOT execute and the component FAILs closed" ;;
+    ENTERED-FAILED) printf '%s' "node-bindings-leak-lane: ENTERED-FAILED — npm run test:leaks WAS entered and DID execute, and it failed (a budget assertion, a contract assertion, or a harness error inside the lane). This is a leak-lane failure, NOT an earlier step; the component FAILs closed and this block does NOT validate the budgets" ;;
+    NO-BUDGET-AFFIRMATION) printf '%s' "node-bindings-leak-lane: NO-BUDGET-AFFIRMATION — npm run test:leaks exited 0 but jest's JSON report did not show every named budget test passing (skipped, renamed, missing, or an unexpected extra budget test); the #1465 budgets are NOT validated and the component FAILs closed" ;;
     SKIP-OPTOUT) printf '%s' "node-bindings-leak-lane: SKIPPED (canonical corpus absent + AGENT_GATE_ALLOW_MISSING_FIXTURES=1) — the #1465 exception-path/abandoned-iterator leak budgets did NOT run; this block does NOT validate them (#1465/#2078)" ;;
     NO-NODE) printf '%s' "node-bindings-leak-lane: NOT-RUN (no node/npm on PATH — the whole node-bindings component SKIPped, #1465)" ;;
+    DECISION-RUN) printf '%s' "node-bindings-leak-lane: WOULD-RUN (the pure decision says this run must execute the #1465 leak budgets; it verifies NOTHING about whether they then passed — only the component's post-run affirmation writes RAN)" ;;
     *) printf '%s' "node-bindings-leak-lane: UNKNOWN state '$1' (#1465) — treat this block as NOT validating the leak budgets" ;;
   esac
+}
+
+# _node_leak_lane_run: RUN the leak lane and AFFIRM it, then write the note. Returns
+# non-zero on any non-affirmation, so the component's `set -e` subshell fails closed.
+#
+# Three properties this shape exists for (issue #1465 round 6):
+#   1. The pessimistic ENTERED-FAILED note is written BEFORE the invocation, so an
+#      abort AT the jest command cannot leave the earlier-step NOT-REACHED text in
+#      place — that misreported the cause of the exact failure this issue exists to
+#      catch, and denied that the budgets had run.
+#   2. The invocation's status is captured EXPLICITLY (no pipeline, so no interaction
+#      with `pipefail`, and no `tee` swallowing the status).
+#   3. The affirmation reads jest's `--json` report FROM A FILE (never a pipe, never
+#      stdout scraping): JSON carries no ANSI, so the parse is colour-immune by
+#      construction rather than by remembering to strip (CLAUDE.md #3400), and it
+#      carries test NAMES and STATUSES rather than a count.
+_node_leak_lane_run() { # <note-file> <json-file>
+  local note_file="$1" json_file="$2" rc=0
+  _node_leak_lane_note ENTERED-FAILED > "$note_file"
+  rm -f "$json_file"
+  # No pipe: the status is this command's own.
+  npm run test:leaks -- --json --outputFile="$json_file" || rc=$?
+  if [ "$rc" -ne 0 ]; then
+    echo "node-bindings: FAIL — npm run test:leaks exited $rc; the #1465 leak lane executed and did not pass (#1465)"
+    return 1
+  fi
+  # Affirm the NAMED budget tests from the JSON report. node is guaranteed present in
+  # this component (it just ran npm), so the parse needs no python3.
+  if ! EXPECTED_TESTS="$_NODE_LEAK_BUDGET_TESTS" \
+       BUDGET_SUFFIX="$_NODE_LEAK_BUDGET_TITLE_SUFFIX" \
+       JSON_FILE="$json_file" node -e '
+        const fs = require("fs");
+        const expected = (process.env.EXPECTED_TESTS || "").split("\n").filter(Boolean);
+        const suffix = process.env.BUDGET_SUFFIX || "";
+        if (!expected.length || !suffix) {
+          console.error("leak-affirm: FAIL — the gate declared no expected budget tests");
+          process.exit(1);
+        }
+        let report;
+        try {
+          report = JSON.parse(fs.readFileSync(process.env.JSON_FILE, "utf8"));
+        } catch (err) {
+          console.error(`leak-affirm: FAIL — cannot read/parse jest JSON at ${process.env.JSON_FILE}: ${err.message}`);
+          process.exit(1);
+        }
+        const observed = new Map();
+        for (const suite of report.testResults || []) {
+          for (const t of suite.assertionResults || []) {
+            const title = t.title || "";
+            if (title.endsWith(suffix)) observed.set(title, t.status);
+          }
+        }
+        let ok = true;
+        for (const name of expected) {
+          const status = observed.get(name);
+          if (status !== "passed") {
+            console.error(`leak-affirm: FAIL — budget test ${JSON.stringify(name)} status=${status === undefined ? "ABSENT" : status} (expected passed)`);
+            ok = false;
+          }
+        }
+        for (const [title, status] of observed) {
+          if (!expected.includes(title)) {
+            console.error(`leak-affirm: FAIL — UNEXPECTED budget test ${JSON.stringify(title)} (status=${status}) is not in the expected list declared by the gate; a new budget test must be enrolled in _NODE_LEAK_BUDGET_TESTS, never silently uncovered`);
+            ok = false;
+          }
+        }
+        if (!ok) process.exit(1);
+        console.log(`leak-affirm: OK — ${expected.length} named budget test(s) present and passed: ${expected.map((n) => JSON.stringify(n)).join(", ")}`);
+      '; then
+    echo "node-bindings: FAIL — npm run test:leaks exited 0 but the named #1465 budget tests were not affirmed (see leak-affirm lines above)"
+    _node_leak_lane_note NO-BUDGET-AFFIRMATION > "$note_file"
+    return 1
+  fi
+  _node_leak_lane_note RUN > "$note_file"
+  return 0
 }
 
 # apply_fixture_preflight: EFFECTFUL FULL-gate canonical-corpus guard (issue #2078).
@@ -2556,7 +2656,13 @@ case "${1:-}" in
   # spending 15 minutes in a real full gate.
   --node-leak-lane)
     _nll_st=$(_node_leak_lane_status); echo "STATUS: $_nll_st"
-    echo "NOTE: $(_node_leak_lane_note "$_nll_st")"
+    # RUN from the PURE decision is a "would run", not an affirmation: it is rendered
+    # as DECISION-RUN so this hook can never print the RAN text, which claims a
+    # post-run verification the decision has not made (issue #1465 round 6).
+    case "$_nll_st" in
+      RUN) echo "NOTE: $(_node_leak_lane_note DECISION-RUN)" ;;
+      *) echo "NOTE: $(_node_leak_lane_note "$_nll_st")" ;;
+    esac
     exit 0 ;;
   # Hidden self-test hook (issue #3148): print the FULL-gate COMMITTED-SCHEMAS decision
   # (OK|FAIL) from _schemas_status, plus the resolved ROOT, its SOURCE and (on FAIL) the

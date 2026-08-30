@@ -4417,11 +4417,15 @@ fi
 #        stale export, and the SUMMARY said nothing.
 nll_present=$(CQLITE_DATASETS_ROOT="$ds_corpus" AGENT_GATE_ALLOW_MISSING_FIXTURES=1 \
   bash "$GATE" --node-leak-lane 2>/dev/null)
+# The PURE decision must render WOULD-RUN, never RAN: RAN asserts a post-run
+# affirmation the decision has not made (issue #1465 round 6, K5). Asserting the
+# absence of RAN here is what keeps the two apart.
 if [ "$(printf '%s\n' "$nll_present" | grep '^STATUS:' | sed 's/^STATUS: //')" = RUN ] \
-   && printf '%s\n' "$nll_present" | grep -q '^NOTE: node-bindings-leak-lane: RAN'; then
-  ok "1465-optout-with-corpus: opt-out var set but corpus PRESENT → RUN + a RAN note"
+   && printf '%s\n' "$nll_present" | grep -q '^NOTE: node-bindings-leak-lane: WOULD-RUN' \
+   && ! printf '%s\n' "$nll_present" | grep -q 'leak-lane: RAN'; then
+  ok "1465-optout-with-corpus: opt-out var set but corpus PRESENT → RUN + a WOULD-RUN note (never RAN)"
 else
-  bad "1465-optout-with-corpus: expected STATUS RUN + a RAN note"
+  bad "1465-optout-with-corpus: expected STATUS RUN + a WOULD-RUN note with no RAN claim"
   echo "------- captured -------"; printf '%s\n' "$nll_present"; echo "------------------------"
 fi
 
@@ -4443,22 +4447,31 @@ fi
 #        be the thing that silently drops coverage.
 nll_absent=$(CQLITE_DATASETS_ROOT="$ds_nocorpus" bash "$GATE" --node-leak-lane 2>/dev/null)
 if [ "$(printf '%s\n' "$nll_absent" | grep '^STATUS:' | sed 's/^STATUS: //')" = RUN ] \
-   && printf '%s\n' "$nll_absent" | grep -q '^NOTE: node-bindings-leak-lane: RAN'; then
+   && printf '%s\n' "$nll_absent" | grep -q '^NOTE: node-bindings-leak-lane: WOULD-RUN'; then
   ok "1465-absent-no-optout: corpus absent, no opt-out → RUN (the fail-closed answer)"
 else
   bad "1465-absent-no-optout: expected STATUS RUN (the strict answer)"
   echo "------- captured -------"; printf '%s\n' "$nll_absent"; echo "------------------------"
 fi
 
-# 1465d. The note vocabulary is CLOSED and single-sourced: every state the component
-#        can write must render a distinct, non-UNKNOWN line. NOT-REACHED (an earlier
-#        step failed) and NO-PASSING-TESTS (jest exited 0 with nothing passing) are
-#        execution outcomes, so they are not reachable through the pure decision hook
-#        — they are asserted here at the text level, which is what keeps a future
+# 1465d. The note vocabulary is CLOSED, single-sourced, and DISTINCT. Every state the
+#        component or the hook can write must render its own line: prefix-and-no-UNKNOWN
+#        was not enough (roborev J4) — two states rendering the SAME text would have
+#        passed, which is the uniform-output blind spot this diff has hit before. So the
+#        rendered lines are collected and counted for UNIQUENESS.
+#        ENTERED-FAILED / NO-BUDGET-AFFIRMATION / NOT-REACHED are execution outcomes and
+#        NO-NODE needs a node-less PATH, so none is reachable through the pure decision
+#        hook; they are asserted here at the text level, which is what stops a future
 #        state from silently falling through the UNKNOWN arm (one already did).
+nll_states="RUN SKIP-OPTOUT NO-NODE NOT-REACHED ENTERED-FAILED NO-BUDGET-AFFIRMATION DECISION-RUN"
 nll_vocab_ok=1
-for _st in RUN SKIP-OPTOUT NO-NODE NOT-REACHED NO-PASSING-TESTS; do
+nll_rendered="$tmp/1465-notes.txt"
+: >"$nll_rendered"
+nll_count=0
+for _st in $nll_states; do
   _line=$(bash -c '. /dev/stdin <<<"$(sed -n "/^_node_leak_lane_note() {/,/^}/p" "$1")"; _node_leak_lane_note "$2"' _ "$GATE" "$_st" 2>/dev/null)
+  nll_count=$((nll_count + 1))
+  printf '%s\n' "$_line" >>"$nll_rendered"
   case "$_line" in
     "node-bindings-leak-lane: "*) : ;;
     *) nll_vocab_ok=0; echo "  state '$_st' rendered: '$_line'" ;;
@@ -4467,18 +4480,59 @@ for _st in RUN SKIP-OPTOUT NO-NODE NOT-REACHED NO-PASSING-TESTS; do
     *UNKNOWN*) nll_vocab_ok=0; echo "  state '$_st' fell through to the UNKNOWN arm" ;;
   esac
 done
+# DISTINCTNESS (roborev J4): as many unique lines as states.
+nll_unique=$(sort -u "$nll_rendered" | wc -l | tr -d ' ')
+if [ "$nll_unique" -ne "$nll_count" ]; then
+  nll_vocab_ok=0
+  echo "  only $nll_unique unique note line(s) for $nll_count states — two states render the SAME text:"
+  sort "$nll_rendered" | uniq -d | sed 's/^/    /'
+fi
 _unknown_line=$(bash -c '. /dev/stdin <<<"$(sed -n "/^_node_leak_lane_note() {/,/^}/p" "$1")"; _node_leak_lane_note "$2"' _ "$GATE" "SOMETHING-NEW" 2>/dev/null)
 case "$_unknown_line" in
   *"UNKNOWN state 'SOMETHING-NEW'"*) : ;;
   *) nll_vocab_ok=0; echo "  an unrecognised state did NOT report itself: '$_unknown_line'" ;;
 esac
 if [ "$nll_vocab_ok" -eq 1 ]; then
-  ok "1465-note-vocab: all five states render a distinct note, and an unrecognised state reports itself"
+  ok "1465-note-vocab: all $nll_count states render a DISTINCT note ($nll_unique unique), and an unrecognised state reports itself"
 else
-  bad "1465-note-vocab: the note vocabulary is not closed (see above)"
+  bad "1465-note-vocab: the note vocabulary is not closed/distinct (see above)"
 fi
 
-ASSERT_FLOOR=386
+# 1465e. The two states that carry the round-6 corrections must SAY what they mean, so a
+#        pasted block cannot be misread: ENTERED-FAILED must assert the lane DID execute
+#        (it replaced a NOT-REACHED that blamed npm ci for a real budget failure), and
+#        NO-BUDGET-AFFIRMATION must name the affirmation, not a test count.
+nll_entered=$(bash -c '. /dev/stdin <<<"$(sed -n "/^_node_leak_lane_note() {/,/^}/p" "$1")"; _node_leak_lane_note ENTERED-FAILED' _ "$GATE" 2>/dev/null)
+nll_noaffirm=$(bash -c '. /dev/stdin <<<"$(sed -n "/^_node_leak_lane_note() {/,/^}/p" "$1")"; _node_leak_lane_note NO-BUDGET-AFFIRMATION' _ "$GATE" 2>/dev/null)
+if printf '%s' "$nll_entered" | grep -q "DID execute" \
+   && printf '%s' "$nll_entered" | grep -q "NOT an earlier step" \
+   && printf '%s' "$nll_noaffirm" | grep -q "named budget test"; then
+  ok "1465-failure-states: ENTERED-FAILED says the lane DID execute; NO-BUDGET-AFFIRMATION names the budget tests"
+else
+  bad "1465-failure-states: the failure notes do not state their own meaning"
+  echo "  ENTERED-FAILED: $nll_entered"
+  echo "  NO-BUDGET-AFFIRMATION: $nll_noaffirm"
+fi
+
+# 1465f. The expected BUDGET-TEST list the gate affirms against must be non-empty and must
+#        match the budget tests the lane actually declares — an expectation that drifts from
+#        the test file is how a budget test goes silently uncovered (roborev J1).
+nll_expected=$(sed -n '/^_NODE_LEAK_BUDGET_TESTS="/,/"$/p' "$GATE" | sed '1s/^_NODE_LEAK_BUDGET_TESTS="//; $s/"$//')
+nll_expected_n=$(printf '%s\n' "$nll_expected" | grep -c . || true)
+nll_leakfile="$SCRIPT_DIR/../../bindings/node/__test__/leak-paths.test.js"
+nll_actual_n=$(grep -cE "^  test\('.*stay under the leak budget'" "$nll_leakfile" 2>/dev/null || echo 0)
+nll_missing=0
+while IFS= read -r _name; do
+  [ -n "$_name" ] || continue
+  grep -qF "$_name" "$nll_leakfile" 2>/dev/null || { nll_missing=1; echo "  expected budget test not found in the lane: '$_name'"; }
+done <<<"$nll_expected"
+if [ "$nll_expected_n" -ge 2 ] && [ "$nll_missing" -eq 0 ] && [ "$nll_expected_n" -eq "$nll_actual_n" ]; then
+  ok "1465-budget-list: the gate expects $nll_expected_n named budget test(s), all present in the lane, and the lane declares exactly that many"
+else
+  bad "1465-budget-list: expected=$nll_expected_n declared-in-lane=$nll_actual_n missing=$nll_missing"
+fi
+
+ASSERT_FLOOR=388
 if [ "$PASS" -lt "$ASSERT_FLOOR" ]; then
   echo "FAIL - assert-floor: only $PASS assertions ran, floor is $ASSERT_FLOOR. Sections are being SKIPPED or dying silently (an extraction that broke, a subshell aborting under set -u), and 'failed: 0' over a shrunken subject set is exactly the vacuous pass this suite tests for."
   FAIL=$((FAIL + 1))
