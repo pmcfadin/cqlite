@@ -211,7 +211,11 @@ pub fn selected_committed_sstable(
 /// census instead of picking one of N silently (issue #1491 review finding L3).
 /// Comparing a second directory is a different staged table and a different
 /// golden, so it is a narrowing of coverage — not, like two SSTables inside ONE
-/// directory, an unsound comparison (`compare::golden_path` fails on that).
+/// directory, an unsound comparison (`compare::golden_path` fails on that). For a
+/// git-COMMITTED table the narrowing is nonetheless a failure elsewhere: the
+/// coverage census classifies per committed `*-Data.db` and refuses the generation
+/// nothing compares, so `of_dirs > 1` survives as a declared gap only for a
+/// fetched-corpus fixture, which git tracks nothing for.
 #[derive(Clone, Debug)]
 pub struct Fixture {
     pub dir: PathBuf,

@@ -69,11 +69,17 @@
 //! uncovered — derived at run time from committed source, not from a hand-kept
 //! count.
 //!
+//! Its UNIT is one committed `*-Data.db`, not one table: the generation the
+//! resolver stages is the compared one, and any OTHER committed generation of the
+//! same table is named as unaccounted for rather than covered by its sibling
+//! (review round 21).
+//!
 //! Every such entry names its unsupported shapes as an `Unsupported` SET rather
-//! than as prose, and the census VERIFIES that set against the committed golden:
-//! the shapes it declares must be exactly the ones `unsupported_shapes` finds in
-//! that table's `*-Data.db.jsonl`. A stale or mis-stated exclusion therefore FAILS
-//! instead of quietly hiding a table that is in fact comparable.
+//! than as prose, and the census VERIFIES that set against the golden PAIRED with
+//! each committed generation it excludes: the shapes it declares must be exactly
+//! the ones `unsupported_shapes` finds in that generation's own
+//! `*-Data.db.jsonl`. A stale or mis-stated exclusion therefore FAILS instead of
+//! quietly hiding a fixture that is in fact comparable.
 //!
 //! The two halves are tied together by
 //! `every_declarable_shape_is_one_the_golden_reader_refuses`, which builds a
@@ -1049,7 +1055,12 @@ fn run_lane(egress: Egress) {
         }
         // The narrowing, COUNTED: a table with several SSTable directories is
         // compared from the first, so the others are untested — declared here (and
-        // tallied for the lane's own summary line) rather than left silent.
+        // tallied for the lane's own summary line) rather than left silent. For a
+        // git-COMMITTED fixture this is now only half the report: the coverage
+        // census classifies per `*-Data.db` and REFUSES the generation nothing
+        // compares, so a committed narrowing fails there while this line says which
+        // generation was read. A fetched-corpus narrowing is the one that stands on
+        // its own — git tracks nothing for it, so no census accounts for it.
         if resolved.of_dirs > 1 {
             narrowed.push(format!(
                 "{qualified}: SSTable directory 1 of {} compared ({} untested)",
@@ -1231,7 +1242,10 @@ fn run_lane(egress: Egress) {
     // count of such tables is part of what this lane measured (finding L3). A
     // second SSTable inside ONE directory is a different matter and is not counted
     // here — `compare::golden_path` FAILS on it, because the staged directory would
-    // feed the CLI more data than any single golden describes.
+    // feed the CLI more data than any single golden describes. Nor does this line
+    // stand alone for a git-committed fixture: the coverage census refuses the
+    // generation nothing compares, so a committed narrowing is a FAILURE there and
+    // only a fetched-corpus one is a declared gap.
     if narrowed.is_empty() {
         eprintln!(
             "AD2 {format} generation coverage: 0 case(s) narrowed — every compared \
