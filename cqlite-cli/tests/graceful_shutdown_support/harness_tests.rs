@@ -464,6 +464,68 @@ fn an_expiry_racing_pipe_closure_reports_closed_pipes() {
              with the pipes \"still open\" — the message names a cause its own final read \
              contradicts (AC2)"
         ),
+        Err(WaitEnd::ReaderFailed { .. }) => panic!(
+            "both readers here ended at EOF, yet the wait reported one of them as having failed"
+        ),
+        Ok((line, _)) => panic!("nothing matching was ever recorded, yet {line:?} matched"),
+    }
+}
+
+/// **A READER THAT ENDS IN AN I/O ERROR IS NOT REPORTED AS EOF** (roborev job 255,
+/// finding 2).
+///
+/// The reader threads did `let Ok(line) = line else { break }`, so a genuine pipe
+/// read failure ended the reader exactly as EOF does — and the resulting failure
+/// said, in as many words, that "the child's stdout AND stderr both reached EOF",
+/// a cause the measurement had not established. The verdict is the same either way
+/// (the awaited line is absent), so this is a WRONG-CAUSE diagnostic and not a
+/// false pass; it is fixed as one, by recording each reader's terminal result and
+/// choosing the variant from it.
+#[test]
+fn a_reader_that_ends_in_an_io_error_is_not_reported_as_eof() {
+    let (io, out, err) = ChildIo::synthetic();
+    let mark = io.mark_from_the_start();
+    err.record(Stream::Stderr, "some other output");
+    // The same path a real reader thread takes when `BufRead::lines` yields `Err`.
+    err.read_failed(
+        Stream::Stderr,
+        std::io::Error::other("simulated pipe failure"),
+    );
+    drop((out, err));
+
+    let deadline = TestDeadline::start(Duration::from_millis(1), Duration::from_millis(1));
+    thread::sleep(Duration::from_millis(25));
+    let stage = deadline.stage("reader-io-error");
+    assert!(
+        stage.remaining().is_zero(),
+        "the precondition of this test is an already-lapsed deadline"
+    );
+
+    match io.wait_for(
+        mark,
+        Stream::Stderr,
+        |l| l.contains(MARKER_HANDLER_ENTERED),
+        &stage,
+    ) {
+        Err(end @ WaitEnd::ReaderFailed { .. }) => {
+            let described = end.describe();
+            assert!(
+                described.contains("simulated pipe failure"),
+                "the failure must carry the reader's own terminal error: {described}"
+            );
+            assert!(
+                !described.contains("both reached EOF"),
+                "a failed read must not be described as EOF: {described}"
+            );
+        }
+        Err(WaitEnd::PipesClosed { .. }) => panic!(
+            "a reader ended in an I/O ERROR and the wait reported that the child's stdout AND \
+             stderr both reached EOF — a cause this measurement never established (job 255, \
+             finding 2)"
+        ),
+        Err(WaitEnd::DeadlineReached { .. }) => {
+            panic!("every reader had ended, yet the wait reported the pipes still open")
+        }
         Ok((line, _)) => panic!("nothing matching was ever recorded, yet {line:?} matched"),
     }
 }

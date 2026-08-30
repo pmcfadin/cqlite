@@ -110,9 +110,18 @@ struct Transcript {
     /// explicitly because a [`Mark`] is a SEQ, and windowing by seq stays correct
     /// even if this store ever stops being a bare append-only `Vec`.
     next_seq: usize,
-    /// Reader threads still attached. `0` means every pipe reached EOF (or its
-    /// reader died), so no further record can ever appear.
+    /// Reader threads still attached. `0` means every reader has ENDED, so no
+    /// further record can ever appear — but NOT that each of them ended at EOF:
+    /// see `read_failures`.
     readers_open: usize,
+    /// **THE READERS' TERMINAL RESULTS, for the ones that did not end at EOF**
+    /// (roborev job 255, finding 2). A reader's `Err` used to be dropped on the
+    /// floor, so an I/O failure on a pipe ended the reader exactly as EOF does and
+    /// the wait then reported, in as many words, that "the child's stdout AND
+    /// stderr both reached EOF" — a cause the measurement had not established.
+    /// Recorded in the SAME store as the records and the count, so a verdict reads
+    /// all three under one lock.
+    read_failures: Vec<(Stream, String)>,
 }
 
 impl Transcript {
@@ -121,6 +130,7 @@ impl Transcript {
             records: Vec::new(),
             next_seq: 0,
             readers_open: readers,
+            read_failures: Vec::new(),
         }
     }
 
@@ -158,6 +168,20 @@ impl ReaderHandle {
     pub fn record(&self, stream: Stream, line: impl Into<String>) {
         if let Ok(mut log) = self.log.lock() {
             log.append(stream, line.into());
+        }
+    }
+
+    /// **RECORD THAT THIS READER ENDED IN AN I/O ERROR RATHER THAN AT EOF**
+    /// (roborev job 255, finding 2).
+    ///
+    /// A reader ends by dropping its handle either way, so without this the two
+    /// outcomes are the same event and the wait names EOF for both. What is at
+    /// stake is the CAUSE a failure reports, not a verdict: the awaited line is
+    /// absent in both cases. It is stored, never rendered from the reader thread,
+    /// so the message and the decision still come from one snapshot.
+    pub fn read_failed(&self, stream: Stream, error: impl std::fmt::Display) {
+        if let Ok(mut log) = self.log.lock() {
+            log.read_failures.push((stream, error.to_string()));
         }
     }
 }
@@ -212,6 +236,10 @@ pub struct TranscriptSnapshot {
     /// The lock was readable. `false` means a reader thread panicked, which is
     /// reported rather than rendered as an empty transcript.
     available: bool,
+    /// Readers that ended in an I/O ERROR rather than at EOF, read under the SAME
+    /// lock as `records` and `pipes_closed` — so "every reader ended" and "one of
+    /// them ended badly" can never come from different moments.
+    read_failures: Vec<(Stream, String)>,
 }
 
 impl TranscriptSnapshot {
@@ -240,9 +268,32 @@ impl TranscriptSnapshot {
             .map(|r| r.text.as_str())
     }
 
-    /// Every reader had ended when this snapshot was taken.
+    /// Every reader had ended when this snapshot was taken. Says NOTHING about
+    /// HOW each ended — see [`TranscriptSnapshot::read_failure_note`].
     pub fn pipes_closed(&self) -> bool {
         self.pipes_closed
+    }
+
+    /// A reader ended in an I/O ERROR rather than at EOF (roborev job 255, finding
+    /// 2). Read from the same snapshot as `pipes_closed`, so a verdict cannot claim
+    /// EOF about a reader this call knows failed.
+    pub fn a_reader_failed(&self) -> bool {
+        !self.read_failures.is_empty()
+    }
+
+    /// Those terminal results, rendered for a failure message; `None` when every
+    /// reader that ended did so at EOF.
+    pub fn read_failure_note(&self) -> Option<String> {
+        if self.read_failures.is_empty() {
+            return None;
+        }
+        Some(
+            self.read_failures
+                .iter()
+                .map(|(stream, error)| format!("{} reader: {error}", stream.tag()))
+                .collect::<Vec<_>>()
+                .join("; "),
+        )
     }
 
     /// When the newest record in the WHOLE store was recorded, if any.
@@ -287,10 +338,23 @@ pub enum WaitEnd {
     /// The test's one deadline passed; the child's pipes were still open, so more
     /// output was still possible.
     DeadlineReached { snapshot: TranscriptSnapshot },
-    /// Every reader had ended: the child's stdout AND stderr reached EOF after
-    /// this long, so no further line could ever arrive. The child had exited,
+    /// Every reader had ended AT EOF: the child's stdout AND stderr reached EOF
+    /// after this long, so no further line could ever arrive. The child had exited,
     /// crashed, or closed its pipes -- this does not say which.
     PipesClosed {
+        after: Duration,
+        snapshot: TranscriptSnapshot,
+    },
+    /// Every reader had ended, and at least one of them ended in an I/O ERROR
+    /// rather than at EOF (roborev job 255, finding 2).
+    ///
+    /// A SEPARATE variant rather than a note on `PipesClosed`, because that
+    /// variant's message states EOF as a fact about the child: a reader whose
+    /// `Err` was discarded ended exactly as one at EOF does, so the wait reported
+    /// a cause its own measurement had not established. The awaited line is absent
+    /// either way — what this fixes is which cause is named, and a variant is what
+    /// stops the EOF claim being reachable from a failed read.
+    ReaderFailed {
         after: Duration,
         snapshot: TranscriptSnapshot,
     },
@@ -305,8 +369,18 @@ impl WaitEnd {
                  of the ONE transcript log covering the {} record(s) sequenced since this wait \
                  began, and none of them matched. The transcript printed below IS that snapshot — \
                  not a fresh read of a store that may since have grown — so this message cannot \
-                 be contradicted by the evidence it prints",
-                snapshot.examined()
+                 be contradicted by the evidence it prints{}",
+                snapshot.examined(),
+                // A reader may have failed while its sibling stayed open: the
+                // deadline is still the cause, but "more output was possible" is
+                // only true of the surviving pipe (job 255, finding 2).
+                snapshot
+                    .read_failure_note()
+                    .map(|note| format!(
+                        ".\nNOTE: not every pipe was still live — a reader had already ended in \
+                         an I/O ERROR rather than at EOF: {note}"
+                    ))
+                    .unwrap_or_default()
             ),
             WaitEnd::PipesClosed { after, snapshot } => format!(
                 "how the wait ended: the child's stdout AND stderr both reached EOF after \
@@ -314,6 +388,21 @@ impl WaitEnd {
                  closed its pipes (this measurement does not say which). The {} record(s) \
                  sequenced since this wait began, printed below, are the snapshot the verdict was \
                  taken from — the records and the end-of-stream fact were read under ONE lock",
+                snapshot.examined()
+            ),
+            WaitEnd::ReaderFailed { after, snapshot } => format!(
+                "how the wait ended: every reader had ended after {after:.3?}, so no further line \
+                 could arrive — but at least one of them ended in an I/O ERROR rather than at \
+                 EOF, so this is NOT the \"both pipes reached EOF\" measurement: {}. \
+                 The {} record(s) sequenced since this wait began, printed below, are the \
+                 snapshot the verdict was taken from — the records, the end-of-stream fact and \
+                 the readers' terminal results were read under ONE lock.\n\
+                 WHAT THIS ESTABLISHES: only that this harness could not read the child's output \
+                 to its end. It is a statement about the pipe, NOT about the child, and NOT about \
+                 the property under test",
+                snapshot
+                    .read_failure_note()
+                    .unwrap_or_else(|| "(no terminal result recorded)".to_string()),
                 snapshot.examined()
             ),
         }
@@ -324,7 +413,22 @@ impl WaitEnd {
         match self {
             WaitEnd::DeadlineReached { snapshot } => snapshot.render(),
             WaitEnd::PipesClosed { snapshot, .. } => snapshot.render(),
+            WaitEnd::ReaderFailed { snapshot, .. } => snapshot.render(),
         }
+    }
+}
+
+/// **THE ONE PLACE THE END-OF-READERS VERDICT IS NAMED** — `PipesClosed` when
+/// every reader ended at EOF, `ReaderFailed` when at least one ended in an I/O
+/// error (roborev job 255, finding 2).
+///
+/// One function, called from both of `wait_for`'s closed-pipe branches, so neither
+/// branch can name EOF for a reader whose terminal result says otherwise.
+fn ended(after: Duration, snapshot: TranscriptSnapshot) -> WaitEnd {
+    if snapshot.a_reader_failed() {
+        WaitEnd::ReaderFailed { after, snapshot }
+    } else {
+        WaitEnd::PipesClosed { after, snapshot }
     }
 }
 
@@ -348,8 +452,16 @@ fn spawn_reader<R: std::io::Read + Send + 'static>(
         let handle = handle;
         let buf = BufReader::new(reader);
         for line in buf.lines() {
-            let Ok(line) = line else { break };
-            handle.record(stream, line);
+            // THE TERMINAL RESULT IS RECORDED, NOT DISCARDED (roborev job 255,
+            // finding 2): `break` alone made an I/O failure indistinguishable from
+            // EOF, and the wait then reported EOF as the cause.
+            match line {
+                Ok(line) => handle.record(stream, line),
+                Err(error) => {
+                    handle.read_failed(stream, error);
+                    break;
+                }
+            }
         }
     });
 }
@@ -428,12 +540,14 @@ impl ChildIo {
                 mark: mark.0,
                 pipes_closed: log.readers_open == 0,
                 available: true,
+                read_failures: log.read_failures.clone(),
             },
             Err(_) => TranscriptSnapshot {
                 records: Vec::new(),
                 mark: 0,
                 pipes_closed: false,
                 available: false,
+                read_failures: Vec::new(),
             },
         }
     }
@@ -485,10 +599,10 @@ impl ChildIo {
                 // finding 3 — collapsing the two reported "pipes still open"
                 // about a child whose readers had both ended).
                 return Err(if snapshot.pipes_closed() {
-                    WaitEnd::PipesClosed {
-                        after: stage.spent(),
-                        snapshot,
-                    }
+                    // EOF and a failed read both END a reader, so the variant is
+                    // chosen from the readers' recorded TERMINAL RESULTS and never
+                    // from the count alone (job 255, finding 2).
+                    ended(stage.spent(), snapshot)
                 } else {
                     WaitEnd::DeadlineReached { snapshot }
                 });
@@ -501,10 +615,7 @@ impl ChildIo {
                 // Every reader has ended AND this snapshot read their records, so
                 // no further line can ever arrive: waiting out the deadline could
                 // only delay the same verdict.
-                return Err(WaitEnd::PipesClosed {
-                    after: stage.spent(),
-                    snapshot,
-                });
+                return Err(ended(stage.spent(), snapshot));
             }
             thread::sleep(WAIT_POLL.min(remaining));
         }
