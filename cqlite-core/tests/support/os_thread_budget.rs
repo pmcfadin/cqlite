@@ -165,7 +165,40 @@ pub const POLL_INTERVAL: Duration = Duration::from_millis(25);
 /// `timeout` is a fail-loud BOUND ONLY, never the synchronization mechanism: if
 /// the count never stabilizes within it, this panics with a clear diagnostic
 /// rather than silently returning an under-sampled value.
+///
+/// ## ACCEPTED RESIDUAL — this timeout has NO confirmation path (#3514 nit 5)
+///
+/// [`poll_until_reaped`] was given an affirmative/asymmetric confirmation because
+/// its subject is a starvation-SENSITIVE VALUE (a thread population compared
+/// against a bound). This function's subject is different in kind — a LIFECYCLE
+/// SETTLING — and it is left as a bare fail-loud panic deliberately, not as an
+/// unswept remnant. Recorded so the next person need not re-derive the risk:
+///
+/// * **The bar is tiny relative to the budget.** Success needs
+///   [`STABLE_STREAK`] (8) consecutive identical readings at
+///   [`POLL_INTERVAL`] (25 ms) — a **200 ms** window — inside a caller budget of
+///   10 s (baseline) or 15–20 s (peak): **50–100× headroom**. Starvation does not
+///   change the thread POPULATION, only when this thread is scheduled to read it,
+///   and thread creation is synchronous in the kernel (the `/proc/self/task` entry
+///   exists the instant the thread does). So a spurious panic needs the count to
+///   keep CHANGING for the whole budget, not merely for this thread to run late.
+/// * **It is materially safer than what #3514 removed.** The old failure was a
+///   peak VALUE assert whose red was textually indistinguishable from a real
+///   regression — that is what cost the field investigation. A panic here says
+///   `never stabilized`, carries the streak, the last reading and (below) the PSI
+///   stall percentage, so it is classifiable on sight and cannot be mistaken for
+///   an amplification.
+/// * **What would settle it, since nothing here does:** a starvation repro — N
+///   CPU spinners at 2–4× the core count — measuring whether 8 consecutive 25 ms
+///   polls ever fail to land inside the 10 s/20 s budgets. Until someone runs
+///   that, the 200 ms-bar argument above is reasoning, not measurement. If such a
+///   run ever produces a `never stabilized` panic, the fix is a confirmation path
+///   shaped like [`poll_until_reaped`]'s (patient before failing), NOT a longer
+///   fixed timeout.
 pub fn poll_until_stable(timeout: Duration) -> (usize, usize) {
+    // Annotate a would-be panic with host CPU stall, so a spurious one is
+    // classifiable without a re-run (#3514 nit 5). Diagnostic only; one /proc read.
+    let pressure = open_cpu_pressure_window();
     let deadline = Instant::now() + timeout;
     let mut peak = 0usize;
     let mut last: Option<usize> = None;
@@ -187,11 +220,14 @@ pub fn poll_until_stable(timeout: Duration) -> (usize, usize) {
         }
         std::thread::sleep(POLL_INTERVAL);
     }
+    let pressure_note = pressure.report();
     panic!(
         "OS thread count never stabilized within {timeout:?} (last reading {last:?}, \
          streak {streak}/{STABLE_STREAK} required, peak observed {peak}); this is a \
          fail-loud BOUND, not a synchronization mechanism — producer startup may be \
-         stalled under extreme contention, or the lifecycle signal never settles"
+         stalled under extreme contention, or the lifecycle signal never settles. \
+         This is NOT a thread-budget regression: no bound was compared. Host CPU-stall \
+         context, DIAGNOSTIC ONLY: {pressure_note}"
     );
 }
 
@@ -481,7 +517,13 @@ impl CpuPressureWindow {
                 )
             }
         };
-        let wall_micros = self.opened.elapsed().as_micros();
+        // ORDER MATTERS (#3514 nit 3): read the CLOSING counter FIRST, then take the
+        // wall denominator. The other order closes the denominator interval BEFORE
+        // the numerator's, so the numerator spans a strictly LONGER interval and the
+        // percentage is biased high — and the bias is worst exactly when it matters,
+        // because on a fully-stalled host the closing /proc read is itself what
+        // blocks. Taken this way the denominator interval is a superset of the
+        // numerator's, so the ratio cannot exceed 100%.
         let ended = match read_cpu_pressure_some_total() {
             Ok(v) => v,
             Err(why) => {
@@ -491,12 +533,30 @@ impl CpuPressureWindow {
                 )
             }
         };
+        let wall_micros = self.opened.elapsed().as_micros();
+        // A BACKWARDS counter is UNMEASURABLE, never 0% (#3514 blocker 1). The `some
+        // total=` field is monotonic only within one PSI accounting domain: a cgroup
+        // or namespace change between the two reads, or a PSI reset, can move it
+        // backwards. A `saturating_sub` would render that as "0.0% stall" — printed on
+        // a genuinely starved host, i.e. this diagnostic would actively MISCLASSIFY
+        // the one red it exists to classify, in the worst direction. The rule is this
+        // module's own, stated at `read_cpu_pressure_some_total`: an unmeasurable value
+        // is not the value zero.
+        let Some(stalled) = ended.checked_sub(started) else {
+            return format!(
+                "cpu-pressure: UNMEASURED (counter went BACKWARDS: 'some total=' read \
+                 {started}us at window open and {ended}us at close, so the two readings \
+                 are not from one monotonic accounting domain — a cgroup/namespace move \
+                 or a PSI reset between them will do this). Reporting 0% here would print \
+                 'no stall' on a possibly-starved host: an unmeasurable value is not 0%"
+            );
+        };
         if wall_micros == 0 {
             return "cpu-pressure: UNMEASURED (zero-width window; nothing to normalise by) \
                     — an unmeasurable value is not 0%"
                 .to_string();
         }
-        let stalled_micros = u128::from(ended.saturating_sub(started));
+        let stalled_micros = u128::from(stalled);
         let pct = (stalled_micros as f64) * 100.0 / (wall_micros as f64);
         format!(
             "cpu-pressure: some-stall {pct:.1}% of wall ({stalled_micros}us stalled over \
