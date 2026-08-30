@@ -409,9 +409,12 @@ refused "MODE: line inside a FULL-header block -> refuse" \
   "$T/full-with-mode.txt" "carries a MODE: line"
 
 # --- Case 23: prose QUOTING the markers is not a block ----------------------
-# CLAUDE.md, issue threads and PR bodies quote these markers inline; and
-# "==== END AGENT-GATE SUMMARY ====" CONTAINS the start marker as a substring, so
-# a substring match would count every terminator as a new block.
+# Whole-line-exact anchoring defends against PROSE copies of a marker —
+# indented, `>`-quoted, fenced or mid-sentence — which CLAUDE.md, issue bodies,
+# PR comments and the doctrine files this change edits all contain, and against
+# a TRUNCATED pattern such as `AGENT-GATE SUMMARY ====`, which matches all four
+# markers (full/lite start and end). Note the end marker does NOT contain the
+# start marker as a substring: `END ` sits between `====` and `AGENT-GATE`.
 {
   printf 'The gate emits a "%s" block whose RESULT: PASS is the verdict.\n' "$FULL_S"
   printf 'Its terminator is %s and it is not a block opener.\n' "$FULL_E"
@@ -435,9 +438,12 @@ if run 0 "prose quoting the markers + ONE real block -> exit 0" \
 fi
 
 # --- Case 24: ANSI-coloured summary still parses (#3400) --------------------
-# Colour SURVIVES redirection to a file, and the gate's own mandated capture is
-# coloured (18 workflows set CARGO_TERM_COLOR=always). A parser keyed on
-# uncoloured text would refuse a perfectly good gate of record.
+# BELT, stated precisely: the summary FILE's block lines are `echo`s of computed
+# strings (scripts/agent-gate.sh emit_summary), so they are NOT coloured —
+# CARGO_TERM_COLOR colours cargo output inside gate.log, not the block. What the
+# strip covers is a block RECOVERED FROM A COLOURED CAPTURE rather than from the
+# summary file, and colour does survive redirection (#3400). Non-vacuous either
+# way: without the strip this fixture refuses a perfectly good gate of record.
 ESC=$(printf '\033')
 sed -e "s/RESULT: PASS/${ESC}[32mRESULT${ESC}[0m: ${ESC}[1;32mPASS${ESC}[0m/" \
     -e "s/tree-integrity: PASS/tree-integrity: ${ESC}[32mPASS${ESC}[0m/" \
