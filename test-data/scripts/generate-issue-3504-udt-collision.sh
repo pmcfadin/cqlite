@@ -67,6 +67,13 @@ KEYSPACE="test_udt_collision"
 TABLE="udt_collide"
 SCHEMA_FILE="$ROOT/schemas/issue-3504-udt-collision.cql"
 
+# Every INSERT carries an explicit writetime so the committed sstabledump golden
+# is reproducible across regenerations rather than carrying a wall clock. NOT
+# fully deterministic: a non-frozen map INSERT also emits a collection tombstone
+# whose local_delete_time comes from nowInSeconds, which no CQL clause pins. The
+# three rows are separate partitions, so one shared timestamp implies no LWW.
+T_FIXED=1000
+
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --out)     OUT_DIR="$2"; shift 2 ;;
@@ -163,6 +170,8 @@ flush_ks() {
 # 'user-supplied-type', which is not a type name anything would inject, and
 # `"_keyspace"` carries 'user-supplied-keyspace'.
 #
+# All INSERTs use an explicit USING TIMESTAMP 1000 (see T_FIXED above).
+#
 #   id 1 — the collision subject, everything populated:
 #           c  = collide with BOTH colliding fields + real_field
 #           p  = plain (NO colliding field) — the contrast value
@@ -179,22 +188,22 @@ flush_ks() {
 #           frozen UDT is orthogonal to the collision.
 # ----------------------------------------------------------------------------
 insert_rows() {
-  log "=== $TABLE: inserting rows ==="
+  log "=== $TABLE: inserting rows (USING TIMESTAMP $T_FIXED) ==="
   cql "INSERT INTO $TABLE (id, c, p, cm, tm) VALUES (
          1,
          {\"_type\": 'user-supplied-type', \"_keyspace\": 'user-supplied-keyspace', real_field: 42},
          {label: 'no-colliding-field', real_field: 7},
          {{\"_type\": 'key-type-marker', \"_keyspace\": 'key-keyspace-marker', real_field: 100}: 1},
          {{\"_type\": 'key-type-marker', \"_keyspace\": 'key-keyspace-marker', real_field: 100}: 2}
-       )"
+       ) USING TIMESTAMP $T_FIXED"
   cql "INSERT INTO $TABLE (id, p) VALUES (
          2,
          {label: 'contrast-row', real_field: 8}
-       )"
+       ) USING TIMESTAMP $T_FIXED"
   cql "INSERT INTO $TABLE (id, c) VALUES (
          3,
          {\"_type\": null, \"_keyspace\": 'keyspace-field-only', real_field: 0}
-       )"
+       ) USING TIMESTAMP $T_FIXED"
 }
 
 generate_sstabledump_jsonl() {

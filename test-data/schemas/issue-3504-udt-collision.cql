@@ -47,7 +47,11 @@
 --                                     distinctness property above.
 --
 -- Deliberately tiny and uncompressed (no CompressionInfo.db): the fixture is a
--- committed binary, and the property under test is above decode.
+-- committed binary, and the property under test is above decode. Every INSERT
+-- carries an explicit USING TIMESTAMP 1000, so the committed sstabledump JSONL
+-- golden is reproducible across regenerations instead of carrying a wall clock
+-- (the non-frozen map columns' collection tombstone still records a
+-- nowInSeconds local_delete_time, which no CQL clause pins).
 
 CREATE KEYSPACE IF NOT EXISTS test_udt_collision WITH replication = {
   'class': 'SimpleStrategy',
