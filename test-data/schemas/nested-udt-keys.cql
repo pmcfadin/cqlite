@@ -32,6 +32,27 @@
 --   f_map_tuple_udt  — frozen<map<frozen<tuple<frozen<key_part>, int>>, int>>
 --   f_map_set_udt    — frozen<map<frozen<set<frozen<key_part>>>, int>>
 --
+-- Plus TWO columns that put a UDT inside a frozen MAP that is itself a SET
+-- ELEMENT, which is the only shape that exercises `contains_udt`'s MAP arm
+-- (roborev job 245, F3):
+--   s_map_udt_key — set<frozen<map<frozen<key_part>, int>>>
+--                   UDT in the map KEY only  -> covers `contains_udt(k)`.
+--   s_map_udt_val — set<frozen<map<int, frozen<key_part>>>>
+--                   UDT in the map VALUE only -> covers `contains_udt(v)`.
+-- TWO NARROW COLUMNS, NOT ONE WIDE ONE, AND THAT IS THE POINT. The arm reads
+-- `pairs.iter().any(|(k, v)| contains_udt(k) || contains_udt(v))`, and `||`
+-- SHORT-CIRCUITS: a single column with a UDT in both halves stays green if the
+-- key half is correct and the value half regressed (the key half answers first
+-- and `v` is never consulted), and its failure would not say WHICH half broke.
+-- One column per half makes each half independently falsifiable.
+--
+-- Neither is a crash case post-fix: `value_to_hashable_key` is TOTAL, so a
+-- regressed half projects the element HASHABLY and the column silently comes
+-- back as a `frozenset` of tuples where #804 requires a `list` of `dict`s — a
+-- SHAPE regression with no exception. That is exactly the "an arm covered by
+-- nothing" class this fixture exists to close, so it is closed the same way:
+-- with real Cassandra-written bytes.
+--
 -- THE TWO FROZEN MAPS ARE THE ONLY COLUMNS THAT REACH THE HASHABLE PROJECTION'S
 -- NEW ARMS, AND THAT IS WHY THEY EXIST (issue #3500).
 -- The four issue-named columns above do NOT. Two independent routes divert them:
@@ -97,9 +118,21 @@ CREATE TYPE IF NOT EXISTS key_part (
 );
 
 -- ── Table ───────────────────────────────────────────────────────────────────
--- Both frozen-map column types were probed against Cassandra 5.0.2 before being
--- committed and were accepted verbatim: a collection or tuple used as a map key
--- must be frozen, and both nestings below satisfy that.
+-- Every column type below was probed against Cassandra 5.0.2 before being
+-- committed and was accepted VERBATIM (`DESCRIBE TABLE` echoes each declaration
+-- unchanged): a collection or tuple used as a map key must be frozen, and so
+-- must a map used as a set element — every nesting below satisfies both.
+--
+-- One measured cqlsh DISPLAY quirk, recorded so it is not mistaken for a
+-- rejection: a `set<frozen<map<frozen<key_part>, …>>>` element whose UDT map key
+-- has NULL fields makes the python driver's SortedSet formatter raise
+-- `Failed to format value … '<' not supported between instances of 'str' and
+-- 'NoneType'` while printing. The INSERT and the SELECT both still exit 0 and
+-- the data is stored correctly; it is a client-side formatting failure only.
+-- s_map_udt_key therefore carries an EMPTY-STRING label rather than a null one,
+-- and null-field coverage for the new pair lives in s_map_udt_val's map VALUES
+-- (where the formatter is fine). Null UDT fields in a hashable position are
+-- already covered by m_tuple_udt / f_map_tuple_udt / f_map_set_udt.
 --
 -- NO `--` COMMENT MAY APPEAR BETWEEN `CREATE TABLE (` AND ITS CLOSING `)`.
 -- CQLite's nom schema parser (cqlite-core/src/schema/cql_parser.rs) strips
@@ -118,6 +151,8 @@ CREATE TABLE IF NOT EXISTS nested_udt_keys (
     s_list_udt      set<frozen<list<frozen<key_part>>>>,
     f_set_tuple_udt frozen<set<frozen<tuple<frozen<key_part>, int>>>>,
     f_map_tuple_udt frozen<map<frozen<tuple<frozen<key_part>, int>>, int>>,
-    f_map_set_udt   frozen<map<frozen<set<frozen<key_part>>>, int>>
+    f_map_set_udt   frozen<map<frozen<set<frozen<key_part>>>, int>>,
+    s_map_udt_key   set<frozen<map<frozen<key_part>, int>>>,
+    s_map_udt_val   set<frozen<map<int, frozen<key_part>>>>
 ) WITH compression = {'enabled': 'false'}
   AND compaction = {'class': 'SizeTieredCompactionStrategy'};

@@ -21,6 +21,13 @@
 #   f_set_tuple_udt frozen<set<frozen<tuple<frozen<key_part>, int>>>>
 #   f_map_tuple_udt frozen<map<frozen<tuple<frozen<key_part>, int>>, int>>
 #   f_map_set_udt   frozen<map<frozen<set<frozen<key_part>>>, int>>
+#   s_map_udt_key   set<frozen<map<frozen<key_part>, int>>>      (contains_udt k)
+#   s_map_udt_val   set<frozen<map<int, frozen<key_part>>>>      (contains_udt v)
+#
+# The last two exist for `contains_udt`'s MAP arm, whose two halves
+# (`contains_udt(k) || contains_udt(v)`) were covered by NOTHING. They are
+# SEPARATE columns because `||` short-circuits, so one column with a UDT in both
+# halves cannot distinguish a k-only from a v-only regression (roborev job 245).
 #
 # The two FROZEN MAPS are the only columns whose values reach the Python
 # binding's `value_to_hashable_key` at all: a frozen map's keys are decoded
@@ -358,9 +365,13 @@ flush_ks() {
 #   * f_map_tuple_udt / f_map_set_udt hold two entries each, so the frozen-map
 #     KEY decode (the only route to value_to_hashable_key) is exercised with
 #     more than one key and with Cassandra's own key ordering.
+#   * s_map_udt_key / s_map_udt_val hold TWO set elements, the first a two-entry
+#     frozen map written out of key order: so the element is a real multi-pair
+#     `Value::Map` when `contains_udt`'s Map arm walks it, and `any(...)` is not
+#     trivially answered by a single pair.
 insert_full() {
   log "=== nested_udt_keys id=1 (fully populated, multi-element) ==="
-  cql "INSERT INTO nested_udt_keys (id, s_tuple_udt, s_set_udt, m_tuple_udt, s_list_udt, f_set_tuple_udt, f_map_tuple_udt, f_map_set_udt) VALUES (
+  cql "INSERT INTO nested_udt_keys (id, s_tuple_udt, s_set_udt, m_tuple_udt, s_list_udt, f_set_tuple_udt, f_map_tuple_udt, f_map_set_udt, s_map_udt_key, s_map_udt_val) VALUES (
     1,
     { ({label:'zulu', rank:26}, 7), ({label:'alpha', rank:1}, 2), ({label:'alpha', rank:1}, 1) },
     { { {label:'beta', rank:2}, {label:'alpha', rank:1} }, { {label:'gamma', rank:3} } },
@@ -368,7 +379,9 @@ insert_full() {
     { [ {label:'one', rank:1}, {label:'two', rank:2} ], [ {label:'two', rank:2}, {label:'one', rank:1} ] },
     { ({label:'frozen-b', rank:12}, 2), ({label:'frozen-a', rank:11}, 1) },
     { ({label:'mkey-b', rank:22}, 2): 220, ({label:'mkey-a', rank:21}, 1): 210 },
-    { { {label:'mset-b', rank:32}, {label:'mset-a', rank:31} }: 310, { {label:'mset-c', rank:33} }: 330 }
+    { { {label:'mset-b', rank:32}, {label:'mset-a', rank:31} }: 310, { {label:'mset-c', rank:33} }: 330 },
+    { { {label:'kb', rank:2}: 20, {label:'ka', rank:1}: 10 }, { {label:'kc', rank:3}: 30 } },
+    { { 2: {label:'vb', rank:12}, 1: {label:'va', rank:11} }, { 3: {label:'vc', rank:13} } }
   )"
 }
 
@@ -378,6 +391,15 @@ insert_full() {
 # id 2 — NULL UDT FIELDS inside every hashable position, plus an EMPTY-string
 # field (distinct from null).
 #
+# EXCEPT s_map_udt_key, which carries an empty-string label instead of a null
+# one: a null UDT field in a `set<frozen<map<frozen<udt>, …>>>` element makes the
+# python driver's SortedSet FORMATTER raise while PRINTING (`'<' not supported
+# between instances of 'str' and 'NoneType'`). Measured against 5.0.2 — the
+# INSERT and the SELECT both exit 0 and the bytes are stored correctly, it is a
+# client-side display failure — but it would put a spurious `Failed to format
+# value` line in this generator's own log. Null-field coverage for the new pair
+# lives in s_map_udt_val's map VALUES, where the formatter is fine.
+#
 # The FROZEN-MAP keys here are what make `value_to_hashable_key`'s Udt-arm
 # `None => py.None()` branch reachable: those keys are the only values in this
 # repository that arrive at that function as a structured `Value::Udt` carrying
@@ -385,7 +407,7 @@ insert_full() {
 # `None` branch — a different function.)
 insert_null_fields() {
   log "=== nested_udt_keys id=2 (null UDT fields + empty-string field) ==="
-  cql "INSERT INTO nested_udt_keys (id, s_tuple_udt, s_set_udt, m_tuple_udt, s_list_udt, f_set_tuple_udt, f_map_tuple_udt, f_map_set_udt) VALUES (
+  cql "INSERT INTO nested_udt_keys (id, s_tuple_udt, s_set_udt, m_tuple_udt, s_list_udt, f_set_tuple_udt, f_map_tuple_udt, f_map_set_udt, s_map_udt_key, s_map_udt_val) VALUES (
     2,
     { ({label:'nullrank', rank:null}, 1), ({label:null, rank:5}, 2) },
     { { {label:'nullrank2', rank:null}, {label:null, rank:null} } },
@@ -393,7 +415,9 @@ insert_null_fields() {
     { [ {label:'', rank:0}, {label:null, rank:9} ] },
     { ({label:null, rank:7}, 3) },
     { ({label:'nullrank3', rank:null}, 1): 51, ({label:null, rank:5}, 2): 52 },
-    { { {label:null, rank:null} }: 61, { {label:'', rank:0} }: 62 }
+    { { {label:null, rank:null} }: 61, { {label:'', rank:0} }: 62 },
+    { { {label:'', rank:0}: 1, {label:'zz', rank:9}: 2 } },
+    { { 1: {label:null, rank:null}, 2: {label:'', rank:0} } }
   )"
 }
 
@@ -401,7 +425,7 @@ insert_null_fields() {
 # five columns, so a decoder that confuses two columns is visible.
 insert_minimal() {
   log "=== nested_udt_keys id=3 (single element per collection) ==="
-  cql "INSERT INTO nested_udt_keys (id, s_tuple_udt, s_set_udt, m_tuple_udt, s_list_udt, f_set_tuple_udt, f_map_tuple_udt, f_map_set_udt) VALUES (
+  cql "INSERT INTO nested_udt_keys (id, s_tuple_udt, s_set_udt, m_tuple_udt, s_list_udt, f_set_tuple_udt, f_map_tuple_udt, f_map_set_udt, s_map_udt_key, s_map_udt_val) VALUES (
     3,
     { ({label:'solo', rank:99}, 42) },
     { { {label:'solo', rank:99} } },
@@ -409,7 +433,9 @@ insert_minimal() {
     { [ {label:'solo', rank:99} ] },
     { ({label:'solo', rank:99}, 42) },
     { ({label:'solo', rank:99}, 42): 7 },
-    { { {label:'solo', rank:99} }: 7 }
+    { { {label:'solo', rank:99} }: 7 },
+    { { {label:'solo', rank:99}: 42 } },
+    { { 42: {label:'solo', rank:99} } }
   )"
 }
 
