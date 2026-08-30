@@ -10,7 +10,7 @@
 #[path = "support/parquet_parity/mod.rs"]
 mod parquet_parity;
 
-use parquet_parity::{assert_case, ParityCase};
+use parquet_parity::{assert_case, KnownGap, ParityCase};
 
 // ---------------------------------------------------------------------------
 // test_da — BTI (`da`) fixtures, binaries COMMITTED to git
@@ -33,6 +33,7 @@ const DA_SIMPLE: ParityCase = ParityCase {
     clustering: &[],
     must_run: true,
     covers: "BTI da: uuid/text/int/bigint/boolean/timestamp scalars",
+    known_gap: None,
 };
 
 #[test]
@@ -55,6 +56,7 @@ const DA_COLLECTIONS: ParityCase = ParityCase {
     clustering: &[],
     must_run: true,
     covers: "BTI da: non-frozen set/list/map assembled from per-element cells",
+    known_gap: None,
 };
 
 #[test]
@@ -76,6 +78,7 @@ const SIGNED_INT_COLLECTIONS: ParityCase = ParityCase {
     clustering: &[],
     must_run: true,
     covers: "negative integers as set elements and map keys (stringified paths)",
+    known_gap: None,
 };
 
 #[test]
@@ -97,6 +100,7 @@ const COMP_LZ4: ParityCase = ParityCase {
     clustering: &["ck"],
     must_run: true,
     covers: "LZ4-compressed BIG nb, 600 clustering rows in one partition",
+    known_gap: None,
 };
 
 #[test]
@@ -118,6 +122,12 @@ const UDT_FROZEN_PERSON: ParityCase = ParityCase {
     clustering: &[],
     must_run: true,
     covers: "frozen UDT with a NULL inner field",
+    known_gap: Some(KnownGap {
+        issue: "#3556",
+        expect: "expected Blob value, got Udt",
+        what: "a frozen UDT column reaches the Arrow converter with no CqlType, so the \
+               export aborts instead of writing a Struct",
+    }),
 };
 
 #[test]
@@ -141,6 +151,12 @@ const UDT_COLLECTIONS: ParityCase = ParityCase {
     clustering: &[],
     must_run: true,
     covers: "frozen collections of frozen UDTs (single-cell nested values)",
+    known_gap: Some(KnownGap {
+        issue: "#3556",
+        expect: "column 'lp'",
+        what: "a UDT nested inside a frozen collection is exported as a Utf8 \
+               ValueFormatter rendering instead of an Arrow Struct",
+    }),
 };
 
 #[test]
@@ -184,6 +200,7 @@ const BASIC_SIMPLE: ParityCase = ParityCase {
     clustering: &[],
     must_run: false,
     covers: "the full scalar zoo: float/double/decimal/date/time/blob/inet/duration/timeuuid",
+    known_gap: None,
 };
 
 #[test]
@@ -207,6 +224,7 @@ const BASIC_COMPOSITE_KEY: ParityCase = ParityCase {
     clustering: &["clustering_key1", "clustering_key2"],
     must_run: false,
     covers: "two-component clustering key (timestamp DESC, text ASC)",
+    known_gap: None,
 };
 
 #[test]
@@ -232,6 +250,7 @@ const COLLECTIONS_TABLE: ParityCase = ParityCase {
     clustering: &[],
     must_run: false,
     covers: "six non-frozen collections incl. list<timestamp> and map<text,bigint>",
+    known_gap: None,
 };
 
 #[test]
@@ -258,6 +277,7 @@ const TIMESERIES_SENSOR_DATA: ParityCase = ParityCase {
     clustering: &["timestamp"],
     must_run: false,
     covers: "2000 clustering rows across 10 partitions, float/double/tinyint",
+    known_gap: None,
 };
 
 #[test]

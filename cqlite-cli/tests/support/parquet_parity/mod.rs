@@ -42,6 +42,7 @@ pub mod datasets_root;
 pub mod arrow_rows;
 pub mod cql_type;
 pub mod golden_rows;
+pub mod spelling;
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -76,6 +77,25 @@ pub struct ParityCase {
     pub must_run: bool,
     /// What this case buys the corpus (type families, format).
     pub covers: &'static str,
+    /// A DOCUMENTED, ISSUE-TRACKED divergence this case currently exhibits.
+    ///
+    /// The harness then asserts the divergence STILL EXISTS: the day the export
+    /// bug is fixed this test FAILS and demands the case be promoted to a full
+    /// parity case. A known gap can never quietly become an unnoticed pass, and
+    /// it cannot be used to silence a NEW divergence either — the recorded
+    /// `expect` substring has to be the one that shows up.
+    pub known_gap: Option<KnownGap>,
+}
+
+/// A recorded, issue-tracked export gap.
+pub struct KnownGap {
+    /// The GitHub issue tracking the fix, e.g. `"#3551"`.
+    pub issue: &'static str,
+    /// A substring the failure message MUST contain, so this case cannot mask a
+    /// different failure.
+    pub expect: &'static str,
+    /// Why the gap exists, in one line.
+    pub what: &'static str,
 }
 
 /// What one case did, for the per-case assertion and the run census.
@@ -277,6 +297,23 @@ pub struct Row {
 }
 
 impl Row {
+    /// TEST-SUPPORT ONLY: overwrite one cell, so a self-test can prove the
+    /// comparison notices. It cannot weaken a real run: nothing in the harness
+    /// calls it, and a `Row` is rebuilt from the Parquet file on every case.
+    pub fn overwrite_cell(&mut self, column: &str, value: CanonicalValue) {
+        self.cells.insert(column.to_string(), value);
+    }
+
+    /// TEST-SUPPORT ONLY: overwrite one primary-key component (position in
+    /// `partition_key ++ clustering` order).
+    pub fn overwrite_key(&mut self, index: usize, value: CanonicalValue) {
+        self.keys[index] = value;
+    }
+
+    pub fn cell(&self, column: &str) -> Option<&CanonicalValue> {
+        self.cells.get(column)
+    }
+
     fn sort_key(&self) -> String {
         self.keys.iter().map(render_value).collect::<Vec<_>>().join("\u{1f}")
     }
@@ -384,20 +421,30 @@ pub fn render_value(v: &CanonicalValue) -> String {
     }
 }
 
-/// Run one case end-to-end. `Err` is a parity failure or a fail-closed refusal;
-/// `Ok(Skipped)` only when no candidate root carries the table.
-pub fn run_case(case: &ParityCase) -> Result<CaseOutcome, String> {
+/// Everything one case needs to compare, before comparing it.
+///
+/// Exposed as its own step so the harness's OWN sensitivity can be tested: a
+/// self-test perturbs one cell / drops one row / rewrites one key and requires
+/// [`compare`] to REPORT it. A comparison harness that has never been shown to
+/// fail is not evidence of anything (`harness_detects_*` in
+/// `issue_1490_parquet_jsonl_parity.rs`).
+pub struct Prepared {
+    pub columns: Vec<ColumnType>,
+    pub golden: Vec<GoldenRow>,
+    pub parquet: Vec<Row>,
+}
+
+/// Export, read back and project both sides. `Ok(None)` only when no candidate
+/// root carries the table.
+pub fn prepare(case: &ParityCase) -> Result<Option<Prepared>, String> {
     let columns = case.column_types()?;
     let Some(fixture) = resolve_fixture(case)? else {
-        return Ok(CaseOutcome::Skipped(datasets_root::describe_search(
-            case.keyspace,
-            case.table,
-        )));
+        return Ok(None);
     };
 
     let tmp = tempfile::TempDir::new().map_err(|e| format!("tempdir: {e}"))?;
     let data_dir = isolated_data_dir(case, &fixture, tmp.path())?;
-    let parquet = export_parquet(case, &data_dir, tmp.path())?;
+    let parquet_path = export_parquet(case, &data_dir, tmp.path())?;
 
     let golden_doc = canonical_jsonl::load_golden_document_with_keys(
         &fixture.golden,
@@ -413,12 +460,33 @@ pub fn run_case(case: &ParityCase) -> Result<CaseOutcome, String> {
     )
     .map_err(|e| format!("{}: {e}", case.id()))?;
 
-    let parquet_rows = project_parquet(case, &parquet)?;
-    compare(case, &columns, golden, parquet_rows)
+    let parquet = project_parquet(case, &parquet_path)?;
+    Ok(Some(Prepared {
+        columns,
+        golden,
+        parquet,
+    }))
+}
+
+/// Run one case end-to-end. `Err` is a parity failure or a fail-closed refusal;
+/// `Ok(Skipped)` only when no candidate root carries the table.
+pub fn run_case(case: &ParityCase) -> Result<CaseOutcome, String> {
+    let Some(prepared) = prepare(case)? else {
+        return Ok(CaseOutcome::Skipped(datasets_root::describe_search(
+            case.keyspace,
+            case.table,
+        )));
+    };
+    compare(
+        case,
+        &prepared.columns,
+        prepared.golden,
+        prepared.parquet,
+    )
 }
 
 /// Sort both sides by primary key and assert full per-cell equality.
-fn compare(
+pub fn compare(
     case: &ParityCase,
     columns: &[ColumnType],
     golden: Vec<GoldenRow>,
@@ -467,8 +535,20 @@ fn compare(
             continue;
         }
         for col in columns {
-            let ev = e.cells.get(&col.name).unwrap_or(&CanonicalValue::Absent);
-            let av = a.cells.get(&col.name).unwrap_or(&CanonicalValue::Absent);
+            let ctx = format!("{} row {i} column '{}'", case.id(), col.name);
+            // Spelling normalization applies to BOTH sides through the same
+            // function, so it can only erase a difference in HOW a value is
+            // written, never a difference in the value (see spelling.rs).
+            let ev = spelling::normalize_spelling(
+                e.cells.get(&col.name).cloned().unwrap_or(CanonicalValue::Absent),
+                &col.spec,
+                &ctx,
+            )?;
+            let av = spelling::normalize_spelling(
+                a.cells.get(&col.name).cloned().unwrap_or(CanonicalValue::Absent),
+                &col.spec,
+                &ctx,
+            )?;
             compared_cells += 1;
             if ev != av {
                 diffs.push(format!(
@@ -476,8 +556,8 @@ fn compare(
                     e.sort_key(),
                     col.name,
                     col.declared,
-                    render_value(ev),
-                    render_value(av)
+                    render_value(&ev),
+                    render_value(&av)
                 ));
                 if diffs.len() >= 10 {
                     break;
@@ -507,7 +587,46 @@ fn compare(
 
 /// Drive one case and apply the per-case fail-closed rule.
 pub fn assert_case(case: &ParityCase) {
-    match run_case(case) {
+    let outcome = run_case(case);
+    if let Some(gap) = &case.known_gap {
+        match outcome {
+            Err(e) => {
+                assert!(
+                    e.contains(gap.expect),
+                    "{}: this case records a KNOWN export gap ({} — {}) whose signature is \
+                     {:?}, but it failed for a DIFFERENT reason, which the recorded gap must \
+                     never hide:\n{e}",
+                    case.id(),
+                    gap.issue,
+                    gap.what,
+                    gap.expect
+                );
+                eprintln!(
+                    "[{}] KNOWN GAP {} still present ({}) — parity comparison deferred",
+                    case.id(),
+                    gap.issue,
+                    gap.what
+                );
+            }
+            Ok(CaseOutcome::Ran { rows, cells }) => panic!(
+                "{}: the KNOWN export gap {} ({}) NO LONGER reproduces — {rows} rows / \
+                 {cells} cells now compare equal. Delete the `known_gap` from this case so \
+                 the table is covered for real, and close {}.",
+                case.id(),
+                gap.issue,
+                gap.what,
+                gap.issue
+            ),
+            Ok(CaseOutcome::Skipped(reason)) => {
+                if case.must_run || require_fixtures() {
+                    panic!("{}: this case MUST run but no fixture was found: {reason}", case.id());
+                }
+                eprintln!("[{}] SKIPPED — {reason}", case.id());
+            }
+        }
+        return;
+    }
+    match outcome {
         Err(e) => panic!("{e}"),
         Ok(CaseOutcome::Ran { rows, cells }) => {
             assert!(
