@@ -1970,21 +1970,59 @@ else
 fi
 
 # ---------------------------------------------------------------------------
-# 7g. THE FETCH USES THE VALIDATED URL, NOT THE SYMBOLIC REMOTE (job 239). Re-resolving
-#     `origin` after validating its value is a time-of-check/time-of-use gap, and on this
-#     fleet it is not theoretical: lanes are worktrees of ONE shared `.git`, so a peer's
-#     `git config` write changes what `origin` means mid-run (#3617 is that incident).
-#     SOURCE-ORDER/SHAPE assert, stated as such: a behavioural case would have to mutate
-#     shared config while a fetch is in flight, which is precisely the thing that must never
-#     be done in a test on a shared checkout.
+# 7g. THE VALIDATED URL IS PINNED INTO THE ISOLATED CONFIG, AND THE FETCH NAMES A REMOTE
+#     (jobs 239 + 242). Two facts, one mechanism, and the case had to be REPLACED rather than
+#     adjusted: its predecessor asserted the fetch passes `"$origin_url"` in argv, which round
+#     11 deliberately stopped doing — a URL in a `git` argument is readable via `ps` and
+#     /proc/<pid>/cmdline, and an accepted canonical URL may carry a token. So that assertion
+#     had become ALWAYS-FALSE *and* directly contradicted `3544-url-not-in-argv` below: two
+#     cases in one file demanding opposite things, which is how a suite starts teaching people
+#     to edit assertions instead of code.
+#
+#     What must hold now: the exact bytes that PASSED VALIDATION are written into the isolated
+#     repository's own config by a shell BUILTIN (no argv, no spawn), and the fetch refers to
+#     them only by the REMOTE NAME. That closes the same time-of-check/time-of-use gap the old
+#     assertion existed for — re-resolving `origin` at fetch time would let a peer's `git
+#     config` write change what is fetched mid-run (#3617 is that incident) — while keeping the
+#     credential out of every process listing.
+#
+#     SOURCE-SHAPE assert, stated as such: proving "not in any argv" behaviourally means
+#     sampling /proc against a subprocess, which is a race, and proving the TOCTOU closed
+#     behaviourally means mutating shared git config while a fetch is in flight, which is
+#     precisely what must never be done from a test on a shared checkout.
 # ---------------------------------------------------------------------------
-fetch_line=$(grep -n 'fetch --quiet --refmap= --no-tags' "$GATE" | head -1)
-if [ -z "$fetch_line" ]; then
-  bad "3544-fetch-validated-url: could not locate the baseline fetch in $GATE — the shape changed or the scan broke (fail-closed)"
-elif printf '%s' "$fetch_line" | grep -q -- '--no-tags "\$origin_url"'; then
-  ok "3544-fetch-validated-url: the baseline fetch passes the VALIDATED url, closing the TOCTOU against a shared-config change"
+cfg_write=$(grep -n 'url = %s' "$GATE" | head -1)
+# LOCATED BY THE ISOLATED REPO PATH, not by the remote name: keying the locator on
+# `csbaseline` made the two SPECIFIC arms below (a re-interpolated URL, a renamed remote)
+# unreachable — every such mutation fell into the fail-closed "shape changed" arm instead, so
+# the messages would have been dead branches and the case would have been right by luck.
+# RED-verified after the change: each plant now reports its OWN cause.
+fetch_line=$(grep -n 'git -C "\$csdir/repo" fetch' "$GATE" | head -1)
+if [ -z "$cfg_write" ] || [ -z "$fetch_line" ]; then
+  bad "3544-fetch-config-pinned: could not locate the config write (got '$(printf '%s' "$cfg_write" | cut -c1-40)') or the isolated fetch (got '$(printf '%s' "$fetch_line" | cut -c1-40)') in $GATE — the shape changed or the scan broke (fail-closed: this is not a clean result)"
+elif ! printf '%s' "$cfg_write" | grep -q 'printf .*url = %s.*"\$origin_url"'; then
+  bad "3544-fetch-config-pinned: the config write does not pass the VALIDATED \$origin_url through printf: $(printf '%s' "$cfg_write" | cut -c1-120)"
+elif ! printf '%s' "$cfg_write" | grep -q '>>"\$csconf"'; then
+  bad "3544-fetch-config-pinned: the URL is not written into the isolated \$csconf by redirection — a spawned writer would put it back in an argv: $(printf '%s' "$cfg_write" | cut -c1-120)"
+elif printf '%s' "$fetch_line" | grep -q 'origin_url'; then
+  bad "3544-fetch-config-pinned: the isolated fetch still interpolates the URL: $(printf '%s' "$fetch_line" | cut -c1-120)"
+elif printf '%s' "$fetch_line" | grep -qE 'fetch --quiet --refmap= --no-tags csbaseline "refs/heads/main:refs/csbaseline"'; then
+  ok "3544-fetch-config-pinned: the validated URL is pinned into the isolated config by a shell builtin, and the fetch names the remote 'csbaseline' with a literal refspec"
 else
-  bad "3544-fetch-validated-url: the baseline fetch does not pass \$origin_url — re-resolving the remote name after validating its value reopens the TOCTOU: $(printf '%s' "$fetch_line" | cut -c1-120)"
+  bad "3544-fetch-config-pinned: the isolated fetch does not name the csbaseline remote with the literal refspec: $(printf '%s' "$fetch_line" | cut -c1-120)"
+fi
+
+# …and the 0600 must be applied BEFORE the URL is written, because the URL may carry a token:
+# a mode change AFTER the write leaves a credential world-readable for the window in between.
+# ORDER assert, which is the only thing a source read can answer here.
+cfg_chmod_ln=$(grep -n 'chmod 600 "\$csconf"' "$GATE" | head -1 | cut -d: -f1)
+cfg_write_ln=$(printf '%s' "$cfg_write" | cut -d: -f1)
+if [ -z "$cfg_chmod_ln" ] || [ -z "$cfg_write_ln" ]; then
+  bad "3544-config-mode-first: could not locate the chmod (got '$cfg_chmod_ln') or the URL write (got '$cfg_write_ln') — the shape changed or the scan broke (fail-closed)"
+elif [ "$cfg_chmod_ln" -lt "$cfg_write_ln" ]; then
+  ok "3544-config-mode-first: the isolated config is chmod 600 (line $cfg_chmod_ln) BEFORE the credential-bearing URL is written into it (line $cfg_write_ln)"
+else
+  bad "3544-config-mode-first: the URL write (line $cfg_write_ln) precedes the chmod (line $cfg_chmod_ln) — a token would be world-readable in between"
 fi
 
 # ---------------------------------------------------------------------------
