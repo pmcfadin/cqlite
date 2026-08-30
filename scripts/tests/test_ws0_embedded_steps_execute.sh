@@ -199,6 +199,46 @@ findings_of() {
     | grep -v '^$'
 }
 
+# driver_step_env <driver> <block-needle> — the `WS0_CFG_*`/`WS0_PIN_*` environment THE DRIVER
+# ITSELF builds for that step, as `NAME=VALUE` lines, with controlled values substituted for the
+# shell variables it reads.
+#
+# WHY THIS EXISTS (#3451 post-rebase round 2, F3). Every other check validates export NAMES and
+# prefix membership; the executions then used values THIS SUITE constructed. So a production
+# MAPPING error — `WS0_CFG_TEMPS="$ARMS"`, or two swapped `WS0_PIN_*` right-hand sides — left the
+# whole suite green while the driver recorded a configuration it never measured. That is the
+# #3272 F1 class the driver's own comment is about: the reporter READS its configuration from the
+# manifest, so a wrong value there is a report describing a run that did not happen.
+#
+# It takes the RIGHT-HAND SIDES FROM THE DRIVER rather than restating them here, because a table
+# of expected values in this file would be a second copy of the driver's intent and would drift.
+#
+# WHY EVALUATING SHELL TEXT IS SAFE **HERE SPECIFICALLY**, and only here: the text is emitted by
+# `--emit-prefix`, which prints it ONLY after proving it is a run of `NAME=` words containing no
+# command separator. The eval's input is bounded by a check that already had to exist. This is
+# strictly conditional on that validation — an unvalidated prefix is never evaluated, and the
+# helper returns non-zero instead.
+#
+# The controlled values are chosen so a SWAP IS DETECTABLE BY THE SHIPPED VALIDATORS rather than
+# by a comparison written here: `temps` and `arms` have DISJOINT legal sets (warm/cold vs
+# bypass/merge), so `WS0_CFG_TEMPS="$ARMS"` yields `temps=bypass`, which `session_manifest_config`
+# refuses. The detector is production code, not a fixture expectation.
+driver_step_env() {
+  local prefix
+  prefix="$(python3 "$REPO_ROOT/scripts/tests/ws0_export_prefix.py" "$1" WS0_ "$2" --emit-prefix)" \
+    || return 1
+  (
+    REPS=1; TEMPS=warm; ARMS=bypass; SCAN_PASSES=1
+    SERVER_CPUS=2,10; CLIENT_CPUS=4,12
+    STEP_DURATION=45s; COLD_STEP_DURATION=1s
+    FLIGHT_ENDPOINT="$WS0_FIXTURE_ENDPOINT"; BASELINE_MODE=non-baseline
+    EVENTS=cycles,instructions; BIN_DIR_RECORDED=target/release; PROFILE_RECORDED=off
+    QUIESCENCE_RECORDED="NOT VERIFIED (no timeseries supplied)"
+    WS0_SERVER_SIBLINGS="server cpu 2 siblings 2,10"; CPU_TOPOLOGY_ROOT="$TMP/fake-topology"
+    eval "$prefix env"
+  ) | grep -E '^WS0_(CFG|PIN)_'
+}
+
 # local_binding_of <driver> <block-needle> — the first `NAME = MAPPING["KEY"]` line in the block
 # that calls <block-needle>, printed as `NAME MAPPING KEY`.
 #
@@ -279,81 +319,7 @@ PY
 # after logical-line joining, a step's assignments and its invocation ARE ONE LINE. Both are
 # IMPORTED — a second copy here would drift, and then this check would certify the copy.
 export_prefix_membership() {
-  python3 - "$REPO_ROOT/scripts/tests" "$1" "$2" "$3" <<'PY'
-import bisect, pathlib, re, sys
-sys.path.insert(0, sys.argv[1])
-from ws0_embedded_python import _join_continuations, census
-
-path = pathlib.Path(sys.argv[2])
-prefix, needle = sys.argv[3], sys.argv[4]
-text = path.read_text()
-
-# WHICH block consumes this prefix, by the shipped writer its body calls.
-records, _findings = census(path)
-owners = [r for r in records if r["kind"] == "BLOCK" and needle in r["body"]]
-if len(owners) != 1:
-    print(f"AMBIGUOUS: {len(owners)} block(s) call {needle!r}", file=sys.stderr)
-    raise SystemExit(2)
-invocation_line = owners[0]["line"]
-
-joined, omap = _join_continuations(text)
-# The ORIGINAL offset where that invocation's physical line begins.
-line_starts = [0] + [i + 1 for i, ch in enumerate(text) if ch == "\n"]
-if invocation_line > len(line_starts):
-    print(f"UNRESOLVABLE: line {invocation_line} is past end of file", file=sys.stderr)
-    raise SystemExit(2)
-invocation_offset = line_starts[invocation_line - 1]
-
-# The JOINED logical line covering it. Spans are in scan space; their bounds are mapped back
-# through `omap`, so the comparison is against original offsets throughout.
-spans, start = [], 0
-for i, ch in enumerate(joined):
-    if ch == "\n":
-        spans.append((start, i))
-        start = i + 1
-spans.append((start, len(joined)))
-logical = None
-for a, b in spans:
-    if b <= a or a >= len(omap):
-        continue
-    if omap[a] <= invocation_offset <= omap[b - 1]:
-        logical = joined[a:b]
-        break
-if logical is None:
-    print(f"UNRESOLVABLE: no logical line covers offset {invocation_offset}", file=sys.stderr)
-    raise SystemExit(2)
-
-names = sorted(set(re.findall(prefix + r"[A-Z_]+(?==)", text)))
-
-# THE PROPERTY IS THE CONTIGUOUS ENVIRONMENT-ASSIGNMENT PREFIX, NOT MERE MEMBERSHIP OF THE
-# LOGICAL LINE (#3451 post-rebase round 1, F1). `n + "=" in logical` passed for
-#
-#     WS0_CFG_BASELINE_MODE="$BASELINE_MODE"; python3 -c '...'
-#
-# which keeps the assignment on the SAME logical line while bash makes it a standalone shell
-# variable python never receives. MEASURED, both directions:
-#
-#     WS0_CFG_REPS="1"; python3 -c ...   -> os.environ.get(...) is None
-#     WS0_CFG_REPS="1"  python3 -c ...   -> "1"
-#
-# So the text BEFORE the command word must be a run of assignment words and nothing else. A
-# command separator anywhere in it, or any word that is not NAME=, means the run is broken and
-# the membership answer is worthless — reported as zero present, which FAILS closed rather than
-# guessing which side of the break each name fell on.
-cmd = logical.find("python3")
-prefix_text = logical[:cmd] if cmd >= 0 else ""
-words = prefix_text.split()
-contiguous = (
-    cmd >= 0
-    and not any(ch in prefix_text for ch in ";&|")
-    and all(re.match(r"[A-Za-z_][A-Za-z0-9_]*=", w) for w in words)
-)
-if contiguous:
-    present = [n for n in names if any(w.startswith(n + "=") for w in words)]
-else:
-    present = []
-print(f"{len(present)} {len(names)}")
-PY
+  python3 "$REPO_ROOT/scripts/tests/ws0_export_prefix.py" "$1" "$2" "$3"
 }
 
 # ============================================================================
@@ -1048,6 +1014,23 @@ run_pin_step() {
   # after the assignments is taken as a command to execute (measured: `env: -u: No such file or
   # directory`, rc 127) — a control that dies before reaching its subject.
   local -a unset_args=() env_args=()
+  # THE VALUES COME FROM THE DRIVER, not from this suite (#3451 post-rebase round 2, F3). Every
+  # other check validates NAMES; the executions used to run on an environment this file built, so
+  # a production MAPPING error (`WS0_CFG_TEMPS="$ARMS"`) left everything green while the driver
+  # recorded a configuration it never measured. `driver_step_env` evaluates the driver's OWN
+  # validated assignment prefix with controlled inputs — see its comment for why evaluating that
+  # text is bounded, and for why a swap is caught by the SHIPPED validators rather than by an
+  # expectation written here.
+  local line
+  while IFS= read -r line; do
+    [ -n "$line" ] || continue
+    env_args+=("$line")
+  done < <(driver_step_env "$drv" write_session_corpus_pin)
+  if [ "${#env_args[@]}" -eq 0 ]; then
+    run_pin_rc=91
+    echo "driver_step_env produced no environment for this driver" > "$STEP_OUT"
+    return
+  fi
   for field in $(cfg_names); do
     if [ "$field" = "$omit" ]; then
       # UNSET, not merely "not passed" (#3451 review round 1, finding 3). `env` INHERITS the
@@ -1055,10 +1038,17 @@ run_pin_step() {
       # have exported — and the control then measures nothing while reporting a failure. `-u`
       # rather than an empty value: the step treats an empty string as absent too, but "was not
       # exported" is the condition being tested and `-u` is the only spelling that states it.
-      unset_args+=("-u" "WS0_CFG_$(echo "$field" | tr '[:lower:]' '[:upper:]')")
-      continue
+      # UNSET for the child, and also REMOVED from the driver-derived list — `env -u NAME`
+      # after `NAME=value` on the same command line does not win, so both halves are needed.
+      local omit_var="WS0_CFG_$(echo "$field" | tr '[:lower:]' '[:upper:]')"
+      unset_args+=("-u" "$omit_var")
+      local -a kept=()
+      local e
+      for e in "${env_args[@]}"; do
+        case "$e" in "$omit_var="*) ;; *) kept+=("$e") ;; esac
+      done
+      env_args=(${kept[@]+"${kept[@]}"})
     fi
-    env_args+=("WS0_CFG_$(echo "$field" | tr '[:lower:]' '[:upper:]')=$(cfg_value "$field")")
   done
   idx="$(find_block "$drv" 'write_session_corpus_pin')"
   [[ "$idx" =~ ^[0-9]+$ ]] || { run_pin_rc=90; echo "block not located: $idx" > "$STEP_OUT"; return; }
@@ -1144,16 +1134,13 @@ sys.path.insert(0, sys.argv[1])
 from ws0_ticket_input import write_ticket_template
 write_ticket_template(pathlib.Path(sys.argv[2]), pathlib.Path(sys.argv[3]) / "ws0-events.cql")
 PY
-CFG_PAIRS_SAVED=("${CFG_PAIRS[@]}")
-CFG_PAIRS=()
-for pair in "${CFG_PAIRS_SAVED[@]}"; do
-  case "$pair" in
-    flight_endpoint=*) CFG_PAIRS+=("flight_endpoint=grpc://127.0.0.1:1") ;;
-    *) CFG_PAIRS+=("$pair") ;;
-  esac
-done
+# The bad value is injected at THE DRIVER'S OWN INPUT (the shell variable its prefix reads),
+# not into a table in this file — since F3 the execution takes its values from the driver, so
+# overriding a local table would no longer reach the step at all.
+WS0_FIXTURE_ENDPOINT_SAVED="$WS0_FIXTURE_ENDPOINT"
+WS0_FIXTURE_ENDPOINT="grpc://127.0.0.1:1"
 run_pin_step "$DRIVER" "$OUT_BADCFG"; badcfg_out="$(cat "$STEP_OUT")"
-CFG_PAIRS=("${CFG_PAIRS_SAVED[@]}")
+WS0_FIXTURE_ENDPOINT="$WS0_FIXTURE_ENDPOINT_SAVED"
 if [ "$run_pin_rc" -eq 0 ] && python3 - "$PERF_DIR" "$OUT_BADCFG" <<'PY'
 import pathlib, sys
 sys.path.insert(0, sys.argv[1])
@@ -1170,6 +1157,49 @@ then
   pass "config-reader CONTROL fired: a grpc:// endpoint is written by the step and REFUSED by session_manifest_config — so the accept above is a measurement, not a reader that takes anything"
 else
   fail "config-reader CONTROL did not fire: session_manifest_config must refuse a non-http endpoint (step rc=$run_pin_rc, out: $(head -2 <<<"$badcfg_out"))"
+fi
+
+# --- CONTROL 3a-map: a SWAPPED RIGHT-HAND SIDE is caught (#3451 post-rebase round 2, F3) --------
+# The mapping defect this whole change is about: `WS0_CFG_TEMPS="$ARMS"` exports a real name with
+# the wrong value, so every NAME-level check stays green while the driver records a configuration
+# it never measured. Detected by the SHIPPED validator rather than by an expectation here —
+# `temps` and `arms` have disjoint legal sets, so the swap yields `temps=bypass` and
+# `session_manifest_config` refuses it.
+SWAPPED="$TMP/swapped-rhs-ws0-driver.sh"
+python3 - "$DRIVER" "$SWAPPED" <<'INJECT'
+import pathlib, sys
+text = pathlib.Path(sys.argv[1]).read_text()
+needle = 'WS0_CFG_TEMPS="$TEMPS"'
+if text.count(needle) != 1:
+    print(f"INJECTION IMPOSSIBLE: {needle} occurs {text.count(needle)} time(s)", file=sys.stderr)
+    raise SystemExit(1)
+pathlib.Path(sys.argv[2]).write_text(text.replace(needle, 'WS0_CFG_TEMPS="$ARMS"'))
+INJECT
+swap_rc=$?
+if [ "$swap_rc" -ne 0 ]; then
+  fail "mapping CONTROL: the swap could not be injected, so the control could not fire"
+else
+  OUT_SWAP="$TMP/session-swapped"; mkdir -p "$OUT_SWAP"
+  python3 - "$PERF_DIR" "$OUT_SWAP" "$CORPUS" <<'PY'
+import pathlib, sys
+sys.path.insert(0, sys.argv[1])
+from ws0_ticket_input import write_ticket_template
+write_ticket_template(pathlib.Path(sys.argv[2]), pathlib.Path(sys.argv[3]) / "ws0-events.cql")
+PY
+  run_pin_rc=0
+  run_pin_step "$SWAPPED" "$OUT_SWAP"; swap_out="$(cat "$STEP_OUT")"
+  if [ "$run_pin_rc" -eq 0 ] && ! python3 - "$PERF_DIR" "$OUT_SWAP" <<'PY'
+import pathlib, sys
+sys.path.insert(0, sys.argv[1])
+from ws0_report import ARMS_ALLOWED, TEMPS_ALLOWED
+from ws0_session import session_manifest_config
+session_manifest_config(pathlib.Path(sys.argv[2]), TEMPS_ALLOWED, ARMS_ALLOWED)
+PY
+  then
+    pass "mapping CONTROL fired: a swapped right-hand side (WS0_CFG_TEMPS taking \$ARMS) is written by the step and REFUSED by the shipped reader — values are now taken from the driver, so a mapping error is visible where a name check cannot see it"
+  else
+    fail "mapping CONTROL did not fire: a swapped right-hand side must reach the manifest and be refused (step rc=$run_pin_rc, out: $(head -2 <<<"$swap_out"))"
+  fi
 fi
 
 # --- POSITIVE CONTROL 3a: the same harness OBSERVES the defective step failing -----------------
