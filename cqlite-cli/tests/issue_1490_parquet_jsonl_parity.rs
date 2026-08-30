@@ -1173,6 +1173,9 @@ fn a_missing_committed_fixture_reds_the_suite() {
         "a must_run case whose fixture is ABSENT must PANIC — a silent skip would shrink the \
          compared-table count with nothing red (#3220)",
     );
+    // `unwrap_or_default()` points the SAFE way: a panic payload that is
+    // neither `String` nor `&str` yields "", and the `contains` assertion below
+    // then FAILS. The unknown takes the strict branch, not the permissive one.
     let message = payload
         .downcast_ref::<String>()
         .cloned()

@@ -120,7 +120,11 @@ use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
 use canonical_jsonl::{CanonicalValue, KeySpec};
 use cql_type::ColumnType;
 use failure::{Failure, Failures, Stage};
-use fixture_root::read_dir_completely;
+// Fixture DISCOVERY and STAGING live in `fixture_root` (round 19); the whole
+// fail-closed resolution path — candidate search, generation census,
+// golden/generation correspondence, isolated staging — is one file there, and
+// test targets reach it as `parquet_parity::fixture_root::…`.
+use fixture_root::{isolated_data_dir, resolve_fixture, Fixture};
 use golden_rows::GoldenRow;
 
 // `ExpectedFailure` is used only by the test binaries that DECLARE a
@@ -210,6 +214,15 @@ impl ParityCase {
         )
     }
 
+    /// The declared CQL types of `names`, in order.
+    ///
+    /// A name not present in `columns` PANICS rather than yielding `""`. The
+    /// `""` this replaces went to `KeyKind::from_cql_type`, which classifies an
+    /// unrecognised type name as `Other` — so a mistyped partition/clustering
+    /// name silently disabled numeric-key unification for that component instead
+    /// of naming the case-definition error. "I could not find the declaration"
+    /// and "the declaration is not integral" are DIFFERENT states, and this is
+    /// the harness's own case table, so the first one is always a bug here.
     fn cql_types_of(&self, names: &[&str]) -> Vec<&'static str> {
         names
             .iter()
@@ -218,196 +231,70 @@ impl ParityCase {
                     .iter()
                     .find(|(cn, _)| cn == n)
                     .map(|(_, t)| *t)
-                    .unwrap_or("")
+                    .unwrap_or_else(|| {
+                        panic!(
+                            "{}.{}: key component '{n}' is not among the declared columns {:?} \
+                             — a key name with no declaration cannot be given a KeySpec kind, \
+                             and defaulting it to a non-integral one would silently change how \
+                             the golden's key components are canonicalized",
+                            self.keyspace,
+                            self.table,
+                            self.columns.iter().map(|(c, _)| *c).collect::<Vec<_>>(),
+                        )
+                    })
             })
             .collect()
     }
 }
 
+/// Is `CQLITE_REQUIRE_FIXTURES` set to a value that makes an absent fixture
+/// fatal?
+///
+/// STRICT on purpose. The `.unwrap_or(false)` this replaces collapsed two
+/// genuinely UNKNOWN states onto "not required" — the permissive answer, which
+/// turns the whole fail-closed rule off:
+///
+///   * `VarError::NotUnicode` — the operator DID set the variable and the
+///     harness cannot read what to. Unset is an affirmative "not required";
+///     "set to something I cannot decode" is not.
+///   * an unrecognised value — `CQLITE_REQUIRE_FIXTURES=yes` (or `=Y`, or a
+///     value with a stray trailing space from a CI expression) read as "not
+///     required", so an operator who asked for the strict mode silently got the
+///     lenient one and every absent fixture SKIPPED under a green run.
+///
+/// Unset and empty are affirmatively NOT required (an empty value is how a shell
+/// spells "unset"). The truthy/falsey sets are explicit; anything else PANICS
+/// naming the value, because a knob whose meaning the harness cannot determine
+/// must not silently pick the weaker mode.
 fn require_fixtures() -> bool {
-    std::env::var("CQLITE_REQUIRE_FIXTURES")
-        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
-        .unwrap_or(false)
-}
-
-/// The resolved on-disk fixture: the single-generation table directory, and the
-/// golden that BELONGS to that generation (see [`fixture_in_table_dir`]).
-#[derive(Debug)]
-pub struct Fixture {
-    pub table_dir: PathBuf,
-    pub golden: PathBuf,
-}
-
-/// Resolve `<root>/<keyspace>/<table>-*/` per TABLE across every candidate root.
-///
-/// Returns `Ok(None)` only when EVERY candidate root was read successfully and
-/// none carries the table; a root that could not be READ is a REFUSAL
-/// (`fixture_root::first_candidate_root_with_table`, round 18 — an unreadable
-/// root used to read as an absent fixture and SKIP), and a root that carries the
-/// table in an unusable shape (several generations, no golden, a golden belonging
-/// to a DIFFERENT generation — see [`fixture_in_table_dir`]) is an ERROR too,
-/// never a skip.
-fn resolve_fixture(case: &ParityCase) -> Result<Option<Fixture>, String> {
-    resolve_fixture_in_roots(case, &fixture_root::candidate_roots())
-}
-
-/// [`resolve_fixture`] parameterized on the candidate roots — the seam the
-/// round-18 refusal is proven against, since the real list is half environment
-/// and half a COMPILE-TIME checkout path and a test reading it could only ever
-/// observe this machine's layout.
-pub fn resolve_fixture_in_roots(
-    case: &ParityCase,
-    roots: &[PathBuf],
-) -> Result<Option<Fixture>, String> {
-    let Some(root) =
-        fixture_root::first_candidate_root_with_table(roots, case.keyspace, case.table)?
-    else {
-        return Ok(None);
-    };
-    let ks_dir = root.join(case.keyspace);
-    let prefix = format!("{}-", case.table);
-    // The prefix is matched on the entry name's BYTES, not on a `to_str()` that
-    // drops a non-UTF-8 name: a `<table>-<non-UTF-8>` generation directory must
-    // COUNT toward the uniqueness census below (and be refused as a second
-    // generation), never vanish from it. `OsStr` is an ASCII-compatible
-    // superset, so an ASCII prefix match on its bytes is exact.
-    let mut dirs: Vec<PathBuf> = read_dir_completely(&ks_dir)?
-        .into_iter()
-        .filter(|e| {
-            e.file_name()
-                .as_encoded_bytes()
-                .starts_with(prefix.as_bytes())
-        })
-        .map(|e| e.path())
-        .filter(|p| p.is_dir())
-        .collect();
-    dirs.sort();
-    if dirs.len() != 1 {
-        return Err(format!(
-            "{}: expected exactly one table directory under {}, found {:?}",
-            case.id(),
-            ks_dir.display(),
-            dirs
-        ));
-    }
-    let table_dir = dirs.remove(0);
-
-    Ok(Some(fixture_in_table_dir(&case.id(), table_dir)?))
-}
-
-/// Select the one Data generation in `table_dir` AND the golden that belongs to
-/// it — the golden is DERIVED from the selected Data file's name, never chosen
-/// independently.
-///
-/// # Why the correspondence has to be checked (issue #1490 round 5)
-///
-/// `sstabledump` names its dump after the file it dumped, so the golden for
-/// `nb-1-big-Data.db` is `nb-1-big-Data.db.jsonl` — and nothing else. Accepting
-/// "one `*-Data.db`" and "one `*-Data.db.jsonl`" INDEPENDENTLY means a partially
-/// regenerated fixture (a new `nb-2-big-Data.db` beside a stale
-/// `nb-1-big-Data.db.jsonl`) compares one generation's DATA against another
-/// generation's DUMP. That is not a near-miss: depending on which way the two
-/// generations differ it produces either a FALSE FAILURE or a FALSE PASS, and
-/// the harness would report neither as suspicious — the oracle would simply be
-/// the wrong oracle. So a non-corresponding pair is a NAMED refusal, never a
-/// fallback to "any `.jsonl` in the directory".
-///
-/// Public so the refusal can be proven against a scratch directory holding a
-/// deliberately mismatched pair, without touching the committed corpus.
-pub fn fixture_in_table_dir(case_id: &str, table_dir: PathBuf) -> Result<Fixture, String> {
-    let mut entries: Vec<String> = Vec::new();
-    for entry in read_dir_completely(&table_dir)? {
-        let name = entry.file_name();
-        // A name this harness cannot read is UNKNOWN, not ABSENT. Dropped, it
-        // would leave the generation census one entry short — and the census is
-        // the whole basis for calling this fixture unique.
-        let name = name.to_str().ok_or_else(|| {
-            format!(
-                "{case_id}: {} holds an entry whose name is not UTF-8 ({name:?}); the harness \
-                 REFUSES a fixture directory it could not inspect COMPLETELY rather than DROP \
-                 the entry from the generation census, which would let a second `*-Data.db` (or \
-                 a mismatched golden) pass as a unique fixture",
-                table_dir.display()
-            )
-        })?;
-        entries.push(name.to_string());
-    }
-    let datas: Vec<&String> = entries.iter().filter(|n| n.ends_with("-Data.db")).collect();
-    let goldens: Vec<&String> = entries
-        .iter()
-        .filter(|n| n.ends_with("-Data.db.jsonl"))
-        .collect();
-    // A multi-generation table's per-generation dumps are not the reconciled
-    // result set the export produces, so the harness refuses rather than
-    // comparing one generation against a merged read.
-    if datas.len() != 1 {
-        return Err(format!(
-            "{case_id}: expected exactly one *-Data.db generation in {}, found {}: the harness \
-             compares a single-generation dump against a reconciled export",
-            table_dir.display(),
-            datas.len()
-        ));
-    }
-    if goldens.len() != 1 {
-        return Err(format!(
-            "{case_id}: expected exactly one *-Data.db.jsonl golden in {}, found {}",
-            table_dir.display(),
-            goldens.len()
-        ));
-    }
-    // The BINDING: the golden's name is derived from the Data file the harness
-    // is actually going to export, and must match exactly.
-    let data = datas[0];
-    let expected = format!("{data}.jsonl");
-    if *goldens[0] != expected {
-        return Err(format!(
-            "{case_id}: {} holds the Data generation '{data}' but its only sstabledump golden \
-             is '{}', which belongs to a DIFFERENT generation (the golden for '{data}' is \
-             '{expected}'). Comparing one generation's data against another generation's dump \
-             can produce either a false failure or a false pass, so the harness refuses: \
-             regenerate the dump for this generation, or restore the matching pair.",
-            table_dir.display(),
-            goldens[0],
-        ));
-    }
-    Ok(Fixture {
-        golden: table_dir.join(expected),
-        table_dir,
-    })
-}
-
-/// Copy the fixture's SSTable components into an isolated `<keyspace>/<table-…>`
-/// data directory.
-///
-/// Isolation is not cosmetic: pointed at a shared corpus root the CLI ingests
-/// EVERY table it finds, so one case's export would depend on unrelated
-/// fixtures (and on this machine's corpus size). Only real SSTable components
-/// are copied — the `.jsonl` / `.txt` sidecars stay out so the reader never sees
-/// them.
-fn isolated_data_dir(case: &ParityCase, fixture: &Fixture, tmp: &Path) -> Result<PathBuf, String> {
-    let data_dir = tmp.join("data");
-    let dest = data_dir.join(case.keyspace).join(
-        fixture
-            .table_dir
-            .file_name()
-            .and_then(|n| n.to_str())
-            .ok_or("fixture directory has no name")?,
-    );
-    std::fs::create_dir_all(&dest).map_err(|e| format!("mkdir {}: {e}", dest.display()))?;
-    for entry in std::fs::read_dir(&fixture.table_dir)
-        .map_err(|e| format!("read_dir {}: {e}", fixture.table_dir.display()))?
-    {
-        let entry = entry.map_err(|e| e.to_string())?;
-        let name = entry.file_name().to_string_lossy().into_owned();
-        if name.ends_with(".jsonl") || name.ends_with(".txt") {
-            continue;
+    match std::env::var("CQLITE_REQUIRE_FIXTURES") {
+        Ok(raw) => {
+            let v = raw.trim();
+            if v.is_empty()
+                || v == "0"
+                || v.eq_ignore_ascii_case("false")
+                || v.eq_ignore_ascii_case("no")
+            {
+                false
+            } else if v == "1" || v.eq_ignore_ascii_case("true") || v.eq_ignore_ascii_case("yes") {
+                true
+            } else {
+                panic!(
+                    "CQLITE_REQUIRE_FIXTURES={raw:?} is not a value this harness recognises \
+                     (1/true/yes, 0/false/no, or unset). It is REFUSED rather than read as \
+                     \"not required\": an unparsed value used to turn the fail-closed \
+                     missing-fixture rule OFF, which is the vacuous-pass mode this knob exists \
+                     to prevent."
+                )
+            }
         }
-        if !entry.path().is_file() {
-            continue;
-        }
-        std::fs::copy(entry.path(), dest.join(&name)).map_err(|e| format!("copy {name}: {e}"))?;
+        Err(std::env::VarError::NotPresent) => false,
+        Err(std::env::VarError::NotUnicode(raw)) => panic!(
+            "CQLITE_REQUIRE_FIXTURES is SET to a value that is not UTF-8 ({raw:?}); the harness \
+             REFUSES it rather than read an undecodable value as \"not required\", which would \
+             silently disable the fail-closed missing-fixture rule the operator asked for"
+        ),
     }
-    Ok(data_dir)
 }
 
 /// Run the real CLI export and return the Parquet file path.
@@ -452,6 +339,10 @@ fn export_parquet(case: &ParityCase, data_dir: &Path, tmp: &Path) -> Result<Path
             ),
         }));
     }
+    // `is_file()` is two-valued here TOO, but its permissive answer points the
+    // safe way: a path it could not stat answers `false` and REFUSES. Left as
+    // `is_file()` deliberately — the fallible form would report the stat error
+    // instead, which is no more actionable than "produced no file".
     if !out.is_file() {
         return Err(Failures::refusal(format!(
             "cqlite export produced no file at {}",
@@ -1353,6 +1244,11 @@ fn compare_inner(
             // mapping compares equal here. Type fidelity is asserted separately,
             // per field, by `arrow_expect::validate_field` in
             // `project_parquet` — before any value reaches this loop.
+            // `unwrap_or(Absent)` on BOTH sides is a DOMAIN value, not a
+            // collapsed error: a Cassandra row legitimately omits a cell, and
+            // `Absent` is how this harness spells that. Nothing fallible is
+            // being defaulted — the maps are already-parsed rows — and the
+            // default is applied symmetrically, so it cannot erase a difference.
             let ev = spelling::normalize_spelling(
                 e.cells
                     .get(&col.name)

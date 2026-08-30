@@ -53,6 +53,8 @@
 use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
 
+use super::ParityCase;
+
 /// Every entry of `dir`, with an entry the OS could not deliver propagated as a
 /// REFUSAL rather than dropped.
 ///
@@ -81,6 +83,53 @@ pub fn read_dir_completely(dir: &Path) -> Result<Vec<std::fs::DirEntry>, String>
         })?);
     }
     Ok(entries)
+}
+
+/// Is `path` a directory? `Err` when the OS could not tell.
+///
+/// `Path::is_dir` is TWO-valued: it answers `false` both for "this is not a
+/// directory" and for "I could not stat it", which is the collapse this whole
+/// module exists to remove. Every caller uses the answer to decide whether an
+/// entry COUNTS toward a census (how many generation directories, how many
+/// components), and a census can only ever conclude "fewer" — so an entry
+/// dropped because it could not be stat'd is exactly how a SECOND generation
+/// passes as a unique fixture.
+///
+/// `NotFound` is the one error kind that IS an affirmative answer: the entry is
+/// gone (a race with a regeneration, or a dangling symlink), so it is genuinely
+/// not a directory. Symlinks are FOLLOWED, matching the `is_dir()` this replaces.
+pub fn path_is_dir(path: &Path) -> Result<bool, String> {
+    path_kind(path, PathKind::Dir)
+}
+
+/// Is `path` a regular file? `Err` when the OS could not tell — see
+/// [`path_is_dir`] for why the two-valued form is unsafe here.
+pub fn path_is_file(path: &Path) -> Result<bool, String> {
+    path_kind(path, PathKind::File)
+}
+
+enum PathKind {
+    Dir,
+    File,
+}
+
+fn path_kind(path: &Path, want: PathKind) -> Result<bool, String> {
+    match std::fs::metadata(path) {
+        Ok(md) => Ok(match want {
+            PathKind::Dir => md.is_dir(),
+            PathKind::File => md.is_file(),
+        }),
+        // The entry is not there at all — an affirmative "it is not a
+        // directory/file", and the only error kind that may answer.
+        Err(e) if e.kind() == ErrorKind::NotFound => Ok(false),
+        Err(e) => Err(format!(
+            "cannot determine what {} is: {e}; the harness REFUSES an entry whose kind it could \
+             not measure rather than DROP it, because a dropped entry leaves every census over \
+             this directory one entry short — and the census is the whole basis for calling a \
+             fixture unique",
+            path.display()
+        )),
+    }
 }
 
 /// The first candidate root carrying `<keyspace>/<table>-*/…-Data.db`, or a
@@ -154,8 +203,13 @@ fn root_holds_table(root: &Path, keyspace: &str, table: &str) -> Result<bool, St
             .file_name()
             .as_encoded_bytes()
             .starts_with(prefix.as_bytes())
-            || !path.is_dir()
         {
+            continue;
+        }
+        // FALLIBLE: an entry whose kind the OS could not report is UNKNOWN, and
+        // the `is_dir()` this replaces would have skipped it — reporting the
+        // table absent from a root that may well hold it.
+        if !path_is_dir(&path)? {
             continue;
         }
         let holds = read_dir_completely(&path)?
@@ -166,4 +220,226 @@ fn root_holds_table(root: &Path, keyspace: &str, table: &str) -> Result<bool, St
         }
     }
     Ok(false)
+}
+
+// ===========================================================================
+// FIXTURE RESOLUTION and ISOLATED STAGING
+//
+// Split out of `mod.rs` (issue #1490 round 19) so the whole fail-closed
+// discovery responsibility — candidate search, generation census,
+// golden/generation correspondence, and the copy into an isolated data root —
+// lives in ONE file beside the primitives it is built on. Every predicate here
+// is fallible for the reason enumerated in `super::permissive_sites`: an entry
+// this code cannot read is UNKNOWN, and a census over an incomplete listing can
+// only ever conclude "fewer".
+// ===========================================================================
+
+/// The resolved on-disk fixture: the single-generation table directory, and the
+/// golden that BELONGS to that generation (see [`fixture_in_table_dir`]).
+#[derive(Debug)]
+pub struct Fixture {
+    pub table_dir: PathBuf,
+    pub golden: PathBuf,
+}
+
+/// Resolve `<root>/<keyspace>/<table>-*/` per TABLE across every candidate root.
+///
+/// Returns `Ok(None)` only when EVERY candidate root was read successfully and
+/// none carries the table; a root that could not be READ is a REFUSAL
+/// ([`first_candidate_root_with_table`], round 18 — an unreadable
+/// root used to read as an absent fixture and SKIP), and a root that carries the
+/// table in an unusable shape (several generations, no golden, a golden belonging
+/// to a DIFFERENT generation — see [`fixture_in_table_dir`]) is an ERROR too,
+/// never a skip.
+pub(super) fn resolve_fixture(case: &ParityCase) -> Result<Option<Fixture>, String> {
+    resolve_fixture_in_roots(case, &candidate_roots())
+}
+
+/// [`resolve_fixture`] parameterized on the candidate roots — the seam the
+/// round-18 refusal is proven against, since the real list is half environment
+/// and half a COMPILE-TIME checkout path and a test reading it could only ever
+/// observe this machine's layout.
+pub fn resolve_fixture_in_roots(
+    case: &ParityCase,
+    roots: &[PathBuf],
+) -> Result<Option<Fixture>, String> {
+    let Some(root) = first_candidate_root_with_table(roots, case.keyspace, case.table)? else {
+        return Ok(None);
+    };
+    let ks_dir = root.join(case.keyspace);
+    let prefix = format!("{}-", case.table);
+    // The prefix is matched on the entry name's BYTES, not on a `to_str()` that
+    // drops a non-UTF-8 name: a `<table>-<non-UTF-8>` generation directory must
+    // COUNT toward the uniqueness census below (and be refused as a second
+    // generation), never vanish from it. `OsStr` is an ASCII-compatible
+    // superset, so an ASCII prefix match on its bytes is exact.
+    // The `.filter(|p| p.is_dir())` this replaces was two-valued: an entry the
+    // OS could not stat answered `false` and left the census — and this census
+    // is precisely what the `dirs.len() != 1` check below calls "exactly one
+    // generation". A dropped entry can only make the count SMALLER, so it is
+    // how a second generation passes as a unique fixture. `path_is_dir` is
+    // fallible: only a verified `NotFound` may answer "not a directory".
+    let mut dirs: Vec<PathBuf> = Vec::new();
+    for entry in read_dir_completely(&ks_dir)? {
+        if !entry
+            .file_name()
+            .as_encoded_bytes()
+            .starts_with(prefix.as_bytes())
+        {
+            continue;
+        }
+        let path = entry.path();
+        if path_is_dir(&path)? {
+            dirs.push(path);
+        }
+    }
+    dirs.sort();
+    if dirs.len() != 1 {
+        return Err(format!(
+            "{}: expected exactly one table directory under {}, found {:?}",
+            case.id(),
+            ks_dir.display(),
+            dirs
+        ));
+    }
+    let table_dir = dirs.remove(0);
+
+    Ok(Some(fixture_in_table_dir(&case.id(), table_dir)?))
+}
+
+/// Select the one Data generation in `table_dir` AND the golden that belongs to
+/// it — the golden is DERIVED from the selected Data file's name, never chosen
+/// independently.
+///
+/// # Why the correspondence has to be checked (issue #1490 round 5)
+///
+/// `sstabledump` names its dump after the file it dumped, so the golden for
+/// `nb-1-big-Data.db` is `nb-1-big-Data.db.jsonl` — and nothing else. Accepting
+/// "one `*-Data.db`" and "one `*-Data.db.jsonl`" INDEPENDENTLY means a partially
+/// regenerated fixture (a new `nb-2-big-Data.db` beside a stale
+/// `nb-1-big-Data.db.jsonl`) compares one generation's DATA against another
+/// generation's DUMP. That is not a near-miss: depending on which way the two
+/// generations differ it produces either a FALSE FAILURE or a FALSE PASS, and
+/// the harness would report neither as suspicious — the oracle would simply be
+/// the wrong oracle. So a non-corresponding pair is a NAMED refusal, never a
+/// fallback to "any `.jsonl` in the directory".
+///
+/// Public so the refusal can be proven against a scratch directory holding a
+/// deliberately mismatched pair, without touching the committed corpus.
+pub fn fixture_in_table_dir(case_id: &str, table_dir: PathBuf) -> Result<Fixture, String> {
+    let mut entries: Vec<String> = Vec::new();
+    for entry in read_dir_completely(&table_dir)? {
+        let name = entry.file_name();
+        // A name this harness cannot read is UNKNOWN, not ABSENT. Dropped, it
+        // would leave the generation census one entry short — and the census is
+        // the whole basis for calling this fixture unique.
+        let name = name.to_str().ok_or_else(|| {
+            format!(
+                "{case_id}: {} holds an entry whose name is not UTF-8 ({name:?}); the harness \
+                 REFUSES a fixture directory it could not inspect COMPLETELY rather than DROP \
+                 the entry from the generation census, which would let a second `*-Data.db` (or \
+                 a mismatched golden) pass as a unique fixture",
+                table_dir.display()
+            )
+        })?;
+        entries.push(name.to_string());
+    }
+    let datas: Vec<&String> = entries.iter().filter(|n| n.ends_with("-Data.db")).collect();
+    let goldens: Vec<&String> = entries
+        .iter()
+        .filter(|n| n.ends_with("-Data.db.jsonl"))
+        .collect();
+    // A multi-generation table's per-generation dumps are not the reconciled
+    // result set the export produces, so the harness refuses rather than
+    // comparing one generation against a merged read.
+    if datas.len() != 1 {
+        return Err(format!(
+            "{case_id}: expected exactly one *-Data.db generation in {}, found {}: the harness \
+             compares a single-generation dump against a reconciled export",
+            table_dir.display(),
+            datas.len()
+        ));
+    }
+    if goldens.len() != 1 {
+        return Err(format!(
+            "{case_id}: expected exactly one *-Data.db.jsonl golden in {}, found {}",
+            table_dir.display(),
+            goldens.len()
+        ));
+    }
+    // The BINDING: the golden's name is derived from the Data file the harness
+    // is actually going to export, and must match exactly.
+    let data = datas[0];
+    let expected = format!("{data}.jsonl");
+    if *goldens[0] != expected {
+        return Err(format!(
+            "{case_id}: {} holds the Data generation '{data}' but its only sstabledump golden \
+             is '{}', which belongs to a DIFFERENT generation (the golden for '{data}' is \
+             '{expected}'). Comparing one generation's data against another generation's dump \
+             can produce either a false failure or a false pass, so the harness refuses: \
+             regenerate the dump for this generation, or restore the matching pair.",
+            table_dir.display(),
+            goldens[0],
+        ));
+    }
+    Ok(Fixture {
+        golden: table_dir.join(expected),
+        table_dir,
+    })
+}
+
+/// Copy the fixture's SSTable components into an isolated `<keyspace>/<table-…>`
+/// data directory.
+///
+/// Isolation is not cosmetic: pointed at a shared corpus root the CLI ingests
+/// EVERY table it finds, so one case's export would depend on unrelated
+/// fixtures (and on this machine's corpus size). Only real SSTable components
+/// are copied — the `.jsonl` / `.txt` sidecars stay out so the reader never sees
+/// them.
+pub(super) fn isolated_data_dir(
+    case: &ParityCase,
+    fixture: &Fixture,
+    tmp: &Path,
+) -> Result<PathBuf, String> {
+    let data_dir = tmp.join("data");
+    let dest = data_dir.join(case.keyspace).join(
+        fixture
+            .table_dir
+            .file_name()
+            .and_then(|n| n.to_str())
+            .ok_or("fixture directory has no name")?,
+    );
+    std::fs::create_dir_all(&dest).map_err(|e| format!("mkdir {}: {e}", dest.display()))?;
+    // Fail-closed on all three counts, because every one of them decides whether
+    // an SSTable COMPONENT reaches the reader — and a component the reader never
+    // sees produces a smaller (or aborted) export, not an error:
+    //
+    //   * entries come through `read_dir_completely`, so a per-entry error is a
+    //     refusal rather than a silently short listing;
+    //   * a non-UTF-8 component name is REFUSED, not `to_string_lossy`'d — the
+    //     lossy name was the COPY DESTINATION, so a component with a non-UTF-8
+    //     name was written under a DIFFERENT name and the reader could no longer
+    //     find it (`fixture_in_table_dir` already refuses such an entry, so this
+    //     is the same rule at the same directory);
+    //   * `path_is_file` is fallible, where the `is_file()` it replaces answered
+    //     `false` for "could not stat" and silently OMITTED the component.
+    for entry in read_dir_completely(&fixture.table_dir)? {
+        let raw = entry.file_name();
+        let name = raw.to_str().ok_or_else(|| {
+            format!(
+                "{} holds a component whose name is not UTF-8 ({raw:?}); the harness REFUSES it \
+                 rather than copy it under a lossily-renamed path, which would hide the \
+                 component from the reader and shrink the export with nothing red",
+                fixture.table_dir.display()
+            )
+        })?;
+        if name.ends_with(".jsonl") || name.ends_with(".txt") {
+            continue;
+        }
+        if !path_is_file(&entry.path())? {
+            continue;
+        }
+        std::fs::copy(entry.path(), dest.join(name)).map_err(|e| format!("copy {name}: {e}"))?;
+    }
+    Ok(data_dir)
 }

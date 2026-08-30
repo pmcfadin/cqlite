@@ -61,7 +61,7 @@ fn a_golden_from_another_generation_is_refused_not_compared() {
         // Left behind by a partial regeneration: the dump of generation 1.
         "nb-1-big-Data.db.jsonl",
     ]);
-    let err = parquet_parity::fixture_in_table_dir("ks.t", tmp.path().to_path_buf())
+    let err = parquet_parity::fixture_root::fixture_in_table_dir("ks.t", tmp.path().to_path_buf())
         .expect_err("a golden from another generation must be refused");
     assert!(
         err.contains("nb-2-big-Data.db") && err.contains("nb-1-big-Data.db.jsonl"),
@@ -85,8 +85,9 @@ fn a_corresponding_data_and_golden_pair_resolves() {
         // A `.txt` sidecar and an unrelated component must not confuse it.
         "nb-2-big-Statistics.db.txt",
     ]);
-    let fixture = parquet_parity::fixture_in_table_dir("ks.t", tmp.path().to_path_buf())
-        .expect("a corresponding pair must resolve");
+    let fixture =
+        parquet_parity::fixture_root::fixture_in_table_dir("ks.t", tmp.path().to_path_buf())
+            .expect("a corresponding pair must resolve");
     assert_eq!(
         fixture.golden,
         tmp.path().join("nb-2-big-Data.db.jsonl"),
@@ -100,8 +101,9 @@ fn a_corresponding_data_and_golden_pair_resolves() {
 #[test]
 fn a_missing_golden_or_a_second_generation_is_refused() {
     let no_golden = scratch_table_dir(&["nb-1-big-Data.db"]);
-    let err = parquet_parity::fixture_in_table_dir("ks.t", no_golden.path().to_path_buf())
-        .expect_err("a fixture with no golden has no oracle");
+    let err =
+        parquet_parity::fixture_root::fixture_in_table_dir("ks.t", no_golden.path().to_path_buf())
+            .expect_err("a fixture with no golden has no oracle");
     assert!(err.contains("golden"), "{err}");
 
     let two_gens = scratch_table_dir(&[
@@ -109,8 +111,9 @@ fn a_missing_golden_or_a_second_generation_is_refused() {
         "nb-2-big-Data.db",
         "nb-2-big-Data.db.jsonl",
     ]);
-    let err = parquet_parity::fixture_in_table_dir("ks.t", two_gens.path().to_path_buf())
-        .expect_err("a multi-generation table is not a single-generation dump");
+    let err =
+        parquet_parity::fixture_root::fixture_in_table_dir("ks.t", two_gens.path().to_path_buf())
+            .expect_err("a multi-generation table is not a single-generation dump");
     assert!(err.contains("*-Data.db generation"), "{err}");
 }
 
@@ -348,6 +351,9 @@ fn a_present_but_invalid_eligibility_field_is_refused_not_read_as_absent() {
         ) else {
             return false;
         };
+        // `.is_ok()` is the MEASUREMENT this closure exists to take — "does the
+        // lenient path accept this line?" — not an unknown collapsed onto a
+        // permissive answer. A refusal from either call IS the negative answer.
         project_golden(&doc, &columns, &["id"], &[]).is_ok()
     };
 
@@ -1440,8 +1446,9 @@ fn a_directory_entry_the_harness_cannot_read_refuses_the_fixture() {
         ));
         std::fs::write(&unreadable, b"").expect("write non-UTF-8 named entry");
 
-        let err = parquet_parity::fixture_in_table_dir("ks.t", tmp.path().to_path_buf())
-            .expect_err("an entry the harness cannot read must REFUSE the fixture");
+        let err =
+            parquet_parity::fixture_root::fixture_in_table_dir("ks.t", tmp.path().to_path_buf())
+                .expect_err("an entry the harness cannot read must REFUSE the fixture");
         assert!(
             err.contains("not UTF-8"),
             "the refusal must name what it could not read: {err}"
@@ -1454,8 +1461,9 @@ fn a_directory_entry_the_harness_cannot_read_refuses_the_fixture() {
         // CONTROL: with that entry removed the SAME directory resolves, so the
         // refusal reds on the unreadable entry and not on the directory.
         std::fs::remove_file(&unreadable).expect("remove");
-        let fixture = parquet_parity::fixture_in_table_dir("ks.t", tmp.path().to_path_buf())
-            .expect("the same directory without the unreadable entry must resolve");
+        let fixture =
+            parquet_parity::fixture_root::fixture_in_table_dir("ks.t", tmp.path().to_path_buf())
+                .expect("the same directory without the unreadable entry must resolve");
         assert_eq!(fixture.golden, tmp.path().join("nb-1-big-Data.db.jsonl"));
     }
 
@@ -1472,9 +1480,14 @@ fn a_directory_entry_the_harness_cannot_read_refuses_the_fixture() {
         std::fs::create_dir(&dir).expect("mkdir");
         std::fs::write(dir.join("nb-1-big-Data.db"), b"").expect("write");
         std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o000)).expect("chmod");
+        // A PROBE, legitimately permissive: it asks whether `chmod 000` actually
+        // made the directory unreadable for THIS process (it does not, as root,
+        // or on a filesystem that ignores the mode). Its permissive branch omits
+        // an ADDITIVE case; the non-UTF-8 half above asserts the same refusal
+        // deterministically for any uid, so no property goes unmeasured.
         let listable = std::fs::read_dir(&dir).is_ok();
         if !listable {
-            let err = parquet_parity::fixture_in_table_dir("ks.t", dir.clone())
+            let err = parquet_parity::fixture_root::fixture_in_table_dir("ks.t", dir.clone())
                 .expect_err("an unlistable fixture directory must be REFUSED");
             assert!(err.contains("cannot read"), "{err}");
         }

@@ -421,6 +421,12 @@ fn int32_col0(bytes: &[u8]) -> Vec<Option<i32>> {
 mod parquet_parity;
 
 use parquet_parity::datasets_root;
+// The fail-closed directory primitives, SHARED with the harness rather than
+// re-spelled here: `read_dir_completely` (a per-entry error is a refusal, never
+// a short listing) and the fallible path-kind pair (`is_dir`/`is_file` answer
+// `false` for "could not stat", which drops an entry from a census that is then
+// asserted to hold exactly one).
+use parquet_parity::fixture_root::{path_is_dir, path_is_file, read_dir_completely};
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -453,6 +459,8 @@ const REWRITTEN_COLUMN: &str = "name";
 /// prevent.
 fn cqlite_binary() -> PathBuf {
     let path = PathBuf::from(env!("CARGO_BIN_EXE_cqlite"));
+    // `is_file()` is two-valued, but here its permissive answer points the safe
+    // way: a path it could not stat answers `false` and the assertion FIRES.
     assert!(
         path.is_file(),
         "the cqlite binary must exist at {} — cargo builds it for this test target, so its \
@@ -478,24 +486,37 @@ fn committed_fixture_dir() -> PathBuf {
         .join("sstables")
         .join(FIXTURE_KEYSPACE);
     let prefix = format!("{FIXTURE_TABLE}-");
-    let entries = std::fs::read_dir(&keyspace_dir).unwrap_or_else(|e| {
+    // The census below asserts there is EXACTLY ONE committed generation, so
+    // every entry has to be accounted for. The `filter_map(|e| e.ok())`,
+    // `p.is_dir()` and `to_str().unwrap_or(false)` this replaces each answered
+    // "not a candidate" for an entry they could not READ, and a dropped entry
+    // can only make the count SMALLER — which is how a second generation passes
+    // the `assert_eq!(dirs.len(), 1)` and gets exported instead of the pinned
+    // one. Fallible throughout, and the name is matched on BYTES so a non-UTF-8
+    // generation directory COUNTS rather than vanishing.
+    let mut dirs: Vec<PathBuf> = Vec::new();
+    for entry in read_dir_completely(&keyspace_dir).unwrap_or_else(|e| {
         panic!(
-            "{FIXTURE_QUALIFIED} is a git-tracked fixture; its keyspace directory {} must be \
-             readable: {e}",
-            keyspace_dir.display()
+            "{FIXTURE_QUALIFIED} is a git-tracked fixture; its keyspace directory must be \
+                readable COMPLETELY: {e}"
         )
-    });
-    let mut dirs: Vec<PathBuf> = entries
-        .filter_map(|e| e.ok().map(|e| e.path()))
-        .filter(|p| {
-            p.is_dir()
-                && p.file_name()
-                    .and_then(|n| n.to_str())
-                    .map(|n| n.starts_with(&prefix))
-                    .unwrap_or(false)
-                && dir_holds_data_db(p)
-        })
-        .collect();
+    }) {
+        if !entry
+            .file_name()
+            .as_encoded_bytes()
+            .starts_with(prefix.as_bytes())
+        {
+            continue;
+        }
+        let path = entry.path();
+        if !path_is_dir(&path).unwrap_or_else(|e| panic!("{e}")) {
+            continue;
+        }
+        if !dir_holds_data_db(&path).unwrap_or_else(|e| panic!("{e}")) {
+            continue;
+        }
+        dirs.push(path);
+    }
     dirs.sort();
     assert_eq!(
         dirs.len(),
@@ -508,22 +529,23 @@ fn committed_fixture_dir() -> PathBuf {
     dirs.pop().expect("length asserted to be 1")
 }
 
-/// True when `dir` holds at least one `*-Data.db` component.
+/// Does `dir` hold at least one `*-Data.db` component? `Err` when it cannot be
+/// determined.
 ///
 /// Presence is judged by the actual binary, never by directory existence: the
 /// repo commits JSONL sidecars for fixtures whose binaries are gitignored, so a
 /// `<table>-<uuid>/` can exist with no readable SSTable in it.
-fn dir_holds_data_db(dir: &Path) -> bool {
-    std::fs::read_dir(dir)
-        .map(|rd| {
-            rd.filter_map(|e| e.ok()).any(|e| {
-                e.file_name()
-                    .to_str()
-                    .map(|n| n.ends_with("-Data.db"))
-                    .unwrap_or(false)
-            })
-        })
-        .unwrap_or(false)
+///
+/// FALLIBLE because the three `unwrap_or(false)`s it replaces made "I could not
+/// read this directory" indistinguishable from "there is no Data.db here", in
+/// BOTH of its call positions and to opposite effect: in the generation census
+/// it dropped a candidate (shrinking a count that is asserted to be 1), and in
+/// the isolated-root assertion it claimed a missing fixture. Neither answer was
+/// measured. The name is matched on BYTES so a non-UTF-8 `*-Data.db` counts.
+fn dir_holds_data_db(dir: &Path) -> Result<bool, String> {
+    Ok(read_dir_completely(dir)?
+        .iter()
+        .any(|e| e.file_name().as_encoded_bytes().ends_with(b"-Data.db")))
 }
 
 /// Copy the committed fixture into an ISOLATED data root under `tmp` and return
@@ -540,9 +562,14 @@ fn isolated_data_root(tmp: &Path) -> PathBuf {
     let root = tmp.join("data");
     let dst = root.join(FIXTURE_KEYSPACE).join(generation);
     std::fs::create_dir_all(&dst).unwrap_or_else(|e| panic!("create {}: {e}", dst.display()));
-    for entry in std::fs::read_dir(&src).unwrap_or_else(|e| panic!("read {}: {e}", src.display())) {
-        let entry = entry.expect("read a fixture component entry");
-        if !entry.file_type().map(|t| t.is_file()).unwrap_or(false) {
+    // Fail-closed: the `file_type().map(..).unwrap_or(false)` this replaces
+    // answered "not a file" for a component whose kind it could not read, and
+    // SILENTLY DID NOT COPY it. The export then reads an SSTable missing a
+    // component — fewer rows, or an abort attributed to the CLI — with nothing
+    // naming the omission. Only a verified `NotFound` may skip an entry now.
+    for entry in read_dir_completely(&src).unwrap_or_else(|e| panic!("read {}: {e}", src.display()))
+    {
+        if !path_is_file(&entry.path()).unwrap_or_else(|e| panic!("{e}")) {
             continue;
         }
         let to = dst.join(entry.file_name());
@@ -550,7 +577,7 @@ fn isolated_data_root(tmp: &Path) -> PathBuf {
             .unwrap_or_else(|e| panic!("copy {} -> {}: {e}", entry.path().display(), to.display()));
     }
     assert!(
-        dir_holds_data_db(&dst),
+        dir_holds_data_db(&dst).unwrap_or_else(|e| panic!("{e}")),
         "the isolated data root must carry the fixture's *-Data.db: {}",
         dst.display()
     );
@@ -597,16 +624,33 @@ fn run_export_command(schema: &Path, data_dir: &Path, out: &Path) -> (bool, Stri
 /// readable, so a *valid* file here would mean the command finished a lossy
 /// export and reported failure — or reported success on a truncated one.
 fn assert_no_valid_parquet_left(path: &Path) {
-    if !path.exists() {
-        return; // nothing written at all — the strongest form of the property
-    }
-    let bytes = std::fs::read(path).expect("read the leftover export output");
+    // The `if !path.exists() { return; }` this replaces SKIPPED the whole
+    // assertion for a path it could not stat: `exists()` answers `false` for a
+    // permission denial or an I/O error just as it does for a genuine absence,
+    // so "I could not tell whether the export left a file" became "the property
+    // holds". Only a verified `NotFound` may take the early return; every other
+    // error is a named failure of THIS assertion.
+    let bytes = match std::fs::read(path) {
+        Ok(bytes) => bytes,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            return; // nothing written at all — the strongest form of the property
+        }
+        Err(e) => panic!(
+            "cannot read the leftover export output {} to check it is not a valid Parquet file: \
+             {e} — an unreadable path is UNKNOWN, not an absent file, and skipping the check \
+             here would pass this case without measuring anything",
+            path.display()
+        ),
+    };
     assert!(
         bytes.len() < 8 || &bytes[bytes.len() - 4..] != b"PAR1",
         "a refused export must not leave a footer-complete Parquet file at {} ({} bytes)",
         path.display(),
         bytes.len()
     );
+    // `.is_ok()` here is the MEASUREMENT, not a collapsed error: "the Parquet
+    // reader rejected these bytes" is exactly the property being asserted, so
+    // the failure IS the affirmative answer rather than an unknown.
     let readable = ParquetRecordBatchReaderBuilder::try_new(Bytes::from(bytes))
         .and_then(|b| b.build())
         .is_ok();
@@ -881,17 +925,26 @@ fn an_unreadable_candidate_root_is_refused_never_read_as_absent() {
         (KS, TABLE),
         "the scratch layout above is built for this case's keyspace/table"
     );
-    parquet_parity::resolve_fixture_in_roots(case, std::slice::from_ref(&ks_is_a_file))
-        .expect_err("an unreadable candidate root must REFUSE the fixture, never skip the case");
-    let resolved = parquet_parity::resolve_fixture_in_roots(case, std::slice::from_ref(&present))
-        .expect("a readable scratch root carrying the fixture must resolve")
-        .expect("…to Some(fixture)");
+    parquet_parity::fixture_root::resolve_fixture_in_roots(
+        case,
+        std::slice::from_ref(&ks_is_a_file),
+    )
+    .expect_err("an unreadable candidate root must REFUSE the fixture, never skip the case");
+    let resolved = parquet_parity::fixture_root::resolve_fixture_in_roots(
+        case,
+        std::slice::from_ref(&present),
+    )
+    .expect("a readable scratch root carrying the fixture must resolve")
+    .expect("…to Some(fixture)");
     assert_eq!(resolved.table_dir, gen_dir);
     assert_eq!(resolved.golden, gen_dir.join("nb-1-big-Data.db.jsonl"));
     assert!(
-        parquet_parity::resolve_fixture_in_roots(case, std::slice::from_ref(&no_keyspace))
-            .expect("a readable root that simply lacks the table is not a refusal")
-            .is_none(),
+        parquet_parity::fixture_root::resolve_fixture_in_roots(
+            case,
+            std::slice::from_ref(&no_keyspace)
+        )
+        .expect("a readable root that simply lacks the table is not a refusal")
+        .is_none(),
         "Ok(None) — the legitimate skip — is reachable ONLY from a verified absence"
     );
 
@@ -914,6 +967,10 @@ fn an_unreadable_candidate_root_is_refused_never_read_as_absent() {
         )
         .expect("scratch data");
         fs::set_permissions(&denied_ks, fs::Permissions::from_mode(0o000)).expect("chmod 000");
+        // A PROBE, legitimately permissive: it asks whether `chmod 000` actually
+        // made the directory unreadable FOR THIS PROCESS. Its permissive branch
+        // omits an ADDITIVE case whose property is already asserted, for any
+        // uid, by the file-shaped cases above — so nothing goes unmeasured.
         if fs::read_dir(&denied_ks).is_err() {
             assert!(
                 !table_has_data(&denied, KS, TABLE),
