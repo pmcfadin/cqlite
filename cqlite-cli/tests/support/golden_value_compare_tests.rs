@@ -336,6 +336,7 @@ fn a_declared_skip_column_is_not_required_to_be_rendered() {
 // for the right reason in the wrong test.
 const TEXT_DDL: &str = "CREATE TABLE t (id int PRIMARY KEY, zip text);";
 const NUM_DDL: &str = "CREATE TABLE t (id int PRIMARY KEY, n int);";
+const SET_DDL: &str = "CREATE TABLE t (id int PRIMARY KEY, s set<int>, fs frozen<set<int>>);";
 const UDT_MAP_DDL: &str = "CREATE TYPE address (street text, city text, zip text); \
      CREATE TABLE t (id int PRIMARY KEY, ma map<text, frozen<address>>);";
 const INT_MAP_DDL: &str = "CREATE TABLE t (id int PRIMARY KEY, mi map<int, text>);";
@@ -420,17 +421,21 @@ fn a_numeric_looking_text_udt_field_is_compared_exactly() {
     }
 }
 
-/// The normalization that must SURVIVE: a numeric column's golden spelling is a
-/// string (a partition key, a collection path) and the CLI's is a number.
+/// The normalization that must SURVIVE, and only where it is EARNED (review
+/// finding R1). `sstabledump` writes a JSON string at exactly two kinds of
+/// position — every partition-key component, and a non-frozen collection's cell
+/// `path` — and a JSON number everywhere else, so the golden's own spelling here
+/// is the expectation: `"1"` for the `int` partition key, `-5` for the ordinary
+/// `int` cell.
 #[test]
 fn a_numeric_column_still_compares_across_spellings() {
     let schema = schema_of(NUM_DDL, "t");
-    let golden = vec![row(&[("id", json!("1")), ("n", json!("-5"))])];
+    let golden = vec![row(&[("id", json!("1")), ("n", json!(-5))])];
     let cli = vec![row(&[("id", json!(1)), ("n", json!(-5))])];
     let report = compare_rows(&golden, &cli, &schema, &["id"], &[], &[], Egress::Json);
     assert!(
         report.diffs.is_empty(),
-        "a numeric column must still pair a string spelling with a number: {:?}",
+        "the dump's stringified partition key must still pair with the CLI's number: {:?}",
         report.diffs
     );
 
@@ -438,6 +443,83 @@ fn a_numeric_column_still_compares_across_spellings() {
     let wrong = vec![row(&[("id", json!(1)), ("n", json!(-6))])];
     let report = compare_rows(&golden, &wrong, &schema, &["id"], &[], &[], Egress::Json);
     assert_eq!(report.diffs.len(), 1, "{:?}", report.diffs);
+}
+
+/// The other half of finding R1: OUTSIDE a stringified position the JSON lane
+/// compares by kind too, so an ordinary `int` cell rendered `"-5"` instead of `-5`
+/// is a divergence. Before this the two canonicalized identically and the
+/// regression passed.
+#[test]
+fn a_numeric_cell_rendered_as_a_string_is_a_json_divergence() {
+    let schema = schema_of(NUM_DDL, "t");
+    let golden = vec![row(&[("id", json!("1")), ("n", json!(-5))])];
+    let stringified = vec![row(&[("id", json!(1)), ("n", json!("-5"))])];
+    let report = compare_rows(
+        &golden,
+        &stringified,
+        &schema,
+        &["id"],
+        &[],
+        &[],
+        Egress::Json,
+    );
+    assert_eq!(
+        report.diffs.len(),
+        1,
+        "an int cell rendered as a JSON string must fail: {:?}",
+        report.diffs
+    );
+    assert!(report.diffs[0].contains(".n:"), "{:?}", report.diffs);
+
+    // CSV hands every cell over as text, so there the same pair is ONE value —
+    // which is why the rule is scoped by egress as well as by position.
+    let report = compare_rows(
+        &golden,
+        &stringified,
+        &schema,
+        &["id"],
+        &[],
+        &[],
+        Egress::Csv,
+    );
+    assert!(report.diffs.is_empty(), "{:?}", report.diffs);
+}
+
+/// Finding R1 at collection elements, where `frozen` decides the answer and the
+/// committed DDL is what knows it: a MULTICELL `set<int>`'s elements are cell
+/// paths (`writeString`, so the golden carries `["-2","-1"]`), while a
+/// `frozen<set<int>>` is one value cell (`writeRawValue`, golden `[-2,-1]`).
+#[test]
+fn set_element_kinding_follows_frozen_from_the_ddl() {
+    let schema = schema_of(SET_DDL, "t");
+    // The shapes the dump actually produces for these two columns.
+    let golden = vec![row(&[
+        ("id", json!("1")),
+        ("s", json!(["-2", "-1"])),
+        ("fs", json!([-2, -1])),
+    ])];
+    let cli = vec![row(&[
+        ("id", json!(1)),
+        ("s", json!([-2, -1])),
+        ("fs", json!([-2, -1])),
+    ])];
+    let report = compare_rows(&golden, &cli, &schema, &["id"], &[], &[], Egress::Json);
+    assert!(
+        report.diffs.is_empty(),
+        "a multicell set's stringified paths must pair with the CLI's numbers: {:?}",
+        report.diffs
+    );
+
+    // The frozen set's elements are NOT stringified by the dump, so a string
+    // there is a divergence — the permissive rule accepted it.
+    let wrong = vec![row(&[
+        ("id", json!(1)),
+        ("s", json!([-2, -1])),
+        ("fs", json!(["-2", "-1"])),
+    ])];
+    let report = compare_rows(&golden, &wrong, &schema, &["id"], &[], &[], Egress::Json);
+    assert_eq!(report.diffs.len(), 1, "{:?}", report.diffs);
+    assert!(report.diffs[0].contains(".fs:"), "{:?}", report.diffs);
 }
 
 /// Map KEYS are canonicalized under the declared KEY type: numeric for

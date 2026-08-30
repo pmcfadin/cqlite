@@ -36,8 +36,8 @@
 //! numeric normalization applies only where the DDL says the value is a number and
 //! a `text` value is compared as an exact string.
 
-use super::schema::{CqlType, TableSchema, UdtType};
-use super::{canon_scalar, canon_typed, csv_container, Depth, Egress, Row};
+use super::schema::{Column, ColumnKind, CqlType, TableSchema, UdtType};
+use super::{canon_scalar, canon_typed, csv_container, Depth, Egress, Kinding, Row};
 use serde_json::{Map, Value};
 use std::cell::RefCell;
 use std::collections::BTreeSet;
@@ -225,9 +225,16 @@ pub fn compare_rows(
             if matches!(gv, Value::Array(_) | Value::Object(_)) {
                 report.container_cells += 1;
             }
-            if let Err(why) =
-                compare_value_at(gv, cv, egress, &column.ty, Depth::TopLevel, name, &skips)
-            {
+            if let Err(why) = compare_value_at(
+                gv,
+                cv,
+                egress,
+                &column.ty,
+                Depth::TopLevel,
+                column_kinding(column),
+                name,
+                &skips,
+            ) {
                 report.diffs.push(format!("row[{key}].{name}: {why}"));
             }
         }
@@ -269,6 +276,38 @@ fn undeclared_columns(
         }
     }
     out
+}
+
+/// The [`Kinding`] of a column's value, derived from the committed DDL and from
+/// `cassandra-5.0.8 JsonTransformer` (never from CQLite's output).
+///
+/// `sstabledump` writes a JSON STRING at exactly two kinds of position, so those
+/// are the only ones where a numeric golden string may be read as a number:
+///
+///   * **every partition-key component** — `serializePartitionKey` writes
+///     `writeString(keyValidator.getString(...))`, so `pk int = 1` arrives as
+///     `"1"`. Read from the DDL's own `PRIMARY KEY` (`ColumnKind::Partition`),
+///     not from the caller's transcribed key list;
+///   * **a non-frozen collection's cell `path`** — `serializeCell` writes
+///     `writeString(ct.nameComparator().getString(...))`. For a multicell SET the
+///     path IS the element (`golden_rows` rebuilds the array from the paths), so a
+///     `set<int>` golden carries `["-2","-1"]`; for a multicell MAP the path is the
+///     key, which [`compare_map`] handles on its own.
+///
+/// Everything else is written `writeRawValue(type.toJSONString(...))` and keeps its
+/// natural JSON kind — clustering values, and every cell VALUE, hence a list's
+/// elements, a frozen collection's members and a UDT's fields. `frozen` is read
+/// from the DDL (`Column::is_multicell`), so a `frozen<set<int>>` (one value cell,
+/// golden `[-2,-1]`) is correctly held to kind equality while the non-frozen
+/// `set<int>` beside it is not.
+fn column_kinding(column: &Column) -> Kinding {
+    let is_partition_key = column.kind == ColumnKind::Partition;
+    let is_multicell_set = column.is_multicell() && matches!(column.ty, CqlType::Set(_));
+    if is_partition_key || is_multicell_set {
+        Kinding::Stringified
+    } else {
+        Kinding::Natural
+    }
 }
 
 /// Why a CSV container cell could not be decoded.
@@ -383,11 +422,15 @@ fn describe(value: &Value, egress: Egress) -> String {
 
 /// Compare one golden value against one CLI value, under the column's DECLARED
 /// CQL type, with no exclusions — the entry point unit tests use.
+///
+/// `kinding` is the caller's statement of whether `sstabledump` stringifies this
+/// position; [`compare_rows`] derives it from the DDL via [`column_kinding`].
 pub fn compare_value(
     golden: &Value,
     cli: &Value,
     egress: Egress,
     ty: &CqlType,
+    kinding: Kinding,
 ) -> Result<(), String> {
     compare_value_at(
         golden,
@@ -395,6 +438,7 @@ pub fn compare_value(
         egress,
         ty,
         Depth::TopLevel,
+        kinding,
         "",
         &SkipPaths::new(&[]),
     )
@@ -407,15 +451,18 @@ pub fn compare_value(
 /// nesting so a `text` map value or UDT field is compared exactly even when its
 /// content looks numeric.
 ///
-/// `depth` is what CSV's empty-field rule keys on (see [`super::Depth`]), and
-/// `path` is the fully-qualified position of this value in the row, which is how
-/// a `SkipPaths` entry can name one UDT field rather than a whole column.
+/// `depth` is what CSV's empty-field rule keys on (see [`super::Depth`]),
+/// `kinding` is whether `sstabledump` stringifies this position (see
+/// [`super::Kinding`] and [`column_kinding`]), and `path` is the fully-qualified
+/// position of this value in the row, which is how a `SkipPaths` entry can name
+/// one UDT field rather than a whole column.
 fn compare_value_at(
     golden: &Value,
     cli: &Value,
     egress: Egress,
     ty: &CqlType,
     depth: Depth,
+    kinding: Kinding,
     path: &str,
     skips: &SkipPaths<'_>,
 ) -> Result<(), String> {
@@ -430,31 +477,24 @@ fn compare_value_at(
         // set / list / frozen collection: same shape both sides, order-sensitive.
         // Cassandra emits a collection in comparator order and the CLI reads it in
         // storage order, so a reordering IS a divergence, not a normalization.
-        CqlType::List(element) | CqlType::Set(element) => {
-            let (g, c) = arrays(golden, cli, egress, ty)?;
-            if g.len() != c.len() {
-                return Err(format!(
-                    "collection length golden {} vs cli {} (golden={}, cli={})",
-                    g.len(),
-                    c.len(),
-                    brief(&describe(golden, egress)),
-                    brief(&describe(cli, egress))
-                ));
-            }
-            for (i, (gi, ci)) in g.iter().zip(c.iter()).enumerate() {
-                compare_value_at(
-                    gi,
-                    ci,
-                    egress,
-                    element,
-                    Depth::Inside,
-                    &index_path(path, &i.to_string()),
-                    skips,
-                )
-                .map_err(|why| format!("[{i}] {why}"))?;
-            }
-            Ok(())
+        //
+        // The two kinds differ ONLY in their elements' kinding, which is why they
+        // are separate arms: a multicell SET's element is the stringified cell
+        // path, a LIST's element is the cell VALUE and so keeps its natural JSON
+        // kind.
+        CqlType::Set(element) => {
+            compare_sequence(golden, cli, egress, ty, element, kinding, path, skips)
         }
+        CqlType::List(element) => compare_sequence(
+            golden,
+            cli,
+            egress,
+            ty,
+            element,
+            Kinding::Natural,
+            path,
+            skips,
+        ),
         CqlType::Tuple(items) => {
             let (g, c) = arrays(golden, cli, egress, ty)?;
             if g.len() != items.len() || c.len() != items.len() {
@@ -472,6 +512,9 @@ fn compare_value_at(
                     egress,
                     ity,
                     Depth::Inside,
+                    // A tuple is always frozen: the whole value is one cell, so
+                    // every slot keeps its natural JSON kind.
+                    Kinding::Natural,
                     &index_path(path, &i.to_string()),
                     skips,
                 )
@@ -494,8 +537,8 @@ fn compare_value_at(
         // A scalar type: both sides canonicalized UNDER THAT TYPE, so the numeric
         // rule applies only where the DDL declares a number.
         _ => {
-            let g = canon_typed(golden, egress, ty, depth)?;
-            let c = canon_typed(cli, egress, ty, depth)?;
+            let g = canon_typed(golden, egress, ty, depth, kinding)?;
+            let c = canon_typed(cli, egress, ty, depth, kinding)?;
             if g == c {
                 Ok(())
             } else {
@@ -508,6 +551,45 @@ fn compare_value_at(
             }
         }
     }
+}
+
+/// The shared list/set walk. `element_kinding` is the caller's statement of how
+/// the GOLDEN spells this collection's elements (see [`column_kinding`]).
+#[allow(clippy::too_many_arguments)]
+fn compare_sequence(
+    golden: &Value,
+    cli: &Value,
+    egress: Egress,
+    ty: &CqlType,
+    element: &CqlType,
+    element_kinding: Kinding,
+    path: &str,
+    skips: &SkipPaths<'_>,
+) -> Result<(), String> {
+    let (g, c) = arrays(golden, cli, egress, ty)?;
+    if g.len() != c.len() {
+        return Err(format!(
+            "collection length golden {} vs cli {} (golden={}, cli={})",
+            g.len(),
+            c.len(),
+            brief(&describe(golden, egress)),
+            brief(&describe(cli, egress))
+        ));
+    }
+    for (i, (gi, ci)) in g.iter().zip(c.iter()).enumerate() {
+        compare_value_at(
+            gi,
+            ci,
+            egress,
+            element,
+            Depth::Inside,
+            element_kinding,
+            &index_path(path, &i.to_string()),
+            skips,
+        )
+        .map_err(|why| format!("[{i}] {why}"))?;
+    }
+    Ok(())
 }
 
 /// Both sides as arrays, or an error naming the declared type.
@@ -625,6 +707,10 @@ fn compare_udt(
             egress,
             field_ty,
             Depth::Inside,
+            // A UDT field is a cell VALUE (a frozen UDT's fields live inside one
+            // value cell; a non-frozen UDT's field IS the cell value), so the
+            // golden keeps its natural JSON kind.
+            Kinding::Natural,
             &field_path(path, field),
             skips,
         )
@@ -697,8 +783,13 @@ fn compare_map(
     // A key canonicalization FAILURE is propagated, never folded into the sort
     // key: a `<reason>` string would still pair with an identical `<reason>` on
     // the other side and compare equal.
+    // A map KEY is `Kinding::Stringified` on BOTH sides and wherever the map
+    // appears, frozen or not: the golden renders a map as a JSON OBJECT, and a
+    // JSON object's key can only be a string. So the kind carries no information
+    // here and the declared key type is what decides equality.
     let canon_key = |v: &Value| -> Result<String, String> {
-        canon_typed(v, egress, key_ty, Depth::Inside).map(|canon| canon.describe())
+        canon_typed(v, egress, key_ty, Depth::Inside, Kinding::Stringified)
+            .map(|canon| canon.describe())
     };
     let mut g: Vec<(String, &Value)> = Vec::with_capacity(golden.len());
     for (k, v) in golden {
@@ -724,6 +815,9 @@ fn compare_map(
             egress,
             value_ty,
             Depth::Inside,
+            // A map VALUE is the cell value (`writeRawValue`), so it keeps its
+            // natural JSON kind even when the key beside it was stringified.
+            Kinding::Natural,
             &index_path(path, gk),
             skips,
         )

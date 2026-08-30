@@ -38,15 +38,22 @@
 //!   `YYYY-MM-DDTHH:MM:SS.mmmZ`. Only a ZERO UTC offset is accepted — a non-zero
 //!   offset is left as opaque text so it FAILS loudly rather than being
 //!   silently shifted.
-//! * **Numeric text vs JSON number, and ONLY for a numeric CQL type.**
-//!   `sstabledump` renders a collection's cell *path* (a set element, a map key)
-//!   and a partition-key component as a JSON **string** — `"path": ["-5"]`,
-//!   `"key": ["1"]` — while the CLI renders that same value as a JSON **number**.
-//!   A value whose DECLARED CQL type is numeric (`int`, `bigint`, `smallint`,
-//!   `tinyint`, `varint`, `float`, `double`, `decimal`, `counter`) is therefore
-//!   compared NUMERICALLY, via the pure-string [`normalize_decimal`] (no
-//!   `10^scale` materialization, no `f64` round-trip, so a 30-digit `decimal` is
-//!   exact).
+//! * **Numeric text vs JSON number — for a numeric CQL type AND ONLY at the
+//!   positions `sstabledump` itself stringifies.** In the JSON lane the two
+//!   sides must agree on JSON KIND, so an ordinary `int` cell rendered `"1"`
+//!   instead of `1` is a DIVERGENCE. The exception is the positions where
+//!   Cassandra's own dumper writes a string: a partition-key component
+//!   (`"key": ["1"]`) and a non-frozen collection's cell path
+//!   (`"path": ["-5"]`, i.e. a multicell set's elements and a multicell map's
+//!   keys), plus a map key anywhere (the dump renders a map as a JSON object, and
+//!   an object key can only be a string). Those, and only those, are compared
+//!   NUMERICALLY — see [`Kinding`], which derives the rule from
+//!   `cassandra-5.0.8 JsonTransformer` and the committed DDL. The comparison
+//!   itself is the pure-string [`normalize_decimal`] (no `10^scale`
+//!   materialization, no `f64` round-trip, so a 30-digit `decimal` is exact).
+//!
+//!   In the CSV lane every cell arrives as text — the format carries no JSON
+//!   kinds at all — so a numeric cell is compared by value everywhere.
 //!
 //!   A `text`/`varchar`/`ascii` value is compared as an EXACT STRING, so the UDT
 //!   zip `"22201"` never equals the number `22201` and `"00000"` never equals
@@ -155,6 +162,40 @@ pub enum Depth {
     Inside,
 }
 
+/// Whether the GOLDEN's spelling of this position may disagree in JSON KIND with
+/// the CLI's — i.e. whether a numeric JSON *string* may be read as a number here.
+///
+/// Derived from Cassandra's own dumper, `cassandra-5.0.8`
+/// `org.apache.cassandra.tools.JsonTransformer`, which uses exactly two writers:
+///
+///   * `json.writeString(type.getString(v))` — the value becomes a JSON STRING
+///     whatever its CQL type. Used by `serializePartitionKey` for EVERY partition
+///     key component, and by `serializeCell` for a non-frozen collection's cell
+///     `path` (a multicell set's element, a multicell map's key).
+///   * `json.writeRawValue(type.toJSONString(v, …))` — the value keeps its
+///     natural JSON kind, so a numeric type yields a JSON NUMBER. Used by
+///     `serializeClustering` for every clustering value and by `serializeCell`
+///     for every cell VALUE (hence a list's elements, a frozen collection's
+///     members and a UDT's fields).
+///
+/// So cross-kind numeric normalization is CORRECT at the first set of positions
+/// and WRONG everywhere else: applying it everywhere let an ordinary `int` cell
+/// rendered as `"1"` pass as `1` (issue #1491 review finding R1).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Kinding {
+    /// The golden keeps its natural JSON kind here, so both sides must agree on
+    /// kind: for a numeric column `1` and `"1"` are DIFFERENT renderings.
+    Natural,
+    /// `sstabledump` stringified the golden here, so a numeric golden string and
+    /// a numeric CLI number denote the same value.
+    ///
+    /// The unavoidable cost, stated rather than hidden: at such a position the
+    /// golden cannot say which kind the CLI *should* have used, so the JSON lane
+    /// cannot tell `1` from `"1"` there. It is bounded to partition keys, multicell
+    /// cell paths and map keys.
+    Stringified,
+}
+
 /// A canonical scalar: the unit of value equality.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Canon {
@@ -238,13 +279,34 @@ pub fn canon_scalar(v: &Value, egress: Egress) -> Result<Canon, String> {
 
 /// Canonicalize a scalar whose declared CQL type is KNOWN — the comparison path.
 ///
-/// This, not [`canon_scalar`], decides value equality. The type is what makes the
-/// numeric normalization SAFE: it is applied only where the DDL says the value is
-/// a number, so a `text` column holding `"22201"` or `"00000"` is compared as the
-/// exact string it is. A JSON number arriving in a text-typed column is
-/// canonicalized as a number precisely so that it compares UNEQUAL to the golden's
-/// string and the failure message names both kinds.
-pub fn canon_typed(v: &Value, egress: Egress, ty: &CqlType, depth: Depth) -> Result<Canon, String> {
+/// This, not [`canon_scalar`], decides value equality. Two things bound the
+/// numeric normalization, and both are needed:
+///
+///   * the declared TYPE — it is applied only where the DDL says the value is a
+///     number, so a `text` column holding `"22201"` or `"00000"` is compared as
+///     the exact string it is;
+///   * the [`Kinding`] of the POSITION — in the JSON lane a numeric string is
+///     read as a number only where `sstabledump` stringifies, so an ordinary
+///     numeric cell must match by JSON kind as well as by value.
+///
+/// A JSON number arriving in a text-typed column is canonicalized as a number
+/// precisely so that it compares UNEQUAL to the golden's string and the failure
+/// message names both kinds.
+pub fn canon_typed(
+    v: &Value,
+    egress: Egress,
+    ty: &CqlType,
+    depth: Depth,
+    kinding: Kinding,
+) -> Result<Canon, String> {
+    // May a numeric TEXT be read as a NUMBER here?
+    let cross_kind = match egress {
+        // CSV carries no JSON kinds at all — the reader hands every cell over as
+        // text — so a numeric cell is compared by value throughout the lane.
+        Egress::Csv => true,
+        // JSON: only where the golden itself is a string by construction.
+        Egress::Json => kinding == Kinding::Stringified,
+    };
     let canon = match v {
         Value::Null => Canon::Null,
         Value::Bool(b) => Canon::Bool(*b),
@@ -255,8 +317,12 @@ pub fn canon_typed(v: &Value, egress: Egress, ty: &CqlType, depth: Depth) -> Res
             None => return Err(format!("uncanonicalizable JSON number {n}")),
         },
         Value::String(s) => match ty {
-            // The one place a numeric TEXT may be read as a number.
-            CqlType::Numeric(_) => match normalize_decimal(s) {
+            // The one place a numeric TEXT may be read as a number: a numeric
+            // declared type AT a position where the two sides may legitimately
+            // spell the kind differently. Elsewhere the string stays a string, so
+            // it compares UNEQUAL to the golden's number and the message names
+            // both kinds.
+            CqlType::Numeric(_) if cross_kind => match normalize_decimal(s) {
                 Some(text) => Canon::Num(text),
                 // e.g. the golden's `Infinity`/`NaN` for a double: left opaque so
                 // it fails loudly rather than being coerced.
@@ -781,8 +847,21 @@ mod tests {
         CqlType::Numeric("int".to_string())
     }
 
+    /// Canonicalize at a position `sstabledump` STRINGIFIES (a partition key, a
+    /// multicell cell path, a map key) — the only JSON positions where a numeric
+    /// string may be read as a number.
     fn canon(v: &Value, ty: &CqlType) -> Canon {
-        match canon_typed(v, Egress::Json, ty, Depth::TopLevel) {
+        canon_at(v, ty, Kinding::Stringified)
+    }
+
+    /// Canonicalize at an ordinary position, where the golden keeps its natural
+    /// JSON kind and the two sides must therefore agree on kind.
+    fn canon_natural(v: &Value, ty: &CqlType) -> Canon {
+        canon_at(v, ty, Kinding::Natural)
+    }
+
+    fn canon_at(v: &Value, ty: &CqlType, kinding: Kinding) -> Canon {
+        match canon_typed(v, Egress::Json, ty, Depth::TopLevel, kinding) {
             Ok(canon) => canon,
             Err(why) => panic!("{why}"),
         }
@@ -817,6 +896,37 @@ mod tests {
             "a numeric column must still pair the dump's string spelling with the \
              CLI's number"
         );
+    }
+
+    /// Review finding R1, pinned from both sides. The cross-kind numeric reading
+    /// is scoped to the positions `sstabledump` stringifies
+    /// (`writeString(type.getString(v))`), so an ORDINARY numeric cell — which the
+    /// dump writes with `writeRawValue(type.toJSONString(v))`, i.e. as a JSON
+    /// number — must compare by KIND as well as by value.
+    #[test]
+    fn a_numeric_cell_outside_a_stringified_position_compares_by_kind_too() {
+        assert_ne!(
+            canon_natural(&json!(1), &int()),
+            canon_natural(&json!("1"), &int()),
+            "an ordinary int cell rendered `\"1\"` is a divergence from the dump's `1`"
+        );
+        assert_eq!(
+            canon(&json!(1), &int()),
+            canon(&json!("1"), &int()),
+            "a partition key / cell path IS stringified by the dump, so there the \
+             two spellings denote the same value"
+        );
+        // CSV carries no JSON kinds at all, so the value comparison stands
+        // whatever the kinding says.
+        for kinding in [Kinding::Natural, Kinding::Stringified] {
+            assert_eq!(
+                canon_typed(&json!(1), Egress::Csv, &int(), Depth::TopLevel, kinding)
+                    .expect("number"),
+                canon_typed(&json!("1"), Egress::Csv, &int(), Depth::TopLevel, kinding)
+                    .expect("text"),
+                "every CSV cell arrives as text, so `1` and `\"1\"` are one value"
+            );
+        }
     }
 
     #[test]
@@ -886,8 +996,14 @@ mod tests {
     /// coerced.
     #[test]
     fn a_container_in_a_scalar_position_is_an_error() {
-        let why = canon_typed(&json!([1, 2]), Egress::Json, &int(), Depth::TopLevel)
-            .expect_err("a container where the DDL says int must not canonicalize");
+        let why = canon_typed(
+            &json!([1, 2]),
+            Egress::Json,
+            &int(),
+            Depth::TopLevel,
+            Kinding::Natural,
+        )
+        .expect_err("a container where the DDL says int must not canonicalize");
         assert!(why.contains("int"), "{why}");
     }
 
@@ -904,13 +1020,35 @@ mod tests {
         let empty = json!("");
         let null = json!(null);
         assert_eq!(
-            canon_typed(&empty, Egress::Csv, &text(), Depth::TopLevel).expect("empty text"),
-            canon_typed(&null, Egress::Csv, &text(), Depth::TopLevel).expect("null"),
+            canon_typed(
+                &empty,
+                Egress::Csv,
+                &text(),
+                Depth::TopLevel,
+                Kinding::Natural
+            )
+            .expect("empty text"),
+            canon_typed(
+                &null,
+                Egress::Csv,
+                &text(),
+                Depth::TopLevel,
+                Kinding::Natural
+            )
+            .expect("null"),
             "a top-level CSV field has one spelling for both, so they must compare alike"
         );
         assert_ne!(
-            canon_typed(&empty, Egress::Csv, &text(), Depth::Inside).expect("empty member"),
-            canon_typed(&null, Egress::Csv, &text(), Depth::Inside).expect("null member"),
+            canon_typed(
+                &empty,
+                Egress::Csv,
+                &text(),
+                Depth::Inside,
+                Kinding::Natural
+            )
+            .expect("empty member"),
+            canon_typed(&null, Egress::Csv, &text(), Depth::Inside, Kinding::Natural)
+                .expect("null member"),
             "inside a container `{{f: }}` and `{{f: null}}` are distinguishable, so an \
              empty member must not canonicalize onto null"
         );
@@ -918,8 +1056,9 @@ mod tests {
         // top-level collapse a format property rather than a lost assertion.
         for depth in [Depth::TopLevel, Depth::Inside] {
             assert_ne!(
-                canon_typed(&empty, Egress::Json, &text(), depth).expect("empty text"),
-                canon_typed(&null, Egress::Json, &text(), depth).expect("null"),
+                canon_typed(&empty, Egress::Json, &text(), depth, Kinding::Natural)
+                    .expect("empty text"),
+                canon_typed(&null, Egress::Json, &text(), depth, Kinding::Natural).expect("null"),
                 "JSON distinguishes `\"\"` from `null` at {depth:?}"
             );
         }
