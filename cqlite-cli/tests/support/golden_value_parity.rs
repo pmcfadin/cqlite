@@ -760,7 +760,19 @@ fn golden_row(
                         .get("value")
                         .cloned()
                         .ok_or_else(|| format!("{}: map cell `{name}` has no value", at()))?;
-                    obj.insert(key, value);
+                    // Two cells with the same path are not something a well-formed
+                    // per-SSTable dump of one row can carry, and inserting over the
+                    // earlier one would silently DROP a golden cell — shrinking the
+                    // oracle instead of reporting it (issue #1491 finding J2's class,
+                    // golden side).
+                    if obj.insert(key.clone(), value).is_some() {
+                        return Err(format!(
+                            "{}: map cell `{name}` carries two cells for the key `{key}` — a \
+                             golden the reader would have to discard part of is not a usable \
+                             oracle",
+                            at()
+                        ));
+                    }
                 }
                 Value::Object(obj)
             }
@@ -868,6 +880,43 @@ mod tests {
     /// JSON kind and the two sides must therefore agree on kind.
     fn canon_natural(v: &Value, ty: &CqlType) -> Canon {
         canon_at(v, ty, Kinding::Natural)
+    }
+
+    /// Two cells for the SAME map key is not a shape a per-SSTable dump of one row
+    /// can carry, and collapsing them would silently DROP a golden cell — shrinking
+    /// the oracle rather than reporting it (issue #1491 finding J2's class, golden
+    /// side).
+    #[test]
+    fn two_map_cells_with_the_same_key_are_refused_rather_than_collapsed() {
+        let dup = concat!(
+            r#"{"partition":{"key":["1"],"position":0},"rows":[{"type":"row","position":1,"#,
+            r#""liveness_info":{"tstamp":"1970-01-01T00:00:00.001Z"},"cells":["#,
+            r#"{"name":"m","path":["k"],"value":"1"},"#,
+            r#"{"name":"m","path":["k"],"value":"2"}]}]}"#
+        );
+        let why = golden_rows(dup, &["id"], &[], &[("m", Multicell::Map)])
+            .expect_err("a golden the reader must discard part of is not an oracle");
+        assert!(
+            why.contains("two cells for the key `k`") && why.contains("`m`"),
+            "the refusal must name the collection and the duplicated key: {why}"
+        );
+
+        // Two DISTINCT keys are the ordinary shape, so the rule is about the
+        // duplicate and not about multicell maps.
+        let distinct = dup.replace(
+            r#"{"name":"m","path":["k"],"value":"2"}"#,
+            r#"{"name":"m","path":["k2"],"value":"2"}"#,
+        );
+        let rows = golden_rows(&distinct, &["id"], &[], &[("m", Multicell::Map)])
+            .expect("distinct map keys are comparable");
+        assert_eq!(
+            rows.first()
+                .and_then(|r| r.get("m"))
+                .and_then(Value::as_object)
+                .map(serde_json::Map::len),
+            Some(2),
+            "both map cells must survive into the expected row"
+        );
     }
 
     fn canon_at(v: &Value, ty: &CqlType, kinding: Kinding) -> Canon {

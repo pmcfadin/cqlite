@@ -645,7 +645,20 @@ fn compare_udt(
                         brief(&describe(key, egress))
                     ));
                 };
-                out.insert(name.clone(), value.clone());
+                // A repeated field name USED to overwrite, so an egress carrying an
+                // extra spurious field compared equal to the golden whenever the
+                // LAST occurrence happened to match (issue #1491 review finding J2).
+                // Duplicate egress is malformed, not something to reconcile.
+                if let Some(previous) = out.insert(name.clone(), value.clone()) {
+                    return Err(format!(
+                        "udt `{}`: the {egress:?} egress repeats the field `{name}` ({} then \
+                         {}) — a duplicate field is malformed output, and comparing only the \
+                         last occurrence would hide the earlier one",
+                        udt.name,
+                        brief(&describe(&previous, egress)),
+                        brief(&describe(value, egress))
+                    ));
+                }
             }
             out
         }
@@ -866,6 +879,20 @@ pub fn cli_csv_rows(text: &str) -> Result<Vec<Row>, String> {
         .collect();
     if headers.is_empty() {
         return Err("CSV egress has no header row".to_string());
+    }
+    // A repeated header USED to overwrite the earlier column of the same name while
+    // building the row map, so egress carrying a duplicate column compared equal to
+    // the golden whenever the LAST occurrence happened to match, and the spurious
+    // column vanished from both the shape check and the cell count (issue #1491
+    // review finding J2).
+    for (i, name) in headers.iter().enumerate() {
+        if let Some(first) = headers[..i].iter().position(|earlier| earlier == name) {
+            return Err(format!(
+                "CSV egress header row repeats the column `{name}` (fields {first} and \
+                 {i}) — a duplicate header is malformed output, and keeping only one of \
+                 the two would hide the other"
+            ));
+        }
     }
     let mut rows = Vec::new();
     for (i, record) in reader.records().enumerate() {

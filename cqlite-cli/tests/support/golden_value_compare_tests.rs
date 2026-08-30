@@ -724,6 +724,59 @@ fn the_csv_lane_carries_no_udt_discriminator() {
     assert_eq!(report.container_cells, 1, "the UDT cell must be compared");
 }
 
+/// J2: a duplicate CSV header used to OVERWRITE the earlier column of the same
+/// name while the row map was built, so egress carrying a spurious duplicate column
+/// compared equal to the golden whenever the LAST occurrence matched — and the
+/// spurious column vanished from the shape check and the cell count too. A duplicate
+/// header is malformed egress, so it is reported rather than reconciled.
+#[test]
+fn a_duplicate_csv_header_is_a_named_failure() {
+    let why = cli_csv_rows("id,v,v\n1,x,x\n").expect_err("a duplicate header is malformed");
+    assert!(
+        why.contains("repeats the column `v`") && why.contains("fields 1 and 2"),
+        "the failure must name the duplicated column and where it repeats: {why}"
+    );
+    // The distinct-header form is the ordinary one, so the rule is about the
+    // DUPLICATE and not about the reader.
+    let rows = cli_csv_rows("id,v,w\n1,x,y\n").expect("distinct headers are readable");
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].len(), 3, "every column must survive into the row");
+}
+
+/// J2, UDT side: a repeated CSV field name used to overwrite, so egress carrying an
+/// EXTRA spurious field passed whenever the last occurrence happened to match the
+/// golden. The duplicate below is written in exactly that order — the second
+/// `first_name` is the golden's value — so the case would pass under the old
+/// last-wins insert and can only be caught by reporting the duplicate.
+#[test]
+fn a_duplicate_csv_udt_field_is_a_named_failure_even_when_the_last_one_matches() {
+    let schema = schema_of(PERSON_DDL, "t");
+    let golden = vec![row(&[
+        ("id", json!(1)),
+        ("p", json!({"first_name": "A", "last_name": "B", "age": 30})),
+    ])];
+    let cli = vec![row(&[
+        ("id", json!("1")),
+        (
+            "p",
+            json!("{first_name: SPURIOUS, first_name: A, last_name: B, age: 30}"),
+        ),
+    ])];
+    let report = compare_rows(&golden, &cli, &schema, &["id"], &[], &[], Egress::Csv);
+    assert_eq!(
+        report.diffs.len(),
+        1,
+        "the duplicate field must be reported: {:?}",
+        report.diffs
+    );
+    assert!(
+        report.diffs[0].contains("repeats the field `first_name`")
+            && report.diffs[0].contains("person"),
+        "the failure must name the UDT and the duplicated field: {:?}",
+        report.diffs
+    );
+}
+
 /// F3: each egress format renders a UDT exactly one way, so only that way is
 /// accepted. Accepting both meant a JSON UDT that regressed to the map
 /// `{key,value}` spelling still passed.
