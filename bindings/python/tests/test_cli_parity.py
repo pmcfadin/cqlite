@@ -69,6 +69,13 @@ import cqlite
 
 from conftest import DATASETS, SCHEMAS, PROJECT_ROOT
 
+# ONE implementation of numeric equality, shared with test_parity.py (#3505).
+from numeric_compare import (
+    float_equal,
+    is_number as _is_number,
+    numbers_equal as _numbers_equal,
+)
+
 
 # CLI renders CQL `time` as "HH:MM:SS.nnnnnnnnn" (9-digit nanoseconds). The
 # Python binding returns exact `int` nanoseconds since midnight (issue #1450),
@@ -357,9 +364,12 @@ def values_equal(py_val: Any, cli_val: Any) -> bool:
         return True
 
     if type(py_val) != type(cli_val):
-        # Allow int/float comparison
-        if isinstance(py_val, (int, float)) and isinstance(cli_val, (int, float)):
-            return _float_equal(float(py_val), float(cli_val))
+        # Allow int/float comparison, but NEVER at the cost of hiding precision
+        # loss (issue #3505).  `bool` is excluded because `isinstance(True, int)`
+        # is `True`, so `True` vs `1.0` used to coerce equal — a genuine type
+        # mismatch a parity harness must report.
+        if _is_number(py_val) and _is_number(cli_val):
+            return _numbers_equal(py_val, cli_val)  # exact above 2**53
         return False
 
     if isinstance(py_val, float):
@@ -392,21 +402,8 @@ def values_equal(py_val: Any, cli_val: Any) -> bool:
 
 
 def _float_equal(a: float, b: float, rel_tol: float = 1e-6, abs_tol: float = 1e-9) -> bool:
-    """Compare floats with tolerance."""
-    if a == b:
-        return True
-    # Handle special cases
-    if a != a and b != b:  # Both NaN
-        return True
-    if a != a or b != b:  # One NaN
-        return False
-    return abs(a - b) <= max(rel_tol * max(abs(a), abs(b)), abs_tol)
-
-
-# =============================================================================
-# CLI Execution
-# =============================================================================
-
+    """Compare floats with tolerance — see `numeric_compare.float_equal`."""
+    return float_equal(a, b, rel_tol, abs_tol)
 
 def run_cli_query(
     data_dir: Path, schema: Path, query: str, cli_binary: Path, timeout: int = 60

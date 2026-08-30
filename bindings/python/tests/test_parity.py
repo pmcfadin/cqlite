@@ -37,6 +37,13 @@ import cqlite
 
 from conftest import DATASETS, SCHEMAS
 
+# ONE implementation of numeric equality, shared with test_cli_parity.py (#3505).
+from numeric_compare import (
+    is_bool_number_mismatch,
+    is_number,
+    numbers_equal,
+)
+
 from corpus import (
     SKIP_KEYSPACES,
     SKIP_PENDING_KEYSPACES,
@@ -476,14 +483,21 @@ def values_equal(actual: Any, expected: Any) -> bool:
             return False
         return all(values_equal(actual[k], expected[k]) for k in actual)
 
-    # Handle float comparison with tolerance
-    if isinstance(actual, float) and isinstance(expected, (int, float)):
-        if actual == expected:
-            return True
-        # Use relative tolerance for large values, absolute for small
-        rel_tol = 1e-6
-        abs_tol = 1e-9
-        return abs(actual - expected) <= max(rel_tol * max(abs(actual), abs(expected)), abs_tol)
+    # A `bool` paired with a number is a genuine type mismatch, not a numeric
+    # comparison (issue #3505): `isinstance(True, int)` is `True`, so `True` vs
+    # `1.0` used to reach the tolerant path below (and `True` vs `1` the exact
+    # fallthrough) and compare EQUAL.  A CQL `boolean` renders as JSON
+    # `true`/`false`, never as a number.
+    if is_bool_number_mismatch(actual, expected):
+        return False
+
+    # Numeric comparison, in EITHER direction, through the one shared rule
+    # (issue #3505).  The float coercion this used to do unconditionally is what
+    # hid an exact integer being rounded to a float: below `2**53` it is
+    # lossless and stays tolerant, at or above it the comparison is exact.
+    if is_number(actual) and is_number(expected):
+        if isinstance(actual, float) or isinstance(expected, float):
+            return numbers_equal(actual, expected)
 
     # Handle Decimal comparison
     if isinstance(actual, Decimal) and isinstance(expected, (int, float, Decimal)):

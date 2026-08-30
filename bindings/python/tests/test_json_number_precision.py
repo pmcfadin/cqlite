@@ -34,6 +34,7 @@ import pytest
 # directory on `sys.path`, but be explicit so a direct `python3` run works too).
 sys.path.insert(0, str(Path(__file__).parent))
 
+import numeric_compare  # noqa: E402
 from test_cli_parity import values_equal as cli_values_equal  # noqa: E402
 from test_parity import values_equal as jsonl_values_equal  # noqa: E402
 
@@ -124,3 +125,52 @@ def test_identical_large_integers_still_match(values_equal):
     """No int/float coercion involved: exact integers compare exactly."""
     assert values_equal(U64_MAX, U64_MAX) is True
     assert values_equal(True, True) is True
+
+
+# =============================================================================
+# The shared rule itself, tested directly (not only through its two consumers)
+# =============================================================================
+
+
+def test_the_bound_is_the_last_exactly_representable_integer():
+    """`EXACT_FLOAT_INT_BOUND` must be the real f64 boundary, not a guess."""
+    assert numeric_compare.EXACT_FLOAT_INT_BOUND == 2**53
+    bound = numeric_compare.EXACT_FLOAT_INT_BOUND
+    assert float(bound) == bound
+    assert float(bound + 1) != bound + 1
+    # And the claim generalises downwards: sample the decade below the bound.
+    for n in (0, 1, 2**31, 2**52, bound - 1, bound):
+        assert float(n) == n, f"{n} must be exactly representable"
+        assert float(-n) == -n
+
+
+def test_is_number_excludes_bool():
+    assert numeric_compare.is_number(1) is True
+    assert numeric_compare.is_number(1.0) is True
+    assert numeric_compare.is_number(True) is False
+    assert numeric_compare.is_number(False) is False
+    assert numeric_compare.is_number("1") is False
+    assert numeric_compare.is_number(None) is False
+
+
+def test_is_bool_number_mismatch():
+    assert numeric_compare.is_bool_number_mismatch(True, 1) is True
+    assert numeric_compare.is_bool_number_mismatch(1, True) is True
+    assert numeric_compare.is_bool_number_mismatch(True, 1.0) is True
+    assert numeric_compare.is_bool_number_mismatch(True, False) is False
+    assert numeric_compare.is_bool_number_mismatch(1, 2) is False
+    assert numeric_compare.is_bool_number_mismatch(True, "x") is False
+
+
+def test_numbers_equal_never_coerces_above_the_bound():
+    bound = numeric_compare.EXACT_FLOAT_INT_BOUND
+    # int/int is always exact, at any magnitude.
+    assert numeric_compare.numbers_equal(U64_MAX, U64_MAX) is True
+    assert numeric_compare.numbers_equal(U64_MAX, U64_MAX - 1) is False
+    # int/float below the bound keeps the tolerance.
+    assert numeric_compare.numbers_equal(1, 1.0000000001) is True
+    # int/float above the bound is exact, in both orders.
+    assert numeric_compare.numbers_equal(bound + 1, float(bound + 1)) is False
+    assert numeric_compare.numbers_equal(float(bound + 1), bound + 1) is False
+    # float/float keeps the tolerance at any magnitude.
+    assert numeric_compare.numbers_equal(1e19, 1e19 * (1 + 1e-9)) is True
