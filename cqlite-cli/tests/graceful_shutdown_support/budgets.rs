@@ -147,16 +147,43 @@ const MAX_TEST_DEADLINE: Duration = Duration::from_secs(900);
 ///   t_ack, sibling (slowest of 5) 38-43ms      97ms          133ms
 /// ```
 ///
-/// 60ms sits ABOVE every quiet observation (max 43ms) and BELOW every observation
-/// taken under real contention (min 81ms). So a quiet host yields `scale == 1`
-/// exactly — calibration can never itself become a flake source — and a saturated
-/// host demonstrably engages it (~2.2x at load average 116). Both directions are
-/// asserted from those recorded numbers by
-/// `the_baseline_is_quiet_inert_and_contention_active`, because a baseline far
-/// above the noise floor makes the whole mechanism inert: the first version of
-/// this change used 500ms/200ms baselines and `scale` stayed at EXACTLY 1.000 in
-/// every run taken, including load average 116.
-pub const QUIET_OBSERVATION_BASELINE: Duration = Duration::from_millis(60);
+/// THE VALUE IS DERIVED FROM THAT TABLE, NOT LABELLED AGAINST IT (roborev job 233,
+/// finding 2). This comment used to call 81ms "the fastest observation taken under
+/// real contention" and set the baseline to 60ms — while the table three lines
+/// above it records loaded observations of 13ms, 45ms and 76ms. At the recorded
+/// load-average-30 timings the SIGINT test could therefore stay entirely unscaled:
+/// the calibration inert at moderate load, which is the ORIGINAL defect this change
+/// exists to remove. That was the THIRD hand-labelled "binding" value in this file
+/// to decay (round 2: a `MEASURED_QUIET_T_ACK` of 3ms against a recorded 1.4ms;
+/// round 6: an 11.4ms `t_boot` anchor that was itself permissive), so the label is
+/// GONE rather than corrected — `the_baseline_is_quiet_inert_and_contention_active`
+/// encodes the table as DATA and derives both bounds from it, asserting activation
+/// per case instead of against one hand-picked observation.
+///
+/// WHAT AN "INTENDED CONTENTION CASE" IS: one TEST RUN at one recorded load level,
+/// not one cell of the table. That is the unit the mechanism operates on —
+/// `calibrate` takes the LARGEST scale over every measurement a run makes, so what
+/// decides whether a run's deadline scales is the MAXIMUM of that run's
+/// observations and never any single one of them. A 13ms `t_ack` does not mean the
+/// calibration failed for that run: the same run's `t_boot` measured 45-66ms.
+///
+/// The table leaves exactly one admissible window — above the slowest recorded
+/// QUIET observation (43ms, the sibling's slowest ack: below it, an unloaded host
+/// scales and the calibration becomes a flake source of its own) and below the
+/// LEAST-scaled contention case (45ms: the SIGINT test at load average 30, whose
+/// binding observation is the slowest of its two measurements at their recorded
+/// floors). Both numbers are computed from the table by the test, which also
+/// asserts the window is non-empty; 44ms is the only whole millisecond inside it.
+///
+/// THE WINDOW IS NARROW (2ms), AND NARROW IS SAFE IN THE DIRECTION THAT MATTERS.
+/// `scale` is floored at 1 and the span clamped at `base`, so calibration can only
+/// ever LOOSEN a deadline: over-eager engagement costs a marginally later timeout
+/// on a genuine hang, while under-eager engagement is the flake this change exists
+/// to remove. A quiet host that happens to measure 45ms gets a deadline 2% longer
+/// and nothing else. The hazard being guarded against is the opposite one: the
+/// first version of this change used 500ms/200ms baselines and `scale` stayed at
+/// EXACTLY 1.000 in every run taken, including load average 116.
+pub const QUIET_OBSERVATION_BASELINE: Duration = Duration::from_millis(44);
 
 // ---------------------------------------------------------------------------
 // The one deadline
@@ -492,46 +519,209 @@ fn any_single_stage_may_consume_the_whole_deadline() {
     );
 }
 
-/// THE BASELINE MUST BE INERT ON A QUIET HOST AND ACTIVE UNDER CONTENTION,
-/// asserted against the RECORDED MEASUREMENTS rather than against itself.
+// ---------------------------------------------------------------------------
+// THE RECORDED MEASUREMENT TABLE, AS DATA (roborev job 233, finding 2)
+// ---------------------------------------------------------------------------
+//
+// Three times now a "binding" observation has been picked by hand and written
+// into prose, and three times the label decayed against the table sitting a few
+// lines from it (round 2: `MEASURED_QUIET_T_ACK = 3ms` vs a recorded 1.4ms; round
+// 6: a `t_boot` anchor of 11.4ms that was itself permissive; round 10: "the
+// fastest loaded observation is 81ms" while the same table records 13ms, 45ms and
+// 76ms). The class is closed by DERIVING the binding values instead: the table is
+// encoded here once, and every bound the baseline must respect is computed from
+// it. A new measurement is added by editing this table and nothing else.
+
+/// One measurement series: its recorded QUIET range and one recorded range per
+/// contention level. Microseconds, so 11.4ms is exact in integer arithmetic.
+struct Series {
+    what: &'static str,
+    /// `(fastest, slowest)` recorded on a quiet host.
+    quiet: (u64, u64),
+    /// `(level, (fastest, slowest))`, one entry per recorded contention level.
+    loaded: &'static [(&'static str, (u64, u64))],
+}
+
+impl Series {
+    /// The recorded FLOOR at `level` — the least favourable value for activation,
+    /// because a case must scale even when its measurement lands at the fast end
+    /// of what was recorded. `None` if this series was not recorded at `level`.
+    fn floor_at(&self, level: &str) -> Option<u64> {
+        self.loaded
+            .iter()
+            .find(|(name, _)| *name == level)
+            .map(|(_, (fastest, _))| *fastest)
+    }
+}
+
+const T_BOOT: Series = Series {
+    what: "t_boot (spawn -> banner)",
+    quiet: (11_400, 29_000),
+    loaded: &[
+        ("load avg 30", (45_000, 66_000)),
+        ("load avg 116", (81_000, 132_000)),
+    ],
+};
+
+const T_ACK_SIGINT: Series = Series {
+    what: "t_ack, SIGINT test",
+    quiet: (1_400, 3_000),
+    loaded: &[
+        ("load avg 30", (13_000, 13_000)),
+        ("load avg 116", (76_000, 76_000)),
+    ],
+};
+
+const T_ACK_SIBLING: Series = Series {
+    what: "t_ack, sibling (slowest of 5)",
+    quiet: (38_000, 43_000),
+    loaded: &[
+        ("load avg 30", (97_000, 97_000)),
+        ("load avg 116", (133_000, 133_000)),
+    ],
+};
+
+/// An INTENDED CONTENTION CASE is one TEST RUN at one recorded load level — the
+/// unit the mechanism actually operates on, because `calibrate` takes the LARGEST
+/// scale over every measurement a run makes. So a run's binding observation is the
+/// MAXIMUM of its series' recorded floors at that level, never any single cell.
+struct RecordedRun {
+    test: &'static str,
+    series: &'static [Series],
+}
+
+const RECORDED_RUNS: &[RecordedRun] = &[
+    RecordedRun {
+        test: "sigint_in_writable_session_flushes_before_exit",
+        series: &[T_BOOT, T_ACK_SIGINT],
+    },
+    RecordedRun {
+        test: "writable_session_auto_flushes_mid_session_across_threshold",
+        series: &[T_BOOT, T_ACK_SIBLING],
+    },
+];
+
+/// Every contention level the table records, in the order they were taken.
+const RECORDED_LEVELS: &[&str] = &["load avg 30", "load avg 116"];
+
+/// THE BASELINE MUST BE INERT ON A QUIET HOST AND ACTIVE FOR EVERY INTENDED
+/// CONTENTION CASE, asserted against the RECORDED MEASUREMENTS rather than against
+/// itself or against a hand-picked "binding" observation.
+///
+/// Two properties, both derived from `RECORDED_RUNS`:
+///
+/// * **Quiet-inert**, per recorded series: the SLOWEST value ever recorded on a
+///   quiet host must still yield `scale == 1` exactly, or an unloaded host scales
+///   and the calibration becomes a flake source of its own.
+/// * **Contention-active**, per CASE (one run at one level): the case's binding
+///   observation — the largest of its series' recorded FLOORS at that level, which
+///   is what `calibrate`'s max-of-scales actually consumes — must engage scaling.
+///   Asserted per case and named per case: a suite-wide "some case scaled" cannot
+///   see one case silently staying inert behind its siblings, which is exactly the
+///   defect this replaces.
 ///
 /// A test that derives its synthetic observation FROM the baseline is invariant to
-/// the baseline's value: inflating it 1000x — the exact defect that left the
-/// calibration inert through every real run of the first version — leaves such a
-/// test GREEN. So both literals below are recorded observations, not multiples of
-/// the constant under examination.
+/// the baseline's value: inflating it 1000x — the defect that left the calibration
+/// inert through every real run of the first version — leaves such a test GREEN. So
+/// every value below comes from the recorded table, never from the constant under
+/// examination.
 #[test]
 fn the_baseline_is_quiet_inert_and_contention_active() {
-    /// The SLOWEST observation ever recorded on a QUIET host (the sibling test's
-    /// slowest of five acks). See `QUIET_OBSERVATION_BASELINE`.
-    const RECORDED_QUIET_SLOWEST: Duration = Duration::from_millis(43);
-    /// The FASTEST observation ever recorded under real contention (`t_boot` at
-    /// load average 116).
-    const RECORDED_LOADED_FASTEST: Duration = Duration::from_millis(81);
-
+    // --- Quiet inertness, per recorded series -------------------------------
+    let mut quiet_slowest = 0u64;
+    let mut quiet_checked = 0usize;
+    for run in RECORDED_RUNS {
+        for series in run.series {
+            let slowest = Duration::from_micros(series.quiet.1);
+            quiet_slowest = quiet_slowest.max(series.quiet.1);
+            let mut d = TestDeadline::start(T1_DEADLINE_BASE, T1_DEADLINE_CAP);
+            d.calibrate(series.what, slowest);
+            assert_eq!(
+                d.span(),
+                T1_DEADLINE_BASE,
+                "{}: the SLOWEST recorded QUIET observation of `{}` ({slowest:.1?}) must leave \
+                 the deadline at EXACTLY the base — otherwise an unloaded host scales and the \
+                 calibration becomes a flake source of its own: {}",
+                run.test,
+                series.what,
+                d.describe()
+            );
+            quiet_checked += 1;
+        }
+    }
     assert!(
-        RECORDED_QUIET_SLOWEST < QUIET_OBSERVATION_BASELINE,
-        "the baseline {QUIET_OBSERVATION_BASELINE:?} must sit above the slowest recorded QUIET \
-         observation {RECORDED_QUIET_SLOWEST:?}, or an unloaded host scales and the calibration \
-         becomes a flake source of its own"
+        quiet_checked > 0,
+        "the recorded table is empty: this test would assert nothing"
     );
 
-    let mut quiet = TestDeadline::start(T1_DEADLINE_BASE, T1_DEADLINE_CAP);
-    quiet.calibrate("t_ack", RECORDED_QUIET_SLOWEST);
-    assert_eq!(
-        quiet.span(),
-        T1_DEADLINE_BASE,
-        "a quiet host must get EXACTLY the base: {}",
-        quiet.describe()
+    // --- Contention activation, per intended contention case ----------------
+    let mut binding_case = None::<(&str, &str, u64)>;
+    let mut cases_checked = 0usize;
+    for run in RECORDED_RUNS {
+        for level in RECORDED_LEVELS {
+            // The binding observation for this case: the largest recorded FLOOR
+            // across the run's series, because `calibrate` takes the largest scale
+            // over everything the run measures.
+            let mut binding = 0u64;
+            for series in run.series {
+                let floor = series.floor_at(level).unwrap_or_else(|| {
+                    panic!(
+                        "{}: series `{}` records nothing at {level:?} — the table must record \
+                         every series at every level it claims, or a case is silently unchecked",
+                        run.test, series.what
+                    )
+                });
+                binding = binding.max(floor);
+            }
+
+            let observed = Duration::from_micros(binding);
+            let mut d = TestDeadline::start(T1_DEADLINE_BASE, T1_DEADLINE_CAP);
+            d.calibrate("recorded contention case", observed);
+            assert!(
+                d.span() > T1_DEADLINE_BASE,
+                "CONTENTION CASE `{}` @ {level}: its binding observation {observed:.1?} (the \
+                 largest recorded floor across that run's measurements) leaves the deadline \
+                 UNSCALED against a {QUIET_OBSERVATION_BASELINE:?} baseline. The calibration is \
+                 inert for this case, which is the original defect of this change: {}",
+                run.test,
+                d.describe()
+            );
+
+            if binding_case.is_none_or(|(_, _, b)| binding < b) {
+                binding_case = Some((run.test, level, binding));
+            }
+            cases_checked += 1;
+        }
+    }
+    let (binding_test, binding_level, contended_floor) =
+        binding_case.expect("the recorded table declares no contention case");
+    assert!(
+        cases_checked >= RECORDED_RUNS.len(),
+        "every recorded run must contribute at least one contention case, but only \
+         {cases_checked} were checked across {} runs",
+        RECORDED_RUNS.len()
     );
 
-    let mut loaded = TestDeadline::start(T1_DEADLINE_BASE, T1_DEADLINE_CAP);
-    loaded.calibrate("t_boot", RECORDED_LOADED_FASTEST);
+    // --- The admissible window, DERIVED and reported ------------------------
+    //
+    // Not a third property: it is the two above stated as the interval the table
+    // leaves, so a failure names the whole window instead of one violated end.
+    let quiet_bound = Duration::from_micros(quiet_slowest);
+    let contended_bound = Duration::from_micros(contended_floor);
     assert!(
-        loaded.span() > T1_DEADLINE_BASE,
-        "the FASTEST observation recorded under real contention must already engage the \
-         calibration, or the mechanism is inert: {}",
-        loaded.describe()
+        quiet_bound < contended_bound,
+        "the recorded table leaves NO admissible baseline: the slowest quiet observation \
+         {quiet_bound:.1?} is not below the least-scaled contention case ({binding_test} @ \
+         {binding_level}, {contended_bound:.1?}). No single baseline can be both quiet-inert and \
+         contention-active for that data."
+    );
+    assert!(
+        quiet_bound < QUIET_OBSERVATION_BASELINE && QUIET_OBSERVATION_BASELINE < contended_bound,
+        "the baseline {QUIET_OBSERVATION_BASELINE:?} is outside the window the recorded table \
+         leaves: it must sit strictly above the slowest recorded quiet observation \
+         {quiet_bound:.1?} and strictly below the least-scaled contention case ({binding_test} @ \
+         {binding_level}, {contended_bound:.1?}). Both ends are DERIVED from the table in this \
+         file — do not relabel the constant, adjust it or the recorded data."
     );
 }
 

@@ -716,7 +716,11 @@ deadline.
   `calibration_takes_the_largest_scale_and_only_ever_loosens`.
 * `T1_DEADLINE_BASE` **180s** / cap 360s; `T2_DEADLINE_BASE` **480s** / cap 720s; both caps under
   `MAX_TEST_DEADLINE` 900s (the full gate's own 15-20 min wall clock).
-* **ONE** baseline constant, `QUIET_OBSERVATION_BASELINE = 60ms`, for both observations — they measure
+* **ONE** baseline constant, `QUIET_OBSERVATION_BASELINE = 60ms`, for both observations
+  *(ROUND 10 CORRECTION: 60ms, and the "81ms fastest loaded observation" bracket below it, were
+  wrong — the same table records loaded observations of 13ms, 45ms and 76ms, so the SIGINT test
+  could stay unscaled at load average 30. The baseline is now **44ms** and both ends are DERIVED
+  from the table rather than labelled. See round 10.)* — they measure
   the same shape of work. It is **bracketed by two recorded measurements**: above the slowest recorded
   QUIET value (43ms, the sibling's slowest ack) so an unloaded host yields `scale == 1` exactly, and
   below the fastest value recorded under real contention (81ms, `t_boot` at load average 116) so

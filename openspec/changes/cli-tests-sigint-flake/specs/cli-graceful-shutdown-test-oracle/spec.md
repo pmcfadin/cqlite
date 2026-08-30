@@ -90,8 +90,17 @@ and a recorded loaded measurement, which is what "not inert" actually means.)*
 - **THEN** the deadline SHALL NOT move earlier
 
 #### Scenario: a baseline inflated away from its measurements
-- **WHEN** `quiet_baseline` is raised past the slowest recorded QUIET measurement, or above the fastest recorded LOADED one
-- **THEN** a unit test SHALL fail, naming the baseline, the measurement, and that the calibration would be inert (or would scale on an unloaded host)
+- **WHEN** `quiet_baseline` is raised past the slowest recorded QUIET measurement, or to or above the binding observation of any intended contention case
+- **THEN** a unit test SHALL fail, naming the baseline, the case, and that the calibration would be inert for it (or would scale on an unloaded host)
+
+**The bounds SHALL be DERIVED from the recorded measurements, never labelled in prose.** The recorded
+table SHALL be encoded as data in the test file; the quiet bound and the contention bound SHALL be
+computed from it; and activation SHALL be asserted PER INTENDED CONTENTION CASE — one test RUN at one
+recorded load level, whose binding observation is the largest recorded FLOOR across that run's
+measurements, because calibration takes the largest scale over everything a run measures. A
+suite-wide "some case scaled" assertion is insufficient: it cannot see one case staying inert behind a
+scaling sibling. *(Round 10, roborev job 233 finding 2: a hand-labelled "fastest loaded observation"
+had decayed against its own table for the third time in this change.)*
 
 #### Scenario: deadline derivation is reported
 - **WHEN** any wait fails

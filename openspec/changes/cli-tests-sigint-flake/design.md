@@ -64,11 +64,29 @@ expressed it as a per-observation ANCHOR (the smallest recorded quiet value) wit
 bounded at 10x, plus a run-time NOTICE when a host measured below its anchor. That factoring made the
 multiple undriftable and the anchor *unverifiable* in exchange: planting a permissive anchor scaled the
 baseline with it, the ratio held, and every assert still passed. With ONE baseline for one deadline the
-property can be asserted directly and in BOTH directions, from two recorded measurements that bracket
-it: above the SLOWEST recorded quiet observation (43ms), so an unloaded host yields `scale == 1`
-exactly; and below the FASTEST observation recorded under real contention (81ms), so contention
-demonstrably engages it. That is what "not inert" actually means, and it needs no anchor, no multiple
-and no NOTICE.
+property can be asserted directly and in BOTH directions, from the recorded measurements that bracket
+it: above the SLOWEST recorded quiet observation, so an unloaded host yields `scale == 1` exactly; and
+below the least-scaled INTENDED CONTENTION CASE, so contention demonstrably engages it. That is what
+"not inert" actually means, and it needs no anchor, no multiple and no NOTICE.
+
+**Round 10 (roborev job 233, finding 2): both ends are now DERIVED, and one of them was wrong.** This
+paragraph originally named the two ends by hand — 43ms and "the FASTEST observation recorded under
+real contention (81ms)" — and the second label was false against the table it was read from, which
+records loaded observations of 13ms, 45ms and 76ms. With a 60ms baseline the SIGINT test could stay
+entirely unscaled at the recorded load-average-30 timings: the calibration inert at moderate load,
+i.e. the original defect. It was the THIRD hand-labelled binding value in this change to decay, so the
+label is deleted rather than corrected — the recorded table is encoded as DATA in `budgets.rs` and
+both ends are computed from it.
+
+Two things had to be defined to do that. **An intended contention case is one TEST RUN at one recorded
+load level, not one cell of the table**, because `calibrate` takes the LARGEST scale over everything a
+run measures — so a run's binding observation is the maximum of its series' recorded FLOORS at that
+level (a 13ms `t_ack` does not leave its run unscaled when the same run's `t_boot` measured 45-66ms).
+And **activation is asserted PER CASE**, naming the case, so no case can stay inert behind a scaling
+sibling. The derived window is (43ms, 45ms) and the baseline is **44ms**. It is narrow, and narrow is
+safe in the only direction that matters: calibration can only ever LOOSEN a deadline, so over-eager
+engagement costs a marginally later timeout on a genuine hang while under-eager engagement is the
+flake this change exists to remove.
 
 **Why calibration and not just a bigger constant.** A constant has to be chosen for the worst host
 anyone will ever run on, which makes a genuine hang cost that constant on every host. A calibrated
