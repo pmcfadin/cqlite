@@ -1804,6 +1804,13 @@ abandoned streaming iterators stay under the leak budget"
 # detectable rather than merely absent from the expected list.
 _NODE_LEAK_BUDGET_TITLE_SUFFIX="stay under the leak budget"
 
+# The SUITE the budget tests must live in. Load-bearing since the recomposition
+# (#1465 round 10, roborev R2): the affirmation now reads the WHOLE-SUITE report (28
+# suites), so a title namespace that was private to one file became shared. Without
+# this scope a same-titled `passed` test in ANY other suite would satisfy the
+# affirmation for a leak test that was skipped or failed.
+_NODE_LEAK_SUITE_FILE="__test__/leak-paths.test.js"
+
 # The note TEXT for a given state, single-sourced so the component, the SUMMARY and the
 # hidden self-test hook can never quote three different sentences. Any unrecognised state
 # is itself reported rather than silently omitted.
@@ -1873,12 +1880,14 @@ _node_leak_lane_affirm() { # <note-file> <json-file>
   fi
   if ! EXPECTED_TESTS="$_NODE_LEAK_BUDGET_TESTS" \
        BUDGET_SUFFIX="$_NODE_LEAK_BUDGET_TITLE_SUFFIX" \
+       SUITE_FILE="$_NODE_LEAK_SUITE_FILE" \
        JSON_FILE="$json_file" node -e '
         const fs = require("fs");
         const expected = (process.env.EXPECTED_TESTS || "").split("\n").filter(Boolean);
         const suffix = process.env.BUDGET_SUFFIX || "";
-        if (!expected.length || !suffix) {
-          console.error("leak-affirm: FAIL — the gate declared no expected budget tests");
+        const suiteFile = process.env.SUITE_FILE || "";
+        if (!expected.length || !suffix || !suiteFile) {
+          console.error("leak-affirm: FAIL — the gate declared no expected budget tests, no title suffix, or no suite file");
           process.exit(1);
         }
         let report;
@@ -1888,29 +1897,46 @@ _node_leak_lane_affirm() { # <note-file> <json-file>
           console.error(`leak-affirm: FAIL — cannot read/parse jest JSON at ${process.env.JSON_FILE}: ${err.message}`);
           process.exit(1);
         }
-        const observed = new Map();
-        for (const suite of report.testResults || []) {
+        // SUITE-SCOPED (roborev R2): only assertions from the leak suite count. The
+        // report covers all 28 suites, so an unscoped title match would let another
+        // suite satisfy this check.
+        const suites = (report.testResults || []).filter((s) =>
+          typeof s.name === "string" && s.name.endsWith(suiteFile)
+        );
+        if (suites.length === 0) {
+          console.error(`leak-affirm: FAIL — the jest report contains no suite whose path ends with ${JSON.stringify(suiteFile)}; the budget tests cannot have run`);
+          process.exit(1);
+        }
+        // EVERY matching assertion is RETAINED, not last-write-wins: a duplicate title
+        // must be visible as a duplicate rather than silently overwriting a sibling.
+        const observed = [];
+        for (const suite of suites) {
           for (const t of suite.assertionResults || []) {
             const title = t.title || "";
-            if (title.endsWith(suffix)) observed.set(title, t.status);
+            if (title.endsWith(suffix)) observed.push({ title, status: t.status });
           }
         }
         let ok = true;
         for (const name of expected) {
-          const status = observed.get(name);
-          if (status !== "passed") {
-            console.error(`leak-affirm: FAIL — budget test ${JSON.stringify(name)} status=${status === undefined ? "ABSENT" : status} (expected passed)`);
+          const matches = observed.filter((o) => o.title === name);
+          if (matches.length !== 1) {
+            console.error(`leak-affirm: FAIL — budget test ${JSON.stringify(name)} matched ${matches.length} assertion(s) in ${JSON.stringify(suiteFile)} (expected exactly 1; statuses=[${matches.map((m) => m.status).join(", ")}]) — an ambiguous or absent budget test is not an affirmation`);
+            ok = false;
+            continue;
+          }
+          if (matches[0].status !== "passed") {
+            console.error(`leak-affirm: FAIL — budget test ${JSON.stringify(name)} status=${matches[0].status} (expected passed)`);
             ok = false;
           }
         }
-        for (const [title, status] of observed) {
-          if (!expected.includes(title)) {
-            console.error(`leak-affirm: FAIL — UNEXPECTED budget test ${JSON.stringify(title)} (status=${status}) is not in the expected list declared by the gate; a new budget test must be enrolled in _NODE_LEAK_BUDGET_TESTS, never silently uncovered`);
+        for (const o of observed) {
+          if (!expected.includes(o.title)) {
+            console.error(`leak-affirm: FAIL — UNEXPECTED budget test ${JSON.stringify(o.title)} (status=${o.status}) is not in the expected list declared by the gate; a new budget test must be enrolled in _NODE_LEAK_BUDGET_TESTS, never silently uncovered`);
             ok = false;
           }
         }
         if (!ok) process.exit(1);
-        console.log(`leak-affirm: OK — ${expected.length} named budget test(s) present and passed: ${expected.map((n) => JSON.stringify(n)).join(", ")}`);
+        console.log(`leak-affirm: OK — ${expected.length} named budget test(s), each matched EXACTLY once in ${JSON.stringify(suiteFile)} and passed: ${expected.map((n) => JSON.stringify(n)).join(", ")}`);
       '; then
     echo "node-bindings: FAIL — the named #1465 budget tests were not affirmed in the jest report (see leak-affirm lines above)"
     _node_leak_lane_note NO-BUDGET-AFFIRMATION > "$note_file"

@@ -4451,6 +4451,68 @@ else
   bad "1465-skip-declares: the opt-out SKIP branch does not declare the leak-lane state"
 fi
 
+# 1465g. THE AFFIRMATION ITSELF, driven with SYNTHETIC jest reports (round 10, roborev
+#        R2). The recomposition pointed the affirmation at the WHOLE-SUITE report, which
+#        widened the title namespace from one file to 28 — so a same-titled `passed` test
+#        in another suite could satisfy it for a leak test that was skipped, and a
+#        duplicate title inside the leak suite collapsed to one Map key and could not be
+#        seen as an extra either. Both were verified to PASS against the pre-fix code.
+#
+#        Synthetic reports are the right oracle: the adversarial shapes can be written
+#        directly instead of hoping a real run produces them. The SHIPPED function is
+#        extracted and driven — no re-implementation.
+if ! command -v node >/dev/null 2>&1; then
+  skipped "1465-affirm-synthetic: needs node — NOT verified here"
+else
+  nll_syn_dir="$tmp/1465-affirm"
+  mkdir -p "$nll_syn_dir"
+  nll_b1="repeated query rejections stay under the leak budget"
+  nll_b2="abandoned streaming iterators stay under the leak budget"
+  nll_leak='/x/bindings/node/__test__/leak-paths.test.js'
+  nll_other='/x/bindings/node/__test__/impostor.test.js'
+  # <case> <json>
+  nll_mk() { printf '%s' "$2" > "$nll_syn_dir/$1.json"; }
+  nll_mk happy "{\"testResults\":[{\"name\":\"$nll_leak\",\"assertionResults\":[{\"title\":\"$nll_b1\",\"status\":\"passed\"},{\"title\":\"$nll_b2\",\"status\":\"passed\"}]}]}"
+  nll_mk other_suite "{\"testResults\":[{\"name\":\"$nll_leak\",\"assertionResults\":[{\"title\":\"$nll_b1\",\"status\":\"pending\"},{\"title\":\"$nll_b2\",\"status\":\"passed\"}]},{\"name\":\"$nll_other\",\"assertionResults\":[{\"title\":\"$nll_b1\",\"status\":\"passed\"}]}]}"
+  nll_mk duplicate "{\"testResults\":[{\"name\":\"$nll_leak\",\"assertionResults\":[{\"title\":\"$nll_b1\",\"status\":\"pending\"},{\"title\":\"$nll_b1\",\"status\":\"passed\"},{\"title\":\"$nll_b2\",\"status\":\"passed\"}]}]}"
+  nll_mk suite_absent "{\"testResults\":[{\"name\":\"$nll_other\",\"assertionResults\":[{\"title\":\"$nll_b1\",\"status\":\"passed\"},{\"title\":\"$nll_b2\",\"status\":\"passed\"}]}]}"
+  nll_mk extra "{\"testResults\":[{\"name\":\"$nll_leak\",\"assertionResults\":[{\"title\":\"$nll_b1\",\"status\":\"passed\"},{\"title\":\"$nll_b2\",\"status\":\"passed\"},{\"title\":\"a third thing stay under the leak budget\",\"status\":\"skipped\"}]}]}"
+  : > "$nll_syn_dir/broken.json"
+  printf '%s' 'not json {{{' > "$nll_syn_dir/broken.json"
+
+  # <case> -> rc, via the SHIPPED function with only its declarations sourced.
+  nll_affirm_rc() {
+    local jsonf="$1" note rc
+    note=$(mktemp "$nll_syn_dir/note.XXXXXX")
+    (
+      eval "$(sed -n '/^_NODE_LEAK_BUDGET_TESTS="/,/"$/p' "$GATE")"
+      eval "$(sed -n '/^_NODE_LEAK_BUDGET_TITLE_SUFFIX=/p' "$GATE")"
+      eval "$(sed -n '/^_NODE_LEAK_SUITE_FILE=/p' "$GATE")"
+      eval "$(sed -n '/^_node_leak_lane_note() {/,/^}/p' "$GATE")"
+      eval "$(sed -n '/^_node_leak_lane_affirm() {/,/^}$/p' "$GATE")"
+      _node_leak_lane_affirm "$note" "$jsonf" >/dev/null 2>&1
+    )
+    rc=$?
+    printf '%s' "$rc"
+    rm -f "$note"
+  }
+  nll_syn_ok=1
+  # The happy path must be the ONLY one that affirms.
+  [ "$(nll_affirm_rc "$nll_syn_dir/happy.json")" = 0 ] || { nll_syn_ok=0; echo "  happy report did NOT affirm"; }
+  for _c in other_suite duplicate suite_absent extra broken missing; do
+    _f="$nll_syn_dir/$_c.json"
+    [ "$_c" = missing ] && _f="$nll_syn_dir/does-not-exist.json"
+    if [ "$(nll_affirm_rc "$_f")" = 0 ]; then
+      nll_syn_ok=0; echo "  adversarial report '$_c' was AFFIRMED (must fail closed)"
+    fi
+  done
+  if [ "$nll_syn_ok" -eq 1 ]; then
+    ok "1465-affirm-synthetic: the affirmation accepts ONLY the happy report — a same-titled test in another suite, a duplicate title, an absent leak suite, an unexpected extra, malformed JSON and a missing file all FAIL closed"
+  else
+    bad "1465-affirm-synthetic: the affirmation is not fail-closed on every adversarial synthetic report (see above)"
+  fi
+fi
+
 # 1465d. The note vocabulary is CLOSED, single-sourced, and DISTINCT. Every state the
 #        component or the hook can write must render its own line: prefix-and-no-UNKNOWN
 #        was not enough (roborev J4) — two states rendering the SAME text would have
@@ -4552,7 +4614,7 @@ else
   fi
 fi
 
-ASSERT_FLOOR=388
+ASSERT_FLOOR=389
 if [ "$PASS" -lt "$ASSERT_FLOOR" ]; then
   echo "FAIL - assert-floor: only $PASS assertions ran, floor is $ASSERT_FLOOR. Sections are being SKIPPED or dying silently (an extraction that broke, a subshell aborting under set -u), and 'failed: 0' over a shrunken subject set is exactly the vacuous pass this suite tests for."
   FAIL=$((FAIL + 1))
