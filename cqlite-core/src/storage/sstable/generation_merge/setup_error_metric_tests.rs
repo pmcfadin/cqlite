@@ -164,7 +164,7 @@ fn collect_data_dbs(dir: &std::path::Path, out: &mut Vec<std::path::PathBuf>) {
 /// mid-stream at `step()`, was forwarded through the MEASURED `JoinedStream`, and was
 /// recorded again. One failed cross-generation scan, two increments — the third
 /// instance of one root cause, now fixed at the source with
-/// `SSTableReader::open_unrecorded` rather than a third special case.
+/// `SSTableReader::open_with_reporting` rather than a third special case.
 ///
 /// # How the reopen is made to fail
 ///

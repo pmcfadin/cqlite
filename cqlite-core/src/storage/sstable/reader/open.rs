@@ -3,7 +3,7 @@
 //!
 //! Split out of `reader/mod.rs` per the campsite rule (#1116): that file is 1721
 //! lines against the ~800-line target, and issue #1704 needed to add a constructor
-//! here. Everything below is a VERBATIM move except [`SSTableReader::open_unrecorded`],
+//! here. Everything below is a VERBATIM move except [`SSTableReader::open_with_reporting`],
 //! which is new.
 //!
 //! # One recording boundary per failed operation
@@ -16,7 +16,7 @@
 //! `compaction::finalize_merge_async` already states for its own inner helpers
 //! ("this is an *unrecorded* inner helper ... recording here too would double-count").
 //!
-//! [`SSTableReader::open_unrecorded`] is the entry point for those inner steps.
+//! [`SSTableReader::open_with_reporting`] is the entry point for those inner steps.
 
 use std::path::Path;
 use std::sync::atomic::Ordering;

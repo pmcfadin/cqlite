@@ -124,7 +124,7 @@ async fn open_delta_scan_reader(
 /// ONE boundary counts a failed delta scan: this one. Every step it delegates to —
 /// locating `Data.db`, platform init, the reader open, and the whole
 /// stitch/parse/emit body — is an unrecorded inner step, which is why the open goes
-/// through [`SSTableReader::open_unrecorded`]. `record_result` counts on the `Err`
+/// through [`SSTableReader::open_with_reporting`]. `record_result` counts on the `Err`
 /// arm and returns the result UNCHANGED; the category comes from the classifier
 /// (`Error::obs_category`), never from here.
 async fn drive_delta_scan(

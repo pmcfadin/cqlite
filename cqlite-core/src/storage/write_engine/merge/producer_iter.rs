@@ -387,7 +387,7 @@ impl SSTableRowIteratorAdapter {
 
                 rt.block_on(async move {
                     let platform = Arc::new(Platform::new(&config).await?);
-                    // `open_unrecorded`, NOT `open` (issue #1704): this reopen is an
+                    // `open_with_reporting`, NOT the self-reporting default (issue #1704): this reopen is an
                     // INNER STEP. A failure here surfaces mid-stream at `step()` and
                     // is counted ONCE by the enclosing operation's seam — the measured
                     // `JoinedStream` on the cross-generation streaming read path, or
