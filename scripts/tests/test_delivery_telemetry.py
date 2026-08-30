@@ -11,6 +11,7 @@ Or via the gate:  scripts/agent-gate.sh --only delivery-telemetry
 """
 
 import contextlib
+import datetime as _datetime
 import importlib.util
 import io
 import json
@@ -1148,7 +1149,10 @@ class SliceDeliveryTests(unittest.TestCase):
                   "2026-02-31T00:00:00Z", "2026-13-01T00:00:00Z", "2025-02-29T00:00:00Z",
                   "2026-06-10T99:99:00Z", "2026-06-10T24:00:00Z",
                   "2026-06-10T00:00:00+99:99", "2026-00-10T00:00:00Z",
-                  "2026-06-32T00:00:00Z", "2026-06-10T00:60:00Z"):
+                  "2026-06-32T00:00:00Z", "2026-06-10T00:60:00Z",
+                  # round 14: Python \\d matches Unicode digits; [0-9] does not
+                  "\u0662\u0660\u0662\u0666-06-10T00:00:00Z",
+                  "2026-\u0660\u0666-10T00:00:00Z"):
             with self.subTest(value=v):
                 # the pattern is a SYNTAX rule; _is_rfc3339 is syntax AND calendar. They must
                 # agree on every value whose calendar is valid, and the tool may only be
@@ -1167,12 +1171,19 @@ class SliceDeliveryTests(unittest.TestCase):
                                     f"{v!r}: tool accepts but the PUBLISHED pattern rejects "
                                     f"— lint would accept a record the schema forbids")
                 elif by_pattern:
-                    # divergence permitted only here, and it must be a CALENDAR failure
+                    # Divergence permitted ONLY for a calendrically impossible DATE — the one
+                    # thing a regex provably cannot express. Asserted SPECIFICALLY, not as
+                    # "any parse failure": the looser form licensed a Unicode-digit value
+                    # (which also fails to parse) and so hid a SYNTAX divergence that WAS
+                    # expressible. Proven by constructing the date directly.
+                    y, mo, dy = int(v[0:4]), int(v[5:7]), int(v[8:10])
                     with self.assertRaises(ValueError,
-                                           msg=f"{v!r}: pattern accepts, tool refuses, but "
-                                               f"the value parses — an unexplained "
-                                               f"divergence, not the documented calendar one"):
-                        dt._parse_ts(v)
+                                           msg=f"{v!r}: the published pattern accepts it and "
+                                               f"the tool refuses it, but {y:04d}-{mo:02d}-"
+                                               f"{dy:02d} is a REAL date — so the divergence "
+                                               f"is not the documented calendar one and the "
+                                               f"pattern is wrong"):
+                        _datetime.date(y, mo, dy)
 
     def test_every_committed_timestamp_is_strict_rfc3339(self):
         """The tightening must not red the committed ledger — asserted, not assumed."""
@@ -1925,7 +1936,9 @@ class StandardValidatorSliceTests(unittest.TestCase):
                   "2026-02-31T00:00:00Z", "2026-13-01T00:00:00Z", "2025-02-29T00:00:00Z",
                   "2026-06-10T99:99:00Z", "2026-06-10T24:00:00Z",
                   "2026-06-10T00:00:00+99:99", "2026-00-10T00:00:00Z",
-                  "2026-06-32T00:00:00Z"):
+                  "2026-06-32T00:00:00Z",
+                  "\u0662\u0660\u0662\u0666-06-10T00:00:00Z",
+                  "2026-\u0660\u0666-10T00:00:00Z"):
             with self.subTest(value=v):
                 rec = dict(base)
                 rec["created_at"] = v
@@ -1939,13 +1952,15 @@ class StandardValidatorSliceTests(unittest.TestCase):
                     self.assertTrue(std_ok, f"{v!r}: lint accepts, standard validator "
                                             f"REJECTS — the schema forbids what lint writes")
                 elif std_ok:
-                    # permitted ONLY for a calendrically impossible instant, which a JSON
-                    # Schema pattern cannot express (issue #3550, documented in the schema)
+                    # permitted ONLY for a calendrically impossible DATE (see the pattern
+                    # parity test): a JSON Schema pattern cannot express leap-year rules
+                    y, mo, dy = int(v[0:4]), int(v[5:7]), int(v[8:10])
                     with self.assertRaises(ValueError,
-                                           msg=f"{v!r}: standard validator accepts and lint "
-                                               f"refuses, but the value parses — that is an "
-                                               f"undocumented divergence"):
-                        dt._parse_ts(v)
+                                           msg=f"{v!r}: the standard validator accepts it "
+                                               f"and lint refuses it, but {y:04d}-{mo:02d}-"
+                                               f"{dy:02d} is a REAL date — undocumented "
+                                               f"divergence"):
+                        _datetime.date(y, mo, dy)
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

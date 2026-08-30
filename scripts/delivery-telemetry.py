@@ -311,10 +311,15 @@ def load_schema(schema_path: Path) -> dict:
 # tool is legitimately stricter there. That asymmetry is IRREDUCIBLE, not a gap to close;
 # claiming full equivalence (as an earlier revision of this issue did) is what produced four
 # successive review rounds on this one subject.
+# [0-9] EVERYWHERE, never \d: in Python's `re` — which the jsonschema library uses for
+# `pattern` — `\d` matches any UNICODE decimal digit, so "٢٠٢٦-06-10T00:00:00Z" (Arabic-Indic
+# digits) satisfied the published pattern while `datetime.fromisoformat` rejected it. That is
+# a SYNTAX divergence, and unlike the calendar one below it IS expressible, so it is closed
+# rather than documented. [0-9] is exact ASCII; there is no further generalisation.
 _TIMESTAMP_PATTERN = (
-    r"^\d{4}-(0[1-9]|1[0-2])-(0[1-9]|[12]\d|3[01])"
-    r"T([01]\d|2[0-3]):[0-5]\d:[0-5]\d(\.\d+)?"
-    r"(Z|[+-]([01]\d|2[0-3]):[0-5]\d)(?![\s\S])")
+    r"^[0-9]{4}-(0[1-9]|1[0-2])-(0[1-9]|[12][0-9]|3[01])"
+    r"T([01][0-9]|2[0-3]):[0-5][0-9]:[0-5][0-9](\.[0-9]+)?"
+    r"(Z|[+-]([01][0-9]|2[0-3]):[0-5][0-9])(?![\s\S])")
 _RFC3339_RE = re.compile(_TIMESTAMP_PATTERN)
 
 
