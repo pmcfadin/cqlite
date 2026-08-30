@@ -6621,11 +6621,11 @@ run_binding_rust_tests() {
   local ffi_enabled="" node_enabled=""
   if ! ffi_enabled=$(_resolved_package_features cqlite-ffi-common ${ffi_feature_args[@]+"${ffi_feature_args[@]}"}); then
     _brt_derivation_fail "cqlite-ffi-common's enabled feature set" \
-      "'cargo tree -p cqlite-ffi-common' emitted no line for the package (a cargo failure or an offline registry)."
+      "'cargo tree -p cqlite-ffi-common' failed, produced no output, emitted no line for the package (a cargo failure or an offline registry), or its feature-extraction/normalisation pipeline failed. Enumerated rather than asserting ONE cause: the E1 fix gave that helper two further failure modes, and a message naming only the package-line case would send the reader to the wrong remedy (roborev F2's class)."
   fi
   if ! node_enabled=$(_resolved_package_features cqlite-node ${node_feature_args[@]+"${node_feature_args[@]}"}); then
     _brt_derivation_fail "cqlite-node's enabled feature set" \
-      "'cargo tree -p cqlite-node --features write-support' emitted no line for the package."
+      "'cargo tree -p cqlite-node --features write-support' failed, produced no output, emitted no line for the package, or its feature-extraction/normalisation pipeline failed (see the cqlite-ffi-common note above: three failure modes, none asserted)."
   fi
 
   # cqlite-ffi-common's integration targets. This package HAS them, so an empty result
@@ -6885,13 +6885,24 @@ EOF
       if ! check_no_unexpected_zero_tests "$name/cqlite-node" "$node_log" 2>>"$verdict_log"; then
         status=FAIL
       fi
-    else
-      # NOT a skipped check: zero is the DERIVED, correct answer for a cdylib with no
-      # tests/ directory. Stated affirmatively in the verdict log so a reader can tell
-      # "there was nothing to observe" from "the observation did not happen" — and
-      # check_no_unexpected_zero_tests is deliberately NOT called, because with `--lib`
-      # only it would have an EMPTY subject set and report OK having measured nothing.
+    elif [ "$node_targets_n" -eq 0 ]; then
+      # NOT a skipped check: zero DECLARED is the derived, correct answer for a cdylib with no
+      # tests/ directory. Stated affirmatively in the verdict log so a reader can tell "there
+      # was nothing to observe" from "the observation did not happen" — and
+      # check_no_unexpected_zero_tests is deliberately NOT called, because with `--lib` only it
+      # would have an EMPTY subject set and report OK having measured nothing.
       echo "$name/cqlite-node: 0 integration targets declared (DERIVED from cargo metadata) — nothing for the observation guard to judge, which is the correct answer for this package today, not a check that was skipped. The moment it declares one, the derived --test list executes it and both guards apply." >> "$verdict_log"
+    else
+      # DECLARED BUT NONE RUNNABLE — a DIFFERENT cause with a DIFFERENT remedy, and it used to
+      # be reported as the branch above (roborev round 5, F2). This is the WRONG-CAUSE variant
+      # my own round-4 sweep named and did not act on: the branch keyed on `node_expect_n == 0`
+      # while its message asserted `node_targets_n == 0`, so with targets declared but all
+      # excluded by unmet required-features the verdict log CONTRADICTED the census printed
+      # moments earlier and falsely promised that a future target would execute.
+      #
+      # RULE, now applied rather than merely observed: a branch whose message asserts a CAUSE
+      # must be reachable ONLY from that cause. Two conditions, two branches, two messages.
+      echo "$name/cqlite-node: $node_targets_n integration target(s) DECLARED but NONE runnable at this lane's feature set, so there is nothing for the observation guard to judge — and, unlike the zero-declared case, this means DECLARED COVERAGE IS NOT BEING EXECUTED HERE. cargo skips such a target SILENTLY (no banner at all), so no guard can see it; the census above declares the same gap. Skipped:$node_skip" >> "$verdict_log"
     fi
   else
     status=FAIL
