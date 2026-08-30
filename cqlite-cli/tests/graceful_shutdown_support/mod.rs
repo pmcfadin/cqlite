@@ -1298,14 +1298,14 @@ fn the_baselines_sit_just_above_the_measured_quiet_noise_floor() {
     // quiet host still yields `scale == 1`.
     assert!(
         BOOT_QUIET_BASELINE >= MEASURED_QUIET_T_BOOT,
-        "BOOT_QUIET_BASELINE {BOOT_QUIET_BASELINE:?} is below the slowest measured quiet \
-         t_boot {MEASURED_QUIET_T_BOOT:?} (the BINDING anchor), so even the fastest \
+        "BOOT_QUIET_BASELINE {BOOT_QUIET_BASELINE:?} is below the BINDING measured quiet \
+         t_boot {MEASURED_QUIET_T_BOOT:?} (the smallest observed), so even the fastest \
          observed quiet host would scale"
     );
     assert!(
         ACK_QUIET_BASELINE >= MEASURED_QUIET_T_ACK,
-        "ACK_QUIET_BASELINE {ACK_QUIET_BASELINE:?} is below the slowest measured quiet \
-         t_ack {MEASURED_QUIET_T_ACK:?} (the BINDING anchor), so even the fastest \
+        "ACK_QUIET_BASELINE {ACK_QUIET_BASELINE:?} is below the BINDING measured quiet \
+         t_ack {MEASURED_QUIET_T_ACK:?} (the smallest observed), so even the fastest \
          observed quiet host would scale"
     );
     // ...and not far above it, or the mechanism is INERT: `scale` is
