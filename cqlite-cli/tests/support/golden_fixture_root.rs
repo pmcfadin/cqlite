@@ -278,14 +278,18 @@ pub fn committed_fixture_dir(
 /// run labelled "NOT PRESENT", i.e. a failure wearing a skip's clothes — the exact
 /// shape this lane exists to prevent (CLAUDE.md: never let a dataset-dependent test
 /// pass on an empty dataset).
+#[derive(Clone, PartialEq, Eq, Debug)]
 pub enum CorpusMiss {
     /// Every candidate root ANSWERED, and none carries this table's `*-Data.db`.
     /// For a fetched-corpus case that is a LEGAL skip, declared in the census.
     Absent(String),
-    /// A candidate root could NOT answer: its keyspace directory, or a fixture
-    /// directory inside it, exists and cannot be read. "I could not tell" is not
-    /// "there is nothing there", so it is a FAILURE naming the root and the cause
-    /// (finding N4).
+    /// A candidate root could not be USED, so nothing it might have carried was
+    /// established. Two causes, and each is a FAILURE naming the root and the cause:
+    /// it could not ANSWER — its keyspace directory, or a fixture directory inside
+    /// it, exists and cannot be read, and "I could not tell" is not "there is nothing
+    /// there" (finding N4) — or `CQLITE_DATASETS_ROOT` is set to something that
+    /// answered and is not a corpus, and "it is a readable path" is not "it is a
+    /// corpus" (finding W1).
     Unusable(String),
 }
 
@@ -325,12 +329,42 @@ pub enum CorpusMiss {
 ///     candidate: a later root's answer cannot stand in for an unknown earlier
 ///     one, since the earlier root is the one the shared rule would have picked.
 ///
-/// The boundary is deliberate: `ENOENT` is an answer, not an absence of one. A
-/// `CQLITE_DATASETS_ROOT` pointing at a path that does not exist therefore still
-/// skips (nothing here can tell it from an unset one) — that whole-corpus
-/// preflight is the gate's `missing-fixtures` component (#2078) and #3104's
-/// territory, not this lane's. A value naming something that is not a directory is
-/// the same kind of answer, and skips for the same reason.
+/// # Readable is not the same question as VALID (issue #1491 review finding W1)
+///
+/// The paragraph above is about whether the filesystem could ANSWER. A separate
+/// question is whether the answer describes a CORPUS. `CQLITE_DATASETS_ROOT` used to
+/// be accepted on ANY successful answer — a regular file, a socket, a path that does
+/// not exist, or a directory with no `sstables/` subtree — because "the filesystem
+/// answered" was read as "the root is fine". The shared candidate list then drops or
+/// walks past such a value, so EVERY corpus-only case reported `NOT PRESENT` and
+/// passed while an explicitly configured corpus was silently contributing nothing.
+/// That is CLAUDE.md's "never let a dataset-dependent test pass on an empty dataset"
+/// at the root level: point the variable at a tarball, at a parent directory, or at a
+/// typo that happens to exist, and half the lane disappears from a green run.
+///
+/// So when the variable is SET and nonblank this lane requires a corpus: the value
+/// must be a directory whose `sstables/` subtree is a directory too, and anything
+/// else is [`CorpusMiss::Unusable`] naming the root and what was wrong with it.
+/// Nothing weaker is available to substitute for it — the checkout candidate is
+/// derived from a compile-time anchor, so an invalid env root cannot be "corrected"
+/// into a valid one at run time.
+///
+/// The three operator situations a corpus miss can come from are told apart in the
+/// message, because they call for three different actions ([`EnvCorpus`]):
+///
+///   * **not configured** — the variable is unset or blank, so no fetched corpus was
+///     asked for and only the checkout was searched. A legal skip;
+///   * **configured but unusable: `<why>`** — a corpus WAS asked for and the value is
+///     not one. A FAILURE;
+///   * **valid corpus, table absent** — the value is a corpus and this table is not
+///     in it. A legal skip.
+///
+/// Two boundaries stay where they were. A nonexistent path is still an ANSWER, but it
+/// is no longer waved through: the set/nonblank test tells it from an unset variable,
+/// so "nothing here can tell them apart" — the old reason for skipping — was simply
+/// untrue. And this is still a per-CASE check of ONE variable, not a whole-corpus
+/// preflight: whether the corpus carries the tables the run needs is the gate's
+/// `missing-fixtures` component (#2078) and #3104's territory.
 pub fn corpus_fixture_dir(
     keyspace: &str,
     table: &str,
@@ -346,50 +380,132 @@ pub fn corpus_fixture_dir(
     //
     // The shared resolver is deliberately left alone: other lanes depend on its
     // rule, and making it three-valued is #3104's territory.
-    env_datasets_root_answered(keyspace, table)?;
+    let configured = env_datasets_root_usable(keyspace, table)?;
     corpus_fixture_from(
         &super::datasets_root::sstables_root_candidates(),
         keyspace,
         table,
         checkout,
     )
+    // A verified absence is a legal skip, and WHICH legal skip it is decides what an
+    // operator should do about it — so the census line says whether a corpus was
+    // configured at all (finding W1).
+    .map_err(|miss| match miss {
+        CorpusMiss::Absent(why) => {
+            CorpusMiss::Absent(format!("{why} — {}", configured.describe_absence()))
+        }
+        unusable => unusable,
+    })
 }
 
-/// Did the filesystem ANSWER about `CQLITE_DATASETS_ROOT`?
+/// What `CQLITE_DATASETS_ROOT` was found to name, for the cases that are NOT a
+/// failure — the two legal-skip situations, kept apart because an operator acts
+/// differently on each (issue #1491 review finding W1).
+#[derive(Clone, PartialEq, Eq, Debug)]
+enum EnvCorpus {
+    /// Unset, or blank by the same test the shared candidate list applies: no fetched
+    /// corpus was asked for, so only the checkout's committed root was searched.
+    NotConfigured,
+    /// Set, and established as a corpus: the value is a directory and so is the
+    /// `sstables/` subtree the shared candidate list appends. Carries that subtree so
+    /// the diagnostic can name the root the table was verified absent from.
+    Corpus { sstables: PathBuf },
+}
+
+impl EnvCorpus {
+    /// Which legal-skip situation this is, appended to the absence message.
+    ///
+    /// The third situation — configured but not a corpus — never reaches here: it is
+    /// a [`CorpusMiss::Unusable`] failure, so it can only be described by
+    /// [`datasets_root_usable`].
+    fn describe_absence(&self) -> String {
+        let env = super::datasets_root::fixture_roots::DATASETS_ROOT_ENV;
+        match self {
+            EnvCorpus::NotConfigured => format!(
+                "not configured: {env} is unset or blank, so no fetched corpus was \
+                 searched — only the checkout's own committed sstables root"
+            ),
+            EnvCorpus::Corpus { sstables } => format!(
+                "valid corpus, table absent: {env} names a corpus ({} is a directory) \
+                 and it does not carry this table",
+                sstables.display()
+            ),
+        }
+    }
+}
+
+/// Is `CQLITE_DATASETS_ROOT` usable as a corpus, and if not, why not?
 ///
-/// Probes the env value itself, which is the exact path the shared resolver tests
-/// with `is_dir()` before it will contribute a candidate. Unset or blank is not a
-/// corpus at all; absent, or present as something that is not a directory, are
-/// ANSWERS and stay legal skips (see [`corpus_fixture_dir`]'s boundary); anything
-/// else means the value could not be classified, and a root that could not be
-/// classified has not been established to lack the table.
-fn env_datasets_root_answered(keyspace: &str, table: &str) -> Result<(), CorpusMiss> {
-    datasets_root_answered(
+/// Reads the variable and hands the raw value to [`datasets_root_usable`]; see
+/// [`corpus_fixture_dir`] for what "usable" requires and why an unusable value is a
+/// failure rather than a skip.
+fn env_datasets_root_usable(keyspace: &str, table: &str) -> Result<EnvCorpus, CorpusMiss> {
+    datasets_root_usable(
         std::env::var_os(super::datasets_root::fixture_roots::DATASETS_ROOT_ENV).as_deref(),
         keyspace,
         table,
     )
 }
 
-/// PURE form of [`env_datasets_root_answered`], parameterized on the raw value —
-/// the same seam the shared `fixture_roots::resolve_datasets_root_if_present` keeps,
-/// and for the same reason: a test that MUTATES the environment races every other
-/// test in the binary, since the environment is process-global.
-fn datasets_root_answered(
+/// PURE form of [`env_datasets_root_usable`], parameterized on the raw value — the
+/// same seam the shared `fixture_roots::resolve_datasets_root_if_present` keeps, and
+/// for the same reason: a test that MUTATES the environment races every other test in
+/// the binary, since the environment is process-global.
+///
+/// `Ok` in exactly the two legal-skip situations of [`EnvCorpus`]. Everything else is
+/// `Unusable`, including a value the filesystem could not describe at all — a root
+/// that could not be classified has not been established to lack the table.
+fn datasets_root_usable(
     raw: Option<&std::ffi::OsStr>,
     keyspace: &str,
     table: &str,
-) -> Result<(), CorpusMiss> {
-    let Some(raw) = raw.filter(|v| !v.is_empty()) else {
-        return Ok(());
+) -> Result<EnvCorpus, CorpusMiss> {
+    let env = super::datasets_root::fixture_roots::DATASETS_ROOT_ENV;
+    let unusable = |why: String| {
+        CorpusMiss::Unusable(format!(
+            "{keyspace}.{table}: configured but unusable: {why}. {env} is set, so a \
+             fetched corpus WAS asked for, and a value that is not a corpus cannot \
+             establish that this table is absent — so this is a failure and not a NOT \
+             PRESENT skip"
+        ))
     };
-    match fs_probe::presence(Path::new(raw)) {
-        Ok(_) => Ok(()),
-        Err(why) => Err(CorpusMiss::Unusable(format!(
-            "{keyspace}.{table}: {why}. That is the value of {}, so it is a candidate \
-             corpus root this lane could not classify — not a root that verifiably \
-             lacks the table, and the shared candidate list drops it silently",
-            super::datasets_root::fixture_roots::DATASETS_ROOT_ENV
+    // Blank exactly as the shared candidate list judges it (a trim-empty value there
+    // contributes no candidate, and a non-UTF-8 one counts as nonblank). The two must
+    // agree: if this said "configured" where the shared list said "not configured",
+    // the lane would fail a run whose corpus really was unset.
+    let Some(raw) = raw.filter(|v| v.to_str().map(|t| !t.trim().is_empty()).unwrap_or(true)) else {
+        return Ok(EnvCorpus::NotConfigured);
+    };
+    let root = Path::new(raw);
+    match fs_probe::presence(root).map_err(&unusable)? {
+        fs_probe::Presence::Dir => {}
+        fs_probe::Presence::Absent => {
+            return Err(unusable(format!(
+                "{env}={} names a path that does not exist",
+                root.display()
+            )))
+        }
+        other => {
+            return Err(unusable(format!(
+                "{env}={} is {}, not a directory",
+                root.display(),
+                other.describe()
+            )))
+        }
+    }
+    // The subtree the shared candidate list appends. Its LISTABILITY is not asked here
+    // — that is answered per keyspace, three-valued, by `table_dirs_in`; what is
+    // asked is whether the corpus layout is there at all.
+    let sstables = root.join("sstables");
+    match fs_probe::presence(&sstables).map_err(&unusable)? {
+        fs_probe::Presence::Dir => Ok(EnvCorpus::Corpus { sstables }),
+        other => Err(unusable(format!(
+            "{env}={} is a directory, but {} is {} — the layout this lane reads is \
+             <root>/sstables/<keyspace>/<table>-<uuid>/*-Data.db (fetch: bash \
+             test-data/scripts/fetch-datasets.sh)",
+            root.display(),
+            sstables.display(),
+            other.describe()
         ))),
     }
 }
@@ -862,20 +978,8 @@ mod tests {
         let file = tmp.path().join("f");
         write(&file, b"not a directory");
 
-        for (label, raw) in [
-            ("unset", None),
-            ("blank", Some(std::ffi::OsString::from(""))),
-            ("absent", Some(tmp.path().join("gone").into_os_string())),
-            ("not a directory", Some(file.clone().into_os_string())),
-        ] {
-            assert!(
-                datasets_root_answered(raw.as_deref(), "ks", "t").is_ok(),
-                "{label} is an ANSWER, so it stays a legal skip"
-            );
-        }
-
         let through = file.join("inside").into_os_string();
-        match datasets_root_answered(Some(&through), "ks", "t") {
+        match datasets_root_usable(Some(&through), "ks", "t") {
             Err(CorpusMiss::Unusable(why)) => assert!(
                 why.contains("ks.t")
                     && why.contains("CQLITE_DATASETS_ROOT")
@@ -883,8 +987,193 @@ mod tests {
                 "the failure must name the table, the variable and the cause: {why}"
             ),
             Err(CorpusMiss::Absent(why)) => panic!("not a verified absence: {why}"),
-            Ok(()) => panic!("a value that could not be classified cannot be waved through"),
+            Ok(state) => panic!(
+                "a value that could not be classified cannot be waved \
+                                through as {state:?}"
+            ),
         }
+    }
+
+    /// W1: a value that IS classifiable and is not a corpus is a FAILURE too.
+    ///
+    /// Every one of these answered — a regular file, a nonexistent path, a directory
+    /// with no `sstables/`, an `sstables` that is a file — and every one was accepted,
+    /// because the check asked only whether the filesystem could answer. The shared
+    /// candidate list then drops the value (not a directory) or walks past it (no
+    /// `sstables/<keyspace>`), so every corpus-only case in the lane reported
+    /// `NOT PRESENT` and passed with an explicitly configured corpus contributing
+    /// nothing. "It is a readable path" is not "it is a corpus".
+    #[test]
+    fn a_configured_root_that_is_not_a_corpus_is_unusable_not_a_skip() {
+        let tmp = tempfile::TempDir::new().expect("tempdir");
+        let tarball = tmp.path().join("datasets.tar.gz");
+        write(&tarball, b"not a corpus");
+        let no_sstables = tmp.path().join("parent");
+        write(&no_sstables.join("some-other-tree/x"), b"x");
+        let sstables_is_a_file = tmp.path().join("weird");
+        write(&sstables_is_a_file.join("sstables"), b"not a directory");
+
+        for (label, root, expected) in [
+            (
+                "a regular file",
+                tarball,
+                "is a regular file, not a directory",
+            ),
+            (
+                "a path that does not exist",
+                tmp.path().join("typo"),
+                "names a path that does not exist",
+            ),
+            ("a directory with no sstables/", no_sstables, "is absent"),
+            (
+                "an sstables/ that is a file",
+                sstables_is_a_file,
+                "is a regular file",
+            ),
+        ] {
+            let raw = root.clone().into_os_string();
+            match datasets_root_usable(Some(&raw), "ks", "t") {
+                Err(CorpusMiss::Unusable(why)) => {
+                    assert!(
+                        why.contains("configured but unusable")
+                            && why.contains("ks.t")
+                            && why.contains("CQLITE_DATASETS_ROOT")
+                            && why.contains(&root.display().to_string())
+                            && why.contains(expected),
+                        "{label}: the failure must name the table, the variable, the \
+                         root and what was wrong with it: {why}"
+                    );
+                    assert!(
+                        why.contains("NOT PRESENT"),
+                        "{label}: and must say why it is not a skip: {why}"
+                    );
+                }
+                Err(CorpusMiss::Absent(why)) => {
+                    panic!("{label}: a configured non-corpus is not a verified absence: {why}")
+                }
+                Ok(state) => panic!("{label}: must not be accepted as {state:?}"),
+            }
+        }
+    }
+
+    /// The other side of W1: the two situations that are NOT failures, and each says
+    /// which one it is.
+    ///
+    /// An unset or blank variable asked for no corpus, and a real corpus that does not
+    /// carry the table is the tier's legal skip. Blankness is judged by the SAME test
+    /// the shared candidate list applies — a trim-empty value contributes no candidate
+    /// there, so calling it "configured" here would fail a run whose corpus really was
+    /// unset.
+    #[test]
+    fn an_unconfigured_root_and_a_corpus_without_the_table_are_the_two_legal_skips() {
+        let tmp = tempfile::TempDir::new().expect("tempdir");
+        for (label, raw) in [
+            ("unset", None),
+            ("blank", Some(std::ffi::OsString::from(""))),
+            ("whitespace only", Some(std::ffi::OsString::from("  \t "))),
+        ] {
+            assert_eq!(
+                datasets_root_usable(raw.as_deref(), "ks", "t").ok(),
+                Some(EnvCorpus::NotConfigured),
+                "{label} asked for no fetched corpus, so the case may legally skip"
+            );
+        }
+
+        let corpus = tmp.path().join("corpus");
+        std::fs::create_dir_all(corpus.join("sstables/other_ks")).expect("mkdir");
+        let raw = corpus.clone().into_os_string();
+        assert_eq!(
+            datasets_root_usable(Some(&raw), "ks", "t").ok(),
+            Some(EnvCorpus::Corpus {
+                sstables: corpus.join("sstables")
+            }),
+            "a real corpus missing this table is usable — the absence is verified against it"
+        );
+    }
+
+    /// And the three situations must be tellable apart in the census line, since that
+    /// line is what an operator acts on: "not configured", "configured but unusable"
+    /// and "valid corpus, table absent" call for three different actions.
+    #[test]
+    fn the_three_corpus_situations_are_distinguishable_in_the_diagnostic() {
+        let tmp = tempfile::TempDir::new().expect("tempdir");
+        let corpus = tmp.path().join("corpus");
+        std::fs::create_dir_all(corpus.join("sstables")).expect("mkdir");
+
+        let unconfigured = EnvCorpus::NotConfigured.describe_absence();
+        let absent_from_corpus = EnvCorpus::Corpus {
+            sstables: corpus.join("sstables"),
+        }
+        .describe_absence();
+        let raw = tmp.path().join("typo").into_os_string();
+        let unusable = match datasets_root_usable(Some(&raw), "ks", "t") {
+            Err(CorpusMiss::Unusable(why)) => why,
+            other => panic!("a configured non-corpus is a failure: {other:?}"),
+        };
+
+        assert!(
+            unconfigured.contains("not configured"),
+            "the unset situation must say so: {unconfigured}"
+        );
+        assert!(
+            absent_from_corpus.contains("valid corpus, table absent")
+                && absent_from_corpus.contains(&corpus.join("sstables").display().to_string()),
+            "the absent-from-a-real-corpus situation must say so, and name the root: \
+             {absent_from_corpus}"
+        );
+        assert!(
+            unusable.contains("configured but unusable"),
+            "the unusable situation must say so: {unusable}"
+        );
+        let phrases = [
+            "not configured",
+            "configured but unusable",
+            "valid corpus, table absent",
+        ];
+        for (label, message) in [
+            ("unconfigured", &unconfigured),
+            ("absent from a corpus", &absent_from_corpus),
+            ("unusable", &unusable),
+        ] {
+            let hits: Vec<&str> = phrases
+                .iter()
+                .copied()
+                .filter(|p| message.contains(p))
+                .collect();
+            assert_eq!(
+                hits.len(),
+                1,
+                "{label}: exactly one situation may be claimed, or a reader cannot tell \
+                 which it is: {hits:?} in {message}"
+            );
+        }
+    }
+
+    /// The end-to-end shape of W1 through the walk: an unusable configured root fails
+    /// the case BEFORE any candidate is consulted, so a corpus-only case cannot skip
+    /// on an absence the invalid root never established.
+    #[test]
+    fn an_unusable_configured_root_fails_before_the_candidate_walk() {
+        let tmp = tempfile::TempDir::new().expect("tempdir");
+        let file = tmp.path().join("datasets.tar.gz");
+        write(&file, b"not a corpus");
+        // The walk itself would have SUCCEEDED from a second root holding the table,
+        // so the failure is attributable to the configured root and to nothing else.
+        let good = tmp.path().join("good");
+        write(&good.join("ks/t-abc/nb-1-big-Data.db"), b"x");
+        let raw = file.clone().into_os_string();
+        match datasets_root_usable(Some(&raw), "ks", "t") {
+            Err(CorpusMiss::Unusable(_)) => {}
+            other => panic!("an unusable configured root must fail: {other:?}"),
+        }
+        let fixture = corpus_fixture_from(&[good.clone()], "ks", "t", tmp.path()).unwrap_or_else(
+            |e| match e {
+                CorpusMiss::Absent(why) | CorpusMiss::Unusable(why) => {
+                    panic!("the candidate walk on its own resolves: {why}")
+                }
+            },
+        );
+        assert_eq!(fixture.dir, good.join("ks").join("t-abc"));
     }
 
     /// When no candidate root carries the table at all, the verdict is the legal
