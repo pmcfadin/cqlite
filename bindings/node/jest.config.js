@@ -20,11 +20,14 @@
  *     (`@jest/core/build/runJest.js:322` for handle collection,
  *     `testSchedulerHelper.js:29` for the runInBand implication). Declaring it in
  *     a `projects[]` entry resolves to `projectConfig.detectOpenHandles = true`
- *     and `globalConfig.detectOpenHandles = false`, i.e. it does NOTHING.
- *     Verified by introspecting `readConfigs()` on this very file. It is
- *     therefore passed as a CLI flag by the `test:leaks` script instead, which is
- *     the only invocation where it is live — a bare `npm test` does NOT enable
- *     it.
+ *     and `globalConfig.detectOpenHandles = false`, i.e. it does NOTHING —
+ *     verified by introspecting `readConfigs()` on this very file. It is not
+ *     passed at the invocation either: it prints a report and exits 0 (no
+ *     enforcement), its baseline on this lane is one `CustomGC` handle from
+ *     loading the napi addon, and an outstanding handle makes jest HANG rather
+ *     than fail, which in a gate component is worse than no signal. See the
+ *     header of `__test__/leak-paths.test.js` for the four measurements and for
+ *     the ad-hoc debugging recipe that keeps it available to a human.
  *   * `detectLeaks` is deliberately absent. (It IS honoured per-project —
  *     `jest-runner/build/runTest.js:261` reads `projectConfig.detectLeaks` and
  *     `@jest/core/build/TestScheduler.js:138` surfaces the verdict — so it did

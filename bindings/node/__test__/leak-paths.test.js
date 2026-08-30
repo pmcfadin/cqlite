@@ -39,20 +39,30 @@
  * enabled anywhere for this file — see the jest.config.js header for the full
  * ruling.
  *
- * WHERE `--detectOpenHandles` IS LIVE, AND WHERE IT IS NOT (measured, jest
- * 29.7.0): it is a GLOBAL-config option, so it can only be enabled at the
- * invocation. `npm run test:leaks` passes it (with `--selectProjects leaks`);
- * a bare `npm test` / `npx jest leak-paths` does NOT, and reports no handles.
- * It is worth having on the dedicated invocation because an abandoned iterator
- * whose `return()`/`close()` never ran can leave a libuv handle behind. Note what
- * it is: a REPORT printed after the run ("Jest has detected the following N open
- * handles"), not an assertion — it does not fail the lane (exit code 0), so it is
- * a diagnostic for a human, and the budgets below are what actually gate.
- * BASELINE, so the next reader is not misled: this lane always reports exactly
- * ONE handle, `CustomGC`, attributed to `require`-ing the napi addon. It is
- * napi-rs's process-global GC integration, appears for ANY file that loads the
- * module, and is NOT produced by the paths under test. The actionable signal is a
- * SECOND handle, or a handle attributed to a stream/iterator frame.
+ * AND WHY `--detectOpenHandles` IS NOT USED EITHER (issue #1465 round 2 — it WAS
+ * wired on this lane's invocation for one round, then removed; do not re-add it
+ * without answering these four measurements):
+ *   1. It has NO ENFORCEMENT. It prints a report after the run and exits 0, so it
+ *      can only work by a human reading a gate-component log on a PASS. Nobody
+ *      reads a PASS log.
+ *   2. Its baseline here is NOT zero: this lane always reported exactly one
+ *      handle, `CustomGC`, attributed to `require`-ing the napi addon (napi-rs's
+ *      process-global GC integration, present for ANY file that loads the
+ *      module). So the "signal" was a human noticing a 2 where a 1 is normal.
+ *   3. It carries a HANG hazard, observed: with a handle outstanding jest waits
+ *      on it rather than failing, so a planted uncleared timer turned the run into
+ *      a 10-minute timeout kill instead of a red. In a gate component that is a
+ *      hung gate, not a failure — strictly worse than no signal.
+ *   4. The enforceable in-process alternative is VACUOUS on these paths:
+ *      `process.getActiveResourcesInfo()` reports `[]` before AND after 300
+ *      abandoned iterators and 300 rejections, and `[]` right after loading the
+ *      addon, while correctly reporting `["Timeout"]` for a planted
+ *      `setInterval`. It is live in general and blind to exactly the
+ *      napi/Tokio handle class this path could leak, so asserting on it would
+ *      measure nothing while looking like a guard.
+ * It remains useful AD HOC for a human chasing a suspected handle leak:
+ *   npx jest leak-paths --detectOpenHandles      # expect the 1 CustomGC baseline
+ * That is a debugging recipe, deliberately not part of any lane.
  *
  * WHAT IS ASSERTED (and what is deliberately NOT): the growth of
  * `heapUsed + external` across N iterations must stay under a documented budget.
