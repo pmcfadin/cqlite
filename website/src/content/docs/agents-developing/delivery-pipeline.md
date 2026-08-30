@@ -126,7 +126,8 @@ roborev pass actually ran on. Three mechanical rules keep the merge honest:
 
 - **Pre-merge SHA + gate-of-record assertion (#2456/#2668/#3465, scripted hard precondition).**
   Immediately before arming `gh pr merge --auto`, the closer does `git push`, then runs
-  `scripts/flow/premerge-assert.sh <pr> <certified-sha> <gate-summary-file>` — which asserts the PR is
+  `scripts/flow/premerge-assert.sh <pr> <certified-sha> <gate-of-record-summary> [<delta-summary>]` —
+  which asserts the PR is
   OPEN and its `headRefOid` **equals the locally-certified tip**, exiting non-zero (and printing a
   loud refusal) on a moved head, a closed/merged PR, or a gh failure.
   **The third argument is REQUIRED (#3465), and it closes TWO distinct escapes with one mechanism.**
@@ -153,7 +154,24 @@ roborev pass actually ran on. Three mechanical rules keep the merge honest:
   the summary came from a genuine gate rather than a hand-written file — a hostile invoker is out of
   the threat model, since whoever runs the script controls the process. What it closes is **accident
   and drift**, which is the observed failure mode. `dirty:` is reported in the success line, not
-  enforced. The closer **refuses to merge on any
+  enforced (failing on it is proposed separately in #3648).
+  **The OPTIONAL fourth argument is the only way a `--delta` re-cert can certify a merge.** #1892
+  *mandates* `--delta` — "never a repeat full gate" — for a test/docs-only diff on top of a full PASS
+  at anchor `X`, and mandates that the PR record BOTH blocks, so a 3-arg-only guard red on correct,
+  doctrine-mandated input: the guard agents learn to waive. With four arguments the third is the
+  ANCHOR's full PASS (its sha need NOT be the certified sha) and the fourth is exactly one
+  `==== AGENT-GATE DELTA SUMMARY ====` block carrying `MODE: delta` (asserted affirmatively — the
+  inverse of the full block's `MODE:` belt), `RESULT: PASS`, `tree-integrity: PASS`, a `delta-anchor:`
+  naming exactly that anchor (an `(UNRESOLVED)` anchor refuses), and its OWN `commit:`/`tree-start:`
+  at the certified sha. A block carrying `nested-under:` (#2874) is refused in either shape: a nested
+  sub-gate runs at the SAME tree, so the sha binding provably cannot distinguish it.
+  **And what `PREMERGE: OK` does NOT prove (#3650), which the success path states itself on a
+  `PREMERGE: SCOPE` line:** it proves the diff is unchanged since certification and that a full gate
+  PASSed on THAT EXACT TREE — not that the change was certified against the `main` it will join. A
+  squash-merge composes the diff with main's CURRENT tip, so for any PR whose base is behind main the
+  certified tree and the merged tree are different objects (measured on #3358/PR #3362). A gate on the
+  MERGE RESULT is #3650; it is deliberately not implemented here, and neither is a staleness bound.
+  Report a pass as "gate of record verified at `<sha>`", never "certified against main". The closer **refuses to merge on any
   non-zero exit** (fail closed). It also re-reads issue/PR comments for a fresh `HOLD:` order in the
   same pre-merge pass. Motivated by the 2026-07-14 stale-merge escape on
   #2299/PR #2421: the closer certified a rebased-and-fixed tip locally but never pushed it, so
