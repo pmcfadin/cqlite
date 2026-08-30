@@ -901,6 +901,55 @@ class SliceDeliveryTests(unittest.TestCase):
                 self.assertIn("issue_url", str(cm.exception))
                 self.assertFalse(ledger.exists() and ledger.read_text().strip())
 
+    def test_record_refuses_an_issue_url_that_names_a_different_issue(self):
+        """The guard compares issue_url against the PR's closing refs, so a well-formed URL
+        naming ANOTHER issue never matches — silently disabling the guard and recording a
+        completed delivery as a slice. It is the likeliest --from-json copy/paste error, and
+        it is indistinguishable from a malformed URL in effect, so it must be bound to
+        --issue rather than merely well-formed."""
+        with tempfile.TemporaryDirectory() as d:
+            tmp = Path(d)
+            ledger = tmp / "ledger.jsonl"
+            with self.assertRaises(SystemExit) as cm:
+                dt.main(self._rec_argv(
+                    ledger, self._ghfields(
+                        tmp, None, closes_issues=[_U],
+                        issue_url="https://github.com/pmcfadin/cqlite/issues/9999"),
+                    "--slice"))
+            msg = str(cm.exception)
+            self.assertIn("identifies issue #9999", msg)
+            self.assertIn("--issue is 3393", msg)
+            self.assertFalse(ledger.exists() and ledger.read_text().strip())
+
+    def test_record_refuses_non_canonical_issue_urls_on_either_side(self):
+        """An unrecognised URL never matches, so it disables the guard rather than failing
+        it. Both operands must be canonical GitHub issue URLs."""
+        bad = ("https://github.com/pmcfadin/cqlite/pull/3393",      # a PR, not an issue
+               "https://example.com/pmcfadin/cqlite/issues/3393",   # wrong host
+               "http://github.com/pmcfadin/cqlite/issues/3393",     # not https
+               "https://github.com/cqlite/issues/3393",             # missing owner segment
+               "https://github.com/pmcfadin/cqlite/issues/",        # no number
+               "https://github.com/pmcfadin/cqlite/issues/3393#c1", # trailing fragment
+               "3393")
+        for u in bad:
+            with self.subTest(side="issue_url", url=u), tempfile.TemporaryDirectory() as d:
+                tmp = Path(d)
+                ledger = tmp / "ledger.jsonl"
+                with self.assertRaises(SystemExit) as cm:
+                    dt.main(self._rec_argv(
+                        ledger, self._ghfields(tmp, None, closes_issues=[_U], issue_url=u),
+                        "--slice"))
+                self.assertIn("issue_url", str(cm.exception))
+                self.assertFalse(ledger.exists() and ledger.read_text().strip())
+            with self.subTest(side="closes_issues", url=u), tempfile.TemporaryDirectory() as d:
+                tmp = Path(d)
+                ledger = tmp / "ledger.jsonl"
+                with self.assertRaises(SystemExit) as cm:
+                    dt.main(self._rec_argv(
+                        ledger, self._ghfields(tmp, None, closes_issues=[u]), "--slice"))
+                self.assertIn("closes_issues", str(cm.exception))
+                self.assertFalse(ledger.exists() and ledger.read_text().strip())
+
     def test_window_guard_ignores_an_unrelated_closing_reference(self):
         """A PR closing some OTHER issue is not evidence about this one."""
         with tempfile.TemporaryDirectory() as d:

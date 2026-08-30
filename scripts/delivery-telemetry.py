@@ -339,6 +339,23 @@ def _require_full_timestamp(value: str, field: str) -> None:
                          f"parses but cannot be differenced against one that has an offset)")
 
 
+_ISSUE_URL_RE = re.compile(r"^https://github\.com/[^/\s]+/[^/\s]+/issues/(\d+)$")
+
+
+def _issue_url_number(value: str):
+    """Return the issue number a canonical GitHub issue URL identifies, else None.
+
+    The window guard (issue #3550) compares this issue's URL against the PR's closing
+    references. A non-empty STRING is not enough for either side: an unrecognised or
+    mismatched URL simply never matches, which silently disables the guard and records a
+    completed delivery as a slice — the same shape as every other defect on this seam, one
+    level up. So both sides must be recognisable AND the left side must identify the issue
+    actually being recorded.
+    """
+    m = _ISSUE_URL_RE.match(value.strip())
+    return int(m.group(1)) if m else None
+
+
 def _assert_never_closed(gh_fields: dict, issue: int) -> None:
     """Raise SystemExit unless the issue has provably NEVER been closed (issue #3550).
 
@@ -637,6 +654,12 @@ def build_record(args, gh_fields: dict) -> dict:
                     f"error: 'closes_issues' must contain issue URLs, got {url!r} "
                     f"({type(url).__name__}) — the raw `gh` shape [{{\"url\": ...}}] is a "
                     f"list of objects and must be reduced to [url] (issue #3550)")
+            if _issue_url_number(url) is None:
+                raise SystemExit(
+                    f"error: 'closes_issues' entry {url!r} is not a canonical GitHub issue "
+                    f"URL (https://github.com/<owner>/<repo>/issues/<n>) — an unrecognised "
+                    f"URL would never match and would silently disable the guard, recording "
+                    f"a completed delivery as a slice (issue #3550)")
         # Compared by URL, never by NUMBER: an issue number is REPOSITORY-SCOPED, so a PR
         # closing other-repo#<N> would collide with this repo's #<N> and wrongly refuse a
         # genuine slice. The url is GitHub's own global identity.
@@ -650,6 +673,21 @@ def build_record(args, gh_fields: dict) -> dict:
             raise SystemExit(
                 f"error: 'issue_url' must be a non-empty string, got {issue_url!r} "
                 f"({type(issue_url).__name__}) (issue #3550)")
+        url_issue = _issue_url_number(issue_url)
+        if url_issue is None:
+            raise SystemExit(
+                f"error: 'issue_url' {issue_url!r} is not a canonical GitHub issue URL "
+                f"(https://github.com/<owner>/<repo>/issues/<n>) — an unrecognised URL never "
+                f"matches, which silently disables the guard rather than failing it "
+                f"(issue #3550)")
+        # BOUND to --issue: a well-formed URL naming a DIFFERENT issue is the same silent
+        # failure as a malformed one, and it is the likeliest --from-json copy/paste error.
+        if url_issue != args.issue:
+            raise SystemExit(
+                f"error: 'issue_url' identifies issue #{url_issue} but --issue is "
+                f"{args.issue} ({issue_url!r}) — the guard compares this URL against the PR's "
+                f"closing references, so a mismatched one would never match and would record "
+                f"a completed delivery as a slice (issue #3550)")
         if issue_url in closes:
             raise SystemExit(
                 f"error: PR #{args.pr} declares it CLOSES {issue_url}, so this is a "
