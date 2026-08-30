@@ -1886,3 +1886,174 @@ point of verifying the stage set against reality instead of trusting the census.
   about the shipped constants.
 * `RUSTFLAGS="-D warnings" cargo clippy -p cqlite-cli --features write-support --tests`: clean.
 * Every `.rs` in the change under the 1500-line test threshold (largest: `budgets.rs` 1330).
+
+## Round 15 — roborev job 255: three findings, NONE of them a live defect
+
+**First round in eleven with no live defect in the findings.** A latent guard hole (a census defeatable
+by a stage that never finishes), a wrong-cause diagnostic on two error paths, and a stale claim D6c had
+already corrected but whose correction was never propagated. The fixes are deliberately proportionate:
+nothing was refactored.
+
+### Finding 1 — the wait census could be defeated by a stage that is never `finish`ed (`budgets.rs:543`)
+
+`WaitCensus` was verified against `TestDeadline::completed_stages()` — the stages that had `finish()`ed.
+A stage that is OPENED, granted deadline-backed waits, and then dropped without finishing was therefore
+invisible to the check, so the aggregate floor could again be asserted against an undercounted base:
+**the fifth instance in this change of a guard that does not cover the case it is named for** (three
+anchor instances, two floor ones, now this). The class has been closed the same way every time — at the
+point the thing being counted comes into existence, not where it reports.
+
+* `TestDeadline` gains `opened: RefCell<Vec<&'static str>>`, pushed by `stage()`. A stage cannot draw on
+  the deadline without being opened, so the record is complete by construction.
+* Completion TIMINGS stay in `stages` — separately, because a duration only exists once a stage ends.
+* `completed_stages()` → `opened_stages()`, plus `unfinished_stages()` (positional, so a name opened
+  twice and finished once reports one unfinished occurrence). The census failure now prints an
+  `of those:` line naming any opened-and-unfinished stage, which separates "the census is wrong" from
+  "the test returned mid-stage" without letting the latter hide the stage.
+* New test: `the_stage_census_check_rejects_an_extra_stage_that_never_finished`.
+
+Residual, unchanged and restated: a wait added INSIDE an already-declared stage changes `waits` and
+nothing detects it. What is derived is the stage SET; the per-stage counts are declared.
+
+### Finding 2 — a reader's / collector's `Err` was discarded, so a failed read was reported as EOF (`transcript.rs:350`, `mod.rs:494`)
+
+Two sites, one shape: the terminal result of a read was thrown away, so a genuine I/O failure ended a
+reader exactly as EOF does.
+
+**The honest scope, stated because overstating it would be the more comfortable option.** Neither site
+is a false pass. The awaited transcript line is absent whether a reader hit EOF or failed; and a
+truncated read-side buffer would most likely fail loudly at the JSON parse. What is fixed is **which
+cause the failure names** — a wrong-cause diagnostic, and it is fixed as one.
+
+* `transcript.rs`: reader threads did `let Ok(line) = line else { break }`, and the wait then said in as
+  many words that "the child's stdout AND stderr both reached EOF" — a cause the measurement had not
+  established. Terminal results are now recorded in the ONE store beside the records and the
+  open-reader count (`read_failures`), and the end-of-readers verdict is chosen from them by a single
+  helper, `ended()`, called from both closed-pipe branches. New variant `WaitEnd::ReaderFailed`, whose
+  message says it is a statement about the pipe and NOT about the child. `DeadlineReached` also carries
+  the note when a reader failed while its sibling stayed open, because "more output was still possible"
+  is then only true of the surviving pipe. A variant rather than a note on `PipesClosed`: that variant's
+  text asserts EOF as a fact, so the fix is to make the EOF claim unreachable from a failed read.
+* `mod.rs`: `collect_to_end` did `let _ = reader.read_to_end(&mut buf)` and then DELIVERED `buf`, so a
+  partial read was presented as the whole stream and stage (e) would have parsed its rows out of it. A
+  failing collector now records the error plus how much it had read and delivers NOTHING; `look()`
+  checks failures FIRST, so a failed read can never be reported through a success variant, nor blamed on
+  the deadline, nor on a collector merely ending. New variant `CollectEnd::ReadFailed`.
+* New tests: `a_reader_that_ends_in_an_io_error_is_not_reported_as_eof`,
+  `a_read_side_collector_that_fails_mid_stream_is_reported_as_a_read_failure` (run against a LIVE
+  deadline, so it also pins that a read failure is not reported as a timeout).
+
+### Finding 3 — D6c's correction was left UN-PROPAGATED (`graceful_shutdown_tests.rs:40`)
+
+**This is the part worth remembering.** D6c corrected the floor claim in round 13: one absolute deadline
+cannot give a later wait a fresh allowance, so "no wait can fire sooner than the 60s bound it replaced"
+holds only for a stage running against a deadline earlier stages have not consumed. The correction
+landed in `budgets.rs`'s test name and messages and in design.md — and then stopped. Four other copies
+of the un-qualified claim survived two further rounds, including the module doc of the very file the
+oracle is about. **A design correction that does not reach every copy of the claim is how the original
+defect survives**: the next reader reaches for the nearest statement, and the nearest statement was
+still the false one.
+
+`grep -rn` census over the tests AND the OpenSpec docs, and what happened to each:
+
+| site | claim | action |
+|---|---|---|
+| `graceful_shutdown_tests.rs:41` | "Any single stage may consume the whole deadline, so no wait here can fire sooner than the 60s bound it replaced" | QUALIFIED — the reported site; now states what holds (in isolation), what does not (a fresh 60s after consumption), and what was bought (a bounded total) |
+| `budgets.rs:956` | `any_single_stage_may_consume_the_whole_deadline` "the property that makes the floor invariant above **unconditional**" | QUALIFIED — it makes it hold IN ISOLATION; what holds unconditionally is the arithmetic (nothing is ever deducted for another stage's sake) |
+| `spec.md:109/111/117` | Requirement title "No wait is tighter than the bound it replaced" + its SHALL sentence + the per-wait bullet | QUALIFIED — retitled "No wait, IN ISOLATION, …"; the qualifier and the non-holding property are now normative, and the aggregate bullet updated to the round-14 census derivation with EQUALITY |
+| `spec.md:134` | round-8 withdrawal: "the invariant holds unconditionally and trivially, which is strictly stronger" | WITHDRAWN IN TURN, in place, with the reason |
+| `design.md:279` | D6a bullet: "holds **unconditionally and trivially**" | STRUCK THROUGH with a pointer to D6c, which falsifies it |
+| `tasks.md:743-744` | round-9 "properties that survive" table | DATED as the superseded round-9 record it is (its bases, 180s/480s, are two rounds stale) — earlier rounds' numbers are records, not claims |
+
+Left alone deliberately: every other `tasks.md` occurrence is inside a dated round record or a RED-plant
+transcript, where the un-qualified wording is what was true (or what a plant produced) at the time.
+
+### RED verification — two committed plants, throwaway worktree, all three fixes
+
+`git worktree add --detach /data/plant-3515-r15 8189c0e61`; each plant committed **inside that worktree
+only** (pruned afterwards — `git worktree list` clean; the lane branch never carried either). **Test
+code only** — no `src/`, no `Cargo.*`, no product plant.
+
+**Plant 1 (finding 1) — key the stage record on `finish()` again**, i.e. the pre-fix behaviour, committed
+as `37688b777`:
+
+```diff
+     pub fn stage(&self, name: &'static str) -> Stage<'_> {
+-        self.opened.borrow_mut().push(name);
+         Stage {
+     pub fn finish(self) -> Duration {
+         let took = self.spent();
++        self.deadline.opened.borrow_mut().push(self.name);
+         self.deadline.stages.borrow_mut().push((self.name, took));
+```
+
+→ **FAILED. 28 passed; 1 failed.**
+
+```text
+---- the_stage_census_check_rejects_an_extra_stage_that_never_finished ----
+the census check ACCEPTED a run carrying a stage the census does not declare, because that stage
+was never `finish`ed — the guard not covering the case it is named for (job 255, finding 1): ()
+```
+
+**ONE test catches it, and that is the finding.** The two pre-existing census tests finish every stage
+they open, so they stay green under this plant — the hole is exactly the case they cannot reach.
+
+*The first form of the new test asserted its precondition (`unfinished_stages`) BEFORE the property, and
+under this same plant it red on the precondition instead — "an opened-and-dropped stage must be recorded
+as unfinished". True, and the wrong sentence: a RED must name the guard hole, not a step supporting it.
+The property is asserted first now (commit `f21a333b8`), and the message above is the result.*
+
+**Plant 2 (finding 2) — discard both terminal results again**, committed as `c90c37759` on top of the
+FIXED `budgets.rs` (so the two plants are independent):
+
+```diff
+-            match line {
+-                Ok(line) => handle.record(stream, line),
+-                Err(error) => { handle.read_failed(stream, error); break; }
+-            }
++            let Ok(line) = line else { break };
++            handle.record(stream, line);
+-        match reader.read_to_end(&mut buf) {
+-            Ok(_) => handle.deliver(stream, buf),
+-            Err(error) => handle.read_failed(stream, error, buf.len()),
+-        }
++        let _ = reader.read_to_end(&mut buf);
++        handle.deliver(stream, buf);
+```
+
+→ **FAILED. 29 passed; 2 failed.**
+
+```text
+---- a_reader_thread_records_a_failed_read_rather_than_ending_silently ----
+the reader ended because its read FAILED, and the store records only that it ended: a failure is
+then indistinguishable from EOF, which is the cause the wait goes on to name (job 255, finding 2)
+
+---- a_collector_thread_that_fails_mid_read_delivers_nothing ----
+the collector's read FAILED and the collection returned both buffers — the 21 partial byte(s) it
+had read were presented as the whole of the child's stdout (job 255, finding 2)
+```
+
+**`the 21 partial byte(s) … presented as the whole of the child's stdout` is the finding measured rather
+than argued.** And the plant is what forced the two SITE-level tests to exist: the first pair of tests
+added for finding 2 call `ReaderHandle::read_failed` / `BufHandle::read_failed` directly, so they pin how
+the verdict is CHOSEN and stay GREEN under this plant. `spawn_reader` is now `pub(super)` and
+`FailsAfterOneLine` (one line, then `Err`) drives `spawn_reader` and `collect_to_end` themselves, at the
+exact `Err` branches the finding named. A test that cannot red on the reverted fix is testing something
+adjacent to it.
+
+Finding 3 is prose and has no plant: a claim is verified by reading it against D6c, not by a test. That
+is stated rather than left as a gap — `an_exhausted_deadline_leaves_a_later_stage_nothing` already pins
+the property the corrected claim admits, and it was green before and after this round.
+
+### State at the end of round 15
+
+* **31 tests** in `graceful_shutdown_tests` (was 26): +1 census (opened-but-unfinished), +2 store-level
+  read-failure verdicts, +2 site-level reader/collector `Err` branches.
+* No constant changed: `T1_DEADLINE_BASE` 360s / cap 720s, `T2_DEADLINE_BASE` 600s / cap 900s, census
+  unchanged — this round touched no bound.
+* `RUSTFLAGS="-D warnings" cargo clippy -p cqlite-cli --features write-support --tests`: clean.
+  (`drop(deadline.stage(..))` in the new test tripped `clippy::drop_non_drop` — `Stage` has no `Drop`;
+  it is a plain binding left to go out of scope now.)
+* Every `.rs` in the change under the 1500-line test threshold: `budgets.rs` 1461, `harness_tests.rs`
+  1148, `mod.rs` 963, `transcript.rs` 639, `graceful_shutdown_tests.rs` 469. **`budgets.rs` is 39 lines
+  from the threshold** — the next round that adds to it should split it (#1135) rather than push it over.
