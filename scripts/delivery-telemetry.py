@@ -612,7 +612,7 @@ def _issue_state_at(issue_url, issue: int, merged_at):
     return (kind == "reopened"), (None if kind == "reopened" else at)
 
 
-def _note_classification_basis(kind: str, detail: str) -> None:
+def _classification_basis_note(kind: str, detail: str) -> str:
     """Say on stderr when a record's kind rests on the OPERATOR'S ASSERTION, not a measurement.
 
     THE UNDECIDABLE CASE, stated where it is decided (issue #3559, lead ruling on
@@ -639,10 +639,15 @@ def _note_classification_basis(kind: str, detail: str) -> None:
     Recording the basis IN the record is `classification_basis`, deliberately deferred to a
     follow-up: #3550's design is NO new required field, since adding one fails `lint` on every
     already-committed record and backfilling an append-only ledger is the wrong move.
+
+    RETURNS the note rather than printing it (roborev round 2): it says "recorded as", and
+    `build_record` runs BEFORE schema validation, duplicate detection and the ledger write —
+    so printing here let a FAILED invocation claim a classification had been recorded when
+    nothing was appended. `cmd_record` prints it only after the write succeeds.
     """
-    print(f"note: recorded as a {kind} on YOUR ASSERTION, not a measurement — {detail} "
-          f"This tool refuses only what it can DISPROVE; it cannot tell this apart from the "
-          f"other reading, so the classification is yours (issue #3559).", file=sys.stderr)
+    return (f"note: recorded as a {kind} on YOUR ASSERTION, not a measurement — {detail} "
+            f"This tool refuses only what it can DISPROVE; it cannot tell this apart from "
+            f"the other reading, so the classification is yours (issue #3559).")
 
 
 def _measured_bool(gh_fields: dict, field: str, issue: int, why: str) -> bool:
@@ -707,8 +712,22 @@ def _gh(argv: list) -> str:
         raise SystemExit(f"error: `{' '.join(argv)}` failed: {detail}")
 
 
-def _github_fields(issue: int, pr: int) -> dict:
-    """Pull authoritative timestamps/labels live from `gh` (only when not injected)."""
+def _github_fields(issue: int, pr: int, *, slice_requested: bool) -> dict:
+    """Pull authoritative timestamps/labels live from `gh` (only when not injected).
+
+    THE TIMELINE REPLAY IS CONDITIONAL, and that is a correctness property rather than an
+    optimisation (roborev round 2, issue #3559). `build_record` consults the timeline only on
+    the CLASSIFICATION paths — `--slice`, or a null `closed_at` — so replaying it
+    unconditionally let a failure in a signal NOBODY READS refuse an ordinary completed
+    delivery: an unreachable timeline endpoint, a malformed event, or (worse, because this
+    change introduced it) a state event in the same second as `mergedAt`, which is now a
+    named refusal. An auto-close CAN land in the merge's second, so a routine stamp could
+    have been blocked by the very tie-refusal added two commits earlier.
+
+    When it is not replayed the two fields are OMITTED, never defaulted: `_measured_bool`
+    then refuses an unexpected consumer instead of reading a fabricated value as a
+    measurement, which is the rule this file keeps re-learning.
+    """
     issue_json = json.loads(_gh(
         ["gh", "issue", "view", str(issue), "--json",
          "createdAt,closedAt,labels,url"]))
@@ -764,8 +783,16 @@ def _github_fields(issue: int, pr: int) -> dict:
             f"error: `gh pr view {pr}` returned no usable mergedAt ({merged_at!r}) — the "
             f"issue timeline can only be replayed to an authoritative merge instant, and a "
             f"record is only ever stamped for a MERGED pr (issue #3559)")
-    issue_open_at_merge, issue_close_event_at = _issue_state_at(
-        issue_json["url"], issue, merged_at)
+    # Only the classification paths read these; see the docstring.
+    replay_needed = slice_requested or issue_json.get("closedAt") is None
+    timeline_fields = {}
+    if replay_needed:
+        issue_open_at_merge, issue_close_event_at = _issue_state_at(
+            issue_json["url"], issue, merged_at)
+        timeline_fields = {
+            "issue_open_at_merge": issue_open_at_merge,
+            "issue_close_event_at": issue_close_event_at,
+        }
     labels = [l.get("name") for l in issue_json.get("labels", []) if l.get("name")]
     prio_labels = [l for l in labels if re.fullmatch(r"P[0-3]", l)]
     # one-priority invariant: a multi-priority issue is a labeling error — surface it
@@ -800,17 +827,16 @@ def _github_fields(issue: int, pr: int) -> dict:
         "pr": pr,
         "created_at": issue_json["createdAt"],
         "closed_at": issue_json["closedAt"],
-        # Was the issue OPEN at this PR's mergedAt, replayed from the issue TIMELINE
-        # (issue #3559)? This REPLACES #3550's `stateReason` proxy rather than joining it:
-        # that proxy answered only "has this issue EVER been closed", so it refused every
-        # genuine slice of a reopened or since-closed issue. Two mechanisms approximating one
-        # fact is the defect, not the fix.
-        "issue_open_at_merge": issue_open_at_merge,
-        # DIAGNOSTIC ONLY — the `created_at` of the deciding `closed` event, so a refusal can
-        # name the instant it is refusing on. No branch reads it, deliberately: a second
-        # field a decision depends on is the "two operands that must agree" shape that
-        # produced six consecutive defects on this seam (issue #3550).
-        "issue_close_event_at": issue_close_event_at,
+        # `issue_open_at_merge` (was the issue OPEN at this PR's mergedAt, replayed from the
+        # issue TIMELINE, issue #3559) and the diagnostic-only `issue_close_event_at` are
+        # spliced in from `timeline_fields` BELOW, and are ABSENT when no branch will read
+        # them. The replay REPLACES #3550's `stateReason` proxy rather than joining it: that
+        # proxy answered only "has this issue EVER been closed", so it refused every genuine
+        # slice of a reopened or since-closed issue. Two mechanisms approximating one fact is
+        # the defect, not the fix. `issue_close_event_at` exists so a refusal can name the
+        # instant it refuses on, and no branch reads it deliberately: a second field a
+        # decision depends on is the "two operands that must agree" shape that produced six
+        # consecutive defects on this seam (issue #3550).
         "pr_opened_at": pr_json["createdAt"],
         "merged_at": pr_json["mergedAt"],
         # The issues THIS PR declares it closes ("Closes #N"). A SLICE pr by definition
@@ -829,11 +855,19 @@ def _github_fields(issue: int, pr: int) -> dict:
         "pr_closes_this_issue": _issue_identity(issue_json["url"]) in closing_identities,
         "priority": priority,
         "routing": routing,
+        # ABSENT when no branch reads them — see the docstring. Spliced rather than defaulted.
+        **timeline_fields,
     }
 
 
-def build_record(args, gh_fields: dict) -> dict:
+def build_record(args, gh_fields: dict, notes: list = None) -> dict:
     """Assemble a record from supplied counters + authoritative GitHub fields.
+
+    `notes` is an OUT-PARAMETER for operator-facing notes the CALLER must print only once the
+    record is actually written (roborev round 2, issue #3559): this function runs before
+    schema validation, duplicate detection and the ledger append, so a note printed here
+    could describe a record that never landed. A list out-param rather than a changed return
+    type, so existing callers and tests that only want the record are unaffected.
 
     Error convention: caller-input / precondition errors (a missing counter, a null
     timestamp, an undeterminable priority/routing) `raise SystemExit` here — they are bad
@@ -1047,28 +1081,43 @@ def build_record(args, gh_fields: dict) -> dict:
                 f"validator (issues #3550/#3559).")
 
     # THE BASIS NOTE (issue #3559, REQ-3559-02 option C). Both surviving classifications
-    # can rest partly on the operator rather than on evidence, and only one of them was
-    # ever visible. Emitted AFTER every refusal above, so a note is never printed for an
-    # invocation that then fails — the note describes a record that IS being written.
-    if slice_delivery and closed_at is not None:
-        # Disprove-impossible: the timeline proved the issue was open at mergedAt and this
-        # PR closes nothing, which is everything measurable — but an undeclared completion
-        # presents identically, so the SLICE reading is the operator's.
-        _note_classification_basis(
-            "SLICE delivery",
-            f"the timeline proves issue #{args.issue} was open when PR #{args.pr} merged and "
-            f"that the PR closes nothing, but it CANNOT prove the PR was not an undeclared "
-            f"completion of it (its closed_at is {closed_at}).")
-    elif not slice_delivery and closed_at is not None:
-        # The path roborev's finding 1 names. No timeline is replayed here (an ordinary
-        # completed delivery reads its terminal timestamp from closed_at), so the completed
-        # reading rests on the OMISSION of --slice and is stated as such rather than
-        # silently taken as proven.
-        _note_classification_basis(
-            "COMPLETED delivery",
-            f"you omitted --slice, and this path does not replay issue #{args.issue}'s "
-            f"timeline — so a late-stamped SLICE of a since-closed issue would present "
-            f"identically here.")
+    # CAN rest on the operator rather than on evidence, and only one of them was ever
+    # visible. Built AFTER every refusal above, and RETURNED rather than printed — it says
+    # "recorded as", and nothing is recorded until cmd_record's ledger write succeeds
+    # (roborev round 2).
+    #
+    # SCOPED TO THE UNDECIDABLE CASE, in BOTH directions. A note on a record the tool
+    # PROVED is noise readers learn to skip, which would cost exactly the signal this note
+    # exists to carry. So the discriminator is `pr_closes_this_issue`: when it is
+    # affirmatively TRUE the classification is proven by the PR's own closing declaration
+    # and nothing is asserted. It is read here WITHOUT `_measured_bool` on purpose — this is
+    # a diagnostic, not a decision, and an absent field must weaken the CLAIM (we cannot
+    # say it was proven) rather than refuse a record every branch above already accepted.
+    basis_note = None
+    proven_by_closing_ref = gh_fields.get("pr_closes_this_issue") is True
+    if closed_at is not None and not proven_by_closing_ref:
+        if slice_delivery:
+            # Disprove-impossible: the timeline proved the issue was open at mergedAt and
+            # this PR closes nothing, which is everything measurable — but an undeclared
+            # completion presents identically, so the SLICE reading is the operator's.
+            basis_note = _classification_basis_note(
+                "SLICE delivery",
+                f"the timeline proves issue #{args.issue} was open when PR #{args.pr} merged "
+                f"and that the PR closes nothing, but it CANNOT prove the PR was not an "
+                f"undeclared completion of it (its closed_at is {closed_at}).")
+        else:
+            # The path roborev round 1's finding names. No timeline is replayed here (an
+            # ordinary completed delivery reads its terminal timestamp from closed_at), so
+            # the completed reading rests on the OMISSION of --slice — and this branch is
+            # reached only when the PR declares no closing reference, i.e. exactly when
+            # that omission is the only evidence there is.
+            basis_note = _classification_basis_note(
+                "COMPLETED delivery",
+                f"you omitted --slice, this PR declares no closing reference, and this path "
+                f"does not replay issue #{args.issue}'s timeline — so a late-stamped SLICE "
+                f"of a since-closed issue would present identically here.")
+    if basis_note is not None and notes is not None:
+        notes.append(basis_note)
 
     created = gh_fields["created_at"]
     pr_opened = gh_fields["pr_opened_at"]
@@ -1132,9 +1181,11 @@ def cmd_record(args) -> int:
     if args.from_json:
         gh_fields = json.loads(Path(args.from_json).read_text())
     else:
-        gh_fields = _github_fields(args.issue, args.pr)
+        gh_fields = _github_fields(args.issue, args.pr,
+                                   slice_requested=bool(args.slice_delivery))
 
-    record = build_record(args, gh_fields)
+    notes: list = []
+    record = build_record(args, gh_fields, notes)
     errors = validate_record(record, schema)
     if errors:
         print("error: built record is not schema-valid:", file=sys.stderr)
@@ -1172,6 +1223,11 @@ def cmd_record(args) -> int:
     with ledger.open("a") as fh:
         fh.write(json.dumps(record, sort_keys=True) + "\n")
     print(f"recorded issue #{record['issue']} (pr #{record['pr']}) -> {ledger}")
+    # Only now is "recorded as ..." true (roborev round 2, issue #3559): every path above
+    # can still refuse, and a note claiming a classification was recorded when nothing was
+    # appended is worse than no note.
+    for note in notes:
+        print(note, file=sys.stderr)
     return 0
 
 

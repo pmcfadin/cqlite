@@ -976,7 +976,7 @@ class SliceDeliveryTests(unittest.TestCase):
 
                 with mock.patch.object(dt.subprocess, "run", fake_run):
                     with self.assertRaises(SystemExit) as cm:
-                        dt._github_fields(1, 2)
+                        dt._github_fields(1, 2, slice_requested=True)
                 self.assertIn("closingIssuesReferences", str(cm.exception))
 
     def test_github_fields_refuses_an_absent_closing_issues_references(self):
@@ -995,7 +995,7 @@ class SliceDeliveryTests(unittest.TestCase):
 
         with mock.patch.object(dt.subprocess, "run", fake_run):
             with self.assertRaises(SystemExit) as cm:
-                dt._github_fields(1, 2)
+                dt._github_fields(1, 2, slice_requested=True)
         self.assertIn("closingIssuesReferences", str(cm.exception))
 
     def test_github_fields_refuses_when_the_issue_reply_omits_url(self):
@@ -1015,7 +1015,7 @@ class SliceDeliveryTests(unittest.TestCase):
 
         with mock.patch.object(dt.subprocess, "run", fake_run):
             with self.assertRaises(SystemExit) as cm:
-                dt._github_fields(1, 2)
+                dt._github_fields(1, 2, slice_requested=True)
         # tight discriminator: bare "url" also matches the issue_url refusal and the
         # closingIssuesReferences entry-without-url refusal
         self.assertIn("no url field", str(cm.exception))
@@ -1507,7 +1507,7 @@ class GhPathTests(unittest.TestCase):
             raise AssertionError(f"unexpected argv: {argv}")
 
         with mock.patch.object(dt.subprocess, "run", fake_run):
-            fields = dt._github_fields(1234, 5678)
+            fields = dt._github_fields(1234, 5678, slice_requested=True)
         self.assertEqual(fields["created_at"], "2026-06-01T00:00:00Z")
         self.assertEqual(fields["closed_at"], "2026-06-01T02:00:00Z")
         self.assertEqual(fields["pr_opened_at"], "2026-06-01T00:30:00Z")
@@ -1553,7 +1553,7 @@ class GhPathTests(unittest.TestCase):
         with mock.patch.object(dt.subprocess, "run", self._issue_pr_fakes(
                 "https://github.com/pmcfadin/cqlite/issues/3393",
                 "https://github.com/other/repo/issues/3393")):
-            fields = dt._github_fields(3393, 3467)
+            fields = dt._github_fields(3393, 3467, slice_requested=True)
         # a same-NUMBER, different-REPOSITORY closing ref is not this issue
         self.assertIs(fields["pr_closes_this_issue"], False)
         # the live path must supply the (issue, pr) binding build_record requires
@@ -1563,7 +1563,7 @@ class GhPathTests(unittest.TestCase):
         with mock.patch.object(dt.subprocess, "run", self._issue_pr_fakes(
                 "https://github.com/pmcfadin/cqlite/issues/3393",
                 "https://github.com/pmcfadin/cqlite/issues/3393")):
-            self.assertIs(dt._github_fields(3393, 3467)["pr_closes_this_issue"], True)
+            self.assertIs(dt._github_fields(3393, 3467, slice_requested=True)["pr_closes_this_issue"], True)
 
     def test_github_fields_refuses_a_non_canonical_issue_url(self):
         """The refusal added with the collapse had no test. Its failure mode is fail-OPEN:
@@ -1576,7 +1576,7 @@ class GhPathTests(unittest.TestCase):
             with self.subTest(url=bad):
                 with mock.patch.object(dt.subprocess, "run", self._issue_pr_fakes(bad, None)):
                     with self.assertRaises(SystemExit) as cm:
-                        dt._github_fields(3393, 3467)
+                        dt._github_fields(3393, 3467, slice_requested=True)
                 self.assertIn("canonical", str(cm.exception))
 
     def test_github_fields_raises_on_multiple_priority_labels(self):
@@ -1598,7 +1598,7 @@ class GhPathTests(unittest.TestCase):
 
         with mock.patch.object(dt.subprocess, "run", fake_run):
             with self.assertRaises(SystemExit) as cm:
-                dt._github_fields(1, 2)
+                dt._github_fields(1, 2, slice_requested=True)
         # assert the LABEL error, not merely that something exited
         self.assertIn("multiple priority labels", str(cm.exception))
 
@@ -1618,7 +1618,7 @@ class GhPathTests(unittest.TestCase):
                 "closingIssuesReferences": []}))
 
         with mock.patch.object(dt.subprocess, "run", fake_run):
-            fields = dt._github_fields(1, 2)
+            fields = dt._github_fields(1, 2, slice_requested=True)
         self.assertEqual(fields["routing"], "design")
         self.assertEqual(fields["priority"], "P2")
 
@@ -1639,7 +1639,7 @@ class GhPathTests(unittest.TestCase):
 
         with mock.patch.object(dt.subprocess, "run", fake_run):
             with self.assertRaises(SystemExit) as cm:
-                dt._github_fields(1, 2)
+                dt._github_fields(1, 2, slice_requested=True)
         self.assertIn("routing", str(cm.exception))
 
     def test_gh_failure_becomes_clean_systemexit(self):

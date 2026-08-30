@@ -287,16 +287,62 @@ class GithubFieldsTimelineTests(unittest.TestCase):
     def test_it_supplies_issue_open_at_merge_as_a_bool(self):
         with mock.patch.object(dt.subprocess, "run",
                                _fake_gh([[_ev("closed", "2026-06-10T04:00:00Z")]])):
-            fields = dt._github_fields(3393, 3467)
+            fields = dt._github_fields(3393, 3467, slice_requested=True)
         # closed only AFTER the merge -> open at mergedAt
         self.assertIs(fields["issue_open_at_merge"], True)
         self.assertIsNone(fields["issue_close_event_at"])
         self.assertEqual((fields["issue"], fields["pr"]), (3393, 3467))
 
+    def test_the_replay_is_SKIPPED_when_no_branch_will_read_it(self):
+        """An ordinary completed delivery must not be blocked by a signal nobody reads.
+
+        `build_record` consults the timeline only on the classification paths (`--slice`, or a
+        null `closed_at`), so replaying it unconditionally let an unreachable endpoint, a
+        malformed event, or a same-second-as-mergedAt tie refuse a routine stamp (roborev
+        round 2, issue #3559). The tie case is the sharp one: this change INTRODUCED that
+        refusal, and an auto-close can land inside the merge's second.
+
+        Planted so the test fails if the replay happens at all: the timeline call raises, and
+        the same-second event that would refuse is present. Reaching the assert proves neither
+        was consulted.
+        """
+        exploding_timeline = AssertionError("timeline must not be consulted on this path")
+        closed_issue = {"createdAt": "2026-06-10T00:00:00Z",
+                        "closedAt": "2026-07-01T00:00:00Z",
+                        "labels": [{"name": "P1"}, {"name": "oracle"}], "url": ISSUE_URL}
+        with mock.patch.object(dt.subprocess, "run",
+                               _fake_gh(exploding_timeline, issue_json=closed_issue)):
+            fields = dt._github_fields(3393, 3467, slice_requested=False)
+        # ABSENT, never defaulted — a fabricated value would be read as a measurement.
+        self.assertNotIn("issue_open_at_merge", fields)
+        self.assertNotIn("issue_close_event_at", fields)
+        self.assertEqual(fields["closed_at"], "2026-07-01T00:00:00Z")
+
+    def test_the_replay_still_runs_when_a_branch_WILL_read_it(self):
+        """The skip must be scoped to the paths that read nothing, or it removes the fix.
+
+        Both readers are covered: `--slice` on a closed-now issue, and a null `closed_at`
+        without `--slice` (the propagation-window / reopened shapes).
+        """
+        closed_issue = {"createdAt": "2026-06-10T00:00:00Z",
+                        "closedAt": "2026-07-01T00:00:00Z",
+                        "labels": [{"name": "P1"}, {"name": "oracle"}], "url": ISSUE_URL}
+        pages = [[_ev("closed", "2026-06-10T04:00:00Z")]]
+        for label, issue_json, slice_requested in (
+            ("--slice on a closed-now issue", closed_issue, True),
+            ("null closed_at without --slice", None, False),
+        ):
+            with self.subTest(label):
+                with mock.patch.object(dt.subprocess, "run",
+                                       _fake_gh(pages, issue_json=issue_json)):
+                    fields = dt._github_fields(3393, 3467,
+                                               slice_requested=slice_requested)
+                self.assertIs(fields["issue_open_at_merge"], True)
+
     def test_it_carries_the_closing_events_timestamp_for_the_refusal_message(self):
         with mock.patch.object(dt.subprocess, "run",
                                _fake_gh([[_ev("closed", "2026-06-10T02:00:00Z")]])):
-            fields = dt._github_fields(3393, 3467)
+            fields = dt._github_fields(3393, 3467, slice_requested=True)
         self.assertIs(fields["issue_open_at_merge"], False)
         self.assertEqual(fields["issue_close_event_at"], "2026-06-10T02:00:00Z")
 
@@ -309,7 +355,7 @@ class GithubFieldsTimelineTests(unittest.TestCase):
                     "closingIssuesReferences": []})
                 with mock.patch.object(dt.subprocess, "run", fake):
                     with self.assertRaises(SystemExit) as cm:
-                        dt._github_fields(3393, 3467)
+                        dt._github_fields(3393, 3467, slice_requested=True)
                 # absent/blank is named as gh's `mergedAt`; a malformed instant is named by
                 # the shared strict-RFC-3339 check as `merged_at` — both are named refusals
                 self.assertRegex(str(cm.exception), r"merged.?[aA]t")
@@ -327,7 +373,7 @@ class GithubFieldsTimelineTests(unittest.TestCase):
             return _fake_gh([[]])(argv, **kw)
 
         with mock.patch.object(dt.subprocess, "run", fake_run):
-            fields = dt._github_fields(3393, 3467)
+            fields = dt._github_fields(3393, 3467, slice_requested=True)
         self.assertNotIn("state_reason", fields)
         joined = " ".join(a for argv in seen for a in argv)
         self.assertNotIn("stateReason", joined)
@@ -412,6 +458,54 @@ class SliceFromTimelineTests(unittest.TestCase):
                     self.assertIn("YOUR ASSERTION", msg)
                     self.assertIn(expect_kind, msg)
                     self.assertIn("#3559", msg)
+
+    def test_a_completed_delivery_with_a_closing_reference_emits_no_note(self):
+        """The normal `Closes #N` path is PROVEN, so claiming an assertion there is false.
+
+        Every non-slice completed record used to be labelled an operator assertion, including
+        the ordinary path where the PR's own closing declaration proves the classification
+        (roborev round 2, issue #3559). That made the note inaccurate exactly where deliveries
+        actually flow — and a note that cries wolf on the common path is one readers learn to
+        skip, costing the signal it exists to carry.
+        """
+        with tempfile.TemporaryDirectory() as d:
+            tmp = Path(d)
+            ledger = tmp / "ledger.jsonl"
+            gh = self._ghfields(tmp, closed_at="2026-07-01T00:00:00Z",
+                                open_at_merge=True, closes=True)
+            err = io.StringIO()
+            with contextlib.redirect_stderr(err):
+                self.assertEqual(0, dt.main(self._argv(ledger, gh)))
+            self.assertNotIn("YOUR ASSERTION", err.getvalue())
+            self.assertEqual(json.loads(ledger.read_text().strip())["closed_at"],
+                             "2026-07-01T00:00:00Z")
+
+    def test_a_refused_invocation_never_claims_a_record_was_written(self):
+        """The note says "recorded as", so it must not outlive a failed write.
+
+        `build_record` runs before schema validation, duplicate detection and the append, so
+        building the note there and printing it immediately let a REFUSED invocation announce
+        a classification that was never recorded (roborev round 2, issue #3559). Driven here
+        through the duplicate-cycle refusal, which fails after the record is built.
+        """
+        with tempfile.TemporaryDirectory() as d:
+            tmp = Path(d)
+            ledger = tmp / "ledger.jsonl"
+            gh = self._ghfields(tmp, closed_at="2026-07-01T00:00:00Z",
+                                open_at_merge=True, closes=False)
+            # first stamp lands and legitimately notes its asserted basis
+            first = io.StringIO()
+            with contextlib.redirect_stderr(first):
+                self.assertEqual(0, dt.main(self._argv(ledger, gh, "--slice")))
+            self.assertIn("YOUR ASSERTION", first.getvalue())
+            before = ledger.read_text()
+            # same (issue, pr) again -> refused as a duplicate cycle, so NOTHING is recorded
+            second = io.StringIO()
+            with contextlib.redirect_stderr(second):
+                self.assertEqual(1, dt.main(self._argv(ledger, gh, "--slice")))
+            self.assertNotIn("YOUR ASSERTION", second.getvalue())
+            self.assertNotIn("recorded as", second.getvalue())
+            self.assertEqual(ledger.read_text(), before)   # ledger untouched
 
     def test_a_proven_classification_emits_no_assertion_note(self):
         """The note must be SCOPED to the undecidable case, or it means nothing.
