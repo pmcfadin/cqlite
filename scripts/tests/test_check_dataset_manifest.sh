@@ -2169,6 +2169,51 @@ else
   echo "info - no real corpus or no nogit copy; skipping the git-detection case"
 fi
 
+# ---------------------------------------------------------------------------
+# Case 92 (post-rebase round 15, Low): EVERY SKIP branch of run_node_bindings must declare
+# the leak-lane state.
+#
+# `NOT-REACHED` is the PESSIMISTIC default written before anything runs, so every early
+# return inherits it unless it says otherwise. The incomplete-corpus SKIP branch was added
+# without the declaration, so a run that skipped on the corpus opt-out reported
+# "node-bindings failed before the affirmation could read a jest report (npm ci / npm run
+# build / jest --listTests / the suite reconciliation)" — a false statement about WHY the
+# budgets did not run, pointing the reader at a build failure that never happened.
+#
+# STRUCTURAL, deliberately. The defect class is "a SKIP branch arrives without the
+# declaration", which is a property of the SOURCE; catching it behaviourally would need a
+# full component run (~224s measured) inside a `tooling-tests` component already at ~948s,
+# to prove one summary line. The behavioural fact was verified once by hand at the time of
+# the fix: partial corpus + opt-out yields `node-bindings-leak-lane: SKIPPED (...)`.
+#
+# Scans each `status=SKIP` in run_node_bindings and requires a `_node_leak_lane_note` write
+# between it and its `return`.
+# ---------------------------------------------------------------------------
+GATE_SRC3=$(cd "$(dirname "$GATE")" && pwd)/agent-gate.sh
+if [ -f "$GATE_SRC3" ]; then
+  ll_out=$(awk '
+    /^run_node_bindings\(\) \{/ { inf = 1 }
+    inf && /^\}/            { inf = 0 }
+    inf && /status=SKIP/    { skip = 1; noted = 0; line = NR }
+    inf && skip && /_node_leak_lane_note/ { noted = 1 }
+    inf && skip && /return 0/ {
+      if (!noted) printf "undeclared-skip-at-line-%d ", line
+      skip = 0
+    }
+    END { }
+  ' "$GATE_SRC3")
+  ll_n=$(awk '/^run_node_bindings\(\) \{/{i=1} i&&/^\}/{i=0} i&&/status=SKIP/{n++} END{print n+0}' "$GATE_SRC3")
+  if [ "$ll_n" -lt 2 ]; then
+    bad "case 92 found only $ll_n SKIP branch(es) in run_node_bindings; the scan is not seeing the function"
+  elif [ -z "$ll_out" ]; then
+    ok "all $ll_n SKIP branches of run_node_bindings declare the leak-lane state"
+  else
+    bad "a SKIP branch of run_node_bindings does not declare the leak-lane state ($ll_out) — its summary would falsely report an earlier build/listing failure"
+  fi
+else
+  echo "info - agent-gate.sh unreadable; skipping the leak-lane declaration case"
+fi
+
 echo "----"
 echo "passed: $PASS  failed: $FAIL"
 [ "$FAIL" -eq 0 ]

@@ -6855,6 +6855,16 @@ run_node_bindings() {
     echo ">>> [$name]   distinguishable from an absent one for these suites — the parity cases derive"
     echo ">>> [$name]   their table set from disk, so they would run GREEN over the tables that remain"
     echo ">>> [$name]   and silently omit the rest. Manifest diagnostics are in $log."
+    # #1465, and the reason this line is easy to forget: `NOT-REACHED` is the PESSIMISTIC
+    # default written before anything runs, so EVERY early return inherits it unless it says
+    # otherwise. Reaching here means the corpus opt-out fired -- but the summary would report
+    # the lane as having died in `npm ci`, the build, `--listTests` or the reconciliation,
+    # which is a false statement about WHY the budgets did not run and points the reader at a
+    # build failure that never happened.
+    #
+    # Same declaration as the ABSENT-corpus branch above; this branch is the second dataset
+    # gate for the leak budgets and was added without it (roborev, post-rebase round 15).
+    _node_leak_lane_note SKIP-OPTOUT > "$(_node_leak_lane_note_file)"
     end=$(date +%s)
     record_result "$name" "$status" "$((end - start))"
     echo ">>> [$name] $status ($((end - start))s)"
