@@ -444,9 +444,11 @@ report `gate-timeout` on the hard deadline rather than guessing.
 
 ## Component logs under `logs: <dir>` (issue #3401)
 
-Every component writes `<dir>/<component>.log`, where `<dir>` is the SUMMARY's `logs:` line —
-that is the ONLY gate text besides the SUMMARY an agent should open, and it is where you go when
-a component's one-line verdict is not enough. In particular `file-size.log` carries the whole
+Every component that RUNS writes `<dir>/<component>.log`, where `<dir>` is the SUMMARY's `logs:`
+line — that is the ONLY gate text besides the SUMMARY an agent should open, and it is where you go
+when a component's one-line verdict is not enough. A component that **SKIPs** (`python-bindings`,
+`oom-audit` and `tooling-tests` each have a no-toolchain SKIP path) writes no log at all: its reason
+is in the SUMMARY line only, so do not read an absent `<component>.log` as a missing artifact. In particular `file-size.log` carries the whole
 ratchet computation the verdict summarises: the thresholds applied, the resolved base sha (and
 the ref it came from, or an explicit "base ref unavailable — growth ratchet skipped"), the full
 list of changed `.rs` files currently over threshold, and one `path: before -> after (limit N)`
