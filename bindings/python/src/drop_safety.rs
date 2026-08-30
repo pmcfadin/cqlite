@@ -75,6 +75,19 @@
 //! pyo3 `cdylib` built with `extension-module`, so `cargo test -p cqlite-py`
 //! cannot link libpython and never runs (the gate documents this exclusion).
 //! A Rust test added here would execute nowhere.
+//!
+//! **DECLARED GAP — the re-entrancy branch (step 2) is covered NOWHERE.** It is
+//! unreachable from the only lane that executes this file: a pytest thread is
+//! never inside a tokio runtime context, so `Handle::try_current()` is always
+//! `Err` there and the branch is never taken. Reaching it needs CPython
+//! embedded in a tokio application (or a pyo3 callback invoked on a runtime
+//! worker thread), which nothing in this repository builds, and the crate has
+//! no Rust test target that could construct one. The runtime-absent branch
+//! (step 3) is equally unexercised: any `Database` that exists at all was
+//! opened through `block_on`, so the runtime is always already built. Both are
+//! stated rather than left implicit, because an untested branch whose absence
+//! is unmentioned reads as a covered one — and these two are precisely the
+//! branches whose failure mode is a process abort.
 
 use std::sync::atomic::Ordering;
 
@@ -98,6 +111,22 @@ impl Drop for Database {
         // runtime there is no safe way to drive the async cleanup from here, so
         // skip it silently. The flag is already set, so the handle is
         // consistently "closed" either way.
+        //
+        // Skipping is not merely the lesser evil, and the tempting alternative
+        // is WORSE. Dispatching the cleanup onto the live runtime
+        // (`Handle::spawn`) would not panic — but a detached task is
+        // CANCELLABLE, and it would be cancelled at runtime shutdown, which is
+        // exactly when an interpreter-teardown drop tends to happen. The flush
+        // writes its SSTable components DIRECTLY into the published data
+        // directory: only the compaction path stages into a tmp dir and
+        // republishes by rename behind a TOC barrier (see
+        // `cqlite-core/src/storage/sstable/writer/finish.rs`). So a cancelled
+        // flush can leave a PARTIAL, DISCOVERABLE SSTable with no publication
+        // barrier. Skipping instead leaves the WAL (`write_dir/wal/`) intact,
+        // which is the write engine's designed idempotent replay marker — a
+        // recoverable state, where a torn SSTable is not. Trading a valid
+        // replay marker for a possibly-truncated published SSTable is a bad
+        // trade even when it flushes successfully most of the time.
         if Handle::try_current().is_ok() {
             tracing::debug!(
                 "cqlite: Database dropped inside a tokio runtime context; \
