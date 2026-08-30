@@ -440,6 +440,19 @@ async function collectWithQuorum(collect, maxAttempts = MAX_MEASURE_ATTEMPTS) {
  *   * every pass negative -- nothing was measured;
  *   * fewer than SAMPLE_QUORUM non-negative passes -- too little was measured.
  *
+ * WHY THESE REFUSALS ARE SOUND HERE WHILE THE PYTHON LANE'S SIGN CHECK WAS NOT
+ * (issue #1465 round 10 — the asymmetry is documented so it does not read as an
+ * oversight). This is NOT a claim that a negative pass indicates failure: a negative
+ * pass is a LEGITIMATE reading of a window that freed more than it allocated, which is
+ * exactly why collectWithQuorum RE-COLLECTS instead of erroring, and why they are
+ * excluded from the ordering rather than treated as evidence of a broken instrument.
+ * The refusals are about STATISTIC FORMABILITY: a minimum and an upper median cannot be
+ * computed from an empty set, and a MAJORITY-supported verdict cannot be computed from
+ * fewer than a majority of samples. The python lane has one sample and no statistic to
+ * form, so the equivalent question there is only "was the instrument on" — answered
+ * affirmatively by `tracemalloc.is_tracing()` plus exact iteration counts, never by the
+ * sign of its output (its round-8 sign check was removed for manufacturing a flake).
+ *
  * The reported statistic is the UPPER median, `sorted[floor(n / 2)]`, which is
  * the middle element for odd `n` and the HIGHER of the two middles for even `n`
  * (n=5 -> index 2; n=4 -> index 2, i.e. the third of four). The classic even-`n`

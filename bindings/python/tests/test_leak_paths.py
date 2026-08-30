@@ -215,8 +215,11 @@ STREAM_BUFFER_SIZE = 2
 # first window of a fresh process): there is no favourable sample to hide behind, no
 # distribution for a median to summarise, and no pass count to reach a quorum with.
 # What this lane DOES share, because it is the same rule and not the same mechanism,
-# is the REFUSAL: a non-positive tracked delta is not a measurement and gets no
-# verdict -- see _assert_tracked_under_budget.
+# is that a verdict requires an AFFIRMED instrument -- here `tracemalloc.is_tracing()`
+# at both snapshots plus the exact iteration counts, there a quorum of samples from
+# which the statistic is FORMABLE. Neither is a check on the SIGN of the growth: round
+# 10 removed this lane's non-positive refusal precisely because a clean loop may
+# legitimately read <= 0 (see _assert_tracked_under_budget).
 #
 # NOTHING TO ENROL, unlike the Node lane: the gate affirms the Node budgets by TEST
 # NAME from a jest JSON report, so a new Node budget test must be enrolled in the
@@ -404,10 +407,27 @@ def _measure_growth_bytes(body, iterations=ITERATIONS, warmup=WARMUP_ITERATIONS)
     rss_before = rss_reader() if rss_reader is not None else None
     tracemalloc.start()
     try:
+        # AFFIRM THE INSTRUMENT, not the sign of its output (round 10; see
+        # _assert_tracked_under_budget). `is_tracing()` is checked at BOTH snapshots:
+        # a window that was not tracing yields a 0-byte diff that looks exactly like a
+        # clean loop, and that is the only reading this file must never accept as a
+        # verdict.
+        if not tracemalloc.is_tracing():
+            raise RuntimeError(
+                "tracemalloc was NOT tracing when the first snapshot was taken, so "
+                "the tracked-allocation window measured nothing about this loop and "
+                "has no verdict to give (issue #1465)"
+            )
         first = tracemalloc.take_snapshot().filter_traces(_NOISE_FILTERS)
         for _ in range(iterations):
             body()
         gc.collect()
+        if not tracemalloc.is_tracing():
+            raise RuntimeError(
+                "tracemalloc STOPPED tracing during the measured loop (something in "
+                "the loop body called tracemalloc.stop()), so the window covers only "
+                "part of it and has no verdict to give (issue #1465)"
+            )
         second = tracemalloc.take_snapshot().filter_traces(_NOISE_FILTERS)
     finally:
         tracemalloc.stop()
@@ -439,32 +459,33 @@ def _measure_growth_bytes(body, iterations=ITERATIONS, warmup=WARMUP_ITERATIONS)
 
 
 def _assert_tracked_under_budget(label: str, growth: int, budget: int) -> None:
-    """Assert Python-allocator growth is under ``budget`` -- with a refusal first.
+    """Assert Python-allocator growth is under ``budget``.
 
-    N5 (issue #1465 round 8), the same affirmative-measurement rule the Node lane
-    got in round 7, swept to this lane: ``growth < budget`` alone PASSES on a
-    non-measurement. A net delta of zero or below means the window freed at least as
-    much as it allocated, which is not evidence that the loop is clean -- it is the
-    absence of a reading, and the difference matters here because this lane takes
-    ONE sample (there is no quorum of passes to fall back on). So a non-positive
-    delta is a hard error naming the value, in the same voice as the Node errors,
-    never a pass.
-
-    Why non-positive rather than "== 0": tracemalloc's net diff can go negative when
-    the loop released tracked blocks that pre-existed the first snapshot, and neither
-    zero nor negative supports the claim "this loop retained less than N bytes".
-    The non-vacuity counters in the caller prove the WORK happened; this proves the
-    MEASUREMENT happened.
+    NON-POSITIVE GROWTH IS UNDER BUDGET, and that is a correction (issue #1465
+    round 10). Round 8 refused ``growth <= 0`` as "not a measurement". Two reviewers
+    then disagreed and BOTH were right about different things, so the seam is
+    recorded here rather than settled by precedence:
+      * the empirical claim (round 8) was that the tracked delta was never observed
+        at or below zero, unlike RSS which legitimately reads 0;
+      * the structural claim (round 10) is that nothing GUARANTEES it stays
+        positive -- correct code that frees pre-existing tracked blocks, or retains
+        nothing at all, legitimately reads <= 0 -- and the post-rebase error-path
+        cold sample fell to 480 bytes, far closer to zero than the 4,340 that made
+        the empirical claim look safe.
+    The refusal CONFLATED two questions: (a) did the instrument work, and (b) is
+    growth under budget. A non-positive delta answers (b) with "yes, comfortably";
+    it is only suspicious as evidence about (a). Refusing it would manufacture a
+    flake in a MANDATORY gate component, which is the failure mode this issue has
+    spent rounds removing elsewhere.
+    So (a) is now answered AFFIRMATIVELY and SEPARATELY, where it belongs:
+      * ``_measure_growth_bytes`` asserts ``tracemalloc.is_tracing()`` at both
+        snapshots -- the instrument was actually on;
+      * the callers assert EXACT iteration counts (raised errors, rows pulled) --
+        the loop body actually ran N times;
+      * the RED controls pin sensitivity -- a planted 64-byte-per-iteration
+        retention reds this very assertion.
+    That is a stronger affirmation than a sign check, and it cannot red correct code.
     """
-    if growth <= 0:
-        raise AssertionError(
-            f"{label}: tracked-allocation growth measured {growth} bytes over "
-            f"{ITERATIONS} iterations — a non-positive net delta is not a "
-            "measurement of this loop (the window freed at least as much as it "
-            "allocated), so there is no verdict to give and the budget below would "
-            "pass vacuously. Re-run; if it persists the tracemalloc window or the "
-            "gc.collect() around it is broken (issue #1465)"
-        )
     assert growth < budget, (
         f"{label}: tracked allocation grew {growth} bytes over {ITERATIONS} "
         f"iterations ({growth / ITERATIONS:.1f} bytes/iteration), exceeding the "
