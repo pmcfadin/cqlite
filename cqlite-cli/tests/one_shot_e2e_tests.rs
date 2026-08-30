@@ -350,10 +350,17 @@ fn get_test_data_root() -> PathBuf {
         })
 }
 
-/// Validate JSON output structure
+/// Validate JSON output STRUCTURE — shape only, deliberately.
 ///
-/// Ensures the output is valid JSON with expected structure
-/// (either array of objects or single object)
+/// Ensures the output is valid JSON with expected structure (either array of
+/// objects or single object). It does NOT compare values, and must not be read as
+/// if it did: `reference` is used only for an upper bound on the row count.
+///
+/// VALUE-level parity for the CLI's JSON/CSV egress lives in
+/// `tests/issue_1491_json_csv_golden_parity.rs` (issue #1491, epic #1469 finding
+/// AD2), which deep-compares every cell of `export --format json|csv` against the
+/// same `*-Data.db.jsonl` sstabledump goldens. That lane is the oracle; this
+/// helper only guards the one-shot `--execute` path's envelope shape.
 fn validate_json_structure(json_output: &str, reference: &[JsonValue]) -> Result<(), String> {
     // Parse as JSON to ensure it's valid
     let parsed: JsonValue =

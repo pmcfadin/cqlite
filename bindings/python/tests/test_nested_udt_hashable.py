@@ -26,15 +26,24 @@ f_map_set_udt    ``TypeError: unhashable type: 'list'``
 
 WHICH COLUMNS COVER ``value_to_hashable_key``, AND WHICH DO NOT
 ---------------------------------------------------------------
-Only the two FROZEN-MAP columns reach that function. A ``set`` whose elements
-contain a UDT takes ``set_to_py``'s list fallback and converts elements with
-``value_to_py``; a MULTICELL map's keys arrive as opaque ``Value::Blob`` from
-the scalar-only ``parse_cell_path_key`` (#3612). A frozen map escapes both: its
-keys are decoded structurally and ``map_to_py`` projects every one of them
-through ``value_to_hashable_key``. So ``f_map_tuple_udt`` covers the ``Tuple``
-arm, ``f_map_set_udt`` the ``Set`` arm, and their id=2 keys are the only values
-in this repository that execute the ``Udt`` arm's ``None => py.None()`` branch.
-Without those two columns all three could regress with zero test failures.
+Only the two FROZEN-MAP columns reach that function's ``Tuple`` and ``Set``
+arms. A ``set`` whose elements contain a UDT takes ``set_to_py``'s list fallback
+and converts the ELEMENT with ``value_to_py``; a MULTICELL map's keys arrive as
+opaque ``Value::Blob`` from the scalar-only ``parse_cell_path_key`` (#3612), so
+they land on a scalar arm. A frozen map escapes both: its keys are decoded
+structurally and ``map_to_py`` projects every one of them through
+``value_to_hashable_key``. So ``f_map_tuple_udt`` covers the ``Tuple`` arm and
+``f_map_set_udt`` the ``Set`` arm, and their id=2 keys are the only values in
+this repository that execute the ``Udt`` arm's ``None => py.None()`` branch —
+BOTH of them do, one through each of those two arms. Without those two columns
+all three could regress with zero test failures.
+
+The FUNCTION is reached more widely than its NEW ``Tuple``/``Set`` ARMS are, and
+every coverage claim below is scoped to the ARM, not the function:
+``m_tuple_udt``'s keys reach it as ``Value::Blob``, and ``s_map_udt_key`` /
+``s_map_udt_val`` reach its ``Udt`` and scalar arms, because ``value_to_py`` on a
+set element that is a frozen MAP calls ``map_to_py``, which projects that inner
+map's keys through it.
 
 ``contains_udt`` IS A SEPARATE MATTER, AND ITS ``Map`` ARM NEEDED ITS OWN
 COLUMNS. ``set_to_py`` is that function's only caller, so the value it inspects
@@ -483,9 +492,11 @@ def _key_part_serialized(label, rank) -> bytes:
 def tuple_udt_int_serialized(label, rank, trailing) -> bytes:
     """``tuple<frozen<key_part>, int>`` as Cassandra serializes it.
 
-    Used ONLY by the ``m_tuple_udt`` documented-gap test: the map key currently
-    arrives as these OPAQUE bytes instead of a structured tuple. Cross-checks
-    against the golden's ``path`` values byte for byte.
+    Used ONLY for ``m_tuple_udt``'s documented-gap expectations — its own class
+    :class:`TestTupleBorneUdtAsMapKey` and the ``SELECT *`` whole-row check —
+    because that map key currently arrives as these OPAQUE bytes instead of a
+    structured tuple. Cross-checks against the golden's ``path`` values byte for
+    byte.
     """
     return _component(_key_part_serialized(label, rank)) + _component(
         trailing.to_bytes(4, "big", signed=True)
@@ -521,12 +532,15 @@ class TestTupleBorneUdtInSetElement:
         ]
 
     def test_null_udt_fields(self, db):
-        """id=2: NULL UDT fields inside the hashable position.
+        """id=2: NULL UDT fields inside a set element.
 
-        Reaches ``value_to_hashable_key``'s ``None => py.None()`` UDT-field
-        branch, which no committed fixture previously exercised inside a
-        hashable position. Golden order: ``\\@\\:5:2`` then
-        ``nullrank\\:\\@:1`` (``\\@`` is sstabledump's null marker).
+        These nulls travel ``udt_to_py``'s own ``None`` branch, NOT
+        ``value_to_hashable_key``'s. ``contains_udt`` is total post-fix, so this
+        column takes ``set_to_py``'s LIST fallback and its elements are
+        converted with ``value_to_py``; the hashable converter's ``Udt``-arm
+        ``None => py.None()`` branch is covered by the two FROZEN-MAP columns
+        instead. Golden order: ``\\@\\:5:2`` then ``nullrank\\:\\@:1``
+        (``\\@`` is sstabledump's null marker).
         """
         row = _rows_by_id(db, "s_tuple_udt")[2]
         assert row.get("s_tuple_udt") == [
@@ -749,9 +763,12 @@ class TestTupleBorneUdtAsMapKey:
 
     That is a separate cqlite-core defect, deliberately OUT OF SCOPE for #3500,
     which is a Python-binding fix. CONSEQUENCE, stated plainly: the hashable
-    projection for tuple-borne MAP KEYS is therefore currently UNEXERCISED by
-    any fixture in this repository. ``value_to_hashable_key``'s new ``Tuple``
-    arm is covered only through the set-element path above.
+    projection for MULTICELL tuple-borne map keys is currently UNEXERCISED by
+    any fixture in this repository — this class pins the ``bytes`` it gets
+    instead. ``value_to_hashable_key``'s new ``Tuple`` arm IS covered, by
+    ``f_map_tuple_udt``'s FROZEN-map keys (:class:`TestFrozenMapWithTupleBorneUdtKey`)
+    and NOT by the set-element path above, which takes ``set_to_py``'s list
+    fallback and so never projects a ``Tuple`` through that function at all.
 
     AC SHAPE 3 IS DISCHARGED BY THIS PINNED GAP TEST PLUS #3612 — BY LEAD
     RULING, not by a worker descope. Issue #3500's acceptance criteria expect
@@ -831,9 +848,13 @@ class TestFrozenMapWithTupleBorneUdtKey:
     independent reasons:
 
     * a ``set`` whose elements contain a UDT takes ``set_to_py``'s LIST
-      fallback, which converts elements with ``value_to_py`` and never calls
-      ``value_to_hashable_key``. Issue #3500's own AC1 — make ``contains_udt``
-      total — is what makes that true of every UDT-bearing set column;
+      fallback, which converts the ELEMENT with ``value_to_py`` and so never
+      projects it through ``value_to_hashable_key``. Issue #3500's own AC1 —
+      make ``contains_udt`` total — is what makes that true of every UDT-bearing
+      set column. (``value_to_py`` can still reach the hashable converter
+      DEEPER: an element that is a frozen MAP has its own keys projected by
+      ``map_to_py`` — see :class:`TestSetElementFrozenMapWithUdtKeyHalf` — but
+      never a ``Tuple``);
     * a MULTICELL map's keys arrive as opaque ``Value::Blob`` from the
       scalar-only ``parse_cell_path_key`` (see ``TestTupleBorneUdtAsMapKey``
       and #3612), so they never reach the ``Tuple`` arm either.
@@ -885,10 +906,15 @@ class TestFrozenMapWithTupleBorneUdtKey:
     def test_null_udt_field_inside_a_hashable_key(self, db):
         """id=2: ``None`` field values INSIDE a dict key — the ``Udt`` ``None`` arm.
 
-        This is the ONLY place in the repository that executes
-        ``value_to_hashable_key``'s ``Udt``-arm ``None => py.None()`` branch. The
-        set columns' null fields travel ``udt_to_py``'s own ``None`` branch — a
-        DIFFERENT function — so ``test_null_udt_fields`` above does not cover it.
+        ONE OF THE TWO places in the repository that execute
+        ``value_to_hashable_key``'s ``Udt``-arm ``None => py.None()`` branch, and
+        the one that reaches it through the ``Tuple`` arm;
+        :class:`TestFrozenMapWithNestedSetUdtKey`'s
+        ``test_null_and_empty_udt_fields_stay_distinct`` reaches the same branch
+        through the ``Set`` arm. Both are frozen-map KEYS. The set columns cover
+        NEITHER: their null fields travel ``udt_to_py``'s own ``None`` branch — a
+        DIFFERENT function, reached via ``set_to_py``'s list fallback — so
+        ``test_null_udt_fields`` above is not coverage of this branch.
 
         Both directions are pinned: a null ``rank`` and a null ``label``, in two
         keys that must stay DISTINCT (a projection that collapsed ``None`` onto a

@@ -245,16 +245,41 @@ describe('TypeScript Definitions (Issue #312)', () => {
   });
 
   describe('UdtValue interface', () => {
-    test('should have _type property', () => {
-      expect(dtsContent).toMatch(/interface\s+UdtValue[\s\S]*?_type\s*:\s*string/);
+    // Issue #3504: the UDT's type identity is carried OUT OF BAND. The declared
+    // shape is `{ typeName, keyspace, fields }`, and the ABSENCE of an index
+    // signature is load-bearing -- `[field: string]: Value` is what let a UDT
+    // field named `_type`/`_keyspace` share a namespace with the markers.
+    //
+    // The interface BODY is isolated first. A `[\s\S]*?` scan from the interface
+    // name reaches arbitrarily far into the rest of the file, so a match proves
+    // only that the token appears SOMEWHERE after it -- which for the negative
+    // assertions below would be a vacuous pass (`_type` and `[field: string]`
+    // both appear later in this file's own JSDoc and in `Row`).
+    const udtBody = () => {
+      const match = dtsContent.match(/export\s+interface\s+UdtValue\s*\{([\s\S]*?)\n\}/);
+      expect(match).not.toBeNull();
+      return match[1];
+    };
+
+    test('should have typeName property', () => {
+      expect(udtBody()).toMatch(/\btypeName\s*:\s*string/);
     });
 
-    test('should have _keyspace property', () => {
-      expect(dtsContent).toMatch(/interface\s+UdtValue[\s\S]*?_keyspace\s*:\s*string/);
+    test('should have keyspace property', () => {
+      expect(udtBody()).toMatch(/\bkeyspace\s*:\s*string/);
     });
 
-    test('should have index signature for fields', () => {
-      expect(dtsContent).toMatch(/interface\s+UdtValue[\s\S]*?\[field\s*:\s*string\]\s*:\s*Value/);
+    test('should have a fields mapping', () => {
+      expect(udtBody()).toMatch(/\bfields\s*:\s*Record\s*<\s*string\s*,\s*Value\s*>/);
+    });
+
+    test('should NOT declare an index signature (that is what permitted the collision)', () => {
+      expect(udtBody()).not.toMatch(/\[\s*\w+\s*:\s*string\s*\]\s*:/);
+    });
+
+    test('should NOT declare the removed _type/_keyspace markers', () => {
+      expect(udtBody()).not.toMatch(/_type\s*:/);
+      expect(udtBody()).not.toMatch(/_keyspace\s*:/);
     });
   });
 

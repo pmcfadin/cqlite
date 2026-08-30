@@ -26,7 +26,7 @@
 //! | Set | `Set` |
 //! | Map | `Map` |
 //! | Tuple | `Array` |
-//! | Udt | `object` with `_type`, `_keyspace`, and field properties |
+//! | Udt | `object` with `typeName`, `keyspace` and a nested `fields` object |
 
 use crate::error::to_napi_error;
 use cqlite_core::types::Value;
@@ -42,19 +42,22 @@ use std::cell::OnceCell;
 /// each constructor at most once per result conversion, lazily: a result with no
 /// `set`/`map` cells performs zero constructor lookups.
 ///
-/// INVARIANT: at most one `get_global()` + named-property lookup for `Set` and
-/// one for `Map` per `ConvCtx`, regardless of row/cell count; zero when the
-/// result has no set/map cells. The [`ctor_lookups`](self::testing::ctor_lookups)
-/// work counter proves this in tests.
+/// INVARIANT: at most one `get_global()` + named-property lookup for `Set`, one
+/// for `Map` and one for `Object.create` (the null-prototype UDT field bag, see
+/// [`udt_to_object`]) per `ConvCtx`, regardless of row/cell count; zero for a
+/// kind the result contains no cells of. The
+/// [`ctor_lookups`](self::testing::ctor_lookups) work counter proves this in
+/// tests.
 ///
 /// One `ConvCtx` is constructed per result (batch: once in `resolve`; streaming:
 /// once per yielded row, since napi handles are scoped to each `resolve` `Env`)
 /// and threaded by shared reference through `row_to_object` → `value_to_napi` →
-/// `set_to_js_set`/`map_to_js_map`.
+/// `set_to_js_set`/`map_to_js_map`/`udt_to_object`.
 pub struct ConvCtx<'a> {
     env: &'a Env,
     set_ctor: OnceCell<JsFunction>,
     map_ctor: OnceCell<JsFunction>,
+    object_create: OnceCell<JsFunction>,
 }
 
 impl<'a> ConvCtx<'a> {
@@ -65,6 +68,7 @@ impl<'a> ConvCtx<'a> {
             env,
             set_ctor: OnceCell::new(),
             map_ctor: OnceCell::new(),
+            object_create: OnceCell::new(),
         }
     }
 
@@ -87,6 +91,41 @@ impl<'a> ConvCtx<'a> {
             let global = self.env.get_global()?;
             global.get_named_property::<JsFunction>("Map")
         })
+    }
+
+    /// The cached global `Object.create`, fetched at most once per context.
+    ///
+    /// Used by [`udt_to_object`] to build the UDT field bag with a NULL
+    /// PROTOTYPE. Cached on the same terms as `Set`/`Map` above: a result with
+    /// no UDT cells performs zero lookups, and a result with a million pays one.
+    fn object_create(&self) -> Result<&JsFunction> {
+        cache_get_or_try_init(&self.object_create, || {
+            let global = self.env.get_global()?;
+            // Read through `JsUnknown` + `coerce_to_object`: the global `Object`
+            // IS a function, and napi's typed `get_named_property::<JsObject>`
+            // rejects a function ("Expect value to be Object, but received
+            // Function"). `ToObject` of a function is that same function object,
+            // whose `create` property is what we want.
+            global
+                .get_named_property::<JsUnknown>("Object")?
+                .coerce_to_object()?
+                .get_named_property::<JsFunction>("create")
+        })
+    }
+
+    /// A fresh object with a NULL PROTOTYPE — `Object.create(null)`.
+    ///
+    /// The whole point is that it INHERITS NOTHING, so no property name a
+    /// caller supplies can reach an inherited accessor or an inherited
+    /// non-writable slot. See [`udt_to_object`] for why that matters.
+    fn create_null_prototype_object(&self) -> Result<JsObject> {
+        let null = self.env.get_null()?;
+        // `ToObject` of an object is that same object (ECMA-262), so this
+        // re-types the returned handle without allocating or copying — it is a
+        // cast with a checked status, not a conversion.
+        self.object_create()?
+            .call(None, &[null])?
+            .coerce_to_object()
     }
 }
 
@@ -414,28 +453,81 @@ fn map_to_js_map(ctx: &ConvCtx, pairs: &[(Value, Value)]) -> Result<JsUnknown> {
     Ok(map_instance.into_unknown())
 }
 
-/// Convert UDT to JavaScript object.
+/// Convert a UDT to a JavaScript object whose type identity is carried OUT OF
+/// BAND (issue #3504).
 ///
-/// Creates an object with:
-/// - `_type`: The UDT type name
-/// - `_keyspace`: The keyspace containing the UDT
-/// - All field names as properties
+/// Creates `{ typeName, keyspace, fields }`, where `fields` is a nested object
+/// holding the declared fields and NOTHING else.
+///
+/// This used to set `_type` and `_keyspace` on the object and then set every
+/// field name on the SAME object, so a UDT field named `_type` or `_keyspace` —
+/// legal CQL via a quoted identifier — overwrote the marker and the type name
+/// became unrecoverable. Giving the fields a namespace of their own removes the
+/// slot they competed for; `result._type` is now `undefined` and the type name is
+/// `result.typeName`.
+///
+/// Fields are deliberately NOT also mirrored at the top level: that would
+/// re-flatten them beside `typeName`/`keyspace` and reintroduce the exact defect.
+/// The Python binding keeps mapping access via a dedicated `cqlite.Udt` type, so
+/// the two bindings differ in ergonomics and agree on semantics.
+///
+/// ## Why `fields` has a NULL PROTOTYPE
+///
+/// Giving the fields their own object is not by itself enough. An ordinary
+/// property assignment is a JavaScript `[[Set]]`, which CONSULTS THE PROTOTYPE
+/// CHAIN: if the name matches an inherited accessor, the assignment calls that
+/// setter instead of creating a field. On a plain `{}` — i.e. anything
+/// inheriting from `Object.prototype` — that is a live channel between a
+/// user-controlled NAME and the engine's own object model, which is the SAME
+/// control/data collision this whole change exists to remove, one layer down.
+/// Measured on the Cassandra-written fixture before this fix (a UDT declaring
+/// `"__proto__"`, legal CQL via a quoted identifier exactly as `"_type"` is):
+/// a string-valued field VANISHED (absent from `Object.keys`, not an own
+/// property, `fields.__proto__` reading back `Object.prototype`), and a
+/// null-valued one REPLACED the object's prototype with `null`.
+///
+/// `Object.create(null)` inherits nothing, so there is no accessor and no
+/// non-writable inherited slot for any name to reach, and every field becomes
+/// an ordinary own data property. Deliberately NOT a special case on the
+/// literal string `__proto__`: that would be picking a rarer delimiter rather
+/// than removing the shared channel, and it would leave every other inherited
+/// name — including any a future JavaScript adds to `Object.prototype` —
+/// still able to intercept a declared field. Defining own properties
+/// (`napi_define_properties`) would also bypass `[[Set]]`, but it leaves
+/// `'toString' in fields` true and `fields.constructor` truthy, so an absence
+/// probe on the bag still reads inherited junk; a null-prototype bag makes
+/// `fields[name] === undefined` mean exactly "no such field".
+///
+/// The cost is one cached `Object.create` call per UDT cell (the constructor
+/// lookup itself is once per result, [`ConvCtx::object_create`]), and the
+/// observable shape is unchanged for every read a caller performs on a mapping:
+/// `Object.keys`, `in`, indexing, spread, destructuring, `JSON.stringify` and
+/// `Object.entries` all behave identically. `fields.hasOwnProperty(...)` does
+/// NOT exist on it — use `Object.prototype.hasOwnProperty.call(fields, name)`
+/// or `Object.hasOwn(fields, name)`, which is also the only form that is
+/// correct on a bag whose keys are user-controlled.
+///
+/// The OUTER object keeps a normal prototype: `typeName`/`keyspace`/`fields` are
+/// chosen HERE, not by data, so no user-controlled name is ever written to it.
 fn udt_to_object(ctx: &ConvCtx, udt: &cqlite_core::UdtValue) -> Result<JsUnknown> {
     let env = ctx.env();
     let mut obj = env.create_object()?;
 
-    // Add type metadata
-    obj.set_named_property("_type", env.create_string(&udt.type_name)?)?;
-    obj.set_named_property("_keyspace", env.create_string(&udt.keyspace)?)?;
+    // Type identity, in a namespace no field name can reach.
+    obj.set_named_property("typeName", env.create_string(&udt.type_name)?)?;
+    obj.set_named_property("keyspace", env.create_string(&udt.keyspace)?)?;
 
-    // Add fields
+    // Declared fields, in their own namespace, on an object that inherits
+    // NOTHING — see the doc comment above.
+    let mut fields = ctx.create_null_prototype_object()?;
     for field in &udt.fields {
         let value = match &field.value {
             Some(v) => value_to_napi(ctx, v)?,
             None => env.get_null()?.into_unknown(),
         };
-        obj.set_named_property(&field.name, value)?;
+        fields.set_named_property(&field.name, value)?;
     }
+    obj.set_named_property("fields", fields)?;
 
     Ok(obj.into_unknown())
 }

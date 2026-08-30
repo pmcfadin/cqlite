@@ -166,29 +166,75 @@ async function main() {
     // =============================================
     console.log('\n=== User-Defined Types ===\n');
 
-    // collections_with_udts has UDT columns
-    const udts = await db.execute(
+    // WHICH CALL, AND WHY IT IS NOT `execute()`: only the NATIVE path produces
+    // the UDT object. `execute()` shapes rows through `value_to_json`
+    // (`src/database/json_value.rs`, `Value::Udt`), which emits a BARE object of
+    // the declared fields — no `typeName`, no `keyspace`, no `fields` wrapper —
+    // because JSON output mirrors the CLI's. So the structural check below can
+    // never fire on an `execute()` row and the #3504 shape is not demonstrable
+    // there. (The pre-#3504 version of this example had the same defect one shape
+    // earlier: it sniffed `_type` on an `execute()` row, which `value_to_json`
+    // does not emit either — so it printed nothing then too.)
+    const udts = await db.executeNative(
       'SELECT * FROM test_collections.collections_with_udts LIMIT 1'
     );
 
-    for (const row of udts.rows) {
-      // UDTs are returned as objects with _type and _keyspace metadata
-      const keys = Object.keys(row);
-      console.log(`Row has ${keys.length} columns`);
+    // A UDT is `{ typeName, keyspace, fields }` — the type identity is carried
+    // OUT OF BAND and the declared fields live in `fields` alone (issue #3504).
+    // Before that change `_type`/`_keyspace` were set on the same object as the
+    // field names, so a UDT declaring a field of either name silently overwrote
+    // the marker.
+    interface UdtValueShape {
+      typeName: string;
+      keyspace: string;
+      fields: Record<string, unknown>;
+    }
 
-      // Check each column for UDT structure
-      for (const key of keys) {
-        const value = row[key];
-        if (value && typeof value === 'object' && '_type' in value) {
-          const udt = value as { _type: string; _keyspace: string; [key: string]: unknown };
-          console.log(`${key} (UDT):`);
-          console.log(`  Type: ${udt._type}`);
-          console.log(`  Keyspace: ${udt._keyspace}`);
-          // Print UDT fields
-          for (const field of Object.keys(udt)) {
-            if (!field.startsWith('_')) {
-              console.log(`  ${field}: ${udt[field]}`);
-            }
+    // Recognise a UDT by its STRUCTURE, not by sniffing for a marker key the data
+    // itself could supply. Note the LIMIT of this check: three co-occurring keys
+    // is a narrower SNIFF than Python's `isinstance(v, cqlite.Udt)`, not an
+    // authoritative type test — a JSON object cell can carry the same keys
+    // (`docs/development/M4_spec.md` §5.3, instance b-5).
+    const isUdt = (value: unknown): value is UdtValueShape =>
+      typeof value === 'object' &&
+      value !== null &&
+      'typeName' in value &&
+      'keyspace' in value &&
+      'fields' in value;
+
+    // In THIS table every UDT is nested inside a collection
+    // (`LIST<FROZEN<address_type>>`, `SET<FROZEN<contact_info>>`,
+    // `MAP<TEXT, FROZEN<contact_info>>`) — measured: it has no top-level UDT
+    // column at all, so checking only the cell itself prints nothing. Hence the
+    // descent through arrays, `Set`s and `Map` VALUES, and through UDT fields
+    // (`contact_info.address` is itself a UDT).
+    function* udtsIn(value: unknown): Generator<UdtValueShape> {
+      if (isUdt(value)) {
+        yield value;
+        for (const field of Object.values(value.fields)) yield* udtsIn(field);
+      } else if (Array.isArray(value)) {
+        for (const item of value) yield* udtsIn(item);
+      } else if (value instanceof Set) {
+        for (const item of value) yield* udtsIn(item);
+      } else if (value instanceof Map) {
+        for (const item of value.values()) yield* udtsIn(item);
+      }
+    }
+
+    for (const row of udts.rows) {
+      const columns = Object.keys(row);
+      console.log(`Row has ${columns.length} columns`);
+
+      for (const column of columns) {
+        for (const udt of udtsIn(row[column])) {
+          console.log(`${column} -> UDT:`);
+          console.log(`  Type: ${udt.typeName}`);
+          console.log(`  Keyspace: ${udt.keyspace}`);
+          // Print UDT fields. No name filtering is needed any more: `fields`
+          // holds declared fields and nothing else, so a field genuinely named
+          // `_type` prints like any other.
+          for (const [field, fieldValue] of Object.entries(udt.fields)) {
+            console.log(`  ${field}: ${JSON.stringify(fieldValue)}`);
           }
         }
       }

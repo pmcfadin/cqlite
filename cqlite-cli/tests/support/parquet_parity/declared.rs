@@ -1,0 +1,1234 @@
+//! THE declared-type-guided canonicalization entry point (issue #1490).
+//!
+//! # The invariant, and the three review rounds that produced it
+//!
+//! Both sides of this harness turn a raw value — a JSON value out of the
+//! sstabledump golden, or an Arrow cell out of the exported Parquet file — into
+//! a [`CanonicalValue`]. Neither raw form carries a CQL type: sstabledump
+//! renders a `boolean` key as `"true"`, a `set<int>` element as `"-2"` and a
+//! `timestamp` as a quoted string, while Arrow renders both a `varint` and a
+//! whole-valued `decimal` as `Decimal128(38, 0)`. Every one of those is
+//! ambiguous WITHOUT the column's DECLARED CQL type, and inferring the type from
+//! the value's bytes is the no-heuristics violation of issue #28.
+//!
+//! **So: every position where a raw value becomes a `CanonicalValue` MUST route
+//! through this module, carrying the [`CqlTypeSpec`] declared for THAT
+//! position.** That is the invariant, and it is written here because it was
+//! established the expensive way — three consecutive review rounds each found a
+//! DIFFERENT position that canonicalized without consulting the declared type,
+//! and each was patched where it was found:
+//!
+//!   * round 5 — top-level scalars, collection values and map keys typed a
+//!     STRING by its spelling (a `text` cell spelling a timestamp became a
+//!     `Timestamp`);
+//!   * round 6 — primary-KEY components (`boolean`/`float`/`decimal` keys stayed
+//!     `Text`, a false primary-key difference on every row);
+//!   * round 7 — `Decimal128` decoding (scale-zero `decimal` compared as an
+//!     integer) and multicell collection PATH components (only integral
+//!     elements were converted, so `set<float>`/`set<decimal>` and
+//!     boolean-keyed maps compared stringified text against typed values).
+//!
+//! The pattern is one defect, not three: a canonicalization site that does not
+//! take a declared type. Hence ONE recursion per side, and the SEVEN positions
+//! all of it flows through:
+//!
+//!   1. a top-level scalar cell — [`Declared::cell`];
+//!   2. a collection ELEMENT (list/set) — internal, from the parent's `elem`;
+//!   3. a map VALUE — internal, from the parent's `value`;
+//!   4. a map KEY — internal, from the parent's `key`;
+//!   5. a multicell collection PATH component — [`Declared::collection_path`];
+//!   6. a primary-key component — [`Declared::primary_key`];
+//!   7. a tuple / UDT field — internal; a UDT's FIELD types are genuinely not
+//!      declared to the harness, so that position carries an explicitly NAMED
+//!      absence ([`DeclaredType::Unavailable`]) rather than a silent guess.
+//!
+//! # What makes bypassing it structurally hard
+//!
+//! * The two canonicalizers ([`canonicalize_golden`], [`canonicalize_arrow`] and
+//!   the `Decimal128` door [`canonicalize_arrow_decimal`]) take a `&Declared`.
+//!   There is no spec-free overload, so a new call site cannot compile without
+//!   deciding which declared type applies.
+//! * `Declared`'s public constructors all REQUIRE a `&CqlTypeSpec`. The
+//!   spec-less constructor is private to this module and is reachable only from
+//!   the recursion, which must name a REASON the declared type does not exist.
+//! * The child position of every container is built INSIDE the recursion, from
+//!   the parent's spec — so adding a nested position means adding an arm that
+//!   already has the spec in hand.
+//! * Every ambiguous decision REFUSES (`Err`) when the declared type is
+//!   unavailable, instead of picking a default: an accidental bypass fails
+//!   closed and loudly rather than comparing something it guessed.
+//! * The per-pass helpers this module absorbed (string typing, number
+//!   canonicalization, frozen-map reshaping, stringified-scalar conversion) are
+//!   private to it. Nothing outside can canonicalize a value one pass at a time,
+//!   which is how a position came to run two of the three passes and not the
+//!   third.
+
+#![allow(dead_code)]
+
+use arrow::array::Array;
+
+use super::canonical_jsonl::{CanonicalValue, NormalizedFloat};
+use super::cql_type::{ColumnType, CqlTypeSpec, SeqKind};
+use super::decimal::{
+    exact_from_decimal128, exact_from_text, is_canonical_text, ExactDecimal, EXPORT_DECIMAL_SCALE,
+};
+use serde_json::value::RawValue;
+
+use super::golden_text::RawObject;
+
+/// WHERE a value sits. Two things depend on it: the diagnostic text, and
+/// whether Cassandra renders the value at that position as a STRING (see
+/// [`Position::is_stringified`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Position {
+    /// A top-level cell of a declared column.
+    Cell,
+    /// An element of a list/set.
+    Element,
+    /// A map entry's key, in a value that is ALREADY a canonical map.
+    MapKey,
+    /// A map entry's value.
+    MapValue,
+    /// A multicell collection PATH component — a set element, or a map key,
+    /// as sstabledump writes it: STRINGIFIED.
+    CollectionPath,
+    /// A partition-key or clustering component — STRINGIFIED.
+    PrimaryKey,
+    /// A frozen map's JSON-OBJECT key — STRINGIFIED (a JSON object key always
+    /// is).
+    FrozenMapObjectKey,
+    /// A positional CQL tuple member.
+    TupleField(usize),
+    /// A named UDT field.
+    UdtField(String),
+}
+
+impl Position {
+    /// Does Cassandra render this position's value as a STRING that has to be
+    /// converted back through the declared type?
+    ///
+    /// `true` for the three positions where it does: every primary-key
+    /// component and every collection PATH component goes through
+    /// `AbstractType.getString` (so an `int` is `"1"`, a `boolean` `"true"`, a
+    /// `float` `Float.toString`, a `decimal` `BigDecimal.toString`), and a JSON
+    /// object key is a string by JSON's own rules. Everywhere else sstabledump
+    /// writes a TYPED JSON value, which must NOT be re-parsed out of its text.
+    pub fn is_stringified(&self) -> bool {
+        matches!(
+            self,
+            Position::CollectionPath | Position::PrimaryKey | Position::FrozenMapObjectKey
+        )
+    }
+
+    /// May a value at this position legitimately be ABSENT — i.e. carry no
+    /// authoritative value at all, however the golden spells that (a missing
+    /// `value` key, which the shared parser renders as
+    /// [`CanonicalValue::Absent`], or an explicit JSON `null`, which it renders
+    /// as [`CanonicalValue::Null`])?
+    ///
+    /// This is the position half of ONE property: **a golden position that CQL
+    /// requires to hold a value must hold one, and "nothing here" is REFUSED
+    /// however it is spelled.** Enumerating spellings is what made the previous
+    /// version of this refusal incomplete — it rejected the missing-`value`
+    /// spelling and passed the explicit-`null` one, which then folded into
+    /// `Absent` and compared EQUAL to an export that wrongly wrote NULL (the
+    /// silent NULL-coercion of AC1, #1485). So the question is asked of the
+    /// POSITION, which is a closed set, rather than of the value's spelling,
+    /// which is not.
+    ///
+    /// `true` at exactly three positions, each because Cassandra legitimately
+    /// renders an absence there:
+    ///
+    ///   * [`Position::Cell`] — a Cassandra NULL **is** the absence of a cell,
+    ///     which `golden_rows::project_column` projects to `Absent` before this
+    ///     descent runs. Present-but-valueless is a DIFFERENT state and is
+    ///     refused one level up, by `golden_rows::require_recognized_cell_shape`,
+    ///     which still sees the cell and so can tell the two apart.
+    ///   * [`Position::UdtField`] — a frozen UDT with a null field is dumped as
+    ///     one JSON object carrying an explicit `null`
+    ///     (`{"first_name":"Edsger","last_name":null,…}` appears in the
+    ///     committed corpus), and CQL permits a null UDT field.
+    ///   * [`Position::TupleField`] — CQL permits a null tuple member, and
+    ///     sstabledump renders it as a positional `null`.
+    ///
+    /// `false` everywhere else, and each `false` is a CQL rule rather than a
+    /// convention: a collection may not contain a null element, a map may not
+    /// have a null key or a null value, and no primary-key or collection-path
+    /// component may be null. A `null` at one of those positions is a malformed
+    /// golden, and reading it as NULL is exactly how a malformed oracle blesses
+    /// a wrong export.
+    pub fn permits_absence(&self) -> bool {
+        matches!(
+            self,
+            Position::Cell | Position::UdtField(_) | Position::TupleField(_)
+        )
+    }
+
+    fn describe(&self) -> String {
+        match self {
+            Position::Cell => "cell".to_string(),
+            Position::Element => "collection element".to_string(),
+            Position::MapKey => "map key".to_string(),
+            Position::MapValue => "map value".to_string(),
+            Position::CollectionPath => "collection path component".to_string(),
+            Position::PrimaryKey => "primary-key component".to_string(),
+            Position::FrozenMapObjectKey => "frozen map object key".to_string(),
+            Position::TupleField(i) => format!("tuple field {i}"),
+            Position::UdtField(name) => format!("UDT field '{name}'"),
+        }
+    }
+}
+
+/// The declared type at a position — or a NAMED absence.
+///
+/// Three-valued in spirit and two-valued in code: there is no "unknown, carry
+/// on" state. `Unavailable` carries WHY, and every ambiguous decision refuses
+/// on it (a positive verdict requires an affirmative measurement).
+#[derive(Debug, Clone)]
+pub enum DeclaredType<'a> {
+    Known(&'a CqlTypeSpec),
+    /// The declared type genuinely does not exist for this position — today only
+    /// a UDT's field types, which the harness models as a NAME only.
+    Unavailable(&'static str),
+}
+
+/// A position plus the declared type that governs it plus the diagnostic
+/// context. The single argument both canonicalizers take.
+#[derive(Debug, Clone)]
+pub struct Declared<'a> {
+    ty: DeclaredType<'a>,
+    position: Position,
+    ctx: String,
+}
+
+impl<'a> Declared<'a> {
+    /// Position 1: a top-level cell of a declared column.
+    pub fn cell(spec: &'a CqlTypeSpec, ctx: impl Into<String>) -> Self {
+        Self::known(spec, Position::Cell, ctx)
+    }
+
+    /// Position 6: a partition-key or clustering component, which sstabledump
+    /// renders as a quoted string.
+    pub fn primary_key(spec: &'a CqlTypeSpec, ctx: impl Into<String>) -> Self {
+        Self::known(spec, Position::PrimaryKey, ctx)
+    }
+
+    /// Position 5: a multicell collection path component (a set element or a map
+    /// key), which sstabledump also renders as a quoted string.
+    pub fn collection_path(spec: &'a CqlTypeSpec, ctx: impl Into<String>) -> Self {
+        Self::known(spec, Position::CollectionPath, ctx)
+    }
+
+    /// Position 2/3: an element of a non-frozen list, or a map entry's value,
+    /// assembled from a per-element cell's VALUE (already typed JSON).
+    pub(super) fn element(spec: &'a CqlTypeSpec, ctx: impl Into<String>) -> Self {
+        Self::known(spec, Position::Element, ctx)
+    }
+
+    pub(super) fn map_value(spec: &'a CqlTypeSpec, ctx: impl Into<String>) -> Self {
+        Self::known(spec, Position::MapValue, ctx)
+    }
+
+    fn known(spec: &'a CqlTypeSpec, position: Position, ctx: impl Into<String>) -> Self {
+        Declared {
+            ty: DeclaredType::Known(spec),
+            position,
+            ctx: ctx.into(),
+        }
+    }
+
+    /// PRIVATE on purpose: a spec-less position must be created by the recursion
+    /// that knows WHY the declared type does not exist. No outside caller can
+    /// manufacture one, so "I had no spec here" is never a way past this module.
+    fn unavailable(why: &'static str, position: Position, ctx: impl Into<String>) -> Self {
+        Declared {
+            ty: DeclaredType::Unavailable(why),
+            position,
+            ctx: ctx.into(),
+        }
+    }
+
+    /// A child position, with the child's declared type derived from this one's.
+    fn child(&self, spec: Option<&'a CqlTypeSpec>, position: Position, ctx: String) -> Self {
+        match spec {
+            Some(spec) => Declared {
+                ty: DeclaredType::Known(spec),
+                position,
+                ctx,
+            },
+            None => Declared {
+                ty: DeclaredType::Unavailable(
+                    "the parent's declared type does not describe this position",
+                ),
+                position,
+                ctx,
+            },
+        }
+    }
+
+    pub fn ctx(&self) -> &str {
+        &self.ctx
+    }
+
+    pub fn position(&self) -> &Position {
+        &self.position
+    }
+
+    fn spec(&self) -> Option<&'a CqlTypeSpec> {
+        match self.ty {
+            DeclaredType::Known(spec) => Some(spec),
+            DeclaredType::Unavailable(_) => None,
+        }
+    }
+
+    /// The declared SCALAR type name at this position, if the declared type is a
+    /// scalar at all.
+    fn scalar(&self) -> Option<&'a str> {
+        match self.spec() {
+            Some(CqlTypeSpec::Scalar(name)) => Some(name.as_str()),
+            _ => None,
+        }
+    }
+
+    /// Does a value at THIS position have to keep its literal TEXT, because
+    /// `serde_json`'s parse would destroy it?
+    ///
+    /// True for exactly two declared scalars, and the decision is taken HERE —
+    /// at a position, from that position's declared type — rather than per
+    /// COLUMN, so a `map<decimal,int>` preserves its declared-`decimal`
+    /// positions and leaves its `int` values alone (round 11).
+    ///
+    /// * `decimal` — `sstabledump` writes a decimal CELL as a bare JSON number,
+    ///   which the shared parser turns into an `f64`, and an `f64` cannot
+    ///   identify the decimal it came from (`0.100000000000000001` and `0.1`
+    ///   are ONE double).
+    /// * `varint` — a `varint` above `u64::MAX` also becomes an `f64`
+    ///   (`Number::as_i64` and `as_u64` both fail), while the exported side
+    ///   reads that column back as an exact `Decimal128(38, 0)` `Int`. So the
+    ///   comparison was `Float` vs `Int` — a false mismatch — and the digits
+    ///   that would have shown a real corruption were already gone.
+    ///
+    /// Nothing else, deliberately: a `float`/`double` literal MUST reach
+    /// `serde_json`'s (exact, `float_roundtrip`) number parser unchanged, which
+    /// is what keeps the exact-bit float comparison exact.
+    fn preserves_exact_lexeme(&self) -> bool {
+        matches!(self.scalar(), Some("decimal") | Some("varint"))
+    }
+
+    /// A refusal naming the position, the declared type (or its absence) and the
+    /// context — used wherever a decision NEEDS the declared type.
+    fn refuse(&self, what: &str) -> String {
+        let ty = match &self.ty {
+            DeclaredType::Known(spec) => format!("declared type {spec:?}"),
+            DeclaredType::Unavailable(why) => {
+                format!("NO declared type is available here ({why})")
+            }
+        };
+        format!(
+            "{}: at the {} — {ty} — {what}",
+            self.ctx,
+            self.position.describe()
+        )
+    }
+}
+
+// ---------------------------------------------------------------------------
+// The GOLDEN side
+// ---------------------------------------------------------------------------
+
+/// Canonicalize ONE raw golden value at ONE declared position, recursively.
+///
+/// Five things happen here, in this order, and the order is load-bearing:
+///
+///   1. a value that carries NO AUTHORITATIVE VALUE — an explicit JSON `null` or
+///      a missing `value`, the two spellings of the same absence — is REFUSED
+///      unless the POSITION legitimately permits one
+///      ([`require_authoritative_value`], [`Position::permits_absence`]); where
+///      it does, it folds into `Absent` (Arrow has one null, and CQL does not
+///      distinguish the two);
+///   2. at a STRINGIFIED position ([`Position::is_stringified`]) the value's
+///      TEXT is converted through the declared scalar type — this is the round-6
+///      key-component conversion and the round-7 path conversion, now one
+///      function;
+///   3. a shape JSON cannot carry is reshaped: a frozen map arrives as a JSON
+///      OBJECT, which the shared parser necessarily reads as a `Tuple`, while
+///      the Arrow side reads the same column back as a `Map`;
+///   4. containers RECURSE, each child at its own position with its own child
+///      spec;
+///   5. scalars are typed from the declared type — a `Timestamp` only where
+///      `timestamp` is declared, a `float` re-narrowed to 32 bits, a `decimal`
+///      read from its PRESERVED LITERAL into an EXACT unscaled/scale pair, and
+///      REFUSED if it arrives as an `f64`.
+///
+/// # Idempotent by construction
+///
+/// A multicell collection's PATH components are canonicalized where they are
+/// assembled (only there is it known that they are stringified), and the
+/// assembled column value then goes through this function again. That is safe
+/// because every rule here is idempotent: `Int` stays `Int`, an exact decimal is
+/// already a tagged `Text`, narrowing an `f32`-widened double again is the
+/// identity, and a non-stringified position never re-parses text.
+pub fn canonicalize_golden(
+    raw: CanonicalValue,
+    at: &Declared<'_>,
+) -> Result<CanonicalValue, String> {
+    let value = require_authoritative_value(raw, at)?;
+    let value = if at.position.is_stringified() {
+        type_stringified_scalar(value, at)?
+    } else {
+        value
+    };
+    match (value, at.spec()) {
+        // A frozen map's JSON object (read as a `Tuple` of string-keyed fields)
+        // becomes a canonical `Map`. The keys are STRINGS by JSON's own rules,
+        // so each goes back through the declared key type at the
+        // `FrozenMapObjectKey` position — never blindly, so a `map<text,int>`
+        // key "5" stays `Text` and can never equal an integer key 5.
+        //
+        // ORDER is preserved, and the comparison depends on it: the workspace
+        // pins `serde_json`'s `preserve_order`, so the golden's object order IS
+        // the order sstabledump wrote (Cassandra's key-comparator order), which
+        // is the order the Arrow map carries.
+        (CanonicalValue::Tuple(fields), Some(CqlTypeSpec::Map { key, value })) => {
+            let mut out = Vec::with_capacity(fields.len());
+            for (k, v) in fields {
+                let kc = canonicalize_golden(
+                    CanonicalValue::Text(k.clone()),
+                    &at.child(
+                        Some(key),
+                        Position::FrozenMapObjectKey,
+                        format!("{}.key({k})", at.ctx),
+                    ),
+                )?;
+                let vc = canonicalize_golden(
+                    v,
+                    &at.child(Some(value), Position::MapValue, format!("{}.{k}", at.ctx)),
+                )?;
+                out.push((kc, vc));
+            }
+            Ok(CanonicalValue::Map(out))
+        }
+        (CanonicalValue::Map(kvs), Some(CqlTypeSpec::Map { key, value })) => {
+            let mut out = Vec::with_capacity(kvs.len());
+            for (i, (k, v)) in kvs.into_iter().enumerate() {
+                let kc = canonicalize_golden(
+                    k,
+                    &at.child(Some(key), Position::MapKey, format!("{}.key[{i}]", at.ctx)),
+                )?;
+                let vc = canonicalize_golden(
+                    v,
+                    &at.child(
+                        Some(value),
+                        Position::MapValue,
+                        format!("{}.value[{i}]", at.ctx),
+                    ),
+                )?;
+                out.push((kc, vc));
+            }
+            Ok(CanonicalValue::Map(out))
+        }
+        (CanonicalValue::List(xs), Some(CqlTypeSpec::Seq { elem, .. })) => {
+            Ok(CanonicalValue::List(recurse_seq(xs, elem, at)?))
+        }
+        (CanonicalValue::Set(xs), Some(CqlTypeSpec::Seq { elem, .. })) => {
+            Ok(CanonicalValue::Set(recurse_seq(xs, elem, at)?))
+        }
+        // A CQL tuple arrives as a POSITIONAL JSON array, matched member-wise.
+        // (Its outer shape still differs from the Arrow `Struct` the export
+        // produces, which is why such a column's VALUES are refused by name in
+        // `unsupported.rs` rather than compared — but the members are still
+        // canonicalized from their declared types, so the refusal is the only
+        // thing standing between the two, not a missing conversion.)
+        (CanonicalValue::List(xs), Some(CqlTypeSpec::Tuple(specs))) if xs.len() == specs.len() => {
+            let mut out = Vec::with_capacity(xs.len());
+            for (i, (x, s)) in xs.into_iter().zip(specs.iter()).enumerate() {
+                out.push(canonicalize_golden(
+                    x,
+                    &at.child(Some(s), Position::TupleField(i), format!("{}.{i}", at.ctx)),
+                )?);
+            }
+            Ok(CanonicalValue::List(out))
+        }
+        // A UDT arrives as ONE JSON object whose field values sstabledump has
+        // already typed, and the harness models a UDT as a NAME only — so each
+        // field's declared type is genuinely absent. Recorded as an explicit,
+        // NAMED absence rather than a guess: the fields keep the representation
+        // the shared parser produced, and if that is ever wrong it shows up as a
+        // loud value difference. (Nothing in the corpus reaches here today: the
+        // UDT columns sit behind the #3556 whole-case gap.)
+        (CanonicalValue::Tuple(fields), Some(CqlTypeSpec::Udt(_))) => {
+            let mut out = Vec::with_capacity(fields.len());
+            for (name, v) in fields {
+                let child = Declared::unavailable(
+                    "a UDT's FIELD types are not declared to the harness — a frozen UDT \
+                     arrives as one JSON object whose values sstabledump has already typed",
+                    Position::UdtField(name.clone()),
+                    format!("{}.{name}", at.ctx),
+                );
+                out.push((name, canonicalize_golden(v, &child)?));
+            }
+            Ok(CanonicalValue::Tuple(out))
+        }
+        (value, _) => type_scalar_golden(value, at),
+    }
+}
+
+/// REFUSE a value that carries NO AUTHORITATIVE VALUE at a position CQL
+/// requires to hold one — whichever way the golden spells the absence.
+///
+/// THE PROPERTY, stated once: a present golden position must carry a value the
+/// harness authoritatively obtained. "Nothing here" has TWO spellings in this
+/// pipeline — a missing `value` key, which the shared parser renders as
+/// [`CanonicalValue::Absent`], and an explicit JSON `null`, which it renders as
+/// [`CanonicalValue::Null`] — and both are refused by ONE predicate, so a third
+/// spelling (a `Null` nested under a container the descent folds) is covered
+/// too. The previous version of this refusal blacklisted the missing-`value`
+/// spelling only; the explicit `null` walked past it, folded into `Absent`, and
+/// compared EQUAL to an export that wrongly wrote NULL — the silent
+/// NULL-coercion of AC1 (#1485), reported as parity.
+///
+/// WHERE an absence is legitimate is decided by [`Position::permits_absence`],
+/// a closed set of three positions, so this function never has to reason about
+/// how the absence was written.
+///
+/// Runs BEFORE any folding, because folding is what erases the difference
+/// between the two spellings. The fold it then applies is LOCAL to this position
+/// — a nested `Null` is left for its OWN position to judge, so the refusal names
+/// the spelling the golden actually used instead of the one an ancestor's
+/// recursive fold left behind.
+fn require_authoritative_value(
+    raw: CanonicalValue,
+    at: &Declared<'_>,
+) -> Result<CanonicalValue, String> {
+    let spelling = match &raw {
+        CanonicalValue::Null => Some("an explicit JSON `null`"),
+        CanonicalValue::Absent => Some("no value at all (a missing `value`)"),
+        _ => None,
+    };
+    let Some(spelling) = spelling else {
+        return Ok(raw);
+    };
+    if !at.position.permits_absence() {
+        return Err(at.refuse(&format!(
+            "the golden carries {spelling} here, but CQL requires a value at this position \
+             — a collection may not hold a null element, a map may not hold a null key or \
+             value, and no primary-key or collection-path component may be null. The harness \
+             REFUSES it instead of folding it into a NULL: folded, a malformed golden AGREES \
+             with an export that wrongly writes NULL, which is the silent NULL-coercion \
+             (AC1, #1485) this oracle exists to catch. A legitimate nested null lives at a \
+             UDT field or a tuple member, and is accepted there"
+        )));
+    }
+    // Arrow has ONE null and CQL does not distinguish the two spellings, so
+    // where an absence is legitimate both land on `Absent`.
+    Ok(CanonicalValue::Absent)
+}
+
+fn recurse_seq(
+    xs: Vec<CanonicalValue>,
+    elem: &CqlTypeSpec,
+    at: &Declared<'_>,
+) -> Result<Vec<CanonicalValue>, String> {
+    let mut out = Vec::with_capacity(xs.len());
+    for (i, x) in xs.into_iter().enumerate() {
+        out.push(canonicalize_golden(
+            x,
+            &at.child(Some(elem), Position::Element, format!("{}[{i}]", at.ctx)),
+        )?);
+    }
+    Ok(out)
+}
+
+/// Convert a STRINGIFIED position's text into the variant its declared scalar
+/// type denotes (positions 5, 6 and the frozen-map object key).
+///
+/// It converts, it never guesses: the conversion is driven entirely by the
+/// DECLARED type, and a value that does not denote that type is a REFUSAL, never
+/// a fallback to the string — a declared `boolean` holding `"maybe"` is a broken
+/// fixture or a broken declaration, and comparing it as text would hide both.
+/// A NON-scalar declared type (a `frozen<list<text>>` clustering key) is left
+/// untouched: that is a refusal to guess, and the case declaring one is
+/// enumerated as uncovered rather than silently mishandled.
+fn type_stringified_scalar(v: CanonicalValue, at: &Declared<'_>) -> Result<CanonicalValue, String> {
+    let (CanonicalValue::Text(s), Some(name)) = (&v, at.scalar()) else {
+        return Ok(v);
+    };
+    let refuse = |what: &str| {
+        Err(at.refuse(&format!(
+            "the golden renders the value as {s:?}, which is not {what}; the harness refuses \
+             to compare it as text rather than hide the disagreement"
+        )))
+    };
+    match name {
+        // Cassandra's `BooleanType.getString` is Java's `Boolean.toString`.
+        "boolean" => match s.as_str() {
+            "true" => Ok(CanonicalValue::Bool(true)),
+            "false" => Ok(CanonicalValue::Bool(false)),
+            _ => refuse("'true' or 'false'"),
+        },
+        // 32-bit narrowing for `float` is applied by `type_scalar_golden`, which
+        // runs next in the same descent — the same rule a `float` CELL goes
+        // through, so a key/path and a cell cannot diverge.
+        "float" | "double" => match s.parse::<f64>() {
+            Ok(f) if f.is_finite() => Ok(CanonicalValue::Float(NormalizedFloat(f))),
+            _ => refuse("a finite decimal number"),
+        },
+        // Exact, with nothing to refuse for ambiguity: the literal TEXT is
+        // present at every golden decimal position — written by Cassandra's
+        // `BigDecimal.toString` here, and preserved by `golden_text.rs` for a
+        // decimal CELL, which `sstabledump` writes as a bare JSON number.
+        "decimal" => Ok(exact_from_text(s, EXPORT_DECIMAL_SCALE, &at.ctx)?.canonical()),
+        "int" | "bigint" | "smallint" | "tinyint" | "varint" | "counter" => {
+            match s.parse::<i128>() {
+                Ok(i) => Ok(CanonicalValue::Int(i)),
+                Err(_) => refuse("an integer"),
+            }
+        }
+        // text/varchar/ascii/blob/uuid/timeuuid/date/time/inet/duration all
+        // compare as `Text` on the Arrow side, and `timestamp` is settled by
+        // `type_scalar_golden` — nothing to convert.
+        _ => Ok(v),
+    }
+}
+
+/// Type a golden SCALAR from its declared type: the string rule (round 5) and
+/// the number rules, in one place.
+///
+/// * A golden value is a `Timestamp` **iff** its declared type IS `timestamp`.
+///   The shared JSON parser has to guess from the SPELLING (its other lanes have
+///   no schema), and a `text` value that legally spells a timestamp became a
+///   `Timestamp` on the golden side while the Arrow `Utf8` side stayed `Text` —
+///   a false failure produced by inferring a type from a value's bytes (#28).
+///   Nothing is weakened: the restored value is the string the golden literally
+///   carried, and a declared `timestamp` still compares as an INSTANT.
+/// * A `float` re-narrows to 32 bits. sstabledump prints Java's
+///   `Float.toString`, which round-trips through 32 bits; parsed as JSON it is
+///   the nearest DOUBLE to that text, which is not the double a widened `f32`
+///   gives (1.84 vs 1.8399999141693115). Narrowing makes both sides hold the
+///   same double WITHOUT a tolerance — the comparison stays exact-bit.
+/// * A `decimal` becomes an EXACT decimal, and NOTHING about it goes through an
+///   `f64` (see `decimal.rs` and `golden_text.rs`): the literal's TEXT is
+///   preserved before the shared parser sees it, so a decimal arrives here as
+///   that text and is read exactly by `exact_from_text`. An integer-shaped
+///   literal (`Int`) is already exact. A decimal that arrives as a DOUBLE is
+///   REFUSED, because a double cannot identify the decimal it was parsed from —
+///   `0.100000000000000001` and `0.1` are the same double, so the recovery this
+///   replaced (round 4→10) canonicalized the first as the second and would have
+///   passed a lossy export.
+/// * A `varint` stays an INTEGER domain on both sides — but a `varint` above
+///   `u64::MAX` cannot survive `serde_json`'s number parse either, so its
+///   literal is preserved by the same mechanism and read back here with an
+///   exact `i128` parse. A `varint` that arrives as a DOUBLE is REFUSED for the
+///   same reason a decimal is: the digits are already gone.
+fn type_scalar_golden(v: CanonicalValue, at: &Declared<'_>) -> Result<CanonicalValue, String> {
+    let Some(name) = at.scalar() else {
+        // No declared SCALAR here: either a container value under a container
+        // declaration whose shapes disagree (which the value comparison must
+        // report as the difference it is), or a position whose declared type is
+        // genuinely unavailable. Either way, EXACTLY as it was — this function
+        // never invents a type.
+        return Ok(v);
+    };
+    // A declared `timestamp` is settled HERE — at the ONE door every position's
+    // scalar reaches — and its SPELLING is VALIDATED before it is accepted.
+    if name == "timestamp" {
+        return type_declared_timestamp(v, at);
+    }
+    // Anywhere else a `Timestamp` is the text the golden literally carried,
+    // which the rules below then apply to. Done first and unconditionally so no
+    // later rule can be skipped by the shared parser's spelling-based timestamp
+    // recognition.
+    let v = match v {
+        CanonicalValue::Timestamp { raw, .. } => CanonicalValue::Text(raw),
+        other => other,
+    };
+    Ok(match (v, name) {
+        (CanonicalValue::Float(NormalizedFloat(f)), "float") => {
+            CanonicalValue::Float(NormalizedFloat(f as f32 as f64))
+        }
+        (CanonicalValue::Float(NormalizedFloat(f)), "decimal") => {
+            return Err(at.refuse(&format!(
+                "the golden decimal arrived as the double {f:?}, i.e. its LITERAL TEXT was \
+                 lost before the harness saw it. A double cannot identify the decimal it was \
+                 parsed from (0.100000000000000001 and 0.1 are the same double), so the \
+                 harness REFUSES rather than recover one — recovery is what let a lossy \
+                 export compare equal. The literal is preserved by \
+                 golden_text::preserve_exact_lexemes, which every golden goes through; \
+                 reaching here means this value bypassed it"
+            )));
+        }
+        // The PRESERVED LITERAL (or, at a stringified position, the text
+        // Cassandra's `BigDecimal.toString` wrote) — read exactly.
+        //
+        // WHY a `Text` here is AUTHORITATIVE, and not merely plausible: at a
+        // NON-stringified position the only string that can exist is the one
+        // `preserve_lexemes` wrote from a verified JSON number token
+        // (`NumberLexeme`) — every other token there is REFUSED before anything
+        // reads a value — and at a STRINGIFIED position Cassandra itself writes
+        // the string. So the two producers are the only producers, and a golden
+        // spelling `"1.2"` or `"decimal(1.2)"` at a declared `decimal` cell can
+        // no longer arrive here disguised as either.
+        //
+        // `is_canonical_text` keeps the descent idempotent: a stringified
+        // position is converted where it is assembled and passes through here
+        // again already canonical.
+        (CanonicalValue::Text(s), "decimal") => {
+            if is_canonical_text(&s) {
+                CanonicalValue::Text(s)
+            } else {
+                exact_from_text(&s, EXPORT_DECIMAL_SCALE, &at.ctx)?.canonical()
+            }
+        }
+        (CanonicalValue::Int(i), "decimal") => ExactDecimal::from_i128(i).canonical(),
+        // A `varint`'s PRESERVED LITERAL, authoritative for the same reason as
+        // the `decimal` arm above: at a non-stringified position only
+        // `preserve_lexemes` can have written a string here, and only from a
+        // verified JSON number token. The exported side reads a
+        // `Decimal128(38, 0)` back as an `Int`, so the golden lands on the same
+        // exact `i128` — no `f64` in either path. A literal too large for an
+        // `i128` is REFUSED: `Decimal128` could not have carried it either, so
+        // there is nothing to compare it against.
+        (CanonicalValue::Text(s), "varint") => match s.parse::<i128>() {
+            Ok(i) => CanonicalValue::Int(i),
+            Err(_) => {
+                return Err(at.refuse(&format!(
+                    "the golden varint literal '{s}' does not fit an i128, which is \
+                     the unscaled range of the Decimal128(38, 0) the export writes a \
+                     `varint` to; the harness refuses to compare rather than truncate"
+                )))
+            }
+        },
+        (CanonicalValue::Float(NormalizedFloat(f)), "varint") => {
+            return Err(at.refuse(&format!(
+                "the golden varint arrived as the double {f:?}, i.e. its \
+                 LITERAL TEXT was lost before the harness saw it — a `varint` above \
+                 u64::MAX is parsed by serde_json as an f64, while the export writes it \
+                 as an exact Decimal128(38, 0). The literal is preserved by \
+                 golden_text::preserve_exact_lexemes, which every golden goes through; \
+                 reaching here means this value bypassed it"
+            )));
+        }
+        (other, _) => other,
+    })
+}
+
+/// THE declared-`timestamp` door: accept a golden timestamp only if its SPELLING
+/// is one `sstabledump` could have WRITTEN.
+///
+/// # Why this is here and not beside each position (round 18)
+///
+/// Round 17 validated the timestamp SPELLING of every metadata FIELD
+/// (`liveness_info.tstamp`, a cell `tstamp`, `marked_deleted`,
+/// `local_delete_time`) in `golden_schema.rs`. Declared timestamp VALUES were
+/// left to the shared parser, which NORMALIZES: `2025-02-30T00:00:00Z` rolls
+/// into March and yields exactly the microseconds of a well-formed
+/// `2025-03-02T00:00:00Z`, so a malformed golden compared EQUAL to a correct
+/// export at a `timestamp` CELL, KEY, clustering component, collection PATH, map
+/// key/value or nested element — a FALSE PASS in the one direction this harness
+/// exists to measure, one level inside the pass built to prevent it.
+///
+/// The fix is placed at the DOOR rather than at the positions the finding named.
+/// Every scalar of every one of the seven positions reaches
+/// [`type_scalar_golden`] through `canonicalize_golden`'s scalar fallthrough, and
+/// a declared `timestamp` there routes here UNCONDITIONALLY — so a position added
+/// to the recursion later inherits this validation by construction, with nothing
+/// to remember. There is deliberately no second timestamp check anywhere.
+///
+/// The notion of a valid timestamp is [`golden_schema::checked_timestamp_micros`]
+/// — the SAME function the metadata pass uses, so the strict validator and the
+/// canonical parser that builds the comparison can never drift apart, and no
+/// position can hold a weaker notion of a timestamp than another.
+///
+/// # The shapes a declared `timestamp` may arrive in
+///
+/// * `Timestamp` — the shared parser recognized the string `sstabledump` wrote
+///   and kept it as `raw`. `raw` is validated, and the micros the value CARRIES
+///   must be the micros that spelling denotes (a value whose two halves disagree
+///   is refused, never compared on the half it happened to carry).
+/// * `Text` — the string reached here WITHOUT the shared parser's recognition.
+///   Two real routes: a frozen map's JSON OBJECT key, which
+///   `canonicalize_golden` takes from the object literally, and a stringified
+///   position whose spelling the parser REFUSED. Validated identically and then
+///   converted, so such a position compares as an INSTANT instead of silently
+///   comparing text against the export's timestamp.
+/// * `Absent` — an absence already judged legitimate at this position by
+///   [`require_authoritative_value`]; there is no spelling to validate.
+///
+/// Anything else (a JSON number, a boolean, a container) is REFUSED: `--raw-time`
+/// integer timestamps are a dump shape this harness does not consume, and
+/// comparing one as whatever variant it arrived in is how an unrecognized dump
+/// reaches a comparison.
+fn type_declared_timestamp(v: CanonicalValue, at: &Declared<'_>) -> Result<CanonicalValue, String> {
+    let (carried, raw) = match v {
+        CanonicalValue::Absent => return Ok(CanonicalValue::Absent),
+        CanonicalValue::Timestamp { micros, raw } => (Some(micros), raw),
+        CanonicalValue::Text(raw) => (None, raw),
+        other => {
+            return Err(at.refuse(&format!(
+                "the golden carries {} where a declared `timestamp` must be the STRING \
+                 Cassandra's `JsonTransformer.dateString` writes (`Instant.toString()`, i.e. \
+                 `DateTimeFormatter.ISO_INSTANT`). A bare integer instant is what \
+                 `sstabledump --raw-time` emits, which this harness does not consume; the \
+                 harness REFUSES rather than compare a shape it cannot attribute to a dump it \
+                 understands",
+                super::render_value(&other)
+            )))
+        }
+    };
+    let micros = super::golden_schema::checked_timestamp_micros(&raw).map_err(|fault| {
+        at.refuse(&format!(
+            "the golden renders this declared `timestamp` as {raw:?}, which is not a timestamp \
+             `sstabledump` could have written ({}). Cassandra 5.0.8 writes every timestamp with \
+             `JsonTransformer.dateString` — `Instant.ofEpochSecond(...).toString()` — so this \
+             spelling is not one the oracle's own writer can produce. It is refused HERE rather \
+             than handed to `canonical_jsonl::parse_timestamp_micros`, which NORMALIZES what it \
+             can (2025-02-30 into March, hour 24 into the next midnight, a 7th fractional digit \
+             away) and so cannot tell a malformed golden from a well-formed one — and an instant \
+             recovered from a malformed spelling compares EQUAL to a correct export",
+            fault.describe()
+        ))
+    })?;
+    if let Some(carried) = carried {
+        if carried != micros {
+            return Err(at.refuse(&format!(
+                "the golden value carries {carried}µs while its own spelling {raw:?} denotes \
+                 {micros}µs. The harness refuses a value whose two halves disagree rather than \
+                 compare on the half it happened to carry"
+            )));
+        }
+    }
+    Ok(CanonicalValue::Timestamp { micros, raw })
+}
+
+// ---------------------------------------------------------------------------
+// LEXEME PRESERVATION — the SAME descent, one stage earlier
+// ---------------------------------------------------------------------------
+//
+// # Why this lives here and not in `golden_text.rs`
+//
+// `golden_text.rs` owns the DOCUMENT half only: it deserializes an sstabledump
+// line against the structure that line actually has, holding every value as its
+// ORIGINAL TEXT (`serde_json::value::RawValue`), and hands each CELL's `value`
+// to this module. It does NOT own the question "must this number keep its
+// literal?", because that question is answered by a POSITION's declared type —
+// and this module is the single place that maps positions to declared types.
+//
+// So there is exactly ONE traversal that decides positions: the descent below.
+// The first version of the lexeme pass had two — a walk that guessed which
+// objects were cells from their SHAPE, plus this descent — and the two
+// disagreed. It asked "does this COLUMN mention a decimal anywhere?" and quoted
+// every number in the column's value, turning a `map<decimal,int>`'s `int`
+// VALUES into strings (a real false failure), and it rewrote any nested object
+// spelled `{"name":…,"value":…}` per the unrelated column of that name,
+// corrupting the oracle. That is the same class as rounds 5–7's
+// coarse-instead-of-positional canonicalization. One declared-type recursion,
+// one set of positions, one answer.
+
+/// WHICH JSON TOKEN a retained value is — the one classification this pass makes,
+/// used both to decide which bracket the descent must open and to decide whether
+/// a lexeme-preserving position holds the NUMBER it must hold.
+///
+/// This is JSON SYNTAX, not a CQL type: the declared type decides what the
+/// positions inside are, and this only says what shape of token is written
+/// there. A token that disagrees with the declared type is left verbatim (a
+/// shape difference is for the value comparison to report) EXCEPT at a
+/// lexeme-preserving position, where a non-number is a refusal — see
+/// [`preserve_lexemes`].
+///
+/// The classification is EXACT and needs no parse: JSON decides a value's form
+/// from its first non-space byte, and the grammar leaves no overlap — `"` opens
+/// a string, `-` or a digit opens a number (JSON allows neither a leading `+`
+/// nor a bare `.`), and `[`, `{`, `t`, `f`, `n` each open exactly one form.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum JsonToken {
+    Number,
+    String,
+    Null,
+    Bool,
+    Array,
+    Object,
+    /// A first byte JSON's grammar does not start any value with. Reachable only
+    /// from a malformed retained value, and named rather than folded into one of
+    /// the above so a refusal can say so.
+    Unrecognized,
+}
+
+impl JsonToken {
+    /// How a refusal names this token.
+    fn describe(self) -> &'static str {
+        match self {
+            JsonToken::Number => "a JSON number",
+            JsonToken::String => "a JSON string",
+            JsonToken::Null => "a JSON null",
+            JsonToken::Bool => "a JSON boolean",
+            JsonToken::Array => "a JSON array",
+            JsonToken::Object => "a JSON object",
+            JsonToken::Unrecognized => "a token JSON's grammar does not recognize",
+        }
+    }
+}
+
+fn json_token(value: &RawValue) -> JsonToken {
+    match value.get().trim_start().as_bytes().first() {
+        Some(b'[') => JsonToken::Array,
+        Some(b'{') => JsonToken::Object,
+        Some(b'"') => JsonToken::String,
+        Some(b'n') => JsonToken::Null,
+        Some(b't') | Some(b'f') => JsonToken::Bool,
+        Some(b'-') | Some(b'0'..=b'9') => JsonToken::Number,
+        _ => JsonToken::Unrecognized,
+    }
+}
+
+/// The preserved LITERAL of a JSON NUMBER token — the only thing that may take
+/// a number's place at a lexeme-preserving position.
+///
+/// # Why a TYPE and not a string convention (#1490 round 15)
+///
+/// This pass replaces a bare JSON number with the JSON STRING of its own
+/// lexeme, because `serde_json` would otherwise parse a `decimal`/`varint` into
+/// an `f64` and lose the digits. Downstream, `type_scalar_golden` reads a `Text`
+/// at a declared `decimal`/`varint` position as that exact literal — so a golden
+/// that ORIGINALLY carried a string there (`"value":"1.2"`, `"value":"123"`,
+/// even `"value":"decimal(1.2)"`) used to be INDISTINGUISHABLE from a preserved
+/// number and canonicalized exactly like one: a malformed golden comparing
+/// EQUAL, which is the false PASS this harness exists not to produce.
+///
+/// A tag or prefix cannot fix that: it is written into the same JSON text the
+/// golden controls, so the golden can spell it too — the forgery is by exactly
+/// the input the defect is about. What fixes it is DISJOINTNESS, established in
+/// the SAME single traversal that does the rewriting: [`preserve_lexemes`]
+/// REFUSES every non-number token at a lexeme-preserving position, so after this
+/// pass such a position can hold no string this pass did not itself write, and a
+/// `Text` arriving there is authoritative BY CONSTRUCTION rather than by
+/// convention.
+///
+/// This type is the producer half of that invariant, and it is a type so the
+/// invariant cannot be re-broken by a new call site: the ONLY constructor
+/// ([`NumberLexeme::from_number_token`]) takes the position's raw JSON token and
+/// refuses anything that is not a number, and the ONLY way to obtain the emitted
+/// text is [`NumberLexeme::into_json_string`]. There is no way to emit a
+/// preserved lexeme without having held a verified number token.
+struct NumberLexeme(String);
+
+impl NumberLexeme {
+    /// THE constructor: a lexeme exists only for a token that IS a JSON number.
+    ///
+    /// It re-asks the token question rather than trusting its caller, so the
+    /// type's guarantee holds for every future call site and not only for the
+    /// one match arm below.
+    fn from_number_token(value: &RawValue, at: &Declared<'_>) -> Result<Self, String> {
+        let text = value.get().trim();
+        if json_token(value) != JsonToken::Number {
+            return Err(at.refuse(&format!(
+                "a preserved number lexeme was requested for {}, which is not a JSON number; \
+                 the harness refuses to present a value it did not obtain from a number token \
+                 as one it did",
+                json_token(value).describe()
+            )));
+        }
+        // A JSON number lexeme contains only `-+.eE0123456789`, none of which
+        // JSON escapes, so quoting it is exact. Asserted rather than assumed: a
+        // lexeme carrying anything else would make the quoted form a DIFFERENT
+        // value, and this harness refuses rather than emit one.
+        if let Some(bad) = text
+            .chars()
+            .find(|c| !matches!(c, '-' | '+' | '.' | 'e' | 'E' | '0'..='9'))
+        {
+            return Err(at.refuse(&format!(
+                "the literal {text:?} starts like a JSON number but carries {bad:?}, which \
+                 JSON's number grammar does not allow; the harness refuses to quote it rather \
+                 than emit a different value"
+            )));
+        }
+        Ok(NumberLexeme(text.to_string()))
+    }
+
+    /// THE way out: the lexeme as a JSON string, digit for digit.
+    fn into_json_string(self) -> String {
+        format!("\"{}\"", self.0)
+    }
+}
+
+/// Preserve the literal text of every number sitting at a position whose
+/// declared type is `decimal` or `varint` — and NO other number.
+///
+/// Takes the value's RETAINED TEXT and returns the text to emit in its place, so
+/// every position this descent does not rewrite is re-emitted byte for byte.
+///
+/// Recurses in lockstep with [`canonicalize_golden`], over the same declared
+/// type, deriving each child position with the same private [`Declared::child`]:
+/// a sequence's `Element`, a frozen map's `MapValue` and a tuple's
+/// `TupleField`. So the two descents cannot disagree about which position
+/// carries which declared type. A UDT is the identity — see the last arm.
+pub(super) fn preserve_lexemes(value: &RawValue, at: &Declared<'_>) -> Result<String, String> {
+    if at.preserves_exact_lexeme() {
+        // A declared `decimal`/`varint` SCALAR: this position IS the value, a
+        // scalar has no children to descend into, and Cassandra writes it as a
+        // bare JSON NUMBER. So the token is REQUIRED to be a number — see
+        // [`NumberLexeme`] for why refusing every other token is what makes the
+        // preserved lexeme unforgeable, rather than tagging it.
+        return match json_token(value) {
+            JsonToken::Number => Ok(NumberLexeme::from_number_token(value, at)?.into_json_string()),
+            // An ABSENCE is a question about the POSITION, not about the number
+            // grammar, and it already has exactly one owner:
+            // `require_authoritative_value` REFUSES it where CQL requires a
+            // value and folds it where Cassandra legitimately writes one (a UDT
+            // field, a tuple member). So it is re-emitted verbatim here rather
+            // than judged twice, in two vocabularies.
+            JsonToken::Null => Ok(value.get().to_string()),
+            other => Err(at.refuse(&format!(
+                "the golden writes {} here, but `sstabledump` writes a declared \
+                 `decimal`/`varint` value at this position as a bare JSON NUMBER. The harness \
+                 REFUSES it instead of reading it as one: this pass replaces a real number \
+                 with the JSON STRING of its own literal (an `f64` cannot carry either type), \
+                 so a string the GOLDEN wrote is indistinguishable from a lexeme this pass \
+                 wrote — `\"1.2\"` for a `decimal`, `\"123\"` for a `varint` or even \
+                 `\"decimal(1.2)\"` would canonicalize exactly like the number and compare \
+                 EQUAL. Refusing every non-number token is what makes the preserved lexeme \
+                 unforgeable: a tag would be written into the same text the golden controls",
+                other.describe()
+            ))),
+        };
+    }
+    match (json_token(value), at.spec()) {
+        // A frozen list/set arrives as a JSON ARRAY of typed values.
+        (JsonToken::Array, Some(CqlTypeSpec::Seq { elem, .. })) => {
+            let items = raw_array(value, at)?;
+            let mut out = Vec::with_capacity(items.len());
+            for (i, item) in items.iter().enumerate() {
+                let child = at.child(Some(elem), Position::Element, format!("{}[{i}]", at.ctx));
+                out.push(reparse(preserve_lexemes(item, &child)?, &child)?);
+            }
+            emit(&out, at)
+        }
+        // A CQL tuple arrives as a POSITIONAL JSON array; a length disagreement
+        // is a difference for the value comparison to report, never something to
+        // guess past here.
+        (JsonToken::Array, Some(CqlTypeSpec::Tuple(specs))) => {
+            let items = raw_array(value, at)?;
+            if items.len() != specs.len() {
+                return Ok(value.get().to_string());
+            }
+            let mut out = Vec::with_capacity(items.len());
+            for (i, (item, spec)) in items.iter().zip(specs.iter()).enumerate() {
+                let child = at.child(
+                    Some(spec),
+                    Position::TupleField(i),
+                    format!("{}.{i}", at.ctx),
+                );
+                out.push(reparse(preserve_lexemes(item, &child)?, &child)?);
+            }
+            emit(&out, at)
+        }
+        // A frozen map arrives as a JSON OBJECT. Its KEYS are strings by JSON's
+        // own rules — a `map<decimal,int>` key's literal is therefore ALREADY
+        // preserved, and read exactly at the `FrozenMapObjectKey` position — so
+        // only the VALUES can be bare numbers here. A non-frozen map's key is
+        // preserved the same way, as Cassandra's stringified `path` component.
+        (JsonToken::Object, Some(CqlTypeSpec::Map { value: vspec, .. })) => {
+            let mut fields = raw_object(value, at)?;
+            for (key, field) in fields.iter_mut() {
+                let child = at.child(Some(vspec), Position::MapValue, format!("{}.{key}", at.ctx));
+                *field = reparse(preserve_lexemes(field, &child)?, &child)?;
+            }
+            emit(&fields, at)
+        }
+        // EVERYTHING ELSE is the identity — the value's retained text, byte for
+        // byte. Three things land here, and each one must:
+        //
+        //  * a UDT. Its FIELD types are not declared to the harness (the
+        //    `UdtField` position carries an explicitly NAMED absence — see
+        //    `canonicalize_golden`'s matching arm), so NO position inside one can
+        //    be known to be a `decimal`/`varint`. Returning the identity
+        //    OUTRIGHT, rather than descending and quoting nothing, is what makes
+        //    a UDT field spelled like a decimal column unreachable by
+        //    construction rather than unreachable by arithmetic.
+        //  * a declared SCALAR that is not `decimal`/`varint` — a `double`
+        //    literal, which MUST reach serde_json's exact parser untouched.
+        //  * a JSON form that disagrees with the declared type (an array under a
+        //    declared map, a tuple whose arity differs). That is a difference for
+        //    the value comparison to REPORT, never something to guess past here.
+        _ => Ok(value.get().to_string()),
+    }
+}
+
+fn raw_array(value: &RawValue, at: &Declared<'_>) -> Result<Vec<Box<RawValue>>, String> {
+    serde_json::from_str(value.get()).map_err(|e| {
+        at.refuse(&format!(
+            "the golden value is a JSON array the harness cannot read: {e}"
+        ))
+    })
+}
+
+fn raw_object(value: &RawValue, at: &Declared<'_>) -> Result<RawObject, String> {
+    serde_json::from_str(value.get()).map_err(|e| {
+        at.refuse(&format!(
+            "the golden value is a JSON object the harness cannot read: {e}"
+        ))
+    })
+}
+
+/// Re-wrap a rewritten member's text as a retained value, so the container is
+/// re-emitted by `serde_json` and can never be assembled into invalid JSON.
+fn reparse(text: String, at: &Declared<'_>) -> Result<Box<RawValue>, String> {
+    RawValue::from_string(text)
+        .map_err(|e| at.refuse(&format!("the rewritten value is not valid JSON: {e}")))
+}
+
+fn emit<T: serde::Serialize>(value: &T, at: &Declared<'_>) -> Result<String, String> {
+    serde_json::to_string(value)
+        .map_err(|e| at.refuse(&format!("re-emitting the golden value failed: {e}")))
+}
+
+/// The declared POSITION of the `value` field of ONE `sstabledump` cell of
+/// `col` — or `None` when that cell's `value` carries nothing typed.
+///
+/// This is the same split `golden_rows::project_column` makes when it assembles
+/// a column, kept here because it is a statement about declared types: a
+/// non-frozen collection is dumped as one cell PER ELEMENT, so such a cell's
+/// `value` is an ELEMENT or a MAP VALUE, not the whole column. Getting it from
+/// the column's own spec (as the first version of the lexeme pass did) would
+/// quote a `list<decimal>` element's literal only by accident and a
+/// `map<decimal,int>` value's wrongly.
+///
+/// `None` for a non-frozen SET, whose elements live entirely in the stringified
+/// `path` (the cell's `value` is the empty string), and for a multicell column
+/// whose parsed type is not a collection at all — a disagreement
+/// `project_column` reports as the error it is.
+pub(super) fn cell_value_declared<'a>(col: &'a ColumnType, ctx: String) -> Option<Declared<'a>> {
+    if !col.is_multicell_collection() {
+        return Some(Declared::cell(&col.spec, ctx));
+    }
+    match &col.spec {
+        CqlTypeSpec::Seq {
+            kind: SeqKind::Set, ..
+        } => None,
+        CqlTypeSpec::Seq {
+            kind: SeqKind::List,
+            elem,
+        } => Some(Declared::element(elem, ctx)),
+        CqlTypeSpec::Map { value, .. } => Some(Declared::map_value(value, ctx)),
+        _ => None,
+    }
+}
+
+// ---------------------------------------------------------------------------
+// The ARROW side
+// ---------------------------------------------------------------------------
+
+/// Canonicalize ONE exported Arrow cell at ONE declared position.
+///
+/// The Arrow decode is mostly STRUCTURAL (an `Int32Array` can only be an
+/// integer), so the declared type is threaded through for the decisions that are
+/// genuinely ambiguous — today `Decimal128`, whose scale-zero form is both a
+/// `varint` and a whole-valued `decimal`. Threading it everywhere anyway is the
+/// point of this module: the next ambiguous representation gets the declared
+/// type for free instead of becoming review round 8.
+pub fn canonicalize_arrow(
+    array: &dyn Array,
+    row: usize,
+    at: &Declared<'_>,
+) -> Result<CanonicalValue, String> {
+    super::arrow_rows::decode_declared(array, row, at)
+}
+
+/// The `Decimal128` door, reachable with an unscaled value and a scale so the
+/// decimal rules can be exercised without building an Arrow array — still only
+/// with a `&Declared`, so it is part of the entry point rather than a way round
+/// it.
+///
+/// # The defect this closes (issue #1490 round 7)
+///
+/// Every scale-zero `Decimal128` used to canonicalize as an `Int`, on the
+/// grounds that scale zero is `varint`'s mapping. But `arrow_expect` accepts
+/// `Decimal128(p, s)` for ANY `s >= 0` for a declared `decimal` — deliberately,
+/// since Arrow carries one scale per COLUMN — so a perfectly valid `decimal`
+/// column exported at scale 0 passed the TYPE check and then compared `Int(n)`
+/// against the golden's exact `decimal(n)`: a false VALUE failure on real data.
+/// The declared type settles it, and an unavailable declared type REFUSES rather
+/// than picking one of the two.
+pub fn canonicalize_arrow_decimal(
+    unscaled: i128,
+    scale: i8,
+    at: &Declared<'_>,
+) -> Result<CanonicalValue, String> {
+    match at.scalar() {
+        // An integer domain on both sides: the golden's integer literal stays an
+        // `Int`, so converting it to a decimal would be the type confusion the
+        // canonical space exists to prevent.
+        Some("varint") => {
+            if scale != 0 {
+                return Err(at.refuse(&format!(
+                    "the export wrote Decimal128 scale {scale}, but a `varint` is an INTEGER \
+                     domain and the harness pins it to scale 0 (arrow_expect); refusing to \
+                     rescale rather than compare two different numbers"
+                )));
+            }
+            Ok(CanonicalValue::Int(unscaled))
+        }
+        // EXACT unscaled/scale pair, at ANY scale INCLUDING ZERO — no `f64`
+        // anywhere. `ExactDecimal` normalizes, so scale 0 lands on exactly the
+        // value the golden's integer-shaped literal recovers to.
+        Some("decimal") => Ok(exact_from_decimal128(unscaled, scale, &at.ctx)?.canonical()),
+        _ => Err(at.refuse(
+            "an exported Decimal128 cell is ambiguous without the declared type — \
+             scale-zero is both a `varint` and a whole-valued `decimal` — so the harness \
+             refuses to decode it rather than guess which one it is",
+        )),
+    }
+}
+
+/// Build the child position for an Arrow container member, from the parent's
+/// declared type. Used by `arrow_rows`' structural decode, so the two sides
+/// derive their child positions the SAME way.
+pub(super) fn arrow_child<'a>(
+    at: &Declared<'a>,
+    spec: Option<&'a CqlTypeSpec>,
+    position: Position,
+    ctx: String,
+) -> Declared<'a> {
+    at.child(spec, position, ctx)
+}
+
+/// The declared ELEMENT type of a sequence, or `None` when the declared type is
+/// not a sequence at all (an Arrow shape that disagrees with the declaration —
+/// reported by the TYPE stage, not silently fixed here).
+pub(super) fn seq_elem<'a>(at: &Declared<'a>) -> Option<&'a CqlTypeSpec> {
+    match at.spec() {
+        Some(CqlTypeSpec::Seq { elem, .. }) => Some(elem),
+        _ => None,
+    }
+}
+
+/// The declared KEY and VALUE types of a map, or `None`s when the declared type
+/// is not a map.
+pub(super) fn map_kv<'a>(at: &Declared<'a>) -> (Option<&'a CqlTypeSpec>, Option<&'a CqlTypeSpec>) {
+    match at.spec() {
+        Some(CqlTypeSpec::Map { key, value }) => (Some(key), Some(value)),
+        _ => (None, None),
+    }
+}
+
+/// The declared type of a struct member at position `i` with field name `name`:
+/// a CQL tuple's member by POSITION, and a UDT field's as an explicitly NAMED
+/// absence (a UDT's field types are not declared to the harness).
+pub(super) fn struct_field<'a>(
+    at: &Declared<'a>,
+    i: usize,
+    name: &str,
+    field_count: usize,
+) -> Declared<'a> {
+    let ctx = format!("{}.{name}", at.ctx());
+    match at.spec() {
+        Some(CqlTypeSpec::Tuple(specs)) if specs.len() == field_count => {
+            at.child(Some(&specs[i]), Position::TupleField(i), ctx)
+        }
+        Some(CqlTypeSpec::Udt(_)) => Declared::unavailable(
+            "a UDT's FIELD types are not declared to the harness — only its NAME is",
+            Position::UdtField(name.to_string()),
+            ctx,
+        ),
+        _ => at.child(None, Position::UdtField(name.to_string()), ctx),
+    }
+}

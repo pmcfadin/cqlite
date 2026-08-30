@@ -720,9 +720,16 @@ fn test_export_with_limit_determinate_path_succeeds() {
 
 #[test]
 fn test_export_csv_deterministic() {
-    // Test that CSV export produces valid, parseable output
-    // Note: Row order is not deterministic (depends on SSTable partition order)
-    // so we verify structure rather than exact content
+    // Test that CSV export produces valid, parseable output.
+    //
+    // Note: the row order is the SSTable's own `(token, key)` order, NOT an order
+    // predictable from the DDL, so this case verifies structure rather than exact
+    // content. It is not run-to-run variation: `cassandra-5.0.8
+    // SortedTableWriter.java:175` refuses to write a `Data.db` out of that order and
+    // every cqlite-core read path preserves it (issue #1577). VALUE-level parity
+    // against the sstabledump goldens — which compares the EMITTED row order too,
+    // for exactly that reason — lives in tests/issue_1491_json_csv_golden_parity.rs
+    // (issue #1491, AD2).
     let (data_dir, schema_file) = assert_test_data_available();
     let temp_dir = TempDir::new().expect("Failed to create temp dir");
     let output_file = temp_dir.path().join("deterministic.csv");
@@ -770,7 +777,10 @@ fn test_export_csv_deterministic() {
 
 #[test]
 fn test_export_json_deterministic() {
-    // Test that JSON export produces valid, parseable output with correct structure
+    // Structure only: valid, parseable output with the expected keys. VALUE-level
+    // parity against the sstabledump goldens lives in
+    // tests/issue_1491_json_csv_golden_parity.rs (issue #1491, AD2) — this test
+    // must not be read as covering how a value is rendered.
     let (data_dir, schema_file) = assert_test_data_available();
     let temp_dir = TempDir::new().expect("Failed to create temp dir");
     let output_file = temp_dir.path().join("deterministic.json");
