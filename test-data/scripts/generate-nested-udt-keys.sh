@@ -75,13 +75,148 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
-if [[ "$OUT_DIR" != /* ]]; then
-  OUT_DIR="$PWD/$OUT_DIR"
-fi
-OUT_DIR="${OUT_DIR%/}"
+# NOTE: OUT_DIR is deliberately NOT normalized here. It is resolved to a
+# canonical PHYSICAL path and validated in the "Destructive-path safety"
+# section below, BEFORE any destructive operation runs.
 
 log()  { echo "[nuk] $(date '+%Y-%m-%dT%H:%M:%S') $*"; }
 fail() { echo "[nuk][ERROR] $*" >&2; exit 1; }
+
+# ----------------------------------------------------------------------------
+# Destructive-path safety (roborev job 240, F1)
+#
+# Every destructive operation in this script targets a path DERIVED from
+# $OUT_DIR. A LEXICAL check on that string is not sufficient: `/tmp/work/../..`
+# matches a `/tmp/*` glob yet resolves to `/`, and a symlinked component
+# (`/tmp/x/escape -> /`) escapes the same way while looking local. So OUT_DIR is
+# resolved to a canonical PHYSICAL path FIRST, and every destructive target is
+# then re-checked against that resolution at its point of use.
+#
+# Audit of every destructive / truncating target in this script:
+#   * rm -rf "$TMPDIR_EXPORT"            -> rm_rf_guarded (2 call sites)
+#   * rm -rf "$SSTABLES_DIR/$KEYSPACE"   -> rm_rf_guarded
+#   * find "$SSTABLES_DIR/$KEYSPACE" -delete -> dir validated immediately before
+#   * > "$jsonl_file" / > "$stats_base"  -> both are `find` results from WITHIN
+#     the already-validated $SSTABLES_DIR subtree, so they inherit its guarantee
+#   * $ENGINE rm -f "$CONTAINER_NAME"    -> a container, fixed literal name
+#   * tar -C "$TMPDIR_EXPORT" -xf -      -> extraction into a validated dir
+# There is no `mv` in this script.
+# ----------------------------------------------------------------------------
+
+# Resolve a path to a canonical PHYSICAL path (symlinks in existing components
+# followed, `.`/`..` collapsed). The path need NOT exist: OUT_DIR is routinely a
+# directory this run is about to create. Echoes the resolved path; returns 1 if
+# it cannot be resolved at all.
+resolve_physical() {
+  local p="$1" out=""
+  [[ "$p" == /* ]] || p="$PWD/$p"
+  if out=$(realpath -m -- "$p" 2>/dev/null) && [[ -n "$out" ]]; then
+    :
+  elif out=$(readlink -m -- "$p" 2>/dev/null) && [[ -n "$out" ]]; then
+    :
+  else
+    # Portable fallback: physically resolve the deepest EXISTING ancestor with
+    # `cd -P`, then re-append the not-yet-existing tail. `..` inside that tail is
+    # NOT collapsed here, which is why validate_destructive_target rejects any
+    # relative component surviving in the result (fail closed).
+    local head="$p" tail="" resolved
+    while [[ -n "$head" && "$head" != "/" && ! -d "$head" ]]; do
+      tail="$(basename -- "$head")${tail:+/$tail}"
+      head="$(dirname -- "$head")"
+    done
+    resolved="$(cd -P -- "$head" 2>/dev/null && pwd -P)" || return 1
+    if [[ -n "$tail" ]]; then
+      out="$resolved/$tail"
+    else
+      out="$resolved"
+    fi
+  fi
+  # Collapse repeated separators. Not cosmetic: bash's own `cd -P; pwd -P` emits
+  # a DOUBLED leading slash when the resolved ancestor is the root — measured,
+  # with `escape -> /`, `cd -P /tmp/x/escape/etc; pwd -P` prints `//etc` — and an
+  # empty component is semantically identical to a single separator on POSIX. If
+  # it is not collapsed, the caller rejects the path on its empty-component
+  # branch and the refusal message names `//etc` instead of the real `/etc`
+  # target, i.e. the right verdict for the wrong stated reason.
+  while [[ "$out" == *//* ]]; do out="${out//\/\//\/}"; done
+  [[ -n "$out" ]] || return 1
+  printf '%s\n' "$out"
+}
+
+# True iff $1 is a STRICT descendant of $2. Trailing-separator aware on both
+# sides, so `/tmpfoo` is NOT beneath `/tmp` and `/tmp` is not beneath itself.
+is_strictly_beneath() {
+  local cand="${1%/}" root="${2%/}"
+  [[ -n "$cand" && -n "$root" ]] || return 1   # never approve `/` as a root
+  [[ "$cand" != "$root" ]] || return 1
+  [[ "$cand" == "$root"/* ]]
+}
+
+# Approved roots for destructive operations, themselves resolved physically
+# (`/tmp` is a symlink to `/private/tmp` on macOS, so comparing the raw strings
+# would reject every legitimate macOS temp path).
+APPROVED_DESTRUCTIVE_ROOTS=()
+for _root in "$REPO_ROOT" "/tmp"; do
+  if _resolved_root="$(resolve_physical "$_root")" && [[ "$_resolved_root" != "/" ]]; then
+    APPROVED_DESTRUCTIVE_ROOTS+=("$_resolved_root")
+  fi
+done
+if [[ "${#APPROVED_DESTRUCTIVE_ROOTS[@]}" -eq 0 ]]; then
+  fail "No approved destructive root could be resolved (tried '$REPO_ROOT' and '/tmp'). Refusing."
+fi
+
+# Resolve $2 and assert it is strictly beneath an approved root; echo the
+# RESOLVED path on success, or a diagnostic on stderr and RETURN 1 on rejection.
+#
+# It deliberately does NOT call `fail` (which exits): every caller invokes this
+# through a command substitution, which runs in a SUBSHELL, so an `exit` here
+# would kill only that subshell and the caller would carry on with an empty
+# path. Measured — an earlier version printed its refusal and the caller still
+# reached its `rm -rf`. Each caller must therefore check the status explicitly
+# (`|| exit 1` at top level, or the `if !` form inside a function).
+validate_destructive_target() {
+  local label="$1" raw="$2" resolved root
+  if ! resolved="$(resolve_physical "$raw")"; then
+    echo "[nuk][ERROR] $label '$raw' could not be resolved to a physical path. Refusing." >&2
+    return 1
+  fi
+  if [[ "$resolved" == "/" ]]; then
+    echo "[nuk][ERROR] $label '$raw' resolves to '/'. Refusing to operate on the filesystem root." >&2
+    return 1
+  fi
+  # `$resolved` always begins with `/`, so appending one trailing separator makes
+  # every component `/`-delimited on BOTH sides: `*/../*` and `*/./*` then match a
+  # surviving relative component in any position, and `*//*` an empty one. Do NOT
+  # prepend a second `/` — `//tmpfoo/x/` matches `*//*` and every path would be
+  # rejected on this branch (caught in RED-verify: all four cases failed here
+  # rather than on the beneath check they were written for). The `*//*` arm is
+  # belt — resolve_physical collapses empty components — and is kept because a
+  # destructive guard should fail closed if that ever stops holding.
+  case "$resolved/" in
+    */../* | */./* | *//*)
+      echo "[nuk][ERROR] $label '$raw' resolved to '$resolved', which still contains a relative or empty path component. Refusing." >&2
+      return 1 ;;
+  esac
+  for root in "${APPROVED_DESTRUCTIVE_ROOTS[@]}"; do
+    if is_strictly_beneath "$resolved" "$root"; then
+      printf '%s\n' "$resolved"
+      return 0
+    fi
+  done
+  echo "[nuk][ERROR] $label '$raw' resolves to '$resolved', which is not strictly beneath an approved root (${APPROVED_DESTRUCTIVE_ROOTS[*]}). Refusing destructive operation." >&2
+  return 1
+}
+
+# `rm -rf` that re-validates its target immediately before deleting. The status
+# of the substitution is checked explicitly rather than left to `set -e`, which
+# is suppressed for any command in a `&&`/`||`/`!` list.
+rm_rf_guarded() {
+  local target
+  if ! target="$(validate_destructive_target "rm -rf target" "$1")" || [[ -z "$target" ]]; then
+    fail "Refusing to 'rm -rf' '$1': rejected by the destructive-path guard (see above)."
+  fi
+  rm -rf -- "$target"
+}
 
 run() {
   if [[ "$DRY_RUN" -eq 1 ]]; then
@@ -277,20 +412,15 @@ for line in sys.stdin:
 
 # ----------------------------------------------------------------------------
 # OUT_DIR safety
+#
+# Canonicalize BEFORE validating, and validate BEFORE any destructive operation:
+# a lexical check accepts `..` and symlinked components that resolve outside the
+# approved roots. OUT_DIR is REBOUND to the resolved path, so every path derived
+# from it below (SSTABLES_DIR, TMPDIR_EXPORT) is derived from the resolved form.
 # ----------------------------------------------------------------------------
-if [[ "${#OUT_DIR}" -lt 4 ]]; then
-  fail "OUT_DIR '$OUT_DIR' is suspiciously short (< 4 chars). Refusing."
-fi
-case "$OUT_DIR" in
-  /) fail "Refusing to operate on '/'." ;;
-  /tmp) fail "Refusing to use '/tmp' directly. Use a subdirectory." ;;
-esac
-_under_repo=0
-_under_tmp=0
-[[ "$OUT_DIR" == "$REPO_ROOT/"* ]] && _under_repo=1
-[[ "$OUT_DIR" == /tmp/*          ]] && _under_tmp=1
-if [[ "$_under_repo" -eq 0 && "$_under_tmp" -eq 0 ]]; then
-  fail "OUT_DIR '$OUT_DIR' is not under the repo root or /tmp/."
+OUT_DIR="$(validate_destructive_target "OUT_DIR" "$OUT_DIR")" || exit 1
+if [[ -z "$OUT_DIR" ]]; then
+  fail "OUT_DIR resolved to an empty path. Refusing."
 fi
 
 log "Starting $KEYSPACE generation (issue #3500)"
@@ -335,20 +465,20 @@ if [[ "$DRY_RUN" -eq 0 ]]; then
   mkdir -p "$SSTABLES_DIR"
 
   TMPDIR_EXPORT="$OUT_DIR/.nuk_export_tmp"
-  rm -rf "$TMPDIR_EXPORT"
+  rm_rf_guarded "$TMPDIR_EXPORT"
   mkdir -p "$TMPDIR_EXPORT"
 
   if $ENGINE exec "$CONTAINER_NAME" bash -lc 'tar -C /var/lib/cassandra -cf - data' \
       | tar -C "$TMPDIR_EXPORT" -xf -; then
     if [[ -d "$TMPDIR_EXPORT/data/$KEYSPACE" ]]; then
-      rm -rf "$SSTABLES_DIR/$KEYSPACE"
+      rm_rf_guarded "$SSTABLES_DIR/$KEYSPACE"
       mkdir -p "$SSTABLES_DIR/$KEYSPACE"
       cp -r "$TMPDIR_EXPORT/data/$KEYSPACE/." "$SSTABLES_DIR/$KEYSPACE/"
       log "$KEYSPACE SSTables placed in $SSTABLES_DIR/$KEYSPACE"
     else
       fail "Expected $TMPDIR_EXPORT/data/$KEYSPACE but it was not found. Export failed."
     fi
-    rm -rf "$TMPDIR_EXPORT"
+    rm_rf_guarded "$TMPDIR_EXPORT"
   else
     fail "tar export from container failed."
   fi
@@ -386,7 +516,11 @@ if [[ "$DRY_RUN" -eq 0 ]]; then
     fi
   done < <(find "$SSTABLES_DIR/$KEYSPACE" -name "*-Data.db" -not -name "._*" -print0)
 
-  find "$SSTABLES_DIR/$KEYSPACE" \( -name '._*' -o -name '.DS_Store' \) -delete 2>/dev/null || true
+  # `find -delete` is destructive: re-validate the root it walks first.
+  _cleanup_root="$(validate_destructive_target "find -delete root" "$SSTABLES_DIR/$KEYSPACE")" \
+    || exit 1
+  [[ -n "$_cleanup_root" ]] || fail "find -delete root resolved to an empty path. Refusing."
+  find "$_cleanup_root" \( -name '._*' -o -name '.DS_Store' \) -delete 2>/dev/null || true
 
   log "=== $KEYSPACE generation COMPLETE ==="
   log "SSTables: $SSTABLES_DIR/$KEYSPACE"
