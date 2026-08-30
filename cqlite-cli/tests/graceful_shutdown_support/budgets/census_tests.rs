@@ -185,7 +185,10 @@ fn the_stage_census_check_rejects_a_declared_stage_that_never_finished() {
         "the failure must say what went wrong, so it is not read as a census mismatch: {panicked}"
     );
 
-    drop(open_forever);
+    // Held to the end deliberately: `Stage` has no `Drop`, so what makes it
+    // unfinished is that `finish()` is never called on it — not that it is still
+    // in scope. Naming it here keeps that from reading as an oversight.
+    let _never_finished_stage = open_forever;
 }
 
 /// A caught panic's message, for the two directions above.
