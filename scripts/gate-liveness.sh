@@ -372,6 +372,21 @@ _START_RE='^==== AGENT-GATE( LITE| DELTA)? SUMMARY ====$'
 _END_RE='^==== END AGENT-GATE( LITE| DELTA)? SUMMARY ====$'
 case "$RESULT_TOKEN" in
   PASS|FAIL|PARTIAL|ERROR|REFUSED)
+    # RECONCILE WITH THE HEARTBEAT before believing this verdict (roborev job 192, Medium). During
+    # startup a NEW run publishes its beat BEFORE it replaces the previous run's summary — the beater
+    # now starts before the tree capture, which widened that window on purpose. So an unbound reader
+    # (no --run-id) could read the PREVIOUS run's PASS as the completion of the run that is starting
+    # right now. If a readable beat names a DIFFERENT run, the two artifacts describe different runs
+    # and neither can be reported as the other's outcome.
+    if [ -z "$WANT_RUN_ID" ] && [ -n "$SUM_RUN_ID" ] && [ -f "$HB" ] && [ -r "$HB" ]; then
+      _hb_peek=$(_snap_of "$HB" hbpeek 2>/dev/null) || _hb_peek=""
+      if [ -n "$_hb_peek" ] && ! _has_nul "$_hb_peek"; then
+        _hb_rid_peek=$(_field "$(_slurp "$_hb_peek")" run-id)
+        if [ -n "$_hb_rid_peek" ] && [ "$_hb_rid_peek" != "$SUM_RUN_ID" ]; then
+          verdict UNKNOWN 4 "summary-superseded; the summary carries a terminal verdict for run '$SUM_RUN_ID' but a live heartbeat names run '$_hb_rid_peek' — a NEWER run is starting on this path and publishes its beat before replacing the summary, so this verdict is the PREVIOUS run's. Pass --run-id to say which run you mean."
+        fi
+      fi
+    fi
     # Distinguish the two shapes rather than blaming the wrong one: NO closer at all is a
     # truncated write; a closer of a DIFFERENT dialect is two fragments spliced together.
     if [ "$_n_end" -eq 0 ]; then
@@ -442,12 +457,22 @@ _beat_valid() {
       return 1
     fi
   done
+  # A DIGIT STRING IS NOT YET A NUMBER (roborev job 192, Low). Bash arithmetic reads a leading zero
+  # as OCTAL, so `interval: 08` is a syntax error that ABORTS the shell — the reader would die
+  # instead of returning its documented UNKNOWN — and an unbounded digit string can overflow a
+  # comparison. So each field is length-bounded (rejecting absurd values outright) and every later
+  # use goes through base-10 arithmetic.
   ep=$(printf '%s\n' "$t" | grep -m1 '^beat-epoch: '); ep="${ep#beat-epoch: }"
   case "$ep" in ''|*[!0-9]*) BEAT_ERR="heartbeat-unparseable-epoch; 'beat-epoch: $ep' is not an integer"; return 1 ;; esac
+  [ "${#ep}" -le 12 ] || { BEAT_ERR="heartbeat-epoch-out-of-range; 'beat-epoch: $ep' has ${#ep} digits, which is not a plausible unix time"; return 1; }
   sq=$(printf '%s\n' "$t" | grep -m1 '^beat-seq: '); sq="${sq#beat-seq: }"
   case "$sq" in ''|*[!0-9]*) BEAT_ERR="heartbeat-unparseable-seq; 'beat-seq: $sq' is not an integer"; return 1 ;; esac
+  [ "${#sq}" -le 12 ] || { BEAT_ERR="heartbeat-seq-out-of-range; 'beat-seq: $sq' has ${#sq} digits"; return 1; }
   iv=$(printf '%s\n' "$t" | grep -m1 '^interval: '); iv="${iv#interval: }"
   case "$iv" in ''|*[!0-9]*) BEAT_ERR="heartbeat-unparseable-interval; 'interval: $iv' is not an integer"; return 1 ;; esac
+  [ "${#iv}" -le 6 ] || { BEAT_ERR="heartbeat-interval-out-of-range; 'interval: $iv' has ${#iv} digits"; return 1; }
+  # Normalise to base 10 NOW, so no later comparison can trip over an octal reading.
+  ep=$((10#$ep)); sq=$((10#$sq)); iv=$((10#$iv))
   [ "$iv" -ge 1 ] || { BEAT_ERR="heartbeat-bad-interval; 'interval: $iv' must be >= 1"; return 1; }
   if [ "$iv" -gt 60 ]; then
     BEAT_ERR="heartbeat-interval-too-long; 'interval: ${iv}s' exceeds the 60s this reader can observe (its confirmation window is capped at 65s to bound a hostile artifact), so a live beat might not advance inside it and STALLED would be a false death"
@@ -479,11 +504,11 @@ elif [ -n "$SUM_RUN_ID" ] && [ "$HB_RUN_ID" != "$SUM_RUN_ID" ]; then
   verdict UNKNOWN 4 "heartbeat-summary-run-id-disagree; summary is run '$SUM_RUN_ID' but the beat is run '$HB_RUN_ID'"
 fi
 
-HB_EPOCH=$(_field "$HB_TEXT" beat-epoch)
+HB_EPOCH=$(_field "$HB_TEXT" beat-epoch); HB_EPOCH=$((10#$HB_EPOCH))
 case "$HB_EPOCH" in
   ''|*[!0-9]*) verdict UNKNOWN 4 "heartbeat-unparseable-epoch; 'beat-epoch: $HB_EPOCH' is not an integer" ;;
 esac
-HB_INTERVAL=$(_field "$HB_TEXT" interval)
+HB_INTERVAL=$(_field "$HB_TEXT" interval); HB_INTERVAL=$((10#$HB_INTERVAL))
 case "$HB_INTERVAL" in
   ''|*[!0-9]*) verdict UNKNOWN 4 "heartbeat-unparseable-interval; 'interval: $HB_INTERVAL' is not an integer" ;;
 esac

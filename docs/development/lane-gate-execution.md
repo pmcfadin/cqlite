@@ -340,6 +340,16 @@ rather than `STALLED`: the confirmation window is capped at 65 s to bound a host
 such a beat might legitimately not advance inside it, and guessing `STALLED` would send a lane to
 re-run a healthy gate.
 
+A **terminal** verdict is reconciled with the beat before it is believed. During startup a new run
+publishes its beat *before* replacing the previous run's summary — a window the early beater start
+deliberately widened — so an unbound reader could otherwise report the **previous** run's `PASS` as
+the completion of the run starting right now. A beat naming a different run makes the summary
+`summary-superseded`; passing `--run-id` says which run you mean and is answered directly.
+
+Numeric fields are length-bounded and normalised **base 10** before any arithmetic. A digit string
+is not yet a number: bash reads a leading zero as octal, so `interval: 08` was a syntax error that
+*aborted the reader* rather than returning its documented `UNKNOWN`.
+
 ### What the reader does NOT guarantee
 
 The summary is **not** published atomically: `agent-gate.sh` writes it in place with `>`, so a
@@ -402,6 +412,12 @@ blind spot the heartbeat exists to close, open at the moment a reader is most li
 also made the launcher's monitorability check racy: a slow capture (~150 ms on a 6114-file checkout,
 but unbounded in principle) could have made the launcher stop a *healthy* gate. The sentinel stays
 after the capture, because it carries `tree-start:` and cannot precede what computes it.
+
+**Ownership is proved from whichever artifact carries the nonce FIRST — the heartbeat, normally.**
+The beat appears in ~0.4 s (before the tree capture), while the summary is written after it, so
+requiring the *summary* to prove ownership would have reintroduced the very defect that moving the
+beater fixed: a slow capture stopping a healthy, actively-beating gate. The summary remains a second
+source, because a very short run can reach its verdict before any beat exists.
 
 **The real guarantee is post-launch, and it is bound to a LAUNCHER NONCE:** the launcher generates
 an opaque token, forwards it to the gate, and requires it in *both* artifacts before trusting them.
@@ -472,7 +488,7 @@ default-path launch keeps the summary and log the caller still needs.
 Every SUMMARY block now carries a `heartbeat:` line, so a pasted block shows the
 mechanism ran (same reason #3148 stamps a positive `schemas:` line).
 
-Self-tests: `scripts/tests/test_gate_liveness.sh` (163 cases) and
+Self-tests: `scripts/tests/test_gate_liveness.sh` (173 cases) and
 `scripts/tests/test_gate_detached.sh` (100 cases), both in the full gate's
 `tooling-tests` component.
 

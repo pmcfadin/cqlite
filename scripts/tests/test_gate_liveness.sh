@@ -1009,6 +1009,54 @@ for f in "$REPO_ROOT/scripts/tests/test_gate_liveness.sh" "$REPO_ROOT/scripts/te
 done
 [ "$sq_bad" -eq 0 ] && ok "11j.6 neither suite depends on an external seq"
 
+echo "=== section 11k: octal traps, and a superseded summary (job 192) ==="
+# A DIGIT STRING IS NOT A NUMBER. Bash arithmetic reads a leading zero as octal, so `interval: 08`
+# was a syntax error that ABORTED the reader — it would die instead of returning its documented
+# UNKNOWN exit code. Every numeric field is now length-bounded and normalised base-10.
+mk_summary "$TMP/oct.txt" run-O "INCOMPLETE (gate did not finish)"
+_mkbeat_num() { # _mkbeat_num <interval> <beat-seq> <epoch>
+  { echo "==== AGENT-GATE HEARTBEAT ===="; echo "run-id: run-O"; echo "gate-pid: 42"
+    echo "beater-pid: 43"; echo "host: $(uname -n 2>/dev/null || echo unknown)"
+    echo "parent-check: starttime"; echo "interval: $1"; echo "beat-seq: $2"
+    echo "beat-epoch: $3"; echo "==== END AGENT-GATE HEARTBEAT ===="; } > "$TMP/oct.txt.heartbeat"
+}
+for v in 08 09 007; do
+  _mkbeat_num "$v" 5 "$(date +%s)"
+  run_reader "$TMP/oct.txt"
+  case "$RC" in
+    0|2|3|4) ok "11k.1 interval '$v' yields a documented verdict (rc=$RC), not a shell abort" ;;
+    *)       bad "11k.1 interval '$v' yields a documented verdict" "rc=$RC: $(printf '%s' "$OUT" | head -1)" ;;
+  esac
+done
+_mkbeat_num 20 08 "$(date +%s)"
+run_reader "$TMP/oct.txt"
+case "$RC" in 0|2|3|4) ok "11k.2 a leading-zero beat-seq yields a documented verdict (rc=$RC)" ;;
+              *)       bad "11k.2 a leading-zero beat-seq yields a documented verdict" "rc=$RC" ;; esac
+# Absurd magnitudes are refused by NAME rather than overflowing a comparison.
+_mkbeat_num 999999999999999 5 "$(date +%s)"
+expect_reader "11k.3 an absurd interval => UNKNOWN (out of range)" UNKNOWN 4 "interval-out-of-range" -- "$TMP/oct.txt"
+_mkbeat_num 20 5 99999999999999999
+expect_reader "11k.4 an absurd beat-epoch => UNKNOWN (out of range)" UNKNOWN 4 "epoch-out-of-range" -- "$TMP/oct.txt"
+
+# A TERMINAL summary must be reconciled with the beat. During startup the NEW run publishes its
+# beat BEFORE it replaces the previous run's summary — and the beater now starts before the tree
+# capture, which widened that window deliberately. So an UNBOUND reader could report the PREVIOUS
+# run's PASS as the completion of the run starting right now.
+mk_summary "$TMP/sup.txt" old-run "PASS"
+mk_beat "$TMP/sup.txt.heartbeat" new-run 5
+expect_reader "11k.5 terminal summary + beat naming a NEWER run => UNKNOWN (superseded)" \
+  UNKNOWN 4 "summary-superseded" -- "$TMP/sup.txt"
+# CONTROL: the same run in both artifacts is the ordinary finished-gate case.
+mk_summary "$TMP/sup2.txt" same-run "PASS"
+mk_beat "$TMP/sup2.txt.heartbeat" same-run 5
+expect_reader "11k.6 control: matching run-ids => COMPLETE" COMPLETE 0 "" -- "$TMP/sup2.txt"
+# CONTROL: a caller who SAYS which run they mean is answered about that run, not refused.
+expect_reader "11k.7 control: --run-id disambiguates instead of refusing" \
+  COMPLETE 0 "" -- "$TMP/sup.txt" --run-id old-run
+# CONTROL: no heartbeat at all is still COMPLETE (the common older-gate case).
+mk_summary "$TMP/sup3.txt" lone-run "PASS"
+expect_reader "11k.8 control: terminal summary with no beat => COMPLETE" COMPLETE 0 "" -- "$TMP/sup3.txt"
+
 echo "=== section 11f: predictable temp files, closed as a RULE not per site ==="
 # The same shape appeared THREE times in this change: the default /tmp artifact names, the
 # beater's sibling temp, and the launcher's probe. Each was a predictable path opened with

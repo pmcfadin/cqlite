@@ -492,9 +492,23 @@ _hb_seen=0
 _new_rid=""
 _i=0
 while [ "$_i" -lt 40 ]; do
-  # (a) the summary must carry OUR NONCE — not merely a run-id that differs from the pre-launch
-  #     value, which a concurrent peer publishing first would also satisfy. Only once the nonce
-  #     proves the block is ours do we read its run-id.
+  # (a) find OUR run-id from whichever of our two artifacts carries OUR NONCE first.
+  #
+  # The HEARTBEAT is checked FIRST, and that ordering is the whole point (roborev job 192). The
+  # beater now starts before the tree-identity capture, but the SUMMARY is still written after it —
+  # so requiring the summary to prove ownership reintroduced exactly the defect moving the beater
+  # was meant to fix: a slow capture would stop a healthy, actively-beating gate. The beat carries
+  # both the nonce and the run-id and appears within ~0.4s, so the monitorability proof needs no
+  # summary at all.
+  #
+  # The summary is kept as a SECOND source because a very short run (a preflight refusal, a tiny
+  # `--only`) can reach its verdict before any beat is published; then the summary is the only
+  # artifact that exists. Either way the NONCE is what establishes ownership — never a run-id we
+  # could not have predicted.
+  if [ -z "$_new_rid" ] && grep -qxF "launch-nonce: $LAUNCH_NONCE" "$_hbdest" 2>/dev/null; then
+    _cur=$(grep -m1 '^run-id: ' "$_hbdest" 2>/dev/null || true)
+    [ -n "$_cur" ] && _new_rid="${_cur#run-id: }"
+  fi
   if [ -z "$_new_rid" ] && grep -qxF "launch-nonce: $LAUNCH_NONCE" "$SUMMARY" 2>/dev/null; then
     _cur=$(grep -m1 '^run-id: ' "$SUMMARY" 2>/dev/null || true)
     [ -n "$_cur" ] && _new_rid="${_cur#run-id: }"
