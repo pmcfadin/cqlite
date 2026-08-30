@@ -367,7 +367,16 @@ roborev_check_findings() {
       # NONE from a COUNT OF ZERO, so an UNMEASURABLE block must be UNKNOWN (which now fails) and
       # never NONE. A positive verdict requires an affirmative measurement.
       if [ -n "${RECHECK_JOB:-}" ]; then
-        if [ "$block_measured" -eq 0 ]; then
+        # AN EMPTY TRANSCRIPT MEASURED NOTHING, so it cannot report NONE. On a recheck the transcript
+        # IS the record's review text, and a record carrying none leaves it empty — for which "no
+        # severity markers found" is TRUE and MEANINGLESS. `review-completed` already FAILs this run
+        # (an empty transcript carries no terminal verdict marker), so this is defence in depth
+        # rather than the only guard; it is here because the permissive value must not be reachable
+        # from an absent measurement AT ALL. A guard that is correct only because a neighbouring
+        # check happens to fail first is the exact coupling #3564 removed one key over.
+        if [ ! -s "$LOG" ]; then
+          FINDINGS="UNKNOWN"
+        elif [ "$block_measured" -eq 0 ]; then
           FINDINGS="UNKNOWN"
           DETAILS+=("ERROR: findings: this is a --recheck-job of a record with no structured 'verdict' field, so the findings state must be re-asserted from the record's own review text — and that text's findings block COULD NOT BE MEASURED (the extraction or the marker scan itself failed, which is distinct from finding no markers). UNKNOWN, which cannot certify a PASS: a pass may not rest on a measurement that did not happen. Transcript: $LOG")
         elif [ "$block_marker_count" -gt 0 ]; then

@@ -4408,6 +4408,22 @@ assert_says 'case (fd6) a reviewer that RAN reports its exit honestly' '^roborev
 assert_says 'case (fd6) and findings are reported present' '^findings: PRESENT'
 reset_stub
 
+printf '== (fd8) #3564: a recheck of a record with NO review text cannot report NONE ==\n'
+# An EMPTY transcript measured nothing, so "no severity markers found" is true and meaningless — and
+# NONE is now the PERMISSIVE value. `review-completed` already FAILs an empty transcript, so this is
+# defence in depth; it is asserted because a guard that holds only because a NEIGHBOURING check fails
+# first is the exact coupling this issue removed one key over.
+reset_stub
+STUB_ANNOUNCE_SHA="$w_head"
+STUB_PROMPT="$PROMPT_WITH_W_PATHS"
+STUB_RECORD_OUTPUT=''
+run_wrapper "$w_work" --recheck-job 4656
+assert_verdict 'case (fd8)' FAIL 1
+assert_says 'case (fd8) an absent measurement is UNKNOWN, never NONE' '^findings: UNKNOWN$'
+assert_says 'case (fd8) and the recheck says the record carried no review text' \
+  'NOTICE: recheck: the job record for .4656. carries no review text'
+reset_stub
+
 printf '== (fd7) #3564 structural: the findings gate is TOKEN-EXACT and not keyed on a neighbour ==\n'
 # Behavioural cases only cover the shapes someone already thought of. Two properties of the FIX are
 # asserted against the shipped wrapper, because both are exactly what a later "simplification" would
