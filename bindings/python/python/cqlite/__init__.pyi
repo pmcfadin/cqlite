@@ -7,8 +7,6 @@ from pathlib import Path
 from typing import Iterator, Any
 from types import TracebackType
 
-# Type alias for configuration (dict or JSON string)
-
 # Version information
 __version__: str
 def version() -> str:
