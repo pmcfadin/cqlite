@@ -192,8 +192,10 @@ cat /tmp/gate-summary.txt   # the SUMMARY block is the ONLY gate text an agent r
   `> gate.log 2>&1` capture is coloured too, so this is not a tty-only artifact. Cargo colours the
   STATUS WORD and emits the reset immediately after it (`Running<ESC>[0m tests/foo.rs`), so a
   pattern anchored on the status word alone survives while one spanning `<status> <payload>` — the
-  literal `Running tests/`, or `warning:` — matches NOTHING; MEASURED consequence, live on `main`
-  for months: the cli-tests zero-tests guard reported OK having judged no target at all. Conversely
+  literal `Running tests/`, or `warning:` — matches NOTHING. **It breaks BOTH ways, and neither is
+  safe**: the cli-tests zero-tests guard reported OK having judged no target at all (a vacuous PASS,
+  live on `main` for months, fixed by #1699); the declared-vs-observed reconciliation reported EVERY
+  declared target unobserved on a healthy run (a false RED, fixed by #3400). Conversely
   `test result:` / `running N tests` are libtest's, and cargo does not pass `--color` through to the
   harness, so they carry no escapes — safe for a reason that is NOT in the code, which is why this
   is a lint and not a comment. Route every cargo-output parse
@@ -206,7 +208,8 @@ cat /tmp/gate-summary.txt   # the SUMMARY block is the ONLY gate text an agent r
   false-PASSes is worse than no guard, since it invites reliance it cannot support. Mechanization is
   deferred to **#3499**; until it lands, this is a review-time rule, and the standing coverage is
   behavioural (`scripts/tests/test_cargo_output_parsers.sh`, in `tooling-tests`), which pins the
-  defect against real code rather than predicting it from source shape.
+  defect against real code rather than predicting it from source shape — it EXTRACTS each guard from
+  the shipped `agent-gate.sh` and runs it, so unrouting one reds the suite instead of greening it.
   `CARGO_TERM_COLOR=never` at the invocation is belt, not the fix; `gate.yml` KEEPS
   `always` — colour is a presentation property of a log for humans, and moving correctness into a
   workflow file 18 files from the parse is a worse coupling than the one being removed.
