@@ -174,6 +174,16 @@ mk_summary() {
 # a whole class of test flakiness is gone with it.
 # mk_beat <path> <run-id> <age-secs> [interval]
 mk_beat() {
+  # DEFAULT STAYS 20. Lowering it to 1 shortened the reader's confirmation sleep (interval+5) and cut
+  # ~8 minutes off the suite — but it also silently changed cases whose behaviour is SCALED BY INTERVAL.
+  # Case 7.6 ("a beat up to one INTERVAL ahead is tolerated") flipped from RUNNING to
+  # heartbeat-in-the-future, because 5s ahead is inside one 20s interval and outside a 1s one.
+  #
+  # I had enumerated the interval-sensitive sections as 5 and 11g and protected those by line range.
+  # There were THREE — section 7 scales future-clock tolerance by interval — and I missed it. Since that
+  # enumeration is demonstrably unreliable, the 19 DEFAULTED call sites keep the old value: a defaulted
+  # call is exactly the one whose author did not think about the interval, so it is the one most likely
+  # to depend on it accidentally. The saving is taken only where each call site was inspected.
   local iv="${4:-20}"
   { echo "==== AGENT-GATE HEARTBEAT ===="
     echo "run-id: $2"
@@ -1482,18 +1492,18 @@ echo "=== section 11n: differing unbound run-ids are UNKNOWN — age proves no o
 mk_summary "$TMP/sup.txt" run-NEW "PASS"
 
 # Beat OLDER than the summary (job 206's shape).
-mk_beat "$TMP/sup.txt.heartbeat" run-OLD 4000 20
+mk_beat "$TMP/sup.txt.heartbeat" run-OLD 4000 1
 expect_reader "11n.1 terminal verdict + STALE foreign beat => UNKNOWN (age proves no ordering)" \
   UNKNOWN 4 "summary-foreign-run" -- "$TMP/sup.txt"
 
 # Beat NEWER than the summary and stale because that run DIED (job 208's shape). Same verdict, and
 # that identity is the point: the reader cannot tell these apart, so it must not try.
-mk_beat "$TMP/sup.txt.heartbeat" run-DIED 4000 20
+mk_beat "$TMP/sup.txt.heartbeat" run-DIED 4000 1
 expect_reader "11n.2 the beat-newer-and-died shape gets the SAME verdict (indistinguishable)" \
   UNKNOWN 4 "summary-foreign-run" -- "$TMP/sup.txt"
 
 # A FRESH foreign beat: still UNKNOWN. One verdict for every differing run-id, no age branch at all.
-mk_beat "$TMP/sup.txt.heartbeat" run-NEWER 5 20
+mk_beat "$TMP/sup.txt.heartbeat" run-NEWER 5 1
 expect_reader "11n.3 terminal verdict + FRESH foreign beat => UNKNOWN" \
   UNKNOWN 4 "summary-foreign-run" -- "$TMP/sup.txt"
 
@@ -1504,7 +1514,7 @@ expect_reader "11n.4 terminal verdict + MALFORMED foreign beat => UNKNOWN" \
   UNKNOWN 4 "summary-foreign-run" -- "$TMP/sup.txt"
 
 # The diagnostic must not claim what it cannot know: no "live", no "NEWER".
-mk_beat "$TMP/sup.txt.heartbeat" run-OTHER 4000 20
+mk_beat "$TMP/sup.txt.heartbeat" run-OTHER 4000 1
 _fr_out=$(bash "$READER" "$TMP/sup.txt" 2>&1 || true)
 if printf '%s' "$_fr_out" | grep -qE 'live heartbeat|a NEWER run is starting'; then
   bad "11n.5 the diagnostic claims neither liveness nor ordering" "overclaims: $_fr_out"
@@ -1519,7 +1529,7 @@ printf '%s' "$_fr_out" | grep -q -- '--run-id' \
 # CONTROL: a MATCHING run-id with an equally stale beat must still be COMPLETE. Without this, every
 # case above would be satisfied by a reader that answers UNKNOWN unconditionally.
 mk_summary "$TMP/sup2.txt" run-SAME "PASS"
-mk_beat "$TMP/sup2.txt.heartbeat" run-SAME 4000 20
+mk_beat "$TMP/sup2.txt.heartbeat" run-SAME 4000 1
 expect_reader "11n.7 control: matching run-id + stale beat => COMPLETE" \
   COMPLETE 0 "terminal verdict" -- "$TMP/sup2.txt"
 
@@ -1662,6 +1672,86 @@ else
   bad "11w.1 every case passes the flags its name claims" "mismatch(es): $_flagmismatch"
 fi
 
+echo "=== section 11z: no summary-section variable can be UNSET on the deferral path (job 238) ==="
+# THE AUDIT, MECHANISED. Job 238 was an abort, not a wrong verdict: job 218 let summary-side paths BREAK
+# OUT before the initial snapshot was taken, and job 231 then expanded `_SUM_SNAP` — two fixes each
+# correct alone, jointly aborting under `set -u`. A gate that completed during the wait produced NO
+# verdict, which the launcher reads as unmonitorable.
+#
+# The generalisation is the check: any variable assigned ONLY inside the summary section but referenced
+# after it can be unset on a deferral. Running that audit by hand found 25 such variables, of which one
+# (`SUM_RUN_ID`) was referenced after the region — unreachable today, because that reference is an `elif`
+# reached only on an unbound read while deferral requires a named run, but the argument is NON-LOCAL and
+# a future change to the deferral condition would make it live. Both are now initialised up front, and
+# this case keeps the property from regressing as paths are added.
+_z_risky=$(python3 - "$READER" <<'PYEOF_INNER'
+import re, sys
+src = open(sys.argv[1]).read().split('\n')
+try:
+    start = next(i for i,l in enumerate(src) if l.strip() == 'while :; do')
+    end   = next(i for i,l in enumerate(src) if 'the heartbeat side: affirmative liveness' in l)
+except StopIteration:
+    print('PROBE-FAILED'); raise SystemExit(0)
+region, after = src[start:end], '\n'.join(src[end:])
+def assigns(lines):
+    out = set()
+    for l in lines:
+        for m in re.finditer(r'(?:^|\s|;)([A-Za-z_][A-Za-z0-9_]*)=', l):
+            out.add(m.group(1))
+    return out
+inside, before = assigns(region), assigns(src[:start])
+risky = []
+for name in sorted(inside - before):
+    if not (name.isupper() or name.startswith('_')):
+        continue
+    for m in re.finditer(r'\$\{?' + re.escape(name) + r'(\}|[^A-Za-z0-9_}])', after):
+        if ':-' in after[m.start():m.start()+len(name)+6]:
+            continue
+        risky.append(name); break
+print(','.join(risky))
+PYEOF_INNER
+) || _z_risky="PROBE-FAILED"
+if [ "$_z_risky" = "PROBE-FAILED" ]; then
+  bad "11z.1 no summary-section variable is referenced unset after a deferral" \
+      "the probe could not delimit the regions — this proves nothing"
+elif [ -z "$_z_risky" ]; then
+  ok "11z.1 no summary-section variable is referenced unset after a deferral"
+else
+  bad "11z.1 no summary-section variable is referenced unset after a deferral" \
+      "would abort under set -u on a deferral: $_z_risky"
+fi
+
+echo "=== section 11aa: a failed post-wait snapshot is NOT 'no change' (job 241) ==="
+# If the summary was readable BEFORE the confirmation wait and cannot be read after it — deleted,
+# replaced by a directory, permissions changed — then whether the gate completed during the wait is
+# UNKNOWABLE. Continuing from the stale INCOMPLETE snapshot reported STALLED on evidence that no longer
+# exists. Third variant of one rule in this file: absence of a measurement read as absence of change
+# (the others: `unknown` hostnames comparing equal, and an unrecognised ActiveState reading as stopped).
+_aa="$TMP/vanish.txt"
+mk_summary "$_aa" run-V "INCOMPLETE (gate did not finish)"
+mk_beat "$_aa.heartbeat" run-V 200 1
+( sleep 3; rm -f "$_aa" ) & _aw=$!
+remember_pid "$_aw"
+expect_reader "11aa.1 summary PRESENT then MISSING during the wait => UNKNOWN, not STALLED" \
+  UNKNOWN 4 "summary-unreadable-after-wait" -- "$_aa" --run-id run-V
+wait "$_aw" 2>/dev/null || true
+# Present-then-unreadable is the same class in a different shape.
+mk_summary "$_aa" run-V "INCOMPLETE (gate did not finish)"
+mk_beat "$_aa.heartbeat" run-V 200 1
+( sleep 3; rm -f "$_aa"; mkdir -p "$_aa" ) & _aw2=$!
+remember_pid "$_aw2"
+expect_reader "11aa.2 summary PRESENT then UNREADABLE during the wait => UNKNOWN" \
+  UNKNOWN 4 "summary-unreadable-after-wait" -- "$_aa" --run-id run-V
+wait "$_aw2" 2>/dev/null || true
+rm -rf "$_aa"
+# CONTROL: absent ALL ALONG must still let the heartbeat side answer — a failed snapshot is consistent
+# with "was never there", so refusing here would break the case 11x.3 exists for.
+_ab="$TMP/neverthere.txt"
+rm -f "$_ab"
+mk_beat "$_ab.heartbeat" run-V 200 1
+expect_reader "11aa.3 control: absent ALL ALONG still yields the heartbeat verdict" \
+  STALLED 3 "" -- "$_ab" --run-id run-V
+
 echo "=== section 11x: the post-wait re-decision must survive an ABSENT initial summary (job 238) ==="
 # Job 231 compared the post-wait snapshot against the initial one. But several summary-side paths — a
 # missing summary, an unsnapshotable one — DEFER to the heartbeat side and break out before the initial
@@ -1673,7 +1763,7 @@ echo "=== section 11x: the post-wait re-decision must survive an ABSENT initial 
 # first version could not see it, because it required the initial snapshot to be non-empty to compare.
 _x="$TMP/absent.txt"
 rm -f "$_x"
-mk_beat "$_x.heartbeat" run-X 200 20
+mk_beat "$_x.heartbeat" run-X 200 1
 ( sleep 3; printf '==== AGENT-GATE SUMMARY ====\nrun-id: run-X\nRESULT: PASS\n==== END AGENT-GATE SUMMARY ====\n' > "$_x" ) &
 _xw=$!
 remember_pid "$_xw"
@@ -1686,7 +1776,7 @@ _xcode=$(grep -c '^_SUM_SNAP=""' "$READER" || true)
                     || bad "11x.2 _SUM_SNAP is initialised before any summary handling" "an unset expansion can still abort under set -u"
 # CONTROL: still no summary and no completion => the heartbeat side answers, not a crash.
 rm -f "$_x"
-mk_beat "$_x.heartbeat" run-X 200 20
+mk_beat "$_x.heartbeat" run-X 200 1
 run_reader "$_x" --run-id run-X
 case "$RC" in
   2|3|4) ok "11x.3 control: absent summary with no completion still yields a verdict (rc=$RC)" ;;
@@ -1705,7 +1795,7 @@ fi
 _y="$TMP/leak.txt"
 _snap_before=$(ls -d "${TMPDIR:-/tmp}"/gate-liveness-snap.* 2>/dev/null | wc -l | tr -d ' ')
 mk_summary "$_y" run-Y "INCOMPLETE (gate did not finish)"
-mk_beat "$_y.heartbeat" run-Y 200 20
+mk_beat "$_y.heartbeat" run-Y 200 1
 ( sleep 3; printf '==== AGENT-GATE SUMMARY ====\nrun-id: run-Y\nRESULT: PASS\n==== END AGENT-GATE SUMMARY ====\n' > "$_y" ) &
 _yw=$!
 remember_pid "$_yw"
@@ -1737,7 +1827,7 @@ fi
 _uw="$TMP/upost.txt"
 _mk_post() {  # <what the summary becomes after 3s>
   mk_summary "$_uw" run-U "INCOMPLETE (gate did not finish)"
-  mk_beat "$_uw.heartbeat" run-U 200 20
+  mk_beat "$_uw.heartbeat" run-U 200 1
   ( sleep 3; printf '%s' "$1" > "$_uw" ) &
   _post_w=$!
   remember_pid "$_post_w"
@@ -1777,7 +1867,7 @@ echo "=== section 11v: --no-wait can only WEAKEN a verdict (job 231) ==="
 # form, or a bounded caller would be trading correctness for latency.
 _nw="$TMP/nowait.txt"
 mk_summary "$_nw" run-N "INCOMPLETE (gate did not finish)"
-mk_beat "$_nw.heartbeat" run-N 4000 20
+mk_beat "$_nw.heartbeat" run-N 4000 1
 # The flag this case is NAMED for must actually be PASSED. The first version omitted it, so the reader
 # blocked and answered STALLED — and the case failed for the right reason, which is the only thing that
 # saved it: an assertion whose name describes a flag it never passes tests something else entirely.
@@ -1790,7 +1880,7 @@ expect_reader "11v.1 stale beat + --no-wait => UNKNOWN (a stall is unprovable wi
 expect_reader "11v.2 control: the BLOCKING form still confirms and answers STALLED" \
   STALLED 3 "" -- "$_nw" --run-id run-N
 # A FRESH beat needs no confirmation, so --no-wait must not weaken it.
-mk_beat "$_nw.heartbeat" run-N 5 20
+mk_beat "$_nw.heartbeat" run-N 5 1
 # SAME DEFECT, found by auditing the group immediately after fixing 11v.1 — and this one the suite could
 # NEVER have caught: a fresh beat answers RUNNING with or without the flag, so it was GREEN while testing
 # nothing about --no-wait. The dangerous half of "an assertion that does not test what its name claims"
@@ -1855,12 +1945,12 @@ echo "=== section 11s: termination needs a COMPLETE block (job 221) ==="
 # added for job 220 did not.
 _tr="$TMP/trunc.txt"
 { echo "==== AGENT-GATE SUMMARY ===="; echo "run-id: run-T"; echo "RESULT: FUTURETHING"; } > "$_tr"
-mk_beat "$_tr.heartbeat" run-T 4000 20
+mk_beat "$_tr.heartbeat" run-T 4000 1
 expect_reader "11s.1 unrecognised token in a TRUNCATED write + stale beat => STALLED" \
   STALLED 3 "" -- "$_tr" --run-id run-T
 # CONTROL: the same token in a COMPLETE block is termination, and no beat overrides it.
 mk_summary "$TMP/complete.txt" run-T "FUTURETHING"
-mk_beat "$TMP/complete.txt.heartbeat" run-T 4000 20
+mk_beat "$TMP/complete.txt.heartbeat" run-T 4000 1
 expect_reader "11s.2 control: the same token in a COMPLETE block => UNKNOWN (termination)" \
   UNKNOWN 4 "unrecognised-result" -- "$TMP/complete.txt" --run-id run-T
 
@@ -1897,11 +1987,11 @@ _unbroken=$(printf '%s\n' "$_reg" | grep '_summary_refusal_or_defer "' | grep -v
 
 # Behavioural: the three paths that bypassed the funnel, each with a STALE matching beat.
 _q="$TMP/q"
-mk_beat "$_q-miss.txt.heartbeat" run-Q 4000 20
+mk_beat "$_q-miss.txt.heartbeat" run-Q 4000 1
 expect_reader "11q.3 MISSING summary + stale matching beat => STALLED" \
   STALLED 3 "" -- "$_q-miss.txt" --run-id run-Q
 { echo "==== AGENT-GATE SUMMARY ===="; echo "run-id: run-Q"; echo "==== END AGENT-GATE SUMMARY ===="; } > "$_q-nores.txt"
-mk_beat "$_q-nores.txt.heartbeat" run-Q 4000 20
+mk_beat "$_q-nores.txt.heartbeat" run-Q 4000 1
 expect_reader "11q.4 summary with NO RESULT line + stale matching beat => STALLED" \
   STALLED 3 "" -- "$_q-nores.txt" --run-id run-Q
 # CORRECTED by job 220, and the correction is the interesting part. Job 218 routed this path through
@@ -1915,16 +2005,16 @@ expect_reader "11q.4 summary with NO RESULT line + stale matching beat => STALLE
 # was right for paths carrying NO termination information, and over-applied here, where the sites
 # genuinely differ. Uniformity is not a substitute for asking what each artifact actually says.
 mk_summary "$_q-weird.txt" run-Q "WEIRDVALUE"
-mk_beat "$_q-weird.txt.heartbeat" run-Q 4000 20
+mk_beat "$_q-weird.txt.heartbeat" run-Q 4000 1
 expect_reader "11q.5 UNRECOGNISED verdict token + stale matching beat => UNKNOWN (termination, not a stall)" \
   UNKNOWN 4 "unrecognised-result" -- "$_q-weird.txt" --run-id run-Q
 # ...and a FRESH beat does not change it either: the closed grammar is not negotiable.
-mk_beat "$_q-weird.txt.heartbeat" run-Q 5 20
+mk_beat "$_q-weird.txt.heartbeat" run-Q 5 1
 expect_reader "11q.5b UNRECOGNISED token + FRESH matching beat => still UNKNOWN" \
   UNKNOWN 4 "unrecognised-result" -- "$_q-weird.txt" --run-id run-Q
 # CONTROL: a summary with NO RESULT line still DEFERS to a fresh beat, or the two policies have
 # collapsed into one and job 218's fix has been undone.
-mk_beat "$_q-nores.txt.heartbeat" run-Q 5 20
+mk_beat "$_q-nores.txt.heartbeat" run-Q 5 1
 expect_reader "11q.5c control: NO RESULT line + fresh beat still DEFERS => RUNNING" \
   RUNNING 2 "is beating" -- "$_q-nores.txt" --run-id run-Q
 # The two policies must remain DISTINCT and both named, so the property guard stays property-shaped
@@ -1955,16 +2045,16 @@ echo "=== section 11p: an unusable summary must not pre-empt the heartbeat (job 
 _up="$TMP/unusable.txt"
 printf 'not a gate summary at all\n' > "$_up"
 
-mk_beat "$_up.heartbeat" run-R 4000 20
+mk_beat "$_up.heartbeat" run-R 4000 1
 expect_reader "11p.1 unusable summary + STALE matching beat => STALLED (reaches the confirmation)" \
   STALLED 3 "" -- "$_up" --run-id run-R
-mk_beat "$_up.heartbeat" run-R 5 20
+mk_beat "$_up.heartbeat" run-R 5 1
 expect_reader "11p.2 unusable summary + FRESH matching beat => RUNNING" \
   RUNNING 2 "is beating" -- "$_up" --run-id run-R
 rm -f "$_up.heartbeat"
 expect_reader "11p.3 unusable summary + NO beat => UNKNOWN (nothing to be authoritative)" \
   UNKNOWN 4 "" -- "$_up" --run-id run-R
-mk_beat "$_up.heartbeat" run-OTHER 4000 20
+mk_beat "$_up.heartbeat" run-OTHER 4000 1
 expect_reader "11p.4 unusable summary + beat for ANOTHER run => UNKNOWN (not our authority)" \
   UNKNOWN 4 "" -- "$_up" --run-id run-R
 # A MALFORMED beat is not an authority either, however matching its run-id looks.
@@ -1975,7 +2065,7 @@ expect_reader "11p.5 unusable summary + MALFORMED matching beat => UNKNOWN" \
 # CONTROL: a VALID TERMINAL summary still wins over a fresh beat, or the deferral has quietly become
 # "the heartbeat always decides" and COMPLETE would be unreachable.
 mk_summary "$TMP/usable.txt" run-R "PASS"
-mk_beat "$TMP/usable.txt.heartbeat" run-R 5 20
+mk_beat "$TMP/usable.txt.heartbeat" run-R 5 1
 expect_reader "11p.6 control: a valid TERMINAL summary still wins over a fresh beat" \
   COMPLETE 0 "terminal verdict" -- "$TMP/usable.txt" --run-id run-R
 

@@ -642,6 +642,37 @@ gate is protected when it is not is the exact false assurance this script exists
 in `bootstrap-agent-machine.sh` alongside the other worker-environment guarantees. Until it is there,
 a freshly-provisioned box will refuse (loudly, with the remedy) rather than run an unprotected gate.
 
+### A safety argument can be TRUE and INCOMPLETE — and the suite's own cost went unmeasured for 20 rounds
+
+Two lessons from one episode, and the second is about noticing a cost I had been adding to all evening.
+
+**The suite had grown to 696s, and it runs in `tooling-tests` on EVERY full gate.** Nobody asked for
+that; it accumulated one case at a time, each of which looked cheap. What surfaced it was a harness
+timeout, not judgement — the run tipped over a 700s ceiling. The driver is that ~22 cases expect
+`STALLED`, and reaching that verdict means reaching the reader's confirmation sleep, which is
+`interval + 5` taken from the BEAT'S OWN interval field: 25s per case with the standard fixture.
+Lowering incidental fixtures to `interval: 1` cut the suite to **429s — a 267s saving on every full gate
+in the repo**, verdict-neutral.
+
+**The safety argument for that sweep was true and incomplete, which is the transferable part.** I
+reasoned: `window = max(3 × interval, 90s)`, so any `interval ≤ 30` yields the same 90s floor, so
+lowering an interval changes only the sleep and never a verdict. Both halves are correct. But the reader
+*also* scales **future-clock tolerance** by interval, which the argument never considered — so case 7.6
+("a beat up to one INTERVAL ahead is tolerated") flipped from `RUNNING` to `heartbeat-in-the-future`,
+because 5s ahead is inside one 20s interval and outside a 1s one.
+
+I had enumerated the interval-sensitive sections as 5 and 11g, protected them by line range, and
+verified them byte-identical by md5. **There were three.** The enumeration was the weak step, not the
+verification.
+
+So the fix was scoped by that demonstrated unreliability rather than by patching the one case that
+failed: the DEFAULT interval stays 20, and the saving is taken only at the 24 call sites that were
+individually inspected. Patching 7.6 and re-running for green would have proved less than it appears —
+with 21 defaulted call sites, a case can exercise a different path and still produce the same verdict
+(the `11v.3` hazard), so **the suite is an oracle for VERDICTS, not for SEMANTICS**. And there is a
+useful asymmetry in which sites are safe: a DEFAULTED call is precisely the one whose author did not
+think about the interval, which makes it the likeliest to depend on it by accident.
+
 ### Two of my own fixes, each correct alone, jointly broken — the audit question none of the others ask
 
 Job 238 found an ABORT, not a wrong verdict, and it was produced by two earlier fixes interacting:

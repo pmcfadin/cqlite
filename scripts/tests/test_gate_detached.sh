@@ -1319,6 +1319,39 @@ else
   skip=$((skip+4)); echo "SKIP 4b.115-4b.118 (no user systemd manager on this host)"
 fi
 
+# --- roborev job 241: the state grammar must be closed on the TERMINAL side ----------------------
+# Job 205 fixed this function's EXIT-CODE form: `is-active --quiet` answers 0 only for "active", so every
+# other outcome fell into "dead, reclaim it". The replacement then listed the LIVE states and made
+# everything else `return 1` — so `maintenance`, or any state a future systemd introduces, read as
+# AFFIRMATIVELY GONE and a live reservation could be reclaimed, putting two gates on one summary path.
+# The same rule, the same function, two rounds apart, one layer over. Knowing the rule and having just
+# applied it did not prevent violating it; only closing the grammar on the terminal side does.
+_uil=$(sed -n '/^_unit_is_live()/,/^}/p' "$LAUNCHER")
+if printf '%s' "$_uil" | grep -q 'inactive|failed) return 1' \
+   && printf '%s' "$_uil" | grep -q '\*) return 0'; then
+  ok "4b.139 only inactive|failed are terminal; every other state reads LIVE"
+else
+  bad "4b.139 only inactive|failed are terminal" "the grammar is closed on the wrong side"
+fi
+# Behavioural, through the shipped function with a stubbed systemctl, because the grep above cannot show
+# what an UNRECOGNISED value does — and that is the whole defect.
+_ud=$(mktemp -d "$TMP/uilstub.XXXXXX")
+printf '#!/usr/bin/env bash\nprintf "%%s\\n" "$FAKE_STATE"\n' > "$_ud/systemctl"
+chmod +x "$_ud/systemctl"
+_uil_bad=0
+_uil_check() {  # <state> <expected LIVE|GONE>
+  local got
+  if ( export PATH="$_ud:$PATH"; eval "$_uil"; FAKE_STATE="$1" _unit_is_live fake.service ); then got=LIVE; else got=GONE; fi
+  [ "$got" = "$2" ] || { _uil_bad=$((_uil_bad+1)); echo "     state '${1:-<empty>}' -> $got, expected $2"; }
+}
+for st in active activating reloading refreshing deactivating maintenance some-future-state ""; do
+  _uil_check "$st" LIVE
+done
+_uil_check inactive GONE
+_uil_check failed GONE
+[ "$_uil_bad" = 0 ] && ok "4b.140 state classification: 8 live/unknown states LIVE, only inactive+failed GONE" \
+                    || bad "4b.140 state classification" "$_uil_bad state(s) misclassified"
+
 # --- roborev job 231: a deadline must bound the BLOCKING CALL, not just the loop top ---------------
 # Job 228 added a wall-clock deadline checked before each iteration. That bounds nothing on its own: the
 # reader itself sleeps `interval + 5` (capped 65s) to confirm whether a non-advancing beat is stalled, so

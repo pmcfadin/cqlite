@@ -616,9 +616,20 @@ _unit_is_live() {  # <unit> -> 0 = live or unmeasurable (refuse), 1 = affirmativ
   local st rc
   st=$(systemctl --user show -p ActiveState --value "$1" 2>/dev/null); rc=$?
   if [ "$rc" != 0 ] || [ -z "$st" ]; then return 0; fi   # could not measure => treat as LIVE
+  # THE GRAMMAR IS CLOSED ON THE *TERMINAL* SIDE, not the live side (roborev job 241). The first version
+  # listed the LIVE states and made everything else `return 1` — so `maintenance`, or any state a future
+  # systemd introduces, read as AFFIRMATIVELY GONE and a live reservation could be reclaimed, putting two
+  # gates on one summary path. That is an open grammar in the PERMISSIVE direction.
+  #
+  # This is the same defect job 205 fixed in this same function, in its exit-code form: `is-active`
+  # answers 0 only for "active", so every other outcome fell into "dead, reclaim it". I corrected the
+  # exit-code version and then reproduced it in the state-name version two rounds later. Only
+  # `inactive` and `failed` are affirmative terminal readings; EVERYTHING else — known transitional,
+  # unknown, or newly invented — is live-or-unmeasurable, and both refuse.
   case "$st" in
-    active|activating|reloading|refreshing|deactivating) return 0 ;;
-    *) return 1 ;;                                        # inactive / failed => affirmatively gone
+    inactive|failed) return 1 ;;   # the only affirmative "not running" answers systemd gives
+    *) return 0 ;;                 # active, activating, reloading, refreshing, deactivating,
+                                   # maintenance, and anything unrecognised => treat as LIVE
   esac
 }
 

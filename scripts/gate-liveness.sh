@@ -63,6 +63,14 @@ NO_WAIT=""
 # NO verdict at all, which the launcher reads as unmonitorable. Reproduced: "line 908: _SUM_SNAP:
 # unbound variable", exit 1.
 _SUM_SNAP=""
+# SUM_RUN_ID for the same reason, and the honest status is: NOT reachable today. The precondition audit
+# (which of my earlier fixes weakened a guarantee later code relies on?) flagged it as assigned only
+# inside the summary section yet referenced after it. Reproduction showed that reference is an `elif`
+# evaluated only on an UNBOUND read, while deferral requires `_beat_matches=yes` which requires a named
+# run — so on that path the summary section always completed. Kept anyway: the reachability argument is
+# NON-LOCAL, and anyone making the funnel defer on an unbound read turns this into the same abort, which
+# yields NO verdict and makes the launcher stop a healthy gate. One line against that.
+SUM_RUN_ID=""
 while [ $# -gt 0 ]; do
   case "$1" in
     --run-id)    WANT_RUN_ID="${2:?--run-id needs a value}"; shift 2 ;;
@@ -912,6 +920,18 @@ sleep "$_confirm_wait"
 # `--no-wait` guarantees termination by forbidding a second sleep.
 if [ -z "$NO_WAIT" ]; then
   _post_snap=$(_snap_of "$SUMMARY" postwait 2>/dev/null) || _post_snap=""
+  # A SNAPSHOT FAILURE IS NOT "NO CHANGE" (roborev job 241). If the summary was readable before the wait
+  # and cannot be snapshotted after it — deleted, replaced by a directory, permissions changed — then
+  # whether the gate completed during the wait is UNKNOWABLE, and continuing from the stale INCOMPLETE
+  # snapshot would report STALLED on evidence that no longer exists. Absence of a measurement read as
+  # absence of change: the same shape as `unknown` hostnames matching, and as an unrecognised
+  # `ActiveState` reading as stopped.
+  #
+  # Present-then-missing is the only failing case: if the summary was ALREADY absent, a failed snapshot
+  # is consistent with that and the heartbeat side answers as before.
+  if [ -n "$_SUM_SNAP" ] && [ -z "$_post_snap" ]; then
+    verdict UNKNOWN 4 "summary-unreadable-after-wait; $SUMMARY was readable before the confirmation wait and cannot be read after it, so whether the gate reached a verdict during the wait is unknowable — reporting STALLED from the pre-wait snapshot would rest on evidence that no longer exists"
+  fi
   # A summary that did not exist before and exists NOW is the most important change of all — it is the
   # gate finishing — and the first version could not see it, because it required the INITIAL snapshot to
   # be non-empty before comparing. Absent-then-present must count.
