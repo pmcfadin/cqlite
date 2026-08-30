@@ -57,6 +57,16 @@
 //!
 //! # Two ambiguities, declared rather than papered over
 //!
+//! 0. **An EMPTY container vs a container of one EMPTY member.** Members are
+//!    unquoted and unseparated at count 1, so a `set<text>` holding exactly the
+//!    empty string renders `{}` — byte for byte what an EMPTY set renders as. The
+//!    two are different values, so neither reading is trustworthy and such a cell
+//!    is REFUSED. The rule is bounded by the DECLARED element type: a `list<int>`
+//!    member always carries a digit, so `[]` there can only mean zero members and
+//!    IS compared. It is the mirror of ambiguity 3 below, which refuses the case
+//!    where the GOLDEN carries the empty member; without it the golden-side scan
+//!    saw nothing to refuse in an empty golden container while the CLI could
+//!    perfectly well have held one empty member.
 //! 1. **`null` vs the text `"null"`.** A container has no empty-field mechanism,
 //!    so `ValueFormatter` spells a null member `null` — the same text a `text`
 //!    member holding `"null"` produces (issue #1499's ambiguity, one level in).
@@ -65,7 +75,7 @@
 //!    the oracle knows it, and loses it only where CSV genuinely cannot express
 //!    it. A CLI that emits the wrong member still fails — only the exact
 //!    null/`"null"` swap is invisible.
-//! 2. **Separator collisions.** Members are unquoted, so a scalar whose text
+//! 3. **Separator collisions.** Members are unquoted, so a scalar whose text
 //!    contains `, ` (or, for a map/UDT KEY, `: `) or a bracket makes the
 //!    rendering genuinely unparseable. Such a cell is REFUSED, never guessed —
 //!    and the refusal is decided from the GOLDEN alone, so it can never be
@@ -98,12 +108,34 @@ fn brackets(ty: &CqlType) -> Option<(char, char)> {
 /// Is this golden container unambiguously recoverable from the flat CSV
 /// rendering? `Some(reason)` means it is not, and the cell must be refused.
 ///
-/// Decided from the GOLDEN alone — never from the CLI's output — so a refusal
-/// can never be produced by the defect the lane is looking for.
-pub fn ambiguity(golden: &Value) -> Option<String> {
+/// Decided from the GOLDEN and the committed DDL — never from the CLI's output —
+/// so a refusal can never be produced by the defect the lane is looking for.
+///
+/// The DDL is consulted for ONE question only: whether a member of the declared
+/// element type can render as the empty string, which is what decides ambiguity 0.
+/// Everything else is read from the golden's own content.
+pub fn ambiguity(golden: &Value, ty: &CqlType) -> Option<String> {
+    ambiguity_at(golden, Some(ty))
+}
+
+/// [`ambiguity`], carrying the declared type of THIS position. `None` means the
+/// declared type does not describe this shape (the comparison reports that), and
+/// no type-dependent rule may then fire — refusing there would suppress a real
+/// divergence rather than declare a format limit.
+fn ambiguity_at(golden: &Value, ty: Option<&CqlType>) -> Option<String> {
     match golden {
         Value::Array(items) => {
-            for item in items {
+            // Ambiguity 0: zero members and one EMPTY member render identically.
+            // Keyed on the AFFIRMATIVE answer — this element type really can
+            // render empty — so an unknown or non-collection type does not refuse.
+            if items.is_empty() && empty_container_is_ambiguous(ty) {
+                return Some(
+                    "an empty container is indistinguishable from a container of one empty \
+                     member of this element type"
+                        .into(),
+                );
+            }
+            for (i, item) in items.iter().enumerate() {
                 // A member rendering to the empty string makes the member count
                 // unrecoverable: one empty member and zero members both render
                 // as an empty body.
@@ -112,7 +144,7 @@ pub fn ambiguity(golden: &Value) -> Option<String> {
                         "an empty scalar member is indistinguishable from no member".into(),
                     );
                 }
-                if let Some(why) = ambiguity(item) {
+                if let Some(why) = ambiguity_at(item, member_type(ty, i)) {
                     return Some(why);
                 }
             }
@@ -131,7 +163,7 @@ pub fn ambiguity(golden: &Value) -> Option<String> {
                 if let Some(why) = scalar_ambiguity_of(&Value::String(key.clone())) {
                     return Some(format!("map/UDT key: {why}"));
                 }
-                if let Some(why) = ambiguity(value) {
+                if let Some(why) = ambiguity_at(value, field_type(ty, key)) {
                     return Some(why);
                 }
             }
@@ -172,6 +204,70 @@ fn scalar_text(scalar: &Value) -> String {
 
 fn is_scalar(v: &Value) -> bool {
     !matches!(v, Value::Array(_) | Value::Object(_))
+}
+
+/// Is an EMPTY golden array of this declared type genuinely unrecoverable?
+///
+/// Only for a `list`/`set` whose ELEMENT can render as the empty string. A
+/// `tuple` is exempt because its member count comes from the DDL, so the
+/// comparison's arity check sees a dropped member; every other type does not
+/// describe an array at all, and refusing there would hide the shape divergence
+/// the comparison exists to report.
+fn empty_container_is_ambiguous(ty: Option<&CqlType>) -> bool {
+    match ty {
+        Some(CqlType::List(element)) | Some(CqlType::Set(element)) => {
+            member_can_render_empty(element)
+        }
+        _ => false,
+    }
+}
+
+/// Can a value of this declared type render as the EMPTY string?
+///
+/// Deliberately CONSERVATIVE — it answers `false` only for the types whose every
+/// rendering provably carries at least one character: a number always carries a
+/// digit, a boolean is `true`/`false`, and a container carries its brackets (an
+/// empty one renders as the bracket pair, not as nothing). Everything else —
+/// `text`/`varchar`/`ascii`, which hold the empty string, and every type whose
+/// empty-value spelling this lane has not established — answers `true`, because
+/// the cost of over-refusing is a counted, NAMED gap in the census while the cost
+/// of under-refusing is a false pass.
+fn member_can_render_empty(ty: &CqlType) -> bool {
+    !matches!(
+        ty,
+        CqlType::Numeric(_)
+            | CqlType::Boolean
+            | CqlType::List(_)
+            | CqlType::Set(_)
+            | CqlType::Map(..)
+            | CqlType::Tuple(_)
+            | CqlType::Udt(_)
+    )
+}
+
+/// The declared type of member `i` of an array position, or `None` when the
+/// declared type does not describe an array.
+fn member_type(ty: Option<&CqlType>, i: usize) -> Option<&CqlType> {
+    match ty {
+        Some(CqlType::List(element)) | Some(CqlType::Set(element)) => Some(element),
+        Some(CqlType::Tuple(items)) => items.get(i),
+        _ => None,
+    }
+}
+
+/// The declared type of entry `key` of an object position: a map's VALUE type, or
+/// the named UDT field's type. `None` for an undeclared field or a type that does
+/// not describe an object.
+fn field_type<'t>(ty: Option<&'t CqlType>, key: &str) -> Option<&'t CqlType> {
+    match ty {
+        Some(CqlType::Map(_, value)) => Some(value),
+        Some(CqlType::Udt(udt)) => udt
+            .fields
+            .iter()
+            .find(|(name, _)| name == key)
+            .map(|(_, t)| t),
+        _ => None,
+    }
 }
 
 /// A predicate over a value path: `true` means the comparison excludes that path,
@@ -426,11 +522,15 @@ fn brief(s: &str) -> String {
 // Unit coverage for the branches the corpus does not reach
 // ===========================================================================
 //
-// The committed + fetched corpus contains no container member carrying a `, `,
-// a bracket or a `: ` in a map key, so the run census reports `0 REFUSED` — a
-// true measurement, but one that leaves the refusal valve and the strictness
-// rules unexecuted. These cases exercise them directly, so "0 refusals" means
-// "the scan ran and found none" rather than "the scan may not work".
+// The corpus reaches ONE of the refusal causes and none of the strictness rules.
+// Measured on the census: with the fetched corpus present the CSV lane reports
+// `1 REFUSED` — `test_types.nb_empty_collections`'s `fs`, a `frozen<set<text>>`
+// the golden carries EMPTY (ambiguity 0). The committed tier alone reports
+// `0 REFUSED`, and no container member anywhere in the committed or fetched
+// corpus carries a `, `, a bracket, a `: ` in a map key, or an empty scalar
+// member. So the other causes, and every strictness rule, are exercised only
+// here — which is what makes a census `0` mean "the scan ran and found none"
+// rather than "the scan may not work".
 //
 // Inputs are renderings in the grammar `ValueFormatter` documents; expected
 // outputs are the GOLDEN-side shapes `sstabledump` produces. Nothing here is
@@ -465,13 +565,15 @@ mod tests {
     fn member_containing_the_element_separator_is_refused() {
         // `{"a, b"}` and `{"a", "b"}` render identically, so no reading of the
         // CLI's text is trustworthy.
-        let why = ambiguity(&json!(["a, b"])).expect("a `, `-bearing member must be refused");
+        let why = ambiguity(&json!(["a, b"]), &ty_of("set<text>"))
+            .expect("a `, `-bearing member must be refused");
         assert!(why.contains("`, ` separator"), "unexpected reason: {why}");
     }
 
     #[test]
     fn member_containing_a_bracket_is_refused() {
-        let why = ambiguity(&json!(["x}y"])).expect("a bracket-bearing member must be refused");
+        let why = ambiguity(&json!(["x}y"]), &ty_of("set<text>"))
+            .expect("a bracket-bearing member must be refused");
         assert!(
             why.contains("structural character"),
             "unexpected reason: {why}"
@@ -480,7 +582,8 @@ mod tests {
 
     #[test]
     fn map_key_containing_the_pair_separator_is_refused() {
-        let why = ambiguity(&json!({"a: b": 1})).expect("a `: `-bearing KEY must be refused");
+        let why = ambiguity(&json!({"a: b": 1}), &ty_of("map<text, int>"))
+            .expect("a `: `-bearing KEY must be refused");
         assert!(why.contains("key"), "unexpected reason: {why}");
     }
 
@@ -489,7 +592,10 @@ mod tests {
         // Entries split at their FIRST top-level `: `, which is the real
         // separator, so a colon inside the VALUE is already decoded correctly.
         // Refusing it would narrow the lane for no reason.
-        assert_eq!(ambiguity(&json!({"k": "a: b"})), None);
+        assert_eq!(
+            ambiguity(&json!({"k": "a: b"}), &ty_of("map<text, text>")),
+            None
+        );
         let decoded = decode(
             &json!({"k": "a: b"}),
             "{k: a: b}",
@@ -502,10 +608,58 @@ mod tests {
     #[test]
     fn an_empty_member_of_a_non_empty_collection_is_refused() {
         // `{}` is both "no members" and "one empty member".
-        let why = ambiguity(&json!([""])).expect("an empty member must be refused");
+        let why =
+            ambiguity(&json!([""]), &ty_of("set<text>")).expect("an empty member must be refused");
         assert!(
             why.contains("empty scalar member"),
             "unexpected reason: {why}"
+        );
+    }
+
+    /// Ambiguity 0, the MIRROR of the case above: the golden container is EMPTY
+    /// and the CLI could perfectly well have held one member that renders empty.
+    /// The golden-side scan saw nothing to refuse there, so `{}` accepted both
+    /// readings — and the two are different values.
+    ///
+    /// Bounded by the DECLARED element type, which is what makes this a
+    /// measurement and not blanket strictness: a `set<text>` member can BE the
+    /// empty string, a `list<int>` member always carries a digit, and a `tuple`'s
+    /// member count comes from the DDL (so the comparison's arity check sees a
+    /// dropped member).
+    #[test]
+    fn an_empty_container_is_refused_only_where_its_element_can_render_empty() {
+        for decl in ["set<text>", "list<ascii>", "set<blob>", "list<timestamp>"] {
+            let why = ambiguity(&json!([]), &ty_of(decl))
+                .unwrap_or_else(|| panic!("{decl}: an empty container must be refused"));
+            assert!(
+                why.contains("empty container is indistinguishable"),
+                "{decl}: unexpected reason: {why}"
+            );
+        }
+        for decl in [
+            "set<int>",
+            "list<double>",
+            "set<boolean>",
+            "list<frozen<set<int>>>",
+        ] {
+            assert_eq!(
+                ambiguity(&json!([]), &ty_of(decl)),
+                None,
+                "{decl}: no member of this element type can render empty, so `[]` can \
+                 only mean zero members and must stay compared"
+            );
+        }
+        // A tuple's arity is the DDL's, so `()` cannot hide a member.
+        assert_eq!(ambiguity(&json!([]), &ty_of("tuple<text, text>")), None);
+        // An empty map/UDT body is unambiguous too: every entry carries a `: `, so
+        // a one-entry rendering can never be `{}`.
+        assert_eq!(ambiguity(&json!({}), &ty_of("map<text, text>")), None);
+        // And the rule reaches a NESTED empty container, under its own element type.
+        let why = ambiguity(&json!([[]]), &ty_of("list<frozen<list<text>>>"))
+            .expect("a nested empty list<text> must be refused");
+        assert!(
+            why.contains("empty container is indistinguishable"),
+            "{why}"
         );
     }
 
@@ -515,11 +669,17 @@ mod tests {
         // only the separators and brackets are structural. (`1 Navy Way` is real
         // content from test_compactionparityudt.udt_collections.)
         assert_eq!(
-            ambiguity(&json!({"home": {"street": "1 Navy Way", "zip": "22201"}})),
+            ambiguity(
+                &json!({"home": {"street": "1 Navy Way", "zip": "22201"}}),
+                &ty_of("map<text, frozen<address>>")
+            ),
             None
         );
         assert_eq!(
-            ambiguity(&json!(["0xdeadbeef", "-1.5", "neg-five", null])),
+            ambiguity(
+                &json!(["0xdeadbeef", "-1.5", "neg-five", null]),
+                &ty_of("list<text>")
+            ),
             None
         );
     }

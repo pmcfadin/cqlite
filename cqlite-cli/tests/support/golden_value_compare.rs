@@ -371,7 +371,7 @@ fn csv_decoded(
     if egress != Egress::Csv || !matches!(gv, Value::Array(_) | Value::Object(_)) {
         return Ok(None);
     }
-    if let Some(why) = csv_container::ambiguity(gv) {
+    if let Some(why) = csv_container::ambiguity(gv, ty) {
         return Err(Refusal::Ambiguous(why));
     }
     let Value::String(text) = cv else {
