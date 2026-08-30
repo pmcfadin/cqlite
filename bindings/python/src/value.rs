@@ -73,29 +73,60 @@ pub fn value_to_py(py: Python<'_>, value: &Value) -> PyResult<PyObject> {
     }
 }
 
-/// Convert a Value for use as a Python dict key (must be hashable).
+/// Convert a Value for use in a Python HASHABLE position — a `dict` key or a
+/// `frozenset` element.
 ///
-/// Python dicts require hashable keys. This converts:
-/// - List → tuple (recursively)
-/// - Map → tuple of (key, value) tuples
-/// - Set → frozenset (elements recursively made hashable)
-/// - Frozen → unwrap and recurse
-/// - UDT → frozenset of (field_name, hashable_value) tuples (sorted by name)
-/// - Other types → as-is (already hashable)
+/// Python `dict` keys and `frozenset` elements must be hashable, but the
+/// ordinary projection of several CQL types is not: a `Udt` becomes a `dict`,
+/// and a `List`/`Set` that contains UDTs becomes a `list` (see `set_to_py`).
+/// This function is the TOTAL hashable projection over `cqlite_core::Value`:
 ///
-/// Note: `SET<FROZEN<UDT>>` is handled at the `set_to_py` level by
-/// returning a `list` instead of a `frozenset` (see `set_to_py`). This
-/// function is still called for UDTs that appear as MAP keys, which are
-/// unusual but possible in CQL.
+/// - `List`, `Tuple` → `tuple` (elements recursively projected)
+/// - `Set` → `frozenset` (elements recursively projected)
+/// - `Map` → `tuple` of `(key, value)` tuples (both sides recursively projected)
+/// - `Udt` → `frozenset` of `(field_name, value)` tuples, sorted by field name
+/// - `Frozen` → unwrap and recurse
+/// - `Json` → `tuple` (array) / `frozenset` of pairs (object), recursively
+/// - every other variant → its ordinary [`value_to_py`] projection, which is
+///   already hashable
+///
+/// # Totality is enforced by the COMPILER (issue #3500)
+///
+/// There is deliberately **no `_ =>` arm**: every one of `Value`'s variants is
+/// named. A wildcard is precisely what made this function non-total — a UDT
+/// reached through a `Tuple` or through a nested `Set` fell through to
+/// [`value_to_py`], which returns an unhashable `dict`/`list`, and the whole
+/// `SELECT` raised `TypeError: unhashable type: 'dict'` (or `'list'`) on legal
+/// CQL. Naming every variant turns a future `Value` variant into a COMPILE
+/// ERROR here instead of a runtime `TypeError` on somebody's data, which is
+/// strictly stronger than detecting it at run time.
+///
+/// Recursion goes through THIS function, never through [`value_to_py`] or
+/// [`set_to_py`]: `set_to_py`'s UDT branch returns an unhashable `list` **on
+/// purpose** (issue #804) because that is the right answer for a top-level
+/// column, and the wrong one inside a hashable position.
 pub fn value_to_hashable_key(py: Python<'_>, value: &Value) -> PyResult<PyObject> {
     match value {
-        Value::List(items) => {
-            // Convert list to tuple for hashability
+        // Both project to a Python `tuple`: a list needs one for hashability, a
+        // CQL tuple maps to one anyway. The element projection is what matters —
+        // it must recurse HERE so a nested UDT becomes a frozenset rather than a
+        // dict.
+        Value::List(items) | Value::Tuple(items) => {
             let converted: Vec<PyObject> = items
                 .iter()
                 .map(|v| value_to_hashable_key(py, v))
                 .collect::<PyResult<Vec<_>>>()?;
             Ok(PyTuple::new(py, converted)?.into_any().unbind())
+        }
+        Value::Set(items) => {
+            // NOT routed through `set_to_py`, whose UDT fallback returns a
+            // `list` — unhashable, and therefore the #3500 failure for
+            // `set<frozen<set<frozen<udt>>>>`.
+            let converted: Vec<PyObject> = items
+                .iter()
+                .map(|v| value_to_hashable_key(py, v))
+                .collect::<PyResult<Vec<_>>>()?;
+            Ok(PyFrozenSet::new(py, &converted)?.into_any().unbind())
         }
         Value::Map(pairs) => {
             // Maps as keys are rare but possible - convert to tuple of tuples
@@ -113,6 +144,13 @@ pub fn value_to_hashable_key(py: Python<'_>, value: &Value) -> PyResult<PyObject
             // Unwrap Frozen and recurse so that FROZEN<UDT> and FROZEN<collection>
             // are handled by the appropriate arm rather than falling through to
             // value_to_py (which would return an unhashable dict for UDTs).
+            //
+            // `Frozen` is present at some nesting levels and ABSENT at others —
+            // a multicell column decodes as
+            // `Set([Frozen(Tuple([Frozen(Udt), Integer]))])` while the same
+            // nesting under a frozen outer collection decodes as
+            // `Frozen(Set([Tuple([Udt, Integer])]))`, with no inner wrappers —
+            // so every arm here must work with and without it (#3500).
             value_to_hashable_key(py, inner)
         }
         Value::Udt(udt) => {
@@ -158,8 +196,81 @@ pub fn value_to_hashable_key(py: Python<'_>, value: &Value) -> PyResult<PyObject
 
             Ok(PyFrozenSet::new(py, &pairs)?.into_any().unbind())
         }
-        // Other types are already hashable or handled by value_to_py
-        _ => value_to_py(py, value),
+        // DEFENSIVE. No real Cassandra SSTable produces `Value::Json`:
+        // `ComparatorType::Json` has no INBOUND parser — `schema/parser.rs` maps
+        // only OUTWARD, onto `CqlType::Custom("json")` — so no marshal class
+        // decodes to this variant. It is still projected hashably rather than
+        // delegated to `json_to_py`, which returns an unhashable `list`/`dict`
+        // for arrays/objects: that is the exact defect class #3500 removed, and
+        // leaving one variant-shaped hole would reintroduce it.
+        Value::Json(json) => json_to_hashable_key(py, json),
+        // Every remaining variant's ordinary projection is ALREADY hashable, so
+        // it delegates to `value_to_py`. Named exhaustively — never `_ =>` — so
+        // a new `Value` variant fails to COMPILE here (see the note above).
+        //
+        // Each is hashable for a checked reason, not by assumption:
+        // `Text`/`Blob`/`Varint`/the integer and float variants project to
+        // immutable Python built-ins; `Timestamp`/`Date` to `datetime`/`date`;
+        // `Uuid` to `uuid.UUID`; `Decimal` to `decimal.Decimal`; `Inet` to
+        // `ipaddress.IPv4Address`/`IPv6Address`; `Duration` to the
+        // `#[pyclass(frozen, eq, hash)]` [`Duration`] class; and `Null` /
+        // `Tombstone` to `None`.
+        Value::Null
+        | Value::Boolean(_)
+        | Value::TinyInt(_)
+        | Value::SmallInt(_)
+        | Value::Integer(_)
+        | Value::BigInt(_)
+        | Value::Counter(_)
+        | Value::Float32(_)
+        | Value::Float(_)
+        | Value::Text(_)
+        | Value::Blob(_)
+        | Value::Timestamp(_)
+        | Value::Date(_)
+        | Value::Time(_)
+        | Value::Uuid(_)
+        | Value::Varint(_)
+        | Value::Decimal { .. }
+        | Value::Duration { .. }
+        | Value::Inet(_)
+        | Value::Tombstone(_) => value_to_py(py, value),
+    }
+}
+
+/// Hashable projection of a JSON value (companion to [`json_to_py`]).
+///
+/// DEFENSIVE ONLY — see the `Value::Json` arm of [`value_to_hashable_key`] for
+/// why this variant cannot arrive from a Cassandra SSTable. Arrays become
+/// `tuple`s and objects become `frozenset`s of `(key, value)` pairs so that a
+/// JSON value in a hashable position can never be the unhashable `list`/`dict`
+/// that [`json_to_py`] would build.
+fn json_to_hashable_key(py: Python<'_>, json: &serde_json::Value) -> PyResult<PyObject> {
+    match json {
+        serde_json::Value::Array(arr) => {
+            let items: Vec<PyObject> = arr
+                .iter()
+                .map(|v| json_to_hashable_key(py, v))
+                .collect::<PyResult<Vec<_>>>()?;
+            Ok(PyTuple::new(py, items)?.into_any().unbind())
+        }
+        serde_json::Value::Object(obj) => {
+            let mut pairs: Vec<PyObject> = Vec::with_capacity(obj.len());
+            for (k, v) in obj {
+                let key = k.as_str().into_pyobject(py)?.into_any().unbind();
+                let val = json_to_hashable_key(py, v)?;
+                pairs.push(PyTuple::new(py, [key, val])?.into_any().unbind());
+            }
+            // `serde_json::Map` iterates in a deterministic order (insertion or
+            // sorted, per its feature set), but a `frozenset` hashes
+            // order-independently either way — matching the `Udt` arm.
+            Ok(PyFrozenSet::new(py, &pairs)?.into_any().unbind())
+        }
+        // Scalars already project to immutable Python built-ins.
+        serde_json::Value::Null
+        | serde_json::Value::Bool(_)
+        | serde_json::Value::Number(_)
+        | serde_json::Value::String(_) => json_to_py(py, json),
     }
 }
 
@@ -414,15 +525,40 @@ fn set_to_py(py: Python<'_>, items: &[Value]) -> PyResult<PyObject> {
     }
 }
 
-/// Return `true` if `value` is or wraps a UDT value.
+/// Return `true` if `value` is or CONTAINS a UDT value, at any nesting depth.
 ///
-/// Used by `set_to_py` to decide whether a `SET` should be returned as a
-/// `frozenset` (scalars, always hashable) or a `list` (UDT elements, whose
-/// dict representation is unhashable).
+/// Used by [`set_to_py`] to decide whether a `SET` is returned as a `frozenset`
+/// (no UDT anywhere inside, so every element projects to something hashable) or
+/// as a `list` (a UDT is in there, and its `dict` projection is unhashable).
+///
+/// # Why this has to be a full traversal (issue #3500)
+///
+/// It used to look only through `Frozen`, so a UDT reached through a `Tuple`, a
+/// nested `Set`, a `Map` or a `List` was invisible: `set_to_py` took the
+/// `frozenset` branch and Python raised `TypeError: unhashable type: 'dict'` (or
+/// `'list'`) on legal CQL such as `set<frozen<tuple<frozen<udt>, int>>>`. The
+/// answer must therefore be about the whole subtree, not the outermost wrapper.
+///
+/// A `Map` is searched on BOTH sides — a UDT can sit in a map key as legally as
+/// in a map value. `Frozen` is followed because it is present at some nesting
+/// levels and absent at others (a multicell column yields
+/// `Set([Frozen(Tuple([Frozen(Udt), …]))])` while a frozen outer collection
+/// yields `Frozen(Set([Tuple([Udt, …])]))`).
+///
+/// Every remaining variant is a scalar and cannot contain anything, so it is
+/// `false`. Reaching a `Udt` answers `true` immediately: a UDT nested inside
+/// another UDT's field cannot change that answer, so there is no recursion into
+/// UDT fields here — it would be code with no reachable effect.
 fn contains_udt(value: &Value) -> bool {
     match value {
         Value::Udt(_) => true,
         Value::Frozen(inner) => contains_udt(inner),
+        Value::List(items) | Value::Set(items) | Value::Tuple(items) => {
+            items.iter().any(contains_udt)
+        }
+        Value::Map(pairs) => pairs
+            .iter()
+            .any(|(k, v)| contains_udt(k) || contains_udt(v)),
         _ => false,
     }
 }
