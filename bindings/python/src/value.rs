@@ -212,44 +212,68 @@ pub fn value_to_hashable_key(py: Python<'_>, value: &Value) -> PyResult<PyObject
 
             Ok(PyFrozenSet::new(py, &pairs)?.into_any().unbind())
         }
-        // LIVE, not defensive. `Value::Json` does arrive from real SSTable
-        // bytes, by two decode paths in cqlite-core:
+        // DEFENSIVE — and not for the reason either earlier version of this
+        // comment gave (both were wrong, in opposite directions), so every clause
+        // here was re-derived at source and the two mechanical ones were run.
         //
-        // * `reader/parsing/custom_scalar.rs` (`decode_custom_scalar`, the
-        //   `"json"` arm) parses a `Custom("json")` body UTF-8-then-JSON into
-        //   `Value::Json`. `CqlType::parse("json")` yields exactly that
-        //   `Custom("json")` (`schema/cql_type_parser.rs`: an all-lowercase name
-        //   that is not a primitive falls through to `Custom`), and this binding
-        //   opens WITH a schema — so a user `.cql` declaring a `json` column
-        //   reads real cells into this arm.
-        // * `reader/parsing/comparator_value_parsing.rs` decodes
-        //   `ComparatorType::Json` the same way and returns `Ok(Value::Json(..))`.
+        // The DECODERS exist: `reader/parsing/custom_scalar.rs:55` (the `"json"`
+        // arm of `decode_custom_scalar`) and
+        // `reader/parsing/comparator_value_parsing.rs:234` both return
+        // `Ok(Value::Json(..))`. What does not exist is an ingestion path that
+        // can deliver a `json`-typed column to either:
         //
-        // The one TRUE narrow statement — all this comment used to say, and it
-        // said it far too broadly — is that no Cassandra MARSHAL CLASS maps onto
-        // `ComparatorType::Json`: `schema/parser.rs` maps that comparator only
-        // OUTWARD, onto `CqlType::Custom("json")`. So a HEADER-DERIVED schema
-        // will not produce this variant. A schema-declared `json` column will.
+        // 1. `CqlType::parse("json")` yields `CqlType::Custom("json")`
+        //    (`schema/cql_type_parser.rs:208`, the fallback arm; the `udt:`
+        //    branch at :175-184 is skipped, needing a NOT-all-lowercase name).
+        //    Verified by running it.
+        // 2. That bare `Custom` is then REJECTED by schema validation:
+        //    `check_type_udt_references` (`schema/mod.rs:655-660`) strips no
+        //    `udt:` prefix from a bare name, `is_udt_identifier("json")` is true
+        //    (`:304-309`, alphanumeric), and `ensure_udt_exists` (`:680-702`)
+        //    errors unless a UDT literally named `json` exists. This binding
+        //    reaches that check on its ONLY schema path (`database/open.rs:137`
+        //    -> `ingestion::ingest`, `validate_udt_dependencies: true` +
+        //    `graceful_degradation: false` at `ingestion.rs:204-207`, fail-fast
+        //    at `:231-242`). Verified by running it: `Err(Schema("Column 'doc'
+        //    references undefined UDT 'json' in keyspace 'ks'"))`.
+        //    And if a UDT named `json` DOES exist, the column is not a JSON
+        //    column either — registry-backed resolution matches that UDT and
+        //    yields `ComparatorType::Udt` (`types/comparator.rs:250-277`).
+        // 3. A HEADER-derived schema cannot produce it: nothing constructs
+        //    `ComparatorType::Json`. A census finds it only in `match` arms, plus
+        //    `schema/parser.rs:531` mapping it OUTWARD to `Custom("json")`; the
+        //    sole inbound `Custom` mapping is `types/comparator.rs:136`
+        //    (`CqlType::Custom(n) -> ComparatorType::Custom(n)`). The variant is
+        //    constructed only in a unit test
+        //    (`value_parsing_schema_type_tests.rs:330`).
         //
-        // KNOWN LIMITATION, deliberately not changed here: the projection below
-        // inherits `json_to_py`'s number handling (see `json_to_py`), so JSON
-        // `1` becomes `int`, `1.0` becomes `float` and `true` becomes `bool`.
-        // Python holds `1 == 1.0 == True` with EQUAL hashes, so `{"a": 1}` and
-        // `{"a": 1.0}` project to equal frozensets and COLLAPSE onto a single
-        // element in a set-element or map-key position.
+        // So: not "there is no decoder" (there is), and not "a `.cql` `json`
+        // column reads real cells into this arm" (that schema is refused at
+        // open). The arm is unreachable from any supported ingestion path and is
+        // kept because this `match` is exhaustive by design (see above), so a
+        // future inbound path must revisit it. Adjacent oddity, recorded for a
+        // future reader and not claimed as a bug: cqlite-core carries decode
+        // support for a `json` custom scalar that no schema can reach.
         //
-        // That is ONE INSTANCE of the collapse class tracked by **#3615** — not
-        // the whole of it. The class is "a hashable projection merges values CQL
-        // keeps distinct", and its other members are independent of JSON: `-0.0`
-        // vs `+0.0` in a `set<double>` (Cassandra orders by
-        // `Double.compare`/`Float.compare`, where `-0.0 < +0.0`, so both zeros
-        // in one set is ordinary legal data, while Python has
+        // IF that path became reachable, one limitation would apply: the
+        // projection below inherits `json_to_py`'s number handling, so JSON `1`
+        // becomes `int`, `1.0` `float` and `true` `bool`, and since Python holds
+        // `1 == 1.0 == True` with EQUAL hashes, `{"a": 1}` and `{"a": 1.0}` would
+        // collapse onto one element in a set-element or map-key position. That is
+        // a LATENT instance of the collapse class tracked by **#3615**, not a
+        // live data-loss bug today, precisely because nothing delivers a
+        // `Value::Json` here.
+        //
+        // #3615's other members are independent of JSON and ARE live: `-0.0` vs
+        // `+0.0` in a `set<double>` (Cassandra orders by
+        // `Double.compare`/`Float.compare`, where `-0.0 < +0.0`, so both zeros in
+        // one set is ordinary legal data, while Python has
         // `hash(-0.0) == hash(0.0)`); a UDT field literally named
         // `_type`/`_keyspace` shadowing the metadata pair injected by the `Udt`
         // arm; and `Null` vs `Tombstone` both projecting to `None` (listed for
-        // completeness — probably desired). All of them PRE-DATE #3500, which
-        // neither introduced nor widened any; fixing them needs a
-        // type-preserving projection, a behaviour change out of scope here.
+        // completeness — probably desired). All PRE-DATE #3500, which neither
+        // introduced nor widened any; fixing them needs a type-preserving
+        // projection, a behaviour change out of scope here.
         Value::Json(json) => json_to_hashable_key(py, json),
         // Every remaining variant's ordinary projection is ALREADY hashable, so
         // it delegates to `value_to_py`. Named exhaustively — never `_ =>` — so
