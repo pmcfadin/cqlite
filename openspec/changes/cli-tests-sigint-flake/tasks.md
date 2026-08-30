@@ -18,8 +18,8 @@
 >
 > They are kept verbatim as a record of **what was tried and what it cost** — that census is the
 > justification for the descope — not as a description of the code. Read "Round 8" first; the tasks
-> in sections 1-5 below are marked done against the round-7 design, and section 6 records how each
-> was re-satisfied.
+> in sections 1-5 below are marked done against the round-7 design; the "Round 8" section at the end
+> of this file records how each surviving property is re-satisfied.
 
 ## 1. Test harness scaffolding (`cqlite-cli/tests/graceful_shutdown_tests.rs`)
 - [x] 1.1 Drain `stderr`: take the handle and spawn a reader alongside the existing stdout reader.

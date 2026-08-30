@@ -35,19 +35,26 @@ actually scheduled (e.g. its own progress marker)" is therefore reachable with a
 ## Approach
 
 Replace one bare deadline with a **staged wait**, where every stage's failure names only what its own
-measurement establishes, and where each stage's ceiling is **calibrated from a measurement taken on
-this host, at this moment**, rather than from a guessed constant:
+measurement establishes, and where the ceiling is **calibrated from measurements taken on this host,
+at this moment**, rather than from a guessed constant:
 
 | stage | awaited signal | what its expiry establishes |
 |---|---|---|
 | a. session up | readiness banner (stderr) | the child never reached the interactive loop |
 | b. write ack | `OK` (stdout), **timed** → `t_ack` | the session accepted no write |
 | c. handler entered | `Received Ctrl-C — flushing…` (stderr) | signal undelivered, handler not entered, **or** marker text drifted |
-| d. clean exit | process exit, **progress-checked** | the flush did not complete — explicitly **not** "no handler" |
+| d. clean exit | process exit, with progress **observed and reported** | the flush did not complete — explicitly **not** "no handler" |
 
-`t_boot` (spawn → readiness) calibrates (b); `t_ack` calibrates (c) and (d). Contention that would
-blow a shutdown ceiling inflates those same measurements, so the ceilings scale with observed
-pressure instead of guessing it.
+`t_boot` (spawn → readiness) and `t_ack` (write → `OK`) calibrate the ceiling. Contention that would
+blow a shutdown ceiling inflates those same measurements, so the ceiling scales with observed pressure
+instead of guessing it.
+
+**Round-8 correction (`design.md` D6a).** As first built there was one calibrated ceiling PER STAGE,
+plus a total-budget clock over them. roborev returned 12 findings across four rounds, all 12 in that
+layer, at a flat 3 per round, while the oracle proper produced none after round 3 — so it is
+**descoped to ONE deadline per test**. The stages above remain, for ATTRIBUTION: which stage was
+pending when the deadline passed is what names the failure. Any single stage may consume the whole
+deadline, and observed progress is reported as evidence in the message but extends nothing.
 
 The same treatment is applied to the sibling `writable_session_auto_flushes_mid_session_across_threshold`
 (AC4), which carries the identical shape in **three** places, and to the first test's own ack message —
@@ -61,6 +68,7 @@ all four of which assert unestablishable causes today.
   That file governs `cargo nextest run` only, and **nothing runs `cqlite-cli`'s tests under
   nextest** — `cli-tests` runs plain `cargo test` — so there is no retry mechanism in play at all
   here, and the non-goal holds a fortiori. See `design.md` D6.)
-* Not a claim that the wall-clock bound is *eliminated*. One bound at the front is irreducibly
-  uncalibrated; the change makes it the cheapest operation in the test and makes its message honest.
-  See `design.md` "The residual, stated at the seam".
+* Not a claim that the wall-clock bound is *eliminated*. The deadline's `base` is irreducibly
+  uncalibrated until the first in-band measurement lands; the change makes that base generous (above
+  the whole nominal aggregate of the bounds it replaced) and makes every message honest about which
+  bound ended it. See `design.md` "The residual, stated at the seam".
