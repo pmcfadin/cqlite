@@ -37,10 +37,11 @@
 #                  baseline-unreadable (3d); manifest-missing, manifest-garbage,
 #                  manifest-stale (3e2); no-git, baseline-workspace, no-tool (3f);
 #                  unboundable (3g); baseline-transfer-mismatch (5f);
+#                  baseline-probe-unmeasured (3a-iv);
 #                  head-set-unmeasured (4b-ii); remote-not-canonical,
 #                  remote-unreadable (10).
-# SEVENTEEN is the count of DISTINCT non-`ok` values assigned to `_CS_KIND` (`fetch-failed` is
-# set from several places, and `ok` is the eighteenth value). THE SET CHANGED SHAPE with #3544
+# EIGHTEEN is the count of DISTINCT non-`ok` values assigned to `_CS_KIND` (`fetch-failed` is
+# set from several places, and `ok` is the nineteenth value). THE SET CHANGED SHAPE with #3544
 # REQ-3544-01, which stopped deriving the baseline by EXECUTING a fetched script: the three
 # `baseline-list-*` kinds and `baseline-missing` were RENAMED to what a DATA read can actually
 # fail at (`baseline-unreadable`, `baseline-set-garbage`, `baseline-set-empty`,
@@ -465,7 +466,7 @@ rf_line=$(field COMPONENT_SET_LINE "$rf_out")
 if [ "$(field VERDICT "$rf_out")" = UNMEASURED ] \
    && [ "$(field KIND "$rf_out")" = baseline-decl-unrecognised ] \
    && grep -q 'FAIL-CLOSED (#3544)' <<<"$rf_line" \
-   && grep -q 'does not CLOSE on its own line' <<<"$rf_line" \
+   && grep -q 'is not a SINGLE-LINE literal' <<<"$rf_line" \
    && grep -q 'scripts/agent-gate.components' <<<"$rf_line"; then
   ok "3544-baseline-decl-unrecognised: a manifest-less baseline whose COMPONENTS array is REFLOWED is REFUSED by name, not guessed at"
 else
@@ -498,6 +499,118 @@ if [ "$(field BASELINE_SRC "$b_out")" = manifest ] \
   ok "3544-baseline-src-manifest: a baseline that HAS the manifest is read from it (data), not from the script text"
 else
   bad "3544-baseline-src-manifest: expected BASELINE_SRC manifest for a manifest-carrying baseline (got '$(field BASELINE_SRC "$b_out")')"
+fi
+
+# mkgitshim <name> <mode> -> echoes a directory holding a `git` SHIM to put FIRST on PATH.
+# Every other invocation is `exec`d to the real git, so the fixture is a real repository and the
+# only difference is the ONE operation being made to fail.
+#
+# WHY A SHIM. The two cases below need a specific git READ to fail while the repository stays
+# otherwise healthy — "the tree could not be read" and "the manifest blob could not be read".
+# Neither is plantable in the repository itself: corrupting one object breaks everything, and
+# nothing in a fixture can make `ls-tree` fail selectively. The shim is the same instrument case
+# 5f uses, for the same reason, and it is honest about what it proves — the gate's DECISION given
+# that observation, not the mechanism that produced it.
+#
+# `ls-tree` is matched as a whole ARGUMENT, never as a substring: the gate's tree-identity code
+# uses `ls-files`, and a substring match would break the run for an unrelated reason.
+mkgitshim() {
+  # SEPARATE `local` statements, for the reason mkmanifest records: a later assignment in ONE
+  # `local` does not see an earlier one, so `dir="$tmp/$name-gitbin"` read an UNBOUND `name` and
+  # under `set -u` killed this builder's subshell — leaving the caller with an EMPTY dir, a PATH
+  # of ":$PATH", NO shim, and two cases that passed the gate's normal path while claiming to
+  # have planted a defect. Second instance of the same bug in this file; hence the comment.
+  local name="$1" mode="$2"
+  local dir="$tmp/$name-gitbin" real
+  real=$(command -v git)
+  [ -n "$real" ] || { echo "FATAL: mkgitshim needs a real git on PATH" >&2; exit 1; }
+  mkdir -p "$dir"
+  {
+    printf '#!/bin/sh\n'
+    printf 'REAL=%s\n' "$real"
+    case "$mode" in
+      fail-ls-tree)
+        printf 'for a in "$@"; do if [ "$a" = ls-tree ]; then echo "gitshim: ls-tree refused" >&2; exit 128; fi; done\n' ;;
+      fail-manifest-show)
+        printf 'for a in "$@"; do case "$a" in *:scripts/agent-gate.components) echo "gitshim: manifest blob read refused" >&2; exit 128 ;; esac; done\n' ;;
+      *) echo "FATAL: mkgitshim: unknown mode '$mode'" >&2; exit 1 ;;
+    esac
+    printf 'exec "$REAL" "$@"\n'
+  } >"$dir/git"
+  chmod +x "$dir/git"
+  printf '%s\n' "$dir"
+}
+
+# ---------------------------------------------------------------------------
+# 3a-iii / 3a-iv. WHICH READ PATH RUNS IS DECIDED BY AN AFFIRMATIVE THREE-VALUED MEASUREMENT,
+#     NOT BY A FAILURE (lead ruling on REQ-3544-01). "The textual fallback is self-limiting —
+#     unreachable once the manifest is on `main`" is true and NOT ENOUGH: it is a property
+#     somebody reasoned about, and nothing measured it, so a refactor or a deleted manifest
+#     would silently re-enable the brittle path. The pre-flight therefore probes the baseline's
+#     tree with `git ls-tree` first, which — unlike `git show`'s non-zero exit — distinguishes
+#     "the tree was read and does not list the manifest" from "the tree could not be read":
+#       present         -> the manifest, and NOTHING ELSE. A failure here is an ERROR.
+#       verified-absent -> the transitional TEXT extraction, NAMED in the line.
+#       could-not-tell  -> REFUSE. Never the fallback.
+#     Both non-`present` outcomes are driven here, because the whole value of the gating is that
+#     `could-not-tell` and `verified-absent` behave DIFFERENTLY — a suite that exercised only one
+#     of them would not distinguish this design from the one it replaced.
+# ---------------------------------------------------------------------------
+base_nofb=$(mkbaseline base-nofb - )
+nofb=$(mkbranch nofb "$base_nofb" - )
+nofb_ctl=$(hook "$nofb")
+
+# 3a-iii. PRESENT BUT UNREADABLE IS AN ERROR, NOT A FALLBACK. The fixture's gate script carries a
+#     perfectly good single-line COMPONENTS declaration, so path 2 WOULD have produced an answer
+#     — that is what makes this a refusal rather than an incapacity, and the second control below
+#     proves it by running the SAME shim against a manifest-LESS baseline, where path 2 is taken
+#     and PASSes.
+nofb_bin=$(mkgitshim nofallback fail-manifest-show)
+nofb_out=$( fx "$nofb" && PATH="$nofb_bin:$PATH" bash "$nofb/scripts/agent-gate.sh" \
+              --component-set-line full 2>/dev/null )
+nofb_line=$(field COMPONENT_SET_LINE "$nofb_out")
+decl_shim_out=$( fx "$decl" && PATH="$nofb_bin:$PATH" bash "$decl/scripts/agent-gate.sh" \
+                   --component-set-line full 2>/dev/null )
+if [ "$(field KIND "$nofb_ctl")" != ok ] || [ "$(field BASELINE_SRC "$nofb_ctl")" != manifest ]; then
+  bad "3544-no-fallback-when-present: the POSITIVE CONTROL (same fixture, no shim) did not read the manifest cleanly (kind '$(field KIND "$nofb_ctl")', src '$(field BASELINE_SRC "$nofb_ctl")') — the case cannot discriminate"
+elif [ "$(field KIND "$decl_shim_out")" != ok ] || [ "$(field BASELINE_SRC "$decl_shim_out")" != declaration ]; then
+  bad "3544-no-fallback-when-present: the SECOND control failed — with the same shim, a manifest-LESS baseline must still be measured from its declaration (kind '$(field KIND "$decl_shim_out")', src '$(field BASELINE_SRC "$decl_shim_out")'), or the refusal below could be an incapacity rather than a decision"
+elif [ "$(field VERDICT "$nofb_out")" = UNMEASURED ] \
+   && [ "$(field KIND "$nofb_out")" = baseline-unreadable ] \
+   && [ "$(field BASELINE_SRC "$nofb_out")" = "<none>" ] \
+   && grep -q 'FAIL-CLOSED (#3544)' <<<"$nofb_line" \
+   && grep -q 'the TEXT fallback is not taken when the manifest EXISTS' <<<"$nofb_line" \
+   && ! grep -q 'TEXTUAL FALLBACK' <<<"$nofb_line" \
+   && ! grep -q 'VERIFIED ABSENT' <<<"$nofb_line"; then
+  ok "3544-no-fallback-when-present: a baseline whose manifest EXISTS but cannot be read is an ERROR and NEVER falls back to the script text (both controls: the manifest reads cleanly without the shim, and the same shim still lets a manifest-LESS baseline use the fallback)"
+else
+  bad "3544-no-fallback-when-present: expected KIND baseline-unreadable with no fallback"
+  printf '%s\n' "$nofb_out"
+fi
+
+# 3a-iv. COULD-NOT-TELL IS A REFUSAL. `git show` cannot answer this question — its non-zero exit
+#     conflates "no such path" with "bad object" with "unreadable repository" — which is why the
+#     probe is `ls-tree` and why an unreadable TREE is its own kind rather than being folded into
+#     `baseline-unreadable`: reading it as "absent" is precisely the two-valued-predicate error
+#     (a predicate that must collapse "cannot tell" onto an answer always picks the permissive
+#     one), and the permissive answer here silently re-enters the brittle textual path.
+probe_bin=$(mkgitshim probefail fail-ls-tree)
+probe_out=$( fx "$nofb" && PATH="$probe_bin:$PATH" bash "$nofb/scripts/agent-gate.sh" \
+               --component-set-line full 2>/dev/null )
+probe_line=$(field COMPONENT_SET_LINE "$probe_out")
+if [ "$(field KIND "$nofb_ctl")" != ok ]; then
+  bad "3544-manifest-probe-unmeasured: the POSITIVE CONTROL (same fixture, no shim) did not reach KIND ok — the case cannot discriminate"
+elif [ "$(field VERDICT "$probe_out")" = UNMEASURED ] \
+   && [ "$(field KIND "$probe_out")" = baseline-probe-unmeasured ] \
+   && [ "$(field BASELINE_SRC "$probe_out")" = "<none>" ] \
+   && grep -q 'FAIL-CLOSED (#3544)' <<<"$probe_line" \
+   && grep -q 'ls-tree' <<<"$probe_line" \
+   && grep -qF "'Cannot tell' is NOT 'absent'" <<<"$probe_line" \
+   && ! grep -q 'TEXTUAL FALLBACK' <<<"$probe_line"; then
+  ok "3544-manifest-probe-unmeasured: an unreadable baseline TREE is its own named refusal — 'cannot tell' never becomes 'absent', so the textual fallback is not entered"
+else
+  bad "3544-manifest-probe-unmeasured: expected KIND baseline-probe-unmeasured naming the probe, with no fallback"
+  printf '%s\n' "$probe_out"
 fi
 
 # 3b. the baseline's manifest lists NOTHING (an empty baseline must never be accepted). A
@@ -1130,7 +1243,7 @@ else
      && [ "$(field HEAD_SRC "$unc_out")" = manifest ] \
      && grep -q 'FAIL-CLOSED (#3544)' <<<"$unc_line" \
      && grep -q 'UNCOMMITTED WORKING-TREE EDIT' <<<"$unc_line" \
-     && grep -q 'PRESENT in the gate script AT HEAD' <<<"$unc_line" \
+     && grep -q 'PRESENT in the committed component set AT HEAD' <<<"$unc_line" \
      && grep -qw -- "$UNC_REMOVED" <<<"$unc_line" \
      && ! grep -q '^component-set: DECLARED' <<<"$unc_line" \
      && ! grep -q "own COMMITTED diff, NOT skew" <<<"$unc_line"; then
@@ -1419,10 +1532,10 @@ n_components=$( fx "$same" && bash scripts/agent-gate.sh --list 2>/dev/null | wc
 # transitional TEXT path is format-brittle and becomes unreachable once the manifest is on main.
 if [ "$(field VERDICT "$s_out")" = PASS ] \
    && [ "$(field BASELINE_SRC "$s_out")" = manifest ] \
-   && grep -q "^component-set: PASS ($n_components/$n_components vs origin/main $s_sha via the committed manifest)$" <<<"$s_line"; then
+   && grep -q "^component-set: PASS ($n_components/$n_components vs origin/main $s_sha) — baseline read via the committed manifest$" <<<"$s_line"; then
   ok "3544-no-skew: an in-sync tree stamps an affirmative PASS naming its baseline sha AND the read path"
 else
-  bad "3544-no-skew: expected 'component-set: PASS ($n_components/$n_components vs origin/main $s_sha via the committed manifest)'"
+  bad "3544-no-skew: expected 'component-set: PASS ($n_components/$n_components vs origin/main $s_sha) — baseline read via the committed manifest'"
   printf '%s\n' "$s_out"
 fi
 
@@ -1733,7 +1846,7 @@ sum2="$tmp/delta-insync-summary.txt"
 fout2="$tmp/delta-insync.log"
 ( fx "$same" && AGENT_GATE_SUMMARY_FILE="$sum2" CQLITE_DATASETS_ROOT="$tmp/no-datasets" \
     bash scripts/agent-gate.sh --delta HEAD~1 --anchor-run-id selftest >"$fout2" 2>&1 ) >/dev/null 2>&1
-if grep -q "^component-set: PASS ($n_components/$n_components vs origin/main $s_sha via the committed manifest)$" "$sum2" 2>/dev/null \
+if grep -q "^component-set: PASS ($n_components/$n_components vs origin/main $s_sha) — baseline read via the committed manifest$" "$sum2" 2>/dev/null \
    && grep -q '^==== AGENT-GATE DELTA SUMMARY ====' "$sum2" 2>/dev/null \
    && ! grep -q 'component-set: FAIL-CLOSED' "$sum2" 2>/dev/null; then
   ok "3544-strict-inSync: an in-sync tree passes the strict pre-flight; its block carries the PASS line"
@@ -2256,7 +2369,9 @@ fi
 # ---------------------------------------------------------------------------
 # The ONE declared constant. Bump it in the SAME change that adds/removes a `_CS_KIND`
 # value, and extend the census above and a case below at the same time.
-DECLARED_KIND_COUNT=17   # +manifest-{missing,garbage,stale} +baseline-decl-unrecognised
+DECLARED_KIND_COUNT=18   # +baseline-probe-unmeasured (the three-valued manifest presence
+                         # probe: "cannot tell" is REFUSED, never read as "absent"),
+                         # +manifest-{missing,garbage,stale} +baseline-decl-unrecognised
                          # (#3544 REQ-3544-01); baseline-list-{failed,garbage,empty} and
                          # baseline-missing became baseline-{unreadable,set-garbage,set-empty}
                          # when the baseline stopped being derived by EXECUTING a script.

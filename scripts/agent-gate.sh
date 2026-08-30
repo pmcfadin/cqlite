@@ -2545,6 +2545,10 @@ apply_schemas_preflight() {
 #   BOUNDED (network-capable; every one goes through _component_set_bounded):
 #     git fetch --refmap= --no-tags …    the baseline read; network by definition. Both
 #                                        flags suppress SHARED-ref writes (branches, tags).
+#     git ls-tree <rev> -- scripts/agent-gate.components
+#                                        the THREE-VALUED presence probe that decides which
+#                                        read path runs. Reads a TREE, which a
+#                                        `--filter=tree:0` partial clone fetches LAZILY.
 #     git show <rev>:scripts/agent-gate.components   reads a BLOB, so in a PARTIAL clone
 #     git show <rev>:scripts/agent-gate.sh           (--filter=blob:none) it fetches LAZILY.
 #                                        This is the site that looked local and was not
@@ -3190,7 +3194,7 @@ _component_set_extract_declaration() {
   rest="${decl#'COMPONENTS=('}"
   case "$rest" in
     *')') inner="${rest%')'}" ;;
-    *) _CS_DECL_ERR="the 'COMPONENTS=(' declaration does not CLOSE on its own line ('$(_component_set_flatten "$decl")'); a multi-line or computed array is REFUSED, never guessed at"
+    *) _CS_DECL_ERR="the 'COMPONENTS=(' declaration is not a SINGLE-LINE literal — it does not close with ')' on its own line ('$(_component_set_flatten "$decl")'); a multi-line (reflowed) or computed array is REFUSED, never guessed at"
        return 1 ;;
   esac
   # THE CHARACTER CHECK COMES BEFORE ANY WORD SPLITTING, and that order is load-bearing: the
@@ -3263,14 +3267,100 @@ _component_set_local_manifest_check() {
   return 1
 }
 
+# _component_set_manifest_presence <rev> <tmpd>: THREE-VALUED presence probe for the manifest
+# at <rev>. Sets _CS_PRESENCE to `present` or `verified-absent` and returns 0; returns 1 with
+# a one-line _CS_PRESENCE_ERR for `could-not-tell`.
+#
+# WHY THIS EXISTS AS ITS OWN STEP, AND WHY THE FALLBACK IS GATED ON IT (lead ruling on
+# REQ-3544-01). "Path 2 is self-limiting — unreachable once the manifest is on `main`" is TRUE
+# and NOT ENOUGH: it is a property somebody reasoned about, and nothing measures it. A refactor,
+# a baseline pointed at an older commit, or an accidentally deleted manifest would silently
+# re-enable the brittle textual path with nobody noticing — a pass derived from the ABSENCE of a
+# bad signal, which is the shape this whole guard exists to close. So presence is MEASURED
+# first, and the fallback is entered ONLY from an affirmative `verified-absent`.
+#
+# `git show <rev>:<path>` CANNOT ANSWER THIS. Its non-zero exit conflates "no such path" with
+# "bad object" with "the repository could not be read", so inferring absence from it is exactly
+# the two-valued-predicate error CLAUDE.md names: a predicate that must collapse "cannot tell"
+# onto one of its answers always picks the permissive one. `git ls-tree <rev> -- <path>`
+# separates them affirmatively:
+#     rc 0 + an entry   -> the tree WAS read and lists the path        => present
+#     rc 0 + NO entry   -> the tree WAS read and does NOT list it      => verified-absent
+#     rc != 0           -> the tree could not be read at all           => could-not-tell
+# An entry that is not a `blob` (a directory at that path) is its own refusal: it can neither be
+# read as a manifest nor called absent.
+#
+# BOUNDED like every other read here: `ls-tree` reads a TREE object, and a partial clone made
+# with `--filter=tree:0` fetches trees LAZILY, so this apparently-local read is network-capable.
+_CS_PRESENCE=""
+_CS_PRESENCE_ERR=""
+_component_set_manifest_presence() {
+  local rev="$1" tmpd="$2" rc line ltype lpath
+  _CS_PRESENCE=""; _CS_PRESENCE_ERR=""
+  _component_set_bounded "$_CS_BOUND_SECS" git -C "$REPO_ROOT" ls-tree "$rev" -- "$_CS_MANIFEST_REL" >"$tmpd/ls" 2>"$tmpd/ls.err"
+  rc=$?
+  if [ "$rc" -ne 0 ]; then
+    if [ "$rc" -eq 124 ] || [ "$rc" -eq 137 ]; then
+      _CS_PRESENCE_ERR="git ls-tree $rev -- $_CS_MANIFEST_REL EXCEEDED its ${_CS_BOUND_HINT}s bound (rc $rc; a partial clone fetching the tree lazily is the usual cause)"
+    elif [ "$rc" -eq "$_CS_UNBOUNDABLE_RC" ]; then
+      _CS_PRESENCE_ERR="git ls-tree $rev -- $_CS_MANIFEST_REL could not be run under a bound, so it was NOT RUN (rc $rc)"
+    else
+      _CS_PRESENCE_ERR="git ls-tree $rev -- $_CS_MANIFEST_REL failed (rc $rc): $(_component_set_safe_detail "$(cat "$tmpd/ls.err" 2>/dev/null)")"
+    fi
+    return 1
+  fi
+  line=""
+  IFS= read -r line <"$tmpd/ls" 2>/dev/null || line="${line:-}"
+  if [ -z "$line" ]; then
+    # THE AFFIRMATIVE ABSENCE: the tree was read successfully and does not list the path.
+    _CS_PRESENCE=verified-absent
+    return 0
+  fi
+  # `<mode> SP <type> SP <oid> TAB <path>` — split into POSITIONAL FIELDS rather than with
+  # `${line#…}` prefix-stripping, and that is not a style choice: the structural externals audit
+  # in scripts/tests/test_agent_gate_component_set.sh strips comments at the first `#`, so a
+  # `${line#* }` leaves it reading `line` as an external PROGRAM and the audit FAILs on correct
+  # code. Field splitting is also the shape git's format actually is (TAB is in the default IFS).
+  # `set -f` around the split because an unquoted expansion also GLOBS; the pathspec is a fixed
+  # ASCII literal so nothing here can contain one, and the guard costs nothing.
+  set -f
+  # shellcheck disable=SC2086  # deliberate field split of git's own `<mode> <type> <oid> <path>`
+  set -- $line
+  set +f
+  ltype="${2:-}"
+  lpath="${4:-}"
+  if [ "$lpath" != "$_CS_MANIFEST_REL" ]; then
+    _CS_PRESENCE_ERR="git ls-tree $rev -- $_CS_MANIFEST_REL returned an entry this parse does not recognise: '$(_component_set_flatten "$line")'"
+    return 1
+  fi
+  case "$ltype" in
+    blob) _CS_PRESENCE=present; return 0 ;;
+    *)    _CS_PRESENCE_ERR="$rev:$_CS_MANIFEST_REL is a '$(_component_set_flatten "$ltype")', not a regular file, so the manifest can neither be read nor called absent"
+          return 1 ;;
+  esac
+}
+
 # _component_set_set_at_rev <rev>: THE ONE READER for a component set at a COMMIT — used for
 # both the fetched baseline and for HEAD (the removal-provenance measurement), so the two can
 # never diverge in grammar, in refusal behaviour or in what they read.
 #
 # Sets _CS_REV_SET / _CS_REV_N / _CS_REV_SRC (`manifest` | `declaration`) and returns 0; on
-# failure returns 1 with _CS_REV_ERRKIND (workspace | unreadable | decl-unrecognised | garbage
-# | empty) and a one-line _CS_REV_ERR. The CALLER maps the errkind onto a `_CS_KIND`, because
-# the same failure means different things for the baseline and for HEAD.
+# failure returns 1 with _CS_REV_ERRKIND (workspace | probe | unreadable | decl-unrecognised |
+# garbage | empty) and a one-line _CS_REV_ERR. The CALLER maps the errkind onto a `_CS_KIND`,
+# because the same failure means different things for the baseline and for HEAD.
+#
+# THE TWO PATHS ARE MUTUALLY EXCLUSIVE AND CHOSEN BY MEASUREMENT, never by failure (lead ruling
+# on REQ-3544-01):
+#   present         -> PATH 1 ONLY. Every failure of the manifest read — unreadable, bound
+#                      exceeded, ungrammatical, empty — is an ERROR. The textual fallback is a
+#                      HARD REFUSAL here: falling back would re-enter the brittle path on a
+#                      baseline that HAS the data, which is the silent re-enablement this
+#                      gating exists to prevent.
+#   verified-absent -> PATH 2, the transitional TEXT extraction, and the SUMMARY line NAMES it.
+#   could-not-tell  -> REFUSE. Not path 2.
+# The payoff is MECHANICAL EXPIRY rather than trust: once the manifest is on `main`, every later
+# baseline measures `present`, so path 2 stops being reachable and any attempt to enter it is an
+# error someone sees — at the cost of one extra bounded probe.
 #
 # <rev> is either the sha40 this run's own fetch produced or the literal `HEAD`; nothing
 # invoker-supplied reaches it.
@@ -3289,12 +3379,32 @@ _component_set_set_at_rev() {
     _CS_REV_ERR="could not create a temp dir to read the component set at $rev"
     return 1
   fi
-  # BOUNDED for exactly the reason every other read here is (job 210, finding 1):
-  # `git show <rev>:<path>` reads a BLOB, and in a PARTIAL clone (`--filter=blob:none`) the
-  # blob is fetched LAZILY — so this apparently-local read is network-capable.
-  _component_set_bounded "$_CS_BOUND_SECS" git -C "$REPO_ROOT" show "$rev:$_CS_MANIFEST_REL" >"$tmpd/manifest" 2>"$tmpd/m.err"
-  rc=$?
-  if [ "$rc" -eq 0 ]; then
+  # STEP 1 — WHICH PATH, decided by an affirmative three-valued measurement (see the probe).
+  if ! _component_set_manifest_presence "$rev" "$tmpd"; then
+    _CS_REV_ERRKIND=probe
+    _CS_REV_ERR="could not determine whether $rev carries $_CS_MANIFEST_REL: $_CS_PRESENCE_ERR. 'Cannot tell' is NOT 'absent', so the transitional TEXT fallback is REFUSED rather than entered on an unmeasured premise"
+    rm -rf "$tmpd"; return 1
+  fi
+  if [ "$_CS_PRESENCE" = present ]; then
+    # PATH 1 — THE COMMITTED MANIFEST, AND NOTHING ELSE. Bounded for the same reason as every
+    # read here (job 210, finding 1): `git show <rev>:<path>` reads a BLOB, and in a PARTIAL
+    # clone (`--filter=blob:none`) the blob is fetched LAZILY.
+    _component_set_bounded "$_CS_BOUND_SECS" git -C "$REPO_ROOT" show "$rev:$_CS_MANIFEST_REL" >"$tmpd/manifest" 2>"$tmpd/m.err"
+    rc=$?
+    if [ "$rc" -ne 0 ]; then
+      # PRESENT BUT UNREADABLE IS AN ERROR, NEVER A FALLBACK: the data is there, so a run that
+      # cannot read it has not measured the baseline — and reading the script text instead
+      # would substitute a different, brittler source for one that exists.
+      _CS_REV_ERRKIND=unreadable
+      if [ "$rc" -eq 124 ] || [ "$rc" -eq 137 ]; then
+        _CS_REV_ERR="$rev carries $_CS_MANIFEST_REL but reading it EXCEEDED the ${_CS_BOUND_HINT}s bound (rc $rc; a partial clone fetching the blob lazily is the usual cause); the TEXT fallback is not taken when the manifest EXISTS"
+      elif [ "$rc" -eq "$_CS_UNBOUNDABLE_RC" ]; then
+        _CS_REV_ERR="$rev carries $_CS_MANIFEST_REL but 'git show' could not be run under a bound, so it was NOT RUN (rc $rc); the TEXT fallback is not taken when the manifest EXISTS"
+      else
+        _CS_REV_ERR="$rev carries $_CS_MANIFEST_REL but git show $rev:$_CS_MANIFEST_REL failed (rc $rc): $(_component_set_safe_detail "$(cat "$tmpd/m.err" 2>/dev/null)"); the TEXT fallback is not taken when the manifest EXISTS"
+      fi
+      rm -rf "$tmpd"; return 1
+    fi
     _component_set_parse_manifest_file "$tmpd/manifest"; prc=$?
     rm -rf "$tmpd"
     case "$prc" in
@@ -3307,31 +3417,18 @@ _component_set_set_at_rev() {
          return 1 ;;
     esac
   fi
-  if [ "$rc" -eq 124 ] || [ "$rc" -eq 137 ]; then
-    _CS_REV_ERRKIND=unreadable
-    _CS_REV_ERR="git show $rev:$_CS_MANIFEST_REL EXCEEDED its ${_CS_BOUND_HINT}s bound (rc $rc; a partial clone fetching the blob lazily is the usual cause)"
-    rm -rf "$tmpd"; return 1
-  fi
-  if [ "$rc" -eq "$_CS_UNBOUNDABLE_RC" ]; then
-    _CS_REV_ERRKIND=unreadable
-    _CS_REV_ERR="git show $rev:$_CS_MANIFEST_REL could not be run under a bound, so it was NOT RUN (rc $rc)"
-    rm -rf "$tmpd"; return 1
-  fi
-  # THE MANIFEST IS ABSENT AT THIS REV -> the transitional text fallback. A NON-BOUND failure
-  # is treated as absence, which is what it is in every case that matters (`fatal: path … does
-  # not exist`); a corrupt object would fail the fallback too, and the fallback's own refusal
-  # names it. Bound-exceeded is handled ABOVE rather than here, because falling back after a
-  # HANG would be reading a second blob in a clone that has already proven it cannot serve one.
+
+  # PATH 2 — THE TRANSITIONAL TEXT EXTRACTION, reachable ONLY from `verified-absent` above.
   _component_set_bounded "$_CS_BOUND_SECS" git -C "$REPO_ROOT" show "$rev:$gate_rel" >"$tmpd/gate" 2>"$tmpd/g.err"
   rc=$?
   if [ "$rc" -ne 0 ]; then
     _CS_REV_ERRKIND=unreadable
     if [ "$rc" -eq 124 ] || [ "$rc" -eq 137 ]; then
-      _CS_REV_ERR="neither $rev:$_CS_MANIFEST_REL nor $rev:$gate_rel could be read: git show $rev:$gate_rel EXCEEDED its ${_CS_BOUND_HINT}s bound (rc $rc; a partial clone fetching the blob lazily is the usual cause)"
+      _CS_REV_ERR="$rev carries no $_CS_MANIFEST_REL and reading $rev:$gate_rel EXCEEDED its ${_CS_BOUND_HINT}s bound (rc $rc; a partial clone fetching the blob lazily is the usual cause)"
     elif [ "$rc" -eq "$_CS_UNBOUNDABLE_RC" ]; then
-      _CS_REV_ERR="neither $rev:$_CS_MANIFEST_REL nor $rev:$gate_rel could be read: git show $rev:$gate_rel could not be run under a bound, so it was NOT RUN (rc $rc)"
+      _CS_REV_ERR="$rev carries no $_CS_MANIFEST_REL and git show $rev:$gate_rel could not be run under a bound, so it was NOT RUN (rc $rc)"
     else
-      _CS_REV_ERR="neither $rev:$_CS_MANIFEST_REL nor $rev:$gate_rel could be read: git show $rev:$gate_rel failed (rc $rc): $(_component_set_safe_detail "$(cat "$tmpd/g.err" 2>/dev/null)")"
+      _CS_REV_ERR="$rev carries no $_CS_MANIFEST_REL and git show $rev:$gate_rel failed (rc $rc): $(_component_set_safe_detail "$(cat "$tmpd/g.err" 2>/dev/null)")"
     fi
     rm -rf "$tmpd"; return 1
   fi
@@ -3710,6 +3807,11 @@ _component_set_probe_inner() {
     # an unmapped errkind is reported AS unmapped rather than folded into a plausible name.
     case "$_CS_REV_ERRKIND" in
       workspace)        _CS_KIND=baseline-workspace ;;
+      # `probe` is its OWN kind, never folded into baseline-unreadable: "I read the tree and the
+      # manifest is not there" and "I could not read the tree" have opposite consequences — the
+      # first legitimately enters the transitional TEXT path, the second must never — so a
+      # shared name would hide exactly the distinction this gating was added for.
+      probe)            _CS_KIND=baseline-probe-unmeasured ;;
       unreadable)       _CS_KIND=baseline-unreadable ;;
       decl-unrecognised) _CS_KIND=baseline-decl-unrecognised ;;
       garbage)          _CS_KIND=baseline-set-garbage ;;
@@ -3856,58 +3958,58 @@ _component_set_line() {
   for c in $_CS_UNCOMMITTED; do n_uncommitted=$((n_uncommitted + 1)); done
   local extra=""
   [ -n "$_CS_EXTRA" ] && extra=" [branch-only, NOT skew: $_CS_EXTRA]"
-  # THE POSITIVE LINE NAMES HOW THE BASELINE WAS READ (#3544 REQ-3544-01). There are two
-  # data-only read paths — the committed manifest, and the TRANSITIONAL text extraction of the
-  # baseline's `COMPONENTS=(…)` declaration — and a reader must be able to tell which one a
-  # certification used, because the second is format-brittle in a shared direction and becomes
-  # unreachable once the manifest is on `main`. It is stamped on the PASS/ADVISORY-PASS line
-  # only: that is the line a PR records as certification, and on every other verdict the
-  # source is already secondary to the failure being reported (the hook exposes it for all of
-  # them, so nothing is unobservable).
+  # EVERY LINE THAT HAS A BASELINE NAMES HOW THAT BASELINE WAS READ (#3544 REQ-3544-01, lead
+  # ruling). There are two data-only read paths — the committed manifest, and the TRANSITIONAL
+  # TEXT extraction of the baseline's `COMPONENTS=(…)` declaration — and use of the second must
+  # be VISIBLE, not inferred: it is format-brittle in a shared direction, and it is now entered
+  # only on an affirmative `verified-absent` measurement, which the wording states. Appended
+  # LAST and uniformly rather than woven into each sentence, so the rule is "the line ends by
+  # naming its baseline source" and no arm can quietly omit it. The UNMEASURED arms have no
+  # baseline to name, which is exactly why they do not carry it.
   local src_note=""
   case "$_CS_BASE_SRC" in
-    manifest)    src_note=" via the committed manifest" ;;
-    declaration) src_note=" via the baseline's COMPONENTS declaration read as TEXT (transitional #3544; nothing fetched is executed)" ;;
+    manifest)    src_note=" — baseline read via the committed manifest" ;;
+    declaration) src_note=" — baseline read via the TEXTUAL FALLBACK: $_CS_MANIFEST_REL is VERIFIED ABSENT at that sha (#3544 transitional; the declaration is parsed as TEXT, never executed)" ;;
   esac
   case "$verdict" in
     PASS)
       if [ -n "$lenient" ]; then
-        printf 'component-set: ADVISORY-PASS (%s/%s vs origin/main %s%s)%s%s' \
-          "$_CS_BASE_N" "$_CS_BASE_N" "$_CS_SHA" "$src_note" "$extra" "$lenient"
+        printf 'component-set: ADVISORY-PASS (%s/%s vs origin/main %s)%s%s%s' \
+          "$_CS_BASE_N" "$_CS_BASE_N" "$_CS_SHA" "$extra" "$lenient" "$src_note"
       else
-        printf 'component-set: PASS (%s/%s vs origin/main %s%s)%s' \
-          "$_CS_BASE_N" "$_CS_BASE_N" "$_CS_SHA" "$src_note" "$extra"
+        printf 'component-set: PASS (%s/%s vs origin/main %s)%s%s' \
+          "$_CS_BASE_N" "$_CS_BASE_N" "$_CS_SHA" "$extra" "$src_note"
       fi ;;
     DECLARED)
-      printf 'component-set: DECLARED (#3544) — this branch REMOVES %s of origin/main %s'"'"'s %s component(s): %s; origin/main IS an ancestor of HEAD and they are absent from the gate script AT HEAD too, so the removal is in THIS branch'"'"'s own COMMITTED diff, NOT skew — recorded, not fatal%s%s' \
-        "$n_missing" "$_CS_SHA" "$_CS_BASE_N" "$_CS_MISSING" "$extra" "$lenient" ;;
+      printf 'component-set: DECLARED (#3544) — this branch REMOVES %s of origin/main %s'"'"'s %s component(s): %s; origin/main IS an ancestor of HEAD and they are absent from the committed component set AT HEAD too, so the removal is in THIS branch'"'"'s own COMMITTED diff, NOT skew — recorded, not fatal%s%s%s' \
+        "$n_missing" "$_CS_SHA" "$_CS_BASE_N" "$_CS_MISSING" "$extra" "$lenient" "$src_note" ;;
     UNCOMMITTED)
       # The DECLARED excusal WITHOUT its precondition. Named separately from BEHIND because
       # it is a different fact with a different remedy (commit or restore, never rebase),
       # and never merged into DECLARED's wording: that sentence asserts committed-diff
       # provenance, and here the measurement says the opposite.
       if [ -n "$lenient" ]; then
-        printf 'component-set: ADVISORY-UNCOMMITTED (#3544) — %s of the %s component(s) missing vs origin/main %s are PRESENT in the gate script AT HEAD (%s), so the removal is an UNCOMMITTED WORKING-TREE EDIT, not this branch'"'"'s committed diff%s%s' \
-          "$n_uncommitted" "$n_missing" "$_CS_SHA" "$_CS_UNCOMMITTED" "$extra" "$lenient"
+        printf 'component-set: ADVISORY-UNCOMMITTED (#3544) — %s of the %s component(s) missing vs origin/main %s are PRESENT in the committed component set AT HEAD (%s), so the removal is an UNCOMMITTED WORKING-TREE EDIT, not this branch'"'"'s committed diff%s%s%s' \
+          "$n_uncommitted" "$n_missing" "$_CS_SHA" "$_CS_UNCOMMITTED" "$extra" "$lenient" "$src_note"
       else
-        printf 'component-set: FAIL-CLOSED (#3544) — %s of the %s component(s) missing vs origin/main %s are PRESENT in the gate script AT HEAD (%s), so the removal is an UNCOMMITTED WORKING-TREE EDIT, not this branch'"'"'s committed diff and cannot be DECLARED; a PASS here would certify a set nothing recorded; overall verdict FAIL' \
-          "$n_uncommitted" "$n_missing" "$_CS_SHA" "$_CS_UNCOMMITTED"
+        printf 'component-set: FAIL-CLOSED (#3544) — %s of the %s component(s) missing vs origin/main %s are PRESENT in the committed component set AT HEAD (%s), so the removal is an UNCOMMITTED WORKING-TREE EDIT, not this branch'"'"'s committed diff and cannot be DECLARED; a PASS here would certify a set nothing recorded; overall verdict FAIL%s' \
+          "$n_uncommitted" "$n_missing" "$_CS_SHA" "$_CS_UNCOMMITTED" "$src_note"
       fi ;;
     BEHIND)
       if [ -n "$lenient" ]; then
-        printf 'component-set: ADVISORY-BEHIND (#3544) — this tree is BEHIND origin/main %s; %s component(s) MISSING from its gate script: %s%s%s' \
-          "$_CS_SHA" "$n_missing" "$_CS_MISSING" "$extra" "$lenient"
+        printf 'component-set: ADVISORY-BEHIND (#3544) — this tree is BEHIND origin/main %s; %s component(s) MISSING from its gate script: %s%s%s%s' \
+          "$_CS_SHA" "$n_missing" "$_CS_MISSING" "$extra" "$lenient" "$src_note"
       else
-        printf 'component-set: FAIL-CLOSED (#3544) — this tree is BEHIND origin/main %s; %s of its %s component(s) MISSING from this gate script: %s; a PASS here would certify a set that is no longer the coverage claim; overall verdict FAIL' \
-          "$_CS_SHA" "$n_missing" "$_CS_BASE_N" "$_CS_MISSING"
+        printf 'component-set: FAIL-CLOSED (#3544) — this tree is BEHIND origin/main %s; %s of its %s component(s) MISSING from this gate script: %s; a PASS here would certify a set that is no longer the coverage claim; overall verdict FAIL%s' \
+          "$_CS_SHA" "$n_missing" "$_CS_BASE_N" "$_CS_MISSING" "$src_note"
       fi ;;
     INDETERMINATE)
       if [ -n "$lenient" ]; then
-        printf 'component-set: ADVISORY-INDETERMINATE (#3544) — %s component(s) missing vs origin/main %s (%s) and the ancestry probe could not tell BEHIND from a deliberate removal (%s)%s' \
-          "$n_missing" "$_CS_SHA" "$_CS_MISSING" "$_CS_DETAIL" "$lenient"
+        printf 'component-set: ADVISORY-INDETERMINATE (#3544) — %s component(s) missing vs origin/main %s (%s) and the ancestry probe could not tell BEHIND from a deliberate removal (%s)%s%s' \
+          "$n_missing" "$_CS_SHA" "$_CS_MISSING" "$_CS_DETAIL" "$lenient" "$src_note"
       else
-        printf 'component-set: FAIL-CLOSED (#3544) — %s component(s) missing vs origin/main %s (%s) and the ancestry probe could not tell BEHIND from a deliberate removal (%s); overall verdict FAIL' \
-          "$n_missing" "$_CS_SHA" "$_CS_MISSING" "$_CS_DETAIL"
+        printf 'component-set: FAIL-CLOSED (#3544) — %s component(s) missing vs origin/main %s (%s) and the ancestry probe could not tell BEHIND from a deliberate removal (%s); overall verdict FAIL%s' \
+          "$n_missing" "$_CS_SHA" "$_CS_MISSING" "$_CS_DETAIL" "$src_note"
       fi ;;
     *)
       # THE `manifest-*` KINDS GET THEIR OWN SENTENCE, because "baseline NOT measured" would be
