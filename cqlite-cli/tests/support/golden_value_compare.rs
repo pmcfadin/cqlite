@@ -57,8 +57,11 @@ pub fn compare_rows(
     }
     let mut golden: Vec<&Row> = golden.iter().collect();
     let mut cli: Vec<&Row> = cli.iter().collect();
-    golden.sort_by_key(|r| row_sort_key(r, pk, ck, egress));
-    cli.sort_by_key(|r| row_sort_key(r, pk, ck, egress));
+    // `sort_by_cached_key`: the key embeds the whole row (see `row_sort_key`), so a
+    // 900-row table with 300-byte payloads would otherwise rebuild multi-kilobyte
+    // keys O(n log n) times.
+    golden.sort_by_cached_key(|r| row_sort_key(r, pk, ck, egress));
+    cli.sort_by_cached_key(|r| row_sort_key(r, pk, ck, egress));
 
     for (g, c) in golden.iter().zip(cli.iter()) {
         let key = row_message_key(g, pk, ck, egress);
