@@ -37,13 +37,16 @@ FAIL=0
 # compared against PASS + SKIPPED_TOOLING, which keeps it a real floor on hosts that
 # have everything while never punishing one that does not.
 #
-# THIS ALSO FIXES A PRE-EXISTING LATENT DEFECT, not just #1465's own case, and that is
-# deliberate rather than incidental: the python3-dependent skips that predate this issue
-# (the 1699-r18 differential-parser case and the 1699-r32 preflight-behaviour case) had
-# exactly the same shape — on a python3-less host they would have counted against the
-# floor. They are covered by this accounting now. With the floor raised to the measured
-# count (round 12, W2), that accounting is load-bearing rather than slack-absorbed: there
-# is no longer 10 assertions of headroom to hide a dead section OR a declared skip.
+# ACCOUNTING MUST BE 1:1, AND TWO PRE-EXISTING SITES WERE NOT (round 13, X2 — the earlier
+# wording of this paragraph claimed they were "covered", which was FALSE):
+#   * 1699-r18-diff-* emits ONE verdict per PARSER_DIFF_SPEC_ROWS row (2 today);
+#   * 1699-r32-preflight-behaviour[*] emits ONE per R32_WANT_CASES entry (9 today);
+# and each had a single-line skip, so a jq/cargo-less host under-accounted by 1 and a
+# python3-less host by 9. With the floor at the measured count that is a FALSE RED, not
+# slack — the old 389 was exactly 400 minus those 9 plus 1. Both skip paths now loop the
+# SAME declared list they would otherwise have iterated, so displacement is 1:1 by
+# construction. Measured, all four host shapes: everything present 400+0; jq/cargo-less
+# 398+2; python3-less 389+11; node-less 399+1 — accounted == 400 in every case.
 SKIPPED_TOOLING=0
 ok()   { printf 'ok   - %s\n' "$1"; PASS=$((PASS + 1)); }
 bad()  { printf 'FAIL - %s\n' "$1"; FAIL=$((FAIL + 1)); }
@@ -3020,6 +3023,12 @@ done
 # whoever wrote it already thought of, and the round-7/10/13 findings were all about
 # target shapes nobody had thought of (manifest-gated, directory-style, `test = false`,
 # required-features-excluded, explicitly path-mapped).
+# The spec rows live in ONE variable consumed by BOTH branches (round 13, X2): the skip
+# path must emit one `skipped` per verdict it DISPLACES, or ASSERT_FLOOR — a count of
+# accounted assertions — reds a host that merely lacks jq/cargo. Deriving the skip from the
+# same list keeps the accounting 1:1 by construction rather than by a hand-kept number.
+PARSER_DIFF_SPEC_ROWS='_package_unittest_srcs|cqlite-flight|lib,bin
+_package_test_targets_gated|cqlite-core|legacy-heuristics'
 if command -v jq >/dev/null 2>&1 && command -v python3 >/dev/null 2>&1 && command -v cargo >/dev/null 2>&1; then
   repo_root_=$(cd "$SCRIPT_DIR/../.." && pwd)
   while IFS='|' read -r fn_ a1_ a2_; do
@@ -3051,12 +3060,18 @@ if command -v jq >/dev/null 2>&1 && command -v python3 >/dev/null 2>&1 && comman
     else
       bad "1699-r18-diff-$fn_: the jq PORT and the python ORIGINAL DISAGREE — one of the two lanes derives a different subject set depending on which parser the host has: $(diff "$py_out_" "$jq_out_" 2>/dev/null | head -4 | tr '\n' ' ')"
     fi
-  done <<'PARSER_DIFF_SPECS'
-_package_unittest_srcs|cqlite-flight|lib,bin
-_package_test_targets_gated|cqlite-core|legacy-heuristics
-PARSER_DIFF_SPECS
+  done <<EOF_PARSER_DIFF_SPECS
+$PARSER_DIFF_SPEC_ROWS
+EOF_PARSER_DIFF_SPECS
 else
-  skipped "1699-r18-diff: needs jq + python3 + cargo on this host — the two metadata parsers were NOT differentially compared here"
+  # ONE skip per DISPLACED verdict, over the same rows the branch above would have
+  # iterated (X2): a single skip for a two-verdict section under-accounts by one.
+  while IFS='|' read -r fn_ _a1_ _a2_; do
+    [ -n "$fn_" ] || continue
+    skipped "1699-r18-diff-$fn_: needs jq + python3 + cargo on this host — this parser pair was NOT differentially compared here"
+  done <<EOF_PARSER_DIFF_SKIP
+$PARSER_DIFF_SPEC_ROWS
+EOF_PARSER_DIFF_SKIP
 fi
 
 # roborev round-18 (Low): the cli-tests component cleaned its two logs but not the
@@ -3552,8 +3567,25 @@ fi
 #
 # The preflight block is extracted from the gate and run against doctored corpus roots, with the few
 # variables it touches stubbed. No cargo, no gate slot, sub-second.
+# Same 1:1 accounting rule as the r18 differential above (round 13, X2): this section
+# emits NINE verdicts, so its skip path must emit nine. The case list is declared once and
+# consumed by both branches.
+R32_WANT_CASES='CASE good: PASS
+CASE second_incomplete: FAIL-CLOSED
+CASE prefix_file: FAIL-CLOSED
+CASE dangling_symlink: FAIL-CLOSED
+CASE nullglob: FAIL-CLOSED
+CASE nullglob_good: PASS
+CASE valid_dir_symlink: PASS
+CASE base_is_symlink: PASS
+CASE no_match: FAIL-CLOSED'
 if ! command -v python3 >/dev/null 2>&1; then
-  skipped "1699-r32-preflight-behaviour: needs python3 — NOT verified here"
+  while IFS= read -r _r32skip_; do
+    [ -n "$_r32skip_" ] || continue
+    skipped "1699-r32-preflight-behaviour[${_r32skip_%%:*}]: needs python3 — NOT verified here"
+  done <<EOF_R32_SKIP
+$R32_WANT_CASES
+EOF_R32_SKIP
 else
   pf_report_="$tmp/1699-r32-pf.txt"
   python3 - "$GATE" "$tmp" > "$pf_report_" 2>&1 <<'PF_PY'
@@ -3641,13 +3673,16 @@ none = os.path.join(tmp, "pf-none"); os.makedirs(os.path.join(none, "sstables/te
 out = run(none)
 print("CASE no_match:", "FAIL-CLOSED" if ("FAIL-CLOSED" in out and "NOTHING matches" in out) else "MISSED")
 PF_PY
-  for want_ in "CASE good: PASS" "CASE second_incomplete: FAIL-CLOSED" "CASE prefix_file: FAIL-CLOSED" "CASE dangling_symlink: FAIL-CLOSED" "CASE nullglob: FAIL-CLOSED" "CASE nullglob_good: PASS" "CASE valid_dir_symlink: PASS" "CASE base_is_symlink: PASS" "CASE no_match: FAIL-CLOSED"; do
+  while IFS= read -r want_; do
+    [ -n "$want_" ] || continue
     if grep -qF "$want_" "$pf_report_"; then
       ok "1699-r32-preflight-behaviour[${want_%%:*}]: ${want_#*: }"
     else
       bad "1699-r32-preflight-behaviour[${want_%%:*}]: expected '${want_#*: }' — got: $(grep -F "${want_%%:*}" "$pf_report_" | head -1)"
     fi
-  done
+  done <<EOF_R32_CASES
+$R32_WANT_CASES
+EOF_R32_CASES
 fi
 
 # The harness must not compile into a predictable shared directory (round-30, Medium): concurrent
