@@ -87,40 +87,114 @@ const MARKER_SESSION_READY: &str = "cqlite writable session: enter CQL DML";
 const MARKER_HANDLER_ENTERED: &str = "Received Ctrl-C";
 
 // ---------------------------------------------------------------------------
-// Stage budgets and the total-budget arithmetic
+// Stage budgets: the floor invariant, and the total-budget arithmetic
 // ---------------------------------------------------------------------------
 //
-// TOTAL-BUDGET ARITHMETIC (spec: "The test owns a total budget below the
-// harness hard-kill"). `.config/nextest.toml` sets
-// `slow-timeout = { period = "60s", terminate-after = 4 }` => a **240s hard
-// kill**. Each test owns `TEST_TOTAL_BUDGET = 180s` and clips every stage
-// budget to what REMAINS of it (`StageClock::clip`), so the stages can never
-// sum past 180s however slow the host is — the test always emits its own
-// attributed failure instead of being killed by the harness.
+// THE FLOOR INVARIANT (#3515, round-3 blocker). This change replaces bare
+// wall-clock deadlines with staged ones, and it MAY NEVER BE TIGHTER THAN THE
+// BOUND IT REPLACED — otherwise it makes the reported flake fire SOONER, which
+// is a regression wearing a fix's clothes. The first version of this change did
+// exactly that: stage (d) had `base 25s` where the old code had a flat 60s, and
+// the hung-flush RED run failed at exactly 25.0s, proving it (a silent flush
+// produces no progress events, so the stall window is already satisfied and the
+// effective bound IS `derived`).
 //
-// EVERY wait ON A CHILD PROCESS is a stage, INCLUDING the read-side durability
-// SELECT. That was not true in the first version of this change: `select_rows`
-// used `Command::output()`, which has no timeout at all, so on the saturated
-// host this issue is about it was an unbounded wait sitting OUTSIDE the budget —
-// and an overrun there lands on nextest's hard kill, producing exactly the
-// uninformative failure this change exists to remove. It is now stage (e), with
-// its own calibrated budget and its own attributed message.
-//
-// Independently of the clipping, the nominal per-stage CAPS are chosen so their
-// worst-case sum is already under the total:
+// The invariant is BY COMPOSITION, not per stage: a single old bound was often
+// split across several new stages, and each new stage can look innocent while
+// the group is tighter. So it is stated as a mapping from each OLD bound to the
+// GROUP of new stages that replaced it, and the group's BASES must sum to at
+// least the old value:
 //
 //   sigint_in_writable_session_flushes_before_exit
-//     (a) session up 40 + (b) ack 25 + (c) handler 25 + (d) exit 50
-//       + (e) durability read 35                                    = 175s <= 180s
+//     OLD wait_for_line(OK, 60s)   [spawn + boot + read + execute + print]
+//        -> (a) session-up 40 + (b) write-ack 25            = 65s >= 60s  OK
+//     OLD wait_timeout(60s)        [handler entry + flush + exit]
+//        -> (c) handler-entry 20 + (d) clean-exit 60        = 80s >= 60s  OK
+//        and (d) ALONE is 60s >= 60s, because (d) is the stage #3515 flaked at
+//     (e) durability-read 25       [NEW ceiling: `select_rows` was unbounded]
 //
 //   writable_session_auto_flushes_mid_session_across_threshold
-//     (a) 40 + (b) 5 writes x 10 = 50 + (c) sstable 25 + (d) EOF exit 25
-//       + (e) durability read 35                                    = 175s <= 180s
+//     OLD per-write wait_for_line(OK, 60s), write id=0  [includes boot]
+//        -> (a) 40 + (b0) 25                               = 65s >= 60s  OK
+//     OLD per-write wait_for_line(OK, 60s), writes id=1..4
+//        -> (b1..4) 10s each                        DECLARED EXCEPTION, below
+//     OLD wait_for_sstable(60s)   -> (c) 35s        DECLARED EXCEPTION, below
+//     OLD wait_timeout(60s) on EOF -> (d) 35s       DECLARED EXCEPTION, below
+//     (e) durability-read 20       [NEW ceiling: `select_rows` was unbounded]
 //
-// What the remaining 60s of the 240s now covers is only what CANNOT be a stage:
+// DECLARED EXCEPTION, and why the invariant CANNOT hold literally for the
+// sibling: its old bounds were SEVEN independent 60s deadlines = 420s nominal,
+// against nextest's 240s HARD KILL. They were therefore never simultaneously
+// realizable — a run that actually used them would have been KILLED at 240s with
+// no message, which is the outcome this whole change exists to prevent. So for
+// the sibling the old "60s per stage" is a nominal figure, not a realizable
+// bound, and the realizable old bound on any late stage was "whatever remains of
+// 240s" — which is exactly what `StageClock::clip` now computes, with an
+// attributed message instead of a kill. Those three groups are floored at
+// `SIBLING_STAGE_FLOOR` and the sibling's total base sum is held at or above
+// 3x the old bound instead. This is a REDUCTION in two of the sibling's nominal
+// ceilings, stated here rather than left to be discovered.
+//
+// TOTAL-BUDGET ARITHMETIC (spec: "The test owns a total budget below the harness
+// hard-kill"). `.config/nextest.toml` sets
+// `slow-timeout = { period = "60s", terminate-after = 4 }` => a **240s hard
+// kill**. Each test owns `TEST_TOTAL_BUDGET` and clips every stage budget to what
+// REMAINS of it (`StageClock::clip`), so the stages can never sum past it however
+// slow the host is. The nominal per-stage CAPS are additionally chosen so their
+// worst-case sum is already under the total.
+//
+// NONE OF THIS ARITHMETIC IS LEFT TO A COMMENT. Every claim above — each group
+// floor, each declared exception, and both cap sums — is asserted by the unit
+// tests at the bottom of this file (`no_wait_is_tighter_than_the_bound_it_
+// replaced`, `the_nominal_cap_sums_stay_under_the_total_budget`), so a future
+// edit that tightens a stage reds the suite instead of silently reintroducing
+// the round-3 blocker. A comment cannot fail; a test can.
+//
+// What the remaining ~10s of the 240s covers is only what CANNOT be a stage:
 // `TempDir` teardown, and the bounded (5s) collection of the read-side child's
 // already-at-EOF pipes after it has exited.
-const TEST_TOTAL_BUDGET: Duration = Duration::from_secs(180);
+const TEST_TOTAL_BUDGET: Duration = Duration::from_secs(230);
+
+/// The single wall-clock bound every wait in the pre-#3515 version of this file
+/// used: `Duration::from_secs(60)`, seven times over. The floor invariant above
+/// is stated against this value.
+const OLD_BOUND: Duration = Duration::from_secs(60);
+
+/// Floor for the sibling stages whose old nominal 60s cannot be honoured inside
+/// the total budget — see DECLARED EXCEPTION above.
+const SIBLING_STAGE_FLOOR: Duration = Duration::from_secs(10);
+
+/// A stage's calibration inputs: `base` is the budget on a quiet host, `cap` the
+/// ceiling no amount of measured contention may exceed.
+#[derive(Clone, Copy, Debug)]
+struct StageSpec {
+    base: Duration,
+    cap: Duration,
+}
+
+const fn spec(base_secs: u64, cap_secs: u64) -> StageSpec {
+    StageSpec {
+        base: Duration::from_secs(base_secs),
+        cap: Duration::from_secs(cap_secs),
+    }
+}
+
+// sigint_in_writable_session_flushes_before_exit
+const T1_ACK: StageSpec = spec(25, 30);
+const T1_HANDLER: StageSpec = spec(20, 30);
+const T1_EXIT: StageSpec = spec(60, 85);
+const T1_READ: StageSpec = spec(25, 35);
+
+// writable_session_auto_flushes_mid_session_across_threshold
+const T2_ACK_FIRST: StageSpec = spec(25, 28);
+const T2_ACK_LATER: StageSpec = spec(10, 12);
+const T2_SSTABLE: StageSpec = spec(35, 40);
+const T2_EOF_EXIT: StageSpec = spec(35, 40);
+const T2_READ: StageSpec = spec(20, 25);
+
+/// The stall window for the progress-checked polls. Calibrated like any stage,
+/// but it is not a stage: it never bounds the test on its own.
+const STALL_WINDOW: StageSpec = spec(5, 20);
 
 /// Stage (a). **The irreducible bound** (design.md, "The residual").
 ///
@@ -131,39 +205,50 @@ const TEST_TOTAL_BUDGET: Duration = Duration::from_secs(180);
 /// (process spawn + dynamic link + engine init, not a flush), and its expiry
 /// message states exactly what the expiry means and nothing more. It is exempt
 /// from the calibration requirement rather than silently non-compliant with it.
+///
+/// It is a NEW ceiling: the old code had no readiness wait at all (it wrote the
+/// INSERT immediately after spawn), so this bound is floored against nothing —
+/// but it is part of the group that replaces the old ack deadline, and the floor
+/// invariant above is asserted on that group.
 const SESSION_UP_DEADLINE: Duration = Duration::from_secs(40);
 
-// The quiet-host references below are set from MEASURED quiet values on this
-// test (warm build, unloaded 16-core box, `--test-threads=1`):
+// ---------------------------------------------------------------------------
+// Calibration baselines
+// ---------------------------------------------------------------------------
 //
-//   t_boot (spawn -> readiness banner)            22-23ms
-//   t_ack  (write -> `OK`)                        3ms (SIGINT test)
-//                                                 38ms (sibling, slowest of 5)
+// MEASURED quiet values for this test (warm build, unloaded 16-core box,
+// `--test-threads=1`), and under self-generated CPU contention:
 //
-// They are set an order of magnitude ABOVE those, so an unloaded host always
-// measures well under the baseline and always gets `scale == 1` — but NOT
-// arbitrarily above them, and that upper limit is load-bearing rather than
-// cosmetic. `scale` is `observed / quiet_baseline`, so a baseline chosen far
-// above the quiet measurement makes the calibration INERT: with a 1s `t_ack`
-// baseline, the issue's measured ~175x contended host (t_ack ~0.5s) would still
-// yield `scale == 1`, leaving stage (d) bounded by its 25s base — TIGHTER than
-// the 60s deadline #3515 is fixing, i.e. a regression dressed as a fix.
-// (design.md D2 suggests baselines "in seconds, not milliseconds"; that was
-// written before these measurements and is the one place this implementation
-// deviates from it, for the reason above. Reported with the change.)
+//                                    quiet      load avg 30    load avg 116
+//   t_boot (spawn -> banner)         22-29ms    45-66ms        81-132ms
+//   t_ack  (write -> `OK`), test 1   3ms        13ms           76ms
+//   t_ack  (slowest of 5), test 2    38-43ms    97ms           133ms
 //
-// With the values below, that same ~175x host derives `scale ~= 2.6` from
-// `t_ack` and lands stages (c)/(d) on their caps (30s/60s) — i.e. at least the
-// old ceiling under real contention, while a quiet box still fails a genuine
-// hang in `base`.
+// THE BASELINES SIT JUST ABOVE THE QUIET NOISE FLOOR, and that is deliberate:
+// `scale = max(1, observed / quiet_baseline)`, so a baseline set far above the
+// quiet measurement makes the whole mechanism INERT. Measured: with the first
+// version's 500ms/200ms baselines, `scale` stayed at EXACTLY 1.000 in every run
+// taken, including load average 116 (~7x oversubscription) — a mechanism with
+// zero observed firings.
+//
+// The asymmetry that makes a small baseline safe: CALIBRATION CAN ONLY LOOSEN A
+// BUDGET (`scale` is floored at 1 and `derived` is clamped at `base`). A
+// spuriously large `scale` therefore cannot cause a failure — it can only delay
+// one. There is no quiet-side risk to protect against, so over-eager engagement
+// is harmless and under-eager engagement is the only real hazard.
+//
+// (design.md D2 asks for baselines "in seconds, not milliseconds" and the spec
+// for "large enough that an unloaded host yields scale == 1". The second is
+// honoured; the first is the one place this implementation deviates, because
+// taken literally it makes the calibration inert on the very host #3515
+// measured. Reported with the change.)
 
-/// Quiet-host reference for `t_boot` (spawn -> readiness banner): ~22x the
-/// measured quiet value.
-const BOOT_QUIET_BASELINE: Duration = Duration::from_millis(500);
+/// Quiet-host reference for `t_boot`: ~4x the measured quiet value.
+const BOOT_QUIET_BASELINE: Duration = Duration::from_millis(100);
 
-/// Quiet-host reference for `t_ack` (write -> `OK` round-trip): ~5x the slowest
-/// measured quiet value (the sibling's 38ms), ~66x the SIGINT test's 3ms.
-const ACK_QUIET_BASELINE: Duration = Duration::from_millis(200);
+/// Quiet-host reference for `t_ack`: just above the slowest measured quiet value
+/// (the sibling's 43ms), ~17x the SIGINT test's 3ms.
+const ACK_QUIET_BASELINE: Duration = Duration::from_millis(50);
 
 /// The `cqlite` binary this test crate built with `--features write-support`.
 fn cqlite_bin() -> &'static str {
@@ -382,12 +467,12 @@ struct Budget {
 /// `quiet_baseline`, yields `scale == 1`, and gets exactly `base` — calibration
 /// can therefore never itself become a source of flakes on an unloaded box.
 fn calibrated(
-    base: Duration,
-    cap: Duration,
+    stage: StageSpec,
     observed: Duration,
     observed_name: &'static str,
     quiet_baseline: Duration,
 ) -> Budget {
+    let StageSpec { base, cap } = stage;
     debug_assert!(base <= cap, "base must not exceed cap");
     debug_assert!(!quiet_baseline.is_zero(), "quiet_baseline must be non-zero");
     let scale = (observed.as_secs_f64() / quiet_baseline.as_secs_f64()).max(1.0);
@@ -885,13 +970,7 @@ fn sigint_in_writable_session_flushes_before_exit() {
     .expect("write INSERT to child stdin");
     stdin.flush().expect("flush child stdin");
 
-    let ack_budget = clock.clip(calibrated(
-        Duration::from_secs(15),
-        Duration::from_secs(25),
-        t_boot,
-        "t_boot",
-        BOOT_QUIET_BASELINE,
-    ));
+    let ack_budget = clock.clip(calibrated(T1_ACK, t_boot, "t_boot", BOOT_QUIET_BASELINE));
     let t_ack = await_write_ack(
         &io,
         "stage (b) write-ack",
@@ -904,13 +983,7 @@ fn sigint_in_writable_session_flushes_before_exit() {
     // The stall window for the progress-checked exit wait is calibrated from the
     // same `t_ack`: on a host where a full write round-trip takes seconds, a
     // few seconds of silence is not evidence of a stall.
-    let stall_window = calibrated(
-        Duration::from_secs(5),
-        Duration::from_secs(20),
-        t_ack,
-        "t_ack",
-        ACK_QUIET_BASELINE,
-    );
+    let stall_window = calibrated(STALL_WINDOW, t_ack, "t_ack", ACK_QUIET_BASELINE);
 
     // Send a real SIGINT to the child.
     let pid = child.id() as libc::pid_t;
@@ -921,13 +994,7 @@ fn sigint_in_writable_session_flushes_before_exit() {
     // that the signal was delivered, that a shutdown handler exists and was
     // entered, and that the child was scheduled — so stage (d) below may never
     // claim anything about a handler's existence.
-    let handler_budget = clock.clip(calibrated(
-        Duration::from_secs(15),
-        Duration::from_secs(25),
-        t_ack,
-        "t_ack",
-        ACK_QUIET_BASELINE,
-    ));
+    let handler_budget = clock.clip(calibrated(T1_HANDLER, t_ack, "t_ack", ACK_QUIET_BASELINE));
     let entered = io.wait_for(
         Stream::Stderr,
         |l| l.contains(MARKER_HANDLER_ENTERED),
@@ -961,13 +1028,7 @@ fn sigint_in_writable_session_flushes_before_exit() {
     // Stage (d): clean exit, PROGRESS-CHECKED. A new child output line or a new
     // durable `-Data.db` artifact resets the stall window, so a flush that is
     // landing slowly is never mistaken for a stall.
-    let exit_budget = clock.clip(calibrated(
-        Duration::from_secs(25),
-        Duration::from_secs(50),
-        t_ack,
-        "t_ack",
-        ACK_QUIET_BASELINE,
-    ));
+    let exit_budget = clock.clip(calibrated(T1_EXIT, t_ack, "t_ack", ACK_QUIET_BASELINE));
     let envelope = clock.remaining();
     let exited = poll_with_progress(
         &io,
@@ -1016,13 +1077,7 @@ fn sigint_in_writable_session_flushes_before_exit() {
     // a real SSTable — the row is present on an independent read-only reopen.
     // A fresh CLI process doing a read is the same shape of work as the session
     // boot, so this budget is calibrated from `t_boot`.
-    let read_budget = clock.clip(calibrated(
-        Duration::from_secs(20),
-        Duration::from_secs(35),
-        t_boot,
-        "t_boot",
-        BOOT_QUIET_BASELINE,
-    ));
+    let read_budget = clock.clip(calibrated(T1_READ, t_boot, "t_boot", BOOT_QUIET_BASELINE));
     let (rows, t_read) = select_rows(
         &data_dir,
         &schema,
@@ -1107,18 +1162,20 @@ fn writable_session_auto_flushes_mid_session_across_threshold() {
         .expect("write INSERT to child stdin");
         stdin.flush().expect("flush child stdin");
 
-        let (observed, name, baseline) = if id == 0 {
-            (t_boot, "t_boot", BOOT_QUIET_BASELINE)
+        // The FIRST write's ack shares the old 60s bound with stage (a) (that
+        // deadline covered boot as well), so it carries a larger base than the
+        // later ones; see the floor invariant above.
+        let (stage_spec, observed, name, baseline) = if id == 0 {
+            (T2_ACK_FIRST, t_boot, "t_boot", BOOT_QUIET_BASELINE)
         } else {
-            (t_ack, "t_ack(slowest so far)", ACK_QUIET_BASELINE)
+            (
+                T2_ACK_LATER,
+                t_ack,
+                "t_ack(slowest so far)",
+                ACK_QUIET_BASELINE,
+            )
         };
-        let budget = clock.clip(calibrated(
-            Duration::from_secs(6),
-            Duration::from_secs(10),
-            observed,
-            name,
-            baseline,
-        ));
+        let budget = clock.clip(calibrated(stage_spec, observed, name, baseline));
         let took = await_write_ack(
             &io,
             "stage (b) write-ack",
@@ -1130,23 +1187,11 @@ fn writable_session_auto_flushes_mid_session_across_threshold() {
     }
     clock.record("b.write-acks", t_ack);
 
-    let stall_window = calibrated(
-        Duration::from_secs(5),
-        Duration::from_secs(20),
-        t_ack,
-        "t_ack",
-        ACK_QUIET_BASELINE,
-    );
+    let stall_window = calibrated(STALL_WINDOW, t_ack, "t_ack", ACK_QUIET_BASELINE);
 
     // Stage (c): a durable SSTable must exist BEFORE we close the session.
     // Progress-checked, and calibrated from `t_ack`.
-    let sstable_budget = clock.clip(calibrated(
-        Duration::from_secs(20),
-        Duration::from_secs(25),
-        t_ack,
-        "t_ack",
-        ACK_QUIET_BASELINE,
-    ));
+    let sstable_budget = clock.clip(calibrated(T2_SSTABLE, t_ack, "t_ack", ACK_QUIET_BASELINE));
     let envelope = clock.remaining();
     let flushed = poll_with_progress(
         &io,
@@ -1193,13 +1238,7 @@ fn writable_session_auto_flushes_mid_session_across_threshold() {
 
     // Stage (d): cleanly end via EOF; progress-checked exit wait.
     drop(stdin);
-    let exit_budget = clock.clip(calibrated(
-        Duration::from_secs(20),
-        Duration::from_secs(25),
-        t_ack,
-        "t_ack",
-        ACK_QUIET_BASELINE,
-    ));
+    let exit_budget = clock.clip(calibrated(T2_EOF_EXIT, t_ack, "t_ack", ACK_QUIET_BASELINE));
     let envelope = clock.remaining();
     let exited = poll_with_progress(
         &io,
@@ -1242,13 +1281,7 @@ fn writable_session_auto_flushes_mid_session_across_threshold() {
     );
 
     // Stage (e): all rows are durable on an independent read-only reopen.
-    let read_budget = clock.clip(calibrated(
-        Duration::from_secs(20),
-        Duration::from_secs(35),
-        t_boot,
-        "t_boot",
-        BOOT_QUIET_BASELINE,
-    ));
+    let read_budget = clock.clip(calibrated(T2_READ, t_boot, "t_boot", BOOT_QUIET_BASELINE));
     let (rows, t_read) = select_rows(
         &data_dir,
         &schema,
@@ -1281,17 +1314,209 @@ fn writable_session_auto_flushes_mid_session_across_threshold() {
 }
 
 // ---------------------------------------------------------------------------
-// Unit coverage for the calibration helper itself (tasks.md 1.3)
+// Unit coverage: the floor invariant, the total-budget arithmetic, and the
+// calibration helper (tasks.md 1.3)
+//
+// These exist because THE ROUND-3 BLOCKER WAS A COMMENT THAT COULD NOT FAIL.
+// The budget arithmetic was written in prose above the constants, was wrong
+// (stage (d) 25s replacing a 60s bound), and nothing noticed until a RED run's
+// timing was read by hand. Every claim in that comment is now asserted here.
 // ---------------------------------------------------------------------------
+
+/// THE FLOOR INVARIANT: this change may never be tighter than the bound it
+/// replaced, for any GROUP of stages that replaced one old bound.
+#[test]
+fn no_wait_is_tighter_than_the_bound_it_replaced() {
+    // --- sigint_in_writable_session_flushes_before_exit ---
+    //
+    // OLD: a single `wait_for_line(OK, 60s)` issued immediately after spawn, so
+    // it covered child boot + engine init + read + execute + print. There was NO
+    // readiness wait, so stage (a) is a new bound INSIDE this old one and the
+    // floor applies to the group, not to either stage alone.
+    assert!(
+        SESSION_UP_DEADLINE + T1_ACK.base >= OLD_BOUND,
+        "stages (a)+(b) replace one {OLD_BOUND:?} ack deadline but sum to only {:?}",
+        SESSION_UP_DEADLINE + T1_ACK.base
+    );
+    // OLD: `wait_timeout(60s)` after SIGINT, covering handler entry + flush + exit.
+    assert!(
+        T1_HANDLER.base + T1_EXIT.base >= OLD_BOUND,
+        "stages (c)+(d) replace one {OLD_BOUND:?} post-SIGINT deadline but sum to only {:?}",
+        T1_HANDLER.base + T1_EXIT.base
+    );
+    // And stage (d) ALONE, because it is the stage #3515 actually flaked at: a
+    // silent flush produces no progress events, so the stall window is already
+    // satisfied and the effective bound is exactly `derived`. If this drops
+    // below the old bound, the "fix" makes the reported flake fire SOONER.
+    assert!(
+        T1_EXIT.base >= OLD_BOUND,
+        "stage (d) is the stage #3515 flaked at and a silent flush makes its \
+         effective bound exactly `base` — {:?} would fire SOONER than the {OLD_BOUND:?} \
+         it replaces",
+        T1_EXIT.base
+    );
+
+    // --- writable_session_auto_flushes_mid_session_across_threshold ---
+    //
+    // OLD: the id=0 write's 60s ack deadline also covered boot.
+    assert!(
+        SESSION_UP_DEADLINE + T2_ACK_FIRST.base >= OLD_BOUND,
+        "stages (a)+(b0) replace one {OLD_BOUND:?} deadline but sum to only {:?}",
+        SESSION_UP_DEADLINE + T2_ACK_FIRST.base
+    );
+    // DECLARED EXCEPTION (see the floor-invariant comment): the sibling's old
+    // bounds were SEVEN independent 60s deadlines = 420s nominal against a 240s
+    // hard kill, so they were never simultaneously realizable. These three
+    // groups are floored at SIBLING_STAGE_FLOOR instead, and the sibling's total
+    // base sum is held at >= 3x the old bound.
+    for (name, base) in [
+        ("(b1..4) per-write ack", T2_ACK_LATER.base),
+        ("(c) mid-session flush", T2_SSTABLE.base),
+        ("(d) EOF exit", T2_EOF_EXIT.base),
+    ] {
+        assert!(
+            base >= SIBLING_STAGE_FLOOR,
+            "sibling stage {name} is {base:?}, below the declared floor {SIBLING_STAGE_FLOOR:?}"
+        );
+        assert!(
+            base < OLD_BOUND,
+            "sibling stage {name} is {base:?} >= {OLD_BOUND:?}: it no longer needs the \
+             DECLARED EXCEPTION, so remove it from this loop and assert the floor directly"
+        );
+    }
+    let sibling_total = SESSION_UP_DEADLINE
+        + T2_ACK_FIRST.base
+        + T2_ACK_LATER.base * 4
+        + T2_SSTABLE.base
+        + T2_EOF_EXIT.base
+        + T2_READ.base;
+    assert!(
+        sibling_total >= OLD_BOUND * 3,
+        "the sibling's stages sum to {sibling_total:?}, under the 3x{OLD_BOUND:?} its \
+         declared exception is predicated on"
+    );
+
+    // Stage (e) is floored against nothing: `select_rows` was an UNBOUNDED
+    // `Command::output()` before, so this is a new ceiling. It must still be
+    // generous on its own terms, since a bound that can fail replaces a wait
+    // that never could.
+    for (name, base) in [("test 1", T1_READ.base), ("test 2", T2_READ.base)] {
+        assert!(
+            base >= Duration::from_secs(20),
+            "stage (e) in {name} replaces an unbounded wait with {base:?}, which is not \
+             generous enough for a new ceiling"
+        );
+    }
+}
+
+/// THE TOTAL-BUDGET ARITHMETIC: per-stage caps may not sum past the total, or a
+/// late stage gets squeezed by `StageClock::clip` and fails for a reason that is
+/// about the budget rather than the product.
+#[test]
+fn the_nominal_cap_sums_stay_under_the_total_budget() {
+    // nextest: slow-timeout period 60s x terminate-after 4.
+    const NEXTEST_HARD_KILL: Duration = Duration::from_secs(240);
+    assert!(
+        TEST_TOTAL_BUDGET < NEXTEST_HARD_KILL,
+        "the test's own budget {TEST_TOTAL_BUDGET:?} must leave room to emit its own \
+         failure before nextest's {NEXTEST_HARD_KILL:?} hard kill"
+    );
+
+    let t1 = SESSION_UP_DEADLINE + T1_ACK.cap + T1_HANDLER.cap + T1_EXIT.cap + T1_READ.cap;
+    assert!(
+        t1 <= TEST_TOTAL_BUDGET,
+        "sigint test caps sum to {t1:?}, over the {TEST_TOTAL_BUDGET:?} total"
+    );
+
+    let t2 = SESSION_UP_DEADLINE
+        + T2_ACK_FIRST.cap
+        + T2_ACK_LATER.cap * 4
+        + T2_SSTABLE.cap
+        + T2_EOF_EXIT.cap
+        + T2_READ.cap;
+    assert!(
+        t2 <= TEST_TOTAL_BUDGET,
+        "sibling test caps sum to {t2:?}, over the {TEST_TOTAL_BUDGET:?} total"
+    );
+
+    // Every spec must be internally coherent.
+    for (name, spec) in [
+        ("T1_ACK", T1_ACK),
+        ("T1_HANDLER", T1_HANDLER),
+        ("T1_EXIT", T1_EXIT),
+        ("T1_READ", T1_READ),
+        ("T2_ACK_FIRST", T2_ACK_FIRST),
+        ("T2_ACK_LATER", T2_ACK_LATER),
+        ("T2_SSTABLE", T2_SSTABLE),
+        ("T2_EOF_EXIT", T2_EOF_EXIT),
+        ("T2_READ", T2_READ),
+        ("STALL_WINDOW", STALL_WINDOW),
+    ] {
+        assert!(
+            spec.base <= spec.cap,
+            "{name}: base {:?} exceeds cap {:?}",
+            spec.base,
+            spec.cap
+        );
+    }
+}
+
+/// THE CALIBRATION ACTUALLY ENGAGES. Before this test the mechanism had ZERO
+/// observed firings: `scale` stayed at exactly 1.000 in every real run taken,
+/// including load average 116, because the baselines were 20-65x above the quiet
+/// noise floor. An unfired mechanism is indistinguishable from a broken one, so
+/// the firing is asserted directly with a synthetic observation.
+#[test]
+fn calibration_engages_on_a_contended_observation() {
+    // 8x the baseline: the budget must GROW, proportionally, from the real
+    // constants a real run uses.
+    let contended = calibrated(T1_EXIT, ACK_QUIET_BASELINE * 8, "t_ack", ACK_QUIET_BASELINE);
+    assert!(
+        (contended.scale - 8.0).abs() < 1e-9,
+        "scale must track the observation: {contended:?}"
+    );
+    assert!(
+        contended.derived > T1_EXIT.base,
+        "a contended observation must LOOSEN the budget: derived {:?} vs base {:?}",
+        contended.derived,
+        T1_EXIT.base
+    );
+    assert_eq!(
+        contended.derived, T1_EXIT.cap,
+        "8x on this spec saturates the cap"
+    );
+
+    // Just over the baseline: growth is proportional, not a step to the cap.
+    let mild = calibrated(
+        T1_EXIT,
+        ACK_QUIET_BASELINE + ACK_QUIET_BASELINE / 4,
+        "t_ack",
+        ACK_QUIET_BASELINE,
+    );
+    assert!(
+        mild.derived > T1_EXIT.base && mild.derived < T1_EXIT.cap,
+        "1.25x must land strictly between base and cap: {mild:?}"
+    );
+
+    // And an observation under the baseline is exactly `base` — the quiet-host
+    // property, from the same real constants.
+    let quiet = calibrated(
+        T1_EXIT,
+        ACK_QUIET_BASELINE / 10,
+        "t_ack",
+        ACK_QUIET_BASELINE,
+    );
+    assert_eq!(quiet.derived, T1_EXIT.base);
+    assert_eq!(quiet.scale, 1.0);
+}
 
 #[test]
 fn calibration_is_the_identity_on_a_quiet_observation() {
-    // A quiet host measures far below `quiet_baseline`, so `scale == 1` and the
+    // A quiet host measures below `quiet_baseline`, so `scale == 1` and the
     // derived budget is EXACTLY `base`: calibration can never tighten a budget
     // and can never itself flake on an unloaded box.
     let b = calibrated(
-        Duration::from_secs(15),
-        Duration::from_secs(30),
+        spec(15, 30),
         Duration::from_millis(12),
         "t_ack",
         ACK_QUIET_BASELINE,
@@ -1304,8 +1529,7 @@ fn calibration_is_the_identity_on_a_quiet_observation() {
 fn calibration_only_ever_loosens_and_never_exceeds_the_cap() {
     // Observation at exactly the baseline is still the identity.
     let at_baseline = calibrated(
-        Duration::from_secs(10),
-        Duration::from_secs(40),
+        spec(10, 40),
         ACK_QUIET_BASELINE,
         "t_ack",
         ACK_QUIET_BASELINE,
@@ -1314,19 +1538,17 @@ fn calibration_only_ever_loosens_and_never_exceeds_the_cap() {
 
     // 3x the baseline loosens proportionally.
     let contended = calibrated(
-        Duration::from_secs(10),
-        Duration::from_secs(40),
+        spec(10, 40),
         ACK_QUIET_BASELINE * 3,
         "t_ack",
         ACK_QUIET_BASELINE,
     );
-    assert!((contended.scale - 3.0).abs() < 1e-9, "{:?}", contended);
+    assert!((contended.scale - 3.0).abs() < 1e-9, "{contended:?}");
     assert_eq!(contended.derived, Duration::from_secs(30));
 
     // A pathological observation is clamped at the cap, never beyond it.
     let saturated = calibrated(
-        Duration::from_secs(10),
-        Duration::from_secs(40),
+        spec(10, 40),
         ACK_QUIET_BASELINE * 600,
         "t_ack",
         ACK_QUIET_BASELINE,
@@ -1356,8 +1578,7 @@ fn a_bare_budget_names_itself_as_uncalibrated() {
 fn the_stage_clock_clips_a_budget_to_the_remaining_total() {
     let clock = StageClock::new(Duration::from_secs(1));
     let clipped = clock.clip(calibrated(
-        Duration::from_secs(30),
-        Duration::from_secs(30),
+        spec(30, 30),
         Duration::ZERO,
         "t_ack",
         ACK_QUIET_BASELINE,
