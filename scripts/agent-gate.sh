@@ -7111,13 +7111,22 @@ TEST_LIMIT=1500
 # told never to read; the SUMMARY's `file-size: FAIL` therefore named neither the file nor
 # the numbers, and every reader re-derived by hand the arithmetic the component had just
 # thrown away. Nothing printed here may go to only one of the two sinks.
+# Count of _fs_emit appends that FAILED. Tracked rather than ignored because the
+# `[ -s "$log" ]` end-state check cannot see a PARTIAL log: a filesystem that accepts the
+# first line and rejects the rest leaves a non-empty file missing the growth entries —
+# #3401's own defect with extra steps, reported as PASS (#3401 review blocker A).
+_FS_WRITE_FAILURES=0
 _fs_emit() { # _fs_emit <logfile> <line> [<line>…]  — one output line per argument
   local _fs_log="$1"; shift
   # Zero args must emit NOTHING: `printf '%s\n'` with no operands still prints the format
   # once, i.e. a spurious blank line to BOTH sinks (#3401 review N2).
   [ "$#" -gt 0 ] || return 0
   printf '%s\n' "$@"
-  printf '%s\n' "$@" >>"$_fs_log"
+  # The append's STATUS is kept, its MESSAGE suppressed (#3401 review N1): an unwritable
+  # log makes the shell print one error per line, ~5 lines of noise interleaved into the
+  # very diagnostic block that has to be unmistakable.
+  printf '%s\n' "$@" >>"$_fs_log" 2>/dev/null ||
+    _FS_WRITE_FAILURES=$((_FS_WRITE_FAILURES + 1))
 }
 run_file_size() {
   local name=file-size
@@ -7132,6 +7141,7 @@ run_file_size() {
   # nothing, hand-computes line counts again), so both the truncate and the end state are
   # CHECKED and a persistence failure is a FAIL, never a silent PASS.
   local log_persist_err=""
+  _FS_WRITE_FAILURES=0
   start=$(date +%s)
   if ! : >"$log" 2>/dev/null; then
     log_persist_err="could not create or truncate it (unwritable path, or not a regular file)"
@@ -7219,22 +7229,57 @@ run_file_size() {
 
   end=$(date +%s)
 
-  # A created-but-EMPTY log is the mid-run ENOSPC shape, which the truncate check above
-  # cannot see — so verify the end state too. The diagnostic must be unmistakably NOT a
-  # ratchet violation: a bare `file-size: FAIL` meaning "my log dir is unwritable" would
-  # send the reader hunting for a grown source file that does not exist, so the ratchet's
-  # own verdict is stated in the same breath.
+  # What this guarantees, precisely (#3401 review A4): for the case where the LOG FILE
+  # cannot be written, the component never reports a silent PASS. It is NOT a general
+  # LOG_DIR guarantee — a wholly unwritable LOG_DIR also loses record_result's `.result`,
+  # and that falls through to the gate's generic "component produced no result" FAIL, which
+  # is fail-closed but carries none of this wording.
+  # Three independent signals, because each is blind to a different shape: the truncate
+  # check (unwritable path / not a regular file), the append-failure counter (a PARTIAL log
+  # — non-empty, so `-s` is satisfied, but missing the growth entries), and the end-state
+  # `-s` (created-but-empty, e.g. every write rejected).
+  if [ -z "$log_persist_err" ] && [ "$_FS_WRITE_FAILURES" -gt 0 ]; then
+    log_persist_err="$_FS_WRITE_FAILURES write(s) to it were rejected, so the log is partial or empty"
+  fi
   if [ -z "$log_persist_err" ] && [ ! -s "$log" ]; then
     log_persist_err="the file is absent or empty after writing (filesystem full?)"
   fi
   if [ -n "$log_persist_err" ]; then
-    local ratchet_verdict="$status"
+    local ratchet_verdict="$status" sib="$LOG_DIR/$name.persistence-error.log" _m _g
+    local -a msg=()
     status=FAIL
-    echo "--- [$name] LOG PERSISTENCE FAILURE — this is NOT a campsite-rule / size-ratchet violation."
-    echo "    The size ratchet itself computed: $ratchet_verdict. What failed is PERSISTING the"
-    echo "    diagnostic log the SUMMARY's 'logs:' line points at: $log"
-    echo "    Cause: $log_persist_err"
-    echo "    Fix the log directory (writable? full?) and re-run; no source file needs splitting."
+    # The diagnostic MUST NOT live on stdout alone: stdout is gate.log, the one file agents
+    # are told never to read, and the whole failure mode here is "the log you were pointed
+    # at is missing". So it also goes to a NON-CLOBBERING SIBLING in LOG_DIR (the #2874
+    # pattern), which is reachable from the SUMMARY's `logs:` line, and the stdout block
+    # names that sibling so both routes lead to it (#3401 review blocker B).
+    : >"$sib" 2>/dev/null
+    if [ "$ratchet_verdict" = FAIL ]; then
+      # BOTH failed. Saying "this is NOT a ratchet violation" here would steer the reader
+      # away from a REAL growth violation (#3401 review blocker C), so report both and keep
+      # the remediation data — which would otherwise be lost with the unwritable log.
+      msg+=("--- [$name] TWO failures: a REAL size-ratchet violation AND a log-persistence failure.")
+      msg+=("    (1) RATCHET (a genuine violation — act on this): the change makes over-threshold")
+      msg+=("        file(s) larger. Split per the campsite rule (epic #1116 source / #1135 tests),")
+      msg+=("        or re-run with CQLITE_ALLOW_FILE_GROWTH=1 to acknowledge. Grown files:")
+      for _g in ${grew[@]+"${grew[@]}"}; do
+        msg+=("          $_g")
+      done
+      msg+=("    (2) PERSISTENCE: the diagnostic log could not be written: $log")
+      msg+=("        Cause: $log_persist_err")
+      msg+=("        Fix the log directory (writable? full?) — that half needs no source split.")
+    else
+      msg+=("--- [$name] LOG PERSISTENCE FAILURE — this is NOT a campsite-rule / size-ratchet violation.")
+      msg+=("    The size ratchet itself computed: $ratchet_verdict. What failed is PERSISTING the")
+      msg+=("    diagnostic log the SUMMARY's 'logs:' line points at: $log")
+      msg+=("    Cause: $log_persist_err")
+      msg+=("    Fix the log directory (writable? full?) and re-run; no source file needs splitting.")
+    fi
+    msg+=("    This block is also written to: $sib")
+    for _m in ${msg[@]+"${msg[@]}"}; do
+      printf '%s\n' "$_m"
+      printf '%s\n' "$_m" >>"$sib" 2>/dev/null
+    done
   fi
 
   # Terminal verdict, written in TWO halves ON PURPOSE (#3401 blockers B/C) — do NOT tidy
@@ -7244,6 +7289,11 @@ run_file_size() {
   #     terminal verdict it promises;
   #   * to STDOUT *after* record_result, because every other component prints in that
   #     order and a gratuitous divergence is its own bug magnet.
+  # This LAST log write is deliberately UNVERIFIED, and that gap is irreducible: verifying
+  # a write requires a later write, so any re-check only moves the same one-write window
+  # further along. What IS verified is everything #3401 exists for — the thresholds, the
+  # base ref and the growth entries, all written and checked above; a failure here costs
+  # only the terminal verdict LINE, which the SUMMARY carries anyway (#3401 review A2).
   printf '%s\n' ">>> [$name] $status ($((end - start))s)" >>"$log" 2>/dev/null
   record_result "$name" "$status" "$((end - start))"
   printf '%s\n' ">>> [$name] $status ($((end - start))s)"
