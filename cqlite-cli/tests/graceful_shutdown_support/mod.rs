@@ -199,7 +199,25 @@ impl ChildIo {
         loop {
             let remaining = stage.remaining();
             if remaining.is_zero() {
-                return Err(WaitEnd::DeadlineReached);
+                // FINAL NON-BLOCKING DRAIN BEFORE DECLARING A TIMEOUT (roborev job
+                // 233, finding 1). The awaited line may have ARRIVED before the
+                // deadline and simply not have been consumed yet: this thread can
+                // be descheduled between the reader thread's `send` and this
+                // loop's next `recv_timeout`. Declaring expiry without looking
+                // would be a false timeout on a working product AND a
+                // self-contradicting diagnostic — the transcript printed by the
+                // failure would contain the very line the message says was never
+                // observed.
+                //
+                // This does NOT extend the deadline and does not wait: it consumes
+                // what is already queued. That is the round-9 ruling applied where
+                // it was previously only half-applied — the deadline bounds how
+                // long we WAIT FOR evidence, never whether we accept evidence we
+                // already hold.
+                return match self.try_match(want, &pred) {
+                    Some(line) => Ok((line, stage.spent())),
+                    None => Err(WaitEnd::DeadlineReached),
+                };
             }
             match self
                 .rx
@@ -218,6 +236,21 @@ impl ChildIo {
                 }
             }
         }
+    }
+
+    /// Non-blocking: consume every line the readers have already queued and
+    /// return the first that matches, if any. Never waits, so it cannot extend
+    /// the deadline; it only inspects evidence that has already arrived.
+    ///
+    /// Non-matching lines are discarded exactly as the blocking loop discards
+    /// them — the transcript keeps every line, so nothing is lost to diagnostics.
+    fn try_match(&self, want: Stream, pred: &impl Fn(&str) -> bool) -> Option<String> {
+        while let Ok((stream, line)) = self.rx.try_recv() {
+            if stream == want && pred(&line) {
+                return Some(line);
+            }
+        }
+        None
     }
 
     /// Non-blocking: consume whatever the readers have queued. Returns how many
@@ -365,6 +398,22 @@ pub fn poll_with_progress<T>(
     loop {
         let remaining = stage.remaining();
         if remaining.is_zero() {
+            // FINAL NON-BLOCKING STATUS CHECK BEFORE DECLARING A TIMEOUT (roborev
+            // job 233, finding 1). The child may have EXITED, or the artifact may
+            // have APPEARED, before the deadline and simply not have been observed
+            // yet: this thread sleeps a slice at a time and can be descheduled
+            // arbitrarily long past the end of one. `step(ZERO)` waits for nothing
+            // — `wait_timeout(ZERO)` is a `try_wait`, and the artifact predicate
+            // is a directory count — so this cannot extend the deadline; it only
+            // consumes evidence that already arrived within it.
+            if let Some(done) = step(Duration::ZERO) {
+                return Ok((done, stage.spent()));
+            }
+            // Still absent, so this IS a timeout. Fold in any progress that
+            // arrived unobserved, so the message describes the moment it is
+            // declared rather than one slice earlier.
+            new_lines += io.drain_new();
+            new_artifacts += count_data_db(data_dir).saturating_sub(artifacts);
             return Err(PollFail {
                 stage_spent: stage.spent(),
                 deadline: stage.describe(),
@@ -430,6 +479,84 @@ fn collect_to_end<R: std::io::Read + Send + 'static>(
         let _ = reader.read_to_end(&mut buf);
         let _ = tx.send((stream, buf));
     });
+}
+
+/// What [`collect_both_streams`] ended with. An enum rather than a panic inside
+/// the loop so the collection is unit-testable: the diagnostics stay at the call
+/// site, which owns the stage-(e) context they report.
+enum CollectEnd {
+    /// Both streams delivered, in `(stdout, stderr)` order.
+    Both(Vec<u8>, Vec<u8>),
+    /// The deadline passed with `collected` of 2 delivered.
+    DeadlineReached { collected: usize },
+    /// A reader thread ended without sending, with `collected` of 2 delivered.
+    Disconnected { collected: usize },
+}
+
+/// Collect both of the read-side child's output buffers under the TEST's one
+/// deadline (`stage.remaining()`: no constant, no per-call-site subtraction).
+///
+/// FINAL NON-BLOCKING DRAIN BEFORE DECLARING A TIMEOUT (roborev job 233,
+/// finding 1). A reader thread can deliver its buffer before the deadline and
+/// this thread can be descheduled before consuming it. Declaring a timeout
+/// without one last `try_recv` would be a false failure on a working product,
+/// reported against a child that had already exited successfully.
+fn collect_both_streams(rx: &Receiver<(Stream, Vec<u8>)>, stage: &Stage) -> CollectEnd {
+    fn store(
+        stream: Stream,
+        buf: Vec<u8>,
+        stdout_buf: &mut Vec<u8>,
+        stderr_buf: &mut Vec<u8>,
+        collected: &mut usize,
+    ) {
+        match stream {
+            Stream::Stdout => *stdout_buf = buf,
+            Stream::Stderr => *stderr_buf = buf,
+        }
+        *collected += 1;
+    }
+
+    let mut stdout_buf = Vec::new();
+    let mut stderr_buf = Vec::new();
+    let mut collected = 0usize;
+    loop {
+        if collected >= 2 {
+            return CollectEnd::Both(stdout_buf, stderr_buf);
+        }
+        let left = stage.remaining();
+        if left.is_zero() {
+            // Consume what already arrived; this waits for nothing, so it cannot
+            // extend the deadline.
+            while collected < 2 {
+                let Ok((stream, buf)) = rx.try_recv() else {
+                    break;
+                };
+                store(
+                    stream,
+                    buf,
+                    &mut stdout_buf,
+                    &mut stderr_buf,
+                    &mut collected,
+                );
+            }
+            return if collected >= 2 {
+                CollectEnd::Both(stdout_buf, stderr_buf)
+            } else {
+                CollectEnd::DeadlineReached { collected }
+            };
+        }
+        match rx.recv_timeout(left.min(Duration::from_millis(250))) {
+            Ok((stream, buf)) => store(
+                stream,
+                buf,
+                &mut stdout_buf,
+                &mut stderr_buf,
+                &mut collected,
+            ),
+            Err(RecvTimeoutError::Disconnected) => return CollectEnd::Disconnected { collected },
+            Err(RecvTimeoutError::Timeout) => {}
+        }
+    }
 }
 
 /// Stage (e): reopen an SSTable directory read-only and SELECT, returning the
@@ -523,45 +650,29 @@ pub fn select_rows(
     //
     // It is now `stage.remaining()`: the test's one deadline. No constant, no
     // subtraction, and nothing for a future edit here to get wrong.
-    let mut stdout_buf = Vec::new();
-    let mut stderr_buf = Vec::new();
-    let mut collected = 0;
-    while collected < 2 {
-        let left = stage.remaining();
-        if left.is_zero() {
-            panic!(
-                "stage (e) durability-read: the read-side child exited ({status:?}) but only \
-                 {collected}/2 of its output streams could be collected before the test's \
-                 deadline (the spawn and the child wait had already taken {child_wait:.2?} of \
-                 this stage).\n\
-                 {}\n\
-                 WHAT THIS ESTABLISHES: only that a reader thread had not delivered its buffer \
-                 in time. It says nothing about durability, and nothing about the child, which \
-                 exited successfully.\n{}",
-                stage.describe(),
-                stage.report()
-            );
-        }
-        match rx.recv_timeout(left.min(Duration::from_millis(250))) {
-            Ok((Stream::Stdout, buf)) => {
-                stdout_buf = buf;
-                collected += 1;
-            }
-            Ok((Stream::Stderr, buf)) => {
-                stderr_buf = buf;
-                collected += 1;
-            }
-            // Not a timeout: both reader threads dropped their senders without
-            // sending, which can only be a panic inside the harness.
-            Err(RecvTimeoutError::Disconnected) => panic!(
-                "stage (e) durability-read: the read-side output channel disconnected with only \
-                 {collected}/2 streams collected — a reader thread ended without sending. This \
-                 is a defect in this test harness, not a statement about durability.\n{}",
-                stage.report()
-            ),
-            Err(RecvTimeoutError::Timeout) => {}
-        }
-    }
+    let (stdout_buf, stderr_buf) = match collect_both_streams(&rx, stage) {
+        CollectEnd::Both(out, err) => (out, err),
+        CollectEnd::DeadlineReached { collected } => panic!(
+            "stage (e) durability-read: the read-side child exited ({status:?}) but only \
+             {collected}/2 of its output streams could be collected before the test's \
+             deadline (the spawn and the child wait had already taken {child_wait:.2?} of \
+             this stage).\n\
+             {}\n\
+             WHAT THIS ESTABLISHES: only that a reader thread had not delivered its buffer \
+             in time. It says nothing about durability, and nothing about the child, which \
+             exited successfully.\n{}",
+            stage.describe(),
+            stage.report()
+        ),
+        // Not a timeout: both reader threads dropped their senders without
+        // sending, which can only be a panic inside the harness.
+        CollectEnd::Disconnected { collected } => panic!(
+            "stage (e) durability-read: the read-side output channel disconnected with only \
+             {collected}/2 streams collected — a reader thread ended without sending. This \
+             is a defect in this test harness, not a statement about durability.\n{}",
+            stage.report()
+        ),
+    };
 
     // Stage (e)'s duration INCLUDES the spawn and the collection, so the reported
     // timing describes the same quantity the stage bounded.
@@ -751,4 +862,133 @@ fn observed_progress_never_extends_the_deadline() {
         observed.contains("ONE deadline passed"),
         "the failure must name the one bound that ended the poll: {observed}"
     );
+}
+
+// ---------------------------------------------------------------------------
+// EVIDENCE THAT ARRIVED BEFORE THE DEADLINE IS ACCEPTED AFTER IT LAPSES
+// (roborev job 233, finding 1 — the round-9 ruling, applied where it had only
+// been half-applied)
+// ---------------------------------------------------------------------------
+//
+// Round 9 ruled that the deadline bounds how long the test WAITS FOR EVIDENCE
+// and not whether it accepts evidence already in hand, and applied that to the
+// SUCCESS path only. The three expiry sites got it wrong in the other direction:
+// each declared a timeout without a last look at what was already queued. Under
+// contention the awaited marker, the process exit or a reader's buffer can
+// arrive well before the deadline and be consumed only after it, because this
+// thread is descheduled in between. The result was a false timeout on a working
+// product — and, worst of all, a message CONTRADICTED BY ITS OWN TRANSCRIPT.
+//
+// The three tests below each queue the evidence FIRST, then let the deadline
+// lapse, then let the harness look: each must SUCCEED.
+//
+// ON THE SLEEPS: a `sleep` can only OVERSHOOT, and overshoot makes the
+// precondition ("the deadline has already lapsed") MORE true, never less. No
+// test here asserts that anything completed FAST, so this is the opposite of the
+// #2642 wall-clock flake class.
+
+/// `wait_for`: a line that arrived before the deadline must still match.
+#[test]
+fn a_line_queued_before_the_deadline_is_matched_after_it_lapses() {
+    let (io, lines) = ChildIo::synthetic();
+    lines
+        .send((
+            Stream::Stderr,
+            format!("cqlite: {MARKER_HANDLER_ENTERED} before exit..."),
+        ))
+        .expect("queue the marker before the deadline lapses");
+
+    let deadline = TestDeadline::start(Duration::from_millis(1), Duration::from_millis(1));
+    thread::sleep(Duration::from_millis(25));
+    let stage = deadline.stage("queued-before-expiry");
+    assert!(
+        stage.remaining().is_zero(),
+        "the precondition of this test is an already-lapsed deadline"
+    );
+
+    match io.wait_for(
+        Stream::Stderr,
+        |l| l.contains(MARKER_HANDLER_ENTERED),
+        &stage,
+    ) {
+        Ok((line, _)) => assert!(line.contains(MARKER_HANDLER_ENTERED), "{line}"),
+        Err(end) => panic!(
+            "the marker had ALREADY ARRIVED when the deadline lapsed, and the wait reported \
+             {end:?} instead of matching it. That is a false timeout on a working product, and \
+             its message would be contradicted by the transcript it prints:\n{}",
+            io.transcript_text()
+        ),
+    }
+}
+
+/// `poll_with_progress`: a step whose evidence landed before the deadline must
+/// still be observed, not reported as a timeout.
+#[test]
+fn a_step_completed_before_the_deadline_is_observed_after_it_lapses() {
+    let dir = tempfile::TempDir::new().expect("tempdir");
+    let data_dir = dir.path().to_path_buf();
+    // The durable artifact APPEARS before the deadline...
+    std::fs::write(data_dir.join("nb-1-big-Data.db"), b"x").expect("plant an artifact");
+
+    let (io, _lines) = ChildIo::synthetic();
+    let deadline = TestDeadline::start(Duration::from_millis(1), Duration::from_millis(1));
+    // ...and only then does the deadline lapse, before the poll ever looks.
+    thread::sleep(Duration::from_millis(25));
+    let stage = deadline.stage("queued-before-expiry");
+    assert!(
+        stage.remaining().is_zero(),
+        "the precondition of this test is an already-lapsed deadline"
+    );
+
+    let outcome = poll_with_progress(&io, &data_dir, &stage, |slice| {
+        if count_data_db(&data_dir) >= 1 {
+            Some(())
+        } else {
+            thread::sleep(slice);
+            None
+        }
+    });
+    if let Err(fail) = outcome {
+        panic!(
+            "the artifact existed BEFORE the deadline lapsed, and the poll reported a timeout \
+             anyway — a false failure on a working product: {}",
+            fail.observed()
+        );
+    }
+}
+
+/// `collect_both_streams`: buffers delivered before the deadline must still be
+/// collected, not reported as a partial collection.
+#[test]
+fn read_side_buffers_queued_before_the_deadline_are_collected_after_it_lapses() {
+    let (tx, rx) = mpsc::channel();
+    tx.send((Stream::Stdout, b"[]".to_vec()))
+        .expect("queue stdout");
+    tx.send((Stream::Stderr, Vec::new())).expect("queue stderr");
+
+    let deadline = TestDeadline::start(Duration::from_millis(1), Duration::from_millis(1));
+    thread::sleep(Duration::from_millis(25));
+    let stage = deadline.stage("queued-before-expiry");
+    assert!(
+        stage.remaining().is_zero(),
+        "the precondition of this test is an already-lapsed deadline"
+    );
+
+    match collect_both_streams(&rx, &stage) {
+        CollectEnd::Both(out, err) => {
+            assert_eq!(
+                out, b"[]",
+                "the queued stdout buffer must be the one returned"
+            );
+            assert!(err.is_empty(), "the queued stderr buffer must be returned");
+        }
+        CollectEnd::DeadlineReached { collected } => panic!(
+            "both reader buffers were delivered BEFORE the deadline lapsed, and the collection \
+             reported a timeout with {collected}/2 collected — a false failure against a child \
+             that had already exited successfully"
+        ),
+        CollectEnd::Disconnected { collected } => panic!(
+            "unexpected disconnect with {collected}/2 collected: the senders are still alive"
+        ),
+    }
 }
