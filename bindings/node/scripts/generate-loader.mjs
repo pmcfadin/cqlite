@@ -43,6 +43,10 @@ const IDENTS = [
   // binding's production paths (issue #1452). `lib/index.js` re-exports it as
   // `_ffiCommonRenderVectors`.
   'ffiCommonRenderVectors',
+  // Test-support: one JSON number literal through the PRODUCTION conversion
+  // chain, for the host-TYPE half of the JSON-number vectors (issue #3505).
+  // `lib/index.js` re-exports it as `_jsonNumberFromText`.
+  'jsonNumberFromText',
 ]
 
 // Native binary loader template.
