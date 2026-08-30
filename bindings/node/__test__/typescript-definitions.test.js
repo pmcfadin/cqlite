@@ -798,7 +798,13 @@ describe('Runtime surface vs index.d.ts', () => {
     // by this test suite, and each is documented `@private` in `lib/index.js`.
     // This mirrors the Python side, which scopes its `__all__`-vs-stub direction
     // to non-underscore names for the same reason.
-    const publicExports = Object.keys(runtimeExports)
+    // `getOwnPropertyNames`, NOT `Object.keys`: an export defined with
+    // `Object.defineProperty` (the default is non-enumerable) is reachable by
+    // callers as `require('cqlite').Name` but absent from `Object.keys`, so it
+    // would evade this alarm entirely. Same principle as the Python side reading
+    // `vars(cqlite)` rather than `__all__` -- derive from the COMPLETE surface and
+    // subtract by rule, never enumerate what to include.
+    const publicExports = Object.getOwnPropertyNames(runtimeExports)
       .filter((name) => !name.startsWith('_'))
       .sort();
     // Non-vacuity: an empty public-export set would satisfy the assert below

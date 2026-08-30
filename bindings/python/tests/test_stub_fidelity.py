@@ -19,6 +19,25 @@ to import -- which is precisely the signal worth failing on. This module
 deliberately does NOT use ``conftest``'s dataset-guard fixtures, and a failed
 ``import cqlite`` is a collection ERROR, never a silent skip.
 
+**SCOPE -- what this alarm compares, and what it deliberately does NOT.**
+Compared: the set of declared vs runtime NAMES (module level and per class, both
+directions), each name's coarse SHAPE (callable vs attribute), and ``open()``'s
+parameter names, kinds, order and default PRESENCE. Each side is derived from the
+most complete source available -- ``vars()`` rather than ``__all__``, the stub AST
+rather than a hand-written list -- and narrowed only by a stated rule (private
+names) or a justified allowlist (:data:`TYPE_ONLY_STUB_NAMES`). Deriving from the
+complete set and subtracting is what makes the check fail closed on a drift class
+nobody enumerated.
+
+NOT compared: TYPES. A declared ``-> str`` whose runtime returns ``int``, a
+changed parameter ANNOTATION, or a changed default VALUE all pass here. That is
+not an oversight to be closed by widening this file: verifying types means
+type-checking the stub against real call sites, which is ``mypy``/``pyright``'s
+job (and ``tsc`` on the Node side), a different tool with a different failure
+mode. Widening name/shape comparison toward types would produce a checker that is
+neither -- so the boundary is stated here rather than rediscovered one review
+round at a time.
+
 ``from __future__ import annotations`` is REQUIRED here, not stylistic:
 ``pyproject.toml`` declares ``requires-python = ">=3.9"`` and this module
 annotates with PEP 604 unions (``ast.FunctionDef | ast.AsyncFunctionDef``), which
@@ -256,17 +275,34 @@ def test_pyi_matches_runtime():
         f"{sorted(missing_at_runtime)}"
     )
 
-    # (2) runtime -> stub, for the PUBLIC surface. Underscore-prefixed
-    # test-support hooks in __all__ are internal (issues #1437/#1451/#1452) and
-    # are covered by the phantom direction only when the stub declares them.
-    undeclared = sorted(
-        name
-        for name in exported
-        if not name.startswith("_") and name not in stub.module_names
-    )
+    # (2) runtime -> stub, derived from the MOST COMPLETE source: the module's own
+    # `vars()`, NOT `__all__`.
+    #
+    # `__all__` is hand-maintained, so deriving the surface from it made the alarm
+    # blind in exactly the way it exists to prevent: a public name added to the
+    # module and forgotten in BOTH `__all__` and the stub stays reachable as
+    # `cqlite.Name` while every check passes. Enumerating what to compare is a
+    # blocklist; enumerating what to EXCLUDE, from the complete set, is an
+    # allowlist -- and only the allowlist shape fails closed on the case nobody
+    # thought of.
+    #
+    # Underscore-prefixed names are the internal test-support hooks
+    # (issues #1437/#1451/#1452) and are excluded by rule, not by enumeration.
+    runtime_public = {name for name in vars(cqlite) if not name.startswith("_")}
+    assert runtime_public, "parsed no public names from the cqlite module"
+    undeclared = sorted(runtime_public - stub.module_names)
     assert not undeclared, (
-        f"exported by cqlite.__all__ but NOT declared in {stub.path.name} "
+        f"public on the cqlite module but NOT declared in {stub.path.name} "
         f"(type checkers cannot see these): {undeclared}"
+    )
+
+    # (2b) `__all__` completeness, now a SEPARATE property rather than the source
+    # of truth: a public runtime name missing from `__all__` is invisible to
+    # `from cqlite import *` and to most re-export tooling.
+    missing_from_all = sorted(runtime_public - set(exported))
+    assert not missing_from_all, (
+        "public on the cqlite module but missing from __all__ "
+        f"(invisible to `import *`): {missing_from_all}"
     )
 
     # (3) stub -> runtime phantom check, over EVERY module-level declaration.
@@ -345,16 +381,36 @@ def test_pyi_matches_runtime():
         # stayed green, which is the same defect class this whole file exists to
         # catch. Hence the non-vacuity assert below.
         declared_dunders = sorted(
-            name
-            for name, _shape in (entry.split(":", 1) for entry in declared_members)
+            (name, shape)
+            for name, shape in (entry.split(":", 1) for entry in declared_members)
             if name.startswith("__") and name.endswith("__")
         )
-        missing_dunders = [n for n in declared_dunders if not hasattr(runtime_cls, n)]
-        if missing_dunders:
-            drift.append(
-                f"{class_name}: dunder declared in the stub but absent at runtime "
-                f"(broken protocol promise): {missing_dunders}"
+        for name, declared_shape in declared_dunders:
+            # `getattr` on the CLASS resolves inherited slots without running an
+            # instance getter. A missing dunder and a dunder whose SHAPE changed
+            # are both breaks of the protocol the stub advertises: replacing
+            # `Row.__getitem__` with a non-callable attribute keeps `hasattr`
+            # true while `row["k"]` stops working, so resolution alone is not
+            # enough -- the earlier version compared only existence.
+            if not hasattr(runtime_cls, name):
+                drift.append(
+                    f"{class_name}: dunder declared in the stub but absent at "
+                    f"runtime (broken protocol promise): {name}"
+                )
+                continue
+            runtime_value = getattr(runtime_cls, name)
+            runtime_shape = (
+                "attribute"
+                if isinstance(runtime_value, property)
+                or type(runtime_value).__name__
+                in {"getset_descriptor", "member_descriptor"}
+                else ("callable" if callable(runtime_value) else "attribute")
             )
+            if runtime_shape != declared_shape:
+                drift.append(
+                    f"{class_name}.{name}: declared as {declared_shape} in the stub "
+                    f"but {runtime_shape} at runtime (the call site differs)"
+                )
         dunder_classes_seen[class_name] = len(declared_dunders)
 
     # Non-vacuity for the dunder direction as a whole: the stub demonstrably
