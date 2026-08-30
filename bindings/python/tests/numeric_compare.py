@@ -27,8 +27,10 @@ from typing import Any
 # provably cannot round: the tolerant compare that genuine FLOAT/DOUBLE columns
 # need is safe there and must keep working.
 #
-# At or above the bound the coercion CAN round -- 2**53 + 1 collapses to 2**53 --
-# so the comparison switches to exact. Python's `int == float` is mathematically
+# ABOVE the bound (strictly `>`, never `>=`) the coercion CAN round -- 2**53 + 1
+# collapses to 2**53 -- so the comparison switches to exact. The operator is
+# load-bearing: 2**53 ITSELF is exactly representable, so it belongs on the
+# tolerant side. Python's `int == float` is mathematically
 # exact (it coerces NEITHER operand; it compares the real values), so a rounded
 # float correctly fails to equal the integer it was rounded from.
 EXACT_FLOAT_INT_BOUND = 2**53

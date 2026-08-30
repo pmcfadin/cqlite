@@ -42,7 +42,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   above was invisible to the harness that should have caught it. The coercion is
   now bounded at `2**53`: below it every integer is exactly representable in an
   IEEE-754 double so the tolerant compare genuine `FLOAT`/`DOUBLE` columns need
-  is provably lossless and is retained; at or above it the comparison is exact.
+  is provably lossless and is retained; strictly above it (`2**53` itself is
+  exactly representable, so it stays on the tolerant side) the comparison is
+  exact.
   `bool` is excluded in both directions (`isinstance(True, int)` is `True`, so
   `True` and `1.0` compared equal). The rule was duplicated in
   `test_cli_parity.py` and `test_parity.py` and now lives once in

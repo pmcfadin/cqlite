@@ -18,8 +18,9 @@ parametrized over both implementations, rather than duplicated into each suite.
 The bound is `2**53`, and it is exact rather than a tolerance: every integer with
 absolute value `<= 2**53` is exactly representable in an IEEE-754 double, so
 below the bound `float(int_val)` provably cannot round and the tolerant compare
-that genuine `float`/`double` columns need stays in force. At or above it the
-coercion can round, so the comparison becomes exact — Python's `int == float` is
+that genuine `float`/`double` columns need stays in force. ABOVE it (strictly
+`>`, because `2**53` itself IS exactly representable) the coercion can round, so
+the comparison becomes exact — Python's `int == float` is
 mathematically exact (it does not coerce either operand), so a rounded float no
 longer equals the exact integer.
 """
@@ -314,3 +315,30 @@ def test_genuine_decimal_number_comparison_is_unchanged():
     assert cli_values_equal(1, Decimal(1)) is False
     assert cli_values_equal(Decimal("1.5"), 1.5) is False
     assert cli_values_equal(Decimal(1), Decimal(1)) is True
+
+
+def test_int_binding_value_vs_float_golden_stays_exact():
+    """`test_parity`'s tolerant path is entered only when the BINDING side is a
+    float — it must not become symmetric (issue #3505 review round 2).
+
+    Before #3505 the branch was gated on `isinstance(actual, float)`, so an
+    `int` binding value against a `float` golden fell through to the exact
+    `actual == expected`. A symmetric gate silently WIDENS a golden-file oracle:
+
+        values_equal(1000000, 1000000.5)  ->  True, because 0.5 <= 1e-6 * 1e6
+
+    A change whose whole subject is removing a mask must not widen one, so the
+    asymmetry is preserved and pinned here rather than absorbed.
+
+    `test_cli_parity` is NOT asserted here: it was ALREADY symmetric and
+    tolerant in both orders before #3505 (its pre-change `type()` mismatch arm
+    ran `_float_equal(float(py_val), float(cli_val))` unconditionally), so
+    demanding exactness of it would be a NEW tightening, not a preserved one.
+    """
+    assert jsonl_values_equal(1000000, 1000000.5) is False
+    assert jsonl_values_equal(1, 1.5) is False
+    assert jsonl_values_equal(0, 1e-12) is False
+    # The other order keeps the tolerance genuine float columns need.
+    assert jsonl_values_equal(1000000.0000001, 1000000) is True
+    # And the pre-existing symmetric tolerance of the CLI suite is unchanged.
+    assert cli_values_equal(1000000, 1000000.5) is True

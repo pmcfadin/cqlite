@@ -497,13 +497,27 @@ def values_equal(actual: Any, expected: Any) -> bool:
     if is_bool_number_mismatch(actual, expected):
         return False
 
-    # Numeric comparison, in EITHER direction, through the one shared rule
-    # (issue #3505).  The float coercion this used to do unconditionally is what
-    # hid an exact integer being rounded to a float: below `2**53` it is
-    # lossless and stays tolerant, at or above it the comparison is exact.
-    if is_number(actual) and is_number(expected):
-        if isinstance(actual, float) or isinstance(expected, float):
-            return numbers_equal(actual, expected)
+    # Float comparison with tolerance, through the one shared rule (issue #3505).
+    #
+    # The gate is DELIBERATELY ASYMMETRIC, and it mirrors exactly what this suite
+    # did before #3505: the tolerant path is entered only when the BINDING side
+    # (`actual`) is a float.  An `int` binding value against a `float` golden
+    # keeps falling through to the exact `==` at the end of this function.
+    #
+    # Why not symmetric: this is a GOLDEN-FILE oracle, and a tolerance is a
+    # LOOSENING.  A symmetric gate makes `values_equal(1000000, 1000000.5)`
+    # return True (`0.5 <= 1e-6 * 1000000.5`), which the pre-#3505 suite reported
+    # as a mismatch.  A change whose whole subject is REMOVING a mask must not
+    # widen one as a side effect, so widening this direction stays an explicit
+    # product call.  Pinned by
+    # `test_json_number_precision.test_int_binding_value_vs_float_golden_stays_exact`.
+    #
+    # What #3505 changed is INSIDE the branch, not at its gate: the coercion used
+    # to be an unconditional `float()`, which hid an exact integer being rounded
+    # to a float.  `numbers_equal` keeps the tolerance below `2**53`, where it is
+    # provably lossless, and is exact strictly above it.
+    if isinstance(actual, float) and is_number(expected):
+        return numbers_equal(actual, expected)
 
     # Handle Decimal comparison
     if isinstance(actual, Decimal) and isinstance(expected, (int, float, Decimal)):
