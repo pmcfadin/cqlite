@@ -98,6 +98,46 @@ fn an_old_shape_document_loads_and_warns_for_every_removed_key() {
     }
 }
 
+/// The shared text reports which keys are DEAD and claims NOTHING about the fate
+/// of the load (#1696 roborev r5 F1).
+///
+/// Pinned at the shared seam rather than only at a caller, because
+/// [`deprecation_warning`] is the ONE definition every surface uses (CLI file
+/// loader, core JSON, Python bindings) — so this is the place a reintroduced
+/// outcome claim would enter all three at once.
+///
+/// Why the claim cannot be reintroduced at any placement: it is a promise about a
+/// LATER stage, and there is always a later stage. It was moved twice (after
+/// deserialization; after the bindings' validation) and falsified twice; the CLI's
+/// `to_core_config` rejects `memory_limit_mb = 1` beside `cache_size_mb = 64`
+/// AFTER any scan placed on the load path has run. So the text is what changed.
+#[test]
+fn the_warning_claims_nothing_about_whether_the_load_succeeds() {
+    let single: &[&'static Removed] = &[&REMOVED_KEYS[0]];
+    let all: Vec<&'static Removed> = REMOVED_KEYS.iter().collect();
+
+    for present in [single, all.as_slice()] {
+        let warning = deprecation_warning("config dict", present).expect("keys are present");
+
+        // What it MUST say: the keys are dead.
+        assert!(
+            warning.contains("REMOVED") && warning.contains("NO EFFECT"),
+            "the warning must state that the named keys do nothing: {warning}"
+        );
+
+        // What it must NEVER say: anything about the outcome of the load. Both
+        // spellings we shipped are listed, so a revert of either reds here.
+        for forbidden in ["still loads", "IGNORED", "loads successfully"] {
+            assert!(
+                !warning.contains(forbidden),
+                "the warning must make NO claim about the fate of the load \
+                 (found {forbidden:?}): a LATER stage can still reject the \
+                 document, whatever placement the caller chooses: {warning}"
+            );
+        }
+    }
+}
+
 /// A current-shape document is SILENT: the signal must not become noise attached
 /// to every load.
 #[test]
