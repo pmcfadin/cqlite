@@ -7037,6 +7037,30 @@ run_tooling_tests() {
     return 0
   fi
 
+  # file-size component-log guard (#3401): hermetic (throwaway git repos under one
+  # mktemp, each holding only a copy of the gate script, driven through the real
+  # `--only file-size` path — no cargo/python3/datasets/network/Docker, ~2s). The
+  # `file-size` component used to write ONLY a bare `file-size.result` (`FAIL 0`),
+  # echoing the base ref, the over-threshold advisory list and the exact
+  # `path: before -> after (limit N)` arithmetic to STDOUT — i.e. only into gate.log,
+  # the one file agents are told never to read. So a `file-size: FAIL` in a pasted
+  # SUMMARY named nothing, and every reader re-derived by hand what the component had
+  # just computed and discarded — on a FAIL that is routinely EXPECTED. This pins the
+  # LOG'S CONTENT (never its mere existence: a zero-byte file would satisfy that and
+  # restore the whole defect) across all six paths, PASS ones included. A failure FAILs
+  # the component, mirroring the keyspace-scoping guard.
+  echo ">>> [$name] bash scripts/tests/test_agent_gate_file_size_log.sh"
+  if ! bash "$REPO_ROOT/scripts/tests/test_agent_gate_file_size_log.sh" >>"$log" 2>&1; then
+    status=FAIL
+    echo "--- [$name] FAILED (file-size component-log guard #3401); last 40 lines of $log ---"
+    tail -40 "$log"
+    echo "--- end of $name output ---"
+    end=$(date +%s)
+    record_result "$name" "$status" "$((end - start))"
+    echo ">>> [$name] $status ($((end - start))s)"
+    return 0
+  fi
+
   if ! command -v python3 >/dev/null 2>&1; then
     status=SKIP
     echo ">>> [$name] SKIP (no python3 on PATH; selftest truncation reader needs it)"
@@ -7081,24 +7105,39 @@ run_tooling_tests() {
 # Degrades to advisory-only (no ratchet) when the base ref can't be resolved.
 SRC_LIMIT=800
 TEST_LIMIT=1500
+# Emit one line to BOTH stdout and the component log (#3401). Everything this component
+# computes — the base ref, the advisory list, the `before -> after` growth entries, the
+# verdict — used to exist ONLY on stdout, i.e. only in gate.log, the one file agents are
+# told never to read; the SUMMARY's `file-size: FAIL` therefore named neither the file nor
+# the numbers, and every reader re-derived by hand the arithmetic the component had just
+# thrown away. Nothing printed here may go to only one of the two sinks.
+_fs_emit() { # _fs_emit <logfile> <line…>
+  local _fs_log="$1"; shift
+  printf '%s\n' "$*"
+  printf '%s\n' "$*" >>"$_fs_log"
+}
 run_file_size() {
   local name=file-size
   if [ -n "$ONLY" ] && ! grep -qw "$name" <<<"${ONLY//,/ }"; then
     return 0
   fi
+  local log="$LOG_DIR/$name.log"
   local start end status=PASS
   start=$(date +%s)
+  : >"$log"
 
   # Base ref: an explicit override (issue #1892 --delta uses the anchor commit),
   # else merge-base with the default branch. If none resolves, we can still do the
   # advisory list but not the growth comparison.
-  local base="" ref
+  local base="" base_src="" ref
   if [ -n "${GATE_BASE_OVERRIDE:-}" ]; then
     base="$GATE_BASE_OVERRIDE"
+    base_src="GATE_BASE_OVERRIDE"
   else
     for ref in origin/main main origin/master master; do
       if git rev-parse --verify -q "$ref" >/dev/null 2>&1; then
-        base=$(git merge-base HEAD "$ref" 2>/dev/null) && [ -n "$base" ] && break
+        base=$(git merge-base HEAD "$ref" 2>/dev/null) && [ -n "$base" ] &&
+          { base_src="merge-base HEAD $ref"; break; }
       fi
     done
   fi
@@ -7131,32 +7170,47 @@ run_file_size() {
     fi
   done <<<"$files"
 
-  echo ">>> [$name] thresholds: src=$SRC_LIMIT test=$TEST_LIMIT (total lines, inline tests included)"
+  local line
+  _fs_emit "$log" ">>> [$name] thresholds: src=$SRC_LIMIT test=$TEST_LIMIT (total lines, inline tests included)"
+  if [ -n "$base" ]; then
+    _fs_emit "$log" ">>> [$name] base ref: $base (via $base_src)"
+  fi
   if [ "${#over[@]}" -eq 0 ]; then
-    echo ">>> [$name] no changed .rs files over threshold"
+    _fs_emit "$log" ">>> [$name] no changed .rs files over threshold"
   else
-    echo "--- [$name] changed files over threshold (campsite rule — split per epic #1116 / #1135):"
-    printf '      %s\n' "${over[@]}"
+    _fs_emit "$log" "--- [$name] changed files over threshold (campsite rule — split per epic #1116 / #1135):"
+    for line in ${over[@]+"${over[@]}"}; do
+      _fs_emit "$log" "      $line"
+    done
   fi
 
   if [ -z "$base" ]; then
-    echo ">>> [$name] base ref unavailable — growth ratchet skipped (advisory only)"
+    _fs_emit "$log" ">>> [$name] base ref unavailable — growth ratchet skipped (advisory only)"
   elif [ "${#grew[@]}" -gt 0 ]; then
     if [ "${CQLITE_ALLOW_FILE_GROWTH:-0}" = 1 ]; then
-      echo ">>> [$name] ${#grew[@]} over-threshold file(s) grew; ALLOWED via CQLITE_ALLOW_FILE_GROWTH=1:"
-      printf '      %s\n' "${grew[@]}"
+      _fs_emit "$log" ">>> [$name] ${#grew[@]} over-threshold file(s) grew; ALLOWED via CQLITE_ALLOW_FILE_GROWTH=1:"
+      for line in ${grew[@]+"${grew[@]}"}; do
+        _fs_emit "$log" "      $line"
+      done
     else
       status=FAIL
-      echo "--- [$name] FAIL: change makes over-threshold file(s) larger."
-      echo "    Split per the campsite rule (epic #1116 source / #1135 tests), or, if a split"
-      echo "    is genuinely out of scope, re-run with CQLITE_ALLOW_FILE_GROWTH=1 to acknowledge:"
-      printf '      %s\n' "${grew[@]}"
+      _fs_emit "$log" "--- [$name] FAIL: change makes over-threshold file(s) larger."
+      _fs_emit "$log" "    Split per the campsite rule (epic #1116 source / #1135 tests), or, if a split"
+      _fs_emit "$log" "    is genuinely out of scope, re-run with CQLITE_ALLOW_FILE_GROWTH=1 to acknowledge:"
+      for line in ${grew[@]+"${grew[@]}"}; do
+        _fs_emit "$log" "      $line"
+      done
+      # AC2 (#3401): name the log path in the remedy block. The SUMMARY carries only
+      # `logs: <dir>`, so without this the reader has to guess the filename.
+      _fs_emit "$log" "    Full detail (thresholds, base ref, every entry above): $log"
     fi
   fi
 
   end=$(date +%s)
+  # Terminal verdict goes to the log too, so a reader opening file-size.log alone sees
+  # what the component concluded and never has to correlate with the SUMMARY.
+  _fs_emit "$log" ">>> [$name] $status ($((end - start))s)"
   record_result "$name" "$status" "$((end - start))"
-  echo ">>> [$name] $status ($((end - start))s)"
 }
 
 # scoped-tests (issue #1821, --lite only): the blast-radius-scoped test component.
