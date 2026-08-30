@@ -349,10 +349,39 @@ CQL types are automatically converted to JavaScript types:
 | `map<K,V>` | `Map<K,V>` | via `executeNative()` |
 | `tuple<...>` | `[...]` | Array |
 | `frozen<T>` | Inner type | Unwrapped |
-| UDT | `object` | With `_type` and `_keyspace` fields |
+| UDT | `object` | `{ typeName, keyspace, fields }` (see below) |
 
 \* **Note:** With `execute()`, `varint` returns `"0x{hex}"` and `decimal` returns `"decimal:{scale}:0x{hex}"`.
 Use `executeNative()` for human-readable formats.
+
+### UDT type identity is carried out of band
+
+A CQL user-defined type is returned as `{ typeName, keyspace, fields }`:
+
+```javascript
+const udt = row.address;
+udt.typeName;          // 'address_type'  — the declared UDT type
+udt.keyspace;          // 'test_collections'
+udt.fields.street;     // '1 Main St'  — declared fields live here, and ONLY here
+Object.keys(udt);      // ['typeName', 'keyspace', 'fields']
+```
+
+**Breaking change (issue #3504).** `_type` and `_keyspace` used to be set on the same object as the
+UDT's own field names — so a UDT declaring a field named `_type` or `_keyspace` (legal CQL via a
+quoted identifier) silently **overwrote** the marker and the type name became unrecoverable.
+`interface UdtValue` also no longer declares a `[field: string]: Value` index signature: that
+signature is what permitted the collision. Migration:
+
+| Before | Now |
+|---|---|
+| `result._type` | `result.typeName` |
+| `result._keyspace` | `result.keyspace` |
+| `result.street` | `result.fields.street` |
+| `'_type' in value` to spot a UDT | `'typeName' in value && 'fields' in value` |
+
+Fields are deliberately NOT also mirrored at the top level — that would re-flatten them beside
+`typeName` and reintroduce the defect. The Python binding keeps `udt["street"]` via a dedicated
+`cqlite.Udt` type, so the two bindings differ in ergonomics and agree on semantics.
 
 ### CQL `decimal` rendering policy
 

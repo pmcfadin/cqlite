@@ -172,23 +172,37 @@ async function main() {
     );
 
     for (const row of udts.rows) {
-      // UDTs are returned as objects with _type and _keyspace metadata
+      // A UDT is `{ typeName, keyspace, fields }` — the type identity is carried
+      // OUT OF BAND and the declared fields live in `fields` alone (issue
+      // #3504). Before that change `_type`/`_keyspace` were set on the same
+      // object as the field names, so a UDT declaring a field of either name
+      // silently overwrote the marker.
       const keys = Object.keys(row);
       console.log(`Row has ${keys.length} columns`);
 
-      // Check each column for UDT structure
+      // Recognise a UDT by its STRUCTURE, not by sniffing for a marker key that
+      // the data itself could supply.
       for (const key of keys) {
         const value = row[key];
-        if (value && typeof value === 'object' && '_type' in value) {
-          const udt = value as { _type: string; _keyspace: string; [key: string]: unknown };
+        if (
+          value &&
+          typeof value === 'object' &&
+          'typeName' in value &&
+          'fields' in value
+        ) {
+          const udt = value as {
+            typeName: string;
+            keyspace: string;
+            fields: Record<string, unknown>;
+          };
           console.log(`${key} (UDT):`);
-          console.log(`  Type: ${udt._type}`);
-          console.log(`  Keyspace: ${udt._keyspace}`);
-          // Print UDT fields
-          for (const field of Object.keys(udt)) {
-            if (!field.startsWith('_')) {
-              console.log(`  ${field}: ${udt[field]}`);
-            }
+          console.log(`  Type: ${udt.typeName}`);
+          console.log(`  Keyspace: ${udt.keyspace}`);
+          // Print UDT fields. No name filtering is needed any more: `fields`
+          // holds declared fields and nothing else, so a field genuinely named
+          // `_type` prints like any other.
+          for (const [field, fieldValue] of Object.entries(udt.fields)) {
+            console.log(`  ${field}: ${fieldValue}`);
           }
         }
       }
