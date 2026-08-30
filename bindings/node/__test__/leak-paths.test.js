@@ -265,23 +265,68 @@ const MEASURE_PASSES = 9;
 // to a native (Rust-allocator) leak, which `heapUsed + external` cannot see at
 // all -- that is the RSS backstop's job below, and properly, issue #3585's.
 // ---------------------------------------------------------------------------
-// On a CI runner (GitHub sets `CI`) both budgets are doubled. Reason, and its
-// limit: the legs that run this file in CI are node-ci.yml's `test`-job matrix --
-// THREE of them: ubuntu-latest, macos-14, windows-latest (macos-15-intel is in the
-// separate `build` job's matrix and runs no tests) -- hosted runners whose
-// GC/allocator jitter has never been measured here, and a lane that reds on correct
-// input is the lane people learn to waive. The MERGE-GATING execution is the
-// local agent-gate's `node-bindings` component, where `CI` is unset and the
-// unscaled budgets apply -- so the doubling cannot weaken the gate.
-const CI_BUDGET_MULTIPLIER = process.env.CI ? 2 : 1;
-// SCOPE OF THAT MULTIPLIER, stated because it is asymmetric (round 11, T4): it doubles
-// the CEILINGS only. SAMPLE_QUORUM and MAX_MEASURE_ATTEMPTS are NOT scaled, so a CI leg
-// faces the same statistic-formability requirements on possibly noisier hardware — i.e. a
-// below-quorum hard error is somewhat likelier there. Deliberate and low-stakes:
-// node-ci.yml is a REGISTERED EXEMPTION in .github/ci-gating-tiers.yml (its merge-gating
-// half is the local gate's node-bindings component), so a red on that leg is triage noise,
-// not a blocked merge. If it ever becomes gating, scale the quorum machinery too rather
-// than widening the ceilings.
+// ---------------------------------------------------------------------------
+// BUDGET RELAXATION: OPT-IN, EXPLICIT, DECLARED — and never inferred from the
+// environment (issue #1465 round 12, roborev V1).
+//
+// THE DEFECT THIS REPLACES, because it was live and not hypothetical: the multiplier
+// used to be `process.env.CI ? 2 : 1`. That keys on ANY nonempty value, so `CI=false`
+// and `CI=0` doubled every ceiling; and `.github/workflows/gate.yml` runs the FULL
+// `scripts/agent-gate.sh` nightly on `main` inside GitHub Actions, where the runner
+// sets `CI=true` unconditionally and the gate never cleared it. The authoritative
+// backstop was therefore running all four ceilings at 2x while presenting itself as a
+// strict run — a relaxed verdict indistinguishable from a strict one. The prose even
+// claimed "the gate has CI unset", which was an assumption about the environment
+// rather than an enforced property. This is the issue's own rule applied to
+// configuration: never infer a policy decision from an ambient signal that means
+// something else.
+//
+// WHY THE RELAXATION STILL EXISTS AT ALL (option (b), on the evidence): its only
+// beneficiaries are node-ci.yml's three `test`-job legs (ubuntu-latest, macos-14,
+// windows-latest), which are a REGISTERED EXEMPTION in .github/ci-gating-tiers.yml —
+// a red there is triage noise, not a merge block. Deleting the knob would also change
+// those legs from relaxed to strict in the same commit that fixes the gate leak, on
+// hardware whose GC/allocator jitter this file has NEVER measured (every number here
+// comes from one Linux fleet box). That is two unmeasured changes at once, and the
+// downside is the one CLAUDE.md warns about: a flaky red on an exempt lane teaches
+// people to ignore the lane. So the knob stays, the legs set it EXPLICITLY, and if a
+// leg is later measured strict-clean, deleting it is a one-line follow-up WITH data.
+//
+// STRICT PARSE: exactly one allowed value, and that value names what it does. `1`,
+// `true`, `false`, `0`, `""` and anything else leave the budgets STRICT, so no
+// generic truthy marker can ever relax them again.
+const LEAK_BUDGET_RELAX_TOKEN = '2x-ceilings';
+
+/**
+ * PURE. Decide the relaxation from an environment object (exported for direct tests —
+ * the previous version was an inline `process.env` read with no test at all).
+ */
+function resolveBudgetRelaxation(env) {
+  const relaxed = env.CQLITE_LEAK_BUDGET_RELAX === LEAK_BUDGET_RELAX_TOKEN;
+  return { relaxed, multiplier: relaxed ? 2 : 1 };
+}
+
+const { relaxed: BUDGETS_RELAXED, multiplier: CI_BUDGET_MULTIPLIER } =
+  resolveBudgetRelaxation(process.env);
+
+// A RELAXED RUN DECLARES ITSELF, wherever a human reads the verdict: a doubled ceiling
+// that looks identical to a strict one is the same defect class as a skipped lane that
+// looks like a passing one (CLAUDE.md: a narrowed lane declares its own narrowing).
+if (BUDGETS_RELAXED) {
+  console.log(
+    `[#1465] LEAK BUDGETS RELAXED 2x: CQLITE_LEAK_BUDGET_RELAX=${LEAK_BUDGET_RELAX_TOKEN} ` +
+      'is set, so every ceiling in this file is DOUBLED. This run does NOT certify the ' +
+      'strict budgets. The merge-gating agent-gate node-bindings component strips this ' +
+      'variable, so it can never relax the gate of record.'
+  );
+}
+
+// SCOPE OF THE MULTIPLIER, stated because it is asymmetric: it doubles the CEILINGS
+// only. SAMPLE_QUORUM and MAX_MEASURE_ATTEMPTS are NOT scaled, so a relaxed leg faces
+// the same statistic-formability requirements on possibly noisier hardware — i.e. a
+// below-quorum hard error is somewhat likelier there. Deliberate and low-stakes for the
+// reason above. If those legs ever become merge-gating, scale the quorum machinery too
+// rather than widening the ceilings.
 const BUDGET_BYTES = 32 * 1024 * CI_BUDGET_MULTIPLIER;
 
 // SECONDARY, LOOSE, NATIVE-VISIBLE BUDGET (issue #1465 review): total RSS growth
@@ -636,6 +681,54 @@ async function measureGrowth(body, counters) {
 // ---------------------------------------------------------------------------
 describe('leak-budget statistic (pure, issue #1465)', () => {
   const neg = (n) => Array.from({ length: n }, (_, i) => -(i + 1) * 1000);
+
+  test('budget relaxation is OPT-IN: no ambient marker can double a ceiling', () => {
+    // roborev V1: the multiplier used to be `process.env.CI ? 2 : 1`, so `CI=false`
+    // and `CI=0` relaxed every ceiling — and gate.yml runs the FULL gate inside
+    // GitHub Actions, where `CI=true` is unconditional. Every one of these must
+    // leave the budgets STRICT.
+    for (const env of [
+      {},
+      { CI: 'true' },
+      { CI: 'false' },
+      { CI: '0' },
+      { CI: '1' },
+      { CI: '' },
+      { GITHUB_ACTIONS: 'true' },
+      { CQLITE_LEAK_BUDGET_RELAX: '' },
+      { CQLITE_LEAK_BUDGET_RELAX: '0' },
+      { CQLITE_LEAK_BUDGET_RELAX: 'false' },
+      { CQLITE_LEAK_BUDGET_RELAX: 'true' },
+      { CQLITE_LEAK_BUDGET_RELAX: '1' },
+      { CQLITE_LEAK_BUDGET_RELAX: 'yes' },
+      { CQLITE_LEAK_BUDGET_RELAX: '2X-CEILINGS' },
+      { CQLITE_LEAK_BUDGET_RELAX: ' 2x-ceilings' },
+      { CQLITE_LEAK_BUDGET_RELAX: '2x-ceilings-please' },
+    ]) {
+      const { relaxed, multiplier } = resolveBudgetRelaxation(env);
+      expect({ env, relaxed, multiplier }).toEqual({ env, relaxed: false, multiplier: 1 });
+    }
+  });
+
+  test('budget relaxation happens ONLY for the exact named token', () => {
+    const { relaxed, multiplier } = resolveBudgetRelaxation({
+      CQLITE_LEAK_BUDGET_RELAX: LEAK_BUDGET_RELAX_TOKEN,
+    });
+    expect(relaxed).toBe(true);
+    expect(multiplier).toBe(2);
+    // ...and the token names what it does, so a reader of an env dump can tell.
+    expect(LEAK_BUDGET_RELAX_TOKEN).toBe('2x-ceilings');
+  });
+
+  test('THIS run is strict unless it declared otherwise', () => {
+    // Pins the live wiring, not just the pure function: if the ceilings are doubled,
+    // BUDGETS_RELAXED must be true (and the file printed its declaration).
+    expect(CI_BUDGET_MULTIPLIER).toBe(BUDGETS_RELAXED ? 2 : 1);
+    expect(BUDGET_BYTES).toBe(32 * 1024 * CI_BUDGET_MULTIPLIER);
+    expect(STREAM_MEDIAN_CEILING_BYTES).toBe(64 * 1024 * CI_BUDGET_MULTIPLIER);
+    expect(ERROR_MEDIAN_GROSS_CEILING_BYTES).toBe(512 * 1024 * CI_BUDGET_MULTIPLIER);
+    expect(RSS_BUDGET_BYTES).toBe(96 * 1024 * 1024 * CI_BUDGET_MULTIPLIER);
+  });
 
   test('the quorum is a majority of MEASURE_PASSES', () => {
     expect(SAMPLE_QUORUM).toBe(Math.floor(MEASURE_PASSES / 2) + 1);

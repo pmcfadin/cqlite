@@ -6454,6 +6454,19 @@ run_node_bindings() {
   # inherited variables are then unset — never the reverse. Deriving the mode FROM the
   # inherited variables would let the ambient environment redefine what the gate
   # certifies.
+  # #1465 V1: the leak budgets must NEVER be relaxed in the gate of record, and that is
+  # now a PROPERTY of this component rather than an assumption about the environment.
+  # `bindings/node/__test__/leak-paths.test.js` doubles its four ceilings when
+  # CQLITE_LEAK_BUDGET_RELAX holds its exact opt-in token; node-ci.yml's exempt legs set
+  # it deliberately. This array UNSETS it for every node invocation below, in every mode,
+  # so an inherited export (a shell profile, a workflow `env:`, a re-used runner) cannot
+  # weaken the gate — the same `env -u` reasoning, and the same B2 lesson, as the
+  # strict-fixture variables: plain `env` INHERITS an exported value.
+  #
+  # The predecessor defect is why this exists: the multiplier keyed on `CI`, which
+  # GitHub Actions sets unconditionally, so gate.yml's nightly FULL-gate backstop on
+  # `main` ran all four ceilings at 2x while presenting itself as authoritative.
+  local -a leak_strict_env=(-u CQLITE_LEAK_BUDGET_RELAX)
   local require_fixtures=0 fixture_note
   local -a fixture_env=()
   if [ -z "$ONLY" ] && [ "$LITE" -eq 0 ] && [ "${AGENT_GATE_ALLOW_MISSING_FIXTURES:-0}" != 1 ]; then
@@ -6484,6 +6497,9 @@ run_node_bindings() {
   census+=("       tests must have passed. ONE executor: the npm test above (measured — the")
   census+=("       all-projects jest --listTests is 28 files with no duplicates and includes the")
   census+=("       leak file), so npm run test:leaks is a human/debug entry point, not a lane.")
+  census+=("       Budgets run STRICT here: CQLITE_LEAK_BUDGET_RELAX is UNSET for every node")
+  census+=("       invocation of this component (#1465 V1), so no inherited value — including a")
+  census+=("       CI runner env — can double a ceiling in the gate of record.")
   census+=("  NOT RUN HERE: cqlite-node's RUST unit tests — that is binding-rust-tests' subject,")
   census+=("       deliberately a separate component because THIS one SKIPs without node/npm and a")
   census+=("       Rust suite behind that SKIP would be a coverage hole wearing a SKIP's clothes.")
@@ -6536,6 +6552,7 @@ run_node_bindings() {
   # tests needs no corpus, so an inherited strict flag could only turn a healthy
   # enumeration into a failure. STEP 2 below is where the mode actually applies.
   if ! env -u CQLITE_REQUIRE_FIXTURES -u CQLITE_PARITY_REQUIRE_DATASETS \
+       "${leak_strict_env[@]}" \
        CQLITE_LIST_FILE="$list_file" bash -c '
       set -euo pipefail
       cd "'"$REPO_ROOT"'/bindings/node"
@@ -6733,7 +6750,7 @@ run_node_bindings() {
   # extra args after `--` reach jest. MEASURED: the human `Test Suites:`/`Tests:` summary the
   # aggregate guard parses is STILL emitted alongside the JSON file, so both guards keep their
   # inputs.
-  if env "${fixture_env[@]}" \
+  if env "${fixture_env[@]}" "${leak_strict_env[@]}" \
      CQLITE_DATASETS_ROOT="$CQLITE_DATASETS_ROOT" \
      CQLITE_JEST_JSON="$suite_json" \
      RUN_SLOW_TESTS="${RUN_SLOW_TESTS:-0}" bash -c '

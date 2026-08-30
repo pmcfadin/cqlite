@@ -36,6 +36,14 @@ FAIL=0
 # supports a node-less host, where node-bindings SKIPs loudly). The floor is therefore
 # compared against PASS + SKIPPED_TOOLING, which keeps it a real floor on hosts that
 # have everything while never punishing one that does not.
+#
+# THIS ALSO FIXES A PRE-EXISTING LATENT DEFECT, not just #1465's own case, and that is
+# deliberate rather than incidental: the python3-dependent skips that predate this issue
+# (the 1699-r18 differential-parser case and the 1699-r32 preflight-behaviour case) had
+# exactly the same shape — on a python3-less host they would have counted against the
+# floor. They are covered by this accounting now. With the floor raised to the measured
+# count (round 12, W2), that accounting is load-bearing rather than slack-absorbed: there
+# is no longer 10 assertions of headroom to hide a dead section OR a declared skip.
 SKIPPED_TOOLING=0
 ok()   { printf 'ok   - %s\n' "$1"; PASS=$((PASS + 1)); }
 bad()  { printf 'FAIL - %s\n' "$1"; FAIL=$((FAIL + 1)); }
@@ -4533,6 +4541,44 @@ else
   fi
 fi
 
+# 1465h. THE GATE OF RECORD CANNOT BE RELAXED (round 12, roborev V1). The leak budgets
+#        double when CQLITE_LEAK_BUDGET_RELAX holds its opt-in token; the predecessor
+#        keyed on `CI`, which GitHub Actions sets unconditionally, so gate.yml's nightly
+#        FULL-gate backstop ran every ceiling at 2x while presenting itself as strict.
+#        Two source properties are pinned:
+#          * node-bindings UNSETS the variable for its node invocations, so an inherited
+#            export cannot weaken it (a convention would not survive a re-used runner);
+#          * the lane's multiplier is not keyed on any ambient marker.
+#        WHAT THIS CANNOT COVER, named rather than implied: it is a source-shape check.
+#        It cannot prove the RUNTIME environment of some future invocation, and it does
+#        not evaluate the JS — the multiplier's value mapping is pinned by the lane's own
+#        pure tests ("budget relaxation is OPT-IN ...", 16 falsy spellings + the token).
+nll_comp_v1=$(sed -n '/^run_node_bindings() {/,/^}$/p' "$GATE")
+nll_leakfile_v1="$SCRIPT_DIR/../../bindings/node/__test__/leak-paths.test.js"
+nll_v1_ok=1
+printf '%s' "$nll_comp_v1" | grep -q 'leak_strict_env=(-u CQLITE_LEAK_BUDGET_RELAX)' \
+  || { nll_v1_ok=0; echo "  node-bindings does not declare the strict leak-budget env"; }
+# every `env` that launches node in this component must carry the unset array
+nll_env_launches=$(printf '%s\n' "$nll_comp_v1" | grep -cE '^[[:space:]]*if (! )?env ')
+nll_env_stripped=$(printf '%s\n' "$nll_comp_v1" | grep -c 'leak_strict_env\[@\]')
+[ "$nll_env_launches" -ge 2 ] && [ "$nll_env_stripped" -eq "$nll_env_launches" ] \
+  || { nll_v1_ok=0; echo "  $nll_env_stripped of $nll_env_launches env launches strip CQLITE_LEAK_BUDGET_RELAX"; }
+if [ ! -r "$nll_leakfile_v1" ]; then
+  nll_v1_ok=0; echo "  leak lane not readable at $nll_leakfile_v1"
+else
+  # No ambient marker may DECIDE the multiplier. Mentions inside comments are fine (the
+  # file documents the defect), so only non-comment lines are inspected.
+  nll_ambient=$(grep -nE '^[[:space:]]*[^/*[:space:]].*process\.env\.(CI|GITHUB_ACTIONS|BUILDKITE|JENKINS[A-Z_]*)\b' "$nll_leakfile_v1" || true)
+  [ -z "$nll_ambient" ] || { nll_v1_ok=0; echo "  the lane keys on an ambient CI marker: $nll_ambient"; }
+  grep -q "resolveBudgetRelaxation" "$nll_leakfile_v1" \
+    || { nll_v1_ok=0; echo "  the lane has no named opt-in resolver"; }
+fi
+if [ "$nll_v1_ok" -eq 1 ]; then
+  ok "1465-gate-strict: node-bindings unsets CQLITE_LEAK_BUDGET_RELAX for all $nll_env_launches node launches, and the lane decides relaxation by a named opt-in rather than an ambient CI marker"
+else
+  bad "1465-gate-strict: the gate path could be relaxed by an inherited environment (see above)"
+fi
+
 # 1465d. The note vocabulary is CLOSED, single-sourced, and DISTINCT. Every state the
 #        component or the hook can write must render its own line: prefix-and-no-UNKNOWN
 #        was not enough (roborev J4) — two states rendering the SAME text would have
@@ -4650,7 +4696,7 @@ else
   fi
 fi
 
-ASSERT_FLOOR=389
+ASSERT_FLOOR=400
 # PASS + SKIPPED_TOOLING, not PASS alone: a DECLARED tooling skip is accounted for
 # rather than counted against the floor (see SKIPPED_TOOLING). A section that dies
 # silently still reds, because a dead section increments neither counter.
