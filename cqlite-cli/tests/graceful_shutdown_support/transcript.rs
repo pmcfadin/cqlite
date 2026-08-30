@@ -801,3 +801,153 @@ impl ChildIo {
         self.snapshot(Mark(0)).render()
     }
 }
+
+// ---------------------------------------------------------------------------
+// THE ONE DERIVATION'S OWN COVERAGE (round 16, roborev job 259 finding 1)
+// ---------------------------------------------------------------------------
+//
+// These live HERE rather than in `harness_tests.rs` because the state they are
+// about is derived from this file's private fields, and one of the five —
+// `Unavailable` — is only reachable by POISONING the store's lock, which needs the
+// `Arc` a `ChildIo` holds. A test that cannot reach a state cannot pin it, and an
+// unpinnable state is exactly where a permissive default hides.
+
+#[cfg(test)]
+mod pipe_status_tests {
+    use super::super::TestDeadline;
+    use super::*;
+
+    /// Poison the one store's lock the way a reader thread panicking inside
+    /// `record` would, so the `Unavailable` state is reached through the real
+    /// mechanism rather than by constructing a snapshot by hand.
+    fn poison(io: &ChildIo) {
+        let log = Arc::clone(&io.log);
+        let hook = std::panic::take_hook();
+        std::panic::set_hook(Box::new(|_| {}));
+        let poisoned = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _guard = log.lock().expect("the store's lock before it is poisoned");
+            panic!("a reader thread panicked while holding the store's lock");
+        }));
+        std::panic::set_hook(hook);
+        assert!(
+            poisoned.is_err(),
+            "this helper's whole purpose is the panic it did not take"
+        );
+    }
+
+    /// **EVERY ONE OF THE FIVE STATES IS DISTINGUISHED, AND `is_terminal` IS TRUE
+    /// FOR EXACTLY THE TWO THAT ESTABLISH IT.**
+    ///
+    /// A bool had two answers for these five, so three of them were reported as
+    /// one — and each collapse was reported as a fact about the child (see
+    /// [`PipeStatus`]).
+    #[test]
+    fn each_reader_state_is_derived_distinctly() {
+        // ALL OPEN: nothing has ended.
+        let (io, handles) = ChildIo::with_readers(2);
+        let mark = io.mark();
+        assert_eq!(
+            io.snapshot(mark).pipe_status(),
+            PipeStatus::AllOpen { open: 2 }
+        );
+        assert!(!io.snapshot(mark).pipe_status().is_terminal());
+
+        // PARTIALLY CLOSED: one reader ended at EOF, its sibling is still attached.
+        let mut handles = handles.into_iter();
+        let out = handles.next().expect("stdout handle");
+        drop(handles.next().expect("stderr handle"));
+        assert_eq!(
+            io.snapshot(mark).pipe_status(),
+            PipeStatus::PartiallyClosed {
+                open: 1,
+                ended: 1,
+                failure_note: None,
+            },
+            "one of two readers had ended: a bool could only say \"not all of them\", which every \
+             consumer then rendered as \"the pipes were still open\""
+        );
+        assert!(
+            !io.snapshot(mark).pipe_status().is_terminal(),
+            "a surviving pipe can still produce output, so the wait must not be abandoned"
+        );
+
+        // ALL AT EOF: every reader ended, none of them badly.
+        drop(out);
+        assert_eq!(
+            io.snapshot(mark).pipe_status(),
+            PipeStatus::AllEof { readers: 2 }
+        );
+        assert!(io.snapshot(mark).pipe_status().is_terminal());
+
+        // READER FAILED: every reader ended and one recorded an I/O error. Chosen
+        // from the TERMINAL RESULTS and never from the count, which is identical in
+        // both cases (job 255, finding 2).
+        let (io, handles) = ChildIo::with_readers(1);
+        let mark = io.mark();
+        let handle = handles.into_iter().next().expect("one handle");
+        handle.read_failed(Stream::Stdout, std::io::Error::other("simulated failure"));
+        drop(handle);
+        match io.snapshot(mark).pipe_status() {
+            PipeStatus::ReaderFailed { note } => assert!(
+                note.contains("simulated failure") && note.contains("stdout"),
+                "the state must carry the reader's own terminal result: {note}"
+            ),
+            other => panic!("a failed read must not be derived as {other:?}"),
+        }
+        assert!(io.snapshot(mark).pipe_status().is_terminal());
+
+        // UNAVAILABLE: the store could not be read, so NOTHING is established —
+        // which a bool had to render as "still open" (round 16).
+        let (io, _handles) = ChildIo::with_readers(2);
+        let mark = io.mark();
+        poison(&io);
+        assert_eq!(io.snapshot(mark).pipe_status(), PipeStatus::Unavailable);
+        assert!(
+            !io.snapshot(mark).pipe_status().is_terminal(),
+            "an unreadable store has NOT established that output is over: treating it as \
+             terminal would abandon a wait on the strength of a measurement that failed"
+        );
+    }
+
+    /// **A WAIT AGAINST AN UNREADABLE STORE REPORTS THAT IT COULD NOT MEASURE** —
+    /// it does not report that the pipes were open.
+    ///
+    /// The wait's VERDICT is unchanged (the awaited line is absent and the deadline
+    /// is what bound it); what changes is that the message no longer asserts a pipe
+    /// state the failed read could not establish.
+    #[test]
+    fn a_wait_against_an_unreadable_store_does_not_claim_the_pipes_were_open() {
+        let (io, _handles) = ChildIo::with_readers(2);
+        let mark = io.mark();
+        poison(&io);
+
+        let deadline = TestDeadline::start(Duration::from_millis(1), Duration::from_millis(1));
+        thread::sleep(Duration::from_millis(25));
+        let stage = deadline.stage("unreadable-store");
+        assert!(
+            stage.remaining().is_zero(),
+            "the precondition of this test is an already-lapsed deadline"
+        );
+
+        match io.wait_for(mark, Stream::Stderr, |_| true, &stage) {
+            Err(end @ WaitEnd::DeadlineReached { .. }) => {
+                let described = end.describe();
+                assert!(
+                    described.contains("POISONED"),
+                    "the failure must say the store could not be read: {described}"
+                );
+                assert!(
+                    !described.contains("still attached"),
+                    "nothing was established about the pipes, so the message may not report \
+                     them open: {described}"
+                );
+            }
+            Err(other) => panic!(
+                "an unreadable store establishes no end of output, so no \"no further line could \
+                 arrive\" verdict may be built from it: {}",
+                other.describe()
+            ),
+            Ok((line, _)) => panic!("the store is unreadable, yet {line:?} matched"),
+        }
+    }
+}
