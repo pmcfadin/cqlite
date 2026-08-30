@@ -2646,11 +2646,20 @@ _component_set_probe() {
   # name is a FAILED DERIVATION, never a line to skip. Filtering unrecognised lines away
   # would silently shrink the baseline, and a shrunken baseline excuses a branch — the
   # vacuous pass inverted.
+  #
+  # The character class is deliberately WIDER than today's names (all `[a-z0-9-]`): it
+  # admits any alnum/`.`/`_`/`-` token, because a guard that reds on correct input is the
+  # guard agents learn to waive, and a future component named `write_tests` or `bti.v2`
+  # would otherwise make EVERY branch FAIL on a correct baseline. What it still rejects is
+  # everything a leaked diagnostic or a prose line contains — whitespace, `:`, `/`, glob
+  # characters — which is the class that actually threatens the derivation. Rejecting a
+  # leading `-` additionally keeps a component name from being read as an option anywhere
+  # downstream, and glob characters can never reach the word-split loops below.
   local line baseline=""
   while IFS= read -r line; do
     [ -n "$line" ] || continue
     case "$line" in
-      *[!a-z0-9-]*|-*|"")
+      *[![:alnum:]._-]*|-*)
         _CS_KIND=baseline-list-garbage
         _CS_DETAIL="'bash <origin/main:$rel> --list' printed a line that is not a component name: '$(_component_set_flatten "$line")'"
         return 0 ;;
@@ -2670,6 +2679,8 @@ EOF_CS_LIST
   # `--list` case in the arg dispatch), read in-process so the running gate's own set
   # needs no subprocess and cannot diverge from what it will actually dispatch.
   local branch=" ${COMPONENTS[*]} " c
+  # shellcheck disable=SC2086  # intentional word-split over the space-separated set; the
+  # closed grammar above guarantees no glob character can be in it
   for c in $baseline; do
     case "$branch" in
       *" $c "*) : ;;
@@ -2738,6 +2749,7 @@ _component_set_line() {
     if [ -n "$ONLY" ]; then mode="--only $ONLY"; else mode="--lite"; fi
     lenient=" — $mode is lenient (#3544); this run does NOT fail on component-set skew"
   fi
+  # shellcheck disable=SC2086  # intentional word-split (grammar-checked, glob-free)
   for c in $_CS_MISSING; do n_missing=$((n_missing + 1)); done
   local extra=""
   [ -n "$_CS_EXTRA" ] && extra=" [branch-only, NOT skew: $_CS_EXTRA]"

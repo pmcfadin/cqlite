@@ -541,6 +541,24 @@ else
   bad "3544-no-optout: an env-var opt-out appeared in the component-set pre-flight"
 fi
 
+# 3e. The grammar must NOT red on a PLAUSIBLE FUTURE component name. It is deliberately
+#     wider than today's `[a-z0-9-]` names: a component added on main as `write_tests` or
+#     `bti.v2` must be measured, not reported as garbage — a guard that reds on correct
+#     input is the guard agents learn to waive. (The garbage case above pins the other
+#     direction, so this pair brackets the grammar from both sides.)
+base_future=$(mkbaseline base-future 's|^COMPONENTS=(file-size|COMPONENTS=(write_tests bti.v2 file-size|')
+future=$(mkbranch future "$base_future" - )
+fu_out=$(hook "$future")
+if [ "$(field VERDICT "$fu_out")" = BEHIND ] \
+   && [ "$(field KIND "$fu_out")" = ok ] \
+   && grep -qw -- 'write_tests' <<<"$(field MISSING "$fu_out")" \
+   && grep -qw -- 'bti.v2' <<<"$(field MISSING "$fu_out")"; then
+  ok "3544-grammar-future: an underscore/dot component name is MEASURED, not called garbage"
+else
+  bad "3544-grammar-future: expected KIND ok + both future-shaped names in MISSING"
+  printf '%s\n' "$fu_out"
+fi
+
 printf '\n%s\n' "----------------------------------------"
 printf 'passed: %d  failed: %d\n' "$PASS" "$FAIL"
 [ "$FAIL" -eq 0 ] || exit 1
